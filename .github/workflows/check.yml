@@ -1,0 +1,39 @@
+name: Build and test
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  linux-core:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Core compile and tests
+        run: bash scripts/check-linux.sh
+  windows:
+    runs-on: windows-2022
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Check PowerShell syntax
+        shell: pwsh
+        run: |
+          Get-ChildItem scripts/*.ps1 | ForEach-Object {
+            $tokens = $null; $errors = $null
+            [Management.Automation.Language.Parser]::ParseFile($_.FullName,[ref]$tokens,[ref]$errors) | Out-Null
+            if ($errors) { $errors | Format-List; throw 'PowerShell parse failure' }
+          }
+      - name: Compile, run fixture tests, bundle the full 7-Zip engine
+        shell: pwsh
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+        run: ./scripts/package-windows.ps1
+      - name: Upload portable Windows package
+        uses: actions/upload-artifact@v4
+        with:
+          name: JchTools-Windows-x64
+          path: dist/*.zip
+          if-no-files-found: error

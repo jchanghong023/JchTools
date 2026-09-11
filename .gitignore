@@ -1,0 +1,11 @@
+/target/
+/dist/
+/.cache/
+/.vendor/
+/resources/7zip/7z.exe
+/resources/7zip/7z.dll
+/resources/7zip/manifest.json
+/resources/7zip/License.txt
+/resources/7zip/7z-source.tar.xz
+*.tmp
+/.tmp/

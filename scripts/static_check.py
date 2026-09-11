@@ -1,0 +1,118 @@
+#!/usr/bin/env python3
+"""Lightweight source-structure checks, NOT rustc, cargo check, or application tests.
+Uses Python stdlib; Pygments, if present, adds Rust lexical delimiter checking.
+All writes are confined to docs/static-check.json under this source tree.
+"""
+from __future__ import annotations
+import json, re, shutil, sqlite3, subprocess, sys, tomllib, xml.etree.ElementTree as ET
+from pathlib import Path
+ROOT = Path(__file__).resolve().parent.parent
+checks: list[dict[str, object]] = []
+def check(name, fn):
+    try:
+        details=fn(); checks.append({'name':name,'status':'PASS','details':details})
+    except Exception as exc:
+        checks.append({'name':name,'status':'FAIL','details':str(exc)})
+def manifests():
+    cargo=tomllib.loads((ROOT/'Cargo.toml').read_text())
+    for binary in cargo['bin']: assert (ROOT/binary['path']).is_file()
+    ET.parse(ROOT/'resources/windows.manifest')
+    return 'Cargo TOML, declared binary paths, Windows XML parsed.'
+def config_schema():
+    config=(ROOT/'src/config.rs').read_text()
+    body=re.search(r'pub struct Config\s*\{(.*?)\n\}',config,re.S).group(1)
+    fields=dict(re.findall(r'pub\s+(\w+)\s*:\s*([\w:]+)',body))
+    rows=json.loads((ROOT/'resources/rules.json').read_text())
+    keys=[r['key'] for r in rows]
+    assert len(keys)==len(set(keys))
+    assert set(fields)==set(keys),(set(fields)-set(keys),set(keys)-set(fields))
+    for row in rows:
+        assert row['title'] and row['hint']
+        ty=fields[row['key']]
+        if ty=='bool': assert row['kind']=='bool'
+        if ty in ('usize','u64','u32'): assert row['kind']=='number'
+        if row['kind']=='choice':
+            assert len(row['choices'])>=2
+            vals=[c[0] for c in row['choices']];assert len(vals)==len(set(vals))
+            if ty!='String':
+                enum=re.search(r'pub enum '+ty+r'\s*\{(.*?)\}',config,re.S).group(1)
+                expected={re.sub(r'(?<!^)(?=[A-Z])','_',v.strip()).lower() for v in enum.split(',') if v.strip()}
+                assert set(vals)==expected,(row['key'],vals,expected)
+    return f'{len(rows)} UI settings exactly match serialized Config fields and enum values.'
+def ui_callbacks():
+    ui=(ROOT/'ui/app.slint').read_text();rs=(ROOT/'src/main.rs').read_text()
+    # 只有导出组件（窗口）上的回调是应用级 API；组件内部的回调在 .slint 内部接线。
+    text=ui[ui.index('export component AppWindow inherits Window'):]
+    depth=0;end=len(text)
+    for index,char in enumerate(text):
+        if char=='{':depth+=1
+        elif char=='}':
+            depth-=1
+            if depth==0:end=index;break
+    declared={name.replace('-','_') for name in re.findall(r'callback\s+([\w-]+)\(',text[:end])}
+    wired=set(re.findall(r'ui\.on_(\w+)\(',rs))
+    assert declared==wired,{'missing_handlers':sorted(declared-wired),'extra_handlers':sorted(wired-declared)}
+    return f'{len(declared)} declared window callbacks have Rust handlers.'
+def rust_lexical():
+    try:
+        from pygments import lex
+        from pygments.lexers import RustLexer
+        from pygments.token import Comment, Literal
+    except ImportError:
+        return 'SKIPPED: Pygments unavailable; no Rust parser or compiler was invoked.'
+    count=0
+    for path in [ROOT/'build.rs',*ROOT.glob('src/**/*.rs'),*ROOT.glob('tests/*.rs')]:
+        stack=[]
+        for token,text in lex(path.read_text(),RustLexer()):
+            if token in Comment or token in Literal.String: continue
+            for ch in text:
+                if ch in '([{':stack.append(ch)
+                elif ch in ')]}':
+                    assert stack and '([{'.index(stack.pop())==')]}'.index(ch),str(path.relative_to(ROOT))
+        assert not stack,(str(path.relative_to(ROOT)),stack)
+        count+=1
+    return f'{count} Rust files have balanced lexical delimiters; this does NOT validate Rust types, APIs, macros or borrow checking.'
+def sql_syntax():
+    conn=sqlite3.connect(':memory:')
+    conn.executescript((ROOT/'src/schema.sql').read_text())
+    conn.executescript('''CREATE TEMP TABLE duplicate_order(seq INTEGER,id INTEGER);
+        CREATE TEMP TABLE conflict_groups(seq INTEGER PRIMARY KEY,key TEXT,size INTEGER);
+        CREATE TEMP TABLE empty_order(seq INTEGER,rel TEXT);
+        CREATE TEMP TABLE hash_candidates(id INTEGER PRIMARY KEY);''')
+    file_columns='id,rel,name,normal,size,mtime,identity,links,hash,cleanable'
+    statements=set()
+    for path in ROOT.glob('src/*.rs'):
+        for match in re.finditer(r'"((?:[^"\\]|\\.)*)"',path.read_text()):
+            raw=match.group(1)
+            if not re.match(r'^(SELECT|UPDATE|INSERT|DELETE)\b',raw): continue
+            raw=raw.replace('{FILE_COLUMNS}',file_columns).replace('{key_expr}','name').replace('{filter}','active=1 AND name=?1 AND size=?2')
+            if '{' in raw or '}' in raw or ';' in raw: continue
+            raw=raw.replace('\\"','"')
+            params=max([int(x) for x in re.findall(r'\?(\d+)',raw)]+[0])
+            conn.execute('EXPLAIN '+raw,[None]*params)
+            statements.add(raw)
+    return f'SQLite schema and {len(statements)} concrete DML statements prepare successfully against empty schema; no organizer application executed.'
+def shell_syntax():
+    script=str(ROOT/'scripts/check-linux.sh')
+    bash=shutil.which('bash')
+    if not bash:
+        return 'SKIPPED: bash not found; bash -n and PowerShell syntax checks run in the Windows/Linux CI jobs.'
+    done=subprocess.run([bash,'-n',script],capture_output=True,text=True)
+    if done.returncode!=0 and ('not found' in (done.stderr or '').lower() or done.returncode==127):
+        return 'SKIPPED: bash launcher is unavailable on this host; bash -n runs in the Linux CI job.'
+    assert done.returncode==0,done.stderr
+    return 'bash -n passed; PowerShell syntax check is defined in Windows CI.'
+def scope_and_delivery():
+    required=['README.md','先读我.txt','LICENSE','THIRD_PARTY_NOTICES.md','docs/ARCHITECTURE.md','docs/ACCEPTANCE.md','scripts/package-windows.ps1','scripts/fetch-7zip.ps1','tests/core.rs','tests/archive.rs','.github/workflows/check.yml']
+    assert all((ROOT/p).is_file() for p in required)
+    for path in ROOT.glob('src/**/*.rs'):
+        text=path.read_text();assert 'todo!(' not in text and 'unimplemented!(' not in text,str(path)
+    tests=sum(len(re.findall(r'#\[test\]',p.read_text())) for p in ROOT.glob('tests/*.rs'))
+    return f'{tests} Rust test functions supplied, NOT executed; no todo!/unimplemented! in Rust implementation; no prebuilt executable asserted.'
+for name,fn in [('manifests',manifests),('config_schema',config_schema),('ui_callbacks',ui_callbacks),('rust_lexical',rust_lexical),('sql_syntax',sql_syntax),('shell_syntax',shell_syntax),('scope_and_delivery',scope_and_delivery)]:check(name,fn)
+report={'kind':'lightweight static source checks only','platform':sys.platform,'python':sys.version.split()[0],
+    'rustc':shutil.which('rustc'),'cargo':shutil.which('cargo'),'powershell':shutil.which('pwsh'),
+    'cargo_check':'NOT RUN','cargo_test':'NOT RUN','windows_runtime':'NOT RUN','real_7zip_tests':'NOT RUN','multi_tb_benchmark':'NOT RUN','checks':checks}
+(ROOT/'docs/static-check.json').write_text(json.dumps(report,ensure_ascii=False,indent=2)+'\n',newline='\n')
+for row in checks: print(row['status'],row['name'],row['details'])
+sys.exit(any(c['status']=='FAIL' for c in checks))

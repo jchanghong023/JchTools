@@ -1,0 +1,3 @@
+[target.x86_64-pc-windows-msvc]
+# Keep the portable Windows application independent of a separately installed MSVC runtime.
+rustflags = ["-C", "target-feature=+crt-static"]

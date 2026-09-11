@@ -1,0 +1,25 @@
+这是 JchTools 的源码工程，不是随源码附带的发布包。
+
+已经交付：Rust + Slint 自绘界面、目录整理核心、49 项配置、Windows 回收站适配、
+7-Zip 打包脚本、CLI、自动化测试源码、CI 和验证记录。
+
+本源码树已经在 Windows 11 上编译与验收：
+  - cargo build 与 cargo build --release 通过；
+  - cargo test 50 通过 / 0 失败 / 8 个真实引擎用例按设计忽略；
+  - 界面（无系统标题栏、自绘窗口按钮、启动居中、配色与深色模式）实测通过；
+  - 在临时目录上跑通解压（含嵌套包与同名冲突保留两份）、内容去重、版本取舍、
+    垃圾/临时/零字节清理、空目录清理、归类、扩展名纠正和 CSV 报告；
+  - release 版扫描 5004 文件 / 521.51 MiB 用时 1.32s，内容去重 1.61s，峰值工作集 < 10 MiB。
+详见 docs/VALIDATION.md。
+
+注意：本源码树里没有 7z.exe / 7z.dll（resources/7zip 只有 README）。直接运行解压时需要用
+  jchtools-cli.exe analyze <目录> --extract --yes --engine "C:\Program Files\7-Zip\7z.exe"
+指定完整引擎；图形界面则需要先按下面方式生成内嵌引擎的发布包。
+
+生成可交付的 Windows 包（需要联网，会下载并校验官方完整 7-Zip）：
+  powershell -NoProfile -File .\scripts\package-windows.ps1
+
+该脚本编译、运行测试并生成包含 7z.exe 与 7z.dll 的 Windows ZIP。最终用户使用这个
+构建出的 ZIP 时，不需要安装 Rust、Slint 或 7-Zip。
+
+详细使用及限制见 README.md；验证结果见 docs/VALIDATION.md 和 docs/static-check.json。
