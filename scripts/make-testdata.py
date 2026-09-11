@@ -294,9 +294,19 @@ def build_hostile(root: Path, seven: Path, log: list[str]) -> None:
 RESTORE_SCRIPT = """# 还原到生成时的基线：先恢复被删除/移动的文件，再清掉整理产生的新文件。
 # 脚本内容保持 ASCII，避免 PowerShell 5.1 按 ANSI 读取时出错；路径都用通配符定位。
 # 安全第一条：解析不到自身目录、或目录里没有 .git 时立刻退出，绝不把 git 命令打到别的仓库。
-$root = if ($PSScriptRoot) { $PSScriptRoot } elseif ($PSCommandPath) { Split-Path -Parent $PSCommandPath } else { Split-Path -Parent $MyInvocation.MyCommand.Path }
-if (-not $root) { Write-Error 'cannot resolve this script directory'; exit 1 }
-if (-not (Test-Path -LiteralPath (Join-Path $root '.git'))) { Write-Error ('no git baseline in ' + $root); exit 1 }
+$here = if ($PSScriptRoot) { $PSScriptRoot } elseif ($PSCommandPath) { Split-Path -Parent $PSCommandPath } else { Split-Path -Parent $MyInvocation.MyCommand.Path }
+if (-not $here) { Write-Error 'cannot resolve this script directory'; exit 1 }
+# 分类整理可能把本脚本移进子目录，所以向上最多找 4 层；只认提交信息匹配本测试基线的仓库。
+$root = $null
+$probe = $here
+for ($depth = 0; $depth -lt 5 -and $probe; $depth++) {
+    if (Test-Path -LiteralPath (Join-Path $probe '.git')) {
+        $message = (git -C $probe log -1 --pretty=%s 2>$null)
+        if ($message -like '*test corpus baseline*') { $root = $probe; break }
+    }
+    $probe = Split-Path -Parent $probe
+}
+if (-not $root) { Write-Error ('no JchTools test-corpus git baseline found above ' + $here); exit 1 }
 Set-Location -LiteralPath $root
 Write-Host ('restoring ' + $root)
 git checkout -- .
