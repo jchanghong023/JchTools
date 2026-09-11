@@ -27,7 +27,7 @@ python scripts/static_check.py      # 结构/配置/回调/SQL 静态检查
 powershell -NoProfile -File .\scripts\package-windows.ps1   # 生成含 7-Zip 的发布 ZIP
 ```
 
-手工测试集：`python scripts/make-testdata.py --destination D:\testzip`（**会先清空目标目录**，只用于专门的测试目录；仓库内测试请指向 `.tmp/`）。
+手工测试集：`python scripts/make-testdata.py --destination D:\testzip --git`（`--git` 会建立 git 基线并生成 `恢复.ps1`，测试后可一键回到初始状态）（**会先清空目标目录**，只用于专门的测试目录；仓库内测试请指向 `.tmp/`）。
 
 ```bash
 bash scripts/check-linux.sh                       # Linux 核心测试

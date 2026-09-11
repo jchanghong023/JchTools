@@ -94,8 +94,10 @@ powershell -NoProfile -File .\scripts\package-windows.ps1
 ## 手工测试数据集
 
 ```powershell
-python scripts/make-testdata.py --destination D:\testzip
+python scripts/make-testdata.py --destination D:\testzip --git
 ```
+
+`--git` 会在目录里额外建立 git 基线（`.gitattributes` 固定 `* -text` 保证字节可复现）并附一个 `恢复.ps1`：测试跑完后执行 `恢复.ps1` 即可回到初始状态（`git checkout -- .` 恢复被删除/移动的文件、`git clean -fd` 清掉解压与归类产生的新文件，并补回 git 不保存的隐藏/系统属性与空目录）。还原脚本自带保护：解析不到自身目录或目录里没有 `.git` 时会直接退出，不会把 git 命令打到别的仓库。`.git/**` 默认在排除规则里，整理时不会被处理。
 
 脚本会**先清空目标目录**再重建一份可重复的手工测试集（约 60 个文件 / 66 MiB，含 16 组用例）：基础文件与中文名、三类重复内容、同名版本冲突、垃圾/临时/零字节、空目录与单层链、扩展名与真实格式不符、11 种压缩格式、解压目标冲突、5 层嵌套包、18 层超深嵌套、截断损坏包、带密码包、1 MiB 分卷包、两个 32 MiB 大文件与 64 MiB 全零包、隐藏与系统属性文件、含 `../` / 绝对路径 / 符号链接的恶意包。目录里的 `_测试说明.md` 由脚本生成，逐条列出每个用例的预期行为。
 

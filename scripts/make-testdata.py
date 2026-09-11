@@ -31,6 +31,20 @@ RANDOM = random.Random(20260912)
 PAYLOAD = b"JchTools duplicate payload 2026-09-12\n" * 4
 
 
+def force_remove_tree(path: Path) -> None:
+    """删除目录树，先清掉只读属性（git 对象文件是只读的，Windows 上直接删会拒绝访问）。"""
+    import stat
+
+    def on_error(function, target, _error):
+        try:
+            os.chmod(target, stat.S_IWRITE)
+            function(target)
+        except OSError:
+            pass
+
+    shutil.rmtree(path, onerror=on_error)
+
+
 def seven_zip() -> Path:
     for candidate in SEVEN_ZIP_CANDIDATES:
         if candidate.is_file():
@@ -277,6 +291,52 @@ def build_hostile(root: Path, seven: Path, log: list[str]) -> None:
     log.append("| `16-恶意条目/` | 含 `../`、绝对路径与符号链接的压缩包 | 绝对路径/越界条目应被拒绝或跳过并记录；含链接的包应整体拒绝（不会写出目录之外的文件） |")
 
 
+RESTORE_SCRIPT = """# 还原到生成时的基线：先恢复被删除/移动的文件，再清掉整理产生的新文件。
+# 脚本内容保持 ASCII，避免 PowerShell 5.1 按 ANSI 读取时出错；路径都用通配符定位。
+# 安全第一条：解析不到自身目录、或目录里没有 .git 时立刻退出，绝不把 git 命令打到别的仓库。
+$root = if ($PSScriptRoot) { $PSScriptRoot } elseif ($PSCommandPath) { Split-Path -Parent $PSCommandPath } else { Split-Path -Parent $MyInvocation.MyCommand.Path }
+if (-not $root) { Write-Error 'cannot resolve this script directory'; exit 1 }
+if (-not (Test-Path -LiteralPath (Join-Path $root '.git'))) { Write-Error ('no git baseline in ' + $root); exit 1 }
+Set-Location -LiteralPath $root
+Write-Host ('restoring ' + $root)
+git checkout -- .
+git clean -fd
+# git 不保存 Windows 属性和空目录，这里补回来。
+$attrDir = Get-ChildItem -LiteralPath $root -Directory | Where-Object { $_.Name -like '15-*' } | Select-Object -First 1
+if ($null -ne $attrDir) {
+    Get-ChildItem -LiteralPath $attrDir.FullName -File | ForEach-Object {
+        if ($_.Name -like 'hidden-*') { attrib +h $_.FullName | Out-Null }
+        if ($_.Name -like 'system-*') { attrib +s $_.FullName | Out-Null }
+    }
+}
+$chainDir = Get-ChildItem -LiteralPath $root -Directory | Where-Object { $_.Name -like '05-*' } | Select-Object -First 1
+if ($null -ne $chainDir) {
+    $empty = Get-ChildItem -LiteralPath $chainDir.FullName -Directory | Where-Object { -not (Get-ChildItem -LiteralPath $_.FullName -Recurse -File -ErrorAction SilentlyContinue) } | Select-Object -First 1
+    if ($null -eq $empty) {
+        # 空目录名与生成脚本保持一致（脚本带 BOM，中文可以安全写在这里）
+        New-Item -ItemType Directory -Path (Join-Path $chainDir.FullName '空目录') | Out-Null
+    }
+}
+Write-Host 'restored to baseline:'
+git status --short
+"""
+
+
+def initialise_git(root: Path, log: list[str]) -> None:
+    """建立可回滚的基线：字节稳定（* -text）、附还原脚本，并把两步都提交。"""
+    (root / ".gitattributes").write_text(
+        "# 测试数据需要字节可复现：不做换行转换，否则检出后哈希变化会影响去重测试。\n* -text\n",
+        encoding="utf-8", newline="\n",
+    )
+    # 带 BOM 写入：PowerShell 5.1 否则会按 ANSI 解析中文注释，可能吞掉后续语句。
+    (root / "恢复.ps1").write_text(RESTORE_SCRIPT, encoding="utf-8-sig", newline="\n")
+    run(["git", "init"], cwd=root)
+    run(["git", "add", "-A"], cwd=root)
+    run(["git", "-c", "core.autocrlf=false", "commit", "-q", "-m",
+         "test corpus baseline: 16 groups of generated JchTools test data"], cwd=root)
+    log.append("| `.git` + `恢复.ps1` | 生成时建立的 git 基线（需 `--git`） | 整理跑完后执行 `恢复.ps1` 即可回到初始状态：`git checkout -- .` 恢复被删除/移动的文件、`git clean -fd` 清掉新文件，并补回隐藏/系统属性与空目录；`.git/**` 默认在排除规则里，不会被整理 |")
+
+
 def build_readme(root: Path, log: list[str], seven: Path) -> None:
     text = [
         "# JchTools 手工测试数据集",
@@ -306,6 +366,18 @@ def build_readme(root: Path, log: list[str], seven: Path) -> None:
         "- 删除动作默认走回收站（可在规则里改成永久删除）；想验证「回收失败则永久删除」请在规则里调整；",
         "- `16-恶意条目/` 里的包是为安全测试准备的，请只在测试目录里使用；",
         "- 本说明文件本身也是被扫描的对象，不需要时可以直接删除。",
+        "",
+        "## 整理之后如何恢复",
+        "",
+        "本目录在生成时已用 git 建立基线（`--git`）。整理跑完后，在本目录执行：",
+        "",
+        "```powershell",
+        ".\\恢复.ps1",
+        "```",
+        "",
+        "等价的手工命令是 `git checkout -- .`（恢复被删除/移动的原始文件）+ `git clean -fd`（清掉解压与归类产生的新文件）。",
+        "git 不保存 Windows 隐藏/系统属性和空目录，所以 `恢复.ps1` 会额外补这两类；目录里的 `.gitattributes`（`* -text`）保证检出后字节与初始一致，去重哈希才有可比性。",
+        "想彻底重来，直接重跑生成脚本（会先清空目录）。",
     ])
     root.joinpath("_测试说明.md").write_text("\n".join(text) + "\n", encoding="utf-8")
 
@@ -313,13 +385,14 @@ def build_readme(root: Path, log: list[str], seven: Path) -> None:
 def main() -> int:
     parser = argparse.ArgumentParser(description="Build the JchTools manual test corpus.")
     parser.add_argument("--destination", default=r"D:\testzip", help="target directory (wiped first)")
+    parser.add_argument("--git", action="store_true", help="also create a git baseline plus a restore script")
     arguments = parser.parse_args()
     root = Path(arguments.destination)
     seven = seven_zip()
 
     if root.exists():
         print(f"clearing {root} ...")
-        shutil.rmtree(root)
+        force_remove_tree(root)
     root.mkdir(parents=True)
 
     log: list[str] = []
@@ -331,8 +404,10 @@ def main() -> int:
         builder(root, seven, log)
         print(f"  built {builder.__name__}")
     build_readme(root, log, seven)
+    if arguments.git:
+        initialise_git(root, log)
 
-    files = [p for p in root.rglob("*") if p.is_file()]
+    files = [p for p in root.rglob("*") if p.is_file() and ".git" not in p.parts]
     total = sum(p.stat().st_size for p in files)
     print(f"corpus: {root}")
     print(f"files: {len(files)}  size: {total / 1048576:.1f} MiB")
