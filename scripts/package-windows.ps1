@@ -30,12 +30,26 @@ if (-not $SkipTests) {
 }
 Invoke-Cargo (@('build','--locked','--release','--bins') + $extra)
 $stamp = Get-Date -Format 'yyyyMMdd-HHmmss'
+# 内嵌前先校验引擎与清单一致：EXE 里编进去的就是这份经过校验的数据。
+$engineManifest = Get-Content -LiteralPath 'resources\7zip\manifest.json' -Raw | ConvertFrom-Json
+foreach ($file in $engineManifest.files) {
+    $path = Join-Path 'resources\7zip' $file.name
+    if ((Get-FileHash -LiteralPath $path -Algorithm SHA256).Hash.ToLowerInvariant() -cne $file.sha256) {throw "Bundled engine hash mismatch: $($file.name)"}
+}
 $folder = Join-Path $root "dist\JchTools-Windows-x64-$stamp"
 New-Item -ItemType Directory -Path $folder | Out-Null
 Copy-Item -LiteralPath 'target\release\JchTools.exe','target\release\jchtools-cli.exe' -Destination $folder
+# 引擎已内嵌进 EXE；发布目录只保留许可证、NOTICE 与上游源码（LGPL 要求），
+# 因此最终用户拿到的是单文件程序，缺引擎时运行期从 EXE 释放并校验 sha256。
 $resources = Join-Path $folder 'resources'
 New-Item -ItemType Directory -Path $resources | Out-Null
-Copy-Item -LiteralPath 'resources\7zip' -Destination $resources -Recurse
+$engineDir = Join-Path $resources '7zip'
+New-Item -ItemType Directory -Path $engineDir | Out-Null
+foreach ($item in @('manifest.json','NOTICE.txt','licenses')) {
+    $source = Join-Path 'resources\7zip' $item
+    if (Test-Path -LiteralPath $source) {Copy-Item -LiteralPath $source -Destination $engineDir -Recurse}
+}
+Get-ChildItem -LiteralPath 'resources\7zip' -File | Where-Object {$_.Name -like '7z*-src.tar.xz'} | ForEach-Object {Copy-Item -LiteralPath $_.FullName -Destination $engineDir}
 Copy-Item -LiteralPath 'README.md','LICENSE','THIRD_PARTY_NOTICES.md','Cargo.lock' -Destination $folder
 Copy-Item -LiteralPath 'docs' -Destination $folder -Recurse
 Copy-Item -LiteralPath 'scripts\launch-software.cmd' -Destination $folder
@@ -63,12 +77,11 @@ $utf8 = New-Object Text.UTF8Encoding($false)
 [IO.File]::WriteAllText((Join-Path $noticeRoot 'index.json'),($licenseIndex | ConvertTo-Json -Depth 5),$utf8)
 $info = @{created=(Get-Date).ToUniversalTime().ToString('o');rustc=(& rustc --version | Out-String).Trim();tests= $(if($SkipTests){'NOT RUN'}else{'cargo tests and real-engine archive tests passed on this build machine'});windows_ui_manual='NOT VERIFIED BY THIS SCRIPT';multi_tb_benchmark='NOT VERIFIED BY THIS SCRIPT';source_validation='See docs/VALIDATION.md for the original source delivery environment.'}
 [IO.File]::WriteAllText((Join-Path $folder 'BUILD-INFO.json'),($info | ConvertTo-Json -Depth 5),$utf8)
-# Check actual resources, independently of the runtime loader.
-$manifest = Get-Content -LiteralPath (Join-Path $folder 'resources\7zip\manifest.json') -Raw | ConvertFrom-Json
-foreach ($file in $manifest.files) {
-    $path = Join-Path (Join-Path $folder 'resources\7zip') $file.name
-    if ((Get-FileHash -LiteralPath $path -Algorithm SHA256).Hash.ToLowerInvariant() -cne $file.sha256) {throw "Packaging hash mismatch: $($file.name)"}
+# 发布目录不应出现引擎可执行文件：它们必须在 EXE 内部。
+foreach ($name in @('7z.exe','7z.dll')) {
+    if (Test-Path -LiteralPath (Join-Path $folder "resources\7zip\$name")) {throw "Engine executable leaked into the package: $name"}
 }
+if (-not (Test-Path -LiteralPath (Join-Path $folder 'resources\7zip\manifest.json'))) {throw 'Engine manifest is missing from the package.'}
 $zip = "$folder.zip"
 Compress-Archive -LiteralPath $folder -DestinationPath $zip -CompressionLevel Optimal
 Write-Host "Created: $zip"

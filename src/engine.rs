@@ -99,6 +99,11 @@ fn scan(job:&mut Job,enqueue:bool,state:&Path)->Result<()> {
     let excluded=rules::build_exclusions(&config.exclusions)?;
     let state=fs::canonicalize(state)?;
     let executable_dir=std::env::current_exe().ok().and_then(|p|p.parent().and_then(|d|fs::canonicalize(d).ok()));
+    if let (Some(directory),Ok(target))=(&executable_dir,fs::canonicalize(&root)) {
+        if target.starts_with(directory) {
+            job.log("扫描","","","提示",&format!("所选目录位于程序自身目录（{}）内；为避免误处理程序文件，扫描会跳过这个目录里的条目",directory.display()),0)?;
+        }
+    }
     let walk=walkdir::WalkDir::new(&root).follow_links(false).min_depth(1)
         .max_depth(if config.recursive {usize::MAX}else{1}).into_iter().filter_entry(|entry| {
             let Ok(meta)=fs::symlink_metadata(entry.path()) else{return true;};

@@ -8,9 +8,11 @@ use std::{collections::BTreeMap, fs, io::Read, path::{Path,PathBuf}, process::Co
 pub struct SevenZip { executable: PathBuf }
 impl SevenZip {
     pub fn from_bundle() -> Result<Self> {
-        let directory = std::env::current_exe()?.parent().context("程序路径缺少目录")?.join("resources/7zip");
+        let Some(directory) = crate::engine_bundle::bundled_dir() else {
+            // 没有随包目录时使用内嵌引擎（首次运行释放到用户数据目录并校验哈希）。
+            return Ok(Self { executable: crate::engine_bundle::resolve_executable()? });
+        };
         let executable = directory.join(if cfg!(windows) { "7z.exe" } else { "7zz" });
-        if !executable.is_file() { bail!("未找到随包携带的 7-Zip。请使用 scripts/package-windows.ps1 构建发布包；不需要终端用户安装 7-Zip。"); }
         let manifest: serde_json::Value = serde_json::from_slice(&fs::read(directory.join("manifest.json"))?)?;
         let files = manifest["files"].as_array().context("7-Zip 校验清单无效")?;
         let mut verified = Vec::new();

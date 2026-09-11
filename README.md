@@ -4,6 +4,14 @@ Windows 优先的 Rust + Slint 本地工具箱。当前提供第一个工具“�
 
 > **当前源码树已在 Windows 11 上编译、运行并做过功能验收**（详见 [验证记录](docs/VALIDATION.md)）：`cargo build` / `cargo build --release` 通过，`cargo test` 50 通过 0 失败，界面、临时目录端到端整理与 5004 文件性能都实测过。仍未内嵌 7-Zip 引擎，因此本仓库直接运行时解压需要 `--engine <完整 7z.exe>`；发布包由 `scripts/package-windows.ps1` 生成并附带引擎与许可证。
 
+## 7-Zip 引擎（内置）
+
+- 官方完整引擎（`7z.exe` 560 KiB + `7z.dll` 1.82 MiB，合计 **2.37 MiB**）在构建时以 **zlib 压缩**（**约 1.0 MiB**）编进 EXE：GUI 从 21.7 MiB 变为 ~22.8 MiB，CLI 同样带上引擎。最终用户拿到的是**单文件程序**，不需要另装 7-Zip，也不会有散落的引擎文件。
+- 首次需要解压时，引擎被释放到 `%LOCALAPPDATA%\JchTools\data\engine\<版本-哈希>\`，逐文件校验 sha256 后才使用；已存在且哈希一致就不重写（实测第二次运行 mtime 不变）。用户把自备的 `7z.exe`/`7z.dll` 放进该目录即可覆盖内嵌副本（LGPL 的可替换要求）；`<exe 目录>\resources\7zip\7z.exe` 始终优先级最高。
+- 发布包仍随附 `resources/7zip/` 下的许可证、NOTICE 与上游源码压缩包（LGPL/BSD/unRAR 要求），但**不再随包放引擎可执行文件**——`scripts/package-windows.ps1` 会在打包时校验引擎哈希并拒绝把 `7z.exe`/`7z.dll` 混进发布目录。
+- 构建机获取官方引擎：`powershell -NoProfile -File .\scripts\fetch-7zip.ps1`（固定官方 release、校验上游 SHA-256、只接受官方下载域名）。没有引擎时构建仍能成功，只是不内嵌（运行期会明确报错）。
+- 代价与边界：首次使用会把引擎写盘再执行，个别杀软可能对「释放并执行可执行文件」敏感；引擎文件本身按官方原样分发，未做任何修改。
+
 ## Windows 构建与发布
 
 构建机需要 Rust stable 的 `x86_64-pc-windows-msvc` 工具链、Visual Studio C++ Build Tools 和 Windows SDK；这些是开发依赖，**不是最终用户的安装要求**。

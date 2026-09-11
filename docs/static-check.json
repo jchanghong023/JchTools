@@ -29,7 +29,7 @@
     {
       "name": "rust_lexical",
       "status": "PASS",
-      "details": "19 Rust files have balanced lexical delimiters; this does NOT validate Rust types, APIs, macros or borrow checking."
+      "details": "20 Rust files have balanced lexical delimiters; this does NOT validate Rust types, APIs, macros or borrow checking."
     },
     {
       "name": "sql_syntax",

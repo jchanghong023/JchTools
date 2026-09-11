@@ -2729,6 +2729,7 @@ dependencies = [
  "csv",
  "directories-next",
  "filetime",
+ "flate2",
  "fs2",
  "globset",
  "hex",

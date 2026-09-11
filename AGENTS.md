@@ -35,6 +35,13 @@ JCHTOOLS_TEST_7ZIP=/abs/path/7zz bash scripts/check-linux.sh   # 含真实解压
 - Windows 构建机需要 Rust `x86_64-pc-windows-msvc` + VS C++ Build Tools + Windows SDK（`rc.exe` 用于把 `resources/app.ico` 嵌入 EXE）。
 - 提交前 `SHOULD` 至少跑 `cargo test` 与 `python scripts/static_check.py`，并确认构建输出没有新增 `binding loop` 警告。
 
+## 3.1 7-Zip 引擎
+
+- 引擎只从官方 release 获取：`scripts/fetch-7zip.ps1`（校验上游 SHA-256，固定版本，拒绝镜像）。下载产物落在 `resources/7zip/`，已被 `.gitignore` 忽略；`MUST NOT` 提交 `7z.exe`/`7z.dll`/`manifest.json`/源码包。
+- 构建时 `build.rs` 会把 `resources/7zip` 里的引擎压缩后编进 EXE（`src/engine_bundle.rs` 负责释放与 sha256 校验）。缺失引擎时构建不失败，只是不带内嵌副本。
+- 运行期顺序 `MUST` 保持：`<exe>/resources/7zip` → 用户数据目录下已释放的内嵌副本 → 从 EXE 释放。前两者都存在时以外部文件为准（LGPL 可替换）。
+- 发布包 `MUST NOT` 含 `7z.exe`/`7z.dll`（打包脚本会检查并报错），但 `MUST` 保留 `licenses/`、`NOTICE.txt` 与上游源码压缩包。
+
 ## 4. 代码与界面约定
 
 - 注释、错误信息、界面文案用中文；标识符、模块名、提交信息用英文或中英混排均可，但同一处保持一致。
