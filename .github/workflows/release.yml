@@ -1,0 +1,34 @@
+name: Release
+on:
+  workflow_dispatch:
+permissions:
+  contents: write
+jobs:
+  windows-release:
+    runs-on: windows-2022
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Compose release metadata
+        id: meta
+        shell: pwsh
+        run: |
+          $tag = (Get-Date).ToUniversalTime().ToString('yyyyMMdd-HHmm')
+          Add-Content -Path $env:GITHUB_OUTPUT -Value "tag=$tag"
+          Add-Content -Path $env:GITHUB_OUTPUT -Value "name=JchTools $tag"
+      - name: Build portable Windows package
+        shell: pwsh
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+        run: ./scripts/package-windows.ps1
+      - name: Create GitHub Release with ZIP
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $tag = '${{ steps.meta.outputs.tag }}'
+          $name = '${{ steps.meta.outputs.name }}'
+          $zips = @(Get-ChildItem -Path dist -Filter '*.zip' -File -ErrorAction SilentlyContinue)
+          if ($zips.Count -ne 1) { throw "Expected exactly one dist ZIP, found $($zips.Count)." }
+          gh release create $tag $zips[0].FullName --title $name --generate-notes --target ${{ github.sha }}

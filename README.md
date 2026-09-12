@@ -30,6 +30,8 @@ powershell -NoProfile -File .\scripts\package-windows.ps1
 
 最终用户解压构建出的 ZIP，运行 `JchTools.exe`；**不用另装 7-Zip，也不依赖 PATH**。图形驱动异常时可运行同目录的 `launch-software.cmd` 请求软件渲染；软件渲染及中文效果同样需要真实 Windows 验证。
 
+正式发布走 GitHub Actions 的 **Release** 工作流（`.github/workflows/release.yml`）：**仅手动触发**（Actions 页 Run workflow），在 `windows-2022` 上执行同一套 `package-windows.ps1`，以 UTC 时间到分钟的 tag（`yyyyMMdd-HHmm`）创建 Release，并把便携 ZIP 挂到该 Release。最终用户直接从仓库 **Releases** 页下载 ZIP 即可。
+
 ## 使用流程
 
 选择目录 → 配置解压、去重、冲突、归类、清理、安全与性能规则 → 确认并开始“解压与分析” → 查看真实文件产生的分页计划 → 勾选/取消单项 → 再次确认执行 → 查看日志和导出 CSV。
