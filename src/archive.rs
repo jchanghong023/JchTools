@@ -40,15 +40,29 @@ impl SevenZip {
         if let Some(directory) = self.executable.parent() { command.current_dir(directory); }
         command
     }
-    fn list(&self, archive: &Path, job: &mut Job) -> Result<u64> {
+    /// 列出压缩包条目。返回 (声明总大小, 大小元数据是否完整)。
+    /// 7-Zip 对 bzip2/xz 等流式格式可能不输出成员 Path，甚至不输出 Size；此时不能把条目静默丢掉，
+    /// 否则 total=0 会在合入阶段误报「实际解压量超过压缩包声明」。
+    fn list(&self, archive: &Path, job: &mut Job) -> Result<(u64, bool)> {
         job.db.conn.execute("DELETE FROM archive_members",[])?;
         let mut command = self.command();
         command.args(["l","-slt","-ba","-sccUTF-8","-p-","--"]).arg(archive);
         let mut fields = BTreeMap::<String,String>::new();
-        let mut total = 0u64; let mut count = 0u64;
+        let mut total = 0u64; let mut count = 0u64; let mut sizes_complete = true;
         let cfg = job.config.clone(); let db = &job.db;
         let mut flush = |fields: &mut BTreeMap<String,String>| -> Result<()> {
-            let Some(raw) = fields.remove("Path") else { fields.clear(); return Ok(()); };
+            let raw = match fields.remove("Path") {
+                Some(raw) => raw,
+                None => {
+                    // 流式格式（bzip2/xz）可能没有 Path；若块内仍有成员元数据则用包名合成。
+                    if fields.is_empty() { return Ok(()); }
+                    let has_meta = fields.contains_key("Size") || fields.contains_key("Packed Size")
+                        || fields.contains_key("Folder") || fields.contains_key("Encrypted")
+                        || fields.contains_key("Attributes");
+                    if !has_meta { fields.clear(); return Ok(()); }
+                    stream_member_name(archive)
+                }
+            };
             if raw == "." || raw == "./" { fields.clear(); return Ok(()); }
             let relative = fsutil::safe_relative(&raw)?;
             let raw = fsutil::path_string(&relative)?.replace('\\',"/");
@@ -62,8 +76,15 @@ impl SevenZip {
             let attr = fields.get("Attributes").cloned().unwrap_or_default();
             if attr.split_whitespace().any(|s| s.starts_with('l')) { bail!("拒绝 Unix 符号链接条目：{raw}"); }
             let directory = fields.get("Folder").is_some_and(|s| s == "+") || attr.starts_with('D') || attr.starts_with('d');
-            let size = match fields.get("Size") { Some(s) if !s.is_empty() => s.parse::<u64>().context("压缩包条目大小无效")?,
-                _ if directory => 0, _ => bail!("压缩包缺少可靠的文件大小元数据，已跳过：{raw}") };
+            let size = match fields.get("Size") {
+                Some(s) if !s.is_empty() => s.parse::<u64>().context("压缩包条目大小无效")?,
+                _ if directory => 0,
+                _ => {
+                    // 流式单文件包可能不声明展开大小：记为不完整，合入阶段跳过精确大小校验。
+                    sizes_complete = false;
+                    0
+                }
+            };
             count = count.checked_add(1).context("条目计数溢出")?;
             total = total.checked_add(size).context("解压总大小溢出")?;
             if count > cfg.max_entries { bail!("压缩包条目数量超过用户设置的上限"); }
@@ -89,8 +110,10 @@ impl SevenZip {
             Err(error)=>{let _=db.conn.execute_batch("ROLLBACK");return Err(error);}
         }
         let packed = fs::metadata(archive)?.len().max(1);
-        if cfg.max_ratio > 0 && total / packed > cfg.max_ratio { bail!("压缩包展开比例超过用户设置的上限"); }
-        Ok(total)
+        if cfg.max_ratio > 0 && sizes_complete && total / packed > cfg.max_ratio {
+            bail!("压缩包展开比例超过用户设置的上限");
+        }
+        Ok((total, sizes_complete))
     }
     fn extract_one(&self, job: &mut Job, archive_rel: &str, depth: u32) -> Result<()> {
         let archive = fsutil::safe_join(&job.root,archive_rel)?;
@@ -99,10 +122,11 @@ impl SevenZip {
         // Keep an open, write-denying source handle on Windows during listing/extraction.
         let source_guard = fsutil::open_stable_read(&archive)?;
         job.context.status(format!("检查压缩包：{archive_rel}"));
-        let total = self.list(&archive,job)?;
+        let (total, sizes_complete) = self.list(&archive,job)?;
         let reserve = job.config.reserve_gib * (1<<30);
         let free = fs2::available_space(&job.root)?;
-        if total.checked_add(reserve).context("容量计算溢出")? > free {
+        // 大小元数据不完整时只校验预留空间，避免对流式格式误报容量不足。
+        if sizes_complete && total.checked_add(reserve).context("容量计算溢出")? > free {
             bail!("可用空间不足：本包需 {}，预留 {}，当前 {}。未写入任何解压文件",bytes(total),bytes(reserve),bytes(free));
         }
         let stage = Staging::new(&job.root)?;
@@ -116,7 +140,7 @@ impl SevenZip {
         },|| {
             if fs2::available_space(&root)? < reserve { bail!("磁盘剩余空间低于预留阈值，停止解压并保留原包"); }
             Ok(())
-        })?;
+        }).with_context(|| "解压失败（可能已损坏、加密或格式不受支持）")?;
         fsutil::unchanged(&archive,&source_snapshot)?;
         drop(source_guard);
         let mut complete = true;
@@ -131,13 +155,18 @@ impl SevenZip {
             if meta.is_dir() { continue; }
             if !meta.is_file() { bail!("解压结果含非普通文件"); }
             expanded = expanded.checked_add(meta.len()).context("解压字节计数溢出")?;
-            if expanded > total { bail!("实际解压量超过压缩包声明，已停止合入"); }
+            if sizes_complete && expanded > total { bail!("实际解压量超过压缩包声明，已停止合入"); }
             let relative = fsutil::relative_string(&stage.content,entry.path())?;
             let base = archive.parent().context("压缩包缺少父目录")?;
             let mut destination = base.join(fsutil::safe_relative(&relative)?);
-            // An archive may contain its own basename. Never overwrite the still-needed source archive.
+            // 压缩包里含有与压缩包同名的成员（gzip 头会记录原始文件名，base.tgz 里就可能是 base.tgz）：
+            // 绝不能覆盖仍在使用的源包。流式包的解压结果其实就是去掉一层压缩后的内容，
+            // 用真实名字（base.tar）落盘并按正常冲突策略处理；其他格式改名放置。
             if fsutil::path_string(&destination)?.to_lowercase() == fsutil::path_string(&archive)?.to_lowercase() {
-                destination = fsutil::unique_target(&job.root,&destination)?;
+                match stream_stem(&archive).map(|stem| base.join(stem)) {
+                    Some(candidate) => destination = candidate,
+                    None => destination = fsutil::unique_target(&job.root,&destination)?,
+                }
             }
             let destination_rel = fsutil::relative_string(&job.root,&destination)?;
             fsutil::safe_join(&job.root,&destination_rel)?;
@@ -145,6 +174,17 @@ impl SevenZip {
                 complete=false;job.summary.skipped+=1;
                 job.log("解压",archive_rel,&destination_rel,"跳过","目标命中排除/隐藏/系统文件设置；原包保留",meta.len())?;
                 continue;
+            }
+            // 分卷/保留源包会在下次分析时再次解压。若归类已把同名同内容文件搬走，
+            // 在源目录旁再写一份只会制造“删除+移动”循环；树内已有相同字节则不再落盘。
+            if !destination.try_exists()? {
+                let incoming = fsutil::snapshot(entry.path())?;
+                if let Some(equivalent) = find_identical_elsewhere(job,entry.path(),&incoming,&relative)? {
+                    job.summary.extracted += 1;
+                    let shown = fsutil::relative_string(&job.root,&equivalent)?;
+                    job.log("解压",archive_rel,&shown,"成功","树内已有相同内容，未在源目录重复写入；原包按规则处理",meta.len())?;
+                    continue;
+                }
             }
             match merge_extracted(job,entry.path(),&destination)? {
                 Some(final_path) => {
@@ -158,7 +198,7 @@ impl SevenZip {
                     job.log("解压",archive_rel,&destination_rel,"跳过","目标冲突未采用新文件；原包强制保留",meta.len())?; }
             }
         }
-        if expanded != total { bail!("解压总量与条目清单不一致，原包保留"); }
+        if sizes_complete && expanded != total { bail!("解压总量与条目清单不一致，原包保留"); }
         // Preserve empty archive directories too. Do not merge them before checking for file/dir collisions.
         for entry in walkdir::WalkDir::new(&stage.content).follow_links(false).min_depth(1) {
             let entry = entry?;
@@ -183,6 +223,35 @@ impl SevenZip {
         Ok(())
     }
 }
+/// 流式压缩包去掉**一层**压缩后缀后的名字；不是流式格式时返回 None。
+fn stream_stem(archive: &Path) -> Option<String> {
+    let name = archive.file_name()?.to_str()?.to_string();
+    let lower = name.to_ascii_lowercase();
+    for suffix in [".tgz", ".tbz2", ".tbz", ".txz", ".bz2", ".gz", ".xz", ".lzma", ".zst"] {
+        if lower.ends_with(suffix) {
+            let stem = &name[..name.len() - suffix.len()];
+            if stem.is_empty() { return None; }
+            // tgz/tbz/txz 本质是 tar 容器，名字里补回 .tar
+            if matches!(suffix, ".tgz" | ".tbz" | ".tbz2" | ".txz")
+                && !stem.to_ascii_lowercase().ends_with(".tar")
+            {
+                return Some(format!("{stem}.tar"));
+            }
+            return Some(stem.to_string());
+        }
+    }
+    None
+}
+/// 流式压缩包（bzip2/xz/gzip）成员名：7-Zip 有时不输出 Path，用包名去掉**一层**压缩后缀合成。
+fn stream_member_name(archive: &Path) -> String {
+    if let Some(stem) = stream_stem(archive) { return stem; }
+    let name = archive.file_name().map(|s| s.to_string_lossy().into_owned()).unwrap_or_else(|| "content".into());
+    match archive.file_stem() {
+        Some(stem) => stem.to_string_lossy().into_owned(),
+        None => name,
+    }
+}
+
 /// 只判断根目录以下的层级。用户选定的根目录本身（例如位于隐藏的 AppData 之下）不参与隐藏/系统判定，
 /// 否则整棵树都会被上级目录的属性判定为隐藏，所有解压结果都会被跳过。
 fn excluded_destination(root: &Path, path: &Path, config: &crate::config::Config) -> bool {
@@ -241,20 +310,48 @@ fn protect_volumes(job: &Job, archive: &Path) -> Result<bool> {
     }
     Ok(false)
 }
+/// 在已扫描文件中查找与暂存条目字节相同的副本（按文件名+大小预筛，再逐字节确认）。
+fn find_identical_elsewhere(job: &Job, source: &Path, incoming: &crate::model::Snapshot, member_rel: &str) -> Result<Option<PathBuf>> {
+    let name = Path::new(member_rel).file_name().and_then(|s|s.to_str()).context("无效压缩包成员名")?.to_lowercase();
+    let size = i64::try_from(incoming.size).context("成员大小超出范围")?;
+    let candidates: Vec<String> = {
+        let mut statement = job.db.conn.prepare("SELECT rel FROM files WHERE active=1 AND name=?1 AND size=?2 LIMIT 32")?;
+        let rows = statement.query_map(params![name,size],|r|r.get::<_,String>(0))?;
+        rows.collect::<rusqlite::Result<Vec<_>>>()?
+    };
+    let source_rel = fsutil::relative_string(&job.root,source)?;
+    for rel in candidates {
+        if rel == source_rel { continue; }
+        let path = fsutil::safe_join(&job.root,&rel)?;
+        // 候选可能已经在本次任务里被删除或移动（例如同名的原压缩包刚被回收），
+        // 这种情况直接跳过：磁盘状态才是准的，不能让整个压缩包因此解压失败。
+        let Ok(existing) = fsutil::snapshot(&path) else { continue; };
+        if existing.size == incoming.size && hashing::equal_bytes(source,incoming,&path,&existing,&job.context.control)? {
+            return Ok(Some(path));
+        }
+    }
+    Ok(None)
+}
 fn merge_extracted(job: &mut Job, source: &Path, target: &Path) -> Result<Option<PathBuf>> {
-    let incoming = fsutil::snapshot(source)?;
+    let incoming = fsutil::snapshot(source).with_context(|| format!("读取暂存解压结果失败：{}",source.display()))?;
     fsutil::ensure_parent(&job.root,target)?;
     if !target.try_exists()? { fsutil::rename_noreplace(source,target)?; return Ok(Some(target.to_path_buf())); }
-    let meta = fs::symlink_metadata(target)?;
+    let meta = fs::symlink_metadata(target).with_context(|| format!("读取目标状态失败：{}",target.display()))?;
     if !meta.is_file() || fsutil::is_link(&meta) {
         let renamed = fsutil::unique_target(&job.root,target)?;
         fsutil::rename_noreplace(source,&renamed)?; return Ok(Some(renamed));
     }
-    let existing = fsutil::snapshot(target)?;
+    let existing = fsutil::snapshot(target).with_context(|| format!("读取已有目标失败：{}",target.display()))?;
+    // Identical bytes are already at the destination. Treat as success so the source archive
+    // can be deleted; otherwise Largest/Newest/Skip on equal size keep the archive forever,
+    // and the next run re-extracts after classification moved the file away.
+    if incoming.size == existing.size && hashing::equal_bytes(source,&incoming,target,&existing,&job.context.control)? {
+        return Ok(Some(target.to_path_buf()));
+    }
     let policy = job.archive_override.unwrap_or(job.config.extract_conflict);
     let policy = if policy == ConflictPolicy::Ask {
         let answer = (job.context.decisions)(ConflictInfo {
-            incoming: source.display().to_string(), existing: target.display().to_string(),
+            existing: crate::platform::display_path_text(&target.display().to_string()),
             incoming_size: incoming.size, existing_size: existing.size,
             incoming_time: incoming.modified_ns, existing_time: existing.modified_ns,
         })?;
@@ -273,10 +370,6 @@ fn merge_extracted(job: &mut Job, source: &Path, target: &Path) -> Result<Option
         }
     };
     if !use_new { return Ok(None); }
-    // An exact duplicate need not replace the existing file; retain the user's existing path.
-    if incoming.size == existing.size && hashing::equal_bytes(source,&incoming,target,&existing,&job.context.control)? {
-        return Ok(Some(target.to_path_buf()));
-    }
     let mode = job.config.conflict_delete.resolve(job.config.global_delete);
     if mode == DeleteMode::Keep { return Ok(None); }
     let removed = job.delete_path(target,Some(&existing),mode,"解压覆盖旧文件")?;

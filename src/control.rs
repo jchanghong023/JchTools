@@ -36,7 +36,7 @@ impl Control {
 }
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ConflictInfo {
-    pub incoming: String,
+    /// 冲突的目标文件（用户可见的最终路径）
     pub existing: String,
     pub incoming_size: u64,
     pub existing_size: u64,
@@ -57,8 +57,12 @@ pub enum Event {
     SelectionSaved(std::path::PathBuf, Option<String>),
     History(Vec<(std::path::PathBuf, String)>),
     LoadedTask(std::path::PathBuf, String, crate::config::Config, crate::model::Summary, bool),
-    ConfigLoaded(crate::config::Config),
+    /// 载入配置；带上来源路径表示是用户导入的（界面会给出提示），`None` 表示启动时读取本机配置。
+    ConfigLoaded(Option<std::path::PathBuf>, crate::config::Config),
+    /// 一次性提示（成功信息等），界面用中性样式展示
     Notice(String),
+    /// 一次性错误（导出失败、规则读取失败等），界面用错误样式展示
+    Error(String),
 }
 #[derive(Clone)]
 pub struct Context {

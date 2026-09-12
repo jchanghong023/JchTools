@@ -6,6 +6,19 @@ use std::{fs, path::Path};
 pub enum DeleteResult { Kept, Recycled, Permanent }
 #[derive(Debug)]
 pub enum RecycleFailure { Cancelled, Failed(String) }
+/// 界面/日志展示用：去掉 Windows 扩展路径前缀，避免用户看到 `\\?\D:\...`。
+pub fn display_path_text(path: &str) -> String {
+    if let Some(unc) = path.strip_prefix(r"\\?\UNC\") { format!(r"\\{unc}") }
+    else if let Some(local) = path.strip_prefix(r"\\?\") { local.to_string() }
+    else { path.to_string() }
+}
+/// 界面展示用：把纳秒时间戳（可能为负）转成本地可读时间；不可表示时回落到原始数字。
+pub fn display_time_text(ns: i64) -> String {
+    let seconds = ns.div_euclid(1_000_000_000);
+    chrono::DateTime::from_timestamp(seconds,0)
+        .map(|utc| utc.with_timezone(&chrono::Local).format("%Y-%m-%d %H:%M:%S").to_string())
+        .unwrap_or_else(|| ns.to_string())
+}
 /// Injectable for tests: tests never need to touch the user's real Recycle Bin.
 pub trait Recycler: Send + Sync {
     fn recycle(&self, path: &Path) -> std::result::Result<(), RecycleFailure>;
@@ -82,4 +95,16 @@ pub fn remove(
     if meta.is_dir() { fs::remove_dir(path).context("删除空目录失败")?; }
     else { fs::remove_file(path).context("永久删除失败（未自动提升权限或修改只读属性）")?; }
     Ok(DeleteResult::Permanent)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::display_path_text;
+
+    #[test]
+    fn display_path_text_strips_extended_prefix() {
+        assert_eq!(display_path_text(r"\\?\D:\testzip"), r"D:\testzip");
+        assert_eq!(display_path_text(r"\\?\UNC\server\share"), r"\\server\share");
+        assert_eq!(display_path_text(r"D:\plain"), r"D:\plain");
+    }
 }

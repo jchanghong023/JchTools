@@ -4,7 +4,7 @@
 //! 1. `<exe 目录>/resources/7zip/`：发布包与开发环境的显式引擎，用户可直接替换（LGPL 要求可替换）；
 //! 2. `<用户数据目录>/JchTools/engine/<版本-哈希>/`：内嵌副本的释放位置，同样允许用户覆盖；
 //! 3. 只有以上都不存在时，才从 EXE 内嵌的压缩数据释放并逐文件校验 sha256。
-//! 已存在且哈希一致的文件不会被重写，避免每次启动都触碰磁盘上的可执行文件。
+//! 已存在的文件一律不重写：用户放进去的自备引擎优先，缺失时才释放内嵌副本并校验 sha256。
 use anyhow::{bail, Context, Result};
 use sha2::{Digest, Sha256};
 use std::path::{Path, PathBuf};
@@ -59,7 +59,9 @@ pub fn release(directory: &Path) -> Result<()> {
             bail!("内嵌引擎缺少清单里声明的文件：{name}");
         };
         let target = directory.join(name);
-        if target.is_file() && hash_matches(&target, &expected)? { continue; }
+        // 已存在的文件一律保留：用户把自备引擎放在这里即可覆盖内嵌副本（LGPL 可替换要求），
+        // 只有缺失时才从 EXE 释放并逐文件校验 sha256。
+        if target.is_file() { continue; }
         let bytes = inflate(compressed).with_context(|| format!("解压内嵌引擎失败：{name}"))?;
         let actual = hex::encode(Sha256::digest(&bytes));
         if actual != expected { bail!("内嵌引擎 {name} 的 sha256 与清单不一致，已拒绝写入"); }
@@ -90,5 +92,23 @@ fn write_atomic(target: &Path, bytes: &[u8]) -> Result<()> {
     match std::fs::rename(&temporary, target) {
         Ok(()) => Ok(()),
         Err(error) => { let _ = std::fs::remove_file(&temporary); Err(error.into()) }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    /// 用户把自备引擎放进释放目录后，程序不得用内嵌副本覆盖它（LGPL 可替换要求）。
+    #[test]
+    fn release_never_overwrites_existing_files() {
+        let Some((name, _)) = embedded::FILES.first().copied() else { return; };
+        let directory = tempfile::tempdir().unwrap();
+        let target = directory.path().join(name);
+        std::fs::write(&target, b"user supplied engine").unwrap();
+        release(directory.path()).unwrap();
+        assert_eq!(std::fs::read(&target).unwrap(), b"user supplied engine");
+        std::fs::remove_file(&target).unwrap();
+        release(directory.path()).unwrap();
+        assert!(target.is_file(), "缺失的引擎文件应从内嵌副本释放");
     }
 }

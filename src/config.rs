@@ -87,22 +87,22 @@ impl Default for Config {
     fn default() -> Self {
         Self {
             recursive: true, include_hidden: false, include_system: false,
-            exclusions: ".git/**;node_modules/**;$RECYCLE.BIN/**;System Volume Information/**".into(),
-            extract: true, nested_archives: true, archive_delete: DeleteChoice::Keep,
-            extract_conflict: ConflictPolicy::Ask, max_depth: 16, max_entries: 10_000_000,
+            exclusions: ".git/**;node_modules/**;$RECYCLE.BIN/**;System Volume Information/**;.svn/**;.hg/**;.vs/**;.idea/**;AppData/**;ProgramData/**;Program Files/**;Program Files (x86)/**;Program Files (Arm)/**;Windows/**;Windows.old/**;$Windows.~BT/**;$Windows.~WS/**;WindowsApps/**;Packages/**;Recovery/**;PerfLogs/**;Config.Msi/**;SoftwareDistribution/**;Application Data/**;Local Settings/**;Temp/**;Tmp/**;Cookies/**;Recent/**;OneDrive/**".into(),
+            extract: true, nested_archives: true, archive_delete: DeleteChoice::Global,
+            extract_conflict: ConflictPolicy::Largest, max_depth: 16, max_entries: 10_000_000,
             max_unpacked_gib: 0, max_file_gib: 0, max_ratio: 10_000, reserve_gib: 1,
             dedup_same_name: true, dedup_copy_names: true, dedup_other_names: true,
             keep_duplicate: KeepPolicy::Newest, duplicate_action: DuplicateAction::Delete,
             duplicate_delete: DeleteChoice::Global, hash_algorithm: HashAlgorithm::Blake3,
             verify_bytes: true, same_name_same_size: true, same_size_keep: KeepPolicy::Newest,
-            same_name_different_size: true, different_size_keep: KeepPolicy::Largest,
+            same_name_different_size: true, different_size_keep: KeepPolicy::Newest,
             conflict_scope_directory: false, conflict_delete: DeleteChoice::Global,
-            classify: ClassifyMode::Off, output_dir: "已整理".into(), preserve_structure: true,
+            classify: ClassifyMode::Category, output_dir: String::new(), preserve_structure: true,
             custom_categories: "文档=pdf,doc,docx,txt,md,xls,xlsx,ppt,pptx;图片=jpg,jpeg,png,webp;视频=mp4,mkv,avi,mov".into(),
             large_files: false, large_threshold_gib: 1, merge_directories: false,
-            flatten_single_child: false, clean_empty_dirs: true, clean_junk: false,
-            clean_temp: false, clean_zero: false, cleanup_delete: DeleteChoice::Global,
-            clean_copy_name: true, normalize_names: false, detect_type: false, fix_extension: false,
+            flatten_single_child: false, clean_empty_dirs: true, clean_junk: true,
+            clean_temp: false, clean_zero: true, cleanup_delete: DeleteChoice::Global,
+            clean_copy_name: true, normalize_names: true, detect_type: false, fix_extension: false,
             global_delete: DeleteMode::Recycle, recycle_fallback: true, hash_workers: 2,
             theme: "system".into(),
         }
@@ -116,7 +116,7 @@ impl Config {
         for number in [self.max_unpacked_gib, self.max_file_gib, self.reserve_gib, self.large_threshold_gib] {
             number.checked_mul(1 << 30).context("容量设置超出范围")?;
         }
-        crate::fsutil::validate_component(&self.output_dir)?;
+        if !self.output_dir.is_empty() { crate::fsutil::validate_component(&self.output_dir)?; }
         if self.fix_extension && !self.detect_type { bail!("修正扩展名需要先开启真实类型检测"); }
         if !["system", "light", "dark"].contains(&self.theme.as_str()) { bail!("主题参数无效"); }
         crate::rules::build_exclusions(&self.exclusions)?;

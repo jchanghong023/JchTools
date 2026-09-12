@@ -36,6 +36,11 @@ impl Job {
             } },
         }
         self.log("删除",&relative,"",match result {DeleteResult::Kept=>"保留",DeleteResult::Recycled=>"已回收",DeleteResult::Permanent if mode==DeleteMode::Recycle=>"回收失败，已按授权永久删除",DeleteResult::Permanent=>"已永久删除"},reason,size)?;
+        // 已经不在磁盘上的文件不能再参与后续按名/按大小的查找：否则同名成员合入时会去读取
+        // 一个刚被删除的路径，把整包解压误判为失败。
+        if result != DeleteResult::Kept {
+            self.db.conn.execute("UPDATE files SET active=0 WHERE rel=?1",[&relative])?;
+        }
         Ok(result)
     }
 }
@@ -85,8 +90,11 @@ pub fn prepare_at(root:&Path,config:Config,context:TaskContext,state:&Path,engin
         Ok(TaskResult { directory:directory.clone(),summary:job.summary.clone() })
     })();
     if let Err(error)=&result {
-        let _=job.db.set("summary",&job.summary); let _=job.db.set("status",&"failed");
-        let _=job.log("任务","","","失败",&format!("{error:#}"),0);
+        // 用户主动取消不是失败：任务记录里要能区分“已取消”和“失败”，否则回看记录时会误判。
+        let cancelled=job.context.control.is_cancelled();
+        let _=job.db.set("summary",&job.summary);
+        let _=job.db.set("status",&if cancelled {"cancelled"} else {"failed"});
+        let _=job.log("任务","","",if cancelled {"已取消"} else {"失败"},&format!("{error:#}"),0);
     }
     result
 }
@@ -288,7 +296,21 @@ pub fn history(state:&Path)->Result<Vec<(PathBuf,String)>>{
         if let Ok(db)=Database::open(&path){
             let root: String=db.get("root").unwrap_or_default();let status:String=db.get("status").unwrap_or_else(|_|"unknown".into());
             let created:String=db.get("created").unwrap_or_default();
-            result.push((path,format!("{created} | {status} | {root}")));
+            let when=chrono::DateTime::parse_from_rfc3339(&created)
+                .map(|time|time.with_timezone(&chrono::Local).format("%Y-%m-%d %H:%M:%S").to_string())
+                .unwrap_or_else(|_|created.clone());
+            let state=match status.as_str(){
+                "ready"=>"待确认","analyzing"=>"分析中","executing"=>"执行中","finished"=>"已完成",
+                "cancelled"=>"已取消","failed"=>"失败",_=>"状态未知"};
+            let counts=match db.summary(){
+                Ok(summary) if status!="ready"&&status!="analyzing" =>
+                    format!(" · 已回收 {} 项 · 永久删除 {} 项 · 移动 {} 项 · 跳过 {} 项 · 错误 {} 项",
+                        summary.recycled,summary.deleted,summary.moved,summary.skipped,summary.errors),
+                Ok(summary) => format!(" · 扫描 {} 个文件 · 待处理 {} 项",summary.scanned,
+                    summary.planned_delete+summary.planned_move+summary.planned_link+summary.planned_empty),
+                Err(_) => String::new(),
+            };
+            result.push((path,format!("{when} · {state} · {}{counts}",platform::display_path_text(&root))));
         }
     }Ok(result)
 }

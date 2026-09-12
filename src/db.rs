@@ -58,10 +58,22 @@ impl Database {
         self.conn.query_row("SELECT id,body,selected,state FROM actions WHERE id=?1", [id], action_row).map_err(Into::into)
     }
     pub fn actions_page(&self, after: i64, limit: usize) -> Result<Vec<Action>> {
-        let mut statement = self.conn.prepare("SELECT id,body,selected,state FROM actions WHERE id>?1 ORDER BY id LIMIT ?2")?;
-        let rows = statement.query_map(params![after, limit.min(1000) as i64], action_row)?;
-        let result = rows.collect::<rusqlite::Result<Vec<_>>>()?;
-        Ok(result)
+        self.actions_page_filtered(after, limit, None)
+    }
+    /// kind_filter: None=全部；Some("delete"/"move"/"hardlink"/"empty_directory")（serde snake_case）
+    pub fn actions_page_filtered(&self, after: i64, limit: usize, kind_filter: Option<&str>) -> Result<Vec<Action>> {
+        let limit = limit.min(1000) as i64;
+        let rows = if let Some(kind) = kind_filter {
+            let like = format!("\"{kind}\"");
+            let mut statement = self.conn.prepare("SELECT id,body,selected,state FROM actions WHERE id>?1 AND kind=?2 ORDER BY id LIMIT ?3")?;
+            let rows = statement.query_map(params![after, like, limit], action_row)?.collect::<rusqlite::Result<Vec<_>>>()?;
+            rows
+        } else {
+            let mut statement = self.conn.prepare("SELECT id,body,selected,state FROM actions WHERE id>?1 ORDER BY id LIMIT ?2")?;
+            let rows = statement.query_map(params![after, limit], action_row)?.collect::<rusqlite::Result<Vec<_>>>()?;
+            rows
+        };
+        Ok(rows)
     }
     pub fn set_selected(&self, id: i64, selected: bool) -> Result<()> {
         let status: String = self.get("status")?;

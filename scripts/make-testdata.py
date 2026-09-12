@@ -110,7 +110,7 @@ def build_conflicts(root: Path, seven: Path, log: list[str]) -> None:
     stamp = 1_750_000_000
     os.utime(same_size_a, (stamp, stamp))
     os.utime(same_size_b, (stamp, stamp))
-    log.append("| `03-版本冲突/` | 同名不同大小（config.ini）与同名同大小不同内容（same-size-a.dat） | 默认保留较大 / 保留最新；两者开关与保留策略独立，可在「冲突」分区改 |")
+    log.append("| `03-版本冲突/` | 同名不同大小（config.ini）与同名同大小不同内容（same-size-a.dat） | 两条规则默认都保留修改时间最新的；开关与保留策略独立，可在「冲突」分区改 |")
 
 
 def build_junk(root: Path, seven: Path, log: list[str]) -> None:
@@ -121,7 +121,7 @@ def build_junk(root: Path, seven: Path, log: list[str]) -> None:
     write(section / "scratch.tmp", b"temp")
     write(section / "backup.bak", b"backup")
     write(section / "empty.txt", b"")
-    log.append("| `04-垃圾与临时/` | 系统附属文件、临时/备份文件、零字节文件 | 三组规则默认关闭；在「清理」分区打开后应分别删除（默认进回收站） |")
+    log.append("| `04-垃圾与临时/` | 系统附属文件、临时/备份文件、零字节文件 | 垃圾与零字节规则默认开启、临时/备份规则默认关闭；开启后应分别删除（默认进回收站） |")
 
 
 def build_empty_and_chain(root: Path, seven: Path, log: list[str]) -> None:
@@ -183,7 +183,7 @@ def build_archive_conflicts(root: Path, seven: Path, log: list[str]) -> None:
     zip_members(section / "pack.zip", {"说明.txt": b"archive version B, different content and length\n"})
     write(section / "等长.txt", b"0123456789abcdef")                        # 16 B
     zip_members(section / "等长冲突.zip", {"等长.txt": b"fedcba9876543210"})
-    log.append("| `08-压缩包-冲突/` | 解压目标已存在同名文件（大小不同 / 大小相同） | 图形界面逐次询问，可「覆盖旧文件 / 跳过新文件 / 保留最新 / 保留较大 / 两个都保留」并应用到后续全部；命令行默认两个都保留 |")
+    log.append("| `08-压缩包-冲突/` | 解压目标已存在同名文件（大小不同 / 大小相同） | 图形界面逐次询问，可「覆盖旧文件 / 跳过新文件 / 保留最新 / 保留较大 / 两个都保留」并应用到后续全部；命令行用默认规则（按大小保留较大的），配置里选「询问」时会自动改为两个都保留 |")
 
 
 def build_nested(root: Path, seven: Path, log: list[str]) -> None:
@@ -347,7 +347,7 @@ def initialise_git(root: Path, log: list[str]) -> None:
     log.append("| `.git` + `恢复.ps1` | 生成时建立的 git 基线（需 `--git`） | 整理跑完后执行 `恢复.ps1` 即可回到初始状态：`git checkout -- .` 恢复被删除/移动的文件、`git clean -fd` 清掉新文件，并补回隐藏/系统属性与空目录；`.git/**` 默认在排除规则里，不会被整理 |")
 
 
-def build_readme(root: Path, log: list[str], seven: Path) -> None:
+def build_readme(root: Path, log: list[str], seven: Path, git: bool) -> None:
     text = [
         "# JchTools 手工测试数据集",
         "",
@@ -377,18 +377,28 @@ def build_readme(root: Path, log: list[str], seven: Path) -> None:
         "- `16-恶意条目/` 里的包是为安全测试准备的，请只在测试目录里使用；",
         "- 本说明文件本身也是被扫描的对象，不需要时可以直接删除。",
         "",
-        "## 整理之后如何恢复",
-        "",
-        "本目录在生成时已用 git 建立基线（`--git`）。整理跑完后，在本目录执行：",
-        "",
-        "```powershell",
-        ".\\恢复.ps1",
-        "```",
-        "",
-        "等价的手工命令是 `git checkout -- .`（恢复被删除/移动的原始文件）+ `git clean -fd`（清掉解压与归类产生的新文件）。",
-        "git 不保存 Windows 隐藏/系统属性和空目录，所以 `恢复.ps1` 会额外补这两类；目录里的 `.gitattributes`（`* -text`）保证检出后字节与初始一致，去重哈希才有可比性。",
-        "想彻底重来，直接重跑生成脚本（会先清空目录）。",
     ])
+    if git:
+        text.extend([
+            "## 整理之后如何恢复",
+            "",
+            "本目录在生成时已用 git 建立基线（`--git`）。整理跑完后，在本目录执行：",
+            "",
+            "```powershell",
+            ".\\恢复.ps1",
+            "```",
+            "",
+            "等价的手工命令是 `git checkout -- .`（恢复被删除/移动的原始文件）+ `git clean -fd`（清掉解压与归类产生的新文件）。",
+            "git 不保存 Windows 隐藏/系统属性和空目录，所以 `恢复.ps1` 会额外补这两类；目录里的 `.gitattributes`（`* -text`）保证检出后字节与初始一致，去重哈希才有可比性。",
+            "想彻底重来，直接重跑生成脚本（会先清空目录）。",
+        ])
+    else:
+        text.extend([
+            "## 整理之后如何恢复",
+            "",
+            "本次生成没有使用 `--git`，目录里没有 git 基线和 `恢复.ps1`，整理后的删除/移动无法一键撤销。",
+            "需要可回滚的测试集，请重新执行 `python scripts/make-testdata.py --destination <目录> --git`（会先清空目录）。",
+        ])
     root.joinpath("_测试说明.md").write_text("\n".join(text) + "\n", encoding="utf-8")
 
 
@@ -413,9 +423,9 @@ def main() -> int:
     ):
         builder(root, seven, log)
         print(f"  built {builder.__name__}")
-    build_readme(root, log, seven)
     if arguments.git:
         initialise_git(root, log)
+    build_readme(root, log, seven, arguments.git)
 
     files = [p for p in root.rglob("*") if p.is_file() and ".git" not in p.parts]
     total = sum(p.stat().st_size for p in files)

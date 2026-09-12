@@ -5,6 +5,25 @@ use std::{io::{BufRead, BufReader, Read}, process::{Command, Stdio}, sync::mpsc,
 
 #[derive(Debug)]
 enum PipeMessage { Line(bool,String), Error(String) }
+/// 7-Zip 失败时 tail 里混着 stdout 的元数据（`Path = …`）和 stderr 的报错；
+/// 只把这些当成"给用户看的原因"，否则用户拿到的是几十行条目字段。
+fn is_metadata_line(line: &str) -> bool {
+    const KEYS: [&str; 27] = ["Path","Type","Physical Size","Headers Size","Size","Packed Size","Modified","Created","Accessed",
+        "Attributes","Encrypted","Comment","CRC","Method","Characteristics","Host OS","Version","Volume Index","Folders","Files",
+        "Solid","Blocks","Hard Links","Alternate Stream","Symbolic Link","Reparse","Offset"];
+    line.split_once('=').is_some_and(|(key,_)| KEYS.contains(&key.trim()))
+}
+fn summarize_failure(stderr: &std::collections::VecDeque<String>, stdout: &std::collections::VecDeque<String>) -> String {
+    let pick = |lines: &std::collections::VecDeque<String>| -> Vec<String> {
+        lines.iter().map(|line| line.trim()).filter(|line| !line.is_empty() && !is_metadata_line(line))
+            .map(|line| line.chars().take(240).collect::<String>().replace(r"\\?\", "")).collect::<Vec<_>>()
+    };
+    let errors = pick(stderr);
+    let chosen = if !errors.is_empty() { errors } else { pick(stdout) };
+    let mut text = chosen.join(" | ");
+    if text.chars().count() > 400 { text = text.chars().take(400).collect::<String>() + "…"; }
+    text
+}
 fn pump<R: Read + Send + 'static>(reader: R, err: bool, sender: mpsc::SyncSender<PipeMessage>) -> thread::JoinHandle<()> {
     thread::spawn(move || {
         let mut input = BufReader::with_capacity(65536,reader);
@@ -48,7 +67,8 @@ pub fn run(command: &mut Command, control: &Control, mut line: impl FnMut(bool,&
     let (send,recv) = mpsc::sync_channel(64);
     let stdout = pump(child.stdout.take().context("缺少 stdout")?,false,send.clone());
     let stderr = pump(child.stderr.take().context("缺少 stderr")?,true,send);
-    let mut tail = std::collections::VecDeque::new();
+    let mut stderr_tail = std::collections::VecDeque::new();
+    let mut stdout_tail = std::collections::VecDeque::new();
     let result = (|| {
         let mut last_tick = std::time::Instant::now();
         loop {
@@ -57,7 +77,10 @@ pub fn run(command: &mut Command, control: &Control, mut line: impl FnMut(bool,&
             if last_tick.elapsed() > Duration::from_millis(500) { tick()?; last_tick = std::time::Instant::now(); }
             match recv.recv_timeout(Duration::from_millis(50)) {
                 Ok(PipeMessage::Line(err,text)) => {
-                    if !text.is_empty() { if tail.len() == 12 { tail.pop_front(); } tail.push_back(text.clone()); }
+                    if !text.is_empty() {
+                        let sink = if err { &mut stderr_tail } else { &mut stdout_tail };
+                        if sink.len() == 12 { sink.pop_front(); } sink.push_back(text.clone());
+                    }
                     line(err,&text)?;
                 }
                 Ok(PipeMessage::Error(error)) => bail!("{error}"),
@@ -66,7 +89,12 @@ pub fn run(command: &mut Command, control: &Control, mut line: impl FnMut(bool,&
             }
         }
         let status = child.wait()?;
-        if !status.success() { bail!("7-Zip 退出码 {:?}（警告也不视为完整成功）：{}", status.code(),tail.into_iter().collect::<Vec<_>>().join(" | ")); }
+        if !status.success() {
+            let code = status.code().map(|code| code.to_string()).unwrap_or_else(|| "未知".into());
+            let summary = summarize_failure(&stderr_tail,&stdout_tail);
+            if summary.is_empty() { bail!("7-Zip 退出码 {code}，且没有输出可读的错误行；压缩包可能已损坏或不完整"); }
+            bail!("7-Zip 退出码 {code}（警告也不视为完整成功）：{summary}");
+        }
         Ok(())
     })();
     if result.is_err() { let _ = child.kill(); let _ = child.wait(); }

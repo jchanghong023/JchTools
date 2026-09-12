@@ -21,7 +21,7 @@ pub fn validate_component(name: &str) -> Result<()> {
     Ok(())
 }
 pub fn safe_relative(raw: &str) -> Result<PathBuf> {
-    if (raw.starts_with('/') || raw.starts_with('\\')) { bail!("拒绝压缩包绝对路径：{raw:?}"); }
+    if raw.starts_with('/') || raw.starts_with('\\') { bail!("拒绝压缩包绝对路径：{raw:?}"); }
     let normalized = raw.replace('\\', "/");
     let mut out = PathBuf::new();
     for part in normalized.split('/') {

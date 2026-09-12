@@ -1,4 +1,4 @@
-use crate::{config::{ClassifyMode, DeleteMode, DuplicateAction, KeepPolicy}, db::FILE_COLUMNS,
+use crate::{config::{ClassifyMode, DeleteMode, DuplicateAction}, db::FILE_COLUMNS,
     engine::Job, fsutil, model::{Action,ActionKind,FileRecord}, rules};
 use anyhow::{Context,Result};
 use rusqlite::{params, OptionalExtension};
@@ -156,6 +156,15 @@ fn directory_target(job: &Job, file: &FileRecord) -> Result<PathBuf> {
     }
     Ok(parent)
 }
+/// `path` 是否已位于 `prefix` 之下（逐段比较；Windows 目录不区分大小写，故忽略 ASCII 大小写）。
+fn under_path(path: &Path, prefix: &Path) -> bool {
+    let mut rest = path.components();
+    prefix.components().all(|part| {
+        rest.next().is_some_and(|next| {
+            if cfg!(windows) { next.as_os_str().eq_ignore_ascii_case(part.as_os_str()) } else { next == part }
+        })
+    })
+}
 fn target_will_be_free(job: &Job, path: &Path, rel: &str) -> Result<bool> {
     if !path.try_exists()? { return Ok(true); }
     let deleting: bool = job.db.conn.query_row(
@@ -199,9 +208,10 @@ fn moves(job: &mut Job) -> Result<()> {
                 job.log("命名",&file.rel,"","跳过",&error.to_string(),0)?; continue;
             }
             let mut parent = directory_target(job,&file)?;
+            let output_dir = job.config.output_dir.as_str();
             // Output is included in deduplication but never nested under itself on repeated runs.
-            let already_sorted = original.starts_with(Path::new(&job.config.output_dir));
-            if !already_sorted && (job.config.classify != ClassifyMode::Off || job.config.large_files) {
+            let under_output = !output_dir.is_empty() && under_path(original, Path::new(output_dir));
+            if !under_output && (job.config.classify != ClassifyMode::Off || job.config.large_files) {
                 let extension = Path::new(&name).extension().and_then(|v|v.to_str()).unwrap_or("").to_lowercase();
                 let label = if job.config.large_files && file.snapshot.size >= job.config.large_threshold_gib * (1<<30) { Some(PathBuf::from("大文件")) }
                     else { match job.config.classify {
@@ -216,8 +226,16 @@ fn moves(job: &mut Job) -> Result<()> {
                         }
                     }};
                 if let Some(label) = label {
-                    parent = if job.config.preserve_structure { Path::new(&job.config.output_dir).join(label).join(parent) }
-                        else { Path::new(&job.config.output_dir).join(label) };
+                    // 空 output_dir：分类目录直接建在选定根下；已在该分类目录下的文件不再套一层。
+                    // label 可能是多段路径（如日期归类的 2024/03），必须整段前缀比较而不是只比首段。
+                    let already = output_dir.is_empty() && under_path(original, &label);
+                    if !already {
+                        parent = if job.config.preserve_structure {
+                            if output_dir.is_empty() { label.join(parent) }
+                            else { Path::new(output_dir).join(label).join(parent) }
+                        } else if output_dir.is_empty() { label }
+                        else { Path::new(output_dir).join(label) };
+                    }
                 }
             }
             let desired = parent.join(&name);
@@ -243,12 +261,32 @@ fn moves(job: &mut Job) -> Result<()> {
     }
     Ok(())
 }
+/// 目录下是否存在未入库文件（隐藏/系统/排除等）；有则不能按空目录清理。
+fn has_unscanned_content(job: &Job, rel: &str) -> Result<bool> {
+    let path = fsutil::safe_join(&job.root, rel)?;
+    for entry in walkdir::WalkDir::new(&path).follow_links(false).into_iter().filter_map(|e| e.ok()) {
+        if !entry.file_type().is_file() { continue; }
+        job.context.control.checkpoint()?;
+        let child = fsutil::relative_string(&job.root, entry.path())?;
+        let in_db: i64 = job.db.conn.query_row("SELECT COUNT(1) FROM files WHERE rel=?1",[&child],|r|r.get(0))?;
+        if in_db == 0 { return Ok(true); }
+    }
+    Ok(false)
+}
 fn empty_directories(job: &mut Job) -> Result<()> {
     let mode = job.config.cleanup_delete.resolve(job.config.global_delete);
     if !job.config.clean_empty_dirs || mode == DeleteMode::Keep { return Ok(()); }
-    // Bottom-up candidates are rechecked at execution; nonempty directories are never recursively removed.
+    // 自底向上推算：只把“计划执行后仍会为空”的目录写进计划。
+    // 目录为空 = 其下没有会留在原地的文件，且其子目录也都为空。
+    // 「会留在原地」= 磁盘上仍会存在：没有选中的删除/移动。分卷源、失败包等 protected 文件
+    // 虽 active=0，但仍占目录，不能被算成空目录。
     let mut cursor = 0i64;
-    job.db.conn.execute_batch("DROP TABLE IF EXISTS empty_order; CREATE TEMP TABLE empty_order AS SELECT ROW_NUMBER() OVER(ORDER BY depth DESC,rel) seq,rel FROM directories;")?;
+    let move_kind = serde_json::to_string(&ActionKind::Move)?;
+    let delete_kind = serde_json::to_string(&ActionKind::Delete)?;
+    job.db.conn.execute_batch(
+        "DROP TABLE IF EXISTS empty_order; DROP TABLE IF EXISTS empty_will;
+         CREATE TEMP TABLE empty_order AS SELECT ROW_NUMBER() OVER(ORDER BY depth DESC,rel) seq,rel,depth FROM directories;
+         CREATE TEMP TABLE empty_will (rel TEXT PRIMARY KEY);")?;
     loop {
         let batch = {
             let mut statement = job.db.conn.prepare("SELECT seq,rel FROM empty_order WHERE seq>?1 ORDER BY seq LIMIT 256")?;
@@ -258,8 +296,25 @@ fn empty_directories(job: &mut Job) -> Result<()> {
         if batch.is_empty() { break; }
         for (seq,rel) in batch {
             cursor = seq; job.context.control.checkpoint()?;
+            // 执行后仍会留在该目录下的文件：没有选中的删除（会消失）或移动（会离开）
+            let has_file: i64 = job.db.conn.query_row(
+                "SELECT COUNT(1) FROM files WHERE rel LIKE ?1 AND NOT EXISTS (\
+                 SELECT 1 FROM actions WHERE kind IN (?2,?3) AND selected=1 AND state='pending' AND source=files.rel)",
+                params![format!("{rel}/%"), move_kind, delete_kind],|r|r.get(0))?;
+            if has_file>0 { continue; }
+            // 隐藏/系统/排除文件不会入库，但仍占目录；有这类内容就不能当作空目录。
+            if has_unscanned_content(job,&rel)? { continue; }
+            // 子目录是否都已判定会为空
+            let child_total: i64 = job.db.conn.query_row(
+                "SELECT COUNT(1) FROM directories WHERE rel LIKE ?1",
+                params![format!("{rel}/%")],|r|r.get(0))?;
+            let child_empty: i64 = job.db.conn.query_row(
+                "SELECT COUNT(1) FROM empty_will WHERE rel LIKE ?1",
+                params![format!("{rel}/%")],|r|r.get(0))?;
+            if child_total>child_empty { continue; }
+            job.db.conn.execute("INSERT OR IGNORE INTO empty_will(rel) VALUES(?1)",[&rel])?;
             job.db.add_action(&Action { id:0,kind:ActionKind::EmptyDirectory,source:rel,target:None,
-                reason:"整理完成后复查；只有实际为空才删除".into(),expected:None,keeper:None,hash:None,
+                reason:"计划执行后该目录将为空；执行时再次确认，只有实际为空才删除".into(),expected:None,keeper:None,hash:None,
                 mode,selected:true,state:"pending".into() })?;
             job.summary.planned_empty += 1;
         }

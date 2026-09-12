@@ -24,7 +24,7 @@
     {
       "name": "ui_callbacks",
       "status": "PASS",
-      "details": "23 declared window callbacks have Rust handlers."
+      "details": "24 declared window callbacks have Rust handlers."
     },
     {
       "name": "rust_lexical",
@@ -34,7 +34,7 @@
     {
       "name": "sql_syntax",
       "status": "PASS",
-      "details": "SQLite schema and 46 concrete DML statements prepare successfully against empty schema; no organizer application executed."
+      "details": "SQLite schema and 50 concrete DML statements prepare successfully against empty schema; no organizer application executed."
     },
     {
       "name": "shell_syntax",
@@ -44,7 +44,7 @@
     {
       "name": "scope_and_delivery",
       "status": "PASS",
-      "details": "59 Rust test functions supplied, NOT executed; no todo!/unimplemented! in Rust implementation; no prebuilt executable asserted."
+      "details": "68 Rust test functions supplied, NOT executed; no todo!/unimplemented! in Rust implementation; no prebuilt executable asserted."
     }
   ]
 }

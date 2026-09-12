@@ -7,6 +7,8 @@ from __future__ import annotations
 import json, re, shutil, sqlite3, subprocess, sys, tomllib, xml.etree.ElementTree as ET
 from pathlib import Path
 ROOT = Path(__file__).resolve().parent.parent
+def read_text(path: Path) -> str:
+    return path.read_text(encoding='utf-8')
 checks: list[dict[str, object]] = []
 def check(name, fn):
     try:
@@ -14,15 +16,15 @@ def check(name, fn):
     except Exception as exc:
         checks.append({'name':name,'status':'FAIL','details':str(exc)})
 def manifests():
-    cargo=tomllib.loads((ROOT/'Cargo.toml').read_text())
+    cargo=tomllib.loads(read_text(ROOT/'Cargo.toml'))
     for binary in cargo['bin']: assert (ROOT/binary['path']).is_file()
     ET.parse(ROOT/'resources/windows.manifest')
     return 'Cargo TOML, declared binary paths, Windows XML parsed.'
 def config_schema():
-    config=(ROOT/'src/config.rs').read_text()
+    config=read_text(ROOT/'src/config.rs')
     body=re.search(r'pub struct Config\s*\{(.*?)\n\}',config,re.S).group(1)
     fields=dict(re.findall(r'pub\s+(\w+)\s*:\s*([\w:]+)',body))
-    rows=json.loads((ROOT/'resources/rules.json').read_text())
+    rows=json.loads(read_text(ROOT/'resources/rules.json'))
     keys=[r['key'] for r in rows]
     assert len(keys)==len(set(keys))
     assert set(fields)==set(keys),(set(fields)-set(keys),set(keys)-set(fields))
@@ -40,7 +42,7 @@ def config_schema():
                 assert set(vals)==expected,(row['key'],vals,expected)
     return f'{len(rows)} UI settings exactly match serialized Config fields and enum values.'
 def ui_callbacks():
-    ui=(ROOT/'ui/app.slint').read_text();rs=(ROOT/'src/main.rs').read_text()
+    ui=read_text(ROOT/'ui/app.slint');rs=read_text(ROOT/'src/main.rs')
     # 只有导出组件（窗口）上的回调是应用级 API；组件内部的回调在 .slint 内部接线。
     text=ui[ui.index('export component AppWindow inherits Window'):]
     depth=0;end=len(text)
@@ -63,7 +65,7 @@ def rust_lexical():
     count=0
     for path in [ROOT/'build.rs',*ROOT.glob('src/**/*.rs'),*ROOT.glob('tests/*.rs')]:
         stack=[]
-        for token,text in lex(path.read_text(),RustLexer()):
+        for token,text in lex(read_text(path),RustLexer()):
             if token in Comment or token in Literal.String: continue
             for ch in text:
                 if ch in '([{':stack.append(ch)
@@ -74,15 +76,16 @@ def rust_lexical():
     return f'{count} Rust files have balanced lexical delimiters; this does NOT validate Rust types, APIs, macros or borrow checking.'
 def sql_syntax():
     conn=sqlite3.connect(':memory:')
-    conn.executescript((ROOT/'src/schema.sql').read_text())
+    conn.executescript(read_text(ROOT/'src/schema.sql'))
     conn.executescript('''CREATE TEMP TABLE duplicate_order(seq INTEGER,id INTEGER);
         CREATE TEMP TABLE conflict_groups(seq INTEGER PRIMARY KEY,key TEXT,size INTEGER);
         CREATE TEMP TABLE empty_order(seq INTEGER,rel TEXT);
+        CREATE TEMP TABLE empty_will(rel TEXT PRIMARY KEY);
         CREATE TEMP TABLE hash_candidates(id INTEGER PRIMARY KEY);''')
     file_columns='id,rel,name,normal,size,mtime,identity,links,hash,cleanable'
     statements=set()
     for path in ROOT.glob('src/*.rs'):
-        for match in re.finditer(r'"((?:[^"\\]|\\.)*)"',path.read_text()):
+        for match in re.finditer(r'"((?:[^"\\]|\\.)*)"',read_text(path)):
             raw=match.group(1)
             if not re.match(r'^(SELECT|UPDATE|INSERT|DELETE)\b',raw): continue
             raw=raw.replace('{FILE_COLUMNS}',file_columns).replace('{key_expr}','name').replace('{filter}','active=1 AND name=?1 AND size=?2')
@@ -106,8 +109,8 @@ def scope_and_delivery():
     required=['README.md','先读我.txt','LICENSE','THIRD_PARTY_NOTICES.md','docs/ARCHITECTURE.md','docs/ACCEPTANCE.md','scripts/package-windows.ps1','scripts/fetch-7zip.ps1','tests/core.rs','tests/archive.rs','.github/workflows/check.yml']
     assert all((ROOT/p).is_file() for p in required)
     for path in ROOT.glob('src/**/*.rs'):
-        text=path.read_text();assert 'todo!(' not in text and 'unimplemented!(' not in text,str(path)
-    tests=sum(len(re.findall(r'#\[test\]',p.read_text())) for p in ROOT.glob('tests/*.rs'))
+        text=read_text(path);assert 'todo!(' not in text and 'unimplemented!(' not in text,str(path)
+    tests=sum(len(re.findall(r'#\[test\]',read_text(p))) for p in ROOT.glob('tests/*.rs'))
     return f'{tests} Rust test functions supplied, NOT executed; no todo!/unimplemented! in Rust implementation; no prebuilt executable asserted.'
 for name,fn in [('manifests',manifests),('config_schema',config_schema),('ui_callbacks',ui_callbacks),('rust_lexical',rust_lexical),('sql_syntax',sql_syntax),('shell_syntax',shell_syntax),('scope_and_delivery',scope_and_delivery)]:check(name,fn)
 report={'kind':'lightweight static source checks only','platform':sys.platform,'python':sys.version.split()[0],

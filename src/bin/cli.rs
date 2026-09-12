@@ -25,7 +25,10 @@ fn run()->Result<()> {
             let result=engine::apply(Path::new(task),TaskContext::default())?;println!("{}",result.summary.description());
         }
         Some("inspect")=>{let task=args.get(1).context("需要任务目录")?;let db=Database::open(Path::new(task))?;
-            println!("{}",db.summary()?.description());for action in db.actions_page(0,100)?{println!("{} {:?} {} -> {:?} | {}",action.id,action.kind,action.source,action.target,action.reason);}},
+            println!("{}",db.summary()?.description());for action in db.actions_page(0,100)?{
+                let kind=match action.kind{jchtools::model::ActionKind::Delete=>"删除",jchtools::model::ActionKind::Move=>"移动",jchtools::model::ActionKind::Hardlink=>"硬链接",jchtools::model::ActionKind::EmptyDirectory=>"空目录复查"};
+                println!("{} {} {} -> {} | {} [{}]",action.id,kind,action.source,action.target.unwrap_or_else(||"-".into()),action.reason,action.state);
+            }},
         Some("report")=>{let task=args.get(1).context("需要任务目录")?;let output=args.get(2).context("需要新的 CSV 文件名")?;Database::open(Path::new(task))?.export_csv(Path::new(output))?;},
         _=>println!("JchTools CLI\n  defaults <rules.json>\n  analyze <目录> [--config rules.json] [--extract --yes] [--engine 完整引擎绝对路径]\n  inspect <任务目录>\n  apply <任务目录> --yes\n  report <任务目录> <新建CSV路径>\n不带 --extract 的 analyze 不修改待整理文件；CLI 不交互询问解压冲突，询问策略改为保留两个。"),
     }Ok(())
