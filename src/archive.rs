@@ -110,8 +110,12 @@ impl SevenZip {
             Err(error)=>{let _=db.conn.execute_batch("ROLLBACK");return Err(error);}
         }
         let packed = fs::metadata(archive)?.len().max(1);
-        if cfg.max_ratio > 0 && sizes_complete && total / packed > cfg.max_ratio {
-            bail!("压缩包展开比例超过用户设置的上限");
+        // 用乘法比较避免整数除法截断导致边界上更宽松。
+        if cfg.max_ratio > 0 && sizes_complete {
+            let limit = packed.checked_mul(cfg.max_ratio).unwrap_or(u64::MAX);
+            if total > limit {
+                bail!("压缩包展开比例超过用户设置的上限");
+            }
         }
         Ok((total, sizes_complete))
     }

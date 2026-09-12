@@ -274,7 +274,17 @@ fn run()->Result<()> {
         let weak=ui.as_weak();let state=state.clone();
         ui.on_rule_text(move|key,value|{if let Some(ui)=weak.upgrade(){
             let numeric=state.borrow().specs.iter().find(|s|s.key==key.as_str()).is_some_and(|s|s.kind=="number");
-            let parsed=if numeric{match value.parse::<u64>(){Ok(v)=>serde_json::Value::from(v),Err(_)=>{show_error(&ui,"该设置需要输入非负整数");return;}}}
+            let parsed=if numeric{match value.parse::<u64>(){Ok(v)=>serde_json::Value::from(v),Err(_)=>{
+                show_error(&ui,"该设置需要输入非负整数");
+                // 校验失败时把输入框恢复为配置中的真实值，避免界面与实际配置不一致。
+                if let Ok(map)=serde_json::to_value(&state.borrow().config){
+                    if let Some(old)=map.get(key.as_str()){
+                        let display=old.as_u64().map(|v|v.to_string()).or_else(||old.as_str().map(|s|s.to_string())).unwrap_or_default();
+                        patch_rule_row(&ui,key.as_str(),|row|row.value=display.clone().into());
+                    }
+                }
+                return;
+            }}}
                 else{serde_json::Value::from(value.to_string())};
             if changed(&ui,&state,key.as_str(),parsed.clone(),false){
                 // 模型行里的 value 是重建列表（切分区、恢复默认规则）时的唯一来源，必须跟着更新，
@@ -305,6 +315,8 @@ fn run()->Result<()> {
         ui.on_confirmed(move|kind|{if let Some(ui)=weak.upgrade(){
             if kind==3{state.borrow_mut().close_after=true;if let Some(control)=&state.borrow().control{control.cancel();}
                 ui.set_status("取消任务中，完成当前安全操作后关闭".into());ui.set_conflict_visible(false);}
+            else if kind==4{state.borrow_mut().config=Config::default();refresh(&ui,&state.borrow());invalidate(&ui);
+                ui.set_notice_text("已恢复内置默认规则".into());}
             else{start_task(&ui,&state,&sender,kind==2);}
         }});
     }
@@ -393,7 +405,10 @@ fn run()->Result<()> {
                     if let Some(directory)=user_file_directory(){dialog=dialog.set_directory(&directory);} dialog.save_file()},
                 2=>{let mut dialog=rfd::FileDialog::new().add_filter("JSON",&["json"]);
                     if let Some(directory)=user_file_directory(){dialog=dialog.set_directory(&directory);} dialog.pick_file()},
-                _=>{state.borrow_mut().config=Config::default();if let Some(ui)=weak.upgrade(){refresh(&ui,&state.borrow());invalidate(&ui);}return;}
+                _=>{if let Some(ui)=weak.upgrade(){
+                    ui.set_confirm_text("将把所有规则恢复为内置默认值，当前未保存的修改会丢失。\n\n此操作只影响本机规则配置，不会修改任何文件。".into());
+                    ui.set_confirm_kind(4);ui.set_acknowledge(true);
+                } return;}
             };
             if let Some(path)=path{async_work(sender.clone(),move||{
                 if kind==2{Ok(Event::ConfigLoaded(Some(path.clone()),Config::load(&path)?))}
@@ -531,6 +546,8 @@ fn run()->Result<()> {
                          s.applying=false;s.planned=summary.planned_delete+summary.planned_move+summary.planned_link+summary.planned_empty;
                          s.archives_failed=summary.archives_failed;s.plan_filter=None;s.plan_filter.clone()};
                         ui.set_directory(platform::display_path_text(&root).into());ui.set_summary(summary.description().into());ui.set_ready(ready);ui.set_has_task(true);ui.set_screen(0);ui.set_panel(1);
+                        ui.set_status(if ready{"已载入历史任务，可再次执行整理"}else{"已载入历史任务（非待执行状态，需重新扫描）"}.into());
+                        ui.set_metrics(format!("删除 {} · 移动 {} · 硬链接 {} · 空目录 {}",summary.planned_delete,summary.planned_move,summary.planned_link,summary.planned_empty).into());
                         ui.set_archives_failed(summary.archives_failed as i32);
                         ui.set_plan_delete_count(summary.planned_delete as i32);
                         ui.set_plan_move_count(summary.planned_move as i32);

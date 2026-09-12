@@ -74,7 +74,16 @@ fn deduplicate(job: &mut Job) -> Result<()> {
                 let reason = if file.name == keeper.name { "相同名称且完整 Hash 相同" }
                     else if file.normalized == keeper.normalized { "副本命名且完整 Hash 相同" } else { "名称不同但完整 Hash 相同" };
                 let mode = job.config.duplicate_delete.resolve(job.config.global_delete);
-                let hardlink = job.config.duplicate_action == DuplicateAction::Hardlink;
+                let mut hardlink = job.config.duplicate_action == DuplicateAction::Hardlink;
+                // 跨卷硬链接在执行期必然失败，规划阶段就降级为删除，避免计划与结果不符。
+                if hardlink {
+                    let vol = |id: &str| -> String { id.split(':').next().unwrap_or("").to_string() };
+                    let same_volume = vol(&keeper.snapshot.identity) == vol(&file.snapshot.identity);
+                    if !same_volume {
+                        hardlink = false;
+                        job.log("去重",&file.rel,&keeper.rel,"降级","跨卷无法硬链接，改为按删除规则处理",file.snapshot.size)?;
+                    }
+                }
                 remove_candidate(job,&file,Some(&keeper),reason,mode,hardlink)?;
                 if mode != DeleteMode::Keep { job.db.conn.execute("UPDATE files SET cleanable=1 WHERE id=?1",[keeper_id])?; }
             } else {
@@ -92,7 +101,7 @@ fn conflict_groups(job: &mut Job, same_size: bool) -> Result<()> {
     if mode == DeleteMode::Keep { return Ok(()); }
     // A grouping table avoids keeping millions of names/paths in RAM.
     job.db.conn.execute_batch("DROP TABLE IF EXISTS conflict_groups; CREATE TEMP TABLE conflict_groups(seq INTEGER PRIMARY KEY,key TEXT,size INTEGER);")?;
-    let key_expr = if job.config.conflict_scope_directory { "substr(rel,1,length(rel)-length(name)) || name" } else { "name" };
+    let key_expr = if job.config.conflict_scope_directory { "lower(rel)" } else { "name" };
     let grouping = if same_size {
         format!("INSERT INTO conflict_groups(key,size) SELECT {key_expr},size FROM files WHERE active=1 AND hash IS NOT NULL GROUP BY {key_expr},size HAVING COUNT(DISTINCT hash)>1")
     } else {
@@ -160,7 +169,11 @@ fn directory_target(job: &Job, file: &FileRecord) -> Result<PathBuf> {
         loop {
             if parent.as_os_str().is_empty() { break; }
             let current = fsutil::safe_join(&job.root,&fsutil::path_string(&parent)?)?;
-            let entries = std::fs::read_dir(&current)?.take(2).collect::<std::io::Result<Vec<_>>>()?;
+            // 单个目录读取失败不应中止整个规划，跳过该文件的扁平化即可。
+            let entries = match std::fs::read_dir(&current) {
+                Ok(rd) => rd.take(2).collect::<std::io::Result<Vec<_>>>().unwrap_or_default(),
+                Err(_) => break,
+            };
             if entries.len() != 1 { break; }
             parent = parent.parent().unwrap_or(Path::new("")).to_path_buf();
         }
@@ -176,8 +189,12 @@ fn under_path(path: &Path, prefix: &Path) -> bool {
         })
     })
 }
-fn target_will_be_free(job: &Job, path: &Path, rel: &str) -> Result<bool> {
-    if !path.try_exists()? { return Ok(true); }
+fn target_will_be_free(job: &Job, path: &Path, rel: &str, source_rel: &str) -> Result<bool> {
+    // Windows 大小写不敏感：仅大小写不同的重命名（如 PHOTO.JPE → PHOTO.jpg）时，
+    // try_exists 对同一物理文件返回 true，必须视为可腾空，否则会错误生成 " (1)" 后缀。
+    if cfg!(windows) && rel.eq_ignore_ascii_case(source_rel) { return Ok(true); }
+    // symlink_metadata 不跟随链接：损坏的符号链接也算目录项已存在。
+    if std::fs::symlink_metadata(path).is_err() { return Ok(true); }
     // 被计划删除或移走的路径执行后会腾空，可以复用原名，不必生成 " (1)" 后缀。
     let freeing: bool = job.db.conn.query_row(
         "SELECT EXISTS(SELECT 1 FROM actions WHERE source=?1 AND kind IN (?2,?3) AND selected=1)",
@@ -199,21 +216,25 @@ fn moves(job: &mut Job) -> Result<()> {
             if job.config.clean_copy_name && file.cleanable && job.config.duplicate_action != DuplicateAction::Hardlink { name = rules::strip_copy_name(&name); }
             if job.config.normalize_names { name = rules::normalize_name(&name); }
             if job.config.detect_type {
-                match infer::get_from_path(&source) {
-                    Ok(Some(kind)) => {
-                        let old = Path::new(&name).extension().and_then(|v|v.to_str()).unwrap_or("").to_lowercase();
-                        // ZIP-container document formats are not renamed to .zip.
-                        let compound = ["docx","xlsx","pptx","epub","odt","ods","odp","jar","apk"].contains(&old.as_str());
-                        let equivalent = old == kind.extension() || (old == "jpeg" && kind.extension() == "jpg") || (old == "tiff" && kind.extension() == "tif");
-                        if !equivalent && !compound {
-                            job.log("类型检测",&file.rel,"","发现",&format!("扩展名 {old}，内容识别为 {}",kind.extension()),file.snapshot.size)?;
-                            if job.config.fix_extension {
-                                let mut p = PathBuf::from(&name); p.set_extension(kind.extension()); name = fsutil::path_string(&p)?;
+                // 以点开头且无扩展名的文件（如 .gitignore）不应被 set_extension 追加后缀。
+                let is_dotfile = name.starts_with('.') && Path::new(&name).extension().is_none();
+                if !is_dotfile {
+                    match infer::get_from_path(&source) {
+                        Ok(Some(kind)) => {
+                            let old = Path::new(&name).extension().and_then(|v|v.to_str()).unwrap_or("").to_lowercase();
+                            // ZIP-container document formats are not renamed to .zip.
+                            let compound = ["docx","xlsx","pptx","epub","odt","ods","odp","jar","apk"].contains(&old.as_str());
+                            let equivalent = old == kind.extension() || (old == "jpeg" && kind.extension() == "jpg") || (old == "tiff" && kind.extension() == "tif");
+                            if !equivalent && !compound {
+                                job.log("类型检测",&file.rel,"","发现",&format!("扩展名 {old}，内容识别为 {}",kind.extension()),file.snapshot.size)?;
+                                if job.config.fix_extension {
+                                    let mut p = PathBuf::from(&name); p.set_extension(kind.extension()); name = fsutil::path_string(&p)?;
+                                }
                             }
                         }
+                        Ok(None) => (),
+                        Err(error) => { job.log("类型检测",&file.rel,"","跳过",&error.to_string(),0)?; }
                     }
-                    Ok(None) => (),
-                    Err(error) => { job.log("类型检测",&file.rel,"","跳过",&error.to_string(),0)?; }
                 }
             }
             if let Err(error) = fsutil::validate_component(&name) {
@@ -225,7 +246,7 @@ fn moves(job: &mut Job) -> Result<()> {
             let under_output = !output_dir.is_empty() && under_path(original, Path::new(output_dir));
             if !under_output && (job.config.classify != ClassifyMode::Off || job.config.large_files) {
                 let extension = Path::new(&name).extension().and_then(|v|v.to_str()).unwrap_or("").to_lowercase();
-                let label = if job.config.large_files && file.snapshot.size >= job.config.large_threshold_gib * (1<<30) { Some(PathBuf::from("大文件")) }
+                let label = if job.config.large_files && job.config.large_threshold_gib > 0 && file.snapshot.size >= job.config.large_threshold_gib * (1<<30) { Some(PathBuf::from("大文件")) }
                     else { match job.config.classify {
                         ClassifyMode::Off => None,
                         ClassifyMode::Extension => Some(PathBuf::from(if extension.is_empty() { "无扩展名".into() } else { extension.to_uppercase() })),
@@ -233,8 +254,10 @@ fn moves(job: &mut Job) -> Result<()> {
                         ClassifyMode::Custom => Some(PathBuf::from(categories.get(&extension).map(String::as_str).unwrap_or("其他"))),
                         ClassifyMode::Date => {
                             let seconds = file.snapshot.modified_ns.div_euclid(1_000_000_000);
-                            let stamp = chrono::DateTime::from_timestamp(seconds,0).context("无法转换文件修改时间")?;
-                            Some(PathBuf::from(stamp.with_timezone(&chrono::Local).format("%Y/%m").to_string()))
+                            match chrono::DateTime::from_timestamp(seconds,0) {
+                                Some(stamp) => Some(PathBuf::from(stamp.with_timezone(&chrono::Local).format("%Y/%m").to_string())),
+                                None => { job.log("日期归类",&file.rel,"","跳过","修改时间超出可表示范围，已跳过日期归类",0)?; None }
+                            }
                         }
                     }};
                 if let Some(label) = label {
@@ -254,7 +277,7 @@ fn moves(job: &mut Job) -> Result<()> {
             let desired_rel = fsutil::path_string(&desired)?.replace('\\',"/");
             if desired_rel == file.rel { continue; }
             let mut target = fsutil::safe_join(&job.root,&desired_rel)?;
-            if !target_will_be_free(job,&target,&desired_rel)? || !job.db.reserve_target(&desired_rel,file.id)? {
+            if !target_will_be_free(job,&target,&desired_rel,&file.rel)? || !job.db.reserve_target(&desired_rel,file.id)? {
                 let requested = target.clone(); let mut index = 1u64;
                 loop {
                     let stem = requested.file_stem().and_then(|s|s.to_str()).context("目标文件名无效")?;
@@ -262,7 +285,7 @@ fn moves(job: &mut Job) -> Result<()> {
                     target = requested.parent().context("目标缺少目录")?.join(format!("{stem} ({index}){suffix}"));
                     let rel = fsutil::relative_string(&job.root,&target)?;
                     fsutil::safe_join(&job.root,&rel)?;
-                    if target_will_be_free(job,&target,&rel)? && job.db.reserve_target(&rel,file.id)? { break; }
+                    if target_will_be_free(job,&target,&rel,&file.rel)? && job.db.reserve_target(&rel,file.id)? { break; }
                     index += 1; anyhow::ensure!(index < 1_000_000,"目标名称冲突过多");
                 }
             }

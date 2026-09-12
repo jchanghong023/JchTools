@@ -12,6 +12,9 @@ global Design {
     in property <color> accent-ink: dark ? #c7d2fe : #3730a3;
     in property <color> danger: #dc2626;
     in property <color> danger-ink: dark ? #fca5a5 : #b91c1c;
+    in property <color> warning: #f59e0b;
+    in property <color> warning-ink: dark ? #fcd34d : #b45309;
+    in property <color> on-accent: #ffffff;
     in property <color> base: dark ? #1b1f2a : #ffffff;
     in property <color> ink: dark ? #eef1f8 : #16192a;
     in property <color> page-top: dark ? #232a3d : #eef0fd;
@@ -28,6 +31,7 @@ global Design {
     in property <color> accent-soft: base.mix(accent, 0.84);
     in property <color> accent-softer: base.mix(accent, 0.93);
     in property <color> shadow: #0f172a26;
+    in property <color> scrim: #0f172a66;
 }
 
 component Label inherits Text { color: Design.text; font-size: 14px; }
@@ -48,7 +52,7 @@ component LogoBadge inherits Rectangle {
     background: Design.bar;
     drop-shadow-color: Design.accent.transparentize(0.55);
     drop-shadow-blur: 12px; drop-shadow-offset-y: 3px;
-    Text { text: "M"; color: white; font-size: 19px; font-weight: 700;
+    Text { text: "J"; color: Design.on-accent; font-size: 19px; font-weight: 700;
         width: parent.width; height: parent.height; horizontal-alignment: center; vertical-alignment: center; }
 }
 
@@ -194,6 +198,8 @@ component ProgressBar inherits Rectangle {
     height: 8px; border-radius: 4px;
     background: Design.line-soft;
     clip: true;
+    accessible-role: text;
+    accessible-label: root.progress >= 0 ? ("进度 " + round(root.progress * 100) + "%") : "正在处理，总量未知";
     property <bool> sweep: false;
     property <length> bar-width: root.progress >= 0 ? max(4px, root.width * min(root.progress, 1.0)) : root.width / 4;
     Timer { interval: 850ms; running: root.progress < 0; triggered => { root.sweep = !root.sweep; } }
@@ -223,7 +229,7 @@ component CaptionButton inherits Rectangle {
     }
     border-width: fs.has-focus ? 1.5px : 0px;
     border-color: Design.accent;
-    property <brush> glyph-color: touch.has-hover && kind == 2 ? white : Design.text;
+    property <brush> glyph-color: touch.has-hover && kind == 2 ? Design.on-accent : Design.text;
     background: touch.has-hover ? (kind == 2 ? Design.danger : Design.hover) : transparent;
 
     touch := TouchArea { mouse-cursor: pointer; clicked => { root.activated(); } }
@@ -459,8 +465,6 @@ export component AppWindow inherits Window {
                     Rectangle { horizontal-stretch: 1; background: transparent; }
                     if root.has-task: Button { text: "打开任务目录"; enabled: !root.busy; clicked => { root.open-report(); } }
                     if root.has-task: Button { text: "导出报告"; enabled: !root.busy; clicked => { root.export-report(); } }
-                    if root.busy: Button { text: root.paused ? "继续" : "暂停"; clicked => { root.pause-task(); } }
-                    if root.busy: Button { text: "取消任务"; clicked => { root.cancel-task(); } }
                 }
                 // 规则分区胶囊
                 if root.panel == 0: Rectangle {
@@ -509,10 +513,10 @@ export component AppWindow inherits Window {
                     }
                     if root.archives-failed > 0: Rectangle {
                         min-height: 36px; border-radius: 10px;
-                        background: Design.base.mix(#f59e0b, 0.90);
-                        border-width: 1px; border-color: Design.base.mix(#f59e0b, 0.65);
+                        background: Design.base.mix(Design.warning, 0.90);
+                        border-width: 1px; border-color: Design.base.mix(Design.warning, 0.65);
                         HorizontalLayout { padding-top: 8px; padding-bottom: 8px; padding-left: 12px; padding-right: 12px; spacing: 10px; cross-axis-alignment: center;
-                            Rectangle { width: 4px; height: 18px; border-radius: 2px; background: #f59e0b; }
+                            Rectangle { width: 4px; height: 18px; border-radius: 2px; background: Design.warning; }
                             Text { text: "有 " + root.archives-failed + " 个压缩包未解压成功（损坏、加密或不支持）。原包已保留，详情见「进度与日志」。";
                                 color: Design.text; wrap: word-wrap; horizontal-stretch: 1; vertical-alignment: center; font-size: 12px; }
                         }
@@ -572,7 +576,7 @@ export component AppWindow inherits Window {
                                     Rectangle { width: 44px; height: 20px; border-radius: 6px;
                                         background: root.busy ? Design.accent : Design.accent-soft;
                                         Text { text: root.busy ? "进行中" : "状态"; font-size: 11px; font-weight: 600;
-                                            color: root.busy ? white : Design.accent-ink;
+                                            color: root.busy ? Design.on-accent : Design.accent-ink;
                                             width: parent.width; height: parent.height;
                                             horizontal-alignment: center; vertical-alignment: center; }
                                     }
@@ -667,10 +671,10 @@ export component AppWindow inherits Window {
         }
     }
     if root.conflict-visible: Rectangle {
-        background: #0f172a66;
+        background: Design.scrim;
         TouchArea { }
         Surface { width: 700px; height: 360px; x: (parent.width - self.width) / 2; y: (parent.height - self.height) / 2;
-            background: Palette.background;
+            background: Design.card;
             VerticalLayout { padding: 24px; spacing: 13px;
                 Label { text: "解压遇到同名文件"; font-size: 22px; font-weight: 700; }
                 Rectangle { width: 48px; height: 3px; border-radius: 2px; background: Design.bar; }
@@ -690,21 +694,21 @@ export component AppWindow inherits Window {
     // 确认层画在冲突层之后：任务运行中收到关闭请求时（confirm-kind=3）它必须盖在冲突对话框之上，
     // 否则用户只能看到一张被压在下面的确认框。
     if root.confirm-kind != 0: Rectangle {
-        background: #0f172a66;
+        background: Design.scrim;
         TouchArea { }
         Surface { width: 620px; height: 335px; x: (parent.width - self.width) / 2; y: (parent.height - self.height) / 2;
-            background: Palette.background;
+            background: Design.card;
             VerticalLayout { padding: 24px; spacing: 14px;
-                Label { text: root.confirm-kind == 3 ? "停止任务并关闭" : "确认文件处理范围"; font-size: 22px; font-weight: 700; }
+                Label { text: root.confirm-kind == 3 ? "停止任务并关闭" : root.confirm-kind == 4 ? "恢复内置默认规则" : "确认文件处理范围"; font-size: 22px; font-weight: 700; }
                 Rectangle { width: 48px; height: 3px; border-radius: 2px; background: Design.bar; }
                 TextEdit { text: root.confirm-text; read-only: true; vertical-stretch: 1; }
-                // 关闭确认不处理目录文件，不需要“永久删除”那一句勾选，勾了也没有对应含义。
-                if root.confirm-kind != 3: CheckBox { text: "我已确认目录、规则及可能的永久删除行为"; checked <=> root.acknowledge; }
+                // 关闭确认与恢复默认不处理目录文件，不需要“永久删除”那一句勾选。
+                if root.confirm-kind != 3 && root.confirm-kind != 4: CheckBox { text: "我已确认目录、规则及可能的永久删除行为"; checked <=> root.acknowledge; }
                 HorizontalLayout { spacing: 10px;
                     Rectangle { horizontal-stretch: 1; background: transparent; }
                     Button { text: "返回检查"; clicked => { root.confirm-kind = 0; root.acknowledge = false; } }
-                    Button { text: root.confirm-kind == 3 ? "停止并关闭" : "确认"; primary: true;
-                        enabled: root.confirm-kind == 3 || root.acknowledge;
+                    Button { text: root.confirm-kind == 3 ? "停止并关闭" : root.confirm-kind == 4 ? "恢复默认" : "确认"; primary: true;
+                        enabled: root.confirm-kind == 3 || root.confirm-kind == 4 || root.acknowledge;
                         clicked => { root.confirmed(root.confirm-kind); root.confirm-kind = 0; root.acknowledge = false; } }
                 }
             }
