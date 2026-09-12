@@ -58,6 +58,25 @@ impl Recycler for MoveRecycle {fn recycle(&self,p:&Path)->Result<(),RecycleFailu
 #[test] fn classification_preserves_paths_and_is_idempotent(){let f=Fixture::new();f.write("folder/a.pdf",b"pdf",10);let mut cfg=base();cfg.classify=ClassifyMode::Extension;let task=f.plan(cfg.clone());f.apply(&task);assert!(f.root.join("PDF/folder/a.pdf").exists());let again=f.plan(cfg);assert_eq!(again.summary.planned_move,0);}
 #[test] fn flatten_classification_allocates_nonconflicting_names(){let f=Fixture::new();f.write("x/a.pdf",b"left",10);f.write("y/a.pdf",b"right",20);let mut cfg=base();cfg.classify=ClassifyMode::Extension;cfg.preserve_structure=false;let task=f.plan(cfg);f.apply(&task);assert!(f.root.join("PDF/a.pdf").exists());assert!(f.root.join("PDF/a (1).pdf").exists());}
 #[test] fn empty_directory_cleanup_is_bottom_up(){let f=Fixture::new();fs::create_dir_all(f.root.join("empty/nested")).unwrap();let mut cfg=base();cfg.clean_empty_dirs=true;let task=f.plan(cfg);f.apply(&task);assert!(!f.root.join("empty").exists());assert!(f.root.exists());}
+#[test] fn empty_directory_with_underscore_not_blocked_by_similar_name(){
+    // LIKE 的 `_` 是单字符通配：不转义时 my_dir/% 会匹配到 myXdir 下的文件。
+    let f=Fixture::new();
+    fs::create_dir_all(f.root.join("my_dir/nested_empty")).unwrap();
+    f.write("myXdir/file.txt",b"payload",10);
+    let mut cfg=base();cfg.clean_empty_dirs=true;
+    f.apply(&f.plan(cfg));
+    assert!(!f.root.join("my_dir").exists(),"含下划线的空目录必须能被清理");
+    assert!(f.root.join("myXdir/file.txt").exists(),"相似前缀目录里的文件不能被误伤");
+}
+#[test] fn empty_directory_with_percent_in_name_is_cleaned(){
+    let f=Fixture::new();
+    fs::create_dir_all(f.root.join("100%done")).unwrap();
+    f.write("100Xdone/file.txt",b"payload",10);
+    let mut cfg=base();cfg.clean_empty_dirs=true;
+    f.apply(&f.plan(cfg));
+    assert!(!f.root.join("100%done").exists());
+    assert!(f.root.join("100Xdone/file.txt").exists());
+}
 #[test] fn classification_empty_dirs_planned_in_same_pass(){
     let f=Fixture::new();
     f.write("folder/a.pdf",b"pdf",10);

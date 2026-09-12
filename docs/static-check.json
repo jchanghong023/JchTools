@@ -44,7 +44,7 @@
     {
       "name": "scope_and_delivery",
       "status": "PASS",
-      "details": "68 Rust test functions supplied, NOT executed; no todo!/unimplemented! in Rust implementation; no prebuilt executable asserted."
+      "details": "70 Rust test functions supplied, NOT executed; no todo!/unimplemented! in Rust implementation; no prebuilt executable asserted."
     }
   ]
 }

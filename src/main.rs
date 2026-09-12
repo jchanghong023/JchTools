@@ -365,7 +365,13 @@ fn run()->Result<()> {
             let mut dialog=rfd::FileDialog::new().set_file_name("整理报告.csv").add_filter("CSV",&["csv"]);
             if let Some(directory)=user_file_directory(){ dialog=dialog.set_directory(&directory); }
             if let Some(path)=dialog.save_file(){
-                async_work(sender.clone(),move||{Database::open(&task)?.export_csv(&path)?;Ok(Event::Notice(format!("已导出：{}",path.display())))});
+                async_work(sender.clone(),move||{
+                    // 系统保存对话框对已存在文件会再问一次“是否替换”；这里按用户确认覆盖，
+                    // 否则 create_new 必然失败，用户在对话框里点了替换也导不出去。
+                    if path.exists(){std::fs::remove_file(&path).context("无法覆盖已存在的导出文件")?;}
+                    Database::open(&task)?.export_csv(&path)?;
+                    Ok(Event::Notice(format!("已导出：{}",path.display())))
+                });
             }
         }});
     }

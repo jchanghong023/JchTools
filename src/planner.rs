@@ -4,6 +4,17 @@ use anyhow::{Context,Result};
 use rusqlite::{params, OptionalExtension};
 use std::path::{Path,PathBuf};
 
+/// 把相对路径转成 LIKE 前缀（匹配该目录的直接/间接子项），并转义 `%` `_` `\`。
+/// 目录名里常见下划线；不转义会把 `my_dir` 误匹配到 `myXdir`。
+fn like_children(rel: &str) -> String {
+    let mut escaped = String::with_capacity(rel.len() + 2);
+    for ch in rel.chars() {
+        if matches!(ch, '%' | '_' | '\\') { escaped.push('\\'); }
+        escaped.push(ch);
+    }
+    escaped.push_str("/%");
+    escaped
+}
 fn action(file: &FileRecord, kind: ActionKind, reason: &str, mode: DeleteMode) -> Action {
     Action { id: 0,kind,source:file.rel.clone(),target:None,reason:reason.into(),expected:Some(file.snapshot.clone()),
         keeper:None,hash:file.hash.clone(),mode,selected:true,state:"pending".into() }
@@ -167,10 +178,11 @@ fn under_path(path: &Path, prefix: &Path) -> bool {
 }
 fn target_will_be_free(job: &Job, path: &Path, rel: &str) -> Result<bool> {
     if !path.try_exists()? { return Ok(true); }
-    let deleting: bool = job.db.conn.query_row(
-        "SELECT EXISTS(SELECT 1 FROM actions WHERE source=?1 AND kind=?2 AND selected=1)",
-        params![rel,serde_json::to_string(&ActionKind::Delete)?],|r|r.get(0))?;
-    Ok(deleting)
+    // 被计划删除或移走的路径执行后会腾空，可以复用原名，不必生成 " (1)" 后缀。
+    let freeing: bool = job.db.conn.query_row(
+        "SELECT EXISTS(SELECT 1 FROM actions WHERE source=?1 AND kind IN (?2,?3) AND selected=1)",
+        params![rel,serde_json::to_string(&ActionKind::Delete)?,serde_json::to_string(&ActionKind::Move)?],|r|r.get(0))?;
+    Ok(freeing)
 }
 fn moves(job: &mut Job) -> Result<()> {
     let categories = rules::parse_categories(&job.config.custom_categories)?;
@@ -298,19 +310,19 @@ fn empty_directories(job: &mut Job) -> Result<()> {
             cursor = seq; job.context.control.checkpoint()?;
             // 执行后仍会留在该目录下的文件：没有选中的删除（会消失）或移动（会离开）
             let has_file: i64 = job.db.conn.query_row(
-                "SELECT COUNT(1) FROM files WHERE rel LIKE ?1 AND NOT EXISTS (\
+                "SELECT COUNT(1) FROM files WHERE rel LIKE ?1 ESCAPE '\\' AND NOT EXISTS (\
                  SELECT 1 FROM actions WHERE kind IN (?2,?3) AND selected=1 AND state='pending' AND source=files.rel)",
-                params![format!("{rel}/%"), move_kind, delete_kind],|r|r.get(0))?;
+                params![like_children(&rel), move_kind, delete_kind],|r|r.get(0))?;
             if has_file>0 { continue; }
             // 隐藏/系统/排除文件不会入库，但仍占目录；有这类内容就不能当作空目录。
             if has_unscanned_content(job,&rel)? { continue; }
             // 子目录是否都已判定会为空
             let child_total: i64 = job.db.conn.query_row(
-                "SELECT COUNT(1) FROM directories WHERE rel LIKE ?1",
-                params![format!("{rel}/%")],|r|r.get(0))?;
+                "SELECT COUNT(1) FROM directories WHERE rel LIKE ?1 ESCAPE '\\'",
+                params![like_children(&rel)],|r|r.get(0))?;
             let child_empty: i64 = job.db.conn.query_row(
-                "SELECT COUNT(1) FROM empty_will WHERE rel LIKE ?1",
-                params![format!("{rel}/%")],|r|r.get(0))?;
+                "SELECT COUNT(1) FROM empty_will WHERE rel LIKE ?1 ESCAPE '\\'",
+                params![like_children(&rel)],|r|r.get(0))?;
             if child_total>child_empty { continue; }
             job.db.conn.execute("INSERT OR IGNORE INTO empty_will(rel) VALUES(?1)",[&rel])?;
             job.db.add_action(&Action { id:0,kind:ActionKind::EmptyDirectory,source:rel,target:None,
