@@ -25,6 +25,9 @@ fn make_fixture()->tempfile::TempDir {
 
 #[test]
 fn plan_execution_confirmation_flow_runs_end_to_end(){
+    // CI runner 与无 GPU 机器没有 OpenGL，默认 femtovg 初始化直接失败；
+    // 软件渲染器不依赖 GPU，事件循环、定时器与回调路径仍与生产完全一致。
+    std::env::set_var("SLINT_BACKEND","winit-software");
     let fixture=make_fixture();
     let data=fixture.path().join("data").to_string_lossy().to_string();
     let state_dir:PathBuf=fixture.path().join("state");
