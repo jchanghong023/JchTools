@@ -1,4 +1,5 @@
-//! The organizer engine is independent of the GUI. No network access is used at runtime.
+//! The organizer engine is independent of the GUI. 整理引擎默认不联网；
+//! 代理/网络工具页在用户点击时可发起本地探测与公网回显查询。
 pub mod archive;
 pub mod config;
 pub mod control;

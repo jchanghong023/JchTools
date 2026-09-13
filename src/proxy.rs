@@ -1,6 +1,7 @@
 //! 本机代理/网络身份只读检测与命令参考。不修改系统设置、不自动执行设置命令。
 //! 除环境变量与注册表外，网卡 IP/MAC 经本地 PowerShell 读取；外网 IP 在用户刷新状态页时向公共回显服务查询（只读、不上传本机数据）。
 use std::collections::HashMap;
+use std::time::Duration;
 
 pub const ENV_PROXY_NAMES: [&str; 4] = ["HTTP_PROXY", "HTTPS_PROXY", "ALL_PROXY", "NO_PROXY"];
 /// 代理特征端口（不含 8080/8888：本地开发服务器最常用，避免大量误报）。
@@ -221,6 +222,7 @@ fn template_command_tips() -> Vec<CommandTip> {
 }
 
 /// 从环境快照收集代理变量。Windows 按大小写不敏感合并；Unix 大小写形式各自成行。
+/// 展示前对 URL 中的 `user:pass@` 做脱敏，避免凭据明文进入界面/日志。
 pub fn collect_env_vars(
     vars: &HashMap<String, String>,
     case_insensitive: bool,
@@ -234,25 +236,92 @@ pub fn collect_env_vars(
         for name in ENV_PROXY_NAMES {
             rows.push(EnvVarStatus {
                 name: name.to_string(),
-                value: upper.get(name).map(|s| (*s).clone()),
+                value: upper.get(name).map(|s| mask_proxy_credentials(s)),
             });
         }
     } else {
         for name in ENV_PROXY_NAMES {
             rows.push(EnvVarStatus {
                 name: name.to_string(),
-                value: vars.get(name).cloned(),
+                value: vars.get(name).map(|s| mask_proxy_credentials(s)),
             });
             let lower = name.to_ascii_lowercase();
             if let Some(value) = vars.get(&lower) {
                 rows.push(EnvVarStatus {
                     name: lower,
-                    value: Some(value.clone()),
+                    value: Some(mask_proxy_credentials(value)),
                 });
             }
         }
     }
     rows
+}
+
+/// 展示用脱敏：把代理 URL 中的 `user:pass@` 替换为 `user:***@`。
+/// 覆盖三种常见格式：
+/// 1. `scheme://user:pass@host[:port][/path]`（标准 URL）
+/// 2. 无 scheme：`user:pass@host:port`（curl 等工具接受）
+/// 3. WinINET 多协议串：`http=user:pass@proxy:8080;https=proxy:8080`（按 `;` 拆分后对每段单独脱敏）
+fn mask_proxy_credentials(value: &str) -> String {
+    // WinINET 多段：`key=value;key=value`。只要含 `;` 且某段带 `=`，就按段处理。
+    if value.contains(';') && value.contains('=') {
+        return value
+            .split(';')
+            .map(|seg| mask_single_proxy_segment(seg.trim()))
+            .collect::<Vec<_>>()
+            .join(";");
+    }
+    mask_single_proxy_segment(value)
+}
+
+/// 对单段代理字符串脱敏（含 scheme 或无 scheme）。
+fn mask_single_proxy_segment(value: &str) -> String {
+    // 有 scheme：scheme://user:pass@host...
+    if let Some(scheme_end) = value.find("://") {
+        let authority_start = scheme_end + 3;
+        let authority_end = value[authority_start..]
+            .find(|c| matches!(c, '/' | '?' | '#'))
+            .map(|i| authority_start + i)
+            .unwrap_or(value.len());
+        let authority = &value[authority_start..authority_end];
+        let Some(at) = authority.rfind('@') else {
+            return value.to_string();
+        };
+        let userinfo = &authority[..at];
+        let Some(colon) = userinfo.find(':') else {
+            // 仅 user@host、无密码，无需脱敏。
+            return value.to_string();
+        };
+        let user = &userinfo[..colon];
+        return format!(
+            "{}{}:***@{}",
+            &value[..authority_start],
+            user,
+            &value[authority_start + at + 1..]
+        );
+    }
+
+    // 无 scheme：识别 `user:pass@host` 模式。
+    // 与有 scheme 分支一致按最后一个 `@` 切分，密码里再出现 `@`（如 `u:p@ss@host`）也不会残留明文；
+    // 要求 `@` 前有 `:`（user:pass），`@` 后非空（host）。
+    // 例如：`user:pass@127.0.0.1:7890`、`u:p@proxy:8080`。
+    if let Some(at) = value.rfind('@') {
+        if at == 0 {
+            return value.to_string();
+        }
+        let userinfo = &value[..at];
+        // 必须有 `:` 才是带密码的形式；同时排除端口被误判（如 `127.0.0.1:7890` 无 @ 本就不会进来）。
+        let Some(colon) = userinfo.find(':') else {
+            return value.to_string();
+        };
+        let user = &userinfo[..colon];
+        if user.is_empty() {
+            return value.to_string();
+        }
+        return format!("{}:***@{}", user, &value[at + 1..]);
+    }
+
+    value.to_string()
 }
 
 fn process_stem(name: &str) -> String {
@@ -477,10 +546,11 @@ pub fn normalize_public_ip(raw: &str) -> Result<String, String> {
 
 fn is_plausible_ip(token: &str) -> bool {
     if token.contains(':') {
-        // IPv6：至少两组冒号分隔的十六进制段
-        let parts: Vec<&str> = token.split(':').filter(|p| !p.is_empty()).collect();
-        return parts.len() >= 2
-            && parts.iter().all(|p| p.chars().all(|c| c.is_ascii_hexdigit()) && p.len() <= 4);
+        // IPv6：必须能被标准解析器接受，避免过宽的启发式误判。
+        return token.parse::<std::net::Ipv6Addr>().is_ok();
+    }
+    if token.parse::<std::net::Ipv4Addr>().is_ok() {
+        return true;
     }
     let parts: Vec<&str> = token.split('.').collect();
     if parts.len() != 4 {
@@ -619,56 +689,57 @@ fn decode_oem(bytes: &[u8]) -> String {
     String::from_utf8_lossy(bytes).into_owned()
 }
 
+/// 外部查询类命令的宿主总超时（PowerShell/tasklist/netstat/netsh）。
+const EXTERNAL_CMD_TIMEOUT: Duration = Duration::from_secs(20);
+
 /// 子进程约定：不闪控制台窗口；OEM 代码页解码（PowerShell 强制 UTF-8）。
+/// `program` 应为 [`crate::process::system_tool`] 给出的绝对路径。
 #[cfg(windows)]
-fn run_capture_oem(program: &str, args: &[&str]) -> anyhow::Result<String> {
+fn run_capture_oem(program: &std::path::Path, args: &[&str]) -> anyhow::Result<String> {
     use std::os::windows::process::CommandExt;
-    let output = std::process::Command::new(program)
+    let mut command = std::process::Command::new(program);
+    command
         .args(args)
-        .creation_flags(0x0800_0000) // CREATE_NO_WINDOW
-        .stdin(std::process::Stdio::null())
-        .output()
-        .map_err(|e| anyhow::anyhow!("无法启动 {program}：{e}"))?;
+        .creation_flags(0x0800_0000); // CREATE_NO_WINDOW
+    let output = crate::process::run_with_timeout(&mut command, EXTERNAL_CMD_TIMEOUT)?;
+    let display = program.display();
     if !output.status.success() && output.stdout.is_empty() {
         let err = decode_oem(&output.stderr);
-        anyhow::bail!("{program} 退出码 {:?}：{}", output.status.code(), err.trim());
+        anyhow::bail!("{display} 退出码 {:?}：{}", output.status.code(), err.trim());
     }
     Ok(decode_oem(&output.stdout))
 }
 
 #[cfg(not(windows))]
-fn run_capture_oem(program: &str, args: &[&str]) -> anyhow::Result<String> {
-    let output = std::process::Command::new(program)
-        .args(args)
-        .stdin(std::process::Stdio::null())
-        .output()
-        .map_err(|e| anyhow::anyhow!("无法启动 {program}：{e}"))?;
+fn run_capture_oem(program: &std::path::Path, args: &[&str]) -> anyhow::Result<String> {
+    let mut command = std::process::Command::new(program);
+    command.args(args);
+    let output = crate::process::run_with_timeout(&mut command, EXTERNAL_CMD_TIMEOUT)?;
+    let display = program.display();
     if !output.status.success() && output.stdout.is_empty() {
-        anyhow::bail!("{program} 退出码 {:?}", output.status.code());
+        anyhow::bail!("{display} 退出码 {:?}", output.status.code());
     }
     Ok(decode_oem(&output.stdout))
 }
 
-/// PowerShell 统一强制 UTF-8 输出。
+/// PowerShell 统一强制 UTF-8 输出。使用 System32 下绝对路径并带宿主总超时。
 #[cfg(windows)]
 fn run_powershell_utf8(script: &str) -> anyhow::Result<String> {
     use std::os::windows::process::CommandExt;
-    let command = format!(
-        "[Console]::OutputEncoding=[Text.Encoding]::UTF8; {script}"
-    );
-    let output = std::process::Command::new("powershell")
+    let command_text = format!("[Console]::OutputEncoding=[Text.Encoding]::UTF8; {script}");
+    let powershell = crate::process::system_tool(r"WindowsPowerShell\v1.0\powershell.exe");
+    let mut command = std::process::Command::new(&powershell);
+    command
         .args([
             "-NoProfile",
             "-NonInteractive",
             "-ExecutionPolicy",
             "Bypass",
             "-Command",
-            &command,
+            &command_text,
         ])
-        .creation_flags(0x0800_0000)
-        .stdin(std::process::Stdio::null())
-        .output()
-        .map_err(|e| anyhow::anyhow!("无法启动 PowerShell：{e}"))?;
+        .creation_flags(0x0800_0000);
+    let output = crate::process::run_with_timeout(&mut command, EXTERNAL_CMD_TIMEOUT)?;
     if !output.status.success() && output.stdout.is_empty() {
         let err = String::from_utf8_lossy(&output.stderr);
         anyhow::bail!("PowerShell 退出码 {:?}：{}", output.status.code(), err.trim());
@@ -731,7 +802,7 @@ fn read_registry_dword(name: &str) -> Option<u32> {
 #[cfg(windows)]
 fn read_system_proxy() -> Option<SystemProxyStatus> {
     let enabled = read_registry_dword("ProxyEnable").unwrap_or(0) != 0;
-    let server = read_registry_string("ProxyServer").unwrap_or_default();
+    let server = mask_proxy_credentials(&read_registry_string("ProxyServer").unwrap_or_default());
     let override_list = read_registry_string("ProxyOverride").unwrap_or_default();
     Some(SystemProxyStatus {
         enabled,
@@ -777,8 +848,14 @@ pub fn detect_with_env(vars: &HashMap<String, String>) -> ProxySnapshot {
 
     #[cfg(windows)]
     {
-        let tasklist = run_capture_oem("tasklist", &["/fo", "csv", "/nh"]);
-        let netstat = run_capture_oem("netstat", &["-ano", "-p", "tcp"]);
+        let tasklist = run_capture_oem(
+            &crate::process::system_tool("tasklist.exe"),
+            &["/fo", "csv", "/nh"],
+        );
+        let netstat = run_capture_oem(
+            &crate::process::system_tool("netstat.exe"),
+            &["-ano", "-p", "tcp"],
+        );
         let processes = match &tasklist {
             Ok(text) => parse_tasklist_csv(text),
             Err(e) => {
@@ -807,8 +884,10 @@ pub fn detect_with_env(vars: &HashMap<String, String>) -> ProxySnapshot {
                     if_indexes = indexes;
                 }
                 Err(e) => {
-                    if let Ok(netsh) = run_capture_oem("netsh", &["interface", "show", "interface"])
-                    {
+                    if let Ok(netsh) = run_capture_oem(
+                        &crate::process::system_tool("netsh.exe"),
+                        &["interface", "show", "interface"],
+                    ) {
                         snap.adapters = parse_netsh_interfaces(&netsh);
                         if snap.adapters.is_empty() {
                             snap.notes.push(format!("网卡 JSON 解析失败且 netsh 回落无结果：{e}"));
@@ -819,7 +898,10 @@ pub fn detect_with_env(vars: &HashMap<String, String>) -> ProxySnapshot {
                 }
             },
             Err(e) => {
-                if let Ok(netsh) = run_capture_oem("netsh", &["interface", "show", "interface"]) {
+                if let Ok(netsh) = run_capture_oem(
+                    &crate::process::system_tool("netsh.exe"),
+                    &["interface", "show", "interface"],
+                ) {
                     snap.adapters = parse_netsh_interfaces(&netsh);
                     if snap.adapters.is_empty() {
                         snap.notes.push(format!("Get-NetAdapter 失败且 netsh 回落无结果：{e}"));
@@ -1070,6 +1152,75 @@ mod tests {
         assert_eq!(normalize_public_ip("  2001:db8::1  ").unwrap(), "2001:db8::1");
         assert!(normalize_public_ip("<html>error</html>").is_err());
         assert!(normalize_public_ip("").is_err());
+        // IPv6 启发式不得过宽：无冒号段、乱拼十六进制都应拒绝。
+        assert!(normalize_public_ip("aa:bb").is_err());
+        assert!(normalize_public_ip("zzzz::1").is_err());
+    }
+
+    #[test]
+    fn mask_proxy_credentials_redacts_password_only() {
+        assert_eq!(
+            mask_proxy_credentials("http://alice:s3cret@127.0.0.1:7890"),
+            "http://alice:***@127.0.0.1:7890"
+        );
+        // 密码中含 @：按最后一个 @ 切分 authority，只脱敏冒号后到末尾 @ 之间的部分。
+        assert_eq!(
+            mask_proxy_credentials("socks5://user:p@ss@10.0.0.1:1080"),
+            "socks5://user:***@10.0.0.1:1080"
+        );
+        // 无密码：原样返回。
+        assert_eq!(mask_proxy_credentials("http://user@host:1"), "http://user@host:1");
+        assert_eq!(mask_proxy_credentials("http://127.0.0.1:7890"), "http://127.0.0.1:7890");
+        let rows = collect_env_vars(
+            &map(&[("HTTP_PROXY", "http://u:pw@proxy.example:8080")]),
+            true,
+        );
+        assert_eq!(rows[0].value.as_deref(), Some("http://u:***@proxy.example:8080"));
+    }
+
+    #[test]
+    fn mask_proxy_credentials_covers_no_scheme_format() {
+        // 无 scheme：curl 等工具接受 `user:pass@host:port`。
+        assert_eq!(
+            mask_proxy_credentials("user:pass@127.0.0.1:7890"),
+            "user:***@127.0.0.1:7890"
+        );
+        // 密码里含 @：与有 scheme 分支一致按最后一个 @ 切分，不留密码残段。
+        assert_eq!(
+            mask_proxy_credentials("user:p@ss@10.0.0.1:1080"),
+            "user:***@10.0.0.1:1080"
+        );
+        assert_eq!(
+            mask_proxy_credentials("alice:s3cret@proxy.example:8080"),
+            "alice:***@proxy.example:8080"
+        );
+        // 无密码的无 scheme 形式不脱敏。
+        assert_eq!(mask_proxy_credentials("user@127.0.0.1:7890"), "user@127.0.0.1:7890");
+        // 纯 host:port 无 @，不脱敏。
+        assert_eq!(mask_proxy_credentials("127.0.0.1:7890"), "127.0.0.1:7890");
+    }
+
+    #[test]
+    fn mask_proxy_credentials_covers_winet_multi_protocol() {
+        // WinINET 多协议串：`;` 分隔的 `key=value`，每段单独脱敏。
+        assert_eq!(
+            mask_proxy_credentials("http=user:pass@proxy:8080;https=proxy:8080"),
+            "http=user:***@proxy:8080;https=proxy:8080"
+        );
+        assert_eq!(
+            mask_proxy_credentials("http=u:p@127.0.0.1:7890;https=u:p@127.0.0.1:7890;ftp=u:p@127.0.0.1:7890"),
+            "http=u:***@127.0.0.1:7890;https=u:***@127.0.0.1:7890;ftp=u:***@127.0.0.1:7890"
+        );
+        // 只有一段带凭据、其余为纯 host:port。
+        assert_eq!(
+            mask_proxy_credentials("http=alice:s3cret@proxy:8080;https=proxy.example:8443"),
+            "http=alice:***@proxy:8080;https=proxy.example:8443"
+        );
+        // 混合：某段带 scheme。
+        assert_eq!(
+            mask_proxy_credentials("http=user:pass@proxy:8080;https=http://user:pass@proxy:8080"),
+            "http=user:***@proxy:8080;https=http://user:***@proxy:8080"
+        );
     }
 
     #[test]

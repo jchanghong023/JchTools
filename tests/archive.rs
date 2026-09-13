@@ -1,6 +1,8 @@
 //! Real-engine tests; intentionally ignored without an explicit JCHTOOLS_TEST_7ZIP path.
 //! package-windows.ps1 runs these after downloading and verifying the bundled engine.
-use jchtools::{config::*,control::Context,engine,platform::{RecycleFailure,Recycler}};
+mod common;
+use common::FailRecycle;
+use jchtools::{config::*,control::Context,engine};
 use std::{fs,path::{Path,PathBuf},process::Command,sync::Arc};
 struct ArchiveFixture { _tmp:tempfile::TempDir, root:PathBuf, input:PathBuf, state:PathBuf, engine:PathBuf }
 impl ArchiveFixture {
@@ -11,8 +13,6 @@ impl ArchiveFixture {
     fn run(&self,cfg:Config)->engine::TaskResult {engine::prepare_at(&self.root,cfg,Context::default(),&self.state,Some(&self.engine)).unwrap()}
     fn apply(&self,task:&engine::TaskResult)->engine::TaskResult {engine::apply_with(&task.directory,Context::default(),Arc::new(FailRecycle)).unwrap()}
 }
-struct FailRecycle;
-impl Recycler for FailRecycle {fn recycle(&self,_:&Path)->Result<(),RecycleFailure>{Err(RecycleFailure::Failed("mock capacity full".into()))}}
 fn config()->Config {Config {reserve_gib:0,global_delete:DeleteMode::Permanent,archive_delete:DeleteChoice::Keep,
     extract_conflict:ConflictPolicy::KeepBoth,max_ratio:0,..Config::default()}}
 #[test] #[ignore = "Requires explicitly provided real 7-Zip engine"]

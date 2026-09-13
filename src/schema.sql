@@ -8,7 +8,6 @@ CREATE TABLE IF NOT EXISTS files (
 CREATE INDEX IF NOT EXISTS idx_files_size ON files(size,id);
 CREATE INDEX IF NOT EXISTS idx_files_pre ON files(size,prehash,id);
 CREATE INDEX IF NOT EXISTS idx_files_hash ON files(hash,id);
-CREATE INDEX IF NOT EXISTS idx_files_name ON files(name,size,id);
 CREATE TABLE IF NOT EXISTS directories (rel TEXT PRIMARY KEY, name TEXT NOT NULL, depth INTEGER NOT NULL);
 CREATE INDEX IF NOT EXISTS idx_dir_name ON directories(name,depth,rel);
 CREATE TABLE IF NOT EXISTS actions (
@@ -33,3 +32,5 @@ CREATE TABLE IF NOT EXISTS archive_members (
 CREATE TABLE IF NOT EXISTS protected_originals (rel TEXT PRIMARY KEY);
 CREATE INDEX IF NOT EXISTS idx_actions_source_kind ON actions(source,kind);
 CREATE INDEX IF NOT EXISTS idx_files_name_size ON files(name,size,id);
+CREATE INDEX IF NOT EXISTS idx_files_active ON files(active,id);
+CREATE INDEX IF NOT EXISTS idx_actions_state ON actions(state,id);

@@ -332,6 +332,20 @@ fn empty_directories(job: &mut Job) -> Result<()> {
          CREATE TEMP TABLE empty_will (rel TEXT PRIMARY KEY);"))?;
     job.db.conn.execute_batch(
         "CREATE TEMP TABLE empty_order AS SELECT ROW_NUMBER() OVER(ORDER BY depth DESC,rel) seq,rel FROM directories;")?;
+    // stay_parents 只覆盖「无 Delete/Move、执行后仍在原地」的文件。同目录改名
+    // （A/x → A/y）与迁入新建子目录（A/x → A/分类/x，分类在规划时可能尚未入库、
+    // 不在 directories 表里）会让 source 带 Move 而离开 stay_parents，若只看
+    // stay_parents 会把仍被占用的源目录误标进 empty_will。预取全部待执行 Move
+    // 的目标：凡落点在该目录（或其子树）下的，执行后该目录仍非空。
+    let mut move_targets: Vec<String> = {
+        let mut stmt = job.db.conn.prepare(
+            "SELECT target FROM actions WHERE kind=?1 AND selected=1 AND state='pending' AND target IS NOT NULL")?;
+        let rows = stmt.query_map([&move_kind], |r| r.get::<_,String>(0))?;
+        rows.collect::<rusqlite::Result<Vec<_>>>()?
+    };
+    // 相同目标只比一次；后续每个目录做前缀判断即可。
+    move_targets.sort_unstable();
+    move_targets.dedup();
     loop {
         let batch = {
             let mut statement = job.db.conn.prepare("SELECT seq,rel FROM empty_order WHERE seq>?1 ORDER BY seq LIMIT 256")?;
@@ -341,6 +355,18 @@ fn empty_directories(job: &mut Job) -> Result<()> {
         if batch.is_empty() { break; }
         for (seq,rel) in batch {
             cursor = seq; job.context.control.checkpoint()?;
+            // 执行后该目录（含子树）将接收被 Move 进来的内容时，不能按空目录处理。
+            // Windows 目录不区分大小写，前缀比较忽略 ASCII 大小写（与 under_path 一致）。
+            let prefix = format!("{rel}/");
+            let receives_move = move_targets.iter().any(|target| {
+                if target.len() < prefix.len() { return false; }
+                if cfg!(windows) {
+                    target.as_bytes()[..prefix.len()].eq_ignore_ascii_case(prefix.as_bytes())
+                } else {
+                    target.starts_with(&prefix)
+                }
+            });
+            if receives_move { continue; }
             // 执行后会留在该目录（含其子树）里的文件：深层留驻文件会让对应子目录进不了
             // empty_will，在这里只需检查直接子文件即可得到相同结论。
             let has_file: i64 = job.db.conn.query_row(

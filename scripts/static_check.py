@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Lightweight source-structure checks, NOT rustc, cargo check, or application tests.
 Uses Python stdlib; Pygments, if present, adds Rust lexical delimiter checking.
-All writes are confined to docs/static-check.json under this source tree.
+All writes are confined to .tmp/static-check.json under this source tree.
 """
 from __future__ import annotations
 import json, re, shutil, sqlite3, subprocess, sys, tomllib, xml.etree.ElementTree as ET
@@ -73,9 +73,9 @@ def rust_lexical():
         from pygments.lexers import RustLexer
         from pygments.token import Comment, Literal
     except ImportError:
-        return 'SKIPPED: Pygments unavailable; no Rust parser or compiler was invoked.'
+        raise Skipped('Pygments unavailable; Rust lexical delimiter check was not run.') from None
     count=0
-    for path in [ROOT/'build.rs',*ROOT.glob('src/**/*.rs'),*ROOT.glob('tests/*.rs')]:
+    for path in [ROOT/'build.rs',*ROOT.glob('src/**/*.rs'),*ROOT.glob('tests/**/*.rs')]:
         stack=[]
         for token,text in lex(read_text(path),RustLexer()):
             if token in Comment or token in Literal.String: continue
@@ -98,7 +98,7 @@ def sql_syntax():
         CREATE TEMP TABLE hash_candidates(id INTEGER PRIMARY KEY);''')
     file_columns='id,rel,name,normal,size,mtime,identity,links,hash,cleanable'
     statements=set()
-    for path in ROOT.glob('src/*.rs'):
+    for path in ROOT.glob('src/**/*.rs'):
         for match in re.finditer(r'"((?:[^"\\]|\\.)*)"',read_text(path)):
             raw=match.group(1)
             if not re.match(r'^(SELECT|UPDATE|INSERT|DELETE)\b',raw): continue
@@ -124,12 +124,14 @@ def scope_and_delivery():
     assert all((ROOT/p).is_file() for p in required)
     for path in ROOT.glob('src/**/*.rs'):
         text=read_text(path);assert 'todo!(' not in text and 'unimplemented!(' not in text,str(path)
-    tests=sum(len(re.findall(r'#\[test\]',read_text(p))) for p in ROOT.glob('tests/*.rs'))
+    tests=sum(len(re.findall(r'#\[test\]',read_text(p))) for p in ROOT.glob('tests/**/*.rs'))
     return f'{tests} Rust test functions supplied, NOT executed; no todo!/unimplemented! in Rust implementation; no prebuilt executable asserted.'
 for name,fn in [('manifests',manifests),('config_schema',config_schema),('ui_callbacks',ui_callbacks),('rust_lexical',rust_lexical),('sql_syntax',sql_syntax),('shell_syntax',shell_syntax),('scope_and_delivery',scope_and_delivery)]:check(name,fn)
 report={'kind':'lightweight static source checks only','platform':sys.platform,'python':sys.version.split()[0],
     'rustc':shutil.which('rustc'),'cargo':shutil.which('cargo'),'powershell':shutil.which('pwsh'),
     'cargo_check':'NOT RUN','cargo_test':'NOT RUN','windows_runtime':'NOT RUN','real_7zip_tests':'NOT RUN','multi_tb_benchmark':'NOT RUN','checks':checks}
-(ROOT/'docs/static-check.json').write_text(json.dumps(report,ensure_ascii=False,indent=2)+'\n',newline='\n')
+report_dir=ROOT/'.tmp'
+report_dir.mkdir(parents=True,exist_ok=True)
+(report_dir/'static-check.json').write_text(json.dumps(report,ensure_ascii=False,indent=2)+'\n',newline='\n')
 for row in checks: print(row['status'],row['name'],row['details'])
 sys.exit(any(c['status']=='FAIL' for c in checks))

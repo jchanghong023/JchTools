@@ -4,7 +4,7 @@
 The corpus is regenerated from scratch every run; point it at a dedicated directory
 (default D:\\testzip) that contains nothing you want to keep. Usage:
 
-    python scripts/make-testdata.py [--destination D:\\testzip]
+    python scripts/make-testdata.py [--destination D:\\testzip] [--force]
 
 Layout and expected behaviour of every case are written to `_测试说明.md` inside
 the destination, so the person testing does not need to read this script.
@@ -32,17 +32,43 @@ PAYLOAD = b"JchTools duplicate payload 2026-09-12\n" * 4
 
 
 def force_remove_tree(path: Path) -> None:
-    """删除目录树，先清掉只读属性（git 对象文件是只读的，Windows 上直接删会拒绝访问）。"""
+    """删除目录树，先清掉只读属性（git 对象文件是只读的，Windows 上直接删会拒绝访问）。
+
+    删除失败的路径会被收集并打印；清理后目录若仍存在也视为失败，避免在残留内容上重建。
+    """
     import stat
+
+    failed: list[str] = []
 
     def on_error(function, target, _error):
         try:
             os.chmod(target, stat.S_IWRITE)
             function(target)
-        except OSError:
-            pass
+        except OSError as exc:
+            failed.append(f"{target}（{exc}）")
 
     shutil.rmtree(path, onerror=on_error)
+    if failed:
+        print(f"清理失败：以下 {len(failed)} 个路径未能删除：", file=sys.stderr)
+        for item in failed:
+            print(f"  {item}", file=sys.stderr)
+        raise SystemExit(f"清理未完成，已中止以免在残留目录上重建测试数据：{path}")
+    if path.exists():
+        raise SystemExit(f"清理后目录仍存在（可能有残留）：{path}")
+
+
+def measure_tree(root: Path) -> tuple[int, int]:
+    """统计目录内文件数量与总字节数，用于清空前摘要。"""
+    count = 0
+    size = 0
+    for dirpath, _dirnames, filenames in os.walk(root):
+        for name in filenames:
+            count += 1
+            try:
+                size += os.stat(os.path.join(dirpath, name)).st_size
+            except OSError:
+                pass
+    return count, size
 
 
 def seven_zip() -> Path:
@@ -342,7 +368,10 @@ def initialise_git(root: Path, log: list[str]) -> None:
     (root / "恢复.ps1").write_text(RESTORE_SCRIPT, encoding="utf-8-sig", newline="\n")
     run(["git", "init"], cwd=root)
     run(["git", "add", "-A"], cwd=root)
-    run(["git", "-c", "core.autocrlf=false", "commit", "-q", "-m",
+    # 内联身份提交：不依赖机器上全局/系统 git user.email / user.name 配置。
+    run(["git", "-c", "core.autocrlf=false",
+         "-c", "user.email=test@local", "-c", "user.name=testdata",
+         "commit", "-q", "-m",
          "test corpus baseline: 16 groups of generated JchTools test data"], cwd=root)
     log.append("| `.git` + `恢复.ps1` | 生成时建立的 git 基线（需 `--git`） | 整理跑完后执行 `恢复.ps1` 即可回到初始状态：`git checkout -- .` 恢复被删除/移动的文件、`git clean -fd` 清掉新文件，并补回隐藏/系统属性与空目录；`.git/**` 默认在排除规则里，不会被整理 |")
 
@@ -402,31 +431,107 @@ def build_readme(root: Path, log: list[str], seven: Path, git: bool) -> None:
     root.joinpath("_测试说明.md").write_text("\n".join(text) + "\n", encoding="utf-8")
 
 
+def _is_drive_alias(resolved: Path) -> bool:
+    """Windows 下检测盘符是否为 subst/网络映射别名；真实本地卷返回 False，非 Windows 恒 False。
+
+    resolve() 不会把映射盘符解析回真实目标（subst X: C:\\Users\\... 会原样保留 X:\\），
+    主目录检查对这类路径全部失效，只能用 QueryDosDeviceW 看真实设备名：
+    真实本地卷是 \\Device\\HarddiskVolumeN，subst 映射是 \\??\\C:\\...，
+    网络映射是 \\Device\\LanmanRedirector\\...；只有真实本地卷放行。
+    """
+    if os.name != "nt":
+        return False
+    anchor = resolved.anchor
+    if len(anchor) < 2 or anchor[1] != ":":
+        return False  # UNC（\\\\server\\...）与无盘符路径不走此检查
+    try:
+        import ctypes
+
+        buffer = ctypes.create_unicode_buffer(1024)
+        # 查询失败（含盘符不存在）按可疑处理，宁可拒绝。
+        if ctypes.windll.kernel32.QueryDosDeviceW(ctypes.c_wchar_p(anchor[:2]), buffer, 1024) == 0:
+            return True
+        return not buffer.value.startswith("\\Device\\HarddiskVolume")
+    except Exception:
+        return True
+
+
 def guard_destination(root: Path) -> None:
-    """清空不可逆：拒绝盘符根、用户主目录，以及会波及本仓库（.tmp 之外）的目标。"""
+    """清空不可逆：拒绝盘符根、用户主目录、系统目录，以及会波及本仓库（.tmp 之外）的目标。"""
+    # 扩展路径前缀（\\?\ 与 \\.\）不会被 resolve() 规范化，会让下面的全部检查失效，直接拒绝。
+    raw = str(root.expanduser())
+    if raw.startswith("\\\\?\\") or raw.startswith("\\\\.\\"):
+        raise SystemExit(f"不支持扩展路径前缀（\\\\?\\ / \\\\.\\）：{root}")
     resolved = root.expanduser().resolve()
+    if _is_drive_alias(resolved):
+        raise SystemExit(f"拒绝清空映射/别名盘符（subst 或网络映射）：{resolved}")
     if resolved == resolved.parent:
         raise SystemExit(f"拒绝清空盘符根：{resolved}")
     home = Path.home().resolve()
-    if resolved == home or resolved in home.parents:
-        raise SystemExit(f"拒绝清空用户主目录或其上级目录：{resolved}")
+    # home 本身、home 的上级（如 C:\Users）与 home 的下级（如桌面/文档）都在清空波及
+    # 用户真实数据的范围内，一并拒绝；测试集只应放在专门的测试目录。
+    if resolved == home or resolved in home.parents or home in resolved.parents:
+        raise SystemExit(f"拒绝清空用户主目录及其上级/下级目录：{resolved}")
     repo = Path(__file__).resolve().parent.parent
     if resolved == repo or resolved in repo.parents:
         raise SystemExit(f"拒绝清空仓库或其上级目录：{resolved}")
     if repo in resolved.parents and repo / ".tmp" not in (resolved, *resolved.parents):
         raise SystemExit(f"仓库内只允许把测试数据放到 .tmp/ 下：{resolved}")
+    # 系统目录黑名单：SystemRoot、ProgramData、Program Files 系列、Users\Public，
+    # 以及路径中任何名为 Windows（含 Windows.old）或以 Program Files 开头的目录。
+    system_root = Path(os.environ.get("SystemRoot", r"C:\Windows")).resolve()
+    if resolved == system_root or system_root in resolved.parents:
+        raise SystemExit(f"拒绝清空 Windows 系统目录（SystemRoot）：{resolved}")
+    public = Path(os.environ.get("PUBLIC", r"C:\Users\Public")).resolve()
+    if resolved == public or public in resolved.parents:
+        raise SystemExit(f"拒绝清空公共用户目录（Users\\Public）：{resolved}")
+    program_data = Path(os.environ.get("ProgramData", r"C:\ProgramData")).resolve()
+    if resolved == program_data or program_data in resolved.parents:
+        raise SystemExit(f"拒绝清空 ProgramData 目录：{resolved}")
+    # 其他用户主目录：Users 下除当前用户外的任何账户目录。
+    users_root = home.parent
+    if resolved != home and users_root in resolved.parents:
+        other_user = resolved.relative_to(users_root).parts[0]
+        if other_user and other_user != home.name:
+            raise SystemExit(f"拒绝清空其他用户目录（{other_user}）：{resolved}")
+    for part in (resolved, *resolved.parents):
+        # resolve() 会按磁盘实际大小写规范化目录名，比较必须忽略大小写。
+        name = part.name.casefold()
+        # startswith("windows") 覆盖 Windows 与 Windows.old 等变体。
+        if name.startswith("windows") or name.startswith("program files"):
+            raise SystemExit(f"拒绝清空系统/程序目录（{part.name}）：{resolved}")
 
 
 def main() -> int:
     parser = argparse.ArgumentParser(description="Build the JchTools manual test corpus.")
     parser.add_argument("--destination", default=r"D:\testzip", help="target directory (wiped first)")
     parser.add_argument("--git", action="store_true", help="also create a git baseline plus a restore script")
+    parser.add_argument("--force", action="store_true",
+                        help="confirm wiping a non-empty destination without prompting")
     arguments = parser.parse_args()
     root = Path(arguments.destination)
     guard_destination(root)
+    # guard 内部用 resolve() 检查，但构建全程用的是原始路径；相对路径在脚本切换
+    # 工作目录后会指向不存在的位置（已清空目标却构建失败），这里统一转成绝对路径。
+    root = root.expanduser().resolve()
     seven = seven_zip()
 
     if root.exists():
+        if root.is_dir():
+            entries = list(root.iterdir())
+            if entries:
+                count, total = measure_tree(root)
+                print(f"目标目录非空：{root}")
+                print(f"  将删除 {count} 个文件，合计 {total / 1048576:.1f} MiB（顶层 {len(entries)} 个条目）")
+                if not arguments.force:
+                    if not sys.stdin.isatty():
+                        raise SystemExit("目标目录非空；非交互环境请加 --force 确认清空。")
+                    try:
+                        answer = input("确认清空以上内容？输入 yes 继续：")
+                    except (EOFError, KeyboardInterrupt):
+                        raise SystemExit("已取消：未清空目标目录。") from None
+                    if answer.strip().lower() != "yes":
+                        raise SystemExit("已取消：未清空目标目录。")
         print(f"clearing {root} ...")
         force_remove_tree(root)
     root.mkdir(parents=True)

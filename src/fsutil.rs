@@ -166,7 +166,7 @@ pub fn unique_target(root: &Path, requested: &Path) -> Result<PathBuf> {
         safe_join(root, &relative_string(root, &path)?)?;
         if !path.try_exists()? { return Ok(path); }
     }
-    bail!("无法为目标分配不冲突的名称")
+    bail!("无法为 {} 分配不冲突的名称：已尝试 {stem} (1)…{stem} (1000000) 均已存在", requested.display())
 }
 pub fn write_json_atomic<T: Serialize>(path: &Path, value: &T) -> Result<()> {
     let parent = path.parent().context("配置路径缺少父目录")?;

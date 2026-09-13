@@ -41,6 +41,10 @@ pub fn strip_copy_name(name: &str) -> String {
 }
 pub fn normal_name(name: &str) -> String { strip_copy_name(name).nfc().collect::<String>().to_lowercase() }
 pub fn normalize_name(name: &str) -> String { name.nfc().collect::<String>().split_whitespace().collect::<Vec<_>>().join(" ") }
+/// 纯参考实现：实际去重匹配在 planner::deduplicate 的 SQL 中（keepers 表按
+/// `(name=? AND dedup_same_name) OR (name<>? AND normal=? AND dedup_copy_names) OR
+/// (name<>? AND normal<>? AND dedup_other_names)` 选择保留者）。仅供测试对照，生产路径不调用。
+#[cfg(test)]
 pub fn duplicate_allowed(a: &FileRecord, b: &FileRecord, cfg: &Config) -> bool {
     if a.name == b.name { cfg.dedup_same_name }
     else if a.normalized == b.normalized { cfg.dedup_copy_names }
@@ -58,6 +62,9 @@ pub fn compare(a: &FileRecord, b: &FileRecord, policy: KeepPolicy) -> Ordering {
     // 与 ordering_sql 的 length(rel)（字符数）保持一致，避免预览与 SQL 计划的平局规则不同。
     primary.then_with(|| a.rel.chars().count().cmp(&b.rel.chars().count())).then_with(|| a.rel.cmp(&b.rel))
 }
+/// SQL 排序片段（供 planner 拼接进 ORDER BY）。依赖 SQLite 对 TEXT 的 length()
+/// 返回 Unicode 码点计数（与 Rust 的 `chars().count()` 一致），与 `compare` 的平局规则对齐；
+/// 勿改成 `length(CAST(rel AS BLOB))`（字节长度）或依赖非确定性的排序。
 pub fn ordering_sql(policy: KeepPolicy) -> &'static str {
     match policy {
         KeepPolicy::Newest => "mtime DESC,length(rel),rel",
@@ -100,4 +107,52 @@ pub fn archive_name(name: &str) -> bool {
 pub fn multipart_name(name: &str) -> bool {
     let n = name.to_lowercase();
     n.ends_with(".001") || (n.ends_with(".rar") && n.contains(".part"))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::model::Snapshot;
+
+    fn record(id: i64, name: &str, normalized: &str) -> FileRecord {
+        FileRecord {
+            id, rel: format!("dir/{name}"), name: name.into(), normalized: normalized.into(),
+            snapshot: Snapshot { size: 1, modified_ns: 10, identity: id.to_string(), links: 1 },
+            hash: Some("h".into()), cleanable: false,
+        }
+    }
+    /// 复刻 planner::deduplicate keepers 查询中的 SQL 匹配条件（与 rust 参考实现逐分支对照）：
+    /// `(name=?2 AND ?4) OR (name<>?2 AND normal=?3 AND ?5) OR (name<>?2 AND normal<>?3 AND ?6)`
+    fn sql_match(a: &FileRecord, b: &FileRecord, cfg: &Config) -> bool {
+        (a.name == b.name && cfg.dedup_same_name)
+            || (a.name != b.name && a.normalized == b.normalized && cfg.dedup_copy_names)
+            || (a.name != b.name && a.normalized != b.normalized && cfg.dedup_other_names)
+    }
+
+    #[test]
+    fn duplicate_allowed_matches_planner_sql() {
+        // 覆盖三种名称关系（同名 / 副本名 / 不同名）与三种开关组合。
+        let pairs = [
+            (record(1, "a.txt", "a.txt"), record(2, "a.txt", "a.txt")),         // 同名
+            (record(1, "a.txt", "a.txt"), record(2, "a (1).txt", "a.txt")),     // 副本名
+            (record(1, "a.txt", "a.txt"), record(2, "b.txt", "b.txt")),         // 不同名
+        ];
+        for dedup_same_name in [false, true] {
+            for dedup_copy_names in [false, true] {
+                for dedup_other_names in [false, true] {
+                    let mut cfg = Config::default();
+                    cfg.dedup_same_name = dedup_same_name;
+                    cfg.dedup_copy_names = dedup_copy_names;
+                    cfg.dedup_other_names = dedup_other_names;
+                    for (a, b) in &pairs {
+                        assert_eq!(
+                            duplicate_allowed(a, b, &cfg), sql_match(a, b, &cfg),
+                            "a={:?} b={:?} flags=({dedup_same_name},{dedup_copy_names},{dedup_other_names})",
+                            a.name, b.name
+                        );
+                    }
+                }
+            }
+        }
+    }
 }

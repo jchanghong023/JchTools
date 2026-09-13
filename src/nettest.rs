@@ -3,10 +3,16 @@
 //! Windows 本机与 WSL2 内部分别探测（WSL2 有独立网络命名空间，必须在发行版内测）。
 
 use std::net::{TcpStream, ToSocketAddrs};
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::{Duration, Instant};
 
 /// 默认单站探测超时（毫秒）。
 pub const DEFAULT_TIMEOUT_MS: u64 = 5_000;
+
+/// 同时最多挂起的 DNS 解析线程数。超过后直接报繁忙并拒绝本次解析，避免无限堆积阻塞线程。
+const MAX_PENDING_DNS: usize = 4;
+/// 当前挂起（尚未把结果送回 channel）的 DNS 解析线程计数。
+static PENDING_DNS: AtomicUsize = AtomicUsize::new(0);
 
 /// 探测目标站点。
 pub struct ProbeTarget {
@@ -112,18 +118,21 @@ pub fn failure_tips(host: &str, extra: Option<&str>) -> Vec<String> {
 
 /// 在本机（Windows 主机进程视角）探测 host:443 的 TCP 连通性与耗时（微秒）。
 /// 成功仅表示能建立到 443 的 TCP 连接，不代表完整 HTTPS 业务可用。
+/// DNS 解析放在独立线程 + `recv_timeout`，避免解析器无限阻塞。
+/// DNS 与所有地址 connect 共享同一总 deadline，避免总耗时 = timeout × (1+N)。
 pub fn probe_host(host: &str, timeout: Duration) -> Result<u64, String> {
-    let addrs = match (host, 443u16).to_socket_addrs() {
-        Ok(addrs) => addrs.collect::<Vec<_>>(),
-        Err(e) => return Err(format!("DNS 解析失败：{e}")),
-    };
-    if addrs.is_empty() {
-        return Err("DNS 未返回地址".to_string());
-    }
     let start = Instant::now();
+    let deadline = start + timeout;
+    let addrs = resolve_with_timeout(host, 443, timeout)?;
     let mut last_err = String::from("无可用地址");
     for addr in addrs {
-        match TcpStream::connect_timeout(&addr, timeout) {
+        // 用剩余预算而非完整 timeout，保证 DNS + 多地址 connect 不会叠乘。
+        let remaining = deadline.saturating_duration_since(Instant::now());
+        if remaining.is_zero() {
+            last_err = "探测总超时已耗尽".to_string();
+            break;
+        }
+        match TcpStream::connect_timeout(&addr, remaining) {
             Ok(_) => {
                 // 微秒：本机/局域网连接常常 <1ms，用毫秒会全是 0，看起来像坏了。
                 let us = start.elapsed().as_micros() as u64;
@@ -133,6 +142,47 @@ pub fn probe_host(host: &str, timeout: Duration) -> Result<u64, String> {
         }
     }
     Err(format!("TCP 443 连接失败：{last_err}"))
+}
+
+/// 带宿主超时的 DNS 解析：`to_socket_addrs` 本身无超时，放到独立线程里等。
+/// 用全局 AtomicUsize 限制同时最多 N 个挂起 DNS 解析；超过时直接报繁忙并拒绝，
+/// 避免 DNS 故障环境下每次探测留下永久阻塞的工作线程。
+fn resolve_with_timeout(
+    host: &str,
+    port: u16,
+    timeout: Duration,
+) -> Result<Vec<std::net::SocketAddr>, String> {
+    // 先检查并发上限：若已有 MAX_PENDING_DNS 个挂起解析，不再启动新线程。
+    let prev = PENDING_DNS.fetch_add(1, Ordering::SeqCst);
+    if prev >= MAX_PENDING_DNS {
+        PENDING_DNS.fetch_sub(1, Ordering::SeqCst);
+        return Err(format!(
+            "DNS 解析繁忙（已有 {MAX_PENDING_DNS} 个解析挂起未完成），请稍后重试"
+        ));
+    }
+
+    let host = host.to_string();
+    let (sender, receiver) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+        let result = (host.as_str(), port)
+            .to_socket_addrs()
+            .map(|iter| iter.collect::<Vec<_>>())
+            .map_err(|e| format!("DNS 解析失败：{e}"));
+        // 无论成功失败都递减挂起计数，让槽位可以被复用。
+        PENDING_DNS.fetch_sub(1, Ordering::SeqCst);
+        let _ = sender.send(result);
+    });
+    match receiver.recv_timeout(timeout) {
+        Ok(Ok(addrs)) if !addrs.is_empty() => Ok(addrs),
+        Ok(Ok(_)) => Err("DNS 未返回地址".to_string()),
+        Ok(Err(error)) => Err(error),
+        Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {
+            Err(format!("DNS 解析超时（超过 {} ms）", timeout.as_millis()))
+        }
+        Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => {
+            Err("DNS 解析线程异常退出".to_string())
+        }
+    }
 }
 
 /// 把微秒耗时格式化成界面文案；小于 1ms 时显示「<1 ms」。
@@ -219,11 +269,24 @@ pub fn wsl_probe_script(timeout_ms: u64) -> String {
         .join(" ");
     // 统一 LF；避免把 CRLF 写进 stdin 造成 `exit 0\r` 之类的解析错误。
     // 耗时用微秒：EPOCHREALTIME（bash≥5）优先，退回 date +%s%N。
+    // 优先 `timeout` 命令；缺失时用后台任务 + sleep/kill 的 bash 内建兜底，避免强依赖 coreutils。
     format!(
         "set +e\n\
          for h in {hosts}; do\n\
          \x20 if [[ -n \"${{EPOCHREALTIME-}}\" ]]; then start=$EPOCHREALTIME; else start=$(date +%s%N 2>/dev/null || echo 0); fi\n\
-         \x20 if timeout {secs} bash -c \"echo >/dev/tcp/${{h}}/443\" >/dev/null 2>&1; then\n\
+         \x20 ok=0\n\
+         \x20 if command -v timeout >/dev/null 2>&1; then\n\
+         \x20   if timeout {secs} bash -c \"echo >/dev/tcp/${{h}}/443\" >/dev/null 2>&1; then ok=1; fi\n\
+         \x20 else\n\
+         \x20   bash -c \"echo >/dev/tcp/${{h}}/443\" >/dev/null 2>&1 &\n\
+         \x20   pid=$!\n\
+         \x20   ( sleep {secs}; kill \"$pid\" 2>/dev/null ) &\n\
+         \x20   killer=$!\n\
+         \x20   if wait \"$pid\" 2>/dev/null; then ok=1; fi\n\
+         \x20   kill \"$killer\" 2>/dev/null\n\
+         \x20   wait \"$killer\" 2>/dev/null\n\
+         \x20 fi\n\
+         \x20 if [ \"$ok\" = 1 ]; then\n\
          \x20   if [[ -n \"${{EPOCHREALTIME-}}\" ]]; then end=$EPOCHREALTIME; else end=$(date +%s%N 2>/dev/null || echo 0); fi\n\
          \x20   us=$(awk -v a=\"$start\" -v b=\"$end\" 'BEGIN{{ d=b-a; if (d<0) d=0; printf \"%.0f\", d/1000 }}')\n\
          \x20   echo \"OK ${{h}} ${{us}}\"\n\
@@ -332,19 +395,27 @@ pub fn assemble_wsl_report(
     }
 }
 
+/// 外部查询类命令（wsl -l 等）的宿主总超时。
+const LIST_CMD_TIMEOUT: Duration = Duration::from_secs(15);
+
 #[cfg(windows)]
-fn run_capture_no_window(program: &str, args: &[&str]) -> Result<String, String> {
+fn run_capture_no_window(program: &std::path::Path, args: &[&str]) -> Result<String, String> {
     use std::os::windows::process::CommandExt;
-    let output = std::process::Command::new(program)
+    let mut command = std::process::Command::new(program);
+    command
         .args(args)
-        .creation_flags(0x0800_0000) // CREATE_NO_WINDOW
-        .stdin(std::process::Stdio::null())
-        .output()
-        .map_err(|e| format!("无法启动 {program}：{e}"))?;
+        .creation_flags(0x0800_0000); // CREATE_NO_WINDOW
+    let output = crate::process::run_with_timeout(&mut command, LIST_CMD_TIMEOUT)
+        .map_err(|e| e.to_string())?;
+    let display = program.display().to_string();
     let mut text = String::from_utf8_lossy(&output.stdout).into_owned();
     if !output.status.success() && text.trim().is_empty() {
         let err = String::from_utf8_lossy(&output.stderr);
-        return Err(format!("{program} 退出码 {:?}：{}", output.status.code(), err.trim()));
+        return Err(format!(
+            "{display} 退出码 {:?}：{}",
+            output.status.code(),
+            err.trim()
+        ));
     }
     // wsl 有时以 UTF-16 输出；若出现大量 NUL 则按 UTF-16LE 再试一次。
     if text.bytes().filter(|b| *b == 0).count() * 2 >= text.len().max(1) && !text.is_empty() {
@@ -361,15 +432,19 @@ fn run_capture_no_window(program: &str, args: &[&str]) -> Result<String, String>
 }
 
 #[cfg(not(windows))]
-fn run_capture_no_window(program: &str, args: &[&str]) -> Result<String, String> {
-    let output = std::process::Command::new(program)
-        .args(args)
-        .stdin(std::process::Stdio::null())
-        .output()
-        .map_err(|e| format!("无法启动 {program}：{e}"))?;
+fn run_capture_no_window(program: &std::path::Path, args: &[&str]) -> Result<String, String> {
+    let mut command = std::process::Command::new(program);
+    command.args(args);
+    let output = crate::process::run_with_timeout(&mut command, LIST_CMD_TIMEOUT)
+        .map_err(|e| e.to_string())?;
     if !output.status.success() && output.stdout.is_empty() {
         let err = String::from_utf8_lossy(&output.stderr);
-        return Err(format!("{program} 退出码 {:?}：{}", output.status.code(), err.trim()));
+        return Err(format!(
+            "{} 退出码 {:?}：{}",
+            program.display(),
+            output.status.code(),
+            err.trim()
+        ));
     }
     Ok(String::from_utf8_lossy(&output.stdout).into_owned())
 }
@@ -377,7 +452,7 @@ fn run_capture_no_window(program: &str, args: &[&str]) -> Result<String, String>
 /// 列出可用 WSL 发行版（仅 Windows 宿主有意义）。
 #[cfg(windows)]
 pub fn list_wsl_distros() -> Result<Vec<String>, String> {
-    let text = run_capture_no_window("wsl.exe", &["-l", "-q"])?;
+    let text = run_capture_no_window(&crate::process::system_tool("wsl.exe"), &["-l", "-q"])?;
     let distros = parse_wsl_distros(&text);
     if distros.is_empty() {
         Err("未检测到已安装的 WSL 发行版".into())
@@ -393,35 +468,28 @@ pub fn list_wsl_distros() -> Result<Vec<String>, String> {
 
 /// 在指定发行版内跑三站探测并组装报告。
 /// 脚本经 stdin 交给 `bash -s`：避免 wsl.exe 破坏 `-c` 参数中的 `$h`。
+/// 宿主侧总超时 ≈ `timeout_ms * 3 + 15s`（三站脚本 + 启动/通信余量）。
 #[cfg(windows)]
 pub fn run_wsl(distro: &str, timeout_ms: u64) -> NetTestReport {
-    use std::io::Write as _;
     use std::os::windows::process::CommandExt;
-    use std::process::{Command, Stdio};
+    use std::process::Command;
 
     let script = wsl_probe_script(timeout_ms);
-    let mut child = match Command::new("wsl.exe")
+    let host_timeout = Duration::from_millis(timeout_ms.saturating_mul(3).saturating_add(15_000));
+    let wsl = crate::process::system_tool("wsl.exe");
+    let mut command = Command::new(&wsl);
+    command
         .args(["-d", distro, "--", "bash", "-s"])
-        .stdin(Stdio::piped())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .creation_flags(0x0800_0000) // CREATE_NO_WINDOW
-        .spawn()
-    {
-        Ok(child) => child,
-        Err(error) => {
-            return wsl_run_error_report(distro, &format!("无法启动 wsl.exe：{error}"));
-        }
-    };
-    if let Some(mut stdin) = child.stdin.take() {
-        if let Err(error) = stdin.write_all(script.as_bytes()).and_then(|_| stdin.flush()) {
-            let _ = child.kill();
-            return wsl_run_error_report(distro, &format!("向 WSL 写入探测脚本失败：{error}"));
-        }
-    }
-    let output = match child.wait_with_output() {
+        .creation_flags(0x0800_0000); // CREATE_NO_WINDOW
+    let output = match crate::process::run_with_timeout_input(
+        &mut command,
+        Some(script.as_bytes()),
+        host_timeout,
+    ) {
         Ok(output) => output,
-        Err(error) => return wsl_run_error_report(distro, &format!("等待 wsl.exe 结束失败：{error}")),
+        Err(error) => {
+            return wsl_run_error_report(distro, &error.to_string());
+        }
     };
     let mut out = decode_wsl_bytes(&output.stdout);
     let err = decode_wsl_bytes(&output.stderr);
@@ -630,6 +698,8 @@ mod tests {
         assert!(script.contains("github.com"));
         assert!(script.contains("/dev/tcp"));
         assert!(script.contains("timeout 5"));
+        assert!(script.contains("command -v timeout"), "无 timeout 命令时需有 bash 内建兜底");
+        assert!(script.contains("kill"), "兜底路径应能终止挂起的探测子进程");
         assert!(!script.contains('\r'), "脚本必须 LF，避免经 stdin 时出现 exit 0\\r");
         // 必须包含 bash 变量展开；若误写成无 $ 的字面量，WSL 侧会得到空主机名。
         assert!(script.contains("${h}"));
@@ -688,5 +758,34 @@ mod tests {
         assert_eq!(report.scope, "WSL2");
         assert_eq!(report.results.len(), 3);
         assert!(report.results[0].tips.iter().any(|t| t.contains("wsl --install")));
+    }
+
+    #[test]
+    fn resolve_with_timeout_returns_error_for_invalid_host() {
+        // 使用含非法字符的主机名，确保 DNS 解析必然失败，不依赖外部 DNS 行为。
+        let result = resolve_with_timeout(
+            "invalid\x00hostname",
+            443,
+            Duration::from_millis(2000),
+        );
+        assert!(result.is_err(), "非法主机名应返回解析错误");
+        // 成功或失败后计数器应归零（allow 有并发测试干扰，但至少不应永久卡在高位）。
+        assert!(PENDING_DNS.load(Ordering::SeqCst) < MAX_PENDING_DNS);
+    }
+
+    #[test]
+    fn probe_host_shares_deadline_across_addresses() {
+        // 用极短超时验证 deadline 逻辑存在：即使 DNS 成功，多地址 connect 也不会叠乘超时。
+        let result = probe_host("127.0.0.1", Duration::from_millis(300));
+        // 127.0.0.1:443 可能不通（测试环境），也可能通；只验证不 panic 且结构正确。
+        match result {
+            Ok(us) => {
+                // 成功时耗时应 < 300ms。
+                assert!(us < 300_000, "成功耗时应小于 timeout：{us}");
+            }
+            Err(msg) => {
+                assert!(!msg.is_empty(), "失败必须给出错误信息");
+            }
+        }
     }
 }

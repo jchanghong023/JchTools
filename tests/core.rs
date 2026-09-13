@@ -1,4 +1,6 @@
 //! These tests mutate only tempfile fixtures. Recycle Bin operations are injected mocks.
+mod common;
+use common::FailRecycle;
 use jchtools::{config::*, control::{Context,Control}, db::Database, engine, fsutil, hashing,
     model::{ActionKind,FileRecord,Snapshot}, platform::{self,DeleteResult,RecycleFailure,Recycler},rules};
 use std::{fs,path::{Path,PathBuf},sync::{Arc,atomic::{AtomicUsize,Ordering}}};
@@ -12,8 +14,6 @@ impl Fixture {
 }
 fn base()->Config {Config{extract:false,global_delete:DeleteMode::Permanent,same_name_same_size:false,
     same_name_different_size:false,clean_empty_dirs:false,clean_copy_name:false,classify:ClassifyMode::Off,..Config::default()}}
-struct FailRecycle;
-impl Recycler for FailRecycle {fn recycle(&self,_:&Path)->Result<(),RecycleFailure>{Err(RecycleFailure::Failed("mock capacity full".into()))}}
 struct CancelRecycle;
 impl Recycler for CancelRecycle {fn recycle(&self,_:&Path)->Result<(),RecycleFailure>{Err(RecycleFailure::Cancelled)}}
 struct MoveRecycle {target:PathBuf,calls:AtomicUsize}
@@ -144,7 +144,15 @@ impl Recycler for MoveRecycle {fn recycle(&self,p:&Path)->Result<(),RecycleFailu
 #[test] fn plan_pagination_is_bounded(){let f=Fixture::new();for i in 0..260{f.write(&format!("{i:04}.txt"),b"same",i+100);}let task=f.plan(base());let db=Database::open(&task.directory).unwrap();let first=db.actions_page(0,100).unwrap();let second=db.actions_page(first.last().unwrap().id,100).unwrap();assert_eq!(first.len(),100);assert_eq!(second.len(),100);assert!(first.last().unwrap().id<second.first().unwrap().id);assert!(first.iter().all(|a|a.kind==ActionKind::Delete));}
 #[cfg(unix)]
 #[test] fn symlink_not_followed_or_deleted(){let f=Fixture::new();let outside=f._temp.path().join("outside");fs::create_dir(&outside).unwrap();fs::write(outside.join("a"),b"a").unwrap();std::os::unix::fs::symlink(&outside,f.root.join("link")).unwrap();assert!(fsutil::safe_join(&f.root,"link/a").is_err());assert_eq!(f.plan(base()).summary.scanned,0);}
-#[test] fn existing_hardlinks_not_counted_twice(){let f=Fixture::new();let a=f.write("a",b"same",10);if fs::hard_link(&a,f.root.join("b")).is_err(){return;}let task=f.plan(base());assert_eq!(task.summary.candidate_bytes,0);assert_eq!(task.summary.planned_delete,0);}
+#[test] fn existing_hardlinks_not_counted_twice(){
+    let f=Fixture::new();let a=f.write("a",b"same",10);
+    if let Err(error)=fs::hard_link(&a,f.root.join("b")){
+        // 静默 return 会让测试永远绿：硬链接失败必须显式失败（FAT32/exFAT 不支持时请换 NTFS/tmpfs 环境）。
+        eprintln!("hard_link failed: {error}; a={a:?}; root={:?}",f.root);
+        panic!("无法创建硬链接，无法验证去重行为；请在支持硬链接的文件系统上运行测试");
+    }
+    let task=f.plan(base());assert_eq!(task.summary.candidate_bytes,0);assert_eq!(task.summary.planned_delete,0);
+}
 #[test] fn hardlink_mode_preserves_aliases(){let f=Fixture::new();f.write("a",b"same",10);f.write("b",b"same",20);let mut cfg=base();cfg.duplicate_action=DuplicateAction::Hardlink;let task=f.plan(cfg);let result=f.apply(&task);assert_eq!(result.summary.linked,1);assert_eq!(fsutil::snapshot(&f.root.join("a")).unwrap().identity,fsutil::snapshot(&f.root.join("b")).unwrap().identity);}
 
 // ===== 核心公共接口缺口补测（配置原子覆盖写 / CSV 注入转义 / 分卷识别）=====
@@ -174,4 +182,115 @@ impl Recycler for MoveRecycle {fn recycle(&self,p:&Path)->Result<(),RecycleFailu
     assert!(!rules::multipart_name("x.rar"));
     assert!(rules::multipart_name("x.7z.001"));
     assert!(!rules::multipart_name("x.7z.002"));
+}
+
+// ===== H-11 并发与多进程访问：状态目录锁 / set_selected 竞态 / reserve_target =====
+#[test] fn prepare_and_apply_share_exclusive_state_lock(){
+    // prepare 与 apply 共用同一 RootGuard：任一持有锁时，另一路必须失败（锁测试增强）。
+    let f=Fixture::new();f.write("a",b"same",10);f.write("b",b"same",20);
+    let task=f.plan(base());
+    {
+        let _guard=fsutil::RootGuard::acquire(&f.state).unwrap();
+        assert!(engine::prepare_at(&f.root,base(),Context::default(),&f.state,None).is_err(),"锁被持有时二次 prepare 必须失败");
+        assert!(engine::apply_with(&task.directory,Context::default(),Arc::new(FailRecycle)).is_err(),"锁被持有时 apply 必须失败");
+    }
+    // 锁释放后 apply 可以正常完成
+    f.apply(&task);
+}
+#[test] fn set_selected_fails_once_apply_started(){
+    // apply 启动后 status 变为 executing；此时修改选择必须失败（set_selected 竞态）。
+    let f=Fixture::new();f.write("a",b"same",10);f.write("b",b"same",20);
+    let task=f.plan(base());
+    let context=Context::default();
+    context.control.pause(true);
+    let dir=task.directory.clone();
+    let apply_handle={
+        let context=context.clone();
+        std::thread::spawn(move||engine::apply_with(&dir,context,Arc::new(FailRecycle)))
+    };
+    // 轮询等待 apply 写入 status=executing（固定 sleep 在高负载/CI 抢占下可能误失败）
+    let deadline=std::time::Instant::now()+std::time::Duration::from_secs(5);
+    let db=Database::open(&task.directory).unwrap();
+    loop{
+        if db.get::<String>("status").unwrap()=="executing"{break;}
+        assert!(std::time::Instant::now()<deadline,"等待 apply 进入 executing 超时");
+        std::thread::sleep(std::time::Duration::from_millis(10));
+    }
+    assert_eq!(db.get::<String>("status").unwrap(),"executing","apply 已进入执行状态");
+    let id=db.actions_page(0,10).unwrap().remove(0).id;
+    assert!(db.set_selected(id,false).is_err(),"执行中不得修改计划选择");
+    context.control.pause(false);
+    apply_handle.join().unwrap().unwrap();
+}
+#[test] fn set_selected_rejected_after_apply_finished(){
+    // apply 完成后 status=finished；set_selected 必须失败（不可重放旧计划的选择变更）。
+    let f=Fixture::new();f.write("a",b"same",10);f.write("b",b"same",20);
+    let task=f.plan(base());f.apply(&task);
+    let db=Database::open(&task.directory).unwrap();
+    assert_eq!(db.get::<String>("status").unwrap(),"finished");
+    let id=db.actions_page(0,10).unwrap().remove(0).id;
+    assert!(db.set_selected(id,true).is_err());
+}
+#[test] fn reserve_target_is_case_insensitive_unique(){
+    // reserve_target 以小写路径入库：大小写不同的同一路径视为冲突（Windows 大小写不敏感文件系统）。
+    let f=Fixture::new();let db=Database::create(&f.state.join("reserve-db")).unwrap();
+    assert!(db.reserve_target("Reports/Final.PDF",1).unwrap(),"首次预留必须成功");
+    assert!(!db.reserve_target("reports/final.pdf",2).unwrap(),"大小写不同的同一路径必须视为冲突");
+    assert!(!db.reserve_target("REPORTS/final.PDF",3).unwrap());
+    assert!(db.reserve_target("reports/other.pdf",4).unwrap(),"不同路径可以预留");
+    assert!(db.reserve_target("other.pdf",5).unwrap());
+}
+
+// ===== L5 actions_page_filtered 直接测 =====
+#[test] fn actions_page_filtered_by_kind_and_rejects_unknown(){
+    let f=Fixture::new();f.write("folder/a.pdf",b"pdf",10);
+    let mut cfg=base();cfg.classify=ClassifyMode::Extension;
+    let task=f.plan(cfg);
+    let db=Database::open(&task.directory).unwrap();
+    let moves=db.actions_page_filtered(0,100,Some("move")).unwrap();
+    assert_eq!(moves.len(),1);
+    assert_eq!(moves[0].kind,ActionKind::Move);
+    let deletes=db.actions_page_filtered(0,100,Some("delete")).unwrap();
+    assert!(deletes.is_empty(),"纯归类任务不应有删除动作");
+    let all=db.actions_page(0,100).unwrap();
+    assert_eq!(all.len(),moves.len()+deletes.len());
+    assert!(db.actions_page_filtered(0,100,Some("unknown")).is_err(),"白名单外的 kind 必须直接报错");
+}
+
+// ===== L6 control::pause / checkpoint 暂停语义 =====
+#[test] fn pause_defers_checkpoint_until_resume(){
+    let ctl=std::sync::Arc::new(Control::default());
+    ctl.checkpoint().unwrap(); // 未暂停时 checkpoint 应直接通过
+    ctl.pause(true);
+    assert!(ctl.is_paused());
+    let (done_tx,done_rx)=std::sync::mpsc::channel();
+    // started 握手：worker 在调用 checkpoint 前先报到，避免调度延迟让「无 done」假通过
+    let (started_tx,started_rx)=std::sync::mpsc::channel();
+    let worker={
+        let c=ctl.clone();
+        std::thread::spawn(move||{let _=started_tx.send(());c.checkpoint().unwrap();let _=done_tx.send(());})
+    };
+    started_rx.recv_timeout(std::time::Duration::from_secs(2)).expect("worker 应已进入 checkpoint 前置");
+    // 暂停期间 checkpoint 不应完成
+    assert!(done_rx.recv_timeout(std::time::Duration::from_millis(150)).is_err(),"暂停期间 checkpoint 不应返回");
+    ctl.pause(false);
+    done_rx.recv_timeout(std::time::Duration::from_secs(2)).expect("恢复后 checkpoint 应完成");
+    worker.join().unwrap();
+}
+#[test] fn cancel_while_paused_makes_checkpoint_fail(){
+    let ctl=std::sync::Arc::new(Control::default());
+    ctl.pause(true);
+    let (done_tx,done_rx)=std::sync::mpsc::channel();
+    // started 握手：worker 报到后再 cancel，覆盖「已进入 checkpoint 暂停环」路径
+    let (started_tx,started_rx)=std::sync::mpsc::channel();
+    let worker={
+        let c=ctl.clone();
+        std::thread::spawn(move||{let _=started_tx.send(());let failed=c.checkpoint().is_err();let _=done_tx.send(failed);})
+    };
+    started_rx.recv_timeout(std::time::Duration::from_secs(2)).expect("worker 应已进入 checkpoint 前置");
+    // started 只表示即将调用 checkpoint；短暂等待让 worker 进入暂停等待环后再取消
+    std::thread::sleep(std::time::Duration::from_millis(20));
+    ctl.cancel();
+    assert_eq!(done_rx.recv_timeout(std::time::Duration::from_secs(2)).unwrap(),true,"暂停中取消必须让 checkpoint 失败");
+    worker.join().unwrap();
 }

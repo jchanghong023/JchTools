@@ -3,7 +3,13 @@ use crate::{config::{ConflictPolicy, DeleteMode}, control::ConflictInfo, engine:
 use anyhow::{bail, Context, Result};
 use rusqlite::{params, OptionalExtension};
 use sha2::Digest;
-use std::{collections::BTreeMap, fs, io::Read, path::{Path,PathBuf}, process::Command};
+use std::{collections::BTreeMap, fs, io::Read, path::{Path,PathBuf}, process::Command, time::{Duration, SystemTime}};
+
+/// 无 Size 元数据的流式包（gzip/bzip2/xz 等）展开量的内置硬顶（GiB）。
+/// 这类包无法按声明总量做预检（sizes_complete=false 会跳过 max_ratio 与
+/// 「声明总量 vs 可用空间」检查），必须有兜底上限；用户设置了更小的
+/// max_unpacked_gib 时取两者较小值——只能收紧，不能放宽。
+const STREAM_UNPACKED_CAP_GIB: u64 = 50;
 
 pub struct SevenZip { executable: PathBuf }
 impl SevenZip {
@@ -133,16 +139,36 @@ impl SevenZip {
         if sizes_complete && total.checked_add(reserve).context("容量计算溢出")? > free {
             bail!("可用空间不足：本包需 {}，预留 {}，当前 {}。未写入任何解压文件",bytes(total),bytes(reserve),bytes(free));
         }
+        // 流式包没有 Size 元数据时无法按声明总量预检：为它启用内置硬顶
+        // （用户 max_unpacked_gib 可进一步收紧），避免解压体量几乎无上限。
+        let stream_cap_bytes: Option<u64> = if sizes_complete { None } else {
+            let builtin = STREAM_UNPACKED_CAP_GIB.checked_mul(1 << 30).context("流式上限计算溢出")?;
+            Some(if job.config.max_unpacked_gib > 0 {
+                builtin.min(job.config.max_unpacked_gib * (1 << 30))
+            } else { builtin })
+        };
         let stage = Staging::new(&job.root)?;
         let mut command = self.command();
         command.args(["x","-aou","-y","-bb0","-bsp1","-bso1","-bse2","-sccUTF-8","-p-","-mmt=2"])
             .arg(format!("-o{}",fsutil::path_string(&stage.content)?)).arg("--").arg(&archive);
         let ctl = job.context.control.clone(); let context = job.context.clone(); let root = job.root.clone();
+        let stage_probe = stage.content.clone();
         process::run(&mut command,&ctl,|err,line| {
             if !err && line.contains('%') { context.status(format!("正在解压 {archive_rel} · {}",line.trim())); }
             Ok(())
         },|| {
             if fs2::available_space(&root)? < reserve { bail!("磁盘剩余空间低于预留阈值，停止解压并保留原包"); }
+            // 无 Size 元数据的包在解压过程中累计暂存量，超过硬顶立即停止（与预留空间联动）。
+            if let Some(cap) = stream_cap_bytes {
+                let mut staged = 0u64;
+                for entry in walkdir::WalkDir::new(&stage_probe).follow_links(false).min_depth(1) {
+                    let entry = entry?;
+                    if entry.file_type().is_file() {
+                        staged = staged.saturating_add(entry.metadata()?.len());
+                        if staged > cap { bail!("流式压缩包解压量超过上限 {}，已停止并保留原包",bytes(cap)); }
+                    }
+                }
+            }
             Ok(())
         }).with_context(|| "解压失败（可能已损坏、加密或格式不受支持）")?;
         fsutil::unchanged(&archive,&source_snapshot)?;
@@ -160,13 +186,30 @@ impl SevenZip {
             if !meta.is_file() { bail!("解压结果含非普通文件"); }
             expanded = expanded.checked_add(meta.len()).context("解压字节计数溢出")?;
             if sizes_complete && expanded > total { bail!("实际解压量超过压缩包声明，已停止合入"); }
+            // 合入阶段兜底：流式包解压期间的抽样检查可能漏掉峰值，这里按最终字节量强制卡住硬顶。
+            if let Some(cap) = stream_cap_bytes {
+                if expanded > cap { bail!("流式压缩包实际解压量超过上限 {}，已停止合入并保留原包",bytes(cap)); }
+            }
+            // sizes_complete=false 时 list 阶段拿不到成员大小，单文件上限改在合入阶段检查。
+            if !sizes_complete && job.config.max_file_gib > 0 && meta.len() > job.config.max_file_gib * (1<<30) {
+                bail!("文件展开大小超过用户上限：{}",fsutil::relative_string(&job.root,entry.path())?);
+            }
             let relative = fsutil::relative_string(&stage.content,entry.path())?;
             let base = archive.parent().context("压缩包缺少父目录")?;
             let mut destination = base.join(fsutil::safe_relative(&relative)?);
             // 压缩包里含有与压缩包同名的成员（gzip 头会记录原始文件名，base.tgz 里就可能是 base.tgz）：
             // 绝不能覆盖仍在使用的源包。流式包的解压结果其实就是去掉一层压缩后的内容，
             // 用真实名字（base.tar）落盘并按正常冲突策略处理；其他格式改名放置。
-            if fsutil::path_string(&destination)?.to_lowercase() == fsutil::path_string(&archive)?.to_lowercase() {
+            // 路径相等判断仅在 Windows 上忽略大小写（NTFS 不区分）；其他平台区分大小写。
+            // Windows 必须用 Unicode 大小写折叠（to_lowercase），不能退回 ASCII 比较：
+            // NTFS 大小写折叠是 Unicode 表驱动的，Ä/ä 这类非 ASCII 对在文件系统层视为同一路径。
+            let collides_with_source = if cfg!(windows) {
+                fsutil::path_string(&destination)?.to_lowercase()
+                    == fsutil::path_string(&archive)?.to_lowercase()
+            } else {
+                destination == archive
+            };
+            if collides_with_source {
                 match stream_stem(&archive).map(|stem| base.join(stem)) {
                     Some(candidate) => destination = candidate,
                     None => destination = fsutil::unique_target(&job.root,&destination)?,
@@ -376,7 +419,15 @@ fn merge_extracted(job: &mut Job, source: &Path, target: &Path) -> Result<Option
     if !use_new { return Ok(None); }
     let mode = job.config.conflict_delete.resolve(job.config.global_delete);
     if mode == DeleteMode::Keep { return Ok(None); }
-    let removed = job.delete_path(target,Some(&existing),mode,"解压覆盖旧文件")?;
+    // 冲突策略决定删除已有文件时写带策略名的明确原因，便于在日志/审计中看出
+    // 是策略自动处理（默认 Newest 也会在用户未显式选择时替换旧文件）。
+    let reason = match policy {
+        ConflictPolicy::Overwrite => "解压冲突策略（覆盖）：已有文件将被解压结果替换".to_string(),
+        ConflictPolicy::Newest => format!("解压冲突策略（较新）：已有文件较旧，将被替换（旧 {} 字节 / 新 {} 字节）",existing.size,incoming.size),
+        ConflictPolicy::Largest => format!("解压冲突策略（较大）：已有文件较小，将被替换（旧 {} 字节 / 新 {} 字节）",existing.size,incoming.size),
+        _ => "解压覆盖旧文件".to_string(),
+    };
+    let removed = job.delete_path(target,Some(&existing),mode,&reason)?;
     if removed == DeleteResult::Kept { return Ok(None); }
     if let Err(error) = fsutil::rename_noreplace(source,target) {
         // The extracted source remains in an owned staging directory until this function returns.
@@ -396,6 +447,11 @@ pub fn enqueue(job: &Job, archive: &Path, depth: u32) -> Result<()> {
     Ok(())
 }
 pub fn extract_queued(job: &mut Job, engine: &SevenZip) -> Result<()> {
+    // 崩溃/强杀后 Drop 不会执行，.jchtools-work 下可能残留孤儿暂存目录；
+    // 解压开始前清理超过 24 小时的残留（阈值远大于正常解压时长，避免误伤并发任务）。
+    if let Ok(removed) = clean_orphan_staging(&job.root, Duration::from_secs(24 * 3600)) {
+        if removed > 0 { job.context.status(format!("已清理 {removed} 个残留解压暂存目录")); }
+    }
     loop {
         job.context.control.checkpoint()?;
         let next: Option<(i64,String,u32)> = job.db.conn.query_row(
@@ -438,4 +494,28 @@ impl Drop for Staging {
             if let Some(parent) = self.directory.parent() { let _ = fs::remove_dir(parent); }
         }
     }
+}
+/// 清理崩溃/断电后残留的孤儿暂存目录（<root>/.jchtools-work/<uuid>）。
+/// 只删除带 OWNER 标记且内容与目录名一致的条目（Staging::new 写入的归属标记），
+/// 并且目录年龄超过 max_age 才处理——阈值须远大于正常解压时长，避免误删并发任务
+/// 正在使用的暂存区。返回清理数量；错误一律跳过单个条目，不影响主流程。
+pub fn clean_orphan_staging(root: &Path, max_age: Duration) -> Result<usize> {
+    let Ok(work) = fsutil::safe_join(root, ".jchtools-work") else { return Ok(0); };
+    let Ok(entries) = fs::read_dir(&work) else { return Ok(0); };
+    let now = SystemTime::now();
+    let mut removed = 0usize;
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if !path.is_dir() { continue; }
+        // OWNER 内容必须与目录名一致：这是 Staging::new 写入的归属标记。
+        let owner = fs::read_to_string(path.join("OWNER")).unwrap_or_default();
+        if owner != entry.file_name().to_string_lossy() { continue; }
+        let Ok(meta) = fs::metadata(&path) else { continue; };
+        let Ok(modified) = meta.modified() else { continue; };
+        let Ok(age) = now.duration_since(modified) else { continue; };
+        if age < max_age { continue; }
+        if fs::remove_dir_all(&path).is_ok() { removed += 1; }
+    }
+    if removed > 0 { let _ = fs::remove_dir(&work); } // 仅当父目录已空时才会成功
+    Ok(removed)
 }

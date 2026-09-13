@@ -73,19 +73,34 @@ def close_app(window):
         close.click_input()
 
 
+def _wait_exit_or_kill(proc: subprocess.Popen, timeout: int = 15) -> None:
+    """等待进程退出；超时则强制结束，避免异常路径泄漏进程。"""
+    try:
+        proc.wait(timeout=timeout)
+    except subprocess.TimeoutExpired:
+        proc.kill()
+        proc.wait(timeout=10)
+
+
 def s1_launch_and_exit(exe: str):
     proc = subprocess.Popen([exe])
+    window = None
     try:
         _, window = wait_window(proc.pid)
         print("S1 PASS：窗口启动并可见")
     finally:
-        close_app(window)
-    proc.wait(timeout=15)
+        if window is not None:
+            try:
+                close_app(window)
+            except Exception:
+                pass
+        _wait_exit_or_kill(proc)
     print("S1 PASS：进程已退出")
 
 
 def s2_analyze_only(exe: str, data: str):
     proc = subprocess.Popen([exe])
+    window = None
     try:
         _, window = wait_window(proc.pid)
         set_directory(window, data)
@@ -96,13 +111,18 @@ def s2_analyze_only(exe: str, data: str):
         wait_text(window, "解压与分析完成")
         print("S2 PASS：解压与分析完成")
     finally:
-        close_app(window)
-    proc.wait(timeout=15)
+        if window is not None:
+            try:
+                close_app(window)
+            except Exception:
+                pass
+        _wait_exit_or_kill(proc)
     print("S2 PASS：进程已退出")
 
 
 def s3_full_organize(exe: str, data: str):
     proc = subprocess.Popen([exe])
+    window = None
     try:
         _, window = wait_window(proc.pid)
         set_directory(window, data)
@@ -118,8 +138,12 @@ def s3_full_organize(exe: str, data: str):
         wait_text(window, "整理结束")
         print("S3 PASS：全链路整理完成")
     finally:
-        close_app(window)
-    proc.wait(timeout=15)
+        if window is not None:
+            try:
+                close_app(window)
+            except Exception:
+                pass
+        _wait_exit_or_kill(proc)
     print("S3 PASS：进程已退出")
 
 

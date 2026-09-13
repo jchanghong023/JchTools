@@ -198,22 +198,29 @@ fn changed(ui:&AppWindow,state:&Rc<RefCell<State>>,key:&str,value:serde_json::Va
     }
 }
 fn async_work(sender:mpsc::SyncSender<Event>,work:impl FnOnce()->Result<Event>+Send+'static){
+    async_work_mapped(sender,work,Event::Error);
+}
+/// 失败事件由调用方经 `map_err` 指定：代理/网络测试/计划加载各自失败时
+/// 不得误清对方的 busy 状态（Event::Error 已不再隐含清 busy）。
+fn async_work_mapped(sender:mpsc::SyncSender<Event>,work:impl FnOnce()->Result<Event>+Send+'static,map_err:fn(String)->Event){
     std::thread::spawn(move||{
         let result=std::panic::catch_unwind(std::panic::AssertUnwindSafe(work));
-        let event=match result{Ok(Ok(event))=>event,Ok(Err(error))=>Event::Error(format!("{error:#}")),
-            Err(_)=>Event::Error("后台操作意外退出；请查看记录，未执行的步骤不会继续".into())};
+        let event=match result{Ok(Ok(event))=>event,Ok(Err(error))=>map_err(format!("{error:#}")),
+            Err(_)=>map_err("后台操作意外退出；请查看记录，未执行的步骤不会继续".into())};
         let _=sender.send(event);
     });
 }
 fn load_plan_filtered(sender:mpsc::SyncSender<Event>,path:PathBuf,start:i64,page:usize,kind:Option<String>){
-    async_work(sender,move||Ok(Event::PlanPage(path.clone(),Database::open(&path)?.actions_page_filtered(start,101,kind.as_deref())?,page)));
+    // 计划页加载失败走 Error：只更新错误文案，不碰 proxy/net 的 busy。
+    // 打开的是引擎已生成的任务库：缺失时报错，不静默新建空库。
+    async_work(sender,move||Ok(Event::PlanPage(path.clone(),Database::open_existing(&path)?.actions_page_filtered(start,101,kind.as_deref())?,page)));
 }
 /// 按「任务状态 + 当前配置 + 目录一致性」重新计算整理计划的就绪状态。
 /// theme 是纯外观设置，不影响计划内容，比较时剔除；
 /// SelectionSaved 与 PlanPage 两处共用，避免一处重算一处漏算。
 fn recompute_ready(ui:&AppWindow,state:&State,path:&Path)->bool{
     let strip_theme=|value:&mut serde_json::Value|{if let Some(object)=value.as_object_mut(){object.remove("theme");}};
-    let Ok(db)=Database::open(path) else {return false;};
+    let Ok(db)=Database::open_existing(path) else {return false;};
     // 任务状态是第一道闸：已执行/已取消/失败的计划页重新加载时不能把 ready 重新点亮。
     if !db.get::<String>("status").is_ok_and(|status|status=="ready"){return false;}
     let Some(mut db_config)=db.config().ok().and_then(|config|serde_json::to_value(&config).ok()) else {return false;};
@@ -395,6 +402,14 @@ fn parse_proxy_command_port(text:&str)->u16{
     text.trim().parse::<u16>().ok().filter(|p|*p>0).unwrap_or(crate::proxy::DEFAULT_PROXY_COMMAND_PORT)
 }
 
+/// 恢复侧栏全量工具列表并清空搜索框：从关于页返回或点选工具后调用，
+/// 避免搜索过滤残留导致侧栏只剩匹配项。
+fn reset_tool_list(ui:&AppWindow){
+    let tools=registry::tools().iter().map(|t|ToolRow{id:t.id.into(),name:t.name.into(),summary:t.summary.into()}).collect::<Vec<_>>();
+    ui.set_tools(Rc::new(VecModel::from(tools)).into());
+    ui.set_tool_search("".into());
+}
+
 /// 同步回调装配：规则表、分区/工具导航、主题与输入校验——纯属性/状态操作，
 /// 不依赖事件循环，独立成函数以便无头 GUI 测试直接装配后断言。
 fn wire_sync(ui:&AppWindow,state:&Rc<RefCell<State>>){
@@ -403,6 +418,8 @@ fn wire_sync(ui:&AppWindow,state:&Rc<RefCell<State>>){
         let weak=ui.as_weak();let state=state.clone();
         ui.on_select_tool(move|id|{
             if let Some(ui)=weak.upgrade(){
+                // 点回工具时恢复全量列表：搜索过滤不得在切页后残留。
+                reset_tool_list(&ui);
                 match id.as_str(){
                     "directory-organizer"=>{
                         ui.set_screen(0);ui.set_active_tool_id(id.clone());
@@ -415,7 +432,7 @@ fn wire_sync(ui:&AppWindow,state:&Rc<RefCell<State>>){
                         if let Some(sender)=state.borrow().proxy_events.clone(){
                             if !ui.get_proxy_busy(){
                                 ui.set_proxy_busy(true);
-                                async_work(sender,move||Ok(Event::ProxySnapshot(crate::proxy::detect())));
+                                async_work_mapped(sender,move||Ok(Event::ProxySnapshot(crate::proxy::detect())),Event::ProxyFailed);
                             }
                         }
                     }
@@ -432,7 +449,7 @@ fn wire_sync(ui:&AppWindow,state:&Rc<RefCell<State>>){
                 if ui.get_proxy_busy(){return;}
                 ui.set_proxy_busy(true);
             }
-            async_work(sender,move||Ok(Event::ProxySnapshot(crate::proxy::detect())));
+            async_work_mapped(sender,move||Ok(Event::ProxySnapshot(crate::proxy::detect())),Event::ProxyFailed);
         });
     }
     {
@@ -491,10 +508,10 @@ fn wire_sync(ui:&AppWindow,state:&Rc<RefCell<State>>){
                     if !ui.get_net_test_busy(){
                         ui.set_net_test_busy(true);
                         ui.set_net_test_wsl_status("正在读取 WSL 发行版列表…".into());
-                        async_work(sender,move||match crate::nettest::list_wsl_distros(){
+                        async_work_mapped(sender,move||match crate::nettest::list_wsl_distros(){
                             Ok(distros)=>Ok(Event::WslDistros(distros,None)),
                             Err(error)=>Ok(Event::WslDistros(Vec::new(),Some(error))),
-                        });
+                        },Event::NetTestFailed);
                     }
                 }
             }else{
@@ -525,10 +542,10 @@ fn wire_sync(ui:&AppWindow,state:&Rc<RefCell<State>>){
             let Some(sender)=state.borrow().proxy_events.clone()else{return;};
             ui.set_net_test_busy(true);
             ui.set_net_test_wsl_status("正在读取 WSL 发行版列表…".into());
-            async_work(sender,move||match crate::nettest::list_wsl_distros(){
+            async_work_mapped(sender,move||match crate::nettest::list_wsl_distros(){
                 Ok(distros)=>Ok(Event::WslDistros(distros,None)),
                 Err(error)=>Ok(Event::WslDistros(Vec::new(),Some(error))),
-            });
+            },Event::NetTestFailed);
         }});
     }
     {
@@ -546,7 +563,7 @@ fn wire_sync(ui:&AppWindow,state:&Rc<RefCell<State>>){
                 "正在本机探测…".into()
             };
             ui.set_net_test_summary(hint.into());
-            async_work(sender,move||Ok(Event::NetTestReport(crate::nettest::run(scope,&distro,5_000))));
+            async_work_mapped(sender,move||Ok(Event::NetTestReport(crate::nettest::run(scope,&distro,5_000))),Event::NetTestFailed);
         }});
     }
     {
@@ -559,7 +576,17 @@ fn wire_sync(ui:&AppWindow,state:&Rc<RefCell<State>>){
     }
     {
         let weak=ui.as_weak();
-        ui.on_navigation(move|screen|{if let Some(ui)=weak.upgrade(){ui.set_screen(screen);}});
+        ui.on_navigation(move|screen|{if let Some(ui)=weak.upgrade(){
+            ui.set_screen(screen);
+            // 「关于」不是工具：清空 active-tool-id，侧栏不高亮任何工具；
+            // 从关于页返回工具页时恢复全量列表并写回对应 active id。
+            if screen==1{ui.set_active_tool_id("".into());}
+            else{
+                reset_tool_list(&ui);
+                if screen==0{ui.set_active_tool_id("directory-organizer".into());}
+                else if screen==2{ui.set_active_tool_id("proxy-status".into());}
+            }
+        }});
     }
     {
         let weak=ui.as_weak();let state=state.clone();
@@ -729,7 +756,7 @@ pub fn run_with_pre_loop_hook(hook:impl FnOnce(&AppWindow)+'static)->Result<()> 
                 // 与 async_work 一致地拦截 panic：否则 pending_selection 永远减不到 0，
                 // 会静默阻断后续的开始执行与历史载入。
                 let result=std::panic::catch_unwind(std::panic::AssertUnwindSafe(||{
-                    Database::open(&task).and_then(|db|db.set_selected(id,selected))
+                    Database::open_existing(&task).and_then(|db|db.set_selected(id,selected))
                 }));
                 let result=result.unwrap_or_else(|_|Err(anyhow::anyhow!("保存勾选时后台操作意外退出")));
                 let saved=result.is_ok().then_some((id,selected));
@@ -768,7 +795,7 @@ pub fn run_with_pre_loop_hook(hook:impl FnOnce(&AppWindow)+'static)->Result<()> 
                     // 系统保存对话框对已存在文件会再问一次“是否替换”；这里按用户确认覆盖，
                     // 否则 create_new 必然失败，用户在对话框里点了替换也导不出去。
                     if path.exists(){std::fs::remove_file(&path).context("无法覆盖已存在的导出文件")?;}
-                    Database::open(&task)?.export_csv(&path)?;
+                    Database::open_existing(&task)?.export_csv(&path)?;
                     Ok(Event::Notice(format!("已导出：{}",path.display())))
                 });
             }
@@ -840,7 +867,7 @@ pub fn run_with_pre_loop_hook(hook:impl FnOnce(&AppWindow)+'static)->Result<()> 
                         ui.set_status("正在等待你选择解压冲突策略；选择前不会继续后续解压".into());
                     }
                     Event::Ready(path,summary)|Event::Done(path,summary)=>{
-                        let ready=Database::open(&path).and_then(|db|db.get::<String>("status")).is_ok_and(|v|v=="ready");
+                        let ready=Database::open_existing(&path).and_then(|db|db.get::<String>("status")).is_ok_and(|v|v=="ready");
                         // 新计划一律回到「全部」筛选：沿用上一任务的筛选可能恰好计数为 0，
                         // 造成「空列表 + 高亮禁用胶囊」的死角。
                         let filter={let mut s=state.borrow_mut();s.task=Some(path.clone());s.page=0;s.page_starts=vec![0];s.conflict=None;s.control=None;
@@ -941,7 +968,10 @@ pub fn run_with_pre_loop_hook(hook:impl FnOnce(&AppWindow)+'static)->Result<()> 
                         }
                     }
                     Event::Notice(text)=>ui.set_notice_text(text.into()),
-                    Event::Error(text)=>{ui.set_proxy_busy(false);ui.set_net_test_busy(false);ui.set_error_text(text.into());},
+                    // Error 只更新错误文案：计划加载/导出失败不得误清代理或网络测试的 busy。
+                    Event::Error(text)=>ui.set_error_text(text.into()),
+                    Event::ProxyFailed(text)=>{ui.set_proxy_busy(false);ui.set_error_text(text.into());},
+                    Event::NetTestFailed(text)=>{ui.set_net_test_busy(false);ui.set_net_test_summary("尚未测试".into());ui.set_error_text(text.into());},
                     Event::ProxySnapshot(snap)=>{ui.set_proxy_busy(false);apply_proxy_snapshot(&ui,snap);},
                     Event::NetTestReport(report)=>{ui.set_net_test_busy(false);apply_net_test_report(&ui,report);},
                     Event::WslDistros(distros,error)=>{
@@ -1018,6 +1048,7 @@ mod gui_tests{
             self.ui.set_show_advanced(false);
             self.ui.set_screen(0);
             self.ui.set_active_tool_id("directory-organizer".into());
+            reset_tool_list(&self.ui);
             self.ui.set_proxy_busy(false);
             self.ui.set_proxy_env_summary("尚未检测".into());
             self.ui.set_proxy_env_set_lines(Rc::new(VecModel::from(Vec::<SharedString>::new())).into());

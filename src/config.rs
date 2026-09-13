@@ -37,9 +37,17 @@ pub struct Config {
     pub extract: bool,
     pub nested_archives: bool,
     pub archive_delete: DeleteChoice,
+    /// 解压冲突策略。默认 Newest（与历史行为一致）：判定采用新文件时会删除/覆盖
+    /// 已有文件，解压侧对每次此类替换写带策略名的明确警告日志；希望绝不覆盖的
+    /// 用户应显式选择 Skip。
     pub extract_conflict: ConflictPolicy,
     pub max_depth: u32,
+    /// 单包条目数上限。默认 100 万：足以覆盖正常压缩包，同时约束异常包的
+    /// inode/内存放大；超大合法包可在高级设置中调高。
     pub max_entries: u64,
+    /// 单包展开总量上限（GiB）。0 = 不额外限制。注意：无 Size 元数据的流式包
+    /// （gzip/bzip2/xz 等）在 archive.rs 中另有内置硬顶（STREAM_UNPACKED_CAP_GIB），
+    /// 本项只能收紧、不能放宽该硬顶。
     pub max_unpacked_gib: u64,
     pub max_file_gib: u64,
     pub max_ratio: u64,
@@ -54,6 +62,9 @@ pub struct Config {
     pub same_size_keep: KeepPolicy,
     pub same_name_different_size: bool,
     pub different_size_keep: KeepPolicy,
+    /// 版本比较范围。true = 仅同目录（默认，最保守）；gui.rs 勾选「允许跨目录」时
+    /// 会把此项写成 false（界面取反显示）。引擎 planner.rs：true → 按 lower(rel)
+    /// 同目录分组，false → 按 lower(name) 全局按文件名分组。
     pub conflict_scope_directory: bool,
     pub conflict_delete: DeleteChoice,
     pub classify: ClassifyMode,
@@ -87,7 +98,11 @@ impl Default for Config {
             recursive: true, include_hidden: false, include_system: false,
             exclusions: ".git/**;node_modules/**;$RECYCLE.BIN/**;System Volume Information/**;.svn/**;.hg/**;.vs/**;.idea/**;AppData/**;ProgramData/**;Program Files/**;Program Files (x86)/**;Program Files (Arm)/**;Windows/**;Windows.old/**;$Windows.~BT/**;$Windows.~WS/**;WindowsApps/**;Packages/**;Recovery/**;PerfLogs/**;Config.Msi/**;SoftwareDistribution/**;Application Data/**;Local Settings/**;Temp/**;Tmp/**;Cookies/**;Recent/**;OneDrive/**".into(),
             extract: true, nested_archives: true, archive_delete: DeleteChoice::Global,
-            extract_conflict: ConflictPolicy::Newest, max_depth: 16, max_entries: 10_000_000,
+            // 默认 Newest 与历史行为一致；涉及删除时解压侧写带策略名的警告日志。
+            extract_conflict: ConflictPolicy::Newest, max_depth: 16,
+            // 100 万条目足够覆盖正常压缩包，同时约束异常包的条目放大；超大合法包可调高。
+            max_entries: 1_000_000,
+            // 0 = 不额外限制。无 Size 元数据的流式包在 archive.rs 另有内置 50 GiB 硬顶。
             max_unpacked_gib: 0, max_file_gib: 0, max_ratio: 10_000, reserve_gib: 1,
             dedup_same_name: true, dedup_copy_names: true, dedup_other_names: true,
             keep_duplicate: KeepPolicy::Newest, duplicate_action: DuplicateAction::Delete,

@@ -5,18 +5,36 @@ use serde::{de::DeserializeOwned, Serialize};
 use std::path::{Path, PathBuf};
 
 pub const SCHEMA: &str = include_str!("schema.sql");
+/// 当前代码已知的任务库 schema 版本；库版本高于此值时 fail-fast，避免用旧逻辑读新库。
+pub const SCHEMA_VERSION: i64 = 1;
 pub struct Database { pub conn: Connection, pub directory: PathBuf }
 impl Database {
     pub fn create(directory: &Path) -> Result<Self> {
         std::fs::create_dir_all(directory)?;
         let value = Self::open(directory)?;
         value.conn.execute_batch(SCHEMA)?;
+        value.conn.pragma_update(None, "user_version", SCHEMA_VERSION)?;
         Ok(value)
     }
     pub fn open(directory: &Path) -> Result<Self> {
-        let conn = Connection::open(directory.join("task.sqlite3"))?;
+        Self::open_impl(directory, false)
+    }
+    /// 只读/打开已有任务库的场景使用：库文件不存在时报错，不静默创建空库。
+    pub fn open_existing(directory: &Path) -> Result<Self> {
+        Self::open_impl(directory, true)
+    }
+    fn open_impl(directory: &Path, existing_only: bool) -> Result<Self> {
+        let path = directory.join("task.sqlite3");
+        if existing_only {
+            anyhow::ensure!(path.is_file(), "任务库文件不存在：{}", path.display());
+        }
+        let conn = Connection::open(path)?;
         conn.busy_timeout(std::time::Duration::from_secs(5))?;
         conn.execute_batch("PRAGMA journal_mode=WAL; PRAGMA synchronous=NORMAL; PRAGMA temp_store=FILE; PRAGMA cache_size=-65536; PRAGMA foreign_keys=ON;")?;
+        // 版本检查：库版本高于当前已知版本则拒绝打开（fail-fast），避免静默读写不兼容结构。
+        let version: i64 = conn.query_row("PRAGMA user_version", [], |row| row.get(0))?;
+        anyhow::ensure!(version <= SCHEMA_VERSION,
+            "任务库版本过高（{version} > {SCHEMA_VERSION}），请升级 JchTools 后再使用该任务库");
         Ok(Self { conn, directory: directory.to_path_buf() })
     }
     pub fn set<T: Serialize>(&self, key: &str, value: &T) -> Result<()> {
@@ -65,10 +83,13 @@ impl Database {
     pub fn actions_page(&self, after: i64, limit: usize) -> Result<Vec<Action>> {
         self.actions_page_filtered(after, limit, None)
     }
-    /// kind_filter: None=全部；Some("delete"/"move"/"hardlink"/"empty_directory")（serde snake_case）
+    /// kind_filter: None=全部；Some("delete"/"move"/"hardlink"/"empty_directory")（serde snake_case）。
+    /// kind 白名单外的取值视为调用错误，直接报错，避免拼接出意外 SQL 语义。
     pub fn actions_page_filtered(&self, after: i64, limit: usize, kind_filter: Option<&str>) -> Result<Vec<Action>> {
         let limit = limit.min(1000) as i64;
         let rows = if let Some(kind) = kind_filter {
+            anyhow::ensure!(matches!(kind, "delete" | "move" | "hardlink" | "empty_directory"),
+                "未知的行动类型筛选：{kind}");
             let like = format!("\"{kind}\"");
             let mut statement = self.conn.prepare("SELECT id,body,selected,state FROM actions WHERE id>?1 AND kind=?2 ORDER BY id LIMIT ?3")?;
             let rows = statement.query_map(params![after, like, limit], action_row)?.collect::<rusqlite::Result<Vec<_>>>()?;
@@ -88,7 +109,11 @@ impl Database {
         Ok(())
     }
     pub fn mark_action(&self, id: i64, state: &str) -> Result<()> {
-        self.conn.execute("UPDATE actions SET state=?1 WHERE id=?2", params![state,id])?;
+        // 状态白名单：与 engine.rs 实际使用的状态集合保持一致。
+        anyhow::ensure!(matches!(state, "pending" | "done" | "skipped" | "failed" | "unselected"),
+            "非法的行动状态：{state}");
+        let changed = self.conn.execute("UPDATE actions SET state=?1 WHERE id=?2", params![state, id])?;
+        anyhow::ensure!(changed == 1, "行动不存在或状态未改变");
         Ok(())
     }
     pub fn reserve_target(&self, target: &str, file_id: i64) -> Result<bool> {

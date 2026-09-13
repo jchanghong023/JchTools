@@ -13,6 +13,7 @@ gui = ["dep:slint", "dep:slint-build", "dep:rfd", "dep:open", "dep:copypasta"]
 [dependencies]
 anyhow = "1.0"
 blake3 = "1.8"
+ctrlc = "3.4"
 chrono = { version = "0.4", default-features = false, features = ["clock", "serde"] }
 csv = "1.3"
 directories-next = "2.0"

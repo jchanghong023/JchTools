@@ -103,6 +103,9 @@ fn native_recycle(path: &Path) -> std::result::Result<(), RecycleFailure> {
 fn native_recycle(path: &Path) -> std::result::Result<(), RecycleFailure> {
     trash::delete(path).map_err(|e| RecycleFailure::Failed(e.to_string()))
 }
+/// 安全删除一个已规划的路径：拒绝链接/非空目录，校验扫描快照未变化；
+/// 回收模式按「条目计数验证 → 未验证 → （可选）降级永久删除」的顺序处理，
+/// 用户取消绝不降级。返回值区分「已回收 / 回收但未验证 / 永久删除 / 保留」。
 pub fn remove(
     path: &Path, expected: Option<&Snapshot>, mode: DeleteMode, fallback: bool,
     control: &Control, recycler: &dyn Recycler,
@@ -150,12 +153,37 @@ pub fn remove(
 
 #[cfg(test)]
 mod tests {
-    use super::display_path_text;
+    use super::{display_path_text, display_time_text};
 
     #[test]
     fn display_path_text_strips_extended_prefix() {
         assert_eq!(display_path_text(r"\\?\D:\testzip"), r"D:\testzip");
         assert_eq!(display_path_text(r"\\?\UNC\server\share"), r"\\server\share");
         assert_eq!(display_path_text(r"D:\plain"), r"D:\plain");
+    }
+
+    #[test]
+    fn display_time_text_formats_epoch_and_falls_back_on_overflow() {
+        // 任意本地时区下都应格式化为日期时间（含 - 与 :），而不是回落数字。
+        let formatted = display_time_text(0);
+        assert!(formatted.contains('-') && formatted.contains(':'), "0ns 应格式化为日期时间：{formatted}");
+        // i64::MAX 纳秒约 2262 年，仍在 chrono 范围内：格式化成功即可。
+        assert!(display_time_text(i64::MAX).contains('-'));
+        // 负时间戳（如 1601 Windows FILETIME 原点之前）不得 panic。
+        let _ = display_time_text(i64::MIN);
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn volume_root_covers_local_and_unc() {
+        use super::volume_root;
+        use std::path::PathBuf;
+        assert_eq!(volume_root(std::path::Path::new(r"\\?\D:\testzip\a.txt")), Some(PathBuf::from(r"D:\")));
+        assert_eq!(volume_root(std::path::Path::new(r"D:\testzip\a.txt")), Some(PathBuf::from(r"D:\")));
+        assert_eq!(volume_root(std::path::Path::new(r"\\server\share\x.txt")), Some(PathBuf::from(r"\\server\share\")));
+        assert_eq!(volume_root(std::path::Path::new(r"\\?\UNC\server\share\x.txt")), Some(PathBuf::from(r"\\server\share\")));
+        // UNC 缺 share、非盘符路径 → 无法定位回收站卷。
+        assert_eq!(volume_root(std::path::Path::new(r"\\server")), None);
+        assert_eq!(volume_root(std::path::Path::new("/unix-like/path")), None);
     }
 }

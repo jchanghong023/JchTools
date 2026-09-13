@@ -97,7 +97,7 @@
     "section": "解压",
     "key": "max_entries",
     "title": "单包最多条目数",
-    "hint": "防止异常包产生过多文件；默认 1000 万。",
+    "hint": "防止异常包产生过多文件；默认 100 万。",
     "kind": "number",
     "choices": [],
     "tier": "advanced"
@@ -443,7 +443,7 @@
     "section": "清理",
     "key": "clean_copy_name",
     "title": "去重后清理保留文件的副本后缀",
-    "hint": "只有实际确认过相同内容的保留者才会去掉 (1) / Copy / 副本；硬链接模式下不适用。",
+    "hint": "只有实际确认过相同内容的保留者才会去掉 (1) / Copy / 副本；中文「副本」紧贴文件名（如「报告副本.pdf」）无分隔符也会被识别并去掉；硬链接模式下不适用。",
     "kind": "bool",
     "choices": [],
     "tier": "advanced"
@@ -494,7 +494,7 @@
     "section": "安全与性能",
     "key": "exclusions",
     "title": "排除路径规则",
-    "hint": "分号分隔的 glob；匹配相对于所选目录的路径。",
+    "hint": "分号分隔的 glob；匹配相对于所选目录的路径；* 默认可匹配路径分隔符，即可跨多层目录命中。",
     "kind": "text",
     "choices": [],
     "tier": "advanced"

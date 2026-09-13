@@ -6,6 +6,7 @@
 # 源码包、许可证目录与 NOTICE 同样只是本地构建材料，由打包脚本带入发布 ZIP。
 /resources/7zip/7z.exe
 /resources/7zip/7z.dll
+/resources/7zip/7zz
 /resources/7zip/manifest.json
 /resources/7zip/License.txt
 /resources/7zip/7z*-src.tar.xz
@@ -13,3 +14,5 @@
 /resources/7zip/NOTICE.txt
 *.tmp
 /.tmp/
+# Python 字节码缓存（运行 scripts/*.py 时生成在源码旁）
+__pycache__/

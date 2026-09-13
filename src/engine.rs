@@ -14,6 +14,9 @@ pub struct Job {
     pub summary: Summary,
     pub archive_override: Option<crate::config::ConflictPolicy>,
     pub recycler: Arc<dyn Recycler>,
+    /// 回收未验证的删除次数：summary.deleted 会把它与永久删除合计记账，
+    /// 单独计数用于结束时向用户说明「已删除」口径（见 apply_with）。
+    pub deleted_unverified: u64,
 }
 impl Job {
     pub fn log(&self,phase:&str,source:&str,target:&str,result:&str,reason:&str,size:u64)->Result<()> {
@@ -32,7 +35,9 @@ impl Job {
             DeleteResult::Kept => { self.summary.skipped += 1; },
             DeleteResult::Recycled => { self.summary.recycled += 1; self.summary.recycled_bytes = self.summary.recycled_bytes.saturating_add(size); },
             // 无法确认进入回收站的删除按永久删除如实记账：文件已不可从回收站恢复。
-            DeleteResult::RecycledUnverified => { self.summary.deleted += 1; if expected.is_none_or(|s|s.links <= 1) {
+            // 注意：Summary::description（model.rs）把 deleted 统一显示为「已永久删除」，
+            // 这里用 deleted_unverified 单独计数，结束时补充更准确的口径说明。
+            DeleteResult::RecycledUnverified => { self.summary.deleted += 1; self.deleted_unverified += 1; if expected.is_none_or(|s|s.links <= 1) {
                 self.summary.permanent_bytes = self.summary.permanent_bytes.saturating_add(size);
             } },
             DeleteResult::Permanent => { self.summary.deleted += 1; if expected.is_none_or(|s|s.links <= 1) {
@@ -63,7 +68,7 @@ pub fn prepare_at(root:&Path,config:Config,context:TaskContext,state:&Path,engin
     db.set("root",&fsutil::path_string(&root)?)?; db.set("config",&config)?;
     db.set("status",&"analyzing")?; db.set("summary",&Summary::default())?;
     db.set("created",&chrono::Utc::now().to_rfc3339())?;
-    let mut job = Job { root,config,context,db,summary:Summary::default(),archive_override:None,recycler:Arc::new(NativeRecycler) };
+    let mut job = Job { root,config,context,db,summary:Summary::default(),archive_override:None,recycler:Arc::new(NativeRecycler),deleted_unverified:0 };
     let result = (|| {
         scan(&mut job,true,state)?;
         if job.config.extract {
@@ -231,7 +236,9 @@ pub fn apply_with(directory:&Path,context:TaskContext,recycler:Arc<dyn Recycler>
     anyhow::ensure!(fsutil::path_string(&root)?==root_text,"目录位置已改变或被链接替换（{root_text}）；请重新扫描生成新计划后再执行");
     let config=db.config()?;config.validate()?;
     let summary=db.summary()?;
-    let mut job=Job{root,config,context,db,summary,archive_override:None,recycler};
+    let mut job=Job{root,config,context,db,summary,archive_override:None,recycler,deleted_unverified:0};
+    // 记录 apply 开始时的 deleted 计数，用于结束时区分「本次执行阶段」与跨阶段合计。
+    let deleted_at_apply_start=job.summary.deleted;
     job.db.set("status",&"executing")?;
     let outcome=(||{
         let mut cursor=0;
@@ -255,6 +262,14 @@ pub fn apply_with(directory:&Path,context:TaskContext,recycler:Arc<dyn Recycler>
     })();
     job.db.set("summary",&job.summary)?;
     job.db.set("status",&if outcome.is_ok(){"finished"}else if job.context.control.is_cancelled(){"cancelled"}else{"failed"})?;
+    // Summary::description 把 deleted 统一写成「已永久删除」；若其中含回收未验证的删除，
+    // 这里补充更准确的口径。注意 summary.deleted 包含 prepare 阶段的合计，
+    // 而 deleted_unverified 只统计本次 apply 会话的增量，因此明确限定为「本次执行阶段」。
+    if job.deleted_unverified>0 {
+        let session_deleted=job.summary.deleted.saturating_sub(deleted_at_apply_start);
+        let _=job.log("任务","","","提示",
+            &format!("本次执行阶段已删除 {session_deleted} 项中有 {} 项是回收未验证（原路径已不可恢复，未必进入回收站）；汇总数字是跨阶段合计口径",job.deleted_unverified),0);
+    }
     outcome?;
     Ok(TaskResult{directory:directory.to_path_buf(),summary:job.summary})
 }
@@ -296,15 +311,19 @@ fn execute_action(job:&mut Job,action:&Action)->Result<bool>{
                 match emergency{
                     Ok(emergency)=>match fsutil::rename_noreplace(&temporary,&emergency){
                         Ok(())=>{
-                            job.log("硬链接",&action.source,&emergency.display().to_string(),"警告",&format!("目标被占用，保留链接副本：{error}"),0)?;
+                            // 原路径已被竞争文件占用：链接落到应急名称，用户承诺的原路径不再可用。
+                            let emergency_rel=fsutil::relative_string(&job.root,&emergency).unwrap_or_else(|_|emergency.display().to_string());
+                            job.log("硬链接",&action.source,&emergency_rel,"警告",
+                                &format!("原路径被竞争占用，链接已改用应急名称保留（承诺的原路径不再可用）：{error}"),0)?;
                             job.summary.linked+=1;return Ok(true);
                         }
                         // 兜底改名也失败时移除临时硬链接：内容仍由保留文件持有，不会丢数据。
-                        // 源位置没有留下任何链接，不能再计为已链接。
+                        // 源路径已被删除且没有留下任何链接：既不能计为已链接，也不能标记为 done。
                         Err(inner)=>{
                             let _=fs::remove_file(&temporary);
-                            job.log("硬链接",&action.source,"","警告",&format!("保留链接副本失败，已移除临时链接（内容仍由保留文件持有）：{inner}"),0)?;
-                            return Ok(true);
+                            job.log("硬链接",&action.source,"","跳过",
+                                &format!("硬链接失败，原路径已删除且未留下链接；内容仍由保留文件持有：{inner}（首次改名失败：{error}）"),0)?;
+                            return Ok(false);
                         }
                     },
                     Err(inner)=>{let _=fs::remove_file(&temporary);return Err(inner).context("目标被占用，且无法为保留链接副本分配名称");}

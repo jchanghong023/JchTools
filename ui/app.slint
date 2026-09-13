@@ -236,7 +236,7 @@ component ProgressBar inherits Rectangle {
     height: 8px; border-radius: 4px;
     background: Design.line-soft;
     clip: true;
-    accessible-role: text;
+    accessible-role: progress-indicator;
     accessible-label: root.progress >= 0 ? ("进度 " + round(root.progress * 100) + "%") : "正在处理，总量未知";
     property <bool> sweep: false;
     // bar-width 以组件自身宽度为基准：本组件宽度完全由外层布局分配（不要改成内容自适应，
@@ -476,8 +476,7 @@ export component AppWindow inherits Window {
                 for tool in root.tools: NavItem {
                     text: tool.name;
                     icon: tool.id == "proxy-status" ? 2 : 0;
-                    active: (tool.id == "directory-organizer" && root.screen == 0)
-                        || (tool.id == "proxy-status" && root.screen == 2);
+                    active: tool.id == root.active-tool-id;
                     clicked => { root.select-tool(tool.id); }
                 }
                 Rectangle { height: 12px; background: transparent; }
@@ -852,6 +851,9 @@ export component AppWindow inherits Window {
                             min-height: 96px;
                             // 整行可点：点卡片任意空白处即复制，命令正文与说明也不遗漏。
                             copy-area := TouchArea {
+                                accessible-role: button;
+                                accessible-label: "复制命令：" + tip.title;
+                                accessible-action-default => { root.copy-proxy-command(tip.command, tip.title); }
                                 clicked => { root.copy-proxy-command(tip.command, tip.title); }
                             }
                             VerticalLayout { padding-top: 12px; padding-bottom: 10px; padding-left: 14px; padding-right: 14px; spacing: 6px;

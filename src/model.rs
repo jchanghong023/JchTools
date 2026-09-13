@@ -21,6 +21,39 @@ pub struct FileRecord {
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub enum ActionKind { Delete, Move, Hardlink, EmptyDirectory }
+/// 动作状态。持久化与界面流转仍以 snake_case 文本（"pending"/"done"/"failed"/"skipped"/"unselected"）
+/// 存于 actions.state 列；本枚举提供类型安全的取值/解析，避免各处手写魔法字符串。
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum ActionState { Pending, Done, Failed, Skipped, Unselected }
+impl ActionState {
+    /// 与数据库 actions.state 列、引擎 mark_action 调用一致的 snake_case 文本。
+    pub fn as_str(self) -> &'static str {
+        match self {
+            ActionState::Pending => "pending",
+            ActionState::Done => "done",
+            ActionState::Failed => "failed",
+            ActionState::Skipped => "skipped",
+            ActionState::Unselected => "unselected",
+        }
+    }
+}
+impl std::str::FromStr for ActionState {
+    type Err = String;
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        match s {
+            "pending" => Ok(ActionState::Pending),
+            "done" => Ok(ActionState::Done),
+            "failed" => Ok(ActionState::Failed),
+            "skipped" => Ok(ActionState::Skipped),
+            "unselected" => Ok(ActionState::Unselected),
+            other => Err(format!("未知动作状态：{other}")),
+        }
+    }
+}
+impl From<ActionState> for String {
+    fn from(state: ActionState) -> Self { state.as_str().into() }
+}
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Action {
     pub id: i64,
@@ -33,6 +66,7 @@ pub struct Action {
     pub hash: Option<String>,
     pub mode: DeleteMode,
     pub selected: bool,
+    /// snake_case 文本，合法取值见 [`ActionState`]；暂保留 String 以免牵动 db/gui/planner 的读写路径。
     pub state: String,
 }
 #[derive(Debug, Default, Clone, Serialize, Deserialize)]
@@ -72,4 +106,24 @@ pub fn bytes(value: u64) -> String {
     let mut i = 0;
     while size >= 1024.0 && i + 1 < UNITS.len() { size /= 1024.0; i += 1; }
     if i == 0 { format!("{value} B") } else { format!("{size:.2} {}", UNITS[i]) }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::ActionState;
+    use std::str::FromStr;
+
+    #[test]
+    fn action_state_text_roundtrip_matches_db_values() {
+        for state in [ActionState::Pending, ActionState::Done, ActionState::Failed,
+                      ActionState::Skipped, ActionState::Unselected] {
+            let text = state.as_str();
+            assert_eq!(ActionState::from_str(text).unwrap(), state);
+            // 持久化文本必须与 db.rs mark_action 校验的 snake_case 字面量一致。
+            assert_eq!(serde_json::to_string(&state).unwrap(), format!("\"{text}\""));
+            let as_string: String = state.into();
+            assert_eq!(as_string, text);
+        }
+        assert!(ActionState::from_str("unknown").is_err());
+    }
 }
