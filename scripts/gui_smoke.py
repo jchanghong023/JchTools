@@ -154,12 +154,36 @@ def main() -> int:
     args = parser.parse_args()
     exe = Path(args.exe).resolve()
     data = Path(args.data).resolve()
-    assert exe.is_file(), f"找不到 {exe}"
-    assert data.is_dir(), f"找不到测试数据目录 {data}"
+    if not exe.is_file():
+        raise RuntimeError(f"找不到 {exe}")
+    if not data.is_dir():
+        raise RuntimeError(f"找不到测试数据目录 {data}")
+    # S3 会真实执行整理：只允许对一次性测试副本操作。
+    # 仓库内仅放行 .tmp/（默认 .tmp/gui-smoke/data 就在这里）；其它路径拒绝。
+    repo = Path(__file__).resolve().parent.parent
+    home = Path.home().resolve()
+    under_repo_tmp = repo / ".tmp" in (data, *data.parents)
+    if (data == repo or repo in data.parents) and not under_repo_tmp:
+        raise RuntimeError("拒绝在仓库目录内执行 GUI 整理冒烟（请使用 .tmp/gui-smoke/data 或其它副本）")
+    if not under_repo_tmp and (data == home or home in data.parents):
+        raise RuntimeError("拒绝在用户主目录内执行 GUI 整理冒烟（请使用一次性测试副本）")
+    # 盘符根：parts 只有 ('D:\\',) 一层；'D:\\foo' 是 2 层，不得误杀。
+    if data.drive and len(data.parts) <= 1:
+        raise RuntimeError(f"拒绝在盘符根目录执行整理冒烟：{data}")
 
     s1_launch_and_exit(str(exe))
-    s2_analyze_only(str(exe), str(data))
-    s3_full_organize(str(exe), str(data))
+    # S2 分析会真实解压改写语料；S3 前从旁路副本恢复，保证“干净语料上的完整链路”。
+    import shutil, tempfile
+    scratch = Path(tempfile.mkdtemp(prefix="jchtools-gui-smoke-", dir=str(repo / ".tmp" if (repo / ".tmp").is_dir() else None)))
+    try:
+        fresh = scratch / "data"
+        shutil.copytree(data, fresh)
+        s2_analyze_only(str(exe), str(fresh))
+        shutil.rmtree(fresh, ignore_errors=True)
+        shutil.copytree(data, fresh)
+        s3_full_organize(str(exe), str(fresh))
+    finally:
+        shutil.rmtree(scratch, ignore_errors=True)
     return 0
 
 

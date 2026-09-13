@@ -60,6 +60,13 @@ impl CliArgs{
     fn positional(&self,index:usize,usage:&str)->Result<&OsStr>{
         self.positionals.get(index).map(|v|v.as_os_str()).with_context(||format!("用法：{usage}"))
     }
+    /// 解析结束后校验位置参数个数：多余参数不再静默忽略。
+    fn finish(self,usage:&str,expected:usize)->Result<Self>{
+        if self.positionals.len()!=expected{
+            bail!("用法：{usage}\n位置参数个数不符：期望 {expected}，实际收到 {}",self.positionals.len());
+        }
+        Ok(self)
+    }
 }
 
 /// 打开任务库前确认 task.sqlite3 已存在，避免 Database::open 在缺失路径上新建空库。
@@ -102,25 +109,34 @@ fn print_plan_stats(db:&Database)->Result<()>{
 fn run()->Result<()>{
     // 用 args_os 保留非 UTF-8 路径，避免 Windows 上 std::env::args() 直接 panic
     let args:Vec<OsString>=std::env::args_os().skip(1).collect();
-    // -h/--help 与 --version：显式处理，打印到 stdout 并 exit(0)
-    if args.iter().any(|a|a==OsStr::new("-h")||a==OsStr::new("--help")){print!("{HELP}");std::process::exit(0);}
-    if args.iter().any(|a|a==OsStr::new("--version")){println!("{VERSION}");std::process::exit(0);}
+    // -h/--help 与 --version：仅当首个参数（无子命令前）才短路。
+    // 若在 apply/analyze 等子命令后出现，禁止 exit 0 伪成功（会落到未知参数错误）。
+    match args.first().and_then(|a|a.to_str()){
+        Some("-h")|Some("--help")=>{print!("{HELP}");std::process::exit(0);}
+        Some("--version")=>{println!("{VERSION}");std::process::exit(0);}
+        _=>{}
+    }
     let Some(sub)=args.first()else{eprint!("{HELP}");std::process::exit(1);};
     let sub=sub.to_str().context("子命令名必须是有效 UTF-8")?;
     let rest=&args[1..];
     match sub{
         "defaults"=>{
-            let parsed=CliArgs::parse(rest,&[],&["--force"])?;
-            let path=PathBuf::from(parsed.positional(0,"jchtools-cli defaults <配置文件.json> [--force]")?);
-            // 已存在则拒绝覆盖，确认后附加 --force
+            let usage="jchtools-cli defaults <配置文件.json> [--force]";
+            let parsed=CliArgs::parse(rest,&[],&["--force"])?.finish(usage,1)?;
+            let path=PathBuf::from(parsed.positional(0,usage)?);
+            // 已存在则拒绝覆盖，确认后附加 --force；目录路径一律拒绝（避免对目录做原子写）。
+            if path.is_dir(){
+                bail!("目标是目录而不是配置文件：{}",path.display());
+            }
             if path.exists()&&!parsed.has("--force"){
                 bail!("配置文件已存在：{}；如确认覆盖请附加 --force",path.display());
             }
             Config::default().save(&path)?;
         }
         "analyze"=>{
-            let parsed=CliArgs::parse(rest,&["--config","--engine","--state"],&["--extract","--yes"])?;
-            let root=PathBuf::from(parsed.positional(0,"jchtools-cli analyze <目录> [--config 配置文件.json] [--extract --yes] [--engine 完整引擎绝对路径] [--state 状态目录]")?);
+            let usage="jchtools-cli analyze <目录> [--config 配置文件.json] [--extract --yes] [--engine 完整引擎绝对路径] [--state 状态目录]";
+            let parsed=CliArgs::parse(rest,&["--config","--engine","--state"],&["--extract","--yes"])?.finish(usage,1)?;
+            let root=PathBuf::from(parsed.positional(0,usage)?);
             let mut cfg=if let Some(path)=parsed.value("--config"){Config::load(Path::new(path))?}else{Config::default()};
             cfg.extract=parsed.has("--extract");
             if cfg.extract&&!parsed.has("--yes"){bail!("解压会修改目录，需要显式 --extract --yes；不解压时仅生成计划");}
@@ -134,15 +150,31 @@ fn run()->Result<()>{
             eprintln!("{}",cfg.destructive_warning());
             let ctx=TaskContext::default();
             install_ctrlc(&ctx);
-            let result=engine::prepare_at(&root,cfg,ctx,&state,engine_path.as_deref())?;
-            println!("任务目录：{}\n{}\n尚未执行去重/归类/清理。",result.directory.display(),result.summary.description());
+            // 失败/取消时 prepare_at 仍会创建任务目录，但 API 只在成功时返回路径；
+            // 先记录已有任务目录，失败后把新增目录路径写到 stderr，便于事后检查。
+            let tasks_root=state.join("tasks");
+            let before:std::collections::HashSet<PathBuf>=std::fs::read_dir(&tasks_root).ok().map(|rd|rd.flatten().filter(|e|e.path().is_dir()).map(|e|e.path()).collect()).unwrap_or_default();
+            let prepared=engine::prepare_at(&root,cfg,ctx,&state,engine_path.as_deref());
+            match prepared{
+                Ok(result)=>{
+                    println!("任务目录：{}\n{}\n尚未执行去重/归类/清理。",result.directory.display(),result.summary.description());
+                }
+                Err(error)=>{
+                    let created:Vec<PathBuf>=std::fs::read_dir(&tasks_root).ok().map(|rd|rd.flatten().filter(|e|e.path().is_dir()).map(|e|e.path()).filter(|p|!before.contains(p)).collect()).unwrap_or_default();
+                    if let Some(dir)=created.into_iter().max_by_key(|p|std::fs::metadata(p).and_then(|m|m.modified()).ok()){
+                        eprintln!("任务目录：{}（analyze 失败或已取消，审计记录保留）",dir.display());
+                    }
+                    return Err(error);
+                }
+            }
         }
         "apply"=>{
-            let parsed=CliArgs::parse(rest,&[],&["--yes"])?;
-            let task=PathBuf::from(parsed.positional(0,"jchtools-cli apply <任务目录> --yes")?);
+            let usage="jchtools-cli apply <任务目录> --yes";
+            let parsed=CliArgs::parse(rest,&[],&["--yes"])?.finish(usage,1)?;
+            let task=PathBuf::from(parsed.positional(0,usage)?);
             if !parsed.has("--yes"){bail!("必须先检查计划，再以 --yes 明确确认文件变更");}
             ensure_task_db(&task)?;
-            let db=Database::open(&task)?;
+            let db=Database::open_existing(&task)?;
             // 警告与计划统计走 stderr，避免污染可重定向的 stdout 结果
             eprintln!("{}",db.config()?.destructive_warning());
             print_plan_stats(&db)?;
@@ -153,10 +185,11 @@ fn run()->Result<()>{
             println!("{}",result.summary.description());
         }
         "inspect"=>{
-            let parsed=CliArgs::parse(rest,&[],&[])?;
-            let task=PathBuf::from(parsed.positional(0,"jchtools-cli inspect <任务目录>")?);
+            let usage="jchtools-cli inspect <任务目录>";
+            let parsed=CliArgs::parse(rest,&[],&[])?.finish(usage,1)?;
+            let task=PathBuf::from(parsed.positional(0,usage)?);
             ensure_task_db(&task)?;
-            let db=Database::open(&task)?;
+            let db=Database::open_existing(&task)?;
             println!("{}",db.summary()?.description());
             // 分页取完所有计划项：只取前 100 条会静默丢掉大计划里的大部分动作。
             let mut cursor=0i64;
@@ -166,16 +199,20 @@ fn run()->Result<()>{
                 cursor=actions.last().unwrap().id;
                 for action in &actions{
                     let kind=match action.kind{ActionKind::Delete=>"删除",ActionKind::Move=>"移动",ActionKind::Hardlink=>"硬链接",ActionKind::EmptyDirectory=>"空目录复查"};
-                    println!("{} {} {} -> {} | {} [{}]",action.id,kind,action.source,action.target.clone().unwrap_or_else(||"-".into()),action.reason,action.state);
+                    // 对齐 GUI：target 为空时回落显示保留文件（keeper），避免计划表出现空目标列。
+                    let target=action.target.clone().unwrap_or_else(||
+                        action.keeper.as_ref().map(|v|format!("保留 {}",v.0)).unwrap_or_default());
+                    println!("{} {} {} -> {} | {} [{}] selected={}",action.id,kind,action.source,target,action.reason,action.state,action.selected);
                 }
             }
         }
         "report"=>{
-            let parsed=CliArgs::parse(rest,&[],&[])?;
-            let task=PathBuf::from(parsed.positional(0,"jchtools-cli report <任务目录> <新建CSV路径>")?);
-            let output=PathBuf::from(parsed.positional(1,"jchtools-cli report <任务目录> <新建CSV路径>")?);
+            let usage="jchtools-cli report <任务目录> <新建CSV路径>";
+            let parsed=CliArgs::parse(rest,&[],&[])?.finish(usage,2)?;
+            let task=PathBuf::from(parsed.positional(0,usage)?);
+            let output=PathBuf::from(parsed.positional(1,usage)?);
             ensure_task_db(&task)?;
-            Database::open(&task)?.export_csv(&output)?;
+            Database::open_existing(&task)?.export_csv(&output)?;
         }
         other=>{
             eprintln!("未知子命令：{other}");

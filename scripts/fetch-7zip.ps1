@@ -1,4 +1,4 @@
-﻿#requires -Version 5.1
+#requires -Version 5.1
 [CmdletBinding()]
 param(
     [string]$Version = '26.03',
@@ -10,7 +10,7 @@ Set-StrictMode -Version Latest
 if ($env:OS -ne 'Windows_NT') { throw 'This packaging helper requires Windows.' }
 if ($Version -notmatch '^\d{2}\.\d{2}$') { throw 'Invalid 7-Zip release version.' }
 $repo = [IO.Path]::GetFullPath((Join-Path $PSScriptRoot '..'))
-$cache = Join-Path $repo ".cache\7zip-$Version"
+$cache = Join-Path $repo ".tmp\7zip-$Version"
 New-Item -ItemType Directory -Force -Path $cache,$Destination | Out-Null
 $Destination = [IO.Path]::GetFullPath($Destination)
 $headers = @{ 'User-Agent'='JchTools-Builder'; 'Accept'='application/vnd.github+json' }

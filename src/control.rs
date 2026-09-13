@@ -53,7 +53,10 @@ pub enum Event {
     Ready(std::path::PathBuf, crate::model::Summary),
     Done(std::path::PathBuf, crate::model::Summary),
     Failed(String),
-    PlanPage(std::path::PathBuf, Vec<crate::model::Action>, usize),
+    /// 计划页加载结果：path/actions/page + 请求代际 gen 与筛选 filter。
+    /// 事件循环只应用「gen 仍是 latest 且 filter/page 与当前视图一致」的结果；
+    /// 低代际晚到事件不得取走或清掉更高代际的 completed 缓存。
+    PlanPage(std::path::PathBuf, Vec<crate::model::Action>, usize, u64, Option<String>),
     /// 第二项携带 (动作 id, 保存后的勾选值)，界面用它就地修正计划行，避免复选框与数据库不一致。
     SelectionSaved(std::path::PathBuf, Option<(i64, bool)>, Option<String>),
     /// 一次性提示（成功信息等），界面用中性样式展示

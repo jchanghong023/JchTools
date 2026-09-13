@@ -167,14 +167,19 @@ impl Recycler for MoveRecycle {fn recycle(&self,p:&Path)->Result<(),RecycleFailu
 }
 #[test] fn export_csv_escapes_formula_prefixes(){
     // 表格软件会把以 = 开头的单元格当公式执行：导出 CSV 时不可信字段必须转义。
+    // 同时覆盖不可见前缀伪装：U+FEFF 等格式字符跟在危险字符前时仍须判定为公式注入。
     let f=Fixture::new();let task=f.plan(base());
     let db=Database::open(&task.directory).unwrap();
     db.log("删除","=cmd|'/c calc'!a1","","准备","注入尝试",7).unwrap();
+    db.log("删除","\u{FEFF}=cmd|'/c calc'!a1","\u{200B}+cmd","准备","不可见前缀注入",9).unwrap();
     let csv=f.root.join("inject.csv");
     db.export_csv(&csv).unwrap();
     let text=fs::read_to_string(&csv).unwrap();
-    let hit=text.lines().find(|line|line.contains("calc")).expect("注入样本应出现在导出中");
-    assert!(hit.contains("'=cmd"),"以 = 开头的不可信字段必须被转义：{hit}");
+    let plain=text.lines().find(|line|line.contains("calc")&&!line.contains("不可见")).expect("注入样本应出现在导出中");
+    assert!(plain.contains("'=cmd"),"以 = 开头的不可信字段必须被转义：{plain}");
+    let stealth=text.lines().find(|line|line.contains("不可见")).expect("不可见前缀样本应出现在导出中");
+    assert!(stealth.contains("'\u{FEFF}=cmd"),"U+FEFF 前缀伪装的公式必须被转义：{stealth}");
+    assert!(stealth.contains("'\u{200B}+cmd"),"U+200B 前缀伪装的公式必须被转义：{stealth}");
 }
 #[test] fn multipart_name_covers_volume_detection_corners(){
     assert!(rules::multipart_name("x.part1.rar"));
@@ -232,11 +237,16 @@ impl Recycler for MoveRecycle {fn recycle(&self,p:&Path)->Result<(),RecycleFailu
     assert!(db.set_selected(id,true).is_err());
 }
 #[test] fn reserve_target_is_case_insensitive_unique(){
-    // reserve_target 以小写路径入库：大小写不同的同一路径视为冲突（Windows 大小写不敏感文件系统）。
     let f=Fixture::new();let db=Database::create(&f.state.join("reserve-db")).unwrap();
     assert!(db.reserve_target("Reports/Final.PDF",1).unwrap(),"首次预留必须成功");
-    assert!(!db.reserve_target("reports/final.pdf",2).unwrap(),"大小写不同的同一路径必须视为冲突");
-    assert!(!db.reserve_target("REPORTS/final.PDF",3).unwrap());
+    // 大小写折叠仅 Windows：大小写敏感文件系统上仅大小写不同的路径是不同目标。
+    if cfg!(windows) {
+        assert!(!db.reserve_target("reports/final.pdf",2).unwrap(),"大小写不同的同一路径必须视为冲突");
+        assert!(!db.reserve_target("REPORTS/final.PDF",3).unwrap());
+    } else {
+        assert!(db.reserve_target("reports/final.pdf",2).unwrap(),"大小写敏感文件系统上不同大小写路径应可并存");
+        assert!(db.reserve_target("REPORTS/final.PDF",3).unwrap());
+    }
     assert!(db.reserve_target("reports/other.pdf",4).unwrap(),"不同路径可以预留");
     assert!(db.reserve_target("other.pdf",5).unwrap());
 }

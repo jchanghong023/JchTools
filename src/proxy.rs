@@ -18,7 +18,7 @@ const KNOWN_CLIENTS: &[&str] = &[
 ];
 /// `naive` 作为普通子串太泛，只按显式名单匹配。
 const NAIVE_EXPLICIT: &[&str] = &["naive", "naiveproxy"];
-const VIRTUAL_ADAPTER_HINTS: &[&str] = &["tap", "wintun", "wireguard", "openvpn", "tun", "虚拟"];
+const VIRTUAL_ADAPTER_HINTS: &[&str] = &["tap", "wintun", "wireguard", "openvpn", "tun", "虚拟", "virtual"];
 
 #[derive(Debug, Clone)]
 pub struct EnvVarStatus {
@@ -397,10 +397,28 @@ pub fn parse_netstat_listeners(text: &str) -> HashMap<u32, Vec<u16>> {
 pub fn is_virtual_adapter(name: &str, description: &str) -> bool {
     let hay = format!("{name} {description}").to_ascii_lowercase();
     VIRTUAL_ADAPTER_HINTS.iter().any(|hint| {
-        if *hint == "虚拟" {
-            hay.contains(hint)
-        } else {
-            hay.contains(hint)
+        match *hint {
+            // 中文关键词按子串；英文关键词按词边界，避免 Fortinet 等含 "tun" 误伤。
+            "虚拟" => hay.contains(hint),
+            "tap" | "tun" => {
+                // tun0/tap1 等常见命名：后缀数字也算词边界。
+                let bytes = hay.as_bytes();
+                let mut found = false;
+                let mut start = 0;
+                while let Some(pos) = hay[start..].find(hint) {
+                    let i = start + pos;
+                    let before_ok = i == 0 || !bytes[i - 1].is_ascii_alphanumeric();
+                    let after = i + hint.len();
+                    let after_ok = after >= bytes.len() || !bytes[after].is_ascii_alphabetic();
+                    if before_ok && after_ok {
+                        found = true;
+                        break;
+                    }
+                    start = i + hint.len();
+                }
+                found
+            }
+            other => hay.contains(other),
         }
     })
 }
@@ -497,6 +515,9 @@ pub fn parse_net_ip_address_json(text: &str) -> Vec<(u32, String)> {
 }
 
 /// 把 IPv4 列表挂到对应网卡（按 ifIndex）。
+/// 挂载后不按字典序排序：字典序会让 169.254.x（APIPA）排在 192.168.x 前面，
+/// 且「10.0.0.2」与「9.0.0.1」比较也不反映数值大小。
+/// 改为：优先非 APIPA（非 169.254.）、非回环，再按四段数值排序。
 pub fn attach_ipv4_to_adapters(adapters: &mut [AdapterStatus], if_indexes: &[u32], ips: &[(u32, String)]) {
     for (adapter, if_index) in adapters.iter_mut().zip(if_indexes.iter()) {
         for (idx, ip) in ips {
@@ -504,28 +525,61 @@ pub fn attach_ipv4_to_adapters(adapters: &mut [AdapterStatus], if_indexes: &[u32
                 adapter.ipv4.push(ip.clone());
             }
         }
-        adapter.ipv4.sort();
+        sort_ipv4_prefer_real(&mut adapter.ipv4);
     }
 }
 
+/// IPv4 排序：优先非 APIPA（非 169.254.）、非回环，再按四段数值升序。
+/// 非 IPv4 文本排在末尾，不参与优先级。
+fn sort_ipv4_prefer_real(ips: &mut [String]) {
+    ips.sort_by(|a, b| {
+        let ra = ipv4_sort_key(a);
+        let rb = ipv4_sort_key(b);
+        ra.cmp(&rb).then_with(|| a.cmp(b))
+    });
+}
+
+/// (是否合法 IPv4, 优先级等级, 四段数值)。等级越小越优先；非法放最后。
+fn ipv4_sort_key(ip: &str) -> (bool, u8, [u8; 4]) {
+    let Ok(addr) = ip.parse::<std::net::Ipv4Addr>() else {
+        // 非 IPv4（解析失败）：合法地址是 (false, rank)；false < true，故用 (true,…) 排末尾。
+        return (true, 3, [0; 4]);
+    };
+    let octets = addr.octets();
+    let is_loopback = octets[0] == 127;
+    let is_apipa = octets[0] == 169 && octets[1] == 254;
+    let rank = if is_loopback || is_apipa {
+        // APIPA / 回环次之（回环已在 parse 阶段过滤，这里双保险）。
+        2
+    } else {
+        0
+    };
+    (false, rank, octets)
+}
+
 /// 从网卡列表挑选「当前系统对外 IPv4」优先级：Up 且非虚拟 → 有地址的任意 Up → 有地址的任意卡。
+/// 每一档内对候选地址先按「非 APIPA/回环 → 数值序」挑第一个，避免直接取字典序 first。
 pub fn pick_local_ip(adapters: &[AdapterStatus]) -> String {
-    let candidates = |filter: fn(&AdapterStatus) -> bool| -> Vec<String> {
-        adapters
+    let pick_best = |filter: fn(&AdapterStatus) -> bool| -> Option<String> {
+        let mut candidates: Vec<String> = adapters
             .iter()
             .filter(|a| filter(a))
             .flat_map(|a| a.ipv4.iter().cloned())
-            .collect()
+            .collect();
+        sort_ipv4_prefer_real(&mut candidates);
+        candidates.into_iter().next()
     };
-    let prefer = candidates(|a| status_is_up(&a.status) && !a.virtual_like);
-    let up_any = candidates(|a| status_is_up(&a.status));
-    let any = candidates(|_| true);
-    prefer.into_iter().next().or_else(|| up_any.into_iter().next()).or_else(|| any.into_iter().next()).unwrap_or_default()
+    let prefer = pick_best(|a| status_is_up(&a.status) && !a.virtual_like);
+    let up_any = pick_best(|a| status_is_up(&a.status));
+    let any = pick_best(|_| true);
+    prefer.or(up_any).or(any).unwrap_or_default()
 }
 
 fn status_is_up(status: &str) -> bool {
     let lower = status.to_ascii_lowercase();
-    lower.trim() == "up"
+    // Get-NetAdapter 用 Up；netsh 英文用 Connected；中文界面常见「已连接」。
+    let trimmed = lower.trim();
+    matches!(trimmed, "up" | "connected" | "已连接" | "已启用")
 }
 
 /// 校验并截取公共回显服务返回的纯 IP 文本（防止 HTML/异常页进入界面）。
@@ -822,12 +876,13 @@ fn current_env_map() -> HashMap<String, String> {
 }
 
 /// 一站式只读检测。单项失败写入 notes，整体不 panic、不中断其它检测。
-pub fn detect() -> ProxySnapshot {
-    detect_with_env(&current_env_map())
+/// `fetch_public_ip=true` 时向公共回显服务查询出口 IP（仅用户显式刷新时传 true）。
+pub fn detect(include_public_ip: bool) -> ProxySnapshot {
+    detect_with_env(&current_env_map(), include_public_ip)
 }
 
 /// 可注入环境快照的检测入口（测试用）。
-pub fn detect_with_env(vars: &HashMap<String, String>) -> ProxySnapshot {
+pub fn detect_with_env(vars: &HashMap<String, String>, include_public_ip: bool) -> ProxySnapshot {
     let mut snap = ProxySnapshot::default();
     #[cfg(windows)]
     {
@@ -918,7 +973,10 @@ pub fn detect_with_env(vars: &HashMap<String, String>) -> ProxySnapshot {
             match &ip_json {
                 Ok(text) => {
                     let ips = parse_net_ip_address_json(text);
-                    if if_indexes.len() == snap.adapters.len() {
+                    // netsh 回落没有 ifIndex：不报“长度不一致”，直接跳过按索引挂载。
+                    if if_indexes.is_empty() {
+                        snap.notes.push("未获取到网卡 ifIndex（netsh 回落），已跳过按索引挂载 IPv4。".into());
+                    } else if if_indexes.len() == snap.adapters.len() {
                         attach_ipv4_to_adapters(&mut snap.adapters, &if_indexes, &ips);
                     } else {
                         snap.notes.push(
@@ -930,7 +988,10 @@ pub fn detect_with_env(vars: &HashMap<String, String>) -> ProxySnapshot {
                 Err(e) => snap.notes.push(format!("IPv4 地址读取失败：{e}")),
             }
             snap.local_ip = pick_local_ip(&snap.adapters);
-            // 外网 IP：向只读公共回显服务查询（不携带本机标识；失败只记 public_ip_error）。
+        }
+        // 外网 IP：仅在用户显式刷新时查询（不携带本机标识；失败只记 public_ip_error）。
+        // 不依赖本地网卡列表是否成功。
+        if include_public_ip {
             match fetch_public_ip() {
                 Ok(ip) => snap.public_ip = ip,
                 Err(err) => snap.public_ip_error = err,
@@ -1147,6 +1208,66 @@ mod tests {
     }
 
     #[test]
+    fn attach_ipv4_prefers_non_apipa_over_lexicographic() {
+        // 字典序下 169.254.x 会排在 192.168.x 之前；应优先非 APIPA。
+        let mut adapters = parse_net_adapter_json(
+            r#"[{"Name":"A","InterfaceDescription":"x","Status":"Up","ifIndex":3,"MacAddress":"11"}]"#,
+        )
+        .unwrap()
+        .0;
+        attach_ipv4_to_adapters(
+            &mut adapters,
+            &[3],
+            &[
+                (3, "169.254.10.2".into()),
+                (3, "192.168.1.20".into()),
+                (3, "10.0.0.5".into()),
+            ],
+        );
+        assert_eq!(
+            adapters[0].ipv4,
+            vec![
+                "10.0.0.5".to_string(),
+                "192.168.1.20".to_string(),
+                "169.254.10.2".to_string()
+            ],
+            "非 APIPA 应排在 APIPA 前；同档内按四段数值排序"
+        );
+    }
+
+    #[test]
+    fn pick_local_ip_skips_apipa_when_other_candidates_exist() {
+        let adapters = vec![
+            AdapterStatus {
+                name: "虚拟网卡".into(),
+                description: "TAP".into(),
+                status: "Up".into(),
+                virtual_like: true,
+                mac: "00-00-00-00-00-01".into(),
+                ipv4: vec!["10.0.0.2".into()],
+            },
+            AdapterStatus {
+                name: "以太网".into(),
+                description: "Intel".into(),
+                status: "Up".into(),
+                virtual_like: false,
+                // 该卡同时有 APIPA 与局域网地址：应选局域网。
+                mac: "AA-BB-CC".into(),
+                ipv4: vec!["169.254.1.1".into(), "192.168.1.30".into()],
+            },
+            AdapterStatus {
+                name: "WLAN".into(),
+                description: "Realtek".into(),
+                status: "Up".into(),
+                virtual_like: false,
+                mac: "DD-EE-FF".into(),
+                ipv4: vec!["10.1.1.1".into()],
+            },
+        ];
+        assert_eq!(pick_local_ip(&adapters), "10.1.1.1", "数值更小的非 APIPA 优先");
+    }
+
+    #[test]
     fn normalize_public_ip_accepts_v4_v6_and_rejects_html() {
         assert_eq!(normalize_public_ip("203.0.113.9\n").unwrap(), "203.0.113.9");
         assert_eq!(normalize_public_ip("  2001:db8::1  ").unwrap(), "2001:db8::1");
@@ -1259,7 +1380,7 @@ mod tests {
 
     #[test]
     fn non_windows_detect_does_not_panic() {
-        let snap = detect();
+        let snap = detect(false);
         assert_eq!(snap.env_vars.len(), 4);
         #[cfg(not(windows))]
         {

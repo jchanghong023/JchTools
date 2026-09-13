@@ -38,7 +38,14 @@ pub fn resolve_executable() -> Result<PathBuf> {
     if let Some(directory) = bundled_dir() {
         let executable = directory.join(engine_name());
         // 随包目录本就允许用户替换引擎（LGPL）；与内嵌清单不一致时仅警告，不阻断。
-        // 按内嵌清单复检所有声明文件（主程序 + 7z.dll），不能只看主程序。
+        // 但 Windows 上 7z.dll 缺失不是「用户替换了引擎」，而是不完整引擎（例如只拷了 exe），
+        // 必须在启动前失败，避免推迟到首次解压才报晦涩错误。
+        #[cfg(windows)]
+        {
+            if executable.is_file() && !directory.join("7z.dll").is_file() {
+                bail!("随包 7-Zip 引擎不完整：缺少 7z.dll（{}/）。请使用 scripts/fetch-7zip.ps1 获取官方完整引擎，或删除随包目录改用内嵌引擎。", directory.display());
+            }
+        }
         warn_all_manifest_mismatches(&directory, "随包 7-Zip 引擎");
         return Ok(executable);
     }
@@ -50,6 +57,13 @@ pub fn resolve_executable() -> Result<PathBuf> {
     cleanup_part_residue(&directory);
     let executable = directory.join(engine_name());
     if !executable.is_file() { bail!("内嵌引擎释放后仍缺少 {}", engine_name()); }
+    // 与随包路径对称：Windows 上缺 7z.dll 视为不完整引擎，释放后必须再检一次。
+    #[cfg(windows)]
+    {
+        if !directory.join("7z.dll").is_file() {
+            bail!("内嵌引擎释放后不完整：缺少 7z.dll（{}）。", directory.display());
+        }
+    }
     // 返回前按内嵌清单逐个复检哈希（主程序 + 7z.dll），缩小释放与实际调用之间的篡改窗口（TOCTOU）。
     // Windows 上 7z.dll 是主要攻击面；用户主动放入的替换引擎不一致时记录警告并放行（LGPL 可替换要求）。
     warn_all_manifest_mismatches(&directory, "已释放的内嵌 7-Zip 引擎");
@@ -177,12 +191,20 @@ pub fn release(directory: &Path) -> Result<()> {
             }
             Err(error) => return Err(error).with_context(|| format!("写入引擎文件失败：{}", target.display())),
         }
-        if !hash_matches(&target, &expected)? {
-            // 写入后校验失败（坏道、位翻转、杀软篡改等）：删掉刚写入的坏文件再报错。
-            // 否则坏文件会在下次运行时因"已存在"被跳过，永久占据释放目录，
-            // 使 sha256 校验机制对它彻底失效，用户只会看到晦涩的 7z 启动错误。
-            let _ = std::fs::remove_file(&target);
-            bail!("引擎文件写入后校验失败：{}", target.display());
+        match hash_matches(&target, &expected) {
+            Ok(true) => {}
+            Ok(false) => {
+                // 写入后校验失败（坏道、位翻转、杀软篡改等）：删掉刚写入的坏文件再报错。
+                // 否则坏文件会在下次运行时因"已存在"被跳过，永久占据释放目录，
+                // 使 sha256 校验机制对它彻底失效，用户只会看到晦涩的 7z 启动错误。
+                let _ = std::fs::remove_file(&target);
+                bail!("引擎文件写入后校验失败：{}", target.display());
+            }
+            Err(error) => {
+                // 校验读取失败同样删除：否则不可读/异常文件会因「已存在」被 keep_existing 永久信任。
+                let _ = std::fs::remove_file(&target);
+                return Err(error).with_context(|| format!("引擎文件写入后校验读取失败：{}", target.display()));
+            }
         }
     }
     Ok(())
@@ -204,9 +226,22 @@ fn inflate(compressed: &[u8]) -> Result<Vec<u8>> {
 /// 先写临时文件再改名，避免中断时留下半个可执行文件；改名用不覆盖语义，
 /// 已存在的目标一律拒绝替换（用户自备文件优先，不用覆盖语义替换用户文件）。
 fn write_atomic(target: &Path, bytes: &[u8]) -> Result<()> {
+    use std::io::Write as _;
     let directory = target.parent().context("引擎目录缺少父级")?;
     let temporary = directory.join(format!("{}.part-{}", target.file_name().and_then(|name| name.to_str()).unwrap_or("engine"), std::process::id()));
-    std::fs::write(&temporary, bytes)?;
+    {
+        let mut file = std::fs::File::create(&temporary)?;
+        file.write_all(bytes)?;
+        // Linux 等 unix：先设执行位再 fsync，保证权限与内容一并落盘。
+        // 否则断电后可能出现「内容完整但无执行位」且被 keep_existing 长期信任。
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&temporary, std::fs::Permissions::from_mode(0o755))?;
+        }
+        // rename 前 fsync：避免断电后改名成功但内容未落盘，留下损坏的可执行文件。
+        file.sync_all()?;
+    }
     match crate::fsutil::rename_noreplace(&temporary, target) {
         Ok(()) => Ok(()),
         Err(error) => { let _ = std::fs::remove_file(&temporary); Err(error) }

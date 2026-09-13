@@ -106,7 +106,11 @@ pub fn archive_name(name: &str) -> bool {
 }
 pub fn multipart_name(name: &str) -> bool {
     let n = name.to_lowercase();
-    n.ends_with(".001") || (n.ends_with(".rar") && n.contains(".part"))
+    // 与 archive_name 对齐：只有 .partN.rar 才算 RAR 分卷；contains(".part") 会把
+    // report.partial.rar 这类普通包误判为分卷。
+    static PART: OnceLock<Regex> = OnceLock::new();
+    let re = PART.get_or_init(|| Regex::new(r"\.part(\d+)\.rar$").expect("constant regex"));
+    n.ends_with(".001") || re.is_match(&n)
 }
 
 #[cfg(test)]

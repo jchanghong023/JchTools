@@ -29,7 +29,11 @@ fn find_rc() -> Option<std::path::PathBuf> {
     if from_path.is_some() { return from_path; }
     let kits = std::env::var_os("ProgramFiles(x86)").map(std::path::PathBuf::from).map(|base| base.join("Windows Kits/10/bin"))?;
     let mut versions: Vec<std::path::PathBuf> = std::fs::read_dir(&kits).ok()?.filter_map(|entry| entry.ok()).map(|entry| entry.path()).collect();
-    versions.sort();
+    // 按数字元组排序（10.0.22621 > 10.0.19041），不能按字典序（否则 10.0.9 会排在 10.0.10 前面）。
+    versions.sort_by_key(|path| {
+        let name = path.file_name().and_then(|n| n.to_str()).unwrap_or("");
+        name.split('.').map(|part| part.parse::<u32>().unwrap_or(0)).collect::<Vec<_>>()
+    });
     versions.reverse();
     versions.into_iter().map(|version| version.join("x64/rc.exe")).find(|candidate| candidate.is_file())
 }
@@ -39,13 +43,17 @@ fn find_rc() -> Option<std::path::PathBuf> {
 /// 发布包仍保留 licenses/ 与上游源码，满足 LGPL 的替换与再分发要求。
 /// 引擎文件不在时（未运行 fetch-7zip.ps1）只警告，不影响构建；
 /// 引擎存在但 sha256 与 manifest.json 不一致时 panic，拒绝嵌入被篡改的引擎。
+/// 内嵌结果写入 OUT_DIR/engine_embed_status.txt，供打包脚本 fail-closed 校验：
+/// "ok" 表示全部文件成功内嵌，"incomplete" 表示本次构建按无内嵌处理。
 fn embed_engine(manifest_dir: &std::path::Path) {
     let out_dir = std::path::PathBuf::from(std::env::var("OUT_DIR").unwrap());
     let source = manifest_dir.join("resources/7zip");
     let generated = out_dir.join("embedded_engine.rs");
+    let status_file = out_dir.join("engine_embed_status.txt");
     let mut files: Vec<(String, i64)> = Vec::new();
     let mut manifest_text = String::new();
     let mut id = String::new();
+    let mut embed_ok = false;
 
     // 按“目标平台”而不是构建宿主选择引擎文件名，交叉编译时才不会内嵌错误引擎。
     let target_windows = std::env::var("CARGO_CFG_TARGET_OS").as_deref() == Ok("windows");
@@ -68,7 +76,10 @@ fn embed_engine(manifest_dir: &std::path::Path) {
                 for name in &names {
                     let bytes = match std::fs::read(source.join(name)) {
                         Ok(bytes) => bytes,
-                        Err(error) => { println!("cargo:warning=读取引擎文件 {name} 失败：{error}"); continue; }
+                        Err(error) => {
+                            println!("cargo:warning=读取引擎文件 {name} 失败：{error}");
+                            break; // 进入下方 files.len() 不完整分支处理
+                        }
                     };
                     let expected = parsed["files"].as_array().and_then(|list| {
                         list.iter().find_map(|entry| {
@@ -99,6 +110,9 @@ fn embed_engine(manifest_dir: &std::path::Path) {
                     // 与“本次构建按无内嵌引擎处理”的口径一致，而不是运行到一半报“缺少清单文件”。
                     println!("cargo:warning=引擎文件不完整：期望 {} 个，实际内嵌 {} 个；本次构建按无内嵌引擎处理", names.len(), files.len());
                     manifest_text = String::new();
+                    files.clear();
+                } else if !manifest_text.is_empty() && !files.is_empty() {
+                    embed_ok = true;
                 }
             }
             // 读失败（锁/权限等）按无内嵌处理并警告；哈希不匹配才会 panic（见上方循环）。
@@ -106,6 +120,14 @@ fn embed_engine(manifest_dir: &std::path::Path) {
         }
     } else {
         println!("cargo:warning=resources/7zip 里没有完整引擎，本次构建不内嵌 7-Zip（运行期只查找随包目录；需要内嵌请先运行 scripts/fetch-7zip.ps1）");
+    }
+    // 写入打包可检出的内嵌状态标记（fail-closed）：package-windows.ps1 在构建后要求 "ok"。
+    // 先删再写：避免上次成功留下的旧 "ok" 在本次写失败时被误读。
+    // 写失败直接 panic：与哈希不一致同级，禁止「构建成功但状态不可信」。
+    let status = if embed_ok { "ok" } else { "incomplete" };
+    let _ = std::fs::remove_file(&status_file);
+    if let Err(error) = std::fs::write(&status_file, format!("{status}\n")) {
+        panic!("写入 engine_embed_status.txt 失败（{error}），拒绝继续构建以免打包误用陈旧状态");
     }
     for name in &names {
         println!("cargo:rerun-if-changed=resources/7zip/{name}");

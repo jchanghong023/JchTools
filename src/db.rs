@@ -117,7 +117,9 @@ impl Database {
         Ok(())
     }
     pub fn reserve_target(&self, target: &str, file_id: i64) -> Result<bool> {
-        Ok(self.conn.execute("INSERT OR IGNORE INTO targets(path,file_id) VALUES(?1,?2)", params![target.to_lowercase(),file_id])? == 1)
+        // 仅 Windows 大小写不敏感文件系统上折叠大小写；Linux 等平台 Report.txt 与 report.txt 是不同目标。
+        let key = if cfg!(windows) { target.to_lowercase() } else { target.to_string() };
+        Ok(self.conn.execute("INSERT OR IGNORE INTO targets(path,file_id) VALUES(?1,?2)", params![key,file_id])? == 1)
     }
     pub fn event_page(&self, before: i64, limit: usize) -> Result<Vec<String>> {
         let before = if before <= 0 { i64::MAX } else { before };
@@ -130,6 +132,11 @@ impl Database {
         Ok(result)
     }
     pub fn export_csv(&self, path: &Path) -> Result<()> {
+        if let Some(parent) = path.parent() {
+            if !parent.as_os_str().is_empty() && !parent.is_dir() {
+                anyhow::bail!("导出目录不存在：{}；请先创建父目录或换一个路径", parent.display());
+            }
+        }
         let file = std::fs::OpenOptions::new().write(true).create_new(true).open(path)
             .context("导出文件已存在或不可写，请换一个名称")?;
         let mut writer = csv::Writer::from_writer(file);
@@ -138,9 +145,13 @@ impl Database {
         let mut rows = statement.query([])?;
         while let Some(row) = rows.next()? {
             let mut values = (0..6).map(|i| row.get::<_,String>(i)).collect::<rusqlite::Result<Vec<_>>>()?;
-            // Prevent spreadsheet formula injection by untrusted filenames.
+            // 防表格公式注入：前导空白后再跟危险字符也要加引号前缀。
+            // 危险字符判定前先剥 U+FEFF / U+200B / Cf（格式字符）前缀，
+            // 防止不可见字符把 =+ 推到 trim_start 之后逃逸转义。
             for value in &mut values {
-                if value.chars().next().is_some_and(|c| "=+-@\t\r".contains(c)) { value.insert(0, '\''); }
+                let stripped = value.trim_start_matches(is_invisible_or_format);
+                let dangerous = stripped.trim_start().chars().next().is_some_and(|c| "=+-@\t\r".contains(c));
+                if dangerous { value.insert(0, '\''); }
             }
             values.push(row.get::<_,i64>(6)?.to_string());
             writer.write_record(values)?;
@@ -151,6 +162,16 @@ impl Database {
     pub fn file_by_path(&self, rel: &str) -> Result<Option<FileRecord>> {
         Ok(self.conn.query_row(&format!("SELECT {FILE_COLUMNS} FROM files WHERE rel=?1"), [rel], file_row).optional()?)
     }
+}
+/// 危险字符判定前需剥除的前缀字符：U+FEFF（BOM）、U+200B（零宽空格），
+/// 以及 Unicode Cf（格式字符）常见区间（方向控制、词连接、标记语言控制等）。
+fn is_invisible_or_format(c: char) -> bool {
+    if c == '\u{FEFF}' || c == '\u{200B}' { return true; }
+    matches!(c as u32,
+        0x0600..=0x0605 | 0x061C | 0x06DD | 0x070F | 0x180E |
+        0x200B..=0x200F | 0x202A..=0x202E | 0x2060..=0x2064 |
+        0x2066..=0x206F | 0xFEFF | 0xFFF9..=0xFFFB |
+        0x110BD | 0x1D173..=0x1D17A | 0xE0001 | 0xE0020..=0xE007F)
 }
 pub const FILE_COLUMNS: &str = "id,rel,name,normal,size,mtime,identity,links,hash,cleanable";
 fn file_row(row: &Row<'_>) -> rusqlite::Result<FileRecord> {

@@ -1,4 +1,4 @@
-﻿#requires -Version 5.1
+#requires -Version 5.1
 [CmdletBinding()]
 param([switch]$SkipTests, [switch]$Offline)
 $ErrorActionPreference = 'Stop'
@@ -14,8 +14,9 @@ function Invoke-Cargo([string[]]$Arguments) {
     if ($LASTEXITCODE -ne 0) {throw "cargo $($Arguments -join ' ') failed: $LASTEXITCODE"}
 }
 $archiveEngine = Join-Path $root 'resources\7zip\7z.exe'
+$archiveDll = Join-Path $root 'resources\7zip\7z.dll'
 if (-not $Offline) {& (Join-Path $PSScriptRoot 'fetch-7zip.ps1')}
-if (-not (Test-Path -LiteralPath $archiveEngine) -or -not (Test-Path -LiteralPath 'resources\7zip\manifest.json')) {throw 'The verified bundled engine is missing. Run fetch-7zip.ps1 on a connected build machine first.'}
+if (-not (Test-Path -LiteralPath $archiveEngine) -or -not (Test-Path -LiteralPath $archiveDll) -or -not (Test-Path -LiteralPath 'resources\7zip\manifest.json')) {throw 'The verified bundled engine is missing (need 7z.exe, 7z.dll and manifest.json). Run fetch-7zip.ps1 on a connected build machine first.'}
 $extra = @()
 if ($Offline) {$extra += '--offline'}
 if (-not (Test-Path -LiteralPath 'Cargo.lock')) {Invoke-Cargo (@('generate-lockfile') + $extra)}
@@ -29,6 +30,19 @@ if (-not $SkipTests) {
     } finally {$env:JCHTOOLS_TEST_7ZIP = $previous}
 }
 Invoke-Cargo (@('build','--locked','--release','--bins') + $extra)
+# 尊重 CARGO_TARGET_DIR：未设置时回落到默认 target 目录。
+if ($env:CARGO_TARGET_DIR) {
+    $targetDir = $env:CARGO_TARGET_DIR
+} else {
+    $targetDir = Join-Path $root 'target'
+}
+$releaseDir = Join-Path $targetDir 'release'
+# fail-closed：要求 build.rs 已把引擎真正编进 EXE。build.rs 部分失败只 warning，
+# 这里读 OUT_DIR/engine_embed_status.txt，不是 "ok" 就中止，避免打包出未内嵌引擎的发布包。
+$engineStatusFile = Get-ChildItem -LiteralPath $releaseDir -Recurse -Filter 'engine_embed_status.txt' -ErrorAction SilentlyContinue | Sort-Object LastWriteTime -Descending | Select-Object -First 1
+if ($null -eq $engineStatusFile) {throw 'engine_embed_status.txt not found after build; the engine was not embedded into the EXE.'}
+$engineStatus = (Get-Content -LiteralPath $engineStatusFile.FullName -Raw).Trim()
+if ($engineStatus -ne 'ok') {throw "Engine embed status is '$engineStatus' (expected 'ok'); refuse to package a build without a fully embedded 7-Zip engine."}
 $stamp = Get-Date -Format 'yyyyMMdd-HHmmss'
 # 内嵌前先校验引擎与清单一致：EXE 里编进去的就是这份经过校验的数据。
 $engineManifest = Get-Content -LiteralPath 'resources\7zip\manifest.json' -Raw | ConvertFrom-Json
@@ -38,7 +52,7 @@ foreach ($file in $engineManifest.files) {
 }
 $folder = Join-Path $root "dist\JchTools-Windows-x64-$stamp"
 New-Item -ItemType Directory -Path $folder | Out-Null
-Copy-Item -LiteralPath 'target\release\JchTools.exe','target\release\jchtools-cli.exe' -Destination $folder
+Copy-Item -LiteralPath (Join-Path $releaseDir 'JchTools.exe'),(Join-Path $releaseDir 'jchtools-cli.exe') -Destination $folder
 # 引擎已内嵌进 EXE；发布目录只保留许可证、NOTICE 与上游源码（LGPL 要求），
 # 因此最终用户拿到的是单文件程序，缺引擎时运行期从 EXE 释放并校验 sha256。
 $resources = Join-Path $folder 'resources'

@@ -6,5 +6,6 @@ fn main(){
 
 可尝试设置 SLINT_BACKEND=winit-software 后启动。"))
             .set_level(rfd::MessageLevel::Error).show();
+        std::process::exit(1);
     }
 }

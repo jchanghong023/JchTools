@@ -139,7 +139,18 @@ pub fn rename_noreplace(source: &Path, target: &Path) -> Result<()> {
         let s = CString::new(source.as_os_str().as_bytes())?;
         let t = CString::new(target.as_os_str().as_bytes())?;
         let rc = unsafe { libc::syscall(libc::SYS_renameat2, libc::AT_FDCWD, s.as_ptr(), libc::AT_FDCWD, t.as_ptr(), libc::RENAME_NOREPLACE) };
-        if rc != 0 { return Err(std::io::Error::last_os_error()).context("不覆盖移动失败"); }
+        if rc == 0 {
+            return Ok(());
+        }
+        let err = std::io::Error::last_os_error();
+        // 老内核/受限 seccomp 可能没有 renameat2：回退到与其它 Unix 相同的硬链接路径，
+        // 目标已存在时 hard_link 失败，仍保持不覆盖语义。
+        if err.raw_os_error() != Some(libc::ENOSYS) {
+            return Err(err).context("不覆盖移动失败");
+        }
+        fs::hard_link(source, target)?;
+        if let Err(e) = fs::remove_file(source) { let _ = fs::remove_file(target); return Err(e.into()); }
+        return Ok(());
     }
     #[cfg(all(unix, not(target_os = "linux")))] {
         // Safe file-only fallback. No existing target can be overwritten.
@@ -163,10 +174,17 @@ pub fn unique_target(root: &Path, requested: &Path) -> Result<PathBuf> {
     for index in 1u64..=1_000_000 {
         let name = match ext { Some(ext) => format!("{stem} ({index}).{ext}"), None => format!("{stem} ({index})") };
         let path = parent.join(name);
-        safe_join(root, &relative_string(root, &path)?)?;
-        if !path.try_exists()? { return Ok(path); }
+        let rel = relative_string(root, &path)?;
+        for part in rel.split('/') { validate_component(part)?; }
+        // 符号链接/坏链视为占用并试下一个序号（与 planner::target_will_be_free 对齐），
+        // 不得因 safe_join 的链接拒绝而整函数失败。
+        match fs::symlink_metadata(&path) {
+            Ok(_) => continue,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(path),
+            Err(_) => continue,
+        }
     }
-    bail!("无法为 {} 分配不冲突的名称：已尝试 {stem} (1)…{stem} (1000000) 均已存在", requested.display())
+    bail!("无法为 {} 分配不冲突的名称：已尝试 {stem} (1)…{stem} (1000000) 均已被占用", requested.display())
 }
 pub fn write_json_atomic<T: Serialize>(path: &Path, value: &T) -> Result<()> {
     let parent = path.parent().context("配置路径缺少父目录")?;
@@ -185,7 +203,11 @@ pub fn write_json_atomic<T: Serialize>(path: &Path, value: &T) -> Result<()> {
                 return Err(std::io::Error::last_os_error().into());
             }
         }
-        #[cfg(not(windows))] fs::rename(&tmp, path)?;
+        #[cfg(not(windows))] {
+            fs::rename(&tmp, path)?;
+            // 与 Windows MOVEFILE_WRITE_THROUGH 对齐：目录项落盘后再返回。
+            if let Ok(dir) = File::open(parent) { let _ = dir.sync_all(); }
+        }
         Ok(())
     })();
     if result.is_err() { let _ = fs::remove_file(&tmp); }

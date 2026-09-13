@@ -8,7 +8,7 @@ use crate::{config::{ClassifyMode,Config,ConflictPolicy,DEFAULT_CUSTOM_CATEGORIE
 use serde::Deserialize;
 use slint::{ComponentHandle,Model,ModelRc,SharedString,VecModel};
 use std::{cell::RefCell,collections::VecDeque,path::{Path,PathBuf},rc::Rc,
-    sync::{atomic::Ordering,mpsc,Arc},time::{Duration,Instant}};
+    sync::{atomic::{AtomicBool,AtomicU64,Ordering},mpsc,Arc,Mutex},time::{Duration,Instant}};
 
 /// 规则的界面层级：basic 常显，advanced 只在「显示高级选项」打开时出现。
 #[derive(Clone,Copy,PartialEq,Deserialize,Default)]
@@ -25,6 +25,28 @@ struct State {
     show_advanced:bool,
     /// 有头 GUI 用于回传代理检测结果；无头测试保持 None，避免 spawn 子进程。
     proxy_events:Option<mpsc::SyncSender<Event>>,
+    /// 测试注入：覆盖任务状态目录与回收站实现；生产路径为 None，仍走 engine::prepare/apply。
+    engine_overrides:Option<EngineTestOverrides>,
+    /// 计划页加载代际（跨线程）：丢弃晚到的旧 filter/page 结果。
+    plan_load:Arc<PlanLoadSync>,
+}
+/// 计划页加载代际同步：worker 完成后写入 `completed` 的 gen（单调不降），
+/// 事件循环只应用「事件 gen 仍是 latest 且 filter/page 与当前视图一致」的结果。
+/// completed 仅记录最新完成代际，供 worker 避免低代际覆盖；UI 应用走事件自带 actions。
+#[derive(Default)]
+struct PlanLoadSync{
+    /// 最新一次请求的代际（每次 load_plan_filtered 递增）
+    latest:AtomicU64,
+    /// 最近完成的代际；低代际完成不得覆盖高代际
+    completed:Mutex<Option<PlanLoadDone>>,
+}
+struct PlanLoadDone{
+    gen:u64,
+}
+/// 无头 GUI 测试用的引擎注入：隔离任务库到 tempfile，并避免污染真实回收站。
+pub struct EngineTestOverrides {
+    pub state_dir: PathBuf,
+    pub recycler: Arc<dyn platform::Recycler>,
 }
 struct WindowDrag {origin:(f64,f64),press:(f64,f64),restoring:bool}
 /// 光标的屏幕坐标（物理像素）。拖动必须基于屏幕坐标：窗口自身移动不会改变它，因此不会出现
@@ -37,21 +59,52 @@ fn pointer_position()->Option<(f64,f64)>{
 }
 #[cfg(not(windows))]
 fn pointer_position()->Option<(f64,f64)>{None}
-/// 启动时把窗口居中：上下留白相等、左右留白相等，同时保证不越过工作区（任务栏）。
+/// 监视器 API 在 windows-sys 的 `Win32_Graphics_Gdi` 特性下，本 crate 未启用该特性，
+/// 因此在 gui 内声明最小 FFI（user32），避免改 Cargo.toml。
+#[cfg(windows)]
+#[allow(non_snake_case)]
+mod win32_monitor{
+    use windows_sys::Win32::Foundation::{HWND,POINT,RECT};
+    #[repr(C)]
+    pub struct MONITORINFO{pub cbSize:u32,pub rcMonitor:RECT,pub rcWork:RECT,pub dwFlags:u32}
+    pub type HMONITOR=*mut core::ffi::c_void;
+    /// MONITOR_DEFAULTTONEAREST：取包含点/窗口的最近监视器
+    pub const MONITOR_DEFAULTTONEAREST:u32=2;
+    extern "system"{
+        pub fn MonitorFromWindow(hwnd:HWND,dw_flags:u32)->HMONITOR;
+        pub fn MonitorFromPoint(pt:POINT,dw_flags:u32)->HMONITOR;
+        pub fn GetMonitorInfoW(hmonitor:HMONITOR,lpmi:*mut MONITORINFO)->i32;
+    }
+}
+/// 启动时把窗口居中：基于当前/光标所在监视器的工作区计算对称留白，
+/// 满足 AGENTS「主窗口启动时居中显示在当前显示器中央」（多显示器下不固定主屏）。
 #[cfg(windows)]
 fn center_window(window:&slint::Window){
-    use windows_sys::Win32::{Foundation::RECT,UI::WindowsAndMessaging::{GetSystemMetrics,SM_CXSCREEN,SM_CYSCREEN,SystemParametersInfoW,SPI_GETWORKAREA}};
-    let mut work=RECT{left:0,top:0,right:0,bottom:0};
-    let ok=unsafe{SystemParametersInfoW(SPI_GETWORKAREA,0,&mut work as *mut RECT as *mut core::ffi::c_void,0)};
-    if ok==0{return;}
-    let screen_w=unsafe{GetSystemMetrics(SM_CXSCREEN)}.max(1);
-    let screen_h=unsafe{GetSystemMetrics(SM_CYSCREEN)}.max(1);
+    use windows_sys::Win32::Foundation::{POINT,RECT};
+    use windows_sys::Win32::UI::WindowsAndMessaging::{GetForegroundWindow,GetCursorPos};
+    use win32_monitor::{GetMonitorInfoW,MonitorFromPoint,MonitorFromWindow,MONITORINFO,MONITOR_DEFAULTTONEAREST};
+    // 优先当前前台窗口所在监视器；没有前台窗口时退到光标所在监视器。
+    let foreground=unsafe{GetForegroundWindow()};
+    let monitor=if !foreground.is_null(){
+        unsafe{MonitorFromWindow(foreground,MONITOR_DEFAULTTONEAREST)}
+    }else{
+        let mut point=POINT{x:0,y:0};
+        if unsafe{GetCursorPos(&mut point)}==0{return;}
+        unsafe{MonitorFromPoint(point,MONITOR_DEFAULTTONEAREST)}
+    };
+    if monitor.is_null(){return;}
+    let mut info=MONITORINFO{cbSize:std::mem::size_of::<MONITORINFO>() as u32,
+        rcMonitor:RECT{left:0,top:0,right:0,bottom:0},
+        rcWork:RECT{left:0,top:0,right:0,bottom:0},dwFlags:0};
+    // 兼容部分声明布局：cbSize 必须正确
+    if unsafe{GetMonitorInfoW(monitor,&mut info)}==0{return;}
+    let work=info.rcWork;
     let size=window.size();
     let width=size.width as i32;
     let height=size.height as i32;
-    // 以整块屏幕计算对称留白，再夹回工作区，避免压住任务栏或跑到屏幕外
-    let x=(screen_w-width)/2;
-    let y=(screen_h-height)/2;
+    // 在监视器工作区内居中，并夹回工作区，避免压住任务栏或跑到屏幕外
+    let x=work.left+((work.right-work.left)-width)/2;
+    let y=work.top+((work.bottom-work.top)-height)/2;
     let x=x.clamp(work.left,(work.right-width).max(work.left));
     let y=y.clamp(work.top,(work.bottom-height).max(work.top));
     window.set_position(slint::PhysicalPosition::new(x,y));
@@ -127,6 +180,24 @@ fn invalidate(ui:&AppWindow){
         ui.set_status("目录不存在或无法访问，请检查路径".into());return;
     }
     ui.set_status("目录已就绪；修改规则后可开始解压与分析".into());
+}
+/// 目录输入变化后的就绪同步：已有任务时用 recompute_ready 按
+/// 「任务 + 配置 + 目录」重算，而不是一律 invalidate——
+/// 用户可能只是重新输入了同一路径，不应清掉仍可执行的计划。
+fn sync_ready_after_directory(ui:&AppWindow,state:&State){
+    if ui.get_has_task(){
+        if let Some(task)=state.task.clone(){
+            let ready=recompute_ready(ui,state,&task);
+            ui.set_ready(ready);
+            ui.set_status(if ready{
+                SharedString::from("目录与当前计划一致，可以确认执行")
+            }else{
+                SharedString::from("规则或目录已改变，请重新解压与分析后再执行")
+            });
+            return;
+        }
+    }
+    invalidate(ui);
 }
 fn apply_theme(ui:&AppWindow,state:&State){
     ui.set_theme(match state.config.theme.as_str(){"light"=>1,"dark"=>2,_=>0});
@@ -210,10 +281,24 @@ fn async_work_mapped(sender:mpsc::SyncSender<Event>,work:impl FnOnce()->Result<E
         let _=sender.send(event);
     });
 }
-fn load_plan_filtered(sender:mpsc::SyncSender<Event>,path:PathBuf,start:i64,page:usize,kind:Option<String>){
+fn load_plan_filtered(sender:mpsc::SyncSender<Event>,plan_load:Arc<PlanLoadSync>,path:PathBuf,start:i64,page:usize,kind:Option<String>){
+    // 递增代际：同一会话里筛选/翻页会并发发起多次加载，晚到的低代际结果不得覆盖当前视图。
+    let gen=plan_load.latest.fetch_add(1,Ordering::AcqRel)+1;
+    let load=plan_load.clone();
     // 计划页加载失败走 Error：只更新错误文案，不碰 proxy/net 的 busy。
     // 打开的是引擎已生成的任务库：缺失时报错，不静默新建空库。
-    async_work(sender,move||Ok(Event::PlanPage(path.clone(),Database::open_existing(&path)?.actions_page_filtered(start,101,kind.as_deref())?,page)));
+    async_work(sender,move||{
+        let actions=Database::open_existing(&path)?.actions_page_filtered(start,101,kind.as_deref())?;
+        {
+            let mut guard=load.completed.lock().unwrap_or_else(|poisoned|poisoned.into_inner());
+            // 只允许写入不低代际的结果：先完成的高代际不被后完成的低代际覆盖。
+            if guard.as_ref().map(|done|done.gen<=gen).unwrap_or(true){
+                *guard=Some(PlanLoadDone{gen});
+            }
+        }
+        // 事件必须携带 gen/filter：UI 侧先比 gen，过期事件不碰 completed。
+        Ok(Event::PlanPage(path,actions,page,gen,kind))
+    });
 }
 /// 按「任务状态 + 当前配置 + 目录一致性」重新计算整理计划的就绪状态。
 /// theme 是纯外观设置，不影响计划内容，比较时剔除；
@@ -229,16 +314,104 @@ fn recompute_ready(ui:&AppWindow,state:&State,path:&Path)->bool{
     db_config==current
         && db.get::<String>("root").is_ok_and(|root|std::fs::canonicalize(Path::new(ui.get_directory().as_str())).is_ok_and(|selected|selected==Path::new(&root)))
 }
+/// 计划页事件是否可应用：代际须仍是 latest，且 filter 与当前视图一致。
+/// page 不再要求与 UI 预置值一致：翻页采用「先加载、成功再提交」，加载期间 state.page 仍是旧页。
+/// 过期事件直接拒绝，不触碰 completed 缓存——否则低代际事件会 take 走高代际结果并一并丢弃。
+fn plan_page_event_accepted(event_gen:u64,latest:u64,_event_page:usize,event_filter:Option<&str>,_ui_page:usize,ui_filter:Option<&str>)->bool{
+    event_gen==latest && event_filter==ui_filter
+}
+/// 会话级导出互斥：同一时间只允许一次 CSV 导出，避免并发写坏目标/临时文件。
+static EXPORT_BUSY:AtomicBool=AtomicBool::new(false);
+/// 导出临时名序号：与进程号、UUID 一起保证同会话多次导出不共用同一临时路径。
+static EXPORT_SEQ:AtomicU64=AtomicU64::new(0);
+/// 导出锁守卫：无论成功/失败/panic，离开作用域都会释放会话级导出锁。
+struct ExportGuard;
+impl Drop for ExportGuard{
+    fn drop(&mut self){EXPORT_BUSY.store(false,Ordering::SeqCst);}
+}
+/// 覆盖导出 CSV：先写入同目录临时文件，成功后再替换目标；失败时清理临时文件且不动原文件。
+/// `write` 负责把内容写入临时路径（默认走 `Database::export_csv`，其 create_new 语义正好适用）。
+fn export_csv_via_temp(task:&Path,dest:&Path)->Result<()>{
+    let db=Database::open_existing(task)?;
+    write_via_temp(dest,move|tmp|db.export_csv(tmp))
+}
+/// 通用「临时文件成功后再覆盖」策略：避免先 `remove_file` 再写导致中途失败时原文件丢失。
+fn write_via_temp<F>(dest:&Path,write:F)->Result<()>
+where F:FnOnce(&Path)->Result<()>{
+    let parent=dest.parent().filter(|p|!p.as_os_str().is_empty()).unwrap_or_else(||Path::new("."));
+    let name=dest.file_name().and_then(|n|n.to_str()).unwrap_or("export.csv");
+    // 临时名：进程号 + 会话内序号 + UUID。仅用 PID 时，同进程并发/快速连续导出会撞名。
+    let seq=EXPORT_SEQ.fetch_add(1,Ordering::Relaxed);
+    let tmp=parent.join(format!(".{name}.{}.{}.{}.tmp",std::process::id(),seq,uuid::Uuid::new_v4()));
+    let _=std::fs::remove_file(&tmp);
+    if let Err(error)=write(&tmp){let _=std::fs::remove_file(&tmp);return Err(error);}
+    if let Err(error)=replace_file(&tmp,dest){let _=std::fs::remove_file(&tmp);return Err(error);}
+    Ok(())
+}
+/// Windows 上用 `MoveFileEx(REPLACE_EXISTING)` 做同卷替换；失败时回落到 `std::fs::rename`。
+#[cfg(windows)]
+fn replace_file(from:&Path,to:&Path)->Result<()>{
+    use std::os::windows::ffi::OsStrExt;
+    use windows_sys::Win32::Storage::FileSystem::{MoveFileExW,MOVEFILE_REPLACE_EXISTING};
+    let from_w:Vec<u16>=from.as_os_str().encode_wide().chain(std::iter::once(0)).collect();
+    let to_w:Vec<u16>=to.as_os_str().encode_wide().chain(std::iter::once(0)).collect();
+    if unsafe{MoveFileExW(from_w.as_ptr(),to_w.as_ptr(),MOVEFILE_REPLACE_EXISTING)}==0{
+        std::fs::rename(from,to).context("无法替换导出文件")?;
+    }
+    Ok(())
+}
+#[cfg(not(windows))]
+fn replace_file(from:&Path,to:&Path)->Result<()>{
+    std::fs::rename(from,to).context("无法替换导出文件")?;
+    Ok(())
+}
+/// 执行阶段的进度分母：只统计仍勾选且待执行（selected=1 且 state='pending'）的计划项，
+/// 用户取消勾选的项不计入。计数失败时返回 Err，调用方可保留旧 planned。
+fn count_selected_pending(task:&Path)->Result<u64>{
+    let db=Database::open_existing(task)?;
+    let n:i64=db.conn.query_row("SELECT COUNT(*) FROM actions WHERE selected=1 AND state='pending'",[],|r|r.get(0))?;
+    Ok(n.max(0) as u64)
+}
 fn start_task(ui:&AppWindow,state:&Rc<RefCell<State>>,sender:&mpsc::SyncSender<Event>,apply:bool){
-    if ui.get_busy() || state.borrow().pending_selection != 0 {return;}
+    if ui.get_busy(){return;}
+    // 导出读任务库时不得并行启动会写库的分析/执行。
+    if EXPORT_BUSY.load(Ordering::SeqCst){
+        ui.set_error_text("报告导出进行中，请稍后再试".into());
+        return;
+    }
+    if state.borrow().pending_selection != 0 {
+        ui.set_error_text("计划勾选仍在保存中，请稍后再试".into());
+        return;
+    }
     let (configuration,task)={let s=state.borrow();(s.config.clone(),s.task.clone())};
     if let Err(error)=configuration.validate(){ui.set_error_text(format!("{error:#}").into());return;}
     let directory=PathBuf::from(ui.get_directory().as_str());
     if apply&&task.is_none(){ui.set_error_text("还没有可以执行的计划".into());return;}
+    if !apply && !directory.is_dir(){
+        ui.set_error_text("目标目录不存在或无法访问，请重新选择目录".into());
+        return;
+    }
     let control=Arc::new(Control::default());
+    // 置 busy 前再抢一次导出锁：与 on_export_report 的 swap 形成近似互斥，
+    // 避免「读到 false → 导出开始 → 引擎启动」的双写任务库窗口。
+    if EXPORT_BUSY.load(Ordering::SeqCst){
+        ui.set_error_text("报告导出进行中，请稍后再试".into());
+        return;
+    }
     {
         let mut s=state.borrow_mut();s.control=Some(control.clone());s.started=Instant::now();s.close_after=false;s.selection_failed=false;
         s.logs.clear();s.page=0;s.page_starts=vec![0];s.conflict=None;s.applying=apply;
+        // 执行分母按将实际执行的勾选数修正：规划期 planned 是全量，用户可能已取消部分勾选。
+        // 计数失败时保留旧 planned，不阻断执行（进度分母可能偏大，但仍可收敛）。
+        if apply{
+            if let Some(task)=s.task.clone(){
+                if let Ok(n)=count_selected_pending(&task){s.planned=n;}
+            }
+        }
+    }
+    if EXPORT_BUSY.load(Ordering::SeqCst){
+        ui.set_error_text("报告导出进行中，请稍后再试".into());
+        return;
     }
     ui.set_busy(true);ui.set_ready(false);ui.set_paused(false);ui.set_error_text("".into());ui.set_notice_text("".into());ui.set_panel(2);
     ui.set_log_text("".into());ui.set_status(if apply{"正在执行已确认的整理计划"}else{"准备扫描与解压；不会提前执行去重或归类"}.into());
@@ -255,9 +428,24 @@ fn start_task(ui:&AppWindow,state:&Rc<RefCell<State>>,sender:&mpsc::SyncSender<E
         }
     })};
     let sender=sender.clone();
+    // 同一次 GUI 会话里可能先分析再执行：覆盖对象必须可重复使用，不能 take。
+    let overrides=state.borrow().engine_overrides.as_ref().map(|o|EngineTestOverrides{
+        state_dir:o.state_dir.clone(),recycler:o.recycler.clone(),
+    });
     std::thread::spawn(move||{
         let result=std::panic::catch_unwind(std::panic::AssertUnwindSafe(||{
-            if apply{engine::apply(task.as_ref().unwrap(),context)}else{engine::prepare(&directory,configuration,context)}
+            if let Some(overrides)=overrides{
+                if apply{
+                    engine::apply_with(task.as_ref().unwrap(),context,overrides.recycler)
+                }else{
+                    // engine 已提供 prepare_with：测试注入的 recycler 必须传入，与 apply_with 对称。
+                    engine::prepare_with(&directory,configuration,context,&overrides.state_dir,None,overrides.recycler)
+                }
+            }else if apply{
+                engine::apply(task.as_ref().unwrap(),context)
+            }else{
+                engine::prepare(&directory,configuration,context)
+            }
         }));
         let event=match result{
             Ok(Ok(result))=>if apply{Event::Done(result.directory,result.summary)}else{Event::Ready(result.directory,result.summary)},
@@ -364,14 +552,39 @@ fn apply_net_test_report(ui:&AppWindow,report:crate::nettest::NetTestReport){
     }).collect();
     ui.set_net_test_rows(Rc::new(VecModel::from(rows)).into());
     let reachable=report.results.iter().filter(|r|r.status==crate::nettest::ProbeStatus::Reachable).count();
+    let unreachable=report.results.iter().filter(|r|r.status==crate::nettest::ProbeStatus::Unreachable).count();
+    let unknown=report.results.iter().filter(|r|r.status==crate::nettest::ProbeStatus::Unknown).count();
     let total=report.results.len();
     let notes=report.notes.join(" ");
     let summary=if reachable==total{
         format!("{}：{} 个站点均可以连接。{}",report.scope,total,notes)
     }else{
-        format!("{}：{reachable}/{total} 个站点可以连接；其余为「不可以用」，请按提示排查。{}",report.scope,notes)
+        // 非全部可达时按真实状态拆分措辞：Unknown 是「未测试」，不得写成「不可以用」。
+        let mut parts=vec![format!("{reachable}/{total} 个站点可以连接")];
+        if unreachable>0{parts.push(format!("{unreachable} 个无法连接"));}
+        if unknown>0{parts.push(format!("{unknown} 个未测试"));}
+        format!("{}：{}；请按提示排查。{}",report.scope,parts.join("，"),notes)
     };
     ui.set_net_test_summary(summary.into());
+}
+
+/// 判断网络测试报告是否仍对应当前 UI 的测试位置（scope）。
+/// 切换 scope 后在途报告必须忽略，不得覆盖新页面的结果，也不得误清新 scope 的 busy。
+fn net_test_report_matches_scope(ui:&AppWindow,report:&crate::nettest::NetTestReport)->bool{
+    if ui.get_net_test_scope()==0{
+        // Windows 本机页只接受 Windows 报告
+        report.scope.as_str()=="Windows"
+    }else{
+        // WSL2 页只接受 WSL2* 报告；若报告带发行版且与当前选择不一致，也视为过期。
+        if !report.scope.starts_with("WSL2"){return false;}
+        let selected=ui.get_net_test_wsl_selected();
+        if selected.is_empty(){return true;}
+        match report.scope.strip_prefix("WSL2:"){
+            Some(distro)=>distro==selected.as_str(),
+            // 未带发行版名的兜底报告（如平台探测失败时的 "WSL2"）仍算当前页
+            None=>true,
+        }
+    }
 }
 
 /// 把 WSL 发行版列表写入下拉；默认选中 Ubuntu* 优先项，用户可再改。
@@ -413,7 +626,10 @@ fn reset_tool_list(ui:&AppWindow){
 /// 同步回调装配：规则表、分区/工具导航、主题与输入校验——纯属性/状态操作，
 /// 不依赖事件循环，独立成函数以便无头 GUI 测试直接装配后断言。
 fn wire_sync(ui:&AppWindow,state:&Rc<RefCell<State>>){
-    {let weak=ui.as_weak();ui.on_root_edited(move||{if let Some(ui)=weak.upgrade(){invalidate(&ui);}});}
+    {
+        let weak=ui.as_weak();let state=state.clone();
+        ui.on_root_edited(move||{if let Some(ui)=weak.upgrade(){sync_ready_after_directory(&ui,&state.borrow());}});
+    }
     {
         let weak=ui.as_weak();let state=state.clone();
         ui.on_select_tool(move|id|{
@@ -428,11 +644,11 @@ fn wire_sync(ui:&AppWindow,state:&Rc<RefCell<State>>){
                     }
                     "proxy-status"=>{
                         ui.set_screen(2);ui.set_active_tool_id(id.clone());
-                        // 进入页面自动刷新一次；无 sender（无头测试）时静默跳过。
+                        // 进入页面只做本地检测；公网 IP 仅在用户点刷新时查询。
                         if let Some(sender)=state.borrow().proxy_events.clone(){
                             if !ui.get_proxy_busy(){
                                 ui.set_proxy_busy(true);
-                                async_work_mapped(sender,move||Ok(Event::ProxySnapshot(crate::proxy::detect())),Event::ProxyFailed);
+                                async_work_mapped(sender,move||Ok(Event::ProxySnapshot(crate::proxy::detect(false))),Event::ProxyFailed);
                             }
                         }
                     }
@@ -449,7 +665,7 @@ fn wire_sync(ui:&AppWindow,state:&Rc<RefCell<State>>){
                 if ui.get_proxy_busy(){return;}
                 ui.set_proxy_busy(true);
             }
-            async_work_mapped(sender,move||Ok(Event::ProxySnapshot(crate::proxy::detect())),Event::ProxyFailed);
+            async_work_mapped(sender,move||Ok(Event::ProxySnapshot(crate::proxy::detect(true))),Event::ProxyFailed);
         });
     }
     {
@@ -494,6 +710,8 @@ fn wire_sync(ui:&AppWindow,state:&Rc<RefCell<State>>){
             if previous!=scope{
                 ui.set_net_test_rows(Rc::new(VecModel::from(Vec::<NetTestRow>::new())).into());
                 ui.set_net_test_summary("尚未测试".into());
+                // 作废在途：清 busy 允许在新 scope 立刻开测；旧报告到达时会被 scope 校验忽略。
+                ui.set_net_test_busy(false);
             }
             if scope==1{
                 let selected=ui.get_net_test_wsl_selected();
@@ -647,12 +865,21 @@ fn wire_sync(ui:&AppWindow,state:&Rc<RefCell<State>>){
         ui.on_rule_text(move|key,value|{if let Some(ui)=weak.upgrade(){
             let numeric=state.borrow().specs.iter().find(|s|s.key==key.as_str()).is_some_and(|s|s.kind=="number");
             let parsed=if numeric{match value.parse::<u64>(){Ok(v)=>serde_json::Value::from(v),Err(_)=>{
-                // 清空是编辑中间态（用户可能正要重输），不报错也不打断；
-                // 非法字符则报错。此时输入框已被用户编辑、行内 text 绑定已断开，
-                // 只有整表重建才能把显示值恢复为配置里的真实值（就地 patch 无效）。
-                if value.is_empty(){return;}
+                // 清空/非法：不写配置，就地把该行显示改回配置真值。
+                // 禁止整表 refresh：会销毁正在编辑的 LineEdit 并丢焦点。
+                let current={
+                    let cfg=serde_json::to_value(&state.borrow().config).unwrap_or_default();
+                    cfg.get(key.as_str()).cloned().unwrap_or_default()
+                };
+                let restore=current.as_u64().map(|v|v.to_string()).unwrap_or_default();
+                if value.is_empty(){
+                    let key=(*key).to_string();
+                    patch_rule_row(&ui,key.as_str(),|row|row.value=restore.clone().into());
+                    return;
+                }
                 show_error(&ui,"该设置需要输入非负整数");
-                refresh(&ui,&state.borrow());
+                let key=(*key).to_string();
+                patch_rule_row(&ui,key.as_str(),|row|row.value=restore.clone().into());
                 return;
             }}}
                 else{serde_json::Value::from(value.to_string())};
@@ -688,15 +915,22 @@ fn initial_state()->Result<State>{
     let specs:Vec<RuleSpec>=serde_json::from_str(include_str!("../resources/rules.json"))?;
     Ok(State{config:Config::default(),specs,section:"解压".into(),task:None,
         control:None,conflict:None,logs:VecDeque::new(),page:0,page_starts:vec![0],started:Instant::now(),close_after:false,pending_selection:0,applying:false,planned:0,
-        plan_filter:None,archives_failed:0,selection_failed:false,show_advanced:false,proxy_events:None})
+        plan_filter:None,archives_failed:0,selection_failed:false,show_advanced:false,proxy_events:None,engine_overrides:None,
+        plan_load:Arc::new(PlanLoadSync::default())})
 }
 
 /// 与 `run` 相同，但在事件循环启动前调用 `hook`——自动化测试用它安装驱动定时器，
 /// 以真实回调路径驱动确认流，而不必访问任何内部状态。
 pub fn run_with_pre_loop_hook(hook:impl FnOnce(&AppWindow)+'static)->Result<()> {
+    run_with_engine_overrides(hook,None)
+}
+
+/// 允许测试注入状态目录与回收站实现；生产 GUI 走 `run()` / `run_with_pre_loop_hook`。
+pub fn run_with_engine_overrides(hook:impl FnOnce(&AppWindow)+'static,overrides:Option<EngineTestOverrides>)->Result<()> {
     let ui=AppWindow::new()?;
     ui.set_system_dark(system_dark());
     let state=Rc::new(RefCell::new(initial_state()?));
+    state.borrow_mut().engine_overrides=overrides;
     let(sender,receiver)=mpsc::sync_channel::<Event>(256);
     state.borrow_mut().proxy_events=Some(sender.clone());
     let tools=registry::tools().iter().map(|tool|ToolRow{id:tool.id.into(),name:tool.name.into(),summary:tool.summary.into()}).collect::<Vec<_>>();
@@ -704,14 +938,16 @@ pub fn run_with_pre_loop_hook(hook:impl FnOnce(&AppWindow)+'static)->Result<()> 
     ui.set_tools(Rc::new(VecModel::from(tools)).into());refresh(&ui,&state.borrow());
     load_proxy_command_tips(&ui,0);
     {
-        let weak=ui.as_weak();
+        let weak=ui.as_weak();let state=state.clone();
         ui.on_choose_directory(move||{if let Some(ui)=weak.upgrade(){
             let mut dialog=rfd::FileDialog::new().set_title("选择需要整理的目录");
             // 已经输入过目录时从这里开始，省掉用户重新导航一遍。
             let entered=PathBuf::from(ui.get_directory().as_str());
             if entered.is_dir(){ dialog=dialog.set_directory(&entered); }
             if let Some(path)=dialog.pick_folder(){
-                ui.set_directory(path.display().to_string().into());invalidate(&ui);
+                ui.set_directory(path.display().to_string().into());
+                // 已有任务时按 recompute_ready 重算，而不是无条件失效（同一路径不应清掉计划）。
+                sync_ready_after_directory(&ui,&state.borrow());
             }
         }});
     }
@@ -749,7 +985,11 @@ pub fn run_with_pre_loop_hook(hook:impl FnOnce(&AppWindow)+'static)->Result<()> 
     {
         let state=state.clone();let sender=sender.clone();let weak=ui.as_weak();
         ui.on_plan_toggle(move|id,selected|{let task=state.borrow().task.clone();if let(Some(task),Ok(id))=(task,id.parse::<i64>()){
-            if let Some(ui)=weak.upgrade(){if ui.get_busy(){return;}ui.set_ready(false);}
+            if let Some(ui)=weak.upgrade(){
+                if ui.get_busy(){return;}
+                // 勾选保存中 ready 暂降，避免在途勾选时误点执行；其他项仍可在 Slint 侧继续编辑。
+                ui.set_ready(false);
+            }
             state.borrow_mut().pending_selection += 1;
             let sender=sender.clone();
             std::thread::spawn(move||{
@@ -766,19 +1006,26 @@ pub fn run_with_pre_loop_hook(hook:impl FnOnce(&AppWindow)+'static)->Result<()> 
     }
     {
         let state=state.clone();let sender=sender.clone();
-        ui.on_plan_page(move|direction|{let mut state=state.borrow_mut();let Some(task)=state.task.clone()else{return;};
+        ui.on_plan_page(move|direction|{let state=state.borrow();let Some(task)=state.task.clone()else{return;};
             let next=if direction<0{state.page.saturating_sub(1)}else{state.page+1};
-            if let Some(start)=state.page_starts.get(next).copied(){state.page=next;load_plan_filtered(sender.clone(),task,start,next,state.plan_filter.clone());}
+            if let Some(start)=state.page_starts.get(next).copied(){
+                // 先发起加载，成功事件再提交 page：失败时 page/按钮保持与列表一致，避免前进软锁。
+                load_plan_filtered(sender.clone(),state.plan_load.clone(),task,start,next,state.plan_filter.clone());
+            }
         });
     }
     {
         // 计划类型筛选：""=全部，否则 snake_case kind
         let state=state.clone();let sender=sender.clone();let weak=ui.as_weak();
         ui.on_filter_plan(move|kind|{let mut s=state.borrow_mut();let Some(task)=s.task.clone()else{return;};
+            // Slint 胶囊已先改 plan-filter 显示；这里必须同步 Rust 状态，否则 PlanPage 事件会被拒。
             s.plan_filter=if kind.is_empty(){None}else{Some(kind.to_string())};
             s.page=0;s.page_starts=vec![0];
-            if let Some(ui)=weak.upgrade(){ui.set_plan_prev_enabled(false);ui.set_plan_next_enabled(false);}
-            load_plan_filtered(sender.clone(),task,0,0,s.plan_filter.clone());
+            if let Some(ui)=weak.upgrade(){
+                ui.set_plan_prev_enabled(false);ui.set_plan_next_enabled(false);
+                ui.set_plan_page_label("加载中…".into());
+            }
+            load_plan_filtered(sender.clone(),s.plan_load.clone(),task,0,0,s.plan_filter.clone());
         });
     }
     {
@@ -786,17 +1033,42 @@ pub fn run_with_pre_loop_hook(hook:impl FnOnce(&AppWindow)+'static)->Result<()> 
         ui.on_open_report(move||{if let Some(path)=&state.borrow().task{if let Err(error)=open::that(path){if let Some(ui)=weak.upgrade(){show_error(&ui,error);}}}});
     }
     {
-        let state=state.clone();let sender=sender.clone();
+        let state=state.clone();let sender=sender.clone();let weak=ui.as_weak();
         ui.on_export_report(move||{let task=state.borrow().task.clone();if let Some(task)=task{
+            // 任务运行中禁止导出：apply 会写任务库，与只读导出并发会拖垮 busy_timeout。
+            if let Some(ui)=weak.upgrade(){if ui.get_busy(){show_error(&ui,"任务运行中无法导出报告");return;}}
             let mut dialog=rfd::FileDialog::new().set_file_name("整理报告.csv").add_filter("CSV",&["csv"]);
             if let Some(directory)=user_file_directory(){ dialog=dialog.set_directory(&directory); }
             if let Some(path)=dialog.save_file(){
-                async_work(sender.clone(),move||{
-                    // 系统保存对话框对已存在文件会再问一次“是否替换”；这里按用户确认覆盖，
-                    // 否则 create_new 必然失败，用户在对话框里点了替换也导不出去。
-                    if path.exists(){std::fs::remove_file(&path).context("无法覆盖已存在的导出文件")?;}
-                    Database::open_existing(&task)?.export_csv(&path)?;
-                    Ok(Event::Notice(format!("已导出：{}",path.display())))
+                // 会话级导出互斥：已有导出在途时拒绝本次，避免并发写坏目标/临时文件。
+                if EXPORT_BUSY.swap(true,Ordering::SeqCst){
+                    if let Some(ui)=weak.upgrade(){show_error(&ui,"已有导出正在进行，请稍后再试");}
+                    return;
+                }
+                // 取锁后若拒绝继续，必须立刻释放：否则会话内导出永久卡死。
+                if let Some(ui)=weak.upgrade(){
+                    if ui.get_busy(){
+                        EXPORT_BUSY.store(false,Ordering::SeqCst);
+                        show_error(&ui,"任务运行中无法导出报告");
+                        return;
+                    }
+                }
+                let sender=sender.clone();
+                std::thread::spawn(move||{
+                    // Drop 守卫：无论成功/失败/panic 都释放会话级导出锁。
+                    let _guard=ExportGuard;
+                    let result=std::panic::catch_unwind(std::panic::AssertUnwindSafe(||{
+                        // 系统保存对话框对已存在文件会再问一次“是否替换”；这里按用户确认覆盖。
+                        // 先写同目录临时文件、成功后再原子替换，失败时原文件仍可用（不再先 remove_file）。
+                        export_csv_via_temp(&task,&path)?;
+                        Ok::<_,anyhow::Error>(Event::Notice(format!("已导出：{}",path.display())))
+                    }));
+                    let event=match result{
+                        Ok(Ok(event))=>event,
+                        Ok(Err(error))=>Event::Error(format!("{error:#}")),
+                        Err(_)=>Event::Error("导出线程意外退出；未完成的导出不会写入目标文件".into()),
+                    };
+                    let _=sender.send(event);
                 });
             }
         }});
@@ -836,6 +1108,9 @@ pub fn run_with_pre_loop_hook(hook:impl FnOnce(&AppWindow)+'static)->Result<()> 
                 ui.set_confirm_kind(3);ui.set_acknowledge(false);return slint::CloseRequestResponse::KeepWindowShown;
             }}
             if let Some(control)=&state.borrow().control{control.cancel();}
+            // Slint 1.17 的 CloseRequestResponse 只有 HideWindow / KeepWindowShown，
+            // HideWindow 仅隐藏窗口、事件循环仍在跑；必须显式 quit 才能让进程真正退出。
+            let _=slint::quit_event_loop();
             slint::CloseRequestResponse::HideWindow
         });
     }
@@ -892,7 +1167,7 @@ pub fn run_with_pre_loop_hook(hook:impl FnOnce(&AppWindow)+'static)->Result<()> 
                             format!("整理结束：已回收 {} 项 · 永久删除 {} 项 · 错误 {} 项；完整记录见「进度与日志」或导出报告。",
                                 summary.recycled,summary.deleted,summary.errors)
                         }.into());
-                        load_plan_filtered(sender.clone(),path,0,0,filter);
+                        load_plan_filtered(sender.clone(),state.borrow().plan_load.clone(),path,0,0,filter);
                         if state.borrow().close_after{let _=slint::quit_event_loop();}
                     }
                     Event::Failed(error)=>{
@@ -908,6 +1183,29 @@ pub fn run_with_pre_loop_hook(hook:impl FnOnce(&AppWindow)+'static)->Result<()> 
                             ui.set_status("任务已停止；已完成的操作不会自动回滚，详情见进度与日志".into());
                         }
                         ui.set_progress(-1.0);ui.set_progress_note("".into());
+                        // 失败/取消后计划与摘要可能已部分变化：从任务库重载摘要与当前计划页，
+                        // 避免界面停留在失败前的旧数据。
+                        if let Some(task)=state.borrow().task.clone(){
+                            if let Ok(db)=Database::open_existing(&task){
+                                if let Ok(summary)=db.summary(){
+                                    ui.set_summary(summary.description().into());
+                                    ui.set_archives_failed(summary.archives_failed as i32);
+                                    ui.set_plan_delete_count(summary.planned_delete as i32);
+                                    ui.set_plan_move_count(summary.planned_move as i32);
+                                    ui.set_plan_link_count(summary.planned_link as i32);
+                                    ui.set_plan_empty_count(summary.planned_empty as i32);
+                                    {let mut s=state.borrow_mut();
+                                        s.planned=summary.planned_delete+summary.planned_move+summary.planned_link+summary.planned_empty;
+                                        s.archives_failed=summary.archives_failed;}
+                                    ui.set_metrics(format!("扫描 {} 个文件 · 解压成功 {} / 失败 {} · 错误 {} 项 · 已回收 {} 项",
+                                        summary.scanned,summary.archives_ok,summary.archives_failed,summary.errors,summary.recycled).into());
+                                }
+                            }
+                            let (start,page,filter)={let s=state.borrow();
+                                (s.page_starts.get(s.page).copied().unwrap_or(0),s.page,s.plan_filter.clone())};
+                            let plan_load=state.borrow().plan_load.clone();
+                            load_plan_filtered(sender.clone(),plan_load,task,start,page,filter);
+                        }
                         if state.borrow().close_after{let _=slint::quit_event_loop();}
                     }
                     Event::SelectionSaved(path,saved,error)=>{
@@ -943,12 +1241,21 @@ pub fn run_with_pre_loop_hook(hook:impl FnOnce(&AppWindow)+'static)->Result<()> 
                         if reload_page{
                             let start=s.page_starts.get(s.page).copied().unwrap_or(0);
                             let (page,filter)=(s.page,s.plan_filter.clone());
-                            load_plan_filtered(sender.clone(),path,start,page,filter);
+                            let plan_load=s.plan_load.clone();
+                            load_plan_filtered(sender.clone(),plan_load,path,start,page,filter);
                         }
                     }
-                    Event::PlanPage(path,mut actions,page)=>{
+                    Event::PlanPage(path,mut actions,page,gen,filter)=>{
                         if state.borrow().task.as_ref()!=Some(&path){continue;}
                         let mut s=state.borrow_mut();
+                        // 过期事件：不碰 completed，避免低代际事件取走/清掉更高代际结果后双方都被丢弃。
+                        let latest=s.plan_load.latest.load(Ordering::Acquire);
+                        if !plan_page_event_accepted(gen,latest,page,filter.as_deref(),s.page,s.plan_filter.as_deref()){continue;}
+                        // 代际仍是最新：应用事件自带 actions；同代 completed 只做清理，不再 take 后丢弃。
+                        {
+                            let mut guard=s.plan_load.completed.lock().unwrap_or_else(|poisoned|poisoned.into_inner());
+                            if guard.as_ref().is_some_and(|done|done.gen==gen){*guard=None;}
+                        }
                         let more=actions.len()>100;actions.truncate(100);
                         if more&&s.page_starts.len()<=page+1{s.page_starts.push(actions.last().unwrap().id);}
                         s.page=page;
@@ -968,15 +1275,43 @@ pub fn run_with_pre_loop_hook(hook:impl FnOnce(&AppWindow)+'static)->Result<()> 
                         }
                     }
                     Event::Notice(text)=>ui.set_notice_text(text.into()),
-                    // Error 只更新错误文案：计划加载/导出失败不得误清代理或网络测试的 busy。
-                    Event::Error(text)=>ui.set_error_text(text.into()),
+                    // Error 更新错误文案：不得误清代理/网络 busy。
+                    // 计划筛选曾乐观置「加载中…」：失败必须恢复分页控件，避免永久中间态。
+                    Event::Error(text)=>{
+                        ui.set_error_text(text.into());
+                        if ui.get_has_task() && !ui.get_busy(){
+                            let s=state.borrow();
+                            let page=s.page;
+                            ui.set_plan_prev_enabled(page>0);
+                            ui.set_plan_next_enabled(page+1 < s.page_starts.len());
+                            ui.set_plan_page_label(format!("第 {} 页 · 每页最多 100 条",page+1).into());
+                        }
+                    },
                     Event::ProxyFailed(text)=>{ui.set_proxy_busy(false);ui.set_error_text(text.into());},
-                    Event::NetTestFailed(text)=>{ui.set_net_test_busy(false);ui.set_net_test_summary("尚未测试".into());ui.set_error_text(text.into());},
+                    Event::NetTestFailed(text)=>{
+                        // 失败只清当前 net-test busy：scope 切换已各自清过 busy，晚到失败不得把
+                        // 新页面的 busy 误清（与 NetTestReport 的 scope 守卫同一策略）。
+                        if !ui.get_net_test_busy(){ui.set_error_text(text.into());}
+                        else{
+                            ui.set_net_test_busy(false);
+                            ui.set_net_test_summary("尚未测试".into());
+                            ui.set_error_text(text.into());
+                        }
+                    },
                     Event::ProxySnapshot(snap)=>{ui.set_proxy_busy(false);apply_proxy_snapshot(&ui,snap);},
-                    Event::NetTestReport(report)=>{ui.set_net_test_busy(false);apply_net_test_report(&ui,report);},
-                    Event::WslDistros(distros,error)=>{
+                    Event::NetTestReport(report)=>{
+                        // 校验报告 scope 与当前页面：切换后晚到的旧 scope 结果不得覆盖新视图，
+                        // 也不得误清新 scope 测试的 busy。
+                        if !net_test_report_matches_scope(&ui,&report){continue;}
                         ui.set_net_test_busy(false);
-                        apply_net_test_wsl_rows(&ui,&distros,error);
+                        apply_net_test_report(&ui,report);
+                    },
+                    Event::WslDistros(distros,error)=>{
+                        // 只在 WSL 页应用：切到 Windows 后晚到的列表不得清新 scope 的 busy/状态。
+                        if ui.get_net_test_scope()==1{
+                            ui.set_net_test_busy(false);
+                            apply_net_test_wsl_rows(&ui,&distros,error);
+                        }
                     },
                 }
             }
@@ -1034,6 +1369,17 @@ mod gui_tests{
     //! 每个用例开始前重置为初始状态，互不干扰且与显示器/事件循环解耦。
     use super::*;
     use std::sync::{mpsc,Mutex,OnceLock};
+
+    #[test]
+    fn plan_page_event_rejects_stale_gen_without_touching_completed(){
+        // 低代际事件晚到：不得因 gen!=latest 而应用；completed 仍留给高代际事件。
+        assert!(!plan_page_event_accepted(5,6,0,None,0,None),"低代际事件必须拒绝");
+        // 高代际且 filter 与视图一致：可应用（翻页为「先加载、成功再提交」，不校验预置页码）。
+        assert!(plan_page_event_accepted(6,6,0,Some("delete"),0,Some("delete")));
+        assert!(plan_page_event_accepted(6,6,1,None,0,None));
+        // 同代但用户已切筛选：拒绝。
+        assert!(!plan_page_event_accepted(6,6,0,None,0,Some("delete")));
+    }
 
     struct GuiTestApp{ ui:AppWindow, state:Rc<RefCell<State>> }
     impl GuiTestApp{
@@ -1396,6 +1742,64 @@ mod gui_tests{
             assert_eq!(ui.get_net_test_wsl_selected().as_str(),"Ubuntu-22.04");
             assert_eq!(ui.get_net_test_scope_label().as_str(),"WSL2 · Ubuntu-22.04");
         }).unwrap();
+    }
+
+    // ---- 纯函数回归：CSV 覆盖策略与执行分母计数（不依赖 GUI 工作线程）----
+
+    fn temp_test_dir(tag:&str)->PathBuf{
+        let dir=std::env::temp_dir().join(format!("jchtools-gui-test-{tag}-{}",std::process::id()));
+        let _=std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    #[test]
+    fn write_via_temp_success_replaces_existing(){
+        let dir=temp_test_dir("csv-ok");
+        let dest=dir.join("report.csv");
+        std::fs::write(&dest,b"old").unwrap();
+        write_via_temp(&dest,|tmp|{std::fs::write(tmp,b"new")?;Ok(())}).unwrap();
+        assert_eq!(std::fs::read(&dest).unwrap(),b"new");
+        // 不应残留临时文件
+        let leftovers=std::fs::read_dir(&dir).unwrap()
+            .filter_map(|e|e.ok())
+            .filter(|e|e.file_name().to_string_lossy().ends_with(".tmp"))
+            .count();
+        assert_eq!(leftovers,0,"成功后不应残留 .tmp 文件");
+        let _=std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn write_via_temp_failure_preserves_original(){
+        let dir=temp_test_dir("csv-fail");
+        let dest=dir.join("report.csv");
+        std::fs::write(&dest,b"original").unwrap();
+        let result=write_via_temp(&dest,|_tmp|Err(anyhow::anyhow!("模拟写入失败")));
+        assert!(result.is_err(),"写失败应上抛错误");
+        assert_eq!(std::fs::read(&dest).unwrap(),b"original","写失败时原文件必须仍可用");
+        let _=std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn count_selected_pending_ignores_unselected_and_done(){
+        use crate::config::DeleteMode;
+        use crate::model::{Action,ActionKind};
+        let dir=temp_test_dir("count-selected");
+        let db=Database::create(&dir).unwrap();
+        // 2 个仍勾选且待执行；1 个取消勾选；1 个已执行
+        for (selected,state) in [(true,"pending"),(true,"pending"),(false,"pending"),(true,"done")] {
+            let action=Action{
+                id:0,kind:ActionKind::Delete,source:format!("a-{selected}-{state}"),
+                target:None,reason:String::new(),expected:None,keeper:None,hash:None,
+                mode:DeleteMode::Keep,selected,state:state.to_string(),
+            };
+            let id=db.add_action(&action).unwrap();
+            // add_action 固定写 pending，显式标记需要非 pending 的状态。
+            if state!="pending"{ db.mark_action(id,state).unwrap(); }
+        }
+        drop(db);
+        assert_eq!(count_selected_pending(&dir).unwrap(),2);
+        let _=std::fs::remove_dir_all(&dir);
     }
 }
 

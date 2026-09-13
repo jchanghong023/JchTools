@@ -59,7 +59,7 @@ JCHTOOLS_TEST_7ZIP=/abs/path/7zz bash scripts/check-linux.sh   # 含真实解压
 
 产品名、二进制名、图标、状态目录等一旦调整，`MUST` 同步以下位置：
 
-`Cargo.toml`（package/bin 名）· `build.rs`（链接参数与图标资源）· `ui/app.slint`（标题、品牌、关于页）· `src/config.rs`（状态目录）· `src/registry.rs`（工具名）· `scripts/*`（打包、启动、检查脚本）· `.github/workflows/check.yml` · `resources/windows.manifest` · `README.md` / `docs/*` / `先读我.txt` · `SHA256SUMS.txt`（用 `sha256sum -b` 重新生成并逐字节复核）。
+`Cargo.toml`（package/bin 名）· `build.rs`（链接参数与图标资源）· `ui/app.slint`（标题、品牌、关于页）· `src/config.rs`（状态目录）· `src/registry.rs`（工具名）· `scripts/*`（打包、启动、检查脚本）· `.github/workflows/check.yml` · `.github/workflows/release.yml` · `resources/windows.manifest` · `README.md` / `docs/*` / `先读我.txt` · `SHA256SUMS.txt`（用 `sha256sum -b` 重新生成并逐字节复核）。
 
 ## 6. 安全底线
 

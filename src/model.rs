@@ -55,6 +55,7 @@ impl From<ActionState> for String {
     fn from(state: ActionState) -> Self { state.as_str().into() }
 }
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
 pub struct Action {
     pub id: i64,
     pub kind: ActionKind,
@@ -69,7 +70,25 @@ pub struct Action {
     /// snake_case 文本，合法取值见 [`ActionState`]；暂保留 String 以免牵动 db/gui/planner 的读写路径。
     pub state: String,
 }
+impl Default for Action {
+    fn default() -> Self {
+        Self {
+            id: 0,
+            kind: ActionKind::Delete,
+            source: String::new(),
+            target: None,
+            reason: String::new(),
+            expected: None,
+            keeper: None,
+            hash: None,
+            mode: DeleteMode::Recycle,
+            selected: true,
+            state: "pending".into(),
+        }
+    }
+}
 #[derive(Debug, Default, Clone, Serialize, Deserialize)]
+#[serde(default)]
 pub struct Summary {
     pub scanned: u64,
     pub scanned_bytes: u64,

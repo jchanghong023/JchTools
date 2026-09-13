@@ -9,7 +9,9 @@ fn action(file: &FileRecord, kind: ActionKind, reason: &str, mode: DeleteMode) -
         keeper:None,hash:file.hash.clone(),mode,selected:true,state:"pending".into() }
 }
 fn remove_candidate(job: &mut Job, file: &FileRecord, keeper: Option<&FileRecord>, reason: &str, mode: DeleteMode, hardlink: bool) -> Result<()> {
-    if mode == DeleteMode::Keep { return Ok(()); }
+    // Hardlink 不销毁内容，只是换名去重：即使删除方式为 Keep 也应生成计划。
+    if mode == DeleteMode::Keep && !hardlink { return Ok(()); }
+    let mode = if hardlink && mode == DeleteMode::Keep { DeleteMode::Permanent } else { mode };
     let mut planned = action(file, if hardlink { ActionKind::Hardlink } else { ActionKind::Delete },reason,mode);
     if let Some(keeper) = keeper { planned.keeper = Some((keeper.rel.clone(),keeper.snapshot.clone())); }
     job.db.add_action(&planned)?;
@@ -70,12 +72,18 @@ fn deduplicate(job: &mut Job) -> Result<()> {
                     let same_volume = vol(&keeper.snapshot.identity) == vol(&file.snapshot.identity);
                     if !same_volume {
                         hardlink = false;
-                        job.log("去重",&file.rel,&keeper.rel,"降级","跨卷无法硬链接，改为按删除规则处理",file.snapshot.size)?;
+                        if mode == DeleteMode::Keep {
+                            job.log("去重",&file.rel,&keeper.rel,"跳过","跨卷无法硬链接，且删除方式为保留",file.snapshot.size)?;
+                        } else {
+                            job.log("去重",&file.rel,&keeper.rel,"降级","跨卷无法硬链接，改为按删除规则处理",file.snapshot.size)?;
+                        }
                     }
                 }
                 remove_candidate(job,&file,Some(&keeper),reason,mode,hardlink)?;
                 if mode != DeleteMode::Keep { job.db.conn.execute("UPDATE files SET cleanable=1 WHERE id=?1",[keeper_id])?; }
-            } else {
+            } else if rules::cleanup_reason(&file.rel,file.snapshot.size,&job.config).is_none() {
+                // 清理命中文件即使 cleanup_delete=Keep（remove_candidate 直接返回、文件仍 active=1）
+                // 也不得进入 keepers 成为去重唯一保留者：否则正常副本反被删除，只留下垃圾文件。
                 job.db.conn.execute("INSERT INTO keepers(file_id,hash,name,normal) VALUES(?1,?2,?3,?4)",params![file.id,hash,file.name,file.normalized])?;
             }
         }
@@ -91,12 +99,17 @@ fn conflict_groups(job: &mut Job, same_size: bool) -> Result<()> {
     // A grouping table avoids keeping millions of names/paths in RAM.
     job.db.conn.execute_batch("DROP TABLE IF EXISTS conflict_groups; CREATE TEMP TABLE conflict_groups(seq INTEGER PRIMARY KEY,key TEXT,size INTEGER);")?;
     // 分组键语义（与 rules.json 的开关描述一致）：
-    // - 目录范围（默认）→ 只比较「同一父目录内的同名文件」。rel 是含父目录的全路径且唯一，
-    //   lower(rel) 即等价于「父目录+小写名」；Windows 文件系统不允许同目录存在同名（含大小写
-    //   变体）文件，因此该范围在 Windows 上永不触发，作用是防止跨目录同名被误判为版本冲突。
+    // - 目录范围（默认）→ 只比较「同一父目录内的同名文件」。rel 是含父目录的全路径且唯一；
+    //   Windows 文件系统不区分大小写，用 lower(rel)（与 archive.rs 的平台门控一致）；
+    //   其他平台区分大小写，必须用精确 rel，否则会把同目录下 A.txt 与 a.txt 误并为
+    //   同名冲突。该范围在任何平台上都永不真正触发（rel 全局唯一），作用是防止
+    //   跨目录同名被误判为版本冲突。
     // - 全局范围 → 只比较小写文件名，跨目录的同名版本取舍由它承担。
-    // 注意：任何「父目录+文件名」形式的键都与 lower(rel) 数学等价，无法让本范围更积极。
-    let key_expr = if job.config.conflict_scope_directory { "lower(rel)" } else { "lower(name)" };
+    let key_expr = if job.config.conflict_scope_directory {
+        if cfg!(windows) { "lower(rel)" } else { "rel" }
+    } else {
+        "lower(name)"
+    };
     let grouping = if same_size {
         format!("INSERT INTO conflict_groups(key,size) SELECT {key_expr},size FROM files WHERE active=1 AND hash IS NOT NULL GROUP BY {key_expr},size HAVING COUNT(DISTINCT hash)>1")
     } else {
@@ -189,7 +202,12 @@ fn target_will_be_free(job: &Job, path: &Path, rel: &str, source_rel: &str) -> R
     // try_exists 对同一物理文件返回 true，必须视为可腾空，否则会错误生成 " (1)" 后缀。
     if cfg!(windows) && rel.eq_ignore_ascii_case(source_rel) { return Ok(true); }
     // symlink_metadata 不跟随链接：损坏的符号链接也算目录项已存在。
-    if std::fs::symlink_metadata(path).is_err() { return Ok(true); }
+    // 仅 NotFound 视为空闲；权限/IO 错误不得假定目标不存在，否则计划与执行不一致。
+    match std::fs::symlink_metadata(path) {
+        Ok(_) => {}
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(true),
+        Err(error) => return Err(error.into()),
+    }
     // 被计划删除或移走的路径执行后会腾空，可以复用原名，不必生成 " (1)" 后缀。
     let freeing: bool = job.db.conn.query_row(
         "SELECT EXISTS(SELECT 1 FROM actions WHERE source=?1 AND kind IN (?2,?3) AND selected=1)",
@@ -256,6 +274,11 @@ fn moves(job: &mut Job) -> Result<()> {
                         }
                     }};
                 if let Some(label) = label {
+                    // 分类目录段同样过 Windows 保留名校验：命中则跳过本文件，不得整次 build 失败。
+                    if let Err(error) = fsutil::safe_relative(&fsutil::path_string(&label)?.replace('\\',"/")) {
+                        job.log("归类",&file.rel,"","跳过",&format!("分类目录名不合法：{error}"),0)?;
+                        continue;
+                    }
                     // 空 output_dir：分类目录直接建在选定根下；已在该分类目录下的文件不再套一层。
                     // label 可能是多段路径（如日期归类的 2024/03），必须整段前缀比较而不是只比首段。
                     let already = output_dir.is_empty() && under_path(original, &label);
@@ -270,11 +293,16 @@ fn moves(job: &mut Job) -> Result<()> {
             }
             let desired = parent.join(&name);
             let desired_rel = fsutil::path_string(&desired)?.replace('\\',"/");
+            if let Err(error) = fsutil::safe_relative(&desired_rel) {
+                job.log("命名",&file.rel,"","跳过",&error.to_string(),0)?;
+                continue;
+            }
             if desired_rel == file.rel { continue; }
             let mut target = fsutil::safe_join(&job.root,&desired_rel)?;
             if !target_will_be_free(job,&target,&desired_rel,&file.rel)? || !job.db.reserve_target(&desired_rel,file.id)? {
                 let requested = target.clone(); let mut index = 1u64;
                 loop {
+                    job.context.control.checkpoint()?;
                     let stem = requested.file_stem().and_then(|s|s.to_str()).context("目标文件名无效")?;
                     let suffix = requested.extension().and_then(|s|s.to_str()).map(|s|format!(".{s}")).unwrap_or_default();
                     target = requested.parent().context("目标缺少目录")?.join(format!("{stem} ({index}){suffix}"));

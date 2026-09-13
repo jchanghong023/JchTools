@@ -3,7 +3,8 @@
 //! Windows 本机与 WSL2 内部分别探测（WSL2 有独立网络命名空间，必须在发行版内测）。
 
 use std::net::{TcpStream, ToSocketAddrs};
-use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 /// 默认单站探测超时（毫秒）。
@@ -125,14 +126,17 @@ pub fn probe_host(host: &str, timeout: Duration) -> Result<u64, String> {
     let deadline = start + timeout;
     let addrs = resolve_with_timeout(host, 443, timeout)?;
     let mut last_err = String::from("无可用地址");
+    let n = addrs.len().max(1) as u32;
     for addr in addrs {
-        // 用剩余预算而非完整 timeout，保证 DNS + 多地址 connect 不会叠乘。
-        let remaining = deadline.saturating_duration_since(Instant::now());
-        if remaining.is_zero() {
+        // 每地址独立预算：坏 IPv6 不得吃光总超时导致 IPv4 从未被试（双栈黑洞常见误报）。
+        let total_remaining = deadline.saturating_duration_since(Instant::now());
+        if total_remaining.is_zero() {
             last_err = "探测总超时已耗尽".to_string();
             break;
         }
-        match TcpStream::connect_timeout(&addr, remaining) {
+        let per_addr = total_remaining / n;
+        let budget = per_addr.max(Duration::from_millis(50)).min(total_remaining);
+        match TcpStream::connect_timeout(&addr, budget) {
             Ok(_) => {
                 // 微秒：本机/局域网连接常常 <1ms，用毫秒会全是 0，看起来像坏了。
                 let us = start.elapsed().as_micros() as u64;
@@ -162,24 +166,43 @@ fn resolve_with_timeout(
     }
 
     let host = host.to_string();
+    // 槽位只允许释放一次：超时返回后工作线程可能仍阻塞，不得再次 fetch_sub。
+    // to_socket_addrs 无法取消；残留线程只占 OS 资源，但 PENDING_DNS 会复用。
+    let released = Arc::new(AtomicBool::new(false));
+    let released_worker = released.clone();
     let (sender, receiver) = std::sync::mpsc::channel();
     std::thread::spawn(move || {
         let result = (host.as_str(), port)
             .to_socket_addrs()
             .map(|iter| iter.collect::<Vec<_>>())
             .map_err(|e| format!("DNS 解析失败：{e}"));
-        // 无论成功失败都递减挂起计数，让槽位可以被复用。
-        PENDING_DNS.fetch_sub(1, Ordering::SeqCst);
+        if !released_worker.swap(true, Ordering::SeqCst) {
+            PENDING_DNS.fetch_sub(1, Ordering::SeqCst);
+        }
         let _ = sender.send(result);
     });
+    let release_slot = |released: &Arc<AtomicBool>| {
+        if !released.swap(true, Ordering::SeqCst) {
+            PENDING_DNS.fetch_sub(1, Ordering::SeqCst);
+        }
+    };
     match receiver.recv_timeout(timeout) {
         Ok(Ok(addrs)) if !addrs.is_empty() => Ok(addrs),
-        Ok(Ok(_)) => Err("DNS 未返回地址".to_string()),
-        Ok(Err(error)) => Err(error),
+        Ok(Ok(_)) => {
+            release_slot(&released);
+            Err("DNS 未返回地址".to_string())
+        }
+        Ok(Err(error)) => {
+            release_slot(&released);
+            Err(error)
+        }
         Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {
+            // 超时后不释放槽位：工作线程可能仍阻塞在 to_socket_addrs；
+            // 若此刻 release，会允许新 spawn，使僵尸线程无界堆积。由 worker 完成时释放。
             Err(format!("DNS 解析超时（超过 {} ms）", timeout.as_millis()))
         }
         Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => {
+            release_slot(&released);
             Err("DNS 解析线程异常退出".to_string())
         }
     }
@@ -288,7 +311,7 @@ pub fn wsl_probe_script(timeout_ms: u64) -> String {
          \x20 fi\n\
          \x20 if [ \"$ok\" = 1 ]; then\n\
          \x20   if [[ -n \"${{EPOCHREALTIME-}}\" ]]; then end=$EPOCHREALTIME; else end=$(date +%s%N 2>/dev/null || echo 0); fi\n\
-         \x20   us=$(awk -v a=\"$start\" -v b=\"$end\" 'BEGIN{{ d=b-a; if (d<0) d=0; printf \"%.0f\", d/1000 }}')\n\
+         \x20   us=$(awk -v a=\"$start\" -v b=\"$end\" 'BEGIN{{ d=b-a; if (d<0) d=0; if (a ~ /\\./) printf \"%.0f\", d*1000000; else printf \"%.0f\", d/1000 }}')\n\
          \x20   echo \"OK ${{h}} ${{us}}\"\n\
          \x20 else\n\
          \x20   echo \"FAIL ${{h}} tcp_or_dns\"\n\
@@ -316,7 +339,14 @@ pub fn parse_wsl_probe_lines(text: &str) -> Vec<(String, Result<u64, String>)> {
         }
         match kind {
             "OK" => {
-                let ms = parts.next().and_then(|v| v.parse::<u64>().ok()).unwrap_or(0);
+                // 缺字段/不可解析不得伪造成 0μs 可达：会把异常链路显示成「<1 ms」。
+                let Some(ms) = parts.next().and_then(|v| v.parse::<u64>().ok()) else {
+                    out.push((
+                        host.to_string(),
+                        Err("WSL 内 OK 响应缺少可解析的耗时字段".to_string()),
+                    ));
+                    continue;
+                };
                 out.push((host.to_string(), Ok(ms)));
             }
             "FAIL" => {
@@ -408,25 +438,15 @@ fn run_capture_no_window(program: &std::path::Path, args: &[&str]) -> Result<Str
     let output = crate::process::run_with_timeout(&mut command, LIST_CMD_TIMEOUT)
         .map_err(|e| e.to_string())?;
     let display = program.display().to_string();
-    let mut text = String::from_utf8_lossy(&output.stdout).into_owned();
+    // wsl.exe 可能以 UTF-16 输出；与 run_wsl 共用 decode_wsl_bytes，避免两套解码分叉。
+    let text = decode_wsl_bytes(&output.stdout);
     if !output.status.success() && text.trim().is_empty() {
-        let err = String::from_utf8_lossy(&output.stderr);
+        let err = decode_wsl_bytes(&output.stderr);
         return Err(format!(
             "{display} 退出码 {:?}：{}",
             output.status.code(),
             err.trim()
         ));
-    }
-    // wsl 有时以 UTF-16 输出；若出现大量 NUL 则按 UTF-16LE 再试一次。
-    if text.bytes().filter(|b| *b == 0).count() * 2 >= text.len().max(1) && !text.is_empty() {
-        let raw = &output.stdout;
-        if raw.len() % 2 == 0 {
-            let units: Vec<u16> = raw
-                .chunks_exact(2)
-                .map(|c| u16::from_le_bytes([c[0], c[1]]))
-                .collect();
-            text = String::from_utf16_lossy(&units);
-        }
     }
     Ok(text)
 }
@@ -513,22 +533,50 @@ pub fn run_wsl(distro: &str, timeout_ms: u64) -> NetTestReport {
     )
 }
 
-/// wsl.exe 字节流解码：优先 UTF-8；大量 NUL 时按 UTF-16LE。
-#[cfg(windows)]
+/// wsl.exe 字节流解码：BOM → UTF-16 启发式 → 严格 UTF-8 → UTF-16LE 重试 → lossy。
+/// 仅靠「NUL 占比 ≥ 一半」会在 CJK 发行版名（高位字节非 0）上失效，故增加奇数位 NUL 与 BOM 证据。
+/// 纯函数，非 Windows 也可编译，便于单测。
+#[allow(dead_code)] // 调用方在 windows 专用路径；非 Windows 仅测试使用
 fn decode_wsl_bytes(raw: &[u8]) -> String {
     if raw.is_empty() {
         return String::new();
     }
-    let text = String::from_utf8_lossy(raw).into_owned();
+    if raw.starts_with(&[0xFF, 0xFE]) {
+        let units: Vec<u16> = raw[2..]
+            .chunks_exact(2)
+            .map(|c| u16::from_le_bytes([c[0], c[1]]))
+            .collect();
+        return String::from_utf16_lossy(&units);
+    }
+    if raw.starts_with(&[0xFE, 0xFF]) {
+        let units: Vec<u16> = raw[2..]
+            .chunks_exact(2)
+            .map(|c| u16::from_be_bytes([c[0], c[1]]))
+            .collect();
+        return String::from_utf16_lossy(&units);
+    }
     let nulls = raw.iter().filter(|b| **b == 0).count();
-    if nulls * 2 >= raw.len().max(1) && raw.len() % 2 == 0 {
+    let odd_nulls = raw.iter().enumerate().filter(|(i, b)| i % 2 == 1 && **b == 0).count();
+    let looks_utf16 = raw.len() % 2 == 0
+        && (nulls * 2 >= raw.len().max(1) || odd_nulls * 4 >= raw.len().max(1));
+    if looks_utf16 {
         let units: Vec<u16> = raw
             .chunks_exact(2)
             .map(|c| u16::from_le_bytes([c[0], c[1]]))
             .collect();
         return String::from_utf16_lossy(&units);
     }
-    text
+    match std::str::from_utf8(raw) {
+        Ok(text) => text.to_string(),
+        Err(_) if raw.len() % 2 == 0 => {
+            let units: Vec<u16> = raw
+                .chunks_exact(2)
+                .map(|c| u16::from_le_bytes([c[0], c[1]]))
+                .collect();
+            String::from_utf16_lossy(&units)
+        }
+        Err(_) => String::from_utf8_lossy(raw).into_owned(),
+    }
 }
 
 #[cfg(windows)]
@@ -547,7 +595,8 @@ fn wsl_run_error_report(distro: &str, error: &str) -> NetTestReport {
                 tips: {
                     let mut tips = failure_tips(t.host, None);
                     tips.push("确认已安装 WSL2 且发行版处于可用状态（可运行 `wsl -l -v` 查看）。".into());
-                    tips.push("在终端执行 `wsl -d Ubuntu-24.04` 验证发行版能否启动。".into());
+                    let check = if distro.is_empty() { "Ubuntu".to_string() } else { distro.to_string() };
+                    tips.push(format!("在终端执行 `wsl -d {check}` 验证发行版能否启动。"));
                     tips
                 },
             })
@@ -713,6 +762,69 @@ mod tests {
         let ok = parse_wsl_probe_lines("OK chatgpt.com 12\n");
         assert_eq!(ok.len(), 1);
         assert_eq!(ok[0].0, "chatgpt.com");
+    }
+
+    #[test]
+    fn wsl_probe_script_converts_epochrealtime_to_microseconds() {
+        let script = wsl_probe_script(1000);
+        assert!(script.contains("d*1000000") || script.contains("d*1e6"), "EPOCHREALTIME 秒差必须乘到微秒");
+        assert!(script.contains("a ~ /\\./"), "需按 start 是否含小数点区分时间基");
+        // 复刻脚本 awk 逻辑：EPOCHREALTIME 始终含小数点（如 100.500000）；纳秒路径为整数字符串。
+        let awk_us = |a: &str, b: &str| -> u64 {
+            let a_n: f64 = a.parse().unwrap();
+            let b_n: f64 = b.parse().unwrap();
+            let d = b_n - a_n;
+            let d = if d < 0.0 { 0.0 } else { d };
+            if a.contains('.') {
+                (d * 1_000_000.0).round() as u64
+            } else {
+                (d / 1000.0).round() as u64
+            }
+        };
+        assert_eq!(awk_us("100.500000", "102.500000"), 2_000_000);
+        assert_eq!(awk_us("1000000000", "3000000000"), 2_000_000);
+    }
+
+    #[test]
+    fn parse_wsl_probe_lines_ok_without_latency_is_failure() {
+        let missing = parse_wsl_probe_lines("OK chatgpt.com\n");
+        assert_eq!(missing.len(), 1);
+        assert!(missing[0].1.is_err(), "缺耗时的 OK 行不得标成可达 0μs");
+        let bad = parse_wsl_probe_lines("OK chatgpt.com notanumber\n");
+        assert!(bad[0].1.is_err());
+        let ok = parse_wsl_probe_lines("OK chatgpt.com 2000000\n");
+        assert_eq!(ok[0].1.as_ref().ok().copied(), Some(2_000_000));
+    }
+
+    #[test]
+    fn decode_wsl_bytes_handles_bom_and_cjk_utf16() {
+        // UTF-16LE + BOM
+        let mut le = vec![0xFF, 0xFE];
+        for u in "Ubuntu-22.04".encode_utf16() { le.extend_from_slice(&u.to_le_bytes()); }
+        assert_eq!(decode_wsl_bytes(&le), "Ubuntu-22.04");
+
+        // UTF-16BE + BOM
+        let mut be = vec![0xFE, 0xFF];
+        for u in "Debian".encode_utf16() { be.extend_from_slice(&u.to_be_bytes()); }
+        assert_eq!(decode_wsl_bytes(&be), "Debian");
+
+        // 无 BOM 的 ASCII UTF-16LE：奇数位 NUL 占比高
+        let mut ascii16 = Vec::new();
+        for u in "OK host 12".encode_utf16() { ascii16.extend_from_slice(&u.to_le_bytes()); }
+        assert_eq!(decode_wsl_bytes(&ascii16), "OK host 12");
+
+        // CJK 混合：高位字节非 0，靠 odd_nulls 启发式
+        let mut cjk = Vec::new();
+        for u in "中文终端".encode_utf16() { cjk.extend_from_slice(&u.to_le_bytes()); }
+        assert_eq!(decode_wsl_bytes(&cjk), "中文终端");
+
+        // 严格 UTF-8 保持原样
+        assert_eq!(decode_wsl_bytes(b"plain utf8 text"), "plain utf8 text");
+
+        // 非法 UTF-8 偶长度：回退 UTF-16LE lossy（不 panic）
+        let _ = decode_wsl_bytes(&[0xFF, 0x00, 0xFE, 0x01]);
+        // 非法 UTF-8 奇长度：lossy UTF-8（不 panic）
+        let _ = decode_wsl_bytes(&[0xC0, 0x80, 0x41]);
     }
 
     #[test]

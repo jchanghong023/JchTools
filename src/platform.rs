@@ -75,10 +75,20 @@ fn native_recycle(path: &Path) -> std::result::Result<(), RecycleFailure> {
         struct ComGuard;
         impl Drop for ComGuard { fn drop(&mut self) { unsafe { CoUninitialize(); } } }
         let _guard = ComGuard;
-        let mut text = path.as_os_str().to_string_lossy().into_owned();
-        if let Some(unc) = text.strip_prefix(r"\\?\UNC\") { text = format!(r"\\{unc}"); }
-        else if let Some(local) = text.strip_prefix(r"\\?\") { text = local.to_string(); }
-        let wide: Vec<u16> = std::ffi::OsStr::new(&text).encode_wide().chain(Some(0)).collect();
+        // 无损宽字符路径：避免 to_string_lossy 把未配对 UTF-16 代理项换成 U+FFFD 后误操作。
+        let mut units: Vec<u16> = path.as_os_str().encode_wide().collect();
+        // 剥掉 \\?\ 或 \\?\UNC\ 扩展前缀，保持与旧实现相同的解析名形态。
+        const Q: &[u16] = &[0x5c, 0x5c, 0x3f, 0x5c]; // \\?\
+        const UNC: &[u16] = &[0x5c, 0x5c, 0x3f, 0x5c, 0x55, 0x4e, 0x43, 0x5c]; // \\?\UNC\
+        if units.starts_with(UNC) {
+            let mut stripped = vec![0x5c, 0x5c];
+            stripped.extend_from_slice(&units[UNC.len()..]);
+            units = stripped;
+        } else if units.starts_with(Q) {
+            units.drain(..Q.len());
+        }
+        units.push(0);
+        let wide = units;
         unsafe {
             let operation: IFileOperation = CoCreateInstance(&FileOperation, None, CLSCTX_INPROC_SERVER)?;
             operation.SetOperationFlags(FOF_NO_UI | FOF_NO_CONNECTED_ELEMENTS | FOFX_RECYCLEONDELETE | FOFX_EARLYFAILURE)?;
@@ -117,6 +127,13 @@ pub fn remove(
     if let Some(expected) = expected { fsutil::unchanged(path, expected)?; }
     if meta.is_dir() && fs::read_dir(path)?.next().is_some() { bail!("目录不是空目录，不会递归删除用户目录"); }
     if mode == DeleteMode::Recycle {
+        // 回收 API 对目录会整树入站：删除前再钉一次类型/链接/空目录，缩小 TOCTOU。
+        control.check_cancelled()?;
+        let meta2 = fs::symlink_metadata(path)?;
+        if fsutil::is_link(&meta2) { bail!("拒绝删除链接 / reparse point"); }
+        if meta2.is_dir() && fs::read_dir(path)?.next().is_some() {
+            bail!("目录不是空目录，不会递归删除用户目录");
+        }
         let volume = volume_root(path);
         let before = volume.as_deref().and_then(|v| recycler.bin_count(v));
         match recycler.recycle(path) {
@@ -142,11 +159,27 @@ pub fn remove(
                 }
                 if !fallback { bail!("回收失败，已保留文件：{reason}"); }
                 if let Some(expected) = expected { fsutil::unchanged(path, expected)?; }
+                // 降级永久删除前重检类型/链接/空目录，避免用陈旧 meta 选错 API 或误删非空树。
+                let meta3 = fs::symlink_metadata(path)?;
+                if fsutil::is_link(&meta3) { bail!("拒绝删除链接 / reparse point"); }
+                if meta3.is_dir() && fs::read_dir(path)?.next().is_some() {
+                    bail!("目录不是空目录，不会递归删除用户目录");
+                }
+                control.check_cancelled()?;
+                if meta3.is_dir() { fs::remove_dir(path).context("删除空目录失败")?; }
+                else { fs::remove_file(path).context("永久删除失败（未自动提升权限或修改只读属性）")?; }
+                return Ok(DeleteResult::Permanent);
             }
         }
     }
     control.check_cancelled()?;
-    if meta.is_dir() { fs::remove_dir(path).context("删除空目录失败")?; }
+    // 永久删除前再确认一次（防检查后类型被替换）。
+    let meta2 = fs::symlink_metadata(path)?;
+    if fsutil::is_link(&meta2) { bail!("拒绝删除链接 / reparse point"); }
+    if meta2.is_dir() && fs::read_dir(path)?.next().is_some() {
+        bail!("目录不是空目录，不会递归删除用户目录");
+    }
+    if meta2.is_dir() { fs::remove_dir(path).context("删除空目录失败")?; }
     else { fs::remove_file(path).context("永久删除失败（未自动提升权限或修改只读属性）")?; }
     Ok(DeleteResult::Permanent)
 }

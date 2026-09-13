@@ -2,8 +2,7 @@ use crate::{config::{ConflictPolicy, DeleteMode}, control::ConflictInfo, engine:
     hashing, model::bytes, platform::DeleteResult, process, rules};
 use anyhow::{bail, Context, Result};
 use rusqlite::{params, OptionalExtension};
-use sha2::Digest;
-use std::{collections::BTreeMap, fs, io::Read, path::{Path,PathBuf}, process::Command, time::{Duration, SystemTime}};
+use std::{collections::BTreeMap, fs, path::{Path,PathBuf}, process::Command, time::{Duration, SystemTime}};
 
 /// 无 Size 元数据的流式包（gzip/bzip2/xz 等）展开量的内置硬顶（GiB）。
 /// 这类包无法按声明总量做预检（sizes_complete=false 会跳过 max_ratio 与
@@ -14,28 +13,10 @@ const STREAM_UNPACKED_CAP_GIB: u64 = 50;
 pub struct SevenZip { executable: PathBuf }
 impl SevenZip {
     pub fn from_bundle() -> Result<Self> {
-        let Some(directory) = crate::engine_bundle::bundled_dir() else {
-            // 没有随包目录时使用内嵌引擎（首次运行释放到用户数据目录并校验哈希）。
-            return Ok(Self { executable: crate::engine_bundle::resolve_executable()? });
-        };
-        let executable = directory.join(if cfg!(windows) { "7z.exe" } else { "7zz" });
-        let manifest: serde_json::Value = serde_json::from_slice(&fs::read(directory.join("manifest.json"))?)?;
-        let files = manifest["files"].as_array().context("7-Zip 校验清单无效")?;
-        let mut verified = Vec::new();
-        for entry in files {
-            let name = entry["name"].as_str().context("引擎文件名无效")?;
-            fsutil::validate_component(name)?;
-            let mut file = fsutil::open_stable_read(&directory.join(name))?;
-            let mut hash = sha2::Sha256::new(); let mut buffer = [0u8;65536];
-            loop { let count = file.read(&mut buffer)?; if count == 0 { break; } hash.update(&buffer[..count]); }
-            let actual = hex::encode(hash.finalize());
-            if entry["sha256"].as_str() != Some(actual.as_str()) { bail!("随包引擎校验失败：{name}"); }
-            verified.push(name.to_owned());
-        }
-        if cfg!(windows) && (!verified.iter().any(|x| x == "7z.exe") || !verified.iter().any(|x| x == "7z.dll")) {
-            bail!("7-Zip 清单必须包括完整的 7z.exe 和 7z.dll；不能使用不支持 RAR 的 7za 替代");
-        }
-        Ok(Self { executable })
+        // 随包目录与内嵌引擎统一走 resolve_executable：随包路径与 AGENTS §3.1 一致
+        // 仅警告放行（LGPL 允许替换外部 7-Zip 引擎），内嵌释放路径保留硬校验。
+        // 不再对随包路径做硬哈希 bail——那会拒绝用户自备/替换的引擎，与 LGPL 冲突。
+        Ok(Self { executable: crate::engine_bundle::resolve_executable()? })
     }
     /// Explicit test/development injection, never inferred from the system PATH.
     pub fn with_executable(executable: &Path) -> Result<Self> {
@@ -83,8 +64,9 @@ impl SevenZip {
             if attr.split_whitespace().any(|s| s.starts_with('l')) { bail!("拒绝 Unix 符号链接条目：{raw}"); }
             let directory = fields.get("Folder").is_some_and(|s| s == "+") || attr.starts_with('D') || attr.starts_with('d');
             let size = match fields.get("Size") {
-                Some(s) if !s.is_empty() => s.parse::<u64>().context("压缩包条目大小无效")?,
+                // 目录条目一律按 0 计入总量：部分引擎会给目录填非 0 Size，导致合入后 expanded!=total 必败。
                 _ if directory => 0,
+                Some(s) if !s.is_empty() => s.parse::<u64>().context("压缩包条目大小无效")?,
                 _ => {
                     // 流式单文件包可能不声明展开大小：记为不完整，合入阶段跳过精确大小校验。
                     sizes_complete = false;
@@ -241,8 +223,19 @@ impl SevenZip {
                         enqueue(job,&final_path,depth+1)?;
                     }
                 }
-                None => { complete = false; job.summary.skipped += 1;
-                    job.log("解压",archive_rel,&destination_rel,"跳过","目标冲突未采用新文件；原包强制保留",meta.len())?; }
+                None => {
+                    job.summary.skipped += 1;
+                    // Newest/Largest/Skip 下「已有文件胜出」是策略结果：目标内容已就位，
+                    // 不应把 complete 置 false 导致原包永久保留并在下次分析重复解压。
+                    // Skip 仍保留原包（用户选择不采用新文件）；Newest/Largest 可按规则删原包。
+                    let policy = job.archive_override.unwrap_or(job.config.extract_conflict);
+                    if policy == ConflictPolicy::Skip {
+                        complete = false;
+                        job.log("解压",archive_rel,&destination_rel,"跳过","目标冲突未采用新文件；原包强制保留",meta.len())?;
+                    } else {
+                        job.log("解压",archive_rel,&destination_rel,"跳过","目标冲突：已有文件按策略保留；原包按规则处理",meta.len())?;
+                    }
+                }
             }
         }
         if sizes_complete && expanded != total { bail!("解压总量与条目清单不一致，原包保留"); }
@@ -254,8 +247,18 @@ impl SevenZip {
                 let dest = archive.parent().unwrap().join(fsutil::safe_relative(&rel)?);
                 let root_rel = fsutil::relative_string(&job.root,&dest)?;
                 fsutil::safe_join(&job.root,&root_rel)?;
+                // 与文件合入/扫描同一过滤口径：X/** 不匹配 bare X，需补 X/ 变体。
+                if exclusions.is_match(&root_rel) || exclusions.is_match(format!("{root_rel}/"))
+                    || excluded_destination(&job.root,&dest,&job.config) {
+                    complete=false;job.summary.skipped+=1;
+                    job.log("解压",archive_rel,&root_rel,"跳过","目标命中排除/隐藏/系统文件设置；原包保留",0)?;
+                    continue;
+                }
                 if !dest.try_exists()? { fs::create_dir_all(&dest)?; }
-                else if !dest.is_dir() { complete = false; }
+                else if !dest.is_dir() {
+                    complete=false;job.summary.skipped+=1;
+                    job.log("解压",archive_rel,&root_rel,"跳过","空目录名与目标处已有文件冲突；原包保留",0)?;
+                }
             }
         }
         if complete && !multipart {
@@ -327,9 +330,19 @@ fn is_system(path: &Path) -> bool {
 }
 #[cfg(not(windows))]
 fn is_system(_path: &Path) -> bool { false }
+/// 将小写文件名解析为 RAR 新式分卷主干（去掉末尾 `.partN.rar` 后的部分）。
+/// 与 rules::multipart_name 使用的 `\.part(\d+)\.rar$` 对齐：
+/// report.partial.rar 这类仅含 “.part” 子串的普通包不得当作分卷。
+fn rar_part_stem(name: &str) -> Option<&str> {
+    let base = name.strip_suffix(".rar")?;
+    let (stem, part) = base.rsplit_once(".part")?;
+    (!part.is_empty() && part.chars().all(|c| c.is_ascii_digit())).then_some(stem)
+}
 fn protect_volumes(job: &Job, archive: &Path) -> Result<bool> {
     let name=archive.file_name().and_then(|s|s.to_str()).context("无效压缩包名称")?.to_lowercase();
-    let stem = if let Some((stem,_))=name.rsplit_once(".part") { Some((stem.to_string(),"rar")) }
+    // 分卷识别只走 rar_part_stem：旧实现 rsplit_once(".part") 会把 report.partial.rar
+    // 误判为分卷并保护整目录的 report.part* 文件。
+    let stem = if let Some(stem)=rar_part_stem(&name) { Some((stem.to_string(),"rar")) }
         else if name.ends_with(".7z.001") || name.ends_with(".zip.001") { Some((name[..name.len()-4].to_string(),"numbered")) }
         else if let Some(stem)=name.strip_suffix(".rar") {Some((stem.to_string(),"oldrar"))}
         else if let Some(stem)=name.strip_suffix(".zip") {Some((stem.to_string(),"splitzip"))}
@@ -339,10 +352,12 @@ fn protect_volumes(job: &Job, archive: &Path) -> Result<bool> {
     for entry in fs::read_dir(archive.parent().context("压缩包缺少目录")?)? {
         let entry=entry?;let candidate=entry.file_name().to_string_lossy().to_lowercase();
         let matches=match kind {
-            "rar"=>candidate.starts_with(&format!("{stem}.part")) && candidate.ends_with(".rar"),
-            "numbered"=>candidate.strip_prefix(&format!("{stem}.")).is_some_and(|v|v.len()==3 && v.chars().all(|c|c.is_ascii_digit())),
-            "oldrar"=>candidate.strip_prefix(&format!("{stem}.r")).is_some_and(|v|v.len()==2 && v.chars().all(|c|c.is_ascii_digit())),
-            "splitzip"=>candidate.strip_prefix(&format!("{stem}.z")).is_some_and(|v|v.len()==2 && v.chars().all(|c|c.is_ascii_digit())),
+            // 与主体识别同口径：只认同主干的 .partN.rar，不用 starts_with 宽匹配。
+            "rar"=>rar_part_stem(&candidate).is_some_and(|s|s==stem),
+            // 7-Zip 多卷可到 .1000+：按最少位数匹配（001/1000 都算兄弟卷），不写死恰好 3 位。
+            "numbered"=>candidate.strip_prefix(&format!("{stem}.")).is_some_and(|v|v.len()>=3 && v.chars().all(|c|c.is_ascii_digit())),
+            "oldrar"=>candidate.strip_prefix(&format!("{stem}.r")).is_some_and(|v|v.len()>=2 && v.chars().all(|c|c.is_ascii_digit())),
+            "splitzip"=>candidate.strip_prefix(&format!("{stem}.z")).is_some_and(|v|v.len()>=2 && v.chars().all(|c|c.is_ascii_digit())),
             _=>false,
         };
         if matches {
@@ -362,7 +377,7 @@ fn find_identical_elsewhere(job: &Job, source: &Path, incoming: &crate::model::S
     let name = Path::new(member_rel).file_name().and_then(|s|s.to_str()).context("无效压缩包成员名")?.to_lowercase();
     let size = i64::try_from(incoming.size).context("成员大小超出范围")?;
     let candidates: Vec<String> = {
-        let mut statement = job.db.conn.prepare("SELECT rel FROM files WHERE active=1 AND name=?1 AND size=?2 LIMIT 32")?;
+        let mut statement = job.db.conn.prepare("SELECT rel FROM files WHERE active=1 AND name=?1 AND size=?2 ORDER BY id LIMIT 32")?;
         let rows = statement.query_map(params![name,size],|r|r.get::<_,String>(0))?;
         rows.collect::<rusqlite::Result<Vec<_>>>()?
     };
@@ -382,7 +397,18 @@ fn find_identical_elsewhere(job: &Job, source: &Path, incoming: &crate::model::S
 fn merge_extracted(job: &mut Job, source: &Path, target: &Path) -> Result<Option<PathBuf>> {
     let incoming = fsutil::snapshot(source).with_context(|| format!("读取暂存解压结果失败：{}",source.display()))?;
     fsutil::ensure_parent(&job.root,target)?;
-    if !target.try_exists()? { fsutil::rename_noreplace(source,target)?; return Ok(Some(target.to_path_buf())); }
+    if !target.try_exists()? {
+        match fsutil::rename_noreplace(source,target) {
+            Ok(()) => return Ok(Some(target.to_path_buf())),
+            Err(error) => {
+                // TOCTOU：目标在 try_exists 与 rename 之间出现。与冲突删除路径一致，
+                // 改用唯一名落盘，而不是整包失败。
+                let emergency = fsutil::unique_target(&job.root,target)?;
+                fsutil::rename_noreplace(source,&emergency).map_err(|_| error)?;
+                return Ok(Some(emergency));
+            }
+        }
+    }
     let meta = fs::symlink_metadata(target).with_context(|| format!("读取目标状态失败：{}",target.display()))?;
     if !meta.is_file() || fsutil::is_link(&meta) {
         let renamed = fsutil::unique_target(&job.root,target)?;
@@ -464,7 +490,13 @@ pub fn extract_queued(job: &mut Job, engine: &SevenZip) -> Result<()> {
         match result {
             Ok(()) => { job.db.conn.execute("UPDATE archives SET state='done' WHERE id=?1",[id])?; }
             Err(error) => {
+                // 归档行先标 failed，避免永久停在 running。
+                // 用户主动取消：上抛取消错误，不累加 archives_failed/errors、不写失败日志
+                // （与 apply_with 的取消口径一致）。单出口，避免双写 failed/误计失败。
                 job.db.conn.execute("UPDATE archives SET state='failed' WHERE id=?1",[id])?;
+                if job.context.control.is_cancelled() {
+                    job.context.control.check_cancelled()?;
+                }
                 job.summary.archives_failed += 1; job.summary.errors += 1;
                 job.log("解压",&relative,"","失败",&format!("{error:#}"),0)?;
                 job.context.control.check_cancelled()?;

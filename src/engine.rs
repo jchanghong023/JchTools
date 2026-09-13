@@ -60,6 +60,11 @@ pub fn prepare(root:&Path,config:Config,context:TaskContext)->Result<TaskResult>
 }
 /// A separate state directory and explicit engine path make the core testable without the GUI.
 pub fn prepare_at(root:&Path,config:Config,context:TaskContext,state:&Path,engine_path:Option<&Path>)->Result<TaskResult> {
+    prepare_with(root,config,context,state,engine_path,Arc::new(NativeRecycler))
+}
+/// 与 apply_with 对称：允许注入 Recycler（例如测试用假回收站）。
+/// prepare / prepare_at 默认仍使用 NativeRecycler，现有调用保持兼容。
+pub fn prepare_with(root:&Path,config:Config,context:TaskContext,state:&Path,engine_path:Option<&Path>,recycler:Arc<dyn Recycler>)->Result<TaskResult> {
     config.validate()?;
     let root = fsutil::normalize_root(root)?;
     let _guard = fsutil::RootGuard::acquire(state)?;
@@ -68,7 +73,7 @@ pub fn prepare_at(root:&Path,config:Config,context:TaskContext,state:&Path,engin
     db.set("root",&fsutil::path_string(&root)?)?; db.set("config",&config)?;
     db.set("status",&"analyzing")?; db.set("summary",&Summary::default())?;
     db.set("created",&chrono::Utc::now().to_rfc3339())?;
-    let mut job = Job { root,config,context,db,summary:Summary::default(),archive_override:None,recycler:Arc::new(NativeRecycler),deleted_unverified:0 };
+    let mut job = Job { root,config,context,db,summary:Summary::default(),archive_override:None,recycler,deleted_unverified:0 };
     let result = (|| {
         scan(&mut job,true,state)?;
         if job.config.extract {
@@ -129,6 +134,8 @@ fn scan(job:&mut Job,enqueue:bool,state:&Path)->Result<()> {
             if executable_dir.as_ref().is_some_and(|d|entry.path().starts_with(d)){return false;}
             let Ok(rel)=fsutil::relative_string(&root,entry.path()) else{return false;};
             if rel==".jchtools-work"||rel.starts_with(".jchtools-work/"){return false;}
+            // 硬链接执行时的临时替换文件（.jchtools-link-{uuid}）：崩溃残留不应进入扫描与计划。
+            if entry.file_name().to_string_lossy().starts_with(".jchtools-link-"){return false;}
             if excluded.is_match(&rel)||excluded.is_match(format!("{rel}/")){return false;}
             #[cfg(windows)] {
                 use std::os::windows::fs::MetadataExt;
@@ -247,12 +254,20 @@ pub fn apply_with(directory:&Path,context:TaskContext,recycler:Arc<dyn Recycler>
             if actions.is_empty(){break;}
             for action in actions{
                 cursor=action.id;job.context.control.checkpoint()?;
-                if !action.selected{job.summary.skipped+=1;job.db.mark_action(action.id,"unselected")?;continue;}
+                if !action.selected{job.summary.skipped+=1;job.db.mark_action(action.id,"unselected")?;
+                    // 未勾选不计入 completed：GUI 分母 count_selected_pending 只含 selected+pending，
+                    // 分子若含 unselected 会出现 done>planned、提前 100% 的口径分裂。
+                    continue;}
                 job.context.status(format!("执行 {:?}：{}",action.kind,action.source));
                 match execute_action(&mut job,&action){
                     Ok(true)=>job.db.mark_action(action.id,"done")?,
                     Ok(false)=>{job.summary.skipped+=1;job.db.mark_action(action.id,"skipped")?;},
-                    Err(error)=>{job.summary.errors+=1;job.db.mark_action(action.id,"failed")?;
+                    Err(error)=>{
+                        // 用户主动取消不是失败：不计 errors、不标 failed，与 prepare 阶段取消口径一致。
+                        if job.context.control.is_cancelled(){
+                            job.context.control.check_cancelled()?;
+                        }
+                        job.summary.errors+=1;job.db.mark_action(action.id,"failed")?;
                         job.log("执行",&action.source,action.target.as_deref().unwrap_or(""),"失败",&format!("{error:#}"),0)?;job.context.control.check_cancelled()?;},
                 }
                 job.context.control.completed.fetch_add(1,Ordering::Relaxed);
@@ -318,12 +333,13 @@ fn execute_action(job:&mut Job,action:&Action)->Result<bool>{
                             job.summary.linked+=1;return Ok(true);
                         }
                         // 兜底改名也失败时移除临时硬链接：内容仍由保留文件持有，不会丢数据。
-                        // 源路径已被删除且没有留下任何链接：既不能计为已链接，也不能标记为 done。
+                        // 源路径已被删除且没有留下任何链接：必须报错并标 failed，不得记 skipped
+                        //（否则与已入账的 deleted 口径分裂）。
                         Err(inner)=>{
                             let _=fs::remove_file(&temporary);
-                            job.log("硬链接",&action.source,"","跳过",
+                            job.log("硬链接",&action.source,"","失败",
                                 &format!("硬链接失败，原路径已删除且未留下链接；内容仍由保留文件持有：{inner}（首次改名失败：{error}）"),0)?;
-                            return Ok(false);
+                            anyhow::bail!("硬链接失败：源路径已删除且未留下链接；内容仍由保留文件持有（{inner}）");
                         }
                     },
                     Err(inner)=>{let _=fs::remove_file(&temporary);return Err(inner).context("目标被占用，且无法为保留链接副本分配名称");}

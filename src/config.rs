@@ -150,6 +150,8 @@ impl Config {
     /// verify_bytes（删除前逐字节复核）已写死为始终开启。
     const REMOVED_FIELDS: &[&str] = &["hash_algorithm", "verify_bytes"];
     pub fn from_json_text(text: &str) -> Result<Self> {
+        // 某些编辑器会写出带 UTF-8 BOM 的文件；serde_json 不接受，解析前剥掉。
+        let text = text.strip_prefix('\u{FEFF}').unwrap_or(text);
         let mut value: serde_json::Value = serde_json::from_str(text)?;
         if let Some(map) = value.as_object_mut() {
             for key in Self::REMOVED_FIELDS { map.remove(*key); }

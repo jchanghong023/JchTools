@@ -107,6 +107,7 @@ component NavItem inherits Rectangle {
     fs := FocusScope {
         width: 100%; height: 100%;
         key-pressed(event) => {
+            if (!root.enabled) { return reject; }
             if (event.text == " " || event.text == "\n") { root.clicked(); return accept; }
             return reject;
         }
@@ -148,6 +149,7 @@ component Pill inherits Rectangle {
     fs := FocusScope {
         width: 100%; height: 100%;
         key-pressed(event) => {
+            if (!root.enabled) { return reject; }
             if (event.text == " " || event.text == "\n") { root.clicked(); return accept; }
             return reject;
         }
@@ -210,6 +212,7 @@ component Tab inherits Rectangle {
     fs := FocusScope {
         width: 100%; height: 100%;
         key-pressed(event) => {
+            if (!root.enabled) { return reject; }
             if (event.text == " " || event.text == "\n") { root.clicked(); return accept; }
             return reject;
         }
@@ -477,10 +480,12 @@ export component AppWindow inherits Window {
                     text: tool.name;
                     icon: tool.id == "proxy-status" ? 2 : 0;
                     active: tool.id == root.active-tool-id;
+                    // 模态确认层打开时导航不可点，避免点击穿透背景控件。
+                    enabled: root.confirm-kind == 0;
                     clicked => { root.select-tool(tool.id); }
                 }
                 Rectangle { height: 12px; background: transparent; }
-                NavItem { text: "关于"; icon: 1; active: root.screen == 1; clicked => { root.navigation(1); } }
+                NavItem { text: "关于"; icon: 1; active: root.screen == 1; enabled: root.confirm-kind == 0; clicked => { root.navigation(1); } }
                 Rectangle { vertical-stretch: 1; background: transparent; }
                 Rectangle { height: 1px; background: Design.line-soft; }
                 Muted { text: "本地处理 · 不上传文件\nWindows 优先"; font-size: 11px; }
@@ -536,15 +541,15 @@ export component AppWindow inherits Window {
                             }
                         }
                         LineEdit { text <=> root.directory; placeholder-text: "选择或输入要整理的目录，例如 D:\\Downloads";
-                            enabled: !root.busy; horizontal-stretch: 1; edited(value) => { root.root-edited(); } }
-                        Button { text: "选择目录…"; enabled: !root.busy; clicked => { root.choose-directory(); } }
+                            enabled: !root.busy && root.confirm-kind == 0; horizontal-stretch: 1; edited(value) => { root.root-edited(); } }
+                        Button { text: "选择目录…"; enabled: !root.busy && root.confirm-kind == 0; clicked => { root.choose-directory(); } }
                     }
                 }
                 // 面板页签 + 任务操作
                 HorizontalLayout { height: 34px; spacing: 2px;
-                    Tab { text: "处理规则"; active: root.panel == 0; width: 104px; clicked => { root.panel = 0; } }
-                    Tab { text: "整理计划"; active: root.panel == 1; width: 104px; enabled: root.has-task; clicked => { root.panel = 1; } }
-                    Tab { text: "进度与日志"; active: root.panel == 2; width: 118px; clicked => { root.panel = 2; } }
+                    Tab { text: "处理规则"; active: root.panel == 0; width: 104px; enabled: root.confirm-kind == 0; clicked => { root.panel = 0; } }
+                    Tab { text: "整理计划"; active: root.panel == 1; width: 104px; enabled: root.has-task && root.confirm-kind == 0; clicked => { root.panel = 1; } }
+                    Tab { text: "进度与日志"; active: root.panel == 2; width: 118px; enabled: root.confirm-kind == 0; clicked => { root.panel = 2; } }
                     Rectangle { horizontal-stretch: 1; background: transparent; }
                     if root.has-task: Button { text: "打开任务目录"; enabled: !root.busy; clicked => { root.open-report(); } }
                     if root.has-task: Button { text: "导出报告"; enabled: !root.busy; clicked => { root.export-report(); } }
@@ -556,13 +561,13 @@ export component AppWindow inherits Window {
                     border-width: 1px; border-color: Design.line-soft;
                     HorizontalLayout { padding: 3px; spacing: 4px;
                         for label[index] in ["解压", "去重", "归类", "清理", "安全与性能"]: Pill {
-                            text: label; active: root.section == index; enabled: !root.busy; horizontal-stretch: 1;
+                            text: label; active: root.section == index; enabled: !root.busy && root.confirm-kind == 0; horizontal-stretch: 1;
                             height: 30px;
                             clicked => { root.select-section(index); }
                         }
                         // 高级选项开关：只控制是否显示专家调优项，不改变任何规则值。
                         Pill { text: root.show-advanced ? "隐藏高级选项" : "显示高级选项"; active: root.show-advanced;
-                            width: 132px; height: 30px; enabled: !root.busy;
+                            width: 132px; height: 30px; enabled: !root.busy && root.confirm-kind == 0;
                             clicked => { root.toggle-advanced(!root.show-advanced); } }
                     }
                 }
@@ -610,22 +615,24 @@ export component AppWindow inherits Window {
                     }
                     // 计划类型筛选
                     HorizontalLayout { height: 30px; spacing: 4px;
-                        Pill { text: "全部"; active: root.plan-filter == 0; width: 64px; enabled: !root.busy;
+                        Pill { text: "全部"; active: root.plan-filter == 0; width: 64px; enabled: !root.busy && root.confirm-kind == 0;
                             clicked => { root.plan-filter = 0; root.filter-plan(""); } }
-                        Pill { text: "删除 " + root.plan-delete-count; active: root.plan-filter == 1; width: 88px; enabled: !root.busy && root.plan-delete-count > 0;
+                        Pill { text: "删除 " + root.plan-delete-count; active: root.plan-filter == 1; width: 88px; enabled: !root.busy && root.plan-delete-count > 0 && root.confirm-kind == 0;
                             clicked => { root.plan-filter = 1; root.filter-plan("delete"); } }
-                        Pill { text: "移动 " + root.plan-move-count; active: root.plan-filter == 2; width: 88px; enabled: !root.busy && root.plan-move-count > 0;
+                        Pill { text: "移动 " + root.plan-move-count; active: root.plan-filter == 2; width: 88px; enabled: !root.busy && root.plan-move-count > 0 && root.confirm-kind == 0;
                             clicked => { root.plan-filter = 2; root.filter-plan("move"); } }
-                        Pill { text: "硬链接 " + root.plan-link-count; active: root.plan-filter == 3; width: 96px; enabled: !root.busy && root.plan-link-count > 0;
+                        Pill { text: "硬链接 " + root.plan-link-count; active: root.plan-filter == 3; width: 96px; enabled: !root.busy && root.plan-link-count > 0 && root.confirm-kind == 0;
                             clicked => { root.plan-filter = 3; root.filter-plan("hardlink"); } }
-                        Pill { text: "空目录 " + root.plan-empty-count; active: root.plan-filter == 4; width: 96px; enabled: !root.busy && root.plan-empty-count > 0;
+                        Pill { text: "空目录 " + root.plan-empty-count; active: root.plan-filter == 4; width: 96px; enabled: !root.busy && root.plan-empty-count > 0 && root.confirm-kind == 0;
                             clicked => { root.plan-filter = 4; root.filter-plan("empty_directory"); } }
                         Rectangle { horizontal-stretch: 1; background: transparent; }
                     }
                     Surface { vertical-stretch: 1;
                         ListView { for item in root.plans: Rectangle { height: 78px;
                             HorizontalLayout { padding-top: 10px; padding-bottom: 10px; padding-left: 14px; padding-right: 14px; spacing: 12px; cross-axis-alignment: center;
-                                CheckBox { checked: item.selected; enabled: root.ready && !root.busy;
+                                // 勾选保存中 ready 短暂为 false：此时仍允许继续改其他勾选，
+                                // 否则整表被锁且主按钮文案被误切。
+                                CheckBox { checked: item.selected; enabled: !root.busy && root.confirm-kind == 0;
                                     accessible-label: item.kind + " " + item.source;
                                     toggled => { root.plan-toggle(item.id,self.checked); } }
                                 VerticalLayout { horizontal-stretch: 1; spacing: 3px;
@@ -677,8 +684,8 @@ export component AppWindow inherits Window {
                             }
                             if root.busy: Button { text: root.paused ? "继续" : "暂停"; clicked => { root.pause-task(); } }
                             if root.busy: Button { text: "取消任务"; clicked => { root.cancel-task(); } }
-                            if !root.busy && root.ready: Button { text: "确认并执行整理"; primary: true; clicked => { root.request-apply(); } }
-                            if !root.busy && !root.ready: Button { text: "开始解压与分析"; primary: true; enabled: root.directory != "";
+                            if !root.busy && root.ready: Button { text: "确认并执行整理"; primary: true; enabled: root.confirm-kind == 0; clicked => { root.request-apply(); } }
+                            if !root.busy && !root.ready: Button { text: "开始解压与分析"; primary: true; enabled: root.directory != "" && root.confirm-kind == 0;
                                 clicked => { root.request-start(); } }
                         }
                         if root.busy: ProgressBar { progress: root.progress; }
@@ -689,10 +696,13 @@ export component AppWindow inherits Window {
                 spacing: 10px;
                 HorizontalLayout { height: 34px; spacing: 2px;
                     Tab { text: "状态"; active: root.proxy-section == 0; width: 80px;
+                        enabled: root.confirm-kind == 0;
                         clicked => { root.proxy-section = 0; } }
                     Tab { text: "命令参考"; active: root.proxy-section == 1; width: 96px;
+                        enabled: root.confirm-kind == 0;
                         clicked => { root.proxy-section = 1; } }
                     Tab { text: "网络测试"; active: root.proxy-section == 2; width: 96px;
+                        enabled: root.confirm-kind == 0;
                         clicked => { root.proxy-section = 2; } }
                     Rectangle { horizontal-stretch: 1; background: transparent; }
                     if root.proxy-busy || root.net-test-busy: Spinner { width: 18px; height: 18px; }
@@ -827,8 +837,10 @@ export component AppWindow inherits Window {
                     spacing: 10px;
                     HorizontalLayout { height: 34px; spacing: 2px;
                         Tab { text: "Windows"; active: root.proxy-platform == 0; width: 96px;
+                            enabled: root.confirm-kind == 0;
                             clicked => { root.select-proxy-platform(0); } }
                         Tab { text: "Linux"; active: root.proxy-platform == 1; width: 96px;
+                            enabled: root.confirm-kind == 0;
                             clicked => { root.select-proxy-platform(1); } }
                         Rectangle { horizontal-stretch: 1; background: transparent; }
                     }
@@ -891,15 +903,20 @@ export component AppWindow inherits Window {
                         padding: 0px;
                         spacing: 12px;
                     HorizontalLayout { height: 36px; spacing: 8px; cross-axis-alignment: center;
+                        // 网络测试进行中禁用范围切换，避免中途切换导致测试状态错乱；模态打开时同样不可点。
                         Tab { text: "Windows 本机"; active: root.net-test-scope == 0; width: 118px;
+                            enabled: !root.net-test-busy && root.confirm-kind == 0;
                             clicked => { root.select-net-test-scope(0); } }
                         Tab { text: "WSL2"; active: root.net-test-scope == 1; width: 96px;
+                            enabled: !root.net-test-busy && root.confirm-kind == 0;
                             clicked => { root.select-net-test-scope(1); } }
                         Rectangle { horizontal-stretch: 1; background: transparent; }
                         if root.net-test-scope == 1 && root.net-test-wsl-options.length > 0: ComboBox {
                             width: 220px;
                             model: root.net-test-wsl-options;
                             current-index: root.net-test-wsl-index;
+                            // busy 时禁止改发行版：否则在途报告会因 distro 不匹配被丢弃且不清 busy。
+                            enabled: !root.net-test-busy && root.confirm-kind == 0;
                             accessible-label: "WSL 发行版";
                             accessible-description: "选择要在其中进行网络测试的 WSL 发行版";
                             selected(value) => { root.select-net-test-wsl(value); }
@@ -975,6 +992,7 @@ export component AppWindow inherits Window {
                         HorizontalLayout { spacing: 6px;
                             for item[index] in ["跟随系统", "浅色", "深色"]: Pill {
                                 text: item; active: root.theme == index; width: 104px; height: 32px;
+                                enabled: root.confirm-kind == 0;
                                 clicked => { root.select-theme(index); }
                             }
                             Rectangle { horizontal-stretch: 1; background: transparent; }

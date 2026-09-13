@@ -35,6 +35,7 @@ def force_remove_tree(path: Path) -> None:
     """删除目录树，先清掉只读属性（git 对象文件是只读的，Windows 上直接删会拒绝访问）。
 
     删除失败的路径会被收集并打印；清理后目录若仍存在也视为失败，避免在残留内容上重建。
+    Windows 上先移除目录型 reparse point，避免 Python<3.12 的 rmtree 穿透 junction 删到目标外。
     """
     import stat
 
@@ -46,6 +47,21 @@ def force_remove_tree(path: Path) -> None:
             function(target)
         except OSError as exc:
             failed.append(f"{target}（{exc}）")
+
+    if os.name == "nt":
+        for dirpath, dirnames, _filenames in os.walk(path, topdown=False):
+            for name in dirnames:
+                p = Path(dirpath) / name
+                try:
+                    st = os.lstat(p)
+                except OSError:
+                    continue
+                reparse = bool(getattr(st, "st_file_attributes", 0) & getattr(stat, "FILE_ATTRIBUTE_REPARSE_POINT", 0x400))
+                if stat.S_ISLNK(st.st_mode) or reparse:
+                    try:
+                        os.rmdir(p)
+                    except OSError as exc:
+                        failed.append(f"{p}（无法移除 reparse point：{exc}）")
 
     shutil.rmtree(path, onerror=on_error)
     if failed:
@@ -96,7 +112,7 @@ def write(path: Path, data: bytes) -> Path:
 
 
 def random_bytes(size: int) -> bytes:
-    return bytes(RANDOM.getrandbits(8) for _ in range(size))
+    return RANDOM.randbytes(size)
 
 
 def zip_members(target: Path, members: dict[str, bytes]) -> None:
@@ -258,7 +274,7 @@ def build_encrypted(root: Path, seven: Path, log: list[str]) -> None:
     section = root / "12-压缩包-加密"
     stage = root / ".build-12"
     write(stage / "secret.txt", b"encrypted payload\n")
-    zip_members(section / "secret.zip", {"secret.txt": (stage / "secret.txt").read_bytes()})
+    # 直接用 7z 从临时目录创建加密 zip，不先写明文容器（避免中途留下未加密的 secret.zip）。
     run([str(seven), "a", "-tzip", "-p123456", "-mem=ZipCrypto", "-y", str(section / "secret.zip"), str(stage / "secret.txt")], cwd=stage)
     shutil.rmtree(stage, ignore_errors=True)
     log.append("| `12-压缩包-加密/` | 带密码的 zip（密码 123456） | 应用不提供密码输入，应**跳过并记录**，不会尝试爆破，也不会误删原包 |")
@@ -457,7 +473,7 @@ def _is_drive_alias(resolved: Path) -> bool:
 
 
 def guard_destination(root: Path) -> None:
-    """清空不可逆：拒绝盘符根、用户主目录、系统目录，以及会波及本仓库（.tmp 之外）的目标。"""
+    """清空不可逆：拒绝盘符根、UNC 共享根、用户主目录、系统目录，以及会波及本仓库（.tmp 之外）的目标。"""
     # 扩展路径前缀（\\?\ 与 \\.\）不会被 resolve() 规范化，会让下面的全部检查失效，直接拒绝。
     raw = str(root.expanduser())
     if raw.startswith("\\\\?\\") or raw.startswith("\\\\.\\"):
@@ -465,18 +481,39 @@ def guard_destination(root: Path) -> None:
     resolved = root.expanduser().resolve()
     if _is_drive_alias(resolved):
         raise SystemExit(f"拒绝清空映射/别名盘符（subst 或网络映射）：{resolved}")
+    # UNC 共享根（\\server\share）：pathlib 版本间对 UNC 根的 parts 表示不一致，
+    # 直接按字符串判定——去掉尾部反斜杠后恰好只剩 server\share 两级则拒绝；
+    # \\server\share\sub 多一层，可放行。此检查先于盘符根判断，确保报错信息准确。
+    norm = str(resolved).replace("/", "\\").rstrip("\\")
+    if norm.startswith("\\\\"):
+        comps = [c for c in norm.split("\\") if c]
+        if len(comps) == 2:
+            raise SystemExit(f"拒绝清空 UNC 共享根：{resolved}")
+        # 管理共享（\\localhost\c$、\\127.0.0.1\d$、\\机器名\admin$ 等）不 resolve 成
+        # 本地盘形态，会绕过 home/Users/Public 检查。直接拒绝，避免清空用户数据区。
+        # 以 `$` 结尾的共享名覆盖 c$/print$/fax$/admin$ 等全部管理共享。
+        share = comps[1].lower() if len(comps) >= 2 else ""
+        if share.endswith("$"):
+            raise SystemExit(f"拒绝清空 Windows 管理共享（admin share）：{resolved}")
+    # 盘符根/POSIX 根：C:\ 的 parts 形如 ('C:\\',)，parent 等于自身。
+    # 新版 pathlib 对 UNC 共享根也把 parent 视为自身，此检查一并覆盖。
     if resolved == resolved.parent:
-        raise SystemExit(f"拒绝清空盘符根：{resolved}")
+        raise SystemExit(f"拒绝清空盘符根/文件系统根：{resolved}")
     home = Path.home().resolve()
-    # home 本身、home 的上级（如 C:\Users）与 home 的下级（如桌面/文档）都在清空波及
-    # 用户真实数据的范围内，一并拒绝；测试集只应放在专门的测试目录。
-    if resolved == home or resolved in home.parents or home in resolved.parents:
-        raise SystemExit(f"拒绝清空用户主目录及其上级/下级目录：{resolved}")
     repo = Path(__file__).resolve().parent.parent
     if resolved == repo or resolved in repo.parents:
         raise SystemExit(f"拒绝清空仓库或其上级目录：{resolved}")
-    if repo in resolved.parents and repo / ".tmp" not in (resolved, *resolved.parents):
-        raise SystemExit(f"仓库内只允许把测试数据放到 .tmp/ 下：{resolved}")
+    # 仓库内测试数据只允许放在 .tmp/（AGENTS.md 第2节）。命中 .tmp 后显式放行，
+    # 仓库若位于 home 下也不得被下面的 home 规则误杀。
+    under_repo_tmp = False
+    if repo in resolved.parents:
+        if repo / ".tmp" not in (resolved, *resolved.parents):
+            raise SystemExit(f"仓库内只允许把测试数据放到 .tmp/ 下：{resolved}")
+        under_repo_tmp = True
+    # home 本身、home 的上级（如 C:\Users）与 home 的下级（如桌面/文档）都在清空波及
+    # 用户真实数据的范围内，一并拒绝；测试集只应放在专门的测试目录。
+    if not under_repo_tmp and (resolved == home or resolved in home.parents or home in resolved.parents):
+        raise SystemExit(f"拒绝清空用户主目录及其上级/下级目录：{resolved}")
     # 系统目录黑名单：SystemRoot、ProgramData、Program Files 系列、Users\Public，
     # 以及路径中任何名为 Windows（含 Windows.old）或以 Program Files 开头的目录。
     system_root = Path(os.environ.get("SystemRoot", r"C:\Windows")).resolve()
@@ -517,6 +554,8 @@ def main() -> int:
     seven = seven_zip()
 
     if root.exists():
+        if not root.is_dir():
+            raise SystemExit(f"目标不是目录：{root}；请改用专门的测试目录。")
         if root.is_dir():
             entries = list(root.iterdir())
             if entries:
@@ -547,6 +586,10 @@ def main() -> int:
     if arguments.git:
         initialise_git(root, log)
     build_readme(root, log, seven, arguments.git)
+    # README 在 baseline 之后生成：必须再提交一次，否则 恢复.ps1 的 git clean -fd 会删掉说明。
+    if arguments.git:
+        run(["git", "-C", str(root), "add", "-A"])
+        run(["git", "-C", str(root), "commit", "-m", "test corpus readme"])
 
     files = [p for p in root.rglob("*") if p.is_file() and ".git" not in p.parts]
     total = sum(p.stat().st_size for p in files)
