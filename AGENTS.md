@@ -6,7 +6,7 @@
 
 - 产品名 **JchTools**（本地工具箱）。`目录整理` 只是当前第一个工具的名字与页面标题，`MUST NOT` 再把它当产品名写进标题、图标、包名或关于页。
 - 技术栈：Rust 2021 + Slint 1.17（fluent 风格）、SQLite（rusqlite bundled）、随包 7-Zip 引擎。
-- 入口：`src/main.rs`（GUI）、`src/bin/cli.rs`（CLI）、`ui/app.slint`（界面）、`resources/rules.json`（49 项界面规则）、`src/registry.rs`（工具注册表）。
+- 入口：`src/main.rs`（GUI）、`src/bin/cli.rs`（CLI）、`ui/app.slint`（界面）、`resources/rules.json`（41 项界面规则）、`src/registry.rs`（工具注册表）。
 - 后续新工具 `MUST` 通过 `src/registry.rs` + 真实页面接入；侧栏中段与导航 `SHOULD NOT` 写死只服务单个工具的文案或流程。
 
 ## 2. 临时文件规则（强制）
@@ -52,6 +52,8 @@ JCHTOOLS_TEST_7ZIP=/abs/path/7zz bash scripts/check-linux.sh   # 含真实解压
 - Slint 布局中 `MUST NOT` 用 `root.width` / `parent.width` 绑定子项自身宽度（会形成绑定环，编译期警告、运行期可能 panic）；需要固定宽度就用常量，需要占满剩余空间用 `horizontal-stretch` 或外层容器。
 - 自绘的可交互控件 `MUST` 设置 `accessible-role` 与 `accessible-label`，否则读屏与自动化测试都取不到。
 - 进度语义：总量已知（执行阶段）显示百分比 + 进度条；总量未知（扫描/哈希/解压）显示不确定态光带 + 实时计数，`MUST NOT` 编造百分比。
+- 窗口默认状态：主窗口启动时 `MUST` 居中显示在当前显示器中央，`MUST NOT` 默认最大化；仅在用户主动最大化或明确偏好时才以最大化启动。
+- 窗口缩放适配：布局 `MUST` 适配窗口放大与缩小，控件与文案在常见尺寸范围内完整可读、不裁切、不重叠、不溢出；优先使用拉伸与 `horizontal-stretch`/`vertical-stretch`，`MUST NOT` 把关键内容写死在仅某一固定尺寸下可见的位置或宽度。
 
 ## 5. 改名与新工具时的同步清单
 

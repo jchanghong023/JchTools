@@ -31,7 +31,12 @@ def config_schema():
     rows=json.loads(read_text(ROOT/'resources/rules.json'))
     keys=[r['key'] for r in rows]
     assert len(keys)==len(set(keys))
-    assert set(fields)==set(keys),(set(fields)-set(keys),set(keys)-set(fields))
+    # 有意不进规则表的配置字段：theme 已挪到「关于」页；其余是合并行的影子键，
+    # 界面一行驱动多个字段，引擎 / CLI / 旧任务库仍读细粒度值。
+    hidden={'theme','dedup_copy_names','dedup_other_names','same_name_different_size','different_size_keep','detect_type'}
+    assert set(fields)==set(keys)|hidden,(set(fields)-set(keys)-hidden,set(keys)-set(fields))
+    # 内容相同的去重/版本组大小必然一致，“保留最大/最小”是无效选项，界面刻意不展示。
+    omitted_choices={'keep_duplicate':{'largest','smallest'},'same_size_keep':{'largest','smallest'}}
     for row in rows:
         assert row['title'] and row['hint']
         ty=fields[row['key']]
@@ -43,8 +48,9 @@ def config_schema():
             if ty!='String':
                 enum=re.search(r'pub enum '+ty+r'\s*\{(.*?)\}',config,re.S).group(1)
                 expected={re.sub(r'(?<!^)(?=[A-Z])','_',v.strip()).lower() for v in enum.split(',') if v.strip()}
-                assert set(vals)==expected,(row['key'],vals,expected)
-    return f'{len(rows)} UI settings exactly match serialized Config fields and enum values.'
+                omitted=omitted_choices.get(row['key'],set())
+                assert set(vals)|omitted==expected,(row['key'],vals,expected,omitted)
+    return f'{len(rows)} UI settings match serialized Config fields ({len(hidden)} engine/CLI-only) and enum values.'
 def ui_callbacks():
     ui=read_text(ROOT/'ui/app.slint')
     # GUI 组装层在 src/gui.rs（bin main.rs 只是薄壳入口），两者都可能有 ui.on_* 接线。

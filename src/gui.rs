@@ -3,21 +3,28 @@
 slint::include_modules!();
 
 use anyhow::{Context as _, Result};
-use crate::{config::{self,Config,ConflictPolicy}, control::{ConflictAnswer,Context,Control,Event},
+use crate::{config::{ClassifyMode,Config,ConflictPolicy,DEFAULT_CUSTOM_CATEGORIES,KeepPolicy}, control::{ConflictAnswer,Context,Control,Event},
     db::Database, engine, model::{bytes,ActionKind}, platform, registry};
 use serde::Deserialize;
 use slint::{ComponentHandle,Model,ModelRc,SharedString,VecModel};
 use std::{cell::RefCell,collections::VecDeque,path::{Path,PathBuf},rc::Rc,
     sync::{atomic::Ordering,mpsc,Arc},time::{Duration,Instant}};
 
+/// 规则的界面层级：basic 常显，advanced 只在「显示高级选项」打开时出现。
+#[derive(Clone,Copy,PartialEq,Deserialize,Default)]
+#[serde(rename_all="snake_case")]
+enum Tier{#[default]Basic,Advanced}
 #[derive(Clone,Deserialize)]
-struct RuleSpec {section:String,key:String,title:String,hint:String,kind:String,choices:Vec<Vec<String>>}
+struct RuleSpec {section:String,key:String,title:String,hint:String,kind:String,choices:Vec<Vec<String>>,#[serde(default)]tier:Tier}
 struct State {
-    config:Config,specs:Vec<RuleSpec>,section:String,task:Option<PathBuf>,history:Vec<PathBuf>,
+    config:Config,specs:Vec<RuleSpec>,section:String,task:Option<PathBuf>,
     control:Option<Arc<Control>>,conflict:Option<mpsc::SyncSender<ConflictAnswer>>,
     logs:VecDeque<String>,page:usize,page_starts:Vec<i64>,started:Instant,close_after:bool,pending_selection:usize,applying:bool,planned:u64,
     plan_filter:Option<String>,archives_failed:u64,/// 本轮勾选保存中出现过失败：pending 归零时用于决定是否重载计划页
-    selection_failed:bool,
+    selection_failed:bool,/// 「显示高级选项」开关：只影响显示，不落盘、不改变任何默认值
+    show_advanced:bool,
+    /// 有头 GUI 用于回传代理检测结果；无头测试保持 None，避免 spawn 子进程。
+    proxy_events:Option<mpsc::SyncSender<Event>>,
 }
 struct WindowDrag {origin:(f64,f64),press:(f64,f64),restoring:bool}
 /// 光标的屏幕坐标（物理像素）。拖动必须基于屏幕坐标：窗口自身移动不会改变它，因此不会出现
@@ -77,30 +84,38 @@ fn hint_for(spec:&RuleSpec,value:&serde_json::Value)->String{
 }
 fn rule_row(spec:&RuleSpec,data:&serde_json::Value)->RuleRow {
     let value=&data[&spec.key];
+    let raw=value.as_bool().unwrap_or(false);
+    // conflict_scope_directory 界面取反显示：勾选=允许跨目录比较版本（配置里为 false）。
+    // 存储键与引擎语义都不变，只是这一行的勾选含义反过来。
+    let checked=if spec.key=="conflict_scope_directory"{!raw}else{raw};
     RuleRow {key:spec.key.clone().into(),title:spec.title.clone().into(),hint:hint_for(spec,value).into(),
         kind:if spec.kind=="bool"{0}else if spec.kind=="choice"{1}else{2},
-        checked:value.as_bool().unwrap_or(false),
+        checked,
         index:spec.choices.iter().position(|c|Some(c[0].as_str())==value.as_str()).unwrap_or(0) as i32,
         options:Rc::new(VecModel::from(spec.choices.iter().map(|c|SharedString::from(c[1].as_str())).collect::<Vec<_>>())).into(),
         value:value.as_str().map(str::to_owned).unwrap_or_else(||value.to_string()).into()}
 }
-fn rule_rows(state:&State)->Result<ModelRc<RuleRow>> {
-    let data=serde_json::to_value(&state.config)?;
-    let rows=state.specs.iter().filter(|s|s.section==state.section).map(|spec|rule_row(spec,&data)).collect::<Vec<_>>();
-    Ok(Rc::new(VecModel::from(rows)).into())
+/// 规则行是否显示：高级层默认隐藏；联动项在依赖未开启且自身仍是默认值时不显示。
+/// 已经改过值的行必须保留可见，否则依赖关掉后用户既看不到该行、也无法把它改回去。
+fn rule_visible(spec:&RuleSpec,config:&Config,show_advanced:bool)->bool{
+    if !show_advanced&&spec.tier==Tier::Advanced{return false;}
+    match spec.key.as_str(){
+        "custom_categories"=>config.classify==ClassifyMode::Custom||config.custom_categories!=DEFAULT_CUSTOM_CATEGORIES,
+        "large_threshold_gib"=>config.large_files||config.large_threshold_gib!=1,
+        "same_size_keep"=>config.same_name_same_size||config.same_name_different_size
+            ||config.same_size_keep!=KeepPolicy::Newest||config.different_size_keep!=KeepPolicy::Newest,
+        "conflict_scope_directory"=>config.same_name_same_size||config.same_name_different_size||!config.conflict_scope_directory,
+        _=>true,
+    }
 }
-/// 「设置与规则预设」页要能一次看完所有规则，不受左侧分区筛选影响。
-/// 「应用」分区的规则（当前只有主题）排在最前：它是全窗口生效、最常改的一项。
-fn all_rule_rows(state:&State)->Result<ModelRc<RuleRow>> {
+fn visible_rows(state:&State)->Result<Vec<RuleRow>> {
     let data=serde_json::to_value(&state.config)?;
-    let mut specs=state.specs.iter().collect::<Vec<_>>();
-    specs.sort_by_key(|spec|if spec.section=="应用"{0}else{1});
-    let rows=specs.into_iter().map(|spec|rule_row(spec,&data)).collect::<Vec<_>>();
-    Ok(Rc::new(VecModel::from(rows)).into())
+    Ok(state.specs.iter().filter(|s|s.section==state.section&&rule_visible(s,&state.config,state.show_advanced))
+        .map(|spec|rule_row(spec,&data)).collect())
 }
+fn rule_rows(state:&State)->Result<ModelRc<RuleRow>> {Ok(Rc::new(VecModel::from(visible_rows(state)?)).into())}
 fn refresh(ui:&AppWindow,state:&State) {
     if let Ok(rows)=rule_rows(state){ui.set_rules(rows);}
-    if let Ok(rows)=all_rule_rows(state){ui.set_all_rules(rows);}
     ui.set_theme(match state.config.theme.as_str(){"light"=>1,"dark"=>2,_=>0});
 }
 fn invalidate(ui:&AppWindow){
@@ -117,20 +132,55 @@ fn apply_theme(ui:&AppWindow,state:&State){
     ui.set_theme(match state.config.theme.as_str(){"light"=>1,"dark"=>2,_=>0});
 }
 /// 只改单行显示，避免整表重建打断 ComboBox/CheckBox（用户点选后文字停在旧值的根因）。
-/// 主页面与「设置与规则预设」页共用同一份规则数据，两边都要就地更新。
 fn patch_rule_row(ui:&AppWindow,key:&str,mutate:impl Fn(&mut RuleRow)){
-    for rules in [ui.get_rules(),ui.get_all_rules()] {
-        let Some(model)=rules.as_any().downcast_ref::<VecModel<RuleRow>>() else{continue;};
-        for i in 0..model.row_count(){
-            if let Some(mut row)=model.row_data(i){
-                if row.key.as_str()==key{mutate(&mut row);model.set_row_data(i,row);break;}
+    let rules=ui.get_rules();
+    let Some(model)=rules.as_any().downcast_ref::<VecModel<RuleRow>>() else{return;};
+    for i in 0..model.row_count(){
+        if let Some(mut row)=model.row_data(i){
+            if row.key.as_str()==key{mutate(&mut row);model.set_row_data(i,row);break;}
+        }
+    }
+}
+/// 只插入/删除可见性变化的行，不重建整表：整表重建会销毁 ListView 里的控件，
+/// 在回调中执行会让刚点过的 ComboBox 文字停在旧值（见 on_rule_bool 上的原注释）。
+fn sync_rules(ui:&AppWindow,state:&State){
+    let Ok(desired)=visible_rows(state) else{return;};
+    let rules=ui.get_rules();
+    let Some(model)=rules.as_any().downcast_ref::<VecModel<RuleRow>>() else{return;};
+    let mut index=0usize;
+    for row in desired{
+        loop{
+            match model.row_data(index){
+                None=>{model.push(row.clone());break;}
+                Some(current) if current.key==row.key=>break,
+                Some(_)=>{
+                    if model.row_data(index+1).is_some_and(|next|next.key==row.key){model.remove(index);continue;}
+                    model.insert(index,row.clone());break;
+                }
             }
         }
+        index+=1;
+    }
+    while model.row_count()>index{model.remove(index);}
+}
+/// 合并行的影子键：界面上一个开关/下拉同时驱动多个配置键，Config 保留细粒度字段
+/// 供引擎、CLI 与历史任务库继续使用，只是界面不再拆开展示。
+fn group_keys(key:&str)->Vec<&str>{
+    match key{
+        "dedup_same_name"=>vec!["dedup_same_name","dedup_copy_names","dedup_other_names"],
+        "same_name_same_size"=>vec!["same_name_same_size","same_name_different_size"],
+        "same_size_keep"=>vec!["same_size_keep","different_size_keep"],
+        "fix_extension"=>vec!["fix_extension","detect_type"],
+        _=>vec![key],
     }
 }
 fn changed(ui:&AppWindow,state:&Rc<RefCell<State>>,key:&str,value:serde_json::Value,rebuild:bool)->bool{
     let mut state=state.borrow_mut();
-    match state.config.set_json(key,value){
+    let result=(||{
+        for target in group_keys(key){state.config.set_json(target,value.clone())?;}
+        Ok::<_,anyhow::Error>(())
+    })();
+    match result{
         Ok(())=>{
             // 立刻反馈规则之间的依赖（例如“修正扩展名”需要先开“检测真实类型”），
             // 不要让用户等到点“开始解压与分析”才知道配置不成立。
@@ -205,50 +255,299 @@ fn start_task(ui:&AppWindow,state:&Rc<RefCell<State>>,sender:&mpsc::SyncSender<E
         let event=match result{
             Ok(Ok(result))=>if apply{Event::Done(result.directory,result.summary)}else{Event::Ready(result.directory,result.summary)},
             Ok(Err(error))=>Event::Failed(format!("{error:#}")),
-            Err(_)=>Event::Failed("整理线程意外退出；请查看本机任务记录，不会自动重放任务".into()),
+            Err(_)=>Event::Failed("整理线程意外退出；未执行的步骤不会继续".into()),
         };
         let _=sender.send(event);
     });
 }
 fn show_error(ui:&AppWindow,error:impl std::fmt::Display){ui.set_error_text(error.to_string().into());}
+/// 写系统剪贴板（命令参考页的一键复制）。失败原样上抛，由调用方给可见错误。
+fn set_clipboard_text(text:&str)->Result<()>{
+    use copypasta::ClipboardProvider as _;
+    let mut ctx=copypasta::ClipboardContext::new().map_err(|e|anyhow::anyhow!("无法打开剪贴板：{e}"))?;
+    ctx.set_contents(text.to_owned()).map_err(|e|anyhow::anyhow!("无法写入剪贴板：{e}"))
+}
 /// 规则文件、报告的默认落盘位置：桌面（没有桌面目录就退到主目录）。
 /// 不用“上次用过的目录”，否则默认会把配置或报告写进正在整理的目录里。
 fn user_file_directory()->Option<PathBuf>{
     directories_next::UserDirs::new().and_then(|dirs|dirs.desktop_dir().map(Path::to_path_buf).or_else(||Some(dirs.home_dir().to_path_buf())))
 }
+/// 把代理检测快照写入界面模型。单项为空时由界面空态文案说明，不写 error_text。
+fn apply_proxy_snapshot(ui:&AppWindow,snap:crate::proxy::ProxySnapshot){
+    let env_rows:Vec<ProxyEnvRow>=snap.env_vars.iter().map(|e|ProxyEnvRow{
+        name:e.name.clone().into(),set:e.value.is_some(),
+        value:e.value.clone().unwrap_or_default().into()}).collect();
+    let set_count=snap.env_vars.iter().filter(|e|e.value.is_some()).count();
+    let summary=if snap.env_vars.is_empty(){
+        "尚未检测".to_string()
+    }else if set_count==0{
+        "HTTP / HTTPS / ALL / NO_PROXY 均未设置".to_string()
+    }else{
+        format!("已设置 {set_count} 项，未设置 {} 项",snap.env_vars.len().saturating_sub(set_count))
+    };
+    ui.set_proxy_env_summary(summary.into());
+    let set_lines:Vec<SharedString>=snap.env_vars.iter().filter_map(|e|{
+        e.value.as_ref().map(|v|SharedString::from(format!("{}={}",e.name,v)))
+    }).collect();
+    ui.set_proxy_env_set_lines(Rc::new(VecModel::from(set_lines)).into());
+    ui.set_proxy_env_rows(Rc::new(VecModel::from(env_rows)).into());
+    match &snap.system_proxy{
+        Some(sys)=>{
+            ui.set_proxy_system_enabled_text(if sys.enabled{"已启用"}else{"未启用"}.into());
+            ui.set_proxy_system_server(if sys.server.is_empty(){"（空）"}else{sys.server.as_str()}.into());
+            ui.set_proxy_system_override(if sys.override_list.is_empty(){"（空）"}else{sys.override_list.as_str()}.into());
+            ui.set_proxy_system_source(sys.source.clone().into());
+        }
+        None=>{
+            ui.set_proxy_system_enabled_text("不可用".into());
+            ui.set_proxy_system_server("—".into());
+            ui.set_proxy_system_override("—".into());
+            ui.set_proxy_system_source("当前平台未读取系统代理".into());
+        }
+    }
+    ui.set_proxy_local_ip(if snap.local_ip.is_empty(){"—".into()}else{snap.local_ip.as_str().into()});
+    if snap.public_ip.is_empty(){
+        ui.set_proxy_public_ip(if snap.public_ip_error.is_empty(){"尚未检测"}else{"获取失败"}.into());
+        ui.set_proxy_public_ip_note(if snap.public_ip_error.is_empty(){"点「刷新」后会尝试查询出口 IP。".into()}else{snap.public_ip_error.as_str().into()});
+    }else{
+        ui.set_proxy_public_ip(snap.public_ip.as_str().into());
+        ui.set_proxy_public_ip_note("".into());
+    }
+    let vpn_rows:Vec<ProxyVpnRow>=snap.vpn_processes.iter().map(|p|ProxyVpnRow{
+        name:p.name.clone().into(),pid:p.pid.to_string().into(),
+        ports:if p.ports.is_empty(){"—".into()}else{p.ports.iter().map(|x|x.to_string()).collect::<Vec<_>>().join(", ").into()},
+        label:p.label.clone().into()}).collect();
+    ui.set_proxy_vpn_rows(Rc::new(VecModel::from(vpn_rows)).into());
+    let adapter_rows:Vec<ProxyAdapterRow>=snap.adapters.iter().map(|a|ProxyAdapterRow{
+        name:a.name.clone().into(),description:a.description.clone().into(),
+        status:a.status.clone().into(),virtual_like:a.virtual_like,
+        mac:a.mac.clone().into(),ipv4:a.ipv4.join(", ").into()}).collect();
+    ui.set_proxy_adapter_rows(Rc::new(VecModel::from(adapter_rows)).into());
+    ui.set_proxy_notes(snap.notes.join("\n").into());
+}
+fn load_proxy_command_tips(ui:&AppWindow,platform:i32){
+    ui.set_proxy_platform(platform);
+    let platform_name=if platform==0{"Windows"}else{"Linux"};
+    let rows:Vec<ProxyCommandRow>=crate::proxy::command_tips(parse_proxy_command_port(ui.get_proxy_command_port().as_str())).into_iter()
+        .filter(|t|t.platform==platform_name)
+        .map(|t|ProxyCommandRow{title:t.title.into(),command:t.command.into(),note:t.note.into(),group:t.group.into()})
+        .collect();
+    ui.set_proxy_command_rows(Rc::new(VecModel::from(rows)).into());
+}
+
+/// 把网络测试报告写入界面模型。成功行只显示耗时（状态另有胶囊），失败行显示原因与排查提示。
+fn apply_net_test_report(ui:&AppWindow,report:crate::nettest::NetTestReport){
+    let rows:Vec<NetTestRow>=report.results.iter().map(|r|{
+        let tips=r.tips.iter().map(|t|format!("· {t}")).collect::<Vec<_>>().join("\n");
+        // 成功时 message 去掉与胶囊重复的「可以连接」前缀，只留耗时/细节。
+        let message=match r.status{
+            crate::nettest::ProbeStatus::Reachable=>{
+                r.message.strip_prefix("可以连接 · ").map(|s|s.to_string()).unwrap_or_else(||r.message.clone())
+            }
+            _=>r.message.clone(),
+        };
+        NetTestRow{
+            name:r.name.clone().into(),host:r.host.clone().into(),
+            status:r.status.label().into(),message:message.into(),
+            tips:tips.into(),
+            ok:r.status==crate::nettest::ProbeStatus::Reachable,
+            failed:r.status==crate::nettest::ProbeStatus::Unreachable,
+            pending:r.status==crate::nettest::ProbeStatus::Unknown,
+        }
+    }).collect();
+    ui.set_net_test_rows(Rc::new(VecModel::from(rows)).into());
+    let reachable=report.results.iter().filter(|r|r.status==crate::nettest::ProbeStatus::Reachable).count();
+    let total=report.results.len();
+    let notes=report.notes.join(" ");
+    let summary=if reachable==total{
+        format!("{}：{} 个站点均可以连接。{}",report.scope,total,notes)
+    }else{
+        format!("{}：{reachable}/{total} 个站点可以连接；其余为「不可以用」，请按提示排查。{}",report.scope,notes)
+    };
+    ui.set_net_test_summary(summary.into());
+}
+
+/// 把 WSL 发行版列表写入下拉；默认选中 Ubuntu* 优先项，用户可再改。
+fn apply_net_test_wsl_rows(ui:&AppWindow,distros:&[String],error:Option<String>){
+    let options:Vec<SharedString>=distros.iter().map(|d|SharedString::from(d.as_str())).collect();
+    ui.set_net_test_wsl_options(Rc::new(VecModel::from(options)).into());
+    if distros.is_empty(){
+        ui.set_net_test_wsl_index(0);
+        ui.set_net_test_wsl_selected("".into());
+        ui.set_net_test_wsl_status(error.unwrap_or_else(||"未检测到已安装的 WSL 发行版".into()).into());
+        ui.set_net_test_scope_label("WSL2（无可用发行版）".into());
+    }else{
+        let preferred=crate::nettest::prefer_wsl_distro(distros).unwrap_or_else(||distros[0].clone());
+        let index=(0..distros.len()).find(|i|distros[*i]==preferred).unwrap_or(0);
+        ui.set_net_test_wsl_index(index as i32);
+        ui.set_net_test_wsl_selected(preferred.clone().into());
+        ui.set_net_test_wsl_status(if let Some(error)=error{
+            format!("已加载 {} 个发行版；{error}",distros.len()).into()
+        }else{
+            format!("已加载 {} 个发行版",distros.len()).into()
+        });
+        ui.set_net_test_scope_label(format!("WSL2 · {preferred}").into());
+    }
+}
+
+/// 解析命令参考页的代理端口输入；非法或 0 回落默认 7890。
+fn parse_proxy_command_port(text:&str)->u16{
+    text.trim().parse::<u16>().ok().filter(|p|*p>0).unwrap_or(crate::proxy::DEFAULT_PROXY_COMMAND_PORT)
+}
 
 /// 同步回调装配：规则表、分区/工具导航、主题与输入校验——纯属性/状态操作，
 /// 不依赖事件循环，独立成函数以便无头 GUI 测试直接装配后断言。
-fn wire_sync(ui:&AppWindow,state:&Rc<RefCell<State>>,sender:&mpsc::SyncSender<Event>){
+fn wire_sync(ui:&AppWindow,state:&Rc<RefCell<State>>){
     {let weak=ui.as_weak();ui.on_root_edited(move||{if let Some(ui)=weak.upgrade(){invalidate(&ui);}});}
     {
-        let state=state.clone();let sender=sender.clone();let weak=ui.as_weak();
-        ui.on_presets(move|kind|{
-            let cfg=state.borrow().config.clone();
-            let path=match kind{
-                0=>match config::state_dir(){Ok(dir)=>Some(dir.join("config.json")),Err(error)=>{
-                    if let Some(ui)=weak.upgrade(){show_error(&ui,format!("无法确定配置目录：{error}"));}
-                    None}},
-                1=>{let mut dialog=rfd::FileDialog::new().set_file_name("jchtools-config.json");
-                    if let Some(directory)=user_file_directory(){dialog=dialog.set_directory(&directory);} dialog.save_file()},
-                2=>{let mut dialog=rfd::FileDialog::new().add_filter("JSON",&["json"]);
-                    if let Some(directory)=user_file_directory(){dialog=dialog.set_directory(&directory);} dialog.pick_file()},
-                _=>{if let Some(ui)=weak.upgrade(){
-                    ui.set_confirm_text("将把所有规则恢复为内置默认值，当前未保存的修改会丢失。\n\n此操作只影响本机规则配置，不会修改任何文件。".into());
-                    ui.set_confirm_kind(4);ui.set_acknowledge(true);
-                } return;}
-            };
-            if let Some(path)=path{async_work(sender.clone(),move||{
-                if kind==2{Ok(Event::ConfigLoaded(Some(path.clone()),Config::load(&path)?))}
-                else{cfg.save(&path)?;Ok(Event::Notice(format!("规则已保存：{}",path.display())))}
-            });}
+        let weak=ui.as_weak();let state=state.clone();
+        ui.on_select_tool(move|id|{
+            if let Some(ui)=weak.upgrade(){
+                match id.as_str(){
+                    "directory-organizer"=>{
+                        ui.set_screen(0);ui.set_active_tool_id(id.clone());
+                        state.borrow_mut().section="解压".into();ui.set_section(0);
+                        refresh(&ui,&state.borrow());
+                    }
+                    "proxy-status"=>{
+                        ui.set_screen(2);ui.set_active_tool_id(id.clone());
+                        // 进入页面自动刷新一次；无 sender（无头测试）时静默跳过。
+                        if let Some(sender)=state.borrow().proxy_events.clone(){
+                            if !ui.get_proxy_busy(){
+                                ui.set_proxy_busy(true);
+                                async_work(sender,move||Ok(Event::ProxySnapshot(crate::proxy::detect())));
+                            }
+                        }
+                    }
+                    _=>{}
+                }
+            }
         });
     }
     {
         let weak=ui.as_weak();let state=state.clone();
-        ui.on_select_tool(move|id|{if id.as_str()=="directory-organizer"{if let Some(ui)=weak.upgrade(){
-            ui.set_screen(0);ui.set_active_tool_id(id.clone());state.borrow_mut().section="解压".into();ui.set_section(0);refresh(&ui,&state.borrow());
-        }}});
+        ui.on_refresh_proxy(move||{
+            let Some(sender)=state.borrow().proxy_events.clone() else{return;};
+            if let Some(ui)=weak.upgrade(){
+                if ui.get_proxy_busy(){return;}
+                ui.set_proxy_busy(true);
+            }
+            async_work(sender,move||Ok(Event::ProxySnapshot(crate::proxy::detect())));
+        });
+    }
+    {
+        let weak=ui.as_weak();
+        ui.on_select_proxy_platform(move|platform|{if let Some(ui)=weak.upgrade(){
+            load_proxy_command_tips(&ui,platform);
+        }});
+    }
+    {
+        // 端口配置：合法端口写回属性并重建命令列表；非法输入保留用户输入、不重建，
+        // 复制仍按最近一次合法端口对应的命令文本进行。
+        let weak=ui.as_weak();
+        ui.on_proxy_command_port_edited(move|value|{if let Some(ui)=weak.upgrade(){
+            let trimmed=value.trim();
+            if trimmed.is_empty(){return;}
+            match trimmed.parse::<u16>(){
+                Ok(port) if port>0=>{
+                    ui.set_proxy_command_port(port.to_string().into());
+                    load_proxy_command_tips(&ui,ui.get_proxy_platform());
+                }
+                _=>{}
+            }
+        }});
+    }
+    {
+        // 复制命令到剪贴板：成功给 notice 提示，失败走 error_text，不静默。
+        let weak=ui.as_weak();
+        ui.on_copy_proxy_command(move|command,title|{if let Some(ui)=weak.upgrade(){
+            match set_clipboard_text(&command){
+                Ok(())=>ui.set_notice_text(format!("已复制「{title}」，可直接粘贴执行。").into()),
+                Err(error)=>show_error(&ui,format!("复制失败：{error}")),
+            }
+        }});
+    }
+    {
+        let weak=ui.as_weak();let state=state.clone();
+        ui.on_select_net_test_scope(move|scope|{if let Some(ui)=weak.upgrade(){
+            let scope=if scope==1{1}else{0};
+            let previous=ui.get_net_test_scope();
+            ui.set_net_test_scope(scope);
+            // 切换测试位置时清空上一轮结果，避免 Windows 结果在 WSL2 页上残留误导。
+            if previous!=scope{
+                ui.set_net_test_rows(Rc::new(VecModel::from(Vec::<NetTestRow>::new())).into());
+                ui.set_net_test_summary("尚未测试".into());
+            }
+            if scope==1{
+                let selected=ui.get_net_test_wsl_selected();
+                let label=if selected.is_empty(){
+                    slint::SharedString::from("WSL2 发行版内")
+                }else{
+                    slint::SharedString::from(format!("WSL2 · {selected}"))
+                };
+                ui.set_net_test_scope_label(label);
+                // 进入 WSL 页时拉取已安装发行版，供用户选择（无 sender 时静默跳过）。
+                if let Some(sender)=state.borrow().proxy_events.clone(){
+                    if !ui.get_net_test_busy(){
+                        ui.set_net_test_busy(true);
+                        ui.set_net_test_wsl_status("正在读取 WSL 发行版列表…".into());
+                        async_work(sender,move||match crate::nettest::list_wsl_distros(){
+                            Ok(distros)=>Ok(Event::WslDistros(distros,None)),
+                            Err(error)=>Ok(Event::WslDistros(Vec::new(),Some(error))),
+                        });
+                    }
+                }
+            }else{
+                ui.set_net_test_scope_label("Windows 本机".into());
+            }
+        }});
+    }
+    {
+        let weak=ui.as_weak();
+        ui.on_select_net_test_wsl(move|distro|{if let Some(ui)=weak.upgrade(){
+            let distro=distro.trim().to_string();
+            ui.set_net_test_wsl_selected(distro.clone().into());
+            let index=(0..ui.get_net_test_wsl_options().row_count())
+                .find(|i|ui.get_net_test_wsl_options().row_data(*i).map(|v|v.as_str()==distro).unwrap_or(false))
+                .unwrap_or(0) as i32;
+            ui.set_net_test_wsl_index(index);
+            ui.set_net_test_scope_label(if distro.is_empty(){
+                "WSL2 发行版内".into()
+            }else{
+                format!("WSL2 · {distro}").into()
+            });
+        }});
+    }
+    {
+        let weak=ui.as_weak();let state=state.clone();
+        ui.on_refresh_wsl_distros(move||{if let Some(ui)=weak.upgrade(){
+            if ui.get_net_test_busy(){return;}
+            let Some(sender)=state.borrow().proxy_events.clone()else{return;};
+            ui.set_net_test_busy(true);
+            ui.set_net_test_wsl_status("正在读取 WSL 发行版列表…".into());
+            async_work(sender,move||match crate::nettest::list_wsl_distros(){
+                Ok(distros)=>Ok(Event::WslDistros(distros,None)),
+                Err(error)=>Ok(Event::WslDistros(Vec::new(),Some(error))),
+            });
+        }});
+    }
+    {
+        let weak=ui.as_weak();let state=state.clone();
+        ui.on_run_net_test(move|scope,distro|{if let Some(ui)=weak.upgrade(){
+            if ui.get_net_test_busy(){return;}
+            let Some(sender)=state.borrow().proxy_events.clone()else{return;};
+            let scope=if scope==1{1}else{0};
+            let distro=distro.trim().to_string();
+            if scope==1 && distro.is_empty(){return;}
+            ui.set_net_test_busy(true);
+            let hint=if scope==1{
+                format!("正在 WSL2 发行版「{distro}」内探测…")
+            }else{
+                "正在本机探测…".into()
+            };
+            ui.set_net_test_summary(hint.into());
+            async_work(sender,move||Ok(Event::NetTestReport(crate::nettest::run(scope,&distro,5_000))));
+        }});
     }
     {
         let weak=ui.as_weak();
@@ -259,24 +558,24 @@ fn wire_sync(ui:&AppWindow,state:&Rc<RefCell<State>>,sender:&mpsc::SyncSender<Ev
         }});
     }
     {
-        let weak=ui.as_weak();let state=state.clone();let sender=sender.clone();
-        ui.on_navigation(move|screen|{if let Some(ui)=weak.upgrade(){ui.set_screen(screen);
-            if screen==2{state.borrow_mut().section="应用".into();refresh(&ui,&state.borrow());}
-            if screen==1{async_work(sender.clone(),||Ok(Event::History(engine::history(&config::state_dir()?)?)));}
-        }});
+        let weak=ui.as_weak();
+        ui.on_navigation(move|screen|{if let Some(ui)=weak.upgrade(){ui.set_screen(screen);}});
     }
     {
         let weak=ui.as_weak();let state=state.clone();
-        ui.on_select_section(move|index|{if let Some(section)=["解压","去重","冲突","归类","清理","安全与性能"].get(index.max(0)as usize){
+        ui.on_select_section(move|index|{if let Some(section)=["解压","去重","归类","清理","安全与性能"].get(index.max(0)as usize){
             state.borrow_mut().section=section.to_string();if let Some(ui)=weak.upgrade(){ui.set_section(index);refresh(&ui,&state.borrow());}
         }});
     }
     // 布尔/下拉：不整表重建 rules。重建会在 selected/toggled 回调里销毁 ListView 里的
-    // ComboBox，用户点选后的文字会停在旧值；改为配置写入 + 就地更新该行。
+    // ComboBox，用户点选后的文字会停在旧值；改为配置写入 + 就地更新该行，
+    // 联动行的出现/消失交给 sync_rules 增量插入删除。
     {let weak=ui.as_weak();let state=state.clone();ui.on_rule_bool(move|key,value|{
         if let Some(ui)=weak.upgrade(){
-            if changed(&ui,&state,key.as_str(),value.into(),false){
+            let stored=if key.as_str()=="conflict_scope_directory"{!value}else{value};
+            if changed(&ui,&state,key.as_str(),stored.into(),false){
                 patch_rule_row(&ui,key.as_str(),|row|row.checked=value);
+                sync_rules(&ui,&state.borrow());
             }
         }
     });}
@@ -292,8 +591,28 @@ fn wire_sync(ui:&AppWindow,state:&Rc<RefCell<State>>,sender:&mpsc::SyncSender<Ev
                         row.index=index;
                         if let Some(hint)=&hint{row.hint=hint.clone().into();}
                     });
+                    sync_rules(&ui,&state.borrow());
                 }
             }
+        }});
+    }
+    {
+        let weak=ui.as_weak();let state=state.clone();
+        // 主题选择在「关于」页（应用级设置，不属于目录整理的处理规则）；
+        // changed() 对 theme 键会跳过计划失效并直接套用。
+        ui.on_select_theme(move|choice|{
+            if let Some(ui)=weak.upgrade(){
+                let value=match choice{1=>"light",2=>"dark",_=>"system"};
+                changed(&ui,&state,"theme",value.into(),false);
+            }
+        });
+    }
+    {
+        let weak=ui.as_weak();let state=state.clone();
+        ui.on_toggle_advanced(move|show|{if let Some(ui)=weak.upgrade(){
+            state.borrow_mut().show_advanced=show;
+            ui.set_show_advanced(show);
+            refresh(&ui,&state.borrow());
         }});
     }
     {
@@ -337,12 +656,12 @@ fn wire_sync(ui:&AppWindow,state:&Rc<RefCell<State>>,sender:&mpsc::SyncSender<Ev
 }
 
 
-/// 初始界面状态：全部 49 条规则规格 + 默认配置。测试与 run() 共用。
+/// 初始界面状态：全部规则规格 + 默认配置（仅会话内存，不落盘）。测试与 run() 共用。
 fn initial_state()->Result<State>{
     let specs:Vec<RuleSpec>=serde_json::from_str(include_str!("../resources/rules.json"))?;
-    Ok(State{config:Config::default(),specs,section:"解压".into(),task:None,history:Vec::new(),
+    Ok(State{config:Config::default(),specs,section:"解压".into(),task:None,
         control:None,conflict:None,logs:VecDeque::new(),page:0,page_starts:vec![0],started:Instant::now(),close_after:false,pending_selection:0,applying:false,planned:0,
-        plan_filter:None,archives_failed:0,selection_failed:false})
+        plan_filter:None,archives_failed:0,selection_failed:false,show_advanced:false,proxy_events:None})
 }
 
 /// 与 `run` 相同，但在事件循环启动前调用 `hook`——自动化测试用它安装驱动定时器，
@@ -352,9 +671,11 @@ pub fn run_with_pre_loop_hook(hook:impl FnOnce(&AppWindow)+'static)->Result<()> 
     ui.set_system_dark(system_dark());
     let state=Rc::new(RefCell::new(initial_state()?));
     let(sender,receiver)=mpsc::sync_channel::<Event>(256);
+    state.borrow_mut().proxy_events=Some(sender.clone());
     let tools=registry::tools().iter().map(|tool|ToolRow{id:tool.id.into(),name:tool.name.into(),summary:tool.summary.into()}).collect::<Vec<_>>();
     ui.set_tool_count(registry::tools().len() as i32);
     ui.set_tools(Rc::new(VecModel::from(tools)).into());refresh(&ui,&state.borrow());
+    load_proxy_command_tips(&ui,0);
     {
         let weak=ui.as_weak();
         ui.on_choose_directory(move||{if let Some(ui)=weak.upgrade(){
@@ -367,7 +688,7 @@ pub fn run_with_pre_loop_hook(hook:impl FnOnce(&AppWindow)+'static)->Result<()> 
             }
         }});
     }
-    wire_sync(&ui,&state,&sender);
+    wire_sync(&ui,&state);
     {
         let weak=ui.as_weak();let state=state.clone();let sender=sender.clone();
         ui.on_confirmed(move|kind|{if let Some(ui)=weak.upgrade(){
@@ -377,8 +698,6 @@ pub fn run_with_pre_loop_hook(hook:impl FnOnce(&AppWindow)+'static)->Result<()> 
                 let control=state.borrow().control.clone();
                 match control{Some(control)=>{control.cancel();},None=>{let _=slint::quit_event_loop();return;}}
                 ui.set_status("取消任务中，完成当前安全操作后关闭".into());ui.set_conflict_visible(false);}
-            else if kind==4{state.borrow_mut().config=Config::default();refresh(&ui,&state.borrow());invalidate(&ui);
-                ui.set_notice_text("已恢复内置默认规则".into());}
             else{start_task(&ui,&state,&sender,kind==2);}
         }});
     }
@@ -453,14 +772,6 @@ pub fn run_with_pre_loop_hook(hook:impl FnOnce(&AppWindow)+'static)->Result<()> 
                     Ok(Event::Notice(format!("已导出：{}",path.display())))
                 });
             }
-        }});
-    }
-    {
-        let state=state.clone();let sender=sender.clone();let weak=ui.as_weak();
-        ui.on_load_history(move|index|{if weak.upgrade().is_none_or(|ui|ui.get_busy()) || state.borrow().pending_selection>0{return;}
-          if let Some(path)=state.borrow().history.get(index.max(0)as usize).cloned(){
-            async_work(sender.clone(),move||{let db=Database::open(&path)?;let status:String=db.get("status")?;
-                Ok(Event::LoadedTask(path,db.get("root")?,db.config()?,db.summary()?,status=="ready"))});
         }});
     }
     {
@@ -564,10 +875,10 @@ pub fn run_with_pre_loop_hook(hook:impl FnOnce(&AppWindow)+'static)->Result<()> 
                         ui.set_busy(false);ui.set_ready(false);ui.set_paused(false);ui.set_conflict_visible(false);
                         if cancelled{
                             ui.set_notice_text(error.into());
-                            ui.set_status("任务已取消；已完成的操作不会自动回滚，详情见任务记录".into());
+                            ui.set_status("任务已取消；已完成的操作不会自动回滚，详情见进度与日志".into());
                         }else{
                             ui.set_error_text(error.into());
-                            ui.set_status("任务已停止；已完成的操作不会自动回滚，详情见任务记录".into());
+                            ui.set_status("任务已停止；已完成的操作不会自动回滚，详情见进度与日志".into());
                         }
                         ui.set_progress(-1.0);ui.set_progress_note("".into());
                         if state.borrow().close_after{let _=slint::quit_event_loop();}
@@ -629,31 +940,14 @@ pub fn run_with_pre_loop_hook(hook:impl FnOnce(&AppWindow)+'static)->Result<()> 
                             ui.set_ready(recompute_ready(&ui,&s,&path));
                         }
                     }
-                    Event::History(items)=>{state.borrow_mut().history=items.iter().map(|(p,_)|p.clone()).collect();ui.set_history_items(Rc::new(VecModel::from(items.into_iter().map(|(_,s)|SharedString::from(s)).collect::<Vec<_>>())).into());},
-                    Event::LoadedTask(path,root,cfg,summary,ready)=>{
-                        if ui.get_busy() || state.borrow().pending_selection>0{continue;}
-                        let filter={let mut s=state.borrow_mut();s.config=cfg;s.task=Some(path.clone());s.page=0;s.page_starts=vec![0];s.section="解压".into();
-                         s.applying=false;s.planned=summary.planned_delete+summary.planned_move+summary.planned_link+summary.planned_empty;
-                         s.archives_failed=summary.archives_failed;s.plan_filter=None;None};
-                        ui.set_directory(platform::display_path_text(&root).into());ui.set_summary(summary.description().into());ui.set_ready(ready);ui.set_has_task(true);ui.set_screen(0);ui.set_panel(1);
-                        // 分区状态与列表数据必须一起复位：refresh 按 s.section 重建，胶囊高亮也要跟着指回「解压」，
-                        // 否则从其它分区载入历史任务后会看到「高亮在清理、列表是解压规则」的错位。
-                        ui.set_section(0);
-                        ui.set_status(if ready{"已载入历史任务，可再次执行整理"}else{"已载入历史任务（非待执行状态，需重新扫描）"}.into());
-                        ui.set_metrics(format!("删除 {} · 移动 {} · 硬链接 {} · 空目录 {}",summary.planned_delete,summary.planned_move,summary.planned_link,summary.planned_empty).into());
-                        ui.set_archives_failed(summary.archives_failed as i32);
-                        ui.set_plan_delete_count(summary.planned_delete as i32);
-                        ui.set_plan_move_count(summary.planned_move as i32);
-                        ui.set_plan_link_count(summary.planned_link as i32);
-                        ui.set_plan_empty_count(summary.planned_empty as i32);
-                        ui.set_plan_filter(0);
-                        refresh(&ui,&state.borrow());load_plan_filtered(sender.clone(),path,0,0,filter);
-                    }
-                    Event::ConfigLoaded(source,config)=>{state.borrow_mut().config=config;refresh(&ui,&state.borrow());invalidate(&ui);
-                        // 导入成功也要有反馈：否则用户不知道文件究竟有没有生效（启动读取本机配置时不提示）。
-                        if let Some(path)=source{ui.set_notice_text(format!("已导入规则：{}",path.display()).into());}},
                     Event::Notice(text)=>ui.set_notice_text(text.into()),
-                    Event::Error(text)=>ui.set_error_text(text.into()),
+                    Event::Error(text)=>{ui.set_proxy_busy(false);ui.set_net_test_busy(false);ui.set_error_text(text.into());},
+                    Event::ProxySnapshot(snap)=>{ui.set_proxy_busy(false);apply_proxy_snapshot(&ui,snap);},
+                    Event::NetTestReport(report)=>{ui.set_net_test_busy(false);apply_net_test_report(&ui,report);},
+                    Event::WslDistros(distros,error)=>{
+                        ui.set_net_test_busy(false);
+                        apply_net_test_wsl_rows(&ui,&distros,error);
+                    },
                 }
             }
             if log_changed{ui.set_log_text(state.borrow().logs.iter().rev().cloned().collect::<Vec<_>>().join("\n").into());}
@@ -688,17 +982,13 @@ pub fn run_with_pre_loop_hook(hook:impl FnOnce(&AppWindow)+'static)->Result<()> 
             }
         });
     }
-    // First show the window; reading a small user configuration happens afterwards on a worker.
+    // First show the window. Rules stay in memory for this session only.
     ui.show()?;
     center_window(&ui.window());
     // 窗口刚映射时系统还会套用默认位置，稍后再居中一次，保证首屏就是居中的
     let centered=ui.as_weak();
     slint::Timer::single_shot(Duration::from_millis(120),move||{
         if let Some(ui)=centered.upgrade(){center_window(&ui.window());}
-    });
-    async_work(sender.clone(),||{
-        let path=config::state_dir()?.join("config.json");
-        if path.try_exists()?{Ok(Event::ConfigLoaded(None,Config::load(&path)?))}else{Ok(Event::Status("请选择需要整理的目录".into()))}
     });
     hook(&ui);
     slint::run_event_loop()?;
@@ -725,6 +1015,23 @@ mod gui_tests{
             self.ui.set_theme(0);
             self.ui.set_confirm_kind(0);
             self.ui.set_section(0);
+            self.ui.set_show_advanced(false);
+            self.ui.set_screen(0);
+            self.ui.set_active_tool_id("directory-organizer".into());
+            self.ui.set_proxy_busy(false);
+            self.ui.set_proxy_env_summary("尚未检测".into());
+            self.ui.set_proxy_env_set_lines(Rc::new(VecModel::from(Vec::<SharedString>::new())).into());
+            self.ui.set_proxy_command_port(crate::proxy::DEFAULT_PROXY_COMMAND_PORT.to_string().into());
+            load_proxy_command_tips(&self.ui,0);
+            self.ui.set_net_test_busy(false);
+            self.ui.set_net_test_scope(0);
+            self.ui.set_net_test_scope_label("Windows 本机".into());
+            self.ui.set_net_test_summary("尚未测试".into());
+            self.ui.set_net_test_rows(Rc::new(VecModel::from(Vec::<NetTestRow>::new())).into());
+            self.ui.set_net_test_wsl_options(Rc::new(VecModel::from(Vec::<SharedString>::new())).into());
+            self.ui.set_net_test_wsl_index(0);
+            self.ui.set_net_test_wsl_selected("".into());
+            self.ui.set_net_test_wsl_status("尚未读取发行版列表".into());
             refresh(&self.ui,&self.state.borrow());
         }
     }
@@ -737,8 +1044,10 @@ mod gui_tests{
                 i_slint_backend_testing::init_no_event_loop();
                 let ui=AppWindow::new().unwrap();
                 let state=Rc::new(RefCell::new(initial_state().unwrap()));
-                let (sender,_receiver)=mpsc::sync_channel::<Event>(64);
-                wire_sync(&ui,&state,&sender);
+                ui.set_tool_count(registry::tools().len() as i32);
+                let tools=registry::tools().iter().map(|tool|ToolRow{id:tool.id.into(),name:tool.name.into(),summary:tool.summary.into()}).collect::<Vec<_>>();
+                ui.set_tools(Rc::new(VecModel::from(tools)).into());
+                wire_sync(&ui,&state);
                 refresh(&ui,&state.borrow());
                 let app=GuiTestApp{ui,state};
                 while let Ok(job)=rx.recv(){
@@ -775,31 +1084,128 @@ mod gui_tests{
         })
     }
 
+    fn rule_checked_at(ui:&AppWindow,key:&str)->Option<bool>{
+        let rules=ui.get_rules();
+        (0..rules.row_count()).find_map(|i|{
+            let row=rules.row_data(i)?;
+            (row.key.as_str()==key).then_some(row.checked)
+        })
+    }
+
     #[test]
-    fn initial_surface_lists_all_rules_and_defaults(){
+    fn initial_surface_lists_defaults(){
         with_gui(|app|{
             let ui=&app.ui;
             assert!(!ui.get_ready(),"初始状态不得就绪");
             assert_eq!(ui.get_theme(),0,"默认跟随系统主题");
-            assert_eq!(ui.get_all_rules().row_count(),49,"设置页必须一次列出全部 49 条规则");
-            assert_eq!(ui.get_tool_count(),1,"当前注册的工具数量");
+            assert_eq!(ui.get_tool_count(),2,"当前注册的工具数量");
         }).unwrap();
     }
     #[test]
     fn section_switch_swaps_rule_rows(){
         with_gui(|app|{
             let ui=&app.ui;
-            ui.invoke_select_section(5); // 安全与性能
-            assert_eq!(ui.get_section(),5);
-            let expected=app.state.borrow().specs.iter().filter(|s|s.section=="安全与性能").count();
-            assert_eq!(ui.get_rules().row_count(),expected,"分区切换后规则行数应与该分区一致");
-            assert!(rule_value_at(ui,"max_depth").is_none(),"最大嵌套层数属于解压分区，切走后不应出现");
+            ui.invoke_select_section(4); // 安全与性能
+            assert_eq!(ui.get_section(),4);
+            assert_eq!(ui.get_rules().row_count(),3,"安全与性能默认只显示 3 条基础规则");
+            assert!(rule_value_at(ui,"hash_workers").is_none(),"Hash 并行工作线程属于高级层");
+            ui.invoke_toggle_advanced(true);
+            assert!(ui.get_show_advanced());
+            assert_eq!(ui.get_rules().row_count(),8,"打开高级层后安全与性能应显示全部 8 条");
+            assert_eq!(rule_value_at(ui,"hash_workers").as_deref(),Some("2"));
+            ui.invoke_toggle_advanced(false);
+            ui.invoke_select_section(0); // 解压
+            assert!(rule_value_at(ui,"max_depth").is_none(),"高级层关闭后最大嵌套层数不应出现");
+            assert!(rule_value_at(ui,"extract").is_some());
+            // 冲突组已并入去重分区；应用分区（主题）已挪到「关于」页，都不再有独立分区。
+            ui.invoke_select_section(1);
+            assert!(rule_value_at(ui,"same_name_same_size").is_some(),"冲突规则并入去重分区");
+            assert!(rule_value_at(ui,"theme").is_none(),"主题不再作为目录整理的规则行");
+        }).unwrap();
+    }
+    #[test]
+    fn advanced_rows_hidden_until_toggled(){
+        with_gui(|app|{
+            let ui=&app.ui;
+            assert_eq!(ui.get_rules().row_count(),3,"解压分区默认只显示 3 条基础规则");
+            assert!(rule_value_at(ui,"max_depth").is_none(),"最大嵌套层数属于高级层");
+            assert!(rule_value_at(ui,"nested_archives").is_none(),"嵌套解压属于高级层");
+            ui.invoke_toggle_advanced(true);
+            assert!(ui.get_show_advanced());
+            assert_eq!(ui.get_rules().row_count(),9,"打开高级层后解压分区应显示全部 9 条");
+            assert_eq!(rule_value_at(ui,"max_depth").as_deref(),Some("16"));
+            ui.invoke_toggle_advanced(false);
+            assert_eq!(ui.get_rules().row_count(),3,"关闭高级层必须恢复基础视图");
+        }).unwrap();
+    }
+    #[test]
+    fn dependent_rows_follow_their_switches(){
+        with_gui(|app|{
+            let ui=&app.ui;
+            // 清理：修正扩展名不再依赖独立的类型检测行，直接可见并自动联动开启
+            ui.invoke_select_section(3);
+            assert!(rule_value_at(ui,"fix_extension").is_some(),"修正扩展名始终可见");
+            assert!(rule_value_at(ui,"detect_type").is_none(),"类型检测不再单列为规则行");
+            ui.invoke_rule_bool("fix_extension".into(),true);
+            assert!(app.state.borrow().config.detect_type,"开启修正扩展名必须自动开启类型检测");
+            // 归类：自定义分类规则依赖归类方式；大文件阈值依赖大文件单独归类（已移入高级层）
+            ui.invoke_select_section(2);
+            assert!(rule_value_at(ui,"custom_categories").is_none());
+            ui.invoke_rule_choice("classify".into(),4); // 按自定义扩展名规则
+            assert!(rule_value_at(ui,"custom_categories").is_some());
+            assert!(rule_value_at(ui,"large_threshold_gib").is_none());
+            ui.invoke_toggle_advanced(true);
+            ui.invoke_rule_bool("large_files".into(),true);
+            assert!(rule_value_at(ui,"large_threshold_gib").is_some());
+            ui.invoke_toggle_advanced(false);
+            // 去重（冲突组已并入）：版本淘汰开关未开时，保留规则与比较范围都隐藏
+            ui.invoke_select_section(1);
+            assert_eq!(ui.get_rules().row_count(),3,"去重基础层：内容去重、保留规则、版本淘汰开关");
+            ui.invoke_rule_bool("same_name_same_size".into(),true);
+            assert!(rule_value_at(ui,"same_size_keep").is_some());
+            assert!(rule_value_at(ui,"conflict_scope_directory").is_none(),"比较范围已移入高级层");
+            // 关掉开关后依赖行必须消失（增量删除路径，与上面的插入路径同样重要）
+            ui.invoke_rule_bool("same_name_same_size".into(),false);
+            assert_eq!(ui.get_rules().row_count(),3,"关掉开关后保留规则要收回");
+            assert!(rule_value_at(ui,"same_size_keep").is_none());
+        }).unwrap();
+    }
+    #[test]
+    fn merged_rows_write_shadow_fields(){
+        with_gui(|app|{
+            let ui=&app.ui;
+            ui.invoke_select_section(1); // 去重
+            ui.invoke_rule_bool("dedup_same_name".into(),false);
+            {let cfg=&app.state.borrow().config;
+                assert!(!cfg.dedup_same_name&&!cfg.dedup_copy_names&&!cfg.dedup_other_names,"内容去重一行必须同时写三个细粒度字段");}
+            ui.invoke_rule_bool("same_name_same_size".into(),true);
+            {let cfg=&app.state.borrow().config;
+                assert!(cfg.same_name_same_size&&cfg.same_name_different_size,"版本淘汰一行必须同时写两个开关");}
+            ui.invoke_rule_choice("same_size_keep".into(),1); // 保留最旧
+            {let cfg=&app.state.borrow().config;
+                assert_eq!(cfg.same_size_keep,KeepPolicy::Oldest);
+                assert_eq!(cfg.different_size_keep,KeepPolicy::Oldest,"保留规则一行必须同时写两个策略");}
+        }).unwrap();
+    }
+    #[test]
+    fn conflict_scope_row_is_inverted_but_stores_original_semantics(){
+        with_gui(|app|{
+            let ui=&app.ui;
+            ui.invoke_select_section(1); // 去重（冲突组已并入）
+            ui.invoke_toggle_advanced(true); // 比较范围已移入高级层
+            ui.invoke_rule_bool("same_name_same_size".into(),true);
+            assert!(app.state.borrow().config.conflict_scope_directory,"默认仍是最保守的同目录范围");
+            assert_eq!(rule_checked_at(ui,"conflict_scope_directory"),Some(false),"默认不勾选");
+            ui.invoke_rule_bool("conflict_scope_directory".into(),true);
+            assert!(!app.state.borrow().config.conflict_scope_directory,"界面勾选必须写入 false");
+            assert_eq!(rule_checked_at(ui,"conflict_scope_directory"),Some(true));
         }).unwrap();
     }
     #[test]
     fn invalid_number_input_reports_error_and_reverts_value(){
         with_gui(|app|{
             let ui=&app.ui;
+            ui.invoke_toggle_advanced(true); // 最大嵌套层数属于高级层，先让它显示出来
             ui.invoke_rule_text("max_depth".into(),"abc".into());
             assert!(ui.get_error_text().contains("非负整数"),"必须提示非法输入：{}",ui.get_error_text());
             assert_eq!(rule_value_at(ui,"max_depth").as_deref(),Some("16"),"非法输入必须回退为配置真值");
@@ -810,7 +1216,7 @@ mod gui_tests{
         with_gui(|app|{
             let ui=&app.ui;
             ui.set_ready(true);
-            ui.invoke_rule_choice("theme".into(),2); // 深色
+            ui.invoke_select_theme(2); // 深色（「关于」页的主题选择）
             assert_eq!(ui.get_theme(),2);
             assert!(ui.get_ready(),"纯外观的主题切换不得使已生成的计划失效");
             ui.invoke_rule_bool("clean_temp".into(),false);
@@ -840,20 +1246,124 @@ mod gui_tests{
     fn navigation_switches_screen(){
         with_gui(|app|{
             let ui=&app.ui;
-            ui.invoke_navigation(2);
-            assert_eq!(ui.get_screen(),2,"设置与规则预设页");
+            ui.invoke_navigation(1);
+            assert_eq!(ui.get_screen(),1,"关于页");
             ui.invoke_navigation(0);
             assert_eq!(ui.get_screen(),0);
         }).unwrap();
     }
     #[test]
-    fn presets_reset_dialog_asks_for_confirmation(){
+    fn select_proxy_tool_routes_without_spawning(){
         with_gui(|app|{
             let ui=&app.ui;
-            ui.invoke_presets(3);
-            assert_eq!(ui.get_confirm_kind(),4);
-            assert!(ui.get_acknowledge(),"恢复默认需要显式确认");
-            assert!(ui.get_confirm_text().contains("内置默认值"));
+            ui.invoke_select_tool("proxy-status".into());
+            assert_eq!(ui.get_screen(),2,"代理工具页");
+            assert_eq!(ui.get_active_tool_id().as_str(),"proxy-status");
+            assert!(!ui.get_proxy_busy(),"无头测试无 sender，不得启动检测");
+            ui.invoke_select_tool("directory-organizer".into());
+            assert_eq!(ui.get_screen(),0,"切回目录整理路由不串");
+            assert_eq!(ui.get_active_tool_id().as_str(),"directory-organizer");
+            assert!(!ui.get_proxy_busy());
+        }).unwrap();
+    }
+    #[test]
+    fn network_identity_defaults_are_neutral(){with_gui(|app|{
+        let ui=&app.ui;
+        assert_eq!(ui.get_proxy_local_ip().as_str(),"尚未检测");
+        assert_eq!(ui.get_proxy_public_ip().as_str(),"尚未检测");
+        assert_eq!(ui.get_proxy_public_ip_note().as_str(),"");
+        ui.invoke_select_tool("proxy-status".into());
+        assert_eq!(ui.get_proxy_local_ip().as_str(),"尚未检测","无 sender 不得清空/伪造 IP");
+    }).unwrap();}
+    #[test]
+    fn refresh_proxy_without_sender_is_noop(){
+        with_gui(|app|{
+            let ui=&app.ui;
+            assert!(app.state.borrow().proxy_events.is_none(),"无头测试不应注入事件通道");
+            ui.invoke_refresh_proxy();
+            assert!(!ui.get_proxy_busy(),"没有 sender 时刷新必须是 no-op");
+        }).unwrap();
+    }
+    #[test]
+    fn proxy_platform_switches_command_tips(){
+        with_gui(|app|{
+            let ui=&app.ui;
+            ui.invoke_select_proxy_platform(0);
+            let win=ui.get_proxy_command_rows().row_count();
+            assert!(win>0);
+            ui.invoke_select_proxy_platform(1);
+            let linux=ui.get_proxy_command_rows().row_count();
+            assert!(linux>0);
+            assert_eq!(ui.get_proxy_platform(),1);
+        }).unwrap();
+    }
+    #[test]
+    fn proxy_command_port_updates_tips_and_copy_source(){
+        with_gui(|app|{
+            let ui=&app.ui;
+            ui.invoke_proxy_command_port_edited(slint::SharedString::from("10809"));
+            assert_eq!(ui.get_proxy_command_port().as_str(),"10809");
+            let rows=ui.get_proxy_command_rows();
+            assert!(rows.row_count()>0);
+            let set_row=(0..rows.row_count())
+                .filter_map(|i|rows.row_data(i))
+                .find(|r|r.title.as_str()=="PowerShell 设置当前会话代理")
+                .expect("应有 PowerShell 设置命令");
+            assert!(set_row.command.contains("http://127.0.0.1:10809"));
+            assert!(!set_row.command.contains(":7890"));
+            // 非法端口不改写列表。
+            ui.invoke_proxy_command_port_edited(slint::SharedString::from("0"));
+            assert_eq!(ui.get_proxy_command_port().as_str(),"10809");
+            // 切到 Linux 后仍使用配置端口。
+            ui.invoke_select_proxy_platform(1);
+            let linux=ui.get_proxy_command_rows();
+            let export_row=(0..linux.row_count())
+                .filter_map(|i|linux.row_data(i))
+                .find(|r|r.title.as_str()=="export 当前 shell 代理")
+                .expect("应有 export 命令");
+            assert!(export_row.command.contains("http://127.0.0.1:10809"));
+        }).unwrap();
+    }
+    #[test]
+    fn net_test_scope_switch_updates_label(){
+        with_gui(|app|{
+            let ui=&app.ui;
+            assert_eq!(ui.get_net_test_scope(),0);
+            assert_eq!(ui.get_net_test_scope_label().as_str(),"Windows 本机");
+            ui.invoke_select_net_test_scope(1);
+            assert_eq!(ui.get_net_test_scope(),1);
+            // 无 sender 时不刷新列表，标签保持占位。
+            assert_eq!(ui.get_net_test_scope_label().as_str(),"WSL2 发行版内");
+            ui.invoke_select_net_test_wsl(slint::SharedString::from("Ubuntu-22.04"));
+            assert_eq!(ui.get_net_test_wsl_selected().as_str(),"Ubuntu-22.04");
+            assert_eq!(ui.get_net_test_scope_label().as_str(),"WSL2 · Ubuntu-22.04");
+            ui.invoke_select_net_test_scope(0);
+            assert_eq!(ui.get_net_test_scope(),0);
+            assert_eq!(ui.get_net_test_scope_label().as_str(),"Windows 本机");
+        }).unwrap();
+    }
+    #[test]
+    fn run_net_test_without_sender_is_noop(){
+        with_gui(|app|{
+            let ui=&app.ui;
+            ui.invoke_run_net_test(0, slint::SharedString::from(""));
+            assert!(!ui.get_net_test_busy(),"无 sender 时不得置忙");
+            ui.invoke_run_net_test(1, slint::SharedString::from("Ubuntu"));
+            assert!(!ui.get_net_test_busy());
+            ui.invoke_refresh_wsl_distros();
+            assert!(!ui.get_net_test_busy());
+        }).unwrap();
+    }
+    #[test]
+    fn apply_wsl_distros_selects_preferred_ubuntu(){
+        with_gui(|app|{
+            let ui=&app.ui;
+            ui.invoke_select_net_test_scope(1);
+            apply_net_test_wsl_rows(ui,&vec!["Debian".into(),"Ubuntu-22.04".into(),"Alpine".into()],None);
+            assert_eq!(ui.get_net_test_wsl_options().row_count(),3);
+            assert_eq!(ui.get_net_test_wsl_index(),1);
+            assert_eq!(ui.get_net_test_wsl_selected().as_str(),"Ubuntu-22.04");
+            assert_eq!(ui.get_net_test_scope_label().as_str(),"WSL2 · Ubuntu-22.04");
         }).unwrap();
     }
 }

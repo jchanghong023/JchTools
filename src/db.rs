@@ -28,7 +28,12 @@ impl Database {
         let value: String = self.conn.query_row("SELECT value FROM metadata WHERE key=?1", [key], |r| r.get(0))?;
         Ok(serde_json::from_str(&value)?)
     }
-    pub fn config(&self) -> Result<Config> { self.get("config") }
+    // 配置可能来自旧版本任务库，需剥除已删除的设置键后再反序列化；
+    // metadata 里存的是原始 JSON 文本，不能经 get<T> 先反序列化成字符串。
+    pub fn config(&self) -> Result<Config> {
+        let raw: String = self.conn.query_row("SELECT value FROM metadata WHERE key=?1", ["config"], |r| r.get(0))?;
+        Config::from_json_text(&raw)
+    }
     pub fn summary(&self) -> Result<Summary> { self.get("summary") }
     pub fn log(&self, phase: &str, source: &str, target: &str, result: &str, reason: &str, size: u64) -> Result<()> {
         self.conn.execute("INSERT INTO events(time,phase,source,target,result,reason,size) VALUES(?1,?2,?3,?4,?5,?6,?7)",

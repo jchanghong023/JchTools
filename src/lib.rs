@@ -8,9 +8,11 @@ pub mod engine_bundle;
 pub mod fsutil;
 pub mod hashing;
 pub mod model;
+pub mod nettest;
 pub mod planner;
 pub mod platform;
 pub mod process;
+pub mod proxy;
 pub mod registry;
 pub mod rules;
 

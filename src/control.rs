@@ -56,14 +56,16 @@ pub enum Event {
     PlanPage(std::path::PathBuf, Vec<crate::model::Action>, usize),
     /// 第二项携带 (动作 id, 保存后的勾选值)，界面用它就地修正计划行，避免复选框与数据库不一致。
     SelectionSaved(std::path::PathBuf, Option<(i64, bool)>, Option<String>),
-    History(Vec<(std::path::PathBuf, String)>),
-    LoadedTask(std::path::PathBuf, String, crate::config::Config, crate::model::Summary, bool),
-    /// 载入配置；带上来源路径表示是用户导入的（界面会给出提示），`None` 表示启动时读取本机配置。
-    ConfigLoaded(Option<std::path::PathBuf>, crate::config::Config),
     /// 一次性提示（成功信息等），界面用中性样式展示
     Notice(String),
-    /// 一次性错误（导出失败、规则读取失败等），界面用错误样式展示
+    /// 一次性错误（导出失败等），界面用错误样式展示
     Error(String),
+    /// 代理工具检测结果快照（环境变量 / 系统代理 / 进程 / 网卡 / 本机与外网 IP / MAC）
+    ProxySnapshot(crate::proxy::ProxySnapshot),
+    /// 网络测试报告（ChatGPT / Google / GitHub 连通性，Windows 或 WSL2）
+    NetTestReport(crate::nettest::NetTestReport),
+    /// WSL 发行版列表：第二项为失败原因（无则 None）
+    WslDistros(Vec<String>, Option<String>),
 }
 #[derive(Clone)]
 pub struct Context {

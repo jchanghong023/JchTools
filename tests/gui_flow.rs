@@ -3,7 +3,7 @@
 //! 驱动器定时器在事件循环内逐步推进状态机，超时自动失败。
 use jchtools::gui;
 use slint::ComponentHandle;
-use std::{cell::Cell,fs,rc::Rc,time::{Duration,Instant}};
+use std::{cell::Cell,fs,rc::Rc,time::Duration};
 
 fn make_fixture()->tempfile::TempDir {
     let dir=tempfile::tempdir().unwrap();

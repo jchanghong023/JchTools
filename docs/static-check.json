@@ -19,17 +19,17 @@
     {
       "name": "config_schema",
       "status": "PASS",
-      "details": "49 UI settings exactly match serialized Config fields and enum values."
+      "details": "41 UI settings match serialized Config fields (6 engine/CLI-only) and enum values."
     },
     {
       "name": "ui_callbacks",
       "status": "PASS",
-      "details": "24 declared window callbacks have Rust handlers."
+      "details": "32 declared window callbacks have Rust handlers."
     },
     {
       "name": "rust_lexical",
       "status": "PASS",
-      "details": "22 Rust files have balanced lexical delimiters; this does NOT validate Rust types, APIs, macros or borrow checking."
+      "details": "24 Rust files have balanced lexical delimiters; this does NOT validate Rust types, APIs, macros or borrow checking."
     },
     {
       "name": "sql_syntax",
@@ -38,13 +38,13 @@
     },
     {
       "name": "shell_syntax",
-      "status": "PASS",
-      "details": "bash -n passed; PowerShell syntax check is defined in Windows CI."
+      "status": "SKIP",
+      "details": "bash launcher is unavailable on this host; bash -n runs in the Linux CI job."
     },
     {
       "name": "scope_and_delivery",
       "status": "PASS",
-      "details": "84 Rust test functions supplied, NOT executed; no todo!/unimplemented! in Rust implementation; no prebuilt executable asserted."
+      "details": "83 Rust test functions supplied, NOT executed; no todo!/unimplemented! in Rust implementation; no prebuilt executable asserted."
     }
   ]
 }

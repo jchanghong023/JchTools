@@ -1,6 +1,5 @@
-use crate::{config::HashAlgorithm, control::Control, fsutil, model::Snapshot};
+use crate::{control::Control, fsutil, model::Snapshot};
 use anyhow::{bail, Result};
-use sha2::Digest;
 use std::{io::{Read, Seek, SeekFrom}, path::Path, sync::atomic::Ordering};
 const BUFFER: usize = 1024 * 1024;
 const SAMPLE: usize = 64 * 1024;
@@ -24,28 +23,25 @@ pub fn prehash(path: &Path, expected: &Snapshot, ctl: &Control) -> Result<String
     fsutil::unchanged(path, expected)?;
     Ok(hash.finalize().to_hex().to_string())
 }
-pub fn full_hash(path: &Path, expected: &Snapshot, algorithm: HashAlgorithm, ctl: &Control) -> Result<String> {
+/// 本地内容判定只关心「是否相同」，固定 BLAKE3：不选算法、不做兼容外部 Hash 清单；
+/// 防误删由删除前的逐字节复核（verify_bytes）承担，不依赖摘要算法强度。
+pub fn full_hash(path: &Path, expected: &Snapshot, ctl: &Control) -> Result<String> {
     ctl.checkpoint()?; fsutil::unchanged(path, expected)?;
     let mut file = fsutil::open_stable_read(path)?;
     let mut buffer = vec![0u8; BUFFER];
-    let mut blake = blake3::Hasher::new();
-    let mut sha = sha2::Sha256::new();
-    let mut md5 = md5::Md5::new();
+    let mut hash = blake3::Hasher::new();
     let mut total = 0u64;
     loop {
         ctl.checkpoint()?;
         let count = file.read(&mut buffer)?;
         if count == 0 { break; }
-        match algorithm { HashAlgorithm::Blake3 => { blake.update(&buffer[..count]); },
-            HashAlgorithm::Sha256 => sha.update(&buffer[..count]), HashAlgorithm::Md5 => md5.update(&buffer[..count]) }
+        hash.update(&buffer[..count]);
         total = total.checked_add(count as u64).ok_or_else(|| anyhow::anyhow!("文件大小溢出"))?;
         ctl.read_bytes.fetch_add(count as u64, Ordering::Relaxed);
     }
     if total != expected.size { bail!("文件读取期间大小发生变化"); }
     fsutil::unchanged(path, expected)?;
-    Ok(match algorithm { HashAlgorithm::Blake3 => format!("blake3:{}", blake.finalize().to_hex()),
-        HashAlgorithm::Sha256 => format!("sha256:{}", hex::encode(sha.finalize())),
-        HashAlgorithm::Md5 => format!("md5:{}", hex::encode(md5.finalize())) })
+    Ok(format!("blake3:{}", hash.finalize().to_hex()))
 }
 pub fn equal_bytes(a: &Path, sa: &Snapshot, b: &Path, sb: &Snapshot, ctl: &Control) -> Result<bool> {
     if sa.size != sb.size { return Ok(false); }

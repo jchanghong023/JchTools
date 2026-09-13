@@ -22,9 +22,6 @@ pub enum KeepPolicy { Newest, Oldest, Largest, Smallest, ShortestName }
 pub enum ConflictPolicy { Ask, Overwrite, Skip, Newest, Largest, KeepBoth }
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
-pub enum HashAlgorithm { Blake3, Sha256, Md5 }
-#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "snake_case")]
 pub enum ClassifyMode { Off, Extension, Category, Date, Custom }
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
@@ -53,8 +50,6 @@ pub struct Config {
     pub keep_duplicate: KeepPolicy,
     pub duplicate_action: DuplicateAction,
     pub duplicate_delete: DeleteChoice,
-    pub hash_algorithm: HashAlgorithm,
-    pub verify_bytes: bool,
     pub same_name_same_size: bool,
     pub same_size_keep: KeepPolicy,
     pub same_name_different_size: bool,
@@ -83,6 +78,9 @@ pub struct Config {
     pub hash_workers: usize,
     pub theme: String,
 }
+/// 默认的自定义分类规则串：界面用它判断「用户是否改过这一项」，
+/// 避免在比较处重复构造同一份字面量。
+pub const DEFAULT_CUSTOM_CATEGORIES:&str="文档=pdf,doc,docx,txt,md,xls,xlsx,ppt,pptx;图片=jpg,jpeg,png,webp;视频=mp4,mkv,avi,mov";
 impl Default for Config {
     fn default() -> Self {
         Self {
@@ -93,12 +91,14 @@ impl Default for Config {
             max_unpacked_gib: 0, max_file_gib: 0, max_ratio: 10_000, reserve_gib: 1,
             dedup_same_name: true, dedup_copy_names: true, dedup_other_names: true,
             keep_duplicate: KeepPolicy::Newest, duplicate_action: DuplicateAction::Delete,
-            duplicate_delete: DeleteChoice::Global, hash_algorithm: HashAlgorithm::Blake3,
-            verify_bytes: true, same_name_same_size: true, same_size_keep: KeepPolicy::Newest,
-            same_name_different_size: true, different_size_keep: KeepPolicy::Newest,
+            duplicate_delete: DeleteChoice::Global,
+            // 版本淘汰（同名但内容不同）默认关闭：它按名称启发式删除文件，与
+            // 「只删已证实重复内容」的去重规则不同，必须由用户显式开启。
+            same_name_same_size: false, same_size_keep: KeepPolicy::Newest,
+            same_name_different_size: false, different_size_keep: KeepPolicy::Newest,
             conflict_scope_directory: true, conflict_delete: DeleteChoice::Global,
             classify: ClassifyMode::Category, output_dir: String::new(), preserve_structure: true,
-            custom_categories: "文档=pdf,doc,docx,txt,md,xls,xlsx,ppt,pptx;图片=jpg,jpeg,png,webp;视频=mp4,mkv,avi,mov".into(),
+            custom_categories: DEFAULT_CUSTOM_CATEGORIES.into(),
             large_files: false, large_threshold_gib: 1, merge_directories: false,
             flatten_single_child: false, clean_empty_dirs: true, clean_junk: true,
             clean_temp: false, clean_zero: false, cleanup_delete: DeleteChoice::Global,
@@ -126,9 +126,20 @@ impl Config {
     pub fn load(path: &Path) -> Result<Self> {
         let meta = std::fs::metadata(path)?;
         if meta.len() > 256 * 1024 { bail!("配置文件超过 256 KiB"); }
-        let value: Self = serde_json::from_slice(&std::fs::read(path)?)?;
+        let value = Self::from_json_text(&String::from_utf8(std::fs::read(path)?).context("配置文件不是 UTF-8")?)?;
         value.validate()?;
         Ok(value)
+    }
+    /// 历史版本已删除的设置键：旧配置文件与旧任务库仍带着它们，反序列化前剥除，
+    /// 否则 deny_unknown_fields 会把旧数据整体判成非法配置。
+    /// verify_bytes（删除前逐字节复核）已写死为始终开启。
+    const REMOVED_FIELDS: &[&str] = &["hash_algorithm", "verify_bytes"];
+    pub fn from_json_text(text: &str) -> Result<Self> {
+        let mut value: serde_json::Value = serde_json::from_str(text)?;
+        if let Some(map) = value.as_object_mut() {
+            for key in Self::REMOVED_FIELDS { map.remove(*key); }
+        }
+        Ok(serde_json::from_value(value)?)
     }
     pub fn save(&self, path: &Path) -> Result<()> {
         self.validate()?;

@@ -94,7 +94,7 @@ pub fn prepare_at(root:&Path,config:Config,context:TaskContext,state:&Path,engin
         Ok(TaskResult { directory:directory.clone(),summary:job.summary.clone() })
     })();
     if let Err(error)=&result {
-        // 用户主动取消不是失败：任务记录里要能区分“已取消”和“失败”，否则回看记录时会误判。
+        // 用户主动取消不是失败：任务库状态要能区分“已取消”和“失败”，否则事后检查会误判。
         let cancelled=job.context.control.is_cancelled();
         let _=job.db.set("summary",&job.summary);
         let _=job.db.set("status",&if cancelled {"cancelled"} else {"failed"});
@@ -174,7 +174,10 @@ fn hash_candidates(job:&mut Job)->Result<()> {
         job.db.conn.execute_batch("DROP TABLE IF EXISTS hash_candidates; CREATE TEMP TABLE hash_candidates(id INTEGER PRIMARY KEY);")?;
         if full {
             job.db.conn.execute("INSERT OR IGNORE INTO hash_candidates SELECT id FROM files WHERE active=1 AND (size,prehash) IN (SELECT size,prehash FROM files WHERE active=1 AND prehash IS NOT NULL GROUP BY size,prehash HAVING COUNT(*)>1)",[])?;
-            if job.config.same_name_same_size {
+            // 同名同大小的完整 Hash 只服务「同名同大小但内容不同」的版本淘汰：
+            // 目录范围在 Windows 上永不分组（lower(rel) 唯一），这些 Hash 是纯浪费；
+            // 非 Windows 文件系统允许同目录出现大小写变体同名，仍需保留。
+            if job.config.same_name_same_size && (!job.config.conflict_scope_directory || !cfg!(windows)) {
                 job.db.conn.execute("INSERT OR IGNORE INTO hash_candidates SELECT id FROM files WHERE active=1 AND (name,size) IN (SELECT name,size FROM files WHERE active=1 GROUP BY name,size HAVING COUNT(*)>1)",[])?;
             }
         } else {
@@ -187,10 +190,10 @@ fn hash_candidates(job:&mut Job)->Result<()> {
             let batch=job.db.files(&sql,params![cursor,(job.config.hash_workers*4).max(16) as i64])?;
             if batch.is_empty(){break;}
             cursor=batch.last().unwrap().id;
-            let root=&job.root;let control=&job.context.control;let algorithm=job.config.hash_algorithm;
+            let root=&job.root;let control=&job.context.control;
             let results:Vec<_>=pool.install(||batch.par_iter().map(|file|{
                 let result=(||{let path=fsutil::safe_join(root,&file.rel)?;
-                    if full{hashing::full_hash(&path,&file.snapshot,algorithm,control)}else{hashing::prehash(&path,&file.snapshot,control)}})();
+                    if full{hashing::full_hash(&path,&file.snapshot,control)}else{hashing::prehash(&path,&file.snapshot,control)}})();
                 (file.id,file.rel.clone(),result)
             }).collect());
             job.db.conn.execute_batch("BEGIN IMMEDIATE")?;
@@ -262,7 +265,8 @@ fn execute_action(job:&mut Job,action:&Action)->Result<bool>{
         let path=fsutil::safe_join(&job.root,relative)?;fsutil::unchanged(&path,snapshot)?;Some((path,snapshot))
     }else{None};
     if let(Some((path,snapshot)),Some(expected),Some(_hash))=(&keeper,&action.expected,&action.hash){
-        if job.config.verify_bytes&&!hashing::equal_bytes(&source,expected,path,snapshot,&job.context.control)?{
+        // 删除前的逐字节复核写死为始终开启（原 verify_bytes 设置已移除）。
+        if !hashing::equal_bytes(&source,expected,path,snapshot,&job.context.control)?{
             bail!("逐字节复核不一致，不执行内容去重");
         }
     }
@@ -313,40 +317,4 @@ fn execute_action(job:&mut Job,action:&Action)->Result<bool>{
             Ok(job.delete_path(&source,None,action.mode,&action.reason)?!=DeleteResult::Kept)
         }
     }
-}
-pub fn history(state:&Path)->Result<Vec<(PathBuf,String)>>{
-    let directory=state.join("tasks");if !directory.try_exists()?{return Ok(Vec::new());}
-    let mut paths=fs::read_dir(directory)?.filter_map(|r|r.ok()).filter(|e|e.path().join("task.sqlite3").is_file())
-        .map(|e|e.path()).collect::<Vec<_>>();
-    paths.sort();paths.reverse();paths.truncate(100);
-    let mut result=Vec::new();
-    for path in paths{
-        // 历史列表是只读展示：优先以只读方式打开，避免把旧任务库的 journal 模式改写或留下 -wal 文件；
-        // 只读打开失败（例如崩溃后残留 -wal）时退回常规打开，保证记录仍然可见。
-        let db=match open_readonly(&path){Ok(db)=>db,Err(_)=>{match Database::open(&path){Ok(db)=>db,Err(_)=>continue}}};
-        let root: String=db.get("root").unwrap_or_default();let status:String=db.get("status").unwrap_or_else(|_|"unknown".into());
-        let created:String=db.get("created").unwrap_or_default();
-        let when=chrono::DateTime::parse_from_rfc3339(&created)
-            .map(|time|time.with_timezone(&chrono::Local).format("%Y-%m-%d %H:%M:%S").to_string())
-            .unwrap_or_else(|_|created.clone());
-        let state=match status.as_str(){
-            "ready"=>"待确认","analyzing"=>"分析中","executing"=>"执行中","finished"=>"已完成",
-            "cancelled"=>"已取消","failed"=>"失败",_=>"状态未知"};
-        let counts=match db.summary(){
-            Ok(summary) if status!="ready"&&status!="analyzing" =>
-                format!(" · 已回收 {} 项 · 永久删除 {} 项 · 移动 {} 项 · 跳过 {} 项 · 错误 {} 项",
-                    summary.recycled,summary.deleted,summary.moved,summary.skipped,summary.errors),
-            Ok(summary) => format!(" · 扫描 {} 个文件 · 待处理 {} 项",summary.scanned,
-                summary.planned_delete+summary.planned_move+summary.planned_link+summary.planned_empty),
-            Err(_) => String::new(),
-        };
-        result.push((path,format!("{when} · {state} · {}{counts}",platform::display_path_text(&root))));
-    }
-    Ok(result)
-}
-/// 只读打开任务库：只用于历史列表展示，不会触发 journal 模式改写。
-fn open_readonly(directory:&Path)->Result<Database>{
-    let conn=rusqlite::Connection::open_with_flags(directory.join("task.sqlite3"),
-        rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY)?;
-    Ok(Database{conn,directory:directory.to_path_buf()})
 }
