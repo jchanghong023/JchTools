@@ -30,7 +30,7 @@ Full x64 MSI: https://github.com/ip7z/7zip/releases/download/26.03/7z2603-x64.ms
 
 ## Rust dependencies
 
-`Cargo.toml` declares dependency constraints. A lockfile could not be generated in the offline, compiler-less delivery environment. The Windows build script generates Cargo.lock and then uses `--locked`. It gathers LICENSE/LICENCE/COPYING/NOTICE/COPYRIGHT files from the exact Cargo metadata dependency graph into `third-party-rust`, with an index of package version, declared license and repository. This collection is an aid, not a substitute for reviewing platform-specific and transitive distribution obligations. An entry with zero collected license files requires attention before redistribution.
+`Cargo.toml` declares dependency constraints; the committed `Cargo.lock` pins the exact versions. The packaging script builds with `--locked`. It gathers LICENSE/LICENCE/COPYING/NOTICE/COPYRIGHT files from the exact Cargo metadata dependency graph into `third-party-rust`, with an index of package version, declared license and repository. This collection is an aid, not a substitute for reviewing platform-specific and transitive distribution obligations. An entry with zero collected license files requires attention before redistribution.
 
 ## Microsoft APIs
 

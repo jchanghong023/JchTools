@@ -3,7 +3,9 @@ use anyhow::{bail, Context, Result};
 use std::{fs, path::Path};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum DeleteResult { Kept, Recycled, Permanent }
+pub enum DeleteResult { Kept, Recycled, /// 文件已离开原位置，但无法确认真的进入了回收站（shell 在超容量、
+    /// 无回收站卷等情形下可能直接销毁并报成功）。按永久删除如实记账，不虚报「已回收」。
+    RecycledUnverified, Permanent }
 #[derive(Debug)]
 pub enum RecycleFailure { Cancelled, Failed(String) }
 /// 界面/日志展示用：去掉 Windows 扩展路径前缀，避免用户看到 `\\?\D:\...`。
@@ -22,11 +24,47 @@ pub fn display_time_text(ns: i64) -> String {
 /// Injectable for tests: tests never need to touch the user's real Recycle Bin.
 pub trait Recycler: Send + Sync {
     fn recycle(&self, path: &Path) -> std::result::Result<(), RecycleFailure>;
+    /// 回收站条目计数（按卷）；返回 None 表示该后端/卷无法校验。
+    fn bin_count(&self, volume: &Path) -> Option<i64> { let _ = volume; None }
 }
 pub struct NativeRecycler;
 impl Recycler for NativeRecycler {
     fn recycle(&self, path: &Path) -> std::result::Result<(), RecycleFailure> { native_recycle(path) }
+    fn bin_count(&self, volume: &Path) -> Option<i64> { bin_item_count(volume) }
 }
+/// 取路径所在卷的回收站查询根：本地盘为 `X:\`，UNC 为 `\\server\share\`；无法识别返回 None。
+#[cfg(windows)]
+fn volume_root(path: &Path) -> Option<std::path::PathBuf> {
+    let text = path.to_str()?;
+    let text = if let Some(unc) = text.strip_prefix(r"\\?\UNC\") { format!(r"\\{unc}") }
+        else if let Some(local) = text.strip_prefix(r"\\?\") { local.to_string() }
+        else { text.to_string() };
+    if let Some(rest) = text.strip_prefix(r"\\") {
+        let mut parts = rest.split('\\');
+        let server = parts.next()?; let share = parts.next()?;
+        if server.is_empty() || share.is_empty() { return None; }
+        return Some(std::path::PathBuf::from(format!(r"\\{server}\{share}\")));
+    }
+    let mut chars = text.chars();
+    let letter = chars.next()?;
+    if !letter.is_ascii_alphabetic() || chars.next() != Some(':') { return None; }
+    Some(std::path::PathBuf::from(format!("{letter}:\\")))
+}
+/// 当前回收站内的条目数；查询失败（无回收站的卷等）返回 None。
+#[cfg(windows)]
+fn bin_item_count(volume: &Path) -> Option<i64> {
+    use std::os::windows::ffi::OsStrExt;
+    use windows::Win32::UI::Shell::{SHQueryRecycleBinW, SHQUERYRBINFO};
+    let mut info: SHQUERYRBINFO = unsafe { std::mem::zeroed() };
+    info.cbSize = std::mem::size_of::<SHQUERYRBINFO>() as u32;
+    let wide: Vec<u16> = volume.as_os_str().encode_wide().chain(Some(0)).collect();
+    let hr = unsafe { SHQueryRecycleBinW(windows::core::PCWSTR(wide.as_ptr()), &mut info) };
+    hr.ok().map(|_| info.i64NumItems)
+}
+#[cfg(not(windows))]
+fn bin_item_count(_volume: &Path) -> Option<i64> { None }
+#[cfg(not(windows))]
+fn volume_root(_path: &Path) -> Option<std::path::PathBuf> { None }
 #[cfg(windows)]
 fn native_recycle(path: &Path) -> std::result::Result<(), RecycleFailure> {
     use std::os::windows::ffi::OsStrExt;
@@ -76,16 +114,29 @@ pub fn remove(
     if let Some(expected) = expected { fsutil::unchanged(path, expected)?; }
     if meta.is_dir() && fs::read_dir(path)?.next().is_some() { bail!("目录不是空目录，不会递归删除用户目录"); }
     if mode == DeleteMode::Recycle {
+        let volume = volume_root(path);
+        let before = volume.as_deref().and_then(|v| recycler.bin_count(v));
         match recycler.recycle(path) {
             Ok(()) => {
                 if path.try_exists()? { bail!("回收站接口返回后文件仍存在，未判定删除成功"); }
-                return Ok(DeleteResult::Recycled);
+                // 「文件消失」≠「进了回收站」：shell 在回收站超容量、无回收站卷等情形下
+                // 可能直接销毁并报成功。只有回收站条目数确实增加时才记「已回收」，
+                // 否则如实记为未验证，避免给用户可恢复的错觉。
+                let after = volume.as_deref().and_then(|v| recycler.bin_count(v));
+                let verified = matches!((before, after), (Some(before), Some(after)) if after > before);
+                return Ok(if verified { DeleteResult::Recycled } else { DeleteResult::RecycledUnverified });
             }
             Err(RecycleFailure::Cancelled) => bail!("回收站操作被取消，不会降级为永久删除"),
             Err(RecycleFailure::Failed(reason)) => {
                 control.check_cancelled()?;
                 // A backend can report an error after moving an item. Never delete a new replacement.
-                if !path.try_exists()? { return Ok(DeleteResult::Recycled); }
+                if !path.try_exists()? {
+                    // 「报错但文件已消失」最常见于移动入站成功后才报错：能用计数确认入站的
+                    // 仍记「已回收」，确认不了才按未验证处理，不夸大也不虚报。
+                    let after = volume.as_deref().and_then(|v| recycler.bin_count(v));
+                    let verified = matches!((before, after), (Some(before), Some(after)) if after > before);
+                    return Ok(if verified { DeleteResult::Recycled } else { DeleteResult::RecycledUnverified });
+                }
                 if !fallback { bail!("回收失败，已保留文件：{reason}"); }
                 if let Some(expected) = expected { fsutil::unchanged(path, expected)?; }
             }

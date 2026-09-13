@@ -13,12 +13,13 @@ fn argument(args:&[String],flag:&str)->Result<Option<String>>{
 fn run()->Result<()> {
     let args:Vec<String>=std::env::args().skip(1).collect();
     match args.first().map(String::as_str){
-        Some("defaults")=>{let path=args.get(1).context("用法：jchtools-cli defaults rules.json")?;Config::default().save(Path::new(path))?;},
+        Some("defaults")=>{let path=args.get(1).context("用法：jchtools-cli defaults <配置文件.json>")?;Config::default().save(Path::new(path))?;},
         Some("analyze")=>{
-            let root=args.get(1).context("用法：jchtools-cli analyze <目录> [--config rules.json] [--extract --yes] [--engine /absolute/7zz]")?;
+            let root=args.get(1).context("用法：jchtools-cli analyze <目录> [--config 配置文件.json] [--extract --yes] [--engine /absolute/7zz] [--state 状态目录]")?;
             let mut cfg=if let Some(path)=argument(&args,"--config")?{Config::load(Path::new(&path))?}else{Config::default()};
             cfg.extract=args.iter().any(|v|v=="--extract");
             if cfg.extract&&!args.iter().any(|v|v=="--yes"){bail!("解压会修改目录，需要显式 --extract --yes；不解压时仅生成计划");}
+            if !cfg.extract&&args.iter().any(|v|v=="--yes"){eprintln!("提示：不带 --extract 时不会修改文件，--yes 被忽略；执行计划请使用 apply <任务目录> --yes");}
             if cfg.extract&&cfg.extract_conflict==ConflictPolicy::Ask{cfg.extract_conflict=ConflictPolicy::KeepBoth;}
             let engine_path=argument(&args,"--engine")?.map(PathBuf::from);
             let state=argument(&args,"--state")?.map(PathBuf::from).map(Ok).unwrap_or_else(jchtools::config::state_dir)?;
@@ -33,12 +34,20 @@ fn run()->Result<()> {
             let result=engine::apply(Path::new(task),TaskContext::default())?;println!("{}",result.summary.description());
         }
         Some("inspect")=>{let task=args.get(1).context("需要任务目录")?;let db=Database::open(Path::new(task))?;
-            println!("{}",db.summary()?.description());for action in db.actions_page(0,100)?{
-                let kind=match action.kind{jchtools::model::ActionKind::Delete=>"删除",jchtools::model::ActionKind::Move=>"移动",jchtools::model::ActionKind::Hardlink=>"硬链接",jchtools::model::ActionKind::EmptyDirectory=>"空目录复查"};
-                println!("{} {} {} -> {} | {} [{}]",action.id,kind,action.source,action.target.unwrap_or_else(||"-".into()),action.reason,action.state);
+            println!("{}",db.summary()?.description());
+            // 分页取完所有计划项：只取前 100 条会静默丢掉大计划里的大部分动作。
+            let mut cursor=0i64;
+            loop{
+                let actions=db.actions_page(cursor,256)?;
+                if actions.is_empty(){break;}
+                cursor=actions.last().unwrap().id;
+                for action in &actions{
+                    let kind=match action.kind{jchtools::model::ActionKind::Delete=>"删除",jchtools::model::ActionKind::Move=>"移动",jchtools::model::ActionKind::Hardlink=>"硬链接",jchtools::model::ActionKind::EmptyDirectory=>"空目录复查"};
+                    println!("{} {} {} -> {} | {} [{}]",action.id,kind,action.source,action.target.clone().unwrap_or_else(||"-".into()),action.reason,action.state);
+                }
             }},
         Some("report")=>{let task=args.get(1).context("需要任务目录")?;let output=args.get(2).context("需要新的 CSV 文件名")?;Database::open(Path::new(task))?.export_csv(Path::new(output))?;},
-        _=>{println!("JchTools CLI\n  defaults <rules.json>\n  analyze <目录> [--config rules.json] [--extract --yes] [--engine 完整引擎绝对路径]\n  inspect <任务目录>\n  apply <任务目录> --yes\n  report <任务目录> <新建CSV路径>\n不带 --extract 的 analyze 不修改待整理文件；CLI 不交互询问解压冲突，询问策略改为保留两个。");
+        _=>{println!("JchTools CLI\n  defaults <配置文件.json>\n  analyze <目录> [--config 配置文件.json] [--extract --yes] [--engine 完整引擎绝对路径] [--state 状态目录]\n  inspect <任务目录>\n  apply <任务目录> --yes\n  report <任务目录> <新建CSV路径>\n不带 --extract 的 analyze 不修改待整理文件；CLI 不交互询问解压冲突，询问策略改为保留两个。");
             std::process::exit(1);},
     }Ok(())
 }

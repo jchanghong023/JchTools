@@ -37,7 +37,7 @@ Rust 1.98.0 stable `x86_64-pc-windows-msvc`，VS 2022 BuildTools（MSVC 14.44）
 
 - 随包 7-Zip 引擎：`resources/7zip` 里的引擎文件不入库（`.gitignore`），需要先运行 `scripts/fetch-7zip.ps1`（联网、校验上游 SHA-256）再构建；未获取引擎时构建仍成功但**不内嵌**，此时解压需要 `--engine <完整 7z.exe>`。当前源码树的实测构建内嵌了本机引擎（26.02），正式发布应使用脚本固定的 26.03。
 - 回收站容量不足、网络盘、RAR 多版本与多卷、超大固实包、多 TB 规模、高 DPI/无 GPU 显示、并发外部修改的竞态。
-- `tests/archive.rs` 的 8 个真实引擎用例仍为 `#[ignore]`；本次只用临时目录做了端到端解压验证。
+- `tests/archive.rs` 的 19 个真实引擎用例仍为 `#[ignore]`；本次只用临时目录做了端到端解压验证。
 - 性能数字来自本机 NVMe 与刚写入（大概率仍在系统缓存）的文件，不等于多 TB 冷启动基准。
 
 ## 3. 交付物最初在 Linux 上执行的静态检查
@@ -51,7 +51,7 @@ Rust 1.98.0 stable `x86_64-pc-windows-msvc`，VS 2022 BuildTools（MSVC 14.44）
 |---|---|
 | Cargo 清单 / Windows manifest | TOML 与 XML 解析通过，声明的二进制源码路径存在 |
 | 配置与 GUI 规则 | 49 个配置字段与 49 个 UI 设置一致，类型和枚举选项检查通过 |
-| GUI 回调 | 导出窗口上声明的回调均有对应 Rust 处理函数（当前 23 个） |
+| GUI 回调 | 导出窗口上声明的回调均有对应 Rust 处理函数（当时 23 个） |
 | Rust 词法结构 | 19 个 Rust 文件括号结构检查通过；不是 Rust 语法、类型、借用或宏编译检查 |
 | SQLite | schema 可解析，46 个可具体化 DML 语句在空 schema 上 EXPLAIN 预编译通过 |
 | Bash | 有 bash 时执行 `bash -n scripts/check-linux.sh`；本机无可用 bash 时记为 SKIP |
@@ -67,7 +67,7 @@ Rust 1.98.0 stable `x86_64-pc-windows-msvc`，VS 2022 BuildTools（MSVC 14.44）
 
 | 步骤 | 结果 |
 |---|---|
-| `python scripts/static_check.py` | 7 项 PASS（1 项 bash 语法检查在 Windows 上 SKIP） |
+| `python scripts/static_check.py` | 7 项 PASS（按当时脚本口径；其中 bash 语法检查实为 SKIP，并非通过） |
 | `cargo test` | 55 通过 / 0 失败 / 14 忽略 |
 | `JCHTOOLS_TEST_7ZIP=<repo>/resources/7zip/7z.exe cargo test --test archive -- --ignored` | 14 通过 / 0 失败（真实引擎用例） |
 | `cargo build --release` + 启动 | 通过；自绘标题栏、最小化/最大化/还原、侧栏导航、四页界面均可操作 |
@@ -121,4 +121,6 @@ Rust 1.98.0 stable `x86_64-pc-windows-msvc`，VS 2022 BuildTools（MSVC 14.44）
 
 ## 5. 校验清单
 
-`SHA256SUMS.txt` 覆盖 48 个交付文件（含 `resources/app.ico`、`resources/app-icon.png`、`scripts/make-icon.py`），按二进制逐字节校验 48/48 一致。注意：Git-for-Windows 自带的 `sha256sum -c` 会以文本模式读文件，对二进制资产误报 FAILED；请用 Linux/macOS 的 `sha256sum -c`，或按二进制读取自行复核。
+当前基线（2026-09-13 多轮评审后）：`cargo test` 73 通过 / 0 失败 / 19 忽略；真实引擎用例 19/19 通过（JCHTOOLS_TEST_7ZIP 实测）；`static_check.py` 7 项 PASS（24 回调、54 DML、83 测试函数）；新增覆盖：同名重复条目 zip（-aou 自动改名两份保留）、GBK 文件名 zip（内容完整落盘）、空 zip / 仅目录条目 7z（合法空包处理）、手工构造合法 zstd 帧解压；历史列表排序与状态标签、config.json 覆盖写、CSV 公式注入转义、分卷识别谓词；GUI 层新增 8 个无头状态测试（Slint 测试后端：初始规则面、分区切换、非法输入回退、主题不失效计划、目录校验、工具搜索、导航、恢复默认确认）。以上各节为历次验证记录，其中数字为当次快照，可能低于当前基线。
+
+`SHA256SUMS.txt` 覆盖除自身外的全部 git 跟踪交付文件（含 `resources/app.ico`、`resources/app-icon.png`、`scripts/make-icon.py` 与 CI workflow），以 `sha256sum -b` 二进制模式生成；改动任何被覆盖文件后必须重新生成并整单复核（`sha256sum -c SHA256SUMS.txt` 应全部 OK）。

@@ -10,9 +10,13 @@ ROOT = Path(__file__).resolve().parent.parent
 def read_text(path: Path) -> str:
     return path.read_text(encoding='utf-8')
 checks: list[dict[str, object]] = []
+class Skipped(Exception):
+    """检查在本机不可执行（依赖缺失等）；与 PASS/FAIL 区分，避免“没跑”被记成“通过”。"""
 def check(name, fn):
     try:
         details=fn(); checks.append({'name':name,'status':'PASS','details':details})
+    except Skipped as exc:
+        checks.append({'name':name,'status':'SKIP','details':str(exc)})
     except Exception as exc:
         checks.append({'name':name,'status':'FAIL','details':str(exc)})
 def manifests():
@@ -42,7 +46,9 @@ def config_schema():
                 assert set(vals)==expected,(row['key'],vals,expected)
     return f'{len(rows)} UI settings exactly match serialized Config fields and enum values.'
 def ui_callbacks():
-    ui=read_text(ROOT/'ui/app.slint');rs=read_text(ROOT/'src/main.rs')
+    ui=read_text(ROOT/'ui/app.slint')
+    # GUI 组装层在 src/gui.rs（bin main.rs 只是薄壳入口），两者都可能有 ui.on_* 接线。
+    rs=chr(10).join(read_text(ROOT/p) for p in sorted(ROOT.glob('src/*.rs')))
     # 只有导出组件（窗口）上的回调是应用级 API；组件内部的回调在 .slint 内部接线。
     text=ui[ui.index('export component AppWindow inherits Window'):]
     depth=0;end=len(text)
@@ -81,6 +87,8 @@ def sql_syntax():
         CREATE TEMP TABLE conflict_groups(seq INTEGER PRIMARY KEY,key TEXT,size INTEGER);
         CREATE TEMP TABLE empty_order(seq INTEGER,rel TEXT);
         CREATE TEMP TABLE empty_will(rel TEXT PRIMARY KEY);
+        CREATE TEMP TABLE stay_parents(parent TEXT);
+        CREATE TEMP TABLE dir_children(parent TEXT,rel TEXT);
         CREATE TEMP TABLE hash_candidates(id INTEGER PRIMARY KEY);''')
     file_columns='id,rel,name,normal,size,mtime,identity,links,hash,cleanable'
     statements=set()
@@ -99,10 +107,10 @@ def shell_syntax():
     script=str(ROOT/'scripts/check-linux.sh')
     bash=shutil.which('bash')
     if not bash:
-        return 'SKIPPED: bash not found; bash -n and PowerShell syntax checks run in the Windows/Linux CI jobs.'
+        raise Skipped('bash not found; bash -n and PowerShell syntax checks run in the Windows/Linux CI jobs.')
     done=subprocess.run([bash,'-n',script],capture_output=True,text=True)
     if done.returncode!=0 and ('not found' in (done.stderr or '').lower() or done.returncode==127):
-        return 'SKIPPED: bash launcher is unavailable on this host; bash -n runs in the Linux CI job.'
+        raise Skipped('bash launcher is unavailable on this host; bash -n runs in the Linux CI job.')
     assert done.returncode==0,done.stderr
     return 'bash -n passed; PowerShell syntax check is defined in Windows CI.'
 def scope_and_delivery():

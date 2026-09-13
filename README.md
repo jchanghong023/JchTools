@@ -2,7 +2,7 @@
 
 Windows 优先的 Rust + Slint 本地工具箱。当前提供第一个工具“目录整理”，后续工具通过工具注册表接入，界面导航不写死。
 
-> **当前源码树已在 Windows 11 上编译、运行并做过功能验收**（详见 [验证记录](docs/VALIDATION.md)）：`cargo build` / `cargo build --release` 通过，`cargo test` 55 通过 0 失败（14 个真实引擎用例默认 ignore），界面、临时目录端到端整理与 5004 文件性能都实测过。仍未内嵌 7-Zip 引擎，因此本仓库直接运行时解压需要 `--engine <完整 7z.exe>`；发布包由 `scripts/package-windows.ps1` 生成并附带引擎与许可证。
+> **当前源码树已在 Windows 11 上编译、运行并做过功能验收**（详见 [验证记录](docs/VALIDATION.md)）：`cargo build` / `cargo build --release` 通过，`cargo test` 73 通过 0 失败（含 8 个无头 GUI 状态测试；另有 19 个真实引擎用例默认 ignore，已实测通过），界面、临时目录端到端整理与 5004 文件性能都实测过。没有引擎时构建不内嵌，解压需要 `--engine <完整 7z.exe>`；运行 `scripts/fetch-7zip.ps1` 获取官方引擎后，构建会自动把它压缩内嵌进 EXE。发布包由 `scripts/package-windows.ps1` 生成，只附带许可证与上游源码，不含引擎可执行文件。
 
 ## 7-Zip 引擎（内置）
 
@@ -55,9 +55,9 @@ powershell -NoProfile -File .\scripts\package-windows.ps1
 - 计划行显示中文状态（待执行 / 已执行 / 已跳过 / 已取消勾选 / 执行失败）；任务记录显示本地时间与中文状态，并带该次的回收、删除、移动、跳过、错误计数；用户主动取消记录为「已取消」，不写成失败。
 - 计划翻页按钮只在确实还有上/下一页时可用；切换类型筛选会回到第一页并同步复位。
 - 「设置与规则预设」页一次列出全部 49 条规则（布尔用复选框、枚举用下拉、数字用输入框），不受左侧分区筛选影响，便于导出前核对；「应用主题」排在最前。
-- 文件对话框有明确默认位置：选择目录时从已输入的目录开始；规则文件与导出报告默认落在桌面（没有桌面目录时退到主目录），不会默认写进正在整理的目录。
+- 文件对话框有明确默认位置：选择目录时从已输入的目录开始；规则文件与导出报告默认落在桌面（没有桌面目录时退到主目录），不会默认写进正在整理的目录；导出的规则文件与 config.json 仅同一程序版本保证兼容，跨大版本导入前请先核对。
 - 任务运行中点击关闭窗口会先弹出「停止任务并关闭」确认（不需要勾选"永久删除"确认项），且该确认框始终盖在解压冲突对话框之上；取消任务用蓝色提示条反馈，不当作错误。
-- 应用图标：`resources/app-icon.png`（256px，运行时窗口与任务栏图标）与 `resources/app.ico`（16/24/32/48/64/128/256 多尺寸，由 build.rs 用 Windows SDK 的 rc.exe 嵌入 EXE，资源管理器与图钉快捷键都能显示）。图案与侧栏徽标一致：靛蓝→青色渐变圆角方块 + 白色 M；重新生成用 `python scripts/make-icon.py`。
+- 应用图标：`resources/app-icon.png`（256px，运行时窗口与任务栏图标）与 `resources/app.ico`（16/24/32/48/64/128/256 多尺寸，由 build.rs 用 Windows SDK 的 rc.exe 嵌入 EXE，资源管理器与图钉快捷键都能显示）。图案与侧栏徽标一致：靛蓝→青色渐变圆角方块 + 白色 J；重新生成用 `python scripts/make-icon.py`。
 - 自定义控件（侧栏导航、分区标签、窗口按钮）都带 `accessible-role/label`，读屏与自动化可识别；它们同时都在 Tab 顺序里，聚焦时有可见焦点框，空格或回车等同于点击（键盘也能切换页面、分区和窗口按钮）。
 
 ## 已实现的功能代码
@@ -78,7 +78,7 @@ powershell -NoProfile -File .\scripts\package-windows.ps1
 | 高级去重 | 可用硬链接替代副本，保持别名；不支持的卷安全失败，不跨卷复制 |
 | 操作 | 暂停、取消；真实进度与有限 GUI 日志；计划分页、单项取消、任务记录、CSV 导出；规则保存、导入、导出 |
 
-“最新”明确指文件修改时间，不表示内容语义上的最新版本；时间相同用路径长度、路径字典序稳定决胜。不同内容的版本取舍不是 Hash 去重。同名规则默认跨所选树，处理代码/项目目录时应关闭或限定父目录，避免把不同项目配置当成版本。
+“最新”明确指文件修改时间，不表示内容语义上的最新版本；时间相同用路径长度、路径字典序稳定决胜。不同内容的版本取舍不是 Hash 去重。版本取舍默认已限定在同一父目录内比较（Windows 同目录不会出现同名文件，默认范围实际不会触发）；需要跨目录的同名版本取舍时才关闭 conflict_scope_directory，项目目录慎用。
 
 ## 多 TB 目录的处理方式与边界
 
@@ -98,7 +98,7 @@ powershell -NoProfile -File .\scripts\package-windows.ps1
 
 密码包目前**跳过并记录**，没有密码输入/密码存储；分卷包支持从识别到的首卷调用引擎，但不自动删除整组源卷；原包保留优先于后续清理规则。文件格式检测只能识别 infer 支持的签名；无法识别的不改名，ZIP 容器的 DOCX/EPUB 等不误改成 ZIP。路径里有 Windows 不支持的名称、非 UTF-8 名称或危险条目会拒绝/跳过，而不是自动猜测改写。
 
-已在 Windows 11 实测通过：Rust/Slint 全量编译（dev 与 release）、`cargo test`（55 通过、14 个真实引擎用例默认 ignore）、界面渲染与自绘标题栏交互、临时目录上的解压/去重/归类/清理/报告端到端流程、`D:\testzip` 手工测试数据集上的 GUI 全流程（见 `docs/VALIDATION.md` §4）、5004 文件 521 MiB 的扫描与去重性能。尚未验证的关键项：Windows Shell 回收站容量不足和网络盘行为、高 DPI（非 150%）与无 GPU 的实际显示、RAR 多版本与多卷、大固实包、多个 TB 的真实性能、并发外部进程修改的全部竞态。当前路径检查不等于对恶意并发文件系统攻击的形式化安全保证。首次运行必须使用副本或测试目录；通过 `docs/ACCEPTANCE.md` 后再决定生产使用。
+已在 Windows 11 实测通过：Rust/Slint 全量编译（dev 与 release）、`cargo test`（65 通过、19 个真实引擎用例 ignore，已实测通过；另含 8 个无头 GUI 状态测试）、界面渲染与自绘标题栏交互、临时目录上的解压/去重/归类/清理/报告端到端流程、`D:\testzip` 手工测试数据集上的 GUI 全流程（见 `docs/VALIDATION.md` §4）、5004 文件 521 MiB 的扫描与去重性能。尚未验证的关键项：Windows Shell 回收站容量不足和网络盘行为、高 DPI（非 150%）与无 GPU 的实际显示、RAR 多版本与多卷、大固实包、多个 TB 的真实性能、并发外部进程修改的全部竞态。当前路径检查不等于对恶意并发文件系统攻击的形式化安全保证。首次运行必须使用副本或测试目录；通过 `docs/ACCEPTANCE.md` 后再决定生产使用。
 
 ## 手工测试数据集
 
@@ -125,8 +125,8 @@ JCHTOOLS_TEST_7ZIP=/absolute/path/7zz bash scripts/check-linux.sh
 代码中的回收站测试全部使用模拟实现，不会删除测试机的个人文件。真实引擎测试有 ignore 标记，只有显式运行时启用。GUI 仍需 Windows 手工验收。
 
 ```powershell
-.\jchtools-cli.exe defaults .\rules.json
-.\jchtools-cli.exe analyze D:\TestData --config .\rules.json
+.\jchtools-cli.exe defaults .\jchtools-config.json
+.\jchtools-cli.exe analyze D:\TestData --config .\jchtools-config.json
 .\jchtools-cli.exe analyze D:\TestData --extract --yes
 .\jchtools-cli.exe inspect "<上一步输出的任务目录>"
 .\jchtools-cli.exe apply "<任务目录>" --yes

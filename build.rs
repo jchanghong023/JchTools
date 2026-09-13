@@ -46,32 +46,47 @@ fn embed_engine(manifest_dir: &std::path::Path) {
     let mut manifest_text = String::new();
     let mut id = String::new();
 
-    let exe_name = if cfg!(windows) { "7z.exe" } else { "7zz" };
+    // 按“目标平台”而不是构建宿主选择引擎文件名，交叉编译时才不会内嵌错误引擎。
+    let target_windows = std::env::var("CARGO_CFG_TARGET_OS").as_deref() == Ok("windows");
+    let exe_name = if target_windows { "7z.exe" } else { "7zz" };
     let manifest_path = source.join("manifest.json");
-    let names: Vec<String> = if cfg!(windows) { vec![exe_name.into(), "7z.dll".into()] } else { vec![exe_name.into()] };
+    let names: Vec<String> = if target_windows { vec![exe_name.into(), "7z.dll".into()] } else { vec![exe_name.into()] };
     let ready = manifest_path.is_file() && names.iter().all(|name| source.join(name).is_file());
     if ready {
-        if let Ok(text) = std::fs::read_to_string(&manifest_path) {
-            manifest_text = text;
-            let version = serde_json::from_str::<serde_json::Value>(&manifest_text).ok()
-                .and_then(|value| value["version"].as_str().map(str::to_owned))
-                .unwrap_or_else(|| "unknown".into());
-            let tag = serde_json::from_str::<serde_json::Value>(&manifest_text).ok()
-                .and_then(|value| value["files"].as_array().and_then(|list| list.first().and_then(|first| first["sha256"].as_str().map(|s| s[..8.min(s.len())].to_owned()))))
-                .unwrap_or_default();
-            id = if tag.is_empty() { version } else { format!("{version}-{tag}") };
-            for name in &names {
-                match std::fs::read(source.join(name)).map(|bytes| compress(&bytes)) {
-                    Ok(compressed) => {
-                        let path = out_dir.join(format!("{name}.zlib"));
-                        let length = compressed.len() as i64;
-                        if std::fs::write(&path, compressed).is_ok() {
-                            files.push((name.clone(), length));
+        match std::fs::read_to_string(&manifest_path) {
+            Ok(text) => {
+                manifest_text = text;
+                let version = serde_json::from_str::<serde_json::Value>(&manifest_text).ok()
+                    .and_then(|value| value["version"].as_str().map(str::to_owned))
+                    .unwrap_or_else(|| "unknown".into());
+                let tag = serde_json::from_str::<serde_json::Value>(&manifest_text).ok()
+                    .and_then(|value| value["files"].as_array().and_then(|list| list.first().and_then(|first| first["sha256"].as_str().map(|s| s[..8.min(s.len())].to_owned()))))
+                    .unwrap_or_default();
+                id = if tag.is_empty() { version } else { format!("{version}-{tag}") };
+                for name in &names {
+                    match std::fs::read(source.join(name)).map(|bytes| compress(&bytes)) {
+                        Ok(compressed) => {
+                            let path = out_dir.join(format!("{name}.zlib"));
+                            let length = compressed.len() as i64;
+                            if std::fs::write(&path, compressed).is_ok() {
+                                files.push((name.clone(), length));
+                            } else {
+                                println!("cargo:warning=写入 {} 的压缩副本失败，本次构建不内嵌该文件", name);
+                            }
                         }
+                        Err(error) => println!("cargo:warning=读取引擎文件 {name} 失败：{error}"),
                     }
-                    Err(error) => println!("cargo:warning=读取引擎文件 {name} 失败：{error}"),
+                }
+                if files.len() < names.len() {
+                    // 部分内嵌会让运行期 embedded_available()=false，必须让构建日志能看出原因
+                    //（常见于杀毒软件短暂占用引擎文件），否则会被误判成“没有运行 fetch-7zip.ps1”。
+                    // 同时清空 MANIFEST，让运行期 embedded_available() 确实返回 false，
+                    // 与“本次构建按无内嵌引擎处理”的口径一致，而不是运行到一半报“缺少清单文件”。
+                    println!("cargo:warning=引擎文件不完整：期望 {} 个，实际内嵌 {} 个；本次构建按无内嵌引擎处理", names.len(), files.len());
+                    manifest_text = String::new();
                 }
             }
+            Err(error) => println!("cargo:warning=读取 manifest.json 失败（{error}），本次构建不内嵌 7-Zip"),
         }
     } else {
         println!("cargo:warning=resources/7zip 里没有完整引擎，本次构建不内嵌 7-Zip（运行期只查找随包目录；需要内嵌请先运行 scripts/fetch-7zip.ps1）");
@@ -115,6 +130,7 @@ fn main() {
     embed_engine(&manifest_dir);
     if std::env::var("CARGO_CFG_TARGET_OS").as_deref() == Ok("windows") {
         let manifest = manifest_dir.join("resources/windows.manifest");
+        println!("cargo:rerun-if-changed=resources/windows.manifest");
         if std::env::var("CARGO_CFG_TARGET_ENV").as_deref() == Ok("msvc") {
             #[cfg(feature = "gui")] {
                 println!("cargo:rustc-link-arg-bin=JchTools=/MANIFEST:EMBED");

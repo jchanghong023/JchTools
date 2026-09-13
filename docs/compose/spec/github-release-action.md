@@ -39,7 +39,7 @@ commits: 20af006..6027801
 - **打包**：复用 `scripts/package-windows.ps1`（含官方 7-Zip 引擎获取、测试、release 构建、许可材料与防泄漏检查）。设置 `GITHUB_TOKEN` 以降低 GitHub API 限流风险。
 - **版本/tag**：执行 job 时取当前 UTC 时间到分钟，格式 `yyyyMMdd-HHmm`（例：`20260912-0644`）。不使用 Cargo.toml 版本，不接受输入框。
 - **Release**：用 runner 自带 `gh release create` 创建 tag + Release，标题 `JchTools <tag>`，`--generate-notes`，`target` 为触发该次 workflow 的 commit SHA。
-- **资产**：仅上传 `dist/JchTools-Windows-x64-*.zip`（完整便携包）。不附带单独 EXE、不附带 SHA256SUMS。
+- **资产**：上传 `dist/JchTools-Windows-x64-*.zip`（完整便携包）及随附的 `SHA256SUMS.txt`（运行时生成，`hash *文件名` 二进制模式，供下载后校验）。不附带单独 EXE。（2026-09-13 修订：原规格“不附带 SHA256SUMS”已按评审意见改为随附校验文件。）
 - **失败语义**：打包失败则不创建 Release；若同分钟 tag/Release 已存在则创建失败并让 job 失败（不静默覆盖）。
 - **不改动** `check.yml` 的 push/PR 检查行为。
 
@@ -47,7 +47,7 @@ commits: 20af006..6027801
 - 自动在 tag push 时发布、定时发布、多平台构建（Linux/macOS）。
 - 代码签名、安装器（MSI/NSIS）、自动更新通道。
 - 修改 `package-windows.ps1` 的打包内容或产物命名。
-- Release 资产的二次校验文件（SHA256SUMS）上传。
+- ~~Release 资产的二次校验文件（SHA256SUMS）上传~~（2026-09-13 修订：已纳入 S2 资产。）
 
 ## Tasks
 - [x] T1: 新增 `.github/workflows/release.yml` — acceptance: YAML 合法；`on` 仅 `workflow_dispatch`；调用 `package-windows.ps1`；用 `yyyyMMdd-HHmm` 创建 Release 并上传 `dist/*.zip` (covers: S2)

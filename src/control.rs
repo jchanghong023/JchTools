@@ -54,7 +54,8 @@ pub enum Event {
     Done(std::path::PathBuf, crate::model::Summary),
     Failed(String),
     PlanPage(std::path::PathBuf, Vec<crate::model::Action>, usize),
-    SelectionSaved(std::path::PathBuf, Option<String>),
+    /// 第二项携带 (动作 id, 保存后的勾选值)，界面用它就地修正计划行，避免复选框与数据库不一致。
+    SelectionSaved(std::path::PathBuf, Option<(i64, bool)>, Option<String>),
     History(Vec<(std::path::PathBuf, String)>),
     LoadedTask(std::path::PathBuf, String, crate::config::Config, crate::model::Summary, bool),
     /// 载入配置；带上来源路径表示是用户导入的（界面会给出提示），`None` 表示启动时读取本机配置。

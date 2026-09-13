@@ -4,17 +4,6 @@ use anyhow::{Context,Result};
 use rusqlite::{params, OptionalExtension};
 use std::path::{Path,PathBuf};
 
-/// 把相对路径转成 LIKE 前缀（匹配该目录的直接/间接子项），并转义 `%` `_` `\`。
-/// 目录名里常见下划线；不转义会把 `my_dir` 误匹配到 `myXdir`。
-fn like_children(rel: &str) -> String {
-    let mut escaped = String::with_capacity(rel.len() + 2);
-    for ch in rel.chars() {
-        if matches!(ch, '%' | '_' | '\\') { escaped.push('\\'); }
-        escaped.push(ch);
-    }
-    escaped.push_str("/%");
-    escaped
-}
 fn action(file: &FileRecord, kind: ActionKind, reason: &str, mode: DeleteMode) -> Action {
     Action { id: 0,kind,source:file.rel.clone(),target:None,reason:reason.into(),expected:Some(file.snapshot.clone()),
         keeper:None,hash:file.hash.clone(),mode,selected:true,state:"pending".into() }
@@ -101,7 +90,13 @@ fn conflict_groups(job: &mut Job, same_size: bool) -> Result<()> {
     if mode == DeleteMode::Keep { return Ok(()); }
     // A grouping table avoids keeping millions of names/paths in RAM.
     job.db.conn.execute_batch("DROP TABLE IF EXISTS conflict_groups; CREATE TEMP TABLE conflict_groups(seq INTEGER PRIMARY KEY,key TEXT,size INTEGER);")?;
-    let key_expr = if job.config.conflict_scope_directory { "lower(rel)" } else { "name" };
+    // 分组键语义（与 rules.json 的开关描述一致）：
+    // - 目录范围（默认）→ 只比较「同一父目录内的同名文件」。rel 是含父目录的全路径且唯一，
+    //   lower(rel) 即等价于「父目录+小写名」；Windows 文件系统不允许同目录存在同名（含大小写
+    //   变体）文件，因此该范围在 Windows 上永不触发，作用是防止跨目录同名被误判为版本冲突。
+    // - 全局范围 → 只比较小写文件名，跨目录的同名版本取舍由它承担。
+    // 注意：任何「父目录+文件名」形式的键都与 lower(rel) 数学等价，无法让本范围更积极。
+    let key_expr = if job.config.conflict_scope_directory { "lower(rel)" } else { "lower(name)" };
     let grouping = if same_size {
         format!("INSERT INTO conflict_groups(key,size) SELECT {key_expr},size FROM files WHERE active=1 AND hash IS NOT NULL GROUP BY {key_expr},size HAVING COUNT(DISTINCT hash)>1")
     } else {
@@ -315,13 +310,28 @@ fn empty_directories(job: &mut Job) -> Result<()> {
     // 目录为空 = 其下没有会留在原地的文件，且其子目录也都为空。
     // 「会留在原地」= 磁盘上仍会存在：没有选中的删除/移动。分卷源、失败包等 protected 文件
     // 虽 active=0，但仍占目录，不能被算成空目录。
+    //
+    // 性能：旧实现对每个目录跑三次 `rel LIKE '前缀%'` 全表扫描，目录多的树上会到
+    // O(目录数×文件数)。这里预先把文件/目录按“父目录”物化成带索引的临时表，全部
+    // 查询退化为等值查找；配合自底向上的处理顺序，深层留驻文件会通过“子目录不在
+    // empty_will”逐层向上传播，结果与按全部后代判断完全一致。
     let mut cursor = 0i64;
+    // kind 在库里是 serde_json 序列化的枚举字符串，只可能是这四个值之一，直接内联安全。
     let move_kind = serde_json::to_string(&ActionKind::Move)?;
     let delete_kind = serde_json::to_string(&ActionKind::Delete)?;
-    job.db.conn.execute_batch(
+    job.db.conn.execute_batch(&format!(
         "DROP TABLE IF EXISTS empty_order; DROP TABLE IF EXISTS empty_will;
-         CREATE TEMP TABLE empty_order AS SELECT ROW_NUMBER() OVER(ORDER BY depth DESC,rel) seq,rel,depth FROM directories;
-         CREATE TEMP TABLE empty_will (rel TEXT PRIMARY KEY);")?;
+         DROP TABLE IF EXISTS stay_parents; DROP TABLE IF EXISTS dir_children;
+         CREATE TEMP TABLE stay_parents (parent TEXT);
+         INSERT INTO stay_parents SELECT rtrim(rtrim(rel,replace(rel,'/','')),'/') FROM files
+          WHERE NOT EXISTS (SELECT 1 FROM actions WHERE kind IN ('{move_kind}','{delete_kind}') AND selected=1 AND state='pending' AND source=files.rel);
+         CREATE INDEX stay_parents_parent ON stay_parents(parent);
+         CREATE TEMP TABLE dir_children (parent TEXT, rel TEXT PRIMARY KEY);
+         INSERT INTO dir_children SELECT rtrim(rtrim(rel,replace(rel,'/','')),'/'),rel FROM directories;
+         CREATE INDEX dir_children_parent ON dir_children(parent);
+         CREATE TEMP TABLE empty_will (rel TEXT PRIMARY KEY);"))?;
+    job.db.conn.execute_batch(
+        "CREATE TEMP TABLE empty_order AS SELECT ROW_NUMBER() OVER(ORDER BY depth DESC,rel) seq,rel FROM directories;")?;
     loop {
         let batch = {
             let mut statement = job.db.conn.prepare("SELECT seq,rel FROM empty_order WHERE seq>?1 ORDER BY seq LIMIT 256")?;
@@ -331,21 +341,18 @@ fn empty_directories(job: &mut Job) -> Result<()> {
         if batch.is_empty() { break; }
         for (seq,rel) in batch {
             cursor = seq; job.context.control.checkpoint()?;
-            // 执行后仍会留在该目录下的文件：没有选中的删除（会消失）或移动（会离开）
+            // 执行后会留在该目录（含其子树）里的文件：深层留驻文件会让对应子目录进不了
+            // empty_will，在这里只需检查直接子文件即可得到相同结论。
             let has_file: i64 = job.db.conn.query_row(
-                "SELECT COUNT(1) FROM files WHERE rel LIKE ?1 ESCAPE '\\' AND NOT EXISTS (\
-                 SELECT 1 FROM actions WHERE kind IN (?2,?3) AND selected=1 AND state='pending' AND source=files.rel)",
-                params![like_children(&rel), move_kind, delete_kind],|r|r.get(0))?;
+                "SELECT COUNT(1) FROM stay_parents WHERE parent=?1",[&rel],|r|r.get(0))?;
             if has_file>0 { continue; }
             // 隐藏/系统/排除文件不会入库，但仍占目录；有这类内容就不能当作空目录。
             if has_unscanned_content(job,&rel)? { continue; }
             // 子目录是否都已判定会为空
             let child_total: i64 = job.db.conn.query_row(
-                "SELECT COUNT(1) FROM directories WHERE rel LIKE ?1 ESCAPE '\\'",
-                params![like_children(&rel)],|r|r.get(0))?;
+                "SELECT COUNT(1) FROM dir_children WHERE parent=?1",[&rel],|r|r.get(0))?;
             let child_empty: i64 = job.db.conn.query_row(
-                "SELECT COUNT(1) FROM empty_will WHERE rel LIKE ?1 ESCAPE '\\'",
-                params![like_children(&rel)],|r|r.get(0))?;
+                "SELECT COUNT(1) FROM dir_children WHERE parent=?1 AND rel IN (SELECT rel FROM empty_will)",[&rel],|r|r.get(0))?;
             if child_total>child_empty { continue; }
             job.db.conn.execute("INSERT OR IGNORE INTO empty_will(rel) VALUES(?1)",[&rel])?;
             job.db.add_action(&Action { id:0,kind:ActionKind::EmptyDirectory,source:rel,target:None,

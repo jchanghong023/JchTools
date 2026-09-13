@@ -42,9 +42,28 @@ pub fn resolve_executable() -> Result<PathBuf> {
     }
     let directory = embedded_dir().context("无法确定用户数据目录，不能释放内嵌的 7-Zip 引擎")?;
     release(&directory)?;
+    cleanup_part_residue(&directory);
     let executable = directory.join(engine_name());
     if !executable.is_file() { bail!("内嵌引擎释放后仍缺少 {}", engine_name()); }
     Ok(executable)
+}
+
+/// 清理本应用引擎目录里崩溃残留的 `.part-*` 临时文件（write_atomic 的中间产物）。
+/// 只匹配本应用命名模式（引擎文件名 + `.part-` + 进程号）且仅为文件时删除；
+/// 用户自备文件与旧版本目录一律不动，避免误删。
+fn cleanup_part_residue(directory: &Path) {
+    let Ok(entries) = std::fs::read_dir(directory) else { return };
+    for entry in entries.filter_map(|e| e.ok()) {
+        let path = entry.path();
+        let name = path.file_name().and_then(|n| n.to_str()).unwrap_or_default();
+        let is_residue = path.is_file()
+            && ["7z.exe", "7z.dll", "7zz"].iter().any(|engine| {
+                name.strip_prefix(engine)
+                    .and_then(|rest| rest.strip_prefix(".part-"))
+                    .is_some_and(|pid| !pid.is_empty() && pid.chars().all(|c| c.is_ascii_digit()))
+            });
+        if is_residue { let _ = std::fs::remove_file(&path); }
+    }
 }
 
 /// 把内嵌引擎释放到 `directory`，并在写入后校验每个文件的 sha256。
@@ -66,7 +85,13 @@ pub fn release(directory: &Path) -> Result<()> {
         let actual = hex::encode(Sha256::digest(&bytes));
         if actual != expected { bail!("内嵌引擎 {name} 的 sha256 与清单不一致，已拒绝写入"); }
         write_atomic(&target, &bytes).with_context(|| format!("写入引擎文件失败：{}", target.display()))?;
-        if !hash_matches(&target, &expected)? { bail!("引擎文件写入后校验失败：{}", target.display()); }
+        if !hash_matches(&target, &expected)? {
+            // 写入后校验失败（坏道、位翻转、杀软篡改等）：删掉刚写入的坏文件再报错。
+            // 否则坏文件会在下次运行时因"已存在"被跳过，永久占据释放目录，
+            // 使 sha256 校验机制对它彻底失效，用户只会看到晦涩的 7z 启动错误。
+            let _ = std::fs::remove_file(&target);
+            bail!("引擎文件写入后校验失败：{}", target.display());
+        }
     }
     Ok(())
 }

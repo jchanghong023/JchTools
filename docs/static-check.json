@@ -29,22 +29,22 @@
     {
       "name": "rust_lexical",
       "status": "PASS",
-      "details": "20 Rust files have balanced lexical delimiters; this does NOT validate Rust types, APIs, macros or borrow checking."
+      "details": "21 Rust files have balanced lexical delimiters; this does NOT validate Rust types, APIs, macros or borrow checking."
     },
     {
       "name": "sql_syntax",
       "status": "PASS",
-      "details": "SQLite schema and 50 concrete DML statements prepare successfully against empty schema; no organizer application executed."
+      "details": "SQLite schema and 54 concrete DML statements prepare successfully against empty schema; no organizer application executed."
     },
     {
       "name": "shell_syntax",
       "status": "PASS",
-      "details": "SKIPPED: bash launcher is unavailable on this host; bash -n runs in the Linux CI job."
+      "details": "bash -n passed; PowerShell syntax check is defined in Windows CI."
     },
     {
       "name": "scope_and_delivery",
       "status": "PASS",
-      "details": "70 Rust test functions supplied, NOT executed; no todo!/unimplemented! in Rust implementation; no prebuilt executable asserted."
+      "details": "83 Rust test functions supplied, NOT executed; no todo!/unimplemented! in Rust implementation; no prebuilt executable asserted."
     }
   ]
 }

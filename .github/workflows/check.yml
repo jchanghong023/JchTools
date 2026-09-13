@@ -1,6 +1,7 @@
 name: Build and test
 on:
   push:
+    branches: [master]
   pull_request:
   workflow_dispatch:
 permissions:
@@ -13,6 +14,8 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
       - name: Core compile and tests
         run: bash scripts/check-linux.sh
+      - name: Static checks
+        run: python3 scripts/static_check.py
   windows:
     runs-on: windows-2022
     steps:

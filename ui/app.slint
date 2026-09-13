@@ -53,7 +53,7 @@ component LogoBadge inherits Rectangle {
     drop-shadow-color: Design.accent.transparentize(0.55);
     drop-shadow-blur: 12px; drop-shadow-offset-y: 3px;
     Text { text: "J"; color: Design.on-accent; font-size: 19px; font-weight: 700;
-        width: parent.width; height: parent.height; horizontal-alignment: center; vertical-alignment: center; }
+        width: 100%; height: 100%; horizontal-alignment: center; vertical-alignment: center; }
 }
 
 // 侧栏导航的小图标：几何图形绘制，不依赖字体或图片资源
@@ -119,6 +119,7 @@ component NavItem inherits Rectangle {
         tint: !root.enabled ? Design.text-muted : (root.active ? Design.accent-ink : Design.text-muted);
     }
     Text {
+        // 父级宽度由固定行高与横向布局约束，不会形成绑定环；Slint 1.17 也不支持 100% 与 px 混合运算
         x: root.icon >= 0 ? 38px : 14px; width: root.width - (root.icon >= 0 ? 48px : 24px); height: root.height;
         text: root.text; font-size: 14px; vertical-alignment: center; overflow: elide;
         color: !root.enabled ? Design.text-muted : (root.active ? Design.accent-ink : Design.text);
@@ -151,8 +152,8 @@ component Pill inherits Rectangle {
     touch := TouchArea { enabled: root.enabled; mouse-cursor: pointer; clicked => { root.clicked(); } }
     Text {
         text: root.text; font-size: 13px; horizontal-alignment: center; vertical-alignment: center;
-        width: root.width; height: root.height; overflow: elide;
-        color: !root.enabled ? Design.text-muted : (root.active ? white : Design.text);
+        width: 100%; height: 100%; overflow: elide;
+        color: !root.enabled ? Design.text-muted : (root.active ? Design.on-accent : Design.text);
         font-weight: root.active ? 600 : 500;
     }
 }
@@ -201,6 +202,8 @@ component ProgressBar inherits Rectangle {
     accessible-role: text;
     accessible-label: root.progress >= 0 ? ("进度 " + round(root.progress * 100) + "%") : "正在处理，总量未知";
     property <bool> sweep: false;
+    // bar-width 以组件自身宽度为基准：本组件宽度完全由外层布局分配（不要改成内容自适应，
+    // 否则"填充宽度依赖自身宽度"会形成绑定环），因此这里读 root.width 是安全的。
     property <length> bar-width: root.progress >= 0 ? max(4px, root.width * min(root.progress, 1.0)) : root.width / 4;
     Timer { interval: 850ms; running: root.progress < 0; triggered => { root.sweep = !root.sweep; } }
     Rectangle {
@@ -293,6 +296,9 @@ export component AppWindow inherits Window {
     in-out property <[RuleRow]> all-rules;
     in-out property <[PlanRow]> plans;
     in-out property <[ToolRow]> tools;
+    // 当前选中的工具 id：侧栏高亮跟随它，而不是写死“screen==0 就全亮”，
+    // 以后注册第二个工具时不会互相串高亮。
+    in-out property <string> active-tool-id: "directory-organizer";
     in-out property <int> tool-count: 1;
     in-out property <[string]> history-items;
     in-out property <string> tool-search;
@@ -303,7 +309,6 @@ export component AppWindow inherits Window {
     in-out property <string> conflict-text;
     in-out property <int> conflict-choice: 4;
     in-out property <bool> conflict-all: false;
-    in-out property <bool> close-pending: false;
     in-out property <bool> system-dark: false;
     in-out property <float> progress: -1;
     in-out property <string> progress-note;
@@ -364,6 +369,9 @@ export component AppWindow inherits Window {
     // 无系统标题栏：顶部条带负责拖动与窗口按钮，其余内容与普通窗口一致
     TouchArea {
         x: 0; y: 0; width: parent.width; height: 32px;
+        accessible-role: button;
+        accessible-label: "窗口标题栏：拖动移动窗口，双击切换最大化";
+        accessible-action-default => { root.maximized = !root.maximized; }
         double-clicked => { root.maximized = !root.maximized; }
         pointer-event(event) => {
             if event.kind == PointerEventKind.down { root.window-drag-start(self.mouse-x, self.mouse-y); }
@@ -391,7 +399,7 @@ export component AppWindow inherits Window {
                     edited(value) => { root.search-tools(value); }
                 }
                 Muted { text: "工具"; font-size: 11px; font-weight: 600; }
-                for tool in root.tools: NavItem { text: tool.name; icon: 0; active: root.screen == 0;
+                for tool in root.tools: NavItem { text: tool.name; icon: 0; active: root.screen == 0 && tool.id == root.active-tool-id;
                     clicked => { root.select-tool(tool.id); } }
                 Rectangle { height: 12px; background: transparent; }
                 NavItem { text: "任务记录"; icon: 1; active: root.screen == 1; clicked => { root.navigation(1); } }
@@ -481,11 +489,11 @@ export component AppWindow inherits Window {
                 }
                 if root.panel == 0: Surface { vertical-stretch: 1;
                     ListView { for row in root.rules: Rectangle {
-                        height: 64px;
+                        height: 76px;
                         HorizontalLayout { padding-left: 16px; padding-right: 16px; spacing: 16px; cross-axis-alignment: center;
                             VerticalLayout { horizontal-stretch: 1; spacing: 3px;
                                 Label { text: row.title; font-weight: 600; font-size: 14px; overflow: elide; }
-                                Muted { text: row.hint; wrap: no-wrap; overflow: elide; font-size: 12px; }
+                                Muted { text: row.hint; wrap: word-wrap; overflow: elide; font-size: 12px; }
                             }
                             if row.kind == 0: CheckBox { checked: row.checked; enabled: !root.busy;
                                 text: "启用"; accessible-label: row.title;
@@ -613,11 +621,11 @@ export component AppWindow inherits Window {
             if root.screen == 2: VerticalLayout { spacing: 12px;
                 Muted { text: "这里是全部规则（按面板顺序列出，可直接改）；规则可导出给其他机器使用，保存只修改本机配置。"; }
                 Surface { vertical-stretch: 1;
-                    ListView { for row in root.all-rules: Rectangle { height: 64px;
+                    ListView { for row in root.all-rules: Rectangle { height: 76px;
                         HorizontalLayout { padding-left: 16px; padding-right: 16px; spacing: 16px; cross-axis-alignment: center;
                             VerticalLayout { horizontal-stretch: 1; spacing: 3px;
                                 Label { text: row.title; font-weight: 600; font-size: 14px; overflow: elide; }
-                                Muted { text: row.hint; wrap: no-wrap; overflow: elide; font-size: 12px; }
+                                Muted { text: row.hint; wrap: word-wrap; overflow: elide; font-size: 12px; }
                             }
                             if row.kind == 0: CheckBox { checked: row.checked; enabled: !root.busy;
                                 text: "启用"; accessible-label: row.title;

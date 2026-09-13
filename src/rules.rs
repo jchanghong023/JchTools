@@ -26,7 +26,9 @@ pub fn parse_categories(text: &str) -> Result<BTreeMap<String,String>> {
 }
 pub fn strip_copy_name(name: &str) -> String {
     static COPY_SUFFIX: OnceLock<Regex> = OnceLock::new();
-    let expression = COPY_SUFFIX.get_or_init(|| Regex::new(r"(?i)(?:\s*[（(]\d+[）)]|\s*[-_ ]*(?:copy|副本)(?:\s*[（(]?\d+[）)]?)?)$").expect("constant regex"));
+    // 拉丁字母紧贴（photocopy / MyCopy）不是副本命名，分隔符必须至少一个；
+    // 中文「副本」紧贴是常见命名习惯（报告副本.pdf → 报告.pdf），允许无分隔符。
+    let expression = COPY_SUFFIX.get_or_init(|| Regex::new(r"(?i)(?:\s*[（(]\d+[）)]|\s*[-_ ]+copy(?:\s*[（(]?\d+[）)]?)?|\s*[-_ ]*副本(?:\s*[（(]?\d+[）)]?)?)$").expect("constant regex"));
     let path = Path::new(name);
     let original = path.file_stem().and_then(|s| s.to_str()).unwrap_or(name);
     let mut stem = original.to_string();
@@ -53,7 +55,8 @@ pub fn compare(a: &FileRecord, b: &FileRecord, policy: KeepPolicy) -> Ordering {
         KeepPolicy::Smallest => a.snapshot.size.cmp(&b.snapshot.size),
         KeepPolicy::ShortestName => a.name.chars().count().cmp(&b.name.chars().count()),
     };
-    primary.then_with(|| a.rel.len().cmp(&b.rel.len())).then_with(|| a.rel.cmp(&b.rel))
+    // 与 ordering_sql 的 length(rel)（字符数）保持一致，避免预览与 SQL 计划的平局规则不同。
+    primary.then_with(|| a.rel.chars().count().cmp(&b.rel.chars().count())).then_with(|| a.rel.cmp(&b.rel))
 }
 pub fn ordering_sql(policy: KeepPolicy) -> &'static str {
     match policy {

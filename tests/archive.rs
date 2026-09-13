@@ -125,3 +125,143 @@ fn kept_source_reextract_does_not_recreate_classified_duplicate(){
     assert_eq!(again.summary.planned_delete,0);
     assert_eq!(again.summary.planned_move,0);
 }
+
+// ===== 手工构造的特殊压缩包样本（重复条目 / GBK 文件名 / 空包 / ZST）=====
+// 7-Zip 无法直接创建这些样本（同名条目、原始字节文件名、空包、zstd 帧），因此按
+// PKWARE APPNOTE 与 RFC 8878 手工生成字节；全部为存储（未压缩）条目，无需压缩器。
+
+/// 标准 CRC-32（poly 0xEDB88320，初值与输出取反）。
+fn crc32(bytes: &[u8]) -> u32 {
+    let mut table=[0u32;256];
+    for i in 0..256u32 {
+        let mut c=i;
+        for _ in 0..8 { c=if c&1!=0 {0xEDB88320^(c>>1)} else {c>>1}; }
+        table[i as usize]=c;
+    }
+    let mut crc=!0u32;
+    for &b in bytes { crc=table[(((crc^b as u32))&0xFF) as usize]^(crc>>8); }
+    !crc
+}
+/// 生成只含"存储"条目的极简 ZIP（本地文件头 + 中央目录 + EOCD）。
+/// 文件名按原始字节写入，不带 UTF-8 标志：可构造 GBK 字节名与同名重复条目。
+fn stored_zip(entries: &[(&[u8], &[u8])]) -> Vec<u8> {
+    let mut out=Vec::new();
+    let mut central=Vec::new();
+    let mut offset=0u32;
+    for (name,data) in entries {
+        let crc=crc32(data);
+        let header_offset=offset;
+        out.extend_from_slice(b"PK\x03\x04");
+        out.extend_from_slice(&20u16.to_le_bytes());            // 版本
+        out.extend_from_slice(&0u16.to_le_bytes());             // 标志：无 UTF-8 位
+        out.extend_from_slice(&0u16.to_le_bytes());             // 方法：存储
+        out.extend_from_slice(&[0,0,0,0]);                      // 时间/日期
+        out.extend_from_slice(&crc.to_le_bytes());
+        out.extend_from_slice(&(data.len() as u32).to_le_bytes());
+        out.extend_from_slice(&(data.len() as u32).to_le_bytes());
+        out.extend_from_slice(&(name.len() as u16).to_le_bytes());
+        out.extend_from_slice(&0u16.to_le_bytes());             // extra 长度
+        out.extend_from_slice(name);
+        out.extend_from_slice(data);
+        central.extend_from_slice(b"PK\x01\x02");
+        central.extend_from_slice(&20u16.to_le_bytes());        // 制作版本
+        central.extend_from_slice(&20u16.to_le_bytes());        // 需要版本
+        central.extend_from_slice(&0u16.to_le_bytes());         // 标志
+        central.extend_from_slice(&0u16.to_le_bytes());         // 方法
+        central.extend_from_slice(&[0,0,0,0]);                  // 时间/日期
+        central.extend_from_slice(&crc.to_le_bytes());
+        central.extend_from_slice(&(data.len() as u32).to_le_bytes());
+        central.extend_from_slice(&(data.len() as u32).to_le_bytes());
+        central.extend_from_slice(&(name.len() as u16).to_le_bytes());
+        central.extend_from_slice(&[0;8]);                      // extra 长度/注释长度/起始盘号/内部属性
+        central.extend_from_slice(&0u32.to_le_bytes());         // 外部属性
+        central.extend_from_slice(&header_offset.to_le_bytes());
+        central.extend_from_slice(name);
+        offset += (30+name.len()+data.len()) as u32;
+    }
+    let central_offset=offset;
+    out.extend_from_slice(&central);
+    out.extend_from_slice(b"PK\x05\x06");                       // EOCD
+    out.extend_from_slice(&[0,0,0,0]);                          // 盘号
+    out.extend_from_slice(&(entries.len() as u16).to_le_bytes());
+    out.extend_from_slice(&(entries.len() as u16).to_le_bytes());
+    out.extend_from_slice(&(central.len() as u32).to_le_bytes());
+    out.extend_from_slice(&central_offset.to_le_bytes());
+    out.extend_from_slice(&0u16.to_le_bytes());                 // 注释长度
+    out
+}
+
+#[test] #[ignore = "Requires explicitly provided real 7-Zip engine"]
+fn zip_with_duplicate_entries_extracts_both_via_auto_rename(){
+    // 同名两条目（内容与大小都不同）：7z 以 -aou 解压时会把第二个同名条目自动改名落盘，
+    // 两个内容都保留；若引擎改为覆盖，总量校验（13+18 ≠ 13）会失败并保留原包。
+    let f=ArchiveFixture::new();
+    fs::write(f.root.join("dup.zip"),stored_zip(&[(b"dup.txt",b"first-10bytes"),(b"dup.txt",b"second-payload-16B")])).unwrap();
+    let result=f.run(config());
+    assert_eq!(result.summary.archives_failed,0);
+    assert_eq!(result.summary.archives_ok,1);
+    assert_eq!(result.summary.extracted,2,"两个同名条目都应落盘（-aou 自动改名）");
+    // dup_1.txt 的改名格式依赖 7-Zip -aou 的实现；引擎版本由 fetch-7zip.ps1 固定，行为稳定。
+    assert_eq!(fs::read(f.root.join("dup.txt")).unwrap(),b"first-10bytes");
+    assert_eq!(fs::read(f.root.join("dup_1.txt")).unwrap(),b"second-payload-16B");
+}
+#[test] #[ignore = "Requires explicitly provided real 7-Zip engine"]
+fn gbk_filename_zip_extracts_without_data_loss(){
+    // GBK 编码文件名（"报告.txt" 的 GBK 字节）且不带 UTF-8 标志的旧式 zip：
+    // 文件名可能与本机代码页不一致而呈乱码，但内容必须完整落盘且路径组件安全。
+    let f=ArchiveFixture::new();
+    let payload=b"gbk-payload\n!";
+    let gbk_name: &[u8]=&[0xB1,0xA8,0xB8,0xE6,b'.',b't',b'x',b't']; // GBK"报告.txt"
+    fs::write(f.root.join("gbk.zip"),stored_zip(&[(gbk_name,payload)])).unwrap();
+    let result=f.run(config());
+    assert_eq!(result.summary.archives_failed,0);
+    assert_eq!(result.summary.archives_ok,1);
+    assert_eq!(result.summary.extracted,1);
+    let extracted:Vec<_>=fs::read_dir(&f.root).unwrap().filter_map(|e|e.ok())
+        .map(|e|e.path()).filter(|p|p.is_file()&&p.extension().is_some_and(|x|x.eq_ignore_ascii_case("txt"))).collect();
+    assert_eq!(extracted.len(),1,"应恰好落盘一个 .txt 文件（名字可能呈乱码）");
+    assert_eq!(fs::read(&extracted[0]).unwrap(),payload);
+}
+#[test] #[ignore = "Requires explicitly provided real 7-Zip engine"]
+fn empty_zip_archive_extracts_cleanly(){
+    // 只有 EOCD 的空 zip：合法归档，零成员零字节，按成功解压处理。
+    let f=ArchiveFixture::new();
+    fs::write(f.root.join("empty.zip"),stored_zip(&[])).unwrap();
+    let mut cfg=config(); cfg.archive_delete=DeleteChoice::Permanent;
+    let result=f.run(cfg);
+    assert_eq!(result.summary.archives_failed,0);
+    assert_eq!(result.summary.archives_ok,1);
+    assert_eq!(result.summary.extracted,0);
+    assert!(!f.root.join("empty.zip").exists(),"空包成功解压后源包同样按规则处理");
+}
+#[test] #[ignore = "Requires explicitly provided real 7-Zip engine"]
+fn empty_7z_with_only_a_directory_entry_restores_the_directory(){
+    // 只含一个空目录条目的 7z：解压后应还原出目录本身。
+    let f=ArchiveFixture::new();
+    fs::create_dir(f.input.join("空目录")).unwrap();
+    f.pack(&f.root.join("empty.7z"),&["-t7z"],&["空目录"]);
+    let mut cfg=config(); cfg.archive_delete=DeleteChoice::Permanent;
+    let result=f.run(cfg);
+    assert_eq!(result.summary.archives_failed,0);
+    assert_eq!(result.summary.archives_ok,1);
+    assert_eq!(result.summary.extracted,0);
+    assert!(f.root.join("空目录").is_dir(),"仅目录条目的 7z 也应还原出目录");
+}
+#[test] #[ignore = "Requires explicitly provided real 7-Zip engine"]
+fn zstd_stream_archive_extracts_with_content(){
+    // 7-Zip 只解不建 .zst，样本按 RFC 8878 手工构造：
+    // magic + 单段帧头（1 字节帧内容大小）+ 一个"最后一块、原始块"，内容直接内联。
+    let f=ArchiveFixture::new();
+    let payload=b"zst payload here\n";
+    let mut zst=b"\x28\xB5\x2F\xFD".to_vec();                    // Zstandard magic
+    zst.push(0x20);                                              // 单段帧 + 帧内容大小 1 字节
+    zst.push(payload.len() as u8);                               // Frame_Content_Size
+    let block_header=1u32 | (payload.len() as u32)<<3;           // 最后一块 · 原始块 · 大小
+    zst.extend_from_slice(&block_header.to_le_bytes()[..3]);
+    zst.extend_from_slice(payload);
+    fs::write(f.root.join("payload.txt.zst"),zst).unwrap();
+    let result=f.run(config());
+    assert_eq!(result.summary.archives_failed,0);
+    assert_eq!(result.summary.archives_ok,1);
+    assert_eq!(fs::read(f.root.join("payload.txt")).unwrap(),payload);
+}

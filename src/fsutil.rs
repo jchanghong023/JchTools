@@ -4,12 +4,17 @@ use serde::Serialize;
 use std::{fs::{self, File, OpenOptions}, io::Write, path::{Component, Path, PathBuf}, time::UNIX_EPOCH};
 
 pub fn validate_component(name: &str) -> Result<()> {
-    if name.is_empty() || name == "." || name == ".." || (name.ends_with(' ') || name.ends_with('.')) {
+    // Windows 拒绝尾随空格/点；其他 Unicode 空白（如全角空格、NBSP）同样会被部分
+    // 文件系统与工具视为尾随空白，一并保守拒绝。
+    if name.is_empty() || name == "." || name == ".."
+        || name.chars().last().is_some_and(|c| c == '.' || c.is_whitespace()) {
         bail!("不安全或不兼容 Windows 的名称：{name:?}");
     }
     if name.chars().any(|c| c.is_control() || "<>:\"/\\|?*".contains(c)) {
         bail!("文件名包含 Windows 不支持的字符：{name:?}");
     }
+    // 官方保留名清单为 COM1-9 / LPT1-9（COM0/LPT0 并非保留名，可正常创建），
+    // 这里按官方清单拒绝，不做额外扩大，避免误拒用户磁盘上真实存在的合法文件。
     let stem = name.split('.').next().unwrap_or("").to_uppercase();
     if ["CON", "PRN", "AUX", "NUL", "CLOCK$"].contains(&stem.as_str())
         || ((stem.starts_with("COM") || stem.starts_with("LPT"))

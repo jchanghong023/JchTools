@@ -3,6 +3,9 @@ on:
   workflow_dispatch:
 permissions:
   contents: write
+concurrency:
+  group: release
+  cancel-in-progress: false
 jobs:
   windows-release:
     runs-on: windows-2022
@@ -31,4 +34,6 @@ jobs:
           $name = '${{ steps.meta.outputs.name }}'
           $zips = @(Get-ChildItem -Path dist -Filter '*.zip' -File -ErrorAction SilentlyContinue)
           if ($zips.Count -ne 1) { throw "Expected exactly one dist ZIP, found $($zips.Count)." }
-          gh release create $tag $zips[0].FullName --title $name --generate-notes --target ${{ github.sha }}
+          $sums = Join-Path $env:RUNNER_TEMP 'SHA256SUMS.txt'
+          (Get-FileHash -Algorithm SHA256 $zips[0].FullName | ForEach-Object { "$($_.Hash.ToLower()) *$($zips[0].Name)" }) | Set-Content -Path $sums -NoNewline
+          gh release create $tag $zips[0].FullName $sums --title $name --generate-notes --target ${{ github.sha }}

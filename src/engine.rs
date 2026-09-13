@@ -31,11 +31,15 @@ impl Job {
         match result {
             DeleteResult::Kept => { self.summary.skipped += 1; },
             DeleteResult::Recycled => { self.summary.recycled += 1; self.summary.recycled_bytes = self.summary.recycled_bytes.saturating_add(size); },
+            // 无法确认进入回收站的删除按永久删除如实记账：文件已不可从回收站恢复。
+            DeleteResult::RecycledUnverified => { self.summary.deleted += 1; if expected.is_none_or(|s|s.links <= 1) {
+                self.summary.permanent_bytes = self.summary.permanent_bytes.saturating_add(size);
+            } },
             DeleteResult::Permanent => { self.summary.deleted += 1; if expected.is_none_or(|s|s.links <= 1) {
                 self.summary.permanent_bytes = self.summary.permanent_bytes.saturating_add(size);
             } },
         }
-        self.log("删除",&relative,"",match result {DeleteResult::Kept=>"保留",DeleteResult::Recycled=>"已回收",DeleteResult::Permanent if mode==DeleteMode::Recycle=>"回收失败，已按授权永久删除",DeleteResult::Permanent=>"已永久删除"},reason,size)?;
+        self.log("删除",&relative,"",match result {DeleteResult::Kept=>"保留",DeleteResult::Recycled=>"已回收",DeleteResult::RecycledUnverified=>"已删除（未能确认进入回收站）",DeleteResult::Permanent if mode==DeleteMode::Recycle=>"回收失败，已按授权永久删除",DeleteResult::Permanent=>"已永久删除"},reason,size)?;
         // 已经不在磁盘上的文件不能再参与后续按名/按大小的查找：否则同名成员合入时会去读取
         // 一个刚被删除的路径，把整包解压误判为失败。
         if result != DeleteResult::Kept {
@@ -191,6 +195,9 @@ fn hash_candidates(job:&mut Job)->Result<()> {
             }).collect());
             job.db.conn.execute_batch("BEGIN IMMEDIATE")?;
             let update=(||{
+                // 用户取消时并行哈希的每个成员都会返回取消错误；先在这里拦截，
+                // 否则每个候选都被计成 error 并逐条写日志，取消任务的错误数虚高。
+                job.context.control.checkpoint()?;
                 for(id,rel,result)in results{
                     match result{
                         Ok(hash)=>{let sql=if full{"UPDATE files SET hash=?1 WHERE id=?2"}else{"UPDATE files SET prehash=?1 WHERE id=?2"};job.db.conn.execute(sql,params![hash,id])?;},
@@ -206,12 +213,19 @@ fn hash_candidates(job:&mut Job)->Result<()> {
 pub fn apply(directory:&Path,context:TaskContext)->Result<TaskResult>{apply_with(directory,context,Arc::new(NativeRecycler))}
 pub fn apply_with(directory:&Path,context:TaskContext,recycler:Arc<dyn Recycler>)->Result<TaskResult>{
     let state=directory.parent().and_then(Path::parent).context("任务目录结构无效")?;
+    // Database::open 会在文件缺失时创建一个空库；先确认这是扫描生成的任务目录，
+    // 避免把任意目录（甚至写错路径）悄悄变成一个必然失败的空任务。
+    // 该检查必须先于 RootGuard：否则写错路径会先在错误位置创建目录并落下锁文件。
+    anyhow::ensure!(directory.join("task.sqlite3").is_file(),"目录里没有 task.sqlite3；请选择「开始解压与分析」生成的任务目录");
     let _guard=fsutil::RootGuard::acquire(state)?;
     let db=Database::open(directory)?;
     let status:String=db.get("status")?;
     if status!="ready"{bail!("任务不是待确认状态（{status}）；请重新扫描，不会盲目重放旧计划");}
     let root_text:String=db.get("root")?;
     let root=fsutil::normalize_root(Path::new(&root_text))?;
+    // prepare 记录的是当时的规范化路径；apply 重新解析 canonicalize（会解析 junction）。
+    // 两者不一致说明目录被移动或被替换成指向别处的链接，继续执行会把整理动作落到另一棵树上。
+    anyhow::ensure!(fsutil::path_string(&root)?==root_text,"目录位置已改变或被链接替换（{root_text}）；请重新扫描生成新计划后再执行");
     let config=db.config()?;config.validate()?;
     let summary=db.summary()?;
     let mut job=Job{root,config,context,db,summary,archive_override:None,recycler};
@@ -274,9 +288,23 @@ fn execute_action(job:&mut Job,action:&Action)->Result<bool>{
             }
             if let Err(error)=fsutil::rename_noreplace(&temporary,&source){
                 // Keep the replacement link under a visible name if a competing file appeared.
-                let emergency=fsutil::unique_target(&job.root,&source)?;
-                fsutil::rename_noreplace(&temporary,&emergency)?;
-                job.log("硬链接",&action.source,&emergency.display().to_string(),"警告",&format!("目标被占用，保留链接副本：{error}"),0)?;
+                let emergency=fsutil::unique_target(&job.root,&source);
+                match emergency{
+                    Ok(emergency)=>match fsutil::rename_noreplace(&temporary,&emergency){
+                        Ok(())=>{
+                            job.log("硬链接",&action.source,&emergency.display().to_string(),"警告",&format!("目标被占用，保留链接副本：{error}"),0)?;
+                            job.summary.linked+=1;return Ok(true);
+                        }
+                        // 兜底改名也失败时移除临时硬链接：内容仍由保留文件持有，不会丢数据。
+                        // 源位置没有留下任何链接，不能再计为已链接。
+                        Err(inner)=>{
+                            let _=fs::remove_file(&temporary);
+                            job.log("硬链接",&action.source,"","警告",&format!("保留链接副本失败，已移除临时链接（内容仍由保留文件持有）：{inner}"),0)?;
+                            return Ok(true);
+                        }
+                    },
+                    Err(inner)=>{let _=fs::remove_file(&temporary);return Err(inner).context("目标被占用，且无法为保留链接副本分配名称");}
+                }
             }
             job.summary.linked+=1;Ok(true)
         }
@@ -293,24 +321,32 @@ pub fn history(state:&Path)->Result<Vec<(PathBuf,String)>>{
     paths.sort();paths.reverse();paths.truncate(100);
     let mut result=Vec::new();
     for path in paths{
-        if let Ok(db)=Database::open(&path){
-            let root: String=db.get("root").unwrap_or_default();let status:String=db.get("status").unwrap_or_else(|_|"unknown".into());
-            let created:String=db.get("created").unwrap_or_default();
-            let when=chrono::DateTime::parse_from_rfc3339(&created)
-                .map(|time|time.with_timezone(&chrono::Local).format("%Y-%m-%d %H:%M:%S").to_string())
-                .unwrap_or_else(|_|created.clone());
-            let state=match status.as_str(){
-                "ready"=>"待确认","analyzing"=>"分析中","executing"=>"执行中","finished"=>"已完成",
-                "cancelled"=>"已取消","failed"=>"失败",_=>"状态未知"};
-            let counts=match db.summary(){
-                Ok(summary) if status!="ready"&&status!="analyzing" =>
-                    format!(" · 已回收 {} 项 · 永久删除 {} 项 · 移动 {} 项 · 跳过 {} 项 · 错误 {} 项",
-                        summary.recycled,summary.deleted,summary.moved,summary.skipped,summary.errors),
-                Ok(summary) => format!(" · 扫描 {} 个文件 · 待处理 {} 项",summary.scanned,
-                    summary.planned_delete+summary.planned_move+summary.planned_link+summary.planned_empty),
-                Err(_) => String::new(),
-            };
-            result.push((path,format!("{when} · {state} · {}{counts}",platform::display_path_text(&root))));
-        }
-    }Ok(result)
+        // 历史列表是只读展示：优先以只读方式打开，避免把旧任务库的 journal 模式改写或留下 -wal 文件；
+        // 只读打开失败（例如崩溃后残留 -wal）时退回常规打开，保证记录仍然可见。
+        let db=match open_readonly(&path){Ok(db)=>db,Err(_)=>{match Database::open(&path){Ok(db)=>db,Err(_)=>continue}}};
+        let root: String=db.get("root").unwrap_or_default();let status:String=db.get("status").unwrap_or_else(|_|"unknown".into());
+        let created:String=db.get("created").unwrap_or_default();
+        let when=chrono::DateTime::parse_from_rfc3339(&created)
+            .map(|time|time.with_timezone(&chrono::Local).format("%Y-%m-%d %H:%M:%S").to_string())
+            .unwrap_or_else(|_|created.clone());
+        let state=match status.as_str(){
+            "ready"=>"待确认","analyzing"=>"分析中","executing"=>"执行中","finished"=>"已完成",
+            "cancelled"=>"已取消","failed"=>"失败",_=>"状态未知"};
+        let counts=match db.summary(){
+            Ok(summary) if status!="ready"&&status!="analyzing" =>
+                format!(" · 已回收 {} 项 · 永久删除 {} 项 · 移动 {} 项 · 跳过 {} 项 · 错误 {} 项",
+                    summary.recycled,summary.deleted,summary.moved,summary.skipped,summary.errors),
+            Ok(summary) => format!(" · 扫描 {} 个文件 · 待处理 {} 项",summary.scanned,
+                summary.planned_delete+summary.planned_move+summary.planned_link+summary.planned_empty),
+            Err(_) => String::new(),
+        };
+        result.push((path,format!("{when} · {state} · {}{counts}",platform::display_path_text(&root))));
+    }
+    Ok(result)
+}
+/// 只读打开任务库：只用于历史列表展示，不会触发 journal 模式改写。
+fn open_readonly(directory:&Path)->Result<Database>{
+    let conn=rusqlite::Connection::open_with_flags(directory.join("task.sqlite3"),
+        rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY)?;
+    Ok(Database{conn,directory:directory.to_path_buf()})
 }

@@ -2,10 +2,14 @@
 /dist/
 /.cache/
 /.vendor/
+# 7-Zip 引擎下载产物（fetch-7zip.ps1 生成）：可执行文件与清单 MUST NOT 提交；
+# 源码包、许可证目录与 NOTICE 同样只是本地构建材料，由打包脚本带入发布 ZIP。
 /resources/7zip/7z.exe
 /resources/7zip/7z.dll
 /resources/7zip/manifest.json
 /resources/7zip/License.txt
-/resources/7zip/7z-source.tar.xz
+/resources/7zip/7z*-src.tar.xz
+/resources/7zip/licenses/
+/resources/7zip/NOTICE.txt
 *.tmp
 /.tmp/

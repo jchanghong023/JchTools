@@ -183,7 +183,7 @@ def build_archive_conflicts(root: Path, seven: Path, log: list[str]) -> None:
     zip_members(section / "pack.zip", {"说明.txt": b"archive version B, different content and length\n"})
     write(section / "等长.txt", b"0123456789abcdef")                        # 16 B
     zip_members(section / "等长冲突.zip", {"等长.txt": b"fedcba9876543210"})
-    log.append("| `08-压缩包-冲突/` | 解压目标已存在同名文件（大小不同 / 大小相同） | 图形界面逐次询问，可「覆盖旧文件 / 跳过新文件 / 保留最新 / 保留较大 / 两个都保留」并应用到后续全部；命令行用默认规则（按大小保留较大的），配置里选「询问」时会自动改为两个都保留 |")
+    log.append("| `08-压缩包-冲突/` | 解压目标已存在同名文件（大小不同 / 大小相同） | 图形界面逐次询问，可「覆盖旧文件 / 跳过新文件 / 保留最新 / 保留较大 / 两个都保留」并应用到后续全部；命令行用默认规则（保留修改时间最新的），配置里选「询问」时会自动改为两个都保留 |")
 
 
 def build_nested(root: Path, seven: Path, log: list[str]) -> None:
@@ -402,12 +402,28 @@ def build_readme(root: Path, log: list[str], seven: Path, git: bool) -> None:
     root.joinpath("_测试说明.md").write_text("\n".join(text) + "\n", encoding="utf-8")
 
 
+def guard_destination(root: Path) -> None:
+    """清空不可逆：拒绝盘符根、用户主目录，以及会波及本仓库（.tmp 之外）的目标。"""
+    resolved = root.expanduser().resolve()
+    if resolved == resolved.parent:
+        raise SystemExit(f"拒绝清空盘符根：{resolved}")
+    home = Path.home().resolve()
+    if resolved == home or resolved in home.parents:
+        raise SystemExit(f"拒绝清空用户主目录或其上级目录：{resolved}")
+    repo = Path(__file__).resolve().parent.parent
+    if resolved == repo or resolved in repo.parents:
+        raise SystemExit(f"拒绝清空仓库或其上级目录：{resolved}")
+    if repo in resolved.parents and repo / ".tmp" not in (resolved, *resolved.parents):
+        raise SystemExit(f"仓库内只允许把测试数据放到 .tmp/ 下：{resolved}")
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description="Build the JchTools manual test corpus.")
     parser.add_argument("--destination", default=r"D:\testzip", help="target directory (wiped first)")
     parser.add_argument("--git", action="store_true", help="also create a git baseline plus a restore script")
     arguments = parser.parse_args()
     root = Path(arguments.destination)
+    guard_destination(root)
     seven = seven_zip()
 
     if root.exists():

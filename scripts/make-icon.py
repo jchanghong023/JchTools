@@ -2,7 +2,7 @@
 """Generate the JchTools app icon (PNG + multi-size ICO).
 
 The art matches the in-app logo badge: rounded square with the indigo -> cyan
-gradient and a white geometric M. Drawn at 4x and downsampled so the 16 px
+gradient and a white geometric J. Drawn at 4x and downsampled so the 16 px
 taskbar size stays crisp. Run from the repository root:
 
     python scripts/make-icon.py
@@ -38,20 +38,20 @@ def rounded_mask(size: int) -> Image.Image:
 
 
 def glyph(size: int) -> Image.Image:
-    """White geometric M, sized in the same coordinate system as `size`."""
+    """White geometric J, sized in the same coordinate system as `size`."""
     layer = Image.new("RGBA", (size, size), (0, 0, 0, 0))
     draw = ImageDraw.Draw(layer)
     s = size / 256
     left, right = 74 * s, 182 * s
     top, bottom = 74 * s, 182 * s
     stroke = 27 * s
-    middle = (left + right) / 2
-    valley = bottom - stroke * 1.9
+    # 块状 J：右侧竖笔从顶到底，底部横笔向左延伸（与旧 M 共用同一描边宽度与包围盒）。
+    stem_left = right - stroke
+    hook_left = left
+    hook_top = bottom - stroke
     points = [
-        (left, bottom), (left, top), (left + stroke * 1.05, top), (middle, top + stroke * 2.1),
-        (right - stroke * 1.05, top), (right, top), (right, bottom), (right - stroke, bottom),
-        (right - stroke, top + stroke * 1.9), (middle, valley), (left + stroke, top + stroke * 1.9),
-        (left + stroke, bottom),
+        (stem_left, top), (right, top), (right, bottom), (hook_left, bottom),
+        (hook_left, hook_top), (stem_left, hook_top),
     ]
     draw.polygon(points, fill=(255, 255, 255, 255))
     return layer
