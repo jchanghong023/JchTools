@@ -7,7 +7,7 @@ use crate::{config::{ClassifyMode,Config,ConflictPolicy,DEFAULT_CUSTOM_CATEGORIE
     db::Database, engine, model::{bytes,ActionKind}, platform, registry};
 use serde::Deserialize;
 use slint::{ComponentHandle,Model,ModelRc,SharedString,VecModel};
-use std::{cell::RefCell,collections::VecDeque,path::{Path,PathBuf},rc::Rc,
+use std::{cell::RefCell,collections::VecDeque,fs,path::{Path,PathBuf},rc::Rc,
     sync::{atomic::{AtomicBool,AtomicU64,Ordering},mpsc,Arc,Mutex},time::{Duration,Instant}};
 
 /// 规则的界面层级：basic 常显，advanced 只在「显示高级选项」打开时出现。
@@ -268,9 +268,6 @@ fn changed(ui:&AppWindow,state:&Rc<RefCell<State>>,key:&str,value:serde_json::Va
         Err(error)=>{ui.set_error_text(format!("{error:#}").into());false}
     }
 }
-fn async_work(sender:mpsc::SyncSender<Event>,work:impl FnOnce()->Result<Event>+Send+'static){
-    async_work_mapped(sender,work,Event::Error);
-}
 /// 失败事件由调用方经 `map_err` 指定：代理/网络测试/计划加载各自失败时
 /// 不得误清对方的 busy 状态（Event::Error 已不再隐含清 busy）。
 fn async_work_mapped(sender:mpsc::SyncSender<Event>,work:impl FnOnce()->Result<Event>+Send+'static,map_err:fn(String)->Event){
@@ -285,20 +282,46 @@ fn load_plan_filtered(sender:mpsc::SyncSender<Event>,plan_load:Arc<PlanLoadSync>
     // 递增代际：同一会话里筛选/翻页会并发发起多次加载，晚到的低代际结果不得覆盖当前视图。
     let gen=plan_load.latest.fetch_add(1,Ordering::AcqRel)+1;
     let load=plan_load.clone();
-    // 计划页加载失败走 Error：只更新错误文案，不碰 proxy/net 的 busy。
+    let err_sender=sender.clone();
+    // 失败路径要区分「回空页」与「只报错」两种事件（见下），不走 async_work 的单事件映射。
     // 打开的是引擎已生成的任务库：缺失时报错，不静默新建空库。
-    async_work(sender,move||{
-        let actions=Database::open_existing(&path)?.actions_page_filtered(start,101,kind.as_deref())?;
-        {
-            let mut guard=load.completed.lock().unwrap_or_else(|poisoned|poisoned.into_inner());
-            // 只允许写入不低代际的结果：先完成的高代际不被后完成的低代际覆盖。
-            if guard.as_ref().map(|done|done.gen<=gen).unwrap_or(true){
-                *guard=Some(PlanLoadDone{gen});
+    std::thread::spawn(move||{
+        // 与 async_work 一致地拦截 panic：否则失败事件缺失会让 UI 停在「加载中…」。
+        let result=std::panic::catch_unwind(std::panic::AssertUnwindSafe(||{
+            Database::open_existing(&path)
+                .and_then(|db|db.actions_page_filtered(start,101,kind.as_deref()).map_err(Into::into))
+        }));
+        let load_result=match result{
+            Ok(inner)=>inner,
+            Err(_)=>Err(anyhow::anyhow!("计划加载时后台操作意外退出；请重试")),
+        };
+        let event=match load_result{
+            Ok(actions)=>{
+                record_plan_load_done(&load,gen);
+                Event::PlanPage(path,actions,page,gen,kind)
             }
-        }
-        // 事件必须携带 gen/filter：UI 侧先比 gen，过期事件不碰 completed。
-        Ok(Event::PlanPage(path,actions,page,gen,kind))
+            Err(error)=>{
+                if page==0{
+                    // 筛选切换/任务加载（都从第 0 页开始）失败必须回空页：否则列表残留
+                    // 上一筛选甚至上一任务的行，与已切换的胶囊不一致。
+                    record_plan_load_done(&load,gen);
+                    let _=sender.send(Event::PlanPage(path,Vec::new(),page,gen,kind.clone()));
+                }
+                // 失败提示带代际/筛选归属：过期请求（用户已切走筛选/翻页）的失败
+                // 不得把红条误报到当前正确视图上，UI 侧按 gen/filter 决定是否上屏。
+                let _=err_sender.send(Event::PlanLoadFailed(format!("{error:#}"),gen,kind));
+                return;
+            }
+        };
+        let _=sender.send(event);
     });
+}
+/// 只允许写入不低代际的结果：先完成的高代际不被后完成的低代际覆盖。
+fn record_plan_load_done(load:&PlanLoadSync,gen:u64){
+    let mut guard=load.completed.lock().unwrap_or_else(|poisoned|poisoned.into_inner());
+    if guard.as_ref().map(|done|done.gen<=gen).unwrap_or(true){
+        *guard=Some(PlanLoadDone{gen});
+    }
 }
 /// 按「任务状态 + 当前配置 + 目录一致性」重新计算整理计划的就绪状态。
 /// theme 是纯外观设置，不影响计划内容，比较时剔除；
@@ -332,6 +355,14 @@ impl Drop for ExportGuard{
 /// 覆盖导出 CSV：先写入同目录临时文件，成功后再替换目标；失败时清理临时文件且不动原文件。
 /// `write` 负责把内容写入临时路径（默认走 `Database::export_csv`，其 create_new 语义正好适用）。
 fn export_csv_via_temp(task:&Path,dest:&Path)->Result<()>{
+    // 目标是任务库本体时拒绝（用户可能在保存对话框里定位到任务目录选了 task.sqlite3）：
+    // 覆盖导出会把它替换成 CSV，任务库永久丢失。
+    let target_db=task.join("task.sqlite3");
+    let same=match (fs::canonicalize(dest),fs::canonicalize(&target_db)){
+        (Ok(dest_path),Ok(db_path))=>dest_path==db_path,
+        _=>dest==target_db,
+    };
+    if same{anyhow::bail!("导出目标不能是任务库本体（task.sqlite3）；请换一个文件名");}
     let db=Database::open_existing(task)?;
     write_via_temp(dest,move|tmp|db.export_csv(tmp))
 }
@@ -572,8 +603,9 @@ fn apply_net_test_report(ui:&AppWindow,report:crate::nettest::NetTestReport){
 /// 切换 scope 后在途报告必须忽略，不得覆盖新页面的结果，也不得误清新 scope 的 busy。
 fn net_test_report_matches_scope(ui:&AppWindow,report:&crate::nettest::NetTestReport)->bool{
     if ui.get_net_test_scope()==0{
-        // Windows 本机页只接受 Windows 报告
-        report.scope.as_str()=="Windows"
+        // 本机页只接受本机探测报告（标签与 nettest::run_local 同一口径：
+        // Windows 平台为 "Windows"，其它平台为 OS 名）。
+        report.scope.as_str()==crate::nettest::local_scope_label()
     }else{
         // WSL2 页只接受 WSL2* 报告；若报告带发行版且与当前选择不一致，也视为过期。
         if !report.scope.starts_with("WSL2"){return false;}
@@ -597,16 +629,21 @@ fn apply_net_test_wsl_rows(ui:&AppWindow,distros:&[String],error:Option<String>)
         ui.set_net_test_wsl_status(error.unwrap_or_else(||"未检测到已安装的 WSL 发行版".into()).into());
         ui.set_net_test_scope_label("WSL2（无可用发行版）".into());
     }else{
-        let preferred=crate::nettest::prefer_wsl_distro(distros).unwrap_or_else(||distros[0].clone());
-        let index=(0..distros.len()).find(|i|distros[*i]==preferred).unwrap_or(0);
+        // 刷新后若用户已选发行版仍在列表中，保留其选择，不得静默重置回优先项。
+        let current=ui.get_net_test_wsl_selected();
+        let keep=(!current.is_empty())
+            .then(||distros.iter().find(|d|d.as_str()==current.as_str()).cloned())
+            .flatten();
+        let chosen=keep.unwrap_or_else(||crate::nettest::prefer_wsl_distro(distros).unwrap_or_else(||distros[0].clone()));
+        let index=(0..distros.len()).find(|i|distros[*i]==chosen).unwrap_or(0);
         ui.set_net_test_wsl_index(index as i32);
-        ui.set_net_test_wsl_selected(preferred.clone().into());
+        ui.set_net_test_wsl_selected(chosen.clone().into());
         ui.set_net_test_wsl_status(if let Some(error)=error{
             format!("已加载 {} 个发行版；{error}",distros.len()).into()
         }else{
             format!("已加载 {} 个发行版",distros.len()).into()
         });
-        ui.set_net_test_scope_label(format!("WSL2 · {preferred}").into());
+        ui.set_net_test_scope_label(format!("WSL2 · {chosen}").into());
     }
 }
 
@@ -628,7 +665,27 @@ fn reset_tool_list(ui:&AppWindow){
 fn wire_sync(ui:&AppWindow,state:&Rc<RefCell<State>>){
     {
         let weak=ui.as_weak();let state=state.clone();
-        ui.on_root_edited(move||{if let Some(ui)=weak.upgrade(){sync_ready_after_directory(&ui,&state.borrow());}});
+        // 目录每敲一键都同步重算就绪（打开任务 SQLite + 双侧序列化 + canonicalize），
+        // 在网络盘/UNC 上会逐键阻塞 UI：去抖 300ms，停顿后才真正重算。
+        let debounce=std::rc::Rc::new(slint::Timer::default());
+        ui.on_root_edited({
+            let weak=weak.clone();let state=state.clone();let debounce=debounce.clone();
+            move||if let Some(ui)=weak.upgrade(){
+                // 编辑目录立即失效执行按钮（旧同步行为的安全属性）：去抖窗口内不得凭
+                // 陈旧 ready 打开确认框；随后去抖重算，目录与计划仍一致时重新点亮。
+                ui.set_ready(false);
+                // 无任务时重算很轻（仅本地存在性检查），保持同步反馈；
+                // 有任务时的重算要开任务库+双侧序列化，网络盘上逐键卡顿，去抖 300ms。
+                if !ui.get_has_task(){
+                    sync_ready_after_directory(&ui,&state.borrow());
+                    return;
+                }
+                let weak=weak.clone();let state=state.clone();
+                debounce.start(slint::TimerMode::SingleShot,Duration::from_millis(300),move||{
+                    if let Some(ui)=weak.upgrade(){sync_ready_after_directory(&ui,&state.borrow());}
+                });
+            }
+        });
     }
     {
         let weak=ui.as_weak();let state=state.clone();
@@ -721,15 +778,19 @@ fn wire_sync(ui:&AppWindow,state:&Rc<RefCell<State>>){
                     slint::SharedString::from(format!("WSL2 · {selected}"))
                 };
                 ui.set_net_test_scope_label(label);
-                // 进入 WSL 页时拉取已安装发行版，供用户选择（无 sender 时静默跳过）。
-                if let Some(sender)=state.borrow().proxy_events.clone(){
-                    if !ui.get_net_test_busy(){
-                        ui.set_net_test_busy(true);
-                        ui.set_net_test_wsl_status("正在读取 WSL 发行版列表…".into());
-                        async_work_mapped(sender,move||match crate::nettest::list_wsl_distros(){
-                            Ok(distros)=>Ok(Event::WslDistros(distros,None)),
-                            Err(error)=>Ok(Event::WslDistros(Vec::new(),Some(error))),
-                        },Event::NetTestFailed);
+                // 只在真正切入 WSL2 页时自动拉取发行版；重复点击已激活页签不再刷新，
+                // 否则 apply_net_test_wsl_rows 会把用户已选发行版静默重置回优先项
+                //（手动重试用「刷新列表」按钮）。
+                if previous!=scope{
+                    if let Some(sender)=state.borrow().proxy_events.clone(){
+                        if !ui.get_net_test_busy(){
+                            ui.set_net_test_busy(true);
+                            ui.set_net_test_wsl_status("正在读取 WSL 发行版列表…".into());
+                            async_work_mapped(sender,move||match crate::nettest::list_wsl_distros(){
+                                Ok(distros)=>Ok(Event::WslDistros(distros,None)),
+                                Err(error)=>Ok(Event::WslDistros(Vec::new(),Some(error))),
+                            },Event::NetTestFailed);
+                        }
                     }
                 }
             }else{
@@ -888,6 +949,17 @@ fn wire_sync(ui:&AppWindow,state:&Rc<RefCell<State>>){
                 // 否则重建后这一行会拿旧值覆盖刚改好的设置。
                 let canonical=parsed.as_u64().map(|v|v.to_string()).unwrap_or_else(||value.to_string());
                 patch_rule_row(&ui,key.as_str(),|row|row.value=canonical.clone().into());
+                // 联动行的可见性也取决于自身的值（如 large_threshold_gib 改回 1、
+                // custom_categories 改回默认）：与 on_rule_choice 同步可见性，增量插删不重建整表。
+                sync_rules(&ui,&state.borrow());
+            } else if numeric{
+                // 数值超出字段范围（如超过 u32 上限）等写入失败：与非法文本同口径处理，
+                // 中文提示并回退行显示，避免输入框与配置真值不一致直到整表重建。
+                let restore={let cfg=serde_json::to_value(&state.borrow().config).unwrap_or_default();
+                    cfg.get(key.as_str()).cloned().unwrap_or_default()};
+                let restore=restore.as_u64().map(|v|v.to_string()).unwrap_or_default();
+                patch_rule_row(&ui,key.as_str(),|row|row.value=restore.clone().into());
+                show_error(&ui,"该设置超出允许的范围");
             }
         }});
     }
@@ -1077,8 +1149,10 @@ pub fn run_with_engine_overrides(hook:impl FnOnce(&AppWindow)+'static,overrides:
         let weak=ui.as_weak();let drag=Rc::new(RefCell::new(None::<WindowDrag>));
         let anchor=drag.clone();
         ui.on_window_drag_start(move|x,y|{if let Some(ui)=weak.upgrade(){
-            let window=ui.window();let restoring=window.is_maximized();
-            if restoring{window.set_maximized(false);}
+            let window=ui.window();
+            // 最大化状态下不在按下时立即还原：双击（无移动）要让 double-clicked 读到
+            // 仍最大化，从而切换为还原；真正的拖动由 drag-move 的 restoring 分支还原。
+            let restoring=window.is_maximized();
             let position=window.position();
             *anchor.borrow_mut()=Some(WindowDrag{origin:(position.x as f64,position.y as f64),
                 press:pointer_position().unwrap_or((x as f64,y as f64)),restoring});
@@ -1089,8 +1163,12 @@ pub fn run_with_engine_overrides(hook:impl FnOnce(&AppWindow)+'static,overrides:
             let mut state=drag.borrow_mut();let Some(drag)=state.as_mut()else{return;};
             let pointer=pointer_position().unwrap_or((x as f64,y as f64));
             if drag.restoring{
-                // 还原尚未生效：等窗口离开最大化后再重新锚定，避免和系统还原位置互相覆盖
-                if ui.window().is_maximized(){return;}
+                // 按下时未还原（见 drag-start 注释）：真正的拖动在这里触发还原，
+                // 等窗口离开最大化后再重新锚定，避免和系统还原位置互相覆盖。
+                if ui.window().is_maximized(){
+                    ui.window().set_maximized(false);
+                    return;
+                }
                 let position=ui.window().position();
                 drag.origin=(position.x as f64,position.y as f64);drag.press=pointer;drag.restoring=false;
                 return;
@@ -1133,6 +1211,11 @@ pub fn run_with_engine_overrides(hook:impl FnOnce(&AppWindow)+'static,overrides:
                     Event::Status(text)=>{if !ui.get_paused(){ui.set_status(text.into());}},
                     Event::Log(text)=>{let mut s=state.borrow_mut();if s.logs.len()==300{s.logs.pop_front();}s.logs.push_back(text);log_changed=true;},
                     Event::Conflict(info,reply)=>{
+                        // 冲突事件可能在用户已请求取消后才被本定时器处理：已取消的任务不再弹
+                        // 冲突框，直接丢弃事件；reply 发送端随事件一起释放，worker 侧会在
+                        // check_cancelled 或通道断开时自行退出，不会悬挂。
+                        let cancelled={let s=state.borrow();s.control.as_ref().is_some_and(|control|control.is_cancelled())};
+                        if cancelled{continue;}
                         state.borrow_mut().conflict=Some(reply);
                         let show=platform::display_path_text;
                         ui.set_conflict_text(format!("目标：{}\n\n现有文件：{} · 修改时间 {}\n新解压文件：{} · 修改时间 {}\n\n覆盖旧文件仍遵守已配置的回收站 / 永久删除策略；选择前不会继续后续解压。",
@@ -1288,6 +1371,14 @@ pub fn run_with_engine_overrides(hook:impl FnOnce(&AppWindow)+'static,overrides:
                         }
                     },
                     Event::ProxyFailed(text)=>{ui.set_proxy_busy(false);ui.set_error_text(text.into());},
+                    Event::PlanLoadFailed(text,gen,filter)=>{
+                        // 计划加载失败带代际/筛选归属：请求已过期（用户切走筛选/翻页后
+                        // 旧请求才失败）时不得把红条误报到当前正确视图上。
+                        let accepted={let s=state.borrow();
+                            s.plan_load.latest.load(Ordering::Acquire)==gen
+                            && s.plan_filter.as_deref()==filter.as_deref()};
+                        if accepted{ui.set_error_text(text.into());}
+                    },
                     Event::NetTestFailed(text)=>{
                         // 失败只清当前 net-test busy：scope 切换已各自清过 busy，晚到失败不得把
                         // 新页面的 busy 误清（与 NetTestReport 的 scope 守卫同一策略）。
@@ -1295,6 +1386,9 @@ pub fn run_with_engine_overrides(hook:impl FnOnce(&AppWindow)+'static,overrides:
                         else{
                             ui.set_net_test_busy(false);
                             ui.set_net_test_summary("尚未测试".into());
+                            // WSL 列表若停在「正在读取…」（如后台线程意外退出），必须给出可恢复的
+                            // 中性提示，否则空列表页的说明文案永久卡在中间态。
+                            ui.set_net_test_wsl_status("上次操作失败；可点击「刷新列表」或「开始测试」重试".into());
                             ui.set_error_text(text.into());
                         }
                     },

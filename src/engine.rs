@@ -24,7 +24,7 @@ impl Job {
         self.context.emit(Event::Log(format!("[{phase}] {result} | {source}{} | {reason}",if target.is_empty(){String::new()}else{format!(" → {target}")})));
         Ok(())
     }
-    pub fn delete_path(&mut self,path:&Path,expected:Option<&Snapshot>,mode:DeleteMode,reason:&str)->Result<DeleteResult> {
+    pub fn delete_path(&mut self,path:&Path,expected:Option<&Snapshot>,mode:DeleteMode,reason:&str,physical_free:bool)->Result<DeleteResult> {
         let relative = fsutil::relative_string(&self.root,path)?;
         fsutil::safe_join(&self.root,&relative)?;
         let size = expected.map(|s|s.size).unwrap_or(0);
@@ -33,14 +33,18 @@ impl Job {
         let result = platform::remove(path,expected,mode,self.config.recycle_fallback,&self.context.control,self.recycler.as_ref())?;
         match result {
             DeleteResult::Kept => { self.summary.skipped += 1; },
-            DeleteResult::Recycled => { self.summary.recycled += 1; self.summary.recycled_bytes = self.summary.recycled_bytes.saturating_add(size); },
+            DeleteResult::Recycled => { self.summary.recycled += 1; if physical_free {
+                self.summary.recycled_bytes = self.summary.recycled_bytes.saturating_add(size);
+            } },
             // 无法确认进入回收站的删除按永久删除如实记账：文件已不可从回收站恢复。
             // 注意：Summary::description（model.rs）把 deleted 统一显示为「已永久删除」，
             // 这里用 deleted_unverified 单独计数，结束时补充更准确的口径说明。
-            DeleteResult::RecycledUnverified => { self.summary.deleted += 1; self.deleted_unverified += 1; if expected.is_none_or(|s|s.links <= 1) {
+            // physical_free=false（硬链接替换：内容经临时链接原样保留，物理占用不变）时
+            // 不计入 permanent_bytes，避免"已永久删除字节"虚高。
+            DeleteResult::RecycledUnverified => { self.summary.deleted += 1; self.deleted_unverified += 1; if physical_free&&expected.is_none_or(|s|s.links <= 1) {
                 self.summary.permanent_bytes = self.summary.permanent_bytes.saturating_add(size);
             } },
-            DeleteResult::Permanent => { self.summary.deleted += 1; if expected.is_none_or(|s|s.links <= 1) {
+            DeleteResult::Permanent => { self.summary.deleted += 1; if physical_free&&expected.is_none_or(|s|s.links <= 1) {
                 self.summary.permanent_bytes = self.summary.permanent_bytes.saturating_add(size);
             } },
         }
@@ -55,6 +59,24 @@ impl Job {
 }
 #[derive(Debug,Clone)]
 pub struct TaskResult { pub directory: PathBuf,pub summary: Summary }
+/// 清理硬链接执行的崩溃残留（.jchtools-link-{uuid}）：崩溃发生在「源已删、改名回
+/// 原路径前」时残留无法自愈，扫描对其永久剪枝且无其它回收路径。残留是指向 keeper
+/// 内容的硬链接，删除后内容仍由保留文件持有。24 小时阈值与 clean_orphan_staging
+/// 一致，避免误删并发任务的临时文件。
+fn clean_orphan_link_temps(root:&Path)->usize{
+    let now=std::time::SystemTime::now();
+    let mut removed=0;
+    for entry in walkdir::WalkDir::new(root).follow_links(false).into_iter().filter_map(|e|e.ok()){
+        let path=entry.path();
+        let Some(name)=path.file_name().and_then(|n|n.to_str()) else {continue;};
+        if !name.starts_with(".jchtools-link-")||!entry.file_type().is_file(){continue;}
+        let stale=fs::symlink_metadata(path).and_then(|m|m.modified()).ok()
+            .and_then(|m|now.duration_since(m).ok())
+            .is_some_and(|age|age.as_secs()>24*3600);
+        if stale && fs::remove_file(path).is_ok(){removed+=1;}
+    }
+    removed
+}
 pub fn prepare(root:&Path,config:Config,context:TaskContext)->Result<TaskResult> {
     prepare_at(root,config,context,&config::state_dir()?,None)
 }
@@ -75,6 +97,11 @@ pub fn prepare_with(root:&Path,config:Config,context:TaskContext,state:&Path,eng
     db.set("created",&chrono::Utc::now().to_rfc3339())?;
     let mut job = Job { root,config,context,db,summary:Summary::default(),archive_override:None,recycler,deleted_unverified:0 };
     let result = (|| {
+        // 先清崩溃残留的硬链接临时文件：它们被扫描永久剪枝，留着只会让源路径承诺静默失效。
+        let removed_link_temps=clean_orphan_link_temps(&job.root);
+        if removed_link_temps>0{
+            job.log("扫描","","","提示",&format!("已清理 {removed_link_temps} 个上次任务崩溃残留的硬链接临时文件"),0)?;
+        }
         scan(&mut job,true,state)?;
         if job.config.extract {
             let count:i64 = job.db.conn.query_row("SELECT COUNT(*) FROM archives WHERE state='pending'",[],|r|r.get(0))?;
@@ -100,6 +127,12 @@ pub fn prepare_with(root:&Path,config:Config,context:TaskContext,state:&Path,eng
             Err(error)=>{ let _=job.db.conn.execute_batch("ROLLBACK");return Err(error); }
         }
         job.db.set("summary",&job.summary)?; job.db.set("status",&"ready")?;
+        // prepare 阶段的回收未验证删除此前只在 apply 结束时提示；解压即删除原包的场景
+        // 用户在分析完成时就应看到口径说明（与 apply_with 的提示对称）。
+        if job.deleted_unverified>0 {
+            let _=job.log("任务","","","提示",
+                &format!("解压阶段已删除 {} 项，其中 {} 项是回收未验证（原路径已不可恢复，未必进入回收站）",job.summary.deleted,job.deleted_unverified),0);
+        }
         job.log("计划","","","待确认","解压阶段已完成；去重、移动和清理等待确认",0)?;
         Ok(TaskResult { directory:directory.clone(),summary:job.summary.clone() })
     })();
@@ -248,6 +281,11 @@ pub fn apply_with(directory:&Path,context:TaskContext,recycler:Arc<dyn Recycler>
     let deleted_at_apply_start=job.summary.deleted;
     job.db.set("status",&"executing")?;
     let outcome=(||{
+        // 上次执行崩溃可能残留硬链接临时文件（.jchtools-link-*）：执行前清理。
+        let removed_link_temps=clean_orphan_link_temps(&job.root);
+        if removed_link_temps>0{
+            job.log("任务","","","提示",&format!("已清理 {removed_link_temps} 个上次执行崩溃残留的硬链接临时文件"),0)?;
+        }
         let mut cursor=0;
         loop{
             let actions=job.db.actions_page(cursor,256)?;
@@ -301,7 +339,7 @@ fn execute_action(job:&mut Job,action:&Action)->Result<bool>{
         }
     }
     match action.kind{
-        ActionKind::Delete=>Ok(job.delete_path(&source,action.expected.as_ref(),action.mode,&action.reason)?!=DeleteResult::Kept),
+        ActionKind::Delete=>Ok(job.delete_path(&source,action.expected.as_ref(),action.mode,&action.reason,true)?!=DeleteResult::Kept),
         ActionKind::Move=>{
             let target=fsutil::safe_join(&job.root,action.target.as_deref().context("移动操作缺少目标")?)?;
             fsutil::ensure_parent(&job.root,&target)?;
@@ -314,7 +352,8 @@ fn execute_action(job:&mut Job,action:&Action)->Result<bool>{
             let temporary=source.parent().context("路径缺少父目录")?.join(format!(".jchtools-link-{}",uuid::Uuid::new_v4()));
             // Create the replacement link before removing any source data. Cross-volume links fail safely here.
             fs::hard_link(&keeper,&temporary).context("此位置不支持硬链接，原文件未删除")?;
-            let removed=job.delete_path(&source,action.expected.as_ref(),action.mode,&action.reason);
+            // physical_free=false：内容经临时硬链接原样保留，物理占用不变，不得计入永久删除字节。
+            let removed=job.delete_path(&source,action.expected.as_ref(),action.mode,&action.reason,false);
             match removed{
                 Ok(DeleteResult::Kept)=>{let _=fs::remove_file(&temporary);return Ok(false);},
                 Err(error)=>{let _=fs::remove_file(&temporary);return Err(error);},
@@ -349,7 +388,7 @@ fn execute_action(job:&mut Job,action:&Action)->Result<bool>{
         }
         ActionKind::EmptyDirectory=>{
             if !source.try_exists()?||!source.is_dir()||fs::read_dir(&source)?.next().is_some(){return Ok(false);}
-            Ok(job.delete_path(&source,None,action.mode,&action.reason)?!=DeleteResult::Kept)
+            Ok(job.delete_path(&source,None,action.mode,&action.reason,true)?!=DeleteResult::Kept)
         }
     }
 }

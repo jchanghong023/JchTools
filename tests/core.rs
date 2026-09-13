@@ -66,12 +66,54 @@ impl Recycler for MoveRecycle {fn recycle(&self,p:&Path)->Result<(),RecycleFailu
 #[test] fn changed_source_after_plan_is_skipped(){let f=Fixture::new();let a=f.write("a",b"same",10);f.write("b",b"same",20);let task=f.plan(base());fs::write(&a,b"brand new").unwrap();let result=f.apply(&task);assert!(a.exists());assert_eq!(result.summary.errors,1);}
 #[test] fn changed_keeper_after_plan_prevents_delete(){let f=Fixture::new();let a=f.write("a",b"same",10);let b=f.write("b",b"same",20);let task=f.plan(base());fs::write(&b,b"new keeper").unwrap();let result=f.apply(&task);assert!(a.exists());assert_eq!(result.summary.errors,1);}
 #[test] fn cleanup_does_not_become_only_dedup_keeper(){let f=Fixture::new();f.write("keep.txt",b"content",10);f.write("temporary.tmp",b"content",20);let mut cfg=base();cfg.clean_temp=true;let task=f.plan(cfg);f.apply(&task);assert!(f.root.join("keep.txt").exists());assert!(!f.root.join("temporary.tmp").exists());}
+#[test] fn cleanup_keep_files_are_not_conflict_versions(){
+    // cleanup_delete=Keep 的清理命中文件由清理规则管辖（保留承诺）：
+    // 不得被选为冲突 keeper（否则正常版本被删、垃圾留下），也不得作为冲突版本删除。
+    let f=Fixture::new();
+    f.write("x/a.txt",b"",20);
+    f.write("y/a.txt",b"payload",10);
+    let mut cfg=base();
+    cfg.clean_zero=true;
+    cfg.cleanup_delete=DeleteChoice::Keep;
+    cfg.same_name_different_size=true;
+    cfg.conflict_scope_directory=false;
+    let task=f.plan(cfg);
+    let actions=Database::open(&task.directory).unwrap().actions_page(0,100).unwrap();
+    assert!(actions.iter().all(|a|a.kind!=ActionKind::Delete),"冲突取舍不得删除清理保留的文件");
+    f.apply(&task);
+    assert!(f.root.join("x/a.txt").exists()&&f.root.join("y/a.txt").exists());
+}
+#[test] fn stale_hardlink_temps_are_swept(){
+    // 崩溃残留的硬链接临时文件被扫描永久剪枝且无其它回收路径：
+    // prepare/apply 前必须清扫过期残留（内容仍由保留文件持有，删除不丢数据）。
+    let f=Fixture::new();f.write("a.txt",b"payload",10);
+    let stale=f.root.join(".jchtools-link-deadbeef");
+    fs::write(&stale,b"content").unwrap();
+    filetime::set_file_mtime(&stale,filetime::FileTime::from_unix_time(0,0)).unwrap();
+    let task=f.plan(base());
+    assert!(!stale.exists(),"过期残留必须被清扫");
+    assert_eq!(task.summary.scanned,1,"清扫不得影响正常文件的扫描");
+}
 #[test] fn global_keep_prohibits_deletion(){let f=Fixture::new();f.write("a",b"same",10);f.write("b",b"same",20);let mut cfg=base();cfg.global_delete=DeleteMode::Keep;assert_eq!(f.plan(cfg).summary.planned_delete,0);}
 #[test] fn class_override_beats_global_keep(){let f=Fixture::new();f.write("a",b"same",10);f.write("b",b"same",20);let mut cfg=base();cfg.global_delete=DeleteMode::Keep;cfg.duplicate_delete=DeleteChoice::Permanent;assert_eq!(f.plan(cfg).summary.planned_delete,1);}
 #[test] fn copy_name_cleanup_uses_freed_original_name(){let f=Fixture::new();f.write("a.pdf",b"same",10);f.write("a (1).pdf",b"same",20);let mut cfg=base();cfg.clean_copy_name=true;let task=f.plan(cfg);f.apply(&task);assert!(f.root.join("a.pdf").exists());assert!(!f.root.join("a (1).pdf").exists());}
 #[test] fn classification_preserves_paths_and_is_idempotent(){let f=Fixture::new();f.write("folder/a.pdf",b"pdf",10);let mut cfg=base();cfg.classify=ClassifyMode::Extension;let task=f.plan(cfg.clone());f.apply(&task);assert!(f.root.join("PDF/folder/a.pdf").exists());let again=f.plan(cfg);assert_eq!(again.summary.planned_move,0);}
 #[test] fn flatten_classification_allocates_nonconflicting_names(){let f=Fixture::new();f.write("x/a.pdf",b"left",10);f.write("y/a.pdf",b"right",20);let mut cfg=base();cfg.classify=ClassifyMode::Extension;cfg.preserve_structure=false;let task=f.plan(cfg);f.apply(&task);assert!(f.root.join("PDF/a.pdf").exists());assert!(f.root.join("PDF/a (1).pdf").exists());}
 #[test] fn empty_directory_cleanup_is_bottom_up(){let f=Fixture::new();fs::create_dir_all(f.root.join("empty/nested")).unwrap();let mut cfg=base();cfg.clean_empty_dirs=true;let task=f.plan(cfg);f.apply(&task);assert!(!f.root.join("empty").exists());assert!(f.root.exists());}
+#[test] fn empty_hidden_subdir_blocks_empty_directory_cleanup(){
+    // 行为锚点：仅含一个空的隐藏（Windows）/点开头（Unix）子目录的目录，
+    // 该子目录不会入库，目录对规划"并非实际为空"，不得计划为空目录。
+    // 否则计划承诺落空：执行期实空复查只能跳过，skipped 虚增、该清的没清。
+    let f=Fixture::new();
+    fs::create_dir_all(f.root.join("outer/.inner")).unwrap();
+    #[cfg(windows)]
+    set_hidden(&f.root.join("outer/.inner"),true);
+    f.write("keep.txt",b"payload",10);
+    let mut cfg=base();cfg.clean_empty_dirs=true;
+    let task=f.plan(cfg);
+    assert_eq!(task.summary.planned_empty,0,"含未入库子目录的目录不得计划为空目录");
+    assert!(f.root.join("outer").exists());
+}
 #[test] fn empty_directory_with_underscore_not_blocked_by_similar_name(){
     // 行为契约：目录名含下划线/百分号时，空目录判定不得波及名字相似（仅差一两个字符）的邻居目录。
     let f=Fixture::new();
@@ -126,6 +168,87 @@ impl Recycler for MoveRecycle {fn recycle(&self,p:&Path)->Result<(),RecycleFailu
     assert_eq!(again.summary.planned_move,0,"重新分析不得把年/月目录再套一层");
 }
 #[test] fn excluded_tree_not_touched(){let f=Fixture::new();f.write("a.txt",b"same",10);f.write("protected/a.txt",b"same",20);let mut cfg=base();cfg.exclusions="protected/**".into();assert_eq!(f.plan(cfg).summary.scanned,1);}
+#[cfg(windows)]
+fn set_hidden(path:&Path,hidden:bool){
+    use std::os::windows::ffi::OsStrExt;
+    use windows_sys::Win32::Storage::FileSystem::{GetFileAttributesW,SetFileAttributesW,FILE_ATTRIBUTE_HIDDEN,INVALID_FILE_ATTRIBUTES};
+    let wide=path.as_os_str().encode_wide().chain(Some(0)).collect::<Vec<u16>>();
+    let attrs=unsafe{GetFileAttributesW(wide.as_ptr())};
+    assert_ne!(attrs,INVALID_FILE_ATTRIBUTES,"读取属性失败：{path:?}");
+    let next=if hidden{attrs|FILE_ATTRIBUTE_HIDDEN}else{attrs&!FILE_ATTRIBUTE_HIDDEN};
+    assert_ne!(unsafe{SetFileAttributesW(wide.as_ptr(),next)},0,"设置属性失败：{path:?}");
+}
+#[cfg(windows)]
+#[test] fn hidden_root_directory_still_scanned(){
+    // 行为锚点：扫描以 walkdir min_depth(1) 运行，根条目不会被产出，filter_entry 谓词
+    // 因此从不作用于用户选定的根目录——隐藏根目录不会整树剪枝；而根目录下的隐藏
+    // 子目录仍按隐藏判定剪枝。两条 walkdir 语义在此一并钉住。
+    let f=Fixture::new();f.write("a.txt",b"payload",10);f.write("secret/b.txt",b"hidden",20);
+    set_hidden(&f.root,true);
+    set_hidden(&f.root.join("secret"),true);
+    let task=f.plan(base());
+    set_hidden(&f.root,false);
+    set_hidden(&f.root.join("secret"),false);
+    assert_eq!(task.summary.scanned,1,"隐藏根目录里的普通文件必须能被扫描到；隐藏子目录必须被剪枝");
+}
+#[cfg(not(windows))]
+#[test] fn hidden_root_directory_still_scanned(){
+    // 行为锚点：扫描以 walkdir min_depth(1) 运行，根条目不会被产出，filter_entry 谓词
+    // 因此从不作用于用户选定的根目录——点开头根目录不会整树剪枝；根下的点开头
+    // 子目录仍按隐藏判定剪枝。
+    let temp=tempfile::tempdir().unwrap();
+    let root=temp.path().join(".hidden-root");
+    fs::create_dir_all(root.join(".secret")).unwrap();
+    fs::write(root.join("a.txt"),b"payload").unwrap();
+    fs::write(root.join(".secret/b.txt"),b"hidden").unwrap();
+    let state=temp.path().join("state");
+    let task=engine::prepare_at(&root,base(),Context::default(),&state,None).unwrap();
+    assert_eq!(task.summary.scanned,1,"点开头根目录里的普通文件必须能被扫描到；点开头子目录必须被剪枝");
+}
+#[test] fn merge_directories_never_pulls_files_out_of_output(){
+    // 输出目录内的分类子目录与树中同名外部目录重名时，合并不得把已归类文件拉回
+    // 外部目录：否则归类与合并跨运行互相拉扯，计划永不收敛。
+    let f=Fixture::new();
+    f.write("文档/old/a.pdf",b"pdf",10);
+    let mut cfg=base();
+    cfg.classify=ClassifyMode::Extension;
+    cfg.preserve_structure=true;
+    cfg.merge_directories=true;
+    cfg.output_dir="整理".into();
+    let task=f.plan(cfg.clone());
+    assert_eq!(task.summary.planned_move,1);
+    f.apply(&task);
+    assert!(f.root.join("整理/PDF/文档/old/a.pdf").exists());
+    let again=f.plan(cfg);
+    assert_eq!(again.summary.planned_move,0,"第二次分析不得把已归类文件再移回外部同名目录");
+}
+#[test] fn copy_name_cleanup_never_plans_self_move(){
+    // 保留文件剥离副本名后原名被其它内容占用时，回退序号不得撞回自身当前名称：
+    // source==target 的空转移动破坏计划幂等（执行后 moved 计数虚高）。
+    let f=Fixture::new();
+    f.write("报告 (1).pdf",b"A",30);
+    f.write("报告 (2).pdf",b"A",20);
+    f.write("报告.pdf",b"B",10);
+    let mut cfg=base();cfg.clean_copy_name=true;
+    let task=f.plan(cfg);
+    assert_eq!(task.summary.planned_delete,1,"同内容副本应被删除");
+    assert_eq!(task.summary.planned_move,0,"保留者已在合理位置，不得生成移动动作");
+    f.apply(&task);
+    assert!(f.root.join("报告 (1).pdf").exists());
+    assert!(!f.root.join("报告 (2).pdf").exists());
+    assert!(f.root.join("报告.pdf").exists());
+}
+#[test] fn hardlink_does_not_claim_permanent_bytes(){
+    // 硬链接去重不销毁内容（源目录项由指向 keeper 的链接顶替），物理占用不变：
+    // 即使删除模式解析为 Permanent，也不得把源大小计入 permanent_bytes。
+    let f=Fixture::new();f.write("a",b"same",10);f.write("b",b"same",20);
+    let mut cfg=base();cfg.duplicate_action=DuplicateAction::Hardlink;
+    let task=f.plan(cfg);
+    let result=f.apply(&task);
+    assert_eq!(result.summary.linked,1);
+    assert_eq!(result.summary.deleted,1,"硬链接替换仍按删除项数记账");
+    assert_eq!(result.summary.permanent_bytes,0,"硬链接不释放物理空间，不得计入永久删除字节");
+}
 #[test] fn no_recursion_leaves_subdirectories_untouched(){let f=Fixture::new();f.write("a",b"same",10);f.write("sub/b",b"same",20);let mut cfg=base();cfg.recursive=false;assert_eq!(f.plan(cfg).summary.scanned,1);}
 #[test] fn finished_plan_cannot_be_replayed(){let f=Fixture::new();f.write("a",b"same",10);f.write("b",b"same",20);let task=f.plan(base());f.apply(&task);assert!(engine::apply_with(&task.directory,Context::default(),Arc::new(FailRecycle)).is_err());}
 #[test] fn task_lock_prevents_second_task(){let f=Fixture::new();let _guard=fsutil::RootGuard::acquire(&f.state).unwrap();assert!(engine::prepare_at(&f.root,base(),Context::default(),&f.state,None).is_err());}

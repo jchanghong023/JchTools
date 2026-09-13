@@ -198,8 +198,13 @@ impl SevenZip {
                 }
             }
             let destination_rel = fsutil::relative_string(&job.root,&destination)?;
-            fsutil::safe_join(&job.root,&destination_rel)?;
-            if exclusions.is_match(&destination_rel) || excluded_destination(&job.root,&destination,&job.config) {
+            // 父链仍做整链校验；最终名可能是既有链接 / junction / OneDrive 在线占位，
+            // 那是成员级场景（merge_extracted 改用唯一名落盘），整链校验会让含这类
+            // 成员的整包解压失败。
+            if let Some(split)=destination_rel.rfind('/'){
+                fsutil::safe_join(&job.root,&destination_rel[..split])?;
+            }
+            if member_excluded(&exclusions,&destination_rel) || excluded_destination(&job.root,&destination,&job.config) {
                 complete=false;job.summary.skipped+=1;
                 job.log("解压",archive_rel,&destination_rel,"跳过","目标命中排除/隐藏/系统文件设置；原包保留",meta.len())?;
                 continue;
@@ -215,21 +220,38 @@ impl SevenZip {
                     continue;
                 }
             }
-            match merge_extracted(job,entry.path(),&destination)? {
-                Some(final_path) => {
+            // 非 Windows 上点开头路径组件等价隐藏目录/文件：未开启 include_hidden 时不落盘，
+            // 否则会成为扫描不可见的影子内容（engine 扫描按组件剪枝，去重/归类/清理都看不到）。
+            #[cfg(not(windows))]
+            if !job.config.include_hidden && has_hidden_component(&destination_rel){
+                complete=false;job.summary.skipped+=1;
+                job.log("解压",archive_rel,&destination_rel,"跳过","路径含点开头（隐藏）组件，未开启包含隐藏文件；原包保留",meta.len())?;
+                continue;
+            }
+            match merge_extracted(job,entry.path(),&destination,archive_rel)? {
+                MergeOutcome::Merged(final_path) => {
                     job.summary.extracted += 1;
+                    normalize_new_member_attributes(&final_path,&job.config);
                     job.log("解压",archive_rel,&fsutil::relative_string(&job.root,&final_path)?,"成功","解压并同卷移动",meta.len())?;
                     if job.config.nested_archives && rules::archive_name(&final_path.to_string_lossy()) {
                         enqueue(job,&final_path,depth+1)?;
                     }
                 }
-                None => {
+                MergeOutcome::BlockedByKeep => {
                     job.summary.skipped += 1;
-                    // Newest/Largest/Skip 下「已有文件胜出」是策略结果：目标内容已就位，
-                    // 不应把 complete 置 false 导致原包永久保留并在下次分析重复解压。
-                    // Skip 仍保留原包（用户选择不采用新文件）；Newest/Largest 可按规则删原包。
-                    let policy = job.archive_override.unwrap_or(job.config.extract_conflict);
-                    if policy == ConflictPolicy::Skip {
+                    // 新文件按冲突策略应替换已有文件，但冲突删除方式为「保留」，目标腾不出来：
+                    // 必须与 Skip 同口径保留原包，否则原包按规则删除后，新内容随暂存目录
+                    // 一起消失，新版本在磁盘上不复存在。
+                    complete = false;
+                    job.log("解压",archive_rel,&destination_rel,"跳过","新文件按冲突策略应替换已有文件，但冲突删除方式为「保留」，无法腾出目标；原包强制保留",meta.len())?;
+                }
+                MergeOutcome::KeptExisting(keep_package) => {
+                    job.summary.skipped += 1;
+                    // 保留判定来自实际采用的策略（含对话框一次性选择），不得用
+                    // archive_override/config 重推导：一次性「跳过」不回写 override，
+                    // 重推导会把它当成 Newest/Largest 的已有胜出而误删原包，
+                    // 新内容随暂存丢弃后这次解压将一无所获。
+                    if keep_package {
                         complete = false;
                         job.log("解压",archive_rel,&destination_rel,"跳过","目标冲突未采用新文件；原包强制保留",meta.len())?;
                     } else {
@@ -246,15 +268,39 @@ impl SevenZip {
                 let rel = fsutil::relative_string(&stage.content,entry.path())?;
                 let dest = archive.parent().unwrap().join(fsutil::safe_relative(&rel)?);
                 let root_rel = fsutil::relative_string(&job.root,&dest)?;
-                fsutil::safe_join(&job.root,&root_rel)?;
-                // 与文件合入/扫描同一过滤口径：X/** 不匹配 bare X，需补 X/ 变体。
-                if exclusions.is_match(&root_rel) || exclusions.is_match(format!("{root_rel}/"))
-                    || excluded_destination(&job.root,&dest,&job.config) {
+                // 父链仍整链校验；最终名可能是链接/junction（如 OneDrive 占位目录）：
+                // 已存在的目录直接合入；链接到目录不会创建也不会被写入（空目录无成员；
+                // 含成员时成员路径的父链校验仍会拒绝），不再让整包解压失败。
+                let dir_parent_rel=match root_rel.rfind('/'){Some(i)=>&root_rel[..i],None=>""};
+                if !dir_parent_rel.is_empty(){fsutil::safe_join(&job.root,dir_parent_rel)?;}
+                // 与文件合入/扫描同一过滤口径：X/** 不匹配 bare X，需补 X/ 变体；
+                // 祖先目录命中排除同样跳过（扫描对 X 整树剪枝，子目录不得落盘）。
+                if member_excluded(&exclusions,&root_rel) || excluded_destination(&job.root,&dest,&job.config) {
                     complete=false;job.summary.skipped+=1;
                     job.log("解压",archive_rel,&root_rel,"跳过","目标命中排除/隐藏/系统文件设置；原包保留",0)?;
                     continue;
                 }
-                if !dest.try_exists()? { fs::create_dir_all(&dest)?; }
+                // 非 Windows 上点开头目录组件等价隐藏目录：不创建，否则目录连同其中的
+                // 成员都会成为扫描不可见的影子内容（excluded_destination 对尚不存在的
+                // 目标判不出"隐藏"，必须按名称判定）。
+                #[cfg(not(windows))]
+                if !job.config.include_hidden && has_hidden_component(&root_rel){
+                    complete=false;job.summary.skipped+=1;
+                    job.log("解压",archive_rel,&root_rel,"跳过","路径含点开头（隐藏）组件，未开启包含隐藏文件；原包保留",0)?;
+                    continue;
+                }
+                if !dest.try_exists()? {
+                    if let Err(error)=fs::create_dir_all(&dest){
+                        // 最终名被悬空链接等占用（try_exists 跟随链接判为不存在，但名字已被占）：
+                        // 与文件成员的应急改名同口径降级为跳过，不让整包解压失败。
+                        if fs::symlink_metadata(&dest).is_ok(){
+                            complete=false;job.summary.skipped+=1;
+                            job.log("解压",archive_rel,&root_rel,"跳过",&format!("空目录名被既有文件/链接占用且无法创建：{error}；原包保留"),0)?;
+                            continue;
+                        }
+                        return Err(error).with_context(||format!("无法创建目录 {}",dest.display()));
+                    }
+                }
                 else if !dest.is_dir() {
                     complete=false;job.summary.skipped+=1;
                     job.log("解压",archive_rel,&root_rel,"跳过","空目录名与目标处已有文件冲突；原包保留",0)?;
@@ -262,7 +308,7 @@ impl SevenZip {
             }
         }
         if complete && !multipart {
-            job.delete_path(&archive,Some(&source_snapshot),job.config.archive_delete.resolve(job.config.global_delete),"解压后原压缩包")?;
+            job.delete_path(&archive,Some(&source_snapshot),job.config.archive_delete.resolve(job.config.global_delete),"解压后原压缩包",true)?;
         } else if job.config.archive_delete.resolve(job.config.global_delete) != DeleteMode::Keep {
             job.log("解压",archive_rel,"","保留","有跳过条目或属于分卷包；不能安全确认所有源卷均可删除",source_snapshot.size)?;
         }
@@ -301,6 +347,45 @@ fn stream_member_name(archive: &Path) -> String {
         None => name,
     }
 }
+
+/// 成员排除判定与扫描剪枝口径对齐：扫描对目录 X 整树剪枝，因此裸目录名 `X`
+/// 也必须排除其下成员 `X/y.txt`，否则成员落盘成为扫描不可见的影子，且原包每轮
+/// 因目录 X 命中排除而强制保留、重复解压永不收敛。
+fn member_excluded(exclusions: &globset::GlobSet, rel: &str) -> bool {
+    let bytes = rel.as_bytes();
+    for i in 0..=bytes.len() {
+        if i == bytes.len() || bytes[i] == b'/' {
+            let prefix = &rel[..i];
+            if exclusions.is_match(prefix) || exclusions.is_match(&format!("{prefix}/")) { return true; }
+        }
+    }
+    false
+}
+
+/// 非 Windows 上点开头路径组件等价隐藏目录/文件（engine 扫描按组件剪枝）：
+/// 未开启 include_hidden 时这样的解压目标不得落盘，否则会成为扫描不可见的影子内容。
+#[cfg(not(windows))]
+fn has_hidden_component(rel: &str) -> bool {
+    rel.split('/').any(|part| part.starts_with('.'))
+}
+
+/// 新解压成员归本工具管理：7-Zip 会还原压缩包内的隐藏/系统属性，若不剥离，
+/// 成员会变成扫描不可见的"影子文件"（去重/归类/清理都看不到它）。按用户当前的
+/// 隐藏/系统过滤设置剥离相应属性，内容与名称不变；剥离失败不影响本次解压结果。
+#[cfg(windows)]
+fn normalize_new_member_attributes(path: &Path, config: &crate::config::Config) {
+    use std::os::windows::ffi::OsStrExt;
+    use std::os::windows::fs::MetadataExt;
+    use windows_sys::Win32::Storage::FileSystem::SetFileAttributesW;
+    let Ok(meta) = fs::symlink_metadata(path) else { return; };
+    let mut attrs = meta.file_attributes();
+    if !config.include_hidden { attrs &= !2; }
+    if !config.include_system { attrs &= !4; }
+    let wide: Vec<u16> = path.as_os_str().encode_wide().chain(Some(0)).collect();
+    let _ = unsafe { SetFileAttributesW(wide.as_ptr(), attrs) };
+}
+#[cfg(not(windows))]
+fn normalize_new_member_attributes(_path: &Path, _config: &crate::config::Config) {}
 
 /// 只判断根目录以下的层级。用户选定的根目录本身（例如位于隐藏的 AppData 之下）不参与隐藏/系统判定，
 /// 否则整棵树都会被上级目录的属性判定为隐藏，所有解压结果都会被跳过。
@@ -394,32 +479,52 @@ fn find_identical_elsewhere(job: &Job, source: &Path, incoming: &crate::model::S
     }
     Ok(None)
 }
-fn merge_extracted(job: &mut Job, source: &Path, target: &Path) -> Result<Option<PathBuf>> {
+/// 单个冲突条目的合入结果。
+enum MergeOutcome {
+    /// 新文件已落位（含 TOCTOU 竞争后改用唯一名的情况）。
+    Merged(PathBuf),
+    /// 按策略保留已有文件（Skip，或 Newest/Largest 判定已有内容更优）：
+    /// 目标内容已就位，新内容可随暂存丢弃。布尔值=是否强制保留原包：
+    /// 「跳过」（含对话框一次性选择）放弃新内容后原包是唯一数据来源，必须保留；
+    /// Newest/Largest 下已有内容胜出时目标已是更优内容，原包可按规则处理。
+    /// 判定必须由 merge_extracted 按实际采用的策略（含 Ask 的回答）给出，
+    /// 调用方无法从 archive_override/config 重推导出一次性选择。
+    KeptExisting(bool),
+    /// 新文件按冲突策略应当胜出，但冲突删除方式解析为「保留」，目标腾不出来：
+    /// 新内容尚未落位，调用方必须保留原包，否则新版本内容会随暂存目录一起消失。
+    BlockedByKeep,
+}
+fn merge_extracted(job: &mut Job, source: &Path, target: &Path, archive_rel: &str) -> Result<MergeOutcome> {
     let incoming = fsutil::snapshot(source).with_context(|| format!("读取暂存解压结果失败：{}",source.display()))?;
-    fsutil::ensure_parent(&job.root,target)?;
+    // 只校验/创建父目录链：最终名被符号链接 / junction / OneDrive 在线占位占用是
+    // 成员级场景（下方改用唯一名落盘），对最终名也做整链校验会让含这类成员的整包失败。
+    let parent=target.parent().context("目标缺少父目录")?;
+    if parent!=job.root{
+        fsutil::ensure_parent(&job.root,parent)?;
+    }
     if !target.try_exists()? {
         match fsutil::rename_noreplace(source,target) {
-            Ok(()) => return Ok(Some(target.to_path_buf())),
+            Ok(()) => return Ok(MergeOutcome::Merged(target.to_path_buf())),
             Err(error) => {
                 // TOCTOU：目标在 try_exists 与 rename 之间出现。与冲突删除路径一致，
                 // 改用唯一名落盘，而不是整包失败。
                 let emergency = fsutil::unique_target(&job.root,target)?;
                 fsutil::rename_noreplace(source,&emergency).map_err(|_| error)?;
-                return Ok(Some(emergency));
+                return Ok(MergeOutcome::Merged(emergency));
             }
         }
     }
     let meta = fs::symlink_metadata(target).with_context(|| format!("读取目标状态失败：{}",target.display()))?;
     if !meta.is_file() || fsutil::is_link(&meta) {
         let renamed = fsutil::unique_target(&job.root,target)?;
-        fsutil::rename_noreplace(source,&renamed)?; return Ok(Some(renamed));
+        fsutil::rename_noreplace(source,&renamed)?; return Ok(MergeOutcome::Merged(renamed));
     }
     let existing = fsutil::snapshot(target).with_context(|| format!("读取已有目标失败：{}",target.display()))?;
     // Identical bytes are already at the destination. Treat as success so the source archive
     // can be deleted; otherwise Largest/Newest/Skip on equal size keep the archive forever,
     // and the next run re-extracts after classification moved the file away.
     if incoming.size == existing.size && hashing::equal_bytes(source,&incoming,target,&existing,&job.context.control)? {
-        return Ok(Some(target.to_path_buf()));
+        return Ok(MergeOutcome::Merged(target.to_path_buf()));
     }
     let policy = job.archive_override.unwrap_or(job.config.extract_conflict);
     let policy = if policy == ConflictPolicy::Ask {
@@ -439,12 +544,19 @@ fn merge_extracted(job: &mut Job, source: &Path, target: &Path) -> Result<Option
         ConflictPolicy::Skip => false,
         ConflictPolicy::KeepBoth | ConflictPolicy::Ask => {
             let renamed = fsutil::unique_target(&job.root,target)?;
-            fsutil::rename_noreplace(source,&renamed)?; return Ok(Some(renamed));
+            fsutil::rename_noreplace(source,&renamed)?; return Ok(MergeOutcome::Merged(renamed));
         }
     };
-    if !use_new { return Ok(None); }
+    // policy 此处已是实际采用的策略（Ask 时为对话框回答）：一次性「跳过」不回写
+    // archive_override，只有这里能判定并把它传给调用方。
+    if !use_new { return Ok(MergeOutcome::KeptExisting(policy == ConflictPolicy::Skip)); }
     let mode = job.config.conflict_delete.resolve(job.config.global_delete);
-    if mode == DeleteMode::Keep { return Ok(None); }
+    if mode == DeleteMode::Keep {
+        // 策略要求新文件胜出，但删除方式为「保留」，已有文件腾不出来：新内容不能
+        // 无声丢弃。返回 BlockedByKeep 让调用方保留原包；若当作「已有文件胜出」处理，
+        // 原包会按规则删除、新内容随暂存目录消失，且与「按策略保留」的日志矛盾。
+        return Ok(MergeOutcome::BlockedByKeep);
+    }
     // 冲突策略决定删除已有文件时写带策略名的明确原因，便于在日志/审计中看出
     // 是策略自动处理（默认 Newest 也会在用户未显式选择时替换旧文件）。
     let reason = match policy {
@@ -453,17 +565,18 @@ fn merge_extracted(job: &mut Job, source: &Path, target: &Path) -> Result<Option
         ConflictPolicy::Largest => format!("解压冲突策略（较大）：已有文件较小，将被替换（旧 {} 字节 / 新 {} 字节）",existing.size,incoming.size),
         _ => "解压覆盖旧文件".to_string(),
     };
-    let removed = job.delete_path(target,Some(&existing),mode,&reason)?;
-    if removed == DeleteResult::Kept { return Ok(None); }
+    let removed = job.delete_path(target,Some(&existing),mode,&reason,true)?;
+    if removed == DeleteResult::Kept { return Ok(MergeOutcome::BlockedByKeep); }
     if let Err(error) = fsutil::rename_noreplace(source,target) {
         // The extracted source remains in an owned staging directory until this function returns.
         // Preserve it under a separate visible name rather than losing it when cleanup runs.
         let emergency = fsutil::unique_target(&job.root,target)?;
         fsutil::rename_noreplace(source,&emergency).context("目标删除后合入失败；原压缩包仍保留")?;
-        job.log("解压",&source.display().to_string(),&emergency.display().to_string(),"警告",&format!("目标发生竞争，改用不冲突名称：{error}"),incoming.size)?;
-        return Ok(Some(emergency));
+        // 日志用压缩包 rel 而不是暂存路径：暂存目录随即删除，审计时必须能归属到压缩包。
+        job.log("解压",archive_rel,&fsutil::relative_string(&job.root,&emergency).unwrap_or_else(|_|emergency.display().to_string()),"警告",&format!("目标发生竞争，改用不冲突名称：{error}"),incoming.size)?;
+        return Ok(MergeOutcome::Merged(emergency));
     }
-    Ok(Some(target.to_path_buf()))
+    Ok(MergeOutcome::Merged(target.to_path_buf()))
 }
 pub fn enqueue(job: &Job, archive: &Path, depth: u32) -> Result<()> {
     let snapshot = fsutil::snapshot(archive)?;
@@ -550,4 +663,92 @@ pub fn clean_orphan_staging(root: &Path, max_age: Duration) -> Result<usize> {
     }
     if removed > 0 { let _ = fs::remove_dir(&work); } // 仅当父目录已空时才会成功
     Ok(removed)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::config::{Config, DeleteMode, DeleteChoice};
+    use crate::control::Context as TaskContext;
+    use crate::db::Database;
+    use crate::engine::Job;
+    use crate::platform::NativeRecycler;
+    use std::sync::Arc;
+
+    #[test]
+    fn merge_with_keep_delete_mode_reports_blocked_instead_of_lost_content() {
+        // 回归：冲突策略要求新文件胜出（Overwrite），但冲突删除方式解析为「保留」时，
+        // 必须返回 BlockedByKeep 让调用方保留原包。此前静默返回 KeptExisting（旧 None），
+        // 调用方会按「已有文件胜出」放行删除原包，新内容随暂存目录丢弃——新版本内容
+        // 在磁盘上不复存在，日志却写「已有文件按策略保留」。
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path().join("data");
+        let state = temp.path().join("state");
+        fs::create_dir(&root).unwrap();
+        let target = root.join("target.txt");
+        fs::write(&target, b"old content bytes").unwrap();
+        let stage = tempfile::tempdir().unwrap();
+        let source = stage.path().join("target.txt");
+        fs::write(&source, b"brand new and longer").unwrap();
+
+        let mut config = Config::default();
+        config.extract_conflict = ConflictPolicy::Overwrite;
+        config.conflict_delete = DeleteChoice::Keep;
+        // 即使全局删除方式为永久删除，冲突删除方式「保留」仍必须优先。
+        config.global_delete = DeleteMode::Permanent;
+        let mut job = Job {
+            root, config, context: TaskContext::default(),
+            db: Database::create(&state).unwrap(), summary: Default::default(),
+            archive_override: Some(ConflictPolicy::Overwrite),
+            recycler: Arc::new(NativeRecycler), deleted_unverified: 0,
+        };
+        let outcome = merge_extracted(&mut job, &source, &target, "target.txt").unwrap();
+        assert!(matches!(outcome, MergeOutcome::BlockedByKeep),
+            "腾不出目标的合入必须报告为 BlockedByKeep");
+        // 新旧内容都原样保留：目标未被覆盖，新文件仍留在暂存里等待下一次机会。
+        assert_eq!(fs::read(&target).unwrap(), b"old content bytes");
+        assert_eq!(fs::read(&source).unwrap(), b"brand new and longer");
+    }
+}
+
+#[cfg(test)]
+mod one_shot_skip_tests {
+    use super::*;
+    use crate::config::{Config, ConflictPolicy};
+    use crate::control::{ConflictAnswer, Context as TaskContext};
+    use crate::db::Database;
+    use crate::engine::Job;
+    use crate::platform::NativeRecycler;
+    use std::sync::Arc;
+
+    #[test]
+    fn merge_one_shot_skip_keeps_original_archive() {
+        // 回归：Ask 对话框一次性选择「跳过」（不应用到全部）不回写 archive_override，
+        // 调用方若按 extract_conflict 重推导（Ask≠Skip）会误删原包：新内容随暂存
+        // 丢弃后，这次解压一无所获。KeptExisting 必须携带保留判定。
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path().join("data");
+        let state = temp.path().join("state");
+        fs::create_dir(&root).unwrap();
+        let target = root.join("target.txt");
+        fs::write(&target, b"old content bytes").unwrap();
+        let stage = tempfile::tempdir().unwrap();
+        let source = stage.path().join("target.txt");
+        fs::write(&source, b"brand new and longer").unwrap();
+
+        let mut config = Config::default();
+        config.extract_conflict = ConflictPolicy::Ask;
+        let mut context = TaskContext::default();
+        context.decisions = Arc::new(|_| Ok(ConflictAnswer { policy: ConflictPolicy::Skip, apply_all: false }));
+        let mut job = Job {
+            root, config, context,
+            db: Database::create(&state).unwrap(), summary: Default::default(),
+            archive_override: None,
+            recycler: Arc::new(NativeRecycler), deleted_unverified: 0,
+        };
+        let outcome = merge_extracted(&mut job, &source, &target, "target.txt").unwrap();
+        assert!(matches!(outcome, MergeOutcome::KeptExisting(true)), "一次性 Skip 必须判定为保留原包");
+        assert_eq!(fs::read(&target).unwrap(), b"old content bytes");
+        assert!(job.archive_override.is_none(), "一次性选择不得回写 override");
+    }
 }

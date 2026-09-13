@@ -63,6 +63,9 @@ pub enum Event {
     Notice(String),
     /// 一次性错误（导出/计划加载失败等），界面用错误样式展示；不隐含代理/网络测试的 busy 语义
     Error(String),
+    /// 计划页加载失败：带请求代际与筛选归属。过期请求（用户已切走筛选/翻页）的失败
+    /// 不得把红条误报到当前正确视图上，UI 侧按 gen/filter 决定是否上屏。
+    PlanLoadFailed(String,u64,Option<String>),
     /// 代理工具检测失败：只清 proxy_busy，不碰 net_test_busy
     ProxyFailed(String),
     /// 网络测试/WSL 列表失败：只清 net_test_busy，不碰 proxy_busy

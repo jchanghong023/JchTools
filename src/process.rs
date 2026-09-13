@@ -1,6 +1,6 @@
 //! Bounded, cancellable process I/O; no shell and no unbounded Command::output buffers.
 use crate::control::Control;
-use anyhow::{bail, Context, Result};
+use anyhow::{bail, Result};
 use std::{
     io::{BufRead, BufReader, Read, Write},
     path::PathBuf,
@@ -99,6 +99,38 @@ pub struct CapturedOutput {
     pub stderr_truncated: bool,
 }
 
+impl CapturedOutput {
+    /// 任一流超过捕获上限被截断时返回提示。截断的输出不完整，调用方不得把它
+    /// 当完整结果解析（否则进程/端口列表会静默缺项），应报错或并入备注。
+    pub fn truncation_note(&self) -> Option<String> {
+        let which = match (self.stdout_truncated, self.stderr_truncated) {
+            (true, true) => "stdout 与 stderr",
+            (true, false) => "stdout",
+            (false, true) => "stderr",
+            _ => return None,
+        };
+        Some(format!(
+            "子进程{which}输出不完整（超过 {} MiB 捕获上限被截断，或子进程退出后管道未能排空、读取超时被放弃）",
+            MAX_CAPTURE_BYTES / (1024 * 1024)
+        ))
+    }
+}
+
+/// 子进程退出后等待管道读线程收尾的宽限：正常情况下进程退出管道随即 EOF，读线程几乎立刻结束；
+/// 孙进程继承管道写端时 EOF 永不到来，若无上限的 join 会把"宿主总超时"承诺变成永久阻塞。
+const PIPE_DRAIN_GRACE: Duration = Duration::from_secs(2);
+
+/// 限时回收线程：超限后放弃（JoinHandle 落地即 detach，读线程仍在排空管道并会在
+/// 写端全部关闭后自行退出），返回 None。仅用于子进程已退出/被回收之后的收尾。
+fn join_with_deadline<T>(handle: thread::JoinHandle<T>, limit: Duration) -> Option<T> {
+    let deadline = Instant::now() + limit;
+    while !handle.is_finished() {
+        if Instant::now() >= deadline { return None; }
+        thread::sleep(Duration::from_millis(10));
+    }
+    handle.join().ok()
+}
+
 /// 带宿主侧总超时地运行命令并捕获全部输出。
 /// 超时后 kill + wait，避免子进程卡死导致永久阻塞。
 pub fn run_with_timeout(
@@ -162,12 +194,15 @@ pub fn run_with_timeout_input(
     let stderr_thread = thread::spawn(move || read_all_capped(stderr_pipe, MAX_CAPTURE_BYTES));
     match wait_child_with_deadline(&mut child, timeout, None) {
         Ok(status) => {
-            let stdout = stdout_thread.join().unwrap_or_else(|_| ReadCapture::default());
-            let stderr = stderr_thread.join().unwrap_or_else(|_| ReadCapture::default());
+            // 读线程被放弃时输出不完整：如实标记截断，不得把半截输出当成完整结果。
+            let stdout = join_with_deadline(stdout_thread, PIPE_DRAIN_GRACE)
+                .unwrap_or_else(|| ReadCapture { truncated: true, ..Default::default() });
+            let stderr = join_with_deadline(stderr_thread, PIPE_DRAIN_GRACE)
+                .unwrap_or_else(|| ReadCapture { truncated: true, ..Default::default() });
             // stdin 写入失败：子进程已成功退出时多半是提前关掉 stdin（EPIPE），不必判失败；
             // 子进程未成功时上报写入错误，便于定位管道问题。
             if let Some(handle) = stdin_thread {
-                if let Ok(Err(error)) = handle.join() {
+                if let Some(Err(error)) = join_with_deadline(handle, PIPE_DRAIN_GRACE) {
                     if !status.success() {
                         bail!("向子进程写入 stdin 失败：{error}");
                     }
@@ -189,13 +224,13 @@ pub fn run_with_timeout_input(
             })
         }
         Err(error) => {
-            // 超时/等待失败：先确保子进程回收，再结束读线程（管道关闭后退出）。
+            // 超时/等待失败：先确保子进程回收，再限时收尾读线程（孙进程持写端时按放弃处理）。
             let _ = child.kill();
             let _ = child.wait();
-            let _ = stdout_thread.join();
-            let _ = stderr_thread.join();
+            let _ = join_with_deadline(stdout_thread, PIPE_DRAIN_GRACE);
+            let _ = join_with_deadline(stderr_thread, PIPE_DRAIN_GRACE);
             if let Some(handle) = stdin_thread {
-                let _ = handle.join();
+                let _ = join_with_deadline(handle, PIPE_DRAIN_GRACE);
             }
             Err(error)
         }
@@ -283,7 +318,9 @@ pub fn run_with_idle_timeout(
     control.checkpoint()?;
     command.stdin(Stdio::null()).stdout(Stdio::piped()).stderr(Stdio::piped());
     #[cfg(windows)] { use std::os::windows::process::CommandExt; command.creation_flags(0x08000000); }
-    let mut child = command.spawn().context("无法启动子进程")?;
+    let mut child = command.spawn().map_err(|error| {
+        anyhow::anyhow!("无法启动 {}：{error}", command.get_program().to_string_lossy())
+    })?;
     let (send,recv) = mpsc::sync_channel(64);
     // spawn 成功后若 take 失败，必须 kill+wait 回收子进程，避免残留。
     let stdout_pipe = match child.stdout.take() {
@@ -348,7 +385,9 @@ pub fn run_with_idle_timeout(
     })();
     if result.is_err() { let _ = child.kill(); let _ = child.wait(); }
     drop(recv);
-    let _ = stdout.join(); let _ = stderr.join();
+    // 7z 退出后管道应立即 EOF；限时收尾防止孙进程继承写端时 join 永久阻塞。
+    let _ = join_with_deadline(stdout, PIPE_DRAIN_GRACE);
+    let _ = join_with_deadline(stderr, PIPE_DRAIN_GRACE);
     result
 }
 

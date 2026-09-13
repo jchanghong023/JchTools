@@ -39,6 +39,11 @@ impl CliArgs{
             };
             if text.starts_with('-')&&text!="-"{
                 if value_flags.contains(&text){
+                    // 重复传入带值 flag 不再静默取第一个：否则脚本拼接旧变量时可能
+                    // 用错配置/引擎/状态目录执行修改类操作且无任何提示。
+                    if out.values.iter().any(|(k,_)|k==&text){
+                        bail!("参数 {text} 重复传入；每个参数只能指定一次");
+                    }
                     let value=args.get(i+1).with_context(||format!("参数 {text} 缺少对应的值"))?;
                     let value_text=value.to_string_lossy();
                     if value_text.starts_with('-')&&value_text!="-"{
@@ -223,3 +228,24 @@ fn run()->Result<()>{
     Ok(())
 }
 fn main(){if let Err(error)=run(){eprintln!("错误：{error:#}");std::process::exit(1);}}
+
+#[cfg(test)]
+mod tests{
+    use super::*;
+    #[test]
+    fn duplicate_value_flags_are_rejected(){
+        // 重复传参不得静默取第一个：否则脚本拼接旧变量时可能用错配置执行修改类操作。
+        let args:Vec<OsString>=vec![OsString::from("analyze"),OsString::from("x"),OsString::from("--config"),
+            OsString::from("a.json"),OsString::from("--config"),OsString::from("b.json")];
+        let error=match CliArgs::parse(&args[1..],&["--config","--engine","--state"],&["--extract","--yes"]){
+            Err(error)=>error,
+            Ok(_)=>panic!("重复传入的 --config 应被拒绝"),
+        };
+        assert!(error.to_string().contains("重复传入"),"实际错误：{error:#}");
+        // 单次传参与开关 flag 不受影响。
+        let ok:Vec<OsString>=vec![OsString::from("x"),OsString::from("--config"),OsString::from("a.json"),OsString::from("--extract")];
+        let parsed=CliArgs::parse(&ok,&["--config","--engine","--state"],&["--extract","--yes"]).unwrap();
+        assert_eq!(parsed.value("--config"),Some(OsStr::new("a.json")));
+        assert!(parsed.has("--extract"));
+    }
+}

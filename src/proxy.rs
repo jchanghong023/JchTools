@@ -263,8 +263,11 @@ pub fn collect_env_vars(
 /// 2. 无 scheme：`user:pass@host:port`（curl 等工具接受）
 /// 3. WinINET 多协议串：`http=user:pass@proxy:8080;https=proxy:8080`（按 `;` 拆分后对每段单独脱敏）
 fn mask_proxy_credentials(value: &str) -> String {
-    // WinINET 多段：`key=value;key=value`。只要含 `;` 且某段带 `=`，就按段处理。
-    if value.contains(';') && value.contains('=') {
+    // WinINET 多段：`key=value;key=value`。必须每一段都含 `=` 才按段处理：
+    // 只要有一段不含 `=`（例如密码里带字面 `;` 的普通 URL，而整串其它处含 `=`），
+    // 拆段会把同一组凭据的 `:` 与 `@` 切进不同段，两段都判"无凭据"而泄漏明文。
+    if value.contains(';') && value.contains('=')
+        && value.split(';').filter(|s| !s.trim().is_empty()).all(|s| s.contains('=')) {
         return value
             .split(';')
             .map(|seg| mask_single_proxy_segment(seg.trim()))
@@ -314,10 +317,8 @@ fn mask_single_proxy_segment(value: &str) -> String {
         let Some(colon) = userinfo.find(':') else {
             return value.to_string();
         };
+        // 空用户名（`:pass@host`）同样带密码：与有 scheme 分支一致脱敏，不得整串原样返回。
         let user = &userinfo[..colon];
-        if user.is_empty() {
-            return value.to_string();
-        }
         return format!("{}:***@{}", user, &value[at + 1..]);
     }
 
@@ -757,6 +758,9 @@ fn run_capture_oem(program: &std::path::Path, args: &[&str]) -> anyhow::Result<S
         .creation_flags(0x0800_0000); // CREATE_NO_WINDOW
     let output = crate::process::run_with_timeout(&mut command, EXTERNAL_CMD_TIMEOUT)?;
     let display = program.display();
+    if let Some(note) = output.truncation_note() {
+        anyhow::bail!("{display} {note}");
+    }
     if !output.status.success() && output.stdout.is_empty() {
         let err = decode_oem(&output.stderr);
         anyhow::bail!("{display} 退出码 {:?}：{}", output.status.code(), err.trim());
@@ -770,6 +774,9 @@ fn run_capture_oem(program: &std::path::Path, args: &[&str]) -> anyhow::Result<S
     command.args(args);
     let output = crate::process::run_with_timeout(&mut command, EXTERNAL_CMD_TIMEOUT)?;
     let display = program.display();
+    if let Some(note) = output.truncation_note() {
+        anyhow::bail!("{display} {note}");
+    }
     if !output.status.success() && output.stdout.is_empty() {
         anyhow::bail!("{display} 退出码 {:?}", output.status.code());
     }
@@ -794,6 +801,9 @@ fn run_powershell_utf8(script: &str) -> anyhow::Result<String> {
         ])
         .creation_flags(0x0800_0000);
     let output = crate::process::run_with_timeout(&mut command, EXTERNAL_CMD_TIMEOUT)?;
+    if let Some(note) = output.truncation_note() {
+        anyhow::bail!("PowerShell {note}");
+    }
     if !output.status.success() && output.stdout.is_empty() {
         let err = String::from_utf8_lossy(&output.stderr);
         anyhow::bail!("PowerShell 退出码 {:?}：{}", output.status.code(), err.trim());
@@ -872,7 +882,11 @@ fn read_system_proxy() -> Option<SystemProxyStatus> {
 }
 
 fn current_env_map() -> HashMap<String, String> {
-    std::env::vars().collect()
+    // vars() 遇到非 Unicode 环境变量会直接 panic（Windows 未配对代理项 / Unix 非法字节）：
+    // 一个损坏变量不应拖垮整页检测，损失转换保持其余变量可用（与 cli.rs 的 args_os 思路一致）。
+    std::env::vars_os()
+        .map(|(key, value)| (key.to_string_lossy().into_owned(), value.to_string_lossy().into_owned()))
+        .collect()
 }
 
 /// 一站式只读检测。单项失败写入 notes，整体不 panic、不中断其它检测。
@@ -1003,6 +1017,8 @@ pub fn detect_with_env(vars: &HashMap<String, String>, include_public_ip: bool) 
 
 /// 查询访问公网时使用的出口 IP。优先 api.ipify.org，失败回落 ifconfig.me。
 /// 单独函数便于单元测试 normalize；真实网络仅在 UI 刷新状态页时触发。
+/// 依赖 PowerShell，因此仅随 Windows 检测路径编译；调用点也在 `#[cfg(windows)]` 块内。
+#[cfg(windows)]
 fn fetch_public_ip() -> Result<String, String> {
     const ENDPOINTS: &[&str] = &["https://api.ipify.org", "https://ifconfig.me/ip"];
     let mut last = String::from("未配置网络或查询被拒绝");
@@ -1319,6 +1335,12 @@ mod tests {
         assert_eq!(mask_proxy_credentials("user@127.0.0.1:7890"), "user@127.0.0.1:7890");
         // 纯 host:port 无 @，不脱敏。
         assert_eq!(mask_proxy_credentials("127.0.0.1:7890"), "127.0.0.1:7890");
+        // 密码含字面 `;` 且整串其它处含 `=`：不得按 WinINET 拆段（会把同一组凭据的
+        // `:` 与 `@` 切进不同段而泄漏明文），必须整串按单段脱敏。
+        assert_eq!(
+            mask_proxy_credentials("http://user:p;s=x@host:8080"),
+            "http://user:***@host:8080"
+        );
     }
 
     #[test]
@@ -1380,8 +1402,13 @@ mod tests {
 
     #[test]
     fn non_windows_detect_does_not_panic() {
-        let snap = detect(false);
-        assert_eq!(snap.env_vars.len(), 4);
+        // 注入固定快照：真实环境里代理变量的大小写/数量不可预期（非 Windows 机器
+        // 常见小写变量），断言数量会确定性假失败；合并/拆分行为已有专门用例覆盖。
+        let snap = detect_with_env(
+            &map(&[("HTTP_PROXY", "http://127.0.0.1:7890"), ("https_proxy", "http://127.0.0.1:7890"), ("NO_PROXY", "localhost")]),
+            false,
+        );
+        assert!(!snap.env_vars.is_empty(), "注入的代理变量应出现在快照中");
         #[cfg(not(windows))]
         {
             assert!(snap.system_proxy.is_none());

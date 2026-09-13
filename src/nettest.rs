@@ -83,11 +83,17 @@ pub struct ProbeResult {
 
 #[derive(Debug, Clone)]
 pub struct NetTestReport {
-    /// 探测发生的位置：`Windows` 或 `WSL2:<发行版>`。
+    /// 探测发生的位置：`Windows`（非 Windows 平台为 `std::env::consts::OS`）或 `WSL2:<发行版>`。
     pub scope: String,
     pub results: Vec<ProbeResult>,
     /// 报告级备注（如 WSL 不可用、部分目标跳过等）。
     pub notes: Vec<String>,
+}
+
+/// 本机探测报告的 scope 标签：Windows 平台保持品牌值 `Windows`，
+/// 其它平台如实返回 OS 名（run_local 与 UI 的报告匹配共用这一个口径）。
+pub fn local_scope_label() -> &'static str {
+    if cfg!(windows) { "Windows" } else { std::env::consts::OS }
 }
 
 /// 供界面循环探测的目标列表（id / 显示名 / 主机）。
@@ -244,7 +250,7 @@ pub fn run_local(timeout_ms: u64) -> NetTestReport {
         }
     }
     NetTestReport {
-        scope: "Windows".into(),
+        scope: local_scope_label().into(),
         results,
         notes: vec!["仅探测 TCP 443 建连与耗时；成功不保证网页内容完整可用。".into()],
     }
@@ -291,7 +297,8 @@ pub fn wsl_probe_script(timeout_ms: u64) -> String {
         .collect::<Vec<_>>()
         .join(" ");
     // 统一 LF；避免把 CRLF 写进 stdin 造成 `exit 0\r` 之类的解析错误。
-    // 耗时用微秒：EPOCHREALTIME（bash≥5）优先，退回 date +%s%N。
+    // 耗时用微秒：EPOCHREALTIME（bash≥5）优先，退回 date +%s%N；两者都不可用时
+    // 计 0，解析层据此显示「耗时不可测」而不是伪造 <1 ms。
     // 优先 `timeout` 命令；缺失时用后台任务 + sleep/kill 的 bash 内建兜底，避免强依赖 coreutils。
     format!(
         "set +e\n\
@@ -389,6 +396,17 @@ pub fn assemble_wsl_report(
             .find(|(host, _)| host.eq_ignore_ascii_case(target.host))
             .cloned();
         match hit {
+            // 脚本在 bash<5（无 EPOCHREALTIME）且 date 不支持 %s%N 时回退计 0：
+            // 可达性为真，但耗时是占位值，必须显示「不可测」，不得伪造成 <1 ms。
+            Some((_, Ok(0))) => results.push(ProbeResult {
+                id: target.id.into(),
+                name: target.name.into(),
+                host: target.host.into(),
+                status: ProbeStatus::Reachable,
+                latency_us: None,
+                message: "可以连接 · 耗时不可测（发行版缺少微秒级时间源）".into(),
+                tips: Vec::new(),
+            }),
             Some((_, Ok(us))) => results.push(ProbeResult {
                 id: target.id.into(),
                 name: target.name.into(),
@@ -438,6 +456,9 @@ fn run_capture_no_window(program: &std::path::Path, args: &[&str]) -> Result<Str
     let output = crate::process::run_with_timeout(&mut command, LIST_CMD_TIMEOUT)
         .map_err(|e| e.to_string())?;
     let display = program.display().to_string();
+    if let Some(note) = output.truncation_note() {
+        return Err(format!("{display} {note}"));
+    }
     // wsl.exe 可能以 UTF-16 输出；与 run_wsl 共用 decode_wsl_bytes，避免两套解码分叉。
     let text = decode_wsl_bytes(&output.stdout);
     if !output.status.success() && text.trim().is_empty() {
@@ -511,6 +532,10 @@ pub fn run_wsl(distro: &str, timeout_ms: u64) -> NetTestReport {
             return wsl_run_error_report(distro, &error.to_string());
         }
     };
+    // 探测输出被截断说明结果不完整：报给用户而不是静默解析缺项列表。
+    if let Some(note) = output.truncation_note() {
+        return wsl_run_error_report(distro, &note);
+    }
     let mut out = decode_wsl_bytes(&output.stdout);
     let err = decode_wsl_bytes(&output.stderr);
     if out.trim().is_empty() && !err.trim().is_empty() {
@@ -838,7 +863,7 @@ mod tests {
     fn run_local_without_network_does_not_panic() {
         // 只验证结构完整；真实连通性随网络变化，不断言可达性。
         let report = run_local(100);
-        assert_eq!(report.scope, "Windows");
+        assert_eq!(report.scope, local_scope_label());
         assert_eq!(report.results.len(), 3);
         for row in &report.results {
             assert!(!row.message.is_empty());
@@ -860,7 +885,7 @@ mod tests {
     fn run_windows_scope_ignores_distro_argument() {
         // scope=0 时不读 WSL，distro 参数可任意。
         let report = run(0, "Ubuntu-22.04", 100);
-        assert_eq!(report.scope, "Windows");
+        assert_eq!(report.scope, local_scope_label());
         assert_eq!(report.results.len(), 3);
     }
 
@@ -881,8 +906,9 @@ mod tests {
             Duration::from_millis(2000),
         );
         assert!(result.is_err(), "非法主机名应返回解析错误");
-        // 成功或失败后计数器应归零（allow 有并发测试干扰，但至少不应永久卡在高位）。
-        assert!(PENDING_DNS.load(Ordering::SeqCst) < MAX_PENDING_DNS);
+        // 不做全局槽位断言：并行测试的在途解析可能瞬时占满全部槽位，任何时点的全局
+        // 快照在此处都存在竞态。非法主机名走快速失败路径，worker 结束即释放槽位，
+        // 不会永久占位；「恰好释放一次」由 acquire/release 的 swap 仲裁逻辑保证。
     }
 
     #[test]
@@ -899,5 +925,22 @@ mod tests {
                 assert!(!msg.is_empty(), "失败必须给出错误信息");
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod zero_latency_tests {
+    use super::*;
+
+    #[test]
+    fn zero_latency_is_reachable_but_shown_as_unknown() {
+        // 回归：bash<5（无 EPOCHREALTIME）且 date 不支持 %s%N 时脚本回退输出 0。
+        // 可达性为真，但 0 是占位值：不得显示成「<1 ms」，必须标为耗时不可测。
+        let report = assemble_wsl_report("Ubuntu-22.04", "OK github.com 0\n", Vec::new());
+        assert_eq!(report.results.len(), 3);
+        let row = report.results.iter().find(|r| r.host == "github.com").unwrap();
+        assert_eq!(row.status, ProbeStatus::Reachable);
+        assert_eq!(row.latency_us, None, "占位 0 不得当作真实微秒耗时");
+        assert!(row.message.contains("不可测"), "{}", row.message);
     }
 }

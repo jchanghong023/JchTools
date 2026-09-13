@@ -579,13 +579,15 @@ export component AppWindow inherits Window {
                                 Label { text: row.title; font-weight: 600; font-size: 14px; overflow: elide; }
                                 Muted { text: row.hint; wrap: word-wrap; overflow: elide; font-size: 12px; }
                             }
-                            if row.kind == 0: CheckBox { checked: row.checked; enabled: !root.busy;
+                            // 规则控件直接写 config，模态确认期间必须与目录输入同口径禁用：
+                            // 否则键盘可穿透确认框改删除策略，确认文案与实际执行不符。
+                            if row.kind == 0: CheckBox { checked: row.checked; enabled: !root.busy && root.confirm-kind == 0;
                                 text: "启用"; accessible-label: row.title;
                                 toggled => { root.rule-bool(row.key,self.checked); } }
                             if row.kind == 1: ComboBox { width: 220px; model: row.options; current-index: row.index;
-                                enabled: !root.busy; accessible-label: row.title;
+                                enabled: !root.busy && root.confirm-kind == 0; accessible-label: row.title;
                                 selected(value) => { root.rule-choice(row.key,self.current-index); } }
-                            if row.kind == 2: LineEdit { width: 160px; text: row.value; enabled: !root.busy;
+                            if row.kind == 2: LineEdit { width: 160px; text: row.value; enabled: !root.busy && root.confirm-kind == 0;
                                 horizontal-alignment: right; accessible-label: row.title;
                                 // Slint 1.17 的 UIA 桥接会把纯数字的 accessible-value 当成数值属性上报，
                                 // 读屏读到的值只有 0；这里把当前值写进描述，读屏聚焦时报“当前值 N”。
@@ -682,8 +684,10 @@ export component AppWindow inherits Window {
                             if root.busy && root.progress >= 0: Text {
                                 text: round(root.progress * 100) + "%"; font-size: 22px; font-weight: 700; color: Design.accent-ink;
                             }
-                            if root.busy: Button { text: root.paused ? "继续" : "暂停"; clicked => { root.pause-task(); } }
-                            if root.busy: Button { text: "取消任务"; clicked => { root.cancel-task(); } }
+                            // 模态（如 kind=3 停止并关闭）期间禁用：键盘不得穿透模态直接取消任务，
+                            // 否则绕过「返回检查」路径且不可逆。
+                            if root.busy: Button { text: root.paused ? "继续" : "暂停"; enabled: root.confirm-kind == 0; clicked => { root.pause-task(); } }
+                            if root.busy: Button { text: "取消任务"; enabled: root.confirm-kind == 0; clicked => { root.cancel-task(); } }
                             if !root.busy && root.ready: Button { text: "确认并执行整理"; primary: true; enabled: root.confirm-kind == 0; clicked => { root.request-apply(); } }
                             if !root.busy && !root.ready: Button { text: "开始解压与分析"; primary: true; enabled: root.directory != "" && root.confirm-kind == 0;
                                 clicked => { root.request-start(); } }
@@ -849,6 +853,7 @@ export component AppWindow inherits Window {
                             HorizontalLayout { spacing: 10px; cross-axis-alignment: center; min-height: 30px;
                                 Label { text: "代理端口"; width: 72px; font-weight: 600; font-size: 13px; }
                                 port-edit := LineEdit { width: 120px; text: root.proxy-command-port;
+                                    enabled: root.confirm-kind == 0;
                                     horizontal-alignment: right; input-type: number;
                                     accessible-label: "代理端口";
                                     accessible-description: "当前端口 " + root.proxy-command-port;
@@ -921,9 +926,9 @@ export component AppWindow inherits Window {
                             accessible-description: "选择要在其中进行网络测试的 WSL 发行版";
                             selected(value) => { root.select-net-test-wsl(value); }
                         }
-                        if root.net-test-scope == 1: Button { text: "刷新列表"; width: 96px; enabled: !root.net-test-busy;
+                        if root.net-test-scope == 1: Button { text: "刷新列表"; width: 96px; enabled: !root.net-test-busy && root.confirm-kind == 0;
                             clicked => { root.refresh-wsl-distros(); } }
-                        Button { text: "开始测试"; primary: true; enabled: !root.net-test-busy
+                        Button { text: "开始测试"; primary: true; enabled: !root.net-test-busy && root.confirm-kind == 0
                             && (root.net-test-scope == 0 || root.net-test-wsl-selected != "");
                             clicked => { root.run-net-test(root.net-test-scope, root.net-test-wsl-selected); } }
                     }

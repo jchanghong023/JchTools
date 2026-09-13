@@ -127,9 +127,12 @@ fn conflict_groups(job: &mut Job, same_size: bool) -> Result<()> {
         for (seq,key,size) in groups {
             job.context.control.checkpoint()?; group_cursor = seq;
             let filter = format!("active=1 AND {key_expr}=?1 {}",if same_size {"AND size=?2 AND hash IS NOT NULL"} else {"AND (?2 IS NULL)"});
-            let keep_sql = format!("SELECT {FILE_COLUMNS} FROM files WHERE {filter} ORDER BY {} LIMIT 1",rules::ordering_sql(policy));
+            let keep_sql = format!("SELECT {FILE_COLUMNS} FROM files WHERE {filter} ORDER BY {} LIMIT 8",rules::ordering_sql(policy));
             let candidates = job.db.files(&keep_sql,params![key,size])?;
-            let Some(keeper) = candidates.first().cloned() else { continue; };
+            // 清理命中且 cleanup_delete=Keep 的文件保持 active，但不得充当冲突 keeper：
+            // 否则策略排序会让正常版本被删、垃圾文件留下（与 dedup 路径的防护同口径）。
+            // 候选窗口内全部为清理命中时整组跳过。
+            let Some(keeper)=candidates.iter().find(|file|rules::cleanup_reason(&file.rel,file.snapshot.size,&job.config).is_none()).cloned() else { continue; };
             let mut file_cursor = 0;
             loop {
                 let sql = format!("SELECT {FILE_COLUMNS} FROM files WHERE {filter} AND id>?3 AND id<>?4 ORDER BY id LIMIT 256");
@@ -139,6 +142,8 @@ fn conflict_groups(job: &mut Job, same_size: bool) -> Result<()> {
                     file_cursor = file.id;
                     if same_size && file.hash == keeper.hash { continue; }
                     if !same_size && file.snapshot.size == keeper.snapshot.size { continue; }
+                    // 清理命中且 Keep 的文件由清理规则管辖（保留承诺），不作为冲突版本删除。
+                    if rules::cleanup_reason(&file.rel,file.snapshot.size,&job.config).is_some() { continue; }
                     let reason = if same_size { "同名同大小但 Hash 不同：用户选择的版本保留规则" }
                         else { "同名不同大小：用户选择的版本保留规则（不是内容去重）" };
                     // Keeper metadata is checked again before deleting a conflicting version.
@@ -156,14 +161,24 @@ fn conflict_groups(job: &mut Job, same_size: bool) -> Result<()> {
     }
     Ok(())
 }
-fn directory_target(job: &Job, file: &FileRecord) -> Result<PathBuf> {
+fn directory_target(job: &Job, file: &FileRecord, under_output: bool) -> Result<PathBuf> {
     let original = Path::new(&file.rel);
     let mut parent = original.parent().unwrap_or(Path::new("")).to_path_buf();
-    if job.config.merge_directories && !parent.as_os_str().is_empty() {
+    // 已在输出目录之下的文件不再参与合并与扁平化：输出目录内的分类子目录与树中
+    // 同名外部目录重名时，合并会把已归类文件拉回外部目录，下一轮归类又移回来，
+    // 跨运行往复移动、计划永不收敛（under_output 只在此处豁免，不影响归类跳过逻辑）。
+    if job.config.merge_directories && !parent.as_os_str().is_empty() && !under_output {
         let mut merged_parent = None;
         for ancestor in parent.ancestors() {
             let Some(name) = ancestor.file_name().and_then(|s|s.to_str()) else { continue; };
-            let candidate: Option<String> = job.db.conn.query_row("SELECT rel FROM directories WHERE name=?1 ORDER BY depth,rel LIMIT 1",[name.to_lowercase()],|r|r.get(0)).optional()?;
+            let mut statement = job.db.conn.prepare("SELECT rel FROM directories WHERE name=?1 ORDER BY depth,rel")?;
+            let candidates = statement.query_map([name.to_lowercase()],|r|r.get::<_,String>(0))?
+                .collect::<rusqlite::Result<Vec<_>>>()?;
+            // 目录名入库时已统一小写（供 Windows 大小写折叠匹配）；非 Windows 大小写
+            // 敏感，必须按 rel 的实际文件名精确比对，否则 Photos/photos 会被误并。
+            let candidate = candidates.into_iter().find(|rel|{
+                cfg!(windows) || Path::new(rel).file_name().and_then(|n|n.to_str())==Some(name)
+            });
             if let Some(candidate) = candidate {
                 let dest = Path::new(&candidate);
                 if dest != ancestor && !dest.starts_with(ancestor) {
@@ -173,7 +188,7 @@ fn directory_target(job: &Job, file: &FileRecord) -> Result<PathBuf> {
         }
         if let Some(merged) = merged_parent { parent = merged; }
     }
-    if job.config.flatten_single_child {
+    if job.config.flatten_single_child && !under_output {
         loop {
             if parent.as_os_str().is_empty() { break; }
             let current = fsutil::safe_join(&job.root,&fsutil::path_string(&parent)?)?;
@@ -188,19 +203,21 @@ fn directory_target(job: &Job, file: &FileRecord) -> Result<PathBuf> {
     }
     Ok(parent)
 }
-/// `path` 是否已位于 `prefix` 之下（逐段比较；Windows 目录不区分大小写，故忽略 ASCII 大小写）。
+/// `path` 是否已位于 `prefix` 之下（逐段比较；Windows 目录不区分大小写，按 Unicode 折叠，
+/// 与 archive.rs 的 NTFS 口径一致——ASCII 折叠会把非 ASCII 仅大小写不同的路径当成两条）。
 fn under_path(path: &Path, prefix: &Path) -> bool {
     let mut rest = path.components();
     prefix.components().all(|part| {
         rest.next().is_some_and(|next| {
-            if cfg!(windows) { next.as_os_str().eq_ignore_ascii_case(part.as_os_str()) } else { next == part }
+            if cfg!(windows) { next.as_os_str().to_string_lossy().to_lowercase() == part.as_os_str().to_string_lossy().to_lowercase() } else { next == part }
         })
     })
 }
 fn target_will_be_free(job: &Job, path: &Path, rel: &str, source_rel: &str) -> Result<bool> {
-    // Windows 大小写不敏感：仅大小写不同的重命名（如 PHOTO.JPE → PHOTO.jpg）时，
-    // try_exists 对同一物理文件返回 true，必须视为可腾空，否则会错误生成 " (1)" 后缀。
-    if cfg!(windows) && rel.eq_ignore_ascii_case(source_rel) { return Ok(true); }
+    // Windows 大小写不敏感（Unicode 折叠口径，同 under_path）：仅大小写不同的重命名
+    // （如 PHOTO.JPE → PHOTO.jpg）时，try_exists 对同一物理文件返回 true，必须视为可腾空，
+    // 否则会错误生成 " (1)" 后缀。
+    if cfg!(windows) && rel.to_lowercase() == source_rel.to_lowercase() { return Ok(true); }
     // symlink_metadata 不跟随链接：损坏的符号链接也算目录项已存在。
     // 仅 NotFound 视为空闲；权限/IO 错误不得假定目标不存在，否则计划与执行不一致。
     match std::fs::symlink_metadata(path) {
@@ -253,10 +270,10 @@ fn moves(job: &mut Job) -> Result<()> {
             if let Err(error) = fsutil::validate_component(&name) {
                 job.log("命名",&file.rel,"","跳过",&error.to_string(),0)?; continue;
             }
-            let mut parent = directory_target(job,&file)?;
             let output_dir = job.config.output_dir.as_str();
             // Output is included in deduplication but never nested under itself on repeated runs.
             let under_output = !output_dir.is_empty() && under_path(original, Path::new(output_dir));
+            let mut parent = directory_target(job,&file,under_output)?;
             if !under_output && (job.config.classify != ClassifyMode::Off || job.config.large_files) {
                 let extension = Path::new(&name).extension().and_then(|v|v.to_str()).unwrap_or("").to_lowercase();
                 let label = if job.config.large_files && job.config.large_threshold_gib > 0 && file.snapshot.size >= job.config.large_threshold_gib * (1<<30) { Some(PathBuf::from("大文件")) }
@@ -301,6 +318,7 @@ fn moves(job: &mut Job) -> Result<()> {
             let mut target = fsutil::safe_join(&job.root,&desired_rel)?;
             if !target_will_be_free(job,&target,&desired_rel,&file.rel)? || !job.db.reserve_target(&desired_rel,file.id)? {
                 let requested = target.clone(); let mut index = 1u64;
+                let mut skip_move = false;
                 loop {
                     job.context.control.checkpoint()?;
                     let stem = requested.file_stem().and_then(|s|s.to_str()).context("目标文件名无效")?;
@@ -308,9 +326,15 @@ fn moves(job: &mut Job) -> Result<()> {
                     target = requested.parent().context("目标缺少目录")?.join(format!("{stem} ({index}){suffix}"));
                     let rel = fsutil::relative_string(&job.root,&target)?;
                     fsutil::safe_join(&job.root,&rel)?;
+                    // 回退候选撞回源文件自身当前名称（如剥离副本名后原名被其它内容占用再回退）：
+                    // 源自己占着这个名字且不会腾空，视为已就位，不生成 source==target 的空转移动。
+                    if rel == file.rel || (cfg!(windows) && rel.to_lowercase() == file.rel.to_lowercase()) {
+                        skip_move = true; break;
+                    }
                     if target_will_be_free(job,&target,&rel,&file.rel)? && job.db.reserve_target(&rel,file.id)? { break; }
                     index += 1; anyhow::ensure!(index < 1_000_000,"目标名称冲突过多");
                 }
+                if skip_move { continue; }
             }
             let mut planned = action(&file,ActionKind::Move,"按已选择的命名、目录合并、分类规则移动；目标不覆盖",DeleteMode::Keep);
             planned.target = Some(fsutil::relative_string(&job.root,&target)?);
@@ -319,15 +343,20 @@ fn moves(job: &mut Job) -> Result<()> {
     }
     Ok(())
 }
-/// 目录下是否存在未入库文件（隐藏/系统/排除等）；有则不能按空目录清理。
+/// 目录下是否存在未入库内容（隐藏/系统/被排除的文件或空子目录）；有则不能按空目录清理。
+/// 子目录也必须核对：仅含一个空的隐藏子目录的目录在文件核对下"看不见"内容，
+/// 会被误计划为空目录（执行期实空复查虽能自保跳过，但计划承诺落空、skipped 虚增）。
 fn has_unscanned_content(job: &Job, rel: &str) -> Result<bool> {
     let path = fsutil::safe_join(&job.root, rel)?;
-    for entry in walkdir::WalkDir::new(&path).follow_links(false).into_iter().filter_map(|e| e.ok()) {
-        if !entry.file_type().is_file() { continue; }
+    for entry in walkdir::WalkDir::new(&path).follow_links(false).min_depth(1).into_iter().filter_map(|e| e.ok()) {
         job.context.control.checkpoint()?;
         let child = fsutil::relative_string(&job.root, entry.path())?;
-        let in_db: i64 = job.db.conn.query_row("SELECT COUNT(1) FROM files WHERE rel=?1",[&child],|r|r.get(0))?;
-        if in_db == 0 { return Ok(true); }
+        let known: i64 = if entry.file_type().is_dir() {
+            job.db.conn.query_row("SELECT COUNT(1) FROM directories WHERE rel=?1",[&child],|r|r.get(0))?
+        } else {
+            job.db.conn.query_row("SELECT COUNT(1) FROM files WHERE rel=?1",[&child],|r|r.get(0))?
+        };
+        if known == 0 { return Ok(true); }
     }
     Ok(false)
 }
@@ -371,9 +400,14 @@ fn empty_directories(job: &mut Job) -> Result<()> {
         let rows = stmt.query_map([&move_kind], |r| r.get::<_,String>(0))?;
         rows.collect::<rusqlite::Result<Vec<_>>>()?
     };
-    // 相同目标只比一次；后续每个目录做前缀判断即可。
+    // 相同目标只比一次；后续每个目录做前缀比较即可。
     move_targets.sort_unstable();
     move_targets.dedup();
+    // Windows 前缀比较按 Unicode 折叠（与 under_path 口径一致）。目标清单固定，
+    // 在此预折叠一次，避免「目录数×目标数」级别的重复分配。
+    if cfg!(windows) {
+        move_targets = move_targets.into_iter().map(|target| target.to_lowercase()).collect();
+    }
     loop {
         let batch = {
             let mut statement = job.db.conn.prepare("SELECT seq,rel FROM empty_order WHERE seq>?1 ORDER BY seq LIMIT 256")?;
@@ -384,15 +418,11 @@ fn empty_directories(job: &mut Job) -> Result<()> {
         for (seq,rel) in batch {
             cursor = seq; job.context.control.checkpoint()?;
             // 执行后该目录（含子树）将接收被 Move 进来的内容时，不能按空目录处理。
-            // Windows 目录不区分大小写，前缀比较忽略 ASCII 大小写（与 under_path 一致）。
-            let prefix = format!("{rel}/");
+            // Windows 下目录 rel 与目标都已按 Unicode 折叠（目标在上方预折叠一次）。
+            let probe = if cfg!(windows) { format!("{rel}/").to_lowercase() } else { format!("{rel}/") };
             let receives_move = move_targets.iter().any(|target| {
-                if target.len() < prefix.len() { return false; }
-                if cfg!(windows) {
-                    target.as_bytes()[..prefix.len()].eq_ignore_ascii_case(prefix.as_bytes())
-                } else {
-                    target.starts_with(&prefix)
-                }
+                if target.len() < probe.len() { return false; }
+                target.starts_with(&probe)
             });
             if receives_move { continue; }
             // 执行后会留在该目录（含其子树）里的文件：深层留驻文件会让对应子目录进不了
