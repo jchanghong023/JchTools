@@ -345,7 +345,9 @@ fn initial_state()->Result<State>{
         plan_filter:None,archives_failed:0,selection_failed:false})
 }
 
-pub fn run()->Result<()> {
+/// 与 `run` 相同，但在事件循环启动前调用 `hook`——自动化测试用它安装驱动定时器，
+/// 以真实回调路径驱动确认流，而不必访问任何内部状态。
+pub fn run_with_pre_loop_hook(hook:impl FnOnce(&AppWindow)+'static)->Result<()> {
     let ui=AppWindow::new()?;
     ui.set_system_dark(system_dark());
     let state=Rc::new(RefCell::new(initial_state()?));
@@ -698,9 +700,13 @@ pub fn run()->Result<()> {
         let path=config::state_dir()?.join("config.json");
         if path.try_exists()?{Ok(Event::ConfigLoaded(None,Config::load(&path)?))}else{Ok(Event::Status("请选择需要整理的目录".into()))}
     });
+    hook(&ui);
     slint::run_event_loop()?;
     Ok(())
 }
+
+/// 默认入口：无额外装配钩子。
+pub fn run()->Result<()> { run_with_pre_loop_hook(|_|()) }
 
 #[cfg(test)]
 mod gui_tests{

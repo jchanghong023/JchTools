@@ -29,7 +29,7 @@
     {
       "name": "rust_lexical",
       "status": "PASS",
-      "details": "21 Rust files have balanced lexical delimiters; this does NOT validate Rust types, APIs, macros or borrow checking."
+      "details": "22 Rust files have balanced lexical delimiters; this does NOT validate Rust types, APIs, macros or borrow checking."
     },
     {
       "name": "sql_syntax",
@@ -44,7 +44,7 @@
     {
       "name": "scope_and_delivery",
       "status": "PASS",
-      "details": "83 Rust test functions supplied, NOT executed; no todo!/unimplemented! in Rust implementation; no prebuilt executable asserted."
+      "details": "84 Rust test functions supplied, NOT executed; no todo!/unimplemented! in Rust implementation; no prebuilt executable asserted."
     }
   ]
 }

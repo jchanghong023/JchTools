@@ -2,7 +2,7 @@
 
 Windows 优先的 Rust + Slint 本地工具箱。当前提供第一个工具“目录整理”，后续工具通过工具注册表接入，界面导航不写死。
 
-> **当前源码树已在 Windows 11 上编译、运行并做过功能验收**（详见 [验证记录](docs/VALIDATION.md)）：`cargo build` / `cargo build --release` 通过，`cargo test` 73 通过 0 失败（含 8 个无头 GUI 状态测试；另有 19 个真实引擎用例默认 ignore，已实测通过），界面、临时目录端到端整理与 5004 文件性能都实测过。没有引擎时构建不内嵌，解压需要 `--engine <完整 7z.exe>`；运行 `scripts/fetch-7zip.ps1` 获取官方引擎后，构建会自动把它压缩内嵌进 EXE。发布包由 `scripts/package-windows.ps1` 生成，只附带许可证与上游源码，不含引擎可执行文件。
+> **当前源码树已在 Windows 11 上编译、运行并做过功能验收**（详见 [验证记录](docs/VALIDATION.md)）：`cargo build` / `cargo build --release` 通过，`cargo test` 74 通过 0 失败（含 8 个无头 GUI 状态测试与 1 个计划执行确认流端到端测试；另有 19 个真实引擎用例默认 ignore，已实测通过），界面、临时目录端到端整理与 5004 文件性能都实测过。没有引擎时构建不内嵌，解压需要 `--engine <完整 7z.exe>`；运行 `scripts/fetch-7zip.ps1` 获取官方引擎后，构建会自动把它压缩内嵌进 EXE。发布包由 `scripts/package-windows.ps1` 生成，只附带许可证与上游源码，不含引擎可执行文件。
 
 ## 7-Zip 引擎（内置）
 
