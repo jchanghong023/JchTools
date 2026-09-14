@@ -1250,6 +1250,9 @@ pub fn run_with_engine_overrides(hook:impl FnOnce(&AppWindow)+'static,overrides:
                             format!("整理结束：已回收 {} 项 · 永久删除 {} 项 · 错误 {} 项；完整记录见「进度与日志」或导出报告。",
                                 summary.recycled,summary.deleted,summary.errors)
                         }.into());
+                        // 新任务加载落地前清空上一任务的旧行：action id 是各任务库各自的
+                        // rowid，旧行在此窗口内仍可交互，会把勾选写进新任务库的同 id 动作。
+                        ui.set_plans(Rc::new(VecModel::from(Vec::<PlanRow>::new())).into());
                         load_plan_filtered(sender.clone(),state.borrow().plan_load.clone(),path,0,0,filter);
                         if state.borrow().close_after{let _=slint::quit_event_loop();}
                     }

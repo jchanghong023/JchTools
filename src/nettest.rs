@@ -460,13 +460,19 @@ fn run_capture_no_window(program: &std::path::Path, args: &[&str]) -> Result<Str
         return Err(format!("{display} {note}"));
     }
     // wsl.exe 可能以 UTF-16 输出；与 run_wsl 共用 decode_wsl_bytes，避免两套解码分叉。
+    // wsl.exe 把自身错误诊断写进 stdout（UTF-16、非零退出码）：非零退出码时不得把
+    // 错误文本当发行版列表解析（会出现幻影条目），统一作为失败返回。
     let text = decode_wsl_bytes(&output.stdout);
-    if !output.status.success() && text.trim().is_empty() {
-        let err = decode_wsl_bytes(&output.stderr);
+    if !output.status.success() {
+        let detail = if !text.trim().is_empty() {
+            text
+        } else {
+            decode_wsl_bytes(&output.stderr)
+        };
         return Err(format!(
             "{display} 退出码 {:?}：{}",
             output.status.code(),
-            err.trim()
+            detail.trim()
         ));
     }
     Ok(text)
@@ -478,13 +484,18 @@ fn run_capture_no_window(program: &std::path::Path, args: &[&str]) -> Result<Str
     command.args(args);
     let output = crate::process::run_with_timeout(&mut command, LIST_CMD_TIMEOUT)
         .map_err(|e| e.to_string())?;
-    if !output.status.success() && output.stdout.is_empty() {
-        let err = String::from_utf8_lossy(&output.stderr);
+    // 与 Windows 版同口径：非零退出码时输出不得当成功结果解析。
+    if !output.status.success() {
+        let detail = if output.stdout.is_empty() {
+            String::from_utf8_lossy(&output.stderr).into_owned()
+        } else {
+            String::from_utf8_lossy(&output.stdout).into_owned()
+        };
         return Err(format!(
             "{} 退出码 {:?}：{}",
             program.display(),
             output.status.code(),
-            err.trim()
+            detail.trim()
         ));
     }
     Ok(String::from_utf8_lossy(&output.stdout).into_owned())
