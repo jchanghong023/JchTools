@@ -9,6 +9,10 @@ import json, re, shutil, sqlite3, subprocess, sys, tomllib, xml.etree.ElementTre
 from pathlib import Path
 ROOT = Path(__file__).resolve().parent.parent
 UPDATE_BASELINE = '--update-test-baseline' in sys.argv[1:]
+# 检查明细含中文；Windows CI 默认 cp1252，会把 print/写文件变成 UnicodeEncodeError。
+# 明确按 UTF-8 输出（stdout 不可重配时退化为替换字符，不让编码问题变成检查失败）。
+try: sys.stdout.reconfigure(encoding='utf-8', errors='replace')
+except AttributeError: pass
 def read_text(path: Path) -> str:
     return path.read_text(encoding='utf-8')
 checks: list[dict[str, object]] = []
@@ -137,7 +141,7 @@ def collect_tests():
 def write_baseline(rows):
     payload={'note':'由 static_check.py --update-test-baseline 生成。删除/改名/放宽断言/新增 ignore 或平台门禁时必须重新生成本文件，并在提交信息说明理由；这是防止「为变绿而削弱测试」的门禁。',
         'tests':sorted(rows,key=lambda r:(r['file'],r['name']))}
-    (ROOT/'scripts'/'test-baseline.json').write_text(json.dumps(payload,ensure_ascii=False,indent=2)+'\n',newline='\n')
+    (ROOT/'scripts'/'test-baseline.json').write_text(json.dumps(payload,ensure_ascii=False,indent=2)+'\n',newline='\n',encoding='utf-8')
 def test_baseline():
     path=ROOT/'scripts'/'test-baseline.json'
     if not path.is_file(): raise Exception('scripts/test-baseline.json 缺失；先运行 python scripts/static_check.py --update-test-baseline 生成')
@@ -226,6 +230,6 @@ report={'kind':'lightweight static source checks only','platform':sys.platform,'
     'cargo_check':'NOT RUN','cargo_test':'NOT RUN','windows_runtime':'NOT RUN','real_7zip_tests':'NOT RUN','multi_tb_benchmark':'NOT RUN','checks':checks}
 report_dir=ROOT/'.tmp'
 report_dir.mkdir(parents=True,exist_ok=True)
-(report_dir/'static-check.json').write_text(json.dumps(report,ensure_ascii=False,indent=2)+'\n',newline='\n')
+(report_dir/'static-check.json').write_text(json.dumps(report,ensure_ascii=False,indent=2)+'\n',newline='\n',encoding='utf-8')
 for row in checks: print(row['status'],row['name'],row['details'])
 sys.exit(any(c['status']=='FAIL' for c in checks))
