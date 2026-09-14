@@ -38,6 +38,10 @@ impl Recycler for MoveRecycle {fn recycle(&self,p:&Path)->Result<(),RecycleFailu
     assert_eq!(platform::remove(&p,Some(&s),DeleteMode::Recycle,false,&Control::default(),&NoBinCount).unwrap(),DeleteResult::RecycledUnverified);
     assert_eq!(platform::remove(&q,Some(&t),DeleteMode::Recycle,true,&Control::default(),&NoBinCount).unwrap(),DeleteResult::RecycledUnverified);
     assert!(!p.exists()&&!q.exists());}
+// 回收的「条目计数验证」是 Windows 专属实现：platform::volume_root 在非 Windows 恒为 None，
+// 引擎不会去询问 bin_count，回收成功也只能记为 RecycledUnverified。下面两个用例断言的就是
+// 这条 Windows 路径；非 Windows 上「回收成功但无法验证」由 recycle_without_bin_counts_as_unverified 覆盖。
+#[cfg(windows)]
 #[test] fn recycle_error_after_move_with_verified_bin_counts_as_recycled(){let f=Fixture::new();let p=f.write("a",b"a",1);struct LateFail{target:PathBuf,calls:AtomicUsize}impl Recycler for LateFail{fn recycle(&self,p:&Path)->Result<(),RecycleFailure>{self.calls.fetch_add(1,Ordering::Relaxed);fs::rename(p,&self.target).map_err(|e|RecycleFailure::Failed(e.to_string()))?;Err(RecycleFailure::Failed("late failure".into()))}fn bin_count(&self,_:&Path)->Option<i64>{Some(self.calls.load(Ordering::Relaxed) as i64)}}let r=LateFail{target:f.root.join("mock-bin-late"),calls:AtomicUsize::new(0)};let s=fsutil::snapshot(&p).unwrap();assert_eq!(platform::remove(&p,Some(&s),DeleteMode::Recycle,true,&Control::default(),&r).unwrap(),DeleteResult::Recycled);assert!(!p.exists()&&r.target.exists());}
 #[test] fn metadata_change_invalidates_snapshot(){let f=Fixture::new();let p=f.write("a",b"one",1);let s=fsutil::snapshot(&p).unwrap();fsutil::unchanged(&p,&s).unwrap();fs::write(&p,b"different").unwrap();assert!(fsutil::unchanged(&p,&s).is_err());}
 #[test] fn rename_never_overwrites(){let f=Fixture::new();let a=f.write("a",b"A",1);let b=f.write("b",b"B",2);assert!(fsutil::rename_noreplace(&a,&b).is_err());assert_eq!(fs::read(a).unwrap(),b"A");assert_eq!(fs::read(b).unwrap(),b"B");}
@@ -51,6 +55,7 @@ impl Recycler for MoveRecycle {fn recycle(&self,p:&Path)->Result<(),RecycleFailu
 #[test] fn recycle_failure_without_permission_keeps_file(){let f=Fixture::new();let p=f.write("a",b"a",1);let s=fsutil::snapshot(&p).unwrap();assert!(platform::remove(&p,Some(&s),DeleteMode::Recycle,false,&Control::default(),&FailRecycle).is_err());assert!(p.exists());}
 #[test] fn recycle_failure_with_permission_deletes(){let f=Fixture::new();let p=f.write("a",b"a",1);let s=fsutil::snapshot(&p).unwrap();assert_eq!(platform::remove(&p,Some(&s),DeleteMode::Recycle,true,&Control::default(),&FailRecycle).unwrap(),DeleteResult::Permanent);assert!(!p.exists());}
 #[test] fn user_cancel_never_falls_back_to_delete(){let f=Fixture::new();let p=f.write("a",b"a",1);assert!(platform::remove(&p,None,DeleteMode::Recycle,true,&Control::default(),&CancelRecycle).is_err());assert!(p.exists());}
+#[cfg(windows)]
 #[test] fn successful_recycle_not_permanent(){let f=Fixture::new();let p=f.write("a",b"a",1);let bin=MoveRecycle{target:f.root.join("mock-bin"),calls:AtomicUsize::new(0)};assert_eq!(platform::remove(&p,None,DeleteMode::Recycle,true,&Control::default(),&bin).unwrap(),DeleteResult::Recycled);assert!(bin.target.exists());assert_eq!(bin.calls.load(Ordering::Relaxed),1);}
 #[test] fn keep_never_calls_recycler(){let f=Fixture::new();let p=f.write("a",b"a",1);assert_eq!(platform::remove(&p,None,DeleteMode::Keep,true,&Control::default(),&CancelRecycle).unwrap(),DeleteResult::Kept);assert!(p.exists());}
 #[test] fn nonempty_directory_cannot_be_removed(){let f=Fixture::new();f.write("sub/a",b"a",1);assert!(platform::remove(&f.root.join("sub"),None,DeleteMode::Permanent,true,&Control::default(),&FailRecycle).is_err());assert!(f.root.join("sub/a").exists());}
