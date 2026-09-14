@@ -167,6 +167,19 @@ pub fn ensure_parent(root: &Path, target: &Path) -> Result<()> {
     safe_join(root, &rel)?;
     Ok(())
 }
+/// 创建目录链本身（`directory` 就是要创建的目录，不再上溯一层）。
+/// `ensure_parent` 只创建传入路径的父级，拿目录调用它只会创建到祖父目录：
+/// 解压成员合入必须用本函数，否则带子目录的成员会以「系统找不到指定的路径」整包失败。
+/// 与 `ensure_parent` 一样对目录链做链接/junction 校验（拒绝把成员写进重定向目录），
+/// 但不校验 `directory` 之下的最终名——那是成员的最终文件名，调用方另有落盘兜底。
+pub fn ensure_dir(root: &Path, directory: &Path) -> Result<()> {
+    let rel = relative_string(root, directory)?;
+    if rel.is_empty() { return Ok(()); } // 选定的根目录自身，无需创建
+    safe_join(root, &rel)?;
+    fs::create_dir_all(directory)?;
+    safe_join(root, &rel)?;
+    Ok(())
+}
 pub fn unique_target(root: &Path, requested: &Path) -> Result<PathBuf> {
     let parent = requested.parent().context("目标没有父目录")?;
     let stem = requested.file_stem().and_then(|v| v.to_str()).context("无效文件名")?;

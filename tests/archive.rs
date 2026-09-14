@@ -16,6 +16,24 @@ impl ArchiveFixture {
 fn config()->Config {Config {reserve_gib:0,global_delete:DeleteMode::Permanent,archive_delete:DeleteChoice::Keep,
     extract_conflict:ConflictPolicy::KeepBoth,max_ratio:0,..Config::default()}}
 #[test] #[ignore = "Requires explicitly provided real 7-Zip engine"]
+fn members_in_subdirectories_merge_into_created_parents(){
+    // 回归：含子目录的包此前只创建到祖父目录，成员改名以「系统找不到指定的路径」失败，
+    // 整包被记为失败并留下半截空目录（含目录的 RAR 完全解不出来）。
+    let f=ArchiveFixture::new();
+    fs::create_dir_all(f.input.join("sub/dir1")).unwrap();
+    fs::create_dir_all(f.input.join("sub/dir2")).unwrap();
+    fs::write(f.input.join("sub/dir1/file1.txt"),b"one").unwrap();
+    fs::write(f.input.join("sub/dir2/file2.txt"),b"two").unwrap();
+    fs::write(f.input.join("top.txt"),b"top").unwrap();
+    f.archive(&f.root.join("pack.zip"),"-tzip");
+    let result=f.run(config());
+    assert_eq!(result.summary.archives_failed,0,"含子目录的包不得计入失败");
+    assert_eq!(result.summary.archives_ok,1);
+    assert_eq!(fs::read(f.root.join("sub/dir1/file1.txt")).unwrap(),b"one");
+    assert_eq!(fs::read(f.root.join("sub/dir2/file2.txt")).unwrap(),b"two");
+    assert_eq!(fs::read(f.root.join("top.txt")).unwrap(),b"top");
+}
+#[test] #[ignore = "Requires explicitly provided real 7-Zip engine"]
 fn zip_extracts_before_generating_dedup_plan(){let f=ArchiveFixture::new();fs::write(f.input.join("inside.txt"),b"duplicate").unwrap();fs::write(f.root.join("existing.txt"),b"duplicate").unwrap();f.archive(&f.root.join("one.zip"),"-tzip");let result=f.run(config());assert_eq!(result.summary.archives_ok,1);assert!(f.root.join("inside.txt").exists());assert!(f.root.join("existing.txt").exists());assert_eq!(result.summary.planned_delete,1);}
 #[test] #[ignore = "Requires explicitly provided real 7-Zip engine"]
 fn solid_7z_is_decoded_in_one_pass(){let f=ArchiveFixture::new();for i in 0..12{fs::write(f.input.join(format!("{i}.txt")),vec![i as u8;8192]).unwrap();}f.archive(&f.root.join("solid.7z"),"-t7z");let result=f.run(config());assert_eq!(result.summary.archives_ok,1);assert_eq!(result.summary.extracted,12);assert!(!f.root.join(".jchtools-work").exists());}

@@ -496,11 +496,13 @@ enum MergeOutcome {
 }
 fn merge_extracted(job: &mut Job, source: &Path, target: &Path, archive_rel: &str) -> Result<MergeOutcome> {
     let incoming = fsutil::snapshot(source).with_context(|| format!("读取暂存解压结果失败：{}",source.display()))?;
-    // 只校验/创建父目录链：最终名被符号链接 / junction / OneDrive 在线占位占用是
-    // 成员级场景（下方改用唯一名落盘），对最终名也做整链校验会让含这类成员的整包失败。
+    // 只校验/创建父目录链（ensure_dir 创建目录链本身，ensure_parent 只会创建到祖父目录，
+    // 带子目录的成员会因此以「系统找不到指定的路径」整包失败）；
+    // 最终名被符号链接 / junction / OneDrive 在线占位占用是成员级场景
+    //（下方改用唯一名落盘），对最终名也做整链校验会让含这类成员的整包失败。
     let parent=target.parent().context("目标缺少父目录")?;
     if parent!=job.root{
-        fsutil::ensure_parent(&job.root,parent)?;
+        fsutil::ensure_dir(&job.root,parent)?;
     }
     if !target.try_exists()? {
         match fsutil::rename_noreplace(source,target) {
@@ -674,6 +676,31 @@ mod tests {
     use crate::engine::Job;
     use crate::platform::NativeRecycler;
     use std::sync::Arc;
+
+    #[test]
+    fn merge_creates_missing_parent_directories() {
+        // 回归：合入成员时把「父目录」传给只创建父级的 ensure_parent，实际只创建到祖父目录，
+        // 带子目录的成员改名必然报「系统找不到指定的路径」，于是含子目录的整包（RAR 的子目录成员、
+        // 分卷包里的 vols/ 目录）解压失败并留下半截空目录。合入必须创建到成员的父目录。
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path().join("data");
+        let state = temp.path().join("state");
+        fs::create_dir(&root).unwrap();
+        let stage = tempfile::tempdir().unwrap();
+        let source = stage.path().join("file1.txt");
+        fs::write(&source, b"member payload").unwrap();
+        let target = root.join("archives/sub/dir1/file1.txt");
+
+        let mut job = Job {
+            root: root.clone(), config: Config::default(), context: TaskContext::default(),
+            db: Database::create(&state).unwrap(), summary: Default::default(),
+            archive_override: None, recycler: Arc::new(NativeRecycler), deleted_unverified: 0,
+        };
+        let outcome = merge_extracted(&mut job, &source, &target, "archives/pack.rar").unwrap();
+        assert!(matches!(outcome, MergeOutcome::Merged(_)), "成员应落到目标路径");
+        assert_eq!(fs::read(&target).unwrap(), b"member payload");
+        assert!(!source.exists(), "合入后暂存文件应已改名离开");
+    }
 
     #[test]
     fn merge_with_keep_delete_mode_reports_blocked_instead_of_lost_content() {
