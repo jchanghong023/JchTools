@@ -53,6 +53,7 @@ serde_json = "1.0"
 tempfile = "3.19"
 filetime = "0.2"
 i-slint-backend-testing = "=1.17.1"
+proptest = "1.11.0"
 
 [[bin]]
 name = "JchTools"

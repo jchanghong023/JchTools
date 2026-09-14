@@ -1,0 +1,51 @@
+name: Mutation testing
+# 变异测试（AGENTS.md 3.2）：回答「测试在行为回退时真的会失败吗」，
+# 对抗「同一个 agent 写代码又写测试」的自证偏差。每周一与手动触发。
+# 范围限定 engine/fsutil：archive.rs 的真实引擎用例默认 #[ignore]，
+# 不跑引擎时其 mutant 几乎必然存活，会淹没预算，故排除（见 AGENTS.md 3.2）。
+on:
+  workflow_dispatch:
+  schedule:
+    - cron: '0 3 * * 1'
+permissions:
+  contents: read
+jobs:
+  mutants:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 300
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Install Linux build dependencies
+        run: sudo apt-get update && sudo apt-get install -y libfontconfig1-dev
+      - name: Install cargo-mutants
+        run: cargo install --locked cargo-mutants
+      - name: Run cargo-mutants on engine and fsutil
+        env:
+          # 存活 mutant 预算：超出即失败。修掉可杀的 mutant 后应逐步下调至 0。
+          SURVIVOR_BUDGET: 12
+        run: |
+          set +e
+          cargo mutants --no-default-features --output .tmp/mutants.out \
+            --file 'src/engine.rs' --file 'src/fsutil.rs' | tee .tmp/mutants.log
+          code=$?
+          set -e
+          # outcomes.json 格式上游声明不稳定；这里只做宽松计数，成败判定以退出码 + 预算为准。
+          total=$(jq '.outcomes | length' .tmp/mutants.out/outcomes.json)
+          survived=$(jq '[.outcomes[] | select(.summary=="MissedMutant")] | length' .tmp/mutants.out/outcomes.json)
+          echo "mutants total: $total, survivors: $survived (budget $SURVIVOR_BUDGET)"
+          if [ "$total" -lt 40 ]; then echo '::error::变异数量异常偏少，检查 --file 过滤是否失效'; exit 1; fi
+          if [ "$code" -eq 0 ]; then echo '全部 mutant 被测试捕获'; exit 0; fi
+          if [ "$code" -eq 2 ] && [ "$survived" -le "$SURVIVOR_BUDGET" ]; then
+            echo "::warning::存活 mutant ${survived} 个，在预算内；请修掉可杀的 mutant 后下调预算"
+            exit 0
+          fi
+          echo "::error::cargo-mutants 退出码 $code，存活 $survived 超预算 $SURVIVOR_BUDGET"
+          exit 1
+      - name: Upload mutants report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: mutants-out
+          path: .tmp/mutants.out
+          if-no-files-found: warn

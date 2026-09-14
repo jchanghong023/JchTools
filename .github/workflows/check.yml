@@ -33,6 +33,9 @@ jobs:
             [Management.Automation.Language.Parser]::ParseFile($_.FullName,[ref]$tokens,[ref]$errors) | Out-Null
             if ($errors) { $errors | Format-List; throw 'PowerShell parse failure' }
           }
+      - name: Static checks
+        shell: pwsh
+        run: python scripts/static_check.py
       - name: Compile, run fixture tests, bundle the full 7-Zip engine
         shell: pwsh
         env:

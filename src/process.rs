@@ -394,8 +394,76 @@ pub fn run_with_idle_timeout(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use proptest::{collection, prelude::*};
     use std::collections::VecDeque;
     use std::sync::Arc;
+
+    /// 关闭失败持久化：默认会在源码旁写 proptest-regressions 文件，违反仓库的 .tmp/ 规则；
+    /// 失败用例由 panic 消息里的 minimal failing input 直接给出，无需落盘重放。
+    fn config() -> ProptestConfig {
+        let mut config = ProptestConfig::with_cases(256);
+        config.failure_persistence = None;
+        config
+    }
+
+    /// 行内容字符：允许任意非 CR/LF 字符（含中文、控制字符、等号等），
+    /// 只排除会改变分行语义的两个字符本身。
+    fn any_line() -> impl Strategy<Value = String> {
+        collection::vec(any::<char>().prop_filter("排除 CR/LF", |c| *c != '\r' && *c != '\n'), 0..16)
+            .prop_map(|chars| chars.into_iter().collect())
+    }
+    /// 生成无歧义的（行内容, 行结束符种子）组合：最后一段非空（「末尾空行」与
+    /// 「结尾终止符」在字节上不可区分），且排除「\r 分隔 + 空行 + \n 分隔」——
+    /// 该组合会拼接成一个 CRLF（单终止符，这是正确语义），留着会把正确合并当吞行。
+    /// 策略提到命名函数：proptest 语句糖的参数列表里出现闭包管道符会解析失败。
+    fn unambiguous_lines_and_seps() -> impl Strategy<Value = (Vec<String>, Vec<u8>)> {
+        (collection::vec(any_line(), 1..12)
+                .prop_filter("最后一段非空", |v| v.last().is_some_and(|l| !l.is_empty())),
+            collection::vec(any::<u8>(), 12))
+            .prop_filter("排除跨空行合并歧义", |(lines, seps)| {
+                (1..lines.len().saturating_sub(1)).all(|j| {
+                    !(seps[j % seps.len()] % 3 == 2 && lines[j].is_empty()
+                        && seps[(j + 1) % seps.len()] % 3 == 1)
+                })
+            })
+    }
+
+    // 属性化回归（2026-09-11 CRLF 缺陷）：任意 \r\n / \n / \r 混排分隔下，
+    // 行内容与顺序必须原样保留，不得多出空行或吞行。
+    proptest! {
+        #![proptest_config(config())]
+        #[test]
+        fn pump_splits_on_any_line_ending_combination(combined in unambiguous_lines_and_seps()) {
+            let (lines, seps) = combined;
+            let mut data = String::new();
+            for (index, line) in lines.iter().enumerate() {
+                if index > 0 {
+                    data.push_str(match seps[index % seps.len()] % 3 { 0 => "\r\n", 1 => "\n", _ => "\r" });
+                }
+                data.push_str(line);
+            }
+            let (send, recv) = mpsc::sync_channel(1024);
+            let handle = pump(std::io::Cursor::new(data.clone().into_bytes()), false, send);
+            handle.join().unwrap();
+            let mut seen = Vec::new();
+            while let Ok(message) = recv.try_recv() {
+                match message {
+                    PipeMessage::Line(err, text) => { assert!(!err); seen.push(text); }
+                    PipeMessage::Error(error) => panic!("合法 UTF-8 输入不应报错：{error}"),
+                }
+            }
+            prop_assert_eq!(seen, lines, "输入：{:?}", data);
+        }
+
+        // 健壮性下界：任意字节序列（含非法 UTF-8、NUL、超长无换行）都不得让 pump panic。
+        #[test]
+        fn pump_never_panics_on_arbitrary_bytes(data in collection::vec(any::<u8>(), 0..4096)) {
+            let (send, recv) = mpsc::sync_channel(1024);
+            let handle = pump(std::io::Cursor::new(data.clone()), false, send);
+            handle.join().unwrap(); // 线程内 panic 会在此暴露
+            while let Ok(_) = recv.try_recv() {}
+        }
+    }
 
     /// is_metadata_line：空行/普通错误行不是元数据；-slt 的 Path/Type/… 字段是元数据。
     #[test]

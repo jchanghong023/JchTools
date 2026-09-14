@@ -125,3 +125,30 @@ Rust 1.98.0 stable `x86_64-pc-windows-msvc`，VS 2022 BuildTools（MSVC 14.44）
 当前基线（2026-09-13 多轮评审后，删除「任务记录」页与「设置与规则预设」页后同步）：`cargo test` 135 通过 / 0 失败 / 19 忽略（基线数字以最近一次 `cargo test` 实测为准）；真实引擎用例 19/19 通过（JCHTOOLS_TEST_7ZIP 实测）；`static_check.py` 7 项检查（有 bash 时 7 PASS；无 bash 的 Windows 主机为 6 PASS + 1 SKIP shell_syntax）：41 项界面规则 + 6 个隐藏字段 = 47 Config 字段、32 回调、56 DML、90 测试函数；新增覆盖：同名重复条目 zip（-aou 自动改名两份保留）、GBK 文件名 zip（内容完整落盘）、空 zip / 仅目录条目 7z（合法空包处理）、手工构造合法 zstd 帧解压；config.json 覆盖写、CSV 公式注入转义、分卷识别谓词；GUI 层新增 7 个无头状态测试（Slint 测试后端：初始规则面、分区切换、非法输入回退、主题不失效计划、目录校验、工具搜索、导航）与 1 个计划执行确认流端到端测试（真实回调+真实引擎线程走完整确认流）。以上各节为历次验证记录，其中数字为当次快照，可能低于当前基线。
 
 `SHA256SUMS.txt` 覆盖除自身外的全部 git 跟踪交付文件（含 `resources/app.ico`、`resources/app-icon.png`、`scripts/make-icon.py` 与 CI workflow），以 `sha256sum -b` 二进制模式生成；改动任何被覆盖文件后必须重新生成并整单复核（`sha256sum -c SHA256SUMS.txt` 应全部 OK）。
+
+## 6. 2026-09-14 测试验收体系加固（对抗 AI 代理自证偏差）
+
+背景：本仓库代码与测试均由 AI 代理产出。本轮按「验收纪律」评审结论落地以下机制，全部在本机（Windows 11，Rust stable MSVC）实测。
+
+新增机制与实测结果：
+
+| 机制 | 落点 | 实测 |
+|---|---|---|
+| 测试基线门禁（防删测试/放宽断言/悄悄加 ignore 或平台门禁） | `scripts/static_check.py` 新增 `test_baseline` 检查 + `scripts/test-baseline.json`（189 项，含 ignore 与 cfg 状态）+ `--update-test-baseline` | PASS；本轮新增 8 个属性测试时门禁先失败、重新生成基线后通过（门禁生效的直接证据） |
+| Slint 界面规则机器检查（AGENTS.md 第 4 节） | `static_check.py` 新增 `slint_layout_width`（布局内禁止 root/parent.width 宽度绑定）、`slint_colors`（十六进制色只许在 Design 全局内）、`slint_accessibility`（含 TouchArea 的组件必须带 accessible-role） | 全部 PASS，对现有代码零误报（检查为结构感知：绝对定位下的填充用法不受影响） |
+| 产品名一致性 | `static_check.py` 新增 `product_naming`（标题/状态目录=Cargo 清单=JchTools，无 MyTools 残留） | PASS |
+| 属性测试（proptest 1.11，随机输入上的需求不变式） | `tests/property.rs`（6 项：safe_relative 不逃逸根目录、绝对路径与 `..` 拒绝、validate_component Windows 兼容不变式、尾随/注入字符拒绝、COM/LPT 保留名边界、CSV 公式注入转义逐格核对）+ `src/process.rs`（2 项：任意 \r\n/\n/\r 混排分行保真、任意字节不 panic） | 6 + 2 全部通过（每项 256 cases） |
+| 单命令验收 | `scripts/acceptance.ps1`（static_check → cargo test → binding loop 扫描；可选 -WithEngine / -WithGuiSmoke -GuiData / -WithPackage；日志落 `.tmp/acceptance/`） | `acceptance.ps1 -WithEngine` 全绿：static-check、cargo-test、binding-loop-scan、engine-tests 均 PASS，未选阶段显式 NOT RUN |
+| 变异测试（cargo-mutants） | `.github/workflows/mutants.yml`（每周一 03:00 UTC + 手动；范围 `src/engine.rs`、`src/fsutil.rs`；存活预算 SURVIVOR_BUDGET=12，超即失败；archive.rs 因真实引擎用例默认 ignore 会假存活而排除） | 工作流已创建，**尚未首次运行**（需 CI 环境；首次运行后按存活报告补测试并下调预算） |
+| CI 补强 | `check.yml` windows job 新增 `python scripts/static_check.py` 步骤 | 待下次 push 验证 |
+| 验收清单状态化 | `docs/ACCEPTANCE.md` 改为编号 + 状态（自动化/半自动/需人工/未执行）+ 证据锚点表；「需人工」条目 AI 代理不得宣称通过 | 完成 |
+| AGENTS.md 3.2 测试验收纪律 | 红测先行、禁削弱测试、DoD 矩阵、独立复核、flaky 禁止重跑到绿、VALIDATION 只追加、人工项不得代验 | 完成 |
+
+本轮全量数字：`cargo test --all-targets` 167 通过 / 0 失败 / 20 忽略（lib 83、core 76、property 6、gui_flow 1、bins 1）；真实引擎用例 20/20 通过（`JCHTOOLS_TEST_7ZIP=resources/7zip/7z.exe`，本机引擎 26.02）；`static_check.py` 12 项检查全 PASS（有 bash）；测试基线 189 项一致。
+
+过程中的假阳性排查记录（保留供后续参照）：
+
+1. `pump_splits_on_any_line_ending_combination` 首版失败两次，均为**测试生成器歧义而非产品缺陷**：(a) 空 字节流与「单个空行」字节相同，pump 返回 0 行是标准语义；(b)「\r 分隔 + 空行 + \n 分隔」拼接成一个 CRLF（单终止符），是 CRLF 修复合并语义的正确结果。已通过「最后一段非空 + 排除跨空行合并组合」把生成器约束到无歧义区间。
+2. `validate_component_rejects_trailing_and_injected_chars` 首版因测试自身把字符序号当字节索引用 `String::insert` 而 panic，与实现无关，已修正为字节边界换算。
+
+仍未验证：mutants 工作流未实际运行（首次运行后需校准存活预算）；`-WithGuiSmoke` / `-WithPackage` 路径本轮未触发（需要 pywinauto 会话与发布打包，留待下一次 GUI/发布变更时执行）。

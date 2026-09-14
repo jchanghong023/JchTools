@@ -23,7 +23,8 @@
 cargo build                # 开发构建（GUI + CLI）
 cargo build --release      # 发布构建
 cargo test                 # 单元与集成测试（真实引擎用例默认 #[ignore]）
-python scripts/static_check.py      # 结构/配置/回调/SQL 静态检查
+python scripts/static_check.py      # 结构/配置/回调/SQL/测试基线/界面规则静态检查
+powershell -NoProfile -File .\scripts\acceptance.ps1 -WithEngine   # 单命令验收（见 3.2）
 powershell -NoProfile -File .\scripts\package-windows.ps1   # 生成含 7-Zip 的发布 ZIP
 ```
 
@@ -44,10 +45,30 @@ JCHTOOLS_TEST_7ZIP=/abs/path/7zz bash scripts/check-linux.sh   # 含真实解压
 - 运行期顺序 `MUST` 保持：`<exe>/resources/7zip` → 用户数据目录下已释放的内嵌副本 → 从 EXE 释放。前两者都存在时以外部文件为准（LGPL 可替换）。
 - 发布包 `MUST NOT` 含 `7z.exe`/`7z.dll`（打包脚本会检查并报错），但 `MUST` 保留 `licenses/`、`NOTICE.txt` 与上游源码压缩包。
 
+## 3.2 测试验收纪律（代码与测试均由 AI 代理产出，以下用于对抗自证偏差）
+
+- **回归测试先行**：修复任何缺陷 `MUST` 先写能在修复前失败的回归测试，并在提交信息或 `docs/VALIDATION.md` 记录反证证据（复现命令 + 修复前失败输出摘要）。只有「修复后通过」而没有「修复前失败」证据的修复不算完成。
+- **禁止削弱测试**：删除、改名、放宽断言、新增 `#[ignore]` 或平台门禁（`#[cfg(...)]`）`MUST` 同步更新 `scripts/test-baseline.json`（用 `python scripts/static_check.py --update-test-baseline` 重新生成）并在提交信息写明理由；`MUST NOT` 只为了让测试变绿而做上述改动。平台门禁 `MUST` 附带原因注释，且被门禁的行为 `SHOULD` 在另一平台仍有覆盖。
+- **完成条件矩阵（DoD）**：按下表执行验证；`MUST NOT` 只跑默认 `cargo test` 就宣称引擎 / UI / 发布相关工作已验证。
+
+  | 变更类型 | 必须通过 |
+  |---|---|
+  | 引擎 / 解压 / 删除 / 路径安全 | `cargo test` + 真实引擎用例（`acceptance.ps1 -WithEngine`）+ `tests/gui_flow.rs` |
+  | UI（`ui/app.slint` / GUI 装配） | `cargo test` + `tests/gui_flow.rs` + `scripts/gui_smoke.py` S1–S3 + 至少两档窗口尺寸目视检查 |
+  | 打包 / 发布 / 引擎捆绑 | `scripts/package-windows.ps1` 全程 + 干净目录解包运行 |
+  | 任意提交前 | `python scripts/static_check.py`（含测试基线与界面规则检查） |
+
+  单命令入口：`powershell -NoProfile -File .\scripts\acceptance.ps1`（可选 `-WithEngine` / `-WithGuiSmoke -GuiData <目录>` / `-WithPackage`）。未执行的阶段会显式打印 `NOT RUN`，`MUST NOT` 把 NOT RUN 报告成通过。
+- **独立复核**：涉及引擎、删除路径、解压安全（`fsutil` / 覆盖语义）或用户可见行为的实质变更，`SHOULD` 由未参与实现的独立代理会话复跑验证并给出证据格式：命令、环境（OS / rustc / 是否真实引擎）、退出码、关键输出行。
+- **flaky 政策**：`MUST NOT` 重跑到绿。测试间歇性失败必须查因；确属 flaky 的要在 `docs/VALIDATION.md` 记录现象与原因，不得静默重跑。
+- **验证记录只追加**：`docs/VALIDATION.md` 的历史条目 `MUST NOT` 回改；新验证以带日期的新小节追加。
+- **人工项**：`docs/ACCEPTANCE.md` 标注「需人工」的条目（真实 TB 级数据、真实网络共享、物理显示器 DPI / 远程桌面等）`MUST NOT` 由代理宣称通过，只能留待人工签署。
+- **变异测试**：发布前或每周 `SHOULD` 触发 `.github/workflows/mutants.yml`（cargo-mutants，范围 `engine` / `fsutil`）；存活 mutant 超预算即失败，新增引擎逻辑时 `SHOULD` 关注存活报告并把可杀的 mutant 用新测试杀掉。
+
 ## 4. 代码与界面约定
 
 - 注释、错误信息、界面文案用中文；标识符、模块名、提交信息用英文或中英混排均可，但同一处保持一致。
-- 界面颜色 `MUST` 走 `ui/app.slint` 的 `Design` 全局（浅色/深色两套由 `Design.dark` 切换）；不要硬编码与主题冲突的颜色。
+- 界面颜色 `MUST` 走 `ui/app.slint` 的 `Design` 全局（浅色/深色两套由 `Design.dark` 切换）；不要硬编码与主题冲突的颜色。本节的颜色 / 布局绑定 / 无障碍规则由 `python scripts/static_check.py` 机器检查（十六进制色只允许出现在 `Design` 全局内、布局内禁止 `root/parent.width` 宽度绑定、含 `TouchArea` 的组件必须带 `accessible-role`）。
 - 控件样式分工已固定：面板切换用 `Tab`（下划线页签），规则分区用 `Pill`（实心胶囊），窗口按钮用 `CaptionButton`，进度用 `ProgressBar`。新增同类控件 `SHOULD` 复用这些组件而不是再写一套。
 - Slint 布局中 `MUST NOT` 用 `root.width` / `parent.width` 绑定子项自身宽度（会形成绑定环，编译期警告、运行期可能 panic）；需要固定宽度就用常量，需要占满剩余空间用 `horizontal-stretch` 或外层容器。
 - 自绘的可交互控件 `MUST` 设置 `accessible-role` 与 `accessible-label`，否则读屏与自动化测试都取不到。

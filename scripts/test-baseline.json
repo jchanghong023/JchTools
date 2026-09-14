@@ -1,0 +1,1139 @@
+{
+  "note": "由 static_check.py --update-test-baseline 生成。删除/改名/放宽断言/新增 ignore 或平台门禁时必须重新生成本文件，并在提交信息说明理由；这是防止「为变绿而削弱测试」的门禁。",
+  "tests": [
+    {
+      "file": "src/archive.rs",
+      "name": "merge_creates_missing_parent_directories",
+      "ignored": false,
+      "cfg": null
+    },
+    {
+      "file": "src/archive.rs",
+      "name": "merge_one_shot_skip_keeps_original_archive",
+      "ignored": false,
+      "cfg": null
+    },
+    {
+      "file": "src/archive.rs",
+      "name": "merge_with_keep_delete_mode_reports_blocked_instead_of_lost_content",
+      "ignored": false,
+      "cfg": null
+    },
+    {
+      "file": "src/bin/cli.rs",
+      "name": "duplicate_value_flags_are_rejected",
+      "ignored": false,
+      "cfg": null
+    },
+    {
+      "file": "src/engine_bundle.rs",
+      "name": "embedded_available_matches_build_configuration",
+      "ignored": false,
+      "cfg": null
+    },
+    {
+      "file": "src/engine_bundle.rs",
+      "name": "release_never_overwrites_existing_files",
+      "ignored": false,
+      "cfg": null
+    },
+    {
+      "file": "src/engine_bundle.rs",
+      "name": "release_writes_files_matching_manifest_hashes",
+      "ignored": false,
+      "cfg": null
+    },
+    {
+      "file": "src/gui.rs",
+      "name": "advanced_rows_hidden_until_toggled",
+      "ignored": false,
+      "cfg": null
+    },
+    {
+      "file": "src/gui.rs",
+      "name": "apply_wsl_distros_selects_preferred_ubuntu",
+      "ignored": false,
+      "cfg": null
+    },
+    {
+      "file": "src/gui.rs",
+      "name": "conflict_scope_row_is_inverted_but_stores_original_semantics",
+      "ignored": false,
+      "cfg": null
+    },
+    {
+      "file": "src/gui.rs",
+      "name": "count_selected_pending_ignores_unselected_and_done",
+      "ignored": false,
+      "cfg": null
+    },
+    {
+      "file": "src/gui.rs",
+      "name": "dependent_rows_follow_their_switches",
+      "ignored": false,
+      "cfg": null
+    },
+    {
+      "file": "src/gui.rs",
+      "name": "initial_surface_lists_defaults",
+      "ignored": false,
+      "cfg": null
+    },
+    {
+      "file": "src/gui.rs",
+      "name": "invalid_number_input_reports_error_and_reverts_value",
+      "ignored": false,
+      "cfg": null
+    },
+    {
+      "file": "src/gui.rs",
+      "name": "merged_rows_write_shadow_fields",
+      "ignored": false,
+      "cfg": null
+    },
+    {
+      "file": "src/gui.rs",
+      "name": "navigation_switches_screen",
+      "ignored": false,
+      "cfg": null
+    },
+    {
+      "file": "src/gui.rs",
+      "name": "net_test_scope_switch_updates_label",
+      "ignored": false,
+      "cfg": null
+    },
+    {
+      "file": "src/gui.rs",
+      "name": "network_identity_defaults_are_neutral",
+      "ignored": false,
+      "cfg": null
+    },
+    {
+      "file": "src/gui.rs",
+      "name": "plan_page_event_rejects_stale_gen_without_touching_completed",
+      "ignored": false,
+      "cfg": null
+    },
+    {
+      "file": "src/gui.rs",
+      "name": "proxy_command_port_updates_tips_and_copy_source",
+      "ignored": false,
+      "cfg": null
+    },
+    {
+      "file": "src/gui.rs",
+      "name": "proxy_platform_switches_command_tips",
+      "ignored": false,
+      "cfg": null
+    },
+    {
+      "file": "src/gui.rs",
+      "name": "refresh_proxy_without_sender_is_noop",
+      "ignored": false,
+      "cfg": null
+    },
+    {
+      "file": "src/gui.rs",
+      "name": "root_edited_reports_missing_directory",
+      "ignored": false,
+      "cfg": null
+    },
+    {
+      "file": "src/gui.rs",
+      "name": "run_net_test_without_sender_is_noop",
+      "ignored": false,
+      "cfg": null
+    },
+    {
+      "file": "src/gui.rs",
+      "name": "search_tools_filters_registry",
+      "ignored": false,
+      "cfg": null
+    },
+    {
+      "file": "src/gui.rs",
+      "name": "section_switch_swaps_rule_rows",
+      "ignored": false,
+      "cfg": null
+    },
+    {
+      "file": "src/gui.rs",
+      "name": "select_proxy_tool_routes_without_spawning",
+      "ignored": false,
+      "cfg": null
+    },
+    {
+      "file": "src/gui.rs",
+      "name": "theme_choice_keeps_plan_ready_but_rule_change_invalidates",
+      "ignored": false,
+      "cfg": null
+    },
+    {
+      "file": "src/gui.rs",
+      "name": "write_via_temp_failure_preserves_original",
+      "ignored": false,
+      "cfg": null
+    },
+    {
+      "file": "src/gui.rs",
+      "name": "write_via_temp_success_replaces_existing",
+      "ignored": false,
+      "cfg": null
+    },
+    {
+      "file": "src/model.rs",
+      "name": "action_state_text_roundtrip_matches_db_values",
+      "ignored": false,
+      "cfg": null
+    },
+    {
+      "file": "src/nettest.rs",
+      "name": "assemble_wsl_report_fills_all_targets",
+      "ignored": false,
+      "cfg": null
+    },
+    {
+      "file": "src/nettest.rs",
+      "name": "assemble_wsl_report_notes_raw_when_unparseable",
+      "ignored": false,
+      "cfg": null
+    },
+    {
+      "file": "src/nettest.rs",
+      "name": "decode_wsl_bytes_handles_bom_and_cjk_utf16",
+      "ignored": false,
+      "cfg": null
+    },
+    {
+      "file": "src/nettest.rs",
+      "name": "failure_tips_include_host_and_optional_extra",
+      "ignored": false,
+      "cfg": null
+    },
+    {
+      "file": "src/nettest.rs",
+      "name": "format_latency_us_shows_sub_millisecond",
+      "ignored": false,
+      "cfg": null
+    },
+    {
+      "file": "src/nettest.rs",
+      "name": "parse_wsl_distros_handles_bom_crlf_and_nul",
+      "ignored": false,
+      "cfg": null
+    },
+    {
+      "file": "src/nettest.rs",
+      "name": "parse_wsl_probe_lines_ignores_empty_host_rows",
+      "ignored": false,
+      "cfg": null
+    },
+    {
+      "file": "src/nettest.rs",
+      "name": "parse_wsl_probe_lines_ok_without_latency_is_failure",
+      "ignored": false,
+      "cfg": null
+    },
+    {
+      "file": "src/nettest.rs",
+      "name": "parse_wsl_probe_lines_reads_ok_and_fail",
+      "ignored": false,
+      "cfg": null
+    },
+    {
+      "file": "src/nettest.rs",
+      "name": "prefer_wsl_prefers_ubuntu_family",
+      "ignored": false,
+      "cfg": null
+    },
+    {
+      "file": "src/nettest.rs",
+      "name": "probe_host_shares_deadline_across_addresses",
+      "ignored": false,
+      "cfg": null
+    },
+    {
+      "file": "src/nettest.rs",
+      "name": "resolve_with_timeout_returns_error_for_invalid_host",
+      "ignored": false,
+      "cfg": null
+    },
+    {
+      "file": "src/nettest.rs",
+      "name": "run_local_without_network_does_not_panic",
+      "ignored": false,
+      "cfg": null
+    },
+    {
+      "file": "src/nettest.rs",
+      "name": "run_windows_scope_ignores_distro_argument",
+      "ignored": false,
+      "cfg": null
+    },
+    {
+      "file": "src/nettest.rs",
+      "name": "targets_cover_three_sites",
+      "ignored": false,
+      "cfg": null
+    },
+    {
+      "file": "src/nettest.rs",
+      "name": "wsl_missing_report_lists_actionable_tips",
+      "ignored": false,
+      "cfg": null
+    },
+    {
+      "file": "src/nettest.rs",
+      "name": "wsl_probe_script_converts_epochrealtime_to_microseconds",
+      "ignored": false,
+      "cfg": null
+    },
+    {
+      "file": "src/nettest.rs",
+      "name": "wsl_probe_script_lists_hosts_and_timeout",
+      "ignored": false,
+      "cfg": null
+    },
+    {
+      "file": "src/nettest.rs",
+      "name": "zero_latency_is_reachable_but_shown_as_unknown",
+      "ignored": false,
+      "cfg": null
+    },
+    {
+      "file": "src/platform.rs",
+      "name": "display_path_text_strips_extended_prefix",
+      "ignored": false,
+      "cfg": null
+    },
+    {
+      "file": "src/platform.rs",
+      "name": "display_time_text_formats_epoch_and_falls_back_on_overflow",
+      "ignored": false,
+      "cfg": null
+    },
+    {
+      "file": "src/platform.rs",
+      "name": "volume_root_covers_local_and_unc",
+      "ignored": false,
+      "cfg": "windows"
+    },
+    {
+      "file": "src/process.rs",
+      "name": "is_metadata_line_classifies_common_lines",
+      "ignored": false,
+      "cfg": null
+    },
+    {
+      "file": "src/process.rs",
+      "name": "pump_handles_crlf_lf_and_trailing_line",
+      "ignored": false,
+      "cfg": null
+    },
+    {
+      "file": "src/process.rs",
+      "name": "pump_never_panics_on_arbitrary_bytes",
+      "ignored": false,
+      "cfg": null
+    },
+    {
+      "file": "src/process.rs",
+      "name": "pump_reports_non_utf8_as_error",
+      "ignored": false,
+      "cfg": null
+    },
+    {
+      "file": "src/process.rs",
+      "name": "pump_splits_on_any_line_ending_combination",
+      "ignored": false,
+      "cfg": null
+    },
+    {
+      "file": "src/process.rs",
+      "name": "read_all_capped_truncates_and_reports_errors",
+      "ignored": false,
+      "cfg": null
+    },
+    {
+      "file": "src/process.rs",
+      "name": "run_idle_timeout_kills_silent_child",
+      "ignored": false,
+      "cfg": null
+    },
+    {
+      "file": "src/process.rs",
+      "name": "run_idle_timeout_supports_cancel",
+      "ignored": false,
+      "cfg": null
+    },
+    {
+      "file": "src/process.rs",
+      "name": "summarize_failure_prefers_stderr_and_truncates",
+      "ignored": false,
+      "cfg": null
+    },
+    {
+      "file": "src/proxy.rs",
+      "name": "attach_ipv4_matches_by_if_index",
+      "ignored": false,
+      "cfg": null
+    },
+    {
+      "file": "src/proxy.rs",
+      "name": "attach_ipv4_prefers_non_apipa_over_lexicographic",
+      "ignored": false,
+      "cfg": null
+    },
+    {
+      "file": "src/proxy.rs",
+      "name": "build_vpn_processes_by_name_and_port_heuristic",
+      "ignored": false,
+      "cfg": null
+    },
+    {
+      "file": "src/proxy.rs",
+      "name": "command_tips_cover_both_platforms_without_blanks",
+      "ignored": false,
+      "cfg": null
+    },
+    {
+      "file": "src/proxy.rs",
+      "name": "command_tips_substitute_custom_port",
+      "ignored": false,
+      "cfg": null
+    },
+    {
+      "file": "src/proxy.rs",
+      "name": "env_vars_merge_case_on_windows_style",
+      "ignored": false,
+      "cfg": null
+    },
+    {
+      "file": "src/proxy.rs",
+      "name": "env_vars_split_case_on_unix_style",
+      "ignored": false,
+      "cfg": null
+    },
+    {
+      "file": "src/proxy.rs",
+      "name": "known_client_match_and_naive_explicit",
+      "ignored": false,
+      "cfg": null
+    },
+    {
+      "file": "src/proxy.rs",
+      "name": "mask_proxy_credentials_covers_no_scheme_format",
+      "ignored": false,
+      "cfg": null
+    },
+    {
+      "file": "src/proxy.rs",
+      "name": "mask_proxy_credentials_covers_winet_multi_protocol",
+      "ignored": false,
+      "cfg": null
+    },
+    {
+      "file": "src/proxy.rs",
+      "name": "mask_proxy_credentials_redacts_password_only",
+      "ignored": false,
+      "cfg": null
+    },
+    {
+      "file": "src/proxy.rs",
+      "name": "non_windows_detect_does_not_panic",
+      "ignored": false,
+      "cfg": null
+    },
+    {
+      "file": "src/proxy.rs",
+      "name": "normalize_public_ip_accepts_v4_v6_and_rejects_html",
+      "ignored": false,
+      "cfg": null
+    },
+    {
+      "file": "src/proxy.rs",
+      "name": "parse_net_adapter_json_single_and_array",
+      "ignored": false,
+      "cfg": null
+    },
+    {
+      "file": "src/proxy.rs",
+      "name": "parse_net_ip_address_json_skips_loopback",
+      "ignored": false,
+      "cfg": null
+    },
+    {
+      "file": "src/proxy.rs",
+      "name": "parse_netstat_listeners_cjk_header_and_ipv6",
+      "ignored": false,
+      "cfg": null
+    },
+    {
+      "file": "src/proxy.rs",
+      "name": "parse_tasklist_csv_with_quoted_and_cjk",
+      "ignored": false,
+      "cfg": null
+    },
+    {
+      "file": "src/proxy.rs",
+      "name": "pick_local_ip_prefers_up_non_virtual",
+      "ignored": false,
+      "cfg": null
+    },
+    {
+      "file": "src/proxy.rs",
+      "name": "pick_local_ip_skips_apipa_when_other_candidates_exist",
+      "ignored": false,
+      "cfg": null
+    },
+    {
+      "file": "src/proxy.rs",
+      "name": "windows_registry_system_proxy_readable",
+      "ignored": false,
+      "cfg": "windows"
+    },
+    {
+      "file": "src/registry.rs",
+      "name": "registry_ids_unique_and_fields_nonempty",
+      "ignored": false,
+      "cfg": null
+    },
+    {
+      "file": "src/rules.rs",
+      "name": "duplicate_allowed_matches_planner_sql",
+      "ignored": false,
+      "cfg": null
+    },
+    {
+      "file": "tests/archive.rs",
+      "name": "bzip2_wrapped_tar_extracts_through_the_named_intermediate_tar",
+      "ignored": true,
+      "cfg": null
+    },
+    {
+      "file": "tests/archive.rs",
+      "name": "corrupt_archive_is_kept_and_logged",
+      "ignored": true,
+      "cfg": null
+    },
+    {
+      "file": "tests/archive.rs",
+      "name": "deleted_same_name_file_does_not_abort_a_later_stream_archive",
+      "ignored": true,
+      "cfg": null
+    },
+    {
+      "file": "tests/archive.rs",
+      "name": "empty_7z_with_only_a_directory_entry_restores_the_directory",
+      "ignored": true,
+      "cfg": null
+    },
+    {
+      "file": "tests/archive.rs",
+      "name": "empty_zip_archive_extracts_cleanly",
+      "ignored": true,
+      "cfg": null
+    },
+    {
+      "file": "tests/archive.rs",
+      "name": "encrypted_archive_is_not_silently_deleted",
+      "ignored": true,
+      "cfg": null
+    },
+    {
+      "file": "tests/archive.rs",
+      "name": "equal_content_archives_delete_and_classify_is_stable",
+      "ignored": true,
+      "cfg": null
+    },
+    {
+      "file": "tests/archive.rs",
+      "name": "gbk_filename_zip_extracts_without_data_loss",
+      "ignored": true,
+      "cfg": null
+    },
+    {
+      "file": "tests/archive.rs",
+      "name": "kept_source_reextract_does_not_recreate_classified_duplicate",
+      "ignored": true,
+      "cfg": null
+    },
+    {
+      "file": "tests/archive.rs",
+      "name": "members_in_subdirectories_merge_into_created_parents",
+      "ignored": true,
+      "cfg": null
+    },
+    {
+      "file": "tests/archive.rs",
+      "name": "nested_archive_depth_limit_retains_unprocessed_package",
+      "ignored": true,
+      "cfg": null
+    },
+    {
+      "file": "tests/archive.rs",
+      "name": "nested_archives_are_processed_recursively",
+      "ignored": true,
+      "cfg": null
+    },
+    {
+      "file": "tests/archive.rs",
+      "name": "skipped_conflict_always_preserves_original_archive",
+      "ignored": true,
+      "cfg": null
+    },
+    {
+      "file": "tests/archive.rs",
+      "name": "solid_7z_is_decoded_in_one_pass",
+      "ignored": true,
+      "cfg": null
+    },
+    {
+      "file": "tests/archive.rs",
+      "name": "successful_source_can_be_deleted",
+      "ignored": true,
+      "cfg": null
+    },
+    {
+      "file": "tests/archive.rs",
+      "name": "tgz_shorthand_restores_the_tar_suffix",
+      "ignored": true,
+      "cfg": null
+    },
+    {
+      "file": "tests/archive.rs",
+      "name": "xz_single_stream_names_member_after_the_archive",
+      "ignored": true,
+      "cfg": null
+    },
+    {
+      "file": "tests/archive.rs",
+      "name": "zip_extracts_before_generating_dedup_plan",
+      "ignored": true,
+      "cfg": null
+    },
+    {
+      "file": "tests/archive.rs",
+      "name": "zip_with_duplicate_entries_extracts_both_via_auto_rename",
+      "ignored": true,
+      "cfg": null
+    },
+    {
+      "file": "tests/archive.rs",
+      "name": "zstd_stream_archive_extracts_with_content",
+      "ignored": true,
+      "cfg": null
+    },
+    {
+      "file": "tests/core.rs",
+      "name": "actions_page_filtered_by_kind_and_rejects_unknown",
+      "ignored": false,
+      "cfg": null
+    },
+    {
+      "file": "tests/core.rs",
+      "name": "analysis_no_changes_and_dedup_keeps_latest",
+      "ignored": false,
+      "cfg": null
+    },
+    {
+      "file": "tests/core.rs",
+      "name": "archive_first_volume_detection",
+      "ignored": false,
+      "cfg": null
+    },
+    {
+      "file": "tests/core.rs",
+      "name": "cancel_while_paused_makes_checkpoint_fail",
+      "ignored": false,
+      "cfg": null
+    },
+    {
+      "file": "tests/core.rs",
+      "name": "cancelled_hash_does_not_read",
+      "ignored": false,
+      "cfg": null
+    },
+    {
+      "file": "tests/core.rs",
+      "name": "category_and_custom_rules",
+      "ignored": false,
+      "cfg": null
+    },
+    {
+      "file": "tests/core.rs",
+      "name": "changed_keeper_after_plan_prevents_delete",
+      "ignored": false,
+      "cfg": null
+    },
+    {
+      "file": "tests/core.rs",
+      "name": "changed_source_after_plan_is_skipped",
+      "ignored": false,
+      "cfg": null
+    },
+    {
+      "file": "tests/core.rs",
+      "name": "class_override_beats_global_keep",
+      "ignored": false,
+      "cfg": null
+    },
+    {
+      "file": "tests/core.rs",
+      "name": "classification_empty_dirs_planned_in_same_pass",
+      "ignored": false,
+      "cfg": null
+    },
+    {
+      "file": "tests/core.rs",
+      "name": "classification_preserves_paths_and_is_idempotent",
+      "ignored": false,
+      "cfg": null
+    },
+    {
+      "file": "tests/core.rs",
+      "name": "cleanup_does_not_become_only_dedup_keeper",
+      "ignored": false,
+      "cfg": null
+    },
+    {
+      "file": "tests/core.rs",
+      "name": "cleanup_keep_files_are_not_conflict_versions",
+      "ignored": false,
+      "cfg": null
+    },
+    {
+      "file": "tests/core.rs",
+      "name": "config_save_overwrites_existing_file",
+      "ignored": false,
+      "cfg": null
+    },
+    {
+      "file": "tests/core.rs",
+      "name": "copy_name_cleanup_never_plans_self_move",
+      "ignored": false,
+      "cfg": null
+    },
+    {
+      "file": "tests/core.rs",
+      "name": "copy_name_cleanup_uses_freed_original_name",
+      "ignored": false,
+      "cfg": null
+    },
+    {
+      "file": "tests/core.rs",
+      "name": "copy_names_can_be_disabled_independently",
+      "ignored": false,
+      "cfg": null
+    },
+    {
+      "file": "tests/core.rs",
+      "name": "copy_suffixes_and_nonempty_name",
+      "ignored": false,
+      "cfg": null
+    },
+    {
+      "file": "tests/core.rs",
+      "name": "coupled_validation_and_bounds",
+      "ignored": false,
+      "cfg": null
+    },
+    {
+      "file": "tests/core.rs",
+      "name": "date_classification_is_idempotent",
+      "ignored": false,
+      "cfg": null
+    },
+    {
+      "file": "tests/core.rs",
+      "name": "defaults_valid_and_roundtrip",
+      "ignored": false,
+      "cfg": null
+    },
+    {
+      "file": "tests/core.rs",
+      "name": "deterministic_keeper_ties",
+      "ignored": false,
+      "cfg": null
+    },
+    {
+      "file": "tests/core.rs",
+      "name": "different_names_can_be_disabled",
+      "ignored": false,
+      "cfg": null
+    },
+    {
+      "file": "tests/core.rs",
+      "name": "directory_scoped_conflicts_do_not_cross_directories",
+      "ignored": false,
+      "cfg": null
+    },
+    {
+      "file": "tests/core.rs",
+      "name": "empty_directory_cleanup_is_bottom_up",
+      "ignored": false,
+      "cfg": null
+    },
+    {
+      "file": "tests/core.rs",
+      "name": "empty_directory_with_percent_in_name_is_cleaned",
+      "ignored": false,
+      "cfg": null
+    },
+    {
+      "file": "tests/core.rs",
+      "name": "empty_directory_with_underscore_not_blocked_by_similar_name",
+      "ignored": false,
+      "cfg": null
+    },
+    {
+      "file": "tests/core.rs",
+      "name": "empty_hidden_subdir_blocks_empty_directory_cleanup",
+      "ignored": false,
+      "cfg": null
+    },
+    {
+      "file": "tests/core.rs",
+      "name": "equal_size_different_hash_not_deleted_when_rule_off",
+      "ignored": false,
+      "cfg": null
+    },
+    {
+      "file": "tests/core.rs",
+      "name": "excluded_tree_not_touched",
+      "ignored": false,
+      "cfg": null
+    },
+    {
+      "file": "tests/core.rs",
+      "name": "existing_hardlinks_not_counted_twice",
+      "ignored": false,
+      "cfg": null
+    },
+    {
+      "file": "tests/core.rs",
+      "name": "export_csv_escapes_formula_prefixes",
+      "ignored": false,
+      "cfg": null
+    },
+    {
+      "file": "tests/core.rs",
+      "name": "finished_plan_cannot_be_replayed",
+      "ignored": false,
+      "cfg": null
+    },
+    {
+      "file": "tests/core.rs",
+      "name": "flatten_classification_allocates_nonconflicting_names",
+      "ignored": false,
+      "cfg": null
+    },
+    {
+      "file": "tests/core.rs",
+      "name": "global_keep_prohibits_deletion",
+      "ignored": false,
+      "cfg": null
+    },
+    {
+      "file": "tests/core.rs",
+      "name": "hardlink_does_not_claim_permanent_bytes",
+      "ignored": false,
+      "cfg": null
+    },
+    {
+      "file": "tests/core.rs",
+      "name": "hardlink_mode_preserves_aliases",
+      "ignored": false,
+      "cfg": null
+    },
+    {
+      "file": "tests/core.rs",
+      "name": "hashes_known_vectors",
+      "ignored": false,
+      "cfg": null
+    },
+    {
+      "file": "tests/core.rs",
+      "name": "hidden_root_directory_still_scanned",
+      "ignored": false,
+      "cfg": "windows"
+    },
+    {
+      "file": "tests/core.rs",
+      "name": "hidden_root_directory_still_scanned",
+      "ignored": false,
+      "cfg": null
+    },
+    {
+      "file": "tests/core.rs",
+      "name": "huge_sizes_use_u64",
+      "ignored": false,
+      "cfg": null
+    },
+    {
+      "file": "tests/core.rs",
+      "name": "keep_never_calls_recycler",
+      "ignored": false,
+      "cfg": null
+    },
+    {
+      "file": "tests/core.rs",
+      "name": "legacy_config_with_removed_fields_still_loads",
+      "ignored": false,
+      "cfg": null
+    },
+    {
+      "file": "tests/core.rs",
+      "name": "merge_directories_never_pulls_files_out_of_output",
+      "ignored": false,
+      "cfg": null
+    },
+    {
+      "file": "tests/core.rs",
+      "name": "metadata_change_invalidates_snapshot",
+      "ignored": false,
+      "cfg": null
+    },
+    {
+      "file": "tests/core.rs",
+      "name": "multipart_name_covers_volume_detection_corners",
+      "ignored": false,
+      "cfg": null
+    },
+    {
+      "file": "tests/core.rs",
+      "name": "no_recursion_leaves_subdirectories_untouched",
+      "ignored": false,
+      "cfg": null
+    },
+    {
+      "file": "tests/core.rs",
+      "name": "nonempty_directory_cannot_be_removed",
+      "ignored": false,
+      "cfg": null
+    },
+    {
+      "file": "tests/core.rs",
+      "name": "pause_defers_checkpoint_until_resume",
+      "ignored": false,
+      "cfg": null
+    },
+    {
+      "file": "tests/core.rs",
+      "name": "plan_pagination_is_bounded",
+      "ignored": false,
+      "cfg": null
+    },
+    {
+      "file": "tests/core.rs",
+      "name": "prepare_and_apply_share_exclusive_state_lock",
+      "ignored": false,
+      "cfg": null
+    },
+    {
+      "file": "tests/core.rs",
+      "name": "recycle_error_after_move_with_verified_bin_counts_as_recycled",
+      "ignored": false,
+      "cfg": "windows"
+    },
+    {
+      "file": "tests/core.rs",
+      "name": "recycle_failure_with_permission_deletes",
+      "ignored": false,
+      "cfg": null
+    },
+    {
+      "file": "tests/core.rs",
+      "name": "recycle_failure_without_permission_keeps_file",
+      "ignored": false,
+      "cfg": null
+    },
+    {
+      "file": "tests/core.rs",
+      "name": "recycle_without_bin_counts_as_unverified",
+      "ignored": false,
+      "cfg": null
+    },
+    {
+      "file": "tests/core.rs",
+      "name": "reject_unknown_configuration",
+      "ignored": false,
+      "cfg": null
+    },
+    {
+      "file": "tests/core.rs",
+      "name": "relative_tar_and_unicode_paths_accepted",
+      "ignored": false,
+      "cfg": null
+    },
+    {
+      "file": "tests/core.rs",
+      "name": "rename_never_overwrites",
+      "ignored": false,
+      "cfg": null
+    },
+    {
+      "file": "tests/core.rs",
+      "name": "report_does_not_overwrite",
+      "ignored": false,
+      "cfg": null
+    },
+    {
+      "file": "tests/core.rs",
+      "name": "reserve_target_is_case_insensitive_unique",
+      "ignored": false,
+      "cfg": null
+    },
+    {
+      "file": "tests/core.rs",
+      "name": "same_name_different_size_version_keeps_newest",
+      "ignored": false,
+      "cfg": null
+    },
+    {
+      "file": "tests/core.rs",
+      "name": "same_name_equal_size_version_keeps_latest",
+      "ignored": false,
+      "cfg": null
+    },
+    {
+      "file": "tests/core.rs",
+      "name": "same_names_different_directories_can_be_disabled",
+      "ignored": false,
+      "cfg": null
+    },
+    {
+      "file": "tests/core.rs",
+      "name": "same_prehash_different_middle_is_not_duplicate",
+      "ignored": false,
+      "cfg": null
+    },
+    {
+      "file": "tests/core.rs",
+      "name": "schema_matches_every_configuration_field",
+      "ignored": false,
+      "cfg": null
+    },
+    {
+      "file": "tests/core.rs",
+      "name": "set_selected_fails_once_apply_started",
+      "ignored": false,
+      "cfg": null
+    },
+    {
+      "file": "tests/core.rs",
+      "name": "set_selected_rejected_after_apply_finished",
+      "ignored": false,
+      "cfg": null
+    },
+    {
+      "file": "tests/core.rs",
+      "name": "stale_hardlink_temps_are_swept",
+      "ignored": false,
+      "cfg": null
+    },
+    {
+      "file": "tests/core.rs",
+      "name": "successful_recycle_not_permanent",
+      "ignored": false,
+      "cfg": "windows"
+    },
+    {
+      "file": "tests/core.rs",
+      "name": "symlink_not_followed_or_deleted",
+      "ignored": false,
+      "cfg": "unix"
+    },
+    {
+      "file": "tests/core.rs",
+      "name": "task_lock_prevents_second_task",
+      "ignored": false,
+      "cfg": null
+    },
+    {
+      "file": "tests/core.rs",
+      "name": "trailing_unicode_whitespace_rejected",
+      "ignored": false,
+      "cfg": null
+    },
+    {
+      "file": "tests/core.rs",
+      "name": "unique_name_preserves_extension",
+      "ignored": false,
+      "cfg": null
+    },
+    {
+      "file": "tests/core.rs",
+      "name": "unsafe_paths_rejected",
+      "ignored": false,
+      "cfg": null
+    },
+    {
+      "file": "tests/core.rs",
+      "name": "unselecting_action_preserves_file",
+      "ignored": false,
+      "cfg": null
+    },
+    {
+      "file": "tests/core.rs",
+      "name": "user_cancel_never_falls_back_to_delete",
+      "ignored": false,
+      "cfg": null
+    },
+    {
+      "file": "tests/core.rs",
+      "name": "user_cancelled_analysis_records_cancelled_status",
+      "ignored": false,
+      "cfg": null
+    },
+    {
+      "file": "tests/core.rs",
+      "name": "windows_reserved_names_rejected",
+      "ignored": false,
+      "cfg": null
+    },
+    {
+      "file": "tests/gui_flow.rs",
+      "name": "plan_execution_confirmation_flow_runs_end_to_end",
+      "ignored": false,
+      "cfg": null
+    },
+    {
+      "file": "tests/property.rs",
+      "name": "exported_csv_escapes_every_formula_trigger",
+      "ignored": false,
+      "cfg": null
+    },
+    {
+      "file": "tests/property.rs",
+      "name": "reserved_device_name_boundary",
+      "ignored": false,
+      "cfg": null
+    },
+    {
+      "file": "tests/property.rs",
+      "name": "safe_relative_output_never_escapes_root",
+      "ignored": false,
+      "cfg": null
+    },
+    {
+      "file": "tests/property.rs",
+      "name": "safe_relative_rejects_absolute_and_parent_segments",
+      "ignored": false,
+      "cfg": null
+    },
+    {
+      "file": "tests/property.rs",
+      "name": "validate_component_ok_implies_windows_safe",
+      "ignored": false,
+      "cfg": null
+    },
+    {
+      "file": "tests/property.rs",
+      "name": "validate_component_rejects_trailing_and_injected_chars",
+      "ignored": false,
+      "cfg": null
+    }
+  ]
+}

@@ -1,4 +1,4 @@
-#requires -Version 5.1
+﻿#requires -Version 5.1
 [CmdletBinding()]
 param([switch]$SkipTests, [switch]$Offline)
 $ErrorActionPreference = 'Stop'

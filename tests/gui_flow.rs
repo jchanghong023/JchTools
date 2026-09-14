@@ -25,6 +25,10 @@ fn make_fixture()->tempfile::TempDir {
 
 #[test]
 fn plan_execution_confirmation_flow_runs_end_to_end(){
+    // SLINT_BACKEND 是进程级环境变量；后续在同文件新增 GUI 测试时必须先拿到这把锁，
+    // 避免并行线程在彼此的事件循环启动后改写渲染后端。
+    static GUI_TEST_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+    let _guard = GUI_TEST_LOCK.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
     // CI runner 与无 GPU 机器没有 OpenGL，默认 femtovg 初始化直接失败；
     // 软件渲染器不依赖 GPU，事件循环、定时器与回调路径仍与生产完全一致。
     std::env::set_var("SLINT_BACKEND","winit-software");
