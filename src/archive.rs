@@ -213,7 +213,7 @@ impl SevenZip {
             // 在源目录旁再写一份只会制造“删除+移动”循环；树内已有相同字节则不再落盘。
             if !destination.try_exists()? {
                 let incoming = fsutil::snapshot(entry.path())?;
-                if let Some(equivalent) = find_identical_elsewhere(job,entry.path(),&incoming,&relative)? {
+                if let Some(equivalent) = find_identical_elsewhere(job,entry.path(),&incoming,&relative,archive_rel)? {
                     job.summary.extracted += 1;
                     let shown = fsutil::relative_string(&job.root,&equivalent)?;
                     job.log("解压",archive_rel,&shown,"成功","树内已有相同内容，未在源目录重复写入；原包按规则处理",meta.len())?;
@@ -231,8 +231,16 @@ impl SevenZip {
             match merge_extracted(job,entry.path(),&destination,archive_rel)? {
                 MergeOutcome::Merged(final_path) => {
                     job.summary.extracted += 1;
-                    normalize_new_member_attributes(&final_path,&job.config);
-                    job.log("解压",archive_rel,&fsutil::relative_string(&job.root,&final_path)?,"成功","解压并同卷移动",meta.len())?;
+                    if normalize_new_member_attributes(&final_path,&job.config){
+                        job.log("解压",archive_rel,&fsutil::relative_string(&job.root,&final_path)?,"成功","解压并同卷移动",meta.len())?;
+                    } else {
+                        // 剥离失败 = 成员带隐藏/系统属性落盘 = 扫描不可见的影子内容。
+                        // 与其它影子内容同口径（207/278 行）：原包强制保留并留日志。
+                        // 后续轮次：叶子成员命中 207 行隐藏门走「跳过」，稳定不动点；
+                        // 若是嵌套归档则每轮重走「合入→剥离失败→保留」，稳定重复、无数据风险。
+                        complete = false;
+                        job.log("解压",archive_rel,&fsutil::relative_string(&job.root,&final_path)?,"保留","成员已解压，但隐藏/系统属性剥离失败（将成扫描不可见的影子文件）；原包强制保留",meta.len())?;
+                    }
                     if job.config.nested_archives && rules::archive_name(&final_path.to_string_lossy()) {
                         enqueue(job,&final_path,depth+1)?;
                     }
@@ -371,21 +379,41 @@ fn has_hidden_component(rel: &str) -> bool {
 
 /// 新解压成员归本工具管理：7-Zip 会还原压缩包内的隐藏/系统属性，若不剥离，
 /// 成员会变成扫描不可见的"影子文件"（去重/归类/清理都看不到它）。按用户当前的
-/// 隐藏/系统过滤设置剥离相应属性，内容与名称不变；剥离失败不影响本次解压结果。
+/// 隐藏/系统过滤设置剥离相应属性，内容与名称不变。
+/// 返回 false 表示剥离未生效，调用方必须按影子内容口径保留原包——剥离失败并不
+/// 「不影响解压结果」：complete 若仍为真，原包会被删除，用户视角即内容丢失。
+/// 路径必须显式补 \\?\ verbatim 前缀：裸 Win32 调用不走 std 的自动转换，
+/// Windows 10 / 旧版 Windows 11（LongPathsEnabled 默认 0，清单需注册表配合）上
+/// >260 字符路径会直接失败；UNC 目标须用 \\?\UNC\ 形式。
 #[cfg(windows)]
-fn normalize_new_member_attributes(path: &Path, config: &crate::config::Config) {
+fn normalize_new_member_attributes(path: &Path, config: &crate::config::Config) -> bool {
     use std::os::windows::ffi::OsStrExt;
     use std::os::windows::fs::MetadataExt;
     use windows_sys::Win32::Storage::FileSystem::SetFileAttributesW;
-    let Ok(meta) = fs::symlink_metadata(path) else { return; };
-    let mut attrs = meta.file_attributes();
+    let Ok(meta) = fs::symlink_metadata(path) else { return false; };
+    let original = meta.file_attributes();
+    let mut attrs = original;
     if !config.include_hidden { attrs &= !2; }
     if !config.include_system { attrs &= !4; }
-    let wide: Vec<u16> = path.as_os_str().encode_wide().chain(Some(0)).collect();
-    let _ = unsafe { SetFileAttributesW(wide.as_ptr(), attrs) };
+    if attrs == original { return true; }
+    let text: Vec<u16> = path.as_os_str().encode_wide().collect();
+    // \\?\ 与 \\?\UNC\ 前缀内的路径不做规范化，按原始组件逐字拼接。
+    let (prefix, skip): (&[u16], usize) = if text.len() >= 4 && text[..4] == [0x5C,0x5C,0x3F,0x5C] {
+        (&[], 0) // 已是 verbatim：std 内部构造的 PathBuf 可能带 \\?\ 前缀，按原样使用
+    } else if text.len() >= 2 && text[..2] == [0x5C,0x5C] {
+        (&[0x5C,0x5C,0x3F,0x5C,0x55,0x4E,0x43,0x5C], 2) // \\server\... → \\?\UNC\server\...
+    } else {
+        (&[0x5C,0x5C,0x3F,0x5C], 0)
+    };
+    let mut wide: Vec<u16> = Vec::with_capacity(prefix.len()+text.len()+1);
+    wide.extend_from_slice(prefix);
+    wide.extend_from_slice(&text[skip..]);
+    wide.push(0);
+    let result = unsafe { SetFileAttributesW(wide.as_ptr(), attrs) };
+    result != 0
 }
 #[cfg(not(windows))]
-fn normalize_new_member_attributes(_path: &Path, _config: &crate::config::Config) {}
+fn normalize_new_member_attributes(_path: &Path, _config: &crate::config::Config) -> bool { true }
 
 /// 只判断根目录以下的层级。用户选定的根目录本身（例如位于隐藏的 AppData 之下）不参与隐藏/系统判定，
 /// 否则整棵树都会被上级目录的属性判定为隐藏，所有解压结果都会被跳过。
@@ -458,12 +486,15 @@ fn protect_volumes(job: &Job, archive: &Path) -> Result<bool> {
     Ok(false)
 }
 /// 在已扫描文件中查找与暂存条目字节相同的副本（按文件名+大小预筛，再逐字节确认）。
-fn find_identical_elsewhere(job: &Job, source: &Path, incoming: &crate::model::Snapshot, member_rel: &str) -> Result<Option<PathBuf>> {
+/// `archive_rel` 是正在解压的原包自身：quine 型自指包（成员字节=整包字节，rsc 式
+/// gzip/zip quine）的成员名+大小与原包行完全一致，若不排除，成员会被判「树内已有
+/// 相同内容」而跳过落盘，随后原包按规则删除——内容两处皆失。
+fn find_identical_elsewhere(job: &Job, source: &Path, incoming: &crate::model::Snapshot, member_rel: &str, archive_rel: &str) -> Result<Option<PathBuf>> {
     let name = Path::new(member_rel).file_name().and_then(|s|s.to_str()).context("无效压缩包成员名")?.to_lowercase();
     let size = i64::try_from(incoming.size).context("成员大小超出范围")?;
     let candidates: Vec<String> = {
-        let mut statement = job.db.conn.prepare("SELECT rel FROM files WHERE active=1 AND name=?1 AND size=?2 ORDER BY id LIMIT 32")?;
-        let rows = statement.query_map(params![name,size],|r|r.get::<_,String>(0))?;
+        let mut statement = job.db.conn.prepare("SELECT rel FROM files WHERE active=1 AND name=?1 AND size=?2 AND rel<>?3 ORDER BY id LIMIT 32")?;
+        let rows = statement.query_map(params![name,size,archive_rel],|r|r.get::<_,String>(0))?;
         rows.collect::<rusqlite::Result<Vec<_>>>()?
     };
     let source_rel = fsutil::relative_string(&job.root,source)?;
@@ -735,6 +766,73 @@ mod tests {
         // 新旧内容都原样保留：目标未被覆盖，新文件仍留在暂存里等待下一次机会。
         assert_eq!(fs::read(&target).unwrap(), b"old content bytes");
         assert_eq!(fs::read(&source).unwrap(), b"brand new and longer");
+    }
+
+    #[test]
+    fn find_identical_elsewhere_never_matches_current_archive(){
+        // 回归：quine 型自指包（成员字节=整个包字节，rsc 式 gzip/zip quine，gzip 头还会
+        // 记录与包同名的原始文件名）此前会把「正在解压的原压缩包自身」当作树内等价副本——
+        // 成员被判「树内已有相同内容」跳过落盘，原包又被按规则删除，内容两处皆失。
+        // 等价查找必须排除当前原包；对其它同名同字节文件的等价去重能力保持不变。
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path().join("data");
+        let state = temp.path().join("state");
+        fs::create_dir(&root).unwrap();
+        let bytes: &[u8] = b"archive-bytes-identical-to-member";
+        fs::write(root.join("pack.zip"), bytes).unwrap();
+        // 暂存成员在真实管线里位于 job.root 下的 .jchtools-work：夹具保持同构。
+        let member = root.join(".jchtools-work/stage/pack.zip");
+        fs::create_dir_all(member.parent().unwrap()).unwrap();
+        fs::write(&member, bytes).unwrap();
+        let mut job = Job {
+            root: root.clone(), config: Config::default(), context: TaskContext::default(),
+            db: Database::create(&state).unwrap(), summary: Default::default(),
+            archive_override: None, recycler: Arc::new(NativeRecycler), deleted_unverified: 0,
+        };
+        let archive_snapshot = fsutil::snapshot(&root.join("pack.zip")).unwrap();
+        job.db.insert_file("pack.zip","pack.zip","pack.zip",&archive_snapshot).unwrap();
+        let incoming = fsutil::snapshot(&member).unwrap();
+        assert!(find_identical_elsewhere(&mut job,&member,&incoming,"pack.zip","pack.zip").unwrap().is_none(),
+            "等价查找不得把正在解压的原包自身当作树内副本");
+        // 对照：其它路径上的同名同字节文件仍按等价副本命中（去重快捷路径不回归）。
+        fs::create_dir(root.join("other")).unwrap();
+        fs::write(root.join("other/pack.zip"), bytes).unwrap();
+        let other_snapshot = fsutil::snapshot(&root.join("other/pack.zip")).unwrap();
+        job.db.insert_file("other/pack.zip","pack.zip","pack.zip",&other_snapshot).unwrap();
+        let hit = find_identical_elsewhere(&mut job,&member,&incoming,"pack.zip","pack.zip").unwrap();
+        let hit_rel = fsutil::relative_string(&root,&hit.unwrap()).unwrap();
+        assert_eq!(hit_rel.as_str(),"other/pack.zip","非原包的等价副本仍应命中");
+    }
+
+    // 平台门禁原因：验证对象是 Windows 路径长度语义（LongPathsEnabled=0 时 >260 普通路径的
+    // 裸 Win32 调用直接失败）与 \\?\ verbatim 前缀拼接，只能在 Windows 上构造。
+    #[cfg(windows)]
+    #[test]
+    fn normalize_strips_hidden_on_plain_long_path(){
+        // 直测锚点：集成测试经 prepare_at 的 root 已 canonicalize（verbatim），裸调用恰好总是
+        // 成功，锁不住「普通路径 + 超长」这一原始缺陷形态；这里显式传非 verbatim 的 >260 路径，
+        // LongPathsEnabled=0 的机器上修复前（裸调用 + 吞错记成功）必失败。
+        use std::os::windows::ffi::OsStrExt;
+        use std::os::windows::fs::MetadataExt;
+        use windows_sys::Win32::Storage::FileSystem::{FILE_ATTRIBUTE_HIDDEN,SetFileAttributesW};
+        let temp = tempfile::tempdir().unwrap();
+        let mut dir = temp.path().to_path_buf();
+        let seg = "n".repeat(40);
+        for i in 0..7 { dir.push(format!("{seg}{i}")); }   // 相对段 ≈300 字符，基路径短但总长 >260
+        fs::create_dir_all(&dir).unwrap();
+        let file = dir.join("deep-hidden.txt");
+        fs::write(&file, b"payload").unwrap();
+        // 植入隐藏属性：这条路径本身 >260，植入同样要走 \\?\（裸调用会以同样方式失败）。
+        let mut wide: Vec<u16> = r"\\".encode_utf16().chain(r"?\".encode_utf16()).collect();
+        wide.extend(file.as_os_str().encode_wide());
+        wide.push(0);
+        assert_ne!(unsafe { SetFileAttributesW(wide.as_ptr(), FILE_ATTRIBUTE_HIDDEN) }, 0,
+            "测试前置：植入隐藏属性失败");
+        let config = Config { include_hidden: false, ..Config::default() };
+        assert!(normalize_new_member_attributes(&file, &config),
+            "普通超长路径的属性剥离必须成功");
+        let attrs = fs::symlink_metadata(&file).unwrap().file_attributes();
+        assert_eq!(attrs & FILE_ATTRIBUTE_HIDDEN, 0, "隐藏属性必须被剥离");
     }
 }
 

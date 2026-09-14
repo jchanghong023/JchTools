@@ -74,8 +74,9 @@ pub enum Event {
     ProxySnapshot(crate::proxy::ProxySnapshot),
     /// 网络测试报告（ChatGPT / Google / GitHub 连通性，Windows 或 WSL2）
     NetTestReport(crate::nettest::NetTestReport),
-    /// WSL 发行版列表：第二项为失败原因（无则 None）
-    WslDistros(Vec<String>, Option<String>),
+    /// WSL 发行版列表：第二项为失败原因（无则 None）；第三项为请求代际——
+    /// 刷新/切换后晚到的旧列表不得清新请求的 busy/状态，UI 按 gen 是否仍是最新决定取舍
+    WslDistros(Vec<String>, Option<String>, u64),
 }
 #[derive(Clone)]
 pub struct Context {

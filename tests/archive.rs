@@ -283,3 +283,45 @@ fn zstd_stream_archive_extracts_with_content(){
     assert_eq!(result.summary.archives_ok,1);
     assert_eq!(fs::read(f.root.join("payload.txt")).unwrap(),payload);
 }
+
+// 平台门禁原因：触发条件本身是 Windows 路径长度语义（>260 字符 + LongPathsEnabled 默认 0 时
+// 裸 Win32 调用失败），且植入隐藏属性需要 SetFileAttributesW，均无法在非 Windows 复现。
+#[test] #[ignore = "Requires explicitly provided real 7-Zip engine"]
+#[cfg(windows)]
+fn long_path_hidden_member_is_stripped_and_archive_completes(){
+    // 管线级行为锚点：>260 字符且存储了隐藏属性的成员（7z 会还原属性），在默认
+    // include_hidden=false 下必须被剥离成可见文件，且 complete 不得被误置——
+    // 否则成员成扫描不可见的影子文件而原包仍被删除，用户视角即内容丢失。
+    // 注意：本测试经 prepare_at 的 root 已 canonicalize（verbatim），锁的是管线级契约；
+    // 「普通路径 + 超长」的原始缺陷形态由 archive.rs 内对 normalize 的直测锚点锁定。
+    use std::os::windows::ffi::OsStrExt;
+    use std::os::windows::fs::MetadataExt;
+    use windows_sys::Win32::Storage::FileSystem::{FILE_ATTRIBUTE_HIDDEN,SetFileAttributesW};
+    let f=ArchiveFixture::new();
+    let mut dir=f.input.clone();
+    let seg="l".repeat(40);
+    for i in 0..7 { dir.push(format!("{seg}{i}")); }             // 相对路径 ≈300 字符，远超 260
+    fs::create_dir_all(&dir).unwrap();
+    let file=dir.join("deep-hidden.txt");
+    fs::write(&file,b"deep hidden payload").unwrap();
+    // 测试自身植入属性必须走 \\?\ 前缀：LongPathsEnabled=0 的机器上裸调用同样会失败
+    //（这正是本次整改所针对的产品缺陷，前置若用裸调用连夹具都搭不起来）。
+    let mut wide: Vec<u16>=r"\\?\".encode_utf16().collect();
+    wide.extend(file.as_os_str().encode_wide());
+    wide.push(0);
+    let ok=unsafe{SetFileAttributesW(wide.as_ptr(),FILE_ATTRIBUTE_HIDDEN)};
+    assert!(ok!=0,"测试前置：植入隐藏属性失败");
+    let meta=fs::symlink_metadata(&file).unwrap();
+    assert_ne!(meta.file_attributes()&2,0,"测试前置：隐藏属性应已植入");
+    f.archive(&f.root.join("deep.7z"),"-t7z");
+    let mut cfg=config();
+    cfg.archive_delete=DeleteChoice::Permanent;
+    let result=f.run(cfg);
+    assert_eq!(result.summary.archives_failed,0,"超长路径包不得计入失败");
+    assert_eq!(result.summary.extracted,1);
+    let rel=dir.strip_prefix(&f.input).unwrap();
+    let dest=f.root.join(rel).join("deep-hidden.txt");
+    let dest_meta=fs::symlink_metadata(&dest).unwrap_or_else(|e|panic!("成员应按原相对路径落盘 {dest:?}: {e}"));
+    assert_eq!(dest_meta.file_attributes()&2,0,"隐藏属性必须被剥离，否则成员成扫描不可见的影子文件");
+    assert!(!f.root.join("deep.7z").exists(),"成员可见后原包应按规则删除（complete 未被误置 false）");
+}

@@ -29,6 +29,8 @@ struct State {
     engine_overrides:Option<EngineTestOverrides>,
     /// 计划页加载代际（跨线程）：丢弃晚到的旧 filter/page 结果。
     plan_load:Arc<PlanLoadSync>,
+    /// WSL 发行版列表请求代际：丢弃晚到的旧列表，防止误清新请求的 busy。
+    wsl_fetch_gen:u64,
 }
 /// 计划页加载代际同步：worker 完成后写入 `completed` 的 gen（单调不降），
 /// 事件循环只应用「事件 gen 仍是 latest 且 filter/page 与当前视图一致」的结果。
@@ -278,6 +280,36 @@ fn async_work_mapped(sender:mpsc::SyncSender<Event>,work:impl FnOnce()->Result<E
         let _=sender.send(event);
     });
 }
+/// Event::Failed 收尾：任务库仍在时重载摘要与计划页，避免界面停留在失败前的旧数据。
+/// 注意 task 必须先用普通 let 从 state 提取：edition 2021 下 if-let scrutinee 的
+/// borrow() Ref 临时存活到整个语句结束，块内 borrow_mut 会 BorrowMutError panic
+/// ——任务取消/失败且有任务时 100% 触发（回归见 gui_tests）。
+fn reload_after_failed(ui:&AppWindow,state:&Rc<RefCell<State>>,sender:&mpsc::SyncSender<Event>){
+    // task 先用普通 let 提取后再 if-let：scrutinee 里的 borrow() Ref 不会存活到块内，
+    // 块内的 borrow_mut 与共享借用才安全（缺陷模式见回归测试 failed_reload_*）。
+    let task=state.borrow().task.clone();
+    if let Some(task)=task{
+        if let Ok(db)=Database::open_existing(&task){
+            if let Ok(summary)=db.summary(){
+                ui.set_summary(summary.description().into());
+                ui.set_archives_failed(summary.archives_failed as i32);
+                ui.set_plan_delete_count(summary.planned_delete as i32);
+                ui.set_plan_move_count(summary.planned_move as i32);
+                ui.set_plan_link_count(summary.planned_link as i32);
+                ui.set_plan_empty_count(summary.planned_empty as i32);
+                {let mut s=state.borrow_mut();
+                    s.planned=summary.planned_delete+summary.planned_move+summary.planned_link+summary.planned_empty;
+                    s.archives_failed=summary.archives_failed;}
+                ui.set_metrics(format!("扫描 {} 个文件 · 解压成功 {} / 失败 {} · 错误 {} 项 · 已回收 {} 项",
+                    summary.scanned,summary.archives_ok,summary.archives_failed,summary.errors,summary.recycled).into());
+            }
+        }
+        let (start,page,filter)={let s=state.borrow();
+            (s.page_starts.get(s.page).copied().unwrap_or(0),s.page,s.plan_filter.clone())};
+        let plan_load=state.borrow().plan_load.clone();
+        load_plan_filtered(sender.clone(),plan_load,task,start,page,filter);
+    }
+}
 fn load_plan_filtered(sender:mpsc::SyncSender<Event>,plan_load:Arc<PlanLoadSync>,path:PathBuf,start:i64,page:usize,kind:Option<String>){
     // 递增代际：同一会话里筛选/翻页会并发发起多次加载，晚到的低代际结果不得覆盖当前视图。
     let gen=plan_load.latest.fetch_add(1,Ordering::AcqRel)+1;
@@ -342,6 +374,11 @@ fn recompute_ready(ui:&AppWindow,state:&State,path:&Path)->bool{
 /// 过期事件直接拒绝，不触碰 completed 缓存——否则低代际事件会 take 走高代际结果并一并丢弃。
 fn plan_page_event_accepted(event_gen:u64,latest:u64,_event_page:usize,event_filter:Option<&str>,_ui_page:usize,ui_filter:Option<&str>)->bool{
     event_gen==latest && event_filter==ui_filter
+}
+/// WSL 发行版列表事件是否可应用：须仍在 WSL 页，且请求代际仍是最新。
+/// 「切走又切回」后晚到的旧列表不得清新请求的 busy（否则测试进行中会重新放行并发操作）。
+fn wsl_distros_event_accepted(event_gen:u64,latest:u64,scope:i32)->bool{
+    scope==1 && event_gen==latest
 }
 /// 会话级导出互斥：同一时间只允许一次 CSV 导出，避免并发写坏目标/临时文件。
 static EXPORT_BUSY:AtomicBool=AtomicBool::new(false);
@@ -782,13 +819,18 @@ fn wire_sync(ui:&AppWindow,state:&Rc<RefCell<State>>){
                 // 否则 apply_net_test_wsl_rows 会把用户已选发行版静默重置回优先项
                 //（手动重试用「刷新列表」按钮）。
                 if previous!=scope{
-                    if let Some(sender)=state.borrow().proxy_events.clone(){
+                    // sender 必须先用普通 let 提取：edition 2021 下 if-let scrutinee 的
+                    // borrow() Ref 临时存活到整个语句结束，块内 borrow_mut 递增代际会
+                    // BorrowMutError panic（生产 GUI 首次切入 WSL 页即崩）。
+                    let sender=state.borrow().proxy_events.clone();
+                    if let Some(sender)=sender{
                         if !ui.get_net_test_busy(){
+                            let gen={let mut s=state.borrow_mut();s.wsl_fetch_gen+=1;s.wsl_fetch_gen};
                             ui.set_net_test_busy(true);
                             ui.set_net_test_wsl_status("正在读取 WSL 发行版列表…".into());
                             async_work_mapped(sender,move||match crate::nettest::list_wsl_distros(){
-                                Ok(distros)=>Ok(Event::WslDistros(distros,None)),
-                                Err(error)=>Ok(Event::WslDistros(Vec::new(),Some(error))),
+                                Ok(distros)=>Ok(Event::WslDistros(distros,None,gen)),
+                                Err(error)=>Ok(Event::WslDistros(Vec::new(),Some(error),gen)),
                             },Event::NetTestFailed);
                         }
                     }
@@ -819,11 +861,12 @@ fn wire_sync(ui:&AppWindow,state:&Rc<RefCell<State>>){
         ui.on_refresh_wsl_distros(move||{if let Some(ui)=weak.upgrade(){
             if ui.get_net_test_busy(){return;}
             let Some(sender)=state.borrow().proxy_events.clone()else{return;};
+            let gen={let mut s=state.borrow_mut();s.wsl_fetch_gen+=1;s.wsl_fetch_gen};
             ui.set_net_test_busy(true);
             ui.set_net_test_wsl_status("正在读取 WSL 发行版列表…".into());
             async_work_mapped(sender,move||match crate::nettest::list_wsl_distros(){
-                Ok(distros)=>Ok(Event::WslDistros(distros,None)),
-                Err(error)=>Ok(Event::WslDistros(Vec::new(),Some(error))),
+                Ok(distros)=>Ok(Event::WslDistros(distros,None,gen)),
+                Err(error)=>Ok(Event::WslDistros(Vec::new(),Some(error),gen)),
             },Event::NetTestFailed);
         }});
     }
@@ -988,7 +1031,7 @@ fn initial_state()->Result<State>{
     Ok(State{config:Config::default(),specs,section:"解压".into(),task:None,
         control:None,conflict:None,logs:VecDeque::new(),page:0,page_starts:vec![0],started:Instant::now(),close_after:false,pending_selection:0,applying:false,planned:0,
         plan_filter:None,archives_failed:0,selection_failed:false,show_advanced:false,proxy_events:None,engine_overrides:None,
-        plan_load:Arc::new(PlanLoadSync::default())})
+        plan_load:Arc::new(PlanLoadSync::default()),wsl_fetch_gen:0})
 }
 
 /// 与 `run` 相同，但在事件循环启动前调用 `hook`——自动化测试用它安装驱动定时器，
@@ -1270,28 +1313,8 @@ pub fn run_with_engine_overrides(hook:impl FnOnce(&AppWindow)+'static,overrides:
                         }
                         ui.set_progress(-1.0);ui.set_progress_note("".into());
                         // 失败/取消后计划与摘要可能已部分变化：从任务库重载摘要与当前计划页，
-                        // 避免界面停留在失败前的旧数据。
-                        if let Some(task)=state.borrow().task.clone(){
-                            if let Ok(db)=Database::open_existing(&task){
-                                if let Ok(summary)=db.summary(){
-                                    ui.set_summary(summary.description().into());
-                                    ui.set_archives_failed(summary.archives_failed as i32);
-                                    ui.set_plan_delete_count(summary.planned_delete as i32);
-                                    ui.set_plan_move_count(summary.planned_move as i32);
-                                    ui.set_plan_link_count(summary.planned_link as i32);
-                                    ui.set_plan_empty_count(summary.planned_empty as i32);
-                                    {let mut s=state.borrow_mut();
-                                        s.planned=summary.planned_delete+summary.planned_move+summary.planned_link+summary.planned_empty;
-                                        s.archives_failed=summary.archives_failed;}
-                                    ui.set_metrics(format!("扫描 {} 个文件 · 解压成功 {} / 失败 {} · 错误 {} 项 · 已回收 {} 项",
-                                        summary.scanned,summary.archives_ok,summary.archives_failed,summary.errors,summary.recycled).into());
-                                }
-                            }
-                            let (start,page,filter)={let s=state.borrow();
-                                (s.page_starts.get(s.page).copied().unwrap_or(0),s.page,s.plan_filter.clone())};
-                            let plan_load=state.borrow().plan_load.clone();
-                            load_plan_filtered(sender.clone(),plan_load,task,start,page,filter);
-                        }
+                        // 避免界面停留在失败前的旧数据（task 提取的借用安全见 reload_after_failed 注释）。
+                        reload_after_failed(&ui,&state,&sender);
                         if state.borrow().close_after{let _=slint::quit_event_loop();}
                     }
                     Event::SelectionSaved(path,saved,error)=>{
@@ -1403,9 +1426,11 @@ pub fn run_with_engine_overrides(hook:impl FnOnce(&AppWindow)+'static,overrides:
                         ui.set_net_test_busy(false);
                         apply_net_test_report(&ui,report);
                     },
-                    Event::WslDistros(distros,error)=>{
-                        // 只在 WSL 页应用：切到 Windows 后晚到的列表不得清新 scope 的 busy/状态。
-                        if ui.get_net_test_scope()==1{
+                    Event::WslDistros(distros,error,gen)=>{
+                        // 只在 WSL 页且请求代际仍是最新时应用：切到 Windows 后晚到的列表不得
+                        // 清新 scope 的 busy/状态；「切走又切回」后晚到的旧列表也不得把新请求
+                        // 的 busy 误清（与 PlanPage/NetTestReport 的归属守卫同一策略）。
+                        if wsl_distros_event_accepted(gen,state.borrow().wsl_fetch_gen,ui.get_net_test_scope()){
                             ui.set_net_test_busy(false);
                             apply_net_test_wsl_rows(&ui,&distros,error);
                         }
@@ -1476,6 +1501,62 @@ mod gui_tests{
         assert!(plan_page_event_accepted(6,6,1,None,0,None));
         // 同代但用户已切筛选：拒绝。
         assert!(!plan_page_event_accepted(6,6,0,None,0,Some("delete")));
+    }
+    #[test]
+    fn wsl_distros_event_requires_current_gen_and_wsl_scope(){
+        // 回归：WSL 列表事件此前只按「当前 scope==1」判定，「刷新中切走又切回」后
+        // 晚到的旧列表会把新请求的 busy 误清，测试进行中重新放行并发操作。
+        // 代际归属：过期请求一律拒绝；同代但已切到 Windows 本机页也拒绝。
+        assert!(!wsl_distros_event_accepted(2,3,1),"过期代际必须拒绝，不得误清新请求的 busy");
+        assert!(wsl_distros_event_accepted(3,3,1));
+        assert!(!wsl_distros_event_accepted(3,3,0),"切到 Windows 本机后不得应用/清 busy");
+    }
+    #[test]
+    fn failed_reload_updates_summary_without_reborrow_panic(){
+        // 回归：Failed 收尾此前把 task 提取放在 if-let scrutinee 里（edition 2021 下
+        // borrow() 临时存活到整个语句结束），块内 borrow_mut 更新 planned 必 BorrowMutError
+        // panic——用户在任务执行中点「取消」即崩掉整个应用，且无任何测试覆盖该分支。
+        with_gui(|app|{
+            let dir=temp_test_dir("failed-reload");
+            let db=Database::create(&dir).unwrap();
+            for i in 0..3{
+                let action=crate::model::Action{id:0,kind:crate::model::ActionKind::Delete,
+                    source:format!("f{i}.txt"),target:None,reason:"测试".into(),expected:None,
+                    keeper:None,hash:None,mode:crate::config::DeleteMode::Permanent,selected:true,
+                    state:"pending".into()};
+                db.add_action(&action).unwrap();
+            }
+            let summary=crate::model::Summary{scanned:5,scanned_bytes:0,archives_ok:0,archives_failed:0,
+                extracted:0,planned_delete:3,planned_move:0,planned_link:0,planned_empty:0,
+                candidate_bytes:0,deleted:0,recycled:0,moved:0,linked:0,skipped:0,errors:0,
+                permanent_bytes:0,recycled_bytes:0};
+            db.set("summary",&summary).unwrap();
+            drop(db);
+            {let mut s=app.state.borrow_mut();s.task=Some(dir.clone());}
+            let (tx,_rx)=mpsc::sync_channel::<crate::control::Event>(8);
+            reload_after_failed(&app.ui,&app.state,&tx);
+            let s=app.state.borrow();
+            assert_eq!(s.planned,3,"Failed 收尾应从任务库重载分母计数");
+            assert_eq!(s.archives_failed,0);
+            assert!(app.ui.get_plan_delete_count()==3,"摘要计数应刷新");
+        }).unwrap();
+    }
+    #[test]
+    fn wsl_scope_switch_with_sender_bumps_gen_and_sets_busy(){
+        // 回归：切页签发点若把 sender 提取留在 if-let scrutinee 里（edition 2021 下
+        // borrow() 临时存活到整个语句结束），块内 borrow_mut 递增代际会 BorrowMutError
+        // panic——生产 GUI 首次切入 WSL 页即崩，而无 sender 的无头用例进不了该块。
+        // 本用例注入真实 channel 锁住「切页不 panic + 代际递增 + busy 置位」。
+        // 后台线程会真实探测 wsl（失败也编码为事件）；接收端随闭包结束丢弃，
+        // 即便先于发送丢弃也有 async_work_mapped 的 `let _=` 兜底。
+        with_gui(|app|{
+            let (tx,_rx)=mpsc::sync_channel::<crate::control::Event>(8);
+            app.state.borrow_mut().proxy_events=Some(tx);
+            let ui=&app.ui;
+            ui.invoke_select_net_test_scope(1);
+            assert_eq!(app.state.borrow().wsl_fetch_gen,1,"切页应递增拉取代际");
+            assert!(ui.get_net_test_busy(),"自动拉取期间应置 busy");
+        }).unwrap();
     }
 
     struct GuiTestApp{ ui:AppWindow, state:Rc<RefCell<State>> }

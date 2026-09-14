@@ -152,3 +152,138 @@ Rust 1.98.0 stable `x86_64-pc-windows-msvc`，VS 2022 BuildTools（MSVC 14.44）
 2. `validate_component_rejects_trailing_and_injected_chars` 首版因测试自身把字符序号当字节索引用 `String::insert` 而 panic，与实现无关，已修正为字节边界换算。
 
 仍未验证：mutants 工作流未实际运行（首次运行后需校准存活预算）；`-WithGuiSmoke` / `-WithPackage` 路径本轮未触发（需要 pywinauto 会话与发布打包，留待下一次 GUI/发布变更时执行）。
+
+## 7. 2026-09-14 持续专家团审查 Session 2 · Round 1（基线 98ca7c5）
+
+范围：全仓库三分片并行初审（引擎与文件安全 / 数据规划网络 CLI / GUI 与界面规则），独立只读交叉复审 + 增量复核。
+
+修复与改动（未提交工作区）：
+
+1. `src/archive.rs` `normalize_new_member_attributes`：返回 `bool`；属性剥离未生效时调用方置 `complete=false` + 原包强制保留 + 日志「保留」（修复前失败被 `let _` 吞掉、`complete` 仍为 true，310 行会删除原压缩包，成员沦为扫描不可见的影子文件）。前缀拼接三分支处理 verbatim / UNC / 普通路径；无可剥离属性时早退；修正「剥离失败不影响本次解压结果」的失实注释。
+2. `tests/core.rs`：为既有 `#[cfg(unix)]` 符号链接门禁补原因注释（AGENTS.md 3.2 要求）。
+3. 新增回归测试 2 个：`tests/archive.rs::long_path_hidden_member_is_stripped_and_archive_completes`（管线级行为锚点，Windows + 真实引擎门控）与 `src/archive.rs::tests::normalize_strips_hidden_on_plain_long_path`（非 verbatim >260 普通路径直测锚点）；`test-baseline.json` 189→191 纯新增。
+
+反证证据（红测先行）：把 `normalize` 函数体临时替换为修复前等价形态（裸路径 `SetFileAttributesW` + 吞错 + 记成功）后，直测锚点在本机（Windows 11 26200，LongPathsEnabled=0，rustc 1.98.0）失败：`assertion left == right failed: 隐藏属性必须被剥离  left: 2  right: 0`（`.tmp/expert-review/s2-r1-unit-red.log`，复现命令 `cargo test --lib normalize_strips_hidden_on_plain_long_path`）；恢复实现后同测试通过（`s2-r1-unit-green.log`）。python 独立探针（`.tmp/expert-review/probe_setattr.py`）：378 字符路径 verbatim 形式 `SetFileAttributesW` ret=1 剥离成功、裸形式 ret=0 err=3（ERROR_PATH_NOT_FOUND），机制与修复方向一致。
+
+裁定记录（初审 A-1 部分证伪）：初审报告的「LongPathsEnabled=0 机器上 >260 字符成员剥离必失败」在产品管线中不可达——`Job.root` 经 `fsutil::normalize_root` 的 `fs::canonicalize`（Windows 恒返回 verbatim 路径），管线内该调用实际总是收到 `\?\` 路径（调试实证进入函数的路径 first4=[92,92,63,92]；集成测试在修复前即通过）。保留并修复的是残留问题：剥离失败（ACL 拒绝/杀软锁/TOCTOU 等任意成因）静默吞错且方向不保守，与同文件 207/278 行等影子内容路径「complete=false + 原包保留」的既定口径矛盾。修复后跨轮行为：叶子成员命中隐藏门走「跳过」稳定不动点；嵌套归档每轮重走「合入→剥离失败→保留」，稳定重复、无数据风险。
+
+交叉复审：首轮 fail（指出集成测试注释与裁定矛盾、缺能在修复前失败的直测锚点）→ 按意见整改（注释改写为管线级锚点定位 + 新增直测锚点 + 调用点注释收敛性表述修正）→ 增量复核 pass。
+
+本轮全量数字：`cargo test --all-targets` 169 通过 / 0 失败 / 21 忽略（lib 84、core 76、property 6、gui_flow 1、bins 2）；真实引擎用例 21/21 通过（`JCHTOOLS_TEST_7ZIP=resources/7zip/7z.exe`，引擎 26.02）；`acceptance.ps1 -WithEngine -WithGuiSmoke -GuiData .tmp/gui-data` 全绿（static-check、cargo-test、binding-loop-scan、engine-tests、gui-smoke S1-S3 全 PASS，package 显式 NOT RUN）；`static_check.py` 12 项检查全 PASS；测试基线 191 项一致。
+
+初审 B/C 分片与 A 分片疑点共 7 项按「只处理有证据的功能性问题」口径记录不修（进度分母失败回退旧值、模态遮罩实例无 accessible-role、gui_smoke 关闭按钮歧义、gui_flow 死变量、equal_bytes 错误上抛整包失败方向保守、nettest 过时注释、LIMIT 8 已记录设计）。
+
+## 8. 2026-09-14 持续专家团审查 Session 2 · Round 2（基线 = 98ca7c5 + Round 1 未提交修复）
+
+范围：全范围重审（3 个全新上下文分片）。确认并修复 2 项初审缺陷；交叉复审另捕获并修复 1 项修复本身引入的高危回归。
+
+修复与改动：
+
+1. `src/planner.rs`（中级）：`cleanup_delete=Keep` 的清理命中文件此前只被防「充当去重 keeper」，作为重复项时无守卫——同组 keeper 先注册（本文件按 keep_duplicate 排序在后）即被按 `duplicate_delete` 删除，结果随排序翻转，违反 rules.json「清理方式=保留：不生成任何清理操作」的承诺，且与冲突路径既有防护（跳过清理命中文件）不一致。修复：去重 keeper 分支在 remove_candidate 前加 `cleanup_reason` 守卫（跳过 + 日志）。反证：守卫临时短路 → 新测试 `cleanup_keep_files_are_not_dedup_deletions` RED（`.tmp/expert-review/s2-r2-dedup-red.log`：清理保留的文件不得按重复规则删除；normal.txt mtime 20 经 `ordering_sql(Newest)="mtime DESC"` 先注册 keeper）。
+2. `src/gui.rs` + `src/control.rs`（低级）：`Event::WslDistros` 此前无请求归属，处理只按「当前 scope==1」判定——「刷新在途→切走→切回（自动发起第二次拉取）」后晚到的旧列表会误清新请求的 busy，测试进行中重新放行并发操作。修复：事件载荷增加请求代际，`State.wsl_fetch_gen` 两处签发点递增，处理收敛到纯函数 `wsl_distros_event_accepted(gen,latest,scope)`（与 PlanPage/NetTestReport 归属守卫同策略），新增无头测试。
+3. 交叉复审捕获（高危，修复 #2 引入）：切页签发点把 sender 提取留在 `if let Some(sender)=state.borrow()...` 的 scrutinee 里，edition 2021 下 `Ref` 临时存活到整个 if-let 语句结束，块内 `state.borrow_mut()` 递增代际必然 `BorrowMutError` panic——生产 GUI 首次切入 WSL 页签即崩；无头测试因 `proxy_events=None` 进不了该块，GUI 冒烟也不点该页签，常规验证全绿属盲区。修复：普通 `let` 提取（Ref 在语句末释放）后再 if-let。反证：临时恢复缺陷模式 → 新测试 `wsl_scope_switch_with_sender_bumps_gen_and_sets_busy` RED（`.tmp/expert-review/s2-r2-borrow-red.log`："RefCell already borrowed"，与复审推断一致）；恢复后 GREEN。该测试注入真实 channel（后台线程真实探测 wsl，发送失败有 `let _=` 兜底，不阻塞测试）。
+
+交叉复审：首轮 fail（C 项借用冲突）→ 按建议修复 + 补测试 → 增量复核 pass。
+
+本轮全量数字：`cargo test --all-targets` 171 通过 / 0 失败 / 21 忽略（lib 86、core 77、property 6、gui_flow 1、bins 2）；真实引擎用例 21/21；`acceptance.ps1 -WithEngine -WithGuiSmoke` 全绿（static-check、cargo-test、binding-loop-scan、engine-tests、gui-smoke 全 PASS；首轮验收因其后又发生代码修改而作废重跑）；`static_check.py` 12 项全 PASS；测试基线 194 项。
+
+初审记录不修（按「只处理有证据的功能性问题」口径）：A 分片 find_identical_elsewhere 候选窗口 LIMIT 32（方向保守）；B 分片 conflict_groups SQL lower() ASCII 折叠（漏删方向保守）、has_unscanned_content 吞 walkdir 错误（执行期实空复查自保）、is_plausible_ip 前导零（展示）、gui keep_duplicate 非默认值显示 index 0（展示）、busybox date %N 优雅降级（可达性判定不受影响）；C 分片 NetTestFailed 无归属（仅 panic 可达，建议后续统一代际）、confirm-kind=3 模态滞留（两出口闭环）、伪 PNG 测试数据（魔数嗅探用例有效）、文本规则字段无就地回退（错误条已提示）。
+
+## 9. 2026-09-14 持续专家团审查 Session 2 · Round 3（基线 = 98ca7c5 + R1/R2 未提交修复）
+
+范围：全范围重审（3 个全新上下文分片）。确认并修复 1 项高级缺陷；B 分片 1 项低级发现按口径记录不修。
+
+修复与改动（全部在 src/gui.rs）：
+
+1. `Event::Failed` 收尾重载（高级，预先存在）：失败/取消收尾块把 `task` 提取放在 `if let Some(task)=state.borrow().task.clone()` 的 scrutinee 里，edition 2021 下该 `Ref` 临时存活到整个 if-let 语句结束，块内 `state.borrow_mut()` 更新 planned 时必然 `BorrowMutError` panic——本会话已有任务后，用户在执行中点「取消」（最常见操作）或任何引擎致命错误都会直接杀死整个应用，任务库停在中间态。该分支此前无任何测试覆盖（gui_flow 只驱动 happy path，gui_tests 无事件泵级用例），故长期存活。修复：块提取为模块函数 `reload_after_failed`，task 先普通 let 提取再 if-let（与 R2 的 WSL 切页修复同款手法），事件泵改为调用该函数。反证：函数体临时写回 scrutinee 借用模式 → 新测试 `failed_reload_updates_summary_without_reborrow_panic` RED（`.tmp/expert-review/s2-r3-failed-red.log`："RefCell already borrowed"）；修复后 GREEN。测试用真实 Database（3 个 Delete 动作 + set("summary")，与 engine.rs:96/129/316 同键同类型）驱动。
+
+裁定记录（不修）：B 分片低级发现——「重复文件删除方式=保留」的规则表文案承诺与 hardlink 模式行为冲突（remove_candidate 对 hardlink 显式绕过 Keep 短路，代码注释表明系有意设计：硬链接不销毁内容、计划可预览可取消勾选），属设置语义与文案口径的真实出入但无数据后果，按「只处理有证据的功能性问题」口径记录。A 分片 4 项与 B/C 分片疑点共 10 项均记录不修（跳过计数 Kept 双计为展示口径、MoveRecycle 未覆写 bin_count 属测试基建、多卷包比例上限按主卷计算默认值下无影响、只读属性不剥导致永久删除路径 loud 失败无静默丢失、Unix 下 name 小写化使「相同名称」实为折叠匹配、moves 落点依赖取消勾选时执行期安全失败、successful_recycle_not_permanent 门禁注释、proxy 环境变量大小写合并顺序、Failed 分支 5 处残余 scrutinee 借用现均无块内 borrow_mut——交叉复审独立核实，防患建议已记录）。
+
+交叉复审：A–F 全部 pass（逐行等价性、借用安全、行为一致性、测试有效性、基线纯新增、6 处残余 scrutinee 独立核实无第 7 处遗漏）。
+
+本轮全量数字：`cargo test --all-targets` 172 通过 / 0 失败 / 21 忽略（lib 87、core 77、property 6、gui_flow 1、bins 2）；真实引擎用例 21/21；`acceptance.ps1 -WithEngine -WithGuiSmoke` 全绿；`static_check.py` 12 项全 PASS；测试基线 195 项。
+
+## 10. 2026-09-14 持续专家团审查 Session 2 · Round 4（基线 = 98ca7c5 + R1-R3 未提交修复）
+
+范围：全范围重审（3 个全新上下文分片）。A、B 分片 0 功能性发现（其嫌疑候选全部源码证伪或落入口径外记录）；C 分片 1 项低级发现并已修复。
+
+修复与改动（scripts/make-testdata.py）：
+
+`--git` 模式的第二次提交（README 生成后）未带内联 git 身份，与 baseline 提交（刻意 `-c user.email=test@local -c user.name=testdata` 以摆脱机器配置依赖）不对称——无全局/系统 git 身份的机器（干净 CI、容器）上整个语料生成完才以 "Author identity unknown" 失败，且 `_测试说明.md` 停留未提交态，随后 `恢复.ps1` 的 `git clean -fd` 会把它删掉，违背该注释的设计目标。修复：第二次提交补齐与 baseline 同款的 `-c core.autocrlf=false -c user.email -c user.name`（`git add -A` 保留）。
+
+反证机制演示（`.tmp/expert-review/gitid-demo`，用 `GIT_CONFIG_GLOBAL=/dev/null GIT_CONFIG_SYSTEM=/dev/null` 模拟无身份机器）：旧命令形态 `git commit` 失败 "Author identity unknown"；新命令形态提交成功，reflog 显示 author/committer 均为 `testdata <test@local>` 且仓库 config 无 user.*。端到端跑完整语料生成未执行（耗时长；身份解析机制与提交命令同路径，由 `git var GIT_AUTHOR_IDENT` 交叉复核佐证）。
+
+交叉复审：A-D 全部 pass（diff 唯一 hunk 且 add -A 保留、`git -C -c commit` 参数顺序实测合法、机制反证成立、`--git` 以外路径零影响、autocrlf=false 幂等无害）。
+
+本轮全量数字：`acceptance.ps1 -WithEngine -WithGuiSmoke` 全绿（static-check、cargo-test、binding-loop-scan、engine-tests、gui-smoke 全 PASS）；`static_check.py` 12 项全 PASS。首轮验收因主代理 shell 工作目录漂移（cd 入 .tmp 后相对路径失效）未执行即失败，非产品问题，已从仓库根重跑并全绿。
+
+初审记录不修（按口径）：A 分片——archive_members 表只写不读（疑似遗留占位）、equal-bytes 合入会剥离既存目标隐藏属性（符合「成员落位归本工具管理」口径但与字面理解有出入，建议确认）、pump 64KiB 行上限对极端超长路径（保守失败）、scan 根豁免依赖 walkdir min_depth 实现细节（建议留注释）、cleanup_part_residue 并发窗口（无数据风险）；B 分片——dedup 守卫 hardlink 组合无行为锚点、conflict 多副本版本全删（可辩护语义）、DNS 槽位 panic 理论泄漏、probe 50ms 下限越 deadline 有界、proxy 大小写合并顺序、ctrlc 注册失败静默、db.rs/planner.rs 两处注释滞后；C 分片——rfd 对话框竞态已有双保险、NetTestFailed 无归属（已记录）、二次分析中计划页显示旧行（写路径全禁用）、finished 后复选框点击有反馈、数值行无 input-type、PlanLoadFailed 无 task 归属（推演无可达误报）、make-testdata 绝对路径投喂 7z（外部行为假设）。
+
+## 11. 2026-09-14 持续专家团审查 Session 2 · Round 5（基线 = 98ca7c5 + R1-R4 未提交修复）
+
+范围：全范围重审（3 个全新上下文分片）。A、B 分片 0 功能性发现；C 分片 1 项中级发现并已修复（端到端红绿实证）。
+
+修复与改动（scripts/make-testdata.py 生成的 恢复.ps1 模板）：
+
+`--git` 语料有两次提交（baseline + README），生成的 `恢复.ps1` 向上探测仓库时用 `git log -1` 只看 HEAD 主题来匹配 `*test corpus baseline*`——HEAD 恒为 README 提交，一键还原必然 `Write-Error; exit 1`（README 宣称的一键还原图灵上不可用；手工等价命令兜底存在，故定中级）。修复：改为 `git log --pretty=%s` 全历史匹配（变量 $message→$subjects，注释说明「HEAD 永远是后者：必须全历史匹配」）。
+
+反证（真实端到端，非机制模拟）：修复前用当时脚本生成语料到 `.tmp/gui-git-red` 并运行生成的 `恢复.ps1` → exit 1，"no JchTools test-corpus git baseline found above ..."；修复后重新生成到 `.tmp/gui-git-green` 并运行 → exit 0，"restoring ... restored to baseline:"（git clean 移除未跟踪空目录后由脚本补建，链路完整）。演示语料已清理。
+
+交叉复审：A-D 全部 pass（PowerShell 5.1 下 `-like` 对标量/数组的两种形态均正确；.git 损坏时 $null -like 为 false 继续向上探测与原版一致；全历史匹配不违背「只认提交信息匹配本测试基线」的安全意图且误认面仅边际扩大；`_测试说明.md` 对外承诺与新实现一致；非 --git 路径零影响）。
+
+本轮全量数字：`acceptance.ps1 -WithEngine -WithGuiSmoke` 全绿；`static_check.py` 12 项全 PASS。
+
+初审记录不修（按口径）：A 分片——`.jchtools-link-` 前缀残留清扫无归属校验（该前缀已是事实保留命名空间，建议声明而非改删除逻辑）、超长路径回收站系统性降级为永久删除（loud、可配置 fallback，与超长路径其它支持的体验落差）；B 分片——successful_recycle 门禁注释相邻性弱、under_path/conflict 大小写折叠口径分域、手动取消勾选的腾名假设落空（执行期安全兜底）、网络超时硬编码与 CLI 失败提示按 mtime 猜目录（展示层）；C 分片——gui_smoke open_confirm 超时静默返回（失败点后移但无假 PASS）、acceptance 未预检 cargo（理论 PASS 窗口）、PlanLoadSync.completed 空转（注释与实现不符）、gui_smoke 在真实 AppData 累积任务库（耗时仅）。
+
+## 12. 2026-09-14 持续专家团审查 Session 2 · Round 6-7 收敛确认（连续 2 个干净轮次，审查通过）
+
+Round 6（候选干净轮 1）：3 个全新上下文分片独立重审，A/B/C 均 0 功能性发现（A 分片新增 7-Zip 上游源码核验 `-ba` 下归档自述块不输出、`list()` 解析前提成立；C 分片对 gui.rs 全部 30 余处 borrow/borrow_mut 调用点逐一排查，无 if-let scrutinee 新违规）。疑点 10 项全部为「无当前可触发故障」的备案（static_check 花括号计数不感知字符串、archive_members 表只写不读、restore 探测误认面分析等），无代码修改。
+
+Round 7（候选干净轮 2）：3 个全新上下文分片再次独立重审，A/B/C 均 0 功能性发现，且逐项确认前六轮 7 项修复在工作区正确落地、无放松或回退（normalize 契约、planner 守卫、WSL 代际、Failed 收尾、make-testdata 两处）。每轮评审均对已裁定项做「无新证据」确认而非机械跳过。
+
+两轮期间代码状态零变化（工作区 porcelain 快照 sha256 前 16 位 b2040696d742a722 前后一致；`git diff --stat` 9 files, +376/−45；HEAD 98ca7c5）。Round 5 验收（全绿）对应当前代码状态，另按惯例复跑最终验收。
+
+最终全量数字：`acceptance.ps1 -WithEngine -WithGuiSmoke -GuiData .tmp/gui-data` 全绿（static-check、cargo-test、binding-loop-scan、engine-tests、gui-smoke S1-S3 全 PASS，package 显式 NOT RUN——无打包类变更）；`cargo test --all-targets` 172 通过 / 0 失败 / 21 忽略；真实引擎用例 21/21；`static_check.py` 12 项全 PASS；测试基线 195 项。
+
+## Session 2 总结
+
+- 基线 98ca7c5，7 轮审查（R1-R5 修复轮 + R6-R7 收敛确认），最多 3 个并行子代理/轮，每轮全新上下文。
+- 修复 7 项：R1 archive.rs 属性剥离契约（初判触发器部分证伪，保留保守失败方向）+ tests/core.rs 门禁注释；R2 planner.rs cleanup_keep 去重守卫（中）+ gui.rs WslDistros 请求代际（低）+ 复审捕获的切页借用冲突（高，修复引入）；R3 gui.rs Event::Failed 收尾借用冲突（高，预先存在，取消任务必崩）；R4 make-testdata --git 第二次提交身份；R5 恢复.ps1 log -1 匹配缺陷（中）。
+- 每项修复均有「修复前失败」反证（4 个自动化 RED + 2 个端到端 RED + 1 个机制演示），全部经独立上下文交叉复审（其中 2 轮复审否定初版修复并驱动返工），全部通过 acceptance -WithEngine -WithGuiSmoke 全量验收。
+- 新增回归测试 6 个（含 2 个真实引擎用例、3 个无头 GUI 用例），测试基线 189→195 纯新增。
+- 另有 1 项 R1 初审发现被证伪（walkdir 根谓词，非本轮）、约 60 项疑点按「只处理有证据的功能性问题」口径记录在 .tmp/expert-review/state.md 供后续轮次参考。
+- 全部修复在未提交工作区（无提交/推送授权）。
+
+## 13. 2026-09-15 持续专家团审查 Session 3 · Round 1（基线 = 98ca7c5 + Session 2 全部未提交修复）
+
+范围：全范围重审（3 个全新上下文分片）。B、C 分片 0 功能性发现；A 分片 1 项中级发现并已修复。
+
+修复与改动（src/archive.rs）：
+
+`find_identical_elsewhere` 的「树内已有相同内容则不落盘」快捷路径可匹配**正在解压的原压缩包自身**：原包在自身解压期间 active=1（失活只发生在 delete_path 或整个解压队列结束），quine 型自指包（成员解压字节=整包字节，rsc 式 gzip/zip quine；gzip 头还会记录与包同名的原始文件名——archive.rs 182-184 行注释自证该形态存在）的成员名+大小与原包行完全一致，逐字节确认通过后成员被判「树内已有相同内容」跳过落盘，随后原包按 archive_delete 删除——内容两处皆失（Permanent 模式即丢失；219 行日志在删除后成为假话）。修复：函数增加 `archive_rel` 参数，SQL 预筛加 `AND rel<>?3` 排除当前原包；跨包等价（成员匹配另一个尚未处理的同字节包）经推演安全——后处理的包自身会正常落盘成员，内容不灭失；merge_extracted 的 equal-bytes 分支因 collides_with_source 先行改名而不可能以原包为目标。
+
+反证（断言级）：临时移除 SQL 排除子句 → 新单元测试 `find_identical_elsewhere_never_matches_current_archive` RED，失败消息即「等价查找不得把正在解压的原包自身当作树内副本」（`.tmp/expert-review/s3-r1-quine-red2.log`）；恢复后 GREEN。测试同时锁住快捷路径不回归：对照组 other/pack.zip（非原包的同名同字节文件）必须仍被命中。
+
+交叉复审：A-D 全部 pass（rel 口径同源性——files.rel 与 archive_rel 同出 relative_string 且 BINARY 比较精确；跨包推演安全；equal_bytes 全仓仅三处、merge 分支被 collides_with_source 拦截无第二丢失通道；测试夹具与真实管线同构；基线 195→196 纯新增）。
+
+本轮全量数字：`acceptance.ps1 -WithEngine -WithGuiSmoke` 全绿；`cargo test --all-targets` 173 通过 / 0 失败 / 21 忽略（lib 88、core 77、property 6、gui_flow 1、bins 2）；`static_check.py` 12 项全 PASS；测试基线 196 项。
+
+初审记录不修（按口径）：A 分片 5 项备案（Staging 无 OWNER 崩溃残留、normalize 失败日志口径、取消时归档行已标 failed、summarize_failure 的 \?\ 抹除、LPE=1 测试局限）；B 分片 4 项（守卫顺带关闭清理保留文件的硬链接合并及日志文案、Unix 大小写折叠去重归类、DEFAULT_TIMEOUT_MS 死常量、新测试无平台门禁之确认）；C 分片 6 项（Error 事件瞬态分页文案、finished 后复选框交互取舍、切页拉取分支防御性记录、sql_syntax 字符串跳过、gui_smoke 真实 AppData 并发隔离、seen_tasks 现状）。
+
+## 14. 2026-09-15 持续专家团审查 Session 3 · Round 2-3 收敛确认（连续 2 个干净轮次，审查通过）
+
+Round 2（候选干净轮 1）：3 个全新上下文分片独立重审，A/B/C 均 0 功能性发现（A 分片对 quine 排除修复与 normalize 契约攻击性复核通过；C 分片对 gui.rs 全部 60 处 borrow/borrow_mut 调用点逐点核查无 edition 2021 scrutinee 新违规）。疑点 9 项全部为失败安全或展示层备案（unique_target 255 上限试错失败安全、删包失败汇总口径、取消勾选无联动提示、run_capture_oem 展示等），无代码修改。
+
+Round 3（候选干净轮 2）：3 个全新上下文分片再次独立重审，A/B/C 均 0 功能性发现，并逐项确认全部历史修复（normalize 契约、quine 排除、cleanup_keep 守卫、WSL 代际、Failed 收尾、make-testdata 两处）在工作区正确落地、无放松或回退。疑点 13 项均为备案（clean_orphan_link_temps 命名空间声明建议、LIMIT 32 窗口回退正常落盘、翻页连点跳页为设计已知代价、NetTestFailed 防御纵深等）。
+
+两轮期间代码状态零变化。Round 1 验收（全绿）对应当前代码状态，另按惯例复跑最终验收。
+
+最终全量数字：`acceptance.ps1 -WithEngine -WithGuiSmoke -GuiData .tmp/gui-data` 全绿（static-check、cargo-test、binding-loop-scan、engine-tests、gui-smoke S1-S3 全 PASS，package 显式 NOT RUN）；`cargo test --all-targets` 173 通过 / 0 失败 / 21 忽略（lib 88、core 77、property 6、gui_flow 1、bins 2）；真实引擎用例 21/21；`static_check.py` 12 项全 PASS；测试基线 196 项。
+
+## Session 3 总结
+
+- 基线 = 98ca7c5 + Session 2 未提交修复；3 轮审查（R1 修复轮 + R2/R3 收敛确认），最多 3 个并行子代理/轮，每轮全新上下文。
+- 修复 1 项：archive.rs `find_identical_elsewhere` 排除当前原包（中）——quine 型自指包（rsc 式 gzip/zip quine）经「树内已有相同内容」快捷路径双失内容；断言级 RED（s3-r1-quine-red2.log）+ 交叉复审 A-D pass + 验收全绿。
+- 新增回归测试 1 个（含对照组锁快捷路径不回归），测试基线 195→196 纯新增。
+- 约 15 项疑点按口径记录在 .tmp/expert-review/state.md。
+- 全部改动在未提交工作区（无提交/推送授权）。

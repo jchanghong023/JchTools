@@ -79,6 +79,13 @@ fn deduplicate(job: &mut Job) -> Result<()> {
                         }
                     }
                 }
+                // 清理命中且 cleanup_delete=Keep 的文件由清理规则管辖（保留承诺）：
+                // cleanup 阶段已让其保持 active，这里若无守卫，同组 keeper 先注册时它会按
+                // duplicate_delete 被删，结果随排序翻转（与下方冲突路径 145 行的防护同口径）。
+                if rules::cleanup_reason(&file.rel,file.snapshot.size,&job.config).is_some() {
+                    job.log("去重",&file.rel,&keeper.rel,"跳过","文件命中清理规则且清理方式为保留；不按重复规则删除",file.snapshot.size)?;
+                    continue;
+                }
                 remove_candidate(job,&file,Some(&keeper),reason,mode,hardlink)?;
                 if mode != DeleteMode::Keep { job.db.conn.execute("UPDATE files SET cleanable=1 WHERE id=?1",[keeper_id])?; }
             } else if rules::cleanup_reason(&file.rel,file.snapshot.size,&job.config).is_none() {

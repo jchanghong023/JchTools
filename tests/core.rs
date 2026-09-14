@@ -88,6 +88,22 @@ impl Recycler for MoveRecycle {fn recycle(&self,p:&Path)->Result<(),RecycleFailu
     f.apply(&task);
     assert!(f.root.join("x/a.txt").exists()&&f.root.join("y/a.txt").exists());
 }
+#[test] fn cleanup_keep_files_are_not_dedup_deletions(){
+    // cleanup_delete=Keep 的清理命中文件由清理规则管辖（保留承诺）：去重路径同样不得删除。
+    // 此前只防了「不得充当 keeper」，keeper 先注册时它作为重复项会按 duplicate_delete 被删，
+    // 结果随 duplicate_order 排序翻转（本用例让 junk.tmp 排在 keeper 之后触发原缺陷）。
+    let f=Fixture::new();
+    f.write("normal.txt",b"payload",20);   // 较新 → 成为 keeper
+    f.write("junk.tmp",b"payload",10);     // 较旧且命中 clean_temp → 修复前被按重复删除
+    let mut cfg=base();
+    cfg.clean_temp=true;
+    cfg.cleanup_delete=DeleteChoice::Keep;
+    let task=f.plan(cfg);
+    let actions=Database::open(&task.directory).unwrap().actions_page(0,100).unwrap();
+    assert!(actions.iter().all(|a|a.kind!=ActionKind::Delete),"清理保留的文件不得按重复规则删除");
+    f.apply(&task);
+    assert!(f.root.join("normal.txt").exists()&&f.root.join("junk.tmp").exists());
+}
 #[test] fn stale_hardlink_temps_are_swept(){
     // 崩溃残留的硬链接临时文件被扫描永久剪枝且无其它回收路径：
     // prepare/apply 前必须清扫过期残留（内容仍由保留文件持有，删除不丢数据）。
@@ -270,6 +286,8 @@ fn set_hidden(path:&Path,hidden:bool){
 #[test] fn huge_sizes_use_u64(){assert_eq!(jchtools::model::bytes(10u64<<40),"10.00 TiB");let f=Fixture::new();let db=Database::create(&f.state).unwrap();let snapshot=Snapshot{size:12u64<<40,modified_ns:1,identity:"mock".into(),links:1};db.insert_file("large.bin","large.bin","large.bin",&snapshot).unwrap();assert_eq!(db.file(1).unwrap().snapshot.size,12u64<<40);}
 #[test] fn deterministic_keeper_ties(){let record=|id,rel:&str|FileRecord{id,rel:rel.into(),name:"x".into(),normalized:"x".into(),snapshot:Snapshot{size:1,modified_ns:10,identity:id.to_string(),links:1},hash:None,cleanable:false};assert!(rules::compare(&record(1,"a/x"),&record(2,"b/x"),KeepPolicy::Newest).is_lt());}
 #[test] fn plan_pagination_is_bounded(){let f=Fixture::new();for i in 0..260{f.write(&format!("{i:04}.txt"),b"same",i+100);}let task=f.plan(base());let db=Database::open(&task.directory).unwrap();let first=db.actions_page(0,100).unwrap();let second=db.actions_page(first.last().unwrap().id,100).unwrap();assert_eq!(first.len(),100);assert_eq!(second.len(),100);assert!(first.last().unwrap().id<second.first().unwrap().id);assert!(first.iter().all(|a|a.kind==ActionKind::Delete));}
+// 平台门禁原因：创建符号链接在 Windows 需管理员/开发者模式特权，Unix 无需特权即可稳定构造；
+// safe_join 拒绝链接穿越的断言只能在 Unix 下验证。
 #[cfg(unix)]
 #[test] fn symlink_not_followed_or_deleted(){let f=Fixture::new();let outside=f._temp.path().join("outside");fs::create_dir(&outside).unwrap();fs::write(outside.join("a"),b"a").unwrap();std::os::unix::fs::symlink(&outside,f.root.join("link")).unwrap();assert!(fsutil::safe_join(&f.root,"link/a").is_err());assert_eq!(f.plan(base()).summary.scanned,0);}
 #[test] fn existing_hardlinks_not_counted_twice(){

@@ -343,8 +343,10 @@ $root = $null
 $probe = $here
 for ($depth = 0; $depth -lt 5 -and $probe; $depth++) {
     if (Test-Path -LiteralPath (Join-Path $probe '.git')) {
-        $message = (git -C $probe log -1 --pretty=%s 2>$null)
-        if ($message -like '*test corpus baseline*') { $root = $probe; break }
+        # 语料有两次提交（baseline + README），HEAD 永远是后者：必须全历史匹配，
+        # 只看 log -1 会让一键还原必然失败。
+        $subjects = (git -C $probe log --pretty=%s 2>$null)
+        if ($subjects -like '*test corpus baseline*') { $root = $probe; break }
     }
     $probe = Split-Path -Parent $probe
 }
@@ -588,8 +590,11 @@ def main() -> int:
     build_readme(root, log, seven, arguments.git)
     # README 在 baseline 之后生成：必须再提交一次，否则 恢复.ps1 的 git clean -fd 会删掉说明。
     if arguments.git:
+        # 与 baseline 提交同款内联身份：不依赖机器上全局/系统 git user.email / user.name 配置。
         run(["git", "-C", str(root), "add", "-A"])
-        run(["git", "-C", str(root), "commit", "-m", "test corpus readme"])
+        run(["git", "-C", str(root), "-c", "core.autocrlf=false",
+             "-c", "user.email=test@local", "-c", "user.name=testdata",
+             "commit", "-m", "test corpus readme"])
 
     files = [p for p in root.rglob("*") if p.is_file() and ".git" not in p.parts]
     total = sum(p.stat().st_size for p in files)
