@@ -11,7 +11,7 @@
   - 在临时目录上跑通解压（含嵌套包与同名冲突保留两份）、内容去重、版本取舍、
     垃圾/临时/零字节清理、空目录清理、归类、扩展名纠正和 CSV 报告；
   - release 版扫描 5004 文件 / 521.51 MiB 用时 1.32s，内容去重 1.61s，峰值工作集 < 10 MiB。
-详见 docs/VALIDATION.md。
+详见 CI 与提交记录。
 
 注意：7z.exe / 7z.dll 不进 git（已被 .gitignore 忽略）。运行 scripts/fetch-7zip.ps1 下载并校验
 官方引擎后，build.rs 会把引擎压缩内嵌进 EXE；没有内嵌引擎的构建在解压时需要用
@@ -25,4 +25,4 @@
 ZIP 只附带 licenses/、NOTICE.txt 与上游源码压缩包（不含 7z.exe/7z.dll）。
 最终用户使用这个构建出的 ZIP 时，不需要安装 Rust、Slint 或 7-Zip。
 
-详细使用及限制见 README.md；验证结果见 docs/VALIDATION.md，机器可读静态检查明细可用 `python scripts/static_check.py` 生成（写入 .tmp/static-check.json）。
+详细使用及限制见 README.md；需求语义见 docs/CONTRACT.md；机器可读静态检查明细可用 `python scripts/static_check.py` 生成（写入 .tmp/static-check.json）。

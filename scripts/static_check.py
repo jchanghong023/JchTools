@@ -299,7 +299,7 @@ def sums_integrity():
     assert not stale,f'哈希与工作树不一致（文件已改，需重建 SHA256SUMS.txt）：{stale}'
     return f'{len(expected)} 个跟踪文件的 SHA256 全部与工作树一致（LF 行尾）。'
 def scope_and_delivery():
-    required=['README.md','先读我.txt','LICENSE','THIRD_PARTY_NOTICES.md','docs/ARCHITECTURE.md','docs/ACCEPTANCE.md','scripts/package-windows.ps1','scripts/fetch-7zip.ps1','scripts/test-baseline.json','tests/core.rs','tests/archive.rs','.github/workflows/check.yml']
+    required=['README.md','先读我.txt','LICENSE','THIRD_PARTY_NOTICES.md','docs/CONTRACT.md','scripts/package-windows.ps1','scripts/fetch-7zip.ps1','scripts/test-baseline.json','tests/core.rs','tests/archive.rs','.github/workflows/check.yml']
     assert all((ROOT/p).is_file() for p in required)
     for path in ROOT.glob('src/**/*.rs'):
         text=read_text(path);assert 'todo!(' not in text and 'unimplemented!(' not in text,str(path)

@@ -1,13 +1,16 @@
 #!/usr/bin/env python3
-"""Build the JchTools manual test corpus (nested archives, conflicts, junk, edge names).
+"""JchTools 临时目录工厂：统一生成与清理本项目需要的所有 `.tmp/` 内容（自包含，不依赖仓库外目录）。
 
-The corpus is regenerated from scratch every run; point it at a dedicated directory
-(default D:\\testzip) that contains nothing you want to keep. Usage:
+种类（后续新增临时数据需求时在此扩展）：
+    testdata  手工测试数据集（嵌套包、冲突、垃圾文件、边界名称等），默认生成到
+              <repo>/.tmp/testdata/，每次重建前先清空目标；`_测试说明.md` 逐条
+              说明每个用例与预期行为。
 
-    python scripts/make-testdata.py [--destination D:\\testzip] [--force]
+用法：
+    python scripts/make_tmp.py testdata [--git] [--destination <专门测试目录>] [--force]
+    python scripts/make_tmp.py clean    # 清空整个 .tmp/ 释放磁盘；测试完成后执行，防止无限增长
 
-Layout and expected behaviour of every case are written to `_测试说明.md` inside
-the destination, so the person testing does not need to read this script.
+clean 只删除仓库内 `.tmp/` 的内容，绝不触碰仓库其他位置与仓库外目录。
 """
 from __future__ import annotations
 
@@ -16,9 +19,11 @@ import gzip
 import os
 import random
 import shutil
+import stat
 import subprocess
 import sys
 import tarfile
+import time
 import zipfile
 from pathlib import Path
 
@@ -399,7 +404,7 @@ def build_readme(root: Path, log: list[str], seven: Path, git: bool) -> None:
         "# JchTools 手工测试数据集",
         "",
         f"生成时间：{__import__('datetime').date.today().isoformat()}",
-        f"生成脚本：`scripts/make-testdata.py`（可重复执行，会先清空本目录）。",
+        f"生成脚本：`python scripts/make_tmp.py testdata`（可重复执行，会先清空本目录；默认生成到仓库 `.tmp/testdata/`）。",
         "所有内容都是脚本生成的假数据，可以随意删除、移动、回收。",
         "",
         "## 建议的测试顺序",
@@ -444,7 +449,7 @@ def build_readme(root: Path, log: list[str], seven: Path, git: bool) -> None:
             "## 整理之后如何恢复",
             "",
             "本次生成没有使用 `--git`，目录里没有 git 基线和 `恢复.ps1`，整理后的删除/移动无法一键撤销。",
-            "需要可回滚的测试集，请重新执行 `python scripts/make-testdata.py --destination <目录> --git`（会先清空目录）。",
+            "需要可回滚的测试集，请重新执行 `python scripts/make_tmp.py testdata --git`（默认 `.tmp/testdata/`，会先清空目录）。",
         ])
     root.joinpath("_测试说明.md").write_text("\n".join(text) + "\n", encoding="utf-8")
 
@@ -541,14 +546,78 @@ def guard_destination(root: Path) -> None:
             raise SystemExit(f"拒绝清空系统/程序目录（{part.name}）：{resolved}")
 
 
+def robust_rmtree(path: Path) -> None:
+    r"""Windows 健壮删除：超长路径加 \\?\ 前缀；git 对象等只读文件先清只读位（WinError 5）；目录删除竞态（WinError 145）短暂重试。"""
+    def on_error(func, target, _exc_info):
+        last: BaseException | None = None
+        for attempt in range(3):
+            try:
+                os.chmod(target, stat.S_IWRITE)
+                func(target)
+                return
+            except OSError as error:
+                last = error
+                time.sleep(0.1 * (attempt + 1))
+        assert last is not None
+        raise last
+
+    # 深层嵌套目录（如多层层级测试残留）总长可超 MAX_PATH，删除中途会“找不到路径”
+    # 而留下深层尾巴；长路径前缀交给系统按扩展长度路径处理。仅内部清理使用；
+    # 用户输入的扩展前缀仍由 guard_destination 直接拒绝。
+    # 前缀必须加在根上：rmtree 的子路径由根拼接而来，中途遇到超长子路径再补就晚了。
+    target: str | Path = path
+    if os.name == "nt":
+        target = r"\\?\\" + str(path.resolve())
+    # onerror 在 3.12 起被 onexc 取代；按解释器版本选择，避免弃用告警。
+    if sys.version_info >= (3, 12):
+        shutil.rmtree(target, onexc=on_error)
+    else:
+        shutil.rmtree(target, onerror=on_error)
+
+
+def clean_tmp(repo_root: Path) -> int:
+    """清空仓库内 .tmp/ 全部内容（一次性中间产物，测试完成后清理，防止磁盘无限增长）。"""
+    tmp = (repo_root / ".tmp").resolve()
+    if tmp.name != ".tmp" or tmp.parent != repo_root:
+        raise SystemExit(f"安全检查失败：目标不是仓库内 .tmp/（{tmp}）")
+    if not tmp.is_dir():
+        print(f".tmp 不存在，无需清理：{tmp}")
+        return 0
+    count, total = measure_tree(tmp)
+    failures: list[tuple[Path, str]] = []
+    for entry in tmp.iterdir():
+        try:
+            if entry.is_dir() and not entry.is_symlink():
+                robust_rmtree(entry)
+            else:
+                os.chmod(entry, stat.S_IWRITE)
+                entry.unlink()
+        except FileNotFoundError:
+            pass
+        except OSError as error:
+            failures.append((entry, str(error)))
+    if failures:
+        for path, error in failures:
+            print(f"删除失败：{path}：{error}")
+        raise SystemExit(f"共 {len(failures)} 个条目删除失败（见上方原因）；请处理后重跑 clean。")
+    print(f"已清空 {tmp}：删除 {count} 个文件，释放约 {total / 1048576:.1f} MiB。")
+    return 0
+
+
 def main() -> int:
-    parser = argparse.ArgumentParser(description="Build the JchTools manual test corpus.")
-    parser.add_argument("--destination", default=r"D:\testzip", help="target directory (wiped first)")
-    parser.add_argument("--git", action="store_true", help="also create a git baseline plus a restore script")
+    repo_root = Path(__file__).resolve().parent.parent
+    parser = argparse.ArgumentParser(description="JchTools 临时目录工厂：生成与清理 .tmp/ 内容。")
+    parser.add_argument("kind", choices=["testdata", "clean"],
+                        help="testdata=生成手工测试数据集；clean=清空整个 .tmp/ 释放磁盘")
+    parser.add_argument("--destination", default=None,
+                        help="testdata 专用：另指定测试目录（默认 <repo>/.tmp/testdata，会先清空）")
+    parser.add_argument("--git", action="store_true", help="testdata 专用：建立 git 基线并生成 恢复.ps1")
     parser.add_argument("--force", action="store_true",
-                        help="confirm wiping a non-empty destination without prompting")
+                        help="testdata 专用：目标目录非空时免交互确认清空")
     arguments = parser.parse_args()
-    root = Path(arguments.destination)
+    if arguments.kind == "clean":
+        return clean_tmp(repo_root)
+    root = Path(arguments.destination) if arguments.destination else repo_root / ".tmp" / "testdata"
     guard_destination(root)
     # guard 内部用 resolve() 检查，但构建全程用的是原始路径；相对路径在脚本切换
     # 工作目录后会指向不存在的位置（已清空目标却构建失败），这里统一转成绝对路径。

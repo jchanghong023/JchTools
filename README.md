@@ -2,7 +2,7 @@
 
 Windows 优先的 Rust + Slint 本地工具箱。当前提供「目录整理」与「代理工具」，后续工具通过工具注册表接入，界面导航不写死。
 
-> **当前源码树已在 Windows 11 上编译、运行并做过功能验收**（详见 [验证记录](docs/VALIDATION.md)）：`cargo build` / `cargo build --release` 通过，`cargo test` 135 通过 0 失败（含 8 个无头 GUI 状态测试与 1 个计划执行确认流端到端测试；另有 19 个真实引擎用例默认 ignore，已实测通过；基线数字以最近一次 `cargo test` 实测为准），界面、临时目录端到端整理与 5004 文件性能都实测过。没有引擎时构建不内嵌，解压需要 `--engine <完整 7z.exe>`；运行 `scripts/fetch-7zip.ps1` 获取官方引擎后，构建会自动把它压缩内嵌进 EXE。发布包由 `scripts/package-windows.ps1` 生成，只附带许可证与上游源码，不含引擎可执行文件。
+> **当前源码树已在 Windows 11 上编译、运行并做过功能验收**（详见 CI 与提交记录）：`cargo build` / `cargo build --release` 通过，`cargo test` 135 通过 0 失败（含 8 个无头 GUI 状态测试与 1 个计划执行确认流端到端测试；另有 19 个真实引擎用例默认 ignore，已实测通过；基线数字以最近一次 `cargo test` 实测为准），界面、临时目录端到端整理与 5004 文件性能都实测过。没有引擎时构建不内嵌，解压需要 `--engine <完整 7z.exe>`；运行 `scripts/fetch-7zip.ps1` 获取官方引擎后，构建会自动把它压缩内嵌进 EXE。发布包由 `scripts/package-windows.ps1` 生成，只附带许可证与上游源码，不含引擎可执行文件。
 
 ## 7-Zip 引擎（内置）
 
@@ -97,17 +97,19 @@ powershell -NoProfile -File .\scripts\package-windows.ps1
 
 密码包目前**跳过并记录**，没有密码输入/密码存储；分卷包支持从识别到的首卷调用引擎，但不自动删除整组源卷；原包保留优先于后续清理规则。文件格式检测只能识别 infer 支持的签名；无法识别的不改名，ZIP 容器的 DOCX/EPUB 等不误改成 ZIP。路径里有 Windows 不支持的名称、非 UTF-8 名称或危险条目会拒绝/跳过，而不是自动猜测改写。
 
-已在 Windows 11 实测通过：Rust/Slint 全量编译（dev 与 release）、`cargo test`（135 通过、19 个真实引擎用例 ignore，已实测通过；另含 8 个无头 GUI 状态测试与 1 个计划执行确认流端到端测试；基线数字以最近一次 `cargo test` 实测为准）、界面渲染与自绘标题栏交互、临时目录上的解压/去重/归类/清理/报告端到端流程、`D:\testzip` 手工测试数据集上的 GUI 全流程（见 `docs/VALIDATION.md` §4）、5004 文件 521 MiB 的扫描与去重性能。尚未验证的关键项：Windows Shell 回收站容量不足和网络盘行为、高 DPI（非 150%）与无 GPU 的实际显示、RAR 多版本与多卷、大固实包、多个 TB 的真实性能、并发外部进程修改的全部竞态。当前路径检查不等于对恶意并发文件系统攻击的形式化安全保证。首次运行必须使用副本或测试目录；通过 `docs/ACCEPTANCE.md` 后再决定生产使用。
+已在 Windows 11 实测通过：Rust/Slint 全量编译（dev 与 release）、`cargo test`（135 通过、19 个真实引擎用例 ignore，已实测通过；另含 8 个无头 GUI 状态测试与 1 个计划执行确认流端到端测试；基线数字以最近一次 `cargo test` 实测为准）、界面渲染与自绘标题栏交互、临时目录上的解压/去重/归类/清理/报告端到端流程、`make_tmp.py` 手工测试数据集上的 GUI 全流程（记录于提交历史）、5004 文件 521 MiB 的扫描与去重性能。尚未验证的关键项：Windows Shell 回收站容量不足和网络盘行为、高 DPI（非 150%）与无 GPU 的实际显示、RAR 多版本与多卷、大固实包、多个 TB 的真实性能、并发外部进程修改的全部竞态。当前路径检查不等于对恶意并发文件系统攻击的形式化安全保证。首次运行必须使用副本或测试目录；经用户亲自验收后再决定生产使用。
 
 ## 手工测试数据集
 
 ```powershell
-python scripts/make-testdata.py --destination D:\testzip --git
+python scripts/make_tmp.py testdata --git
 ```
 
-`--git` 会在目录里额外建立 git 基线（`.gitattributes` 固定 `* -text` 保证字节可复现）并附一个 `恢复.ps1`：测试跑完后执行 `恢复.ps1` 即可回到初始状态（`git checkout -- .` 恢复被删除/移动的文件、`git clean -fd` 清掉解压与归类产生的新文件，并补回 git 不保存的隐藏/系统属性与空目录）。还原脚本自带保护：解析不到自身目录或目录里没有 `.git` 时会直接退出，不会把 git 命令打到别的仓库。`.git/**` 默认在排除规则里，整理时不会被处理。
+脚本默认把测试集生成到仓库内 `.tmp\testdata\`（自包含，不依赖仓库外目录；也可 `--destination` 另指专门测试目录），会**先清空目标目录**再重建一份可重复的手工测试集（规模以脚本实际输出为准，当前约 60 个文件 / 66 MiB）。
 
-脚本会**先清空目标目录**再重建一份可重复的手工测试集（约 160 个文件 / 130 MiB，含 16 组用例）：基础文件与中文名、三类重复内容、同名版本冲突、垃圾/临时/零字节、空目录与单层链、扩展名与真实格式不符、11 种压缩格式、解压目标冲突、5 层嵌套包、18 层超深嵌套、截断损坏包、带密码包、1 MiB 分卷包、两个 32 MiB 大文件与 64 MiB 全零包、隐藏与系统属性文件、含 `../` / 绝对路径 / 符号链接的恶意包。目标目录非空时会先列出将删除的文件数量与体积，要求输入 `yes` 确认（非交互环境用 `--force`）；盘符根、用户主目录及其上/下级、系统目录与仓库内非 `.tmp` 位置会被直接拒绝。目录里的 `_测试说明.md` 由脚本生成，逐条列出每个用例的预期行为。
+`--git` 会在目录里额外建立 git 基线（`.gitattributes` 固定 `* -text` 保证字节可复现）并附一个 `恢复.ps1`：测试跑完后执行 `恢复.ps1` 即可回到初始状态（`git checkout -- .` 恢复被删除/移动的文件、`git clean -fd` 清掉解压与归类产生的新文件，并补回 git 不保存的隐藏/系统属性与空目录）。还原脚本自带保护：解析不到自身目录或目录里没有 `.git` 时会直接退出，不会把 git 命令打到别的仓库。`.git/**` 默认在排除规则里，整理时不会被处理。测试完成后用 `python scripts/make_tmp.py clean` 清空整个 `.tmp\` 释放磁盘。
+
+测试集含 16 组用例：基础文件与中文名、三类重复内容、同名版本冲突、垃圾/临时/零字节、空目录与单层链、扩展名与真实格式不符、11 种压缩格式、解压目标冲突、5 层嵌套包、18 层超深嵌套、截断损坏包、带密码包、1 MiB 分卷包、两个 32 MiB 大文件与 64 MiB 全零包、隐藏与系统属性文件、含 `../` / 绝对路径 / 符号链接的恶意包。目标目录非空时会先列出将删除的文件数量与体积，要求输入 `yes` 确认（非交互环境用 `--force`）；盘符根、用户主目录及其上/下级、系统目录与仓库内非 `.tmp` 位置会被直接拒绝。目录里的 `_测试说明.md` 由脚本生成，逐条列出每个用例的预期行为。
 
 自己测试时建议：先只开「解压 + 去重」跑一遍看计划，再逐项打开归类、清理、类型修正、隐藏/系统等开关对比差异。
 
@@ -125,8 +127,8 @@ JCHTOOLS_TEST_7ZIP=/absolute/path/7zz bash scripts/check-linux.sh
 
 ```powershell
 .\jchtools-cli.exe defaults .\jchtools-config.json
-.\jchtools-cli.exe analyze D:\TestData --config .\jchtools-config.json
-.\jchtools-cli.exe analyze D:\TestData --extract --yes
+.\jchtools-cli.exe analyze .tmp\testdata --config .\jchtools-config.json
+.\jchtools-cli.exe analyze .tmp\testdata --extract --yes
 .\jchtools-cli.exe inspect "<上一步输出的任务目录>"
 .\jchtools-cli.exe apply "<任务目录>" --yes
 .\jchtools-cli.exe report "<任务目录>" .\new-report.csv
@@ -138,4 +140,4 @@ CLI 不带 `--extract` 的 analyze 只生成计划、不修改目标文件；显
 
 `src/main.rs`/`ui/app.slint`：界面；`resources/rules.json`：41 项界面规则；`src/config.rs`：配置及校验；`src/registry.rs`：真实工具注册；`src/engine.rs`：阶段控制；`archive.rs`：7-Zip；`planner.rs`：计划；`platform.rs`：回收站/删除；`db.rs`/`schema.sql`：磁盘索引、计划及审计；`tests/`：测试；`scripts/`：检查/打包；`.github/workflows/check.yml`：Windows/Linux CI。
 
-技术依据和许可见 [第三方说明](THIRD_PARTY_NOTICES.md) 与 [设计说明](docs/ARCHITECTURE.md)。
+技术依据和许可见 [第三方说明](THIRD_PARTY_NOTICES.md)；需求语义见 [需求合同](docs/CONTRACT.md)。
