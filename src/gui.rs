@@ -7,8 +7,8 @@ use crate::{config::{ClassifyMode,Config,ConflictPolicy,DEFAULT_CUSTOM_CATEGORIE
     db::Database, engine, model::{bytes,ActionKind}, platform, registry};
 use serde::Deserialize;
 use slint::{ComponentHandle,Model,ModelRc,SharedString,VecModel};
-use std::{cell::RefCell,collections::VecDeque,fs,path::{Path,PathBuf},rc::Rc,
-    sync::{atomic::{AtomicBool,AtomicU64,Ordering},mpsc,Arc,Mutex},time::{Duration,Instant}};
+use std::{cell::RefCell,collections::VecDeque,path::{Path,PathBuf},rc::Rc,
+    sync::{atomic::{AtomicU64,Ordering},mpsc,Arc,Mutex},time::{Duration,Instant}};
 
 /// 规则的界面层级：basic 常显，advanced 只在「显示高级选项」打开时出现。
 #[derive(Clone,Copy,PartialEq,Deserialize,Default)]
@@ -240,7 +240,6 @@ fn sync_rules(ui:&AppWindow,state:&State){
 /// 供引擎、CLI 与历史任务库继续使用，只是界面不再拆开展示。
 fn group_keys(key:&str)->Vec<&str>{
     match key{
-        "dedup_same_name"=>vec!["dedup_same_name","dedup_copy_names","dedup_other_names"],
         "same_name_same_size"=>vec!["same_name_same_size","same_name_different_size"],
         "same_size_keep"=>vec!["same_size_keep","different_size_keep"],
         "fix_extension"=>vec!["fix_extension","detect_type"],
@@ -380,59 +379,6 @@ fn plan_page_event_accepted(event_gen:u64,latest:u64,_event_page:usize,event_fil
 fn wsl_distros_event_accepted(event_gen:u64,latest:u64,scope:i32)->bool{
     scope==1 && event_gen==latest
 }
-/// 会话级导出互斥：同一时间只允许一次 CSV 导出，避免并发写坏目标/临时文件。
-static EXPORT_BUSY:AtomicBool=AtomicBool::new(false);
-/// 导出临时名序号：与进程号、UUID 一起保证同会话多次导出不共用同一临时路径。
-static EXPORT_SEQ:AtomicU64=AtomicU64::new(0);
-/// 导出锁守卫：无论成功/失败/panic，离开作用域都会释放会话级导出锁。
-struct ExportGuard;
-impl Drop for ExportGuard{
-    fn drop(&mut self){EXPORT_BUSY.store(false,Ordering::SeqCst);}
-}
-/// 覆盖导出 CSV：先写入同目录临时文件，成功后再替换目标；失败时清理临时文件且不动原文件。
-/// `write` 负责把内容写入临时路径（默认走 `Database::export_csv`，其 create_new 语义正好适用）。
-fn export_csv_via_temp(task:&Path,dest:&Path)->Result<()>{
-    // 目标是任务库本体时拒绝（用户可能在保存对话框里定位到任务目录选了 task.sqlite3）：
-    // 覆盖导出会把它替换成 CSV，任务库永久丢失。
-    let target_db=task.join("task.sqlite3");
-    let same=match (fs::canonicalize(dest),fs::canonicalize(&target_db)){
-        (Ok(dest_path),Ok(db_path))=>dest_path==db_path,
-        _=>dest==target_db,
-    };
-    if same{anyhow::bail!("导出目标不能是任务库本体（task.sqlite3）；请换一个文件名");}
-    let db=Database::open_existing(task)?;
-    write_via_temp(dest,move|tmp|db.export_csv(tmp))
-}
-/// 通用「临时文件成功后再覆盖」策略：避免先 `remove_file` 再写导致中途失败时原文件丢失。
-fn write_via_temp<F>(dest:&Path,write:F)->Result<()>
-where F:FnOnce(&Path)->Result<()>{
-    let parent=dest.parent().filter(|p|!p.as_os_str().is_empty()).unwrap_or_else(||Path::new("."));
-    let name=dest.file_name().and_then(|n|n.to_str()).unwrap_or("export.csv");
-    // 临时名：进程号 + 会话内序号 + UUID。仅用 PID 时，同进程并发/快速连续导出会撞名。
-    let seq=EXPORT_SEQ.fetch_add(1,Ordering::Relaxed);
-    let tmp=parent.join(format!(".{name}.{}.{}.{}.tmp",std::process::id(),seq,uuid::Uuid::new_v4()));
-    let _=std::fs::remove_file(&tmp);
-    if let Err(error)=write(&tmp){let _=std::fs::remove_file(&tmp);return Err(error);}
-    if let Err(error)=replace_file(&tmp,dest){let _=std::fs::remove_file(&tmp);return Err(error);}
-    Ok(())
-}
-/// Windows 上用 `MoveFileEx(REPLACE_EXISTING)` 做同卷替换；失败时回落到 `std::fs::rename`。
-#[cfg(windows)]
-fn replace_file(from:&Path,to:&Path)->Result<()>{
-    use std::os::windows::ffi::OsStrExt;
-    use windows_sys::Win32::Storage::FileSystem::{MoveFileExW,MOVEFILE_REPLACE_EXISTING};
-    let from_w:Vec<u16>=from.as_os_str().encode_wide().chain(std::iter::once(0)).collect();
-    let to_w:Vec<u16>=to.as_os_str().encode_wide().chain(std::iter::once(0)).collect();
-    if unsafe{MoveFileExW(from_w.as_ptr(),to_w.as_ptr(),MOVEFILE_REPLACE_EXISTING)}==0{
-        std::fs::rename(from,to).context("无法替换导出文件")?;
-    }
-    Ok(())
-}
-#[cfg(not(windows))]
-fn replace_file(from:&Path,to:&Path)->Result<()>{
-    std::fs::rename(from,to).context("无法替换导出文件")?;
-    Ok(())
-}
 /// 执行阶段的进度分母：只统计仍勾选且待执行（selected=1 且 state='pending'）的计划项，
 /// 用户取消勾选的项不计入。计数失败时返回 Err，调用方可保留旧 planned。
 fn count_selected_pending(task:&Path)->Result<u64>{
@@ -442,11 +388,6 @@ fn count_selected_pending(task:&Path)->Result<u64>{
 }
 fn start_task(ui:&AppWindow,state:&Rc<RefCell<State>>,sender:&mpsc::SyncSender<Event>,apply:bool){
     if ui.get_busy(){return;}
-    // 导出读任务库时不得并行启动会写库的分析/执行。
-    if EXPORT_BUSY.load(Ordering::SeqCst){
-        ui.set_error_text("报告导出进行中，请稍后再试".into());
-        return;
-    }
     if state.borrow().pending_selection != 0 {
         ui.set_error_text("计划勾选仍在保存中，请稍后再试".into());
         return;
@@ -460,12 +401,6 @@ fn start_task(ui:&AppWindow,state:&Rc<RefCell<State>>,sender:&mpsc::SyncSender<E
         return;
     }
     let control=Arc::new(Control::default());
-    // 置 busy 前再抢一次导出锁：与 on_export_report 的 swap 形成近似互斥，
-    // 避免「读到 false → 导出开始 → 引擎启动」的双写任务库窗口。
-    if EXPORT_BUSY.load(Ordering::SeqCst){
-        ui.set_error_text("报告导出进行中，请稍后再试".into());
-        return;
-    }
     {
         let mut s=state.borrow_mut();s.control=Some(control.clone());s.started=Instant::now();s.close_after=false;s.selection_failed=false;
         s.logs.clear();s.page=0;s.page_starts=vec![0];s.conflict=None;s.applying=apply;
@@ -476,10 +411,6 @@ fn start_task(ui:&AppWindow,state:&Rc<RefCell<State>>,sender:&mpsc::SyncSender<E
                 if let Ok(n)=count_selected_pending(&task){s.planned=n;}
             }
         }
-    }
-    if EXPORT_BUSY.load(Ordering::SeqCst){
-        ui.set_error_text("报告导出进行中，请稍后再试".into());
-        return;
     }
     ui.set_busy(true);ui.set_ready(false);ui.set_paused(false);ui.set_error_text("".into());ui.set_notice_text("".into());ui.set_panel(2);
     ui.set_log_text("".into());ui.set_status(if apply{"正在执行已确认的整理计划"}else{"准备扫描与解压；不会提前执行去重或归类"}.into());
@@ -529,11 +460,6 @@ fn set_clipboard_text(text:&str)->Result<()>{
     use copypasta::ClipboardProvider as _;
     let mut ctx=copypasta::ClipboardContext::new().map_err(|e|anyhow::anyhow!("无法打开剪贴板：{e}"))?;
     ctx.set_contents(text.to_owned()).map_err(|e|anyhow::anyhow!("无法写入剪贴板：{e}"))
-}
-/// 规则文件、报告的默认落盘位置：桌面（没有桌面目录就退到主目录）。
-/// 不用“上次用过的目录”，否则默认会把配置或报告写进正在整理的目录里。
-fn user_file_directory()->Option<PathBuf>{
-    directories_next::UserDirs::new().and_then(|dirs|dirs.desktop_dir().map(Path::to_path_buf).or_else(||Some(dirs.home_dir().to_path_buf())))
 }
 /// 把代理检测快照写入界面模型。单项为空时由界面空态文案说明，不写 error_text。
 fn apply_proxy_snapshot(ui:&AppWindow,snap:crate::proxy::ProxySnapshot){
@@ -596,6 +522,13 @@ fn load_proxy_command_tips(ui:&AppWindow,platform:i32){
         .map(|t|ProxyCommandRow{title:t.title.into(),command:t.command.into(),note:t.note.into(),group:t.group.into()})
         .collect();
     ui.set_proxy_command_rows(Rc::new(VecModel::from(rows)).into());
+}
+
+/// 事件循环把日志写进界面环形缓冲的统一入口（C-12：界面仅保留最近 300 条）。
+/// Failed 收尾与普通日志同走此路径，避免失败消息绕过条数上限。
+fn push_event_log(logs:&mut VecDeque<String>,text:String){
+    if logs.len()>=300 { logs.pop_front(); }
+    logs.push_back(text);
 }
 
 /// 把网络测试报告写入界面模型。成功行只显示耗时（状态另有胶囊），失败行显示原因与排查提示。
@@ -1148,47 +1081,6 @@ pub fn run_with_engine_overrides(hook:impl FnOnce(&AppWindow)+'static,overrides:
         ui.on_open_report(move||{if let Some(path)=&state.borrow().task{if let Err(error)=open::that(path){if let Some(ui)=weak.upgrade(){show_error(&ui,error);}}}});
     }
     {
-        let state=state.clone();let sender=sender.clone();let weak=ui.as_weak();
-        ui.on_export_report(move||{let task=state.borrow().task.clone();if let Some(task)=task{
-            // 任务运行中禁止导出：apply 会写任务库，与只读导出并发会拖垮 busy_timeout。
-            if let Some(ui)=weak.upgrade(){if ui.get_busy(){show_error(&ui,"任务运行中无法导出报告");return;}}
-            let mut dialog=rfd::FileDialog::new().set_file_name("整理报告.csv").add_filter("CSV",&["csv"]);
-            if let Some(directory)=user_file_directory(){ dialog=dialog.set_directory(&directory); }
-            if let Some(path)=dialog.save_file(){
-                // 会话级导出互斥：已有导出在途时拒绝本次，避免并发写坏目标/临时文件。
-                if EXPORT_BUSY.swap(true,Ordering::SeqCst){
-                    if let Some(ui)=weak.upgrade(){show_error(&ui,"已有导出正在进行，请稍后再试");}
-                    return;
-                }
-                // 取锁后若拒绝继续，必须立刻释放：否则会话内导出永久卡死。
-                if let Some(ui)=weak.upgrade(){
-                    if ui.get_busy(){
-                        EXPORT_BUSY.store(false,Ordering::SeqCst);
-                        show_error(&ui,"任务运行中无法导出报告");
-                        return;
-                    }
-                }
-                let sender=sender.clone();
-                std::thread::spawn(move||{
-                    // Drop 守卫：无论成功/失败/panic 都释放会话级导出锁。
-                    let _guard=ExportGuard;
-                    let result=std::panic::catch_unwind(std::panic::AssertUnwindSafe(||{
-                        // 系统保存对话框对已存在文件会再问一次“是否替换”；这里按用户确认覆盖。
-                        // 先写同目录临时文件、成功后再原子替换，失败时原文件仍可用（不再先 remove_file）。
-                        export_csv_via_temp(&task,&path)?;
-                        Ok::<_,anyhow::Error>(Event::Notice(format!("已导出：{}",path.display())))
-                    }));
-                    let event=match result{
-                        Ok(Ok(event))=>event,
-                        Ok(Err(error))=>Event::Error(format!("{error:#}")),
-                        Err(_)=>Event::Error("导出线程意外退出；未完成的导出不会写入目标文件".into()),
-                    };
-                    let _=sender.send(event);
-                });
-            }
-        }});
-    }
-    {
         let weak=ui.as_weak();let drag=Rc::new(RefCell::new(None::<WindowDrag>));
         let anchor=drag.clone();
         ui.on_window_drag_start(move|x,y|{if let Some(ui)=weak.upgrade(){
@@ -1252,7 +1144,7 @@ pub fn run_with_engine_overrides(hook:impl FnOnce(&AppWindow)+'static,overrides:
             for event in receiver.try_iter().take(256){
                 match event{
                     Event::Status(text)=>{if !ui.get_paused(){ui.set_status(text.into());}},
-                    Event::Log(text)=>{let mut s=state.borrow_mut();if s.logs.len()==300{s.logs.pop_front();}s.logs.push_back(text);log_changed=true;},
+                    Event::Log(text)=>{let mut s=state.borrow_mut();push_event_log(&mut s.logs,text);log_changed=true;},
                     Event::Conflict(info,reply)=>{
                         // 冲突事件可能在用户已请求取消后才被本定时器处理：已取消的任务不再弹
                         // 冲突框，直接丢弃事件；reply 发送端随事件一起释放，worker 侧会在
@@ -1302,7 +1194,7 @@ pub fn run_with_engine_overrides(hook:impl FnOnce(&AppWindow)+'static,overrides:
                     Event::Failed(error)=>{
                         // 用户点了“取消任务”时不要用红色错误条报同一个消息：取消是预期操作，不是故障。
                         let cancelled={let s=state.borrow();s.control.as_ref().is_some_and(|control|control.is_cancelled())};
-                        {let mut s=state.borrow_mut();s.control=None;s.conflict=None;s.logs.push_back(error.clone());log_changed=true;}
+                        {let mut s=state.borrow_mut();s.control=None;s.conflict=None;push_event_log(&mut s.logs,error.clone());log_changed=true;}
                         ui.set_busy(false);ui.set_ready(false);ui.set_paused(false);ui.set_conflict_visible(false);
                         if cancelled{
                             ui.set_notice_text(error.into());
@@ -1512,6 +1404,17 @@ mod gui_tests{
         assert!(!wsl_distros_event_accepted(3,3,0),"切到 Windows 本机后不得应用/清 busy");
     }
     #[test]
+    fn failed_event_log_respects_300_cap(){
+        // 回归（C-12）：Failed 收尾此前直接 push_back 不查上限；一次任务先积累 300 条
+        // 日志再收到失败事件时界面日志会到 301 条。失败收尾必须与普通日志同受 300 条约束。
+        let mut logs=VecDeque::new();
+        for i in 0..300{ push_event_log(&mut logs,format!("日志 {i}")); }
+        push_event_log(&mut logs,"任务失败：测试".into());
+        assert_eq!(logs.len(),300,"界面日志最多保留最近 300 条（C-12）");
+        assert_eq!(logs.back().map(|s|s.as_str()),Some("任务失败：测试"),"最新一条在最上");
+        assert_eq!(logs.front().map(|s|s.as_str()),Some("日志 1"),"最旧一条被挤出");
+    }
+    #[test]
     fn failed_reload_updates_summary_without_reborrow_panic(){
         // 回归：Failed 收尾此前把 task 提取放在 if-let scrutinee 里（edition 2021 下
         // borrow() 临时存活到整个语句结束），块内 borrow_mut 更新 planned 必 BorrowMutError
@@ -1713,15 +1616,19 @@ mod gui_tests{
             ui.invoke_rule_bool("large_files".into(),true);
             assert!(rule_value_at(ui,"large_threshold_gib").is_some());
             ui.invoke_toggle_advanced(false);
-            // 去重（冲突组已并入）：版本淘汰开关未开时，保留规则与比较范围都隐藏
+            // 去重（R-04 拆分后）：同名/副本名/不同名三个独立开关 + 重复组保留规则 + 版本淘汰开关；
+            // 版本保留规则仍随版本淘汰开关隐藏。
             ui.invoke_select_section(1);
-            assert_eq!(ui.get_rules().row_count(),3,"去重基础层：内容去重、保留规则、版本淘汰开关");
+            assert!(rule_value_at(ui,"dedup_same_name").is_some()&&rule_value_at(ui,"dedup_copy_names").is_some()
+                &&rule_value_at(ui,"dedup_other_names").is_some(),"去重三类开关必须同屏独立出现");
+            assert_eq!(ui.get_rules().row_count(),5,"去重基础层：三个去重开关 + 保留规则 + 版本淘汰开关");
             ui.invoke_rule_bool("same_name_same_size".into(),true);
             assert!(rule_value_at(ui,"same_size_keep").is_some());
+            assert_eq!(ui.get_rules().row_count(),6,"打开版本淘汰后保留规则出现");
             assert!(rule_value_at(ui,"conflict_scope_directory").is_none(),"比较范围已移入高级层");
             // 关掉开关后依赖行必须消失（增量删除路径，与上面的插入路径同样重要）
             ui.invoke_rule_bool("same_name_same_size".into(),false);
-            assert_eq!(ui.get_rules().row_count(),3,"关掉开关后保留规则要收回");
+            assert_eq!(ui.get_rules().row_count(),5,"关掉开关后版本保留规则要收回");
             assert!(rule_value_at(ui,"same_size_keep").is_none());
         }).unwrap();
     }
@@ -1730,9 +1637,16 @@ mod gui_tests{
         with_gui(|app|{
             let ui=&app.ui;
             ui.invoke_select_section(1); // 去重
+            // R-04 拆分后：同名/副本名/不同名同内容三类独立启停，互不联动。
             ui.invoke_rule_bool("dedup_same_name".into(),false);
             {let cfg=&app.state.borrow().config;
-                assert!(!cfg.dedup_same_name&&!cfg.dedup_copy_names&&!cfg.dedup_other_names,"内容去重一行必须同时写三个细粒度字段");}
+                assert!(!cfg.dedup_same_name,"同名去重开关只写自己");
+                assert!(cfg.dedup_copy_names&&cfg.dedup_other_names,"副本名/不同名去重必须保持独立，不得被联动");}
+            ui.invoke_rule_bool("dedup_copy_names".into(),false);
+            ui.invoke_rule_bool("dedup_other_names".into(),false);
+            {let cfg=&app.state.borrow().config;
+                assert!(!cfg.dedup_copy_names&&!cfg.dedup_other_names,"两类开关各自独立生效");}
+            // 版本淘汰组仍是合并行（R-05）：一行写两个细粒度字段。
             ui.invoke_rule_bool("same_name_same_size".into(),true);
             {let cfg=&app.state.borrow().config;
                 assert!(cfg.same_name_same_size&&cfg.same_name_different_size,"版本淘汰一行必须同时写两个开关");}
@@ -1740,6 +1654,10 @@ mod gui_tests{
             {let cfg=&app.state.borrow().config;
                 assert_eq!(cfg.same_size_keep,KeepPolicy::Oldest);
                 assert_eq!(cfg.different_size_keep,KeepPolicy::Oldest,"保留规则一行必须同时写两个策略");}
+            // R-04：保留规则补齐「最大/最小」，写入对应枚举。
+            ui.invoke_rule_choice("same_size_keep".into(),2); // 保留最大
+            {let cfg=&app.state.borrow().config;
+                assert_eq!(cfg.same_size_keep,KeepPolicy::Largest,"最大选项必须可用");}
         }).unwrap();
     }
     #[test]
@@ -1929,33 +1847,6 @@ mod gui_tests{
         let _=std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
         dir
-    }
-
-    #[test]
-    fn write_via_temp_success_replaces_existing(){
-        let dir=temp_test_dir("csv-ok");
-        let dest=dir.join("report.csv");
-        std::fs::write(&dest,b"old").unwrap();
-        write_via_temp(&dest,|tmp|{std::fs::write(tmp,b"new")?;Ok(())}).unwrap();
-        assert_eq!(std::fs::read(&dest).unwrap(),b"new");
-        // 不应残留临时文件
-        let leftovers=std::fs::read_dir(&dir).unwrap()
-            .filter_map(|e|e.ok())
-            .filter(|e|e.file_name().to_string_lossy().ends_with(".tmp"))
-            .count();
-        assert_eq!(leftovers,0,"成功后不应残留 .tmp 文件");
-        let _=std::fs::remove_dir_all(&dir);
-    }
-
-    #[test]
-    fn write_via_temp_failure_preserves_original(){
-        let dir=temp_test_dir("csv-fail");
-        let dest=dir.join("report.csv");
-        std::fs::write(&dest,b"original").unwrap();
-        let result=write_via_temp(&dest,|_tmp|Err(anyhow::anyhow!("模拟写入失败")));
-        assert!(result.is_err(),"写失败应上抛错误");
-        assert_eq!(std::fs::read(&dest).unwrap(),b"original","写失败时原文件必须仍可用");
-        let _=std::fs::remove_dir_all(&dir);
     }
 
     #[test]

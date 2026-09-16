@@ -183,12 +183,41 @@ pub fn ensure_dir(root: &Path, directory: &Path) -> Result<()> {
     safe_join(root, &rel)?;
     Ok(())
 }
+/// 生成「stem (N)ext」形式的候选名；整体超过 Windows 单组件上限（255 个 UTF-16
+/// 单元）时按「序号标记 → 扩展名 → stem」的优先级截断，而不是让 validate_component
+/// 把整次分配搞失败。截断按 UTF-16 单元预算逐字符进行，不会切开代理对；扩展名
+/// 截断后剥掉尾部点/空白，保证结果仍是合法组件。ext 自带前导点（可为空串）。
+pub fn suffixed_candidate(stem: &str, ext: &str, index: u64) -> String {
+    let sep = format!(" ({index})");
+    let budget = 255usize.saturating_sub(sep.encode_utf16().count());
+    // stem 非空时至少给 stem 保留 1 个单元，避免扩展名占满预算后候选名以序号空格开头。
+    let ext_cap = budget.saturating_sub(usize::from(!stem.is_empty()));
+    // 扩展名截断后剥掉尾部点与任意 Unicode 空白，与 validate_component 的尾随判定同口径。
+    let ext: String = truncate_utf16(ext, ext_cap)
+        .trim_end_matches(|c: char| c == '.' || c.is_whitespace())
+        .to_string();
+    let budget = budget - ext.encode_utf16().count();
+    let cut = truncate_utf16(stem, budget);
+    format!("{cut}{sep}{ext}")
+}
+/// 按 UTF-16 单元上限截断字符串：逐字符累计 len_utf16，不切开代理对。
+fn truncate_utf16(text: &str, max_units: usize) -> String {
+    let mut out = String::new();
+    let mut units = 0usize;
+    for ch in text.chars() {
+        let need = ch.len_utf16();
+        if units + need > max_units { break; }
+        units += need;
+        out.push(ch);
+    }
+    out
+}
 pub fn unique_target(root: &Path, requested: &Path) -> Result<PathBuf> {
     let parent = requested.parent().context("目标没有父目录")?;
     let stem = requested.file_stem().and_then(|v| v.to_str()).context("无效文件名")?;
-    let ext = requested.extension().and_then(|v| v.to_str());
+    let ext = requested.extension().and_then(|v| v.to_str()).map(|v| format!(".{v}")).unwrap_or_default();
     for index in 1u64..=1_000_000 {
-        let name = match ext { Some(ext) => format!("{stem} ({index}).{ext}"), None => format!("{stem} ({index})") };
+        let name = suffixed_candidate(stem, &ext, index);
         let path = parent.join(name);
         let rel = relative_string(root, &path)?;
         for part in rel.split('/') { validate_component(part)?; }

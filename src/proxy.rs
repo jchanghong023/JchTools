@@ -170,6 +170,20 @@ fn template_command_tips() -> Vec<CommandTip> {
             note: "PowerShell；大小写不敏感匹配。",
         },
         CommandTip {
+            platform: "Windows",
+            group: "git 代理",
+            title: "git 设置代理（全局）",
+            command: "git config --global http.proxy http://127.0.0.1:7890\ngit config --global https.proxy http://127.0.0.1:7890".into(),
+            note: "写入当前用户的 ~/.gitconfig，只影响 git；取消见下一条。",
+        },
+        CommandTip {
+            platform: "Windows",
+            group: "git 代理",
+            title: "git 取消代理（全局）",
+            command: "git config --global --unset http.proxy\ngit config --global --unset https.proxy".into(),
+            note: "未设置过时 git 报 exit code 5，属正常，可忽略。",
+        },
+        CommandTip {
             platform: "Linux",
             group: "会话环境变量",
             title: "export 当前 shell 代理",
@@ -210,6 +224,20 @@ fn template_command_tips() -> Vec<CommandTip> {
             title: "apt 指定代理",
             command: "sudo tee /etc/apt/apt.conf.d/99proxy <<'EOF'\nAcquire::http::Proxy \"http://127.0.0.1:7890\";\nAcquire::https::Proxy \"http://127.0.0.1:7890\";\nEOF".into(),
             note: "只影响 apt；用完可删除该配置文件。",
+        },
+        CommandTip {
+            platform: "Linux",
+            group: "git 代理",
+            title: "git 设置代理（全局）",
+            command: "git config --global http.proxy http://127.0.0.1:7890\ngit config --global https.proxy http://127.0.0.1:7890".into(),
+            note: "写入当前用户的 ~/.gitconfig，只影响 git；取消见下一条。",
+        },
+        CommandTip {
+            platform: "Linux",
+            group: "git 代理",
+            title: "git 取消代理（全局）",
+            command: "git config --global --unset http.proxy\ngit config --global --unset https.proxy".into(),
+            note: "未设置过时 git 报 exit code 5，属正常，可忽略。",
         },
         CommandTip {
             platform: "Linux",
@@ -813,6 +841,7 @@ fn run_powershell_utf8(script: &str) -> anyhow::Result<String> {
 
 #[cfg(windows)]
 fn read_registry_string(name: &str) -> Option<String> {
+    use windows_sys::Win32::Foundation::ERROR_MORE_DATA;
     use windows_sys::Win32::System::Registry::{RegGetValueW, HKEY_CURRENT_USER, RRF_RT_REG_SZ};
     let path: Vec<u16> = "Software\\Microsoft\\Windows\\CurrentVersion\\Internet Settings"
         .encode_utf16()
@@ -821,7 +850,7 @@ fn read_registry_string(name: &str) -> Option<String> {
     let value_name: Vec<u16> = name.encode_utf16().chain(std::iter::once(0)).collect();
     let mut buffer = vec![0u16; 1024];
     let mut size = (buffer.len() * 2) as u32;
-    let status = unsafe {
+    let mut status = unsafe {
         RegGetValueW(
             HKEY_CURRENT_USER,
             path.as_ptr(),
@@ -832,6 +861,25 @@ fn read_registry_string(name: &str) -> Option<String> {
             &mut size,
         )
     };
+    // 值超过 1023 字符时首次调用返回 ERROR_MORE_DATA（size 已写为所需字节数）：
+    // 按报告大小重配缓冲再读一次，否则长值（如超长 ProxyOverride 绕过列表）会被
+    // 静默当成「不存在」，界面显示为（空）。
+    if status == ERROR_MORE_DATA {
+        buffer.clear();
+        buffer.resize((size as usize / 2).max(1), 0);
+        size = (buffer.len() * 2) as u32;
+        status = unsafe {
+            RegGetValueW(
+                HKEY_CURRENT_USER,
+                path.as_ptr(),
+                value_name.as_ptr(),
+                RRF_RT_REG_SZ,
+                std::ptr::null_mut(),
+                buffer.as_mut_ptr() as *mut core::ffi::c_void,
+                &mut size,
+            )
+        };
+    }
     if status != 0 || size < 2 {
         return None;
     }
@@ -1398,6 +1446,30 @@ mod tests {
             .find(|t| t.title == "unset 清除当前会话代理")
             .expect("应有 unset 命令");
         assert!(!clear.command.contains("10809"));
+    }
+
+    #[test]
+    fn command_tips_include_git_proxy_snippets() {
+        // 回归（X-04）：命令参考必须包含 git 代理配置片段——http.proxy / https.proxy 的
+        // 设置与取消命令，端口号注入当前配置端口。两个平台页签都要能直接复制到 git。
+        let tips = command_tips(10809);
+        for platform in ["Windows", "Linux"] {
+            let set = tips
+                .iter()
+                .find(|t| t.platform == platform && t.title.contains("git 设置代理"))
+                .unwrap_or_else(|| panic!("{platform} 应有 git 设置代理命令"));
+            assert!(set.command.contains("git config --global http.proxy http://127.0.0.1:10809"),
+                "git 设置命令必须注入当前端口：{}", set.command);
+            assert!(set.command.contains("git config --global https.proxy http://127.0.0.1:10809"));
+            assert!(!set.command.contains("7890"), "默认端口不得残留在 git 设置命令中");
+            let unset = tips
+                .iter()
+                .find(|t| t.platform == platform && t.title.contains("git 取消代理"))
+                .unwrap_or_else(|| panic!("{platform} 应有 git 取消代理命令"));
+            assert!(unset.command.contains("git config --global --unset http.proxy"));
+            assert!(unset.command.contains("git config --global --unset https.proxy"));
+            assert!(!unset.command.contains("10809"), "取消命令不含端口，不得被端口替换污染");
+        }
     }
 
     #[test]

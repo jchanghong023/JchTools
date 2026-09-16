@@ -330,7 +330,9 @@ fn moves(job: &mut Job) -> Result<()> {
                     job.context.control.checkpoint()?;
                     let stem = requested.file_stem().and_then(|s|s.to_str()).context("目标文件名无效")?;
                     let suffix = requested.extension().and_then(|s|s.to_str()).map(|s|format!(".{s}")).unwrap_or_default();
-                    target = requested.parent().context("目标缺少目录")?.join(format!("{stem} ({index}){suffix}"));
+                    // 基础名接近 255 个 UTF-16 单元时，后缀候选名超限会让整次归类失败；
+                    // suffixed_candidate 负责截断 stem 保持组件合法。
+                    target = requested.parent().context("目标缺少目录")?.join(fsutil::suffixed_candidate(stem, &suffix, index));
                     let rel = fsutil::relative_string(&job.root,&target)?;
                     fsutil::safe_join(&job.root,&rel)?;
                     // 回退候选撞回源文件自身当前名称（如剥离副本名后原名被其它内容占用再回退）：

@@ -408,7 +408,6 @@ export component AppWindow inherits Window {
     callback plan-page(int);
     callback filter-plan(string);
     callback open-report();
-    callback export-report();
     callback answer-conflict(int,bool);
     callback refresh-proxy();
     callback select-proxy-platform(int);
@@ -492,7 +491,7 @@ export component AppWindow inherits Window {
             }
         }
         VerticalLayout {
-            padding: root.page-padding; padding-top: 36px; padding-bottom: 18px; spacing: 12px;
+            padding: root.page-padding; padding-top: 36px; padding-bottom: 16px; spacing: 10px;
             // 页面标题区
             HorizontalLayout { height: 32px; spacing: 12px; cross-axis-alignment: center;
                 Label { text: root.screen == 0 ? "目录整理" : root.screen == 2 ? "代理工具" : "关于 JchTools";
@@ -527,11 +526,11 @@ export component AppWindow inherits Window {
                 }
             }
             if root.screen == 0: VerticalLayout {
-                spacing: 10px;
+                spacing: 8px;
                 // 目录选择：独立卡片，作为主输入
                 Surface {
                     min-height: 48px;
-                    HorizontalLayout { padding-top: 10px; padding-bottom: 10px; padding-left: 14px; padding-right: 12px; spacing: 10px; cross-axis-alignment: center;
+                    HorizontalLayout { padding-top: 8px; padding-bottom: 8px; padding-left: 14px; padding-right: 12px; spacing: 10px; cross-axis-alignment: center;
                         Rectangle {
                             width: 28px; height: 28px; border-radius: 8px;
                             background: Design.accent-softer;
@@ -546,38 +545,39 @@ export component AppWindow inherits Window {
                     }
                 }
                 // 面板页签 + 任务操作
-                HorizontalLayout { height: 34px; spacing: 2px;
+                HorizontalLayout { height: 32px; spacing: 2px;
                     Tab { text: "处理规则"; active: root.panel == 0; width: 104px; enabled: root.confirm-kind == 0 && !root.conflict-visible; clicked => { root.panel = 0; } }
                     Tab { text: "整理计划"; active: root.panel == 1; width: 104px; enabled: root.has-task && root.confirm-kind == 0 && !root.conflict-visible; clicked => { root.panel = 1; } }
                     Tab { text: "进度与日志"; active: root.panel == 2; width: 118px; enabled: root.confirm-kind == 0 && !root.conflict-visible; clicked => { root.panel = 2; } }
                     Rectangle { horizontal-stretch: 1; background: transparent; }
                     if root.has-task: Button { text: "打开任务目录"; enabled: !root.busy && root.confirm-kind == 0; clicked => { root.open-report(); } }
-                    if root.has-task: Button { text: "导出报告"; enabled: !root.busy && root.confirm-kind == 0; clicked => { root.export-report(); } }
                 }
                 // 规则分区胶囊
                 if root.panel == 0: Rectangle {
-                    height: 36px; border-radius: 12px;
+                    height: 32px; border-radius: 12px;
                     background: Design.base.mix(Design.accent, 0.95);
                     border-width: 1px; border-color: Design.line-soft;
                     HorizontalLayout { padding: 3px; spacing: 4px;
                         for label[index] in ["解压", "去重", "归类", "清理", "安全与性能"]: Pill {
                             text: label; active: root.section == index; enabled: !root.busy && root.confirm-kind == 0; horizontal-stretch: 1;
-                            height: 30px;
+                            height: 24px;
                             clicked => { root.select-section(index); }
                         }
                         // 高级选项开关：只控制是否显示专家调优项，不改变任何规则值。
                         Pill { text: root.show-advanced ? "隐藏高级选项" : "显示高级选项"; active: root.show-advanced;
-                            width: 132px; height: 30px; enabled: !root.busy && root.confirm-kind == 0;
+                            width: 132px; height: 24px; enabled: !root.busy && root.confirm-kind == 0;
                             clicked => { root.toggle-advanced(!root.show-advanced); } }
                     }
                 }
                 if root.panel == 0: Surface { vertical-stretch: 1;
+                    // 行高 44px：U-05 要求默认 1120×720 下「处理规则」同屏可见 9 行；
+                    // 说明文字单行省略，不换行撑高。
                     ListView { for row in root.rules: Rectangle {
-                        height: 76px;
+                        height: 44px;
                         HorizontalLayout { padding-left: 16px; padding-right: 16px; spacing: 16px; cross-axis-alignment: center;
-                            VerticalLayout { horizontal-stretch: 1; spacing: 3px;
-                                Label { text: row.title; font-weight: 600; font-size: 14px; overflow: elide; }
-                                Muted { text: row.hint; wrap: word-wrap; overflow: elide; font-size: 12px; }
+                            VerticalLayout { horizontal-stretch: 1; spacing: 2px;
+                                Label { text: row.title; font-weight: 600; font-size: 13px; overflow: elide; }
+                                Muted { text: row.hint; wrap: no-wrap; overflow: elide; font-size: 11px; }
                             }
                             // 规则控件直接写 config，模态确认期间必须与目录输入同口径禁用：
                             // 否则键盘可穿透确认框改删除策略，确认文案与实际执行不符。
@@ -665,7 +665,7 @@ export component AppWindow inherits Window {
                     border-color: Design.base.mix(Design.accent, 0.68);
                     drop-shadow-blur: 18px;
                     drop-shadow-offset-y: 6px;
-                    VerticalLayout { padding-top: 10px; padding-bottom: 10px; padding-left: 16px; padding-right: 14px; spacing: 8px;
+                    VerticalLayout { padding-top: 8px; padding-bottom: 8px; padding-left: 16px; padding-right: 14px; spacing: 8px;
                         HorizontalLayout { spacing: 12px; cross-axis-alignment: center;
                             VerticalLayout { horizontal-stretch: 1; spacing: 2px;
                                 HorizontalLayout { spacing: 8px; cross-axis-alignment: center;
@@ -684,10 +684,10 @@ export component AppWindow inherits Window {
                             if root.busy && root.progress >= 0: Text {
                                 text: round(root.progress * 100) + "%"; font-size: 22px; font-weight: 700; color: Design.accent-ink;
                             }
-                            // 模态（如 kind=3 停止并关闭）期间禁用：键盘不得穿透模态直接取消任务，
-                            // 否则绕过「返回检查」路径且不可逆。
-                            if root.busy: Button { text: root.paused ? "继续" : "暂停"; enabled: root.confirm-kind == 0; clicked => { root.pause-task(); } }
-                            if root.busy: Button { text: "取消任务"; enabled: root.confirm-kind == 0; clicked => { root.cancel-task(); } }
+                            // 模态（如 kind=3 停止并关闭）与解压冲突框打开期间都禁用：键盘
+                            // 不得穿透遮罩直接暂停/取消任务，必须先处理最上层对话框。
+                            if root.busy: Button { text: root.paused ? "继续" : "暂停"; enabled: root.confirm-kind == 0 && !root.conflict-visible; clicked => { root.pause-task(); } }
+                            if root.busy: Button { text: "取消任务"; enabled: root.confirm-kind == 0 && !root.conflict-visible; clicked => { root.cancel-task(); } }
                             if !root.busy && root.ready: Button { text: "确认并执行整理"; primary: true; enabled: root.confirm-kind == 0; clicked => { root.request-apply(); } }
                             if !root.busy && !root.ready: Button { text: "开始解压与分析"; primary: true; enabled: root.directory != "" && root.confirm-kind == 0;
                                 clicked => { root.request-start(); } }
@@ -698,7 +698,7 @@ export component AppWindow inherits Window {
             }
             if root.screen == 2: VerticalLayout {
                 spacing: 10px;
-                HorizontalLayout { height: 34px; spacing: 2px;
+                HorizontalLayout { height: 32px; spacing: 2px;
                     Tab { text: "状态"; active: root.proxy-section == 0; width: 80px;
                         enabled: root.confirm-kind == 0 && !root.conflict-visible;
                         clicked => { root.proxy-section = 0; } }
@@ -819,6 +819,10 @@ export component AppWindow inherits Window {
                                     if row.virtual-like: Text { text: "虚"; width: 18px; font-size: 10px; font-weight: 600;
                                         color: Design.accent-ink; horizontal-alignment: center; }
                                     CopyChip { text: "复制"; width: 44px; height: 20px;
+                                        enabled: row.ipv4 != "" && root.confirm-kind == 0 && !root.conflict-visible;
+                                        accessible-label: "复制 IPv4：" + row.name;
+                                        clicked => { root.copy-proxy-command(row.ipv4, row.name + " IPv4"); } }
+                                    CopyChip { text: "复制"; width: 44px; height: 20px;
                                         enabled: row.mac != "" && root.confirm-kind == 0 && !root.conflict-visible;
                                         accessible-label: "复制 MAC：" + row.name;
                                         clicked => { root.copy-proxy-command(row.mac, row.name + " MAC"); } }
@@ -839,7 +843,7 @@ export component AppWindow inherits Window {
                 }
                 if root.proxy-section == 1: VerticalLayout {
                     spacing: 10px;
-                    HorizontalLayout { height: 34px; spacing: 2px;
+                    HorizontalLayout { height: 32px; spacing: 2px;
                         Tab { text: "Windows"; active: root.proxy-platform == 0; width: 96px;
                             enabled: root.confirm-kind == 0 && !root.conflict-visible;
                             clicked => { root.select-proxy-platform(0); } }
@@ -1009,7 +1013,7 @@ export component AppWindow inherits Window {
                     }
                 }
                 AboutSlint { }
-                Muted { text: "本项目原创代码：MIT。Slint 使用其桌面 Royalty-free 许可并保留本署名组件。\n7-Zip：LGPL / BSD / unRAR 限制；随发布包提供许可证及对应源码。\n完整验证状态见包内 docs/VALIDATION.md。"; }
+                Muted { text: "本项目原创代码：MIT。Slint 使用其桌面 Royalty-free 许可并保留本署名组件。\n7-Zip：LGPL / BSD / unRAR 限制；随发布包提供许可证及对应源码。"; }
                 Rectangle { vertical-stretch: 1; background: transparent; }
             }
         }

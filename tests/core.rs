@@ -24,7 +24,8 @@ impl Recycler for MoveRecycle {fn recycle(&self,p:&Path)->Result<(),RecycleFailu
 #[test] fn legacy_config_with_removed_fields_still_loads(){let dir=tempfile::tempdir().unwrap();let path=dir.path().join("config.json");let mut value=serde_json::to_value(Config::default()).unwrap();value.as_object_mut().unwrap().insert("hash_algorithm".into(),"md5".into());value.as_object_mut().unwrap().insert("verify_bytes".into(),false.into());fs::write(&path,serde_json::to_vec(&value).unwrap()).unwrap();Config::load(&path).unwrap();}
 #[test] fn schema_matches_every_configuration_field(){let cfg=serde_json::to_value(Config::default()).unwrap();let schema:serde_json::Value=serde_json::from_str(include_str!("../resources/rules.json")).unwrap();let keys=schema.as_array().unwrap();let fields=cfg.as_object().unwrap();
     // 有意不进规则表的字段：theme 在「关于」页；其余是界面合并行的影子键（一行驱动多个细粒度字段，引擎/CLI/旧任务库仍读原值）。
-    let hidden=["theme","dedup_copy_names","dedup_other_names","same_name_different_size","different_size_keep","detect_type"];
+    // 去重三类（同名/副本名/不同名同内容）已按 R-04 拆为独立规则行，不再是影子键。
+    let hidden=["theme","same_name_different_size","different_size_keep","detect_type"];
     assert_eq!(fields.len(),keys.len()+hidden.len());
     for row in keys{assert!(fields.get(row["key"].as_str().unwrap()).is_some());}
     for key in hidden{assert!(fields.contains_key(key),"{key} 应作为配置字段保留");}}
@@ -46,6 +47,36 @@ impl Recycler for MoveRecycle {fn recycle(&self,p:&Path)->Result<(),RecycleFailu
 #[test] fn metadata_change_invalidates_snapshot(){let f=Fixture::new();let p=f.write("a",b"one",1);let s=fsutil::snapshot(&p).unwrap();fsutil::unchanged(&p,&s).unwrap();fs::write(&p,b"different").unwrap();assert!(fsutil::unchanged(&p,&s).is_err());}
 #[test] fn rename_never_overwrites(){let f=Fixture::new();let a=f.write("a",b"A",1);let b=f.write("b",b"B",2);assert!(fsutil::rename_noreplace(&a,&b).is_err());assert_eq!(fs::read(a).unwrap(),b"A");assert_eq!(fs::read(b).unwrap(),b"B");}
 #[test] fn unique_name_preserves_extension(){let f=Fixture::new();let p=f.write("report.pdf",b"a",1);let q=fsutil::unique_target(&f.root,&p).unwrap();assert_eq!(q.file_name().unwrap(),"report (1).pdf");}
+#[test] fn unique_name_truncates_long_stem_to_component_limit(){
+    // 回归：基础名接近 255 个 UTF-16 单元且目标被占用时，“名 (N).扩展”候选名会超限，
+    // validate_component 令 unique_target 整体失败——归类/解压冲突回退因此把整次任务
+    // 或整包解压搞失败。应截断 stem 生成合法候选名，而不是放弃分配。
+    let f=Fixture::new();
+    // 基础名 251+4=255 恰好合法；加「 (1)」后 260 超限，旧行为会让 unique_target 失败。
+    let stem="a".repeat(251);
+    let p=f.write(&format!("{stem}.txt"),b"a",1);
+    let q=fsutil::unique_target(&f.root,&p).unwrap();
+    let name=q.file_name().unwrap().to_str().unwrap().to_string();
+    assert!(name.encode_utf16().count()<=255,"分配名不得超 255 个 UTF-16 单元：{name}");
+    assert!(name.ends_with(" (1).txt"),"保持扩展名与序号后缀：{name}");
+    assert_ne!(q,p);
+    // 截断只发生在超限时：常规名不受影响。
+    let r=f.write("b.pdf",b"b",1);
+    assert_eq!(fsutil::unique_target(&f.root,&r).unwrap().file_name().unwrap(),"b (1).pdf");
+    // 直接钉住扩展名截断后的尾随空白剥离：截断点落在 NBSP 之后时不得留下 NBSP 结尾
+    // （validate_component 拒一切 Unicode 尾随空白，trim 集必须与其同口径）。
+    let ext=format!(".{}\u{a0}z","x".repeat(248));
+    let n=fsutil::suffixed_candidate("a",&ext,1);
+    assert!(n.encode_utf16().count()<=255,"{n}");
+    assert!(!n.chars().last().is_some_and(|c|c.is_whitespace()),"不得以任何空白结尾：{n:?}");
+    assert!(n.ends_with('x'),"截断剥掉 NBSP 后应露出的最后字符：{n:?}");
+    // 扩展名超长（252 单元）同样不得放弃分配：序号优先，其次扩展名，再截 stem。
+    let long_ext="x".repeat(251);
+    let p2=f.write(&format!("a.{long_ext}"),b"a",1);
+    let q2=fsutil::unique_target(&f.root,&p2).unwrap();
+    let n2=q2.file_name().unwrap().to_str().unwrap().to_string();
+    assert!(n2.encode_utf16().count()<=255,"分配名不得超 255 个 UTF-16 单元：{n2}");
+    assert!(n2.contains(" (1).")&&n2.starts_with('a'),"保留序号与扩展名起点：{n2}");}
 #[test] fn hashes_known_vectors(){let f=Fixture::new();let p=f.write("a",b"abc",1);let s=fsutil::snapshot(&p).unwrap();let ctl=Control::default();assert_eq!(hashing::full_hash(&p,&s,&ctl).unwrap(),"blake3:6437b3ac38465133ffb63b75273a8db548c558465d79db03fd359c6cd5bd9d85");}
 #[test] fn same_prehash_different_middle_is_not_duplicate(){let f=Fixture::new();let a=vec![7u8;300_000];let mut b=a.clone();b[150_000]=8;let ap=f.write("a",&a,1);let bp=f.write("b",&b,2);let sa=fsutil::snapshot(&ap).unwrap();let sb=fsutil::snapshot(&bp).unwrap();let ctl=Control::default();assert_eq!(hashing::prehash(&ap,&sa,&ctl).unwrap(),hashing::prehash(&bp,&sb,&ctl).unwrap());assert_ne!(hashing::full_hash(&ap,&sa,&ctl).unwrap(),hashing::full_hash(&bp,&sb,&ctl).unwrap());assert_eq!(f.plan(base()).summary.planned_delete,0);}
 #[test] fn cancelled_hash_does_not_read(){let f=Fixture::new();let p=f.write("a",b"abc",1);let ctl=Control::default();ctl.cancel();assert!(hashing::full_hash(&p,&fsutil::snapshot(&p).unwrap(),&ctl).is_err());assert_eq!(ctl.read_bytes.load(Ordering::Relaxed),0);}

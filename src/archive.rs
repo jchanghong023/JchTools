@@ -31,12 +31,11 @@ impl SevenZip {
     /// 7-Zip 对 bzip2/xz 等流式格式可能不输出成员 Path，甚至不输出 Size；此时不能把条目静默丢掉，
     /// 否则 total=0 会在合入阶段误报「实际解压量超过压缩包声明」。
     fn list(&self, archive: &Path, job: &mut Job) -> Result<(u64, bool)> {
-        job.db.conn.execute("DELETE FROM archive_members",[])?;
         let mut command = self.command();
         command.args(["l","-slt","-ba","-sccUTF-8","-p-","--"]).arg(archive);
         let mut fields = BTreeMap::<String,String>::new();
         let mut total = 0u64; let mut count = 0u64; let mut sizes_complete = true;
-        let cfg = job.config.clone(); let db = &job.db;
+        let cfg = job.config.clone();
         let mut flush = |fields: &mut BTreeMap<String,String>| -> Result<()> {
             let raw = match fields.remove("Path") {
                 Some(raw) => raw,
@@ -78,11 +77,12 @@ impl SevenZip {
             if count > cfg.max_entries { bail!("压缩包条目数量超过用户设置的上限"); }
             if cfg.max_file_gib > 0 && size > cfg.max_file_gib * (1<<30) { bail!("文件展开大小超过用户上限：{raw}"); }
             if cfg.max_unpacked_gib > 0 && total > cfg.max_unpacked_gib * (1<<30) { bail!("压缩包展开总量超过用户上限"); }
-            db.conn.execute("INSERT INTO archive_members(path,size,directory) VALUES(?1,?2,?3)", params![raw,i64::try_from(size)?,directory])?;
+            // 条目信息只在此处做限额/危险校验，不再整包入库：archive_members 表此前
+            // 只写不读（上限百万条目的纯写放大），已随表一起删除。
             fields.clear(); Ok(())
         };
         let ctl = job.context.control.clone();
-        db.conn.execute_batch("BEGIN IMMEDIATE")?;
+        // 条目校验只读不落库（archive_members 已删除），无需事务壳。
         let listed = process::run(&mut command,&ctl,|err,line| {
             if err { return Ok(()); }
             if line.trim().is_empty() { return flush(&mut fields); }
@@ -93,10 +93,7 @@ impl SevenZip {
             Ok(())
         },|| Ok(())).and_then(|_|flush(&mut fields));
         drop(flush);
-        match listed {
-            Ok(())=>db.conn.execute_batch("COMMIT")?,
-            Err(error)=>{let _=db.conn.execute_batch("ROLLBACK");return Err(error);}
-        }
+        listed?;
         let packed = fs::metadata(archive)?.len().max(1);
         // 用乘法比较避免整数除法截断导致边界上更宽松。
         if cfg.max_ratio > 0 && sizes_complete {
@@ -572,7 +569,10 @@ fn merge_extracted(job: &mut Job, source: &Path, target: &Path, archive_rel: &st
     job.context.control.checkpoint()?;
     let use_new = match policy {
         ConflictPolicy::Overwrite => true,
-        ConflictPolicy::Newest => incoming.modified_ns > existing.modified_ns,
+        // C-03：默认保留 mtime 最新；无法判定哪个最新（mtime 相同）时保留体积最大者。
+        // mtime 与体积全平局时维持已有文件，避免无谓替换。
+        ConflictPolicy::Newest => incoming.modified_ns > existing.modified_ns
+            || (incoming.modified_ns == existing.modified_ns && incoming.size > existing.size),
         ConflictPolicy::Largest => incoming.size > existing.size,
         ConflictPolicy::Skip => false,
         ConflictPolicy::KeepBoth | ConflictPolicy::Ask => {
@@ -594,7 +594,11 @@ fn merge_extracted(job: &mut Job, source: &Path, target: &Path, archive_rel: &st
     // 是策略自动处理（默认 Newest 也会在用户未显式选择时替换旧文件）。
     let reason = match policy {
         ConflictPolicy::Overwrite => "解压冲突策略（覆盖）：已有文件将被解压结果替换".to_string(),
-        ConflictPolicy::Newest => format!("解压冲突策略（较新）：已有文件较旧，将被替换（旧 {} 字节 / 新 {} 字节）",existing.size,incoming.size),
+        ConflictPolicy::Newest => if incoming.modified_ns == existing.modified_ns {
+            format!("解压冲突策略（较新）：修改时间相同，保留体积较大者（旧 {} 字节 / 新 {} 字节）",existing.size,incoming.size)
+        } else {
+            format!("解压冲突策略（较新）：已有文件较旧，将被替换（旧 {} 字节 / 新 {} 字节）",existing.size,incoming.size)
+        },
         ConflictPolicy::Largest => format!("解压冲突策略（较大）：已有文件较小，将被替换（旧 {} 字节 / 新 {} 字节）",existing.size,incoming.size),
         _ => "解压覆盖旧文件".to_string(),
     };
@@ -615,6 +619,10 @@ pub fn enqueue(job: &Job, archive: &Path, depth: u32) -> Result<()> {
     let snapshot = fsutil::snapshot(archive)?;
     let relative = fsutil::relative_string(&job.root,archive)?;
     let fingerprint = format!("{}:{}:{}:{}",relative,snapshot.size,snapshot.modified_ns,snapshot.identity);
+    // 同一路径的包可能已被扫描按旧内容入队、随后被其他包的成员覆盖：清掉未处理的旧行再入队。
+    // 唯一键在 fingerprint 上，INSERT OR IGNORE 挡不住同 rel 的新内容；旧行残留会在其
+    // 删除该包后让新行 snapshot 失败，把「解压失败 N 包」与错误计数虚高。
+    job.db.conn.execute("DELETE FROM archives WHERE rel=?1 AND state='pending'",params![relative])?;
     job.db.conn.execute("INSERT OR IGNORE INTO archives(rel,fingerprint,depth) VALUES(?1,?2,?3)",params![relative,fingerprint,depth])?;
     Ok(())
 }
@@ -769,6 +777,57 @@ mod tests {
     }
 
     #[test]
+    fn newest_policy_breaks_mtime_tie_by_larger_size() {
+        // 回归（C-03）：解压冲突默认策略 Newest 此前只比较 mtime，mtime 相同时直接保留
+        // 已有文件，从不比较体积；合同要求「无法判定哪个最新（mtime 相同）时保留体积
+        // 最大者」。用 conflict_delete=Keep 把「新文件胜出」表达为 BlockedByKeep，
+        // 断言不触发真实删除。
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path().join("data");
+        let state = temp.path().join("state");
+        fs::create_dir(&root).unwrap();
+        let target = root.join("target.txt");
+        fs::write(&target, b"short old").unwrap();
+        let stage = tempfile::tempdir().unwrap();
+        let source = stage.path().join("target.txt");
+        fs::write(&source, b"much longer new content").unwrap();
+        // 平局：两个文件 mtime 完全一致（C-03 的「无法判定哪个最新」）。
+        let tie = filetime::FileTime::from_unix_time(1_700_000_000, 0);
+        filetime::set_file_mtime(&target, tie).unwrap();
+        filetime::set_file_mtime(&source, tie).unwrap();
+
+        let mut config = Config::default();
+        config.extract_conflict = ConflictPolicy::Newest;
+        config.conflict_delete = DeleteChoice::Keep;
+        config.global_delete = DeleteMode::Permanent;
+        let mut job = Job {
+            root: root.clone(), config, context: TaskContext::default(),
+            db: Database::create(&state).unwrap(), summary: Default::default(),
+            archive_override: Some(ConflictPolicy::Newest),
+            recycler: Arc::new(NativeRecycler), deleted_unverified: 0,
+        };
+        let outcome = merge_extracted(&mut job, &source, &target, "target.txt").unwrap();
+        assert!(matches!(outcome, MergeOutcome::BlockedByKeep),
+            "mtime 平局且新文件更大：Newest 必须选择新文件（C-03 平局回退比较体积）");
+        assert_eq!(fs::read(&target).unwrap(), b"short old", "Keep 模式下旧文件保持原样");
+        assert_eq!(fs::read(&source).unwrap(), b"much longer new content", "新内容仍在暂存目录");
+
+        // 对照一：平局且新文件更小 → 保留体积更大的已有文件（KeptExisting，不是 BlockedByKeep）。
+        fs::write(&source, b"tiny").unwrap();
+        filetime::set_file_mtime(&source, tie).unwrap();
+        let outcome = merge_extracted(&mut job, &source, &target, "target.txt").unwrap();
+        assert!(matches!(outcome, MergeOutcome::KeptExisting(false)),
+            "mtime 平局且新文件更小：应保留体积更大的已有文件");
+
+        // 对照二：平局且等大但内容不同 → 维持已有文件（全平局时稳定不动，避免无谓替换）。
+        fs::write(&source, b"samelen!!").unwrap();
+        filetime::set_file_mtime(&source, tie).unwrap();
+        let outcome = merge_extracted(&mut job, &source, &target, "target.txt").unwrap();
+        assert!(matches!(outcome, MergeOutcome::KeptExisting(false)),
+            "mtime 与体积全平局：应稳定保留已有文件");
+    }
+
+    #[test]
     fn find_identical_elsewhere_never_matches_current_archive(){
         // 回归：quine 型自指包（成员字节=整个包字节，rsc 式 gzip/zip quine，gzip 头还会
         // 记录与包同名的原始文件名）此前会把「正在解压的原压缩包自身」当作树内等价副本——
@@ -802,6 +861,32 @@ mod tests {
         let hit = find_identical_elsewhere(&mut job,&member,&incoming,"pack.zip","pack.zip").unwrap();
         let hit_rel = fsutil::relative_string(&root,&hit.unwrap()).unwrap();
         assert_eq!(hit_rel.as_str(),"other/pack.zip","非原包的等价副本仍应命中");
+    }
+
+    #[test]
+    fn enqueue_replaces_pending_row_for_same_rel() {
+        // 回归：archives 表唯一键在 fingerprint 上；同一路径的压缩包被另一个包的成员
+        // 覆盖（内容变化）后，旧 fingerprint 的 pending 行残留、新行又入队。旧行先被
+        // 处理并按规则删除该包后，新行 snapshot 必然失败，把「解压失败 N 包」与错误
+        // 计数虚高。入队时应先清同 rel 的未处理旧行。
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path().join("data");
+        let state = temp.path().join("state");
+        fs::create_dir(&root).unwrap();
+        let pack = root.join("pack.zip");
+        fs::write(&pack, b"first version bytes").unwrap();
+
+        let job = Job {
+            root: root.clone(), config: Config::default(), context: TaskContext::default(),
+            db: Database::create(&state).unwrap(), summary: Default::default(),
+            archive_override: None, recycler: Arc::new(NativeRecycler), deleted_unverified: 0,
+        };
+        enqueue(&job, &pack, 0).unwrap();
+        // 同路径包内容被覆盖（大小与内容都变了）后再次入队。
+        fs::write(&pack, b"second version with different length").unwrap();
+        enqueue(&job, &pack, 0).unwrap();
+        let rows: i64 = job.db.conn.query_row("SELECT COUNT(*) FROM archives WHERE rel='pack.zip'", [], |r| r.get(0)).unwrap();
+        assert_eq!(rows, 1, "同一路径只应保留最新 fingerprint 的待处理行");
     }
 
     // 平台门禁原因：验证对象是 Windows 路径长度语义（LongPathsEnabled=0 时 >260 普通路径的

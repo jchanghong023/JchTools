@@ -25,10 +25,6 @@ CREATE TABLE IF NOT EXISTS archives (
  id INTEGER PRIMARY KEY, rel TEXT NOT NULL, fingerprint TEXT NOT NULL UNIQUE,
  depth INTEGER NOT NULL, state TEXT NOT NULL DEFAULT 'pending'
 );
-CREATE TABLE IF NOT EXISTS archive_members (
- id INTEGER PRIMARY KEY, path TEXT NOT NULL, size INTEGER NOT NULL, directory INTEGER NOT NULL
-);
-
 CREATE TABLE IF NOT EXISTS protected_originals (rel TEXT PRIMARY KEY);
 CREATE INDEX IF NOT EXISTS idx_actions_source_kind ON actions(source,kind);
 CREATE INDEX IF NOT EXISTS idx_files_name_size ON files(name,size,id);

@@ -625,7 +625,9 @@ fn wsl_run_error_report(distro: &str, error: &str) -> NetTestReport {
                 id: t.id.into(),
                 name: t.name.into(),
                 host: t.host.into(),
-                status: ProbeStatus::Unreachable,
+                // 环境不可用（无法启动发行版/输出截断/空输出）是「未得到结论」，
+                // 不是站点不可达：标 Unknown 让汇总结为「未测试」，不得误报「无法连接」。
+                status: ProbeStatus::Unknown,
                 latency_us: None,
                 message: format!("无法在 WSL 内执行探测 · {error}"),
                 tips: {
@@ -671,7 +673,8 @@ fn wsl_missing_report(error: String) -> NetTestReport {
                 id: t.id.into(),
                 name: t.name.into(),
                 host: t.host.into(),
-                status: ProbeStatus::Unreachable,
+                // 未安装 WSL 属环境不可用：整组 Unknown（未测试），不得标成站点不可达。
+                status: ProbeStatus::Unknown,
                 latency_us: None,
                 message: format!("未选择或未找到可用 WSL 发行版 · {error}"),
                 tips: {
@@ -906,6 +909,10 @@ mod tests {
         assert_eq!(report.scope, "WSL2");
         assert_eq!(report.results.len(), 3);
         assert!(report.results[0].tips.iter().any(|t| t.contains("wsl --install")));
+        // 回归（X-03/X-07）：WSL 环境不可用是「未得到结论」，不是「站点不可达」；
+        // 三站不得被标成 Unreachable（否则汇总显示「3 个无法连接」误导排查方向）。
+        assert!(report.results.iter().all(|r| r.status == ProbeStatus::Unknown),
+            "环境不可用必须整组标记 Unknown（未测试），不得标 Unreachable");
     }
 
     #[test]
