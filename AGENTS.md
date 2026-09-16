@@ -56,7 +56,7 @@ JCHTOOLS_TEST_7ZIP=/abs/path/7zz bash scripts/check-linux.sh   # 含真实解压
   | 引擎 / 解压 / 删除 / 路径安全 | `cargo test` + 真实引擎用例（`acceptance.ps1 -WithEngine`）+ `tests/gui_flow.rs` |
   | UI（`ui/app.slint` / GUI 装配） | `cargo test` + `tests/gui_flow.rs` + `scripts/gui_smoke.py` S1–S3 + 至少两档窗口尺寸目视检查 |
   | 打包 / 发布 / 引擎捆绑 | `scripts/package-windows.ps1` 全程 + 干净目录解包运行 |
-  | 任意提交前 | `python scripts/static_check.py`（含测试基线与界面规则检查） |
+  | 任意提交前 | `python scripts/static_check.py`（含测试基线、界面规则与 SHA256SUMS 完整性检查；改动过跟踪文件后须最后用 `git -c core.quotePath=false ls-files -z | grep -zv '^SHA256SUMS.txt$' | xargs -0 sha256sum -b > SHA256SUMS.txt` 重建清单） |
 
   单命令入口：`powershell -NoProfile -File .\scripts\acceptance.ps1`（可选 `-WithEngine` / `-WithGuiSmoke -GuiData <目录>` / `-WithPackage`）。未执行的阶段会显式打印 `NOT RUN`，`MUST NOT` 把 NOT RUN 报告成通过。
 - **独立复核**：涉及引擎、删除路径、解压安全（`fsutil` / 覆盖语义）或用户可见行为的实质变更，`SHOULD` 由未参与实现的独立代理会话复跑验证并给出证据格式：命令、环境（OS / rustc / 是否真实引擎）、退出码、关键输出行。

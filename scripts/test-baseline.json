@@ -675,6 +675,12 @@
     },
     {
       "file": "tests/core.rs",
+      "name": "apply_after_task_dir_moved_still_uses_prepare_state_lock",
+      "ignored": false,
+      "cfg": null
+    },
+    {
+      "file": "tests/core.rs",
       "name": "archive_first_volume_detection",
       "ignored": false,
       "cfg": null
@@ -1126,6 +1132,12 @@
     {
       "file": "tests/core.rs",
       "name": "user_cancelled_analysis_records_cancelled_status",
+      "ignored": false,
+      "cfg": null
+    },
+    {
+      "file": "tests/core.rs",
+      "name": "user_file_with_link_temp_prefix_is_never_swept",
       "ignored": false,
       "cfg": null
     },

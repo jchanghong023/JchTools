@@ -113,7 +113,7 @@ proptest! {
     }
 
     /// 导出 CSV 的公式注入转义：可见内容以 = + - @ \t \r 开头的单元格必须加 "'" 前缀，
-    /// 其余原样输出。可见内容 = 剥离不可见/格式字符前缀后再去首部空白。
+    /// 其余原样输出。可见内容 = 剥掉首部任意交错的空白与不可见/格式字符（不动点）。
     #[test]
     fn exported_csv_escapes_every_formula_trigger(source in any_string()) {
         // 行语义字符会改变 CSV 结构，本属性只针对公式注入转义。
@@ -147,5 +147,6 @@ fn invisible_trim_start(text: &str) -> &str {
             0x2066..=0x206F | 0xFFF9..=0xFFFB |
             0x110BD | 0x1D173..=0x1D17A | 0xE0001 | 0xE0020..=0xE007F)
     }
-    text.trim_start_matches(invisible).trim_start()
+    // 空白与格式字符可任意交错，剥到两类都不再匹配（与 db.rs 实现同口径）。
+    text.trim_start_matches(|c: char| c.is_whitespace() || invisible(c))
 }

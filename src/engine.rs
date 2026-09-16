@@ -73,7 +73,11 @@ fn clean_orphan_link_temps(root:&Path)->usize{
         let stale=fs::symlink_metadata(path).and_then(|m|m.modified()).ok()
             .and_then(|m|now.duration_since(m).ok())
             .is_some_and(|age|age.as_secs()>24*3600);
-        if stale && fs::remove_file(path).is_ok(){removed+=1;}
+        if !stale {continue;}
+        // 只有仍是硬链接（链接数 >= 2，内容另有链接持有，与崩溃残留的不变量一致）才清扫；
+        // 普通同名文件可能是用户文件或从压缩包解出的同名成员，静默删除即数据丢失。
+        let residue=fsutil::snapshot(path).map(|s|s.links>=2).unwrap_or(false);
+        if residue && fs::remove_file(path).is_ok(){removed+=1;}
     }
     removed
 }
@@ -95,6 +99,9 @@ pub fn prepare_with(root:&Path,config:Config,context:TaskContext,state:&Path,eng
     db.set("root",&fsutil::path_string(&root)?)?; db.set("config",&config)?;
     db.set("status",&"analyzing")?; db.set("summary",&Summary::default())?;
     db.set("created",&chrono::Utc::now().to_rfc3339())?;
+    // 记录本次的全局锁目录：apply 若按任务目录当前位置推导锁位置，任务目录被移动后
+    // 会与这里的互斥失效（apply_with 会优先锁这个记录值）。
+    db.set("state_dir",&fsutil::path_string(state)?)?;
     let mut job = Job { root,config,context,db,summary:Summary::default(),archive_override:None,recycler,deleted_unverified:0 };
     let result = (|| {
         // 先清崩溃残留的硬链接临时文件：它们被扫描永久剪枝，留着只会让源路径承诺静默失效。
@@ -260,13 +267,17 @@ fn hash_candidates(job:&mut Job)->Result<()> {
 }
 pub fn apply(directory:&Path,context:TaskContext)->Result<TaskResult>{apply_with(directory,context,Arc::new(NativeRecycler))}
 pub fn apply_with(directory:&Path,context:TaskContext,recycler:Arc<dyn Recycler>)->Result<TaskResult>{
-    let state=directory.parent().and_then(Path::parent).context("任务目录结构无效")?;
+    let derived=directory.parent().and_then(Path::parent).context("任务目录结构无效")?;
     // Database::open 会在文件缺失时创建一个空库；先确认这是扫描生成的任务目录，
     // 避免把任意目录（甚至写错路径）悄悄变成一个必然失败的空任务。
     // 该检查必须先于 RootGuard：否则写错路径会先在错误位置创建目录并落下锁文件。
     anyhow::ensure!(directory.join("task.sqlite3").is_file(),"目录里没有 task.sqlite3；请选择「开始解压与分析」生成的任务目录");
-    let _guard=fsutil::RootGuard::acquire(state)?;
     let db=Database::open(directory)?;
+    // 锁位置：prepare 已把当时的全局锁目录记进任务库。任务目录被移动到别处后按当前
+    // 位置推导会失去与 prepare 的互斥，优先锁记录位置；旧任务（无记录）或记录目录已
+    // 不存在（任务目录被搬到别的机器）时退回当前位置推导，不在陌生位置创建锁目录。
+    let recorded:Option<PathBuf>=db.get::<String>("state_dir").ok().map(PathBuf::from).filter(|p|p.is_dir());
+    let _guard=fsutil::RootGuard::acquire(recorded.as_deref().unwrap_or(derived))?;
     let status:String=db.get("status")?;
     if status!="ready"{bail!("任务不是待确认状态（{status}）；请重新扫描，不会盲目重放旧计划");}
     let root_text:String=db.get("root")?;

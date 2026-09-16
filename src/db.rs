@@ -145,12 +145,13 @@ impl Database {
         let mut rows = statement.query([])?;
         while let Some(row) = rows.next()? {
             let mut values = (0..6).map(|i| row.get::<_,String>(i)).collect::<rusqlite::Result<Vec<_>>>()?;
-            // 防表格公式注入：前导空白后再跟危险字符也要加引号前缀。
-            // 危险字符判定前先剥 U+FEFF / U+200B / Cf（格式字符）前缀，
-            // 防止不可见字符把 =+ 推到 trim_start 之后逃逸转义。
+            // 防表格公式注入：可见内容以 = + - @ \t \r 开头的单元格必须加引号前缀。
+            // 可见内容 = 剥掉首部的空白与不可见/格式字符（U+FEFF / U+200B / Cf 等）；
+            // 两类字符可以任意交错（如 " 空格+BOM+= 公式"），必须剥到两类都不再匹配，
+            // 固定顺序剥会留下逃逸缺口，让不可见字符把 = 推到剥除之后。
             for value in &mut values {
-                let stripped = value.trim_start_matches(is_invisible_or_format);
-                let dangerous = stripped.trim_start().chars().next().is_some_and(|c| "=+-@\t\r".contains(c));
+                let stripped = value.trim_start_matches(|c: char| c.is_whitespace() || is_invisible_or_format(c));
+                let dangerous = stripped.chars().next().is_some_and(|c| "=+-@\t\r".contains(c));
                 if dangerous { value.insert(0, '\''); }
             }
             values.push(row.get::<_,i64>(6)?.to_string());

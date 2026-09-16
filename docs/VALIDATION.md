@@ -287,3 +287,91 @@ Round 3（候选干净轮 2）：3 个全新上下文分片再次独立重审，
 - 新增回归测试 1 个（含对照组锁快捷路径不回归），测试基线 195→196 纯新增。
 - 约 15 项疑点按口径记录在 .tmp/expert-review/state.md。
 - 全部改动在未提交工作区（无提交/推送授权）。
+## 15. 2026-09-16 持续专家团审查 Session 4 · Round 1（基线 = 8611759，工作树干净）
+
+范围：全仓库，3 并发分片（A 引擎/文件系统安全、B GUI/UI/CLI、C 数据/配置/网络/脚本/CI/文档），全部初审完成后才动代码。基线验证在首次修改前采集：cargo test 全绿、static_check 12 项 PASS、`acceptance.ps1 -WithEngine` 全 PASS（本机 PowerShell 需 `-ExecutionPolicy Bypass`，Git Bash 下 -File 路径需正斜杠）。
+
+确认并修复 7 项（每项先红后绿，反证归档 `.tmp/expert-review/s4-red-evidence.md`）：
+
+1. **CSV 公式注入转义顺序缺口（低危安全）**：`db.rs export_csv` 剥除顺序固定为「先格式字符后空白」，`" 空格+BOM+= 公式"` 形态逃逸（与注释自述意图不符）。修复为空白∪格式字符交替剥到不动点；`tests/property.rs` 镜像同步；`tests/core.rs` 补空白包裹样本。RED：`空白在格式字符之前的伪装公式必须被转义` 断言失败。
+2. **确认模态键盘穿透（低，8 处）**：AppWindow 内 8 个控件 enabled 未挂 `confirm-kind == 0`（整理计划页「打开任务目录/导出报告/上一页/下一页」+ 代理页「刷新/复制本机IP/复制外网IP/复制MAC」——后 4 处为主代理核验时比初审多找出，kind=3 关闭确认模态可在代理页打开故键盘可达）。补齐门禁并新增 `static_check.py slint_modal_gating` 规则（AppWindow 确认层之前所有 enabled 绑定必须含 confirm-kind；确认层自身豁免）。RED：规则报 8 处违规。
+3. **build.rs rc.exe 解析顺序（构建供应链一致性）**：`find_rc` 先搜 PATH 再回退 Windows SDK，与 process.rs `system_tool` 防 PATH 劫持口径矛盾。改为 SDK 优先、PATH 仅回退且打 cargo:warning；新增 `build_rc_prefers_windows_kits` 静态规则。RED：规则失败。
+4. **apply 锁位置推导缺陷（中）**：任务目录被移动到 state 外后，apply 按当前位置推导锁目录，与 prepare 的全局互斥失效。prepare 现把 `state_dir` 记入任务库，apply 优先锁记录位置（记录缺失或目录已不存在时退回推导，不在陌生位置创建锁目录；task.sqlite3 存在性检查仍先于任何落锁/建目录）。RED：新测试 `apply_after_task_dir_moved_still_uses_prepare_state_lock`（移动任务目录 + 持锁场景断言 apply 必须失败）修复前失败。
+5. **planner receives_move 线性扫描（性能，等价变换）**：逐目录全量扫描 move_targets 的 O(目录数×移动数)；且 Windows 折叠发生在排序之后，二分不可用。改为先折叠→排序→去重→`partition_point` 定位（若任何目标以 probe 为前缀，字典序最小的命中者必是第一个 ≥ probe 的条目，等价性成立）。纯性能变换无行为差异，红绿不适用；由既有空目录系列测试锚定（cargo test 全绿）。
+6. **acceptance.ps1 gui-smoke 路径（验证链完整性）**：硬编码 `target\debug`，忽略 CARGO_TARGET_DIR；旧 exe 残留时跳过构建冒烟陈旧二进制。改为与 package-windows.ps1 同口径解析 + 无条件重建；新增 `acceptance_respects_cargo_target_dir` 静态规则。RED：规则失败。
+7. **package-windows.ps1 ZIP 时间戳（中，验证中新发现）**：`Compress-Archive` 对早于 1980-01-01 的条目 mtime 直接抛异常——cargo registry 抽取的 crate 许可证保留 tarball 古董时间（实测暂存目录 1039 文件中 52 个为 1970/1973，清单 `.tmp/expert-review/s4-red-package-files.txt`），发布打包必败（此前会话从未执行 -WithPackage 故未暴露）。压缩前把暂存副本中过旧时间规范化到当前时间（原始 registry 文件不动）。RED：端到端 `-WithPackage` 失败（Compress-Archive LastWriteTime 异常）；GREEN：`-WithPackage` 全 PASS 并产出 ZIP。修复中另纠正一次 PowerShell 类型问题（LastWriteTimeUtc 为 DateTime，阈值须用 UTC DateTime 而非 DateTimeOffset）。
+
+排除项（依据见 `.tmp/expert-review/checkpoint.md`）：A-3 回收站逐次计数查询为注释明示的验证语义，缓存会在外部进程并发入站/恢复时引入非保守误判且性能影响未实测，不构成缺陷；测试覆盖缺口（resolve_executable 顺序、run_with_timeout 路径等）与零影响死状态记为观察项。
+
+测试基线 196→197 纯新增（新增 1 个 Rust 测试；另扩展 1 个既有测试样本），`--update-test-baseline` 重建。
+
+本轮全量数字：`cargo test` 174 通过 / 0 失败 / 21 忽略（lib 88、JchTools bin 1、core 78、gui_flow 1、property 6）；`static_check.py` 15 项全 PASS；`acceptance.ps1 -WithEngine` 全 PASS（含真实引擎 21/21）；`acceptance.ps1 -WithGuiSmoke` 全 PASS（S1-S3）；`acceptance.ps1 -WithPackage` 全 PASS + 干净目录解包运行（窗口正常启动，截图 `.tmp/expert-review/shots/unpack-run.png`）；UI 两档以上窗口尺寸目视检查通过（默认/1280×800/980×1400 × 首页/代理页共 6 张，无裁切/重叠/溢出，同目录 shots/）。
+
+交叉复审（3 个新上下文代理，只读）：XR1（build.rs/engine.rs/planner.rs）、XR2（app.slint/static_check/acceptance.ps1/package-windows.ps1）、XR3（db.rs/property.rs/core.rs/test-baseline/VALIDATION 数字对账）全部 PASS。XR2 发现 1 项同类低危缺口并已增量修复：app.slint 命令卡片的 `copy-area` TouchArea 与 CopyChip「复制」（原 870/886 行）没有任何 enabled 绑定，kind=3 模态下键盘仍可触达复制——补 `enabled: root.confirm-kind == 0`（CopyChip 组件原生转发 enabled，含 accessible-enabled）。窗口横幅「关闭」（清提示文本）与标题栏 TouchArea（窗口 chrome，与 CaptionButton 不门禁同口径）记录为已知边界不改。XR3 指出本节初次写入时把历史条目行尾统一化（内容零变化）——已按字节恢复 HEAD 历史区后重新追加本节，`git diff docs/VALIDATION.md` 为纯新增。增量修复后复跑：cargo test 全绿、static_check 15/15、`-WithGuiSmoke` S1-S3 全 PASS。
+
+## 16. 2026-09-16 持续专家团审查 Session 4 · Round 2（基线 = Round 1 修复后的工作树）
+
+3 个全新上下文分片全量重审。第 1 轮 8 项修复的回归核查：R2-A / R2-B / R2-C 三份报告全部逐项 PASS。
+
+确认并修复 5 项（红灯证据 `.tmp/expert-review/s4-r2-red-evidence.md`）：
+
+1. **冲突对话框键盘穿透（中）**：冲突层 4 个控件（解压冲突 ComboBox、应用于后续 CheckBox、取消整个任务、应用选择）无 enabled 门禁——确认层（kind=3）注释自证会盖在冲突框之上，Tab 可穿透确认层直接改冲突策略或取消任务（R2-B 与 R2-C 独立同报；第 1 轮 slint_modal_gating 规则只覆盖「有 enabled 绑定」的行，属同类盲区）。修复：4 处补 `confirm-kind == 0` 门禁；新增 `static_check.py slint_conflict_modal_gating` 规则（冲突层内 Button/ComboBox/CheckBox/LineEdit 声明行必须含 confirm-kind）。RED：规则恰报 4 处违规；GREEN：17 项全 PASS。
+2. **copy-area accessible-enabled（低，加固）**：命令卡片 TouchArea 补 `accessible-enabled: root.confirm-kind == 0`，与全文件自绘控件显式声明口径一致（R2B-2 的 UIA 绕过前提待核实，纯一致性加固，无行为回归面）。
+3. **SHA256SUMS.txt 三重失实（中低）**：实测 CRLF 行尾（Git Bash 下 `sha256sum -c` 0 项 OK）、覆盖 57/62 个跟踪文件（缺 acceptance.ps1、test-baseline.json、mutants.yml、property.rs）、21 项哈希过时（其中约 12 项在 HEAD=8611759 已失配，非本轮引入）。修复：按 AGENTS §5 用 `sha256sum -b` 全量重建（61 项、LF、`sha256sum -c` 61/61 OK）；新增 `sums_integrity` 规则（LF 行尾 + 全覆盖 + 哈希与工作树一致，git 不可用时 SKIP）。RED：规则报 CRLF 违规；GREEN：61 项一致。
+4. **acceptance.ps1 帮助注释（低）**：-WithGuiSmoke 描述仍写死 `target\debug\JchTools.exe`，改为「cargo build 产物（尊重 CARGO_TARGET_DIR）」。
+5. **property.rs 规格注释（极低）**：镜像函数 doc 注释仍描述修复前的固定剥除顺序，改为「剥掉首部任意交错的空白与不可见/格式字符（不动点）」，与实现同步。
+
+排除（含新证据）：R2A-1 深路径回收疑点被运行时反证排除——本机 LongPathsEnabled=0x0（reg 实测）下 `SHCreateItemFromParsingName` 对 381 字符普通形态路径 PARSE OK、对 `\\?\` verbatim 形态 PARSE FAIL，现实现（剥前缀交普通形态）正确，审查建议的 verbatim 优先反而有害；R2A-2 conflict_groups SQL lower() ASCII 折叠为 Session 3 已备案的保守方向漏检（无新证据不重开）。
+
+观察项：搜索框 LineEdit 无门禁但 tool-count≤5 不可见（未来接入需挂门禁）；proxy-env-rows 等死状态字段；README/先读我历史计数（自带免责）。
+
+Round 2 验证：`cargo test` 174 通过 / 0 失败 / 21 忽略；`static_check.py` 17 项全 PASS（12 原有 + 5 本会话新增）；`acceptance.ps1 -WithGuiSmoke` 全 PASS（static-check / cargo-test / binding-loop-scan / gui-build / gui-smoke S1-S3）；解包运行证据重拍为独立尺寸截图 `unpack-run-1100x950.png`（与 run1 哈希不同，回应 R2C-4 证据强度疑点）。SHA256SUMS 在全部文件改动（含本节）之后最终重建。
+
+### 第 16 节更正（交叉复审 XR5 发现，2026-09-16 追加）
+
+- 「约 12 项在 HEAD=8611759 已失配」有误：blob 级实测（`git show 8611759:SHA256SUMS.txt` 逐条对 `git show 8611759:<name> | sha256sum`）为 **17 项**在 HEAD 已失配（check.yml、AGENTS.md、Cargo.lock、Cargo.toml、ACCEPTANCE.md、VALIDATION.md、make-testdata.py、package-windows.ps1、static_check.py、archive.rs、control.rs、gui.rs、planner.rs、process.rs、tests/archive.rs、tests/core.rs、tests/gui_flow.rs）；21 项总失配 = 17 项 HEAD 既有 + 4 项本会话 Round 1 改动。方向不变（预存失配更多，「非本轮引入」论点更强）。
+- R2A-1 排除记录补第一手出处：该发现来自本会话 Round 2 的 R2-A 分片报告（已转述于 `.tmp/expert-review/checkpoint.md` 第 2 轮排除项）；结论口径收敛为「现实现在 SHCreateItemFromParsingName 解析层未被证伪（LongPathsEnabled=0 本机 381 字符普通形态 PARSE OK），且 verbatim 方案在该层实测有害（PARSE FAIL）」。
+- 补充红灯证据：sums_integrity 的 stale 分支在 01:44 亦实际触发过 FAIL（`哈希与工作树不一致：['ui/app.slint']`，重建后通过）；missing/extra 分支无独立 RED 记录。
+- 交叉复审同期落地的小修：sums_integrity 解析器兼容双空格文本格式（`hash␣␣name`）的一行加固；AGENTS.md §3.2 提交前清单补「最后重建 SHA256SUMS.txt」提示。
+
+## 17. 2026-09-16 持续专家团审查 Session 4 · Round 3（基线 = Round 2 修复后的工作树）
+
+3 个全新上下文分片全量重审。前两轮 13 项修复回归核查全部 PASS。新发现 3 项，处置如下：
+
+1. **conflict→背景方向门禁缺失（中，已确认并修复）**：冲突对话框打开期间（busy=true 必然成立），不含 busy 门槛的背景控件（侧栏 NavItem、面板 Tab、暂停/取消任务按钮、代理页与关于页控件等共 17 处 enabled + 1 处 accessible-enabled）键盘可达——可穿透冲突层直接触发「取消整个任务」（不可逆）或切页让冲突框悬浮在其它页面之上。前两轮已覆盖 confirm→背景与 confirm→冲突层两个方向，本方向为漏网（R3-B 报告，静态可确证：conflict ⟹ busy，而 busy 只关掉带 !busy 门槛的控件）。修复：18 行追加 `&& !root.conflict-visible`；`slint_modal_gating` 扩展为「无 busy 门槛的 enabled 绑定必须含 conflict-visible」，扫描区间同时止于冲突层（冲突层自身控件在 conflict-visible 打开时必须可用，仅受 confirm-kind 门禁，由 slint_conflict_modal_gating 单独管）。RED：扩展后的规则恰报背景 17 行（首版规则曾误把冲突层 4 行计入，系区间未排除冲突层，已修正）；GREEN：17 项静态检查全 PASS。
+2. **AGENTS §3.2 sums 重建命令在默认配置下不可用（低，已确认并修复）**：默认 `core.quotePath=true` 时「先读我.txt」被 git 输出为八进制转义，`xargs sha256sum` 报 No such file or directory（R3-C 本机实测复现；本会话机器恰设 quotePath=false 才碰巧成功）。修复：命令改为 `git -c core.quotePath=false ls-files -z | grep -zv '^SHA256SUMS.txt$' | xargs -0 sha256sum -b > SHA256SUMS.txt`，输出与现行清单逐字节一致（哈希比对验证）。
+3. **UNC 共享根绕过磁盘根拒绝（低，证伪撤销）**：初审称 `\\?\UNC\server\share` 为 3 组件可绕过 `count()<=2`。运行时探针（`.tmp/expert-review/pathprobe2.rs`，正确转义路径）实测 Rust 组件解析：`\\server\share` 为 2 组件（UNC 前缀吸收 server\share）、`\\?\UNC\server\share` 仅 1 组件——原判定已拒绝 UNC 共享根（含 `\\srv\d$` 管理共享）。一度实施的「UNC 门槛 3」修复会误拒 `\\server\share\dir`（3 组件）合法共享子目录，已完整撤销；fsutil.rs 仅保留 3 行解释性注释（两次独立误读同一解析语义，注释防复发），行为与 HEAD 一致。教训归档：Bash 工具的 heredoc 会吞反斜杠，路径探针类脚本必须经文件落盘执行。
+
+Round 3 验证：`cargo test` 全绿（174 通过 / 0 失败 / 21 忽略）；`static_check.py` 17 项全 PASS（含扩展后的 slint_modal_gating 与终建后的 sums_integrity）；`acceptance.ps1 -WithGuiSmoke` 全 PASS（static-check / cargo-test / binding-loop-scan / gui-build / gui-smoke S1-S3）；SHA256SUMS 于本节追加后按新命令终建（61 项 LF，`sha256sum -c` 全 OK）。
+
+## 18. 2026-09-16 持续专家团审查 Session 4 · Round 3 交叉复审补正（XR6-1）
+
+XR6 复审第 3 轮时发现 1 项中低危 ISSUE 并已修复：`slint_modal_gating` 规则原以 `'busy' not in line` 子串豁免「已含任务忙门槛」的行，但 `proxy-busy` / `net-test-busy` 是页面局部状态（仅由刷新代理 / 网络测试自身操作置位），冲突框弹出时为 false——代理页「刷新」、网络测试范围 Tab×2、WSL 发行版 ComboBox、刷新列表、开始测试共 6 处控件在冲突模态下仍键盘可达（可触发网络探测 / wsl.exe 调用），「冲突模态打开时背景全禁」的声称存在例外。
+
+修复（XR6 最小修正建议，XR6 复核回执 PASS）：
+1. ui/app.slint 上述 6 行追加 `&& !root.conflict-visible`（累计 24 处 conflict-visible 门禁）。
+2. 规则收紧为 `(?<![\w-])busy` 负向后瞻：`root.busy` / `if root.busy` 仍正确豁免，`proxy-busy` / `net-test-busy`（busy 前为连字符）不再误豁免；注释同步改写。
+3. 红绿证据：临时移除「刷新」按钮的 conflict-visible 门禁 → `slint_modal_gating` RED（恰报 713 行 `enabled: !root.proxy-busy && root.confirm-kind == 0;`）→ 恢复后 17 项全 PASS（GREEN）。
+4. 同轮修复后的全量验证：`acceptance.ps1 -WithGuiSmoke` 全 PASS（static-check / cargo-test / binding-loop-scan / gui-build / gui-smoke S1-S3）；SHA256SUMS 于本节追加后按 §17 新命令终建（61 项 LF，`sha256sum -c` 全 OK）。
+
+## 19. 2026-09-16 持续专家团审查 Session 4 · Round 4（基线 = Round 3 修复后的工作树）
+
+3 个全新上下文分片全量重审。此前 16 项修复回归核查全部 PASS；R4-B 分片零缺陷（门禁全状态矩阵：正常态等价、kind=1/2/3、conflict-visible、两模态叠加逐格核实）。新确认并修复 3 项（红绿证据见 `.tmp/expert-review/s4-r4-red-evidence.md`）：
+
+1. **`.jchtools-link-` 前缀清扫缺归属校验（低危·数据丢失方向，已修复）**：`clean_orphan_link_temps` 此前把树内任何同名前缀、超 24 小时的普通文件直接 `fs::remove_file`——同名用户文件或从压缩包解出的同名成员（解压合并不检查该前缀，落盘后为扫描不可见内容）会被静默永久删除，绕过删除策略且日志误述为「崩溃残留」。修复：清扫前经 `fsutil::snapshot` 校验硬链接数 ≥ 2（崩溃残留的不变量即「内容仍由保留文件持有」；链接数为 1 时内容可能仅此一份，保留为安全方向）。回归测试 `user_file_with_link_temp_prefix_is_never_swept` 修复前 RED（同名用户文件被清扫，断言失败于 tests/core.rs:132）、修复后 GREEN；既有 `stale_hardlink_temps_are_swept` 夹具由普通文件改为真实硬链接（更符合真实残留形态，属加强非削弱，基线随更新），并补 keeper 存活断言。
+2. **sums_integrity 对「已删未暂存」文件静默跳过（低，已修复）**：stale 分支的 `is_file()` 守卫使跟踪文件从工作树删除后规则仍谎报「全部一致」。修复：新增 gone 断言（跟踪文件缺失即 FAIL，fail-loud）。红证：LICENSE 移除后旧规则 PASS（假宣称）、新规则 FAIL（正确报「跟踪文件已从工作树删除」）、恢复后 PASS。
+3. **ARCHITECTURE.md 交付边界陈述过时（低，已修复）**：「交付环境不能编译运行」与现行 README / VALIDATION（Windows 11 构建 + 多级验收全 PASS）矛盾。改为时效表述（初始交付环境不能编译运行，后续已完成构建与验收），保留「发布前必须通过验收、静态检查不等于功能测试」的原意。
+
+**文字更正（R4B-O1）**：第 17 节把「暂停/取消任务按钮」列入 Round 3 的 18 行修复列举有误——ui/app.slint 689/690 行从未被修改（行内 `if root.busy:` 含真任务忙门槛，被规则豁免且行为正确：冲突模态下这两按钮键盘可达，但「取消任务」与冲突框内「取消整个任务」为同一回调效果一致、「暂停」可逆，无越权操作）。第 17 节按只追加纪律不改，以本节为准。
+
+观察项（备案不计缺陷）：net_test_report_matches_scope 无请求代际（与 WslDistros 防护不对称，危害仅限短暂 UI 误导）；Kept 双计 skipped 为不可达死路径；两遍扫描对同一持久性错误双计（方向保守）；package-windows 时间戳阈值在负 UTC 偏移时区有约 24h 边界窗口（fail-loud，本机与 CI 无触发面）。
+
+Round 4 验证：`cargo test` 175 通过 / 0 失败 / 21 忽略（lib 88、JchTools bin 1、core 79、gui_flow 1、property 6）；测试基线 197→198 纯新增；`static_check.py` 17 项全 PASS；`acceptance.ps1 -WithEngine -WithGuiSmoke` 全 PASS（static-check / cargo-test / binding-loop-scan / engine-tests 21/21 真实引擎 / gui-build / gui-smoke S1-S3；首次因验收启动后 ARCHITECTURE.md 再改动致 sums 过时而失败一次，属预期时序，终建后复跑全绿）；SHA256SUMS 于本节追加后按 §17 命令终建（61 项 LF，`sha256sum -c` 全 OK）。
+
+## 20. 2026-09-16 Session 4 收敛与发布
+
+- 第 5 轮全量重审（3 个全新上下文分片）：R5-A / R5-B / R5-C 均 0 项新缺陷、全部在片修复回归核查 PASS，判定为干净轮次。此前第 4 轮经 XR7 交叉复审全 PASS（XR7-3a 疑点经实验反驳：`git ls-files -z` 本就无视 core.quotePath 输出原始名；`-c core.quotePath=false` 保留为无害加固）。
+- 用户裁定收敛：不再继续第 6 轮（技能口径的「连续 2 个干净轮次」只满足第 1 个），按用户指示进入全量测试与发布。
+- 本会话累计修复 18 项（第 1 轮 7、第 2 轮 5、第 3 轮 2、XR6-1 增量 1、第 4 轮 3），另有 2 项初审发现（深路径回收、UNC 共享根绕过）与 1 项复审疑点（XR7-3a）经运行时实验证伪并如实记录；fsutil.rs 保留 3 行防误读注释。测试基线 196→198 纯新增（2 个新回归测试），另扩展 2 个既有测试（CSV 转义样本、残留夹具改真实硬链接）。static_check 12→17 项（新增 slint_modal_gating、slint_conflict_modal_gating、build_rc_prefers_windows_kits、acceptance_respects_cargo_target_dir、sums_integrity）。SHA256SUMS.txt 重建为 61 项 LF 全覆盖。全部修复的红灯/绿灯证据归档于 .tmp/expert-review/s4-red-evidence.md、s4-r2-red-evidence.md、s4-r4-red-evidence.md 与 checkpoint.md。
+- 收敛时终验（对应提交的代码状态）：`cargo test` 175 通过 / 0 失败 / 21 忽略；`static_check.py` 17 项全 PASS；`acceptance.ps1 -WithEngine -WithGuiSmoke` 全 PASS（static-check / cargo-test / binding-loop-scan / engine-tests 真实引擎 21/21 / gui-build / gui-smoke S1-S3）；SHA256SUMS 61/61 OK。
+- 发布：按用户指示提交本工作区全部修复并触发仓库既有 Release workflow（时间戳 tag、CI 干净构建 package-windows.ps1 后创建 GitHub Release 并附 ZIP 与其 SHA256）。

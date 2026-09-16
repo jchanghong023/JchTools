@@ -106,14 +106,30 @@ impl Recycler for MoveRecycle {fn recycle(&self,p:&Path)->Result<(),RecycleFailu
 }
 #[test] fn stale_hardlink_temps_are_swept(){
     // 崩溃残留的硬链接临时文件被扫描永久剪枝且无其它回收路径：
-    // prepare/apply 前必须清扫过期残留（内容仍由保留文件持有，删除不丢数据）。
+    // prepare/apply 前必须清扫过期残留。残留必是硬链接（内容仍由保留文件持有），
+    // 清扫前校验链接数 >= 2，普通同名文件绝不能被当作残留删除。
     let f=Fixture::new();f.write("a.txt",b"payload",10);
     let stale=f.root.join(".jchtools-link-deadbeef");
-    fs::write(&stale,b"content").unwrap();
+    if let Err(error)=fs::hard_link(f.root.join("a.txt"),&stale){
+        eprintln!("hard_link failed: {error}; keeper={:?}",f.root.join("a.txt"));
+        panic!("无法创建硬链接，无法验证残留清扫；请在支持硬链接的文件系统上运行测试");
+    }
     filetime::set_file_mtime(&stale,filetime::FileTime::from_unix_time(0,0)).unwrap();
     let task=f.plan(base());
     assert!(!stale.exists(),"过期残留必须被清扫");
+    assert!(f.root.join("a.txt").exists(),"清扫残留不得影响 keeper 本体");
     assert_eq!(task.summary.scanned,1,"清扫不得影响正常文件的扫描");
+}
+#[test] fn user_file_with_link_temp_prefix_is_never_swept(){
+    // 回归：.jchtools-link- 前缀清扫此前不校验归属，同名用户文件（或从压缩包解出的
+    // 同名成员）会被静默永久删除。崩溃残留必是硬链接（链接数 >= 2，内容仍有其他
+    // 链接持有）；普通同名文件不属于本工具命名空间，必须原样保留。
+    let f=Fixture::new();f.write("a.txt",b"payload",10);
+    let user=f.root.join(".jchtools-link-mydata");
+    fs::write(&user,b"precious").unwrap();
+    filetime::set_file_mtime(&user,filetime::FileTime::from_unix_time(0,0)).unwrap();
+    f.plan(base());
+    assert!(user.exists(),"同名用户文件不是崩溃残留，绝不能被清扫");
 }
 #[test] fn global_keep_prohibits_deletion(){let f=Fixture::new();f.write("a",b"same",10);f.write("b",b"same",20);let mut cfg=base();cfg.global_delete=DeleteMode::Keep;assert_eq!(f.plan(cfg).summary.planned_delete,0);}
 #[test] fn class_override_beats_global_keep(){let f=Fixture::new();f.write("a",b"same",10);f.write("b",b"same",20);let mut cfg=base();cfg.global_delete=DeleteMode::Keep;cfg.duplicate_delete=DeleteChoice::Permanent;assert_eq!(f.plan(cfg).summary.planned_delete,1);}
@@ -318,6 +334,7 @@ fn set_hidden(path:&Path,hidden:bool){
     let db=Database::open(&task.directory).unwrap();
     db.log("删除","=cmd|'/c calc'!a1","","准备","注入尝试",7).unwrap();
     db.log("删除","\u{FEFF}=cmd|'/c calc'!a1","\u{200B}+cmd","准备","不可见前缀注入",9).unwrap();
+    db.log("删除"," \u{FEFF}=1+2","","准备","空白格式包裹注入",9).unwrap();
     let csv=f.root.join("inject.csv");
     db.export_csv(&csv).unwrap();
     let text=fs::read_to_string(&csv).unwrap();
@@ -326,6 +343,8 @@ fn set_hidden(path:&Path,hidden:bool){
     let stealth=text.lines().find(|line|line.contains("不可见")).expect("不可见前缀样本应出现在导出中");
     assert!(stealth.contains("'\u{FEFF}=cmd"),"U+FEFF 前缀伪装的公式必须被转义：{stealth}");
     assert!(stealth.contains("'\u{200B}+cmd"),"U+200B 前缀伪装的公式必须被转义：{stealth}");
+    let wrapped=text.lines().find(|line|line.contains("空白格式包裹")).expect("空白包裹样本应出现在导出中");
+    assert!(wrapped.contains("' \u{FEFF}=1+2"),"空白在格式字符之前的伪装公式必须被转义：{wrapped}");
 }
 #[test] fn multipart_name_covers_volume_detection_corners(){
     assert!(rules::multipart_name("x.part1.rar"));
@@ -346,6 +365,23 @@ fn set_hidden(path:&Path,hidden:bool){
         assert!(engine::apply_with(&task.directory,Context::default(),Arc::new(FailRecycle)).is_err(),"锁被持有时 apply 必须失败");
     }
     // 锁释放后 apply 可以正常完成
+    f.apply(&task);
+}
+#[test] fn apply_after_task_dir_moved_still_uses_prepare_state_lock(){
+    // 回归：apply 此前按「任务目录当前位置」推导锁位置；任务目录被移动到 state 之外后，
+    // 旧计划的执行会与新的 prepare 失去互斥。prepare 把全局锁目录记进任务库后，
+    // apply 必须优先锁记录的位置（记录缺失或该目录已不存在时才退回当前位置推导）。
+    let f=Fixture::new();f.write("a",b"same",10);f.write("b",b"same",20);
+    let task=f.plan(base());
+    let elsewhere=tempfile::tempdir().unwrap();let moved=elsewhere.path().join("moved-task");
+    fs::rename(&task.directory,&moved).unwrap();
+    {
+        let _guard=fsutil::RootGuard::acquire(&f.state).unwrap();
+        assert!(engine::apply_with(&moved,Context::default(),Arc::new(FailRecycle)).is_err(),
+            "任务目录被移动后，apply 仍必须锁 prepare 记录的全局锁目录");
+    }
+    // 记录位置与当前位置一致（移回原位）时正常流程不受影响
+    fs::rename(&moved,&task.directory).unwrap();
     f.apply(&task);
 }
 #[test] fn set_selected_fails_once_apply_started(){

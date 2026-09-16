@@ -100,6 +100,13 @@ foreach ($name in @('7z.exe','7z.dll')) {
 }
 if (-not (Test-Path -LiteralPath (Join-Path $folder 'resources\7zip\manifest.json'))) {throw 'Engine manifest is missing from the package.'}
 $zip = "$folder.zip"
+# Compress-Archive 逐条目写入 LastWriteTime；早于 1980-01-01（ZIP DOS 纪元）的时间无法
+# 转换会直接失败。cargo registry 抽取的 crate 许可证常保留 tarball 的古董 mtime（实测
+# 1970/1973 等），这里把暂存副本里过旧的时间规范化到当前时间；原始 registry 文件不受影响。
+$zipEpoch = [datetime]::new(1980, 1, 1, 0, 0, 0, [System.DateTimeKind]::Utc)
+foreach ($item in (Get-ChildItem -LiteralPath $folder -Recurse -Force)) {
+    if ($item.LastWriteTimeUtc -lt $zipEpoch) { $item.LastWriteTime = Get-Date }
+}
 Compress-Archive -LiteralPath $folder -DestinationPath $zip -CompressionLevel Optimal
 Write-Host "Created: $zip"
 Write-Host 'End users extract this ZIP and run JchTools.exe; no separate 7-Zip installation.'

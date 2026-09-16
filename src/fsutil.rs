@@ -70,6 +70,9 @@ pub fn normalize_root(path: &Path) -> Result<PathBuf> {
     let root = fs::canonicalize(path).context("无法访问目标目录")?;
     if !root.is_dir() || root.parent().is_none() { bail!("请选择普通目录，不允许直接整理整个磁盘根目录"); }
     #[cfg(windows)] {
+        // 组件数 <= 2 同时覆盖盘根与 UNC 共享根：UNC 形态的 server\share 被吸收进
+        // Prefix（\\server\share 为 2 组件，canonicalize 后的 \\?\UNC\server\share 甚至
+        // 只有 1 个组件），因此共享根（含 \\srv\d$ 管理共享）与整盘根同样被拒绝。
         if root.components().count() <= 2 { bail!("不允许整理磁盘根目录"); }
         for var in ["SystemRoot", "ProgramFiles", "ProgramFiles(x86)", "ProgramData"] {
             if let Some(protected) = std::env::var_os(var) {

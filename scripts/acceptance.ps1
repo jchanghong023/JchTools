@@ -9,7 +9,7 @@
     -WithEngine   追加真实引擎用例（JCHTOOLS_TEST_7ZIP 或 resources\7zip\7z.exe，
                   缺失时直接失败并提示先运行 fetch-7zip.ps1）
     -WithGuiSmoke 追加 OS 级 UIA 冒烟 S1-S3（需要 -GuiData 指向 make-testdata.py
-                  生成的数据集与 target\debug\JchTools.exe；需要 pip install pywinauto）
+                  生成的数据集与 cargo build 产物（尊重 CARGO_TARGET_DIR，未设置时为 target\debug）；需要 pip install pywinauto）
     -WithPackage  追加发布打包自检（package-windows.ps1，需要引擎与 MSVC 工具链）
   未执行的阶段在汇总里显式打印 NOT RUN；不得把 NOT RUN 报告成通过。
   所有日志写在 .tmp\acceptance\ 下，任何已执行阶段失败即以非零码终止。
@@ -108,10 +108,17 @@ if ($WithEngine) {
 if ($WithGuiSmoke) {
     if (-not $GuiData) {throw '-WithGuiSmoke 需要 -GuiData 指向 make-testdata.py 生成的数据集目录'}
     if (-not (Test-Path -LiteralPath $GuiData)) {throw "数据集目录不存在：$GuiData"}
-    $exe = Join-Path $root 'target\debug\JchTools.exe'
-    if (-not (Test-Path -LiteralPath $exe)) {
-        $null = Invoke-Logged -Name 'gui-build' -File 'cargo' -Arguments @('build')
+    # 与 package-windows.ps1 同口径尊重 CARGO_TARGET_DIR：未设置时回落默认 target 目录。
+    # 否则自定义 target 目录的机器上 cargo build 产物永远不在硬编码路径，冒烟误报失败。
+    if ($env:CARGO_TARGET_DIR) {
+        $targetDir = $env:CARGO_TARGET_DIR
+    } else {
+        $targetDir = Join-Path $root 'target'
     }
+    $exe = Join-Path $targetDir 'debug\JchTools.exe'
+    # 无条件重建：target 下残留旧 exe 时跳过构建会让冒烟作用于陈旧二进制，
+    # 验证结论与当前源码脱节（AGENTS.md 3.2 对抗自证偏差）。
+    $null = Invoke-Logged -Name 'gui-build' -File 'cargo' -Arguments @('build')
     $null = Invoke-Logged -Name 'gui-smoke' -File $python -Arguments @('scripts/gui_smoke.py','--exe',$exe,'--data',$GuiData)
 } else {$script:Results.Add('NOT RUN  gui-smoke S1-S3（加 -WithGuiSmoke -GuiData <目录>）')}
 

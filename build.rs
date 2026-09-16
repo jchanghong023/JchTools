@@ -22,20 +22,31 @@ fn embed_icon(manifest_dir: &std::path::Path) {
 }
 
 fn find_rc() -> Option<std::path::PathBuf> {
+    // 与 process.rs 的 system_tool 防 PATH 劫持口径一致：优先从 Windows SDK 解析 rc.exe；
+    // SDK 里找不到时才回退 PATH 并明确告警（PATH 中的同名程序可能是伪造的，
+    // 会在构建期执行任意代码并污染产物）。
+    let kits = std::env::var_os("ProgramFiles(x86)").map(std::path::PathBuf::from).map(|base| base.join("Windows Kits/10/bin"));
+    if let Some(kits) = kits {
+        if let Ok(entries) = std::fs::read_dir(&kits) {
+            let mut versions: Vec<std::path::PathBuf> = entries.filter_map(|entry| entry.ok()).map(|entry| entry.path()).collect();
+            // 按数字元组排序（10.0.22621 > 10.0.19041），不能按字典序（否则 10.0.9 会排在 10.0.10 前面）。
+            versions.sort_by_key(|path| {
+                let name = path.file_name().and_then(|n| n.to_str()).unwrap_or("");
+                name.split('.').map(|part| part.parse::<u32>().unwrap_or(0)).collect::<Vec<_>>()
+            });
+            versions.reverse();
+            let found = versions.into_iter().map(|version| version.join("x64/rc.exe")).find(|candidate| candidate.is_file());
+            if found.is_some() { return found; }
+        }
+    }
     let names = ["rc.exe"];
     let from_path = std::env::var_os("PATH").and_then(|paths| {
         std::env::split_paths(&paths).flat_map(|dir| names.iter().map(move |name| dir.join(name))).find(|candidate| candidate.is_file())
     });
-    if from_path.is_some() { return from_path; }
-    let kits = std::env::var_os("ProgramFiles(x86)").map(std::path::PathBuf::from).map(|base| base.join("Windows Kits/10/bin"))?;
-    let mut versions: Vec<std::path::PathBuf> = std::fs::read_dir(&kits).ok()?.filter_map(|entry| entry.ok()).map(|entry| entry.path()).collect();
-    // 按数字元组排序（10.0.22621 > 10.0.19041），不能按字典序（否则 10.0.9 会排在 10.0.10 前面）。
-    versions.sort_by_key(|path| {
-        let name = path.file_name().and_then(|n| n.to_str()).unwrap_or("");
-        name.split('.').map(|part| part.parse::<u32>().unwrap_or(0)).collect::<Vec<_>>()
-    });
-    versions.reverse();
-    versions.into_iter().map(|version| version.join("x64/rc.exe")).find(|candidate| candidate.is_file())
+    if from_path.is_some() {
+        println!("cargo:warning=Windows SDK 中未找到 rc.exe，回退使用 PATH 中的 rc.exe（无法排除被伪造的可能，图标嵌入产物可信度降低）");
+    }
+    from_path
 }
 
 /// 把已校验的 7-Zip 引擎（7z.exe + 7z.dll + manifest.json）用 zlib 压缩后编进 EXE。

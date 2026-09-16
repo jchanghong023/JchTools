@@ -407,14 +407,14 @@ fn empty_directories(job: &mut Job) -> Result<()> {
         let rows = stmt.query_map([&move_kind], |r| r.get::<_,String>(0))?;
         rows.collect::<rusqlite::Result<Vec<_>>>()?
     };
-    // 相同目标只比一次；后续每个目录做前缀比较即可。
-    move_targets.sort_unstable();
-    move_targets.dedup();
     // Windows 前缀比较按 Unicode 折叠（与 under_path 口径一致）。目标清单固定，
-    // 在此预折叠一次，避免「目录数×目标数」级别的重复分配。
+    // 在此预折叠一次；折叠必须在排序之前——排序结果要用于二分定位前缀区间，
+    // 折叠会改变字符的字典序。折叠后相同的目标去重，每个前缀只需检查一次。
     if cfg!(windows) {
         move_targets = move_targets.into_iter().map(|target| target.to_lowercase()).collect();
     }
+    move_targets.sort_unstable();
+    move_targets.dedup();
     loop {
         let batch = {
             let mut statement = job.db.conn.prepare("SELECT seq,rel FROM empty_order WHERE seq>?1 ORDER BY seq LIMIT 256")?;
@@ -427,10 +427,13 @@ fn empty_directories(job: &mut Job) -> Result<()> {
             // 执行后该目录（含子树）将接收被 Move 进来的内容时，不能按空目录处理。
             // Windows 下目录 rel 与目标都已按 Unicode 折叠（目标在上方预折叠一次）。
             let probe = if cfg!(windows) { format!("{rel}/").to_lowercase() } else { format!("{rel}/") };
-            let receives_move = move_targets.iter().any(|target| {
-                if target.len() < probe.len() { return false; }
-                target.starts_with(&probe)
-            });
+            // 有序目标表中以 probe 为前缀的目标构成连续区间：二分定位第一个 >= probe 的
+            // 条目，只需检查它——若任何目标以 probe 开头，字典序最小的命中者必然是它，
+            // 复杂度从「目录数×目标数」降为「目录数×log 目标数」。
+            let receives_move = {
+                let index = move_targets.partition_point(|t| t.as_str() < probe.as_str());
+                move_targets.get(index).is_some_and(|t| t.starts_with(probe.as_str()))
+            };
             if receives_move { continue; }
             // 执行后会留在该目录（含其子树）里的文件：深层留驻文件会让对应子目录进不了
             // empty_will，在这里只需检查直接子文件即可得到相同结论。
