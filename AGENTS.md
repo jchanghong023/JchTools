@@ -80,7 +80,7 @@ JCHTOOLS_TEST_7ZIP=/abs/path/7zz bash scripts/check-linux.sh   # 含真实解压
 
 - 单命令入口：`powershell -NoProfile -File .\scripts\acceptance.ps1`（可选 `-WithEngine` / `-WithGuiSmoke -GuiData <目录>` / `-WithPackage`）。
 - 改动过跟踪文件后，提交前须最后用 `git -c core.quotePath=false ls-files -z | grep -zv '^SHA256SUMS.txt$' | xargs -0 sha256sum -b > SHA256SUMS.txt` 重建清单（static_check 会校验其完整性）。
-- **需求 ↔ 测试映射**：验证合同条目的测试 `MUST` 在其文档注释中标明合同编号（如 `// 覆盖 C-12`）；每个合同条目至少被一个测试引用。（执法：`static_check.py` 合同矩阵检查 · 待落地）
+- **需求 ↔ 测试映射**：验证合同条目的测试 `MUST` 在其文档注释中标明合同编号（如 `// 覆盖 C-12`）；每个合同条目至少被一个测试引用。（现状：现有测试尚未标注合同编号，标注与执法均待落地）
 - 合同条目的拆分、合并或重编号 `MUST` 经用户确认。
 
 ## 4. 代码与界面实现约定
@@ -121,10 +121,10 @@ JCHTOOLS_TEST_7ZIP=/abs/path/7zz bash scripts/check-linux.sh   # 含真实解压
 
 ## 9. 可信基与防共谋
 
-- 可信基文件：`AGENTS.md`、`scripts/static_check.py`、`scripts/test-baseline.json`、`scripts/acceptance.ps1`、`scripts/gui_smoke.py`、`scripts/make_tmp.py`、`docs/CONTRACT.md`、`tests/ui-baseline/`。（`resources/rules.json` 与 `src/config.rs` 结构上由 static_check 的 config_schema 检查互锁，且加规则时二者本就合法同变，不列入可信基。）
+- 可信基文件：`AGENTS.md`、`scripts/static_check.py`、`scripts/test-baseline.json`、`scripts/acceptance.ps1`、`scripts/gui_smoke.py`、`scripts/make_tmp.py`、`docs/CONTRACT.md`。（`resources/rules.json` 与 `src/config.rs` 结构上由 static_check 的 config_schema 检查互锁，且加规则时二者本就合法同变，不列入可信基。）
 - 任何变更 `MUST NOT` 同时修改产品代码（`src/`、`ui/`、`resources/`）与可信基文件；可信基变更 `MUST` 独立提交、提交信息注明理由并获用户批准。（执法：CI 按 diff 文件清单检测混合提交 · 待落地）
 - 向本文件新增 `MUST` 级条款时，同一变更 `MUST` 落地对应执法脚本检查，否则该条 `MUST` 显式标注「无执法点 · 软法」；`SHOULD` 每月审计一次无执法点的条款，补齐执法或降级措辞。
 
 ## 10. 基线保护
 
-- UI 截图基线与 `scripts/test-baseline.json` 的再生成 `MUST` 先以新旧并排提交用户做是/否判断，对应提交信息 `MUST` 带 `[基线已确认]` 标记；`MUST NOT` 静默更新后直接提交。（执法：脚本校验提交标记 · 待落地）
+- `scripts/test-baseline.json` 的再生成 `MUST` 先以新旧并排提交用户做是/否判断，对应提交信息 `MUST` 带 `[基线已确认]` 标记；`MUST NOT` 静默更新后直接提交。（执法：脚本校验提交标记 · 待落地）
