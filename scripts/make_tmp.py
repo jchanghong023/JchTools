@@ -157,7 +157,7 @@ def build_conflicts(root: Path, seven: Path, log: list[str]) -> None:
     stamp = 1_750_000_000
     os.utime(same_size_a, (stamp, stamp))
     os.utime(same_size_b, (stamp, stamp))
-    log.append("| `03-版本冲突/` | 同名不同大小（config.ini）与同名同大小不同内容（same-size-a.dat） | 两条规则默认都保留修改时间最新的；开关与保留策略独立，可在「冲突」分区改 |")
+    log.append("| `03-版本冲突/` | 同名不同大小（config.ini）与同名同大小不同内容（same-size-a.dat） | 两条规则默认都保留修改时间最新的；开关与保留策略独立，可在「去重」分区改 |")
 
 
 def build_junk(root: Path, seven: Path, log: list[str]) -> None:

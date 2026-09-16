@@ -39,10 +39,9 @@ def config_schema():
     assert len(keys)==len(set(keys))
     # 有意不进规则表的配置字段：theme 已挪到「关于」页；其余是合并行的影子键，
     # 界面一行驱动多个字段，引擎 / CLI / 旧任务库仍读细粒度值。
-    hidden={'theme','dedup_copy_names','dedup_other_names','same_name_different_size','different_size_keep','detect_type'}
+    # 去重三类（同名/副本名/不同名同内容）按 R-04 是独立规则行，不在此列。
+    hidden={'theme','same_name_different_size','different_size_keep','detect_type'}
     assert set(fields)==set(keys)|hidden,(set(fields)-set(keys)-hidden,set(keys)-set(fields))
-    # 内容相同的去重/版本组大小必然一致，“保留最大/最小”是无效选项，界面刻意不展示。
-    omitted_choices={'keep_duplicate':{'largest','smallest'},'same_size_keep':{'largest','smallest'}}
     for row in rows:
         assert row['title'] and row['hint']
         ty=fields[row['key']]
@@ -54,8 +53,9 @@ def config_schema():
             if ty!='String':
                 enum=re.search(r'pub enum '+ty+r'\s*\{(.*?)\}',config,re.S).group(1)
                 expected={re.sub(r'(?<!^)(?=[A-Z])','_',v.strip()).lower() for v in enum.split(',') if v.strip()}
-                omitted=omitted_choices.get(row['key'],set())
-                assert set(vals)|omitted==expected,(row['key'],vals,expected,omitted)
+                # R-04：保留规则的全部枚举选项（含最大/最小）都必须在界面出现，
+                # 不再有「刻意不展示」的白名单——界面选项必须与配置枚举一一对应。
+                assert set(vals)==expected,(row['key'],vals,expected)
     return f'{len(rows)} UI settings match serialized Config fields ({len(hidden)} engine/CLI-only) and enum values.'
 def ui_callbacks():
     ui=read_text(ROOT/'ui/app.slint')
@@ -125,19 +125,92 @@ def shell_syntax():
         raise Skipped('bash launcher is unavailable on this host; bash -n runs in the Linux CI job.')
     assert done.returncode==0,done.stderr
     return 'bash -n passed; PowerShell syntax check is defined in Windows CI.'
+def _attr_body(text,i):
+    """text[i] 指向 '#'：解析 #[...] 与 #![...] 属性（括号配对，允许嵌套括号）。
+    返回 (属性体如 'cfg(not(windows))' 或 'ignore = "..."', 结束下标+1)；不是属性则 None。"""
+    if i+1>=len(text) or text[i]!='#':return None
+    j=i+1
+    if text[j]=='!':j+=1
+    if j>=len(text) or text[j]!='[':return None
+    depth=0
+    for k in range(j,len(text)):
+        if text[k]=='[':depth+=1
+        elif text[k]==']':
+            depth-=1
+            if depth==0:return text[j+1:k],k+1
+    return None
+def _cfg_payload(inner):
+    """'cfg(...)' -> '...'；其余属性返回 None。'test' 门禁对 cargo test 恒真，返回 '' 表示忽略。"""
+    s=inner.strip()
+    if not s.startswith('cfg'):return None
+    s=s[3:].strip()
+    if s.startswith('(') and s.endswith(')'):s=s[1:-1].strip()
+    return '' if s=='test' else s
 def collect_tests():
-    # 提取 src/ 与 tests/ 全部 #[test]：识别 #[ignore]、紧贴在 #[test] 之前或之后的 #[cfg(...)]
-    # 平台门禁——两者都属于「削弱测试」的形态，必须进基线；同名测试靠 cfg 分平台时也各自成键。
+    # 提取 src/ 与 tests/ 全部 #[test]。基线键包含生效门禁（cfg）：
+    #   1) 文件级 #![cfg(...)]（仅扫文件头部内层属性区）；
+    #   2) 包裹测试的 #[cfg(...)] mod 块（花括号配对取范围；cfg(test) 恒真不计）；
+    #   3) 紧贴 #[test] 的属性块（前后均可，方括号配对，支持 not(windows) 等嵌套括号）。
+    # 已知残留盲区：定义在其它文件里的门禁（如 lib.rs 的 #[cfg(feature = "gui")] pub mod gui;）
+    # 不在本文件扫描范围内——本检查是执法下界，不是完整 cfg 求值器。
     rows=[]
     for path in [*ROOT.glob('src/**/*.rs'),*ROOT.glob('tests/**/*.rs')]:
         text=read_text(path);rel=path.relative_to(ROOT).as_posix()
-        for m in re.finditer(r'(?:#\[cfg\(([^)]*)\)\]\s*)?#\[test\]([^{}]*?)fn\s+(\w+)\s*\(',text):
-            cfgs=([m.group(1)] if m.group(1) else [])+re.findall(r'#\[cfg\(([^)]*)\)\]',m.group(2))
-            rows.append({'file':rel,'name':m.group(3),'ignored':'#[ignore' in m.group(2),
+        # 文件头内层属性：#![cfg(...)]（遇到第一个顶层项即停，避免误读宏内的 #![ ]）
+        head=re.split(r'\n(?=(?:pub\s+)?(?:use|mod|fn|struct|enum|impl|trait|const|static|type|macro_rules)\b)',text)[0]
+        file_cfgs=[]
+        for m in re.finditer(r'#!\[',head):
+            got=_attr_body(head,m.start())
+            if got:
+                payload=_cfg_payload(got[0])
+                if payload and payload not in file_cfgs:file_cfgs.append(payload)
+        # 模块级门禁：#[cfg(...)] mod X { ... }
+        mod_spans=[]
+        for m in re.finditer(r'#\[cfg\s*\(([^()]*(?:\([^()]*\)[^()]*)*)\)\]\s*(?:pub(?:\([^)]*\))?\s+)?mod\s+(\w+)\s*\{',text):
+            payload=m.group(1).strip()
+            if payload=='test':continue
+            end=_brace_end(text,text.find('{',m.end()-1))
+            mod_spans.append((m.end(),end,payload))
+        # 全部属性跨度（供逐测试回溯/前瞻；#![ ] 内层属性只出现在文件头，不会被测试链到）
+        attrs=[]
+        for m in re.finditer(r'#\[',text):
+            got=_attr_body(text,m.start())
+            if got:attrs.append((m.start(),got[1],got[0]))
+        def walk(pos,step):
+            """从 #[test] 位置向前(step=-1)/向后(step=+1)收集紧贴的属性行。"""
+            out=[]
+            cursor=pos
+            while True:
+                cand=None
+                for a in attrs:
+                    if step<0 and a[1]<=cursor and text[a[1]:cursor].strip()=='':cand=a
+                    elif step>0 and a[0]>=cursor and text[cursor:a[0]].strip()=='':cand=a
+                if not cand:break
+                out.append(cand);cursor=cand[0] if step<0 else cand[1]
+            return out
+        for m in re.finditer(r'#\[test\]',text):
+            cfgs=list(file_cfgs);ignored=False
+            for _,_,inner in walk(m.start(),-1)+list(reversed(walk(m.end(),1))):
+                payload=_cfg_payload(inner)
+                if payload is not None and payload and payload not in cfgs:cfgs.append(payload)
+                if inner.strip().startswith('ignore'):ignored=True
+            name_m=re.match(r'[^{};]*?fn\s+(\w+)\s*\(',text[m.end():])
+            if not name_m:continue
+            for a0,a1,payload in mod_spans:
+                if a0<m.start()<a1 and payload not in cfgs:cfgs.append(payload)
+            rows.append({'file':rel,'name':name_m.group(1),'ignored':ignored,
                 'cfg':' && '.join(cfgs) if cfgs else None})
     keys=[(r['file'],r['name'],r['cfg']) for r in rows]
     assert len(keys)==len(set(keys)),f'测试键重复（同名且同门禁）：{sorted(k for k in keys if keys.count(k)>1)}'
     return rows
+def _brace_end(text,open_idx):
+    depth=0
+    for i in range(open_idx,len(text)):
+        if text[i]=='{':depth+=1
+        elif text[i]=='}':
+            depth-=1
+            if depth==0:return i
+    return len(text)-1
 def write_baseline(rows):
     payload={'note':'由 static_check.py --update-test-baseline 生成。删除/改名/放宽断言/新增 ignore 或平台门禁时必须重新生成本文件，并在提交信息说明理由；这是防止「为变绿而削弱测试」的门禁。',
         'tests':sorted(rows,key=lambda r:(r['file'],r['name']))}
@@ -225,17 +298,20 @@ def slint_modal_gating():
     start_line=ui.count('\n',0,start)+1
     bad=[]
     for offset,line in enumerate(ui[start:overlay].split('\n')):
-        # 排除组件内部转发（touch := TouchArea { enabled: root.enabled }）与
-        # plan-prev-enabled 等属性声明：只匹配独立的 enabled 绑定。
-        if re.search(r'(?<![\w-])enabled\s*:',line):
-            if 'confirm-kind' not in line:
-                bad.append((start_line+offset,line.strip()))
-            # 冲突对话框（conflict-visible）的 scrim 同样只挡鼠标：不含任务忙门槛的
-            # 控件在冲突模态下依然可用（conflict ⟹ busy，但 busy 只关掉带 !busy 门槛
-            # 的控件；proxy-busy / net-test-busy 是页面局部状态，冲突弹出时为 false），
-            # 必须额外挂 conflict-visible 门禁，否则键盘可穿透冲突层触发操作。
-            elif not re.search(r'(?<![\w-])busy',line) and 'conflict-visible' not in line:
-                bad.append((start_line+offset,line.strip()))
+        # 只解析 enabled 绑定表达式本身（排除 accessible-enabled 与属性声明）；
+        # 「同行的 if 渲染条件里有 busy 字样」不再作为豁免依据——冲突弹出时 busy 恒真，
+        # if root.busy: 控件恰在此时渲染，恰恰是最需要 conflict-visible 门禁的形态。
+        m_en=re.search(r'(?<![\w-])enabled\s*:(.*)',line)
+        if not m_en:continue
+        expr=m_en.group(1)
+        if 'confirm-kind' not in expr:
+            bad.append((start_line+offset,line.strip()))
+        # confirm-kind 门禁只防确认模态：冲突模态（conflict-visible）下还需要
+        # enabled 含 !root.busy / conflict-visible，或本行渲染条件保证 !root.busy
+        #（该控件在冲突弹出时根本不渲染）。
+        elif not (re.search(r'!\s*root\.busy',expr) or 'conflict-visible' in expr
+                  or re.search(r'!\s*root\.busy',line[:m_en.start()])):
+            bad.append((start_line+offset,line.strip()))
     assert not bad,f'AppWindow 内存在未按 confirm-kind 门禁的 enabled 绑定（行, 表达式）：{bad}'
     return 'AppWindow 内（确认层之前）所有可交互控件的 enabled 绑定都门禁 confirm-kind。'
 def build_rc_prefers_windows_kits():
@@ -271,7 +347,7 @@ def slint_conflict_modal_gating():
     assert not bad,f'冲突对话框内存在未按 confirm-kind 门禁的可交互控件：{bad}'
     return '冲突对话框内全部可交互控件都门禁 confirm-kind。'
 def sums_integrity():
-    # VALIDATION §5 契约：SHA256SUMS.txt 覆盖除自身外的全部 git 跟踪文件、哈希与
+    # SHA256SUMS.txt 契约：覆盖除自身外的全部 git 跟踪文件、哈希与
     # 工作树一致、LF 行尾（CRLF 会让 `sha256sum -c` 在 Git Bash 下整单失败）。
     import hashlib,subprocess
     raw=(ROOT/'SHA256SUMS.txt').read_bytes()

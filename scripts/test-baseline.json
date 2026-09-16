@@ -3,6 +3,12 @@
   "tests": [
     {
       "file": "src/archive.rs",
+      "name": "enqueue_replaces_pending_row_for_same_rel",
+      "ignored": false,
+      "cfg": null
+    },
+    {
+      "file": "src/archive.rs",
       "name": "find_identical_elsewhere_never_matches_current_archive",
       "ignored": false,
       "cfg": null
@@ -22,6 +28,12 @@
     {
       "file": "src/archive.rs",
       "name": "merge_with_keep_delete_mode_reports_blocked_instead_of_lost_content",
+      "ignored": false,
+      "cfg": null
+    },
+    {
+      "file": "src/archive.rs",
+      "name": "newest_policy_breaks_mtime_tie_by_larger_size",
       "ignored": false,
       "cfg": null
     },
@@ -82,6 +94,12 @@
     {
       "file": "src/gui.rs",
       "name": "dependent_rows_follow_their_switches",
+      "ignored": false,
+      "cfg": null
+    },
+    {
+      "file": "src/gui.rs",
+      "name": "failed_event_log_respects_300_cap",
       "ignored": false,
       "cfg": null
     },
@@ -184,18 +202,6 @@
     {
       "file": "src/gui.rs",
       "name": "theme_choice_keeps_plan_ready_but_rule_change_invalidates",
-      "ignored": false,
-      "cfg": null
-    },
-    {
-      "file": "src/gui.rs",
-      "name": "write_via_temp_failure_preserves_original",
-      "ignored": false,
-      "cfg": null
-    },
-    {
-      "file": "src/gui.rs",
-      "name": "write_via_temp_success_replaces_existing",
       "ignored": false,
       "cfg": null
     },
@@ -424,6 +430,12 @@
     {
       "file": "src/proxy.rs",
       "name": "command_tips_cover_both_platforms_without_blanks",
+      "ignored": false,
+      "cfg": null
+    },
+    {
+      "file": "src/proxy.rs",
+      "name": "command_tips_include_git_proxy_snippets",
       "ignored": false,
       "cfg": null
     },
@@ -911,7 +923,7 @@
       "file": "tests/core.rs",
       "name": "hidden_root_directory_still_scanned",
       "ignored": false,
-      "cfg": null
+      "cfg": "not(windows)"
     },
     {
       "file": "tests/core.rs",
@@ -1113,6 +1125,12 @@
     },
     {
       "file": "tests/core.rs",
+      "name": "unique_name_truncates_long_stem_to_component_limit",
+      "ignored": false,
+      "cfg": null
+    },
+    {
+      "file": "tests/core.rs",
       "name": "unsafe_paths_rejected",
       "ignored": false,
       "cfg": null
@@ -1151,7 +1169,7 @@
       "file": "tests/gui_flow.rs",
       "name": "plan_execution_confirmation_flow_runs_end_to_end",
       "ignored": false,
-      "cfg": null
+      "cfg": "feature = \"gui\""
     },
     {
       "file": "tests/property.rs",

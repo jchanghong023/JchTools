@@ -17,7 +17,7 @@
 - **工具**：当前两个——「目录整理」与「代理工具」，各自需求见 `docs/CONTRACT.md` 的 C 分区与 X 分区。新工具 `MUST` 经 `src/registry.rs` 注册 + 真实页面接入；侧栏与导航 `SHOULD NOT` 写死只服务单个工具的文案或流程。
 - **生产方式**：本项目全部产出（代码、测试、文档、CI）由 AI 代理完成；用户不编写任何代码或文字，只在封闭选择、看图判断与真实使用中给出意图和反馈（协作协议见第 7 节）。本文件的纪律条款用于对抗代理的自证偏差。
 - **权威文档**：仅两份——`AGENTS.md`（本文件：项目背景与过程纪律，怎么开发、怎么测试、怎么验收）与 `docs/CONTRACT.md`（需求合同：软件必须满足什么，只写需求）。其余文档仅为辅助说明，冲突时以权威文档为准。
-- **代码入口**：`src/main.rs`（GUI）、`src/bin/cli.rs`（CLI）、`ui/app.slint`（界面）、`resources/rules.json`（41 项界面规则）、`src/registry.rs`（工具注册表）。
+- **代码入口**：`src/main.rs`（GUI）、`src/bin/cli.rs`（CLI）、`ui/app.slint`（界面）、`resources/rules.json`（43 项界面规则）、`src/registry.rs`（工具注册表）。
 
 ## 2. 临时文件规则（强制）
 
