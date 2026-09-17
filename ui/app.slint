@@ -514,7 +514,7 @@ export component AppWindow inherits Window {
                     Button { text: "关闭"; clicked => { root.error-text = ""; } }
                 }
             }
-            // 成功/中性提示与错误分开：导出完成、规则已保存这类消息不再用红色错误样式。
+            // 成功/中性提示与错误分开：复制完成这类消息不再用红色错误样式。
             if root.notice-text != "": Rectangle {
                 min-height: 40px; border-radius: 12px;
                 background: Design.base.mix(Design.accent-2, 0.90);

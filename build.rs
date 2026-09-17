@@ -7,14 +7,27 @@ fn embed_icon(manifest_dir: &std::path::Path) {
     let rc_file = out.join("jchtools.rc");
     let res_file = out.join("jchtools.res");
     let quoted = icon.display().to_string().replace('\\', "\\\\");
-    if std::fs::write(&rc_file, format!("1 ICON \"{quoted}\"\n")).is_err() { return; }
+    // rc.exe 对无 BOM 的 .rc 按 ANSI 代码页解析：仓库路径含 CJK 字符时 UTF-8 字节会被
+    // 误解码导致资源编译失败。写成带 BOM 的 UTF-16LE，rc.exe 按 Unicode 解析任意路径。
+    let rc_text = format!("1 ICON \"{quoted}\"\r\n");
+    let mut rc_bytes: Vec<u8> = vec![0xFF, 0xFE];
+    rc_bytes.extend(rc_text.encode_utf16().flat_map(u16::to_le_bytes));
+    if let Err(error) = std::fs::write(&rc_file, rc_bytes) {
+        println!("cargo:warning=无法写入 rc 资源源文件（{error}），EXE 未嵌入图标");
+        return;
+    }
     let Some(rc) = find_rc() else {
         println!("cargo:warning=未找到 Windows SDK 的 rc.exe，EXE 未嵌入图标（窗口/任务栏图标仍在运行时可正常显示）");
         return;
     };
     match std::process::Command::new(&rc).args(["/nologo", "/fo"]).arg(&res_file).arg(&rc_file).output() {
         Ok(output) if output.status.success() => {
-            println!("cargo:rustc-link-arg-bin=JchTools={}", res_file.display());
+            // MSVC 链接参数无法安全携带空格（rustc 会把引号转义成字面量）；路径含空格时
+                // 显式告警而不是静默产出坏参数。
+                if res_file.display().to_string().contains(' ') {
+                    println!("cargo:warning=构建路径含空格，MSVC 链接可能失败：{}", res_file.display());
+                }
+                println!("cargo:rustc-link-arg-bin=JchTools={}", res_file.display());
         }
         Ok(output) => println!("cargo:warning=rc.exe 未能编译图标资源：{}", String::from_utf8_lossy(&output.stderr).trim()),
         Err(error) => println!("cargo:warning=无法运行 rc.exe（{error}），EXE 未嵌入图标"),
@@ -231,12 +244,13 @@ fn main() {
         if std::env::var("CARGO_CFG_TARGET_ENV").as_deref() == Ok("msvc") {
             #[cfg(feature = "gui")] {
                 println!("cargo:rustc-link-arg-bin=JchTools=/MANIFEST:EMBED");
+                if manifest.display().to_string().contains(' ') {
+                    println!("cargo:warning=构建路径含空格，MSVC 链接可能失败：{}", manifest.display());
+                }
                 println!("cargo:rustc-link-arg-bin=JchTools=/MANIFESTINPUT:{}", manifest.display());
                 println!("cargo:rerun-if-changed=resources/app.ico");
                 embed_icon(&manifest_dir);
             }
-            println!("cargo:rustc-link-arg-bin=jchtools-cli=/MANIFEST:EMBED");
-            println!("cargo:rustc-link-arg-bin=jchtools-cli=/MANIFESTINPUT:{}", manifest.display());
         }
     }
 }

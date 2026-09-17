@@ -132,6 +132,7 @@ mod tests {
     use super::ActionState;
     use std::str::FromStr;
 
+    // 覆盖 C-11
     #[test]
     fn action_state_text_roundtrip_matches_db_values() {
         for state in [ActionState::Pending, ActionState::Done, ActionState::Failed,

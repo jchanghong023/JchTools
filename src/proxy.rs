@@ -931,7 +931,7 @@ fn read_system_proxy() -> Option<SystemProxyStatus> {
 
 fn current_env_map() -> HashMap<String, String> {
     // vars() 遇到非 Unicode 环境变量会直接 panic（Windows 未配对代理项 / Unix 非法字节）：
-    // 一个损坏变量不应拖垮整页检测，损失转换保持其余变量可用（与 cli.rs 的 args_os 思路一致）。
+    // 一个损坏变量不应拖垮整页检测，损失转换保持其余变量可用。
     std::env::vars_os()
         .map(|(key, value)| (key.to_string_lossy().into_owned(), value.to_string_lossy().into_owned()))
         .collect()
@@ -1099,6 +1099,7 @@ mod tests {
             .collect()
     }
 
+    // 覆盖 X-01
     #[test]
     fn env_vars_merge_case_on_windows_style() {
         let vars = map(&[
@@ -1115,6 +1116,7 @@ mod tests {
         assert!(rows[3].value.is_none());
     }
 
+    // 覆盖 X-01
     #[test]
     fn env_vars_split_case_on_unix_style() {
         let vars = map(&[
@@ -1133,6 +1135,7 @@ mod tests {
         assert_eq!(rows[3].value.as_deref(), Some("http://all:1"));
     }
 
+    // 覆盖 X-01
     #[test]
     fn known_client_match_and_naive_explicit() {
         assert!(matches_known_client("clash-verge.exe"));
@@ -1144,6 +1147,7 @@ mod tests {
         assert!(!matches_known_client("MyNaiveApp.exe"));
     }
 
+    // 覆盖 X-01
     #[test]
     fn parse_tasklist_csv_with_quoted_and_cjk() {
         let sample = r#""System Idle Process","0","Services","0","8 K"
@@ -1158,6 +1162,7 @@ mod tests {
         assert_eq!(rows[2].1, 2048);
     }
 
+    // 覆盖 X-01
     #[test]
     fn parse_netstat_listeners_cjk_header_and_ipv6() {
         let sample = "\
@@ -1174,6 +1179,7 @@ mod tests {
         assert!(!map.contains_key(&555), "只处理 TCP");
     }
 
+    // 覆盖 X-01
     #[test]
     fn build_vpn_processes_by_name_and_port_heuristic() {
         let processes = vec![
@@ -1195,6 +1201,7 @@ mod tests {
         assert_eq!(rows[1].ports, vec![10808]);
     }
 
+    // 覆盖 X-01, X-02
     #[test]
     fn parse_net_adapter_json_single_and_array() {
         let single = r#"{"Name":"以太网","InterfaceDescription":"Intel I219","Status":"Up","MacAddress":"AA-BB-CC-DD-EE-FF","ifIndex":12}"#;
@@ -1213,6 +1220,7 @@ mod tests {
         assert_eq!(indexes, vec![5, 9]);
     }
 
+    // 覆盖 X-02
     #[test]
     fn parse_net_ip_address_json_skips_loopback() {
         let sample = r#"[
@@ -1224,6 +1232,7 @@ mod tests {
         assert_eq!(ips, vec![(12, "192.168.1.20".into()), (9, "10.0.0.5".into())]);
     }
 
+    // 覆盖 X-02
     #[test]
     fn pick_local_ip_prefers_up_non_virtual() {
         let adapters = vec![
@@ -1255,6 +1264,7 @@ mod tests {
         assert_eq!(pick_local_ip(&adapters), "192.168.1.20");
     }
 
+    // 覆盖 X-02
     #[test]
     fn attach_ipv4_matches_by_if_index() {
         let mut adapters = parse_net_adapter_json(
@@ -1271,6 +1281,7 @@ mod tests {
         assert_eq!(adapters[1].ipv4, vec!["10.0.0.4".to_string()]);
     }
 
+    // 覆盖 X-02
     #[test]
     fn attach_ipv4_prefers_non_apipa_over_lexicographic() {
         // 字典序下 169.254.x 会排在 192.168.x 之前；应优先非 APIPA。
@@ -1299,6 +1310,7 @@ mod tests {
         );
     }
 
+    // 覆盖 X-02
     #[test]
     fn pick_local_ip_skips_apipa_when_other_candidates_exist() {
         let adapters = vec![
@@ -1331,6 +1343,7 @@ mod tests {
         assert_eq!(pick_local_ip(&adapters), "10.1.1.1", "数值更小的非 APIPA 优先");
     }
 
+    // 覆盖 X-02
     #[test]
     fn normalize_public_ip_accepts_v4_v6_and_rejects_html() {
         assert_eq!(normalize_public_ip("203.0.113.9\n").unwrap(), "203.0.113.9");
@@ -1342,6 +1355,7 @@ mod tests {
         assert!(normalize_public_ip("zzzz::1").is_err());
     }
 
+    // 覆盖 X-01
     #[test]
     fn mask_proxy_credentials_redacts_password_only() {
         assert_eq!(
@@ -1363,6 +1377,7 @@ mod tests {
         assert_eq!(rows[0].value.as_deref(), Some("http://u:***@proxy.example:8080"));
     }
 
+    // 覆盖 X-01
     #[test]
     fn mask_proxy_credentials_covers_no_scheme_format() {
         // 无 scheme：curl 等工具接受 `user:pass@host:port`。
@@ -1391,6 +1406,7 @@ mod tests {
         );
     }
 
+    // 覆盖 X-01
     #[test]
     fn mask_proxy_credentials_covers_winet_multi_protocol() {
         // WinINET 多协议串：`;` 分隔的 `key=value`，每段单独脱敏。
@@ -1414,6 +1430,7 @@ mod tests {
         );
     }
 
+    // 覆盖 X-04
     #[test]
     fn command_tips_cover_both_platforms_without_blanks() {
         let tips = command_tips(DEFAULT_PROXY_COMMAND_PORT);
@@ -1426,6 +1443,7 @@ mod tests {
         }
     }
 
+    // 覆盖 X-05
     #[test]
     fn command_tips_substitute_custom_port() {
         let tips = command_tips(10809);
@@ -1448,6 +1466,7 @@ mod tests {
         assert!(!clear.command.contains("10809"));
     }
 
+    // 覆盖 X-04
     #[test]
     fn command_tips_include_git_proxy_snippets() {
         // 回归（X-04）：命令参考必须包含 git 代理配置片段——http.proxy / https.proxy 的
@@ -1472,6 +1491,7 @@ mod tests {
         }
     }
 
+    // 覆盖 X-06
     #[test]
     fn non_windows_detect_does_not_panic() {
         // 注入固定快照：真实环境里代理变量的大小写/数量不可预期（非 Windows 机器
@@ -1490,6 +1510,7 @@ mod tests {
         }
     }
 
+    // 覆盖 X-01
     #[cfg(windows)]
     #[test]
     fn windows_registry_system_proxy_readable() {

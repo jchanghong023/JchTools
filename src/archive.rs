@@ -8,7 +8,6 @@ use std::{collections::BTreeMap, fs, path::{Path,PathBuf}, process::Command, tim
 /// 这类包无法按声明总量做预检（sizes_complete=false 会跳过 max_ratio 与
 /// 「声明总量 vs 可用空间」检查），必须有兜底上限；用户设置了更小的
 /// max_unpacked_gib 时取两者较小值——只能收紧，不能放宽。
-const STREAM_UNPACKED_CAP_GIB: u64 = 50;
 
 pub struct SevenZip { executable: PathBuf }
 impl SevenZip {
@@ -118,13 +117,11 @@ impl SevenZip {
         if sizes_complete && total.checked_add(reserve).context("容量计算溢出")? > free {
             bail!("可用空间不足：本包需 {}，预留 {}，当前 {}。未写入任何解压文件",bytes(total),bytes(reserve),bytes(free));
         }
-        // 流式包没有 Size 元数据时无法按声明总量预检：为它启用内置硬顶
-        // （用户 max_unpacked_gib 可进一步收紧），避免解压体量几乎无上限。
-        let stream_cap_bytes: Option<u64> = if sizes_complete { None } else {
-            let builtin = STREAM_UNPACKED_CAP_GIB.checked_mul(1 << 30).context("流式上限计算溢出")?;
-            Some(if job.config.max_unpacked_gib > 0 {
-                builtin.min(job.config.max_unpacked_gib * (1 << 30))
-            } else { builtin })
+        // 流式包没有 Size 元数据时无法按声明总量预检：仍受用户「单包展开上限」约束
+        // （R-02：0 = 不限，此时只有磁盘预留与剩余空间检查兜底；用户 2026-09-18 裁决
+        // 取消此前的 50 GiB 内置硬顶）。
+        let stream_cap_bytes: Option<u64> = if sizes_complete || job.config.max_unpacked_gib == 0 { None } else {
+            Some(job.config.max_unpacked_gib.checked_mul(1 << 30).context("容量计算溢出")?)
         };
         let stage = Staging::new(&job.root)?;
         let mut command = self.command();
@@ -716,6 +713,7 @@ mod tests {
     use crate::platform::NativeRecycler;
     use std::sync::Arc;
 
+    // 覆盖 S-06
     #[test]
     fn merge_creates_missing_parent_directories() {
         // 回归：合入成员时把「父目录」传给只创建父级的 ensure_parent，实际只创建到祖父目录，
@@ -741,6 +739,7 @@ mod tests {
         assert!(!source.exists(), "合入后暂存文件应已改名离开");
     }
 
+    // 覆盖 S-01, C-03
     #[test]
     fn merge_with_keep_delete_mode_reports_blocked_instead_of_lost_content() {
         // 回归：冲突策略要求新文件胜出（Overwrite），但冲突删除方式解析为「保留」时，
@@ -776,6 +775,7 @@ mod tests {
         assert_eq!(fs::read(&source).unwrap(), b"brand new and longer");
     }
 
+    // 覆盖 C-03
     #[test]
     fn newest_policy_breaks_mtime_tie_by_larger_size() {
         // 回归（C-03）：解压冲突默认策略 Newest 此前只比较 mtime，mtime 相同时直接保留
@@ -827,6 +827,7 @@ mod tests {
             "mtime 与体积全平局：应稳定保留已有文件");
     }
 
+    // 覆盖 C-04
     #[test]
     fn find_identical_elsewhere_never_matches_current_archive(){
         // 回归：quine 型自指包（成员字节=整个包字节，rsc 式 gzip/zip quine，gzip 头还会
@@ -866,7 +867,6 @@ mod tests {
     #[test]
     fn enqueue_replaces_pending_row_for_same_rel() {
         // 回归：archives 表唯一键在 fingerprint 上；同一路径的压缩包被另一个包的成员
-        // 覆盖（内容变化）后，旧 fingerprint 的 pending 行残留、新行又入队。旧行先被
         // 处理并按规则删除该包后，新行 snapshot 必然失败，把「解压失败 N 包」与错误
         // 计数虚高。入队时应先清同 rel 的未处理旧行。
         let temp = tempfile::tempdir().unwrap();
@@ -891,6 +891,7 @@ mod tests {
 
     // 平台门禁原因：验证对象是 Windows 路径长度语义（LongPathsEnabled=0 时 >260 普通路径的
     // 裸 Win32 调用直接失败）与 \\?\ verbatim 前缀拼接，只能在 Windows 上构造。
+    // 覆盖 R-07
     #[cfg(windows)]
     #[test]
     fn normalize_strips_hidden_on_plain_long_path(){
@@ -931,6 +932,7 @@ mod one_shot_skip_tests {
     use crate::platform::NativeRecycler;
     use std::sync::Arc;
 
+    // 覆盖 C-03, R-03
     #[test]
     fn merge_one_shot_skip_keeps_original_archive() {
         // 回归：Ask 对话框一次性选择「跳过」（不应用到全部）不回写 archive_override，

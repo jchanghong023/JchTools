@@ -97,77 +97,7 @@ fn deduplicate(job: &mut Job) -> Result<()> {
     }
     Ok(())
 }
-fn conflict_groups(job: &mut Job, same_size: bool) -> Result<()> {
-    let enabled = if same_size { job.config.same_name_same_size } else { job.config.same_name_different_size };
-    if !enabled { return Ok(()); }
-    let policy = if same_size { job.config.same_size_keep } else { job.config.different_size_keep };
-    let mode = job.config.conflict_delete.resolve(job.config.global_delete);
-    if mode == DeleteMode::Keep { return Ok(()); }
-    // A grouping table avoids keeping millions of names/paths in RAM.
-    job.db.conn.execute_batch("DROP TABLE IF EXISTS conflict_groups; CREATE TEMP TABLE conflict_groups(seq INTEGER PRIMARY KEY,key TEXT,size INTEGER);")?;
-    // 分组键语义（与 rules.json 的开关描述一致）：
-    // - 目录范围（默认）→ 只比较「同一父目录内的同名文件」。rel 是含父目录的全路径且唯一；
-    //   Windows 文件系统不区分大小写，用 lower(rel)（与 archive.rs 的平台门控一致）；
-    //   其他平台区分大小写，必须用精确 rel，否则会把同目录下 A.txt 与 a.txt 误并为
-    //   同名冲突。该范围在任何平台上都永不真正触发（rel 全局唯一），作用是防止
-    //   跨目录同名被误判为版本冲突。
-    // - 全局范围 → 只比较小写文件名，跨目录的同名版本取舍由它承担。
-    let key_expr = if job.config.conflict_scope_directory {
-        if cfg!(windows) { "lower(rel)" } else { "rel" }
-    } else {
-        "lower(name)"
-    };
-    let grouping = if same_size {
-        format!("INSERT INTO conflict_groups(key,size) SELECT {key_expr},size FROM files WHERE active=1 AND hash IS NOT NULL GROUP BY {key_expr},size HAVING COUNT(DISTINCT hash)>1")
-    } else {
-        format!("INSERT INTO conflict_groups(key,size) SELECT {key_expr},NULL FROM files WHERE active=1 GROUP BY {key_expr} HAVING COUNT(DISTINCT size)>1")
-    };
-    job.db.conn.execute(&grouping,[])?;
-    let mut group_cursor = 0;
-    loop {
-        let groups = {
-            let mut stmt = job.db.conn.prepare("SELECT seq,key,size FROM conflict_groups WHERE seq>?1 ORDER BY seq LIMIT 128")?;
-            let rows = stmt.query_map([group_cursor],|r| Ok((r.get::<_,i64>(0)?,r.get::<_,String>(1)?,r.get::<_,Option<i64>>(2)?)))?;
-            rows.collect::<rusqlite::Result<Vec<_>>>()?
-        };
-        if groups.is_empty() { break; }
-        for (seq,key,size) in groups {
-            job.context.control.checkpoint()?; group_cursor = seq;
-            let filter = format!("active=1 AND {key_expr}=?1 {}",if same_size {"AND size=?2 AND hash IS NOT NULL"} else {"AND (?2 IS NULL)"});
-            let keep_sql = format!("SELECT {FILE_COLUMNS} FROM files WHERE {filter} ORDER BY {} LIMIT 8",rules::ordering_sql(policy));
-            let candidates = job.db.files(&keep_sql,params![key,size])?;
-            // 清理命中且 cleanup_delete=Keep 的文件保持 active，但不得充当冲突 keeper：
-            // 否则策略排序会让正常版本被删、垃圾文件留下（与 dedup 路径的防护同口径）。
-            // 候选窗口内全部为清理命中时整组跳过。
-            let Some(keeper)=candidates.iter().find(|file|rules::cleanup_reason(&file.rel,file.snapshot.size,&job.config).is_none()).cloned() else { continue; };
-            let mut file_cursor = 0;
-            loop {
-                let sql = format!("SELECT {FILE_COLUMNS} FROM files WHERE {filter} AND id>?3 AND id<>?4 ORDER BY id LIMIT 256");
-                let files = job.db.files(&sql,params![key,size,file_cursor,keeper.id])?;
-                if files.is_empty() { break; }
-                for file in files {
-                    file_cursor = file.id;
-                    if same_size && file.hash == keeper.hash { continue; }
-                    if !same_size && file.snapshot.size == keeper.snapshot.size { continue; }
-                    // 清理命中且 Keep 的文件由清理规则管辖（保留承诺），不作为冲突版本删除。
-                    if rules::cleanup_reason(&file.rel,file.snapshot.size,&job.config).is_some() { continue; }
-                    let reason = if same_size { "同名同大小但 Hash 不同：用户选择的版本保留规则" }
-                        else { "同名不同大小：用户选择的版本保留规则（不是内容去重）" };
-                    // Keeper metadata is checked again before deleting a conflicting version.
-                    let mut planned = action(&file,ActionKind::Delete,reason,mode);
-                    planned.keeper = Some((keeper.rel.clone(),keeper.snapshot.clone()));
-                    // Different-content conflicts must not go through byte-equality validation.
-                    planned.hash = None;
-                    job.db.add_action(&planned)?;
-                    job.db.conn.execute("UPDATE files SET active=0 WHERE id=?1",[file.id])?;
-                    job.summary.planned_delete += 1;
-                    if file.snapshot.links <= 1 { job.summary.candidate_bytes = job.summary.candidate_bytes.saturating_add(file.snapshot.size); }
-                }
-            }
-        }
-    }
-    Ok(())
-}
+
 fn directory_target(job: &Job, file: &FileRecord, under_output: bool) -> Result<PathBuf> {
     let original = Path::new(&file.rel);
     let mut parent = original.parent().unwrap_or(Path::new("")).to_path_buf();
@@ -463,8 +393,6 @@ pub fn build(job: &mut Job) -> Result<()> {
     job.db.conn.execute_batch("DELETE FROM actions; DELETE FROM targets; DELETE FROM keepers;")?;
     cleanup_candidates(job)?; // Cleanup candidates must never become the sole duplicate keeper.
     deduplicate(job)?;
-    conflict_groups(job,true)?;
-    conflict_groups(job,false)?;
     moves(job)?;
     empty_directories(job)?;
     Ok(())

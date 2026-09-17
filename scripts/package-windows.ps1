@@ -52,7 +52,7 @@ foreach ($file in $engineManifest.files) {
 }
 $folder = Join-Path $root "dist\JchTools-Windows-x64-$stamp"
 New-Item -ItemType Directory -Path $folder | Out-Null
-Copy-Item -LiteralPath (Join-Path $releaseDir 'JchTools.exe'),(Join-Path $releaseDir 'jchtools-cli.exe') -Destination $folder
+Copy-Item -LiteralPath (Join-Path $releaseDir 'JchTools.exe') -Destination $folder
 # 引擎已内嵌进 EXE；发布目录只保留许可证、NOTICE 与上游源码（LGPL 要求），
 # 因此最终用户拿到的是单文件程序，缺引擎时运行期从 EXE 释放并校验 sha256。
 $resources = Join-Path $folder 'resources'

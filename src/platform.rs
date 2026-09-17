@@ -7,7 +7,10 @@ pub enum DeleteResult { Kept, Recycled, /// 文件已离开原位置，但无法
     /// 无回收站卷等情形下可能直接销毁并报成功）。按永久删除如实记账，不虚报「已回收」。
     RecycledUnverified, Permanent }
 #[derive(Debug)]
-pub enum RecycleFailure { Cancelled, Failed(String) }
+pub enum RecycleFailure { Cancelled, Failed(String),
+    /// 回收接口本身不可用（如调用线程 COM 已初始化为 MTA）：文件仍完好地留在原位，
+    /// 与 Failed 的关键区别是绝不允许降级为永久删除（S-02：降级只留给「回收失败」）。
+    Unavailable(String) }
 /// 界面/日志展示用：去掉 Windows 扩展路径前缀，避免用户看到 `\\?\D:\...`。
 pub fn display_path_text(path: &str) -> String {
     if let Some(unc) = path.strip_prefix(r"\\?\UNC\") { format!(r"\\{unc}") }
@@ -106,6 +109,10 @@ fn native_recycle(path: &Path) -> std::result::Result<(), RecycleFailure> {
     match perform() {
         Ok(()) => Ok(()),
         Err(error) if [0x800704C7u32,0x80270000,0x80004004].contains(&(error.code().0 as u32)) => Err(RecycleFailure::Cancelled),
+        // RPC_E_CHANGED_MODE：调用线程已被初始化为 MTA，STA 回收接口用不了。此时
+        // 文件未受任何影响；按「接口不可用」失败且不降级，防止未来有人把删除搬到
+        // GUI/OLE 线程时文件被静默永久删除（engine 在专属工作线程调用，正常不触发）。
+        Err(error) if error.code().0 as u32 == 0x80010106 => Err(RecycleFailure::Unavailable(error.to_string())),
         Err(error) => Err(RecycleFailure::Failed(error.to_string())),
     }
 }
@@ -147,6 +154,7 @@ pub fn remove(
                 return Ok(if verified { DeleteResult::Recycled } else { DeleteResult::RecycledUnverified });
             }
             Err(RecycleFailure::Cancelled) => bail!("回收站操作被取消，不会降级为永久删除"),
+            Err(RecycleFailure::Unavailable(reason)) => bail!("回收站接口在当前线程不可用，已保留文件：{reason}"),
             Err(RecycleFailure::Failed(reason)) => {
                 control.check_cancelled()?;
                 // A backend can report an error after moving an item. Never delete a new replacement.
@@ -206,6 +214,7 @@ mod tests {
         let _ = display_time_text(i64::MIN);
     }
 
+    // 覆盖 S-02
     #[cfg(windows)]
     #[test]
     fn volume_root_covers_local_and_unc() {

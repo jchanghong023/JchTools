@@ -85,6 +85,8 @@ pub fn prepare(root:&Path,config:Config,context:TaskContext)->Result<TaskResult>
     prepare_at(root,config,context,&config::state_dir()?,None)
 }
 /// A separate state directory and explicit engine path make the core testable without the GUI.
+/// engine_path 只是测试注入钩子（tests/archive.rs 经 JCHTOOLS_TEST_7ZIP 注入真实引擎）：
+/// 产品侧（GUI）恒传 None，引擎只能按 E-02 固定顺序获得，不向用户提供指定引擎路径的参数。
 pub fn prepare_at(root:&Path,config:Config,context:TaskContext,state:&Path,engine_path:Option<&Path>)->Result<TaskResult> {
     prepare_with(root,config,context,state,engine_path,Arc::new(NativeRecycler))
 }
@@ -219,19 +221,13 @@ fn scan(job:&mut Job,enqueue:bool,state:&Path)->Result<()> {
     Ok(())
 }
 fn hash_candidates(job:&mut Job)->Result<()> {
-    if !job.config.dedup_same_name&&!job.config.dedup_copy_names&&!job.config.dedup_other_names&&!job.config.same_name_same_size{return Ok(());}
+    if !job.config.dedup_same_name&&!job.config.dedup_copy_names&&!job.config.dedup_other_names{return Ok(());}
     let pool=rayon::ThreadPoolBuilder::new().num_threads(job.config.hash_workers).thread_name(|i|format!("organizer-hash-{i}")).build()?;
     for full in [false,true]{
         job.context.status(if full{"计算候选文件的完整 Hash"}else{"按文件大小分组并计算首尾预哈希"});
         job.db.conn.execute_batch("DROP TABLE IF EXISTS hash_candidates; CREATE TEMP TABLE hash_candidates(id INTEGER PRIMARY KEY);")?;
         if full {
             job.db.conn.execute("INSERT OR IGNORE INTO hash_candidates SELECT id FROM files WHERE active=1 AND (size,prehash) IN (SELECT size,prehash FROM files WHERE active=1 AND prehash IS NOT NULL GROUP BY size,prehash HAVING COUNT(*)>1)",[])?;
-            // 同名同大小的完整 Hash 只服务「同名同大小但内容不同」的版本淘汰：
-            // 目录范围在 Windows 上永不分组（lower(rel) 唯一），这些 Hash 是纯浪费；
-            // 非 Windows 文件系统允许同目录出现大小写变体同名，仍需保留。
-            if job.config.same_name_same_size && (!job.config.conflict_scope_directory || !cfg!(windows)) {
-                job.db.conn.execute("INSERT OR IGNORE INTO hash_candidates SELECT id FROM files WHERE active=1 AND (name,size) IN (SELECT name,size FROM files WHERE active=1 GROUP BY name,size HAVING COUNT(*)>1)",[])?;
-            }
         } else {
             job.db.conn.execute("INSERT INTO hash_candidates SELECT id FROM files WHERE active=1 AND size IN (SELECT size FROM files WHERE active=1 GROUP BY size HAVING COUNT(*)>1)",[])?;
         }
@@ -266,18 +262,32 @@ fn hash_candidates(job:&mut Job)->Result<()> {
     Ok(())
 }
 pub fn apply(directory:&Path,context:TaskContext)->Result<TaskResult>{apply_with(directory,context,Arc::new(NativeRecycler))}
-pub fn apply_with(directory:&Path,context:TaskContext,recycler:Arc<dyn Recycler>)->Result<TaskResult>{
+/// apply 的锁目录决策：优先 prepare 记录的全局锁目录；记录缺失或失效时，仅当任务
+/// 目录仍处于「…/tasks/<任务>」布局才退回上一级推导（搬到别的机器后放回新机器的
+/// tasks/ 布局仍可执行），其余位置一律拒绝——不得在陌生位置创建锁文件。
+/// 布局判定成立时 derived 必然已存在（它包含 tasks/ 这一级），无需再查 is_dir。
+fn lock_dir_for(directory:&Path,recorded:Option<&Path>)->Result<PathBuf>{
+    if let Some(recorded)=recorded.filter(|p|p.is_dir()){return Ok(recorded.to_path_buf());}
     let derived=directory.parent().and_then(Path::parent).context("任务目录结构无效")?;
+    // 盘根（X:\）与 UNC 共享根（\\server\share\）不是状态目录：在那里落锁会留下
+    // 陌生位置的锁文件。判定：derived 不含任何 Normal 组件（盘根/共享根只有
+    // Prefix+RootDir；UNC 前缀不可拆分，不能用祖先层数统计，否则会误拒共享盘上
+    // 正常深度的状态目录）。
+    let root_level=!derived.components().any(|c|matches!(c,std::path::Component::Normal(_)));
+    anyhow::ensure!(
+        !root_level&&directory.parent().and_then(Path::file_name).is_some_and(|name|name=="tasks"),
+        "任务库缺少有效的全局锁目录记录且任务目录已离开原位置；为避免互斥失效，请重新「解压与分析」后再执行");
+    Ok(derived.to_path_buf())
+}
+pub fn apply_with(directory:&Path,context:TaskContext,recycler:Arc<dyn Recycler>)->Result<TaskResult>{
     // Database::open 会在文件缺失时创建一个空库；先确认这是扫描生成的任务目录，
     // 避免把任意目录（甚至写错路径）悄悄变成一个必然失败的空任务。
     // 该检查必须先于 RootGuard：否则写错路径会先在错误位置创建目录并落下锁文件。
     anyhow::ensure!(directory.join("task.sqlite3").is_file(),"目录里没有 task.sqlite3；请选择「开始解压与分析」生成的任务目录");
     let db=Database::open(directory)?;
-    // 锁位置：prepare 已把当时的全局锁目录记进任务库。任务目录被移动到别处后按当前
-    // 位置推导会失去与 prepare 的互斥，优先锁记录位置；旧任务（无记录）或记录目录已
-    // 不存在（任务目录被搬到别的机器）时退回当前位置推导，不在陌生位置创建锁目录。
-    let recorded:Option<PathBuf>=db.get::<String>("state_dir").ok().map(PathBuf::from).filter(|p|p.is_dir());
-    let _guard=fsutil::RootGuard::acquire(recorded.as_deref().unwrap_or(derived))?;
+    // 锁位置：prepare 已把当时的全局锁目录记进任务库（决策规则见 lock_dir_for）。
+    let recorded:Option<PathBuf>=db.get::<String>("state_dir").ok().map(PathBuf::from);
+    let _guard=fsutil::RootGuard::acquire(&lock_dir_for(directory,recorded.as_deref())?)?;
     let status:String=db.get("status")?;
     if status!="ready"{bail!("任务不是待确认状态（{status}）；请重新扫描，不会盲目重放旧计划");}
     let root_text:String=db.get("root")?;
@@ -401,5 +411,59 @@ fn execute_action(job:&mut Job,action:&Action)->Result<bool>{
             if !source.try_exists()?||!source.is_dir()||fs::read_dir(&source)?.next().is_some(){return Ok(false);}
             Ok(job.delete_path(&source,None,action.mode,&action.reason,true)?!=DeleteResult::Kept)
         }
+    }
+}
+
+#[cfg(test)]
+mod lock_tests{
+    use super::*;
+    const BSLASH:char=std::path::MAIN_SEPARATOR; // Windows 下为反斜杠
+    // apply 锁目录决策：recorded 有效优先；失效时仅 tasks/ 布局可回退推导。
+    #[test]
+    fn recorded_state_dir_takes_priority(){
+        let temp=tempfile::tempdir().unwrap();
+        let tasks=temp.path().join("tasks").join("t1");
+        std::fs::create_dir_all(&tasks).unwrap();
+        assert_eq!(lock_dir_for(&tasks,Some(temp.path())).unwrap(),*temp.path());
+    }
+    #[test]
+    fn invalid_record_with_tasks_layout_falls_back_to_parent(){
+        let temp=tempfile::tempdir().unwrap();
+        let tasks=temp.path().join("tasks").join("t1");
+        std::fs::create_dir_all(&tasks).unwrap();
+        let gone=temp.path().join("gone"); // 不存在 → recorded 过滤失效
+        assert_eq!(lock_dir_for(&tasks,Some(&gone)).unwrap(),*temp.path());
+        assert_eq!(lock_dir_for(&tasks,None).unwrap(),*temp.path());
+    }
+    // 平台门禁原因：断言依赖 Windows 路径语义（盘符前缀与 \server\share UNC 前缀的
+    // components 解析），Unix 上分隔符不同、该解析不存在；OS 无关的三条决策测试保持全平台。
+    #[cfg(windows)]
+    #[test]
+    fn tasks_layout_at_drive_root_is_rejected(){
+        // 盘根/共享根不是状态目录：在那里落锁会留下陌生位置的锁文件（engine 不挂载
+        // 任何盘，这里用纯路径验证决策逻辑，不触碰文件系统；UNC 前缀用 BSLASH 拼接，
+        // 避免源码转义歧义）。
+        assert!(lock_dir_for(Path::new(r"Q:\tasks\t1"),None).is_err(),"盘根 tasks 布局必须拒绝");
+        let unc=[BSLASH,BSLASH].iter().collect::<String>()+"server"+&BSLASH.to_string()+"share"+&BSLASH.to_string()+"tasks"+&BSLASH.to_string()+"t1";
+        assert!(lock_dir_for(Path::new(&unc),None).is_err(),"UNC 共享根 tasks 布局必须拒绝");
+    }
+    // 平台门禁原因：同上，断言 Windows 前缀路径的解析结果。
+    #[cfg(windows)]
+    #[test]
+    fn tasks_layout_deep_on_unc_share_is_allowed(){
+        // UNC 上正常深度的状态目录（如 \\server\share\JchTools\data）必须放行：
+        // 前缀 \\server\share 不可拆分，不能用「祖先层数少」误判为根。
+        let unc=[BSLASH,BSLASH].iter().collect::<String>()+"server"+&BSLASH.to_string()+"share"+&BSLASH.to_string()+"JchTools"+&BSLASH.to_string()+"data"+&BSLASH.to_string()+"tasks"+&BSLASH.to_string()+"t1";
+        let expected=[BSLASH,BSLASH].iter().collect::<String>()+"server"+&BSLASH.to_string()+"share"+&BSLASH.to_string()+"JchTools"+&BSLASH.to_string()+"data";
+        assert_eq!(lock_dir_for(Path::new(&unc),None).unwrap(),PathBuf::from(expected),"UNC 深目录 tasks 布局必须放行");
+        let win=Path::new(r"C:\state\tasks\t1");
+        assert_eq!(lock_dir_for(win,None).unwrap(),PathBuf::from(r"C:\state"));
+    }
+    #[test]
+    fn non_tasks_layout_without_record_is_rejected(){
+        let temp=tempfile::tempdir().unwrap();
+        let dir=temp.path().join("t1");
+        std::fs::create_dir_all(&dir).unwrap();
+        assert!(lock_dir_for(&dir,None).is_err(),"非 tasks 布局且无记录必须拒绝");
     }
 }

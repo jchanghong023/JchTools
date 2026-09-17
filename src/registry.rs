@@ -28,6 +28,7 @@ pub fn tools() -> &'static [ToolDescriptor] {
 mod tests {
     use super::tools;
 
+    // 覆盖 P-02
     #[test]
     fn registry_ids_unique_and_fields_nonempty() {
         let list = tools();

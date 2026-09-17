@@ -2,11 +2,11 @@
 
 Windows 优先的 Rust + Slint 本地工具箱。当前提供「目录整理」与「代理工具」，后续工具通过工具注册表接入，界面导航不写死。
 
-> **当前源码树已在 Windows 11 上编译、运行并做过功能验收**（详见 CI 与提交记录）：`cargo build` / `cargo build --release` 通过，`cargo test` 178 通过 0 失败（含 25 个无头 GUI 状态测试与 1 个计划执行确认流端到端测试；另有 21 个真实引擎用例默认 ignore，已实测通过；基线数字以最近一次 `cargo test` 实测为准），界面、临时目录端到端整理与 5004 文件性能都实测过。没有引擎时构建不内嵌，解压需要 `--engine <完整 7z.exe>`；运行 `scripts/fetch-7zip.ps1` 获取官方引擎后，构建会自动把它压缩内嵌进 EXE。发布包由 `scripts/package-windows.ps1` 生成，只附带许可证与上游源码，不含引擎可执行文件。
+> **当前源码树已在 Windows 11 上编译、运行并做过功能验收**（详见 CI 与提交记录）：`cargo build` / `cargo build --release` 通过，`cargo test` 全量通过（含无头 GUI 状态测试与计划执行确认流端到端测试；另有 21 个真实引擎用例默认 ignore，已实测通过；基线数字以最近一次 `cargo test` 实测为准），界面、临时目录端到端整理与 5004 文件性能都实测过。没有引擎时构建不内嵌，运行期解压会给出明确错误；运行 `scripts/fetch-7zip.ps1` 获取官方引擎后，构建会自动把它压缩内嵌进 EXE。发布包由 `scripts/package-windows.ps1` 生成，只附带许可证与上游源码，不含引擎可执行文件。
 
 ## 7-Zip 引擎（内置）
 
-- 官方完整引擎（`7z.exe` 560 KiB + `7z.dll` 1.82 MiB，合计 **2.37 MiB**）在构建时以 **zlib 压缩**（**约 1.0 MiB**）编进 EXE：GUI 从 21.7 MiB 变为 ~22.8 MiB，CLI 同样带上引擎。最终用户拿到的是**单文件程序**，不需要另装 7-Zip，也不会有散落的引擎文件。
+- 官方完整引擎（`7z.exe` 560 KiB + `7z.dll` 1.82 MiB，合计 **2.37 MiB**）在构建时以 **zlib 压缩**（**约 1.0 MiB**）编进 EXE：GUI 从 21.7 MiB 变为 ~22.8 MiB。最终用户拿到的是**单文件程序**，不需要另装 7-Zip，也不会有散落的引擎文件。
 - 首次需要解压时，引擎被释放到 `%LOCALAPPDATA%\JchTools\data\engine\<版本-哈希>\`，逐文件校验 sha256 后才使用；已存在的文件不会被覆盖，所以用户把自备的 `7z.exe`/`7z.dll` 放进该目录即可覆盖内嵌副本（LGPL 的可替换要求，删除该目录可让程序重新释放官方副本）；`<exe 目录>\resources\7zip\7z.exe` 始终优先级最高。
 - 发布包仍随附 `resources/7zip/` 下的许可证、NOTICE 与上游源码压缩包（LGPL/BSD/unRAR 要求），但**不再随包放引擎可执行文件**——`scripts/package-windows.ps1` 会在打包时校验引擎哈希并拒绝把 `7z.exe`/`7z.dll` 混进发布目录。
 - 构建机获取官方引擎：`powershell -NoProfile -File .\scripts\fetch-7zip.ps1`（固定官方 release、校验上游 SHA-256、只接受官方下载域名）。没有引擎时构建仍能成功，只是不内嵌（运行期会明确报错）。
@@ -24,7 +24,7 @@ powershell -NoProfile -File .\scripts\package-windows.ps1
 
 脚本从官方 `ip7z/7zip` 的固定 `26.03` 发布获取完整 x64 MSI 和对应源码，要求 GitHub 发布元数据提供 SHA-256 摘要；缺少摘要、校验失败或资产缺失时停止，不换非官方镜像。MSI 只在构建机生成 administrative image，提取完整 `7z.exe + 7z.dll`，不把安装步骤交给最终用户。
 
-随后生成 Cargo.lock，执行 `cargo check`、核心测试和真实引擎解压测试，编译 GUI/CLI，校验内嵌引擎与清单，复制许可证及 7-Zip 源码（发布包不含 7z.exe/dll），生成 `dist/JchTools-Windows-x64-时间戳.zip`。该构建目录的 `BUILD-INFO.json` 记录实际执行结果；脚本不会声称已完成手工 UI 或多 TB 性能验收。首次验证通过后的 Cargo.lock 应纳入仓库。
+随后生成 Cargo.lock，执行 `cargo check`、核心测试和真实引擎解压测试，编译 GUI，校验内嵌引擎与清单，复制许可证及 7-Zip 源码（发布包不含 7z.exe/dll），生成 `dist/JchTools-Windows-x64-时间戳.zip`。该构建目录的 `BUILD-INFO.json` 记录实际执行结果；脚本不会声称已完成手工 UI 或多 TB 性能验收。首次验证通过后的 Cargo.lock 应纳入仓库。
 
 `-Offline` 只供已经缓存全部 Rust 依赖和已校验引擎的构建机使用；`-SkipTests` 会在构建记录明确标为 NOT RUN，不应用于生产交付。脚本不修改执行策略，不自动安装编译器，不自动提升权限。
 
@@ -36,7 +36,7 @@ powershell -NoProfile -File .\scripts\package-windows.ps1
 
 选择目录 → 配置解压、去重、归类、清理、安全与性能规则 → 确认并开始“解压与分析” → 查看真实文件产生的分页计划 → 勾选/取消单项 → 再次确认执行 → 查看日志。
 
-第一次确认后**已经会修改目录**：解压、处理解压目标冲突、按设置处理原压缩包。第一次并不是完全只读预览。第二次确认才执行去重、版本取舍、归类和清理。没有假装在解压前已经知道新文件 Hash 或重复数。
+第一次确认后**已经会修改目录**：解压、处理解压目标冲突、按设置处理原压缩包。第一次并不是完全只读预览。第二次确认才执行去重、归类和清理。没有假装在解压前已经知道新文件 Hash 或重复数。
 
 导航只显示已注册工具（目录整理、代理工具）和关于；工具描述集中注册，增加新工具时才出现其真实入口。当前未包含任何空 AI/文档分类。“关于”包含 Slint 的 AboutSlint 署名组件。不提供独立的任务记录页或设置页：规则只在主界面「处理规则」里会话内调整，不落盘、不导入导出。代理工具只读检测环境变量、系统代理、常见 VPN/代理进程与虚拟网卡，并提供可复制的设置命令，不自动修改系统；另含「网络测试」：仅在用户点击时对固定目标站点发起 Windows 本机/WSL2 TCP 探测（WSL2 有独立网络命名空间需在发行版内测），不上传数据、不自动发起探测。
 
@@ -50,7 +50,7 @@ powershell -NoProfile -File .\scripts\package-windows.ps1
 - 侧栏导航带小图标（文件夹 / 信息圈），用几何图形绘制，不依赖字体或图片资源；选中项是主色底 + 左侧色条；侧栏中段留空，预留给后续工具。
 - 两组切换用两种样式：面板切换（处理规则 / 整理计划 / 进度与日志）是下划线页签，规则分区（解压 / 去重 / 归类 / 清理 / 安全与性能）是实心胶囊，不会混淆。冲突规则已并入「去重」分区；主题在「关于」页。
 - 进度：执行阶段显示百分比 + 进度条 + “已完成 / 总数 项”计数，状态栏同时显示“执行中：已处理 N / M 项”；分析阶段总量无法提前预知，显示往返扫动的光带与实时计数（已扫描文件数、读取量、平均速度）。空闲时进度条隐藏。
-- 日志：最新的消息显示在最上面，界面只保留最近 300 条；完整逐文件记录在本次任务数据库里，需要 CSV 时用 `jchtools-cli report` 导出（按时间顺序）。
+- 日志：最新的消息显示在最上面，界面只保留最近 300 条；完整逐文件记录在本次任务数据库里，不提供日志或报告导出。
 - 提示分两级：复制成功这类消息走蓝色提示条，配置不成立或操作失败走红色错误条，两者都可单独关闭。
 - 计划行显示中文状态（待执行 / 已执行 / 已跳过 / 已取消勾选 / 执行失败）；用户主动取消任务库状态为「已取消」，不写成失败。
 - 计划翻页按钮只在确实还有上/下一页时可用；切换类型筛选会回到第一页并同步复位。
@@ -69,7 +69,6 @@ powershell -NoProfile -File .\scripts\package-windows.ps1
 | 原压缩包 | 保留、回收、永久删除；密码/损坏/警告退出/部分跳过时保留；分卷包及其相关源卷保守保留并排除后续清理 |
 | 真正去重 | 文件大小 → 首尾预哈希 → 完整 BLAKE3；删除前始终再逐字节复核（不可关闭） |
 | 去重分类 | 同名、`(1)/(2)/Copy/副本`、不同名内容相同三类独立启停；保留最新、最旧、最大、最小或最短名称 |
-| 版本冲突 | 同名同大小但 Hash 不同默认保留较新；同名不同大小默认保留修改时间最新的；各自开关、保留策略与作用范围独立配置 |
 | 归类 | 按扩展名、大类、修改日期、自定义扩展名规则；保留相对目录或扁平归类；可单独归类超大文件 |
 | 命名与目录 | 合并同名目录候选、提升单子项目录、确认重复后清理副本名称、Unicode NFC 和空白规范化 |
 | 清理 | 空目录、明确配置的垃圾文件、临时/备份文件、零字节文件；真实格式检测及可选修正扩展名 |
@@ -77,7 +76,7 @@ powershell -NoProfile -File .\scripts\package-windows.ps1
 | 高级去重 | 可用硬链接替代副本，保持别名；不支持的卷安全失败，不跨卷复制 |
 | 操作 | 暂停、取消；真实进度与有限 GUI 日志；计划分页、单项取消；主界面会话内调整规则 |
 
-“最新”明确指文件修改时间，不表示内容语义上的最新版本；时间相同用路径长度、路径字典序稳定决胜（解压冲突的「保留较新」是唯一例外：其修改时间相同时按体积决胜，不再看路径）。不同内容的版本取舍不是 Hash 去重。版本取舍默认已限定在同一父目录内比较（Windows 同目录不会出现同名文件，默认范围实际不会触发）；需要跨目录的同名版本取舍时才关闭 conflict_scope_directory，项目目录慎用。
+“最新”明确指文件修改时间，不表示内容语义上的最新版本；时间相同用路径长度、路径字典序稳定决胜（解压冲突的「保留较新」是唯一例外：其修改时间相同时按体积决胜，不再看路径）。同名但内容不同的文件不提供版本取舍或自动淘汰——去重只删除完整哈希一致的内容。
 
 ## 多 TB 目录的处理方式与边界
 
@@ -97,7 +96,7 @@ powershell -NoProfile -File .\scripts\package-windows.ps1
 
 密码包目前**跳过并记录**，没有密码输入/密码存储；分卷包支持从识别到的首卷调用引擎，但不自动删除整组源卷；原包保留优先于后续清理规则。文件格式检测只能识别 infer 支持的签名；无法识别的不改名，ZIP 容器的 DOCX/EPUB 等不误改成 ZIP。路径里有 Windows 不支持的名称、非 UTF-8 名称或危险条目会拒绝/跳过，而不是自动猜测改写。
 
-已在 Windows 11 实测通过：Rust/Slint 全量编译（dev 与 release）、`cargo test`（178 通过、21 个真实引擎用例 ignore，已实测通过；另含 25 个无头 GUI 状态测试与 1 个计划执行确认流端到端测试；基线数字以最近一次 `cargo test` 实测为准）、界面渲染与自绘标题栏交互、临时目录上的解压/去重/归类/清理/报告端到端流程、`make_tmp.py` 手工测试数据集上的 GUI 全流程（记录于提交历史）、5004 文件 521 MiB 的扫描与去重性能。尚未验证的关键项：Windows Shell 回收站容量不足和网络盘行为、高 DPI（非 150%）与无 GPU 的实际显示、RAR 多版本与多卷、大固实包、多个 TB 的真实性能、并发外部进程修改的全部竞态。当前路径检查不等于对恶意并发文件系统攻击的形式化安全保证。首次运行必须使用副本或测试目录；经用户亲自验收后再决定生产使用。
+已在 Windows 11 实测通过：Rust/Slint 全量编译（dev 与 release）、`cargo test`（全量通过、21 个真实引擎用例 ignore，已实测通过；另含无头 GUI 状态测试与计划执行确认流端到端测试；基线数字以最近一次 `cargo test` 实测为准）、界面渲染与自绘标题栏交互、临时目录上的解压/去重/归类/清理端到端流程、`make_tmp.py` 手工测试数据集上的 GUI 全流程（记录于提交历史）、5004 文件 521 MiB 的扫描与去重性能。尚未验证的关键项：Windows Shell 回收站容量不足和网络盘行为、高 DPI（非 150%）与无 GPU 的实际显示、RAR 多版本与多卷、大固实包、多个 TB 的真实性能、并发外部进程修改的全部竞态。当前路径检查不等于对恶意并发文件系统攻击的形式化安全保证。首次运行必须使用副本或测试目录；经用户亲自验收后再决定生产使用。
 
 ## 手工测试数据集
 
@@ -113,7 +112,7 @@ python scripts/make_tmp.py testdata --git
 
 自己测试时建议：先只开「解压 + 去重」跑一遍看计划，再逐项打开归类、清理、类型修正、隐藏/系统等开关对比差异。
 
-## 核心测试与命令行
+## 核心测试
 
 在装有 Rust 的 Linux/Ubuntu 测试机：
 
@@ -123,21 +122,10 @@ bash scripts/check-linux.sh
 JCHTOOLS_TEST_7ZIP=/absolute/path/7zz bash scripts/check-linux.sh
 ```
 
-代码中的回收站测试全部使用模拟实现，不会删除测试机的个人文件。真实引擎测试有 ignore 标记，只有显式运行时启用。GUI 仍需 Windows 手工验收。
-
-```powershell
-.\jchtools-cli.exe defaults .\jchtools-config.json
-.\jchtools-cli.exe analyze .tmp\testdata --config .\jchtools-config.json
-.\jchtools-cli.exe analyze .tmp\testdata --extract --yes
-.\jchtools-cli.exe inspect "<上一步输出的任务目录>"
-.\jchtools-cli.exe apply "<任务目录>" --yes
-.\jchtools-cli.exe report "<任务目录>" .\new-report.csv
-```
-
-CLI 不带 `--extract` 的 analyze 只生成计划、不修改目标文件；显式解压需要 `--extract --yes`。非交互 CLI 将“询问冲突”改为两份都保留。任务状态默认放在当前用户本地应用数据目录，不上传文件或日志。
+代码中的回收站测试全部使用模拟实现，不会删除测试机的个人文件。真实引擎测试有 ignore 标记，只有显式运行时启用。GUI 需 Windows 验收。
 
 ## 工程入口
 
-`src/main.rs`/`ui/app.slint`：界面；`resources/rules.json`：43 项界面规则；`src/config.rs`：配置及校验；`src/registry.rs`：真实工具注册；`src/engine.rs`：阶段控制；`archive.rs`：7-Zip；`planner.rs`：计划；`platform.rs`：回收站/删除；`db.rs`/`schema.sql`：磁盘索引、计划及审计；`tests/`：测试；`scripts/`：检查/打包；`.github/workflows/check.yml`：Windows/Linux CI。
+`src/main.rs`/`ui/app.slint`：界面；`resources/rules.json`：40 项界面规则；`src/config.rs`：配置及校验；`src/registry.rs`：真实工具注册；`src/engine.rs`：阶段控制；`archive.rs`：7-Zip；`planner.rs`：计划；`platform.rs`：回收站/删除；`db.rs`/`schema.sql`：磁盘索引、计划及审计；`tests/`：测试；`scripts/`：检查/打包；`.github/workflows/check.yml`：Windows/Linux CI。
 
 技术依据和许可见 [第三方说明](THIRD_PARTY_NOTICES.md)；需求语义见 [需求合同](docs/CONTRACT.md)。

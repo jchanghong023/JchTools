@@ -3,7 +3,7 @@
 slint::include_modules!();
 
 use anyhow::{Context as _, Result};
-use crate::{config::{ClassifyMode,Config,ConflictPolicy,DEFAULT_CUSTOM_CATEGORIES,KeepPolicy}, control::{ConflictAnswer,Context,Control,Event},
+use crate::{config::{ClassifyMode,Config,ConflictPolicy,DEFAULT_CUSTOM_CATEGORIES}, control::{ConflictAnswer,Context,Control,Event},
     db::Database, engine, model::{bytes,ActionKind}, platform, registry};
 use serde::Deserialize;
 use slint::{ComponentHandle,Model,ModelRc,SharedString,VecModel};
@@ -139,10 +139,7 @@ fn hint_for(spec:&RuleSpec,value:&serde_json::Value)->String{
 }
 fn rule_row(spec:&RuleSpec,data:&serde_json::Value)->RuleRow {
     let value=&data[&spec.key];
-    let raw=value.as_bool().unwrap_or(false);
-    // conflict_scope_directory 界面取反显示：勾选=允许跨目录比较版本（配置里为 false）。
-    // 存储键与引擎语义都不变，只是这一行的勾选含义反过来。
-    let checked=if spec.key=="conflict_scope_directory"{!raw}else{raw};
+    let checked=value.as_bool().unwrap_or(false);
     RuleRow {key:spec.key.clone().into(),title:spec.title.clone().into(),hint:hint_for(spec,value).into(),
         kind:if spec.kind=="bool"{0}else if spec.kind=="choice"{1}else{2},
         checked,
@@ -157,9 +154,6 @@ fn rule_visible(spec:&RuleSpec,config:&Config,show_advanced:bool)->bool{
     match spec.key.as_str(){
         "custom_categories"=>config.classify==ClassifyMode::Custom||config.custom_categories!=DEFAULT_CUSTOM_CATEGORIES,
         "large_threshold_gib"=>config.large_files||config.large_threshold_gib!=1,
-        "same_size_keep"=>config.same_name_same_size||config.same_name_different_size
-            ||config.same_size_keep!=KeepPolicy::Newest||config.different_size_keep!=KeepPolicy::Newest,
-        "conflict_scope_directory"=>config.same_name_same_size||config.same_name_different_size||!config.conflict_scope_directory,
         _=>true,
     }
 }
@@ -236,12 +230,10 @@ fn sync_rules(ui:&AppWindow,state:&State){
     }
     while model.row_count()>index{model.remove(index);}
 }
-/// 合并行的影子键：界面上一个开关/下拉同时驱动多个配置键，Config 保留细粒度字段
-/// 供引擎、CLI 与历史任务库继续使用，只是界面不再拆开展示。
+/// 合并行的影子键：界面上一个开关同时驱动多个配置键，Config 保留细粒度字段
+/// 供引擎与历史任务库继续使用，只是界面不再拆开展示。
 fn group_keys(key:&str)->Vec<&str>{
     match key{
-        "same_name_same_size"=>vec!["same_name_same_size","same_name_different_size"],
-        "same_size_keep"=>vec!["same_size_keep","different_size_keep"],
         "fix_extension"=>vec!["fix_extension","detect_type"],
         _=>vec![key],
     }
@@ -666,7 +658,7 @@ fn wire_sync(ui:&AppWindow,state:&Rc<RefCell<State>>){
                 match id.as_str(){
                     "directory-organizer"=>{
                         ui.set_screen(0);ui.set_active_tool_id(id.clone());
-                        state.borrow_mut().section="解压".into();ui.set_section(0);
+                        // 保留用户上次所在规则分区（State 默认即「解压」），不强制跳回。
                         refresh(&ui,&state.borrow());
                     }
                     "proxy-status"=>{
@@ -833,19 +825,17 @@ fn wire_sync(ui:&AppWindow,state:&Rc<RefCell<State>>){
         let weak=ui.as_weak();
         ui.on_navigation(move|screen|{if let Some(ui)=weak.upgrade(){
             ui.set_screen(screen);
-            // 「关于」不是工具：清空 active-tool-id，侧栏不高亮任何工具；
-            // 从关于页返回工具页时恢复全量列表并写回对应 active id。
+            // 「关于」不是工具：清空 active-tool-id，侧栏不高亮任何工具。
+            // 返回工具页统一走 select_tool（工具 NavItem 的点击回调），此处不再恢复列表：
+            // 该回调在生产中只被「关于」NavItem 以 1 调用，其余分支属不可达路径。
             if screen==1{ui.set_active_tool_id("".into());}
-            else{
-                reset_tool_list(&ui);
-                if screen==0{ui.set_active_tool_id("directory-organizer".into());}
-                else if screen==2{ui.set_active_tool_id("proxy-status".into());}
-            }
         }});
     }
     {
         let weak=ui.as_weak();let state=state.clone();
         ui.on_select_section(move|index|{if let Some(section)=["解压","去重","归类","清理","安全与性能"].get(index.max(0)as usize){
+            // UI 与状态用同一个钳制值：负 index 不再出现「状态到解压、高亮停在 -1」的分叉。
+            let index=index.max(0);
             state.borrow_mut().section=section.to_string();if let Some(ui)=weak.upgrade(){ui.set_section(index);refresh(&ui,&state.borrow());}
         }});
     }
@@ -854,8 +844,7 @@ fn wire_sync(ui:&AppWindow,state:&Rc<RefCell<State>>){
     // 联动行的出现/消失交给 sync_rules 增量插入删除。
     {let weak=ui.as_weak();let state=state.clone();ui.on_rule_bool(move|key,value|{
         if let Some(ui)=weak.upgrade(){
-            let stored=if key.as_str()=="conflict_scope_directory"{!value}else{value};
-            if changed(&ui,&state,key.as_str(),stored.into(),false){
+            if changed(&ui,&state,key.as_str(),value.into(),false){
                 patch_rule_row(&ui,key.as_str(),|row|row.checked=value);
                 sync_rules(&ui,&state.borrow());
             }
@@ -1182,7 +1171,7 @@ pub fn run_with_engine_overrides(hook:impl FnOnce(&AppWindow)+'static,overrides:
                         ui.set_status(if ready{
                             "解压与分析完成。请检查计划，然后确认执行整理。".into()
                         }else{
-                            format!("整理结束：已回收 {} 项 · 永久删除 {} 项 · 错误 {} 项；完整记录见「进度与日志」或导出报告。",
+                            format!("整理结束：已回收 {} 项 · 永久删除 {} 项 · 错误 {} 项；完整记录见「进度与日志」。",
                                 summary.recycled,summary.deleted,summary.errors)
                         }.into());
                         // 新任务加载落地前清空上一任务的旧行：action id 是各任务库各自的
@@ -1384,6 +1373,7 @@ mod gui_tests{
     use super::*;
     use std::sync::{mpsc,Mutex,OnceLock};
 
+    // 覆盖 C-11
     #[test]
     fn plan_page_event_rejects_stale_gen_without_touching_completed(){
         // 低代际事件晚到：不得因 gen!=latest 而应用；completed 仍留给高代际事件。
@@ -1394,6 +1384,7 @@ mod gui_tests{
         // 同代但用户已切筛选：拒绝。
         assert!(!plan_page_event_accepted(6,6,0,None,0,Some("delete")));
     }
+    // 覆盖 X-03, X-07
     #[test]
     fn wsl_distros_event_requires_current_gen_and_wsl_scope(){
         // 回归：WSL 列表事件此前只按「当前 scope==1」判定，「刷新中切走又切回」后
@@ -1403,6 +1394,7 @@ mod gui_tests{
         assert!(wsl_distros_event_accepted(3,3,1));
         assert!(!wsl_distros_event_accepted(3,3,0),"切到 Windows 本机后不得应用/清 busy");
     }
+    // 覆盖 C-12
     #[test]
     fn failed_event_log_respects_300_cap(){
         // 回归（C-12）：Failed 收尾此前直接 push_back 不查上限；一次任务先积累 300 条
@@ -1414,6 +1406,7 @@ mod gui_tests{
         assert_eq!(logs.back().map(|s|s.as_str()),Some("任务失败：测试"),"最新一条在最上");
         assert_eq!(logs.front().map(|s|s.as_str()),Some("日志 1"),"最旧一条被挤出");
     }
+    // 覆盖 C-08
     #[test]
     fn failed_reload_updates_summary_without_reborrow_panic(){
         // 回归：Failed 收尾此前把 task 提取放在 if-let scrutinee 里（edition 2021 下
@@ -1444,6 +1437,7 @@ mod gui_tests{
             assert!(app.ui.get_plan_delete_count()==3,"摘要计数应刷新");
         }).unwrap();
     }
+    // 覆盖 X-07, X-03
     #[test]
     fn wsl_scope_switch_with_sender_bumps_gen_and_sets_busy(){
         // 回归：切页签发点若把 sender 提取留在 if-let scrutinee 里（edition 2021 下
@@ -1542,14 +1536,7 @@ mod gui_tests{
         })
     }
 
-    fn rule_checked_at(ui:&AppWindow,key:&str)->Option<bool>{
-        let rules=ui.get_rules();
-        (0..rules.row_count()).find_map(|i|{
-            let row=rules.row_data(i)?;
-            (row.key.as_str()==key).then_some(row.checked)
-        })
-    }
-
+    // 覆盖 P-02, P-04
     #[test]
     fn initial_surface_lists_defaults(){
         with_gui(|app|{
@@ -1559,6 +1546,7 @@ mod gui_tests{
             assert_eq!(ui.get_tool_count(),2,"当前注册的工具数量");
         }).unwrap();
     }
+    // 覆盖 R-01, R-05
     #[test]
     fn section_switch_swaps_rule_rows(){
         with_gui(|app|{
@@ -1575,12 +1563,16 @@ mod gui_tests{
             ui.invoke_select_section(0); // 解压
             assert!(rule_value_at(ui,"max_depth").is_none(),"高级层关闭后最大嵌套层数不应出现");
             assert!(rule_value_at(ui,"extract").is_some());
-            // 冲突组已并入去重分区；应用分区（主题）已挪到「关于」页，都不再有独立分区。
+            // 主题已挪到「关于」页；R-05 移除版本取舍后，其开关不得再出现在任何层级。
             ui.invoke_select_section(1);
-            assert!(rule_value_at(ui,"same_name_same_size").is_some(),"冲突规则并入去重分区");
+            assert!(rule_value_at(ui,"dedup_same_name").is_some(),"去重开关在去重分区");
+            ui.invoke_toggle_advanced(true);
+            assert!(rule_value_at(ui,"same_name_same_size").is_none(),"R-05：版本取舍开关不得出现在规则面板");
+            assert!(rule_value_at(ui,"same_size_keep").is_none(),"R-05：版本取舍保留规则不得出现");
             assert!(rule_value_at(ui,"theme").is_none(),"主题不再作为目录整理的规则行");
         }).unwrap();
     }
+    // 覆盖 R-01
     #[test]
     fn advanced_rows_hidden_until_toggled(){
         with_gui(|app|{
@@ -1590,12 +1582,13 @@ mod gui_tests{
             assert!(rule_value_at(ui,"nested_archives").is_none(),"嵌套解压属于高级层");
             ui.invoke_toggle_advanced(true);
             assert!(ui.get_show_advanced());
-            assert_eq!(ui.get_rules().row_count(),9,"打开高级层后解压分区应显示全部 9 条");
+            assert_eq!(ui.get_rules().row_count(),10,"打开高级层后解压分区应显示全部 10 条");
             assert_eq!(rule_value_at(ui,"max_depth").as_deref(),Some("16"));
             ui.invoke_toggle_advanced(false);
             assert_eq!(ui.get_rules().row_count(),3,"关闭高级层必须恢复基础视图");
         }).unwrap();
     }
+    // 覆盖 R-01, R-04, R-05
     #[test]
     fn dependent_rows_follow_their_switches(){
         with_gui(|app|{
@@ -1616,22 +1609,25 @@ mod gui_tests{
             ui.invoke_rule_bool("large_files".into(),true);
             assert!(rule_value_at(ui,"large_threshold_gib").is_some());
             ui.invoke_toggle_advanced(false);
-            // 去重（R-04 拆分后）：同名/副本名/不同名三个独立开关 + 重复组保留规则 + 版本淘汰开关；
-            // 版本保留规则仍随版本淘汰开关隐藏。
+            // 去重（R-04 拆分后）：同名/副本名/不同名三个独立开关 + 重复组保留规则；
+            // R-05 移除版本取舍后，去重基础层固定 4 行，不再有随开关出现/收回的行。
             ui.invoke_select_section(1);
             assert!(rule_value_at(ui,"dedup_same_name").is_some()&&rule_value_at(ui,"dedup_copy_names").is_some()
                 &&rule_value_at(ui,"dedup_other_names").is_some(),"去重三类开关必须同屏独立出现");
-            assert_eq!(ui.get_rules().row_count(),5,"去重基础层：三个去重开关 + 保留规则 + 版本淘汰开关");
-            ui.invoke_rule_bool("same_name_same_size".into(),true);
-            assert!(rule_value_at(ui,"same_size_keep").is_some());
-            assert_eq!(ui.get_rules().row_count(),6,"打开版本淘汰后保留规则出现");
-            assert!(rule_value_at(ui,"conflict_scope_directory").is_none(),"比较范围已移入高级层");
-            // 关掉开关后依赖行必须消失（增量删除路径，与上面的插入路径同样重要）
-            ui.invoke_rule_bool("same_name_same_size".into(),false);
-            assert_eq!(ui.get_rules().row_count(),5,"关掉开关后版本保留规则要收回");
-            assert!(rule_value_at(ui,"same_size_keep").is_none());
+            assert_eq!(ui.get_rules().row_count(),4,"去重基础层：三个去重开关 + 保留规则");
+            // 解压覆盖旧文件的删除方式（conflict_delete）已按语义移到「解压」分区高级层。
+            ui.invoke_select_section(0);
+            ui.invoke_toggle_advanced(true);
+            assert!(rule_value_at(ui,"conflict_delete").is_some(),"解压覆盖旧文件的删除方式在解压高级层");
+            assert!(rule_value_at(ui,"same_size_keep").is_none(),"R-05：版本取舍保留规则不得出现");
+            ui.invoke_toggle_advanced(false);
+            ui.invoke_select_section(1);
+            ui.invoke_toggle_advanced(true);
+            assert!(rule_value_at(ui,"conflict_delete").is_none(),"去重分区不再有解压覆盖删除方式行");
+            ui.invoke_toggle_advanced(false);
         }).unwrap();
     }
+    // 覆盖 R-04, R-06
     #[test]
     fn merged_rows_write_shadow_fields(){
         with_gui(|app|{
@@ -1646,34 +1642,14 @@ mod gui_tests{
             ui.invoke_rule_bool("dedup_other_names".into(),false);
             {let cfg=&app.state.borrow().config;
                 assert!(!cfg.dedup_copy_names&&!cfg.dedup_other_names,"两类开关各自独立生效");}
-            // 版本淘汰组仍是合并行（R-05）：一行写两个细粒度字段。
-            ui.invoke_rule_bool("same_name_same_size".into(),true);
+            // R-05 移除版本淘汰组后，剩余合并行：修正扩展名一行仍驱动两个细粒度字段。
+            ui.invoke_select_section(3);
+            ui.invoke_rule_bool("fix_extension".into(),true);
             {let cfg=&app.state.borrow().config;
-                assert!(cfg.same_name_same_size&&cfg.same_name_different_size,"版本淘汰一行必须同时写两个开关");}
-            ui.invoke_rule_choice("same_size_keep".into(),1); // 保留最旧
-            {let cfg=&app.state.borrow().config;
-                assert_eq!(cfg.same_size_keep,KeepPolicy::Oldest);
-                assert_eq!(cfg.different_size_keep,KeepPolicy::Oldest,"保留规则一行必须同时写两个策略");}
-            // R-04：保留规则补齐「最大/最小」，写入对应枚举。
-            ui.invoke_rule_choice("same_size_keep".into(),2); // 保留最大
-            {let cfg=&app.state.borrow().config;
-                assert_eq!(cfg.same_size_keep,KeepPolicy::Largest,"最大选项必须可用");}
+                assert!(cfg.fix_extension&&cfg.detect_type,"修正扩展名一行必须同时开启类型检测");}
         }).unwrap();
     }
-    #[test]
-    fn conflict_scope_row_is_inverted_but_stores_original_semantics(){
-        with_gui(|app|{
-            let ui=&app.ui;
-            ui.invoke_select_section(1); // 去重（冲突组已并入）
-            ui.invoke_toggle_advanced(true); // 比较范围已移入高级层
-            ui.invoke_rule_bool("same_name_same_size".into(),true);
-            assert!(app.state.borrow().config.conflict_scope_directory,"默认仍是最保守的同目录范围");
-            assert_eq!(rule_checked_at(ui,"conflict_scope_directory"),Some(false),"默认不勾选");
-            ui.invoke_rule_bool("conflict_scope_directory".into(),true);
-            assert!(!app.state.borrow().config.conflict_scope_directory,"界面勾选必须写入 false");
-            assert_eq!(rule_checked_at(ui,"conflict_scope_directory"),Some(true));
-        }).unwrap();
-    }
+    // 覆盖 C-13
     #[test]
     fn invalid_number_input_reports_error_and_reverts_value(){
         with_gui(|app|{
@@ -1684,6 +1660,7 @@ mod gui_tests{
             assert_eq!(rule_value_at(ui,"max_depth").as_deref(),Some("16"),"非法输入必须回退为配置真值");
         }).unwrap();
     }
+    // 覆盖 C-10, P-04
     #[test]
     fn theme_choice_keeps_plan_ready_but_rule_change_invalidates(){
         with_gui(|app|{
@@ -1705,6 +1682,7 @@ mod gui_tests{
             assert!(ui.get_status().contains("目录不存在"),"输入不存在的目录必须立即提示：status={} directory={}",ui.get_status(),ui.get_directory());
         }).unwrap();
     }
+    // 覆盖 P-02
     #[test]
     fn search_tools_filters_registry(){
         with_gui(|app|{
@@ -1715,6 +1693,7 @@ mod gui_tests{
             assert_eq!(ui.get_tools().row_count(),0);
         }).unwrap();
     }
+    // 覆盖 P-02
     #[test]
     fn navigation_switches_screen(){
         with_gui(|app|{
@@ -1725,6 +1704,7 @@ mod gui_tests{
             assert_eq!(ui.get_screen(),0);
         }).unwrap();
     }
+    // 覆盖 P-02
     #[test]
     fn select_proxy_tool_routes_without_spawning(){
         with_gui(|app|{
@@ -1739,6 +1719,7 @@ mod gui_tests{
             assert!(!ui.get_proxy_busy());
         }).unwrap();
     }
+    // 覆盖 X-02, X-06
     #[test]
     fn network_identity_defaults_are_neutral(){with_gui(|app|{
         let ui=&app.ui;
@@ -1748,6 +1729,7 @@ mod gui_tests{
         ui.invoke_select_tool("proxy-status".into());
         assert_eq!(ui.get_proxy_local_ip().as_str(),"尚未检测","无 sender 不得清空/伪造 IP");
     }).unwrap();}
+    // 覆盖 X-07
     #[test]
     fn refresh_proxy_without_sender_is_noop(){
         with_gui(|app|{
@@ -1757,6 +1739,7 @@ mod gui_tests{
             assert!(!ui.get_proxy_busy(),"没有 sender 时刷新必须是 no-op");
         }).unwrap();
     }
+    // 覆盖 X-04
     #[test]
     fn proxy_platform_switches_command_tips(){
         with_gui(|app|{
@@ -1770,6 +1753,7 @@ mod gui_tests{
             assert_eq!(ui.get_proxy_platform(),1);
         }).unwrap();
     }
+    // 覆盖 X-05
     #[test]
     fn proxy_command_port_updates_tips_and_copy_source(){
         with_gui(|app|{
@@ -1797,6 +1781,7 @@ mod gui_tests{
             assert!(export_row.command.contains("http://127.0.0.1:10809"));
         }).unwrap();
     }
+    // 覆盖 X-03
     #[test]
     fn net_test_scope_switch_updates_label(){
         with_gui(|app|{
@@ -1815,6 +1800,7 @@ mod gui_tests{
             assert_eq!(ui.get_net_test_scope_label().as_str(),"Windows 本机");
         }).unwrap();
     }
+    // 覆盖 X-03
     #[test]
     fn run_net_test_without_sender_is_noop(){
         with_gui(|app|{
@@ -1827,6 +1813,7 @@ mod gui_tests{
             assert!(!ui.get_net_test_busy());
         }).unwrap();
     }
+    // 覆盖 X-03
     #[test]
     fn apply_wsl_distros_selects_preferred_ubuntu(){
         with_gui(|app|{
@@ -1840,7 +1827,7 @@ mod gui_tests{
         }).unwrap();
     }
 
-    // ---- 纯函数回归：CSV 覆盖策略与执行分母计数（不依赖 GUI 工作线程）----
+    // ---- 纯函数回归：执行分母计数（不依赖 GUI 工作线程）----
 
     fn temp_test_dir(tag:&str)->PathBuf{
         let dir=std::env::temp_dir().join(format!("jchtools-gui-test-{tag}-{}",std::process::id()));
@@ -1849,6 +1836,7 @@ mod gui_tests{
         dir
     }
 
+    // 覆盖 C-07, C-11
     #[test]
     fn count_selected_pending_ignores_unselected_and_done(){
         use crate::config::DeleteMode;

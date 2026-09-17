@@ -541,6 +541,7 @@ mod tests {
         assert_eq!(lines, vec!["line1", "line2", "line3"]);
     }
 
+    // 覆盖 X-07
     #[test]
     fn pump_reports_non_utf8_as_error() {
         let (send, recv) = mpsc::sync_channel(64);
@@ -624,6 +625,7 @@ mod tests {
     }
 
     /// run_with_idle_timeout：取消路径仍可用——先启动再 cancel，应返回取消错误。
+    // 覆盖 C-08
     #[test]
     fn run_idle_timeout_supports_cancel() {
         let mut command = silent_hung_command();

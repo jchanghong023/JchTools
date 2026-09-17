@@ -16,6 +16,9 @@ jobs:
         # dev-dependency i-slint-backend-testing → fontdb 在 Unix 用 pkg-config 查找 fontconfig，
         # 缺开发包时 cargo check/test 会在构建脚本阶段失败（与业务代码无关）。
         run: sudo apt-get update && sudo apt-get install -y libfontconfig1-dev
+      # Pygments 供 static_check 的 rust_lexical 词法配平检查使用：不装则该检查以 SKIP 通过。
+      - name: Install Pygments
+        run: python3 -m pip install --quiet pygments
       - name: Core compile and tests
         run: bash scripts/check-linux.sh
       - name: Static checks

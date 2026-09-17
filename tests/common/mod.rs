@@ -1,4 +1,7 @@
 //! 集成测试共享 mock：core.rs 与 archive.rs 复用，避免重复定义。
+// 每个集成测试二进制单独编译本模块：未被该二进制使用的 mock 会报 dead_code，
+// 属共享模块的预期形态，不是遗漏。
+#![allow(dead_code)]
 use jchtools::platform::{RecycleFailure, Recycler};
 use std::{fs,path::{Path,PathBuf},sync::atomic::{AtomicUsize,Ordering}};
 

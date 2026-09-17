@@ -50,7 +50,7 @@ pub fn resolve_executable() -> Result<PathBuf> {
         return Ok(executable);
     }
     if !embedded_available() {
-        bail!("未找到 7-Zip 引擎：resources/7zip 里没有 {}, 本构建也没有内嵌引擎。请运行 scripts/fetch-7zip.ps1 获取官方完整引擎后重新构建，或用 --engine 指定完整 7z.exe。", engine_name());
+        bail!("未找到 7-Zip 引擎：resources/7zip 里没有 {}, 本构建也没有内嵌引擎。请运行 scripts/fetch-7zip.ps1 获取官方完整引擎后重新构建。", engine_name());
     }
     let directory = embedded_dir().context("无法确定用户数据目录，不能释放内嵌的 7-Zip 引擎")?;
     release(&directory)?;
@@ -254,6 +254,7 @@ mod tests {
 
     /// 未内嵌引擎时 embedded_available 必须返回 false（合法开发配置，不是失败）；
     /// 内嵌时返回 true，且与 FILES / MANIFEST 一致。
+    // 覆盖 E-05
     #[test]
     fn embedded_available_matches_build_configuration() {
         if embedded_available() {
@@ -271,6 +272,7 @@ mod tests {
     }
 
     /// 用户把自备引擎放进释放目录后，程序不得用内嵌副本覆盖它（LGPL 可替换要求）。
+    // 覆盖 E-02
     #[test]
     fn release_never_overwrites_existing_files() {
         if !embedded_available() {
@@ -289,6 +291,7 @@ mod tests {
     }
 
     /// 有内嵌时 release 必须写出与清单一致的文件（写入后逐文件 sha256 校验）。
+    // 覆盖 E-02
     #[test]
     fn release_writes_files_matching_manifest_hashes() {
         if !embedded_available() {

@@ -23,6 +23,7 @@ fn make_fixture()->tempfile::TempDir {
     dir
 }
 
+// 覆盖 C-01, C-07, S-02
 #[test]
 fn plan_execution_confirmation_flow_runs_end_to_end(){
     // SLINT_BACKEND 是进程级环境变量；后续在同文件新增 GUI 测试时必须先拿到这把锁，
@@ -91,4 +92,13 @@ fn plan_execution_confirmation_flow_runs_end_to_end(){
     assert!(data.join("其他").join("temp.tmp").exists(),
         "默认配置下 temp.tmp 应归类到「其他/」而不是被清理：{remaining:?}");
     assert!(data.join("文档").join("b.txt").exists(),"去重保留项应随归类移动到 文档/：{remaining:?}");
+}
+
+// 覆盖 C-07：「确认执行」按钮必须被「我已确认」勾选门禁。该门禁是 Slint 声明式绑定，
+// 无头测试只能直接调用回调、绕不过它，因此这里锁定声明本身不被误删/改弱。
+#[test]
+fn acknowledge_gate_is_declared_in_ui(){
+    let ui=include_str!("../ui/app.slint");
+    assert!(ui.contains("enabled: root.confirm-kind == 3 || root.acknowledge;"),
+        "确认按钮的「我已确认」门禁声明缺失或被改动（C-07）");
 }

@@ -59,7 +59,12 @@ try {
         $manifestFiles += @{name=$name;sha256=(Get-FileHash -LiteralPath (Join-Path $Destination $name) -Algorithm SHA256).Hash.ToLowerInvariant()}
     }
     $engine = Join-Path $Destination '7z.exe'
-    $info = & $engine i 2>&1 | Out-String
+    # PS 5.1 下「原生命令 stderr 被 2>&1 重定向」会生成 ErrorRecord，在 EAP=Stop 时直接
+    # 抛终止错误（杀软/策略注入任意 stderr 行即触发）；与 acceptance.ps1 同口径临时放宽，
+    # 凭退出码判定成败。
+    $previousEap = $ErrorActionPreference
+    $ErrorActionPreference = 'Continue'
+    try { $info = & $engine i 2>&1 | Out-String } finally { $ErrorActionPreference = $previousEap }
     if ($LASTEXITCODE -ne 0 -or $info -notmatch 'Rar') { throw 'Bundled engine does not advertise RAR support.' }
     $licenseFiles = @(Get-ChildItem -LiteralPath $staging -Recurse -File | Where-Object { $_.Name -match '^(License|copying).*(\.txt)?$' })
     if ($licenseFiles.Count -eq 0) { throw 'Official 7-Zip license files were not found.' }

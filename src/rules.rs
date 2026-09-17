@@ -133,6 +133,7 @@ mod tests {
             || (a.name != b.name && a.normalized != b.normalized && cfg.dedup_other_names)
     }
 
+    // 覆盖 R-04
     #[test]
     fn duplicate_allowed_matches_planner_sql() {
         // 覆盖三种名称关系（同名 / 副本名 / 不同名）与三种开关组合。

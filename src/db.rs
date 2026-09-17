@@ -1,5 +1,5 @@
 use crate::{config::Config, model::{Action, FileRecord, Snapshot, Summary}};
-use anyhow::{Context, Result};
+use anyhow::Result;
 use rusqlite::{params, Connection, OptionalExtension, Params, Row};
 use serde::{de::DeserializeOwned, Serialize};
 use std::path::{Path, PathBuf};
@@ -131,48 +131,9 @@ impl Database {
         let result = rows.collect::<rusqlite::Result<Vec<_>>>()?;
         Ok(result)
     }
-    pub fn export_csv(&self, path: &Path) -> Result<()> {
-        if let Some(parent) = path.parent() {
-            if !parent.as_os_str().is_empty() && !parent.is_dir() {
-                anyhow::bail!("导出目录不存在：{}；请先创建父目录或换一个路径", parent.display());
-            }
-        }
-        let file = std::fs::OpenOptions::new().write(true).create_new(true).open(path)
-            .context("导出文件已存在或不可写，请换一个名称")?;
-        let mut writer = csv::Writer::from_writer(file);
-        writer.write_record(["time", "phase", "result", "source", "target", "reason", "logical_bytes"])?;
-        let mut statement = self.conn.prepare("SELECT time,phase,result,source,target,reason,size FROM events ORDER BY id")?;
-        let mut rows = statement.query([])?;
-        while let Some(row) = rows.next()? {
-            let mut values = (0..6).map(|i| row.get::<_,String>(i)).collect::<rusqlite::Result<Vec<_>>>()?;
-            // 防表格公式注入：可见内容以 = + - @ \t \r 开头的单元格必须加引号前缀。
-            // 可见内容 = 剥掉首部的空白与不可见/格式字符（U+FEFF / U+200B / Cf 等）；
-            // 两类字符可以任意交错（如 " 空格+BOM+= 公式"），必须剥到两类都不再匹配，
-            // 固定顺序剥会留下逃逸缺口，让不可见字符把 = 推到剥除之后。
-            for value in &mut values {
-                let stripped = value.trim_start_matches(|c: char| c.is_whitespace() || is_invisible_or_format(c));
-                let dangerous = stripped.chars().next().is_some_and(|c| "=+-@\t\r".contains(c));
-                if dangerous { value.insert(0, '\''); }
-            }
-            values.push(row.get::<_,i64>(6)?.to_string());
-            writer.write_record(values)?;
-        }
-        writer.flush()?;
-        Ok(())
-    }
     pub fn file_by_path(&self, rel: &str) -> Result<Option<FileRecord>> {
         Ok(self.conn.query_row(&format!("SELECT {FILE_COLUMNS} FROM files WHERE rel=?1"), [rel], file_row).optional()?)
     }
-}
-/// 危险字符判定前需剥除的前缀字符：U+FEFF（BOM）、U+200B（零宽空格），
-/// 以及 Unicode Cf（格式字符）常见区间（方向控制、词连接、标记语言控制等）。
-fn is_invisible_or_format(c: char) -> bool {
-    if c == '\u{FEFF}' || c == '\u{200B}' { return true; }
-    matches!(c as u32,
-        0x0600..=0x0605 | 0x061C | 0x06DD | 0x070F | 0x180E |
-        0x200B..=0x200F | 0x202A..=0x202E | 0x2060..=0x2064 |
-        0x2066..=0x206F | 0xFEFF | 0xFFF9..=0xFFFB |
-        0x110BD | 0x1D173..=0x1D17A | 0xE0001 | 0xE0020..=0xE007F)
 }
 pub const FILE_COLUMNS: &str = "id,rel,name,normal,size,mtime,identity,links,hash,cleanable";
 fn file_row(row: &Row<'_>) -> rusqlite::Result<FileRecord> {

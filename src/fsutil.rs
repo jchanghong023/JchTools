@@ -1,7 +1,6 @@
 use crate::model::Snapshot;
 use anyhow::{bail, Context, Result};
-use serde::Serialize;
-use std::{fs::{self, File, OpenOptions}, io::Write, path::{Component, Path, PathBuf}, time::UNIX_EPOCH};
+use std::{fs::{self, File, OpenOptions}, path::{Component, Path, PathBuf}, time::UNIX_EPOCH};
 
 pub fn validate_component(name: &str) -> Result<()> {
     // Windows 拒绝尾随空格/点；其他 Unicode 空白（如全角空格、NBSP）同样会被部分
@@ -230,33 +229,6 @@ pub fn unique_target(root: &Path, requested: &Path) -> Result<PathBuf> {
         }
     }
     bail!("无法为 {} 分配不冲突的名称：已尝试 {stem} (1)…{stem} (1000000) 均已被占用", requested.display())
-}
-pub fn write_json_atomic<T: Serialize>(path: &Path, value: &T) -> Result<()> {
-    let parent = path.parent().context("配置路径缺少父目录")?;
-    fs::create_dir_all(parent)?;
-    let tmp = parent.join(format!(".{}.tmp", uuid::Uuid::new_v4()));
-    let result = (|| {
-        let mut file = OpenOptions::new().write(true).create_new(true).open(&tmp)?;
-        serde_json::to_writer_pretty(&mut file, value)?;
-        file.write_all(b"\n")?; file.sync_all()?; drop(file);
-        #[cfg(windows)] {
-            use std::os::windows::ffi::OsStrExt;
-            use windows_sys::Win32::Storage::FileSystem::{MoveFileExW, MOVEFILE_REPLACE_EXISTING, MOVEFILE_WRITE_THROUGH};
-            let a: Vec<u16> = tmp.as_os_str().encode_wide().chain(Some(0)).collect();
-            let b: Vec<u16> = path.as_os_str().encode_wide().chain(Some(0)).collect();
-            if unsafe { MoveFileExW(a.as_ptr(), b.as_ptr(), MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH) } == 0 {
-                return Err(std::io::Error::last_os_error().into());
-            }
-        }
-        #[cfg(not(windows))] {
-            fs::rename(&tmp, path)?;
-            // 与 Windows MOVEFILE_WRITE_THROUGH 对齐：目录项落盘后再返回。
-            if let Ok(dir) = File::open(parent) { let _ = dir.sync_all(); }
-        }
-        Ok(())
-    })();
-    if result.is_err() { let _ = fs::remove_file(&tmp); }
-    result
 }
 pub struct RootGuard(File);
 impl RootGuard {

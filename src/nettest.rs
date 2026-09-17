@@ -257,12 +257,17 @@ pub fn run_local(timeout_ms: u64) -> NetTestReport {
 }
 
 /// 解析 `wsl.exe -l -q` 输出：去掉 BOM、CRLF，过滤空行与尾部 NUL。
+/// 部分 WSL 版本在「没有已安装发行版」时仍以退出码 0 输出整句提示（中英文均见）；
+/// 发行版名不允许含空白、也不会以句末标点结尾，命中任一特征的行按提示文本丢弃，
+/// 避免把整句当成发行版名去发起探测。
 pub fn parse_wsl_distros(text: &str) -> Vec<String> {
     let cleaned = text.replace('\0', "").trim_start_matches('\u{feff}').to_string();
     cleaned
         .lines()
         .map(|line| line.trim().trim_end_matches('\0').trim())
-        .filter(|line| !line.is_empty())
+        .filter(|line| !line.is_empty()
+            && !line.chars().any(char::is_whitespace)
+            && !line.ends_with(['.', '。', '!', '！', '?', '？', ';', '；']))
         .map(|line| line.to_string())
         .collect()
 }
@@ -721,6 +726,7 @@ pub fn run(scope: i32, distro: &str, timeout_ms: u64) -> NetTestReport {
 mod tests {
     use super::*;
 
+    // 覆盖 X-03
     #[test]
     fn targets_cover_three_sites() {
         let list = targets();
@@ -731,6 +737,7 @@ mod tests {
         assert!(find_target("nope").is_none());
     }
 
+    // 覆盖 X-03, X-07
     #[test]
     fn parse_wsl_distros_handles_bom_crlf_and_nul() {
         let sample = "\u{feff}Ubuntu\r\n\0Ubuntu-22.04\0\n\ndebian\r\n";
@@ -738,6 +745,17 @@ mod tests {
         assert_eq!(rows, vec!["Ubuntu", "Ubuntu-22.04", "debian"]);
     }
 
+    // 覆盖 X-03, X-06
+    #[test]
+    fn parse_wsl_distros_drops_sentence_like_lines() {
+        // 无发行版时部分 wsl 版本输出整句提示（退出码 0）：不得当成发行版名去探测。
+        let sample = "没有已安装的分发版。\r\nWindows Subsystem for Linux has no installed distributions.\r\n";
+        assert!(parse_wsl_distros(sample).is_empty(),"整句提示必须被丢弃，解析为空表示无发行版");
+        let mixed = "\u{feff}Ubuntu-24.04\r\n没有已安装的分发版。\r\n";
+        assert_eq!(parse_wsl_distros(mixed), vec!["Ubuntu-24.04"],"真实发行版名不受影响");
+    }
+
+    // 覆盖 X-03
     #[test]
     fn prefer_wsl_prefers_ubuntu_family() {
         let distros = vec!["Debian".into(), "Ubuntu-22.04".into(), "Alpine".into()];
@@ -747,6 +765,7 @@ mod tests {
         assert!(prefer_wsl_distro(&[]).is_none());
     }
 
+    // 覆盖 X-03
     #[test]
     fn parse_wsl_probe_lines_reads_ok_and_fail() {
         let out = "OK chatgpt.com 12\nFAIL www.google.com tcp_or_dns\nOK github.com 8\nnoise\n";
@@ -759,6 +778,7 @@ mod tests {
         assert_eq!(rows[2].1.as_ref().unwrap(), &8u64);
     }
 
+    // 覆盖 X-03, X-06
     #[test]
     fn assemble_wsl_report_fills_all_targets() {
         let out = "OK chatgpt.com 10\nFAIL www.google.com tcp_or_dns\n";
@@ -778,6 +798,7 @@ mod tests {
         assert!(tips.iter().any(|t| t == "站点提示"));
     }
 
+    // 覆盖 X-03
     #[test]
     fn wsl_probe_script_lists_hosts_and_timeout() {
         let script = wsl_probe_script(5000);
@@ -793,6 +814,7 @@ mod tests {
         assert!(script.contains("${h}"));
     }
 
+    // 覆盖 X-03
     #[test]
     fn parse_wsl_probe_lines_ignores_empty_host_rows() {
         // 历史 bug：bash -c 参数被破坏后输出 `FAIL  tcp_or_dns`（无主机名），不得当作有效结果。
@@ -803,6 +825,7 @@ mod tests {
         assert_eq!(ok[0].0, "chatgpt.com");
     }
 
+    // 覆盖 X-03
     #[test]
     fn wsl_probe_script_converts_epochrealtime_to_microseconds() {
         let script = wsl_probe_script(1000);
@@ -824,6 +847,7 @@ mod tests {
         assert_eq!(awk_us("1000000000", "3000000000"), 2_000_000);
     }
 
+    // 覆盖 X-03
     #[test]
     fn parse_wsl_probe_lines_ok_without_latency_is_failure() {
         let missing = parse_wsl_probe_lines("OK chatgpt.com\n");
@@ -835,6 +859,7 @@ mod tests {
         assert_eq!(ok[0].1.as_ref().ok().copied(), Some(2_000_000));
     }
 
+    // 覆盖 X-07
     #[test]
     fn decode_wsl_bytes_handles_bom_and_cjk_utf16() {
         // UTF-16LE + BOM
@@ -866,6 +891,7 @@ mod tests {
         let _ = decode_wsl_bytes(&[0xC0, 0x80, 0x41]);
     }
 
+    // 覆盖 X-06
     #[test]
     fn assemble_wsl_report_notes_raw_when_unparseable() {
         let report = assemble_wsl_report("Ubuntu", "weird output\n", vec![]);
@@ -873,6 +899,7 @@ mod tests {
         assert_eq!(report.results[0].status, ProbeStatus::Unknown);
     }
 
+    // 覆盖 X-03, X-06
     #[test]
     fn run_local_without_network_does_not_panic() {
         // 只验证结构完整；真实连通性随网络变化，不断言可达性。
@@ -895,6 +922,7 @@ mod tests {
         assert_eq!(format_latency_us(250_000), "250 ms");
     }
 
+    // 覆盖 X-03
     #[test]
     fn run_windows_scope_ignores_distro_argument() {
         // scope=0 时不读 WSL，distro 参数可任意。
@@ -903,6 +931,7 @@ mod tests {
         assert_eq!(report.results.len(), 3);
     }
 
+    // 覆盖 X-03, X-06
     #[test]
     fn wsl_missing_report_lists_actionable_tips() {
         let report = wsl_missing_report("未检测到已安装的 WSL 发行版".into());
@@ -929,6 +958,7 @@ mod tests {
         // 不会永久占位；「恰好释放一次」由 acquire/release 的 swap 仲裁逻辑保证。
     }
 
+    // 覆盖 X-03
     #[test]
     fn probe_host_shares_deadline_across_addresses() {
         // 用极短超时验证 deadline 逻辑存在：即使 DNS 成功，多地址 connect 也不会叠乘超时。
@@ -950,6 +980,7 @@ mod tests {
 mod zero_latency_tests {
     use super::*;
 
+    // 覆盖 X-06
     #[test]
     fn zero_latency_is_reachable_but_shown_as_unknown() {
         // 回归：bash<5（无 EPOCHREALTIME）且 date 不支持 %s%N 时脚本回退输出 0。
