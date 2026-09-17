@@ -37,10 +37,10 @@ def config_schema():
     rows=json.loads(read_text(ROOT/'resources/rules.json'))
     keys=[r['key'] for r in rows]
     assert len(keys)==len(set(keys))
-    # 有意不进规则表的配置字段：theme 已挪到「关于」页；其余是合并行的影子键，
-    # 界面一行驱动多个字段，引擎 / CLI / 旧任务库仍读细粒度值。
+    # 有意不进规则表的配置字段：theme 已挪到「关于」页；detect_type 是合并行的
+    # 影子键（「修正扩展名」一行驱动两个细粒度字段），引擎 / 旧任务库仍读原值。
     # 去重三类（同名/副本名/不同名同内容）按 R-04 是独立规则行，不在此列。
-    hidden={'theme','same_name_different_size','different_size_keep','detect_type'}
+    hidden={'theme','detect_type'}
     assert set(fields)==set(keys)|hidden,(set(fields)-set(keys)-hidden,set(keys)-set(fields))
     for row in rows:
         assert row['title'] and row['hint']
@@ -56,7 +56,7 @@ def config_schema():
                 # R-04：保留规则的全部枚举选项（含最大/最小）都必须在界面出现，
                 # 不再有「刻意不展示」的白名单——界面选项必须与配置枚举一一对应。
                 assert set(vals)==expected,(row['key'],vals,expected)
-    return f'{len(rows)} UI settings match serialized Config fields ({len(hidden)} engine/CLI-only) and enum values.'
+    return f'{len(rows)} UI settings match serialized Config fields ({len(hidden)} engine-only) and enum values.'
 def ui_callbacks():
     ui=read_text(ROOT/'ui/app.slint')
     # GUI 组装层在 src/gui.rs（bin main.rs 只是薄壳入口），两者都可能有 ui.on_* 接线。
@@ -96,7 +96,6 @@ def sql_syntax():
     conn=sqlite3.connect(':memory:')
     conn.executescript(read_text(ROOT/'src/schema.sql'))
     conn.executescript('''CREATE TEMP TABLE duplicate_order(seq INTEGER,id INTEGER);
-        CREATE TEMP TABLE conflict_groups(seq INTEGER PRIMARY KEY,key TEXT,size INTEGER);
         CREATE TEMP TABLE empty_order(seq INTEGER,rel TEXT);
         CREATE TEMP TABLE empty_will(rel TEXT PRIMARY KEY);
         CREATE TEMP TABLE stay_parents(parent TEXT);

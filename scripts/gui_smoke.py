@@ -315,7 +315,9 @@ def main() -> int:
     s1_launch_and_exit(str(exe))
     # S2 分析会真实解压改写语料；S3 前从旁路副本恢复，保证“干净语料上的完整链路”。
     import shutil, tempfile
-    scratch = Path(tempfile.mkdtemp(prefix="jchtools-gui-smoke-", dir=str(repo / ".tmp" if (repo / ".tmp").is_dir() else None)))
+    repo_tmp = repo / ".tmp"
+    repo_tmp.mkdir(exist_ok=True)  # AGENTS §2：一切冒烟临时数据一律落在仓库 .tmp/ 下
+    scratch = Path(tempfile.mkdtemp(prefix="jchtools-gui-smoke-", dir=str(repo_tmp)))
     try:
         fresh = scratch / "data"
         shutil.copytree(data, fresh)

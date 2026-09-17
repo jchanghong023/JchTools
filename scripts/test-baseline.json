@@ -44,10 +44,34 @@
       "cfg": "windows"
     },
     {
-      "file": "src/bin/cli.rs",
-      "name": "duplicate_value_flags_are_rejected",
+      "file": "src/engine.rs",
+      "name": "invalid_record_with_tasks_layout_falls_back_to_parent",
       "ignored": false,
       "cfg": null
+    },
+    {
+      "file": "src/engine.rs",
+      "name": "non_tasks_layout_without_record_is_rejected",
+      "ignored": false,
+      "cfg": null
+    },
+    {
+      "file": "src/engine.rs",
+      "name": "recorded_state_dir_takes_priority",
+      "ignored": false,
+      "cfg": null
+    },
+    {
+      "file": "src/engine.rs",
+      "name": "tasks_layout_at_drive_root_is_rejected",
+      "ignored": false,
+      "cfg": "windows"
+    },
+    {
+      "file": "src/engine.rs",
+      "name": "tasks_layout_deep_on_unc_share_is_allowed",
+      "ignored": false,
+      "cfg": "windows"
     },
     {
       "file": "src/engine_bundle.rs",
@@ -76,12 +100,6 @@
     {
       "file": "src/gui.rs",
       "name": "apply_wsl_distros_selects_preferred_ubuntu",
-      "ignored": false,
-      "cfg": null
-    },
-    {
-      "file": "src/gui.rs",
-      "name": "conflict_scope_row_is_inverted_but_stores_original_semantics",
       "ignored": false,
       "cfg": null
     },
@@ -250,6 +268,12 @@
     {
       "file": "src/nettest.rs",
       "name": "format_latency_us_shows_sub_millisecond",
+      "ignored": false,
+      "cfg": null
+    },
+    {
+      "file": "src/nettest.rs",
+      "name": "parse_wsl_distros_drops_sentence_like_lines",
       "ignored": false,
       "cfg": null
     },
@@ -693,6 +717,18 @@
     },
     {
       "file": "tests/core.rs",
+      "name": "apply_with_invalid_record_but_tasks_layout_still_runs",
+      "ignored": false,
+      "cfg": null
+    },
+    {
+      "file": "tests/core.rs",
+      "name": "apply_without_valid_state_record_refuses_foreign_lock",
+      "ignored": false,
+      "cfg": null
+    },
+    {
+      "file": "tests/core.rs",
       "name": "archive_first_volume_detection",
       "ignored": false,
       "cfg": null
@@ -753,19 +789,19 @@
     },
     {
       "file": "tests/core.rs",
-      "name": "cleanup_keep_files_are_not_conflict_versions",
-      "ignored": false,
-      "cfg": null
-    },
-    {
-      "file": "tests/core.rs",
       "name": "cleanup_keep_files_are_not_dedup_deletions",
       "ignored": false,
       "cfg": null
     },
     {
       "file": "tests/core.rs",
-      "name": "config_save_overwrites_existing_file",
+      "name": "completion_status_text_has_no_export_reference",
+      "ignored": false,
+      "cfg": null
+    },
+    {
+      "file": "tests/core.rs",
+      "name": "config_has_no_version_elimination_switches",
       "ignored": false,
       "cfg": null
     },
@@ -825,12 +861,6 @@
     },
     {
       "file": "tests/core.rs",
-      "name": "directory_scoped_conflicts_do_not_cross_directories",
-      "ignored": false,
-      "cfg": null
-    },
-    {
-      "file": "tests/core.rs",
       "name": "empty_directory_cleanup_is_bottom_up",
       "ignored": false,
       "cfg": null
@@ -868,12 +898,6 @@
     {
       "file": "tests/core.rs",
       "name": "existing_hardlinks_not_counted_twice",
-      "ignored": false,
-      "cfg": null
-    },
-    {
-      "file": "tests/core.rs",
-      "name": "export_csv_escapes_formula_prefixes",
       "ignored": false,
       "cfg": null
     },
@@ -963,6 +987,18 @@
     },
     {
       "file": "tests/core.rs",
+      "name": "no_cli_binary_is_declared",
+      "ignored": false,
+      "cfg": null
+    },
+    {
+      "file": "tests/core.rs",
+      "name": "no_csv_report_export_remains",
+      "ignored": false,
+      "cfg": null
+    },
+    {
+      "file": "tests/core.rs",
       "name": "no_recursion_leaves_subdirectories_untouched",
       "ignored": false,
       "cfg": null
@@ -1035,25 +1071,13 @@
     },
     {
       "file": "tests/core.rs",
-      "name": "report_does_not_overwrite",
-      "ignored": false,
-      "cfg": null
-    },
-    {
-      "file": "tests/core.rs",
       "name": "reserve_target_is_case_insensitive_unique",
       "ignored": false,
       "cfg": null
     },
     {
       "file": "tests/core.rs",
-      "name": "same_name_different_size_version_keeps_newest",
-      "ignored": false,
-      "cfg": null
-    },
-    {
-      "file": "tests/core.rs",
-      "name": "same_name_equal_size_version_keeps_latest",
+      "name": "rules_table_has_exactly_40_rows_without_version_switches",
       "ignored": false,
       "cfg": null
     },
@@ -1167,15 +1191,15 @@
     },
     {
       "file": "tests/gui_flow.rs",
-      "name": "plan_execution_confirmation_flow_runs_end_to_end",
+      "name": "acknowledge_gate_is_declared_in_ui",
       "ignored": false,
       "cfg": "feature = \"gui\""
     },
     {
-      "file": "tests/property.rs",
-      "name": "exported_csv_escapes_every_formula_trigger",
+      "file": "tests/gui_flow.rs",
+      "name": "plan_execution_confirmation_flow_runs_end_to_end",
       "ignored": false,
-      "cfg": null
+      "cfg": "feature = \"gui\""
     },
     {
       "file": "tests/property.rs",

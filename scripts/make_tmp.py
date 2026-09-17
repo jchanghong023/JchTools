@@ -68,7 +68,11 @@ def force_remove_tree(path: Path) -> None:
                     except OSError as exc:
                         failed.append(f"{p}（无法移除 reparse point：{exc}）")
 
-    shutil.rmtree(path, onerror=on_error)
+    # onerror 在 3.12 起被 onexc 取代；按解释器版本选择，与 robust_rmtree 同口径。
+    if sys.version_info >= (3, 12):
+        shutil.rmtree(path, onexc=on_error)
+    else:
+        shutil.rmtree(path, onerror=on_error)
     if failed:
         print(f"清理失败：以下 {len(failed)} 个路径未能删除：", file=sys.stderr)
         for item in failed:
@@ -157,7 +161,7 @@ def build_conflicts(root: Path, seven: Path, log: list[str]) -> None:
     stamp = 1_750_000_000
     os.utime(same_size_a, (stamp, stamp))
     os.utime(same_size_b, (stamp, stamp))
-    log.append("| `03-版本冲突/` | 同名不同大小（config.ini）与同名同大小不同内容（same-size-a.dat） | 两条规则默认都保留修改时间最新的；开关与保留策略独立，可在「去重」分区改 |")
+    log.append("| `03-版本冲突/` | 同名不同大小（config.ini）与同名同大小不同内容（same-size-a.dat） | 按 R-05 此类文件一律原样保留、不提供版本取舍开关；整理前后两份都应在原位 |")
 
 
 def build_junk(root: Path, seven: Path, log: list[str]) -> None:
@@ -230,7 +234,7 @@ def build_archive_conflicts(root: Path, seven: Path, log: list[str]) -> None:
     zip_members(section / "pack.zip", {"说明.txt": b"archive version B, different content and length\n"})
     write(section / "等长.txt", b"0123456789abcdef")                        # 16 B
     zip_members(section / "等长冲突.zip", {"等长.txt": b"fedcba9876543210"})
-    log.append("| `08-压缩包-冲突/` | 解压目标已存在同名文件（大小不同 / 大小相同） | 图形界面逐次询问，可「覆盖旧文件 / 跳过新文件 / 保留最新 / 保留较大 / 两个都保留」并应用到后续全部；命令行用默认规则（保留修改时间最新的），配置里选「询问」时会自动改为两个都保留 |")
+    log.append("| `08-压缩包-冲突/` | 解压目标已存在同名文件（大小不同 / 大小相同） | 图形界面逐次询问，可「覆盖旧文件 / 跳过新文件 / 保留最新 / 保留较大 / 两个都保留」并应用到后续全部；不选「询问」时按所选策略自动处理 |")
 
 
 def build_nested(root: Path, seven: Path, log: list[str]) -> None:
