@@ -1990,9 +1990,7 @@ fn analysis_phase_keeps_stale_link_temps_until_execution() {
     f.write("a.txt", b"payload", 10);
     let stale = f.root.join(".jchtools-link-deadbeef");
     if let Err(error) = fs::hard_link(f.root.join("a.txt"), &stale) {
-        panic!(
-            "无法创建硬链接，无法验证残留清扫时序；请在支持硬链接的文件系统上运行测试：{error}"
-        );
+        panic!("无法创建硬链接，无法验证残留清扫时序；请在支持硬链接的文件系统上运行测试：{error}");
     }
     filetime::set_file_mtime(&stale, filetime::FileTime::from_unix_time(0, 0)).unwrap();
     let task = f.plan(base());
@@ -2026,9 +2024,12 @@ fn recycled_bytes_exclude_hardlinked_sources() {
         target: f.root.join("mock-bin"),
         calls: AtomicUsize::new(0),
     });
-    let task = engine::prepare_with(&f.root, cfg, Context::default(), &f.state, recycler.clone())
-        .unwrap();
-    assert!(task.summary.planned_delete >= 1, "a/c 与 b 内容相同应生成删除计划");
+    let task =
+        engine::prepare_with(&f.root, cfg, Context::default(), &f.state, recycler.clone()).unwrap();
+    assert!(
+        task.summary.planned_delete >= 1,
+        "a/c 与 b 内容相同应生成删除计划"
+    );
     assert_eq!(task.summary.candidate_bytes, 0, "计划侧已排除多链接文件");
     let result = engine::apply_with(&task.directory, Context::default(), recycler).unwrap();
     assert!(

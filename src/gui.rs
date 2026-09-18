@@ -2012,7 +2012,8 @@ mod gui_tests {
             self.ui.set_metrics("".into());
             self.ui.set_status("".into());
             self.ui.set_confirm_text("".into());
-            self.ui.set_plans(Rc::new(VecModel::from(Vec::<PlanRow>::new())).into());
+            self.ui
+                .set_plans(Rc::new(VecModel::from(Vec::<PlanRow>::new())).into());
             reset_tool_list(&self.ui);
             refresh(&self.ui, &self.state.borrow());
         }
@@ -2586,7 +2587,9 @@ mod gui_tests {
     fn plan_checkbox_gated_by_row_state_declared_in_ui() {
         let slint = include_str!("../ui/app.slint");
         assert!(
-            slint.contains("enabled: !root.busy && root.confirm-kind == 0 && item.state == \"待执行\";"),
+            slint.contains(
+                "enabled: !root.busy && root.confirm-kind == 0 && item.state == \"待执行\";"
+            ),
             "C-11：计划复选框必须同时按行状态（待执行）门禁，避免已结束任务的行仍可点击必报错"
         );
     }

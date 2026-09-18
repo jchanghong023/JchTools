@@ -1073,9 +1073,7 @@ pub fn extract_queued(job: &mut Job, engine: &SevenZip) -> Result<()> {
                             &relative,
                             "",
                             "警告",
-                            &format!(
-                                "解压成功但原包处置失败，原包保留在原地：{error:#}"
-                            ),
+                            &format!("解压成功但原包处置失败，原包保留在原地：{error:#}"),
                             0,
                         )?;
                     }

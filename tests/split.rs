@@ -302,8 +302,11 @@ fn dispose_failure_does_not_abort_remaining_archives() {
             path
         }
     };
-    let mut cfg = Config::default(); // archive_delete 默认 Recycle
-    cfg.recycle_fallback = false; // 回收失败必须保留原包，不得降级
+    // archive_delete 默认 Recycle；回收失败必须保留原包，不得降级。
+    let cfg = Config {
+        recycle_fallback: false,
+        ..Config::default()
+    };
     let result = engine::extract_run_at(
         &root,
         cfg,
@@ -314,10 +317,7 @@ fn dispose_failure_does_not_abort_remaining_archives() {
     );
     let summary = result.expect("单包处置失败不得中止任务").summary;
     assert_eq!(summary.archives_ok, 2, "两个包都应解压成功");
-    assert!(
-        summary.errors >= 1,
-        "处置失败必须如实记为错误（而非静默）"
-    );
+    assert!(summary.errors >= 1, "处置失败必须如实记为错误（而非静默）");
     assert!(
         root.join("a.zip").exists() && root.join("b.zip").exists(),
         "处置失败时原包保留原地（重跑可自愈）"
