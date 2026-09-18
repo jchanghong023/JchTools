@@ -68,6 +68,9 @@ impl Recycler for CancelRecycle {
         Err(RecycleFailure::Cancelled)
     }
 }
+// 平台门禁原因：构造方均为 Windows 门禁用例（回收条目计数验证是 Windows 专属
+// 实现）；非 Windows 编译时无构造方，属预期 dead_code。
+#[allow(dead_code)]
 struct MoveRecycle {
     target: PathBuf,
     calls: AtomicUsize,
