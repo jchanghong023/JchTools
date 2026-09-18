@@ -39,6 +39,12 @@
     },
     {
       "file": "src/archive.rs",
+      "name": "newest_winner_displaces_loser_through_recycle",
+      "ignored": false,
+      "cfg": null
+    },
+    {
+      "file": "src/archive.rs",
       "name": "normalize_strips_hidden_on_plain_long_path",
       "ignored": false,
       "cfg": "windows"
@@ -99,6 +105,18 @@
     },
     {
       "file": "src/gui.rs",
+      "name": "busy_close_confirmation_declared_in_ui",
+      "ignored": false,
+      "cfg": null
+    },
+    {
+      "file": "src/gui.rs",
+      "name": "cancel_notice_not_error_declared_in_ui",
+      "ignored": false,
+      "cfg": null
+    },
+    {
+      "file": "src/gui.rs",
       "name": "count_selected_pending_ignores_unselected_and_done",
       "ignored": false,
       "cfg": null
@@ -106,6 +124,18 @@
     {
       "file": "src/gui.rs",
       "name": "dependent_rows_follow_their_switches",
+      "ignored": false,
+      "cfg": null
+    },
+    {
+      "file": "src/gui.rs",
+      "name": "extract_start_rejects_protected_directory_immediately",
+      "ignored": false,
+      "cfg": "windows"
+    },
+    {
+      "file": "src/gui.rs",
+      "name": "extract_start_shows_single_confirmation_with_dispose_info",
       "ignored": false,
       "cfg": null
     },
@@ -147,7 +177,19 @@
     },
     {
       "file": "src/gui.rs",
+      "name": "plan_checkbox_gated_by_row_state_declared_in_ui",
+      "ignored": false,
+      "cfg": null
+    },
+    {
+      "file": "src/gui.rs",
       "name": "plan_page_event_rejects_stale_gen_without_touching_completed",
+      "ignored": false,
+      "cfg": null
+    },
+    {
+      "file": "src/gui.rs",
+      "name": "progress_semantics_declared_in_ui",
       "ignored": false,
       "cfg": null
     },
@@ -268,6 +310,12 @@
     {
       "file": "src/rules.rs",
       "name": "duplicate_allowed_matches_planner_sql",
+      "ignored": false,
+      "cfg": null
+    },
+    {
+      "file": "src/rules.rs",
+      "name": "ordering_sql_agrees_with_rust_compare",
       "ignored": false,
       "cfg": null
     },
@@ -417,7 +465,19 @@
     },
     {
       "file": "tests/core.rs",
+      "name": "analysis_phase_keeps_stale_link_temps_until_execution",
+      "ignored": false,
+      "cfg": null
+    },
+    {
+      "file": "tests/core.rs",
       "name": "apply_after_task_dir_moved_still_uses_prepare_state_lock",
+      "ignored": false,
+      "cfg": null
+    },
+    {
+      "file": "tests/core.rs",
+      "name": "apply_refuses_when_root_directory_moved_after_plan",
       "ignored": false,
       "cfg": null
     },
@@ -436,6 +496,18 @@
     {
       "file": "tests/core.rs",
       "name": "archive_first_volume_detection",
+      "ignored": false,
+      "cfg": null
+    },
+    {
+      "file": "tests/core.rs",
+      "name": "archive_name_covers_supported_formats",
+      "ignored": false,
+      "cfg": null
+    },
+    {
+      "file": "tests/core.rs",
+      "name": "byte_level_recheck_blocks_delete_when_content_diverges",
       "ignored": false,
       "cfg": null
     },
@@ -591,6 +663,12 @@
     },
     {
       "file": "tests/core.rs",
+      "name": "equal_bytes_matches_only_identical_content",
+      "ignored": false,
+      "cfg": null
+    },
+    {
+      "file": "tests/core.rs",
       "name": "equal_size_different_hash_not_deleted_when_rule_off",
       "ignored": false,
       "cfg": null
@@ -609,13 +687,37 @@
     },
     {
       "file": "tests/core.rs",
+      "name": "extract_summary_counts_failed_packages_not_volumes",
+      "ignored": false,
+      "cfg": null
+    },
+    {
+      "file": "tests/core.rs",
       "name": "finished_plan_cannot_be_replayed",
       "ignored": false,
       "cfg": null
     },
     {
       "file": "tests/core.rs",
+      "name": "fix_extension_plans_rename_to_detected_type",
+      "ignored": false,
+      "cfg": null
+    },
+    {
+      "file": "tests/core.rs",
       "name": "flatten_classification_allocates_nonconflicting_names",
+      "ignored": false,
+      "cfg": null
+    },
+    {
+      "file": "tests/core.rs",
+      "name": "flatten_single_child_collapses_levels",
+      "ignored": false,
+      "cfg": null
+    },
+    {
+      "file": "tests/core.rs",
+      "name": "flatten_with_classification_is_idempotent_across_rounds",
       "ignored": false,
       "cfg": null
     },
@@ -663,13 +765,37 @@
     },
     {
       "file": "tests/core.rs",
+      "name": "junk_system_files_are_planned_for_cleanup_by_default",
+      "ignored": false,
+      "cfg": null
+    },
+    {
+      "file": "tests/core.rs",
       "name": "keep_never_calls_recycler",
       "ignored": false,
       "cfg": null
     },
     {
       "file": "tests/core.rs",
+      "name": "keeper_policy_variants_pick_expected_keepers",
+      "ignored": false,
+      "cfg": null
+    },
+    {
+      "file": "tests/core.rs",
+      "name": "large_files_classified_into_own_directory",
+      "ignored": false,
+      "cfg": null
+    },
+    {
+      "file": "tests/core.rs",
       "name": "legacy_config_with_removed_fields_still_loads",
+      "ignored": false,
+      "cfg": null
+    },
+    {
+      "file": "tests/core.rs",
+      "name": "merge_directories_joins_same_name_directories",
       "ignored": false,
       "cfg": null
     },
@@ -717,7 +843,37 @@
     },
     {
       "file": "tests/core.rs",
+      "name": "normalize_names_collapses_whitespace_and_applies_nfc",
+      "ignored": false,
+      "cfg": null
+    },
+    {
+      "file": "tests/core.rs",
+      "name": "normalize_root_rejects_protected_locations",
+      "ignored": false,
+      "cfg": "windows"
+    },
+    {
+      "file": "tests/core.rs",
+      "name": "normalize_root_rejects_root_directory",
+      "ignored": false,
+      "cfg": "not(windows)"
+    },
+    {
+      "file": "tests/core.rs",
+      "name": "offline_sources_have_no_network_capabilities",
+      "ignored": false,
+      "cfg": null
+    },
+    {
+      "file": "tests/core.rs",
       "name": "pause_defers_checkpoint_until_resume",
+      "ignored": false,
+      "cfg": null
+    },
+    {
+      "file": "tests/core.rs",
+      "name": "performance_defaults_match_contract",
       "ignored": false,
       "cfg": null
     },
@@ -730,6 +886,18 @@
     {
       "file": "tests/core.rs",
       "name": "prepare_and_apply_share_exclusive_state_lock",
+      "ignored": false,
+      "cfg": null
+    },
+    {
+      "file": "tests/core.rs",
+      "name": "prepare_writes_no_standalone_settings_file",
+      "ignored": false,
+      "cfg": null
+    },
+    {
+      "file": "tests/core.rs",
+      "name": "quarantine_move_out_is_rescanned",
       "ignored": false,
       "cfg": null
     },
@@ -756,6 +924,12 @@
       "name": "recycle_without_bin_counts_as_unverified",
       "ignored": false,
       "cfg": null
+    },
+    {
+      "file": "tests/core.rs",
+      "name": "recycled_bytes_exclude_hardlinked_sources",
+      "ignored": false,
+      "cfg": "windows"
     },
     {
       "file": "tests/core.rs",
@@ -831,6 +1005,12 @@
     },
     {
       "file": "tests/core.rs",
+      "name": "summary_separates_recycled_and_permanent_bytes",
+      "ignored": false,
+      "cfg": null
+    },
+    {
+      "file": "tests/core.rs",
       "name": "symlink_not_followed_or_deleted",
       "ignored": false,
       "cfg": "unix"
@@ -896,6 +1076,12 @@
       "cfg": null
     },
     {
+      "file": "tests/core.rs",
+      "name": "zero_byte_cleanup_follows_its_switch",
+      "ignored": false,
+      "cfg": null
+    },
+    {
       "file": "tests/gui_flow.rs",
       "name": "acknowledge_gate_is_declared_in_ui",
       "ignored": false,
@@ -945,6 +1131,12 @@
     },
     {
       "file": "tests/split.rs",
+      "name": "dispose_failure_does_not_abort_remaining_archives",
+      "ignored": false,
+      "cfg": null
+    },
+    {
+      "file": "tests/split.rs",
       "name": "extract_run_without_engine_fails_loudly",
       "ignored": false,
       "cfg": null
@@ -970,6 +1162,12 @@
     {
       "file": "tests/split.rs",
       "name": "organizer_scan_extracts_nothing_and_skips_failed_dir",
+      "ignored": false,
+      "cfg": null
+    },
+    {
+      "file": "tests/split.rs",
+      "name": "quarantined_archive_reason_is_recorded_in_log",
       "ignored": false,
       "cfg": null
     },
