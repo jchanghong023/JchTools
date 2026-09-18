@@ -29,7 +29,15 @@ ignore = [
     "T20",    # stdout/stderr 输出可能就是程序接口，禁止逼迫无意义替代写法
     "TD002", "TD003",
     # 不强制 TODO 作者/issue 编号格式；是否允许未完成 TODO 仍由其他规则和测试决定
+    "S603",   # subprocess 固定 argv 调用的提示级规则，结构性误报；注入面由 Bandit 分角色门与代码审查承担
 ]
+
+[tool.ruff.lint.per-file-ignores]
+# 经用户批准的固定基线修订（2026-09-19）：typings/ 是镜像 pywinauto 官方 API 命名的
+# 自维护桩，InvalidElement/InvalidWindowHandle/TimeoutError 三个异常名被调用契约钉死
+# （gui_smoke 的 except 元组按这些名字捕获），改名即断开与真实库的错误对接。
+# 豁免仅限本目录的 N818/A001；scripts/ 与其余代码两规则照常生效。
+"typings/**" = ["N818", "A001"]
 
 [tool.basedpyright]
 typeCheckingMode = "all"

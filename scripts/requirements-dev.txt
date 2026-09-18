@@ -6,3 +6,8 @@ Pillow>=12.3
 pygments>=2.21
 pywinauto>=0.6.9; sys_platform == "win32"
 pywin32>=312; sys_platform == "win32"
+# static_check 解析 resources/windows.manifest 用的加固型 XML 解析器（替代 xml.etree，S314）。
+defusedxml>=0.7.1
+# 官方类型桩（basedpyright 质量门）：取代此前自维护的 typings/PIL、pywintypes、win32con、win32gui 桩。
+types-Pillow>=10.2.0.20240822
+types-pywin32>=312.0.0.20260827; sys_platform == "win32"

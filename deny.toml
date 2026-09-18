@@ -3,8 +3,16 @@
 
 [advisories]
 version = 2
-# 漏洞不得通过 ignore 绕过；本表当前为空，出现漏洞时修复依赖而非加 ignore。
+# 漏洞类（RustSec vulnerability，含 CVE）不得通过 ignore 绕过，保持默认硬失败；
+# 本表当前为空，出现漏洞时修复依赖而非加 ignore。
 ignore = []
+# v2 schema 中 unmaintained/unsound 只支持范围开关（all/workspace/transitive/none），无 warn 级。
+# 按质量门固定口径，卫生类（非漏洞提示）不判失败：此处置 none 关闭其硬失败，
+# 此类提示的可见性由 cargo audit 的警告报告承担（其退出码仅对漏洞类失败）。
+unmaintained = "none"
+unsound = "none"
+# yanked 支持 warn：撤回版本仍逐条提示，但不判失败。
+yanked = "warn"
 
 [sources]
 unknown-registry = "deny"  # 未知 registry 一律失败（显式信任模型）

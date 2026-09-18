@@ -28,15 +28,15 @@ def gradient(size: int) -> Image.Image:
     draw = ImageDraw.Draw(image)
     for offset in range(2 * size):
         factor = offset / (2 * size - 1)
-        color = tuple(round(a + (b - a) * factor) for a, b in zip(ACCENT, ACCENT_2, strict=False))
-        draw.line([(offset, 0), (0, offset)], fill=color, width=2)
+        r, g, b = (round(a + (b - a) * factor) for a, b in zip(ACCENT, ACCENT_2, strict=False))
+        draw.line([(offset, 0), (0, offset)], fill=(r, g, b), width=2)
     return image
 
 
 def rounded_mask(size: int) -> Image.Image:
     mask = Image.new("L", (size, size), 0)
     draw = ImageDraw.Draw(mask)
-    draw.rounded_rectangle([0, 0, size - 1, size - 1], radius=round(size * 0.22), fill=255)
+    draw.rounded_rectangle((0, 0, size - 1, size - 1), radius=round(size * 0.22), fill=255)
     return mask
 
 

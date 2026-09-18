@@ -20,11 +20,26 @@ jobs:
         # dev-dependency i-slint-backend-testing → fontdb 在 Unix 用 pkg-config 查找 fontconfig，
         # 缺开发包时 cargo check/test 会在构建脚本阶段失败（与业务代码无关）。
         run: sudo apt-get update && sudo apt-get install -y libfontconfig1-dev
-      # Pygments 供 static_check 的 rust_lexical 词法配平检查使用：不装则该检查以 SKIP 通过。
+      # Pygments 供 static_check 的 rust_lexical 词法配平检查、defusedxml 供其解析
+      # resources/windows.manifest 使用：不装则对应检查以 SKIP/失败告终。
       - name: Install Pygments
-        run: python3 -m pip install --quiet pygments
+        run: python3 -m pip install --quiet pygments defusedxml
       - name: Core compile and tests
         run: bash scripts/check-linux.sh
+      # rustdoc 零告警门禁：与本地质量门同一规则（RUSTDOCFLAGS=-D warnings）。
+      - name: Rustdoc zero-warning gate
+        run: cargo doc --workspace --no-deps --locked
+        env:
+          RUSTDOCFLAGS: -D warnings
+      # 供应链门禁：按 Cargo.lock 锁定的解析结果对照 RustSec advisory DB 与来源白名单。
+      - name: cargo audit
+        run: |
+          cargo install --locked cargo-audit --version 0.22.2
+          cargo audit
+      - name: cargo deny
+        run: |
+          cargo install --locked cargo-deny --version 0.20.2
+          cargo deny check advisories sources
       - name: Static checks
         run: python3 scripts/static_check.py
   windows:
@@ -51,6 +66,19 @@ jobs:
       - name: Clippy zero-warning gate
         shell: pwsh
         run: cargo clippy --all-targets -- -D warnings
+      # Python 质量门（与本地同一命令；规则固定于 pyproject.toml）。
+      # Bandit 的 B404/B603 为经逐点核实的固定角色例外：全部 subprocess 命中点均为
+      # 固定 argv、无 shell、可执行文件经 which()/绝对路径解析（bash/git/7z/被测产品）。
+      - name: Python quality gate
+        shell: pwsh
+        run: |
+          python -m pip install --quiet -r scripts/requirements-dev.txt
+          python -m ruff format --check scripts typings
+          python -m ruff check scripts typings
+          python -m basedpyright scripts typings
+          python -m vulture scripts typings --min-confidence 100
+          python -m bandit -r scripts -s B404,B603 -q
+          python -m pip-audit -r scripts/requirements-dev.txt
       - name: Compile, run fixture tests, bundle the full 7-Zip engine
         shell: pwsh
         env:

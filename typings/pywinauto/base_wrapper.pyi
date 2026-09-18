@@ -1,48 +1,36 @@
-"""pywinauto.base_wrapper 的最小类型桩：控件包装器基类（gui_smoke 用到的转发目标）.
-
-成员的真实实现分布于 base_wrapper.py / uiawrapper.py；gui_smoke 只用到下列 API 面。
-"""
+# pywinauto.base_wrapper 的最小类型桩：控件包装器基类（gui_smoke 用到的转发目标）。
+#
+# 成员的真实实现分布于 base_wrapper.py / uiawrapper.py；gui_smoke 只用到下列 API 面。
+# （桩文件不放 docstring：类型桩只承载 API 面，语义说明以注释维护。）
 
 from .win32structures import RECT
 
+class InvalidElement(RuntimeError): ...
 
-class InvalidElement(RuntimeError):
-    """UIA 元素无效（已从 UI 树移除）时抛出。"""
-
-
+# 控件包装器基类。
 class BaseWrapper:
-    """控件包装器基类。"""
-
     handle: int
 
-    def click_input(self) -> None:
-        """真实鼠标点击（移动光标并按下/抬起鼠标键）。"""
-        ...
+    # 真实鼠标点击（移动光标并按下/抬起鼠标键）。
+    def click_input(self) -> None: ...
 
-    def descendants(self, **criteria: object) -> list[BaseWrapper]:
-        """按条件枚举全部后代控件。"""
-        ...
+    # 按条件枚举全部后代控件。
+    def descendants(self, **criteria: object) -> list[BaseWrapper]: ...
 
-    def is_enabled(self) -> bool:
-        """控件（及其顶层窗口）是否可用。"""
-        ...
+    # 控件（及其顶层窗口）是否可用。
+    def is_enabled(self) -> bool: ...
 
-    def is_visible(self) -> bool:
-        """控件（及其顶层窗口）是否可见。"""
-        ...
+    # 控件（及其顶层窗口）是否可见。
+    def is_visible(self) -> bool: ...
 
-    def rectangle(self) -> RECT:
-        """控件的屏幕矩形。"""
-        ...
+    # 控件的屏幕矩形。
+    def rectangle(self) -> RECT: ...
 
-    def set_edit_text(self, text: str) -> None:
-        """写入编辑框文本（真实定义在编辑类控件包装器；gui_smoke 经 descendants 取得后调用）。"""
-        ...
+    # 写入编辑框文本（真实定义在编辑类控件包装器；gui_smoke 经 descendants 取得后调用）。
+    def set_edit_text(self, text: str) -> None: ...
 
-    def set_focus(self) -> BaseWrapper:
-        """置前并聚焦（UIA 包装器返回自身）。"""
-        ...
+    # 置前并聚焦（UIA 包装器返回自身）。
+    def set_focus(self) -> BaseWrapper: ...
 
-    def window_text(self) -> str | None:
-        """控件可见文本（可能为 None）。"""
-        ...
+    # 控件可见文本（可能为 None）。
+    def window_text(self) -> str | None: ...
