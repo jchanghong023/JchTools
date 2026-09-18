@@ -1,6 +1,6 @@
 # JchTools
 
-Windows 优先的 Rust + Slint 本地工具箱。当前提供「目录整理」与「代理工具」，后续工具通过工具注册表接入，界面导航不写死。
+Windows 优先的 Rust + Slint 本地工具箱。当前提供「递归解压」与「目录整理」两个工具，后续工具通过工具注册表接入，界面导航不写死；软件完全离线（不发起任何网络请求）。
 
 > **当前源码树已在 Windows 11 上编译、运行并做过功能验收**（详见 CI 与提交记录）：`cargo build` / `cargo build --release` 通过，`cargo test` 全量通过（含无头 GUI 状态测试与计划执行确认流端到端测试；另有 21 个真实引擎用例默认 ignore，已实测通过；基线数字以最近一次 `cargo test` 实测为准），界面、临时目录端到端整理与 5004 文件性能都实测过。没有引擎时构建不内嵌，运行期解压会给出明确错误；运行 `scripts/fetch-7zip.ps1` 获取官方引擎后，构建会自动把它压缩内嵌进 EXE。发布包由 `scripts/package-windows.ps1` 生成，只附带许可证与上游源码，不含引擎可执行文件。
 
@@ -24,7 +24,7 @@ powershell -NoProfile -File .\scripts\package-windows.ps1
 
 脚本从官方 `ip7z/7zip` 的固定 `26.03` 发布获取完整 x64 MSI 和对应源码，要求 GitHub 发布元数据提供 SHA-256 摘要；缺少摘要、校验失败或资产缺失时停止，不换非官方镜像。MSI 只在构建机生成 administrative image，提取完整 `7z.exe + 7z.dll`，不把安装步骤交给最终用户。
 
-随后生成 Cargo.lock，执行 `cargo check`、核心测试和真实引擎解压测试，编译 GUI，校验内嵌引擎与清单，复制许可证及 7-Zip 源码（发布包不含 7z.exe/dll），生成 `dist/JchTools-Windows-x64-时间戳.zip`。该构建目录的 `BUILD-INFO.json` 记录实际执行结果；脚本不会声称已完成手工 UI 或多 TB 性能验收。首次验证通过后的 Cargo.lock 应纳入仓库。
+随后生成 Cargo.lock，执行 `cargo check`、核心测试和真实引擎解压测试，编译 GUI，校验内嵌引擎与清单，复制许可证及 7-Zip 源码（发布包不含 7z.exe/dll），生成 `dist/JchTools-Windows-x64-时间戳.zip`；构建机装有 Inno Setup 6 时还会编译出安装包 `dist/JchTools-Setup-x64.exe`（安装到当前用户目录、免管理员权限，自动创建桌面快捷方式与开始菜单入口，控制面板可卸载；缺 ISCC 时该阶段如实标注 NOT RUN，CI 发布流程保证产出）。该构建目录的 `BUILD-INFO.json` 记录实际执行结果；脚本不会声称已完成手工 UI 或多 TB 性能验收。首次验证通过后的 Cargo.lock 应纳入仓库。
 
 `-Offline` 只供已经缓存全部 Rust 依赖和已校验引擎的构建机使用；`-SkipTests` 会在构建记录明确标为 NOT RUN，不应用于生产交付。脚本不修改执行策略，不自动安装编译器，不自动提升权限。
 

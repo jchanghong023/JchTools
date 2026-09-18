@@ -1,7 +1,7 @@
 这是 JchTools 的源码工程，不是随源码附带的发布包。
 
-已经交付：Rust + Slint 自绘界面、已注册工具（目录整理、代理工具）、目录整理核心、
-40 项界面配置（另有高级选项层）、Windows 回收站适配、
+已经交付：Rust + Slint 自绘界面、已注册工具（递归解压、目录整理）、解压与整理核心、
+39 项界面配置（另有高级选项层）、Windows 回收站适配、
 7-Zip 打包脚本、自动化测试源码、CI 和验证记录。
 
 本源码树已经在 Windows 11 上编译与验收：
@@ -20,8 +20,9 @@
 生成可交付的 Windows 包（需要联网，会下载并校验官方完整 7-Zip）：
   powershell -NoProfile -File .\scripts\package-windows.ps1
 
-该脚本编译、运行测试并生成 Windows ZIP。完整 7-Zip 引擎在构建时已内嵌进 EXE，
-ZIP 只附带 licenses/、NOTICE.txt 与上游源码压缩包（不含 7z.exe/7z.dll）。
-最终用户使用这个构建出的 ZIP 时，不需要安装 Rust、Slint 或 7-Zip。
+该脚本编译、运行测试并生成 Windows ZIP；构建机装有 Inno Setup 6 时还会生成安装包
+JchTools-Setup-x64.exe（安装到当前用户目录、免 UAC，含桌面快捷方式/开始菜单/卸载项）。
+完整 7-Zip 引擎在构建时已内嵌进 EXE，ZIP 只附带 licenses/、NOTICE.txt 与上游源码压缩包
+（不含 7z.exe/7z.dll）。最终用户使用安装包或 ZIP 时，不需要安装 Rust、Slint 或 7-Zip。
 
 详细使用及限制见 README.md；需求语义见 docs/CONTRACT.md；机器可读静态检查明细可用 `python scripts/static_check.py` 生成（写入 .tmp/static-check.json）。

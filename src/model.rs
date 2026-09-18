@@ -20,12 +20,23 @@ pub struct FileRecord {
 }
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
-pub enum ActionKind { Delete, Move, Hardlink, EmptyDirectory }
+pub enum ActionKind {
+    Delete,
+    Move,
+    Hardlink,
+    EmptyDirectory,
+}
 /// 动作状态。持久化与界面流转仍以 snake_case 文本（"pending"/"done"/"failed"/"skipped"/"unselected"）
 /// 存于 actions.state 列；本枚举提供类型安全的取值/解析，避免各处手写魔法字符串。
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
-pub enum ActionState { Pending, Done, Failed, Skipped, Unselected }
+pub enum ActionState {
+    Pending,
+    Done,
+    Failed,
+    Skipped,
+    Unselected,
+}
 impl ActionState {
     /// 与数据库 actions.state 列、引擎 mark_action 调用一致的 snake_case 文本。
     pub fn as_str(self) -> &'static str {
@@ -52,7 +63,9 @@ impl std::str::FromStr for ActionState {
     }
 }
 impl From<ActionState> for String {
-    fn from(state: ActionState) -> Self { state.as_str().into() }
+    fn from(state: ActionState) -> Self {
+        state.as_str().into()
+    }
 }
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
@@ -94,6 +107,10 @@ pub struct Summary {
     pub scanned_bytes: u64,
     pub archives_ok: u64,
     pub archives_failed: u64,
+    /// 移入「解压失败」子目录的原包数（X-06）：含解压出错的包与未完全解开（有跳过
+    /// 条目、分卷来源不确定）的包，是失败处置的总量口径；archives_failed 只计解压
+    /// 出错的包。
+    pub archives_quarantined: u64,
     pub extracted: u64,
     pub planned_delete: u64,
     pub planned_move: u64,
@@ -110,21 +127,35 @@ pub struct Summary {
     pub recycled_bytes: u64,
 }
 impl Summary {
+    /// 目录整理（两段式）的任务摘要：只描述扫描与计划/执行口径，不含解压字段。
     pub fn description(&self) -> String {
-        format!("扫描 {} 个文件 / {}\n解压成功 {} 包；失败 {} 包；产生 {} 个文件\n待删除 {} 项 · 待移动 {} 项 · 待硬链接 {} 项 · 空目录复查 {} 项\n候选逻辑大小 {}（移入回收站不会立即释放磁盘空间）\n已永久删除 {} 项 / {}；已回收 {} 项 / {}\n已移动 {} 项；已硬链接 {} 项；跳过 {} 项；错误 {} 项",
-            self.scanned, bytes(self.scanned_bytes), self.archives_ok, self.archives_failed,
-            self.extracted, self.planned_delete, self.planned_move, self.planned_link,
+        format!("扫描 {} 个文件 / {}\n待删除 {} 项 · 待移动 {} 项 · 待硬链接 {} 项 · 空目录复查 {} 项\n候选逻辑大小 {}（移入回收站不会立即释放磁盘空间）\n已永久删除 {} 项 / {}；已回收 {} 项 / {}\n已移动 {} 项；已硬链接 {} 项；跳过 {} 项；错误 {} 项",
+            self.scanned, bytes(self.scanned_bytes),
+            self.planned_delete, self.planned_move, self.planned_link,
             self.planned_empty, bytes(self.candidate_bytes), self.deleted,
             bytes(self.permanent_bytes), self.recycled, bytes(self.recycled_bytes),
             self.moved, self.linked, self.skipped, self.errors)
+    }
+    /// 「递归解压」一段式运行的收尾摘要（X-02 确认框与结束状态的口径）。
+    pub fn extract_description(&self) -> String {
+        format!("扫描 {} 个文件\n解压成功 {} 包（{} 个文件落盘）\n失败并移入「解压失败」{} 包\n已回收 {} 项 / {}；已永久删除 {} 项 / {}；错误 {} 项",
+            self.scanned, self.archives_ok, self.extracted, self.archives_quarantined,
+            self.recycled, bytes(self.recycled_bytes), self.deleted, bytes(self.permanent_bytes), self.errors)
     }
 }
 pub fn bytes(value: u64) -> String {
     const UNITS: [&str; 7] = ["B", "KiB", "MiB", "GiB", "TiB", "PiB", "EiB"];
     let mut size = value as f64;
     let mut i = 0;
-    while size >= 1024.0 && i + 1 < UNITS.len() { size /= 1024.0; i += 1; }
-    if i == 0 { format!("{value} B") } else { format!("{size:.2} {}", UNITS[i]) }
+    while size >= 1024.0 && i + 1 < UNITS.len() {
+        size /= 1024.0;
+        i += 1;
+    }
+    if i == 0 {
+        format!("{value} B")
+    } else {
+        format!("{size:.2} {}", UNITS[i])
+    }
 }
 
 #[cfg(test)]
@@ -135,12 +166,20 @@ mod tests {
     // 覆盖 C-11
     #[test]
     fn action_state_text_roundtrip_matches_db_values() {
-        for state in [ActionState::Pending, ActionState::Done, ActionState::Failed,
-                      ActionState::Skipped, ActionState::Unselected] {
+        for state in [
+            ActionState::Pending,
+            ActionState::Done,
+            ActionState::Failed,
+            ActionState::Skipped,
+            ActionState::Unselected,
+        ] {
             let text = state.as_str();
             assert_eq!(ActionState::from_str(text).unwrap(), state);
             // 持久化文本必须与 db.rs mark_action 校验的 snake_case 字面量一致。
-            assert_eq!(serde_json::to_string(&state).unwrap(), format!("\"{text}\""));
+            assert_eq!(
+                serde_json::to_string(&state).unwrap(),
+                format!("\"{text}\"")
+            );
             let as_string: String = state.into();
             assert_eq!(as_string, text);
         }

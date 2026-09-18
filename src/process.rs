@@ -11,57 +11,142 @@ use std::{
 };
 
 #[derive(Debug)]
-enum PipeMessage { Line(bool,String), Error(String) }
+enum PipeMessage {
+    Line(bool, String),
+    Error(String),
+}
 /// 7-Zip 失败时 tail 里混着 stdout 的元数据（`Path = …`）和 stderr 的报错；
 /// 只把这些当成"给用户看的原因"，否则用户拿到的是几十行条目字段。
 fn is_metadata_line(line: &str) -> bool {
-    const KEYS: [&str; 27] = ["Path","Type","Physical Size","Headers Size","Size","Packed Size","Modified","Created","Accessed",
-        "Attributes","Encrypted","Comment","CRC","Method","Characteristics","Host OS","Version","Volume Index","Folders","Files",
-        "Solid","Blocks","Hard Links","Alternate Stream","Symbolic Link","Reparse","Offset"];
-    line.split_once('=').is_some_and(|(key,_)| KEYS.contains(&key.trim()))
+    const KEYS: [&str; 27] = [
+        "Path",
+        "Type",
+        "Physical Size",
+        "Headers Size",
+        "Size",
+        "Packed Size",
+        "Modified",
+        "Created",
+        "Accessed",
+        "Attributes",
+        "Encrypted",
+        "Comment",
+        "CRC",
+        "Method",
+        "Characteristics",
+        "Host OS",
+        "Version",
+        "Volume Index",
+        "Folders",
+        "Files",
+        "Solid",
+        "Blocks",
+        "Hard Links",
+        "Alternate Stream",
+        "Symbolic Link",
+        "Reparse",
+        "Offset",
+    ];
+    line.split_once('=')
+        .is_some_and(|(key, _)| KEYS.contains(&key.trim()))
 }
-fn summarize_failure(stderr: &std::collections::VecDeque<String>, stdout: &std::collections::VecDeque<String>) -> String {
+fn summarize_failure(
+    stderr: &std::collections::VecDeque<String>,
+    stdout: &std::collections::VecDeque<String>,
+) -> String {
     let pick = |lines: &std::collections::VecDeque<String>| -> Vec<String> {
-        lines.iter().map(|line| line.trim()).filter(|line| !line.is_empty() && !is_metadata_line(line))
-            .map(|line| line.chars().take(240).collect::<String>().replace(r"\\?\", "")).collect::<Vec<_>>()
+        lines
+            .iter()
+            .map(|line| line.trim())
+            .filter(|line| !line.is_empty() && !is_metadata_line(line))
+            .map(|line| {
+                line.chars()
+                    .take(240)
+                    .collect::<String>()
+                    .replace(r"\\?\", "")
+            })
+            .collect::<Vec<_>>()
     };
     let errors = pick(stderr);
-    let chosen = if !errors.is_empty() { errors } else { pick(stdout) };
+    let chosen = if !errors.is_empty() {
+        errors
+    } else {
+        pick(stdout)
+    };
     let mut text = chosen.join(" | ");
-    if text.chars().count() > 400 { text = text.chars().take(400).collect::<String>() + "…"; }
+    if text.chars().count() > 400 {
+        text = text.chars().take(400).collect::<String>() + "…";
+    }
     text
 }
-fn pump<R: Read + Send + 'static>(reader: R, err: bool, sender: mpsc::SyncSender<PipeMessage>) -> thread::JoinHandle<()> {
+fn pump<R: Read + Send + 'static>(
+    reader: R,
+    err: bool,
+    sender: mpsc::SyncSender<PipeMessage>,
+) -> thread::JoinHandle<()> {
     thread::spawn(move || {
-        let mut input = BufReader::with_capacity(65536,reader);
+        let mut input = BufReader::with_capacity(65536, reader);
         let mut line = Vec::with_capacity(1024);
         // Windows 上 7-Zip 用 CRLF 输出；'\r' 和 '\n' 会各触发一次扫描，必须吃掉紧跟其后的 '\n'，
         // 否则每行后面都会多出一个空行，把 -slt 的条目元数据提前刷新成不完整字段。
         let mut skip_lf = false;
         loop {
             let (consume, terminated) = {
-                let bytes = match input.fill_buf() { Ok(bytes) => bytes, Err(e) => { let _ = sender.send(PipeMessage::Error(e.to_string())); break; } };
+                let bytes = match input.fill_buf() {
+                    Ok(bytes) => bytes,
+                    Err(e) => {
+                        let _ = sender.send(PipeMessage::Error(e.to_string()));
+                        break;
+                    }
+                };
                 if bytes.is_empty() {
                     if !line.is_empty() {
-                        let message = match String::from_utf8(std::mem::take(&mut line)) { Ok(text)=>PipeMessage::Line(err,text),Err(_)=>PipeMessage::Error("7-Zip 输出不是 UTF-8".into()) };
+                        let message = match String::from_utf8(std::mem::take(&mut line)) {
+                            Ok(text) => PipeMessage::Line(err, text),
+                            Err(_) => PipeMessage::Error("7-Zip 输出不是 UTF-8".into()),
+                        };
                         let _ = sender.send(message);
                     }
                     break;
                 }
-                let skip = if skip_lf && bytes.first() == Some(&b'\n') { 1 } else { 0 };
+                let skip = if skip_lf && bytes.first() == Some(&b'\n') {
+                    1
+                } else {
+                    0
+                };
                 let rest = &bytes[skip..];
                 match rest.iter().position(|b| *b == b'\n' || *b == b'\r') {
-                    Some(index) => { line.extend_from_slice(&rest[..index]); (skip + index + 1, Some(rest[index] == b'\r')) }
-                    None => { line.extend_from_slice(rest); (bytes.len(), None) }
+                    Some(index) => {
+                        line.extend_from_slice(&rest[..index]);
+                        (skip + index + 1, Some(rest[index] == b'\r'))
+                    }
+                    None => {
+                        line.extend_from_slice(rest);
+                        (bytes.len(), None)
+                    }
                 }
             };
             skip_lf = terminated == Some(true);
             input.consume(consume);
-            if line.len() > 64 * 1024 { let _ = sender.send(PipeMessage::Error("7-Zip 输出行超过 64 KiB，已拒绝解析".into())); break; }
+            if line.len() > 64 * 1024 {
+                let _ = sender.send(PipeMessage::Error(
+                    "7-Zip 输出行超过 64 KiB，已拒绝解析".into(),
+                ));
+                break;
+            }
             if terminated.is_some() {
-                let text = match String::from_utf8(std::mem::take(&mut line)) { Ok(s) => s,
-                    Err(_) => { let _ = sender.send(PipeMessage::Error("7-Zip 未返回有效 UTF-8，无法安全解析文件路径".into())); break; } };
-                if sender.send(PipeMessage::Line(err,text)).is_err() { break; }
+                let text = match String::from_utf8(std::mem::take(&mut line)) {
+                    Ok(s) => s,
+                    Err(_) => {
+                        let _ = sender.send(PipeMessage::Error(
+                            "7-Zip 未返回有效 UTF-8，无法安全解析文件路径".into(),
+                        ));
+                        break;
+                    }
+                };
+                if sender.send(PipeMessage::Line(err, text)).is_err() {
+                    break;
+                }
             }
         }
     })
@@ -125,7 +210,9 @@ const PIPE_DRAIN_GRACE: Duration = Duration::from_secs(2);
 fn join_with_deadline<T>(handle: thread::JoinHandle<T>, limit: Duration) -> Option<T> {
     let deadline = Instant::now() + limit;
     while !handle.is_finished() {
-        if Instant::now() >= deadline { return None; }
+        if Instant::now() >= deadline {
+            return None;
+        }
         thread::sleep(Duration::from_millis(10));
     }
     handle.join().ok()
@@ -133,10 +220,7 @@ fn join_with_deadline<T>(handle: thread::JoinHandle<T>, limit: Duration) -> Opti
 
 /// 带宿主侧总超时地运行命令并捕获全部输出。
 /// 超时后 kill + wait，避免子进程卡死导致永久阻塞。
-pub fn run_with_timeout(
-    command: &mut Command,
-    timeout: Duration,
-) -> Result<CapturedOutput> {
+pub fn run_with_timeout(command: &mut Command, timeout: Duration) -> Result<CapturedOutput> {
     run_with_timeout_input(command, None, timeout)
 }
 
@@ -153,11 +237,18 @@ pub fn run_with_timeout_input(
     }
     command.stdout(Stdio::piped()).stderr(Stdio::piped());
     // 与 run / run_with_idle_timeout 一致：GUI 下不弹控制台窗口。
-    #[cfg(windows)] { use std::os::windows::process::CommandExt; command.creation_flags(0x08000000); }
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        command.creation_flags(0x08000000);
+    }
     // 错误必须带上程序名与系统原因：调用方（nettest/proxy）用 `to_string()` 展示，
     // 只取最外层文本；一旦只写"无法启动子进程"，用户就无从判断是哪个程序、为何失败。
     let mut child = command.spawn().map_err(|error| {
-        anyhow::anyhow!("无法启动 {}：{error}", command.get_program().to_string_lossy())
+        anyhow::anyhow!(
+            "无法启动 {}：{error}",
+            command.get_program().to_string_lossy()
+        )
     })?;
 
     // stdin 必须在独立线程写入：子进程可能在读完 stdin 前持续写 stdout。
@@ -178,14 +269,18 @@ pub fn run_with_timeout_input(
     let Some(stdout_pipe) = child.stdout.take() else {
         let _ = child.kill();
         let _ = child.wait();
-        if let Some(handle) = stdin_thread { let _ = handle.join(); }
+        if let Some(handle) = stdin_thread {
+            let _ = handle.join();
+        }
         bail!("缺少 stdout");
     };
     let Some(stderr_pipe) = child.stderr.take() else {
         let _ = child.kill();
         let _ = child.wait();
         drop(stdout_pipe);
-        if let Some(handle) = stdin_thread { let _ = handle.join(); }
+        if let Some(handle) = stdin_thread {
+            let _ = handle.join();
+        }
         bail!("缺少 stderr");
     };
     // 截断/读错误必须让调用方感知：超限时继续 drain 到 EOF（避免子进程写满管道卡死），
@@ -195,10 +290,18 @@ pub fn run_with_timeout_input(
     match wait_child_with_deadline(&mut child, timeout, None) {
         Ok(status) => {
             // 读线程被放弃时输出不完整：如实标记截断，不得把半截输出当成完整结果。
-            let stdout = join_with_deadline(stdout_thread, PIPE_DRAIN_GRACE)
-                .unwrap_or_else(|| ReadCapture { truncated: true, ..Default::default() });
-            let stderr = join_with_deadline(stderr_thread, PIPE_DRAIN_GRACE)
-                .unwrap_or_else(|| ReadCapture { truncated: true, ..Default::default() });
+            let stdout = join_with_deadline(stdout_thread, PIPE_DRAIN_GRACE).unwrap_or_else(|| {
+                ReadCapture {
+                    truncated: true,
+                    ..Default::default()
+                }
+            });
+            let stderr = join_with_deadline(stderr_thread, PIPE_DRAIN_GRACE).unwrap_or_else(|| {
+                ReadCapture {
+                    truncated: true,
+                    ..Default::default()
+                }
+            });
             // stdin 写入失败：子进程已成功退出时多半是提前关掉 stdin（EPIPE），不必判失败；
             // 子进程未成功时上报写入错误，便于定位管道问题。
             if let Some(handle) = stdin_thread {
@@ -247,7 +350,11 @@ struct ReadCapture {
 
 /// 读满到 `limit` 后截断并继续 drain 到 EOF；读错误记入 `error`，不再静默丢弃。
 fn read_all_capped<R: Read>(mut reader: R, limit: usize) -> ReadCapture {
-    let mut capture = ReadCapture { data: Vec::new(), truncated: false, error: None };
+    let mut capture = ReadCapture {
+        data: Vec::new(),
+        truncated: false,
+        error: None,
+    };
     let mut chunk = [0u8; 8192];
     loop {
         match reader.read(&mut chunk) {
@@ -274,7 +381,11 @@ fn read_all_capped<R: Read>(mut reader: R, limit: usize) -> ReadCapture {
     capture
 }
 
-fn wait_child_with_deadline(child: &mut Child, timeout: Duration, control: Option<&Control>) -> Result<std::process::ExitStatus> {
+fn wait_child_with_deadline(
+    child: &mut Child,
+    timeout: Duration,
+    control: Option<&Control>,
+) -> Result<std::process::ExitStatus> {
     let deadline = Instant::now() + timeout;
     loop {
         if let Some(control) = control {
@@ -288,7 +399,10 @@ fn wait_child_with_deadline(child: &mut Child, timeout: Duration, control: Optio
             Ok(Some(status)) => return Ok(status),
             Ok(None) => {
                 if Instant::now() >= deadline {
-                    bail!("子进程超过 {} 毫秒未结束，已按超时处理", timeout.as_millis());
+                    bail!(
+                        "子进程超过 {} 毫秒未结束，已按超时处理",
+                        timeout.as_millis()
+                    );
                 }
                 thread::sleep(Duration::from_millis(20));
             }
@@ -302,7 +416,12 @@ fn wait_child_with_deadline(child: &mut Child, timeout: Duration, control: Optio
 /// 取 10 分钟可覆盖杀软扫描等短暂静默，又避免挂死进程长期占住 RootGuard。
 pub const DEFAULT_IDLE_TIMEOUT: Duration = Duration::from_secs(10 * 60);
 
-pub fn run(command: &mut Command, control: &Control, line: impl FnMut(bool,&str)->Result<()>, tick: impl FnMut()->Result<()>) -> Result<()> {
+pub fn run(
+    command: &mut Command,
+    control: &Control,
+    line: impl FnMut(bool, &str) -> Result<()>,
+    tick: impl FnMut() -> Result<()>,
+) -> Result<()> {
     run_with_idle_timeout(command, control, DEFAULT_IDLE_TIMEOUT, line, tick)
 }
 
@@ -312,16 +431,26 @@ pub fn run_with_idle_timeout(
     command: &mut Command,
     control: &Control,
     idle_timeout: Duration,
-    mut line: impl FnMut(bool,&str)->Result<()>,
-    mut tick: impl FnMut()->Result<()>,
+    mut line: impl FnMut(bool, &str) -> Result<()>,
+    mut tick: impl FnMut() -> Result<()>,
 ) -> Result<()> {
     control.checkpoint()?;
-    command.stdin(Stdio::null()).stdout(Stdio::piped()).stderr(Stdio::piped());
-    #[cfg(windows)] { use std::os::windows::process::CommandExt; command.creation_flags(0x08000000); }
+    command
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        command.creation_flags(0x08000000);
+    }
     let mut child = command.spawn().map_err(|error| {
-        anyhow::anyhow!("无法启动 {}：{error}", command.get_program().to_string_lossy())
+        anyhow::anyhow!(
+            "无法启动 {}：{error}",
+            command.get_program().to_string_lossy()
+        )
     })?;
-    let (send,recv) = mpsc::sync_channel(64);
+    let (send, recv) = mpsc::sync_channel(64);
     // spawn 成功后若 take 失败，必须 kill+wait 回收子进程，避免残留。
     let stdout_pipe = match child.stdout.take() {
         Some(pipe) => pipe,
@@ -331,7 +460,7 @@ pub fn run_with_idle_timeout(
             bail!("缺少 stdout");
         }
     };
-    let stdout = pump(stdout_pipe,false,send.clone());
+    let stdout = pump(stdout_pipe, false, send.clone());
     let stderr_pipe = match child.stderr.take() {
         Some(pipe) => pipe,
         None => {
@@ -343,7 +472,7 @@ pub fn run_with_idle_timeout(
             bail!("缺少 stderr");
         }
     };
-    let stderr = pump(stderr_pipe,true,send);
+    let stderr = pump(stderr_pipe, true, send);
     let mut stderr_tail = std::collections::VecDeque::new();
     let mut stdout_tail = std::collections::VecDeque::new();
     let result = (|| {
@@ -354,20 +483,33 @@ pub fn run_with_idle_timeout(
         loop {
             // Pause is deliberately deferred until this whole archive finishes. We must drain pipes.
             control.check_cancelled()?;
-            if last_tick.elapsed() > Duration::from_millis(500) { tick()?; last_tick = std::time::Instant::now(); }
+            if last_tick.elapsed() > Duration::from_millis(500) {
+                tick()?;
+                last_tick = std::time::Instant::now();
+            }
             match recv.recv_timeout(Duration::from_millis(50)) {
-                Ok(PipeMessage::Line(err,text)) => {
+                Ok(PipeMessage::Line(err, text)) => {
                     last_output = Instant::now();
                     if !text.is_empty() {
-                        let sink = if err { &mut stderr_tail } else { &mut stdout_tail };
-                        if sink.len() == 12 { sink.pop_front(); } sink.push_back(text.clone());
+                        let sink = if err {
+                            &mut stderr_tail
+                        } else {
+                            &mut stdout_tail
+                        };
+                        if sink.len() == 12 {
+                            sink.pop_front();
+                        }
+                        sink.push_back(text.clone());
                     }
-                    line(err,&text)?;
+                    line(err, &text)?;
                 }
                 Ok(PipeMessage::Error(error)) => bail!("{error}"),
                 Err(mpsc::RecvTimeoutError::Timeout) => {
                     if last_output.elapsed() >= idle_timeout {
-                        bail!("7-Zip 连续 {} 秒无输出，疑似挂死，已强制终止", idle_timeout.as_secs());
+                        bail!(
+                            "7-Zip 连续 {} 秒无输出，疑似挂死，已强制终止",
+                            idle_timeout.as_secs()
+                        );
                     }
                 }
                 Err(mpsc::RecvTimeoutError::Disconnected) => break,
@@ -376,14 +518,22 @@ pub fn run_with_idle_timeout(
         // 管道已断开后子进程仍可能挂死：限时等待，禁止无界 child.wait()。
         let status = wait_child_with_deadline(&mut child, idle_timeout, Some(control))?;
         if !status.success() {
-            let code = status.code().map(|code| code.to_string()).unwrap_or_else(|| "未知".into());
-            let summary = summarize_failure(&stderr_tail,&stdout_tail);
-            if summary.is_empty() { bail!("7-Zip 退出码 {code}，且没有输出可读的错误行；压缩包可能已损坏或不完整"); }
+            let code = status
+                .code()
+                .map(|code| code.to_string())
+                .unwrap_or_else(|| "未知".into());
+            let summary = summarize_failure(&stderr_tail, &stdout_tail);
+            if summary.is_empty() {
+                bail!("7-Zip 退出码 {code}，且没有输出可读的错误行；压缩包可能已损坏或不完整");
+            }
             bail!("7-Zip 退出码 {code}（警告也不视为完整成功）：{summary}");
         }
         Ok(())
     })();
-    if result.is_err() { let _ = child.kill(); let _ = child.wait(); }
+    if result.is_err() {
+        let _ = child.kill();
+        let _ = child.wait();
+    }
     drop(recv);
     // 7z 退出后管道应立即 EOF；限时收尾防止孙进程继承写端时 join 永久阻塞。
     let _ = join_with_deadline(stdout, PIPE_DRAIN_GRACE);
@@ -409,20 +559,27 @@ mod tests {
     /// 行内容字符：允许任意非 CR/LF 字符（含中文、控制字符、等号等），
     /// 只排除会改变分行语义的两个字符本身。
     fn any_line() -> impl Strategy<Value = String> {
-        collection::vec(any::<char>().prop_filter("排除 CR/LF", |c| *c != '\r' && *c != '\n'), 0..16)
-            .prop_map(|chars| chars.into_iter().collect())
+        collection::vec(
+            any::<char>().prop_filter("排除 CR/LF", |c| *c != '\r' && *c != '\n'),
+            0..16,
+        )
+        .prop_map(|chars| chars.into_iter().collect())
     }
     /// 生成无歧义的（行内容, 行结束符种子）组合：最后一段非空（「末尾空行」与
     /// 「结尾终止符」在字节上不可区分），且排除「\r 分隔 + 空行 + \n 分隔」——
     /// 该组合会拼接成一个 CRLF（单终止符，这是正确语义），留着会把正确合并当吞行。
     /// 策略提到命名函数：proptest 语句糖的参数列表里出现闭包管道符会解析失败。
     fn unambiguous_lines_and_seps() -> impl Strategy<Value = (Vec<String>, Vec<u8>)> {
-        (collection::vec(any_line(), 1..12)
-                .prop_filter("最后一段非空", |v| v.last().is_some_and(|l| !l.is_empty())),
-            collection::vec(any::<u8>(), 12))
+        (
+            collection::vec(any_line(), 1..12).prop_filter("最后一段非空", |v| {
+                v.last().is_some_and(|l| !l.is_empty())
+            }),
+            collection::vec(any::<u8>(), 12),
+        )
             .prop_filter("排除跨空行合并歧义", |(lines, seps)| {
                 (1..lines.len().saturating_sub(1)).all(|j| {
-                    !(seps[j % seps.len()] % 3 == 2 && lines[j].is_empty()
+                    !(seps[j % seps.len()] % 3 == 2
+                        && lines[j].is_empty()
                         && seps[(j + 1) % seps.len()] % 3 == 1)
                 })
             })
@@ -471,13 +628,18 @@ mod tests {
         assert!(!is_metadata_line(""));
         assert!(!is_metadata_line("   "));
         assert!(!is_metadata_line("ERROR: Cannot open the file as archive"));
-        assert!(!is_metadata_line("7-Zip [64] 23.01: Copyright (c) 1999-2023 Igor Pavlov"));
+        assert!(!is_metadata_line(
+            "7-Zip [64] 23.01: Copyright (c) 1999-2023 Igor Pavlov"
+        ));
         assert!(!is_metadata_line("foo = bar"), "非白名单键不得当成元数据");
         assert!(is_metadata_line("Path = archive.7z"));
         assert!(is_metadata_line("Type = 7z"));
         assert!(is_metadata_line("Physical Size = 12345"));
         assert!(is_metadata_line("Method = LZMA2:19"));
-        assert!(is_metadata_line(" Path = leading-space-key"), "键两侧空白应被 trim");
+        assert!(
+            is_metadata_line(" Path = leading-space-key"),
+            "键两侧空白应被 trim"
+        );
         // 超长行：只做键匹配，不得 panic，也不得把普通长行误判为元数据
         let long_meta = format!("Path = {}", "a".repeat(100_000));
         assert!(is_metadata_line(&long_meta));
@@ -495,7 +657,10 @@ mod tests {
         stderr.push_back("ERROR: Cannot open file".into());
         let summary = summarize_failure(&stderr, &stdout);
         assert!(summary.contains("ERROR: Cannot open file"));
-        assert!(!summary.contains("stdout only error"), "stderr 有可用行时不回退 stdout");
+        assert!(
+            !summary.contains("stdout only error"),
+            "stderr 有可用行时不回退 stdout"
+        );
         assert!(!summary.contains("Path ="), "元数据行不应进入用户可见摘要");
 
         // stderr 全是元数据时才回退 stdout
@@ -534,7 +699,10 @@ mod tests {
         let mut lines = Vec::new();
         while let Ok(message) = recv.try_recv() {
             match message {
-                PipeMessage::Line(err, text) => { assert!(!err); lines.push(text); }
+                PipeMessage::Line(err, text) => {
+                    assert!(!err);
+                    lines.push(text);
+                }
                 PipeMessage::Error(error) => panic!("不应出现错误：{error}"),
             }
         }
@@ -586,7 +754,10 @@ mod tests {
             }
         }
         let capture = read_all_capped(FailingReader, 64);
-        assert!(capture.error.as_deref().is_some_and(|e| e.contains("模拟读错误")));
+        assert!(capture
+            .error
+            .as_deref()
+            .is_some_and(|e| e.contains("模拟读错误")));
         assert!(capture.data.is_empty());
     }
 
@@ -620,8 +791,14 @@ mod tests {
         let elapsed = start.elapsed();
         assert!(result.is_err(), "空闲超时应返回错误");
         let message = format!("{:#}", result.unwrap_err());
-        assert!(message.contains("无输出") || message.contains("挂死"), "错误应说明空闲超时：{message}");
-        assert!(elapsed < Duration::from_secs(10), "应在空闲超时后尽快返回，实际 {elapsed:?}");
+        assert!(
+            message.contains("无输出") || message.contains("挂死"),
+            "错误应说明空闲超时：{message}"
+        );
+        assert!(
+            elapsed < Duration::from_secs(10),
+            "应在空闲超时后尽快返回，实际 {elapsed:?}"
+        );
     }
 
     /// run_with_idle_timeout：取消路径仍可用——先启动再 cancel，应返回取消错误。

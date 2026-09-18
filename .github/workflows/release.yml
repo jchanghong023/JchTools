@@ -11,7 +11,17 @@ jobs:
     runs-on: windows-2022
     steps:
       - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
+      # 工具链固定：与 Cargo.toml 的 rust-version 同步更新。
+      - uses: dtolnay/rust-toolchain@1.98.1
+      # P-05/E-04：双形态交付。runner 镜像自带 Inno Setup 6；缺失时兜底安装，
+      # 保证 package-windows.ps1 能编译出安装包（免 UAC + 桌面快捷方式 + 卸载项）。
+      - name: Ensure Inno Setup 6
+        shell: pwsh
+        run: |
+          if (-not (Test-Path "${env:ProgramFiles(x86)}\Inno Setup 6\ISCC.exe")) {
+            choco install innosetup -y --no-progress
+          }
+          & "${env:ProgramFiles(x86)}\Inno Setup 6\ISCC.exe" /? | Select-Object -First 1
       - name: Compose release metadata
         id: meta
         shell: pwsh
@@ -19,12 +29,12 @@ jobs:
           $tag = (Get-Date).ToUniversalTime().ToString('yyyyMMdd-HHmm')
           Add-Content -Path $env:GITHUB_OUTPUT -Value "tag=$tag"
           Add-Content -Path $env:GITHUB_OUTPUT -Value "name=JchTools $tag"
-      - name: Build portable Windows package
+      - name: Build installer and portable ZIP
         shell: pwsh
         env:
           GITHUB_TOKEN: ${{ github.token }}
         run: ./scripts/package-windows.ps1
-      - name: Create GitHub Release with ZIP
+      - name: Create GitHub Release with both artifacts
         shell: pwsh
         env:
           GH_TOKEN: ${{ github.token }}
@@ -34,6 +44,11 @@ jobs:
           $name = '${{ steps.meta.outputs.name }}'
           $zips = @(Get-ChildItem -Path dist -Filter '*.zip' -File -ErrorAction SilentlyContinue)
           if ($zips.Count -ne 1) { throw "Expected exactly one dist ZIP, found $($zips.Count)." }
+          $setups = @(Get-ChildItem -Path dist -Filter 'JchTools-Setup-x64.exe' -File -ErrorAction Stop)
+          if ($setups.Count -ne 1) { throw "Expected the installer JchTools-Setup-x64.exe, found $($setups.Count)." }
           $sums = Join-Path $env:RUNNER_TEMP 'SHA256SUMS.txt'
-          (Get-FileHash -Algorithm SHA256 $zips[0].FullName | ForEach-Object { "$($_.Hash.ToLower()) *$($zips[0].Name)" }) | Set-Content -Path $sums -NoNewline
-          gh release create $tag $zips[0].FullName $sums --title $name --generate-notes --target ${{ github.sha }}
+          $lines = @($zips[0], $setups[0]) | ForEach-Object {
+            "$((Get-FileHash -Algorithm SHA256 $_.FullName).Hash.ToLower()) *$($_.Name)"
+          }
+          $lines | Set-Content -Path $sums -NoNewline
+          gh release create $tag $zips[0].FullName $setups[0].FullName $sums --title $name --generate-notes --target ${{ github.sha }}

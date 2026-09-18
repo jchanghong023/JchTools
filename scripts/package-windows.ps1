@@ -92,8 +92,6 @@ foreach ($package in $metadata.packages) {
 }
 $utf8 = New-Object Text.UTF8Encoding($false)
 [IO.File]::WriteAllText((Join-Path $noticeRoot 'index.json'),($licenseIndex | ConvertTo-Json -Depth 5),$utf8)
-$info = @{created=(Get-Date).ToUniversalTime().ToString('o');rustc=(& rustc --version | Out-String).Trim();tests= $(if($SkipTests){'NOT RUN'}else{'cargo tests and real-engine archive tests passed on this build machine'});windows_ui_manual='NOT VERIFIED BY THIS SCRIPT';multi_tb_benchmark='NOT VERIFIED BY THIS SCRIPT';source_validation='See git history and CI runs for validation evidence.'}
-[IO.File]::WriteAllText((Join-Path $folder 'BUILD-INFO.json'),($info | ConvertTo-Json -Depth 5),$utf8)
 # 发布目录不应出现引擎可执行文件：它们必须在 EXE 内部。
 foreach ($name in @('7z.exe','7z.dll')) {
     if (Test-Path -LiteralPath (Join-Path $folder "resources\7zip\$name")) {throw "Engine executable leaked into the package: $name"}
@@ -110,3 +108,27 @@ foreach ($item in (Get-ChildItem -LiteralPath $folder -Recurse -Force)) {
 Compress-Archive -LiteralPath $folder -DestinationPath $zip -CompressionLevel Optimal
 Write-Host "Created: $zip"
 Write-Host 'End users extract this ZIP and run JchTools.exe; no separate 7-Zip installation.'
+
+# ===== 安装包（P-05/E-04）：Inno Setup 双形态交付的第二产物 =====
+# ISCC 不可用时如实标注 NOT RUN 并继续产出便携 ZIP（CI 负责装 Inno Setup；本地缺件不阻断）。
+$version = (Select-String -LiteralPath 'Cargo.toml' -Pattern '^version\s*=\s*"([^"]+)"' | Select-Object -First 1).Matches[0].Groups[1].Value
+$setupSummary = 'NOT RUN (ISCC not found on this machine; CI release job builds the installer)'
+$isccPath = (Get-Command ISCC.exe -ErrorAction SilentlyContinue).Source
+if (-not $isccPath) {
+    $isccPath = @(
+        "${env:ProgramFiles(x86)}\Inno Setup 6\ISCC.exe",
+        "$env:ProgramFiles\Inno Setup 6\ISCC.exe"
+    ) | Where-Object { Test-Path -LiteralPath $_ } | Select-Object -First 1
+}
+if ($isccPath) {
+    & $isccPath "/DSourceDir=$folder" "/DOutputDir=$(Join-Path $root 'dist')" "/DVersion=$version" (Join-Path $root 'installer\JchTools.iss')
+    if ($LASTEXITCODE -ne 0) { throw "Inno Setup compiler failed: $LASTEXITCODE" }
+    $setup = Join-Path $root 'dist\JchTools-Setup-x64.exe'
+    if (-not (Test-Path -LiteralPath $setup)) { throw 'Installer was not produced at dist\JchTools-Setup-x64.exe' }
+    $setupSummary = 'built dist\JchTools-Setup-x64.exe (per-user install, desktop shortcut, start menu, uninstall entry)'
+    Write-Host "Created: $setup"
+} else {
+    Write-Warning "Inno Setup (ISCC.exe) not found: installer NOT RUN; portable ZIP is still produced."
+}
+$info = @{created=(Get-Date).ToUniversalTime().ToString('o');rustc=(& rustc --version | Out-String).Trim();tests= $(if($SkipTests){'NOT RUN'}else{'cargo tests and real-engine archive tests passed on this build machine'});installer=$setupSummary;windows_ui_manual='NOT VERIFIED BY THIS SCRIPT';multi_tb_benchmark='NOT VERIFIED BY THIS SCRIPT';source_validation='See git history and CI runs for validation evidence.'}
+[IO.File]::WriteAllText((Join-Path $folder 'BUILD-INFO.json'),($info | ConvertTo-Json -Depth 5),$utf8)

@@ -1,49 +1,38 @@
 [
   {
     "section": "解压",
-    "key": "extract",
-    "title": "递归解压压缩包",
-    "hint": "使用随应用携带的完整 7-Zip；不需要单独安装。",
-    "kind": "bool",
-    "choices": []
-  },
-  {
-    "section": "解压",
     "key": "nested_archives",
     "title": "继续解压嵌套压缩包",
     "hint": "例如 ZIP → TAR → 文件；受最大嵌套层数限制。",
     "kind": "bool",
     "choices": [],
+    "tools": ["extract"],
     "tier": "advanced"
   },
   {
     "section": "解压",
     "key": "archive_delete",
     "title": "解压成功后的原压缩包",
-    "hint": "有跳过、失败或分卷来源不确定时强制保留原包。",
+    "hint": "默认移入回收站；未能完全解开的原包一律移入「解压失败」子目录等待人工处理。",
     "kind": "choice",
     "choices": [
       [
-        "global",
-        "跟随全局",
-        "使用“安全与性能 → 全局默认删除方式”的当前值；有跳过、失败或分卷来源不确定时仍强制保留原包。"
-      ],
-      [
         "keep",
         "保留，不删除",
-        "解压成功后原压缩包保持在原位置；有跳过、失败或分卷来源不确定时同样保留。"
+        "解压成功后原压缩包保持在原位置；未能完全解开的原包仍移入「解压失败」。"
       ],
       [
         "recycle",
         "移入回收站",
-        "解压成功后把原压缩包移入回收站；有跳过、失败或分卷来源不确定时改为保留原包。"
+        "解压成功后把原压缩包移入回收站，误删可找回；未能完全解开的原包移入「解压失败」。"
       ],
       [
         "permanent",
         "永久删除",
-        "解压成功后直接永久删除原压缩包，不可从回收站恢复；有跳过、失败或分卷来源不确定时改为保留原包。"
+        "解压成功后直接永久删除原压缩包，不可从回收站恢复；未能完全解开的原包移入「解压失败」。"
       ]
-    ]
+    ],
+    "tools": ["extract"]
   },
   {
     "section": "解压",
@@ -65,7 +54,7 @@
       [
         "skip",
         "跳过新文件",
-        "目标已存在时保留磁盘上原有文件，跳过解压结果；有跳过的条目时原压缩包强制保留。"
+        "目标已存在时保留磁盘上原有文件，跳过解压结果；该包按未完全解开移入「解压失败」。"
       ],
       [
         "newest",
@@ -82,7 +71,8 @@
         "两个都保留并重命名",
         "不覆盖任何一份；新文件自动分配不冲突的新名称，两份都保留。"
       ]
-    ]
+    ],
+    "tools": ["extract"]
   },
   {
     "section": "解压",
@@ -112,15 +102,17 @@
         "直接永久删除解压时被覆盖的旧文件，不可从回收站恢复。"
       ]
     ],
+    "tools": ["extract"],
     "tier": "advanced"
   },
   {
     "section": "解压",
     "key": "max_depth",
     "title": "最大嵌套层数",
-    "hint": "1～64；到达限制后保留压缩包并记录原因。",
+    "hint": "1～64；到达限制后原包移入「解压失败」并记录原因。",
     "kind": "number",
     "choices": [],
+    "tools": ["extract"],
     "tier": "advanced"
   },
   {
@@ -130,6 +122,7 @@
     "hint": "防止异常包产生过多文件；默认 100 万。",
     "kind": "number",
     "choices": [],
+    "tools": ["extract"],
     "tier": "advanced"
   },
   {
@@ -139,6 +132,7 @@
     "hint": "0 表示不额外限制；仍然检查磁盘剩余空间。",
     "kind": "number",
     "choices": [],
+    "tools": ["extract"],
     "tier": "advanced"
   },
   {
@@ -148,6 +142,7 @@
     "hint": "0 表示不额外限制，支持 TB 级文件。",
     "kind": "number",
     "choices": [],
+    "tools": ["extract"],
     "tier": "advanced"
   },
   {
@@ -157,6 +152,7 @@
     "hint": "默认 10000；0 表示关闭比例检查。",
     "kind": "number",
     "choices": [],
+    "tools": ["extract"],
     "tier": "advanced"
   },
   {
@@ -165,7 +161,8 @@
     "title": "同名去重",
     "hint": "同名且内容相同的文件参与去重，只保留一份；保留规则见下，其余按「重复文件处理方式」处理。",
     "kind": "bool",
-    "choices": []
+    "choices": [],
+    "tools": ["organizer"]
   },
   {
     "section": "去重",
@@ -173,7 +170,8 @@
     "title": "副本名去重",
     "hint": "名称带副本后缀（如「(1)」「- Copy」「副本」）的文件也视为重复候选参与内容去重，只保留一份。",
     "kind": "bool",
-    "choices": []
+    "choices": [],
+    "tools": ["organizer"]
   },
   {
     "section": "去重",
@@ -181,7 +179,8 @@
     "title": "不同名同内容去重",
     "hint": "名称不同但内容完全相同的文件也参与去重，只保留一份。",
     "kind": "bool",
-    "choices": []
+    "choices": [],
+    "tools": ["organizer"]
   },
   {
     "section": "去重",
@@ -215,7 +214,8 @@
         "保留名称最短的",
         "重复组内保留文件名最短的那一份；再按路径稳定决胜。"
       ]
-    ]
+    ],
+    "tools": ["organizer"]
   },
   {
     "section": "去重",
@@ -235,6 +235,7 @@
         "路径都保留，但共享同一份磁盘数据；只适用于同一卷，修改任一名称会影响其他名称。"
       ]
     ],
+    "tools": ["organizer"],
     "tier": "advanced"
   },
   {
@@ -265,6 +266,7 @@
         "直接永久删除重复文件，不可从回收站恢复。"
       ]
     ],
+    "tools": ["organizer"],
     "tier": "advanced"
   },
   {
@@ -299,7 +301,8 @@
         "按自定义扩展名规则",
         "使用下方“自定义分类规则”匹配；未匹配的放入“其他”。"
       ]
-    ]
+    ],
+    "tools": ["organizer"]
   },
   {
     "section": "归类",
@@ -307,7 +310,8 @@
     "title": "归类输出目录名称",
     "hint": "留空表示分类目录直接建在选定目录根下；填名称（如“已整理”）则先建该子目录再分类。",
     "kind": "text",
-    "choices": []
+    "choices": [],
+    "tools": ["organizer"]
   },
   {
     "section": "归类",
@@ -315,7 +319,8 @@
     "title": "在分类目录内保留原相对路径",
     "hint": "默认开启：分类下保留原文件夹层级；关闭后扁平归类，同名自动改名。",
     "kind": "bool",
-    "choices": []
+    "choices": [],
+    "tools": ["organizer"]
   },
   {
     "section": "归类",
@@ -323,7 +328,8 @@
     "title": "自定义分类规则",
     "hint": "格式：文档=pdf,docx;图片=jpg,png；未匹配的放入“其他”。",
     "kind": "text",
-    "choices": []
+    "choices": [],
+    "tools": ["organizer"]
   },
   {
     "section": "归类",
@@ -332,6 +338,7 @@
     "hint": "优先放入输出目录下的“大文件”目录。",
     "kind": "bool",
     "choices": [],
+    "tools": ["organizer"],
     "tier": "advanced"
   },
   {
@@ -341,6 +348,7 @@
     "hint": "使用 64 位大小计算；归类前先显示具体移动计划。",
     "kind": "number",
     "choices": [],
+    "tools": ["organizer"],
     "tier": "advanced"
   },
   {
@@ -350,6 +358,7 @@
     "hint": "以层级更浅、名称排序更前的目录为目标；原路径逐项显示在计划中。",
     "kind": "bool",
     "choices": [],
+    "tools": ["organizer"],
     "tier": "advanced"
   },
   {
@@ -359,6 +368,7 @@
     "hint": "可能改变上下文或相对路径，因此默认关闭。",
     "kind": "bool",
     "choices": [],
+    "tools": ["organizer"],
     "tier": "advanced"
   },
   {
@@ -367,7 +377,8 @@
     "title": "整理结束后清理空目录",
     "hint": "逐目录复查，仅删除实际为空的目录，绝不递归删除用户目录。",
     "kind": "bool",
-    "choices": []
+    "choices": [],
+    "tools": ["organizer"]
   },
   {
     "section": "清理",
@@ -375,7 +386,8 @@
     "title": "清理常见系统附属文件",
     "hint": "Thumbs.db / .DS_Store / desktop.ini / __MACOSX / ._；默认开启，系统会再生缓存类文件。",
     "kind": "bool",
-    "choices": []
+    "choices": [],
+    "tools": ["organizer"]
   },
   {
     "section": "清理",
@@ -383,7 +395,8 @@
     "title": "清理临时文件和备份",
     "hint": "包含 .tmp / .temp / .bak / Office ~$ 文件；可能有用，默认关闭。",
     "kind": "bool",
-    "choices": []
+    "choices": [],
+    "tools": ["organizer"]
   },
   {
     "section": "清理",
@@ -392,6 +405,7 @@
     "hint": "空文件可能是标记文件（如 .gitkeep）；默认关闭，开启后按全局删除方式处理。",
     "kind": "bool",
     "choices": [],
+    "tools": ["organizer"],
     "tier": "advanced"
   },
   {
@@ -422,6 +436,7 @@
         "直接永久删除清理目标，不可从回收站恢复。"
       ]
     ],
+    "tools": ["organizer"],
     "tier": "advanced"
   },
   {
@@ -431,6 +446,7 @@
     "hint": "只有实际确认过相同内容的保留者才会去掉 (1) / Copy / 副本；中文「副本」紧贴文件名（如「报告副本.pdf」）无分隔符也会被识别并去掉；硬链接模式下不适用。",
     "kind": "bool",
     "choices": [],
+    "tools": ["organizer"],
     "tier": "advanced"
   },
   {
@@ -440,6 +456,7 @@
     "hint": "Unicode NFC、合并连续空白；不随意删除正常字符。默认开启。",
     "kind": "bool",
     "choices": [],
+    "tools": ["organizer"],
     "tier": "advanced"
   },
   {
@@ -448,7 +465,8 @@
     "title": "修正错误的文件扩展名",
     "hint": "按内容签名检测真实类型并修正（例如 jpg 误存成 png）；更名列入计划，不直接修改。",
     "kind": "bool",
-    "choices": []
+    "choices": [],
+    "tools": ["organizer"]
   },
   {
     "section": "安全与性能",
@@ -456,7 +474,8 @@
     "title": "包含全部子目录",
     "hint": "关闭时只扫描所选目录的直接子项。",
     "kind": "bool",
-    "choices": []
+    "choices": [],
+    "tools": ["extract", "organizer"]
   },
   {
     "section": "安全与性能",
@@ -464,7 +483,8 @@
     "title": "包含隐藏文件",
     "hint": "链接和程序工作目录仍然排除。",
     "kind": "bool",
-    "choices": []
+    "choices": [],
+    "tools": ["extract", "organizer"]
   },
   {
     "section": "安全与性能",
@@ -473,6 +493,7 @@
     "hint": "需要明确开启；始终拒绝直接整理 Windows 安装目录。",
     "kind": "bool",
     "choices": [],
+    "tools": ["extract", "organizer"],
     "tier": "advanced"
   },
   {
@@ -482,6 +503,7 @@
     "hint": "分号分隔的 glob；匹配相对于所选目录的路径；* 默认可匹配路径分隔符，即可跨多层目录命中。",
     "kind": "text",
     "choices": [],
+    "tools": ["extract", "organizer"],
     "tier": "advanced"
   },
   {
@@ -506,7 +528,8 @@
         "永久删除",
         "各类“跟随全局”的删除项默认永久删除，不可从回收站恢复；仍可在单项里覆盖。"
       ]
-    ]
+    ],
+    "tools": ["extract", "organizer"]
   },
   {
     "section": "安全与性能",
@@ -515,6 +538,7 @@
     "hint": "默认开启；任务确认中会再次明确告知。取消操作不会触发降级。",
     "kind": "bool",
     "choices": [],
+    "tools": ["extract", "organizer"],
     "tier": "advanced"
   },
   {
@@ -524,6 +548,7 @@
     "hint": "1～16；机械盘通常选择 1，SSD 可适当增加，不默认拉满磁盘。",
     "kind": "number",
     "choices": [],
+    "tools": ["organizer"],
     "tier": "advanced"
   },
   {
@@ -533,6 +558,7 @@
     "hint": "解压前检查总需求，运行时持续检查剩余空间。",
     "kind": "number",
     "choices": [],
+    "tools": ["extract"],
     "tier": "advanced"
   }
 ]

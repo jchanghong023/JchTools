@@ -4,28 +4,81 @@ use std::path::PathBuf;
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
-pub enum DeleteMode { Keep, Recycle, Permanent }
+pub enum DeleteMode {
+    Keep,
+    Recycle,
+    Permanent,
+}
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
-pub enum DeleteChoice { Global, Keep, Recycle, Permanent }
+pub enum DeleteChoice {
+    Global,
+    Keep,
+    Recycle,
+    Permanent,
+}
+/// 递归解压工具的原包处置（X-05/R-02）：只属于解压工具，默认回收站，
+/// 不提供「跟随全局」（成功解包的结果不依赖其它工具的全局删除口径）。
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum ArchiveDispose {
+    Keep,
+    Recycle,
+    Permanent,
+}
+impl ArchiveDispose {
+    pub fn resolve(self) -> DeleteMode {
+        match self {
+            Self::Keep => DeleteMode::Keep,
+            Self::Recycle => DeleteMode::Recycle,
+            Self::Permanent => DeleteMode::Permanent,
+        }
+    }
+}
 impl DeleteChoice {
     pub fn resolve(self, global: DeleteMode) -> DeleteMode {
-        match self { Self::Global => global, Self::Keep => DeleteMode::Keep,
-            Self::Recycle => DeleteMode::Recycle, Self::Permanent => DeleteMode::Permanent }
+        match self {
+            Self::Global => global,
+            Self::Keep => DeleteMode::Keep,
+            Self::Recycle => DeleteMode::Recycle,
+            Self::Permanent => DeleteMode::Permanent,
+        }
     }
 }
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
-pub enum KeepPolicy { Newest, Oldest, Largest, Smallest, ShortestName }
+pub enum KeepPolicy {
+    Newest,
+    Oldest,
+    Largest,
+    Smallest,
+    ShortestName,
+}
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
-pub enum ConflictPolicy { Ask, Overwrite, Skip, Newest, Largest, KeepBoth }
+pub enum ConflictPolicy {
+    Ask,
+    Overwrite,
+    Skip,
+    Newest,
+    Largest,
+    KeepBoth,
+}
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
-pub enum ClassifyMode { Off, Extension, Category, Date, Custom }
+pub enum ClassifyMode {
+    Off,
+    Extension,
+    Category,
+    Date,
+    Custom,
+}
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
-pub enum DuplicateAction { Delete, Hardlink }
+pub enum DuplicateAction {
+    Delete,
+    Hardlink,
+}
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default, deny_unknown_fields)]
@@ -34,9 +87,8 @@ pub struct Config {
     pub include_hidden: bool,
     pub include_system: bool,
     pub exclusions: String,
-    pub extract: bool,
     pub nested_archives: bool,
-    pub archive_delete: DeleteChoice,
+    pub archive_delete: ArchiveDispose,
     /// 解压冲突策略。默认 Newest（与历史行为一致）：判定采用新文件时会删除/覆盖
     /// 已有文件，解压侧对每次此类替换写带策略名的明确警告日志；希望绝不覆盖的
     /// 用户应显式选择 Skip。
@@ -84,13 +136,14 @@ pub struct Config {
 }
 /// 默认的自定义分类规则串：界面用它判断「用户是否改过这一项」，
 /// 避免在比较处重复构造同一份字面量。
-pub const DEFAULT_CUSTOM_CATEGORIES:&str="文档=pdf,doc,docx,txt,md,xls,xlsx,ppt,pptx;图片=jpg,jpeg,png,webp;视频=mp4,mkv,avi,mov";
+pub const DEFAULT_CUSTOM_CATEGORIES: &str =
+    "文档=pdf,doc,docx,txt,md,xls,xlsx,ppt,pptx;图片=jpg,jpeg,png,webp;视频=mp4,mkv,avi,mov";
 impl Default for Config {
     fn default() -> Self {
         Self {
             recursive: true, include_hidden: false, include_system: false,
             exclusions: ".git/**;node_modules/**;$RECYCLE.BIN/**;System Volume Information/**;.svn/**;.hg/**;.vs/**;.idea/**;AppData/**;ProgramData/**;Program Files/**;Program Files (x86)/**;Program Files (Arm)/**;Windows/**;Windows.old/**;$Windows.~BT/**;$Windows.~WS/**;WindowsApps/**;Packages/**;Recovery/**;PerfLogs/**;Config.Msi/**;SoftwareDistribution/**;Application Data/**;Local Settings/**;Temp/**;Tmp/**;Cookies/**;Recent/**;OneDrive/**".into(),
-            extract: true, nested_archives: true, archive_delete: DeleteChoice::Global,
+            nested_archives: true, archive_delete: ArchiveDispose::Recycle,
             // 默认 Newest 与历史行为一致；涉及删除时解压侧写带策略名的警告日志。
             extract_conflict: ConflictPolicy::Newest, max_depth: 16,
             // 100 万条目足够覆盖正常压缩包，同时约束异常包的条目放大；超大合法包可调高。
@@ -114,15 +167,32 @@ impl Default for Config {
 }
 impl Config {
     pub fn validate(&self) -> Result<()> {
-        if !(1..=16).contains(&self.hash_workers) { bail!("Hash 工作线程必须在 1～16 之间"); }
-        if !(1..=64).contains(&self.max_depth) { bail!("嵌套层数必须在 1～64 之间"); }
-        if self.max_entries == 0 { bail!("压缩包条目上限不能为 0"); }
-        for number in [self.max_unpacked_gib, self.max_file_gib, self.reserve_gib, self.large_threshold_gib] {
+        if !(1..=16).contains(&self.hash_workers) {
+            bail!("Hash 工作线程必须在 1～16 之间");
+        }
+        if !(1..=64).contains(&self.max_depth) {
+            bail!("嵌套层数必须在 1～64 之间");
+        }
+        if self.max_entries == 0 {
+            bail!("压缩包条目上限不能为 0");
+        }
+        for number in [
+            self.max_unpacked_gib,
+            self.max_file_gib,
+            self.reserve_gib,
+            self.large_threshold_gib,
+        ] {
             number.checked_mul(1 << 30).context("容量设置超出范围")?;
         }
-        if !self.output_dir.is_empty() { crate::fsutil::validate_component(&self.output_dir)?; }
-        if self.fix_extension && !self.detect_type { bail!("修正扩展名需要先开启真实类型检测"); }
-        if !["system", "light", "dark"].contains(&self.theme.as_str()) { bail!("主题参数无效"); }
+        if !self.output_dir.is_empty() {
+            crate::fsutil::validate_component(&self.output_dir)?;
+        }
+        if self.fix_extension && !self.detect_type {
+            bail!("修正扩展名需要先开启真实类型检测");
+        }
+        if !["system", "light", "dark"].contains(&self.theme.as_str()) {
+            bail!("主题参数无效");
+        }
         crate::rules::build_exclusions(&self.exclusions)?;
         crate::rules::parse_categories(&self.custom_categories)?;
         Ok(())
@@ -132,35 +202,55 @@ impl Config {
     /// 历史版本已删除的设置键：旧配置与旧任务库仍带着它们，反序列化前剥除，
     /// 否则 deny_unknown_fields 会把旧数据整体判成非法配置。
     /// verify_bytes（删除前逐字节复核）已写死为始终开启；
-    /// 5 个 same_name_*/conflict_scope 键是已按 R-05 移除的同名版本取舍开关。
-    const REMOVED_FIELDS: &[&str] = &["hash_algorithm", "verify_bytes", "same_name_same_size",
-        "same_size_keep", "same_name_different_size", "different_size_keep", "conflict_scope_directory"];
+    /// 5 个 same_name_*/conflict_scope 键是已按 R-05 移除的同名版本取舍开关；
+    /// extract 键随两工具拆分移除（解压职责整体移交「递归解压」工具，X-01）。
+    const REMOVED_FIELDS: &[&str] = &[
+        "hash_algorithm",
+        "verify_bytes",
+        "same_name_same_size",
+        "same_size_keep",
+        "same_name_different_size",
+        "different_size_keep",
+        "conflict_scope_directory",
+        "extract",
+    ];
     pub fn from_json_text(text: &str) -> Result<Self> {
         // 某些编辑器会写出带 UTF-8 BOM 的文件；serde_json 不接受，解析前剥掉。
         let text = text.strip_prefix('\u{FEFF}').unwrap_or(text);
         let mut value: serde_json::Value = serde_json::from_str(text)?;
         if let Some(map) = value.as_object_mut() {
-            for key in Self::REMOVED_FIELDS { map.remove(*key); }
+            for key in Self::REMOVED_FIELDS {
+                map.remove(*key);
+            }
         }
         Ok(serde_json::from_value(value)?)
     }
     pub fn set_json(&mut self, key: &str, value: serde_json::Value) -> Result<()> {
         let mut data = serde_json::to_value(&*self)?;
         let map = data.as_object_mut().context("配置不是对象")?;
-        if !map.contains_key(key) { bail!("未知设置：{key}"); }
+        if !map.contains_key(key) {
+            bail!("未知设置：{key}");
+        }
         map.insert(key.to_string(), value);
         *self = serde_json::from_value(data)?;
         Ok(())
     }
     pub fn destructive_warning(&self) -> String {
-        fn label(mode: DeleteMode) -> &'static str { match mode { DeleteMode::Keep=>"保留",DeleteMode::Recycle=>"回收站",DeleteMode::Permanent=>"永久删除" } }
+        fn label(mode: DeleteMode) -> &'static str {
+            match mode {
+                DeleteMode::Keep => "保留",
+                DeleteMode::Recycle => "回收站",
+                DeleteMode::Permanent => "永久删除",
+            }
+        }
         format!("原压缩包：{}；重复文件：{}；解压覆盖旧文件：{}；清理文件：{}。\n回收失败后永久删除：{}（用户取消不会触发降级）。没有自动回滚；请确认目录和规则。",
-            label(self.archive_delete.resolve(self.global_delete)),label(self.duplicate_delete.resolve(self.global_delete)),
+            label(self.archive_delete.resolve()),label(self.duplicate_delete.resolve(self.global_delete)),
             label(self.conflict_delete.resolve(self.global_delete)),label(self.cleanup_delete.resolve(self.global_delete)),
             if self.recycle_fallback { "已开启" } else { "已关闭" })
     }
 }
 pub fn state_dir() -> Result<PathBuf> {
-    let dirs = directories_next::ProjectDirs::from("", "", "JchTools").context("无法确定用户数据目录")?;
+    let dirs =
+        directories_next::ProjectDirs::from("", "", "JchTools").context("无法确定用户数据目录")?;
     Ok(dirs.data_local_dir().to_path_buf())
 }

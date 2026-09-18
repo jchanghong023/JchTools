@@ -19,11 +19,16 @@ fn any_string() -> impl Strategy<Value = String> {
 }
 /// 组成路径形状的输入：若干任意段，用随机正/反斜杠连接。
 fn any_path_like() -> impl Strategy<Value = String> {
-    (collection::vec(any_string(), 1..5), collection::vec(any::<bool>(), 5))
+    (
+        collection::vec(any_string(), 1..5),
+        collection::vec(any::<bool>(), 5),
+    )
         .prop_map(|(parts, backslash)| {
             let mut raw = String::new();
             for (index, part) in parts.iter().enumerate() {
-                if index > 0 { raw.push(if backslash[index - 1] {'\\'} else {'/'}); }
+                if index > 0 {
+                    raw.push(if backslash[index - 1] { '\\' } else { '/' });
+                }
                 raw.push_str(part);
             }
             raw

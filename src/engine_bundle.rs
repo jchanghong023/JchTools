@@ -15,11 +15,16 @@ mod embedded {
 }
 
 /// 构建时是否内嵌了完整引擎。
-pub fn embedded_available() -> bool { !embedded::FILES.is_empty() && !embedded::MANIFEST.is_empty() }
+pub fn embedded_available() -> bool {
+    !embedded::FILES.is_empty() && !embedded::MANIFEST.is_empty()
+}
 
 /// 随包携带的引擎目录（`resources/7zip`），存在即返回。
 pub fn bundled_dir() -> Option<PathBuf> {
-    let directory = std::env::current_exe().ok()?.parent()?.join("resources/7zip");
+    let directory = std::env::current_exe()
+        .ok()?
+        .parent()?
+        .join("resources/7zip");
     let executable = directory.join(engine_name());
     executable.is_file().then_some(directory)
 }
@@ -27,11 +32,21 @@ pub fn bundled_dir() -> Option<PathBuf> {
 /// 内嵌引擎的释放目录；用户可以把自备的 7z.exe / 7z.dll 放在这里覆盖内嵌副本。
 pub fn embedded_dir() -> Option<PathBuf> {
     let base = crate::config::state_dir().ok()?;
-    let id = if embedded::ID.is_empty() { "unknown".to_string() } else { embedded::ID.to_string() };
+    let id = if embedded::ID.is_empty() {
+        "unknown".to_string()
+    } else {
+        embedded::ID.to_string()
+    };
     Some(base.join("engine").join(id))
 }
 
-fn engine_name() -> &'static str { if cfg!(windows) { "7z.exe" } else { "7zz" } }
+fn engine_name() -> &'static str {
+    if cfg!(windows) {
+        "7z.exe"
+    } else {
+        "7zz"
+    }
+}
 
 /// 返回可执行的 7-Zip 路径：随包目录 → 已释放的内嵌副本 → 现释放内嵌副本。
 pub fn resolve_executable() -> Result<PathBuf> {
@@ -56,12 +71,17 @@ pub fn resolve_executable() -> Result<PathBuf> {
     release(&directory)?;
     cleanup_part_residue(&directory);
     let executable = directory.join(engine_name());
-    if !executable.is_file() { bail!("内嵌引擎释放后仍缺少 {}", engine_name()); }
+    if !executable.is_file() {
+        bail!("内嵌引擎释放后仍缺少 {}", engine_name());
+    }
     // 与随包路径对称：Windows 上缺 7z.dll 视为不完整引擎，释放后必须再检一次。
     #[cfg(windows)]
     {
         if !directory.join("7z.dll").is_file() {
-            bail!("内嵌引擎释放后不完整：缺少 7z.dll（{}）。", directory.display());
+            bail!(
+                "内嵌引擎释放后不完整：缺少 7z.dll（{}）。",
+                directory.display()
+            );
         }
     }
     // 返回前按内嵌清单逐个复检哈希（主程序 + 7z.dll），缩小释放与实际调用之间的篡改窗口（TOCTOU）。
@@ -76,7 +96,11 @@ fn manifest_expectation(file_name: &str) -> Option<String> {
     let files = manifest["files"].as_array()?;
     files.iter().find_map(|entry| {
         let name = entry["name"].as_str()?;
-        if name.eq_ignore_ascii_case(file_name) { entry["sha256"].as_str().map(|s| s.to_lowercase()) } else { None }
+        if name.eq_ignore_ascii_case(file_name) {
+            entry["sha256"].as_str().map(|s| s.to_lowercase())
+        } else {
+            None
+        }
     })
 }
 
@@ -84,10 +108,16 @@ fn manifest_expectation(file_name: &str) -> Option<String> {
 /// resolve_executable 返回前调用，缩小释放与实际调用之间的篡改窗口（TOCTOU）。
 /// Windows 上 7z.dll 是主要攻击面，不能只复检主程序。
 fn warn_all_manifest_mismatches(directory: &Path, context: &str) {
-    let Ok(manifest) = serde_json::from_str::<serde_json::Value>(embedded::MANIFEST) else { return };
-    let Some(entries) = manifest["files"].as_array() else { return };
+    let Ok(manifest) = serde_json::from_str::<serde_json::Value>(embedded::MANIFEST) else {
+        return;
+    };
+    let Some(entries) = manifest["files"].as_array() else {
+        return;
+    };
     for entry in entries {
-        let Some(name) = entry["name"].as_str() else { continue };
+        let Some(name) = entry["name"].as_str() else {
+            continue;
+        };
         warn_if_hash_mismatch(&directory.join(name), context);
     }
 }
@@ -103,7 +133,11 @@ fn persist_engine_warning(message: &str) {
             if std::fs::create_dir_all(&dir).is_ok() {
                 use std::io::Write;
                 let path = dir.join("engine-warnings.log");
-                if let Ok(mut file) = std::fs::OpenOptions::new().create(true).append(true).open(&path) {
+                if let Ok(mut file) = std::fs::OpenOptions::new()
+                    .create(true)
+                    .append(true)
+                    .open(&path)
+                {
                     let timestamp = chrono::Utc::now().to_rfc3339();
                     let _ = writeln!(file, "[{timestamp}] {message}");
                 }
@@ -114,8 +148,12 @@ fn persist_engine_warning(message: &str) {
 
 /// 校验文件 sha256 是否与内嵌清单一致；不一致或无法读取时记录警告（不阻断，LGPL 允许替换）。
 fn warn_if_hash_mismatch(path: &Path, context: &str) {
-    let Some(name) = path.file_name().and_then(|n| n.to_str()) else { return };
-    let Some(expected) = manifest_expectation(name) else { return };
+    let Some(name) = path.file_name().and_then(|n| n.to_str()) else {
+        return;
+    };
+    let Some(expected) = manifest_expectation(name) else {
+        return;
+    };
     match hash_matches(path, &expected) {
         Ok(true) => {}
         Ok(false) => persist_engine_warning(&format!("警告：{context} {} 的 sha256 与内嵌清单不一致，可能是用户自备或被篡改的引擎，已放行（LGPL 允许替换），请自行确认来源可信", path.display())),
@@ -127,17 +165,24 @@ fn warn_if_hash_mismatch(path: &Path, context: &str) {
 /// 只匹配本应用命名模式（引擎文件名 + `.part-` + 进程号）且仅为文件时删除；
 /// 用户自备文件与旧版本目录一律不动，避免误删。
 fn cleanup_part_residue(directory: &Path) {
-    let Ok(entries) = std::fs::read_dir(directory) else { return };
+    let Ok(entries) = std::fs::read_dir(directory) else {
+        return;
+    };
     for entry in entries.filter_map(|e| e.ok()) {
         let path = entry.path();
-        let name = path.file_name().and_then(|n| n.to_str()).unwrap_or_default();
+        let name = path
+            .file_name()
+            .and_then(|n| n.to_str())
+            .unwrap_or_default();
         let is_residue = path.is_file()
             && ["7z.exe", "7z.dll", "7zz"].iter().any(|engine| {
                 name.strip_prefix(engine)
                     .and_then(|rest| rest.strip_prefix(".part-"))
                     .is_some_and(|pid| !pid.is_empty() && pid.chars().all(|c| c.is_ascii_digit()))
             });
-        if is_residue { let _ = std::fs::remove_file(&path); }
+        if is_residue {
+            let _ = std::fs::remove_file(&path);
+        }
     }
 }
 
@@ -150,7 +195,10 @@ fn keep_existing_engine_file(target: &Path, name: &str, expected: &str) -> Resul
             Ok(())
         }
         Err(error) => {
-            persist_engine_warning(&format!("警告：无法读取已存在的引擎文件 {} 以校验 sha256：{error}，保留该文件", target.display()));
+            persist_engine_warning(&format!(
+                "警告：无法读取已存在的引擎文件 {} 以校验 sha256：{error}，保留该文件",
+                target.display()
+            ));
             Ok(())
         }
     }
@@ -158,15 +206,26 @@ fn keep_existing_engine_file(target: &Path, name: &str, expected: &str) -> Resul
 
 /// 把内嵌引擎释放到 `directory`，并在写入后校验每个文件的 sha256。
 pub fn release(directory: &Path) -> Result<()> {
-    let manifest: serde_json::Value = serde_json::from_str(embedded::MANIFEST).context("内嵌引擎清单无效")?;
-    let entries = manifest["files"].as_array().context("内嵌引擎清单缺少 files 数组")?;
-    std::fs::create_dir_all(directory).with_context(|| format!("创建引擎目录失败：{}", directory.display()))?;
+    let manifest: serde_json::Value =
+        serde_json::from_str(embedded::MANIFEST).context("内嵌引擎清单无效")?;
+    let entries = manifest["files"]
+        .as_array()
+        .context("内嵌引擎清单缺少 files 数组")?;
+    std::fs::create_dir_all(directory)
+        .with_context(|| format!("创建引擎目录失败：{}", directory.display()))?;
     for entry in entries {
         let name = entry["name"].as_str().context("内嵌引擎清单缺少文件名")?;
         // 清单由本机 build.rs 嵌入，但仍拒绝路径分隔符与 ".."，防止路径穿越写入引擎目录之外。
-        crate::fsutil::validate_component(name).with_context(|| format!("内嵌引擎清单文件名不安全：{name}"))?;
-        let expected = entry["sha256"].as_str().context("内嵌引擎清单缺少 sha256")?.to_lowercase();
-        let Some((_, compressed)) = embedded::FILES.iter().find(|(file, _)| file.eq_ignore_ascii_case(name)) else {
+        crate::fsutil::validate_component(name)
+            .with_context(|| format!("内嵌引擎清单文件名不安全：{name}"))?;
+        let expected = entry["sha256"]
+            .as_str()
+            .context("内嵌引擎清单缺少 sha256")?
+            .to_lowercase();
+        let Some((_, compressed)) = embedded::FILES
+            .iter()
+            .find(|(file, _)| file.eq_ignore_ascii_case(name))
+        else {
             bail!("内嵌引擎缺少清单里声明的文件：{name}");
         };
         let target = directory.join(name);
@@ -180,7 +239,9 @@ pub fn release(directory: &Path) -> Result<()> {
         }
         let bytes = inflate(compressed).with_context(|| format!("解压内嵌引擎失败：{name}"))?;
         let actual = hex::encode(Sha256::digest(&bytes));
-        if actual != expected { bail!("内嵌引擎 {name} 的 sha256 与清单不一致，已拒绝写入"); }
+        if actual != expected {
+            bail!("内嵌引擎 {name} 的 sha256 与清单不一致，已拒绝写入");
+        }
         match write_atomic(&target, &bytes) {
             Ok(()) => {}
             // 改名采用不覆盖语义：若改名前目标已出现（另一进程并发释放，或用户此刻放入
@@ -189,7 +250,10 @@ pub fn release(directory: &Path) -> Result<()> {
                 keep_existing_engine_file(&target, name, &expected)?;
                 continue;
             }
-            Err(error) => return Err(error).with_context(|| format!("写入引擎文件失败：{}", target.display())),
+            Err(error) => {
+                return Err(error)
+                    .with_context(|| format!("写入引擎文件失败：{}", target.display()))
+            }
         }
         match hash_matches(&target, &expected) {
             Ok(true) => {}
@@ -203,7 +267,8 @@ pub fn release(directory: &Path) -> Result<()> {
             Err(error) => {
                 // 校验读取失败同样删除：否则不可读/异常文件会因「已存在」被 keep_existing 永久信任。
                 let _ = std::fs::remove_file(&target);
-                return Err(error).with_context(|| format!("引擎文件写入后校验读取失败：{}", target.display()));
+                return Err(error)
+                    .with_context(|| format!("引擎文件写入后校验读取失败：{}", target.display()));
             }
         }
     }
@@ -228,7 +293,14 @@ fn inflate(compressed: &[u8]) -> Result<Vec<u8>> {
 fn write_atomic(target: &Path, bytes: &[u8]) -> Result<()> {
     use std::io::Write as _;
     let directory = target.parent().context("引擎目录缺少父级")?;
-    let temporary = directory.join(format!("{}.part-{}", target.file_name().and_then(|name| name.to_str()).unwrap_or("engine"), std::process::id()));
+    let temporary = directory.join(format!(
+        "{}.part-{}",
+        target
+            .file_name()
+            .and_then(|name| name.to_str())
+            .unwrap_or("engine"),
+        std::process::id()
+    ));
     {
         let mut file = std::fs::File::create(&temporary)?;
         file.write_all(bytes)?;
@@ -244,7 +316,10 @@ fn write_atomic(target: &Path, bytes: &[u8]) -> Result<()> {
     }
     match crate::fsutil::rename_noreplace(&temporary, target) {
         Ok(()) => Ok(()),
-        Err(error) => { let _ = std::fs::remove_file(&temporary); Err(error) }
+        Err(error) => {
+            let _ = std::fs::remove_file(&temporary);
+            Err(error)
+        }
     }
 }
 
@@ -258,8 +333,14 @@ mod tests {
     #[test]
     fn embedded_available_matches_build_configuration() {
         if embedded_available() {
-            assert!(!embedded::FILES.is_empty(), "embedded_available 为 true 时 FILES 不得为空");
-            assert!(!embedded::MANIFEST.is_empty(), "embedded_available 为 true 时 MANIFEST 不得为空");
+            assert!(
+                !embedded::FILES.is_empty(),
+                "embedded_available 为 true 时 FILES 不得为空"
+            );
+            assert!(
+                !embedded::MANIFEST.is_empty(),
+                "embedded_available 为 true 时 MANIFEST 不得为空"
+            );
         } else {
             // 未运行 fetch-7zip.ps1 或引擎不完整：合法的开发配置，但必须在测试输出里可见，
             // 避免「无内嵌时静默空转」掩盖真实回归；CI 需另有带引擎的构建路径。
@@ -279,7 +360,10 @@ mod tests {
             eprintln!("warning: 未内嵌 7-Zip 引擎，跳过 release 不覆盖已有文件的测试；带引擎构建须在 CI 验证此路径");
             return;
         }
-        let (name, _) = embedded::FILES.first().copied().expect("内嵌可用时至少有一个引擎文件");
+        let (name, _) = embedded::FILES
+            .first()
+            .copied()
+            .expect("内嵌可用时至少有一个引擎文件");
         let directory = tempfile::tempdir().unwrap();
         let target = directory.path().join(name);
         std::fs::write(&target, b"user supplied engine").unwrap();
@@ -300,15 +384,24 @@ mod tests {
         }
         let directory = tempfile::tempdir().unwrap();
         release(directory.path()).unwrap();
-        let manifest: serde_json::Value = serde_json::from_str(embedded::MANIFEST).expect("内嵌清单应是合法 JSON");
-        let entries = manifest["files"].as_array().expect("内嵌清单应有 files 数组");
+        let manifest: serde_json::Value =
+            serde_json::from_str(embedded::MANIFEST).expect("内嵌清单应是合法 JSON");
+        let entries = manifest["files"]
+            .as_array()
+            .expect("内嵌清单应有 files 数组");
         assert!(!entries.is_empty());
         for entry in entries {
             let name = entry["name"].as_str().expect("清单条目应有 name");
-            let expected = entry["sha256"].as_str().expect("清单条目应有 sha256").to_lowercase();
+            let expected = entry["sha256"]
+                .as_str()
+                .expect("清单条目应有 sha256")
+                .to_lowercase();
             let path = directory.path().join(name);
             assert!(path.is_file(), "内嵌引擎文件 {name} 应被释放");
-            assert!(hash_matches(&path, &expected).unwrap(), "释放后的 {name} 必须与清单 sha256 一致");
+            assert!(
+                hash_matches(&path, &expected).unwrap(),
+                "释放后的 {name} 必须与清单 sha256 一致"
+            );
         }
     }
 }

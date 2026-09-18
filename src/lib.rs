@@ -1,5 +1,5 @@
-//! The organizer engine is independent of the GUI. 整理引擎默认不联网；
-//! 代理/网络工具页在用户点击时可发起本地探测与公网回显查询。
+//! 「递归解压」与「目录整理」两个工具的引擎独立于 GUI（P-02）。
+//! 软件完全离线（P-03）：不发起任何网络请求、不上传文件、日志或路径。
 pub mod archive;
 pub mod config;
 pub mod control;
@@ -9,11 +9,9 @@ pub mod engine_bundle;
 pub mod fsutil;
 pub mod hashing;
 pub mod model;
-pub mod nettest;
 pub mod planner;
 pub mod platform;
 pub mod process;
-pub mod proxy;
 pub mod registry;
 pub mod rules;
 

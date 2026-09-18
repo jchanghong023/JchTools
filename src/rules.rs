@@ -1,4 +1,8 @@
-use crate::{config::{Config, KeepPolicy}, fsutil, model::FileRecord};
+use crate::{
+    config::{Config, KeepPolicy},
+    fsutil,
+    model::FileRecord,
+};
 use anyhow::{bail, Context, Result};
 use globset::{GlobBuilder, GlobSet, GlobSetBuilder};
 use regex::Regex;
@@ -8,17 +12,30 @@ use unicode_normalization::UnicodeNormalization;
 pub fn build_exclusions(text: &str) -> Result<GlobSet> {
     let mut builder = GlobSetBuilder::new();
     for part in text.split(';').map(str::trim).filter(|s| !s.is_empty()) {
-        builder.add(GlobBuilder::new(part).case_insensitive(true).literal_separator(false).build()?);
+        builder.add(
+            GlobBuilder::new(part)
+                .case_insensitive(true)
+                .literal_separator(false)
+                .build()?,
+        );
     }
     Ok(builder.build()?)
 }
-pub fn parse_categories(text: &str) -> Result<BTreeMap<String,String>> {
+pub fn parse_categories(text: &str) -> Result<BTreeMap<String, String>> {
     let mut map = BTreeMap::new();
     for item in text.split(';').map(str::trim).filter(|s| !s.is_empty()) {
-        let (category, extensions) = item.split_once('=').context("自定义分类格式：目录=pdf,docx;图片=jpg,png")?;
+        let (category, extensions) = item
+            .split_once('=')
+            .context("自定义分类格式：目录=pdf,docx;图片=jpg,png")?;
         fsutil::validate_component(category.trim())?;
-        for ext in extensions.split(',').map(str::trim).filter(|s| !s.is_empty()) {
-            if !ext.chars().all(|c| c.is_ascii_alphanumeric()) { bail!("扩展名只能包含英文字母和数字：{ext}"); }
+        for ext in extensions
+            .split(',')
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+        {
+            if !ext.chars().all(|c| c.is_ascii_alphanumeric()) {
+                bail!("扩展名只能包含英文字母和数字：{ext}");
+            }
             map.insert(ext.to_lowercase(), category.trim().into());
         }
     }
@@ -34,21 +51,41 @@ pub fn strip_copy_name(name: &str) -> String {
     let mut stem = original.to_string();
     loop {
         let next = expression.replace(&stem, "").trim().to_string();
-        if next.is_empty() || next == stem { break; }
+        if next.is_empty() || next == stem {
+            break;
+        }
         stem = next;
     }
-    match path.extension().and_then(|s| s.to_str()) { Some(ext) => format!("{stem}.{ext}"), None => stem }
+    match path.extension().and_then(|s| s.to_str()) {
+        Some(ext) => format!("{stem}.{ext}"),
+        None => stem,
+    }
 }
-pub fn normal_name(name: &str) -> String { strip_copy_name(name).nfc().collect::<String>().to_lowercase() }
-pub fn normalize_name(name: &str) -> String { name.nfc().collect::<String>().split_whitespace().collect::<Vec<_>>().join(" ") }
+pub fn normal_name(name: &str) -> String {
+    strip_copy_name(name)
+        .nfc()
+        .collect::<String>()
+        .to_lowercase()
+}
+pub fn normalize_name(name: &str) -> String {
+    name.nfc()
+        .collect::<String>()
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ")
+}
 /// 纯参考实现：实际去重匹配在 planner::deduplicate 的 SQL 中（keepers 表按
 /// `(name=? AND dedup_same_name) OR (name<>? AND normal=? AND dedup_copy_names) OR
 /// (name<>? AND normal<>? AND dedup_other_names)` 选择保留者）。仅供测试对照，生产路径不调用。
 #[cfg(test)]
 pub fn duplicate_allowed(a: &FileRecord, b: &FileRecord, cfg: &Config) -> bool {
-    if a.name == b.name { cfg.dedup_same_name }
-    else if a.normalized == b.normalized { cfg.dedup_copy_names }
-    else { cfg.dedup_other_names }
+    if a.name == b.name {
+        cfg.dedup_same_name
+    } else if a.normalized == b.normalized {
+        cfg.dedup_copy_names
+    } else {
+        cfg.dedup_other_names
+    }
 }
 /// Ordering::Less means a is the preferred keeper. Ties never rely on traversal order.
 pub fn compare(a: &FileRecord, b: &FileRecord, policy: KeepPolicy) -> Ordering {
@@ -60,7 +97,9 @@ pub fn compare(a: &FileRecord, b: &FileRecord, policy: KeepPolicy) -> Ordering {
         KeepPolicy::ShortestName => a.name.chars().count().cmp(&b.name.chars().count()),
     };
     // 与 ordering_sql 的 length(rel)（字符数）保持一致，避免预览与 SQL 计划的平局规则不同。
-    primary.then_with(|| a.rel.chars().count().cmp(&b.rel.chars().count())).then_with(|| a.rel.cmp(&b.rel))
+    primary
+        .then_with(|| a.rel.chars().count().cmp(&b.rel.chars().count()))
+        .then_with(|| a.rel.cmp(&b.rel))
 }
 /// SQL 排序片段（供 planner 拼接进 ORDER BY）。依赖 SQLite 对 TEXT 的 length()
 /// 返回 Unicode 码点计数（与 Rust 的 `chars().count()` 一致），与 `compare` 的平局规则对齐；
@@ -76,22 +115,39 @@ pub fn ordering_sql(policy: KeepPolicy) -> &'static str {
 }
 pub fn category(extension: &str) -> &'static str {
     match extension {
-        "pdf"|"doc"|"docx"|"xls"|"xlsx"|"ppt"|"pptx"|"txt"|"md"|"csv"|"rtf"|"odt"|"epub" => "文档",
-        "jpg"|"jpeg"|"png"|"webp"|"gif"|"bmp"|"svg"|"tif"|"tiff"|"heic"|"avif" => "图片",
-        "mp4"|"mkv"|"avi"|"mov"|"wmv"|"webm"|"m4v" => "视频",
-        "mp3"|"wav"|"flac"|"aac"|"ogg"|"m4a"|"wma"|"opus" => "音频",
-        "zip"|"7z"|"rar"|"tar"|"gz"|"bz2"|"xz"|"zst"|"tgz" => "压缩包",
-        "rs"|"py"|"c"|"cpp"|"h"|"hpp"|"js"|"ts"|"tsx"|"html"|"css"|"json"|"yaml"|"yml"|"toml"|"tcl"|"v"|"sv"|"vhd" => "代码",
-        "exe"|"msi"|"msix"|"appx" => "安装包",
+        "pdf" | "doc" | "docx" | "xls" | "xlsx" | "ppt" | "pptx" | "txt" | "md" | "csv" | "rtf"
+        | "odt" | "epub" => "文档",
+        "jpg" | "jpeg" | "png" | "webp" | "gif" | "bmp" | "svg" | "tif" | "tiff" | "heic"
+        | "avif" => "图片",
+        "mp4" | "mkv" | "avi" | "mov" | "wmv" | "webm" | "m4v" => "视频",
+        "mp3" | "wav" | "flac" | "aac" | "ogg" | "m4a" | "wma" | "opus" => "音频",
+        "zip" | "7z" | "rar" | "tar" | "gz" | "bz2" | "xz" | "zst" | "tgz" => "压缩包",
+        "rs" | "py" | "c" | "cpp" | "h" | "hpp" | "js" | "ts" | "tsx" | "html" | "css" | "json"
+        | "yaml" | "yml" | "toml" | "tcl" | "v" | "sv" | "vhd" => "代码",
+        "exe" | "msi" | "msix" | "appx" => "安装包",
         _ => "其他",
     }
 }
 pub fn cleanup_reason(rel: &str, size: u64, cfg: &Config) -> Option<&'static str> {
     let file = Path::new(rel).file_name()?.to_str()?.to_lowercase();
-    if cfg.clean_junk && (["thumbs.db", ".ds_store", "desktop.ini"].contains(&file.as_str())
-        || file.starts_with("._") || rel.split('/').any(|s| s.eq_ignore_ascii_case("__MACOSX"))) { return Some("用户开启的垃圾文件规则"); }
-    if cfg.clean_temp && (file.ends_with(".tmp") || file.ends_with(".temp") || file.ends_with(".bak") || file.starts_with("~$")) { return Some("用户开启的临时/备份文件规则"); }
-    if cfg.clean_zero && size == 0 { return Some("用户开启的零字节文件规则"); }
+    if cfg.clean_junk
+        && (["thumbs.db", ".ds_store", "desktop.ini"].contains(&file.as_str())
+            || file.starts_with("._")
+            || rel.split('/').any(|s| s.eq_ignore_ascii_case("__MACOSX")))
+    {
+        return Some("用户开启的垃圾文件规则");
+    }
+    if cfg.clean_temp
+        && (file.ends_with(".tmp")
+            || file.ends_with(".temp")
+            || file.ends_with(".bak")
+            || file.starts_with("~$"))
+    {
+        return Some("用户开启的临时/备份文件规则");
+    }
+    if cfg.clean_zero && size == 0 {
+        return Some("用户开启的零字节文件规则");
+    }
     None
 }
 pub fn archive_name(name: &str) -> bool {
@@ -99,10 +155,17 @@ pub fn archive_name(name: &str) -> bool {
     if name.ends_with(".rar") {
         static PART: OnceLock<Regex> = OnceLock::new();
         let re = PART.get_or_init(|| Regex::new(r"\.part(\d+)\.rar$").expect("constant regex"));
-        if let Some(caps) = re.captures(&name) { return caps[1].parse::<u64>().ok() == Some(1); }
+        if let Some(caps) = re.captures(&name) {
+            return caps[1].parse::<u64>().ok() == Some(1);
+        }
         return true;
     }
-    [".zip", ".7z", ".tar", ".gz", ".bz2", ".xz", ".zst", ".tgz", ".tbz2", ".txz", ".cab", ".iso", ".wim", ".lzh", ".cpio", ".7z.001", ".zip.001"].iter().any(|suffix| name.ends_with(suffix))
+    [
+        ".zip", ".7z", ".tar", ".gz", ".bz2", ".xz", ".zst", ".tgz", ".tbz2", ".txz", ".cab",
+        ".iso", ".wim", ".lzh", ".cpio", ".7z.001", ".zip.001",
+    ]
+    .iter()
+    .any(|suffix| name.ends_with(suffix))
 }
 pub fn multipart_name(name: &str) -> bool {
     let n = name.to_lowercase();
@@ -120,9 +183,18 @@ mod tests {
 
     fn record(id: i64, name: &str, normalized: &str) -> FileRecord {
         FileRecord {
-            id, rel: format!("dir/{name}"), name: name.into(), normalized: normalized.into(),
-            snapshot: Snapshot { size: 1, modified_ns: 10, identity: id.to_string(), links: 1 },
-            hash: Some("h".into()), cleanable: false,
+            id,
+            rel: format!("dir/{name}"),
+            name: name.into(),
+            normalized: normalized.into(),
+            snapshot: Snapshot {
+                size: 1,
+                modified_ns: 10,
+                identity: id.to_string(),
+                links: 1,
+            },
+            hash: Some("h".into()),
+            cleanable: false,
         }
     }
     /// 复刻 planner::deduplicate keepers 查询中的 SQL 匹配条件（与 rust 参考实现逐分支对照）：
@@ -138,9 +210,9 @@ mod tests {
     fn duplicate_allowed_matches_planner_sql() {
         // 覆盖三种名称关系（同名 / 副本名 / 不同名）与三种开关组合。
         let pairs = [
-            (record(1, "a.txt", "a.txt"), record(2, "a.txt", "a.txt")),         // 同名
-            (record(1, "a.txt", "a.txt"), record(2, "a (1).txt", "a.txt")),     // 副本名
-            (record(1, "a.txt", "a.txt"), record(2, "b.txt", "b.txt")),         // 不同名
+            (record(1, "a.txt", "a.txt"), record(2, "a.txt", "a.txt")), // 同名
+            (record(1, "a.txt", "a.txt"), record(2, "a (1).txt", "a.txt")), // 副本名
+            (record(1, "a.txt", "a.txt"), record(2, "b.txt", "b.txt")), // 不同名
         ];
         for dedup_same_name in [false, true] {
             for dedup_copy_names in [false, true] {

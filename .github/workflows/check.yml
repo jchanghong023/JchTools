@@ -11,7 +11,11 @@ jobs:
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
+      # 工具链固定：@rev 即版本，与 Cargo.toml 的 rust-version 同步更新。
+      # clippy 供 check-linux.sh 的预算棘轮，rustfmt 供其格式门禁（rustup minimal profile 不含二者）。
+      - uses: dtolnay/rust-toolchain@1.98.1
+        with:
+          components: clippy, rustfmt
       - name: Install Linux build dependencies
         # dev-dependency i-slint-backend-testing → fontdb 在 Unix 用 pkg-config 查找 fontconfig，
         # 缺开发包时 cargo check/test 会在构建脚本阶段失败（与业务代码无关）。
@@ -27,7 +31,10 @@ jobs:
     runs-on: windows-2022
     steps:
       - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
+      # 工具链固定：与 Cargo.toml 的 rust-version 同步更新。
+      - uses: dtolnay/rust-toolchain@1.98.1
+        with:
+          components: clippy
       - name: Check PowerShell syntax
         shell: pwsh
         run: |
@@ -39,6 +46,11 @@ jobs:
       - name: Static checks
         shell: pwsh
         run: python scripts/static_check.py
+      # 预算棘轮：默认特性（含 GUI 与 Windows 专属代码）的 clippy 告警不得新增。
+      # Linux 侧（--no-default-features）在 check-linux.sh 内执行，两侧互补覆盖 cfg 差异。
+      - name: Clippy budget ratchet
+        shell: pwsh
+        run: python scripts/clippy_budget.py --budget 315 -- --all-targets
       - name: Compile, run fixture tests, bundle the full 7-Zip engine
         shell: pwsh
         env:

@@ -1,0 +1,5 @@
+# clippy 配置（对 [lints.clippy] 中 unwrap_used / expect_used 生效）：
+# 测试代码允许 unwrap/expect（断言失败即测试失败，是合理用法）；
+# src/ 实现代码中的 unwrap/expect 仍为告警并计入预算。
+allow-unwrap-in-tests = true
+allow-expect-in-tests = true

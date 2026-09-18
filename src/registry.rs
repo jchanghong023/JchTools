@@ -10,16 +10,16 @@ pub struct ToolDescriptor {
 pub fn tools() -> &'static [ToolDescriptor] {
     &[
         ToolDescriptor {
+            id: "recursive-extract",
+            name: "递归解压",
+            category: "文件",
+            summary: "递归解开压缩包 · 成功原包进回收站 · 失败原包集中到「解压失败」",
+        },
+        ToolDescriptor {
             id: "directory-organizer",
             name: "目录整理",
             category: "文件",
-            summary: "递归解压 · 内容去重 · 冲突处理 · 分类清理",
-        },
-        ToolDescriptor {
-            id: "proxy-status",
-            name: "代理工具",
-            category: "网络",
-            summary: "本机/外网 IP · MAC · 环境变量 · 系统代理 · VPN 进程 · 设置命令 · 网络测试",
+            summary: "内容去重 · 归类 · 清理（不解压）",
         },
     ]
 }
@@ -39,7 +39,12 @@ mod tests {
             assert!(!tool.category.is_empty(), "第 {i} 项 category 为空");
             assert!(!tool.summary.is_empty(), "第 {i} 项 summary 为空");
             assert_eq!(tool.id, tool.id.trim(), "id 不应含首尾空白：{:?}", tool.id);
-            assert_eq!(tool.name, tool.name.trim(), "name 不应含首尾空白：{:?}", tool.name);
+            assert_eq!(
+                tool.name,
+                tool.name.trim(),
+                "name 不应含首尾空白：{:?}",
+                tool.name
+            );
         }
         let ids: std::collections::HashSet<_> = list.iter().map(|t| t.id).collect();
         assert_eq!(ids.len(), list.len(), "工具 id 必须全局唯一");

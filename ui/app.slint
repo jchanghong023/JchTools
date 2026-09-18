@@ -3,12 +3,6 @@ import { Button, CheckBox, ComboBox, LineEdit, ListView, TextEdit, Spinner, Abou
 export struct RuleRow { key: string, title: string, hint: string, kind: int, checked: bool, index: int, options: [string], value: string }
 export struct PlanRow { id: string, selected: bool, kind: string, source: string, target: string, reason: string, state: string }
 export struct ToolRow { id: string, name: string, summary: string }
-export struct ProxyEnvRow { name: string, set: bool, value: string }
-export struct ProxyVpnRow { name: string, pid: string, ports: string, label: string }
-export struct ProxyAdapterRow { name: string, description: string, status: string, virtual-like: bool, mac: string, ipv4: string }
-export struct ProxyCommandRow { title: string, command: string, note: string, group: string }
-export struct NetTestRow { name: string, host: string, status: string, message: string, tips: string, ok: bool, failed: bool, pending: bool }
-
 // 界面配色：所有颜色都是不透明色，浅色/深色主题由 Design.dark 决定（写入方见 AppWindow）。
 global Design {
     in property <bool> dark: false;
@@ -63,7 +57,7 @@ component LogoBadge inherits Rectangle {
 
 // 侧栏导航的小图标：几何图形绘制，不依赖字体或图片资源
 component NavGlyph inherits Rectangle {
-    in property <int> kind: 0;          // 0 目录，1 关于，2 代理
+    in property <int> kind: 0;          // 0 目录，1 关于
     in property <brush> tint: Design.text;
     width: 16px; height: 16px;
     background: transparent;
@@ -79,15 +73,6 @@ component NavGlyph inherits Rectangle {
     }
     if kind == 1: Rectangle { x: 7.25px; y: 4px; width: 1.5px; height: 1.5px; border-radius: 1px; background: root.tint; }
     if kind == 1: Rectangle { x: 7.25px; y: 7px; width: 1.5px; height: 5px; border-radius: 1px; background: root.tint; }
-    if kind == 2: Rectangle {           // 代理：网络拓扑（三节点经干线连通）
-        x: 6px; y: 0; width: 4px; height: 4px; border-radius: 2px; background: root.tint;
-    }
-    if kind == 2: Rectangle { x: 0.5px; y: 11px; width: 4px; height: 4px; border-radius: 2px; background: root.tint; }
-    if kind == 2: Rectangle { x: 11.5px; y: 11px; width: 4px; height: 4px; border-radius: 2px; background: root.tint; }
-    if kind == 2: Rectangle { x: 7.25px; y: 4px; width: 1.5px; height: 3px; background: root.tint; }
-    if kind == 2: Rectangle { x: 2.5px; y: 6.25px; width: 11px; height: 1.5px; background: root.tint; }
-    if kind == 2: Rectangle { x: 1.75px; y: 7.75px; width: 1.5px; height: 3.25px; background: root.tint; }
-    if kind == 2: Rectangle { x: 12.75px; y: 7.75px; width: 1.5px; height: 3.25px; background: root.tint; }
 }
 
 // 侧栏与顶部导航项：整行可点，选中项带主色底和左侧色条
@@ -164,36 +149,6 @@ component Pill inherits Rectangle {
         width: 100%; height: 100%; overflow: elide;
         color: !root.enabled ? Design.text-muted : (root.active ? Design.on-accent : Design.text);
         font-weight: root.active ? 600 : 500;
-    }
-}
-
-// 行内小操作按钮（如命令卡片上的「复制」）：与 Pill 同一套配色，尺寸更紧凑。
-component CopyChip inherits Rectangle {
-    in property <string> text;
-    in property <bool> enabled: true;
-    callback clicked();
-    width: 56px; height: 26px; border-radius: 6px;
-    background: !root.enabled ? transparent : (touch.has-hover ? Design.hover : Design.accent-softer);
-    accessible-role: button;
-    accessible-label: root.text;
-    accessible-enabled: root.enabled;
-    accessible-action-default => { root.clicked(); }
-    fs := FocusScope {
-        width: 100%; height: 100%;
-        key-pressed(event) => {
-            if (!root.enabled) { return reject; }
-            if (event.text == " " || event.text == "\n") { root.clicked(); return accept; }
-            return reject;
-        }
-    }
-    border-width: fs.has-focus ? 2px : 0px;
-    border-color: Design.accent-ink;
-    touch := TouchArea { enabled: root.enabled; mouse-cursor: pointer; clicked => { root.clicked(); } }
-    Text {
-        text: root.text; font-size: 12px; font-weight: 600;
-        width: 100%; height: 100%;
-        horizontal-alignment: center; vertical-alignment: center;
-        color: root.enabled ? Design.accent-ink : Design.text-muted;
     }
 }
 
@@ -321,12 +276,11 @@ export component AppWindow inherits Window {
     in-out property <bool> show-advanced: false;
     in-out property <bool> busy: false;
     // 代理检测独立于目录整理的 busy：检测期间关窗不得被「任务仍在处理文件」误拦。
-    in-out property <bool> proxy-busy: false;
     in-out property <bool> ready: false;
     in-out property <bool> paused: false;
     in-out property <bool> has-task: false;
     in-out property <string> status: "请选择需要整理的目录";
-    in-out property <string> metrics: "尚未扫描 · 不预估尚未解压文件的重复数量";
+    in-out property <string> metrics: "尚未扫描";
     in-out property <string> summary;
     in-out property <string> log-text;
     in-out property <string> error-text;
@@ -359,35 +313,7 @@ export component AppWindow inherits Window {
     in-out property <int> plan-link-count: 0;
     in-out property <int> plan-empty-count: 0;
     in-out property <int> plan-filter: 0;
-    in-out property <[ProxyEnvRow]> proxy-env-rows;
-    in-out property <string> proxy-system-enabled-text: "尚未检测";
-    in-out property <string> proxy-system-server;
-    in-out property <string> proxy-system-override;
-    in-out property <string> proxy-system-source;
-    in-out property <[ProxyVpnRow]> proxy-vpn-rows;
-    in-out property <[ProxyAdapterRow]> proxy-adapter-rows;
-    in-out property <[ProxyCommandRow]> proxy-command-rows;
-    in-out property <string> proxy-notes;
-    in-out property <string> proxy-local-ip: "尚未检测";
-    in-out property <string> proxy-public-ip: "尚未检测";
-    in-out property <string> proxy-public-ip-note;
-    in-out property <string> proxy-env-summary: "尚未检测";
-    in-out property <[string]> proxy-env-set-lines;
-    in-out property <int> proxy-platform: 0;
-    in-out property <string> proxy-command-port: "7890";
-    // 网络测试：与代理状态检测相互独立的 busy，避免互相误清状态。
-    in-out property <bool> net-test-busy: false;
-    in-out property <int> net-test-scope: 0;
-    in-out property <[NetTestRow]> net-test-rows;
-    in-out property <string> net-test-summary: "尚未测试";
-    in-out property <string> net-test-scope-label: "Windows 本机";
-    // WSL2：用户从已安装发行版中选择；进入 WSL 页时异步拉取列表。
-    in-out property <[string]> net-test-wsl-options;
-    in-out property <int> net-test-wsl-index: 0;
-    in-out property <string> net-test-wsl-selected: "";
-    in-out property <string> net-test-wsl-status: "尚未读取发行版列表";
-    property <int> proxy-section: 0;
-
+    in-out property <int> quarantined-count: 0;
     callback choose-directory();
     callback root-edited();
     callback select-tool(string);
@@ -409,14 +335,7 @@ export component AppWindow inherits Window {
     callback filter-plan(string);
     callback open-report();
     callback answer-conflict(int,bool);
-    callback refresh-proxy();
-    callback select-proxy-platform(int);
-    callback proxy-command-port-edited(string);
-    callback copy-proxy-command(string,string);
-    callback select-net-test-scope(int);
-    callback run-net-test(int, string);
-    callback select-net-test-wsl(string);
-    callback refresh-wsl-distros();
+    callback request-extract-start();
     callback window-drag-start(length,length);
     callback window-drag-move(length,length);
     property <length> caption-area: 138px;
@@ -477,7 +396,7 @@ export component AppWindow inherits Window {
                 Muted { text: "工具"; font-size: 11px; font-weight: 600; }
                 for tool in root.tools: NavItem {
                     text: tool.name;
-                    icon: tool.id == "proxy-status" ? 2 : 0;
+                    icon: 0;
                     active: tool.id == root.active-tool-id;
                     // 模态确认层打开时导航不可点，避免点击穿透背景控件。
                     enabled: root.confirm-kind == 0 && !root.conflict-visible;
@@ -494,11 +413,11 @@ export component AppWindow inherits Window {
             padding: root.page-padding; padding-top: 36px; padding-bottom: 16px; spacing: 10px;
             // 页面标题区
             HorizontalLayout { height: 32px; spacing: 12px; cross-axis-alignment: center;
-                Label { text: root.screen == 0 ? "目录整理" : root.screen == 2 ? "代理工具" : "关于 JchTools";
+                Label { text: root.screen == 0 ? "目录整理" : root.screen == 2 ? "递归解压" : "关于 JchTools";
                     font-size: 22px; font-weight: 700; }
                 Rectangle { width: 3px; height: 18px; border-radius: 2px; background: Design.bar; }
-                Muted { text: root.screen == 0 ? "递归解压、内容去重、冲突处理、归类与清理。每项操作都由你决定。"
-                    : root.screen == 2 ? "本机/外网 IP · MAC · 环境变量 · 系统代理 · VPN 进程 · 设置命令 · 网络测试"
+                Muted { text: root.screen == 0 ? "内容去重、归类与清理（不解压）；先分析出计划，确认后才执行。"
+                    : root.screen == 2 ? "递归解开压缩包；成功原包进回收站，失败原包集中到「解压失败」。"
                     : "Windows 优先的本地工具箱 · 功能持续增加";
                     horizontal-stretch: 1; wrap: no-wrap; overflow: elide; vertical-alignment: center; font-size: 13px; }
                 if root.busy: Spinner { width: 20px; height: 20px; }
@@ -558,7 +477,7 @@ export component AppWindow inherits Window {
                     background: Design.base.mix(Design.accent, 0.95);
                     border-width: 1px; border-color: Design.line-soft;
                     HorizontalLayout { padding: 3px; spacing: 4px;
-                        for label[index] in ["解压", "去重", "归类", "清理", "安全与性能"]: Pill {
+                        for label[index] in ["去重", "归类", "清理", "安全与性能"]: Pill {
                             text: label; active: root.section == index; enabled: !root.busy && root.confirm-kind == 0; horizontal-stretch: 1;
                             height: 24px;
                             clicked => { root.select-section(index); }
@@ -603,16 +522,6 @@ export component AppWindow inherits Window {
                         VerticalLayout { padding-top: 12px; padding-bottom: 12px; padding-left: 14px; padding-right: 14px; spacing: 4px;
                             Muted { text: "任务摘要"; font-size: 11px; font-weight: 600; }
                             TextEdit { text: root.summary; read-only: true; }
-                        }
-                    }
-                    if root.archives-failed > 0: Rectangle {
-                        min-height: 36px; border-radius: 10px;
-                        background: Design.base.mix(Design.warning, 0.90);
-                        border-width: 1px; border-color: Design.base.mix(Design.warning, 0.65);
-                        HorizontalLayout { padding-top: 8px; padding-bottom: 8px; padding-left: 12px; padding-right: 12px; spacing: 10px; cross-axis-alignment: center;
-                            Rectangle { width: 4px; height: 18px; border-radius: 2px; background: Design.warning; }
-                            Text { text: "有 " + root.archives-failed + " 个压缩包未解压成功（损坏、加密或不支持）。原包已保留，详情见「进度与日志」。";
-                                color: Design.text; wrap: word-wrap; horizontal-stretch: 1; vertical-alignment: center; font-size: 12px; }
                         }
                     }
                     // 计划类型筛选
@@ -689,7 +598,7 @@ export component AppWindow inherits Window {
                             if root.busy: Button { text: root.paused ? "继续" : "暂停"; enabled: root.confirm-kind == 0 && !root.conflict-visible; clicked => { root.pause-task(); } }
                             if root.busy: Button { text: "取消任务"; enabled: root.confirm-kind == 0 && !root.conflict-visible; clicked => { root.cancel-task(); } }
                             if !root.busy && root.ready: Button { text: "确认并执行整理"; primary: true; enabled: root.confirm-kind == 0; clicked => { root.request-apply(); } }
-                            if !root.busy && !root.ready: Button { text: "开始解压与分析"; primary: true; enabled: root.directory != "" && root.confirm-kind == 0;
+                            if !root.busy && !root.ready: Button { text: "开始分析"; primary: true; enabled: root.directory != "" && root.confirm-kind == 0;
                                 clicked => { root.request-start(); } }
                         }
                         if root.busy: ProgressBar { progress: root.progress; }
@@ -697,289 +606,118 @@ export component AppWindow inherits Window {
                 }
             }
             if root.screen == 2: VerticalLayout {
-                spacing: 10px;
+                spacing: 8px;
+                // 目录选择：独立卡片，作为主输入
+                Surface {
+                    min-height: 48px;
+                    HorizontalLayout { padding-top: 8px; padding-bottom: 8px; padding-left: 14px; padding-right: 12px; spacing: 10px; cross-axis-alignment: center;
+                        Rectangle {
+                            width: 28px; height: 28px; border-radius: 8px;
+                            background: Design.accent-softer;
+                            NavGlyph {
+                                x: 6px; y: 6px; kind: 0;
+                                tint: Design.accent-ink;
+                            }
+                        }
+                        LineEdit { text <=> root.directory; placeholder-text: "选择或输入要解压的目录，例如 D:\\Downloads";
+                            enabled: !root.busy && root.confirm-kind == 0; horizontal-stretch: 1; edited(value) => { root.root-edited(); } }
+                        Button { text: "选择目录…"; enabled: !root.busy && root.confirm-kind == 0; clicked => { root.choose-directory(); } }
+                    }
+                }
+                // 一段式（X-02）：只有规则与日志两个面板，没有计划审核环节
                 HorizontalLayout { height: 32px; spacing: 2px;
-                    Tab { text: "状态"; active: root.proxy-section == 0; width: 80px;
-                        enabled: root.confirm-kind == 0 && !root.conflict-visible;
-                        clicked => { root.proxy-section = 0; } }
-                    Tab { text: "命令参考"; active: root.proxy-section == 1; width: 96px;
-                        enabled: root.confirm-kind == 0 && !root.conflict-visible;
-                        clicked => { root.proxy-section = 1; } }
-                    Tab { text: "网络测试"; active: root.proxy-section == 2; width: 96px;
-                        enabled: root.confirm-kind == 0 && !root.conflict-visible;
-                        clicked => { root.proxy-section = 2; } }
+                    Tab { text: "处理规则"; active: root.panel == 0; width: 104px; enabled: root.confirm-kind == 0 && !root.conflict-visible; clicked => { root.panel = 0; } }
+                    Tab { text: "进度与日志"; active: root.panel == 1; width: 118px; enabled: root.confirm-kind == 0 && !root.conflict-visible; clicked => { root.panel = 1; } }
                     Rectangle { horizontal-stretch: 1; background: transparent; }
-                    if root.proxy-busy || root.net-test-busy: Spinner { width: 18px; height: 18px; }
-                    Button { text: "刷新"; enabled: !root.proxy-busy && root.confirm-kind == 0 && !root.conflict-visible; clicked => { root.refresh-proxy(); } }
                 }
-                if root.proxy-section == 0: Flickable {
-                    vertical-stretch: 1;
-                    VerticalLayout { spacing: 8px;
-                        // 本机 IP / 外网 IP 合并成一张紧凑卡
-                        Surface {
-                            vertical-stretch: 0;
-                            VerticalLayout { padding-top: 10px; padding-bottom: 10px; padding-left: 14px; padding-right: 14px; spacing: 6px;
-                                Label { text: "本机网络信息"; font-weight: 600; font-size: 13px; }
-                                HorizontalLayout { height: 24px; spacing: 10px; cross-axis-alignment: center;
-                                    Text { text: "本机"; width: 36px; font-size: 12px; color: Design.text-muted; }
-                                    Text { text: root.proxy-local-ip; horizontal-stretch: 1; font-size: 12px;
-                                        font-family: "Consolas"; color: Design.text; overflow: elide; }
-                                    CopyChip { text: "复制"; width: 52px; height: 22px;
-                                        enabled: root.proxy-local-ip != "尚未检测" && root.proxy-local-ip != "—" && root.confirm-kind == 0 && !root.conflict-visible;
-                                        accessible-label: "复制本机 IP";
-                                        clicked => { root.copy-proxy-command(root.proxy-local-ip, "本机 IP"); } }
-                                }
-                                HorizontalLayout { height: 24px; spacing: 10px; cross-axis-alignment: center;
-                                    Text { text: "外网"; width: 36px; font-size: 12px; color: Design.text-muted; }
-                                    Text { text: root.proxy-public-ip; horizontal-stretch: 1; font-size: 12px;
-                                        font-family: "Consolas"; color: Design.text; overflow: elide; }
-                                    CopyChip { text: "复制"; width: 52px; height: 22px;
-                                        enabled: root.proxy-public-ip != "尚未检测" && root.proxy-public-ip != "—" && root.proxy-public-ip-note == "" && root.confirm-kind == 0 && !root.conflict-visible;
-                                        accessible-label: "复制外网 IP";
-                                        clicked => { root.copy-proxy-command(root.proxy-public-ip, "外网 IP"); } }
-                                }
-                                if root.proxy-public-ip-note != "": Text { text: root.proxy-public-ip-note; font-size: 11px; color: Design.warning-ink; wrap: word-wrap; }
-                            }
+                // 规则分区胶囊（递归解压只有解压与安全两分区）
+                if root.panel == 0: Rectangle {
+                    height: 32px; border-radius: 12px;
+                    background: Design.base.mix(Design.accent, 0.95);
+                    border-width: 1px; border-color: Design.line-soft;
+                    HorizontalLayout { padding: 3px; spacing: 4px;
+                        for label[index] in ["解压", "安全与性能"]: Pill {
+                            text: label; active: root.section == index; enabled: !root.busy && root.confirm-kind == 0; horizontal-stretch: 1;
+                            height: 24px;
+                            clicked => { root.select-section(index); }
                         }
-                        // 环境变量：一行摘要；有已设置项才展开
-                        Surface {
-                            vertical-stretch: 0;
-                            VerticalLayout { padding-top: 10px; padding-bottom: 10px; padding-left: 14px; padding-right: 14px; spacing: 3px;
-                                HorizontalLayout { height: 24px; spacing: 10px; cross-axis-alignment: center;
-                                    Label { text: "环境变量"; font-weight: 600; font-size: 13px; width: 72px; }
-                                    Text { text: root.proxy-env-summary; horizontal-stretch: 1; font-size: 12px;
-                                        color: Design.text-muted; overflow: elide; }
-                                }
-                                for line in root.proxy-env-set-lines: Text {
-                                    height: 20px; text: line; font-size: 11px; font-family: "Consolas";
-                                    color: Design.text; overflow: elide; horizontal-alignment: left;
-                                }
-                            }
-                        }
-                        // 系统代理：状态 + 服务器一行，绕过/来源折叠为次要行
-                        Surface {
-                            vertical-stretch: 0;
-                            VerticalLayout { padding-top: 10px; padding-bottom: 10px; padding-left: 14px; padding-right: 14px; spacing: 4px;
-                                HorizontalLayout { height: 24px; spacing: 10px; cross-axis-alignment: center;
-                                    Label { text: "系统代理"; font-weight: 600; font-size: 13px; width: 72px; }
-                                    Text { text: root.proxy-system-enabled-text; width: 56px; font-size: 12px;
-                                        color: root.proxy-system-enabled-text == "已启用" ? Design.accent-ink : Design.text-muted; }
-                                    Text { text: root.proxy-system-server; horizontal-stretch: 1; font-size: 12px;
-                                        font-family: "Consolas"; overflow: elide; color: Design.text; }
-                                }
-                                Text { text: root.proxy-system-source == "" ? "" : "来源 " + root.proxy-system-source;
-                                    height: 18px; font-size: 11px; color: Design.text-muted; overflow: elide; }
-                                Text { text: root.proxy-system-override == "" || root.proxy-system-override == "—"
-                                    ? "" : "绕过 " + root.proxy-system-override;
-                                    height: 18px; font-size: 11px; color: Design.text-muted; overflow: elide; }
-                            }
-                        }
-                        // VPN：一行一个进程
-                        Surface {
-                            vertical-stretch: 0;
-                            VerticalLayout { padding-top: 10px; padding-bottom: 10px; padding-left: 14px; padding-right: 14px; spacing: 4px;
-                                Label { text: "VPN / 代理进程"; font-weight: 600; font-size: 13px; }
-                                if root.proxy-vpn-rows.length == 0: Text {
-                                    text: "未发现常见客户端（进程名/端口启发式，不代表一定没有）。";
-                                    font-size: 12px; color: Design.text-muted; wrap: word-wrap;
-                                }
-                                for row in root.proxy-vpn-rows: HorizontalLayout {
-                                    height: 22px; spacing: 8px; cross-axis-alignment: center;
-                                    Text { text: row.name; horizontal-stretch: 1; font-size: 12px; font-weight: 600;
-                                        overflow: elide; color: Design.text; }
-                                    Text { text: row.pid; width: 56px; font-size: 11px; font-family: "Consolas";
-                                        horizontal-alignment: right; color: Design.text-muted; }
-                                    Text { text: row.ports; width: 120px; font-size: 11px; font-family: "Consolas";
-                                        horizontal-alignment: right; overflow: elide; color: Design.text-muted; }
-                                }
-                            }
-                        }
-                        // 网卡：一行一张卡（名称/状态/IP/MAC），描述进 accessible，不再占竖向空间
-                        Surface {
-                            vertical-stretch: 0;
-                            VerticalLayout { padding-top: 10px; padding-bottom: 10px; padding-left: 14px; padding-right: 14px; spacing: 2px;
-                                HorizontalLayout { height: 24px; spacing: 8px; cross-axis-alignment: center;
-                                    Label { text: "网卡"; font-weight: 600; font-size: 13px; width: 72px; }
-                                    Text { text: root.proxy-adapter-rows.length == 0
-                                        ? "未读取到列表，或当前平台不支持。" : "";
-                                        horizontal-stretch: 1; font-size: 12px; color: Design.text-muted; overflow: elide; }
-                                }
-                                for row in root.proxy-adapter-rows: HorizontalLayout {
-                                    height: 28px; spacing: 6px; cross-axis-alignment: center;
-                                    accessible-role: text;
-                                    accessible-label: row.name + "，状态 " + row.status + "，IPv4 " + (row.ipv4 == "" ? "无" : row.ipv4) + "，MAC " + (row.mac == "" ? "无" : row.mac) + "，" + row.description;
-                                    Text { text: row.name; width: 130px; font-size: 12px; font-weight: 600;
-                                        overflow: elide; color: Design.text; }
-                                    Text { text: row.status; width: 78px; font-size: 11px; horizontal-alignment: right;
-                                        overflow: elide; color: row.status == "Up" ? Design.accent-ink : Design.text-muted; }
-                                    Text { text: row.ipv4 == "" ? "—" : row.ipv4; width: 110px; font-size: 11px;
-                                        font-family: "Consolas"; overflow: elide; color: Design.text; }
-                                    Text { text: row.mac == "" ? "—" : row.mac; horizontal-stretch: 1; font-size: 11px;
-                                        font-family: "Consolas"; overflow: elide; color: Design.text-muted; }
-                                    if row.virtual-like: Text { text: "虚"; width: 18px; font-size: 10px; font-weight: 600;
-                                        color: Design.accent-ink; horizontal-alignment: center; }
-                                    CopyChip { text: "复制"; width: 44px; height: 20px;
-                                        enabled: row.ipv4 != "" && root.confirm-kind == 0 && !root.conflict-visible;
-                                        accessible-label: "复制 IPv4：" + row.name;
-                                        clicked => { root.copy-proxy-command(row.ipv4, row.name + " IPv4"); } }
-                                    CopyChip { text: "复制"; width: 44px; height: 20px;
-                                        enabled: row.mac != "" && root.confirm-kind == 0 && !root.conflict-visible;
-                                        accessible-label: "复制 MAC：" + row.name;
-                                        clicked => { root.copy-proxy-command(row.mac, row.name + " MAC"); } }
-                                }
-                            }
-                        }
-                        if root.proxy-notes != "": Surface {
-                            vertical-stretch: 0;
-                            VerticalLayout { padding-top: 8px; padding-bottom: 8px; padding-left: 14px; padding-right: 14px; spacing: 4px;
-                                Text { text: root.proxy-notes; wrap: word-wrap; font-size: 11px; color: Design.warning-ink; }
-                            }
-                        }
-                        Text {
-                            text: "只读检测；外网 IP 仅查询公共回显服务，不上传本机文件。";
-                            font-size: 11px; color: Design.text-muted;
-                        }
+                        // 高级选项开关：只控制是否显示专家调优项，不改变任何规则值。
+                        Pill { text: root.show-advanced ? "隐藏高级选项" : "显示高级选项"; active: root.show-advanced;
+                            width: 132px; height: 24px; enabled: !root.busy && root.confirm-kind == 0;
+                            clicked => { root.toggle-advanced(!root.show-advanced); } }
                     }
                 }
-                if root.proxy-section == 1: VerticalLayout {
-                    spacing: 10px;
-                    HorizontalLayout { height: 32px; spacing: 2px;
-                        Tab { text: "Windows"; active: root.proxy-platform == 0; width: 96px;
-                            enabled: root.confirm-kind == 0 && !root.conflict-visible;
-                            clicked => { root.select-proxy-platform(0); } }
-                        Tab { text: "Linux"; active: root.proxy-platform == 1; width: 96px;
-                            enabled: root.confirm-kind == 0 && !root.conflict-visible;
-                            clicked => { root.select-proxy-platform(1); } }
-                        Rectangle { horizontal-stretch: 1; background: transparent; }
-                    }
-                    Surface {
-                        VerticalLayout { padding-top: 12px; padding-bottom: 12px; padding-left: 14px; padding-right: 14px; spacing: 8px;
-                            HorizontalLayout { spacing: 10px; cross-axis-alignment: center; min-height: 30px;
-                                Label { text: "代理端口"; width: 72px; font-weight: 600; font-size: 13px; }
-                                port-edit := LineEdit { width: 120px; text: root.proxy-command-port;
-                                    enabled: root.confirm-kind == 0 && !root.conflict-visible;
-                                    horizontal-alignment: right; input-type: number;
-                                    accessible-label: "代理端口";
-                                    accessible-description: "当前端口 " + root.proxy-command-port;
-                                    edited(value) => { root.proxy-command-port-edited(value); } }
-                                Muted { text: "下列示例命令中的代理端口将随此项变化；复制时使用当前配置的端口。"; horizontal-stretch: 1; }
+                if root.panel == 0: Surface { vertical-stretch: 1;
+                    // 行高 44px：与目录整理同口径（U-05 的可见行数约束）。
+                    ListView { for row in root.rules: Rectangle {
+                        height: 44px;
+                        HorizontalLayout { padding-left: 16px; padding-right: 16px; spacing: 16px; cross-axis-alignment: center;
+                            VerticalLayout { horizontal-stretch: 1; spacing: 2px;
+                                Label { text: row.title; font-weight: 600; font-size: 13px; overflow: elide; }
+                                Muted { text: row.hint; wrap: no-wrap; overflow: elide; font-size: 11px; }
                             }
+                            if row.kind == 0: CheckBox { checked: row.checked; enabled: !root.busy && root.confirm-kind == 0;
+                                text: "启用"; accessible-label: row.title;
+                                toggled => { root.rule-bool(row.key,self.checked); } }
+                            if row.kind == 1: ComboBox { width: 220px; model: row.options; current-index: row.index;
+                                enabled: !root.busy && root.confirm-kind == 0; accessible-label: row.title;
+                                selected(value) => { root.rule-choice(row.key,self.current-index); } }
+                            if row.kind == 2: LineEdit { width: 160px; text: row.value; enabled: !root.busy && root.confirm-kind == 0;
+                                horizontal-alignment: right; accessible-label: row.title;
+                                accessible-description: "当前值 " + row.value;
+                                edited(value) => { root.rule-text(row.key,value); } }
+                        }
+                        Rectangle { y: parent.height - 1px; x: 16px; height: 1px; width: parent.width - 32px;
+                            background: Design.line-soft; }
+                    }}
+                }
+                if root.panel == 1: VerticalLayout { spacing: 10px;
+                    if root.quarantined-count > 0: Rectangle {
+                        min-height: 36px; border-radius: 10px;
+                        background: Design.base.mix(Design.warning, 0.90);
+                        border-width: 1px; border-color: Design.base.mix(Design.warning, 0.65);
+                        HorizontalLayout { padding-top: 8px; padding-bottom: 8px; padding-left: 12px; padding-right: 12px; spacing: 10px; cross-axis-alignment: center;
+                            Rectangle { width: 4px; height: 18px; border-radius: 2px; background: Design.warning; }
+                            Text { text: "有 " + root.quarantined-count + " 个压缩包未完全解开，已移入「解压失败」子目录等待人工处理；详情见下方日志。";
+                                color: Design.text; wrap: word-wrap; horizontal-stretch: 1; vertical-alignment: center; font-size: 12px; }
                         }
                     }
-                    Muted { text: "点击命令卡片任意空白处或「复制」按钮即可复制；本工具不会自动设置或清除代理。"; }
                     Surface { vertical-stretch: 1;
-                        ListView { for tip in root.proxy-command-rows: Rectangle {
-                            min-height: 96px;
-                            // 整行可点：点卡片任意空白处即复制，命令正文与说明也不遗漏。
-                            copy-area := TouchArea {
-                                // 与其它代理页控件同口径：确认模态打开期间键盘不得触达复制。
-                                enabled: root.confirm-kind == 0 && !root.conflict-visible;
-                                accessible-enabled: root.confirm-kind == 0 && !root.conflict-visible;
-                                accessible-role: button;
-                                accessible-label: "复制命令：" + tip.title;
-                                accessible-action-default => { root.copy-proxy-command(tip.command, tip.title); }
-                                clicked => { root.copy-proxy-command(tip.command, tip.title); }
-                            }
-                            VerticalLayout { padding-top: 12px; padding-bottom: 10px; padding-left: 14px; padding-right: 14px; spacing: 6px;
+                        VerticalLayout { padding-top: 12px; padding-bottom: 12px; padding-left: 14px; padding-right: 14px; spacing: 8px;
+                            Muted { text: "最新的消息显示在最上面；界面只保留最近 300 条。"; }
+                            TextEdit { text: root.log-text; read-only: true; font-family: "Consolas"; vertical-stretch: 1; }
+                        }
+                    }
+                }
+                // 底部状态与主操作
+                Surface {
+                    min-height: 56px;
+                    background: @linear-gradient(120deg, Design.base.mix(Design.accent, 0.88) 0%, Design.base.mix(Design.accent-2, 0.92) 100%);
+                    border-color: Design.base.mix(Design.accent, 0.68);
+                    drop-shadow-blur: 18px;
+                    drop-shadow-offset-y: 6px;
+                    VerticalLayout { padding-top: 8px; padding-bottom: 8px; padding-left: 16px; padding-right: 14px; spacing: 8px;
+                        HorizontalLayout { spacing: 12px; cross-axis-alignment: center;
+                            VerticalLayout { horizontal-stretch: 1; spacing: 2px;
                                 HorizontalLayout { spacing: 8px; cross-axis-alignment: center;
-                                    Rectangle {
-                                        width: 96px; height: 22px; border-radius: 6px;
-                                        background: Design.accent-softer;
-                                        Text { text: tip.group; font-size: 11px; color: Design.accent-ink; font-weight: 600;
+                                    Rectangle { width: 44px; height: 20px; border-radius: 6px;
+                                        background: root.busy ? Design.accent : Design.accent-soft;
+                                        Text { text: root.busy ? "进行中" : "状态"; font-size: 11px; font-weight: 600;
+                                            color: root.busy ? Design.on-accent : Design.accent-ink;
                                             width: parent.width; height: parent.height;
                                             horizontal-alignment: center; vertical-alignment: center; }
                                     }
-                                    Label { text: tip.title; font-weight: 600; font-size: 13px; horizontal-stretch: 1; overflow: elide; }
-                                    CopyChip { text: "复制"; enabled: root.confirm-kind == 0 && !root.conflict-visible; accessible-label: "复制命令：" + tip.title;
-                                        clicked => { root.copy-proxy-command(tip.command, tip.title); } }
+                                    Label { text: root.status; overflow: elide; font-weight: 600; horizontal-stretch: 1; font-size: 14px; }
                                 }
-                                // 命令正文用纯 Text 展示（std TextEdit 在该卡片里渲染为空白，不可靠）；
-                                // 复制统一走整行点击或「复制」按钮，不需要手动选中。
-                                Text {
-                                    text: tip.command;
-                                    wrap: no-wrap;
-                                    overflow: elide;
-                                    font-family: "Consolas";
-                                    font-size: 12px;
-                                    color: Design.text;
-                                }
-                                Muted { text: tip.note; font-size: 12px; wrap: word-wrap; }
+                                Muted { text: root.metrics; wrap: no-wrap; overflow: elide; font-size: 12px; }
                             }
-                            Rectangle { y: parent.height - 1px; x: 14px; height: 1px; width: parent.width - 28px; background: Design.line-soft; }
-                        }}
-                    }
-                }
-                if root.proxy-section == 2: Flickable {
-                    vertical-stretch: 1;
-                    VerticalLayout {
-                        padding: 0px;
-                        spacing: 12px;
-                    HorizontalLayout { height: 36px; spacing: 8px; cross-axis-alignment: center;
-                        // 网络测试进行中禁用范围切换，避免中途切换导致测试状态错乱；模态打开时同样不可点。
-                        Tab { text: "Windows 本机"; active: root.net-test-scope == 0; width: 118px;
-                            enabled: !root.net-test-busy && root.confirm-kind == 0 && !root.conflict-visible;
-                            clicked => { root.select-net-test-scope(0); } }
-                        Tab { text: "WSL2"; active: root.net-test-scope == 1; width: 96px;
-                            enabled: !root.net-test-busy && root.confirm-kind == 0 && !root.conflict-visible;
-                            clicked => { root.select-net-test-scope(1); } }
-                        Rectangle { horizontal-stretch: 1; background: transparent; }
-                        if root.net-test-scope == 1 && root.net-test-wsl-options.length > 0: ComboBox {
-                            width: 220px;
-                            model: root.net-test-wsl-options;
-                            current-index: root.net-test-wsl-index;
-                            // busy 时禁止改发行版：否则在途报告会因 distro 不匹配被丢弃且不清 busy。
-                            enabled: !root.net-test-busy && root.confirm-kind == 0 && !root.conflict-visible;
-                            accessible-label: "WSL 发行版";
-                            accessible-description: "选择要在其中进行网络测试的 WSL 发行版";
-                            selected(value) => { root.select-net-test-wsl(value); }
+                            if root.busy: Text { text: root.progress-note; wrap: no-wrap; overflow: elide; color: Design.accent-ink; font-weight: 600; }
+                            if root.busy: Button { text: root.paused ? "继续" : "暂停"; enabled: root.confirm-kind == 0 && !root.conflict-visible; clicked => { root.pause-task(); } }
+                            if root.busy: Button { text: "取消任务"; enabled: root.confirm-kind == 0 && !root.conflict-visible; clicked => { root.cancel-task(); } }
+                            if !root.busy: Button { text: "开始解压"; primary: true; enabled: root.directory != "" && root.confirm-kind == 0;
+                                clicked => { root.request-extract-start(); } }
                         }
-                        if root.net-test-scope == 1: Button { text: "刷新列表"; width: 96px; enabled: !root.net-test-busy && root.confirm-kind == 0 && !root.conflict-visible;
-                            clicked => { root.refresh-wsl-distros(); } }
-                        Button { text: "开始测试"; primary: true; enabled: !root.net-test-busy && root.confirm-kind == 0 && !root.conflict-visible
-                            && (root.net-test-scope == 0 || root.net-test-wsl-selected != "");
-                            clicked => { root.run-net-test(root.net-test-scope, root.net-test-wsl-selected); } }
-                    }
-                    if root.net-test-scope == 1 && root.net-test-wsl-options.length == 0: Muted {
-                        text: root.net-test-wsl-status;
-                    }
-                    // Surface 在 VerticalLayout 里默认会拉伸，必须显式 0，否则卡片会空很高。
-                    Surface {
-                        vertical-stretch: 0;
-                        VerticalLayout { padding-top: 12px; padding-bottom: 12px; padding-left: 16px; padding-right: 16px; spacing: 6px;
-                            Text { text: root.net-test-summary; wrap: word-wrap; font-size: 13px;
-                                color: root.net-test-busy ? Design.accent-ink : Design.text; }
-                            Muted { text: "对 ChatGPT / Google / GitHub 探测 TCP 443；WSL2 在所选发行版内探测。"; font-size: 11px; }
-                        }
-                    }
-                    if root.net-test-rows.length == 0: Muted {
-                        text: "选择测试位置后点击「开始测试」。可用显示「可以连接」，不可用显示「不可以用」并附排查提示。";
-                    }
-                    if root.net-test-rows.length > 0: Surface {
-                        vertical-stretch: 0;
-                        VerticalLayout { padding-top: 2px; padding-bottom: 2px; padding-left: 4px; padding-right: 4px; spacing: 0px;
-                            for row in root.net-test-rows: VerticalLayout {
-                                padding-top: 10px; padding-bottom: 10px; padding-left: 14px; padding-right: 14px; spacing: 6px;
-                                HorizontalLayout { spacing: 12px; cross-axis-alignment: center;
-                                    Label { text: row.name; font-weight: 600; font-size: 13px; width: 84px; overflow: elide; }
-                                    Muted { text: row.host; font-family: "Consolas"; font-size: 12px; width: 130px; overflow: elide; }
-                                    Rectangle {
-                                        width: 72px; height: 22px; border-radius: 6px;
-                                        background: row.failed ? Design.hover : Design.accent-softer;
-                                        border-width: row.failed ? 1px : 0px;
-                                        border-color: Design.line-soft;
-                                        Text { text: row.status; font-size: 11px; font-weight: 600;
-                                            width: parent.width; height: parent.height;
-                                            horizontal-alignment: center; vertical-alignment: center;
-                                            color: row.ok ? Design.accent-ink : (row.failed ? Design.danger-ink : Design.text-muted); }
-                                    }
-                                    Text { text: row.message; horizontal-stretch: 1; font-size: 12px;
-                                        color: row.failed ? Design.danger-ink : Design.text; wrap: word-wrap; overflow: elide; }
-                                }
-                                if row.tips != "": Muted { text: row.tips; font-size: 12px; wrap: word-wrap; }
-                            }
-                        }
-                    }
-                    Muted { text: "仅在点击时访问目标站点 443 端口；不上传文件、不修改系统设置。"; font-size: 11px; }
+                        if root.busy: ProgressBar { progress: root.progress; }
                     }
                 }
             }
@@ -994,7 +732,7 @@ export component AppWindow inherits Window {
                             }
                         }
                         Rectangle { height: 1px; background: Design.line-soft; }
-                        Muted { text: "Rust + Slint · 独立整理引擎 · SQLite 磁盘索引 · 随包携带完整 7-Zip\n已注册工具：目录整理、代理工具；以后通过工具注册表添加真实工具和页面。\n整理引擎不联网；网络测试仅在您点击时向目标站点发起连通探测，不上传文件、不自动提权、不执行目录中的程序。\n启动低于一秒是目标，不是未经实测的承诺。"; }
+                        Muted { text: "Rust + Slint · 独立整理引擎 · SQLite 磁盘索引 · 随包携带完整 7-Zip\n已注册工具：递归解压、目录整理；以后通过工具注册表添加真实工具和页面。\n软件完全离线：不发起任何网络请求、不上传文件、不自动提权、不执行目录中的程序。\n启动低于一秒是目标，不是未经实测的承诺。"; }
                     }
                 }
                 // 主题是应用级设置，放在关于页而不是目录整理的规则分区。

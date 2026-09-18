@@ -15,7 +15,8 @@ jobs:
     timeout-minutes: 300
     steps:
       - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
+      # 工具链固定：与 Cargo.toml 的 rust-version 同步更新。
+      - uses: dtolnay/rust-toolchain@1.98.1
       - name: Install Linux build dependencies
         run: sudo apt-get update && sudo apt-get install -y libfontconfig1-dev
       - name: Install cargo-mutants

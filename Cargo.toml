@@ -2,19 +2,22 @@
 name = "jchtools"
 version = "0.1.0"
 edition = "2021"
+# 最低支持工具链（MSRV）：CI 用 dtolnay/rust-toolchain@1.98.1 固定精确版本，
+# 两处同步更新；本地不强制固定（rust-toolchain.toml 的在线下载在本机网络下不可靠），
+# 靠本下限拒绝过旧的工具链。
+rust-version = "1.98.1"
 license = "MIT"
 description = "Windows-first extensible local toolbox and directory organizer"
 build = "build.rs"
 
 [features]
 default = ["gui"]
-gui = ["dep:slint", "dep:slint-build", "dep:rfd", "dep:open", "dep:copypasta"]
+gui = ["dep:slint", "dep:slint-build", "dep:rfd", "dep:open"]
 
 [dependencies]
 anyhow = "1.0"
 blake3 = "1.8"
 chrono = { version = "0.4", default-features = false, features = ["clock", "serde"] }
-csv = "1.3"
 directories-next = "2.0"
 fs2 = "0.4"
 globset = "0.4"
@@ -33,7 +36,6 @@ walkdir = "2.5"
 slint = { version = "=1.17.1", optional = true, default-features = false, features = ["std", "compat-1-2", "backend-winit", "renderer-femtovg", "renderer-software", "accessibility"] }
 rfd = { version = "0.15", optional = true }
 open = { version = "5.3", optional = true }
-copypasta = { version = "0.8", optional = true }
 
 [target.'cfg(windows)'.dependencies]
 windows = { version = "0.61", features = ["Win32_Foundation", "Win32_System_Com", "Win32_UI_Shell"] }
@@ -63,6 +65,45 @@ required-features = ["gui"]
 lto = "thin"
 codegen-units = 1
 strip = true
+# 生产构建同样启用运行期安全检查（release 默认关闭）：
+# 本工具移动/删除用户文件，算术溢出与断言失败宁可显式失败也不静默产出错误值。
+# 代价是对依赖同样生效的少量性能开销，对本地工具箱值得。
+overflow-checks = true
+debug-assertions = true
 
 [profile.dev]
 debug = 1
+
+# ── lint 分层（AGENTS.md 3.2 预算棘轮：存量计入预算、新增即 CI 失败）────────────
+# 规则只约束发现面：deny = 当前零存量、触犯即硬错误；warn = 有存量、计入
+# clippy 预算（scripts/clippy_budget.py），修复后应下调预算直至归零。
+[lints.rust]
+# 以下在本仓当前代码零触发，直接设为硬错误（新增即本地编译失败）：
+unsafe_op_in_unsafe_fn = "deny"    # unsafe fn 体内操作必须显式 unsafe 块（edition 2024 默认规则提前转正）
+unused_must_use = "deny"
+unreachable_patterns = "deny"
+future_incompatible = { level = "deny", priority = -1 } # 组：未来版本将变硬错误的写法，提前暴露（组需低于单体优先级）
+# 注意：unused_variables 保持 warn —— build.rs 在关闭 gui 特性时存在条件未用变量
+#（build.rs:242 `manifest`），deny 会弄挂 no-default-features 的 Linux CI；计入预算管控。
+# 以下当前有存量告警，warn + 预算管控：
+unused_variables = "warn"
+explicit_outlives_requirements = "warn"
+elided_lifetimes_in_paths = "warn"
+single_use_lifetimes = "warn"
+unreachable_pub = "warn"
+
+[lints.clippy]
+# 组级最大化发现面（clippy 默认组 correctness/suspicious/style/complexity/perf 天然开启）：
+pedantic = { level = "warn", priority = -1 }
+cargo = { level = "warn", priority = -1 }
+# restriction 组中与「文件操作工具中途不得 panic」直接相关的高价值项：
+unwrap_used = "warn"               # src/ 内 unwrap 即告警（测试代码经 clippy.toml 豁免）
+expect_used = "warn"
+dbg_macro = "warn"                 # 调试残留
+# 豁免：纯排版/文档义务类噪音，与缺陷发现无关（存量见预算报告）。
+doc_markdown = "allow"             # 文档标识符反引号排版
+missing_errors_doc = "allow"       # 文档段落义务
+missing_panics_doc = "allow"
+must_use_candidate = "allow"       # 属性建议，量大且属意见
+items_after_statements = "allow"   # 风格偏好
+unreadable_literal = "allow"       # Windows API 标志常量等无分隔符惯用法
