@@ -30,6 +30,11 @@ import re
 import subprocess
 import sys
 
+# Windows 运行器控制台常为 cp1252（CI 实测 Python 3.12 直接 UnicodeEncodeError），
+# 中文摘要输出统一按 UTF-8、不可映射字符替换，避免门禁本身崩掉。
+for _stream in (sys.stdout, sys.stderr):
+    _stream.reconfigure(encoding="utf-8", errors="replace")
+
 _LOCATED_WARNING = re.compile(r'^(\S+):\d+:\d+: warning: ')
 # 生成代码路径特征：位于任意 target 构建目录的 out/ 下（分隔符兼容 / 与 \）。
 _GENERATED_PATH = re.compile(r'[\\/]target[\\/].*[\\/]out[\\/]')

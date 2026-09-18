@@ -113,7 +113,10 @@ Write-Host 'End users extract this ZIP and run JchTools.exe; no separate 7-Zip i
 # ISCC 不可用时如实标注 NOT RUN 并继续产出便携 ZIP（CI 负责装 Inno Setup；本地缺件不阻断）。
 $version = (Select-String -LiteralPath 'Cargo.toml' -Pattern '^version\s*=\s*"([^"]+)"' | Select-Object -First 1).Matches[0].Groups[1].Value
 $setupSummary = 'NOT RUN (ISCC not found on this machine; CI release job builds the installer)'
-$isccPath = (Get-Command ISCC.exe -ErrorAction SilentlyContinue).Source
+# Get-Command 找不到 ISCC 时返回 $null；Set-StrictMode Latest 下直接取 .Source 会抛
+# PropertyNotFoundStrict 异常，导致「缺件不阻断」的降级路径（113 行）永远走不到。
+$isccCmd = Get-Command ISCC.exe -ErrorAction SilentlyContinue
+$isccPath = if ($isccCmd) { $isccCmd.Source } else { $null }
 if (-not $isccPath) {
     $isccPath = @(
         "${env:ProgramFiles(x86)}\Inno Setup 6\ISCC.exe",
