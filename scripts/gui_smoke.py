@@ -1,10 +1,12 @@
 #!/usr/bin/env python3
 """JchTools GUI OS 级冒烟测试（pywinauto / UIA）。
 
-三条关键路径冒烟：
+四条关键路径冒烟（2026-09-18 两工具拆分后）：
   S1 启动并正常退出；
-  S2 选择目录 → 解压与分析 → 计划生成（不执行）；
-  S3 全链路：解压与分析 → 确认执行 → 整理完成。
+  S2 目录整理：选择目录 → 开始分析（只读，无确认框）→ 计划生成（不执行）；
+  S3 目录整理全链路：开始分析 → 确认执行 → 整理完成；
+  S4 递归解压全链路：开始解压 → 一段确认 → 解压结束，目录不残留压缩包
+     （除「解压失败」子目录，X-05/X-06）。
 
 用法：
     python scripts/gui_smoke.py --exe target/debug/JchTools.exe --data <已生成的测试数据目录>
@@ -242,18 +244,24 @@ def s1_launch_and_exit(exe: str):
     print("S1 PASS：进程已退出")
 
 
+def goto_organizer(window) -> None:
+    """启动落在注册表第一个工具（递归解压）；目录整理用例先切过去。"""
+    click(window, find_button(window, "目录整理"))
+
+
 def s2_analyze_only(exe: str, data: str):
     proc = subprocess.Popen([exe])
     window = None
     try:
         _, window = wait_window(proc.pid)
+        goto_organizer(window)
         setup_directory(window, data)
         baseline = newest_task(data)
-        open_confirm(window, "开始解压与分析")
-        confirm_dialog(window)
+        # C-01：分析只读，不再弹破坏性确认框——点击后直接进入分析。
+        click(window, find_button(window, "开始分析"))
         wait_task_status(data, "ready", baseline)
         find_button(window, "确认并执行整理").wait("visible enabled", timeout=TIMEOUT)
-        print("S2 PASS：解压与分析完成（计划已生成，执行按钮可用）")
+        print("S2 PASS：分析完成（计划已生成，执行按钮可用；分析阶段未改动文件）")
     finally:
         if window is not None:
             try:
@@ -269,10 +277,10 @@ def s3_full_organize(exe: str, data: str):
     window = None
     try:
         _, window = wait_window(proc.pid)
+        goto_organizer(window)
         setup_directory(window, data)
         baseline = newest_task(data)
-        open_confirm(window, "开始解压与分析")
-        confirm_dialog(window)
+        click(window, find_button(window, "开始分析"))
         wait_task_status(data, "ready", baseline)
         open_confirm(window, "确认并执行整理")
         confirm_dialog(window)
@@ -286,6 +294,45 @@ def s3_full_organize(exe: str, data: str):
                 pass
         _wait_exit_or_kill(proc)
     print("S3 PASS：进程已退出")
+
+
+ARCHIVE_SUFFIXES = (
+    ".zip", ".7z", ".rar", ".tar", ".gz", ".bz2", ".xz", ".zst", ".tgz",
+    ".tbz2", ".txz", ".cab", ".iso", ".wim", ".lzh", ".cpio",
+)
+
+
+def s4_full_extract(exe: str, data: str):
+    """递归解压全链路（X-02/X-05/X-06）：一段确认后跑完，目录不残留压缩包。"""
+    proc = subprocess.Popen([exe])
+    window = None
+    try:
+        _, window = wait_window(proc.pid)
+        # 启动页即递归解压，无需切换。
+        setup_directory(window, data)
+        baseline = newest_task(data)
+        open_confirm(window, "开始解压")
+        confirm_dialog(window)
+        wait_task_status(data, "finished", baseline)
+        # X 分区总体约束：除「解压失败」外不得残留压缩包。
+        leftovers = [
+            str(p.relative_to(data))
+            for p in Path(data).rglob("*")
+            if p.is_file()
+            and p.suffix.lower() in ARCHIVE_SUFFIXES
+            and "解压失败" not in p.relative_to(data).parts
+        ]
+        if leftovers:
+            raise RuntimeError(f"解压结束后目录残留压缩包（除「解压失败」外）：{leftovers}")
+        print("S4 PASS：递归解压完成（任务状态 finished；目录不残留压缩包）")
+    finally:
+        if window is not None:
+            try:
+                close_app(window)
+            except Exception:
+                pass
+        _wait_exit_or_kill(proc)
+    print("S4 PASS：进程已退出")
 
 
 def main() -> int:
@@ -313,13 +360,17 @@ def main() -> int:
         raise RuntimeError(f"拒绝在盘符根目录执行整理冒烟：{data}")
 
     s1_launch_and_exit(str(exe))
-    # S2 分析会真实解压改写语料；S3 前从旁路副本恢复，保证“干净语料上的完整链路”。
+    # S4 解压与 S2 分析都会真实改写语料；每个阶段前都从旁路副本恢复，
+    # 保证“干净语料上的完整链路”（顺序：S4 解压 → S2 只分析 → S3 整理）。
     import shutil, tempfile
     repo_tmp = repo / ".tmp"
     repo_tmp.mkdir(exist_ok=True)  # AGENTS §2：一切冒烟临时数据一律落在仓库 .tmp/ 下
     scratch = Path(tempfile.mkdtemp(prefix="jchtools-gui-smoke-", dir=str(repo_tmp)))
     try:
         fresh = scratch / "data"
+        shutil.copytree(data, fresh)
+        s4_full_extract(str(exe), str(fresh))
+        shutil.rmtree(fresh, ignore_errors=True)
         shutil.copytree(data, fresh)
         s2_analyze_only(str(exe), str(fresh))
         shutil.rmtree(fresh, ignore_errors=True)

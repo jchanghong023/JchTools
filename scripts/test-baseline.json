@@ -99,12 +99,6 @@
     },
     {
       "file": "src/gui.rs",
-      "name": "apply_wsl_distros_selects_preferred_ubuntu",
-      "ignored": false,
-      "cfg": null
-    },
-    {
-      "file": "src/gui.rs",
       "name": "count_selected_pending_ignores_unselected_and_done",
       "ignored": false,
       "cfg": null
@@ -153,49 +147,13 @@
     },
     {
       "file": "src/gui.rs",
-      "name": "net_test_scope_switch_updates_label",
-      "ignored": false,
-      "cfg": null
-    },
-    {
-      "file": "src/gui.rs",
-      "name": "network_identity_defaults_are_neutral",
-      "ignored": false,
-      "cfg": null
-    },
-    {
-      "file": "src/gui.rs",
       "name": "plan_page_event_rejects_stale_gen_without_touching_completed",
       "ignored": false,
       "cfg": null
     },
     {
       "file": "src/gui.rs",
-      "name": "proxy_command_port_updates_tips_and_copy_source",
-      "ignored": false,
-      "cfg": null
-    },
-    {
-      "file": "src/gui.rs",
-      "name": "proxy_platform_switches_command_tips",
-      "ignored": false,
-      "cfg": null
-    },
-    {
-      "file": "src/gui.rs",
-      "name": "refresh_proxy_without_sender_is_noop",
-      "ignored": false,
-      "cfg": null
-    },
-    {
-      "file": "src/gui.rs",
       "name": "root_edited_reports_missing_directory",
-      "ignored": false,
-      "cfg": null
-    },
-    {
-      "file": "src/gui.rs",
-      "name": "run_net_test_without_sender_is_noop",
       "ignored": false,
       "cfg": null
     },
@@ -213,151 +171,19 @@
     },
     {
       "file": "src/gui.rs",
-      "name": "select_proxy_tool_routes_without_spawning",
-      "ignored": false,
-      "cfg": null
-    },
-    {
-      "file": "src/gui.rs",
       "name": "theme_choice_keeps_plan_ready_but_rule_change_invalidates",
       "ignored": false,
       "cfg": null
     },
     {
       "file": "src/gui.rs",
-      "name": "wsl_distros_event_requires_current_gen_and_wsl_scope",
-      "ignored": false,
-      "cfg": null
-    },
-    {
-      "file": "src/gui.rs",
-      "name": "wsl_scope_switch_with_sender_bumps_gen_and_sets_busy",
+      "name": "tool_routing_swaps_screens_and_sections",
       "ignored": false,
       "cfg": null
     },
     {
       "file": "src/model.rs",
       "name": "action_state_text_roundtrip_matches_db_values",
-      "ignored": false,
-      "cfg": null
-    },
-    {
-      "file": "src/nettest.rs",
-      "name": "assemble_wsl_report_fills_all_targets",
-      "ignored": false,
-      "cfg": null
-    },
-    {
-      "file": "src/nettest.rs",
-      "name": "assemble_wsl_report_notes_raw_when_unparseable",
-      "ignored": false,
-      "cfg": null
-    },
-    {
-      "file": "src/nettest.rs",
-      "name": "decode_wsl_bytes_handles_bom_and_cjk_utf16",
-      "ignored": false,
-      "cfg": null
-    },
-    {
-      "file": "src/nettest.rs",
-      "name": "failure_tips_include_host_and_optional_extra",
-      "ignored": false,
-      "cfg": null
-    },
-    {
-      "file": "src/nettest.rs",
-      "name": "format_latency_us_shows_sub_millisecond",
-      "ignored": false,
-      "cfg": null
-    },
-    {
-      "file": "src/nettest.rs",
-      "name": "parse_wsl_distros_drops_sentence_like_lines",
-      "ignored": false,
-      "cfg": null
-    },
-    {
-      "file": "src/nettest.rs",
-      "name": "parse_wsl_distros_handles_bom_crlf_and_nul",
-      "ignored": false,
-      "cfg": null
-    },
-    {
-      "file": "src/nettest.rs",
-      "name": "parse_wsl_probe_lines_ignores_empty_host_rows",
-      "ignored": false,
-      "cfg": null
-    },
-    {
-      "file": "src/nettest.rs",
-      "name": "parse_wsl_probe_lines_ok_without_latency_is_failure",
-      "ignored": false,
-      "cfg": null
-    },
-    {
-      "file": "src/nettest.rs",
-      "name": "parse_wsl_probe_lines_reads_ok_and_fail",
-      "ignored": false,
-      "cfg": null
-    },
-    {
-      "file": "src/nettest.rs",
-      "name": "prefer_wsl_prefers_ubuntu_family",
-      "ignored": false,
-      "cfg": null
-    },
-    {
-      "file": "src/nettest.rs",
-      "name": "probe_host_shares_deadline_across_addresses",
-      "ignored": false,
-      "cfg": null
-    },
-    {
-      "file": "src/nettest.rs",
-      "name": "resolve_with_timeout_returns_error_for_invalid_host",
-      "ignored": false,
-      "cfg": null
-    },
-    {
-      "file": "src/nettest.rs",
-      "name": "run_local_without_network_does_not_panic",
-      "ignored": false,
-      "cfg": null
-    },
-    {
-      "file": "src/nettest.rs",
-      "name": "run_windows_scope_ignores_distro_argument",
-      "ignored": false,
-      "cfg": null
-    },
-    {
-      "file": "src/nettest.rs",
-      "name": "targets_cover_three_sites",
-      "ignored": false,
-      "cfg": null
-    },
-    {
-      "file": "src/nettest.rs",
-      "name": "wsl_missing_report_lists_actionable_tips",
-      "ignored": false,
-      "cfg": null
-    },
-    {
-      "file": "src/nettest.rs",
-      "name": "wsl_probe_script_converts_epochrealtime_to_microseconds",
-      "ignored": false,
-      "cfg": null
-    },
-    {
-      "file": "src/nettest.rs",
-      "name": "wsl_probe_script_lists_hosts_and_timeout",
-      "ignored": false,
-      "cfg": null
-    },
-    {
-      "file": "src/nettest.rs",
-      "name": "zero_latency_is_reachable_but_shown_as_unknown",
       "ignored": false,
       "cfg": null
     },
@@ -434,132 +260,6 @@
       "cfg": null
     },
     {
-      "file": "src/proxy.rs",
-      "name": "attach_ipv4_matches_by_if_index",
-      "ignored": false,
-      "cfg": null
-    },
-    {
-      "file": "src/proxy.rs",
-      "name": "attach_ipv4_prefers_non_apipa_over_lexicographic",
-      "ignored": false,
-      "cfg": null
-    },
-    {
-      "file": "src/proxy.rs",
-      "name": "build_vpn_processes_by_name_and_port_heuristic",
-      "ignored": false,
-      "cfg": null
-    },
-    {
-      "file": "src/proxy.rs",
-      "name": "command_tips_cover_both_platforms_without_blanks",
-      "ignored": false,
-      "cfg": null
-    },
-    {
-      "file": "src/proxy.rs",
-      "name": "command_tips_include_git_proxy_snippets",
-      "ignored": false,
-      "cfg": null
-    },
-    {
-      "file": "src/proxy.rs",
-      "name": "command_tips_substitute_custom_port",
-      "ignored": false,
-      "cfg": null
-    },
-    {
-      "file": "src/proxy.rs",
-      "name": "env_vars_merge_case_on_windows_style",
-      "ignored": false,
-      "cfg": null
-    },
-    {
-      "file": "src/proxy.rs",
-      "name": "env_vars_split_case_on_unix_style",
-      "ignored": false,
-      "cfg": null
-    },
-    {
-      "file": "src/proxy.rs",
-      "name": "known_client_match_and_naive_explicit",
-      "ignored": false,
-      "cfg": null
-    },
-    {
-      "file": "src/proxy.rs",
-      "name": "mask_proxy_credentials_covers_no_scheme_format",
-      "ignored": false,
-      "cfg": null
-    },
-    {
-      "file": "src/proxy.rs",
-      "name": "mask_proxy_credentials_covers_winet_multi_protocol",
-      "ignored": false,
-      "cfg": null
-    },
-    {
-      "file": "src/proxy.rs",
-      "name": "mask_proxy_credentials_redacts_password_only",
-      "ignored": false,
-      "cfg": null
-    },
-    {
-      "file": "src/proxy.rs",
-      "name": "non_windows_detect_does_not_panic",
-      "ignored": false,
-      "cfg": null
-    },
-    {
-      "file": "src/proxy.rs",
-      "name": "normalize_public_ip_accepts_v4_v6_and_rejects_html",
-      "ignored": false,
-      "cfg": null
-    },
-    {
-      "file": "src/proxy.rs",
-      "name": "parse_net_adapter_json_single_and_array",
-      "ignored": false,
-      "cfg": null
-    },
-    {
-      "file": "src/proxy.rs",
-      "name": "parse_net_ip_address_json_skips_loopback",
-      "ignored": false,
-      "cfg": null
-    },
-    {
-      "file": "src/proxy.rs",
-      "name": "parse_netstat_listeners_cjk_header_and_ipv6",
-      "ignored": false,
-      "cfg": null
-    },
-    {
-      "file": "src/proxy.rs",
-      "name": "parse_tasklist_csv_with_quoted_and_cjk",
-      "ignored": false,
-      "cfg": null
-    },
-    {
-      "file": "src/proxy.rs",
-      "name": "pick_local_ip_prefers_up_non_virtual",
-      "ignored": false,
-      "cfg": null
-    },
-    {
-      "file": "src/proxy.rs",
-      "name": "pick_local_ip_skips_apipa_when_other_candidates_exist",
-      "ignored": false,
-      "cfg": null
-    },
-    {
-      "file": "src/proxy.rs",
-      "name": "windows_registry_system_proxy_readable",
-      "ignored": false,
-      "cfg": "windows"
-    },
-    {
       "file": "src/registry.rs",
       "name": "registry_ids_unique_and_fields_nonempty",
       "ignored": false,
@@ -579,7 +279,7 @@
     },
     {
       "file": "tests/archive.rs",
-      "name": "corrupt_archive_is_kept_and_logged",
+      "name": "corrupt_archive_is_quarantined_and_logged",
       "ignored": true,
       "cfg": null
     },
@@ -603,13 +303,19 @@
     },
     {
       "file": "tests/archive.rs",
-      "name": "encrypted_archive_is_not_silently_deleted",
+      "name": "encrypted_archive_is_quarantined_not_deleted",
       "ignored": true,
       "cfg": null
     },
     {
       "file": "tests/archive.rs",
-      "name": "equal_content_archives_delete_and_classify_is_stable",
+      "name": "equal_content_archives_dispose_and_classify_is_stable",
+      "ignored": true,
+      "cfg": null
+    },
+    {
+      "file": "tests/archive.rs",
+      "name": "extract_then_organize_generates_dedup_plan",
       "ignored": true,
       "cfg": null
     },
@@ -621,7 +327,7 @@
     },
     {
       "file": "tests/archive.rs",
-      "name": "kept_source_reextract_does_not_recreate_classified_duplicate",
+      "name": "kept_source_rerun_does_not_recreate_classified_duplicate",
       "ignored": true,
       "cfg": null
     },
@@ -639,7 +345,7 @@
     },
     {
       "file": "tests/archive.rs",
-      "name": "nested_archive_depth_limit_retains_unprocessed_package",
+      "name": "nested_archive_depth_limit_quarantines_unprocessed_package",
       "ignored": true,
       "cfg": null
     },
@@ -651,7 +357,7 @@
     },
     {
       "file": "tests/archive.rs",
-      "name": "skipped_conflict_always_preserves_original_archive",
+      "name": "skipped_conflict_moves_original_to_quarantine",
       "ignored": true,
       "cfg": null
     },
@@ -663,7 +369,13 @@
     },
     {
       "file": "tests/archive.rs",
-      "name": "successful_source_can_be_deleted",
+      "name": "successful_source_defaults_to_recycle",
+      "ignored": true,
+      "cfg": null
+    },
+    {
+      "file": "tests/archive.rs",
+      "name": "successful_source_is_disposed_by_policy",
       "ignored": true,
       "cfg": null
     },
@@ -676,12 +388,6 @@
     {
       "file": "tests/archive.rs",
       "name": "xz_single_stream_names_member_after_the_archive",
-      "ignored": true,
-      "cfg": null
-    },
-    {
-      "file": "tests/archive.rs",
-      "name": "zip_extracts_before_generating_dedup_plan",
       "ignored": true,
       "cfg": null
     },
@@ -1077,7 +783,7 @@
     },
     {
       "file": "tests/core.rs",
-      "name": "rules_table_has_exactly_40_rows_without_version_switches",
+      "name": "rules_table_has_exactly_39_rows_without_version_switches",
       "ignored": false,
       "cfg": null
     },
@@ -1228,6 +934,42 @@
     {
       "file": "tests/property.rs",
       "name": "validate_component_rejects_trailing_and_injected_chars",
+      "ignored": false,
+      "cfg": null
+    },
+    {
+      "file": "tests/split.rs",
+      "name": "extract_run_without_engine_fails_loudly",
+      "ignored": false,
+      "cfg": null
+    },
+    {
+      "file": "tests/split.rs",
+      "name": "failed_archive_is_moved_to_quarantine_directory",
+      "ignored": false,
+      "cfg": null
+    },
+    {
+      "file": "tests/split.rs",
+      "name": "multipart_siblings_move_to_quarantine_together",
+      "ignored": false,
+      "cfg": null
+    },
+    {
+      "file": "tests/split.rs",
+      "name": "organizer_analysis_is_read_only_and_never_extracts",
+      "ignored": false,
+      "cfg": null
+    },
+    {
+      "file": "tests/split.rs",
+      "name": "organizer_scan_extracts_nothing_and_skips_failed_dir",
+      "ignored": false,
+      "cfg": null
+    },
+    {
+      "file": "tests/split.rs",
+      "name": "rerun_skips_quarantined_archives_and_reports_count",
       "ignored": false,
       "cfg": null
     }

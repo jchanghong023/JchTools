@@ -13,8 +13,8 @@
 
 ## 1. 项目背景
 
-- **产品**：JchTools——用户个人使用的 Windows 本地工具箱。技术栈 Rust 2021 + Slint 1.17（自绘界面、fluent 风格）、SQLite（rusqlite bundled）、随包 7-Zip 引擎。产品定位与命名规范见合同 P 分区。
-- **工具**：当前两个——「目录整理」与「代理工具」，各自需求见 `docs/CONTRACT.md` 的 C 分区与 X 分区。新工具 `MUST` 经 `src/registry.rs` 注册 + 真实页面接入；侧栏与导航 `SHOULD NOT` 写死只服务单个工具的文案或流程。
+- **产品**：JchTools——用户个人使用的 Windows 本地工具箱，交付形态为安装包（当前用户目录、免 UAC、桌面快捷方式/开始菜单/卸载项）+ 便携 ZIP（P-05/E-04，打包脚本见 `scripts/package-windows.ps1`，安装脚本见 `installer/JchTools.iss`）。技术栈 Rust 2021 + Slint 1.17（自绘界面、fluent 风格）、SQLite（rusqlite bundled）、随包 7-Zip 引擎。产品定位与命名规范见合同 P 分区。
+- **工具**：当前两个——「递归解压」（X 分区）与「目录整理」（C 分区），各自需求见 `docs/CONTRACT.md`。产品完全离线（P-03）：源码中不得引入任何联网能力。新工具 `MUST` 经 `src/registry.rs` 注册 + 真实页面接入；侧栏与导航 `SHOULD NOT` 写死只服务单个工具的文案或流程。
 - **生产方式**：本项目全部产出（代码、测试、文档、CI）由 AI 代理完成；用户不编写任何代码或文字，只在封闭选择、看图判断与真实使用中给出意图和反馈（协作协议见第 7 节）。本文件的纪律条款用于对抗代理的自证偏差。
 - **权威文档**：仅两份——`AGENTS.md`（本文件：项目背景与过程纪律，怎么开发、怎么测试、怎么验收）与 `docs/CONTRACT.md`（需求合同：软件必须满足什么，只写需求）。其余文档仅为辅助说明，冲突时以权威文档为准。
 - **代码入口**：`src/main.rs`（GUI）、`ui/app.slint`（界面）、`resources/rules.json`（40 项界面规则）、`src/registry.rs`（工具注册表）。
@@ -74,7 +74,7 @@ JCHTOOLS_TEST_7ZIP=/abs/path/7zz bash scripts/check-linux.sh   # 含真实解压
 | 任意变更（每次提交） | `cargo test` + `python scripts/static_check.py` | 合同全部条目对应测试 |
 | 引擎 / 解压 / 删除 / 路径安全 | 上行 + `powershell -NoProfile -File .\scripts\acceptance.ps1 -WithEngine` + `tests/gui_flow.rs` | 合同 S / E 分区、C-01 |
 | UI（`ui/app.slint` / GUI 装配） | 任意变更行 + `tests/gui_flow.rs` + `scripts/gui_smoke.py` S1–S3 + 两档窗口尺寸目视检查 | 合同 C / U 分区 |
-| 代理工具 | `cargo test`（`src/proxy.rs` / `src/nettest.rs` 单测）；真实网络连通、外网 IP 与命令复制由用户本人点击验收，自动化不冒充 | 合同 X 分区 |
+| 递归解压端到端 | `python scripts/make_tmp.py testdata --git` 生成数据集 → GUI 走「开始解压 → 一段确认 → 跑完」→ 按合同 X 分区逐条核对（成功原包回收、失败原包进「解压失败」、重跑不再重试、目录不残留压缩包）→ `恢复.ps1` 还原 → `python scripts/make_tmp.py clean` 清理 | 合同 X 分区 |
 | 目录整理端到端 | `python scripts/make_tmp.py testdata --git` 自动生成数据集到 `.tmp/testdata/` → GUI 按默认配置完整走一遍目录整理主流程 → 按合同 C 分区逐条核对结果 → `恢复.ps1` 还原 → `python scripts/make_tmp.py clean` 清理 | 合同 C 分区 |
 | 打包 / 发布 / 引擎捆绑 | `scripts/package-windows.ps1` 全程 + 干净目录解包运行 | 合同 E 分区 |
 
