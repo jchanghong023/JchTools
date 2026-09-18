@@ -208,6 +208,7 @@ pub fn rename_noreplace(source: &Path, target: &Path) -> Result<()> {
         if unsafe { MoveFileExW(s.as_ptr(), t.as_ptr(), MOVEFILE_WRITE_THROUGH) } == 0 {
             return Err(std::io::Error::last_os_error()).context("移动失败（不会覆盖或跨卷复制）");
         }
+        Ok(())
     }
     #[cfg(target_os = "linux")]
     {
@@ -238,7 +239,7 @@ pub fn rename_noreplace(source: &Path, target: &Path) -> Result<()> {
             let _ = fs::remove_file(target);
             return Err(e.into());
         }
-        return Ok(());
+        Ok(())
     }
     #[cfg(all(unix, not(target_os = "linux")))]
     {
@@ -248,8 +249,8 @@ pub fn rename_noreplace(source: &Path, target: &Path) -> Result<()> {
             let _ = fs::remove_file(target);
             return Err(e.into());
         }
+        Ok(())
     }
-    Ok(())
 }
 pub fn ensure_parent(root: &Path, target: &Path) -> Result<()> {
     let rel = relative_string(root, target)?;

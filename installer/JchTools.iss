@@ -34,8 +34,19 @@ ArchitecturesInstallIn64BitMode=x64compatible
 ; 卸载时一并清掉用户数据目录（任务库）由用户自行决定：默认保留，仅移除程序文件。
 UninstallDisplayIcon={app}\JchTools.exe
 
+; 简体中文是 Inno Setup 的非官方翻译：官方安装包不带，随安装来源分别位于
+; Languages\ 或 Languages\Unofficial\。编译期探测两者取其一，都缺失即编译失败（
+; fail-closed），避免静默产出英文安装包。
+#if FileExists(AddBackslash(CompilerPath) + "Languages\ChineseSimplified.isl")
+#define ChineseMessagesFile "compiler:Languages\ChineseSimplified.isl"
+#elif FileExists(AddBackslash(CompilerPath) + "Languages\Unofficial\ChineseSimplified.isl")
+#define ChineseMessagesFile "compiler:Languages\Unofficial\ChineseSimplified.isl"
+#else
+#error ChineseSimplified.isl not found under Inno Setup Languages
+#endif
+
 [Languages]
-Name: "chinesesimplified"; MessagesFile: "compiler:Languages\ChineseSimplified.isl"
+Name: "chinesesimplified"; MessagesFile: "{#ChineseMessagesFile}"
 
 [Tasks]
 ; P-05：桌面快捷方式默认创建（用户可取消勾选）。

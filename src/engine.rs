@@ -1020,6 +1020,8 @@ fn execute_action(job: &mut Job, action: &Action) -> Result<bool> {
 #[cfg(test)]
 mod lock_tests {
     use super::*;
+    // 平台门禁原因：仅 Windows 门禁测试使用（UNC/盘符前缀拼接），非 Windows 无使用者。
+    #[cfg(windows)]
     const BSLASH: char = std::path::MAIN_SEPARATOR; // Windows 下为反斜杠
                                                     // apply 锁目录决策：recorded 有效优先；失效时仅 tasks/ 布局可回退推导。
     #[test]
