@@ -10,7 +10,7 @@ use std::{
 };
 
 /// 总是失败的回收站 mock：模拟回收站容量满等失败场景。
-pub struct FailRecycle;
+pub(crate) struct FailRecycle;
 impl Recycler for FailRecycle {
     fn recycle(&self, _: &Path) -> Result<(), RecycleFailure> {
         Err(RecycleFailure::Failed("mock capacity full".into()))
@@ -18,12 +18,12 @@ impl Recycler for FailRecycle {
 }
 
 /// 把回收对象移入指定「假回收站」目录：断言不污染真实回收站，且可计数。
-pub struct MoveRecycle {
+pub(crate) struct MoveRecycle {
     pub bin: PathBuf,
     pub bin_count: AtomicUsize,
 }
 impl MoveRecycle {
-    pub fn new(bin: PathBuf) -> Self {
+    pub(crate) fn new(bin: PathBuf) -> Self {
         let _ = fs::create_dir_all(&bin);
         Self {
             bin,
@@ -35,7 +35,7 @@ impl Recycler for MoveRecycle {
     fn recycle(&self, path: &Path) -> Result<(), RecycleFailure> {
         let name = path
             .file_name()
-            .map(|n| n.to_os_string())
+            .map(std::ffi::OsStr::to_os_string)
             .unwrap_or_default();
         let dest = self.bin.join(format!(
             "{}-{}",

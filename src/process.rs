@@ -68,10 +68,10 @@ fn summarize_failure(
             .collect::<Vec<_>>()
     };
     let errors = pick(stderr);
-    let chosen = if !errors.is_empty() {
-        errors
-    } else {
+    let chosen = if errors.is_empty() {
         pick(stdout)
+    } else {
+        errors
     };
     let mut text = chosen.join(" | ");
     if text.chars().count() > 400 {
@@ -109,21 +109,14 @@ fn pump<R: Read + Send + 'static>(
                     }
                     break;
                 }
-                let skip = if skip_lf && bytes.first() == Some(&b'\n') {
-                    1
-                } else {
-                    0
-                };
+                let skip = usize::from(skip_lf && bytes.first() == Some(&b'\n'));
                 let rest = &bytes[skip..];
-                match rest.iter().position(|b| *b == b'\n' || *b == b'\r') {
-                    Some(index) => {
-                        line.extend_from_slice(&rest[..index]);
-                        (skip + index + 1, Some(rest[index] == b'\r'))
-                    }
-                    None => {
-                        line.extend_from_slice(rest);
-                        (bytes.len(), None)
-                    }
+                if let Some(index) = rest.iter().position(|b| *b == b'\n' || *b == b'\r') {
+                    line.extend_from_slice(&rest[..index]);
+                    (skip + index + 1, Some(rest[index] == b'\r'))
+                } else {
+                    line.extend_from_slice(rest);
+                    (bytes.len(), None)
                 }
             };
             skip_lf = terminated == Some(true);
@@ -135,14 +128,11 @@ fn pump<R: Read + Send + 'static>(
                 break;
             }
             if terminated.is_some() {
-                let text = match String::from_utf8(std::mem::take(&mut line)) {
-                    Ok(s) => s,
-                    Err(_) => {
-                        let _ = sender.send(PipeMessage::Error(
-                            "7-Zip 未返回有效 UTF-8，无法安全解析文件路径".into(),
-                        ));
-                        break;
-                    }
+                let Ok(text) = String::from_utf8(std::mem::take(&mut line)) else {
+                    let _ = sender.send(PipeMessage::Error(
+                        "7-Zip 未返回有效 UTF-8，无法安全解析文件路径".into(),
+                    ));
+                    break;
                 };
                 if sender.send(PipeMessage::Line(err, text)).is_err() {
                     break;
@@ -255,10 +245,10 @@ pub fn run_with_timeout_input(
     // 若在本线程同步 write_all，双方会分别卡在 stdin/stdout 管道满上形成互锁，
     // 永远进不了 wait_child_with_deadline，timeout 形同虚设，可无限期挂死。
     // 复制一份数据以满足线程的 'static 要求；写完后 drop stdin 发送 EOF。
-    let stdin_owned = stdin_data.map(|data| data.to_vec());
+    let stdin_owned = stdin_data.map(<[u8]>::to_vec);
     let stdin_thread = match (stdin_owned, child.stdin.take()) {
         (Some(data), Some(mut stdin)) => Some(thread::spawn(move || {
-            let result = stdin.write_all(&data).and_then(|_| stdin.flush());
+            let result = stdin.write_all(&data).and_then(|()| stdin.flush());
             drop(stdin);
             result
         })),
@@ -414,7 +404,7 @@ fn wait_child_with_deadline(
 /// 默认空闲上限：连续无输出超过该时长视为挂死并 kill。
 /// 正常任务（含超大压缩包）在工作期间会持续吐进度/条目输出，不会长时间静默；
 /// 取 10 分钟可覆盖杀软扫描等短暂静默，又避免挂死进程长期占住 RootGuard。
-pub const DEFAULT_IDLE_TIMEOUT: Duration = Duration::from_secs(10 * 60);
+pub const DEFAULT_IDLE_TIMEOUT: Duration = Duration::from_mins(10);
 
 pub fn run(
     command: &mut Command,
@@ -452,25 +442,19 @@ pub fn run_with_idle_timeout(
     })?;
     let (send, recv) = mpsc::sync_channel(64);
     // spawn 成功后若 take 失败，必须 kill+wait 回收子进程，避免残留。
-    let stdout_pipe = match child.stdout.take() {
-        Some(pipe) => pipe,
-        None => {
-            let _ = child.kill();
-            let _ = child.wait();
-            bail!("缺少 stdout");
-        }
+    let Some(stdout_pipe) = child.stdout.take() else {
+        let _ = child.kill();
+        let _ = child.wait();
+        bail!("缺少 stdout");
     };
     let stdout = pump(stdout_pipe, false, send.clone());
-    let stderr_pipe = match child.stderr.take() {
-        Some(pipe) => pipe,
-        None => {
-            let _ = child.kill();
-            let _ = child.wait();
-            drop(send);
-            drop(recv);
-            let _ = stdout.join();
-            bail!("缺少 stderr");
-        }
+    let Some(stderr_pipe) = child.stderr.take() else {
+        let _ = child.kill();
+        let _ = child.wait();
+        drop(send);
+        drop(recv);
+        let _ = stdout.join();
+        bail!("缺少 stderr");
     };
     let stderr = pump(stderr_pipe, true, send);
     let mut stderr_tail = std::collections::VecDeque::new();
@@ -520,8 +504,7 @@ pub fn run_with_idle_timeout(
         if !status.success() {
             let code = status
                 .code()
-                .map(|code| code.to_string())
-                .unwrap_or_else(|| "未知".into());
+                .map_or_else(|| "未知".into(), |code| code.to_string());
             let summary = summarize_failure(&stderr_tail, &stdout_tail);
             if summary.is_empty() {
                 bail!("7-Zip 退出码 {code}，且没有输出可读的错误行；压缩包可能已损坏或不完整");
@@ -618,7 +601,7 @@ mod tests {
             let (send, recv) = mpsc::sync_channel(1024);
             let handle = pump(std::io::Cursor::new(data.clone()), false, send);
             handle.join().unwrap(); // 线程内 panic 会在此暴露
-            while let Ok(_) = recv.try_recv() {}
+            while recv.try_recv().is_ok() {}
         }
     }
 
@@ -709,7 +692,7 @@ mod tests {
         assert_eq!(lines, vec!["line1", "line2", "line3"]);
     }
 
-    // 覆盖 X-07
+    // 覆盖 X-08（无法解码的文件名必须报错，不得静默落盘）
     #[test]
     fn pump_reports_non_utf8_as_error() {
         let (send, recv) = mpsc::sync_channel(64);
@@ -750,7 +733,7 @@ mod tests {
         struct FailingReader;
         impl Read for FailingReader {
             fn read(&mut self, _buf: &mut [u8]) -> std::io::Result<usize> {
-                Err(std::io::Error::new(std::io::ErrorKind::Other, "模拟读错误"))
+                Err(std::io::Error::other("模拟读错误"))
             }
         }
         let capture = read_all_capped(FailingReader, 64);
@@ -802,7 +785,7 @@ mod tests {
     }
 
     /// run_with_idle_timeout：取消路径仍可用——先启动再 cancel，应返回取消错误。
-    // 覆盖 C-08
+    // 覆盖 C-10（用户取消在安全边界生效）
     #[test]
     fn run_idle_timeout_supports_cancel() {
         let mut command = silent_hung_command();

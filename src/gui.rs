@@ -1,6 +1,13 @@
 //! GUI 组装层：Slint 界面的状态、回调整体在此实现；`main.rs` 只是薄壳入口。
 //! 同步回调集中在 `wire_sync`，便于无头测试装配后直接断言界面状态。
-slint::include_modules!();
+/// Slint 生成代码（target/**/out/app.rs）不做 unwrap/可达性审查：机器生成、
+/// 修复无意义且计数随 UI 改版大幅波动；业务代码保持 unwrap/expect 全面禁止。
+#[allow(clippy::unwrap_used)]
+#[allow(unreachable_pub)]
+mod generated_ui {
+    slint::include_modules!();
+}
+pub use generated_ui::*;
 
 use crate::{
     config::{ClassifyMode, Config, ConflictPolicy, DEFAULT_CUSTOM_CATEGORIES},
@@ -127,7 +134,8 @@ struct WindowDrag {
 fn pointer_position() -> Option<(f64, f64)> {
     use windows_sys::Win32::{Foundation::POINT, UI::WindowsAndMessaging::GetCursorPos};
     let mut point = POINT { x: 0, y: 0 };
-    (unsafe { GetCursorPos(&mut point) } != 0).then_some((point.x as f64, point.y as f64))
+    (unsafe { GetCursorPos(&raw mut point) } != 0)
+        .then_some((f64::from(point.x), f64::from(point.y)))
 }
 #[cfg(not(windows))]
 fn pointer_position() -> Option<(f64, f64)> {
@@ -140,19 +148,19 @@ fn pointer_position() -> Option<(f64, f64)> {
 mod win32_monitor {
     use windows_sys::Win32::Foundation::{HWND, POINT, RECT};
     #[repr(C)]
-    pub struct MONITORINFO {
+    pub(super) struct MonitorInfo {
         pub cbSize: u32,
         pub rcMonitor: RECT,
         pub rcWork: RECT,
         pub dwFlags: u32,
     }
-    pub type HMONITOR = *mut core::ffi::c_void;
+    pub(super) type HMonitor = *mut core::ffi::c_void;
     /// MONITOR_DEFAULTTONEAREST：取包含点/窗口的最近监视器
-    pub const MONITOR_DEFAULTTONEAREST: u32 = 2;
+    pub(super) const MONITOR_DEFAULTTONEAREST: u32 = 2;
     extern "system" {
-        pub fn MonitorFromWindow(hwnd: HWND, dw_flags: u32) -> HMONITOR;
-        pub fn MonitorFromPoint(pt: POINT, dw_flags: u32) -> HMONITOR;
-        pub fn GetMonitorInfoW(hmonitor: HMONITOR, lpmi: *mut MONITORINFO) -> i32;
+        pub(super) fn MonitorFromWindow(hwnd: HWND, dw_flags: u32) -> HMonitor;
+        pub(super) fn MonitorFromPoint(pt: POINT, dw_flags: u32) -> HMonitor;
+        pub(super) fn GetMonitorInfoW(hmonitor: HMonitor, lpmi: *mut MonitorInfo) -> i32;
     }
 }
 /// 启动时把窗口居中：基于当前/光标所在监视器的工作区计算对称留白，
@@ -160,26 +168,29 @@ mod win32_monitor {
 #[cfg(windows)]
 fn center_window(window: &slint::Window) {
     use win32_monitor::{
-        GetMonitorInfoW, MonitorFromPoint, MonitorFromWindow, MONITORINFO, MONITOR_DEFAULTTONEAREST,
+        GetMonitorInfoW, MonitorFromPoint, MonitorFromWindow, MonitorInfo, MONITOR_DEFAULTTONEAREST,
     };
     use windows_sys::Win32::Foundation::{POINT, RECT};
     use windows_sys::Win32::UI::WindowsAndMessaging::{GetCursorPos, GetForegroundWindow};
     // 优先当前前台窗口所在监视器；没有前台窗口时退到光标所在监视器。
     let foreground = unsafe { GetForegroundWindow() };
-    let monitor = if !foreground.is_null() {
-        unsafe { MonitorFromWindow(foreground, MONITOR_DEFAULTTONEAREST) }
-    } else {
+    let monitor = if foreground.is_null() {
         let mut point = POINT { x: 0, y: 0 };
-        if unsafe { GetCursorPos(&mut point) } == 0 {
+        if unsafe { GetCursorPos(&raw mut point) } == 0 {
             return;
         }
         unsafe { MonitorFromPoint(point, MONITOR_DEFAULTTONEAREST) }
+    } else {
+        unsafe { MonitorFromWindow(foreground, MONITOR_DEFAULTTONEAREST) }
     };
     if monitor.is_null() {
         return;
     }
-    let mut info = MONITORINFO {
-        cbSize: std::mem::size_of::<MONITORINFO>() as u32,
+    // Win32 ABI 要求的 cbSize：结构体仅数十字节，截断不可能发生。
+    #[allow(clippy::cast_possible_truncation)]
+    let cb_size = std::mem::size_of::<MonitorInfo>() as u32;
+    let mut info = MonitorInfo {
+        cbSize: cb_size,
         rcMonitor: RECT {
             left: 0,
             top: 0,
@@ -195,13 +206,14 @@ fn center_window(window: &slint::Window) {
         dwFlags: 0,
     };
     // 兼容部分声明布局：cbSize 必须正确
-    if unsafe { GetMonitorInfoW(monitor, &mut info) } == 0 {
+    if unsafe { GetMonitorInfoW(monitor, &raw mut info) } == 0 {
         return;
     }
     let work = info.rcWork;
     let size = window.size();
-    let width = size.width as i32;
-    let height = size.height as i32;
+    // 窗口尺寸远小于 i32 上限；饱和转换仅防御性兜底（显示用途）。
+    let width = i32::try_from(size.width).unwrap_or(i32::MAX);
+    let height = i32::try_from(size.height).unwrap_or(i32::MAX);
     // 在监视器工作区内居中，并夹回工作区，避免压住任务栏或跑到屏幕外
     let x = work.left + ((work.right - work.left) - width) / 2;
     let y = work.top + ((work.bottom - work.top) - height) / 2;
@@ -224,6 +236,8 @@ fn system_dark() -> bool {
         .chain(std::iter::once(0))
         .collect();
     let mut value: u32 = 1;
+    // DWORD 缓冲区大小恒为 4，截断不可能发生。
+    #[allow(clippy::cast_possible_truncation)]
     let mut size = std::mem::size_of::<u32>() as u32;
     let status = unsafe {
         RegGetValueW(
@@ -232,8 +246,8 @@ fn system_dark() -> bool {
             name.as_ptr(),
             RRF_RT_REG_DWORD,
             std::ptr::null_mut(),
-            &mut value as *mut u32 as *mut core::ffi::c_void,
-            &mut size,
+            (&raw mut value).cast::<core::ffi::c_void>(),
+            &raw mut size,
         )
     };
     status == 0 && value == 0
@@ -273,11 +287,13 @@ fn rule_row(spec: &RuleSpec, data: &serde_json::Value) -> RuleRow {
             2
         },
         checked,
-        index: spec
-            .choices
-            .iter()
-            .position(|c| Some(c[0].as_str()) == value.as_str())
-            .unwrap_or(0) as i32,
+        index: i32::try_from(
+            spec.choices
+                .iter()
+                .position(|c| Some(c[0].as_str()) == value.as_str())
+                .unwrap_or(0),
+        )
+        .unwrap_or(0),
         options: Rc::new(VecModel::from(
             spec.choices
                 .iter()
@@ -287,8 +303,7 @@ fn rule_row(spec: &RuleSpec, data: &serde_json::Value) -> RuleRow {
         .into(),
         value: value
             .as_str()
-            .map(str::to_owned)
-            .unwrap_or_else(|| value.to_string())
+            .map_or_else(|| value.to_string(), str::to_owned)
             .into(),
     }
 }
@@ -457,7 +472,7 @@ fn changed(
     ui: &AppWindow,
     state: &Rc<RefCell<State>>,
     key: &str,
-    value: serde_json::Value,
+    value: &serde_json::Value,
     rebuild: bool,
 ) -> bool {
     let tool = state.borrow().tool;
@@ -509,10 +524,11 @@ fn reload_after_failed(
         if let Ok(db) = Database::open_existing(&task) {
             if let Ok(summary) = db.summary() {
                 ui.set_summary(summary.description().into());
-                ui.set_plan_delete_count(summary.planned_delete as i32);
-                ui.set_plan_move_count(summary.planned_move as i32);
-                ui.set_plan_link_count(summary.planned_link as i32);
-                ui.set_plan_empty_count(summary.planned_empty as i32);
+                // 计数为显示用途，超出 i32 的极端值饱和显示即可。
+                ui.set_plan_delete_count(i32::try_from(summary.planned_delete).unwrap_or(i32::MAX));
+                ui.set_plan_move_count(i32::try_from(summary.planned_move).unwrap_or(i32::MAX));
+                ui.set_plan_link_count(i32::try_from(summary.planned_link).unwrap_or(i32::MAX));
+                ui.set_plan_empty_count(i32::try_from(summary.planned_empty).unwrap_or(i32::MAX));
                 {
                     let mut s = state.borrow_mut();
                     s.planned = summary.planned_delete
@@ -538,12 +554,12 @@ fn reload_after_failed(
             )
         };
         let plan_load = state.borrow().plan_load.clone();
-        load_plan_filtered(sender.clone(), plan_load, task, start, page, filter);
+        load_plan_filtered(sender, &plan_load, task, start, page, filter);
     }
 }
 fn load_plan_filtered(
-    sender: mpsc::SyncSender<Event>,
-    plan_load: Arc<PlanLoadSync>,
+    sender: &mpsc::SyncSender<Event>,
+    plan_load: &Arc<PlanLoadSync>,
     path: PathBuf,
     start: i64,
     page: usize,
@@ -551,17 +567,17 @@ fn load_plan_filtered(
 ) {
     // 递增代际：同一会话里筛选/翻页会并发发起多次加载，晚到的低代际结果不得覆盖当前视图。
     let gen = plan_load.latest.fetch_add(1, Ordering::AcqRel) + 1;
-    let load = plan_load.clone();
+    let load = Arc::clone(plan_load);
+    // 线程需要所有权：从引用克隆出独立句柄（成功路径用 sender，失败路径用 err_sender）。
+    let sender = sender.clone();
     let err_sender = sender.clone();
     // 失败路径要区分「回空页」与「只报错」两种事件（见下），不走 async_work 的单事件映射。
     // 打开的是引擎已生成的任务库：缺失时报错，不静默新建空库。
     std::thread::spawn(move || {
         // 与 async_work 一致地拦截 panic：否则失败事件缺失会让 UI 停在「加载中…」。
         let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-            Database::open_existing(&path).and_then(|db| {
-                db.actions_page_filtered(start, 101, kind.as_deref())
-                    .map_err(Into::into)
-            })
+            Database::open_existing(&path)
+                .and_then(|db| db.actions_page_filtered(start, 101, kind.as_deref()))
         }));
         let load_result = match result {
             Ok(inner) => inner,
@@ -593,8 +609,8 @@ fn record_plan_load_done(load: &PlanLoadSync, gen: u64) {
     let mut guard = load
         .completed
         .lock()
-        .unwrap_or_else(|poisoned| poisoned.into_inner());
-    if guard.as_ref().map(|done| done.gen <= gen).unwrap_or(true) {
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    if guard.as_ref().is_none_or(|done| done.gen <= gen) {
         *guard = Some(PlanLoadDone { gen });
     }
 }
@@ -657,7 +673,8 @@ fn count_selected_pending(task: &Path) -> Result<u64> {
         [],
         |r| r.get(0),
     )?;
-    Ok(n.max(0) as u64)
+    // COUNT(*) 恒非负，max(0) 仅防御损坏库；转换在 64 位平台无损。
+    Ok(u64::try_from(n.max(0)).unwrap_or(0))
 }
 fn start_task(
     ui: &AppWindow,
@@ -758,23 +775,28 @@ fn start_task(
         });
     std::thread::spawn(move || {
         let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-            if let Some(overrides) = overrides {
-                if apply {
-                    engine::apply_with(task.as_ref().unwrap(), context, overrides.recycler)
-                } else {
+            if apply {
+                // apply 分支在函数入口已校验任务库存在；工作线程内不使用 unwrap，
+                // 若状态被并发改动则按错误返回，交给事件循环统一呈现。
+                let Some(task_path) = task.as_deref() else {
+                    anyhow::bail!("内部错误：执行阶段任务库缺失");
+                };
+                match &overrides {
+                    Some(o) => engine::apply_with(task_path, context, o.recycler.clone()),
+                    None => engine::apply(task_path, context),
+                }
+            } else {
+                match &overrides {
                     // engine 已提供 prepare_with：测试注入的 recycler 必须传入，与 apply_with 对称。
-                    engine::prepare_with(
+                    Some(o) => engine::prepare_with(
                         &directory,
                         configuration,
                         context,
-                        &overrides.state_dir,
-                        overrides.recycler,
-                    )
+                        &o.state_dir,
+                        o.recycler.clone(),
+                    ),
+                    None => engine::prepare(&directory, configuration, context),
                 }
-            } else if apply {
-                engine::apply(task.as_ref().unwrap(), context)
-            } else {
-                engine::prepare(&directory, configuration, context)
             }
         }));
         let event = match result {
@@ -901,7 +923,7 @@ fn extract_confirm_text(count_text: &str, directory: &str, config: &Config) -> S
 fn show_error(ui: &AppWindow, error: impl std::fmt::Display) {
     ui.set_error_text(error.to_string().into());
 }
-/// 事件循环把日志写进界面环形缓冲的统一入口（C-12：界面仅保留最近 300 条）。
+/// 事件循环把日志写进界面环形缓冲的统一入口（U-10/S-07：界面仅保留最近 300 条）。
 /// Failed 收尾与普通日志同走此路径，避免失败消息绕过条数上限。
 fn push_event_log(logs: &mut VecDeque<String>, text: String) {
     if logs.len() >= 300 {
@@ -927,7 +949,7 @@ fn reset_tool_list(ui: &AppWindow) {
 
 /// 同步回调装配：规则表、分区/工具导航、主题与输入校验——纯属性/状态操作，
 /// 不依赖事件循环，独立成函数以便无头 GUI 测试直接装配后断言。
-fn wire_sync(ui: &AppWindow, state: &Rc<RefCell<State>>, sender: mpsc::SyncSender<Event>) {
+fn wire_sync(ui: &AppWindow, state: &Rc<RefCell<State>>, sender: &mpsc::SyncSender<Event>) {
     {
         let weak = ui.as_weak();
         let state = state.clone();
@@ -1034,7 +1056,7 @@ fn wire_sync(ui: &AppWindow, state: &Rc<RefCell<State>>, sender: mpsc::SyncSende
             {
                 // 分区集合随工具变化（R-01）：递归解压=解压/安全与性能，目录整理=去重/归类/清理/安全与性能。
                 let sections = state.borrow().tool.sections();
-                if let Some(section) = sections.get(index.max(0) as usize) {
+                if let Some(section) = sections.get(usize::try_from(index.max(0)).unwrap_or(0)) {
                     // UI 与状态用同一个钳制值：负 index 不再出现「状态到解压、高亮停在 -1」的分叉。
                     let index = index.max(0);
                     state.borrow_mut().section = section.to_string();
@@ -1056,7 +1078,7 @@ fn wire_sync(ui: &AppWindow, state: &Rc<RefCell<State>>, sender: mpsc::SyncSende
         let state = state.clone();
         ui.on_rule_bool(move |key, value| {
             if let Some(ui) = weak.upgrade() {
-                if changed(&ui, &state, key.as_str(), value.into(), false) {
+                if changed(&ui, &state, key.as_str(), &value.into(), false) {
                     patch_rule_row(&ui, key.as_str(), |row| row.checked = value);
                     sync_rules(&ui, &state.borrow());
                 }
@@ -1073,7 +1095,7 @@ fn wire_sync(ui: &AppWindow, state: &Rc<RefCell<State>>, sender: mpsc::SyncSende
                     .specs
                     .iter()
                     .find(|s| s.key == key.as_str())
-                    .and_then(|s| s.choices.get(index.max(0) as usize))
+                    .and_then(|s| s.choices.get(usize::try_from(index.max(0)).unwrap_or(0)))
                     .map(|c| c[0].clone());
                 if let Some(value) = selected {
                     let hint = state
@@ -1082,7 +1104,7 @@ fn wire_sync(ui: &AppWindow, state: &Rc<RefCell<State>>, sender: mpsc::SyncSende
                         .iter()
                         .find(|s| s.key == key.as_str())
                         .map(|s| hint_for(s, &serde_json::Value::from(value.as_str())));
-                    if changed(&ui, &state, key.as_str(), value.into(), false) {
+                    if changed(&ui, &state, key.as_str(), &value.into(), false) {
                         patch_rule_row(&ui, key.as_str(), |row| {
                             row.index = index;
                             if let Some(hint) = &hint {
@@ -1107,7 +1129,7 @@ fn wire_sync(ui: &AppWindow, state: &Rc<RefCell<State>>, sender: mpsc::SyncSende
                     2 => "dark",
                     _ => "system",
                 };
-                changed(&ui, &state, "theme", value.into(), false);
+                changed(&ui, &state, "theme", &value.into(), false);
             }
         });
     }
@@ -1134,45 +1156,42 @@ fn wire_sync(ui: &AppWindow, state: &Rc<RefCell<State>>, sender: mpsc::SyncSende
                     .find(|s| s.key == key.as_str())
                     .is_some_and(|s| s.kind == "number");
                 let parsed = if numeric {
-                    match value.parse::<u64>() {
-                        Ok(v) => serde_json::Value::from(v),
-                        Err(_) => {
-                            // 清空/非法：不写配置，就地把该行显示改回配置真值。
-                            // 禁止整表 refresh：会销毁正在编辑的 LineEdit 并丢焦点。
-                            let current = {
-                                let cfg = serde_json::to_value(&state.borrow().config)
-                                    .unwrap_or_default();
-                                cfg.get(key.as_str()).cloned().unwrap_or_default()
-                            };
-                            let restore =
-                                current.as_u64().map(|v| v.to_string()).unwrap_or_default();
-                            if value.is_empty() {
-                                let key = (*key).to_string();
-                                patch_rule_row(&ui, key.as_str(), |row| {
-                                    row.value = restore.clone().into()
-                                });
-                                return;
-                            }
-                            show_error(&ui, "该设置需要输入非负整数");
+                    if let Ok(v) = value.parse::<u64>() {
+                        serde_json::Value::from(v)
+                    } else {
+                        // 清空/非法：不写配置，就地把该行显示改回配置真值。
+                        // 禁止整表 refresh：会销毁正在编辑的 LineEdit 并丢焦点。
+                        let current = {
+                            let cfg =
+                                serde_json::to_value(&state.borrow().config).unwrap_or_default();
+                            cfg.get(key.as_str()).cloned().unwrap_or_default()
+                        };
+                        let restore = current.as_u64().map(|v| v.to_string()).unwrap_or_default();
+                        if value.is_empty() {
                             let key = (*key).to_string();
                             patch_rule_row(&ui, key.as_str(), |row| {
-                                row.value = restore.clone().into()
+                                row.value = restore.clone().into();
                             });
                             return;
                         }
+                        show_error(&ui, "该设置需要输入非负整数");
+                        let key = (*key).to_string();
+                        patch_rule_row(&ui, key.as_str(), |row| {
+                            row.value = restore.clone().into();
+                        });
+                        return;
                     }
                 } else {
                     serde_json::Value::from(value.to_string())
                 };
-                if changed(&ui, &state, key.as_str(), parsed.clone(), false) {
+                if changed(&ui, &state, key.as_str(), &parsed, false) {
                     // 模型行里的 value 是重建列表（切分区、恢复默认规则）时的唯一来源，必须跟着更新，
                     // 否则重建后这一行会拿旧值覆盖刚改好的设置。
                     let canonical = parsed
                         .as_u64()
-                        .map(|v| v.to_string())
-                        .unwrap_or_else(|| value.to_string());
+                        .map_or_else(|| value.to_string(), |v| v.to_string());
                     patch_rule_row(&ui, key.as_str(), |row| {
-                        row.value = canonical.clone().into()
+                        row.value = canonical.clone().into();
                     });
                     // 联动行的可见性也取决于自身的值（如 large_threshold_gib 改回 1、
                     // custom_categories 改回默认）：与 on_rule_choice 同步可见性，增量插删不重建整表。
@@ -1223,6 +1242,12 @@ fn wire_sync(ui: &AppWindow, state: &Rc<RefCell<State>>, sender: mpsc::SyncSende
                 }
                 if !directory.is_dir() {
                     show_error(&ui, "目标目录不存在或无法访问，请重新选择目录");
+                    return;
+                }
+                // 与清点同一口径的规范化预检（S-05 受保护目录等）：在这里就拒绝，
+                // 不得先打开确认框再等后台清点失败——占位文案下仍可点「确认」。
+                if let Err(error) = crate::fsutil::normalize_root(&directory) {
+                    show_error(&ui, error);
                     return;
                 }
                 let count_text = state.borrow().config.destructive_warning();
@@ -1318,7 +1343,7 @@ pub fn run_with_engine_overrides(
             summary: tool.summary.into(),
         })
         .collect::<Vec<_>>();
-    ui.set_tool_count(registry::tools().len() as i32);
+    ui.set_tool_count(i32::try_from(registry::tools().len()).unwrap_or(i32::MAX));
     ui.set_tools(Rc::new(VecModel::from(tools)).into());
     refresh(&ui, &state.borrow());
     {
@@ -1340,7 +1365,7 @@ pub fn run_with_engine_overrides(
             }
         });
     }
-    wire_sync(&ui, &state, sender.clone());
+    wire_sync(&ui, &state, &sender);
     // 启动落在注册表第一个工具（P-02 顺序：递归解压在前）。必须在 wire_sync 之后调用：
     // 回调接线前的 invoke 是空调用，窗口会停在目录整理页。
     ui.invoke_select_tool("recursive-extract".into());
@@ -1355,14 +1380,11 @@ pub fn run_with_engine_overrides(
                     // 任务可能已在确认框打开期间结束：此时没有可取消的对象，直接退出窗口，
                     // 否则状态停在“取消任务中”且 close_after 残留，会让之后的任务收尾时意外关闭应用。
                     let control = state.borrow().control.clone();
-                    match control {
-                        Some(control) => {
-                            control.cancel();
-                        }
-                        None => {
-                            let _ = slint::quit_event_loop();
-                            return;
-                        }
+                    if let Some(control) = control {
+                        control.cancel();
+                    } else {
+                        let _ = slint::quit_event_loop();
+                        return;
                     }
                     ui.set_status("取消任务中，完成当前安全操作后关闭".into());
                     ui.set_conflict_visible(false);
@@ -1467,8 +1489,8 @@ pub fn run_with_engine_overrides(
             if let Some(start) = state.page_starts.get(next).copied() {
                 // 先发起加载，成功事件再提交 page：失败时 page/按钮保持与列表一致，避免前进软锁。
                 load_plan_filtered(
-                    sender.clone(),
-                    state.plan_load.clone(),
+                    &sender,
+                    &state.plan_load,
                     task,
                     start,
                     next,
@@ -1500,14 +1522,7 @@ pub fn run_with_engine_overrides(
                 ui.set_plan_next_enabled(false);
                 ui.set_plan_page_label("加载中…".into());
             }
-            load_plan_filtered(
-                sender.clone(),
-                s.plan_load.clone(),
-                task,
-                0,
-                0,
-                s.plan_filter.clone(),
-            );
+            load_plan_filtered(&sender, &s.plan_load, task, 0, 0, s.plan_filter.clone());
         });
     }
     {
@@ -1535,8 +1550,8 @@ pub fn run_with_engine_overrides(
                 let restoring = window.is_maximized();
                 let position = window.position();
                 *anchor.borrow_mut() = Some(WindowDrag {
-                    origin: (position.x as f64, position.y as f64),
-                    press: pointer_position().unwrap_or((x as f64, y as f64)),
+                    origin: (f64::from(position.x), f64::from(position.y)),
+                    press: pointer_position().unwrap_or((f64::from(x), f64::from(y))),
                     restoring,
                 });
             }
@@ -1550,7 +1565,7 @@ pub fn run_with_engine_overrides(
             let Some(drag) = state.as_mut() else {
                 return;
             };
-            let pointer = pointer_position().unwrap_or((x as f64, y as f64));
+            let pointer = pointer_position().unwrap_or((f64::from(x), f64::from(y)));
             if drag.restoring {
                 // 按下时未还原（见 drag-start 注释）：真正的拖动在这里触发还原，
                 // 等窗口离开最大化后再重新锚定，避免和系统还原位置互相覆盖。
@@ -1559,15 +1574,22 @@ pub fn run_with_engine_overrides(
                     return;
                 }
                 let position = ui.window().position();
-                drag.origin = (position.x as f64, position.y as f64);
+                drag.origin = (f64::from(position.x), f64::from(position.y));
                 drag.press = pointer;
                 drag.restoring = false;
                 return;
             }
-            ui.window().set_position(slint::PhysicalPosition::new(
-                (drag.origin.0 + pointer.0 - drag.press.0).round() as i32,
-                (drag.origin.1 + pointer.1 - drag.press.1).round() as i32,
-            ));
+            // 拖动坐标为显示用途：饱和换算，越界值夹到 i32 边界。
+            #[allow(clippy::cast_possible_truncation)]
+            let drag_x = (drag.origin.0 + pointer.0 - drag.press.0)
+                .clamp(f64::from(i32::MIN), f64::from(i32::MAX))
+                .round() as i32;
+            #[allow(clippy::cast_possible_truncation)]
+            let drag_y = (drag.origin.1 + pointer.1 - drag.press.1)
+                .clamp(f64::from(i32::MIN), f64::from(i32::MAX))
+                .round() as i32;
+            ui.window()
+                .set_position(slint::PhysicalPosition::new(drag_x, drag_y));
         });
     }
     {
@@ -1595,7 +1617,7 @@ pub fn run_with_engine_overrides(
         let last_theme_poll = Rc::new(std::cell::Cell::new(
             Instant::now()
                 .checked_sub(Duration::from_secs(10))
-                .unwrap_or_else(|| Instant::now()),
+                .unwrap_or_else(Instant::now),
         ));
         let theme_poll = last_theme_poll.clone();
         timer.start(slint::TimerMode::Repeated,Duration::from_millis(100),move||{
@@ -1632,10 +1654,10 @@ pub fn run_with_engine_overrides(
                          s.plan_filter=None;None};
                         ui.set_busy(false);ui.set_paused(false);ui.set_conflict_visible(false);ui.set_ready(ready);ui.set_has_task(true);
                         ui.set_summary(summary.description().into());ui.set_panel(1);
-                        ui.set_plan_delete_count(summary.planned_delete as i32);
-                        ui.set_plan_move_count(summary.planned_move as i32);
-                        ui.set_plan_link_count(summary.planned_link as i32);
-                        ui.set_plan_empty_count(summary.planned_empty as i32);
+                        ui.set_plan_delete_count(i32::try_from(summary.planned_delete).unwrap_or(i32::MAX));
+                        ui.set_plan_move_count(i32::try_from(summary.planned_move).unwrap_or(i32::MAX));
+                        ui.set_plan_link_count(i32::try_from(summary.planned_link).unwrap_or(i32::MAX));
+                        ui.set_plan_empty_count(i32::try_from(summary.planned_empty).unwrap_or(i32::MAX));
                         ui.set_plan_filter(0);
                         // 任务结束后停止实时计时，改写最终统计，避免「耗时」空闲继续增长
                         ui.set_metrics(format!("扫描 {} 个文件 · 错误 {} 项 · 已回收 {} 项",
@@ -1651,7 +1673,7 @@ pub fn run_with_engine_overrides(
                         // 新任务加载落地前清空上一任务的旧行：action id 是各任务库各自的
                         // rowid，旧行在此窗口内仍可交互，会把勾选写进新任务库的同 id 动作。
                         ui.set_plans(Rc::new(VecModel::from(Vec::<PlanRow>::new())).into());
-                        load_plan_filtered(sender.clone(),state.borrow().plan_load.clone(),path,0,0,filter);
+                        load_plan_filtered(&sender,&state.borrow().plan_load,path,0,0,filter);
                         if state.borrow().close_after{let _=slint::quit_event_loop();}
                     }
                     Event::Failed(error)=>{
@@ -1706,7 +1728,7 @@ pub fn run_with_engine_overrides(
                             let start=s.page_starts.get(s.page).copied().unwrap_or(0);
                             let (page,filter)=(s.page,s.plan_filter.clone());
                             let plan_load=s.plan_load.clone();
-                            load_plan_filtered(sender.clone(),plan_load,path,start,page,filter);
+                            load_plan_filtered(&sender,&plan_load,path,start,page,filter);
                         }
                     }
                     Event::PlanPage(path,mut actions,page,gen,filter)=>{
@@ -1717,11 +1739,13 @@ pub fn run_with_engine_overrides(
                         if !plan_page_event_accepted(gen,latest,page,filter.as_deref(),s.page,s.plan_filter.as_deref()){continue;}
                         // 代际仍是最新：应用事件自带 actions；同代 completed 只做清理，不再 take 后丢弃。
                         {
-                            let mut guard=s.plan_load.completed.lock().unwrap_or_else(|poisoned|poisoned.into_inner());
+                            let mut guard=s.plan_load.completed.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
                             if guard.as_ref().is_some_and(|done|done.gen==gen){*guard=None;}
                         }
                         let more=actions.len()>100;actions.truncate(100);
-                        if more&&s.page_starts.len()<=page+1{s.page_starts.push(actions.last().unwrap().id);}
+                        if more&&s.page_starts.len()<=page+1{
+                            if let Some(last)=actions.last(){s.page_starts.push(last.id);}
+                        }
                         s.page=page;
                         // 只有真的还有上一页/下一页时才让按钮可用，避免点了没有任何反应。
                         ui.set_plan_prev_enabled(page>0);
@@ -1766,7 +1790,12 @@ pub fn run_with_engine_overrides(
                                 Ok(n)=>ui.set_confirm_text(extract_confirm_text(
                                     &format!("清点到 {n} 个压缩包（按当前扫描范围，已排除「解压失败」目录）。"),
                                     ui.get_directory().as_str(),&state.borrow().config).into()),
-                                Err(error)=>ui.set_error_text(error.into()),
+                                Err(error)=>{
+                                    // 清点失败：关闭确认框只留红条——占位文案下继续允许确认
+                                    // 会让用户在数量未知的状态启动任务（X-02）。
+                                    ui.set_confirm_kind(0);
+                                    ui.set_error_text(error.into());
+                                },
                             }
                         }
                     },
@@ -1774,11 +1803,13 @@ pub fn run_with_engine_overrides(
                         // X-02 一段式收尾：只清运行态与展示摘要；不改 ready/has_task（目录整理两段式专用）。
                         {let mut s=state.borrow_mut();s.control=None;s.conflict=None;}
                         ui.set_busy(false);ui.set_paused(false);ui.set_conflict_visible(false);
-                        ui.set_quarantined_count(summary.archives_quarantined as i32);
+                        ui.set_quarantined_count(
+                            i32::try_from(summary.archives_failed).unwrap_or(i32::MAX),
+                        );
                         ui.set_progress(-1.0);ui.set_progress_note("".into());
                         ui.set_metrics(summary.extract_description().into());
                         ui.set_status(format!("解压结束：成功 {} 包；{} 包移入「解压失败」，详情见「进度与日志」。",
-                            summary.archives_ok,summary.archives_quarantined).into());
+                            summary.archives_ok,summary.archives_failed).into());
                         if state.borrow().close_after{let _=slint::quit_event_loop();}
                     },
                 }
@@ -1795,11 +1826,17 @@ pub fn run_with_engine_overrides(
                     if s.applying{
                         ui.set_metrics(format!("执行中：已处理 {} / {} 项 · 耗时 {:.1}s",done,s.planned,elapsed).into());
                     }else{
-                        ui.set_metrics(format!("扫描 {} 个文件 · 读取 {} · 已处理 {} 个计划项 · 耗时 {:.1}s · 平均读取 {:.1} MiB/s",scanned,bytes(read),done,elapsed,read as f64/elapsed/1048576.0).into());
+                        // 吞吐速率为显示用途，u64→f64 的精度损失无意义。
+                        #[allow(clippy::cast_precision_loss)]
+                        let rate_mib_s = read as f64 / elapsed / 1048576.0;
+                        ui.set_metrics(format!("扫描 {} 个文件 · 读取 {} · 已处理 {} 个计划项 · 耗时 {:.1}s · 平均读取 {:.1} MiB/s",scanned,bytes(read),done,elapsed,rate_mib_s).into());
                     }
                     // 执行阶段按计划项计数；分析阶段总量未知（扫描/哈希/解压包大小不能提前预知）
                     if s.applying&&s.planned>0{
-                        ui.set_progress((done as f32/s.planned as f32).clamp(0.0,1.0));
+                        // 进度分数为显示用途，整数→浮点的精度损失无意义。
+                        #[allow(clippy::cast_precision_loss, clippy::cast_possible_truncation)]
+                        let progress = (done as f64 / s.planned as f64).clamp(0.0, 1.0) as f32;
+                        ui.set_progress(progress);
                         ui.set_progress_note(format!("{done} / {} 项",s.planned).into());
                     }else if s.applying{
                         // 执行阶段没有可执行的计划项（全部取消勾选或空计划）时，不要显示“已扫描 0 个文件”
@@ -1817,12 +1854,12 @@ pub fn run_with_engine_overrides(
     }
     // First show the window. Rules stay in memory for this session only.
     ui.show()?;
-    center_window(&ui.window());
+    center_window(ui.window());
     // 窗口刚映射时系统还会套用默认位置，稍后再居中一次，保证首屏就是居中的
     let centered = ui.as_weak();
     slint::Timer::single_shot(Duration::from_millis(120), move || {
         if let Some(ui) = centered.upgrade() {
-            center_window(&ui.window());
+            center_window(ui.window());
         }
     });
     hook(&ui);
@@ -1863,29 +1900,29 @@ mod gui_tests {
         // 同代但用户已切筛选：拒绝。
         assert!(!plan_page_event_accepted(6, 6, 0, None, 0, Some("delete")));
     }
-    // 覆盖 C-12
+    // 覆盖 S-07, U-10
     #[test]
     fn failed_event_log_respects_300_cap() {
-        // 回归（C-12）：Failed 收尾此前直接 push_back 不查上限；一次任务先积累 300 条
+        // 回归（U-10）：Failed 收尾此前直接 push_back 不查上限；一次任务先积累 300 条
         // 日志再收到失败事件时界面日志会到 301 条。失败收尾必须与普通日志同受 300 条约束。
         let mut logs = VecDeque::new();
         for i in 0..300 {
             push_event_log(&mut logs, format!("日志 {i}"));
         }
         push_event_log(&mut logs, "任务失败：测试".into());
-        assert_eq!(logs.len(), 300, "界面日志最多保留最近 300 条（C-12）");
+        assert_eq!(logs.len(), 300, "界面日志最多保留最近 300 条（U-10）");
         assert_eq!(
-            logs.back().map(|s| s.as_str()),
+            logs.back().map(std::string::String::as_str),
             Some("任务失败：测试"),
             "最新一条在最上"
         );
         assert_eq!(
-            logs.front().map(|s| s.as_str()),
+            logs.front().map(std::string::String::as_str),
             Some("日志 1"),
             "最旧一条被挤出"
         );
     }
-    // 覆盖 C-08
+    // 覆盖 U-06（失败收尾如实重载摘要，不得崩溃或停留旧数据）
     #[test]
     fn failed_reload_updates_summary_without_reborrow_panic() {
         // 回归：Failed 收尾此前把 task 提取放在 if-let scrutinee 里（edition 2021 下
@@ -1962,6 +1999,20 @@ mod gui_tests {
             self.ui.set_screen(0);
             self.ui.set_active_tool_id("directory-organizer".into());
             self.ui.set_quarantined_count(0);
+            self.ui.set_acknowledge(false);
+            self.ui.set_directory("".into());
+            self.ui.set_has_task(false);
+            self.ui.set_busy(false);
+            self.ui.set_progress(-1.0);
+            self.ui.set_progress_note("".into());
+            self.ui.set_plan_filter(0);
+            self.ui.set_plan_prev_enabled(false);
+            self.ui.set_plan_next_enabled(false);
+            self.ui.set_summary("".into());
+            self.ui.set_metrics("".into());
+            self.ui.set_status("".into());
+            self.ui.set_confirm_text("".into());
+            self.ui.set_plans(Rc::new(VecModel::from(Vec::<PlanRow>::new())).into());
             reset_tool_list(&self.ui);
             refresh(&self.ui, &self.state.borrow());
         }
@@ -1977,7 +2028,7 @@ mod gui_tests {
                     i_slint_backend_testing::init_no_event_loop();
                     let ui = AppWindow::new().unwrap();
                     let state = Rc::new(RefCell::new(initial_state().unwrap()));
-                    ui.set_tool_count(registry::tools().len() as i32);
+                    ui.set_tool_count(i32::try_from(registry::tools().len()).unwrap_or(i32::MAX));
                     let tools = registry::tools()
                         .iter()
                         .map(|tool| ToolRow {
@@ -1988,7 +2039,7 @@ mod gui_tests {
                         .collect::<Vec<_>>();
                     ui.set_tools(Rc::new(VecModel::from(tools)).into());
                     let (dummy_tx, _) = mpsc::sync_channel::<Event>(1);
-                    wire_sync(&ui, &state, dummy_tx);
+                    wire_sync(&ui, &state, &dummy_tx);
                     refresh(&ui, &state.borrow());
                     let app = GuiTestApp { ui, state };
                     while let Ok(job) = rx.recv() {
@@ -2050,7 +2101,7 @@ mod gui_tests {
         })
         .unwrap();
     }
-    // 覆盖 R-01, R-05
+    // 覆盖 R-01, C-02
     #[test]
     fn section_switch_swaps_rule_rows() {
         with_gui(|app| {
@@ -2087,11 +2138,11 @@ mod gui_tests {
             ui.invoke_toggle_advanced(true);
             assert!(
                 rule_value_at(ui, "same_name_same_size").is_none(),
-                "R-05：版本取舍开关不得出现在规则面板"
+                "C-02：版本取舍开关不得出现在规则面板"
             );
             assert!(
                 rule_value_at(ui, "same_size_keep").is_none(),
-                "R-05：版本取舍保留规则不得出现"
+                "C-02：版本取舍保留规则不得出现"
             );
             assert!(
                 rule_value_at(ui, "theme").is_none(),
@@ -2146,7 +2197,7 @@ mod gui_tests {
         })
         .unwrap();
     }
-    // 覆盖 P-02, X-01
+    // 覆盖 P-02, R-01, X-01（两工具规则分区互不串扰）
     #[test]
     fn tool_routing_swaps_screens_and_sections() {
         with_gui(|app| {
@@ -2187,7 +2238,7 @@ mod gui_tests {
         })
         .unwrap();
     }
-    // 覆盖 R-01, R-04, R-05
+    // 覆盖 R-01, R-02, C-02
     #[test]
     fn dependent_rows_follow_their_switches() {
         with_gui(|app| {
@@ -2217,8 +2268,8 @@ mod gui_tests {
             ui.invoke_rule_bool("large_files".into(), true);
             assert!(rule_value_at(ui, "large_threshold_gib").is_some());
             ui.invoke_toggle_advanced(false);
-            // 去重（R-04 拆分后）：同名/副本名/不同名三个独立开关 + 重复组保留规则；
-            // R-05 移除版本取舍后，去重基础层固定 4 行，不再有随开关出现/收回的行。
+            // 去重（R-02）：同名/副本名/不同名三个独立开关 + 重复组保留规则；
+            // C-02 禁止版本取舍开关后，去重基础层固定 4 行，不再有随开关出现/收回的行。
             ui.invoke_select_section(0);
             assert!(
                 rule_value_at(ui, "dedup_same_name").is_some()
@@ -2260,13 +2311,13 @@ mod gui_tests {
         })
         .unwrap();
     }
-    // 覆盖 R-04, R-06
+    // 覆盖 R-02, C-08
     #[test]
     fn merged_rows_write_shadow_fields() {
         with_gui(|app| {
             let ui = &app.ui;
             ui.invoke_select_section(0); // 去重
-                                         // R-04 拆分后：同名/副本名/不同名同内容三类独立启停，互不联动。
+                                         // R-02：同名/副本名/不同名同内容三类独立启停，互不联动。
             ui.invoke_rule_bool("dedup_same_name".into(), false);
             {
                 let cfg = &app.state.borrow().config;
@@ -2285,7 +2336,7 @@ mod gui_tests {
                     "两类开关各自独立生效"
                 );
             }
-            // R-05 移除版本淘汰组后，剩余合并行：修正扩展名一行仍驱动两个细粒度字段。
+            // C-02 禁止版本淘汰开关后，剩余合并行：修正扩展名一行仍驱动两个细粒度字段。
             ui.invoke_select_section(2);
             ui.invoke_rule_bool("fix_extension".into(), true);
             {
@@ -2298,7 +2349,7 @@ mod gui_tests {
         })
         .unwrap();
     }
-    // 覆盖 C-13
+    // 覆盖 U-06（非法输入红条提示并回退显示）
     #[test]
     fn invalid_number_input_reports_error_and_reverts_value() {
         with_gui(|app| {
@@ -2333,6 +2384,7 @@ mod gui_tests {
         })
         .unwrap();
     }
+    // 覆盖 R-04（目录改动后立即反馈，不得凭陈旧目录继续）
     #[test]
     fn root_edited_reports_missing_directory() {
         with_gui(|app| {
@@ -2382,7 +2434,7 @@ mod gui_tests {
         dir
     }
 
-    // 覆盖 C-07, C-11
+    // 覆盖 U-03, C-11（进度分母只含仍勾选且待执行的项）
     #[test]
     fn count_selected_pending_ignores_unselected_and_done() {
         use crate::config::DeleteMode;
@@ -2418,5 +2470,124 @@ mod gui_tests {
         drop(db);
         assert_eq!(count_selected_pending(&dir).unwrap(), 2);
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    // 覆盖 X-02（解压一段确认：确认框必须就地解压去向、成功原包处置、失败去向与降级告知）
+    #[test]
+    fn extract_start_shows_single_confirmation_with_dispose_info() {
+        with_gui(|app| {
+            let ui = &app.ui;
+            ui.invoke_select_tool("recursive-extract".into());
+            let dir = temp_test_dir("extract-confirm");
+            ui.set_directory(dir.display().to_string().into());
+            ui.invoke_request_extract_start();
+            assert_eq!(ui.get_confirm_kind(), 1, "解压是一段确认（kind=1）");
+            let text = ui.get_confirm_text().to_string();
+            assert!(
+                text.contains("正在清点压缩包"),
+                "数量先占位、后台清点后原位更新：{text}"
+            );
+            assert!(
+                text.contains("就地解到各包所在位置"),
+                "就地解压去向（X-03）：{text}"
+            );
+            assert!(
+                text.contains("移入回收站"),
+                "成功原包默认处置（X-05）：{text}"
+            );
+            assert!(
+                text.contains("「解压失败」"),
+                "失败原包去向（X-06）：{text}"
+            );
+            assert!(
+                text.contains("回收失败后永久删除：已开启"),
+                "S-02 降级默认开启，确认时必须明确告知：{text}"
+            );
+            let _ = std::fs::remove_dir_all(&dir);
+        })
+        .unwrap();
+    }
+
+    // 覆盖 U-03（总量未知不得编造百分比：百分比文本与不定光带的声明锁定）
+    #[test]
+    fn progress_semantics_declared_in_ui() {
+        let slint = include_str!("../ui/app.slint");
+        assert!(
+            slint.contains("if root.busy && root.progress >= 0: Text {"),
+            "U-03：百分比文本只应在总量已知（progress>=0）时显示"
+        );
+        assert!(
+            slint.contains("running: root.progress < 0;"),
+            "U-03：总量未知时使用不定光带"
+        );
+        assert!(
+            slint.contains(": \"正在处理，总量未知\""),
+            "U-03：无障碍标签如实声明总量未知"
+        );
+    }
+
+    // 覆盖 U-06（用户取消 MUST NOT 报成错误：取消走蓝条通知的声明锁定）
+    #[test]
+    fn cancel_notice_not_error_declared_in_ui() {
+        let source = include_str!("gui.rs");
+        assert!(
+            source.contains("ui.set_notice_text(error.into());"),
+            "U-06：取消必须走蓝条通知而不是红条错误"
+        );
+        assert!(
+            source.contains("任务已取消；已完成的操作不会自动回滚"),
+            "U-06：取消后的状态文案不得是错误口径"
+        );
+    }
+
+    // 覆盖 U-09（运行中关窗必须弹「停止任务并关闭」确认并拦截关闭）
+    #[test]
+    fn busy_close_confirmation_declared_in_ui() {
+        let source = include_str!("gui.rs");
+        let slint = include_str!("../ui/app.slint");
+        assert!(
+            source.contains("if ui.get_busy(){"),
+            "U-09：运行中关窗必须先进确认分支"
+        );
+        assert!(
+            source.contains("CloseRequestResponse::KeepWindowShown"),
+            "U-09：未确认前窗口不得关闭"
+        );
+        assert!(slint.contains("停止任务并关闭"), "U-09：确认框标题");
+    }
+
+    // 覆盖 X-02, S-05（受保护目录在打开确认框之前就被拒绝，不得进入"清点中"占位态）
+    // 平台门禁原因：S-05 的安装目录保护分支依赖 Windows 环境变量与路径语义。
+    #[cfg(windows)]
+    #[test]
+    fn extract_start_rejects_protected_directory_immediately() {
+        with_gui(|app| {
+            let ui = &app.ui;
+            ui.invoke_select_tool("recursive-extract".into());
+            let protected = std::env::var("SystemRoot").unwrap();
+            ui.set_directory(protected.clone().into());
+            ui.invoke_request_extract_start();
+            assert_ne!(
+                ui.get_confirm_kind(),
+                1,
+                "受保护目录不得打开解压确认框（清点必然失败）"
+            );
+            assert!(
+                !ui.get_error_text().is_empty(),
+                "必须给出明确错误：{}",
+                ui.get_error_text()
+            );
+        })
+        .unwrap();
+    }
+
+    // 覆盖 C-11（任务结束/取消后计划复选框不得再可点：只有"待执行"行可勾选）
+    #[test]
+    fn plan_checkbox_gated_by_row_state_declared_in_ui() {
+        let slint = include_str!("../ui/app.slint");
+        assert!(
+            slint.contains("enabled: !root.busy && root.confirm-kind == 0 && item.state == \"待执行\";"),
+            "C-11：计划复选框必须同时按行状态（待执行）门禁，避免已结束任务的行仍可点击必报错"
+        );
     }
 }

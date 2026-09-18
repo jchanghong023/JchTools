@@ -1,5 +1,6 @@
 use crate::{
     config::Config,
+    convert,
     model::{Action, FileRecord, Snapshot, Summary},
 };
 use anyhow::Result;
@@ -140,7 +141,7 @@ impl Database {
         limit: usize,
         kind_filter: Option<&str>,
     ) -> Result<Vec<Action>> {
-        let limit = limit.min(1000) as i64;
+        let limit = convert::usize_as_i64(limit.min(1000));
         let rows = if let Some(kind) = kind_filter {
             anyhow::ensure!(
                 matches!(kind, "delete" | "move" | "hardlink" | "empty_directory"),
@@ -201,12 +202,15 @@ impl Database {
     pub fn event_page(&self, before: i64, limit: usize) -> Result<Vec<String>> {
         let before = if before <= 0 { i64::MAX } else { before };
         let mut statement = self.conn.prepare("SELECT time,phase,result,source,target,reason FROM events WHERE id<?1 ORDER BY id DESC LIMIT ?2")?;
-        let rows = statement.query_map(params![before, limit.min(1000) as i64], |row| {
-            let values = (0..6)
-                .map(|i| row.get::<_, String>(i))
-                .collect::<rusqlite::Result<Vec<_>>>()?;
-            Ok(values.join(" | "))
-        })?;
+        let rows = statement.query_map(
+            params![before, convert::usize_as_i64(limit.min(1000))],
+            |row| {
+                let values = (0..6)
+                    .map(|i| row.get::<_, String>(i))
+                    .collect::<rusqlite::Result<Vec<_>>>()?;
+                Ok(values.join(" | "))
+            },
+        )?;
         let result = rows.collect::<rusqlite::Result<Vec<_>>>()?;
         Ok(result)
     }
@@ -222,6 +226,16 @@ impl Database {
     }
 }
 pub const FILE_COLUMNS: &str = "id,rel,name,normal,size,mtime,identity,links,hash,cleanable";
+/// SQLite 以有符号 i64 存 size/links；写入方恒非负，读回负值即库损坏，按错误上报。
+fn nonneg_u64(row: &Row<'_>, idx: usize) -> rusqlite::Result<u64> {
+    u64::try_from(row.get::<_, i64>(idx)?).map_err(|_| {
+        rusqlite::Error::FromSqlConversionFailure(
+            idx,
+            rusqlite::types::Type::Integer,
+            "库中存在负的文件大小/链接数".into(),
+        )
+    })
+}
 fn file_row(row: &Row<'_>) -> rusqlite::Result<FileRecord> {
     Ok(FileRecord {
         id: row.get(0)?,
@@ -229,10 +243,10 @@ fn file_row(row: &Row<'_>) -> rusqlite::Result<FileRecord> {
         name: row.get(2)?,
         normalized: row.get(3)?,
         snapshot: Snapshot {
-            size: row.get::<_, i64>(4)? as u64,
+            size: nonneg_u64(row, 4)?,
             modified_ns: row.get(5)?,
             identity: row.get(6)?,
-            links: row.get::<_, i64>(7)? as u64,
+            links: nonneg_u64(row, 7)?,
         },
         hash: row.get(8)?,
         cleanable: row.get(9)?,

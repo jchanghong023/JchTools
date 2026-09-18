@@ -2,7 +2,10 @@
 //! 「分析（只读）→ 检查计划 → 确认执行 → 整理结束」流程。
 //! 驱动器定时器在事件循环内逐步推进状态机，超时自动失败。
 //! 状态目录与回收站均注入临时路径，不碰用户真实任务库/回收站。
+// 测试代码允许 unwrap/expect：断言失败即测试失败，属合理用法
+// （与 clippy.toml 的 allow-*-in-tests 策略一致，集成测试 crate 不在其覆盖范围内）。
 #![cfg(feature = "gui")]
+#![allow(clippy::unwrap_used, clippy::expect_used)]
 use jchtools::gui::{self, EngineTestOverrides};
 use slint::ComponentHandle;
 use std::{
@@ -32,7 +35,7 @@ fn make_fixture() -> tempfile::TempDir {
     dir
 }
 
-// 覆盖 C-01, C-07, S-02
+// 覆盖 C-01, C-05, S-02（两段式确认执行全流程 + 回收走注入实现）
 #[test]
 fn plan_execution_confirmation_flow_runs_end_to_end() {
     // SLINT_BACKEND 是进程级环境变量；后续在同文件新增 GUI 测试时必须先拿到这把锁，
@@ -40,7 +43,7 @@ fn plan_execution_confirmation_flow_runs_end_to_end() {
     static GUI_TEST_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
     let _guard = GUI_TEST_LOCK
         .lock()
-        .unwrap_or_else(|poisoned| poisoned.into_inner());
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
     // CI runner 与无 GPU 机器没有 OpenGL，默认 femtovg 初始化直接失败；
     // 软件渲染器不依赖 GPU，事件循环、定时器与回调路径仍与生产完全一致。
     std::env::set_var("SLINT_BACKEND", "winit-software");
@@ -93,11 +96,9 @@ fn plan_execution_confirmation_flow_runs_end_to_end() {
                                 steps.set(3);
                             }
                         }
-                        3 => {
-                            if ui.get_status().contains("整理结束") {
-                                steps.set(4);
-                                let _ = slint::quit_event_loop();
-                            }
+                        3 if ui.get_status().contains("整理结束") => {
+                            steps.set(4);
+                            let _ = slint::quit_event_loop();
                         }
                         _ => {}
                     }
@@ -117,14 +118,14 @@ fn plan_execution_confirmation_flow_runs_end_to_end() {
         tasks_root.is_dir(),
         "任务库应写入注入的 state 目录：{tasks_root:?}"
     );
-    let task_count = fs::read_dir(&tasks_root).map(|it| it.count()).unwrap_or(0);
+    let task_count = fs::read_dir(&tasks_root).map_or(0, std::iter::Iterator::count);
     assert!(task_count >= 1, "注入 state 下应有任务目录");
 
     // 2) 回收走 mock，不碰真实回收站；a.txt 应落在 mock-bin
     let data = fixture.path().join("data");
     let remaining: Vec<String> = fs::read_dir(&data)
         .unwrap()
-        .filter_map(|e| e.ok())
+        .filter_map(std::result::Result::ok)
         .map(|e| {
             format!(
                 "{}{}",
@@ -135,7 +136,7 @@ fn plan_execution_confirmation_flow_runs_end_to_end() {
         .collect();
     let bin_names: Vec<String> = fs::read_dir(&bin)
         .unwrap()
-        .filter_map(|e| e.ok())
+        .filter_map(std::result::Result::ok)
         .map(|e| e.file_name().to_string_lossy().into_owned())
         .collect();
     assert!(
@@ -158,7 +159,7 @@ fn plan_execution_confirmation_flow_runs_end_to_end() {
     );
 }
 
-// 覆盖 C-07：「确认执行」按钮必须被「我已确认」勾选门禁。该门禁是 Slint 声明式绑定，
+// 覆盖 C-01（第二段确认的「我已确认」门禁）。该门禁是 Slint 声明式绑定，
 // 无头测试只能直接调用回调、绕不过它，因此这里锁定声明本身不被误删/改弱。
 #[test]
 fn acknowledge_gate_is_declared_in_ui() {

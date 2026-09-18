@@ -1,5 +1,6 @@
 # clippy 配置（对 [lints.clippy] 中 unwrap_used / expect_used 生效）：
-# 测试代码允许 unwrap/expect（断言失败即测试失败，是合理用法）；
-# src/ 实现代码中的 unwrap/expect 仍为告警并计入预算。
+# #[cfg(test)] 单元测试允许 unwrap/expect（断言失败即测试失败，是合理用法）；
+# tests/ 下的集成测试 crate 不在本配置覆盖范围内，按同一政策在各文件头 crate 级豁免；
+# src/ 实现代码中的 unwrap/expect 为硬错误。
 allow-unwrap-in-tests = true
 allow-expect-in-tests = true

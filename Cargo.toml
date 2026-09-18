@@ -77,36 +77,36 @@ debug-assertions = true
 [profile.dev]
 debug = 1
 
-# ── lint 分层（AGENTS.md 3.2 预算棘轮：存量计入预算、新增即 CI 失败）────────────
-# 规则只约束发现面：deny = 当前零存量、触犯即硬错误；warn = 有存量、计入
-# clippy 预算（scripts/clippy_budget.py），修复后应下调预算直至归零。
+# ── lint 硬门禁（2026-09-18 起零告警，预算棘轮已删除）────────────────────────
+# 告警存量清零后全部升为硬错误：新增告警本地编译即失败；
+# CI 另以 cargo clippy --all-targets -- -D warnings 双侧兜底（默认特性 + --no-default-features）。
 [lints.rust]
-# 以下在本仓当前代码零触发，直接设为硬错误（新增即本地编译失败）：
 unsafe_op_in_unsafe_fn = "deny"    # unsafe fn 体内操作必须显式 unsafe 块（edition 2024 默认规则提前转正）
 unused_must_use = "deny"
 unreachable_patterns = "deny"
+unreachable_pub = "deny"
+unused_variables = "deny"
 future_incompatible = { level = "deny", priority = -1 } # 组：未来版本将变硬错误的写法，提前暴露（组需低于单体优先级）
-# 注意：unused_variables 保持 warn —— build.rs 在关闭 gui 特性时存在条件未用变量
-#（build.rs:242 `manifest`），deny 会弄挂 no-default-features 的 Linux CI；计入预算管控。
-# 以下当前有存量告警，warn + 预算管控：
-unused_variables = "warn"
-explicit_outlives_requirements = "warn"
-elided_lifetimes_in_paths = "warn"
-single_use_lifetimes = "warn"
-unreachable_pub = "warn"
+explicit_outlives_requirements = "deny"
+elided_lifetimes_in_paths = "deny"
+single_use_lifetimes = "deny"
 
 [lints.clippy]
 # 组级最大化发现面（clippy 默认组 correctness/suspicious/style/complexity/perf 天然开启）：
-pedantic = { level = "warn", priority = -1 }
-cargo = { level = "warn", priority = -1 }
+pedantic = { level = "deny", priority = -1 }
+cargo = { level = "deny", priority = -1 }
 # restriction 组中与「文件操作工具中途不得 panic」直接相关的高价值项：
-unwrap_used = "warn"               # src/ 内 unwrap 即告警（测试代码经 clippy.toml 豁免）
-expect_used = "warn"
-dbg_macro = "warn"                 # 调试残留
-# 豁免：纯排版/文档义务类噪音，与缺陷发现无关（存量见预算报告）。
+unwrap_used = "deny"               # src/ 内 unwrap 即编译失败（测试 crate 按政策豁免，见各测试文件头）
+expect_used = "deny"
+dbg_macro = "deny"                 # 调试残留
+# 豁免：纯排版/文档义务/意见型噪音，与缺陷发现无关（每条附理由）。
 doc_markdown = "allow"             # 文档标识符反引号排版
 missing_errors_doc = "allow"       # 文档段落义务
 missing_panics_doc = "allow"
 must_use_candidate = "allow"       # 属性建议，量大且属意见
 items_after_statements = "allow"   # 风格偏好
 unreadable_literal = "allow"       # Windows API 标志常量等无分隔符惯用法
+cargo_common_metadata = "allow"    # 个人离线工具的 manifest 元数据义务（keywords/repository 等）
+multiple_crate_versions = "allow"  # 传递依赖版本重复（windows 生态），非本仓可控
+too_many_lines = "allow"           # GUI 装配/引擎主流程函数天然较长，强拆损可读性
+struct_excessive_bools = "allow"   # Config/State 的开关集合镜像 JSON 配置与 UI 状态

@@ -2,6 +2,9 @@
 //! package-windows.ps1 runs these after downloading and verifying the bundled engine.
 //! 2026-09-18 两工具拆分后：解压用例走 engine::extract_run_at（X 分区），
 //! 涉及整理计划的用例先解压再 prepare/apply（C 分区）。
+// 测试代码允许 unwrap/expect：断言失败即测试失败，属合理用法
+// （与 clippy.toml 的 allow-*-in-tests 策略一致，集成测试 crate 不在其覆盖范围内）。
+#![allow(clippy::unwrap_used, clippy::expect_used)]
 mod common;
 use common::FailRecycle;
 use jchtools::{config::*, control::Context, engine};
@@ -12,7 +15,7 @@ use std::{
     sync::Arc,
 };
 struct ArchiveFixture {
-    _tmp: tempfile::TempDir,
+    tmp: tempfile::TempDir,
     root: PathBuf,
     input: PathBuf,
     state: PathBuf,
@@ -32,7 +35,7 @@ impl ArchiveFixture {
         );
         assert!(engine.is_absolute());
         Self {
-            _tmp: tmp,
+            tmp,
             root,
             input,
             state,
@@ -74,7 +77,7 @@ impl ArchiveFixture {
         )
         .unwrap()
     }
-    fn apply(&self, task: &engine::TaskResult) -> engine::TaskResult {
+    fn apply(task: &engine::TaskResult) -> engine::TaskResult {
         engine::apply_with(&task.directory, Context::default(), Arc::new(FailRecycle)).unwrap()
     }
 }
@@ -139,7 +142,11 @@ fn extract_then_organize_generates_dedup_plan() {
 fn solid_7z_is_decoded_in_one_pass() {
     let f = ArchiveFixture::new();
     for i in 0..12 {
-        fs::write(f.input.join(format!("{i}.txt")), vec![i as u8; 8192]).unwrap();
+        fs::write(
+            f.input.join(format!("{i}.txt")),
+            vec![u8::try_from(i).unwrap(); 8192],
+        )
+        .unwrap();
     }
     f.archive(&f.root.join("solid.7z"), "-t7z");
     let result = f.run(config());
@@ -258,7 +265,7 @@ fn encrypted_archive_is_quarantined_not_deleted() {
 fn nested_archives_are_processed_recursively() {
     let f = ArchiveFixture::new();
     fs::write(f.input.join("payload.txt"), b"payload").unwrap();
-    let inner = f._tmp.path().join("inner.zip");
+    let inner = f.tmp.path().join("inner.zip");
     f.archive(&inner, "-tzip");
     fs::remove_file(f.input.join("payload.txt")).unwrap();
     fs::rename(inner, f.input.join("inner.zip")).unwrap();
@@ -273,7 +280,7 @@ fn nested_archives_are_processed_recursively() {
 fn nested_archive_depth_limit_quarantines_unprocessed_package() {
     let f = ArchiveFixture::new();
     fs::write(f.input.join("payload.txt"), b"payload").unwrap();
-    let inner = f._tmp.path().join("inner.zip");
+    let inner = f.tmp.path().join("inner.zip");
     f.archive(&inner, "-tzip");
     fs::remove_file(f.input.join("payload.txt")).unwrap();
     fs::rename(inner, f.input.join("inner.zip")).unwrap();
@@ -375,7 +382,7 @@ fn deleted_same_name_file_does_not_abort_a_later_stream_archive() {
         b"stream payload\n"
     );
 }
-// 覆盖 X-04, C-14：先解压（等量包冲突裁决）再整理（归类），两阶段各自幂等。
+// 覆盖 X-04, C-05：先解压（等量包冲突裁决）再整理（归类），两阶段各自幂等。
 #[test]
 #[ignore = "Requires explicitly provided real 7-Zip engine"]
 fn equal_content_archives_dispose_and_classify_is_stable() {
@@ -396,7 +403,7 @@ fn equal_content_archives_dispose_and_classify_is_stable() {
     let mut org = organizer();
     org.preserve_structure = false;
     let task = engine::prepare_at(&f.root, org.clone(), Context::default(), &f.state).unwrap();
-    f.apply(&task);
+    ArchiveFixture::apply(&task);
     assert!(f.root.join("文档/beta.txt").exists());
     let again = engine::prepare_at(&f.root, org, Context::default(), &f.state).unwrap();
     assert_eq!(again.summary.archives_ok, 0);
@@ -404,7 +411,7 @@ fn equal_content_archives_dispose_and_classify_is_stable() {
     assert_eq!(again.summary.planned_move, 0);
     assert!(f.root.join("文档/beta.txt").exists());
 }
-// 覆盖 X-05, C-14
+// 覆盖 X-05, C-05
 #[test]
 #[ignore = "Requires explicitly provided real 7-Zip engine"]
 fn kept_source_rerun_does_not_recreate_classified_duplicate() {
@@ -424,7 +431,7 @@ fn kept_source_rerun_does_not_recreate_classified_duplicate() {
     let mut org = organizer();
     org.preserve_structure = false;
     let task = engine::prepare_at(&f.root, org.clone(), Context::default(), &f.state).unwrap();
-    f.apply(&task);
+    ArchiveFixture::apply(&task);
     assert!(!f.root.join("payload.txt").exists());
     assert!(f.root.join("文档/payload.txt").exists());
     let again = f.run(cfg);
@@ -456,7 +463,7 @@ fn crc32(bytes: &[u8]) -> u32 {
     }
     let mut crc = !0u32;
     for &b in bytes {
-        crc = table[((crc ^ b as u32) & 0xFF) as usize] ^ (crc >> 8);
+        crc = table[((crc ^ u32::from(b)) & 0xFF) as usize] ^ (crc >> 8);
     }
     !crc
 }
@@ -475,9 +482,9 @@ fn stored_zip(entries: &[(&[u8], &[u8])]) -> Vec<u8> {
         out.extend_from_slice(&0u16.to_le_bytes()); // 方法：存储
         out.extend_from_slice(&[0, 0, 0, 0]); // 时间/日期
         out.extend_from_slice(&crc.to_le_bytes());
-        out.extend_from_slice(&(data.len() as u32).to_le_bytes());
-        out.extend_from_slice(&(data.len() as u32).to_le_bytes());
-        out.extend_from_slice(&(name.len() as u16).to_le_bytes());
+        out.extend_from_slice(&u32::try_from(data.len()).unwrap().to_le_bytes());
+        out.extend_from_slice(&u32::try_from(data.len()).unwrap().to_le_bytes());
+        out.extend_from_slice(&u16::try_from(name.len()).unwrap().to_le_bytes());
         out.extend_from_slice(&0u16.to_le_bytes()); // extra 长度
         out.extend_from_slice(name);
         out.extend_from_slice(data);
@@ -488,22 +495,22 @@ fn stored_zip(entries: &[(&[u8], &[u8])]) -> Vec<u8> {
         central.extend_from_slice(&0u16.to_le_bytes()); // 方法
         central.extend_from_slice(&[0, 0, 0, 0]); // 时间/日期
         central.extend_from_slice(&crc.to_le_bytes());
-        central.extend_from_slice(&(data.len() as u32).to_le_bytes());
-        central.extend_from_slice(&(data.len() as u32).to_le_bytes());
-        central.extend_from_slice(&(name.len() as u16).to_le_bytes());
+        central.extend_from_slice(&u32::try_from(data.len()).unwrap().to_le_bytes());
+        central.extend_from_slice(&u32::try_from(data.len()).unwrap().to_le_bytes());
+        central.extend_from_slice(&u16::try_from(name.len()).unwrap().to_le_bytes());
         central.extend_from_slice(&[0; 8]); // extra 长度/注释长度/起始盘号/内部属性
         central.extend_from_slice(&0u32.to_le_bytes()); // 外部属性
         central.extend_from_slice(&header_offset.to_le_bytes());
         central.extend_from_slice(name);
-        offset += (30 + name.len() + data.len()) as u32;
+        offset += u32::try_from(30 + name.len() + data.len()).unwrap();
     }
     let central_offset = offset;
     out.extend_from_slice(&central);
     out.extend_from_slice(b"PK\x05\x06"); // EOCD
     out.extend_from_slice(&[0, 0, 0, 0]); // 盘号
-    out.extend_from_slice(&(entries.len() as u16).to_le_bytes());
-    out.extend_from_slice(&(entries.len() as u16).to_le_bytes());
-    out.extend_from_slice(&(central.len() as u32).to_le_bytes());
+    out.extend_from_slice(&u16::try_from(entries.len()).unwrap().to_le_bytes());
+    out.extend_from_slice(&u16::try_from(entries.len()).unwrap().to_le_bytes());
+    out.extend_from_slice(&u32::try_from(central.len()).unwrap().to_le_bytes());
     out.extend_from_slice(&central_offset.to_le_bytes());
     out.extend_from_slice(&0u16.to_le_bytes()); // 注释长度
     out
@@ -554,7 +561,7 @@ fn gbk_filename_zip_extracts_without_data_loss() {
     assert_eq!(result.summary.extracted, 1);
     let extracted: Vec<_> = fs::read_dir(&f.root)
         .unwrap()
-        .filter_map(|e| e.ok())
+        .filter_map(std::result::Result::ok)
         .map(|e| e.path())
         .filter(|p| p.is_file() && p.extension().is_some_and(|x| x.eq_ignore_ascii_case("txt")))
         .collect();
@@ -612,8 +619,8 @@ fn zstd_stream_archive_extracts_with_content() {
     let payload = b"zst payload here\n";
     let mut zst = b"\x28\xB5\x2F\xFD".to_vec(); // Zstandard magic
     zst.push(0x20); // 单段帧 + 帧内容大小 1 字节
-    zst.push(payload.len() as u8); // Frame_Content_Size
-    let block_header = 1u32 | (payload.len() as u32) << 3; // 最后一块 · 原始块 · 大小
+    zst.push(u8::try_from(payload.len()).unwrap()); // Frame_Content_Size
+    let block_header = 1u32 | u32::try_from(payload.len()).unwrap() << 3; // 最后一块 · 原始块 · 大小
     zst.extend_from_slice(&block_header.to_le_bytes()[..3]);
     zst.extend_from_slice(payload);
     fs::write(f.root.join("payload.txt.zst"), zst).unwrap();
@@ -625,7 +632,7 @@ fn zstd_stream_archive_extracts_with_content() {
 
 // 平台门禁原因：触发条件本身是 Windows 路径长度语义（>260 字符 + LongPathsEnabled 默认 0 时
 // 裸 Win32 调用失败），且植入隐藏属性需要 SetFileAttributesW，均无法在非 Windows 复现。
-// 覆盖 R-07(扫描隐藏), X-08
+// 覆盖 S-04(扫描隐藏), X-08
 #[test]
 #[ignore = "Requires explicitly provided real 7-Zip engine"]
 #[cfg(windows)]

@@ -417,31 +417,27 @@ fn moves(job: &mut Job) -> Result<()> {
                         })),
                         ClassifyMode::Category => Some(PathBuf::from(rules::category(&extension))),
                         ClassifyMode::Custom => Some(PathBuf::from(
-                            categories
-                                .get(&extension)
-                                .map(String::as_str)
-                                .unwrap_or("其他"),
+                            categories.get(&extension).map_or("其他", String::as_str),
                         )),
                         ClassifyMode::Date => {
                             let seconds = file.snapshot.modified_ns.div_euclid(1_000_000_000);
-                            match chrono::DateTime::from_timestamp(seconds, 0) {
-                                Some(stamp) => Some(PathBuf::from(
+                            if let Some(stamp) = chrono::DateTime::from_timestamp(seconds, 0) {
+                                Some(PathBuf::from(
                                     stamp
                                         .with_timezone(&chrono::Local)
                                         .format("%Y/%m")
                                         .to_string(),
-                                )),
-                                None => {
-                                    job.log(
-                                        "日期归类",
-                                        &file.rel,
-                                        "",
-                                        "跳过",
-                                        "修改时间超出可表示范围，已跳过日期归类",
-                                        0,
-                                    )?;
-                                    None
-                                }
+                                ))
+                            } else {
+                                job.log(
+                                    "日期归类",
+                                    &file.rel,
+                                    "",
+                                    "跳过",
+                                    "修改时间超出可表示范围，已跳过日期归类",
+                                    0,
+                                )?;
+                                None
                             }
                         }
                     }
@@ -464,7 +460,13 @@ fn moves(job: &mut Job) -> Result<()> {
                     // 空 output_dir：分类目录直接建在选定根下；已在该分类目录下的文件不再套一层。
                     // label 可能是多段路径（如日期归类的 2024/03），必须整段前缀比较而不是只比首段。
                     let already = output_dir.is_empty() && under_path(original, &label);
-                    if !already {
+                    if already {
+                        // 已在分类目录内的文件必须稳定：flatten/merge 作用在原始父目录上，
+                        // 可能把恰好只剩一个文件的分类目录整层抽掉，导致 desired 落到分类目录
+                        // 之外——下一轮又归回来，跨轮往复移动破坏幂等（C-05/C-10）。
+                        // 归位到原始父目录：改名类调整（规范化/扩展名修正）照常生效，位置不动。
+                        parent = original.parent().unwrap_or(Path::new("")).to_path_buf();
+                    } else {
                         parent = if job.config.preserve_structure {
                             if output_dir.is_empty() {
                                 label.join(parent)
@@ -556,7 +558,7 @@ fn has_unscanned_content(job: &Job, rel: &str) -> Result<bool> {
         .follow_links(false)
         .min_depth(1)
         .into_iter()
-        .filter_map(|e| e.ok())
+        .filter_map(std::result::Result::ok)
     {
         job.context.control.checkpoint()?;
         let child = fsutil::relative_string(&job.root, entry.path())?;

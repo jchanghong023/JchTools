@@ -139,10 +139,14 @@ impl Summary {
     /// 「递归解压」一段式运行的收尾摘要（X-02 确认框与结束状态的口径）。
     pub fn extract_description(&self) -> String {
         format!("扫描 {} 个文件\n解压成功 {} 包（{} 个文件落盘）\n失败并移入「解压失败」{} 包\n已回收 {} 项 / {}；已永久删除 {} 项 / {}；错误 {} 项",
-            self.scanned, self.archives_ok, self.extracted, self.archives_quarantined,
+            // 用户口径按"包"计：archives_failed 是包数；archives_quarantined 按卷文件数
+            // 累计（分卷组整组隔离时 > 包数），不得直接当包数展示。
+            self.scanned, self.archives_ok, self.extracted, self.archives_failed,
             self.recycled, bytes(self.recycled_bytes), self.deleted, bytes(self.permanent_bytes), self.errors)
     }
 }
+/// 人类可读的字节数格式化：仅用于界面/日志展示，f64 精度损失无意义。
+#[allow(clippy::cast_precision_loss)]
 pub fn bytes(value: u64) -> String {
     const UNITS: [&str; 7] = ["B", "KiB", "MiB", "GiB", "TiB", "PiB", "EiB"];
     let mut size = value as f64;

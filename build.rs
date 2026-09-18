@@ -1,11 +1,13 @@
 /// 把 resources/app.ico 作为 Windows 资源编译进 EXE：资源管理器、任务栏和图钉快捷键都用到它。
 /// rc.exe 来自 Windows SDK；找不到时只警告（运行时窗口图标仍由 Slint 的 icon 属性设置），不中断构建。
+/// 仅 gui 装配调用：关闭 gui 特性时整段不编译，避免 dead_code。
+#[cfg(feature = "gui")]
 fn embed_icon(manifest_dir: &std::path::Path) {
     let icon = manifest_dir.join("resources/app.ico");
     if !icon.is_file() {
         return;
     }
-    let out = std::path::PathBuf::from(std::env::var("OUT_DIR").unwrap());
+    let out = std::path::PathBuf::from(cargo_env("OUT_DIR"));
     let rc_file = out.join("jchtools.rc");
     let res_file = out.join("jchtools.res");
     let quoted = icon.display().to_string().replace('\\', "\\\\");
@@ -47,6 +49,7 @@ fn embed_icon(manifest_dir: &std::path::Path) {
     }
 }
 
+#[cfg(feature = "gui")]
 fn find_rc() -> Option<std::path::PathBuf> {
     // 与 process.rs 的 system_tool 防 PATH 劫持口径一致：优先从 Windows SDK 解析 rc.exe；
     // SDK 里找不到时才回退 PATH 并明确告警（PATH 中的同名程序可能是伪造的，
@@ -57,7 +60,7 @@ fn find_rc() -> Option<std::path::PathBuf> {
     if let Some(kits) = kits {
         if let Ok(entries) = std::fs::read_dir(&kits) {
             let mut versions: Vec<std::path::PathBuf> = entries
-                .filter_map(|entry| entry.ok())
+                .filter_map(std::result::Result::ok)
                 .map(|entry| entry.path())
                 .collect();
             // 按数字元组排序（10.0.22621 > 10.0.19041），不能按字典序（否则 10.0.9 会排在 10.0.10 前面）。
@@ -96,12 +99,17 @@ fn find_rc() -> Option<std::path::PathBuf> {
 /// 引擎存在但 sha256 与 manifest.json 不一致时 panic，拒绝嵌入被篡改的引擎。
 /// 内嵌结果写入 OUT_DIR/engine_embed_status.txt，供打包脚本 fail-closed 校验：
 /// "ok" 表示全部文件成功内嵌，"incomplete" 表示本次构建按无内嵌处理。
+/// 读取 cargo 注入的环境变量（OUT_DIR / CARGO_MANIFEST_DIR 等）：
+/// 这些变量只在构建脚本运行期由 cargo 保证存在，缺失即构建环境损坏，按不可达处理。
+fn cargo_env(key: &str) -> String {
+    std::env::var(key).unwrap_or_else(|error| panic!("cargo 构建环境缺少 {key}：{error}"))
+}
 fn embed_engine(manifest_dir: &std::path::Path) {
-    let out_dir = std::path::PathBuf::from(std::env::var("OUT_DIR").unwrap());
+    let out_dir = std::path::PathBuf::from(cargo_env("OUT_DIR"));
     let source = manifest_dir.join("resources/7zip");
     let generated = out_dir.join("embedded_engine.rs");
     let status_file = out_dir.join("engine_embed_status.txt");
-    let mut files: Vec<(String, i64)> = Vec::new();
+    let mut files: Vec<(String, u64)> = Vec::new();
     let mut manifest_text = String::new();
     let mut id = String::new();
     let mut embed_ok = false;
@@ -120,12 +128,15 @@ fn embed_engine(manifest_dir: &std::path::Path) {
         match std::fs::read_to_string(&manifest_path) {
             Ok(text) => {
                 manifest_text = text;
-                let parsed = serde_json::from_str::<serde_json::Value>(&manifest_text)
-                    .expect("fetch-7zip.ps1 生成的 manifest.json 应是合法 JSON");
+                let parsed = match serde_json::from_str::<serde_json::Value>(&manifest_text) {
+                    Ok(value) => value,
+                    Err(error) => {
+                        panic!("manifest.json 应是 fetch-7zip.ps1 生成的合法 JSON：{error}")
+                    }
+                };
                 let version = parsed["version"]
                     .as_str()
-                    .map(str::to_owned)
-                    .unwrap_or_else(|| "unknown".into());
+                    .map_or_else(|| "unknown".into(), str::to_owned);
                 let tag = parsed["files"]
                     .as_array()
                     .and_then(|list| {
@@ -164,19 +175,14 @@ fn embed_engine(manifest_dir: &std::path::Path) {
                         panic!("manifest.json 缺少引擎文件 {name} 的条目，拒绝嵌入未校验的引擎；清单必须为每个待内嵌文件提供 sha256（scripts/fetch-7zip.ps1 只生成 7z.exe/7z.dll 的条目，手动放置的其他引擎文件无法内嵌）");
                     };
                     let actual = sha256_hex(&bytes);
-                    if actual != expected {
-                        panic!("引擎文件 {name} 的 sha256（{actual}）与 manifest.json 期望值（{expected}）不一致，拒绝嵌入；请重新运行 scripts/fetch-7zip.ps1 获取官方完整引擎");
-                    }
+                    assert!(actual == expected, "引擎文件 {name} 的 sha256（{actual}）与 manifest.json 期望值（{expected}）不一致，拒绝嵌入；请重新运行 scripts/fetch-7zip.ps1 获取官方完整引擎");
                     let compressed = compress(&bytes);
                     let path = out_dir.join(format!("{name}.zlib"));
-                    let length = compressed.len() as i64;
+                    let length = u64::try_from(compressed.len()).unwrap_or(u64::MAX);
                     if std::fs::write(&path, compressed).is_ok() {
                         files.push((name.clone(), length));
                     } else {
-                        println!(
-                            "cargo:warning=写入 {} 的压缩副本失败，本次构建不内嵌该文件",
-                            name
-                        );
+                        println!("cargo:warning=写入 {name} 的压缩副本失败，本次构建不内嵌该文件");
                     }
                 }
                 if files.len() < names.len() {
@@ -193,7 +199,7 @@ fn embed_engine(manifest_dir: &std::path::Path) {
             }
             // 读失败（锁/权限等）按无内嵌处理并警告；哈希不匹配才会 panic（见上方循环）。
             Err(error) => {
-                println!("cargo:warning=读取 manifest.json 失败（{error}），本次构建不内嵌 7-Zip")
+                println!("cargo:warning=读取 manifest.json 失败（{error}），本次构建不内嵌 7-Zip");
             }
         }
     } else {
@@ -212,33 +218,39 @@ fn embed_engine(manifest_dir: &std::path::Path) {
     }
     println!("cargo:rerun-if-changed=resources/7zip/manifest.json");
 
+    use std::fmt::Write as _;
     let mut code = String::from("// 由 build.rs 生成：内嵌 7-Zip 引擎（zlib 压缩）\n");
-    code.push_str(&format!("pub const ID: &str = {:?};\n", id));
-    code.push_str(&format!(
-        "pub const MANIFEST: &str = {:?};\n",
-        manifest_text
-    ));
-    code.push_str("pub const FILES: &[(&str, &[u8])] = &[\n");
+    // pub(crate)：该文件被 include! 进私有 mod embedded，裸 pub 会触发 unreachable_pub 门禁。
+    let _ = writeln!(code, "pub(crate) const ID: &str = {id:?};");
+    let _ = writeln!(code, "pub(crate) const MANIFEST: &str = {manifest_text:?};");
+    code.push_str("pub(crate) const FILES: &[(&str, &[u8])] = &[\n");
     for (name, _) in &files {
-        code.push_str(&format!(
-            "    ({:?}, include_bytes!(concat!(env!(\"OUT_DIR\"), \"/{}.zlib\"))),\n",
-            name, name
-        ));
+        let _ = writeln!(
+            code,
+            "    ({name:?}, include_bytes!(concat!(env!(\"OUT_DIR\"), \"/{name}.zlib\"))),"
+        );
     }
     code.push_str("];\n");
-    std::fs::write(&generated, code).expect("write embedded_engine.rs");
+    if let Err(error) = std::fs::write(&generated, code) {
+        panic!("写入 embedded_engine.rs 失败：{error}");
+    }
 }
 
 fn compress(bytes: &[u8]) -> Vec<u8> {
     use flate2::{write::ZlibEncoder, Compression};
     use std::io::Write;
     let mut encoder = ZlibEncoder::new(Vec::new(), Compression::best());
-    encoder.write_all(bytes).expect("compress engine file");
-    encoder.finish().expect("finish engine compression")
+    if let Err(error) = encoder.write_all(bytes) {
+        panic!("压缩引擎文件失败：{error}");
+    }
+    encoder
+        .finish()
+        .unwrap_or_else(|error| panic!("结束引擎压缩失败：{error}"))
 }
 
 /// 构建脚本专用的 SHA-256（小写十六进制）。
 /// build-dependencies 里没有 sha2，这里内联实现，避免为构建脚本引入额外依赖。
+#[allow(clippy::many_single_char_names)] // SHA-2 标准记号（a..h、w、K）
 fn sha256_hex(data: &[u8]) -> String {
     const K: [u32; 64] = [
         0x428a2f98, 0x71374491, 0xb5c0fbcf, 0xe9b5dba5, 0x3956c25b, 0x59f111f1, 0x923f82a4,
@@ -311,7 +323,12 @@ fn sha256_hex(data: &[u8]) -> String {
         h[6] = h[6].wrapping_add(g);
         h[7] = h[7].wrapping_add(hh);
     }
-    h.iter().map(|word| format!("{word:08x}")).collect()
+    use std::fmt::Write as _;
+    let mut digest = String::with_capacity(h.len() * 8);
+    for word in &h {
+        let _ = write!(digest, "{word:08x}");
+    }
+    digest
 }
 
 fn main() {
@@ -320,19 +337,21 @@ fn main() {
         println!("cargo:rerun-if-changed=ui/app.slint");
         println!("cargo:rerun-if-changed=resources/app-icon.png");
         let config = slint_build::CompilerConfiguration::new().with_style("fluent".into());
-        slint_build::compile_with_config("ui/app.slint", config)
-            .expect("Slint UI compilation failed");
+        if let Err(error) = slint_build::compile_with_config("ui/app.slint", config) {
+            panic!("Slint UI 编译失败：{error}");
+        }
     }
-    let manifest_dir = std::path::PathBuf::from(std::env::var("CARGO_MANIFEST_DIR").unwrap());
+    let manifest_dir = std::path::PathBuf::from(cargo_env("CARGO_MANIFEST_DIR"));
     // src/engine_bundle.rs 无条件 include! 这个生成文件，所以非 Windows 目标（check-linux.sh / linux-core CI）
     // 也必须生成；没有引擎时内容为空，只影响内嵌释放能力。
     embed_engine(&manifest_dir);
     if std::env::var("CARGO_CFG_TARGET_OS").as_deref() == Ok("windows") {
-        let manifest = manifest_dir.join("resources/windows.manifest");
         println!("cargo:rerun-if-changed=resources/windows.manifest");
         if std::env::var("CARGO_CFG_TARGET_ENV").as_deref() == Ok("msvc") {
+            // manifest 路径只被 gui 装配使用；绑定放块内，关闭 gui 特性时不产生未用变量。
             #[cfg(feature = "gui")]
             {
+                let manifest = manifest_dir.join("resources/windows.manifest");
                 println!("cargo:rustc-link-arg-bin=JchTools=/MANIFEST:EMBED");
                 if manifest.display().to_string().contains(' ') {
                     println!(

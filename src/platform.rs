@@ -32,13 +32,14 @@ pub fn display_path_text(path: &str) -> String {
 /// 界面展示用：把纳秒时间戳（可能为负）转成本地可读时间；不可表示时回落到原始数字。
 pub fn display_time_text(ns: i64) -> String {
     let seconds = ns.div_euclid(1_000_000_000);
-    chrono::DateTime::from_timestamp(seconds, 0)
-        .map(|utc| {
+    chrono::DateTime::from_timestamp(seconds, 0).map_or_else(
+        || ns.to_string(),
+        |utc| {
             utc.with_timezone(&chrono::Local)
                 .format("%Y-%m-%d %H:%M:%S")
                 .to_string()
-        })
-        .unwrap_or_else(|| ns.to_string())
+        },
+    )
 }
 /// Injectable for tests: tests never need to touch the user's real Recycle Bin.
 pub trait Recycler: Send + Sync {
@@ -85,16 +86,32 @@ fn volume_root(path: &Path) -> Option<std::path::PathBuf> {
     }
     Some(std::path::PathBuf::from(format!("{letter}:\\")))
 }
+/// HRESULT 的 i32 位模式按位重解释为 u32：仅用于与 `0x800704C7` 这类错误码常量
+/// 比较，是位模式对照而非数值转换，符号位丢失正是目的本身。
+#[cfg(windows)]
+#[allow(clippy::cast_sign_loss)]
+fn hresult_bits(code: windows::core::HRESULT) -> u32 {
+    code.0 as u32
+}
+/// u32 错误码常量按位重解释为 HRESULT（与 hresult_bits 互逆）。
+#[cfg(windows)]
+#[allow(clippy::cast_possible_wrap)]
+fn hresult_from_bits(bits: u32) -> windows::core::HRESULT {
+    windows::core::HRESULT(bits as i32)
+}
 /// 当前回收站内的条目数；查询失败（无回收站的卷等）返回 None。
 #[cfg(windows)]
 fn bin_item_count(volume: &Path) -> Option<i64> {
     use std::os::windows::ffi::OsStrExt;
     use windows::Win32::UI::Shell::{SHQueryRecycleBinW, SHQUERYRBINFO};
     let mut info: SHQUERYRBINFO = unsafe { std::mem::zeroed() };
-    info.cbSize = std::mem::size_of::<SHQUERYRBINFO>() as u32;
+    // Win32 ABI 要求的 cbSize；该结构体仅数十字节，截断不可能发生。
+    #[allow(clippy::cast_possible_truncation)]
+    let cb_size = std::mem::size_of::<SHQUERYRBINFO>() as u32;
+    info.cbSize = cb_size;
     let wide: Vec<u16> = volume.as_os_str().encode_wide().chain(Some(0)).collect();
-    let hr = unsafe { SHQueryRecycleBinW(windows::core::PCWSTR(wide.as_ptr()), &mut info) };
-    hr.ok().map(|_| info.i64NumItems)
+    let hr = unsafe { SHQueryRecycleBinW(windows::core::PCWSTR(wide.as_ptr()), &raw mut info) };
+    hr.ok().map(|()| info.i64NumItems)
 }
 #[cfg(not(windows))]
 fn bin_item_count(_volume: &Path) -> Option<i64> {
@@ -109,7 +126,16 @@ fn native_recycle(path: &Path) -> std::result::Result<(), RecycleFailure> {
     use std::os::windows::ffi::OsStrExt;
     use windows::{
         core::PCWSTR,
-        Win32::{System::Com::*, UI::Shell::*},
+        Win32::{
+            System::Com::{
+                CoCreateInstance, CoInitializeEx, CoUninitialize, CLSCTX_INPROC_SERVER,
+                COINIT_APARTMENTTHREADED,
+            },
+            UI::Shell::{
+                FileOperation, IFileOperation, IShellItem, SHCreateItemFromParsingName,
+                FOFX_EARLYFAILURE, FOFX_RECYCLEONDELETE, FOF_NO_CONNECTED_ELEMENTS, FOF_NO_UI,
+            },
+        },
     };
     let perform = || -> windows::core::Result<()> {
         // Runs on the file-operation worker, not the UI thread. Balanced COM lifetime.
@@ -151,8 +177,8 @@ fn native_recycle(path: &Path) -> std::result::Result<(), RecycleFailure> {
             if operation.GetAnyOperationsAborted()?.as_bool() {
                 // Shell aborted without a specific error: conservatively treat as cancellation.
                 // Never infer permanent-delete permission from an ambiguous abort status.
-                return Err(windows::core::Error::from_hresult(windows::core::HRESULT(
-                    0x800704C7u32 as i32,
+                return Err(windows::core::Error::from_hresult(hresult_from_bits(
+                    0x800704C7,
                 )));
             }
         }
@@ -161,14 +187,14 @@ fn native_recycle(path: &Path) -> std::result::Result<(), RecycleFailure> {
     match perform() {
         Ok(()) => Ok(()),
         Err(error)
-            if [0x800704C7u32, 0x80270000, 0x80004004].contains(&(error.code().0 as u32)) =>
+            if [0x800704C7u32, 0x80270000, 0x80004004].contains(&hresult_bits(error.code())) =>
         {
             Err(RecycleFailure::Cancelled)
         }
         // RPC_E_CHANGED_MODE：调用线程已被初始化为 MTA，STA 回收接口用不了。此时
         // 文件未受任何影响；按「接口不可用」失败且不降级，防止未来有人把删除搬到
         // GUI/OLE 线程时文件被静默永久删除（engine 在专属工作线程调用，正常不触发）。
-        Err(error) if error.code().0 as u32 == 0x80010106 => {
+        Err(error) if hresult_bits(error.code()) == 0x80010106 => {
             Err(RecycleFailure::Unavailable(error.to_string()))
         }
         Err(error) => Err(RecycleFailure::Failed(error.to_string())),

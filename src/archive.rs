@@ -60,24 +60,23 @@ impl SevenZip {
         let mut sizes_complete = true;
         let cfg = job.config.clone();
         let mut flush = |fields: &mut BTreeMap<String, String>| -> Result<()> {
-            let raw = match fields.remove("Path") {
-                Some(raw) => raw,
-                None => {
-                    // 流式格式（bzip2/xz）可能没有 Path；若块内仍有成员元数据则用包名合成。
-                    if fields.is_empty() {
-                        return Ok(());
-                    }
-                    let has_meta = fields.contains_key("Size")
-                        || fields.contains_key("Packed Size")
-                        || fields.contains_key("Folder")
-                        || fields.contains_key("Encrypted")
-                        || fields.contains_key("Attributes");
-                    if !has_meta {
-                        fields.clear();
-                        return Ok(());
-                    }
-                    stream_member_name(archive)
+            let raw = if let Some(raw) = fields.remove("Path") {
+                raw
+            } else {
+                // 流式格式（bzip2/xz）可能没有 Path；若块内仍有成员元数据则用包名合成。
+                if fields.is_empty() {
+                    return Ok(());
                 }
+                let has_meta = fields.contains_key("Size")
+                    || fields.contains_key("Packed Size")
+                    || fields.contains_key("Folder")
+                    || fields.contains_key("Encrypted")
+                    || fields.contains_key("Attributes");
+                if !has_meta {
+                    fields.clear();
+                    return Ok(());
+                }
+                stream_member_name(archive)
             };
             if raw == "." || raw == "./" {
                 fields.clear();
@@ -157,13 +156,12 @@ impl SevenZip {
             },
             || Ok(()),
         )
-        .and_then(|_| flush(&mut fields));
-        drop(flush);
+        .and_then(|()| flush(&mut fields));
         listed?;
         let packed = fs::metadata(archive)?.len().max(1);
         // 用乘法比较避免整数除法截断导致边界上更宽松。
         if cfg.max_ratio > 0 && sizes_complete {
-            let limit = packed.checked_mul(cfg.max_ratio).unwrap_or(u64::MAX);
+            let limit = packed.saturating_mul(cfg.max_ratio);
             if total > limit {
                 bail!("压缩包展开比例超过用户设置的上限");
             }
@@ -458,7 +456,10 @@ impl SevenZip {
             let entry = entry?;
             if entry.file_type().is_dir() {
                 let rel = fsutil::relative_string(&stage.content, entry.path())?;
-                let dest = archive.parent().unwrap().join(fsutil::safe_relative(&rel)?);
+                let dest = archive
+                    .parent()
+                    .context("压缩包路径缺少父目录")?
+                    .join(fsutil::safe_relative(&rel)?);
                 let root_rel = fsutil::relative_string(&job.root, &dest)?;
                 // 父链仍整链校验；最终名可能是链接/junction（如 OneDrive 占位目录）：
                 // 已存在的目录直接合入；链接到目录不会创建也不会被写入（空目录无成员；
@@ -580,8 +581,7 @@ fn stream_member_name(archive: &Path) -> String {
     }
     let name = archive
         .file_name()
-        .map(|s| s.to_string_lossy().into_owned())
-        .unwrap_or_else(|| "content".into());
+        .map_or_else(|| "content".into(), |s| s.to_string_lossy().into_owned());
     match archive.file_stem() {
         Some(stem) => stem.to_string_lossy().into_owned(),
         None => name,
@@ -596,7 +596,7 @@ fn member_excluded(exclusions: &globset::GlobSet, rel: &str) -> bool {
     for i in 0..=bytes.len() {
         if i == bytes.len() || bytes[i] == b'/' {
             let prefix = &rel[..i];
-            if exclusions.is_match(prefix) || exclusions.is_match(&format!("{prefix}/")) {
+            if exclusions.is_match(prefix) || exclusions.is_match(format!("{prefix}/")) {
                 return true;
             }
         }
@@ -722,10 +722,9 @@ fn volume_set(archive: &Path) -> Result<Vec<PathBuf>> {
         Some((name[..name.len() - 4].to_string(), "numbered"))
     } else if let Some(stem) = name.strip_suffix(".rar") {
         Some((stem.to_string(), "oldrar"))
-    } else if let Some(stem) = name.strip_suffix(".zip") {
-        Some((stem.to_string(), "splitzip"))
     } else {
-        None
+        name.strip_suffix(".zip")
+            .map(|stem| (stem.to_string(), "splitzip"))
     };
     let mut volumes = vec![archive.to_path_buf()];
     let Some((stem, kind)) = stem else {
@@ -789,7 +788,7 @@ fn quarantine(job: &mut Job, archive_rel: &str, reason: &str) -> Result<()> {
             continue;
         }
         let source_rel = fsutil::relative_string(&job.root, &source)?;
-        let size = fsutil::snapshot(&source).map(|s| s.size).unwrap_or(0);
+        let size = fsutil::snapshot(&source).map_or(0, |s| s.size);
         let mut target = dir.join(source.file_name().unwrap_or_default());
         if target.try_exists()? || fs::symlink_metadata(&target).is_ok() {
             target = fsutil::unique_target(&job.root, &target)?;
@@ -933,7 +932,7 @@ fn merge_extracted(
     job.context.control.checkpoint()?;
     let use_new = match policy {
         ConflictPolicy::Overwrite => true,
-        // C-03：默认保留 mtime 最新；无法判定哪个最新（mtime 相同）时保留体积最大者。
+        // X-04：默认保留 mtime 最新；无法判定哪个最新（mtime 相同）时保留体积最大者。
         // mtime 与体积全平局时维持已有文件，避免无谓替换。
         ConflictPolicy::Newest => {
             incoming.modified_ns > existing.modified_ns
@@ -1029,7 +1028,7 @@ pub fn enqueue(job: &Job, archive: &Path, depth: u32) -> Result<()> {
 pub fn extract_queued(job: &mut Job, engine: &SevenZip) -> Result<()> {
     // 崩溃/强杀后 Drop 不会执行，.jchtools-work 下可能残留孤儿暂存目录；
     // 解压开始前清理超过 24 小时的残留（阈值远大于正常解压时长，避免误伤并发任务）。
-    if let Ok(removed) = clean_orphan_staging(&job.root, Duration::from_secs(24 * 3600)) {
+    if let Ok(removed) = clean_orphan_staging(&job.root, Duration::from_hours(24)) {
         if removed > 0 {
             job.context
                 .status(format!("已清理 {removed} 个残留解压暂存目录"));
@@ -1065,8 +1064,21 @@ pub fn extract_queued(job: &mut Job, engine: &SevenZip) -> Result<()> {
                 // X-05/X-06：complete 整组按处置策略处理（默认回收站）；未完全解开的
                 // 整组移入「解压失败」，目录里不残留压缩包（X 分区总体约束）。
                 if outcome.complete {
-                    dispose_archive(job, &outcome.volumes)
-                        .with_context(|| format!("处置解压成功的原包失败：{relative}"))?;
+                    // X-02/X-06：单包故障隔离——处置失败（回收接口异常、共享冲突等）只记
+                    // 警告并保留原包原地，不得中止整个任务；重跑按等字节合入幂等收敛。
+                    if let Err(error) = dispose_archive(job, &outcome.volumes) {
+                        job.summary.errors += 1;
+                        job.log(
+                            "解压",
+                            &relative,
+                            "",
+                            "警告",
+                            &format!(
+                                "解压成功但原包处置失败，原包保留在原地：{error:#}"
+                            ),
+                            0,
+                        )?;
+                    }
                 } else {
                     job.summary.archives_failed += 1;
                     job.log(
@@ -1198,7 +1210,7 @@ mod tests {
     use crate::platform::NativeRecycler;
     use std::sync::Arc;
 
-    // 覆盖 S-06
+    // 覆盖 X-03（成员就地解到包所在位置，含缺失父目录）
     #[test]
     fn merge_creates_missing_parent_directories() {
         // 回归：合入成员时把「父目录」传给只创建父级的 ensure_parent，实际只创建到祖父目录，
@@ -1206,7 +1218,7 @@ mod tests {
         // 分卷包里的 vols/ 目录）解压失败并留下半截空目录。合入必须创建到成员的父目录。
         let temp = tempfile::tempdir().unwrap();
         let root = temp.path().join("data");
-        let state = temp.path().join("state");
+        let db_dir = temp.path().join("state");
         fs::create_dir(&root).unwrap();
         let stage = tempfile::tempdir().unwrap();
         let source = stage.path().join("file1.txt");
@@ -1217,8 +1229,8 @@ mod tests {
             root: root.clone(),
             config: Config::default(),
             context: TaskContext::default(),
-            db: Database::create(&state).unwrap(),
-            summary: Default::default(),
+            db: Database::create(&db_dir).unwrap(),
+            summary: crate::model::Summary::default(),
             archive_override: None,
             recycler: Arc::new(NativeRecycler),
             deleted_unverified: 0,
@@ -1232,7 +1244,7 @@ mod tests {
         assert!(!source.exists(), "合入后暂存文件应已改名离开");
     }
 
-    // 覆盖 S-01, C-03
+    // 覆盖 X-04, S-01（冲突删除方式为「保留」时不覆盖，原包保留）
     #[test]
     fn merge_with_keep_delete_mode_reports_blocked_instead_of_lost_content() {
         // 回归：冲突策略要求新文件胜出（Overwrite），但冲突删除方式解析为「保留」时，
@@ -1241,7 +1253,7 @@ mod tests {
         // 在磁盘上不复存在，日志却写「已有文件按策略保留」。
         let temp = tempfile::tempdir().unwrap();
         let root = temp.path().join("data");
-        let state = temp.path().join("state");
+        let db_dir = temp.path().join("state");
         fs::create_dir(&root).unwrap();
         let target = root.join("target.txt");
         fs::write(&target, b"old content bytes").unwrap();
@@ -1249,17 +1261,19 @@ mod tests {
         let source = stage.path().join("target.txt");
         fs::write(&source, b"brand new and longer").unwrap();
 
-        let mut config = Config::default();
-        config.extract_conflict = ConflictPolicy::Overwrite;
-        config.conflict_delete = DeleteChoice::Keep;
-        // 即使全局删除方式为永久删除，冲突删除方式「保留」仍必须优先。
-        config.global_delete = DeleteMode::Permanent;
+        let config = Config {
+            extract_conflict: ConflictPolicy::Overwrite,
+            conflict_delete: DeleteChoice::Keep,
+            // 即使全局删除方式为永久删除，冲突删除方式「保留」仍必须优先。
+            global_delete: DeleteMode::Permanent,
+            ..Config::default()
+        };
         let mut job = Job {
             root,
             config,
             context: TaskContext::default(),
-            db: Database::create(&state).unwrap(),
-            summary: Default::default(),
+            db: Database::create(&db_dir).unwrap(),
+            summary: crate::model::Summary::default(),
             archive_override: Some(ConflictPolicy::Overwrite),
             recycler: Arc::new(NativeRecycler),
             deleted_unverified: 0,
@@ -1274,7 +1288,7 @@ mod tests {
         assert_eq!(fs::read(&source).unwrap(), b"brand new and longer");
     }
 
-    // 覆盖 C-03
+    // 覆盖 X-04（mtime 平局回退比较体积）
     #[test]
     fn newest_policy_breaks_mtime_tie_by_larger_size() {
         // 回归（C-03）：解压冲突默认策略 Newest 此前只比较 mtime，mtime 相同时直接保留
@@ -1283,7 +1297,7 @@ mod tests {
         // 断言不触发真实删除。
         let temp = tempfile::tempdir().unwrap();
         let root = temp.path().join("data");
-        let state = temp.path().join("state");
+        let db_dir = temp.path().join("state");
         fs::create_dir(&root).unwrap();
         let target = root.join("target.txt");
         fs::write(&target, b"short old").unwrap();
@@ -1295,16 +1309,18 @@ mod tests {
         filetime::set_file_mtime(&target, tie).unwrap();
         filetime::set_file_mtime(&source, tie).unwrap();
 
-        let mut config = Config::default();
-        config.extract_conflict = ConflictPolicy::Newest;
-        config.conflict_delete = DeleteChoice::Keep;
-        config.global_delete = DeleteMode::Permanent;
+        let config = Config {
+            extract_conflict: ConflictPolicy::Newest,
+            conflict_delete: DeleteChoice::Keep,
+            global_delete: DeleteMode::Permanent,
+            ..Config::default()
+        };
         let mut job = Job {
             root: root.clone(),
             config,
             context: TaskContext::default(),
-            db: Database::create(&state).unwrap(),
-            summary: Default::default(),
+            db: Database::create(&db_dir).unwrap(),
+            summary: crate::model::Summary::default(),
             archive_override: Some(ConflictPolicy::Newest),
             recycler: Arc::new(NativeRecycler),
             deleted_unverified: 0,
@@ -1344,7 +1360,7 @@ mod tests {
         );
     }
 
-    // 覆盖 C-04
+    // 覆盖 X-03, X-05（等价内容跳过不得吞掉原包自身的唯一副本）
     #[test]
     fn find_identical_elsewhere_never_matches_current_archive() {
         // 回归：quine 型自指包（成员字节=整个包字节，rsc 式 gzip/zip quine，gzip 头还会
@@ -1353,7 +1369,7 @@ mod tests {
         // 等价查找必须排除当前原包；对其它同名同字节文件的等价去重能力保持不变。
         let temp = tempfile::tempdir().unwrap();
         let root = temp.path().join("data");
-        let state = temp.path().join("state");
+        let db_dir = temp.path().join("state");
         fs::create_dir(&root).unwrap();
         let bytes: &[u8] = b"archive-bytes-identical-to-member";
         fs::write(root.join("pack.zip"), bytes).unwrap();
@@ -1361,12 +1377,12 @@ mod tests {
         let member = root.join(".jchtools-work/stage/pack.zip");
         fs::create_dir_all(member.parent().unwrap()).unwrap();
         fs::write(&member, bytes).unwrap();
-        let mut job = Job {
+        let job = Job {
             root: root.clone(),
             config: Config::default(),
             context: TaskContext::default(),
-            db: Database::create(&state).unwrap(),
-            summary: Default::default(),
+            db: Database::create(&db_dir).unwrap(),
+            summary: crate::model::Summary::default(),
             archive_override: None,
             recycler: Arc::new(NativeRecycler),
             deleted_unverified: 0,
@@ -1377,7 +1393,7 @@ mod tests {
             .unwrap();
         let incoming = fsutil::snapshot(&member).unwrap();
         assert!(
-            find_identical_elsewhere(&mut job, &member, &incoming, "pack.zip", "pack.zip")
+            find_identical_elsewhere(&job, &member, &incoming, "pack.zip", "pack.zip")
                 .unwrap()
                 .is_none(),
             "等价查找不得把正在解压的原包自身当作树内副本"
@@ -1390,7 +1406,7 @@ mod tests {
             .insert_file("other/pack.zip", "pack.zip", "pack.zip", &other_snapshot)
             .unwrap();
         let hit =
-            find_identical_elsewhere(&mut job, &member, &incoming, "pack.zip", "pack.zip").unwrap();
+            find_identical_elsewhere(&job, &member, &incoming, "pack.zip", "pack.zip").unwrap();
         let hit_rel = fsutil::relative_string(&root, &hit.unwrap()).unwrap();
         assert_eq!(
             hit_rel.as_str(),
@@ -1406,7 +1422,7 @@ mod tests {
         // 计数虚高。入队时应先清同 rel 的未处理旧行。
         let temp = tempfile::tempdir().unwrap();
         let root = temp.path().join("data");
-        let state = temp.path().join("state");
+        let db_dir = temp.path().join("state");
         fs::create_dir(&root).unwrap();
         let pack = root.join("pack.zip");
         fs::write(&pack, b"first version bytes").unwrap();
@@ -1415,8 +1431,8 @@ mod tests {
             root: root.clone(),
             config: Config::default(),
             context: TaskContext::default(),
-            db: Database::create(&state).unwrap(),
-            summary: Default::default(),
+            db: Database::create(&db_dir).unwrap(),
+            summary: crate::model::Summary::default(),
             archive_override: None,
             recycler: Arc::new(NativeRecycler),
             deleted_unverified: 0,
@@ -1439,7 +1455,7 @@ mod tests {
 
     // 平台门禁原因：验证对象是 Windows 路径长度语义（LongPathsEnabled=0 时 >260 普通路径的
     // 裸 Win32 调用直接失败）与 \\?\ verbatim 前缀拼接，只能在 Windows 上构造。
-    // 覆盖 R-07
+    // 覆盖 X-08, S-04（隐藏属性剥离，避免成员成为扫描不可见的影子文件）
     #[cfg(windows)]
     #[test]
     fn normalize_strips_hidden_on_plain_long_path() {
@@ -1490,7 +1506,7 @@ mod one_shot_skip_tests {
     use crate::platform::NativeRecycler;
     use std::sync::Arc;
 
-    // 覆盖 C-03, R-03
+    // 覆盖 X-04, R-02（逐次询问的一次性选择不应用到全部）
     #[test]
     fn merge_one_shot_skip_keeps_original_archive() {
         // 回归：Ask 对话框一次性选择「跳过」（不应用到全部）不回写 archive_override，
@@ -1498,7 +1514,7 @@ mod one_shot_skip_tests {
         // 丢弃后，这次解压一无所获。KeptExisting 必须携带保留判定。
         let temp = tempfile::tempdir().unwrap();
         let root = temp.path().join("data");
-        let state = temp.path().join("state");
+        let db_dir = temp.path().join("state");
         fs::create_dir(&root).unwrap();
         let target = root.join("target.txt");
         fs::write(&target, b"old content bytes").unwrap();
@@ -1506,21 +1522,25 @@ mod one_shot_skip_tests {
         let source = stage.path().join("target.txt");
         fs::write(&source, b"brand new and longer").unwrap();
 
-        let mut config = Config::default();
-        config.extract_conflict = ConflictPolicy::Ask;
-        let mut context = TaskContext::default();
-        context.decisions = Arc::new(|_| {
-            Ok(ConflictAnswer {
-                policy: ConflictPolicy::Skip,
-                apply_all: false,
-            })
-        });
+        let config = Config {
+            extract_conflict: ConflictPolicy::Ask,
+            ..Config::default()
+        };
+        let context = TaskContext {
+            decisions: Arc::new(|_| {
+                Ok(ConflictAnswer {
+                    policy: ConflictPolicy::Skip,
+                    apply_all: false,
+                })
+            }),
+            ..TaskContext::default()
+        };
         let mut job = Job {
             root,
             config,
             context,
-            db: Database::create(&state).unwrap(),
-            summary: Default::default(),
+            db: Database::create(&db_dir).unwrap(),
+            summary: crate::model::Summary::default(),
             archive_override: None,
             recycler: Arc::new(NativeRecycler),
             deleted_unverified: 0,
@@ -1535,5 +1555,82 @@ mod one_shot_skip_tests {
             job.archive_override.is_none(),
             "一次性选择不得回写 override"
         );
+    }
+
+    // 覆盖 X-04, S-01（默认 Newest 判新文件胜出：被淘汰旧文件先移入回收站，再放置新文件）
+    #[test]
+    fn newest_winner_displaces_loser_through_recycle() {
+        struct BinRecycle {
+            bin: PathBuf,
+        }
+        impl crate::platform::Recycler for BinRecycle {
+            fn recycle(
+                &self,
+                p: &Path,
+            ) -> std::result::Result<(), crate::platform::RecycleFailure> {
+                let dest = self.bin.join(p.file_name().unwrap_or_default());
+                std::fs::rename(p, dest)
+                    .map_err(|e| crate::platform::RecycleFailure::Failed(e.to_string()))
+            }
+            fn bin_count(&self, _: &Path) -> Option<i64> {
+                // 用假回收站目录内的条目数作为「回收站计数」：回收前后可观察到 +1，
+                // Windows 上据此把删除确认为 Recycled（S-02 条目计数验证）。
+                std::fs::read_dir(&self.bin)
+                    .ok()
+                    .map(|it| i64::try_from(it.count()).unwrap_or(i64::MAX))
+            }
+        }
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path().join("data");
+        let db_dir = temp.path().join("state");
+        let bin = temp.path().join("mock-bin");
+        fs::create_dir(&root).unwrap();
+        fs::create_dir(&bin).unwrap();
+        let target = root.join("target.txt");
+        fs::write(&target, b"old short").unwrap();
+        filetime::set_file_mtime(&target, filetime::FileTime::from_unix_time(1000, 0)).unwrap();
+        let staging = tempfile::tempdir().unwrap();
+        let source = staging.path().join("target.txt");
+        fs::write(&source, b"brand new winner").unwrap();
+        filetime::set_file_mtime(&source, filetime::FileTime::from_unix_time(2000, 0)).unwrap();
+
+        // conflict_delete=Global → 全局默认 Recycle
+        let config = Config {
+            extract_conflict: ConflictPolicy::Newest,
+            ..Config::default()
+        };
+        let mut job = Job {
+            root: root.clone(),
+            config,
+            context: TaskContext::default(),
+            db: Database::create(&db_dir).unwrap(),
+            summary: crate::model::Summary::default(),
+            archive_override: Some(ConflictPolicy::Newest),
+            recycler: Arc::new(BinRecycle { bin: bin.clone() }),
+            deleted_unverified: 0,
+        };
+        let outcome = merge_extracted(&mut job, &source, &target, "target.txt").unwrap();
+        assert!(
+            matches!(outcome, MergeOutcome::Merged(_)),
+            "新文件更旧文件新（mtime 更大）：Newest 必须判新文件胜出"
+        );
+        assert_eq!(
+            fs::read(&target).unwrap(),
+            b"brand new winner",
+            "旧文件移入回收站后目标位置应放置新文件"
+        );
+        assert!(!source.exists(), "暂存新文件已改名离开");
+        assert_eq!(
+            fs::read(bin.join("target.txt")).unwrap(),
+            b"old short",
+            "被淘汰的旧文件必须先进回收站（不覆盖、不永久删除）"
+        );
+        // 记账口径：Windows 条目计数可验证 → Recycled；非 Windows 无验证后端 → 按未验证如实记账。
+        if cfg!(windows) {
+            assert_eq!(job.summary.recycled, 1);
+            assert_eq!(job.summary.recycled_bytes, 9, "「old short」=9 字节");
+        } else {
+            assert_eq!(job.summary.deleted, 1, "回收未验证按永久删除口径记账");
+        }
     }
 }

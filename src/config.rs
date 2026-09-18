@@ -109,8 +109,8 @@ pub struct Config {
     pub keep_duplicate: KeepPolicy,
     pub duplicate_action: DuplicateAction,
     pub duplicate_delete: DeleteChoice,
-    /// 解压覆盖旧文件时的删除方式（C-03：覆盖或淘汰旧文件必须走用户选择的删除策略）。
-    /// 同名但内容不同的「版本取舍」已按 R-05 移除，本字段只服务解压冲突覆盖。
+    /// 解压覆盖旧文件时的删除方式（X-04：淘汰旧文件必须走用户选择的删除策略）。
+    /// 同名但内容不同的「版本取舍」已按 C-02 禁止并移除，本字段只服务解压冲突覆盖。
     pub conflict_delete: DeleteChoice,
     pub classify: ClassifyMode,
     pub output_dir: String,
@@ -148,7 +148,7 @@ impl Default for Config {
             extract_conflict: ConflictPolicy::Newest, max_depth: 16,
             // 100 万条目足够覆盖正常压缩包，同时约束异常包的条目放大；超大合法包可调高。
             max_entries: 1_000_000,
-            // 0 = 不额外限制。无 Size 元数据的流式包在 archive.rs 另有内置 50 GiB 硬顶。
+            // 0 = 不额外限制。流式包（无 Size 元数据）在解压期间按本项累计检查（archive.rs）。
             max_unpacked_gib: 0, max_file_gib: 0, max_ratio: 10_000, reserve_gib: 1,
             dedup_same_name: true, dedup_copy_names: true, dedup_other_names: true,
             keep_duplicate: KeepPolicy::Newest, duplicate_action: DuplicateAction::Delete,
@@ -202,7 +202,7 @@ impl Config {
     /// 历史版本已删除的设置键：旧配置与旧任务库仍带着它们，反序列化前剥除，
     /// 否则 deny_unknown_fields 会把旧数据整体判成非法配置。
     /// verify_bytes（删除前逐字节复核）已写死为始终开启；
-    /// 5 个 same_name_*/conflict_scope 键是已按 R-05 移除的同名版本取舍开关；
+    /// 5 个 same_name_*/conflict_scope 键是已按 C-02 禁止移除的同名版本取舍开关；
     /// extract 键随两工具拆分移除（解压职责整体移交「递归解压」工具，X-01）。
     const REMOVED_FIELDS: &[&str] = &[
         "hash_algorithm",

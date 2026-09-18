@@ -61,7 +61,7 @@ impl Job {
     ) -> Result<DeleteResult> {
         let relative = fsutil::relative_string(&self.root, path)?;
         fsutil::safe_join(&self.root, &relative)?;
-        let size = expected.map(|s| s.size).unwrap_or(0);
+        let size = expected.map_or(0, |s| s.size);
         // Record intent before a mutation. This is an audit trail, not a recovery journal.
         self.log("删除", &relative, "", "准备", reason, size)?;
         let result = platform::remove(
@@ -78,7 +78,9 @@ impl Job {
             }
             DeleteResult::Recycled => {
                 self.summary.recycled += 1;
-                if physical_free {
+                // 多硬链接源的内容仍由其他链接持有：逻辑大小与 candidate_bytes /
+                // permanent_bytes 同口径，不重复计入 recycled_bytes（S-06）。
+                if physical_free && expected.is_none_or(|s| s.links <= 1) {
                     self.summary.recycled_bytes = self.summary.recycled_bytes.saturating_add(size);
                 }
             }
@@ -144,7 +146,7 @@ fn clean_orphan_link_temps(root: &Path) -> usize {
     for entry in walkdir::WalkDir::new(root)
         .follow_links(false)
         .into_iter()
-        .filter_map(|e| e.ok())
+        .filter_map(std::result::Result::ok)
     {
         let path = entry.path();
         let Some(name) = path.file_name().and_then(|n| n.to_str()) else {
@@ -163,9 +165,7 @@ fn clean_orphan_link_temps(root: &Path) -> usize {
         }
         // 只有仍是硬链接（链接数 >= 2，内容另有链接持有，与崩溃残留的不变量一致）才清扫；
         // 普通同名文件可能是用户文件或从压缩包解出的同名成员，静默删除即数据丢失。
-        let residue = fsutil::snapshot(path)
-            .map(|s| s.links >= 2)
-            .unwrap_or(false);
+        let residue = fsutil::snapshot(path).is_ok_and(|s| s.links >= 2);
         if residue && fs::remove_file(path).is_ok() {
             removed += 1;
         }
@@ -222,18 +222,8 @@ pub fn prepare_with(
         deleted_unverified: 0,
     };
     let result = (|| {
-        // 先清崩溃残留的硬链接临时文件：它们被扫描永久剪枝，留着只会让源路径承诺静默失效。
-        let removed_link_temps = clean_orphan_link_temps(&job.root);
-        if removed_link_temps > 0 {
-            job.log(
-                "扫描",
-                "",
-                "",
-                "提示",
-                &format!("已清理 {removed_link_temps} 个上次任务崩溃残留的硬链接临时文件"),
-                0,
-            )?;
-        }
+        // C-01：分析阶段只读，不做任何清扫（含本工具崩溃残留的硬链接临时文件——
+        // 它们被扫描永久剪枝，不影响计划正确性；清扫统一在 apply_with 执行前进行）。
         // C-01：目录整理的分析阶段只读——不解压（解压职责整体移交「递归解压」工具，X-01），
         // 扫描即终态；树里既有压缩包按普通文件参与后续去重/归类。
         scan(&mut job, false, state)?;
@@ -371,7 +361,7 @@ fn extract_run_with(
                 "解压结束：成功 {} 包；失败并移入「{}」 {} 包",
                 job.summary.archives_ok,
                 archive::QUARANTINE_DIR_NAME,
-                job.summary.archives_quarantined
+                job.summary.archives_failed
             ),
             0,
         )?;
@@ -596,7 +586,7 @@ fn scan(job: &mut Job, enqueue: bool, state: &Path) -> Result<()> {
                         .to_lowercase();
                     job.db.conn.execute(
                         "INSERT INTO directories(rel,name,depth) VALUES(?1,?2,?3)",
-                        params![relative, name, entry.depth() as i64],
+                        params![relative, name, crate::convert::usize_as_i64(entry.depth())],
                     )?;
                     return Ok(());
                 }
@@ -677,12 +667,15 @@ fn hash_candidates(job: &mut Job) -> Result<()> {
             let sql=format!("SELECT {FILE_COLUMNS} FROM files WHERE id>?1 AND active=1 AND id IN (SELECT id FROM hash_candidates) ORDER BY id LIMIT ?2");
             let batch = job.db.files(
                 &sql,
-                params![cursor, (job.config.hash_workers * 4).max(16) as i64],
+                params![
+                    cursor,
+                    crate::convert::usize_as_i64((job.config.hash_workers * 4).max(16))
+                ],
             )?;
-            if batch.is_empty() {
+            let Some(last) = batch.last() else {
                 break;
-            }
-            cursor = batch.last().unwrap().id;
+            };
+            cursor = last.id;
             let root = &job.root;
             let control = &job.context.control;
             let results: Vec<_> = pool.install(|| {
@@ -937,7 +930,7 @@ fn execute_action(job: &mut Job, action: &Action) -> Result<bool> {
                 action.target.as_deref().unwrap_or(""),
                 "准备",
                 &action.reason,
-                action.expected.as_ref().map(|s| s.size).unwrap_or(0),
+                action.expected.as_ref().map_or(0, |s| s.size),
             )?;
             fsutil::rename_noreplace(&source, &target)?;
             job.summary.moved += 1;

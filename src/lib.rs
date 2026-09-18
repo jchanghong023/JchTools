@@ -3,6 +3,7 @@
 pub mod archive;
 pub mod config;
 pub mod control;
+pub mod convert;
 pub mod db;
 pub mod engine;
 pub mod engine_bundle;

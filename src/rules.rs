@@ -45,6 +45,7 @@ pub fn strip_copy_name(name: &str) -> String {
     static COPY_SUFFIX: OnceLock<Regex> = OnceLock::new();
     // 拉丁字母紧贴（photocopy / MyCopy）不是副本命名，分隔符必须至少一个；
     // 中文「副本」紧贴是常见命名习惯（报告副本.pdf → 报告.pdf），允许无分隔符。
+    #[allow(clippy::expect_used)] // 常量正则语法错误只可能是开发期笔误，按不可达处理
     let expression = COPY_SUFFIX.get_or_init(|| Regex::new(r"(?i)(?:\s*[（(]\d+[）)]|\s*[-_ ]+copy(?:\s*[（(]?\d+[）)]?)?|\s*[-_ ]*副本(?:\s*[（(]?\d+[）)]?)?)$").expect("constant regex"));
     let path = Path::new(name);
     let original = path.file_stem().and_then(|s| s.to_str()).unwrap_or(name);
@@ -138,9 +139,9 @@ pub fn cleanup_reason(rel: &str, size: u64, cfg: &Config) -> Option<&'static str
         return Some("用户开启的垃圾文件规则");
     }
     if cfg.clean_temp
-        && (file.ends_with(".tmp")
-            || file.ends_with(".temp")
-            || file.ends_with(".bak")
+        && (has_ext(&file, "tmp")
+            || has_ext(&file, "temp")
+            || has_ext(&file, "bak")
             || file.starts_with("~$"))
     {
         return Some("用户开启的临时/备份文件规则");
@@ -150,10 +151,16 @@ pub fn cleanup_reason(rel: &str, size: u64, cfg: &Config) -> Option<&'static str
     }
     None
 }
+/// 扩展名等值判断：按最后一个点切分比较尾段，等价于 `ends_with(".ext")`
+/// （输入已预先 lowercase，无大小写歧义）。rsplit_once 按字符边界切分，不会 panic。
+fn has_ext(name: &str, ext: &str) -> bool {
+    matches!(name.rsplit_once('.'), Some((_, tail)) if tail == ext)
+}
 pub fn archive_name(name: &str) -> bool {
     let name = name.to_lowercase();
-    if name.ends_with(".rar") {
+    if has_ext(&name, "rar") {
         static PART: OnceLock<Regex> = OnceLock::new();
+        #[allow(clippy::expect_used)] // 常量正则语法错误只可能是开发期笔误，按不可达处理
         let re = PART.get_or_init(|| Regex::new(r"\.part(\d+)\.rar$").expect("constant regex"));
         if let Some(caps) = re.captures(&name) {
             return caps[1].parse::<u64>().ok() == Some(1);
@@ -172,6 +179,7 @@ pub fn multipart_name(name: &str) -> bool {
     // 与 archive_name 对齐：只有 .partN.rar 才算 RAR 分卷；contains(".part") 会把
     // report.partial.rar 这类普通包误判为分卷。
     static PART: OnceLock<Regex> = OnceLock::new();
+    #[allow(clippy::expect_used)] // 常量正则语法错误只可能是开发期笔误，按不可达处理
     let re = PART.get_or_init(|| Regex::new(r"\.part(\d+)\.rar$").expect("constant regex"));
     n.ends_with(".001") || re.is_match(&n)
 }
@@ -200,12 +208,14 @@ mod tests {
     /// 复刻 planner::deduplicate keepers 查询中的 SQL 匹配条件（与 rust 参考实现逐分支对照）：
     /// `(name=?2 AND ?4) OR (name<>?2 AND normal=?3 AND ?5) OR (name<>?2 AND normal<>?3 AND ?6)`
     fn sql_match(a: &FileRecord, b: &FileRecord, cfg: &Config) -> bool {
-        (a.name == b.name && cfg.dedup_same_name)
-            || (a.name != b.name && a.normalized == b.normalized && cfg.dedup_copy_names)
-            || (a.name != b.name && a.normalized != b.normalized && cfg.dedup_other_names)
+        match (a.name == b.name, a.normalized == b.normalized) {
+            (true, _) => cfg.dedup_same_name,
+            (false, true) => cfg.dedup_copy_names,
+            (false, false) => cfg.dedup_other_names,
+        }
     }
 
-    // 覆盖 R-04
+    // 覆盖 C-02, R-02（三类名称关系独立启停，SQL 与参考实现一致）
     #[test]
     fn duplicate_allowed_matches_planner_sql() {
         // 覆盖三种名称关系（同名 / 副本名 / 不同名）与三种开关组合。
@@ -217,10 +227,12 @@ mod tests {
         for dedup_same_name in [false, true] {
             for dedup_copy_names in [false, true] {
                 for dedup_other_names in [false, true] {
-                    let mut cfg = Config::default();
-                    cfg.dedup_same_name = dedup_same_name;
-                    cfg.dedup_copy_names = dedup_copy_names;
-                    cfg.dedup_other_names = dedup_other_names;
+                    let cfg = Config {
+                        dedup_same_name,
+                        dedup_copy_names,
+                        dedup_other_names,
+                        ..Config::default()
+                    };
                     for (a, b) in &pairs {
                         assert_eq!(
                             duplicate_allowed(a, b, &cfg), sql_match(a, b, &cfg),
@@ -230,6 +242,69 @@ mod tests {
                     }
                 }
             }
+        }
+    }
+
+    // 覆盖 C-03, S-08（SQL 排序与 Rust 参考实现一致：预览与计划的保留者永不分裂）
+    #[test]
+    fn ordering_sql_agrees_with_rust_compare() {
+        let conn = rusqlite::Connection::open_in_memory().unwrap();
+        let seed = [
+            ("a/x", "x", 5i64, 10u64),
+            ("b/yy", "yy", 5, 20),
+            ("c", "zzzz", 9, 7),
+            ("d/long/name", "n", 5, 20),
+            ("e", "mm", 9, 7),
+        ];
+        // 纯字面量子查询：不建表、不写 DML（static_check 会按任务库 schema 逐条
+        // prepare 源码中的 SQL，测试内的建表/插入语句会与 schema 校验冲突）。
+        use std::fmt::Write as _;
+        let mut rows = format!(
+            "SELECT '{}' AS rel, '{}' AS name, {} AS mtime, {} AS size",
+            seed[0].0, seed[0].1, seed[0].2, seed[0].3
+        );
+        for (rel, name, mtime, size) in &seed[1..] {
+            let _ = write!(rows, " UNION ALL SELECT '{rel}', '{name}', {mtime}, {size}");
+        }
+        let records: Vec<FileRecord> = seed
+            .iter()
+            .map(|(rel, name, mtime, size)| FileRecord {
+                id: 0,
+                rel: rel.to_string(),
+                name: name.to_string(),
+                normalized: name.to_string(),
+                snapshot: Snapshot {
+                    size: *size,
+                    modified_ns: *mtime,
+                    identity: rel.to_string(),
+                    links: 1,
+                },
+                hash: None,
+                cleanable: false,
+            })
+            .collect();
+        for policy in [
+            KeepPolicy::Newest,
+            KeepPolicy::Oldest,
+            KeepPolicy::Largest,
+            KeepPolicy::Smallest,
+            KeepPolicy::ShortestName,
+        ] {
+            let sql = format!("SELECT rel FROM ({rows}) ORDER BY {}", ordering_sql(policy));
+            let sql_order: Vec<String> = conn
+                .prepare(&sql)
+                .unwrap()
+                .query_map([], |row| row.get::<_, String>(0))
+                .unwrap()
+                .collect::<rusqlite::Result<_>>()
+                .unwrap();
+            let by_rel = |rel: &str| records.iter().find(|r| r.rel == rel).unwrap();
+            let mut rust_order: Vec<&str> = records.iter().map(|r| r.rel.as_str()).collect();
+            rust_order.sort_by(|a, b| compare(by_rel(a), by_rel(b), policy));
+            assert_eq!(
+                sql_order, rust_order,
+                "{policy:?} 的 SQL 与 Rust 排序必须一致"
+            );
         }
     }
 }

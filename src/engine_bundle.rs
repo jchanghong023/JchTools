@@ -4,8 +4,8 @@
 //! 1. `<exe 目录>/resources/7zip/`：发布包与开发环境的显式引擎，用户可直接替换（LGPL 要求可替换）；
 //! 2. `<用户数据目录>/JchTools/engine/<版本-哈希>/`：内嵌副本的释放位置，同样允许用户覆盖；
 //! 3. 只有以上都不存在时，才从 EXE 内嵌的压缩数据释放并逐文件校验 sha256。
-//! 已存在的文件一律不重写（用户自备引擎优先，符合 LGPL 可替换要求），
-//! 但会计算 sha256 与内嵌清单比对：不一致时保留文件并记录警告，防止预植文件无声通过校验。
+//!    已存在的文件一律不重写（用户自备引擎优先，符合 LGPL 可替换要求），
+//!    但会计算 sha256 与内嵌清单比对：不一致时保留文件并记录警告，防止预植文件无声通过校验。
 use anyhow::{bail, Context, Result};
 use sha2::{Digest, Sha256};
 use std::path::{Path, PathBuf};
@@ -97,7 +97,7 @@ fn manifest_expectation(file_name: &str) -> Option<String> {
     files.iter().find_map(|entry| {
         let name = entry["name"].as_str()?;
         if name.eq_ignore_ascii_case(file_name) {
-            entry["sha256"].as_str().map(|s| s.to_lowercase())
+            entry["sha256"].as_str().map(str::to_lowercase)
         } else {
             None
         }
@@ -168,7 +168,7 @@ fn cleanup_part_residue(directory: &Path) {
     let Ok(entries) = std::fs::read_dir(directory) else {
         return;
     };
-    for entry in entries.filter_map(|e| e.ok()) {
+    for entry in entries.filter_map(std::result::Result::ok) {
         let path = entry.path();
         let name = path
             .file_name()
@@ -187,19 +187,17 @@ fn cleanup_part_residue(directory: &Path) {
 }
 
 /// 目录中已存在同名引擎文件时的口径：保留该文件，按内嵌清单比对哈希并记录警告。
-fn keep_existing_engine_file(target: &Path, name: &str, expected: &str) -> Result<()> {
+fn keep_existing_engine_file(target: &Path, name: &str, expected: &str) {
     match hash_matches(target, expected) {
-        Ok(true) => Ok(()),
+        Ok(true) => {}
         Ok(false) => {
             persist_engine_warning(&format!("警告：引擎目录中已存在与内嵌清单 sha256 不一致的 {name}（{}），保留该文件（用户自备引擎可覆盖内嵌副本），请自行确认来源可信", target.display()));
-            Ok(())
         }
         Err(error) => {
             persist_engine_warning(&format!(
                 "警告：无法读取已存在的引擎文件 {} 以校验 sha256：{error}，保留该文件",
                 target.display()
             ));
-            Ok(())
         }
     }
 }
@@ -234,7 +232,7 @@ pub fn release(directory: &Path) -> Result<()> {
         // 但已存在文件也要计算 sha256 与清单比对——不一致时保留并记录警告，
         // 防止恶意预植文件在"已存在即跳过"逻辑下无声绕过内嵌校验。
         if target.is_file() {
-            keep_existing_engine_file(&target, name, &expected)?;
+            keep_existing_engine_file(&target, name, &expected);
             continue;
         }
         let bytes = inflate(compressed).with_context(|| format!("解压内嵌引擎失败：{name}"))?;
@@ -247,7 +245,7 @@ pub fn release(directory: &Path) -> Result<()> {
             // 改名采用不覆盖语义：若改名前目标已出现（另一进程并发释放，或用户此刻放入
             // 自备引擎），保留已出现的目标并按"已存在文件"口径处理，绝不用覆盖语义替换。
             Err(_) if target.is_file() => {
-                keep_existing_engine_file(&target, name, &expected)?;
+                keep_existing_engine_file(&target, name, &expected);
                 continue;
             }
             Err(error) => {

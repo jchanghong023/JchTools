@@ -10,7 +10,7 @@ fn app_slint_compiles_with_zero_diagnostics() {
     // 与 build.rs 保持同一风格配置，诊断口径一致
     compiler.set_style("fluent".into());
     let result = spin_on::spin_on(compiler.build_from_path("ui/app.slint"));
-    let offenders: Vec<String> = result.diagnostics().map(|d| format!("{:?}", d)).collect();
+    let offenders: Vec<String> = result.diagnostics().map(|d| format!("{d:?}")).collect();
     assert!(
         offenders.is_empty(),
         "ui/app.slint 存在编译诊断（警告同样视为失败）:\n{}",

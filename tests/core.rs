@@ -1,4 +1,11 @@
 //! These tests mutate only tempfile fixtures. Recycle Bin operations are injected mocks.
+// 测试代码允许 unwrap/expect 与短名（f/p/q 夹具惯例）：断言失败即测试失败，属合理用法
+// （与 clippy.toml 的 allow-*-in-tests 策略一致，集成测试 crate 不在其覆盖范围内）。
+#![allow(
+    clippy::unwrap_used,
+    clippy::expect_used,
+    clippy::many_single_char_names
+)]
 mod common;
 use common::FailRecycle;
 use jchtools::{
@@ -20,7 +27,7 @@ use std::{
 };
 use tempfile::TempDir;
 struct Fixture {
-    _temp: TempDir,
+    temp: TempDir,
     root: PathBuf,
     state: PathBuf,
 }
@@ -30,11 +37,7 @@ impl Fixture {
         let root = temp.path().join("data");
         let state = temp.path().join("state");
         fs::create_dir(&root).unwrap();
-        Self {
-            _temp: temp,
-            root,
-            state,
-        }
+        Self { temp, root, state }
     }
     fn write(&self, name: &str, bytes: &[u8], time: i64) -> PathBuf {
         let p = self.root.join(name);
@@ -46,7 +49,7 @@ impl Fixture {
     fn plan(&self, cfg: Config) -> engine::TaskResult {
         engine::prepare_at(&self.root, cfg, Context::default(), &self.state).unwrap()
     }
-    fn apply(&self, task: &engine::TaskResult) -> engine::TaskResult {
+    fn apply(task: &engine::TaskResult) -> engine::TaskResult {
         engine::apply_with(&task.directory, Context::default(), Arc::new(FailRecycle)).unwrap()
     }
 }
@@ -75,7 +78,7 @@ impl Recycler for MoveRecycle {
         fs::rename(p, &self.target).map_err(|e| RecycleFailure::Failed(e.to_string()))
     }
     fn bin_count(&self, _: &Path) -> Option<i64> {
-        Some(self.calls.load(Ordering::Relaxed) as i64)
+        Some(i64::try_from(self.calls.load(Ordering::Relaxed)).unwrap())
     }
 }
 // 覆盖 S-02
@@ -95,7 +98,7 @@ fn defaults_valid_and_roundtrip() {
 fn reject_unknown_configuration() {
     assert!(Config::from_json_text(r#"{"delete_everything":true}"#).is_err());
 }
-// 覆盖 R-05
+// 覆盖 S-03, C-02（verify_bytes 写死不可关闭；同名版本取舍开关已按合同移除）
 #[test]
 fn legacy_config_with_removed_fields_still_loads() {
     let mut value = serde_json::to_value(Config::default()).unwrap();
@@ -131,7 +134,7 @@ fn schema_matches_every_configuration_field() {
         assert!(fields.contains_key(key), "{key} 应作为配置字段保留");
     }
 }
-// 覆盖 R-06, R-08, S-06
+// 覆盖 R-03, X-08, C-08
 #[test]
 fn coupled_validation_and_bounds() {
     let mut c = base();
@@ -254,7 +257,7 @@ fn recycle_error_after_move_with_verified_bin_counts_as_recycled() {
             Err(RecycleFailure::Failed("late failure".into()))
         }
         fn bin_count(&self, _: &Path) -> Option<i64> {
-            Some(self.calls.load(Ordering::Relaxed) as i64)
+            Some(i64::try_from(self.calls.load(Ordering::Relaxed)).unwrap())
         }
     }
     let r = LateFail {
@@ -276,7 +279,7 @@ fn recycle_error_after_move_with_verified_bin_counts_as_recycled() {
     );
     assert!(!p.exists() && r.target.exists());
 }
-// 覆盖 S-04
+// 覆盖 C-10（源/目标变化后快照失效，执行期跳过而非覆盖）
 #[test]
 fn metadata_change_invalidates_snapshot() {
     let f = Fixture::new();
@@ -296,7 +299,7 @@ fn rename_never_overwrites() {
     assert_eq!(fs::read(a).unwrap(), b"A");
     assert_eq!(fs::read(b).unwrap(), b"B");
 }
-// 覆盖 C-03, C-05
+// 覆盖 C-05, S-01
 #[test]
 fn unique_name_preserves_extension() {
     let f = Fixture::new();
@@ -304,7 +307,7 @@ fn unique_name_preserves_extension() {
     let q = fsutil::unique_target(&f.root, &p).unwrap();
     assert_eq!(q.file_name().unwrap(), "report (1).pdf");
 }
-// 覆盖 C-05, C-03
+// 覆盖 C-05
 #[test]
 fn unique_name_truncates_long_stem_to_component_limit() {
     // 回归：基础名接近 255 个 UTF-16 单元且目标被占用时，“名 (N).扩展”候选名会超限，
@@ -337,7 +340,7 @@ fn unique_name_truncates_long_stem_to_component_limit() {
     let n = fsutil::suffixed_candidate("a", &ext, 1);
     assert!(n.encode_utf16().count() <= 255, "{n}");
     assert!(
-        !n.chars().last().is_some_and(|c| c.is_whitespace()),
+        !n.chars().last().is_some_and(char::is_whitespace),
         "不得以任何空白结尾：{n:?}"
     );
     assert!(n.ends_with('x'), "截断剥掉 NBSP 后应露出的最后字符：{n:?}");
@@ -389,7 +392,7 @@ fn same_prehash_different_middle_is_not_duplicate() {
     );
     assert_eq!(f.plan(base()).summary.planned_delete, 0);
 }
-// 覆盖 C-09
+// 覆盖 C-10（取消后不再继续读取）
 #[test]
 fn cancelled_hash_does_not_read() {
     let f = Fixture::new();
@@ -399,7 +402,7 @@ fn cancelled_hash_does_not_read() {
     assert!(hashing::full_hash(&p, &fsutil::snapshot(&p).unwrap(), &ctl).is_err());
     assert_eq!(ctl.read_bytes.load(Ordering::Relaxed), 0);
 }
-// 覆盖 R-04
+// 覆盖 C-08（副本后缀清理的识别口径）
 #[test]
 fn copy_suffixes_and_nonempty_name() {
     for s in [
@@ -423,7 +426,7 @@ fn category_and_custom_rules() {
     );
     assert!(rules::parse_categories("../x=pdf").is_err());
 }
-// 覆盖 C-02
+// 覆盖 X-01（支持格式与分卷首卷识别）
 #[test]
 fn archive_first_volume_detection() {
     assert!(rules::archive_name("A.part01.rar"));
@@ -529,7 +532,7 @@ fn keep_never_calls_recycler() {
     );
     assert!(p.exists());
 }
-// 覆盖 C-06
+// 覆盖 C-07（MUST NOT 递归删除有内容的目录）
 #[test]
 fn nonempty_directory_cannot_be_removed() {
     let f = Fixture::new();
@@ -545,7 +548,7 @@ fn nonempty_directory_cannot_be_removed() {
     .is_err());
     assert!(f.root.join("sub/a").exists());
 }
-// 覆盖 C-04, S-11
+// 覆盖 C-01, C-03
 #[test]
 fn analysis_no_changes_and_dedup_keeps_latest() {
     let f = Fixture::new();
@@ -554,10 +557,10 @@ fn analysis_no_changes_and_dedup_keeps_latest() {
     let task = f.plan(base());
     assert!(old.exists() && new.exists());
     assert_eq!(task.summary.planned_delete, 1);
-    f.apply(&task);
+    Fixture::apply(&task);
     assert!(!old.exists() && new.exists());
 }
-// 覆盖 R-04
+// 覆盖 R-02
 #[test]
 fn different_names_can_be_disabled() {
     let f = Fixture::new();
@@ -567,7 +570,7 @@ fn different_names_can_be_disabled() {
     cfg.dedup_other_names = false;
     assert_eq!(f.plan(cfg).summary.planned_delete, 0);
 }
-// 覆盖 R-04
+// 覆盖 R-02
 #[test]
 fn same_names_different_directories_can_be_disabled() {
     let f = Fixture::new();
@@ -577,7 +580,7 @@ fn same_names_different_directories_can_be_disabled() {
     cfg.dedup_same_name = false;
     assert_eq!(f.plan(cfg).summary.planned_delete, 0);
 }
-// 覆盖 R-04
+// 覆盖 R-02
 #[test]
 fn copy_names_can_be_disabled_independently() {
     let f = Fixture::new();
@@ -587,7 +590,7 @@ fn copy_names_can_be_disabled_independently() {
     cfg.dedup_copy_names = false;
     assert_eq!(f.plan(cfg).summary.planned_delete, 0);
 }
-// 覆盖 R-05, S-03
+// 覆盖 C-02, S-03
 #[test]
 fn equal_size_different_hash_not_deleted_when_rule_off() {
     let f = Fixture::new();
@@ -595,7 +598,7 @@ fn equal_size_different_hash_not_deleted_when_rule_off() {
     f.write("b/report.txt", b"efgh", 20);
     assert_eq!(f.plan(base()).summary.planned_delete, 0);
 }
-// 覆盖 C-07
+// 覆盖 C-01（计划逐项可勾选/取消）
 #[test]
 fn unselecting_action_preserves_file() {
     let f = Fixture::new();
@@ -606,10 +609,10 @@ fn unselecting_action_preserves_file() {
     let action = db.actions_page(0, 10).unwrap().remove(0);
     db.set_selected(action.id, false).unwrap();
     drop(db);
-    f.apply(&task);
+    Fixture::apply(&task);
     assert!(f.root.join("a").exists() && f.root.join("b").exists());
 }
-// 覆盖 S-04
+// 覆盖 C-10
 #[test]
 fn changed_source_after_plan_is_skipped() {
     let f = Fixture::new();
@@ -617,11 +620,11 @@ fn changed_source_after_plan_is_skipped() {
     f.write("b", b"same", 20);
     let task = f.plan(base());
     fs::write(&a, b"brand new").unwrap();
-    let result = f.apply(&task);
+    let result = Fixture::apply(&task);
     assert!(a.exists());
     assert_eq!(result.summary.errors, 1);
 }
-// 覆盖 S-04
+// 覆盖 C-10
 #[test]
 fn changed_keeper_after_plan_prevents_delete() {
     let f = Fixture::new();
@@ -629,11 +632,11 @@ fn changed_keeper_after_plan_prevents_delete() {
     let b = f.write("b", b"same", 20);
     let task = f.plan(base());
     fs::write(&b, b"new keeper").unwrap();
-    let result = f.apply(&task);
+    let result = Fixture::apply(&task);
     assert!(a.exists());
     assert_eq!(result.summary.errors, 1);
 }
-// 覆盖 R-06, C-04
+// 覆盖 C-08
 #[test]
 fn cleanup_does_not_become_only_dedup_keeper() {
     let f = Fixture::new();
@@ -642,11 +645,11 @@ fn cleanup_does_not_become_only_dedup_keeper() {
     let mut cfg = base();
     cfg.clean_temp = true;
     let task = f.plan(cfg);
-    f.apply(&task);
+    Fixture::apply(&task);
     assert!(f.root.join("keep.txt").exists());
     assert!(!f.root.join("temporary.tmp").exists());
 }
-// 覆盖 R-06
+// 覆盖 C-08
 #[test]
 fn cleanup_keep_files_are_not_dedup_deletions() {
     // cleanup_delete=Keep 的清理命中文件由清理规则管辖（保留承诺）：去重路径同样不得删除。
@@ -667,14 +670,14 @@ fn cleanup_keep_files_are_not_dedup_deletions() {
         actions.iter().all(|a| a.kind != ActionKind::Delete),
         "清理保留的文件不得按重复规则删除"
     );
-    f.apply(&task);
+    Fixture::apply(&task);
     assert!(f.root.join("normal.txt").exists() && f.root.join("junk.tmp").exists());
 }
-// 覆盖 S-10
+// 覆盖 C-04（硬链接执行的崩溃残留自愈，删除前校验 links>=2）
 #[test]
 fn stale_hardlink_temps_are_swept() {
     // 崩溃残留的硬链接临时文件被扫描永久剪枝且无其它回收路径：
-    // prepare/apply 前必须清扫过期残留。残留必是硬链接（内容仍由保留文件持有），
+    // 清扫只发生在执行确认之后（apply_with 执行前；C-01 分析阶段只读）。残留必是硬链接（内容仍由保留文件持有），
     // 清扫前校验链接数 >= 2，普通同名文件绝不能被当作残留删除。
     let f = Fixture::new();
     f.write("a.txt", b"payload", 10);
@@ -688,14 +691,16 @@ fn stale_hardlink_temps_are_swept() {
     }
     filetime::set_file_mtime(&stale, filetime::FileTime::from_unix_time(0, 0)).unwrap();
     let task = f.plan(base());
-    assert!(!stale.exists(), "过期残留必须被清扫");
+    assert!(stale.exists(), "C-01：分析阶段不得删除残留（只读）");
+    Fixture::apply(&task);
+    assert!(!stale.exists(), "执行阶段必须清扫过期残留");
     assert!(
         f.root.join("a.txt").exists(),
         "清扫残留不得影响 keeper 本体"
     );
     assert_eq!(task.summary.scanned, 1, "清扫不得影响正常文件的扫描");
 }
-// 覆盖 S-10
+// 覆盖 C-04（残留清扫不得误删用户文件）
 #[test]
 fn user_file_with_link_temp_prefix_is_never_swept() {
     // 回归：.jchtools-link- 前缀清扫此前不校验归属，同名用户文件（或从压缩包解出的
@@ -709,7 +714,7 @@ fn user_file_with_link_temp_prefix_is_never_swept() {
     f.plan(base());
     assert!(user.exists(), "同名用户文件不是崩溃残留，绝不能被清扫");
 }
-// 覆盖 R-03, R-04
+// 覆盖 R-02（删除方式可按类覆盖）
 #[test]
 fn global_keep_prohibits_deletion() {
     let f = Fixture::new();
@@ -719,7 +724,7 @@ fn global_keep_prohibits_deletion() {
     cfg.global_delete = DeleteMode::Keep;
     assert_eq!(f.plan(cfg).summary.planned_delete, 0);
 }
-// 覆盖 R-04, R-06
+// 覆盖 R-02
 #[test]
 fn class_override_beats_global_keep() {
     let f = Fixture::new();
@@ -730,7 +735,7 @@ fn class_override_beats_global_keep() {
     cfg.duplicate_delete = DeleteChoice::Permanent;
     assert_eq!(f.plan(cfg).summary.planned_delete, 1);
 }
-// 覆盖 R-06
+// 覆盖 C-08
 #[test]
 fn copy_name_cleanup_uses_freed_original_name() {
     let f = Fixture::new();
@@ -739,11 +744,11 @@ fn copy_name_cleanup_uses_freed_original_name() {
     let mut cfg = base();
     cfg.clean_copy_name = true;
     let task = f.plan(cfg);
-    f.apply(&task);
+    Fixture::apply(&task);
     assert!(f.root.join("a.pdf").exists());
     assert!(!f.root.join("a (1).pdf").exists());
 }
-// 覆盖 C-05, C-14
+// 覆盖 C-05
 #[test]
 fn classification_preserves_paths_and_is_idempotent() {
     let f = Fixture::new();
@@ -751,7 +756,7 @@ fn classification_preserves_paths_and_is_idempotent() {
     let mut cfg = base();
     cfg.classify = ClassifyMode::Extension;
     let task = f.plan(cfg.clone());
-    f.apply(&task);
+    Fixture::apply(&task);
     assert!(f.root.join("PDF/folder/a.pdf").exists());
     let again = f.plan(cfg);
     assert_eq!(again.summary.planned_move, 0);
@@ -766,11 +771,11 @@ fn flatten_classification_allocates_nonconflicting_names() {
     cfg.classify = ClassifyMode::Extension;
     cfg.preserve_structure = false;
     let task = f.plan(cfg);
-    f.apply(&task);
+    Fixture::apply(&task);
     assert!(f.root.join("PDF/a.pdf").exists());
     assert!(f.root.join("PDF/a (1).pdf").exists());
 }
-// 覆盖 C-06
+// 覆盖 C-07
 #[test]
 fn empty_directory_cleanup_is_bottom_up() {
     let f = Fixture::new();
@@ -778,11 +783,11 @@ fn empty_directory_cleanup_is_bottom_up() {
     let mut cfg = base();
     cfg.clean_empty_dirs = true;
     let task = f.plan(cfg);
-    f.apply(&task);
+    Fixture::apply(&task);
     assert!(!f.root.join("empty").exists());
     assert!(f.root.exists());
 }
-// 覆盖 C-06, R-07
+// 覆盖 C-07, S-04
 #[test]
 fn empty_hidden_subdir_blocks_empty_directory_cleanup() {
     // 行为锚点：仅含一个空的隐藏（Windows）/点开头（Unix）子目录的目录，
@@ -802,7 +807,7 @@ fn empty_hidden_subdir_blocks_empty_directory_cleanup() {
     );
     assert!(f.root.join("outer").exists());
 }
-// 覆盖 C-06
+// 覆盖 C-07
 #[test]
 fn empty_directory_with_underscore_not_blocked_by_similar_name() {
     // 行为契约：目录名含下划线/百分号时，空目录判定不得波及名字相似（仅差一两个字符）的邻居目录。
@@ -811,7 +816,7 @@ fn empty_directory_with_underscore_not_blocked_by_similar_name() {
     f.write("myXdir/file.txt", b"payload", 10);
     let mut cfg = base();
     cfg.clean_empty_dirs = true;
-    f.apply(&f.plan(cfg));
+    Fixture::apply(&f.plan(cfg));
     assert!(
         !f.root.join("my_dir").exists(),
         "含下划线的空目录必须能被清理"
@@ -821,7 +826,7 @@ fn empty_directory_with_underscore_not_blocked_by_similar_name() {
         "相似前缀目录里的文件不能被误伤"
     );
 }
-// 覆盖 C-06
+// 覆盖 C-07
 #[test]
 fn empty_directory_with_percent_in_name_is_cleaned() {
     let f = Fixture::new();
@@ -829,11 +834,11 @@ fn empty_directory_with_percent_in_name_is_cleaned() {
     f.write("100Xdone/file.txt", b"payload", 10);
     let mut cfg = base();
     cfg.clean_empty_dirs = true;
-    f.apply(&f.plan(cfg));
+    Fixture::apply(&f.plan(cfg));
     assert!(!f.root.join("100%done").exists());
     assert!(f.root.join("100Xdone/file.txt").exists());
 }
-// 覆盖 C-05, C-06
+// 覆盖 C-05, C-07
 #[test]
 fn classification_empty_dirs_planned_in_same_pass() {
     let f = Fixture::new();
@@ -848,7 +853,7 @@ fn classification_empty_dirs_planned_in_same_pass() {
         task.summary.planned_empty, 1,
         "folder/ becomes empty after the move and must be planned now"
     );
-    f.apply(&task);
+    Fixture::apply(&task);
     assert!(f.root.join("PDF/folder/a.pdf").exists());
     assert!(!f.root.join("folder").exists());
     let again = f.plan(cfg);
@@ -876,14 +881,14 @@ fn date_classification_is_idempotent() {
     assert_eq!(parts.len(), 4, "年/月/folder/x.txt");
     assert_eq!((parts[0].len(), parts[1].len()), (4, 2), "年月目录");
     assert_eq!(parts[3], "x.txt");
-    f.apply(&task);
+    Fixture::apply(&task);
     let again = f.plan(cfg);
     assert_eq!(
         again.summary.planned_move, 0,
         "重新分析不得把年/月目录再套一层"
     );
 }
-// 覆盖 R-07
+// 覆盖 S-04
 #[test]
 fn excluded_tree_not_touched() {
     let f = Fixture::new();
@@ -905,7 +910,12 @@ fn set_hidden(path: &Path, hidden: bool) {
         .chain(Some(0))
         .collect::<Vec<u16>>();
     let attrs = unsafe { GetFileAttributesW(wide.as_ptr()) };
-    assert_ne!(attrs, INVALID_FILE_ATTRIBUTES, "读取属性失败：{path:?}");
+    assert_ne!(
+        attrs,
+        INVALID_FILE_ATTRIBUTES,
+        "读取属性失败：{}",
+        path.display()
+    );
     let next = if hidden {
         attrs | FILE_ATTRIBUTE_HIDDEN
     } else {
@@ -914,10 +924,11 @@ fn set_hidden(path: &Path, hidden: bool) {
     assert_ne!(
         unsafe { SetFileAttributesW(wide.as_ptr(), next) },
         0,
-        "设置属性失败：{path:?}"
+        "设置属性失败：{}",
+        path.display()
     );
 }
-// 覆盖 R-07
+// 覆盖 S-04
 #[cfg(windows)]
 #[test]
 fn hidden_root_directory_still_scanned() {
@@ -937,7 +948,7 @@ fn hidden_root_directory_still_scanned() {
         "隐藏根目录里的普通文件必须能被扫描到；隐藏子目录必须被剪枝"
     );
 }
-// 覆盖 R-07
+// 覆盖 S-04
 #[cfg(not(windows))]
 #[test]
 fn hidden_root_directory_still_scanned() {
@@ -956,7 +967,7 @@ fn hidden_root_directory_still_scanned() {
         "点开头根目录里的普通文件必须能被扫描到；点开头子目录必须被剪枝"
     );
 }
-// 覆盖 R-09, C-05
+// 覆盖 C-05, C-06（合并同名目录的收敛性/幂等）
 #[test]
 fn merge_directories_never_pulls_files_out_of_output() {
     // 输出目录内的分类子目录与树中同名外部目录重名时，合并不得把已归类文件拉回
@@ -970,7 +981,7 @@ fn merge_directories_never_pulls_files_out_of_output() {
     cfg.output_dir = "整理".into();
     let task = f.plan(cfg.clone());
     assert_eq!(task.summary.planned_move, 1);
-    f.apply(&task);
+    Fixture::apply(&task);
     assert!(f.root.join("整理/PDF/文档/old/a.pdf").exists());
     let again = f.plan(cfg);
     assert_eq!(
@@ -978,7 +989,7 @@ fn merge_directories_never_pulls_files_out_of_output() {
         "第二次分析不得把已归类文件再移回外部同名目录"
     );
 }
-// 覆盖 R-06
+// 覆盖 C-08
 #[test]
 fn copy_name_cleanup_never_plans_self_move() {
     // 保留文件剥离副本名后原名被其它内容占用时，回退序号不得撞回自身当前名称：
@@ -995,12 +1006,12 @@ fn copy_name_cleanup_never_plans_self_move() {
         task.summary.planned_move, 0,
         "保留者已在合理位置，不得生成移动动作"
     );
-    f.apply(&task);
+    Fixture::apply(&task);
     assert!(f.root.join("报告 (1).pdf").exists());
     assert!(!f.root.join("报告 (2).pdf").exists());
     assert!(f.root.join("报告.pdf").exists());
 }
-// 覆盖 S-09, S-10
+// 覆盖 C-04, S-06
 #[test]
 fn hardlink_does_not_claim_permanent_bytes() {
     // 硬链接去重不销毁内容（源目录项由指向 keeper 的链接顶替），物理占用不变：
@@ -1011,7 +1022,7 @@ fn hardlink_does_not_claim_permanent_bytes() {
     let mut cfg = base();
     cfg.duplicate_action = DuplicateAction::Hardlink;
     let task = f.plan(cfg);
-    let result = f.apply(&task);
+    let result = Fixture::apply(&task);
     assert_eq!(result.summary.linked, 1);
     assert_eq!(result.summary.deleted, 1, "硬链接替换仍按删除项数记账");
     assert_eq!(
@@ -1019,6 +1030,7 @@ fn hardlink_does_not_claim_permanent_bytes() {
         "硬链接不释放物理空间，不得计入永久删除字节"
     );
 }
+// 覆盖 R-03（默认递归包含全部子目录，可关）
 #[test]
 fn no_recursion_leaves_subdirectories_untouched() {
     let f = Fixture::new();
@@ -1028,14 +1040,14 @@ fn no_recursion_leaves_subdirectories_untouched() {
     cfg.recursive = false;
     assert_eq!(f.plan(cfg).summary.scanned, 1);
 }
-// 覆盖 C-08, S-08
+// 覆盖 S-07, C-10（无任务重放）
 #[test]
 fn finished_plan_cannot_be_replayed() {
     let f = Fixture::new();
     f.write("a", b"same", 10);
     f.write("b", b"same", 20);
     let task = f.plan(base());
-    f.apply(&task);
+    Fixture::apply(&task);
     assert!(
         engine::apply_with(&task.directory, Context::default(), Arc::new(FailRecycle)).is_err()
     );
@@ -1046,7 +1058,7 @@ fn task_lock_prevents_second_task() {
     let _guard = fsutil::RootGuard::acquire(&f.state).unwrap();
     assert!(engine::prepare_at(&f.root, base(), Context::default(), &f.state).is_err());
 }
-// 覆盖 C-08
+// 覆盖 C-10（用户取消不算失败）
 #[test]
 fn user_cancelled_analysis_records_cancelled_status() {
     // 用户取消不是故障：任务状态必须写成 cancelled，否则事后检查任务库会把主动取消当成失败。
@@ -1079,7 +1091,7 @@ fn huge_sizes_use_u64() {
         .unwrap();
     assert_eq!(db.file(1).unwrap().snapshot.size, 12u64 << 40);
 }
-// 覆盖 S-11
+// 覆盖 C-03
 #[test]
 fn deterministic_keeper_ties() {
     let record = |id, rel: &str| FileRecord {
@@ -1098,7 +1110,7 @@ fn deterministic_keeper_ties() {
     };
     assert!(rules::compare(&record(1, "a/x"), &record(2, "b/x"), KeepPolicy::Newest).is_lt());
 }
-// 覆盖 C-07
+// 覆盖 C-11
 #[test]
 fn plan_pagination_is_bounded() {
     let f = Fixture::new();
@@ -1116,7 +1128,7 @@ fn plan_pagination_is_bounded() {
 }
 // 平台门禁原因：创建符号链接在 Windows 需管理员/开发者模式特权，Unix 无需特权即可稳定构造；
 // safe_join 拒绝链接穿越的断言只能在 Unix 下验证。
-// 覆盖 R-07, S-05
+// 覆盖 S-04
 #[cfg(unix)]
 #[test]
 fn symlink_not_followed_or_deleted() {
@@ -1128,7 +1140,7 @@ fn symlink_not_followed_or_deleted() {
     assert!(fsutil::safe_join(&f.root, "link/a").is_err());
     assert_eq!(f.plan(base()).summary.scanned, 0);
 }
-// 覆盖 S-10
+// 覆盖 C-04, S-06（已是硬链接的文件不重复计入逻辑大小）
 #[test]
 fn existing_hardlinks_not_counted_twice() {
     let f = Fixture::new();
@@ -1142,7 +1154,7 @@ fn existing_hardlinks_not_counted_twice() {
     assert_eq!(task.summary.candidate_bytes, 0);
     assert_eq!(task.summary.planned_delete, 0);
 }
-// 覆盖 S-10
+// 覆盖 C-04
 #[test]
 fn hardlink_mode_preserves_aliases() {
     let f = Fixture::new();
@@ -1151,7 +1163,7 @@ fn hardlink_mode_preserves_aliases() {
     let mut cfg = base();
     cfg.duplicate_action = DuplicateAction::Hardlink;
     let task = f.plan(cfg);
-    let result = f.apply(&task);
+    let result = Fixture::apply(&task);
     assert_eq!(result.summary.linked, 1);
     assert_eq!(
         fsutil::snapshot(&f.root.join("a")).unwrap().identity,
@@ -1160,7 +1172,7 @@ fn hardlink_mode_preserves_aliases() {
 }
 
 // ===== 核心公共接口缺口补测（分卷识别）=====
-// 覆盖 R-03, C-02
+// 覆盖 X-01, X-06（分卷识别口径）
 #[test]
 fn multipart_name_covers_volume_detection_corners() {
     assert!(rules::multipart_name("x.part1.rar"));
@@ -1172,6 +1184,7 @@ fn multipart_name_covers_volume_detection_corners() {
 
 // 任务库缺少有效全局锁目录记录时，apply 不得退回「当前位置推导」
 // 在陌生位置（极端为盘根）创建 organizer.lock，必须拒绝执行。
+// 覆盖 C-10（任务目录移位后不得凭旧计划执行）
 #[test]
 fn apply_without_valid_state_record_refuses_foreign_lock() {
     let f = Fixture::new();
@@ -1183,7 +1196,7 @@ fn apply_without_valid_state_record_refuses_foreign_lock() {
     // 先把任务目录移到任意位置，再让记录的锁目录失效（改名挪走）：
     // recorded 过滤失败后只剩「当前位置推导」这一条回退路径。
     fs::rename(&task.directory, &moved).unwrap();
-    fs::rename(&f.state, f._temp.path().join("state-gone")).unwrap();
+    fs::rename(&f.state, f.temp.path().join("state-gone")).unwrap();
     let derived = moved.parent().unwrap().parent().unwrap().to_path_buf();
     let result = engine::apply_with(&moved, Context::default(), Arc::new(FailRecycle));
     assert!(
@@ -1199,6 +1212,7 @@ fn apply_without_valid_state_record_refuses_foreign_lock() {
 
 // 记录失效但任务目录处于 tasks/ 布局（如搬到别的机器后放回新状态目录的
 // tasks/ 下）时，apply 必须仍可执行——锁退回 tasks 的上一级（新状态目录）。
+// 覆盖 C-10
 #[test]
 fn apply_with_invalid_record_but_tasks_layout_still_runs() {
     let f = Fixture::new();
@@ -1209,7 +1223,7 @@ fn apply_with_invalid_record_but_tasks_layout_still_runs() {
     let moved = elsewhere.path().join("tasks").join("moved-task");
     fs::create_dir_all(moved.parent().unwrap()).unwrap();
     fs::rename(&task.directory, &moved).unwrap();
-    fs::rename(&f.state, f._temp.path().join("state-gone")).unwrap();
+    fs::rename(&f.state, f.temp.path().join("state-gone")).unwrap();
     let result = engine::apply_with(&moved, Context::default(), Arc::new(FailRecycle)).unwrap();
     assert_eq!(result.summary.deleted, 1, "tasks/ 布局下任务照常执行");
     assert!(
@@ -1244,8 +1258,9 @@ fn prepare_and_apply_share_exclusive_state_lock() {
         );
     }
     // 锁释放后 apply 可以正常完成
-    f.apply(&task);
+    Fixture::apply(&task);
 }
+// 覆盖 C-10（任务目录被移动后执行仍与 prepare 互斥）
 #[test]
 fn apply_after_task_dir_moved_still_uses_prepare_state_lock() {
     // 回归：apply 此前按「任务目录当前位置」推导锁位置；任务目录被移动到 state 之外后，
@@ -1268,9 +1283,9 @@ fn apply_after_task_dir_moved_still_uses_prepare_state_lock() {
     }
     // 记录位置与当前位置一致（移回原位）时正常流程不受影响
     fs::rename(&moved, &task.directory).unwrap();
-    f.apply(&task);
+    Fixture::apply(&task);
 }
-// 覆盖 C-07, C-08
+// 覆盖 C-10, C-11（执行开始后不得修改计划选择）
 #[test]
 fn set_selected_fails_once_apply_started() {
     // apply 启动后 status 变为 executing；此时修改选择必须失败（set_selected 竞态）。
@@ -1311,7 +1326,7 @@ fn set_selected_fails_once_apply_started() {
     context.control.pause(false);
     apply_handle.join().unwrap().unwrap();
 }
-// 覆盖 C-08
+// 覆盖 S-07, C-10（已结束的计划不可重放/改选）
 #[test]
 fn set_selected_rejected_after_apply_finished() {
     // apply 完成后 status=finished；set_selected 必须失败（不可重放旧计划的选择变更）。
@@ -1319,7 +1334,7 @@ fn set_selected_rejected_after_apply_finished() {
     f.write("a", b"same", 10);
     f.write("b", b"same", 20);
     let task = f.plan(base());
-    f.apply(&task);
+    Fixture::apply(&task);
     let db = Database::open(&task.directory).unwrap();
     assert_eq!(db.get::<String>("status").unwrap(), "finished");
     let id = db.actions_page(0, 10).unwrap().remove(0).id;
@@ -1378,7 +1393,7 @@ fn actions_page_filtered_by_kind_and_rejects_unknown() {
     );
 }
 
-// ===== 合同对齐回归（P-06 / R-05 / R-01 / E-05）：缺陷修复前必须失败 =====
+// ===== 合同对齐回归（P-06 / C-02 / R-01 / E-05）：缺陷修复前必须失败 =====
 // 覆盖 P-06
 #[test]
 fn no_cli_binary_is_declared() {
@@ -1401,7 +1416,7 @@ fn no_csv_report_export_remains() {
         "P-06：任务库不得保留 CSV 报告导出 API"
     );
 }
-// 覆盖 R-05
+// 覆盖 C-02（MUST NOT 提供同名不同内容的淘汰开关）
 #[test]
 fn config_has_no_version_elimination_switches() {
     let value = serde_json::to_value(Config::default()).unwrap();
@@ -1414,11 +1429,11 @@ fn config_has_no_version_elimination_switches() {
     ] {
         assert!(
             value.get(key).is_none(),
-            "R-05：配置不得提供版本取舍开关：{key}"
+            "C-02：配置不得提供版本取舍开关：{key}"
         );
     }
 }
-// 覆盖 R-01, R-05
+// 覆盖 R-01, C-02
 #[test]
 fn rules_table_has_exactly_39_rows_without_version_switches() {
     let schema: serde_json::Value =
@@ -1438,7 +1453,7 @@ fn rules_table_has_exactly_39_rows_without_version_switches() {
     ] {
         assert!(
             rows.iter().all(|r| r["key"].as_str() != Some(key)),
-            "R-05：规则面板不得提供版本取舍开关行：{key}"
+            "C-02：规则面板不得提供版本取舍开关行：{key}"
         );
     }
 }
@@ -1449,12 +1464,12 @@ fn completion_status_text_has_no_export_reference() {
     let gui_src = fs::read_to_string(concat!(env!("CARGO_MANIFEST_DIR"), "/src/gui.rs")).unwrap();
     assert!(
         !gui_src.contains("导出报告"),
-        "P-06/C-12：界面文案不得引导使用已移除的报告导出"
+        "P-06：界面文案不得引导使用已移除的报告导出"
     );
 }
 
 // ===== L6 control::pause / checkpoint 暂停语义 =====
-// 覆盖 C-09
+// 覆盖 C-10（暂停/取消在安全边界生效）
 #[test]
 fn pause_defers_checkpoint_until_resume() {
     let ctl = std::sync::Arc::new(Control::default());
@@ -1488,7 +1503,7 @@ fn pause_defers_checkpoint_until_resume() {
         .expect("恢复后 checkpoint 应完成");
     worker.join().unwrap();
 }
-// 覆盖 C-09, C-08
+// 覆盖 C-10
 #[test]
 fn cancel_while_paused_makes_checkpoint_fail() {
     let ctl = std::sync::Arc::new(Control::default());
@@ -1510,12 +1525,566 @@ fn cancel_while_paused_makes_checkpoint_fail() {
     // started 只表示即将调用 checkpoint；短暂等待让 worker 进入暂停等待环后再取消
     std::thread::sleep(std::time::Duration::from_millis(20));
     ctl.cancel();
-    assert_eq!(
+    assert!(
         done_rx
             .recv_timeout(std::time::Duration::from_secs(2))
             .unwrap(),
-        true,
         "暂停中取消必须让 checkpoint 失败"
     );
     worker.join().unwrap();
+}
+
+// ===== 合同覆盖补齐（AGENTS 3.3：每个合同条目至少被一个测试引用）=====
+
+// 覆盖 C-02, S-03（逐字节复核的判定本身：等长同内容 / 等长异内容 / 长度不同）
+#[test]
+fn equal_bytes_matches_only_identical_content() {
+    let f = Fixture::new();
+    let a = f.write("a", b"same content", 1);
+    let b = f.write("b", b"same content", 1);
+    let c = f.write("c", b"other length", 1);
+    let d = f.write("d", b"samelength!!", 1);
+    let sa = fsutil::snapshot(&a).unwrap();
+    let sb = fsutil::snapshot(&b).unwrap();
+    let sc = fsutil::snapshot(&c).unwrap();
+    let sd = fsutil::snapshot(&d).unwrap();
+    let ctl = Control::default();
+    assert!(hashing::equal_bytes(&a, &sa, &b, &sb, &ctl).unwrap());
+    assert!(
+        !hashing::equal_bytes(&a, &sa, &c, &sc, &ctl).unwrap(),
+        "长度不同直接判不等"
+    );
+    assert!(
+        !hashing::equal_bytes(&a, &sa, &d, &sd, &ctl).unwrap(),
+        "等长不同内容必须逐字节判不等"
+    );
+}
+
+// 覆盖 C-02, S-03（删除前逐字节复核不可关闭：元数据未变但内容分歧时拒绝删除）
+#[test]
+fn byte_level_recheck_blocks_delete_when_content_diverges() {
+    let f = Fixture::new();
+    let a = f.write("a", b"same", 10); // 旧 → 计划删除项
+    f.write("b", b"same", 20); // 新 → 保留者
+    let task = f.plan(base());
+    assert_eq!(task.summary.planned_delete, 1);
+    // 篡改待删项内容但保持长度与 mtime（绕过 unchanged 的元数据校验）：
+    // 逐字节复核必须发现两份内容不同并拒绝执行删除。
+    fs::write(&a, b"diff").unwrap();
+    filetime::set_file_mtime(&a, filetime::FileTime::from_unix_time(10, 0)).unwrap();
+    let result = Fixture::apply(&task);
+    assert_eq!(result.summary.errors, 1, "复核不一致必须计为执行失败");
+    assert!(
+        a.exists() && f.root.join("b").exists(),
+        "两份内容都必须原样保留，不得以覆盖方式「自动修复」（C-10）"
+    );
+}
+
+// 覆盖 C-03, R-02, S-08（保留规则各可选项的实际选择结果与决胜链）
+#[test]
+fn keeper_policy_variants_pick_expected_keepers() {
+    for (policy, kept, deleted) in [
+        (KeepPolicy::Oldest, "aa.txt", "zzzz.txt"),
+        (KeepPolicy::Newest, "zzzz.txt", "aa.txt"),
+        // 同内容必然等大小：Largest/Smallest 的主键全平局，按 C-03 决胜链（路径长度）落位
+        (KeepPolicy::Largest, "aa.txt", "zzzz.txt"),
+        (KeepPolicy::Smallest, "aa.txt", "zzzz.txt"),
+        (KeepPolicy::ShortestName, "aa.txt", "zzzz.txt"),
+    ] {
+        let f = Fixture::new();
+        f.write("aa.txt", b"same", 100);
+        f.write("zzzz.txt", b"same", 200);
+        let mut cfg = base();
+        cfg.keep_duplicate = policy;
+        let task = f.plan(cfg);
+        assert_eq!(task.summary.planned_delete, 1, "{policy:?}");
+        let db = Database::open(&task.directory).unwrap();
+        let actions = db.actions_page(0, 10).unwrap();
+        drop(db);
+        assert_eq!(actions[0].source, deleted, "{policy:?} 应删除 {deleted}");
+        assert!(
+            actions[0].keeper.as_ref().is_some_and(|k| k.0 == kept),
+            "{policy:?} 应保留 {kept}"
+        );
+        Fixture::apply(&task);
+        assert!(
+            f.root.join(kept).exists() && !f.root.join(deleted).exists(),
+            "{policy:?} 执行结果与计划一致"
+        );
+    }
+}
+
+// 覆盖 C-06（大文件单独归类，默认阈值 1 GiB）
+#[test]
+fn large_files_classified_into_own_directory() {
+    let f = Fixture::new();
+    // 逻辑大小达 1 GiB 的稀疏文件：set_len 只改元数据，不占实际磁盘
+    let big = f.root.join("big.bin");
+    let handle = fs::File::create(&big).unwrap();
+    handle.set_len(1 << 30).unwrap();
+    drop(handle);
+    filetime::set_file_mtime(&big, filetime::FileTime::from_unix_time(100, 0)).unwrap();
+    f.write("small.txt", b"s", 100);
+    let mut cfg = base();
+    cfg.large_files = true; // large_threshold_gib 默认 1（GiB）
+    let task = f.plan(cfg);
+    let db = Database::open(&task.directory).unwrap();
+    let moves = db.actions_page_filtered(0, 10, Some("move")).unwrap();
+    drop(db);
+    let big_move = moves
+        .iter()
+        .find(|a| a.source == "big.bin")
+        .expect("大文件应有归类移动计划");
+    assert_eq!(big_move.target.as_deref(), Some("大文件/big.bin"));
+    assert!(
+        moves.iter().all(|a| a.source == "big.bin"),
+        "小文件不参与大文件归类"
+    );
+}
+
+// 覆盖 C-06（消除只有一个子项的目录层级）
+#[test]
+fn flatten_single_child_collapses_levels() {
+    let f = Fixture::new();
+    f.write("alpha/only/report.pdf", b"pdf", 10);
+    let mut cfg = base();
+    cfg.classify = ClassifyMode::Extension;
+    cfg.preserve_structure = true;
+    cfg.flatten_single_child = true;
+    let task = f.plan(cfg);
+    let db = Database::open(&task.directory).unwrap();
+    let moves = db.actions_page_filtered(0, 10, Some("move")).unwrap();
+    drop(db);
+    let target = moves
+        .iter()
+        .find(|a| a.source == "alpha/only/report.pdf")
+        .expect("文件应有移动计划")
+        .target
+        .clone()
+        .unwrap();
+    assert_eq!(target, "PDF/report.pdf", "单子项目录链应被消除：{target}");
+}
+
+// 覆盖 C-06（合并不同位置的同名目录：两处 report/ 的文件进同一物理目录）
+#[test]
+fn merge_directories_joins_same_name_directories() {
+    let f = Fixture::new();
+    f.write("alpha/report/a.pdf", b"one", 10);
+    f.write("beta/report/b.pdf", b"two", 20);
+    let mut cfg = base();
+    cfg.classify = ClassifyMode::Extension;
+    cfg.preserve_structure = true;
+    cfg.merge_directories = true;
+    let task = f.plan(cfg);
+    Fixture::apply(&task);
+    assert!(
+        f.root.join("PDF/alpha/report/a.pdf").exists(),
+        "a.pdf 应随合并落位"
+    );
+    assert!(
+        f.root.join("PDF/alpha/report/b.pdf").exists(),
+        "同名目录必须合并到同一位置，b.pdf 不得留在另一棵 report/ 下"
+    );
+}
+
+// 覆盖 C-08（系统附属文件清理默认开启；__MACOSX 目录内容一并清理）
+#[test]
+fn junk_system_files_are_planned_for_cleanup_by_default() {
+    let f = Fixture::new();
+    for name in ["Thumbs.db", "desktop.ini", "keep.txt"] {
+        f.write(name, b"x", 10);
+    }
+    fs::create_dir_all(f.root.join("__MACOSX")).unwrap();
+    f.write("__MACOSX/junk.dat", b"x", 10);
+    let cfg = base(); // clean_junk 默认 true
+    let task = f.plan(cfg);
+    assert_eq!(
+        task.summary.planned_delete, 3,
+        "Thumbs.db / desktop.ini / __MACOSX 内容应入清理计划"
+    );
+    Fixture::apply(&task);
+    assert!(f.root.join("keep.txt").exists(), "普通文件不受清理影响");
+    assert!(
+        !f.root.join("Thumbs.db").exists() && !f.root.join("__MACOSX/junk.dat").exists(),
+        "系统附属文件应被清理"
+    );
+}
+
+// 覆盖 C-08（零字节文件清理默认关，开启后入计划）
+#[test]
+fn zero_byte_cleanup_follows_its_switch() {
+    let f = Fixture::new();
+    f.write("empty.dat", b"", 10);
+    f.write("full.dat", b"x", 10);
+    let mut cfg = base();
+    assert_eq!(
+        f.plan(cfg.clone()).summary.planned_delete,
+        0,
+        "默认关闭：零字节文件不得入清理计划"
+    );
+    cfg.clean_zero = true;
+    assert_eq!(f.plan(cfg).summary.planned_delete, 1);
+}
+
+// 覆盖 C-08（NFC 规范化 + 合并连续空白，默认开；不删正常字符）
+#[test]
+fn normalize_names_collapses_whitespace_and_applies_nfc() {
+    let f = Fixture::new();
+    // U+0065 + U+0301（分解形式）应规范为 U+00E9（合成形式）；双空格合并为单空格
+    let raw_name = "cafe\u{0301}  report .txt";
+    f.write(raw_name, b"payload", 10);
+    let cfg = base();
+    let task = f.plan(cfg);
+    let db = Database::open(&task.directory).unwrap();
+    let moves = db.actions_page_filtered(0, 10, Some("move")).unwrap();
+    drop(db);
+    assert_eq!(moves.len(), 1, "规范化默认开启，改名应入移动计划");
+    assert_eq!(moves[0].target.as_deref(), Some("café report .txt"));
+    Fixture::apply(&task);
+    assert!(
+        f.root.join("café report .txt").exists(),
+        "执行后应为规范化名"
+    );
+    assert!(!f.root.join(raw_name).exists(), "旧分解形式名称不得残留");
+}
+
+// 覆盖 C-08（按内容签名修正错误扩展名：改名列入计划可见）
+#[test]
+fn fix_extension_plans_rename_to_detected_type() {
+    let f = Fixture::new();
+    let mut png = vec![0x89, b'P', b'N', b'G', 0x0D, 0x0A, 0x1A, 0x0A];
+    png.extend_from_slice(&[0, 0, 0, 13, b'I', b'H', b'D', b'R']);
+    f.write("photo.txt", &png, 10);
+    let mut cfg = base();
+    cfg.detect_type = true;
+    cfg.fix_extension = true;
+    let task = f.plan(cfg);
+    let db = Database::open(&task.directory).unwrap();
+    let moves = db.actions_page_filtered(0, 10, Some("move")).unwrap();
+    drop(db);
+    assert_eq!(moves.len(), 1, "错误扩展名应产生改名计划");
+    assert_eq!(
+        moves[0].target.as_deref(),
+        Some("photo.png"),
+        "计划里可见改名为内容识别出的真实类型"
+    );
+    Fixture::apply(&task);
+    assert!(f.root.join("photo.png").exists());
+}
+
+// 覆盖 C-10（计划生成后目录被移动：执行必须拒绝，不得把动作落到别处）
+#[test]
+fn apply_refuses_when_root_directory_moved_after_plan() {
+    let f = Fixture::new();
+    f.write("a", b"same", 10);
+    f.write("b", b"same", 20);
+    let task = f.plan(base());
+    let moved = f.temp.path().join("data-moved");
+    fs::rename(&f.root, &moved).unwrap();
+    let result = engine::apply_with(&task.directory, Context::default(), Arc::new(FailRecycle));
+    let error = format!("{:#}", result.err().unwrap());
+    assert!(
+        error.contains("无法访问目标目录") || error.contains("目录位置已改变"),
+        "执行前必须发现目录移位：{error}"
+    );
+    assert!(
+        moved.join("a").exists() && moved.join("b").exists(),
+        "新位置内容不得被触碰"
+    );
+}
+
+// 平台门禁原因：normalize_root 对 Windows 安装目录/盘根的拒绝分支依赖 Windows 环境变量
+// 与盘符路径语义；Unix 侧只验证「根目录不可整理」。
+// 覆盖 S-05（始终拒绝整理 Windows 安装/系统数据目录与磁盘根目录，无开关可放开）
+#[cfg(windows)]
+#[test]
+fn normalize_root_rejects_protected_locations() {
+    let system_root = std::env::var("SystemRoot").unwrap();
+    assert!(
+        fsutil::normalize_root(Path::new(&system_root)).is_err(),
+        "不得整理 Windows 系统目录"
+    );
+    let program_files = std::env::var("ProgramFiles").unwrap();
+    assert!(
+        fsutil::normalize_root(Path::new(&program_files)).is_err(),
+        "不得整理程序安装目录"
+    );
+    assert!(
+        fsutil::normalize_root(Path::new(r"C:\")).is_err(),
+        "不得整理磁盘根目录"
+    );
+}
+// 覆盖 S-05
+#[cfg(not(windows))]
+#[test]
+fn normalize_root_rejects_root_directory() {
+    assert!(
+        fsutil::normalize_root(Path::new("/")).is_err(),
+        "不得整理根目录"
+    );
+}
+
+// 覆盖 S-06（摘要区分「回收」与「永久删除」的逻辑大小，不得互相串账）
+#[test]
+fn summary_separates_recycled_and_permanent_bytes() {
+    // 永久删除模式（全平台）：计入 permanent_bytes，不计回收
+    {
+        let f = Fixture::new();
+        f.write("a", b"same", 10);
+        f.write("b", b"same", 20);
+        let task = f.plan(base()); // global_delete = Permanent
+        let result = Fixture::apply(&task);
+        assert_eq!(result.summary.deleted, 1);
+        assert_eq!(result.summary.permanent_bytes, 4, "「same」=4 字节");
+        assert_eq!(result.summary.recycled_bytes, 0);
+        assert_eq!(result.summary.recycled, 0);
+    }
+    // 回收模式：Windows 上条目计数可验证，计入 recycled_bytes 且不算永久删除。
+    // 平台门禁原因：回收「条目计数验证」是 Windows 专属实现（volume_root 在
+    // 非 Windows 恒为 None，只能记 RecycledUnverified），该口径由本用例 Windows 分支锚定。
+    #[cfg(windows)]
+    {
+        let f = Fixture::new();
+        f.write("a", b"same", 10);
+        f.write("b", b"same", 20);
+        let mut cfg = base();
+        cfg.global_delete = DeleteMode::Recycle;
+        let recycler = Arc::new(MoveRecycle {
+            target: f.root.join("mock-bin"),
+            calls: AtomicUsize::new(0),
+        });
+        let task =
+            engine::prepare_with(&f.root, cfg, Context::default(), &f.state, recycler.clone())
+                .unwrap();
+        let result = engine::apply_with(&task.directory, Context::default(), recycler).unwrap();
+        assert_eq!(result.summary.recycled, 1, "回收成功且计数验证通过");
+        assert_eq!(result.summary.recycled_bytes, 4);
+        assert_eq!(result.summary.permanent_bytes, 0);
+        assert_eq!(result.summary.deleted, 0);
+    }
+}
+
+// 覆盖 R-01（规则仅会话内生效：状态目录不得出现独立设置文件）
+#[test]
+fn prepare_writes_no_standalone_settings_file() {
+    let f = Fixture::new();
+    f.write("a.txt", b"payload", 10);
+    let _ = f.plan(base());
+    let entries: Vec<String> = fs::read_dir(&f.state)
+        .unwrap()
+        .filter_map(std::result::Result::ok)
+        .map(|e| e.file_name().to_string_lossy().into_owned())
+        .collect();
+    assert!(
+        entries
+            .iter()
+            .all(|name| name == "tasks" || name == "organizer.lock"),
+        "状态目录只应含任务库与锁文件，不得出现独立设置文件（不落盘/无导入导出）：{entries:?}"
+    );
+}
+
+// 覆盖 P-03（完全离线：依赖清单与源码不得引入联网能力）
+#[test]
+fn offline_sources_have_no_network_capabilities() {
+    let manifest = fs::read_to_string(concat!(env!("CARGO_MANIFEST_DIR"), "/Cargo.toml")).unwrap();
+    for crate_name in [
+        "reqwest",
+        "ureq",
+        "hyper",
+        "curl",
+        "isahc",
+        "surf",
+        "attohttpc",
+        "websocket",
+        "ftp",
+        "tokio-tungstenite",
+    ] {
+        assert!(
+            !manifest.contains(crate_name),
+            "P-03：依赖清单不得引入联网 crate：{crate_name}"
+        );
+    }
+    let manifest_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+    for entry in [
+        "src/main.rs",
+        "src/lib.rs",
+        "src/engine.rs",
+        "src/gui.rs",
+        "src/platform.rs",
+        "src/db.rs",
+        "src/process.rs",
+        "build.rs",
+    ] {
+        let text = fs::read_to_string(manifest_dir.join(entry)).unwrap();
+        for needle in ["TcpStream", "UdpSocket", "lookup_host"] {
+            assert!(
+                !text.contains(needle),
+                "P-03：{entry} 不得出现网络 API：{needle}"
+            );
+        }
+    }
+}
+
+// 覆盖 X-01（支持格式候选清单与大小写不敏感；非压缩包后缀不误判）
+#[test]
+fn archive_name_covers_supported_formats() {
+    for name in [
+        "a.zip",
+        "a.7Z",
+        "b.tar",
+        "b.gz",
+        "b.bz2",
+        "b.xz",
+        "b.zst",
+        "b.tgz",
+        "b.tbz2",
+        "b.txz",
+        "c.cab",
+        "c.iso",
+        "c.wim",
+        "c.lzh",
+        "c.cpio",
+        "d.7z.001",
+        "d.zip.001",
+        "e.part1.rar",
+    ] {
+        assert!(rules::archive_name(name), "{name} 应识别为压缩包");
+    }
+    for name in ["a.txt", "a.png", "a.zipx", "e.part2.rar", "archive"] {
+        assert!(!rules::archive_name(name), "{name} 不应识别为压缩包");
+    }
+}
+
+// 覆盖 X-07（隔离目录中的包被用户移出后，下次扫描自然重试）
+#[test]
+fn quarantine_move_out_is_rescanned() {
+    let f = Fixture::new();
+    f.write("解压失败/fix.zip", b"not a zip", 10);
+    let cfg = base();
+    assert_eq!(
+        engine::count_archives(&f.root, &cfg).unwrap(),
+        0,
+        "隔离目录内的包不计入确认框计数"
+    );
+    fs::rename(f.root.join("解压失败/fix.zip"), f.root.join("fix.zip")).unwrap();
+    assert_eq!(
+        engine::count_archives(&f.root, &cfg).unwrap(),
+        1,
+        "用户补救（移出隔离目录）后下次扫描自然重试"
+    );
+}
+
+// 覆盖 R-03（性能默认值：哈希线程 2、磁盘预留 1 GiB、递归默认包含子目录）
+#[test]
+fn performance_defaults_match_contract() {
+    let cfg = Config::default();
+    assert_eq!(cfg.hash_workers, 2);
+    assert_eq!(cfg.reserve_gib, 1);
+    assert!(cfg.recursive);
+}
+
+// 覆盖 C-01（分析阶段 MUST NOT 改动任何文件：清扫只能发生在执行确认之后）
+#[test]
+fn analysis_phase_keeps_stale_link_temps_until_execution() {
+    let f = Fixture::new();
+    f.write("a.txt", b"payload", 10);
+    let stale = f.root.join(".jchtools-link-deadbeef");
+    if let Err(error) = fs::hard_link(f.root.join("a.txt"), &stale) {
+        panic!(
+            "无法创建硬链接，无法验证残留清扫时序；请在支持硬链接的文件系统上运行测试：{error}"
+        );
+    }
+    filetime::set_file_mtime(&stale, filetime::FileTime::from_unix_time(0, 0)).unwrap();
+    let task = f.plan(base());
+    assert!(
+        stale.exists(),
+        "C-01：分析（只读）阶段不得删除任何文件——即使是本工具的崩溃残留"
+    );
+    assert_eq!(task.summary.scanned, 1, "残留被扫描剪枝，不影响计数");
+    // 执行确认后（apply）才允许清扫；apply 的执行前清理承担该职责。
+    Fixture::apply(&task);
+    assert!(!stale.exists(), "执行阶段应清扫过期残留");
+    assert!(f.root.join("a.txt").exists(), "清扫不得影响 keeper 本体");
+}
+
+// 覆盖 S-06（回收字节与永久字节同口径：多硬链接的源不重复计入逻辑大小）
+// 平台门禁原因：断言依赖回收条目计数验证（volume_root 仅 Windows 提供），
+// 非 Windows 上回收只能记 RecycledUnverified（走已有 links<=1 守卫）。
+#[cfg(windows)]
+#[test]
+fn recycled_bytes_exclude_hardlinked_sources() {
+    let f = Fixture::new();
+    let a = f.write("a", b"same", 10);
+    if let Err(error) = fs::hard_link(&a, f.root.join("c")) {
+        panic!("无法创建硬链接：{error}；请在支持硬链接的文件系统上运行测试");
+    }
+    filetime::set_file_mtime(&a, filetime::FileTime::from_unix_time(10, 0)).unwrap();
+    f.write("b", b"same", 20); // 更新 → 保留者
+    let mut cfg = base();
+    cfg.global_delete = DeleteMode::Recycle;
+    let recycler = Arc::new(MoveRecycle {
+        target: f.root.join("mock-bin"),
+        calls: AtomicUsize::new(0),
+    });
+    let task = engine::prepare_with(&f.root, cfg, Context::default(), &f.state, recycler.clone())
+        .unwrap();
+    assert!(task.summary.planned_delete >= 1, "a/c 与 b 内容相同应生成删除计划");
+    assert_eq!(task.summary.candidate_bytes, 0, "计划侧已排除多链接文件");
+    let result = engine::apply_with(&task.directory, Context::default(), recycler).unwrap();
+    assert!(
+        result.summary.recycled >= 1,
+        "回收确实发生了（项数记账不受影响）"
+    );
+    assert_eq!(
+        result.summary.recycled_bytes, 0,
+        "被删副本仍有其他硬链接持有内容，回收字节不得计入（与 permanent_bytes/candidate_bytes 同口径）"
+    );
+}
+
+// 覆盖 C-05, C-10（flatten 与分类同时开启时重复整理幂等，不得把文件移出分类目录）
+#[test]
+fn flatten_with_classification_is_idempotent_across_rounds() {
+    let f = Fixture::new();
+    f.write("alpha/only/report.pdf", b"pdf", 10);
+    let mut cfg = base();
+    cfg.classify = ClassifyMode::Extension;
+    cfg.preserve_structure = true;
+    cfg.flatten_single_child = true;
+    // 第一轮：单子项目录链被消除，文件归入 PDF/。
+    let first = f.plan(cfg.clone());
+    assert_eq!(first.summary.planned_move, 1);
+    Fixture::apply(&first);
+    assert!(f.root.join("PDF/report.pdf").exists(), "首轮应归入 PDF/");
+    // 第二轮：PDF/ 只含一个文件（恰为 flatten 的"单子项"形态），
+    // 不得把文件从分类目录里抽回根下——否则第三轮又移回去，无限往复。
+    let second = f.plan(cfg.clone());
+    assert_eq!(
+        second.summary.planned_move, 0,
+        "已在分类目录内的文件必须稳定，不得被 flatten 抽出（幂等）"
+    );
+    Fixture::apply(&second);
+    assert!(
+        f.root.join("PDF/report.pdf").exists(),
+        "二轮执行后文件仍在分类目录"
+    );
+    // 第三轮继续稳定（无奇偶振荡）。
+    let third = f.plan(cfg.clone());
+    assert_eq!(third.summary.planned_move, 0, "第三轮同样不得产生移动");
+}
+
+// 覆盖 X-06, C-11（失败口径按"包"计：分卷组的每卷文件数不得报成包数）
+#[test]
+fn extract_summary_counts_failed_packages_not_volumes() {
+    use jchtools::model::Summary;
+    let summary = Summary {
+        archives_ok: 1,
+        archives_failed: 1,
+        archives_quarantined: 3, // 三卷分卷组整组隔离：文件数 3、包数 1
+        ..Summary::default()
+    };
+    let text = summary.extract_description();
+    assert!(
+        text.contains("失败并移入「解压失败」1 包"),
+        "用户可见口径必须是包数（1），不是卷文件数（3）：{text}"
+    );
 }

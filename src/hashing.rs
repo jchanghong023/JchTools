@@ -1,4 +1,4 @@
-use crate::{control::Control, fsutil, model::Snapshot};
+use crate::{control::Control, convert, fsutil, model::Snapshot};
 use anyhow::{bail, Result};
 use std::{
     io::{Read, Seek, SeekFrom},
@@ -15,13 +15,13 @@ pub fn prehash(path: &Path, expected: &Snapshot, ctl: &Control) -> Result<String
     let mut buffer = vec![0u8; SAMPLE];
     let mut hash = blake3::Hasher::new();
     hash.update(&expected.size.to_le_bytes());
-    let first = expected.size.min(SAMPLE as u64) as usize;
+    let first = convert::u64_as_usize(expected.size.min(SAMPLE as u64));
     file.read_exact(&mut buffer[..first])?;
     hash.update(&buffer[..first]);
     ctl.read_bytes.fetch_add(first as u64, Ordering::Relaxed);
     if expected.size > SAMPLE as u64 {
         ctl.checkpoint()?;
-        file.seek(SeekFrom::End(-(SAMPLE as i64)))?;
+        file.seek(SeekFrom::End(-convert::usize_as_i64(SAMPLE)))?;
         file.read_exact(&mut buffer)?;
         hash.update(&buffer);
         ctl.read_bytes.fetch_add(SAMPLE as u64, Ordering::Relaxed);
@@ -75,7 +75,7 @@ pub fn equal_bytes(
     let mut left = sa.size;
     while left > 0 {
         ctl.checkpoint()?;
-        let count = left.min(BUFFER as u64) as usize;
+        let count = convert::u64_as_usize(left.min(BUFFER as u64));
         fa.read_exact(&mut ba[..count])?;
         fb.read_exact(&mut bb[..count])?;
         ctl.read_bytes

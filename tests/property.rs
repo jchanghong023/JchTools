@@ -96,7 +96,7 @@ proptest! {
     ) {
         // 注意：prop_assert! 会把断言表达式拼进格式串，表达式内的字符串字面量
         // 不能使用 {var} 隐式捕获，必须用位置参数。
-        prop_assert!(fsutil::validate_component(&format!("{}{}", s, trailer)).is_err(), "尾随 {:?}", trailer);
+        prop_assert!(fsutil::validate_component(&format!("{s}{trailer}")).is_err(), "尾随 {:?}", trailer);
         let mut injected = s.clone();
         // String::insert 需要字节边界；position 是字符序号，先换算成字节偏移。
         let byte_index = s.char_indices().nth(position % (s.chars().count() + 1)).map_or(s.len(), |(b, _)| b);
@@ -111,11 +111,11 @@ proptest! {
         let name = format!("{}{digit}", if base_is_com {"com"} else {"lpt"});
         let expect_err = digit >= 1;
         prop_assert_eq!(fsutil::validate_component(&name).is_err(), expect_err, "{:?}", name);
-        let with_ext = format!("{}.txt", name);
+        let with_ext = format!("{name}.txt");
         prop_assert_eq!(fsutil::validate_component(&with_ext).is_err(), expect_err, "{}", with_ext);
         for superscript in ["¹", "²", "³"] {
-            let com = format!("com{}", superscript);
-            let lpt = format!("lpt{}", superscript);
+            let com = format!("com{superscript}");
+            let lpt = format!("lpt{superscript}");
             prop_assert!(fsutil::validate_component(&com).is_err(), "{}", com);
             prop_assert!(fsutil::validate_component(&lpt).is_err(), "{}", lpt);
         }

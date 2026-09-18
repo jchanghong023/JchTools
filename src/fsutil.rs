@@ -158,7 +158,7 @@ pub fn snapshot(path: &Path) -> Result<Snapshot> {
         };
         let file = File::open(path)?;
         let mut info: BY_HANDLE_FILE_INFORMATION = unsafe { std::mem::zeroed() };
-        if unsafe { GetFileInformationByHandle(file.as_raw_handle(), &mut info) } == 0 {
+        if unsafe { GetFileInformationByHandle(file.as_raw_handle(), &raw mut info) } == 0 {
             return Err(std::io::Error::last_os_error()).context("读取 Windows 文件标识失败");
         }
         (
@@ -166,7 +166,7 @@ pub fn snapshot(path: &Path) -> Result<Snapshot> {
                 "{}:{}:{}",
                 info.dwVolumeSerialNumber, info.nFileIndexHigh, info.nFileIndexLow
             ),
-            info.nNumberOfLinks as u64,
+            u64::from(info.nNumberOfLinks),
         )
     };
     Ok(Snapshot {
@@ -325,10 +325,10 @@ pub fn unique_target(root: &Path, requested: &Path) -> Result<PathBuf> {
         }
         // 符号链接/坏链视为占用并试下一个序号（与 planner::target_will_be_free 对齐），
         // 不得因 safe_join 的链接拒绝而整函数失败。
-        match fs::symlink_metadata(&path) {
-            Ok(_) => continue,
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(path),
-            Err(_) => continue,
+        if let Err(error) = fs::symlink_metadata(&path) {
+            if error.kind() == std::io::ErrorKind::NotFound {
+                return Ok(path);
+            }
         }
     }
     bail!(

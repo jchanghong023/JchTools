@@ -3,6 +3,9 @@
 //! - C-09 / X-07 扫描默认排除所选目录根下的「解压失败」子目录；
 //! - X-06 解压失败的原包移入「解压失败」子目录（含分卷兄弟卷）；
 //! - X-05 成功原包按处置策略处理（默认回收，见 tests/archive.rs 真实引擎用例）。
+// 测试代码允许 unwrap/expect：断言失败即测试失败，属合理用法
+// （与 clippy.toml 的 allow-*-in-tests 策略一致，集成测试 crate 不在其覆盖范围内）。
+#![allow(clippy::unwrap_used, clippy::expect_used)]
 use jchtools::{config::*, control::Context, engine};
 use std::{
     fs,
@@ -243,4 +246,80 @@ fn extract_run_without_engine_fails_loudly() {
         "缺引擎必须给明确错误，而不是静默跳过压缩包（E-05）：{error}"
     );
     assert!(root.join("pack.zip").exists(), "缺引擎时原包不得被处置");
+}
+
+// 覆盖 X-06（隔离必须记录每个包的失败原因，日志字段可查）
+#[test]
+fn quarantined_archive_reason_is_recorded_in_log() {
+    use jchtools::db::Database;
+    let tmp = fixture("reason");
+    let root = tmp.path().join("data");
+    write_with_mtime(&root.join("broken.zip"), b"definitely not a zip", 100);
+    let result = engine::extract_run_at(
+        &root,
+        Config::default(),
+        Context::default(),
+        &state_of(&tmp),
+        Some(&fake_engine(tmp.path())),
+        Arc::new(MoveRecycle::new(tmp.path().join("bin"))),
+    )
+    .unwrap();
+    let db = Database::open(&result.directory).unwrap();
+    let events = db.event_page(0, 100).unwrap();
+    let line = events
+        .iter()
+        .find(|line| line.contains("移入解压失败"))
+        .expect("日志必须记录隔离事件");
+    assert!(line.contains("broken.zip"), "记录必须归属到原包：{line}");
+    assert!(
+        line.contains("解压失败"),
+        "失败原因必须随隔离记录（界面可查）：{line}"
+    );
+}
+
+// 覆盖 X-02, X-06（单包处置失败不得中止整个解压任务：逐包隔离，任务继续）
+#[test]
+fn dispose_failure_does_not_abort_remaining_archives() {
+    use common::FailRecycle;
+    let tmp = fixture("dispose-fail");
+    let root = tmp.path().join("data");
+    write_with_mtime(&root.join("a.zip"), b"fake archive a", 100);
+    write_with_mtime(&root.join("b.zip"), b"fake archive b", 200);
+    // 恒成功引擎：空输出 → 0 条目 → 解压"成功"，随后原包处置走回收站
+    let engine_path = {
+        #[cfg(windows)]
+        {
+            let path = tmp.path().join("fake-ok.bat");
+            fs::write(&path, b"@exit /b 0\r\n").unwrap();
+            path
+        }
+        #[cfg(not(windows))]
+        {
+            let path = tmp.path().join("fake-ok.sh");
+            fs::write(&path, b"#!/bin/sh\nexit 0\n").unwrap();
+            use std::os::unix::fs::PermissionsExt;
+            fs::set_permissions(&path, fs::Permissions::from_mode(0o755)).unwrap();
+            path
+        }
+    };
+    let mut cfg = Config::default(); // archive_delete 默认 Recycle
+    cfg.recycle_fallback = false; // 回收失败必须保留原包，不得降级
+    let result = engine::extract_run_at(
+        &root,
+        cfg,
+        Context::default(),
+        &state_of(&tmp),
+        Some(&engine_path),
+        Arc::new(FailRecycle),
+    );
+    let summary = result.expect("单包处置失败不得中止任务").summary;
+    assert_eq!(summary.archives_ok, 2, "两个包都应解压成功");
+    assert!(
+        summary.errors >= 1,
+        "处置失败必须如实记为错误（而非静默）"
+    );
+    assert!(
+        root.join("a.zip").exists() && root.join("b.zip").exists(),
+        "处置失败时原包保留原地（重跑可自愈）"
+    );
 }
