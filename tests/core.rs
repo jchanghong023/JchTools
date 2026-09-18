@@ -909,6 +909,7 @@ fn set_hidden(path: &Path, hidden: bool) {
         .encode_wide()
         .chain(Some(0))
         .collect::<Vec<u16>>();
+    // SAFETY: wide 是以 NUL 结尾的 UTF-16 路径；调用只读取该缓冲区。
     let attrs = unsafe { GetFileAttributesW(wide.as_ptr()) };
     assert_ne!(
         attrs,
@@ -922,6 +923,7 @@ fn set_hidden(path: &Path, hidden: bool) {
         attrs & !FILE_ATTRIBUTE_HIDDEN
     };
     assert_ne!(
+        // SAFETY: 同上，wide 仍指向以 NUL 结尾的 UTF-16 路径。
         unsafe { SetFileAttributesW(wide.as_ptr(), next) },
         0,
         "设置属性失败：{}",
@@ -1133,7 +1135,7 @@ fn plan_pagination_is_bounded() {
 #[test]
 fn symlink_not_followed_or_deleted() {
     let f = Fixture::new();
-    let outside = f._temp.path().join("outside");
+    let outside = f.temp.path().join("outside");
     fs::create_dir(&outside).unwrap();
     fs::write(outside.join("a"), b"a").unwrap();
     std::os::unix::fs::symlink(&outside, f.root.join("link")).unwrap();

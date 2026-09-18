@@ -157,7 +157,9 @@ pub fn snapshot(path: &Path) -> Result<Snapshot> {
             GetFileInformationByHandle, BY_HANDLE_FILE_INFORMATION,
         };
         let file = File::open(path)?;
+        // SAFETY: BY_HANDLE_FILE_INFORMATION 是纯 POD 结构，全零是合法初值（无必须非零的字段）。
         let mut info: BY_HANDLE_FILE_INFORMATION = unsafe { std::mem::zeroed() };
+        // SAFETY: file 是刚打开的有效句柄；调用只向 info 写入，不保留指针出本作用域。
         if unsafe { GetFileInformationByHandle(file.as_raw_handle(), &raw mut info) } == 0 {
             return Err(std::io::Error::last_os_error()).context("读取 Windows 文件标识失败");
         }
@@ -205,6 +207,7 @@ pub fn rename_noreplace(source: &Path, target: &Path) -> Result<()> {
         use windows_sys::Win32::Storage::FileSystem::{MoveFileExW, MOVEFILE_WRITE_THROUGH};
         let s: Vec<u16> = source.as_os_str().encode_wide().chain(Some(0)).collect();
         let t: Vec<u16> = target.as_os_str().encode_wide().chain(Some(0)).collect();
+        // SAFETY: s/t 都是以 NUL 结尾的 UTF-16 缓冲区；MoveFileExW 只在调用期间读取这两个指针。
         if unsafe { MoveFileExW(s.as_ptr(), t.as_ptr(), MOVEFILE_WRITE_THROUGH) } == 0 {
             return Err(std::io::Error::last_os_error()).context("移动失败（不会覆盖或跨卷复制）");
         }
@@ -215,6 +218,8 @@ pub fn rename_noreplace(source: &Path, target: &Path) -> Result<()> {
         use std::{ffi::CString, os::unix::ffi::OsStrExt};
         let s = CString::new(source.as_os_str().as_bytes())?;
         let t = CString::new(target.as_os_str().as_bytes())?;
+        // SAFETY: s/t 是合法 CString（路径不含 NUL，构造失败会提前返回）；
+        // renameat2 按 libc 约定传 AT_FDCWD + RENAME_NOREPLACE，内核侧不保留指针。
         let rc = unsafe {
             libc::syscall(
                 libc::SYS_renameat2,

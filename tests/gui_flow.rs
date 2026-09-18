@@ -105,7 +105,9 @@ fn plan_execution_confirmation_flow_runs_end_to_end() {
                 },
             );
             let _ = seen_tasks;
-            std::mem::forget(driver); // 事件循环运行期间必须保持驱动定时器存活
+            // 有意泄漏（与 mem::forget 同义但走惯用 API）：事件循环运行期间必须保持驱动定时器存活，
+            // 不得让 Timer 在闭包结束时 Drop 停摆；泄漏量恒为一个 Timer，进程随即退出。
+            let _driver_leaked: &'static mut slint::Timer = Box::leak(Box::new(driver));
         },
         Some(overrides),
     )

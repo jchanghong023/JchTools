@@ -104,12 +104,16 @@ fn hresult_from_bits(bits: u32) -> windows::core::HRESULT {
 fn bin_item_count(volume: &Path) -> Option<i64> {
     use std::os::windows::ffi::OsStrExt;
     use windows::Win32::UI::Shell::{SHQueryRecycleBinW, SHQUERYRBINFO};
-    let mut info: SHQUERYRBINFO = unsafe { std::mem::zeroed() };
+    let mut info: SHQUERYRBINFO = unsafe {
+        // SAFETY: SHQUERYRBINFO 是纯 POD 结构，全零是合法初值；cbSize 随后显式补上。
+        std::mem::zeroed()
+    };
     // Win32 ABI 要求的 cbSize；该结构体仅数十字节，截断不可能发生。
     #[allow(clippy::cast_possible_truncation)]
     let cb_size = std::mem::size_of::<SHQUERYRBINFO>() as u32;
     info.cbSize = cb_size;
     let wide: Vec<u16> = volume.as_os_str().encode_wide().chain(Some(0)).collect();
+    // SAFETY: wide 是以 NUL 结尾的 UTF-16 卷路径；调用只向已初始化的 info 写入。
     let hr = unsafe { SHQueryRecycleBinW(windows::core::PCWSTR(wide.as_ptr()), &raw mut info) };
     hr.ok().map(|()| info.i64NumItems)
 }
@@ -139,12 +143,16 @@ fn native_recycle(path: &Path) -> std::result::Result<(), RecycleFailure> {
     };
     let perform = || -> windows::core::Result<()> {
         // Runs on the file-operation worker, not the UI thread. Balanced COM lifetime.
+        // SAFETY: CoInitializeEx 返回 S_OK/S_FALSE 都表示本线程此后处于 STA，须配对 CoUninitialize；
+        // RPC_E_CHANGED_MODE 等失败经 `?` 提前返回，不构造 ComGuard，无需配对。
         unsafe {
             CoInitializeEx(None, COINIT_APARTMENTTHREADED).ok()?;
         }
         struct ComGuard;
         impl Drop for ComGuard {
             fn drop(&mut self) {
+                // SAFETY: ComGuard 只在 CoInitializeEx 成功后构造（成功含 S_FALSE），
+                // 析构时的 CoUninitialize 与之严格配对。
                 unsafe {
                     CoUninitialize();
                 }
@@ -165,22 +173,33 @@ fn native_recycle(path: &Path) -> std::result::Result<(), RecycleFailure> {
         }
         units.push(0);
         let wide = units;
+        // SAFETY: perform 闭包只在已成功 CoInitializeEx 的线程上执行（下方各调用同一前提）。
+        let operation: IFileOperation =
+            unsafe { CoCreateInstance(&FileOperation, None, CLSCTX_INPROC_SERVER)? };
+        // SAFETY: operation 是刚创建的有效 IFileOperation；标志组合为文档化取值。
         unsafe {
-            let operation: IFileOperation =
-                CoCreateInstance(&FileOperation, None, CLSCTX_INPROC_SERVER)?;
             operation.SetOperationFlags(
                 FOF_NO_UI | FOF_NO_CONNECTED_ELEMENTS | FOFX_RECYCLEONDELETE | FOFX_EARLYFAILURE,
             )?;
-            let item: IShellItem = SHCreateItemFromParsingName(PCWSTR(wide.as_ptr()), None)?;
+        }
+        // SAFETY: wide 是以 NUL 结尾的 UTF-16 路径；调用返回独立的 IShellItem，不保留输入指针。
+        let item: IShellItem = unsafe { SHCreateItemFromParsingName(PCWSTR(wide.as_ptr()), None)? };
+        // SAFETY: operation 与 item 均为有效 COM 对象，DeleteItem 只增加对 item 的引用。
+        unsafe {
             operation.DeleteItem(&item, None)?;
+        }
+        // SAFETY: operation 有效；PerformOperations 提交此前排队（仅上面一项）的删除。
+        unsafe {
             operation.PerformOperations()?;
-            if operation.GetAnyOperationsAborted()?.as_bool() {
-                // Shell aborted without a specific error: conservatively treat as cancellation.
-                // Never infer permanent-delete permission from an ambiguous abort status.
-                return Err(windows::core::Error::from_hresult(hresult_from_bits(
-                    0x800704C7,
-                )));
-            }
+        }
+        // SAFETY: operation 有效；查询结果只在本次操作会话内有效。
+        let aborted = unsafe { operation.GetAnyOperationsAborted()? };
+        if aborted.as_bool() {
+            // Shell aborted without a specific error: conservatively treat as cancellation.
+            // Never infer permanent-delete permission from an ambiguous abort status.
+            return Err(windows::core::Error::from_hresult(hresult_from_bits(
+                0x800704C7,
+            )));
         }
         Ok(())
     };

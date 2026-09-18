@@ -39,3 +39,8 @@ Windows operations use the `windows` and `windows-sys` bindings. Windows itself 
 IFileOperation flags: https://learn.microsoft.com/en-us/windows/win32/api/shobjidl_core/nf-shobjidl_core-ifileoperation-setoperationflags
 
 Administrative MSI extraction: https://learn.microsoft.com/en-us/windows/win32/msi/administrative-installation
+
+
+## Inno Setup Chinese Simplified language file
+
+installer/ChineseSimplified.isl is vendored from the official Inno Setup repository (jrsoftware/issrc, main branch, Files/Languages/ChineseSimplified.isl; messages for Inno Setup 6.5.0+). It is redistributed here so the installer builds reproducibly on machines whose Inno Setup installation does not ship this file. The file remains subject to the Inno Setup license: https://jrsoftware.org/files/is/license.txt

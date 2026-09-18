@@ -659,6 +659,7 @@ fn long_path_hidden_member_is_stripped_and_archive_completes() {
     let mut wide: Vec<u16> = r"\\?\".encode_utf16().collect();
     wide.extend(file.as_os_str().encode_wide());
     wide.push(0);
+    // SAFETY: wide 是以 NUL 结尾的 UTF-16 verbatim 路径；调用只读取该缓冲区。
     let ok = unsafe { SetFileAttributesW(wide.as_ptr(), FILE_ATTRIBUTE_HIDDEN) };
     assert!(ok != 0, "测试前置：植入隐藏属性失败");
     let meta = fs::symlink_metadata(&file).unwrap();

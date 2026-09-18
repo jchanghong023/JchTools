@@ -2,7 +2,10 @@
 //! 同步回调集中在 `wire_sync`，便于无头测试装配后直接断言界面状态。
 /// Slint 生成代码（target/**/out/app.rs）不做 unwrap/可达性审查：机器生成、
 /// 修复无意义且计数随 UI 改版大幅波动；业务代码保持 unwrap/expect 全面禁止。
+/// todo 豁免同因：slint 1.17.1 生成器在 embed_component 等内部桩里无条件发射
+/// todo 宏，无生成器配置可关闭；仅作用于本生成模块，不覆盖业务代码。
 #[allow(clippy::unwrap_used)]
+#[allow(clippy::todo)]
 #[allow(unreachable_pub)]
 mod generated_ui {
     slint::include_modules!();
@@ -134,6 +137,7 @@ struct WindowDrag {
 fn pointer_position() -> Option<(f64, f64)> {
     use windows_sys::Win32::{Foundation::POINT, UI::WindowsAndMessaging::GetCursorPos};
     let mut point = POINT { x: 0, y: 0 };
+    // SAFETY: point 是有效的栈上 POINT；调用只向它写入光标坐标。
     (unsafe { GetCursorPos(&raw mut point) } != 0)
         .then_some((f64::from(point.x), f64::from(point.y)))
 }
@@ -173,14 +177,18 @@ fn center_window(window: &slint::Window) {
     use windows_sys::Win32::Foundation::{POINT, RECT};
     use windows_sys::Win32::UI::WindowsAndMessaging::{GetCursorPos, GetForegroundWindow};
     // 优先当前前台窗口所在监视器；没有前台窗口时退到光标所在监视器。
+    // SAFETY: GetForegroundWindow 只是查询前台窗口句柄，不产生所有权或别名约束。
     let foreground = unsafe { GetForegroundWindow() };
     let monitor = if foreground.is_null() {
         let mut point = POINT { x: 0, y: 0 };
+        // SAFETY: point 是有效的栈上 POINT；调用只向它写入光标坐标。
         if unsafe { GetCursorPos(&raw mut point) } == 0 {
             return;
         }
+        // SAFETY: point 由 GetCursorPos 刚写入；MONITOR_DEFAULTTONEAREST 只读该值。
         unsafe { MonitorFromPoint(point, MONITOR_DEFAULTTONEAREST) }
     } else {
+        // SAFETY: foreground 非空（上方已判空）；调用只读取该句柄。
         unsafe { MonitorFromWindow(foreground, MONITOR_DEFAULTTONEAREST) }
     };
     if monitor.is_null() {
@@ -206,6 +214,8 @@ fn center_window(window: &slint::Window) {
         dwFlags: 0,
     };
     // 兼容部分声明布局：cbSize 必须正确
+    // SAFETY: monitor 是刚取得的有效 HMONITOR；info.cbSize 已按 ABI 要求填好，
+    // 调用只向 info 写入监视器信息。
     if unsafe { GetMonitorInfoW(monitor, &raw mut info) } == 0 {
         return;
     }
@@ -239,6 +249,8 @@ fn system_dark() -> bool {
     // DWORD 缓冲区大小恒为 4，截断不可能发生。
     #[allow(clippy::cast_possible_truncation)]
     let mut size = std::mem::size_of::<u32>() as u32;
+    // SAFETY: path/name 都是以 NUL 结尾的 UTF-16 缓冲区；value/size 是配套的
+    // DWORD 输出缓冲区（RRF_RT_REG_DWORD 要求大小恰为 4），调用期间指针均有效。
     let status = unsafe {
         RegGetValueW(
             HKEY_CURRENT_USER,

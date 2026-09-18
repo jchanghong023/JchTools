@@ -81,12 +81,14 @@ debug = 1
 # 告警存量清零后全部升为硬错误：新增告警本地编译即失败；
 # CI 另以 cargo clippy --all-targets -- -D warnings 双侧兜底（默认特性 + --no-default-features）。
 [lints.rust]
+warnings = "deny"                  # 兜底：任何未归类告警本地编译即失败（CI 另以 -D warnings 双侧兜底）
 unsafe_op_in_unsafe_fn = "deny"    # unsafe fn 体内操作必须显式 unsafe 块（edition 2024 默认规则提前转正）
 unused_must_use = "deny"
 unreachable_patterns = "deny"
 unreachable_pub = "deny"
 unused_variables = "deny"
 future_incompatible = { level = "deny", priority = -1 } # 组：未来版本将变硬错误的写法，提前暴露（组需低于单体优先级）
+rust_2018_idioms = { level = "deny", priority = -1 }    # 组：idiom 迁移遗留写法（组需低于单体优先级）
 explicit_outlives_requirements = "deny"
 elided_lifetimes_in_paths = "deny"
 single_use_lifetimes = "deny"
@@ -99,6 +101,12 @@ cargo = { level = "deny", priority = -1 }
 unwrap_used = "deny"               # src/ 内 unwrap 即编译失败（测试 crate 按政策豁免，见各测试文件头）
 expect_used = "deny"
 dbg_macro = "deny"                 # 调试残留
+todo = "deny"                      # 未完成占位不得合入
+unimplemented = "deny"             # 未实现占位不得合入
+mem_forget = "deny"                # 手工泄漏内存（ManuallyDrop/drop 才是显式选择）
+fn_to_numeric_cast_any = "deny"    # 函数指针转整数几乎总是 ABI 错误
+undocumented_unsafe_blocks = "deny"        # 每个 unsafe 块必须带真实 SAFETY: 依据
+multiple_unsafe_ops_per_block = "deny"     # 多个独立 unsafe 操作不得挤在一个块里
 # 豁免：纯排版/文档义务/意见型噪音，与缺陷发现无关（每条附理由）。
 doc_markdown = "allow"             # 文档标识符反引号排版
 missing_errors_doc = "allow"       # 文档段落义务

@@ -652,6 +652,7 @@ fn normalize_new_member_attributes(path: &Path, config: &crate::config::Config) 
     wide.extend_from_slice(prefix);
     wide.extend_from_slice(&text[skip..]);
     wide.push(0);
+    // SAFETY: wide 是以 NUL 结尾的 UTF-16 路径（含 verbatim 前缀）；调用只读取该缓冲区。
     let result = unsafe { SetFileAttributesW(wide.as_ptr(), attrs) };
     result != 0
 }
@@ -1477,6 +1478,7 @@ mod tests {
         wide.extend(file.as_os_str().encode_wide());
         wide.push(0);
         assert_ne!(
+            // SAFETY: wide 是以 NUL 结尾的 UTF-16 verbatim 路径；调用只读取该缓冲区。
             unsafe { SetFileAttributesW(wide.as_ptr(), FILE_ATTRIBUTE_HIDDEN) },
             0,
             "测试前置：植入隐藏属性失败"
