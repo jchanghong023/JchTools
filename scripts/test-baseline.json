@@ -938,6 +938,12 @@
       "cfg": null
     },
     {
+      "file": "tests/slint_gate.rs",
+      "name": "app_slint_compiles_with_zero_diagnostics",
+      "ignored": false,
+      "cfg": null
+    },
+    {
       "file": "tests/split.rs",
       "name": "extract_run_without_engine_fails_loudly",
       "ignored": false,
