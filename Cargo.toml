@@ -55,6 +55,9 @@ tempfile = "3.19"
 filetime = "0.2"
 i-slint-backend-testing = "=1.17.1"
 proptest = "1.11.0"
+# 仅测试用：编译 ui/app.slint 做零诊断门禁（不进产品二进制）
+slint-interpreter = "=1.17.1"
+spin_on = "0.1"
 
 [[bin]]
 name = "JchTools"
