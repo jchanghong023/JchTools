@@ -168,9 +168,9 @@ pub struct CapturedOutput {
     pub status: std::process::ExitStatus,
     pub stdout: Vec<u8>,
     pub stderr: Vec<u8>,
-    /// stdout 是否因超过 [`MAX_CAPTURE_BYTES`] 被截断
+    /// stdout 是否因超过捕获上限 `MAX_CAPTURE_BYTES` 被截断
     pub stdout_truncated: bool,
-    /// stderr 是否因超过 [`MAX_CAPTURE_BYTES`] 被截断
+    /// stderr 是否因超过捕获上限 `MAX_CAPTURE_BYTES` 被截断
     pub stderr_truncated: bool,
 }
 

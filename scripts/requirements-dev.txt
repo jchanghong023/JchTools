@@ -1,0 +1,8 @@
+# JchTools Python 脚本（scripts/）的第三方运行时依赖，供质量门与 pip-audit 复现解析结果。
+# 版本下限取 2026-09-19 实际验证通过的解析版本（pip-audit 无已知漏洞）。
+# pywin32/pywinauto 仅 Windows（gui_smoke 的 GUI 自动化依赖）。
+
+Pillow>=12.3
+pygments>=2.21
+pywinauto>=0.6.9; sys_platform == "win32"
+pywin32>=312; sys_platform == "win32"

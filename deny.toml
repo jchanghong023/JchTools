@@ -1,0 +1,13 @@
+# cargo-deny 配置：质量门只强制 advisories 与 sources 两项（`cargo deny check advisories sources`）。
+# License policy 不在本配置中决定（如需引入由项目所有者另行决策）。
+
+[advisories]
+version = 2
+# 漏洞不得通过 ignore 绕过；本表当前为空，出现漏洞时修复依赖而非加 ignore。
+ignore = []
+
+[sources]
+unknown-registry = "deny"  # 未知 registry 一律失败（显式信任模型）
+unknown-git = "deny"       # 未知 git source 一律失败
+allow-registry = ["https://github.com/rust-lang/crates.io-index"]
+allow-git = []

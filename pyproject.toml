@@ -1,0 +1,39 @@
+# JchTools Python 质量门（作用范围：scripts/ 下项目自己维护的脚本与 typings/ 自维护 stub）
+# 固定基线：Ruff select ALL + 固定例外集；BasedPyright all 模式零容忍。
+# 例外集是本质量基线的固定组成，不得为让检查通过而扩大；每条附理由。
+
+[tool.ruff]
+target-version = "py313" # 项目未声明最低 Python 版本；按当前实际解释器（3.13.x）验证
+line-length = 120        # 现有维护源码 96% 的行 ≤120 列；96 列以上多为中文长句注释/文案
+extend-exclude = []      # 不排除任何维护源码
+
+[tool.ruff.lint]
+# 中文注释/文案按正确中文排版使用全角标点；此处显式放行实际使用的码点（外科手术式，
+# 不放行任何拉丁/西里尔等同形字符，RUF001/2/3 对其余字符保持生效）。
+allowed-confusables = ["，", "。", "：", "；", "（", "）", "？", "！"]
+select = ["ALL"]
+ignore = [
+    "ANN",    # 类型正确性由 BasedPyright all 模式负责，避免重复的签名风格规则
+    "CPY001", # 版权头属于项目治理策略，不是代码正确性
+    "D100", "D101", "D102", "D103", "D104", "D105", "D106", "D107",
+    # 不强迫逐对象 docstring；已有 docstring 仍受其他 D 规则检查
+    "E111", "E114", "E117",
+    "W191",
+    "D203", "D206", "D300",
+    "Q000", "Q001", "Q002", "Q003", "Q004",
+    "COM812", "COM819",
+    "ISC002",
+    # 以上为 formatter 冲突/不兼容规则
+    "INP001", # namespace package 是合法 Python 结构
+    "S101",   # assert 语义由 Bandit 分角色执行（B101），Ruff 不重复
+    "T20",    # stdout/stderr 输出可能就是程序接口，禁止逼迫无意义替代写法
+    "TD002", "TD003",
+    # 不强制 TODO 作者/issue 编号格式；是否允许未完成 TODO 仍由其他规则和测试决定
+]
+
+[tool.basedpyright]
+typeCheckingMode = "all"
+failOnWarnings = true
+stubPath = "typings"
+# 自维护最小 stub 覆盖无官方类型信息的 GUI 自动化/图像依赖；
+# 不使用 baselineFile，不忽略任何路径，不降级任何 report* 规则。

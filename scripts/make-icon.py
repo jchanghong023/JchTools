@@ -7,17 +7,20 @@ taskbar size stays crisp. Run from the repository root:
 
     python scripts/make-icon.py
 """
+
 from __future__ import annotations
+
 import sys
 from pathlib import Path
+
 from PIL import Image, ImageDraw
 
 ROOT = Path(__file__).resolve().parent.parent
 RESOURCES = ROOT / "resources"
 SUPERSAMPLE = 4
 BASE = 256
-ACCENT = (79, 70, 229)      # #4f46e5
-ACCENT_2 = (14, 165, 233)   # #0ea5e9
+ACCENT = (79, 70, 229)  # #4f46e5
+ACCENT_2 = (14, 165, 233)  # #0ea5e9
 
 
 def gradient(size: int) -> Image.Image:
@@ -25,7 +28,7 @@ def gradient(size: int) -> Image.Image:
     draw = ImageDraw.Draw(image)
     for offset in range(2 * size):
         factor = offset / (2 * size - 1)
-        color = tuple(round(a + (b - a) * factor) for a, b in zip(ACCENT, ACCENT_2))
+        color = tuple(round(a + (b - a) * factor) for a, b in zip(ACCENT, ACCENT_2, strict=False))
         draw.line([(offset, 0), (0, offset)], fill=color, width=2)
     return image
 
@@ -50,8 +53,12 @@ def glyph(size: int) -> Image.Image:
     hook_left = left
     hook_top = bottom - stroke
     points = [
-        (stem_left, top), (right, top), (right, bottom), (hook_left, bottom),
-        (hook_left, hook_top), (stem_left, hook_top),
+        (stem_left, top),
+        (right, top),
+        (right, bottom),
+        (hook_left, bottom),
+        (hook_left, hook_top),
+        (stem_left, hook_top),
     ]
     draw.polygon(points, fill=(255, 255, 255, 255))
     return layer
