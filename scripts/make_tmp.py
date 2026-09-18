@@ -20,9 +20,10 @@ import bz2
 import contextlib
 import ctypes
 import gzip
+import hashlib
+import itertools
 import lzma
 import os
-import random
 import shutil
 import stat
 import subprocess
@@ -43,7 +44,8 @@ SEVEN_ZIP_CANDIDATES = [
     Path(r"C:\Program Files (x86)\7-Zip\7z.exe"),
 ]
 MAKECAB = Path(os.environ.get("SYSTEMROOT", r"C:\Windows")) / "System32" / "makecab.exe"
-random.seed(20260912)  # 固定随机种子：random_bytes 的输出必须逐字节可复现
+# random_bytes 的流编号：每次调用递增，保证同尺寸多次调用内容不同；起点固定，全程可复现。
+_STREAM_IDS = itertools.count()
 PAYLOAD = b"JchTools duplicate payload 2026-09-12\n" * 4
 DEEP_ZIP_LAYERS = 18  # 10-压缩包-超深 的嵌套层数（默认 max_depth=16，第 17 层起应停止解压）
 UNC_SHARE_PARTS = 2  # \\server\share 去掉尾部反斜杠后恰好只剩两级即共享根
@@ -144,8 +146,15 @@ def write(path: Path, data: bytes) -> None:
 
 
 def random_bytes(size: int) -> bytes:
-    """生成 size 字节可复现的伪随机数据（与固定种子的 random.Random.randbytes 逐字节等价）."""
-    return random.getrandbits(size * 8).to_bytes(size, "little")
+    """生成 size 字节确定性伪随机数据（SHA-256 计数器流：可复现，且每次调用内容不同）."""
+    stream = next(_STREAM_IDS)
+    out = bytearray()
+    position = 0
+    while len(out) < size:
+        block_input = stream.to_bytes(8, "little") + position.to_bytes(8, "little")
+        out += hashlib.sha256(block_input).digest()
+        position += 1
+    return bytes(out[:size])
 
 
 def zip_members(target: Path, members: dict[str, bytes]) -> None:

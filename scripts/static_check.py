@@ -18,9 +18,10 @@ import sqlite3
 import subprocess
 import sys
 import tomllib
-import xml.etree.ElementTree as ET
 from pathlib import Path
 from typing import TYPE_CHECKING
+
+import defusedxml.ElementTree
 
 if TYPE_CHECKING:
     from collections.abc import Callable
@@ -89,7 +90,8 @@ def check(name: str, fn: Callable[[], object]) -> None:
         checks.append({"name": name, "status": "SKIP", "details": str(exc)})
     # BLE001：这里必须捕获任意 Exception——check() 的职责就是把单个检查的任何异常记为
     # FAIL 而不是让整个脚本崩溃；可出现的异常类型无法穷举，重抛又会改变退出行为。
-    except Exception as exc:
+    # （异常转为 FAIL 条目而非静默吞掉，属检查器逐项汇总场景。）
+    except Exception as exc:  # noqa: BLE001
         checks.append({"name": name, "status": "FAIL", "details": str(exc)})
 
 
@@ -112,7 +114,7 @@ def manifests() -> str:
             raise AssertionError(detail)
         if not (ROOT / bin_path).is_file():
             raise AssertionError
-    _ = ET.parse(ROOT / "resources/windows.manifest")
+    _ = defusedxml.ElementTree.parse(ROOT / "resources/windows.manifest")
     return "Cargo TOML, declared binary paths, Windows XML parsed."
 
 
@@ -782,9 +784,14 @@ def sums_integrity() -> str:
         detail = "SHA256SUMS.txt 必须是 LF 行尾（CRLF 会让 sha256sum -c 全部失败）"
         raise AssertionError(detail)
     listed = _listed_digests(raw)
+    # 解析 PATH 上 git 的绝对路径：避免用部分可执行名启动进程（S607）。
+    git = shutil.which("git")
+    if git is None:
+        message = "git 不可用，跳过：PATH 上找不到 git"
+        raise SkippedError(message)
     try:
         out = subprocess.run(
-            ["git", "-c", "core.quotePath=false", "ls-files", "-z"], cwd=ROOT, capture_output=True, check=True
+            [git, "-c", "core.quotePath=false", "ls-files", "-z"], cwd=ROOT, capture_output=True, check=True
         ).stdout
     except Exception as exc:
         message = f"git 不可用，跳过：{exc}"
