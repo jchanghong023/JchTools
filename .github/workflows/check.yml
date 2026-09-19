@@ -58,6 +58,12 @@ jobs:
             [Management.Automation.Language.Parser]::ParseFile($_.FullName,[ref]$tokens,[ref]$errors) | Out-Null
             if ($errors) { $errors | Format-List; throw 'PowerShell parse failure' }
           }
+      # Python 固定 3.13：与 pyproject 的 target-version 及本地验证解释器一致。
+      # 3.12 的 typing 无 TypeIs（3.13 起转正），static_check 顶层导入会失效
+      #（反证：run 35409549176 windows Python quality gate reportGeneralTypeIssues）。
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
       # defusedxml 供 static_check 顶层导入解析 resources/windows.manifest（S314）：
       # Windows runner 预装 Python 无此包，缺装会让 static_check 直接 ImportError
       #（反证：run 35407626046 windows Static checks ModuleNotFoundError）。
