@@ -42,11 +42,6 @@ powershell -NoProfile -File .\scripts\package-windows.ps1   # 生成含 7-Zip �
 
 手工测试集：`python scripts/make_tmp.py testdata --git`（默认自动生成到 `.tmp/testdata/`，会先清空该目录；`--git` 建立 git 基线并生成 `恢复.ps1`，测试后可一键回到初始状态；也可 `--destination` 另指专门测试目录，仓库内 `.tmp` 之外的位置会被拒绝；测试完成后用 `python scripts/make_tmp.py clean` 清理）。
 
-```bash
-bash scripts/check-linux.sh                       # Linux 核心测试
-JCHTOOLS_TEST_7ZIP=/abs/path/7zz bash scripts/check-linux.sh   # 含真实解压
-```
-
 - Windows 构建机需要 Rust `x86_64-pc-windows-msvc` + VS C++ Build Tools + Windows SDK（`rc.exe` 用于把 `resources/app.ico` 嵌入 EXE）。
 - 提交前 `SHOULD` 至少跑 `cargo test` 与 `python scripts/static_check.py`，并确认构建输出没有新增 `binding loop` 警告。
 
@@ -86,11 +81,11 @@ JCHTOOLS_TEST_7ZIP=/abs/path/7zz bash scripts/check-linux.sh   # 含真实解压
 
 ## 3.4 三级测试门与执行权限
 
-统一入口 `python scripts/test_gate.py <fastcheck|fulltest|slowtest>`；三级语义固定，`MUST NOT` 按需要改写层级含义，也 `MUST NOT` 把耗时、跨 WSL 或远程阶段塞进更低层级。
+统一入口 `python scripts/test_gate.py <fastcheck|fulltest|slowtest>`；三级语义固定，`MUST NOT` 按需要改写层级含义，也 `MUST NOT` 把耗时或远程阶段塞进更低层级。平台范围按合同 P-07 仅 Windows：不设任何跨平台/跨 WSL 验证阶段。
 
 - **fastcheck**：static_check + rustfmt + clippy + cargo test（含 binding loop 扫描）；总墙钟硬上限 60 秒，超时即失败并终止整个进程树，`MUST NOT` 把超时报成成功；AI 代理 `MAY` 自主执行，但其通过不代表完整验证。（执法点：test_gate.py 的预算终止与退出码）
-- **fulltest**：当前平台（Windows）全部本地验证——Python 质量门（与 CI 同命令）+ fmt/clippy + `acceptance.ps1 -WithEngine -WithGuiSmoke -WithPackage`；不跨 WSL、`MUST NOT` 触发远程流水线。每次运行 `MUST` 有人类明确授权。（执法点：test_gate.py 的 `--authorized` 入口守卫；越过入口直接执行内部命令属规避行为 · 无执法点 · 软法）
-- **slowtest**：fulltest 全部阶段 + WSL `scripts/check-linux.sh`（隔离 `CARGO_TARGET_DIR`）+ 远程 `check.yml`、`mutants.yml`（gh 触发并轮询到最终状态，`MUST NOT` 把「已触发」当「通过」）。每次运行 `MUST` 有人类明确授权。（执法点：同上 `--authorized` 入口守卫；同上软法）
+- **fulltest**：当前平台（Windows，唯一支持平台）全部本地验证——Python 质量门（与 CI 同命令）+ fmt/clippy + `acceptance.ps1 -WithEngine -WithGuiSmoke -WithPackage`；`MUST NOT` 触发远程流水线。每次运行 `MUST` 有人类明确授权。（执法点：test_gate.py 的 `--authorized` 入口守卫；越过入口直接执行内部命令属规避行为 · 无执法点 · 软法）
+- **slowtest**：fulltest 全部阶段 + 远程 `check.yml`、`mutants.yml`（gh 触发并轮询到最终状态，`MUST NOT` 把「已触发」当「通过」）。每次运行 `MUST` 有人类明确授权。（执法点：同上 `--authorized` 入口守卫；同上软法）
 - `release.yml` 是真实发布（自动打时间戳 tag 并发布产物），`MUST NOT` 纳入 slowtest 自动触发；发布需用户单独明确该次目标。（执法点：test_gate.py 不包含该阶段）
 - 历史授权、上一次授权、CI 配置或脚本注释 `MUST NOT` 视为本次授权；环境或工具缺失只能如实标注 UNVERIFIED，`MUST NOT` 当作通过或静默跳过。（无执法点 · 软法）
 

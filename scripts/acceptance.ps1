@@ -26,7 +26,7 @@ param(
 )
 $ErrorActionPreference = 'Stop'
 Set-StrictMode -Version Latest
-if ($env:OS -ne 'Windows_NT') {throw 'Windows 专用验收脚本；Linux 核心验证请用 bash scripts/check-linux.sh。'}
+if ($env:OS -ne 'Windows_NT') {throw 'Windows 专用验收脚本；本项目按合同 P-07 仅支持 Windows 平台。'}
 $root = [IO.Path]::GetFullPath((Join-Path $PSScriptRoot '..'))
 Set-Location -LiteralPath $root
 $script:LogDir = Join-Path $root '.tmp\acceptance'

@@ -308,20 +308,29 @@ def sql_syntax() -> str:
 
 
 def shell_syntax() -> str:
-    script = str(ROOT / "scripts/check-linux.sh")
+    # 平台范围按合同 P-07 仅 Windows：scripts/ 下可能没有 .sh；有则逐个 bash -n 校验。
+    scripts = sorted((ROOT / "scripts").glob("*.sh"))
+    if not scripts:
+        return "no shell scripts under scripts/; nothing to check"
     bash = shutil.which("bash")
     if not bash:
-        message = "bash not found; bash -n and PowerShell syntax checks run in the Windows/Linux CI jobs."
+        message = "bash not found; bash -n and PowerShell syntax checks run in the Windows CI job."
         raise SkippedError(message)
-    done = subprocess.run([bash, "-n", script], capture_output=True, text=True, check=False)
-    if done.returncode != 0 and (
-        "not found" in (done.stderr or "").lower() or done.returncode == _BASH_COMMAND_NOT_FOUND
-    ):
-        message = "bash launcher is unavailable on this host; bash -n runs in the Linux CI job."
-        raise SkippedError(message)
-    if done.returncode != 0:
-        raise AssertionError(done.stderr)
-    return "bash -n passed; PowerShell syntax check is defined in Windows CI."
+    for script in scripts:
+        done = subprocess.run([bash, "-n", str(script)], capture_output=True, text=True, check=False)
+        if done.returncode != 0 and (
+            "not found" in (done.stderr or "").lower() or done.returncode == _BASH_COMMAND_NOT_FOUND
+        ):
+            message = "bash launcher is unavailable on this host; bash -n runs in the Windows CI job."
+            raise SkippedError(message)
+        if done.returncode != 0:
+            message = f"{script}: {done.stderr}"
+            raise AssertionError(message)
+    names = ", ".join(path.name for path in scripts)
+    return (
+        f"bash -n passed for {len(scripts)} shell script(s) ({names}); "
+        "PowerShell syntax check is defined in Windows CI."
+    )
 
 
 # text[i] 指向 '#'：解析 #[...] 与 #![...] 属性（括号配对，允许嵌套括号）。
