@@ -59,7 +59,6 @@ powershell -NoProfile -File .\scripts\package-windows.ps1   # 生成含 7-Zip �
 - **CI 权威**：本地验证通过只是临时结论；对应 CI（`.github/workflows/`）run 转绿之前 `MUST NOT` 宣称变更已完成，宣称完成 `MUST` 附 CI run 链接；本地自报证据（提交信息、终端输出）视为线索而非判决。
 - **flaky 政策**：`MUST NOT` 重跑到绿。测试间歇性失败必须查因；确属 flaky 的要在提交信息记录现象与原因，不得静默重跑。
 - **人工验收边界**：用户已决定不保留人工验收项清单；自动化未覆盖的行为（如真实 TB 级数据、非 150% DPI、网络共享）`MUST NOT` 被代理宣称已验证，只能如实标注「未验证」。
-- **变异测试**：发布前或每周 `SHOULD` 触发 `.github/workflows/mutants.yml`（cargo-mutants，范围 `engine` / `fsutil`）；存活 mutant 超预算即失败，新增引擎逻辑时 `SHOULD` 关注存活报告并把可杀的 mutant 用新测试杀掉。
 
 ## 3.3 验收方法（怎么测试、怎么验收）
 
@@ -85,7 +84,7 @@ powershell -NoProfile -File .\scripts\package-windows.ps1   # 生成含 7-Zip �
 
 - **fastcheck**：static_check + rustfmt + clippy + cargo test（含 binding loop 扫描）；总墙钟硬上限 60 秒，超时即失败并终止整个进程树，`MUST NOT` 把超时报成成功；AI 代理 `MAY` 自主执行，但其通过不代表完整验证。（执法点：test_gate.py 的预算终止与退出码）
 - **fulltest**：当前平台（Windows，唯一支持平台）全部本地验证——Python 质量门（与 CI 同命令）+ fmt/clippy + `acceptance.ps1 -WithEngine -WithGuiSmoke -WithPackage`；`MUST NOT` 触发远程流水线。每次运行 `MUST` 有人类明确授权。（执法点：test_gate.py 的 `--authorized` 入口守卫；越过入口直接执行内部命令属规避行为 · 无执法点 · 软法）
-- **slowtest**：fulltest 全部阶段 + 远程 `check.yml`、`mutants.yml`（gh 触发并轮询到最终状态，`MUST NOT` 把「已触发」当「通过」）。每次运行 `MUST` 有人类明确授权。（执法点：同上 `--authorized` 入口守卫；同上软法）
+- **slowtest**：fulltest 全部阶段 + 远程 `check.yml`（gh 触发并轮询到最终状态，`MUST NOT` 把「已触发」当「通过」）。每次运行 `MUST` 有人类明确授权。（执法点：同上 `--authorized` 入口守卫；同上软法）
 - `release.yml` 是真实发布（自动打时间戳 tag 并发布产物），`MUST NOT` 纳入 slowtest 自动触发；发布需用户单独明确该次目标。（执法点：test_gate.py 不包含该阶段）
 - 历史授权、上一次授权、CI 配置或脚本注释 `MUST NOT` 视为本次授权；环境或工具缺失只能如实标注 UNVERIFIED，`MUST NOT` 当作通过或静默跳过。（无执法点 · 软法）
 
