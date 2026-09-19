@@ -231,6 +231,12 @@
     },
     {
       "file": "src/gui.rs",
+      "name": "switching_tools_while_busy_keeps_running_status_text",
+      "ignored": false,
+      "cfg": null
+    },
+    {
+      "file": "src/gui.rs",
       "name": "theme_choice_keeps_plan_ready_but_rule_change_invalidates",
       "ignored": false,
       "cfg": null
@@ -423,6 +429,24 @@
     },
     {
       "file": "tests/archive.rs",
+      "name": "real_engine_brace_in_comment_cannot_enable_sweep",
+      "ignored": true,
+      "cfg": null
+    },
+    {
+      "file": "tests/archive.rs",
+      "name": "real_engine_forged_comment_cannot_enable_sweep",
+      "ignored": true,
+      "cfg": null
+    },
+    {
+      "file": "tests/archive.rs",
+      "name": "real_engine_standalone_zip_keeps_stale_z_sibling",
+      "ignored": true,
+      "cfg": null
+    },
+    {
+      "file": "tests/archive.rs",
       "name": "skipped_conflict_moves_original_to_quarantine",
       "ignored": true,
       "cfg": null
@@ -430,6 +454,12 @@
     {
       "file": "tests/archive.rs",
       "name": "solid_7z_is_decoded_in_one_pass",
+      "ignored": true,
+      "cfg": null
+    },
+    {
+      "file": "tests/archive.rs",
+      "name": "successful_numbered_split_set_disposes_every_volume",
       "ignored": true,
       "cfg": null
     },
@@ -1149,6 +1179,12 @@
     },
     {
       "file": "tests/split.rs",
+      "name": "corroborated_volume_siblings_are_disposed_together",
+      "ignored": false,
+      "cfg": null
+    },
+    {
+      "file": "tests/split.rs",
       "name": "dispose_failure_does_not_abort_remaining_archives",
       "ignored": false,
       "cfg": null
@@ -1162,6 +1198,24 @@
     {
       "file": "tests/split.rs",
       "name": "failed_archive_is_moved_to_quarantine_directory",
+      "ignored": false,
+      "cfg": null
+    },
+    {
+      "file": "tests/split.rs",
+      "name": "failed_archive_still_quarantines_wide_named_siblings",
+      "ignored": false,
+      "cfg": null
+    },
+    {
+      "file": "tests/split.rs",
+      "name": "forged_comment_corroboration_is_ignored",
+      "ignored": false,
+      "cfg": null
+    },
+    {
+      "file": "tests/split.rs",
+      "name": "forged_comment_with_brace_line_cannot_enable_sweep",
       "ignored": false,
       "cfg": null
     },
@@ -1192,6 +1246,18 @@
     {
       "file": "tests/split.rs",
       "name": "rerun_skips_quarantined_archives_and_reports_count",
+      "ignored": false,
+      "cfg": null
+    },
+    {
+      "file": "tests/split.rs",
+      "name": "stale_r_sibling_is_not_disposed_with_standalone_rar",
+      "ignored": false,
+      "cfg": null
+    },
+    {
+      "file": "tests/split.rs",
+      "name": "stale_z_sibling_is_not_disposed_with_standalone_zip",
       "ignored": false,
       "cfg": null
     }
