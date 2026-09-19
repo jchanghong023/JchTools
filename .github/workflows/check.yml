@@ -90,7 +90,8 @@ jobs:
           python -m basedpyright scripts typings
           python -m vulture scripts typings --min-confidence 100
           python -m bandit -r scripts -s B404,B603 -q
-          python -m pip-audit -r scripts/requirements-dev.txt
+          # pip-audit 包名的模块形式是下划线 pip_audit（连字符名只是 console script）。
+          python -m pip_audit -r scripts/requirements-dev.txt
       - name: Compile, run fixture tests, bundle the full 7-Zip engine
         shell: pwsh
         env:
