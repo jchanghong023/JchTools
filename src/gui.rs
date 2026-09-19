@@ -391,19 +391,23 @@ fn invalidate(ui: &AppWindow, tool: Tool) {
     }
     ui.set_status("目录已就绪；「分析」只读不改文件，随时可以开始".into());
 }
-/// 目录输入变化后的就绪同步：已有任务时用 recompute_ready 按
-/// 「任务 + 配置 + 目录」重算，而不是一律 invalidate——
-/// 用户可能只是重新输入了同一路径，不应清掉仍可执行的计划。
+/// 目录输入变化与切换工具共用的就绪同步：已有任务时按「任务 + 配置 + 目录」
+/// 重算，而不是一律 invalidate——用户可能只是重新输入了同一路径或切去看了一眼
+/// 另一个工具，不应清掉仍可执行的计划。
 fn sync_ready_after_directory(ui: &AppWindow, state: &State) {
     if ui.get_has_task() && state.tool == Tool::Organizer {
         if let Some(task) = state.task.clone() {
-            let ready = recompute_ready(ui, state, &task);
-            ui.set_ready(ready);
-            ui.set_status(if ready {
-                SharedString::from("目录与当前计划一致，可以确认执行")
-            } else {
-                SharedString::from("规则或目录已改变，请重新分析后再执行")
-            });
+            let outcome = classify_plan_ready(ui, state, &task);
+            ui.set_ready(matches!(outcome, PlanReadyState::Ready));
+            // 三态各给真实文案：已结束的任务不得谎报「规则或目录已改变」（C-11 如实展示）。
+            ui.set_status(
+                match outcome {
+                    PlanReadyState::Ready => "目录与当前计划一致，可以确认执行",
+                    PlanReadyState::Changed => "规则或目录已改变，请重新分析后再执行",
+                    PlanReadyState::Finished => "上次任务已结束；如需再次整理请重新分析",
+                }
+                .into(),
+            );
             return;
         }
     }
@@ -624,42 +628,57 @@ fn record_plan_load_done(load: &PlanLoadSync, gen: u64) {
         *guard = Some(PlanLoadDone { gen });
     }
 }
+/// 计划就绪三态：Ready=任务在就绪态且配置/目录一致；Changed=规则或目录与计划不一致；
+/// Finished=任务已执行/取消/失败等非就绪态。三态决定界面文案（C-11 如实展示）。
+enum PlanReadyState {
+    Ready,
+    Changed,
+    Finished,
+}
 /// 按「任务状态 + 当前配置 + 目录一致性」重新计算整理计划的就绪状态。
 /// theme 是纯外观设置，不影响计划内容，比较时剔除；
-/// SelectionSaved 与 PlanPage 两处共用，避免一处重算一处漏算。
-fn recompute_ready(ui: &AppWindow, state: &State, path: &Path) -> bool {
+/// SelectionSaved 与 PlanPage 两处共用 recompute_ready，避免一处重算一处漏算。
+fn classify_plan_ready(ui: &AppWindow, state: &State, path: &Path) -> PlanReadyState {
     let strip_theme = |value: &mut serde_json::Value| {
         if let Some(object) = value.as_object_mut() {
             object.remove("theme");
         }
     };
     let Ok(db) = Database::open_existing(path) else {
-        return false;
+        // 任务库不可访问按「已改变」处理：目录可能被移动或删除，需重新分析。
+        return PlanReadyState::Changed;
     };
     // 任务状态是第一道闸：已执行/已取消/失败的计划页重新加载时不能把 ready 重新点亮。
     if !db
         .get::<String>("status")
         .is_ok_and(|status| status == "ready")
     {
-        return false;
+        return PlanReadyState::Finished;
     }
     let Some(mut db_config) = db
         .config()
         .ok()
         .and_then(|config| serde_json::to_value(&config).ok())
     else {
-        return false;
+        return PlanReadyState::Changed;
     };
     let Ok(mut current) = serde_json::to_value(&state.config) else {
-        return false;
+        return PlanReadyState::Changed;
     };
     strip_theme(&mut db_config);
     strip_theme(&mut current);
-    db_config == current
-        && db.get::<String>("root").is_ok_and(|root| {
-            std::fs::canonicalize(Path::new(ui.get_directory().as_str()))
-                .is_ok_and(|selected| selected == Path::new(&root))
-        })
+    let root_matches = db.get::<String>("root").is_ok_and(|root| {
+        std::fs::canonicalize(Path::new(ui.get_directory().as_str()))
+            .is_ok_and(|selected| selected == Path::new(&root))
+    });
+    if db_config == current && root_matches {
+        PlanReadyState::Ready
+    } else {
+        PlanReadyState::Changed
+    }
+}
+fn recompute_ready(ui: &AppWindow, state: &State, path: &Path) -> bool {
+    matches!(classify_plan_ready(ui, state, path), PlanReadyState::Ready)
 }
 /// 计划页事件是否可应用：代际须仍是 latest，且 filter 与当前视图一致。
 /// page 不再要求与 UI 预置值一致：翻页采用「先加载、成功再提交」，加载期间 state.page 仍是旧页。
@@ -1017,8 +1036,13 @@ fn wire_sync(ui: &AppWindow, state: &Rc<RefCell<State>>, sender: &mpsc::SyncSend
                         s.section = tool.sections()[0].to_string();
                     }
                     ui.set_section(0);
+                    // 面板页签集合同样随工具变化（目录整理 0–2、递归解压 0–1）：
+                    // 共享索引不重置会停在另一工具才有的面板，内容区整块空白（U-11）。
+                    ui.set_panel(0);
                     refresh(&ui, &state.borrow());
-                    invalidate(&ui, tool);
+                    // 切工具不是规则或目录改动（C-10/R-04）：就绪计划按「任务+配置+目录」
+                    // 重算保持可执行，与目录重输同口径，而不是一律失效。
+                    sync_ready_after_directory(&ui, &state.borrow());
                 }
             }
         });
@@ -2009,6 +2033,7 @@ mod gui_tests {
             self.ui.set_theme(0);
             self.ui.set_confirm_kind(0);
             self.ui.set_section(0);
+            self.ui.set_panel(0);
             self.ui.set_show_advanced(false);
             self.ui.set_screen(0);
             self.ui.set_active_tool_id("directory-organizer".into());
@@ -2396,6 +2421,93 @@ mod gui_tests {
             assert!(ui.get_ready(), "纯外观的主题切换不得使已生成的计划失效");
             ui.invoke_rule_bool("clean_temp".into(), false);
             assert!(!ui.get_ready(), "实际规则变更必须使计划失效并要求重新分析");
+        })
+        .unwrap();
+    }
+    // 覆盖 C-10, C-11, R-04（切换工具不是规则或目录改动，就绪计划必须保持可执行）
+    #[test]
+    fn switching_tools_keeps_ready_plan_executable() {
+        with_gui(|app| {
+            let ui = &app.ui;
+            let dir = temp_test_dir("switch-keeps-ready");
+            let root = crate::fsutil::normalize_root(&dir).unwrap();
+            {
+                let db = Database::create(&dir).unwrap();
+                db.set("root", &crate::fsutil::path_string(&root).unwrap())
+                    .unwrap();
+                db.set("config", &app.state.borrow().config.clone())
+                    .unwrap();
+                db.set("status", &"ready").unwrap();
+            }
+            app.state.borrow_mut().task = Some(dir.clone());
+            ui.set_directory(dir.display().to_string().into());
+            ui.set_has_task(true);
+            ui.set_ready(true);
+            ui.invoke_select_tool("recursive-extract".into());
+            ui.invoke_select_tool("directory-organizer".into());
+            assert!(
+                ui.get_ready(),
+                "任务、配置与目录都没变，切工具往返后计划必须仍可执行：status={}",
+                ui.get_status()
+            );
+            assert!(
+                !ui.get_status().contains("已改变"),
+                "不得谎报规则或目录已改变：{}",
+                ui.get_status()
+            );
+            let _ = std::fs::remove_dir_all(&dir);
+        })
+        .unwrap();
+    }
+    // 覆盖 U-11（切工具回到默认面板；共享面板索引不得停留在另一工具才有的面板）
+    #[test]
+    fn switching_tools_resets_shared_panel_to_default() {
+        with_gui(|app| {
+            let ui = &app.ui;
+            ui.set_panel(2);
+            ui.invoke_select_tool("recursive-extract".into());
+            assert_eq!(
+                ui.get_panel(),
+                0,
+                "递归解压没有第三面板，panel=2 会让内容区整块空白"
+            );
+            ui.set_panel(1);
+            ui.invoke_select_tool("directory-organizer".into());
+            assert_eq!(
+                ui.get_panel(),
+                0,
+                "切回目录整理必须回到默认面板「处理规则」"
+            );
+        })
+        .unwrap();
+    }
+    // 覆盖 C-11（已结束任务不得谎报「规则或目录已改变」，状态须如实）
+    #[test]
+    fn switching_back_to_finished_task_reports_finished_status() {
+        with_gui(|app| {
+            let ui = &app.ui;
+            let dir = temp_test_dir("switch-finished");
+            let root = crate::fsutil::normalize_root(&dir).unwrap();
+            {
+                let db = Database::create(&dir).unwrap();
+                db.set("root", &crate::fsutil::path_string(&root).unwrap())
+                    .unwrap();
+                db.set("config", &app.state.borrow().config.clone())
+                    .unwrap();
+                db.set("status", &"finished").unwrap();
+            }
+            app.state.borrow_mut().task = Some(dir.clone());
+            ui.set_directory(dir.display().to_string().into());
+            ui.set_has_task(true);
+            ui.invoke_select_tool("recursive-extract".into());
+            ui.invoke_select_tool("directory-organizer".into());
+            assert!(!ui.get_ready(), "已结束的任务不得重新点亮执行");
+            assert!(
+                ui.get_status().contains("已结束"),
+                "任务只是已结束，状态必须如实说明而不是谎报改动：{}",
+                ui.get_status()
+            );
+            let _ = std::fs::remove_dir_all(&dir);
         })
         .unwrap();
     }
