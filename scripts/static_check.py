@@ -333,6 +333,21 @@ def shell_syntax() -> str:
     )
 
 
+def ps1_utf8_bom() -> str:
+    # 反证（2026-09-19，run 35430517207 与 zh-CN 本机）：Windows PowerShell 5.1 对无 BOM 的
+    # .ps1 按 ANSI 代码页解码，在 cp936/cp932 等多字节代码页下中文注释会吞掉后续换行
+    # （fetch-7zip.ps1 实测 83 行→81 行），把下一行代码并进注释而静默失效——该文件的
+    # `$previousEap = $ErrorActionPreference` 即如此丢失，finally 引用未赋值变量报错；
+    # CI 的 en-US/cp1252 是单字节代码页，不吞换行，故 CI 绿色掩盖了此缺陷。
+    # 带 BOM 后 PowerShell 5.1 一律按 UTF-8 解码，与文件实际编码一致。
+    scripts = sorted((ROOT / "scripts").glob("*.ps1"))
+    missing = [path.name for path in scripts if not path.read_bytes().startswith(b"\xef\xbb\xbf")]
+    if missing:
+        detail = f"scripts/*.ps1 必须带 UTF-8 BOM（否则多字节 ANSI 代码页下会被误解码）：{missing}"
+        raise AssertionError(detail)
+    return f"{len(scripts)} 个 .ps1 均带 UTF-8 BOM；PowerShell 5.1 按 UTF-8 解码，不受 ANSI 代码页影响。"
+
+
 # text[i] 指向 '#'：解析 #[...] 与 #![...] 属性（括号配对，允许嵌套括号）。
 # 返回 (属性体如 'cfg(not(windows))' 或 'ignore = "..."', 结束下标+1)；不是属性则 None。
 def _attr_body(text: str, i: int) -> tuple[str, int] | None:
@@ -865,6 +880,7 @@ for name, fn in [
     ("rust_lexical", rust_lexical),
     ("sql_syntax", sql_syntax),
     ("shell_syntax", shell_syntax),
+    ("ps1_utf8_bom", ps1_utf8_bom),
     ("test_baseline", test_baseline),
     ("slint_layout_width", slint_layout_width),
     ("slint_colors", slint_colors),
