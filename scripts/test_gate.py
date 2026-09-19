@@ -243,7 +243,8 @@ def _python_quality_stages(results: list[StageResult]) -> None:
             [sys.executable, "-m", "vulture", "scripts", "typings", "--min-confidence", "100"],
         ),
         ("pyquality-bandit", "bandit", [sys.executable, "-m", "bandit", "-r", "scripts", "-s", "B404,B603", "-q"]),
-        ("pyquality-pip-audit", "pip_audit", [sys.executable, "-m", "pip-audit", "-r", "scripts/requirements-dev.txt"]),
+        # pip-audit 的模块名是下划线形式 pip_audit（连字符只是 console script 名）。
+        ("pyquality-pip-audit", "pip_audit", [sys.executable, "-m", "pip_audit", "-r", "scripts/requirements-dev.txt"]),
     ]
     for name, module, argv in stages:
         if importlib.util.find_spec(module) is None:
