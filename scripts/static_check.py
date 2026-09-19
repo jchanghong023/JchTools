@@ -53,9 +53,11 @@ with contextlib.suppress(AttributeError):
 _parse_json: Callable[[str], object] = json.loads
 _parse_toml: Callable[[str], object] = tomllib.loads
 _module_attr: Callable[[object, str], object] = getattr
-# rules.json 单条 choice 规则至少要有的选项数；bash「命令不存在」的退出码。
+# rules.json 单条 choice 规则至少要有的选项数；bash「命令不存在」的退出码；
+# 非 ASCII 判定阈值（0x00-0x7F 在 UTF-8 与任何 ANSI 单字节代码页下解码一致）。
 _MIN_CHOICE_COUNT = 2
 _BASH_COMMAND_NOT_FOUND = 127
+_ASCII_LIMIT = 0x80
 
 
 def _is_str(value: object) -> TypeIs[str]:
@@ -339,13 +341,19 @@ def ps1_utf8_bom() -> str:
     # （fetch-7zip.ps1 实测 83 行→81 行），把下一行代码并进注释而静默失效——该文件的
     # `$previousEap = $ErrorActionPreference` 即如此丢失，finally 引用未赋值变量报错；
     # CI 的 en-US/cp1252 是单字节代码页，不吞换行，故 CI 绿色掩盖了此缺陷。
-    # 带 BOM 后 PowerShell 5.1 一律按 UTF-8 解码，与文件实际编码一致。
+    # 带 BOM 后 PowerShell 5.1 一律按 UTF-8 解码，与文件实际编码一致；
+    # 纯 ASCII 文件不在此列：其字节在 ANSI 与 UTF-8 下解码结果相同，本就不受该缺陷影响。
     scripts = sorted((ROOT / "scripts").glob("*.ps1"))
-    missing = [path.name for path in scripts if not path.read_bytes().startswith(b"\xef\xbb\xbf")]
+    missing: list[str] = []
+    for path in scripts:
+        raw = path.read_bytes()
+        if raw.startswith(b"\xef\xbb\xbf") or all(byte < _ASCII_LIMIT for byte in raw):
+            continue
+        missing.append(path.name)
     if missing:
-        detail = f"scripts/*.ps1 必须带 UTF-8 BOM（否则多字节 ANSI 代码页下会被误解码）：{missing}"
+        detail = f"scripts/*.ps1 含非 ASCII 内容时必须带 UTF-8 BOM（否则多字节 ANSI 代码页下会被误解码）：{missing}"
         raise AssertionError(detail)
-    return f"{len(scripts)} 个 .ps1 均带 UTF-8 BOM；PowerShell 5.1 按 UTF-8 解码，不受 ANSI 代码页影响。"
+    return f"{len(scripts)} 个 .ps1 均带 UTF-8 BOM 或为纯 ASCII；PowerShell 5.1 解码不受 ANSI 代码页影响。"
 
 
 # text[i] 指向 '#'：解析 #[...] 与 #![...] 属性（括号配对，允许嵌套括号）。
