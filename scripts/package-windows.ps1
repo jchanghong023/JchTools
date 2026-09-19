@@ -97,24 +97,15 @@ foreach ($name in @('7z.exe','7z.dll')) {
     if (Test-Path -LiteralPath (Join-Path $folder "resources\7zip\$name")) {throw "Engine executable leaked into the package: $name"}
 }
 if (-not (Test-Path -LiteralPath (Join-Path $folder 'resources\7zip\manifest.json'))) {throw 'Engine manifest is missing from the package.'}
-$zip = "$folder.zip"
-# Compress-Archive 逐条目写入 LastWriteTime；早于 1980-01-01（ZIP DOS 纪元）的时间无法
-# 转换会直接失败。cargo registry 抽取的 crate 许可证常保留 tarball 的古董 mtime（实测
-# 1970/1973 等），这里把暂存副本里过旧的时间规范化到当前时间；原始 registry 文件不受影响。
-$zipEpoch = [datetime]::new(1980, 1, 1, 0, 0, 0, [System.DateTimeKind]::Utc)
-foreach ($item in (Get-ChildItem -LiteralPath $folder -Recurse -Force)) {
-    if ($item.LastWriteTimeUtc -lt $zipEpoch) { $item.LastWriteTime = Get-Date }
-}
-Compress-Archive -LiteralPath $folder -DestinationPath $zip -CompressionLevel Optimal
-Write-Host "Created: $zip"
-Write-Host 'End users extract this ZIP and run JchTools.exe; no separate 7-Zip installation.'
-
 # ===== 安装包（P-05/E-04）：Inno Setup 双形态交付的第二产物 =====
 # ISCC 不可用时如实标注 NOT RUN 并继续产出便携 ZIP（CI 负责装 Inno Setup；本地缺件不阻断）。
+# 安装包先于 ZIP 构建：BUILD-INFO.json 需要记录安装包阶段的真实结果，且必须在
+# Compress-Archive 之前写入 $folder，否则不会进入便携 ZIP（此前时序相反导致两份
+# 产物都不含构建记录，NOT RUN/NOT VERIFIED 标注只剩 CI 日志可见）。
 $version = (Select-String -LiteralPath 'Cargo.toml' -Pattern '^version\s*=\s*"([^"]+)"' | Select-Object -First 1).Matches[0].Groups[1].Value
 $setupSummary = 'NOT RUN (ISCC not found on this machine; CI release job builds the installer)'
 # Get-Command 找不到 ISCC 时返回 $null；Set-StrictMode Latest 下直接取 .Source 会抛
-# PropertyNotFoundStrict 异常，导致「缺件不阻断」的降级路径（113 行）永远走不到。
+# PropertyNotFoundStrict 异常，导致「缺件不阻断」的降级路径永远走不到。
 $isccCmd = Get-Command ISCC.exe -ErrorAction SilentlyContinue
 $isccPath = if ($isccCmd) { $isccCmd.Source } else { $null }
 if (-not $isccPath) {
@@ -135,3 +126,14 @@ if ($isccPath) {
 }
 $info = @{created=(Get-Date).ToUniversalTime().ToString('o');rustc=(& rustc --version | Out-String).Trim();tests= $(if($SkipTests){'NOT RUN'}else{'cargo tests and real-engine archive tests passed on this build machine'});installer=$setupSummary;windows_ui_manual='NOT VERIFIED BY THIS SCRIPT';multi_tb_benchmark='NOT VERIFIED BY THIS SCRIPT';source_validation='See git history and CI runs for validation evidence.'}
 [IO.File]::WriteAllText((Join-Path $folder 'BUILD-INFO.json'),($info | ConvertTo-Json -Depth 5),$utf8)
+$zip = "$folder.zip"
+# Compress-Archive 逐条目写入 LastWriteTime；早于 1980-01-01（ZIP DOS 纪元）的时间无法
+# 转换会直接失败。cargo registry 抽取的 crate 许可证常保留 tarball 的古董 mtime（实测
+# 1970/1973 等），这里把暂存副本里过旧的时间规范化到当前时间；原始 registry 文件不受影响。
+$zipEpoch = [datetime]::new(1980, 1, 1, 0, 0, 0, [System.DateTimeKind]::Utc)
+foreach ($item in (Get-ChildItem -LiteralPath $folder -Recurse -Force)) {
+    if ($item.LastWriteTimeUtc -lt $zipEpoch) { $item.LastWriteTime = Get-Date }
+}
+Compress-Archive -LiteralPath $folder -DestinationPath $zip -CompressionLevel Optimal
+Write-Host "Created: $zip"
+Write-Host 'End users extract this ZIP and run JchTools.exe; no separate 7-Zip installation.'

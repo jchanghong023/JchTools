@@ -306,7 +306,7 @@ def _fulltest_stages(results: list[StageResult]) -> None:
 def cmd_fulltest() -> int:
     if sys.platform != "win32":
         message = "fulltest 按 Windows 当前平台设计（acceptance.ps1 为 Windows 专用）；"
-        message += "Linux 侧请用 bash scripts/check-linux.sh"
+        message += "平台范围按合同 P-07 仅支持 Windows（原 Linux 验证入口已移除）"
         print(message)
         return 2
     results: list[StageResult] = []
@@ -401,7 +401,9 @@ def _stage_remote_workflow(git: str, gh: str, workflow: str, *, watch_seconds: f
 
 def cmd_slowtest() -> int:
     if sys.platform != "win32":
-        message = "slowtest 按 Windows 主机设计（Windows fulltest + WSL 第二平台）；请在 Windows 上运行"
+        message = (
+            "slowtest 按 Windows 主机设计（Windows fulltest + 远程 CI）；请在 Windows 上运行（合同 P-07 仅 Windows）"
+        )
         print(message)
         return 2
     results: list[StageResult] = []

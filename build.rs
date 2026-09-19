@@ -402,8 +402,8 @@ fn main() {
         }
     }
     let manifest_dir = std::path::PathBuf::from(cargo_env("CARGO_MANIFEST_DIR"));
-    // src/engine_bundle.rs 无条件 include! 这个生成文件，所以非 Windows 目标（check-linux.sh / linux-core CI）
-    // 也必须生成；没有引擎时内容为空，只影响内嵌释放能力。
+    // src/engine_bundle.rs 无条件 include! 这个生成文件，所以非 Windows 目标
+    // 也必须生成；没有引擎时内容为空，只影响内嵌释放能力（平台范围按 P-07 仅 Windows）。
     embed_engine(&manifest_dir);
     if std::env::var("CARGO_CFG_TARGET_OS").as_deref() == Ok("windows") {
         println!("cargo:rerun-if-changed=resources/windows.manifest");

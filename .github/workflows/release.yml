@@ -50,5 +50,8 @@ jobs:
           $lines = @($zips[0], $setups[0]) | ForEach-Object {
             "$((Get-FileHash -Algorithm SHA256 $_.FullName).Hash.ToLower()) *$($_.Name)"
           }
-          $lines | Set-Content -Path $sums -NoNewline
+          # Set-Content -NoNewline 对管道多对象不做任何分隔（PS 5.1 与 7 实测），
+          # 直接管道会把两行哈希粘连成一行、sha256sum -c 全部失败；必须先 join。
+          # 不用去掉 -NoNewline 的写法：pwsh 默认写 CRLF，同样会让 Git Bash 校验失败。
+          ($lines -join "`n") | Set-Content -Path $sums -NoNewline
           gh release create $tag $zips[0].FullName $setups[0].FullName $sums --title $name --generate-notes --target ${{ github.sha }}

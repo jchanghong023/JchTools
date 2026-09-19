@@ -16,7 +16,7 @@ No font files are redistributed; Windows system fonts are referenced by family n
 
 ## 7-Zip 26.03
 
-The source delivery contains **no 7-Zip binaries** because the build environment could not download them. `scripts/fetch-7zip.ps1` downloads the fixed official full x64 MSI and corresponding source. The portable application uses unmodified `7z.exe` and `7z.dll` as a separate local process. It does not use the limited `7za` as a substitute for full RAR support.
+The source repository intentionally contains no 7-Zip binaries: engine executables are kept out of git and out of the delivered packages by policy (contract E-01), not because the build environment could not download them. `scripts/fetch-7zip.ps1` fetches the fixed official full x64 MSI and corresponding source on a connected build machine (upstream SHA-256 verification, official domains only). The portable application uses unmodified `7z.exe` and `7z.dll` as a separate local process. It does not use the limited `7za` as a substitute for full RAR support.
 
 7-Zip uses LGPL-2.1-or-later for most code, with BSD portions and the unRAR restriction. The packaging script includes upstream license texts and the corresponding complete source archive alongside the engine. Publisher should retain this folder and the generated manifest. Users must not be prevented from exercising third-party license rights; the manifest integrity mechanism is open source and can be regenerated for a lawful replacement engine.
 

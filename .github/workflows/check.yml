@@ -17,7 +17,7 @@ jobs:
       # 工具链固定：与 Cargo.toml 的 rust-version 同步更新。
       - uses: dtolnay/rust-toolchain@1.98.1
         with:
-          components: clippy
+          components: clippy, rustfmt
       - name: Check PowerShell syntax
         shell: pwsh
         run: |
@@ -32,20 +32,36 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: "3.13"
-      # defusedxml 供 static_check 顶层导入解析 resources/windows.manifest（S314）：
-      # Windows runner 预装 Python 无此包，缺装会让 static_check 直接 ImportError
-      #（反证：run 35407626046 windows Static checks ModuleNotFoundError）。
-      - name: Install defusedxml
+      # static_check 的运行时依赖（defusedxml 解析 manifest、pygments 做 rust_lexical）：
+      # Windows runner 预装 Python 缺这些包。此前只装 defusedxml 导致 rust_lexical 在
+      # CI 被 SKIP（本地装齐则实际执行，覆盖不对称）；按 requirements-dev.txt 整体安装。
+      - name: Install Python script dependencies
         shell: pwsh
-        run: python -m pip install --quiet defusedxml
+        run: python -m pip install --quiet -r scripts/requirements-dev.txt
       - name: Static checks
         shell: pwsh
         run: python scripts/static_check.py
+      # rustfmt 门禁：与本地 fastcheck/fulltest 同一口径（cargo fmt --all -- --check）。
+      - name: Rustfmt check
+        shell: pwsh
+        run: cargo fmt --all -- --check
       # clippy 零告警硬门禁：默认特性（含 GUI 与 Windows 专属代码）与
       # --no-default-features（无 GUI 核心库）双侧覆盖；任何告警即失败。
       - name: Clippy zero-warning gate (default features)
         shell: pwsh
-        run: cargo clippy --all-targets -- -D warnings
+        run: |
+          # 本步是 CI 对默认特性的首次冷编译：Slint 布局绑定环警告由 build script
+          # 输出，-D warnings 管不住它，须显式扫描编译日志（与 acceptance.ps1 /
+          # fastcheck 同口径；增量缓存不重放旧警告，故挂在首个冷编译步骤上）。
+          $log = Join-Path $env:RUNNER_TEMP 'clippy-default.log'
+          cargo clippy --all-targets -- -D warnings *> $log
+          Get-Content -LiteralPath $log
+          if ($LASTEXITCODE -ne 0) { throw "clippy (default features) failed: $LASTEXITCODE" }
+          $hits = @(Select-String -LiteralPath $log -Pattern 'binding loop' -SimpleMatch)
+          if ($hits.Count -gt 0) {
+            $hits | ForEach-Object {"$($_.LineNumber): $($_.Line)"} | Write-Host
+            throw '构建输出出现 binding loop 警告（AGENTS 第 4 节禁止）'
+          }
       - name: Clippy zero-warning gate (no default features)
         shell: pwsh
         run: cargo clippy --all-targets --no-default-features -- -D warnings
