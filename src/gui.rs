@@ -368,6 +368,12 @@ fn refresh(ui: &AppWindow, state: &State) {
     });
 }
 fn invalidate(ui: &AppWindow, tool: Tool) {
+    // 运行中不得改写状态文案（C-11 如实展示）：规则/目录/工具变化在任务收尾后由
+    // Done/Failed/Cancelled 事件按最终状态重算；运行期改写会把「执行中」谎报成
+    // 「已结束/已就绪」。ready 在任务启动时已置 false，无需在此重复。
+    if ui.get_busy() {
+        return;
+    }
     ui.set_ready(false);
     if tool == Tool::Extract {
         if ui.get_directory().is_empty() {
@@ -400,6 +406,11 @@ fn invalidate(ui: &AppWindow, tool: Tool) {
 /// 重算，而不是一律 invalidate——用户可能只是重新输入了同一路径或切去看了一眼
 /// 另一个工具，不应清掉仍可执行的计划。
 fn sync_ready_after_directory(ui: &AppWindow, state: &State) {
+    // 同 invalidate 的 busy 门禁：运行中的状态栏归任务事件管，目录输入与工具切换
+    // 不得触发 classify_plan_ready 把执行中任务改写为「已结束/可执行」。
+    if ui.get_busy() {
+        return;
+    }
     if ui.get_has_task() && state.tool == Tool::Organizer {
         if let Some(task) = state.task.clone() {
             let outcome = classify_plan_ready(ui, state, &task);
@@ -1390,7 +1401,13 @@ pub fn run_with_engine_overrides(
         let state = state.clone();
         ui.on_choose_directory(move || {
             if let Some(ui) = weak.upgrade() {
-                let mut dialog = rfd::FileDialog::new().set_title("选择需要整理的目录");
+                // 两个工具页共用此回调：标题按当前工具区分，不得把「整理」文案带到解压页。
+                let mut dialog =
+                    rfd::FileDialog::new().set_title(if state.borrow().tool == Tool::Extract {
+                        "选择需要解压的目录"
+                    } else {
+                        "选择需要整理的目录"
+                    });
                 // 已经输入过目录时从这里开始，省掉用户重新导航一遍。
                 let entered = PathBuf::from(ui.get_directory().as_str());
                 if entered.is_dir() {
@@ -2279,6 +2296,59 @@ mod gui_tests {
             assert!(
                 rule_value_at(ui, "archive_delete").is_none(),
                 "解压规则不得出现在目录整理面板"
+            );
+        })
+        .unwrap();
+    }
+    // 覆盖 C-11, U-11（回归 2026-09-19：运行中切换工具不得谎报「任务已结束」）。
+    // 复现：确认执行的同一拍 busy 已同步置位、任务库状态已是 executing，此时切走
+    // 再切回工具，on_select_tool → sync_ready_after_directory → classify_plan_ready
+    // 会把一切非 ready 状态归为 Finished，状态栏谎报「上次任务已结束」；切到递归
+    // 解压方向则谎报「目录已就绪」。运行中文案由任务事件负责，工具切换不得改写。
+    #[test]
+    fn switching_tools_while_busy_keeps_running_status_text() {
+        struct NoRecycle;
+        impl platform::Recycler for NoRecycle {
+            fn recycle(&self, _: &Path) -> Result<(), platform::RecycleFailure> {
+                Ok(())
+            }
+        }
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path().join("data");
+        std::fs::create_dir(&root).unwrap();
+        std::fs::write(root.join("a.txt"), b"same").unwrap();
+        std::fs::write(root.join("b.txt"), b"same").unwrap();
+        let state_dir = tmp.path().join("state");
+        std::fs::create_dir(&state_dir).unwrap();
+        let prepared = engine::prepare_with(
+            &root,
+            Config::default(),
+            Context::default(),
+            &state_dir,
+            Arc::new(NoRecycle),
+        )
+        .unwrap();
+        // 任务执行中：apply_with 执行期任务库状态为 executing（非 ready）。
+        Database::open_existing(&prepared.directory)
+            .unwrap()
+            .set("status", &"executing".to_string())
+            .unwrap();
+        let task = prepared.directory;
+        let directory = root.to_string_lossy().to_string();
+        with_gui(move |app| {
+            let ui = &app.ui;
+            app.state.borrow_mut().task = Some(task.clone());
+            ui.set_has_task(true);
+            ui.set_busy(true);
+            ui.set_directory(directory.clone().into());
+            ui.set_status("正在执行已确认的整理计划".into());
+            ui.invoke_select_tool("recursive-extract".into());
+            ui.invoke_select_tool("directory-organizer".into());
+            assert!(ui.get_busy(), "切换工具不得改变运行状态");
+            assert_eq!(
+                ui.get_status().as_str(),
+                "正在执行已确认的整理计划",
+                "运行中切换工具不得把状态文案改写为「已结束/已就绪」（C-11 如实展示）"
             );
         })
         .unwrap();

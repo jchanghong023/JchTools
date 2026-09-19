@@ -161,13 +161,13 @@ fn plan_execution_confirmation_flow_runs_end_to_end() {
     );
 }
 
-// 覆盖 C-01（第二段确认的「我已确认」门禁）。该门禁是 Slint 声明式绑定，
+// 覆盖 X-02/C-01（解压一段确认与整理第二段确认共用的「我已确认」门禁）。该门禁是 Slint 声明式绑定，
 // 无头测试只能直接调用回调、绕不过它，因此这里锁定声明本身不被误删/改弱。
 #[test]
 fn acknowledge_gate_is_declared_in_ui() {
     let ui = include_str!("../ui/app.slint");
     assert!(
         ui.contains("enabled: root.confirm-kind == 3 || root.acknowledge;"),
-        "确认按钮的「我已确认」门禁声明缺失或被改动（C-07）"
+        "确认按钮的「我已确认」门禁声明缺失或被改动（C-01）"
     );
 }
