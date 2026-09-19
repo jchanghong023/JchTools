@@ -277,6 +277,438 @@ fn quarantined_archive_reason_is_recorded_in_log() {
     );
 }
 
+/// 恒成功引擎：任何子命令都 0 退出且无输出（0 条目 → 解压「成功」）。
+/// 与 dispose_failure_does_not_abort_remaining_archives 的内联版本同构，供分卷回归复用。
+fn ok_engine(dir: &Path) -> PathBuf {
+    #[cfg(windows)]
+    let (path, bytes) = (
+        dir.join("fake-ok.bat"),
+        b"@exit /b 0
+"
+        .as_slice(),
+    );
+    #[cfg(not(windows))]
+    let (path, bytes) = (
+        dir.join("fake-ok.sh"),
+        b"#!/bin/sh
+exit 0
+"
+        .as_slice(),
+    );
+    fs::write(&path, bytes).unwrap();
+    #[cfg(not(windows))]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        fs::set_permissions(&path, fs::Permissions::from_mode(0o755)).unwrap();
+    }
+    path
+}
+
+/// 恒成功引擎，且不带 -ba 的 `l` 子命令输出带多卷标志的档案头块（`--` 与
+/// `----------` 之间）：模拟 7-Zip 对真多卷包的档案级 -slt 输出（zip 的
+/// Volume Index 仅 IsMultiVol 时出现、rar 的 Is Volume 仅卷标志置位时出现），
+/// 用于在无真实引擎环境驱动「档案级多卷佐证为真 → 宽命名兄弟卷整组处置」路径。
+/// 带 -ba 的条目列表与解压子命令静默成功（0 条目）。
+fn volume_index_engine(dir: &Path) -> PathBuf {
+    #[cfg(windows)]
+    let (path, body) = (
+        dir.join("fake-volume-list.bat"),
+        concat!(
+            "@echo off
+",
+            "if not \"%~1\"==\"l\" exit /b 0
+",
+            "if \"%~3\"==\"-ba\" exit /b 0
+",
+            "echo --
+",
+            "echo Type = rar
+",
+            "echo Multivolume = +
+",
+            "echo Volume Index = 0
+",
+            "echo ----------
+",
+            "exit /b 0
+",
+        ),
+    );
+    #[cfg(not(windows))]
+    let (path, body) = (
+        dir.join("fake-volume-list.sh"),
+        concat!(
+            "#!/bin/sh
+",
+            "[ \"$1\" = \"l\" ] || exit 0
+",
+            "[ \"$3\" = \"-ba\" ] && exit 0
+",
+            "printf '%s\n' '--' 'Type = rar' 'Multivolume = +' 'Volume Index = 0' '----------'
+",
+            "exit 0
+",
+        ),
+    );
+    fs::write(&path, body).unwrap();
+    #[cfg(not(windows))]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        fs::set_permissions(&path, fs::Permissions::from_mode(0o755)).unwrap();
+    }
+    path
+}
+
+/// 伪造注释头假引擎：不带 -ba 的 `l` 输出带多卷键的档案注释块（`{`…`}` 内），
+/// 模拟 crafted 档案把 `Volumes = 9` 等键写进 zip/rar 档案注释、借 7-Zip 原样
+/// 输出伪造多卷佐证的对抗形态。修复后注释块内的键不得参与判定。
+fn comment_forging_engine(dir: &Path) -> PathBuf {
+    #[cfg(windows)]
+    let (path, body) = (
+        dir.join("fake-comment-forgery.bat"),
+        concat!(
+            "@echo off
+",
+            "if not \"%~1\"==\"l\" exit /b 0
+",
+            "if \"%~3\"==\"-ba\" exit /b 0
+",
+            "echo --
+",
+            "echo Type = rar
+",
+            "echo Comment = 
+",
+            "echo {
+",
+            "echo Volumes = 9
+",
+            "echo Volume Index = 0
+",
+            "echo Multivolume = +
+",
+            "echo }
+",
+            "echo ----------
+",
+            "exit /b 0
+",
+        ),
+    );
+    #[cfg(not(windows))]
+    let (path, body) = (
+        dir.join("fake-comment-forgery.sh"),
+        concat!(
+            "#!/bin/sh
+",
+            "[ \"$1\" = \"l\" ] || exit 0
+",
+            "[ \"$3\" = \"-ba\" ] && exit 0
+",
+            "printf '%s\n' '--' 'Type = rar' 'Comment = ' '{' 'Volumes = 9' 'Volume Index = 0' 'Multivolume = +' '}' '----------'
+",
+            "exit 0
+",
+        ),
+    );
+    fs::write(&path, body).unwrap();
+    #[cfg(not(windows))]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        fs::set_permissions(&path, fs::Permissions::from_mode(0o755)).unwrap();
+    }
+    path
+}
+
+// 覆盖 X-05, S-01（回归 2026-09-19：crafted 档案注释伪造多卷佐证）。
+// 7-Zip 把档案注释在 -slt 头块内以 {...} 原样逐行输出；注释里的
+// `Volumes = 9` 等键若参与佐证判定，恶意档案即可让同主干无辜 .rNN/.zNN
+// 随成功包被回收甚至永久删除。注释块内的键必须被忽略。真实引擎同型回归见
+// tests/archive.rs real_engine_forged_comment_cannot_enable_sweep。
+#[test]
+fn forged_comment_corroboration_is_ignored() {
+    let tmp = fixture("forged-comment");
+    let root = tmp.path().join("data");
+    write_with_mtime(&root.join("report.rar"), b"standalone rar", 100);
+    write_with_mtime(&root.join("report.r00"), b"innocent bystander", 200);
+    let bin = tmp.path().join("bin");
+    let result = engine::extract_run_at(
+        &root,
+        Config::default(),
+        Context::default(),
+        &state_of(&tmp),
+        Some(&comment_forging_engine(tmp.path())),
+        Arc::new(MoveRecycle::new(bin.clone())),
+    )
+    .unwrap();
+    assert_eq!(result.summary.archives_ok, 1);
+    assert!(
+        root.join("report.r00").exists(),
+        "档案注释里伪造的多卷键不得成为处置佐证"
+    );
+    let recycled: Vec<String> = fs::read_dir(&bin)
+        .unwrap()
+        .filter_map(std::result::Result::ok)
+        .map(|e| e.file_name().to_string_lossy().into_owned())
+        .collect();
+    assert!(
+        !recycled.iter().any(|n| n.contains("report.r00")),
+        "无辜 .r00 不得进入回收：{recycled:?}"
+    );
+}
+
+/// 伪造注释头假引擎（嵌套 } 变体）：7-Zip 把档案注释以 {...} 原样逐行输出，
+/// 注释内容本身可以含 } 行——若解析器遇到注释内的 } 就退出注释跳过，其后
+/// 攻击者控制的伪造键会被当作档案头键解析。修复后 } 结束注释的同时必须结束
+/// 档案头块（真实输出中 Comment 是头块最后一个字段，键不会出现在其后）。
+fn comment_escape_forging_engine(dir: &Path) -> PathBuf {
+    #[cfg(windows)]
+    let (path, body) = (
+        dir.join("fake-comment-escape.bat"),
+        concat!(
+            "@echo off
+",
+            "if not \"%~1\"==\"l\" exit /b 0
+",
+            "if \"%~3\"==\"-ba\" exit /b 0
+",
+            "echo --
+",
+            "echo Type = rar
+",
+            "echo Comment = 
+",
+            "echo {
+",
+            "echo }
+",
+            "echo Volume Index = 0
+",
+            "echo Volumes = 9
+",
+            "echo Multivolume = +
+",
+            "echo }
+",
+            "echo ----------
+",
+            "exit /b 0
+",
+        ),
+    );
+    #[cfg(not(windows))]
+    let (path, body) = (
+        dir.join("fake-comment-escape.sh"),
+        concat!(
+            "#!/bin/sh
+",
+            "[ \"$1\" = \"l\" ] || exit 0
+",
+            "[ \"$3\" = \"-ba\" ] && exit 0
+",
+            "printf '%s\n' '--' 'Type = rar' 'Comment = ' '{' '}' 'Volume Index = 0' 'Volumes = 9' 'Multivolume = +' '}' '----------'
+",
+            "exit 0
+",
+        ),
+    );
+    fs::write(&path, body).unwrap();
+    #[cfg(not(windows))]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        fs::set_permissions(&path, fs::Permissions::from_mode(0o755)).unwrap();
+    }
+    path
+}
+
+// 覆盖 X-05, S-01（回归 2026-09-19：注释内 } 行绕过注释跳过——crafted 对抗变体）。
+#[test]
+fn forged_comment_with_brace_line_cannot_enable_sweep() {
+    let tmp = fixture("forged-comment-brace");
+    let root = tmp.path().join("data");
+    write_with_mtime(&root.join("report.rar"), b"standalone rar", 100);
+    write_with_mtime(&root.join("report.r00"), b"innocent bystander", 200);
+    let bin = tmp.path().join("bin");
+    let result = engine::extract_run_at(
+        &root,
+        Config::default(),
+        Context::default(),
+        &state_of(&tmp),
+        Some(&comment_escape_forging_engine(tmp.path())),
+        Arc::new(MoveRecycle::new(bin.clone())),
+    )
+    .unwrap();
+    assert_eq!(result.summary.archives_ok, 1);
+    assert!(
+        root.join("report.r00").exists(),
+        "注释内 }} 行后的伪造键不得成为处置佐证"
+    );
+}
+
+// 覆盖 X-05, S-01（回归 2026-09-19：宽命名兄弟卷误处置——zip 变体）。
+// 完整单卷 zip 替换旧分卷集合后残留的同主干 .z01 不是该包的分卷成员：处置
+// （不可逆，含永久删除模式）必须以引擎档案级属性证实多卷（条目级 Volume Index
+// 对 zip 单卷包也无条件输出，不能作证），否则无辜文件会随成功包一并被回收甚至
+// 永久删除。真实引擎下的同型回归见 tests/archive.rs real_engine_standalone_zip。
+#[test]
+fn stale_z_sibling_is_not_disposed_with_standalone_zip() {
+    let tmp = fixture("stale-z");
+    let root = tmp.path().join("data");
+    write_with_mtime(&root.join("report.zip"), b"standalone complete zip", 100);
+    write_with_mtime(
+        &root.join("report.z01"),
+        b"stale fragment of an old set",
+        200,
+    );
+    let bin = tmp.path().join("bin");
+    let result = engine::extract_run_at(
+        &root,
+        Config::default(),
+        Context::default(),
+        &state_of(&tmp),
+        Some(&ok_engine(tmp.path())),
+        Arc::new(MoveRecycle::new(bin.clone())),
+    )
+    .unwrap();
+    assert_eq!(result.summary.archives_ok, 1);
+    assert!(
+        !root.join("report.zip").exists(),
+        "成功原包按 X-05 移入回收站"
+    );
+    assert!(
+        root.join("report.z01").exists(),
+        "无分卷佐证的同主干 .z01 是无辜文件，不得随包处置"
+    );
+    let recycled: Vec<String> = fs::read_dir(&bin)
+        .unwrap()
+        .filter_map(std::result::Result::ok)
+        .map(|e| e.file_name().to_string_lossy().into_owned())
+        .collect();
+    assert!(
+        recycled.iter().any(|n| n.ends_with("report.zip")),
+        "原包应进入回收：{recycled:?}"
+    );
+    assert!(
+        !recycled.iter().any(|n| n.contains("report.z01")),
+        "无辜 .z01 不得进入回收：{recycled:?}"
+    );
+    // 无佐证保留必须有用户可见日志（否则残留无声、用户不可感知）。
+    let db = jchtools::db::Database::open(&result.directory).unwrap();
+    let events = db.event_page(0, 100).unwrap();
+    assert!(
+        events.iter().any(|line| line.contains("未能证实分卷关系")),
+        "无佐证保留兄弟卷必须留日志：{events:?}"
+    );
+}
+
+// 覆盖 X-05, S-01（回归 2026-09-19：宽命名兄弟卷误处置——旧式 RAR 变体）。
+// 同上，但走 oldrar 分支：完整单卷 report.rar 旁边的同主干 .r00 不因命名巧合
+// 被认定为其分卷成员。
+#[test]
+fn stale_r_sibling_is_not_disposed_with_standalone_rar() {
+    let tmp = fixture("stale-r");
+    let root = tmp.path().join("data");
+    write_with_mtime(&root.join("report.rar"), b"standalone complete rar", 100);
+    write_with_mtime(
+        &root.join("report.r00"),
+        b"stale fragment of an old set",
+        200,
+    );
+    let bin = tmp.path().join("bin");
+    let result = engine::extract_run_at(
+        &root,
+        Config::default(),
+        Context::default(),
+        &state_of(&tmp),
+        Some(&ok_engine(tmp.path())),
+        Arc::new(MoveRecycle::new(bin.clone())),
+    )
+    .unwrap();
+    assert_eq!(result.summary.archives_ok, 1);
+    assert!(
+        root.join("report.r00").exists(),
+        "无分卷佐证的同主干 .r00 是无辜文件，不得随包处置"
+    );
+    let recycled: Vec<String> = fs::read_dir(&bin)
+        .unwrap()
+        .filter_map(std::result::Result::ok)
+        .map(|e| e.file_name().to_string_lossy().into_owned())
+        .collect();
+    assert!(
+        !recycled.iter().any(|n| n.contains("report.r00")),
+        "无辜 .r00 不得进入回收：{recycled:?}"
+    );
+}
+
+// 覆盖 X-05（分卷佐证为真 → 兄弟卷整组处置）：条目带 Volume Index 的多卷包
+// （zip/rar/rar5 多卷时 7-Zip 才输出该字段）成功后兄弟卷必须一并处置，
+// 目录不残留压缩包（X 分区总体约束）。
+#[test]
+fn corroborated_volume_siblings_are_disposed_together() {
+    let tmp = fixture("corroborated");
+    let root = tmp.path().join("data");
+    write_with_mtime(&root.join("report.rar"), b"multi-volume main", 100);
+    write_with_mtime(&root.join("report.r00"), b"volume 0", 200);
+    write_with_mtime(&root.join("report.r01"), b"volume 1", 300);
+    let bin = tmp.path().join("bin");
+    let result = engine::extract_run_at(
+        &root,
+        Config::default(),
+        Context::default(),
+        &state_of(&tmp),
+        Some(&volume_index_engine(tmp.path())),
+        Arc::new(MoveRecycle::new(bin.clone())),
+    )
+    .unwrap();
+    assert_eq!(result.summary.archives_ok, 1);
+    assert!(
+        !root.join("report.rar").exists()
+            && !root.join("report.r00").exists()
+            && !root.join("report.r01").exists(),
+        "佐证为真的分卷组必须整组处置，目录不残留压缩包"
+    );
+    let recycled: Vec<String> = fs::read_dir(&bin)
+        .unwrap()
+        .filter_map(std::result::Result::ok)
+        .map(|e| e.file_name().to_string_lossy().into_owned())
+        .collect();
+    assert_eq!(
+        recycled.iter().filter(|n| n.contains("report.r")).count(),
+        3,
+        "主体与两个兄弟卷都进入回收：{recycled:?}"
+    );
+}
+
+// 覆盖 X-06（失败路径的宽命名兄弟卷仍整组隔离）：隔离是可逆改名而非删除；
+// 真 PKZIP/旧 RAR 分卷集失败时 7-Zip 常无法从主体确认成员关系，若失败路径也
+// 要求佐证，真兄弟卷会残留在原目录（.zNN/.rNN 不是扫描口径内的压缩包，永远
+// 不会再被处理）。宁可整组隔离（可还原、有日志），处置路径才设佐证门。
+#[test]
+fn failed_archive_still_quarantines_wide_named_siblings() {
+    let tmp = fixture("quarantine-wide");
+    let root = tmp.path().join("data");
+    write_with_mtime(&root.join("combo.zip"), b"corrupt standalone zip", 100);
+    write_with_mtime(&root.join("combo.z01"), b"possibly related fragment", 200);
+    let result = engine::extract_run_at(
+        &root,
+        Config::default(),
+        Context::default(),
+        &state_of(&tmp),
+        Some(&fake_engine(tmp.path())),
+        Arc::new(MoveRecycle::new(tmp.path().join("bin"))),
+    )
+    .unwrap();
+    assert_eq!(result.summary.archives_failed, 1);
+    assert!(
+        root.join("解压失败").join("combo.zip").exists(),
+        "失败主体必须移入「解压失败」（X-06）"
+    );
+    assert!(
+        root.join("解压失败").join("combo.z01").exists(),
+        "宽命名兄弟卷随主体整组隔离（可逆），不得残留在原目录"
+    );
+}
+
 // 覆盖 X-02, X-06（单包处置失败不得中止整个解压任务：逐包隔离，任务继续）
 #[test]
 fn dispose_failure_does_not_abort_remaining_archives() {

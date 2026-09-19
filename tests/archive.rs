@@ -684,3 +684,211 @@ fn long_path_hidden_member_is_stripped_and_archive_completes() {
         "成员可见后原包应按规则处置（complete 未被误置 false）"
     );
 }
+
+// 覆盖 X-05（成功的编号式分卷组整组处置）：真分卷集解压成功后所有卷一并回收，
+// 目录不残留压缩包；与 tests/split.rs 的 stale_* 回归共同锁定分卷组语义
+// （单卷包旁的无佐证同主干文件不得处置，佐证为真/命名精确的分卷组必须整组处置）。
+#[test]
+#[ignore = "Requires explicitly provided real 7-Zip engine"]
+fn successful_numbered_split_set_disposes_every_volume() {
+    let f = ArchiveFixture::new();
+    // 伪随机（LCG）数据不可压缩，确保 -v1k 真正切出多个卷（可压缩数据会压进单卷）。
+    let mut seed = 0x2545_F491_4F6C_DD1D_u64;
+    let mut random_bytes = std::iter::repeat_with(move || {
+        seed = seed
+            .wrapping_mul(6_364_136_223_846_793_005)
+            .wrapping_add(1_442_695_040_888_963_407);
+        u8::try_from((seed >> 33) & 0xff).unwrap()
+    });
+    for i in 0..6 {
+        let data: Vec<u8> = random_bytes.by_ref().take(1500).collect();
+        fs::write(f.input.join(format!("f{i}.txt")), data).unwrap();
+    }
+    f.pack(&f.root.join("split.zip"), &["-tzip", "-v1k"], &["."]);
+    let volumes = fs::read_dir(&f.root)
+        .unwrap()
+        .filter_map(std::result::Result::ok)
+        .filter(|e| e.file_name().to_string_lossy().starts_with("split.zip."))
+        .count();
+    assert!(volumes >= 2, "应生成至少两个分卷，实际 {volumes}");
+    let mut cfg = config();
+    cfg.archive_delete = ArchiveDispose::Recycle;
+    let result = f.run(cfg);
+    assert_eq!(result.summary.archives_failed, 0, "分卷集不得计入失败");
+    assert_eq!(result.summary.archives_ok, 1, "分卷组按一个包计数");
+    for i in 0..6 {
+        assert!(
+            f.root.join(format!("f{i}.txt")).exists(),
+            "成员 f{i}.txt 应解压落盘"
+        );
+    }
+    let left = fs::read_dir(&f.root)
+        .unwrap()
+        .filter_map(std::result::Result::ok)
+        .filter(|e| e.file_name().to_string_lossy().starts_with("split.zip."))
+        .count();
+    assert_eq!(
+        left, 0,
+        "成功分卷组的所有卷都不得残留在目录里（X-05 与 X 分区总体约束）"
+    );
+    let recycled = fs::read_dir(f.state.join("bin"))
+        .unwrap()
+        .filter_map(std::result::Result::ok)
+        .filter(|e| e.file_name().to_string_lossy().contains("split.zip."))
+        .count();
+    assert_eq!(recycled, volumes, "全部分卷应进入回收站");
+}
+
+// 覆盖 X-05, S-01（回归 2026-09-19 返工：zip 的条目级 Volume Index 无条件输出，
+// 单卷包也全为 0，不能作分卷佐证；佐证必须取档案级属性块）。真实引擎下完整独立的
+// report.zip 旁边残留的同主干 report.z01 不得随包处置（回收/永久删除均不可）。
+#[test]
+#[ignore = "Requires explicitly provided real 7-Zip engine"]
+fn real_engine_standalone_zip_keeps_stale_z_sibling() {
+    let f = ArchiveFixture::new();
+    fs::write(f.input.join("one.txt"), b"real standalone payload").unwrap();
+    fs::write(f.input.join("two.txt"), b"second member").unwrap();
+    f.archive(&f.root.join("report.zip"), "-tzip");
+    fs::write(
+        f.root.join("report.z01"),
+        b"stale fragment of a replaced split set",
+    )
+    .unwrap();
+    let mut cfg = config();
+    cfg.archive_delete = ArchiveDispose::Recycle;
+    let result = f.run(cfg);
+    assert_eq!(result.summary.archives_failed, 0);
+    assert_eq!(result.summary.archives_ok, 1);
+    assert!(
+        f.root.join("one.txt").exists() && f.root.join("two.txt").exists(),
+        "成员应正常解压落盘"
+    );
+    assert!(
+        !f.root.join("report.zip").exists(),
+        "成功原包按 X-05 移入回收站"
+    );
+    assert!(
+        f.root.join("report.z01").exists(),
+        "真实引擎下无档案级多卷佐证的同主干 .z01 是无辜文件，不得随包处置"
+    );
+    let bin = f.state.join("bin");
+    let recycled: Vec<String> = fs::read_dir(&bin)
+        .unwrap()
+        .filter_map(std::result::Result::ok)
+        .map(|e| e.file_name().to_string_lossy().into_owned())
+        .collect();
+    assert!(
+        recycled.iter().any(|n| n.ends_with("report.zip")),
+        "原包应进入回收：{recycled:?}"
+    );
+    assert!(
+        !recycled.iter().any(|n| n.contains("report.z01")),
+        "无辜 .z01 不得进入回收：{recycled:?}"
+    );
+}
+
+// 覆盖 X-05, S-01（回归 2026-09-19：crafted 档案注释伪造多卷佐证——真实引擎形态）。
+// zip 档案注释由 7-Zip 在 -slt 档案头块内以 {...} 原样逐行输出；把
+// `Volumes = 9` 写进注释若能骗过佐证判定，恶意档案即可让同主干无辜 .z01 随成功
+// 包处置（Permanent 模式即永久删除）。注释块内的键必须被忽略。
+#[test]
+#[ignore = "Requires explicitly provided real 7-Zip engine"]
+fn real_engine_forged_comment_cannot_enable_sweep() {
+    /// 给 zip 附加档案注释：注释是 EOCD 固定 22 字节之后的尾部字节，长度写在
+    /// EOCD 偏移 20..22（小端）。只改注释不改其余结构，7-Zip 照常列出与解压。
+    fn add_zip_comment(path: &std::path::Path, comment: &[u8]) {
+        let mut data = fs::read(path).unwrap();
+        let signature = [0x50u8, 0x4b, 0x05, 0x06];
+        let eocd = data
+            .windows(4)
+            .rposition(|window| window == signature)
+            .expect("zip EOCD 签名");
+        assert_eq!(
+            data.len(),
+            eocd + 22,
+            "测试前置：期望无既有注释的 EOCD 结尾"
+        );
+        let length = u16::try_from(comment.len()).expect("注释长度须在 u16 内");
+        data[eocd + 20] = (length & 0xff) as u8;
+        data[eocd + 21] = (length >> 8) as u8;
+        data.extend_from_slice(comment);
+        fs::write(path, data).unwrap();
+    }
+    let f = ArchiveFixture::new();
+    fs::write(f.input.join("one.txt"), b"payload").unwrap();
+    f.archive(&f.root.join("report.zip"), "-tzip");
+    add_zip_comment(
+        &f.root.join("report.zip"),
+        b"benign first line
+Volumes = 9
+Volume Index = 0
+Multivolume = +
+",
+    );
+    fs::write(f.root.join("report.z01"), b"innocent bystander").unwrap();
+    let mut cfg = config();
+    cfg.archive_delete = ArchiveDispose::Permanent;
+    let result = f.run(cfg);
+    assert_eq!(
+        result.summary.archives_failed, 0,
+        "带注释的合法 zip 不得失败"
+    );
+    assert_eq!(result.summary.archives_ok, 1);
+    assert!(
+        f.root.join("one.txt").exists(),
+        "成员应正常解压落盘（注释不影响解压）"
+    );
+    assert!(!f.root.join("report.zip").exists(), "成功原包按 X-05 处置");
+    assert!(
+        f.root.join("report.z01").exists(),
+        "档案注释里伪造的多卷键不得让无辜 .z01 被永久删除"
+    );
+}
+
+// 覆盖 X-05, S-01（回归 2026-09-19：注释内 } 行绕过注释跳过——真实引擎变体）。
+// 7-Zip 把档案注释以 {...} 原样输出，注释内容可含 } 行；若 } 只结束注释模式
+// 不结束档案头块，其后的伪造键会被当作头块键解析。真实输出中 Comment 是头块
+// 最后一个字段，} 结束注释时一并结束头块是 fail-closed 的。
+#[test]
+#[ignore = "Requires explicitly provided real 7-Zip engine"]
+fn real_engine_brace_in_comment_cannot_enable_sweep() {
+    fn add_zip_comment(path: &std::path::Path, comment: &[u8]) {
+        let mut data = fs::read(path).unwrap();
+        let signature = [0x50u8, 0x4b, 0x05, 0x06];
+        let eocd = data
+            .windows(4)
+            .rposition(|window| window == signature)
+            .expect("zip EOCD 签名");
+        assert_eq!(
+            data.len(),
+            eocd + 22,
+            "测试前置：期望无既有注释的 EOCD 结尾"
+        );
+        let length = u16::try_from(comment.len()).expect("注释长度须在 u16 内");
+        data[eocd + 20] = (length & 0xff) as u8;
+        data[eocd + 21] = (length >> 8) as u8;
+        data.extend_from_slice(comment);
+        fs::write(path, data).unwrap();
+    }
+    let f = ArchiveFixture::new();
+    fs::write(f.input.join("one.txt"), b"payload").unwrap();
+    f.archive(&f.root.join("report.zip"), "-tzip");
+    add_zip_comment(
+        &f.root.join("report.zip"),
+        b"benign first line
+}
+Volume Index = 0
+Volumes = 9
+",
+    );
+    fs::write(f.root.join("report.z01"), b"innocent bystander").unwrap();
+    let mut cfg = config();
+    cfg.archive_delete = ArchiveDispose::Permanent;
+    let result = f.run(cfg);
+    assert_eq!(result.summary.archives_failed, 0);
+    assert_eq!(result.summary.archives_ok, 1);
+    assert!(
+        f.root.join("report.z01").exists(),
+        "注释内 }} 行后的伪造键不得让无辜 .z01 被永久删除"
+    );
+}
