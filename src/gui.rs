@@ -148,15 +148,20 @@ fn pointer_position() -> Option<(f64, f64)> {
 /// 监视器 API 在 windows-sys 的 `Win32_Graphics_Gdi` 特性下，本 crate 未启用该特性，
 /// 因此在 gui 内声明最小 FFI（user32），避免改 Cargo.toml。
 #[cfg(windows)]
-#[allow(non_snake_case)]
 mod win32_monitor {
     use windows_sys::Win32::Foundation::{HWND, POINT, RECT};
+    /// MONITORINFO：字段名仅为 Rust 侧标识，ABI 布局由 `repr(C)` 的字段顺序与类型决定，
+    /// 因此按 Rust 命名惯例写；Win32 的 `cbSize`/`rcMonitor`/`rcWork`/`dwFlags` 语义见各字段注释。
     #[repr(C)]
     pub(super) struct MonitorInfo {
-        pub cbSize: u32,
-        pub rcMonitor: RECT,
-        pub rcWork: RECT,
-        pub dwFlags: u32,
+        /// cbSize：调用方必须填入结构体字节数
+        pub cb_size: u32,
+        /// rcMonitor：监视器完整矩形
+        pub rc_monitor: RECT,
+        /// rcWork：监视器工作区矩形（排除任务栏）
+        pub rc_work: RECT,
+        /// dwFlags：MONITORINFOF_* 标志
+        pub dw_flags: u32,
     }
     pub(super) type HMonitor = *mut core::ffi::c_void;
     /// MONITOR_DEFAULTTONEAREST：取包含点/窗口的最近监视器
@@ -197,28 +202,28 @@ fn center_window(window: &slint::Window) {
     // Win32 ABI 要求的 cbSize：结构体仅数十字节，饱和兜底不可能触发。
     let cb_size = u32::try_from(std::mem::size_of::<MonitorInfo>()).unwrap_or(u32::MAX);
     let mut info = MonitorInfo {
-        cbSize: cb_size,
-        rcMonitor: RECT {
+        cb_size,
+        rc_monitor: RECT {
             left: 0,
             top: 0,
             right: 0,
             bottom: 0,
         },
-        rcWork: RECT {
+        rc_work: RECT {
             left: 0,
             top: 0,
             right: 0,
             bottom: 0,
         },
-        dwFlags: 0,
+        dw_flags: 0,
     };
-    // 兼容部分声明布局：cbSize 必须正确
-    // SAFETY: monitor 是刚取得的有效 HMONITOR；info.cbSize 已按 ABI 要求填好，
+    // 兼容部分声明布局：cb_size 必须正确
+    // SAFETY: monitor 是刚取得的有效 HMONITOR；info.cb_size 已按 ABI 要求填好，
     // 调用只向 info 写入监视器信息。
     if unsafe { GetMonitorInfoW(monitor, &raw mut info) } == 0 {
         return;
     }
-    let work = info.rcWork;
+    let work = info.rc_work;
     let size = window.size();
     // 窗口尺寸远小于 i32 上限；饱和转换仅防御性兜底（显示用途）。
     let width = i32::try_from(size.width).unwrap_or(i32::MAX);
