@@ -213,6 +213,24 @@
     },
     {
       "file": "src/gui.rs",
+      "name": "switching_back_to_finished_task_reports_finished_status",
+      "ignored": false,
+      "cfg": null
+    },
+    {
+      "file": "src/gui.rs",
+      "name": "switching_tools_keeps_ready_plan_executable",
+      "ignored": false,
+      "cfg": null
+    },
+    {
+      "file": "src/gui.rs",
+      "name": "switching_tools_resets_shared_panel_to_default",
+      "ignored": false,
+      "cfg": null
+    },
+    {
+      "file": "src/gui.rs",
       "name": "theme_choice_keeps_plan_ready_but_rule_change_invalidates",
       "ignored": false,
       "cfg": null
