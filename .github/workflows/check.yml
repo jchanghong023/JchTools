@@ -78,7 +78,7 @@ jobs:
       - name: Python quality gate
         shell: pwsh
         run: |
-          python -m pip install --quiet -r scripts/requirements-dev.txt
+          python -m pip install --quiet -r scripts/requirements-dev.txt -r scripts/requirements-quality.txt
           python -m ruff format --check scripts typings
           python -m ruff check scripts typings
           python -m basedpyright scripts typings
