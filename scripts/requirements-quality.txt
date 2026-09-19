@@ -1,3 +1,5 @@
+# -*- coding: utf-8 -*-
+# PEP 263 编码声明：同 requirements-dev.txt（pip_requirements_parser 按 locale 解码中文注释会失败）。
 # JchTools Python 质量工具（CI "Python quality gate" 与本地同一套命令）。
 # 版本下限取 2026-09-19 本地实际验证通过的版本。
 # 注意：scripts/requirements-dev.txt 是脚本的运行时依赖，不含本清单的工具本身。

@@ -447,14 +447,14 @@ fn kept_source_rerun_does_not_recreate_classified_duplicate() {
 // 7-Zip 无法直接创建这些样本（同名条目、原始字节文件名、空包、zstd 帧），因此按
 // PKWARE APPNOTE 与 RFC 8878 手工生成字节；全部为存储（未压缩）条目，无需压缩器。
 
-/// 标准 CRC-32（poly 0xEDB88320，初值与输出取反）。
+/// 标准 CRC-32（poly 0xEDB8_8320，初值与输出取反）。
 fn crc32(bytes: &[u8]) -> u32 {
     let mut table = [0u32; 256];
     for i in 0..256u32 {
         let mut c = i;
         for _ in 0..8 {
             c = if c & 1 != 0 {
-                0xEDB88320 ^ (c >> 1)
+                0xEDB8_8320 ^ (c >> 1)
             } else {
                 c >> 1
             };

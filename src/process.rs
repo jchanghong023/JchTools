@@ -230,7 +230,7 @@ pub fn run_with_timeout_input(
     #[cfg(windows)]
     {
         use std::os::windows::process::CommandExt;
-        command.creation_flags(0x08000000);
+        command.creation_flags(0x0800_0000);
     }
     // 错误必须带上程序名与系统原因：调用方（nettest/proxy）用 `to_string()` 展示，
     // 只取最外层文本；一旦只写"无法启动子进程"，用户就无从判断是哪个程序、为何失败。
@@ -432,7 +432,7 @@ pub fn run_with_idle_timeout(
     #[cfg(windows)]
     {
         use std::os::windows::process::CommandExt;
-        command.creation_flags(0x08000000);
+        command.creation_flags(0x0800_0000);
     }
     let mut child = command.spawn().map_err(|error| {
         anyhow::anyhow!(

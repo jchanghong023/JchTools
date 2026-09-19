@@ -1,6 +1,7 @@
 //! 集成测试共享 mock：core.rs 与 archive.rs 复用，避免重复定义。
 // 每个集成测试二进制单独编译本模块：未被该二进制使用的 mock 会报 dead_code，
 // 属共享模块的预期形态，不是遗漏。
+// [quality-baseline approved 2026-09-19] pub 化实验证实不可消除（rustc 按二进制分析死代码）
 #![allow(dead_code)]
 use jchtools::platform::{RecycleFailure, Recycler};
 use std::{

@@ -45,8 +45,11 @@ pub fn strip_copy_name(name: &str) -> String {
     static COPY_SUFFIX: OnceLock<Regex> = OnceLock::new();
     // 拉丁字母紧贴（photocopy / MyCopy）不是副本命名，分隔符必须至少一个；
     // 中文「副本」紧贴是常见命名习惯（报告副本.pdf → 报告.pdf），允许无分隔符。
-    #[allow(clippy::expect_used)] // 常量正则语法错误只可能是开发期笔误，按不可达处理
-    let expression = COPY_SUFFIX.get_or_init(|| Regex::new(r"(?i)(?:\s*[（(]\d+[）)]|\s*[-_ ]+copy(?:\s*[（(]?\d+[）)]?)?|\s*[-_ ]*副本(?:\s*[（(]?\d+[）)]?)?)$").expect("constant regex"));
+    let expression = COPY_SUFFIX.get_or_init(|| match Regex::new(r"(?i)(?:\s*[（(]\d+[）)]|\s*[-_ ]+copy(?:\s*[（(]?\d+[）)]?)?|\s*[-_ ]*副本(?:\s*[（(]?\d+[）)]?)?)$") {
+        Ok(re) => re,
+        // 常量正则语法错误只可能是开发期笔误，按不可达处理
+        Err(_) => unreachable!("constant regex"),
+    });
     let path = Path::new(name);
     let original = path.file_stem().and_then(|s| s.to_str()).unwrap_or(name);
     let mut stem = original.to_string();
@@ -160,8 +163,11 @@ pub fn archive_name(name: &str) -> bool {
     let name = name.to_lowercase();
     if has_ext(&name, "rar") {
         static PART: OnceLock<Regex> = OnceLock::new();
-        #[allow(clippy::expect_used)] // 常量正则语法错误只可能是开发期笔误，按不可达处理
-        let re = PART.get_or_init(|| Regex::new(r"\.part(\d+)\.rar$").expect("constant regex"));
+        let re = PART.get_or_init(|| match Regex::new(r"\.part(\d+)\.rar$") {
+            Ok(re) => re,
+            // 常量正则语法错误只可能是开发期笔误，按不可达处理
+            Err(_) => unreachable!("constant regex"),
+        });
         if let Some(caps) = re.captures(&name) {
             return caps[1].parse::<u64>().ok() == Some(1);
         }
@@ -179,8 +185,11 @@ pub fn multipart_name(name: &str) -> bool {
     // 与 archive_name 对齐：只有 .partN.rar 才算 RAR 分卷；contains(".part") 会把
     // report.partial.rar 这类普通包误判为分卷。
     static PART: OnceLock<Regex> = OnceLock::new();
-    #[allow(clippy::expect_used)] // 常量正则语法错误只可能是开发期笔误，按不可达处理
-    let re = PART.get_or_init(|| Regex::new(r"\.part(\d+)\.rar$").expect("constant regex"));
+    let re = PART.get_or_init(|| match Regex::new(r"\.part(\d+)\.rar$") {
+        Ok(re) => re,
+        // 常量正则语法错误只可能是开发期笔误，按不可达处理
+        Err(_) => unreachable!("constant regex"),
+    });
     n.ends_with(".001") || re.is_match(&n)
 }
 

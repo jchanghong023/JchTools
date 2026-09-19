@@ -146,6 +146,7 @@ impl Summary {
     }
 }
 /// 人类可读的字节数格式化：仅用于界面/日志展示，f64 精度损失无意义。
+// [quality-baseline approved 2026-09-19] 显示用途转换；整数化重写属「为消 lint 写更复杂代码」，经用户裁定保留
 #[allow(clippy::cast_precision_loss)]
 pub fn bytes(value: u64) -> String {
     const UNITS: [&str; 7] = ["B", "KiB", "MiB", "GiB", "TiB", "PiB", "EiB"];

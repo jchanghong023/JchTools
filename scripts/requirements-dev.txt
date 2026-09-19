@@ -1,3 +1,7 @@
+# -*- coding: utf-8 -*-
+# PEP 263 编码声明：pip_requirements_parser 的 auto_decode 无 BOM 时按本地编码解码
+# （Windows runner 是 cp1252、中文 Windows 是 cp936），中文注释会 UnicodeDecodeError；
+# 有此前两行内的 coding cookie 即按 UTF-8 解码（CI run 35410688391 反证）。
 # JchTools Python 脚本（scripts/）的第三方运行时依赖，供质量门与 pip-audit 复现解析结果。
 # 版本下限取 2026-09-19 实际验证通过的解析版本（pip-audit 无已知漏洞）。
 # pywin32/pywinauto 仅 Windows（gui_smoke 的 GUI 自动化依赖）。

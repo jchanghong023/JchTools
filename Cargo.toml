@@ -8,6 +8,9 @@ edition = "2021"
 rust-version = "1.98.1"
 license = "MIT"
 description = "Windows-first extensible local toolbox and directory organizer"
+repository = "https://github.com/jchanghong023/JchTools"
+keywords = ["toolbox", "windows", "file-manager", "organizer"]
+categories = ["command-line-utilities", "gui", "filesystem"]
 build = "build.rs"
 
 [features]
@@ -113,8 +116,6 @@ missing_errors_doc = "allow"       # 文档段落义务
 missing_panics_doc = "allow"
 must_use_candidate = "allow"       # 属性建议，量大且属意见
 items_after_statements = "allow"   # 风格偏好
-unreadable_literal = "allow"       # Windows API 标志常量等无分隔符惯用法
-cargo_common_metadata = "allow"    # 个人离线工具的 manifest 元数据义务（keywords/repository 等）
-multiple_crate_versions = "allow"  # 传递依赖版本重复（windows 生态），非本仓可控
+multiple_crate_versions = "allow"  # 传递依赖版本重复（windows/slint 生态，见 quality-gate 证据 cargo-tree-duplicates），非本仓可控 [quality-baseline approved 2026-09-19]
 too_many_lines = "allow"           # GUI 装配/引擎主流程函数天然较长，强拆损可读性
 struct_excessive_bools = "allow"   # Config/State 的开关集合镜像 JSON 配置与 UI 状态

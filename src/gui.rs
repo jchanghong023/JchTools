@@ -194,9 +194,8 @@ fn center_window(window: &slint::Window) {
     if monitor.is_null() {
         return;
     }
-    // Win32 ABI 要求的 cbSize：结构体仅数十字节，截断不可能发生。
-    #[allow(clippy::cast_possible_truncation)]
-    let cb_size = std::mem::size_of::<MonitorInfo>() as u32;
+    // Win32 ABI 要求的 cbSize：结构体仅数十字节，饱和兜底不可能触发。
+    let cb_size = u32::try_from(std::mem::size_of::<MonitorInfo>()).unwrap_or(u32::MAX);
     let mut info = MonitorInfo {
         cbSize: cb_size,
         rcMonitor: RECT {
@@ -246,9 +245,8 @@ fn system_dark() -> bool {
         .chain(std::iter::once(0))
         .collect();
     let mut value: u32 = 1;
-    // DWORD 缓冲区大小恒为 4，截断不可能发生。
-    #[allow(clippy::cast_possible_truncation)]
-    let mut size = std::mem::size_of::<u32>() as u32;
+    // DWORD 缓冲区大小恒为 4，饱和兜底不可能触发。
+    let mut size = u32::try_from(std::mem::size_of::<u32>()).unwrap_or(u32::MAX);
     // SAFETY: path/name 都是以 NUL 结尾的 UTF-16 缓冲区；value/size 是配套的
     // DWORD 输出缓冲区（RRF_RT_REG_DWORD 要求大小恰为 4），调用期间指针均有效。
     let status = unsafe {
@@ -1592,10 +1590,12 @@ pub fn run_with_engine_overrides(
                 return;
             }
             // 拖动坐标为显示用途：饱和换算，越界值夹到 i32 边界。
+            // [quality-baseline approved 2026-09-19] clamp 后截断数学上不可能；std 无 f64→i32 受检转换
             #[allow(clippy::cast_possible_truncation)]
             let drag_x = (drag.origin.0 + pointer.0 - drag.press.0)
                 .clamp(f64::from(i32::MIN), f64::from(i32::MAX))
                 .round() as i32;
+            // [quality-baseline approved 2026-09-19] 同 drag_x：clamp 后截断不可能，无受检转换可用
             #[allow(clippy::cast_possible_truncation)]
             let drag_y = (drag.origin.1 + pointer.1 - drag.press.1)
                 .clamp(f64::from(i32::MIN), f64::from(i32::MAX))
@@ -1839,13 +1839,15 @@ pub fn run_with_engine_overrides(
                         ui.set_metrics(format!("执行中：已处理 {} / {} 项 · 耗时 {:.1}s",done,s.planned,elapsed).into());
                     }else{
                         // 吞吐速率为显示用途，u64→f64 的精度损失无意义。
+                        // [quality-baseline approved 2026-09-19] 显示用途转换，经用户裁定保留
                         #[allow(clippy::cast_precision_loss)]
-                        let rate_mib_s = read as f64 / elapsed / 1048576.0;
+                        let rate_mib_s = read as f64 / elapsed / 1_048_576.0;
                         ui.set_metrics(format!("扫描 {} 个文件 · 读取 {} · 已处理 {} 个计划项 · 耗时 {:.1}s · 平均读取 {:.1} MiB/s",scanned,bytes(read),done,elapsed,rate_mib_s).into());
                     }
                     // 执行阶段按计划项计数；分析阶段总量未知（扫描/哈希/解压包大小不能提前预知）
                     if s.applying&&s.planned>0{
                         // 进度分数为显示用途，整数→浮点的精度损失无意义。
+                        // [quality-baseline approved 2026-09-19] Slint progress 属性即 f32，整数→浮点无受检 API
                         #[allow(clippy::cast_precision_loss, clippy::cast_possible_truncation)]
                         let progress = (done as f64 / s.planned as f64).clamp(0.0, 1.0) as f32;
                         ui.set_progress(progress);

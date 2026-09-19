@@ -86,18 +86,16 @@ fn volume_root(path: &Path) -> Option<std::path::PathBuf> {
     }
     Some(std::path::PathBuf::from(format!("{letter}:\\")))
 }
-/// HRESULT 的 i32 位模式按位重解释为 u32：仅用于与 `0x800704C7` 这类错误码常量
+/// HRESULT 的 i32 位模式按位重解释为 u32：仅用于与 `0x8007_04C7` 这类错误码常量
 /// 比较，是位模式对照而非数值转换，符号位丢失正是目的本身。
 #[cfg(windows)]
-#[allow(clippy::cast_sign_loss)]
 fn hresult_bits(code: windows::core::HRESULT) -> u32 {
-    code.0 as u32
+    u32::from_ne_bytes(code.0.to_ne_bytes())
 }
 /// u32 错误码常量按位重解释为 HRESULT（与 hresult_bits 互逆）。
 #[cfg(windows)]
-#[allow(clippy::cast_possible_wrap)]
 fn hresult_from_bits(bits: u32) -> windows::core::HRESULT {
-    windows::core::HRESULT(bits as i32)
+    windows::core::HRESULT(i32::from_ne_bytes(bits.to_ne_bytes()))
 }
 /// 当前回收站内的条目数；查询失败（无回收站的卷等）返回 None。
 #[cfg(windows)]
@@ -108,9 +106,8 @@ fn bin_item_count(volume: &Path) -> Option<i64> {
         // SAFETY: SHQUERYRBINFO 是纯 POD 结构，全零是合法初值；cbSize 随后显式补上。
         std::mem::zeroed()
     };
-    // Win32 ABI 要求的 cbSize；该结构体仅数十字节，截断不可能发生。
-    #[allow(clippy::cast_possible_truncation)]
-    let cb_size = std::mem::size_of::<SHQUERYRBINFO>() as u32;
+    // Win32 ABI 要求的 cbSize；该结构体仅数十字节，饱和兜底不可能触发。
+    let cb_size = u32::try_from(std::mem::size_of::<SHQUERYRBINFO>()).unwrap_or(u32::MAX);
     info.cbSize = cb_size;
     let wide: Vec<u16> = volume.as_os_str().encode_wide().chain(Some(0)).collect();
     // SAFETY: wide 是以 NUL 结尾的 UTF-16 卷路径；调用只向已初始化的 info 写入。
@@ -198,7 +195,7 @@ fn native_recycle(path: &Path) -> std::result::Result<(), RecycleFailure> {
             // Shell aborted without a specific error: conservatively treat as cancellation.
             // Never infer permanent-delete permission from an ambiguous abort status.
             return Err(windows::core::Error::from_hresult(hresult_from_bits(
-                0x800704C7,
+                0x8007_04C7,
             )));
         }
         Ok(())
@@ -206,14 +203,14 @@ fn native_recycle(path: &Path) -> std::result::Result<(), RecycleFailure> {
     match perform() {
         Ok(()) => Ok(()),
         Err(error)
-            if [0x800704C7u32, 0x80270000, 0x80004004].contains(&hresult_bits(error.code())) =>
+            if [0x8007_04C7u32, 0x8027_0000, 0x8000_4004].contains(&hresult_bits(error.code())) =>
         {
             Err(RecycleFailure::Cancelled)
         }
         // RPC_E_CHANGED_MODE：调用线程已被初始化为 MTA，STA 回收接口用不了。此时
         // 文件未受任何影响；按「接口不可用」失败且不降级，防止未来有人把删除搬到
         // GUI/OLE 线程时文件被静默永久删除（engine 在专属工作线程调用，正常不触发）。
-        Err(error) if hresult_bits(error.code()) == 0x80010106 => {
+        Err(error) if hresult_bits(error.code()) == 0x8001_0106 => {
             Err(RecycleFailure::Unavailable(error.to_string()))
         }
         Err(error) => Err(RecycleFailure::Failed(error.to_string())),
