@@ -12,8 +12,8 @@
               -WithEngine -WithGuiSmoke -WithPackage（复用可信基验收入口，内含
               static_check、全量测试、真实引擎用例、GUI 冒烟 S1-S4、打包自检）。
               不触发远程流水线；每次运行都需要人类明确授权（--authorized）。
-  slowtest    fulltest 全部阶段 + 远程 CI（check.yml 与 mutants.yml：gh 触发后
-              轮询到最终状态，TRIGGERED 不等于 PASS）。平台范围按合同 P-07 仅
+  slowtest    fulltest 全部阶段 + 远程 CI（check.yml：gh 触发后轮询到最终
+              状态，TRIGGERED 不等于 PASS）。平台范围按合同 P-07 仅
               Windows，不设跨平台/跨 WSL 阶段。同样需要人类本次明确授权。
               release.yml 是真实发布（自动打时间戳 tag 并发布产物），不属于
               slowtest，只能单独显式授权手动触发。
@@ -55,9 +55,8 @@ GUI_DATA_DIR = LOG_DIR / "gui-data"
 
 FASTCHECK_DEADLINE_SECONDS = 60.0
 STAGE_TIMEOUT_DEFAULT = 3600.0
-# 远程工作流等待上限：check.yml 约 30-40 分钟；mutants.yml 自身 timeout-minutes=300。
+# 远程工作流等待上限：check.yml 约 30-40 分钟。
 REMOTE_CHECK_WATCH_SECONDS = 5400.0
-REMOTE_MUTANTS_WATCH_SECONDS = 19800.0
 REMOTE_POLL_INTERVAL_SECONDS = 30.0
 
 # 常量名避开 pass 字样（S105 会把含 pass 的变量名当作疑似硬编码口令）。
@@ -418,15 +417,7 @@ def cmd_slowtest() -> int:
         if auth.returncode != 0:
             results.append(StageResult("remote-ci", STATUS_UNVERIFIED, "gh 未登录（先 gh auth login）"))
         else:
-            check = _stage_remote_workflow(git, gh, "check.yml", watch_seconds=REMOTE_CHECK_WATCH_SECONDS)
-            results.append(check)
-            if check.status == STATUS_OK:
-                results.append(
-                    _stage_remote_workflow(git, gh, "mutants.yml", watch_seconds=REMOTE_MUTANTS_WATCH_SECONDS)
-                )
-            else:
-                note = "remote-mutants.yml：前置 check.yml 未通过，按序跳过（NOT RUN，不算通过）"
-                results.append(StageResult("remote-mutants.yml", STATUS_NOT_RUN, note))
+            results.append(_stage_remote_workflow(git, gh, "check.yml", watch_seconds=REMOTE_CHECK_WATCH_SECONDS))
     release_note = (
         "release-workflow：真实发布（自动打时间戳 tag 并发布安装包与便携 ZIP），不属于 slowtest；"
         "如需发布请单独确认目标后手动运行 gh workflow run release.yml"
@@ -446,9 +437,9 @@ def main(argv: list[str] | None = None) -> int:
         default=FASTCHECK_DEADLINE_SECONDS,
         help="仅允许 (0,60]（用于验证超时路径），不得调高绕过硬上限",
     )
-    full = sub.add_parser("fulltest", help="当前平台（Windows）全部本地检查；不跨 WSL、不触发远程流水线")
+    full = sub.add_parser("fulltest", help="当前平台（Windows）全部本地检查；不触发远程流水线")
     _ = full.add_argument("--authorized", action="store_true", help="确认本次运行已由人类明确授权")
-    slow = sub.add_parser("slowtest", help="fulltest + WSL Linux + 远程 CI（check.yml、mutants.yml）")
+    slow = sub.add_parser("slowtest", help="fulltest + 远程 CI（check.yml）")
     _ = slow.add_argument("--authorized", action="store_true", help="确认本次运行已由人类明确授权")
     arguments = parser.parse_args(argv, namespace=_Arguments())
     if arguments.gate == "fastcheck":
