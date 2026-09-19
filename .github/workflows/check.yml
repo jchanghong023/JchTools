@@ -58,6 +58,12 @@ jobs:
             [Management.Automation.Language.Parser]::ParseFile($_.FullName,[ref]$tokens,[ref]$errors) | Out-Null
             if ($errors) { $errors | Format-List; throw 'PowerShell parse failure' }
           }
+      # defusedxml 供 static_check 顶层导入解析 resources/windows.manifest（S314）：
+      # Windows runner 预装 Python 无此包，缺装会让 static_check 直接 ImportError
+      #（反证：run 35407626046 windows Static checks ModuleNotFoundError）。
+      - name: Install defusedxml
+        shell: pwsh
+        run: python -m pip install --quiet defusedxml
       - name: Static checks
         shell: pwsh
         run: python scripts/static_check.py
