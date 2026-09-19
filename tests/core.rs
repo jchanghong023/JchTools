@@ -20,11 +20,12 @@ use jchtools::{
 use std::{
     fs,
     path::{Path, PathBuf},
-    sync::{
-        atomic::{AtomicUsize, Ordering},
-        Arc,
-    },
+    sync::{atomic::Ordering, Arc},
 };
+// 平台门禁原因：AtomicUsize 的全部使用点都在 Windows 门禁用例内（回收条目计数
+// 验证是 Windows 专属实现）；非 Windows 编译时按 cfg 裁剪导入，否则为 unused import。
+#[cfg(windows)]
+use std::sync::atomic::AtomicUsize;
 use tempfile::TempDir;
 struct Fixture {
     temp: TempDir,
