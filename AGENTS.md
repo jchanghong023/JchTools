@@ -35,6 +35,7 @@ cargo build                # 开发构建（GUI）
 cargo build --release      # 发布构建
 cargo test                 # 单元与集成测试（真实引擎用例默认 #[ignore]）
 python scripts/static_check.py      # 结构/配置/回调/SQL/测试基线/界面规则静态检查
+python scripts/test_gate.py fastcheck   # 三级测试门之快速门（AI 可自主，≤60s 硬超时；其余两级见 3.4）
 powershell -NoProfile -File .\scripts\acceptance.ps1 -WithEngine   # 单命令验收（见 3.2）
 powershell -NoProfile -File .\scripts\package-windows.ps1   # 生成含 7-Zip 的发布 ZIP
 ```
@@ -82,6 +83,16 @@ JCHTOOLS_TEST_7ZIP=/abs/path/7zz bash scripts/check-linux.sh   # 含真实解压
 - 改动过跟踪文件后，提交前须最后用 `git -c core.quotePath=false ls-files -z | grep -zv '^SHA256SUMS.txt$' | xargs -0 sha256sum -b > SHA256SUMS.txt` 重建清单（static_check 会校验其完整性）。
 - **需求 ↔ 测试映射**：验证合同条目的测试 `MUST` 在其文档注释中标明合同编号（如 `// 覆盖 C-12`）；每个合同条目至少被一个测试引用。（现状：现有测试尚未标注合同编号，标注与执法均待落地）
 - 合同条目的拆分、合并或重编号 `MUST` 经用户确认。
+
+## 3.4 三级测试门与执行权限
+
+统一入口 `python scripts/test_gate.py <fastcheck|fulltest|slowtest>`；三级语义固定，`MUST NOT` 按需要改写层级含义，也 `MUST NOT` 把耗时、跨 WSL 或远程阶段塞进更低层级。
+
+- **fastcheck**：static_check + rustfmt + clippy + cargo test（含 binding loop 扫描）；总墙钟硬上限 60 秒，超时即失败并终止整个进程树，`MUST NOT` 把超时报成成功；AI 代理 `MAY` 自主执行，但其通过不代表完整验证。（执法点：test_gate.py 的预算终止与退出码）
+- **fulltest**：当前平台（Windows）全部本地验证——Python 质量门（与 CI 同命令）+ fmt/clippy + `acceptance.ps1 -WithEngine -WithGuiSmoke -WithPackage`；不跨 WSL、`MUST NOT` 触发远程流水线。每次运行 `MUST` 有人类明确授权。（执法点：test_gate.py 的 `--authorized` 入口守卫；越过入口直接执行内部命令属规避行为 · 无执法点 · 软法）
+- **slowtest**：fulltest 全部阶段 + WSL `scripts/check-linux.sh`（隔离 `CARGO_TARGET_DIR`）+ 远程 `check.yml`、`mutants.yml`（gh 触发并轮询到最终状态，`MUST NOT` 把「已触发」当「通过」）。每次运行 `MUST` 有人类明确授权。（执法点：同上 `--authorized` 入口守卫；同上软法）
+- `release.yml` 是真实发布（自动打时间戳 tag 并发布产物），`MUST NOT` 纳入 slowtest 自动触发；发布需用户单独明确该次目标。（执法点：test_gate.py 不包含该阶段）
+- 历史授权、上一次授权、CI 配置或脚本注释 `MUST NOT` 视为本次授权；环境或工具缺失只能如实标注 UNVERIFIED，`MUST NOT` 当作通过或静默跳过。（无执法点 · 软法）
 
 ## 4. 代码与界面实现约定
 
