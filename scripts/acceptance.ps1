@@ -8,7 +8,7 @@
   构建输出 binding loop 警告扫描。可选阶段：
     -WithEngine   追加真实引擎用例（JCHTOOLS_TEST_7ZIP 或 resources\7zip\7z.exe，
                   缺失时直接失败并提示先运行 fetch-7zip.ps1）
-    -WithGuiSmoke 追加 OS 级 UIA 冒烟 S1-S3（需要 -GuiData 指向 make_tmp.py testdata
+    -WithGuiSmoke 追加 OS 级 UIA 冒烟 S1-S4（需要 -GuiData 指向 make_tmp.py testdata
                   生成的数据集与 cargo build 产物（尊重 CARGO_TARGET_DIR，未设置时为 target\debug）；需要 pip install pywinauto）
     -WithPackage  追加发布打包自检（package-windows.ps1，需要引擎与 MSVC 工具链）
   未执行的阶段在汇总里显式打印 NOT RUN；不得把 NOT RUN 报告成通过。
@@ -104,7 +104,7 @@ if ($WithEngine) {
         -Environment @{JCHTOOLS_TEST_7ZIP = $engine}
 } else {$script:Results.Add('NOT RUN  engine-tests（加 -WithEngine）')}
 
-# 5) OS 级 GUI 冒烟 S1-S3（可选）。
+# 5) OS 级 GUI 冒烟 S1-S4（可选）。
 if ($WithGuiSmoke) {
     if (-not $GuiData) {throw '-WithGuiSmoke 需要 -GuiData 指向 make_tmp.py testdata 生成的数据集目录'}
     if (-not (Test-Path -LiteralPath $GuiData)) {throw "数据集目录不存在：$GuiData"}
@@ -120,7 +120,7 @@ if ($WithGuiSmoke) {
     # 验证结论与当前源码脱节（AGENTS.md 3.2 对抗自证偏差）。
     $null = Invoke-Logged -Name 'gui-build' -File 'cargo' -Arguments @('build')
     $null = Invoke-Logged -Name 'gui-smoke' -File $python -Arguments @('scripts/gui_smoke.py','--exe',$exe,'--data',$GuiData)
-} else {$script:Results.Add('NOT RUN  gui-smoke S1-S3（加 -WithGuiSmoke -GuiData <目录>）')}
+} else {$script:Results.Add('NOT RUN  gui-smoke S1-S4（加 -WithGuiSmoke -GuiData <目录>）')}
 
 # 6) 发布打包自检（可选）。
 if ($WithPackage) {
