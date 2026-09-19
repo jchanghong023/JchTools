@@ -114,18 +114,18 @@ python scripts/make_tmp.py testdata --git
 
 ## 核心测试
 
-在装有 Rust 的 Linux/Ubuntu 测试机：
+平台范围按需求合同 P-07 仅支持 Windows：构建、测试、验证与 CI 流水线都只在 Windows 上运行（原 Linux/WSL 验证入口已于 2026-09-19 移除）。
 
-```bash
-bash scripts/check-linux.sh
-# 真实解压测试需显式指定完整官方 7zz：
-JCHTOOLS_TEST_7ZIP=/absolute/path/7zz bash scripts/check-linux.sh
+```powershell
+cargo test                 # 单元与集成测试（真实引擎用例默认 #[ignore]）
+python scripts/test_gate.py fastcheck   # 快速门（AI 可自主，≤60s；fulltest/slowtest 见 AGENTS.md 3.4）
+powershell -NoProfile -File .\scripts\acceptance.ps1 -WithEngine   # 单命令验收
 ```
 
-代码中的回收站测试全部使用模拟实现，不会删除测试机的个人文件。真实引擎测试有 ignore 标记，只有显式运行时启用。GUI 需 Windows 验收。
+代码中的回收站测试全部使用模拟实现，不会删除测试机的个人文件。真实引擎测试有 ignore 标记，只有显式运行时启用。
 
 ## 工程入口
 
-`src/main.rs`/`ui/app.slint`：界面；`resources/rules.json`：40 项界面规则；`src/config.rs`：配置及校验；`src/registry.rs`：真实工具注册；`src/engine.rs`：阶段控制；`archive.rs`：7-Zip；`planner.rs`：计划；`platform.rs`：回收站/删除；`db.rs`/`schema.sql`：磁盘索引、计划及审计；`tests/`：测试；`scripts/`：检查/打包；`.github/workflows/check.yml`：Windows/Linux CI。
+`src/main.rs`/`ui/app.slint`：界面；`resources/rules.json`：40 项界面规则；`src/config.rs`：配置及校验；`src/registry.rs`：真实工具注册；`src/engine.rs`：阶段控制；`archive.rs`：7-Zip；`planner.rs`：计划；`platform.rs`：回收站/删除；`db.rs`/`schema.sql`：磁盘索引、计划及审计；`tests/`：测试；`scripts/`：检查/打包；`.github/workflows/check.yml`：Windows CI。
 
 技术依据和许可见 [第三方说明](THIRD_PARTY_NOTICES.md)；需求语义见 [需求合同](docs/CONTRACT.md)。

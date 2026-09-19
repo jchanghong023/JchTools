@@ -11,12 +11,12 @@
               + rustfmt + clippy + make_tmp 测试数据集 + acceptance.ps1
               -WithEngine -WithGuiSmoke -WithPackage（复用可信基验收入口，内含
               static_check、全量测试、真实引擎用例、GUI 冒烟 S1-S4、打包自检）。
-              不跨 WSL、不触发远程流水线；每次运行都需要人类明确授权（--authorized）。
-  slowtest    fulltest 全部阶段 + WSL Linux 核心验证（check-linux.sh，隔离
-              CARGO_TARGET_DIR 防止污染 Windows target/）+ 远程 CI（check.yml 与
-              mutants.yml：gh 触发后轮询到最终状态，TRIGGERED 不等于 PASS）。
-              同样需要人类本次明确授权。release.yml 是真实发布（自动打时间戳 tag
-              并发布产物），不属于 slowtest，只能单独显式授权手动触发。
+              不触发远程流水线；每次运行都需要人类明确授权（--authorized）。
+  slowtest    fulltest 全部阶段 + 远程 CI（check.yml 与 mutants.yml：gh 触发后
+              轮询到最终状态，TRIGGERED 不等于 PASS）。平台范围按合同 P-07 仅
+              Windows，不设跨平台/跨 WSL 阶段。同样需要人类本次明确授权。
+              release.yml 是真实发布（自动打时间戳 tag 并发布产物），不属于
+              slowtest，只能单独显式授权手动触发。
 
 防递归：被触发的远程工作流各自运行固定步骤，不会回调本脚本，不存在
 slowtest → CI → slowtest 循环。
@@ -295,7 +295,11 @@ def _fulltest_stages(results: list[StageResult]) -> None:
         str(GUI_DATA_DIR),
         "-WithPackage",
     ]
-    results.append(run_logged("acceptance", acceptance_argv, timeout=STAGE_TIMEOUT_DEFAULT))
+    # 本机执行策略全作用域 Undefined（默认 Restricted）会拒绝任何 -File 运行 .ps1；
+    # PSExecutionPolicyPreference 以 Process 作用域覆盖之，且随环境继承给
+    # acceptance.ps1 内部再起的 powershell 子进程（package 阶段），只影响本进程树。
+    acceptance_env = {"PSExecutionPolicyPreference": "Bypass"}
+    results.append(run_logged("acceptance", acceptance_argv, timeout=STAGE_TIMEOUT_DEFAULT, env_extra=acceptance_env))
     shutil.rmtree(GUI_DATA_DIR, ignore_errors=True)
     results.append(StageResult("cleanup-gui-data", STATUS_OK, f"已删除一次性数据集 {GUI_DATA_DIR}"))
 
@@ -324,29 +328,6 @@ def _git_output(git: str, args: list[str]) -> str | None:
     if done.returncode != 0:
         return None
     return done.stdout.strip()
-
-
-def _stage_wsl_linux() -> StageResult:
-    # 跨 WSL 验证固定属于 slowtest；工具链缺失只能 UNVERIFIED，不得自动安装。
-    wsl = shutil.which("wsl.exe")
-    if wsl is None:
-        return StageResult("wsl-linux-core", STATUS_UNVERIFIED, "找不到 wsl.exe")
-    converted = subprocess.run([wsl, "-e", "wslpath", "-a", str(ROOT)], capture_output=True, text=True, check=False)
-    linux_root = (converted.stdout or "").strip()
-    if converted.returncode != 0 or not linux_root.startswith("/"):
-        stderr = (converted.stderr or "").strip()
-        detail = f"wslpath 转换失败（退出码 {converted.returncode}）：{stderr}"
-        return StageResult("wsl-linux-core", STATUS_UNVERIFIED, detail)
-    probe = subprocess.run([wsl, "-e", "bash", "-lc", "command -v cargo"], capture_output=True, text=True, check=False)
-    if probe.returncode != 0:
-        detail = "WSL 内没有 Rust 工具链（cargo）；按约定不自动安装，请先在 WSL 内手动安装 rustup"
-        return StageResult("wsl-linux-core", STATUS_UNVERIFIED, detail)
-    # 隔离 CARGO_TARGET_DIR：Windows 与 WSL 共用同一工作区，混用同一 target/ 会
-    # 互相污染构建缓存（锁文件、路径形态、增量元数据互不兼容）。
-    script = (
-        f"cd '{linux_root}' && CARGO_TARGET_DIR=\"$HOME/.cache/jchtools-testgate-target\" bash scripts/check-linux.sh"
-    )
-    return run_logged("wsl-linux-core", [wsl, "-e", "bash", "-lc", script], timeout=7200.0)
 
 
 def _trigger_workflow(git: str, gh: str, workflow: str) -> tuple[str, str] | StageResult:
@@ -426,9 +407,7 @@ def cmd_slowtest() -> int:
         return 2
     results: list[StageResult] = []
     _fulltest_stages(results)
-    # 前置本地验证已失败时停止后续跨环境/远程阶段，避免在已知失败状态下消耗流水线资源。
-    if not _has_blocking(results):
-        results.append(_stage_wsl_linux())
+    # 前置本地验证已失败时停止后续远程阶段，避免在已知失败状态下消耗流水线资源。
     git = shutil.which("git")
     gh = shutil.which("gh")
     if git is None or gh is None:
@@ -452,7 +431,7 @@ def cmd_slowtest() -> int:
         "release-workflow：真实发布（自动打时间戳 tag 并发布安装包与便携 ZIP），不属于 slowtest；"
         "如需发布请单独确认目标后手动运行 gh workflow run release.yml"
     )
-    return _print_summary("slowtest（fulltest + WSL + 远程流水线）", results, [release_note])
+    return _print_summary("slowtest（fulltest + 远程流水线）", results, [release_note])
 
 
 def main(argv: list[str] | None = None) -> int:

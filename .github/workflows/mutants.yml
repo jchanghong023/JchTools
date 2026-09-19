@@ -11,14 +11,13 @@ permissions:
   contents: read
 jobs:
   mutants:
-    runs-on: ubuntu-24.04
+    # 平台范围按合同 P-07 仅 Windows（原 ubuntu-24.04 runner 于 2026-09-19 迁移）。
+    runs-on: windows-2022
     timeout-minutes: 300
     steps:
       - uses: actions/checkout@v4
       # 工具链固定：与 Cargo.toml 的 rust-version 同步更新。
       - uses: dtolnay/rust-toolchain@1.98.1
-      - name: Install Linux build dependencies
-        run: sudo apt-get update && sudo apt-get install -y libfontconfig1-dev
       - name: Install cargo-mutants
         run: cargo install --locked cargo-mutants
       - name: Run cargo-mutants on engine and fsutil

@@ -7,41 +7,9 @@ on:
 permissions:
   contents: read
 jobs:
-  linux-core:
-    runs-on: ubuntu-24.04
-    steps:
-      - uses: actions/checkout@v4
-      # 工具链固定：@rev 即版本，与 Cargo.toml 的 rust-version 同步更新。
-      # clippy 供 check-linux.sh 的零告警门禁，rustfmt 供其格式门禁（rustup minimal profile 不含二者）。
-      - uses: dtolnay/rust-toolchain@1.98.1
-        with:
-          components: clippy, rustfmt
-      - name: Install Linux build dependencies
-        # dev-dependency i-slint-backend-testing → fontdb 在 Unix 用 pkg-config 查找 fontconfig，
-        # 缺开发包时 cargo check/test 会在构建脚本阶段失败（与业务代码无关）。
-        run: sudo apt-get update && sudo apt-get install -y libfontconfig1-dev
-      # Pygments 供 static_check 的 rust_lexical 词法配平检查、defusedxml 供其解析
-      # resources/windows.manifest 使用：不装则对应检查以 SKIP/失败告终。
-      - name: Install Pygments
-        run: python3 -m pip install --quiet pygments defusedxml
-      - name: Core compile and tests
-        run: bash scripts/check-linux.sh
-      # rustdoc 零告警门禁：与本地质量门同一规则（RUSTDOCFLAGS=-D warnings）。
-      - name: Rustdoc zero-warning gate
-        run: cargo doc --workspace --no-deps --locked
-        env:
-          RUSTDOCFLAGS: -D warnings
-      # 供应链门禁：按 Cargo.lock 锁定的解析结果对照 RustSec advisory DB 与来源白名单。
-      - name: cargo audit
-        run: |
-          cargo install --locked cargo-audit --version 0.22.2
-          cargo audit
-      - name: cargo deny
-        run: |
-          cargo install --locked cargo-deny --version 0.20.2
-          cargo deny check advisories sources
-      - name: Static checks
-        run: python3 scripts/static_check.py
+  # 平台范围按合同 P-07 仅 Windows（2026-09-19 起原 linux-core job 移除，
+  # 其承载的检查——no-default-features clippy/test、rustdoc、cargo audit/deny——
+  # 等量迁入本 job，不得借平台收敛之名少跑检查）。
   windows:
     runs-on: windows-2022
     steps:
@@ -73,11 +41,23 @@ jobs:
       - name: Static checks
         shell: pwsh
         run: python scripts/static_check.py
-      # clippy 零告警硬门禁：默认特性（含 GUI 与 Windows 专属代码）下任何告警即失败。
-      # Linux 侧（--no-default-features）在 check-linux.sh 内执行，两侧互补覆盖 cfg 差异。
-      - name: Clippy zero-warning gate
+      # clippy 零告警硬门禁：默认特性（含 GUI 与 Windows 专属代码）与
+      # --no-default-features（无 GUI 核心库）双侧覆盖；任何告警即失败。
+      - name: Clippy zero-warning gate (default features)
         shell: pwsh
         run: cargo clippy --all-targets -- -D warnings
+      - name: Clippy zero-warning gate (no default features)
+        shell: pwsh
+        run: cargo clippy --all-targets --no-default-features -- -D warnings
+      - name: Core tests (no default features)
+        shell: pwsh
+        run: cargo test --all-targets --no-default-features
+      # rustdoc 零告警门禁：与本地质量门同一规则（RUSTDOCFLAGS=-D warnings）。
+      - name: Rustdoc zero-warning gate
+        shell: pwsh
+        run: cargo doc --workspace --no-deps --locked
+        env:
+          RUSTDOCFLAGS: -D warnings
       # Python 质量门（与本地同一命令；规则固定于 pyproject.toml）。
       # Bandit 的 B404/B603 为经逐点核实的固定角色例外：全部 subprocess 命中点均为
       # 固定 argv、无 shell、可执行文件经 which()/绝对路径解析（bash/git/7z/被测产品）。
@@ -92,6 +72,18 @@ jobs:
           python -m bandit -r scripts -s B404,B603 -q
           # pip-audit 包名的模块形式是下划线 pip_audit（连字符名只是 console script）。
           python -m pip_audit -r scripts/requirements-dev.txt
+      # 供应链门禁：按 Cargo.lock 锁定的解析结果对照 RustSec advisory DB 与来源白名单。
+      - name: Install cargo-audit and cargo-deny
+        shell: pwsh
+        run: |
+          cargo install --locked cargo-audit --version 0.22.2
+          cargo install --locked cargo-deny --version 0.20.2
+      - name: cargo audit
+        shell: pwsh
+        run: cargo audit
+      - name: cargo deny
+        shell: pwsh
+        run: cargo deny check advisories sources
       - name: Compile, run fixture tests, bundle the full 7-Zip engine
         shell: pwsh
         env:
