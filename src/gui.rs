@@ -1925,7 +1925,7 @@ pub fn run_with_engine_overrides(
                         // 让人误以为没扫到东西。
                         ui.set_progress(-1.0);ui.set_progress_note("没有待执行的计划项".into());
                     }else if s.extracting{
-                        // 解压期间进度说明只报已处理的包数；包内百分比由状态行的 7z 输出提供。
+                        // 解压期间不显示整理口径的进度说明；已处理包数与耗时由上面的实时指标行给出。
                         ui.set_progress(-1.0);ui.set_progress_note("".into());
                     }else{
                         ui.set_progress(-1.0);
