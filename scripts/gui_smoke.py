@@ -288,7 +288,10 @@ def close_app(window: WindowSpecification) -> None:
     with contextlib.suppress(*TRANSIENT_GUI_ERRORS):
         for button in window.descendants(control_type="Button"):
             if (button.window_text() or "") == "关闭":
-                click(window, button)
+                # 与 click() 同口径：先激活窗口再点，避免合成点击落到别的窗口。
+                activate(window)
+                button.click_input()
+                time.sleep(0.3)
                 return
 
 
