@@ -210,6 +210,16 @@ fn skipped_conflict_moves_original_to_quarantine() {
         result.summary.archives_quarantined >= 1,
         "跳过未完全解开应计入隔离数"
     );
+    // 回归：未完全解开的包此前在解压层被无条件计入 archives_ok，收尾摘要同时报
+    // 「解压成功 1 包」与「失败并移入解压失败 1 包」（同一包两个口径，X-05/X-06 互斥）。
+    assert_eq!(
+        result.summary.archives_ok, 0,
+        "未完全解开的包不得计入「解压成功」（X-05/X-06 按包互斥）"
+    );
+    assert_eq!(
+        result.summary.archives_failed, 1,
+        "未完全解开的包计入失败并移入「解压失败」（X-06）"
+    );
     assert!(
         !f.root.join("one.zip").exists(),
         "跳过策略下原包不得留在原位置"

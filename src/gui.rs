@@ -95,6 +95,9 @@ struct State {
     close_after: bool,
     pending_selection: usize,
     applying: bool,
+    /// 递归解压运行中：解压不写整理流程的 read_bytes/completed 计数器，实时指标与
+    /// 进度说明必须走单独口径，否则解压期间会显示恒为 0 的整理指标（U-03）。
+    extracting: bool,
     planned: u64,
     plan_filter: Option<String>,
     /// 本轮勾选保存中出现过失败：pending 归零时用于决定是否重载计划页
@@ -414,6 +417,7 @@ fn sync_ready_after_directory(ui: &AppWindow, state: &State) {
     if ui.get_has_task() && state.tool == Tool::Organizer {
         if let Some(task) = state.task.clone() {
             let outcome = classify_plan_ready(ui, state, &task);
+            ui.set_plan_editable(!matches!(outcome, PlanReadyState::Finished));
             ui.set_ready(matches!(outcome, PlanReadyState::Ready));
             // 三态各给真实文案：已结束的任务不得谎报「规则或目录已改变」（C-11 如实展示）。
             ui.set_status(
@@ -693,8 +697,18 @@ fn classify_plan_ready(ui: &AppWindow, state: &State, path: &Path) -> PlanReadyS
         PlanReadyState::Changed
     }
 }
-fn recompute_ready(ui: &AppWindow, state: &State, path: &Path) -> bool {
-    matches!(classify_plan_ready(ui, state, path), PlanReadyState::Ready)
+/// 任务库状态是否为 ready：计划勾选可编辑的唯一依据（C-11）。库不可访问按不可编辑处理。
+fn task_is_ready(path: &Path) -> bool {
+    Database::open_existing(path)
+        .and_then(|db| db.get::<String>("status"))
+        .is_ok_and(|status| status == "ready")
+}
+/// 计划就绪与勾选可编辑同源：两者都取自 classify_plan_ready，只有任务已结束
+/// （Finished）才禁用勾选。勾选保存在途、目录编辑等瞬时降级只影响 ready，不影响勾选。
+fn sync_plan_readiness(ui: &AppWindow, state: &State, path: &Path) -> bool {
+    let outcome = classify_plan_ready(ui, state, path);
+    ui.set_plan_editable(!matches!(outcome, PlanReadyState::Finished));
+    matches!(outcome, PlanReadyState::Ready)
 }
 /// 计划页事件是否可应用：代际须仍是 latest，且 filter 与当前视图一致。
 /// page 不再要求与 UI 预置值一致：翻页采用「先加载、成功再提交」，加载期间 state.page 仍是旧页。
@@ -763,6 +777,7 @@ fn start_task(
         s.page_starts = vec![0];
         s.conflict = None;
         s.applying = apply;
+        s.extracting = false;
         // 执行分母按将实际执行的勾选数修正：规划期 planned 是全量，用户可能已取消部分勾选。
         // 计数失败时保留旧 planned，不阻断执行（进度分母可能偏大，但仍可收敛）。
         if apply {
@@ -886,6 +901,7 @@ fn start_extract(ui: &AppWindow, state: &Rc<RefCell<State>>, sender: &mpsc::Sync
         s.logs.clear();
         s.conflict = None;
         s.applying = false;
+        s.extracting = true;
         s.planned = 0;
     }
     ui.set_busy(true);
@@ -1359,6 +1375,7 @@ fn initial_state() -> Result<State> {
         close_after: false,
         pending_selection: 0,
         applying: false,
+        extracting: false,
         planned: 0,
         plan_filter: None,
         selection_failed: false,
@@ -1708,9 +1725,9 @@ pub fn run_with_engine_overrides(
                         // 新计划一律回到「全部」筛选：沿用上一任务的筛选可能恰好计数为 0，
                         // 造成「空列表 + 高亮禁用胶囊」的死角。
                         let filter={let mut s=state.borrow_mut();s.task=Some(path.clone());s.page=0;s.page_starts=vec![0];s.conflict=None;s.control=None;
-                         s.applying=false;s.planned=summary.planned_delete+summary.planned_move+summary.planned_link+summary.planned_empty;
+                         s.applying=false;s.extracting=false;s.planned=summary.planned_delete+summary.planned_move+summary.planned_link+summary.planned_empty;
                          s.plan_filter=None;None};
-                        ui.set_busy(false);ui.set_paused(false);ui.set_conflict_visible(false);ui.set_ready(ready);ui.set_has_task(true);
+                        ui.set_busy(false);ui.set_paused(false);ui.set_conflict_visible(false);ui.set_ready(ready);ui.set_plan_editable(ready);ui.set_has_task(true);
                         ui.set_summary(summary.description().into());ui.set_panel(1);
                         ui.set_plan_delete_count(i32::try_from(summary.planned_delete).unwrap_or(i32::MAX));
                         ui.set_plan_move_count(i32::try_from(summary.planned_move).unwrap_or(i32::MAX));
@@ -1737,8 +1754,8 @@ pub fn run_with_engine_overrides(
                     Event::Failed(error)=>{
                         // 用户点了“取消任务”时不要用红色错误条报同一个消息：取消是预期操作，不是故障。
                         let cancelled={let s=state.borrow();s.control.as_ref().is_some_and(|control|control.is_cancelled())};
-                        {let mut s=state.borrow_mut();s.control=None;s.conflict=None;push_event_log(&mut s.logs,error.clone());log_changed=true;}
-                        ui.set_busy(false);ui.set_ready(false);ui.set_paused(false);ui.set_conflict_visible(false);
+                        {let mut s=state.borrow_mut();s.control=None;s.conflict=None;s.extracting=false;push_event_log(&mut s.logs,error.clone());log_changed=true;}
+                        ui.set_busy(false);ui.set_ready(false);ui.set_plan_editable(state.borrow().task.clone().is_some_and(|task|task_is_ready(&task)));ui.set_paused(false);ui.set_conflict_visible(false);
                         if cancelled{
                             ui.set_notice_text(error.into());
                             ui.set_status("任务已取消；已完成的操作不会自动回滚，详情见进度与日志".into());
@@ -1780,7 +1797,7 @@ pub fn run_with_engine_overrides(
                             }
                         }
                         if s.task.as_ref()==Some(&path) && s.pending_selection==0 && !ui.get_busy(){
-                            ui.set_ready(!batch_failed && recompute_ready(&ui,&s,&path));
+                            ui.set_ready(!batch_failed && sync_plan_readiness(&ui,&s,&path));
                         }
                         if reload_page{
                             let start=s.page_starts.get(s.page).copied().unwrap_or(0);
@@ -1817,7 +1834,7 @@ pub fn run_with_engine_overrides(
                         // 页面重建后同步一次 ready：勾选保存失败触发重载时，不能让「开始执行」
                         // 因为一次瞬时数据库失败而一直禁用。
                         if !ui.get_busy() && s.pending_selection==0 && s.task.as_ref()==Some(&path){
-                            ui.set_ready(recompute_ready(&ui,&s,&path));
+                            ui.set_ready(sync_plan_readiness(&ui,&s,&path));
                         }
                     }
                     Event::Notice(text)=>ui.set_notice_text(text.into()),
@@ -1859,7 +1876,7 @@ pub fn run_with_engine_overrides(
                     },
                     Event::ExtractDone(_path,summary)=>{
                         // X-02 一段式收尾：只清运行态与展示摘要；不改 ready/has_task（目录整理两段式专用）。
-                        {let mut s=state.borrow_mut();s.control=None;s.conflict=None;}
+                        {let mut s=state.borrow_mut();s.control=None;s.conflict=None;s.extracting=false;}
                         ui.set_busy(false);ui.set_paused(false);ui.set_conflict_visible(false);
                         ui.set_quarantined_count(
                             i32::try_from(summary.archives_failed).unwrap_or(i32::MAX),
@@ -1883,6 +1900,11 @@ pub fn run_with_engine_overrides(
                     // 执行阶段不再扫描，写“扫描 0 个文件”只会让人误以为没扫到东西，这里只报执行进度。
                     if s.applying{
                         ui.set_metrics(format!("执行中：已处理 {} / {} 项 · 耗时 {:.1}s",done,s.planned,elapsed).into());
+                    }else if s.extracting{
+                        // 解压不写整理流程的计数器（read_bytes/completed 只由哈希与计划执行累加），
+                        // 沿用整理口径会显示恒为 0 的「读取 / 平均读取 / 计划项」。这里只报解压
+                        // 自身真实可得的包进度与耗时（U-03：总量未知时不得编造数字）。
+                        ui.set_metrics(format!("解压中：已处理 {done} 包 · 耗时 {elapsed:.1}s").into());
                     }else{
                         // 吞吐速率为显示用途，u64→f64 的精度损失无意义。
                         // [quality-baseline approved 2026-09-19] 显示用途转换，经用户裁定保留
@@ -1902,6 +1924,9 @@ pub fn run_with_engine_overrides(
                         // 执行阶段没有可执行的计划项（全部取消勾选或空计划）时，不要显示“已扫描 0 个文件”
                         // 让人误以为没扫到东西。
                         ui.set_progress(-1.0);ui.set_progress_note("没有待执行的计划项".into());
+                    }else if s.extracting{
+                        // 解压期间进度说明只报已处理的包数；包内百分比由状态行的 7z 输出提供。
+                        ui.set_progress(-1.0);ui.set_progress_note("".into());
                     }else{
                         ui.set_progress(-1.0);
                         ui.set_progress_note(format!("已扫描 {scanned} 个文件 · 读取 {}",bytes(read)).into());
@@ -2783,15 +2808,61 @@ mod gui_tests {
         .unwrap();
     }
 
-    // 覆盖 C-11（任务结束/取消后计划复选框不得再可点：只有"待执行"行可勾选）
+    // 覆盖 C-11（任务结束/取消后计划复选框不得再可点：只有"待执行"行且任务仍就绪才可勾选）
     #[test]
     fn plan_checkbox_gated_by_row_state_declared_in_ui() {
         let slint = include_str!("../ui/app.slint");
         assert!(
             slint.contains(
-                "enabled: !root.busy && root.confirm-kind == 0 && item.state == \"待执行\";"
+                "enabled: !root.busy && root.confirm-kind == 0 && item.state == \"待执行\" && root.plan-editable;"
             ),
-            "C-11：计划复选框必须同时按行状态（待执行）门禁，避免已结束任务的行仍可点击必报错"
+            "C-11：计划复选框必须同时按行状态（待执行）与任务状态（plan-editable）门禁，\
+             取消/失败后残留的待执行行不得可点击必报错"
         );
+    }
+
+    // 覆盖 C-11, C-01（另一工具失败/取消后切回整理：仍就绪的计划必须保持可勾选）
+    #[test]
+    fn plan_editable_recovers_when_ready_task_is_shown_again() {
+        // 回归：plan-editable 曾只在任务事件里刷新，而 Event::Failed 是两个工具共用的收尾
+        // 事件——解压取消会把禁用态带到整理工具，切回后计划可执行却勾不动（C-01 逐项可勾选）。
+        with_gui(|app| {
+            let task = temp_test_dir("plan-editable-task");
+            let root = temp_test_dir("plan-editable-root");
+            let canonical = std::fs::canonicalize(&root).unwrap();
+            let db = Database::create(&task).unwrap();
+            db.set("root", &crate::fsutil::path_string(&canonical).unwrap())
+                .unwrap();
+            db.set("config", &crate::config::Config::default()).unwrap();
+            db.set("status", &"ready".to_string()).unwrap();
+            drop(db);
+            {
+                let mut s = app.state.borrow_mut();
+                s.task = Some(task.clone());
+            }
+            let ui = &app.ui;
+            ui.set_has_task(true);
+            ui.set_directory(root.to_string_lossy().to_string().into());
+            // 模拟解压取消/失败后残留的禁用态（Event::Failed 收尾时置为 false）。
+            ui.set_plan_editable(false);
+            sync_ready_after_directory(ui, &app.state.borrow());
+            assert!(
+                ui.get_plan_editable(),
+                "仍就绪的整理计划在切回后必须保持可勾选（C-01/C-11）"
+            );
+            assert!(ui.get_ready(), "同一状态下主按钮应可用");
+            // 反向：任务已取消/失败（任务库状态非 ready）后勾选必须禁用，
+            // 否则用户点到的是必然被 db::set_selected 拒绝的行（C-11）。
+            let db = Database::open_existing(&task).unwrap();
+            db.set("status", &"cancelled".to_string()).unwrap();
+            drop(db);
+            sync_ready_after_directory(ui, &app.state.borrow());
+            assert!(
+                !ui.get_plan_editable(),
+                "已取消任务的计划不得再可勾选（C-11）"
+            );
+            assert!(!ui.get_ready(), "已取消任务不得再显示为可执行");
+        })
+        .unwrap();
     }
 }

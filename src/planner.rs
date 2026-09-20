@@ -355,15 +355,30 @@ fn moves(job: &mut Job) -> Result<()> {
                                 .and_then(|v| v.to_str())
                                 .unwrap_or("")
                                 .to_lowercase();
-                            // ZIP-container document formats are not renamed to .zip.
+                            // 容器类识别结果（zip/gz/…）只说明外层容器，不含更精确的格式信息；
+                            // OOXML 变体（docm/dotx/ppsx…）与包格式（jar/apk/epub…）同样只会被
+                            // 识别成容器或同容器基础类型。据此改名等于把正确扩展名改错
+                            //（C-08 只修正「错误」扩展名）。
+                            let detected_container = [
+                                "zip", "gz", "bz2", "xz", "zst", "tar", "7z", "rar", "cab", "iso",
+                                "wim", "lz", "lzma", "cpio", "lzh",
+                            ]
+                            .contains(&kind.extension());
                             let compound = [
-                                "docx", "xlsx", "pptx", "epub", "odt", "ods", "odp", "jar", "apk",
+                                "docx", "docm", "dotx", "dotm", "xlsx", "xlsm", "xltx", "xltm",
+                                "xlsb", "pptx", "pptm", "potx", "potm", "ppsx", "ppsm", "epub",
+                                "odt", "ods", "odp", "jar", "apk",
                             ]
                             .contains(&old.as_str());
+                            // 同义别名（jpeg/jpe/jfif→jpg、tiff→tif、htm→html、mid→midi）
+                            // 同样是正确扩展名。
                             let equivalent = old == kind.extension()
-                                || (old == "jpeg" && kind.extension() == "jpg")
-                                || (old == "tiff" && kind.extension() == "tif");
-                            if !equivalent && !compound {
+                                || (matches!(old.as_str(), "jpeg" | "jpe" | "jfif")
+                                    && kind.extension() == "jpg")
+                                || (old == "tiff" && kind.extension() == "tif")
+                                || (old == "htm" && kind.extension() == "html")
+                                || (old == "mid" && kind.extension() == "midi");
+                            if !equivalent && !compound && !detected_container {
                                 job.log(
                                     "类型检测",
                                     &file.rel,
@@ -490,7 +505,23 @@ fn moves(job: &mut Job) -> Result<()> {
             if desired_rel == file.rel {
                 continue;
             }
-            let mut target = fsutil::safe_join(&job.root, &desired_rel)?;
+            // 目标路径含链接（典型：与分类目录同名的 junction/符号链接）时跳过本文件：
+            // 与上方「分类目录名不合法」分支同口径——拒绝写穿链接是安全属性，但粒度必须是
+            // 该项而不是整次 build（C-10「对应项跳过或失败」）。
+            let mut target = match fsutil::safe_join(&job.root, &desired_rel) {
+                Ok(target) => target,
+                Err(error) => {
+                    job.log(
+                        "归类",
+                        &file.rel,
+                        "",
+                        "跳过",
+                        &format!("目标路径不可用：{error:#}"),
+                        0,
+                    )?;
+                    continue;
+                }
+            };
             if !target_will_be_free(job, &target, &desired_rel, &file.rel)?
                 || !job.db.reserve_target(&desired_rel, file.id)?
             {
@@ -515,7 +546,20 @@ fn moves(job: &mut Job) -> Result<()> {
                         .context("目标缺少目录")?
                         .join(fsutil::suffixed_candidate(stem, &suffix, index));
                     let rel = fsutil::relative_string(&job.root, &target)?;
-                    fsutil::safe_join(&job.root, &rel)?;
+                    if let Err(error) = fsutil::safe_join(&job.root, &rel) {
+                        // 候选名落在链接上（含既有链接文件占名）：换下一个候选名，不整次失败。
+                        job.log(
+                            "命名",
+                            &file.rel,
+                            "",
+                            "跳过",
+                            &format!("候选目标路径不可用：{error:#}"),
+                            0,
+                        )?;
+                        index += 1;
+                        anyhow::ensure!(index < 1_000_000, "目标名称冲突过多");
+                        continue;
+                    }
                     // 回退候选撞回源文件自身当前名称（如剥离副本名后原名被其它内容占用再回退）：
                     // 源自己占着这个名字且不会腾空，视为已就位，不生成 source==target 的空转移动。
                     if rel == file.rel

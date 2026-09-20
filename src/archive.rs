@@ -14,6 +14,7 @@ use std::{
     fs,
     path::{Path, PathBuf},
     process::Command,
+    sync::atomic::Ordering,
     time::{Duration, SystemTime},
 };
 
@@ -633,7 +634,8 @@ impl SevenZip {
                 }
             }
         }
-        job.summary.archives_ok += 1;
+        // 「解压成功」包数由调用方按 complete 口径累加：未完全解开的包要计入失败
+        // 并移入「解压失败」（X-06），不得在解压层无条件先记一次成功。
         Ok(ExtractOutcome { complete, volumes })
     }
 }
@@ -1165,6 +1167,9 @@ pub fn extract_queued(job: &mut Job, engine: &SevenZip) -> Result<()> {
                 // X-05/X-06：complete 整组按处置策略处理（默认回收站）；未完全解开的
                 // 整组移入「解压失败」，目录里不残留压缩包（X 分区总体约束）。
                 if outcome.complete {
+                    // X-05：只有完全解开的包才计「解压成功」；未完全解开的包走下面的
+                    // 失败分支，两个包计数按 X-05/X-06 的划分互斥。
+                    job.summary.archives_ok += 1;
                     // X-02/X-06：单包故障隔离——处置失败（回收接口异常、共享冲突等）只记
                     // 警告并保留原包原地，不得中止整个任务；重跑按等字节合入幂等收敛。
                     if let Err(error) = dispose_archive(job, &outcome.volumes) {
@@ -1214,6 +1219,12 @@ pub fn extract_queued(job: &mut Job, engine: &SevenZip) -> Result<()> {
                 job.context.control.check_cancelled()?;
             }
         }
+        // U-03：解压页的实时计数按「已处理的包」统计（成败都算处理过）；与目录整理的
+        // 计划项计数互不影响（两工具各自持有独立 Control）。
+        job.context
+            .control
+            .completed
+            .fetch_add(1, Ordering::Relaxed);
     }
     Ok(())
 }

@@ -1779,6 +1779,88 @@ fn fix_extension_plans_rename_to_detected_type() {
     assert!(f.root.join("photo.png").exists());
 }
 
+// 覆盖 C-08（只修正「错误」扩展名：同类容器与别名扩展名不得按更粗的识别结果改粗）
+#[test]
+fn fix_extension_keeps_specialized_container_and_alias_extensions() {
+    // 最小 ZIP 头：签名 + 26 字节本地文件头 + 条目名（infer 只看 0x1E 起的条目名）。
+    fn minimal_zip_entry(entry: &str) -> Vec<u8> {
+        let mut bytes = Vec::from(*b"PK\x03\x04");
+        bytes.extend_from_slice(&[0u8; 26]);
+        bytes.extend_from_slice(entry.as_bytes());
+        bytes
+    }
+    let f = Fixture::new();
+    // 条目名为 word/：infer 对 OOXML 家族（含宏启用/模板变体）只识别到 docx 这一粒度，
+    // 此前 dotx/docm 会被当作「错误扩展名」改名成 docx。
+    f.write("报告.docm", &minimal_zip_entry("word/document.xml"), 10);
+    f.write("模板.dotx", &minimal_zip_entry("word/document.xml"), 15);
+    // 条目名非 OOXML：识别结果只有容器类型 zip，whl 的扩展名本身是正确信息。
+    f.write("包.whl", &minimal_zip_entry("data.txt"), 18);
+    // gzip 流：识别结果只有容器类型 gz（svgz 是压缩 SVG）。
+    f.write("图标.svgz", &[0x1F, 0x8B, 0x08, 0x00, 0x00, 0x00], 19);
+    // 同义别名：htm→html、mid→midi 都不算「错误扩展名」。
+    f.write(
+        "index.htm",
+        b"<!DOCTYPE html><html><body>hi</body></html>",
+        20,
+    );
+    f.write("歌曲.mid", b"MThd\x00\x00\x00\x06", 22);
+    let mut cfg = base();
+    cfg.detect_type = true;
+    cfg.fix_extension = true;
+    let task = f.plan(cfg);
+    let db = Database::open(&task.directory).unwrap();
+    let moves = db.actions_page_filtered(0, 10, Some("move")).unwrap();
+    drop(db);
+    assert!(
+        moves.is_empty(),
+        "这些都是正确扩展名，不得按更粗的识别结果改名：{moves:?}"
+    );
+    for name in [
+        "报告.docm",
+        "模板.dotx",
+        "包.whl",
+        "图标.svgz",
+        "index.htm",
+        "歌曲.mid",
+    ] {
+        assert!(f.root.join(name).exists(), "{name} 必须保留原名");
+    }
+}
+
+// 平台门禁原因：用例需要 junction（mklink /J）复现「分类目录名被重定向目录占用」；
+// 非 Windows 无 reparse point 语义（Unix 侧链接拒绝穿越由 symlink_not_followed_or_deleted 覆盖）。
+#[cfg(windows)]
+#[test]
+fn junction_named_like_category_skips_item_instead_of_failing_plan() {
+    let f = Fixture::new();
+    let outside = f.temp.path().join("outside");
+    fs::create_dir_all(&outside).unwrap();
+    let status = std::process::Command::new("cmd")
+        .args(["/C", "mklink", "/J"])
+        .arg(f.root.join("图片"))
+        .arg(&outside)
+        .status()
+        .unwrap();
+    assert!(status.success(), "无法创建 junction，用例前置条件不成立");
+    f.write("photo.png", b"not really a png", 10);
+    // 默认规则按大类归类：photo.png 的目标是 图片/photo.png，中间目录段正是 junction。
+    let task = f.plan(Config::default());
+    let db = Database::open(&task.directory).unwrap();
+    let moves = db.actions_page_filtered(0, 10, Some("move")).unwrap();
+    let events = db.event_page(i64::MAX, 20).unwrap();
+    drop(db);
+    assert!(
+        moves.is_empty(),
+        "目标路径穿过链接的文件必须按项跳过，不得整次分析失败：{moves:?}"
+    );
+    assert!(f.root.join("photo.png").exists(), "跳过的文件必须原地保留");
+    assert!(
+        events.iter().any(|event| event.contains("目标路径不可用")),
+        "按项跳过必须留日志：{events:?}"
+    );
+}
+
 // 覆盖 C-10（计划生成后目录被移动：执行必须拒绝，不得把动作落到别处）
 #[test]
 fn apply_refuses_when_root_directory_moved_after_plan() {

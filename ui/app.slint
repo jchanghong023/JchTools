@@ -279,6 +279,9 @@ export component AppWindow inherits Window {
     in-out property <bool> ready: false;
     in-out property <bool> paused: false;
     in-out property <bool> has-task: false;
+    // 计划勾选是否可编辑：以任务库状态为准（ready 才可编辑）。ready 属性会因勾选保存
+    // 在途短暂降下，不能直接复用它做勾选门禁（C-11：已结束任务的行不得再可点击）。
+    in-out property <bool> plan-editable: false;
     in-out property <string> status: "请选择需要整理的目录";
     in-out property <string> metrics: "尚未扫描";
     in-out property <string> summary;
@@ -543,7 +546,7 @@ export component AppWindow inherits Window {
                             HorizontalLayout { padding-top: 10px; padding-bottom: 10px; padding-left: 14px; padding-right: 14px; spacing: 12px; cross-axis-alignment: center;
                                 // 勾选保存中 ready 短暂为 false：此时仍允许继续改其他勾选，
                                 // 否则整表被锁且主按钮文案被误切。
-                                CheckBox { checked: item.selected; enabled: !root.busy && root.confirm-kind == 0 && item.state == "待执行";
+                                CheckBox { checked: item.selected; enabled: !root.busy && root.confirm-kind == 0 && item.state == "待执行" && root.plan-editable;
                                     accessible-label: item.kind + " " + item.source;
                                     toggled => { root.plan-toggle(item.id,self.checked); } }
                                 VerticalLayout { horizontal-stretch: 1; spacing: 3px;
