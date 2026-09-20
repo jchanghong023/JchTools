@@ -284,11 +284,11 @@ def open_confirm(window: WindowSpecification, button_title: str, timeout: int = 
 
 
 def close_app(window: WindowSpecification) -> None:
-    """请求关闭：先按用户路径点标题栏「关闭」，再补发标准 WM_CLOSE 兜底.
+    """按用户路径请求关闭：激活窗口后点标题栏「关闭」.
 
     合成鼠标点击在本环境可能落空或点到同窗其他控件（实测 S2 会误开确认层并卡住），
-    WM_CLOSE 走的是同一条 on_close_requested 路径，且不依赖坐标命中；关闭路径真的
-    挂死时两者都无效，仍由退出断言判失败（不放宽判定）。
+    因此 _wait_exit_or_kill 的后续重试允许升级为 WM_CLOSE 兜底；首次尝试只走这条
+    用户路径，避免「标题栏按钮点击失效」这类回归被兜底掩盖。
     """
     with contextlib.suppress(*TRANSIENT_GUI_ERRORS):
         for button in window.descendants(control_type="Button"):
@@ -297,7 +297,11 @@ def close_app(window: WindowSpecification) -> None:
                 activate(window)
                 button.click_input()
                 time.sleep(0.3)
-                break
+                return
+
+
+def _escalate_close(window: WindowSpecification) -> None:
+    """关闭兜底：向窗口发标准 WM_CLOSE，走同一条 on_close_requested 路径，不依赖坐标命中."""
     with contextlib.suppress(*TRANSIENT_GUI_ERRORS):
         win32gui.PostMessage(window.handle, win32con.WM_CLOSE, 0, 0)
 
@@ -310,17 +314,23 @@ def _wait_exit_or_kill(
     """等待进程退出，超时则强制结束（避免异常路径泄漏进程），并返回是否被强杀与退出码.
 
     合成鼠标点击可能落空（窗口未在前台时点到了别的窗口，实测 S2 稳定复现且随后手动
-    点击同一按钮立即退出）：因此进程仍在时周期性重试点击关闭，把「点击落空」与
-    「关闭路径真的挂死」区分开——后者会耗尽全部重试并最终被强杀、由断言判失败。
+    点击同一按钮立即退出）：首次尝试仍只点标题栏按钮，之后的重试才补发 WM_CLOSE，
+    把「点击落空」与「关闭路径真的挂死」区分开——后者会耗尽全部重试并最终被强杀、
+    由断言判失败。
     """
     deadline = time.time() + timeout
+    attempts = 0
     while time.time() < deadline:
         try:
             _ = proc.wait(timeout=min(3.0, max(0.1, deadline - time.time())))
         except subprocess.TimeoutExpired:
+            attempts += 1
             if window is not None:
                 with contextlib.suppress(*TRANSIENT_GUI_ERRORS):
-                    close_app(window)
+                    if attempts <= 1:
+                        close_app(window)
+                    else:
+                        _escalate_close(window)
         else:
             return False, proc.returncode
     proc.kill()
