@@ -8,7 +8,7 @@
 2. 明确任务类型：新需求 → 先按第 7 节协议转成合同条目并经用户确认；缺陷修复 → 先写能在修复前失败的回归测试；其余变更 → 确认不违反第 9 节可信基隔离。
 3. 动工前记录基线：`cargo test` 与 `python scripts/static_check.py` 的当前状态。
 4. 编码遵守第 4 节实现约定与合同相应分区；测试数据一律经 `python scripts/make_tmp.py` 生成。
-5. 完成后按 3.3 验收矩阵执行相应层级验证，等 CI 转绿，按第 7 节格式报告（结论先行 + 命令/退出码/关键输出 + CI run 链接）。
+5. 完成后按 3.3 验收矩阵执行相应层级验证；需要 CI 结论时按 3.4 跑 slowtest（`check.yml` 现仅手动触发，slowtest 是它的唯一自动入口），等 CI 转绿后按第 7 节格式报告（结论先行 + 命令/退出码/关键输出 + CI run 链接）。
 6. 收尾：`python scripts/make_tmp.py clean` 清空 `.tmp/`，按第 8 节与 3.2 提交纪律写提交信息。
 
 ## 1. 项目背景
@@ -51,18 +51,18 @@ powershell -NoProfile -File .\scripts\package-windows.ps1   # 生成含 7-Zip �
 
 ## 3.2 测试验收纪律（代码与测试均由 AI 代理产出，以下用于对抗自证偏差）
 
-- **回归测试先行**：修复任何缺陷 `MUST` 先写能在修复前失败的回归测试，并在提交信息记录反证证据（复现命令 + 修复前失败输出摘要，CI 转绿后附 run 链接）。只有「修复后通过」而没有「修复前失败」证据的修复不算完成。
+- **回归测试先行**：修复任何缺陷 `MUST` 先写能在修复前失败的回归测试，并在提交信息记录反证证据（复现命令 + 修复前失败输出摘要，slowtest 触发的 CI run 转绿后附 run 链接）。只有「修复后通过」而没有「修复前失败」证据的修复不算完成。
 - **禁止削弱测试**：删除、改名、放宽断言、新增 `#[ignore]` 或平台门禁（`#[cfg(...)]`）`MUST` 同步更新 `scripts/test-baseline.json`（用 `python scripts/static_check.py --update-test-baseline` 重新生成）并在提交信息写明理由；`MUST NOT` 只为了让测试变绿而做上述改动。平台门禁 `MUST` 附带原因注释，且被门禁的行为 `SHOULD` 在另一平台仍有覆盖。
-- **提交纪律**：提交信息按变更性质 `MUST` 携带对应记录——缺陷修复附回归反证（复现命令 + 修复前失败输出摘要）；合同增改附用户确认结果；可信基变更附理由与用户批准记录；基线再生成附 `[基线已确认]` 标记；宣称完成附 CI run 链接。缺对应记录的提交 `MUST NOT` 合入。
+- **提交纪律**：提交信息按变更性质 `MUST` 携带对应记录——缺陷修复附回归反证（复现命令 + 修复前失败输出摘要）；合同增改附用户确认结果；可信基变更附理由与用户批准记录；基线再生成附 `[基线已确认]` 标记；宣称完成附 slowtest 触发的 CI run 链接（见下条「CI 权威」）。缺对应记录的提交 `MUST NOT` 合入。
 - **完成条件**：见 3.3 验收矩阵；`MUST NOT` 只跑默认 `cargo test` 就宣称引擎 / UI / 发布相关工作已验证。
 - **独立复核**：涉及引擎、删除路径、解压安全（`fsutil` / 覆盖语义）或用户可见行为的实质变更，`SHOULD` 由未参与实现的独立代理会话复跑验证并给出证据格式：命令、环境（OS / rustc / 是否真实引擎）、退出码、关键输出行。
-- **CI 权威**：本地验证通过只是临时结论；对应 CI（`.github/workflows/`）run 转绿之前 `MUST NOT` 宣称变更已完成，宣称完成 `MUST` 附 CI run 链接；本地自报证据（提交信息、终端输出）视为线索而非判决。
+- **CI 权威**：本地验证通过只是临时结论；对应 CI（`.github/workflows/`）run 转绿之前 `MUST NOT` 宣称变更已完成，宣称完成 `MUST` 附 CI run 链接；本地自报证据（提交信息、终端输出）视为线索而非判决。`check.yml` 现仅 `workflow_dispatch` 手动触发（push / PR 不触发），其 run 只能由 slowtest（`python scripts/test_gate.py slowtest --authorized`）或人类明确手动 dispatch 产生；未跑 slowtest 的变更只能如实标注「未验证」，`MUST NOT` 宣称完成。（无执法点 · 软法：无法机器判定「是否宣称完成」，靠会话纪律 + 3.4 的 `--authorized` 入口守卫）
 - **flaky 政策**：`MUST NOT` 重跑到绿。测试间歇性失败必须查因；确属 flaky 的要在提交信息记录现象与原因，不得静默重跑。
 - **人工验收边界**：用户已决定不保留人工验收项清单；自动化未覆盖的行为（如真实 TB 级数据、非 150% DPI、网络共享）`MUST NOT` 被代理宣称已验证，只能如实标注「未验证」。
 
 ## 3.3 验收方法（怎么测试、怎么验收）
 
-「验收通过」= 下表相应行全部执行且通过 + 对应 CI run 转绿（3.2 CI 权威）；`NOT RUN` 不得报告为通过。
+「验收通过」= 下表相应行全部执行且通过 + slowtest 触发的对应 CI run 转绿（3.2 CI 权威）；`NOT RUN` 不得报告为通过。
 
 | 场景 / 变更类型 | 必须通过 | 覆盖 |
 |---|---|---|
@@ -84,7 +84,7 @@ powershell -NoProfile -File .\scripts\package-windows.ps1   # 生成含 7-Zip �
 
 - **fastcheck**：static_check + rustfmt + clippy + cargo test（含 binding loop 扫描）；总墙钟硬上限 60 秒，超时即失败并终止整个进程树，`MUST NOT` 把超时报成成功；AI 代理 `MAY` 自主执行，但其通过不代表完整验证。（执法点：test_gate.py 的预算终止与退出码）
 - **fulltest**：当前平台（Windows，唯一支持平台）全部本地验证——Python 质量门（与 CI 同命令）+ fmt/clippy + `acceptance.ps1 -WithEngine -WithGuiSmoke -WithPackage`；`MUST NOT` 触发远程流水线。每次运行 `MUST` 有人类明确授权。（执法点：test_gate.py 的 `--authorized` 入口守卫；越过入口直接执行内部命令属规避行为 · 无执法点 · 软法）
-- **slowtest**：fulltest 全部阶段 + 远程 `check.yml`（gh 触发并轮询到最终状态，`MUST NOT` 把「已触发」当「通过」）。每次运行 `MUST` 有人类明确授权。（执法点：同上 `--authorized` 入口守卫；同上软法）
+- **slowtest**：fulltest 全部阶段 + 远程 `check.yml`（该工作流仅 `workflow_dispatch`，由本门经 `gh workflow run` 触发并轮询到最终状态，`MUST NOT` 把「已触发」当「通过」；push / PR 不自动触发）。每次运行 `MUST` 有人类明确授权。（执法点：同上 `--authorized` 入口守卫；同上软法）
 - `release.yml` 是真实发布（自动打时间戳 tag 并发布产物），`MUST NOT` 纳入 slowtest 自动触发；发布需用户单独明确该次目标。（执法点：test_gate.py 不包含该阶段）
 - 历史授权、上一次授权、CI 配置或脚本注释 `MUST NOT` 视为本次授权；环境或工具缺失只能如实标注 UNVERIFIED，`MUST NOT` 当作通过或静默跳过。（无执法点 · 软法）
 
