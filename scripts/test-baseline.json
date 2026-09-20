@@ -183,6 +183,12 @@
     },
     {
       "file": "src/gui.rs",
+      "name": "plan_editable_recovers_when_ready_task_is_shown_again",
+      "ignored": false,
+      "cfg": null
+    },
+    {
+      "file": "src/gui.rs",
       "name": "plan_page_event_rejects_stale_gen_without_touching_completed",
       "ignored": false,
       "cfg": null
@@ -747,6 +753,12 @@
     },
     {
       "file": "tests/core.rs",
+      "name": "fix_extension_keeps_specialized_container_and_alias_extensions",
+      "ignored": false,
+      "cfg": null
+    },
+    {
+      "file": "tests/core.rs",
       "name": "fix_extension_plans_rename_to_detected_type",
       "ignored": false,
       "cfg": null
@@ -810,6 +822,12 @@
       "name": "huge_sizes_use_u64",
       "ignored": false,
       "cfg": null
+    },
+    {
+      "file": "tests/core.rs",
+      "name": "junction_named_like_category_skips_item_instead_of_failing_plan",
+      "ignored": false,
+      "cfg": "windows"
     },
     {
       "file": "tests/core.rs",
