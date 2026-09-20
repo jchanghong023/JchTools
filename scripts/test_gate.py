@@ -19,7 +19,11 @@
               slowtest，只能单独显式授权手动触发。
 
 防递归：被触发的远程工作流各自运行固定步骤，不会回调本脚本，不存在
-slowtest → CI → slowtest 循环。
+slowtest → CI → slowtest 循环。本地阶段未全部 PASS（FAIL/TIMEOUT/UNVERIFIED）
+时不触发远程阶段，避免在本地未验证的状态下消耗流水线资源。
+
+fulltest / slowtest 打印本次运行的源码快照（HEAD、工作区是否干净、主要工具版本）
+与总墙钟耗时，结论据此绑定到具体提交；fastcheck 另有 60 秒预算判定。
 
 用法：
     python scripts/test_gate.py fastcheck
@@ -58,6 +62,8 @@ STAGE_TIMEOUT_DEFAULT = 3600.0
 # 远程工作流等待上限：check.yml 约 30-40 分钟。
 REMOTE_CHECK_WATCH_SECONDS = 5400.0
 REMOTE_POLL_INTERVAL_SECONDS = 30.0
+# 源码快照里的工作区改动只列前 N 项，dirty 时避免刷屏。
+SNAPSHOT_DIRTY_SAMPLE = 10
 
 # 常量名避开 pass 字样（S105 会把含 pass 的变量名当作疑似硬编码口令）。
 STATUS_OK = "PASS"
@@ -146,11 +152,11 @@ def run_logged(name: str, argv: list[str], *, timeout: float, env_extra: dict[st
             _ = proc.wait(timeout=30)
     elapsed = time.monotonic() - started
     if timed_out:
-        detail = f"超过 {timeout:.0f}s 限制，进程树已终止；完整日志：{log}"
+        detail = f"超过 {timeout:.0f}s 限制（已耗时 {elapsed:.1f}s），进程树已终止；完整日志：{log}"
         return StageResult(name, STATUS_TIMED_OUT, detail, log)
     if proc.returncode == 0:
         return StageResult(name, STATUS_OK, f"{elapsed:.1f}s；完整日志：{log}", log)
-    detail = f"退出码 {proc.returncode}；日志尾部：\n{_tail(log)}"
+    detail = f"退出码 {proc.returncode}（已耗时 {elapsed:.1f}s）；日志尾部：\n{_tail(log)}"
     return StageResult(name, STATUS_FAILED, detail, log)
 
 
@@ -170,8 +176,17 @@ def _has_blocking(results: list[StageResult]) -> bool:
     return any(result.status in (STATUS_FAILED, STATUS_TIMED_OUT) for result in results)
 
 
-def _print_summary(title: str, results: list[StageResult], notes: list[str]) -> int:
+def _print_summary(
+    title: str,
+    results: list[StageResult],
+    notes: list[str],
+    *,
+    snapshot: list[str] | None = None,
+    wall_note: str | None = None,
+) -> int:
     print(f"\n==== {title} ====")
+    for line in snapshot or []:
+        print(f"快照       {line}")
     for result in results:
         print(f"{result.status:10} {result.name}")
         for line in result.detail.splitlines():
@@ -181,13 +196,18 @@ def _print_summary(title: str, results: list[StageResult], notes: list[str]) -> 
     unverified = [result.name for result in results if result.status == STATUS_UNVERIFIED]
     if all(result.status == STATUS_OK for result in results):
         print(f"Overall: PASS（{len(results)} 个阶段全部通过）")
-        return 0
-    if unverified:
+        code = 0
+    elif unverified:
         names = ", ".join(unverified)
         print(f"Overall: NOT FULLY VERIFIED（存在 UNVERIFIED 阶段：{names}；不得报告为通过）")
+        code = 1
     else:
         print("Overall: FAIL")
-    return 1
+        code = 1
+    # 墙钟耗时：fastcheck 用于判定 60 秒硬上限，fulltest/slowtest 用于如实记录本次运行规模。
+    if wall_note is not None:
+        print(wall_note)
+    return code
 
 
 def cmd_fastcheck(deadline_seconds: float) -> int:
@@ -224,10 +244,8 @@ def cmd_fastcheck(deadline_seconds: float) -> int:
         elif result.status != STATUS_OK:
             break
     elapsed = time.monotonic() - started
-    code = _print_summary("fastcheck", results, [])
-    budget_note = f"墙钟：{elapsed:.1f}s / 预算 {deadline_seconds:.0f}s（60 秒为硬上限，超时即失败）"
-    print(budget_note)
-    return code
+    note = f"墙钟：{elapsed:.1f}s / 预算 {deadline_seconds:.0f}s（60 秒为硬上限，超时即失败）"
+    return _print_summary("fastcheck", results, [], wall_note=note)
 
 
 def _python_quality_stages(results: list[StageResult]) -> None:
@@ -251,6 +269,30 @@ def _python_quality_stages(results: list[StageResult]) -> None:
             results.append(StageResult(name, STATUS_UNVERIFIED, hint))
             continue
         results.append(run_logged(name, argv, timeout=600.0))
+
+
+def _ps51_module_path() -> str | None:
+    r"""给 Windows PowerShell 5.1 子进程用的 PSModulePath：剔除 PowerShell 7 的模块目录.
+
+    调用方本身跑在 PowerShell 7 会话里时，进程继承的 PSModulePath 以
+    `c:\program files\powershell\7\Modules` 开头；5.1 会优先自动加载该目录下标注
+    CompatiblePSEditions=Core 的 Microsoft.PowerShell.Utility，加载失败后 Get-FileHash
+    等内置 cmdlet 变成 CommandNotFoundException，acceptance.ps1 的打包阶段随即失败
+    （本机实测反证：PSModulePath 收窄到 Windows PowerShell 自身目录后 Get-FileHash 立即可用）。
+    只影响本进程树继承的环境，不改系统设置。
+    """
+    # Windows 环境变量名大小写不敏感，官方拼写是 PSModulePath；此处按现有值读取。
+    value = os.environ.get("PSModulePath")  # noqa: SIM112
+    if not value:
+        return None
+    keep = [
+        part
+        for part in value.split(os.pathsep)
+        if part
+        and "\\powershell\\7\\" not in f"{part.lower()}\\"
+        and "\\documents\\powershell\\" not in f"{part.lower()}\\"
+    ]
+    return os.pathsep.join(keep) or None
 
 
 def _fulltest_stages(results: list[StageResult]) -> None:
@@ -298,6 +340,9 @@ def _fulltest_stages(results: list[StageResult]) -> None:
     # PSExecutionPolicyPreference 以 Process 作用域覆盖之，且随环境继承给
     # acceptance.ps1 内部再起的 powershell 子进程（package 阶段），只影响本进程树。
     acceptance_env = {"PSExecutionPolicyPreference": "Bypass"}
+    module_path = _ps51_module_path()
+    if module_path is not None:
+        acceptance_env["PSModulePath"] = module_path
     results.append(run_logged("acceptance", acceptance_argv, timeout=STAGE_TIMEOUT_DEFAULT, env_extra=acceptance_env))
     shutil.rmtree(GUI_DATA_DIR, ignore_errors=True)
     results.append(StageResult("cleanup-gui-data", STATUS_OK, f"已删除一次性数据集 {GUI_DATA_DIR}"))
@@ -309,9 +354,14 @@ def cmd_fulltest() -> int:
         message += "平台范围按合同 P-07 仅支持 Windows（原 Linux 验证入口已移除）"
         print(message)
         return 2
+    started = time.monotonic()
+    snapshot = _snapshot_lines()
     results: list[StageResult] = []
     _fulltest_stages(results)
-    return _print_summary("fulltest（当前平台 Windows）", results, [])
+    elapsed = time.monotonic() - started
+    return _print_summary(
+        "fulltest（当前平台 Windows）", results, [], snapshot=snapshot, wall_note=f"墙钟：{elapsed:.1f}s"
+    )
 
 
 def _str_field(entry: object, key: str) -> str | None:
@@ -327,6 +377,46 @@ def _git_output(git: str, args: list[str]) -> str | None:
     if done.returncode != 0:
         return None
     return done.stdout.strip()
+
+
+def _version_line(name: str) -> str:
+    exe = shutil.which(name)
+    if exe is None:
+        return f"{name}: 未找到（PATH 缺失）"
+    done = subprocess.run([exe, "--version"], capture_output=True, text=True, check=False)
+    lines = (done.stdout or done.stderr).strip().splitlines()
+    return f"{name}: {lines[0] if lines else '版本未知'}"
+
+
+def _snapshot_lines() -> list[str]:
+    """本次运行的源码快照：HEAD、工作区是否干净、关键构建配置与主要工具版本.
+
+    fulltest / slowtest 的结论必须能绑回具体提交；工作区不干净时列出改动摘要，
+    避免把「含未提交改动的本地结果」与「CI 构建的提交结果」混为同一状态。
+    """
+    git = shutil.which("git")
+    head = _git_output(git, ["rev-parse", "HEAD"]) if git is not None else None
+    lines = [f"HEAD: {head or '未知（git 不可用）'}"]
+    if git is not None:
+        porcelain = _git_output(git, ["status", "--porcelain"])
+        if porcelain is None:
+            lines.append("工作区：状态查询失败")
+        elif not porcelain:
+            lines.append("工作区：clean（无未提交改动）")
+        else:
+            changed = porcelain.splitlines()
+            sample = "；".join(changed[:SNAPSHOT_DIRTY_SAMPLE])
+            rest = len(changed) - SNAPSHOT_DIRTY_SAMPLE
+            more = f"；另有 {rest} 项" if rest > 0 else ""
+            lines.append(f"工作区：dirty（{len(changed)} 项未提交改动）：{sample}{more}")
+    lines.append(_version_line("cargo"))
+    lines.append(_version_line("rustc"))
+    lines.append(f"python: {sys.version.split()[0]}（{sys.executable}）")
+    for key in ("CARGO_TARGET_DIR", "RUSTFLAGS", "CARGO_ENCODED_RUSTFLAGS"):
+        value = os.environ.get(key)
+        if value:
+            lines.append(f"{key}: {value}")
+    return lines
 
 
 def _trigger_workflow(git: str, gh: str, workflow: str) -> tuple[str, str] | StageResult:
@@ -352,9 +442,8 @@ def _trigger_workflow(git: str, gh: str, workflow: str) -> tuple[str, str] | Sta
     return head, branch
 
 
-def _find_completed_run(gh: str, workflow: str, branch: str, head: str) -> StageResult | None:
-    """查询该提交的 run；已完结返回最终结果，未完结或查询失败返回 None."""
-    stage = f"remote-{workflow}"
+def _find_run(gh: str, workflow: str, branch: str, head: str) -> tuple[str | None, str | None, str] | None:
+    """查询该提交对应的 run；返回 (status, conclusion, url)，查不到或查询失败返回 None."""
     json_fields = "headSha,status,conclusion,url"
     listing = subprocess.run(
         [gh, "run", "list", "--workflow", workflow, "--branch", branch, "--limit", "10", "--json", json_fields],
@@ -372,13 +461,22 @@ def _find_completed_run(gh: str, workflow: str, branch: str, head: str) -> Stage
         if _str_field(entry, "headSha") != head:
             continue
         url = _str_field(entry, "url") or "（未取得 run 链接）"
-        if _str_field(entry, "status") == "completed":
-            conclusion = _str_field(entry, "conclusion")
-            if conclusion == "success":
-                return StageResult(stage, STATUS_OK, url)
-            detail = f"流水线最终状态 {conclusion}；run：{url}"
-            return StageResult(stage, STATUS_FAILED, detail)
+        return _str_field(entry, "status"), _str_field(entry, "conclusion"), url
     return None
+
+
+def _find_completed_run(gh: str, workflow: str, branch: str, head: str) -> StageResult | None:
+    """查询该提交的 run；已完结返回最终结果，未完结或查询失败返回 None."""
+    stage = f"remote-{workflow}"
+    info = _find_run(gh, workflow, branch, head)
+    if info is None:
+        return None
+    status, conclusion, url = info
+    if status != "completed":
+        return None
+    if conclusion == "success":
+        return StageResult(stage, STATUS_OK, f"最终状态 success；run：{url} @ {head[:12]}")
+    return StageResult(stage, STATUS_FAILED, f"流水线最终状态 {conclusion}；run：{url} @ {head[:12]}")
 
 
 def _stage_remote_workflow(git: str, gh: str, workflow: str, *, watch_seconds: float) -> StageResult:
@@ -395,7 +493,14 @@ def _stage_remote_workflow(git: str, gh: str, workflow: str, *, watch_seconds: f
         if found is not None:
             return found
     minutes = watch_seconds / 60
-    detail = f"等待 {minutes:.0f} 分钟仍未完成（未验证完成，不得报告为通过）"
+    detail = f"等待 {minutes:.0f} 分钟仍未完结（未验证完成，不得报告为通过）"
+    running = _find_run(gh, workflow, branch, head)
+    if running is not None:
+        status, _conclusion, url = running
+        detail = (
+            f"等待 {minutes:.0f} 分钟仍未完结，当前状态 {status or '未知'}（未验证完成，不得报告为通过）；"
+            f"run：{url} @ {head[:12]}；续查：gh run list --workflow {workflow} --branch {branch} --limit 5"
+        )
     return StageResult(stage, STATUS_UNVERIFIED, detail)
 
 
@@ -406,25 +511,40 @@ def cmd_slowtest() -> int:
         )
         print(message)
         return 2
+    started = time.monotonic()
+    snapshot = _snapshot_lines()
     results: list[StageResult] = []
     _fulltest_stages(results)
-    # 前置本地验证已失败时停止后续远程阶段，避免在已知失败状态下消耗流水线资源。
+    # 前置本地验证未全部 PASS（FAIL / TIMEOUT / UNVERIFIED）时停止后续远程阶段：
+    # 本地平台验证都没能成立就去消耗流水线资源属于自欺，且会把「本地未验证」掩盖成「远程已验证」。
     git = shutil.which("git")
     gh = shutil.which("gh")
-    if git is None or gh is None:
-        state = f"git={'有' if git else '缺'} gh={'有' if gh else '缺'}；远程阶段无法验证"
-        results.append(StageResult("remote-ci", STATUS_UNVERIFIED, state))
-    elif not _has_blocking(results):
+    if all(result.status == STATUS_OK for result in results) and git is not None and gh is not None:
         auth = subprocess.run([gh, "auth", "status"], capture_output=True, text=True, check=False)
         if auth.returncode != 0:
             results.append(StageResult("remote-ci", STATUS_UNVERIFIED, "gh 未登录（先 gh auth login）"))
         else:
             results.append(_stage_remote_workflow(git, gh, "check.yml", watch_seconds=REMOTE_CHECK_WATCH_SECONDS))
+    elif git is None or gh is None:
+        state = f"git={'有' if git else '缺'} gh={'有' if gh else '缺'}；远程阶段无法验证"
+        results.append(StageResult("remote-ci", STATUS_UNVERIFIED, state))
+    else:
+        failed = ", ".join(f"{result.name}={result.status}" for result in results if result.status != STATUS_OK)
+        results.append(
+            StageResult("remote-ci", STATUS_NOT_RUN, f"本地阶段未全部 PASS（{failed}）；按纪律不触发远程流水线")
+        )
     release_note = (
         "release-workflow：真实发布（自动打时间戳 tag 并发布安装包与便携 ZIP），不属于 slowtest；"
         "如需发布请单独确认目标后手动运行 gh workflow run release.yml"
     )
-    return _print_summary("slowtest（fulltest + 远程流水线）", results, [release_note])
+    elapsed = time.monotonic() - started
+    return _print_summary(
+        "slowtest（fulltest + 远程流水线）",
+        results,
+        [release_note],
+        snapshot=snapshot,
+        wall_note=f"墙钟：{elapsed:.1f}s",
+    )
 
 
 def main(argv: list[str] | None = None) -> int:
