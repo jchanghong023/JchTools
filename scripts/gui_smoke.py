@@ -284,7 +284,12 @@ def open_confirm(window: WindowSpecification, button_title: str, timeout: int = 
 
 
 def close_app(window: WindowSpecification) -> None:
-    """点标题栏「关闭」：确认框也带同名按钮时按枚举取首个匹配，避免 ElementAmbiguousError."""
+    """请求关闭：先按用户路径点标题栏「关闭」，再补发标准 WM_CLOSE 兜底.
+
+    合成鼠标点击在本环境可能落空或点到同窗其他控件（实测 S2 会误开确认层并卡住），
+    WM_CLOSE 走的是同一条 on_close_requested 路径，且不依赖坐标命中；关闭路径真的
+    挂死时两者都无效，仍由退出断言判失败（不放宽判定）。
+    """
     with contextlib.suppress(*TRANSIENT_GUI_ERRORS):
         for button in window.descendants(control_type="Button"):
             if (button.window_text() or "") == "关闭":
@@ -292,7 +297,9 @@ def close_app(window: WindowSpecification) -> None:
                 activate(window)
                 button.click_input()
                 time.sleep(0.3)
-                return
+                break
+    with contextlib.suppress(*TRANSIENT_GUI_ERRORS):
+        win32gui.PostMessage(window.handle, win32con.WM_CLOSE, 0, 0)
 
 
 def _wait_exit_or_kill(
