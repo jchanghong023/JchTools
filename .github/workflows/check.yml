@@ -1,8 +1,9 @@
 name: Build and test
+# 触发策略：仅 workflow_dispatch（手动）。
+# 本工作流是 slowtest 的远程阶段：由 `python scripts/test_gate.py slowtest --authorized`
+# 经 gh workflow run 触发，或由人类明确要求时手动触发；push / pull_request 不再自动触发，
+# 避免在人类未明确要求时消耗流水线资源。
 on:
-  push:
-    branches: [master]
-  pull_request:
   workflow_dispatch:
 permissions:
   contents: read
