@@ -289,13 +289,25 @@ def close_app(window: WindowSpecification) -> None:
         click(window, close)
 
 
-def _wait_exit_or_kill(proc: subprocess.Popen[bytes], timeout: int = 15) -> None:
-    """等待进程退出；超时则强制结束，避免异常路径泄漏进程."""
+def _wait_exit_or_kill(proc: subprocess.Popen[bytes], timeout: int = 15) -> tuple[bool, int | None]:
+    """等待进程退出；超时则强制结束（避免异常路径泄漏进程），并返回是否被强杀与退出码."""
     try:
         _ = proc.wait(timeout=timeout)
     except subprocess.TimeoutExpired:
         proc.kill()
         _ = proc.wait(timeout=10)
+        return True, proc.returncode
+    return False, proc.returncode
+
+
+def assert_clean_exit(tag: str, *, killed: bool, code: int | None) -> None:
+    """S1-S4 的退出断言：被强杀或非 0 退出码都算失败（AGENTS §3.4 不得把未验证当作通过）."""
+    if killed:
+        msg = f"{tag}：进程在 15 秒内未自行退出，已被强杀（关闭路径可能挂死）"
+        raise RuntimeError(msg)
+    if code != 0:
+        msg = f"{tag}：进程退出码 {code}（预期 0）"
+        raise RuntimeError(msg)
 
 
 def s1_launch_and_exit(exe: str) -> None:
@@ -308,7 +320,8 @@ def s1_launch_and_exit(exe: str) -> None:
         if window is not None:
             with contextlib.suppress(*TRANSIENT_GUI_ERRORS):
                 close_app(window)
-        _wait_exit_or_kill(proc)
+        killed, code = _wait_exit_or_kill(proc)
+    assert_clean_exit("S1", killed=killed, code=code)
     print("S1 PASS：进程已退出")
 
 
@@ -334,7 +347,8 @@ def s2_analyze_only(exe: str, data: str) -> None:
         if window is not None:
             with contextlib.suppress(*TRANSIENT_GUI_ERRORS):
                 close_app(window)
-        _wait_exit_or_kill(proc)
+        killed, code = _wait_exit_or_kill(proc)
+    assert_clean_exit("S2", killed=killed, code=code)
     print("S2 PASS：进程已退出")
 
 
@@ -356,7 +370,8 @@ def s3_full_organize(exe: str, data: str) -> None:
         if window is not None:
             with contextlib.suppress(*TRANSIENT_GUI_ERRORS):
                 close_app(window)
-        _wait_exit_or_kill(proc)
+        killed, code = _wait_exit_or_kill(proc)
+    assert_clean_exit("S3", killed=killed, code=code)
     print("S3 PASS：进程已退出")
 
 
@@ -406,7 +421,8 @@ def s4_full_extract(exe: str, data: str) -> None:
         if window is not None:
             with contextlib.suppress(*TRANSIENT_GUI_ERRORS):
                 close_app(window)
-        _wait_exit_or_kill(proc)
+        killed, code = _wait_exit_or_kill(proc)
+    assert_clean_exit("S4", killed=killed, code=code)
     print("S4 PASS：进程已退出")
 
 
