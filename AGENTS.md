@@ -88,6 +88,15 @@ powershell -NoProfile -File .\scripts\package-windows.ps1   # 生成含 7-Zip �
 - `release.yml` 是真实发布（自动打时间戳 tag 并发布产物），`MUST NOT` 纳入 slowtest 自动触发；发布需用户单独明确该次目标。（执法点：test_gate.py 不包含该阶段）
 - 历史授权、上一次授权、CI 配置或脚本注释 `MUST NOT` 视为本次授权；环境或工具缺失只能如实标注 UNVERIFIED，`MUST NOT` 当作通过或静默跳过。（无执法点 · 软法）
 
+## 3.5 构建与缓存纪律
+
+- **profile 约定**：日常/受检构建用 Cargo 默认 `dev` profile（`incremental = true`、`codegen-units = 256`、`debug = 1` 行号级调试信息；保持默认，不关闭增量、不加昂贵优化）。受检 `release` profile 同时就是打包配置（`lto = "thin"`、`codegen-units = 1`、`strip`、`overflow-checks`、`debug-assertions`）：质量门的 `cargo build --all-targets --release` 与 `package-windows.ps1` / CI 的 `--release --bins` 走同一 profile，不另拆打包 profile（拆分须同步本文件、打包脚本与 CI，属待所有者裁定项）。
+- **linker 选择**：保持 MSVC 默认 `link.exe`（`.cargo/config.toml` 仅设 `+crt-static`）。改用 `rust-lld` 等更快链接器前，须以一次完整质量门（含 `--all-targets`、FFI、build.rs）验证兼容；不兼容即回退并留痕。
+- **缓存保护**：禁止无理由 `cargo clean`；禁止删除或迁移当前受检配置的 `target/`；清理前确认无 cargo 进程持有 build-dir 锁；确需全量重建时给出具体理由，优先定点清理。
+- **配置维度稳定**：单轮质量门内 toolchain、`RUSTFLAGS`/`CARGO_ENCODED_RUSTFLAGS`、`.cargo/config*`、`CARGO_TARGET_DIR` 保持不变；feature 模式 / target triple / profile 矩阵切换属门设计本身，但同一条门命令在修复循环与最终完整验证之间必须保持同一变体，门覆盖的维度集合不得缩小。
+- **磁盘清理顺序**：废弃 triple/profile 的整目录 → 旧 toolchain 产物 → 自建临时工具产物（如 `target/miri`）；当前有效增量缓存 MUST NOT 删除；feature 差异在 `target/` 内无独立目录，禁止按目录名/时间戳/体积猜测「旧 feature 缓存」，无法证明废弃的一律保留。
+- **timings 诊断**：构建耗时占主导时用 `cargo build --timings` 定位串行瓶颈（大 crate、build.rs、proc-macro、链接阶段），Top 阻塞单元与建议写入质量门报告；宿主机实时防护（如 Windows Defender 覆盖 `target/`）仅作为环境建议披露——不改系统设置、不据此跳过任何检查。
+
 ## 4. 代码与界面实现约定
 
 产品行为类要求（控件分工、进度语义、无障碍、窗口行为、缩放适配、配色令牌、命名规范）一律以 `docs/CONTRACT.md` 的 U / P 分区为准，本节不重复。本节只写实现层约定：
