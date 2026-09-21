@@ -254,6 +254,12 @@
       "cfg": null
     },
     {
+      "file": "src/hash_cache.rs",
+      "name": "degenerate_identities_are_never_cacheable",
+      "ignored": false,
+      "cfg": null
+    },
+    {
       "file": "src/model.rs",
       "name": "action_state_text_roundtrip_matches_db_values",
       "ignored": false,
@@ -1113,6 +1119,12 @@
     },
     {
       "file": "tests/perf_probe.rs",
+      "name": "organizer_dedup_reuse_probe",
+      "ignored": true,
+      "cfg": null
+    },
+    {
+      "file": "tests/perf_probe.rs",
       "name": "organizer_empty_dirs_probe",
       "ignored": true,
       "cfg": null
@@ -1192,6 +1204,18 @@
     {
       "file": "tests/split.rs",
       "name": "forged_comment_with_brace_line_cannot_enable_sweep",
+      "ignored": false,
+      "cfg": null
+    },
+    {
+      "file": "tests/split.rs",
+      "name": "hash_cache_recomputes_when_size_changes",
+      "ignored": false,
+      "cfg": null
+    },
+    {
+      "file": "tests/split.rs",
+      "name": "hash_cache_reuses_unchanged_files_across_runs",
       "ignored": false,
       "cfg": null
     },
