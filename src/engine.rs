@@ -910,6 +910,26 @@ fn hash_candidates(job: &mut Job) -> Result<()> {
             job.db.conn.execute(&format!("INSERT OR IGNORE INTO hash_candidates SELECT id FROM files WHERE active=1 AND (size,{key}) IN (SELECT size,{key} FROM files WHERE active=1 GROUP BY size,{key} HAVING COUNT(*)>1)"),[])?;
         }
     }
+    // C-13：跨运行哈希缓存放在状态目录根（每次 prepare 都新建任务库，缓存必须
+    // 跨任务存活）。打开失败只降级为「无缓存、全部重算」，不得阻断分析。
+    let mut cache = match job.db.get::<String>("state_dir") {
+        Ok(dir) => match crate::hash_cache::HashCache::open(Path::new(&dir)) {
+            Ok(cache) => Some(cache),
+            Err(error) => {
+                job.log(
+                    "Hash",
+                    "",
+                    "",
+                    "提示",
+                    &format!("哈希缓存不可用，本次全部重新计算（{error:#}）"),
+                    0,
+                )?;
+                None
+            }
+        },
+        Err(_) => None,
+    };
+    let mut reused_total: u64 = 0;
     let mut cursor = 0;
     // 分页 SQL 整个哈希阶段逐字不变：循环外构造一次，配合 db::files 的 prepare_cached
     // 让每页都命中语句缓存（不再逐页 format! 与解析）。
@@ -934,8 +954,48 @@ fn hash_candidates(job: &mut Job) -> Result<()> {
         cursor = last.id;
         let root = &job.root;
         let control = &job.context.control;
+        // C-13：先查跨运行缓存，命中的候选不再读取文件内容。缓存故障一次性
+        // 降级为「其后全部重算」——缓存只是加速，正确性不依赖它。
+        let mut reused: Vec<(i64, String)> = Vec::new();
+        let mut compute: Vec<&_> = Vec::new();
+        let mut index = 0;
+        while index < batch.len() {
+            let file = &batch[index];
+            let Some(cache_conn) = cache.as_ref() else {
+                break;
+            };
+            let Ok(size) = i64::try_from(file.snapshot.size) else {
+                compute.push(file);
+                index += 1;
+                continue;
+            };
+            if crate::hash_cache::identity_is_degenerate(&file.snapshot.identity) {
+                compute.push(file);
+                index += 1;
+                continue;
+            }
+            match cache_conn.lookup(&file.snapshot.identity, size, file.snapshot.modified_ns) {
+                Ok(Some(hash)) => reused.push((file.id, hash)),
+                Ok(None) => compute.push(file),
+                Err(error) => {
+                    cache = None;
+                    job.log(
+                        "Hash",
+                        "",
+                        "",
+                        "提示",
+                        &format!("哈希缓存读取失败，其后全部重新计算（{error:#}）"),
+                        0,
+                    )?;
+                    break;
+                }
+            }
+            index += 1;
+        }
+        compute.extend(batch[index..].iter());
+        reused_total = reused_total.saturating_add(u64::try_from(reused.len()).unwrap_or(0));
         let results: Vec<_> = pool.install(|| {
-            batch
+            compute
                 .par_iter()
                 .map(|file| {
                     let result = (|| {
@@ -951,15 +1011,19 @@ fn hash_candidates(job: &mut Job) -> Result<()> {
             // 用户取消时并行哈希的每个成员都会返回取消错误；先在这里拦截，
             // 否则每个候选都被计成 error 并逐条写日志，取消任务的错误数虚高。
             job.context.control.checkpoint()?;
-            for (id, rel, result) in results {
+            // C-13：缓存命中的哈希与刚算出的走完全相同的落库路径，planner 无感知。
+            for (id, hash) in &reused {
+                job.db.set_file_hash(*id, hash)?;
+            }
+            for (id, rel, result) in &results {
                 match result {
                     Ok(hash) => {
-                        job.db.set_file_hash(id, &hash)?;
+                        job.db.set_file_hash(*id, hash)?;
                     }
                     Err(error) => {
                         job.summary.errors += 1;
-                        job.db.deactivate_file_id(id)?;
-                        job.log("Hash", &rel, "", "跳过", &format!("{error:#}"), 0)?;
+                        job.db.deactivate_file_id(*id)?;
+                        job.log("Hash", rel, "", "跳过", &format!("{error:#}"), 0)?;
                     }
                 }
             }
@@ -972,6 +1036,47 @@ fn hash_candidates(job: &mut Job) -> Result<()> {
                 return Err(error);
             }
         }
+        // C-13：把本次新算出的哈希写入跨运行缓存；写失败同样只降级、不失败。
+        if let Some(cache_conn) = cache.as_ref() {
+            let by_id: HashMap<i64, &_> = batch.iter().map(|file| (file.id, file)).collect();
+            let entries: Vec<(String, i64, i64, String)> = results
+                .iter()
+                .filter_map(|(id, _, result)| {
+                    let hash = result.as_ref().ok()?;
+                    let file = by_id.get(id)?;
+                    let size = i64::try_from(file.snapshot.size).ok()?;
+                    Some((
+                        file.snapshot.identity.clone(),
+                        size,
+                        file.snapshot.modified_ns,
+                        hash.clone(),
+                    ))
+                })
+                .collect();
+            if let Err(error) = cache_conn.store(&entries) {
+                cache = None;
+                job.log(
+                    "Hash",
+                    "",
+                    "",
+                    "提示",
+                    &format!("哈希缓存写入失败，其后不再复用（{error:#}）"),
+                    0,
+                )?;
+            }
+        }
+    }
+    if reused_total > 0 {
+        job.log(
+            "Hash",
+            "",
+            "",
+            "提示",
+            &format!(
+                "复用上次运行的哈希 {reused_total} 个（文件标识/大小/修改时间未变，未重读内容）"
+            ),
+            0,
+        )?;
     }
     Ok(())
 }

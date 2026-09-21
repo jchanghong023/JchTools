@@ -60,6 +60,51 @@ fn organizer_analysis_is_read_only_and_never_extracts() {
     assert_eq!(result.summary.scanned, 2, "压缩包与散文件都应被扫描");
 }
 
+// 覆盖 C-13：三要素（文件标识/大小/修改时间）未变时跨运行复用哈希
+#[test]
+fn hash_cache_reuses_unchanged_files_across_runs() {
+    // 反证构造：第一次分析后把副本原地改写成同长度的不同字节并还原修改时间——
+    // 若第二次分析重新计算哈希，两文件内容不同、不再判重复；实测仍判重复，
+    // 证明走的是缓存复用（C-13 的「三者未变即内容未变」信任假设）。
+    let tmp = fixture("hashcache");
+    let root = tmp.path().join("data");
+    write_with_mtime(&root.join("a.txt"), b"same-bytes", 100);
+    write_with_mtime(&root.join("sub").join("a.txt"), b"same-bytes", 100);
+    let state = state_of(&tmp);
+    let first = engine::prepare_at(&root, Config::default(), Context::default(), &state).unwrap();
+    assert_eq!(
+        first.summary.planned_delete, 1,
+        "一对真重复应生成一条删除计划"
+    );
+    let copy = root.join("sub").join("a.txt");
+    let stamp = filetime::FileTime::from_last_modification_time(&fs::metadata(&copy).unwrap());
+    fs::write(&copy, b"DIFF-BYTES").unwrap();
+    filetime::set_file_mtime(&copy, stamp).unwrap();
+    let second = engine::prepare_at(&root, Config::default(), Context::default(), &state).unwrap();
+    assert_eq!(
+        second.summary.planned_delete, 1,
+        "C-13：三要素未变时复用旧哈希——改写后（同长不同内容、还原时间戳）仍按缓存判重复"
+    );
+}
+
+// 覆盖 C-13：大小变化必须重算，不得复用旧哈希
+#[test]
+fn hash_cache_recomputes_when_size_changes() {
+    let tmp = fixture("hashcache2");
+    let root = tmp.path().join("data");
+    write_with_mtime(&root.join("a.txt"), b"same-bytes", 100);
+    write_with_mtime(&root.join("sub").join("a.txt"), b"same-bytes", 100);
+    let state = state_of(&tmp);
+    let first = engine::prepare_at(&root, Config::default(), Context::default(), &state).unwrap();
+    assert_eq!(first.summary.planned_delete, 1);
+    fs::write(root.join("sub").join("a.txt"), b"same-bytes!").unwrap();
+    let second = engine::prepare_at(&root, Config::default(), Context::default(), &state).unwrap();
+    assert_eq!(
+        second.summary.planned_delete, 0,
+        "大小变化不在缓存键上，必须完整重算并发现内容已不同"
+    );
+}
+
 // 覆盖 C-09
 #[test]
 fn organizer_scan_extracts_nothing_and_skips_failed_dir() {

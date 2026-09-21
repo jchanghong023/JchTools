@@ -1663,8 +1663,8 @@ fn prepare_writes_no_standalone_settings_file() {
     assert!(
         entries
             .iter()
-            .all(|name| name == "tasks" || name == "organizer.lock"),
-        "状态目录只应含任务库与锁文件，不得出现独立设置文件（不落盘/无导入导出）：{entries:?}"
+            .all(|name| name == "tasks" || name == "organizer.lock" || name == "hash-cache.sqlite3"),
+        "状态目录只应含任务库、锁文件与跨运行哈希缓存（C-13），不得出现独立设置文件（不落盘/无导入导出）：{entries:?}"
     );
 }
 

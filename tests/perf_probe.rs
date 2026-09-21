@@ -117,6 +117,82 @@ fn organizer_dedup_probe() {
     perf_dump(&state);
 }
 
+/// 去重复用场景（C-13）：同一数据、同一状态目录连跑两次分析。
+/// 第一次冷启动（计算全部哈希并写入跨运行缓存），第二次热启动（三要素
+/// 未变的候选全部命中缓存，不重读内容）。规模环境变量与 dedup 探针同口径，
+/// 另加 JT_PERF_FILE_KIB 固定单文件大小（KiB，默认 0 = 按 dedup 探针的
+/// 4–16KiB 随组变化），用于大文件场景（如 4 组 × 4 副本 × 512MiB ≈ 8GiB）。
+#[test]
+#[ignore = "性能基准：生成与运行耗时数十秒，仅手动运行"]
+fn organizer_dedup_reuse_probe() {
+    let groups = env_or("JT_PERF_GROUPS", 5000);
+    let copies = env_or("JT_PERF_COPIES", 8);
+    let fixed_kib = env_or("JT_PERF_FILE_KIB", 0);
+    let temp = TempDir::new().unwrap();
+    let root = temp.path().join("data");
+    let state = temp.path().join("state");
+    let gen = Instant::now();
+    for g in 0..groups {
+        let size = if fixed_kib > 0 {
+            fixed_kib * 1024
+        } else {
+            4096 + (g % 12) * 1024
+        };
+        let content: Vec<u8> = (0..size)
+            .map(|i| {
+                let group_byte = (g >> (8 * (i % 4))) as u8;
+                group_byte.wrapping_add(i as u8 % 251)
+            })
+            .collect();
+        for c in 0..copies {
+            let dir = root.join(format!("g{g:04}/copy{c:02}"));
+            fs::create_dir_all(&dir).unwrap();
+            fs::write(dir.join("file.bin"), &content).unwrap();
+        }
+    }
+    println!(
+        "[reuse] 数据生成：{groups} 组 × {copies} 副本 = {} 文件（单文件 {}），{:.2}s（不计入测量）",
+        groups * copies,
+        if fixed_kib > 0 {
+            format!("{fixed_kib}KiB")
+        } else {
+            "4–16KiB".into()
+        },
+        gen.elapsed().as_secs_f64()
+    );
+    let t0 = Instant::now();
+    let cold = engine::prepare_at(&root, Config::default(), Context::default(), &state).unwrap();
+    let t_cold = t0.elapsed();
+    assert!(
+        state.join("hash-cache.sqlite3").is_file(),
+        "首轮分析应产出跨运行哈希缓存（C-13）"
+    );
+    let t1 = Instant::now();
+    let warm = engine::prepare_at(&root, Config::default(), Context::default(), &state).unwrap();
+    let t_warm = t1.elapsed();
+    // 两次走的是同一条计划路径，否则耗时对比没有意义。
+    assert_eq!(
+        cold.summary.planned_delete,
+        warm.summary.planned_delete,
+        "冷/热两轮的去重计划必须一致；summary：{} / {}",
+        cold.summary.description(),
+        warm.summary.description()
+    );
+    let expected = u64::try_from((copies - 1) * groups).unwrap();
+    assert!(
+        cold.summary.planned_delete >= expected,
+        "删除计划 {} 应不少于副本淘汰数 {expected}",
+        cold.summary.planned_delete
+    );
+    println!(
+        "[reuse] cold(全量分析)：{:.3}s  warm(缓存复用)：{:.3}s  省 {:.1}%  planned_delete={}",
+        t_cold.as_secs_f64(),
+        t_warm.as_secs_f64(),
+        (1.0 - t_warm.as_secs_f64() / t_cold.as_secs_f64()) * 100.0,
+        cold.summary.planned_delete
+    );
+}
+
 /// 空目录场景：N 个嵌套空目录，覆盖 plan_empty_dirs 物化临时表与 apply 自底向上删除。
 #[test]
 #[ignore = "性能基准：生成与运行耗时数十秒，仅手动运行"]
