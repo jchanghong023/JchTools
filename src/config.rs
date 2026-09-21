@@ -6,31 +6,28 @@ use std::path::PathBuf;
 #[serde(rename_all = "snake_case")]
 pub enum DeleteMode {
     Keep,
-    Recycle,
     Permanent,
 }
+/// 各类功能的删除方式覆盖（S-02：只在「保留」与「永久删除」之间选择，无回收站选项）。
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub enum DeleteChoice {
     Global,
     Keep,
-    Recycle,
     Permanent,
 }
-/// 递归解压工具的原包处置（X-05/R-02）：只属于解压工具，默认回收站，
+/// 递归解压工具的原包处置（X-05/R-02）：只属于解压工具，默认直接永久删除，
 /// 不提供「跟随全局」（成功解包的结果不依赖其它工具的全局删除口径）。
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub enum ArchiveDispose {
     Keep,
-    Recycle,
     Permanent,
 }
 impl ArchiveDispose {
     pub fn resolve(self) -> DeleteMode {
         match self {
             Self::Keep => DeleteMode::Keep,
-            Self::Recycle => DeleteMode::Recycle,
             Self::Permanent => DeleteMode::Permanent,
         }
     }
@@ -40,7 +37,6 @@ impl DeleteChoice {
         match self {
             Self::Global => global,
             Self::Keep => DeleteMode::Keep,
-            Self::Recycle => DeleteMode::Recycle,
             Self::Permanent => DeleteMode::Permanent,
         }
     }
@@ -130,7 +126,6 @@ pub struct Config {
     pub detect_type: bool,
     pub fix_extension: bool,
     pub global_delete: DeleteMode,
-    pub recycle_fallback: bool,
     pub hash_workers: usize,
     pub theme: String,
 }
@@ -143,14 +138,14 @@ impl Default for Config {
         Self {
             recursive: true, include_hidden: false, include_system: false,
             exclusions: ".git/**;node_modules/**;$RECYCLE.BIN/**;System Volume Information/**;.svn/**;.hg/**;.vs/**;.idea/**;AppData/**;ProgramData/**;Program Files/**;Program Files (x86)/**;Program Files (Arm)/**;Windows/**;Windows.old/**;$Windows.~BT/**;$Windows.~WS/**;WindowsApps/**;Packages/**;Recovery/**;PerfLogs/**;Config.Msi/**;SoftwareDistribution/**;Application Data/**;Local Settings/**;Temp/**;Tmp/**;Cookies/**;Recent/**;OneDrive/**".into(),
-            nested_archives: true, archive_delete: ArchiveDispose::Recycle,
+            nested_archives: true, archive_delete: ArchiveDispose::Permanent,
             // 默认 Newest 与历史行为一致；涉及删除时解压侧写带策略名的警告日志。
             extract_conflict: ConflictPolicy::Newest, max_depth: 16,
             // 100 万条目足够覆盖正常压缩包，同时约束异常包的条目放大；超大合法包可调高。
             max_entries: 1_000_000,
             // 0 = 不额外限制。流式包（无 Size 元数据）在解压期间按本项累计检查（archive.rs）。
             max_unpacked_gib: 0, max_file_gib: 0, max_ratio: 10_000, reserve_gib: 1,
-            dedup_same_name: true, dedup_copy_names: true, dedup_other_names: true,
+            dedup_same_name: true, dedup_copy_names: true, dedup_other_names: false,
             keep_duplicate: KeepPolicy::Newest, duplicate_action: DuplicateAction::Delete,
             duplicate_delete: DeleteChoice::Global,
             conflict_delete: DeleteChoice::Global,
@@ -160,7 +155,7 @@ impl Default for Config {
             flatten_single_child: false, clean_empty_dirs: true, clean_junk: true,
             clean_temp: false, clean_zero: false, cleanup_delete: DeleteChoice::Global,
             clean_copy_name: true, normalize_names: true, detect_type: false, fix_extension: false,
-            global_delete: DeleteMode::Recycle, recycle_fallback: true, hash_workers: 2,
+            global_delete: DeleteMode::Permanent, hash_workers: 6,
             theme: "system".into(),
         }
     }
@@ -207,12 +202,23 @@ impl Config {
     const REMOVED_FIELDS: &[&str] = &[
         "hash_algorithm",
         "verify_bytes",
+        "recycle_fallback",
         "same_name_same_size",
         "same_size_keep",
         "same_name_different_size",
         "different_size_keep",
         "conflict_scope_directory",
         "extract",
+    ];
+    /// 旧任务库可能保存着已移除的「回收站」取值。S-02 之后删除方式只在「保留」与
+    /// 「永久删除」之间选择，历史值按「永久删除」读取，否则旧任务库会因枚举缺项
+    /// 整体判成非法配置而无法打开。
+    const DELETE_MODE_KEYS: &[&str] = &[
+        "global_delete",
+        "duplicate_delete",
+        "cleanup_delete",
+        "conflict_delete",
+        "archive_delete",
     ];
     pub fn from_json_text(text: &str) -> Result<Self> {
         // 某些编辑器会写出带 UTF-8 BOM 的文件；serde_json 不接受，解析前剥掉。
@@ -221,6 +227,14 @@ impl Config {
         if let Some(map) = value.as_object_mut() {
             for key in Self::REMOVED_FIELDS {
                 map.remove(*key);
+            }
+            for key in Self::DELETE_MODE_KEYS {
+                if map.get(*key).and_then(|v| v.as_str()) == Some("recycle") {
+                    map.insert(
+                        (*key).to_string(),
+                        serde_json::Value::String("permanent".into()),
+                    );
+                }
             }
         }
         Ok(serde_json::from_value(value)?)
@@ -235,18 +249,18 @@ impl Config {
         *self = serde_json::from_value(data)?;
         Ok(())
     }
+    /// 二次确认框的破坏性说明（S-02：删除一律为永久删除、不可由本软件恢复，
+    /// 任务确认时必须明确告知）。
     pub fn destructive_warning(&self) -> String {
         fn label(mode: DeleteMode) -> &'static str {
             match mode {
                 DeleteMode::Keep => "保留",
-                DeleteMode::Recycle => "回收站",
                 DeleteMode::Permanent => "永久删除",
             }
         }
-        format!("原压缩包：{}；重复文件：{}；解压覆盖旧文件：{}；清理文件：{}。\n回收失败后永久删除：{}（用户取消不会触发降级）。没有自动回滚；请确认目录和规则。",
+        format!("原压缩包：{}；重复文件：{}；解压覆盖旧文件：{}；清理文件：{}。\n删除一律为永久删除，不经回收站、不可由本软件恢复；用户取消不会触发任何删除。没有自动回滚；请确认目录和规则。",
             label(self.archive_delete.resolve()),label(self.duplicate_delete.resolve(self.global_delete)),
-            label(self.conflict_delete.resolve(self.global_delete)),label(self.cleanup_delete.resolve(self.global_delete)),
-            if self.recycle_fallback { "已开启" } else { "已关闭" })
+            label(self.conflict_delete.resolve(self.global_delete)),label(self.cleanup_delete.resolve(self.global_delete)))
     }
 }
 pub fn state_dir() -> Result<PathBuf> {

@@ -106,7 +106,7 @@ struct State {
     show_advanced: bool,
     /// 当前工具：切工具时同步重置规则分区（P-02 两工具各自只显示相关分区，R-01）。
     tool: Tool,
-    /// 测试注入：覆盖任务状态目录与回收站实现；生产路径为 None，仍走 engine::prepare/apply。
+    /// 测试注入：覆盖任务状态目录；生产路径为 None，仍走 engine::prepare/apply。
     engine_overrides: Option<EngineTestOverrides>,
     /// 计划页加载代际（跨线程）：丢弃晚到的旧 filter/page 结果。
     plan_load: Arc<PlanLoadSync>,
@@ -124,10 +124,9 @@ struct PlanLoadSync {
 struct PlanLoadDone {
     gen: u64,
 }
-/// 无头 GUI 测试用的引擎注入：隔离任务库到 tempfile，并避免污染真实回收站。
+/// 无头 GUI 测试用的引擎注入：把任务库隔离到 tempfile，避免污染真实状态目录。
 pub struct EngineTestOverrides {
     pub state_dir: PathBuf,
-    pub recycler: Arc<dyn platform::Recycler>,
 }
 struct WindowDrag {
     origin: (f64, f64),
@@ -572,8 +571,8 @@ fn reload_after_failed(
                 }
                 ui.set_metrics(
                     format!(
-                        "扫描 {} 个文件 · 错误 {} 项 · 已回收 {} 项",
-                        summary.scanned, summary.errors, summary.recycled
+                        "扫描 {} 个文件 · 错误 {} 项 · 已永久删除 {} 项",
+                        summary.scanned, summary.errors, summary.deleted
                     )
                     .into(),
                 );
@@ -831,7 +830,6 @@ fn start_task(
         .as_ref()
         .map(|o| EngineTestOverrides {
             state_dir: o.state_dir.clone(),
-            recycler: o.recycler.clone(),
         });
     std::thread::spawn(move || {
         let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
@@ -841,20 +839,11 @@ fn start_task(
                 let Some(task_path) = task.as_deref() else {
                     anyhow::bail!("内部错误：执行阶段任务库缺失");
                 };
-                match &overrides {
-                    Some(o) => engine::apply_with(task_path, context, o.recycler.clone()),
-                    None => engine::apply(task_path, context),
-                }
+                engine::apply(task_path, context)
             } else {
                 match &overrides {
-                    // engine 已提供 prepare_with：测试注入的 recycler 必须传入，与 apply_with 对称。
-                    Some(o) => engine::prepare_with(
-                        &directory,
-                        configuration,
-                        context,
-                        &o.state_dir,
-                        o.recycler.clone(),
-                    ),
+                    // 测试注入只需隔离任务库状态目录（回收站注入随 S-02 一并移除）。
+                    Some(o) => engine::prepare_at(&directory, configuration, context, &o.state_dir),
                     None => engine::prepare(&directory, configuration, context),
                 }
             }
@@ -912,7 +901,9 @@ fn start_extract(ui: &AppWindow, state: &Rc<RefCell<State>>, sender: &mpsc::Sync
     ui.set_panel(1);
     ui.set_quarantined_count(0);
     ui.set_log_text("".into());
-    ui.set_status("正在解压；成功原包按规则处置（默认回收站），失败原包移入「解压失败」".into());
+    ui.set_status(
+        "正在解压；成功原包按规则处置（默认直接永久删除），失败原包移入「解压失败」".into(),
+    );
     let ask_sender = sender.clone();
     let ask_control = control.clone();
     let context = Context {
@@ -940,7 +931,6 @@ fn start_extract(ui: &AppWindow, state: &Rc<RefCell<State>>, sender: &mpsc::Sync
         .as_ref()
         .map(|o| EngineTestOverrides {
             state_dir: o.state_dir.clone(),
-            recycler: o.recycler.clone(),
         });
     std::thread::spawn(move || {
         let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| match overrides {
@@ -950,7 +940,6 @@ fn start_extract(ui: &AppWindow, state: &Rc<RefCell<State>>, sender: &mpsc::Sync
                 context,
                 &overrides.state_dir,
                 None,
-                overrides.recycler,
             ),
             None => engine::extract_run(&directory, configuration, context),
         }));
@@ -967,8 +956,7 @@ fn start_extract(ui: &AppWindow, state: &Rc<RefCell<State>>, sender: &mpsc::Sync
 fn extract_confirm_text(count_text: &str, directory: &str, config: &Config) -> String {
     let dispose = match config.archive_delete.resolve() {
         crate::config::DeleteMode::Keep => "保留不删",
-        crate::config::DeleteMode::Recycle => "移入回收站",
-        crate::config::DeleteMode::Permanent => "永久删除",
+        crate::config::DeleteMode::Permanent => "永久删除（不可恢复）",
     };
     format!(
         "目标目录：{directory}
@@ -1392,7 +1380,7 @@ pub fn run_with_pre_loop_hook(hook: impl FnOnce(&AppWindow) + 'static) -> Result
     run_with_engine_overrides(hook, None)
 }
 
-/// 允许测试注入状态目录与回收站实现；生产 GUI 走 `run()` / `run_with_pre_loop_hook`。
+/// 允许测试注入状态目录；生产 GUI 走 `run()` / `run_with_pre_loop_hook`。
 pub fn run_with_engine_overrides(
     hook: impl FnOnce(&AppWindow) + 'static,
     overrides: Option<EngineTestOverrides>,
@@ -1401,6 +1389,16 @@ pub fn run_with_engine_overrides(
     ui.set_system_dark(system_dark());
     let state = Rc::new(RefCell::new(initial_state()?));
     state.borrow_mut().engine_overrides = overrides;
+    // 性能耗时打点（`perf-tracing` 特性，默认关闭）：日志写在状态目录的独立子目录里，
+    // 测试注入状态目录时同样隔离在注入目录内。句柄绑到本函数作用域，退出前刷盘。
+    #[cfg(feature = "perf-tracing")]
+    let _perf_guard = {
+        let directory = state.borrow().engine_overrides.as_ref().map_or_else(
+            || crate::config::state_dir().ok(),
+            |o| Some(o.state_dir.clone()),
+        );
+        directory.as_deref().and_then(crate::perf::init)
+    };
     let (sender, receiver) = mpsc::sync_channel::<Event>(256);
     let tools = registry::tools()
         .iter()
@@ -1714,7 +1712,7 @@ pub fn run_with_engine_overrides(
                         if cancelled{continue;}
                         state.borrow_mut().conflict=Some(reply);
                         let show=platform::display_path_text;
-                        ui.set_conflict_text(format!("目标：{}\n\n现有文件：{} · 修改时间 {}\n新解压文件：{} · 修改时间 {}\n\n覆盖旧文件仍遵守已配置的回收站 / 永久删除策略；选择前不会继续后续解压。",
+                        ui.set_conflict_text(format!("目标：{}\n\n现有文件：{} · 修改时间 {}\n新解压文件：{} · 修改时间 {}\n\n覆盖旧文件按已配置的删除方式处理（一律为永久删除、不可恢复）；选择前不会继续后续解压。",
                             show(&info.existing),bytes(info.existing_size),platform::display_time_text(info.existing_time),
                             bytes(info.incoming_size),platform::display_time_text(info.incoming_time)).into());
                         ui.set_conflict_choice(4);ui.set_conflict_all(false);ui.set_conflict_visible(true);
@@ -1735,15 +1733,15 @@ pub fn run_with_engine_overrides(
                         ui.set_plan_empty_count(i32::try_from(summary.planned_empty).unwrap_or(i32::MAX));
                         ui.set_plan_filter(0);
                         // 任务结束后停止实时计时，改写最终统计，避免「耗时」空闲继续增长
-                        ui.set_metrics(format!("扫描 {} 个文件 · 错误 {} 项 · 已回收 {} 项",
-                            summary.scanned,summary.errors,summary.recycled).into());
+                        ui.set_metrics(format!("扫描 {} 个文件 · 错误 {} 项 · 已永久删除 {} 项",
+                            summary.scanned,summary.errors,summary.deleted).into());
                         ui.set_progress(-1.0);ui.set_progress_note("".into());
                         ui.set_plan_prev_enabled(false);ui.set_plan_next_enabled(false);
                         ui.set_status(if ready{
                             "分析完成（只读）。请检查计划，然后确认执行整理。".into()
                         }else{
-                            format!("整理结束：已回收 {} 项 · 永久删除 {} 项 · 错误 {} 项；完整记录见「进度与日志」。",
-                                summary.recycled,summary.deleted,summary.errors)
+                            format!("整理结束：已永久删除 {} 项（不可恢复）· 错误 {} 项；完整记录见「进度与日志」。",
+                                summary.deleted,summary.errors)
                         }.into());
                         // 新任务加载落地前清空上一任务的旧行：action id 是各任务库各自的
                         // rowid，旧行在此窗口内仍可交互，会把勾选写进新任务库的同 id 动作。
@@ -2045,13 +2043,11 @@ mod gui_tests {
                 planned_empty: 0,
                 candidate_bytes: 0,
                 deleted: 0,
-                recycled: 0,
                 moved: 0,
                 linked: 0,
                 skipped: 0,
                 errors: 0,
                 permanent_bytes: 0,
-                recycled_bytes: 0,
             };
             db.set("summary", &summary).unwrap();
             drop(db);
@@ -2208,10 +2204,10 @@ mod gui_tests {
             assert!(ui.get_show_advanced());
             assert_eq!(
                 ui.get_rules().row_count(),
-                7,
-                "打开高级层后安全与性能应显示全部 7 条（reserve 属于递归解压）"
+                6,
+                "打开高级层后安全与性能应显示全部 6 条（reserve 属于递归解压；回收失败降级项已随 S-02 移除）"
             );
-            assert_eq!(rule_value_at(ui, "hash_workers").as_deref(), Some("2"));
+            assert_eq!(rule_value_at(ui, "hash_workers").as_deref(), Some("6"));
             assert!(
                 rule_value_at(ui, "reserve_gib").is_none(),
                 "磁盘预留属于递归解压的工具规则"
@@ -2276,8 +2272,8 @@ mod gui_tests {
             assert_eq!(rule_value_at(ui, "max_depth").as_deref(), Some("16"));
             assert_eq!(
                 rule_value_at(ui, "archive_delete").as_deref(),
-                Some("recycle"),
-                "X-05：成功原包默认移入回收站"
+                Some("permanent"),
+                "X-05/S-02：成功原包默认直接永久删除"
             );
             ui.invoke_toggle_advanced(false);
             assert_eq!(ui.get_rules().row_count(), 2, "关闭高级层必须恢复基础视图");
@@ -2332,12 +2328,6 @@ mod gui_tests {
     // 解压方向则谎报「目录已就绪」。运行中文案由任务事件负责，工具切换不得改写。
     #[test]
     fn switching_tools_while_busy_keeps_running_status_text() {
-        struct NoRecycle;
-        impl platform::Recycler for NoRecycle {
-            fn recycle(&self, _: &Path) -> Result<(), platform::RecycleFailure> {
-                Ok(())
-            }
-        }
         let tmp = tempfile::tempdir().unwrap();
         let root = tmp.path().join("data");
         std::fs::create_dir(&root).unwrap();
@@ -2345,14 +2335,8 @@ mod gui_tests {
         std::fs::write(root.join("b.txt"), b"same").unwrap();
         let state_dir = tmp.path().join("state");
         std::fs::create_dir(&state_dir).unwrap();
-        let prepared = engine::prepare_with(
-            &root,
-            Config::default(),
-            Context::default(),
-            &state_dir,
-            Arc::new(NoRecycle),
-        )
-        .unwrap();
+        let prepared =
+            engine::prepare_at(&root, Config::default(), Context::default(), &state_dir).unwrap();
         // 任务执行中：apply_with 执行期任务库状态为 executing（非 ready）。
         Database::open_existing(&prepared.directory)
             .unwrap()
@@ -2463,17 +2447,17 @@ mod gui_tests {
                 let cfg = &app.state.borrow().config;
                 assert!(!cfg.dedup_same_name, "同名去重开关只写自己");
                 assert!(
-                    cfg.dedup_copy_names && cfg.dedup_other_names,
-                    "副本名/不同名去重必须保持独立，不得被联动"
+                    cfg.dedup_copy_names && !cfg.dedup_other_names,
+                    "副本名/不同名去重必须保持独立，不得被联动（各自保持默认值：副本名开、不同名关）"
                 );
             }
             ui.invoke_rule_bool("dedup_copy_names".into(), false);
-            ui.invoke_rule_bool("dedup_other_names".into(), false);
+            ui.invoke_rule_bool("dedup_other_names".into(), true);
             {
                 let cfg = &app.state.borrow().config;
                 assert!(
-                    !cfg.dedup_copy_names && !cfg.dedup_other_names,
-                    "两类开关各自独立生效"
+                    !cfg.dedup_copy_names && cfg.dedup_other_names,
+                    "两类开关各自独立生效（不同名默认关闭，可手动开启）"
                 );
             }
             // C-02 禁止版本淘汰开关后，剩余合并行：修正扩展名一行仍驱动两个细粒度字段。
@@ -2719,16 +2703,16 @@ mod gui_tests {
                 "就地解压去向（X-03）：{text}"
             );
             assert!(
-                text.contains("移入回收站"),
-                "成功原包默认处置（X-05）：{text}"
+                text.contains("永久删除（不可恢复）"),
+                "成功原包默认处置（X-05/S-02：直接永久删除、不可恢复）：{text}"
             );
             assert!(
                 text.contains("「解压失败」"),
                 "失败原包去向（X-06）：{text}"
             );
             assert!(
-                text.contains("回收失败后永久删除：已开启"),
-                "S-02 降级默认开启，确认时必须明确告知：{text}"
+                text.contains("删除一律为永久删除，不经回收站、不可由本软件恢复"),
+                "S-02：确认框必须明确告知删除不可恢复：{text}"
             );
             let _ = std::fs::remove_dir_all(&dir);
         })

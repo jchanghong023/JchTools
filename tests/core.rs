@@ -1,4 +1,4 @@
-//! These tests mutate only tempfile fixtures. Recycle Bin operations are injected mocks.
+//! These tests mutate only tempfile fixtures. 删除一律为永久删除（S-02），不再有回收站注入点。
 // 测试代码允许 unwrap/expect 与短名（f/p/q 夹具惯例）：断言失败即测试失败，属合理用法
 // （与 clippy.toml 的 allow-*-in-tests 策略一致，集成测试 crate 不在其覆盖范围内）。
 #![allow(
@@ -6,26 +6,20 @@
     clippy::expect_used,
     clippy::many_single_char_names
 )]
-mod common;
-use common::FailRecycle;
 use jchtools::{
     config::*,
     control::{Context, Control},
     db::Database,
     engine, fsutil, hashing,
     model::{ActionKind, FileRecord, Snapshot},
-    platform::{self, DeleteResult, RecycleFailure, Recycler},
+    platform::{self, DeleteResult},
     rules,
 };
 use std::{
     fs,
     path::{Path, PathBuf},
-    sync::{atomic::Ordering, Arc},
+    sync::atomic::Ordering,
 };
-// 平台门禁原因：AtomicUsize 的全部使用点都在 Windows 门禁用例内（回收条目计数
-// 验证是 Windows 专属实现）；非 Windows 编译时按 cfg 裁剪导入，否则为 unused import。
-#[cfg(windows)]
-use std::sync::atomic::AtomicUsize;
 use tempfile::TempDir;
 struct Fixture {
     temp: TempDir,
@@ -51,39 +45,20 @@ impl Fixture {
         engine::prepare_at(&self.root, cfg, Context::default(), &self.state).unwrap()
     }
     fn apply(task: &engine::TaskResult) -> engine::TaskResult {
-        engine::apply_with(&task.directory, Context::default(), Arc::new(FailRecycle)).unwrap()
+        engine::apply(&task.directory, Context::default()).unwrap()
     }
 }
 fn base() -> Config {
     Config {
         global_delete: DeleteMode::Permanent,
+        // 这些用例考的是记账 / 分类 / 排序 / 幂等等其它行为，需要「内容相同的不同名文件」
+        // 也进入去重，故显式开启第三类；C-02 的默认值（不同名关闭）由
+        // `different_names_not_deduped_by_default` 单独锚定。
+        dedup_other_names: true,
         clean_empty_dirs: false,
         clean_copy_name: false,
         classify: ClassifyMode::Off,
         ..Config::default()
-    }
-}
-struct CancelRecycle;
-impl Recycler for CancelRecycle {
-    fn recycle(&self, _: &Path) -> Result<(), RecycleFailure> {
-        Err(RecycleFailure::Cancelled)
-    }
-}
-// 平台门禁原因：构造方均为 Windows 门禁用例（回收条目计数验证是 Windows 专属
-// 实现）；非 Windows 直接不编译本类型。
-#[cfg(windows)]
-struct MoveRecycle {
-    target: PathBuf,
-    calls: AtomicUsize,
-}
-#[cfg(windows)]
-impl Recycler for MoveRecycle {
-    fn recycle(&self, p: &Path) -> Result<(), RecycleFailure> {
-        self.calls.fetch_add(1, Ordering::Relaxed);
-        fs::rename(p, &self.target).map_err(|e| RecycleFailure::Failed(e.to_string()))
-    }
-    fn bin_count(&self, _: &Path) -> Option<i64> {
-        Some(i64::try_from(self.calls.load(Ordering::Relaxed)).unwrap())
     }
 }
 // 覆盖 S-02
@@ -91,7 +66,6 @@ impl Recycler for MoveRecycle {
 fn defaults_valid_and_roundtrip() {
     let cfg = Config::default();
     cfg.validate().unwrap();
-    assert!(cfg.recycle_fallback);
     let text = serde_json::to_string(&cfg).unwrap();
     let back = Config::from_json_text(&text).unwrap();
     assert_eq!(
@@ -200,100 +174,6 @@ fn trailing_unicode_whitespace_rejected() {
     assert!(fsutil::validate_component("a\u{a0}").is_err());
     assert!(fsutil::validate_component("a b").is_ok());
 }
-// 覆盖 S-02
-#[test]
-fn recycle_without_bin_counts_as_unverified() {
-    let f = Fixture::new();
-    let p = f.write("a", b"a", 1);
-    let q = f.write("b", b"b", 1);
-    struct NoBinCount;
-    impl Recycler for NoBinCount {
-        fn recycle(&self, p: &Path) -> Result<(), RecycleFailure> {
-            fs::rename(p, p.with_extension("gone"))
-                .map_err(|e| RecycleFailure::Failed(e.to_string()))
-        }
-    }
-    let s = fsutil::snapshot(&p).unwrap();
-    let t = fsutil::snapshot(&q).unwrap();
-    // 回收「成功」但拿不到回收站条目数（无论是否允许降级）都必须如实记为未验证。
-    assert_eq!(
-        platform::remove(
-            &p,
-            Some(&s),
-            DeleteMode::Recycle,
-            false,
-            &Control::default(),
-            &NoBinCount
-        )
-        .unwrap(),
-        DeleteResult::RecycledUnverified
-    );
-    assert_eq!(
-        platform::remove(
-            &q,
-            Some(&t),
-            DeleteMode::Recycle,
-            true,
-            &Control::default(),
-            &NoBinCount
-        )
-        .unwrap(),
-        DeleteResult::RecycledUnverified
-    );
-    assert!(!p.exists() && !q.exists());
-}
-// 回收的「条目计数验证」是 Windows 专属实现：platform::volume_root 在非 Windows 恒为 None，
-// 引擎不会去询问 bin_count，回收成功也只能记为 RecycledUnverified。下面两个用例断言的就是
-// 这条 Windows 路径；非 Windows 上「回收成功但无法验证」由 recycle_without_bin_counts_as_unverified 覆盖。
-// 覆盖 S-02
-#[cfg(windows)]
-#[test]
-fn recycle_error_after_move_with_verified_bin_counts_as_recycled() {
-    let f = Fixture::new();
-    let p = f.write("a", b"a", 1);
-    struct LateFail {
-        target: PathBuf,
-        calls: AtomicUsize,
-    }
-    impl Recycler for LateFail {
-        fn recycle(&self, p: &Path) -> Result<(), RecycleFailure> {
-            self.calls.fetch_add(1, Ordering::Relaxed);
-            fs::rename(p, &self.target).map_err(|e| RecycleFailure::Failed(e.to_string()))?;
-            Err(RecycleFailure::Failed("late failure".into()))
-        }
-        fn bin_count(&self, _: &Path) -> Option<i64> {
-            Some(i64::try_from(self.calls.load(Ordering::Relaxed)).unwrap())
-        }
-    }
-    let r = LateFail {
-        target: f.root.join("mock-bin-late"),
-        calls: AtomicUsize::new(0),
-    };
-    let s = fsutil::snapshot(&p).unwrap();
-    assert_eq!(
-        platform::remove(
-            &p,
-            Some(&s),
-            DeleteMode::Recycle,
-            true,
-            &Control::default(),
-            &r
-        )
-        .unwrap(),
-        DeleteResult::Recycled
-    );
-    assert!(!p.exists() && r.target.exists());
-}
-// 覆盖 C-10（源/目标变化后快照失效，执行期跳过而非覆盖）
-#[test]
-fn metadata_change_invalidates_snapshot() {
-    let f = Fixture::new();
-    let p = f.write("a", b"one", 1);
-    let s = fsutil::snapshot(&p).unwrap();
-    fsutil::unchanged(&p, &s).unwrap();
-    fs::write(&p, b"different").unwrap();
-    assert!(fsutil::unchanged(&p, &s).is_err());
-}
 // 覆盖 S-01
 #[test]
 fn rename_never_overwrites() {
@@ -375,28 +255,6 @@ fn hashes_known_vectors() {
         "blake3:6437b3ac38465133ffb63b75273a8db548c558465d79db03fd359c6cd5bd9d85"
     );
 }
-// 覆盖 S-03
-#[test]
-fn same_prehash_different_middle_is_not_duplicate() {
-    let f = Fixture::new();
-    let a = vec![7u8; 300_000];
-    let mut b = a.clone();
-    b[150_000] = 8;
-    let ap = f.write("a", &a, 1);
-    let bp = f.write("b", &b, 2);
-    let sa = fsutil::snapshot(&ap).unwrap();
-    let sb = fsutil::snapshot(&bp).unwrap();
-    let ctl = Control::default();
-    assert_eq!(
-        hashing::prehash(&ap, &sa, &ctl).unwrap(),
-        hashing::prehash(&bp, &sb, &ctl).unwrap()
-    );
-    assert_ne!(
-        hashing::full_hash(&ap, &sa, &ctl).unwrap(),
-        hashing::full_hash(&bp, &sb, &ctl).unwrap()
-    );
-    assert_eq!(f.plan(base()).summary.planned_delete, 0);
-}
 // 覆盖 C-10（取消后不再继续读取）
 #[test]
 fn cancelled_hash_does_not_read() {
@@ -440,99 +298,13 @@ fn archive_first_volume_detection() {
     assert!(!rules::archive_name("A.7z.002"));
     assert!(rules::archive_name("A.tar.gz"));
 }
-// 覆盖 S-02
+// 覆盖 S-02（保留方式不删除任何东西）
 #[test]
-fn recycle_failure_without_permission_keeps_file() {
-    let f = Fixture::new();
-    let p = f.write("a", b"a", 1);
-    let s = fsutil::snapshot(&p).unwrap();
-    assert!(platform::remove(
-        &p,
-        Some(&s),
-        DeleteMode::Recycle,
-        false,
-        &Control::default(),
-        &FailRecycle
-    )
-    .is_err());
-    assert!(p.exists());
-}
-// 覆盖 S-02
-#[test]
-fn recycle_failure_with_permission_deletes() {
-    let f = Fixture::new();
-    let p = f.write("a", b"a", 1);
-    let s = fsutil::snapshot(&p).unwrap();
-    assert_eq!(
-        platform::remove(
-            &p,
-            Some(&s),
-            DeleteMode::Recycle,
-            true,
-            &Control::default(),
-            &FailRecycle
-        )
-        .unwrap(),
-        DeleteResult::Permanent
-    );
-    assert!(!p.exists());
-}
-// 覆盖 S-02
-#[test]
-fn user_cancel_never_falls_back_to_delete() {
-    let f = Fixture::new();
-    let p = f.write("a", b"a", 1);
-    assert!(platform::remove(
-        &p,
-        None,
-        DeleteMode::Recycle,
-        true,
-        &Control::default(),
-        &CancelRecycle
-    )
-    .is_err());
-    assert!(p.exists());
-}
-// 覆盖 S-02
-#[cfg(windows)]
-#[test]
-fn successful_recycle_not_permanent() {
-    let f = Fixture::new();
-    let p = f.write("a", b"a", 1);
-    let bin = MoveRecycle {
-        target: f.root.join("mock-bin"),
-        calls: AtomicUsize::new(0),
-    };
-    assert_eq!(
-        platform::remove(
-            &p,
-            None,
-            DeleteMode::Recycle,
-            true,
-            &Control::default(),
-            &bin
-        )
-        .unwrap(),
-        DeleteResult::Recycled
-    );
-    assert!(bin.target.exists());
-    assert_eq!(bin.calls.load(Ordering::Relaxed), 1);
-}
-// 覆盖 S-02
-#[test]
-fn keep_never_calls_recycler() {
+fn keep_never_deletes() {
     let f = Fixture::new();
     let p = f.write("a", b"a", 1);
     assert_eq!(
-        platform::remove(
-            &p,
-            None,
-            DeleteMode::Keep,
-            true,
-            &Control::default(),
-            &CancelRecycle
-        )
-        .unwrap(),
+        platform::remove(&p, DeleteMode::Keep, &Control::default()).unwrap(),
         DeleteResult::Kept
     );
     assert!(p.exists());
@@ -544,11 +316,8 @@ fn nonempty_directory_cannot_be_removed() {
     f.write("sub/a", b"a", 1);
     assert!(platform::remove(
         &f.root.join("sub"),
-        None,
         DeleteMode::Permanent,
-        true,
-        &Control::default(),
-        &FailRecycle
+        &Control::default()
     )
     .is_err());
     assert!(f.root.join("sub/a").exists());
@@ -616,30 +385,6 @@ fn unselecting_action_preserves_file() {
     drop(db);
     Fixture::apply(&task);
     assert!(f.root.join("a").exists() && f.root.join("b").exists());
-}
-// 覆盖 C-10
-#[test]
-fn changed_source_after_plan_is_skipped() {
-    let f = Fixture::new();
-    let a = f.write("a", b"same", 10);
-    f.write("b", b"same", 20);
-    let task = f.plan(base());
-    fs::write(&a, b"brand new").unwrap();
-    let result = Fixture::apply(&task);
-    assert!(a.exists());
-    assert_eq!(result.summary.errors, 1);
-}
-// 覆盖 C-10
-#[test]
-fn changed_keeper_after_plan_prevents_delete() {
-    let f = Fixture::new();
-    let a = f.write("a", b"same", 10);
-    let b = f.write("b", b"same", 20);
-    let task = f.plan(base());
-    fs::write(&b, b"new keeper").unwrap();
-    let result = Fixture::apply(&task);
-    assert!(a.exists());
-    assert_eq!(result.summary.errors, 1);
 }
 // 覆盖 C-08
 #[test]
@@ -1055,9 +800,7 @@ fn finished_plan_cannot_be_replayed() {
     f.write("b", b"same", 20);
     let task = f.plan(base());
     Fixture::apply(&task);
-    assert!(
-        engine::apply_with(&task.directory, Context::default(), Arc::new(FailRecycle)).is_err()
-    );
+    assert!(engine::apply(&task.directory, Context::default()).is_err());
 }
 #[test]
 fn task_lock_prevents_second_task() {
@@ -1205,7 +948,7 @@ fn apply_without_valid_state_record_refuses_foreign_lock() {
     fs::rename(&task.directory, &moved).unwrap();
     fs::rename(&f.state, f.temp.path().join("state-gone")).unwrap();
     let derived = moved.parent().unwrap().parent().unwrap().to_path_buf();
-    let result = engine::apply_with(&moved, Context::default(), Arc::new(FailRecycle));
+    let result = engine::apply(&moved, Context::default());
     assert!(
         result.is_err(),
         "缺少有效锁记录且任务目录已移位：必须拒绝执行"
@@ -1231,7 +974,7 @@ fn apply_with_invalid_record_but_tasks_layout_still_runs() {
     fs::create_dir_all(moved.parent().unwrap()).unwrap();
     fs::rename(&task.directory, &moved).unwrap();
     fs::rename(&f.state, f.temp.path().join("state-gone")).unwrap();
-    let result = engine::apply_with(&moved, Context::default(), Arc::new(FailRecycle)).unwrap();
+    let result = engine::apply(&moved, Context::default()).unwrap();
     assert_eq!(result.summary.deleted, 1, "tasks/ 布局下任务照常执行");
     assert!(
         moved
@@ -1260,7 +1003,7 @@ fn prepare_and_apply_share_exclusive_state_lock() {
             "锁被持有时二次 prepare 必须失败"
         );
         assert!(
-            engine::apply_with(&task.directory, Context::default(), Arc::new(FailRecycle)).is_err(),
+            engine::apply(&task.directory, Context::default()).is_err(),
             "锁被持有时 apply 必须失败"
         );
     }
@@ -1284,7 +1027,7 @@ fn apply_after_task_dir_moved_still_uses_prepare_state_lock() {
     {
         let _guard = fsutil::RootGuard::acquire(&f.state).unwrap();
         assert!(
-            engine::apply_with(&moved, Context::default(), Arc::new(FailRecycle)).is_err(),
+            engine::apply(&moved, Context::default()).is_err(),
             "任务目录被移动后，apply 仍必须锁 prepare 记录的全局锁目录"
         );
     }
@@ -1305,7 +1048,7 @@ fn set_selected_fails_once_apply_started() {
     let dir = task.directory.clone();
     let apply_handle = {
         let context = context.clone();
-        std::thread::spawn(move || engine::apply_with(&dir, context, Arc::new(FailRecycle)))
+        std::thread::spawn(move || engine::apply(&dir, context))
     };
     // 轮询等待 apply 写入 status=executing（固定 sleep 在高负载/CI 抢占下可能误失败）
     let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
@@ -1442,15 +1185,16 @@ fn config_has_no_version_elimination_switches() {
 }
 // 覆盖 R-01, C-02
 #[test]
-fn rules_table_has_exactly_39_rows_without_version_switches() {
+fn rules_table_has_exactly_38_rows_without_version_switches() {
     let schema: serde_json::Value =
         serde_json::from_str(include_str!("../resources/rules.json")).unwrap();
     let rows = schema.as_array().unwrap();
-    // 2026-09-18 两工具拆分：「递归解压压缩包」总开关随 X-01 工具化移除（39 项）。
+    // 2026-09-18 两工具拆分：「递归解压压缩包」总开关随 X-01 工具化移除；
+    // 2026-09-21 「回收失败后直接永久删除」随 S-02 移除（38 项）。
     assert_eq!(
         rows.len(),
-        39,
-        "R-01：规则表必须恰好 39 项，实际 {}",
+        38,
+        "R-01：规则表必须恰好 38 项，实际 {}",
         rows.len()
     );
     for key in [
@@ -1564,26 +1308,6 @@ fn equal_bytes_matches_only_identical_content() {
     assert!(
         !hashing::equal_bytes(&a, &sa, &d, &sd, &ctl).unwrap(),
         "等长不同内容必须逐字节判不等"
-    );
-}
-
-// 覆盖 C-02, S-03（删除前逐字节复核不可关闭：元数据未变但内容分歧时拒绝删除）
-#[test]
-fn byte_level_recheck_blocks_delete_when_content_diverges() {
-    let f = Fixture::new();
-    let a = f.write("a", b"same", 10); // 旧 → 计划删除项
-    f.write("b", b"same", 20); // 新 → 保留者
-    let task = f.plan(base());
-    assert_eq!(task.summary.planned_delete, 1);
-    // 篡改待删项内容但保持长度与 mtime（绕过 unchanged 的元数据校验）：
-    // 逐字节复核必须发现两份内容不同并拒绝执行删除。
-    fs::write(&a, b"diff").unwrap();
-    filetime::set_file_mtime(&a, filetime::FileTime::from_unix_time(10, 0)).unwrap();
-    let result = Fixture::apply(&task);
-    assert_eq!(result.summary.errors, 1, "复核不一致必须计为执行失败");
-    assert!(
-        a.exists() && f.root.join("b").exists(),
-        "两份内容都必须原样保留，不得以覆盖方式「自动修复」（C-10）"
     );
 }
 
@@ -1870,7 +1594,7 @@ fn apply_refuses_when_root_directory_moved_after_plan() {
     let task = f.plan(base());
     let moved = f.temp.path().join("data-moved");
     fs::rename(&f.root, &moved).unwrap();
-    let result = engine::apply_with(&task.directory, Context::default(), Arc::new(FailRecycle));
+    let result = engine::apply(&task.directory, Context::default());
     let error = format!("{:#}", result.err().unwrap());
     assert!(
         error.contains("无法访问目标目录") || error.contains("目录位置已改变"),
@@ -1913,44 +1637,16 @@ fn normalize_root_rejects_root_directory() {
     );
 }
 
-// 覆盖 S-06（摘要区分「回收」与「永久删除」的逻辑大小，不得互相串账）
+// 覆盖 S-06（摘要只按逻辑大小报告已永久删除的项，MUST NOT 声称等于文件系统实际释放量）
 #[test]
-fn summary_separates_recycled_and_permanent_bytes() {
-    // 永久删除模式（全平台）：计入 permanent_bytes，不计回收
-    {
-        let f = Fixture::new();
-        f.write("a", b"same", 10);
-        f.write("b", b"same", 20);
-        let task = f.plan(base()); // global_delete = Permanent
-        let result = Fixture::apply(&task);
-        assert_eq!(result.summary.deleted, 1);
-        assert_eq!(result.summary.permanent_bytes, 4, "「same」=4 字节");
-        assert_eq!(result.summary.recycled_bytes, 0);
-        assert_eq!(result.summary.recycled, 0);
-    }
-    // 回收模式：Windows 上条目计数可验证，计入 recycled_bytes 且不算永久删除。
-    // 平台门禁原因：回收「条目计数验证」是 Windows 专属实现（volume_root 在
-    // 非 Windows 恒为 None，只能记 RecycledUnverified），该口径由本用例 Windows 分支锚定。
-    #[cfg(windows)]
-    {
-        let f = Fixture::new();
-        f.write("a", b"same", 10);
-        f.write("b", b"same", 20);
-        let mut cfg = base();
-        cfg.global_delete = DeleteMode::Recycle;
-        let recycler = Arc::new(MoveRecycle {
-            target: f.root.join("mock-bin"),
-            calls: AtomicUsize::new(0),
-        });
-        let task =
-            engine::prepare_with(&f.root, cfg, Context::default(), &f.state, recycler.clone())
-                .unwrap();
-        let result = engine::apply_with(&task.directory, Context::default(), recycler).unwrap();
-        assert_eq!(result.summary.recycled, 1, "回收成功且计数验证通过");
-        assert_eq!(result.summary.recycled_bytes, 4);
-        assert_eq!(result.summary.permanent_bytes, 0);
-        assert_eq!(result.summary.deleted, 0);
-    }
+fn summary_counts_permanent_bytes_only() {
+    let f = Fixture::new();
+    f.write("a", b"same", 10);
+    f.write("b", b"same", 20);
+    let task = f.plan(base()); // global_delete = Permanent
+    let result = Fixture::apply(&task);
+    assert_eq!(result.summary.deleted, 1);
+    assert_eq!(result.summary.permanent_bytes, 4, "「same」=4 字节");
 }
 
 // 覆盖 R-01（规则仅会话内生效：状态目录不得出现独立设置文件）
@@ -2063,11 +1759,11 @@ fn quarantine_move_out_is_rescanned() {
     );
 }
 
-// 覆盖 R-03（性能默认值：哈希线程 2、磁盘预留 1 GiB、递归默认包含子目录）
+// 覆盖 R-03（性能默认值：哈希线程 6、磁盘预留 1 GiB、递归默认包含子目录）
 #[test]
 fn performance_defaults_match_contract() {
     let cfg = Config::default();
-    assert_eq!(cfg.hash_workers, 2);
+    assert_eq!(cfg.hash_workers, 6, "R-03：默认 6（1–16 可配）");
     assert_eq!(cfg.reserve_gib, 1);
     assert!(cfg.recursive);
 }
@@ -2094,12 +1790,9 @@ fn analysis_phase_keeps_stale_link_temps_until_execution() {
     assert!(f.root.join("a.txt").exists(), "清扫不得影响 keeper 本体");
 }
 
-// 覆盖 S-06（回收字节与永久字节同口径：多硬链接的源不重复计入逻辑大小）
-// 平台门禁原因：断言依赖回收条目计数验证（volume_root 仅 Windows 提供），
-// 非 Windows 上回收只能记 RecycledUnverified（走已有 links<=1 守卫）。
-#[cfg(windows)]
+// 覆盖 S-06（永久删除字节与 candidate_bytes 同口径：多硬链接的源不重复计入逻辑大小）
 #[test]
-fn recycled_bytes_exclude_hardlinked_sources() {
+fn permanent_bytes_exclude_hardlinked_sources() {
     let f = Fixture::new();
     let a = f.write("a", b"same", 10);
     if let Err(error) = fs::hard_link(&a, f.root.join("c")) {
@@ -2107,27 +1800,20 @@ fn recycled_bytes_exclude_hardlinked_sources() {
     }
     filetime::set_file_mtime(&a, filetime::FileTime::from_unix_time(10, 0)).unwrap();
     f.write("b", b"same", 20); // 更新 → 保留者
-    let mut cfg = base();
-    cfg.global_delete = DeleteMode::Recycle;
-    let recycler = Arc::new(MoveRecycle {
-        target: f.root.join("mock-bin"),
-        calls: AtomicUsize::new(0),
-    });
-    let task =
-        engine::prepare_with(&f.root, cfg, Context::default(), &f.state, recycler.clone()).unwrap();
+    let task = f.plan(base());
     assert!(
         task.summary.planned_delete >= 1,
         "a/c 与 b 内容相同应生成删除计划"
     );
     assert_eq!(task.summary.candidate_bytes, 0, "计划侧已排除多链接文件");
-    let result = engine::apply_with(&task.directory, Context::default(), recycler).unwrap();
+    let result = Fixture::apply(&task);
     assert!(
-        result.summary.recycled >= 1,
-        "回收确实发生了（项数记账不受影响）"
+        result.summary.deleted >= 1,
+        "删除确实发生了（项数记账不受影响）"
     );
     assert_eq!(
-        result.summary.recycled_bytes, 0,
-        "被删副本仍有其他硬链接持有内容，回收字节不得计入（与 permanent_bytes/candidate_bytes 同口径）"
+        result.summary.permanent_bytes, 0,
+        "被删副本仍有其他硬链接持有内容，永久删除字节不得计入"
     );
 }
 
@@ -2176,5 +1862,72 @@ fn extract_summary_counts_failed_packages_not_volumes() {
     assert!(
         text.contains("失败并移入「解压失败」1 包"),
         "用户可见口径必须是包数（1），不是卷文件数（3）：{text}"
+    );
+}
+
+// 覆盖 C-12, S-03（执行阶段 MUST NOT 读取文件内容：去重删除只依据分析期算出的整文件哈希）
+#[test]
+fn execution_phase_reads_no_file_content() {
+    let f = Fixture::new();
+    f.write("a", b"same", 10);
+    f.write("b", b"same", 20);
+    let task = f.plan(base());
+    assert_eq!(task.summary.planned_delete, 1, "同内容同尺寸应生成删除计划");
+    let context = Context::default();
+    let control = context.control.clone();
+    let result = engine::apply(&task.directory, context).unwrap();
+    assert_eq!(result.summary.deleted, 1);
+    assert_eq!(
+        control.read_bytes.load(Ordering::Relaxed),
+        0,
+        "执行阶段不得读取文件内容（C-12/S-03）：删除只依据分析期算出的整文件哈希"
+    );
+}
+
+// 覆盖 S-02（旧任务库里的 recycle 取值按永久删除读取，不得让旧配置整体判非法）
+#[test]
+fn legacy_recycle_mode_loads_as_permanent() {
+    let mut value = serde_json::to_value(Config::default()).unwrap();
+    value["global_delete"] = serde_json::json!("recycle");
+    value["archive_delete"] = serde_json::json!("recycle");
+    value["cleanup_delete"] = serde_json::json!("recycle");
+    let cfg = Config::from_json_text(&value.to_string()).unwrap();
+    assert_eq!(cfg.global_delete, DeleteMode::Permanent);
+    assert_eq!(cfg.archive_delete.resolve(), DeleteMode::Permanent);
+    assert_eq!(
+        cfg.cleanup_delete.resolve(cfg.global_delete),
+        DeleteMode::Permanent
+    );
+}
+
+// 覆盖 C-02（不同名去重默认关闭：不同名的同内容文件默认不得被自动淘汰，可手动开启）
+#[test]
+fn different_names_not_deduped_by_default() {
+    let cfg = Config {
+        clean_empty_dirs: false,
+        clean_copy_name: false,
+        classify: ClassifyMode::Off,
+        global_delete: DeleteMode::Permanent,
+        ..Config::default()
+    };
+    assert!(!cfg.dedup_other_names, "C-02：不同名去重默认关闭");
+    let f = Fixture::new();
+    f.write("a.txt", b"same", 10);
+    f.write("z.txt", b"same", 20);
+    let task = f.plan(cfg.clone());
+    assert_eq!(
+        task.summary.planned_delete, 0,
+        "默认配置下不同名的同内容文件不得被自动淘汰（C-02）"
+    );
+    // 手动开启后照旧生效：同一份数据必须产出删除计划。
+    let mut on = cfg;
+    on.dedup_other_names = true;
+    let f2 = Fixture::new();
+    f2.write("a.txt", b"same", 10);
+    f2.write("z.txt", b"same", 20);
+    assert_eq!(
+        f2.plan(on).summary.planned_delete,
+        1,
+        "开启不同名去重后应生成删除计划"
     );
 }

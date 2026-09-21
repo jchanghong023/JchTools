@@ -10,11 +10,7 @@ use jchtools::{config::*, control::Context, engine};
 use std::{
     fs,
     path::{Path, PathBuf},
-    sync::Arc,
 };
-
-mod common;
-use common::MoveRecycle;
 
 /// 假引擎：一个存在但不可执行/非 PE 的文件。任何解压命令都会失败，
 /// 用于在无真实 7-Zip 的环境（CI / 本地默认）驱动「解压失败 → 隔离」路径。
@@ -56,14 +52,7 @@ fn organizer_analysis_is_read_only_and_never_extracts() {
     write_with_mtime(&root.join("a.zip"), b"pretend archive bytes", 100);
     write_with_mtime(&root.join("b.txt"), b"loose file", 200);
     let cfg = Config::default(); // 组织器默认：不含解压
-    let result = engine::prepare_with(
-        &root,
-        cfg,
-        Context::default(),
-        &state_of(&tmp),
-        Arc::new(MoveRecycle::new(tmp.path().join("bin"))),
-    )
-    .unwrap();
+    let result = engine::prepare_at(&root, cfg, Context::default(), &state_of(&tmp)).unwrap();
     assert_eq!(result.summary.archives_ok, 0, "目录整理不得解压任何压缩包");
     assert_eq!(result.summary.archives_failed, 0);
     assert!(root.join("a.zip").exists(), "分析阶段不得动压缩包（只读）");
@@ -81,12 +70,11 @@ fn organizer_scan_extracts_nothing_and_skips_failed_dir() {
     let root = tmp.path().join("data");
     write_with_mtime(&root.join("dup.txt"), b"same", 100);
     write_with_mtime(&root.join("解压失败").join("dup.txt"), b"same", 200);
-    let result = engine::prepare_with(
+    let result = engine::prepare_at(
         &root,
         Config::default(),
         Context::default(),
         &state_of(&tmp),
-        Arc::new(MoveRecycle::new(tmp.path().join("bin"))),
     )
     .unwrap();
     assert_eq!(
@@ -123,7 +111,6 @@ fn failed_archive_is_moved_to_quarantine_directory() {
         Context::default(),
         &state_of(&tmp),
         Some(&fake_engine(tmp.path())),
-        Arc::new(MoveRecycle::new(tmp.path().join("bin"))),
     )
     .unwrap();
     assert_eq!(
@@ -169,7 +156,6 @@ fn rerun_skips_quarantined_archives_and_reports_count() {
         Context::default(),
         &state_of(&tmp),
         Some(&fake_engine(tmp.path())),
-        Arc::new(MoveRecycle::new(tmp.path().join("bin"))),
     )
     .unwrap();
     assert_eq!(
@@ -202,7 +188,6 @@ fn multipart_siblings_move_to_quarantine_together() {
         Context::default(),
         &state_of(&tmp),
         Some(&fake_engine(tmp.path())),
-        Arc::new(MoveRecycle::new(tmp.path().join("bin"))),
     )
     .unwrap();
     assert!(result.summary.archives_failed >= 1);
@@ -238,7 +223,6 @@ fn extract_run_without_engine_fails_loudly() {
         Context::default(),
         &state_of(&tmp),
         None,
-        Arc::new(MoveRecycle::new(tmp.path().join("bin"))),
     );
     let error = result.err().map(|e| format!("{e:#}")).unwrap_or_default();
     assert!(
@@ -261,7 +245,6 @@ fn quarantined_archive_reason_is_recorded_in_log() {
         Context::default(),
         &state_of(&tmp),
         Some(&fake_engine(tmp.path())),
-        Arc::new(MoveRecycle::new(tmp.path().join("bin"))),
     )
     .unwrap();
     let db = Database::open(&result.directory).unwrap();
@@ -431,14 +414,12 @@ fn forged_comment_corroboration_is_ignored() {
     let root = tmp.path().join("data");
     write_with_mtime(&root.join("report.rar"), b"standalone rar", 100);
     write_with_mtime(&root.join("report.r00"), b"innocent bystander", 200);
-    let bin = tmp.path().join("bin");
     let result = engine::extract_run_at(
         &root,
         Config::default(),
         Context::default(),
         &state_of(&tmp),
         Some(&comment_forging_engine(tmp.path())),
-        Arc::new(MoveRecycle::new(bin.clone())),
     )
     .unwrap();
     assert_eq!(result.summary.archives_ok, 1);
@@ -446,14 +427,9 @@ fn forged_comment_corroboration_is_ignored() {
         root.join("report.r00").exists(),
         "档案注释里伪造的多卷键不得成为处置佐证"
     );
-    let recycled: Vec<String> = fs::read_dir(&bin)
-        .unwrap()
-        .filter_map(std::result::Result::ok)
-        .map(|e| e.file_name().to_string_lossy().into_owned())
-        .collect();
-    assert!(
-        !recycled.iter().any(|n| n.contains("report.r00")),
-        "无辜 .r00 不得进入回收：{recycled:?}"
+    assert_eq!(
+        result.summary.deleted, 1,
+        "只有主体原包被永久处置，无辜 .r00 不得计入（S-02）"
     );
 }
 
@@ -528,14 +504,12 @@ fn forged_comment_with_brace_line_cannot_enable_sweep() {
     let root = tmp.path().join("data");
     write_with_mtime(&root.join("report.rar"), b"standalone rar", 100);
     write_with_mtime(&root.join("report.r00"), b"innocent bystander", 200);
-    let bin = tmp.path().join("bin");
     let result = engine::extract_run_at(
         &root,
         Config::default(),
         Context::default(),
         &state_of(&tmp),
         Some(&comment_escape_forging_engine(tmp.path())),
-        Arc::new(MoveRecycle::new(bin.clone())),
     )
     .unwrap();
     assert_eq!(result.summary.archives_ok, 1);
@@ -560,37 +534,30 @@ fn stale_z_sibling_is_not_disposed_with_standalone_zip() {
         b"stale fragment of an old set",
         200,
     );
-    let bin = tmp.path().join("bin");
     let result = engine::extract_run_at(
         &root,
         Config::default(),
         Context::default(),
         &state_of(&tmp),
         Some(&ok_engine(tmp.path())),
-        Arc::new(MoveRecycle::new(bin.clone())),
     )
     .unwrap();
     assert_eq!(result.summary.archives_ok, 1);
     assert!(
         !root.join("report.zip").exists(),
-        "成功原包按 X-05 移入回收站"
+        "成功原包按 X-05/S-02 直接永久删除"
     );
     assert!(
         root.join("report.z01").exists(),
         "无分卷佐证的同主干 .z01 是无辜文件，不得随包处置"
     );
-    let recycled: Vec<String> = fs::read_dir(&bin)
-        .unwrap()
-        .filter_map(std::result::Result::ok)
-        .map(|e| e.file_name().to_string_lossy().into_owned())
-        .collect();
-    assert!(
-        recycled.iter().any(|n| n.ends_with("report.zip")),
-        "原包应进入回收：{recycled:?}"
+    assert_eq!(
+        result.summary.deleted, 1,
+        "成功原包按 X-05/S-02 直接永久删除并计入"
     );
     assert!(
-        !recycled.iter().any(|n| n.contains("report.z01")),
-        "无辜 .z01 不得进入回收：{recycled:?}"
+        root.join("report.z01").exists(),
+        "无辜 .z01 不得被处置（S-02：只按佐证处置主体）"
     );
     // 无佐证保留必须有用户可见日志（否则残留无声、用户不可感知）。
     let db = jchtools::db::Database::open(&result.directory).unwrap();
@@ -614,14 +581,12 @@ fn stale_r_sibling_is_not_disposed_with_standalone_rar() {
         b"stale fragment of an old set",
         200,
     );
-    let bin = tmp.path().join("bin");
     let result = engine::extract_run_at(
         &root,
         Config::default(),
         Context::default(),
         &state_of(&tmp),
         Some(&ok_engine(tmp.path())),
-        Arc::new(MoveRecycle::new(bin.clone())),
     )
     .unwrap();
     assert_eq!(result.summary.archives_ok, 1);
@@ -629,14 +594,9 @@ fn stale_r_sibling_is_not_disposed_with_standalone_rar() {
         root.join("report.r00").exists(),
         "无分卷佐证的同主干 .r00 是无辜文件，不得随包处置"
     );
-    let recycled: Vec<String> = fs::read_dir(&bin)
-        .unwrap()
-        .filter_map(std::result::Result::ok)
-        .map(|e| e.file_name().to_string_lossy().into_owned())
-        .collect();
-    assert!(
-        !recycled.iter().any(|n| n.contains("report.r00")),
-        "无辜 .r00 不得进入回收：{recycled:?}"
+    assert_eq!(
+        result.summary.deleted, 1,
+        "只有主体原包被永久处置，无辜 .r00 不得计入（S-02）"
     );
 }
 
@@ -650,14 +610,12 @@ fn corroborated_volume_siblings_are_disposed_together() {
     write_with_mtime(&root.join("report.rar"), b"multi-volume main", 100);
     write_with_mtime(&root.join("report.r00"), b"volume 0", 200);
     write_with_mtime(&root.join("report.r01"), b"volume 1", 300);
-    let bin = tmp.path().join("bin");
     let result = engine::extract_run_at(
         &root,
         Config::default(),
         Context::default(),
         &state_of(&tmp),
         Some(&volume_index_engine(tmp.path())),
-        Arc::new(MoveRecycle::new(bin.clone())),
     )
     .unwrap();
     assert_eq!(result.summary.archives_ok, 1);
@@ -667,15 +625,9 @@ fn corroborated_volume_siblings_are_disposed_together() {
             && !root.join("report.r01").exists(),
         "佐证为真的分卷组必须整组处置，目录不残留压缩包"
     );
-    let recycled: Vec<String> = fs::read_dir(&bin)
-        .unwrap()
-        .filter_map(std::result::Result::ok)
-        .map(|e| e.file_name().to_string_lossy().into_owned())
-        .collect();
     assert_eq!(
-        recycled.iter().filter(|n| n.contains("report.r")).count(),
-        3,
-        "主体与两个兄弟卷都进入回收：{recycled:?}"
+        result.summary.deleted, 3,
+        "佐证为真的分卷组（主体 + 两个兄弟卷）整组永久处置"
     );
 }
 
@@ -695,7 +647,6 @@ fn failed_archive_still_quarantines_wide_named_siblings() {
         Context::default(),
         &state_of(&tmp),
         Some(&fake_engine(tmp.path())),
-        Arc::new(MoveRecycle::new(tmp.path().join("bin"))),
     )
     .unwrap();
     assert_eq!(result.summary.archives_failed, 1);
@@ -712,7 +663,6 @@ fn failed_archive_still_quarantines_wide_named_siblings() {
 // 覆盖 X-02, X-06（单包处置失败不得中止整个解压任务：逐包隔离，任务继续）
 #[test]
 fn dispose_failure_does_not_abort_remaining_archives() {
-    use common::FailRecycle;
     let tmp = fixture("dispose-fail");
     let root = tmp.path().join("data");
     write_with_mtime(&root.join("a.zip"), b"fake archive a", 100);
@@ -734,22 +684,38 @@ fn dispose_failure_does_not_abort_remaining_archives() {
             path
         }
     };
-    // archive_delete 默认 Recycle；回收失败必须保留原包，不得降级。
-    let cfg = Config {
-        recycle_fallback: false,
-        ..Config::default()
-    };
+    // 处置失败必须保留原包、不得中止任务。故障注入：持有 FILE_SHARE_READ 打开句柄，
+    // 永久删除以共享冲突失败（与「原包被其他程序占用」同因）。
+    // 平台门禁原因（P-07 仅支持 Windows）：只有 Windows 的共享模式能阻止删除；
+    // Unix 上打开句柄不阻止 unlink，故该平台不断言「处置失败」这一分支。
+    #[cfg(windows)]
+    let _guards: Vec<fs::File> = ["a.zip", "b.zip"]
+        .iter()
+        .map(|name| {
+            use std::os::windows::fs::OpenOptionsExt;
+            let mut opts = fs::OpenOptions::new();
+            opts.read(true).share_mode(1); // FILE_SHARE_READ：拒绝写入与删除
+            opts.open(root.join(name)).unwrap()
+        })
+        .collect();
+    let cfg = Config::default();
     let result = engine::extract_run_at(
         &root,
         cfg,
         Context::default(),
         &state_of(&tmp),
         Some(&engine_path),
-        Arc::new(FailRecycle),
     );
     let summary = result.expect("单包处置失败不得中止任务").summary;
     assert_eq!(summary.archives_ok, 2, "两个包都应解压成功");
+    #[cfg(windows)]
     assert!(summary.errors >= 1, "处置失败必须如实记为错误（而非静默）");
+    #[cfg(not(windows))]
+    assert_eq!(
+        summary.errors, 0,
+        "非 Windows 无共享冲突语义：处置正常完成，不得报错"
+    );
+    #[cfg(windows)]
     assert!(
         root.join("a.zip").exists() && root.join("b.zip").exists(),
         "处置失败时原包保留原地（重跑可自愈）"

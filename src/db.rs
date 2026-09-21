@@ -226,6 +226,15 @@ impl Database {
     }
 }
 pub const FILE_COLUMNS: &str = "id,rel,name,normal,size,mtime,identity,links,hash,cleanable";
+/// 同一列清单的别名限定形式，供与其他表 JOIN 的查询使用（未限定的 `id` 会歧义）。
+/// 由 FILE_COLUMNS 派生，避免两份清单各自漂移。
+pub fn file_columns_qualified(alias: &str) -> String {
+    FILE_COLUMNS
+        .split(',')
+        .map(|column| format!("{alias}.{column}"))
+        .collect::<Vec<_>>()
+        .join(",")
+}
 /// SQLite 以有符号 i64 存 size/links；写入方恒非负，读回负值即库损坏，按错误上报。
 fn nonneg_u64(row: &Row<'_>, idx: usize) -> rusqlite::Result<u64> {
     u64::try_from(row.get::<_, i64>(idx)?).map_err(|_| {

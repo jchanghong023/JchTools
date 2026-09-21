@@ -1,39 +1,13 @@
 use crate::{control::Control, convert, fsutil, model::Snapshot};
 use anyhow::{bail, Result};
-use std::{
-    io::{Read, Seek, SeekFrom},
-    path::Path,
-    sync::atomic::Ordering,
-};
+use std::{io::Read, path::Path, sync::atomic::Ordering};
 const BUFFER: usize = 1024 * 1024;
-const SAMPLE: usize = 64 * 1024;
 
-pub fn prehash(path: &Path, expected: &Snapshot, ctl: &Control) -> Result<String> {
-    ctl.checkpoint()?;
-    fsutil::unchanged(path, expected)?;
-    let mut file = fsutil::open_stable_read(path)?;
-    let mut buffer = vec![0u8; SAMPLE];
-    let mut hash = blake3::Hasher::new();
-    hash.update(&expected.size.to_le_bytes());
-    let first = convert::u64_as_usize(expected.size.min(SAMPLE as u64));
-    file.read_exact(&mut buffer[..first])?;
-    hash.update(&buffer[..first]);
-    ctl.read_bytes.fetch_add(first as u64, Ordering::Relaxed);
-    if expected.size > SAMPLE as u64 {
-        ctl.checkpoint()?;
-        file.seek(SeekFrom::End(-convert::usize_as_i64(SAMPLE)))?;
-        file.read_exact(&mut buffer)?;
-        hash.update(&buffer);
-        ctl.read_bytes.fetch_add(SAMPLE as u64, Ordering::Relaxed);
-    }
-    fsutil::unchanged(path, expected)?;
-    Ok(hash.finalize().to_hex().to_string())
-}
 /// 本地内容判定只关心「是否相同」，固定 BLAKE3：不选算法、不做兼容外部 Hash 清单；
-/// 防误删由删除前的逐字节复核（verify_bytes）承担，不依赖摘要算法强度。
+/// 单个文件在一次整理中只计算一次完整哈希（C-12），不再有预哈希采样阶段。
+/// P-08：假定处理期间文件不被其他程序改动，故不做读取前后的快照比对。
 pub fn full_hash(path: &Path, expected: &Snapshot, ctl: &Control) -> Result<String> {
     ctl.checkpoint()?;
-    fsutil::unchanged(path, expected)?;
     let mut file = fsutil::open_stable_read(path)?;
     let mut buffer = vec![0u8; BUFFER];
     let mut hash = blake3::Hasher::new();
@@ -51,11 +25,13 @@ pub fn full_hash(path: &Path, expected: &Snapshot, ctl: &Control) -> Result<Stri
         ctl.read_bytes.fetch_add(count as u64, Ordering::Relaxed);
     }
     if total != expected.size {
-        bail!("文件读取期间大小发生变化");
+        bail!("读取的长度与扫描记录不一致");
     }
-    fsutil::unchanged(path, expected)?;
     Ok(format!("blake3:{}", hash.finalize().to_hex()))
 }
+/// 逐字节比较两个文件是否相同（解压冲突裁决用：内容相同的目标视为已合入）。
+/// 去重删除路径不使用本函数（S-03/C-12：删除前不重读文件内容）。
+/// P-08：假定比较期间两侧都不被其他程序改动，故不做快照比对与二次增长检查。
 pub fn equal_bytes(
     a: &Path,
     sa: &Snapshot,
@@ -66,8 +42,6 @@ pub fn equal_bytes(
     if sa.size != sb.size {
         return Ok(false);
     }
-    fsutil::unchanged(a, sa)?;
-    fsutil::unchanged(b, sb)?;
     let mut fa = fsutil::open_stable_read(a)?;
     let mut fb = fsutil::open_stable_read(b)?;
     let mut ba = vec![0u8; BUFFER];
@@ -85,12 +59,5 @@ pub fn equal_bytes(
         }
         left -= count as u64;
     }
-    // Detect growth, not just changes to the expected prefix.
-    let mut extra = [0u8; 1];
-    if fa.read(&mut extra)? != 0 || fb.read(&mut extra)? != 0 {
-        bail!("文件比较期间长度发生变化");
-    }
-    fsutil::unchanged(a, sa)?;
-    fsutil::unchanged(b, sb)?;
     Ok(true)
 }

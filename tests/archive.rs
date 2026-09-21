@@ -5,14 +5,11 @@
 // 测试代码允许 unwrap/expect：断言失败即测试失败，属合理用法
 // （与 clippy.toml 的 allow-*-in-tests 策略一致，集成测试 crate 不在其覆盖范围内）。
 #![allow(clippy::unwrap_used, clippy::expect_used)]
-mod common;
-use common::FailRecycle;
 use jchtools::{config::*, control::Context, engine};
 use std::{
     fs,
     path::{Path, PathBuf},
     process::Command,
-    sync::Arc,
 };
 struct ArchiveFixture {
     tmp: tempfile::TempDir,
@@ -73,12 +70,11 @@ impl ArchiveFixture {
             Context::default(),
             &self.state,
             Some(&self.engine),
-            Arc::new(common::MoveRecycle::new(self.state.join("bin"))),
         )
         .unwrap()
     }
     fn apply(task: &engine::TaskResult) -> engine::TaskResult {
-        engine::apply_with(&task.directory, Context::default(), Arc::new(FailRecycle)).unwrap()
+        engine::apply(&task.directory, Context::default()).unwrap()
     }
 }
 fn config() -> Config {
@@ -89,6 +85,14 @@ fn config() -> Config {
         extract_conflict: ConflictPolicy::KeepBoth,
         max_ratio: 0,
         ..Config::default()
+    }
+}
+/// 与 config() 相同，但原包处置取 Config::default 的出厂值：
+/// 验证「默认即直接永久删除」的用例必须沿用出厂默认，不能再被 fixture 覆盖成保留。
+fn config_factory_dispose() -> Config {
+    Config {
+        archive_delete: Config::default().archive_delete,
+        ..config()
     }
 }
 fn organizer() -> Config {
@@ -122,6 +126,7 @@ fn members_in_subdirectories_merge_into_created_parents() {
     assert_eq!(fs::read(f.root.join("top.txt")).unwrap(), b"top");
 }
 // 覆盖 C-02, C-01：先解压（工具一）再分析（工具二，只读），两工具分工后仍能衔接出删除计划。
+// C-02（2026-09-21 第四批）：不同名去重默认关闭，本用例显式开启后再验证衔接。
 #[test]
 #[ignore = "Requires explicitly provided real 7-Zip engine"]
 fn extract_then_organize_generates_dedup_plan() {
@@ -133,7 +138,9 @@ fn extract_then_organize_generates_dedup_plan() {
     assert_eq!(extracted.summary.archives_ok, 1);
     assert!(f.root.join("inside.txt").exists());
     assert!(f.root.join("existing.txt").exists());
-    let plan = engine::prepare_at(&f.root, organizer(), Context::default(), &f.state).unwrap();
+    let mut org = organizer();
+    org.dedup_other_names = true;
+    let plan = engine::prepare_at(&f.root, org, Context::default(), &f.state).unwrap();
     assert_eq!(plan.summary.planned_delete, 1);
 }
 // 覆盖 X-08
@@ -171,28 +178,26 @@ fn successful_source_is_disposed_by_policy() {
     );
     assert!(f.root.join("a.txt").exists());
 }
-// 覆盖 X-05：默认处置是回收站；回收实现注入 MoveRecycle，落 bin 即视为已回收。
+// 覆盖 X-05：默认处置是直接永久删除（不经回收站、不可恢复）。
 #[test]
 #[ignore = "Requires explicitly provided real 7-Zip engine"]
-fn successful_source_defaults_to_recycle() {
+fn successful_source_defaults_to_permanent() {
     let f = ArchiveFixture::new();
     fs::write(f.input.join("a.txt"), b"one").unwrap();
     f.archive(&f.root.join("one.zip"), "-tzip");
-    let mut cfg = config();
-    cfg.archive_delete = ArchiveDispose::Recycle;
+    let cfg = config_factory_dispose();
+    assert_eq!(
+        cfg.archive_delete.resolve(),
+        DeleteMode::Permanent,
+        "出厂默认处置必须是直接永久删除（S-02 不再有回收站）"
+    );
     let result = f.run(cfg);
     assert_eq!(result.summary.archives_ok, 1);
-    assert!(!f.root.join("one.zip").exists());
-    let bin = f.state.join("bin");
     assert!(
-        fs::read_dir(&bin).unwrap().count() >= 1,
-        "成功原包应进入（mock）回收站"
-    ); // mock 未实现 bin_count，平台层按「回收未验证」诚实记账（S-06）：计入 deleted 而非 recycled。
-    assert_eq!(
-        result.summary.recycled + result.summary.deleted,
-        1,
-        "处置计数入账（回收或回收未验证）"
+        !f.root.join("one.zip").exists(),
+        "成功原包按默认处置直接永久删除（X-05/S-02）"
     );
+    assert_eq!(result.summary.deleted, 1, "永久删除计数入账（S-06）");
 }
 // 覆盖 X-04, X-06
 #[test]
@@ -722,7 +727,7 @@ fn successful_numbered_split_set_disposes_every_volume() {
         .count();
     assert!(volumes >= 2, "应生成至少两个分卷，实际 {volumes}");
     let mut cfg = config();
-    cfg.archive_delete = ArchiveDispose::Recycle;
+    cfg.archive_delete = ArchiveDispose::Permanent;
     let result = f.run(cfg);
     assert_eq!(result.summary.archives_failed, 0, "分卷集不得计入失败");
     assert_eq!(result.summary.archives_ok, 1, "分卷组按一个包计数");
@@ -741,12 +746,6 @@ fn successful_numbered_split_set_disposes_every_volume() {
         left, 0,
         "成功分卷组的所有卷都不得残留在目录里（X-05 与 X 分区总体约束）"
     );
-    let recycled = fs::read_dir(f.state.join("bin"))
-        .unwrap()
-        .filter_map(std::result::Result::ok)
-        .filter(|e| e.file_name().to_string_lossy().contains("split.zip."))
-        .count();
-    assert_eq!(recycled, volumes, "全部分卷应进入回收站");
 }
 
 // 覆盖 X-05, S-01（回归 2026-09-19 返工：zip 的条目级 Volume Index 无条件输出，
@@ -765,7 +764,7 @@ fn real_engine_standalone_zip_keeps_stale_z_sibling() {
     )
     .unwrap();
     let mut cfg = config();
-    cfg.archive_delete = ArchiveDispose::Recycle;
+    cfg.archive_delete = ArchiveDispose::Permanent;
     let result = f.run(cfg);
     assert_eq!(result.summary.archives_failed, 0);
     assert_eq!(result.summary.archives_ok, 1);
@@ -775,25 +774,11 @@ fn real_engine_standalone_zip_keeps_stale_z_sibling() {
     );
     assert!(
         !f.root.join("report.zip").exists(),
-        "成功原包按 X-05 移入回收站"
+        "成功原包按 X-05 直接永久删除（S-02 不再有回收站）"
     );
     assert!(
         f.root.join("report.z01").exists(),
         "真实引擎下无档案级多卷佐证的同主干 .z01 是无辜文件，不得随包处置"
-    );
-    let bin = f.state.join("bin");
-    let recycled: Vec<String> = fs::read_dir(&bin)
-        .unwrap()
-        .filter_map(std::result::Result::ok)
-        .map(|e| e.file_name().to_string_lossy().into_owned())
-        .collect();
-    assert!(
-        recycled.iter().any(|n| n.ends_with("report.zip")),
-        "原包应进入回收：{recycled:?}"
-    );
-    assert!(
-        !recycled.iter().any(|n| n.contains("report.z01")),
-        "无辜 .z01 不得进入回收：{recycled:?}"
     );
 }
 

@@ -13,12 +13,8 @@ use std::{
     fs,
     path::PathBuf,
     rc::Rc,
-    sync::Arc,
     time::Duration,
 };
-
-mod common;
-use common::MoveRecycle;
 
 fn make_fixture() -> tempfile::TempDir {
     let dir = tempfile::tempdir().unwrap();
@@ -51,15 +47,12 @@ fn plan_execution_confirmation_flow_runs_end_to_end() {
     let data = fixture.path().join("data").to_string_lossy().to_string();
     let state_dir: PathBuf = fixture.path().join("state");
     fs::create_dir_all(&state_dir).unwrap();
-    let bin = fixture.path().join("mock-bin");
-    let recycler = Arc::new(MoveRecycle::new(bin.clone()));
     let seen_tasks = Rc::new(RefCell::new(Vec::<PathBuf>::new()));
     let steps = Rc::new(Cell::new(0u32));
     let ticks = Rc::new(Cell::new(0u32));
 
     let overrides = EngineTestOverrides {
         state_dir: state_dir.clone(),
-        recycler: recycler.clone(),
     };
     gui::run_with_engine_overrides(
         move |ui| {
@@ -136,18 +129,13 @@ fn plan_execution_confirmation_flow_runs_end_to_end() {
             )
         })
         .collect();
-    let bin_names: Vec<String> = fs::read_dir(&bin)
-        .unwrap()
-        .filter_map(std::result::Result::ok)
-        .map(|e| e.file_name().to_string_lossy().into_owned())
-        .collect();
     assert!(
         !data.join("a.txt").exists(),
         "重复项应被移除：{remaining:?}"
     );
     assert!(
-        bin_names.iter().any(|n| n.contains("a.txt")),
-        "重复项应进入 mock 回收目录：{bin_names:?}"
+        !data.join("a.txt").exists(),
+        "重复项应被直接永久删除（S-02：不经回收站）"
     );
 
     // 3) 默认 clean_temp=false + ClassifyMode::Category：temp.tmp 被归类移动，而非清理删除

@@ -94,7 +94,7 @@ impl Default for Action {
             expected: None,
             keeper: None,
             hash: None,
-            mode: DeleteMode::Recycle,
+            mode: DeleteMode::Permanent,
             selected: true,
             state: "pending".into(),
         }
@@ -118,31 +118,30 @@ pub struct Summary {
     pub planned_empty: u64,
     pub candidate_bytes: u64,
     pub deleted: u64,
-    pub recycled: u64,
     pub moved: u64,
     pub linked: u64,
     pub skipped: u64,
     pub errors: u64,
     pub permanent_bytes: u64,
-    pub recycled_bytes: u64,
 }
 impl Summary {
     /// 目录整理（两段式）的任务摘要：只描述扫描与计划/执行口径，不含解压字段。
+    /// S-06：只按逻辑大小报告已永久删除的项，`MUST NOT` 声称等于文件系统实际释放量。
     pub fn description(&self) -> String {
-        format!("扫描 {} 个文件 / {}\n待删除 {} 项 · 待移动 {} 项 · 待硬链接 {} 项 · 空目录复查 {} 项\n候选逻辑大小 {}（移入回收站不会立即释放磁盘空间）\n已永久删除 {} 项 / {}；已回收 {} 项 / {}\n已移动 {} 项；已硬链接 {} 项；跳过 {} 项；错误 {} 项",
+        format!("扫描 {} 个文件 / {}\n待删除 {} 项 · 待移动 {} 项 · 待硬链接 {} 项 · 空目录复查 {} 项\n候选逻辑大小 {}\n已永久删除 {} 项 / {}（不经回收站，不可由本软件恢复）\n已移动 {} 项；已硬链接 {} 项；跳过 {} 项；错误 {} 项",
             self.scanned, bytes(self.scanned_bytes),
             self.planned_delete, self.planned_move, self.planned_link,
             self.planned_empty, bytes(self.candidate_bytes), self.deleted,
-            bytes(self.permanent_bytes), self.recycled, bytes(self.recycled_bytes),
+            bytes(self.permanent_bytes),
             self.moved, self.linked, self.skipped, self.errors)
     }
     /// 「递归解压」一段式运行的收尾摘要（X-02 确认框与结束状态的口径）。
     pub fn extract_description(&self) -> String {
-        format!("扫描 {} 个文件\n解压成功 {} 包（{} 个文件落盘）\n失败并移入「解压失败」{} 包\n已回收 {} 项 / {}；已永久删除 {} 项 / {}；错误 {} 项",
+        format!("扫描 {} 个文件\n解压成功 {} 包（{} 个文件落盘）\n失败并移入「解压失败」{} 包\n原包已永久删除 {} 项 / {}（不可恢复）；错误 {} 项",
             // 用户口径按"包"计：archives_failed 是包数；archives_quarantined 按卷文件数
             // 累计（分卷组整组隔离时 > 包数），不得直接当包数展示。
             self.scanned, self.archives_ok, self.extracted, self.archives_failed,
-            self.recycled, bytes(self.recycled_bytes), self.deleted, bytes(self.permanent_bytes), self.errors)
+            self.deleted, bytes(self.permanent_bytes), self.errors)
     }
 }
 /// 人类可读的字节数格式化：仅用于界面/日志展示，f64 精度损失无意义。

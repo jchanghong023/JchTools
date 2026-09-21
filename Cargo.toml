@@ -16,6 +16,9 @@ build = "build.rs"
 [features]
 default = ["gui"]
 gui = ["dep:slint", "dep:slint-build", "dep:rfd", "dep:open"]
+# 性能耗时打点（默认关闭，长期保留）：只有显式启用才编译 tracing 依赖与打点代码。
+# 启用方式：cargo run --features perf-tracing（日志落状态目录下的 perf-logs/，见 src/perf.rs）。
+perf-tracing = ["dep:tracing", "dep:tracing-subscriber", "dep:tracing-appender"]
 
 [dependencies]
 anyhow = "1.0"
@@ -39,14 +42,16 @@ walkdir = "2.5"
 slint = { version = "=1.17.1", optional = true, default-features = false, features = ["std", "compat-1-2", "backend-winit", "renderer-femtovg", "renderer-software", "accessibility"] }
 rfd = { version = "0.15", optional = true }
 open = { version = "5.3", optional = true }
+# 性能打点可选依赖：只在 perf-tracing 特性下进入依赖图（dep: 写法保证不额外产生同名 feature）。
+tracing = { version = "0.1", optional = true }
+tracing-subscriber = { version = "0.3", optional = true, features = ["fmt", "env-filter"] }
+tracing-appender = { version = "0.2", optional = true }
 
 [target.'cfg(windows)'.dependencies]
-windows = { version = "0.61", features = ["Win32_Foundation", "Win32_System_Com", "Win32_UI_Shell"] }
 windows-sys = { version = "0.59", features = ["Win32_Foundation", "Win32_Globalization", "Win32_Storage_FileSystem", "Win32_System_Registry", "Win32_UI_WindowsAndMessaging"] }
 
 [target.'cfg(unix)'.dependencies]
 libc = "0.2"
-trash = "5.2"
 
 [build-dependencies]
 slint-build = { version = "=1.17.1", optional = true }

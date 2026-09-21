@@ -239,7 +239,6 @@ impl SevenZip {
     }
     fn extract_one(&self, job: &mut Job, archive_rel: &str, depth: u32) -> Result<ExtractOutcome> {
         let archive = fsutil::safe_join(&job.root, archive_rel)?;
-        let source_snapshot = fsutil::snapshot(&archive)?;
         // Keep an open, write-denying source handle on Windows during listing/extraction.
         let source_guard = fsutil::open_stable_read(&archive)?;
         job.context.status(format!("检查压缩包：{archive_rel}"));
@@ -349,7 +348,7 @@ impl SevenZip {
             },
         )
         .with_context(|| "解压失败（可能已损坏、加密或格式不受支持）")?;
-        fsutil::unchanged(&archive, &source_snapshot)?;
+        // P-08：不再复核源包在解包期间是否被其他程序改动；原包处置只依据解包结果。
         drop(source_guard);
         let mut complete = true;
         let exclusions = rules::build_exclusions(&job.config.exclusions)?;
@@ -1128,6 +1127,10 @@ pub fn enqueue(job: &Job, archive: &Path, depth: u32) -> Result<()> {
     )?;
     Ok(())
 }
+#[cfg_attr(
+    feature = "perf-tracing",
+    tracing::instrument(target = "perf", name = "extract_batch", skip_all)
+)]
 pub fn extract_queued(job: &mut Job, engine: &SevenZip) -> Result<()> {
     // 崩溃/强杀后 Drop 不会执行，.jchtools-work 下可能残留孤儿暂存目录；
     // 解压开始前清理超过 24 小时的残留（阈值远大于正常解压时长，避免误伤并发任务）。
@@ -1317,8 +1320,6 @@ mod tests {
     use crate::control::Context as TaskContext;
     use crate::db::Database;
     use crate::engine::Job;
-    use crate::platform::NativeRecycler;
-    use std::sync::Arc;
 
     // 覆盖 X-03（成员就地解到包所在位置，含缺失父目录）
     #[test]
@@ -1342,8 +1343,6 @@ mod tests {
             db: Database::create(&db_dir).unwrap(),
             summary: crate::model::Summary::default(),
             archive_override: None,
-            recycler: Arc::new(NativeRecycler),
-            deleted_unverified: 0,
         };
         let outcome = merge_extracted(&mut job, &source, &target, "archives/pack.rar").unwrap();
         assert!(
@@ -1385,8 +1384,6 @@ mod tests {
             db: Database::create(&db_dir).unwrap(),
             summary: crate::model::Summary::default(),
             archive_override: Some(ConflictPolicy::Overwrite),
-            recycler: Arc::new(NativeRecycler),
-            deleted_unverified: 0,
         };
         let outcome = merge_extracted(&mut job, &source, &target, "target.txt").unwrap();
         assert!(
@@ -1432,8 +1429,6 @@ mod tests {
             db: Database::create(&db_dir).unwrap(),
             summary: crate::model::Summary::default(),
             archive_override: Some(ConflictPolicy::Newest),
-            recycler: Arc::new(NativeRecycler),
-            deleted_unverified: 0,
         };
         let outcome = merge_extracted(&mut job, &source, &target, "target.txt").unwrap();
         assert!(
@@ -1494,8 +1489,6 @@ mod tests {
             db: Database::create(&db_dir).unwrap(),
             summary: crate::model::Summary::default(),
             archive_override: None,
-            recycler: Arc::new(NativeRecycler),
-            deleted_unverified: 0,
         };
         let archive_snapshot = fsutil::snapshot(&root.join("pack.zip")).unwrap();
         job.db
@@ -1544,8 +1537,6 @@ mod tests {
             db: Database::create(&db_dir).unwrap(),
             summary: crate::model::Summary::default(),
             archive_override: None,
-            recycler: Arc::new(NativeRecycler),
-            deleted_unverified: 0,
         };
         enqueue(&job, &pack, 0).unwrap();
         // 同路径包内容被覆盖（大小与内容都变了）后再次入队。
@@ -1614,7 +1605,6 @@ mod one_shot_skip_tests {
     use crate::control::{ConflictAnswer, Context as TaskContext};
     use crate::db::Database;
     use crate::engine::Job;
-    use crate::platform::NativeRecycler;
     use std::sync::Arc;
 
     // 覆盖 X-04, R-02（逐次询问的一次性选择不应用到全部）
@@ -1653,8 +1643,6 @@ mod one_shot_skip_tests {
             db: Database::create(&db_dir).unwrap(),
             summary: crate::model::Summary::default(),
             archive_override: None,
-            recycler: Arc::new(NativeRecycler),
-            deleted_unverified: 0,
         };
         let outcome = merge_extracted(&mut job, &source, &target, "target.txt").unwrap();
         assert!(
@@ -1668,35 +1656,13 @@ mod one_shot_skip_tests {
         );
     }
 
-    // 覆盖 X-04, S-01（默认 Newest 判新文件胜出：被淘汰旧文件先移入回收站，再放置新文件）
+    // 覆盖 X-04, S-01, S-02（默认 Newest 判新文件胜出：被淘汰旧文件先永久删除，再放置新文件）
     #[test]
-    fn newest_winner_displaces_loser_through_recycle() {
-        struct BinRecycle {
-            bin: PathBuf,
-        }
-        impl crate::platform::Recycler for BinRecycle {
-            fn recycle(
-                &self,
-                p: &Path,
-            ) -> std::result::Result<(), crate::platform::RecycleFailure> {
-                let dest = self.bin.join(p.file_name().unwrap_or_default());
-                std::fs::rename(p, dest)
-                    .map_err(|e| crate::platform::RecycleFailure::Failed(e.to_string()))
-            }
-            fn bin_count(&self, _: &Path) -> Option<i64> {
-                // 用假回收站目录内的条目数作为「回收站计数」：回收前后可观察到 +1，
-                // Windows 上据此把删除确认为 Recycled（S-02 条目计数验证）。
-                std::fs::read_dir(&self.bin)
-                    .ok()
-                    .map(|it| i64::try_from(it.count()).unwrap_or(i64::MAX))
-            }
-        }
+    fn newest_winner_displaces_loser_permanently() {
         let temp = tempfile::tempdir().unwrap();
         let root = temp.path().join("data");
         let db_dir = temp.path().join("state");
-        let bin = temp.path().join("mock-bin");
         fs::create_dir(&root).unwrap();
-        fs::create_dir(&bin).unwrap();
         let target = root.join("target.txt");
         fs::write(&target, b"old short").unwrap();
         filetime::set_file_mtime(&target, filetime::FileTime::from_unix_time(1000, 0)).unwrap();
@@ -1705,7 +1671,6 @@ mod one_shot_skip_tests {
         fs::write(&source, b"brand new winner").unwrap();
         filetime::set_file_mtime(&source, filetime::FileTime::from_unix_time(2000, 0)).unwrap();
 
-        // conflict_delete=Global → 全局默认 Recycle
         let config = Config {
             extract_conflict: ConflictPolicy::Newest,
             ..Config::default()
@@ -1717,8 +1682,6 @@ mod one_shot_skip_tests {
             db: Database::create(&db_dir).unwrap(),
             summary: crate::model::Summary::default(),
             archive_override: Some(ConflictPolicy::Newest),
-            recycler: Arc::new(BinRecycle { bin: bin.clone() }),
-            deleted_unverified: 0,
         };
         let outcome = merge_extracted(&mut job, &source, &target, "target.txt").unwrap();
         assert!(
@@ -1728,20 +1691,11 @@ mod one_shot_skip_tests {
         assert_eq!(
             fs::read(&target).unwrap(),
             b"brand new winner",
-            "旧文件移入回收站后目标位置应放置新文件"
+            "旧文件永久删除后，目标位置应放置新文件"
         );
         assert!(!source.exists(), "暂存新文件已改名离开");
-        assert_eq!(
-            fs::read(bin.join("target.txt")).unwrap(),
-            b"old short",
-            "被淘汰的旧文件必须先进回收站（不覆盖、不永久删除）"
-        );
-        // 记账口径：Windows 条目计数可验证 → Recycled；非 Windows 无验证后端 → 按未验证如实记账。
-        if cfg!(windows) {
-            assert_eq!(job.summary.recycled, 1);
-            assert_eq!(job.summary.recycled_bytes, 9, "「old short」=9 字节");
-        } else {
-            assert_eq!(job.summary.deleted, 1, "回收未验证按永久删除口径记账");
-        }
+        // S-02：不再有回收站路径，被淘汰的旧文件是永久删除，记账也是永久删除口径。
+        assert_eq!(job.summary.deleted, 1);
+        assert_eq!(job.summary.permanent_bytes, 9, "「old short」=9 字节");
     }
 }

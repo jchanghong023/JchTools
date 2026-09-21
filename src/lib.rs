@@ -10,6 +10,7 @@ pub mod engine_bundle;
 pub mod fsutil;
 pub mod hashing;
 pub mod model;
+pub mod perf;
 pub mod planner;
 pub mod platform;
 pub mod process;

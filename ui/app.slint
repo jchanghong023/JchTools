@@ -420,7 +420,7 @@ export component AppWindow inherits Window {
                     font-size: 22px; font-weight: 700; }
                 Rectangle { width: 3px; height: 18px; border-radius: 2px; background: Design.bar; }
                 Muted { text: root.screen == 0 ? "内容去重、归类与清理（不解压）；先分析出计划，确认后才执行。"
-                    : root.screen == 2 ? "递归解开压缩包；成功原包进回收站，失败原包集中到「解压失败」。"
+                    : root.screen == 2 ? "递归解开压缩包；成功原包直接永久删除，失败原包集中到「解压失败」。"
                     : "Windows 优先的本地工具箱 · 功能持续增加";
                     horizontal-stretch: 1; wrap: no-wrap; overflow: elide; vertical-alignment: center; font-size: 13px; }
                 if root.busy: Spinner { width: 20px; height: 20px; }

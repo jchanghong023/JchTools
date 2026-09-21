@@ -14,5 +14,7 @@
 /resources/7zip/NOTICE.txt
 *.tmp
 /.tmp/
+# 性能打点日志（perf-tracing 特性）：运行时生成在用户状态目录的 perf-logs/ 下，不提交
+perf-logs/
 # Python 字节码缓存（运行 scripts/*.py 时生成在源码旁）
 __pycache__/

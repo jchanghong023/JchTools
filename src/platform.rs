@@ -1,23 +1,12 @@
-use crate::{config::DeleteMode, control::Control, fsutil, model::Snapshot};
+use crate::{config::DeleteMode, control::Control, fsutil};
 use anyhow::{bail, Context, Result};
 use std::{fs, path::Path};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum DeleteResult {
     Kept,
-    Recycled,
-    /// 文件已离开原位置，但无法确认真的进入了回收站（shell 在超容量、
-    /// 无回收站卷等情形下可能直接销毁并报成功）。按永久删除如实记账，不虚报「已回收」。
-    RecycledUnverified,
+    /// 已从磁盘永久删除。S-02 之后不再有回收站路径，删除不可由本软件恢复。
     Permanent,
-}
-#[derive(Debug)]
-pub enum RecycleFailure {
-    Cancelled,
-    Failed(String),
-    /// 回收接口本身不可用（如调用线程 COM 已初始化为 MTA）：文件仍完好地留在原位，
-    /// 与 Failed 的关键区别是绝不允许降级为永久删除（S-02：降级只留给「回收失败」）。
-    Unavailable(String),
 }
 /// 界面/日志展示用：去掉 Windows 扩展路径前缀，避免用户看到 `\\?\D:\...`。
 pub fn display_path_text(path: &str) -> String {
@@ -41,196 +30,11 @@ pub fn display_time_text(ns: i64) -> String {
         },
     )
 }
-/// Injectable for tests: tests never need to touch the user's real Recycle Bin.
-pub trait Recycler: Send + Sync {
-    fn recycle(&self, path: &Path) -> std::result::Result<(), RecycleFailure>;
-    /// 回收站条目计数（按卷）；返回 None 表示该后端/卷无法校验。
-    fn bin_count(&self, volume: &Path) -> Option<i64> {
-        let _ = volume;
-        None
-    }
-}
-pub struct NativeRecycler;
-impl Recycler for NativeRecycler {
-    fn recycle(&self, path: &Path) -> std::result::Result<(), RecycleFailure> {
-        native_recycle(path)
-    }
-    fn bin_count(&self, volume: &Path) -> Option<i64> {
-        bin_item_count(volume)
-    }
-}
-/// 取路径所在卷的回收站查询根：本地盘为 `X:\`，UNC 为 `\\server\share\`；无法识别返回 None。
-#[cfg(windows)]
-fn volume_root(path: &Path) -> Option<std::path::PathBuf> {
-    let text = path.to_str()?;
-    let text = if let Some(unc) = text.strip_prefix(r"\\?\UNC\") {
-        format!(r"\\{unc}")
-    } else if let Some(local) = text.strip_prefix(r"\\?\") {
-        local.to_string()
-    } else {
-        text.to_string()
-    };
-    if let Some(rest) = text.strip_prefix(r"\\") {
-        let mut parts = rest.split('\\');
-        let server = parts.next()?;
-        let share = parts.next()?;
-        if server.is_empty() || share.is_empty() {
-            return None;
-        }
-        return Some(std::path::PathBuf::from(format!(r"\\{server}\{share}\")));
-    }
-    let mut chars = text.chars();
-    let letter = chars.next()?;
-    if !letter.is_ascii_alphabetic() || chars.next() != Some(':') {
-        return None;
-    }
-    Some(std::path::PathBuf::from(format!("{letter}:\\")))
-}
-/// HRESULT 的 i32 位模式按位重解释为 u32：仅用于与 `0x8007_04C7` 这类错误码常量
-/// 比较，是位模式对照而非数值转换，符号位丢失正是目的本身。
-#[cfg(windows)]
-fn hresult_bits(code: windows::core::HRESULT) -> u32 {
-    u32::from_ne_bytes(code.0.to_ne_bytes())
-}
-/// u32 错误码常量按位重解释为 HRESULT（与 hresult_bits 互逆）。
-#[cfg(windows)]
-fn hresult_from_bits(bits: u32) -> windows::core::HRESULT {
-    windows::core::HRESULT(i32::from_ne_bytes(bits.to_ne_bytes()))
-}
-/// 当前回收站内的条目数；查询失败（无回收站的卷等）返回 None。
-#[cfg(windows)]
-fn bin_item_count(volume: &Path) -> Option<i64> {
-    use std::os::windows::ffi::OsStrExt;
-    use windows::Win32::UI::Shell::{SHQueryRecycleBinW, SHQUERYRBINFO};
-    let mut info: SHQUERYRBINFO = unsafe {
-        // SAFETY: SHQUERYRBINFO 是纯 POD 结构，全零是合法初值；cbSize 随后显式补上。
-        std::mem::zeroed()
-    };
-    // Win32 ABI 要求的 cbSize；该结构体仅数十字节，饱和兜底不可能触发。
-    let cb_size = u32::try_from(std::mem::size_of::<SHQUERYRBINFO>()).unwrap_or(u32::MAX);
-    info.cbSize = cb_size;
-    let wide: Vec<u16> = volume.as_os_str().encode_wide().chain(Some(0)).collect();
-    // SAFETY: wide 是以 NUL 结尾的 UTF-16 卷路径；调用只向已初始化的 info 写入。
-    let hr = unsafe { SHQueryRecycleBinW(windows::core::PCWSTR(wide.as_ptr()), &raw mut info) };
-    hr.ok().map(|()| info.i64NumItems)
-}
-#[cfg(not(windows))]
-fn bin_item_count(_volume: &Path) -> Option<i64> {
-    None
-}
-#[cfg(not(windows))]
-fn volume_root(_path: &Path) -> Option<std::path::PathBuf> {
-    None
-}
-#[cfg(windows)]
-fn native_recycle(path: &Path) -> std::result::Result<(), RecycleFailure> {
-    use std::os::windows::ffi::OsStrExt;
-    use windows::{
-        core::PCWSTR,
-        Win32::{
-            System::Com::{
-                CoCreateInstance, CoInitializeEx, CoUninitialize, CLSCTX_INPROC_SERVER,
-                COINIT_APARTMENTTHREADED,
-            },
-            UI::Shell::{
-                FileOperation, IFileOperation, IShellItem, SHCreateItemFromParsingName,
-                FOFX_EARLYFAILURE, FOFX_RECYCLEONDELETE, FOF_NO_CONNECTED_ELEMENTS, FOF_NO_UI,
-            },
-        },
-    };
-    let perform = || -> windows::core::Result<()> {
-        // Runs on the file-operation worker, not the UI thread. Balanced COM lifetime.
-        // SAFETY: CoInitializeEx 返回 S_OK/S_FALSE 都表示本线程此后处于 STA，须配对 CoUninitialize；
-        // RPC_E_CHANGED_MODE 等失败经 `?` 提前返回，不构造 ComGuard，无需配对。
-        unsafe {
-            CoInitializeEx(None, COINIT_APARTMENTTHREADED).ok()?;
-        }
-        struct ComGuard;
-        impl Drop for ComGuard {
-            fn drop(&mut self) {
-                // SAFETY: ComGuard 只在 CoInitializeEx 成功后构造（成功含 S_FALSE），
-                // 析构时的 CoUninitialize 与之严格配对。
-                unsafe {
-                    CoUninitialize();
-                }
-            }
-        }
-        let _guard = ComGuard;
-        // 无损宽字符路径：避免 to_string_lossy 把未配对 UTF-16 代理项换成 U+FFFD 后误操作。
-        let mut units: Vec<u16> = path.as_os_str().encode_wide().collect();
-        // 剥掉 \\?\ 或 \\?\UNC\ 扩展前缀，保持与旧实现相同的解析名形态。
-        const Q: &[u16] = &[0x5c, 0x5c, 0x3f, 0x5c]; // \\?\
-        const UNC: &[u16] = &[0x5c, 0x5c, 0x3f, 0x5c, 0x55, 0x4e, 0x43, 0x5c]; // \\?\UNC\
-        if units.starts_with(UNC) {
-            let mut stripped = vec![0x5c, 0x5c];
-            stripped.extend_from_slice(&units[UNC.len()..]);
-            units = stripped;
-        } else if units.starts_with(Q) {
-            units.drain(..Q.len());
-        }
-        units.push(0);
-        let wide = units;
-        // SAFETY: perform 闭包只在已成功 CoInitializeEx 的线程上执行（下方各调用同一前提）。
-        let operation: IFileOperation =
-            unsafe { CoCreateInstance(&FileOperation, None, CLSCTX_INPROC_SERVER)? };
-        // SAFETY: operation 是刚创建的有效 IFileOperation；标志组合为文档化取值。
-        unsafe {
-            operation.SetOperationFlags(
-                FOF_NO_UI | FOF_NO_CONNECTED_ELEMENTS | FOFX_RECYCLEONDELETE | FOFX_EARLYFAILURE,
-            )?;
-        }
-        // SAFETY: wide 是以 NUL 结尾的 UTF-16 路径；调用返回独立的 IShellItem，不保留输入指针。
-        let item: IShellItem = unsafe { SHCreateItemFromParsingName(PCWSTR(wide.as_ptr()), None)? };
-        // SAFETY: operation 与 item 均为有效 COM 对象，DeleteItem 只增加对 item 的引用。
-        unsafe {
-            operation.DeleteItem(&item, None)?;
-        }
-        // SAFETY: operation 有效；PerformOperations 提交此前排队（仅上面一项）的删除。
-        unsafe {
-            operation.PerformOperations()?;
-        }
-        // SAFETY: operation 有效；查询结果只在本次操作会话内有效。
-        let aborted = unsafe { operation.GetAnyOperationsAborted()? };
-        if aborted.as_bool() {
-            // Shell aborted without a specific error: conservatively treat as cancellation.
-            // Never infer permanent-delete permission from an ambiguous abort status.
-            return Err(windows::core::Error::from_hresult(hresult_from_bits(
-                0x8007_04C7,
-            )));
-        }
-        Ok(())
-    };
-    match perform() {
-        Ok(()) => Ok(()),
-        Err(error)
-            if [0x8007_04C7u32, 0x8027_0000, 0x8000_4004].contains(&hresult_bits(error.code())) =>
-        {
-            Err(RecycleFailure::Cancelled)
-        }
-        // RPC_E_CHANGED_MODE：调用线程已被初始化为 MTA，STA 回收接口用不了。此时
-        // 文件未受任何影响；按「接口不可用」失败且不降级，防止未来有人把删除搬到
-        // GUI/OLE 线程时文件被静默永久删除（engine 在专属工作线程调用，正常不触发）。
-        Err(error) if hresult_bits(error.code()) == 0x8001_0106 => {
-            Err(RecycleFailure::Unavailable(error.to_string()))
-        }
-        Err(error) => Err(RecycleFailure::Failed(error.to_string())),
-    }
-}
-#[cfg(not(windows))]
-fn native_recycle(path: &Path) -> std::result::Result<(), RecycleFailure> {
-    trash::delete(path).map_err(|e| RecycleFailure::Failed(e.to_string()))
-}
-/// 安全删除一个已规划的路径：拒绝链接/非空目录，校验扫描快照未变化；
-/// 回收模式按「条目计数验证 → 未验证 → （可选）降级永久删除」的顺序处理，
-/// 用户取消绝不降级。返回值区分「已回收 / 回收但未验证 / 永久删除 / 保留」。
-pub fn remove(
-    path: &Path,
-    expected: Option<&Snapshot>,
-    mode: DeleteMode,
-    fallback: bool,
-    control: &Control,
-    recycler: &dyn Recycler,
-) -> Result<DeleteResult> {
+/// 安全删除一个已规划的路径：拒绝链接/非空目录，删除前复查类型与空目录；
+/// 用户取消后不执行任何删除（S-02：删除一律为永久删除，不经回收站，
+/// `MUST NOT` 提供回收站选项或降级开关）。
+/// P-08：假定处理期间文件不被其他程序改动，因此不再做删除前的快照比对。
+pub fn remove(path: &Path, mode: DeleteMode, control: &Control) -> Result<DeleteResult> {
     control.checkpoint()?;
     if mode == DeleteMode::Keep {
         return Ok(DeleteResult::Kept);
@@ -239,95 +43,19 @@ pub fn remove(
     if fsutil::is_link(&meta) {
         bail!("拒绝删除链接 / reparse point");
     }
-    if let Some(expected) = expected {
-        fsutil::unchanged(path, expected)?;
+    if meta.is_dir() && fs::read_dir(path)?.next().is_some() {
+        bail!("目录不是空目录，不会递归删除用户目录");
+    }
+    control.check_cancelled()?;
+    // 永久删除前再确认一次类型与空目录（防检查后类型被替换）。
+    let meta = fs::symlink_metadata(path)?;
+    if fsutil::is_link(&meta) {
+        bail!("拒绝删除链接 / reparse point");
     }
     if meta.is_dir() && fs::read_dir(path)?.next().is_some() {
         bail!("目录不是空目录，不会递归删除用户目录");
     }
-    if mode == DeleteMode::Recycle {
-        // 回收 API 对目录会整树入站：删除前再钉一次类型/链接/空目录，缩小 TOCTOU。
-        control.check_cancelled()?;
-        let meta2 = fs::symlink_metadata(path)?;
-        if fsutil::is_link(&meta2) {
-            bail!("拒绝删除链接 / reparse point");
-        }
-        if meta2.is_dir() && fs::read_dir(path)?.next().is_some() {
-            bail!("目录不是空目录，不会递归删除用户目录");
-        }
-        let volume = volume_root(path);
-        let before = volume.as_deref().and_then(|v| recycler.bin_count(v));
-        match recycler.recycle(path) {
-            Ok(()) => {
-                if path.try_exists()? {
-                    bail!("回收站接口返回后文件仍存在，未判定删除成功");
-                }
-                // 「文件消失」≠「进了回收站」：shell 在回收站超容量、无回收站卷等情形下
-                // 可能直接销毁并报成功。只有回收站条目数确实增加时才记「已回收」，
-                // 否则如实记为未验证，避免给用户可恢复的错觉。
-                let after = volume.as_deref().and_then(|v| recycler.bin_count(v));
-                let verified =
-                    matches!((before, after), (Some(before), Some(after)) if after > before);
-                return Ok(if verified {
-                    DeleteResult::Recycled
-                } else {
-                    DeleteResult::RecycledUnverified
-                });
-            }
-            Err(RecycleFailure::Cancelled) => bail!("回收站操作被取消，不会降级为永久删除"),
-            Err(RecycleFailure::Unavailable(reason)) => {
-                bail!("回收站接口在当前线程不可用，已保留文件：{reason}")
-            }
-            Err(RecycleFailure::Failed(reason)) => {
-                control.check_cancelled()?;
-                // A backend can report an error after moving an item. Never delete a new replacement.
-                if !path.try_exists()? {
-                    // 「报错但文件已消失」最常见于移动入站成功后才报错：能用计数确认入站的
-                    // 仍记「已回收」，确认不了才按未验证处理，不夸大也不虚报。
-                    let after = volume.as_deref().and_then(|v| recycler.bin_count(v));
-                    let verified =
-                        matches!((before, after), (Some(before), Some(after)) if after > before);
-                    return Ok(if verified {
-                        DeleteResult::Recycled
-                    } else {
-                        DeleteResult::RecycledUnverified
-                    });
-                }
-                if !fallback {
-                    bail!("回收失败，已保留文件：{reason}");
-                }
-                if let Some(expected) = expected {
-                    fsutil::unchanged(path, expected)?;
-                }
-                // 降级永久删除前重检类型/链接/空目录，避免用陈旧 meta 选错 API 或误删非空树。
-                let meta3 = fs::symlink_metadata(path)?;
-                if fsutil::is_link(&meta3) {
-                    bail!("拒绝删除链接 / reparse point");
-                }
-                if meta3.is_dir() && fs::read_dir(path)?.next().is_some() {
-                    bail!("目录不是空目录，不会递归删除用户目录");
-                }
-                control.check_cancelled()?;
-                if meta3.is_dir() {
-                    fs::remove_dir(path).context("删除空目录失败")?;
-                } else {
-                    fs::remove_file(path)
-                        .context("永久删除失败（未自动提升权限或修改只读属性）")?;
-                }
-                return Ok(DeleteResult::Permanent);
-            }
-        }
-    }
-    control.check_cancelled()?;
-    // 永久删除前再确认一次（防检查后类型被替换）。
-    let meta2 = fs::symlink_metadata(path)?;
-    if fsutil::is_link(&meta2) {
-        bail!("拒绝删除链接 / reparse point");
-    }
-    if meta2.is_dir() && fs::read_dir(path)?.next().is_some() {
-        bail!("目录不是空目录，不会递归删除用户目录");
-    }
-    if meta2.is_dir() {
+    if meta.is_dir() {
         fs::remove_dir(path).context("删除空目录失败")?;
     } else {
         fs::remove_file(path).context("永久删除失败（未自动提升权限或修改只读属性）")?;
@@ -361,32 +89,5 @@ mod tests {
         assert!(display_time_text(i64::MAX).contains('-'));
         // 负时间戳（如 1601 Windows FILETIME 原点之前）不得 panic。
         let _ = display_time_text(i64::MIN);
-    }
-
-    // 覆盖 S-02
-    #[cfg(windows)]
-    #[test]
-    fn volume_root_covers_local_and_unc() {
-        use super::volume_root;
-        use std::path::PathBuf;
-        assert_eq!(
-            volume_root(std::path::Path::new(r"\\?\D:\testzip\a.txt")),
-            Some(PathBuf::from(r"D:\"))
-        );
-        assert_eq!(
-            volume_root(std::path::Path::new(r"D:\testzip\a.txt")),
-            Some(PathBuf::from(r"D:\"))
-        );
-        assert_eq!(
-            volume_root(std::path::Path::new(r"\\server\share\x.txt")),
-            Some(PathBuf::from(r"\\server\share\"))
-        );
-        assert_eq!(
-            volume_root(std::path::Path::new(r"\\?\UNC\server\share\x.txt")),
-            Some(PathBuf::from(r"\\server\share\"))
-        );
-        // UNC 缺 share、非盘符路径 → 无法定位回收站卷。
-        assert_eq!(volume_root(std::path::Path::new(r"\\server")), None);
-        assert_eq!(volume_root(std::path::Path::new("/unix-like/path")), None);
     }
 }

@@ -178,17 +178,6 @@ pub fn snapshot(path: &Path) -> Result<Snapshot> {
         links,
     })
 }
-pub fn unchanged(path: &Path, expected: &Snapshot) -> Result<()> {
-    let actual = snapshot(path)?;
-    // Link counts can change when another selected alias is removed; identity/content metadata must not.
-    if actual.size != expected.size
-        || actual.modified_ns != expected.modified_ns
-        || actual.identity != expected.identity
-    {
-        bail!("扫描后文件已发生变化，已跳过：{}", path.display());
-    }
-    Ok(())
-}
 pub fn open_stable_read(path: &Path) -> Result<File> {
     let mut options = OpenOptions::new();
     options.read(true);
