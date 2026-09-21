@@ -116,7 +116,8 @@ fn plan_execution_confirmation_flow_runs_end_to_end() {
     let task_count = fs::read_dir(&tasks_root).map_or(0, std::iter::Iterator::count);
     assert!(task_count >= 1, "注入 state 下应有任务目录");
 
-    // 2) 回收走 mock，不碰真实回收站；a.txt 应落在 mock-bin
+    // 2) 重复项按 S-02 直接永久删除（不经回收站、不可恢复）；下方两条断言分别
+    //    锁定「移除」与「永久删除口径」两个意图（消息不同、条件相同系声明式锚定）。
     let data = fixture.path().join("data");
     let remaining: Vec<String> = fs::read_dir(&data)
         .unwrap()
@@ -151,11 +152,15 @@ fn plan_execution_confirmation_flow_runs_end_to_end() {
 
 // 覆盖 X-02/C-01（解压一段确认与整理第二段确认共用的「我已确认」门禁）。该门禁是 Slint 声明式绑定，
 // 无头测试只能直接调用回调、绕不过它，因此这里锁定声明本身不被误删/改弱。
+// 2026-09-21 审查轮加强：解压确认框在后台清点期间置 confirm-pending，确认按钮在
+// 「我已确认」之外还被 !confirm-pending 门禁（X-02：数量未知不得启动）——锁定随之收紧。
 #[test]
 fn acknowledge_gate_is_declared_in_ui() {
     let ui = include_str!("../ui/app.slint");
     assert!(
-        ui.contains("enabled: root.confirm-kind == 3 || root.acknowledge;"),
-        "确认按钮的「我已确认」门禁声明缺失或被改动（C-01）"
+        ui.contains(
+            "enabled: root.confirm-kind == 3 || (root.acknowledge && !root.confirm-pending);"
+        ),
+        "确认按钮的「我已确认」门禁声明缺失或被改动（C-01/X-02 清点门禁）"
     );
 }

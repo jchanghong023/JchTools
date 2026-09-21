@@ -77,7 +77,7 @@ fn defaults_valid_and_roundtrip() {
 fn reject_unknown_configuration() {
     assert!(Config::from_json_text(r#"{"delete_everything":true}"#).is_err());
 }
-// 覆盖 S-03, C-02（verify_bytes 写死不可关闭；同名版本取舍开关已按合同移除）
+// 覆盖 S-03, C-02（verify_bytes 已随合同第三批整体移除、旧值被剥除；同名版本取舍开关已按合同移除）
 #[test]
 fn legacy_config_with_removed_fields_still_loads() {
     let mut value = serde_json::to_value(Config::default()).unwrap();

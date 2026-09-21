@@ -108,6 +108,8 @@ struct State {
     tool: Tool,
     /// 测试注入：覆盖任务状态目录；生产路径为 None，仍走 engine::prepare/apply。
     engine_overrides: Option<EngineTestOverrides>,
+    /// 解压确认清点的请求代际：迟到的低代际清点事件不得刷新文案或解除门禁（X-02）。
+    extract_generation: u64,
     /// 计划页加载代际（跨线程）：丢弃晚到的旧 filter/page 结果。
     plan_load: Arc<PlanLoadSync>,
 }
@@ -1316,19 +1318,32 @@ fn wire_sync(ui: &AppWindow, state: &Rc<RefCell<State>>, sender: &mpsc::SyncSend
                 let _ = count_text;
                 ui.set_acknowledge(false);
                 ui.set_confirm_kind(1);
+                // X-02：数量未知（清点进行中）不得允许确认；清点返回后在事件侧解除。
+                ui.set_confirm_pending(true);
                 let sender = sender.clone();
                 let config = {
                     let s = state.borrow();
                     s.config.clone()
+                };
+                // 清点请求代际：每次发起清点请求时递增，迟到的低代际事件整体丢弃（X-02）。
+                let generation = {
+                    let mut s = state.borrow_mut();
+                    s.extract_generation += 1;
+                    s.extract_generation
                 };
                 std::thread::spawn(move || {
                     let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
                         engine::count_archives(&directory, &config)
                     }));
                     let event = match result {
-                        Ok(Ok(count)) => Event::ExtractCount(Ok(count)),
-                        Ok(Err(error)) => Event::ExtractCount(Err(format!("{error:#}"))),
-                        Err(_) => Event::ExtractCount(Err("清点压缩包时后台操作意外退出".into())),
+                        Ok(Ok(count)) => Event::ExtractCount(generation, Ok(count)),
+                        Ok(Err(error)) => {
+                            Event::ExtractCount(generation, Err(format!("{error:#}")))
+                        }
+                        Err(_) => Event::ExtractCount(
+                            generation,
+                            Err("清点压缩包时后台操作意外退出".into()),
+                        ),
                     };
                     let _ = sender.send(event);
                 });
@@ -1371,6 +1386,7 @@ fn initial_state() -> Result<State> {
         tool: Tool::Organizer,
         engine_overrides: None,
         plan_load: Arc::new(PlanLoadSync::default()),
+        extract_generation: 0,
     })
 }
 
@@ -1856,17 +1872,22 @@ pub fn run_with_engine_overrides(
                             && s.plan_filter.as_deref()==filter.as_deref()};
                         if accepted{ui.set_error_text(text.into());}
                     },
-                    Event::ExtractCount(count)=>{
-                        // 确认框仍开着（kind=1）才更新文案；用户已确认/返回则丢弃，不打扰运行中状态。
-                        if ui.get_confirm_kind()==1&&ui.get_screen()==2{
+                    Event::ExtractCount(generation, count)=>{
+                        let current = state.borrow().extract_generation;
+                        // 确认框仍开着（kind=1）且事件仍是当前代际才更新文案；用户已确认/返回、
+                        // 或已改目录重新发起清点时，过期事件整体丢弃，不打扰运行中状态（X-02）。
+                        if ui.get_confirm_kind()==1&&ui.get_screen()==2&&generation==current{
                             match count{
-                                Ok(n)=>ui.set_confirm_text(extract_confirm_text(
+                                Ok(n)=>{ui.set_confirm_text(extract_confirm_text(
                                     &format!("清点到 {n} 个压缩包（按当前扫描范围，已排除「解压失败」目录）。"),
-                                    ui.get_directory().as_str(),&state.borrow().config).into()),
+                                    ui.get_directory().as_str(),&state.borrow().config).into());
+                                    // 数量已知：解除清点门禁，勾选后即可确认（X-02）。
+                                    ui.set_confirm_pending(false);},
                                 Err(error)=>{
                                     // 清点失败：关闭确认框只留红条——占位文案下继续允许确认
                                     // 会让用户在数量未知的状态启动任务（X-02）。
                                     ui.set_confirm_kind(0);
+                                    ui.set_confirm_pending(false);
                                     ui.set_error_text(error.into());
                                 },
                             }
@@ -2075,6 +2096,7 @@ mod gui_tests {
             self.ui.set_notice_text("".into());
             self.ui.set_theme(0);
             self.ui.set_confirm_kind(0);
+            self.ui.set_confirm_pending(false);
             self.ui.set_section(0);
             self.ui.set_panel(0);
             self.ui.set_show_advanced(false);

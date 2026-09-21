@@ -2,7 +2,7 @@
 //! - C-01 目录整理分析阶段只读：不解压、不改目录（解压职责已移交「递归解压」工具）；
 //! - C-09 / X-07 扫描默认排除所选目录根下的「解压失败」子目录；
 //! - X-06 解压失败的原包移入「解压失败」子目录（含分卷兄弟卷）；
-//! - X-05 成功原包按处置策略处理（默认回收，见 tests/archive.rs 真实引擎用例）。
+//! - X-05 成功原包按处置策略处理（默认永久删除，见 tests/archive.rs 真实引擎用例）。
 // 测试代码允许 unwrap/expect：断言失败即测试失败，属合理用法
 // （与 clippy.toml 的 allow-*-in-tests 策略一致，集成测试 crate 不在其覆盖范围内）。
 #![allow(clippy::unwrap_used, clippy::expect_used)]
@@ -667,7 +667,7 @@ fn dispose_failure_does_not_abort_remaining_archives() {
     let root = tmp.path().join("data");
     write_with_mtime(&root.join("a.zip"), b"fake archive a", 100);
     write_with_mtime(&root.join("b.zip"), b"fake archive b", 200);
-    // 恒成功引擎：空输出 → 0 条目 → 解压"成功"，随后原包处置走回收站
+    // 恒成功引擎：空输出 → 0 条目 → 解压"成功"，随后原包处置按永久删除执行（删除由共享句柄注入失败）
     let engine_path = {
         #[cfg(windows)]
         {

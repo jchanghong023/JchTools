@@ -96,8 +96,10 @@ pub enum Event {
     /// 计划页加载失败：带请求代际与筛选归属。过期请求（用户已切走筛选/翻页）的失败
     /// 不得把红条误报到当前正确视图上，UI 侧按 gen/filter 决定是否上屏。
     PlanLoadFailed(String, u64, Option<String>),
-    /// 「开始解压」确认框的压缩包清点结果（X-02）：Err 为清点失败原因。
-    ExtractCount(Result<u64, String>),
+    /// 「开始解压」确认框的压缩包清点结果（X-02）：Err 为清点失败原因。首项是请求
+    /// 代际：用户返回检查后改目录再次发起清点时，迟到的低代际事件不得刷新文案或
+    /// 解除 confirm-pending 门禁（与 PlanPage/PlanLoadFailed 的 gen 同一口径）。
+    ExtractCount(u64, Result<u64, String>),
     /// 「递归解压」一段式运行结束（X-02）：不生成计划、无 ready 态，界面只收尾摘要。
     ExtractDone(std::path::PathBuf, crate::model::Summary),
 }

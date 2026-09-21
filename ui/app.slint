@@ -303,6 +303,8 @@ export component AppWindow inherits Window {
     in-out property <int> confirm-kind: 0;
     in-out property <string> confirm-text;
     in-out property <bool> acknowledge: false;
+    // X-02：解压确认框在后台清点压缩包期间置真——数量未知时不得允许确认启动。
+    in-out property <bool> confirm-pending: false;
     in-out property <bool> conflict-visible: false;
     in-out property <string> conflict-text;
     in-out property <int> conflict-choice: 4;
@@ -804,10 +806,10 @@ export component AppWindow inherits Window {
                 if root.confirm-kind != 3: CheckBox { text: "我已确认目录、规则及可能的永久删除行为"; checked <=> root.acknowledge; }
                 HorizontalLayout { spacing: 10px;
                     Rectangle { horizontal-stretch: 1; background: transparent; }
-                    Button { text: "返回检查"; clicked => { root.confirm-kind = 0; root.acknowledge = false; } }
+                    Button { text: "返回检查"; clicked => { root.confirm-kind = 0; root.acknowledge = false; root.confirm-pending = false; } }
                     Button { text: root.confirm-kind == 3 ? "停止并关闭" : "确认"; primary: true;
-                        enabled: root.confirm-kind == 3 || root.acknowledge;
-                        clicked => { root.confirmed(root.confirm-kind); root.confirm-kind = 0; root.acknowledge = false; } }
+                        enabled: root.confirm-kind == 3 || (root.acknowledge && !root.confirm-pending);
+                        clicked => { root.confirmed(root.confirm-kind); root.confirm-kind = 0; root.acknowledge = false; root.confirm-pending = false; } }
                 }
             }
         }

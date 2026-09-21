@@ -242,7 +242,7 @@ pub fn prepare_at(
     result
 }
 /// 「递归解压」工具的一段式执行（X-02）：确认后连续运行到结束——扫描登记压缩包、
-/// 就地解压（X-03）、成功原包按处置策略处理（X-05 默认回收站）、失败原包移入
+/// 就地解压（X-03）、成功原包按处置策略处理（X-05 默认永久删除）、失败原包移入
 /// 「解压失败」子目录（X-06）。没有计划审核环节，也不生成整理计划。
 pub fn extract_run(root: &Path, config: Config, context: TaskContext) -> Result<TaskResult> {
     extract_run_at(root, config, context, &config::state_dir()?, None)
@@ -359,7 +359,8 @@ fn extract_run_with(
     result
 }
 /// 确认框用的压缩包计数（X-02）：只读快速清点，与正式扫描同一套过滤口径
-/// （递归/隐藏/系统/排除规则/跳过「解压失败」，X-07）。失败即报错，不回退猜测值。
+/// （递归/隐藏/系统/排除规则/跳过「解压失败」/状态与程序目录剪枝，X-07）。
+/// 失败即报错，不回退猜测值。
 #[cfg_attr(
     feature = "perf-tracing",
     tracing::instrument(target = "perf", name = "count_archives", skip_all)
@@ -369,6 +370,18 @@ pub fn count_archives(root: &Path, config: &Config) -> Result<u64> {
     let root = fsutil::normalize_root(root)?;
     let excluded = rules::build_exclusions(&config.exclusions)?;
     let quarantine = root.join(archive::QUARANTINE_DIR_NAME);
+    // 与 scan 同源的特殊目录剪枝口径。状态目录此时可能尚不存在（首次运行先弹
+    // 确认再建目录）：canonicalize 失败视为无重叠，不阻止清点。
+    let state = fs::canonicalize(crate::config::state_dir()?).ok();
+    let executable_dir = std::env::current_exe()
+        .ok()
+        .and_then(|p| p.parent().and_then(|d| fs::canonicalize(d).ok()));
+    let (state_prefix, exe_prefix, root_under_special) =
+        special_prefixes(&root, state.as_deref(), executable_dir.as_deref());
+    if root_under_special {
+        // 选定根位于状态目录/程序目录内：扫描将整树剪枝，清点必须同为 0。
+        return Ok(0);
+    }
     let mut count = 0u64;
     for entry in walkdir::WalkDir::new(&root)
         .follow_links(false)
@@ -377,7 +390,8 @@ pub fn count_archives(root: &Path, config: &Config) -> Result<u64> {
         .into_iter()
         .filter_entry(|entry| {
             let Ok(meta) = fs::symlink_metadata(entry.path()) else {
-                return true;
+                // 与正式扫描一致：元数据不可读的条目按跳过处理，不计入清点。
+                return false;
             };
             if fsutil::is_link(&meta) {
                 return false;
@@ -402,6 +416,12 @@ pub fn count_archives(root: &Path, config: &Config) -> Result<u64> {
             }
             if quarantine.is_dir() && entry.path().starts_with(&quarantine) {
                 return false;
+            }
+            // 状态目录/程序目录位于选定根内：与扫描同口径剪枝其子树。
+            for prefix in [state_prefix.as_deref(), exe_prefix.as_deref()] {
+                if prefix.is_some_and(|p| rel == p || rel.starts_with(&format!("{p}/"))) {
+                    return false;
+                }
             }
             if excluded.is_match(&rel) || excluded.is_match(format!("{rel}/")) {
                 return false;
@@ -730,6 +750,32 @@ fn scan_emit(
     }
     Ok(())
 }
+/// 状态目录/程序目录的剪枝口径换算：把「选定根内的特殊目录」折算成相对前缀
+/// （条目都以相对路径比较，免去逐条目拼绝对路径），并给出「选定根本身位于特殊
+/// 目录内（含重合）」标志——此时整棵树按旧口径全部剪枝。scan 与 count_archives
+/// 共用本函数，保证确认框清点（X-02）与正式扫描是同一套过滤口径。
+fn special_prefixes(
+    root: &Path,
+    state: Option<&Path>,
+    executable_dir: Option<&Path>,
+) -> (Option<String>, Option<String>, bool) {
+    let prefix_under_root = |special: &Path| -> Option<String> {
+        if !special.starts_with(root) {
+            return None;
+        }
+        match fsutil::relative_string(root, special) {
+            Ok(rel) if rel.is_empty() => None, // 根自身即特殊目录：走整树剪枝
+            Ok(rel) => Some(rel),
+            Err(_) => None,
+        }
+    };
+    (
+        state.and_then(prefix_under_root),
+        executable_dir.and_then(prefix_under_root),
+        state.is_some_and(|dir| root.starts_with(dir))
+            || executable_dir.is_some_and(|dir| root.starts_with(dir)),
+    )
+}
 #[cfg_attr(
     feature = "perf-tracing",
     tracing::instrument(target = "perf", name = "scan", skip_all)
@@ -774,25 +820,10 @@ fn scan(job: &mut Job, enqueue: bool, state: &Path) -> Result<()> {
             0,
         )?;
     }
-    // 状态目录/程序目录的剪枝条件换算成「选定根内相对前缀」（条目都以相对路径比较，
-    // 免去逐条目拼绝对路径）；选定根位于它们内部时，整棵树按旧口径全部剪枝。
-    let prefix_under_root = |special: &Path| -> Option<String> {
-        if !special.starts_with(&root) {
-            return None;
-        }
-        match fsutil::relative_string(&root, special) {
-            Ok(rel) if rel.is_empty() => None, // 根自身即特殊目录：走整树剪枝
-            Ok(rel) => Some(rel),
-            Err(_) => None,
-        }
-    };
-    let state_prefix = prefix_under_root(&state);
-    let exe_prefix = executable_dir.as_deref().and_then(prefix_under_root);
-    // 选定根位于状态目录/程序目录内（含重合）时，整棵树按旧口径全部剪枝。
-    let root_under_special = root.starts_with(&state)
-        || executable_dir
-            .as_deref()
-            .is_some_and(|dir| root.starts_with(dir));
+    // 状态目录/程序目录的剪枝口径与 count_archives 共用；选定根位于它们内部
+    // （含重合）时，整棵树按旧口径全部剪枝。
+    let (state_prefix, exe_prefix, root_under_special) =
+        special_prefixes(&root, Some(&state), executable_dir.as_deref());
     let sink = Mutex::new(ScanSink::default());
     let ctx = WalkCtx {
         control: job.context.control.clone(),

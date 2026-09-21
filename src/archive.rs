@@ -59,6 +59,10 @@ impl SevenZip {
         let mut total = 0u64;
         let mut count = 0u64;
         let mut sizes_complete = true;
+        // 归档是否位于选定根：只有此时成员的顶层组件才会落进 scan 的顶层隔离剪枝，
+        // 「解压失败」保留名判定才适用（子目录归档的同名成员对 scan 可见，见下方 guard）。
+        let archive_at_root =
+            fsutil::relative_string(&job.root, archive).map_or(true, |rel| !rel.contains('/'));
         let cfg = job.config.clone();
         let mut flush = |fields: &mut BTreeMap<String, String>| -> Result<()> {
             let raw = if let Some(raw) = fields.remove("Path") {
@@ -91,6 +95,18 @@ impl SevenZip {
                     || s.eq_ignore_ascii_case("System Volume Information")
             }) {
                 bail!("拒绝压缩包中的程序工作区/系统目录条目：{raw}");
+            }
+            // 保留命名空间（按成员的落盘位置对齐 scan 剪枝口径）：任意层
+            // .jchtools-link-* 组件与 scan 按名剪枝同构；顶层「解压失败」组件仅在
+            // 归档位于选定根时落进 scan 永久盲区——子目录归档的同名成员落在归档
+            // 自己的目录下（如 sub/解压失败/x），scan 可见、两工具可管理，不拒绝。
+            // 影子内容成员落盘后原包会按「完全解开」处置（默认永久删除），用户唯一
+            // 副本随之流入不可管理区域，故整包隔离（X-06 危险条目，可逆、有日志）。
+            let top_component = raw.split('/').next().unwrap_or_default();
+            if (archive_at_root && top_component == QUARANTINE_DIR_NAME)
+                || raw.split('/').any(|s| s.starts_with(".jchtools-link-"))
+            {
+                bail!("拒绝压缩包中的「解压失败」暂存区或内部链接标记条目：{raw}");
             }
             if fields.get("Encrypted").is_some_and(|s| s == "+") {
                 bail!("加密压缩包需要人工处理；没有把密码写入进程命令行");
@@ -237,7 +253,13 @@ impl SevenZip {
         .with_context(|| "无法完成压缩包的多卷佐证探测")?;
         Ok(multipart)
     }
-    fn extract_one(&self, job: &mut Job, archive_rel: &str, depth: u32) -> Result<ExtractOutcome> {
+    fn extract_one(
+        &self,
+        job: &mut Job,
+        archive_rel: &str,
+        depth: u32,
+        disposed: &std::collections::HashSet<String>,
+    ) -> Result<ExtractOutcome> {
         let archive = fsutil::safe_join(&job.root, archive_rel)?;
         // Keep an open, write-denying source handle on Windows during listing/extraction.
         let source_guard = fsutil::open_stable_read(&archive)?;
@@ -352,6 +374,18 @@ impl SevenZip {
         drop(source_guard);
         let mut complete = true;
         let exclusions = rules::build_exclusions(&job.config.exclusions)?;
+        // 分卷组（主体+兄弟卷）随后将整组处置（X-05/X-06），不得充当成员的
+        // 「树内已有相同内容」来源：否则成员跳过落盘、整组又被永久删除，两处皆失
+        // （与 quine 自指包同型，见 find_identical_elsewhere 注释）。无法无损表示为
+        // 相对路径的兄弟卷（非 UTF-8 名）跳过即可：只少一个排除项、退回旧口径，
+        // 不得让整个包因此转隔离。
+        let mut exclude_rels: Vec<String> = volumes
+            .iter()
+            .filter_map(|path| fsutil::relative_string(&job.root, path).ok())
+            .collect();
+        if !exclude_rels.iter().any(|rel| rel == archive_rel) {
+            exclude_rels.push(archive_rel.to_string());
+        }
         let mut expanded = 0u64;
         // One archive is decoded once, including solid archives. Final placement is rename, never copy.
         for entry in walkdir::WalkDir::new(&stage.content)
@@ -442,9 +476,14 @@ impl SevenZip {
             // 在源目录旁再写一份只会制造“删除+移动”循环；树内已有相同字节则不再落盘。
             if !destination.try_exists()? {
                 let incoming = fsutil::snapshot(entry.path())?;
-                if let Some(equivalent) =
-                    find_identical_elsewhere(job, entry.path(), &incoming, &relative, archive_rel)?
-                {
+                if let Some(equivalent) = find_identical_elsewhere(
+                    job,
+                    entry.path(),
+                    &incoming,
+                    &relative,
+                    &exclude_rels,
+                    disposed,
+                )? {
                     job.summary.extracted += 1;
                     let shown = fsutil::relative_string(&job.root, &equivalent)?;
                     job.log(
@@ -853,7 +892,7 @@ fn volume_set(archive: &Path, sweep_fuzzy: bool) -> Result<Vec<PathBuf>> {
     }
     Ok(volumes)
 }
-/// 成功整组处置（X-05）：complete 的分卷组每个文件按原包处置策略处理，默认回收站。
+/// 成功整组处置（X-05）：complete 的分卷组每个文件按原包处置策略处理，默认永久删除。
 /// 兄弟卷从未单独入队，必须在这里一并处理，否则跑完后目录里仍残留压缩包。
 fn dispose_archive(job: &mut Job, volumes: &[PathBuf]) -> Result<()> {
     let mode = job.config.archive_delete.resolve();
@@ -914,15 +953,24 @@ fn quarantine(job: &mut Job, archive_rel: &str, reason: &str) -> Result<()> {
     Ok(())
 }
 /// 在已扫描文件中查找与暂存条目字节相同的副本（按文件名+大小预筛，再逐字节确认）。
-/// `archive_rel` 是正在解压的原包自身：quine 型自指包（成员字节=整包字节，rsc 式
-/// gzip/zip quine）的成员名+大小与原包行完全一致，若不排除，成员会被判「树内已有
-/// 相同内容」而跳过落盘，随后原包按规则删除——内容两处皆失。
+/// `exclude_rels` 是本次不得充当内容来源的相对路径：正在解压的原包连同将被整组处置的
+/// 分卷兄弟卷；`disposed` 是整个任务将被处置的相对路径全集（全部排队压缩包及其分卷
+/// 组，见 extract_queued）。quine 型自指包（成员字节=整包字节，rsc 式 gzip/zip quine）
+/// 的成员名+大小与原包行完全一致，分卷成员也可能与兄弟卷同名同字节，跨包成员还可能
+/// 撞上稍后才处置的另一包——若不排除，成员会被判「树内已有相同内容」而跳过落盘，
+/// 随后来源按规则删除——内容两处皆失。
+///
+/// 已登记残余边界（审查第 1/2 轮，两轮独立确认为预存在窄面、登记备查）：成员命中
+/// 普通文件来源后，本任务内另一包的成员若按 X-04 冲突策略胜出并置换删除该来源路径，
+/// 已跳过落盘的成员仍会两处皆失。封堵需要「冲突置换时动态登记 disposed」或调度级
+/// 设计，超出本函数职责；在合同层面裁决前接受现状。
 fn find_identical_elsewhere(
     job: &Job,
     source: &Path,
     incoming: &crate::model::Snapshot,
     member_rel: &str,
-    archive_rel: &str,
+    exclude_rels: &[String],
+    disposed: &std::collections::HashSet<String>,
 ) -> Result<Option<PathBuf>> {
     let name = Path::new(member_rel)
         .file_name()
@@ -931,13 +979,19 @@ fn find_identical_elsewhere(
         .to_lowercase();
     let size = i64::try_from(incoming.size).context("成员大小超出范围")?;
     let candidates: Vec<String> = {
-        let mut statement = job.db.conn.prepare("SELECT rel FROM files WHERE active=1 AND name=?1 AND size=?2 AND rel<>?3 ORDER BY id LIMIT 32")?;
-        let rows =
-            statement.query_map(params![name, size, archive_rel], |r| r.get::<_, String>(0))?;
+        // 候选排除放在循环内而非 SQL：最坏情形（排除项占满 LIMIT 32 个候选槽）的
+        // 后果只是成员正常落盘（放弃一次去重捷径），没有丢失路径。
+        let mut statement = job.db.conn.prepare(
+            "SELECT rel FROM files WHERE active=1 AND name=?1 AND size=?2 ORDER BY id LIMIT 32",
+        )?;
+        let rows = statement.query_map(params![name, size], |r| r.get::<_, String>(0))?;
         rows.collect::<rusqlite::Result<Vec<_>>>()?
     };
     let source_rel = fsutil::relative_string(&job.root, source)?;
     for rel in candidates {
+        if exclude_rels.iter().any(|excluded| excluded == &rel) || disposed.contains(&rel) {
+            continue;
+        }
         if rel == source_rel {
             continue;
         }
@@ -947,10 +1001,18 @@ fn find_identical_elsewhere(
         let Ok(existing) = fsutil::snapshot(&path) else {
             continue;
         };
-        if existing.size == incoming.size
-            && hashing::equal_bytes(source, incoming, &path, &existing, &job.context.control)?
-        {
-            return Ok(Some(path));
+        if existing.size == incoming.size {
+            // 候选此刻无法稳定读取（如正被其他进程以写方式占用，stable read 的
+            // 共享模式冲突）与 snapshot 失败同口径：当作「不等价」跳过该候选，
+            // 让成员正常落盘；不得把健康的整包因此打入「解压失败」。
+            let Ok(equivalent) =
+                hashing::equal_bytes(source, incoming, &path, &existing, &job.context.control)
+            else {
+                continue;
+            };
+            if equivalent {
+                return Ok(Some(path));
+            }
         }
     }
     Ok(None)
@@ -1140,40 +1202,101 @@ pub fn extract_queued(job: &mut Job, engine: &SevenZip) -> Result<()> {
                 .status(format!("已清理 {removed} 个残留解压暂存目录"));
         }
     }
+    // 本次任务将被处置的相对路径全集（排队压缩包 + 各分卷组可能随处置的兄弟卷）：
+    // 成员解压的「树内已有相同内容」快捷路径不得信任它们——否则成员跳过落盘后
+    // 来源又被整组永久删除，两处皆失（A-3，含跨包形态）。宽命名兄弟卷宽松计入：
+    // 多排除只会让成员正常落盘（不走去重捷径），不会丢数据。
+    let mut disposed: std::collections::HashSet<String> = job
+        .db
+        .conn
+        .prepare("SELECT rel FROM archives")?
+        .query_map([], |r| r.get::<_, String>(0))?
+        .collect::<rusqlite::Result<_>>()?;
+    let queued: Vec<String> = disposed.iter().cloned().collect();
+    for rel in &queued {
+        let Ok(path) = fsutil::safe_join(&job.root, rel) else {
+            continue;
+        };
+        let Ok(volumes) = volume_set(&path, true) else {
+            continue;
+        };
+        for volume in volumes {
+            if let Ok(volume_rel) = fsutil::relative_string(&job.root, &volume) {
+                disposed.insert(volume_rel);
+            }
+        }
+    }
     loop {
         job.context.control.checkpoint()?;
-        let next: Option<(i64, String, u32)> = job
+        let next: Option<(i64, String, u32, String)> = job
             .db
             .conn
             .query_row(
-                "SELECT id,rel,depth FROM archives WHERE state='pending' ORDER BY depth,id LIMIT 1",
+                "SELECT id,rel,depth,fingerprint FROM archives WHERE state='pending' ORDER BY depth,id LIMIT 1",
                 [],
-                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)),
             )
             .optional()?;
-        let Some((id, relative, depth)) = next else {
+        let Some((id, relative, depth, stored_fingerprint)) = next else {
             break;
         };
+        // 指纹复核（A8-1）：排队期间该路径可能已被其他包的成员按冲突策略置换——
+        // 旧包被删除、新成员顶替同名路径，而 enqueue 清理旧行的兜底只在嵌套开启
+        // 且成员名匹配压缩包后缀时才生效。与 enqueue 同公式重算指纹，不一致即
+        // 「原包已被取代」，清掉残留 pending 行并跳过：不得把刚解出的合法文件误当
+        // 失败包移入「解压失败」，也不得虚报失败计数。比对对象是本任务自己的扫描
+        // 记录与自身成员的处置结果，不属 P-08 禁止的对外部并发改动的防御。
+        let Ok(path) = fsutil::safe_join(&job.root, &relative) else {
+            job.db
+                .conn
+                .execute("DELETE FROM archives WHERE id=?1", [id])?;
+            continue;
+        };
+        // 路径已不存在或此刻无法读取：原包已被删除/取代，残留行一并清除。
+        let superseded = if let Ok(snapshot) = fsutil::snapshot(&path) {
+            let fingerprint = format!(
+                "{}:{}:{}:{}",
+                relative, snapshot.size, snapshot.modified_ns, snapshot.identity
+            );
+            fingerprint != stored_fingerprint
+        } else {
+            true
+        };
+        if superseded {
+            job.db
+                .conn
+                .execute("DELETE FROM archives WHERE id=?1", [id])?;
+            job.summary.skipped += 1;
+            job.log(
+                "解压",
+                &relative,
+                "",
+                "跳过",
+                "扫描入队后无法确认原包仍在原位（可能已被其他成员的冲突处置取代，或被其他程序占用），本次不再处理",
+                0,
+            )?;
+            continue;
+        }
         job.db
             .conn
             .execute("UPDATE archives SET state='running' WHERE id=?1", [id])?;
         let result = if depth >= job.config.max_depth {
             Err(anyhow::anyhow!("达到最大嵌套层数（X-08 防护上限）"))
         } else {
-            engine.extract_one(job, &relative, depth)
+            engine.extract_one(job, &relative, depth, &disposed)
         };
         match result {
             Ok(outcome) => {
                 job.db
                     .conn
                     .execute("UPDATE archives SET state='done' WHERE id=?1", [id])?;
-                // X-05/X-06：complete 整组按处置策略处理（默认回收站）；未完全解开的
+                // X-05/X-06：complete 整组按处置策略处理（默认永久删除）；未完全解开的
                 // 整组移入「解压失败」，目录里不残留压缩包（X 分区总体约束）。
                 if outcome.complete {
                     // X-05：只有完全解开的包才计「解压成功」；未完全解开的包走下面的
                     // 失败分支，两个包计数按 X-05/X-06 的划分互斥。
                     job.summary.archives_ok += 1;
-                    // X-02/X-06：单包故障隔离——处置失败（回收接口异常、共享冲突等）只记
+                    // X-02/X-06：单包故障隔离——处置失败（处置接口异常、共享冲突等）只记
                     // 警告并保留原包原地，不得中止整个任务；重跑按等字节合入幂等收敛。
                     if let Err(error) = dispose_archive(job, &outcome.volumes) {
                         job.summary.errors += 1;
@@ -1495,8 +1618,10 @@ mod tests {
             .insert_file("pack.zip", "pack.zip", "pack.zip", &archive_snapshot)
             .unwrap();
         let incoming = fsutil::snapshot(&member).unwrap();
+        let exclude = ["pack.zip".to_string()];
+        let no_disposed = std::collections::HashSet::<String>::new();
         assert!(
-            find_identical_elsewhere(&job, &member, &incoming, "pack.zip", "pack.zip")
+            find_identical_elsewhere(&job, &member, &incoming, "pack.zip", &exclude, &no_disposed)
                 .unwrap()
                 .is_none(),
             "等价查找不得把正在解压的原包自身当作树内副本"
@@ -1509,7 +1634,8 @@ mod tests {
             .insert_file("other/pack.zip", "pack.zip", "pack.zip", &other_snapshot)
             .unwrap();
         let hit =
-            find_identical_elsewhere(&job, &member, &incoming, "pack.zip", "pack.zip").unwrap();
+            find_identical_elsewhere(&job, &member, &incoming, "pack.zip", &exclude, &no_disposed)
+                .unwrap();
         let hit_rel = fsutil::relative_string(&root, &hit.unwrap()).unwrap();
         assert_eq!(
             hit_rel.as_str(),
