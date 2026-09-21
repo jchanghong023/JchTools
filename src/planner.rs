@@ -116,21 +116,16 @@ fn deduplicate(job: &mut Job) -> Result<()> {
     job.db.conn.execute_batch(&format!("DROP TABLE IF EXISTS duplicate_order; CREATE TEMP TABLE duplicate_order AS SELECT ROW_NUMBER() OVER(ORDER BY hash,{order}) AS seq,id FROM files WHERE active=1 AND hash IS NOT NULL; CREATE INDEX duplicate_order_seq ON duplicate_order(seq); DELETE FROM keepers;"))?;
     let mut cursor = 0i64;
     loop {
-        let items = {
-            let mut stmt = job.db.conn.prepare(
-                "SELECT seq,id FROM duplicate_order WHERE seq>?1 ORDER BY seq LIMIT 256",
-            )?;
-            let rows =
-                stmt.query_map([cursor], |r| Ok((r.get::<_, i64>(0)?, r.get::<_, i64>(1)?)))?;
-            rows.collect::<rusqlite::Result<Vec<_>>>()?
-        };
+        // 一条 JOIN 语句取整页（duplicate_order 游标 × files 全列），替代逐候选的
+        // file(id) 主键单行查询；keeper 查找保留逐行——它依赖本页内已注册的 keepers。
+        // 写语句无需页内事务：engine 在 planner::build 外层已包一个整体事务。
+        let items = job.db.duplicate_page(cursor, 256)?;
         if items.is_empty() {
             break;
         }
-        for (seq, id) in items {
+        for (seq, file) in items {
             cursor = seq;
             job.context.control.checkpoint()?;
-            let file = job.db.file(id)?;
             let hash = file.hash.as_ref().context("重复候选缺少 Hash")?;
             let keeper_id: Option<i64> = job.db.conn.query_row(
                 "SELECT file_id FROM keepers WHERE hash=?1 AND ((name=?2 AND ?4) OR (name<>?2 AND normal=?3 AND ?5) OR (name<>?2 AND normal<>?3 AND ?6)) ORDER BY rowid LIMIT 1",

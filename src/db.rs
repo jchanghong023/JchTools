@@ -102,18 +102,32 @@ impl Database {
         Ok(())
     }
     pub fn files<P: Params>(&self, sql: &str, args: P) -> Result<Vec<FileRecord>> {
-        let mut stmt = self.conn.prepare(sql)?;
+        // prepare_cached：分页循环里同一 SQL 反复到达，避免每页重新解析。
+        // 传入的 SQL 文本必须跨调用逐字稳定，否则缓存永远不命中（只是退回逐次解析）。
+        let mut stmt = self.conn.prepare_cached(sql)?;
         let rows = stmt.query_map(args, file_row)?;
         Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
     }
+    /// 与 FILE_COLUMNS 同序的按 id 取行 SQL（写死列清单换静态常量，避免每次调用 format!）。
+    const FILE_BY_ID_SQL: &str =
+        "SELECT id,rel,name,normal,size,mtime,identity,links,hash,cleanable FROM files WHERE id=?1";
     pub fn file(&self, id: i64) -> Result<FileRecord> {
-        self.conn
-            .query_row(
-                &format!("SELECT {FILE_COLUMNS} FROM files WHERE id=?1"),
-                [id],
-                file_row,
-            )
-            .map_err(Into::into)
+        let mut stmt = self.conn.prepare_cached(Self::FILE_BY_ID_SQL)?;
+        stmt.query_row([id], file_row).map_err(Into::into)
+    }
+    /// 按计划顺序取一页重复候选（duplicate_order JOIN files，一条语句取整批，
+    /// 替代逐候选 file(id) 的主键单行查询）。seq 是 duplicate_order 的游标列。
+    pub fn duplicate_page(&self, after: i64, limit: i64) -> Result<Vec<(i64, FileRecord)>> {
+        let sql = format!(
+            "SELECT o.seq,{} FROM duplicate_order AS o CROSS JOIN files AS f ON f.id=o.id \
+             WHERE o.seq>?1 ORDER BY o.seq LIMIT ?2",
+            file_columns_qualified("f")
+        );
+        let mut stmt = self.conn.prepare_cached(&sql)?;
+        let rows = stmt.query_map(params![after, limit], |row| {
+            Ok((row.get::<_, i64>(0)?, file_row_offset(row, 1)?))
+        })?;
+        Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
     }
     pub fn add_action(&self, action: &Action) -> Result<i64> {
         self.conn.execute("INSERT INTO actions(kind,source,target,body,selected,state) VALUES(?1,?2,?3,?4,?5,'pending')",
@@ -148,13 +162,13 @@ impl Database {
                 "未知的行动类型筛选：{kind}"
             );
             let like = format!("\"{kind}\"");
-            let mut statement = self.conn.prepare("SELECT id,body,selected,state FROM actions WHERE id>?1 AND kind=?2 ORDER BY id LIMIT ?3")?;
+            let mut statement = self.conn.prepare_cached("SELECT id,body,selected,state FROM actions WHERE id>?1 AND kind=?2 ORDER BY id LIMIT ?3")?;
             let rows = statement
                 .query_map(params![after, like, limit], action_row)?
                 .collect::<rusqlite::Result<Vec<_>>>()?;
             rows
         } else {
-            let mut statement = self.conn.prepare(
+            let mut statement = self.conn.prepare_cached(
                 "SELECT id,body,selected,state FROM actions WHERE id>?1 ORDER BY id LIMIT ?2",
             )?;
             let rows = statement
@@ -246,19 +260,24 @@ fn nonneg_u64(row: &Row<'_>, idx: usize) -> rusqlite::Result<u64> {
     })
 }
 fn file_row(row: &Row<'_>) -> rusqlite::Result<FileRecord> {
+    file_row_offset(row, 0)
+}
+/// 与 FILE_COLUMNS 同序的行解析，从第 `offset` 列起读（供前面带有附加列的 JOIN 使用）。
+fn file_row_offset(row: &Row<'_>, offset: usize) -> rusqlite::Result<FileRecord> {
+    let column = |i: usize| i + offset;
     Ok(FileRecord {
-        id: row.get(0)?,
-        rel: row.get(1)?,
-        name: row.get(2)?,
-        normalized: row.get(3)?,
+        id: row.get(column(0))?,
+        rel: row.get(column(1))?,
+        name: row.get(column(2))?,
+        normalized: row.get(column(3))?,
         snapshot: Snapshot {
-            size: nonneg_u64(row, 4)?,
-            modified_ns: row.get(5)?,
-            identity: row.get(6)?,
-            links: nonneg_u64(row, 7)?,
+            size: nonneg_u64(row, column(4))?,
+            modified_ns: row.get(column(5))?,
+            identity: row.get(column(6))?,
+            links: nonneg_u64(row, column(7))?,
         },
-        hash: row.get(8)?,
-        cleanable: row.get(9)?,
+        hash: row.get(column(8))?,
+        cleanable: row.get(column(9))?,
     })
 }
 fn action_row(row: &Row<'_>) -> rusqlite::Result<Action> {

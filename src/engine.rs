@@ -646,13 +646,19 @@ fn hash_candidates(job: &mut Job) -> Result<()> {
         }
     }
     let mut cursor = 0;
+    // 分页 SQL 整个哈希阶段逐字不变：循环外构造一次，配合 db::files 的 prepare_cached
+    // 让每页都命中语句缓存（不再逐页 format! 与解析）。
+    let sql = format!(
+        "SELECT {} FROM hash_candidates AS c CROSS JOIN files AS f ON f.id=c.id \
+         WHERE c.id>?1 AND f.active=1 ORDER BY c.id LIMIT ?2",
+        crate::db::file_columns_qualified("f")
+    );
     loop {
         job.context.control.checkpoint()?;
         // 候选表按主键游标推进，并用 CROSS JOIN 固定 hash_candidates 为外层扫描表：
         // 旧的 `id IN (SELECT id FROM hash_candidates)` 会让每次分页都重扫整个候选集合
         // （实测每次调用成本随游标位置线性增长，累计平方级）。取数批量与哈希线程数解耦，
         // 避免「调线程数」同时改变两个量。
-        let sql=format!("SELECT {} FROM hash_candidates AS c CROSS JOIN files AS f ON f.id=c.id WHERE c.id>?1 AND f.active=1 ORDER BY c.id LIMIT ?2", crate::db::file_columns_qualified("f"));
         let batch = job.db.files(
             &sql,
             params![cursor, crate::convert::usize_as_i64(HASH_BATCH)],
