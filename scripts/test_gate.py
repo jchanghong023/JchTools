@@ -9,14 +9,15 @@
               binding loop 警告扫描）。
   fulltest    当前平台（Windows）全部适用本地检查：Python 质量门（与 CI 同命令）
               + rustfmt + clippy + make_tmp 测试数据集 + acceptance.ps1
-              -WithEngine -WithGuiSmoke -WithPackage（复用可信基验收入口，内含
-              static_check、全量测试、真实引擎用例、GUI 冒烟 S1-S4、打包自检）。
+              -WithEngine -WithGuiSmoke（复用可信基验收入口，内含 static_check、
+              全量测试、binding 扫描、真实引擎用例、GUI 冒烟 S1-S4）。不含发布
+              打包自检——它验证的是发布产物而非平台功能，只在 slowtest 执行。
               不触发远程流水线；每次运行都需要人类明确授权（--authorized）。
-  slowtest    fulltest 全部阶段 + 远程 CI（check.yml：gh 触发后轮询到最终
-              状态，TRIGGERED 不等于 PASS）。平台范围按合同 P-07 仅
-              Windows，不设跨平台/跨 WSL 阶段。同样需要人类本次明确授权。
-              release.yml 是真实发布（自动打时间戳 tag 并发布产物），不属于
-              slowtest，只能单独显式授权手动触发。
+  slowtest    fulltest 全部阶段 + 发布打包自检（package-windows.ps1 全程）
+              + 远程 CI（check.yml：gh 触发后轮询到最终状态，TRIGGERED 不等于
+              PASS）。平台范围按合同 P-07 仅 Windows，不设跨平台/跨 WSL 阶段。
+              同样需要人类本次明确授权。release.yml 是真实发布（自动打时间戳
+              tag 并发布产物），不属于 slowtest，只能单独显式授权手动触发。
 
 防递归：被触发的远程工作流各自运行固定步骤，不会回调本脚本，不存在
 slowtest → CI → slowtest 循环。本地阶段未全部 PASS（FAIL/TIMEOUT/UNVERIFIED）
@@ -324,7 +325,7 @@ def _fulltest_stages(results: list[StageResult]) -> None:
     if _has_blocking(results):
         return
     # 单命令复用可信基验收入口：static_check + 全量测试 + binding 扫描 + 真实引擎用例
-    # + GUI 冒烟（内含 gui-build）+ 打包自检（package-windows.ps1，本地构建，不触发远程）。
+    # + GUI 冒烟（内含 gui-build）。发布打包自检不在本级（只在 slowtest，见 _package_stage）。
     acceptance_argv = [
         powershell,
         "-NoProfile",
@@ -334,11 +335,10 @@ def _fulltest_stages(results: list[StageResult]) -> None:
         "-WithGuiSmoke",
         "-GuiData",
         str(GUI_DATA_DIR),
-        "-WithPackage",
     ]
     # 本机执行策略全作用域 Undefined（默认 Restricted）会拒绝任何 -File 运行 .ps1；
     # PSExecutionPolicyPreference 以 Process 作用域覆盖之，且随环境继承给
-    # acceptance.ps1 内部再起的 powershell 子进程（package 阶段），只影响本进程树。
+    # acceptance.ps1 内部再起的 powershell 子进程，只影响本进程树。
     acceptance_env = {"PSExecutionPolicyPreference": "Bypass"}
     module_path = _ps51_module_path()
     if module_path is not None:
@@ -361,6 +361,33 @@ def cmd_fulltest() -> int:
     elapsed = time.monotonic() - started
     return _print_summary(
         "fulltest（当前平台 Windows）", results, [], snapshot=snapshot, wall_note=f"墙钟：{elapsed:.1f}s"
+    )
+
+
+def _package_stage(results: list[StageResult]) -> None:
+    """发布打包自检（package-windows.ps1 全程）：只属于 slowtest 层级（AGENTS.md 3.4）.
+
+    fulltest 不含本阶段：它验证的是发布产物（引擎内嵌、许可证合规、无引擎泄漏、
+    便携 ZIP 与安装包）而不是当前平台功能，且 release 构建 + 重复测试 + 压缩在本机
+    要两分钟以上；放进 slowtest 后它的耗时与结论在汇总里单独可见。
+    """
+    powershell = shutil.which("powershell")
+    if powershell is None:
+        results.append(
+            StageResult("package", STATUS_UNVERIFIED, "PATH 上找不到 powershell（package-windows.ps1 需要）")
+        )
+        return
+    env_extra = {"PSExecutionPolicyPreference": "Bypass"}
+    module_path = _ps51_module_path()
+    if module_path is not None:
+        env_extra["PSModulePath"] = module_path
+    results.append(
+        run_logged(
+            "package",
+            [powershell, "-NoProfile", "-File", str(ROOT / "scripts" / "package-windows.ps1")],
+            timeout=STAGE_TIMEOUT_DEFAULT,
+            env_extra=env_extra,
+        )
     )
 
 
@@ -515,6 +542,19 @@ def cmd_slowtest() -> int:
     snapshot = _snapshot_lines()
     results: list[StageResult] = []
     _fulltest_stages(results)
+    # 发布打包自检：只在本级执行（AGENTS.md 3.4）。本地阶段未全部 PASS 时按纪律不执行——
+    # 前提都没成立就花两分钟构建发布产物没有意义，且会掩盖「本地未验证」。
+    not_ok = [result.name for result in results if result.status != STATUS_OK]
+    if not_ok:
+        results.append(
+            StageResult(
+                "package",
+                STATUS_NOT_RUN,
+                f"本地阶段未全部 PASS（{', '.join(not_ok)}）；按纪律不执行打包自检",
+            )
+        )
+    else:
+        _package_stage(results)
     # 前置本地验证未全部 PASS（FAIL / TIMEOUT / UNVERIFIED）时停止后续远程阶段：
     # 本地平台验证都没能成立就去消耗流水线资源属于自欺，且会把「本地未验证」掩盖成「远程已验证」。
     git = shutil.which("git")
