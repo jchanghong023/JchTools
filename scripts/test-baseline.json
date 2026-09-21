@@ -39,7 +39,7 @@
     },
     {
       "file": "src/archive.rs",
-      "name": "newest_winner_displaces_loser_through_recycle",
+      "name": "newest_winner_displaces_loser_permanently",
       "ignored": false,
       "cfg": null
     },
@@ -272,12 +272,6 @@
       "cfg": null
     },
     {
-      "file": "src/platform.rs",
-      "name": "volume_root_covers_local_and_unc",
-      "ignored": false,
-      "cfg": "windows"
-    },
-    {
       "file": "src/process.rs",
       "name": "is_metadata_line_classifies_common_lines",
       "ignored": false,
@@ -471,7 +465,7 @@
     },
     {
       "file": "tests/archive.rs",
-      "name": "successful_source_defaults_to_recycle",
+      "name": "successful_source_defaults_to_permanent",
       "ignored": true,
       "cfg": null
     },
@@ -561,12 +555,6 @@
     },
     {
       "file": "tests/core.rs",
-      "name": "byte_level_recheck_blocks_delete_when_content_diverges",
-      "ignored": false,
-      "cfg": null
-    },
-    {
-      "file": "tests/core.rs",
       "name": "cancel_while_paused_makes_checkpoint_fail",
       "ignored": false,
       "cfg": null
@@ -580,18 +568,6 @@
     {
       "file": "tests/core.rs",
       "name": "category_and_custom_rules",
-      "ignored": false,
-      "cfg": null
-    },
-    {
-      "file": "tests/core.rs",
-      "name": "changed_keeper_after_plan_prevents_delete",
-      "ignored": false,
-      "cfg": null
-    },
-    {
-      "file": "tests/core.rs",
-      "name": "changed_source_after_plan_is_skipped",
       "ignored": false,
       "cfg": null
     },
@@ -693,6 +669,12 @@
     },
     {
       "file": "tests/core.rs",
+      "name": "different_names_not_deduped_by_default",
+      "ignored": false,
+      "cfg": null
+    },
+    {
+      "file": "tests/core.rs",
       "name": "empty_directory_cleanup_is_bottom_up",
       "ignored": false,
       "cfg": null
@@ -730,6 +712,12 @@
     {
       "file": "tests/core.rs",
       "name": "excluded_tree_not_touched",
+      "ignored": false,
+      "cfg": null
+    },
+    {
+      "file": "tests/core.rs",
+      "name": "execution_phase_reads_no_file_content",
       "ignored": false,
       "cfg": null
     },
@@ -837,7 +825,7 @@
     },
     {
       "file": "tests/core.rs",
-      "name": "keep_never_calls_recycler",
+      "name": "keep_never_deletes",
       "ignored": false,
       "cfg": null
     },
@@ -861,6 +849,12 @@
     },
     {
       "file": "tests/core.rs",
+      "name": "legacy_recycle_mode_loads_as_permanent",
+      "ignored": false,
+      "cfg": null
+    },
+    {
+      "file": "tests/core.rs",
       "name": "merge_directories_joins_same_name_directories",
       "ignored": false,
       "cfg": null
@@ -868,12 +862,6 @@
     {
       "file": "tests/core.rs",
       "name": "merge_directories_never_pulls_files_out_of_output",
-      "ignored": false,
-      "cfg": null
-    },
-    {
-      "file": "tests/core.rs",
-      "name": "metadata_change_invalidates_snapshot",
       "ignored": false,
       "cfg": null
     },
@@ -945,6 +933,12 @@
     },
     {
       "file": "tests/core.rs",
+      "name": "permanent_bytes_exclude_hardlinked_sources",
+      "ignored": false,
+      "cfg": null
+    },
+    {
+      "file": "tests/core.rs",
       "name": "plan_pagination_is_bounded",
       "ignored": false,
       "cfg": null
@@ -966,36 +960,6 @@
       "name": "quarantine_move_out_is_rescanned",
       "ignored": false,
       "cfg": null
-    },
-    {
-      "file": "tests/core.rs",
-      "name": "recycle_error_after_move_with_verified_bin_counts_as_recycled",
-      "ignored": false,
-      "cfg": "windows"
-    },
-    {
-      "file": "tests/core.rs",
-      "name": "recycle_failure_with_permission_deletes",
-      "ignored": false,
-      "cfg": null
-    },
-    {
-      "file": "tests/core.rs",
-      "name": "recycle_failure_without_permission_keeps_file",
-      "ignored": false,
-      "cfg": null
-    },
-    {
-      "file": "tests/core.rs",
-      "name": "recycle_without_bin_counts_as_unverified",
-      "ignored": false,
-      "cfg": null
-    },
-    {
-      "file": "tests/core.rs",
-      "name": "recycled_bytes_exclude_hardlinked_sources",
-      "ignored": false,
-      "cfg": "windows"
     },
     {
       "file": "tests/core.rs",
@@ -1023,19 +987,13 @@
     },
     {
       "file": "tests/core.rs",
-      "name": "rules_table_has_exactly_39_rows_without_version_switches",
+      "name": "rules_table_has_exactly_38_rows_without_version_switches",
       "ignored": false,
       "cfg": null
     },
     {
       "file": "tests/core.rs",
       "name": "same_names_different_directories_can_be_disabled",
-      "ignored": false,
-      "cfg": null
-    },
-    {
-      "file": "tests/core.rs",
-      "name": "same_prehash_different_middle_is_not_duplicate",
       "ignored": false,
       "cfg": null
     },
@@ -1065,13 +1023,7 @@
     },
     {
       "file": "tests/core.rs",
-      "name": "successful_recycle_not_permanent",
-      "ignored": false,
-      "cfg": "windows"
-    },
-    {
-      "file": "tests/core.rs",
-      "name": "summary_separates_recycled_and_permanent_bytes",
+      "name": "summary_counts_permanent_bytes_only",
       "ignored": false,
       "cfg": null
     },
@@ -1114,12 +1066,6 @@
     {
       "file": "tests/core.rs",
       "name": "unselecting_action_preserves_file",
-      "ignored": false,
-      "cfg": null
-    },
-    {
-      "file": "tests/core.rs",
-      "name": "user_cancel_never_falls_back_to_delete",
       "ignored": false,
       "cfg": null
     },
