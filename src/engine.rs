@@ -1,7 +1,7 @@
 use crate::{
     archive::{self, SevenZip},
     config::{self, Config, DeleteMode},
-    control::{Context as TaskContext, Event},
+    control::{Context as TaskContext, Control, Event},
     db::Database,
     fsutil, hashing,
     model::{Action, ActionKind, Snapshot, Summary},
@@ -9,13 +9,14 @@ use crate::{
     platform::{self, DeleteResult},
     rules,
 };
-use anyhow::{bail, Context, Result};
+use anyhow::{bail, Context as _, Result};
 use rayon::prelude::*;
 use rusqlite::params;
 use std::{
+    collections::{HashMap, HashSet},
     fs,
     path::{Path, PathBuf},
-    sync::atomic::Ordering,
+    sync::{atomic::Ordering, Arc, Mutex},
 };
 
 pub struct Job {
@@ -98,9 +99,7 @@ impl Job {
         // 已经不在磁盘上的文件不能再参与后续按名/按大小的查找：否则同名成员合入时会去读取
         // 一个刚被删除的路径，把整包解压误判为失败。
         if result != DeleteResult::Kept {
-            self.db
-                .conn
-                .execute("UPDATE files SET active=0 WHERE rel=?1", [&relative])?;
+            self.db.deactivate_file_rel(&relative)?;
         }
         Ok(result)
     }
@@ -437,6 +436,300 @@ pub fn count_archives(root: &Path, config: &Config) -> Result<u64> {
     }
     Ok(count)
 }
+/// IO 阶段（目录枚举、句柄查询、删除）的线程池：这些都是元数据级小操作、
+/// 瓶颈在系统调用延迟而非 CPU；按磁盘延迟预算取小池（与 hash_workers 同思路，
+/// 不按 CPU 核数打满磁盘）。
+fn io_pool() -> Result<rayon::ThreadPool> {
+    let threads = std::thread::available_parallelism().map_or(4, usize::from);
+    rayon::ThreadPoolBuilder::new()
+        .num_threads(threads.min(8))
+        .thread_name(|i| format!("jch-io-{i}"))
+        .build()
+        .map_err(anyhow::Error::new)
+        .context("无法创建 IO 线程池")
+}
+/// 并行扫描收集到的一条子项：目录或文件。同一父目录的子项由单线程按枚举序追加，
+/// 汇总后按父目录分组即可还原旧 walkdir 的深度先序（目录先于其子树、
+/// 同目录内保持文件系统枚举顺序），插入顺序与旧实现一致。
+struct ScanChild {
+    parent: String,
+    name: String,
+    kind: ScanKind,
+}
+enum ScanKind {
+    Dir {
+        lower: String,
+    },
+    File {
+        lower: String,
+        normal: String,
+        snapshot: Snapshot,
+    },
+}
+/// 扫描期需要主线程补记的错误日志（工作线程不能触碰任务库连接）。
+struct ScanNote {
+    path: String,
+    message: String,
+}
+#[derive(Default)]
+struct ScanSink {
+    children: Vec<ScanChild>,
+    notes: Vec<ScanNote>,
+    /// 盘上可见但未入盘点的内容所在的目录（被过滤条目、枚举/读取失败）：
+    /// 空目录规划据此（planner 内向上传播）拒绝把该目录及其祖先当作空目录，
+    /// 替代旧实现对每个候选目录重新走盘核对（has_unscanned_content）。
+    taint: HashSet<String>,
+}
+fn lock_sink(sink: &Mutex<ScanSink>) -> std::sync::MutexGuard<'_, ScanSink> {
+    // 锁中毒只可能因持锁线程 panic；本模块持锁期间不 panic，恢复数据是安全回退。
+    sink.lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+}
+struct WalkCtx<'a> {
+    control: Arc<Control>,
+    excluded: &'a globset::GlobSet,
+    recursive: bool,
+    include_hidden: bool,
+    include_system: bool,
+    quarantine: &'a str,
+    /// 状态目录/程序目录位于选定根内的相对路径前缀（剪枝其子树）。
+    state_prefix: Option<String>,
+    exe_prefix: Option<String>,
+    /// 选定根本身位于状态目录或程序目录内：整棵树按旧口径全部剪枝。
+    root_under_special: bool,
+    sink: &'a Mutex<ScanSink>,
+}
+impl WalkCtx<'_> {
+    fn special_or_excluded(&self, child_rel: &str, name: &str, metadata: &fs::Metadata) -> bool {
+        if self.root_under_special
+            || fsutil::is_link(metadata)
+            || child_rel == ".jchtools-work"
+            || child_rel.starts_with(".jchtools-work/")
+            || name.starts_with(".jchtools-link-")
+        {
+            return true;
+        }
+        for prefix in [self.state_prefix.as_deref(), self.exe_prefix.as_deref()] {
+            if prefix.is_some_and(|p| child_rel == p || child_rel.starts_with(&format!("{p}/"))) {
+                return true;
+            }
+        }
+        if child_rel == self.quarantine || child_rel.starts_with(&format!("{}/", self.quarantine)) {
+            return true;
+        }
+        if self.excluded.is_match(child_rel) || self.excluded.is_match(format!("{child_rel}/")) {
+            return true;
+        }
+        #[cfg(windows)]
+        {
+            use std::os::windows::fs::MetadataExt;
+            if !self.include_hidden && metadata.file_attributes() & 2 != 0 {
+                return true;
+            }
+            if !self.include_system && metadata.file_attributes() & 4 != 0 {
+                return true;
+            }
+        }
+        #[cfg(not(windows))]
+        if !self.include_hidden && name.starts_with('.') {
+            return true;
+        }
+        false
+    }
+}
+/// 单个目录的枚举与登记（在 IO 池线程上运行）。过滤口径与旧 walkdir filter_entry
+/// 一致；子目录下钻时首个内联、其余 spawn。内联深度设上限：极深树上避免
+/// 任务在偷取执行时栈随树深增长；超限的子目录全部走 spawn（在全新栈帧上执行）。
+fn walk_dir<'a>(
+    scope: &rayon::Scope<'a>,
+    ctx: &'a WalkCtx<'a>,
+    dir: &Path,
+    rel: String,
+    inline: u32,
+) {
+    if ctx.control.checkpoint().is_err() {
+        // 取消：主线程在汇合后统一以取消错误收尾，这里不再记账。
+        return;
+    }
+    let read = match fs::read_dir(dir) {
+        Ok(read) => read,
+        Err(error) => {
+            let mut sink = lock_sink(ctx.sink);
+            sink.notes.push(ScanNote {
+                path: dir.display().to_string(),
+                message: format!("{error:#}"),
+            });
+            // 本目录未能盘点：其内容未知，自身记污点。
+            sink.taint.insert(rel);
+            return;
+        }
+    };
+    let mut children: Vec<ScanChild> = Vec::new();
+    let mut subdirs: Vec<(PathBuf, String)> = Vec::new();
+    let mut parent_tainted = false;
+    for entry in read {
+        if ctx.control.checkpoint().is_err() {
+            return;
+        }
+        let entry = match entry {
+            Ok(entry) => entry,
+            Err(error) => {
+                let mut sink = lock_sink(ctx.sink);
+                sink.notes.push(ScanNote {
+                    path: dir.display().to_string(),
+                    message: format!("{error:#}"),
+                });
+                parent_tainted = true;
+                continue;
+            }
+        };
+        let Ok(name) = entry.file_name().into_string() else {
+            let mut sink = lock_sink(ctx.sink);
+            sink.notes.push(ScanNote {
+                path: entry.path().display().to_string(),
+                message: "文件名不能无损表示为 UTF-8，已跳过".into(),
+            });
+            parent_tainted = true;
+            continue;
+        };
+        let metadata = match entry.metadata() {
+            Ok(metadata) => metadata,
+            Err(error) => {
+                let mut sink = lock_sink(ctx.sink);
+                sink.notes.push(ScanNote {
+                    path: entry.path().display().to_string(),
+                    message: format!("{error:#}"),
+                });
+                parent_tainted = true;
+                continue;
+            }
+        };
+        let child_rel = if rel.is_empty() {
+            name.clone()
+        } else {
+            format!("{rel}/{name}")
+        };
+        if ctx.special_or_excluded(&child_rel, &name, &metadata) {
+            // 被剪枝的条目盘上仍存在：其父目录不得按空目录处理。
+            parent_tainted = true;
+            continue;
+        }
+        if metadata.is_dir() {
+            children.push(ScanChild {
+                parent: rel.clone(),
+                name,
+                kind: ScanKind::Dir {
+                    lower: String::new(),
+                },
+            });
+            if ctx.recursive {
+                subdirs.push((entry.path(), child_rel));
+            }
+        } else if metadata.file_type().is_file() {
+            match fsutil::snapshot_with(&entry.path(), &metadata) {
+                Ok(snapshot) => {
+                    let normal = rules::normal_name(&name);
+                    children.push(ScanChild {
+                        parent: rel.clone(),
+                        name,
+                        kind: ScanKind::File {
+                            lower: String::new(),
+                            normal,
+                            snapshot,
+                        },
+                    });
+                    ctx.control.scanned.fetch_add(1, Ordering::Relaxed);
+                }
+                Err(error) => {
+                    let mut sink = lock_sink(ctx.sink);
+                    sink.notes.push(ScanNote {
+                        path: entry.path().display().to_string(),
+                        message: format!("{error:#}"),
+                    });
+                    parent_tainted = true;
+                }
+            }
+        } else {
+            // 既非目录也非普通文件（旧实现静默不入库 → 盘上有、库里无，等价于污点）。
+            parent_tainted = true;
+        }
+    }
+    {
+        let mut sink = lock_sink(ctx.sink);
+        // 目录名小写折叠在这里补齐（供 directories.name 的 Windows 折叠匹配）。
+        for child in &mut children {
+            if let ScanKind::Dir { lower } = &mut child.kind {
+                *lower = child.name.to_lowercase();
+            } else if let ScanKind::File { lower, .. } = &mut child.kind {
+                *lower = child.name.to_lowercase();
+            }
+        }
+        sink.children.append(&mut children);
+        if parent_tainted {
+            sink.taint.insert(rel.clone());
+        }
+    }
+    let mut iter = subdirs.into_iter();
+    if let Some((first_path, first_rel)) = iter.next() {
+        for (path, child_rel) in iter {
+            let ctx_ref = ctx;
+            scope.spawn(move |scope| walk_dir(scope, ctx_ref, &path, child_rel, 0));
+        }
+        if inline < 32 {
+            walk_dir(scope, ctx, &first_path, first_rel, inline + 1);
+        } else {
+            scope.spawn(move |scope| walk_dir(scope, ctx, &first_path, first_rel, 0));
+        }
+    }
+}
+/// 深度先序回放：按父目录分组后的子项以枚举序递归发射，与旧 walkdir 的产出顺序一致。
+fn scan_emit(
+    job: &mut Job,
+    by_parent: &HashMap<String, Vec<ScanChild>>,
+    enqueue: bool,
+    parent: &str,
+    depth: i64,
+    count: &mut u64,
+) -> Result<()> {
+    let Some(children) = by_parent.get(parent) else {
+        return Ok(());
+    };
+    for child in children {
+        *count += 1;
+        if (*count).is_multiple_of(2048) {
+            job.db.conn.execute_batch("COMMIT; BEGIN IMMEDIATE;")?;
+        }
+        job.context.control.checkpoint()?;
+        let rel = if parent.is_empty() {
+            child.name.clone()
+        } else {
+            format!("{parent}/{}", child.name)
+        };
+        match &child.kind {
+            ScanKind::Dir { lower } => {
+                job.db.insert_dir(&rel, lower, depth)?;
+                scan_emit(job, by_parent, enqueue, &rel, depth + 1, count)?;
+            }
+            ScanKind::File {
+                lower,
+                normal,
+                snapshot,
+            } => {
+                job.db.insert_file(&rel, lower, normal, snapshot)?;
+                job.summary.scanned += 1;
+                job.summary.scanned_bytes = job.summary.scanned_bytes.saturating_add(snapshot.size);
+                if enqueue && rules::archive_name(&child.name) {
+                    // 入队失败按旧口径计错误并跳过该包，不中断整个扫描（文件行已入库）。
+                    if let Err(error) = archive::enqueue(job, &job.root.join(&rel), 0) {
+                        job.summary.errors += 1;
+                        job.log("扫描", &rel, "", "跳过", &format!("{error:#}"), 0)?;
+                    }
+                }
+            }
+        }
+    }
+    Ok(())
+}
 #[cfg_attr(
     feature = "perf-tracing",
     tracing::instrument(target = "perf", name = "scan", skip_all)
@@ -481,132 +774,73 @@ fn scan(job: &mut Job, enqueue: bool, state: &Path) -> Result<()> {
             0,
         )?;
     }
-    let walk = walkdir::WalkDir::new(&root)
-        .follow_links(false)
-        .min_depth(1)
-        .max_depth(if config.recursive { usize::MAX } else { 1 })
-        .into_iter()
-        .filter_entry(|entry| {
-            let Ok(meta) = fs::symlink_metadata(entry.path()) else {
-                return true;
-            };
-            if fsutil::is_link(&meta) {
-                return false;
-            }
-            if entry.path().starts_with(&state) {
-                return false;
-            }
-            if executable_dir
-                .as_ref()
-                .is_some_and(|d| entry.path().starts_with(d))
-            {
-                return false;
-            }
-            let Ok(rel) = fsutil::relative_string(&root, entry.path()) else {
-                return false;
-            };
-            if rel == ".jchtools-work" || rel.starts_with(".jchtools-work/") {
-                return false;
-            }
-            // 硬链接执行时的临时替换文件（.jchtools-link-{uuid}）：崩溃残留不应进入扫描与计划。
-            if entry
-                .file_name()
-                .to_string_lossy()
-                .starts_with(".jchtools-link-")
-            {
-                return false;
-            }
-            if rel == archive::QUARANTINE_DIR_NAME
-                || rel.starts_with(&format!("{}/", archive::QUARANTINE_DIR_NAME))
-            {
-                return false;
-            }
-            if excluded.is_match(&rel) || excluded.is_match(format!("{rel}/")) {
-                return false;
-            }
-            #[cfg(windows)]
-            {
-                use std::os::windows::fs::MetadataExt;
-                if !config.include_hidden && meta.file_attributes() & 2 != 0 {
-                    return false;
-                }
-                if !config.include_system && meta.file_attributes() & 4 != 0 {
-                    return false;
-                }
-            }
-            #[cfg(not(windows))]
-            if !config.include_hidden && entry.file_name().to_string_lossy().starts_with('.') {
-                return false;
-            }
-            true
+    // 状态目录/程序目录的剪枝条件换算成「选定根内相对前缀」（条目都以相对路径比较，
+    // 免去逐条目拼绝对路径）；选定根位于它们内部时，整棵树按旧口径全部剪枝。
+    let prefix_under_root = |special: &Path| -> Option<String> {
+        if !special.starts_with(&root) {
+            return None;
+        }
+        match fsutil::relative_string(&root, special) {
+            Ok(rel) if rel.is_empty() => None, // 根自身即特殊目录：走整树剪枝
+            Ok(rel) => Some(rel),
+            Err(_) => None,
+        }
+    };
+    let state_prefix = prefix_under_root(&state);
+    let exe_prefix = executable_dir.as_deref().and_then(prefix_under_root);
+    // 选定根位于状态目录/程序目录内（含重合）时，整棵树按旧口径全部剪枝。
+    let root_under_special = root.starts_with(&state)
+        || executable_dir
+            .as_deref()
+            .is_some_and(|dir| root.starts_with(dir));
+    let sink = Mutex::new(ScanSink::default());
+    let ctx = WalkCtx {
+        control: job.context.control.clone(),
+        excluded: &excluded,
+        recursive: config.recursive,
+        include_hidden: config.include_hidden,
+        include_system: config.include_system,
+        quarantine: archive::QUARANTINE_DIR_NAME,
+        state_prefix,
+        exe_prefix,
+        root_under_special,
+        sink: &sink,
+    };
+    let pool = io_pool()?;
+    pool.install(|| {
+        rayon::scope(|scope| {
+            scope.spawn(|scope| walk_dir(scope, &ctx, &root, String::new(), 0));
         });
+    });
+    // 用户取消：不做入库与后续阶段（旧实现同样以取消错误中止扫描）。
+    job.context.control.checkpoint()?;
+    let sink = sink
+        .into_inner()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    for note in &sink.notes {
+        job.summary.errors += 1;
+        job.log("扫描", &note.path, "", "跳过", &note.message, 0)?;
+    }
+    // 汇总入库：按父目录分组还原深度先序；污点表供 planner 的空目录规划排除。
+    let mut by_parent: HashMap<String, Vec<ScanChild>> = HashMap::new();
+    for child in sink.children {
+        by_parent
+            .entry(child.parent.clone())
+            .or_default()
+            .push(child);
+    }
+    let mut taint: Vec<String> = sink.taint.into_iter().collect();
+    taint.sort();
     job.db.conn.execute_batch("BEGIN IMMEDIATE")?;
     let result = (|| {
-        let mut count = 0;
-        for entry in walk {
-            job.context.control.checkpoint()?;
-            let entry = match entry {
-                Ok(entry) => entry,
-                Err(error) => {
-                    job.summary.errors += 1;
-                    job.log("扫描", "", "", "失败", &error.to_string(), 0)?;
-                    continue;
-                }
-            };
-            let scan_one = (|| {
-                let relative = fsutil::relative_string(&root, entry.path())?;
-                fsutil::safe_join(&root, &relative)?;
-                if entry.file_type().is_dir() {
-                    let name = entry
-                        .file_name()
-                        .to_str()
-                        .context("目录名称不能无损表示")?
-                        .to_lowercase();
-                    job.db.conn.execute(
-                        "INSERT INTO directories(rel,name,depth) VALUES(?1,?2,?3)",
-                        params![relative, name, crate::convert::usize_as_i64(entry.depth())],
-                    )?;
-                    return Ok(());
-                }
-                if !entry.file_type().is_file() {
-                    return Ok(());
-                }
-                let snapshot = fsutil::snapshot(entry.path())?;
-                let name = entry
-                    .file_name()
-                    .to_str()
-                    .context("文件名不能无损表示")?
-                    .to_string();
-                job.db.insert_file(
-                    &relative,
-                    &name.to_lowercase(),
-                    &rules::normal_name(&name),
-                    &snapshot,
-                )?;
-                job.summary.scanned += 1;
-                job.summary.scanned_bytes = job.summary.scanned_bytes.saturating_add(snapshot.size);
-                job.context.control.scanned.fetch_add(1, Ordering::Relaxed);
-                if enqueue && rules::archive_name(&name) {
-                    archive::enqueue(job, entry.path(), 0)?;
-                }
-                Ok::<_, anyhow::Error>(())
-            })();
-            if let Err(error) = scan_one {
-                job.summary.errors += 1;
-                job.log(
-                    "扫描",
-                    &entry.path().display().to_string(),
-                    "",
-                    "跳过",
-                    &format!("{error:#}"),
-                    0,
-                )?;
-            }
-            count += 1;
-            if count % 2048 == 0 {
-                job.db.conn.execute_batch("COMMIT; BEGIN IMMEDIATE;")?;
-            }
+        job.db.conn.execute_batch(
+            "DROP TABLE IF EXISTS scan_taint; CREATE TEMP TABLE scan_taint(rel TEXT PRIMARY KEY)",
+        )?;
+        for rel in &taint {
+            job.db.remember_taint(rel)?;
         }
+        let mut count = 0u64;
+        scan_emit(job, &by_parent, enqueue, "", 1, &mut count)?;
         Ok::<_, anyhow::Error>(())
     })();
     match result {
@@ -689,15 +923,11 @@ fn hash_candidates(job: &mut Job) -> Result<()> {
             for (id, rel, result) in results {
                 match result {
                     Ok(hash) => {
-                        job.db
-                            .conn
-                            .execute("UPDATE files SET hash=?1 WHERE id=?2", params![hash, id])?;
+                        job.db.set_file_hash(id, &hash)?;
                     }
                     Err(error) => {
                         job.summary.errors += 1;
-                        job.db
-                            .conn
-                            .execute("UPDATE files SET active=0 WHERE id=?1", [id])?;
+                        job.db.deactivate_file_id(id)?;
                         job.log("Hash", &rel, "", "跳过", &format!("{error:#}"), 0)?;
                     }
                 }
@@ -794,6 +1024,7 @@ pub fn apply(directory: &Path, context: TaskContext) -> Result<TaskResult> {
         // 性能打点（perf-tracing，默认不编译）：计划动作的实际执行区间；与前面的
         // 崩溃残留清理、后面的收尾写库分开计时。
         crate::perf::perf_span!("execute_actions");
+        let pool = io_pool()?;
         let mut cursor = 0;
         loop {
             let actions = job.db.actions_page(cursor, APPLY_BATCH)?;
@@ -808,46 +1039,22 @@ pub fn apply(directory: &Path, context: TaskContext) -> Result<TaskResult> {
             //   「执行中」恢复（C-10 无断点恢复），不存在重复删除的可能。
             job.db.conn.execute_batch("BEGIN IMMEDIATE")?;
             let batch = (|| -> Result<()> {
-                for action in actions {
-                    cursor = action.id;
-                    job.context.control.checkpoint()?;
-                    if !action.selected {
-                        job.summary.skipped += 1;
-                        job.db.mark_action(action.id, "unselected")?;
-                        // 未勾选不计入 completed：GUI 分母 count_selected_pending 只含 selected+pending，
-                        // 分子若含 unselected 会出现 done>planned、提前 100% 的口径分裂。
+                // 分段执行：文件删除彼此独立、空目录删除按深度分层（计划按深度降序生成，
+                // 同层目录不互为父子，更深层已在此前的段/页删除）——这两类连续动作在
+                // IO 池上并行；移动/硬链接/未勾选保持逐项串行，语义与旧实现一致。
+                let mut index = 0;
+                while index < actions.len() {
+                    let Some(kind) = parallel_run_kind(&actions[index]) else {
+                        execute_sequential(&mut job, &actions[index])?;
+                        index += 1;
                         continue;
+                    };
+                    let mut end = index + 1;
+                    while end < actions.len() && parallel_run_kind(&actions[end]) == Some(kind) {
+                        end += 1;
                     }
-                    job.context
-                        .status(format!("执行 {:?}：{}", action.kind, action.source));
-                    match execute_action(&mut job, &action) {
-                        Ok(true) => job.db.mark_action(action.id, "done")?,
-                        Ok(false) => {
-                            job.summary.skipped += 1;
-                            job.db.mark_action(action.id, "skipped")?;
-                        }
-                        Err(error) => {
-                            // 用户主动取消不是失败：不计 errors、不标 failed，与 prepare 阶段取消口径一致。
-                            if job.context.control.is_cancelled() {
-                                job.context.control.check_cancelled()?;
-                            }
-                            job.summary.errors += 1;
-                            job.db.mark_action(action.id, "failed")?;
-                            job.log(
-                                "执行",
-                                &action.source,
-                                action.target.as_deref().unwrap_or(""),
-                                "失败",
-                                &format!("{error:#}"),
-                                0,
-                            )?;
-                            job.context.control.check_cancelled()?;
-                        }
-                    }
-                    job.context
-                        .control
-                        .completed
-                        .fetch_add(1, Ordering::Relaxed);
+                    execute_run(&mut job, &pool, &actions[index..end], kind)?;
+                    index = end;
                 }
                 Ok(())
             })();
@@ -859,6 +1066,7 @@ pub fn apply(directory: &Path, context: TaskContext) -> Result<TaskResult> {
                     return Err(error);
                 }
             }
+            cursor = actions[actions.len() - 1].id;
         }
         Ok::<_, anyhow::Error>(())
     })();
@@ -886,6 +1094,191 @@ pub fn apply(directory: &Path, context: TaskContext) -> Result<TaskResult> {
         directory: directory.to_path_buf(),
         summary: job.summary,
     })
+}
+/// 可并行执行的动作段类别：文件删除彼此独立；空目录删除按深度分层
+/// （计划按深度降序生成，同层目录不互为父子，深层已在更早的段/页删除）。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ParallelKind {
+    Delete,
+    EmptyDir(usize),
+}
+fn parallel_run_kind(action: &Action) -> Option<ParallelKind> {
+    if !action.selected {
+        return None;
+    }
+    match action.kind {
+        ActionKind::Delete => Some(ParallelKind::Delete),
+        ActionKind::EmptyDirectory => Some(ParallelKind::EmptyDir(
+            action.source.bytes().filter(|byte| *byte == b'/').count(),
+        )),
+        ActionKind::Move | ActionKind::Hardlink => None,
+    }
+}
+/// 单个动作的串行执行（移动/硬链接/未勾选）：语义与旧逐项循环一致。
+fn execute_sequential(job: &mut Job, action: &Action) -> Result<()> {
+    job.context.control.checkpoint()?;
+    if !action.selected {
+        job.summary.skipped += 1;
+        job.db.mark_action(action.id, "unselected")?;
+        // 未勾选不计入 completed：GUI 分母 count_selected_pending 只含 selected+pending，
+        // 分子若含 unselected 会出现 done>planned、提前 100% 的口径分裂。
+        return Ok(());
+    }
+    job.context
+        .status(format!("执行 {:?}：{}", action.kind, action.source));
+    match execute_action(job, action) {
+        Ok(true) => {
+            job.db.mark_action(action.id, "done")?;
+        }
+        Ok(false) => {
+            job.summary.skipped += 1;
+            job.db.mark_action(action.id, "skipped")?;
+        }
+        Err(error) => {
+            // 用户主动取消不是失败：不计 errors、不标 failed，与 prepare 阶段取消口径一致。
+            if job.context.control.is_cancelled() {
+                job.context.control.check_cancelled()?;
+            }
+            job.summary.errors += 1;
+            job.db.mark_action(action.id, "failed")?;
+            job.log(
+                "执行",
+                &action.source,
+                action.target.as_deref().unwrap_or(""),
+                "失败",
+                &format!("{error:#}"),
+                0,
+            )?;
+            job.context.control.check_cancelled()?;
+        }
+    }
+    job.context
+        .control
+        .completed
+        .fetch_add(1, Ordering::Relaxed);
+    Ok(())
+}
+/// 并行执行一段相互独立的删除类动作：先整段记审计（意图先于任何变更落账），
+/// 再在 IO 池上并行做文件系统变更，最后按段内顺序串行结算（日志、计数、任务库状态）。
+/// 路径只用字符串级校验（safe_relative）：P-08 假定处理期间文件不被其他程序改动，
+/// 且 platform::remove 自身复查链接并拒绝非空目录；写入类动作仍走 safe_join 全校验。
+fn execute_run(
+    job: &mut Job,
+    pool: &rayon::ThreadPool,
+    run: &[Action],
+    kind: ParallelKind,
+) -> Result<()> {
+    job.context.control.checkpoint()?;
+    job.context.status(if run.len() > 1 {
+        format!(
+            "执行 {:?}：{} 等 {} 项",
+            run[0].kind,
+            run[0].source,
+            run.len()
+        )
+    } else {
+        format!("执行 {:?}：{}", run[0].kind, run[0].source)
+    });
+    let size = |action: &Action| action.expected.as_ref().map_or(0, |snapshot| snapshot.size);
+    for action in run {
+        job.log(
+            "删除",
+            &action.source,
+            "",
+            "准备",
+            &action.reason,
+            size(action),
+        )?;
+    }
+    let mut targets = Vec::with_capacity(run.len());
+    for action in run {
+        let path = job.root.join(fsutil::safe_relative(&action.source)?);
+        targets.push((path, action.mode));
+    }
+    let control = job.context.control.clone();
+    let results: Vec<_> = pool.install(|| {
+        targets
+            .par_iter()
+            .map(|(path, mode)| match kind {
+                ParallelKind::Delete => platform::remove(path, *mode, &control).map(Some),
+                ParallelKind::EmptyDir(_) => {
+                    // 执行期实空复查（同旧 EmptyDirectory 分支）；同段目录互不嵌套，可并行。
+                    if !path.try_exists()? || !path.is_dir() || fs::read_dir(path)?.next().is_some()
+                    {
+                        return Ok(None);
+                    }
+                    platform::remove(path, *mode, &control).map(Some)
+                }
+            })
+            .collect()
+    });
+    for (action, result) in run.iter().zip(results) {
+        match result {
+            Err(error) => {
+                // 用户主动取消不是失败：不计 errors、不标 failed，与串行路径口径一致。
+                if job.context.control.is_cancelled() {
+                    job.context.control.check_cancelled()?;
+                }
+                job.summary.errors += 1;
+                job.db.mark_action(action.id, "failed")?;
+                // 失败日志与串行路径同口径（phase「执行」、带目标），便于统一筛选。
+                job.log(
+                    "执行",
+                    &action.source,
+                    action.target.as_deref().unwrap_or(""),
+                    "失败",
+                    &format!("{error:#}"),
+                    0,
+                )?;
+                job.context.control.check_cancelled()?;
+            }
+            // 空目录实空复查未过（已不存在/非目录/非空）：按旧口径计跳过、不写结果日志。
+            Ok(None) => {
+                job.summary.skipped += 1;
+                job.db.mark_action(action.id, "skipped")?;
+            }
+            Ok(Some(DeleteResult::Kept)) => {
+                job.summary.skipped += 1;
+                job.log(
+                    "删除",
+                    &action.source,
+                    "",
+                    "保留",
+                    &action.reason,
+                    size(action),
+                )?;
+                job.db.mark_action(action.id, "skipped")?;
+            }
+            Ok(Some(DeleteResult::Permanent)) => {
+                job.summary.deleted += 1;
+                // 硬链接源（links>1）的内容仍由其他链接持有，不计入 permanent_bytes（S-06）；
+                // 空目录（expected=None）逻辑大小为 0。
+                if action
+                    .expected
+                    .as_ref()
+                    .is_none_or(|snapshot| snapshot.links <= 1)
+                {
+                    job.summary.permanent_bytes =
+                        job.summary.permanent_bytes.saturating_add(size(action));
+                }
+                job.db.deactivate_file_rel(&action.source)?;
+                job.log(
+                    "删除",
+                    &action.source,
+                    "",
+                    "已永久删除",
+                    &action.reason,
+                    size(action),
+                )?;
+                job.db.mark_action(action.id, "done")?;
+            }
+        }
+        job.context
+            .control
+            .completed
+            .fetch_add(1, Ordering::Relaxed);
+    }
+    Ok(())
 }
 fn execute_action(job: &mut Job, action: &Action) -> Result<bool> {
     // P-08：处理期间假定文件不被其他程序改动，执行阶段不再做快照比对；

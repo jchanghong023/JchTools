@@ -56,9 +56,7 @@ fn remove_candidate(
         planned.keeper = Some((keeper.rel.clone(), keeper.snapshot.clone()));
     }
     job.db.add_action(&planned)?;
-    job.db
-        .conn
-        .execute("UPDATE files SET active=0 WHERE id=?1", [file.id])?;
+    job.db.deactivate_file_id(file.id)?;
     if hardlink {
         job.summary.planned_link += 1;
     } else {
@@ -127,9 +125,23 @@ fn deduplicate(job: &mut Job) -> Result<()> {
             cursor = seq;
             job.context.control.checkpoint()?;
             let hash = file.hash.as_ref().context("重复候选缺少 Hash")?;
-            let keeper_id: Option<i64> = job.db.conn.query_row(
-                "SELECT file_id FROM keepers WHERE hash=?1 AND ((name=?2 AND ?4) OR (name<>?2 AND normal=?3 AND ?5) OR (name<>?2 AND normal<>?3 AND ?6)) ORDER BY rowid LIMIT 1",
-                params![hash,file.name,file.normalized,job.config.dedup_same_name,job.config.dedup_copy_names,job.config.dedup_other_names],|r|r.get(0)).optional()?;
+            let keeper_id: Option<i64> = {
+                let mut statement = job.db.conn.prepare_cached(
+                    "SELECT file_id FROM keepers WHERE hash=?1 AND ((name=?2 AND ?4) OR (name<>?2 AND normal=?3 AND ?5) OR (name<>?2 AND normal<>?3 AND ?6)) ORDER BY rowid LIMIT 1")?;
+                statement
+                    .query_row(
+                        params![
+                            hash,
+                            file.name,
+                            file.normalized,
+                            job.config.dedup_same_name,
+                            job.config.dedup_copy_names,
+                            job.config.dedup_other_names
+                        ],
+                        |r| r.get(0),
+                    )
+                    .optional()?
+            };
             if let Some(keeper_id) = keeper_id {
                 let keeper = job.db.file(keeper_id)?;
                 if keeper.snapshot.identity == file.snapshot.identity {
@@ -200,17 +212,13 @@ fn deduplicate(job: &mut Job) -> Result<()> {
                 }
                 remove_candidate(job, &file, Some(&keeper), reason, mode, hardlink)?;
                 if mode != DeleteMode::Keep {
-                    job.db
-                        .conn
-                        .execute("UPDATE files SET cleanable=1 WHERE id=?1", [keeper_id])?;
+                    job.db.mark_cleanable(keeper_id)?;
                 }
             } else if rules::cleanup_reason(&file.rel, file.snapshot.size, &job.config).is_none() {
                 // 清理命中文件即使 cleanup_delete=Keep（remove_candidate 直接返回、文件仍 active=1）
                 // 也不得进入 keepers 成为去重唯一保留者：否则正常副本反被删除，只留下垃圾文件。
-                job.db.conn.execute(
-                    "INSERT INTO keepers(file_id,hash,name,normal) VALUES(?1,?2,?3,?4)",
-                    params![file.id, hash, file.name, file.normalized],
-                )?;
+                job.db
+                    .insert_keeper(file.id, hash, &file.name, &file.normalized)?;
             }
         }
     }
@@ -600,38 +608,6 @@ fn moves(job: &mut Job) -> Result<()> {
     }
     Ok(())
 }
-/// 目录下是否存在未入库内容（隐藏/系统/被排除的文件或空子目录）；有则不能按空目录清理。
-/// 子目录也必须核对：仅含一个空的隐藏子目录的目录在文件核对下"看不见"内容，
-/// 会被误计划为空目录（执行期实空复查虽能自保跳过，但计划承诺落空、skipped 虚增）。
-fn has_unscanned_content(job: &Job, rel: &str) -> Result<bool> {
-    let path = fsutil::safe_join(&job.root, rel)?;
-    for entry in walkdir::WalkDir::new(&path)
-        .follow_links(false)
-        .min_depth(1)
-        .into_iter()
-        .filter_map(std::result::Result::ok)
-    {
-        job.context.control.checkpoint()?;
-        let child = fsutil::relative_string(&job.root, entry.path())?;
-        let known: i64 = if entry.file_type().is_dir() {
-            job.db.conn.query_row(
-                "SELECT COUNT(1) FROM directories WHERE rel=?1",
-                [&child],
-                |r| r.get(0),
-            )?
-        } else {
-            job.db
-                .conn
-                .query_row("SELECT COUNT(1) FROM files WHERE rel=?1", [&child], |r| {
-                    r.get(0)
-                })?
-        };
-        if known == 0 {
-            return Ok(true);
-        }
-    }
-    Ok(false)
-}
 #[cfg_attr(
     feature = "perf-tracing",
     tracing::instrument(target = "perf", name = "plan_empty_dirs", skip_all)
@@ -663,7 +639,7 @@ fn empty_directories(job: &mut Job) -> Result<()> {
     job.db.conn.execute_batch(&format!(
         "DROP TABLE IF EXISTS empty_order; DROP TABLE IF EXISTS empty_will;
          DROP TABLE IF EXISTS stay_parents; DROP TABLE IF EXISTS dir_children;
-         DROP TABLE IF EXISTS doomed_sources;
+         DROP TABLE IF EXISTS doomed_sources; DROP TABLE IF EXISTS tainted_will;
          CREATE TEMP TABLE doomed_sources (rel TEXT PRIMARY KEY);
          INSERT OR IGNORE INTO doomed_sources SELECT source FROM actions
           WHERE kind IN ('{move_kind}','{delete_kind}') AND selected=1 AND state='pending';
@@ -674,7 +650,8 @@ fn empty_directories(job: &mut Job) -> Result<()> {
          CREATE TEMP TABLE dir_children (parent TEXT, rel TEXT PRIMARY KEY);
          INSERT INTO dir_children SELECT rtrim(rtrim(rel,replace(rel,'/','')),'/'),rel FROM directories;
          CREATE INDEX dir_children_parent ON dir_children(parent);
-         CREATE TEMP TABLE empty_will (rel TEXT PRIMARY KEY);"))?;
+         CREATE TEMP TABLE empty_will (rel TEXT PRIMARY KEY);
+         CREATE TEMP TABLE tainted_will (rel TEXT PRIMARY KEY);"))?;
     job.db.conn.execute_batch(
         // seq 是本表唯一的游标列，CREATE TABLE AS SELECT 不会继承任何约束或索引；
         // 缺索引时分页会退化成「每次重扫全表 + 临时 B 树排序」（实测 20 万目录 4.9s vs 0.07s）。
@@ -704,10 +681,9 @@ fn empty_directories(job: &mut Job) -> Result<()> {
     move_targets.dedup();
     loop {
         let batch = {
-            let mut statement = job
-                .db
-                .conn
-                .prepare("SELECT seq,rel FROM empty_order WHERE seq>?1 ORDER BY seq LIMIT 256")?;
+            let mut statement = job.db.conn.prepare_cached(
+                "SELECT seq,rel FROM empty_order WHERE seq>?1 ORDER BY seq LIMIT 256",
+            )?;
             let rows = statement.query_map([cursor], |r| {
                 Ok((r.get::<_, i64>(0)?, r.get::<_, String>(1)?))
             })?;
@@ -719,6 +695,30 @@ fn empty_directories(job: &mut Job) -> Result<()> {
         for (seq, rel) in batch {
             cursor = seq;
             job.context.control.checkpoint()?;
+            // 污点自底向上传播（empty_order 按 depth DESC，子目录必然先处理）：
+            // 自身或任一子目录里存在「盘上可见但未入盘点」的内容（扫描期被过滤/读取
+            // 失败，记录于 scan_taint）时，本目录不得按空目录处理，且继续向祖先传播。
+            // 语义与旧 has_unscanned_content（对该目录整个子树重新走盘核对）一致，
+            // 免去逐目录的文件系统遍历。
+            let tainted: bool = {
+                let mut self_stmt = job
+                    .db
+                    .conn
+                    .prepare_cached("SELECT EXISTS(SELECT 1 FROM scan_taint WHERE rel=?1)")?;
+                let direct: bool = self_stmt.query_row([&rel], |r| r.get(0))?;
+                let mut child_stmt = job.db.conn.prepare_cached(
+                    "SELECT EXISTS(SELECT 1 FROM dir_children AS c JOIN tainted_will AS t ON t.rel=c.rel WHERE c.parent=?1)")?;
+                let via_child: bool = child_stmt.query_row([&rel], |r| r.get(0))?;
+                direct || via_child
+            };
+            if tainted {
+                let mut insert = job
+                    .db
+                    .conn
+                    .prepare_cached("INSERT OR IGNORE INTO tainted_will(rel) VALUES(?1)")?;
+                insert.execute([&rel])?;
+                continue;
+            }
             // 执行后该目录（含子树）将接收被 Move 进来的内容时，不能按空目录处理。
             // Windows 下目录 rel 与目标都已按 Unicode 折叠（目标在上方预折叠一次）。
             let probe = if cfg!(windows) {
@@ -740,16 +740,14 @@ fn empty_directories(job: &mut Job) -> Result<()> {
             }
             // 执行后会留在该目录（含其子树）里的文件：深层留驻文件会让对应子目录进不了
             // empty_will，在这里只需检查直接子文件即可得到相同结论。
-            let has_file: i64 = job.db.conn.query_row(
-                "SELECT COUNT(1) FROM stay_parents WHERE parent=?1",
-                [&rel],
-                |r| r.get(0),
-            )?;
-            if has_file > 0 {
-                continue;
-            }
-            // 隐藏/系统/排除文件不会入库，但仍占目录；有这类内容就不能当作空目录。
-            if has_unscanned_content(job, &rel)? {
+            let has_file: bool = {
+                let mut statement = job
+                    .db
+                    .conn
+                    .prepare_cached("SELECT EXISTS(SELECT 1 FROM stay_parents WHERE parent=?1)")?;
+                statement.query_row([&rel], |r| r.get(0))?
+            };
+            if has_file {
                 continue;
             }
             // 子目录是否都已判定会为空
@@ -763,9 +761,13 @@ fn empty_directories(job: &mut Job) -> Result<()> {
             if child_total > child_empty {
                 continue;
             }
-            job.db
-                .conn
-                .execute("INSERT OR IGNORE INTO empty_will(rel) VALUES(?1)", [&rel])?;
+            {
+                let mut statement = job
+                    .db
+                    .conn
+                    .prepare_cached("INSERT OR IGNORE INTO empty_will(rel) VALUES(?1)")?;
+                statement.execute([&rel])?;
+            }
             job.db.add_action(&Action {
                 id: 0,
                 kind: ActionKind::EmptyDirectory,

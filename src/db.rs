@@ -86,8 +86,20 @@ impl Database {
         reason: &str,
         size: u64,
     ) -> Result<()> {
-        self.conn.execute("INSERT INTO events(time,phase,source,target,result,reason,size) VALUES(?1,?2,?3,?4,?5,?6,?7)",
-            params![chrono::Utc::now().to_rfc3339(), phase, source, target, result, reason, i64::try_from(size)?])?;
+        // 执行阶段每动作两条日志（数万动作），必须命中语句缓存：conn.execute 每次重新
+        // 解析 SQL，批量语句缓存在大任务上是秒级差异。
+        let mut stmt = self.conn.prepare_cached(
+            "INSERT INTO events(time,phase,source,target,result,reason,size) VALUES(?1,?2,?3,?4,?5,?6,?7)",
+        )?;
+        stmt.execute(params![
+            chrono::Utc::now().to_rfc3339(),
+            phase,
+            source,
+            target,
+            result,
+            reason,
+            i64::try_from(size)?
+        ])?;
         Ok(())
     }
     pub fn insert_file(
@@ -97,8 +109,71 @@ impl Database {
         normal: &str,
         snapshot: &Snapshot,
     ) -> Result<()> {
-        self.conn.execute("INSERT INTO files(rel,name,normal,size,mtime,identity,links) VALUES(?1,?2,?3,?4,?5,?6,?7)",
-            params![rel, name, normal, i64::try_from(snapshot.size)?, snapshot.modified_ns, snapshot.identity, i64::try_from(snapshot.links)?])?;
+        let mut stmt = self
+            .conn
+            .prepare_cached("INSERT INTO files(rel,name,normal,size,mtime,identity,links) VALUES(?1,?2,?3,?4,?5,?6,?7)")?;
+        stmt.execute(params![
+            rel,
+            name,
+            normal,
+            i64::try_from(snapshot.size)?,
+            snapshot.modified_ns,
+            snapshot.identity,
+            i64::try_from(snapshot.links)?
+        ])?;
+        Ok(())
+    }
+    /// 扫描登记目录行。name 由调用方小写后传入（与 files.name 同口径）。
+    pub fn insert_dir(&self, rel: &str, name: &str, depth: i64) -> Result<()> {
+        let mut stmt = self
+            .conn
+            .prepare_cached("INSERT INTO directories(rel,name,depth) VALUES(?1,?2,?3)")?;
+        stmt.execute(params![rel, name, depth])?;
+        Ok(())
+    }
+    /// 哈希回写（候选分页循环逐条到达，走语句缓存）。
+    pub fn set_file_hash(&self, id: i64, hash: &str) -> Result<()> {
+        let mut stmt = self
+            .conn
+            .prepare_cached("UPDATE files SET hash=?1 WHERE id=?2")?;
+        stmt.execute(params![hash, id])?;
+        Ok(())
+    }
+    pub fn deactivate_file_id(&self, id: i64) -> Result<()> {
+        let mut stmt = self
+            .conn
+            .prepare_cached("UPDATE files SET active=0 WHERE id=?1")?;
+        stmt.execute(params![id])?;
+        Ok(())
+    }
+    pub fn deactivate_file_rel(&self, rel: &str) -> Result<()> {
+        let mut stmt = self
+            .conn
+            .prepare_cached("UPDATE files SET active=0 WHERE rel=?1")?;
+        stmt.execute(params![rel])?;
+        Ok(())
+    }
+    pub fn mark_cleanable(&self, id: i64) -> Result<()> {
+        let mut stmt = self
+            .conn
+            .prepare_cached("UPDATE files SET cleanable=1 WHERE id=?1")?;
+        stmt.execute(params![id])?;
+        Ok(())
+    }
+    pub fn insert_keeper(&self, file_id: i64, hash: &str, name: &str, normal: &str) -> Result<()> {
+        let mut stmt = self
+            .conn
+            .prepare_cached("INSERT INTO keepers(file_id,hash,name,normal) VALUES(?1,?2,?3,?4)")?;
+        stmt.execute(params![file_id, hash, name, normal])?;
+        Ok(())
+    }
+    /// 记录扫描污点：该目录里存在盘上可见但未入盘点的内容（被过滤/读取失败），
+    /// 空目录规划据此（并向上传播）拒绝把它当作空目录。
+    pub fn remember_taint(&self, rel: &str) -> Result<()> {
+        let mut stmt = self
+            .conn
+            .prepare_cached("INSERT OR IGNORE INTO scan_taint(rel) VALUES(?1)")?;
+        stmt.execute(params![rel])?;
         Ok(())
     }
     pub fn files<P: Params>(&self, sql: &str, args: P) -> Result<Vec<FileRecord>> {
@@ -130,9 +205,16 @@ impl Database {
         Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
     }
     pub fn add_action(&self, action: &Action) -> Result<i64> {
-        self.conn.execute("INSERT INTO actions(kind,source,target,body,selected,state) VALUES(?1,?2,?3,?4,?5,'pending')",
-            params![serde_json::to_string(&action.kind)?, action.source, action.target,
-                serde_json::to_string(action)?, action.selected])?;
+        let mut stmt = self
+            .conn
+            .prepare_cached("INSERT INTO actions(kind,source,target,body,selected,state) VALUES(?1,?2,?3,?4,?5,'pending')")?;
+        stmt.execute(params![
+            serde_json::to_string(&action.kind)?,
+            action.source,
+            action.target,
+            serde_json::to_string(action)?,
+            action.selected
+        ])?;
         Ok(self.conn.last_insert_rowid())
     }
     pub fn action(&self, id: i64) -> Result<Action> {
@@ -194,10 +276,10 @@ impl Database {
             ),
             "非法的行动状态：{state}"
         );
-        let changed = self.conn.execute(
-            "UPDATE actions SET state=?1 WHERE id=?2",
-            params![state, id],
-        )?;
+        let mut stmt = self
+            .conn
+            .prepare_cached("UPDATE actions SET state=?1 WHERE id=?2")?;
+        let changed = stmt.execute(params![state, id])?;
         anyhow::ensure!(changed == 1, "行动不存在或状态未改变");
         Ok(())
     }
@@ -208,10 +290,10 @@ impl Database {
         } else {
             target.to_string()
         };
-        Ok(self.conn.execute(
-            "INSERT OR IGNORE INTO targets(path,file_id) VALUES(?1,?2)",
-            params![key, file_id],
-        )? == 1)
+        let mut stmt = self
+            .conn
+            .prepare_cached("INSERT OR IGNORE INTO targets(path,file_id) VALUES(?1,?2)")?;
+        Ok(stmt.execute(params![key, file_id])? == 1)
     }
     pub fn event_page(&self, before: i64, limit: usize) -> Result<Vec<String>> {
         let before = if before <= 0 { i64::MAX } else { before };

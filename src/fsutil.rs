@@ -135,7 +135,12 @@ pub fn normalize_root(path: &Path) -> Result<PathBuf> {
 }
 pub fn snapshot(path: &Path) -> Result<Snapshot> {
     let metadata = fs::symlink_metadata(path)?;
-    if is_link(&metadata) || !metadata.is_file() {
+    snapshot_with(path, &metadata)
+}
+/// 与 [`snapshot`] 相同，但复用调用方已取得的元数据（如目录枚举随条目带回的
+/// symlink 元数据，Windows 上不产生额外系统调用），只为标识与硬链接数补开一次句柄。
+pub fn snapshot_with(path: &Path, metadata: &fs::Metadata) -> Result<Snapshot> {
+    if is_link(metadata) || !metadata.is_file() {
         bail!("不是普通文件：{}", path.display());
     }
     let modified_ns = match metadata.modified()?.duration_since(UNIX_EPOCH) {
