@@ -83,8 +83,8 @@ powershell -NoProfile -File .\scripts\package-windows.ps1   # 生成含 7-Zip �
 统一入口 `python scripts/test_gate.py <fastcheck|fulltest|slowtest>`；三级语义固定，`MUST NOT` 按需要改写层级含义，也 `MUST NOT` 把耗时或远程阶段塞进更低层级。平台范围按合同 P-07 仅 Windows：不设任何跨平台/跨 WSL 验证阶段。
 
 - **fastcheck**：static_check + rustfmt + clippy + cargo test（含 binding loop 扫描）；总墙钟硬上限 60 秒，超时即失败并终止整个进程树，`MUST NOT` 把超时报成成功；AI 代理 `MAY` 自主执行，但其通过不代表完整验证。（执法点：test_gate.py 的预算终止与退出码）
-- **fulltest**：当前平台（Windows，唯一支持平台）全部本地验证——Python 质量门（与 CI 同命令）+ fmt/clippy + `acceptance.ps1 -WithEngine -WithGuiSmoke -WithPackage`；`MUST NOT` 触发远程流水线。每次运行 `MUST` 有人类明确授权。（执法点：test_gate.py 的 `--authorized` 入口守卫；越过入口直接执行内部命令属规避行为 · 无执法点 · 软法）
-- **slowtest**：fulltest 全部阶段 + 远程 `check.yml`（该工作流仅 `workflow_dispatch`，由本门经 `gh workflow run` 触发并轮询到最终状态，`MUST NOT` 把「已触发」当「通过」；push / PR 不自动触发）。每次运行 `MUST` 有人类明确授权。（执法点：同上 `--authorized` 入口守卫；同上软法）
+- **fulltest**：当前平台（Windows，唯一支持平台）全部本地验证——Python 质量门（与 CI 同命令）+ fmt/clippy + `acceptance.ps1 -WithEngine -WithGuiSmoke`；`MUST NOT` 触发远程流水线。不含发布打包自检（打包只在 slowtest）。每次运行 `MUST` 有人类明确授权。（执法点：test_gate.py 的 `--authorized` 入口守卫；越过入口直接执行内部命令属规避行为 · 无执法点 · 软法）
+- **slowtest**：fulltest 全部阶段 + 发布打包自检（`scripts/package-windows.ps1` 全程，验证引擎内嵌、许可证合规、无引擎泄漏与两种交付产物；本地阶段未全部 PASS 时不执行）+ 远程 `check.yml`（该工作流仅 `workflow_dispatch`，由本门经 `gh workflow run` 触发并轮询到最终状态，`MUST NOT` 把「已触发」当「通过」；push / PR 不自动触发）。每次运行 `MUST` 有人类明确授权。（执法点：同上 `--authorized` 入口守卫；同上软法）
 - `release.yml` 是真实发布（自动打时间戳 tag 并发布产物），`MUST NOT` 纳入 slowtest 自动触发；发布需用户单独明确该次目标。（执法点：test_gate.py 不包含该阶段）
 - 历史授权、上一次授权、CI 配置或脚本注释 `MUST NOT` 视为本次授权；环境或工具缺失只能如实标注 UNVERIFIED，`MUST NOT` 当作通过或静默跳过。（无执法点 · 软法）
 
