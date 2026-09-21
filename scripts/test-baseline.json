@@ -1106,6 +1106,18 @@
       "cfg": "feature = \"gui\""
     },
     {
+      "file": "tests/perf_probe.rs",
+      "name": "organizer_dedup_probe",
+      "ignored": true,
+      "cfg": null
+    },
+    {
+      "file": "tests/perf_probe.rs",
+      "name": "organizer_empty_dirs_probe",
+      "ignored": true,
+      "cfg": null
+    },
+    {
       "file": "tests/property.rs",
       "name": "reserved_device_name_boundary",
       "ignored": false,
