@@ -516,10 +516,12 @@ fn equal_content_archives_extract_both_and_classify_is_stable() {
     ArchiveFixture::apply(&task);
     use chrono::Datelike;
     let now = chrono::Local::now();
-    let classified = format!("文档/{:04}/{:02}/beta.txt", now.year(), now.month());
+    // C-03：保留者是修改时间最新的成员——后解出的 beta (1).txt 更新，保留它并按
+    // C-08 清理副本标记，最终名 beta_1.txt；beta.txt 作为重复副本被永久删除。
+    let classified = format!("文档/{:04}/{:02}/beta_1.txt", now.year(), now.month());
     assert!(
         f.root.join(&classified).exists(),
-        "副本名成员（beta (1).txt）清理为 beta_1 后与 beta.txt 同键去重，保留者归类落位"
+        "保留者（beta (1).txt → beta_1.txt）归类落位，重复的 beta.txt 已删除"
     );
     let again = engine::prepare_at(&f.root, org, Context::default(), &f.state).unwrap();
     assert_eq!(again.summary.archives_ok, 0);
