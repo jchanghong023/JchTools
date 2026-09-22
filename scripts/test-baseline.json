@@ -351,7 +351,31 @@
     },
     {
       "file": "src/rules.rs",
+      "name": "category_matches_appendix_a",
+      "ignored": false,
+      "cfg": null
+    },
+    {
+      "file": "src/rules.rs",
       "name": "cleanup_reason_reports_category",
+      "ignored": false,
+      "cfg": null
+    },
+    {
+      "file": "src/rules.rs",
+      "name": "copy_key_strips_all_markers",
+      "ignored": false,
+      "cfg": null
+    },
+    {
+      "file": "src/rules.rs",
+      "name": "copy_marker_conversion_matches_appendix_b",
+      "ignored": false,
+      "cfg": null
+    },
+    {
+      "file": "src/rules.rs",
+      "name": "digest_candidate_respects_unit_budget",
       "ignored": false,
       "cfg": null
     },
@@ -375,13 +399,19 @@
     },
     {
       "file": "src/rules.rs",
+      "name": "normalize_stem_collapses_whitespace_and_nfc",
+      "ignored": false,
+      "cfg": null
+    },
+    {
+      "file": "src/rules.rs",
       "name": "ordering_sql_agrees_with_rust_compare",
       "ignored": false,
       "cfg": null
     },
     {
       "file": "src/rules.rs",
-      "name": "strip_copy_name_keeps_compound_extensions",
+      "name": "path_digest_is_uppercase_sha256_prefix",
       "ignored": false,
       "cfg": null
     },
@@ -584,6 +614,78 @@
       "cfg": null
     },
     {
+      "file": "tests/classify_shape.rs",
+      "name": "collection_under_root_is_stable_across_reruns",
+      "ignored": false,
+      "cfg": null
+    },
+    {
+      "file": "tests/classify_shape.rs",
+      "name": "git_collection_blocked_by_file_keeps_projects",
+      "ignored": false,
+      "cfg": null
+    },
+    {
+      "file": "tests/classify_shape.rs",
+      "name": "in_place_normalized_collision_resolves_once_and_stays",
+      "ignored": false,
+      "cfg": null
+    },
+    {
+      "file": "tests/classify_shape.rs",
+      "name": "items_without_usable_date_stay_in_place",
+      "ignored": false,
+      "cfg": null
+    },
+    {
+      "file": "tests/classify_shape.rs",
+      "name": "large_files_take_priority_over_extension_category",
+      "ignored": false,
+      "cfg": null
+    },
+    {
+      "file": "tests/classify_shape.rs",
+      "name": "minimal_level_prefixes_and_digest_fallback",
+      "ignored": false,
+      "cfg": null
+    },
+    {
+      "file": "tests/classify_shape.rs",
+      "name": "moves_preserve_creation_time_for_idempotent_dates",
+      "ignored": false,
+      "cfg": null
+    },
+    {
+      "file": "tests/classify_shape.rs",
+      "name": "occupied_category_container_keeps_source_items",
+      "ignored": false,
+      "cfg": null
+    },
+    {
+      "file": "tests/classify_shape.rs",
+      "name": "organize_parent_after_children_rebuilds_standard_shape",
+      "ignored": false,
+      "cfg": null
+    },
+    {
+      "file": "tests/classify_shape.rs",
+      "name": "organize_subtree_b_matches_contract_shape",
+      "ignored": false,
+      "cfg": null
+    },
+    {
+      "file": "tests/classify_shape.rs",
+      "name": "quarantine_tree_is_left_alone",
+      "ignored": false,
+      "cfg": null
+    },
+    {
+      "file": "tests/classify_shape.rs",
+      "name": "root_inside_git_project_is_rejected",
+      "ignored": false,
+      "cfg": null
+    },
+    {
       "file": "tests/contract_engine.rs",
       "name": "broken_hash_cache_degrades_without_failing",
       "ignored": false,
@@ -735,37 +837,7 @@
     },
     {
       "file": "tests/core.rs",
-      "name": "category_and_custom_rules",
-      "ignored": false,
-      "cfg": null
-    },
-    {
-      "file": "tests/core.rs",
-      "name": "category_merge_does_not_nest_category_directory_inside_itself",
-      "ignored": false,
-      "cfg": null
-    },
-    {
-      "file": "tests/core.rs",
-      "name": "category_merge_flatten_rerun_is_idempotent",
-      "ignored": false,
-      "cfg": null
-    },
-    {
-      "file": "tests/core.rs",
-      "name": "class_override_beats_global_keep",
-      "ignored": false,
-      "cfg": null
-    },
-    {
-      "file": "tests/core.rs",
       "name": "classification_empty_dirs_planned_in_same_pass",
-      "ignored": false,
-      "cfg": null
-    },
-    {
-      "file": "tests/core.rs",
-      "name": "classification_preserves_paths_and_is_idempotent",
       "ignored": false,
       "cfg": null
     },
@@ -813,12 +885,6 @@
     },
     {
       "file": "tests/core.rs",
-      "name": "copy_name_cleanup_uses_freed_original_name",
-      "ignored": false,
-      "cfg": null
-    },
-    {
-      "file": "tests/core.rs",
       "name": "copy_names_can_be_disabled_independently",
       "ignored": false,
       "cfg": null
@@ -832,12 +898,6 @@
     {
       "file": "tests/core.rs",
       "name": "coupled_validation_and_bounds",
-      "ignored": false,
-      "cfg": null
-    },
-    {
-      "file": "tests/core.rs",
-      "name": "date_classification_is_idempotent",
       "ignored": false,
       "cfg": null
     },
@@ -945,30 +1005,6 @@
     },
     {
       "file": "tests/core.rs",
-      "name": "flatten_allocation_preserves_compound_extension",
-      "ignored": false,
-      "cfg": null
-    },
-    {
-      "file": "tests/core.rs",
-      "name": "flatten_classification_allocates_nonconflicting_names",
-      "ignored": false,
-      "cfg": null
-    },
-    {
-      "file": "tests/core.rs",
-      "name": "flatten_single_child_collapses_levels",
-      "ignored": false,
-      "cfg": null
-    },
-    {
-      "file": "tests/core.rs",
-      "name": "flatten_with_classification_is_idempotent_across_rounds",
-      "ignored": false,
-      "cfg": null
-    },
-    {
-      "file": "tests/core.rs",
       "name": "git_tree_ancestors_survive_empty_directory_cleanup",
       "ignored": false,
       "cfg": null
@@ -976,18 +1012,6 @@
     {
       "file": "tests/core.rs",
       "name": "global_keep_prohibits_deletion",
-      "ignored": false,
-      "cfg": null
-    },
-    {
-      "file": "tests/core.rs",
-      "name": "hardlink_does_not_claim_permanent_bytes",
-      "ignored": false,
-      "cfg": null
-    },
-    {
-      "file": "tests/core.rs",
-      "name": "hardlink_mode_preserves_aliases",
       "ignored": false,
       "cfg": null
     },
@@ -1060,18 +1084,6 @@
     {
       "file": "tests/core.rs",
       "name": "legacy_recycle_mode_loads_as_permanent",
-      "ignored": false,
-      "cfg": null
-    },
-    {
-      "file": "tests/core.rs",
-      "name": "merge_directories_joins_same_name_directories",
-      "ignored": false,
-      "cfg": null
-    },
-    {
-      "file": "tests/core.rs",
-      "name": "merge_directories_never_pulls_files_out_of_output",
       "ignored": false,
       "cfg": null
     },
