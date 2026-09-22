@@ -111,8 +111,8 @@ fn organizer_dedup_probe() {
         done.summary.description()
     );
     println!(
-        "[dedup] deleted={} moved={} linked={}",
-        done.summary.deleted, done.summary.moved, done.summary.linked
+        "[dedup] deleted={} moved={}",
+        done.summary.deleted, done.summary.moved
     );
     perf_dump(&state);
 }

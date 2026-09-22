@@ -13,7 +13,7 @@ mod generated_ui {
 pub use generated_ui::*;
 
 use crate::{
-    config::{ClassifyMode, Config, DeleteChoice, DEFAULT_CUSTOM_CATEGORIES},
+    config::{Config, DeleteChoice},
     control::{Context, Control, Event, PlanSnapshot},
     db::Database,
     engine,
@@ -80,6 +80,9 @@ struct RuleSpec {
     tier: Tier,
     #[serde(default = "default_tools")]
     tools: Vec<String>,
+    /// 附录 D：容量项可用 B/KiB/MiB/GiB/TiB 单位输入；None 表示普通整数。
+    #[serde(default)]
+    unit: Option<String>,
 }
 struct State {
     config: Config,
@@ -379,6 +382,57 @@ fn rule_row(spec: &RuleSpec, data: &serde_json::Value) -> RuleRow {
             .into(),
     }
 }
+/// 解析规则数字输入。附录 D：计数/比例项只接受非负十进制整数；容量项（capacity）
+/// 额外接受可选的 B/KiB/MiB/GiB/TiB 单位（不区分大小写），换算后必须为整数字节，
+/// 否则按非法输入处理（报错并回退，不自动截断）。全程整数运算，不做浮点换算。
+fn parse_capacity(value: &str, capacity: bool) -> Result<u64, ()> {
+    if !capacity {
+        return value.parse::<u64>().map_err(|_| ());
+    }
+    let text = value.trim();
+    let split = text
+        .find(|c: char| !(c.is_ascii_digit() || c == '.'))
+        .unwrap_or(text.len());
+    let (number, unit) = text.split_at(split);
+    let multiplier: u64 = match unit.trim().to_lowercase().as_str() {
+        "" | "b" => 1,
+        "kib" => 1 << 10,
+        "mib" => 1 << 20,
+        "gib" => 1 << 30,
+        "tib" => 1 << 40,
+        _ => return Err(()),
+    };
+    let (int_part, frac_part) = match number.split_once('.') {
+        Some((whole, frac)) => (whole, frac),
+        None => (number, ""),
+    };
+    let digits_ok = |text: &str| text.bytes().all(|b| b.is_ascii_digit());
+    if !digits_ok(int_part) || !digits_ok(frac_part) {
+        return Err(());
+    }
+    if int_part.is_empty() && frac_part.is_empty() {
+        return Err(());
+    }
+    let whole: u64 = if int_part.is_empty() {
+        0
+    } else {
+        int_part.parse().map_err(|_| ())?
+    };
+    let total = whole.checked_mul(multiplier).ok_or(())?;
+    if frac_part.is_empty() {
+        return Ok(total);
+    }
+    // 小数部分：frac × 单位 ÷ 10^位数 必须整除，否则不是整数字节。
+    let frac: u64 = frac_part.parse().map_err(|_| ())?;
+    let digits = u32::try_from(frac_part.len()).map_err(|_| ())?;
+    let denom = 10u64.checked_pow(digits).ok_or(())?;
+    let scaled = frac.checked_mul(multiplier).ok_or(())?;
+    if scaled % denom != 0 {
+        return Err(());
+    }
+    total.checked_add(scaled / denom).ok_or(())
+}
+
 /// 规则行是否显示：高级层默认隐藏；联动项在依赖未开启且自身仍是默认值时不显示。
 /// 已经改过值的行必须保留可见，否则依赖关掉后用户既看不到该行、也无法把它改回去。
 fn rule_visible(spec: &RuleSpec, config: &Config, show_advanced: bool) -> bool {
@@ -386,11 +440,9 @@ fn rule_visible(spec: &RuleSpec, config: &Config, show_advanced: bool) -> bool {
         return false;
     }
     match spec.key.as_str() {
-        "custom_categories" => {
-            config.classify == ClassifyMode::Custom
-                || config.custom_categories != DEFAULT_CUSTOM_CATEGORIES
+        "large_threshold_bytes" => {
+            config.large_files || config.large_threshold_bytes != 1024 * 1024 * 1024
         }
-        "large_threshold_gib" => config.large_files || config.large_threshold_gib != 1,
         // C-08：各清理类别的删除方式只在对应清理开启时才有意义；已经改过值的行保留可见，
         // 否则类别关掉后用户既看不到该行、也无法把它改回默认。
         "junk_delete" => config.clean_junk || config.junk_delete != DeleteChoice::Global,
@@ -1418,14 +1470,16 @@ fn wire_sync(ui: &AppWindow, state: &Rc<RefCell<State>>, out: &EventSender) {
         let state = state.clone();
         ui.on_rule_text(move |key, value| {
             if let Some(ui) = weak.upgrade() {
-                let numeric = state
+                let spec = state
                     .borrow()
                     .specs
                     .iter()
                     .find(|s| s.key == key.as_str())
-                    .is_some_and(|s| s.kind == "number");
+                    .cloned();
+                let numeric = spec.as_ref().is_some_and(|s| s.kind == "number");
+                let capacity = spec.as_ref().is_some_and(|s| s.unit.as_deref() == Some("bytes"));
                 let parsed = if numeric {
-                    if let Ok(v) = value.parse::<u64>() {
+                    if let Ok(v) = parse_capacity(value.as_str(), capacity) {
                         serde_json::Value::from(v)
                     } else {
                         // 清空/非法：不写配置，就地把该行显示改回配置真值。
@@ -1443,7 +1497,14 @@ fn wire_sync(ui: &AppWindow, state: &Rc<RefCell<State>>, out: &EventSender) {
                             });
                             return;
                         }
-                        show_error(&ui, "该设置需要输入非负整数");
+                        show_error(
+                            &ui,
+                            if capacity {
+                                "该设置需要非负数字，可选单位 B/KiB/MiB/GiB/TiB（换算后须为整数字节）"
+                            } else {
+                                "该设置需要输入非负整数"
+                            },
+                        );
                         let key = (*key).to_string();
                         patch_rule_row(&ui, key.as_str(), |row| {
                             row.value = restore.clone().into();
@@ -1462,8 +1523,8 @@ fn wire_sync(ui: &AppWindow, state: &Rc<RefCell<State>>, out: &EventSender) {
                     patch_rule_row(&ui, key.as_str(), |row| {
                         row.value = canonical.clone().into();
                     });
-                    // 联动行的可见性也取决于自身的值（如 large_threshold_gib 改回 1、
-                    // custom_categories 改回默认）：与 on_rule_choice 同步可见性，增量插删不重建整表。
+                    // 联动行的可见性也取决于自身的值（如 large_threshold_bytes 改回默认）：
+                    // 与 on_rule_choice 同步可见性，增量插删不重建整表。
                     sync_rules(&ui, &state.borrow());
                 } else if numeric {
                     // 数值超出字段范围（如超过 u32 上限）等写入失败：与非法文本同口径处理，
@@ -1810,7 +1871,6 @@ impl UiPump {
                             kind: match a.kind {
                                 ActionKind::Delete => "删除",
                                 ActionKind::Move => "移动/重命名",
-                                ActionKind::Hardlink => "硬链接",
                                 ActionKind::EmptyDirectory => "空目录复查",
                             }
                             .into(),
@@ -2091,7 +2151,7 @@ fn apply_summary(ui: &AppWindow, state: &mut State, summary: &Summary) {
     // 计数为显示用途，超出 i32 的极端值饱和显示即可。
     ui.set_plan_delete_count(i32::try_from(summary.planned_delete).unwrap_or(i32::MAX));
     ui.set_plan_move_count(i32::try_from(summary.planned_move).unwrap_or(i32::MAX));
-    ui.set_plan_link_count(i32::try_from(summary.planned_link).unwrap_or(i32::MAX));
+    ui.set_plan_git_count(i32::try_from(summary.planned_git).unwrap_or(i32::MAX));
     ui.set_plan_empty_count(i32::try_from(summary.planned_empty).unwrap_or(i32::MAX));
     ui.set_metrics(
         format!(
@@ -2100,10 +2160,7 @@ fn apply_summary(ui: &AppWindow, state: &mut State, summary: &Summary) {
         )
         .into(),
     );
-    state.planned = summary.planned_delete
-        + summary.planned_move
-        + summary.planned_link
-        + summary.planned_empty;
+    state.planned = summary.planned_delete + summary.planned_move + summary.planned_empty;
 }
 
 /// 初始界面状态：全部规则规格 + 默认配置（仅会话内存，不落盘）。测试与 run() 共用。
@@ -2574,12 +2631,11 @@ mod gui_tests {
                 extracted: 0,
                 planned_delete: 3,
                 planned_move: 0,
-                planned_link: 0,
+                planned_git: 0,
                 planned_empty: 0,
                 candidate_bytes: 0,
                 deleted: 0,
                 moved: 0,
-                linked: 0,
                 skipped: 0,
                 errors: 0,
                 permanent_bytes: 0,
@@ -2769,8 +2825,8 @@ mod gui_tests {
             assert_eq!(ui.get_section(), 3);
             assert_eq!(
                 ui.get_rules().row_count(),
-                3,
-                "安全与性能默认只显示 3 条基础规则"
+                2,
+                "安全与性能默认只显示 2 条基础规则（全局删除方式 + 递归扫描）"
             );
             assert!(
                 rule_value_at(ui, "hash_workers").is_none(),
@@ -2781,11 +2837,11 @@ mod gui_tests {
             assert_eq!(
                 ui.get_rules().row_count(),
                 6,
-                "打开高级层后安全与性能应显示全部 6 条（reserve 属于递归解压；回收失败降级项已随 S-02 移除）"
+                "打开高级层后安全与性能应显示全部 6 条（隐藏/系统属性/排除 glob/Hash 线程；磁盘预留属于递归解压）"
             );
             assert_eq!(rule_value_at(ui, "hash_workers").as_deref(), Some("6"));
             assert!(
-                rule_value_at(ui, "reserve_gib").is_none(),
+                rule_value_at(ui, "reserve_bytes").is_none(),
                 "磁盘预留属于递归解压的工具规则"
             );
             ui.invoke_toggle_advanced(false);
@@ -2842,8 +2898,8 @@ mod gui_tests {
             assert!(ui.get_show_advanced());
             assert_eq!(
                 ui.get_rules().row_count(),
-                5,
-                "打开高级层后解压分区应显示全部 5 条防护上限"
+                4,
+                "打开高级层后解压分区应显示全部 4 条防护上限（层数/条目/比例/磁盘预留）"
             );
             assert_eq!(rule_value_at(ui, "max_depth").as_deref(), Some("16"));
             assert!(
@@ -2874,14 +2930,19 @@ mod gui_tests {
                 rule_value_at(ui, "archive_delete").is_none(),
                 "X-05/R-02：原包处置不得再是可配置项"
             );
-            // 安全是两工具共享分区：递归解压视角不含 Hash 线程（reserve 属于高级层，先展开）
+            // 安全是两工具共享分区：递归解压视角不含 Hash 线程；磁盘预留在解压分区（高级层）
             ui.invoke_select_section(1);
             assert!(
                 rule_value_at(ui, "hash_workers").is_none(),
                 "Hash 线程属于目录整理"
             );
             assert!(
-                rule_value_at(ui, "reserve_gib").is_some(),
+                rule_value_at(ui, "reserve_bytes").is_none(),
+                "磁盘预留属于解压分区，不在安全与性能"
+            );
+            ui.invoke_select_section(0);
+            assert!(
+                rule_value_at(ui, "reserve_bytes").is_some(),
                 "磁盘预留属于递归解压"
             );
             ui.invoke_toggle_advanced(false);
@@ -2951,11 +3012,12 @@ mod gui_tests {
     fn dependent_rows_follow_their_switches() {
         with_gui(|app| {
             let ui = &app.ui;
-            // 清理：修正扩展名不再依赖独立的类型检测行，直接可见并自动联动开启
+            // 清理：修正扩展名不再依赖独立的类型检测行（影子键随行联动），位于高级层
             ui.invoke_select_section(2);
+            ui.invoke_toggle_advanced(true);
             assert!(
                 rule_value_at(ui, "fix_extension").is_some(),
-                "修正扩展名始终可见"
+                "修正扩展名在清理分区的高级层可见"
             );
             assert!(
                 rule_value_at(ui, "detect_type").is_none(),
@@ -2966,15 +3028,19 @@ mod gui_tests {
                 app.state.borrow().config.detect_type,
                 "开启修正扩展名必须自动开启类型检测"
             );
-            // 归类：自定义分类规则依赖归类方式；大文件阈值依赖大文件单独归类（已移入高级层）
+            ui.invoke_toggle_advanced(false);
+            // 归类：R-02 已删除自定义分类规则与 classify 开关；大文件阈值（字节口径，
+            // 高级层）依赖大文件单独归类开启后才显示
             ui.invoke_select_section(1);
             assert!(rule_value_at(ui, "custom_categories").is_none());
-            ui.invoke_rule_choice("classify".into(), 4); // 按自定义扩展名规则
-            assert!(rule_value_at(ui, "custom_categories").is_some());
-            assert!(rule_value_at(ui, "large_threshold_gib").is_none());
+            assert!(
+                rule_value_at(ui, "classify").is_none(),
+                "R-02：归类方式开关已删除（固定「大类/创建年/创建月」）"
+            );
+            assert!(rule_value_at(ui, "large_threshold_bytes").is_none());
             ui.invoke_toggle_advanced(true);
             ui.invoke_rule_bool("large_files".into(), true);
-            assert!(rule_value_at(ui, "large_threshold_gib").is_some());
+            assert!(rule_value_at(ui, "large_threshold_bytes").is_some());
             ui.invoke_toggle_advanced(false);
             // 去重（R-02）：同名/副本名/不同名三个独立开关 + 重复组保留规则；
             // C-02 禁止版本取舍开关后，去重基础层固定 4 行，不再有随开关出现/收回的行。
@@ -3411,8 +3477,8 @@ mod gui_tests {
     fn organizer_warning_mentions_only_organizer_deletes() {
         let warning = Config::default().destructive_warning();
         assert!(
-            warning.contains("重复文件") && warning.contains("永久删除"),
-            "整理确认必须告知重复文件的删除方式：{warning}"
+            warning.contains("重复副本") && warning.contains("永久删除"),
+            "整理确认必须告知重复副本的删除方式：{warning}"
         );
         for category in ["系统附属文件", "临时与备份文件", "零字节文件"] {
             assert!(

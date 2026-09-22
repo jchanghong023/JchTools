@@ -5,6 +5,8 @@ use serde::{Deserialize, Serialize};
 pub struct Snapshot {
     pub size: u64,
     pub modified_ns: i64,
+    /// 创建时间（C-05 归类依据；系统不提供时为 None，回落 mtime）。
+    pub created_ns: Option<i64>,
     pub identity: String,
     pub links: u64,
 }
@@ -23,7 +25,6 @@ pub struct FileRecord {
 pub enum ActionKind {
     Delete,
     Move,
-    Hardlink,
     EmptyDirectory,
 }
 /// 动作状态。持久化与界面流转仍以 snake_case 文本（"pending"/"done"/"failed"/"skipped"/"unselected"）
@@ -112,12 +113,12 @@ pub struct Summary {
     pub extracted: u64,
     pub planned_delete: u64,
     pub planned_move: u64,
-    pub planned_link: u64,
+    /// 计划整体移入「Git项目集合」的项目数（C-14；含在计划中的移动项，未执行不计）。
+    pub planned_git: u64,
     pub planned_empty: u64,
     pub candidate_bytes: u64,
     pub deleted: u64,
     pub moved: u64,
-    pub linked: u64,
     pub skipped: u64,
     pub errors: u64,
     pub permanent_bytes: u64,
@@ -126,12 +127,12 @@ impl Summary {
     /// 目录整理（两段式）的任务摘要：只描述扫描与计划/执行口径，不含解压字段。
     /// S-06：只按逻辑大小报告已永久删除的项，`MUST NOT` 声称等于文件系统实际释放量。
     pub fn description(&self) -> String {
-        format!("扫描 {} 个文件 / {}\n待删除 {} 项 · 待移动 {} 项 · 待硬链接 {} 项 · 空目录复查 {} 项\n候选逻辑大小 {}\n已永久删除 {} 项 / {}（不经回收站，不可由本软件恢复）\n已移动 {} 项；已硬链接 {} 项；跳过 {} 项；错误 {} 项",
+        format!("扫描 {} 个文件 / {}\n待删除 {} 项 · 待移动 {} 项（含 Git 项目 {} 项）· 空目录复查 {} 项\n候选逻辑大小 {}\n已永久删除 {} 项 / {}（不经回收站，不可由本软件恢复）\n已移动 {} 项；跳过 {} 项；错误 {} 项",
             self.scanned, bytes(self.scanned_bytes),
-            self.planned_delete, self.planned_move, self.planned_link,
+            self.planned_delete, self.planned_move, self.planned_git,
             self.planned_empty, bytes(self.candidate_bytes), self.deleted,
             bytes(self.permanent_bytes),
-            self.moved, self.linked, self.skipped, self.errors)
+            self.moved, self.skipped, self.errors)
     }
     /// 「递归解压」一段式运行的收尾摘要（X-02 确认框与结束状态的口径）。
     pub fn extract_description(&self) -> String {

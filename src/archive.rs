@@ -255,12 +255,8 @@ impl SevenZip {
             if count > cfg.max_entries {
                 bail!("压缩包条目数量超过用户设置的上限");
             }
-            if cfg.max_file_gib > 0 && size > cfg.max_file_gib * (1 << 30) {
-                bail!("文件展开大小超过用户上限：{raw}");
-            }
-            if cfg.max_unpacked_gib > 0 && total > cfg.max_unpacked_gib * (1 << 30) {
-                bail!("压缩包展开总量超过用户上限");
-            }
+            // X-08：单包与单文件展开体积不另设固定上限（允许 TB 级资料），
+            // 仍受条目数、展开比例、空间和文件系统能力约束。
             // 条目信息只在此处做限额/危险校验，不再整包入库：archive_members 表此前
             // 只写不读（上限百万条目的纯写放大），已随表一起删除。
             fields.clear();
@@ -407,7 +403,7 @@ impl SevenZip {
                 bail!("压缩包展开比例超过用户设置的上限");
             }
         }
-        let reserve = job.config.reserve_gib * (1 << 30);
+        let reserve = job.config.reserve_bytes;
         let free = fs2::available_space(&job.root)
             .map_err(|error| StopExtraction(format!("无法查询磁盘可用空间：{error}")))?;
         // 大小元数据不完整时只校验预留空间，避免对流式格式误报容量不足。
@@ -422,19 +418,8 @@ impl SevenZip {
             ))
             .into());
         }
-        // 流式包没有 Size 元数据时无法按声明总量预检：仍受用户「单包展开上限」约束
-        // （R-02：0 = 不限，此时只有磁盘预留与剩余空间检查兜底；用户 2026-09-18 裁决
-        // 取消此前的 50 GiB 内置硬顶）。
-        let stream_cap_bytes: Option<u64> = if sizes_complete || job.config.max_unpacked_gib == 0 {
-            None
-        } else {
-            Some(
-                job.config
-                    .max_unpacked_gib
-                    .checked_mul(1 << 30)
-                    .context("容量计算溢出")?,
-            )
-        };
+        // X-08：单包/单文件展开体积不设上限后，流式包（无 Size 元数据）只受
+        // 磁盘预留与运行期剩余空间检查约束（预留 0 也不取消磁盘写入失败处理）。
         let stage = Staging::new(&job.root)?;
         let mut command = self.command();
         command
@@ -456,7 +441,6 @@ impl SevenZip {
         let ctl = job.context.control.clone();
         let context = job.context.clone();
         let root = job.root.clone();
-        let stage_probe = stage.content.clone();
         process::run(
             &mut command,
             &ctl,
@@ -477,22 +461,6 @@ impl SevenZip {
                         bytes(reserve)
                     ))
                     .into());
-                }
-                // 无 Size 元数据的包在解压过程中累计暂存量，超过硬顶立即停止（与预留空间联动）。
-                if let Some(cap) = stream_cap_bytes {
-                    let mut staged = 0u64;
-                    for entry in walkdir::WalkDir::new(&stage_probe)
-                        .follow_links(false)
-                        .min_depth(1)
-                    {
-                        let entry = entry?;
-                        if entry.file_type().is_file() {
-                            staged = staged.saturating_add(entry.metadata()?.len());
-                            if staged > cap {
-                                bail!("流式压缩包解压量超过上限 {}，已停止并保留原包", bytes(cap));
-                            }
-                        }
-                    }
                 }
                 Ok(())
             },
@@ -524,25 +492,6 @@ impl SevenZip {
                 .context("解压字节计数溢出")?;
             if sizes_complete && expanded > total {
                 bail!("实际解压量超过压缩包声明，已停止合入");
-            }
-            // 合入阶段兜底：流式包解压期间的抽样检查可能漏掉峰值，这里按最终字节量强制卡住硬顶。
-            if let Some(cap) = stream_cap_bytes {
-                if expanded > cap {
-                    bail!(
-                        "流式压缩包实际解压量超过上限 {}，已停止合入并保留原包",
-                        bytes(cap)
-                    );
-                }
-            }
-            // sizes_complete=false 时 list 阶段拿不到成员大小，单文件上限改在合入阶段检查。
-            if !sizes_complete
-                && job.config.max_file_gib > 0
-                && meta.len() > job.config.max_file_gib * (1 << 30)
-            {
-                bail!(
-                    "文件展开大小超过用户上限：{}",
-                    fsutil::relative_string(&job.root, entry.path())?
-                );
             }
             let relative = fsutil::relative_string(&stage.content, entry.path())?;
             let base = archive.parent().context("压缩包缺少父目录")?;

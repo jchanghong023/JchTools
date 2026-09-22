@@ -104,15 +104,15 @@ impl ArchiveFixture {
 /// 处置类配置已整体移除（无删除选项可配），这里只关掉与本文件无关的容量限制（预留 0、展开比例不限）。
 fn config() -> Config {
     Config {
-        reserve_gib: 0,
+        reserve_bytes: 0,
         max_ratio: 0,
         ..Config::default()
     }
 }
+/// 整理（第二工具）用例的规则：固定归类（C-05 恒开启）+ 全局永久删除。
 fn organizer() -> Config {
     Config {
         global_delete: DeleteMode::Permanent,
-        classify: ClassifyMode::Category,
         ..Config::default()
     }
 }
@@ -510,16 +510,22 @@ fn equal_content_archives_extract_both_and_classify_is_stable() {
         b"beta member\n",
         "两个包解出同名成员：第二个按 H-07 改名落盘，内容相同也不跳过"
     );
-    let mut org = organizer();
-    org.preserve_structure = false;
+    // 整理：C-05 固定归类「大类/创建年/创建月」恒开启；解出文件未设创建时间 → 当前年/月。
+    let org = organizer();
     let task = engine::prepare_at(&f.root, org.clone(), Context::default(), &f.state).unwrap();
     ArchiveFixture::apply(&task);
-    assert!(f.root.join("文档/beta.txt").exists());
+    use chrono::Datelike;
+    let now = chrono::Local::now();
+    let classified = format!("文档/{:04}/{:02}/beta.txt", now.year(), now.month());
+    assert!(
+        f.root.join(&classified).exists(),
+        "副本名成员（beta (1).txt）清理为 beta_1 后与 beta.txt 同键去重，保留者归类落位"
+    );
     let again = engine::prepare_at(&f.root, org, Context::default(), &f.state).unwrap();
     assert_eq!(again.summary.archives_ok, 0);
     assert_eq!(again.summary.planned_delete, 0);
     assert_eq!(again.summary.planned_move, 0);
-    assert!(f.root.join("文档/beta.txt").exists());
+    assert!(f.root.join(&classified).exists());
 }
 // 覆盖 X-05, X-07
 #[test]
@@ -1158,7 +1164,7 @@ fn insufficient_space_stops_the_task_without_quarantine() {
     f.archive(&f.root.join("two.zip"), "-tzip");
     // 预留 ≈1 PiB：任何真实磁盘都不满足，稳定触发「空间不足」这条任务级中止路径。
     let cfg = Config {
-        reserve_gib: 1 << 20,
+        reserve_bytes: 1u64 << 50,
         ..config()
     };
     let result =

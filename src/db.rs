@@ -9,8 +9,10 @@ use serde::{de::DeserializeOwned, Serialize};
 use std::path::{Path, PathBuf};
 
 pub const SCHEMA: &str = include_str!("schema.sql");
-/// 当前代码已知的任务库 schema 版本；库版本高于此值时 fail-fast，避免用旧逻辑读新库。
-pub const SCHEMA_VERSION: i64 = 1;
+/// 当前代码已知的任务库 schema 版本；库版本高于此值时 fail-fast，避免用旧逻辑读新库；
+/// 低于此值（C-05 创建时间列引入前的旧库）同样拒绝——旧库的计划基于已废止的归类
+/// 规则，按 R-04 必须重新分析，不做数据迁移。
+pub const SCHEMA_VERSION: i64 = 2;
 pub struct Database {
     pub conn: Connection,
     pub directory: PathBuf,
@@ -41,12 +43,16 @@ impl Database {
         let conn = Connection::open(path)?;
         conn.busy_timeout(std::time::Duration::from_secs(5))?;
         conn.execute_batch("PRAGMA journal_mode=WAL; PRAGMA synchronous=NORMAL; PRAGMA temp_store=FILE; PRAGMA cache_size=-65536; PRAGMA foreign_keys=ON;")?;
-        // 版本检查：库版本高于当前已知版本则拒绝打开（fail-fast），避免静默读写不兼容结构。
-        let version: i64 = conn.query_row("PRAGMA user_version", [], |row| row.get(0))?;
-        anyhow::ensure!(
-            version <= SCHEMA_VERSION,
-            "任务库版本过高（{version} > {SCHEMA_VERSION}），请升级 JchTools 后再使用该任务库"
-        );
+        // 版本检查只对“打开既有库”生效：新建库 user_version 恒为 0，建库事务随后写入
+        // 当前版本。库版本与当前已知版本不一致则拒绝（fail-fast）：高版本结构未知，
+        // 低版本库（无 created 列）基于已废止的归类规则，按 R-04 必须重新分析。
+        if existing_only {
+            let version: i64 = conn.query_row("PRAGMA user_version", [], |row| row.get(0))?;
+            anyhow::ensure!(
+                version == SCHEMA_VERSION,
+                "任务库版本不兼容（{version} ≠ {SCHEMA_VERSION}）：旧任务由历史版本生成，请重新分析后再执行"
+            );
+        }
         Ok(Self {
             conn,
             directory: directory.to_path_buf(),
@@ -103,6 +109,8 @@ impl Database {
         ])?;
         Ok(())
     }
+    /// `name` 传分析时的原文件名；`name` 列的小写折叠与 name16/rel16（C-03 平局规则
+    /// 用的 UTF-16 单元数）在此统一计算，调用方不再各自预折叠。
     pub fn insert_file(
         &self,
         rel: &str,
@@ -110,15 +118,19 @@ impl Database {
         normal: &str,
         snapshot: &Snapshot,
     ) -> Result<()> {
-        let mut stmt = self
-            .conn
-            .prepare_cached("INSERT INTO files(rel,name,normal,size,mtime,identity,links) VALUES(?1,?2,?3,?4,?5,?6,?7)")?;
+        let folded = name.to_lowercase();
+        let mut stmt = self.conn.prepare_cached(
+            "INSERT INTO files(rel,name,normal,size,mtime,created,name16,rel16,identity,links) VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9,?10)",
+        )?;
         stmt.execute(params![
             rel,
-            name,
+            folded,
             normal,
             i64::try_from(snapshot.size)?,
             snapshot.modified_ns,
+            snapshot.created_ns,
+            i64::try_from(name.encode_utf16().count())?,
+            i64::try_from(rel.encode_utf16().count())?,
             snapshot.identity,
             i64::try_from(snapshot.links)?
         ])?;
@@ -186,7 +198,7 @@ impl Database {
     }
     /// 与 FILE_COLUMNS 同序的按 id 取行 SQL（写死列清单换静态常量，避免每次调用 format!）。
     const FILE_BY_ID_SQL: &str =
-        "SELECT id,rel,name,normal,size,mtime,identity,links,hash,cleanable FROM files WHERE id=?1";
+        "SELECT id,rel,name,normal,size,mtime,created,name16,rel16,identity,links,hash,cleanable FROM files WHERE id=?1";
     pub fn file(&self, id: i64) -> Result<FileRecord> {
         let mut stmt = self.conn.prepare_cached(Self::FILE_BY_ID_SQL)?;
         stmt.query_row([id], file_row).map_err(Into::into)
@@ -230,7 +242,7 @@ impl Database {
     pub fn actions_page(&self, after: i64, limit: usize) -> Result<Vec<Action>> {
         self.actions_page_filtered(after, limit, None)
     }
-    /// kind_filter: None=全部；Some("delete"/"move"/"hardlink"/"empty_directory")（serde snake_case）。
+    /// kind_filter: None=全部；Some("delete"/"move"/"empty_directory")（serde snake_case）。
     /// kind 白名单外的取值视为调用错误，直接报错，避免拼接出意外 SQL 语义。
     pub fn actions_page_filtered(
         &self,
@@ -241,7 +253,7 @@ impl Database {
         let limit = convert::usize_as_i64(limit.min(1000));
         let rows = if let Some(kind) = kind_filter {
             anyhow::ensure!(
-                matches!(kind, "delete" | "move" | "hardlink" | "empty_directory"),
+                matches!(kind, "delete" | "move" | "empty_directory"),
                 "未知的行动类型筛选：{kind}"
             );
             let like = format!("\"{kind}\"");
@@ -322,7 +334,8 @@ impl Database {
             .optional()?)
     }
 }
-pub const FILE_COLUMNS: &str = "id,rel,name,normal,size,mtime,identity,links,hash,cleanable";
+pub const FILE_COLUMNS: &str =
+    "id,rel,name,normal,size,mtime,created,name16,rel16,identity,links,hash,cleanable";
 /// 同一列清单的别名限定形式，供与其他表 JOIN 的查询使用（未限定的 `id` 会歧义）。
 /// 由 FILE_COLUMNS 派生，避免两份清单各自漂移。
 pub fn file_columns_qualified(alias: &str) -> String {
@@ -356,11 +369,12 @@ fn file_row_offset(row: &Row<'_>, offset: usize) -> rusqlite::Result<FileRecord>
         snapshot: Snapshot {
             size: nonneg_u64(row, column(4))?,
             modified_ns: row.get(column(5))?,
-            identity: row.get(column(6))?,
-            links: nonneg_u64(row, column(7))?,
+            created_ns: row.get(column(6))?,
+            identity: row.get(column(9))?,
+            links: nonneg_u64(row, column(10))?,
         },
-        hash: row.get(column(8))?,
-        cleanable: row.get(column(9))?,
+        hash: row.get(column(11))?,
+        cleanable: row.get(column(12))?,
     })
 }
 fn action_row(row: &Row<'_>) -> rusqlite::Result<Action> {

@@ -171,6 +171,8 @@ pub fn prepare_at(
     let root = fsutil::normalize_root(root)?;
     // H-06：选定根目录直接含 .git 时整次处理不执行，明确提示且不创建任务库。
     anyhow::ensure!(!fsutil::is_git_root(&root)?, ROOT_GIT_MESSAGE);
+    // H-06：祖先直接含 .git 同样拒绝整次处理（不拆散项目子树）。
+    fsutil::root_inside_git_project(&root)?;
     let _guard = fsutil::RootGuard::acquire(state)?;
     let directory = state.join("tasks").join(format!(
         "{}-{}",
@@ -282,6 +284,8 @@ fn extract_run_with(
     let root = fsutil::normalize_root(root)?;
     // H-06：选定根目录直接含 .git 时整次处理不执行，明确提示且不创建任务库。
     anyhow::ensure!(!fsutil::is_git_root(&root)?, ROOT_GIT_MESSAGE);
+    // H-06：祖先直接含 .git 同样拒绝整次处理（不拆散项目子树）。
+    fsutil::root_inside_git_project(&root)?;
     let _guard = fsutil::RootGuard::acquire(state)?;
     let directory = state.join("tasks").join(format!(
         "{}-{}",
@@ -383,6 +387,8 @@ pub fn count_archives(root: &Path, config: &Config) -> Result<u64> {
     let root = fsutil::normalize_root(root)?;
     // H-06：选定根目录直接含 .git 时整次处理不执行，确认框清点同样拒绝。
     anyhow::ensure!(!fsutil::is_git_root(&root)?, ROOT_GIT_MESSAGE);
+    // H-06：祖先直接含 .git 同样拒绝整次处理（不拆散项目子树）。
+    fsutil::root_inside_git_project(&root)?;
     let excluded = rules::build_exclusions(&config.exclusions)?;
     // 与 scan 同源的特殊目录剪枝口径。状态目录此时可能尚不存在（首次运行先弹
     // 确认再建目录）：canonicalize 失败视为无重叠，不阻止清点。
@@ -470,14 +476,8 @@ struct ScanChild {
     kind: ScanKind,
 }
 enum ScanKind {
-    Dir {
-        lower: String,
-    },
-    File {
-        lower: String,
-        normal: String,
-        snapshot: Snapshot,
-    },
+    Dir { lower: String },
+    File { normal: String, snapshot: Snapshot },
 }
 /// 扫描期需要主线程补记的错误日志（工作线程不能触碰任务库连接）。
 struct ScanNote {
@@ -499,16 +499,6 @@ fn lock_sink(sink: &Mutex<ScanSink>) -> std::sync::MutexGuard<'_, ScanSink> {
     // 锁中毒只可能因持锁线程 panic；本模块持锁期间不 panic，恢复数据是安全回退。
     sink.lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner)
-}
-/// 把 Git 整树排除的目录自身与其全部祖先记入扫描污点：祖先目录在盘上仍有内容
-/// （Git 树），不得被空目录规划当成空目录，从而避免顺着删除/改名祖先间接改动该树。
-fn taint_git_ancestors(taint: &mut HashSet<String>, rel: &str) {
-    taint.insert(rel.to_string());
-    let mut rest = rel;
-    while let Some(index) = rest.rfind('/') {
-        rest = &rest[..index];
-        taint.insert(rest.to_string());
-    }
 }
 /// 处理范围剪枝口径：扫描、确认框清点（X-02）与整理收尾实空清理共用同一套判定，
 /// 三处不会各自漂移出不同范围。Git 整树排除（H-06）由调用方在枚举目录前单独判定。
@@ -592,8 +582,9 @@ fn walk_dir<'a>(
     let git_boundary = fsutil::is_git_root(dir);
     if matches!(git_boundary, Ok(true)) {
         let mut sink = lock_sink(ctx.sink);
-        taint_git_ancestors(&mut sink.taint, &rel);
         sink.git_skips.push(rel);
+        // Git 树自身不入盘点（不进 directories/files），其祖先的空目录保护由
+        // planner 按 git_roots.staying 在空目录规划时计算（C-14 移走后允许变空）。
         return;
     }
     if let Err(error) = git_boundary {
@@ -603,7 +594,7 @@ fn walk_dir<'a>(
             path: dir.display().to_string(),
             message: format!("无法判定是否含 .git，已整树跳过：{error:#}"),
         });
-        taint_git_ancestors(&mut sink.taint, &rel);
+        sink.taint.insert(rel.clone());
         return;
     }
     let read = match fs::read_dir(dir) {
@@ -677,7 +668,6 @@ fn walk_dir<'a>(
                 let git_boundary = fsutil::is_git_root(&entry.path());
                 if matches!(git_boundary, Ok(true)) {
                     let mut sink = lock_sink(ctx.sink);
-                    taint_git_ancestors(&mut sink.taint, &child_rel);
                     sink.git_skips.push(child_rel);
                     continue;
                 }
@@ -687,7 +677,7 @@ fn walk_dir<'a>(
                         path: entry.path().display().to_string(),
                         message: format!("无法判定是否含 .git，已整树跳过：{error:#}"),
                     });
-                    taint_git_ancestors(&mut sink.taint, &child_rel);
+                    sink.taint.insert(child_rel);
                     continue;
                 }
             }
@@ -704,15 +694,11 @@ fn walk_dir<'a>(
         } else if metadata.file_type().is_file() {
             match fsutil::snapshot_with(&entry.path(), &metadata) {
                 Ok(snapshot) => {
-                    let normal = rules::normal_name(&name);
+                    let normal = rules::normal_key(&name);
                     children.push(ScanChild {
                         parent: rel.clone(),
                         name,
-                        kind: ScanKind::File {
-                            lower: String::new(),
-                            normal,
-                            snapshot,
-                        },
+                        kind: ScanKind::File { normal, snapshot },
                     });
                     ctx.control.scanned.fetch_add(1, Ordering::Relaxed);
                 }
@@ -732,11 +718,10 @@ fn walk_dir<'a>(
     }
     {
         let mut sink = lock_sink(ctx.sink);
-        // 目录名小写折叠在这里补齐（供 directories.name 的 Windows 折叠匹配）。
+        // 目录名小写折叠在这里补齐（供 directories.name 的 Windows 折叠匹配）；
+        // 文件名的小写折叠与 UTF-16 计数由 db.insert_file 统一完成。
         for child in &mut children {
             if let ScanKind::Dir { lower } = &mut child.kind {
-                *lower = child.name.to_lowercase();
-            } else if let ScanKind::File { lower, .. } = &mut child.kind {
                 *lower = child.name.to_lowercase();
             }
         }
@@ -786,12 +771,8 @@ fn scan_emit(
                 job.db.insert_dir(&rel, lower, depth)?;
                 scan_emit(job, by_parent, enqueue, &rel, depth + 1, count)?;
             }
-            ScanKind::File {
-                lower,
-                normal,
-                snapshot,
-            } => {
-                job.db.insert_file(&rel, lower, normal, snapshot)?;
+            ScanKind::File { normal, snapshot } => {
+                job.db.insert_file(&rel, &child.name, normal, snapshot)?;
                 job.summary.scanned += 1;
                 job.summary.scanned_bytes = job.summary.scanned_bytes.saturating_add(snapshot.size);
                 if enqueue && rules::archive_name(&child.name) {
@@ -1585,7 +1566,7 @@ fn parallel_run_kind(action: &Action) -> Option<ParallelKind> {
         ActionKind::EmptyDirectory => Some(ParallelKind::EmptyDir(
             action.source.bytes().filter(|byte| *byte == b'/').count(),
         )),
-        ActionKind::Move | ActionKind::Hardlink => None,
+        ActionKind::Move => None,
     }
 }
 /// 单个动作的串行执行（移动/硬链接/未勾选）：语义与旧逐项循环一致。
@@ -1759,13 +1740,6 @@ fn execute_action(job: &mut Job, action: &Action) -> Result<bool> {
     // S-03/C-12：删除前 `MUST NOT` 重读文件内容做逐字节复核，去重判定完全依据
     // 分析期算出的整文件哈希，因此执行阶段不读取任何文件内容。
     let source = fsutil::safe_join(&job.root, &action.source)?;
-    // keeper 仅用于硬链接动作（同卷硬链接的链接源）；内容去重删除不再需要它。
-    let keeper = if action.kind == ActionKind::Hardlink {
-        let (relative, _) = action.keeper.as_ref().context("硬链接缺少保留文件")?;
-        Some(fsutil::safe_join(&job.root, relative)?)
-    } else {
-        None
-    };
     match action.kind {
         ActionKind::Delete => Ok(job.delete_path(
             &source,
@@ -1788,7 +1762,10 @@ fn execute_action(job: &mut Job, action: &Action) -> Result<bool> {
                 &action.reason,
                 action.expected.as_ref().map_or(0, |s| s.size),
             )?;
-            fsutil::rename_noreplace(&source, &target)?;
+            // S-01/C-21：同卷改名天然保留创建时间；跨卷按「复制+写回创建/修改时间+
+            // 删源」执行，任一步失败保留源项。目录移动（C-14 Git 项目整树平移）只在
+            // 同卷可行，跨卷在复制一步安全失败并保留原项目。
+            fsutil::move_file_preserving_times(&source, &target)?;
             job.summary.moved += 1;
             job.log(
                 "移动",
@@ -1798,66 +1775,6 @@ fn execute_action(job: &mut Job, action: &Action) -> Result<bool> {
                 &action.reason,
                 0,
             )?;
-            Ok(true)
-        }
-        ActionKind::Hardlink => {
-            let keeper = keeper.context("硬链接缺少保留文件")?;
-            let temporary = source
-                .parent()
-                .context("路径缺少父目录")?
-                .join(format!(".jchtools-link-{}", uuid::Uuid::new_v4()));
-            // Create the replacement link before removing any source data. Cross-volume links fail safely here.
-            fs::hard_link(&keeper, &temporary).context("此位置不支持硬链接，原文件未删除")?;
-            // physical_free=false：内容经临时硬链接原样保留，物理占用不变，不得计入永久删除字节。
-            let removed = job.delete_path(
-                &source,
-                action.expected.as_ref(),
-                action.mode,
-                &action.reason,
-                false,
-            );
-            match removed {
-                Ok(DeleteResult::Kept) => {
-                    let _ = fs::remove_file(&temporary);
-                    return Ok(false);
-                }
-                Err(error) => {
-                    let _ = fs::remove_file(&temporary);
-                    return Err(error);
-                }
-                _ => (),
-            }
-            if let Err(error) = fsutil::rename_noreplace(&temporary, &source) {
-                // Keep the replacement link under a visible name if a competing file appeared.
-                let emergency = fsutil::unique_target(&job.root, &source);
-                match emergency {
-                    Ok(emergency) => match fsutil::rename_noreplace(&temporary, &emergency) {
-                        Ok(()) => {
-                            // 原路径已被竞争文件占用：链接落到应急名称，用户承诺的原路径不再可用。
-                            let emergency_rel = fsutil::relative_string(&job.root, &emergency)
-                                .unwrap_or_else(|_| emergency.display().to_string());
-                            job.log("硬链接",&action.source,&emergency_rel,"警告",
-                                &format!("原路径被竞争占用，链接已改用应急名称保留（承诺的原路径不再可用）：{error}"),0)?;
-                            job.summary.linked += 1;
-                            return Ok(true);
-                        }
-                        // 兜底改名也失败时移除临时硬链接：内容仍由保留文件持有，不会丢数据。
-                        // 源路径已被删除且没有留下任何链接：必须报错并标 failed，不得记 skipped
-                        //（否则与已入账的 deleted 口径分裂）。
-                        Err(inner) => {
-                            let _ = fs::remove_file(&temporary);
-                            job.log("硬链接",&action.source,"","失败",
-                                &format!("硬链接失败，原路径已删除且未留下链接；内容仍由保留文件持有：{inner}（首次改名失败：{error}）"),0)?;
-                            anyhow::bail!("硬链接失败：源路径已删除且未留下链接；内容仍由保留文件持有（{inner}）");
-                        }
-                    },
-                    Err(inner) => {
-                        let _ = fs::remove_file(&temporary);
-                        return Err(inner).context("目标被占用，且无法为保留链接副本分配名称");
-                    }
-                }
-            }
-            job.summary.linked += 1;
             Ok(true)
         }
         ActionKind::EmptyDirectory => {

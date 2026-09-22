@@ -260,7 +260,8 @@ fn plan_execution_confirmation_flow_runs_end_to_end() {
     let task_count = fs::read_dir(&tasks_root).map_or(0, std::iter::Iterator::count);
     assert!(task_count >= 1, "注入 state 下应有任务目录");
 
-    // 2) 去重副本已移除，保留项与未开启清理的文件归类后仍存在。
+    // 2) 去重副本已移除，保留项与未开启清理的文件归类后仍存在
+    //（GUI 默认规则不同名去重关闭：a.txt/b.txt 同内容不同名，各自随归类保留）。
     let remaining: Vec<String> = fs::read_dir(&data)
         .unwrap()
         .filter_map(std::result::Result::ok)
@@ -272,19 +273,25 @@ fn plan_execution_confirmation_flow_runs_end_to_end() {
             )
         })
         .collect();
-    assert!(
-        !data.join("a.txt").exists(),
-        "重复项应被移除：{remaining:?}"
-    );
 
-    // 3) 默认 clean_temp=false + ClassifyMode::Category：temp.tmp 被归类移动，而非清理删除
+    // 3) 默认 clean_temp=false：temp.tmp 被归类移动，而非清理删除
+    //（C-05 固定归类「大类/创建年/创建月」，文件未设创建时间 → 当前年/月）。
+    let classified = |category: &str, name: &str| {
+        use chrono::Datelike;
+        let now = chrono::Local::now();
+        data.join(format!(
+            "{category}/{:04}/{:02}/{name}",
+            now.year(),
+            now.month()
+        ))
+    };
     assert!(
-        data.join("其他").join("temp.tmp").exists(),
-        "默认配置下 temp.tmp 应归类到「其他/」而不是被清理：{remaining:?}"
+        classified("其他", "temp.tmp").exists(),
+        "默认配置下 temp.tmp 应归类到「其他/年/月」而不是被清理：{remaining:?}"
     );
     assert!(
-        data.join("文档").join("b.txt").exists(),
-        "去重保留项应随归类移动到 文档/：{remaining:?}"
+        classified("文档", "a.txt").exists() && classified("文档", "b.txt").exists(),
+        "GUI 默认不同名去重关闭：a.txt/b.txt 同内容不同名，各自随归类保留到 文档/年/月/：{remaining:?}"
     );
 }
 
@@ -319,23 +326,36 @@ fn git_subtree_skip_is_visible_after_run_and_tree_untouched() {
         );
     });
 
+    // C-14：Git 项目整体移入「Git项目集合」，树内文件随树移动且不得被删除或改写。
+    let moved = data.join("Git项目集合").join("keepgit");
     assert!(
-        data.join("keepgit").join(".git").join("config").is_file(),
-        "H-06：Git 树内的文件不得被删除或移动"
+        moved.join(".git").join("config").is_file(),
+        "H-06：Git 树内的文件不得被删除或改写"
     );
     assert!(
-        data.join("keepgit").join("tracked.txt").is_file(),
-        "H-06：Git 目录整树（含祖先目录内容）不参与归类"
+        moved.join("tracked.txt").is_file(),
+        "H-06：Git 目录整树（含全部内容）不参与归类，随项目整体移动"
     );
     assert!(
-        !data.join("keepgit").join("其他").exists(),
+        !moved.join("其他").exists(),
         "H-06：Git 目录树内不得生成分类目录"
     );
-    // 默认按大类归类且保留原相对路径：docs/note.txt → 文档/docs/note.txt（排除树之外照常处理）。
-    let handled = ["文档/docs/note.txt", "docs/note.txt", "文档/note.txt"]
-        .iter()
-        .any(|rel| data.join(rel).is_file());
-    assert!(handled, "排除树之外的文件仍按计划处理（归类后仍存在）");
+    // 固定归类（C-05，恒开启）：docs/note.txt → 文档/年/月/note.txt（排除树之外照常处理）。
+    let handled = {
+        use chrono::Datelike;
+        let now = chrono::Local::now();
+        let month = format!("{:04}/{:02}", now.year(), now.month());
+        [
+            format!("文档/{month}/note.txt"),
+            "文档/docs/note.txt".to_string(),
+            "docs/note.txt".to_string(),
+            "文档/note.txt".to_string(),
+        ]
+    };
+    assert!(
+        handled.iter().any(|rel| data.join(rel).is_file()),
+        "排除树之外的文件仍按计划处理（归类后仍存在）"
+    );
 }
 
 // 覆盖 X-02, X-04, X-05, X-06, H-07（解压一段确认的端到端）：确认文案必须说明完整成功后

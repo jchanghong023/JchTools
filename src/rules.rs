@@ -3,15 +3,10 @@ use crate::{
     fsutil,
     model::FileRecord,
 };
-use anyhow::{bail, Context, Result};
+use anyhow::Result;
 use globset::{GlobBuilder, GlobSet, GlobSetBuilder};
-use regex::Regex;
-use std::{
-    cmp::Ordering,
-    collections::BTreeMap,
-    path::Path,
-    sync::{LazyLock, OnceLock},
-};
+use sha2::{Digest, Sha256};
+use std::{cmp::Ordering, path::Path, sync::OnceLock};
 use unicode_normalization::UnicodeNormalization;
 
 pub fn build_exclusions(text: &str) -> Result<GlobSet> {
@@ -26,65 +21,171 @@ pub fn build_exclusions(text: &str) -> Result<GlobSet> {
     }
     Ok(builder.build()?)
 }
-pub fn parse_categories(text: &str) -> Result<BTreeMap<String, String>> {
-    let mut map = BTreeMap::new();
-    for item in text.split(';').map(str::trim).filter(|s| !s.is_empty()) {
-        let (category, extensions) = item
-            .split_once('=')
-            .context("自定义分类格式：目录=pdf,docx;图片=jpg,png")?;
-        fsutil::validate_component(category.trim())?;
-        for ext in extensions
-            .split(',')
-            .map(str::trim)
-            .filter(|s| !s.is_empty())
-        {
-            if !ext.chars().all(|c| c.is_ascii_alphanumeric()) {
-                bail!("扩展名只能包含英文字母和数字：{ext}");
+// ---------------------------------------------------------------------------
+// 附录 B：副本标记与名称规范化（C-02 / C-08 / C-16）
+// ---------------------------------------------------------------------------
+
+/// 一段末尾副本标记：`(N)`（ASCII 圆括号 + 一至多个十进制数字）或
+/// `- Copy`（忽略大小写，连字符与 Copy 间允许 ASCII 空格）/ 中文 `副本`。
+/// 标记前允许零个或多个 ASCII 空格；主体中间的同形字串不算标记。
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum CopyMarker {
+    Numbered(Vec<u8>),
+    Label,
+}
+/// 从主体末尾自右向左收集整段标记；返回剥除后的基础主体与按原顺序（从左往右）的标记。
+/// 每段标记在剥除当下即被记录，不重复计数。
+fn split_copy_markers(stem: &str) -> (String, Vec<CopyMarker>) {
+    let mut rest = stem.to_string();
+    let mut markers = Vec::new();
+    while let Some((next, marker)) = strip_one_marker(&rest) {
+        rest = next;
+        // 收集顺序为从右往左；最后统一反转回原顺序。
+        markers.push(marker);
+    }
+    markers.reverse();
+    (rest, markers)
+}
+/// 剥除主体末尾的一段标记（连同其前导 ASCII 空格），同时返回该段标记本身。
+fn strip_one_marker(stem: &str) -> Option<(String, CopyMarker)> {
+    // (N)：以 ')' 结尾，回找 '('，括号内全部为 ASCII 十进制数字且非空。
+    if stem.ends_with(')') {
+        if let Some(open) = stem.rfind('(') {
+            let digits = &stem[open + 1..stem.len() - 1];
+            if !digits.is_empty() && digits.bytes().all(|b| b.is_ascii_digit()) {
+                let base = stem[..open].trim_end_matches(' ').to_string();
+                return Some((base, CopyMarker::Numbered(digits.bytes().collect())));
             }
-            map.insert(ext.to_lowercase(), category.trim().into());
         }
     }
-    Ok(map)
+    // 中文「副本」。
+    if let Some(base) = stem.strip_suffix("副本") {
+        return Some((base.trim_end_matches(' ').to_string(), CopyMarker::Label));
+    }
+    // `- Copy`：ASCII 连字符 + 可选空格 + Copy（忽略大小写）。
+    let lower = stem.to_lowercase();
+    if let Some(pos) = lower.rfind("copy") {
+        if lower[pos + 4..].is_empty() {
+            let before = &stem[..pos];
+            let trimmed = before.trim_end_matches(' ');
+            if let Some(hyphen) = trimmed.strip_suffix('-') {
+                let base = hyphen.trim_end_matches(' ').to_string();
+                return Some((base, CopyMarker::Label));
+            }
+        }
+    }
+    None
 }
-pub fn strip_copy_name(name: &str) -> String {
-    static COPY_SUFFIX: OnceLock<Regex> = OnceLock::new();
-    // 拉丁字母紧贴（photocopy / MyCopy）不是副本命名，分隔符必须至少一个；
-    // 中文「副本」紧贴是常见命名习惯（报告副本.pdf → 报告.pdf），允许无分隔符。
-    let expression = COPY_SUFFIX.get_or_init(|| match Regex::new(r"(?i)(?:\s*[（(]\d+[）)]|\s*[-_ ]+copy(?:\s*[（(]?\d+[）)]?)?|\s*[-_ ]*副本(?:\s*[（(]?\d+[）)]?)?)$") {
-        Ok(re) => re,
-        // 常量正则语法错误只可能是开发期笔误，按不可达处理
-        Err(_) => unreachable!("constant regex"),
-    });
-    // 副本后缀贴在文件名主体之后、整个扩展名之前：复合扩展名（.tar.gz）与编号分卷
-    // （.7z.001）必须整体保留（H-07 例：资料.tar.gz → 资料 (1).tar.gz），
-    // 因此主体/扩展名切分与 fsutil::unique_target 共用同一口径。
+/// 十进制数字串转输出序号：去前导零、全零保留 `0`（附录 B）。
+fn marker_digits_to_text(digits: &[u8]) -> String {
+    let text = String::from_utf8_lossy(digits);
+    let trimmed = text.trim_start_matches('0');
+    if trimmed.is_empty() {
+        "0".into()
+    } else {
+        trimmed.to_string()
+    }
+}
+/// C-08 副本后缀清理的输出名转换：每个 `(N)` 转为 `_N`，`- Copy` / `副本` 移除；
+/// 基础主体为空时用 `_`。幂等：`_N` 不是标记，转换后的名称再次整理不再变化。
+/// 扩展名（含复合扩展名与编号分卷后缀）整体保留，标记只作用于主体。
+pub fn clean_copy_output(name: &str) -> String {
     let (stem, extension) = fsutil::split_compound_name(name);
-    let mut stem = stem.to_string();
-    loop {
-        let next = expression.replace(&stem, "").trim().to_string();
-        if next.is_empty() || next == stem {
-            break;
+    let (base, markers) = split_copy_markers(stem);
+    let mut out = if base.is_empty() && !markers.is_empty() {
+        "_".to_string()
+    } else {
+        base
+    };
+    for marker in markers {
+        if let CopyMarker::Numbered(digits) = marker {
+            out.push('_');
+            out.push_str(&marker_digits_to_text(&digits));
         }
-        stem = next;
     }
-    format!("{stem}{extension}")
+    format!("{out}{extension}")
 }
-pub fn normal_name(name: &str) -> String {
-    strip_copy_name(name)
-        .nfc()
-        .collect::<String>()
-        .to_lowercase()
+/// C-02 副本名键：剥除全部末尾标记的主体 + 未改变的扩展名（附录 B：键只按
+/// 副本标记剥除后连同扩展名做忽略大小写比较；小写折叠由 files.name 列的存储口径完成）。
+pub fn copy_key(name: &str) -> String {
+    let (stem, extension) = fsutil::split_compound_name(name);
+    let (base, _) = split_copy_markers(stem);
+    format!("{base}{extension}")
 }
-pub fn normalize_name(name: &str) -> String {
-    name.nfc()
-        .collect::<String>()
-        .split_whitespace()
-        .collect::<Vec<_>>()
-        .join(" ")
+/// C-02 名称关系判定的 `normal` 列取值：副本名键的小写折叠。
+pub fn normal_key(name: &str) -> String {
+    copy_key(name).to_lowercase()
 }
-/// 纯参考实现：实际去重匹配在 planner::deduplicate 的 SQL 中（keepers 表按
-/// `(name=? AND dedup_same_name) OR (name<>? AND normal=? AND dedup_copy_names) OR
-/// (name<>? AND normal<>? AND dedup_other_names)` 选择保留者）。仅供测试对照，生产路径不调用。
+/// C-08 NFC 与连续空白规范化（单一开关）：对主体做 NFC，把 Unicode White_Space
+/// 属性字符的连续串压成一个 ASCII 空格，去主体首尾空白；不改扩展名。
+pub fn normalize_stem(stem: &str) -> String {
+    let nfc: String = stem.nfc().collect();
+    let mut out = String::with_capacity(nfc.len());
+    let mut in_space = false;
+    for ch in nfc.chars() {
+        if ch.is_whitespace() {
+            in_space = true;
+        } else {
+            // 首部空白直接丢弃（out 仍空时不补空格），尾部空白由循环自然截断。
+            if in_space {
+                if !out.is_empty() {
+                    out.push(' ');
+                }
+                in_space = false;
+            }
+            out.push(ch);
+        }
+    }
+    out
+}
+/// C-16 名称规范化流水线（顺序按附录 B：先 NFC/空白，再副本后缀清理），
+/// 返回主体与扩展名（扩展名含前导点，复合扩展名整体保留）。
+pub fn derive_stem_ext(name: &str, cfg: &Config) -> (String, String) {
+    let (stem, extension) = fsutil::split_compound_name(name);
+    let mut stem = if cfg.normalize_names {
+        normalize_stem(stem)
+    } else {
+        stem.to_string()
+    };
+    if cfg.clean_copy_name {
+        stem = {
+            let converted = clean_copy_output(&format!("{stem}{extension}"));
+            let (new_stem, _) = fsutil::split_compound_name(&converted);
+            new_stem.to_string()
+        };
+    }
+    (stem, extension.to_string())
+}
+/// 附录 B 合法性处理：只作用于实际派生的新名称——控制字符与 Windows 禁用字符替换为
+/// `_`，末尾 ASCII 点/空格去掉，空主体 / `.` / `..` 用 `_`；设备保留名前加 `_`。
+pub fn legalize_derived(stem: &str) -> String {
+    let mut out: String = stem
+        .chars()
+        .map(|c| {
+            if c.is_control() || "<>:\"/\\|?*".contains(c) {
+                '_'
+            } else {
+                c
+            }
+        })
+        .collect();
+    while out.ends_with('.') || out.ends_with(' ') {
+        out.pop();
+    }
+    if out.is_empty() || out == "." || out == ".." {
+        out = "_".into();
+    }
+    let head = out.split('.').next().unwrap_or("").to_uppercase();
+    if ["CON", "PRN", "AUX", "NUL"].contains(&head.as_str())
+        || ((head.starts_with("COM") || head.starts_with("LPT"))
+            && head.len() == 4
+            && head.ends_with(|c: char| ('1'..='9').contains(&c)))
+    {
+        out = format!("_{out}");
+    }
+    out
+}
+/// 纯参考实现：实际去重匹配在 planner::deduplicate 的 SQL 中。仅供测试对照。
 #[cfg(test)]
 pub fn duplicate_allowed(a: &FileRecord, b: &FileRecord, cfg: &Config) -> bool {
     if a.name == b.name {
@@ -96,35 +197,42 @@ pub fn duplicate_allowed(a: &FileRecord, b: &FileRecord, cfg: &Config) -> bool {
     }
 }
 /// Ordering::Less means a is the preferred keeper. Ties never rely on traversal order.
+/// C-03：最短名称按完整文件名的 UTF-16 单元数升序；平局按相对路径长度（UTF-16 单元）
+/// 升序、再按路径稳定升序决胜（附录 B）。
 pub fn compare(a: &FileRecord, b: &FileRecord, policy: KeepPolicy) -> Ordering {
     let primary = match policy {
         KeepPolicy::Newest => b.snapshot.modified_ns.cmp(&a.snapshot.modified_ns),
         KeepPolicy::Oldest => a.snapshot.modified_ns.cmp(&b.snapshot.modified_ns),
-        KeepPolicy::Largest => b.snapshot.size.cmp(&a.snapshot.size),
-        KeepPolicy::Smallest => a.snapshot.size.cmp(&b.snapshot.size),
-        KeepPolicy::ShortestName => a.name.chars().count().cmp(&b.name.chars().count()),
+        KeepPolicy::ShortestName => a
+            .name
+            .encode_utf16()
+            .count()
+            .cmp(&b.name.encode_utf16().count()),
     };
-    // 与 ordering_sql 的 length(rel)（字符数）保持一致，避免预览与 SQL 计划的平局规则不同。
     primary
-        .then_with(|| a.rel.chars().count().cmp(&b.rel.chars().count()))
+        .then_with(|| {
+            a.rel
+                .encode_utf16()
+                .count()
+                .cmp(&b.rel.encode_utf16().count())
+        })
         .then_with(|| a.rel.cmp(&b.rel))
 }
-/// SQL 排序片段（供 planner 拼接进 ORDER BY）。依赖 SQLite 对 TEXT 的 length()
-/// 返回 Unicode 码点计数（与 Rust 的 `chars().count()` 一致），与 `compare` 的平局规则对齐；
-/// 勿改成 `length(CAST(rel AS BLOB))`（字节长度）或依赖非确定性的排序。
+/// SQL 排序片段（供 planner 拼接进 ORDER BY）。name16/rel16 是扫描期预计算的
+/// UTF-16 单元数列；决胜列 rel 为 SQLite BINARY 文本序（与附录 B 的「UTF-16 单元逐
+/// 单元升序」仅在星形字符与 U+E000..U+FFFF 的相对顺序上有差异，且只在忽略大小写
+/// 比较仍相同的路径之间才用到，保持确定性即可）。
 pub fn ordering_sql(policy: KeepPolicy) -> &'static str {
     match policy {
-        KeepPolicy::Newest => "mtime DESC,length(rel),rel",
-        KeepPolicy::Oldest => "mtime ASC,length(rel),rel",
-        KeepPolicy::Largest => "size DESC,length(rel),rel",
-        KeepPolicy::Smallest => "size ASC,length(rel),rel",
-        KeepPolicy::ShortestName => "length(name),length(rel),rel",
+        KeepPolicy::Newest => "mtime DESC,rel16,rel",
+        KeepPolicy::Oldest => "mtime ASC,rel16,rel",
+        KeepPolicy::ShortestName => "name16,rel16,rel",
     }
 }
 /// C-04：可靠文件标识是否证明两个目录项指向同一物理文件。
 /// 条件：标识相同、两侧链接数 >= 2（两个目录项必然抬高链接数）、且标识未退化。
 /// Windows 的「卷:索引高:索引低」在部分文件系统上索引恒为 0，无法区分不同文件
-/// （与 C-13 的 hash_cache 同口径）；退化时不得据此跳过重复处理或重复建链。
+/// （与 C-13 的 hash_cache 同口径）；退化时不得据此跳过重复处理。
 /// Unix 的「设备:inode」两段结构本身就唯一标识文件，不套用该三段口径。
 pub fn identity_proves_same_file(a: &FileRecord, b: &FileRecord) -> bool {
     a.snapshot.identity == b.snapshot.identity
@@ -196,21 +304,94 @@ fn specialized_extension(ext: &str) -> bool {
             | "apk"
     )
 }
-pub fn category(extension: &str) -> &'static str {
+// ---------------------------------------------------------------------------
+// 附录 A：普通文件大类映射（C-05 / C-06）
+// ---------------------------------------------------------------------------
+
+/// 附录 A 唯一归类映射：按最终完整文件名（小写）匹配，先匹配最长复合后缀，再匹配
+/// 最后一段扩展名；X-10 命名族分卷（`.7z.001`、`.partN.rar`、`.rNN`、`.zNN`）按
+/// 附录 A 说明归「压缩包」；未匹配与无扩展名归「其他」。
+// 输入已预先小写，ends_with 的字面量比较即为忽略大小写口径。
+#[allow(clippy::case_sensitive_file_extension_comparisons)]
+pub fn category_for(name_lower: &str) -> &'static str {
+    const COMPOUND: [&str; 6] = [
+        ".tar.gz",
+        ".tar.bz2",
+        ".tar.xz",
+        ".tar.zst",
+        ".tar.lzma",
+        ".tar.z",
+    ];
+    if COMPOUND.iter().any(|suffix| name_lower.ends_with(suffix)) {
+        return "压缩包";
+    }
+    // X-10 数字尾卷：白名单扩展名 + 恰好三位 .NNN。
+    if let Some(dot) = name_lower.rfind('.') {
+        if let Some(prev) = name_lower[..dot].rfind('.') {
+            let tail = &name_lower[dot + 1..];
+            let inner = &name_lower[prev + 1..dot];
+            let numbered = tail.len() == 3 && tail.bytes().all(|b| b.is_ascii_digit());
+            if numbered
+                && [
+                    "7z", "zip", "rar", "tar", "gz", "bz2", "xz", "zst", "lzma", "z", "tgz",
+                    "tbz2", "txz", "tzst",
+                ]
+                .contains(&inner)
+            {
+                return "压缩包";
+            }
+        }
+    }
+    if name_lower.ends_with(".rar") {
+        return "压缩包";
+    }
+    // part rar 分卷：主干.partN.rar。
+    if let Some(pos) = name_lower.rfind(".part") {
+        let after = &name_lower[pos + 5..];
+        if let Some(rar) = after.rfind(".rar") {
+            if after[..rar].bytes().all(|b| b.is_ascii_digit()) && !after[..rar].is_empty() {
+                return "压缩包";
+            }
+        }
+    }
+    // 老式尾卷族：.r00～.r99 / .z01～.z99（附录 A：整理中的 X-10 命名族分卷归「压缩包」；
+    // data.001 这类无格式孤立编号不匹配，仍归「其他」）。
+    if let Some((_, tail)) = name_lower.rsplit_once('.') {
+        if tail.len() == 3
+            && (tail.starts_with('r') || tail.starts_with('z'))
+            && tail.as_bytes()[1..].iter().all(u8::is_ascii_digit)
+        {
+            return "压缩包";
+        }
+    }
+    let extension = name_lower.rsplit_once('.').map_or("", |(_, tail)| tail);
     match extension {
-        "pdf" | "doc" | "docx" | "xls" | "xlsx" | "ppt" | "pptx" | "txt" | "md" | "csv" | "rtf"
-        | "odt" | "epub" => "文档",
-        "jpg" | "jpeg" | "png" | "webp" | "gif" | "bmp" | "svg" | "tif" | "tiff" | "heic"
-        | "avif" => "图片",
-        "mp4" | "mkv" | "avi" | "mov" | "wmv" | "webm" | "m4v" => "视频",
-        "mp3" | "wav" | "flac" | "aac" | "ogg" | "m4a" | "wma" | "opus" => "音频",
-        "zip" | "7z" | "rar" | "tar" | "gz" | "bz2" | "xz" | "zst" | "tgz" => "压缩包",
-        "rs" | "py" | "c" | "cpp" | "h" | "hpp" | "js" | "ts" | "tsx" | "html" | "css" | "json"
-        | "yaml" | "yml" | "toml" | "tcl" | "v" | "sv" | "vhd" => "代码",
-        "exe" | "msi" | "msix" | "appx" => "安装包",
+        "mp4" | "mkv" | "avi" | "mov" | "wmv" | "flv" | "webm" | "m4v" | "mpg" | "mpeg" | "ts"
+        | "mts" | "m2ts" | "3gp" | "vob" | "rm" | "rmvb" => "视频",
+        "mp3" | "wav" | "flac" | "aac" | "m4a" | "ogg" | "opus" | "wma" | "aiff" | "aif"
+        | "ape" | "mid" | "midi" => "音频",
+        "jpg" | "jpeg" | "png" | "gif" | "bmp" | "webp" | "tif" | "tiff" | "svg" | "ico"
+        | "heic" | "heif" | "avif" | "psd" | "raw" | "cr2" | "cr3" | "nef" | "arw" | "dng" => {
+            "图片"
+        }
+        "pdf" | "txt" | "md" | "rtf" | "doc" | "docx" | "docm" | "xls" | "xlsx" | "xlsm"
+        | "csv" | "ppt" | "pptx" | "pptm" | "odt" | "ods" | "odp" | "epub" | "mobi" | "azw"
+        | "azw3" | "chm" | "html" | "htm" => "文档",
+        "zip" | "7z" | "tar" | "gz" | "bz2" | "xz" | "zst" | "lzma" | "z" | "tgz" | "tbz2"
+        | "txz" | "tzst" | "lz4" | "br" | "lz" => "压缩包",
+        "exe" | "com" | "msi" | "msix" | "appx" | "msixbundle" | "appxbundle" | "bat" | "cmd"
+        | "ps1" | "apk" => "程序",
         _ => "其他",
     }
 }
+/// 兼容旧调用点（测试）：按单个扩展名（不带点、小写）取大类。
+pub fn category(extension: &str) -> &'static str {
+    category_for(&format!(".{extension}"))
+}
+// ---------------------------------------------------------------------------
+// 清理项（C-08）
+// ---------------------------------------------------------------------------
+
 /// 清理项类别（C-08）：三类清理各自独立启停，并可独立覆盖删除方式。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum CleanupKind {
@@ -225,7 +406,7 @@ pub fn cleanup_reason(rel: &str, size: u64, cfg: &Config) -> Option<(CleanupKind
     if cfg.clean_junk
         && (["thumbs.db", ".ds_store", "desktop.ini"].contains(&file.as_str())
             || file.starts_with("._")
-            || rel.split('/').any(|s| s.eq_ignore_ascii_case("__MACOSX")))
+            || rel.split('/').any(|s| s.to_lowercase() == "__macosx"))
     {
         return Some((CleanupKind::Junk, "用户开启的垃圾文件规则"));
     }
@@ -255,6 +436,10 @@ pub fn cleanup_delete(cfg: &Config, kind: CleanupKind) -> DeleteChoice {
 fn has_ext(name: &str, ext: &str) -> bool {
     matches!(name.rsplit_once('.'), Some((_, tail)) if tail == ext)
 }
+// ---------------------------------------------------------------------------
+// X-01 / X-10：解压白名单与分卷
+// ---------------------------------------------------------------------------
+
 /// X-01：自动解压白名单。判断口径不是「这个文件是不是压缩格式」，而是「它是不是
 /// 用户意义上的归档文件」——`.cab` 是安装介质的一部分（Office/驱动/更新包），
 /// `.iso`/`.wim`/`.esd` 是系统镜像，`.msi`/`.msix`/`.appx` 是安装包，`.jar`/`.apk`/
@@ -266,12 +451,13 @@ pub fn archive_name(name: &str) -> bool {
     let name = name.to_lowercase();
     if has_ext(&name, "rar") {
         // 只有 `.partN.rar` 的 part1 算分卷主体；`report.partial.rar` 这类普通包不受影响。
-        static PART: LazyLock<Regex> = LazyLock::new(|| match Regex::new(r"\.part(\d+)\.rar$") {
+        static PART: OnceLock<regex::Regex> = OnceLock::new();
+        let re = PART.get_or_init(|| match regex::Regex::new(r"\.part(\d+)\.rar$") {
             Ok(re) => re,
             // 常量正则语法错误只可能是开发期笔误，按不可达处理
             Err(_) => unreachable!("constant regex"),
         });
-        if let Some(caps) = PART.captures(&name) {
+        if let Some(caps) = re.captures(&name) {
             return caps[1].parse::<u64>().ok() == Some(1);
         }
         return true;
@@ -281,7 +467,7 @@ pub fn archive_name(name: &str) -> bool {
     // 压缩流（.gz/.bz2/.xz/.zst/.lzma/.z）允许前面再带一层 `.tar`，整体作为一个包
     // （`.tar.gz` 等由流后缀本身覆盖，`.tgz`/`.tbz2`/`.txz`/`.tzst` 是别名）。
     // `.lz4` / `.br` / `.lz`（真 lzip）不在白名单内：捆绑引擎没有对应解码器，
-    // 放进来只会把这类文件一律推进「解压失败」，不如完全不碰。
+    // 放进来只会把这类文件一律推进「解压失败」，不如完全不碰（X-09）。
     // 卷（`.002`、`.part2.rar`、`.r00`、`.z01`）不是独立解压对象，不在这里放行；
     // 白名单外格式的卷（`.iso.001`）与配不上主包的孤立编号文件（`data.001`）同样不匹配。
     [
@@ -295,13 +481,109 @@ pub fn multipart_name(name: &str) -> bool {
     let n = name.to_lowercase();
     // 与 archive_name 对齐：只有 .partN.rar 才算 RAR 分卷；contains(".part") 会把
     // report.partial.rar 这类普通包误判为分卷。
-    static PART: OnceLock<Regex> = OnceLock::new();
-    let re = PART.get_or_init(|| match Regex::new(r"\.part(\d+)\.rar$") {
+    static PART: OnceLock<regex::Regex> = OnceLock::new();
+    let re = PART.get_or_init(|| match regex::Regex::new(r"\.part(\d+)\.rar$") {
         Ok(re) => re,
         // 常量正则语法错误只可能是开发期笔误，按不可达处理
         Err(_) => unreachable!("constant regex"),
     });
     n.ends_with(".001") || re.is_match(&n)
+}
+// ---------------------------------------------------------------------------
+// C-19：命名摘要与 C-20：长度受限候选
+// ---------------------------------------------------------------------------
+
+/// C-19 命名摘要输入：分析开始时该项相对于所选根的原始完整路径（`/` 分隔，无前后
+/// 斜杠，保留原始大小写与 Unicode 序列，不做 NFC 或副本后缀清理），无 BOM UTF-8
+/// 编码计算 SHA-256，取十六进制大写前 `hex_units` 位（8 起，每次 +2，最多 64）。
+pub fn path_digest(rel: &str, hex_units: usize) -> String {
+    let digest = Sha256::digest(rel.as_bytes());
+    let hex = hex::encode_upper(digest);
+    hex[..hex_units.min(64)].to_string()
+}
+/// C-20 阈值常量：40 个 UTF-16 单元是冲突候选的退让阈值；255 是单段名称硬上限。
+pub const CONFLICT_YIELD_UNITS: usize = 40;
+pub const SEGMENT_LIMIT_UNITS: usize = 255;
+/// C-19/C-20 摘要候选：优先「最近一级来源_主体_摘要.扩展名」；该形式（或 C-18 逐层
+/// 候选）超过 40 单元时，按 C-20 去掉来源段，改用「主体前段(≤25，继续截短至放得下)
+/// _摘要.扩展名」。扩展名与摘要位数永不截断；仍放不下时允许超过 40 但不得超过 255，
+/// 连一个合法主体字符都容不下时返回 None（该项安全失败）。
+pub fn digest_candidate(
+    nearest_level: Option<&str>,
+    stem: &str,
+    digest: &str,
+    extension: &str,
+) -> Option<String> {
+    let separator = 1usize;
+    let digest_units = digest.encode_utf16().count();
+    let ext_units = extension.encode_utf16().count();
+    let level_units = nearest_level.map_or(0, |level| level.encode_utf16().count() + separator);
+    let fixed_no_source = separator + digest_units + ext_units;
+    if fixed_no_source + 1 > SEGMENT_LIMIT_UNITS {
+        // 分隔符之外连一个主体字符都放不下。
+        return None;
+    }
+    let build = |stem_part: &str, with_level: bool| -> Option<String> {
+        if stem_part.is_empty() {
+            return None;
+        }
+        let total = if with_level {
+            level_units + stem_part.encode_utf16().count() + separator + digest_units + ext_units
+        } else {
+            stem_part.encode_utf16().count() + fixed_no_source
+        };
+        if total > SEGMENT_LIMIT_UNITS {
+            return None;
+        }
+        Some(if with_level {
+            let level = nearest_level.unwrap_or("");
+            format!("{level}_{stem_part}_{digest}{extension}")
+        } else {
+            format!("{stem_part}_{digest}{extension}")
+        })
+    };
+    // 先试带来源的 C-19 形式（主体截到 25）；放得下且 ≤40 即返回。
+    if nearest_level.is_some() {
+        let capped = truncate_utf16_units(stem, 25);
+        if let Some(candidate) = build(&capped, true) {
+            if candidate.encode_utf16().count() <= CONFLICT_YIELD_UNITS {
+                return Some(candidate);
+            }
+        }
+    }
+    // 超过 40：去掉来源段，主体从 25 起逐字符截短到 ≤40（不拆代理对）。
+    let mut stem_part = truncate_utf16_units(stem, 25);
+    loop {
+        let total = stem_part.encode_utf16().count() + fixed_no_source;
+        if total <= CONFLICT_YIELD_UNITS || stem_part.is_empty() {
+            break;
+        }
+        let next = truncate_utf16_units(&stem_part, stem_part.encode_utf16().count() - 1);
+        if next.is_empty() {
+            break;
+        }
+        stem_part = next;
+    }
+    build(&stem_part, false)
+}
+/// 按 UTF-16 单元上限截断字符串：逐字符累计 len_utf16，不切开代理对。
+pub fn truncate_utf16_units(text: &str, max_units: usize) -> String {
+    let mut out = String::new();
+    let mut units = 0usize;
+    for ch in text.chars() {
+        let need = ch.len_utf16();
+        if units + need > max_units {
+            break;
+        }
+        units += need;
+        out.push(ch);
+    }
+    out
+}
+/// 生成 `stem (N)ext」形式的候选名（供目录整理之外的兜底路径使用）；截断口径与
+/// fsutil::suffixed_candidate 一致。
+pub fn suffixed_candidate(stem: &str, ext: &str, index: u64) -> String {
+    fsutil::suffixed_candidate(stem, ext, index)
 }
 
 #[cfg(test)]
@@ -318,6 +600,7 @@ mod tests {
             snapshot: Snapshot {
                 size: 1,
                 modified_ns: 10,
+                created_ns: None,
                 identity: id.to_string(),
                 links: 1,
             },
@@ -476,22 +759,52 @@ mod tests {
         }
     }
 
-    // 覆盖 C-08, H-07（副本后缀识别：复合扩展名与编号分卷整体保留，序号插在扩展名之前）
+    // 覆盖 C-08 / 附录 B（副本标记输出转换：`(N)` 转 `_N`，其余标记移除；复合扩展名与
+    // 编号分卷整体保留；`_1` 不是标记，转换幂等）
     #[test]
-    fn strip_copy_name_keeps_compound_extensions() {
+    fn copy_marker_conversion_matches_appendix_b() {
         for (input, expected) in [
-            ("资料 (1).tar.gz", "资料.tar.gz"),
-            ("资料 - Copy.tar.bz2", "资料.tar.bz2"),
-            ("资料 副本.tar.xz", "资料.tar.xz"),
-            ("报告 (2).docx", "报告.docx"),
+            ("报告 (1) (02).pdf", "报告_1_2.pdf"),
+            ("report - Copy (1).tar.gz", "report_1.tar.gz"),
             ("报告副本.pdf", "报告.pdf"),
-            ("report.final (1).txt", "report.final.txt"),
-            ("(1).pdf", "(1).pdf"),
+            ("报告副本说明.pdf", "报告副本说明.pdf"),
+            ("(1).pdf", "__1.pdf"),
+            ("report(1).pdf", "report_1.pdf"),
+            ("report (01).pdf", "report_1.pdf"),
+            ("report (0).pdf", "report_0.pdf"),
+            ("report - copy.pdf", "report.pdf"),
+            ("report  副本.pdf", "report.pdf"),
+            ("资料 (1).tar.gz", "资料_1.tar.gz"),
+            ("包 (1).7z.001", "包_1.7z.001"),
+            ("报告_1.pdf", "报告_1.pdf"),
+            ("report.final (1).txt", "report.final_1.txt"),
+        ] {
+            assert_eq!(clean_copy_output(input), expected, "{input}");
+        }
+    }
+
+    // 覆盖 C-02（副本名键：剥除全部标记的主体 + 原扩展名）
+    #[test]
+    fn copy_key_strips_all_markers() {
+        for (input, expected) in [
+            ("报告 (1) (02).pdf", "报告.pdf"),
+            ("report - Copy (1).tar.gz", "report.tar.gz"),
+            ("报告副本.pdf", "报告.pdf"),
             ("资料.tar.gz", "资料.tar.gz"),
             ("包.7z.001", "包.7z.001"),
         ] {
-            assert_eq!(strip_copy_name(input), expected, "{input}");
+            assert_eq!(copy_key(input), expected, "{input}");
         }
+    }
+
+    // 覆盖 C-08（NFC 与连续空白规范化：单一开关、不改扩展名、压成 ASCII 空格）
+    #[test]
+    fn normalize_stem_collapses_whitespace_and_nfc() {
+        let normalized = normalize_stem("  a　b  c　");
+        assert_eq!(normalized, "a b c");
+        // NFD 组合字符归并为 NFC 预组合形式。
+        let nfd = "e\u{301}";
+        assert_eq!(normalize_stem(nfd), "e\u{301}".nfc().to_string());
     }
 
     // 覆盖 C-02, R-02（三类名称关系独立启停，SQL 与参考实现一致）
@@ -538,12 +851,19 @@ mod tests {
         // 纯字面量子查询：不建表、不写 DML（static_check 会按任务库 schema 逐条
         // prepare 源码中的 SQL，测试内的建表/插入语句会与 schema 校验冲突）。
         use std::fmt::Write as _;
-        let mut rows = format!(
-            "SELECT '{}' AS rel, '{}' AS name, {} AS mtime, {} AS size",
-            seed[0].0, seed[0].1, seed[0].2, seed[0].3
+        let units = |text: &str| text.encode_utf16().count();
+        let mut rows =
+            format!(
+            "SELECT '{}' AS rel, '{}' AS name, {} AS mtime, {} AS size, {} AS name16, {} AS rel16",
+            seed[0].0, seed[0].1, seed[0].2, seed[0].3, units(seed[0].1), units(seed[0].0)
         );
         for (rel, name, mtime, size) in &seed[1..] {
-            let _ = write!(rows, " UNION ALL SELECT '{rel}', '{name}', {mtime}, {size}");
+            let _ = write!(
+                rows,
+                " UNION ALL SELECT '{rel}', '{name}', {mtime}, {size}, {}, {}",
+                units(name),
+                units(rel)
+            );
         }
         let records: Vec<FileRecord> = seed
             .iter()
@@ -555,6 +875,7 @@ mod tests {
                 snapshot: Snapshot {
                     size: *size,
                     modified_ns: *mtime,
+                    created_ns: None,
                     identity: rel.to_string(),
                     links: 1,
                 },
@@ -565,8 +886,6 @@ mod tests {
         for policy in [
             KeepPolicy::Newest,
             KeepPolicy::Oldest,
-            KeepPolicy::Largest,
-            KeepPolicy::Smallest,
             KeepPolicy::ShortestName,
         ] {
             let sql = format!("SELECT rel FROM ({rows}) ORDER BY {}", ordering_sql(policy));
@@ -585,5 +904,75 @@ mod tests {
                 "{policy:?} 的 SQL 与 Rust 排序必须一致"
             );
         }
+    }
+
+    // 覆盖附录 A（大类映射：复合后缀、分卷族、.ts 归视频、未匹配归其他）
+    #[test]
+    fn category_matches_appendix_a() {
+        for (name, expected) in [
+            ("a.mp4", "视频"),
+            ("a.TS", "视频"),
+            ("a.m2ts", "视频"),
+            ("a.mp3", "音频"),
+            ("a.opus", "音频"),
+            ("a.jpg", "图片"),
+            ("a.HEIC", "图片"),
+            ("a.raw", "图片"),
+            ("a.pdf", "文档"),
+            ("a.azw3", "文档"),
+            ("a.chm", "文档"),
+            ("a.zip", "压缩包"),
+            ("a.tar.gz", "压缩包"),
+            ("a.TAR.ZST", "压缩包"),
+            ("a.lz4", "压缩包"),
+            ("a.br", "压缩包"),
+            ("a.7z.001", "压缩包"),
+            ("a.part01.rar", "压缩包"),
+            ("b.r00", "压缩包"),
+            ("b.z02", "压缩包"),
+            ("a.exe", "程序"),
+            ("a.ps1", "程序"),
+            ("a.msixbundle", "程序"),
+            ("a.unknownext", "其他"),
+            ("noext", "其他"),
+            ("data.001", "其他"),
+        ] {
+            assert_eq!(category_for(&name.to_lowercase()), expected, "{name}");
+        }
+    }
+
+    // 覆盖 C-19（命名摘要：SHA-256 大写十六进制、前 8 位起、可扩展）
+    #[test]
+    fn path_digest_is_uppercase_sha256_prefix() {
+        let d8 = path_digest("a/b/合同.pdf", 8);
+        assert_eq!(d8.len(), 8);
+        assert!(d8
+            .chars()
+            .all(|c| c.is_ascii_hexdigit() && !c.is_ascii_lowercase()));
+        let d10 = path_digest("a/b/合同.pdf", 10);
+        assert_eq!(&d10[..8], &d8);
+        // 相同输入相同摘要；不同输入（通常）不同。
+        assert_eq!(path_digest("a/b/合同.pdf", 8), d8);
+    }
+
+    // 覆盖 C-20（长度受限摘要候选：≤40 退让、扩展名不截断、超限返回 None）
+    #[test]
+    fn digest_candidate_respects_unit_budget() {
+        let long_stem = "二".repeat(60);
+        // C-20：带来源形式超 40 时去掉来源段，只保留主体前段+摘要+扩展名。
+        let candidate = digest_candidate(Some("年报"), &long_stem, "A83F21C7", ".pdf").unwrap();
+        assert!(candidate.encode_utf16().count() <= CONFLICT_YIELD_UNITS);
+        assert!(candidate.starts_with("二"));
+        assert!(candidate.ends_with("_A83F21C7.pdf"));
+        assert!(!candidate.contains('年'));
+        // 短主体带来源：保留 C-19 完整形式。
+        let with_source = digest_candidate(Some("年报"), "产品说明_1", "A13F72C4", ".pdf").unwrap();
+        assert_eq!(with_source, "年报_产品说明_1_A13F72C4.pdf");
+        // 无来源段时省略来源。
+        let none_source = digest_candidate(None, "资料", "A83F21C7", ".pdf").unwrap();
+        assert_eq!(none_source, "资料_A83F21C7.pdf");
+        // 扩展名与摘要自身挤爆预算：允许超过 40 但不得超过 255；再放不下则 None。
+        let huge_ext = format!(".{}", "e".repeat(300));
+        assert!(digest_candidate(None, "x", "A83F21C7", &huge_ext).is_none());
     }
 }

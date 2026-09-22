@@ -3,84 +3,89 @@
     "section": "解压",
     "key": "max_depth",
     "title": "最大嵌套层数",
-    "hint": "嵌套解压始终开启；1～64，到达限制的包移入「解压失败」并记录原因。",
+    "hint": "默认 16，范围 1～64；到达限制的包不解码，移入「解压失败」并记录原因。",
     "kind": "number",
     "choices": [],
-    "tools": ["extract"],
+    "tools": [
+      "extract"
+    ],
     "tier": "advanced"
   },
   {
     "section": "解压",
     "key": "max_entries",
-    "title": "单包最多条目数",
-    "hint": "防止异常包产生过多文件；默认 100 万。",
+    "title": "单包条目数上限",
+    "hint": "默认 100 万，范围 1～1000000000（不允许 0）；包内条目超过上限即判失败。",
     "kind": "number",
     "choices": [],
-    "tools": ["extract"],
-    "tier": "advanced"
-  },
-  {
-    "section": "解压",
-    "key": "max_unpacked_gib",
-    "title": "单包展开上限（GiB）",
-    "hint": "0 表示不额外限制；仍然检查磁盘剩余空间。",
-    "kind": "number",
-    "choices": [],
-    "tools": ["extract"],
-    "tier": "advanced"
-  },
-  {
-    "section": "解压",
-    "key": "max_file_gib",
-    "title": "单文件展开上限（GiB）",
-    "hint": "0 表示不额外限制，支持 TB 级文件。",
-    "kind": "number",
-    "choices": [],
-    "tools": ["extract"],
+    "tools": [
+      "extract"
+    ],
     "tier": "advanced"
   },
   {
     "section": "解压",
     "key": "max_ratio",
     "title": "最大展开比例",
-    "hint": "默认 10000；0 表示关闭比例检查。",
+    "hint": "默认 10000；0 为关闭。比例＝包解码输出的累计逻辑字节 ÷ 实际输入卷集合总字节。",
     "kind": "number",
     "choices": [],
-    "tools": ["extract"],
+    "tools": [
+      "extract"
+    ],
     "tier": "advanced"
+  },
+  {
+    "section": "解压",
+    "key": "reserve_bytes",
+    "title": "磁盘预留",
+    "hint": "解压前和运行中检查目标卷可用空间；可用空间减预计新增占用不得小于预留。可用 B/KiB/MiB/GiB/TiB 单位，默认 1 GiB。",
+    "kind": "number",
+    "choices": [],
+    "tools": [
+      "extract"
+    ],
+    "tier": "advanced",
+    "unit": "bytes"
   },
   {
     "section": "去重",
     "key": "dedup_same_name",
     "title": "同名去重",
-    "hint": "同名且内容相同的文件参与去重，只保留一份；保留规则见下，其余按「重复文件处理方式」处理。",
+    "hint": "同名（忽略大小写）且整文件内容哈希一致的文件参与去重，只保留一份。",
     "kind": "bool",
     "choices": [],
-    "tools": ["organizer"]
+    "tools": [
+      "organizer"
+    ]
   },
   {
     "section": "去重",
     "key": "dedup_copy_names",
     "title": "副本名去重",
-    "hint": "名称带副本后缀（如「(1)」「- Copy」「副本」）的文件也视为重复候选参与内容去重，只保留一份。",
+    "hint": "名称仅差副本标记（如「(1)」「- Copy」「副本」）的同尺寸文件也视为重复候选参与内容去重。",
     "kind": "bool",
     "choices": [],
-    "tools": ["organizer"]
+    "tools": [
+      "organizer"
+    ]
   },
   {
     "section": "去重",
     "key": "dedup_other_names",
-    "title": "不同名同内容去重",
-    "hint": "名称不同但内容完全相同的文件也参与去重，只保留一份。",
+    "title": "不同名去重",
+    "hint": "默认关闭。开启后同尺寸文件均成为候选，不再受名称限制；仍只按整文件哈希判重。",
     "kind": "bool",
     "choices": [],
-    "tools": ["organizer"]
+    "tools": [
+      "organizer"
+    ]
   },
   {
     "section": "去重",
     "key": "keep_duplicate",
-    "title": "重复组的保留规则",
-    "hint": "“最新”指文件修改时间；时间相同按路径长度和名称稳定决策。",
+    "title": "保留者",
+    "hint": "重复组的保留策略；“最新/最旧”按修改时间，平局按相对路径长度与路径稳定决胜。",
     "kind": "choice",
     "choices": [
       [
@@ -91,195 +96,87 @@
       [
         "oldest",
         "保留修改时间最旧的",
-        "重复组内保留修改时间最旧的那一份。"
-      ],
-      [
-        "largest",
-        "保留最大的",
-        "重复组内保留体积最大的那一份；组内内容相同则体积一致，此时按路径稳定决胜。"
-      ],
-      [
-        "smallest",
-        "保留最小的",
-        "重复组内保留体积最小的那一份；组内内容相同则体积一致，此时按路径稳定决胜。"
+        "重复组内保留修改时间最旧的那一份；平局按路径稳定决胜。"
       ],
       [
         "shortest_name",
         "保留名称最短的",
-        "重复组内保留文件名最短的那一份；再按路径稳定决胜。"
+        "重复组内保留文件名（UTF-16 单元数）最短的那一份；平局按路径稳定决胜。"
       ]
     ],
-    "tools": ["organizer"]
+    "tools": [
+      "organizer"
+    ]
   },
   {
-    "section": "去重",
-    "key": "duplicate_action",
-    "title": "重复文件处理方式",
-    "hint": "硬链接会共享内容，修改任一名称会影响其他名称；只适用于同一卷。",
+    "section": "安全与性能",
+    "key": "global_delete",
+    "title": "全局文件删除方式",
+    "hint": "重复副本与各类“跟随全局”的清理默认按此方式处理；保留时不生成文件删除，归类、名称清理与最终空目录清理照常。删除一律为永久删除、不经回收站。",
     "kind": "choice",
     "choices": [
-      [
-        "delete",
-        "删除其余副本",
-        "每组只保留一份，其余按删除方式处理；是否重复只依据分析期算出的整文件哈希，删除前不再读取文件内容。"
-      ],
-      [
-        "hardlink",
-        "保留路径并改为硬链接",
-        "路径都保留，但共享同一份磁盘数据；只适用于同一卷，修改任一名称会影响其他名称。"
-      ]
-    ],
-    "tools": ["organizer"],
-    "tier": "advanced"
-  },
-  {
-    "section": "去重",
-    "key": "duplicate_delete",
-    "title": "重复文件删除方式",
-    "hint": "选择“不删除”后不生成删除操作；“硬链接”方式下重复文件仍会改为硬链接。",
-    "kind": "choice",
-    "choices": [
-      [
-        "global",
-        "跟随全局",
-        "使用“安全与性能 → 全局默认删除方式”的当前值处理重复文件。"
-      ],
       [
         "keep",
         "保留，不删除",
-        "重复文件全部留在磁盘上，不生成删除操作；处理方式为“硬链接”时仍会改为硬链接。"
+        "重复副本和“跟随全局”的清理项都不删除文件；归类与实际空目录清理照常进行。"
       ],
       [
         "permanent",
         "永久删除",
-        "直接永久删除重复文件，不可恢复。"
+        "重复副本和“跟随全局”的清理项永久删除，不可恢复；仍可按清理类别单独覆盖。"
       ]
     ],
-    "tools": ["organizer"],
-    "tier": "advanced"
-  },
-  {
-    "section": "归类",
-    "key": "classify",
-    "title": "文件归类方式",
-    "hint": "可关闭；已经位于输出目录的文件不会再次嵌套归类。",
-    "kind": "choice",
-    "choices": [
-      [
-        "off",
-        "不归类",
-        "不移动文件到分类目录；其余去重、冲突和清理规则仍然生效。"
-      ],
-      [
-        "extension",
-        "按扩展名：PDF / MP4",
-        "按扩展名建目录，例如 pdf/、mp4/；已在输出目录内的文件不会再次嵌套归类。"
-      ],
-      [
-        "category",
-        "按大类：文档 / 图片 / 视频",
-        "按文档/图片/视频等大类建目录；已在输出目录内的文件不会再次嵌套归类。"
-      ],
-      [
-        "date",
-        "按修改日期：年 / 月",
-        "按文件修改时间建年/月目录；已在输出目录内的文件不会再次嵌套归类。"
-      ],
-      [
-        "custom",
-        "按自定义扩展名规则",
-        "使用下方“自定义分类规则”匹配；未匹配的放入“其他”。"
-      ]
-    ],
-    "tools": ["organizer"]
-  },
-  {
-    "section": "归类",
-    "key": "output_dir",
-    "title": "归类输出目录名称",
-    "hint": "留空表示分类目录直接建在选定目录根下；填名称（如“已整理”）则先建该子目录再分类。",
-    "kind": "text",
-    "choices": [],
-    "tools": ["organizer"]
-  },
-  {
-    "section": "归类",
-    "key": "preserve_structure",
-    "title": "在分类目录内保留原相对路径",
-    "hint": "默认开启：分类下保留原文件夹层级；关闭后扁平归类，同名自动改名。",
-    "kind": "bool",
-    "choices": [],
-    "tools": ["organizer"]
-  },
-  {
-    "section": "归类",
-    "key": "custom_categories",
-    "title": "自定义分类规则",
-    "hint": "格式：文档=pdf,docx;图片=jpg,png；未匹配的放入“其他”。",
-    "kind": "text",
-    "choices": [],
-    "tools": ["organizer"]
+    "tools": [
+      "organizer"
+    ]
   },
   {
     "section": "归类",
     "key": "large_files",
     "title": "大文件单独归类",
-    "hint": "优先放入输出目录下的“大文件”目录。",
+    "hint": "默认关闭。开启后命中的文件进入「大文件/创建年/创建月」，优先于扩展名大类；Git 项目始终整体移入「Git项目集合」（固定行为，无开关）；其余文件固定归入「大类/创建年/创建月」。",
     "kind": "bool",
     "choices": [],
-    "tools": ["organizer"],
+    "tools": [
+      "organizer"
+    ],
     "tier": "advanced"
   },
   {
     "section": "归类",
-    "key": "large_threshold_gib",
-    "title": "大文件阈值（GiB）",
-    "hint": "使用 64 位大小计算；归类前先显示具体移动计划。",
+    "key": "large_threshold_bytes",
+    "title": "大文件阈值",
+    "hint": "按文件逻辑字节数大于等于阈值命中；可用 B/KiB/MiB/GiB/TiB 单位，默认 1 GiB（1073741824）。切换规则或阈值后需重新分析。",
     "kind": "number",
     "choices": [],
-    "tools": ["organizer"],
-    "tier": "advanced"
-  },
-  {
-    "section": "归类",
-    "key": "merge_directories",
-    "title": "合并不同位置的同名目录",
-    "hint": "以层级更浅、名称排序更前的目录为目标；原路径逐项显示在计划中。",
-    "kind": "bool",
-    "choices": [],
-    "tools": ["organizer"],
-    "tier": "advanced"
-  },
-  {
-    "section": "归类",
-    "key": "flatten_single_child",
-    "title": "消除只有一个子项的目录层级",
-    "hint": "可能改变上下文或相对路径，因此默认关闭。",
-    "kind": "bool",
-    "choices": [],
-    "tools": ["organizer"],
-    "tier": "advanced"
+    "tools": [
+      "organizer"
+    ],
+    "tier": "advanced",
+    "unit": "bytes"
   },
   {
     "section": "清理",
     "key": "clean_junk",
-    "title": "清理常见系统附属文件",
-    "hint": "Thumbs.db / .DS_Store / desktop.ini / __MACOSX / ._；默认开启，系统会再生缓存类文件。",
+    "title": "系统附属文件清理",
+    "hint": "默认开启。精确匹配 Thumbs.db / .DS_Store / desktop.ini、以 ._ 开头的文件，及 __MACOSX 目录范围内的普通文件；逐文件列入计划，不整树递归删除。",
     "kind": "bool",
     "choices": [],
-    "tools": ["organizer"]
+    "tools": [
+      "organizer"
+    ]
   },
   {
     "section": "清理",
     "key": "junk_delete",
     "title": "系统附属文件的删除方式",
-    "hint": "只在开启「清理常见系统附属文件」时生效；默认跟随全局设置。",
+    "hint": "只在开启「系统附属文件清理」时生效；默认跟随全局设置。",
     "kind": "choice",
     "choices": [
       [
         "global",
         "跟随全局",
-        "使用“安全与性能 → 全局默认删除方式”的当前值处理系统附属文件。"
+        "使用“安全与性能 → 全局文件删除方式”的当前值处理系统附属文件。"
       ],
       [
         "keep",
@@ -292,29 +189,33 @@
         "直接永久删除系统附属文件，不可恢复。"
       ]
     ],
-    "tools": ["organizer"],
+    "tools": [
+      "organizer"
+    ],
     "tier": "advanced"
   },
   {
     "section": "清理",
     "key": "clean_temp",
-    "title": "清理临时文件和备份",
-    "hint": "包含 .tmp / .temp / .bak / Office ~$ 文件；可能有用，默认关闭。",
+    "title": "临时与备份清理",
+    "hint": "默认关闭。最后扩展名为 .tmp / .temp / .bak，或文件名以 ~$ 开头（Office 临时文件）；名称中间含这些字串不算命中。",
     "kind": "bool",
     "choices": [],
-    "tools": ["organizer"]
+    "tools": [
+      "organizer"
+    ]
   },
   {
     "section": "清理",
     "key": "temp_delete",
     "title": "临时与备份文件的删除方式",
-    "hint": "只在开启「清理临时文件和备份」时生效；默认跟随全局设置。",
+    "hint": "只在开启「临时与备份清理」时生效；默认跟随全局设置。",
     "kind": "choice",
     "choices": [
       [
         "global",
         "跟随全局",
-        "使用“安全与性能 → 全局默认删除方式”的当前值处理临时与备份文件。"
+        "使用“安全与性能 → 全局文件删除方式”的当前值处理临时与备份文件。"
       ],
       [
         "keep",
@@ -327,30 +228,33 @@
         "直接永久删除临时与备份文件，不可恢复。"
       ]
     ],
-    "tools": ["organizer"],
+    "tools": [
+      "organizer"
+    ],
     "tier": "advanced"
   },
   {
     "section": "清理",
     "key": "clean_zero",
-    "title": "清理零字节文件",
-    "hint": "空文件可能是标记文件（如 .gitkeep）；默认关闭，开启后按本项的删除方式处理。",
+    "title": "零字节文件清理",
+    "hint": "默认关闭。条件为普通文件逻辑长度等于 0（不是“内容全为零”的非空文件）；全局保留时仍可对本项显式选择永久删除。",
     "kind": "bool",
     "choices": [],
-    "tools": ["organizer"],
-    "tier": "advanced"
+    "tools": [
+      "organizer"
+    ]
   },
   {
     "section": "清理",
     "key": "zero_delete",
     "title": "零字节文件的删除方式",
-    "hint": "只在开启「清理零字节文件」时生效；默认跟随全局设置。",
+    "hint": "只在开启「零字节文件清理」时生效；默认跟随全局设置。",
     "kind": "choice",
     "choices": [
       [
         "global",
         "跟随全局",
-        "使用“安全与性能 → 全局默认删除方式”的当前值处理零字节文件。"
+        "使用“安全与性能 → 全局文件删除方式”的当前值处理零字节文件。"
       ],
       [
         "keep",
@@ -363,114 +267,106 @@
         "直接永久删除零字节文件，不可恢复。"
       ]
     ],
-    "tools": ["organizer"],
+    "tools": [
+      "organizer"
+    ],
     "tier": "advanced"
   },
   {
     "section": "清理",
     "key": "clean_copy_name",
-    "title": "去重后清理保留文件的副本后缀",
-    "hint": "只有实际确认过相同内容的保留者才会去掉 (1) / Copy / 副本；中文「副本」紧贴文件名（如「报告副本.pdf」）无分隔符也会被识别并去掉；硬链接模式下不适用。",
+    "title": "副本后缀清理",
+    "hint": "默认开启。名称末尾的 (N) 转为 _N（如 report (1).pdf → report_1.pdf），“- Copy”/「副本」标记移除；复合扩展名与编号分卷后缀整体保留；不限去重保留者。",
     "kind": "bool",
     "choices": [],
-    "tools": ["organizer"],
-    "tier": "advanced"
+    "tools": [
+      "organizer"
+    ]
   },
   {
     "section": "清理",
     "key": "normalize_names",
-    "title": "规范化文件名",
-    "hint": "Unicode NFC、合并连续空白；不随意删除正常字符。默认开启。",
+    "title": "NFC 与连续空白规范化",
+    "hint": "默认开启。文件名主体做 Unicode NFC、连续空白压成一个空格并去首尾空白；不改扩展名、不删正常字符。",
     "kind": "bool",
     "choices": [],
-    "tools": ["organizer"],
-    "tier": "advanced"
+    "tools": [
+      "organizer"
+    ]
   },
   {
     "section": "清理",
     "key": "fix_extension",
-    "title": "修正错误的文件扩展名",
-    "hint": "按内容签名检测真实类型并修正（例如 jpg 误存成 png）；更名列入计划，不直接修改。",
+    "title": "内容签名修正扩展名",
+    "hint": "默认关闭。分析阶段按内容签名确定真实类型，确认错误后改名并列入计划；签名不足以确定类型时不改名。",
     "kind": "bool",
     "choices": [],
-    "tools": ["organizer"]
+    "tools": [
+      "organizer"
+    ],
+    "tier": "advanced"
   },
   {
     "section": "安全与性能",
     "key": "recursive",
-    "title": "包含全部子目录",
-    "hint": "关闭时只扫描所选目录的直接子项，会明确提示范围缩小。",
+    "title": "递归扫描",
+    "hint": "默认扫描所选目录的全部后代。关闭时只处理根直接包含的普通文件；「递归解压」成功解开的包会永久删除原包及分卷（不可恢复），无法解开的包移入「解压失败」目录。",
     "kind": "bool",
     "choices": [],
-    "tools": ["extract", "organizer"]
+    "tools": [
+      "extract",
+      "organizer"
+    ]
   },
   {
     "section": "安全与性能",
     "key": "include_hidden",
-    "title": "包含隐藏文件",
-    "hint": "默认包含隐藏属性资料；关闭后明确提示范围缩小（链接和程序工作目录仍然排除）。",
+    "title": "包含隐藏资料",
+    "hint": "默认包含隐藏属性资料；关闭后明确提示范围缩小（Git 目录、链接边界与「解压失败」容器仍固定排除）。",
     "kind": "bool",
     "choices": [],
-    "tools": ["extract", "organizer"]
+    "tools": [
+      "extract",
+      "organizer"
+    ],
+    "tier": "advanced"
   },
   {
     "section": "安全与性能",
     "key": "include_system",
-    "title": "包含 Windows 系统属性文件",
-    "hint": "默认包含系统属性资料；关闭后明确提示范围缩小；始终拒绝直接整理 Windows 安装目录。",
+    "title": "包含系统属性资料",
+    "hint": "默认包含系统属性资料；关闭后明确提示范围缩小；始终拒绝直接处理 Windows 安装目录。",
     "kind": "bool",
     "choices": [],
-    "tools": ["extract", "organizer"],
+    "tools": [
+      "extract",
+      "organizer"
+    ],
     "tier": "advanced"
   },
   {
     "section": "安全与性能",
     "key": "exclusions",
-    "title": "排除路径规则",
-    "hint": "分号分隔的 glob；匹配相对于所选目录的路径；* 默认可匹配路径分隔符，即可跨多层目录命中。默认留空（不额外排除）；Git 目录始终整树排除，不受本项与开关影响。",
+    "title": "排除 glob",
+    "hint": "分号分隔；* 可跨 / 匹配，? 恰好一个字符，按 Windows 口径忽略大小写；目录命中整树排除。默认留空。Git 目录、「解压失败」容器与链接边界固定优先，无法用模式重新纳入。",
     "kind": "text",
     "choices": [],
-    "tools": ["extract", "organizer"],
-    "tier": "advanced"
-  },
-  {
-    "section": "安全与性能",
-    "key": "global_delete",
-    "title": "全局默认删除方式",
-    "hint": "重复文件与各类清理的删除方式默认跟随此项，且可逐项单独覆盖；删除一律为永久删除，不经回收站、不可恢复。",
-    "kind": "choice",
-    "choices": [
-      [
-        "keep",
-        "保留，不删除",
-        "各类“跟随全局”的删除项默认都不删文件；仍可在单项里覆盖。"
-      ],
-      [
-        "permanent",
-        "永久删除",
-        "各类“跟随全局”的删除项默认永久删除，不可恢复；仍可在单项里覆盖。"
-      ]
+    "tools": [
+      "extract",
+      "organizer"
     ],
-    "tools": ["extract", "organizer"]
+    "tier": "advanced"
   },
   {
     "section": "安全与性能",
     "key": "hash_workers",
-    "title": "Hash 并行工作线程",
-    "hint": "1～16；机械盘通常选择 1，SSD 可适当增加，不默认拉满磁盘。",
+    "title": "哈希并行线程",
+    "hint": "1～16，默认 6；机械盘建议 1，SSD 可适当增加。整理成功后的最终空目录清理是固定步骤（不可关闭）。",
     "kind": "number",
     "choices": [],
-    "tools": ["organizer"],
-    "tier": "advanced"
-  },
-  {
-    "section": "安全与性能",
-    "key": "reserve_gib",
-    "title": "始终预留磁盘空间（GiB）",
-    "hint": "解压前检查总需求，运行时持续检查剩余空间。",
-    "kind": "number",
-    "choices": [],
-    "tools": ["extract"],
+    "tools": [
+      "organizer"
+    ],
     "tier": "advanced"
   }
 ]

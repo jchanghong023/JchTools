@@ -8,7 +8,7 @@
 )]
 use jchtools::{
     archive::QUARANTINE_DIR_NAME,
-    config::{ClassifyMode, Config, DeleteMode},
+    config::{Config, DeleteMode},
     control::Context,
     db::Database,
     engine,
@@ -68,7 +68,7 @@ impl Fixture {
 fn base() -> Config {
     Config {
         global_delete: DeleteMode::Permanent,
-        classify: ClassifyMode::Off,
+        // 归类按 C-05 恒开启（大类/创建年/创建月），不再有 classify 开关。
         dedup_other_names: true,
         ..Config::default()
     }
@@ -186,10 +186,6 @@ fn child_git_tree_excluded_and_ancestors_untouched() {
         "Git 子树内容不得进入盘点：{:#?}",
         task.summary
     );
-    assert_eq!(
-        task.summary.planned_empty, 0,
-        "Git 祖先目录不得按空目录规划（否则会间接改动 Git 树）"
-    );
     let db = Database::open_existing(&task.directory).unwrap();
     let git_files: i64 = db
         .conn
@@ -201,26 +197,63 @@ fn child_git_tree_excluded_and_ancestors_untouched() {
         .unwrap();
     assert_eq!(git_files, 0, "Git 子树文件不得入库（也就不参与哈希）");
     let actions = db.actions_page(0, 1000).unwrap();
+    drop(db);
+    // Git 树内部不得被规划任何动作；项目根自身按 C-14 整体移入「Git项目集合」。
     assert!(
         actions
             .iter()
-            .all(|action| !action.source.starts_with("only_")),
-        "Git 子树与祖先不得出现在计划里：{actions:#?}"
+            .all(|action| !action.source.starts_with("only_dir/proj/")
+                && !action.source.starts_with("only_file/proj/")),
+        "Git 子树内部不得出现在计划里：{actions:#?}"
     );
-    drop(db);
+    let git_moves = actions
+        .iter()
+        .filter(|a| {
+            a.kind == jchtools::model::ActionKind::Move
+                && (a.source == "only_dir/proj" || a.source == "only_file/proj")
+        })
+        .count();
+    assert_eq!(git_moves, 2, "两个 Git 项目整体移入集合（C-14）");
+    drop(actions);
     assert!(
         events(&task.directory).contains("Git"),
         "跳过 Git 目录必须明确提示：{}",
         events(&task.directory)
     );
     engine::apply(&task.directory, Context::default()).unwrap();
-    assert!(f.root.join("only_dir/proj/note.txt").exists());
-    assert!(f.root.join("only_dir/proj/.git/HEAD").exists());
-    assert!(f.root.join("only_file/proj/note.txt").exists());
-    assert!(f.root.join("only_file/proj/.git").is_file());
-    assert!(f.root.join("only_dir/proj").is_dir());
-    assert!(f.root.join("only_file/proj").is_dir());
-    assert!(f.root.join("other/keep.txt").exists());
+    // 同名项目按 C-17/C-18 加最近来源目录前缀消解，整树内容原样随移动。
+    assert!(f.root.join("Git项目集合/only_dir_proj/note.txt").exists());
+    assert!(f.root.join("Git项目集合/only_dir_proj/.git/HEAD").exists());
+    assert!(
+        f.root.join("Git项目集合/only_file_proj/note.txt").exists(),
+        ".git 为文件（worktree 形态）的项目同样整树移动"
+    );
+    assert!(f.root.join("Git项目集合/only_file_proj/.git").is_file());
+    assert!(
+        exists_somewhere(&f.root, "keep.txt"),
+        "Git 之外的普通文件照常归类保留"
+    );
+}
+
+/// 在根下按文件名递归查找（C-05 归类恒移动文件，断言“内容仍在”需按名找）。
+fn exists_somewhere(root: &std::path::Path, name: &str) -> bool {
+    fn walk(dir: &std::path::Path, name: &str) -> bool {
+        let Ok(entries) = fs::read_dir(dir) else {
+            return false;
+        };
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if path.is_dir() {
+                if walk(&path, name) {
+                    return true;
+                }
+            } else if entry.file_name().to_string_lossy() == name {
+                return true;
+            }
+        }
+        false
+    }
+    walk(root, name)
 }
 
 // 覆盖 H-05/C-07/C-09（成功整理后收尾清理新产生的空目录链与空的「解压失败」目录）
@@ -231,12 +264,13 @@ fn final_cleanup_removes_newly_empty_chain_and_empty_quarantine() {
     f.dir("vault/deep");
     f.dir(QUARANTINE_DIR_NAME);
     f.write("move_src/report.pdf", b"pdf");
-    let mut config = base();
-    config.classify = ClassifyMode::Extension;
+    let config = base();
+    // C-05 固定归类「大类/创建年/创建月」：Fixture::write 不设创建时间 → 当前年/月。
+    let month_dir = year_month_path();
     let task = f.plan(config);
     engine::apply(&task.directory, Context::default()).unwrap();
     assert!(
-        f.root.join("PDF/move_src/report.pdf").exists(),
+        f.root.join(format!("文档/{month_dir}/report.pdf")).exists(),
         "归类目标必须落盘"
     );
     assert!(
@@ -248,7 +282,10 @@ fn final_cleanup_removes_newly_empty_chain_and_empty_quarantine() {
         !f.root.join(QUARANTINE_DIR_NAME).exists(),
         "实际为空的「解压失败」目录仍按 H-05 清理"
     );
-    assert_eq!(fs::read(f.root.join("TXT/keep.txt")).unwrap(), b"payload");
+    assert_eq!(
+        fs::read(f.root.join(format!("文档/{month_dir}/keep.txt"))).unwrap(),
+        b"payload"
+    );
     assert_eq!(status(&task.directory), "finished");
 }
 
@@ -357,10 +394,18 @@ fn broken_hash_cache_degrades_without_failing() {
         events(&task.directory)
     );
     engine::apply(&task.directory, Context::default()).unwrap();
-    assert!(
-        f.root.join("a.txt").exists() ^ f.root.join("b.txt").exists(),
-        "恰好保留一个副本"
-    );
+    // 保留者随 C-05 固定归类移动；按内容判断恰好保留一个副本。
+    let remaining = fs::read(f.root.join("文档").join(year_month_path()).join("a.txt"))
+        .ok()
+        .or_else(|| fs::read(f.root.join("文档").join(year_month_path()).join("b.txt")).ok());
+    assert_eq!(remaining, Some(b"same".to_vec()), "恰好保留一个副本");
+}
+
+/// 当前本地年/月（C-05：Fixture::write 不设创建时间 → 归类按“现在”落位）。
+fn year_month_path() -> String {
+    use chrono::Datelike;
+    let now = chrono::Local::now();
+    format!("{:04}/{:02}", now.year(), now.month())
 }
 
 // 覆盖 H-06（Git 树内的崩溃残留不得被清扫）
@@ -374,10 +419,16 @@ fn stale_link_temp_inside_git_tree_is_not_swept() {
     filetime::set_file_mtime(&stale, filetime::FileTime::from_unix_time(0, 0)).unwrap();
     let task = f.plan(base());
     engine::apply(&task.directory, Context::default()).unwrap();
-    assert!(stale.exists(), "Git 树内的一切内容都不得被删除（H-06）");
+    // 项目随 C-14 整体移入集合；树内的崩溃残留随树移动且绝不被清扫（H-06）。
+    assert!(
+        f.root
+            .join("Git项目集合/proj/.jchtools-link-deadbeef")
+            .exists(),
+        "Git 树内的一切内容都不得被删除（H-06）"
+    );
 }
 
-// 覆盖 H-06（Git 树内的空目录不得被整理清理，树本身不得被改名/删除）
+// 覆盖 H-06（Git 树内的空目录不得被整理清理，树本身只随项目整体移动）
 #[test]
 fn empty_directories_inside_git_tree_are_preserved() {
     let f = Fixture::new();
@@ -387,10 +438,11 @@ fn empty_directories_inside_git_tree_are_preserved() {
     f.dir("proj/sub/deep");
     let task = f.plan(base());
     engine::apply(&task.directory, Context::default()).unwrap();
-    assert!(f.root.join("proj/emptydir").is_dir());
-    assert!(f.root.join("proj/sub/deep").is_dir());
-    assert!(f.root.join("proj").is_dir());
-    assert!(f.root.join("proj/.git/HEAD").is_file());
+    let moved = f.root.join("Git项目集合/proj");
+    assert!(moved.join("emptydir").is_dir());
+    assert!(moved.join("sub/deep").is_dir());
+    assert!(moved.is_dir());
+    assert!(moved.join(".git/HEAD").is_file());
 }
 
 // 覆盖 H-05/C-07：无法删除实际空目录时，必须报告未完成而非成功。

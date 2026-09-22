@@ -1,5 +1,5 @@
 use crate::{
-    config::{ClassifyMode, DeleteMode, DuplicateAction},
+    config::DeleteMode,
     db::FILE_COLUMNS,
     engine::Job,
     fsutil,
@@ -7,8 +7,15 @@ use crate::{
     rules,
 };
 use anyhow::{Context, Result};
+use chrono::{Datelike, Offset};
 use rusqlite::{params, OptionalExtension};
-use std::path::{Path, PathBuf};
+use std::{
+    collections::{HashMap, HashSet},
+    path::Path,
+};
+
+/// C-14 固定集合容器名（建在本次所选根下）。
+pub const GIT_COLLECTION_DIR: &str = "Git项目集合";
 
 fn action(file: &FileRecord, kind: ActionKind, reason: &str, mode: DeleteMode) -> Action {
     Action {
@@ -31,37 +38,18 @@ fn remove_candidate(
     keeper: Option<&FileRecord>,
     reason: &str,
     mode: DeleteMode,
-    hardlink: bool,
 ) -> Result<()> {
-    // Hardlink 不销毁内容，只是换名去重：即使删除方式为 Keep 也应生成计划。
-    if mode == DeleteMode::Keep && !hardlink {
+    // S-02/C-04：保留时不生成删除操作，副本仍按其余已启用规则参与归类和清理。
+    if mode == DeleteMode::Keep {
         return Ok(());
     }
-    let mode = if hardlink && mode == DeleteMode::Keep {
-        DeleteMode::Permanent
-    } else {
-        mode
-    };
-    let mut planned = action(
-        file,
-        if hardlink {
-            ActionKind::Hardlink
-        } else {
-            ActionKind::Delete
-        },
-        reason,
-        mode,
-    );
+    let mut planned = action(file, ActionKind::Delete, reason, mode);
     if let Some(keeper) = keeper {
         planned.keeper = Some((keeper.rel.clone(), keeper.snapshot.clone()));
     }
     job.db.add_action(&planned)?;
     job.db.deactivate_file_id(file.id)?;
-    if hardlink {
-        job.summary.planned_link += 1;
-    } else {
-        job.summary.planned_delete += 1;
-    }
+    job.summary.planned_delete += 1;
     // Already-hardlinked files do not represent distinct physical allocation.
     if file.snapshot.links <= 1 {
         job.summary.candidate_bytes = job
@@ -96,7 +84,7 @@ fn cleanup_candidates(job: &mut Job) -> Result<()> {
                 // C-08：三类清理各自独立覆盖删除方式，未覆盖时跟随全局文件删除方式。
                 let mode =
                     rules::cleanup_delete(&job.config, kind).resolve(job.config.global_delete);
-                remove_candidate(job, &file, None, reason, mode, false)?;
+                remove_candidate(job, &file, None, reason, mode)?;
             }
         }
     }
@@ -148,7 +136,7 @@ fn deduplicate(job: &mut Job) -> Result<()> {
             if let Some(keeper_id) = keeper_id {
                 let keeper = job.db.file(keeper_id)?;
                 // C-04：只有可靠标识 + 两侧链接数证明是同一物理文件时才跳过；标识退化
-                // （如 Windows 卷不提供索引）时不得据此跳过去重，也不得重复建链。
+                // （如 Windows 卷不提供索引）时不得据此跳过去重，也不得重复计数。
                 if rules::identity_proves_same_file(&keeper, &file) {
                     job.log(
                         "去重",
@@ -167,43 +155,11 @@ fn deduplicate(job: &mut Job) -> Result<()> {
                 } else {
                     "名称不同但完整 Hash 相同"
                 };
-                let mode = job
-                    .config
-                    .duplicate_delete
-                    .resolve(job.config.global_delete);
-                let mut hardlink = job.config.duplicate_action == DuplicateAction::Hardlink;
-                // 跨卷硬链接在执行期必然失败，规划阶段就降级为删除，避免计划与结果不符。
-                if hardlink {
-                    let vol =
-                        |id: &str| -> String { id.split(':').next().unwrap_or("").to_string() };
-                    let same_volume =
-                        vol(&keeper.snapshot.identity) == vol(&file.snapshot.identity);
-                    if !same_volume {
-                        hardlink = false;
-                        if mode == DeleteMode::Keep {
-                            job.log(
-                                "去重",
-                                &file.rel,
-                                &keeper.rel,
-                                "跳过",
-                                "跨卷无法硬链接，且删除方式为保留",
-                                file.snapshot.size,
-                            )?;
-                        } else {
-                            job.log(
-                                "去重",
-                                &file.rel,
-                                &keeper.rel,
-                                "降级",
-                                "跨卷无法硬链接，改为按删除规则处理",
-                                file.snapshot.size,
-                            )?;
-                        }
-                    }
-                }
+                // C-04/S-02：副本处置只有「保留副本」和「永久删除副本」，随全局文件删除方式。
+                let mode = job.config.global_delete;
                 // 清理命中且该类清理的删除方式为「保留」的文件由清理规则管辖（保留承诺）：
                 // cleanup 阶段已让其保持 active，这里若无守卫，同组 keeper 先注册时它会按
-                // duplicate_delete 被删，结果随排序翻转。
+                // 全局方式被删，结果随排序翻转。
                 if rules::cleanup_reason(&file.rel, file.snapshot.size, &job.config).is_some() {
                     job.log(
                         "去重",
@@ -215,10 +171,7 @@ fn deduplicate(job: &mut Job) -> Result<()> {
                     )?;
                     continue;
                 }
-                remove_candidate(job, &file, Some(&keeper), reason, mode, hardlink)?;
-                if mode != DeleteMode::Keep {
-                    job.db.mark_cleanable(keeper_id)?;
-                }
+                remove_candidate(job, &file, Some(&keeper), reason, mode)?;
             } else if rules::cleanup_reason(&file.rel, file.snapshot.size, &job.config).is_none() {
                 // 清理命中文件即使该类的删除方式为「保留」（remove_candidate 直接返回、文件仍 active=1）
                 // 也不得进入 keepers 成为去重唯一保留者：否则正常副本反被删除，只留下垃圾文件。
@@ -230,119 +183,548 @@ fn deduplicate(job: &mut Job) -> Result<()> {
     Ok(())
 }
 
-fn directory_target(job: &Job, file: &FileRecord, under_output: bool) -> Result<PathBuf> {
-    let original = Path::new(&file.rel);
-    let mut parent = original.parent().unwrap_or(Path::new("")).to_path_buf();
-    // 已在输出目录之下的文件不再参与合并与扁平化：输出目录内的分类子目录与树中
-    // 同名外部目录重名时，合并会把已归类文件拉回外部目录，下一轮归类又移回来，
-    // 跨运行往复移动、计划永不收敛（under_output 只在此处豁免，不影响归类跳过逻辑）。
-    if job.config.merge_directories && !parent.as_os_str().is_empty() && !under_output {
-        let mut merged_parent = None;
-        for ancestor in parent.ancestors() {
-            let Some(name) = ancestor.file_name().and_then(|s| s.to_str()) else {
+// ---------------------------------------------------------------------------
+// C-05 / C-14 / C-16～C-21：固定归类与统一冲突消解
+// ---------------------------------------------------------------------------
+
+/// Windows 序数忽略大小写的近似折叠（与库内 targets/directories 折叠口径一致；
+/// 非 Windows 平台大小写敏感）。
+fn fold(name: &str) -> String {
+    if cfg!(windows) {
+        name.to_lowercase()
+    } else {
+        name.to_string()
+    }
+}
+fn parent_of(rel: &str) -> &str {
+    match rel.rfind('/') {
+        Some(index) => &rel[..index],
+        None => "",
+    }
+}
+fn same_dir(a: &str, b: &str) -> bool {
+    if cfg!(windows) {
+        a.to_lowercase() == b.to_lowercase()
+    } else {
+        a == b
+    }
+}
+fn same_component(a: &str, b: &str) -> bool {
+    if cfg!(windows) {
+        a.to_lowercase() == b.to_lowercase()
+    } else {
+        a == b
+    }
+}
+/// 附录 A 大类名 + 「大文件」的固定容器集合（C-18 来源链识别用）。
+fn is_category_label(name: &str) -> bool {
+    matches!(
+        name,
+        "视频" | "音频" | "图片" | "文档" | "压缩包" | "程序" | "其他" | "大文件"
+    )
+}
+fn is_year(text: &str) -> bool {
+    text.len() == 4 && text.bytes().all(|b| b.is_ascii_digit())
+}
+fn is_month(text: &str) -> bool {
+    text.len() == 2
+        && text.bytes().all(|b| b.is_ascii_digit())
+        && text.parse::<u8>().is_ok_and(|m| (1..=12).contains(&m))
+}
+/// C-18 来源段：parent 各目录段（最近一级在前），剔除紧邻的标准分类链
+///（附录 A 大类或大文件/四位年/两位月；普通文件要求年月与该项归类时间一致，项目不比对）、
+/// 以及项目来源的直接集合容器「Git项目集合」。段按已开启的 NFC/空白规则规范化（仅普通文件），
+/// 不剥副本标记、不改源目录。
+fn source_levels(
+    parent: &str,
+    date_chain: Option<(&str, &str)>,
+    drop_collection: bool,
+    normalize: bool,
+) -> Vec<String> {
+    let mut segments: Vec<String> = parent
+        .split('/')
+        .filter(|s| !s.is_empty())
+        .map(str::to_string)
+        .collect();
+    if segments.len() >= 3 {
+        let count = segments.len();
+        let (cat, year, month) = (
+            segments[count - 3].clone(),
+            segments[count - 2].clone(),
+            segments[count - 1].clone(),
+        );
+        let chain_matches = is_category_label(&cat)
+            && is_year(&year)
+            && is_month(&month)
+            && date_chain.is_none_or(|(y, m)| y == year && m == month);
+        if chain_matches {
+            segments.truncate(count - 3);
+        }
+    }
+    if drop_collection {
+        if let Some(last) = segments.last() {
+            if same_component(last, GIT_COLLECTION_DIR) {
+                segments.pop();
+            }
+        }
+    }
+    // 最近一级在前（k=1 只加最近的父目录；level_prefix 拼接时再转回外→内顺序）。
+    segments
+        .into_iter()
+        .rev()
+        .map(|segment| {
+            if normalize {
+                rules::normalize_stem(&segment)
+            } else {
+                segment
+            }
+        })
+        .filter(|segment| !segment.is_empty())
+        .collect()
+}
+/// C-18 第 k 级候选前缀：最近 k 个来源段按外→内顺序以 `_` 连接（华东_客户A_正式版_方案.pdf）。
+fn level_prefix(sources: &[String], k: usize) -> String {
+    let take = sources.len().min(k);
+    let mut parts: Vec<&str> = sources[..take].iter().map(String::as_str).collect();
+    parts.reverse();
+    parts.join("_")
+}
+/// C-05 归类时间：创建时间优先，缺失回落修改时间；以分析开始时的系统本地时区解释，
+/// 年四位 / 月两位；无法表示时返回 None（该项不归类，保留并显示原因）。
+fn year_month(stamp_ns: i64, offset: chrono::FixedOffset) -> Option<(String, String)> {
+    let seconds = stamp_ns.div_euclid(1_000_000_000);
+    let subsec = u32::try_from(stamp_ns.rem_euclid(1_000_000_000)).unwrap_or(0);
+    let local = chrono::DateTime::from_timestamp(seconds, subsec)?.with_timezone(&offset);
+    let year = local.year();
+    if !(1..=9999).contains(&year) {
+        return None;
+    }
+    Some((format!("{year:04}"), format!("{:02}", local.month())))
+}
+
+/// 一个待定位项（存活文件或 Git 项目目录）。
+struct Item {
+    id: i64,
+    rel: String,
+    current_name: String,
+    stem: String,
+    extension: String,
+    target_dir: String,
+    sources: Vec<String>,
+    /// 已位于目标目录内（C-21 按位置判定）。
+    in_place: bool,
+    /// 派生名与当前名一致且组内唯一：保持名称与位置，不参与消解、名作固定占用。
+    settled: bool,
+    /// 消解失败原因（该项保留源项）。
+    failed: Option<String>,
+    /// 当前候选完整名。
+    candidate: String,
+    /// 当前来源级数（C-18 的 k；对来源不足的项按可用级数封顶）。
+    k: usize,
+    /// 摘要阶段（0=未进入；1..=29 对应 8,10,…,64 位十六进制）。
+    digest_step: u32,
+    /// C-20 长度触发时已去掉来源段；后续摘要扩展保持无来源形式。
+    digest_no_source: bool,
+    /// C-19 稳定序号兜底（摘要 64 位后追加 _N）。
+    index_suffix: Option<u32>,
+}
+impl Item {
+    fn derived(&self) -> String {
+        format!("{}{}", self.stem, self.extension)
+    }
+    fn source_parent(&self) -> &str {
+        parent_of(&self.rel)
+    }
+    fn digest_candidate(&self, hex_units: usize, no_source: bool) -> Option<String> {
+        let digest = rules::path_digest(&self.rel, hex_units);
+        let nearest = if no_source {
+            None
+        } else {
+            self.sources.first().map(String::as_str)
+        };
+        let base = rules::digest_candidate(nearest, &self.stem, &digest, &self.extension)?;
+        if let Some(index) = self.index_suffix {
+            // 序号追加在最后一个扩展名之前（H-07 同口径，不拆复合扩展名）。
+            let (head, ext) = split_last_extension(&base);
+            return Some(format!("{head}_{index}{ext}"));
+        }
+        Some(base)
+    }
+    /// 当前阶段的候选名（C-18 来源前缀 / C-19 摘要 / C-20 长度受限形式）。
+    fn current_candidate(&self) -> Option<String> {
+        if self.digest_step == 0 {
+            let derived = self.derived();
+            let take = self.k.min(self.sources.len());
+            if take == 0 {
+                return Some(derived);
+            }
+            let prefix = level_prefix(&self.sources, take);
+            let candidate = format!("{prefix}_{derived}");
+            // C-20：逐层候选一旦超过 40 单元立即停止加来源，转无来源段的摘要形式。
+            if candidate.encode_utf16().count() > rules::CONFLICT_YIELD_UNITS {
+                return self.digest_candidate(8, true);
+            }
+            return Some(candidate);
+        }
+        let hex_units = usize::try_from((6 + 2 * self.digest_step).min(64)).unwrap_or(64);
+        self.digest_candidate(hex_units, self.digest_no_source)
+    }
+}
+/// 把完整名拆成「最后一个扩展名前的部分 + 扩展名」（C-19 序号插在扩展名之前）。
+fn split_last_extension(name: &str) -> (&str, &str) {
+    match name.rfind('.') {
+        Some(index) if index > 0 => (&name[..index], &name[index..]),
+        _ => (name, ""),
+    }
+}
+/// 单个目标目录的占用与可用性。
+struct DirPlan {
+    /// 不参与本次操作的占用（fold 后）：范围外磁盘条目、保持原名的已就位项。
+    fixed: HashSet<String>,
+    /// 容器不可用（被文件/链接/读取失败占用）：依赖它的项全部失败（S-01）。
+    blocked: Option<String>,
+}
+impl DirPlan {
+    fn new() -> Self {
+        Self {
+            fixed: HashSet::new(),
+            blocked: None,
+        }
+    }
+}
+
+/// 收集目标目录的磁盘占用：范围外条目与已就位保留项为固定占用；活动项的当前名
+/// 执行后会腾空，不算占用。`moved_roots` 内的目录整树将在执行期先行移走，其内部
+/// 条目不构成占用（C-14 先移动项目，分类目录后创建）。
+fn gather_dir_plans(job: &Job, items: &[Item], moved_roots: &[String]) -> HashMap<String, DirPlan> {
+    let mut dirs: HashMap<String, DirPlan> = HashMap::new();
+    let mut by_dir: HashMap<&str, Vec<usize>> = HashMap::new();
+    for (index, item) in items.iter().enumerate() {
+        if item.failed.is_some() {
+            continue;
+        }
+        by_dir
+            .entry(item.target_dir.as_str())
+            .or_default()
+            .push(index);
+    }
+    for (dir, members) in by_dir {
+        let mut plan = DirPlan::new();
+        let dir_folded = fold(dir);
+        let under_moved_root = moved_roots.iter().any(|root| {
+            let root_folded = fold(root);
+            dir_folded == root_folded || dir_folded.starts_with(&format!("{root_folded}/"))
+        });
+        if !under_moved_root {
+            // 活动且当前就在该目录里的项：当前名执行后会腾空，从占用中排除。
+            let freeing: HashSet<String> = members
+                .iter()
+                .filter(|&&i| !items[i].settled && same_dir(items[i].source_parent(), dir))
+                .map(|&i| fold(&items[i].current_name))
+                .collect();
+            match fsutil::safe_join(&job.root, dir) {
+                Ok(path) => match std::fs::read_dir(&path) {
+                    Ok(entries) => {
+                        for entry in entries.flatten() {
+                            if let Some(name) = entry.file_name().to_str() {
+                                let folded = fold(name);
+                                if !freeing.contains(&folded) {
+                                    plan.fixed.insert(folded);
+                                }
+                            }
+                        }
+                    }
+                    Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                        // NotFound 可能只是“目录尚未创建”，也可能是某个祖先已被普通
+                        // 文件占用（穿过文件组件报路径未找到）：逐段核对，S-01 拒绝把
+                        // 分类目录建到文件之下。
+                        if let Some(reason) = blocked_by_file_ancestor(&job.root, dir) {
+                            plan.blocked = Some(reason);
+                        }
+                    }
+                    Err(error) => {
+                        plan.blocked = Some(format!(
+                            "目标目录存在但无法读取（可能被同名文件占用）：{error}"
+                        ));
+                    }
+                },
+                Err(error) => plan.blocked = Some(format!("目标路径不可用：{error:#}")),
+            }
+        }
+        dirs.insert(dir.to_string(), plan);
+    }
+    dirs
+}
+
+/// 目标目录的祖先链上是否存在普通文件占位（目录无法创建，S-01）。
+/// 只报告“已存在且不是目录”的组件；尚不存在的组件视为执行期可创建。
+fn blocked_by_file_ancestor(root: &Path, dir: &str) -> Option<String> {
+    let mut current = root.to_path_buf();
+    for segment in dir.split('/') {
+        current.push(segment);
+        match std::fs::symlink_metadata(&current) {
+            Ok(meta) if !meta.is_dir() => {
+                return Some(format!(
+                    "固定容器被普通文件占用（{}）：不删除、不挪走占用项",
+                    current.display()
+                ))
+            }
+            Ok(_) => {}
+            Err(_) => return None,
+        }
+    }
+    None
+}
+
+/// C-17 统一冲突消解：全部活动候选项互不冲突、且不撞任何固定占用为止；
+/// 不同活动组互撞时合并碰撞集合统一继续，不按扫描顺序抢名。
+fn resolve_all(items: &mut [Item], dirs: &mut HashMap<String, DirPlan>) {
+    for item in items.iter_mut() {
+        item.candidate = item.derived();
+    }
+    // 按目标目录 + 派生名分组决定「已就位保持原名」（C-17 / C-21 / 附录 E）：
+    // 组内恰好一个「已就位且派生名与当前名一致」的项 → 它保持原名并作为固定占用，
+    // 其余项退让；两个及以上这样的已就位项 → 全部统一消解；没有 → 全部活动。
+    {
+        let mut groups: HashMap<(String, String), Vec<usize>> = HashMap::new();
+        for (index, item) in items.iter().enumerate() {
+            if item.failed.is_some() {
                 continue;
-            };
-            let mut statement = job
-                .db
-                .conn
-                .prepare("SELECT rel FROM directories WHERE name=?1 ORDER BY depth,rel")?;
-            let candidates = statement
-                .query_map([name.to_lowercase()], |r| r.get::<_, String>(0))?
-                .collect::<rusqlite::Result<Vec<_>>>()?;
-            // 目录名入库时已统一小写（供 Windows 大小写折叠匹配）；非 Windows 大小写
-            // 敏感，必须按 rel 的实际文件名精确比对，否则 Photos/photos 会被误并。
-            let candidate = candidates.into_iter().find(|rel| {
-                cfg!(windows) || Path::new(rel).file_name().and_then(|n| n.to_str()) == Some(name)
-            });
-            if let Some(candidate) = candidate {
-                let dest = Path::new(&candidate);
-                if dest != ancestor && !dest.starts_with(ancestor) {
-                    merged_parent = Some(dest.join(parent.strip_prefix(ancestor)?));
-                    break;
+            }
+            groups
+                .entry((item.target_dir.clone(), fold(&item.derived())))
+                .or_default()
+                .push(index);
+        }
+        for members in groups.values() {
+            let capable: Vec<usize> = members
+                .iter()
+                .copied()
+                .filter(|&i| items[i].in_place && items[i].derived() == items[i].current_name)
+                .collect();
+            if let Some(&only) = capable.first().filter(|_| capable.len() == 1) {
+                items[only].settled = true;
+            }
+        }
+    }
+    // 已就位保留项的名称是固定占用（保护既有项优先于任何候选）。
+    for item in items.iter().filter(|i| i.settled && i.failed.is_none()) {
+        if let Some(plan) = dirs.get_mut(&item.target_dir) {
+            plan.fixed.insert(fold(&item.candidate));
+        }
+    }
+    // C-17/C-18 逐轮消解：碰撞簇里仍有可用来源级数的成员先加前缀（k+1），
+    // 来源已用尽的成员本轮等待——给同伴腾位的时机；当碰撞簇全部成员都用尽来源
+    // 仍撞名（或撞固定占用）时，这些成员进入 C-19 摘要阶梯（8,10,…,64 位，再到
+    // 稳定序号兜底）。这样“x/合同 + y/合同 + 根/合同”在 k=1 即互不相同：根文件
+    // 无来源、保持原名，x/y 加前缀（C-18 最少级数，不按扫描顺序抢名）。
+    let mut rounds = 0usize;
+    loop {
+        rounds += 1;
+        if rounds > 1_000_000 {
+            // 每项阶梯有限且序号兜底单调递增，正常必然收敛；此处防御性终止。
+            break;
+        }
+        let mut by_slot: HashMap<(String, String), Vec<usize>> = HashMap::new();
+        for (index, item) in items.iter().enumerate() {
+            if item.failed.is_some() || item.settled {
+                continue;
+            }
+            by_slot
+                .entry((item.target_dir.clone(), fold(&item.candidate)))
+                .or_default()
+                .push(index);
+        }
+        let mut escalate_prefix: Vec<usize> = Vec::new();
+        let mut escalate_digest: Vec<usize> = Vec::new();
+        for ((dir, name), members) in &by_slot {
+            let fixed_hit = dirs.get(dir).is_some_and(|plan| plan.fixed.contains(name));
+            if members.len() > 1 || fixed_hit {
+                // 仍有来源级数可加的成员先加前缀；其余本轮不动，等同伴分化。
+                let advancing: Vec<usize> = members
+                    .iter()
+                    .copied()
+                    .filter(|&i| items[i].digest_step == 0 && items[i].k < items[i].sources.len())
+                    .collect();
+                if advancing.is_empty() {
+                    escalate_digest.extend(members.iter().copied());
+                } else {
+                    escalate_prefix.extend(advancing);
                 }
             }
         }
-        if let Some(merged) = merged_parent {
-            parent = merged;
+        if escalate_prefix.is_empty() && escalate_digest.is_empty() {
+            break;
         }
-    }
-    if job.config.flatten_single_child && !under_output {
-        loop {
-            if parent.as_os_str().is_empty() {
-                break;
+        for index in escalate_prefix {
+            items[index].k += 1;
+            let no_source = items[index].digest_no_source;
+            let item = &mut items[index];
+            match item.current_candidate() {
+                Some(candidate) => item.candidate = candidate,
+                None => {
+                    item.failed = Some("无法生成合法的冲突消解名称（名称与扩展名过长）".into());
+                }
             }
-            let current = fsutil::safe_join(&job.root, &fsutil::path_string(&parent)?)?;
-            // 单个目录读取失败不应中止整个规划，跳过该文件的扁平化即可。
-            let entries = match std::fs::read_dir(&current) {
-                Ok(rd) => rd
-                    .take(2)
-                    .collect::<std::io::Result<Vec<_>>>()
-                    .unwrap_or_default(),
-                Err(_) => break,
-            };
-            if entries.len() != 1 {
-                break;
-            }
-            parent = parent.parent().unwrap_or(Path::new("")).to_path_buf();
+            let _ = no_source;
         }
-    }
-    Ok(parent)
-}
-/// `path` 是否已位于 `prefix` 之下（逐段比较；Windows 目录不区分大小写，按 Unicode 折叠，
-/// 与 archive.rs 的 NTFS 口径一致——ASCII 折叠会把非 ASCII 仅大小写不同的路径当成两条）。
-fn under_path(path: &Path, prefix: &Path) -> bool {
-    let mut rest = path.components();
-    prefix.components().all(|part| {
-        rest.next().is_some_and(|next| {
-            if cfg!(windows) {
-                next.as_os_str().to_string_lossy().to_lowercase()
-                    == part.as_os_str().to_string_lossy().to_lowercase()
+        for index in escalate_digest {
+            let item = &mut items[index];
+            if item.digest_step == 0 {
+                // 首次进入摘要：保留最近来源（C-19 完整形式）；C-20 超长时内部去源。
+                item.digest_step = 1;
+            } else if item.digest_step < 29 {
+                item.digest_step += 1;
             } else {
-                next == part
+                // 摘要 64 位仍冲突：稳定序号兜底，逐次递增直到可用。
+                item.index_suffix = Some(item.index_suffix.map_or(1, |n| n + 1));
             }
-        })
-    })
-}
-fn target_will_be_free(job: &Job, path: &Path, rel: &str, source_rel: &str) -> Result<bool> {
-    // Windows 大小写不敏感（Unicode 折叠口径，同 under_path）：仅大小写不同的重命名
-    // （如 PHOTO.JPE → PHOTO.jpg）时，try_exists 对同一物理文件返回 true，必须视为可腾空，
-    // 否则会错误生成 " (1)" 后缀。
-    if cfg!(windows) && rel.to_lowercase() == source_rel.to_lowercase() {
-        return Ok(true);
+            match item.current_candidate() {
+                Some(candidate) => item.candidate = candidate,
+                None => {
+                    item.failed = Some("无法生成合法的冲突消解名称（名称与扩展名过长）".into());
+                }
+            }
+        }
     }
-    // symlink_metadata 不跟随链接：损坏的符号链接也算目录项已存在。
-    // 仅 NotFound 视为空闲；权限/IO 错误不得假定目标不存在，否则计划与执行不一致。
-    match std::fs::symlink_metadata(path) {
-        Ok(_) => {}
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(true),
-        Err(error) => return Err(error.into()),
-    }
-    // 被计划删除或移走的路径执行后会腾空，可以复用原名，不必生成 " (1)" 后缀。
-    let freeing: bool = job.db.conn.query_row(
-        "SELECT EXISTS(SELECT 1 FROM actions WHERE source=?1 AND kind IN (?2,?3) AND selected=1)",
-        params![
-            rel,
-            serde_json::to_string(&ActionKind::Delete)?,
-            serde_json::to_string(&ActionKind::Move)?
-        ],
-        |r| r.get(0),
-    )?;
-    Ok(freeing)
 }
+
+/// C-14：Git 项目整体移入所选根下的「Git项目集合」。
+/// 返回已计划移动的项目根列表（供文件归类阶段忽略其内部占用）。
 #[cfg_attr(
     feature = "perf-tracing",
-    tracing::instrument(target = "perf", name = "plan_moves", skip_all)
+    tracing::instrument(target = "perf", name = "plan_git_collection", skip_all)
 )]
-fn moves(job: &mut Job) -> Result<()> {
-    let categories = rules::parse_categories(&job.config.custom_categories)?;
-    // H-06：引擎在扫描事务里把每个被剪枝的 Git 根（直接含 .git 的目录）写进会话临时表
-    // git_roots；被剪枝的目录不在 directories 表里，只有它能回答「目标是否落在 Git 树内」。
-    // 表由同一次扫描建立：缺失属真实错误，不做静默兜底。
-    let git_roots: Vec<String> = {
-        let mut statement = job.db.conn.prepare("SELECT rel FROM git_roots")?;
+fn git_collection(job: &mut Job) -> Result<Vec<String>> {
+    let roots: Vec<String> = {
+        let mut statement = job
+            .db
+            .conn
+            .prepare("SELECT rel FROM git_roots ORDER BY rel")?;
         let rows = statement.query_map([], |row| row.get::<_, String>(0))?;
         rows.collect::<rusqlite::Result<Vec<_>>>()?
     };
+    let mut items: Vec<Item> = Vec::new();
+    for rel in &roots {
+        // 已位于本次所选根的「Git项目集合」下：不再移动（C-10 幂等 / C-14）。
+        if same_component(parent_of(rel), GIT_COLLECTION_DIR) {
+            continue;
+        }
+        let Some(name) = Path::new(rel).file_name().and_then(|s| s.to_str()) else {
+            continue;
+        };
+        let parent = parent_of(rel).to_string();
+        // 项目来源排除分类层级与直接集合容器（C-14），不比对日期（项目无归类时间）。
+        let sources = source_levels(&parent, None, true, false);
+        items.push(Item {
+            id: 0,
+            rel: rel.clone(),
+            current_name: name.to_string(),
+            stem: name.to_string(),
+            extension: String::new(),
+            target_dir: GIT_COLLECTION_DIR.to_string(),
+            sources,
+            in_place: false,
+            settled: false,
+            failed: None,
+            candidate: String::new(),
+            k: 0,
+            digest_step: 0,
+            digest_no_source: false,
+            index_suffix: None,
+        });
+    }
+    if items.is_empty() {
+        // 没有待移入项目：不创建集合目录，全部项目保持 staying。
+        return Ok(Vec::new());
+    }
+    let mut dirs = gather_dir_plans(job, &items, &[]);
+    // 集合容器被文件/链接占用：全部项目保留原位（S-01，不挪走占用项）。
+    if let Some(reason) = dirs
+        .get(GIT_COLLECTION_DIR)
+        .and_then(|plan| plan.blocked.clone())
+    {
+        for item in &mut items {
+            item.failed = Some(reason.clone());
+        }
+    }
+    resolve_all(&mut items, &mut dirs);
+    let mut moved: Vec<String> = Vec::new();
+    for item in &items {
+        if let Some(reason) = &item.failed {
+            job.log(
+                "Git归类",
+                &item.rel,
+                "",
+                "失败",
+                &format!("{reason}；原项目保留在原位置"),
+                0,
+            )?;
+            job.summary.errors += 1;
+            continue;
+        }
+        let target = format!("{GIT_COLLECTION_DIR}/{}", item.candidate);
+        if let Err(error) = fsutil::safe_relative(&target) {
+            job.log(
+                "Git归类",
+                &item.rel,
+                "",
+                "失败",
+                &format!("目标名不合法，原项目保留：{error}"),
+                0,
+            )?;
+            job.summary.errors += 1;
+            continue;
+        }
+        let planned = Action {
+            id: 0,
+            kind: ActionKind::Move,
+            source: item.rel.clone(),
+            target: Some(target.clone()),
+            reason: "Git 项目整体移入「Git项目集合」（C-14：不进入项目内部）".into(),
+            expected: None,
+            keeper: None,
+            hash: None,
+            mode: DeleteMode::Keep,
+            selected: true,
+            state: "pending".into(),
+        };
+        job.db.add_action(&planned)?;
+        job.db.reserve_target(&target, 0)?;
+        job.summary.planned_move += 1;
+        job.summary.planned_git += 1;
+        moved.push(item.rel.clone());
+    }
+    if !moved.is_empty() {
+        job.log(
+            "Git归类",
+            "",
+            "",
+            "提示",
+            &format!(
+                "识别到 {} 个 Git 项目，其中 {} 个将整体移入「{}」（其余项目保持原位）；项目内部不做任何处理",
+                roots.len(),
+                moved.len(),
+                GIT_COLLECTION_DIR
+            ),
+            0,
+        )?;
+    }
+    Ok(moved)
+}
+
+/// C-05 / C-16～C-21：存活文件的固定归类与命名。
+#[cfg_attr(
+    feature = "perf-tracing",
+    tracing::instrument(target = "perf", name = "plan_classify", skip_all)
+)]
+fn classify_files(job: &mut Job, moved_roots: &[String]) -> Result<()> {
+    job.context
+        .status("按「大类/创建年/创建月」确定存活文件的归类目标与最终名称");
+    // C-05：日期采用分析开始时的系统本地时区。
+    let local_offset = chrono::Local::now().offset().fix();
+    let _ = &local_offset;
+    let mut items: Vec<Item> = Vec::new();
     let mut cursor = 0;
     loop {
         let batch = job.db.files(
@@ -355,280 +737,178 @@ fn moves(job: &mut Job) -> Result<()> {
             break;
         }
         for file in batch {
-            cursor = file.id;
             job.context.control.checkpoint()?;
-            let source = fsutil::safe_join(&job.root, &file.rel)?;
-            let original = Path::new(&file.rel);
-            let Some(original_name) = original.file_name().and_then(|s| s.to_str()) else {
+            cursor = file.id;
+            let Some(current_name) = Path::new(&file.rel)
+                .file_name()
+                .and_then(|value| value.to_str())
+            else {
                 continue;
             };
-            let mut name = original_name.to_string();
-            if job.config.clean_copy_name
-                && file.cleanable
-                && job.config.duplicate_action != DuplicateAction::Hardlink
-            {
-                name = rules::strip_copy_name(&name);
-            }
-            if job.config.normalize_names {
-                name = rules::normalize_name(&name);
-            }
-            if job.config.detect_type {
-                // 以点开头且无扩展名的文件（如 .gitignore）不应被 set_extension 追加后缀。
-                let is_dotfile = name.starts_with('.') && Path::new(&name).extension().is_none();
-                if !is_dotfile {
-                    match infer::get_from_path(&source) {
-                        Ok(Some(kind)) => {
-                            let old = Path::new(&name)
-                                .extension()
-                                .and_then(|v| v.to_str())
-                                .unwrap_or("")
-                                .to_lowercase();
-                            // C-08 的保守判定集中在 rules::extension_needs_fix：
-                            // 容器类识别结果只说明外层容器，OOXML/ODF 等家族的专用扩展名与
-                            // 同义别名都不得按更粗的识别结果改名。
-                            if rules::extension_needs_fix(&old, kind.extension()) {
-                                job.log(
-                                    "类型检测",
-                                    &file.rel,
-                                    "",
-                                    "发现",
-                                    &format!("扩展名 {old}，内容识别为 {}", kind.extension()),
-                                    file.snapshot.size,
-                                )?;
-                                if job.config.fix_extension {
-                                    let mut p = PathBuf::from(&name);
-                                    p.set_extension(kind.extension());
-                                    name = fsutil::path_string(&p)?;
-                                }
-                            }
-                        }
-                        Ok(None) => (),
-                        Err(error) => {
-                            job.log("类型检测", &file.rel, "", "跳过", &error.to_string(), 0)?;
+            let (stem, extension) = rules::derive_stem_ext(current_name, &job.config);
+            let mut extension = extension;
+            // C-08 内容签名修正（默认关）：只在分析阶段判定最终扩展名（C-01）。
+            if job.config.fix_extension && !(stem.starts_with('.') && extension.is_empty()) {
+                if let Ok(source) = fsutil::safe_join(&job.root, &file.rel) {
+                    if let Ok(Some(kind)) = infer::get_from_path(&source) {
+                        let old = extension.trim_start_matches('.').to_lowercase();
+                        if rules::extension_needs_fix(&old, kind.extension()) {
+                            extension = format!(".{}", kind.extension());
+                            job.log(
+                                "类型检测",
+                                &file.rel,
+                                "",
+                                "发现",
+                                &format!(
+                                    "扩展名 {old}，内容识别为 {}，将按识别结果修正",
+                                    kind.extension()
+                                ),
+                                file.snapshot.size,
+                            )?;
                         }
                     }
                 }
             }
-            if let Err(error) = fsutil::validate_component(&name) {
-                job.log("命名", &file.rel, "", "跳过", &error.to_string(), 0)?;
-                continue;
-            }
-            let output_dir = job.config.output_dir.as_str();
-            // Output is included in deduplication but never nested under itself on repeated runs.
-            let under_output =
-                !output_dir.is_empty() && under_path(original, Path::new(output_dir));
-            let mut parent = directory_target(job, &file, under_output)?;
-            if !under_output && (job.config.classify != ClassifyMode::Off || job.config.large_files)
-            {
-                let extension = Path::new(&name)
-                    .extension()
-                    .and_then(|v| v.to_str())
-                    .unwrap_or("")
-                    .to_lowercase();
-                let label = if job.config.large_files
-                    && job.config.large_threshold_gib > 0
-                    && file.snapshot.size >= job.config.large_threshold_gib * (1 << 30)
-                {
-                    Some(PathBuf::from("大文件"))
-                } else {
-                    match job.config.classify {
-                        ClassifyMode::Off => None,
-                        ClassifyMode::Extension => Some(PathBuf::from(if extension.is_empty() {
-                            "无扩展名".into()
-                        } else {
-                            extension.to_uppercase()
-                        })),
-                        ClassifyMode::Category => Some(PathBuf::from(rules::category(&extension))),
-                        ClassifyMode::Custom => Some(PathBuf::from(
-                            categories.get(&extension).map_or("其他", String::as_str),
-                        )),
-                        ClassifyMode::Date => {
-                            let seconds = file.snapshot.modified_ns.div_euclid(1_000_000_000);
-                            if let Some(stamp) = chrono::DateTime::from_timestamp(seconds, 0) {
-                                Some(PathBuf::from(
-                                    stamp
-                                        .with_timezone(&chrono::Local)
-                                        .format("%Y/%m")
-                                        .to_string(),
-                                ))
-                            } else {
-                                job.log(
-                                    "日期归类",
-                                    &file.rel,
-                                    "",
-                                    "跳过",
-                                    "修改时间超出可表示范围，已跳过日期归类",
-                                    0,
-                                )?;
-                                None
-                            }
-                        }
-                    }
-                };
-                if let Some(label) = label {
-                    // 分类目录段同样过 Windows 保留名校验：命中则跳过本文件，不得整次 build 失败。
-                    if let Err(error) =
-                        fsutil::safe_relative(&fsutil::path_string(&label)?.replace('\\', "/"))
-                    {
-                        job.log(
-                            "归类",
-                            &file.rel,
-                            "",
-                            "跳过",
-                            &format!("分类目录名不合法：{error}"),
-                            0,
-                        )?;
-                        continue;
-                    }
-                    // 空 output_dir：分类目录直接建在选定根下；已在该分类目录下的文件不再套一层。
-                    // label 可能是多段路径（如日期归类的 2024/03），必须整段前缀比较而不是只比首段。
-                    // 合并/扁平调整后的父目录同样参与判定：合并把文件带进同名的分类目录
-                    // （如 other/图片/photo.png → 图片/）时就地归类，绝不写成 图片/图片/…，
-                    // 否则分类目录会嵌套自身，跨轮往复移动破坏幂等（C-05/C-06/C-10）。
-                    let already = output_dir.is_empty()
-                        && (under_path(original, &label) || under_path(&parent, &label));
-                    if already {
-                        // 已在分类目录内的文件必须稳定：flatten 可能把恰好只剩一个文件的
-                        // 分类目录整层抽到分类目录之外（parent 不再位于 label 之下），
-                        // 此时归位到原始父目录：改名类调整（规范化/扩展名修正）照常生效，位置不动。
-                        // 合并后的 parent 仍位于 label 之下时保留合并结果，让合并真正生效。
-                        if !under_path(&parent, &label) {
-                            parent = original.parent().unwrap_or(Path::new("")).to_path_buf();
-                        }
-                    } else {
-                        parent = if job.config.preserve_structure {
-                            if output_dir.is_empty() {
-                                label.join(parent)
-                            } else {
-                                Path::new(output_dir).join(label).join(parent)
-                            }
-                        } else if output_dir.is_empty() {
-                            label
-                        } else {
-                            Path::new(output_dir).join(label)
-                        };
-                    }
-                }
-            }
-            let desired = parent.join(&name);
-            let desired_rel = fsutil::path_string(&desired)?.replace('\\', "/");
-            if let Err(error) = fsutil::safe_relative(&desired_rel) {
-                job.log("命名", &file.rel, "", "跳过", &error.to_string(), 0)?;
-                continue;
-            }
-            if desired_rel == file.rel {
-                continue;
-            }
-            // H-06：Git 目录树整树排除，且不得通过移动/改名间接改变它。分类目录、输出目录
-            // 或合并目标可能与既有 Git 工作树同名（Git 树不在 directories 表里，无法靠库内
-            // 行判断），引擎在扫描事务里把每个被剪枝的 Git 根记进 git_roots，这里逐项比对：
-            // 目标目录位于任一 Git 根之下即跳过该项并留日志，绝不写入该树。
-            if let Some(git_root) = git_roots.iter().find(|root| {
-                let target_dir = desired.parent().unwrap_or(Path::new(""));
-                under_path(target_dir, Path::new(root.as_str()))
-            }) {
+            // 合法性处理只作用于派生名（附录 B）。
+            let stem = rules::legalize_derived(&stem);
+            let derived_name = format!("{stem}{extension}");
+            if let Err(error) = fsutil::validate_component(&derived_name) {
                 job.log(
                     "归类",
                     &file.rel,
                     "",
-                    "跳过",
-                    &format!("目标目录位于 Git 目录树（{git_root}）内，已跳过"),
+                    "失败",
+                    &format!("派生名称不合法，保留源项：{error}"),
                     0,
                 )?;
+                job.summary.errors += 1;
                 continue;
             }
-            // 目标路径含链接（典型：与分类目录同名的 junction/符号链接）时跳过本文件：
-            // 与上方「分类目录名不合法」分支同口径——拒绝写穿链接是安全属性，但粒度必须是
-            // 该项而不是整次 build（C-10「对应项跳过或失败」）。
-            let mut target = match fsutil::safe_join(&job.root, &desired_rel) {
-                Ok(target) => target,
-                Err(error) => {
-                    job.log(
-                        "归类",
-                        &file.rel,
-                        "",
-                        "跳过",
-                        &format!("目标路径不可用：{error:#}"),
-                        0,
-                    )?;
-                    continue;
-                }
+            let stamp_ns = file
+                .snapshot
+                .created_ns
+                .unwrap_or(file.snapshot.modified_ns);
+            let Some((year, month)) = year_month(stamp_ns, local_offset) else {
+                // C-05：两个时间都不可用或无法表示时不归类，保留并显示原因。
+                job.log(
+                    "归类",
+                    &file.rel,
+                    "",
+                    "失败",
+                    "创建时间与修改时间均不可用或超出可表示范围；该项不归类，保留源项",
+                    0,
+                )?;
+                job.summary.errors += 1;
+                continue;
             };
-            if !target_will_be_free(job, &target, &desired_rel, &file.rel)?
-                || !job.db.reserve_target(&desired_rel, file.id)?
+            let category = if job.config.large_files
+                && file.snapshot.size >= job.config.large_threshold_bytes
             {
-                let requested = target.clone();
-                let mut index = 1u64;
-                let mut skip_move = false;
-                loop {
-                    job.context.control.checkpoint()?;
-                    // 主体/扩展名切分与 unique_target、strip_copy_name 同一口径：序号插在
-                    // 完整扩展名之前（资料.tar.gz → 资料 (1).tar.gz），不得拆散 .tar.* 与
-                    // 编号分卷 .7z.001（H-07）。借用原串，不额外分配。
-                    let name = requested
-                        .file_name()
-                        .and_then(|s| s.to_str())
-                        .context("目标文件名无效")?;
-                    let (stem, suffix) = fsutil::split_compound_name(name);
-                    // 基础名接近 255 个 UTF-16 单元时，后缀候选名超限会让整次归类失败；
-                    // suffixed_candidate 负责截断 stem 保持组件合法。
-                    target = requested
-                        .parent()
-                        .context("目标缺少目录")?
-                        .join(fsutil::suffixed_candidate(stem, suffix, index));
-                    let rel = fsutil::relative_string(&job.root, &target)?;
-                    if let Err(error) = fsutil::safe_join(&job.root, &rel) {
-                        // 候选名落在链接上（含既有链接文件占名）：换下一个候选名，不整次失败。
-                        job.log(
-                            "命名",
-                            &file.rel,
-                            "",
-                            "跳过",
-                            &format!("候选目标路径不可用：{error:#}"),
-                            0,
-                        )?;
-                        index += 1;
-                        anyhow::ensure!(index < 1_000_000, "目标名称冲突过多");
-                        continue;
-                    }
-                    // 回退候选撞回源文件自身当前名称（如剥离副本名后原名被其它内容占用再回退）：
-                    // 源自己占着这个名字且不会腾空，视为已就位，不生成 source==target 的空转移动。
-                    if rel == file.rel
-                        || (cfg!(windows) && rel.to_lowercase() == file.rel.to_lowercase())
-                    {
-                        skip_move = true;
-                        break;
-                    }
-                    if target_will_be_free(job, &target, &rel, &file.rel)?
-                        && job.db.reserve_target(&rel, file.id)?
-                    {
-                        break;
-                    }
-                    index += 1;
-                    anyhow::ensure!(index < 1_000_000, "目标名称冲突过多");
-                }
-                if skip_move {
-                    continue;
-                }
-            }
-            let mut planned = action(
-                &file,
-                ActionKind::Move,
-                "按已选择的命名、目录合并、分类规则移动；目标不覆盖",
-                DeleteMode::Keep,
+                "大文件"
+            } else {
+                rules::category_for(&derived_name.to_lowercase())
+            };
+            let target_dir = format!("{category}/{year}/{month}");
+            let parent = parent_of(&file.rel).to_string();
+            let in_place = same_dir(&parent, &target_dir);
+            let sources = source_levels(
+                &parent,
+                Some((&year, &month)),
+                false,
+                job.config.normalize_names,
             );
-            planned.target = Some(fsutil::relative_string(&job.root, &target)?);
-            job.db.add_action(&planned)?;
-            job.summary.planned_move += 1;
+            items.push(Item {
+                id: file.id,
+                rel: file.rel.clone(),
+                current_name: current_name.to_string(),
+                stem,
+                extension,
+                target_dir,
+                sources,
+                in_place,
+                settled: false,
+                failed: None,
+                candidate: String::new(),
+                k: 0,
+                digest_step: 0,
+                digest_no_source: false,
+                index_suffix: None,
+            });
         }
+    }
+    let mut dirs = gather_dir_plans(job, &items, moved_roots);
+    // 容器被占用的目录：依赖它的项全部失败并保留源项（S-01）。
+    let blocked: Vec<(String, String)> = dirs
+        .iter()
+        .filter_map(|(dir, plan)| {
+            plan.blocked
+                .as_ref()
+                .map(|reason| (dir.clone(), reason.clone()))
+        })
+        .collect::<Vec<_>>();
+    for (dir, reason) in &blocked {
+        for item in &mut items {
+            if item.target_dir == *dir {
+                item.failed = Some(reason.clone());
+            }
+        }
+    }
+    resolve_all(&mut items, &mut dirs);
+    for item in &items {
+        if let Some(reason) = &item.failed {
+            job.log(
+                "归类",
+                &item.rel,
+                "",
+                "失败",
+                &format!("{reason}；已保留源项"),
+                0,
+            )?;
+            job.summary.errors += 1;
+            continue;
+        }
+        if item.settled {
+            continue;
+        }
+        let target = format!("{}/{}", item.target_dir, item.candidate);
+        // 候选回落到自身当前名与当前目录：无需移动（防御性，正常不会出现）。
+        if same_dir(&item.target_dir, item.source_parent())
+            && same_component(&item.candidate, &item.current_name)
+        {
+            continue;
+        }
+        if let Err(error) = fsutil::safe_relative(&target) {
+            job.log(
+                "归类",
+                &item.rel,
+                "",
+                "失败",
+                &format!("目标路径不合法，保留源项：{error}"),
+                0,
+            )?;
+            job.summary.errors += 1;
+            continue;
+        }
+        let file = job.db.file(item.id)?;
+        let mut planned = action(
+            &file,
+            ActionKind::Move,
+            "按「大类/创建年/创建月」归类（同名冲突已统一消解；目标不覆盖）",
+            DeleteMode::Keep,
+        );
+        planned.target = Some(target.clone());
+        job.db.add_action(&planned)?;
+        job.db.reserve_target(&target, item.id)?;
+        job.summary.planned_move += 1;
     }
     Ok(())
 }
+
 #[cfg_attr(
     feature = "perf-tracing",
     tracing::instrument(target = "perf", name = "plan_empty_dirs", skip_all)
 )]
-fn empty_directories(job: &mut Job) -> Result<()> {
+fn empty_directories(job: &mut Job, moved_roots: &[String]) -> Result<()> {
     // C-07/H-05：空目录清理是强制步骤——没有开关，也不受文件删除方式（全局或按类别覆盖）
     // 影响；删除对象只可能是执行期复查后实际为空的目录，不涉及任何文件内容。
     // 递归关闭时子目录内容未知（扫描未下钻），不得据库内条目判定为空目录。
@@ -645,14 +925,8 @@ fn empty_directories(job: &mut Job) -> Result<()> {
     // O(目录数×文件数)。这里预先把文件/目录按“父目录”物化成带索引的临时表，全部
     // 查询退化为等值查找；配合自底向上的处理顺序，深层留驻文件会通过“子目录不在
     // empty_will”逐层向上传播，结果与按全部后代判断完全一致。
-    //
-    // 性能（2026-09-21 实测）：判断“文件是否有待执行的删除/移动”此前写成对 actions 的
-    // 相关子查询，SQLite 选 `idx_actions_state(state=?)` 做内层探测，每个文件都要重扫
-    // 全部待执行动作——20k 文件 × 19.75k 动作的实测耗时 53s（计划阶段总耗时 26s 的
-    // 绝大部分）。改成先把待执行动作的 source 物化成带主键的临时表再反连接后，同一
-    // 数据集实测 0.016s，结果集完全一致。
     let mut cursor = 0i64;
-    // kind 在库里是 serde_json 序列化的枚举字符串，只可能是这四个值之一，直接内联安全。
+    // kind 在库里是 serde_json 序列化的枚举字符串，只可能是这两个值之一，直接内联安全。
     let move_kind = serde_json::to_string(&ActionKind::Move)?;
     let delete_kind = serde_json::to_string(&ActionKind::Delete)?;
     job.db.conn.execute_batch(&format!(
@@ -687,6 +961,24 @@ fn empty_directories(job: &mut Job) -> Result<()> {
         let rows = stmt.query_map([&move_kind], |r| r.get::<_, String>(0))?;
         rows.collect::<rusqlite::Result<Vec<_>>>()?
     };
+    // C-14：保持原位的 Git 项目整树仍受 H-06 保护——其祖先目录不得被当成空目录
+    //（顺着删祖先等于间接改动该树）；已计划移入集合的项目不再保护，移走后变空的
+    // 祖先按 C-07 消失。staying = git_roots − moved（Rust 侧计算）。
+    // 前缀比较按 Unicode 折叠（与 fold 同口径）。
+    let staying_git_roots: Vec<String> = {
+        let mut stmt = job.db.conn.prepare("SELECT rel FROM git_roots")?;
+        let rows = stmt.query_map([], |r| r.get::<_, String>(0))?;
+        let mut roots: Vec<String> = rows
+            .collect::<rusqlite::Result<Vec<_>>>()?
+            .into_iter()
+            .filter(|rel| !moved_roots.contains(rel))
+            .collect();
+        if cfg!(windows) {
+            roots = roots.into_iter().map(|rel| rel.to_lowercase()).collect();
+        }
+        roots.sort();
+        roots
+    };
     // Windows 前缀比较按 Unicode 折叠（与 under_path 口径一致）。目标清单固定，
     // 在此预折叠一次；折叠必须在排序之前——排序结果要用于二分定位前缀区间，
     // 折叠会改变字符的字典序。折叠后相同的目标去重，每个前缀只需检查一次。
@@ -714,11 +1006,22 @@ fn empty_directories(job: &mut Job) -> Result<()> {
         for (seq, rel) in batch {
             cursor = seq;
             job.context.control.checkpoint()?;
+            // H-06：本目录或其子树内仍有保持原位的 Git 项目时不按空目录处理。
+            let rel_folded = if cfg!(windows) {
+                rel.to_lowercase()
+            } else {
+                rel.clone()
+            };
+            let probe_git = format!("{rel_folded}/");
+            let holds_git = staying_git_roots
+                .iter()
+                .any(|root| *root == rel_folded || root.starts_with(&probe_git));
+            if holds_git {
+                continue;
+            }
             // 污点自底向上传播（empty_order 按 depth DESC，子目录必然先处理）：
             // 自身或任一子目录里存在「盘上可见但未入盘点」的内容（扫描期被过滤/读取
             // 失败，记录于 scan_taint）时，本目录不得按空目录处理，且继续向祖先传播。
-            // 语义与旧 has_unscanned_content（对该目录整个子树重新走盘核对）一致，
-            // 免去逐目录的文件系统遍历。
             let tainted: bool = {
                 let mut self_stmt = job
                     .db
@@ -739,15 +1042,13 @@ fn empty_directories(job: &mut Job) -> Result<()> {
                 continue;
             }
             // 执行后该目录（含子树）将接收被 Move 进来的内容时，不能按空目录处理。
-            // Windows 下目录 rel 与目标都已按 Unicode 折叠（目标在上方预折叠一次）。
             let probe = if cfg!(windows) {
                 format!("{rel}/").to_lowercase()
             } else {
                 format!("{rel}/")
             };
             // 有序目标表中以 probe 为前缀的目标构成连续区间：二分定位第一个 >= probe 的
-            // 条目，只需检查它——若任何目标以 probe 开头，字典序最小的命中者必然是它，
-            // 复杂度从「目录数×目标数」降为「目录数×log 目标数」。
+            // 条目，只需检查它——若任何目标以 probe 开头，字典序最小的命中者必然是它。
             let receives_move = {
                 let index = move_targets.partition_point(|t| t.as_str() < probe.as_str());
                 move_targets
@@ -815,7 +1116,10 @@ pub fn build(job: &mut Job) -> Result<()> {
         .execute_batch("DELETE FROM actions; DELETE FROM targets; DELETE FROM keepers;")?;
     cleanup_candidates(job)?; // Cleanup candidates must never become the sole duplicate keeper.
     deduplicate(job)?;
-    moves(job)?;
-    empty_directories(job)?;
+    // C-14 先于文件归类：项目移动先行执行，腾出的目录名可被分类层级复用；
+    // 空目录规划依赖 git_roots.staying 标记，必须在集合规划之后。
+    let moved_roots = git_collection(job)?;
+    classify_files(job, &moved_roots)?;
+    empty_directories(job, &moved_roots)?;
     Ok(())
 }

@@ -392,7 +392,7 @@ export component AppWindow inherits Window {
     in-out property <int> archives-failed: 0;
     in-out property <int> plan-delete-count: 0;
     in-out property <int> plan-move-count: 0;
-    in-out property <int> plan-link-count: 0;
+    in-out property <int> plan-git-count: 0;
     in-out property <int> plan-empty-count: 0;
     in-out property <int> plan-filter: 0;
     in-out property <int> quarantined-count: 0;
@@ -586,8 +586,7 @@ export component AppWindow inherits Window {
                             clicked => { root.plan-filter = 1; root.filter-plan("delete"); } }
                         Pill { text: "移动 " + root.plan-move-count; active: root.plan-filter == 2; width: 88px; enabled: !root.busy && root.plan-move-count > 0 && root.confirm-kind == 0;
                             clicked => { root.plan-filter = 2; root.filter-plan("move"); } }
-                        Pill { text: "硬链接 " + root.plan-link-count; active: root.plan-filter == 3; width: 96px; enabled: !root.busy && root.plan-link-count > 0 && root.confirm-kind == 0;
-                            clicked => { root.plan-filter = 3; root.filter-plan("hardlink"); } }
+                        Pill { text: "Git 项目 " + root.plan-git-count; active: false; width: 96px; enabled: root.plan-git-count > 0 && root.confirm-kind == 0; }
                         Pill { text: "空目录 " + root.plan-empty-count; active: root.plan-filter == 4; width: 96px; enabled: !root.busy && root.plan-empty-count > 0 && root.confirm-kind == 0;
                             clicked => { root.plan-filter = 4; root.filter-plan("empty_directory"); } }
                         Rectangle { horizontal-stretch: 1; background: transparent; }

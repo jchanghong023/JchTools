@@ -93,6 +93,21 @@ pub fn is_git_root(path: &Path) -> Result<bool> {
         }
     }
 }
+/// H-06：沿所选根的祖先到卷根检查直接目录项；任一祖先直接含 `.git` 说明所选根
+/// 位于 Git 项目内部，两工具都必须拒绝整次处理（不拆散项目子树）。
+pub fn root_inside_git_project(root: &Path) -> Result<()> {
+    let mut current = root.parent();
+    while let Some(dir) = current {
+        if is_git_root(dir)? {
+            bail!(
+                "所选目录位于 Git 项目（{}）内部：为保护项目完整，本次处理不执行；请选择项目外的目录",
+                dir.display()
+            );
+        }
+        current = dir.parent();
+    }
+    Ok(())
+}
 pub fn safe_join(root: &Path, rel: &str) -> Result<PathBuf> {
     let p = safe_relative(rel)?;
     let mut current = root.to_path_buf();
@@ -157,6 +172,17 @@ pub fn snapshot_with(path: &Path, metadata: &fs::Metadata) -> Result<Snapshot> {
         Ok(d) => i64::try_from(d.as_nanos()).context("文件时间超出范围")?,
         Err(e) => -i64::try_from(e.duration().as_nanos()).context("文件时间超出范围")?,
     };
+    // C-05 归类取创建时间；系统/文件系统不提供时为 None，由调用方回落 mtime。
+    let created_ns =
+        metadata
+            .created()
+            .ok()
+            .and_then(|time| match time.duration_since(UNIX_EPOCH) {
+                Ok(delta) => i64::try_from(delta.as_nanos()).ok(),
+                Err(error) => i64::try_from(error.duration().as_nanos())
+                    .ok()
+                    .map(|value| -value),
+            });
     #[cfg(unix)]
     let (identity, links) = {
         use std::os::unix::fs::MetadataExt;
@@ -189,6 +215,7 @@ pub fn snapshot_with(path: &Path, metadata: &fs::Metadata) -> Result<Snapshot> {
     Ok(Snapshot {
         size: metadata.len(),
         modified_ns,
+        created_ns,
         identity,
         links,
     })
@@ -250,6 +277,119 @@ pub fn rename_noreplace(source: &Path, target: &Path) -> Result<()> {
         }
         Ok(())
     }
+}
+/// S-01：用户文件的最终移动入口。同卷走不覆盖改名（Windows 同卷改名天然保留创建时间，
+/// 满足 C-21 幂等归类要求）；确因跨文件系统失败时按「不覆盖完整复制 → 设置创建/修改
+/// 时间 → 删除源项」执行，复制、写时间或删除任一失败都保留源项并如实报错。
+pub fn move_file_preserving_times(source: &Path, target: &Path) -> Result<()> {
+    let metadata = fs::symlink_metadata(source)?;
+    let created = metadata.created().ok();
+    let modified = metadata.modified().ok();
+    match rename_noreplace(source, target) {
+        Ok(()) => Ok(()),
+        Err(error) => {
+            let cross_volume = error
+                .root_cause()
+                .downcast_ref::<std::io::Error>()
+                .and_then(std::io::Error::raw_os_error)
+                .is_some_and(|code| {
+                    // 17 = Windows ERROR_NOT_SAME_DEVICE；18 = POSIX EXDEV。
+                    code == 17 || code == 18
+                });
+            if !cross_volume {
+                return Err(error);
+            }
+            // fs::copy 不会覆盖已存在目标的打开语义由调用方保证（规划期已预留目标名，
+            // 执行用不覆盖兜底再核一次），复制失败不删除源项。
+            if let Err(error) = fs::copy(source, target) {
+                let _ = fs::remove_file(target);
+                return Err(anyhow::Error::new(error).context("跨卷复制失败，源文件已保留"));
+            }
+            if let Err(error) = set_created_and_modified(target, created, modified) {
+                let _ = fs::remove_file(target);
+                return Err(error.context("跨卷副本时间设置失败，已保留源文件与副本状态"));
+            }
+            fs::remove_file(source)
+                .with_context(|| format!("源删除失败；两份均保留：{}", source.display()))?;
+            Ok(())
+        }
+    }
+}
+/// 把创建/修改时间写回文件（S-01 跨卷复制后必须恢复创建时间，保证 C-21 幂等）。
+fn set_created_and_modified(
+    path: &Path,
+    created: Option<std::time::SystemTime>,
+    modified: Option<std::time::SystemTime>,
+) -> Result<()> {
+    #[cfg(windows)]
+    {
+        use std::os::windows::ffi::OsStrExt;
+        use windows_sys::Win32::Foundation::{CloseHandle, FILETIME, INVALID_HANDLE_VALUE};
+        use windows_sys::Win32::Storage::FileSystem::{
+            CreateFileW, SetFileTime, FILE_ATTRIBUTE_NORMAL, FILE_FLAG_BACKUP_SEMANTICS,
+            FILE_SHARE_READ, FILE_SHARE_WRITE, FILE_WRITE_ATTRIBUTES, OPEN_EXISTING,
+        };
+        let path16: Vec<u16> = path.as_os_str().encode_wide().chain(Some(0)).collect();
+        // SAFETY: path16 是 NUL 结尾的 UTF-16 缓冲区；句柄在本函数内关闭，指针不出作用域。
+        let handle = unsafe {
+            CreateFileW(
+                path16.as_ptr(),
+                FILE_WRITE_ATTRIBUTES,
+                FILE_SHARE_READ | FILE_SHARE_WRITE,
+                std::ptr::null(),
+                OPEN_EXISTING,
+                FILE_ATTRIBUTE_NORMAL | FILE_FLAG_BACKUP_SEMANTICS,
+                std::ptr::null_mut(),
+            )
+        };
+        if handle == INVALID_HANDLE_VALUE {
+            return Err(std::io::Error::last_os_error()).context("打开文件以写回时间失败");
+        }
+        let to_filetime = |time: std::time::SystemTime| -> FILETIME {
+            const EPOCH_DELTA_100NS: u64 = 116_444_736_000_000_000;
+            // 时间换算为 100ns 单位；越界值钳制到 u64::MAX（SetFileTime 会拒绝非法值）。
+            let units = match time.duration_since(std::time::UNIX_EPOCH) {
+                Ok(delta) => {
+                    let total = u128::from(EPOCH_DELTA_100NS) + delta.as_nanos() / 100;
+                    u64::try_from(total).unwrap_or(u64::MAX)
+                }
+                Err(_) => EPOCH_DELTA_100NS,
+            };
+            FILETIME {
+                dwLowDateTime: u32::try_from(units % (1u64 << 32)).unwrap_or(0),
+                dwHighDateTime: u32::try_from(units >> 32).unwrap_or(0),
+            }
+        };
+        let created_ft = created.map(to_filetime);
+        let modified_ft = modified.map(to_filetime);
+        let creation_ptr = created_ft
+            .as_ref()
+            .map_or(std::ptr::null(), std::ptr::from_ref::<FILETIME>);
+        let modified_ptr = modified_ft
+            .as_ref()
+            .map_or(std::ptr::null(), std::ptr::from_ref::<FILETIME>);
+        // SAFETY: handle 有效；两个指针指向本函数栈上的 FILETIME 或为 NULL（表示不修改）。
+        let ok = unsafe { SetFileTime(handle, creation_ptr, std::ptr::null(), modified_ptr) };
+        // SAFETY: 关闭本函数打开的句柄。
+        unsafe { CloseHandle(handle) };
+        if ok == 0 {
+            return Err(std::io::Error::last_os_error()).context("写回创建/修改时间失败");
+        }
+        Ok(())
+    }
+    #[cfg(not(windows))]
+    {
+        let file = fs::OpenOptions::new().write(true).open(path)?;
+        if let Some(modified) = modified {
+            file.set_modified(modified)?;
+        }
+        Ok(())
+    }
+}
+/// 设置文件/目录的创建时间（S-01 跨卷复制写回创建时间的同一底层能力；
+/// 测试用它伪造归类用的创建日期）。
+pub fn set_created_time(path: &Path, created: std::time::SystemTime) -> Result<()> {
+    set_created_and_modified(path, Some(created), None)
 }
 pub fn ensure_parent(root: &Path, target: &Path) -> Result<()> {
     let rel = relative_string(root, target)?;
