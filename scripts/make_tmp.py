@@ -310,7 +310,42 @@ def build_archives(root: Path, seven: Path, log: list[str]) -> None:
         _ = stream.write(single_payload)
     with lzma.open(section / "single.txt.xz", "wb") as stream:
         _ = stream.write(single_payload)
+    shutil.rmtree(source, ignore_errors=True)
+    log.append(
+        _line(
+            "| `07-压缩包-各格式/` | 白名单内的 7z / zip / tar / tar.gz / tgz / tar.bz2 / tar.xz / gz / bz2 / xz",
+            "（本机 7-Zip 只支持解压 zst，没有构造 zst 用例） | ",
+            "每个包都应解压成功后永久删除原包，同内容成员仍完整落盘；只有另行执行目录整理才会去重；失败记录原因 |",
+        )
+    )
+
+
+def build_containers(root: Path, _seven: Path, log: list[str]) -> None:
+    """X-01 白名单反例：这些文件都能被 7-Zip 打开，但语义上不是用户要整理的归档文件."""
+    section = root / "17-容器不自动解压"
+    # 内容一律用合法 ZIP：证明「完全不碰」不是打不开，而是根本不在自动解压白名单内。
+    containers = (
+        "windows.iso",
+        "boot.wim",
+        "install.esd",
+        "setup.msi",
+        "setup.exe",
+        "app.apk",
+        "library.jar",
+        "wheel.whl",
+        "book.epub",
+        "report.docx",
+        "legacy.lzh",
+        "archive.cpio",
+        "addon.crx",
+        "styles.xpi",
+    )
+    for index, name in enumerate(containers):
+        payload = f"container payload {index}\n".encode()
+        zip_members(section / name, {f"member{index:02}.bin": payload})
     if MAKECAB.is_file():
+        source = root / ".build-17"
+        write(source / "alpha.txt", b"alpha member\n")
         run(
             [
                 str(MAKECAB),
@@ -319,16 +354,20 @@ def build_archives(root: Path, seven: Path, log: list[str]) -> None:
                 "/D",
                 "CompressionMemory=21",
                 "alpha.txt",
-                str(section / "data.cab"),
+                str(section / "visproww.cab"),
             ],
             cwd=source,
         )
-    shutil.rmtree(source, ignore_errors=True)
+        shutil.rmtree(source, ignore_errors=True)
+    else:
+        zip_members(section / "visproww.cab", {"alpha.txt": b"alpha member\n"})
     log.append(
         _line(
-            "| `07-压缩包-各格式/` | 7z / zip / tar / tar.gz / tgz / tar.bz2 / tar.xz / gz / bz2 / xz / cab",
-            "（本机 7-Zip 只支持解压 zst，没有构造 zst 用例） | ",
-            "每个包都应解压成功后永久删除原包，同内容成员仍完整落盘；只有另行执行目录整理才会去重；失败记录原因 |",
+            "| `17-容器不自动解压/` | 内容合法可读的安装资源 `.cab`、镜像 `.iso/.wim/.esd`、",
+            "安装包 `.msi/.exe`、程序包 `.apk/.jar/.whl`、浏览器扩展 `.crx/.xpi`、",
+            "文档容器 `.docx/.epub`、旧式容器 `.lzh/.cpio` | ",
+            "一律完全不碰：不解压、不删除、不移动、不进「解压失败」——",
+            "7-Zip 能打开不等于应该解压，只有白名单格式及其分卷才自动解压 |",
         )
     )
 
@@ -935,6 +974,7 @@ def main() -> int:
         build_large,
         build_hidden,
         build_hostile,
+        build_containers,
     ):
         builder(root, seven, log)
         print(f"  built {builder.__name__}")

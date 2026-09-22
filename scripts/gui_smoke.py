@@ -425,6 +425,9 @@ def s3_full_organize(exe: str, data: str) -> None:
     print("S3 PASS：进程已退出")
 
 
+# 自动解压白名单（与 src/rules.rs::archive_name 同口径）：只有这些后缀会被解压。
+# 其它格式（.cab/.iso/.wim/.lzh/.cpio/.docx/.msi 等）即使 7-Zip 能打开也不碰，
+# 因此在核对里必须按「既有文件」处理——字节不变、不得消失、不得进隔离目录。
 ARCHIVE_SUFFIXES = (
     ".zip",
     ".7z",
@@ -437,11 +440,6 @@ ARCHIVE_SUFFIXES = (
     ".tgz",
     ".tbz2",
     ".txz",
-    ".cab",
-    ".iso",
-    ".wim",
-    ".lzh",
-    ".cpio",
 )
 
 

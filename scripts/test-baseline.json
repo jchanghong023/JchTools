@@ -495,6 +495,12 @@
     },
     {
       "file": "tests/archive.rs",
+      "name": "non_whitelisted_containers_stay_untouched_beside_a_real_archive",
+      "ignored": true,
+      "cfg": null
+    },
+    {
+      "file": "tests/archive.rs",
       "name": "real_engine_brace_in_comment_cannot_inflate_ratio_denominator",
       "ignored": true,
       "cfg": null
@@ -711,7 +717,7 @@
     },
     {
       "file": "tests/core.rs",
-      "name": "archive_name_covers_supported_formats",
+      "name": "archive_name_only_accepts_the_user_archive_whitelist",
       "ignored": false,
       "cfg": null
     },
@@ -1438,6 +1444,12 @@
     {
       "file": "tests/split.rs",
       "name": "multipart_siblings_move_to_quarantine_together",
+      "ignored": false,
+      "cfg": null
+    },
+    {
+      "file": "tests/split.rs",
+      "name": "non_whitelisted_containers_are_never_opened",
       "ignored": false,
       "cfg": null
     },
