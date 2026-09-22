@@ -6,7 +6,12 @@ use crate::{
 use anyhow::{bail, Context, Result};
 use globset::{GlobBuilder, GlobSet, GlobSetBuilder};
 use regex::Regex;
-use std::{cmp::Ordering, collections::BTreeMap, path::Path, sync::OnceLock};
+use std::{
+    cmp::Ordering,
+    collections::BTreeMap,
+    path::Path,
+    sync::{LazyLock, OnceLock},
+};
 use unicode_normalization::UnicodeNormalization;
 
 pub fn build_exclusions(text: &str) -> Result<GlobSet> {
@@ -250,23 +255,33 @@ pub fn cleanup_delete(cfg: &Config, kind: CleanupKind) -> DeleteChoice {
 fn has_ext(name: &str, ext: &str) -> bool {
     matches!(name.rsplit_once('.'), Some((_, tail)) if tail == ext)
 }
+/// X-01：自动解压白名单。判断口径不是「这个文件是不是压缩格式」，而是「它是不是
+/// 用户意义上的归档文件」——`.cab` 是安装介质的一部分（Office/驱动/更新包），
+/// `.iso`/`.wim`/`.esd` 是系统镜像，`.msi`/`.msix`/`.appx` 是安装包，`.jar`/`.apk`/
+/// `.whl`/`.nupkg` 是程序包，`.docx`/`.xlsx`/`.epub`/`.odt` 是文档容器，`.exe`/`.com`
+/// 可能是自解压包：它们即使能被 7-Zip 打开，也一律不自动解压（只看扩展名，不猜内容）。
+/// 分卷只认可独立解开的第一卷：`.7z.001` / `.zip.001` 认 001、`.partN.rar` 认 part1；
+/// 其余卷（`.z01`/`.r00`/`.002`）由删除与隔离的卷集合逻辑成组处理，不单独入队。
 pub fn archive_name(name: &str) -> bool {
     let name = name.to_lowercase();
     if has_ext(&name, "rar") {
-        static PART: OnceLock<Regex> = OnceLock::new();
-        let re = PART.get_or_init(|| match Regex::new(r"\.part(\d+)\.rar$") {
+        // 只有 `.partN.rar` 的 part1 算分卷主体；`report.partial.rar` 这类普通包不受影响。
+        static PART: LazyLock<Regex> = LazyLock::new(|| match Regex::new(r"\.part(\d+)\.rar$") {
             Ok(re) => re,
             // 常量正则语法错误只可能是开发期笔误，按不可达处理
             Err(_) => unreachable!("constant regex"),
         });
-        if let Some(caps) = re.captures(&name) {
+        if let Some(caps) = PART.captures(&name) {
             return caps[1].parse::<u64>().ok() == Some(1);
         }
         return true;
     }
+    // 白名单之外的一切格式（含引擎能打开的 cab/iso/wim/lzh/cpio 等）都不自动解压：
+    // 维护「禁止列表」必然漏掉新出现的容器格式，白名单是唯一可靠的边界。
+    // `.tar.gz` / `.tar.bz2` / `.tar.xz` / `.tar.zst` 由 `.gz`/`.bz2`/`.xz`/`.zst` 覆盖。
     [
-        ".zip", ".7z", ".tar", ".gz", ".bz2", ".xz", ".zst", ".tgz", ".tbz2", ".txz", ".cab",
-        ".iso", ".wim", ".lzh", ".cpio", ".7z.001", ".zip.001",
+        ".zip", ".7z", ".tar", ".gz", ".bz2", ".xz", ".zst", ".tgz", ".tbz2", ".txz", ".7z.001",
+        ".zip.001",
     ]
     .iter()
     .any(|suffix| name.ends_with(suffix))

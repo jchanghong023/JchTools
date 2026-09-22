@@ -1747,9 +1747,10 @@ fn offline_sources_have_no_network_capabilities() {
     }
 }
 
-// 覆盖 X-01（支持格式候选清单与大小写不敏感；非压缩包后缀不误判）
+// 覆盖 X-01：自动解压只认用户意义上的归档文件（白名单）；安装资源、系统镜像、
+// 语言包、安装包、文档容器即使 7-Zip 能打开，也不得自动解压。
 #[test]
-fn archive_name_covers_supported_formats() {
+fn archive_name_only_accepts_the_user_archive_whitelist() {
     for name in [
         "a.zip",
         "a.7Z",
@@ -1761,19 +1762,69 @@ fn archive_name_covers_supported_formats() {
         "b.tgz",
         "b.tbz2",
         "b.txz",
-        "c.cab",
-        "c.iso",
-        "c.wim",
-        "c.lzh",
-        "c.cpio",
+        "f.tar.gz",
+        "f.tar.bz2",
+        "f.tar.xz",
         "d.7z.001",
         "d.zip.001",
         "e.part1.rar",
     ] {
-        assert!(rules::archive_name(name), "{name} 应识别为压缩包");
+        assert!(
+            rules::archive_name(name),
+            "{name} 在白名单内，应识别为压缩包"
+        );
     }
-    for name in ["a.txt", "a.png", "a.zipx", "e.part2.rar", "archive"] {
-        assert!(!rules::archive_name(name), "{name} 不应识别为压缩包");
+    for name in [
+        "a.txt",
+        "a.png",
+        "a.zipx",
+        "e.part2.rar",
+        "archive",
+        // Windows 安装资源与安装包
+        "data.cab",
+        "setup.msi",
+        "app.msix",
+        "bundle.msixbundle",
+        // 磁盘 / 系统镜像
+        "windows.iso",
+        "boot.wim",
+        "install.esd",
+        "disk.img",
+        "disk.vhd",
+        "disk.vhdx",
+        // Java / Android / Python / .NET / 扩展包
+        "library.jar",
+        "service.war",
+        "module.ear",
+        "app.apk",
+        "app.aab",
+        "wheel.whl",
+        "pack.nupkg",
+        "ext.vsix",
+        "addon.crx",
+        "addon.xpi",
+        // Apple 软件包与旧式容器
+        "app.ipa",
+        "installer.pkg",
+        "disk.dmg",
+        "legacy.lzh",
+        "archive.cpio",
+        // Office / OpenDocument / 电子书容器
+        "report.docx",
+        "sheet.xlsx",
+        "slides.pptx",
+        "macro.docm",
+        "macro.xlsm",
+        "doc.odt",
+        "book.epub",
+        // 可执行文件与自解压包
+        "setup.exe",
+        "self-extract.com",
+    ] {
+        assert!(
+            !rules::archive_name(name),
+            "{name} 不在自动解压白名单内，不得被当作压缩包处理"
+        );
     }
 }
 

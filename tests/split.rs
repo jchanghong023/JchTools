@@ -333,6 +333,97 @@ exit 0
     path
 }
 
+/// 记录调用的恒成功引擎：每次调用把命令行追加到脚本同目录的 `fake-log.txt`，
+/// 用于证明「哪些文件真的被引擎打开过」（不经引擎 = 完全不碰）。
+fn logging_engine(dir: &Path) -> PathBuf {
+    #[cfg(windows)]
+    let (path, bytes) = (
+        dir.join("fake-log.bat"),
+        b"@echo off\r\n>> \"%~dp0fake-log.txt\" echo %*\r\nexit /b 0\r\n".as_slice(),
+    );
+    #[cfg(not(windows))]
+    let (path, bytes) = (
+        dir.join("fake-log.sh"),
+        b"#!/bin/sh\nprintf '%s\\n' \"$*\" >> \"$(dirname \"$0\")/fake-log.txt\"\nexit 0\n"
+            .as_slice(),
+    );
+    fs::write(&path, bytes).unwrap();
+    #[cfg(not(windows))]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        fs::set_permissions(&path, fs::Permissions::from_mode(0o755)).unwrap();
+    }
+    path
+}
+
+// 覆盖 X-01：自动解压白名单之外的文件完全不碰——引擎一次都不得被调用，
+// 文件字节原样保留，也不得被当成失败包隔离；只有白名单内的包被处理并清理。
+#[test]
+fn non_whitelisted_containers_are_never_opened() {
+    let tmp = fixture("whitelist");
+    let root = tmp.path().join("data");
+    // 内容故意用合法 ZIP：引擎确实能打开，语义上却是安装介质、文档或程序包。
+    let containers: [(&str, &[u8]); 15] = [
+        ("visproww.cab", b"zip payload, but an install cab"),
+        ("windows.iso", b"zip payload, but a disk image"),
+        ("boot.wim", b"zip payload, but a system image"),
+        ("install.esd", b"zip payload, but a system image"),
+        ("legacy.lzh", b"zip payload, but a legacy container"),
+        ("archive.cpio", b"zip payload, but a cpio archive"),
+        ("report.docx", b"zip payload, but a document"),
+        ("package.msi", b"zip payload, but an installer"),
+        ("setup.exe", b"zip payload, but an installer"),
+        ("app.apk", b"zip payload, but an android package"),
+        ("library.jar", b"zip payload, but a java package"),
+        ("wheel.whl", b"zip payload, but a python package"),
+        ("book.epub", b"zip payload, but an ebook"),
+        ("addon.crx", b"zip payload, but a browser extension"),
+        ("styles.xpi", b"zip payload, but a browser extension"),
+    ];
+    for (index, (name, bytes)) in containers.iter().enumerate() {
+        let stamp = 100 + i64::try_from(index).unwrap();
+        write_with_mtime(&root.join(name), bytes, stamp);
+    }
+    write_with_mtime(&root.join("keep.zip"), b"the only whitelisted archive", 400);
+    let engine = logging_engine(tmp.path());
+    let result = engine::extract_run_at(
+        &root,
+        Config::default(),
+        Context::default(),
+        &state_of(&tmp),
+        Some(&engine),
+    )
+    .unwrap();
+    let calls = fs::read_to_string(tmp.path().join("fake-log.txt")).unwrap_or_default();
+    assert!(
+        calls.contains("keep.zip"),
+        "白名单内的包必须交给引擎处理：{calls}"
+    );
+    for (name, bytes) in containers {
+        assert!(
+            !calls.contains(name),
+            "{name} 不属于自动解压白名单，引擎不得打开它：{calls}"
+        );
+        assert_eq!(
+            fs::read(root.join(name)).unwrap(),
+            bytes,
+            "{name} 必须原样保留（不碰、不改、不移动）"
+        );
+    }
+    assert!(
+        !root.join("keep.zip").exists(),
+        "白名单内的包完整成功后按 X-05 永久删除"
+    );
+    assert!(
+        !root.join("解压失败").exists(),
+        "白名单外的文件不是失败包，不得进隔离目录"
+    );
+    assert_eq!(result.summary.archives_ok, 1, "只应处理白名单内的那一个包");
+    assert_eq!(result.summary.deleted, 1);
+    assert_eq!(result.summary.errors, 0);
+    assert_eq!(result.summary.archives_failed, 0);
+}
+
 /// 恒成功引擎，且不带 -ba 的 `l` 子命令输出带多卷标志的档案头块（`--` 与
 /// `----------` 之间）：模拟 7-Zip 对真多卷包的档案级 -slt 输出（zip 的
 /// Volume Index 仅 IsMultiVol 时出现、rar 的 Is Volume 仅卷标志置位时出现），

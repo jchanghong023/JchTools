@@ -196,6 +196,94 @@ fn successful_cleanup_preserves_unused_volume_tail_after_gap() {
     }
 }
 
+// 覆盖 X-01, X-09：白名单之外的容器即使能被引擎打开也完全不碰（真实引擎）。
+#[test]
+#[ignore = "Requires explicitly provided real 7-Zip engine"]
+fn non_whitelisted_containers_stay_untouched_beside_a_real_archive() {
+    let f = ArchiveFixture::new();
+    fs::write(f.input.join("payload.txt"), b"payload for the only archive").unwrap();
+    f.archive(&f.root.join("keep.zip"), "-tzip");
+    // 真 CAB（Windows 自带 makecab；7-Zip 只能读不能写 cab）：证明「不碰」不是打不开。
+    let makecab = PathBuf::from(std::env::var_os("SYSTEMROOT").unwrap_or_default())
+        .join("System32")
+        .join("makecab.exe");
+    let cab = f.root.join("visproww.cab");
+    if makecab.is_file() {
+        let status = Command::new(&makecab)
+            .current_dir(&f.input)
+            .args(["/D", "CompressionType=LZX", "payload.txt"])
+            .arg(&cab)
+            .status()
+            .unwrap();
+        assert!(status.success(), "makecab 应能生成 CAB");
+    } else {
+        // 无 makecab（非 Windows 环境）时退化为 ZIP 字节改名，仍然是「引擎可打开」的容器。
+        fs::copy(f.root.join("keep.zip"), &cab).unwrap();
+    }
+    let cab_bytes = fs::read(&cab).unwrap();
+    // 测试前提：引擎确实能打开这个 CAB——白名单判定不依赖内容类型探测。
+    let listed = Command::new(&f.engine)
+        .arg("l")
+        .arg("-ba")
+        .arg("--")
+        .arg(&cab)
+        .output()
+        .unwrap();
+    assert!(
+        listed.status.success(),
+        "测试前提：7-Zip 能打开该 CAB（否则本用例证明不了「能打开也不解压」）"
+    );
+    // 其余容器用合法 ZIP 字节改名：7-Zip 同样能打开，语义上仍不是用户要整理的归档。
+    let archive_bytes = fs::read(f.root.join("keep.zip")).unwrap();
+    let containers = [
+        "windows.iso",
+        "boot.wim",
+        "install.esd",
+        "legacy.lzh",
+        "archive.cpio",
+        "report.docx",
+        "setup.msi",
+        "setup.exe",
+        "app.apk",
+        "library.jar",
+        "wheel.whl",
+        "book.epub",
+        "addon.crx",
+        "styles.xpi",
+    ];
+    for name in containers {
+        fs::write(f.root.join(name), &archive_bytes).unwrap();
+    }
+    let result = f.run(config());
+    assert_eq!(result.summary.archives_ok, 1, "只有白名单内的包应被处理");
+    assert_eq!(result.summary.deleted, 1);
+    assert_eq!(result.summary.errors, 0);
+    assert!(
+        !f.root.join("keep.zip").exists(),
+        "白名单内的包完整成功后按 X-05 删除"
+    );
+    assert_eq!(
+        fs::read(f.root.join("payload.txt")).unwrap(),
+        b"payload for the only archive"
+    );
+    assert_eq!(
+        fs::read(f.root.join("visproww.cab")).unwrap(),
+        cab_bytes,
+        "真实 CAB 必须原样保留：安装介质不是待整理的压缩包"
+    );
+    for name in containers {
+        assert_eq!(
+            fs::read(f.root.join(name)).unwrap(),
+            archive_bytes,
+            "{name} 必须原样保留：不解压、不删除、不移动"
+        );
+    }
+    assert!(
+        !f.root.join("解压失败").exists(),
+        "白名单外的文件不是失败包，不得进隔离目录"
+    );
+}
+
 // 覆盖 X-03, X-05：全部成员成功落盘后永久删除原包。
 #[test]
 #[ignore = "Requires explicitly provided real 7-Zip engine"]
