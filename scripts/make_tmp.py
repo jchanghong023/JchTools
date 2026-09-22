@@ -310,12 +310,19 @@ def build_archives(root: Path, seven: Path, log: list[str]) -> None:
         _ = stream.write(single_payload)
     with lzma.open(section / "single.txt.xz", "wb") as stream:
         _ = stream.write(single_payload)
+    # 压缩流与 `.tar` 组合（X-01）：.lzma 引擎只能读不能写，用 Python 按 FORMAT_ALONE 生成。
+    _ = (section / "single.txt.lzma").write_bytes(lzma.compress(single_payload, format=lzma.FORMAT_ALONE))
+    buffer = BytesIO()
+    with tarfile.open(fileobj=buffer, mode="w") as archive:
+        _add_tar_members(archive, members, source)
+    _ = (section / "bundle.tar.lzma").write_bytes(lzma.compress(buffer.getvalue(), format=lzma.FORMAT_ALONE))
     shutil.rmtree(source, ignore_errors=True)
     log.append(
         _line(
-            "| `07-压缩包-各格式/` | 白名单内的 7z / zip / tar / tar.gz / tgz / tar.bz2 / tar.xz / gz / bz2 / xz",
-            "（本机 7-Zip 只支持解压 zst，没有构造 zst 用例） | ",
-            "每个包都应解压成功后永久删除原包，同内容成员仍完整落盘；只有另行执行目录整理才会去重；失败记录原因 |",
+            "| `07-压缩包-各格式/` | 白名单内的 7z / zip / tar / tar.gz / tgz / tar.bz2 / tar.xz / gz / bz2 / xz /",
+            "单文件流 .lzma 与 `.tar.lzma` 组合（本机 7-Zip 只支持解压 zst，没有构造 zst 用例） | ",
+            "每个包都应解压成功后永久删除原包，同内容成员仍完整落盘，中间 tar 层不留在正式位置；",
+            "只有另行执行目录整理才会去重；失败记录原因 |",
         )
     )
 

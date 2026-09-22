@@ -437,9 +437,15 @@ ARCHIVE_SUFFIXES = (
     ".bz2",
     ".xz",
     ".zst",
+    ".lz4",
+    ".lzma",
+    ".lz",
+    ".z",
+    ".br",
     ".tgz",
     ".tbz2",
     ".txz",
+    ".tzst",
 )
 
 
@@ -480,8 +486,12 @@ def verify_original_disposition(root: Path, originals: dict[Path, str], quaranti
         quarantined[digest] -= 1
 
 
+# 与 make_tmp.py 的 07 分区一致：同内容的单文件压缩流个数（gz / bz2 / xz / lzma）。
+STREAM_PAYLOAD_CASES = ("single.txt.gz", "single.txt.bz2", "single.txt.xz", "single.txt.lzma")
+
+
 def verify_extracted_outputs(root: Path) -> None:
-    """核对解压产物内容、分卷体积与嵌套原包清理."""
+    """核对解压产物内容、分卷体积、复合压缩的中间层与嵌套原包清理."""
     expected = {
         "08-压缩包-冲突/说明 (1).txt": b"archive version B, different content and length\n",
         "08-压缩包-冲突/等长 (1).txt": b"fedcba9876543210",
@@ -491,6 +501,21 @@ def verify_extracted_outputs(root: Path) -> None:
         if (root / relative).read_bytes() != content:
             msg = f"解压输出内容不符合测试语料：{relative}"
             raise RuntimeError(msg)
+    # X-01：复合扩展名整体识别，中间 tar 层不得留在正式位置（`.tar.lzma` 这类
+    # 引擎不自动拆 tar 的组合，靠把中间 tar 当嵌套包继续解开并清理）。
+    leftovers = [str(path.relative_to(root)) for path in (root / "07-压缩包-各格式").rglob("*.tar")]
+    if leftovers:
+        msg = f"中间 tar 层不得留在正式位置：{leftovers}"
+        raise RuntimeError(msg)
+    # 同内容的单文件压缩流（gz/bz2/xz/lzma）都应解出；同名冲突自动改名，内容不变。
+    payload = b"single member payload\n" * 8
+    expected_copies = len(STREAM_PAYLOAD_CASES)
+    copies = sum(
+        1 for path in (root / "07-压缩包-各格式").rglob("*") if path.is_file() and path.read_bytes() == payload
+    )
+    if copies != expected_copies:
+        msg = f"单文件压缩流应各解出一份内容（含 .lzma），实得 {copies} 份"
+        raise RuntimeError(msg)
     if (root / "13-压缩包-分卷/big.bin").stat().st_size != 2 * 1024 * 1024 + 12345:
         msg = "分卷原包删除前必须完整解出 big.bin"
         raise RuntimeError(msg)
