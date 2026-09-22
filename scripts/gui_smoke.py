@@ -586,9 +586,10 @@ def main() -> int:
     s1_launch_and_exit(str(exe))
     # S4 解压与 S3 整理都会真实改写语料；每个阶段前都从旁路副本恢复，
     # 保证“干净语料上的完整链路”（顺序：S4 解压 → S2 只分析 → S3 整理）。
-    repo_tmp = repo / ".tmp"
-    repo_tmp.mkdir(exist_ok=True)  # AGENTS §2：一切冒烟临时数据一律落在仓库 .tmp/ 下
-    scratch = Path(tempfile.mkdtemp(prefix="jchtools-gui-smoke-", dir=str(repo_tmp)))
+    # H-06/附录 E：所选根的任一祖先直接含 .git 时两工具拒绝整次处理。仓库根本身
+    # 带 .git，冒烟副本若继续放在仓库 .tmp/ 下会整次被拒（S4 确认框不再出现）。
+    # 改放系统临时目录（AGENTS §2 允许的 tempfile 例外；语料源目录不受影响）。
+    scratch = Path(tempfile.mkdtemp(prefix="jchtools-gui-smoke-"))
     try:
         fresh = scratch / "data"
         _ = shutil.copytree(data, fresh)
