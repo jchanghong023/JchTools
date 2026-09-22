@@ -135,9 +135,9 @@ impl Summary {
     }
     /// 「递归解压」一段式运行的收尾摘要（X-02 确认框与结束状态的口径）。
     pub fn extract_description(&self) -> String {
-        format!("扫描 {} 个文件\n解压成功 {} 包（{} 个文件落盘）\n未完全解开 {} 包；已移入「解压失败」{} 个原包或分卷文件\n成功原包、既有文件与已落盘结果均保留；错误 {} 项",
+        format!("扫描 {} 个文件\n解压成功 {} 包（{} 个文件落盘）\n未完全解开 {} 包；已移入「解压失败」{} 个原包或分卷文件\n已永久删除成功原包及分卷 {} 个（不可恢复）；既有文件与普通解压结果保留；错误 {} 项",
             self.scanned, self.archives_ok, self.extracted, self.archives_failed,
-            self.archives_quarantined, self.errors)
+            self.archives_quarantined, self.deleted, self.errors)
     }
 }
 /// 人类可读的字节数格式化：仅用于界面/日志展示，f64 精度损失无意义。

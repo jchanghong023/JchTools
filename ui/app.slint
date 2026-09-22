@@ -488,7 +488,7 @@ export component AppWindow inherits Window {
                     font-size: 20px; font-weight: 700; }
                 Rectangle { width: 3px; height: 16px; border-radius: 2px; background: Design.bar; }
                 Muted { text: root.screen == 0 ? "内容去重、归类与清理（不解压）；先分析出计划，确认后才执行。"
-                    : root.screen == 2 ? "递归解开压缩包；原压缩包与已有文件保留，无法完全解开的包移入「解压失败」。"
+                    : root.screen == 2 ? "递归解开压缩包；完整成功解出的原压缩包及分卷永久删除（不可恢复），失败或未完全解开的包保留。"
                     : "Windows 优先的本地工具箱 · 功能持续增加";
                     horizontal-stretch: 1; wrap: no-wrap; overflow: elide; vertical-alignment: center; }
                 if root.busy: Spinner { width: 20px; height: 20px; }
@@ -702,7 +702,7 @@ export component AppWindow inherits Window {
                     }
                 }
                 if root.panel == 0: Surface { vertical-stretch: 1;
-                    // 解压侧的处置已按 X-03/X-04/X-05/H-07 固定，基础层没有可调行：
+                    // 解压侧的处置已按 X-03/X-04/X-05/X-06 固定，基础层没有可调行：
                     // 空卡片改为固定行为的简要说明，而不是一句话顶在一整张空白大卡上。
                     if root.rules.length == 0: Rectangle {
                         x: 16px; y: 16px; width: parent.width - 32px;
@@ -711,10 +711,10 @@ export component AppWindow inherits Window {
                         border-radius: 10px;
                         border-width: 1px; border-color: Design.line-soft;
                         VerticalLayout { padding: 14px; spacing: 6px;
-                            Label { text: "解压处置已固定（不提供删除原包、覆盖或跳过冲突的选项）"; wrap: word-wrap; font-weight: 600; font-size: 13px; }
-                            Muted { text: "· 压缩包就地解开（含本次解出的嵌套包），原压缩包与已有文件一律保留"; }
+                            Label { text: "解压处置已固定（不提供保留原包、覆盖或跳过冲突的选项）"; wrap: word-wrap; font-weight: 600; font-size: 13px; }
+                            Muted { text: "· 压缩包就地解开（含本次解出的嵌套包）；完整成功解出的原压缩包及分卷永久删除（不可恢复），已有文件一律保留"; }
                             Muted { text: "· 目标同名时只为新解出的文件自动改名，扩展名与复合扩展名保持不变"; }
-                            Muted { text: "· 无法完全解开的包移入「解压失败」子目录，原因记录在日志中"; }
+                            Muted { text: "· 失败、部分解开或取消的包保留；无法完全解开的包移入「解压失败」子目录，原因记录在日志中"; }
                             Muted { text: "本分区没有基础规则；点「显示高级选项」可调整防护上限（嵌套层数、条目数、展开大小与比例）。"; }
                         }
                     }
@@ -828,9 +828,10 @@ export component AppWindow inherits Window {
                 Label { text: root.confirm-kind == 3 ? "停止任务并关闭" : "确认文件处理范围"; font-size: 20px; font-weight: 700; }
                 Rectangle { width: 48px; height: 3px; border-radius: 2px; background: Design.bar; }
                 TextEdit { text: root.confirm-text; read-only: true; vertical-stretch: 1; }
-                // 关闭确认不处理目录文件，不需要确认勾选；解压不删除任何文件（X-05/H-07），
-                // 勾选文案不得把永久删除说成解压授权；只有目录整理才可能有永久删除（S-02）。
-                if root.confirm-kind == 1: CheckBox { text: "我已确认解压范围：原压缩包与已有文件保留"; checked <=> root.acknowledge; }
+                // 关闭确认不处理目录文件，不需要确认勾选；解压按 X-05 只删完整成功的原包及分卷，
+                // 且 S-02 要求破坏性确认明确告知不可恢复——文案必须说清「永久删除」。
+                // 该文案同时是 gui_smoke 的固定选择器，改动必须与 scripts/gui_smoke.py 同步。
+                if root.confirm-kind == 1: CheckBox { text: "我已确认：成功原包及分卷永久删除（不可恢复）"; checked <=> root.acknowledge; }
                 if root.confirm-kind == 2: CheckBox { text: "我已确认目录、规则及可能的永久删除行为（不可恢复）"; checked <=> root.acknowledge; }
                 HorizontalLayout { spacing: 10px;
                     Rectangle { horizontal-stretch: 1; background: transparent; }

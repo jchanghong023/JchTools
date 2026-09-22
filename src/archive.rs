@@ -1,5 +1,5 @@
-use crate::{engine::Job, fsutil, model::bytes, process, rules};
-use anyhow::{bail, Context, Result};
+use crate::{config::DeleteMode, engine::Job, fsutil, model::bytes, process, rules};
+use anyhow::{bail, ensure, Context, Result};
 use rusqlite::{params, OptionalExtension};
 use std::{
     collections::{BTreeMap, HashMap, HashSet},
@@ -107,9 +107,10 @@ fn volume_bytes(volumes: &[PathBuf]) -> Result<u64> {
     Ok(total.max(1))
 }
 
-/// 任务级中止信号（X-06/X-08）：空间不足不是包损坏——保留当前源包、报错并停止整个
-/// 解压任务，不隔离本包，也不继续批量隔离后续正常包。错误在解压回调里会被
-/// `with_context` 包装，判定走错误链而不是顶层 downcast（见 [`stops_extraction`]）。
+/// 任务级中止信号（X-05/X-06/X-08）：空间不足、以及成功原包/分卷删除失败都不是包
+/// 损坏——保留当前源包（含未删除的分卷）、报错并停止整个解压任务，不隔离本包，也不
+/// 继续处理后续包。错误在解压回调里会被 `with_context` 包装，判定走错误链而不是顶层
+/// downcast（见 [`stops_extraction`]）。
 #[derive(Debug)]
 struct StopExtraction(String);
 
@@ -209,8 +210,8 @@ impl SevenZip {
             // .jchtools-link-* 组件与 scan 按名剪枝同构；顶层「解压失败」组件仅在
             // 归档位于选定根时落进 scan 永久盲区——子目录归档的同名成员落在归档
             // 自己的目录下（如 sub/解压失败/x），scan 可见、两工具可管理，不拒绝。
-            // 影子成员落盘后原包虽然保留（X-05），内容却落在两工具都看不到的区域，
-            // 用户无法管理；故整包隔离（X-06 危险条目，可逆、有日志）。
+            // 影子成员落盘不会删除原包（X-06 隔离而非 X-05 删除），但解出的内容会落在
+            // 两工具都看不到的区域、用户无法管理；故在清单阶段就按危险条目拒绝并整包隔离（可逆、有日志）。
             let top_component = raw.split('/').next().unwrap_or_default();
             if (archive_at_root && top_component == QUARANTINE_DIR_NAME)
                 || raw.split('/').any(|s| s.starts_with(".jchtools-link-"))
@@ -297,21 +298,18 @@ impl SevenZip {
             git_subtrees,
         })
     }
-    /// 档案级多卷佐证（分卷组识别与展开比例分母专用）。`l -slt`（不带 -ba）输出的
-    /// 档案头块才被多卷标志门控：zip 的 `Volume Index` 仅在 IsMultiVol 时出现、rar 的
-    /// `Multivolume`/`Volume Index` 仅在卷标志置位时出现、字节切割集（Type = Split）
-    /// 带 `Volumes` 计数。条目级 `Volume Index` 不能作佐证——zip 单卷包也逐条
-    /// 无条件输出（值恒为条目所在盘号 0）。档案注释以 `{`…`}` 原样逐行输出，
-    /// 注释内伪造的多卷键必须忽略（crafted 档案对抗面）。探测失败即上抛：佐证
-    /// 拿不到时整包走失败路径（隔离可逆），不得默认放行宽匹配。
-    fn archive_is_multi_volume(&self, archive: &Path, job: &mut Job) -> Result<bool> {
+    /// 只读取最外层档案头中的格式与实际卷数。注释和后续内层档案头不具有删除授权。
+    fn archive_volume_count(&self, archive: &Path, job: &mut Job) -> Result<ArchiveVolumes> {
         let mut command = self.command();
         command
             .args(["l", "-slt", "-sccUTF-8", "-p-", "--"])
             .arg(archive);
         let mut in_header = false;
-        let mut in_comment = false;
+        let mut header_seen = false;
+        let mut kind = String::new();
+        let mut count = None;
         let mut multipart = false;
+        let mut new_rar_names = false;
         let ctl = job.context.control.clone();
         process::run(
             &mut command,
@@ -321,63 +319,63 @@ impl SevenZip {
                     return Ok(());
                 }
                 let line = line.trim_end();
-                // 注释块整体跳过：里面的键值（含伪造的 -- / ----）都不参与判定。
-                // 注释内容本身可含 } 行（crafted 对抗）：} 结束注释的同时结束档案
-                // 头块——真实输出中 Comment 是头块最后一个字段，其后的键只可能是
-                // 注释伪造；漏检（如带多行注释的真分卷集）只导致宽命名兄弟卷留在
-                // 原地（extract_one 有用户可见日志），不可被伪造键放行处置。
-                if in_comment {
-                    if line == "}" {
-                        in_comment = false;
-                        in_header = false;
-                    }
-                    return Ok(());
-                }
-                if line == "{" {
-                    in_comment = true;
-                    return Ok(());
-                }
-                if line == "--" {
+                if line == "--" && !header_seen {
+                    header_seen = true;
                     in_header = true;
                     return Ok(());
                 }
-                // `----------`（及内层档案块的 `----`）结束档案头块；条目块不参与判定。
-                if line.starts_with("----") {
+                // Comment 是不可信的原样文本；此后绝不重新进入头块，哪怕注释伪造 } / --。
+                if line.starts_with("----") || line.starts_with("Comment =") || line == "{" {
                     in_header = false;
-                    return Ok(());
                 }
                 if !in_header {
                     return Ok(());
                 }
                 if let Some((key, value)) = line.split_once(" = ") {
-                    if key == "Volume Index" {
-                        multipart = true;
-                    } else if key == "Volumes" {
-                        multipart |= value.trim().parse::<u64>().is_ok_and(|v| v > 1);
-                    } else if key == "Multivolume" {
-                        multipart |= value.trim() == "+";
+                    match key {
+                        "Type" => value.clone_into(&mut kind),
+                        "Volumes" => {
+                            let value = value.parse::<usize>().context("引擎分卷数量无效")?;
+                            ensure!(value > 0, "引擎分卷数量不能为零");
+                            count = Some(value);
+                        }
+                        "Characteristics" => {
+                            new_rar_names =
+                                value.split_whitespace().any(|flag| flag == "NewVolName");
+                        }
+                        "Volume Index" => multipart = true,
+                        "Multivolume" => multipart |= value == "+",
+                        _ => {}
                     }
                 }
                 Ok(())
             },
             || Ok(()),
         )
-        .with_context(|| "无法完成压缩包的多卷佐证探测")?;
-        Ok(multipart)
+        .with_context(|| "无法确认压缩包实际分卷")?;
+        ensure!(
+            !multipart || count.is_some(),
+            "引擎未提供可信的实际分卷数量，保留源包"
+        );
+        Ok(ArchiveVolumes {
+            kind,
+            count: count.unwrap_or(1),
+            new_rar_names,
+        })
     }
     fn extract_one(&self, job: &mut Job, archive_rel: &str, depth: u32) -> Result<bool> {
         let archive = fsutil::safe_join(&job.root, archive_rel)?;
         job.context.status(format!("检查压缩包：{archive_rel}"));
-        // 分卷组（主体 + 兄弟卷）是隔离（X-06）与展开比例分母（X-08）的单位。
-        // 宽命名兄弟卷（同主干 .rNN/.zNN）只认引擎档案级佐证：单卷包旁同主干的
-        // 无辜文件（如换成完整包后残留的旧 .z01）不得被一并隔离、也不得计入分母。
-        // partN/.NNN 命名本身精确，不受佐证门约束；无宽命名候选时也无需付出探测开销。
-        let named = volume_set(&archive, true)?;
-        let multipart = named.len() > 1 && self.archive_is_multi_volume(&archive, job)?;
-        let volumes = if multipart {
-            named
+        // 文件名仅用于发现候选；删除与展开比例只能使用引擎实际打开的连续分卷。
+        // 隔离仍使用独立的可逆宽匹配，不能把该集合复用为永久删除授权。
+        let named = volume_set(&archive)?;
+        let volumes = if named.paths.len() > 1
+            || matches!(named.scheme, VolumeScheme::RarParts | VolumeScheme::OldRar)
+        {
+            let info = self.archive_volume_count(&archive, job)?;
+            named.scheme.actual_paths(&archive, &info)?
         } else {
-            volume_set(&archive, false)?
+            named.paths
         };
         // X-08：展开比例的分母是实际卷集合合计，不是主体单卷大小。
         let packed = volume_bytes(&volumes)?;
@@ -778,10 +776,63 @@ impl SevenZip {
                 }
             }
         }
+        // X-05：只有整包解码与校验成功、全部成员（含空目录）完整落盘后，才永久删除
+        // 原包及其实际分卷；失败、部分解开或取消都不启动删除，也不删除仅同主干的文件。
+        if complete {
+            delete_successful_source(job, archive_rel, &volumes)?;
+        }
         // 「解压成功」包数由调用方按 complete 口径累加：未完全解开的包要计入失败
         // 并移入「解压失败」（X-06），不得在解压层无条件先记一次成功。
         Ok(complete)
     }
+}
+/// X-05：完整解开的原包与其实际分卷按永久删除处置（`volumes` 已在解压前按命名口径
+/// 与档案级佐证门校验：主体 + 精确命名兄弟卷 + 已证实的宽命名兄弟卷）。
+/// 复用 [`Job::delete_path`] 的既有语义（审计日志、删除计数、files 行失活），删除方式
+/// 固定为永久删除，不受目录整理的全局删除方式影响。
+/// 每个卷删除前检查取消：取消后不再启动后续删除（已落盘结果与未删除的卷保留）。
+/// 删除失败即如实上抛为任务级中止（不是包损坏）：解压结果已落盘，未删除的卷保留在
+/// 原位置，不做隔离、不虚计成功、也不回滚已删除的卷（X-05 不承诺多卷删除事务性）。
+fn delete_successful_source(job: &mut Job, archive_rel: &str, volumes: &[PathBuf]) -> Result<()> {
+    for (index, volume) in volumes.iter().enumerate() {
+        // 取消在文件操作的安全边界生效：取消后不再启动任何删除。
+        job.context.control.checkpoint()?;
+        let expected = fsutil::snapshot(volume).ok();
+        let reason = if index == 0 {
+            "已完全解压落盘：按 X-05 永久删除原包"
+        } else {
+            "已完全解压落盘：按 X-05 随主体一并永久删除分卷"
+        };
+        if let Err(error) = job.delete_path(
+            volume,
+            expected.as_ref(),
+            DeleteMode::Permanent,
+            reason,
+            true,
+        ) {
+            let unattempted = volumes.len() - index - 1;
+            let volume_rel = fsutil::relative_string(&job.root, volume)
+                .unwrap_or_else(|_| volume.display().to_string());
+            let stop = StopExtraction(format!(
+                "解压已完全落盘，但源包清理失败：永久删除原包/分卷时出错（{archive_rel} → {volume_rel}）；\
+                 当前卷可能已删除，后续 {unattempted} 个卷尚未尝试删除；已删除的卷不回滚；不隔离本包，也不继续处理后续包：{error:#}"
+            ));
+            // 文件删除后的结果日志或数据库更新同样可能失败；不能据 Err 声称当前卷仍在。
+            // 尽力补写日志，但始终保留清理失败的任务级中止，不再隔离已部分删除的包组。
+            let _ = job.log(
+                "删除",
+                &volume_rel,
+                "",
+                "失败",
+                &format!(
+                    "源包清理未完成：解压结果已完全落盘，当前卷可能已删除；后续 {unattempted} 个卷未尝试删除（不隔离、不回滚）"
+                ),
+                expected.as_ref().map_or(0, |snapshot| snapshot.size),
+            );
+            return Err(stop.into());
+        }
+    }
+    Ok(())
 }
 /// 流式压缩包去掉**一层**压缩后缀后的名字；不是流式格式时返回 None。
 fn stream_stem(archive: &Path) -> Option<String> {
@@ -954,57 +1005,173 @@ fn rar_part_stem(name: &str) -> Option<&str> {
     let (stem, part) = base.rsplit_once(".part")?;
     (!part.is_empty() && part.chars().all(|c| c.is_ascii_digit())).then_some(stem)
 }
-/// 分卷组解析：返回主体自身 + 同目录下的兄弟卷（X-05/X-06 的处置单位）。
-/// 非分卷包返回只含主体自身的单项集合。识别口径与旧 protect_volumes 一致：
-/// 分卷识别只走 rar_part_stem，不用 starts_with 宽匹配（report.partial.rar 不是分卷）。
-/// sweep_fuzzy 控制 oldrar/splitzip 的宽命名兄弟卷（同主干 .rNN/.zNN）：处置不可逆
-/// （可配永久删除），只有引擎档案级属性证实多卷（archive_is_multi_volume）才计入；
-/// .partN.rar 与 .NNN 编号命名本身精确，不受此门约束。
-fn volume_set(archive: &Path, sweep_fuzzy: bool) -> Result<Vec<PathBuf>> {
+struct ArchiveVolumes {
+    kind: String,
+    count: usize,
+    new_rar_names: bool,
+}
+
+/// 分卷命名仅描述引擎逐卷打开时使用的路径；是否多卷以及实际数量必须由引擎确认。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum VolumeScheme {
+    Single,
+    RarParts,
+    Numbered,
+    OldRar,
+    SplitZip,
+}
+impl VolumeScheme {
+    fn actual_paths(self, archive: &Path, info: &ArchiveVolumes) -> Result<Vec<PathBuf>> {
+        let kind = &info.kind;
+        let count = info.count;
+        if count == 1 {
+            return Ok(vec![archive.to_path_buf()]);
+        }
+        let compatible = match self {
+            Self::RarParts | Self::OldRar => {
+                kind.eq_ignore_ascii_case("rar") || kind.eq_ignore_ascii_case("rar5")
+            }
+            Self::Numbered => kind.eq_ignore_ascii_case("split"),
+            Self::SplitZip => kind.eq_ignore_ascii_case("zip"),
+            Self::Single => false,
+        };
+        ensure!(compatible, "引擎格式与分卷命名不一致，保留源包");
+        let name = archive
+            .file_name()
+            .and_then(|name| name.to_str())
+            .context("无效分卷名称")?;
+        // RAR4 由 NewVolName 标志决定；RAR5 总用新式规则。新式取扩展名前最后一段数字，
+        // 不要求叫 part1：report1.rar → report2.rar，数字后的文字与前导零也保持不变。
+        let base = &name[..name.len() - 4];
+        let mut rar_number = if info.new_rar_names || kind.eq_ignore_ascii_case("rar5") {
+            base.as_bytes()
+                .iter()
+                .rposition(u8::is_ascii_digit)
+                .map(|last| {
+                    let end = last + 1;
+                    let start = base.as_bytes()[..end]
+                        .iter()
+                        .rposition(|byte| !byte.is_ascii_digit())
+                        .map_or(0, |position| position + 1);
+                    (start, end, name.as_bytes()[start..end].to_vec())
+                })
+        } else {
+            None
+        };
+        let mut paths = vec![archive.to_path_buf()];
+        for index in 1..count {
+            let next = match self {
+                Self::RarParts | Self::OldRar => {
+                    if let Some((start, end, digits)) = &mut rar_number {
+                        let mut carry = true;
+                        for digit in digits.iter_mut().rev() {
+                            if *digit == b'9' {
+                                *digit = b'0';
+                            } else {
+                                *digit += 1;
+                                carry = false;
+                                break;
+                            }
+                        }
+                        if carry {
+                            digits.insert(0, b'1');
+                        }
+                        format!(
+                            "{}{}{}",
+                            &name[..*start],
+                            std::str::from_utf8(digits)?,
+                            &name[*end..]
+                        )
+                    } else {
+                        let extension = u32::try_from((index - 1) / 100)?
+                            .checked_add(u32::from('r'))
+                            .and_then(char::from_u32)
+                            .context("RAR 分卷编号超出范围")?;
+                        format!("{base}.{extension}{:02}", (index - 1) % 100)
+                    }
+                }
+                Self::Numbered => format!("{base}.{:03}", index + 1),
+                Self::SplitZip => format!("{}.z{index:02}", &name[..name.len() - 4]),
+                Self::Single => unreachable!(),
+            };
+            let path = archive.with_file_name(next);
+            let metadata = fs::symlink_metadata(&path)
+                .with_context(|| format!("实际分卷不可访问：{}", path.display()))?;
+            ensure!(
+                metadata.file_type().is_file(),
+                "实际分卷不是普通文件，保留源包：{}",
+                path.display()
+            );
+            paths.push(path);
+        }
+        Ok(paths)
+    }
+}
+/// 候选组供可逆隔离使用；成功删除前必须转换成经引擎确认的实际卷集合。
+#[derive(Debug)]
+struct VolumeSet {
+    paths: Vec<PathBuf>,
+    scheme: VolumeScheme,
+}
+/// 分卷组解析：返回主体自身 + 同目录下的兄弟卷（X-05 删除与 X-06 隔离的处置单位）。
+/// 非分卷包（命名不能匹配任何分卷方案）返回只含主体自身的单项集合，且**不枚举目录**：
+/// 单卷 7z/tar/gz 等格式没有可匹配的兄弟卷命名，逐包扫描目录是纯粹的重复工作。
+/// 识别口径与旧 protect_volumes 一致：分卷识别只走 rar_part_stem，不用 starts_with
+/// 宽匹配（report.partial.rar 不是分卷）。
+fn volume_set(archive: &Path) -> Result<VolumeSet> {
     let name = archive
         .file_name()
         .and_then(|s| s.to_str())
         .context("无效压缩包名称")?
         .to_lowercase();
-    let stem = if let Some(stem) = rar_part_stem(&name) {
-        Some((stem.to_string(), "rar"))
+    let (stem, scheme) = if let Some(stem) = rar_part_stem(&name) {
+        (stem.to_string(), VolumeScheme::RarParts)
     } else if name.ends_with(".7z.001") || name.ends_with(".zip.001") {
-        Some((name[..name.len() - 4].to_string(), "numbered"))
+        (name[..name.len() - 4].to_string(), VolumeScheme::Numbered)
     } else if let Some(stem) = name.strip_suffix(".rar") {
-        Some((stem.to_string(), "oldrar"))
+        (stem.to_string(), VolumeScheme::OldRar)
+    } else if let Some(stem) = name.strip_suffix(".zip") {
+        (stem.to_string(), VolumeScheme::SplitZip)
     } else {
-        name.strip_suffix(".zip")
-            .map(|stem| (stem.to_string(), "splitzip"))
+        return Ok(VolumeSet {
+            paths: vec![archive.to_path_buf()],
+            scheme: VolumeScheme::Single,
+        });
     };
-    let mut volumes = vec![archive.to_path_buf()];
-    let Some((stem, kind)) = stem else {
-        return Ok(volumes);
+    // 逐条目复用的匹配前缀与最少位数在扫描前算好（此前每个目录条目要 format! 两次）：
+    // rar 的 `.partN` 判定走 rar_part_stem，没有固定前缀；编号命名最少 3 位
+    // （7-Zip 多卷可到 .1000+，001/1000 都算兄弟卷，不写死恰好 3 位），宽命名至少 2 位。
+    let (prefix, min_digits) = match scheme {
+        VolumeScheme::Numbered => (Some(format!("{stem}.")), 3),
+        VolumeScheme::OldRar => (Some(format!("{stem}.r")), 2),
+        VolumeScheme::SplitZip => (Some(format!("{stem}.z")), 2),
+        VolumeScheme::RarParts | VolumeScheme::Single => (None, 0),
     };
+    let matches_candidate = |candidate: &str| -> bool {
+        match scheme {
+            // 与主体识别同口径：只认同主干的 .partN.rar，不用 starts_with 宽匹配。
+            VolumeScheme::RarParts => rar_part_stem(candidate).is_some_and(|s| s == stem),
+            VolumeScheme::Numbered | VolumeScheme::OldRar | VolumeScheme::SplitZip => {
+                prefix.as_deref().is_some_and(|prefix| {
+                    candidate.strip_prefix(prefix).is_some_and(|digits| {
+                        digits.len() >= min_digits && digits.chars().all(|c| c.is_ascii_digit())
+                    })
+                })
+            }
+            VolumeScheme::Single => false,
+        }
+    };
+    let mut paths = vec![archive.to_path_buf()];
     for entry in fs::read_dir(archive.parent().context("压缩包缺少目录")?)? {
         let entry = entry?;
         let candidate = entry.file_name().to_string_lossy().to_lowercase();
-        let matches = match kind {
-            // 与主体识别同口径：只认同主干的 .partN.rar，不用 starts_with 宽匹配。
-            "rar" => rar_part_stem(&candidate).is_some_and(|s| s == stem),
-            // 7-Zip 多卷可到 .1000+：按最少位数匹配（001/1000 都算兄弟卷），不写死恰好 3 位。
-            "numbered" => candidate
-                .strip_prefix(&format!("{stem}."))
-                .is_some_and(|v| v.len() >= 3 && v.chars().all(|c| c.is_ascii_digit())),
-            // 宽命名兄弟卷受 sweep_fuzzy 门禁（见函数注释）；门禁关闭时落到 _ => false。
-            "oldrar" if sweep_fuzzy => candidate
-                .strip_prefix(&format!("{stem}.r"))
-                .is_some_and(|v| v.len() >= 2 && v.chars().all(|c| c.is_ascii_digit())),
-            "splitzip" if sweep_fuzzy => candidate
-                .strip_prefix(&format!("{stem}.z"))
-                .is_some_and(|v| v.len() >= 2 && v.chars().all(|c| c.is_ascii_digit())),
-            _ => false,
-        };
         // 主体自身已在集合里（如 part1.rar 对主干同判）；大小写不敏感路径上可能重复命名，去重交给文件系统唯一性。
-        if matches && entry.path() != archive {
-            volumes.push(entry.path());
+        if matches_candidate(&candidate) && entry.path() != archive && entry.file_type()?.is_file()
+        {
+            paths.push(entry.path());
         }
     }
-    Ok(volumes)
+    Ok(VolumeSet { paths, scheme })
 }
 /// 失败处置（X-06）：把未能完全解开的原包（连同兄弟卷）移入所选目录根下的
 /// 「解压失败」子目录。移动用不覆盖改名；同名冲突改用唯一名。失败原因是界面可查的
@@ -1014,8 +1181,8 @@ fn quarantine(job: &mut Job, archive_rel: &str, reason: &str) -> Result<()> {
     // 隔离可逆（改名进「解压失败」，用户可移回）：宽命名兄弟卷保持整组隔离。
     // 真 PKZIP/旧 RAR 分卷集失败时常无法从主体取得 Volume Index 佐证，若在此也
     // 设门会把真兄弟卷残留在原目录（.zNN/.rNN 不在扫描口径内，永远不会再被处理）；
-    // 误隔离可还原、有日志，误处置不可逆——佐证门只设在处置路径。
-    let sources = volume_set(&archive, true)?;
+    // 误隔离可还原、有日志，误删除不可逆——佐证门只设在删除路径（extract_one）。
+    let sources = volume_set(&archive)?.paths;
     let dir = job.root.join(QUARANTINE_DIR_NAME);
     if !dir.try_exists()? {
         fs::create_dir_all(&dir)?;
@@ -1193,15 +1360,16 @@ pub fn extract_queued(job: &mut Job, engine: &SevenZip) -> Result<()> {
                 job.db
                     .conn
                     .execute("UPDATE archives SET state='done' WHERE id=?1", [id])?;
-                // X-05/H-07：完全解开不作任何处置——原包与全部分卷原地保留是正常结果；
-                // 同次任务里该包已标 done，不会再入队（X-07/H-04）。
+                // X-05/X-07：完全解开的包（含全部分卷）已在 extract_one 尾部永久删除，
+                // 删除失败会以任务级中止上抛、走不到这里；同次任务里该包已标 done，
+                // 不会再入队（X-07/H-04）。
                 job.summary.archives_ok += 1;
                 job.log(
                     "解压",
                     &relative,
                     "",
                     "成功",
-                    "已完全解开；原包与分卷按 X-05 保留在原地",
+                    "已完全解开；原包与分卷按 X-05 永久删除",
                     0,
                 )?;
             }
@@ -1565,5 +1733,33 @@ mod tests {
         control.cancel();
         let cancelled = control.check_cancelled().unwrap_err();
         assert!(!stops_extraction(&cancelled), "取消不得被当成空间不足");
+    }
+
+    // 覆盖 X-05, X-08（取消在删除的安全边界生效）：已取消时不启动任何删除，
+    // 错误沿用取消口径（不是「停止任务」信号，不隔离、不虚计成功）。
+    #[test]
+    fn delete_successful_source_stops_on_cancellation() {
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path().join("data");
+        fs::create_dir(&root).unwrap();
+        let volume = root.join("pack.zip");
+        fs::write(&volume, b"archive bytes").unwrap();
+        let mut job = Job {
+            root,
+            config: Config::default(),
+            context: TaskContext::default(),
+            db: Database::create(&temp.path().join("state")).unwrap(),
+            summary: crate::model::Summary::default(),
+        };
+        job.context.control.cancel();
+
+        let error = delete_successful_source(&mut job, "pack.zip", std::slice::from_ref(&volume))
+            .unwrap_err();
+        assert!(
+            !stops_extraction(&error),
+            "取消沿用取消口径，不得被当成任务级中止信号处理：{error:#}"
+        );
+        assert!(volume.is_file(), "取消后不得启动任何删除");
+        assert_eq!(job.summary.deleted, 0, "取消后不得虚计删除");
     }
 }

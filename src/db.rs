@@ -18,11 +18,12 @@ pub struct Database {
 impl Database {
     pub fn create(directory: &Path) -> Result<Self> {
         std::fs::create_dir_all(directory)?;
-        let value = Self::open(directory)?;
-        value.conn.execute_batch(SCHEMA)?;
-        value
-            .conn
-            .pragma_update(None, "user_version", SCHEMA_VERSION)?;
+        let mut value = Self::open(directory)?;
+        // 建表与索引只提交一次，避免新任务为每条 DDL 单独提交。
+        let transaction = value.conn.transaction()?;
+        transaction.execute_batch(SCHEMA)?;
+        transaction.pragma_update(None, "user_version", SCHEMA_VERSION)?;
+        transaction.commit()?;
         Ok(value)
     }
     pub fn open(directory: &Path) -> Result<Self> {

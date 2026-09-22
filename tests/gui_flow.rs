@@ -338,11 +338,12 @@ fn git_subtree_skip_is_visible_after_run_and_tree_untouched() {
     assert!(handled, "排除树之外的文件仍按计划处理（归类后仍存在）");
 }
 
-// 覆盖 X-02, X-05, H-07（解压一段确认的端到端）：确认文案必须说明原包与已有文件均保留、
-// 冲突只为新文件自动改名，且不得出现删除/覆盖授权；确认后跑完不改动目录里的任何文件。
-// 目录内没有压缩包时不会解析引擎（E-02/E-05 只在真正解压时要求引擎），因此本用例无需真实引擎。
+// 覆盖 X-02, X-04, X-05, X-06, H-07（解压一段确认的端到端）：确认文案必须说明完整成功后
+// 原包及分卷永久删除且不可恢复、已有文件保留、冲突只为新文件自动改名，且不得出现覆盖授权；
+// 结束状态如实报出删除与保留口径。目录内没有压缩包时不会解析引擎（E-02/E-05 只在真正解压时
+// 要求引擎），因此本用例无需真实引擎；既有文件与目录内容在结束后必须原样保留。
 #[test]
-fn extract_confirmation_keeps_originals_and_completes() {
+fn extract_confirmation_discloses_source_deletion_and_leaves_files_untouched() {
     let fixture = tempfile::tempdir().unwrap();
     let data = fixture.path().join("data");
     fs::create_dir_all(&data).unwrap();
@@ -353,6 +354,9 @@ fn extract_confirmation_keeps_originals_and_completes() {
     // 跨线程可见的确认标志：Rc 不是 Send，工作线程任务用原子量回传结果。
     let confirm_seen = Arc::new(AtomicBool::new(false));
     let confirm_flag = Arc::clone(&confirm_seen);
+    // 结束时的状态栏文案（事件循环内读取）。
+    let end_status = Arc::new(Mutex::new(String::new()));
+    let status_sink = Arc::clone(&end_status);
 
     let overrides = EngineTestOverrides {
         state_dir: state_dir.clone(),
@@ -372,6 +376,7 @@ fn extract_confirmation_keeps_originals_and_completes() {
                 let steps = steps.clone();
                 let ticks = ticks.clone();
                 let failures = Arc::clone(&failure_sink);
+                let status_sink = Arc::clone(&status_sink);
                 let driver = slint::Timer::default();
                 driver.start(
                     slint::TimerMode::Repeated,
@@ -388,23 +393,49 @@ fn extract_confirmation_keeps_originals_and_completes() {
                         let Some(ui) = ui.upgrade() else { return };
                         match steps.get() {
                             0 => {
-                                // 清点完成后（confirm-pending 解除）文案必须已说明保留口径。
+                                // 清点完成后（confirm-pending 解除）文案必须已说明删除与保留口径。
                                 if ui.get_confirm_kind() == 1 && !ui.get_confirm_pending() {
                                     let text = ui.get_confirm_text().to_string();
                                     let mut problems: Vec<String> = Vec::new();
-                                    if !text.contains("原压缩包与已有文件") {
+                                    // X-02/S-02：破坏性确认必须明说完整成功后原包及分卷永久删除。
+                                    if !text.contains("永久删除") {
                                         problems.push(format!(
-                                            "X-05/H-07：确认文案必须说明原包与已有文件均保留：{text}"
+                                            "X-02/S-02：确认文案必须说明完整成功后原包及分卷永久删除：{text}"
                                         ));
                                     }
+                                    if !text.contains("不可恢复") {
+                                        problems.push(format!(
+                                            "X-02/S-02：确认文案必须说明永久删除不可恢复：{text}"
+                                        ));
+                                    }
+                                    // X-05：失败、未完全解开或取消时保留。
+                                    if !text.contains("保留") {
+                                        problems.push(format!(
+                                            "X-05：确认文案必须说明失败/部分/取消时保留原包：{text}"
+                                        ));
+                                    }
+                                    // X-05/H-07：已有文件保留。
+                                    if !text.contains("已有文件") {
+                                        problems.push(format!(
+                                            "X-05/H-07：确认文案必须说明已有文件保留：{text}"
+                                        ));
+                                    }
+                                    // X-04/H-07：冲突只为新文件自动改名。
                                     if !text.contains("自动改文件名") {
                                         problems.push(format!(
                                             "X-04/H-07：确认文案必须说明冲突只为新文件自动改名：{text}"
                                         ));
                                     }
-                                    if text.contains("永久删除") || text.contains("覆盖") {
+                                    // X-06：失败包去向。
+                                    if !text.contains("「解压失败」") {
                                         problems.push(format!(
-                                            "X-05/R-02：解压确认不得出现删除/覆盖授权：{text}"
+                                            "X-06：确认文案必须说明失败包去向：{text}"
+                                        ));
+                                    }
+                                    // H-07/X-04：不得提供覆盖授权，也不得询问冲突策略。
+                                    if text.contains("覆盖") || text.contains("冲突策略") {
+                                        problems.push(format!(
+                                            "X-04/H-07：解压确认不得出现覆盖或冲突策略授权：{text}"
                                         ));
                                     }
                                     if problems.is_empty() {
@@ -420,6 +451,10 @@ fn extract_confirmation_keeps_originals_and_completes() {
                             }
                             1 if ui.get_status().contains("解压结束") => {
                                 steps.set(2);
+                                *status_sink
+                                    .lock()
+                                    .unwrap_or_else(std::sync::PoisonError::into_inner) =
+                                    ui.get_status().to_string();
                                 let _ = slint::quit_event_loop();
                             }
                             _ => {}
@@ -437,6 +472,14 @@ fn extract_confirmation_keeps_originals_and_completes() {
     });
 
     assert!(confirm_seen.load(Ordering::Relaxed), "必须经过一次解压确认");
+    let status = end_status
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .clone();
+    assert!(
+        status.contains("永久删除") && status.contains("保留"),
+        "X-05/S-02：结束状态必须如实报出删除与保留口径：{status}"
+    );
     assert_eq!(
         fs::read(data.join("keep.txt")).unwrap(),
         b"keep me",

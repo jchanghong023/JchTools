@@ -13,7 +13,7 @@ pub fn tools() -> &'static [ToolDescriptor] {
             id: "recursive-extract",
             name: "递归解压",
             category: "文件",
-            summary: "递归解开压缩包 · 原包与已有文件保留 · 冲突自动改名",
+            summary: "递归解开压缩包 · 成功后删除原包 · 冲突自动改名",
         },
         ToolDescriptor {
             id: "directory-organizer",

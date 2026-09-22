@@ -178,6 +178,7 @@ pub fn prepare_at(
         uuid::Uuid::new_v4()
     ));
     let db = Database::create(&directory)?;
+    let initialization = db.conn.unchecked_transaction()?;
     db.set("root", &fsutil::path_string(&root)?)?;
     db.set("config", &config)?;
     db.set("status", &"analyzing")?;
@@ -186,6 +187,7 @@ pub fn prepare_at(
     // 记录本次的全局锁目录：apply 若按任务目录当前位置推导锁位置，任务目录被移动后
     // 会与这里的互斥失效（apply_with 会优先锁这个记录值）。
     db.set("state_dir", &fsutil::path_string(state)?)?;
+    initialization.commit()?;
     let mut job = Job {
         root,
         config,
@@ -287,12 +289,14 @@ fn extract_run_with(
         uuid::Uuid::new_v4()
     ));
     let db = Database::create(&directory)?;
+    let initialization = db.conn.unchecked_transaction()?;
     db.set("root", &fsutil::path_string(&root)?)?;
     db.set("config", &config)?;
     db.set("status", &"executing")?;
     db.set("summary", &Summary::default())?;
     db.set("created", &chrono::Utc::now().to_rfc3339())?;
     db.set("state_dir", &fsutil::path_string(state)?)?;
+    initialization.commit()?;
     let mut job = Job {
         root,
         config,
@@ -330,7 +334,7 @@ fn extract_run_with(
             "",
             "完成",
             &format!(
-                "解压结束：成功 {} 包；失败并移入「{}」 {} 包",
+                "解压结束：成功 {} 包（成功原包及分卷已永久删除）；未完全解开并移入「{}」 {} 包",
                 job.summary.archives_ok,
                 archive::QUARANTINE_DIR_NAME,
                 job.summary.archives_failed

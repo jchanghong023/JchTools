@@ -100,8 +100,8 @@ impl ArchiveFixture {
         engine::apply(&task.directory, Context::default()).unwrap()
     }
 }
-/// 解压用例的默认规则：X-05 之后原包一律保留、冲突一律只给新成员改名，
-/// 处置类配置已整体移除，这里只关掉与本文件无关的容量限制（预留 0、展开比例不限）。
+/// 解压用例的默认规则：X-05 之后成功原包一律永久删除、冲突一律只给新成员改名，
+/// 处置类配置已整体移除（无删除选项可配），这里只关掉与本文件无关的容量限制（预留 0、展开比例不限）。
 fn config() -> Config {
     Config {
         reserve_gib: 0,
@@ -116,7 +116,87 @@ fn organizer() -> Config {
         ..Config::default()
     }
 }
-// 覆盖 X-03
+// 覆盖 X-05, H-07：RAR 新式编号由档案头决定，不能把 report1.r00 当成 report2.rar。
+#[test]
+#[ignore = "Requires explicitly provided real 7-Zip engine"]
+fn successful_cleanup_uses_rar_header_volume_naming() {
+    let f = ArchiveFixture::new();
+    // 合法 RAR4 空分卷：主头含 Volume/NewVolName，头 CRC 与末卷编号均完整。
+    let first = [
+        0x52, 0x61, 0x72, 0x21, 0x1a, 0x07, 0x00, 0x5a, 0x6e, 0x73, 0x11, 0x01, 0x0d, 0x00, 0x00,
+        0x00, 0x00, 0x00, 0x00, 0x00, 0xed, 0x45, 0x7b, 0x09, 0x00, 0x09, 0x00, 0x00, 0x00,
+    ];
+    let last = [
+        0x52, 0x61, 0x72, 0x21, 0x1a, 0x07, 0x00, 0x19, 0x7a, 0x73, 0x11, 0x00, 0x0d, 0x00, 0x00,
+        0x00, 0x00, 0x00, 0x00, 0x00, 0x09, 0xa7, 0x7b, 0x08, 0x00, 0x09, 0x00, 0x01, 0x00,
+    ];
+    fs::write(f.root.join("report1.rar"), first).unwrap();
+    fs::write(f.root.join("report2.rar"), last).unwrap();
+    fs::write(f.root.join("report1.r00"), b"unrelated old-style sibling").unwrap();
+    let result = f.run(config());
+    assert_eq!(
+        fs::read(f.root.join("report1.r00")).unwrap(),
+        b"unrelated old-style sibling"
+    );
+    assert!(!f.root.join("report1.rar").exists());
+    assert!(!f.root.join("report2.rar").exists());
+    assert_eq!(result.summary.archives_ok, 1);
+    assert_eq!(result.summary.deleted, 2);
+    assert_eq!(result.summary.errors, 0);
+}
+
+// 覆盖 X-05, H-07：看似分卷的名字不等于引擎实际读取过的分卷。
+#[test]
+#[ignore = "Requires explicitly provided real 7-Zip engine"]
+fn successful_cleanup_preserves_unused_volume_named_siblings() {
+    let f = ArchiveFixture::new();
+    fs::write(f.input.join("payload.txt"), b"complete payload").unwrap();
+    f.archive(&f.root.join("report.part1.rar"), "-tzip");
+    fs::write(f.root.join("report.part2.rar"), b"unrelated user file").unwrap();
+    fs::create_dir(f.root.join("report.part3.rar")).unwrap();
+    let result = f.run(config());
+    assert_eq!(result.summary.archives_ok, 1);
+    assert!(!f.root.join("report.part1.rar").exists());
+    assert_eq!(
+        fs::read(f.root.join("report.part2.rar")).unwrap(),
+        b"unrelated user file"
+    );
+    assert!(f.root.join("report.part3.rar").is_dir());
+    assert_eq!(
+        fs::read(f.root.join("payload.txt")).unwrap(),
+        b"complete payload"
+    );
+    assert_eq!(result.summary.deleted, 1);
+}
+
+// 覆盖 X-05, H-07：真实分卷只删除引擎报告的数量，不删除断号后的同名尾卷或目录。
+#[test]
+#[ignore = "Requires explicitly provided real 7-Zip engine"]
+fn successful_cleanup_preserves_unused_volume_tail_after_gap() {
+    let f = ArchiveFixture::new();
+    let count = f.split_set(&f.root.join("part.zip"));
+    fs::write(f.root.join("part.zip.999"), b"unrelated tail").unwrap();
+    fs::create_dir(f.root.join("part.zip.1000")).unwrap();
+    let result = f.run(config());
+    assert_eq!(result.summary.archives_ok, 1);
+    assert_eq!(result.summary.deleted, u64::try_from(count).unwrap());
+    for index in 1..=count {
+        assert!(!f.root.join(format!("part.zip.{index:03}")).exists());
+    }
+    assert_eq!(
+        fs::read(f.root.join("part.zip.999")).unwrap(),
+        b"unrelated tail"
+    );
+    assert!(f.root.join("part.zip.1000").is_dir());
+    for index in 0..6 {
+        assert_eq!(
+            fs::read(f.root.join(format!("f{index}.txt"))).unwrap(),
+            fs::read(f.input.join(format!("f{index}.txt"))).unwrap()
+        );
+    }
+}
+
+// 覆盖 X-03, X-05：全部成员成功落盘后永久删除原包。
 #[test]
 #[ignore = "Requires explicitly provided real 7-Zip engine"]
 fn members_in_subdirectories_merge_into_created_parents() {
@@ -138,6 +218,10 @@ fn members_in_subdirectories_merge_into_created_parents() {
     assert_eq!(fs::read(f.root.join("sub/dir1/file1.txt")).unwrap(), b"one");
     assert_eq!(fs::read(f.root.join("sub/dir2/file2.txt")).unwrap(), b"two");
     assert_eq!(fs::read(f.root.join("top.txt")).unwrap(), b"top");
+    assert!(
+        !f.root.join("pack.zip").exists(),
+        "X-05：全部成员成功落盘后必须永久删除原压缩包"
+    );
 }
 // 覆盖 C-02, C-01：先解压（工具一）再分析（工具二，只读），两工具分工后仍能衔接出删除计划。
 // C-02（2026-09-21 第四批）：不同名去重默认关闭，本用例显式开启后再验证衔接。
@@ -281,8 +365,8 @@ fn bzip2_wrapped_tar_extracts_through_the_named_intermediate_tar() {
         "外层 bz2 与中间 tar 都应处理"
     );
     assert!(
-        f.root.join("bundle.tar").is_file(),
-        "中间成员按去掉一层压缩后缀命名，保留策略下留在原地"
+        !f.root.join("bundle.tar").exists() && !f.root.join("bundle.tar.bz2").exists(),
+        "中间 tar 按去掉一层压缩后缀命名并作为嵌套包处理，两者都按 X-05 永久删除"
     );
     assert_eq!(
         fs::read(f.root.join("payload.txt")).unwrap(),
@@ -303,8 +387,8 @@ fn tgz_shorthand_restores_the_tar_suffix() {
         "外层 tgz 与中间 tar 都应处理"
     );
     assert!(
-        f.root.join("bundle.tar").is_file(),
-        "tgz 应还原为中间 tar 而不是再次解压"
+        !f.root.join("bundle.tar").exists() && !f.root.join("bundle.tgz").exists(),
+        "tgz 还原出的中间 tar 被当作嵌套包再次处理，两者都按 X-05 永久删除"
     );
     assert_eq!(
         fs::read(f.root.join("payload.txt")).unwrap(),
@@ -324,8 +408,14 @@ fn equal_content_archives_extract_both_and_classify_is_stable() {
     assert_eq!(extracted.summary.archives_ok, 2, "两个包都应完全解开");
     assert_eq!(extracted.summary.archives_failed, 0);
     assert_eq!(extracted.summary.archives_quarantined, 0);
-    assert!(f.root.join("base.zip").is_file(), "原包保留（X-05/H-07）");
-    assert!(f.root.join("base.tar").is_file(), "原包保留（X-05/H-07）");
+    assert_eq!(
+        extracted.summary.deleted, 2,
+        "两个包都完整解开：原包各自按 X-05 永久删除"
+    );
+    assert!(
+        !f.root.join("base.zip").exists() && !f.root.join("base.tar").exists(),
+        "成功原包必须被永久删除（X-05）"
+    );
     assert_eq!(fs::read(f.root.join("beta.txt")).unwrap(), b"beta member\n");
     assert_eq!(
         fs::read(f.root.join("beta (1).txt")).unwrap(),
@@ -346,17 +436,19 @@ fn equal_content_archives_extract_both_and_classify_is_stable() {
 // 覆盖 X-05, X-07
 #[test]
 #[ignore = "Requires explicitly provided real 7-Zip engine"]
-fn rerun_lands_a_new_copy_beside_the_retained_source() {
-    // 原包一律保留（X-05）；跨任务重跑属于新任务，可以重新解压并产生新副本——X-07
-    // 不承诺幂等，也不按历史成功记录跳过。上次解出的内容被搬走后重跑：内容重新落回
-    // 源包旁，被搬走的那份保持原样，互不覆盖。
+fn rerun_of_a_recreated_source_lands_a_new_copy() {
+    // X-05 删除成功原包；X-07 不承诺幂等，也不按历史成功记录跳过。用户重新放入同名包
+    // 属于新任务：内容照旧完整解压、冲突只给新成员改名，既有文件一份都不动。
     let f = ArchiveFixture::new();
     fs::write(f.input.join("payload.txt"), b"payload for kept source\n").unwrap();
     f.archive(&f.root.join("kept.zip"), "-tzip");
     let cfg = config();
     let extracted = f.run(cfg.clone());
     assert_eq!(extracted.summary.archives_ok, 1);
-    assert!(f.root.join("kept.zip").exists(), "原包保留在原位置（X-05）");
+    assert!(
+        !f.root.join("kept.zip").exists(),
+        "成功解压后原包被永久删除（X-05）"
+    );
     assert_eq!(
         fs::read(f.root.join("payload.txt")).unwrap(),
         b"payload for kept source\n"
@@ -364,13 +456,19 @@ fn rerun_lands_a_new_copy_beside_the_retained_source() {
     // 模拟内容被搬走（例如目录整理归类到别的子目录）。
     fs::create_dir(f.root.join("文档")).unwrap();
     fs::rename(f.root.join("payload.txt"), f.root.join("文档/payload.txt")).unwrap();
+    // 用户重新放入同名包：新任务必须真的重新解压，不得按历史成功记录跳过。
+    f.archive(&f.root.join("kept.zip"), "-tzip");
     let again = f.run(cfg);
-    assert_eq!(again.summary.archives_ok, 1, "保留的源包可再次完整解压");
+    assert_eq!(again.summary.archives_ok, 1, "新任务中的包必须重新完整解压");
     assert_eq!(again.summary.archives_failed, 0);
+    assert!(
+        !f.root.join("kept.zip").exists(),
+        "新任务里同样按 X-05 删除原包"
+    );
     assert_eq!(
         fs::read(f.root.join("payload.txt")).unwrap(),
         b"payload for kept source\n",
-        "重跑重新落盘本次解出的内容（X-07：不承诺幂等，不按历史成功记录跳过）"
+        "重跑重新落盘本次解出的内容（X-07：不按历史成功记录跳过）"
     );
     assert!(
         f.root.join("文档/payload.txt").exists(),
@@ -520,9 +618,10 @@ fn empty_zip_archive_extracts_cleanly() {
     assert_eq!(result.summary.archives_ok, 1);
     assert_eq!(result.summary.extracted, 0);
     assert!(
-        f.root.join("empty.zip").is_file(),
-        "空包成功解压后原包同样保留（X-05/H-07）"
+        !f.root.join("empty.zip").exists(),
+        "零成员的空包同样算完整解开：原包按 X-05 永久删除"
     );
+    assert_eq!(result.summary.deleted, 1, "空包删除同样计入删除计数");
 }
 // 覆盖 X-05
 #[test]
@@ -540,6 +639,10 @@ fn empty_7z_with_only_a_directory_entry_restores_the_directory() {
     assert!(
         f.root.join("空目录").is_dir(),
         "仅目录条目的 7z 也应还原出目录"
+    );
+    assert!(
+        !f.root.join("empty.7z").exists(),
+        "只含目录条目的包同样完整落盘（含空目录）：原包按 X-05 永久删除"
     );
 }
 // 覆盖 X-03
@@ -617,18 +720,18 @@ fn long_path_hidden_member_is_stripped_and_archive_completes() {
         "隐藏属性必须被剥离，否则成员成扫描不可见的影子文件"
     );
     assert!(
-        f.root.join("deep.7z").is_file(),
-        "成员可见（complete 未被误置 false）时原包按 X-05 保留"
+        !f.root.join("deep.7z").exists() && !f.root.join("解压失败/deep.7z").exists(),
+        "complete 为真时原包按 X-05 永久删除；complete 被误置 false 的包会留在「解压失败」"
     );
 }
 
 // 覆盖 X-05, S-01（回归 2026-09-19 返工：zip 的条目级 Volume Index 无条件输出，
 // 单卷包也全为 0，不能作分卷佐证；佐证必须取档案级属性块）。真实引擎下完整独立的
-// report.zip 旁边残留的同主干 report.z01 是无辜文件：成功路径不得移动、改名或删除
-// 它以外的任何东西，成功原包本身也按 X-05 原地保留。
+// report.zip 旁边残留的同主干 report.z01 是无辜文件：成功路径只能删除主体自身，
+// 不得移动、改名或删除这一旁观文件。
 #[test]
 #[ignore = "Requires explicitly provided real 7-Zip engine"]
-fn real_engine_standalone_zip_keeps_stale_z_sibling() {
+fn real_engine_standalone_zip_deletes_source_and_keeps_stale_z_sibling() {
     let f = ArchiveFixture::new();
     fs::write(f.input.join("one.txt"), b"real standalone payload").unwrap();
     fs::write(f.input.join("two.txt"), b"second member").unwrap();
@@ -647,12 +750,16 @@ fn real_engine_standalone_zip_keeps_stale_z_sibling() {
         "成员应正常解压落盘"
     );
     assert!(
-        f.root.join("report.zip").is_file(),
-        "成功原包原地保留（X-05/H-07）"
+        !f.root.join("report.zip").exists(),
+        "成功原包按 X-05 永久删除"
     );
     assert!(
         f.root.join("report.z01").exists(),
         "真实引擎下无档案级多卷佐证的同主干 .z01 是无辜文件，不得被移动或删除"
+    );
+    assert_eq!(
+        result.summary.deleted, 1,
+        "删除集合只含主体自身：无辜 .z01 不得计入"
     );
 }
 
@@ -717,14 +824,15 @@ Volumes = 9
 }
 
 // ===== 2026-09-22 合同整改：解压语义回归（H-07 / X-01 / X-04 / X-05 / X-06 / X-07 / X-08 / H-06）=====
-// 本段用例指向整改后的合同行为：原包与分卷一律保留、冲突一律只给新成员改名、内容相同
-// 也要落盘、Git 目录树不动、空间不足停止整个任务而不是逐包隔离。整改前这些断言必然失败，
-// 是「先红后绿」的红侧证据。
+// 本段用例指向整改后的合同行为：完整落盘的原包与已佐证分卷永久删除、冲突一律只给新成员
+// 改名、内容相同也要落盘、Git 目录树不动、空间不足停止整个任务而不是逐包隔离。
+// 整改前这些断言必然失败，是「先红后绿」的红侧证据。
 
-// 覆盖 X-05, H-07, X-01（回归：成功解压后原包与全部分卷必须原样保留）
+// 覆盖 X-05, X-01（回归：全部成员成功落盘后，原包与全部分卷都被永久删除；
+// 已落盘的解压结果与既有文件不受影响）
 #[test]
 #[ignore = "Requires explicitly provided real 7-Zip engine"]
-fn successful_extraction_retains_source_and_all_volumes() {
+fn successful_extraction_deletes_source_and_all_volumes() {
     let f = ArchiveFixture::new();
     fs::write(f.input.join("a.txt"), b"one").unwrap();
     f.archive(&f.root.join("one.zip"), "-tzip");
@@ -734,16 +842,20 @@ fn successful_extraction_retains_source_and_all_volumes() {
     assert_eq!(result.summary.archives_failed, 0, "正常包不得计入失败");
     assert_eq!(result.summary.archives_ok, 2, "普通包与分卷组各按一包计数");
     assert_eq!(result.summary.archives_quarantined, 0);
-    assert_eq!(result.summary.deleted, 0, "递归解压不删除任何文件（X-01）");
-    assert!(
-        f.root.join("one.zip").is_file(),
-        "X-05/H-07：成功解压的原包必须保留"
+    assert_eq!(
+        result.summary.deleted,
+        u64::try_from(volumes).unwrap() + 1,
+        "普通包与分卷组的每个卷都必须永久删除（X-05）"
     );
-    assert!(f.root.join("a.txt").is_file(), "成员应解压落盘");
+    assert!(
+        !f.root.join("one.zip").exists(),
+        "X-05：成功解压的原包必须永久删除"
+    );
+    assert!(f.root.join("a.txt").is_file(), "成员应解压落盘且不被删改");
     for index in 1..=volumes {
         assert!(
-            f.root.join(format!("split.zip.{index:03}")).is_file(),
-            "分卷 {index} 必须与主体一并保留（X-05）"
+            !f.root.join(format!("split.zip.{index:03}")).exists(),
+            "分卷 {index} 必须与主体一并删除（X-05）"
         );
     }
     for index in 0..6 {
@@ -1006,10 +1118,10 @@ fn split_set_ratio_limit_uses_total_volume_bytes() {
     }
 }
 
-// 覆盖 X-07, H-04（回归：保留的原包与本次解出的嵌套包都只处理一次，不得反复入队）
+// 覆盖 X-05, X-07, H-04（回归：每个包只处理一次，包括本次解出的嵌套包；成功原包按 X-05 删除）
 #[test]
 #[ignore = "Requires explicitly provided real 7-Zip engine"]
-fn retained_nested_archives_are_processed_exactly_once() {
+fn nested_archives_are_processed_exactly_once() {
     let f = ArchiveFixture::new();
     fs::write(f.input.join("payload.txt"), b"stream payload\n").unwrap();
     f.pack(&f.input.join("bundle.tar"), &["-ttar"], &["payload.txt"]);
@@ -1019,13 +1131,17 @@ fn retained_nested_archives_are_processed_exactly_once() {
     assert_eq!(result.summary.archives_failed, 0);
     assert_eq!(
         result.summary.archives_ok, 3,
-        "预置 tar、tar.gz 与本次解出的 (1) tar 各处理一次，原包保留不得触发再次入队"
+        "预置 tar、tar.gz 与本次解出的嵌套 tar 各处理一次，不得反复入队"
     );
-    assert!(f.root.join("bundle.tar").is_file(), "原包保留（X-05）");
-    assert!(f.root.join("bundle.tar.gz").is_file(), "原包保留（X-05）");
+    assert_eq!(
+        result.summary.deleted, 3,
+        "三个包各自完整解开：原包都按 X-05 永久删除"
+    );
     assert!(
-        f.root.join("bundle (1).tar").is_file(),
-        "嵌套解出的 tar 同样保留（X-05），不得因原包保留而反复解压"
+        !f.root.join("bundle.tar").exists()
+            && !f.root.join("bundle.tar.gz").exists()
+            && !f.root.join("bundle (1).tar").exists(),
+        "无论成员以哪个名字落盘，它都是被处理的包并在成功后删除"
     );
     assert_eq!(
         fs::read(f.root.join("payload.txt")).unwrap(),
