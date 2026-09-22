@@ -363,7 +363,7 @@ fn non_whitelisted_containers_are_never_opened() {
     let tmp = fixture("whitelist");
     let root = tmp.path().join("data");
     // 内容故意用合法 ZIP：引擎确实能打开，语义上却是安装介质、文档或程序包。
-    let containers: [(&str, &[u8]); 15] = [
+    let containers: [(&str, &[u8]); 20] = [
         ("visproww.cab", b"zip payload, but an install cab"),
         ("windows.iso", b"zip payload, but a disk image"),
         ("boot.wim", b"zip payload, but a system image"),
@@ -379,6 +379,18 @@ fn non_whitelisted_containers_are_never_opened() {
         ("book.epub", b"zip payload, but an ebook"),
         ("addon.crx", b"zip payload, but a browser extension"),
         ("styles.xpi", b"zip payload, but a browser extension"),
+        // X-09：白名单外格式的分卷与配不上主包的孤立编号文件，同样完全不碰。
+        ("windows.iso.001", b"zip payload, but an image volume"),
+        ("report.docx.001", b"zip payload, but a document volume"),
+        ("data.001", b"zip payload, but an orphan numbered file"),
+        (
+            "orphan.z01",
+            b"zip payload, but an orphan old-style zip volume",
+        ),
+        (
+            "orphan.r00",
+            b"zip payload, but an orphan old-style rar volume",
+        ),
     ];
     for (index, (name, bytes)) in containers.iter().enumerate() {
         let stamp = 100 + i64::try_from(index).unwrap();

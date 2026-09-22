@@ -835,19 +835,22 @@ fn delete_successful_source(job: &mut Job, archive_rel: &str, volumes: &[PathBuf
     Ok(())
 }
 /// 流式压缩包去掉**一层**压缩后缀后的名字；不是流式格式时返回 None。
+/// 后缀集合与 X-01 白名单里的压缩流一致（`.tar.<流后缀>` 只去一层，剩下的 `.tar`
+/// 由 tar 处理逻辑继续展开）。
 fn stream_stem(archive: &Path) -> Option<String> {
     let name = archive.file_name()?.to_str()?.to_string();
     let lower = name.to_ascii_lowercase();
     for suffix in [
-        ".tgz", ".tbz2", ".tbz", ".txz", ".bz2", ".gz", ".xz", ".lzma", ".zst",
+        ".tgz", ".tbz2", ".tbz", ".txz", ".tzst", ".bz2", ".gz", ".xz", ".lzma", ".zst", ".lz4",
+        ".lz", ".z", ".br",
     ] {
         if lower.ends_with(suffix) {
             let stem = &name[..name.len() - suffix.len()];
             if stem.is_empty() {
                 return None;
             }
-            // tgz/tbz/txz 本质是 tar 容器，名字里补回 .tar
-            if matches!(suffix, ".tgz" | ".tbz" | ".tbz2" | ".txz")
+            // tgz/tbz/tbz2/txz/tzst 本质是 tar 容器，名字里补回 .tar
+            if matches!(suffix, ".tgz" | ".tbz" | ".tbz2" | ".txz" | ".tzst")
                 && !stem.to_ascii_lowercase().ends_with(".tar")
             {
                 return Some(format!("{stem}.tar"));
