@@ -5,8 +5,8 @@
   S1 启动并正常退出；
   S2 目录整理：选择目录 → 开始分析（只读，无确认框）→ 计划生成（不执行）；
   S3 目录整理全链路：开始分析 → 确认执行 → 整理完成；
-  S4 递归解压全链路：开始解压 → 一段确认 → 解压结束，目录不残留压缩包
-     （除「解压失败」子目录，X-05/X-06）。
+  S4 递归解压全链路：开始解压 → 一段确认 → 解压结束；原包/分卷及既有内容保留，
+     冲突自动改名、嵌套内容落盘，失败包保留在「解压失败」（H-07/X-05/X-06）。
 
 用法：
     python scripts/gui_smoke.py --exe target/debug/JchTools.exe --data <已生成的测试数据目录>
@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import argparse
 import contextlib
+import hashlib
 import json
 import os
 import shutil
@@ -26,6 +27,7 @@ import subprocess
 import sys
 import tempfile
 import time
+from collections import Counter
 from pathlib import Path
 from typing import cast
 
@@ -44,6 +46,8 @@ COMPLETION_TIMEOUT = 240
 EDIT_ROW_TOLERANCE_PX = 20
 DEFAULT_EXE = "target/debug/JchTools.exe"
 DEFAULT_DATA = ".tmp/gui-smoke/data"
+EXTRACT_ACK = "我已确认解压范围：原压缩包与已有文件保留"
+ORGANIZE_ACK = "我已确认目录、规则及可能的永久删除行为（不可恢复）"
 
 # pywinauto/pywin32 窗口操作在窗口建立/销毁竞态下抛出的瞬态错误族；
 # 此元组是唯一放行集合，出现新瞬态类型须显式补充并说明：
@@ -134,14 +138,14 @@ def click(window: WindowSpecification, control: WindowSpecification) -> None:
     time.sleep(0.3)
 
 
-def confirm_dialog(window: WindowSpecification, timeout: int = TIMEOUT) -> None:
+def confirm_dialog(window: WindowSpecification, timeout: int = TIMEOUT, *, extraction: bool = False) -> None:
     """勾选「我已确认…」并点「确认」，以**对话框消失**作为成功判据.
 
     点击可能落在对话框滑入动画的空档或未生效，所以按当前状态重试：
     未勾选就点复选框，已勾选就点确认，直到对话框关闭；
     只检查「点击没报错」会把没生效的点击当成成功，后续等待必然超时。
     """
-    checkbox = window.child_window(title="我已确认目录、规则及可能的永久删除行为", control_type="CheckBox")
+    checkbox = window.child_window(title=EXTRACT_ACK if extraction else ORGANIZE_ACK, control_type="CheckBox")
     ok = find_button(window, "确认")
     deadline = time.time() + timeout
     attempts = 0
@@ -269,7 +273,8 @@ def open_confirm(window: WindowSpecification, button_title: str, timeout: int = 
     上一个对话框的关闭动画期间点击会被吞掉，按钮显示 enabled 但不生效；
     因此以「确认框出现」为判据重试按钮点击。
     """
-    checkbox = window.child_window(title="我已确认目录、规则及可能的永久删除行为", control_type="CheckBox")
+    title = EXTRACT_ACK if button_title == "开始解压" else ORGANIZE_ACK
+    checkbox = window.child_window(title=title, control_type="CheckBox")
     deadline = time.time() + timeout
     while time.time() < deadline:
         button = find_button(window, button_title)
@@ -403,6 +408,13 @@ def s3_full_organize(exe: str, data: str) -> None:
         open_confirm(window, "确认并执行整理")
         confirm_dialog(window)
         wait_task_status(data, "finished", baseline)
+        for parent, dirs, files in os.walk(data):
+            if ".git" in dirs or ".git" in files:
+                dirs.clear()
+                continue
+            if Path(parent) != Path(data) and not dirs and not files:
+                msg = f"整理成功后仍残留空目录：{parent}"
+                raise RuntimeError(msg)
         print("S3 PASS：全链路整理完成（任务状态 finished）")
     finally:
         if window is not None:
@@ -433,28 +445,53 @@ ARCHIVE_SUFFIXES = (
 )
 
 
+def file_digest(path: Path) -> str:
+    with path.open("rb") as stream:
+        return hashlib.file_digest(stream, "sha256").hexdigest()
+
+
+def verify_extraction_results(root: Path, originals: dict[Path, str]) -> None:
+    """核对所有输入仍在原处或完整隔离，并验证生成语料的冲突与嵌套输出."""
+    quarantined = Counter(file_digest(path) for path in (root / "解压失败").rglob("*") if path.is_file())
+    for relative, digest in originals.items():
+        current = root / relative
+        if current.is_file():
+            if file_digest(current) != digest:
+                msg = f"解压修改了既有文件：{relative}"
+                raise RuntimeError(msg)
+            continue
+        is_archive = relative.suffix.lower() in ARCHIVE_SUFFIXES or relative.suffix[1:].isdigit()
+        if not is_archive or quarantined[digest] == 0:
+            msg = f"解压丢失原包、分卷或既有文件：{relative}"
+            raise RuntimeError(msg)
+        quarantined[digest] -= 1
+    expected = {
+        "08-压缩包-冲突/说明 (1).txt": b"archive version B, different content and length\n",
+        "08-压缩包-冲突/等长 (1).txt": b"fedcba9876543210",
+        "09-压缩包-嵌套/level5.txt": b"innermost payload\n",
+    }
+    for relative, content in expected.items():
+        if (root / relative).read_bytes() != content:
+            msg = f"解压输出内容不符合测试语料：{relative}"
+            raise RuntimeError(msg)
+
+
 def s4_full_extract(exe: str, data: str) -> None:
-    """递归解压全链路（X-02/X-05/X-06）：一段确认后跑完，目录不残留压缩包."""
+    """递归解压全链路：保留原包/既有文件，冲突另存，嵌套内容完整落盘."""
     proc = subprocess.Popen([exe])
     window: WindowSpecification | None = None
+    root = Path(data)
+    originals = {path.relative_to(root): file_digest(path) for path in root.rglob("*") if path.is_file()}
     try:
         _, window = wait_window(proc.pid)
         # 启动页即递归解压，无需切换。
         setup_directory(window, data)
         baseline = newest_task(data)
         open_confirm(window, "开始解压")
-        confirm_dialog(window)
+        confirm_dialog(window, extraction=True)
         wait_task_status(data, "finished", baseline)
-        # X 分区总体约束：除「解压失败」外不得残留压缩包。
-        leftovers = [
-            str(p.relative_to(data))
-            for p in Path(data).rglob("*")
-            if p.is_file() and p.suffix.lower() in ARCHIVE_SUFFIXES and "解压失败" not in p.relative_to(data).parts
-        ]
-        if leftovers:
-            msg = f"解压结束后目录残留压缩包（除「解压失败」外）：{leftovers}"
-            raise RuntimeError(msg)
-        print("S4 PASS：递归解压完成（任务状态 finished；目录不残留压缩包）")
+        verify_extraction_results(root, originals)
+        print("S4 PASS：原包、分卷及既有内容保留；冲突自动改名，嵌套内容正确落盘")
     finally:
         if window is not None:
             with contextlib.suppress(*TRANSIENT_GUI_ERRORS):
@@ -494,7 +531,7 @@ def main() -> int:
         raise RuntimeError(msg)
 
     s1_launch_and_exit(str(exe))
-    # S4 解压与 S2 分析都会真实改写语料；每个阶段前都从旁路副本恢复，
+    # S4 解压与 S3 整理都会真实改写语料；每个阶段前都从旁路副本恢复，
     # 保证“干净语料上的完整链路”（顺序：S4 解压 → S2 只分析 → S3 整理）。
     repo_tmp = repo / ".tmp"
     repo_tmp.mkdir(exist_ok=True)  # AGENTS §2：一切冒烟临时数据一律落在仓库 .tmp/ 下

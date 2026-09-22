@@ -9,37 +9,37 @@
     },
     {
       "file": "src/archive.rs",
-      "name": "find_identical_elsewhere_never_matches_current_archive",
+      "name": "failure_classification_separates_stop_from_quarantine",
+      "ignored": false,
+      "cfg": null
+    },
+    {
+      "file": "src/archive.rs",
+      "name": "git_cache_checks_descendants_of_an_allowed_directory",
+      "ignored": false,
+      "cfg": null
+    },
+    {
+      "file": "src/archive.rs",
+      "name": "git_cache_does_not_protect_siblings_of_a_repository",
+      "ignored": false,
+      "cfg": null
+    },
+    {
+      "file": "src/archive.rs",
+      "name": "merge_conflict_preserves_compound_extension",
+      "ignored": false,
+      "cfg": null
+    },
+    {
+      "file": "src/archive.rs",
+      "name": "merge_conflict_with_identical_bytes_lands_a_renamed_copy",
       "ignored": false,
       "cfg": null
     },
     {
       "file": "src/archive.rs",
       "name": "merge_creates_missing_parent_directories",
-      "ignored": false,
-      "cfg": null
-    },
-    {
-      "file": "src/archive.rs",
-      "name": "merge_one_shot_skip_keeps_original_archive",
-      "ignored": false,
-      "cfg": null
-    },
-    {
-      "file": "src/archive.rs",
-      "name": "merge_with_keep_delete_mode_reports_blocked_instead_of_lost_content",
-      "ignored": false,
-      "cfg": null
-    },
-    {
-      "file": "src/archive.rs",
-      "name": "newest_policy_breaks_mtime_tie_by_larger_size",
-      "ignored": false,
-      "cfg": null
-    },
-    {
-      "file": "src/archive.rs",
-      "name": "newest_winner_displaces_loser_permanently",
       "ignored": false,
       "cfg": null
     },
@@ -105,18 +105,6 @@
     },
     {
       "file": "src/gui.rs",
-      "name": "busy_close_confirmation_declared_in_ui",
-      "ignored": false,
-      "cfg": null
-    },
-    {
-      "file": "src/gui.rs",
-      "name": "cancel_notice_not_error_declared_in_ui",
-      "ignored": false,
-      "cfg": null
-    },
-    {
-      "file": "src/gui.rs",
       "name": "count_selected_pending_ignores_unselected_and_done",
       "ignored": false,
       "cfg": null
@@ -129,15 +117,15 @@
     },
     {
       "file": "src/gui.rs",
-      "name": "extract_start_rejects_protected_directory_immediately",
+      "name": "extract_confirmation_keeps_originals_without_delete_controls",
       "ignored": false,
-      "cfg": "windows"
+      "cfg": null
     },
     {
       "file": "src/gui.rs",
-      "name": "extract_start_shows_single_confirmation_with_dispose_info",
+      "name": "extract_start_rejects_protected_directory_immediately",
       "ignored": false,
-      "cfg": null
+      "cfg": "windows"
     },
     {
       "file": "src/gui.rs",
@@ -171,13 +159,19 @@
     },
     {
       "file": "src/gui.rs",
+      "name": "narrowing_scope_shows_notice_and_restoring_clears_it",
+      "ignored": false,
+      "cfg": null
+    },
+    {
+      "file": "src/gui.rs",
       "name": "navigation_switches_screen",
       "ignored": false,
       "cfg": null
     },
     {
       "file": "src/gui.rs",
-      "name": "plan_checkbox_gated_by_row_state_declared_in_ui",
+      "name": "organizer_warning_mentions_only_organizer_deletes",
       "ignored": false,
       "cfg": null
     },
@@ -195,13 +189,13 @@
     },
     {
       "file": "src/gui.rs",
-      "name": "progress_semantics_declared_in_ui",
+      "name": "root_edited_reports_missing_directory",
       "ignored": false,
       "cfg": null
     },
     {
       "file": "src/gui.rs",
-      "name": "root_edited_reports_missing_directory",
+      "name": "rules_and_config_expose_only_contracted_switches",
       "ignored": false,
       "cfg": null
     },
@@ -339,13 +333,37 @@
     },
     {
       "file": "src/rules.rs",
+      "name": "cleanup_reason_reports_category",
+      "ignored": false,
+      "cfg": null
+    },
+    {
+      "file": "src/rules.rs",
       "name": "duplicate_allowed_matches_planner_sql",
       "ignored": false,
       "cfg": null
     },
     {
       "file": "src/rules.rs",
+      "name": "extension_fix_is_conservative",
+      "ignored": false,
+      "cfg": null
+    },
+    {
+      "file": "src/rules.rs",
+      "name": "identity_proves_same_file_requires_reliable_identity",
+      "ignored": false,
+      "cfg": null
+    },
+    {
+      "file": "src/rules.rs",
       "name": "ordering_sql_agrees_with_rust_compare",
+      "ignored": false,
+      "cfg": null
+    },
+    {
+      "file": "src/rules.rs",
+      "name": "strip_copy_name_keeps_compound_extensions",
       "ignored": false,
       "cfg": null
     },
@@ -358,12 +376,6 @@
     {
       "file": "tests/archive.rs",
       "name": "corrupt_archive_is_quarantined_and_logged",
-      "ignored": true,
-      "cfg": null
-    },
-    {
-      "file": "tests/archive.rs",
-      "name": "deleted_same_name_file_does_not_abort_a_later_stream_archive",
       "ignored": true,
       "cfg": null
     },
@@ -387,7 +399,7 @@
     },
     {
       "file": "tests/archive.rs",
-      "name": "equal_content_archives_dispose_and_classify_is_stable",
+      "name": "equal_content_archives_extract_both_and_classify_is_stable",
       "ignored": true,
       "cfg": null
     },
@@ -405,7 +417,25 @@
     },
     {
       "file": "tests/archive.rs",
-      "name": "kept_source_rerun_does_not_recreate_classified_duplicate",
+      "name": "git_subtree_members_are_skipped_as_a_whole",
+      "ignored": true,
+      "cfg": null
+    },
+    {
+      "file": "tests/archive.rs",
+      "name": "identical_member_conflict_lands_as_a_new_copy",
+      "ignored": true,
+      "cfg": null
+    },
+    {
+      "file": "tests/archive.rs",
+      "name": "identical_member_in_another_directory_is_not_skipped",
+      "ignored": true,
+      "cfg": null
+    },
+    {
+      "file": "tests/archive.rs",
+      "name": "insufficient_space_stops_the_task_without_quarantine",
       "ignored": true,
       "cfg": null
     },
@@ -414,6 +444,12 @@
       "name": "long_path_hidden_member_is_stripped_and_archive_completes",
       "ignored": true,
       "cfg": "windows"
+    },
+    {
+      "file": "tests/archive.rs",
+      "name": "member_targeting_existing_git_tree_is_skipped_and_tree_untouched",
+      "ignored": true,
+      "cfg": null
     },
     {
       "file": "tests/archive.rs",
@@ -435,13 +471,7 @@
     },
     {
       "file": "tests/archive.rs",
-      "name": "real_engine_brace_in_comment_cannot_enable_sweep",
-      "ignored": true,
-      "cfg": null
-    },
-    {
-      "file": "tests/archive.rs",
-      "name": "real_engine_forged_comment_cannot_enable_sweep",
+      "name": "real_engine_brace_in_comment_cannot_inflate_ratio_denominator",
       "ignored": true,
       "cfg": null
     },
@@ -453,7 +483,19 @@
     },
     {
       "file": "tests/archive.rs",
-      "name": "skipped_conflict_moves_original_to_quarantine",
+      "name": "rerun_lands_a_new_copy_beside_the_retained_source",
+      "ignored": true,
+      "cfg": null
+    },
+    {
+      "file": "tests/archive.rs",
+      "name": "retained_nested_archives_are_processed_exactly_once",
+      "ignored": true,
+      "cfg": null
+    },
+    {
+      "file": "tests/archive.rs",
+      "name": "root_level_git_member_skips_the_whole_staged_root",
       "ignored": true,
       "cfg": null
     },
@@ -465,19 +507,13 @@
     },
     {
       "file": "tests/archive.rs",
-      "name": "successful_numbered_split_set_disposes_every_volume",
+      "name": "split_set_ratio_limit_uses_total_volume_bytes",
       "ignored": true,
       "cfg": null
     },
     {
       "file": "tests/archive.rs",
-      "name": "successful_source_defaults_to_permanent",
-      "ignored": true,
-      "cfg": null
-    },
-    {
-      "file": "tests/archive.rs",
-      "name": "successful_source_is_disposed_by_policy",
+      "name": "successful_extraction_retains_source_and_all_volumes",
       "ignored": true,
       "cfg": null
     },
@@ -503,6 +539,90 @@
       "file": "tests/archive.rs",
       "name": "zstd_stream_archive_extracts_with_content",
       "ignored": true,
+      "cfg": null
+    },
+    {
+      "file": "tests/contract_engine.rs",
+      "name": "broken_hash_cache_degrades_without_failing",
+      "ignored": false,
+      "cfg": null
+    },
+    {
+      "file": "tests/contract_engine.rs",
+      "name": "cancelled_apply_does_not_run_final_cleanup",
+      "ignored": false,
+      "cfg": null
+    },
+    {
+      "file": "tests/contract_engine.rs",
+      "name": "child_git_tree_excluded_and_ancestors_untouched",
+      "ignored": false,
+      "cfg": null
+    },
+    {
+      "file": "tests/contract_engine.rs",
+      "name": "count_archives_matches_scan_filtering",
+      "ignored": false,
+      "cfg": null
+    },
+    {
+      "file": "tests/contract_engine.rs",
+      "name": "default_scan_covers_hidden_and_ordinary_named_directories",
+      "ignored": false,
+      "cfg": null
+    },
+    {
+      "file": "tests/contract_engine.rs",
+      "name": "empty_directories_inside_git_tree_are_preserved",
+      "ignored": false,
+      "cfg": null
+    },
+    {
+      "file": "tests/contract_engine.rs",
+      "name": "extraction_never_cleans_empty_directories",
+      "ignored": false,
+      "cfg": null
+    },
+    {
+      "file": "tests/contract_engine.rs",
+      "name": "failed_empty_directory_cleanup_reports_an_incomplete_task",
+      "ignored": false,
+      "cfg": "windows"
+    },
+    {
+      "file": "tests/contract_engine.rs",
+      "name": "final_cleanup_removes_newly_empty_chain_and_empty_quarantine",
+      "ignored": false,
+      "cfg": null
+    },
+    {
+      "file": "tests/contract_engine.rs",
+      "name": "reduced_scope_is_announced",
+      "ignored": false,
+      "cfg": null
+    },
+    {
+      "file": "tests/contract_engine.rs",
+      "name": "root_git_directory_blocks_prepare_count_and_extract",
+      "ignored": false,
+      "cfg": null
+    },
+    {
+      "file": "tests/contract_engine.rs",
+      "name": "root_git_file_blocks_processing",
+      "ignored": false,
+      "cfg": null
+    },
+    {
+      "file": "tests/contract_engine.rs",
+      "name": "stale_link_temp_inside_git_tree_is_not_swept",
+      "ignored": false,
+      "cfg": null
+    },
+    {
+      "file": "tests/contract_paths.rs",
+      "name": "archive_collision_preserves_compound_extension_and_existing_files",
+      "ignored": false,
       "cfg": null
     },
     {
@@ -579,6 +699,18 @@
     },
     {
       "file": "tests/core.rs",
+      "name": "category_merge_does_not_nest_category_directory_inside_itself",
+      "ignored": false,
+      "cfg": null
+    },
+    {
+      "file": "tests/core.rs",
+      "name": "category_merge_flatten_rerun_is_idempotent",
+      "ignored": false,
+      "cfg": null
+    },
+    {
+      "file": "tests/core.rs",
       "name": "class_override_beats_global_keep",
       "ignored": false,
       "cfg": null
@@ -592,6 +724,18 @@
     {
       "file": "tests/core.rs",
       "name": "classification_preserves_paths_and_is_idempotent",
+      "ignored": false,
+      "cfg": null
+    },
+    {
+      "file": "tests/core.rs",
+      "name": "classification_target_never_enters_git_tree",
+      "ignored": false,
+      "cfg": null
+    },
+    {
+      "file": "tests/core.rs",
+      "name": "cleanup_categories_override_delete_mode_independently",
       "ignored": false,
       "cfg": null
     },
@@ -681,6 +825,12 @@
     },
     {
       "file": "tests/core.rs",
+      "name": "empty_cleanup_ignores_file_delete_modes",
+      "ignored": false,
+      "cfg": null
+    },
+    {
+      "file": "tests/core.rs",
       "name": "empty_directory_cleanup_is_bottom_up",
       "ignored": false,
       "cfg": null
@@ -705,13 +855,13 @@
     },
     {
       "file": "tests/core.rs",
-      "name": "equal_bytes_matches_only_identical_content",
+      "name": "equal_size_different_hash_not_deleted_when_rule_off",
       "ignored": false,
       "cfg": null
     },
     {
       "file": "tests/core.rs",
-      "name": "equal_size_different_hash_not_deleted_when_rule_off",
+      "name": "excluded_tree_is_not_cleaned_as_empty",
       "ignored": false,
       "cfg": null
     },
@@ -735,12 +885,6 @@
     },
     {
       "file": "tests/core.rs",
-      "name": "extract_summary_counts_failed_packages_not_volumes",
-      "ignored": false,
-      "cfg": null
-    },
-    {
-      "file": "tests/core.rs",
       "name": "finished_plan_cannot_be_replayed",
       "ignored": false,
       "cfg": null
@@ -759,6 +903,12 @@
     },
     {
       "file": "tests/core.rs",
+      "name": "flatten_allocation_preserves_compound_extension",
+      "ignored": false,
+      "cfg": null
+    },
+    {
+      "file": "tests/core.rs",
       "name": "flatten_classification_allocates_nonconflicting_names",
       "ignored": false,
       "cfg": null
@@ -772,6 +922,12 @@
     {
       "file": "tests/core.rs",
       "name": "flatten_with_classification_is_idempotent_across_rounds",
+      "ignored": false,
+      "cfg": null
+    },
+    {
+      "file": "tests/core.rs",
+      "name": "git_tree_ancestors_survive_empty_directory_cleanup",
       "ignored": false,
       "cfg": null
     },
@@ -796,6 +952,12 @@
     {
       "file": "tests/core.rs",
       "name": "hashes_known_vectors",
+      "ignored": false,
+      "cfg": null
+    },
+    {
+      "file": "tests/core.rs",
+      "name": "hidden_dir_scanned_by_default",
       "ignored": false,
       "cfg": null
     },
@@ -969,6 +1131,12 @@
     },
     {
       "file": "tests/core.rs",
+      "name": "recursion_disabled_never_plans_empty_subdirectories",
+      "ignored": false,
+      "cfg": null
+    },
+    {
+      "file": "tests/core.rs",
       "name": "reject_unknown_configuration",
       "ignored": false,
       "cfg": null
@@ -976,6 +1144,12 @@
     {
       "file": "tests/core.rs",
       "name": "relative_tar_and_unicode_paths_accepted",
+      "ignored": false,
+      "cfg": null
+    },
+    {
+      "file": "tests/core.rs",
+      "name": "removed_extraction_and_cleanup_switches_are_gone",
       "ignored": false,
       "cfg": null
     },
@@ -993,7 +1167,7 @@
     },
     {
       "file": "tests/core.rs",
-      "name": "rules_table_has_exactly_38_rows_without_version_switches",
+      "name": "rules_table_has_no_version_or_removed_switches",
       "ignored": false,
       "cfg": null
     },
@@ -1065,6 +1239,12 @@
     },
     {
       "file": "tests/core.rs",
+      "name": "unique_target_errors_when_extension_cannot_take_suffix",
+      "ignored": false,
+      "cfg": null
+    },
+    {
+      "file": "tests/core.rs",
       "name": "unsafe_paths_rejected",
       "ignored": false,
       "cfg": null
@@ -1101,7 +1281,13 @@
     },
     {
       "file": "tests/gui_flow.rs",
-      "name": "acknowledge_gate_is_declared_in_ui",
+      "name": "extract_confirmation_keeps_originals_and_completes",
+      "ignored": false,
+      "cfg": "feature = \"gui\""
+    },
+    {
+      "file": "tests/gui_flow.rs",
+      "name": "git_subtree_skip_is_visible_after_run_and_tree_untouched",
       "ignored": false,
       "cfg": "feature = \"gui\""
     },
@@ -1167,13 +1353,7 @@
     },
     {
       "file": "tests/split.rs",
-      "name": "corroborated_volume_siblings_are_disposed_together",
-      "ignored": false,
-      "cfg": null
-    },
-    {
-      "file": "tests/split.rs",
-      "name": "dispose_failure_does_not_abort_remaining_archives",
+      "name": "corroborated_volume_siblings_are_preserved_together",
       "ignored": false,
       "cfg": null
     },
@@ -1240,6 +1420,12 @@
     {
       "file": "tests/split.rs",
       "name": "quarantined_archive_reason_is_recorded_in_log",
+      "ignored": false,
+      "cfg": null
+    },
+    {
+      "file": "tests/split.rs",
+      "name": "read_locked_archives_are_preserved_without_errors",
       "ignored": false,
       "cfg": null
     },

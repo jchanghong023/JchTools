@@ -185,7 +185,7 @@ def build_plain(root: Path, _seven: Path, log: list[str]) -> None:
     log.append(
         _line(
             "| `01-普通文件/` | 基础扫描：中文名、空格、括号、同名不同内容 | 全部保留；",
-            "`notes copy.txt` 与 `报告-2026.txt` 内容相同 -> 归入「不同名内容相同」去重 |",
+            "`notes copy.txt` 与 `报告-2026.txt` 内容相同；不同名去重默认关闭，手动开启后才参与 |",
         )
     )
 
@@ -200,7 +200,7 @@ def build_duplicates(root: Path, _seven: Path, log: list[str]) -> None:
     log.append(
         _line(
             "| `02-重复内容/` | 三类去重规则各自命中（同名 / 副本命名 / 不同名） | ",
-            "每组按「保留最新」留一个，其余进回收站；三类规则可在界面分别关掉验证差异 |",
+            "同名与副本名默认去重，不同名需手动开启；每组按「保留最新」留一个，其余默认永久删除 |",
         )
     )
 
@@ -223,7 +223,7 @@ def build_conflicts(root: Path, _seven: Path, log: list[str]) -> None:
     log.append(
         _line(
             "| `03-版本冲突/` | 同名不同大小（config.ini）与同名同大小不同内容（same-size-a.dat） | ",
-            "按 C-02 此类文件一律原样保留、不提供版本取舍开关；整理前后两份都应在原位 |",
+            "按 C-02 保留两份不同内容，不提供版本取舍开关；归类可以移动它们，但不得按同名自动淘汰 |",
         )
     )
 
@@ -239,7 +239,7 @@ def build_junk(root: Path, _seven: Path, log: list[str]) -> None:
     log.append(
         _line(
             "| `04-垃圾与临时/` | 系统附属文件、临时/备份文件、零字节文件 | ",
-            "系统附属文件规则默认开启，临时/备份与零字节规则默认关闭；开启后应分别删除（默认进回收站） |",
+            "系统附属文件规则默认开启，临时/备份与零字节规则默认关闭；各项独立设置删除方式，默认跟随全局永久删除 |",
         )
     )
 
@@ -328,7 +328,7 @@ def build_archives(root: Path, seven: Path, log: list[str]) -> None:
         _line(
             "| `07-压缩包-各格式/` | 7z / zip / tar / tar.gz / tgz / tar.bz2 / tar.xz / gz / bz2 / xz / cab",
             "（本机 7-Zip 只支持解压 zst，没有构造 zst 用例） | ",
-            "每个包都应解压成功并产生重复内容（同一段 payload），随后被去重；某个格式失败会记录到错误数 |",
+            "每个包都应解压成功并保留原包，同内容成员仍完整落盘；只有另行执行目录整理才会去重；失败记录原因 |",
         )
     )
 
@@ -342,8 +342,7 @@ def build_archive_conflicts(root: Path, _seven: Path, log: list[str]) -> None:
     log.append(
         _line(
             "| `08-压缩包-冲突/` | 解压目标已存在同名文件（大小不同 / 大小相同） | ",
-            "图形界面逐次询问，可「覆盖旧文件 / 跳过新文件 / 保留最新 / 保留较大 / 两个都保留」并应用到后续全部；",
-            "不选「询问」时按所选策略自动处理 |",
+            "已有文件不变，新文件自动改名为「文件名 (1).原扩展名」，同内容也保留两份；不弹冲突策略、不删除原包 |",
         )
     )
 
@@ -363,7 +362,7 @@ def build_nested(root: Path, seven: Path, log: list[str]) -> None:
     log.append(
         _line(
             "| `09-压缩包-嵌套/` | zip -> 7z -> tar.gz -> zip -> xz 共 5 层 | ",
-            "开启「继续解压嵌套压缩包」后应逐层解压到最内层文本；关闭时只解第一层 |",
+            "默认逐层解压到最内层文本并保留每层原包；不提供关闭嵌套解压的开关 |",
         )
     )
 
@@ -397,7 +396,7 @@ def build_broken(root: Path, seven: Path, log: list[str]) -> None:
         data = (stage / name).read_bytes()
         write(section / f"truncated{Path(name).suffix}", data[: int(len(data) * 0.6)])
     shutil.rmtree(stage, ignore_errors=True)
-    log.append("| `11-压缩包-损坏/` | 被截断的 zip / 7z | 应报错并**保留原包**，不产生半成品文件；错误数 +1 |")
+    log.append("| `11-压缩包-损坏/` | 被截断的 zip / 7z | 应报错并移入「解压失败」，不删除原包、不落盘未校验结果 |")
 
 
 def build_encrypted(root: Path, seven: Path, log: list[str]) -> None:
@@ -422,7 +421,7 @@ def build_encrypted(root: Path, seven: Path, log: list[str]) -> None:
     log.append(
         _line(
             "| `12-压缩包-加密/` | 带密码的 zip（密码 123456） | ",
-            "应用不提供密码输入，应**跳过并记录**，不会尝试爆破，也不会误删原包 |",
+            "应用不提供密码输入，应移入「解压失败」并记录原因，不删除原包 |",
         )
     )
 
@@ -440,7 +439,7 @@ def build_multipart(root: Path, seven: Path, log: list[str]) -> None:
     log.append(
         _line(
             f"| `13-压缩包-分卷/` | 7z 分卷（{len(volumes)} 个卷，1 MiB/卷） | ",
-            "应从识别到的首卷调用引擎解出完整文件；源卷保守保留，不自动删除整组 |",
+            "应从识别到的首卷解出完整文件；全部源卷始终保留 |",
         )
     )
 
@@ -472,8 +471,8 @@ def build_hidden(root: Path, _seven: Path, log: list[str]) -> None:
         ctypes.windll.kernel32.SetFileAttributesW(str(system), 0x04)
     log.append(
         _line(
-            "| `15-隐藏与系统/` | 带隐藏属性 / 系统属性的文件 | 默认两者都不扫描；",
-            "在「安全与性能」分区打开后应出现 |",
+            "| `15-隐藏与系统/` | 带隐藏属性 / 系统属性的文件 | 默认两者都扫描；",
+            "用户主动关闭相应开关时跳过，并明确提示范围缩小 |",
         )
     )
 
@@ -583,9 +582,7 @@ def initialise_git(root: Path, log: list[str]) -> None:
     log.append(
         _line(
             "| `.git` + `恢复.ps1` | 生成时建立的 git 基线（需 `--git`） | ",
-            "整理跑完后执行 `恢复.ps1` 即可回到初始状态：",
-            "`git checkout -- .` 恢复被删除/移动的文件、`git clean -fd` 清掉新文件，并补回隐藏/系统属性与空目录；",
-            "`.git/**` 默认在排除规则里，不会被整理 |",
+            "根目录含 `.git` 时两个工具均拒绝整次处理；该模式仅用于验证 Git 保护，不用于普通处理验收 |",
         )
     )
 
@@ -599,17 +596,17 @@ def build_readme(root: Path, log: list[str], *, git: bool) -> None:
             "生成脚本：`python scripts/make_tmp.py testdata`（可重复执行，会先清空本目录；",
             "默认生成到仓库 `.tmp/testdata/`）。",
         ),
-        "所有内容都是脚本生成的假数据，可以随意删除、移动、回收。",
+        "所有内容都是脚本生成的假数据，可以用于移动和永久删除测试；不要指向真实资料。",
         "",
         "## 建议的测试顺序",
         "",
         _line(
             "1. 先用「递归解压」工具：选本目录 → 点「开始解压」→ 一段确认后跑完；",
-            "成功的原包进回收站，没解开的进「解压失败」子目录（含损坏、加密、分卷不全与恶意条目各目录的包）；",
+            "成功原包及分卷保留，冲突自动改文件名且后缀不变；未完全解开的包移入「解压失败」并记录原因；",
         ),
         "2. 再用「目录整理」工具：点「开始分析」（只读，不改文件），看计划里对每个重复组的判定是否符合下表；",
         "3. 逐组勾选/取消计划项，确认「确认并执行整理」只执行勾选项；",
-        "4. 再打开归类、清理、类型修正、隐藏/系统等开关，重新分析并执行；",
+        "4. 按需调整归类、临时/零字节清理及类型修正规则，重新分析并执行；默认已包含隐藏和系统属性资料；",
         "5. 关注底部进度条：解压/分析阶段是往返光带 + 实时计数，执行阶段是百分比 + 已完成/总数。",
         "",
         "## 各目录的用途与预期行为",
@@ -624,7 +621,7 @@ def build_readme(root: Path, log: list[str], *, git: bool) -> None:
             "## 注意",
             "",
             "- 全零压缩包解出来是 64 MiB 的 `zeros.bin`，分卷包解出来是 2 MiB 的 `big.bin`，执行整理前请确认磁盘空间；",
-            "- 删除动作默认走回收站（可在规则里改成永久删除）；想验证「回收失败则永久删除」请在规则里调整；",
+            "- 整理文件删除默认永久删除、不可恢复，各清理类别可独立覆盖删除方式；解压不删除文件；",
             "- `16-恶意条目/` 里的包是为安全测试准备的，请只在测试目录里使用；",
             "- 本说明文件本身也是被扫描的对象，不需要时可以直接删除。",
             "",
@@ -635,7 +632,7 @@ def build_readme(root: Path, log: list[str], *, git: bool) -> None:
             [
                 "## 整理之后如何恢复",
                 "",
-                "本目录在生成时已用 git 建立基线（`--git`）。整理跑完后，在本目录执行：",
+                "本目录使用 `--git` 建立了根 Git 边界，应被两个工具整体拒绝。仅用于验证 Git 保护；恢复基线可执行：",
                 "",
                 "```powershell",
                 ".\\恢复.ps1",
@@ -659,8 +656,8 @@ def build_readme(root: Path, log: list[str], *, git: bool) -> None:
                 "",
                 "本次生成没有使用 `--git`，目录里没有 git 基线和 `恢复.ps1`，整理后的删除/移动无法一键撤销。",
                 _line(
-                    "需要可回滚的测试集，请重新执行 `python scripts/make_tmp.py testdata --git`",
-                    "（默认 `.tmp/testdata/`，会先清空目录）。",
+                    "普通处理验收保持不带 `--git`；需要还原时重新执行 `python scripts/make_tmp.py testdata --force`",
+                    "（默认 `.tmp/testdata/`，会先清空目录重建）。",
                 ),
             ]
         )

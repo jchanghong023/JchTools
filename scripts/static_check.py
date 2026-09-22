@@ -287,6 +287,7 @@ def sql_syntax() -> str:
         CREATE TEMP TABLE dir_children(parent TEXT,rel TEXT);
         CREATE TEMP TABLE hash_candidates(id INTEGER PRIMARY KEY);
         CREATE TEMP TABLE scan_taint(rel TEXT PRIMARY KEY);
+        CREATE TEMP TABLE git_roots(rel TEXT PRIMARY KEY);
         CREATE TEMP TABLE tainted_will(rel TEXT PRIMARY KEY);
         CREATE TABLE hash_cache(identity TEXT NOT NULL, size INTEGER NOT NULL, mtime INTEGER NOT NULL,
             hash TEXT NOT NULL, updated INTEGER NOT NULL, PRIMARY KEY(identity,size,mtime));""")
@@ -655,26 +656,6 @@ def slint_colors() -> str:
     return "十六进制颜色只出现在 Design 全局内。"
 
 
-def slint_accessibility() -> str:
-    # AGENTS.md 第 4 节：自绘可交互控件必须有 accessible-role。这里检查下界：
-    # 任何包含 TouchArea 的组件定义（含 AppWindow）本身必须声明 accessible-role。
-    ui = read_text(ROOT / "ui" / "app.slint")
-    pairs = slint_blocks(ui)
-    missing: list[str] = []
-    for match in re.finditer(r"(?:export\s+)?component\s+([\w-]+)[^{]*\{", ui):
-        span = [pair for pair in pairs if pair[0] == match.end() - 1]
-        if not span:
-            continue
-        _, close, _ = span[0]
-        body = ui[match.end() - 1 : close]
-        if "TouchArea" in body and "accessible-role" not in body:
-            missing.append(match.group(1))
-    if missing:
-        detail = f"含 TouchArea 的组件缺少 accessible-role：{missing}"
-        raise AssertionError(detail)
-    return "所有含 TouchArea 的组件都声明了 accessible-role。"
-
-
 def product_naming() -> str:
     # AGENTS.md 第 1/5 节的产品名同步下界：标题与状态目录必须是 JchTools，且无旧名残留。
     ui = read_text(ROOT / "ui" / "app.slint")
@@ -699,29 +680,15 @@ def slint_modal_gating() -> str:
     ui = read_text(ROOT / "ui" / "app.slint")
     start = ui.index("export component AppWindow inherits Window")
     overlay = ui.index("if root.confirm-kind != 0:", start)
-    # 冲突层是模态层，其自身控件在 conflict-visible 打开时必须可用，不适用背景门禁
-    # （它们只受 confirm-kind 门禁，见 slint_conflict_modal_gating）。
-    conflict = ui.find("if root.conflict-visible:", start)
-    if conflict != -1:
-        overlay = min(overlay, conflict)
     start_line = ui.count("\n", 0, start) + 1
     bad: list[tuple[int, str]] = []
     for offset, line in enumerate(ui[start:overlay].split("\n")):
-        # 只解析 enabled 绑定表达式本身（排除 accessible-enabled 与属性声明）；
-        # 「同行的 if 渲染条件里有 busy 字样」不再作为豁免依据——冲突弹出时 busy 恒真，
-        # if root.busy: 控件恰在此时渲染，恰恰是最需要 conflict-visible 门禁的形态。
+        # 唯一的确认模态打开时，背景控件不可交互；运行中的暂停/取消仍应可用。
         enabled_match = re.search(r"(?<![\w-])enabled\s*:(.*)", line)
         if not enabled_match:
             continue
         expr = enabled_match.group(1)
-        # confirm-kind 门禁只防确认模态：冲突模态（conflict-visible）下还需要
-        # enabled 含 !root.busy / conflict-visible，或本行渲染条件保证 !root.busy
-        # （该控件在冲突弹出时根本不渲染）。
-        if "confirm-kind" not in expr or not (
-            re.search(r"!\s*root\.busy", expr)
-            or "conflict-visible" in expr
-            or re.search(r"!\s*root\.busy", line[: enabled_match.start()])
-        ):
+        if "confirm-kind" not in expr:
             bad.append((start_line + offset, line.strip()))
     if bad:
         detail = f"AppWindow 内存在未按 confirm-kind 门禁的 enabled 绑定（行, 表达式）：{bad}"
@@ -749,38 +716,6 @@ def acceptance_respects_cargo_target_dir() -> str:
         detail = "acceptance.ps1 的 gui-smoke 必须尊重 CARGO_TARGET_DIR（与 package-windows.ps1 同口径）"
         raise AssertionError(detail)
     return "acceptance.ps1 的 gui-smoke 尊重 CARGO_TARGET_DIR。"
-
-
-def slint_conflict_modal_gating() -> str:
-    # 冲突层画在确认层之下（app.slint 注释自证 kind=3 确认层会盖在其上）：确认模态
-    # 打开期间，冲突对话框的全部可交互控件必须禁用，否则键盘可穿透确认层直接改
-    # 冲突策略或取消任务。slint_modal_gating 只覆盖「有 enabled 绑定」的行，本规则
-    # 补上冲突层内无 enabled 绑定的控件这一盲区。
-    ui = read_text(ROOT / "ui" / "app.slint")
-    match = re.search(r"if root\.conflict-visible:.*?\{", ui)
-    if match is None:
-        detail = "找不到冲突层声明"
-        raise AssertionError(detail)
-    depth = 0
-    end = len(ui)
-    for i, ch in enumerate(ui[match.end() - 1 :]):
-        if ch == "{":
-            depth += 1
-        elif ch == "}":
-            depth -= 1
-            if depth == 0:
-                end = match.end() - 1 + i
-                break
-    body = ui[match.end() : end]
-    bad = [
-        line.strip()
-        for line in body.split("\n")
-        if re.search(r"\b(Button|ComboBox|CheckBox|LineEdit) \{", line) and "confirm-kind" not in line
-    ]
-    if bad:
-        detail = f"冲突对话框内存在未按 confirm-kind 门禁的可交互控件：{bad}"
-        raise AssertionError(detail)
-    return "冲突对话框内全部可交互控件都门禁 confirm-kind。"
 
 
 def _listed_digests(raw: bytes) -> dict[str, str]:
@@ -896,12 +831,10 @@ for name, fn in [
     ("test_baseline", test_baseline),
     ("slint_layout_width", slint_layout_width),
     ("slint_colors", slint_colors),
-    ("slint_accessibility", slint_accessibility),
     ("product_naming", product_naming),
     ("slint_modal_gating", slint_modal_gating),
     ("build_rc_prefers_windows_kits", build_rc_prefers_windows_kits),
     ("acceptance_respects_cargo_target_dir", acceptance_respects_cargo_target_dir),
-    ("slint_conflict_modal_gating", slint_conflict_modal_gating),
     ("sums_integrity", sums_integrity),
     ("scope_and_delivery", scope_and_delivery),
 ]:

@@ -17,7 +17,7 @@
 - **工具**：当前两个——「递归解压」（X 分区）与「目录整理」（C 分区），各自需求见 `docs/CONTRACT.md`。产品完全离线（P-03）：源码中不得引入任何联网能力。新工具 `MUST` 经 `src/registry.rs` 注册 + 真实页面接入；侧栏与导航 `SHOULD NOT` 写死只服务单个工具的文案或流程。
 - **生产方式**：本项目全部产出（代码、测试、文档、CI）由 AI 代理完成；用户不编写任何代码或文字，只在封闭选择、看图判断与真实使用中给出意图和反馈（协作协议见第 7 节）。本文件的纪律条款用于对抗代理的自证偏差。
 - **权威文档**：仅两份——`AGENTS.md`（本文件：项目背景与过程纪律，怎么开发、怎么测试、怎么验收）与 `docs/CONTRACT.md`（需求合同：软件必须满足什么，只写需求）。其余文档仅为辅助说明，冲突时以权威文档为准。
-- **代码入口**：`src/main.rs`（GUI）、`ui/app.slint`（界面）、`resources/rules.json`（38 项界面规则）、`src/registry.rs`（工具注册表）。
+- **代码入口**：`src/main.rs`（GUI）、`ui/app.slint`（界面）、`resources/rules.json`（界面规则清单）、`src/registry.rs`（工具注册表）。
 
 ## 2. 临时文件规则（强制）
 
@@ -40,7 +40,7 @@ powershell -NoProfile -File .\scripts\acceptance.ps1 -WithEngine   # 单命令�
 powershell -NoProfile -File .\scripts\package-windows.ps1   # 生成含 7-Zip 的发布 ZIP
 ```
 
-手工测试集：`python scripts/make_tmp.py testdata --git`（默认自动生成到 `.tmp/testdata/`，会先清空该目录；`--git` 建立 git 基线并生成 `恢复.ps1`，测试后可一键回到初始状态；也可 `--destination` 另指专门测试目录，仓库内 `.tmp` 之外的位置会被拒绝；测试完成后用 `python scripts/make_tmp.py clean` 清理）。
+手工测试集：`python scripts/make_tmp.py testdata`（默认自动生成到 `.tmp/testdata/`，会先清空该目录；也可 `--destination` 另指专门测试目录，仓库内 `.tmp` 之外的位置会被拒绝）。普通处理验收不使用 `--git`：根目录含 `.git` 时按 H-06 拒绝整次处理；`--git` 仅可用于验证该拒绝行为。需要还原普通数据集时重新运行生成命令；测试完成后用 `python scripts/make_tmp.py clean` 清理。
 
 - Windows 构建机需要 Rust `x86_64-pc-windows-msvc` + VS C++ Build Tools + Windows SDK（`rc.exe` 用于把 `resources/app.ico` 嵌入 EXE）。
 - 提交前 `SHOULD` 至少跑 `cargo test` 与 `python scripts/static_check.py`，并确认构建输出没有新增 `binding loop` 警告。
@@ -69,8 +69,8 @@ powershell -NoProfile -File .\scripts\package-windows.ps1   # 生成含 7-Zip �
 | 任意变更（每次提交） | `cargo test` + `python scripts/static_check.py` | 合同全部条目对应测试 |
 | 引擎 / 解压 / 删除 / 路径安全 | 上行 + `powershell -NoProfile -File .\scripts\acceptance.ps1 -WithEngine` + `tests/gui_flow.rs` | 合同 S / E 分区、C-01 |
 | UI（`ui/app.slint` / GUI 装配） | 任意变更行 + `tests/gui_flow.rs` + `scripts/gui_smoke.py` S1–S4 + 两档窗口尺寸目视检查 | 合同 C / U 分区 |
-| 递归解压端到端 | `python scripts/make_tmp.py testdata --git` 生成数据集 → GUI 走「开始解压 → 一段确认 → 跑完」→ 按合同 X 分区逐条核对（成功原包回收、失败原包进「解压失败」、重跑不再重试、目录不残留压缩包）→ `恢复.ps1` 还原 → `python scripts/make_tmp.py clean` 清理 | 合同 X 分区 |
-| 目录整理端到端 | `python scripts/make_tmp.py testdata --git` 自动生成数据集到 `.tmp/testdata/` → GUI 按默认配置完整走一遍目录整理主流程 → 按合同 C 分区逐条核对结果 → `恢复.ps1` 还原 → `python scripts/make_tmp.py clean` 清理 | 合同 C 分区 |
+| 递归解压端到端 | `python scripts/make_tmp.py testdata` 生成数据集 → GUI 走「开始解压 → 一段确认 → 跑完」→ 按合同 X / H 分区核对（成功原包及分卷保留、已有文件不变、冲突自动改名且后缀不变、失败原包进「解压失败」、Git 整树排除、后续新任务允许重新解压）→ `python scripts/make_tmp.py clean` 清理 | 合同 X / H 分区 |
+| 目录整理端到端 | `python scripts/make_tmp.py testdata` 自动生成数据集到 `.tmp/testdata/` → GUI 按默认配置完整走一遍目录整理主流程 → 按合同 C / H 分区核对（Git 整树排除、成功后处理范围内无空目录、再次整理幂等）→ `python scripts/make_tmp.py clean` 清理 | 合同 C / H 分区 |
 | 打包 / 发布 / 引擎捆绑 | `scripts/package-windows.ps1` 全程 + 干净目录解包运行 | 合同 E 分区 |
 
 - 单命令入口：`powershell -NoProfile -File .\scripts\acceptance.ps1`（可选 `-WithEngine` / `-WithGuiSmoke -GuiData <目录>` / `-WithPackage`）。
@@ -99,13 +99,12 @@ powershell -NoProfile -File .\scripts\package-windows.ps1   # 生成含 7-Zip �
 
 ## 4. 代码与界面实现约定
 
-产品行为类要求（控件分工、进度语义、无障碍、窗口行为、缩放适配、配色令牌、命名规范）一律以 `docs/CONTRACT.md` 的 U / P 分区为准，本节不重复。本节只写实现层约定：
+产品行为类要求（控件分工、进度语义、窗口行为、缩放适配、配色令牌、命名规范）一律以 `docs/CONTRACT.md` 的 U / P / H 分区为准，本节不重复。本节只写实现层约定：
 
 - 注释、错误信息、界面文案用中文；标识符、模块名、提交信息用英文或中英混排均可，但同一处保持一致。
 - 界面颜色走 `ui/app.slint` 的 `Design` 全局（浅色/深色两套由 `Design.dark` 切换），不硬编码与主题冲突的颜色。
 - Slint 布局中 `MUST NOT` 用 `root.width` / `parent.width` 绑定子项自身宽度（会形成绑定环，编译期警告、运行期可能 panic）；固定宽度用常量，占满剩余空间用 `horizontal-stretch` 或外层容器。
-- 含 `TouchArea` 的自绘控件 `MUST` 带 `accessible-role` 与 `accessible-label`（读屏与自动化测试依赖）。
-- 本节颜色 / 布局绑定 / 无障碍规则由 `python scripts/static_check.py` 机器检查（十六进制色只允许出现在 `Design` 全局内、布局内禁止 `root/parent.width` 宽度绑定、含 `TouchArea` 的组件必须带 `accessible-role`）。
+- 本节颜色 / 布局绑定规则由 `python scripts/static_check.py` 机器检查（十六进制色只允许出现在 `Design` 全局内、布局内禁止 `root/parent.width` 宽度绑定）。无障碍不设开发或验收要求，按 H-08 / U-04 执行。
 
 ## 5. 改名与新工具时的同步清单
 
