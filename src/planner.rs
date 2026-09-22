@@ -342,13 +342,14 @@ impl Item {
         } else {
             self.sources.first().map(String::as_str)
         };
-        let base = rules::digest_candidate(nearest, &self.stem, &digest, &self.extension)?;
-        if let Some(index) = self.index_suffix {
-            // 序号追加在最后一个扩展名之前（H-07 同口径，不拆复合扩展名）。
-            let (head, ext) = split_last_extension(&base);
-            return Some(format!("{head}_{index}{ext}"));
-        }
-        Some(base)
+        // 序号由 rules::digest_candidate 计入长度预算并插在扩展名之前（H-07 同口径）。
+        rules::digest_candidate(
+            nearest,
+            &self.stem,
+            &digest,
+            &self.extension,
+            self.index_suffix,
+        )
     }
     /// 当前阶段的候选名（C-18 来源前缀 / C-19 摘要 / C-20 长度受限形式）。
     fn current_candidate(&self) -> Option<String> {
@@ -368,13 +369,6 @@ impl Item {
         }
         let hex_units = usize::try_from((6 + 2 * self.digest_step).min(64)).unwrap_or(64);
         self.digest_candidate(hex_units, self.digest_no_source)
-    }
-}
-/// 把完整名拆成「最后一个扩展名前的部分 + 扩展名」（C-19 序号插在扩展名之前）。
-fn split_last_extension(name: &str) -> (&str, &str) {
-    match name.rfind('.') {
-        Some(index) if index > 0 => (&name[..index], &name[index..]),
-        _ => (name, ""),
     }
 }
 /// 单个目标目录的占用与可用性。

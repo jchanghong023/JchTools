@@ -355,11 +355,13 @@ pub fn category_for(name_lower: &str) -> &'static str {
         }
     }
     // 老式尾卷族：.r00～.r99 / .z01～.z99（附录 A：整理中的 X-10 命名族分卷归「压缩包」；
-    // data.001 这类无格式孤立编号不匹配，仍归「其他」）。
+    // zip 族起始编号是 01，z00 不属命名族；data.001 这类无格式孤立编号仍归「其他」）。
     if let Some((_, tail)) = name_lower.rsplit_once('.') {
+        let digits = tail.as_bytes();
         if tail.len() == 3
             && (tail.starts_with('r') || tail.starts_with('z'))
-            && tail.as_bytes()[1..].iter().all(u8::is_ascii_digit)
+            && digits[1..].iter().all(u8::is_ascii_digit)
+            && (tail.starts_with('r') || &tail[1..] != "00")
         {
             return "压缩包";
         }
@@ -513,12 +515,15 @@ pub fn digest_candidate(
     stem: &str,
     digest: &str,
     extension: &str,
+    index: Option<u32>,
 ) -> Option<String> {
     let separator = 1usize;
     let digest_units = digest.encode_utf16().count();
     let ext_units = extension.encode_utf16().count();
     let level_units = nearest_level.map_or(0, |level| level.encode_utf16().count() + separator);
-    let fixed_no_source = separator + digest_units + ext_units;
+    // C-20：稳定序号同样计入长度预算，先截短主体腾位，不截摘要/扩展名。
+    let index_units = index.map_or(0, |n| n.to_string().encode_utf16().count() + separator);
+    let fixed_no_source = separator + digest_units + ext_units + index_units;
     if fixed_no_source + 1 > SEGMENT_LIMIT_UNITS {
         // 分隔符之外连一个主体字符都放不下。
         return None;
@@ -528,18 +533,24 @@ pub fn digest_candidate(
             return None;
         }
         let total = if with_level {
-            level_units + stem_part.encode_utf16().count() + separator + digest_units + ext_units
+            level_units
+                + stem_part.encode_utf16().count()
+                + separator
+                + digest_units
+                + ext_units
+                + index_units
         } else {
             stem_part.encode_utf16().count() + fixed_no_source
         };
         if total > SEGMENT_LIMIT_UNITS {
             return None;
         }
+        let index_text = index.map_or(String::new(), |n| format!("_{n}"));
         Some(if with_level {
             let level = nearest_level.unwrap_or("");
-            format!("{level}_{stem_part}_{digest}{extension}")
+            format!("{level}_{stem_part}_{digest}{index_text}{extension}")
         } else {
-            format!("{stem_part}_{digest}{extension}")
+            format!("{stem_part}_{digest}{index_text}{extension}")
         })
     };
     // 先试带来源的 C-19 形式（主体截到 25）；放得下且 ≤40 即返回。
@@ -930,6 +941,7 @@ mod tests {
             ("a.part01.rar", "压缩包"),
             ("b.r00", "压缩包"),
             ("b.z02", "压缩包"),
+            ("b.z00", "其他"),
             ("a.exe", "程序"),
             ("a.ps1", "程序"),
             ("a.msixbundle", "程序"),
@@ -960,19 +972,21 @@ mod tests {
     fn digest_candidate_respects_unit_budget() {
         let long_stem = "二".repeat(60);
         // C-20：带来源形式超 40 时去掉来源段，只保留主体前段+摘要+扩展名。
-        let candidate = digest_candidate(Some("年报"), &long_stem, "A83F21C7", ".pdf").unwrap();
+        let candidate =
+            digest_candidate(Some("年报"), &long_stem, "A83F21C7", ".pdf", None).unwrap();
         assert!(candidate.encode_utf16().count() <= CONFLICT_YIELD_UNITS);
         assert!(candidate.starts_with("二"));
         assert!(candidate.ends_with("_A83F21C7.pdf"));
         assert!(!candidate.contains('年'));
         // 短主体带来源：保留 C-19 完整形式。
-        let with_source = digest_candidate(Some("年报"), "产品说明_1", "A13F72C4", ".pdf").unwrap();
+        let with_source =
+            digest_candidate(Some("年报"), "产品说明_1", "A13F72C4", ".pdf", None).unwrap();
         assert_eq!(with_source, "年报_产品说明_1_A13F72C4.pdf");
         // 无来源段时省略来源。
-        let none_source = digest_candidate(None, "资料", "A83F21C7", ".pdf").unwrap();
+        let none_source = digest_candidate(None, "资料", "A83F21C7", ".pdf", None).unwrap();
         assert_eq!(none_source, "资料_A83F21C7.pdf");
         // 扩展名与摘要自身挤爆预算：允许超过 40 但不得超过 255；再放不下则 None。
         let huge_ext = format!(".{}", "e".repeat(300));
-        assert!(digest_candidate(None, "x", "A83F21C7", &huge_ext).is_none());
+        assert!(digest_candidate(None, "x", "A83F21C7", &huge_ext, None).is_none());
     }
 }
