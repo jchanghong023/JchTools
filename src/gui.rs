@@ -13,14 +13,14 @@ mod generated_ui {
 pub use generated_ui::*;
 
 use crate::{
-    config::{ClassifyMode, Config, ConflictPolicy, DEFAULT_CUSTOM_CATEGORIES},
-    control::{ConflictAnswer, Context, Control, Event},
+    config::{ClassifyMode, Config, DeleteChoice, DEFAULT_CUSTOM_CATEGORIES},
+    control::{Context, Control, Event},
     db::Database,
     engine,
     model::{bytes, ActionKind},
-    platform, registry,
+    registry,
 };
-use anyhow::{Context as _, Result};
+use anyhow::Result;
 use serde::Deserialize;
 use slint::{ComponentHandle, Model, ModelRc, SharedString, VecModel};
 use std::{
@@ -87,7 +87,6 @@ struct State {
     section: String,
     task: Option<PathBuf>,
     control: Option<Arc<Control>>,
-    conflict: Option<mpsc::SyncSender<ConflictAnswer>>,
     logs: VecDeque<String>,
     page: usize,
     page_starts: Vec<i64>,
@@ -338,6 +337,11 @@ fn rule_visible(spec: &RuleSpec, config: &Config, show_advanced: bool) -> bool {
                 || config.custom_categories != DEFAULT_CUSTOM_CATEGORIES
         }
         "large_threshold_gib" => config.large_files || config.large_threshold_gib != 1,
+        // C-08：各清理类别的删除方式只在对应清理开启时才有意义；已经改过值的行保留可见，
+        // 否则类别关掉后用户既看不到该行、也无法把它改回默认。
+        "junk_delete" => config.clean_junk || config.junk_delete != DeleteChoice::Global,
+        "temp_delete" => config.clean_temp || config.temp_delete != DeleteChoice::Global,
+        "zero_delete" => config.clean_zero || config.zero_delete != DeleteChoice::Global,
         _ => true,
     }
 }
@@ -528,6 +532,7 @@ fn changed(
             }
             // theme 是纯外观设置，不影响计划内容：不使已生成的计划失效。
             if key != "theme" {
+                refresh_scope_notice(ui, &state.config);
                 invalidate(ui, tool);
             }
             if rebuild {
@@ -776,7 +781,6 @@ fn start_task(
         s.logs.clear();
         s.page = 0;
         s.page_starts = vec![0];
-        s.conflict = None;
         s.applying = apply;
         s.extracting = false;
         // 执行分母按将实际执行的勾选数修正：规划期 planned 是全量，用户可能已取消部分勾选。
@@ -793,7 +797,11 @@ fn start_task(
     ui.set_ready(false);
     ui.set_paused(false);
     ui.set_error_text("".into());
-    ui.set_notice_text("".into());
+    // 分析（新任务）清掉上一任务的提示；执行是同一任务的收尾阶段，必须保留分析期产生的
+    // 提示（H-06 已跳过 Git 目录树等），否则用户在整个执行阶段都看不到跳过说明。
+    if !apply {
+        ui.set_notice_text("".into());
+    }
     ui.set_panel(2);
     ui.set_log_text("".into());
     ui.set_status(
@@ -804,25 +812,10 @@ fn start_task(
         }
         .into(),
     );
-    let ask_sender = sender.clone();
-    let ask_control = control.clone();
+    // 目录整理不调用解压、不询问解压冲突（C-01/H-03）：引擎只需任务控制与事件通道。
     let context = Context {
         control: control.clone(),
         events: Some(sender.clone()),
-        decisions: Arc::new(move |info| {
-            let (reply_sender, reply_receiver) = mpsc::sync_channel(1);
-            ask_sender
-                .send(Event::Conflict(info, reply_sender))
-                .context("界面已经关闭")?;
-            loop {
-                ask_control.check_cancelled()?;
-                match reply_receiver.recv_timeout(Duration::from_millis(100)) {
-                    Ok(reply) => return Ok(reply),
-                    Err(mpsc::RecvTimeoutError::Timeout) => (),
-                    Err(_) => anyhow::bail!("冲突选择窗口已关闭"),
-                }
-            }
-        }),
     };
     let sender = sender.clone();
     // 同一次 GUI 会话里可能先分析再执行：覆盖对象必须可重复使用，不能 take。
@@ -890,7 +883,6 @@ fn start_extract(ui: &AppWindow, state: &Rc<RefCell<State>>, sender: &mpsc::Sync
         s.started = Instant::now();
         s.close_after = false;
         s.logs.clear();
-        s.conflict = None;
         s.applying = false;
         s.extracting = true;
         s.planned = 0;
@@ -904,27 +896,12 @@ fn start_extract(ui: &AppWindow, state: &Rc<RefCell<State>>, sender: &mpsc::Sync
     ui.set_quarantined_count(0);
     ui.set_log_text("".into());
     ui.set_status(
-        "正在解压；成功原包按规则处置（默认直接永久删除），失败原包移入「解压失败」".into(),
+        "正在解压；原压缩包与已有文件保留，无法完全解开的包移入「解压失败」并记录原因".into(),
     );
-    let ask_sender = sender.clone();
-    let ask_control = control.clone();
+    // X-05/H-07：解压不删除、不覆盖、不询问冲突，引擎侧只需任务控制与事件通道。
     let context = Context {
         control: control.clone(),
         events: Some(sender.clone()),
-        decisions: Arc::new(move |info| {
-            let (reply_sender, reply_receiver) = mpsc::sync_channel(1);
-            ask_sender
-                .send(Event::Conflict(info, reply_sender))
-                .context("界面已经关闭")?;
-            loop {
-                ask_control.check_cancelled()?;
-                match reply_receiver.recv_timeout(Duration::from_millis(100)) {
-                    Ok(reply) => return Ok(reply),
-                    Err(mpsc::RecvTimeoutError::Timeout) => (),
-                    Err(_) => anyhow::bail!("冲突选择窗口已关闭"),
-                }
-            }
-        }),
     };
     let sender = sender.clone();
     let overrides = state
@@ -954,26 +931,96 @@ fn start_extract(ui: &AppWindow, state: &Rc<RefCell<State>>, sender: &mpsc::Sync
     });
 }
 /// 「开始解压」确认框文案（X-02）：数量由后台清点（大目录不阻塞界面），
-/// 清点完成前先给占位文案，事件到达后原位更新。
-fn extract_confirm_text(count_text: &str, directory: &str, config: &Config) -> String {
-    let dispose = match config.archive_delete.resolve() {
-        crate::config::DeleteMode::Keep => "保留不删",
-        crate::config::DeleteMode::Permanent => "永久删除（不可恢复）",
-    };
+/// 清点完成前先给占位文案，事件到达后原位更新。文案固定说明去向、原包与已有文件保留、
+/// 冲突只为新文件自动改名且保持扩展名、失败包去向与原因可查；不提供删除或冲突策略选项。
+fn extract_confirm_text(count_text: &str, directory: &str) -> String {
     format!(
         "目标目录：{directory}
 
-将递归解压压缩包（含嵌套包），就地解到各包所在位置。
+将递归解压压缩包（含本次解出的嵌套压缩包），就地解到各包所在位置。
 {count_text}
-成功完全解开的原包：{dispose}；未完全解开的原包：移入「解压失败」子目录等待人工处理。
-
-{}",
-        config.destructive_warning()
+原压缩包与已有文件一律保留，不会删除；目标同名时只为新解出的文件自动改文件名（如 资料 (1).txt），扩展名与复合扩展名保持不变。
+无法完全解开的包保留并移入「解压失败」子目录，原因记录在日志中；处理期间可随时取消。"
     )
 }
 fn show_error(ui: &AppWindow, error: impl std::fmt::Display) {
     ui.set_error_text(error.to_string().into());
 }
+/// 范围缩小提示的前缀：只有本条提示才在范围恢复默认时被清除，
+/// 不影响取消等其它蓝条通知（U-06）。
+const SCOPE_NOTICE_PREFIX: &str = "已缩小处理范围";
+
+/// R-03/S-04：用户主动缩小处理范围（关闭递归、排除隐藏/系统资料、填写排除规则）时，
+/// 界面必须明确提示范围缩小；Git 排除不受这些开关影响，始终生效。
+fn scope_notice(config: &Config) -> Option<String> {
+    let mut parts: Vec<&str> = Vec::new();
+    if !config.recursive {
+        parts.push("不含所选目录的子目录");
+    }
+    if !config.include_hidden {
+        parts.push("不含隐藏属性资料");
+    }
+    if !config.include_system {
+        parts.push("不含系统属性资料");
+    }
+    if !config.exclusions.trim().is_empty() {
+        parts.push("已应用排除路径规则");
+    }
+    (!parts.is_empty()).then(|| {
+        format!(
+            "{SCOPE_NOTICE_PREFIX}：{}；Git 目录仍始终整树排除。",
+            parts.join("、")
+        )
+    })
+}
+
+/// 按当前配置刷新范围缩小提示：缩小就提示，恢复默认（且当前提示正是它）就清除。
+fn refresh_scope_notice(ui: &AppWindow, config: &Config) {
+    match scope_notice(config) {
+        Some(text) => ui.set_notice_text(text.into()),
+        None => {
+            if ui.get_notice_text().starts_with(SCOPE_NOTICE_PREFIX) {
+                ui.set_notice_text("".into());
+            }
+        }
+    }
+}
+
+/// C-11：计划行状态的中文显示。未勾选且尚未执行的计划行按勾选实际状态显示
+/// 「已取消勾选」，重新勾选恢复「待执行」（勾选即时生效，不必等执行阶段）。
+/// 其它状态（已执行/已跳过/执行失败）原样透出。
+fn plan_row_state(selected: bool, stored: &str) -> &str {
+    match stored {
+        "pending" | "待执行" | "unselected" | "已取消勾选" => {
+            if selected {
+                "待执行"
+            } else {
+                "已取消勾选"
+            }
+        }
+        other => other,
+    }
+}
+
+/// 勾选切换时就地更新该行：勾选值与状态显示同时改，避免「取消勾选后仍显示待执行」
+/// 到数据库事件回来前的不一致；保存失败时由 SelectionSaved/重载恢复数据库真值。
+fn patch_plan_row(ui: &AppWindow, id: i64, selected: bool) {
+    let plans = ui.get_plans();
+    let Some(model) = plans.as_any().downcast_ref::<VecModel<PlanRow>>() else {
+        return;
+    };
+    for i in 0..model.row_count() {
+        if let Some(mut row) = model.row_data(i) {
+            if row.id.as_str().parse::<i64>() == Ok(id) {
+                row.selected = selected;
+                row.state = plan_row_state(selected, row.state.as_str()).into();
+                model.set_row_data(i, row);
+                break;
+            }
+        }
+    }
+}
+
 /// 事件循环把日志写进界面环形缓冲的统一入口（U-10/S-07：界面仅保留最近 300 条）。
 /// Failed 收尾与普通日志同走此路径，避免失败消息绕过条数上限。
 fn push_event_log(logs: &mut VecDeque<String>, text: String) {
@@ -1306,16 +1353,9 @@ fn wire_sync(ui: &AppWindow, state: &Rc<RefCell<State>>, sender: &mpsc::SyncSend
                     show_error(&ui, error);
                     return;
                 }
-                let count_text = state.borrow().config.destructive_warning();
                 ui.set_confirm_text(
-                    extract_confirm_text(
-                        "正在清点压缩包…",
-                        ui.get_directory().as_str(),
-                        &state.borrow().config,
-                    )
-                    .into(),
+                    extract_confirm_text("正在清点压缩包…", ui.get_directory().as_str()).into(),
                 );
-                let _ = count_text;
                 ui.set_acknowledge(false);
                 ui.set_confirm_kind(1);
                 // X-02：数量未知（清点进行中）不得允许确认；清点返回后在事件侧解除。
@@ -1370,7 +1410,6 @@ fn initial_state() -> Result<State> {
         section: "去重".into(),
         task: None,
         control: None,
-        conflict: None,
         logs: VecDeque::new(),
         page: 0,
         page_starts: vec![0],
@@ -1474,7 +1513,6 @@ pub fn run_with_engine_overrides(
                         return;
                     }
                     ui.set_status("取消任务中，完成当前安全操作后关闭".into());
-                    ui.set_conflict_visible(false);
                 } else if kind == 2 {
                     start_task(&ui, &state, &sender, true);
                 } else if ui.get_screen() == 2 {
@@ -1500,29 +1538,6 @@ pub fn run_with_engine_overrides(
             }
             if let Some(ui) = weak.upgrade() {
                 ui.set_status("正在取消；不会继续后续删除和移动".into());
-                ui.set_conflict_visible(false);
-            }
-        });
-    }
-    {
-        let weak = ui.as_weak();
-        let state = state.clone();
-        ui.on_answer_conflict(move |index, all| {
-            let policy = match index {
-                0 => ConflictPolicy::Overwrite,
-                1 => ConflictPolicy::Skip,
-                2 => ConflictPolicy::Newest,
-                3 => ConflictPolicy::Largest,
-                _ => ConflictPolicy::KeepBoth,
-            };
-            if let Some(reply) = state.borrow_mut().conflict.take() {
-                let _ = reply.send(ConflictAnswer {
-                    policy,
-                    apply_all: all,
-                });
-            }
-            if let Some(ui) = weak.upgrade() {
-                ui.set_conflict_visible(false);
             }
         });
     }
@@ -1539,6 +1554,9 @@ pub fn run_with_engine_overrides(
                     }
                     // 勾选保存中 ready 暂降，避免在途勾选时误点执行；其他项仍可在 Slint 侧继续编辑。
                     ui.set_ready(false);
+                    // C-11：勾选后即时显示对应状态（取消勾选→已取消勾选，重新勾选→待执行），
+                    // 不等数据库事件回来；保存失败时由 SelectionSaved/重载恢复真值。
+                    patch_plan_row(&ui, id, selected);
                 }
                 state.borrow_mut().pending_selection += 1;
                 let sender = sender.clone();
@@ -1720,28 +1738,14 @@ pub fn run_with_engine_overrides(
                 match event{
                     Event::Status(text)=>{if !ui.get_paused(){ui.set_status(text.into());}},
                     Event::Log(text)=>{let mut s=state.borrow_mut();push_event_log(&mut s.logs,text);log_changed=true;},
-                    Event::Conflict(info,reply)=>{
-                        // 冲突事件可能在用户已请求取消后才被本定时器处理：已取消的任务不再弹
-                        // 冲突框，直接丢弃事件；reply 发送端随事件一起释放，worker 侧会在
-                        // check_cancelled 或通道断开时自行退出，不会悬挂。
-                        let cancelled={let s=state.borrow();s.control.as_ref().is_some_and(|control|control.is_cancelled())};
-                        if cancelled{continue;}
-                        state.borrow_mut().conflict=Some(reply);
-                        let show=platform::display_path_text;
-                        ui.set_conflict_text(format!("目标：{}\n\n现有文件：{} · 修改时间 {}\n新解压文件：{} · 修改时间 {}\n\n覆盖旧文件按已配置的删除方式处理（一律为永久删除、不可恢复）；选择前不会继续后续解压。",
-                            show(&info.existing),bytes(info.existing_size),platform::display_time_text(info.existing_time),
-                            bytes(info.incoming_size),platform::display_time_text(info.incoming_time)).into());
-                        ui.set_conflict_choice(4);ui.set_conflict_all(false);ui.set_conflict_visible(true);
-                        ui.set_status("正在等待你选择解压冲突策略；选择前不会继续后续解压".into());
-                    }
                     Event::Ready(path,summary)|Event::Done(path,summary)=>{
                         let ready=Database::open_existing(&path).and_then(|db|db.get::<String>("status")).is_ok_and(|v|v=="ready");
                         // 新计划一律回到「全部」筛选：沿用上一任务的筛选可能恰好计数为 0，
                         // 造成「空列表 + 高亮禁用胶囊」的死角。
-                        let filter={let mut s=state.borrow_mut();s.task=Some(path.clone());s.page=0;s.page_starts=vec![0];s.conflict=None;s.control=None;
+                        let filter={let mut s=state.borrow_mut();s.task=Some(path.clone());s.page=0;s.page_starts=vec![0];s.control=None;
                          s.applying=false;s.extracting=false;s.planned=summary.planned_delete+summary.planned_move+summary.planned_link+summary.planned_empty;
                          s.plan_filter=None;None};
-                        ui.set_busy(false);ui.set_paused(false);ui.set_conflict_visible(false);ui.set_ready(ready);ui.set_plan_editable(ready);ui.set_has_task(true);
+                        ui.set_busy(false);ui.set_paused(false);ui.set_ready(ready);ui.set_plan_editable(ready);ui.set_has_task(true);
                         ui.set_summary(summary.description().into());ui.set_panel(1);
                         ui.set_plan_delete_count(i32::try_from(summary.planned_delete).unwrap_or(i32::MAX));
                         ui.set_plan_move_count(i32::try_from(summary.planned_move).unwrap_or(i32::MAX));
@@ -1768,8 +1772,8 @@ pub fn run_with_engine_overrides(
                     Event::Failed(error)=>{
                         // 用户点了“取消任务”时不要用红色错误条报同一个消息：取消是预期操作，不是故障。
                         let cancelled={let s=state.borrow();s.control.as_ref().is_some_and(|control|control.is_cancelled())};
-                        {let mut s=state.borrow_mut();s.control=None;s.conflict=None;s.extracting=false;push_event_log(&mut s.logs,error.clone());log_changed=true;}
-                        ui.set_busy(false);ui.set_ready(false);ui.set_plan_editable(state.borrow().task.clone().is_some_and(|task|task_is_ready(&task)));ui.set_paused(false);ui.set_conflict_visible(false);
+                        {let mut s=state.borrow_mut();s.control=None;s.extracting=false;push_event_log(&mut s.logs,error.clone());log_changed=true;}
+                        ui.set_busy(false);ui.set_ready(false);ui.set_plan_editable(state.borrow().task.clone().is_some_and(|task|task_is_ready(&task)));ui.set_paused(false);
                         if cancelled{
                             ui.set_notice_text(error.into());
                             ui.set_status("任务已取消；已完成的操作不会自动回滚，详情见进度与日志".into());
@@ -1842,8 +1846,11 @@ pub fn run_with_engine_overrides(
                         ui.set_plan_page_label(format!("第 {} 页 · 每页最多 100 条",page+1).into());
                         let rows=actions.into_iter().map(|a|PlanRow{id:a.id.to_string().into(),selected:a.selected,
                             kind:match a.kind{ActionKind::Delete=>"删除",ActionKind::Move=>"移动/重命名",ActionKind::Hardlink=>"硬链接",ActionKind::EmptyDirectory=>"空目录复查"}.into(),
-                            source:a.source.into(),target:a.target.unwrap_or_else(||a.keeper.as_ref().map(|v|format!("保留 {}",v.0)).unwrap_or_default()).into(),reason:a.reason.into(),
-                            state:match a.state.as_str(){"pending"=>"待执行","done"=>"已执行","skipped"=>"已跳过","unselected"=>"已取消勾选","failed"=>"执行失败",other=>other}.into()}).collect::<Vec<_>>();
+                            source:a.source.into(),target:a.target.unwrap_or_else(||a.keeper.as_ref().map(|v|format!("保留 {}",v.0)).unwrap_or_default()).into(),
+                            // H-05/C-07：空目录清理是整理收尾的强制动作，行内明示不可取消，
+                            // 与复选框的禁用口径一致（C-11 如实显示）。
+                            reason:if matches!(a.kind,ActionKind::EmptyDirectory){format!("{}（整理完成后强制清理，不可取消）",a.reason)}else{a.reason}.into(),
+                            state:plan_row_state(a.selected,a.state.as_str()).into()}).collect::<Vec<_>>();
                         ui.set_plans(Rc::new(VecModel::from(rows)).into());
                         // 页面重建后同步一次 ready：勾选保存失败触发重载时，不能让「开始执行」
                         // 因为一次瞬时数据库失败而一直禁用。
@@ -1880,7 +1887,7 @@ pub fn run_with_engine_overrides(
                             match count{
                                 Ok(n)=>{ui.set_confirm_text(extract_confirm_text(
                                     &format!("清点到 {n} 个压缩包（按当前扫描范围，已排除「解压失败」目录）。"),
-                                    ui.get_directory().as_str(),&state.borrow().config).into());
+                                    ui.get_directory().as_str()).into());
                                     // 数量已知：解除清点门禁，勾选后即可确认（X-02）。
                                     ui.set_confirm_pending(false);},
                                 Err(error)=>{
@@ -1895,15 +1902,22 @@ pub fn run_with_engine_overrides(
                     },
                     Event::ExtractDone(_path,summary)=>{
                         // X-02 一段式收尾：只清运行态与展示摘要；不改 ready/has_task（目录整理两段式专用）。
-                        {let mut s=state.borrow_mut();s.control=None;s.conflict=None;s.extracting=false;}
-                        ui.set_busy(false);ui.set_paused(false);ui.set_conflict_visible(false);
+                        {let mut s=state.borrow_mut();s.control=None;s.extracting=false;}
+                        ui.set_busy(false);ui.set_paused(false);
+                        // 未完全解开的包不一定都成功移入「解压失败」（移动本身可能失败或未执行）：
+                        // 计数只报「未完全解开」，隔离数量另报，二者都不当成完成解压（X-06）。
                         ui.set_quarantined_count(
-                            i32::try_from(summary.archives_failed).unwrap_or(i32::MAX),
+                            i32::try_from(summary.archives_quarantined).unwrap_or(i32::MAX),
                         );
                         ui.set_progress(-1.0);ui.set_progress_note("".into());
                         ui.set_metrics(summary.extract_description().into());
-                        ui.set_status(format!("解压结束：成功 {} 包；{} 包移入「解压失败」，详情见「进度与日志」。",
-                            summary.archives_ok,summary.archives_failed).into());
+                        ui.set_status(if summary.archives_failed==0{
+                            format!("解压结束：成功 {} 包；原压缩包与已落盘结果保留，详情见「进度与日志」。",
+                                summary.archives_ok)
+                        }else{
+                            format!("解压结束：成功 {} 包；未完全解开 {} 包（其中 {} 个原包或分卷已移入「解压失败」），详情见「进度与日志」。",
+                                summary.archives_ok,summary.archives_failed,summary.archives_quarantined)
+                        }.into());
                         if state.borrow().close_after{let _=slint::quit_event_loop();}
                     },
                 }
@@ -2195,7 +2209,7 @@ mod gui_tests {
         })
     }
 
-    // 覆盖 P-02, P-04
+    // 覆盖 P-02, P-04, H-03
     #[test]
     fn initial_surface_lists_defaults() {
         with_gui(|app| {
@@ -2203,6 +2217,19 @@ mod gui_tests {
             assert!(!ui.get_ready(), "初始状态不得就绪");
             assert_eq!(ui.get_theme(), 0, "默认跟随系统主题");
             assert_eq!(ui.get_tool_count(), 2, "当前注册的工具数量");
+            // H-03：两个独立工具入口都正常可见（侧栏遍历注册表，不做隐藏、折叠或降级）。
+            let tools = ui.get_tools();
+            assert_eq!(tools.row_count(), 2, "侧栏必须同时列出两个工具");
+            let ids: Vec<String> = (0..tools.row_count())
+                .filter_map(|i| tools.row_data(i))
+                .map(|tool| tool.id.to_string())
+                .collect();
+            assert!(
+                ids.iter().any(|id| id == "recursive-extract")
+                    && ids.iter().any(|id| id == "directory-organizer"),
+                "两个工具入口必须按注册表 id 出现在侧栏：{ids:?}"
+            );
+            assert_eq!(ui.get_tool_search().as_str(), "", "启动不得预置搜索过滤");
         })
         .unwrap();
     }
@@ -2260,7 +2287,7 @@ mod gui_tests {
         })
         .unwrap();
     }
-    // 覆盖 R-01
+    // 覆盖 R-01, X-05, X-08（解压侧只剩安全与性能项：处置已固定，高级层是防护上限）
     #[test]
     fn advanced_rows_hidden_until_toggled() {
         with_gui(|app| {
@@ -2269,8 +2296,8 @@ mod gui_tests {
             ui.invoke_select_section(0); // 解压（递归解压：0解压/1安全与性能）
             assert_eq!(
                 ui.get_rules().row_count(),
-                2,
-                "解压分区默认只显示 2 条基础规则（原包处置与冲突策略）"
+                0,
+                "解压分区没有基础规则：原包处置与冲突策略已按 X-05/X-04 固定移除"
             );
             assert!(
                 rule_value_at(ui, "max_depth").is_none(),
@@ -2278,7 +2305,7 @@ mod gui_tests {
             );
             assert!(
                 rule_value_at(ui, "nested_archives").is_none(),
-                "嵌套解压属于高级层"
+                "R-02：嵌套解压开关不得出现（嵌套解压始终开启，受最大嵌套层数限制）"
             );
             assert!(
                 rule_value_at(ui, "dedup_same_name").is_none(),
@@ -2288,17 +2315,16 @@ mod gui_tests {
             assert!(ui.get_show_advanced());
             assert_eq!(
                 ui.get_rules().row_count(),
-                9,
-                "打开高级层后解压分区应显示全部 9 条"
+                5,
+                "打开高级层后解压分区应显示全部 5 条防护上限"
             );
             assert_eq!(rule_value_at(ui, "max_depth").as_deref(), Some("16"));
-            assert_eq!(
-                rule_value_at(ui, "archive_delete").as_deref(),
-                Some("permanent"),
-                "X-05/S-02：成功原包默认直接永久删除"
+            assert!(
+                rule_value_at(ui, "archive_delete").is_none(),
+                "X-05/R-02：原包处置不得再是可配置项"
             );
             ui.invoke_toggle_advanced(false);
-            assert_eq!(ui.get_rules().row_count(), 2, "关闭高级层必须恢复基础视图");
+            assert_eq!(ui.get_rules().row_count(), 0, "关闭高级层必须恢复基础视图");
         })
         .unwrap();
     }
@@ -2312,13 +2338,17 @@ mod gui_tests {
             assert_eq!(ui.get_active_tool_id().as_str(), "recursive-extract");
             assert_eq!(app.state.borrow().tool, Tool::Extract);
             assert_eq!(ui.get_section(), 0, "切工具回到第一个分区");
+            ui.invoke_toggle_advanced(true);
             assert!(
-                rule_value_at(ui, "archive_delete").is_some(),
-                "默认分区是「解压」"
+                rule_value_at(ui, "max_depth").is_some(),
+                "解压分区的高级层应显示防护上限"
+            );
+            assert!(
+                rule_value_at(ui, "archive_delete").is_none(),
+                "X-05/R-02：原包处置不得再是可配置项"
             );
             // 安全是两工具共享分区：递归解压视角不含 Hash 线程（reserve 属于高级层，先展开）
             ui.invoke_select_section(1);
-            ui.invoke_toggle_advanced(true);
             assert!(
                 rule_value_at(ui, "hash_workers").is_none(),
                 "Hash 线程属于目录整理"
@@ -2337,7 +2367,7 @@ mod gui_tests {
                 "默认分区是「去重」"
             );
             assert!(
-                rule_value_at(ui, "archive_delete").is_none(),
+                rule_value_at(ui, "nested_archives").is_none(),
                 "解压规则不得出现在目录整理面板"
             );
         })
@@ -2428,20 +2458,14 @@ mod gui_tests {
                 4,
                 "去重基础层：三个去重开关 + 保留规则"
             );
-            // conflict_delete 属于递归解压的「解压」分区高级层；目录整理任何分区都不出现。
+            // R-02：解压侧不再有冲突删除方式行；目录整理任何分区都不得出现解压专用项。
             ui.invoke_select_tool("recursive-extract".into());
             ui.invoke_select_section(0);
             ui.invoke_toggle_advanced(true);
             assert!(
-                rule_value_at(ui, "conflict_delete").is_some(),
-                "解压覆盖旧文件的删除方式在解压高级层"
-            );
-            ui.invoke_toggle_advanced(false);
-            ui.invoke_select_section(1);
-            ui.invoke_toggle_advanced(true);
-            assert!(
-                rule_value_at(ui, "conflict_delete").is_none(),
-                "安全分区不含解压覆盖删除方式行"
+                rule_value_at(ui, "conflict_delete").is_none()
+                    && rule_value_at(ui, "extract_conflict").is_none(),
+                "X-04/R-02：解压冲突处置已固定，解压面板不得再有冲突策略行"
             );
             ui.invoke_toggle_advanced(false);
             ui.invoke_select_tool("directory-organizer".into());
@@ -2705,9 +2729,10 @@ mod gui_tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
-    // 覆盖 X-02（解压一段确认：确认框必须就地解压去向、成功原包处置、失败去向与降级告知）
+    // 覆盖 X-02, X-03, X-04, X-05, X-06, H-07（解压一段确认：去向、原包与已有文件保留、
+    // 冲突自动改名保扩展名、失败去向；不得出现删除原包/覆盖/冲突策略授权）
     #[test]
-    fn extract_start_shows_single_confirmation_with_dispose_info() {
+    fn extract_confirmation_keeps_originals_without_delete_controls() {
         with_gui(|app| {
             let ui = &app.ui;
             ui.invoke_select_tool("recursive-extract".into());
@@ -2725,68 +2750,168 @@ mod gui_tests {
                 "就地解压去向（X-03）：{text}"
             );
             assert!(
-                text.contains("永久删除（不可恢复）"),
-                "成功原包默认处置（X-05/S-02：直接永久删除、不可恢复）：{text}"
+                text.contains("原压缩包与已有文件") && text.contains("保留"),
+                "X-05/H-07：确认框必须说明原包与已有文件均保留：{text}"
+            );
+            assert!(
+                text.contains("自动改文件名") && text.contains("扩展名"),
+                "X-04/H-07：冲突只为新解出的文件自动改名且保持扩展名：{text}"
             );
             assert!(
                 text.contains("「解压失败」"),
                 "失败原包去向（X-06）：{text}"
             );
-            assert!(
-                text.contains("删除一律为永久删除，不经回收站、不可由本软件恢复"),
-                "S-02：确认框必须明确告知删除不可恢复：{text}"
-            );
+            for forbidden in ["永久删除", "删除原包", "覆盖", "回收站", "冲突"] {
+                assert!(
+                    !text.contains(forbidden),
+                    "X-05/R-02：解压确认不得出现删除/覆盖/冲突策略授权（{forbidden}）：{text}"
+                );
+            }
             let _ = std::fs::remove_dir_all(&dir);
         })
         .unwrap();
     }
 
-    // 覆盖 U-03（总量未知不得编造百分比：百分比文本与不定光带的声明锁定）
+    // 覆盖 S-02, R-02, C-08（整理确认逐项如实告知删除后果：按当前开关与删除方式，解压处置不再出现）
     #[test]
-    fn progress_semantics_declared_in_ui() {
-        let slint = include_str!("../ui/app.slint");
+    fn organizer_warning_mentions_only_organizer_deletes() {
+        let warning = Config::default().destructive_warning();
         assert!(
-            slint.contains("if root.busy && root.progress >= 0: Text {"),
-            "U-03：百分比文本只应在总量已知（progress>=0）时显示"
+            warning.contains("重复文件") && warning.contains("永久删除"),
+            "整理确认必须告知重复文件的删除方式：{warning}"
+        );
+        for category in ["系统附属文件", "临时与备份文件", "零字节文件"] {
+            assert!(
+                warning.contains(category),
+                "C-08：整理确认必须逐项说明清理后果（{category}）：{warning}"
+            );
+        }
+        assert!(
+            warning.contains("空目录"),
+            "H-05/C-07：空目录清理不可关闭，必须如实告知：{warning}"
         );
         assert!(
-            slint.contains("running: root.progress < 0;"),
-            "U-03：总量未知时使用不定光带"
+            warning.contains("不可由本软件恢复"),
+            "S-02：必须明确告知永久删除不可恢复：{warning}"
         );
+        for forbidden in ["原压缩包", "解压覆盖", "解压冲突"] {
+            assert!(
+                !warning.contains(forbidden),
+                "R-02：解压侧的处置已固定，不得出现在整理确认里（{forbidden}）：{warning}"
+            );
+        }
+        // 关闭的清理项如实显示为「不清理」，而不是宣称会删除。
+        let config = Config {
+            clean_temp: false,
+            ..Config::default()
+        };
         assert!(
-            slint.contains(": \"正在处理，总量未知\""),
-            "U-03：无障碍标签如实声明总量未知"
+            config
+                .destructive_warning()
+                .contains("临时与备份文件：不清理"),
+            "关闭的清理类别不得宣称删除：{}",
+            config.destructive_warning()
         );
     }
 
-    // 覆盖 U-06（用户取消 MUST NOT 报成错误：取消走蓝条通知的声明锁定）
+    // 覆盖 X-04, X-05, R-02, R-03, C-08, S-04（规则表与配置只暴露合同允许的开关与默认值）
     #[test]
-    fn cancel_notice_not_error_declared_in_ui() {
-        let source = include_str!("gui.rs");
+    fn rules_and_config_expose_only_contracted_switches() {
+        let rows: Vec<serde_json::Value> =
+            serde_json::from_str(include_str!("../resources/rules.json")).unwrap();
+        let keys: Vec<&str> = rows.iter().filter_map(|row| row["key"].as_str()).collect();
+        let config = serde_json::to_value(Config::default()).unwrap();
+        // X-05/X-04/R-02：原包处置、冲突策略、冲突删除方式与嵌套解压开关不再存在。
+        for forbidden in [
+            "nested_archives",
+            "archive_delete",
+            "extract_conflict",
+            "conflict_delete",
+            "clean_empty_dirs",
+        ] {
+            assert!(
+                !keys.contains(&forbidden),
+                "R-02：规则表不得再有 {forbidden} 行（行为已固定）"
+            );
+            assert!(
+                config.get(forbidden).is_none(),
+                "R-02：配置不得再有 {forbidden} 字段"
+            );
+        }
+        // C-07/H-05：空目录清理不可关闭，因此不得再有总开关或统一删除方式行。
         assert!(
-            source.contains("ui.set_notice_text(error.into());"),
-            "U-06：取消必须走蓝条通知而不是红条错误"
+            !keys.contains(&"cleanup_delete"),
+            "C-08：清理删除方式必须按项独立，不得再有一个覆盖全部清理项的行"
         );
         assert!(
-            source.contains("任务已取消；已完成的操作不会自动回滚"),
-            "U-06：取消后的状态文案不得是错误口径"
+            config.get("cleanup_delete").is_none(),
+            "C-08：配置不得再有 cleanup_delete 字段"
         );
+        // C-08 六类独立开关：规则表保留且默认值逐项与合同一致。
+        for (key, expected) in [
+            ("clean_junk", true),
+            ("clean_temp", false),
+            ("clean_zero", false),
+            ("clean_copy_name", true),
+            ("normalize_names", true),
+            ("fix_extension", false),
+        ] {
+            assert!(keys.contains(&key), "C-08：规则表必须保留独立开关 {key}");
+            assert_eq!(
+                config[key].as_bool(),
+                Some(expected),
+                "C-08：{key} 的默认值必须为 {expected}"
+            );
+        }
+        // C-08：涉及删除的清理项各自独立覆盖删除方式，默认跟随全局文件删除方式。
+        for key in ["junk_delete", "temp_delete", "zero_delete"] {
+            assert!(keys.contains(&key), "C-08：{key} 必须以独立删除方式行暴露");
+            assert_eq!(
+                config[key].as_str(),
+                Some("global"),
+                "C-08：{key} 默认必须跟随全局文件删除方式"
+            );
+        }
+        // S-04/R-03：默认覆盖隐藏与系统属性资料，排除规则默认为空（不额外缩小范围）。
+        assert_eq!(config["include_hidden"].as_bool(), Some(true));
+        assert_eq!(config["include_system"].as_bool(), Some(true));
+        assert_eq!(config["exclusions"].as_str(), Some(""));
+        assert_eq!(config["recursive"].as_bool(), Some(true));
     }
 
-    // 覆盖 U-09（运行中关窗必须弹「停止任务并关闭」确认并拦截关闭）
+    // 覆盖 R-03, S-04（主动关闭递归或排除资料时明确提示范围缩小；恢复默认范围后提示消失）
     #[test]
-    fn busy_close_confirmation_declared_in_ui() {
-        let source = include_str!("gui.rs");
-        let slint = include_str!("../ui/app.slint");
-        assert!(
-            source.contains("if ui.get_busy(){"),
-            "U-09：运行中关窗必须先进确认分支"
-        );
-        assert!(
-            source.contains("CloseRequestResponse::KeepWindowShown"),
-            "U-09：未确认前窗口不得关闭"
-        );
-        assert!(slint.contains("停止任务并关闭"), "U-09：确认框标题");
+    fn narrowing_scope_shows_notice_and_restoring_clears_it() {
+        with_gui(|app| {
+            let ui = &app.ui;
+            ui.invoke_select_tool("recursive-extract".into());
+            assert_eq!(ui.get_notice_text().as_str(), "", "默认范围不提示缩小");
+            ui.invoke_rule_bool("recursive".into(), false);
+            assert!(
+                ui.get_notice_text().contains("已缩小处理范围"),
+                "R-03：关闭递归必须明确提示范围缩小：{}",
+                ui.get_notice_text()
+            );
+            assert!(
+                ui.get_notice_text().contains("子目录"),
+                "提示须说明只处理所选目录的直接子项：{}",
+                ui.get_notice_text()
+            );
+            ui.invoke_rule_bool("include_hidden".into(), false);
+            assert!(
+                ui.get_notice_text().contains("隐藏"),
+                "S-04：不包含隐藏资料同样要提示范围缩小：{}",
+                ui.get_notice_text()
+            );
+            ui.invoke_rule_bool("recursive".into(), true);
+            ui.invoke_rule_bool("include_hidden".into(), true);
+            assert_eq!(
+                ui.get_notice_text().as_str(),
+                "",
+                "恢复默认范围后不得残留缩小提示"
+            );
+        })
+        .unwrap();
     }
 
     // 覆盖 X-02, S-05（受保护目录在打开确认框之前就被拒绝，不得进入"清点中"占位态）
@@ -2812,19 +2937,6 @@ mod gui_tests {
             );
         })
         .unwrap();
-    }
-
-    // 覆盖 C-11（任务结束/取消后计划复选框不得再可点：只有"待执行"行且任务仍就绪才可勾选）
-    #[test]
-    fn plan_checkbox_gated_by_row_state_declared_in_ui() {
-        let slint = include_str!("../ui/app.slint");
-        assert!(
-            slint.contains(
-                "enabled: !root.busy && root.confirm-kind == 0 && item.state == \"待执行\" && root.plan-editable;"
-            ),
-            "C-11：计划复选框必须同时按行状态（待执行）与任务状态（plan-editable）门禁，\
-             取消/失败后残留的待执行行不得可点击必报错"
-        );
     }
 
     // 覆盖 C-11, C-01（另一工具失败/取消后切回整理：仍就绪的计划必须保持可勾选）

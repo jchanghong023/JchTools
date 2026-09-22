@@ -90,9 +90,12 @@ fn cleanup_candidates(job: &mut Job) -> Result<()> {
         for file in batch {
             job.context.control.checkpoint()?;
             cursor = file.id;
-            if let Some(reason) = rules::cleanup_reason(&file.rel, file.snapshot.size, &job.config)
+            if let Some((kind, reason)) =
+                rules::cleanup_reason(&file.rel, file.snapshot.size, &job.config)
             {
-                let mode = job.config.cleanup_delete.resolve(job.config.global_delete);
+                // C-08：三类清理各自独立覆盖删除方式，未覆盖时跟随全局文件删除方式。
+                let mode =
+                    rules::cleanup_delete(&job.config, kind).resolve(job.config.global_delete);
                 remove_candidate(job, &file, None, reason, mode, false)?;
             }
         }
@@ -144,7 +147,9 @@ fn deduplicate(job: &mut Job) -> Result<()> {
             };
             if let Some(keeper_id) = keeper_id {
                 let keeper = job.db.file(keeper_id)?;
-                if keeper.snapshot.identity == file.snapshot.identity {
+                // C-04：只有可靠标识 + 两侧链接数证明是同一物理文件时才跳过；标识退化
+                // （如 Windows 卷不提供索引）时不得据此跳过去重，也不得重复建链。
+                if rules::identity_proves_same_file(&keeper, &file) {
                     job.log(
                         "去重",
                         &file.rel,
@@ -196,9 +201,9 @@ fn deduplicate(job: &mut Job) -> Result<()> {
                         }
                     }
                 }
-                // 清理命中且 cleanup_delete=Keep 的文件由清理规则管辖（保留承诺）：
+                // 清理命中且该类清理的删除方式为「保留」的文件由清理规则管辖（保留承诺）：
                 // cleanup 阶段已让其保持 active，这里若无守卫，同组 keeper 先注册时它会按
-                // duplicate_delete 被删，结果随排序翻转（与下方冲突路径 145 行的防护同口径）。
+                // duplicate_delete 被删，结果随排序翻转。
                 if rules::cleanup_reason(&file.rel, file.snapshot.size, &job.config).is_some() {
                     job.log(
                         "去重",
@@ -215,7 +220,7 @@ fn deduplicate(job: &mut Job) -> Result<()> {
                     job.db.mark_cleanable(keeper_id)?;
                 }
             } else if rules::cleanup_reason(&file.rel, file.snapshot.size, &job.config).is_none() {
-                // 清理命中文件即使 cleanup_delete=Keep（remove_candidate 直接返回、文件仍 active=1）
+                // 清理命中文件即使该类的删除方式为「保留」（remove_candidate 直接返回、文件仍 active=1）
                 // 也不得进入 keepers 成为去重唯一保留者：否则正常副本反被删除，只留下垃圾文件。
                 job.db
                     .insert_keeper(file.id, hash, &file.name, &file.normalized)?;
@@ -330,6 +335,14 @@ fn target_will_be_free(job: &Job, path: &Path, rel: &str, source_rel: &str) -> R
 )]
 fn moves(job: &mut Job) -> Result<()> {
     let categories = rules::parse_categories(&job.config.custom_categories)?;
+    // H-06：引擎在扫描事务里把每个被剪枝的 Git 根（直接含 .git 的目录）写进会话临时表
+    // git_roots；被剪枝的目录不在 directories 表里，只有它能回答「目标是否落在 Git 树内」。
+    // 表由同一次扫描建立：缺失属真实错误，不做静默兜底。
+    let git_roots: Vec<String> = {
+        let mut statement = job.db.conn.prepare("SELECT rel FROM git_roots")?;
+        let rows = statement.query_map([], |row| row.get::<_, String>(0))?;
+        rows.collect::<rusqlite::Result<Vec<_>>>()?
+    };
     let mut cursor = 0;
     loop {
         let batch = job.db.files(
@@ -370,30 +383,10 @@ fn moves(job: &mut Job) -> Result<()> {
                                 .and_then(|v| v.to_str())
                                 .unwrap_or("")
                                 .to_lowercase();
-                            // 容器类识别结果（zip/gz/…）只说明外层容器，不含更精确的格式信息；
-                            // OOXML 变体（docm/dotx/ppsx…）与包格式（jar/apk/epub…）同样只会被
-                            // 识别成容器或同容器基础类型。据此改名等于把正确扩展名改错
-                            //（C-08 只修正「错误」扩展名）。
-                            let detected_container = [
-                                "zip", "gz", "bz2", "xz", "zst", "tar", "7z", "rar", "cab", "iso",
-                                "wim", "lz", "lzma", "cpio", "lzh",
-                            ]
-                            .contains(&kind.extension());
-                            let compound = [
-                                "docx", "docm", "dotx", "dotm", "xlsx", "xlsm", "xltx", "xltm",
-                                "xlsb", "pptx", "pptm", "potx", "potm", "ppsx", "ppsm", "epub",
-                                "odt", "ods", "odp", "jar", "apk",
-                            ]
-                            .contains(&old.as_str());
-                            // 同义别名（jpeg/jpe/jfif→jpg、tiff→tif、htm→html、mid→midi）
-                            // 同样是正确扩展名。
-                            let equivalent = old == kind.extension()
-                                || (matches!(old.as_str(), "jpeg" | "jpe" | "jfif")
-                                    && kind.extension() == "jpg")
-                                || (old == "tiff" && kind.extension() == "tif")
-                                || (old == "htm" && kind.extension() == "html")
-                                || (old == "mid" && kind.extension() == "midi");
-                            if !equivalent && !compound && !detected_container {
+                            // C-08 的保守判定集中在 rules::extension_needs_fix：
+                            // 容器类识别结果只说明外层容器，OOXML/ODF 等家族的专用扩展名与
+                            // 同义别名都不得按更粗的识别结果改名。
+                            if rules::extension_needs_fix(&old, kind.extension()) {
                                 job.log(
                                     "类型检测",
                                     &file.rel,
@@ -489,13 +482,19 @@ fn moves(job: &mut Job) -> Result<()> {
                     }
                     // 空 output_dir：分类目录直接建在选定根下；已在该分类目录下的文件不再套一层。
                     // label 可能是多段路径（如日期归类的 2024/03），必须整段前缀比较而不是只比首段。
-                    let already = output_dir.is_empty() && under_path(original, &label);
+                    // 合并/扁平调整后的父目录同样参与判定：合并把文件带进同名的分类目录
+                    // （如 other/图片/photo.png → 图片/）时就地归类，绝不写成 图片/图片/…，
+                    // 否则分类目录会嵌套自身，跨轮往复移动破坏幂等（C-05/C-06/C-10）。
+                    let already = output_dir.is_empty()
+                        && (under_path(original, &label) || under_path(&parent, &label));
                     if already {
-                        // 已在分类目录内的文件必须稳定：flatten/merge 作用在原始父目录上，
-                        // 可能把恰好只剩一个文件的分类目录整层抽掉，导致 desired 落到分类目录
-                        // 之外——下一轮又归回来，跨轮往复移动破坏幂等（C-05/C-10）。
-                        // 归位到原始父目录：改名类调整（规范化/扩展名修正）照常生效，位置不动。
-                        parent = original.parent().unwrap_or(Path::new("")).to_path_buf();
+                        // 已在分类目录内的文件必须稳定：flatten 可能把恰好只剩一个文件的
+                        // 分类目录整层抽到分类目录之外（parent 不再位于 label 之下），
+                        // 此时归位到原始父目录：改名类调整（规范化/扩展名修正）照常生效，位置不动。
+                        // 合并后的 parent 仍位于 label 之下时保留合并结果，让合并真正生效。
+                        if !under_path(&parent, &label) {
+                            parent = original.parent().unwrap_or(Path::new("")).to_path_buf();
+                        }
                     } else {
                         parent = if job.config.preserve_structure {
                             if output_dir.is_empty() {
@@ -518,6 +517,24 @@ fn moves(job: &mut Job) -> Result<()> {
                 continue;
             }
             if desired_rel == file.rel {
+                continue;
+            }
+            // H-06：Git 目录树整树排除，且不得通过移动/改名间接改变它。分类目录、输出目录
+            // 或合并目标可能与既有 Git 工作树同名（Git 树不在 directories 表里，无法靠库内
+            // 行判断），引擎在扫描事务里把每个被剪枝的 Git 根记进 git_roots，这里逐项比对：
+            // 目标目录位于任一 Git 根之下即跳过该项并留日志，绝不写入该树。
+            if let Some(git_root) = git_roots.iter().find(|root| {
+                let target_dir = desired.parent().unwrap_or(Path::new(""));
+                under_path(target_dir, Path::new(root.as_str()))
+            }) {
+                job.log(
+                    "归类",
+                    &file.rel,
+                    "",
+                    "跳过",
+                    &format!("目标目录位于 Git 目录树（{git_root}）内，已跳过"),
+                    0,
+                )?;
                 continue;
             }
             // 目标路径含链接（典型：与分类目录同名的 junction/符号链接）时跳过本文件：
@@ -545,21 +562,20 @@ fn moves(job: &mut Job) -> Result<()> {
                 let mut skip_move = false;
                 loop {
                     job.context.control.checkpoint()?;
-                    let stem = requested
-                        .file_stem()
+                    // 主体/扩展名切分与 unique_target、strip_copy_name 同一口径：序号插在
+                    // 完整扩展名之前（资料.tar.gz → 资料 (1).tar.gz），不得拆散 .tar.* 与
+                    // 编号分卷 .7z.001（H-07）。借用原串，不额外分配。
+                    let name = requested
+                        .file_name()
                         .and_then(|s| s.to_str())
                         .context("目标文件名无效")?;
-                    let suffix = requested
-                        .extension()
-                        .and_then(|s| s.to_str())
-                        .map(|s| format!(".{s}"))
-                        .unwrap_or_default();
+                    let (stem, suffix) = fsutil::split_compound_name(name);
                     // 基础名接近 255 个 UTF-16 单元时，后缀候选名超限会让整次归类失败；
                     // suffixed_candidate 负责截断 stem 保持组件合法。
                     target = requested
                         .parent()
                         .context("目标缺少目录")?
-                        .join(fsutil::suffixed_candidate(stem, &suffix, index));
+                        .join(fsutil::suffixed_candidate(stem, suffix, index));
                     let rel = fsutil::relative_string(&job.root, &target)?;
                     if let Err(error) = fsutil::safe_join(&job.root, &rel) {
                         // 候选名落在链接上（含既有链接文件占名）：换下一个候选名，不整次失败。
@@ -613,10 +629,13 @@ fn moves(job: &mut Job) -> Result<()> {
     tracing::instrument(target = "perf", name = "plan_empty_dirs", skip_all)
 )]
 fn empty_directories(job: &mut Job) -> Result<()> {
-    let mode = job.config.cleanup_delete.resolve(job.config.global_delete);
-    if !job.config.clean_empty_dirs || mode == DeleteMode::Keep {
+    // C-07/H-05：空目录清理是强制步骤——没有开关，也不受文件删除方式（全局或按类别覆盖）
+    // 影响；删除对象只可能是执行期复查后实际为空的目录，不涉及任何文件内容。
+    // 递归关闭时子目录内容未知（扫描未下钻），不得据库内条目判定为空目录。
+    if !job.config.recursive {
         return Ok(());
     }
+    let mode = DeleteMode::Permanent;
     // 自底向上推算：只把“计划执行后仍会为空”的目录写进计划。
     // 目录为空 = 其下没有会留在原地的文件，且其子目录也都为空。
     // 「会留在原地」= 磁盘上仍会存在：没有选中的删除/移动。分卷源、失败包等 protected 文件

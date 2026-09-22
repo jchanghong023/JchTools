@@ -1,5 +1,5 @@
 use crate::{
-    config::{Config, KeepPolicy},
+    config::{Config, DeleteChoice, KeepPolicy},
     fsutil,
     model::FileRecord,
 };
@@ -50,9 +50,11 @@ pub fn strip_copy_name(name: &str) -> String {
         // 常量正则语法错误只可能是开发期笔误，按不可达处理
         Err(_) => unreachable!("constant regex"),
     });
-    let path = Path::new(name);
-    let original = path.file_stem().and_then(|s| s.to_str()).unwrap_or(name);
-    let mut stem = original.to_string();
+    // 副本后缀贴在文件名主体之后、整个扩展名之前：复合扩展名（.tar.gz）与编号分卷
+    // （.7z.001）必须整体保留（H-07 例：资料.tar.gz → 资料 (1).tar.gz），
+    // 因此主体/扩展名切分与 fsutil::unique_target 共用同一口径。
+    let (stem, extension) = fsutil::split_compound_name(name);
+    let mut stem = stem.to_string();
     loop {
         let next = expression.replace(&stem, "").trim().to_string();
         if next.is_empty() || next == stem {
@@ -60,10 +62,7 @@ pub fn strip_copy_name(name: &str) -> String {
         }
         stem = next;
     }
-    match path.extension().and_then(|s| s.to_str()) {
-        Some(ext) => format!("{stem}.{ext}"),
-        None => stem,
-    }
+    format!("{stem}{extension}")
 }
 pub fn normal_name(name: &str) -> String {
     strip_copy_name(name)
@@ -117,6 +116,81 @@ pub fn ordering_sql(policy: KeepPolicy) -> &'static str {
         KeepPolicy::ShortestName => "length(name),length(rel),rel",
     }
 }
+/// C-04：可靠文件标识是否证明两个目录项指向同一物理文件。
+/// 条件：标识相同、两侧链接数 >= 2（两个目录项必然抬高链接数）、且标识未退化。
+/// Windows 的「卷:索引高:索引低」在部分文件系统上索引恒为 0，无法区分不同文件
+/// （与 C-13 的 hash_cache 同口径）；退化时不得据此跳过重复处理或重复建链。
+/// Unix 的「设备:inode」两段结构本身就唯一标识文件，不套用该三段口径。
+pub fn identity_proves_same_file(a: &FileRecord, b: &FileRecord) -> bool {
+    a.snapshot.identity == b.snapshot.identity
+        && a.snapshot.links >= 2
+        && b.snapshot.links >= 2
+        && !(cfg!(windows) && crate::hash_cache::identity_is_degenerate(&a.snapshot.identity))
+}
+/// C-08：按内容签名修正错误扩展名的保守判定。true = 旧扩展名确实错误、可以改名。
+/// 签名不足以确定实际类型（只识别到外层容器/存储）、旧扩展名属于同一容器家族的更具体
+/// 格式、或旧扩展名本就是同义写法时一律不改名；合法的同义扩展名不强制统一。
+pub fn extension_needs_fix(old: &str, detected: &str) -> bool {
+    !equivalent_extension(old, detected)
+        && !specialized_extension(old)
+        && !outer_container_extension(detected)
+}
+/// 同义扩展名（同一格式的常见写法），不算错误扩展名。
+fn equivalent_extension(old: &str, detected: &str) -> bool {
+    old == detected
+        || (matches!(old, "jpeg" | "jpe" | "jfif") && detected == "jpg")
+        || (old == "tiff" && detected == "tif")
+        || (old == "htm" && detected == "html")
+        || (old == "mid" && detected == "midi")
+}
+/// 识别结果只说明外层容器/存储，不含更具体的格式信息：压缩包与 OLE 存储
+/// （doc/xls/ppt/msi/vsd 等都只会被识别成同一个 OLE 存储类型）都属此类。
+/// 通用压缩后缀与 `archive_name` 保持同口径，另加 OLE 存储（infer 报 msi）。
+fn outer_container_extension(ext: &str) -> bool {
+    matches!(
+        ext,
+        "zip"
+            | "gz"
+            | "bz2"
+            | "xz"
+            | "zst"
+            | "tar"
+            | "7z"
+            | "rar"
+            | "cab"
+            | "iso"
+            | "wim"
+            | "lz"
+            | "lzma"
+            | "cpio"
+            | "lzh"
+            | "msi"
+    )
+}
+/// 旧扩展名是该容器家族里的更具体格式，识别结果粒度更粗（infer 对 OOXML 变体
+/// 只报 docx/xlsx/pptx 基础类型）：按更粗的结果改名会把正确的专用扩展名改错。
+fn specialized_extension(ext: &str) -> bool {
+    matches!(
+        ext,
+        "docm"
+            | "dotx"
+            | "dotm"
+            | "xlsm"
+            | "xltx"
+            | "xltm"
+            | "xlsb"
+            | "potx"
+            | "potm"
+            | "ppsx"
+            | "ppsm"
+            | "epub"
+            | "odt"
+            | "ods"
+            | "odp"
+            | "jar"
+            | "apk"
+    )
+}
 pub fn category(extension: &str) -> &'static str {
     match extension {
         "pdf" | "doc" | "docx" | "xls" | "xlsx" | "ppt" | "pptx" | "txt" | "md" | "csv" | "rtf"
@@ -132,14 +206,23 @@ pub fn category(extension: &str) -> &'static str {
         _ => "其他",
     }
 }
-pub fn cleanup_reason(rel: &str, size: u64, cfg: &Config) -> Option<&'static str> {
+/// 清理项类别（C-08）：三类清理各自独立启停，并可独立覆盖删除方式。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CleanupKind {
+    Junk,
+    Temp,
+    Zero,
+}
+/// C-08：清理命中判定与类别。返回 None 表示不清理。
+/// planner 按类别解析删除方式（[`cleanup_delete`]），不得比较原因文案。
+pub fn cleanup_reason(rel: &str, size: u64, cfg: &Config) -> Option<(CleanupKind, &'static str)> {
     let file = Path::new(rel).file_name()?.to_str()?.to_lowercase();
     if cfg.clean_junk
         && (["thumbs.db", ".ds_store", "desktop.ini"].contains(&file.as_str())
             || file.starts_with("._")
             || rel.split('/').any(|s| s.eq_ignore_ascii_case("__MACOSX")))
     {
-        return Some("用户开启的垃圾文件规则");
+        return Some((CleanupKind::Junk, "用户开启的垃圾文件规则"));
     }
     if cfg.clean_temp
         && (has_ext(&file, "tmp")
@@ -147,12 +230,20 @@ pub fn cleanup_reason(rel: &str, size: u64, cfg: &Config) -> Option<&'static str
             || has_ext(&file, "bak")
             || file.starts_with("~$"))
     {
-        return Some("用户开启的临时/备份文件规则");
+        return Some((CleanupKind::Temp, "用户开启的临时/备份文件规则"));
     }
     if cfg.clean_zero && size == 0 {
-        return Some("用户开启的零字节文件规则");
+        return Some((CleanupKind::Zero, "用户开启的零字节文件规则"));
     }
     None
+}
+/// C-08：清理项的删除方式覆盖（默认跟随全局文件删除方式）。
+pub fn cleanup_delete(cfg: &Config, kind: CleanupKind) -> DeleteChoice {
+    match kind {
+        CleanupKind::Junk => cfg.junk_delete,
+        CleanupKind::Temp => cfg.temp_delete,
+        CleanupKind::Zero => cfg.zero_delete,
+    }
 }
 /// 扩展名等值判断：按最后一个点切分比较尾段，等价于 `ends_with(".ext")`
 /// （输入已预先 lowercase，无大小写歧义）。rsplit_once 按字符边界切分，不会 panic。
@@ -221,6 +312,165 @@ mod tests {
             (true, _) => cfg.dedup_same_name,
             (false, true) => cfg.dedup_copy_names,
             (false, false) => cfg.dedup_other_names,
+        }
+    }
+
+    // 覆盖 C-04（同一物理文件判定：标识必须可靠，且链接数证明存在第二个目录项）
+    #[test]
+    fn identity_proves_same_file_requires_reliable_identity() {
+        let pair = |identity: &str, links: u64| {
+            let mut a = record(1, "a.txt", "a.txt");
+            a.snapshot.identity = identity.into();
+            a.snapshot.links = links;
+            let mut b = record(2, "b.txt", "b.txt");
+            b.snapshot.identity = identity.into();
+            b.snapshot.links = links;
+            (a, b)
+        };
+        // 真实硬链接：两侧标识相同且编号可靠、链接数 >= 2 → 证明同一物理文件。
+        let reliable = if cfg!(windows) { "12:34:56" } else { "2049:99" };
+        let (a, b) = pair(reliable, 2);
+        assert!(
+            identity_proves_same_file(&a, &b),
+            "可靠标识 + 两个目录项必须判定为同一物理文件"
+        );
+        let (a, b) = pair(reliable, 3);
+        assert!(identity_proves_same_file(&a, &b));
+        // 标识相同但链接数只有 1：两个目录项不可能指向同一物理文件，不得据此跳过去重。
+        let (a, b) = pair(reliable, 1);
+        assert!(
+            !identity_proves_same_file(&a, &b),
+            "链接数不足以证明同一物理文件"
+        );
+        // 标识不同：不是同一物理文件。
+        let (mut a, b) = pair(reliable, 2);
+        a.snapshot.identity = "99:88:77".into();
+        assert!(!identity_proves_same_file(&a, &b));
+        // Windows 上部分文件系统索引恒为 0（hash_cache::identity_is_degenerate 同口径）：
+        // 该标识无法区分不同文件，退化时不得作为跳过依据（C-04）。
+        #[cfg(windows)]
+        {
+            let (a, b) = pair("12:0:0", 2);
+            assert!(
+                !identity_proves_same_file(&a, &b),
+                "退化标识不得证明同一物理文件"
+            );
+        }
+    }
+
+    // 覆盖 C-08（三类清理的识别与类别归属：planner 按类别解析删除方式，不比较中文原因串）
+    #[test]
+    fn cleanup_reason_reports_category() {
+        let cfg = Config {
+            clean_temp: true,
+            clean_zero: true,
+            ..Config::default()
+        };
+        assert_eq!(
+            cleanup_reason("a/Thumbs.db", 1, &cfg).map(|(kind, _)| kind),
+            Some(CleanupKind::Junk)
+        );
+        assert_eq!(
+            cleanup_reason("a/__MACOSX/x", 1, &cfg).map(|(kind, _)| kind),
+            Some(CleanupKind::Junk)
+        );
+        assert_eq!(
+            cleanup_reason("a/x.tmp", 1, &cfg).map(|(kind, _)| kind),
+            Some(CleanupKind::Temp)
+        );
+        assert_eq!(
+            cleanup_reason("a/~$x.docx", 1, &cfg).map(|(kind, _)| kind),
+            Some(CleanupKind::Temp)
+        );
+        assert_eq!(
+            cleanup_reason("a/zero.dat", 0, &cfg).map(|(kind, _)| kind),
+            Some(CleanupKind::Zero)
+        );
+        assert_eq!(
+            cleanup_reason("a/keep.txt", 5, &cfg),
+            None,
+            "普通文件不清理"
+        );
+    }
+
+    // 覆盖 C-08（扩展名修正的保守口径：别名与容器识别都不得触发改名）
+    #[test]
+    fn extension_fix_is_conservative() {
+        for (old, detected) in [
+            ("jpg", "jpg"),
+            ("jpeg", "jpg"),
+            ("jpe", "jpg"),
+            ("jfif", "jpg"),
+            ("tif", "tif"),
+            ("tiff", "tif"),
+            ("htm", "html"),
+            ("html", "html"),
+            ("mid", "midi"),
+            ("midi", "midi"),
+        ] {
+            assert!(
+                !extension_needs_fix(old, detected),
+                "{old} -> {detected} 是同义扩展名，不得强制统一"
+            );
+        }
+        // 复合/包格式：更粗的识别结果不得把专用扩展名改粗（C-08 例：Office ZIP 容器）。
+        for old in [
+            "docm", "dotx", "dotm", "xlsm", "xltm", "xlsb", "potx", "ppsx", "ppsm", "epub", "odt",
+            "ods", "odp", "jar", "apk",
+        ] {
+            for detected in ["zip", "docx", "xlsx", "pptx"] {
+                assert!(
+                    !extension_needs_fix(old, detected),
+                    "{old} 的相对具体扩展名不得按 {detected} 改粗"
+                );
+            }
+        }
+        // 包装格式（压缩流内层未知，如 svgz/tgz）识别到容器后缀时同样不是错误扩展名。
+        for (old, detected) in [("svgz", "gz"), ("tgz", "gz"), ("tbz2", "bz2")] {
+            assert!(
+                !extension_needs_fix(old, detected),
+                "{old} 不得按外层容器 {detected} 改名"
+            );
+        }
+        // 容器识别只说明外层容器（OLE 存储同样只会被识别成 msi）：不得据此改成压缩包/安装包后缀。
+        for detected in [
+            "zip", "gz", "bz2", "xz", "zst", "tar", "7z", "rar", "cab", "iso", "wim", "lz", "lzma",
+            "cpio", "lzh", "msi",
+        ] {
+            assert!(
+                !extension_needs_fix("bin", detected),
+                "容器识别 {detected} 不得直接作为改名依据"
+            );
+        }
+        // 明确的错误扩展名仍必须修正（默认关闭，开启后列入计划）。
+        for (old, detected) in [
+            ("txt", "png"),
+            ("bin", "pdf"),
+            ("jpg", "png"),
+            ("mp4", "mp3"),
+        ] {
+            assert!(
+                extension_needs_fix(old, detected),
+                "{old} -> {detected} 是错误扩展名，应修正"
+            );
+        }
+    }
+
+    // 覆盖 C-08, H-07（副本后缀识别：复合扩展名与编号分卷整体保留，序号插在扩展名之前）
+    #[test]
+    fn strip_copy_name_keeps_compound_extensions() {
+        for (input, expected) in [
+            ("资料 (1).tar.gz", "资料.tar.gz"),
+            ("资料 - Copy.tar.bz2", "资料.tar.bz2"),
+            ("资料 副本.tar.xz", "资料.tar.xz"),
+            ("报告 (2).docx", "报告.docx"),
+            ("报告副本.pdf", "报告.pdf"),
+            ("report.final (1).txt", "report.final.txt"),
+            ("(1).pdf", "(1).pdf"),
+            ("资料.tar.gz", "资料.tar.gz"),
+            ("包.7z.001", "包.7z.001"),
+        ] {
+            assert_eq!(strip_copy_name(input), expected, "{input}");
         }
     }
 

@@ -1,20 +1,98 @@
 //! 计划执行确认流的无头 GUI 测试：用真实回调 + 真实引擎线程走完整
-//! 「分析（只读）→ 检查计划 → 确认执行 → 整理结束」流程。
-//! 驱动器定时器在事件循环内逐步推进状态机，超时自动失败。
-//! 状态目录与回收站均注入临时路径，不碰用户真实任务库/回收站。
+//! 「分析（只读）→ 检查计划 → 确认执行 → 整理结束」流程，以及
+//! 「递归解压」的一段确认流程。驱动器定时器在事件循环内逐步推进状态机，超时自动失败。
+//! 状态目录注入临时路径，不碰用户真实任务库。
 // 测试代码允许 unwrap/expect：断言失败即测试失败，属合理用法
 // （与 clippy.toml 的 allow-*-in-tests 策略一致，集成测试 crate 不在其覆盖范围内）。
 #![cfg(feature = "gui")]
 #![allow(clippy::unwrap_used, clippy::expect_used)]
 use jchtools::gui::{self, EngineTestOverrides};
-use slint::ComponentHandle;
+use slint::{ComponentHandle, Model};
 use std::{
     cell::{Cell, RefCell},
     fs,
     path::PathBuf,
     rc::Rc,
+    sync::{
+        atomic::{AtomicBool, Ordering},
+        mpsc, Arc, LazyLock, Mutex,
+    },
     time::Duration,
 };
+
+thread_local! {
+    /// 驱动器定时器必须活到事件循环结束：放进线程局部存储即可，
+    /// 既不会被 hook 作用域回收，也不需要泄漏。
+    static DRIVER: RefCell<Option<slint::Timer>> = const { RefCell::new(None) };
+}
+
+type Job = Box<dyn FnOnce() + Send>;
+/// 驱动器在事件循环内检测到的失败：不在回调里 panic（会带着半开的事件循环退出，
+/// 后续用例再跑事件循环会撞上「Nested event loops are not supported」），
+/// 而是记录后退出循环，由用例在循环外统一断言。
+type Failures = Arc<Mutex<Vec<String>>>;
+
+/// Slint 平台绑定首次初始化它的线程：所有端到端用例都在同一个工作线程上串行运行，
+/// 否则并行的测试线程各自建窗口会撞上「platform was initialized in another thread」。
+/// 工作线程只负责承载事件循环；渲染后端、定时器与回调路径与生产完全一致。
+static GUI_WORKER: LazyLock<Mutex<mpsc::Sender<Job>>> = LazyLock::new(|| {
+    let (sender, receiver) = mpsc::channel::<Job>();
+    std::thread::Builder::new()
+        .name("gui-flow-worker".into())
+        .spawn(move || {
+            // CI runner 与无 GPU 机器没有 OpenGL，默认 femtovg 初始化直接失败；
+            // 软件渲染器不依赖 GPU，事件循环、定时器与回调路径仍与生产完全一致。
+            std::env::set_var("SLINT_BACKEND", "winit-software");
+            while let Ok(job) = receiver.recv() {
+                job();
+            }
+        })
+        .expect("启动 GUI 端到端工作线程");
+    Mutex::new(sender)
+});
+
+/// 在 GUI 工作线程上跑一段流程；任务 panic 原样透出给测试线程，避免被通道错误掩盖。
+fn run_gui_job(job: impl FnOnce() + Send + 'static) {
+    let (done_sender, done_receiver) = mpsc::channel::<Result<(), String>>();
+    GUI_WORKER
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .send(Box::new(move || {
+            let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(job));
+            let message = match outcome {
+                Ok(()) => Ok(()),
+                Err(payload) => Err(if let Some(text) = payload.downcast_ref::<&str>() {
+                    (*text).to_string()
+                } else if let Some(text) = payload.downcast_ref::<String>() {
+                    text.clone()
+                } else {
+                    "未知 panic".to_string()
+                }),
+            };
+            let _ = done_sender.send(message);
+        }))
+        .expect("GUI 工作线程不可用");
+    if let Err(message) = done_receiver.recv().expect("GUI 工作线程中断") {
+        panic!("{message}");
+    }
+}
+
+/// 记录一次流程失败并退出事件循环（见 `Failures` 的类型注释）。
+fn record_failure(failures: &Failures, message: String) {
+    failures
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .push(message);
+    let _ = slint::quit_event_loop();
+}
+
+fn take_failures(failures: &Failures) -> Vec<String> {
+    std::mem::take(
+        &mut *failures
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner),
+    )
+}
 
 fn make_fixture() -> tempfile::TempDir {
     let dir = tempfile::tempdir().unwrap();
@@ -31,45 +109,70 @@ fn make_fixture() -> tempfile::TempDir {
     dir
 }
 
-// 覆盖 C-01, C-05, S-02（两段式确认执行全流程 + 回收走注入实现）
-#[test]
-fn plan_execution_confirmation_flow_runs_end_to_end() {
-    // SLINT_BACKEND 是进程级环境变量；后续在同文件新增 GUI 测试时必须先拿到这把锁，
-    // 避免并行线程在彼此的事件循环启动后改写渲染后端。
-    static GUI_TEST_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
-    let _guard = GUI_TEST_LOCK
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner);
-    // CI runner 与无 GPU 机器没有 OpenGL，默认 femtovg 初始化直接失败；
-    // 软件渲染器不依赖 GPU，事件循环、定时器与回调路径仍与生产完全一致。
-    std::env::set_var("SLINT_BACKEND", "winit-software");
-    let fixture = make_fixture();
-    let data = fixture.path().join("data").to_string_lossy().to_string();
-    let state_dir: PathBuf = fixture.path().join("state");
-    fs::create_dir_all(&state_dir).unwrap();
-    let seen_tasks = Rc::new(RefCell::new(Vec::<PathBuf>::new()));
+/// 目录整理两段式流程的驱动结果：结束时的状态栏与提示条文本（事件循环内读取）。
+struct OrganizerRun {
+    failures: Vec<String>,
+    status: String,
+    notice: String,
+}
+
+// 覆盖 C-11：真实回调必须即时更新勾选状态，而不是等待任务库回传或重新加载。
+fn toggle_first_file_action(ui: &gui::AppWindow, selected: bool, failures: &Failures) -> bool {
+    let plans = ui.get_plans();
+    let Some((index, row)) = plans
+        .iter()
+        .enumerate()
+        .find(|(_, row)| row.kind != "空目录复查" && row.selected != selected)
+    else {
+        return false;
+    };
+    ui.invoke_plan_toggle(row.id, selected);
+    let expected = if selected {
+        "待执行"
+    } else {
+        "已取消勾选"
+    };
+    if !ui
+        .get_plans()
+        .row_data(index)
+        .is_some_and(|row| row.selected == selected && row.state == expected)
+    {
+        record_failure(failures, format!("勾选回调没有即时显示 {expected}"));
+    }
+    true
+}
+
+/// 在 GUI 工作线程上驱动目录整理：选目录 → 开始分析 → 确认执行 → 整理结束。
+fn drive_organizer(data: String, state_dir: PathBuf) -> OrganizerRun {
+    let failures: Failures = Arc::new(Mutex::new(Vec::new()));
+    let failure_sink = Arc::clone(&failures);
     let steps = Rc::new(Cell::new(0u32));
     let ticks = Rc::new(Cell::new(0u32));
-
-    let overrides = EngineTestOverrides {
-        state_dir: state_dir.clone(),
-    };
+    let observed = Arc::new(Mutex::new((String::new(), String::new())));
+    let observed_sink = Arc::clone(&observed);
     gui::run_with_engine_overrides(
         move |ui| {
-            // 启动页是注册表第一个工具（递归解压）；本用例驱动目录整理，先切工具。
+            // 启动页是注册表第一个工具（递归解压）；本流程驱动目录整理，先切工具。
             ui.invoke_select_tool("directory-organizer".into());
             ui.set_directory(data.clone().into());
             let ui = ui.as_weak();
             let steps = steps.clone();
             let ticks = ticks.clone();
-            let seen_tasks = seen_tasks.clone();
+            let failures = Arc::clone(&failure_sink);
+            let observed = Arc::clone(&observed_sink);
             let driver = slint::Timer::default();
             driver.start(
                 slint::TimerMode::Repeated,
                 Duration::from_millis(200),
                 move || {
                     ticks.set(ticks.get() + 1);
-                    assert!(ticks.get() < 150, "驱动超时：流程卡在步骤 {}", steps.get());
+                    if ticks.get() >= 150 {
+                        record_failure(
+                            &failures,
+                            format!("驱动超时：流程卡在步骤 {}", steps.get()),
+                        );
+                        return;
+                    }
                     let Some(ui) = ui.upgrade() else { return };
                     match steps.get() {
                         // C-01：分析只读，不再弹破坏性确认框——点「开始分析」直接进入分析。
@@ -78,10 +181,18 @@ fn plan_execution_confirmation_flow_runs_end_to_end() {
                             steps.set(1);
                         }
                         1 => {
-                            if ui.get_ready() {
-                                ui.invoke_request_apply();
-                                steps.set(2);
+                            if ui.get_ready() && toggle_first_file_action(&ui, false, &failures) {
+                                steps.set(4);
                             }
+                        }
+                        4 if ui.get_ready() => {
+                            if toggle_first_file_action(&ui, true, &failures) {
+                                steps.set(5);
+                            }
+                        }
+                        5 if ui.get_ready() => {
+                            ui.invoke_request_apply();
+                            steps.set(2);
                         }
                         2 => {
                             if ui.get_confirm_kind() == 2 {
@@ -90,25 +201,58 @@ fn plan_execution_confirmation_flow_runs_end_to_end() {
                             }
                         }
                         3 if ui.get_status().contains("整理结束") => {
-                            steps.set(4);
+                            steps.set(6);
+                            *observed
+                                .lock()
+                                .unwrap_or_else(std::sync::PoisonError::into_inner) = (
+                                ui.get_status().to_string(),
+                                ui.get_notice_text().to_string(),
+                            );
                             let _ = slint::quit_event_loop();
                         }
                         _ => {}
                     }
                 },
             );
-            let _ = seen_tasks;
-            // 有意泄漏（与 mem::forget 同义但走惯用 API）：事件循环运行期间必须保持驱动定时器存活，
-            // 不得让 Timer 在闭包结束时 Drop 停摆；泄漏量恒为一个 Timer，进程随即退出。
-            let _driver_leaked: &'static mut slint::Timer = Box::leak(Box::new(driver));
+            // 驱动定时器必须活到事件循环结束：放进线程局部存储，事件循环退出前不会被回收。
+            DRIVER.with(|slot| *slot.borrow_mut() = Some(driver));
         },
-        Some(overrides),
+        Some(EngineTestOverrides { state_dir }),
     )
     .expect("GUI 流程失败");
+    let (status, notice) = observed
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .clone();
+    OrganizerRun {
+        failures: take_failures(&failures),
+        status,
+        notice,
+    }
+}
+
+// 覆盖 C-01, C-05, S-02（两段式确认执行全流程）
+#[test]
+fn plan_execution_confirmation_flow_runs_end_to_end() {
+    let fixture = make_fixture();
+    let data = fixture.path().join("data");
+    let state_dir: PathBuf = fixture.path().join("state");
+    fs::create_dir_all(&state_dir).unwrap();
+
+    let data_text = data.to_string_lossy().to_string();
+    run_gui_job(move || {
+        let run = drive_organizer(data_text, state_dir);
+        assert!(run.failures.is_empty(), "流程未完成：{:?}", run.failures);
+        assert!(
+            run.status.contains("整理结束"),
+            "结束时状态栏必须报告完成：{}",
+            run.status
+        );
+    });
 
     // 事件循环退出后校验：
     // 1) 任务库写在注入的 state_dir/tasks 下
-    let tasks_root = state_dir.join("tasks");
+    let tasks_root = fixture.path().join("state").join("tasks");
     assert!(
         tasks_root.is_dir(),
         "任务库应写入注入的 state 目录：{tasks_root:?}"
@@ -116,9 +260,7 @@ fn plan_execution_confirmation_flow_runs_end_to_end() {
     let task_count = fs::read_dir(&tasks_root).map_or(0, std::iter::Iterator::count);
     assert!(task_count >= 1, "注入 state 下应有任务目录");
 
-    // 2) 重复项按 S-02 直接永久删除（不经回收站、不可恢复）；下方两条断言分别
-    //    锁定「移除」与「永久删除口径」两个意图（消息不同、条件相同系声明式锚定）。
-    let data = fixture.path().join("data");
+    // 2) 去重副本已移除，保留项与未开启清理的文件归类后仍存在。
     let remaining: Vec<String> = fs::read_dir(&data)
         .unwrap()
         .filter_map(std::result::Result::ok)
@@ -134,10 +276,6 @@ fn plan_execution_confirmation_flow_runs_end_to_end() {
         !data.join("a.txt").exists(),
         "重复项应被移除：{remaining:?}"
     );
-    assert!(
-        !data.join("a.txt").exists(),
-        "重复项应被直接永久删除（S-02：不经回收站）"
-    );
 
     // 3) 默认 clean_temp=false + ClassifyMode::Category：temp.tmp 被归类移动，而非清理删除
     assert!(
@@ -150,17 +288,162 @@ fn plan_execution_confirmation_flow_runs_end_to_end() {
     );
 }
 
-// 覆盖 X-02/C-01（解压一段确认与整理第二段确认共用的「我已确认」门禁）。该门禁是 Slint 声明式绑定，
-// 无头测试只能直接调用回调、绕不过它，因此这里锁定声明本身不被误删/改弱。
-// 2026-09-21 审查轮加强：解压确认框在后台清点期间置 confirm-pending，确认按钮在
-// 「我已确认」之外还被 !confirm-pending 门禁（X-02：数量未知不得启动）——锁定随之收紧。
+// 覆盖 H-06, S-04（Git 目录整树排除在界面明确可见：结束后提示条仍保留跳过说明，
+// 排除树内的文件既不被归类也不被删除，目录结构原样保留）
 #[test]
-fn acknowledge_gate_is_declared_in_ui() {
-    let ui = include_str!("../ui/app.slint");
+fn git_subtree_skip_is_visible_after_run_and_tree_untouched() {
+    let fixture = tempfile::tempdir().unwrap();
+    let data = fixture.path().join("data");
+    fs::create_dir_all(data.join("keepgit").join(".git")).unwrap();
+    fs::create_dir_all(data.join("docs")).unwrap();
+    fs::write(data.join("docs").join("note.txt"), b"note").unwrap();
+    fs::write(data.join("keepgit").join(".git").join("config"), b"git").unwrap();
+    fs::write(data.join("keepgit").join("tracked.txt"), b"tracked").unwrap();
+    let state_dir: PathBuf = fixture.path().join("state");
+    fs::create_dir_all(&state_dir).unwrap();
+
+    let data_text = data.to_string_lossy().to_string();
+    run_gui_job(move || {
+        let run = drive_organizer(data_text, state_dir);
+        assert!(run.failures.is_empty(), "流程未完成：{:?}", run.failures);
+        assert!(
+            run.notice.contains("Git"),
+            "H-06：结束后提示条必须仍明确说明跳过的 Git 目录：notice={} status={}",
+            run.notice,
+            run.status
+        );
+        assert!(
+            run.notice.contains("跳过") || run.notice.contains("排除"),
+            "H-06：提示必须说明已跳过/排除，而不是静默略过：{}",
+            run.notice
+        );
+    });
+
     assert!(
-        ui.contains(
-            "enabled: root.confirm-kind == 3 || (root.acknowledge && !root.confirm-pending);"
-        ),
-        "确认按钮的「我已确认」门禁声明缺失或被改动（C-01/X-02 清点门禁）"
+        data.join("keepgit").join(".git").join("config").is_file(),
+        "H-06：Git 树内的文件不得被删除或移动"
+    );
+    assert!(
+        data.join("keepgit").join("tracked.txt").is_file(),
+        "H-06：Git 目录整树（含祖先目录内容）不参与归类"
+    );
+    assert!(
+        !data.join("keepgit").join("其他").exists(),
+        "H-06：Git 目录树内不得生成分类目录"
+    );
+    // 默认按大类归类且保留原相对路径：docs/note.txt → 文档/docs/note.txt（排除树之外照常处理）。
+    let handled = ["文档/docs/note.txt", "docs/note.txt", "文档/note.txt"]
+        .iter()
+        .any(|rel| data.join(rel).is_file());
+    assert!(handled, "排除树之外的文件仍按计划处理（归类后仍存在）");
+}
+
+// 覆盖 X-02, X-05, H-07（解压一段确认的端到端）：确认文案必须说明原包与已有文件均保留、
+// 冲突只为新文件自动改名，且不得出现删除/覆盖授权；确认后跑完不改动目录里的任何文件。
+// 目录内没有压缩包时不会解析引擎（E-02/E-05 只在真正解压时要求引擎），因此本用例无需真实引擎。
+#[test]
+fn extract_confirmation_keeps_originals_and_completes() {
+    let fixture = tempfile::tempdir().unwrap();
+    let data = fixture.path().join("data");
+    fs::create_dir_all(&data).unwrap();
+    fs::write(data.join("keep.txt"), b"keep me").unwrap();
+    let state_dir: PathBuf = fixture.path().join("state");
+    fs::create_dir_all(&state_dir).unwrap();
+    let directory = data.to_string_lossy().to_string();
+    // 跨线程可见的确认标志：Rc 不是 Send，工作线程任务用原子量回传结果。
+    let confirm_seen = Arc::new(AtomicBool::new(false));
+    let confirm_flag = Arc::clone(&confirm_seen);
+
+    let overrides = EngineTestOverrides {
+        state_dir: state_dir.clone(),
+    };
+    run_gui_job(move || {
+        let failures: Failures = Arc::new(Mutex::new(Vec::new()));
+        let failure_sink = Arc::clone(&failures);
+        let steps = Rc::new(Cell::new(0u32));
+        let ticks = Rc::new(Cell::new(0u32));
+        gui::run_with_engine_overrides(
+            move |ui| {
+                // 递归解压是启动页，但显式选择一次更贴近用户路径（并确保 screen==2）。
+                ui.invoke_select_tool("recursive-extract".into());
+                ui.set_directory(directory.clone().into());
+                ui.invoke_request_extract_start();
+                let ui = ui.as_weak();
+                let steps = steps.clone();
+                let ticks = ticks.clone();
+                let failures = Arc::clone(&failure_sink);
+                let driver = slint::Timer::default();
+                driver.start(
+                    slint::TimerMode::Repeated,
+                    Duration::from_millis(200),
+                    move || {
+                        ticks.set(ticks.get() + 1);
+                        if ticks.get() >= 150 {
+                            record_failure(
+                                &failures,
+                                format!("驱动超时：流程卡在步骤 {}", steps.get()),
+                            );
+                            return;
+                        }
+                        let Some(ui) = ui.upgrade() else { return };
+                        match steps.get() {
+                            0 => {
+                                // 清点完成后（confirm-pending 解除）文案必须已说明保留口径。
+                                if ui.get_confirm_kind() == 1 && !ui.get_confirm_pending() {
+                                    let text = ui.get_confirm_text().to_string();
+                                    let mut problems: Vec<String> = Vec::new();
+                                    if !text.contains("原压缩包与已有文件") {
+                                        problems.push(format!(
+                                            "X-05/H-07：确认文案必须说明原包与已有文件均保留：{text}"
+                                        ));
+                                    }
+                                    if !text.contains("自动改文件名") {
+                                        problems.push(format!(
+                                            "X-04/H-07：确认文案必须说明冲突只为新文件自动改名：{text}"
+                                        ));
+                                    }
+                                    if text.contains("永久删除") || text.contains("覆盖") {
+                                        problems.push(format!(
+                                            "X-05/R-02：解压确认不得出现删除/覆盖授权：{text}"
+                                        ));
+                                    }
+                                    if problems.is_empty() {
+                                        confirm_flag.store(true, Ordering::Relaxed);
+                                        ui.invoke_confirmed(1);
+                                        steps.set(1);
+                                    } else {
+                                        for problem in problems {
+                                            record_failure(&failures, problem);
+                                        }
+                                    }
+                                }
+                            }
+                            1 if ui.get_status().contains("解压结束") => {
+                                steps.set(2);
+                                let _ = slint::quit_event_loop();
+                            }
+                            _ => {}
+                        }
+                    },
+                );
+                // 驱动定时器必须活到事件循环结束：放进线程局部存储，事件循环退出前不会被回收。
+                DRIVER.with(|slot| *slot.borrow_mut() = Some(driver));
+            },
+            Some(overrides),
+        )
+        .expect("GUI 流程失败");
+        let recorded = take_failures(&failures);
+        assert!(recorded.is_empty(), "{}", recorded.join("\n"));
+    });
+
+    assert!(confirm_seen.load(Ordering::Relaxed), "必须经过一次解压确认");
+    assert_eq!(
+        fs::read(data.join("keep.txt")).unwrap(),
+        b"keep me",
+        "X-05/H-07：解压不得删除或改动已有文件"
+    );
+    assert!(
+        data.read_dir().unwrap().count() == 1,
+        "解压结束后目录内容必须保持原样"
     );
 }

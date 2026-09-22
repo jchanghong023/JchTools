@@ -1,6 +1,4 @@
-use crate::config::ConflictPolicy;
 use anyhow::{bail, Result};
-use serde::{Deserialize, Serialize};
 use std::sync::{
     atomic::{AtomicBool, AtomicU64, Ordering},
     mpsc, Arc, Condvar, Mutex,
@@ -55,25 +53,10 @@ impl Control {
         self.check_cancelled()
     }
 }
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct ConflictInfo {
-    /// 冲突的目标文件（用户可见的最终路径）
-    pub existing: String,
-    pub incoming_size: u64,
-    pub existing_size: u64,
-    pub incoming_time: i64,
-    pub existing_time: i64,
-}
-#[derive(Debug, Clone)]
-pub struct ConflictAnswer {
-    pub policy: ConflictPolicy,
-    pub apply_all: bool,
-}
 #[derive(Debug)]
 pub enum Event {
     Status(String),
     Log(String),
-    Conflict(ConflictInfo, mpsc::SyncSender<ConflictAnswer>),
     Ready(std::path::PathBuf, crate::model::Summary),
     Done(std::path::PathBuf, crate::model::Summary),
     Failed(String),
@@ -103,25 +86,10 @@ pub enum Event {
     /// 「递归解压」一段式运行结束（X-02）：不生成计划、无 ready 态，界面只收尾摘要。
     ExtractDone(std::path::PathBuf, crate::model::Summary),
 }
-#[derive(Clone)]
+#[derive(Clone, Default)]
 pub struct Context {
     pub control: Arc<Control>,
     pub events: Option<mpsc::SyncSender<Event>>,
-    pub decisions: Arc<dyn Fn(ConflictInfo) -> Result<ConflictAnswer> + Send + Sync>,
-}
-impl Default for Context {
-    fn default() -> Self {
-        Self {
-            control: Arc::new(Control::default()),
-            events: None,
-            decisions: Arc::new(|_| {
-                Ok(ConflictAnswer {
-                    policy: ConflictPolicy::KeepBoth,
-                    apply_all: false,
-                })
-            }),
-        }
-    }
 }
 impl Context {
     pub fn emit(&self, event: Event) {

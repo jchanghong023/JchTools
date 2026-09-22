@@ -2,7 +2,7 @@
 //! - C-01 目录整理分析阶段只读：不解压、不改目录（解压职责已移交「递归解压」工具）；
 //! - C-09 / X-07 扫描默认排除所选目录根下的「解压失败」子目录；
 //! - X-06 解压失败的原包移入「解压失败」子目录（含分卷兄弟卷）；
-//! - X-05 成功原包按处置策略处理（默认永久删除，见 tests/archive.rs 真实引擎用例）。
+//! - H-07 / X-05 成功原包及分卷一律保留，不删除、不按内容跳过解压。
 // 测试代码允许 unwrap/expect：断言失败即测试失败，属合理用法
 // （与 clippy.toml 的 allow-*-in-tests 策略一致，集成测试 crate 不在其覆盖范围内）。
 #![allow(clippy::unwrap_used, clippy::expect_used)]
@@ -448,11 +448,7 @@ fn comment_forging_engine(dir: &Path) -> PathBuf {
     path
 }
 
-// 覆盖 X-05, S-01（回归 2026-09-19：crafted 档案注释伪造多卷佐证）。
-// 7-Zip 把档案注释在 -slt 头块内以 {...} 原样逐行输出；注释里的
-// `Volumes = 9` 等键若参与佐证判定，恶意档案即可让同主干无辜 .rNN/.zNN
-// 随成功包被回收甚至永久删除。注释块内的键必须被忽略。真实引擎同型回归见
-// tests/archive.rs real_engine_forged_comment_cannot_enable_sweep。
+// 覆盖 H-07 / X-05：即使档案注释伪造多卷信息，原包及旁路文件也不得删除。
 #[test]
 fn forged_comment_corroboration_is_ignored() {
     let tmp = fixture("forged-comment");
@@ -473,9 +469,10 @@ fn forged_comment_corroboration_is_ignored() {
         "档案注释里伪造的多卷键不得成为处置佐证"
     );
     assert_eq!(
-        result.summary.deleted, 1,
-        "只有主体原包被永久处置，无辜 .r00 不得计入（S-02）"
+        fs::read(root.join("report.rar")).unwrap(),
+        b"standalone rar"
     );
+    assert_eq!(result.summary.deleted, 0);
 }
 
 /// 伪造注释头假引擎（嵌套 } 变体）：7-Zip 把档案注释以 {...} 原样逐行输出，
@@ -564,11 +561,7 @@ fn forged_comment_with_brace_line_cannot_enable_sweep() {
     );
 }
 
-// 覆盖 X-05, S-01（回归 2026-09-19：宽命名兄弟卷误处置——zip 变体）。
-// 完整单卷 zip 替换旧分卷集合后残留的同主干 .z01 不是该包的分卷成员：处置
-// （不可逆，含永久删除模式）必须以引擎档案级属性证实多卷（条目级 Volume Index
-// 对 zip 单卷包也无条件输出，不能作证），否则无辜文件会随成功包一并被回收甚至
-// 永久删除。真实引擎下的同型回归见 tests/archive.rs real_engine_standalone_zip。
+// 覆盖 H-07 / X-05：单卷 ZIP 和同主干的旧分卷文件均保留。
 #[test]
 fn stale_z_sibling_is_not_disposed_with_standalone_zip() {
     let tmp = fixture("stale-z");
@@ -588,28 +581,19 @@ fn stale_z_sibling_is_not_disposed_with_standalone_zip() {
     )
     .unwrap();
     assert_eq!(result.summary.archives_ok, 1);
-    assert!(
-        !root.join("report.zip").exists(),
-        "成功原包按 X-05/S-02 直接永久删除"
-    );
+    assert!(root.join("report.zip").exists(), "成功原包必须原地保留");
     assert!(
         root.join("report.z01").exists(),
         "无分卷佐证的同主干 .z01 是无辜文件，不得随包处置"
     );
+    assert_eq!(result.summary.deleted, 0);
     assert_eq!(
-        result.summary.deleted, 1,
-        "成功原包按 X-05/S-02 直接永久删除并计入"
+        fs::read(root.join("report.zip")).unwrap(),
+        b"standalone complete zip"
     );
-    assert!(
-        root.join("report.z01").exists(),
-        "无辜 .z01 不得被处置（S-02：只按佐证处置主体）"
-    );
-    // 无佐证保留必须有用户可见日志（否则残留无声、用户不可感知）。
-    let db = jchtools::db::Database::open(&result.directory).unwrap();
-    let events = db.event_page(0, 100).unwrap();
-    assert!(
-        events.iter().any(|line| line.contains("未能证实分卷关系")),
-        "无佐证保留兄弟卷必须留日志：{events:?}"
+    assert_eq!(
+        fs::read(root.join("report.z01")).unwrap(),
+        b"stale fragment of an old set"
     );
 }
 
@@ -639,17 +623,16 @@ fn stale_r_sibling_is_not_disposed_with_standalone_rar() {
         root.join("report.r00").exists(),
         "无分卷佐证的同主干 .r00 是无辜文件，不得随包处置"
     );
+    assert_eq!(result.summary.deleted, 0);
     assert_eq!(
-        result.summary.deleted, 1,
-        "只有主体原包被永久处置，无辜 .r00 不得计入（S-02）"
+        fs::read(root.join("report.rar")).unwrap(),
+        b"standalone complete rar"
     );
 }
 
-// 覆盖 X-05（分卷佐证为真 → 兄弟卷整组处置）：条目带 Volume Index 的多卷包
-// （zip/rar/rar5 多卷时 7-Zip 才输出该字段）成功后兄弟卷必须一并处置，
-// 目录不残留压缩包（X 分区总体约束）。
+// 覆盖 H-07 / X-05：引擎确认的分卷组成功解压后，主体与全部分卷仍原样保留。
 #[test]
-fn corroborated_volume_siblings_are_disposed_together() {
+fn corroborated_volume_siblings_are_preserved_together() {
     let tmp = fixture("corroborated");
     let root = tmp.path().join("data");
     write_with_mtime(&root.join("report.rar"), b"multi-volume main", 100);
@@ -664,16 +647,13 @@ fn corroborated_volume_siblings_are_disposed_together() {
     )
     .unwrap();
     assert_eq!(result.summary.archives_ok, 1);
-    assert!(
-        !root.join("report.rar").exists()
-            && !root.join("report.r00").exists()
-            && !root.join("report.r01").exists(),
-        "佐证为真的分卷组必须整组处置，目录不残留压缩包"
-    );
     assert_eq!(
-        result.summary.deleted, 3,
-        "佐证为真的分卷组（主体 + 两个兄弟卷）整组永久处置"
+        fs::read(root.join("report.rar")).unwrap(),
+        b"multi-volume main"
     );
+    assert_eq!(fs::read(root.join("report.r00")).unwrap(), b"volume 0");
+    assert_eq!(fs::read(root.join("report.r01")).unwrap(), b"volume 1");
+    assert_eq!(result.summary.deleted, 0);
 }
 
 // 覆盖 X-06（失败路径的宽命名兄弟卷仍整组隔离）：隔离是可逆改名而非删除；
@@ -705,14 +685,14 @@ fn failed_archive_still_quarantines_wide_named_siblings() {
     );
 }
 
-// 覆盖 X-02, X-06（单包处置失败不得中止整个解压任务：逐包隔离，任务继续）
+// 覆盖 H-07 / X-05：原包无需删除权限；持有读取句柄不应令成功解压变成错误。
 #[test]
-fn dispose_failure_does_not_abort_remaining_archives() {
+fn read_locked_archives_are_preserved_without_errors() {
     let tmp = fixture("dispose-fail");
     let root = tmp.path().join("data");
     write_with_mtime(&root.join("a.zip"), b"fake archive a", 100);
     write_with_mtime(&root.join("b.zip"), b"fake archive b", 200);
-    // 恒成功引擎：空输出 → 0 条目 → 解压"成功"，随后原包处置按永久删除执行（删除由共享句柄注入失败）
+    // 恒成功引擎：空输出表示空包，成功后仍保留原包。
     let engine_path = {
         #[cfg(windows)]
         {
@@ -729,10 +709,8 @@ fn dispose_failure_does_not_abort_remaining_archives() {
             path
         }
     };
-    // 处置失败必须保留原包、不得中止任务。故障注入：持有 FILE_SHARE_READ 打开句柄，
-    // 永久删除以共享冲突失败（与「原包被其他程序占用」同因）。
-    // 平台门禁原因（P-07 仅支持 Windows）：只有 Windows 的共享模式能阻止删除；
-    // Unix 上打开句柄不阻止 unlink，故该平台不断言「处置失败」这一分支。
+    // Windows 读取共享句柄禁止删除，验证解压流程不会再尝试删除原包。
+    // 平台门禁原因：只有 Windows 的共享模式能阻止删除。
     #[cfg(windows)]
     let _guards: Vec<fs::File> = ["a.zip", "b.zip"]
         .iter()
@@ -751,18 +729,10 @@ fn dispose_failure_does_not_abort_remaining_archives() {
         &state_of(&tmp),
         Some(&engine_path),
     );
-    let summary = result.expect("单包处置失败不得中止任务").summary;
+    let summary = result.expect("原包不能删除不影响解压成功").summary;
     assert_eq!(summary.archives_ok, 2, "两个包都应解压成功");
-    #[cfg(windows)]
-    assert!(summary.errors >= 1, "处置失败必须如实记为错误（而非静默）");
-    #[cfg(not(windows))]
-    assert_eq!(
-        summary.errors, 0,
-        "非 Windows 无共享冲突语义：处置正常完成，不得报错"
-    );
-    #[cfg(windows)]
-    assert!(
-        root.join("a.zip").exists() && root.join("b.zip").exists(),
-        "处置失败时原包保留原地（重跑可自愈）"
-    );
+    assert_eq!(summary.errors, 0);
+    assert_eq!(summary.deleted, 0);
+    assert_eq!(fs::read(root.join("a.zip")).unwrap(), b"fake archive a");
+    assert_eq!(fs::read(root.join("b.zip")).unwrap(), b"fake archive b");
 }

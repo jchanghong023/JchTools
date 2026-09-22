@@ -8,29 +8,14 @@ pub enum DeleteMode {
     Keep,
     Permanent,
 }
-/// 各类功能的删除方式覆盖（S-02：只在「保留」与「永久删除」之间选择，无回收站选项）。
+/// 各类功能的删除方式覆盖（S-02：只在「保留」与「永久删除」之间选择，无回收站选项；
+/// 默认 Global 表示跟随「全局默认删除方式」）。各清理类别各自独立覆盖，互不影响。
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub enum DeleteChoice {
     Global,
     Keep,
     Permanent,
-}
-/// 递归解压工具的原包处置（X-05/R-02）：只属于解压工具，默认直接永久删除，
-/// 不提供「跟随全局」（成功解包的结果不依赖其它工具的全局删除口径）。
-#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "snake_case")]
-pub enum ArchiveDispose {
-    Keep,
-    Permanent,
-}
-impl ArchiveDispose {
-    pub fn resolve(self) -> DeleteMode {
-        match self {
-            Self::Keep => DeleteMode::Keep,
-            Self::Permanent => DeleteMode::Permanent,
-        }
-    }
 }
 impl DeleteChoice {
     pub fn resolve(self, global: DeleteMode) -> DeleteMode {
@@ -49,16 +34,6 @@ pub enum KeepPolicy {
     Largest,
     Smallest,
     ShortestName,
-}
-#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "snake_case")]
-pub enum ConflictPolicy {
-    Ask,
-    Overwrite,
-    Skip,
-    Newest,
-    Largest,
-    KeepBoth,
 }
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
@@ -83,12 +58,6 @@ pub struct Config {
     pub include_hidden: bool,
     pub include_system: bool,
     pub exclusions: String,
-    pub nested_archives: bool,
-    pub archive_delete: ArchiveDispose,
-    /// 解压冲突策略。默认 Newest（与历史行为一致）：判定采用新文件时会删除/覆盖
-    /// 已有文件，解压侧对每次此类替换写带策略名的明确警告日志；希望绝不覆盖的
-    /// 用户应显式选择 Skip。
-    pub extract_conflict: ConflictPolicy,
     pub max_depth: u32,
     /// 单包条目数上限。默认 100 万：足以覆盖正常压缩包，同时约束异常包的
     /// inode/内存放大；超大合法包可在高级设置中调高。
@@ -105,9 +74,6 @@ pub struct Config {
     pub keep_duplicate: KeepPolicy,
     pub duplicate_action: DuplicateAction,
     pub duplicate_delete: DeleteChoice,
-    /// 解压覆盖旧文件时的删除方式（X-04：淘汰旧文件必须走用户选择的删除策略）。
-    /// 同名但内容不同的「版本取舍」已按 C-02 禁止并移除，本字段只服务解压冲突覆盖。
-    pub conflict_delete: DeleteChoice,
     pub classify: ClassifyMode,
     pub output_dir: String,
     pub preserve_structure: bool,
@@ -116,11 +82,15 @@ pub struct Config {
     pub large_threshold_gib: u64,
     pub merge_directories: bool,
     pub flatten_single_child: bool,
-    pub clean_empty_dirs: bool,
     pub clean_junk: bool,
+    /// 系统附属文件清理的删除方式（C-08：涉及删除的清理项各自独立覆盖，默认跟随全局）。
+    pub junk_delete: DeleteChoice,
     pub clean_temp: bool,
+    /// 临时与备份文件清理的删除方式（C-08 独立覆盖）。
+    pub temp_delete: DeleteChoice,
     pub clean_zero: bool,
-    pub cleanup_delete: DeleteChoice,
+    /// 零字节文件清理的删除方式（C-08 独立覆盖）。
+    pub zero_delete: DeleteChoice,
     pub clean_copy_name: bool,
     pub normalize_names: bool,
     pub detect_type: bool,
@@ -136,26 +106,46 @@ pub const DEFAULT_CUSTOM_CATEGORIES: &str =
 impl Default for Config {
     fn default() -> Self {
         Self {
-            recursive: true, include_hidden: false, include_system: false,
-            exclusions: ".git/**;node_modules/**;$RECYCLE.BIN/**;System Volume Information/**;.svn/**;.hg/**;.vs/**;.idea/**;AppData/**;ProgramData/**;Program Files/**;Program Files (x86)/**;Program Files (Arm)/**;Windows/**;Windows.old/**;$Windows.~BT/**;$Windows.~WS/**;WindowsApps/**;Packages/**;Recovery/**;PerfLogs/**;Config.Msi/**;SoftwareDistribution/**;Application Data/**;Local Settings/**;Temp/**;Tmp/**;Cookies/**;Recent/**;OneDrive/**".into(),
-            nested_archives: true, archive_delete: ArchiveDispose::Permanent,
-            // 默认 Newest 与历史行为一致；涉及删除时解压侧写带策略名的警告日志。
-            extract_conflict: ConflictPolicy::Newest, max_depth: 16,
+            recursive: true,
+            include_hidden: true,
+            include_system: true,
+            // S-04：默认覆盖所选目录内的全部资料（含隐藏与系统属性），不因普通目录名自动漏处理；
+            // 排除规则默认留空，只有用户显式填写才缩小范围（Git 排除不受本项与开关影响）。
+            exclusions: String::new(),
+            max_depth: 16,
             // 100 万条目足够覆盖正常压缩包，同时约束异常包的条目放大；超大合法包可调高。
             max_entries: 1_000_000,
             // 0 = 不额外限制。流式包（无 Size 元数据）在解压期间按本项累计检查（archive.rs）。
-            max_unpacked_gib: 0, max_file_gib: 0, max_ratio: 10_000, reserve_gib: 1,
-            dedup_same_name: true, dedup_copy_names: true, dedup_other_names: false,
-            keep_duplicate: KeepPolicy::Newest, duplicate_action: DuplicateAction::Delete,
+            max_unpacked_gib: 0,
+            max_file_gib: 0,
+            max_ratio: 10_000,
+            reserve_gib: 1,
+            dedup_same_name: true,
+            dedup_copy_names: true,
+            dedup_other_names: false,
+            keep_duplicate: KeepPolicy::Newest,
+            duplicate_action: DuplicateAction::Delete,
             duplicate_delete: DeleteChoice::Global,
-            conflict_delete: DeleteChoice::Global,
-            classify: ClassifyMode::Category, output_dir: String::new(), preserve_structure: true,
+            classify: ClassifyMode::Category,
+            output_dir: String::new(),
+            preserve_structure: true,
             custom_categories: DEFAULT_CUSTOM_CATEGORIES.into(),
-            large_files: false, large_threshold_gib: 1, merge_directories: false,
-            flatten_single_child: false, clean_empty_dirs: true, clean_junk: true,
-            clean_temp: false, clean_zero: false, cleanup_delete: DeleteChoice::Global,
-            clean_copy_name: true, normalize_names: true, detect_type: false, fix_extension: false,
-            global_delete: DeleteMode::Permanent, hash_workers: 6,
+            large_files: false,
+            large_threshold_gib: 1,
+            merge_directories: false,
+            flatten_single_child: false,
+            clean_junk: true,
+            junk_delete: DeleteChoice::Global,
+            clean_temp: false,
+            temp_delete: DeleteChoice::Global,
+            clean_zero: false,
+            zero_delete: DeleteChoice::Global,
+            clean_copy_name: true,
+            normalize_names: true,
+            detect_type: false,
+            fix_extension: false,
+            global_delete: DeleteMode::Permanent,
+            hash_workers: 6,
             theme: "system".into(),
         }
     }
@@ -197,10 +187,12 @@ impl Config {
     /// 历史版本已删除的设置键：旧配置与旧任务库仍带着它们，反序列化前剥除，
     /// 否则 deny_unknown_fields 会把旧数据整体判成非法配置。
     /// verify_bytes（删除前逐字节复核）已随 S-03 整体移除：去重删除只依据分析期
-    /// 整文件哈希，去重删除流程的任何阶段都不再做二次内容比对（C-02/C-12；
-    /// X-04 解压冲突裁决的内容比对不在此约束范围，见合同第三批说明）；
+    /// 整文件哈希，流程任何阶段都不再做二次内容比对（C-02/C-12）；
     /// 5 个 same_name_*/conflict_scope 键是已按 C-02 禁止移除的同名版本取舍开关；
     /// extract 键随两工具拆分移除（解压职责整体移交「递归解压」工具，X-01）。
+    /// 注意：本轮按 H-07/X-04/X-05/R-02 移除的 nested_archives / archive_delete /
+    /// extract_conflict / conflict_delete / clean_empty_dirs 不列为兼容剥除项——
+    /// 它们是显式切割，旧任务库带这些键时按非法配置拒绝，需按新规则重新分析。
     const REMOVED_FIELDS: &[&str] = &[
         "hash_algorithm",
         "verify_bytes",
@@ -218,9 +210,9 @@ impl Config {
     const DELETE_MODE_KEYS: &[&str] = &[
         "global_delete",
         "duplicate_delete",
-        "cleanup_delete",
-        "conflict_delete",
-        "archive_delete",
+        "junk_delete",
+        "temp_delete",
+        "zero_delete",
     ];
     pub fn from_json_text(text: &str) -> Result<Self> {
         // 某些编辑器会写出带 UTF-8 BOM 的文件；serde_json 不接受，解析前剥掉。
@@ -251,8 +243,9 @@ impl Config {
         *self = serde_json::from_value(data)?;
         Ok(())
     }
-    /// 二次确认框的破坏性说明（S-02：删除一律为永久删除、不可由本软件恢复，
-    /// 任务确认时必须明确告知）。
+    /// 二次确认框的破坏性说明（S-02：删除一律为永久删除、不可由本软件恢复，任务确认时
+    /// 必须明确告知）。按 C-08 逐项如实描述：关闭的清理类别显示「不清理」，删除方式按
+    /// 各自覆盖解析；空目录清理不可关闭（H-05/C-07），固定永久删除。
     pub fn destructive_warning(&self) -> String {
         fn label(mode: DeleteMode) -> &'static str {
             match mode {
@@ -260,9 +253,24 @@ impl Config {
                 DeleteMode::Permanent => "永久删除",
             }
         }
-        format!("原压缩包：{}；重复文件：{}；解压覆盖旧文件：{}；清理文件：{}。\n删除一律为永久删除，不经回收站、不可由本软件恢复；用户取消不会触发任何删除。没有自动回滚；请确认目录和规则。",
-            label(self.archive_delete.resolve()),label(self.duplicate_delete.resolve(self.global_delete)),
-            label(self.conflict_delete.resolve(self.global_delete)),label(self.cleanup_delete.resolve(self.global_delete)))
+        fn category(enabled: bool, choice: DeleteChoice, global: DeleteMode) -> &'static str {
+            if !enabled {
+                return "不清理";
+            }
+            label(choice.resolve(global))
+        }
+        // 硬链接模式下重复文件不删除，只把其余副本改为硬链接（C-04）。
+        let duplicates = if self.duplicate_action == DuplicateAction::Hardlink {
+            "保留路径并改为硬链接".to_string()
+        } else {
+            label(self.duplicate_delete.resolve(self.global_delete)).to_string()
+        };
+        format!(
+            "重复文件：{duplicates}；系统附属文件：{}；临时与备份文件：{}；零字节文件：{}；空目录：永久删除（不可关闭）。\n删除一律为永久删除，不经回收站、不可由本软件恢复；用户取消不会触发任何删除。没有自动回滚；请确认目录和规则。",
+            category(self.clean_junk, self.junk_delete, self.global_delete),
+            category(self.clean_temp, self.temp_delete, self.global_delete),
+            category(self.clean_zero, self.zero_delete, self.global_delete),
+        )
     }
 }
 pub fn state_dir() -> Result<PathBuf> {

@@ -25,8 +25,10 @@ pub struct Job {
     pub context: TaskContext,
     pub db: Database,
     pub summary: Summary,
-    pub archive_override: Option<crate::config::ConflictPolicy>,
 }
+/// H-06：选定根目录直接含 .git（目录或文件）时整次处理不执行的统一提示。
+/// 只允许为识别边界做必要的目录项检查，识别后不读取、不改动任何内容。
+const ROOT_GIT_MESSAGE: &str = "所选根目录直接含 .git（Git 仓库或工作树）；按 H-06 整次处理不执行。请改选不含 .git 的子目录后重试。";
 /// 哈希阶段一次从任务库取多少条候选。与哈希线程数解耦（线程数只决定并行度，
 /// 批量只决定分页次数），避免「调线程数」同时改变两个量而无法判断。
 const HASH_BATCH: usize = 256;
@@ -113,12 +115,17 @@ pub struct TaskResult {
 /// 原路径前」时残留无法自愈，扫描对其永久剪枝且无其它回收路径。残留是指向 keeper
 /// 内容的硬链接，删除后内容仍由保留文件持有。24 小时阈值与 clean_orphan_staging
 /// 一致，避免误删并发任务的临时文件。
+/// H-06：Git 目录树整树排除——识别边界后不遍历内部、不清理其中任何内容；崩溃残留
+/// 只可能出现在参与过去重的目录里，而 Git 树从不参与处理，剪枝不损失回收路径。
 fn clean_orphan_link_temps(root: &Path) -> usize {
     let now = std::time::SystemTime::now();
     let mut removed = 0;
     for entry in walkdir::WalkDir::new(root)
         .follow_links(false)
         .into_iter()
+        .filter_entry(|entry| {
+            !entry.file_type().is_dir() || !fsutil::is_git_root(entry.path()).unwrap_or(true)
+        })
         .filter_map(std::result::Result::ok)
     {
         let path = entry.path();
@@ -162,6 +169,8 @@ pub fn prepare_at(
 ) -> Result<TaskResult> {
     config.validate()?;
     let root = fsutil::normalize_root(root)?;
+    // H-06：选定根目录直接含 .git 时整次处理不执行，明确提示且不创建任务库。
+    anyhow::ensure!(!fsutil::is_git_root(&root)?, ROOT_GIT_MESSAGE);
     let _guard = fsutil::RootGuard::acquire(state)?;
     let directory = state.join("tasks").join(format!(
         "{}-{}",
@@ -183,7 +192,6 @@ pub fn prepare_at(
         context,
         db,
         summary: Summary::default(),
-        archive_override: None,
     };
     let result = (|| {
         // C-01：分析阶段只读，不做任何清扫（含本工具崩溃残留的硬链接临时文件——
@@ -270,6 +278,8 @@ fn extract_run_with(
 ) -> Result<TaskResult> {
     config.validate()?;
     let root = fsutil::normalize_root(root)?;
+    // H-06：选定根目录直接含 .git 时整次处理不执行，明确提示且不创建任务库。
+    anyhow::ensure!(!fsutil::is_git_root(&root)?, ROOT_GIT_MESSAGE);
     let _guard = fsutil::RootGuard::acquire(state)?;
     let directory = state.join("tasks").join(format!(
         "{}-{}",
@@ -289,7 +299,6 @@ fn extract_run_with(
         context,
         db,
         summary: Summary::default(),
-        archive_override: None,
     };
     let result = (|| {
         scan(&mut job, true, state)?;
@@ -359,7 +368,7 @@ fn extract_run_with(
     result
 }
 /// 确认框用的压缩包计数（X-02）：只读快速清点，与正式扫描同一套过滤口径
-/// （递归/隐藏/系统/排除规则/跳过「解压失败」/状态与程序目录剪枝，X-07）。
+/// （递归/隐藏/系统/排除规则/跳过「解压失败」/Git 整树排除/状态与程序目录剪枝，X-07）。
 /// 失败即报错，不回退猜测值。
 #[cfg_attr(
     feature = "perf-tracing",
@@ -368,8 +377,9 @@ fn extract_run_with(
 pub fn count_archives(root: &Path, config: &Config) -> Result<u64> {
     config.validate()?;
     let root = fsutil::normalize_root(root)?;
+    // H-06：选定根目录直接含 .git 时整次处理不执行，确认框清点同样拒绝。
+    anyhow::ensure!(!fsutil::is_git_root(&root)?, ROOT_GIT_MESSAGE);
     let excluded = rules::build_exclusions(&config.exclusions)?;
-    let quarantine = root.join(archive::QUARANTINE_DIR_NAME);
     // 与 scan 同源的特殊目录剪枝口径。状态目录此时可能尚不存在（首次运行先弹
     // 确认再建目录）：canonicalize 失败视为无重叠，不阻止清点。
     let state = fs::canonicalize(crate::config::state_dir()?).ok();
@@ -382,6 +392,16 @@ pub fn count_archives(root: &Path, config: &Config) -> Result<u64> {
         // 选定根位于状态目录/程序目录内：扫描将整树剪枝，清点必须同为 0。
         return Ok(0);
     }
+    // 剪枝口径与扫描共用同一个实现（避免两处各自漂移成不同范围）。
+    let scope_filter = ScopeFilter {
+        excluded: &excluded,
+        include_hidden: config.include_hidden,
+        include_system: config.include_system,
+        quarantine: Some(archive::QUARANTINE_DIR_NAME),
+        state_prefix,
+        exe_prefix,
+        root_under_special,
+    };
     let mut count = 0u64;
     for entry in walkdir::WalkDir::new(&root)
         .follow_links(false)
@@ -393,54 +413,23 @@ pub fn count_archives(root: &Path, config: &Config) -> Result<u64> {
                 // 与正式扫描一致：元数据不可读的条目按跳过处理，不计入清点。
                 return false;
             };
-            if fsutil::is_link(&meta) {
+            // H-06：目录直接含 .git（目录或文件）时整树排除，识别后不遍历内部。
+            // 边界判定失败时同样剪枝：内容未知的目录不得计入清点。
+            if entry.file_type().is_dir() && fsutil::is_git_root(entry.path()).unwrap_or(true) {
                 return false;
             }
             let Ok(rel) = fsutil::relative_string(&root, entry.path()) else {
                 return false;
             };
-            if rel == ".jchtools-work" || rel.starts_with(".jchtools-work/") {
-                return false;
+            // 选定根目录自身不参与隐藏/系统/名称等判定——扫描同口径：筛选只作用于
+            // 根目录的子项，隐藏的选定根目录不会把整棵树剪掉（否则确认框报 0，
+            // 正式扫描却能找到包）。
+            if rel.is_empty() {
+                return true;
             }
-            if entry
-                .file_name()
-                .to_string_lossy()
-                .starts_with(".jchtools-link-")
-            {
-                return false;
-            }
-            if rel == archive::QUARANTINE_DIR_NAME
-                || rel.starts_with(&format!("{}/", archive::QUARANTINE_DIR_NAME))
-            {
-                return false;
-            }
-            if quarantine.is_dir() && entry.path().starts_with(&quarantine) {
-                return false;
-            }
-            // 状态目录/程序目录位于选定根内：与扫描同口径剪枝其子树。
-            for prefix in [state_prefix.as_deref(), exe_prefix.as_deref()] {
-                if prefix.is_some_and(|p| rel == p || rel.starts_with(&format!("{p}/"))) {
-                    return false;
-                }
-            }
-            if excluded.is_match(&rel) || excluded.is_match(format!("{rel}/")) {
-                return false;
-            }
-            #[cfg(windows)]
-            {
-                use std::os::windows::fs::MetadataExt;
-                if !config.include_hidden && meta.file_attributes() & 2 != 0 {
-                    return false;
-                }
-                if !config.include_system && meta.file_attributes() & 4 != 0 {
-                    return false;
-                }
-            }
-            #[cfg(not(windows))]
-            if !config.include_hidden && entry.file_name().to_string_lossy().starts_with('.') {
-                return false;
-            }
-            true
+            let name = entry.file_name();
+            let name = name.to_string_lossy();
+            !scope_filter.prunes(&rel, &name, &meta)
         })
     {
         let entry = entry?;
@@ -499,28 +488,41 @@ struct ScanSink {
     /// 空目录规划据此（planner 内向上传播）拒绝把该目录及其祖先当作空目录，
     /// 替代旧实现对每个候选目录重新走盘核对（has_unscanned_content）。
     taint: HashSet<String>,
+    /// 整树排除的 Git 目录（目录直接含 .git 的 rel）：只用于界面提示与 git_roots 表。
+    git_skips: Vec<String>,
 }
 fn lock_sink(sink: &Mutex<ScanSink>) -> std::sync::MutexGuard<'_, ScanSink> {
     // 锁中毒只可能因持锁线程 panic；本模块持锁期间不 panic，恢复数据是安全回退。
     sink.lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner)
 }
-struct WalkCtx<'a> {
-    control: Arc<Control>,
+/// 把 Git 整树排除的目录自身与其全部祖先记入扫描污点：祖先目录在盘上仍有内容
+/// （Git 树），不得被空目录规划当成空目录，从而避免顺着删除/改名祖先间接改动该树。
+fn taint_git_ancestors(taint: &mut HashSet<String>, rel: &str) {
+    taint.insert(rel.to_string());
+    let mut rest = rel;
+    while let Some(index) = rest.rfind('/') {
+        rest = &rest[..index];
+        taint.insert(rest.to_string());
+    }
+}
+/// 处理范围剪枝口径：扫描、确认框清点（X-02）与整理收尾实空清理共用同一套判定，
+/// 三处不会各自漂移出不同范围。Git 整树排除（H-06）由调用方在枚举目录前单独判定。
+struct ScopeFilter<'a> {
     excluded: &'a globset::GlobSet,
-    recursive: bool,
     include_hidden: bool,
     include_system: bool,
-    quarantine: &'a str,
+    /// 「解压失败」暂存区：扫描与清点整树跳过（C-09/X-07）；收尾实空清理不跳过
+    /// （该目录实际为空时仍按 H-05 清理，但其内容一律不碰）。
+    quarantine: Option<&'a str>,
     /// 状态目录/程序目录位于选定根内的相对路径前缀（剪枝其子树）。
     state_prefix: Option<String>,
     exe_prefix: Option<String>,
     /// 选定根本身位于状态目录或程序目录内：整棵树按旧口径全部剪枝。
     root_under_special: bool,
-    sink: &'a Mutex<ScanSink>,
 }
-impl WalkCtx<'_> {
-    fn special_or_excluded(&self, child_rel: &str, name: &str, metadata: &fs::Metadata) -> bool {
+impl ScopeFilter<'_> {
+    fn prunes(&self, child_rel: &str, name: &str, metadata: &fs::Metadata) -> bool {
         if self.root_under_special
             || fsutil::is_link(metadata)
             || child_rel == ".jchtools-work"
@@ -534,7 +536,10 @@ impl WalkCtx<'_> {
                 return true;
             }
         }
-        if child_rel == self.quarantine || child_rel.starts_with(&format!("{}/", self.quarantine)) {
+        if self
+            .quarantine
+            .is_some_and(|q| child_rel == q || child_rel.starts_with(&format!("{q}/")))
+        {
             return true;
         }
         if self.excluded.is_match(child_rel) || self.excluded.is_match(format!("{child_rel}/")) {
@@ -557,6 +562,12 @@ impl WalkCtx<'_> {
         false
     }
 }
+struct WalkCtx<'a> {
+    control: Arc<Control>,
+    scope: &'a ScopeFilter<'a>,
+    recursive: bool,
+    sink: &'a Mutex<ScanSink>,
+}
 /// 单个目录的枚举与登记（在 IO 池线程上运行）。过滤口径与旧 walkdir filter_entry
 /// 一致；子目录下钻时首个内联、其余 spawn。内联深度设上限：极深树上避免
 /// 任务在偷取执行时栈随树深增长；超限的子目录全部走 spawn（在全新栈帧上执行）。
@@ -569,6 +580,26 @@ fn walk_dir<'a>(
 ) {
     if ctx.control.checkpoint().is_err() {
         // 取消：主线程在汇合后统一以取消错误收尾，这里不再记账。
+        return;
+    }
+    // H-06：目录直接含 .git（目录或文件）即整树排除——在枚举子项之前判定，
+    // 识别后不继续遍历内部，也不登记其中任何内容；该目录与其全部祖先记污点，
+    // 避免空目录规划顺着祖先间接改动 Git 树。
+    let git_boundary = fsutil::is_git_root(dir);
+    if matches!(git_boundary, Ok(true)) {
+        let mut sink = lock_sink(ctx.sink);
+        taint_git_ancestors(&mut sink.taint, &rel);
+        sink.git_skips.push(rel);
+        return;
+    }
+    if let Err(error) = git_boundary {
+        // 边界无法判定：不得继续遍历该目录（内容未知），如实记录并整树跳过。
+        let mut sink = lock_sink(ctx.sink);
+        sink.notes.push(ScanNote {
+            path: dir.display().to_string(),
+            message: format!("无法判定是否含 .git，已整树跳过：{error:#}"),
+        });
+        taint_git_ancestors(&mut sink.taint, &rel);
         return;
     }
     let read = match fs::read_dir(dir) {
@@ -629,12 +660,33 @@ fn walk_dir<'a>(
         } else {
             format!("{rel}/{name}")
         };
-        if ctx.special_or_excluded(&child_rel, &name, &metadata) {
+        if ctx.scope.prunes(&child_rel, &name, &metadata) {
             // 被剪枝的条目盘上仍存在：其父目录不得按空目录处理。
             parent_tainted = true;
             continue;
         }
         if metadata.is_dir() {
+            // H-06 不受递归开关影响：递归关闭时不再下钻，子目录自己的边界判定没有
+            // 机会执行——直接含 .git 的目录同样不得登记（登记会让空目录规划把它当作
+            // 空目录，等于间接处理该树），这里补一次判定。
+            if !ctx.recursive {
+                let git_boundary = fsutil::is_git_root(&entry.path());
+                if matches!(git_boundary, Ok(true)) {
+                    let mut sink = lock_sink(ctx.sink);
+                    taint_git_ancestors(&mut sink.taint, &child_rel);
+                    sink.git_skips.push(child_rel);
+                    continue;
+                }
+                if let Err(error) = git_boundary {
+                    let mut sink = lock_sink(ctx.sink);
+                    sink.notes.push(ScanNote {
+                        path: entry.path().display().to_string(),
+                        message: format!("无法判定是否含 .git，已整树跳过：{error:#}"),
+                    });
+                    taint_git_ancestors(&mut sink.taint, &child_rel);
+                    continue;
+                }
+            }
             children.push(ScanChild {
                 parent: rel.clone(),
                 name,
@@ -820,21 +872,57 @@ fn scan(job: &mut Job, enqueue: bool, state: &Path) -> Result<()> {
             0,
         )?;
     }
-    // 状态目录/程序目录的剪枝口径与 count_archives 共用；选定根位于它们内部
-    // （含重合）时，整棵树按旧口径全部剪枝。
+    // S-04：任何缩小处理范围的选择都必须在日志里明确提示，避免静默漏处理。
+    let mut reduced: Vec<String> = Vec::new();
+    if !config.recursive {
+        reduced.push("递归已关闭（只处理所选目录的第一层）".into());
+    }
+    if !config.include_hidden {
+        reduced.push("未包含隐藏属性资料".into());
+    }
+    if !config.include_system {
+        reduced.push("未包含系统属性资料".into());
+    }
+    // 规则的完整文本可能很长（默认列表就跨多行），这里只报条数，规则本身在界面上可查。
+    let exclusion_rules = config
+        .exclusions
+        .split(';')
+        .filter(|part| !part.trim().is_empty())
+        .count();
+    if exclusion_rules > 0 {
+        reduced.push(format!("排除规则生效（{exclusion_rules} 条）"));
+    }
+    if !reduced.is_empty() {
+        job.log(
+            "扫描",
+            "",
+            "",
+            "提示",
+            &format!(
+                "范围提示：{}；这些资料不参与本次处理，也不会被改动",
+                reduced.join("；")
+            ),
+            0,
+        )?;
+    }
+    // 状态目录/程序目录的剪枝口径与 count_archives、收尾实空清理共用；选定根位于
+    // 它们内部（含重合）时，整棵树按旧口径全部剪枝。
     let (state_prefix, exe_prefix, root_under_special) =
         special_prefixes(&root, Some(&state), executable_dir.as_deref());
-    let sink = Mutex::new(ScanSink::default());
-    let ctx = WalkCtx {
-        control: job.context.control.clone(),
+    let scope_filter = ScopeFilter {
         excluded: &excluded,
-        recursive: config.recursive,
         include_hidden: config.include_hidden,
         include_system: config.include_system,
-        quarantine: archive::QUARANTINE_DIR_NAME,
+        quarantine: Some(archive::QUARANTINE_DIR_NAME),
         state_prefix,
         exe_prefix,
         root_under_special,
+    };
+    let sink = Mutex::new(ScanSink::default());
+    let ctx = WalkCtx {
+        control: job.context.control.clone(),
+        scope: &scope_filter,
+        recursive: config.recursive,
         sink: &sink,
     };
     let pool = io_pool()?;
@@ -845,14 +933,43 @@ fn scan(job: &mut Job, enqueue: bool, state: &Path) -> Result<()> {
     });
     // 用户取消：不做入库与后续阶段（旧实现同样以取消错误中止扫描）。
     job.context.control.checkpoint()?;
-    let sink = sink
+    let mut sink = sink
         .into_inner()
         .unwrap_or_else(std::sync::PoisonError::into_inner);
     for note in &sink.notes {
         job.summary.errors += 1;
         job.log("扫描", &note.path, "", "跳过", &note.message, 0)?;
     }
-    // 汇总入库：按父目录分组还原深度先序；污点表供 planner 的空目录规划排除。
+    let mut git_roots = std::mem::take(&mut sink.git_skips);
+    if !git_roots.is_empty() {
+        // H-06：Git 整树排除必须明确提示（界面蓝条 + 日志），不静默跳过。
+        git_roots.sort();
+        git_roots.dedup();
+        let shown = git_roots
+            .iter()
+            .take(3)
+            .cloned()
+            .collect::<Vec<_>>()
+            .join("、");
+        let more = if git_roots.len() > 3 { " 等" } else { "" };
+        job.log(
+            "扫描",
+            "",
+            "",
+            "提示",
+            &format!(
+                "已跳过 {} 个 Git 目录及其全部内容（含 .git 的目录整树排除：不读取、不归类、不改名、不删除，不受隐藏/递归/清理开关影响）：{shown}{more}",
+                git_roots.len()
+            ),
+            0,
+        )?;
+        job.context.emit(Event::Notice(format!(
+            "已跳过 {} 个 Git 目录树（含全部后代，未读取内容）",
+            git_roots.len()
+        )));
+    }
+    // 汇总入库：按父目录分组还原深度先序；污点表供 planner 的空目录规划排除，
+    // git_roots 供 planner 拒绝把内容归入 Git 工作树（H-06：不归类）。
     let mut by_parent: HashMap<String, Vec<ScanChild>> = HashMap::new();
     for child in sink.children {
         by_parent
@@ -865,10 +982,20 @@ fn scan(job: &mut Job, enqueue: bool, state: &Path) -> Result<()> {
     job.db.conn.execute_batch("BEGIN IMMEDIATE")?;
     let result = (|| {
         job.db.conn.execute_batch(
-            "DROP TABLE IF EXISTS scan_taint; CREATE TEMP TABLE scan_taint(rel TEXT PRIMARY KEY)",
+            "DROP TABLE IF EXISTS scan_taint; CREATE TEMP TABLE scan_taint(rel TEXT PRIMARY KEY);
+             DROP TABLE IF EXISTS git_roots; CREATE TEMP TABLE git_roots(rel TEXT PRIMARY KEY)",
         )?;
         for rel in &taint {
             job.db.remember_taint(rel)?;
+        }
+        {
+            let mut statement = job
+                .db
+                .conn
+                .prepare_cached("INSERT OR IGNORE INTO git_roots(rel) VALUES(?1)")?;
+            for rel in &git_roots {
+                statement.execute(params![rel])?;
+            }
         }
         let mut count = 0u64;
         scan_emit(job, &by_parent, enqueue, "", 1, &mut count)?;
@@ -1000,7 +1127,7 @@ fn hash_candidates(job: &mut Job) -> Result<()> {
                 .map(|file| {
                     let result = (|| {
                         let path = fsutil::safe_join(root, &file.rel)?;
-                        hashing::full_hash(&path, &file.snapshot, control)
+                        hashing::full_hash(&path, control)
                     })();
                     (file.id, file.rel.clone(), result)
                 })
@@ -1141,7 +1268,6 @@ pub fn apply(directory: &Path, context: TaskContext) -> Result<TaskResult> {
         context,
         db,
         summary,
-        archive_override: None,
     };
     job.db.set("status", &"executing")?;
     let outcome = (|| {
@@ -1204,6 +1330,10 @@ pub fn apply(directory: &Path, context: TaskContext) -> Result<TaskResult> {
             }
             cursor = actions[actions.len() - 1].id;
         }
+        // H-05/C-07：计划动作执行完总是做最终实空清理（不可关闭、不受文件清理/删除
+        // 方式选择影响）：既覆盖本次新产生的空目录与空目录链，也覆盖从未入库的目录
+        // （例如实际为空的「解压失败」暂存区、归类新建但没落文件的目录）。
+        final_empty_cleanup(&mut job)?;
         Ok::<_, anyhow::Error>(())
     })();
     job.db.set("summary", &job.summary)?;
@@ -1230,6 +1360,210 @@ pub fn apply(directory: &Path, context: TaskContext) -> Result<TaskResult> {
         directory: directory.to_path_buf(),
         summary: job.summary,
     })
+}
+/// 整理收尾的实空清理（H-05/C-07）：自底向上删除实际为空的目录及空目录链。
+/// 「总是执行」：没有配置开关可关闭，也不受文件清理/删除方式选择影响——空目录清理
+/// 不属于 C-08 的六类清理项，H-05 不提供关闭这一步的选项。只尊重：选定根目录、
+/// Git 整树排除（H-06）、递归范围、用户排除与隐藏/系统开关、状态目录/程序目录/
+/// 工具工作目录，以及取消；一律永久删除（S-02）。
+/// 与扫描共用同一套范围口径（[`ScopeFilter`]），所以「解压失败」暂存区内实际为空的
+/// 目录也按 H-05 清理（C-09），但其内容一律不碰——判定只看目录项是否为空。
+fn final_empty_cleanup(job: &mut Job) -> Result<()> {
+    job.context.control.checkpoint()?;
+    let errors_before_cleanup = job.summary.errors;
+    let excluded = rules::build_exclusions(&job.config.exclusions)?;
+    let executable_dir = std::env::current_exe()
+        .ok()
+        .and_then(|p| p.parent().and_then(|d| fs::canonicalize(d).ok()));
+    let state = job
+        .db
+        .get::<String>("state_dir")
+        .ok()
+        .map(PathBuf::from)
+        .and_then(|directory| fs::canonicalize(directory).ok());
+    let (state_prefix, exe_prefix, root_under_special) =
+        special_prefixes(&job.root, state.as_deref(), executable_dir.as_deref());
+    if root_under_special {
+        // 选定根位于状态目录/程序目录内：扫描整树剪枝，这里同样不处理任何条目。
+        return Ok(());
+    }
+    let scope_filter = ScopeFilter {
+        excluded: &excluded,
+        include_hidden: job.config.include_hidden,
+        include_system: job.config.include_system,
+        // C-09：暂存区内容不参与处理，但实际为空的目录仍按 H-05 清理。
+        quarantine: None,
+        state_prefix,
+        exe_prefix,
+        root_under_special,
+    };
+    let recursive = job.config.recursive;
+    let mut stack: Vec<SweepFrame> = Vec::new();
+    // 选定根目录本身绝不删除（H-05）：它的条目决定深度 1 的候选。
+    let (children, keep, notes) = sweep_entries(&scope_filter, true, &job.root, "");
+    for note in notes {
+        job.summary.errors += 1;
+        job.log("清理", "", "", "跳过", &note, 0)?;
+    }
+    stack.push(SweepFrame {
+        path: job.root.clone(),
+        rel: String::new(),
+        children,
+        next: 0,
+        keep,
+    });
+    while !stack.is_empty() {
+        // 后序遍历：先把全部子目录处理完，再决定当前目录是否实际为空。
+        let index = stack.len() - 1;
+        if stack[index].next < stack[index].children.len() {
+            let (path, rel) = stack[index].children[stack[index].next].clone();
+            stack[index].next += 1;
+            let (children, keep, notes) = sweep_entries(&scope_filter, recursive, &path, &rel);
+            for note in notes {
+                job.summary.errors += 1;
+                job.log("清理", &rel, "", "跳过", &note, 0)?;
+            }
+            stack.push(SweepFrame {
+                path,
+                rel,
+                children,
+                next: 0,
+                keep,
+            });
+            continue;
+        }
+        let Some(frame) = stack.pop() else {
+            break;
+        };
+        if frame.rel.is_empty() {
+            // 选定根目录本身绝不删除（H-05）。
+            continue;
+        }
+        job.context.control.checkpoint()?;
+        if !sweep_remove(job, &frame)? {
+            // 目录没能删除（非空/失败/超出范围）：父目录因此不算实际为空。
+            if let Some(parent) = stack.last_mut() {
+                parent.keep = true;
+            }
+        }
+    }
+    anyhow::ensure!(
+        job.summary.errors == errors_before_cleanup,
+        "空目录清理未完成：有目录无法读取或删除，详情见进度与日志"
+    );
+    Ok(())
+}
+/// 删除一个收尾清理候选目录，返回是否真的删掉了（没删掉时父目录不算实际为空）。
+/// 一律永久删除（S-02）；这里不看用户勾选状态——H-05 的清理是强制步骤。
+fn sweep_remove(job: &mut Job, frame: &SweepFrame) -> Result<bool> {
+    if frame.keep {
+        return Ok(false);
+    }
+    // 执行期复查（与计划动作同口径）：platform::remove 还会再确认一次目录为空。
+    match platform::remove(&frame.path, DeleteMode::Permanent, &job.context.control) {
+        Ok(DeleteResult::Permanent) => {
+            job.summary.deleted += 1;
+            job.log(
+                "清理",
+                &frame.rel,
+                "",
+                "已永久删除",
+                "整理收尾：目录实际为空（H-05）",
+                0,
+            )?;
+            Ok(true)
+        }
+        Ok(DeleteResult::Kept) => {
+            job.summary.skipped += 1;
+            job.log("清理", &frame.rel, "", "保留", "删除方式为保留", 0)?;
+            Ok(false)
+        }
+        Err(error) => {
+            // 用户主动取消不是失败（C-10）：直接以取消错误收尾，不记为错误。
+            if job.context.control.is_cancelled() {
+                job.context.control.check_cancelled()?;
+            }
+            job.summary.errors += 1;
+            job.log("清理", &frame.rel, "", "失败", &format!("{error:#}"), 0)?;
+            Ok(false)
+        }
+    }
+}
+/// 收尾清理的一个待处理目录：读条目、处理完全部子目录后再决定它是否实际为空。
+struct SweepFrame {
+    path: PathBuf,
+    rel: String,
+    /// 需要下钻处理的子目录（按目录项枚举序）。
+    children: Vec<(PathBuf, String)>,
+    next: usize,
+    /// 该目录里存在不会随本次清理消失的条目（普通文件、链接、被范围剪枝的条目、
+    /// Git 目录、不可读条目，或递归范围之外的子目录）：存在这样的条目即「不是空目录」。
+    keep: bool,
+}
+/// 读取收尾清理候选目录的条目：返回（需下钻的子目录、是否确定不会为空、记录的跳过原因）。
+/// `collect` 为假（递归已关闭，且不是选定根目录的第一层）时不下钻更深层，也不清理它们；
+/// 深层条目仍会使本目录不算空。
+fn sweep_entries(
+    scope_filter: &ScopeFilter<'_>,
+    collect: bool,
+    dir: &Path,
+    rel: &str,
+) -> (Vec<(PathBuf, String)>, bool, Vec<String>) {
+    let read = match fs::read_dir(dir) {
+        Ok(read) => read,
+        Err(error) => return (Vec::new(), true, vec![format!("{error:#}")]),
+    };
+    let mut children = Vec::new();
+    let mut keep = false;
+    let mut notes = Vec::new();
+    for entry in read {
+        let entry = match entry {
+            Ok(entry) => entry,
+            Err(error) => {
+                // 枚举中断：该目录未必为空，按保留处理。
+                keep = true;
+                notes.push(format!("{error:#}"));
+                continue;
+            }
+        };
+        let Ok(name) = entry.file_name().into_string() else {
+            keep = true;
+            continue;
+        };
+        let child_rel = if rel.is_empty() {
+            name.clone()
+        } else {
+            format!("{rel}/{name}")
+        };
+        let Ok(metadata) = entry.metadata() else {
+            keep = true;
+            continue;
+        };
+        if scope_filter.prunes(&child_rel, &name, &metadata) {
+            // 超出本次处理范围的条目仍在盘上：本目录不是实际为空，也不会被删除。
+            keep = true;
+            continue;
+        }
+        if !metadata.is_dir() {
+            keep = true;
+            continue;
+        }
+        if !collect {
+            // 递归范围之外：不清理也不下钻（清理范围与本次扫描一致）。
+            keep = true;
+            continue;
+        }
+        match fsutil::is_git_root(&entry.path()) {
+            // H-06：目录直接含 .git 时整树排除，不遍历内部，也不清理它。
+            Ok(true) => keep = true,
+            Ok(false) => children.push((entry.path(), child_rel)),
+            Err(error) => {
+                keep = true;
+                notes.push(format!("{}：{error:#}", entry.path().display()));
+            }
+        }
+    }
+    (children, keep, notes)
 }
 /// 可并行执行的动作段类别：文件删除彼此独立；空目录删除按深度分层
 /// （计划按深度降序生成，同层目录不互为父子，深层已在更早的段/页删除）。

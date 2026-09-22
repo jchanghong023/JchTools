@@ -305,10 +305,6 @@ export component AppWindow inherits Window {
     in-out property <bool> acknowledge: false;
     // X-02：解压确认框在后台清点压缩包期间置真——数量未知时不得允许确认启动。
     in-out property <bool> confirm-pending: false;
-    in-out property <bool> conflict-visible: false;
-    in-out property <string> conflict-text;
-    in-out property <int> conflict-choice: 4;
-    in-out property <bool> conflict-all: false;
     in-out property <bool> system-dark: false;
     in-out property <float> progress: -1;
     in-out property <string> progress-note;
@@ -339,7 +335,6 @@ export component AppWindow inherits Window {
     callback plan-page(int);
     callback filter-plan(string);
     callback open-report();
-    callback answer-conflict(int,bool);
     callback request-extract-start();
     callback window-drag-start(length,length);
     callback window-drag-move(length,length);
@@ -404,11 +399,11 @@ export component AppWindow inherits Window {
                     icon: 0;
                     active: tool.id == root.active-tool-id;
                     // 模态确认层打开时导航不可点，避免点击穿透背景控件。
-                    enabled: root.confirm-kind == 0 && !root.conflict-visible;
+                    enabled: root.confirm-kind == 0;
                     clicked => { root.select-tool(tool.id); }
                 }
                 Rectangle { height: 12px; background: transparent; }
-                NavItem { text: "关于"; icon: 1; active: root.screen == 1; enabled: root.confirm-kind == 0 && !root.conflict-visible; clicked => { root.navigation(1); } }
+                NavItem { text: "关于"; icon: 1; active: root.screen == 1; enabled: root.confirm-kind == 0; clicked => { root.navigation(1); } }
                 Rectangle { vertical-stretch: 1; background: transparent; }
                 Rectangle { height: 1px; background: Design.line-soft; }
                 Muted { text: "本地处理 · 不上传文件\nWindows 优先"; font-size: 11px; }
@@ -422,7 +417,7 @@ export component AppWindow inherits Window {
                     font-size: 22px; font-weight: 700; }
                 Rectangle { width: 3px; height: 18px; border-radius: 2px; background: Design.bar; }
                 Muted { text: root.screen == 0 ? "内容去重、归类与清理（不解压）；先分析出计划，确认后才执行。"
-                    : root.screen == 2 ? "递归解开压缩包；成功原包直接永久删除，失败原包集中到「解压失败」。"
+                    : root.screen == 2 ? "递归解开压缩包；原压缩包与已有文件保留，无法完全解开的包移入「解压失败」。"
                     : "Windows 优先的本地工具箱 · 功能持续增加";
                     horizontal-stretch: 1; wrap: no-wrap; overflow: elide; vertical-alignment: center; font-size: 13px; }
                 if root.busy: Spinner { width: 20px; height: 20px; }
@@ -470,9 +465,9 @@ export component AppWindow inherits Window {
                 }
                 // 面板页签 + 任务操作
                 HorizontalLayout { height: 32px; spacing: 2px;
-                    Tab { text: "处理规则"; active: root.panel == 0; width: 104px; enabled: root.confirm-kind == 0 && !root.conflict-visible; clicked => { root.panel = 0; } }
-                    Tab { text: "整理计划"; active: root.panel == 1; width: 104px; enabled: root.has-task && root.confirm-kind == 0 && !root.conflict-visible; clicked => { root.panel = 1; } }
-                    Tab { text: "进度与日志"; active: root.panel == 2; width: 118px; enabled: root.confirm-kind == 0 && !root.conflict-visible; clicked => { root.panel = 2; } }
+                    Tab { text: "处理规则"; active: root.panel == 0; width: 104px; enabled: root.confirm-kind == 0; clicked => { root.panel = 0; } }
+                    Tab { text: "整理计划"; active: root.panel == 1; width: 104px; enabled: root.has-task && root.confirm-kind == 0; clicked => { root.panel = 1; } }
+                    Tab { text: "进度与日志"; active: root.panel == 2; width: 118px; enabled: root.confirm-kind == 0; clicked => { root.panel = 2; } }
                     Rectangle { horizontal-stretch: 1; background: transparent; }
                     if root.has-task: Button { text: "打开任务目录"; enabled: !root.busy && root.confirm-kind == 0; clicked => { root.open-report(); } }
                 }
@@ -548,7 +543,11 @@ export component AppWindow inherits Window {
                             HorizontalLayout { padding-top: 10px; padding-bottom: 10px; padding-left: 14px; padding-right: 14px; spacing: 12px; cross-axis-alignment: center;
                                 // 勾选保存中 ready 短暂为 false：此时仍允许继续改其他勾选，
                                 // 否则整表被锁且主按钮文案被误切。
-                                CheckBox { checked: item.selected; enabled: !root.busy && root.confirm-kind == 0 && item.state == "待执行" && root.plan-editable;
+                                // C-11：取消勾选的行走「已取消勾选」显示，重新勾选恢复「待执行」，
+                                // 因此两种行状态都必须可点，只有已执行/已跳过/失败的行锁死。
+                                // H-05/C-07：空目录清理是整理收尾的强制动作，不受勾选影响，
+                                // 因此这些行不得可取消勾选（勾了也会被清理，显示会与结果不符）。
+                                CheckBox { checked: item.selected; enabled: !root.busy && root.confirm-kind == 0 && (item.state == "待执行" || item.state == "已取消勾选") && item.kind != "空目录复查" && root.plan-editable;
                                     accessible-label: item.kind + " " + item.source;
                                     toggled => { root.plan-toggle(item.id,self.checked); } }
                                 VerticalLayout { horizontal-stretch: 1; spacing: 3px;
@@ -600,8 +599,8 @@ export component AppWindow inherits Window {
                             }
                             // 模态（如 kind=3 停止并关闭）与解压冲突框打开期间都禁用：键盘
                             // 不得穿透遮罩直接暂停/取消任务，必须先处理最上层对话框。
-                            if root.busy: Button { text: root.paused ? "继续" : "暂停"; enabled: root.confirm-kind == 0 && !root.conflict-visible; clicked => { root.pause-task(); } }
-                            if root.busy: Button { text: "取消任务"; enabled: root.confirm-kind == 0 && !root.conflict-visible; clicked => { root.cancel-task(); } }
+                            if root.busy: Button { text: root.paused ? "继续" : "暂停"; enabled: root.confirm-kind == 0; clicked => { root.pause-task(); } }
+                            if root.busy: Button { text: "取消任务"; enabled: root.confirm-kind == 0; clicked => { root.cancel-task(); } }
                             if !root.busy && root.ready: Button { text: "确认并执行整理"; primary: true; enabled: root.confirm-kind == 0; clicked => { root.request-apply(); } }
                             if !root.busy && !root.ready: Button { text: "开始分析"; primary: true; enabled: root.directory != "" && root.confirm-kind == 0;
                                 clicked => { root.request-start(); } }
@@ -631,8 +630,8 @@ export component AppWindow inherits Window {
                 }
                 // 一段式（X-02）：只有规则与日志两个面板，没有计划审核环节
                 HorizontalLayout { height: 32px; spacing: 2px;
-                    Tab { text: "处理规则"; active: root.panel == 0; width: 104px; enabled: root.confirm-kind == 0 && !root.conflict-visible; clicked => { root.panel = 0; } }
-                    Tab { text: "进度与日志"; active: root.panel == 1; width: 118px; enabled: root.confirm-kind == 0 && !root.conflict-visible; clicked => { root.panel = 1; } }
+                    Tab { text: "处理规则"; active: root.panel == 0; width: 104px; enabled: root.confirm-kind == 0; clicked => { root.panel = 0; } }
+                    Tab { text: "进度与日志"; active: root.panel == 1; width: 118px; enabled: root.confirm-kind == 0; clicked => { root.panel = 1; } }
                     Rectangle { horizontal-stretch: 1; background: transparent; }
                 }
                 // 规则分区胶囊（递归解压只有解压与安全两分区）
@@ -653,6 +652,13 @@ export component AppWindow inherits Window {
                     }
                 }
                 if root.panel == 0: Surface { vertical-stretch: 1;
+                    // 解压侧的基础规则已按 X-04/X-05 固定（原包保留、冲突自动改名），
+                    // 该分区默认只剩高级层：给出去向提示，不留一张空白卡片。
+                    if root.rules.length == 0: Muted {
+                        x: 16px; y: 16px; width: parent.width - 32px;
+                        text: "本分区没有基础规则；点「显示高级选项」查看解压防护与上限设置。";
+                        font-size: 12px;
+                    }
                     // 行高 44px：与目录整理同口径（U-05 的可见行数约束）。
                     ListView { for row in root.rules: Rectangle {
                         height: 44px;
@@ -683,7 +689,7 @@ export component AppWindow inherits Window {
                         border-width: 1px; border-color: Design.base.mix(Design.warning, 0.65);
                         HorizontalLayout { padding-top: 8px; padding-bottom: 8px; padding-left: 12px; padding-right: 12px; spacing: 10px; cross-axis-alignment: center;
                             Rectangle { width: 4px; height: 18px; border-radius: 2px; background: Design.warning; }
-                            Text { text: "有 " + root.quarantined-count + " 个压缩包未完全解开，已移入「解压失败」子目录等待人工处理；详情见下方日志。";
+                            Text { text: "有 " + root.quarantined-count + " 个压缩包未完全解开，原包或分卷已移入「解压失败」子目录等待人工处理；详情见下方日志。";
                                 color: Design.text; wrap: word-wrap; horizontal-stretch: 1; vertical-alignment: center; font-size: 12px; }
                         }
                     }
@@ -717,8 +723,8 @@ export component AppWindow inherits Window {
                                 Muted { text: root.metrics; wrap: no-wrap; overflow: elide; font-size: 12px; }
                             }
                             if root.busy: Text { text: root.progress-note; wrap: no-wrap; overflow: elide; color: Design.accent-ink; font-weight: 600; }
-                            if root.busy: Button { text: root.paused ? "继续" : "暂停"; enabled: root.confirm-kind == 0 && !root.conflict-visible; clicked => { root.pause-task(); } }
-                            if root.busy: Button { text: "取消任务"; enabled: root.confirm-kind == 0 && !root.conflict-visible; clicked => { root.cancel-task(); } }
+                            if root.busy: Button { text: root.paused ? "继续" : "暂停"; enabled: root.confirm-kind == 0; clicked => { root.pause-task(); } }
+                            if root.busy: Button { text: "取消任务"; enabled: root.confirm-kind == 0; clicked => { root.cancel-task(); } }
                             if !root.busy: Button { text: "开始解压"; primary: true; enabled: root.directory != "" && root.confirm-kind == 0;
                                 clicked => { root.request-extract-start(); } }
                         }
@@ -747,7 +753,7 @@ export component AppWindow inherits Window {
                         HorizontalLayout { spacing: 6px;
                             for item[index] in ["跟随系统", "浅色", "深色"]: Pill {
                                 text: item; active: root.theme == index; width: 104px; height: 32px;
-                                enabled: root.confirm-kind == 0 && !root.conflict-visible;
+                                enabled: root.confirm-kind == 0;
                                 clicked => { root.select-theme(index); }
                             }
                             Rectangle { horizontal-stretch: 1; background: transparent; }
@@ -770,29 +776,7 @@ export component AppWindow inherits Window {
             CaptionButton { kind: 2; activated => { root.close(); } }
         }
     }
-    if root.conflict-visible: Rectangle {
-        background: Design.scrim;
-        TouchArea { }
-        Surface { width: 700px; height: 360px; x: (parent.width - self.width) / 2; y: (parent.height - self.height) / 2;
-            background: Design.card;
-            VerticalLayout { padding: 24px; spacing: 13px;
-                Label { text: "解压遇到同名文件"; font-size: 22px; font-weight: 700; }
-                Rectangle { width: 48px; height: 3px; border-radius: 2px; background: Design.bar; }
-                TextEdit { text: root.conflict-text; read-only: true; vertical-stretch: 1; }
-                ComboBox { model: ["覆盖旧文件", "跳过新文件", "保留修改时间更新的", "保留较大的", "两个都保留并重命名"]; enabled: root.confirm-kind == 0;
-                    accessible-label: "解压冲突处理方式";
-                    current-index <=> root.conflict-choice; }
-                CheckBox { text: "应用于本次任务后续解压冲突"; checked <=> root.conflict-all; enabled: root.confirm-kind == 0; }
-                HorizontalLayout { spacing: 10px;
-                    Button { text: "取消整个任务"; enabled: root.confirm-kind == 0; clicked => { root.cancel-task(); } }
-                    Rectangle { horizontal-stretch: 1; background: transparent; }
-                    Button { text: "应用选择"; primary: true; enabled: root.confirm-kind == 0; clicked => { root.answer-conflict(root.conflict-choice,root.conflict-all); } }
-                }
-            }
-        }
-    }
-    // 确认层画在冲突层之后：任务运行中收到关闭请求时（confirm-kind=3）它必须盖在冲突对话框之上，
-    // 否则用户只能看到一张被压在下面的确认框。
+    // 确认层是唯一的模态层：任务运行中收到关闭请求时（confirm-kind=3）显示在最上层。
     if root.confirm-kind != 0: Rectangle {
         background: Design.scrim;
         TouchArea { }
@@ -802,8 +786,10 @@ export component AppWindow inherits Window {
                 Label { text: root.confirm-kind == 3 ? "停止任务并关闭" : "确认文件处理范围"; font-size: 22px; font-weight: 700; }
                 Rectangle { width: 48px; height: 3px; border-radius: 2px; background: Design.bar; }
                 TextEdit { text: root.confirm-text; read-only: true; vertical-stretch: 1; }
-                // 关闭确认不处理目录文件，不需要“永久删除”那一句勾选。
-                if root.confirm-kind != 3: CheckBox { text: "我已确认目录、规则及可能的永久删除行为"; checked <=> root.acknowledge; }
+                // 关闭确认不处理目录文件，不需要确认勾选；解压不删除任何文件（X-05/H-07），
+                // 勾选文案不得把永久删除说成解压授权；只有目录整理才可能有永久删除（S-02）。
+                if root.confirm-kind == 1: CheckBox { text: "我已确认解压范围：原压缩包与已有文件保留"; checked <=> root.acknowledge; }
+                if root.confirm-kind == 2: CheckBox { text: "我已确认目录、规则及可能的永久删除行为（不可恢复）"; checked <=> root.acknowledge; }
                 HorizontalLayout { spacing: 10px;
                     Rectangle { horizontal-stretch: 1; background: transparent; }
                     Button { text: "返回检查"; clicked => { root.confirm-kind = 0; root.acknowledge = false; root.confirm-pending = false; } }

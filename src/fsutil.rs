@@ -83,6 +83,16 @@ pub fn is_link(meta: &fs::Metadata) -> bool {
     }
     false
 }
+/// 只检查目录边界，不遍历 Git 工作树内部；`.git` 文件与目录均保护整树。
+pub fn is_git_root(path: &Path) -> Result<bool> {
+    match fs::symlink_metadata(path.join(".git")) {
+        Ok(_) => Ok(true),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(false),
+        Err(error) => {
+            Err(error).with_context(|| format!("无法检查 Git 目录边界：{}", path.display()))
+        }
+    }
+}
 pub fn safe_join(root: &Path, rel: &str) -> Result<PathBuf> {
     let p = safe_relative(rel)?;
     let mut current = root.to_path_buf();
@@ -182,16 +192,6 @@ pub fn snapshot_with(path: &Path, metadata: &fs::Metadata) -> Result<Snapshot> {
         identity,
         links,
     })
-}
-pub fn open_stable_read(path: &Path) -> Result<File> {
-    let mut options = OpenOptions::new();
-    options.read(true);
-    #[cfg(windows)]
-    {
-        use std::os::windows::fs::OpenOptionsExt;
-        options.share_mode(1); // FILE_SHARE_READ; deny writes/deletes while hashing.
-    }
-    Ok(options.open(path)?)
 }
 /// User-file moves are strictly no-replace and never copy data across volumes.
 pub fn rename_noreplace(source: &Path, target: &Path) -> Result<()> {
@@ -305,19 +305,40 @@ fn truncate_utf16(text: &str, max_units: usize) -> String {
     }
     out
 }
+/// 分离文件名主体与完整扩展名；扩展名含前导点，直接借用原串。
+pub fn split_compound_name(name: &str) -> (&str, &str) {
+    let Some(mut split) = name.rfind('.').filter(|&index| index > 0) else {
+        return (name, "");
+    };
+    let (stem, extension) = name.split_at(split);
+    if let Some(inner_dot) = stem.rfind('.').filter(|&index| index > 0) {
+        let inner = &stem[inner_dot + 1..];
+        let numbered_volume =
+            extension.len() == 4 && extension.as_bytes()[1..].iter().all(u8::is_ascii_digit);
+        if inner.eq_ignore_ascii_case("tar")
+            || (numbered_volume
+                && ["7z", "zip", "rar"]
+                    .iter()
+                    .any(|kind| inner.eq_ignore_ascii_case(kind)))
+        {
+            split = inner_dot;
+        }
+    }
+    name.split_at(split)
+}
 pub fn unique_target(root: &Path, requested: &Path) -> Result<PathBuf> {
     let parent = requested.parent().context("目标没有父目录")?;
-    let stem = requested
-        .file_stem()
-        .and_then(|v| v.to_str())
+    let name = requested
+        .file_name()
+        .and_then(|value| value.to_str())
         .context("无效文件名")?;
-    let ext = requested
-        .extension()
-        .and_then(|v| v.to_str())
-        .map(|v| format!(".{v}"))
-        .unwrap_or_default();
+    let (stem, ext) = split_compound_name(name);
+    let extension_units = ext.encode_utf16().count();
     for index in 1u64..=1_000_000 {
-        let name = suffixed_candidate(stem, &ext, index);
+        if extension_units + index.ilog10() as usize + 5 > 255 {
+            bail!("原扩展名过长，无法保留扩展名并追加冲突序号");
+        }
+        let name = suffixed_candidate(stem, ext, index);
         let path = parent.join(name);
         let rel = relative_string(root, &path)?;
         for part in rel.split('/') {
