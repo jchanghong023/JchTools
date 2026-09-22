@@ -24,7 +24,7 @@ use anyhow::Result;
 use serde::Deserialize;
 use slint::{ComponentHandle, Model, ModelRc, SharedString, VecModel};
 use std::{
-    cell::RefCell,
+    cell::{Cell, RefCell},
     collections::VecDeque,
     path::{Path, PathBuf},
     rc::Rc,
@@ -1030,6 +1030,32 @@ fn push_event_log(logs: &mut VecDeque<String>, text: String) {
     logs.push_back(text);
 }
 
+/// 日志面板当前是否可见：「进度与日志」在目录整理页是 panel 2、在递归解压页是 panel 1
+/// （ui/app.slint 两处 `if root.panel == …` 的条件元素）。不可见时条件子树根本没实例化，
+/// 重建 300 行文本纯属浪费——事件循环据此只在可见时上屏（见轮询尾部的 log_dirty）。
+fn log_panel_visible(ui: &AppWindow) -> bool {
+    match ui.get_screen() {
+        0 => ui.get_panel() == 2,
+        2 => ui.get_panel() == 1,
+        _ => false,
+    }
+}
+
+/// 日志面板的呈现文本：最新一条在最上（U-10 的显示口径与环形缓冲同源）。
+/// 逐条 push_str 一次成型，避免「克隆 300 条字符串 → 收集成 Vec → join」的中间分配。
+fn log_panel_text(logs: &VecDeque<String>) -> String {
+    // 预分配：行长之和 + 分隔换行，避免大字符串反复扩容拷贝。
+    let capacity = logs.iter().map(String::len).sum::<usize>() + logs.len().saturating_sub(1);
+    let mut text = String::with_capacity(capacity);
+    for (index, line) in logs.iter().rev().enumerate() {
+        if index > 0 {
+            text.push('\n');
+        }
+        text.push_str(line);
+    }
+    text
+}
+
 /// 恢复侧栏全量工具列表并清空搜索框：从关于页返回或点选工具后调用，
 /// 避免搜索过滤残留导致侧栏只剩匹配项。
 fn reset_tool_list(ui: &AppWindow) {
@@ -1727,18 +1753,26 @@ pub fn run_with_engine_overrides(
                 .unwrap_or_else(Instant::now),
         ));
         let theme_poll = last_theme_poll.clone();
+        // 日志呈现是否落后于环形缓冲：面板不可见时只置脏（重建文本浪费），
+        // 打开后的下一次轮询按 state.logs 补齐，保持最新在上的 300 条记录。
+        let log_dirty = Cell::new(false);
         timer.start(slint::TimerMode::Repeated,Duration::from_millis(100),move||{
             let Some(ui)=weak.upgrade()else{return;};
             if theme_poll.get().elapsed()>=Duration::from_secs(2){
                 theme_poll.set(Instant::now());
                 ui.set_system_dark(system_dark());
             }
-            let mut log_changed=false;
+            // 一轮回调返回后才会绘制，同一轮里只有最后一条状态文案会被看到：逐条 set_status
+            // 只是把同一个标签反复标记重绘。暂停态丢弃的判断仍按事件原位置求值（语义不变）；
+            // 自带收尾文案的事件（Ready/Done、Failed、ExtractDone）处理前清空缓冲，
+            // 保证「后写的收尾文案覆盖先写的状态」与逐条写入时一致。
+            let mut pending_status:Option<String>=None;
             for event in receiver.try_iter().take(256){
                 match event{
-                    Event::Status(text)=>{if !ui.get_paused(){ui.set_status(text.into());}},
-                    Event::Log(text)=>{let mut s=state.borrow_mut();push_event_log(&mut s.logs,text);log_changed=true;},
+                    Event::Status(text)=>{if !ui.get_paused(){pending_status=Some(text);}},
+                    Event::Log(text)=>{let mut s=state.borrow_mut();push_event_log(&mut s.logs,text);log_dirty.set(true);},
                     Event::Ready(path,summary)|Event::Done(path,summary)=>{
+                        pending_status=None;
                         let ready=Database::open_existing(&path).and_then(|db|db.get::<String>("status")).is_ok_and(|v|v=="ready");
                         // 新计划一律回到「全部」筛选：沿用上一任务的筛选可能恰好计数为 0，
                         // 造成「空列表 + 高亮禁用胶囊」的死角。
@@ -1770,9 +1804,10 @@ pub fn run_with_engine_overrides(
                         if state.borrow().close_after{let _=slint::quit_event_loop();}
                     }
                     Event::Failed(error)=>{
+                        pending_status=None;
                         // 用户点了“取消任务”时不要用红色错误条报同一个消息：取消是预期操作，不是故障。
                         let cancelled={let s=state.borrow();s.control.as_ref().is_some_and(|control|control.is_cancelled())};
-                        {let mut s=state.borrow_mut();s.control=None;s.extracting=false;push_event_log(&mut s.logs,error.clone());log_changed=true;}
+                        {let mut s=state.borrow_mut();s.control=None;s.extracting=false;push_event_log(&mut s.logs,error.clone());log_dirty.set(true);}
                         ui.set_busy(false);ui.set_ready(false);ui.set_plan_editable(state.borrow().task.clone().is_some_and(|task|task_is_ready(&task)));ui.set_paused(false);
                         if cancelled{
                             ui.set_notice_text(error.into());
@@ -1802,7 +1837,9 @@ pub fn run_with_engine_overrides(
                                 if let Some(model)=plans.as_any().downcast_ref::<VecModel<PlanRow>>(){
                                     for i in 0..model.row_count(){
                                         if let Some(mut row)=model.row_data(i){
-                                            if row.id.as_str()==id.to_string(){row.selected=selected;model.set_row_data(i,row);break;}
+                                            // 与 patch_plan_row 同口径比较：按数值比 id，避免每行
+                                            // 都拼一次 id.to_string()（保存一行的分配次数与行数同阶）。
+                                            if row.id.as_str().parse::<i64>()==Ok(id){row.selected=selected;model.set_row_data(i,row);break;}
                                         }
                                     }
                                 }
@@ -1901,6 +1938,7 @@ pub fn run_with_engine_overrides(
                         }
                     },
                     Event::ExtractDone(_path,summary)=>{
+                        pending_status=None;
                         // X-02 一段式收尾：只清运行态与展示摘要；不改 ready/has_task（目录整理两段式专用）。
                         {let mut s=state.borrow_mut();s.control=None;s.extracting=false;}
                         ui.set_busy(false);ui.set_paused(false);
@@ -1922,7 +1960,13 @@ pub fn run_with_engine_overrides(
                     },
                 }
             }
-            if log_changed{ui.set_log_text(state.borrow().logs.iter().rev().cloned().collect::<Vec<_>>().join("\n").into());}
+            if let Some(text)=pending_status{ui.set_status(text.into());}
+            // 隐藏时只置脏：日志面板没实例化就不重建 300 行文本；面板可见（含从隐藏切回来）
+            // 的下一次轮询按环形缓冲上屏，保证打开时看到的是最新 300 条。
+            if log_dirty.get()&&log_panel_visible(&ui){
+                log_dirty.set(false);
+                ui.set_log_text(log_panel_text(&state.borrow().logs).into());
+            }
             let busy=ui.get_busy();
             let s=state.borrow();
             // 只在真正运行时刷新实时指标；空闲时不碰 metrics，避免耗时一直涨

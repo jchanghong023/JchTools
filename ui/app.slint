@@ -6,31 +6,47 @@ export struct ToolRow { id: string, name: string, summary: string }
 // 界面配色：所有颜色都是不透明色，浅色/深色主题由 Design.dark 决定（写入方见 AppWindow）。
 global Design {
     in property <bool> dark: false;
-    in property <color> accent: #4f46e5;
-    in property <color> accent-2: #0ea5e9;
-    in property <color> accent-ink: dark ? #c7d2fe : #3730a3;
+    // 主色与 fluent 标准控件同值（Palette.accent-background / accent-foreground 的取值）：
+    // Slint 1.17 的 Palette 颜色成员是 out 属性，应用层无法覆写，只能反向对齐，
+    // 否则自绘导航与标准按钮会是两种蓝。
+    in property <color> accent: dark ? #60cdff : #005fb8;
+    in property <color> accent-2: dark ? #8fd9f6 : #1570bb;
+    in property <color> on-accent: dark ? #071620 : #ffffff;
+    in property <color> accent-ink: dark ? #9adcff : #00497f;
     in property <color> danger: #dc2626;
     in property <color> danger-ink: dark ? #fca5a5 : #b91c1c;
     in property <color> warning: #f59e0b;
     in property <color> warning-ink: dark ? #fcd34d : #b45309;
-    in property <color> on-accent: #ffffff;
-    in property <color> base: dark ? #1b1f2a : #ffffff;
+    // 中性底色：浅色是灰底白卡，深色是深灰底浅卡；大面积彩色渐变与光晕已移除。
+    in property <color> canvas: dark ? #15171b : #f3f4f6;
+    in property <color> rail: dark ? #1a1c21 : #eceef2;
+    in property <color> base: dark ? #1f2229 : #ffffff;
     in property <color> ink: dark ? #eef1f8 : #16192a;
-    in property <color> page-top: dark ? #232a3d : #eef0fd;
-    in property <color> page-bottom: dark ? #172430 : #eaf6fc;
     in property <brush> text: ink;
     in property <brush> text-muted: ink.transparentize(0.15);
-    in property <brush> page: @linear-gradient(150deg, page-top 0%, base 46%, page-bottom 100%);
-    in property <brush> rail: @linear-gradient(180deg, base.mix(accent, 0.88) 0%, base.mix(accent-2, 0.94) 100%);
     in property <brush> bar: @linear-gradient(90deg, accent 0%, accent-2 100%);
     in property <color> card: base;
+    // 内凹底色：分段控件底、进度轨等比卡片低一层，不再用主色染整条。
+    in property <color> sunken: dark ? #ffffff12 : #0f172a0f;
     in property <color> line: dark ? #ffffff24 : #10182824;
     in property <color> line-soft: dark ? #ffffff17 : #10182814;
     in property <color> hover: dark ? #ffffff1a : #10182812;
+    in property <color> press: dark ? #ffffff2e : #1018281f;
     in property <color> accent-soft: base.mix(accent, 0.84);
     in property <color> accent-softer: base.mix(accent, 0.93);
-    in property <color> shadow: #0f172a26;
-    in property <color> scrim: #0f172a66;
+    // 提示条底色：由卡片底色派生，浅深两套都可读（不再在各处重复 mix 表达式）。
+    in property <color> info-bg: base.mix(accent, 0.90);
+    in property <color> info-line: base.mix(accent, 0.62);
+    in property <color> danger-bg: base.mix(danger, 0.90);
+    in property <color> danger-line: base.mix(danger, 0.62);
+    in property <color> warning-bg: base.mix(warning, 0.90);
+    in property <color> warning-line: base.mix(warning, 0.65);
+    // 规则说明的完整提示框：浅色主题用深色气泡、深色主题用浅色气泡，两套都保持反相差。
+    in property <color> tip-bg: dark ? #343a42 : #1f2430;
+    in property <color> tip-ink: dark ? #eef1f8 : #f6f7fb;
+    in property <color> tip-line: dark ? #ffffff2b : #ffffff1f;
+    in property <color> shadow: dark ? #00000066 : #0f172a1f;
+    in property <color> scrim: dark ? #0000008c : #0f172a66;
 }
 
 component Label inherits Text { color: Design.text; font-size: 14px; }
@@ -38,19 +54,19 @@ component Muted inherits Text { color: Design.text-muted; font-size: 12px; wrap:
 
 component Surface inherits Rectangle {
     background: Design.card;
-    border-radius: 14px;
+    border-radius: 12px;
     border-width: 1px;
     border-color: Design.line;
     drop-shadow-color: Design.shadow;
-    drop-shadow-blur: 16px;
-    drop-shadow-offset-y: 5px;
+    drop-shadow-blur: 10px;
+    drop-shadow-offset-y: 3px;
 }
 
 component LogoBadge inherits Rectangle {
-    width: 36px; height: 36px; border-radius: 11px;
+    width: 36px; height: 36px; border-radius: 12px;
     background: Design.bar;
-    drop-shadow-color: Design.accent.transparentize(0.55);
-    drop-shadow-blur: 12px; drop-shadow-offset-y: 3px;
+    drop-shadow-color: Design.accent.transparentize(0.72);
+    drop-shadow-blur: 8px; drop-shadow-offset-y: 2px;
     Text { text: "J"; color: Design.on-accent; font-size: 19px; font-weight: 700;
         width: 100%; height: 100%; horizontal-alignment: center; vertical-alignment: center; }
 }
@@ -82,7 +98,7 @@ component NavItem inherits Rectangle {
     in property <bool> enabled: true;
     in property <int> icon: -1;
     callback clicked();
-    height: 40px; border-radius: 10px;
+    height: 40px; border-radius: 8px;
     accessible-role: button;
     accessible-label: root.text;
     accessible-enabled: root.enabled;
@@ -100,7 +116,8 @@ component NavItem inherits Rectangle {
     border-width: fs.has-focus ? 1.5px : 0px;
     border-color: Design.accent;
     background: !root.enabled ? transparent : root.active ? Design.accent-soft
-        : (touch.has-hover ? Design.hover : transparent);
+        : (touch.pressed ? Design.press : touch.has-hover ? Design.hover : transparent);
+    animate background, border-color { duration: 120ms; }
 
     touch := TouchArea { enabled: root.enabled; mouse-cursor: pointer; clicked => { root.clicked(); } }
     if root.active: Rectangle {
@@ -126,7 +143,7 @@ component Pill inherits Rectangle {
     in property <bool> active: false;
     in property <bool> enabled: true;
     callback clicked();
-    height: 34px; border-radius: 10px;
+    height: 34px; border-radius: 8px;
     accessible-role: button;
     accessible-label: root.text;
     accessible-enabled: root.enabled;
@@ -139,9 +156,12 @@ component Pill inherits Rectangle {
             return reject;
         }
     }
-    background: !root.enabled ? transparent : root.active ? Design.accent : (touch.has-hover ? Design.hover : Design.accent-softer);
+    // 选中态保持实心主色（分段控件里只有选中项着色），未选中退成卡片色，整体不再染一条主色底。
+    background: !root.enabled ? Design.sunken : root.active ? Design.accent
+        : (touch.pressed ? Design.press : touch.has-hover ? Design.hover : Design.card);
     border-width: fs.has-focus ? 2px : (root.active ? 0px : 1px);
     border-color: fs.has-focus ? Design.accent-ink : Design.line-soft;
+    animate background, border-color { duration: 120ms; }
 
     touch := TouchArea { enabled: root.enabled; mouse-cursor: pointer; clicked => { root.clicked(); } }
     Text {
@@ -159,7 +179,8 @@ component Tab inherits Rectangle {
     in property <bool> enabled: true;
     callback clicked();
     height: 34px; border-radius: 8px;
-    background: root.enabled && touch.has-hover && !root.active ? Design.hover : transparent;
+    background: (!root.enabled || root.active) ? transparent
+        : (touch.pressed ? Design.press : touch.has-hover ? Design.hover : transparent);
     accessible-role: tab;
     accessible-label: root.text;
     accessible-enabled: root.enabled;
@@ -182,6 +203,7 @@ component Tab inherits Rectangle {
         color: !root.enabled ? Design.text-muted : (root.active ? Design.accent-ink : Design.text);
         font-weight: root.active ? 600 : 500;
     }
+    animate background, border-color { duration: 120ms; }
     if root.active: Rectangle {
         x: 12px; y: root.height - 3px; width: root.width - 24px; height: 2.5px; border-radius: 1.5px;
         background: Design.bar;
@@ -192,7 +214,7 @@ component Tab inherits Rectangle {
 component ProgressBar inherits Rectangle {
     in property <float> progress: -1;
     height: 8px; border-radius: 4px;
-    background: Design.line-soft;
+    background: Design.sunken;
     clip: true;
     accessible-role: progress-indicator;
     accessible-label: root.progress >= 0 ? ("进度 " + round(root.progress * 100) + "%") : "正在处理，总量未知";
@@ -228,7 +250,8 @@ component CaptionButton inherits Rectangle {
     border-width: fs.has-focus ? 1.5px : 0px;
     border-color: Design.accent;
     property <brush> glyph-color: touch.has-hover && kind == 2 ? Design.on-accent : Design.text;
-    background: touch.has-hover ? (kind == 2 ? Design.danger : Design.hover) : transparent;
+    background: touch.has-hover ? (kind == 2 ? Design.danger : (touch.pressed ? Design.press : Design.hover)) : transparent;
+    animate background { duration: 120ms; }
 
     touch := TouchArea { mouse-cursor: pointer; clicked => { root.activated(); } }
 
@@ -259,6 +282,64 @@ component CaptionButton inherits Rectangle {
     }
 }
 
+// 规则说明的完整提示框：固定宽度、自动换行。标准 Tooltip 的纯文本模式按整行取宽，
+// 长中文说明会拉成横跨窗口的一条，这里用它的自定义内容模式把宽度收住。
+component HintTip inherits Rectangle {
+    in property <string> body;
+    background: Design.tip-bg;
+    border-radius: 8px;
+    border-width: 1px;
+    border-color: Design.tip-line;
+    drop-shadow-color: Design.shadow;
+    drop-shadow-blur: 12px;
+    drop-shadow-offset-y: 4px;
+
+    VerticalLayout { padding: 10px;
+        // 使用处宽度 400px 减去左右内边距即为正文宽度；两者需要一起改。
+        Text { text: root.body; width: 380px; wrap: word-wrap; color: Design.tip-ink; font-size: 12px; }
+    }
+}
+
+// 规则行：目录整理与递归解压共用同一套行布局（44px 行高，默认 1120×720 同屏 9 行完整可见）。
+// 说明文字单行省略；完整说明由标准 Tooltip 悬浮弹出（输入透明浮层，不撑行高、不重建模型）。
+component RuleRowItem inherits Rectangle {
+    in property <RuleRow> rule;
+    // 门禁表达式由 AppWindow 计算后传入，与目录输入保持同一口径。
+    in property <bool> editable: false;
+    // 确认模态打开时不弹提示气泡（浮层会盖在遮罩之上）；运行中仍可读说明。
+    in property <bool> show-hint: true;
+    callback rule-toggled(value: bool);
+    callback rule-chosen(value: int);
+    callback rule-edited(value: string);
+    height: 44px;
+
+    HorizontalLayout { padding-left: 16px; padding-right: 16px; spacing: 16px; cross-axis-alignment: center;
+        Rectangle { horizontal-stretch: 1;
+            VerticalLayout { spacing: 2px;
+                Label { text: root.rule.title; font-weight: 600; font-size: 13px; overflow: elide; }
+                Muted { text: root.rule.hint; wrap: no-wrap; overflow: elide; font-size: 11px; }
+            }
+            if root.show-hint: Tooltip { HintTip { width: 400px; body: root.rule.hint; } }
+        }
+        // 规则控件直接写 config，模态确认期间必须与目录输入同口径禁用：
+        // 否则键盘可穿透确认框改删除策略，确认文案与实际执行不符。
+        if root.rule.kind == 0: CheckBox { checked: root.rule.checked; enabled: root.editable;
+            text: "启用"; accessible-label: root.rule.title;
+            toggled => { root.rule-toggled(self.checked); } }
+        if root.rule.kind == 1: ComboBox { width: 220px; model: root.rule.options; current-index: root.rule.index;
+            enabled: root.editable; accessible-label: root.rule.title;
+            selected(value) => { root.rule-chosen(self.current-index); } }
+        if root.rule.kind == 2: LineEdit { width: 160px; text: root.rule.value; enabled: root.editable;
+            horizontal-alignment: right; accessible-label: root.rule.title;
+            // Slint 1.17 的 UIA 桥接会把纯数字的 accessible-value 当成数值属性上报，
+            // 读屏读到的值只有 0；这里把当前值写进描述，读屏聚焦时报“当前值 N”。
+            accessible-description: "当前值 " + root.rule.value;
+            edited(value) => { root.rule-edited(value); } }
+    }
+    Rectangle { y: parent.height - 1px; x: 16px; height: 1px; width: parent.width - 32px;
+        background: Design.line-soft; }
+}
+
 export component AppWindow inherits Window {
     title: "JchTools";
     icon: @image-url("../resources/app-icon.png");
@@ -266,7 +347,7 @@ export component AppWindow inherits Window {
     resize-border-width: 6px;
     preferred-width: 1120px; preferred-height: 720px;
     min-width: 960px; min-height: 620px;
-    background: Design.page;
+    background: Design.canvas;
     default-font-family: "Microsoft YaHei UI";
     default-font-size: 14px;
     in-out property <string> directory;
@@ -351,16 +432,6 @@ export component AppWindow inherits Window {
     changed theme => { root.apply-theme(); }
     changed system-dark => { root.apply-theme(); }
 
-    // 背景装饰：柔和光晕铺在内容之下
-    Rectangle {
-        x: -140px; y: -180px; width: 620px; height: 620px;
-        background: @radial-gradient(circle, Design.base.mix(Design.accent, 0.84) 0%, Design.base 72%);
-    }
-    Rectangle {
-        x: parent.width - 460px; y: parent.height - 420px; width: 640px; height: 640px;
-        background: @radial-gradient(circle, Design.base.mix(Design.accent-2, 0.86) 0%, Design.base 70%);
-    }
-
     // 无系统标题栏：顶部条带负责拖动与窗口按钮，其余内容与普通窗口一致
     TouchArea {
         x: 0; y: 0; width: parent.width; height: 32px;
@@ -388,7 +459,7 @@ export component AppWindow inherits Window {
                         Muted { text: "本地工具箱"; font-size: 11px; }
                     }
                 }
-                Rectangle { height: 10px; background: transparent; }
+                Rectangle { height: 1px; background: Design.line-soft; }
                 if root.tool-count > 5: LineEdit {
                     text <=> root.tool-search; placeholder-text: "搜索工具";
                     edited(value) => { root.search-tools(value); }
@@ -414,19 +485,19 @@ export component AppWindow inherits Window {
             // 页面标题区
             HorizontalLayout { height: 32px; spacing: 12px; cross-axis-alignment: center;
                 Label { text: root.screen == 0 ? "目录整理" : root.screen == 2 ? "递归解压" : "关于 JchTools";
-                    font-size: 22px; font-weight: 700; }
-                Rectangle { width: 3px; height: 18px; border-radius: 2px; background: Design.bar; }
+                    font-size: 20px; font-weight: 700; }
+                Rectangle { width: 3px; height: 16px; border-radius: 2px; background: Design.bar; }
                 Muted { text: root.screen == 0 ? "内容去重、归类与清理（不解压）；先分析出计划，确认后才执行。"
                     : root.screen == 2 ? "递归解开压缩包；原压缩包与已有文件保留，无法完全解开的包移入「解压失败」。"
                     : "Windows 优先的本地工具箱 · 功能持续增加";
-                    horizontal-stretch: 1; wrap: no-wrap; overflow: elide; vertical-alignment: center; font-size: 13px; }
+                    horizontal-stretch: 1; wrap: no-wrap; overflow: elide; vertical-alignment: center; }
                 if root.busy: Spinner { width: 20px; height: 20px; }
                 Rectangle { width: root.caption-area; background: transparent; }
             }
             if root.error-text != "": Rectangle {
-                min-height: 40px; border-radius: 12px;
-                background: Design.base.mix(Design.danger, 0.90);
-                border-width: 1px; border-color: Design.base.mix(Design.danger, 0.62);
+                min-height: 40px; border-radius: 10px;
+                background: Design.danger-bg;
+                border-width: 1px; border-color: Design.danger-line;
                 HorizontalLayout { padding-top: 8px; padding-bottom: 8px; padding-left: 14px; padding-right: 10px; spacing: 12px; cross-axis-alignment: center;
                     Rectangle { width: 4px; height: 20px; border-radius: 2px; background: Design.danger; }
                     Text { text: root.error-text; wrap: word-wrap; color: Design.danger-ink; horizontal-stretch: 1; vertical-alignment: center; }
@@ -435,11 +506,11 @@ export component AppWindow inherits Window {
             }
             // 成功/中性提示与错误分开：复制完成这类消息不再用红色错误样式。
             if root.notice-text != "": Rectangle {
-                min-height: 40px; border-radius: 12px;
-                background: Design.base.mix(Design.accent-2, 0.90);
-                border-width: 1px; border-color: Design.base.mix(Design.accent-2, 0.62);
+                min-height: 40px; border-radius: 10px;
+                background: Design.info-bg;
+                border-width: 1px; border-color: Design.info-line;
                 HorizontalLayout { padding-top: 8px; padding-bottom: 8px; padding-left: 14px; padding-right: 10px; spacing: 12px; cross-axis-alignment: center;
-                    Rectangle { width: 4px; height: 20px; border-radius: 2px; background: Design.accent-2; }
+                    Rectangle { width: 4px; height: 20px; border-radius: 2px; background: Design.accent; }
                     Text { text: root.notice-text; wrap: word-wrap; color: Design.accent-ink; horizontal-stretch: 1; vertical-alignment: center; }
                     Button { text: "关闭"; clicked => { root.notice-text = ""; } }
                 }
@@ -471,10 +542,10 @@ export component AppWindow inherits Window {
                     Rectangle { horizontal-stretch: 1; background: transparent; }
                     if root.has-task: Button { text: "打开任务目录"; enabled: !root.busy && root.confirm-kind == 0; clicked => { root.open-report(); } }
                 }
-                // 规则分区胶囊
+                // 规则分区胶囊：内凹底 + 实心选中项
                 if root.panel == 0: Rectangle {
-                    height: 32px; border-radius: 12px;
-                    background: Design.base.mix(Design.accent, 0.95);
+                    height: 32px; border-radius: 10px;
+                    background: Design.sunken;
                     border-width: 1px; border-color: Design.line-soft;
                     HorizontalLayout { padding: 3px; spacing: 4px;
                         for label[index] in ["去重", "归类", "清理", "安全与性能"]: Pill {
@@ -490,31 +561,14 @@ export component AppWindow inherits Window {
                 }
                 if root.panel == 0: Surface { vertical-stretch: 1;
                     // 行高 44px：U-05 要求默认 1120×720 下「处理规则」同屏可见 9 行；
-                    // 说明文字单行省略，不换行撑高。
-                    ListView { for row in root.rules: Rectangle {
-                        height: 44px;
-                        HorizontalLayout { padding-left: 16px; padding-right: 16px; spacing: 16px; cross-axis-alignment: center;
-                            VerticalLayout { horizontal-stretch: 1; spacing: 2px;
-                                Label { text: row.title; font-weight: 600; font-size: 13px; overflow: elide; }
-                                Muted { text: row.hint; wrap: no-wrap; overflow: elide; font-size: 11px; }
-                            }
-                            // 规则控件直接写 config，模态确认期间必须与目录输入同口径禁用：
-                            // 否则键盘可穿透确认框改删除策略，确认文案与实际执行不符。
-                            if row.kind == 0: CheckBox { checked: row.checked; enabled: !root.busy && root.confirm-kind == 0;
-                                text: "启用"; accessible-label: row.title;
-                                toggled => { root.rule-bool(row.key,self.checked); } }
-                            if row.kind == 1: ComboBox { width: 220px; model: row.options; current-index: row.index;
-                                enabled: !root.busy && root.confirm-kind == 0; accessible-label: row.title;
-                                selected(value) => { root.rule-choice(row.key,self.current-index); } }
-                            if row.kind == 2: LineEdit { width: 160px; text: row.value; enabled: !root.busy && root.confirm-kind == 0;
-                                horizontal-alignment: right; accessible-label: row.title;
-                                // Slint 1.17 的 UIA 桥接会把纯数字的 accessible-value 当成数值属性上报，
-                                // 读屏读到的值只有 0；这里把当前值写进描述，读屏聚焦时报“当前值 N”。
-                                accessible-description: "当前值 " + row.value;
-                                edited(value) => { root.rule-text(row.key,value); } }
-                        }
-                        Rectangle { y: parent.height - 1px; x: 16px; height: 1px; width: parent.width - 32px;
-                            background: Design.line-soft; }
+                    // 说明文字单行省略，完整说明由行内 Tooltip 悬浮显示。
+                    ListView { for entry in root.rules: RuleRowItem {
+                        rule: entry;
+                        editable: !root.busy && root.confirm-kind == 0;
+                        show-hint: root.confirm-kind == 0;
+                        rule-toggled(value) => { root.rule-bool(entry.key, value); }
+                        rule-chosen(value) => { root.rule-choice(entry.key, value); }
+                        rule-edited(value) => { root.rule-text(entry.key, value); }
                     }}
                 }
                 if root.panel == 1: VerticalLayout { spacing: 10px;
@@ -524,8 +578,8 @@ export component AppWindow inherits Window {
                             TextEdit { text: root.summary; read-only: true; }
                         }
                     }
-                    // 计划类型筛选
-                    HorizontalLayout { height: 30px; spacing: 4px;
+                    // 计划类型筛选（行高与 Pill 默认高度一致，避免胶囊被行高裁切）
+                    HorizontalLayout { height: 34px; spacing: 4px;
                         Pill { text: "全部"; active: root.plan-filter == 0; width: 64px; enabled: !root.busy && root.confirm-kind == 0;
                             clicked => { root.plan-filter = 0; root.filter-plan(""); } }
                         Pill { text: "删除 " + root.plan-delete-count; active: root.plan-filter == 1; width: 88px; enabled: !root.busy && root.plan-delete-count > 0 && root.confirm-kind == 0;
@@ -574,10 +628,6 @@ export component AppWindow inherits Window {
                 // 底部状态与主操作
                 Surface {
                     min-height: 56px;
-                    background: @linear-gradient(120deg, Design.base.mix(Design.accent, 0.88) 0%, Design.base.mix(Design.accent-2, 0.92) 100%);
-                    border-color: Design.base.mix(Design.accent, 0.68);
-                    drop-shadow-blur: 18px;
-                    drop-shadow-offset-y: 6px;
                     VerticalLayout { padding-top: 8px; padding-bottom: 8px; padding-left: 16px; padding-right: 14px; spacing: 8px;
                         HorizontalLayout { spacing: 12px; cross-axis-alignment: center;
                             VerticalLayout { horizontal-stretch: 1; spacing: 2px;
@@ -634,10 +684,10 @@ export component AppWindow inherits Window {
                     Tab { text: "进度与日志"; active: root.panel == 1; width: 118px; enabled: root.confirm-kind == 0; clicked => { root.panel = 1; } }
                     Rectangle { horizontal-stretch: 1; background: transparent; }
                 }
-                // 规则分区胶囊（递归解压只有解压与安全两分区）
+                // 规则分区胶囊（递归解压只有解压与安全两分区）：内凹底 + 实心选中项
                 if root.panel == 0: Rectangle {
-                    height: 32px; border-radius: 12px;
-                    background: Design.base.mix(Design.accent, 0.95);
+                    height: 32px; border-radius: 10px;
+                    background: Design.sunken;
                     border-width: 1px; border-color: Design.line-soft;
                     HorizontalLayout { padding: 3px; spacing: 4px;
                         for label[index] in ["解压", "安全与性能"]: Pill {
@@ -652,41 +702,37 @@ export component AppWindow inherits Window {
                     }
                 }
                 if root.panel == 0: Surface { vertical-stretch: 1;
-                    // 解压侧的基础规则已按 X-04/X-05 固定（原包保留、冲突自动改名），
-                    // 该分区默认只剩高级层：给出去向提示，不留一张空白卡片。
-                    if root.rules.length == 0: Muted {
+                    // 解压侧的处置已按 X-03/X-04/X-05/H-07 固定，基础层没有可调行：
+                    // 空卡片改为固定行为的简要说明，而不是一句话顶在一整张空白大卡上。
+                    if root.rules.length == 0: Rectangle {
                         x: 16px; y: 16px; width: parent.width - 32px;
-                        text: "本分区没有基础规则；点「显示高级选项」查看解压防护与上限设置。";
-                        font-size: 12px;
+                        height: self.preferred-height;
+                        background: Design.sunken;
+                        border-radius: 10px;
+                        border-width: 1px; border-color: Design.line-soft;
+                        VerticalLayout { padding: 14px; spacing: 6px;
+                            Label { text: "解压处置已固定（不提供删除原包、覆盖或跳过冲突的选项）"; wrap: word-wrap; font-weight: 600; font-size: 13px; }
+                            Muted { text: "· 压缩包就地解开（含本次解出的嵌套包），原压缩包与已有文件一律保留"; }
+                            Muted { text: "· 目标同名时只为新解出的文件自动改名，扩展名与复合扩展名保持不变"; }
+                            Muted { text: "· 无法完全解开的包移入「解压失败」子目录，原因记录在日志中"; }
+                            Muted { text: "本分区没有基础规则；点「显示高级选项」可调整防护上限（嵌套层数、条目数、展开大小与比例）。"; }
+                        }
                     }
                     // 行高 44px：与目录整理同口径（U-05 的可见行数约束）。
-                    ListView { for row in root.rules: Rectangle {
-                        height: 44px;
-                        HorizontalLayout { padding-left: 16px; padding-right: 16px; spacing: 16px; cross-axis-alignment: center;
-                            VerticalLayout { horizontal-stretch: 1; spacing: 2px;
-                                Label { text: row.title; font-weight: 600; font-size: 13px; overflow: elide; }
-                                Muted { text: row.hint; wrap: no-wrap; overflow: elide; font-size: 11px; }
-                            }
-                            if row.kind == 0: CheckBox { checked: row.checked; enabled: !root.busy && root.confirm-kind == 0;
-                                text: "启用"; accessible-label: row.title;
-                                toggled => { root.rule-bool(row.key,self.checked); } }
-                            if row.kind == 1: ComboBox { width: 220px; model: row.options; current-index: row.index;
-                                enabled: !root.busy && root.confirm-kind == 0; accessible-label: row.title;
-                                selected(value) => { root.rule-choice(row.key,self.current-index); } }
-                            if row.kind == 2: LineEdit { width: 160px; text: row.value; enabled: !root.busy && root.confirm-kind == 0;
-                                horizontal-alignment: right; accessible-label: row.title;
-                                accessible-description: "当前值 " + row.value;
-                                edited(value) => { root.rule-text(row.key,value); } }
-                        }
-                        Rectangle { y: parent.height - 1px; x: 16px; height: 1px; width: parent.width - 32px;
-                            background: Design.line-soft; }
+                    ListView { for entry in root.rules: RuleRowItem {
+                        rule: entry;
+                        editable: !root.busy && root.confirm-kind == 0;
+                        show-hint: root.confirm-kind == 0;
+                        rule-toggled(value) => { root.rule-bool(entry.key, value); }
+                        rule-chosen(value) => { root.rule-choice(entry.key, value); }
+                        rule-edited(value) => { root.rule-text(entry.key, value); }
                     }}
                 }
                 if root.panel == 1: VerticalLayout { spacing: 10px;
                     if root.quarantined-count > 0: Rectangle {
                         min-height: 36px; border-radius: 10px;
-                        background: Design.base.mix(Design.warning, 0.90);
-                        border-width: 1px; border-color: Design.base.mix(Design.warning, 0.65);
+                        background: Design.warning-bg;
+                        border-width: 1px; border-color: Design.warning-line;
                         HorizontalLayout { padding-top: 8px; padding-bottom: 8px; padding-left: 12px; padding-right: 12px; spacing: 10px; cross-axis-alignment: center;
                             Rectangle { width: 4px; height: 18px; border-radius: 2px; background: Design.warning; }
                             Text { text: "有 " + root.quarantined-count + " 个压缩包未完全解开，原包或分卷已移入「解压失败」子目录等待人工处理；详情见下方日志。";
@@ -703,10 +749,6 @@ export component AppWindow inherits Window {
                 // 底部状态与主操作
                 Surface {
                     min-height: 56px;
-                    background: @linear-gradient(120deg, Design.base.mix(Design.accent, 0.88) 0%, Design.base.mix(Design.accent-2, 0.92) 100%);
-                    border-color: Design.base.mix(Design.accent, 0.68);
-                    drop-shadow-blur: 18px;
-                    drop-shadow-offset-y: 6px;
                     VerticalLayout { padding-top: 8px; padding-bottom: 8px; padding-left: 16px; padding-right: 14px; spacing: 8px;
                         HorizontalLayout { spacing: 12px; cross-axis-alignment: center;
                             VerticalLayout { horizontal-stretch: 1; spacing: 2px;
@@ -734,11 +776,11 @@ export component AppWindow inherits Window {
             }
             if root.screen == 1: VerticalLayout { spacing: 14px;
                 Surface {
-                    VerticalLayout { padding: 22px; spacing: 14px;
+                    VerticalLayout { padding: 18px; spacing: 14px;
                         HorizontalLayout { spacing: 16px; cross-axis-alignment: center;
-                            LogoBadge { width: 56px; height: 56px; border-radius: 16px; }
+                            LogoBadge { width: 56px; height: 56px; border-radius: 14px; }
                             VerticalLayout { spacing: 4px;
-                                Text { text: "JchTools 0.1.0"; color: Design.text; font-size: 22px; font-weight: 700; }
+                                Text { text: "JchTools 0.1.0"; color: Design.text; font-size: 20px; font-weight: 700; }
                                 Muted { text: "Windows 优先的本地工具箱 · 功能持续增加"; }
                             }
                         }
@@ -783,7 +825,7 @@ export component AppWindow inherits Window {
         Surface { width: 620px; height: 335px; x: (parent.width - self.width) / 2; y: (parent.height - self.height) / 2;
             background: Design.card;
             VerticalLayout { padding: 24px; spacing: 14px;
-                Label { text: root.confirm-kind == 3 ? "停止任务并关闭" : "确认文件处理范围"; font-size: 22px; font-weight: 700; }
+                Label { text: root.confirm-kind == 3 ? "停止任务并关闭" : "确认文件处理范围"; font-size: 20px; font-weight: 700; }
                 Rectangle { width: 48px; height: 3px; border-radius: 2px; background: Design.bar; }
                 TextEdit { text: root.confirm-text; read-only: true; vertical-stretch: 1; }
                 // 关闭确认不处理目录文件，不需要确认勾选；解压不删除任何文件（X-05/H-07），

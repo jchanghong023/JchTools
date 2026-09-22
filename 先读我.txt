@@ -9,11 +9,11 @@
 空目录收尾不可关闭；含 .git 文件或目录的目录始终整树排除，
 所选根目录直接含 .git 时拒绝任务。两个工具不会自动串联。
 
-本次在 Windows 11 上运行：
-  python scripts/test_gate.py fulltest --authorized
-结果：退出码 0，11 个阶段全部 PASS；包含真实引擎测试与 GUI S1–S4。
-另已目视检查 150% DPI 下 1120×720、960×620 两档窗口。
-本次未运行 slowtest、发布打包或远程 CI，不能据此宣称发布验收通过。
+验证结果必须对应具体提交，不能把旧版本的通过记录当作当前源码的结论。
+fulltest 覆盖本地质量门、真实引擎与 GUI S1–S4；slowtest 在此基础上
+增加发布打包和远程 check.yml，二者每次运行均需明确授权。
+命令退出码、对应提交的 Actions 记录与包内 BUILD-INFO.json 共同记录验证范围；
+正式交付的安装包、便携 ZIP 和校验和见仓库 Releases 页。
 
 注意：7z.exe / 7z.dll 不进 git（已被 .gitignore 忽略）。运行 scripts/fetch-7zip.ps1 下载并校验
 官方引擎后，build.rs 会把引擎压缩内嵌进 EXE；没有内嵌引擎的构建在解压时会给出明确错误，
