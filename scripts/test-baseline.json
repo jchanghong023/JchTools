@@ -3,6 +3,12 @@
   "tests": [
     {
       "file": "src/archive.rs",
+      "name": "delete_successful_source_stops_on_cancellation",
+      "ignored": false,
+      "cfg": null
+    },
+    {
+      "file": "src/archive.rs",
       "name": "enqueue_replaces_pending_row_for_same_rel",
       "ignored": false,
       "cfg": null
@@ -117,7 +123,13 @@
     },
     {
       "file": "src/gui.rs",
-      "name": "extract_confirmation_keeps_originals_without_delete_controls",
+      "name": "directory_recheck_disarms_before_worker_finishes",
+      "ignored": false,
+      "cfg": null
+    },
+    {
+      "file": "src/gui.rs",
+      "name": "directory_recheck_status_survives_superseding_page_request",
       "ignored": false,
       "cfg": null
     },
@@ -183,7 +195,13 @@
     },
     {
       "file": "src/gui.rs",
-      "name": "plan_page_event_rejects_stale_gen_without_touching_completed",
+      "name": "plan_page_event_rejects_stale_generation_and_filter",
+      "ignored": false,
+      "cfg": null
+    },
+    {
+      "file": "src/gui.rs",
+      "name": "plan_readiness_fails_closed_on_stale_snapshot",
       "ignored": false,
       "cfg": null
     },
@@ -465,6 +483,12 @@
     },
     {
       "file": "tests/archive.rs",
+      "name": "nested_archives_are_processed_exactly_once",
+      "ignored": true,
+      "cfg": null
+    },
+    {
+      "file": "tests/archive.rs",
       "name": "nested_archives_are_processed_recursively",
       "ignored": true,
       "cfg": null
@@ -477,19 +501,13 @@
     },
     {
       "file": "tests/archive.rs",
-      "name": "real_engine_standalone_zip_keeps_stale_z_sibling",
+      "name": "real_engine_standalone_zip_deletes_source_and_keeps_stale_z_sibling",
       "ignored": true,
       "cfg": null
     },
     {
       "file": "tests/archive.rs",
-      "name": "rerun_lands_a_new_copy_beside_the_retained_source",
-      "ignored": true,
-      "cfg": null
-    },
-    {
-      "file": "tests/archive.rs",
-      "name": "retained_nested_archives_are_processed_exactly_once",
+      "name": "rerun_of_a_recreated_source_lands_a_new_copy",
       "ignored": true,
       "cfg": null
     },
@@ -513,7 +531,25 @@
     },
     {
       "file": "tests/archive.rs",
-      "name": "successful_extraction_retains_source_and_all_volumes",
+      "name": "successful_cleanup_preserves_unused_volume_named_siblings",
+      "ignored": true,
+      "cfg": null
+    },
+    {
+      "file": "tests/archive.rs",
+      "name": "successful_cleanup_preserves_unused_volume_tail_after_gap",
+      "ignored": true,
+      "cfg": null
+    },
+    {
+      "file": "tests/archive.rs",
+      "name": "successful_cleanup_uses_rar_header_volume_naming",
+      "ignored": true,
+      "cfg": null
+    },
+    {
+      "file": "tests/archive.rs",
+      "name": "successful_extraction_deletes_source_and_all_volumes",
       "ignored": true,
       "cfg": null
     },
@@ -1281,7 +1317,7 @@
     },
     {
       "file": "tests/gui_flow.rs",
-      "name": "extract_confirmation_keeps_originals_and_completes",
+      "name": "extract_confirmation_discloses_source_deletion_and_leaves_files_untouched",
       "ignored": false,
       "cfg": "feature = \"gui\""
     },
@@ -1353,7 +1389,7 @@
     },
     {
       "file": "tests/split.rs",
-      "name": "corroborated_volume_siblings_are_preserved_together",
+      "name": "corroborated_volume_siblings_are_deleted_together",
       "ignored": false,
       "cfg": null
     },
@@ -1419,15 +1455,21 @@
     },
     {
       "file": "tests/split.rs",
+      "name": "partially_deleted_volume_group_reports_failure_without_quarantine",
+      "ignored": false,
+      "cfg": "windows"
+    },
+    {
+      "file": "tests/split.rs",
       "name": "quarantined_archive_reason_is_recorded_in_log",
       "ignored": false,
       "cfg": null
     },
     {
       "file": "tests/split.rs",
-      "name": "read_locked_archives_are_preserved_without_errors",
+      "name": "read_locked_archives_surface_cleanup_failure_and_are_preserved",
       "ignored": false,
-      "cfg": null
+      "cfg": "windows"
     },
     {
       "file": "tests/split.rs",

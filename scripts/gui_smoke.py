@@ -5,7 +5,7 @@
   S1 启动并正常退出；
   S2 目录整理：选择目录 → 开始分析（只读，无确认框）→ 计划生成（不执行）；
   S3 目录整理全链路：开始分析 → 确认执行 → 整理完成；
-  S4 递归解压全链路：开始解压 → 一段确认 → 解压结束；原包/分卷及既有内容保留，
+  S4 递归解压全链路：开始解压 → 一段确认 → 解压结束；完整成功的原包/分卷删除，既有内容保留，
      冲突自动改名、嵌套内容落盘，失败包保留在「解压失败」（H-07/X-05/X-06）。
 
 用法：
@@ -46,7 +46,7 @@ COMPLETION_TIMEOUT = 240
 EDIT_ROW_TOLERANCE_PX = 20
 DEFAULT_EXE = "target/debug/JchTools.exe"
 DEFAULT_DATA = ".tmp/gui-smoke/data"
-EXTRACT_ACK = "我已确认解压范围：原压缩包与已有文件保留"
+EXTRACT_ACK = "我已确认：成功原包及分卷永久删除（不可恢复）"
 ORGANIZE_ACK = "我已确认目录、规则及可能的永久删除行为（不可恢复）"
 
 # pywinauto/pywin32 窗口操作在窗口建立/销毁竞态下抛出的瞬态错误族；
@@ -450,21 +450,40 @@ def file_digest(path: Path) -> str:
         return hashlib.file_digest(stream, "sha256").hexdigest()
 
 
-def verify_extraction_results(root: Path, originals: dict[Path, str]) -> None:
-    """核对所有输入仍在原处或完整隔离，并验证生成语料的冲突与嵌套输出."""
-    quarantined = Counter(file_digest(path) for path in (root / "解压失败").rglob("*") if path.is_file())
+def verify_original_disposition(root: Path, originals: dict[Path, str], quarantined: Counter[str]) -> None:
+    """逐个原包核对：成功组的原包与分卷必须已删除，失败组必须完整隔离，既有文件必须原样保留."""
+    successful_sections = {
+        "07-压缩包-各格式",
+        "08-压缩包-冲突",
+        "09-压缩包-嵌套",
+        "10-压缩包-超深",
+        "13-压缩包-分卷",
+        "14-大文件",
+    }
     for relative, digest in originals.items():
         current = root / relative
+        is_archive = relative.suffix.lower() in ARCHIVE_SUFFIXES or relative.suffix[1:].isdigit()
+        if is_archive and relative.parts[0] in successful_sections:
+            if current.exists():
+                msg = f"完整成功后仍保留原包或分卷：{relative}"
+                raise RuntimeError(msg)
+            continue
         if current.is_file():
+            if is_archive:
+                msg = f"失败原包未隔离：{relative}"
+                raise RuntimeError(msg)
             if file_digest(current) != digest:
                 msg = f"解压修改了既有文件：{relative}"
                 raise RuntimeError(msg)
             continue
-        is_archive = relative.suffix.lower() in ARCHIVE_SUFFIXES or relative.suffix[1:].isdigit()
         if not is_archive or quarantined[digest] == 0:
-            msg = f"解压丢失原包、分卷或既有文件：{relative}"
+            msg = f"解压丢失失败原包、分卷或既有文件：{relative}"
             raise RuntimeError(msg)
         quarantined[digest] -= 1
+
+
+def verify_extracted_outputs(root: Path) -> None:
+    """核对解压产物内容、分卷体积与嵌套原包清理."""
     expected = {
         "08-压缩包-冲突/说明 (1).txt": b"archive version B, different content and length\n",
         "08-压缩包-冲突/等长 (1).txt": b"fedcba9876543210",
@@ -474,10 +493,24 @@ def verify_extraction_results(root: Path, originals: dict[Path, str]) -> None:
         if (root / relative).read_bytes() != content:
             msg = f"解压输出内容不符合测试语料：{relative}"
             raise RuntimeError(msg)
+    if (root / "13-压缩包-分卷/big.bin").stat().st_size != 2 * 1024 * 1024 + 12345:
+        msg = "分卷原包删除前必须完整解出 big.bin"
+        raise RuntimeError(msg)
+    for path in (root / "09-压缩包-嵌套").rglob("*"):
+        if path.is_file() and path.suffix.lower() in ARCHIVE_SUFFIXES:
+            msg = f"嵌套成功原包未清理：{path.relative_to(root)}"
+            raise RuntimeError(msg)
+
+
+def verify_extraction_results(root: Path, originals: dict[Path, str]) -> None:
+    """核对成功源包删除、失败包完整隔离、既有文件不变与真实解压结果."""
+    quarantined = Counter(file_digest(path) for path in (root / "解压失败").rglob("*") if path.is_file())
+    verify_original_disposition(root, originals, quarantined)
+    verify_extracted_outputs(root)
 
 
 def s4_full_extract(exe: str, data: str) -> None:
-    """递归解压全链路：保留原包/既有文件，冲突另存，嵌套内容完整落盘."""
+    """递归解压全链路：成功原包删除、既有文件不变，冲突另存、嵌套内容完整落盘."""
     proc = subprocess.Popen([exe])
     window: WindowSpecification | None = None
     root = Path(data)
@@ -491,7 +524,7 @@ def s4_full_extract(exe: str, data: str) -> None:
         confirm_dialog(window, extraction=True)
         wait_task_status(data, "finished", baseline)
         verify_extraction_results(root, originals)
-        print("S4 PASS：原包、分卷及既有内容保留；冲突自动改名，嵌套内容正确落盘")
+        print("S4 PASS：成功原包及分卷删除；既有内容保留，冲突自动改名，嵌套内容正确落盘")
     finally:
         if window is not None:
             with contextlib.suppress(*TRANSIENT_GUI_ERRORS):
