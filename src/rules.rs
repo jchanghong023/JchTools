@@ -278,13 +278,15 @@ pub fn archive_name(name: &str) -> bool {
     }
     // 白名单之外的一切格式（含引擎能打开的 cab/iso/wim/lzh/cpio 等）都不自动解压：
     // 维护「禁止列表」必然漏掉新出现的容器格式，白名单是唯一可靠的边界。
-    // 压缩流（.gz/.bz2/.xz/.zst/.lz4/.lzma/.lz/.z/.br）允许前面再带一层 `.tar`，
-    // 整体作为一个包（`.tar.gz` 等由流后缀本身覆盖，`.tgz`/`.tbz2`/`.txz`/`.tzst` 是别名）。
+    // 压缩流（.gz/.bz2/.xz/.zst/.lzma/.z）允许前面再带一层 `.tar`，整体作为一个包
+    // （`.tar.gz` 等由流后缀本身覆盖，`.tgz`/`.tbz2`/`.txz`/`.tzst` 是别名）。
+    // `.lz4` / `.br` / `.lz`（真 lzip）不在白名单内：捆绑引擎没有对应解码器，
+    // 放进来只会把这类文件一律推进「解压失败」，不如完全不碰。
     // 卷（`.002`、`.part2.rar`、`.r00`、`.z01`）不是独立解压对象，不在这里放行；
     // 白名单外格式的卷（`.iso.001`）与配不上主包的孤立编号文件（`data.001`）同样不匹配。
     [
-        ".zip", ".7z", ".tar", ".gz", ".bz2", ".xz", ".zst", ".lz4", ".lzma", ".lz", ".z", ".br",
-        ".tgz", ".tbz2", ".txz", ".tzst", ".7z.001", ".zip.001",
+        ".zip", ".7z", ".tar", ".gz", ".bz2", ".xz", ".zst", ".lzma", ".z", ".tgz", ".tbz2",
+        ".txz", ".tzst", ".7z.001", ".zip.001",
     ]
     .iter()
     .any(|suffix| name.ends_with(suffix))

@@ -841,8 +841,7 @@ fn stream_stem(archive: &Path) -> Option<String> {
     let name = archive.file_name()?.to_str()?.to_string();
     let lower = name.to_ascii_lowercase();
     for suffix in [
-        ".tgz", ".tbz2", ".tbz", ".txz", ".tzst", ".bz2", ".gz", ".xz", ".lzma", ".zst", ".lz4",
-        ".lz", ".z", ".br",
+        ".tgz", ".tbz2", ".tbz", ".txz", ".tzst", ".bz2", ".gz", ".xz", ".lzma", ".zst", ".z",
     ] {
         if lower.ends_with(suffix) {
             let stem = &name[..name.len() - suffix.len()];
