@@ -1,11 +1,17 @@
 //! 7-Zip 引擎定位：随包目录优先，其次使用内嵌副本（首次使用时释放到用户数据目录）。
 //!
-//! 顺序与理由：
-//! 1. `<exe 目录>/resources/7zip/`：发布包与开发环境的显式引擎，用户可直接替换（LGPL 要求可替换）；
-//! 2. `<用户数据目录>/JchTools/engine/<版本-哈希>/`：内嵌副本的释放位置，同样允许用户覆盖；
-//! 3. 只有以上都不存在时，才从 EXE 内嵌的压缩数据释放并逐文件校验 sha256。
-//!    已存在的文件一律不重写（用户自备引擎优先，符合 LGPL 可替换要求），
-//!    但会计算 sha256 与内嵌清单比对：不一致时保留文件并记录警告，防止预植文件无声通过校验。
+//! 候选顺序（E-02）：
+//! 1. `<exe 目录>/resources/7zip/`：发布包与开发环境的显式引擎；
+//! 2. 已释放的内嵌副本：`<用户数据目录>/JchTools/engine/<版本-哈希>/` 及其下的
+//!    `release-*` 独立释放目录；
+//! 3. 从 EXE 内嵌的压缩数据释放：固定位置只缺文件时补齐；固定位置被无效文件占用时，
+//!    释放到新的独立自有位置（`release-*` 子目录），不删占用文件。
+//!
+//! 每个候选必须在内嵌清单声明的全部文件上通过「存在 + sha256 一致」校验后才可使用；
+//! 缺失或校验失败的候选绝不执行，只记录原因（stderr + engine-warnings.log）并继续下一顺位。
+//! 构建未内嵌引擎时没有可校验的清单，随包目录退化为最小完整性检查
+//! （主程序存在 + Windows 上 7z.dll 存在）。全部候选不可用时按 E-05 口径报错停止，
+//! 错误信息逐候选给出原因。
 use anyhow::{bail, Context, Result};
 use sha2::{Digest, Sha256};
 use std::path::{Path, PathBuf};
@@ -19,7 +25,7 @@ pub fn embedded_available() -> bool {
     !embedded::FILES.is_empty() && !embedded::MANIFEST.is_empty()
 }
 
-/// 随包携带的引擎目录（`resources/7zip`），存在即返回。
+/// 随包携带的引擎目录（`resources/7zip`），存在即返回；能否使用由候选校验决定。
 pub fn bundled_dir() -> Option<PathBuf> {
     let directory = std::env::current_exe()
         .ok()?
@@ -29,7 +35,8 @@ pub fn bundled_dir() -> Option<PathBuf> {
     executable.is_file().then_some(directory)
 }
 
-/// 内嵌引擎的释放目录；用户可以把自备的 7z.exe / 7z.dll 放在这里覆盖内嵌副本。
+/// 内嵌引擎的固定释放目录；被无效文件占用时会在其下新开 `release-*` 独立释放目录。
+/// 放入与内嵌清单不一致的自备引擎会导致该目录被候选校验拒绝（E-02：只认符合清单的候选）。
 pub fn embedded_dir() -> Option<PathBuf> {
     let base = crate::config::state_dir().ok()?;
     let id = if embedded::ID.is_empty() {
@@ -48,46 +55,249 @@ fn engine_name() -> &'static str {
     }
 }
 
-/// 返回可执行的 7-Zip 路径：随包目录 → 已释放的内嵌副本 → 现释放内嵌副本。
+/// 返回可执行的 7-Zip 路径：随包目录 → 已释放的内嵌副本（含独立释放目录）→ 从 EXE 释放；
+/// 每个候选逐文件校验通过后才可使用（E-02）。
 pub fn resolve_executable() -> Result<PathBuf> {
-    if let Some(directory) = bundled_dir() {
-        let executable = directory.join(engine_name());
-        // 随包目录本就允许用户替换引擎（LGPL）；与内嵌清单不一致时仅警告，不阻断。
-        // 但 Windows 上 7z.dll 缺失不是「用户替换了引擎」，而是不完整引擎（例如只拷了 exe），
-        // 必须在启动前失败，避免推迟到首次解压才报晦涩错误。
-        #[cfg(windows)]
-        {
-            if executable.is_file() && !directory.join("7z.dll").is_file() {
-                bail!("随包 7-Zip 引擎不完整：缺少 7z.dll（{}/）。请使用 scripts/fetch-7zip.ps1 获取官方完整引擎，或删除随包目录改用内嵌引擎。", directory.display());
+    let bundled = bundled_dir();
+    let embedded_base = embedded_dir();
+    resolve_among(bundled.as_deref(), embedded_base.as_deref())
+}
+
+/// 在给定候选中按 E-02 顺序解析引擎（`bundled` = 随包目录，`embedded_base` = 内嵌释放目录）。
+/// 抽出目录参数以便单元测试注入。每个候选必须在内嵌清单声明的全部文件上
+/// 通过「存在 + sha256 一致」校验后才可使用；不可用的候选只记录原因并继续下一顺位，
+/// 绝不执行、绝不删除或改写其中的文件（E-02：不自动覆盖现有文件）。
+fn resolve_among(bundled: Option<&Path>, embedded_base: Option<&Path>) -> Result<PathBuf> {
+    let mut failures: Vec<String> = Vec::new();
+
+    // 候选 1：EXE 同目录的随包引擎目录。
+    if let Some(directory) = bundled {
+        let problems = candidate_problems(directory);
+        if problems.is_empty() {
+            return Ok(directory.join(engine_name()));
+        }
+        reject_candidate("随包 7-Zip 引擎", directory, &problems);
+        failures.push(candidate_failure_line("随包引擎", directory, &problems));
+    } else {
+        failures.push(format!(
+            "随包引擎：EXE 同目录不存在含 {} 的 resources/7zip",
+            engine_name()
+        ));
+    }
+
+    // 候选 2/3 都依赖内嵌引擎；构建未内嵌时到此为止（E-05）。
+    if !embedded_available() {
+        let mut message = format!(
+            "未找到 7-Zip 引擎：resources/7zip 里没有 {}, 本构建也没有内嵌引擎。请运行 scripts/fetch-7zip.ps1 获取官方完整引擎后重新构建。",
+            engine_name()
+        );
+        if !failures.is_empty() {
+            message.push_str("\n各候选不可用的原因：\n- ");
+            message.push_str(&failures.join("\n- "));
+        }
+        bail!(message);
+    }
+    let base = embedded_base.context("无法确定用户数据目录，不能释放内嵌的 7-Zip 引擎")?;
+
+    // 候选 2a：固定释放位置（已释放的内嵌副本）。
+    let mut problems = candidate_problems(base);
+    if problems.is_empty() {
+        return Ok(base.join(engine_name()));
+    }
+    reject_candidate("已释放的内嵌引擎", base, &problems);
+    failures.push(candidate_failure_line("已释放的内嵌引擎", base, &problems));
+
+    // 候选 2b：此前因固定位置被占用而新开的独立释放目录（release-*），按目录名顺序取第一个可用者。
+    for directory in existing_release_dirs(base) {
+        let problems = candidate_problems(&directory);
+        if problems.is_empty() {
+            return Ok(directory.join(engine_name()));
+        }
+        reject_candidate("已释放的内嵌引擎", &directory, &problems);
+        failures.push(candidate_failure_line(
+            "已释放的内嵌引擎",
+            &directory,
+            &problems,
+        ));
+    }
+
+    // 候选 3a：固定位置只缺文件时从 EXE 补齐释放（已存在文件一律不覆盖），补齐后复检。
+    if problems.iter().any(|problem| problem.missing) {
+        if let Err(error) = release(base) {
+            failures.push(format!("向固定位置释放内嵌引擎失败：{error:#}"));
+        }
+        cleanup_part_residue(base);
+        problems = candidate_problems(base);
+        if problems.is_empty() {
+            return Ok(base.join(engine_name()));
+        }
+        // 仍无效：固定位置存在不可覆盖的无效文件，转新的独立位置（下方）。
+    }
+
+    // 候选 3b：固定位置被无效文件占用时，释放到新的独立自有位置（不删占用文件），仍校验后使用。
+    match fresh_release_dir(base).and_then(|directory| release(&directory).map(|()| directory)) {
+        Ok(directory) => {
+            cleanup_part_residue(&directory);
+            let problems = candidate_problems(&directory);
+            if problems.is_empty() {
+                return Ok(directory.join(engine_name()));
+            }
+            reject_candidate("新释放的内嵌引擎", &directory, &problems);
+            failures.push(candidate_failure_line(
+                "新释放的内嵌引擎",
+                &directory,
+                &problems,
+            ));
+        }
+        Err(error) => failures.push(format!("新位置释放内嵌引擎失败：{error:#}")),
+    }
+
+    bail!(
+        "没有可用的 7-Zip 引擎（所有候选均未通过校验，按 E-05 停止）：\n- {}",
+        failures.join("\n- ")
+    )
+}
+
+/// 候选目录的单个校验问题；`missing` 为 true 表示文件缺失（可从 EXE 重新释放补齐），
+/// 为 false 表示文件存在但无效（哈希不一致或不可读），重新释放也不得覆盖它。
+struct Problem {
+    description: String,
+    missing: bool,
+}
+
+fn join_problems(problems: &[Problem]) -> String {
+    problems
+        .iter()
+        .map(|problem| problem.description.as_str())
+        .collect::<Vec<_>>()
+        .join("；")
+}
+
+/// 候选因校验问题被拒绝时记录原因（stderr + engine-warnings.log）。
+/// 拒绝只表示「不使用该候选」：其中的文件一律不删除、不改写。
+fn reject_candidate(context: &str, directory: &Path, problems: &[Problem]) {
+    persist_engine_warning(&format!(
+        "已拒绝使用{context}（{}）：{}；按候选顺序尝试下一顺位",
+        directory.display(),
+        join_problems(problems)
+    ));
+}
+
+/// 汇总进最终报错的单个候选原因行（哪份引擎、哪个文件、缺失还是哈希不一致）。
+fn candidate_failure_line(context: &str, directory: &Path, problems: &[Problem]) -> String {
+    format!(
+        "{context}（{}）：{}",
+        directory.display(),
+        join_problems(problems)
+    )
+}
+
+/// 本目标平台必需的引擎文件（文件名 + 期望 sha256，来自内嵌清单）。
+/// 以本构建实际内嵌的文件（embedded::FILES）为准：交叉编译时清单里可能同时有其他平台的条目，
+/// 那些不参与校验。构建未内嵌引擎时返回 None（候选退化为最小完整性检查）。
+fn required_engine_files() -> Option<Vec<(String, String)>> {
+    if !embedded_available() {
+        return None;
+    }
+    let mut files = Vec::new();
+    for (name, _) in embedded::FILES {
+        let expected = manifest_expectation(name)?;
+        files.push(((*name).to_string(), expected));
+    }
+    (!files.is_empty()).then_some(files)
+}
+
+/// 按必需清单逐文件校验候选目录（存在 + sha256 一致），返回问题列表（空 = 可用）。
+/// 本函数只读：绝不修改候选目录里的文件；「不覆盖占用文件」的释放策略由 resolve_among 处理。
+fn candidate_problems(directory: &Path) -> Vec<Problem> {
+    let mut problems = Vec::new();
+    if let Some(files) = required_engine_files() {
+        for (name, expected) in files {
+            let path = directory.join(&name);
+            if !path.is_file() {
+                problems.push(Problem {
+                    description: format!("缺少 {name}"),
+                    missing: true,
+                });
+                continue;
+            }
+            match hash_matches(&path, &expected) {
+                Ok(true) => {}
+                Ok(false) => problems.push(Problem {
+                    description: format!("{name} 的 sha256 与内嵌清单不一致"),
+                    missing: false,
+                }),
+                Err(error) => problems.push(Problem {
+                    description: format!("{name} 无法读取以校验 sha256：{error}"),
+                    missing: false,
+                }),
             }
         }
-        warn_all_manifest_mismatches(&directory, "随包 7-Zip 引擎");
-        return Ok(executable);
-    }
-    if !embedded_available() {
-        bail!("未找到 7-Zip 引擎：resources/7zip 里没有 {}, 本构建也没有内嵌引擎。请运行 scripts/fetch-7zip.ps1 获取官方完整引擎后重新构建。", engine_name());
-    }
-    let directory = embedded_dir().context("无法确定用户数据目录，不能释放内嵌的 7-Zip 引擎")?;
-    release(&directory)?;
-    cleanup_part_residue(&directory);
-    let executable = directory.join(engine_name());
-    if !executable.is_file() {
-        bail!("内嵌引擎释放后仍缺少 {}", engine_name());
-    }
-    // 与随包路径对称：Windows 上缺 7z.dll 视为不完整引擎，释放后必须再检一次。
-    #[cfg(windows)]
-    {
-        if !directory.join("7z.dll").is_file() {
-            bail!(
-                "内嵌引擎释放后不完整：缺少 7z.dll（{}）。",
-                directory.display()
-            );
+    } else {
+        // 无内嵌清单（构建未内嵌引擎）：没有可校验的清单，退化为最小完整性检查。
+        // Windows 上 7z.dll 缺失不是「用户替换了引擎」，而是不完整引擎（例如只拷了 exe）。
+        let name = engine_name();
+        if !directory.join(name).is_file() {
+            problems.push(Problem {
+                description: format!("缺少 {name}"),
+                missing: true,
+            });
+        }
+        #[cfg(windows)]
+        {
+            if !directory.join("7z.dll").is_file() {
+                problems.push(Problem {
+                    description: "缺少 7z.dll（引擎不完整）".to_string(),
+                    missing: true,
+                });
+            }
         }
     }
-    // 返回前按内嵌清单逐个复检哈希（主程序 + 7z.dll），缩小释放与实际调用之间的篡改窗口（TOCTOU）。
-    // Windows 上 7z.dll 是主要攻击面；用户主动放入的替换引擎不一致时记录警告并放行（LGPL 可替换要求）。
-    warn_all_manifest_mismatches(&directory, "已释放的内嵌 7-Zip 引擎");
-    Ok(executable)
+    problems
+}
+
+/// base 下已有的独立释放目录（release-* 前缀），按目录名排序保证顺序确定。
+fn existing_release_dirs(base: &Path) -> Vec<PathBuf> {
+    let Ok(entries) = std::fs::read_dir(base) else {
+        return Vec::new();
+    };
+    let mut directories: Vec<PathBuf> = entries
+        .filter_map(std::result::Result::ok)
+        .map(|entry| entry.path())
+        .filter(|path| {
+            path.is_dir()
+                && path
+                    .file_name()
+                    .and_then(|name| name.to_str())
+                    .is_some_and(|name| name.starts_with("release-"))
+        })
+        .collect();
+    directories.sort();
+    directories
+}
+
+/// 在 base 下用独占创建语义新建一个独立释放目录 `release-<纳秒>-<进程号>-<序号>`，
+/// 并发进程不会挤进同一个目录。
+fn fresh_release_dir(base: &Path) -> Result<PathBuf> {
+    std::fs::create_dir_all(base)
+        .with_context(|| format!("创建引擎目录失败：{}", base.display()))?;
+    let nanos = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|duration| duration.as_nanos())
+        .unwrap_or_default();
+    let pid = std::process::id();
+    for attempt in 0..64u32 {
+        let directory = base.join(format!("release-{nanos}-{pid}-{attempt}"));
+        match std::fs::create_dir(&directory) {
+            Ok(()) => return Ok(directory),
+            Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {}
+            Err(error) => {
+                return Err(error)
+                    .with_context(|| format!("创建独立引擎释放目录失败：{}", directory.display()))
+            }
+        }
+    }
+    bail!("无法创建新的独立引擎释放目录（连续 64 次目录名冲突）")
 }
 
 /// 在内嵌清单中查找 `file_name` 的期望 sha256（小写十六进制）；找不到时返回 None。
@@ -104,25 +314,7 @@ fn manifest_expectation(file_name: &str) -> Option<String> {
     })
 }
 
-/// 按内嵌清单对目录中所有声明的引擎文件逐个复检哈希（主程序 + 7z.dll）。
-/// resolve_executable 返回前调用，缩小释放与实际调用之间的篡改窗口（TOCTOU）。
-/// Windows 上 7z.dll 是主要攻击面，不能只复检主程序。
-fn warn_all_manifest_mismatches(directory: &Path, context: &str) {
-    let Ok(manifest) = serde_json::from_str::<serde_json::Value>(embedded::MANIFEST) else {
-        return;
-    };
-    let Some(entries) = manifest["files"].as_array() else {
-        return;
-    };
-    for entry in entries {
-        let Some(name) = entry["name"].as_str() else {
-            continue;
-        };
-        warn_if_hash_mismatch(&directory.join(name), context);
-    }
-}
-
-/// 把引擎哈希警告追加写入用户数据目录下的 `engine-warnings.log`。
+/// 把引擎校验警告/拒绝记录追加写入用户数据目录下的 `engine-warnings.log`。
 /// GUI 启动不展示 stderr，仅 eprintln 等于静默放行；落盘留下持久痕迹供排查。
 fn persist_engine_warning(message: &str) {
     eprintln!("{message}");
@@ -143,21 +335,6 @@ fn persist_engine_warning(message: &str) {
                 }
             }
         }
-    }
-}
-
-/// 校验文件 sha256 是否与内嵌清单一致；不一致或无法读取时记录警告（不阻断，LGPL 允许替换）。
-fn warn_if_hash_mismatch(path: &Path, context: &str) {
-    let Some(name) = path.file_name().and_then(|n| n.to_str()) else {
-        return;
-    };
-    let Some(expected) = manifest_expectation(name) else {
-        return;
-    };
-    match hash_matches(path, &expected) {
-        Ok(true) => {}
-        Ok(false) => persist_engine_warning(&format!("警告：{context} {} 的 sha256 与内嵌清单不一致，可能是用户自备或被篡改的引擎，已放行（LGPL 允许替换），请自行确认来源可信", path.display())),
-        Err(error) => persist_engine_warning(&format!("警告：无法读取{context} {} 以校验 sha256：{error}", path.display())),
     }
 }
 
@@ -186,12 +363,13 @@ fn cleanup_part_residue(directory: &Path) {
     }
 }
 
-/// 目录中已存在同名引擎文件时的口径：保留该文件，按内嵌清单比对哈希并记录警告。
+/// 目录中已存在同名引擎文件时的口径：保留该文件（绝不覆盖），按内嵌清单比对哈希并记录警告。
+/// 与清单不一致时只记录、不替换；所在目录能否被使用由 resolve_among 的逐文件校验决定。
 fn keep_existing_engine_file(target: &Path, name: &str, expected: &str) {
     match hash_matches(target, expected) {
         Ok(true) => {}
         Ok(false) => {
-            persist_engine_warning(&format!("警告：引擎目录中已存在与内嵌清单 sha256 不一致的 {name}（{}），保留该文件（用户自备引擎可覆盖内嵌副本），请自行确认来源可信", target.display()));
+            persist_engine_warning(&format!("警告：引擎目录中已存在与内嵌清单 sha256 不一致的 {name}（{}），保留该文件（不覆盖既有文件），该目录能否使用以逐文件校验为准", target.display()));
         }
         Err(error) => {
             persist_engine_warning(&format!(
@@ -227,10 +405,10 @@ pub fn release(directory: &Path) -> Result<()> {
             bail!("内嵌引擎缺少清单里声明的文件：{name}");
         };
         let target = directory.join(name);
-        // 已存在的文件一律保留：用户把自备引擎放在这里即可覆盖内嵌副本（LGPL 可替换要求），
-        // 只有缺失时才从 EXE 释放并逐文件校验 sha256。
-        // 但已存在文件也要计算 sha256 与清单比对——不一致时保留并记录警告，
-        // 防止恶意预植文件在"已存在即跳过"逻辑下无声绕过内嵌校验。
+        // 已存在的文件一律保留（E-02：不自动覆盖现有文件），只有缺失时才从 EXE 释放并逐文件校验。
+        // 已存在文件也计算 sha256 与清单比对并记录警告，防止恶意预植文件在
+        // "已存在即跳过"逻辑下无声绕过内嵌校验；目录能否被使用由 resolve_among 在
+        // 释放后整体复检决定——含不一致文件的候选会被拒绝并转新的独立位置释放。
         if target.is_file() {
             keep_existing_engine_file(&target, name, &expected);
             continue;
@@ -401,5 +579,193 @@ mod tests {
                 "释放后的 {name} 必须与清单 sha256 一致"
             );
         }
+    }
+
+    /// 在临时目录里用内嵌副本释放出一份「与清单一致」的引擎目录，充当合法随包目录。
+    fn valid_engine_dir() -> tempfile::TempDir {
+        let directory = tempfile::tempdir().unwrap();
+        release(directory.path()).unwrap();
+        directory
+    }
+
+    /// 往目录里写入与清单不一致的引擎文件（主程序必写；Windows 上补一份坏 7z.dll）。
+    fn write_tampered_engine(directory: &Path) {
+        std::fs::write(directory.join(engine_name()), b"tampered engine bytes").unwrap();
+        #[cfg(windows)]
+        std::fs::write(directory.join("7z.dll"), b"tampered engine bytes").unwrap();
+    }
+
+    /// 断言路径是引擎文件且与内嵌清单一致。
+    fn assert_valid_executable(path: &Path) {
+        assert!(
+            hash_matches(path, &manifest_expectation(engine_name()).unwrap()).unwrap(),
+            "{} 应与内嵌清单 sha256 一致",
+            path.display()
+        );
+    }
+
+    /// 候选均不可用时的最终报错必须包含各候选的原因（哪份引擎、哪个文件、什么问题）。
+    // 覆盖 E-02 / E-05
+    #[test]
+    fn resolve_reports_per_candidate_reasons_when_all_candidates_invalid() {
+        if !embedded_available() {
+            eprintln!("warning: 未内嵌 7-Zip 引擎，跳过全候选不可用报错测试；带引擎构建须在 CI 验证此路径");
+            return;
+        }
+        let bundled = tempfile::tempdir().unwrap();
+        write_tampered_engine(bundled.path());
+        // 内嵌释放基目录落在一个普通文件之下：释放必然失败，模拟「新位置也无法产出可用引擎」。
+        let base = tempfile::tempdir().unwrap();
+        let blocked = base.path().join("occupied.txt");
+        std::fs::write(&blocked, b"occupied").unwrap();
+        let embedded_base = blocked.join("engine");
+        let error = resolve_among(Some(bundled.path()), Some(&embedded_base)).unwrap_err();
+        let message = format!("{error:#}");
+        assert!(
+            message.contains("随包"),
+            "报错应说明随包候选被拒：{message}"
+        );
+        assert!(
+            message.contains("sha256 与内嵌清单不一致"),
+            "报错应给出具体文件与不一致原因：{message}"
+        );
+        assert!(
+            message.contains(&bundled.path().display().to_string()),
+            "报错应指出是哪份随包引擎：{message}"
+        );
+    }
+
+    /// 已释放位置存在哈希不一致的引擎文件时：不得使用、不得覆盖或删除，
+    /// 必须释放到新的独立自有位置，校验通过后才使用（自愈）。
+    // 覆盖 E-02
+    #[test]
+    fn resolve_releases_to_fresh_location_when_existing_file_hash_mismatches() {
+        if !embedded_available() {
+            eprintln!(
+                "warning: 未内嵌 7-Zip 引擎，跳过新位置释放测试；带引擎构建须在 CI 验证此路径"
+            );
+            return;
+        }
+        let base = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(base.path()).unwrap();
+        std::fs::write(base.path().join(engine_name()), b"corrupted engine bytes").unwrap();
+        let path = resolve_among(None, Some(base.path())).unwrap();
+        let released_dir = path.parent().expect("返回路径应有父目录");
+        assert_eq!(
+            released_dir.parent(),
+            Some(base.path()),
+            "新释放位置应是内嵌释放目录下的独立子目录"
+        );
+        assert!(
+            released_dir
+                .file_name()
+                .and_then(|name| name.to_str())
+                .is_some_and(|name| name.starts_with("release-")),
+            "独立释放目录应以 release- 命名：{}",
+            released_dir.display()
+        );
+        assert_valid_executable(&path);
+        // 被占用的无效文件不得删除或改写。
+        assert_eq!(
+            std::fs::read(base.path().join(engine_name())).unwrap(),
+            b"corrupted engine bytes",
+            "固定释放位置的无效文件必须原样保留"
+        );
+    }
+
+    /// 随包目录校验不可用（哈希不一致）时：拒绝该候选并回退到内嵌释放，而不是警告后照常执行。
+    // 覆盖 E-02
+    #[test]
+    fn resolve_falls_back_to_embedded_when_bundled_dir_hash_mismatches() {
+        if !embedded_available() {
+            eprintln!("warning: 未内嵌 7-Zip 引擎，跳过随包回退测试；带引擎构建须在 CI 验证此路径");
+            return;
+        }
+        let bundled = tempfile::tempdir().unwrap();
+        write_tampered_engine(bundled.path());
+        let base = tempfile::tempdir().unwrap();
+        let path = resolve_among(Some(bundled.path()), Some(base.path())).unwrap();
+        assert_ne!(
+            path.parent(),
+            Some(bundled.path()),
+            "不得使用与清单不一致的随包引擎"
+        );
+        assert_valid_executable(&path);
+        assert_eq!(
+            std::fs::read(bundled.path().join(engine_name())).unwrap(),
+            b"tampered engine bytes",
+            "随包目录里的文件必须原样保留"
+        );
+    }
+
+    /// Windows 随包目录缺 7z.dll（不完整引擎）时：该候选不可用并回退内嵌，
+    /// 而不是整体报错中断、放弃后续候选。
+    // 覆盖 E-02
+    #[test]
+    fn resolve_falls_back_when_bundled_dir_missing_dll() {
+        if !embedded_available() {
+            eprintln!(
+                "warning: 未内嵌 7-Zip 引擎，跳过随包缺 dll 回退测试；带引擎构建须在 CI 验证此路径"
+            );
+            return;
+        }
+        let bundled = tempfile::tempdir().unwrap();
+        std::fs::write(bundled.path().join(engine_name()), b"only main exe").unwrap();
+        let base = tempfile::tempdir().unwrap();
+        let path = resolve_among(Some(bundled.path()), Some(base.path())).unwrap();
+        assert_ne!(
+            path.parent(),
+            Some(bundled.path()),
+            "不完整的随包引擎目录不得被使用"
+        );
+        assert_valid_executable(&path);
+    }
+
+    /// 合法随包目录仍然最优先，行为不变。
+    // 覆盖 E-02
+    #[test]
+    fn resolve_prefers_valid_bundled_dir() {
+        if !embedded_available() {
+            eprintln!("warning: 未内嵌 7-Zip 引擎，跳过随包优先测试；带引擎构建须在 CI 验证此路径");
+            return;
+        }
+        let bundled = valid_engine_dir();
+        let base = tempfile::tempdir().unwrap();
+        let path = resolve_among(Some(bundled.path()), Some(base.path())).unwrap();
+        assert_eq!(path, bundled.path().join(engine_name()));
+    }
+
+    /// 构建未内嵌引擎时的候选口径：最小完整性检查（主程序存在 + Windows 上 7z.dll 存在）。
+    // 覆盖 E-02 / E-05
+    #[test]
+    fn resolve_without_embedded_uses_minimal_bundled_checks() {
+        if embedded_available() {
+            return; // 仅无内嵌构建执行（该配置合法，见 embedded_available_matches_build_configuration）
+        }
+        let bundled = tempfile::tempdir().unwrap();
+        std::fs::write(bundled.path().join(engine_name()), b"user supplied engine").unwrap();
+        #[cfg(windows)]
+        std::fs::write(bundled.path().join("7z.dll"), b"user supplied engine").unwrap();
+        let base = tempfile::tempdir().unwrap();
+        let path = resolve_among(Some(bundled.path()), Some(base.path())).unwrap();
+        assert_eq!(path, bundled.path().join(engine_name()));
+    }
+
+    /// 构建未内嵌引擎且随包目录不完整（Windows 缺 7z.dll）时：显式报错并说明原因。
+    // 覆盖 E-02 / E-05
+    #[test]
+    fn resolve_without_embedded_reports_incomplete_bundled_dir() {
+        if embedded_available() {
+            return; // 仅无内嵌构建执行
+        }
+        let bundled = tempfile::tempdir().unwrap();
+        std::fs::write(bundled.path().join(engine_name()), b"only main exe").unwrap();
+        let error = resolve_among(Some(bundled.path()), None).unwrap_err();
+        let message = format!("{error:#}");
+        #[cfg(windows)]
+        assert!(
+            message.contains("7z.dll"),
+            "报错应说明随包引擎缺少 7z.dll：{message}"
+        );
     }
 }
