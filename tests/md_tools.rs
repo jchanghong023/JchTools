@@ -172,6 +172,70 @@ fn merge_converts_setext_headings() {
     assert_eq!(text, expected, "Setext 下划线转 ATX 且下划线行不再输出");
 }
 
+// 覆盖 M-04/M-05（带 UTF-8 BOM 的文件：首行 ATX 标题仍须下移一级，BOM 剥除不残留）
+#[test]
+fn merge_shifts_first_atx_heading_in_bom_file() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path();
+    // Windows 旧版记事本、PowerShell 重定向等来源常写出带 UTF-8 BOM 的 .md
+    let mut content = String::from("\u{FEFF}");
+    content.push_str("# 标题\n\n正文\n");
+    write(&root.join("bom.md"), &content);
+    let output = root.join("merged.md");
+    merge_to(root, true, &output);
+    let text = fs::read_to_string(&output).unwrap();
+    assert_eq!(
+        text, "# bom.md\n\n## 标题\n\n正文\n",
+        "带 BOM 文件的首行 ATX 标题必须下移一级：{text:?}"
+    );
+    assert!(
+        !text.contains('\u{FEFF}'),
+        "文件开头 BOM 必须剥除，不得残留在输出中：{text:?}"
+    );
+}
+
+// 覆盖 M-04/M-05（带 UTF-8 BOM 的文件：首行 Setext 标题转换为二级 ATX 且不含 BOM 字节）
+#[test]
+fn merge_converts_first_setext_heading_in_bom_file() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path();
+    let mut content = String::from("\u{FEFF}");
+    content.push_str("标题\n====\n\n正文\n");
+    write(&root.join("bom.md"), &content);
+    let output = root.join("merged.md");
+    merge_to(root, true, &output);
+    let text = fs::read_to_string(&output).unwrap();
+    assert_eq!(
+        text, "# bom.md\n\n## 标题\n\n正文\n",
+        "带 BOM 文件的首行 Setext 标题必须转换为二级 ATX：{text:?}"
+    );
+    assert!(
+        !text.contains('\u{FEFF}'),
+        "文件开头 BOM 必须剥除，不得嵌进转换后的标题文本：{text:?}"
+    );
+}
+
+// 覆盖 M-04/M-05（BOM 只在文件开头剥除一次：无 BOM 文件行为不变，
+// 文件中间出现的 U+FEFF 字节按普通文本原样保留）
+#[test]
+fn merge_strips_bom_only_at_file_start() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path();
+    write(&root.join("plain.md"), "# 普通\n\n正文\n");
+    write(&root.join("mid.md"), "开头\n\n零宽\u{FEFF}夹在中间\n");
+    let output = root.join("merged.md");
+    merge_to(root, true, &output);
+    let text = fs::read_to_string(&output).unwrap();
+    assert!(
+        text.contains("# plain.md\n\n## 普通\n\n正文\n"),
+        "无 BOM 文件行为不变：{text:?}"
+    );
+    assert!(
+        text.contains("零宽\u{FEFF}夹在中间"),
+        "文件中间的 U+FEFF 不是 BOM，必须原样保留：{text:?}"
+    );
+}
+
 // 覆盖 M-05（Setext 不误伤：空行后的 --- 是分隔线不是标题；列表项后的 --- 不是标题）
 #[test]
 fn merge_keeps_thematic_break_and_list_untouched() {

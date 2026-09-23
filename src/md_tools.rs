@@ -451,6 +451,7 @@ pub fn merge_markdown(
             .with_context(|| format!("打开输入文件失败：{}", entry.path.display()))?;
         let mut reader = BufReader::with_capacity(256 * 1024, source);
         let mut shifter = HeadingShift::default();
+        let mut first_line = true;
         loop {
             let mut line: Vec<u8> = Vec::with_capacity(1024);
             let read = reader
@@ -458,6 +459,20 @@ pub fn merge_markdown(
                 .with_context(|| format!("读取输入文件失败：{}", entry.path.display()))?;
             if read == 0 {
                 break;
+            }
+            if first_line {
+                first_line = false;
+                // 某些编辑器（Windows 旧版记事本、PowerShell 重定向等）会写出带 UTF-8 BOM 的
+                // 文件；BOM 字节会让首行不再被识别为标题，破坏 M-04/M-05 的下移（CommonMark
+                // 口径：文档开头的 BOM 被忽略）。只在每个文件开头剥除恰好一次，文件中间出现
+                // 的相同字节是普通文本、原样保留；拆分路径（M-09/M-10）是字节级无损操作，不剥。
+                const UTF8_BOM: [u8; 3] = [0xEF, 0xBB, 0xBF];
+                if line.starts_with(&UTF8_BOM) {
+                    line.drain(..UTF8_BOM.len());
+                    if line.is_empty() {
+                        continue; // 整个文件只有一个 BOM：按空文件处理
+                    }
+                }
             }
             shifter.feed(&line, &mut out)?;
         }
