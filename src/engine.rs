@@ -29,6 +29,15 @@ pub struct Job {
 /// H-06：选定根目录直接含 .git（目录或文件）时整次处理不执行的统一提示。
 /// 只允许为识别边界做必要的目录项检查，识别后不读取、不改动任何内容。
 const ROOT_GIT_MESSAGE: &str = "所选根目录直接含 .git（Git 仓库或工作树）；按 H-06 整次处理不执行。请改选不含 .git 的子目录后重试。";
+/// X-07：所选根本身名为「解压失败」时不开始解压的统一提示（确认框清点与解压一致拒绝）。
+const ROOT_QUARANTINE_MESSAGE: &str = "所选目录本身名为「解压失败」（隔离容器）；按 X-07 不开始解压。请先将待重试的包移出隔离容器后重试。";
+/// X-07：所选根本身名为「解压失败」（不区分大小写）时拒绝开始解压。
+/// 容器名本身没有大小写变体，ASCII 折叠与 archive.rs 的组件名判定同口径。
+fn root_is_quarantine(root: &Path) -> bool {
+    root.file_name()
+        .and_then(|name| name.to_str())
+        .is_some_and(|name| name.eq_ignore_ascii_case(archive::QUARANTINE_DIR_NAME))
+}
 /// 哈希阶段一次从任务库取多少条候选。与哈希线程数解耦（线程数只决定并行度，
 /// 批量只决定分页次数），避免「调线程数」同时改变两个量而无法判断。
 const HASH_BATCH: usize = 256;
@@ -282,6 +291,8 @@ fn extract_run_with(
 ) -> Result<TaskResult> {
     config.validate()?;
     let root = fsutil::normalize_root(root)?;
+    // X-07：所选根本身名为「解压失败」时不开始解压，提示先移出待重试的包。
+    anyhow::ensure!(!root_is_quarantine(&root), ROOT_QUARANTINE_MESSAGE);
     // H-06：选定根目录直接含 .git 时整次处理不执行，明确提示且不创建任务库。
     anyhow::ensure!(!fsutil::is_git_root(&root)?, ROOT_GIT_MESSAGE);
     // H-06：祖先直接含 .git 同样拒绝整次处理（不拆散项目子树）。
@@ -385,6 +396,8 @@ fn extract_run_with(
 pub fn count_archives(root: &Path, config: &Config) -> Result<u64> {
     config.validate()?;
     let root = fsutil::normalize_root(root)?;
+    // X-07：所选根本身名为「解压失败」时不开始解压，确认框清点同样拒绝。
+    anyhow::ensure!(!root_is_quarantine(&root), ROOT_QUARANTINE_MESSAGE);
     // H-06：选定根目录直接含 .git 时整次处理不执行，确认框清点同样拒绝。
     anyhow::ensure!(!fsutil::is_git_root(&root)?, ROOT_GIT_MESSAGE);
     // H-06：祖先直接含 .git 同样拒绝整次处理（不拆散项目子树）。
@@ -530,11 +543,17 @@ impl ScopeFilter<'_> {
                 return true;
             }
         }
-        if self
-            .quarantine
-            .is_some_and(|q| child_rel == q || child_rel.starts_with(&format!("{q}/")))
-        {
-            return true;
+        if let Some(quarantine) = self.quarantine {
+            // C-09/X-07：「解压失败」容器按任意层级的路径组件名整树剪枝（不区分大小写）——
+            // 子目录单独解压会按 X-06 在子目录里留下隔离容器，整理父目录时同样保留，
+            // 其内容不参与去重、归类、清理，也不计入确认框清点。
+            // 容器名本身没有大小写变体，ASCII 折叠与 archive.rs 的组件名判定同口径。
+            if child_rel
+                .split('/')
+                .any(|component| component.eq_ignore_ascii_case(quarantine))
+            {
+                return true;
+            }
         }
         if self.excluded.is_match(child_rel) || self.excluded.is_match(format!("{child_rel}/")) {
             return true;

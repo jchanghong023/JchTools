@@ -169,6 +169,37 @@ fn root_git_file_blocks_processing() {
     assert!(engine::count_archives(&f.root, &base()).is_err());
 }
 
+// 覆盖 X-07（所选根本身名为「解压失败」时不开始解压：清点与解压都拒绝并明确提示）
+#[test]
+fn root_named_quarantine_blocks_count_and_extract() {
+    let f = Fixture::new();
+    f.write("解压失败/待重试.zip", b"retry me");
+    let quarantine_root = f.root.join(QUARANTINE_DIR_NAME);
+    let error = format!(
+        "{:#}",
+        engine::count_archives(&quarantine_root, &base()).unwrap_err()
+    );
+    assert!(
+        error.contains("解压失败") && error.contains("移出"),
+        "根本身为隔离容器时清点必须拒绝并提示移出待重试包：{error}"
+    );
+    let error = format!(
+        "{:#}",
+        engine::extract_run_at(&quarantine_root, base(), Context::default(), &f.state, None)
+            .unwrap_err()
+    );
+    assert!(
+        error.contains("解压失败") && error.contains("移出"),
+        "根本身为隔离容器时解压必须拒绝并提示移出待重试包：{error}"
+    );
+    // 与 root_git 拒绝用例同口径：被拒绝的任务不得留下任务目录（整次处理不执行）。
+    let tasks = f.state.join("tasks");
+    assert!(
+        !tasks.exists() || fs::read_dir(&tasks).unwrap().next().is_none(),
+        "被拒绝的任务不得留下任务目录（整次处理不执行）"
+    );
+}
+
 // 覆盖 H-06（子目录含 .git：只排除该子树；祖先不得被改名/删除，内容不读取、不参与哈希去重）
 #[test]
 fn child_git_tree_excluded_and_ancestors_untouched() {
@@ -280,6 +311,42 @@ fn final_cleanup_removes_newly_empty_chain_and_empty_quarantine() {
     );
     assert_eq!(fs::read(f.root.join("文档/keep.txt")).unwrap(), b"payload");
     assert_eq!(status(&task.directory), "finished");
+}
+
+// 覆盖 C-09/X-07/X-02（任意层级的「解压失败」容器都整树剪枝：子目录单独解压按
+// X-06 天然在子目录里留下隔离容器，整理父目录时容器内的包不得计入清点、不入盘点、
+// 不参与归类搬移或清理，也不得被读取）
+#[test]
+fn nested_quarantine_container_is_pruned_at_any_depth() {
+    let f = Fixture::new();
+    f.write("子/解压失败/坏包.7z", b"broken package");
+    f.write("keep.txt", b"payload");
+    assert_eq!(
+        engine::count_archives(&f.root, &base()).unwrap(),
+        0,
+        "嵌套隔离容器内的包不得计入确认框清点（X-02/X-07）"
+    );
+    let task = f.plan(base());
+    assert_eq!(
+        task.summary.scanned, 1,
+        "嵌套隔离容器内容不得进入盘点（C-09）：{:#?}",
+        task.summary
+    );
+    engine::apply(&task.directory, Context::default()).unwrap();
+    assert_eq!(
+        fs::read(f.root.join("子/解压失败/坏包.7z")).unwrap(),
+        b"broken package",
+        "嵌套隔离容器内的包不得被搬移或删除（C-09）"
+    );
+    assert!(
+        !events(&task.directory).contains("坏包.7z"),
+        "嵌套隔离容器内的包不得参与归类或清理（C-09）：{}",
+        events(&task.directory)
+    );
+    assert!(
+        f.root.join("子/解压失败").is_dir(),
+        "非空的隔离容器不得被收尾清理（C-09：仅实际为空才可按 H-05 清理）"
+    );
 }
 
 // 覆盖 H-05/C-10（取消后不得继续删除空目录；状态如实为已取消）
