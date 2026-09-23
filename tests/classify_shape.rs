@@ -1,4 +1,4 @@
-//! 覆盖 C-05 / C-14 / C-15 / C-16～C-21：固定归类「大类/创建年/创建月」+「Git项目集合」
+//! 覆盖 C-05 / C-14 / C-15 / C-16～C-21：固定归类「大类/年/月」+「Git项目集合」
 //! 的标准形态、来源前缀与短哈希消解、超长名截短与幂等。用例直接复刻合同 C-15 的
 //! 附录示例（子目录分趟整理后整理父目录），期望值来自合同，不由实现反推。
 // 测试代码允许 unwrap/expect（与 tests/core.rs 的集成测试惯例一致）：断言失败即测试失败。
@@ -21,7 +21,8 @@ use std::{
 use tempfile::TempDir;
 
 fn at(date: &str) -> SystemTime {
-    // 示例日期（每月 15 日中午 UTC）→ 创建时间；断言只关心年/月，月中避开月末边界。
+    // 示例日期（每月 15 日中午 UTC）→ 创建时间；夹具只设创建时间，它即 C-05 创建/修改中
+    // 最早的可用时间（修改时间为“现在”）；断言只关心年/月，月中避开月末边界。
     let (year, month) = date.split_once('-').unwrap();
     let naive = chrono::NaiveDate::from_ymd_opt(year.parse().unwrap(), month.parse().unwrap(), 15)
         .unwrap()
@@ -158,7 +159,7 @@ fn organize_subtree_b_matches_contract_shape() {
     Fixture::apply(&task);
     assert_eq!(task.summary.planned_git, 2, "两个 Git 项目都应整体移入集合");
 
-    // C-05：大类/创建年/创建月；C-16：产品说明 (1).pdf 规范化为 产品说明_1.pdf。
+    // C-05：大类/年/月；C-16：产品说明 (1).pdf 规范化为 产品说明_1.pdf。
     assert!(f.exists("文档/2026/03/年度报告.pdf"));
     let h_copy = digest8("工作资料/年报/产品说明 (1).pdf");
     let h_plain = digest8("工作资料/年报/产品说明_1.pdf");
@@ -384,7 +385,7 @@ fn git_collection_blocked_by_file_keeps_projects() {
     assert!(f.root.join("Git项目集合").is_file(), "占用项不被删除或挪走");
 }
 
-// 覆盖 C-12 / C-05：归类移动保留创建时间，重复整理仍落同一「创建年/创建月」。
+// 覆盖 C-12 / C-05：归类移动保留文件时间戳（同卷改名），重复整理仍落同一「年/月」。
 #[test]
 fn moves_preserve_creation_time_for_idempotent_dates() {
     let f = Fixture::new();
@@ -393,7 +394,7 @@ fn moves_preserve_creation_time_for_idempotent_dates() {
     Fixture::apply(&task);
     assert!(f.exists("文档/2024/07/资料.pdf"));
     let again = f.plan();
-    assert_eq!(again.summary.planned_move, 0, "创建时间不变 → 仍判已就位");
+    assert_eq!(again.summary.planned_move, 0, "时间戳不变 → 仍判已就位");
 }
 
 // 覆盖 C-06：大文件命中后优先进入「大文件/年/月」，未命中仍按扩展名大类。
@@ -418,8 +419,8 @@ fn large_files_take_priority_over_extension_category() {
 fn items_without_usable_date_stay_in_place() {
     let f = Fixture::new();
     let p = f.write_at("keep.pdf", b"x", "2026-05");
-    // 伪造极端 mtime 与创建时间：创建时间在 Windows 上无法设为“不可用”，
-    // 这里用远超 9999 年的时间触发 year_month 的 None 分支。
+    // 伪造极端 mtime 与创建时间：无法表示的时间（超出 i64 纳秒范围）使该项无法归类，
+    // 必须在原位置保留而不被当前日期代替。
     let far = UNIX_EPOCH + Duration::from_secs(270_000_000_000);
     jchtools::fsutil::set_created_time(&p, far).unwrap();
     filetime::set_file_mtime(&p, filetime::FileTime::from_system_time(far)).unwrap();

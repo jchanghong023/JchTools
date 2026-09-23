@@ -54,18 +54,24 @@ fn base() -> Config {
         // 这些用例考的是记账 / 归类 / 排序 / 幂等等其它行为，需要「内容相同的不同名文件」
         // 也进入去重，故显式开启第三类；C-02 的默认值（不同名关闭）由
         // `different_names_not_deduped_by_default` 单独锚定。
-        // 归类按 C-05 恒开启（大类/创建年/创建月），不再有 classify 开关。
+        // 归类按 C-05 恒开启（大类/年/月），不再有 classify 开关。
         dedup_other_names: true,
         clean_copy_name: false,
         ..Config::default()
     }
 }
-/// Fixture::write 只设 mtime：创建时间即“现在”（C-05 创建时间优先、缺失回落修改时间）。
-/// 期望目录按分析时的本地年/月推导。
-fn now_year_month() -> (String, String) {
-    use chrono::Datelike;
-    let now = chrono::Local::now();
-    (format!("{:04}", now.year()), format!("{:02}", now.month()))
+/// Fixture::write 只设 mtime，创建时间为“现在”，故按 C-05 取创建/修改中最早的可用时间
+/// 即该 mtime；期望目录用与分析开始时一致的本地时区把 mtime 换算成年/月。
+fn year_month_of(unix_seconds: i64) -> (String, String) {
+    use chrono::{Datelike, Local, Offset};
+    let offset = Local::now().offset().fix();
+    let local = chrono::DateTime::from_timestamp(unix_seconds, 0)
+        .expect("夹具时间必须可表示")
+        .with_timezone(&offset);
+    (
+        format!("{:04}", local.year()),
+        format!("{:02}", local.month()),
+    )
 }
 /// 在根下按文件名递归查找（C-05 归类恒移动文件，断言“内容仍在”需按名找）。
 fn exists_somewhere(root: &Path, name: &str) -> bool {
@@ -636,7 +642,7 @@ fn classification_empty_dirs_planned_in_same_pass() {
     let f = Fixture::new();
     f.write("folder/a.pdf", b"pdf", 10);
     let cfg = base();
-    let (year, month) = now_year_month();
+    let (year, month) = year_month_of(10);
     let target = format!("文档/{year}/{month}/a.pdf");
     let task = f.plan(cfg.clone());
     assert_eq!(task.summary.planned_move, 1);
@@ -653,7 +659,7 @@ fn classification_empty_dirs_planned_in_same_pass() {
     assert_eq!(again.summary.planned_empty, 0);
 }
 // 注：原 date_classification_is_idempotent 考的是已删除的 classify=Date 按修改日期
-// 归类形态；新归类（创建时间优先、大类/年/月恒开启）由 classify_shape.rs 的
+// 归类形态；新归类（创建/修改取最早、大类/年/月恒开启）由 classify_shape.rs 的
 // moves_preserve_creation_time_for_idempotent_dates 等锚定。
 // 覆盖 S-04
 #[test]
@@ -776,7 +782,7 @@ fn copy_name_cleanup_never_plans_self_move() {
         "不得生成 source==target 的空转移动：{actions:?}"
     );
     Fixture::apply(&task);
-    let (year, month) = now_year_month();
+    let (year, month) = year_month_of(30);
     let dir = f.root.join(format!("文档/{year}/{month}"));
     // C-16：报告 (1).pdf / 报告 (2).pdf 的输出名都是 报告_1.pdf；保留者按消解结果落位。
     assert_eq!(
@@ -1137,11 +1143,11 @@ fn actions_page_filtered_by_kind_and_rejects_unknown() {
     let moves = db.actions_page_filtered(0, 100, Some("move")).unwrap();
     assert_eq!(moves.len(), 1);
     assert_eq!(moves[0].kind, ActionKind::Move);
-    let (year, month) = now_year_month();
+    let (year, month) = year_month_of(10);
     assert_eq!(
         moves[0].target.as_deref(),
         Some(format!("文档/{year}/{month}/a.pdf").as_str()),
-        "C-05：归类目标是「大类/创建年/创建月」"
+        "C-05：归类目标是「大类/年/月」，年月取创建/修改中最早（此处即夹具 mtime）"
     );
     let deletes = db.actions_page_filtered(0, 100, Some("delete")).unwrap();
     assert!(deletes.is_empty(), "纯归类任务不应有删除动作");
@@ -1358,7 +1364,7 @@ fn large_files_classified_into_own_directory() {
     let db = Database::open(&task.directory).unwrap();
     let moves = db.actions_page_filtered(0, 10, Some("move")).unwrap();
     drop(db);
-    let (year, month) = now_year_month();
+    let (year, month) = year_month_of(100);
     let big_move = moves
         .iter()
         .find(|a| a.source == "big.bin")
@@ -1366,7 +1372,7 @@ fn large_files_classified_into_own_directory() {
     assert_eq!(
         big_move.target.as_deref(),
         Some(format!("大文件/{year}/{month}/big.bin").as_str()),
-        "C-06：大文件进入「大文件/创建年/创建月」"
+        "C-06：大文件进入「大文件/年/月」"
     );
     assert!(
         moves.iter().all(|a| {
@@ -1441,7 +1447,7 @@ fn normalize_names_collapses_whitespace_and_applies_nfc() {
     let db = Database::open(&task.directory).unwrap();
     let moves = db.actions_page_filtered(0, 10, Some("move")).unwrap();
     drop(db);
-    let (year, month) = now_year_month();
+    let (year, month) = year_month_of(10);
     let expected = format!("文档/{year}/{month}/café report.txt");
     assert_eq!(moves.len(), 1, "规范化默认开启，改名应入移动计划");
     assert_eq!(moves[0].target.as_deref(), Some(expected.as_str()));
@@ -1467,7 +1473,7 @@ fn fix_extension_plans_rename_to_detected_type() {
     let db = Database::open(&task.directory).unwrap();
     let moves = db.actions_page_filtered(0, 10, Some("move")).unwrap();
     drop(db);
-    let (year, month) = now_year_month();
+    let (year, month) = year_month_of(10);
     let expected = format!("图片/{year}/{month}/photo.png");
     assert_eq!(moves.len(), 1, "错误扩展名应产生改名计划");
     assert_eq!(
@@ -1575,7 +1581,8 @@ fn fix_extension_corrects_promised_containers_but_not_volume_tails() {
     let db = Database::open(&task.directory).unwrap();
     let moves = db.actions_page_filtered(0, 10, Some("move")).unwrap();
     drop(db);
-    let (year, month) = now_year_month();
+    // 五个样例的夹具 mtime 为 12～18 秒，落在同一本地月；年月按创建/修改中最早者取。
+    let (year, month) = year_month_of(12);
     let planned: Vec<(String, String)> = moves
         .iter()
         .map(|a| (a.source.clone(), a.target.clone().unwrap_or_default()))
@@ -2145,7 +2152,7 @@ fn classification_target_never_enters_git_tree() {
     f.write("photo.png", b"photo", 20);
     f.write("doc/a.pdf", b"pdf", 30);
     let cfg = base();
-    let (year, month) = now_year_month();
+    let (year, month) = year_month_of(20);
     let task = f.plan(cfg);
     let db = Database::open(&task.directory).unwrap();
     let moves = db.actions_page_filtered(0, 100, Some("move")).unwrap();

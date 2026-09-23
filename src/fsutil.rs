@@ -172,7 +172,8 @@ pub fn snapshot_with(path: &Path, metadata: &fs::Metadata) -> Result<Snapshot> {
         Ok(d) => i64::try_from(d.as_nanos()).context("文件时间超出范围")?,
         Err(e) => -i64::try_from(e.duration().as_nanos()).context("文件时间超出范围")?,
     };
-    // C-05 归类取创建时间；系统/文件系统不提供时为 None，由调用方回落 mtime。
+    // C-05 归类时间取创建时间与修改时间中最早的可用者；系统/文件系统不提供创建时间时
+    // 为 None，由调用方按修改时间归类。
     let created_ns =
         metadata
             .created()

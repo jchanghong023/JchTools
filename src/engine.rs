@@ -1773,7 +1773,7 @@ fn execute_action(job: &mut Job, action: &Action) -> Result<bool> {
                 &action.reason,
                 action.expected.as_ref().map_or(0, |s| s.size),
             )?;
-            // S-01/C-21：同卷改名天然保留创建时间；跨卷按「复制+写回创建/修改时间+
+            // S-01/C-21：同卷改名天然保留全部时间戳；跨卷按「复制+写回创建/修改时间+
             // 删源」执行，任一步失败保留源项。目录移动（C-14 Git 项目整树平移）只在
             // 同卷可行，跨卷在复制一步安全失败并保留原项目。
             fsutil::move_file_preserving_times(&source, &target)?;

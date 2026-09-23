@@ -10,9 +10,10 @@ use std::path::{Path, PathBuf};
 
 pub const SCHEMA: &str = include_str!("schema.sql");
 /// 当前代码已知的任务库 schema 版本；库版本高于此值时 fail-fast，避免用旧逻辑读新库；
-/// 低于此值（C-05 创建时间列引入前的旧库）同样拒绝——旧库的计划基于已废止的归类
-/// 规则，按 R-04 必须重新分析，不做数据迁移。
-pub const SCHEMA_VERSION: i64 = 2;
+/// 低于此值时同样拒绝——旧库的计划基于已废止的归类规则（3 起：归类依据由创建时间改为
+/// 创建时间与修改时间中最早者，结构未变、版本号标记归类口径代次），按 R-04 必须重新
+/// 分析，不做数据迁移。
+pub const SCHEMA_VERSION: i64 = 3;
 pub struct Database {
     pub conn: Connection,
     pub directory: PathBuf,
@@ -45,7 +46,7 @@ impl Database {
         conn.execute_batch("PRAGMA journal_mode=WAL; PRAGMA synchronous=NORMAL; PRAGMA temp_store=FILE; PRAGMA cache_size=-65536; PRAGMA foreign_keys=ON;")?;
         // 版本检查只对“打开既有库”生效：新建库 user_version 恒为 0，建库事务随后写入
         // 当前版本。库版本与当前已知版本不一致则拒绝（fail-fast）：高版本结构未知，
-        // 低版本库（无 created 列）基于已废止的归类规则，按 R-04 必须重新分析。
+        // 低版本库基于已废止的归类规则，按 R-04 必须重新分析。
         if existing_only {
             let version: i64 = conn.query_row("PRAGMA user_version", [], |row| row.get(0))?;
             anyhow::ensure!(

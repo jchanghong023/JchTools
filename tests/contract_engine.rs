@@ -68,7 +68,7 @@ impl Fixture {
 fn base() -> Config {
     Config {
         global_delete: DeleteMode::Permanent,
-        // 归类按 C-05 恒开启（大类/创建年/创建月），不再有 classify 开关。
+        // 归类按 C-05 恒开启（大类/年/月），不再有 classify 开关。
         dedup_other_names: true,
         ..Config::default()
     }
@@ -265,7 +265,7 @@ fn final_cleanup_removes_newly_empty_chain_and_empty_quarantine() {
     f.dir(QUARANTINE_DIR_NAME);
     f.write("move_src/report.pdf", b"pdf");
     let config = base();
-    // C-05 固定归类「大类/创建年/创建月」：Fixture::write 不设创建时间 → 当前年/月。
+    // C-05 固定归类「大类/年/月」：Fixture::write 不设时间 → 创建与修改都≈现在 → 当前年/月。
     let month_dir = year_month_path();
     let task = f.plan(config);
     engine::apply(&task.directory, Context::default()).unwrap();
@@ -401,7 +401,7 @@ fn broken_hash_cache_degrades_without_failing() {
     assert_eq!(remaining, Some(b"same".to_vec()), "恰好保留一个副本");
 }
 
-/// 当前本地年/月（C-05：Fixture::write 不设创建时间 → 归类按“现在”落位）。
+/// 当前本地年/月（C-05：Fixture::write 不设时间 → 创建与修改都≈现在 → 归类按“现在”落位）。
 fn year_month_path() -> String {
     use chrono::Datelike;
     let now = chrono::Local::now();

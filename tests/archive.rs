@@ -510,7 +510,7 @@ fn equal_content_archives_extract_both_and_classify_is_stable() {
         b"beta member\n",
         "两个包解出同名成员：第二个按 H-07 改名落盘，内容相同也不跳过"
     );
-    // 整理：C-05 固定归类「大类/创建年/创建月」恒开启；解出文件未设创建时间 → 当前年/月。
+    // 整理：C-05 固定归类「大类/年/月」恒开启；解出文件的创建与修改时间都≈现在 → 当前年/月。
     let org = organizer();
     let task = engine::prepare_at(&f.root, org.clone(), Context::default(), &f.state).unwrap();
     ArchiveFixture::apply(&task);

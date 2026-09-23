@@ -54,7 +54,7 @@ pub struct Config {
     pub dedup_copy_names: bool,
     pub dedup_other_names: bool,
     pub keep_duplicate: KeepPolicy,
-    /// C-06 大文件单独归类：命中文件进入「大文件/创建年/创建月」。
+    /// C-06 大文件单独归类：命中文件进入「大文件/年/月」。
     pub large_files: bool,
     /// C-06 大文件阈值（字节），≥ 阈值命中；≥1。
     pub large_threshold_bytes: u64,

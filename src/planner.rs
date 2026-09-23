@@ -289,8 +289,9 @@ fn level_prefix(sources: &[String], k: usize) -> String {
     parts.reverse();
     parts.join("_")
 }
-/// C-05 归类时间：创建时间优先，缺失回落修改时间；以分析开始时的系统本地时区解释，
-/// 年四位 / 月两位；无法表示时返回 None（该项不归类，保留并显示原因）。
+/// C-05 归类时间：文件「创建时间、修改时间」中最早的可用时间（复制、解压、迁移会把
+/// 创建时间刷成新日期，故不能只看创建时间）；以分析开始时的系统本地时区解释，年四位 /
+/// 月两位；无法表示时返回 None（该项不归类，保留并显示原因）。
 fn year_month(stamp_ns: i64, offset: chrono::FixedOffset) -> Option<(String, String)> {
     let seconds = stamp_ns.div_euclid(1_000_000_000);
     let subsec = u32::try_from(stamp_ns.rem_euclid(1_000_000_000)).unwrap_or(0);
@@ -300,6 +301,12 @@ fn year_month(stamp_ns: i64, offset: chrono::FixedOffset) -> Option<(String, Str
         return None;
     }
     Some((format!("{year:04}"), format!("{:02}", local.month())))
+}
+/// C-05 归类时间取值：修改时间恒可用，创建时间可用时取两者最早。
+fn classification_stamp(snapshot: &crate::model::Snapshot) -> i64 {
+    snapshot.created_ns.map_or(snapshot.modified_ns, |created| {
+        created.min(snapshot.modified_ns)
+    })
 }
 
 /// 一个待定位项（存活文件或 Git 项目目录）。
@@ -714,7 +721,7 @@ fn git_collection(job: &mut Job) -> Result<Vec<String>> {
 )]
 fn classify_files(job: &mut Job, moved_roots: &[String]) -> Result<()> {
     job.context
-        .status("按「大类/创建年/创建月」确定存活文件的归类目标与最终名称");
+        .status("按「大类/年/月」确定存活文件的归类目标与最终名称");
     // C-05：日期采用分析开始时的系统本地时区。
     let local_offset = chrono::Local::now().offset().fix();
     let _ = &local_offset;
@@ -778,18 +785,15 @@ fn classify_files(job: &mut Job, moved_roots: &[String]) -> Result<()> {
                 job.summary.errors += 1;
                 continue;
             }
-            let stamp_ns = file
-                .snapshot
-                .created_ns
-                .unwrap_or(file.snapshot.modified_ns);
+            let stamp_ns = classification_stamp(&file.snapshot);
             let Some((year, month)) = year_month(stamp_ns, local_offset) else {
-                // C-05：两个时间都不可用或无法表示时不归类，保留并显示原因。
+                // C-05：无可用时间或无法表示时不归类，保留并显示原因。
                 job.log(
                     "归类",
                     &file.rel,
                     "",
                     "失败",
-                    "创建时间与修改时间均不可用或超出可表示范围；该项不归类，保留源项",
+                    "归类时间超出可表示范围；该项不归类，保留源项",
                     0,
                 )?;
                 job.summary.errors += 1;
@@ -887,7 +891,7 @@ fn classify_files(job: &mut Job, moved_roots: &[String]) -> Result<()> {
         let mut planned = action(
             &file,
             ActionKind::Move,
-            "按「大类/创建年/创建月」归类（同名冲突已统一消解；目标不覆盖）",
+            "按「大类/年/月」归类（同名冲突已统一消解；目标不覆盖）",
             DeleteMode::Keep,
         );
         planned.target = Some(target.clone());

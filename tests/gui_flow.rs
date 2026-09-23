@@ -105,7 +105,7 @@ fn make_fixture() -> tempfile::TempDir {
     };
     write("a.txt", b"same content", 100); // 旧 → 去重时被删除
     write("b.txt", b"same content", 200); // 新 → 保留
-    write("temp.tmp", b"junk", 300); // 默认 clean_temp=false → 会按归类移到「其他/」
+    write("temp.tmp", b"junk", 300); // 默认 clean_temp=false → 会按归类移到「其他/年/月/」
     dir
 }
 
@@ -275,22 +275,26 @@ fn plan_execution_confirmation_flow_runs_end_to_end() {
         .collect();
 
     // 3) 默认 clean_temp=false：temp.tmp 被归类移动，而非清理删除
-    //（C-05 固定归类「大类/创建年/创建月」，文件未设创建时间 → 当前年/月）。
-    let classified = |category: &str, name: &str| {
-        use chrono::Datelike;
-        let now = chrono::Local::now();
+    //（C-05 固定归类「大类/年/月」，年月取创建时间与修改时间中最早的可用时间；夹具只设
+    // mtime、创建时间为“现在”，故按夹具 mtime 落位）。
+    let classified = |category: &str, name: &str, mtime: i64| {
+        use chrono::{Datelike, Local, Offset};
+        let offset = Local::now().offset().fix();
+        let local = chrono::DateTime::from_timestamp(mtime, 0)
+            .expect("夹具时间必须可表示")
+            .with_timezone(&offset);
         data.join(format!(
             "{category}/{:04}/{:02}/{name}",
-            now.year(),
-            now.month()
+            local.year(),
+            local.month()
         ))
     };
     assert!(
-        classified("其他", "temp.tmp").exists(),
+        classified("其他", "temp.tmp", 300).exists(),
         "默认配置下 temp.tmp 应归类到「其他/年/月」而不是被清理：{remaining:?}"
     );
     assert!(
-        classified("文档", "a.txt").exists() && classified("文档", "b.txt").exists(),
+        classified("文档", "a.txt", 100).exists() && classified("文档", "b.txt", 200).exists(),
         "GUI 默认不同名去重关闭：a.txt/b.txt 同内容不同名，各自随归类保留到 文档/年/月/：{remaining:?}"
     );
 }
