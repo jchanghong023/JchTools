@@ -310,6 +310,16 @@ def _fulltest_stages(results: list[StageResult]) -> None:
         return
     results.append(run_logged("rustfmt-check", [cargo, "fmt", "--all", "--", "--check"], timeout=300.0))
     results.append(run_logged("clippy", [cargo, "clippy", "--all-targets", "--", "-D", "warnings"], timeout=1800.0))
+    # perf-tracing 是文档化的性能打点构建配置（src/perf.rs、tests/perf_probe.rs），默认特性构建
+    # 覆盖不到它：曾因 `Summary.linked` 字段删除后遗漏调用点而整个配置编译失败。单独构建该特性，
+    # 防止只改字段/签名的变更再次打断这个配置。
+    results.append(
+        run_logged(
+            "clippy-perf-tracing",
+            [cargo, "clippy", "--all-targets", "--features", "perf-tracing", "--", "-D", "warnings"],
+            timeout=1800.0,
+        )
+    )
     if _has_blocking(results):
         return
     # GUI 冒烟数据集：一次性生成在 .tmp/ 下，跑完删除（不整清 .tmp/，保留各阶段日志）。
