@@ -314,7 +314,24 @@ pub fn status_changes(git: &Path, root: &Path) -> Result<Vec<FileChange>> {
             summarize(&output_text(&out.stderr), &output_text(&out.stdout))
         );
     }
-    let data = output_text(&out.stdout);
+    parse_status(&output_text(&out.stdout))
+}
+
+/// 取 rename/copy 记录的第二段（旧路径）：porcelain -z 中此类记录形如
+/// 「XY 新路径\0旧路径\0」，缺段说明输出异常，拒绝继续解析。
+fn take_origin_path(segments: &[&str], index: &mut usize, new_path: &str) -> Result<String> {
+    match segments.get(*index) {
+        Some(old) if !old.is_empty() => {
+            *index += 1;
+            Ok((*old).to_owned())
+        }
+        _ => bail!("解析 git status 的 rename/copy 记录失败：{new_path}"),
+    }
+}
+
+/// 解析 `git status --porcelain=v1 -z` 的输出（G-12）。
+/// pub 供集成测试以合成输入验证各类记录形状（部分形状无法用真实 git 命令构造）。
+pub fn parse_status(data: &str) -> Result<Vec<FileChange>> {
     let segments: Vec<&str> = data.split('\0').filter(|s| !s.is_empty()).collect();
     let mut changes = Vec::new();
     let mut index = 0;
@@ -331,16 +348,21 @@ pub fn status_changes(git: &Path, root: &Path) -> Result<Vec<FileChange>> {
             bail!("仓库存在未解决的冲突条目：{path}；请先解决冲突并完成或中止合并（G-11）");
         }
         let change = match (x, y) {
-            (b'?', b'?') | (b'C', _) => FileChange::Added(path),
-            (b'R', _) => {
-                let old = segments
-                    .get(index)
-                    .map_or(String::new(), |s| (*s).to_owned());
-                if old.is_empty() {
-                    bail!("解析 git status 的 rename 记录失败：{path}");
-                }
-                index += 1;
+            (b'?', b'?') => FileChange::Added(path),
+            // G-04：Git 已识别的 rename 作为一个逻辑变更处理。两列都可能给出 R：
+            // X='R' 是已暂存重命名（git mv 等），Y='R' 是工作区重命名（如先 add
+            // 修改再在资源管理器改名的 MR 记录）。porcelain -z 中此类记录形如
+            // 「XY 新路径\0旧路径\0」，旧路径段必须消费，否则会被当成下一条
+            // 记录头串位误解析。
+            (b'R', _) | (_, b'R') => {
+                let old = take_origin_path(&segments, &mut index, &path)?;
                 FileChange::Renamed(old, path)
+            }
+            // 已暂存 copy（status.renames=copies）同样是「新路径\0旧路径\0」两段：
+            // 消费旧路径段，按 G-04 归类为新增，避免串位。
+            (b'C', _) => {
+                take_origin_path(&segments, &mut index, &path)?;
+                FileChange::Added(path)
             }
             (b' ', other) => match other {
                 b'D' => FileChange::Deleted(path),

@@ -621,3 +621,74 @@ fn completed_files_not_reprocessed_on_restart() {
         "不得重复提交：{log:?}"
     );
 }
+
+// 覆盖 G-04（已暂存 copy：porcelain 两段记录「C 新路径\0旧路径\0」，旧路径段必须被
+// 消费并按新增处理为一个逻辑变更，不得串位成幽灵记录导致整次扫描失败）
+#[test]
+fn staged_copy_two_segment_record_is_handled_as_single_added_change() {
+    let fix = fixture();
+    fs::write(fix.repo.join("src.txt"), "l1\nl2\nl3\nl4\nl5\nl6\n").unwrap();
+    git_ok(&fix.repo, &["add", "src.txt"]);
+    git_ok(&fix.repo, &["commit", "-q", "-m", "prepare"]);
+    git_ok(&fix.repo, &["push", "-q"]);
+    // status.renames=copies 时，「源文件同批修改 + 副本新增」会被 git 识别为 copy
+    git_ok(&fix.repo, &["config", "status.renames", "copies"]);
+    fs::copy(fix.repo.join("src.txt"), fix.repo.join("dst.txt")).unwrap();
+    fs::write(
+        fix.repo.join("src.txt"),
+        "l1\nl2\nl3\nl4\nl5\nl6-modified\n",
+    )
+    .unwrap();
+    git_ok(&fix.repo, &["add", "src.txt", "dst.txt"]);
+    // 前置条件守卫：确认确实构造出了 copy 两段记录（新路径后随 NUL + 旧路径）
+    let porcelain = git_ok(
+        &fix.repo,
+        &["status", "--porcelain=v1", "-z", "--untracked-files=all"],
+    );
+    assert!(
+        porcelain.contains("C  dst.txt\0src.txt\0"),
+        "前置条件：必须构造出 copy 两段记录：{porcelain:?}"
+    );
+    let outcome = run_tool(&fix.repo);
+    assert!(
+        outcome.text.contains("全部完成"),
+        "收尾文案：{}",
+        outcome.text
+    );
+    assert!(worktree_clean(&fix.repo));
+    let log = remote_log(&fix.remote);
+    assert!(log.contains(&"update: dst.txt".to_string()), "{log:?}");
+    assert!(log.contains(&"update: src.txt".to_string()), "{log:?}");
+    // copy 按新增处理 + 源文件修改：恰好两个逻辑变更（旧路径段不得变成幽灵提交）
+    let updates = log.iter().filter(|s| s.starts_with("update: ")).count();
+    assert_eq!(updates, 2, "{log:?}");
+}
+
+// 覆盖 G-04（工作区重命名：porcelain X=' '、Y='R' 两段记录按一个 Renamed 处理。
+// 当前 git 版本的 status 不为未暂存重命名输出 Y='R'，故以合成 porcelain 输入直接
+// 验证解析分支；其他 git 配置/版本下可能出现该形状，解析器必须健壮）
+#[test]
+fn parse_worktree_rename_record_as_one_renamed_change() {
+    let changes = git_tools::parse_status(" R wt_new.txt\0wt_old.txt\0").expect("记录必须解析成功");
+    assert_eq!(
+        changes,
+        vec![git_tools::FileChange::Renamed(
+            "wt_old.txt".to_string(),
+            "wt_new.txt".to_string()
+        )]
+    );
+}
+
+// 覆盖 G-04（MR 记录：先 add 修改再工作区改名，porcelain「MR 新路径\0旧路径\0」
+// 两段；旧路径段必须被消费，不得被当成下一条记录头串位误解析）
+#[test]
+fn parse_staged_modify_plus_worktree_rename_record_without_ghost() {
+    let changes = git_tools::parse_status("MR mr_new.txt\0mr_old.txt\0").expect("记录必须解析成功");
+    assert_eq!(
+        changes,
+        vec![git_tools::FileChange::Renamed(
+            "mr_old.txt".to_string(),
+            "mr_new.txt".to_string()
+        )]
+    );
+}
