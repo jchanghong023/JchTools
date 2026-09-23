@@ -1216,10 +1216,10 @@ fn parse_size_bytes(text: &str, unit_index: i32) -> Result<u64, String> {
     let base = whole_value
         .checked_mul(multiplier)
         .ok_or_else(|| "数值超出允许的范围".to_string())?;
-    if base == 0 {
-        return Err("拆分大小必须大于 0".into());
-    }
     if frac.is_empty() {
+        if base == 0 {
+            return Err("拆分大小必须大于 0".into());
+        }
         return Ok(base);
     }
     if frac.len() > 9 {
@@ -1236,8 +1236,15 @@ fn parse_size_bytes(text: &str, unit_index: i32) -> Result<u64, String> {
     if scaled % denom != 0 {
         return Err("换算后不是整数字节（如 0.1 KB = 102.4 字节）".into());
     }
-    base.checked_add(scaled / denom)
-        .ok_or_else(|| "数值超出允许的范围".to_string())
+    // 合法性判定看换算后的总量：整数部分为 0 的小数（如 0.5 MB）在汇总后才见真值，
+    // 提前判 base==0 会把合法小数输入误拒（回归见 split_size_accepts_integral_fractions）。
+    let total = base
+        .checked_add(scaled / denom)
+        .ok_or_else(|| "数值超出允许的范围".to_string())?;
+    if total == 0 {
+        return Err("拆分大小必须大于 0".into());
+    }
+    Ok(total)
 }
 
 /// MD 整理合并输出文件名（M-07）：去掉首尾空白，不含路径分隔符，自动补 `.md` 后缀。
@@ -1338,22 +1345,27 @@ fn md_split_run(
             .unwrap_or_default(),
         plan.bounds.len(),
     );
-    let conflicts = md_tools::conflicting_outputs(out_dir, &names);
-    if !conflicts.is_empty() {
-        let sample: Vec<String> = conflicts
-            .iter()
-            .take(3)
-            .map(|path| {
-                path.file_name()
-                    .map(|name| name.to_string_lossy().into_owned())
-                    .unwrap_or_default()
-            })
-            .collect();
-        return Err(format!(
-            "MD_CONFLICT {} 个同名分片已存在于输出目录（如 {}）",
-            conflicts.len(),
-            sample.join("、")
-        ));
+    // M-11：仅在未确认覆盖时前置检测冲突；确认覆盖（overwrite=true）后直接写出，
+    // 否则旧分片仍存在会让确认框无限复弹、覆盖永远无法完成（回归见
+    // md_split_existing_output_requires_confirmation_then_overwrites）。
+    if !overwrite {
+        let conflicts = md_tools::conflicting_outputs(out_dir, &names);
+        if !conflicts.is_empty() {
+            let sample: Vec<String> = conflicts
+                .iter()
+                .take(3)
+                .map(|path| {
+                    path.file_name()
+                        .map(|name| name.to_string_lossy().into_owned())
+                        .unwrap_or_default()
+                })
+                .collect();
+            return Err(format!(
+                "MD_CONFLICT {} 个同名分片已存在于输出目录（如 {}）",
+                conflicts.len(),
+                sample.join("、")
+            ));
+        }
     }
     let progress_out = out.clone();
     let progress_control = Arc::clone(control);
@@ -3301,6 +3313,83 @@ mod gui_tests {
     //! 每个用例开始前重置为初始状态，互不干扰且与显示器/事件循环解耦。
     use super::*;
     use std::sync::{mpsc, Mutex, OnceLock};
+
+    // 覆盖 M-08（小数大小换算后为正整数字节即合法：0.5 MB = 524288 字节；
+    // 0 与换算后非整数字节的输入仍必须拒绝）
+    #[test]
+    fn split_size_accepts_integral_fractions_and_rejects_zero() {
+        assert_eq!(
+            parse_size_bytes("0.5", 1),
+            Ok(512 * 1024),
+            "0.5 MB = 524288 字节，合法输入不得拒绝"
+        );
+        assert_eq!(parse_size_bytes("0.5", 0), Ok(512), "0.5 KB = 512 字节");
+        assert_eq!(parse_size_bytes("1.5", 0), Ok(1536), "1.5 KB = 1536 字节");
+        assert!(parse_size_bytes("0", 0).is_err(), "0 字节必须拒绝");
+        assert!(
+            parse_size_bytes("0.1", 0).is_err(),
+            "0.1 KB = 102.4 字节换算后非整数，必须拒绝"
+        );
+        assert!(
+            parse_size_bytes("0.0", 1).is_err(),
+            "0.0 MB 换算后为 0，必须拒绝"
+        );
+    }
+
+    // 覆盖 M-11（同名分片确认覆盖后必须实际写出：确认不得再次弹框或空转）
+    #[test]
+    fn md_split_existing_output_requires_confirmation_then_overwrites() {
+        let dir = temp_test_dir("md-split-confirm");
+        let docs = dir.join("docs");
+        std::fs::create_dir_all(&docs).unwrap();
+        let content = "0123456789".repeat(150); // 1500 字节 → 1 KB 限制下 2 片
+        std::fs::write(docs.join("doc.md"), &content).unwrap();
+        let parts = dir.join("parts");
+        std::fs::create_dir_all(&parts).unwrap();
+        std::fs::write(parts.join("doc_001.md"), "旧内容").unwrap();
+        let parts_text = parts.display().to_string();
+        with_gui(move |app| {
+            app.ui.invoke_select_tool("md-organizer".into());
+            app.ui.set_md_subpage(1);
+            app.ui
+                .set_md_split_file(docs.join("doc.md").display().to_string().into());
+            app.ui.set_md_split_size("1".into());
+            app.ui.set_md_split_unit(0);
+            app.ui.set_md_split_dir(parts_text.clone().into());
+            app.ui.invoke_md_split_start();
+            assert!(
+                pump_until(app, || app.ui.get_confirm_kind() == 4),
+                "同名分片已存在必须先弹确认框（M-11）"
+            );
+            assert_eq!(
+                std::fs::read_to_string(parts.join("doc_001.md")).unwrap(),
+                "旧内容",
+                "确认前不得写入"
+            );
+            app.ui.set_acknowledge(true);
+            app.ui.set_confirm_kind(0);
+            confirm_md_override(&app.ui, &app.state, &app.pump.out);
+            assert!(
+                pump_until(app, || {
+                    !app.ui.get_busy() && app.ui.get_status().contains("拆分完成")
+                }),
+                "确认覆盖后必须完成写出而不是再次弹确认（M-11）：status={}",
+                app.ui.get_status()
+            );
+            assert_eq!(
+                std::fs::read_to_string(parts.join("doc_001.md")).unwrap(),
+                &content[..1024],
+                "确认后旧分片被覆盖为新内容前 1024 字节"
+            );
+            assert_eq!(
+                std::fs::read_to_string(parts.join("doc_002.md")).unwrap(),
+                &content[1024..],
+                "第二片写出剩余内容"
+            );
+            let _ = std::fs::remove_dir_all(&dir);
+        })
+        .unwrap();
+    }
 
     // 覆盖 P-02/U-11（新工具导航注册与切工具回默认子页）
     #[test]

@@ -304,6 +304,26 @@ fn merge_excludes_own_output_and_refuses_silent_overwrite() {
     assert_eq!(again.len(), 2, "本次输出文件不得作为输入参与合并（M-07）");
 }
 
+// 覆盖 M-07（输出排除不依赖路径大小写拼写：Windows 路径不区分大小写，
+// 输入框与输出框对同一目录的大小写拼写不同时仍必须排除输出自身）
+#[test]
+fn merge_excludes_output_regardless_of_path_casing() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path();
+    write(&root.join("a.md"), "# 甲");
+    std::fs::write(root.join("merged.md"), "旧输出").unwrap();
+    // 输出路径按全小写拼写（与磁盘真实大小写不同），但指向同一文件
+    let lowered = std::path::PathBuf::from(root.display().to_string().to_lowercase());
+    let output = lowered.join("merged.md");
+    let entries = md_tools::scan_markdown(root, true, Some(&output)).unwrap();
+    let rels: Vec<String> = entries.iter().map(|e| e.rel.clone()).collect();
+    assert_eq!(
+        rels,
+        vec!["a.md".to_string()],
+        "大小写拼写不同的同一输出文件必须被排除（M-07）：{rels:?}"
+    );
+}
+
 // 覆盖 M-07（大文件流式处理正确性：5MB 输入的合并输出包含全部内容）
 #[test]
 fn merge_handles_large_file_streaming() {

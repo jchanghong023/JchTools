@@ -25,6 +25,15 @@ pub struct MergeEntry {
     pub file_name: String,
 }
 
+/// Windows 口径的同一文件判定：大小写与分隔符（`/` 与 `\`）不敏感的路径文本比较。
+/// 仅用于输出文件排除这一用途；排序仍用原始路径，不受本归一化影响。
+fn same_file_path(a: &Path, b: &Path) -> bool {
+    fn normalized(path: &Path) -> String {
+        path.to_string_lossy().to_lowercase().replace('\\', "/")
+    }
+    normalized(a) == normalized(b)
+}
+
 fn is_markdown(path: &Path) -> bool {
     path.extension()
         .is_some_and(|ext| ext.eq_ignore_ascii_case("md"))
@@ -61,7 +70,10 @@ pub fn scan_markdown(
         if !is_markdown(path) {
             continue;
         }
-        if exclude.is_some_and(|out| path == out) {
+        // Windows 路径不区分大小写、两种分隔符等价：输入框与输出框对同一目录的
+        // 大小写拼写不同时，按字节比较会漏排除，把本次输出误当输入合并（M-07，
+        // 回归见 tests/md_tools.rs merge_excludes_output_regardless_of_path_casing）。
+        if exclude.is_some_and(|out| same_file_path(path, out)) {
             continue;
         }
         let rel = path
