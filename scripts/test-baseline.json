@@ -165,6 +165,24 @@
     },
     {
       "file": "src/gui.rs",
+      "name": "md_and_git_tools_navigate_and_reset_subpage",
+      "ignored": false,
+      "cfg": null
+    },
+    {
+      "file": "src/gui.rs",
+      "name": "md_merge_existing_output_requires_confirmation",
+      "ignored": false,
+      "cfg": null
+    },
+    {
+      "file": "src/gui.rs",
+      "name": "md_merge_flow_runs_end_to_end_via_real_callbacks",
+      "ignored": false,
+      "cfg": null
+    },
+    {
+      "file": "src/gui.rs",
       "name": "merged_rows_write_shadow_fields",
       "ignored": false,
       "cfg": null
@@ -1352,6 +1370,78 @@
       "cfg": null
     },
     {
+      "file": "tests/git_tools.rs",
+      "name": "backoff_follows_required_sequence",
+      "ignored": false,
+      "cfg": null
+    },
+    {
+      "file": "tests/git_tools.rs",
+      "name": "completed_files_not_reprocessed_on_restart",
+      "ignored": false,
+      "cfg": null
+    },
+    {
+      "file": "tests/git_tools.rs",
+      "name": "conflict_resolved_resume_pushes_and_does_not_recommit",
+      "ignored": false,
+      "cfg": null
+    },
+    {
+      "file": "tests/git_tools.rs",
+      "name": "inspect_rejects_invalid_repositories",
+      "ignored": false,
+      "cfg": null
+    },
+    {
+      "file": "tests/git_tools.rs",
+      "name": "merge_blocked_by_dirty_worktree_stops_with_reason",
+      "ignored": false,
+      "cfg": null
+    },
+    {
+      "file": "tests/git_tools.rs",
+      "name": "merge_conflict_stops_and_preserves_state",
+      "ignored": false,
+      "cfg": null
+    },
+    {
+      "file": "tests/git_tools.rs",
+      "name": "modified_deleted_and_renamed_changes",
+      "ignored": false,
+      "cfg": null
+    },
+    {
+      "file": "tests/git_tools.rs",
+      "name": "multiple_files_are_strictly_serial",
+      "ignored": false,
+      "cfg": null
+    },
+    {
+      "file": "tests/git_tools.rs",
+      "name": "preexisting_staged_content_is_protected",
+      "ignored": false,
+      "cfg": null
+    },
+    {
+      "file": "tests/git_tools.rs",
+      "name": "remote_ahead_triggers_fetch_merge_then_push",
+      "ignored": false,
+      "cfg": null
+    },
+    {
+      "file": "tests/git_tools.rs",
+      "name": "single_added_file_committed_and_pushed",
+      "ignored": false,
+      "cfg": null
+    },
+    {
+      "file": "tests/git_tools.rs",
+      "name": "stop_before_any_file_keeps_repo_untouched",
+      "ignored": false,
+      "cfg": null
+    },
+    {
       "file": "tests/gui_flow.rs",
       "name": "extract_confirmation_discloses_source_deletion_and_leaves_files_untouched",
       "ignored": false,
@@ -1368,6 +1458,120 @@
       "name": "plan_execution_confirmation_flow_runs_end_to_end",
       "ignored": false,
       "cfg": "feature = \"gui\""
+    },
+    {
+      "file": "tests/md_tools.rs",
+      "name": "merge_converts_setext_headings",
+      "ignored": false,
+      "cfg": null
+    },
+    {
+      "file": "tests/md_tools.rs",
+      "name": "merge_excludes_own_output_and_refuses_silent_overwrite",
+      "ignored": false,
+      "cfg": null
+    },
+    {
+      "file": "tests/md_tools.rs",
+      "name": "merge_handles_info_string_and_indented_fence",
+      "ignored": false,
+      "cfg": null
+    },
+    {
+      "file": "tests/md_tools.rs",
+      "name": "merge_handles_large_file_streaming",
+      "ignored": false,
+      "cfg": null
+    },
+    {
+      "file": "tests/md_tools.rs",
+      "name": "merge_keeps_sources_untouched_and_separates_files",
+      "ignored": false,
+      "cfg": null
+    },
+    {
+      "file": "tests/md_tools.rs",
+      "name": "merge_keeps_thematic_break_and_list_untouched",
+      "ignored": false,
+      "cfg": null
+    },
+    {
+      "file": "tests/md_tools.rs",
+      "name": "merge_orders_by_creation_time_then_natural_path",
+      "ignored": false,
+      "cfg": null
+    },
+    {
+      "file": "tests/md_tools.rs",
+      "name": "merge_protects_fenced_code_blocks",
+      "ignored": false,
+      "cfg": null
+    },
+    {
+      "file": "tests/md_tools.rs",
+      "name": "merge_shifts_atx_headings_and_adds_file_header",
+      "ignored": false,
+      "cfg": null
+    },
+    {
+      "file": "tests/md_tools.rs",
+      "name": "natural_sort_compares_digits_numerically",
+      "ignored": false,
+      "cfg": null
+    },
+    {
+      "file": "tests/md_tools.rs",
+      "name": "scan_nonrecursive_takes_only_top_level_markdown",
+      "ignored": false,
+      "cfg": null
+    },
+    {
+      "file": "tests/md_tools.rs",
+      "name": "scan_recursive_includes_subdirectories",
+      "ignored": false,
+      "cfg": null
+    },
+    {
+      "file": "tests/md_tools.rs",
+      "name": "split_detects_conflicts_and_refuses_without_confirmation",
+      "ignored": false,
+      "cfg": null
+    },
+    {
+      "file": "tests/md_tools.rs",
+      "name": "split_keeps_source_untouched",
+      "ignored": false,
+      "cfg": null
+    },
+    {
+      "file": "tests/md_tools.rs",
+      "name": "split_many_parts_on_disk_sorted_correctly",
+      "ignored": false,
+      "cfg": null
+    },
+    {
+      "file": "tests/md_tools.rs",
+      "name": "split_names_use_three_digits_and_widen_beyond_999",
+      "ignored": false,
+      "cfg": null
+    },
+    {
+      "file": "tests/md_tools.rs",
+      "name": "split_never_breaks_multibyte_and_rejoins_losslessly",
+      "ignored": false,
+      "cfg": null
+    },
+    {
+      "file": "tests/md_tools.rs",
+      "name": "split_respects_kb_and_mb_limits",
+      "ignored": false,
+      "cfg": null
+    },
+    {
+      "file": "tests/md_tools.rs",
+      "name": "split_tiny_limit_ascii_ok_and_too_small_errors",
+      "ignored": false,
+      "cfg": null
     },
     {
       "file": "tests/perf_probe.rs",
