@@ -993,6 +993,12 @@
     },
     {
       "file": "tests/core.rs",
+      "name": "fix_extension_corrects_promised_containers_but_not_volume_tails",
+      "ignored": false,
+      "cfg": null
+    },
+    {
+      "file": "tests/core.rs",
       "name": "fix_extension_keeps_specialized_container_and_alias_extensions",
       "ignored": false,
       "cfg": null
