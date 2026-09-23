@@ -810,6 +810,118 @@ fn failed_archive_still_quarantines_wide_named_siblings() {
     );
 }
 
+// 覆盖 X-06, X-10（回归：隔离按整组一次规划目标名——「解压失败」内已有同名
+// 占用时整组统一改主干，组员不再分家）
+#[test]
+fn quarantined_split_zip_group_renames_stem_as_a_whole() {
+    // 修复前：combo.zip → combo (1).zip，combo.z01 → combo.z01，组员主干不一致；
+    // 修复后：按 X-10 统一为 combo (1).zip / combo (1).z01，后缀原样保留。
+    let tmp = fixture("quarantine-group-zip");
+    let root = tmp.path().join("data");
+    write_with_mtime(&root.join("combo.zip"), b"broken main", 100);
+    write_with_mtime(&root.join("combo.z01"), b"broken volume", 200);
+    write_with_mtime(
+        &root.join("解压失败").join("combo.zip"),
+        b"earlier failure",
+        300,
+    );
+    let result = engine::extract_run_at(
+        &root,
+        Config::default(),
+        Context::default(),
+        &state_of(&tmp),
+        Some(&fake_engine(tmp.path())),
+    )
+    .unwrap();
+    assert_eq!(result.summary.archives_failed, 1);
+    assert_eq!(
+        fs::read(root.join("解压失败").join("combo.zip")).unwrap(),
+        b"earlier failure",
+        "既有占用文件必须原样保留（X-06 不覆盖）"
+    );
+    assert!(
+        !root.join("解压失败").join("combo.z01").exists(),
+        "组员不得再以原名落盘：整组统一改主干（X-10）"
+    );
+    assert!(
+        root.join("解压失败").join("combo (1).zip").is_file(),
+        "主体以统一改后的主干隔离（X-10）"
+    );
+    assert!(
+        root.join("解压失败").join("combo (1).z01").is_file(),
+        "兄弟卷跟随同一主干，后缀原样保留（X-10）"
+    );
+}
+
+// 覆盖 X-06, X-10（回归：编号卷集冲突时整组统一改主干，编号与补零原样保留）
+#[test]
+fn quarantined_numbered_group_renames_stem_as_a_whole() {
+    // 修复前：data.7z.001 原名进入「解压失败」，data.7z.002 因占用改成
+    // data (1).7z.002，整组分家；修复后统一为 data (1).7z.001 / data (1).7z.002。
+    let tmp = fixture("quarantine-group-numbered");
+    let root = tmp.path().join("data");
+    write_with_mtime(&root.join("data.7z.001"), b"vol1", 100);
+    write_with_mtime(&root.join("data.7z.002"), b"vol2", 200);
+    write_with_mtime(
+        &root.join("解压失败").join("data.7z.002"),
+        b"earlier failure",
+        300,
+    );
+    let result = engine::extract_run_at(
+        &root,
+        Config::default(),
+        Context::default(),
+        &state_of(&tmp),
+        Some(&fake_engine(tmp.path())),
+    )
+    .unwrap();
+    assert_eq!(result.summary.archives_failed, 1);
+    assert!(
+        !root.join("解压失败").join("data.7z.001").exists(),
+        "组员不得再以原名落盘：整组统一改主干（X-10）"
+    );
+    assert_eq!(
+        fs::read(root.join("解压失败").join("data.7z.002")).unwrap(),
+        b"earlier failure",
+        "既有占用文件必须原样保留（X-06 不覆盖）"
+    );
+    assert!(root.join("解压失败").join("data (1).7z.001").is_file());
+    assert!(root.join("解压失败").join("data (1).7z.002").is_file());
+}
+
+// 覆盖 X-06, X-10（回归：part rar 族隔离示例 data (1).part01.rar / data (1).part02.rar，
+// `.partN.rar` 整体作为不可拆分后缀，序号插在主干之后）
+#[test]
+fn quarantined_part_rar_group_renames_stem_as_a_whole() {
+    let tmp = fixture("quarantine-group-part");
+    let root = tmp.path().join("data");
+    write_with_mtime(&root.join("data.part01.rar"), b"vol1", 100);
+    write_with_mtime(&root.join("data.part02.rar"), b"vol2", 200);
+    write_with_mtime(
+        &root.join("解压失败").join("data.part01.rar"),
+        b"earlier failure",
+        300,
+    );
+    let result = engine::extract_run_at(
+        &root,
+        Config::default(),
+        Context::default(),
+        &state_of(&tmp),
+        Some(&fake_engine(tmp.path())),
+    )
+    .unwrap();
+    assert_eq!(result.summary.archives_failed, 1);
+    assert!(
+        root.join("解压失败").join("data (1).part01.rar").is_file()
+            && root.join("解压失败").join("data (1).part02.rar").is_file(),
+        "整组统一改主干，`.partN.rar` 后缀原样保留（X-10）"
+    );
+    assert!(
+        !root.join("解压失败").join("data.part01 (1).rar").exists(),
+        "不得把 part 段留在主体里按普通扩展名改名（X-10/附录 B）"
+    );
+}
+
 /// 任务以错误结束（没有 TaskResult）时，打开本次运行的任务库：摘要与行状态都在里面。
 #[cfg(windows)]
 fn task_db(state: &Path) -> jchtools::db::Database {

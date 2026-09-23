@@ -169,10 +169,6 @@ impl SevenZip {
         let mut count = 0u64;
         let mut sizes_complete = true;
         let mut git_subtrees = HashSet::new();
-        // 归档是否位于选定根：只有此时成员的顶层组件才会落进 scan 的顶层隔离剪枝，
-        // 「解压失败」保留名判定才适用（子目录归档的同名成员对 scan 可见，见下方 guard）。
-        let archive_at_root =
-            fsutil::relative_string(&job.root, archive).map_or(true, |rel| !rel.contains('/'));
         let cfg = job.config.clone();
         let mut flush = |fields: &mut BTreeMap<String, String>| -> Result<()> {
             let raw = if let Some(raw) = fields.remove("Path") {
@@ -207,13 +203,13 @@ impl SevenZip {
                 bail!("拒绝压缩包中的程序工作区/系统目录条目：{raw}");
             }
             // 保留命名空间（按成员的落盘位置对齐 scan 剪枝口径）：任意层
-            // .jchtools-link-* 组件与 scan 按名剪枝同构；顶层「解压失败」组件仅在
-            // 归档位于选定根时落进 scan 永久盲区——子目录归档的同名成员落在归档
-            // 自己的目录下（如 sub/解压失败/x），scan 可见、两工具可管理，不拒绝。
-            // 影子成员落盘不会删除原包（X-06 隔离而非 X-05 删除），但解出的内容会落在
-            // 两工具都看不到的区域、用户无法管理；故在清单阶段就按危险条目拒绝并整包隔离（可逆、有日志）。
-            let top_component = raw.split('/').next().unwrap_or_default();
-            if (archive_at_root && top_component == QUARANTINE_DIR_NAME)
+            // .jchtools-link-* 组件与 scan 按名剪枝同构；「解压失败」组件在 scan 按
+            // 任意层级组件整树剪枝（C-09/X-07），成员一旦落盘就处于两工具都看不到、
+            // 用户无法管理的永久盲区。影子成员落盘不会删除原包（X-06 隔离而非 X-05
+            // 删除）；故在清单阶段就按危险条目拒绝并整包隔离（可逆、有日志）。
+            if raw
+                .split('/')
+                .any(|s| s.eq_ignore_ascii_case(QUARANTINE_DIR_NAME))
                 || raw.split('/').any(|s| s.starts_with(".jchtools-link-"))
             {
                 bail!("拒绝压缩包中的「解压失败」暂存区或内部链接标记条目：{raw}");
@@ -470,6 +466,60 @@ impl SevenZip {
         let exclusions = rules::build_exclusions(&job.config.exclusions)?;
         let mut git = GitBoundaries::default();
         let mut expanded = 0u64;
+        let base = archive.parent().context("压缩包缺少父目录")?;
+        // X-04：目录落盘名规划。压缩包目录的默认落盘名被普通文件、链接或 junction
+        // 占用时，为新目录选最小未占用序号（`目录 (1)`、`目录 (2)`），该目录及全部
+        // 后代成员整体映射到新目录；既有文件一律不动，与既有普通目录同名则合入。
+        // 规划必须在成员合入前完成：文件成员的父链与空目录条目共用这一映射。
+        let mut dir_renames: HashMap<String, String> = HashMap::new();
+        for entry in walkdir::WalkDir::new(&stage.content)
+            .follow_links(false)
+            .min_depth(1)
+        {
+            job.context.control.checkpoint()?;
+            let entry = entry?;
+            if !entry.file_type().is_dir() {
+                continue;
+            }
+            let rel = fsutil::relative_string(&stage.content, entry.path())?;
+            let (parent_rel, name) = match rel.rfind('/') {
+                Some(index) => (&rel[..index], &rel[index + 1..]),
+                None => ("", rel.as_str()),
+            };
+            // walkdir 保证父目录先于后代：父目录已改名时，后代在改后的父目录下规划。
+            let parent_dest = dir_renames
+                .get(parent_rel)
+                .map_or_else(|| parent_rel.to_string(), Clone::clone);
+            let join = |name: &str| -> Result<PathBuf> {
+                let rel = if parent_dest.is_empty() {
+                    name.to_string()
+                } else {
+                    format!("{parent_dest}/{name}")
+                };
+                Ok(base.join(fsutil::safe_relative(&rel)?))
+            };
+            if !matches!(classify_occupancy(&join(name)?)?, Occupancy::Blocked) {
+                // 目标空闲（按原名创建）或已是普通目录（按 X-04 合入）：不改名。
+                continue;
+            }
+            let mut new_rel = None;
+            for index in 1u64..=1_000_000 {
+                let candidate = fsutil::suffixed_candidate(name, "", index);
+                let candidate_rel = if parent_dest.is_empty() {
+                    candidate
+                } else {
+                    format!("{parent_dest}/{candidate}")
+                };
+                if matches!(classify_occupancy(&join(&candidate_rel)?)?, Occupancy::Free) {
+                    new_rel = Some(candidate_rel);
+                    break;
+                }
+            }
+            let Some(new_rel) = new_rel else {
+                bail!("无法为目录 {rel} 分配不冲突的落盘名（X-04：无法生成合法目标时该包不算完整成功）");
+            };
+            dir_renames.insert(rel, new_rel);
+        }
         // One archive is decoded once, including solid archives. Final placement is rename, never copy.
         for entry in walkdir::WalkDir::new(&stage.content)
             .follow_links(false)
@@ -494,8 +544,11 @@ impl SevenZip {
                 bail!("实际解压量超过压缩包声明，已停止合入");
             }
             let relative = fsutil::relative_string(&stage.content, entry.path())?;
-            let base = archive.parent().context("压缩包缺少父目录")?;
             let mut destination = base.join(fsutil::safe_relative(&relative)?);
+            // X-04：祖先目录因被既有文件占用而整体改名时，成员落盘路径跟随映射。
+            if let Some(mapped) = mapped_entry_rel(&dir_renames, &relative) {
+                destination = base.join(fsutil::safe_relative(&mapped)?);
+            }
             // 压缩包里含有与压缩包同名的成员（gzip 头会记录原始文件名，base.tgz 里就可能是 base.tgz）：
             // 绝不能覆盖仍在使用的源包。流式包的解压结果其实就是去掉一层压缩后的内容，
             // 用真实名字（base.tar）落盘并按正常冲突策略处理；其他格式改名放置。
@@ -640,10 +693,9 @@ impl SevenZip {
                     )?;
                     continue;
                 }
-                let dest = archive
-                    .parent()
-                    .context("压缩包路径缺少父目录")?
-                    .join(fsutil::safe_relative(&rel)?);
+                // X-04：目录自身或祖先被改名时，空目录条目落在新名字下（规划阶段已选好）。
+                let dest_rel = mapped_entry_rel(&dir_renames, &rel).unwrap_or_else(|| rel.clone());
+                let dest = base.join(fsutil::safe_relative(&dest_rel)?);
                 let root_rel = fsutil::relative_string(&job.root, &dest)?;
                 // 父链仍整链校验；最终名可能是链接/junction（如 OneDrive 占位目录）：
                 // 已存在的目录直接合入；链接到目录不会创建也不会被写入（空目录无成员；
@@ -1058,6 +1110,14 @@ impl VolumeScheme {
         Ok(paths)
     }
 }
+/// 名称是否以恰好三位 ASCII 数字 `.NNN` 结尾（X-10 数字尾卷族的入口形态）。
+/// 主干 = 去掉 `.NNN`；匹配不区分大小写由调用方的小写化保证，`.NNN` 本身是数字。
+fn numbered_entry(name: &str) -> bool {
+    let bytes = name.as_bytes();
+    bytes.len() > 4
+        && bytes[bytes.len() - 4] == b'.'
+        && bytes[bytes.len() - 3..].iter().all(u8::is_ascii_digit)
+}
 /// 候选组供可逆隔离使用；成功删除前必须转换成经引擎确认的实际卷集合。
 #[derive(Debug)]
 struct VolumeSet {
@@ -1077,7 +1137,10 @@ fn volume_set(archive: &Path) -> Result<VolumeSet> {
         .to_lowercase();
     let (stem, scheme) = if let Some(stem) = rar_part_stem(&name) {
         (stem.to_string(), VolumeScheme::RarParts)
-    } else if name.ends_with(".7z.001") || name.ends_with(".zip.001") {
+    } else if numbered_entry(&name) {
+        // X-10：主包完整名带白名单扩展名（含复合扩展名）再带恰好三位 .NNN。
+        // 入口侧（rules）只放行 `<白名单后缀>.NNN`；这里按「.NNN 结尾」认族，
+        // 主干即去掉 `.NNN`（如 `x.tar.gz.001` 的主干是 `x.tar.gz`）。
         (name[..name.len() - 4].to_string(), VolumeScheme::Numbered)
     } else if let Some(stem) = name.strip_suffix(".rar") {
         (stem.to_string(), VolumeScheme::OldRar)
@@ -1124,9 +1187,91 @@ fn volume_set(archive: &Path) -> Result<VolumeSet> {
     }
     Ok(VolumeSet { paths, scheme })
 }
+/// 目标位置的占用形态（X-04）：空闲、可合入的普通目录、或被文件/链接等占用。
+enum Occupancy {
+    Free,
+    /// 普通目录（非链接/junction）：同名新目录按 X-04 合入。
+    PlainDir,
+    /// 普通文件、悬空链接或重解析点：名字被占，新目录须另选未占用名。
+    Blocked,
+}
+fn classify_occupancy(path: &Path) -> Result<Occupancy> {
+    match fs::symlink_metadata(path) {
+        // symlink_metadata 不跟随链接：链接/junction 一律按占用处理（X-04：不得
+        // 借合入写入受保护的重解析点，需要该位置时另选未占用名）。
+        Ok(meta) if meta.is_dir() && !fsutil::is_link(&meta) => Ok(Occupancy::PlainDir),
+        Ok(_) => Ok(Occupancy::Blocked),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(Occupancy::Free),
+        Err(error) => {
+            Err(anyhow::Error::new(error).context(format!("无法检查 {}", path.display())))
+        }
+    }
+}
+/// 条目落盘路径的 X-04 目录映射：条目自身被改名（目录条目）或其最长祖先目录被
+/// 改名（任意成员）时，返回映射后的相对路径；无需映射时返回 None。
+fn mapped_entry_rel(renames: &HashMap<String, String>, rel: &str) -> Option<String> {
+    if let Some(mapped) = renames.get(rel) {
+        return Some(mapped.clone());
+    }
+    let components: Vec<&str> = rel.split('/').collect();
+    let mut prefix = String::new();
+    let mut matched: Option<(&String, usize)> = None;
+    for component in components.iter().take(components.len().saturating_sub(1)) {
+        if !prefix.is_empty() {
+            prefix.push('/');
+        }
+        prefix.push_str(component);
+        if let Some(mapped) = renames.get(&prefix) {
+            matched = Some((mapped, prefix.len()));
+        }
+    }
+    let (mapped, matched_len) = matched?;
+    Some(format!("{mapped}{}", &rel[matched_len..]))
+}
+/// X-06/X-10：隔离整组一次规划目标名。先试原名；任一目标被占用时，选最小正整数
+/// N 使整组以「主干 (N)原后缀」统一改名后全部未占用——后缀、编号及补零原样保留
+/// （命名歧义组各卷后缀不同，也按各自原后缀保持，不改造成看似完整的卷集）。
+/// 组内候选重名视同占用，整组换下一序号。返回 None 表示找不到整组可用的序号。
+fn quarantine_targets(dir: &Path, names: &[(String, String)]) -> Result<Option<Vec<PathBuf>>> {
+    if names.is_empty() {
+        return Ok(Some(Vec::new()));
+    }
+    let build = |index: Option<u64>| -> Result<Vec<PathBuf>> {
+        let mut targets = Vec::with_capacity(names.len());
+        let mut claimed = HashSet::new();
+        for (stem, ext) in names {
+            let name = match index {
+                None => format!("{stem}{ext}"),
+                Some(index) => fsutil::suffixed_candidate(stem, ext, index),
+            };
+            if !claimed.insert(name.clone()) {
+                return Ok(Vec::new());
+            }
+            let target = dir.join(&name);
+            if !matches!(classify_occupancy(&target)?, Occupancy::Free) {
+                return Ok(Vec::new());
+            }
+            targets.push(target);
+        }
+        Ok(targets)
+    };
+    let original = build(None)?;
+    if !original.is_empty() {
+        return Ok(Some(original));
+    }
+    for index in 1u64..=1_000_000 {
+        let candidates = build(Some(index))?;
+        if !candidates.is_empty() {
+            return Ok(Some(candidates));
+        }
+    }
+    Ok(None)
+}
+
 /// 失败处置（X-06）：把未能完全解开的原包（连同兄弟卷）移入所选目录根下的
-/// 「解压失败」子目录。移动用不覆盖改名；同名冲突改用唯一名。失败原因是界面可查的
-/// 日志字段。移动不走删除接口——隔离不是删除，原包保持可用等待人工处理。
+/// 「解压失败」子目录。移动用不覆盖改名；目标名按 X-10 对整组一次规划。
+/// 失败原因是界面可查的日志字段。移动不走删除接口——隔离不是删除，原包保持可用
+/// 等待人工处理。
 fn quarantine(job: &mut Job, archive_rel: &str, reason: &str) -> Result<()> {
     let archive = fsutil::safe_join(&job.root, archive_rel)?;
     // 隔离可逆（改名进「解压失败」，用户可移回）：宽命名兄弟卷保持整组隔离。
@@ -1143,16 +1288,33 @@ fn quarantine(job: &mut Job, archive_rel: &str, reason: &str) -> Result<()> {
         "无法建立「{QUARANTINE_DIR_NAME}」子目录：{}（目标位置被同名文件占用）",
         dir.display()
     );
-    for source in sources {
+    // 只规划实际仍存在的源项（缺失卷不阻止整组隔离，与既有语义一致）。
+    let mut present: Vec<PathBuf> = Vec::new();
+    let mut names: Vec<(String, String)> = Vec::new();
+    for source in &sources {
         if !source.try_exists()? {
             continue;
         }
+        let name = source
+            .file_name()
+            .and_then(|name| name.to_str())
+            .context("无效压缩包名称")?
+            .to_string();
+        let (stem, ext) = fsutil::split_compound_name(&name);
+        names.push((stem.to_string(), ext.to_string()));
+        present.push(source.clone());
+    }
+    let Some(targets) = quarantine_targets(&dir, &names)? else {
+        bail!(
+            "无法为隔离卷集分配整组不冲突的目标名：{}",
+            archive.display()
+        );
+    };
+    for (source, target) in present.into_iter().zip(targets) {
+        // 移动仍逐卷进行：某卷移动失败时保留未移动源项并如实上抛（X-06），
+        // 不宣称整包隔离成功。
         let source_rel = fsutil::relative_string(&job.root, &source)?;
         let size = fsutil::snapshot(&source).map_or(0, |s| s.size);
-        let mut target = dir.join(source.file_name().unwrap_or_default());
-        if target.try_exists()? || fs::symlink_metadata(&target).is_ok() {
-            target = fsutil::unique_target(&job.root, &target)?;
-        }
         fsutil::rename_noreplace(&source, &target)?;
         let target_rel = fsutil::relative_string(&job.root, &target)?;
         job.summary.archives_quarantined += 1;
@@ -1712,5 +1874,34 @@ mod tests {
         );
         assert!(volume.is_file(), "取消后不得启动任何删除");
         assert_eq!(job.summary.deleted, 0, "取消后不得虚计删除");
+    }
+
+    // 覆盖 X-10（回归：数字尾卷族按「名称以恰好三位 .NNN 结尾」识别入口，
+    // 复合扩展名（如 .tar.gz.001）的卷集同样成组，不再只认 .7z.001/.zip.001）
+    #[test]
+    fn volume_set_groups_compound_numbered_volumes() {
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path().join("data");
+        fs::create_dir(&root).unwrap();
+        fs::write(root.join("资料.tar.gz.001"), b"vol1").unwrap();
+        fs::write(root.join("资料.tar.gz.002"), b"vol2").unwrap();
+        // 完整主包名自身不加入数字尾卷族（X-10），也不得被吸入卷集。
+        fs::write(root.join("资料.tar.gz"), b"standalone").unwrap();
+        let set = volume_set(&root.join("资料.tar.gz.001")).unwrap();
+        assert_eq!(set.scheme, VolumeScheme::Numbered);
+        assert_eq!(set.paths.len(), 2, "同主干 .001/.002 应识别为同一卷集");
+    }
+
+    // 覆盖 X-10（回归：普通扩展名 + .NNN 同样按数字尾卷族识别，主干为去掉 .NNN）
+    #[test]
+    fn volume_set_recognizes_any_three_digit_numbered_entry() {
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path().join("data");
+        fs::create_dir(&root).unwrap();
+        fs::write(root.join("x.rar.001"), b"vol1").unwrap();
+        fs::write(root.join("x.rar.002"), b"vol2").unwrap();
+        let set = volume_set(&root.join("x.rar.001")).unwrap();
+        assert_eq!(set.scheme, VolumeScheme::Numbered);
+        assert_eq!(set.paths.len(), 2);
     }
 }

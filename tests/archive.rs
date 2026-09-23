@@ -1246,3 +1246,99 @@ fn nested_archives_are_processed_exactly_once() {
         "嵌套包成员与既有文件冲突时改名落盘（X-04）"
     );
 }
+
+// 覆盖 X-04, X-03（回归：新目录名被既有文件占用时，为新目录选最小未占用序号
+// `目录 (1)`，该目录全部成员整体映射到新目录；既有文件不动，整包完整成功。
+// 修复前：含文件成员经 ensure_dir 报「目录已存在同名文件」整包失败并隔离）
+#[test]
+#[ignore = "Requires explicitly provided real 7-Zip engine"]
+fn directory_name_taken_by_file_maps_members_to_a_new_directory() {
+    let f = ArchiveFixture::new();
+    fs::create_dir_all(f.input.join("sub/empty")).unwrap();
+    fs::write(f.input.join("sub/file.txt"), b"member payload").unwrap();
+    f.archive(&f.root.join("pack.zip"), "-tzip");
+    // 目标处的 sub 被普通文件占用。
+    fs::write(f.root.join("sub"), b"existing file occupies the name").unwrap();
+    let result = f.run(config());
+    assert_eq!(
+        result.summary.archives_ok, 1,
+        "目录改名映射后整包应完整成功（X-04）"
+    );
+    assert_eq!(result.summary.archives_failed, 0);
+    assert_eq!(
+        fs::read(f.root.join("sub")).unwrap(),
+        b"existing file occupies the name",
+        "既有文件必须原样保留（X-04/H-07）"
+    );
+    assert_eq!(
+        fs::read(f.root.join("sub (1)/file.txt")).unwrap(),
+        b"member payload",
+        "成员必须整体映射到改名后的新目录（X-04）"
+    );
+    assert!(
+        f.root.join("sub (1)/empty").is_dir(),
+        "空目录条目同样落在改名后的新目录内（X-04）"
+    );
+    assert!(
+        !f.root.join("解压失败/pack.zip").exists(),
+        "目录名冲突按 X-04 改名映射后不得再按失败隔离"
+    );
+}
+
+// 覆盖 X-04（回归：空目录名被既有文件占用时同样按最小未占用序号改名，
+// 包不判失败；修复前空目录被跳过、整包判未完全解开并隔离）
+#[test]
+#[ignore = "Requires explicitly provided real 7-Zip engine"]
+fn empty_directory_name_taken_by_file_lands_under_a_new_number() {
+    let f = ArchiveFixture::new();
+    fs::create_dir(f.input.join("空目录")).unwrap();
+    f.pack(&f.root.join("empty.7z"), &["-t7z"], &["空目录"]);
+    fs::write(f.root.join("空目录"), b"occupied").unwrap();
+    let result = f.run(config());
+    assert_eq!(
+        result.summary.archives_ok, 1,
+        "空目录改名落盘后包应完整成功（X-04）"
+    );
+    assert_eq!(
+        fs::read(f.root.join("空目录")).unwrap(),
+        b"occupied",
+        "既有文件必须原样保留（X-04/H-07）"
+    );
+    assert!(
+        f.root.join("空目录 (1)").is_dir(),
+        "空目录应改用最小未占用序号（X-04）"
+    );
+    assert!(
+        !f.root.join("解压失败/empty.7z").exists(),
+        "空目录改名落盘后不得再按失败隔离"
+    );
+}
+
+// 覆盖 X-08, X-07：scan 按任意层级组件剪枝「解压失败」（C-09/X-07）后，子目录归档解出
+// 同名组件成员也会落进两工具的永久盲区——按危险条目在清单阶段整包拒绝并隔离（X-06）。
+#[test]
+#[ignore = "Requires explicitly provided real 7-Zip engine"]
+fn quarantine_component_member_in_subdir_archive_is_rejected_as_dangerous() {
+    let f = ArchiveFixture::new();
+    fs::create_dir(f.input.join("解压失败")).unwrap();
+    fs::write(f.input.join("解压失败").join("x.txt"), b"shadow").unwrap();
+    fs::create_dir(f.root.join("sub")).unwrap();
+    f.archive(&f.root.join("sub").join("a.zip"), "-tzip");
+    let result = f.run(config());
+    assert!(
+        !f.root.join("sub").join("解压失败").join("x.txt").exists(),
+        "成员不得落盘到 scan 剪枝区（两工具永久盲区）"
+    );
+    assert_eq!(
+        result.summary.archives_ok, 0,
+        "含危险条目的包不算完整成功（X-08）"
+    );
+    assert_eq!(
+        result.summary.archives_quarantined, 1,
+        "整包按 X-06 隔离保留"
+    );
+    assert!(
+        f.root.join("解压失败").join("a.zip").is_file(),
+        "原包移入「解压失败」等待人工处理（X-06）"
+    );
+}
