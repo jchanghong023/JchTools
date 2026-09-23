@@ -622,6 +622,17 @@ fn process_change(
                     let stderr = output_text(&out.stderr);
                     let stdout = output_text(&out.stdout);
                     let text = format!("{stderr}{stdout}");
+                    // 身份未配置是确定性配置错误，重试永远不会成功（不属于 G-09 的
+                    // 可重试失败）：停止并给出可操作的修复提示。
+                    if text.contains("Author identity unknown")
+                        || text.contains("Committer identity unknown")
+                        || text.contains("Please tell me who you are")
+                    {
+                        return StepOutcome::Fatal(
+                            "git 未配置提交身份（user.name / user.email），无法提交；请先在仓库或全局配置 git 身份后重新开始任务"
+                                .into(),
+                        );
+                    }
                     // 命令超时误判等场景：提交可能实际已完成。按 git 状态核实：
                     // 该路径不再有未提交变更即视为已提交（G-09 阶段记忆）。
                     let settled = text.contains("no changes added to commit")
