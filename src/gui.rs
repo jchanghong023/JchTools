@@ -3035,7 +3035,7 @@ mod gui_tests {
             assert!(rule_value_at(ui, "custom_categories").is_none());
             assert!(
                 rule_value_at(ui, "classify").is_none(),
-                "R-02：归类方式开关已删除（固定「大类/年/月」）"
+                "R-02：归类方式开关已删除（固定「大类/功能分类」）"
             );
             assert!(rule_value_at(ui, "large_threshold_bytes").is_none());
             ui.invoke_toggle_advanced(true);

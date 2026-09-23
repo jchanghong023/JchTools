@@ -510,15 +510,13 @@ fn equal_content_archives_extract_both_and_classify_is_stable() {
         b"beta member\n",
         "两个包解出同名成员：第二个按 H-07 改名落盘，内容相同也不跳过"
     );
-    // 整理：C-05 固定归类「大类/年/月」恒开启；解出文件的创建与修改时间都≈现在 → 当前年/月。
+    // 整理：C-05 固定归类「大类/功能分类」恒开启；单个文件无公共主题 → 「其他」。
     let org = organizer();
     let task = engine::prepare_at(&f.root, org.clone(), Context::default(), &f.state).unwrap();
     ArchiveFixture::apply(&task);
-    use chrono::Datelike;
-    let now = chrono::Local::now();
     // C-03：保留者是修改时间最新的成员——后解出的 beta (1).txt 更新，保留它并按
     // C-08 清理副本标记，最终名 beta_1.txt；beta.txt 作为重复副本被永久删除。
-    let classified = format!("文档/{:04}/{:02}/beta_1.txt", now.year(), now.month());
+    let classified = "文档/其他/beta_1.txt".to_string();
     assert!(
         f.root.join(&classified).exists(),
         "保留者（beta (1).txt → beta_1.txt）归类落位，重复的 beta.txt 已删除"

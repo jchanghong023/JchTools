@@ -105,7 +105,7 @@ fn make_fixture() -> tempfile::TempDir {
     };
     write("a.txt", b"same content", 100); // 旧 → 去重时被删除
     write("b.txt", b"same content", 200); // 新 → 保留
-    write("temp.tmp", b"junk", 300); // 默认 clean_temp=false → 会按归类移到「其他/年/月/」
+    write("temp.tmp", b"junk", 300); // 默认 clean_temp=false → 会按归类移到「其他/其他/」
     dir
 }
 
@@ -275,27 +275,15 @@ fn plan_execution_confirmation_flow_runs_end_to_end() {
         .collect();
 
     // 3) 默认 clean_temp=false：temp.tmp 被归类移动，而非清理删除
-    //（C-05 固定归类「大类/年/月」，年月取创建时间与修改时间中最早的可用时间；夹具只设
-    // mtime、创建时间为“现在”，故按夹具 mtime 落位）。
-    let classified = |category: &str, name: &str, mtime: i64| {
-        use chrono::{Datelike, Local, Offset};
-        let offset = Local::now().offset().fix();
-        let local = chrono::DateTime::from_timestamp(mtime, 0)
-            .expect("夹具时间必须可表示")
-            .with_timezone(&offset);
-        data.join(format!(
-            "{category}/{:04}/{:02}/{name}",
-            local.year(),
-            local.month()
-        ))
-    };
+    //（C-05 固定归类「大类/功能分类」；无公共主题的文件进入「其他」）。
+    let classified = |category: &str, name: &str| data.join(format!("{category}/其他/{name}"));
     assert!(
-        classified("其他", "temp.tmp", 300).exists(),
-        "默认配置下 temp.tmp 应归类到「其他/年/月」而不是被清理：{remaining:?}"
+        classified("其他", "temp.tmp").exists(),
+        "默认配置下 temp.tmp 应归类到「其他/其他」而不是被清理：{remaining:?}"
     );
     assert!(
-        classified("文档", "a.txt", 100).exists() && classified("文档", "b.txt", 200).exists(),
-        "GUI 默认不同名去重关闭：a.txt/b.txt 同内容不同名，各自随归类保留到 文档/年/月/：{remaining:?}"
+        classified("文档", "a.txt").exists() && classified("文档", "b.txt").exists(),
+        "GUI 默认不同名去重关闭：a.txt/b.txt 同内容不同名，各自随归类保留到 文档/其他/：{remaining:?}"
     );
 }
 
@@ -345,18 +333,13 @@ fn git_subtree_skip_is_visible_after_run_and_tree_untouched() {
         !moved.join("其他").exists(),
         "H-06：Git 目录树内不得生成分类目录"
     );
-    // 固定归类（C-05，恒开启）：docs/note.txt → 文档/年/月/note.txt（排除树之外照常处理）。
-    let handled = {
-        use chrono::Datelike;
-        let now = chrono::Local::now();
-        let month = format!("{:04}/{:02}", now.year(), now.month());
-        [
-            format!("文档/{month}/note.txt"),
-            "文档/docs/note.txt".to_string(),
-            "docs/note.txt".to_string(),
-            "文档/note.txt".to_string(),
-        ]
-    };
+    // 固定归类（C-05，恒开启）：docs/note.txt → 文档/其他/note.txt（排除树之外照常处理）。
+    let handled = [
+        "文档/其他/note.txt".to_string(),
+        "文档/docs/note.txt".to_string(),
+        "docs/note.txt".to_string(),
+        "文档/note.txt".to_string(),
+    ];
     assert!(
         handled.iter().any(|rel| data.join(rel).is_file()),
         "排除树之外的文件仍按计划处理（归类后仍存在）"

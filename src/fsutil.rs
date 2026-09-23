@@ -172,8 +172,7 @@ pub fn snapshot_with(path: &Path, metadata: &fs::Metadata) -> Result<Snapshot> {
         Ok(d) => i64::try_from(d.as_nanos()).context("文件时间超出范围")?,
         Err(e) => -i64::try_from(e.duration().as_nanos()).context("文件时间超出范围")?,
     };
-    // C-05 归类时间取创建时间与修改时间中最早的可用者；系统/文件系统不提供创建时间时
-    // 为 None，由调用方按修改时间归类。
+    // 创建时间随移动忠实保留（S-01 跨卷复制同口径）；系统/文件系统不提供时为 None。
     let created_ns =
         metadata
             .created()
@@ -280,7 +279,7 @@ pub fn rename_noreplace(source: &Path, target: &Path) -> Result<()> {
     }
 }
 /// S-01：用户文件的最终移动入口。同卷走不覆盖改名（Windows 同卷改名天然保留创建时间，
-/// 满足 C-21 幂等归类要求）；确因跨文件系统失败时按「不覆盖完整复制 → 设置创建/修改
+/// 满足 S-01 忠实移动要求）；确因跨文件系统失败时按「不覆盖完整复制 → 设置创建/修改
 /// 时间 → 删除源项」执行，复制、写时间或删除任一失败都保留源项并如实报错。
 pub fn move_file_preserving_times(source: &Path, target: &Path) -> Result<()> {
     let metadata = fs::symlink_metadata(source)?;
@@ -388,7 +387,7 @@ fn set_created_and_modified(
     }
 }
 /// 设置文件/目录的创建时间（S-01 跨卷复制写回创建时间的同一底层能力；
-/// 测试用它伪造归类用的创建日期）。
+/// 测试用它伪造创建日期）。
 pub fn set_created_time(path: &Path, created: std::time::SystemTime) -> Result<()> {
     set_created_and_modified(path, Some(created), None)
 }

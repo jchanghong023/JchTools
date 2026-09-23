@@ -5,7 +5,7 @@ use serde::{Deserialize, Serialize};
 pub struct Snapshot {
     pub size: u64,
     pub modified_ns: i64,
-    /// 创建时间（C-05 归类依据之一：与修改时间取最早者；系统不提供时按修改时间归类）。
+    /// 创建时间（S-01：移动与跨卷复制忠实保留；功能分类不读取时间）。
     pub created_ns: Option<i64>,
     pub identity: String,
     pub links: u64,
