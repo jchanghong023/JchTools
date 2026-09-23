@@ -3,6 +3,9 @@ import { Button, CheckBox, ComboBox, LineEdit, ListView, TextEdit, Spinner, Abou
 export struct RuleRow { key: string, title: string, hint: string, kind: int, checked: bool, index: int, options: [string], value: string }
 export struct PlanRow { id: string, selected: bool, kind: string, source: string, target: string, reason: string, state: string }
 export struct ToolRow { id: string, name: string, summary: string }
+// U-10：本次解压失败项列表的一行（递归解压页）：阶段、原路径、失败原因与隔离后位置；
+// 没有隔离记录时 target 为空，界面如实显示「未记录隔离位置」，不编造「已隔离」。
+export struct FailRow { stage: string, source: string, reason: string, target: string }
 // 界面配色：所有颜色都是不透明色，浅色/深色主题由 Design.dark 决定（写入方见 AppWindow）。
 global Design {
     in property <bool> dark: false;
@@ -396,6 +399,15 @@ export component AppWindow inherits Window {
     in-out property <int> plan-empty-count: 0;
     in-out property <int> plan-filter: 0;
     in-out property <int> quarantined-count: 0;
+    // U-10：本次解压失败项分页列表（递归解压页「失败列表」面板）。任务结束或取消后仍可
+    // 查看，启动下一次解压任务或退出前保留；切换工具不清空（Rust 侧状态持久，此处只呈现）。
+    in-out property <[FailRow]> fail-rows;
+    in-out property <int> fail-total: 0;
+    // 尚未关联到本次解压任务的任务库时为 false：列表区显示「正在关联」而不是空态。
+    in-out property <bool> fail-ready: false;
+    in-out property <string> fail-page-label: "第 1 页";
+    in-out property <bool> fail-prev-enabled: false;
+    in-out property <bool> fail-next-enabled: false;
     // MD 整理（M 分区）：合并输入/输出与拆分输入/输出，任务参数直接在功能页面提供（R-01）。
     in-out property <int> md-subpage: 0;          // 0 合并 MD，1 拆分 MD
     in-out property <string> md-input-dir;
@@ -438,6 +450,8 @@ export component AppWindow inherits Window {
     callback filter-plan(string);
     callback open-report();
     callback request-extract-start();
+    // U-10：失败列表翻页（direction < 0 上一页，> 0 下一页）。
+    callback fail-page(int);
     // MD 整理回调（M 分区）：目录/文件选择与任务启动。
     callback md-select-subpage(int);
     callback md-choose-input();
@@ -713,10 +727,11 @@ export component AppWindow inherits Window {
                         Button { text: "选择目录…"; enabled: !root.busy && root.confirm-kind == 0; clicked => { root.choose-directory(); } }
                     }
                 }
-                // 一段式（X-02）：只有规则与日志两个面板，没有计划审核环节
+                // 一段式（X-02）：只有规则、日志与失败列表三个面板，没有计划审核环节
                 HorizontalLayout { height: 32px; spacing: 2px;
                     Tab { text: "处理规则"; active: root.panel == 0; width: 104px; enabled: root.confirm-kind == 0; clicked => { root.panel = 0; } }
                     Tab { text: "进度与日志"; active: root.panel == 1; width: 118px; enabled: root.confirm-kind == 0; clicked => { root.panel = 1; } }
+                    Tab { text: "失败列表"; active: root.panel == 2; width: 104px; enabled: root.confirm-kind == 0; clicked => { root.panel = 2; } }
                     Rectangle { horizontal-stretch: 1; background: transparent; }
                 }
                 // 规则分区胶囊（递归解压只有解压与安全两分区）：内凹底 + 实心选中项
@@ -778,6 +793,37 @@ export component AppWindow inherits Window {
                         VerticalLayout { padding-top: 12px; padding-bottom: 12px; padding-left: 14px; padding-right: 14px; spacing: 8px;
                             Muted { text: "最新的消息显示在最上面；界面只保留最近 300 条。"; }
                             TextEdit { text: root.log-text; read-only: true; font-family: "Consolas"; vertical-stretch: 1; }
+                        }
+                    }
+                }
+                // U-10：本次解压失败项分页列表。每个失败包或卷集对应一项，显示原路径、
+                // 失败原因与隔离后位置；总数与翻页按钮只在对应页真实存在时启用。
+                // 运行中可查看，任务结束或取消后仍可查看；切换工具不清空。
+                if root.screen == 2 && root.panel == 2: Surface { vertical-stretch: 1;
+                    VerticalLayout { padding-top: 12px; padding-bottom: 12px; padding-left: 14px; padding-right: 14px; spacing: 8px;
+                        HorizontalLayout { spacing: 12px; cross-axis-alignment: center;
+                            Label { text: "本次解压失败项（共 " + root.fail-total + " 项）"; font-weight: 600; font-size: 13px; }
+                            Muted { text: "每个失败包或分卷集对应一项；启动下一次解压任务或退出前保留，切换工具不清空。"; horizontal-stretch: 1; overflow: elide; }
+                        }
+                        if !root.fail-ready: Muted { text: "正在关联本次解压任务…"; }
+                        if root.fail-ready && root.fail-total == 0: Muted { text: "本次任务没有失败项。"; }
+                        if root.fail-total > 0: Rectangle { vertical-stretch: 1;
+                            background: Design.sunken;
+                            border-radius: 8px;
+                            border-width: 1px; border-color: Design.line-soft;
+                            ListView { for item in root.fail-rows: Rectangle { height: 72px;
+                                VerticalLayout { padding-left: 12px; padding-right: 12px; padding-top: 6px; padding-bottom: 4px; spacing: 2px;
+                                    Label { text: item.stage + "  ·  " + item.source; font-weight: 600; font-size: 13px; overflow: elide; }
+                                    Muted { text: "原因：" + item.reason; overflow: elide; }
+                                    Muted { text: item.target == "" ? "未记录隔离位置（隔离可能失败或尚未执行；整体原因见「进度与日志」）" : "隔离后位置：" + item.target; overflow: elide; }
+                                }
+                                Rectangle { y: parent.height - 1px; x: 12px; height: 1px; width: parent.width - 24px; background: Design.line-soft; }
+                            }}
+                        }
+                        HorizontalLayout { height: 32px; spacing: 8px; cross-axis-alignment: center;
+                            Button { text: "上一页"; enabled: root.fail-prev-enabled && root.confirm-kind == 0; clicked => { root.fail-page(-1); } }
+                            Muted { text: root.fail-page-label; wrap: no-wrap; horizontal-alignment: center; horizontal-stretch: 1; vertical-alignment: center; }
+                            Button { text: "下一页"; enabled: root.fail-next-enabled && root.confirm-kind == 0; clicked => { root.fail-page(1); } }
                         }
                     }
                 }

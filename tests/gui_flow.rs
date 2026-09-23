@@ -346,10 +346,10 @@ fn git_subtree_skip_is_visible_after_run_and_tree_untouched() {
     );
 }
 
-// 覆盖 X-02, X-04, X-05, X-06, H-07（解压一段确认的端到端）：确认文案必须说明完整成功后
-// 原包及分卷永久删除且不可恢复、已有文件保留、冲突只为新文件自动改名，且不得出现覆盖授权；
-// 结束状态如实报出删除与保留口径。目录内没有压缩包时不会解析引擎（E-02/E-05 只在真正解压时
-// 要求引擎），因此本用例无需真实引擎；既有文件与目录内容在结束后必须原样保留。
+// 覆盖 X-02, X-04, X-05, X-06, H-07（解压一段确认的端到端）：目录内没有压缩包时（清点为 0），
+// 确认框必须如实提示无可处理包，且不得解除清点门禁——不启动空解压任务，已有文件原样保留。
+// 发现数 > 0 时确认文案的删除/保留口径逐条披露由 gui.rs 的
+// extract_confirm_text_discloses_deletion_rules 单元测试覆盖（零包流程按 X-02 不再进入确认执行）。
 #[test]
 fn extract_confirmation_discloses_source_deletion_and_leaves_files_untouched() {
     let fixture = tempfile::tempdir().unwrap();
@@ -360,11 +360,8 @@ fn extract_confirmation_discloses_source_deletion_and_leaves_files_untouched() {
     fs::create_dir_all(&state_dir).unwrap();
     let directory = data.to_string_lossy().to_string();
     // 跨线程可见的确认标志：Rc 不是 Send，工作线程任务用原子量回传结果。
-    let confirm_seen = Arc::new(AtomicBool::new(false));
-    let confirm_flag = Arc::clone(&confirm_seen);
-    // 结束时的状态栏文案（事件循环内读取）。
-    let end_status = Arc::new(Mutex::new(String::new()));
-    let status_sink = Arc::clone(&end_status);
+    let zero_gate_held = Arc::new(AtomicBool::new(false));
+    let gate_flag = Arc::clone(&zero_gate_held);
 
     let overrides = EngineTestOverrides {
         state_dir: state_dir.clone(),
@@ -384,7 +381,7 @@ fn extract_confirmation_discloses_source_deletion_and_leaves_files_untouched() {
                 let steps = steps.clone();
                 let ticks = ticks.clone();
                 let failures = Arc::clone(&failure_sink);
-                let status_sink = Arc::clone(&status_sink);
+                let gate_flag = Arc::clone(&gate_flag);
                 let driver = slint::Timer::default();
                 driver.start(
                     slint::TimerMode::Repeated,
@@ -401,68 +398,34 @@ fn extract_confirmation_discloses_source_deletion_and_leaves_files_untouched() {
                         let Some(ui) = ui.upgrade() else { return };
                         match steps.get() {
                             0 => {
-                                // 清点完成后（confirm-pending 解除）文案必须已说明删除与保留口径。
-                                if ui.get_confirm_kind() == 1 && !ui.get_confirm_pending() {
-                                    let text = ui.get_confirm_text().to_string();
-                                    let mut problems: Vec<String> = Vec::new();
-                                    // X-02/S-02：破坏性确认必须明说完整成功后原包及分卷永久删除。
-                                    if !text.contains("永久删除") {
-                                        problems.push(format!(
-                                            "X-02/S-02：确认文案必须说明完整成功后原包及分卷永久删除：{text}"
-                                        ));
-                                    }
-                                    if !text.contains("不可恢复") {
-                                        problems.push(format!(
-                                            "X-02/S-02：确认文案必须说明永久删除不可恢复：{text}"
-                                        ));
-                                    }
-                                    // X-05：失败、未完全解开或取消时保留。
-                                    if !text.contains("保留") {
-                                        problems.push(format!(
-                                            "X-05：确认文案必须说明失败/部分/取消时保留原包：{text}"
-                                        ));
-                                    }
-                                    // X-05/H-07：已有文件保留。
-                                    if !text.contains("已有文件") {
-                                        problems.push(format!(
-                                            "X-05/H-07：确认文案必须说明已有文件保留：{text}"
-                                        ));
-                                    }
-                                    // X-04/H-07：冲突只为新文件自动改名。
-                                    if !text.contains("自动改文件名") {
-                                        problems.push(format!(
-                                            "X-04/H-07：确认文案必须说明冲突只为新文件自动改名：{text}"
-                                        ));
-                                    }
-                                    // X-06：失败包去向。
-                                    if !text.contains("「解压失败」") {
-                                        problems.push(format!(
-                                            "X-06：确认文案必须说明失败包去向：{text}"
-                                        ));
-                                    }
-                                    // H-07/X-04：不得提供覆盖授权，也不得询问冲突策略。
-                                    if text.contains("覆盖") || text.contains("冲突策略") {
-                                        problems.push(format!(
-                                            "X-04/H-07：解压确认不得出现覆盖或冲突策略授权：{text}"
-                                        ));
-                                    }
-                                    if problems.is_empty() {
-                                        confirm_flag.store(true, Ordering::Relaxed);
-                                        ui.invoke_confirmed(1);
-                                        steps.set(1);
-                                    } else {
-                                        for problem in problems {
-                                            record_failure(&failures, problem);
+                                // X-02：清点为 0——门禁必须保持（确认不可用），文案如实提示。
+                                if ui.get_confirm_kind() == 1 {
+                                    if ui.get_confirm_pending() {
+                                        let text = ui.get_confirm_text().to_string();
+                                        if text.contains("未发现") {
+                                            gate_flag.store(true, Ordering::Relaxed);
+                                            // 返回检查收尾：流程到此为止，不启动解压任务。
+                                            ui.set_confirm_kind(0);
+                                            steps.set(2);
+                                        } else {
+                                            record_failure(
+                                                &failures,
+                                                format!(
+                                                    "X-02：清点为 0 必须如实提示无可处理包：{text}"
+                                                ),
+                                            );
                                         }
+                                    } else {
+                                        record_failure(
+                                            &failures,
+                                            "X-02：清点为 0 不得解除确认门禁（不得启动空解压任务）"
+                                                .to_string(),
+                                        );
                                     }
                                 }
                             }
-                            1 if ui.get_status().contains("解压结束") => {
-                                steps.set(2);
-                                *status_sink
-                                    .lock()
-                                    .unwrap_or_else(std::sync::PoisonError::into_inner) =
-                                    ui.get_status().to_string();
+                            2 if !ui.get_busy() => {
+                                steps.set(3);
                                 let _ = slint::quit_event_loop();
                             }
                             _ => {}
@@ -479,22 +442,153 @@ fn extract_confirmation_discloses_source_deletion_and_leaves_files_untouched() {
         assert!(recorded.is_empty(), "{}", recorded.join("\n"));
     });
 
-    assert!(confirm_seen.load(Ordering::Relaxed), "必须经过一次解压确认");
-    let status = end_status
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner)
-        .clone();
     assert!(
-        status.contains("永久删除") && status.contains("保留"),
-        "X-05/S-02：结束状态必须如实报出删除与保留口径：{status}"
+        zero_gate_held.load(Ordering::Relaxed),
+        "必须观察到清点为 0 时门禁保持、提示如实"
     );
     assert_eq!(
         fs::read(data.join("keep.txt")).unwrap(),
         b"keep me",
-        "X-05/H-07：解压不得删除或改动已有文件"
+        "X-05/H-07：未启动的解压不得删除或改动已有文件"
     );
     assert!(
         data.read_dir().unwrap().count() == 1,
-        "解压结束后目录内容必须保持原样"
+        "零包流程结束后目录内容必须保持原样（未做任何改动）"
+    );
+}
+
+// 覆盖 U-09（停止并关闭后窗口最终必然关闭）：MD 合并的扫描与冲突检查不经过任务检查点，
+// 「停止并关闭」确认（close_after=true + 请求取消）后任务会自然结束并回传 MdDone；
+// 结束分支必须处理 close_after 退出事件循环，不得把窗口留在运行界面、也不得让
+// close_after 残留到之后的任务。本用例目录没有 .md 文件：合并不经过任何检查点直接
+// 完成（MdDone），从而确定性地驱动该分支。
+#[test]
+fn stop_and_close_during_md_merge_quits_when_merge_finishes() {
+    let fixture = tempfile::tempdir().unwrap();
+    let docs = fixture.path().join("docs");
+    fs::create_dir_all(&docs).unwrap(); // 空目录：合并立即以「没有 .md 文件」结束
+    let state_dir: PathBuf = fixture.path().join("state");
+    fs::create_dir_all(&state_dir).unwrap();
+    let docs_text = docs.display().to_string();
+    let overrides = EngineTestOverrides { state_dir };
+    run_gui_job(move || {
+        let failures: Failures = Arc::new(Mutex::new(Vec::new()));
+        let failure_sink = Arc::clone(&failures);
+        let ticks = Rc::new(Cell::new(0u32));
+        gui::run_with_engine_overrides(
+            move |ui| {
+                ui.invoke_select_tool("md-organizer".into());
+                ui.set_md_input_dir(docs_text.clone().into());
+                ui.set_md_output_name("merged.md".into());
+                ui.set_md_output_dir(docs_text.clone().into());
+                // busy 已同步置位且 control 存在：立即确认「停止并关闭」。
+                // 两个回调都在事件循环启动前同步执行，close_after 必然先于任何收尾事件。
+                ui.invoke_md_merge_start();
+                ui.invoke_confirmed(3);
+                let ticks = ticks.clone();
+                let failures = Arc::clone(&failure_sink);
+                let driver = slint::Timer::default();
+                driver.start(
+                    slint::TimerMode::Repeated,
+                    Duration::from_millis(200),
+                    move || {
+                        ticks.set(ticks.get() + 1);
+                        if ticks.get() >= 75 {
+                            // 修复前：MdDone 不读 close_after，事件循环不会退出，
+                            // 只能靠这里超时退出——超时即「该关不关」缺陷（U-09）。
+                            record_failure(
+                                &failures,
+                                "U-09：停止并关闭后 MD 任务自然结束（MdDone）15 秒内未关闭窗口"
+                                    .to_string(),
+                            );
+                        }
+                    },
+                );
+                DRIVER.with(|slot| *slot.borrow_mut() = Some(driver));
+            },
+            Some(overrides),
+        )
+        .expect("GUI 流程失败");
+        let recorded = take_failures(&failures);
+        assert!(
+            recorded.is_empty(),
+            "停止并关闭后 MD 合并结束必须关闭窗口：{}",
+            recorded.join("\n")
+        );
+    });
+}
+
+// 覆盖 U-09（停止并关闭后不得再弹出覆盖确认）：MD 合并输出已存在时任务以 MD_CONFLICT
+// 结束回传 MdNeedsConfirm；用户已确认「停止并关闭」时必须直接退出应用，而不是弹出
+// 覆盖确认框把用户留在界面里。
+#[test]
+fn stop_and_close_skips_override_confirm_and_quits() {
+    let fixture = tempfile::tempdir().unwrap();
+    let docs = fixture.path().join("docs");
+    fs::create_dir_all(&docs).unwrap();
+    fs::write(docs.join("a.md"), "# 甲\n内容\n").unwrap();
+    fs::write(docs.join("merged.md"), "旧输出").unwrap();
+    let state_dir: PathBuf = fixture.path().join("state");
+    fs::create_dir_all(&state_dir).unwrap();
+    let docs_text = docs.display().to_string();
+    let overrides = EngineTestOverrides { state_dir };
+    run_gui_job(move || {
+        let failures: Failures = Arc::new(Mutex::new(Vec::new()));
+        let failure_sink = Arc::clone(&failures);
+        let ticks = Rc::new(Cell::new(0u32));
+        gui::run_with_engine_overrides(
+            move |ui| {
+                ui.invoke_select_tool("md-organizer".into());
+                ui.set_md_input_dir(docs_text.clone().into());
+                ui.set_md_output_name("merged.md".into());
+                ui.set_md_output_dir(docs_text.clone().into());
+                ui.invoke_md_merge_start();
+                ui.invoke_confirmed(3);
+                let ui = ui.as_weak();
+                let ticks = ticks.clone();
+                let failures = Arc::clone(&failure_sink);
+                let driver = slint::Timer::default();
+                driver.start(
+                    slint::TimerMode::Repeated,
+                    Duration::from_millis(200),
+                    move || {
+                        ticks.set(ticks.get() + 1);
+                        let Some(ui) = ui.upgrade() else { return };
+                        if ui.get_confirm_kind() == 4 {
+                            // 修复前：MdNeedsConfirm 不读 close_after，会弹出覆盖确认框。
+                            record_failure(
+                                &failures,
+                                "U-09：停止并关闭后不得再弹出覆盖确认框，应直接退出".to_string(),
+                            );
+                            let _ = slint::quit_event_loop();
+                            return;
+                        }
+                        if ticks.get() >= 75 {
+                            record_failure(
+                                &failures,
+                                "U-09：停止并关闭后 MD 冲突回传（MdNeedsConfirm）15 秒内未关闭窗口"
+                                    .to_string(),
+                            );
+                        }
+                    },
+                );
+                DRIVER.with(|slot| *slot.borrow_mut() = Some(driver));
+            },
+            Some(overrides),
+        )
+        .expect("GUI 流程失败");
+        let recorded = take_failures(&failures);
+        assert!(
+            recorded.is_empty(),
+            "停止并关闭后 MD 冲突必须直接退出而不是弹覆盖确认：{}",
+            recorded.join("\n")
+        );
+    });
+
+    // 确认「返回检查」语义未被绕过：旧输出没有被覆盖写入。
+    assert_eq!(
+        fs::read_to_string(fixture.path().join("docs").join("merged.md")).unwrap(),
+        "旧输出",
+        "U-09/M-07：停止并关闭路径不得覆盖已有输出"
     );
 }

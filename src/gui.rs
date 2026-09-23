@@ -153,6 +153,17 @@ struct State {
     plan_load: Arc<PlanLoadSync>,
     /// 目录/工具变化的反馈意图保留到最新有效快照落地，不随被顶替的请求丢失。
     readiness_status_pending: Cell<bool>,
+    /// U-10 失败列表：当前解压任务的任务库目录。引擎在状态目录下创建任务库，启动时
+    /// 界面只知状态目录，由 watcher（`watch_extract_task`）发现新目录后回传。
+    extract_task: Option<PathBuf>,
+    /// 失败列表分页游标（每页首项的事件 id）与请求代际（丢弃迟到的旧结果）。
+    fail_page: usize,
+    fail_page_starts: Vec<i64>,
+    fail_gen: u64,
+    /// 失败列表专用通道：Sender 克隆给 watcher/分页 worker，Receiver 由事件泵排空
+    /// （Event 枚举属引擎事件协议，不扩展；见 FailChannelMsg）。
+    fail_sender: mpsc::Sender<FailChannelMsg>,
+    fail_receiver: RefCell<mpsc::Receiver<FailChannelMsg>>,
 }
 /// 计划页/就绪快照的请求代际：worker 完成后按事件自带代际与当前视图比较，
 /// 界面只应用「仍是最新代际」的结果。两个计数器分开：页面与就绪快照是两类独立请求
@@ -163,6 +174,230 @@ struct PlanLoadSync {
     page: AtomicU64,
     /// 最新就绪快照请求的代际（页面请求也带回快照，因此同样递增）
     state: AtomicU64,
+}
+
+/// U-10 失败列表的一行数据（worker 取数结果）：一个失败包或 X-10 卷集对应一项。
+#[derive(Debug)]
+struct FailItem {
+    /// 阶段标识：解压失败 / 未完全解开 / 源包清理失败（X-05 单独标明，不冒充坏包）。
+    stage: &'static str,
+    /// 原路径（相对所选目录）。
+    source: String,
+    /// 失败原因（任务库事件 reason 字段）。
+    reason: String,
+    /// 隔离后位置；无隔离记录时为空（界面如实显示「未记录隔离位置」，不编造「已隔离」）。
+    target: String,
+}
+
+/// 失败列表分页 worker 的取数结果。
+#[derive(Debug)]
+struct FailPage {
+    task: PathBuf,
+    generation: u64,
+    page: usize,
+    items: Vec<FailItem>,
+    total: u64,
+    has_more: bool,
+    /// 本页最后一项的任务库事件 id：下一页的取数游标。
+    last_id: i64,
+    error: Option<String>,
+}
+
+/// 失败列表专用通道的消息。`Event` 枚举属于引擎事件协议（control.rs），这里不扩展它：
+/// 解压失败列表的分页结果与任务目录发现走独立通道，由事件泵每拍排空，
+/// 与计划页 worker 同一「界面线程不开库、后台分页取数」架构（H-02）。
+#[derive(Debug)]
+enum FailChannelMsg {
+    /// watcher 发现当前解压任务的任务库目录（引擎在状态目录下创建，界面事先不知道路径；
+    /// 首项为发起解压时的清点请求代际，迟到的发现按代际整体丢弃）。
+    TaskFound(PathBuf, u64),
+    /// 分页取数结果。
+    Page(FailPage),
+}
+
+/// 解压失败列表的取数条件（U-10/X-06/S-07）：
+/// - `解压` 阶段的 `失败`（引擎报错）与 `未完全解开`（成员被跳过/排除等）记录：一个
+///   失败包或卷集对应一项；
+/// - `删除` 阶段的 `失败` 记录：源包清理失败按 X-05 单独标明阶段，不冒充坏包；
+/// - `移入解压失败` 记录不单独成项，只作为其后最近一个失败项的隔离后位置归属。
+const FAIL_ITEM_PREDICATE: &str =
+    "(phase='解压' AND result IN ('失败','未完全解开')) OR (phase='删除' AND result='失败')";
+
+/// 运行中失败列表的自动刷新间隔（U-10「运行中可查看已经发生的失败」）。
+const FAIL_REFRESH_MIN: Duration = Duration::from_secs(2);
+
+/// watcher 等待任务库目录出现的超时：引擎在解压开始的最初几步内建库；超时即放弃，
+/// 任务收尾（ExtractDone/Failed）会按事件自带的路径刷新，失败列表不会因此缺数据。
+const EXTRACT_TASK_WATCH_TIMEOUT: Duration = Duration::from_secs(120);
+
+/// 轮询状态目录的 tasks/ 子目录，发现快照之外的新任务目录即回传（U-10）。
+/// 任务库目录由引擎在 extract worker 内部创建、路径随结果事件返回时任务已结束，
+/// 运行中查看失败列表必须先发现目录：启动解压前快照既有目录，本函数只做只读
+/// 文件系统访问，与分页 worker 一样不进界面线程。
+fn watch_extract_task(
+    tasks_root: &std::path::Path,
+    known: &[PathBuf],
+    generation: u64,
+    sender: &mpsc::Sender<FailChannelMsg>,
+    timeout: Duration,
+) {
+    let deadline = Instant::now() + timeout;
+    while Instant::now() < deadline {
+        if let Ok(entries) = std::fs::read_dir(tasks_root) {
+            for entry in entries.flatten() {
+                let path = entry.path();
+                if path.is_dir() && !known.contains(&path) {
+                    let _ = sender.send(FailChannelMsg::TaskFound(path, generation));
+                    return;
+                }
+            }
+        }
+        std::thread::sleep(Duration::from_millis(50));
+    }
+}
+
+/// 发起失败列表分页取数：worker 线程开任务库查询（界面线程不开库，H-02），
+/// 结果经专用通道由事件泵应用；请求代际递增，迟到的旧结果整体丢弃。
+fn request_fail_page(state: &Rc<RefCell<State>>, page: usize) {
+    let (task, generation, start, sender) = {
+        let mut s = state.borrow_mut();
+        let Some(task) = s.extract_task.clone() else {
+            return;
+        };
+        s.fail_gen += 1;
+        (
+            task,
+            s.fail_gen,
+            s.fail_page_starts.get(page).copied().unwrap_or(0),
+            s.fail_sender.clone(),
+        )
+    };
+    std::thread::spawn(move || {
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            query_fail_page(&task, start, page, generation)
+        }));
+        let fail = result
+            .unwrap_or_else(|_| Err(anyhow::anyhow!("失败列表加载时后台操作意外退出")))
+            .unwrap_or_else(|error| FailPage {
+                task: task.clone(),
+                generation,
+                page,
+                items: Vec::new(),
+                total: 0,
+                has_more: false,
+                last_id: 0,
+                error: Some(format!("{error:#}")),
+            });
+        let _ = sender.send(FailChannelMsg::Page(fail));
+    });
+}
+
+/// 查询一页失败项（U-10）：只在 worker 线程调用。隔离后位置按事件顺序归组——
+/// 一个失败包的「移入解压失败」记录紧跟该包的失败记录、且先于下一个失败记录
+/// （解压按包串行处理），据此把整组卷的隔离位置合并进同一项。
+fn query_fail_page(task: &Path, start: i64, page: usize, generation: u64) -> Result<FailPage> {
+    let db = Database::open_existing(task)?;
+    let total: i64 = db.conn.query_row(
+        &format!("SELECT COUNT(*) FROM events WHERE ({FAIL_ITEM_PREDICATE})"),
+        [],
+        |row| row.get(0),
+    )?;
+    // 多取一条探测「还有下一页」，随后截断到 100 行（与计划页每页 100 条同口径）。
+    // 注意谓词含 OR，必须整体加括号再与 `id > ?1` 组合，否则 AND 优先级会把游标
+    // 条件吞进第二个分支（回归：失败列表翻页失效、隔离位置归组为空）。
+    let mut stmt = db.conn.prepare(&format!(
+        "SELECT id, phase, result, source, reason FROM events WHERE ({FAIL_ITEM_PREDICATE}) AND id > ?1 ORDER BY id LIMIT 101"
+    ))?;
+    let query = stmt.query_map(rusqlite::params![start], |row| {
+        Ok((
+            row.get::<_, i64>(0)?,
+            row.get::<_, String>(1)?,
+            row.get::<_, String>(2)?,
+            row.get::<_, String>(3)?,
+            row.get::<_, String>(4)?,
+        ))
+    })?;
+    let mut rows = query.collect::<rusqlite::Result<Vec<_>>>()?;
+    let has_more = rows.len() > 100;
+    rows.truncate(100);
+    // 本页末项的隔离记录上界：下一个失败项的事件 id（没有则直到库尾）。
+    let upper_bound: i64 = match rows.last() {
+        None => 0,
+        Some((last_id, ..)) => db
+            .conn
+            .query_row(
+                &format!("SELECT MIN(id) FROM events WHERE ({FAIL_ITEM_PREDICATE}) AND id > ?1"),
+                rusqlite::params![last_id],
+                |row| row.get::<_, Option<i64>>(0),
+            )?
+            .unwrap_or(i64::MAX),
+    };
+    let mut items = Vec::new();
+    if !rows.is_empty() {
+        let first_id = rows[0].0;
+        let mut qstmt = db.conn.prepare(
+            "SELECT id, target FROM events WHERE result='移入解压失败' AND id > ?1 AND id < ?2 ORDER BY id",
+        )?;
+        let quarantine_query = qstmt
+            .query_map(rusqlite::params![first_id, upper_bound], |row| {
+                Ok((row.get::<_, i64>(0)?, row.get::<_, String>(1)?))
+            })?;
+        let quarantines = quarantine_query.collect::<rusqlite::Result<Vec<_>>>()?;
+        for (index, (id, phase, result, source, reason)) in rows.iter().enumerate() {
+            // 归组区间 (本项 id, 下一失败项 id)：页内以下一项为界，页末项用 upper_bound。
+            let bound = rows
+                .get(index + 1)
+                .map_or(upper_bound, |(next_id, ..)| *next_id);
+            let moved: Vec<&str> = quarantines
+                .iter()
+                .filter(|(qid, _)| *qid > *id && *qid < bound)
+                .map(|(_, target)| target.as_str())
+                .collect();
+            let target = match moved.as_slice() {
+                [] => String::new(),
+                [first] => (*first).to_string(),
+                [first, ..] => format!("{first}（整组共 {} 个卷已隔离）", moved.len()),
+            };
+            let stage = if phase == "删除" {
+                "源包清理失败（X-05）"
+            } else if result == "未完全解开" {
+                "未完全解开"
+            } else {
+                "解压失败"
+            };
+            items.push(FailItem {
+                stage,
+                source: source.clone(),
+                reason: reason.clone(),
+                target,
+            });
+        }
+    }
+    Ok(FailPage {
+        task: task.to_path_buf(),
+        generation,
+        page,
+        total: u64::try_from(total.max(0)).unwrap_or(0),
+        has_more,
+        last_id: rows.last().map_or(0, |(id, ..)| *id),
+        items,
+        error: None,
+    })
+}
+
+/// U-10：失败列表只保留「本次」解压任务的数据——启动下一次解压任务时清空上一任务的
+/// 列表与分页游标并使其在途结果过期（任务结束/取消后、切换工具时不清空）。
+fn reset_fail_list(ui: &AppWindow, state: &mut State) {
+    state.extract_task = None;
+    state.fail_page = 0;
+    state.fail_page_starts = vec![0];
+    state.fail_gen += 1;
+    ui.set_fail_ready(false);
+    ui.set_fail_rows(Rc::new(VecModel::from(Vec::<FailRow>::new())).into());
+    ui.set_fail_total(0);
+    ui.set_fail_prev_enabled(false);
+    ui.set_fail_next_enabled(false);
+    ui.set_fail_page_label("第 1 页".into());
 }
 /// 无头 GUI 测试用的引擎注入：把任务库隔离到 tempfile，避免污染真实状态目录。
 pub struct EngineTestOverrides {
@@ -538,6 +773,20 @@ fn invalidate(ui: &AppWindow, tool: Tool) {
             return;
         }
         ui.set_status("目录已就绪；点「开始解压」后会先弹一次确认".into());
+        return;
+    }
+    // U-11/C-11：MD 整理与 Git 工具没有「分析→计划→执行」流程，状态栏必须用本工具
+    // 中性文案，不得串用目录整理的流程词（分析/整理/规则）误导用户。
+    if matches!(tool, Tool::Md | Tool::Git) {
+        if ui.get_directory().is_empty() {
+            ui.set_status("请选择需要处理的目录".into());
+            return;
+        }
+        if !PathBuf::from(ui.get_directory().as_str()).is_dir() {
+            ui.set_status("目录不存在或无法访问，请检查路径".into());
+            return;
+        }
+        ui.set_status("目录已就绪".into());
         return;
     }
     if ui.get_has_task() {
@@ -1122,6 +1371,8 @@ fn start_extract(ui: &AppWindow, state: &Rc<RefCell<State>>, out: &EventSender) 
     ui.set_panel(1);
     ui.set_quarantined_count(0);
     ui.set_log_text("".into());
+    // U-10：新解压任务开始——清空上一任务的失败列表与分页游标（在途分页结果一并作废）。
+    reset_fail_list(ui, &mut state.borrow_mut());
     // X-05/S-02：成功删原包是破坏性行为，运行期状态栏必须如实说明删除条件与保留条件。
     ui.set_status(
         "正在解压；完整成功解出的原压缩包及分卷会永久删除（不经回收站，不可恢复），失败、未完全解开或取消的包保留，无法完全解开的包移入「解压失败」并记录原因".into(),
@@ -1158,6 +1409,35 @@ fn start_extract(ui: &AppWindow, state: &Rc<RefCell<State>>, out: &EventSender) 
         };
         let _ = out.send(event);
     });
+    // U-10：失败列表的数据源是本次任务的任务库，而任务库目录由引擎在状态目录下创建、
+    // 路径随结果事件返回时任务已结束。启动前快照既有任务目录，watcher 在后台轮询新
+    // 目录并回传路径（只读访问，不进界面线程）；失败列表由此在运行中即可查看。
+    let state_root = state.borrow().engine_overrides.as_ref().map_or_else(
+        || crate::config::state_dir().ok(),
+        |o| Some(o.state_dir.clone()),
+    );
+    if let Some(state_root) = state_root {
+        let tasks_root = state_root.join("tasks");
+        let known = std::fs::read_dir(&tasks_root)
+            .map(|entries| {
+                entries
+                    .flatten()
+                    .map(|entry| entry.path())
+                    .collect::<Vec<PathBuf>>()
+            })
+            .unwrap_or_default();
+        let generation = state.borrow().extract_generation;
+        let fail_sender = state.borrow().fail_sender.clone();
+        std::thread::spawn(move || {
+            watch_extract_task(
+                &tasks_root,
+                &known,
+                generation,
+                &fail_sender,
+                EXTRACT_TASK_WATCH_TIMEOUT,
+            );
+        });
+    }
 }
 /// 「开始解压」确认框文案（X-02，S-02 的破坏性告知）：数量由后台清点（大目录不阻塞界面），
 /// 清点完成前先给占位文案，事件到达后原位更新。文案固定说明去向、完整成功即永久删除原包及
@@ -1447,6 +1727,10 @@ fn start_md_merge(ui: &AppWindow, state: &Rc<RefCell<State>>, out: &EventSender)
         let mut s = state.borrow_mut();
         s.control = Some(Arc::clone(&control));
         s.logs.clear();
+        // U-09：一次「停止并关闭」只作用于当次任务收尾，启动新任务必须重置；
+        // U-03：实时耗时从本次任务起算。
+        s.close_after = false;
+        s.started = Instant::now();
         s.runtime = RuntimeMode::Md;
         s.md_pending = Some(MdPending::Merge {
             root: root.clone(),
@@ -1504,6 +1788,10 @@ fn start_md_split(ui: &AppWindow, state: &Rc<RefCell<State>>, out: &EventSender)
         let mut s = state.borrow_mut();
         s.control = Some(Arc::clone(&control));
         s.logs.clear();
+        // U-09：一次「停止并关闭」只作用于当次任务收尾，启动新任务必须重置；
+        // U-03：实时耗时从本次任务起算。
+        s.close_after = false;
+        s.started = Instant::now();
         s.runtime = RuntimeMode::Md;
         s.md_pending = Some(MdPending::Split {
             input: input.clone(),
@@ -1541,6 +1829,10 @@ fn resume_md_after_confirm(pending: MdPending, state: &Rc<RefCell<State>>, out: 
     {
         let mut s = state.borrow_mut();
         s.control = Some(Arc::clone(&control));
+        // 覆盖确认重跑是一次新的执行段：耗时从重跑起算（U-03）；close_after 理论上
+        // 必为 false（为 true 时 MdNeedsConfirm 已直接退出），此处一并重置保持不变量。
+        s.close_after = false;
+        s.started = Instant::now();
         s.runtime = RuntimeMode::Md;
     }
     let worker_out = out.clone();
@@ -1578,6 +1870,10 @@ fn start_git(ui: &AppWindow, state: &Rc<RefCell<State>>, out: &EventSender) {
         let mut s = state.borrow_mut();
         s.control = Some(Arc::clone(&control));
         s.logs.clear();
+        // U-09：一次「停止并关闭」只作用于当次任务收尾，启动新任务必须重置；
+        // U-03：实时耗时从本次任务起算。
+        s.close_after = false;
+        s.started = Instant::now();
         s.runtime = RuntimeMode::Git;
         s.git_shared = Some(Arc::clone(&shared));
         s.md_pending = None;
@@ -1660,7 +1956,9 @@ fn refresh_scope_notice(ui: &AppWindow, config: &Config) {
 
 /// C-11：计划行状态的中文显示。未勾选且尚未执行的计划行按勾选实际状态显示
 /// 「已取消勾选」，重新勾选恢复「待执行」（勾选即时生效，不必等执行阶段）。
-/// 其它状态（已执行/已跳过/执行失败）原样透出。
+/// 任务库存英文状态（done/skipped/failed，engine 执行后回写），读取链在此翻译成中文；
+/// 旧任务库可能已存中文，别名一并保留。终态行不会落入「待执行/已取消勾选」，
+/// 与 ui/app.slint 的勾选门禁（只认这两种状态可勾选）保持一致。
 fn plan_row_state(selected: bool, stored: &str) -> &str {
     match stored {
         "pending" | "待执行" | "unselected" | "已取消勾选" => {
@@ -1670,6 +1968,9 @@ fn plan_row_state(selected: bool, stored: &str) -> &str {
                 "已取消勾选"
             }
         }
+        "done" | "已执行" => "已执行",
+        "skipped" | "已跳过" => "已跳过",
+        "failed" | "执行失败" => "执行失败",
         other => other,
     }
 }
@@ -2118,6 +2419,25 @@ fn wire_sync(ui: &AppWindow, state: &Rc<RefCell<State>>, out: &EventSender) {
             ui.set_acknowledge(false);ui.set_confirm_kind(2);
         }});
     }
+    {
+        // U-10：失败列表翻页。页游标存在才发起（翻页按钮只在对应页真实存在时启用）；
+        // 采用「先加载、结果落地再提交页码」，失败时按钮保持与列表一致。
+        let state = state.clone();
+        ui.on_fail_page(move |direction| {
+            let next = if direction < 0 {
+                state.borrow().fail_page.saturating_sub(1)
+            } else {
+                state.borrow().fail_page + 1
+            };
+            let valid = {
+                let s = state.borrow();
+                s.extract_task.is_some() && next < s.fail_page_starts.len()
+            };
+            if valid {
+                request_fail_page(&state, next);
+            }
+        });
+    }
 }
 
 /// 界面事件泵：排空事件通道、上屏日志、刷新实时指标与系统主题。
@@ -2139,6 +2459,8 @@ struct UiPump {
     /// 日志呈现是否落后于环形缓冲：面板不可见时只置脏（重建 300 行文本浪费），
     /// 打开后的下一次刷新按 state.logs 补齐，保持最新在上的 300 条记录。
     log_dirty: Cell<bool>,
+    /// 失败列表当前页的上次自动刷新时间：运行中低频节流刷新（U-10，见 refresh_fail_list）。
+    fail_refreshed: Cell<Instant>,
 }
 /// 300 行可选中文本的整段重排开销显著：运行中日志合批到 2Hz，避免连续重排挤占输入处理。
 /// 进度与取消仍走原来的 100ms 刷新；任务收尾日志不等待此间隔。
@@ -2162,9 +2484,14 @@ impl UiPump {
                     .unwrap_or_else(Instant::now),
             ),
             log_dirty: Cell::new(false),
+            fail_refreshed: Cell::new(
+                Instant::now()
+                    .checked_sub(FAIL_REFRESH_MIN)
+                    .unwrap_or_else(Instant::now),
+            ),
         }
     }
-    /// 一次刷新：主题 → 排空事件 → 日志上屏 → 实时指标。
+    /// 一次刷新：主题 → 排空事件 → 日志上屏 → 失败列表 → 实时指标。
     fn run(&self, ui: &AppWindow) {
         if self.theme_poll.get().elapsed() >= Duration::from_secs(2) {
             self.theme_poll.set(Instant::now());
@@ -2183,7 +2510,107 @@ impl UiPump {
             self.log_dirty.set(false);
             ui.set_log_text(log_panel_text(&self.state.borrow().logs).into());
         }
+        self.apply_fail_messages(ui);
+        self.refresh_fail_list(ui);
         self.refresh_runtime(ui);
+    }
+    /// 排空失败列表专用通道：任务目录发现与分页结果（U-10）。
+    /// 迟到的结果按请求代际与当前解压任务整体丢弃，与计划页事件同一口径。
+    fn apply_fail_messages(&self, ui: &AppWindow) {
+        let messages: Vec<FailChannelMsg> = self
+            .state
+            .borrow()
+            .fail_receiver
+            .borrow_mut()
+            .try_iter()
+            .collect();
+        for message in messages {
+            match message {
+                FailChannelMsg::TaskFound(path, generation) => {
+                    // 过期发现：用户已发起新的解压任务（清点代际已前进）或流程已结束。
+                    if self.state.borrow().extract_generation != generation {
+                        continue;
+                    }
+                    {
+                        let mut s = self.state.borrow_mut();
+                        s.extract_task = Some(path);
+                        s.fail_page = 0;
+                        s.fail_page_starts = vec![0];
+                        s.fail_gen += 1;
+                    }
+                    // 关联到本次任务：先呈现空列表占位，第 0 页数据落地后填充。
+                    ui.set_fail_ready(true);
+                    ui.set_fail_rows(Rc::new(VecModel::from(Vec::<FailRow>::new())).into());
+                    ui.set_fail_total(0);
+                    ui.set_fail_prev_enabled(false);
+                    ui.set_fail_next_enabled(false);
+                    ui.set_fail_page_label("加载中…".into());
+                    request_fail_page(&self.state, 0);
+                }
+                FailChannelMsg::Page(fail) => {
+                    let accepted = {
+                        let s = self.state.borrow();
+                        s.extract_task.as_ref() == Some(&fail.task) && s.fail_gen == fail.generation
+                    };
+                    if !accepted {
+                        continue;
+                    }
+                    if let Some(error) = fail.error {
+                        ui.set_error_text(error.into());
+                        // 取数失败按当前页恢复翻页按钮，避免永久中间态（与计划页同口径）。
+                        let (page, page_count) = {
+                            let s = self.state.borrow();
+                            (s.fail_page, s.fail_page_starts.len())
+                        };
+                        ui.set_fail_prev_enabled(page > 0);
+                        ui.set_fail_next_enabled(page + 1 < page_count);
+                        continue;
+                    }
+                    {
+                        let mut s = self.state.borrow_mut();
+                        s.fail_page = fail.page;
+                        if fail.has_more && s.fail_page_starts.len() <= fail.page + 1 {
+                            s.fail_page_starts.push(fail.last_id);
+                        }
+                    }
+                    let rows = fail
+                        .items
+                        .into_iter()
+                        .map(|item| FailRow {
+                            stage: item.stage.into(),
+                            source: item.source.into(),
+                            reason: item.reason.into(),
+                            target: item.target.into(),
+                        })
+                        .collect::<Vec<_>>();
+                    ui.set_fail_rows(Rc::new(VecModel::from(rows)).into());
+                    // 总数为显示用途，超出 i32 的极端值饱和显示即可。
+                    ui.set_fail_total(i32::try_from(fail.total).unwrap_or(i32::MAX));
+                    ui.set_fail_prev_enabled(fail.page > 0);
+                    ui.set_fail_next_enabled(fail.has_more);
+                    ui.set_fail_page_label(
+                        format!("第 {} 页 · 每页最多 100 项", fail.page + 1).into(),
+                    );
+                }
+            }
+        }
+    }
+    /// 运行中自动刷新失败列表当前页（U-10「运行中可查看已经发生的失败」）：
+    /// 只在解压任务运行且失败列表面板可见时按低频节流发起；空闲与其他页面不取数。
+    fn refresh_fail_list(&self, ui: &AppWindow) {
+        if ui.get_screen() != 2 || ui.get_panel() != 2 || !ui.get_busy() {
+            return;
+        }
+        let (extracting, has_task) = {
+            let s = self.state.borrow();
+            (s.runtime == RuntimeMode::Extract, s.extract_task.is_some())
+        };
+        if !extracting || !has_task || self.fail_refreshed.get().elapsed() < FAIL_REFRESH_MIN {
+            return;
+        }
+        self.fail_refreshed.set(Instant::now());
+        let page = self.state.borrow().fail_page;
+        request_fail_page(&self.state, page);
     }
     /// 排空事件通道并应用事件；返回本轮是否处理过任务收尾事件（Ready/Done/Failed/ExtractDone），
     /// 供调用方决定是否立即上屏日志（收尾日志是例外，不受刷新预算限制）。
@@ -2260,6 +2687,12 @@ impl UiPump {
                     // （同一次后台开库），避免界面停留在失败前的旧数据。
                     // task 提取的借用安全见 reload_after_failed 注释。
                     reload_after_failed(ui, &self.state, &self.out);
+                    // U-10：解压失败/取消后同样刷新失败列表，保留本次已产生的失败明细
+                    // 供查看（仅解压任务存在时；其他工具的失败与该列表无关）。
+                    if self.state.borrow().extract_task.is_some() {
+                        let page = self.state.borrow().fail_page;
+                        request_fail_page(&self.state, page);
+                    }
                     if self.state.borrow().close_after {
                         let _ = slint::quit_event_loop();
                     }
@@ -2456,6 +2889,15 @@ impl UiPump {
                     // 或已改目录重新发起清点时，过期事件整体丢弃，不打扰运行中状态（X-02）。
                     if ui.get_confirm_kind() == 1 && ui.get_screen() == 2 && generation == current {
                         match count {
+                            Ok(0) => {
+                                // X-02：发现数为零时提示无可处理包，不启动空解压任务——
+                                // 清点门禁保持（确认按钮保持禁用），用户点「返回检查」
+                                // 重新选择目录或调整规则。
+                                ui.set_confirm_text(
+                                    "未发现可处理的压缩包（按当前扫描范围，已排除「解压失败」目录），本次不会解压任何文件；不启动空解压任务。点「返回检查」可重新选择目录或调整规则。"
+                                        .into(),
+                                );
+                            }
                             Ok(n) => {
                                 ui.set_confirm_text(
                                     extract_confirm_text(
@@ -2514,6 +2956,12 @@ impl UiPump {
                         }
                         .into(),
                     );
+                    // U-10：任务结束后刷新失败列表当前页——收尾日志已全部落库，
+                    // 此刻取数才能看到完整的失败明细（任务结束后仍可查看）。
+                    if self.state.borrow().extract_task.is_some() {
+                        let page = self.state.borrow().fail_page;
+                        request_fail_page(&self.state, page);
+                    }
                     if self.state.borrow().close_after {
                         let _ = slint::quit_event_loop();
                     }
@@ -2521,6 +2969,7 @@ impl UiPump {
                 Event::MdNeedsConfirm(text) => {
                     pending_status = None;
                     terminal = true;
+                    let close_after = self.state.borrow().close_after;
                     // M-07/M-11：输出/分片冲突转确认框；挂起的操作保存在 state.md_pending，
                     // 确认（kind=4）后重跑，返回检查则由下一次启动自然顶替。
                     {
@@ -2532,24 +2981,38 @@ impl UiPump {
                     ui.set_busy(false);
                     ui.set_progress(-1.0);
                     ui.set_progress_note("".into());
-                    ui.set_confirm_text(text.into());
-                    ui.set_acknowledge(false);
-                    ui.set_confirm_kind(4);
+                    if close_after {
+                        // U-09：用户已确认「停止并关闭」。MD 扫描与冲突检查不经过任务
+                        // 检查点，操作自然结束走到这里——此时应直接退出应用，不得再弹
+                        // 覆盖确认把用户留在界面里，也不得残留 close_after。
+                        let _ = slint::quit_event_loop();
+                    } else {
+                        ui.set_confirm_text(text.into());
+                        ui.set_acknowledge(false);
+                        ui.set_confirm_kind(4);
+                    }
                 }
                 Event::MdDone(text) => {
                     pending_status = None;
                     terminal = true;
-                    {
+                    let close_after = {
                         let mut s = self.state.borrow_mut();
                         s.control = None;
                         s.runtime = RuntimeMode::Organizer;
                         push_event_log(&mut s.logs, text.clone());
                         self.log_dirty.set(true);
-                    }
+                        // U-09：close_after 在此消费；MD 扫描与合并不经过任务检查点，
+                        // 「停止并关闭」确认后任务会自然结束——结束时必须关闭窗口，
+                        // 而不是把窗口留在运行完成状态、把请求残留到之后的任务。
+                        std::mem::take(&mut s.close_after)
+                    };
                     ui.set_busy(false);
                     ui.set_progress(-1.0);
                     ui.set_progress_note("".into());
                     ui.set_status(text.into());
+                    if close_after {
+                        let _ = slint::quit_event_loop();
+                    }
                 }
                 Event::GitDone(text) => {
                     pending_status = None;
@@ -2793,6 +3256,7 @@ fn apply_summary(ui: &AppWindow, state: &mut State, summary: &Summary) {
 /// 初始界面状态：全部规则规格 + 默认配置（仅会话内存，不落盘）。测试与 run() 共用。
 fn initial_state() -> Result<State> {
     let specs: Vec<RuleSpec> = serde_json::from_str(include_str!("../resources/rules.json"))?;
+    let (fail_sender, fail_receiver) = mpsc::channel();
     Ok(State {
         config: Config::default(),
         specs,
@@ -2818,6 +3282,12 @@ fn initial_state() -> Result<State> {
         engine_overrides: None,
         plan_load: Arc::new(PlanLoadSync::default()),
         readiness_status_pending: Cell::new(false),
+        extract_task: None,
+        fail_page: 0,
+        fail_page_starts: vec![0],
+        fail_gen: 0,
+        fail_sender,
+        fail_receiver: RefCell::new(fail_receiver),
         extract_generation: 0,
     })
 }
@@ -3674,6 +4144,13 @@ mod gui_tests {
             self.ui
                 .set_plans(Rc::new(VecModel::from(Vec::<PlanRow>::new())).into());
             self.ui.set_md_subpage(0);
+            self.ui.set_fail_ready(false);
+            self.ui
+                .set_fail_rows(Rc::new(VecModel::from(Vec::<FailRow>::new())).into());
+            self.ui.set_fail_total(0);
+            self.ui.set_fail_prev_enabled(false);
+            self.ui.set_fail_next_enabled(false);
+            self.ui.set_fail_page_label("第 1 页".into());
             self.ui.set_git_branch("".into());
             self.ui.set_git_upstream("".into());
             self.ui.set_git_current("".into());
@@ -4679,5 +5156,562 @@ mod gui_tests {
             assert!(!ui.get_ready(), "已取消任务不得再显示为可执行");
         })
         .unwrap();
+    }
+
+    // 覆盖 C-11（计划行「已执行/已跳过/执行失败」必须以中文显示，不得透出英文状态值；
+    // 任务库存 done/skipped/failed，读取链必须翻译）
+    #[test]
+    fn plan_row_state_maps_terminal_states_to_chinese() {
+        assert_eq!(plan_row_state(true, "done"), "已执行");
+        assert_eq!(plan_row_state(true, "skipped"), "已跳过");
+        assert_eq!(plan_row_state(true, "failed"), "执行失败");
+        // 既有中文旧值别名保持稳定
+        assert_eq!(plan_row_state(true, "已执行"), "已执行");
+        assert_eq!(plan_row_state(true, "已跳过"), "已跳过");
+        assert_eq!(plan_row_state(true, "执行失败"), "执行失败");
+        // 未执行语义不回归：勾选即时生效口径保持
+        assert_eq!(plan_row_state(true, "pending"), "待执行");
+        assert_eq!(plan_row_state(false, "pending"), "已取消勾选");
+        assert_eq!(plan_row_state(true, "unselected"), "待执行");
+        assert_eq!(plan_row_state(false, "unselected"), "已取消勾选");
+        // 勾选门禁联动（ui/app.slint 只认「待执行/已取消勾选」可勾选）：
+        // 补映射后已执行/已跳过/执行失败行仍不得落入可勾选状态。
+        for terminal in ["done", "skipped", "failed", "已执行", "已跳过", "执行失败"] {
+            assert!(
+                !matches!(plan_row_state(true, terminal), "待执行" | "已取消勾选"),
+                "终态 {terminal} 不得映射为可勾选状态（勾选门禁失效）"
+            );
+        }
+    }
+
+    // 覆盖 U-11, C-11（切到 MD 整理/Git 工具时状态栏必须显示本工具中性文案，
+    // 不得出现「分析/整理/规则」等目录整理专属流程词）
+    #[test]
+    fn switching_to_md_or_git_shows_neutral_status() {
+        with_gui(|app| {
+            let ui = &app.ui;
+            let assert_neutral = |ui: &AppWindow, page: &str| {
+                let status = ui.get_status().to_string();
+                for forbidden in ["分析", "整理", "规则"] {
+                    assert!(
+                        !status.contains(forbidden),
+                        "{page} 页状态栏不得出现目录整理流程词（{forbidden}）：{status}"
+                    );
+                }
+            };
+            ui.invoke_select_tool("md-organizer".into());
+            assert_neutral(ui, "MD 整理");
+            ui.invoke_select_tool("git-tools".into());
+            assert_neutral(ui, "Git 工具");
+            // 目录输入有效时是「就绪」类提示，同样不得串用目录整理流程词
+            let ready_dir = temp_test_dir("neutral-status-dir");
+            ui.set_directory(ready_dir.display().to_string().into());
+            ui.invoke_select_tool("md-organizer".into());
+            assert_neutral(ui, "MD 整理");
+            assert!(
+                ui.get_status().contains("就绪"),
+                "目录有效时应显示就绪类提示：{}",
+                ui.get_status()
+            );
+            // 目录无效时的反馈同样保持中性
+            ui.set_directory("D:/surely-missing-dir-42/data".into());
+            ui.invoke_root_edited();
+            assert_neutral(ui, "MD 整理");
+            assert!(
+                ui.get_status().contains("目录不存在"),
+                "无效目录必须立即提示：{}",
+                ui.get_status()
+            );
+            let _ = std::fs::remove_dir_all(&ready_dir);
+        })
+        .unwrap();
+    }
+
+    /// 构造 MD 合并输入/输出目录：`file_count` 个带内容的 .md 文件（让合并耗时可观测）。
+    fn make_md_fixture(tag: &str, file_count: usize) -> (PathBuf, PathBuf, PathBuf) {
+        let dir = temp_test_dir(tag);
+        let docs = dir.join("docs");
+        std::fs::create_dir_all(&docs).unwrap();
+        let content = "# 标题\n\n正文内容\n".repeat(8192); // 约 120KB/文件
+        for i in 0..file_count {
+            std::fs::write(docs.join(format!("doc{i:03}.md")), &content).unwrap();
+        }
+        let out_dir = dir.join("out");
+        std::fs::create_dir_all(&out_dir).unwrap();
+        (docs, out_dir, dir)
+    }
+
+    /// 从实时指标文本解析「耗时 N s」的秒数（MD/Git 指标口径）。
+    fn elapsed_in_metrics(metrics: &str) -> Option<f64> {
+        let index = metrics.find("耗时 ")?;
+        let rest = metrics[index + "耗时 ".len()..].trim_end_matches('s');
+        rest.parse().ok()
+    }
+
+    // 覆盖 U-03（MD 合并/拆分启动时耗时必须从本次任务起算，不得沿用上次任务的时钟）
+    #[test]
+    fn md_start_resets_started_clock() {
+        // 合并：上次任务遗留 10 分钟前的旧时钟，启动后实时耗时必须回到本次任务口径。
+        let (docs, out_dir, dir) = make_md_fixture("md-clock-merge", 20);
+        let docs_text = docs.display().to_string();
+        let out_text = out_dir.display().to_string();
+        with_gui(move |app| {
+            app.ui.invoke_select_tool("md-organizer".into());
+            let stale = Instant::now()
+                .checked_sub(Duration::from_secs(600))
+                .expect("系统运行时间不足 600 秒，无法构造旧时钟");
+            app.state.borrow_mut().started = stale;
+            app.ui.set_md_input_dir(docs_text.clone().into());
+            app.ui.set_md_output_name("merged.md".into());
+            app.ui.set_md_output_dir(out_text.into());
+            app.ui.invoke_md_merge_start();
+            assert!(
+                pump_until(app, || {
+                    app.ui.get_busy()
+                        && elapsed_in_metrics(app.ui.get_metrics().as_str())
+                            .is_some_and(|secs| secs < 120.0)
+                }),
+                "MD 合并启动后耗时必须从本次任务起算（不得显示 600s+ 旧时钟）：metrics={}",
+                app.ui.get_metrics()
+            );
+            assert!(pump_until(app, || !app.ui.get_busy()), "合并应正常收尾");
+        })
+        .unwrap();
+        let _ = std::fs::remove_dir_all(&dir);
+        // 拆分：同一口径
+        let (docs, out_dir, dir) = make_md_fixture("md-clock-split", 8);
+        let input = docs.join("doc000.md");
+        let input_text = input.display().to_string();
+        let out_text = out_dir.display().to_string();
+        with_gui(move |app| {
+            app.ui.invoke_select_tool("md-organizer".into());
+            app.ui.set_md_subpage(1);
+            let stale = Instant::now()
+                .checked_sub(Duration::from_secs(600))
+                .expect("系统运行时间不足 600 秒，无法构造旧时钟");
+            app.state.borrow_mut().started = stale;
+            app.ui.set_md_split_file(input_text.into());
+            app.ui.set_md_split_size("1".into());
+            app.ui.set_md_split_unit(1); // MB：单文件上限 1MB，多片写出保证耗时可观测
+            app.ui.set_md_split_dir(out_text.into());
+            app.ui.invoke_md_split_start();
+            assert!(
+                pump_until(app, || {
+                    app.ui.get_busy()
+                        && elapsed_in_metrics(app.ui.get_metrics().as_str())
+                            .is_some_and(|secs| secs < 120.0)
+                }),
+                "MD 拆分启动后耗时必须从本次任务起算：metrics={}",
+                app.ui.get_metrics()
+            );
+            assert!(pump_until(app, || !app.ui.get_busy()), "拆分应正常收尾");
+        })
+        .unwrap();
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    // 覆盖 U-09（MD/Git 任务启动时必须重置 close_after：一次「停止并关闭」只作用于
+    // 当次任务收尾，不得残留到之后的任务让收尾时意外退出应用）
+    #[test]
+    fn md_and_git_start_reset_close_after() {
+        let (docs, out_dir, dir) = make_md_fixture("md-close-after-merge", 2);
+        let docs_text = docs.display().to_string();
+        let out_text = out_dir.display().to_string();
+        with_gui(move |app| {
+            app.ui.invoke_select_tool("md-organizer".into());
+            app.state.borrow_mut().close_after = true;
+            app.ui.set_md_input_dir(docs_text.into());
+            app.ui.set_md_output_name("merged.md".into());
+            app.ui.set_md_output_dir(out_text.into());
+            app.ui.invoke_md_merge_start();
+            assert!(
+                !app.state.borrow().close_after,
+                "MD 合并启动必须重置 close_after（U-09）：残留会让之后的任务收尾时意外关闭应用"
+            );
+            assert!(pump_until(app, || !app.ui.get_busy()), "合并应正常收尾");
+        })
+        .unwrap();
+        let _ = std::fs::remove_dir_all(&dir);
+        // 拆分
+        let (docs, out_dir, dir) = make_md_fixture("md-close-after-split", 2);
+        let input_text = docs.join("doc000.md").display().to_string();
+        let out_text = out_dir.display().to_string();
+        with_gui(move |app| {
+            app.ui.invoke_select_tool("md-organizer".into());
+            app.ui.set_md_subpage(1);
+            app.state.borrow_mut().close_after = true;
+            app.ui.set_md_split_file(input_text.into());
+            app.ui.set_md_split_size("1".into());
+            app.ui.set_md_split_unit(0);
+            app.ui.set_md_split_dir(out_text.into());
+            app.ui.invoke_md_split_start();
+            assert!(
+                !app.state.borrow().close_after,
+                "MD 拆分启动必须重置 close_after（U-09）"
+            );
+            assert!(pump_until(app, || !app.ui.get_busy()), "拆分应正常收尾");
+        })
+        .unwrap();
+        let _ = std::fs::remove_dir_all(&dir);
+        // Git：仓库无效也会快速收尾，启动路径的重置必须同样生效
+        let git_dir = temp_test_dir("git-close-after");
+        let git_text = git_dir.display().to_string();
+        with_gui(move |app| {
+            app.ui.invoke_select_tool("git-tools".into());
+            app.state.borrow_mut().close_after = true;
+            app.ui.set_git_repo(git_text.into());
+            app.ui.invoke_git_start();
+            assert!(
+                !app.state.borrow().close_after,
+                "Git 启动必须重置 close_after（U-09）"
+            );
+            assert!(pump_until(app, || !app.ui.get_busy()), "Git 任务应快速收尾");
+        })
+        .unwrap();
+        let _ = std::fs::remove_dir_all(&git_dir);
+    }
+
+    // 覆盖 X-02（清点为 0 时必须提示无可处理包：不解除清点门禁、确认保持不可用，
+    // 不得启动空解压任务）
+    #[test]
+    fn extract_count_zero_keeps_confirm_gated() {
+        let dir = tempfile::tempdir().unwrap();
+        let data = dir.path().join("data");
+        std::fs::create_dir_all(&data).unwrap();
+        std::fs::write(data.join("keep.txt"), b"keep me").unwrap();
+        let data_text = data.display().to_string();
+        with_gui(move |app| {
+            let ui = &app.ui;
+            ui.invoke_select_tool("recursive-extract".into());
+            ui.set_directory(data_text.into());
+            ui.invoke_request_extract_start();
+            assert!(
+                pump_until(app, || {
+                    ui.get_confirm_kind() == 1 && ui.get_confirm_text().contains("未发现")
+                }),
+                "清点为 0 必须给出「未发现可处理包」的如实提示：{}",
+                ui.get_confirm_text()
+            );
+            assert!(
+                ui.get_confirm_pending(),
+                "清点为 0 不得解除清点门禁（确认必须保持不可用，X-02 不启动空解压任务）"
+            );
+            assert!(
+                !ui.get_confirm_text().contains("永久删除"),
+                "零包提示不得保留破坏性告知（没有任务可启动）：{}",
+                ui.get_confirm_text()
+            );
+            // 返回检查：门禁状态随确认框关闭一并复位，可重新发起
+            ui.set_confirm_kind(0);
+            ui.set_confirm_pending(false);
+        })
+        .unwrap();
+    }
+
+    // 覆盖 X-02, S-02, X-04, X-05, X-06, H-07（发现数 > 0 的确认文案必须完整披露：
+    // 原包及分卷永久删除且不可恢复、失败/取消保留、已有文件保留、冲突只为新文件自动改名、
+    // 失败包去向，且不得出现覆盖或冲突策略授权）。该文案由 extract_confirm_text 构造，
+    // 端到端零包用例无法覆盖（目录无压缩包时按 X-02 不再进入确认执行），故在此逐条断言。
+    #[test]
+    fn extract_confirm_text_discloses_deletion_rules() {
+        let text = extract_confirm_text(
+            "清点到 2 个压缩包（按当前扫描范围，已排除「解压失败」目录）。\n",
+            "D:/data",
+        );
+        assert!(
+            text.contains("永久删除"),
+            "X-02/S-02：确认文案必须说明完整成功后原包及分卷永久删除：{text}"
+        );
+        assert!(
+            text.contains("不可恢复"),
+            "X-02/S-02：确认文案必须说明永久删除不可恢复：{text}"
+        );
+        assert!(
+            text.contains("保留"),
+            "X-05：确认文案必须说明失败/部分/取消时保留原包：{text}"
+        );
+        assert!(
+            text.contains("已有文件"),
+            "X-05/H-07：确认文案必须说明已有文件保留：{text}"
+        );
+        assert!(
+            text.contains("自动改文件名"),
+            "X-04/H-07：确认文案必须说明冲突只为新文件自动改名：{text}"
+        );
+        assert!(
+            text.contains("「解压失败」"),
+            "X-06：确认文案必须说明失败包去向：{text}"
+        );
+        assert!(
+            !text.contains("覆盖") && !text.contains("冲突策略"),
+            "X-04/H-07：解压确认不得出现覆盖或冲突策略授权：{text}"
+        );
+    }
+
+    /// 构造带失败事件的解压任务库（U-10）：返回任务库目录。
+    /// 事件 id 顺序即写入顺序；与 archive.rs 的真实写入序列一致：
+    /// 失败记录在前，其卷集的「移入解压失败」紧跟其后，成功包与任务级记录穿插。
+    fn make_extract_task_db(tag: &str) -> PathBuf {
+        let dir = temp_test_dir(tag);
+        let db = Database::create(&dir).unwrap();
+        // 失败包 1：解压失败（引擎报错），两个卷整组隔离
+        db.log("解压", "bad.7z", "", "失败", "压缩包已损坏", 0)
+            .unwrap();
+        db.log(
+            "解压",
+            "bad.7z",
+            "解压失败/bad.7z",
+            "移入解压失败",
+            "解压失败：压缩包已损坏",
+            0,
+        )
+        .unwrap();
+        db.log(
+            "解压",
+            "bad.7z.002",
+            "解压失败/bad.7z.002",
+            "移入解压失败",
+            "解压失败：压缩包已损坏",
+            0,
+        )
+        .unwrap();
+        // 失败包 2：未完全解开（成员被跳过），一个卷已隔离
+        db.log(
+            "解压",
+            "part.zip",
+            "",
+            "未完全解开",
+            "有成员被跳过或未落盘（排除规则）；原包保留",
+            0,
+        )
+        .unwrap();
+        db.log(
+            "解压",
+            "part.zip",
+            "解压失败/part.zip",
+            "移入解压失败",
+            "未能完全解开：有成员被跳过",
+            0,
+        )
+        .unwrap();
+        // 成功包与任务级记录：不得出现在失败列表
+        db.log(
+            "解压",
+            "ok.zip",
+            "",
+            "成功",
+            "已完全解开；原包与分卷按 X-05 永久删除",
+            0,
+        )
+        .unwrap();
+        // 源包清理失败：X-05 单独阶段，不冒充坏包
+        db.log(
+            "删除",
+            "ok2.zip",
+            "",
+            "失败",
+            "源包清理未完成：删除时出错",
+            0,
+        )
+        .unwrap();
+        db.log("任务", "", "", "完成", "解压结束：成功 1 包", 0)
+            .unwrap();
+        dir
+    }
+
+    // 覆盖 U-10, X-06, S-07（本次解压失败项分页列表）：每个失败包/卷集一项，显示原路径、
+    // 失败原因与隔离后位置；列表显示失败项总数；成功包与任务级记录不出现；源包清理失败
+    // 单独标明阶段；无隔离记录时如实留空，不编造「已隔离」；切换工具不清空该列表。
+    #[test]
+    fn fail_list_groups_failed_events_per_volume_set() {
+        let task = make_extract_task_db("fail-list-basic");
+        let task_for_cleanup = task.clone();
+        with_gui(move |app| {
+            app.state.borrow_mut().extract_task = Some(task.clone());
+            app.state.borrow_mut().extract_generation = 5;
+            // 模拟 watcher 回传任务目录发现（watcher 自身另有专测）；代际须与当前一致。
+            let sender = app.state.borrow().fail_sender.clone();
+            sender.send(FailChannelMsg::TaskFound(task, 5)).unwrap();
+            assert!(
+                pump_until(app, || {
+                    app.ui.get_fail_ready() && app.ui.get_fail_total() == 3
+                }),
+                "失败列表必须显示失败项总数 3：total={} ready={}",
+                app.ui.get_fail_total(),
+                app.ui.get_fail_ready()
+            );
+            let rows = app.ui.get_fail_rows();
+            assert_eq!(rows.row_count(), 3, "一页应包含全部 3 个失败项");
+            let first = rows.row_data(0).unwrap();
+            assert_eq!(first.stage.as_str(), "解压失败");
+            assert_eq!(first.source.as_str(), "bad.7z", "U-10：必须显示原路径");
+            assert_eq!(
+                first.reason.as_str(),
+                "压缩包已损坏",
+                "U-10：必须显示失败原因"
+            );
+            assert!(
+                first.target.as_str().starts_with("解压失败/bad.7z")
+                    && first.target.contains("2 个卷"),
+                "整组卷集隔离必须显示隔离后位置与卷数：{}",
+                first.target
+            );
+            let second = rows.row_data(1).unwrap();
+            assert_eq!(second.stage.as_str(), "未完全解开");
+            assert_eq!(second.source.as_str(), "part.zip");
+            assert_eq!(second.target.as_str(), "解压失败/part.zip");
+            let third = rows.row_data(2).unwrap();
+            assert_eq!(
+                third.stage.as_str(),
+                "源包清理失败（X-05）",
+                "源包清理失败必须单独标明阶段，不冒充坏包"
+            );
+            assert_eq!(third.source.as_str(), "ok2.zip");
+            assert_eq!(
+                third.target.as_str(),
+                "",
+                "无隔离记录必须如实留空，不得编造「已隔离」"
+            );
+            assert!(rows.row_data(0).is_some());
+            assert!(
+                !app.ui.get_fail_prev_enabled() && !app.ui.get_fail_next_enabled(),
+                "只有一页时两个翻页按钮都必须禁用"
+            );
+            // 切换工具不清空该列表（U-10）
+            app.ui.invoke_select_tool("git-tools".into());
+            assert_eq!(app.ui.get_fail_total(), 3, "切换工具不得清空失败列表");
+            assert_eq!(app.ui.get_fail_rows().row_count(), 3);
+        })
+        .unwrap();
+        let _ = std::fs::remove_dir_all(&task_for_cleanup);
+    }
+
+    // 覆盖 U-10（附录 E：超过 300 项也不得截断，全部可翻页查询；翻页按钮只在对应页
+    // 真实存在时启用；最后一项仍能翻页查到）
+    #[test]
+    fn fail_list_pages_beyond_single_page_limit() {
+        let dir = temp_test_dir("fail-list-paging");
+        {
+            let db = Database::create(&dir).unwrap();
+            for i in 0..305 {
+                db.log(
+                    "解压",
+                    &format!("bad{i}.zip"),
+                    "",
+                    "失败",
+                    &format!("损坏 {i}"),
+                    0,
+                )
+                .unwrap();
+            }
+        }
+        let dir_text = dir.display().to_string();
+        with_gui(move |app| {
+            app.state.borrow_mut().extract_task = Some(PathBuf::from(&dir_text));
+            request_fail_page(&app.state, 0);
+            assert!(
+                pump_until(app, || {
+                    app.ui.get_fail_total() == 305 && app.ui.get_fail_rows().row_count() == 100
+                }),
+                "首页应取 100 项且总数如实显示 305：total={}",
+                app.ui.get_fail_total()
+            );
+            assert!(app.ui.get_fail_next_enabled(), "305 项必须有下一页");
+            assert!(!app.ui.get_fail_prev_enabled(), "首页没有上一页");
+            app.ui.invoke_fail_page(1);
+            assert!(
+                pump_until(app, || {
+                    app.ui.get_fail_rows().row_count() == 100
+                        && app.ui.get_fail_page_label().contains("第 2 页")
+                }),
+                "第二页应取 100 项：{}",
+                app.ui.get_fail_page_label()
+            );
+            app.ui.invoke_fail_page(2);
+            assert!(
+                pump_until(app, || {
+                    app.ui.get_fail_rows().row_count() == 100
+                        && app.ui.get_fail_page_label().contains("第 3 页")
+                }),
+                "第三页应取 100 项：{}",
+                app.ui.get_fail_page_label()
+            );
+            assert!(app.ui.get_fail_prev_enabled() && app.ui.get_fail_next_enabled());
+            app.ui.invoke_fail_page(3);
+            assert!(
+                pump_until(app, || {
+                    app.ui.get_fail_rows().row_count() == 5
+                        && !app.ui.get_fail_next_enabled()
+                        && app.ui.get_fail_page_label().contains("第 4 页")
+                }),
+                "最后一页 5 项且不再有下一页（按钮只在对应页真实存在时启用）：{}",
+                app.ui.get_fail_page_label()
+            );
+            let rows = app.ui.get_fail_rows();
+            let last = rows.row_data(4).unwrap();
+            assert_eq!(
+                last.source.as_str(),
+                "bad304.zip",
+                "附录 E：最后一项仍能翻页查到，不因 300 条截断"
+            );
+        })
+        .unwrap();
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    // 覆盖 U-10（失败列表只保留「本次」任务：启动下一次解压任务前清空上一任务的列表）
+    #[test]
+    fn reset_fail_list_clears_for_next_task() {
+        let task = make_extract_task_db("fail-list-reset");
+        let task_for_cleanup = task.clone();
+        with_gui(move |app| {
+            app.state.borrow_mut().extract_task = Some(task.clone());
+            app.state.borrow_mut().extract_generation = 1;
+            let sender = app.state.borrow().fail_sender.clone();
+            sender.send(FailChannelMsg::TaskFound(task, 1)).unwrap();
+            assert!(
+                pump_until(app, || app.ui.get_fail_ready()
+                    && app.ui.get_fail_total() == 3),
+                "前置：失败列表已填充"
+            );
+            let mut s = app.state.borrow_mut();
+            reset_fail_list(&app.ui, &mut s);
+            drop(s);
+            assert!(
+                !app.ui.get_fail_ready() && app.ui.get_fail_total() == 0,
+                "新任务开始必须清空上一任务的失败列表"
+            );
+            assert_eq!(app.ui.get_fail_rows().row_count(), 0);
+            assert!(app.state.borrow().extract_task.is_none());
+        })
+        .unwrap();
+        let _ = std::fs::remove_dir_all(&task_for_cleanup);
+    }
+
+    // 覆盖 U-10（失败列表的数据源发现：状态目录下出现新任务目录时 watcher 回传路径与代际）
+    #[test]
+    fn extract_task_watcher_discovers_new_task_dir() {
+        let state_root = temp_test_dir("watch-extract-task");
+        let tasks_root = state_root.join("tasks");
+        std::fs::create_dir_all(tasks_root.join("old-task")).unwrap();
+        let known = vec![tasks_root.join("old-task")];
+        let (sender, receiver) = mpsc::channel();
+        std::thread::spawn(move || {
+            watch_extract_task(&tasks_root, &known, 7, &sender, Duration::from_secs(10));
+        });
+        // 模拟引擎在任务开始的最初几步创建任务库目录
+        std::thread::sleep(Duration::from_millis(150));
+        std::fs::create_dir_all(state_root.join("tasks").join("new-task")).unwrap();
+        match receiver.recv_timeout(Duration::from_secs(5)) {
+            Ok(FailChannelMsg::TaskFound(path, generation)) => {
+                assert!(
+                    path.ends_with("new-task"),
+                    "应发现快照之外的新任务目录：{path:?}"
+                );
+                assert_eq!(generation, 7, "发现消息必须携带发起时的清点代际");
+            }
+            other => panic!("watcher 应回传任务目录发现消息：{other:?}"),
+        }
+        let _ = std::fs::remove_dir_all(&state_root);
     }
 }
