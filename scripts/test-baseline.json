@@ -104,72 +104,6 @@
       "cfg": null
     },
     {
-      "file": "src/functional.rs",
-      "name": "amba_family_groups_with_two_token_name",
-      "ignored": false,
-      "cfg": null
-    },
-    {
-      "file": "src/functional.rs",
-      "name": "cap_ten_functional_dirs",
-      "ignored": false,
-      "cfg": null
-    },
-    {
-      "file": "src/functional.rs",
-      "name": "coarse_grained_single_dir",
-      "ignored": false,
-      "cfg": null
-    },
-    {
-      "file": "src/functional.rs",
-      "name": "incumbents_win_ties_over_new_candidates",
-      "ignored": false,
-      "cfg": null
-    },
-    {
-      "file": "src/functional.rs",
-      "name": "input_order_does_not_change_result",
-      "ignored": false,
-      "cfg": null
-    },
-    {
-      "file": "src/functional.rs",
-      "name": "large_synthetic_set_completes_without_full_pairwise",
-      "ignored": false,
-      "cfg": null
-    },
-    {
-      "file": "src/functional.rs",
-      "name": "mbist_pair_groups_together",
-      "ignored": false,
-      "cfg": null
-    },
-    {
-      "file": "src/functional.rs",
-      "name": "mixed_language_and_noise_still_group",
-      "ignored": false,
-      "cfg": null
-    },
-    {
-      "file": "src/functional.rs",
-      "name": "scan_prefix_does_not_merge",
-      "ignored": false,
-      "cfg": null
-    },
-    {
-      "file": "src/functional.rs",
-      "name": "singletons_fall_back",
-      "ignored": false,
-      "cfg": null
-    },
-    {
-      "file": "src/functional.rs",
-      "name": "strong_parent_token_joins_uninformative_names",
-      "ignored": false,
-      "cfg": null
-    },
-    {
       "file": "src/gui.rs",
       "name": "advanced_rows_hidden_until_toggled",
       "ignored": false,
@@ -681,31 +615,7 @@
     },
     {
       "file": "tests/classify_shape.rs",
-      "name": "amba_family_forms_stable_group",
-      "ignored": false,
-      "cfg": null
-    },
-    {
-      "file": "tests/classify_shape.rs",
       "name": "collection_under_root_is_stable_across_reruns",
-      "ignored": false,
-      "cfg": null
-    },
-    {
-      "file": "tests/classify_shape.rs",
-      "name": "conflicts_resolve_within_functional_dir",
-      "ignored": false,
-      "cfg": null
-    },
-    {
-      "file": "tests/classify_shape.rs",
-      "name": "functional_dir_cap_end_to_end",
-      "ignored": false,
-      "cfg": null
-    },
-    {
-      "file": "tests/classify_shape.rs",
-      "name": "functional_groups_do_not_cross_categories",
       "ignored": false,
       "cfg": null
     },
@@ -729,7 +639,7 @@
     },
     {
       "file": "tests/classify_shape.rs",
-      "name": "mbist_files_group_into_named_dir",
+      "name": "legacy_two_level_tree_is_flattened",
       "ignored": false,
       "cfg": null
     },
@@ -741,13 +651,7 @@
     },
     {
       "file": "tests/classify_shape.rs",
-      "name": "mixed_and_noisy_names_cluster",
-      "ignored": false,
-      "cfg": null
-    },
-    {
-      "file": "tests/classify_shape.rs",
-      "name": "noise_only_name_still_lands_in_fallback",
+      "name": "noise_only_name_lands_with_original_name",
       "ignored": false,
       "cfg": null
     },
@@ -789,7 +693,7 @@
     },
     {
       "file": "tests/classify_shape.rs",
-      "name": "scan_prefix_pair_stays_in_fallback",
+      "name": "simple_files_land_directly_in_category",
       "ignored": false,
       "cfg": null
     },
