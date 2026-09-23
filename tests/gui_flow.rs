@@ -105,7 +105,7 @@ fn make_fixture() -> tempfile::TempDir {
     };
     write("a.txt", b"same content", 100); // 旧 → 去重时被删除
     write("b.txt", b"same content", 200); // 新 → 保留
-    write("temp.tmp", b"junk", 300); // 默认 clean_temp=false → 会按归类移到「其他/其他/」
+    write("temp.tmp", b"junk", 300); // 默认 clean_temp=false → 会按归类移到「其他」大类
     dir
 }
 
@@ -275,15 +275,15 @@ fn plan_execution_confirmation_flow_runs_end_to_end() {
         .collect();
 
     // 3) 默认 clean_temp=false：temp.tmp 被归类移动，而非清理删除
-    //（C-05 固定归类「大类/功能分类」；无公共主题的文件进入「其他」）。
-    let classified = |category: &str, name: &str| data.join(format!("{category}/其他/{name}"));
+    //（C-05 固定归类「大类」一级；无扩展名匹配的文件进入「其他」大类）。
+    let classified = |category: &str, name: &str| data.join(format!("{category}/{name}"));
     assert!(
         classified("其他", "temp.tmp").exists(),
-        "默认配置下 temp.tmp 应归类到「其他/其他」而不是被清理：{remaining:?}"
+        "默认配置下 temp.tmp 应归类到「其他」大类而不是被清理：{remaining:?}"
     );
     assert!(
         classified("文档", "a.txt").exists() && classified("文档", "b.txt").exists(),
-        "GUI 默认不同名去重关闭：a.txt/b.txt 同内容不同名，各自随归类保留到 文档/其他/：{remaining:?}"
+        "GUI 默认不同名去重关闭：a.txt/b.txt 同内容不同名，各自随归类保留到 文档/ 大类：{remaining:?}"
     );
 }
 
@@ -333,9 +333,9 @@ fn git_subtree_skip_is_visible_after_run_and_tree_untouched() {
         !moved.join("其他").exists(),
         "H-06：Git 目录树内不得生成分类目录"
     );
-    // 固定归类（C-05，恒开启）：docs/note.txt → 文档/其他/note.txt（排除树之外照常处理）。
+    // 固定归类（C-05，恒开启）：docs/note.txt → 文档/note.txt（排除树之外照常处理）。
     let handled = [
-        "文档/其他/note.txt".to_string(),
+        "文档/note.txt".to_string(),
         "文档/docs/note.txt".to_string(),
         "docs/note.txt".to_string(),
         "文档/note.txt".to_string(),

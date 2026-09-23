@@ -68,7 +68,7 @@ impl Fixture {
 fn base() -> Config {
     Config {
         global_delete: DeleteMode::Permanent,
-        // 归类按 C-05 恒开启（大类/功能分类），不再有 classify 开关。
+        // 归类按 C-05 恒开启（大类一级），不再有 classify 开关。
         dedup_other_names: true,
         ..Config::default()
     }
@@ -265,11 +265,11 @@ fn final_cleanup_removes_newly_empty_chain_and_empty_quarantine() {
     f.dir(QUARANTINE_DIR_NAME);
     f.write("move_src/report.pdf", b"pdf");
     let config = base();
-    // C-05 固定归类「大类/功能分类」：单个 report.pdf 无公共主题 → 「其他」。
+    // C-05 固定归类「大类」一级：report.pdf → 文档。
     let task = f.plan(config);
     engine::apply(&task.directory, Context::default()).unwrap();
     assert!(
-        f.root.join("文档/其他/report.pdf").exists(),
+        f.root.join("文档/report.pdf").exists(),
         "归类目标必须落盘"
     );
     assert!(
@@ -282,7 +282,7 @@ fn final_cleanup_removes_newly_empty_chain_and_empty_quarantine() {
         "实际为空的「解压失败」目录仍按 H-05 清理"
     );
     assert_eq!(
-        fs::read(f.root.join("文档/其他/keep.txt")).unwrap(),
+        fs::read(f.root.join("文档/keep.txt")).unwrap(),
         b"payload"
     );
     assert_eq!(status(&task.directory), "finished");
@@ -394,9 +394,9 @@ fn broken_hash_cache_degrades_without_failing() {
     );
     engine::apply(&task.directory, Context::default()).unwrap();
     // 保留者随 C-05 固定归类移动；按内容判断恰好保留一个副本。
-    let remaining = fs::read(f.root.join("文档").join("其他").join("a.txt"))
+    let remaining = fs::read(f.root.join("文档").join("a.txt"))
         .ok()
-        .or_else(|| fs::read(f.root.join("文档").join("其他").join("b.txt")).ok());
+        .or_else(|| fs::read(f.root.join("文档").join("b.txt")).ok());
     assert_eq!(remaining, Some(b"same".to_vec()), "恰好保留一个副本");
 }
 

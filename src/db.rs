@@ -10,10 +10,10 @@ use std::path::{Path, PathBuf};
 
 pub const SCHEMA: &str = include_str!("schema.sql");
 /// 当前代码已知的任务库 schema 版本；库版本高于此值时 fail-fast，避免用旧逻辑读新库；
-/// 低于此值时同样拒绝——旧库的计划基于已废止的归类规则（4 起：归类目标由「大类/年/月」
-/// 改为「大类/功能分类」，结构未变、版本号标记归类口径代次），按 R-04 必须重新
+/// 低于此值时同样拒绝——旧库的计划基于已废止的归类规则（5 起：归类目标由「大类/功能分类」
+/// 改为「大类」一级结构，结构未变、版本号标记归类口径代次），按 R-04 必须重新
 /// 分析，不做数据迁移。
-pub const SCHEMA_VERSION: i64 = 4;
+pub const SCHEMA_VERSION: i64 = 5;
 pub struct Database {
     pub conn: Connection,
     pub directory: PathBuf,

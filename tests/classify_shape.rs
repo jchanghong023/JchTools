@@ -1,5 +1,5 @@
-//! 覆盖 C-05 / C-14 / C-15 / C-16～C-21：固定归类「大类/功能分类」+「Git项目集合」
-//! 的标准形态、功能聚类、来源前缀与短哈希消解、超长名截短与幂等。用例直接复刻合同
+//! 覆盖 C-05 / C-14 / C-15 / C-16～C-21：固定归类「大类」一级结构 +「Git项目集合」
+//! 的标准形态、来源前缀与短哈希消解、超长名截短与幂等。用例直接复刻合同
 //! C-15 的附录示例（子目录分趟整理后整理父目录），期望值来自合同，不由实现反推。
 // 测试代码允许 unwrap/expect（与 tests/core.rs 的集成测试惯例一致）：断言失败即测试失败。
 #![allow(
@@ -73,6 +73,8 @@ fn digest8(rel: &str) -> String {
 
 /// 合同 C-15 (1) 的原始目录树（内容互不相同，不做去重删除）。
 const LONG_NAME: &str = "芯片研发中心第一联合研发重大专项技术合作合同及全部附件资料非常非常长的归档文件名称副本2026.pdf";
+/// C-20 触发后主体截到 25 个 UTF-16 单元的前段（超长名两例共用）。
+const LONG_CUT: &str = "芯片研发中心第一联合研发重大专项技术合作合同及全部";
 
 fn seed_standard_tree(f: &Fixture) {
     // a/b：工作资料 / 客户A / 客户B / 华东 / 华南 / 超长路径 / code
@@ -117,7 +119,7 @@ fn seed_standard_tree(f: &Fixture) {
     f.write("c/github/project-beta/package.json", b"{}");
 }
 
-// 覆盖 C-05 / C-14 / C-15 (2)：整理子目录 b 的标准形态。
+// 覆盖 C-05 / C-14 / C-15 (2)：整理子目录 b 的标准形态（一级大类）。
 #[test]
 fn organize_subtree_b_matches_contract_shape() {
     let f = Fixture::new();
@@ -148,32 +150,34 @@ fn organize_subtree_b_matches_contract_shape() {
     Fixture::apply(&task);
     assert_eq!(task.summary.planned_git, 2, "两个 Git 项目都应整体移入集合");
 
-    // C-05：大类/功能分类；C-16：产品说明 (1).pdf 规范化为 产品说明_1.pdf。
-    assert!(f.exists("文档/其他/年度报告.pdf"), "单文件不成组 → 其他");
+    // C-05 一级结构：文件直接落在大类下。
+    assert!(f.exists("文档/年度报告.pdf"));
     let h_copy = digest8("工作资料/年报/产品说明 (1).pdf");
     let h_plain = digest8("工作资料/年报/产品说明_1.pdf");
     // C-19：来源同级同名同目标 → 最近一级来源 + 主体 + 短哈希。
     assert!(
-        f.exists(&format!("文档/产品/年报_产品说明_1_{h_copy}.pdf")),
+        f.exists(&format!("文档/年报_产品说明_1_{h_copy}.pdf")),
         "实际内容见下方断言"
     );
-    assert!(f.exists(&format!("文档/产品/年报_产品说明_1_{h_plain}.pdf")));
+    assert!(f.exists(&format!("文档/年报_产品说明_1_{h_plain}.pdf")));
     assert!(
-        f.exists("文档/合同/客户A_合同.pdf"),
+        f.exists("文档/客户A_合同.pdf"),
         "同名文件按来源前缀消解"
     );
-    assert!(f.exists("文档/合同/客户B_合同.pdf"));
-    assert!(f.exists("文档/报价/客户A_报价.xlsx"));
-    assert!(f.exists("文档/报价/客户B_报价.xlsx"));
+    assert!(f.exists("文档/客户B_合同.pdf"));
+    assert!(f.exists("文档/客户A_报价.xlsx"));
+    assert!(f.exists("文档/客户B_报价.xlsx"));
     // C-18：两级来源仍冲突时升到第三级（华东_/华南_）。
-    assert!(f.exists("文档/方案/华东_客户A_正式版_方案.pdf"));
-    assert!(f.exists("文档/方案/华南_客户A_正式版_方案.pdf"));
-    assert!(f.exists("图片/LOGO/图片_logo.png"));
-    assert!(f.exists("图片/LOGO/客户A_logo.png"));
-    // C-08/附录 B：(2) → _2；无公共主题 → 其他。
-    assert!(f.exists("图片/其他/截图_2.png"));
-    assert!(f.exists("视频/其他/demo.mp4"));
-    assert!(f.exists(&format!("文档/其他/{LONG_NAME}")));
+    assert!(f.exists("文档/华东_客户A_正式版_方案.pdf"));
+    assert!(f.exists("文档/华南_客户A_正式版_方案.pdf"));
+    // 紧邻「图片」段按 C-18 剔除 → 剩余来源「工作资料」作前缀。
+    assert!(f.exists("图片/工作资料_logo.png"));
+    assert!(f.exists("图片/客户A_logo.png"));
+    // C-08/附录 B：(2) → _2。
+    assert!(f.exists("图片/截图_2.png"));
+    assert!(f.exists("视频/demo.mp4"));
+    // 未冲突的超长文件保持原名（C-20：40 不是全体文件强制改名阈值）。
+    assert!(f.exists(&format!("文档/{LONG_NAME}")));
     // C-14：项目平铺进集合、目录名不变；内容整树保留。
     assert!(f.root.join("Git项目集合/tools/.git").is_dir());
     assert!(f.root.join("Git项目集合/tools/src/main.rs").is_file());
@@ -183,17 +187,22 @@ fn organize_subtree_b_matches_contract_shape() {
     assert!(!f.root.join("客户A").exists());
     assert!(!f.root.join("华东").exists());
     assert!(!f.root.join("code").exists());
-    // C-05：文档下功能目录 = 产品/合同/报价/方案/其他，恰好两级。
+    // C-05：根下只有大类与集合容器；大类内没有任何子目录（严格一级）。
     assert_eq!(
-        f.subdirs("文档"),
+        f.subdirs(""),
         BTreeSet::from([
-            "其他".into(),
-            "产品".into(),
-            "合同".into(),
-            "报价".into(),
-            "方案".into()
+            "文档".into(),
+            "图片".into(),
+            "视频".into(),
+            "Git项目集合".into()
         ])
     );
+    for category in ["文档", "图片", "视频"] {
+        assert!(
+            f.subdirs(category).is_empty(),
+            "大类 {category} 内不得出现任何第二级分类目录"
+        );
+    }
 }
 
 // 覆盖 C-15 (1)→(4)：先 b/c 后父目录 a 的完整重组与最终形态。
@@ -212,7 +221,7 @@ fn organize_parent_after_children_rebuilds_standard_shape() {
         .unwrap();
         Fixture::apply(&task);
     }
-    assert!(f.exists("b/文档/其他/年度报告.pdf"));
+    assert!(f.exists("b/文档/年度报告.pdf"));
     assert!(f.root.join("b/Git项目集合/tools/.git").is_dir());
     // 第二趟：整理 a/c。
     {
@@ -225,50 +234,50 @@ fn organize_parent_after_children_rebuilds_standard_shape() {
         .unwrap();
         Fixture::apply(&task);
     }
-    assert!(f.exists("c/文档/其他/年度报告.pdf"));
-    assert!(f.exists("c/文档/其他/安装说明.pdf"));
-    assert!(f.exists("c/文档/合同/客户A_合同.pdf"));
-    assert!(f.exists("c/图片/其他/截图_1.png"));
+    assert!(f.exists("c/文档/年度报告.pdf"));
+    assert!(f.exists("c/文档/安装说明.pdf"));
+    assert!(f.exists("c/文档/客户A_合同.pdf"));
+    assert!(f.exists("c/图片/截图_1.png"));
     // 第三趟：整理父目录 a。
     let task = f.plan();
     Fixture::apply(&task);
 
-    // —— 合同 (4) 的最终形态 ——
-    assert!(f.exists("文档/年度报告/b_年度报告.pdf"));
-    assert!(f.exists("文档/年度报告/c_年度报告.pdf"));
+    // —— 合同 (4) 的最终形态（一级大类 + 来源前缀消解） ——
+    assert!(f.exists("文档/b_年度报告.pdf"));
+    assert!(f.exists("文档/c_年度报告.pdf"));
     assert!(
-        f.exists("文档/其他/安装说明.pdf"),
-        "只来自 c 的不冲突，保持原名且仍在「其他」"
+        f.exists("文档/安装说明.pdf"),
+        "只来自 c 的不冲突，保持原名"
     );
-    assert!(f.exists("文档/其他/需求.docx"));
+    assert!(f.exists("文档/需求.docx"));
     assert!(
-        f.exists("图片/LOGO/图片_logo.png"),
+        f.exists("图片/工作资料_logo.png"),
         "无新冲突的历史消解名原样保留"
     );
-    assert!(f.exists("图片/LOGO/客户A_logo.png"));
-    assert!(f.exists("文档/合同/b_客户A_合同.pdf"));
-    assert!(f.exists("文档/合同/c_客户A_合同.pdf"));
+    assert!(f.exists("图片/客户A_logo.png"));
+    assert!(f.exists("文档/b_客户A_合同.pdf"));
+    assert!(f.exists("文档/c_客户A_合同.pdf"));
     assert!(
-        f.exists("文档/合同/客户B_合同.pdf"),
+        f.exists("文档/客户B_合同.pdf"),
         "不得为形式统一全部加前缀"
     );
-    assert!(f.exists("文档/合同/客户C_合同.pdf"));
-    assert!(f.exists("文档/报价/客户A_报价.xlsx"));
-    assert!(f.exists("文档/报价/客户B_报价.xlsx"));
-    assert!(f.exists("文档/报价/报价.xlsx"));
-    assert!(f.exists("文档/方案/华东_客户A_正式版_方案.pdf"));
-    assert!(f.exists("文档/方案/华南_客户A_正式版_方案.pdf"));
-    assert!(f.exists("文档/方案/方案.pdf"));
-    assert!(f.exists("图片/截图/截图_1.png"));
-    assert!(f.exists("图片/截图/截图_2.png"));
-    assert!(f.exists("视频/DEMO/b_demo.mp4"));
-    assert!(f.exists("视频/DEMO/c_demo.mp4"));
-    // 超长文件：b、c 各一份，聚成一组（目录名 = 组内公共短语），冲突后按 C-20 截短为
-    // 主体前段+摘要；C-19 摘要输入是“分析开始时”的原始完整路径（前一趟的落位路径）。
-    let dig_b = digest8(&format!("b/文档/其他/{LONG_NAME}"));
-    let dig_c = digest8(&format!("c/文档/其他/{LONG_NAME}"));
-    let cut_b = format!("文档/芯片研发中心第一联合研发重大专项技术合作合同/芯片研发中心第一联合研发重大专项技术合作合同及全部_{dig_b}.pdf");
-    let cut_c = format!("文档/芯片研发中心第一联合研发重大专项技术合作合同/芯片研发中心第一联合研发重大专项技术合作合同及全部_{dig_c}.pdf");
+    assert!(f.exists("文档/客户C_合同.pdf"));
+    assert!(f.exists("文档/客户A_报价.xlsx"));
+    assert!(f.exists("文档/客户B_报价.xlsx"));
+    assert!(f.exists("文档/报价.xlsx"));
+    assert!(f.exists("文档/华东_客户A_正式版_方案.pdf"));
+    assert!(f.exists("文档/华南_客户A_正式版_方案.pdf"));
+    assert!(f.exists("文档/方案.pdf"));
+    assert!(f.exists("图片/截图_1.png"));
+    assert!(f.exists("图片/截图_2.png"));
+    assert!(f.exists("视频/b_demo.mp4"));
+    assert!(f.exists("视频/c_demo.mp4"));
+    // 超长文件：同目标同名 → C-20 截短为主体前段 + 摘要（来源段去掉）；
+    // C-19 摘要输入是“分析开始时”的原始完整路径（前一趟的落位路径）。
+    let dig_b = digest8(&format!("b/文档/{LONG_NAME}"));
+    let dig_c = digest8(&format!("c/文档/{LONG_NAME}"));
+    let cut_b = format!("文档/{LONG_CUT}_{dig_b}.pdf");
+    let cut_c = format!("文档/{LONG_CUT}_{dig_c}.pdf");
     assert!(f.exists(&cut_b), "b 超长文件截短+摘要：{cut_b}");
     assert!(f.exists(&cut_c), "c 超长文件截短+摘要：{cut_c}");
     // Git 项目：同名 tools 按来源消解，其余保持原名；平铺在根的集合下。
@@ -280,26 +289,30 @@ fn organize_parent_after_children_rebuilds_standard_shape() {
         .root
         .join("Git项目集合/project-beta/package.json")
         .is_file());
-    // C-15：中间目录（含上一轮的子级分类目录与集合目录）全部消失，无重复叠加。
+    // C-15：中间目录（含上一轮的子级大类目录与集合目录）全部消失，无重复叠加。
     assert!(!f.root.join("b").exists());
     assert!(!f.root.join("c").exists());
     assert!(!f.root.join("Git项目集合/Git项目集合").exists());
     assert_eq!(
-        f.subdirs("文档"),
+        f.subdirs(""),
         BTreeSet::from([
-            "其他".into(),
-            "产品".into(),
-            "年度报告".into(),
-            "合同".into(),
-            "报价".into(),
-            "方案".into(),
-            "芯片研发中心第一联合研发重大专项技术合作合同".into(),
+            "文档".into(),
+            "图片".into(),
+            "视频".into(),
+            "Git项目集合".into()
         ]),
-        "文档下只有两级：大类/功能分类"
+        "根下只有大类与集合容器"
     );
-    // (6) 禁止的形态：无套娃、无年月层级。
-    assert!(!f.exists("文档/其他/文档/其他/安装说明.pdf"));
-    assert!(!f.root.join("文档/年度报告/2026").exists());
+    for category in ["文档", "图片", "视频"] {
+        assert!(
+            f.subdirs(category).is_empty(),
+            "大类 {category} 下不得出现任何第二级分类目录"
+        );
+    }
+    // (6) 禁止的形态：无套娃、无功能/年月层级。
+    assert!(!f.exists("文档/合同/客户A_合同.pdf"));
+    assert!(!f.exists("文档/年度报告/b_年度报告.pdf"));
+    assert!(!f.root.join("文档/2026").exists());
     // (5) 幂等：马上再次整理 a，不再产生任何文件操作。
     let again = f.plan();
     assert_eq!(again.summary.planned_move, 0, "已就位项不再移动");
@@ -311,177 +324,78 @@ fn organize_parent_after_children_rebuilds_standard_shape() {
     assert_eq!(third.summary.planned_move, 0);
 }
 
-// 覆盖 C-05 场景：明显相同功能（MBIST 强 token）→ 文档/MBIST/。
+// 覆盖 C-05：普通文件只按扩展名进入一级大类（用户示例口径）。
 #[test]
-fn mbist_files_group_into_named_dir() {
+fn simple_files_land_directly_in_category() {
     let f = Fixture::new();
-    f.write("05_10 SMS Mbist 介绍.docx", b"a");
-    f.write("05_22 Tessent_MBIST_RTL流程指导.docx", b"b");
+    f.write("a.pdf", b"pdf");
+    f.write("b.docx", b"docx");
+    f.write("x.png", b"png");
+    f.write("y.mp4", b"mp4");
+    f.write("z.mp3", b"mp3");
+    f.write("w.zip", b"zip");
+    f.write("unknown.odg", b"odg");
     let task = f.plan();
     Fixture::apply(&task);
-    assert!(f.exists("文档/MBIST/05_10 SMS Mbist 介绍.docx"));
-    assert!(f.exists("文档/MBIST/05_22 Tessent_MBIST_RTL流程指导.docx"));
-}
-
-// 覆盖 C-05 场景：多个相关缩写 → 稳定的同一功能组 文档/AMBA_APB/。
-#[test]
-fn amba_family_forms_stable_group() {
-    let f = Fixture::new();
-    f.write("amba_apb_protocol_spec.pdf", b"a");
-    f.write("AAMBA3apb.pdf", b"b");
-    f.write("AMBA总线基础(2013)[1].pptx", b"c");
-    f.write("JTAG2APB案例.docx", b"d");
-    let task = f.plan();
-    Fixture::apply(&task);
-    for name in [
-        "amba_apb_protocol_spec.pdf",
-        "AAMBA3apb.pdf",
-        "AMBA总线基础(2013)[1].pptx",
-        "JTAG2APB案例.docx",
-    ] {
-        assert!(f.exists(&format!("文档/AMBA_APB/{name}")), "{name}");
+    assert!(f.exists("文档/a.pdf"));
+    assert!(f.exists("文档/b.docx"));
+    assert!(f.exists("图片/x.png"));
+    assert!(f.exists("视频/y.mp4"));
+    assert!(f.exists("音频/z.mp3"));
+    assert!(f.exists("压缩包/w.zip"));
+    // 附录 A：未匹配扩展名 → 「其他」大类（一级，不是任何大类下的兜底目录）。
+    assert!(f.exists("其他/unknown.odg"));
+    for category in ["文档", "图片", "视频", "音频", "压缩包", "其他"] {
+        assert!(f.subdirs(category).is_empty(), "{category} 必须严格一级");
     }
+    // 源文件已不在根直接层（全部移入大类）。
+    assert!(!f.exists("a.pdf"));
 }
 
-// 覆盖 C-05 场景：字符串看起来相似但语义 token 不足（scan 前缀）不得错误合并。
+// 覆盖 C-05（旧版两级结构不是标准形态：重新整理时拉平，遗留功能目录名只作来源前缀）。
 #[test]
-fn scan_prefix_pair_stays_in_fallback() {
+fn legacy_two_level_tree_is_flattened() {
     let f = Fixture::new();
-    f.write("scan_report.pdf", b"a");
-    f.write("scanner_driver.pdf", b"b");
+    // 旧版「大类/功能分类」与「大类/其他」输出：文件全部拉平到大类下。
+    f.write("文档/MBIST/report.pdf", b"r");
+    f.write("文档/其他/notes.txt", b"n");
+    f.write("图片/DEMO/demo.mp4", b"d");
     let task = f.plan();
     Fixture::apply(&task);
-    assert!(f.exists("文档/其他/scan_report.pdf"));
-    assert!(f.exists("文档/其他/scanner_driver.pdf"));
-}
-
-// 覆盖 C-05 场景：中英文混合 + 噪声名称稳定归入同组。
-#[test]
-fn mixed_and_noisy_names_cluster() {
-    let f = Fixture::new();
-    f.write("Tessent_MBIST流程指导.pdf", b"a");
-    f.write("MBIST 测试介绍.docx", b"b");
-    f.write("mbist_rtl_flow.txt", b"c");
-    f.write("MBIST介绍 (1).pdf", b"d");
-    f.write("MBIST介绍_final.pdf", b"e");
-    f.write("2026-05_MBIST介绍_v2.pdf", b"ff");
-    let task = f.plan();
-    Fixture::apply(&task);
-    for name in [
-        "Tessent_MBIST流程指导.pdf",
-        "MBIST 测试介绍.docx",
-        "mbist_rtl_flow.txt",
-        // 噪声后缀按 C-08 清理后仍在同组。
-        "MBIST介绍_1.pdf",
-        "MBIST介绍_final.pdf",
-        "2026-05_MBIST介绍_v2.pdf",
-    ] {
-        assert!(f.exists(&format!("文档/MBIST/{name}")), "{name}");
+    assert!(f.exists("文档/report.pdf"), "无冲突时不加前缀，直接落大类");
+    assert!(f.exists("文档/notes.txt"));
+    assert!(f.exists("视频/demo.mp4"), "按扩展名重新判大类");
+    for category in ["文档", "视频"] {
+        assert!(f.subdirs(category).is_empty());
     }
-}
-
-// 覆盖 C-05 场景：不同大类不跨越——同名功能目录在大类间互不影响；
-// 某大类下同功能文件只有一个时，不因其他大类存在同名组而成目录，仍进「其他」。
-#[test]
-fn functional_groups_do_not_cross_categories() {
-    let f = Fixture::new();
-    f.write("MBIST介绍.pdf", b"a");
-    f.write("MBIST算法.pdf", b"b");
-    f.write("MBIST结构图.png", b"c");
-    f.write("MBIST版图.png", b"d");
-    let task = f.plan();
-    Fixture::apply(&task);
-    assert!(f.exists("文档/MBIST/MBIST介绍.pdf"));
-    assert!(f.exists("文档/MBIST/MBIST算法.pdf"));
-    assert!(f.exists("图片/MBIST/MBIST结构图.png"));
-    assert!(f.exists("图片/MBIST/MBIST版图.png"));
-    assert!(
-        !f.exists("图片/MBIST/MBIST介绍.pdf"),
-        "功能聚类不得跨越大类"
-    );
-    // 孤立同功能文件：文档类已有 MBIST 组，但图片类只剩一个同功能文件时
-    // 不得因此获得目录（跨大类信息不参与本大类判断），按兜底进入「其他」。
+    // 「图片」内容全部移走后按 C-07 消失，不再保留空大类目录。
+    assert!(!f.root.join("图片").exists());
+    // 遗留功能目录名在同名冲突时作为普通来源目录参与消解（C-18）。
     let g = Fixture::new();
-    g.write("MBIST介绍.pdf", b"a");
-    g.write("MBIST算法.pdf", b"b");
-    g.write("MBIST结构图.png", b"c");
+    g.write("b/文档/MBIST/规格.pdf", b"1");
+    g.write("c/文档/AMBA/规格.pdf", b"2");
     let task = g.plan();
     Fixture::apply(&task);
-    assert!(g.exists("文档/MBIST/MBIST介绍.pdf"));
-    assert!(g.exists("文档/MBIST/MBIST算法.pdf"));
-    assert!(
-        g.exists("图片/其他/MBIST结构图.png"),
-        "单文件不因其他大类的同名组而成目录"
-    );
-    assert!(!g.exists("图片/MBIST/MBIST结构图.png"));
+    assert!(g.exists("文档/MBIST_规格.pdf"));
+    assert!(g.exists("文档/AMBA_规格.pdf"));
+    assert!(g.subdirs("文档").is_empty());
+    // 拉平后幂等。
+    let again = g.plan();
+    assert_eq!(again.summary.planned_move, 0);
 }
 
-// 覆盖 C-05 场景：同功能目录下文件名冲突仍按 C-17～C-20 消解（来源前缀）。
-#[test]
-fn conflicts_resolve_within_functional_dir() {
-    let f = Fixture::new();
-    f.write("b/MBIST流程.pdf", b"1");
-    f.write("c/MBIST流程.pdf", b"2");
-    let task = f.plan();
-    Fixture::apply(&task);
-    assert!(f.exists("文档/MBIST/b_MBIST流程.pdf"));
-    assert!(f.exists("文档/MBIST/c_MBIST流程.pdf"));
-}
-
-// 覆盖 C-05 场景：功能目录数量上限（10 + 「其他」不计入）端到端。
-#[test]
-fn functional_dir_cap_end_to_end() {
-    let f = Fixture::new();
-    let themes = [
-        "MBIST",
-        "ATPG",
-        "SCAN",
-        "AMBA_APB",
-        "JTAG",
-        "TESSENT",
-        "DFT",
-        "RTL",
-        "PROTOCOL",
-        "VERIFICATION",
-        "LITHO",
-        "PACKAGE",
-    ];
-    for (rank, theme) in themes.iter().enumerate() {
-        let copies = 6 - (rank / 3);
-        for n in 0..copies {
-            f.write(
-                &format!("{theme}_guide_{n}.pdf"),
-                format!("{theme} {n}").as_bytes(),
-            );
-        }
-    }
-    f.write("lonely_misfit.pdf", b"x");
-    let task = f.plan();
-    Fixture::apply(&task);
-    let dirs = f.subdirs("文档");
-    assert_eq!(dirs.len(), 11, "10 个功能目录 + 1 个「其他」：{dirs:?}");
-    assert!(dirs.contains("其他"), "「其他」必须存在且不计入上限");
-    assert!(
-        dirs.contains("MBIST") && dirs.contains("PACKAGE") || dirs.contains("LITHO"),
-        "大组优先保留"
-    );
-    assert!(
-        f.exists("文档/其他/lonely_misfit.pdf"),
-        "单文件进入「其他」"
-    );
-}
-
-// 覆盖 C-17 / 附录 E：目标功能目录已有「报告 (1).pdf」与「报告_1.pdf」统一消解，
+// 覆盖 C-17 / 附录 E：目标大类目录已有「报告 (1).pdf」与「报告_1.pdf」统一消解，
 // 且再次整理不再改名（幂等）。
 #[test]
 fn in_place_normalized_collision_resolves_once_and_stays() {
     let f = Fixture::new();
-    f.write("文档/报告/报告 (1).pdf", b"a");
-    f.write("文档/报告/报告_1.pdf", b"b");
+    f.write("文档/报告 (1).pdf", b"a");
+    f.write("文档/报告_1.pdf", b"b");
     let task = f.plan();
     Fixture::apply(&task);
-    // 两个已就位项规范化后同名 → 统一消解（其一保持、其一摘要化）。
-    let entries: Vec<String> = fs::read_dir(f.root.join("文档/报告"))
+    // 两个已就位项规范化后同名 → 统一消解（其一保持、其一摘要化；紧邻「文档」段
+    // 已剔除，摘要形式无来源段）。
+    let entries: Vec<String> = fs::read_dir(f.root.join("文档"))
         .unwrap()
         .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
         .collect();
@@ -491,7 +405,7 @@ fn in_place_normalized_collision_resolves_once_and_stays() {
         "唯一可占名的已就位项保持原名：{entries:?}"
     );
     let other = entries.iter().find(|n| n.as_str() != "报告_1.pdf").unwrap();
-    let dig = digest8("文档/报告/报告 (1).pdf");
+    let dig = digest8("文档/报告 (1).pdf");
     assert!(
         other.starts_with("报告_1_") && other.contains(&dig),
         "新改者按 C-19 摘要消解：{other}（digest {dig}）"
@@ -500,7 +414,7 @@ fn in_place_normalized_collision_resolves_once_and_stays() {
     let again = f.plan();
     assert_eq!(again.summary.planned_move, 0);
     Fixture::apply(&again);
-    let entries2: Vec<String> = fs::read_dir(f.root.join("文档/报告"))
+    let entries2: Vec<String> = fs::read_dir(f.root.join("文档"))
         .unwrap()
         .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
         .collect();
@@ -512,7 +426,7 @@ fn in_place_normalized_collision_resolves_once_and_stays() {
 fn occupied_category_container_keeps_source_items() {
     let f = Fixture::new();
     f.write("报告.pdf", b"pdf");
-    // 「文档」被普通文件占用：依赖「文档/其他」的归类全部失败并保留源项。
+    // 「文档」被普通文件占用：依赖「文档」容器的归类全部失败并保留源项。
     fs::write(f.root.join("文档"), b"not a directory").unwrap();
     let task = f.plan();
     // 名为「文档」的普通文件本身照常归类（它是范围内普通文件）；只有依赖被占用
@@ -555,12 +469,12 @@ fn reorganized_files_stay_in_place_without_moves() {
     f.write("old/资料.pdf", b"x");
     let task = f.plan();
     Fixture::apply(&task);
-    assert!(f.exists("文档/其他/资料.pdf"));
+    assert!(f.exists("文档/资料.pdf"));
     let again = f.plan();
     assert_eq!(again.summary.planned_move, 0, "无变化 → 仍判已就位");
 }
 
-// 覆盖 C-06：大文件命中后优先进入「大文件」大类（同样两级：大文件/功能分类）。
+// 覆盖 C-06：大文件命中后优先进入「大文件」大类（同为一级结构）。
 #[test]
 fn large_files_take_priority_over_extension_category() {
     let f = Fixture::new();
@@ -573,18 +487,19 @@ fn large_files_take_priority_over_extension_category() {
     f.write("small.pdf", b"p");
     let task = engine::prepare_at(&f.root, cfg, Context::default(), &f.state).unwrap();
     Fixture::apply(&task);
-    assert!(f.exists("大文件/其他/big.bin"));
-    assert!(f.exists("文档/其他/small.pdf"));
+    assert!(f.exists("大文件/big.bin"));
+    assert!(f.exists("文档/small.pdf"));
+    assert!(f.subdirs("大文件").is_empty());
 }
 
-// 覆盖 C-05：主体全是噪声（日期编号）的文件名不影响兜底落位。
+// 覆盖 C-05：主体全是噪声（日期编号）的文件名不影响按扩展名归类。
 #[test]
-fn noise_only_name_still_lands_in_fallback() {
+fn noise_only_name_lands_with_original_name() {
     let f = Fixture::new();
     f.write("2026-05-10.pdf", b"x");
     let task = f.plan();
     Fixture::apply(&task);
-    assert!(f.exists("文档/其他/2026-05-10.pdf"), "实际文件名不被改写");
+    assert!(f.exists("文档/2026-05-10.pdf"), "实际文件名不被改写");
 }
 
 // 覆盖 C-18 / C-19：同目录内不同来源的同名文件最少级数消解 + 摘要兜底。
@@ -597,17 +512,17 @@ fn minimal_level_prefixes_and_digest_fallback() {
     let task = f.plan();
     Fixture::apply(&task);
     // k=1 即互不相同：x_合同 / y_合同 / 合同（根文件无来源段，保持原名）。
-    assert!(f.exists("文档/合同/x_合同.pdf"));
-    assert!(f.exists("文档/合同/y_合同.pdf"));
-    assert!(f.exists("文档/合同/合同.pdf"));
+    assert!(f.exists("文档/x_合同.pdf"));
+    assert!(f.exists("文档/y_合同.pdf"));
+    assert!(f.exists("文档/合同.pdf"));
     let f4 = Fixture::new();
     f4.write("same/报表.pdf", b"1");
     f4.write("same/nested/报表.pdf", b"2");
     let task4 = f4.plan();
     Fixture::apply(&task4);
     // k=1：same_报表 vs nested_报表 已互不相同，不进入摘要。
-    assert!(f4.exists("文档/报表/same_报表.pdf"));
-    assert!(f4.exists("文档/报表/nested_报表.pdf"));
+    assert!(f4.exists("文档/same_报表.pdf"));
+    assert!(f4.exists("文档/nested_报表.pdf"));
     let _ = task;
 }
 
@@ -635,6 +550,6 @@ fn quarantine_tree_is_left_alone() {
     let task = f.plan();
     Fixture::apply(&task);
     assert!(f.exists("解压失败/broken.zip"), "隔离容器内容不参与处理");
-    assert!(f.exists("文档/其他/normal.txt"));
+    assert!(f.exists("文档/normal.txt"));
     assert!(!f.root.join("解压失败").join("文档").exists());
 }

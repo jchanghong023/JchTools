@@ -54,7 +54,7 @@ fn base() -> Config {
         // 这些用例考的是记账 / 归类 / 排序 / 幂等等其它行为，需要「内容相同的不同名文件」
         // 也进入去重，故显式开启第三类；C-02 的默认值（不同名关闭）由
         // `different_names_not_deduped_by_default` 单独锚定。
-        // 归类按 C-05 恒开启（大类/功能分类），不再有 classify 开关。
+        // 归类按 C-05 恒开启（大类一级），不再有 classify 开关。
         dedup_other_names: true,
         clean_copy_name: false,
         ..Config::default()
@@ -629,7 +629,7 @@ fn classification_empty_dirs_planned_in_same_pass() {
     let f = Fixture::new();
     f.write("folder/a.pdf", b"pdf", 10);
     let cfg = base();
-    let target = "文档/其他/a.pdf".to_string();
+    let target = "文档/a.pdf".to_string();
     let task = f.plan(cfg.clone());
     assert_eq!(task.summary.planned_move, 1);
     assert_eq!(
@@ -645,9 +645,9 @@ fn classification_empty_dirs_planned_in_same_pass() {
     assert_eq!(again.summary.planned_empty, 0);
 }
 // 注：原 date_classification_is_idempotent 考的是已删除的 classify=Date 按修改日期归类
-// 形态；旧的「大类/年/月」时间归类（创建/修改取最早）也随 2026-09-23 需求变更整体废除，
-// 由 classify_shape.rs 的 organize_parent_after_children_rebuilds_standard_shape 等
-// 锚定「大类/功能分类」新形态。
+// 形态；「大类/年/月」时间归类与「大类/功能分类」两级功能归类均随 2026-09-23 需求变更
+// 整体废除，由 classify_shape.rs 的 organize_parent_after_children_rebuilds_standard_shape
+// 等锚定「大类」一级新形态。
 // 覆盖 S-04
 #[test]
 fn excluded_tree_not_touched() {
@@ -769,7 +769,7 @@ fn copy_name_cleanup_never_plans_self_move() {
         "不得生成 source==target 的空转移动：{actions:?}"
     );
     Fixture::apply(&task);
-    let dir = f.root.join("文档/报告");
+    let dir = f.root.join("文档");
     // C-16：报告 (1).pdf / 报告 (2).pdf 的输出名都是 报告_1.pdf；保留者按消解结果落位。
     assert_eq!(
         fs::read(dir.join("报告_1.pdf")).unwrap(),
@@ -1131,8 +1131,8 @@ fn actions_page_filtered_by_kind_and_rejects_unknown() {
     assert_eq!(moves[0].kind, ActionKind::Move);
     assert_eq!(
         moves[0].target.as_deref(),
-        Some("文档/其他/a.pdf"),
-        "C-05：归类目标是「大类/功能分类」（无公共主题 → 其他）"
+        Some("文档/a.pdf"),
+        "C-05：归类目标是「大类」一级（a.pdf → 文档）"
     );
     let deletes = db.actions_page_filtered(0, 100, Some("delete")).unwrap();
     assert!(deletes.is_empty(), "纯归类任务不应有删除动作");
@@ -1355,8 +1355,8 @@ fn large_files_classified_into_own_directory() {
         .expect("大文件应有归类移动计划");
     assert_eq!(
         big_move.target.as_deref(),
-        Some("大文件/其他/big.bin"),
-        "C-06：大文件进入「大文件」大类并按两级结构落位"
+        Some("大文件/big.bin"),
+        "C-06：大文件进入「大文件」大类并按一级结构落位"
     );
     assert!(
         moves.iter().all(|a| {
@@ -1431,7 +1431,7 @@ fn normalize_names_collapses_whitespace_and_applies_nfc() {
     let db = Database::open(&task.directory).unwrap();
     let moves = db.actions_page_filtered(0, 10, Some("move")).unwrap();
     drop(db);
-    let expected = "文档/其他/café report.txt".to_string();
+    let expected = "文档/café report.txt".to_string();
     assert_eq!(moves.len(), 1, "规范化默认开启，改名应入移动计划");
     assert_eq!(moves[0].target.as_deref(), Some(expected.as_str()));
     Fixture::apply(&task);
@@ -1456,7 +1456,7 @@ fn fix_extension_plans_rename_to_detected_type() {
     let db = Database::open(&task.directory).unwrap();
     let moves = db.actions_page_filtered(0, 10, Some("move")).unwrap();
     drop(db);
-    let expected = "图片/其他/photo.png".to_string();
+    let expected = "图片/photo.png".to_string();
     assert_eq!(moves.len(), 1, "错误扩展名应产生改名计划");
     assert_eq!(
         moves[0].target.as_deref(),
@@ -1568,11 +1568,11 @@ fn fix_extension_corrects_promised_containers_but_not_volume_tails() {
         .map(|a| (a.source.clone(), a.target.clone().unwrap_or_default()))
         .collect();
     for (source, expected) in [
-        ("备份.txt", "压缩包/其他/备份.zip".to_string()),
-        ("数据.mp4", "压缩包/其他/数据.7z".to_string()),
-        ("老包.png", "压缩包/其他/老包.rar".to_string()),
-        ("分卷.zip.001", "压缩包/其他/分卷.zip.001".to_string()),
-        ("图纸.odg", "其他/其他/图纸.odg".to_string()),
+        ("备份.txt", "压缩包/备份.zip".to_string()),
+        ("数据.mp4", "压缩包/数据.7z".to_string()),
+        ("老包.png", "压缩包/老包.rar".to_string()),
+        ("分卷.zip.001", "压缩包/分卷.zip.001".to_string()),
+        ("图纸.odg", "其他/图纸.odg".to_string()),
     ] {
         let actual = planned.iter().find(|(s, _)| s == source).map(|(_, t)| t);
         assert_eq!(
@@ -1599,7 +1599,7 @@ fn junction_named_like_category_skips_item_instead_of_failing_plan() {
         .unwrap();
     assert!(status.success(), "无法创建 junction，用例前置条件不成立");
     f.write("photo.png", b"not really a png", 10);
-    // 默认规则按大类归类：photo.png 的目标是 图片/其他/photo.png，中间目录段正是 junction。
+    // 默认规则按大类归类：photo.png 的目标是 图片/photo.png，大类段正是 junction。
     let task = f.plan(Config::default());
     let db = Database::open(&task.directory).unwrap();
     let moves = db.actions_page_filtered(0, 10, Some("move")).unwrap();
@@ -2165,7 +2165,7 @@ fn classification_target_never_enters_git_tree() {
     );
     Fixture::apply(&task);
     assert!(
-        f.root.join("图片/其他/photo.png").exists(),
+        f.root.join("图片/photo.png").exists(),
         "归类目录复用项目腾出的名字（C-14）"
     );
     assert!(

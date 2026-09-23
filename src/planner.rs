@@ -3,14 +3,13 @@ use crate::{
     db::FILE_COLUMNS,
     engine::Job,
     fsutil,
-    functional::{self, FuncFile},
     model::{Action, ActionKind, FileRecord},
     rules,
 };
 use anyhow::{Context, Result};
 use rusqlite::{params, OptionalExtension};
 use std::{
-    collections::{BTreeMap, BTreeSet, HashMap, HashSet},
+    collections::{HashMap, HashSet},
     path::Path,
 };
 
@@ -223,28 +222,19 @@ fn is_category_label(name: &str) -> bool {
         "视频" | "音频" | "图片" | "文档" | "压缩包" | "程序" | "其他" | "大文件"
     )
 }
-/// C-18 来源段：parent 各目录段（最近一级在前），剔除紧邻的标准分类链
-///（附录 A 大类或大文件/功能分类两层，功能分类须与本次生成的功能目录名或固定兜底
-///「其他」一致；普通文件才比对，项目不比对）、以及项目来源的直接集合容器「Git项目集合」。
+/// C-18 来源段：parent 各目录段（最近一级在前），剔除紧邻的标准分类段
+///（附录 A 大类或大文件的单个目录段；旧版功能目录、年月目录等其他名称不剔除，
+/// 作为普通来源目录参与消解）、以及项目来源的直接集合容器「Git项目集合」。
 /// 段按已开启的 NFC/空白规则规范化（仅普通文件），不剥副本标记、不改源目录。
-fn source_levels(
-    parent: &str,
-    functional: &BTreeSet<String>,
-    drop_collection: bool,
-    normalize: bool,
-) -> Vec<String> {
+fn source_levels(parent: &str, drop_collection: bool, normalize: bool) -> Vec<String> {
     let mut segments: Vec<String> = parent
         .split('/')
         .filter(|s| !s.is_empty())
         .map(str::to_string)
         .collect();
-    if segments.len() >= 2 {
-        let count = segments.len();
-        let (cat, func) = (segments[count - 2].clone(), segments[count - 1].clone());
-        let functional_hit =
-            same_component(&func, functional::FALLBACK_DIR) || functional.contains(&fold(&func));
-        if is_category_label(&cat) && functional_hit {
-            segments.truncate(count - 2);
+    if let Some(last) = segments.last() {
+        if is_category_label(last) {
+            segments.pop();
         }
     }
     if drop_collection {
@@ -582,8 +572,8 @@ fn git_collection(job: &mut Job) -> Result<Vec<String>> {
             continue;
         };
         let parent = parent_of(rel).to_string();
-        // 项目来源排除分类层级与直接集合容器（C-14）；项目无功能分类可比对。
-        let sources = source_levels(&parent, &BTreeSet::new(), true, false);
+        // 项目来源排除分类层级与直接集合容器（C-14）；项目无大类段可比对剔除。
+        let sources = source_levels(&parent, true, false);
         items.push(Item {
             id: 0,
             rel: rel.clone(),
@@ -681,25 +671,17 @@ fn git_collection(job: &mut Job) -> Result<Vec<String>> {
     Ok(moved)
 }
 
-/// C-05 / C-16～C-21：存活文件的固定归类与命名（目标目录 = 大类/功能分类）。
+/// C-05 / C-16～C-21：存活文件的固定归类与命名（目标目录 = 大类，一级结构）。
 #[cfg_attr(
     feature = "perf-tracing",
     tracing::instrument(target = "perf", name = "plan_classify", skip_all)
 )]
 fn classify_files(job: &mut Job, moved_roots: &[String]) -> Result<()> {
     job.context
-        .status("按「大类/功能分类」确定存活文件的归类目标与最终名称");
-    // 阶段 1：逐文件确定派生名、最终扩展名与大类（C-01 / C-08 / 附录 A）。
-    struct Pending {
-        id: i64,
-        rel: String,
-        current_name: String,
-        stem: String,
-        extension: String,
-        category: &'static str,
-        parent: String,
-    }
-    let mut pending: Vec<Pending> = Vec::new();
+        .status("按「大类」确定存活文件的归类目标与最终名称");
+    // C-05 一级结构：逐文件确定派生名、最终扩展名与大类（C-01 / C-08 / 附录 A），
+    // 直接构建定位项，随后统一消解冲突（C-17～C-21）。
+    let mut items: Vec<Item> = Vec::new();
     let mut cursor = 0;
     loop {
         let batch = job.db.files(
@@ -766,84 +748,28 @@ fn classify_files(job: &mut Job, moved_roots: &[String]) -> Result<()> {
             } else {
                 rules::category_for(&derived_name.to_lowercase())
             };
-            pending.push(Pending {
+            let parent = parent_of(&file.rel).to_string();
+            let target_dir = category.to_string();
+            let in_place = same_dir(&parent, &target_dir);
+            let sources = source_levels(&parent, false, job.config.normalize_names);
+            items.push(Item {
                 id: file.id,
                 rel: file.rel.clone(),
                 current_name: current_name.to_string(),
                 stem,
                 extension,
-                category,
-                parent: parent_of(&file.rel).to_string(),
+                target_dir,
+                sources,
+                in_place,
+                settled: false,
+                failed: None,
+                candidate: String::new(),
+                k: 0,
+                digest_step: 0,
+                digest_no_source: false,
+                index_suffix: None,
             });
         }
-    }
-    // 阶段 2：按大类功能聚类（C-05：文件名 + 紧邻原父目录名；至多 10 个功能目录 + 「其他」）。
-    let mut by_category: BTreeMap<&'static str, Vec<FuncFile>> = BTreeMap::new();
-    for item in &pending {
-        by_category
-            .entry(item.category)
-            .or_default()
-            .push(FuncFile {
-                id: item.id,
-                rel: item.rel.clone(),
-                name: item.current_name.clone(),
-                parent: item.parent.clone(),
-            });
-    }
-    let mut assigned: HashMap<i64, String> = HashMap::new();
-    // C-18 来源链剔除用的大类 → 功能目录名集合（本次生成的 + 固定兜底「其他」）。
-    let mut generated: BTreeMap<&'static str, BTreeSet<String>> = BTreeMap::new();
-    for (category, files) in &by_category {
-        // 在位者优先（C-05 稳定性）：读取该大类当前已存在的功能目录名。
-        let incumbents: BTreeSet<String> = fsutil::safe_join(&job.root, category)
-            .ok()
-            .and_then(|path| std::fs::read_dir(path).ok())
-            .map(|entries| {
-                entries
-                    .flatten()
-                    .filter(|entry| entry.file_type().is_ok_and(|kind| kind.is_dir()))
-                    .filter_map(|entry| entry.file_name().into_string().ok())
-                    .map(|name| fold(&name))
-                    .collect()
-            })
-            .unwrap_or_default();
-        for (id, name) in functional::functional_dirs(files, &incumbents) {
-            generated.entry(category).or_default().insert(fold(&name));
-            assigned.insert(id, name);
-        }
-    }
-    // 阶段 3：构建定位项并统一消解冲突（C-17～C-21）。
-    let mut items: Vec<Item> = Vec::new();
-    for entry in &pending {
-        let Some(function) = assigned.get(&entry.id) else {
-            continue;
-        };
-        let target_dir = format!("{}/{}", entry.category, function);
-        let in_place = same_dir(&entry.parent, &target_dir);
-        let category_dirs = generated.get(entry.category).cloned().unwrap_or_default();
-        let sources = source_levels(
-            &entry.parent,
-            &category_dirs,
-            false,
-            job.config.normalize_names,
-        );
-        items.push(Item {
-            id: entry.id,
-            rel: entry.rel.clone(),
-            current_name: entry.current_name.clone(),
-            stem: entry.stem.clone(),
-            extension: entry.extension.clone(),
-            target_dir,
-            sources,
-            in_place,
-            settled: false,
-            failed: None,
-            candidate: String::new(),
-            k: 0,
-            digest_step: 0,
-            digest_no_source: false,
-            index_suffix: None,
-        });
     }
     let mut dirs = gather_dir_plans(job, &items, moved_roots);
     // 容器被占用的目录：依赖它的项全部失败并保留源项（S-01）。
@@ -902,7 +828,7 @@ fn classify_files(job: &mut Job, moved_roots: &[String]) -> Result<()> {
         let mut planned = action(
             &file,
             ActionKind::Move,
-            "按「大类/功能分类」归类（同名冲突已统一消解；目标不覆盖）",
+            "按「大类」归类（同名冲突已统一消解；目标不覆盖）",
             DeleteMode::Keep,
         );
         planned.target = Some(target.clone());

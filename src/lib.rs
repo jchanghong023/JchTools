@@ -8,7 +8,6 @@ pub mod db;
 pub mod engine;
 pub mod engine_bundle;
 pub mod fsutil;
-pub mod functional;
 pub mod hash_cache;
 pub mod hashing;
 pub mod model;
