@@ -99,12 +99,11 @@ pub fn analyze_done(files: u64, bytes: u64, errors: u64) {
 
 /// 目录整理·执行收尾的工作量字段。
 #[cfg(feature = "perf-tracing")]
-pub fn apply_done(deleted: u64, moved: u64, linked: u64, skipped: u64, errors: u64) {
+pub fn apply_done(deleted: u64, moved: u64, skipped: u64, errors: u64) {
     tracing::info!(
         target: TARGET,
         deleted,
         moved,
-        linked,
         skipped,
         errors,
         "目录整理执行完成"

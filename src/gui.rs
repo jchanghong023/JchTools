@@ -977,7 +977,7 @@ fn start_task(ui: &AppWindow, state: &Rc<RefCell<State>>, out: &EventSender, app
     ui.set_paused(false);
     ui.set_error_text("".into());
     // 分析（新任务）清掉上一任务的提示；执行是同一任务的收尾阶段，必须保留分析期产生的
-    // 提示（H-06 已跳过 Git 目录树等），否则用户在整个执行阶段都看不到跳过说明。
+    // 提示（H-06 Git 目录处置结果等），否则用户在整个执行阶段都看不到该说明。
     if !apply {
         ui.set_notice_text("".into());
     }

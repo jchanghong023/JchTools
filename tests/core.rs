@@ -1544,6 +1544,61 @@ fn fix_extension_keeps_specialized_container_and_alias_extensions() {
     }
 }
 
+// 覆盖 C-08 / 附录 B（已知格式后缀 + 承诺可修正的 ZIP / 7z / RAR 内容时改名并归「压缩包」；
+// 无法由签名证明后缀错误的后缀与 X-10 卷尾后缀保留）
+#[test]
+fn fix_extension_corrects_promised_containers_but_not_volume_tails() {
+    // 最小 ZIP 头：签名 + 26 字节本地文件头 + 条目名（infer 只看 0x1E 起的条目名）。
+    fn minimal_zip_entry(entry: &str) -> Vec<u8> {
+        let mut bytes = Vec::from(*b"PK\x03\x04");
+        bytes.extend_from_slice(&[0u8; 26]);
+        bytes.extend_from_slice(entry.as_bytes());
+        bytes
+    }
+    let f = Fixture::new();
+    // 已知格式后缀 + 真实压缩包内容：识别结果为 zip / 7z / rar，应按识别结果改名。
+    f.write("备份.txt", &minimal_zip_entry("data.txt"), 10);
+    f.write(
+        "数据.mp4",
+        &[0x37, 0x7A, 0xBC, 0xAF, 0x27, 0x1C, 0, 0, 0, 0],
+        12,
+    );
+    f.write("老包.png", b"Rar!\x1A\x07\x00payload", 14);
+    // X-10 数字尾卷：整组后缀不可拆，识别到 zip 也不得改名（内容与其它样本不同，避免去重）。
+    f.write("分卷.zip.001", &minimal_zip_entry("part.bin"), 16);
+    // 附录 A 未列出的后缀：识别到的只是外层容器，无法确定真实类型，保留原后缀（C-08）。
+    f.write("图纸.odg", &minimal_zip_entry("content.xml"), 18);
+    let mut cfg = base();
+    cfg.detect_type = true;
+    cfg.fix_extension = true;
+    let task = f.plan(cfg);
+    let db = Database::open(&task.directory).unwrap();
+    let moves = db.actions_page_filtered(0, 10, Some("move")).unwrap();
+    drop(db);
+    let (year, month) = now_year_month();
+    let planned: Vec<(String, String)> = moves
+        .iter()
+        .map(|a| (a.source.clone(), a.target.clone().unwrap_or_default()))
+        .collect();
+    for (source, expected) in [
+        ("备份.txt", format!("压缩包/{year}/{month}/备份.zip")),
+        ("数据.mp4", format!("压缩包/{year}/{month}/数据.7z")),
+        ("老包.png", format!("压缩包/{year}/{month}/老包.rar")),
+        (
+            "分卷.zip.001",
+            format!("压缩包/{year}/{month}/分卷.zip.001"),
+        ),
+        ("图纸.odg", format!("其他/{year}/{month}/图纸.odg")),
+    ] {
+        let actual = planned.iter().find(|(s, _)| s == source).map(|(_, t)| t);
+        assert_eq!(
+            actual.map(String::as_str),
+            Some(expected.as_str()),
+            "{source} 应计划为 {expected}；实际 {planned:#?}"
+        );
+    }
+}
+
 // 平台门禁原因：用例需要 junction（mklink /J）复现「分类目录名被重定向目录占用」；
 // 非 Windows 无 reparse point 语义（Unix 侧链接拒绝穿越由 symlink_not_followed_or_deleted 覆盖）。
 #[cfg(windows)]

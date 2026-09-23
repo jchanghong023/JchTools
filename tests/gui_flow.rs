@@ -315,13 +315,14 @@ fn git_subtree_skip_is_visible_after_run_and_tree_untouched() {
         assert!(run.failures.is_empty(), "流程未完成：{:?}", run.failures);
         assert!(
             run.notice.contains("Git"),
-            "H-06：结束后提示条必须仍明确说明跳过的 Git 目录：notice={} status={}",
+            "H-06：结束后提示条必须明确说明 Git 目录的处置结果：notice={} status={}",
             run.notice,
             run.status
         );
         assert!(
-            run.notice.contains("跳过") || run.notice.contains("排除"),
-            "H-06：提示必须说明已跳过/排除，而不是静默略过：{}",
+            run.notice.contains("Git项目集合") && !run.notice.contains("跳过"),
+            "C-14：整理流程中 Git 项目整体移入「Git项目集合」，提示条必须说明该处置，\
+             不得说成「跳过」：{}",
             run.notice
         );
     });

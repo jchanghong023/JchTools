@@ -240,13 +240,23 @@ pub fn identity_proves_same_file(a: &FileRecord, b: &FileRecord) -> bool {
         && b.snapshot.links >= 2
         && !(cfg!(windows) && crate::hash_cache::identity_is_degenerate(&a.snapshot.identity))
 }
-/// C-08：按内容签名修正错误扩展名的保守判定。true = 旧扩展名确实错误、可以改名。
-/// 签名不足以确定实际类型（只识别到外层容器/存储）、旧扩展名属于同一容器家族的更具体
-/// 格式、或旧扩展名本就是同义写法时一律不改名；合法的同义扩展名不强制统一。
+/// C-08 / 附录 B：按内容签名修正错误扩展名的保守判定。true = 旧扩展名确实错误、可以改名。
+/// 只有承诺可修正的类型才作为改名目标，且只有旧后缀能对应到附录 A 已列格式时才谈得上
+/// 「现后缀不正确」；无法可靠判型、识别结果比旧后缀更粗、旧后缀是 X-10 卷尾/复合后缀
+/// 或本就是同义写法时一律不改名。
 pub fn extension_needs_fix(old: &str, detected: &str) -> bool {
     !equivalent_extension(old, detected)
-        && !specialized_extension(old)
-        && !outer_container_extension(detected)
+        && !unsplittable_suffix(old)
+        && known_format_suffix(old)
+        && !coarser_detection(old, detected)
+        && correctable_type(detected)
+}
+/// 附录 A 是本产品认得并用于归类的格式清单，也是判断「现后缀不正确」的唯一依据：
+/// 后缀对应不上任何大类（`.bin`、`.dat`、`.odg`、`.xps`、`.cbz` 等）时，识别到的
+/// 只是外层容器，无法确定其真实类型，按 C-08「签名不足以确定实际类型时不改名」保留，
+/// 不得猜成压缩包后缀。
+fn known_format_suffix(old: &str) -> bool {
+    !old.is_empty() && category_for(&format!("x.{old}")) != "其他"
 }
 /// 同义扩展名（同一格式的常见写法），不算错误扩展名。
 fn equivalent_extension(old: &str, detected: &str) -> bool {
@@ -256,52 +266,135 @@ fn equivalent_extension(old: &str, detected: &str) -> bool {
         || (old == "htm" && detected == "html")
         || (old == "mid" && detected == "midi")
 }
-/// 识别结果只说明外层容器/存储，不含更具体的格式信息：压缩包与 OLE 存储
-/// （doc/xls/ppt/msi/vsd 等都只会被识别成同一个 OLE 存储类型）都属此类。
-/// 通用压缩后缀与 `archive_name` 保持同口径，另加 OLE 存储（infer 报 msi）。
-fn outer_container_extension(ext: &str) -> bool {
+/// 附录 B 552-557：只有这些类型是「可确定识别并修正」的改名目标；
+/// 未承诺的类型不进行修正，不以模糊特征强行分类。
+/// 其中 docm/xlsm/pptm/odt/ods/odp/epub 是 ZIP 内层类型标识才能确认的类型，`infer`
+/// 给不出的粒度，列入只为与合同清单一致。
+fn correctable_type(ext: &str) -> bool {
     matches!(
         ext,
-        "zip"
-            | "gz"
-            | "bz2"
-            | "xz"
-            | "zst"
-            | "tar"
+        "png"
+            | "jpg"
+            | "gif"
+            | "bmp"
+            | "tif"
+            | "webp"
+            | "pdf"
+            | "flac"
+            | "wav"
+            | "zip"
             | "7z"
             | "rar"
-            | "cab"
-            | "iso"
-            | "wim"
-            | "lz"
-            | "lzma"
-            | "cpio"
-            | "lzh"
-            | "msi"
+            | "docx"
+            | "xlsx"
+            | "pptx"
+            | "docm"
+            | "xlsm"
+            | "pptm"
+            | "odt"
+            | "ods"
+            | "odp"
+            | "epub"
     )
 }
-/// 旧扩展名是该容器家族里的更具体格式，识别结果粒度更粗（infer 对 OOXML 变体
-/// 只报 docx/xlsx/pptx 基础类型）：按更粗的结果改名会把正确的专用扩展名改错。
-fn specialized_extension(ext: &str) -> bool {
+/// 附录 B 531-532：复合扩展名（`.tar.gz` 等）与 X-10 卷尾/编号后缀（`.NNN`、`.rNN`、
+/// `.zNN`、`.partN`）在改名时整体保留、不拆不改；改名目标都是单段扩展名，
+/// 因此凡是不止一段的后缀都不作为「错误扩展名」处理。
+fn unsplittable_suffix(ext: &str) -> bool {
+    if ext.contains('.') {
+        return true;
+    }
+    if ext.len() == 3 && ext.bytes().all(|b| b.is_ascii_digit()) {
+        return true;
+    }
+    if let Some(rest) = ext.strip_prefix(['r', 'z']) {
+        return rest.len() == 2 && rest.bytes().all(|b| b.is_ascii_digit());
+    }
+    if let Some(rest) = ext.strip_prefix("part") {
+        return !rest.is_empty() && rest.bytes().all(|b| b.is_ascii_digit());
+    }
+    false
+}
+/// 识别结果比旧后缀更粗（或由同一容器证据得出）时不得改名：
+/// - 内层类型未确认（只识别到 ZIP 容器）：保留 Office（含旧式 doc/xls/ppt）、ODF、EPUB 与
+///   X-09 其他已列容器后缀，不降级为 `.zip`（附录 B 557、C-08）。
+/// - 只识别到 OOXML 基础类型 docx/xlsx/pptx（`infer` 对宏/模板变体只报基础类型，见 C-08 例）：
+///   更具体的变体与同族容器后缀不得据此改粗。
+fn coarser_detection(old: &str, detected: &str) -> bool {
+    match detected {
+        "zip" => office_extension(old) || legacy_office_extension(old) || container_extension(old),
+        "docx" | "xlsx" | "pptx" => ooxml_variant_extension(old) || container_extension(old),
+        _ => false,
+    }
+}
+/// 旧式 Office 后缀（OLE 文档）：内容识别为 ZIP 容器时它已不是旧式文档，但也无法确定
+/// 是不是伪装成该后缀的 OOXML，按 C-08 不猜测、不降级为压缩包后缀。
+fn legacy_office_extension(ext: &str) -> bool {
+    matches!(ext, "doc" | "xls" | "ppt")
+}
+/// Office（OOXML 基础类型与模板/宏变体）。
+fn office_extension(ext: &str) -> bool {
     matches!(
         ext,
-        "docm"
+        "docx"
+            | "docm"
             | "dotx"
             | "dotm"
+            | "xlsx"
             | "xlsm"
             | "xltx"
             | "xltm"
             | "xlsb"
+            | "pptx"
+            | "pptm"
             | "potx"
             | "potm"
             | "ppsx"
             | "ppsm"
-            | "epub"
-            | "odt"
+    )
+}
+/// OOXML 模板/宏变体：`infer` 对它们只报基础类型 docx/xlsx/pptx，按更粗的结果改名会改错。
+fn ooxml_variant_extension(ext: &str) -> bool {
+    office_extension(ext) && !matches!(ext, "docx" | "xlsx" | "pptx")
+}
+/// ODF、EPUB 与 X-09 其他已列容器格式：识别结果只有外层 ZIP 容器时保留原后缀。
+fn container_extension(ext: &str) -> bool {
+    matches!(
+        ext,
+        "odt"
             | "ods"
             | "odp"
+            | "epub"
+            | "cab"
+            | "msi"
+            | "msix"
+            | "appx"
+            | "msixbundle"
+            | "appxbundle"
+            | "iso"
+            | "img"
+            | "wim"
+            | "esd"
+            | "vhd"
+            | "vhdx"
             | "jar"
+            | "war"
+            | "ear"
             | "apk"
+            | "aab"
+            | "whl"
+            | "nupkg"
+            | "vsix"
+            | "crx"
+            | "xpi"
+            | "ipa"
+            | "pkg"
+            | "dmg"
+            | "lz4"
+            | "br"
+            | "lz"
+            | "exe"
+            | "com"
     )
 }
 // ---------------------------------------------------------------------------
@@ -728,16 +821,103 @@ mod tests {
             );
         }
         // 复合/包格式：更粗的识别结果不得把专用扩展名改粗（C-08 例：Office ZIP 容器）。
+        // OOXML 模板/宏变体：infer 只报基础类型 docx/xlsx/pptx，不得据此改粗。
         for old in [
-            "docm", "dotx", "dotm", "xlsm", "xltm", "xlsb", "potx", "ppsx", "ppsm", "epub", "odt",
-            "ods", "odp", "jar", "apk",
+            "docm", "dotx", "dotm", "xlsm", "xltx", "xltm", "xlsb", "potx", "potm", "ppsx", "ppsm",
         ] {
             for detected in ["zip", "docx", "xlsx", "pptx"] {
                 assert!(
                     !extension_needs_fix(old, detected),
-                    "{old} 的相对具体扩展名不得按 {detected} 改粗"
+                    "{old} 的具体变体扩展名不得按 {detected} 改粗"
                 );
             }
+        }
+        // ODF / EPUB / X-09 其他已列容器后缀：识别结果只有容器粒度时保留原后缀，不降级。
+        for old in [
+            "odt",
+            "ods",
+            "odp",
+            "epub",
+            "cab",
+            "msi",
+            "msix",
+            "appx",
+            "msixbundle",
+            "appxbundle",
+            "iso",
+            "img",
+            "wim",
+            "esd",
+            "vhd",
+            "vhdx",
+            "jar",
+            "war",
+            "ear",
+            "apk",
+            "aab",
+            "whl",
+            "nupkg",
+            "vsix",
+            "crx",
+            "xpi",
+            "ipa",
+            "pkg",
+            "dmg",
+            "lz4",
+            "br",
+            "lz",
+            "exe",
+            "com",
+        ] {
+            for detected in ["zip", "docx", "xlsx", "pptx"] {
+                assert!(
+                    !extension_needs_fix(old, detected),
+                    "{old} 是容器/文档容器后缀，不得按 {detected} 改粗或降级"
+                );
+            }
+        }
+        // Office 基础类型：内层类型未确认时保留原后缀；内容确认为另一文档类型时才修正。
+        for old in ["docx", "xlsx", "pptx"] {
+            assert!(
+                !extension_needs_fix(old, "zip"),
+                "{old} 内层类型未确认时不得降级为 .zip"
+            );
+        }
+        assert!(
+            extension_needs_fix("docx", "xlsx"),
+            "内容确认为 xlsx 时 .docx 是错误扩展名，应修正"
+        );
+        // 旧式 Office 后缀同上：内容已是 ZIP 容器时不降级为 .zip。
+        for old in ["doc", "xls", "ppt"] {
+            assert!(
+                !extension_needs_fix(old, "zip"),
+                "{old} 是 Office 后缀，不得仅因识别到 ZIP 容器降级为 .zip"
+            );
+        }
+        // 附录 A 未列出的后缀（含 ZIP 家族容器文档）：识别到的只是外层容器，
+        // 无法确定真实类型，按 C-08「签名不足以确定实际类型时不改名」保留。
+        for (old, detected) in [
+            ("bin", "zip"),
+            ("dat", "7z"),
+            ("odg", "zip"),
+            ("odf", "zip"),
+            ("xps", "zip"),
+            ("vsdx", "zip"),
+            ("sldx", "zip"),
+            ("thmx", "zip"),
+            ("cbz", "zip"),
+            ("kmz", "zip"),
+            ("sxw", "zip"),
+            ("ott", "odt"),
+            ("ots", "ods"),
+            ("otp", "odp"),
+            ("odm", "odt"),
+            ("xyz", "rar"),
+        ] {
+            assert!(
+                !extension_needs_fix(old, detected),
+                "{old} 无法由签名证明后缀错误，不得按 {detected} 改名"
+            );
         }
         // 包装格式（压缩流内层未知，如 svgz/tgz）识别到容器后缀时同样不是错误扩展名。
         for (old, detected) in [("svgz", "gz"), ("tgz", "gz"), ("tbz2", "bz2")] {
@@ -746,22 +926,53 @@ mod tests {
                 "{old} 不得按外层容器 {detected} 改名"
             );
         }
-        // 容器识别只说明外层容器（OLE 存储同样只会被识别成 msi）：不得据此改成压缩包/安装包后缀。
-        for detected in [
-            "zip", "gz", "bz2", "xz", "zst", "tar", "7z", "rar", "cab", "iso", "wim", "lz", "lzma",
-            "cpio", "lzh", "msi",
+        // 附录 B 承诺可确定识别并修正的类型：旧后缀确是别的已知格式时必须改名。
+        for (old, detected) in [
+            ("txt", "zip"),
+            ("mp4", "zip"),
+            ("jpg", "7z"),
+            ("mp3", "rar"),
+            ("zip", "rar"),
+            ("7z", "zip"),
+            ("tar", "rar"),
         ] {
             assert!(
-                !extension_needs_fix("bin", detected),
-                "容器识别 {detected} 不得直接作为改名依据"
+                extension_needs_fix(old, detected),
+                "{old} -> {detected} 是承诺可修正的错误扩展名，应改名"
+            );
+        }
+        // 未承诺的类型不进行修正（附录 B 末句）：流格式、OLE 存储等识别结果不是改名依据。
+        for detected in [
+            "gz", "bz2", "xz", "zst", "tar", "cab", "iso", "wim", "lz", "lzma", "cpio", "lzh",
+            "msi", "mp3", "mp4",
+        ] {
+            assert!(
+                !extension_needs_fix("txt", detected),
+                "未承诺的类型 {detected} 不得直接作为改名依据"
+            );
+        }
+        // X-10 卷尾与复合后缀属于不可拆分后缀（附录 B）：识别到承诺容器也不得改名。
+        for (old, detected) in [
+            ("zip.001", "zip"),
+            ("7z.001", "7z"),
+            ("tar.gz", "gz"),
+            ("r00", "rar"),
+            ("z01", "zip"),
+            ("part01", "rar"),
+            ("001", "zip"),
+        ] {
+            assert!(
+                !extension_needs_fix(old, detected),
+                "卷尾/复合后缀 {old} 不得按 {detected} 改名"
             );
         }
         // 明确的错误扩展名仍必须修正（默认关闭，开启后列入计划）。
         for (old, detected) in [
             ("txt", "png"),
-            ("bin", "pdf"),
+            ("mp4", "pdf"),
             ("jpg", "png"),
-            ("mp4", "mp3"),
+            ("mp4", "flac"),
+            ("mkv", "wav"),
         ] {
             assert!(
                 extension_needs_fix(old, detected),

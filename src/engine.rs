@@ -927,7 +927,9 @@ fn scan(job: &mut Job, enqueue: bool, state: &Path) -> Result<()> {
     }
     let mut git_roots = std::mem::take(&mut sink.git_skips);
     if !git_roots.is_empty() {
-        // H-06：Git 整树排除必须明确提示（界面蓝条 + 日志），不静默跳过。
+        // H-06：Git 整树保护必须明确提示处置结果（界面蓝条 + 日志），不静默跳过。
+        // 解压流程里 Git 项目整树排除；目录整理流程里按 C-14 固定行为整体移入「Git项目集合」，
+        // 两者都不读取内容、不进入树内处理，但「处置结果」必须各自说清，不能都说成「跳过」。
         git_roots.sort();
         git_roots.dedup();
         let shown = git_roots
@@ -937,21 +939,31 @@ fn scan(job: &mut Job, enqueue: bool, state: &Path) -> Result<()> {
             .collect::<Vec<_>>()
             .join("、");
         let more = if git_roots.len() > 3 { " 等" } else { "" };
-        job.log(
-            "扫描",
-            "",
-            "",
-            "提示",
-            &format!(
-                "已跳过 {} 个 Git 目录及其全部内容（含 .git 的目录整树排除：不读取、不归类、不改名、不删除，不受隐藏/递归/清理开关影响）：{shown}{more}",
-                git_roots.len()
-            ),
-            0,
-        )?;
-        job.context.emit(Event::Notice(format!(
-            "已跳过 {} 个 Git 目录树（含全部后代，未读取内容）",
-            git_roots.len()
-        )));
+        let (log_message, notice) = if enqueue {
+            (
+                format!(
+                    "已跳过 {} 个 Git 目录及其全部内容（含 .git 的目录整树排除：不读取、不归类、不改名、不删除，不受隐藏/递归/清理开关影响）：{shown}{more}",
+                    git_roots.len()
+                ),
+                format!(
+                    "已跳过 {} 个 Git 目录树（含全部后代，未读取内容）",
+                    git_roots.len()
+                ),
+            )
+        } else {
+            (
+                format!(
+                    "已识别 {} 个 Git 项目（含 .git 的目录整树保护：不读取内容、不进入树内改名/去重/清理；整树移入本次所选根下的「Git项目集合」，已在集合内的不再移动）：{shown}{more}",
+                    git_roots.len()
+                ),
+                format!(
+                    "已识别 {} 个 Git 项目（整树移入「Git项目集合」，未读取内容）",
+                    git_roots.len()
+                ),
+            )
+        };
+        job.log("扫描", "", "", "提示", &log_message, 0)?;
+        job.context.emit(Event::Notice(notice));
     }
     // 汇总入库：按父目录分组还原深度先序；污点表供 planner 的空目录规划排除，
     // git_roots 供 planner 拒绝把内容归入 Git 工作树（H-06：不归类）。
@@ -1337,7 +1349,6 @@ pub fn apply(directory: &Path, context: TaskContext) -> Result<TaskResult> {
     crate::perf::apply_done(
         job.summary.deleted,
         job.summary.moved,
-        job.summary.linked,
         job.summary.skipped,
         job.summary.errors,
     );
