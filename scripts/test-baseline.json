@@ -56,6 +56,18 @@
       "cfg": "windows"
     },
     {
+      "file": "src/archive.rs",
+      "name": "volume_set_groups_compound_numbered_volumes",
+      "ignored": false,
+      "cfg": null
+    },
+    {
+      "file": "src/archive.rs",
+      "name": "volume_set_recognizes_any_three_digit_numbered_entry",
+      "ignored": false,
+      "cfg": null
+    },
+    {
       "file": "src/engine.rs",
       "name": "invalid_record_with_tasks_layout_falls_back_to_parent",
       "ignored": false,
@@ -104,6 +116,72 @@
       "cfg": null
     },
     {
+      "file": "src/engine_bundle.rs",
+      "name": "resolve_falls_back_to_embedded_when_bundled_dir_hash_mismatches",
+      "ignored": false,
+      "cfg": null
+    },
+    {
+      "file": "src/engine_bundle.rs",
+      "name": "resolve_falls_back_when_bundled_dir_missing_dll",
+      "ignored": false,
+      "cfg": null
+    },
+    {
+      "file": "src/engine_bundle.rs",
+      "name": "resolve_prefers_valid_bundled_dir",
+      "ignored": false,
+      "cfg": null
+    },
+    {
+      "file": "src/engine_bundle.rs",
+      "name": "resolve_releases_to_fresh_location_when_existing_file_hash_mismatches",
+      "ignored": false,
+      "cfg": null
+    },
+    {
+      "file": "src/engine_bundle.rs",
+      "name": "resolve_reports_per_candidate_reasons_when_all_candidates_invalid",
+      "ignored": false,
+      "cfg": null
+    },
+    {
+      "file": "src/engine_bundle.rs",
+      "name": "resolve_without_embedded_reports_incomplete_bundled_dir",
+      "ignored": false,
+      "cfg": null
+    },
+    {
+      "file": "src/engine_bundle.rs",
+      "name": "resolve_without_embedded_uses_minimal_bundled_checks",
+      "ignored": false,
+      "cfg": null
+    },
+    {
+      "file": "src/fsutil.rs",
+      "name": "split_keeps_compound_stream_suffix",
+      "ignored": false,
+      "cfg": null
+    },
+    {
+      "file": "src/fsutil.rs",
+      "name": "split_keeps_part_rar_suffix_whole",
+      "ignored": false,
+      "cfg": null
+    },
+    {
+      "file": "src/fsutil.rs",
+      "name": "split_merges_whitelisted_components_behind_numbered_tail",
+      "ignored": false,
+      "cfg": null
+    },
+    {
+      "file": "src/fsutil.rs",
+      "name": "unique_target_inserts_index_before_volume_suffix",
+      "ignored": false,
+      "cfg": null
+    },
+    {
       "file": "src/gui.rs",
       "name": "advanced_rows_hidden_until_toggled",
       "ignored": false,
@@ -135,9 +213,39 @@
     },
     {
       "file": "src/gui.rs",
+      "name": "extract_confirm_text_discloses_deletion_rules",
+      "ignored": false,
+      "cfg": null
+    },
+    {
+      "file": "src/gui.rs",
+      "name": "extract_count_zero_keeps_confirm_gated",
+      "ignored": false,
+      "cfg": null
+    },
+    {
+      "file": "src/gui.rs",
       "name": "extract_start_rejects_protected_directory_immediately",
       "ignored": false,
       "cfg": "windows"
+    },
+    {
+      "file": "src/gui.rs",
+      "name": "extract_task_watcher_discovers_new_task_dir",
+      "ignored": false,
+      "cfg": null
+    },
+    {
+      "file": "src/gui.rs",
+      "name": "fail_list_groups_failed_events_per_volume_set",
+      "ignored": false,
+      "cfg": null
+    },
+    {
+      "file": "src/gui.rs",
+      "name": "fail_list_pages_beyond_single_page_limit",
+      "ignored": false,
+      "cfg": null
     },
     {
       "file": "src/gui.rs",
@@ -165,6 +273,12 @@
     },
     {
       "file": "src/gui.rs",
+      "name": "md_and_git_start_reset_close_after",
+      "ignored": false,
+      "cfg": null
+    },
+    {
+      "file": "src/gui.rs",
       "name": "md_and_git_tools_navigate_and_reset_subpage",
       "ignored": false,
       "cfg": null
@@ -184,6 +298,12 @@
     {
       "file": "src/gui.rs",
       "name": "md_split_existing_output_requires_confirmation_then_overwrites",
+      "ignored": false,
+      "cfg": null
+    },
+    {
+      "file": "src/gui.rs",
+      "name": "md_start_resets_started_clock",
       "ignored": false,
       "cfg": null
     },
@@ -231,6 +351,18 @@
     },
     {
       "file": "src/gui.rs",
+      "name": "plan_row_state_maps_terminal_states_to_chinese",
+      "ignored": false,
+      "cfg": null
+    },
+    {
+      "file": "src/gui.rs",
+      "name": "reset_fail_list_clears_for_next_task",
+      "ignored": false,
+      "cfg": null
+    },
+    {
+      "file": "src/gui.rs",
       "name": "root_edited_reports_missing_directory",
       "ignored": false,
       "cfg": null
@@ -262,6 +394,12 @@
     {
       "file": "src/gui.rs",
       "name": "switching_back_to_finished_task_reports_finished_status",
+      "ignored": false,
+      "cfg": null
+    },
+    {
+      "file": "src/gui.rs",
+      "name": "switching_to_md_or_git_shows_neutral_status",
       "ignored": false,
       "cfg": null
     },
@@ -417,6 +555,18 @@
     },
     {
       "file": "src/rules.rs",
+      "name": "exclusion_globs_follow_appendix_c_literal_semantics",
+      "ignored": false,
+      "cfg": null
+    },
+    {
+      "file": "src/rules.rs",
+      "name": "exclusion_globs_reject_drive_absolute_and_parent_segments",
+      "ignored": false,
+      "cfg": null
+    },
+    {
+      "file": "src/rules.rs",
       "name": "extension_fix_is_conservative",
       "ignored": false,
       "cfg": null
@@ -429,7 +579,19 @@
     },
     {
       "file": "src/rules.rs",
+      "name": "multipart_name_numbered_family_alignment_with_x10",
+      "ignored": false,
+      "cfg": null
+    },
+    {
+      "file": "src/rules.rs",
       "name": "normalize_stem_collapses_whitespace_and_nfc",
+      "ignored": false,
+      "cfg": null
+    },
+    {
+      "file": "src/rules.rs",
+      "name": "numbered_volume_family_recognition_matches_x10",
       "ignored": false,
       "cfg": null
     },
@@ -459,7 +621,19 @@
     },
     {
       "file": "tests/archive.rs",
+      "name": "directory_name_taken_by_file_maps_members_to_a_new_directory",
+      "ignored": true,
+      "cfg": null
+    },
+    {
+      "file": "tests/archive.rs",
       "name": "empty_7z_with_only_a_directory_entry_restores_the_directory",
+      "ignored": true,
+      "cfg": null
+    },
+    {
+      "file": "tests/archive.rs",
+      "name": "empty_directory_name_taken_by_file_lands_under_a_new_number",
       "ignored": true,
       "cfg": null
     },
@@ -556,6 +730,12 @@
     {
       "file": "tests/archive.rs",
       "name": "non_whitelisted_containers_stay_untouched_beside_a_real_archive",
+      "ignored": true,
+      "cfg": null
+    },
+    {
+      "file": "tests/archive.rs",
+      "name": "quarantine_component_member_in_subdir_archive_is_rejected_as_dangerous",
       "ignored": true,
       "cfg": null
     },
@@ -783,6 +963,12 @@
     },
     {
       "file": "tests/contract_engine.rs",
+      "name": "nested_quarantine_container_is_pruned_at_any_depth",
+      "ignored": false,
+      "cfg": null
+    },
+    {
+      "file": "tests/contract_engine.rs",
       "name": "reduced_scope_is_announced",
       "ignored": false,
       "cfg": null
@@ -796,6 +982,12 @@
     {
       "file": "tests/contract_engine.rs",
       "name": "root_git_file_blocks_processing",
+      "ignored": false,
+      "cfg": null
+    },
+    {
+      "file": "tests/contract_engine.rs",
+      "name": "root_named_quarantine_blocks_count_and_extract",
       "ignored": false,
       "cfg": null
     },
@@ -1431,6 +1623,18 @@
     },
     {
       "file": "tests/git_tools.rs",
+      "name": "parse_staged_modify_plus_worktree_rename_record_without_ghost",
+      "ignored": false,
+      "cfg": null
+    },
+    {
+      "file": "tests/git_tools.rs",
+      "name": "parse_worktree_rename_record_as_one_renamed_change",
+      "ignored": false,
+      "cfg": null
+    },
+    {
+      "file": "tests/git_tools.rs",
       "name": "preexisting_staged_content_is_protected",
       "ignored": false,
       "cfg": null
@@ -1444,6 +1648,12 @@
     {
       "file": "tests/git_tools.rs",
       "name": "single_added_file_committed_and_pushed",
+      "ignored": false,
+      "cfg": null
+    },
+    {
+      "file": "tests/git_tools.rs",
+      "name": "staged_copy_two_segment_record_is_handled_as_single_added_change",
       "ignored": false,
       "cfg": null
     },
@@ -1470,6 +1680,24 @@
       "name": "plan_execution_confirmation_flow_runs_end_to_end",
       "ignored": false,
       "cfg": "feature = \"gui\""
+    },
+    {
+      "file": "tests/gui_flow.rs",
+      "name": "stop_and_close_during_md_merge_quits_when_merge_finishes",
+      "ignored": false,
+      "cfg": "feature = \"gui\""
+    },
+    {
+      "file": "tests/gui_flow.rs",
+      "name": "stop_and_close_skips_override_confirm_and_quits",
+      "ignored": false,
+      "cfg": "feature = \"gui\""
+    },
+    {
+      "file": "tests/md_tools.rs",
+      "name": "merge_converts_first_setext_heading_in_bom_file",
+      "ignored": false,
+      "cfg": null
     },
     {
       "file": "tests/md_tools.rs",
@@ -1528,6 +1756,18 @@
     {
       "file": "tests/md_tools.rs",
       "name": "merge_shifts_atx_headings_and_adds_file_header",
+      "ignored": false,
+      "cfg": null
+    },
+    {
+      "file": "tests/md_tools.rs",
+      "name": "merge_shifts_first_atx_heading_in_bom_file",
+      "ignored": false,
+      "cfg": null
+    },
+    {
+      "file": "tests/md_tools.rs",
+      "name": "merge_strips_bom_only_at_file_start",
       "ignored": false,
       "cfg": null
     },
@@ -1726,6 +1966,24 @@
     {
       "file": "tests/split.rs",
       "name": "quarantined_archive_reason_is_recorded_in_log",
+      "ignored": false,
+      "cfg": null
+    },
+    {
+      "file": "tests/split.rs",
+      "name": "quarantined_numbered_group_renames_stem_as_a_whole",
+      "ignored": false,
+      "cfg": null
+    },
+    {
+      "file": "tests/split.rs",
+      "name": "quarantined_part_rar_group_renames_stem_as_a_whole",
+      "ignored": false,
+      "cfg": null
+    },
+    {
+      "file": "tests/split.rs",
+      "name": "quarantined_split_zip_group_renames_stem_as_a_whole",
       "ignored": false,
       "cfg": null
     },
