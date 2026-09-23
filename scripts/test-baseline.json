@@ -183,6 +183,12 @@
     },
     {
       "file": "src/gui.rs",
+      "name": "md_split_existing_output_requires_confirmation_then_overwrites",
+      "ignored": false,
+      "cfg": null
+    },
+    {
+      "file": "src/gui.rs",
       "name": "merged_rows_write_shadow_fields",
       "ignored": false,
       "cfg": null
@@ -244,6 +250,12 @@
     {
       "file": "src/gui.rs",
       "name": "section_switch_swaps_rule_rows",
+      "ignored": false,
+      "cfg": null
+    },
+    {
+      "file": "src/gui.rs",
+      "name": "split_size_accepts_integral_fractions_and_rejects_zero",
       "ignored": false,
       "cfg": null
     },
@@ -1462,6 +1474,12 @@
     {
       "file": "tests/md_tools.rs",
       "name": "merge_converts_setext_headings",
+      "ignored": false,
+      "cfg": null
+    },
+    {
+      "file": "tests/md_tools.rs",
+      "name": "merge_excludes_output_regardless_of_path_casing",
       "ignored": false,
       "cfg": null
     },
