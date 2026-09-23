@@ -160,10 +160,7 @@ fn organize_subtree_b_matches_contract_shape() {
         "实际内容见下方断言"
     );
     assert!(f.exists(&format!("文档/年报_产品说明_1_{h_plain}.pdf")));
-    assert!(
-        f.exists("文档/客户A_合同.pdf"),
-        "同名文件按来源前缀消解"
-    );
+    assert!(f.exists("文档/客户A_合同.pdf"), "同名文件按来源前缀消解");
     assert!(f.exists("文档/客户B_合同.pdf"));
     assert!(f.exists("文档/客户A_报价.xlsx"));
     assert!(f.exists("文档/客户B_报价.xlsx"));
@@ -245,10 +242,7 @@ fn organize_parent_after_children_rebuilds_standard_shape() {
     // —— 合同 (4) 的最终形态（一级大类 + 来源前缀消解） ——
     assert!(f.exists("文档/b_年度报告.pdf"));
     assert!(f.exists("文档/c_年度报告.pdf"));
-    assert!(
-        f.exists("文档/安装说明.pdf"),
-        "只来自 c 的不冲突，保持原名"
-    );
+    assert!(f.exists("文档/安装说明.pdf"), "只来自 c 的不冲突，保持原名");
     assert!(f.exists("文档/需求.docx"));
     assert!(
         f.exists("图片/工作资料_logo.png"),
@@ -257,10 +251,7 @@ fn organize_parent_after_children_rebuilds_standard_shape() {
     assert!(f.exists("图片/客户A_logo.png"));
     assert!(f.exists("文档/b_客户A_合同.pdf"));
     assert!(f.exists("文档/c_客户A_合同.pdf"));
-    assert!(
-        f.exists("文档/客户B_合同.pdf"),
-        "不得为形式统一全部加前缀"
-    );
+    assert!(f.exists("文档/客户B_合同.pdf"), "不得为形式统一全部加前缀");
     assert!(f.exists("文档/客户C_合同.pdf"));
     assert!(f.exists("文档/客户A_报价.xlsx"));
     assert!(f.exists("文档/客户B_报价.xlsx"));

@@ -268,10 +268,7 @@ fn final_cleanup_removes_newly_empty_chain_and_empty_quarantine() {
     // C-05 固定归类「大类」一级：report.pdf → 文档。
     let task = f.plan(config);
     engine::apply(&task.directory, Context::default()).unwrap();
-    assert!(
-        f.root.join("文档/report.pdf").exists(),
-        "归类目标必须落盘"
-    );
+    assert!(f.root.join("文档/report.pdf").exists(), "归类目标必须落盘");
     assert!(
         !f.root.join("move_src").exists(),
         "归类后变空的源目录必须清理"
@@ -281,10 +278,7 @@ fn final_cleanup_removes_newly_empty_chain_and_empty_quarantine() {
         !f.root.join(QUARANTINE_DIR_NAME).exists(),
         "实际为空的「解压失败」目录仍按 H-05 清理"
     );
-    assert_eq!(
-        fs::read(f.root.join("文档/keep.txt")).unwrap(),
-        b"payload"
-    );
+    assert_eq!(fs::read(f.root.join("文档/keep.txt")).unwrap(), b"payload");
     assert_eq!(status(&task.directory), "finished");
 }
 
