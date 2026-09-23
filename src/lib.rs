@@ -1,5 +1,6 @@
-//! 「递归解压」与「目录整理」两个工具的引擎独立于 GUI（P-02）。
-//! 软件完全离线（P-03）：不发起任何网络请求、不上传文件、日志或路径。
+//! 「递归解压」「目录整理」「MD 整理」「Git 工具」四个工具的引擎独立于 GUI（P-02）。
+//! 软件完全离线（P-03，Git 工具的 upstream 网络访问例外见该条）：不主动发起网络请求、
+//! 不上传文件、日志或路径。
 pub mod archive;
 pub mod config;
 pub mod control;
@@ -8,8 +9,10 @@ pub mod db;
 pub mod engine;
 pub mod engine_bundle;
 pub mod fsutil;
+pub mod git_tools;
 pub mod hash_cache;
 pub mod hashing;
+pub mod md_tools;
 pub mod model;
 pub mod perf;
 pub mod planner;

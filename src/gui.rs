@@ -17,6 +17,8 @@ use crate::{
     control::{Context, Control, Event, PlanSnapshot},
     db::Database,
     engine,
+    git_tools::{self, GitShared, BACKOFF_UNIT},
+    md_tools,
     model::{bytes, ActionKind, Summary},
     registry,
 };
@@ -35,26 +37,55 @@ use std::{
     time::{Duration, Instant},
 };
 
-/// 当前工具（P-02 两个注册工具）：决定规则分区集合、流程与状态文案。
+/// 当前工具（P-02 四个注册工具）：决定规则分区集合、流程与状态文案。
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 enum Tool {
     Extract,
     Organizer,
+    Md,
+    Git,
 }
 impl Tool {
     fn sections(self) -> &'static [&'static str] {
         match self {
             Tool::Extract => &["解压", "安全与性能"],
             Tool::Organizer => &["去重", "归类", "清理", "安全与性能"],
+            // R-01：MD 整理与 Git 工具不设规则面板，分区集合为空。
+            Tool::Md | Tool::Git => &[],
         }
     }
     fn from_id(id: &str) -> Option<Self> {
         match id {
             "recursive-extract" => Some(Tool::Extract),
             "directory-organizer" => Some(Tool::Organizer),
+            "md-organizer" => Some(Tool::Md),
+            "git-tools" => Some(Tool::Git),
             _ => None,
         }
     }
+}
+/// 当前运行中的任务种类：实时指标与进度口径随工具区分（U-03/U-12）。
+#[derive(Clone, Copy, PartialEq, Eq, Default)]
+enum RuntimeMode {
+    #[default]
+    Organizer,
+    Extract,
+    Md,
+    Git,
+}
+/// 等待覆盖确认后执行的 MD 操作（M-07/M-11）：确认（confirm-kind=4）后由界面重新发起。
+#[derive(Clone)]
+enum MdPending {
+    Merge {
+        root: PathBuf,
+        recursive: bool,
+        output: PathBuf,
+    },
+    Split {
+        input: PathBuf,
+        limit: u64,
+        out_dir: PathBuf,
+    },
 }
 /// 规则的界面层级：basic 常显，advanced 只在「显示高级选项」打开时出现。
 #[derive(Clone, Copy, PartialEq, Deserialize, Default)]
@@ -108,6 +139,12 @@ struct State {
     show_advanced: bool,
     /// 当前工具：切工具时同步重置规则分区（P-02 两工具各自只显示相关分区，R-01）。
     tool: Tool,
+    /// 当前任务的运行口径（U-03/U-12）：MD/Git 不写整理流程的计数器与文案。
+    runtime: RuntimeMode,
+    /// MD 整理：等待覆盖确认的挂起操作（M-07/M-11）。
+    md_pending: Option<MdPending>,
+    /// Git 工具：运行中任务的共享进度（G-13），由事件泵轮询上屏。
+    git_shared: Option<Arc<GitShared>>,
     /// 测试注入：覆盖任务状态目录；生产路径为 None，仍走 engine::prepare/apply。
     engine_overrides: Option<EngineTestOverrides>,
     /// 解压确认清点的请求代际：迟到的低代际清点事件不得刷新文案或解除门禁（X-02）。
@@ -456,6 +493,8 @@ fn visible_rows(state: &State) -> Result<Vec<RuleRow>> {
     let tool = match state.tool {
         Tool::Extract => "extract",
         Tool::Organizer => "organizer",
+        // MD/Git 不设规则面板（R-01）：不会进入规则表过滤，占位即可。
+        Tool::Md | Tool::Git => "",
     };
     Ok(state
         .specs
@@ -969,6 +1008,7 @@ fn start_task(ui: &AppWindow, state: &Rc<RefCell<State>>, out: &EventSender, app
         s.page_starts = vec![0];
         s.applying = apply;
         s.extracting = false;
+        s.runtime = RuntimeMode::Organizer;
     }
     // 先把运行态上屏，再让 worker 做磁盘工作：busy/状态文案必须早于任何等待 I/O 的操作
     // 画出来（H-02：点确认后界面立即有反馈，项目计数不再拖住首帧）。
@@ -1071,6 +1111,7 @@ fn start_extract(ui: &AppWindow, state: &Rc<RefCell<State>>, out: &EventSender) 
         s.logs.clear();
         s.applying = false;
         s.extracting = true;
+        s.runtime = RuntimeMode::Extract;
         s.planned = 0;
     }
     ui.set_busy(true);
@@ -1136,6 +1177,435 @@ fn extract_confirm_text(count_text: &str, directory: &str) -> String {
 fn show_error(ui: &AppWindow, error: impl std::fmt::Display) {
     ui.set_error_text(error.to_string().into());
 }
+/// 通用目录选择（U-07）：标题按用途传入；从 `directory` 输入框的已有值起步，
+/// 选择后经 `apply` 写回对应输入框（MD/Git 各自的目录输入互不影响）。
+fn pick_directory(ui: &AppWindow, title: &str, apply: impl FnOnce(&AppWindow, PathBuf)) {
+    let mut dialog = rfd::FileDialog::new().set_title(title);
+    let entered = PathBuf::from(ui.get_directory().to_string());
+    if entered.is_dir() {
+        dialog = dialog.set_directory(entered);
+    } else {
+        // 主输入为空或无效时，退到 MD 输入目录起步（U-07 不无故回到其他位置）。
+        let md_input = PathBuf::from(ui.get_md_input_dir().to_string());
+        if md_input.is_dir() {
+            dialog = dialog.set_directory(md_input);
+        }
+    }
+    if let Some(path) = dialog.pick_folder() {
+        apply(ui, path);
+    }
+}
+/// M-08：解析拆分大小输入——正数十进制（可含小数），按 KB（1024）/ MB（1024×1024）
+/// 换算后必须为整数字节；非法输入报字段错误，不自动截断或钳制。
+fn parse_size_bytes(text: &str, unit_index: i32) -> Result<u64, String> {
+    let multiplier: u64 = if unit_index == 1 { 1024 * 1024 } else { 1024 };
+    let trimmed = text.trim();
+    let (whole, frac) = trimmed
+        .split_once('.')
+        .map_or((trimmed, ""), |(w, f)| (w, f));
+    let digits = |part: &str| part.bytes().all(|b| b.is_ascii_digit());
+    if whole.is_empty() && frac.is_empty() {
+        return Err("请输入大于 0 的数字（可用小数，换算后须为整数字节）".into());
+    }
+    if !digits(whole) || !digits(frac) {
+        return Err("大小只接受非负十进制数字".into());
+    }
+    let whole_value: u64 = whole
+        .parse()
+        .map_err(|_| "数值超出允许的范围".to_string())?;
+    let base = whole_value
+        .checked_mul(multiplier)
+        .ok_or_else(|| "数值超出允许的范围".to_string())?;
+    if base == 0 {
+        return Err("拆分大小必须大于 0".into());
+    }
+    if frac.is_empty() {
+        return Ok(base);
+    }
+    if frac.len() > 9 {
+        return Err("小数位数过多，换算后不是整数字节".into());
+    }
+    let frac_value: u64 = frac.parse().map_err(|_| "数值超出允许的范围".to_string())?;
+    let digits_count = u32::try_from(frac.len()).unwrap_or(u32::MAX);
+    let denom = 10u64
+        .checked_pow(digits_count)
+        .ok_or_else(|| "数值超出允许的范围".to_string())?;
+    let scaled = frac_value
+        .checked_mul(multiplier)
+        .ok_or_else(|| "数值超出允许的范围".to_string())?;
+    if scaled % denom != 0 {
+        return Err("换算后不是整数字节（如 0.1 KB = 102.4 字节）".into());
+    }
+    base.checked_add(scaled / denom)
+        .ok_or_else(|| "数值超出允许的范围".to_string())
+}
+
+/// MD 整理合并输出文件名（M-07）：去掉首尾空白，不含路径分隔符，自动补 `.md` 后缀。
+fn normalize_output_name(raw: &str) -> Result<String, String> {
+    let name = raw.trim();
+    if name.is_empty() {
+        return Err("请填写输出文件名".into());
+    }
+    if name.contains('/') || name.contains('\\') || name.contains(':') {
+        return Err("输出文件名不能包含路径分隔符".into());
+    }
+    if crate::fsutil::validate_component(name).is_err() {
+        return Err(format!("输出文件名「{name}」不是合法的 Windows 文件名"));
+    }
+    if name.to_ascii_lowercase().ends_with(".md") {
+        Ok(name.to_owned())
+    } else {
+        Ok(format!("{name}.md"))
+    }
+}
+
+/// MD 合并任务的公共运行段：扫描（排除输出自身）→（按 overwrite）合并（M-02~M-07）。
+/// 供首次启动（overwrite=false）与覆盖确认后的重跑共用；文件集合在执行时重新扫描。
+fn md_merge_run(
+    root: &Path,
+    recursive: bool,
+    output: &Path,
+    overwrite: bool,
+    control: &Arc<Control>,
+    out: &EventSender,
+) -> Result<String, String> {
+    let entries = md_tools::scan_markdown(root, recursive, Some(output))
+        .map_err(|error| format!("{error:#}"))?;
+    let _ = out.send(Event::Log(format!(
+        "扫描完成：找到 {} 个 .md 文件（{}），输出：{}",
+        entries.len(),
+        if recursive { "递归" } else { "不递归" },
+        output.display()
+    )));
+    if entries.is_empty() {
+        return Ok(format!(
+            "所选范围内没有 .md 文件，未生成输出：{}",
+            root.display()
+        ));
+    }
+    // M-07：输出已存在 → 交由界面确认（MD_CONFLICT 前缀触发确认框），确认后重跑覆盖
+    if !overwrite && output.exists() {
+        return Err(format!(
+            "MD_CONFLICT 输出文件已存在：{}；确认后将覆盖原内容（不可恢复），返回检查则不做任何写入",
+            output.display()
+        ));
+    }
+    let progress_out = out.clone();
+    let progress_control = Arc::clone(control);
+    let stats = md_tools::merge_markdown(
+        &entries,
+        output,
+        overwrite,
+        control,
+        &|index: usize, total: usize| {
+            progress_control.set_planned(u64::try_from(total).unwrap_or(0));
+            progress_control
+                .completed
+                .store(u64::try_from(index).unwrap_or(0), Ordering::Relaxed);
+            let _ = progress_out.send(Event::Status(format!("合并中：{index} / {total} 个文件")));
+            Ok(())
+        },
+    )
+    .map_err(|error| format!("{error:#}"))?;
+    Ok(format!(
+        "合并完成：{} 个文件按创建时间顺序写入 {}",
+        stats.files,
+        output.display()
+    ))
+}
+
+/// MD 拆分任务的公共运行段：规划（UTF-8 安全边界）→ 冲突检测 →（按 overwrite）写出
+/// （M-08~M-11）。供首次启动与覆盖确认后的重跑共用。
+fn md_split_run(
+    input: &Path,
+    limit: u64,
+    out_dir: &Path,
+    overwrite: bool,
+    control: &Arc<Control>,
+    out: &EventSender,
+) -> Result<String, String> {
+    let plan = md_tools::plan_splits(input, limit).map_err(|error| format!("{error:#}"))?;
+    if plan.bounds.is_empty() {
+        return Ok(format!(
+            "输入文件为空（0 字节），没有可拆分的内容：{}",
+            input.display()
+        ));
+    }
+    let names = md_tools::split_names(
+        &input
+            .file_name()
+            .map(|name| name.to_string_lossy().into_owned())
+            .unwrap_or_default(),
+        plan.bounds.len(),
+    );
+    let conflicts = md_tools::conflicting_outputs(out_dir, &names);
+    if !conflicts.is_empty() {
+        let sample: Vec<String> = conflicts
+            .iter()
+            .take(3)
+            .map(|path| {
+                path.file_name()
+                    .map(|name| name.to_string_lossy().into_owned())
+                    .unwrap_or_default()
+            })
+            .collect();
+        return Err(format!(
+            "MD_CONFLICT {} 个同名分片已存在于输出目录（如 {}）",
+            conflicts.len(),
+            sample.join("、")
+        ));
+    }
+    let progress_out = out.clone();
+    let progress_control = Arc::clone(control);
+    let written = md_tools::run_split(
+        input,
+        &plan,
+        out_dir,
+        overwrite,
+        control,
+        &|index: usize, total: usize| {
+            progress_control.set_planned(u64::try_from(total).unwrap_or(0));
+            progress_control
+                .completed
+                .store(u64::try_from(index).unwrap_or(0), Ordering::Relaxed);
+            let _ = progress_out.send(Event::Status(format!("拆分中：{index} / {total} 片")));
+            Ok(())
+        },
+    )
+    .map_err(|error| format!("{error:#}"))?;
+    let _ = written;
+    Ok(format!(
+        "拆分完成：{} 片写入 {}（每片不超过 {} 字节）",
+        plan.bounds.len(),
+        out_dir.display(),
+        limit
+    ))
+}
+
+/// 后台线程统一收尾：Err 前缀 MD_CONFLICT 表示需要覆盖确认（M-07/M-11），
+/// 由事件泵转为确认框；其余 Err 按失败收尾。
+fn spawn_md_worker(
+    out: EventSender,
+    body: impl FnOnce() -> Result<String, String> + Send + 'static,
+) {
+    std::thread::spawn(move || {
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(body))
+            .unwrap_or_else(|_| Err("MD 整理后台操作意外退出；未完成的输出请手动检查".to_string()));
+        let event = match result {
+            Ok(text) => Event::MdDone(text),
+            Err(text) if text.starts_with("MD_CONFLICT ") => {
+                Event::MdNeedsConfirm(text.trim_start_matches("MD_CONFLICT ").to_string())
+            }
+            Err(text) => Event::Failed(text),
+        };
+        let _ = out.send(event);
+    });
+}
+
+/// 启动 MD 合并任务（M-02~M-07）：同步校验输入后转后台扫描与合并。
+fn start_md_merge(ui: &AppWindow, state: &Rc<RefCell<State>>, out: &EventSender) {
+    if ui.get_busy() {
+        return;
+    }
+    let root = PathBuf::from(ui.get_md_input_dir().to_string());
+    if root.as_os_str().is_empty() {
+        show_error(ui, "请先选择或输入要合并的目录");
+        return;
+    }
+    if !root.is_dir() {
+        show_error(ui, "输入目录不存在或无法访问，请重新选择");
+        return;
+    }
+    let name = match normalize_output_name(ui.get_md_output_name().as_str()) {
+        Ok(name) => name,
+        Err(text) => {
+            show_error(ui, text);
+            return;
+        }
+    };
+    let out_dir = PathBuf::from(ui.get_md_output_dir().to_string());
+    if out_dir.as_os_str().is_empty() {
+        show_error(ui, "请填写输出目录（可用「选择目录…」指定）");
+        return;
+    }
+    let recursive = ui.get_md_recursive();
+    let output = out_dir.join(&name);
+    let control = Arc::new(Control::default());
+    {
+        let mut s = state.borrow_mut();
+        s.control = Some(Arc::clone(&control));
+        s.logs.clear();
+        s.runtime = RuntimeMode::Md;
+        s.md_pending = Some(MdPending::Merge {
+            root: root.clone(),
+            recursive,
+            output: output.clone(),
+        });
+    }
+    ui.set_busy(true);
+    ui.set_error_text("".into());
+    ui.set_progress(-1.0);
+    ui.set_progress_note("".into());
+    ui.set_log_text("".into());
+    ui.set_status("正在扫描并合并 Markdown 文件；原文件不会被改动".into());
+    let worker_out = out.clone();
+    spawn_md_worker(worker_out.clone(), move || {
+        md_merge_run(&root, recursive, &output, false, &control, &worker_out)
+    });
+}
+
+/// 启动 MD 拆分任务（M-08~M-11）。
+fn start_md_split(ui: &AppWindow, state: &Rc<RefCell<State>>, out: &EventSender) {
+    if ui.get_busy() {
+        return;
+    }
+    let input = PathBuf::from(ui.get_md_split_file().to_string());
+    if input.as_os_str().is_empty() {
+        show_error(ui, "请先选择要拆分的 .md 文件");
+        return;
+    }
+    if !input.is_file() {
+        show_error(ui, "输入文件不存在或不是文件，请重新选择");
+        return;
+    }
+    if !input
+        .extension()
+        .is_some_and(|ext| ext.eq_ignore_ascii_case("md"))
+    {
+        show_error(ui, "MD 拆分只接受 .md 文件");
+        return;
+    }
+    let limit = match parse_size_bytes(ui.get_md_split_size().as_str(), ui.get_md_split_unit()) {
+        Ok(limit) => limit,
+        Err(text) => {
+            show_error(ui, text);
+            return;
+        }
+    };
+    let out_dir = PathBuf::from(ui.get_md_split_dir().to_string());
+    if out_dir.as_os_str().is_empty() {
+        show_error(ui, "请填写输出目录（可用「选择目录…」指定）");
+        return;
+    }
+    let control = Arc::new(Control::default());
+    {
+        let mut s = state.borrow_mut();
+        s.control = Some(Arc::clone(&control));
+        s.logs.clear();
+        s.runtime = RuntimeMode::Md;
+        s.md_pending = Some(MdPending::Split {
+            input: input.clone(),
+            limit,
+            out_dir: out_dir.clone(),
+        });
+    }
+    ui.set_busy(true);
+    ui.set_error_text("".into());
+    ui.set_progress(-1.0);
+    ui.set_progress_note("".into());
+    ui.set_log_text("".into());
+    ui.set_status(format!("正在规划拆分边界（单文件上限 {limit} 字节）").into());
+    let worker_out = out.clone();
+    spawn_md_worker(worker_out.clone(), move || {
+        md_split_run(&input, limit, &out_dir, false, &control, &worker_out)
+    });
+}
+
+/// 确认框 kind=4 的处理：消费挂起的 MD 操作并以覆盖模式重跑（M-07/M-11）。
+/// 生产由 on_confirmed(4) 调用；无头测试直接调用同一函数走完全相同的路径。
+fn confirm_md_override(ui: &AppWindow, state: &Rc<RefCell<State>>, out: &EventSender) {
+    let pending = state.borrow_mut().md_pending.take();
+    if let Some(pending) = pending {
+        ui.set_busy(true);
+        ui.set_acknowledge(false);
+        ui.set_status("已确认覆盖：正在重新扫描并写入输出".into());
+        resume_md_after_confirm(pending, state, out);
+    }
+}
+
+/// 覆盖确认后的 MD 重跑（M-07/M-11）：重新扫描/规划并写入（overwrite=true）。
+fn resume_md_after_confirm(pending: MdPending, state: &Rc<RefCell<State>>, out: &EventSender) {
+    let control = Arc::new(Control::default());
+    {
+        let mut s = state.borrow_mut();
+        s.control = Some(Arc::clone(&control));
+        s.runtime = RuntimeMode::Md;
+    }
+    let worker_out = out.clone();
+    spawn_md_worker(worker_out.clone(), move || match pending {
+        MdPending::Merge {
+            root,
+            recursive,
+            output,
+        } => md_merge_run(&root, recursive, &output, true, &control, &worker_out),
+        MdPending::Split {
+            input,
+            limit,
+            out_dir,
+        } => md_split_run(&input, limit, &out_dir, true, &control, &worker_out),
+    });
+}
+
+/// 启动 Git 逐文件提交并推送任务（G-02~G-16）。
+fn start_git(ui: &AppWindow, state: &Rc<RefCell<State>>, out: &EventSender) {
+    if ui.get_busy() {
+        return;
+    }
+    let repo = PathBuf::from(ui.get_git_repo().to_string());
+    if repo.as_os_str().is_empty() {
+        show_error(ui, "请先选择或输入 Git 项目目录");
+        return;
+    }
+    if !repo.is_dir() {
+        show_error(ui, "目录不存在或无法访问，请重新选择");
+        return;
+    }
+    let control = Arc::new(Control::default());
+    let shared = Arc::new(GitShared::new());
+    {
+        let mut s = state.borrow_mut();
+        s.control = Some(Arc::clone(&control));
+        s.logs.clear();
+        s.runtime = RuntimeMode::Git;
+        s.git_shared = Some(Arc::clone(&shared));
+        s.md_pending = None;
+    }
+    ui.set_busy(true);
+    ui.set_error_text("".into());
+    ui.set_notice_text("".into());
+    ui.set_progress(-1.0);
+    ui.set_progress_note("".into());
+    ui.set_log_text("".into());
+    ui.set_git_state("检查仓库".into());
+    ui.set_status("正在验证仓库（分支、upstream 与仓库状态）…".into());
+    let worker_out = out.clone();
+    std::thread::spawn(move || {
+        let git = match git_tools::find_git() {
+            Ok(git) => git,
+            Err(error) => {
+                let _ = worker_out.send(Event::Failed(format!("{error:#}")));
+                return;
+            }
+        };
+        let log_out = worker_out.clone();
+        let status_out = worker_out.clone();
+        let final_text = git_tools::run(
+            &git,
+            &repo,
+            &control,
+            &shared,
+            &|text: &str| {
+                let _ = log_out.send(Event::Log(text.to_string()));
+            },
+            &|text: &str| {
+                let _ = status_out.send(Event::Status(text.to_string()));
+            },
+            BACKOFF_UNIT,
+        );
+        let _ = worker_out.send(Event::GitDone(final_text));
+    });
+}
+
 /// 范围缩小提示的前缀：只有本条提示才在范围恢复默认时被清除，
 /// 不影响取消等其它蓝条通知（U-06）。
 const SCOPE_NOTICE_PREFIX: &str = "已缩小处理范围";
@@ -1227,6 +1697,8 @@ fn log_panel_visible(ui: &AppWindow) -> bool {
     match ui.get_screen() {
         0 => ui.get_panel() == 2,
         2 => ui.get_panel() == 1,
+        // MD 整理与 Git 工具页的日志区常驻显示（无面板切换）。
+        3 | 4 => true,
         _ => false,
     }
 }
@@ -1313,19 +1785,27 @@ fn wire_sync(ui: &AppWindow, state: &Rc<RefCell<State>>, out: &EventSender) {
                     let screen = match tool {
                         Tool::Extract => 2,
                         Tool::Organizer => 0,
+                        Tool::Md => 3,
+                        Tool::Git => 4,
                     };
                     ui.set_screen(screen);
                     ui.set_active_tool_id(id.clone());
                     {
                         let mut s = state.borrow_mut();
                         s.tool = tool;
-                        // 切工具回到该工具的第一个规则分区；分区集合随工具变化（R-01）。
-                        s.section = tool.sections()[0].to_string();
+                        // 切工具回到该工具的第一个规则分区；MD/Git 无规则分区（R-01），
+                        // 分区名清空，界面不显示分区胶囊。分区集合随工具变化（R-01）。
+                        s.section = tool
+                            .sections()
+                            .first()
+                            .map_or_else(String::new, |first| (*first).to_string());
                     }
                     ui.set_section(0);
                     // 面板页签集合同样随工具变化（目录整理 0–2、递归解压 0–1）：
                     // 共享索引不重置会停在另一工具才有的面板，内容区整块空白（U-11）。
                     ui.set_panel(0);
+                    // U-11：MD 整理回到默认子页「合并 MD」，不得停留在拆分子页。
+                    ui.set_md_subpage(0);
                     refresh(&ui, &state.borrow());
                     // 切工具不是规则或目录改动（C-10/R-04）：就绪计划按「任务+配置+目录」
                     // 重算保持可执行，与目录重输同口径，而不是一律失效。
@@ -1739,6 +2219,9 @@ impl UiPump {
                         let mut s = self.state.borrow_mut();
                         s.control = None;
                         s.extracting = false;
+                        s.runtime = RuntimeMode::Organizer;
+                        s.md_pending = None;
+                        s.git_shared = None;
                         push_event_log(&mut s.logs, error.clone());
                         self.log_dirty.set(true);
                     }
@@ -2023,6 +2506,75 @@ impl UiPump {
                         let _ = slint::quit_event_loop();
                     }
                 }
+                Event::MdNeedsConfirm(text) => {
+                    pending_status = None;
+                    terminal = true;
+                    // M-07/M-11：输出/分片冲突转确认框；挂起的操作保存在 state.md_pending，
+                    // 确认（kind=4）后重跑，返回检查则由下一次启动自然顶替。
+                    {
+                        let mut s = self.state.borrow_mut();
+                        s.control = None;
+                        push_event_log(&mut s.logs, format!("等待确认：{text}"));
+                        self.log_dirty.set(true);
+                    }
+                    ui.set_busy(false);
+                    ui.set_progress(-1.0);
+                    ui.set_progress_note("".into());
+                    ui.set_confirm_text(text.into());
+                    ui.set_acknowledge(false);
+                    ui.set_confirm_kind(4);
+                }
+                Event::MdDone(text) => {
+                    pending_status = None;
+                    terminal = true;
+                    {
+                        let mut s = self.state.borrow_mut();
+                        s.control = None;
+                        s.runtime = RuntimeMode::Organizer;
+                        push_event_log(&mut s.logs, text.clone());
+                        self.log_dirty.set(true);
+                    }
+                    ui.set_busy(false);
+                    ui.set_progress(-1.0);
+                    ui.set_progress_note("".into());
+                    ui.set_status(text.into());
+                }
+                Event::GitDone(text) => {
+                    pending_status = None;
+                    terminal = true;
+                    {
+                        let mut s = self.state.borrow_mut();
+                        s.control = None;
+                        s.runtime = RuntimeMode::Organizer;
+                        push_event_log(&mut s.logs, text.clone());
+                        self.log_dirty.set(true);
+                        // 收尾时把共享进度的最终状态定格上屏（G-13）。
+                        if let Some(shared) = &s.git_shared {
+                            if let Ok(state_text) = shared.state.lock() {
+                                ui.set_git_state(state_text.as_str().into());
+                            }
+                            if let Ok(stage) = shared.stage.lock() {
+                                ui.set_git_stage(stage.as_str().into());
+                            }
+                            ui.set_git_done(
+                                i32::try_from(shared.done.load(Ordering::Relaxed))
+                                    .unwrap_or(i32::MAX),
+                            );
+                            ui.set_git_total(
+                                i32::try_from(shared.total.load(Ordering::Relaxed))
+                                    .unwrap_or(i32::MAX),
+                            );
+                        }
+                        s.git_shared = None;
+                    }
+                    ui.set_busy(false);
+                    ui.set_progress(-1.0);
+                    ui.set_progress_note("".into());
+                    ui.set_status(text.into());
+                    if self.state.borrow().close_after {
+                        let _ = slint::quit_event_loop();
+                    }
+                }
             }
         }
         if let Some(text) = pending_status {
@@ -2097,6 +2649,69 @@ impl UiPump {
             ui.set_progress_note("准备中".into());
             return;
         };
+        // Git：从共享进度读取全部界面字段（G-13；不写整理流程计数器）。
+        if s.runtime == RuntimeMode::Git {
+            if let Some(shared) = &s.git_shared {
+                if let Ok(branch) = shared.branch.lock() {
+                    ui.set_git_branch(branch.as_str().into());
+                }
+                if let Ok(upstream) = shared.upstream.lock() {
+                    ui.set_git_upstream(upstream.as_str().into());
+                }
+                if let Ok(current) = shared.current.lock() {
+                    ui.set_git_current(current.as_str().into());
+                }
+                if let Ok(stage) = shared.stage.lock() {
+                    ui.set_git_stage(stage.as_str().into());
+                }
+                if let Ok(state_text) = shared.state.lock() {
+                    ui.set_git_state(state_text.as_str().into());
+                }
+                let retry = shared.retry.load(Ordering::Relaxed);
+                ui.set_git_retry(i32::try_from(retry).unwrap_or(i32::MAX));
+                ui.set_git_retry_wait(
+                    i32::try_from(shared.retry_wait.load(Ordering::Relaxed)).unwrap_or(i32::MAX),
+                );
+                let done = shared.done.load(Ordering::Relaxed);
+                let total = shared.total.load(Ordering::Relaxed);
+                ui.set_git_done(i32::try_from(done).unwrap_or(i32::MAX));
+                ui.set_git_total(i32::try_from(total).unwrap_or(i32::MAX));
+                let elapsed = s.started.elapsed().as_secs_f64().max(0.001);
+                if total > 0 {
+                    // 进度分数为显示用途（Slint progress 即 f32），整数→浮点无受检 API。
+                    #[allow(clippy::cast_possible_truncation, clippy::cast_precision_loss)]
+                    let progress = (done as f64 / total as f64).clamp(0.0, 1.0) as f32;
+                    ui.set_progress(progress);
+                    ui.set_progress_note(format!("{done} / {total}").into());
+                } else {
+                    ui.set_progress(-1.0);
+                    ui.set_progress_note("".into());
+                }
+                ui.set_metrics(
+                    format!("已完成 {done} / {total} · 重试 {retry} 次 · 耗时 {elapsed:.1}s")
+                        .into(),
+                );
+            }
+            return;
+        }
+        // MD：worker 经 control 上报已完成/总数（不写整理的读取量指标）。
+        if s.runtime == RuntimeMode::Md {
+            let done = control.completed.load(Ordering::Relaxed);
+            let planned = control.planned().unwrap_or(0);
+            let elapsed = s.started.elapsed().as_secs_f64().max(0.001);
+            ui.set_metrics(format!("已处理 {done} / {planned} · 耗时 {elapsed:.1}s").into());
+            if planned > 0 {
+                // 进度分数为显示用途（Slint progress 即 f32），整数→浮点无受检 API。
+                #[allow(clippy::cast_possible_truncation, clippy::cast_precision_loss)]
+                let progress = (done as f64 / planned as f64).clamp(0.0, 1.0) as f32;
+                ui.set_progress(progress);
+                ui.set_progress_note(format!("{done} / {planned}").into());
+            } else {
+                ui.set_progress(-1.0);
+                ui.set_progress_note("".into());
+            }
+            return;
+        }
         let read = control.read_bytes.load(Ordering::Relaxed);
         let elapsed = s.started.elapsed().as_secs_f64().max(0.001);
         let done = control.completed.load(Ordering::Relaxed);
@@ -2185,6 +2800,9 @@ fn initial_state() -> Result<State> {
         selection_failed: false,
         show_advanced: false,
         tool: Tool::Organizer,
+        runtime: RuntimeMode::Organizer,
+        md_pending: None,
+        git_shared: None,
         engine_overrides: None,
         plan_load: Arc::new(PlanLoadSync::default()),
         readiness_status_pending: Cell::new(false),
@@ -2199,6 +2817,132 @@ pub fn run_with_pre_loop_hook(hook: impl FnOnce(&AppWindow) + 'static) -> Result
 }
 
 /// 允许测试注入状态目录；生产 GUI 走 `run()` / `run_with_pre_loop_hook`。
+/// MD 整理与 Git 工具的回调装配（M/G 分区；R-01 参数直接在页面提供）。
+/// 生产 `run_with_engine_overrides` 与无头测试 `with_gui` 共用：测试直接以真实回调驱动。
+fn wire_md_git(ui: &AppWindow, state: &Rc<RefCell<State>>, out: &EventSender) {
+    {
+        let weak = ui.as_weak();
+        ui.on_md_select_subpage(move |page| {
+            if let Some(ui) = weak.upgrade() {
+                if page == 0 || page == 1 {
+                    ui.set_md_subpage(page);
+                }
+            }
+        });
+    }
+    {
+        let weak = ui.as_weak();
+        ui.on_md_choose_input(move || {
+            if let Some(ui) = weak.upgrade() {
+                pick_directory(&ui, "选择要合并的目录", |ui, path| {
+                    ui.set_md_input_dir(path.display().to_string().into());
+                });
+            }
+        });
+    }
+    {
+        let weak = ui.as_weak();
+        ui.on_md_choose_output(move || {
+            if let Some(ui) = weak.upgrade() {
+                pick_directory(&ui, "选择合并输出目录", |ui, path| {
+                    ui.set_md_output_dir(path.display().to_string().into());
+                });
+            }
+        });
+    }
+    {
+        let weak = ui.as_weak();
+        ui.on_md_split_choose_dir(move || {
+            if let Some(ui) = weak.upgrade() {
+                pick_directory(&ui, "选择拆分输出目录", |ui, path| {
+                    ui.set_md_split_dir(path.display().to_string().into());
+                });
+            }
+        });
+    }
+    {
+        let weak = ui.as_weak();
+        ui.on_md_split_choose_file(move || {
+            if let Some(ui) = weak.upgrade() {
+                // U-07：文件选择从最近输入目录开始。
+                let mut dialog = rfd::FileDialog::new()
+                    .set_title("选择要拆分的 .md 文件")
+                    .add_filter("Markdown", &["md"]);
+                let entered = PathBuf::from(ui.get_md_split_file().to_string());
+                let start = if entered.is_file() {
+                    entered.parent().map(Path::to_path_buf)
+                } else if entered.is_dir() {
+                    Some(entered.clone())
+                } else {
+                    let fallback = PathBuf::from(ui.get_md_input_dir().to_string());
+                    fallback.is_dir().then_some(fallback)
+                };
+                if let Some(start) = start {
+                    dialog = dialog.set_directory(start);
+                }
+                if let Some(path) = dialog.pick_file() {
+                    ui.set_md_split_file(path.display().to_string().into());
+                }
+            }
+        });
+    }
+    {
+        let weak = ui.as_weak();
+        ui.on_git_choose_repo(move || {
+            if let Some(ui) = weak.upgrade() {
+                pick_directory(&ui, "选择 Git 项目目录", |ui, path| {
+                    ui.set_git_repo(path.display().to_string().into());
+                });
+            }
+        });
+    }
+    {
+        let weak = ui.as_weak();
+        let state = state.clone();
+        let out = out.clone();
+        ui.on_md_merge_start(move || {
+            if let Some(ui) = weak.upgrade() {
+                start_md_merge(&ui, &state, &out);
+            }
+        });
+    }
+    {
+        let weak = ui.as_weak();
+        let state = state.clone();
+        let out = out.clone();
+        ui.on_md_split_start(move || {
+            if let Some(ui) = weak.upgrade() {
+                start_md_split(&ui, &state, &out);
+            }
+        });
+    }
+    {
+        let weak = ui.as_weak();
+        let state = state.clone();
+        let out = out.clone();
+        ui.on_git_start(move || {
+            if let Some(ui) = weak.upgrade() {
+                start_git(&ui, &state, &out);
+            }
+        });
+    }
+    {
+        let weak = ui.as_weak();
+        let state = state.clone();
+        ui.on_git_stop(move || {
+            // G-15：停止 = 不再处理新文件、不启动下一次 retry；当前 git 命令自然结束。
+            if let Some(control) = &state.borrow().control {
+                control.cancel();
+            }
+            if let Some(ui) = weak.upgrade() {
+                ui.set_status(
+                    "正在停止：等待当前 git 命令结束后不再继续；已成功推送的文件保持成功".into(),
+                );
+            }
+        });
+    }
+}
+
 pub fn run_with_engine_overrides(
     hook: impl FnOnce(&AppWindow) + 'static,
     overrides: Option<EngineTestOverrides>,
@@ -2257,6 +3001,7 @@ pub fn run_with_engine_overrides(
         });
     }
     wire_sync(&ui, &state, &out);
+    wire_md_git(&ui, &state, &out);
     // 启动落在注册表第一个工具（P-02 顺序：递归解压在前）。必须在 wire_sync 之后调用：
     // 回调接线前的 invoke 是空调用，窗口会停在目录整理页。
     ui.invoke_select_tool("recursive-extract".into());
@@ -2278,6 +3023,9 @@ pub fn run_with_engine_overrides(
                         return;
                     }
                     ui.set_status("取消任务中，完成当前安全操作后关闭".into());
+                } else if kind == 4 {
+                    // M-07/M-11：覆盖确认后重跑挂起的 MD 操作（写入前重新扫描/规划）。
+                    confirm_md_override(&ui, &state, &out);
                 } else if kind == 2 {
                     start_task(&ui, &state, &out, true);
                 } else if ui.get_screen() == 2 {
@@ -2302,7 +3050,7 @@ pub fn run_with_engine_overrides(
                 control.cancel();
             }
             if let Some(ui) = weak.upgrade() {
-                ui.set_status("正在取消；不会继续后续删除和移动".into());
+                ui.set_status("正在取消；当前操作完成后停止，不会继续后续操作".into());
             }
         });
     }
@@ -2554,6 +3302,146 @@ mod gui_tests {
     use super::*;
     use std::sync::{mpsc, Mutex, OnceLock};
 
+    // 覆盖 P-02/U-11（新工具导航注册与切工具回默认子页）
+    #[test]
+    fn md_and_git_tools_navigate_and_reset_subpage() {
+        with_gui(|app| {
+            app.ui.invoke_select_tool("md-organizer".into());
+            assert_eq!(app.ui.get_screen(), 3, "MD 整理应进入独立页面（M-01）");
+            assert_eq!(app.ui.get_active_tool_id(), "md-organizer");
+            app.ui.set_md_subpage(1);
+            app.ui.invoke_select_tool("git-tools".into());
+            assert_eq!(app.ui.get_screen(), 4, "Git 工具应进入独立页面（G-01）");
+            // U-11：切回 MD 整理必须回到默认子页「合并 MD」，不得停留在拆分子页
+            app.ui.invoke_select_tool("md-organizer".into());
+            assert_eq!(app.ui.get_md_subpage(), 0, "切工具回默认子页（U-11）");
+            // 现有工具不受影响（H-03：不删除、不隐藏、不改名）
+            app.ui.invoke_select_tool("recursive-extract".into());
+            assert_eq!(app.ui.get_screen(), 2);
+            app.ui.invoke_select_tool("directory-organizer".into());
+            assert_eq!(app.ui.get_screen(), 0);
+        })
+        .unwrap();
+    }
+
+    // 覆盖 M-02/M-04/M-07（MD 合并的真实回调端到端：扫描→合并→完成文案与输出内容）
+    #[test]
+    fn md_merge_flow_runs_end_to_end_via_real_callbacks() {
+        let dir = temp_test_dir("md-merge-flow");
+        let docs = dir.join("docs");
+        std::fs::create_dir_all(&docs).unwrap();
+        std::fs::write(
+            docs.join("a.md"),
+            "# 甲
+
+内容A",
+        )
+        .unwrap();
+        std::fs::write(
+            docs.join("b.md"),
+            "# 乙
+内容B
+",
+        )
+        .unwrap();
+        let output = docs.join("merged.md");
+        let docs_text = docs.display().to_string();
+        let output_text = output.display().to_string();
+        with_gui(move |app| {
+            app.ui.invoke_select_tool("md-organizer".into());
+            app.ui.set_md_input_dir(docs_text.clone().into());
+            app.ui.set_md_recursive(true);
+            app.ui.set_md_output_name("merged.md".into());
+            app.ui.set_md_output_dir(docs_text.clone().into());
+            app.ui.invoke_md_merge_start();
+            assert!(
+                pump_until(app, || !app.ui.get_busy()
+                    && app.ui.get_status().contains("合并完成")),
+                "合并应经真实回调完成：status={}",
+                app.ui.get_status()
+            );
+            let merged = std::fs::read_to_string(&output).unwrap();
+            assert!(
+                merged.contains(
+                    "# a.md
+
+## 甲"
+                ),
+                "文件名标题+内部标题下移：{merged}"
+            );
+            assert!(
+                merged.contains(
+                    "## 乙
+内容B"
+                ),
+                "{merged}"
+            );
+            assert!(
+                merged.contains(
+                    "内容A
+
+# b.md"
+                ),
+                "文件间必须空行分隔：{merged:?}"
+            );
+            assert!(
+                std::fs::read_to_string(docs.join("a.md"))
+                    .unwrap()
+                    .starts_with("# 甲"),
+                "原文件不得被改动（M-02）"
+            );
+            let _ = output_text;
+            let _ = std::fs::remove_dir_all(&dir);
+        })
+        .unwrap();
+    }
+
+    // 覆盖 M-07（输出已存在：先确认、不静默覆盖；确认后完成覆盖）
+    #[test]
+    fn md_merge_existing_output_requires_confirmation() {
+        let dir = temp_test_dir("md-merge-confirm");
+        let docs = dir.join("docs");
+        std::fs::create_dir_all(&docs).unwrap();
+        std::fs::write(
+            docs.join("a.md"),
+            "# 甲
+",
+        )
+        .unwrap();
+        std::fs::write(docs.join("merged.md"), "旧输出").unwrap();
+        let docs_text = docs.display().to_string();
+        with_gui(move |app| {
+            app.ui.invoke_select_tool("md-organizer".into());
+            app.ui.set_md_input_dir(docs_text.clone().into());
+            app.ui.set_md_output_name("merged.md".into());
+            app.ui.set_md_output_dir(docs_text.clone().into());
+            app.ui.invoke_md_merge_start();
+            // 冲突 → 确认框（kind=4），旧输出未被破坏
+            assert!(
+                pump_until(app, || app.ui.get_confirm_kind() == 4),
+                "输出已存在必须弹确认框（M-07）"
+            );
+            assert_eq!(
+                std::fs::read_to_string(dir.join("docs").join("merged.md")).unwrap(),
+                "旧输出",
+                "确认前不得破坏已有文件"
+            );
+            app.ui.set_acknowledge(true);
+            app.ui.set_confirm_kind(0);
+            confirm_md_override(&app.ui, &app.state, &app.pump.out);
+            assert!(
+                pump_until(app, || !app.ui.get_busy()
+                    && app.ui.get_status().contains("合并完成")),
+                "确认覆盖后应完成：status={}",
+                app.ui.get_status()
+            );
+            let merged = std::fs::read_to_string(dir.join("docs").join("merged.md")).unwrap();
+            assert!(merged.contains("# a.md"), "确认后输出被覆盖写入：{merged}");
+            let _ = std::fs::remove_dir_all(&dir);
+        })
+        .unwrap();
+    }
+
     // 覆盖 C-11（页面结果只按当前页面代际与视图筛选应用；过期页面不落地）
     #[test]
     fn plan_page_event_rejects_stale_generation_and_filter() {
@@ -2696,6 +3584,16 @@ mod gui_tests {
             self.ui.set_confirm_text("".into());
             self.ui
                 .set_plans(Rc::new(VecModel::from(Vec::<PlanRow>::new())).into());
+            self.ui.set_md_subpage(0);
+            self.ui.set_git_branch("".into());
+            self.ui.set_git_upstream("".into());
+            self.ui.set_git_current("".into());
+            self.ui.set_git_stage("".into());
+            self.ui.set_git_retry(0);
+            self.ui.set_git_retry_wait(0);
+            self.ui.set_git_total(0);
+            self.ui.set_git_done(0);
+            self.ui.set_git_state("".into());
             reset_tool_list(&self.ui);
             refresh(&self.ui, &self.state.borrow());
         }
@@ -2726,6 +3624,7 @@ mod gui_tests {
                     let (event_tx, event_rx) = mpsc::sync_channel::<Event>(256);
                     let out = EventSender::new(event_tx);
                     wire_sync(&ui, &state, &out);
+                    wire_md_git(&ui, &state, &out);
                     refresh(&ui, &state.borrow());
                     let pump = UiPump::new(event_rx, state.clone(), out);
                     let app = GuiTestApp { ui, state, pump };
@@ -2799,18 +3698,24 @@ mod gui_tests {
             let ui = &app.ui;
             assert!(!ui.get_ready(), "初始状态不得就绪");
             assert_eq!(ui.get_theme(), 0, "默认跟随系统主题");
-            assert_eq!(ui.get_tool_count(), 2, "当前注册的工具数量");
-            // H-03：两个独立工具入口都正常可见（侧栏遍历注册表，不做隐藏、折叠或降级）。
+            assert_eq!(
+                ui.get_tool_count(),
+                4,
+                "当前注册的工具数量（P-02：四个工具）"
+            );
+            // H-03：四个独立工具入口都正常可见（侧栏遍历注册表，不做隐藏、折叠或降级）。
             let tools = ui.get_tools();
-            assert_eq!(tools.row_count(), 2, "侧栏必须同时列出两个工具");
+            assert_eq!(tools.row_count(), 4, "侧栏必须同时列出全部工具");
             let ids: Vec<String> = (0..tools.row_count())
                 .filter_map(|i| tools.row_data(i))
                 .map(|tool| tool.id.to_string())
                 .collect();
             assert!(
                 ids.iter().any(|id| id == "recursive-extract")
-                    && ids.iter().any(|id| id == "directory-organizer"),
-                "两个工具入口必须按注册表 id 出现在侧栏：{ids:?}"
+                    && ids.iter().any(|id| id == "directory-organizer")
+                    && ids.iter().any(|id| id == "md-organizer")
+                    && ids.iter().any(|id| id == "git-tools"),
+                "四个工具入口必须按注册表 id 出现在侧栏：{ids:?}"
             );
             assert_eq!(ui.get_tool_search().as_str(), "", "启动不得预置搜索过滤");
         })

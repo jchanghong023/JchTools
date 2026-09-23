@@ -21,6 +21,18 @@ pub fn tools() -> &'static [ToolDescriptor] {
             category: "文件",
             summary: "内容去重 · 归类 · 清理（不解压）",
         },
+        ToolDescriptor {
+            id: "md-organizer",
+            name: "MD 整理",
+            category: "文档",
+            summary: "合并 MD（标题下移一级）· 拆分 MD（UTF-8 安全 · 无损）",
+        },
+        ToolDescriptor {
+            id: "git-tools",
+            name: "Git 工具",
+            category: "开发",
+            summary: "逐文件提交并推送 · 自动重试 · 冲突即停",
+        },
     ]
 }
 

@@ -133,6 +133,13 @@ pub enum Event {
     ExtractCount(u64, Result<u64, String>),
     /// 「递归解压」一段式运行结束（X-02）：不生成计划、无 ready 态，界面只收尾摘要。
     ExtractDone(std::path::PathBuf, crate::model::Summary),
+    /// MD 整理：输出/分片冲突需要用户确认覆盖（M-07/M-11）。文本为确认框文案；
+    /// 待执行的操作保存在界面 State 的挂起槽，确认后由界面重新发起执行。
+    MdNeedsConfirm(String),
+    /// MD 整理：合并或拆分完成（文案含统计）。
+    MdDone(String),
+    /// Git 工具：任务收尾（完成/停止/冲突/失败的最终文案，G-13 总体状态）。
+    GitDone(String),
 }
 #[derive(Clone, Default)]
 pub struct Context {

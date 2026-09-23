@@ -396,6 +396,27 @@ export component AppWindow inherits Window {
     in-out property <int> plan-empty-count: 0;
     in-out property <int> plan-filter: 0;
     in-out property <int> quarantined-count: 0;
+    // MD 整理（M 分区）：合并输入/输出与拆分输入/输出，任务参数直接在功能页面提供（R-01）。
+    in-out property <int> md-subpage: 0;          // 0 合并 MD，1 拆分 MD
+    in-out property <string> md-input-dir;
+    in-out property <bool> md-recursive: false;   // M-02：不递归 / 递归
+    in-out property <string> md-output-name: "merged.md";
+    in-out property <string> md-output-dir;
+    in-out property <string> md-split-file;
+    in-out property <string> md-split-size: "1";
+    in-out property <int> md-split-unit: 0;       // 0 KB，1 MB（M-08：1024 换算）
+    in-out property <string> md-split-dir;
+    // Git 工具（G 分区）：仓库输入与实时执行信息（G-13）。
+    in-out property <string> git-repo;
+    in-out property <string> git-branch;
+    in-out property <string> git-upstream;
+    in-out property <int> git-total: 0;
+    in-out property <int> git-done: 0;
+    in-out property <string> git-current;
+    in-out property <string> git-stage;
+    in-out property <int> git-retry: 0;
+    in-out property <int> git-retry-wait: 0;
+    in-out property <string> git-state;
     callback choose-directory();
     callback root-edited();
     callback select-tool(string);
@@ -417,6 +438,18 @@ export component AppWindow inherits Window {
     callback filter-plan(string);
     callback open-report();
     callback request-extract-start();
+    // MD 整理回调（M 分区）：目录/文件选择与任务启动。
+    callback md-select-subpage(int);
+    callback md-choose-input();
+    callback md-choose-output();
+    callback md-split-choose-file();
+    callback md-split-choose-dir();
+    callback md-merge-start();
+    callback md-split-start();
+    // Git 工具回调（G 分区）：仓库选择、启动与停止（G-15）。
+    callback git-choose-repo();
+    callback git-start();
+    callback git-stop();
     callback window-drag-start(length,length);
     callback window-drag-move(length,length);
     property <length> caption-area: 138px;
@@ -484,11 +517,14 @@ export component AppWindow inherits Window {
             padding: root.page-padding; padding-top: 36px; padding-bottom: 16px; spacing: 10px;
             // 页面标题区
             HorizontalLayout { height: 32px; spacing: 12px; cross-axis-alignment: center;
-                Label { text: root.screen == 0 ? "目录整理" : root.screen == 2 ? "递归解压" : "关于 JchTools";
+                Label { text: root.screen == 0 ? "目录整理" : root.screen == 2 ? "递归解压"
+                    : root.screen == 3 ? "MD 整理" : root.screen == 4 ? "Git 工具" : "关于 JchTools";
                     font-size: 20px; font-weight: 700; }
                 Rectangle { width: 3px; height: 16px; border-radius: 2px; background: Design.bar; }
                 Muted { text: root.screen == 0 ? "内容去重、归类与清理（不解压）；先分析出计划，确认后才执行。"
                     : root.screen == 2 ? "递归解开压缩包；完整成功解出的原压缩包及分卷永久删除（不可恢复），失败或未完全解开的包保留。"
+                    : root.screen == 3 ? "合并 MD（标题整体下移一级）与拆分 MD（UTF-8 安全、按序拼接无损还原）；原文件一律不改动。"
+                    : root.screen == 4 ? "逐文件提交并推送：add → commit → push 成功后才处理下一个文件；冲突即停、失败无限重试（可停止）。"
                     : "Windows 优先的本地工具箱 · 功能持续增加";
                     horizontal-stretch: 1; wrap: no-wrap; overflow: elide; vertical-alignment: center; }
                 if root.busy: Spinner { width: 20px; height: 20px; }
@@ -773,6 +809,185 @@ export component AppWindow inherits Window {
                     }
                 }
             }
+            if root.screen == 3: VerticalLayout {
+                spacing: 8px;
+                // 子功能页签（M-01：当前只有「合并 MD」与「拆分 MD」两个功能）
+                HorizontalLayout { height: 32px; spacing: 2px;
+                    Tab { text: "合并 MD"; active: root.md-subpage == 0; width: 104px; enabled: root.confirm-kind == 0; clicked => { root.md-select-subpage(0); } }
+                    Tab { text: "拆分 MD"; active: root.md-subpage == 1; width: 104px; enabled: root.confirm-kind == 0; clicked => { root.md-select-subpage(1); } }
+                    Rectangle { horizontal-stretch: 1; background: transparent; }
+                }
+                if root.md-subpage == 0: Surface {
+                    VerticalLayout { padding: 12px; spacing: 8px;
+                        Muted { text: "输入目录"; font-size: 11px; font-weight: 600; }
+                        HorizontalLayout { spacing: 10px; cross-axis-alignment: center;
+                            LineEdit { text <=> root.md-input-dir; placeholder-text: "选择或输入包含 Markdown 文件的目录，例如 D:\\Docs";
+                                enabled: !root.busy && root.confirm-kind == 0; horizontal-stretch: 1; }
+                            CheckBox { text: "递归子目录"; checked <=> root.md-recursive;
+                                enabled: !root.busy && root.confirm-kind == 0; }
+                            Button { text: "选择目录…"; enabled: !root.busy && root.confirm-kind == 0; clicked => { root.md-choose-input(); } }
+                        }
+                        Muted { text: "按文件创建时间从早到晚合并；创建时间相同时按相对路径自然排序（2.md 在 10.md 之前）。原文件不修改、不删除、不移动。"; }
+                    }
+                }
+                if root.md-subpage == 0: Surface {
+                    VerticalLayout { padding: 12px; spacing: 8px;
+                        Muted { text: "输出"; font-size: 11px; font-weight: 600; }
+                        HorizontalLayout { spacing: 10px; cross-axis-alignment: center;
+                            Label { text: "文件名"; }
+                            LineEdit { text <=> root.md-output-name; width: 200px;
+                                enabled: !root.busy && root.confirm-kind == 0; }
+                            Label { text: "输出目录"; }
+                            LineEdit { text <=> root.md-output-dir; placeholder-text: "合并结果保存位置";
+                                enabled: !root.busy && root.confirm-kind == 0; horizontal-stretch: 1; }
+                            Button { text: "选择目录…"; enabled: !root.busy && root.confirm-kind == 0; clicked => { root.md-choose-output(); } }
+                        }
+                        Muted { text: "每个原文件以「# 文件名.md」为一级标题，内部标题整体下移一级（六级封顶）。输出文件已存在时先弹确认，不静默覆盖；输出文件位于被扫描目录中时不作为输入参与合并。"; }
+                    }
+                }
+                if root.md-subpage == 1: Surface {
+                    VerticalLayout { padding: 12px; spacing: 8px;
+                        Muted { text: "输入文件"; font-size: 11px; font-weight: 600; }
+                        HorizontalLayout { spacing: 10px; cross-axis-alignment: center;
+                            LineEdit { text <=> root.md-split-file; placeholder-text: "选择要拆分的 .md 文件";
+                                enabled: !root.busy && root.confirm-kind == 0; horizontal-stretch: 1; }
+                            Button { text: "选择文件…"; enabled: !root.busy && root.confirm-kind == 0; clicked => { root.md-split-choose-file(); } }
+                        }
+                        HorizontalLayout { spacing: 10px; cross-axis-alignment: center;
+                            Label { text: "单文件上限"; }
+                            LineEdit { text <=> root.md-split-size; width: 120px; horizontal-alignment: right;
+                                enabled: !root.busy && root.confirm-kind == 0; }
+                            ComboBox { model: ["KB", "MB"]; current-index: root.md-split-unit; width: 100px;
+                                enabled: !root.busy && root.confirm-kind == 0;
+                                selected(value) => { root.md-split-unit = self.current-index; } }
+                            Rectangle { horizontal-stretch: 1; background: transparent; }
+                        }
+                        HorizontalLayout { spacing: 10px; cross-axis-alignment: center;
+                            Label { text: "输出目录"; }
+                            LineEdit { text <=> root.md-split-dir; placeholder-text: "分片保存位置";
+                                enabled: !root.busy && root.confirm-kind == 0; horizontal-stretch: 1; }
+                            Button { text: "选择目录…"; enabled: !root.busy && root.confirm-kind == 0; clicked => { root.md-split-choose-dir(); } }
+                        }
+                        Muted { text: "换算固定 1 KB = 1024 字节、1 MB = 1024 × 1024 字节；任意分片实际字节数严格不超过上限；全部分片按编号顺序拼接后与原文件完全一致，不插入任何额外文本。"; }
+                    }
+                }
+                Surface { vertical-stretch: 1;
+                    VerticalLayout { padding-top: 12px; padding-bottom: 12px; padding-left: 14px; padding-right: 14px; spacing: 8px;
+                        Muted { text: "最新的消息显示在最上面；界面只保留最近 300 条。"; }
+                        TextEdit { text: root.log-text; read-only: true; font-family: "Consolas"; vertical-stretch: 1; }
+                    }
+                }
+                // 底部状态与主操作（U-12：后台执行，界面保持响应、可取消）
+                Surface {
+                    min-height: 56px;
+                    VerticalLayout { padding-top: 8px; padding-bottom: 8px; padding-left: 16px; padding-right: 14px; spacing: 8px;
+                        HorizontalLayout { spacing: 12px; cross-axis-alignment: center;
+                            VerticalLayout { horizontal-stretch: 1; spacing: 2px;
+                                HorizontalLayout { spacing: 8px; cross-axis-alignment: center;
+                                    Rectangle { width: 44px; height: 20px; border-radius: 6px;
+                                        background: root.busy ? Design.accent : Design.accent-soft;
+                                        Text { text: root.busy ? "进行中" : "状态"; font-size: 11px; font-weight: 600;
+                                            color: root.busy ? Design.on-accent : Design.accent-ink;
+                                            width: parent.width; height: parent.height;
+                                            horizontal-alignment: center; vertical-alignment: center; }
+                                    }
+                                    Label { text: root.status; overflow: elide; font-weight: 600; horizontal-stretch: 1; font-size: 14px; }
+                                }
+                                Muted { text: root.metrics; wrap: no-wrap; overflow: elide; font-size: 12px; }
+                            }
+                            if root.busy: Button { text: "取消任务"; enabled: root.confirm-kind == 0; clicked => { root.cancel-task(); } }
+                            if !root.busy && root.md-subpage == 0: Button { text: "开始合并"; primary: true;
+                                enabled: root.md-input-dir != "" && root.confirm-kind == 0; clicked => { root.md-merge-start(); } }
+                            if !root.busy && root.md-subpage == 1: Button { text: "开始拆分"; primary: true;
+                                enabled: root.md-split-file != "" && root.confirm-kind == 0; clicked => { root.md-split-start(); } }
+                        }
+                        if root.busy: ProgressBar { progress: root.progress; }
+                    }
+                }
+            }
+            if root.screen == 4: VerticalLayout {
+                spacing: 8px;
+                Surface {
+                    VerticalLayout { padding: 12px; spacing: 8px;
+                        Muted { text: "本地 Git 项目目录（须为有效仓库，当前分支已配置 upstream）"; font-size: 11px; font-weight: 600; }
+                        HorizontalLayout { spacing: 10px; cross-axis-alignment: center;
+                            LineEdit { text <=> root.git-repo; placeholder-text: "选择或输入 Git 项目目录，例如 D:\\code\\my-project";
+                                enabled: !root.busy && root.confirm-kind == 0; horizontal-stretch: 1; }
+                            Button { text: "选择目录…"; enabled: !root.busy && root.confirm-kind == 0; clicked => { root.git-choose-repo(); } }
+                            if !root.busy: Button { text: "开始"; primary: true;
+                                enabled: root.git-repo != "" && root.confirm-kind == 0; clicked => { root.git-start(); } }
+                            if root.busy: Button { text: "停止"; enabled: root.confirm-kind == 0; clicked => { root.git-stop(); } }
+                        }
+                        Muted { text: "严格逐个处理：一个文件单独 add → 单独 commit（只含当前文件）→ 单独 push，push 成功后才处理下一个。提交信息固定「update: 相对路径」。"; }
+                    }
+                }
+                // 实时执行信息（G-13：仓库、分支、upstream、总数、完成数、当前文件、阶段、重试、等待、总体状态）
+                Surface {
+                    VerticalLayout { padding: 12px; spacing: 6px;
+                        HorizontalLayout { spacing: 16px; cross-axis-alignment: center;
+                            VerticalLayout { spacing: 2px; horizontal-stretch: 1;
+                                Muted { text: "仓库 · 分支 · upstream"; font-size: 11px; font-weight: 600; }
+                                Label { text: (root.git-branch == "" ? "—" : root.git-branch) + "  ·  " + (root.git-upstream == "" ? "—" : root.git-upstream);
+                                    overflow: elide; font-weight: 600; }
+                            }
+                            VerticalLayout { spacing: 2px;
+                                Muted { text: "已完成 / 总数"; font-size: 11px; font-weight: 600; }
+                                Label { text: root.git-done + " / " + root.git-total; font-weight: 700; }
+                            }
+                            VerticalLayout { spacing: 2px;
+                                Muted { text: "当前阶段"; font-size: 11px; font-weight: 600; }
+                                Label { text: root.git-stage == "" ? "—" : root.git-stage; font-weight: 600; }
+                            }
+                        }
+                        HorizontalLayout { spacing: 16px; cross-axis-alignment: center;
+                            VerticalLayout { spacing: 2px; horizontal-stretch: 1;
+                                Muted { text: "当前文件"; font-size: 11px; font-weight: 600; }
+                                Label { text: root.git-current == "" ? "—" : root.git-current; overflow: elide; }
+                            }
+                            VerticalLayout { spacing: 2px;
+                                Muted { text: "重试次数"; font-size: 11px; font-weight: 600; }
+                                Label { text: root.git-retry; }
+                            }
+                            VerticalLayout { spacing: 2px;
+                                Muted { text: "下次重试等待"; font-size: 11px; font-weight: 600; }
+                                Label { text: root.git-retry-wait > 0 ? (root.git-retry-wait + " 秒") : "—"; }
+                            }
+                        }
+                        HorizontalLayout { spacing: 8px; cross-axis-alignment: center;
+                            Muted { text: "总体状态"; font-size: 11px; font-weight: 600; }
+                            Label { text: root.git-state == "" ? "—" : root.git-state; overflow: elide; horizontal-stretch: 1; font-weight: 600; }
+                        }
+                        if root.busy: ProgressBar { progress: root.progress; }
+                    }
+                }
+                // 实时日志（G-14：阶段、stdout/stderr、错误原因、push/merge 返回、retry 信息）
+                Surface { vertical-stretch: 1;
+                    VerticalLayout { padding-top: 12px; padding-bottom: 12px; padding-left: 14px; padding-right: 14px; spacing: 8px;
+                        Muted { text: "最新的消息显示在最上面；界面只保留最近 300 条。"; }
+                        TextEdit { text: root.log-text; read-only: true; font-family: "Consolas"; vertical-stretch: 1; }
+                    }
+                }
+                Surface {
+                    min-height: 48px;
+                    VerticalLayout { padding-top: 8px; padding-bottom: 8px; padding-left: 16px; padding-right: 14px; spacing: 8px;
+                        HorizontalLayout { spacing: 12px; cross-axis-alignment: center;
+                            VerticalLayout { horizontal-stretch: 1; spacing: 2px;
+                                HorizontalLayout { spacing: 8px; cross-axis-alignment: center;
+                                    Rectangle { width: 44px; height: 20px; border-radius: 6px;
+                                        background: root.busy ? Design.accent : Design.accent-soft;
+                                        Text { text: root.busy ? "进行中" : "状态"; font-size: 11px; font-weight: 600;
+                                            color: root.busy ? Design.on-accent : Design.accent-ink;
+                                            width: parent.width; height: parent.height;
+                                            horizontal-alignment: center; vertical-alignment: center; }
+                                    }
+                                    Label { text: root.status; overflow: elide; font-weight: 600; horizontal-stretch: 1; font-size: 14px; }
+                                }
+                            }
+                            if root.busy: Button { text: "停止任务"; enabled: root.confirm-kind == 0; clicked => { root.git-stop(); } }
+                        }
+                    }
+                }
+            }
             if root.screen == 1: VerticalLayout { spacing: 14px;
                 Surface {
                     VerticalLayout { padding: 18px; spacing: 14px;
@@ -784,7 +999,7 @@ export component AppWindow inherits Window {
                             }
                         }
                         Rectangle { height: 1px; background: Design.line-soft; }
-                        Muted { text: "Rust + Slint · 独立整理引擎 · SQLite 磁盘索引 · 随包携带完整 7-Zip\n已注册工具：递归解压、目录整理；以后通过工具注册表添加真实工具和页面。\n软件完全离线：不发起任何网络请求、不上传文件、不自动提权、不执行目录中的程序。\n启动低于一秒是目标，不是未经实测的承诺。"; }
+                        Muted { text: "Rust + Slint · 独立整理引擎 · SQLite 磁盘索引 · 随包携带完整 7-Zip\n已注册工具：递归解压、目录整理、MD 整理、Git 工具；以后通过工具注册表添加真实工具和页面。\n软件完全离线：不发起任何网络请求、不上传文件、不自动提权、不执行目录中的程序（Git 工具的 upstream 推送例外，见需求合同 P-03）。\n启动低于一秒是目标，不是未经实测的承诺。"; }
                     }
                 }
                 // 主题是应用级设置，放在关于页而不是目录整理的规则分区。
@@ -824,7 +1039,7 @@ export component AppWindow inherits Window {
         Surface { width: 620px; height: 335px; x: (parent.width - self.width) / 2; y: (parent.height - self.height) / 2;
             background: Design.card;
             VerticalLayout { padding: 24px; spacing: 14px;
-                Label { text: root.confirm-kind == 3 ? "停止任务并关闭" : "确认文件处理范围"; font-size: 20px; font-weight: 700; }
+                Label { text: root.confirm-kind == 3 ? "停止任务并关闭" : root.confirm-kind == 4 ? "确认覆盖输出文件" : "确认文件处理范围"; font-size: 20px; font-weight: 700; }
                 Rectangle { width: 48px; height: 3px; border-radius: 2px; background: Design.bar; }
                 TextEdit { text: root.confirm-text; read-only: true; vertical-stretch: 1; }
                 // 关闭确认不处理目录文件，不需要确认勾选；解压按 X-05 只删完整成功的原包及分卷，
@@ -832,6 +1047,8 @@ export component AppWindow inherits Window {
                 // 该文案同时是 gui_smoke 的固定选择器，改动必须与 scripts/gui_smoke.py 同步。
                 if root.confirm-kind == 1: CheckBox { text: "我已确认：成功原包及分卷永久删除（不可恢复）"; checked <=> root.acknowledge; }
                 if root.confirm-kind == 2: CheckBox { text: "我已确认目录、规则及可能的永久删除行为（不可恢复）"; checked <=> root.acknowledge; }
+                // M-07/M-11：MD 合并/拆分的输出冲突确认（不静默覆盖）
+                if root.confirm-kind == 4: CheckBox { text: "我已确认覆盖已存在的输出文件（原内容将被替换，不可恢复）"; checked <=> root.acknowledge; }
                 HorizontalLayout { spacing: 10px;
                     Rectangle { horizontal-stretch: 1; background: transparent; }
                     Button { text: "返回检查"; clicked => { root.confirm-kind = 0; root.acknowledge = false; root.confirm-pending = false; } }
