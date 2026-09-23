@@ -380,7 +380,8 @@ fn mixed_and_noisy_names_cluster() {
     }
 }
 
-// 覆盖 C-05 场景：不同大类不跨越——同名功能目录在大类间互不影响。
+// 覆盖 C-05 场景：不同大类不跨越——同名功能目录在大类间互不影响；
+// 某大类下同功能文件只有一个时，不因其他大类存在同名组而成目录，仍进「其他」。
 #[test]
 fn functional_groups_do_not_cross_categories() {
     let f = Fixture::new();
@@ -398,6 +399,21 @@ fn functional_groups_do_not_cross_categories() {
         !f.exists("图片/MBIST/MBIST介绍.pdf"),
         "功能聚类不得跨越大类"
     );
+    // 孤立同功能文件：文档类已有 MBIST 组，但图片类只剩一个同功能文件时
+    // 不得因此获得目录（跨大类信息不参与本大类判断），按兜底进入「其他」。
+    let g = Fixture::new();
+    g.write("MBIST介绍.pdf", b"a");
+    g.write("MBIST算法.pdf", b"b");
+    g.write("MBIST结构图.png", b"c");
+    let task = g.plan();
+    Fixture::apply(&task);
+    assert!(g.exists("文档/MBIST/MBIST介绍.pdf"));
+    assert!(g.exists("文档/MBIST/MBIST算法.pdf"));
+    assert!(
+        g.exists("图片/其他/MBIST结构图.png"),
+        "单文件不因其他大类的同名组而成目录"
+    );
+    assert!(!g.exists("图片/MBIST/MBIST结构图.png"));
 }
 
 // 覆盖 C-05 场景：同功能目录下文件名冲突仍按 C-17～C-20 消解（来源前缀）。
