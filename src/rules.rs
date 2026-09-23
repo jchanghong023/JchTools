@@ -3,17 +3,77 @@ use crate::{
     fsutil,
     model::FileRecord,
 };
-use anyhow::Result;
+use anyhow::{bail, Result};
 use globset::{GlobBuilder, GlobSet, GlobSetBuilder};
 use sha2::{Digest, Sha256};
 use std::{cmp::Ordering, path::Path, sync::OnceLock};
 use unicode_normalization::UnicodeNormalization;
 
+// ---------------------------------------------------------------------------
+// 附录 C：扫描排除 glob（S-04 / R-03）
+// ---------------------------------------------------------------------------
+
+/// 附录 C：把一段用户模式翻译为 globset 等价模式。合同语法只保留两个通配符——
+/// `*`（零个或多个字符，可跨 `/`）与 `?`（恰好一个字符，不跨 `/`），其余一律字面匹配：
+/// - `\` 视为目录分隔符，统一改写成 `/`（不是转义符）；
+/// - 连续多个 `*` 折叠成一个（globset 会把 `**` 解释成递归前缀/后缀等独立语义，
+///   如 `**/cache` 会命中根级 cache，与合同「连续星号等同单个星号」相悖）；
+/// - `?` 译成否定字符类 `[!/]`（globset 0.4 语法，编译为 `[^/]`）：在
+///   literal_separator(false) 下 globset 的 `?` 本可跨 `/`，必须收紧成不跨；
+/// - `[`、`]`、`{`、`}` 用单元素字符类表达字面量（globset 没有转义语法，且类内
+///   首个 `]` 按字面、其余括号按普通字符解析）：`[[]`、`[]]`、`[{]`、`[}]`；
+///   `,` 只在花括号展开内有特殊义，展开已被逐字转义，故保持原样即为字面量。
+///
+/// 翻译只做一遍，翻译产物不会再被二次转义。
+fn translate_exclusion_part(part: &str) -> String {
+    let mut out = String::with_capacity(part.len());
+    let mut chars = part.chars().peekable();
+    while let Some(c) = chars.next() {
+        match c {
+            '\\' => out.push('/'),
+            '*' => {
+                while chars.peek() == Some(&'*') {
+                    chars.next();
+                }
+                out.push('*');
+            }
+            '?' => out.push_str("[!/]"),
+            '[' => out.push_str("[[]"),
+            ']' => out.push_str("[]]"),
+            '{' => out.push_str("[{]"),
+            '}' => out.push_str("[}]"),
+            c => out.push(c),
+        }
+    }
+    out
+}
+
+/// 附录 C 无效模式判定：返回 Some(原因) 表示该段含盘符、以 `/` 或 `\` 开头的
+/// 绝对路径，或存在恰好等于 `..` 的路径段（`\` 同样按分隔符切分）。
+fn invalid_exclusion_reason(part: &str) -> Option<&'static str> {
+    let mut chars = part.chars();
+    if matches!(chars.next(), Some(c) if c.is_ascii_alphabetic()) && chars.next() == Some(':') {
+        return Some("含盘符");
+    }
+    if part.starts_with('/') || part.starts_with('\\') {
+        return Some("是绝对路径");
+    }
+    if part.split(['/', '\\']).any(|segment| segment == "..") {
+        return Some("含独立的 .. 路径段");
+    }
+    None
+}
+
 pub fn build_exclusions(text: &str) -> Result<GlobSet> {
     let mut builder = GlobSetBuilder::new();
     for part in text.split(';').map(str::trim).filter(|s| !s.is_empty()) {
+        // 附录 C：盘符、绝对路径与独立 .. 段是无效模式，阻止开始并指出错误段，
+        // 不悄悄忽略（否则该模式变成永不命中的死规则，排除保护静默失效）。
+        if let Some(reason) = invalid_exclusion_reason(part) {
+            bail!("排除规则段「{part}」无效：{reason}；不支持盘符、绝对路径或独立的 .. 路径段（附录 C）");
+        }
         builder.add(
-            GlobBuilder::new(part)
+            GlobBuilder::new(&translate_exclusion_part(part))
                 .case_insensitive(true)
                 .literal_separator(false)
                 .build()?,
@@ -540,8 +600,9 @@ fn has_ext(name: &str, ext: &str) -> bool {
 /// `.iso`/`.wim`/`.esd` 是系统镜像，`.msi`/`.msix`/`.appx` 是安装包，`.jar`/`.apk`/
 /// `.whl`/`.nupkg` 是程序包，`.docx`/`.xlsx`/`.epub`/`.odt` 是文档容器，`.exe`/`.com`
 /// 可能是自解压包：它们即使能被 7-Zip 打开，也一律不自动解压（只看扩展名，不猜内容）。
-/// 分卷只认可独立解开的第一卷：`.7z.001` / `.zip.001` 认 001、`.partN.rar` 认 part1；
-/// 其余卷（`.z01`/`.r00`/`.002`）由删除与隔离的卷集合逻辑成组处理，不单独入队。
+/// 分卷只认可独立解开的第一卷：数字尾卷族认白名单后缀 + 恰好三位 `.NNN` 的入口卷
+/// （`.001`；`.000` 是可识别的非法起始编号，入队后整组失败隔离）、`.partN.rar` 认
+/// part1；其余卷（`.z01`/`.r00`/`.002`）由删除与隔离的卷集合逻辑成组处理，不单独入队。
 pub fn archive_name(name: &str) -> bool {
     let name = name.to_lowercase();
     if has_ext(&name, "rar") {
@@ -557,6 +618,14 @@ pub fn archive_name(name: &str) -> bool {
         }
         return true;
     }
+    // X-10 数字尾卷族入口：主包完整名具有白名单任一后缀（含复合扩展名），再带恰好
+    // 三位 `.NNN`。合法起始编号是 `.001`；末尾 `.000` 是该族的非法起始编号，同样按族
+    // 识别入队——捆绑引擎打不开错误起始编号的分卷集，解压失败后按 X-06 把整组卷集
+    // 移入「解压失败」，不作为普通独立包处理。`.002` 起的后续卷不是入口，由 archive.rs
+    // 的卷集合逻辑成组删除/隔离，不单独入队（一组仅入队、计数、判定一次）。
+    if let Some((_, digits)) = numbered_volume_tail(&name) {
+        return matches!(digits, "000" | "001");
+    }
     // 白名单之外的一切格式（含引擎能打开的 cab/iso/wim/lzh/cpio 等）都不自动解压：
     // 维护「禁止列表」必然漏掉新出现的容器格式，白名单是唯一可靠的边界。
     // 压缩流（.gz/.bz2/.xz/.zst/.lzma/.z）允许前面再带一层 `.tar`，整体作为一个包
@@ -565,12 +634,27 @@ pub fn archive_name(name: &str) -> bool {
     // 放进来只会把这类文件一律推进「解压失败」，不如完全不碰（X-09）。
     // 卷（`.002`、`.part2.rar`、`.r00`、`.z01`）不是独立解压对象，不在这里放行；
     // 白名单外格式的卷（`.iso.001`）与配不上主包的孤立编号文件（`data.001`）同样不匹配。
-    [
-        ".zip", ".7z", ".tar", ".gz", ".bz2", ".xz", ".zst", ".lzma", ".z", ".tgz", ".tbz2",
-        ".txz", ".tzst", ".7z.001", ".zip.001",
-    ]
-    .iter()
-    .any(|suffix| name.ends_with(suffix))
+    ARCHIVE_SUFFIXES.iter().any(|suffix| name.ends_with(suffix))
+}
+/// X-01 白名单后缀（小写；压缩流允许前面再带一层 `.tar` 的复合形式由 `.gz` 等
+/// 流后缀整体覆盖）。数字尾卷族按 [`numbered_volume_tail`] 另行判定。
+const ARCHIVE_SUFFIXES: [&str; 13] = [
+    ".zip", ".7z", ".tar", ".gz", ".bz2", ".xz", ".zst", ".lzma", ".z", ".tgz", ".tbz2", ".txz",
+    ".tzst",
+];
+/// X-10 数字尾卷族：名称（小写）以恰好三位 ASCII 十进制数字 `.NNN` 结尾，且去掉
+/// `.NNN` 后的剩余部分以 X-01 白名单任一后缀结尾（`.tar.gz` 天然被 `.gz` 覆盖）时
+/// 返回 (剩余部分, 三位编号)，否则 None。`.iso.001`、`.docx.001`、`data.001` 这类
+/// 白名单外或无格式的编号文件不构成该族（X-09 完全不碰）。
+fn numbered_volume_tail(name_lower: &str) -> Option<(&str, &str)> {
+    let (rest, digits) = name_lower.rsplit_once('.')?;
+    if digits.len() != 3 || !digits.bytes().all(|b| b.is_ascii_digit()) {
+        return None;
+    }
+    ARCHIVE_SUFFIXES
+        .iter()
+        .any(|suffix| rest.ends_with(suffix))
+        .then_some((rest, digits))
 }
 pub fn multipart_name(name: &str) -> bool {
     let n = name.to_lowercase();
@@ -582,7 +666,13 @@ pub fn multipart_name(name: &str) -> bool {
         // 常量正则语法错误只可能是开发期笔误，按不可达处理
         Err(_) => unreachable!("constant regex"),
     });
-    n.ends_with(".001") || re.is_match(&n)
+    if re.is_match(&n) {
+        return true;
+    }
+    // 数字尾卷族入口与 archive_name 同口径（X-10）：恰好三位 .NNN + 白名单主干，
+    // .001 为合法入口、.000 为可识别的非法起始编号；.002 起的后续卷与白名单外
+    // 编号（data.001 等）都不是组入口。
+    matches!(numbered_volume_tail(&n), Some((_, "000" | "001")))
 }
 // ---------------------------------------------------------------------------
 // C-19：命名摘要与 C-20：长度受限候选
@@ -1176,6 +1266,157 @@ mod tests {
         assert_eq!(&d10[..8], &d8);
         // 相同输入相同摘要；不同输入（通常）不同。
         assert_eq!(path_digest("a/b/合同.pdf", 8), d8);
+    }
+
+    // 覆盖 附录C（S-04/R-03）：通配符只有 * 与 ?，其余元字符一律字面匹配；
+    // ? 恰好一个字符且不跨 /；* 可跨 /；连续 * 等同单个 *；\ 是分隔符不是转义符。
+    #[test]
+    fn exclusion_globs_follow_appendix_c_literal_semantics() {
+        let matches = |text: &str, rel: &str| {
+            build_exclusions(text)
+                .unwrap_or_else(|error| panic!("模式 {text} 应合法：{error:#}"))
+                .is_match(rel)
+        };
+        // 字符类与花括号展开不支持：含这些元字符的目录名按字面命中（Windows 常见
+        // 形如 movie [1080p] 的目录名不得静默失去排除保护）。模式匹配整个相对路径，
+        // 目录整树排除靠剪枝实现，不要求子路径逐个命中。
+        assert!(matches("movie [1080p]", "movie [1080p]"));
+        assert!(
+            !matches("movie [1080p]", "movie 1"),
+            "[1080p] 不得按字符类展开命中无关项"
+        );
+        assert!(
+            !matches("movie [1080p]", "movie 1/a.txt"),
+            "[1080p] 不得按字符类展开命中无关子路径"
+        );
+        assert!(matches("[ab]", "[ab]"));
+        assert!(
+            !matches("[ab]", "a"),
+            "附录 C：[ab] 匹配字面 [ab]，不是 a 或 b"
+        );
+        assert!(!matches("[ab]", "b"));
+        assert!(matches("{a,b}.txt", "{a,b}.txt"));
+        assert!(!matches("{a,b}.txt", "a.txt"));
+        assert!(!matches("{a,b}.txt", "b.txt"));
+        // ? 恰好一个字符，不匹配 /，也不跨层级（附录 C 例）。
+        assert!(matches("a/?.txt", "a/x.txt"));
+        assert!(!matches("a/?.txt", "a/xy.txt"));
+        assert!(!matches("a/?.txt", "a/b/x.txt"));
+        assert!(!matches("a/?.txt", "a/.txt"), "? 必须恰好一个字符");
+        assert!(!matches("a/?.txt", "a/x/y.txt"));
+        assert!(!matches("a?b", "a/b"), "? 不得跨 /");
+        assert!(matches("a?b", "axb"));
+        // * 为零个或多个字符，可跨 /。
+        assert!(matches("*.tmp", "x.tmp"));
+        assert!(matches("*.tmp", "a/b/c.tmp"));
+        // 连续多个星号等同一个星号，** 没有独立递归语义（不得匹配根级 cache）。
+        assert!(matches("**/cache", "a/cache"));
+        assert!(matches("**/cache", "a/b/cache"));
+        assert!(!matches("**/cache", "cache"));
+        // 附录 C 组合例保持不变。
+        assert!(matches("cache;*/cache", "cache"));
+        assert!(matches("cache;*/cache", "a/cache"));
+        assert!(matches("cache;*/cache", "a/b/cache"));
+        assert!(!matches("cache;*/cache", "cachex"));
+        // 用户模式中的 \ 视为目录分隔符，不作为转义符。
+        assert!(matches("a\\b\\x.tmp", "a/b/x.tmp"));
+    }
+
+    // 覆盖 附录C：盘符、绝对路径与独立 .. 段是无效模式，阻止开始并指出错误段，
+    // 不悄悄忽略（否则这些模式变成永不命中的死规则，排除保护静默失效）。
+    #[test]
+    fn exclusion_globs_reject_drive_absolute_and_parent_segments() {
+        for bad in [
+            "D:\\备份\\私人资料",
+            "c:/x",
+            "/abs/path",
+            "\\rooted",
+            "a/../b",
+            "a/b/..",
+            "..",
+        ] {
+            let error = build_exclusions(bad)
+                .err()
+                .unwrap_or_else(|| panic!("模式 {bad} 应被判定为无效"));
+            let text = error.to_string();
+            assert!(text.contains(bad), "错误信息必须指出错误段原文：{text}");
+        }
+        // 非上述三类的一律合法：.. 的超集串、纯文件名模式都正常构建。
+        for good in [
+            "cache;*/cache",
+            "a/?.txt",
+            "movie [1080p]",
+            "a..b",
+            "...",
+            "a/..b",
+        ] {
+            build_exclusions(good).unwrap_or_else(|error| panic!("模式 {good} 应合法：{error:#}"));
+        }
+    }
+
+    // 覆盖 X-10, X-01, X-09, H-04：数字尾卷族 = 白名单后缀（含复合）+ 恰好三位 .NNN；
+    // 族入口是 .001（.000 为可识别的非法起始编号）；白名单外与孤立编号一律不碰。
+    #[test]
+    fn numbered_volume_family_recognition_matches_x10() {
+        // 族入口：白名单任一后缀 + .001（含此前漏认的复合与非 7z/zip 后缀）。
+        for name in [
+            "x.7z.001",
+            "x.zip.001",
+            "x.tar.gz.001",
+            "x.tar.bz2.001",
+            "x.tar.001",
+            "x.tgz.001",
+            "x.gz.001",
+            "X.ZST.001",
+        ] {
+            assert!(
+                archive_name(name),
+                "{name} 是白名单数字尾卷族的入口，应识别"
+            );
+        }
+        // X-10：末尾 .000 是该族的非法起始编号，同样按族识别入队——引擎打不开错误
+        // 起始编号的分卷集，解压失败后整组隔离，不作为普通独立包处理。
+        assert!(archive_name("x.7z.000"));
+        assert!(archive_name("x.tar.gz.000"));
+        // 白名单外格式的卷与无格式孤立编号完全不碰（X-09）。
+        for name in [
+            "data.001",
+            "x.iso.001",
+            "x.docx.001",
+            "x.msi.001",
+            "x.txt.001",
+        ] {
+            assert!(
+                !archive_name(name),
+                "{name} 不在白名单数字尾卷族内，不得识别"
+            );
+        }
+        // 编号位数不是恰好三位、或编号不是族入口（后续卷由卷集合成组处理）时不是入口。
+        for name in ["x.7z.1", "x.7z.01", "x.7z.0001", "x.7z.002", "x.tar.gz.002"] {
+            assert!(
+                !archive_name(name),
+                "{name} 不是数字尾卷族入口，不得单独入队"
+            );
+        }
+        // 纯白名单名不受影响。
+        for name in ["a.zip", "a.7z", "f.tar.gz", "b.tgz", "a.rar", "e.part1.rar"] {
+            assert!(archive_name(name), "{name} 仍在普通白名单内");
+        }
+    }
+
+    // 覆盖 X-10, X-09：multipart_name 与 archive_name 的数字尾卷族口径一致。
+    #[test]
+    fn multipart_name_numbered_family_alignment_with_x10() {
+        assert!(multipart_name("x.part1.rar"));
+        assert!(multipart_name("x.part99.rar"));
+        assert!(!multipart_name("x.rar"));
+        assert!(multipart_name("x.7z.001"));
+        assert!(multipart_name("x.tar.gz.001"));
+        assert!(multipart_name("x.7z.000"));
+        assert!(!multipart_name("x.7z.002"));
+        // 白名单外与孤立编号不是组入口（X-09）。
+        assert!(!multipart_name("data.001"));
+        assert!(!multipart_name("x.iso.001"));
     }
 
     // 覆盖 C-20（长度受限摘要候选：≤40 退让、扩展名不截断、超限返回 None）
