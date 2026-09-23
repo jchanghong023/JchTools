@@ -99,15 +99,16 @@ struct RunOutcome {
 }
 
 fn run_tool(repo: &Path) -> RunOutcome {
-    run_tool_with_control(repo, Arc::new(Control::default()))
+    let control = Arc::new(Control::default());
+    run_tool_with_control(repo, &control)
 }
 
-fn run_tool_with_control(repo: &Path, control: Arc<Control>) -> RunOutcome {
+fn run_tool_with_control(repo: &Path, control: &Arc<Control>) -> RunOutcome {
     let shared = Arc::new(GitShared::new());
     let logs = Arc::new(Mutex::new(Vec::<String>::new()));
     // 看门狗：环境异常导致工具进入无限重试（G-09 真实故障下不会自行结束）时，
     // 3 分钟后取消任务让本用例带着「已停止」文案失败退出，而不是挂死整个测试进程。
-    let trip = Arc::clone(&control);
+    let trip = Arc::clone(control);
     std::thread::spawn(move || {
         std::thread::sleep(Duration::from_secs(180));
         trip.cancel();
@@ -118,7 +119,7 @@ fn run_tool_with_control(repo: &Path, control: Arc<Control>) -> RunOutcome {
         git_tools::run(
             &git_exe(),
             repo,
-            &control,
+            control,
             &shared,
             &|line| {
                 let line = line.to_string();
@@ -420,7 +421,7 @@ fn stop_before_any_file_keeps_repo_untouched() {
     fs::write(fix.repo.join("b.txt"), "pending\n").unwrap();
     let control = Arc::new(Control::default());
     control.cancel();
-    let outcome = run_tool_with_control(&fix.repo, control);
+    let outcome = run_tool_with_control(&fix.repo, &control);
     assert!(
         outcome.text.contains("已停止"),
         "收尾文案：{}",
