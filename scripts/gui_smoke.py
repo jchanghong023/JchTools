@@ -452,7 +452,7 @@ def file_digest(path: Path) -> str:
 
 
 def verify_original_disposition(root: Path, originals: dict[Path, str], quarantined: Counter[str]) -> None:
-    """逐个原包核对：成功组的原包与分卷必须已删除，失败组必须完整隔离，既有文件必须原样保留."""
+    """逐个原包核对：成功组的原包与分卷必须已删除且不得出现在「解压失败」，失败组必须完整隔离，既有文件必须原样保留."""
     successful_sections = {
         "07-压缩包-各格式",
         "08-压缩包-冲突",
@@ -481,6 +481,18 @@ def verify_original_disposition(root: Path, originals: dict[Path, str], quaranti
             msg = f"解压丢失失败原包、分卷或既有文件：{relative}"
             raise RuntimeError(msg)
         quarantined[digest] -= 1
+    # X-05 与 X-06 是互斥的两种结果：「原包不在原位」不等于「按 X-05 永久删除」——
+    # 被防护上限误伤而按 X-06 移入「解压失败」的原包，原位同样不存在。全部预期
+    # 隔离项按 digest 配平后，「解压失败」不得再有剩余项：成功组的包若被误伤隔离，
+    # 其 digest 不会出现在任何配平里，在此被拦下（否则 S4 对该类回归假绿，
+    # 例如 max_ratio 上限被调小后 14-大文件 的全零包被整包推进「解压失败」）。
+    leftovers = {digest: count for digest, count in quarantined.items() if count > 0}
+    if leftovers:
+        msg = (
+            "「解压失败」存在无法对应到任何失败原包/分卷的多余隔离项"
+            f"（成功包可能被误伤隔离）：{leftovers}"
+        )
+        raise RuntimeError(msg)
 
 
 # 与 make_tmp.py 的 07 分区一致：同内容的单文件压缩流个数（gz / bz2 / xz / lzma）。
@@ -544,7 +556,7 @@ def s4_full_extract(exe: str, data: str) -> None:
         confirm_dialog(window, extraction=True)
         wait_task_status(data, "finished", baseline)
         verify_extraction_results(root, originals)
-        print("S4 PASS：成功原包及分卷删除；既有内容保留，冲突自动改名，嵌套内容正确落盘")
+        print("S4 PASS：成功原包及分卷删除（隔离目录无多余项）；既有内容保留，冲突自动改名，嵌套内容正确落盘")
     finally:
         if window is not None:
             with contextlib.suppress(*TRANSIENT_GUI_ERRORS):

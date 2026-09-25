@@ -251,7 +251,7 @@ def build_empty_and_chain(root: Path, _seven: Path, log: list[str]) -> None:
     log.append(
         _line(
             "| `05-空目录与单链/` | 真空目录 + 只有一个子项的目录链 | 空目录清理应删除；",
-            "开启「消除只有一个子项的目录层级」后 payload.txt 应被提升 |",
+            "payload.txt 归类进「文档」后，单链/a/b/c 搬空、按空目录清理删除（C-06：不设「消除单子项层级」开关，靠归类与空目录清理自然消除）|",
         )
     )
 
@@ -278,7 +278,7 @@ def build_formats(root: Path, _seven: Path, log: list[str]) -> None:
     log.append(
         _line(
             "| `06-格式识别/` | 扩展名与真实内容不一致 | ",
-            "开启「检测真实类型 + 修正扩展名」后：`.txt`->`.png`、`.dat`->`.zip`；",
+            "开启「按内容签名修正扩展名」后：`.txt`->`.png`；`.dat` 只能识别到 ZIP 容器、无法确认内部类型，按 C-08 保持 `.dat` 不改名；",
             "`.docx` 是 ZIP 容器但**不应**被改成 zip；",
             "未知格式与无扩展名 PDF 按规则处理 |",
         )
