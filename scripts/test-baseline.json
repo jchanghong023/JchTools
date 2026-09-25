@@ -1947,6 +1947,12 @@
     },
     {
       "file": "tests/split.rs",
+      "name": "old_style_tails_without_main_pack_are_grouped_and_quarantined",
+      "ignored": false,
+      "cfg": null
+    },
+    {
+      "file": "tests/split.rs",
       "name": "organizer_analysis_is_read_only_and_never_extracts",
       "ignored": false,
       "cfg": null
