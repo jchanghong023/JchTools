@@ -105,19 +105,21 @@ fn merge_orders_by_creation_time_then_natural_path() {
     write(&root.join("10.md"), "ten");
     write(&root.join("2.md"), "two");
     write(&root.join("1.md"), "one");
-    // 1.md 与 2.md 同一创建时间 → 自然排序 1 < 2；10.md 创建时间最早 → 排最前
-    set_created(&root.join("10.md"), 100);
+    // 1.md 创建时间最早排最前；2.md 与 10.md 同一创建时间 → 触发自然排序决胜
+    // （2.md 在 10.md 前）。若第二排序键退化为字典序，10.md 会排到 2.md 前。
+    // （旧夹具把 10.md 设为最早，同时间对只剩 1/2——两种排序同序，检不出退化。）
+    set_created(&root.join("1.md"), 100);
     set_created(&root.join("2.md"), 200);
-    set_created(&root.join("1.md"), 200);
+    set_created(&root.join("10.md"), 200);
     let output = root.join("merged.md");
     merge_to(root, true, &output);
     let text = fs::read_to_string(&output).unwrap();
-    let first = text.find("# 10.md").unwrap();
-    let second = text.find("# 1.md").unwrap();
-    let third = text.find("# 2.md").unwrap();
+    let first = text.find("# 1.md").unwrap();
+    let second = text.find("# 2.md").unwrap();
+    let third = text.find("# 10.md").unwrap();
     assert!(
         first < second && second < third,
-        "排序应为 10.md(最早) → 1.md → 2.md：{text}"
+        "排序应为 1.md(最早) → 2.md → 10.md（同时间按自然排序 2 在 10 前）：{text}"
     );
 }
 
@@ -274,11 +276,26 @@ fn merge_protects_fenced_code_blocks() {
         text.contains("# shell comment"),
         "``` 内的 # 行必须原样：{text}"
     );
+    // 正向 contains 在「漏识别 fence、内容被下移一级」的回归下照样成立
+    // （"## shell comment" 包含子串 "# shell comment"），必须同时断言下移后的
+    // 形态不出现，M-06 的保护才有检测能力。
+    assert!(
+        !text.contains("## shell comment"),
+        "fence 内的 # 行被当作标题下移了：{text}"
+    );
     assert!(
         text.contains("## not a heading"),
         "~~~ 内的 ## 行必须原样：{text}"
     );
+    assert!(
+        !text.contains("### not a heading"),
+        "fence 内的 ## 行被当作标题下移了：{text}"
+    );
     assert!(text.contains("### deep"), "~~~ 内的 ### 行必须原样：{text}");
+    assert!(
+        !text.contains("#### deep"),
+        "fence 内的 ### 行被当作标题下移了：{text}"
+    );
     assert!(
         text.contains("### after"),
         "代码块结束后标题恢复下移：{text}"
@@ -302,8 +319,16 @@ fn merge_handles_info_string_and_indented_fence() {
         "info string fence 内原样：{text}"
     );
     assert!(
+        !text.contains("## [dependencies]"),
+        "info string fence 内被当作标题下移了：{text}"
+    );
+    assert!(
         text.contains("# indented fence"),
         "缩进 fence 内原样：{text}"
+    );
+    assert!(
+        !text.contains("## indented fence"),
+        "缩进 fence 内被当作标题下移了：{text}"
     );
     assert!(text.contains("## 尾标题"), "fence 后标题下移：{text}");
 }

@@ -6,7 +6,7 @@ use crate::{
 use anyhow::{bail, Result};
 use globset::{GlobBuilder, GlobSet, GlobSetBuilder};
 use sha2::{Digest, Sha256};
-use std::{cmp::Ordering, path::Path, sync::OnceLock};
+use std::{cmp::Ordering, collections::HashSet, path::Path, sync::OnceLock};
 use unicode_normalization::UnicodeNormalization;
 
 // ---------------------------------------------------------------------------
@@ -655,6 +655,60 @@ fn numbered_volume_tail(name_lower: &str) -> Option<(&str, &str)> {
         .iter()
         .any(|suffix| rest.ends_with(suffix))
         .then_some((rest, digits))
+}
+/// X-10 老式分卷族的尾卷形态：`主干.z01`～`主干.z99`（zip 族，编号从 01 起）与
+/// `主干.r00`～`主干.r99`（rar 族，编号从 00 起）。入口是 `主干.zip` / `主干.rar`；
+/// 只发现尾卷、没有主包时仍归组报告缺主包（入队与清点见
+/// [`count_tail_only_old_style_groups`]，缺主包处置在 archive::missing_old_style_main）。
+pub struct OldStyleTail<'a> {
+    pub stem: &'a str,
+    /// 该族主包的扩展名（`zip` 或 `rar`）。
+    pub main_ext: &'static str,
+}
+pub fn old_style_tail(name_lower: &str) -> Option<OldStyleTail<'_>> {
+    let bytes = name_lower.as_bytes();
+    // 形态：倒数第四字节是 `.`，倒数第三是 `z`/`r`，末两位是数字（`.z01`/`.r00`）。
+    if bytes.len() < 5 || bytes[bytes.len() - 4] != b'.' {
+        return None;
+    }
+    let main_ext = match bytes[bytes.len() - 3] {
+        b'z' => "zip",
+        b'r' => "rar",
+        _ => return None,
+    };
+    let digits = &name_lower[name_lower.len() - 2..];
+    if !digits.bytes().all(|b| b.is_ascii_digit()) {
+        return None;
+    }
+    // zip 族的起始编号是 01（`z00` 不属命名族，与 category_for 口径一致）；rar 族从 00 起。
+    if main_ext == "zip" && digits == "00" {
+        return None;
+    }
+    let stem = &name_lower[..name_lower.len() - 4];
+    if stem.is_empty() {
+        return None;
+    }
+    Some(OldStyleTail { stem, main_ext })
+}
+/// X-10/X-02：对一份目录内的文件名清单（小写）统计「只发现尾卷、没有主包」的
+/// 老式族组数——残缺但可归组的卷集计一包；主包（`主干.zip`/`主干.rar`）在场的
+/// 尾卷属于其卷集，不计；同主干同族的多个尾卷只计一组（一组仅入队、计数、判定一次）。
+pub fn count_tail_only_old_style_groups(names_lower: &[String]) -> u64 {
+    let files: HashSet<&str> = names_lower.iter().map(String::as_str).collect();
+    let mut seen: HashSet<(&str, &'static str)> = HashSet::new();
+    let mut count = 0u64;
+    for name in names_lower {
+        let Some(tail) = old_style_tail(name) else {
+            continue;
+        };
+        if files.contains(format!("{}.{}", tail.stem, tail.main_ext).as_str())
+            || !seen.insert((tail.stem, tail.main_ext))
+        {
+            continue;
+        }
+        count += 1;
+    }
+    count
 }
 pub fn multipart_name(name: &str) -> bool {
     let n = name.to_lowercase();

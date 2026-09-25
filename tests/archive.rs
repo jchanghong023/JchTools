@@ -898,8 +898,18 @@ Volume Index = 0
 Volumes = 9
 ",
     );
-    // 旁置的大号同主干兄弟卷：分母只应计主体与「有佐证的」分卷，无佐证不得计入。
-    fs::write(f.root.join("report.z01"), vec![0u8; 1_000_000]).unwrap();
+    // 旁置的大号同主干兄弟卷 z01～z08 全部真实存在：这样「伪造键被采纳」的回归态
+    // 才有可断言的差异——分母被放大 → 比例检查通过 → 包被解开并删源；正确态
+    // （} 连同注释一并结束头块，伪造键被忽略）分母只计主体，比例必然超限。
+    // 若只旁置 z01，回归态会在 actual_paths 因缺失卷报错整包失败，与本测试断言的
+    // 「失败并隔离」相同，用例就检不出它声称守护的回归。
+    for index in 1..=8 {
+        fs::write(
+            f.root.join(format!("report.z{index:02}")),
+            vec![0u8; 100_000],
+        )
+        .unwrap();
+    }
     let packed = fs::metadata(f.root.join("report.zip")).unwrap().len();
     assert!(packed * 2 < 12_288, "测试前置：包体应远小于声明总量");
     let cfg = Config {
@@ -909,7 +919,8 @@ Volumes = 9
     let result = f.run(cfg);
     assert_eq!(
         result.summary.archives_failed, 1,
-        "分母只应计主体（{packed} 字节）：12 KiB 声明量必然超过比例上限"
+        "分母只应计主体（{packed} 字节）：12 KiB 声明量必然超过比例上限；\
+         若伪造的 Volumes=9 被采纳，真实存在的 z01～z08 会把分母放大到比例检查通过"
     );
     assert!(
         f.root.join("解压失败/report.zip").is_file(),

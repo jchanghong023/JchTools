@@ -420,10 +420,23 @@ fn occupied_category_container_keeps_source_items() {
     // 「文档」被普通文件占用：依赖「文档」容器的归类全部失败并保留源项。
     fs::write(f.root.join("文档"), b"not a directory").unwrap();
     let task = f.plan();
-    // 名为「文档」的普通文件本身照常归类（它是范围内普通文件）；只有依赖被占用
-    // 容器的「报告.pdf」失败并保留源项（S-01）。
+    // 名为「文档」的普通文件本身照常归类（它是范围内普通文件，无扩展名入「其他」）。
     assert_eq!(task.summary.planned_move, 1);
-    assert!(f.exists("报告.pdf"), "依赖被占用容器的项保留在原位置");
+    // 必须真正执行：磁盘态断言在只读的分析阶段恒为真，检验不了执行器的
+    // 「不删除占用项、失败保留源项」行为（S-01/附录 E）。
+    Fixture::apply(&task);
+    assert!(
+        f.root.join("其他").join("文档").is_file(),
+        "名为「文档」的普通文件本身照常归类移动"
+    );
+    assert!(
+        f.exists("报告.pdf"),
+        "依赖被占用容器的项执行后必须保留在原位置（S-01）"
+    );
+    assert!(
+        !f.root.join("文档").exists(),
+        "占用项不因容器身份被删除或另存——它只按普通文件归类移动"
+    );
 }
 
 // 覆盖 H-06 / C-14：已在本次根「Git项目集合」下的项目不再移动（幂等、不自嵌套）。
@@ -436,8 +449,28 @@ fn collection_under_root_is_stable_across_reruns() {
     let task = f.plan();
     assert_eq!(task.summary.planned_git, 0, "已就位项目不再移动");
     assert!(!f.exists("Git项目集合/Git项目集合/proj/README.md"));
-    // 没有第二个待移入项目时不新建集合目录之外的东西；普通文件照常归类。
-    assert!(f.exists("note.txt") || task.summary.planned_move >= 1);
+    assert_eq!(task.summary.planned_move, 1, "只有 note.txt 待归类");
+    // 必须执行后再验证幂等：只分析就断言磁盘状态在本项目「分析只读」下恒为真。
+    Fixture::apply(&task);
+    assert!(
+        f.root.join("文档").join("note.txt").is_file(),
+        "普通文件照常归类"
+    );
+    assert!(
+        f.root
+            .join("Git项目集合")
+            .join("proj")
+            .join(".git")
+            .is_dir(),
+        "集合内项目原样保留"
+    );
+    assert!(
+        !f.root.join("Git项目集合").join("Git项目集合").exists(),
+        "不自嵌套"
+    );
+    let again = f.plan();
+    assert_eq!(again.summary.planned_git, 0, "再次整理：项目仍不移动");
+    assert_eq!(again.summary.planned_move, 0, "再次整理：无待归类文件");
 }
 
 // 覆盖 C-14 / 附录 E：集合容器被文件占用时项目保留原位。
@@ -449,8 +482,20 @@ fn git_collection_blocked_by_file_keeps_projects() {
     fs::write(f.root.join("Git项目集合"), b"occupied").unwrap();
     let task = f.plan();
     assert_eq!(task.summary.planned_git, 0);
+    // 必须执行后再断言：占用项文件本身按普通文件归类（无扩展名入「其他」，与
+    // 「文档」占用项用例同一语义——S-01 禁止的是为腾位删除/挪走占用项，不是
+    // 豁免它自己的归类）；执行必须跟随计划，不得因占用项让位就新建集合并挪入项目。
+    Fixture::apply(&task);
+    assert!(
+        f.root.join("其他").join("Git项目集合").is_file(),
+        "占用项不因容器身份被删除——它按普通文件归类移动"
+    );
     assert!(f.root.join("proj/.git").is_dir(), "原项目保留在原位置");
-    assert!(f.root.join("Git项目集合").is_file(), "占用项不被删除或挪走");
+    assert!(f.root.join("proj/src/a.rs").is_file(), "项目内容原样保留");
+    assert!(
+        !f.root.join("Git项目集合").is_dir(),
+        "计划为 0：执行不得新建集合并挪入项目"
+    );
 }
 
 // 覆盖 C-05 / C-21：归类移动保留时间戳；重复整理仍判已就位、不再移动。

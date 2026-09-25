@@ -499,8 +499,16 @@ fn user_file_with_link_temp_prefix_is_never_swept() {
     let user = f.root.join(".jchtools-link-mydata");
     fs::write(&user, b"precious").unwrap();
     filetime::set_file_mtime(&user, filetime::FileTime::from_unix_time(0, 0)).unwrap();
-    f.plan(base());
-    assert!(user.exists(), "同名用户文件不是崩溃残留，绝不能被清扫");
+    let task = f.plan(base());
+    assert!(user.exists(), "C-01：分析（只读）阶段不得删除用户文件");
+    // 必须真正走到执行阶段：清扫只发生在 apply 内（执行前清理），只分析就断言
+    // 「文件还在」在本项目「分析只读」的保证下恒为真，检验不了 links >= 2 归属
+    // 校验。时序与相邻的 stale_hardlink_temps_are_swept 一致。
+    Fixture::apply(&task);
+    assert!(
+        user.exists(),
+        "同名用户文件不是崩溃残留（links < 2），执行阶段清扫也绝不能动它"
+    );
 }
 // 覆盖 R-02（删除方式可按类覆盖）
 #[test]

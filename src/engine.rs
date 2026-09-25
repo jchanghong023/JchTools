@@ -154,6 +154,8 @@ fn clean_orphan_link_temps(root: &Path) -> usize {
         }
         // 只有仍是硬链接（链接数 >= 2，内容另有链接持有，与崩溃残留的不变量一致）才清扫；
         // 普通同名文件可能是用户文件或从压缩包解出的同名成员，静默删除即数据丢失。
+        // 只有仍是硬链接（链接数 >= 2，内容另有链接持有，与崩溃残留的不变量一致）才清扫；
+        // 普通同名文件可能是用户文件或从压缩包解出的同名成员，静默删除即数据丢失。
         let residue = fsutil::snapshot(path).is_ok_and(|s| s.links >= 2);
         if residue && fs::remove_file(path).is_ok() {
             removed += 1;
@@ -425,7 +427,9 @@ pub fn count_archives(root: &Path, config: &Config) -> Result<u64> {
         exe_prefix,
         root_under_special,
     };
-    let mut count = 0u64;
+    // X-10：缺主包的老式族尾卷组按「残缺但可归组的卷集计一包」参与清点。
+    // 归组依赖同目录兄弟关系，先按目录收集文件名再统一计数，与扫描的兄弟判定同源。
+    let mut names_by_dir: HashMap<PathBuf, Vec<String>> = HashMap::new();
     for entry in walkdir::WalkDir::new(&root)
         .follow_links(false)
         .min_depth(1)
@@ -462,9 +466,22 @@ pub fn count_archives(root: &Path, config: &Config) -> Result<u64> {
         let Some(name) = entry.file_name().to_str() else {
             continue;
         };
-        if rules::archive_name(name) {
-            count += 1;
-        }
+        let parent = entry
+            .path()
+            .parent()
+            .map_or_else(|| root.clone(), Path::to_path_buf);
+        names_by_dir
+            .entry(parent)
+            .or_default()
+            .push(name.to_lowercase());
+    }
+    let mut count = 0u64;
+    for names in names_by_dir.values() {
+        count += names
+            .iter()
+            .filter(|name| rules::archive_name(name))
+            .count() as u64;
+        count += rules::count_tail_only_old_style_groups(names);
     }
     Ok(count)
 }
@@ -802,6 +819,50 @@ fn scan_emit(
                     }
                 }
             }
+        }
+    }
+    if enqueue {
+        enqueue_old_style_tail_groups(job, parent, children)?;
+    }
+    Ok(())
+}
+/// X-10：老式 zip/rar 族只发现尾卷、没有主包时仍归组——按「残缺但可归组的卷集
+/// 计一包」把该组首个尾卷作为代表入队，解压阶段按缺主包整组失败并隔离（X-06）。
+/// 主包（主干.zip/主干.rar）在场的尾卷属于其卷集，不在此入队，与
+/// rules::archive_name 的入口口径一致；同主干同族只入队一次。
+fn enqueue_old_style_tail_groups(
+    job: &mut Job,
+    parent: &str,
+    children: &[ScanChild],
+) -> Result<()> {
+    let siblings: HashSet<String> = children
+        .iter()
+        .filter(|child| matches!(child.kind, ScanKind::File { .. }))
+        .map(|child| child.name.to_lowercase())
+        .collect();
+    let mut seen: HashSet<(String, &'static str)> = HashSet::new();
+    for child in children {
+        let ScanKind::File { .. } = &child.kind else {
+            continue;
+        };
+        let lower = child.name.to_lowercase();
+        let Some(tail) = rules::old_style_tail(&lower) else {
+            continue;
+        };
+        if siblings.contains(format!("{}.{}", tail.stem, tail.main_ext).as_str())
+            || !seen.insert((tail.stem.to_string(), tail.main_ext))
+        {
+            continue;
+        }
+        let rel = if parent.is_empty() {
+            child.name.clone()
+        } else {
+            format!("{parent}/{}", child.name)
+        };
+        // 与 archive_name 入队同口径：入队失败计错误并跳过，不中断整个扫描。
+        if let Err(error) = archive::enqueue(job, &job.root.join(&rel), 0) {
+            job.summary.errors += 1;
+            job.log("扫描", &rel, "", "跳过", &format!("{error:#}"), 0)?;
         }
     }
     Ok(())

@@ -361,6 +361,12 @@ impl SevenZip {
         // 文件名仅用于发现候选；删除与展开比例只能使用引擎实际打开的连续分卷。
         // 隔离仍使用独立的可逆宽匹配，不能把该集合复用为永久删除授权。
         let named = volume_set(&archive)?;
+        // X-10：老式 zip/rar 族只发现尾卷、没有主包时整组按失败包处置并报告缺主包，
+        // 不把尾卷交给引擎猜格式（引擎对孤立 .zNN/.rNN 的报错只会说「无法打开」，
+        // 指向不了真正原因）。
+        if missing_old_style_main(&archive) {
+            anyhow::bail!("老式分卷族缺主包：{archive_rel}（只发现 .zNN/.rNN 尾卷，未找到 主干.zip/主干.rar）");
+        }
         let volumes = if named.paths.len() > 1
             || matches!(named.scheme, VolumeScheme::RarParts | VolumeScheme::OldRar)
         {
@@ -1124,6 +1130,20 @@ struct VolumeSet {
     paths: Vec<PathBuf>,
     scheme: VolumeScheme,
 }
+/// X-10：该文件是老式族尾卷、且同目录没有对应主包（`主干.zip`/`主干.rar`）。
+/// 只发现这些尾卷时整组按失败包处置并报告缺主包（X-10：缺入口仍是一组失败包）。
+fn missing_old_style_main(archive: &Path) -> bool {
+    let Some(name) = archive.file_name().and_then(|s| s.to_str()) else {
+        return false;
+    };
+    let lower = name.to_lowercase();
+    let Some(tail) = rules::old_style_tail(&lower) else {
+        return false;
+    };
+    !archive
+        .with_file_name(format!("{}.{}", tail.stem, tail.main_ext))
+        .exists()
+}
 /// 分卷组解析：返回主体自身 + 同目录下的兄弟卷（X-05 删除与 X-06 隔离的处置单位）。
 /// 非分卷包（命名不能匹配任何分卷方案）返回只含主体自身的单项集合，且**不枚举目录**：
 /// 单卷 7z/tar/gz 等格式没有可匹配的兄弟卷命名，逐包扫描目录是纯粹的重复工作。
@@ -1142,6 +1162,15 @@ fn volume_set(archive: &Path) -> Result<VolumeSet> {
         // 入口侧（rules）只放行 `<白名单后缀>.NNN`；这里按「.NNN 结尾」认族，
         // 主干即去掉 `.NNN`（如 `x.tar.gz.001` 的主干是 `x.tar.gz`）。
         (name[..name.len() - 4].to_string(), VolumeScheme::Numbered)
+    } else if let Some(tail) = rules::old_style_tail(&name) {
+        // X-10：老式族尾卷按其族方案成组——主包缺位时（尾卷组已按缺主包入队），
+        // 失败处置与隔离仍能按整组移动；主包在场时尾卷不会单独走到这里（不单独入队）。
+        let scheme = if tail.main_ext == "zip" {
+            VolumeScheme::SplitZip
+        } else {
+            VolumeScheme::OldRar
+        };
+        (tail.stem.to_string(), scheme)
     } else if let Some(stem) = name.strip_suffix(".rar") {
         (stem.to_string(), VolumeScheme::OldRar)
     } else if let Some(stem) = name.strip_suffix(".zip") {

@@ -299,10 +299,23 @@ fn quarantined_archive_reason_is_recorded_in_log() {
         .iter()
         .find(|line| line.contains("移入解压失败"))
         .expect("日志必须记录隔离事件");
-    assert!(line.contains("broken.zip"), "记录必须归属到原包：{line}");
+    // 行格式为 time | phase | result | source | target | reason（db.rs 的 event_page）。
+    // 「解压失败」是「移入解压失败」的子串——contains 断言对它恒真；X-06/U-10 要求
+    // 的是 reason 列有实际失败原因，必须按列拆开核对。
+    let fields: Vec<&str> = line.split(" | ").collect();
+    assert_eq!(
+        fields.len(),
+        6,
+        "事件行应为六列（time|phase|result|source|target|reason）：{line}"
+    );
+    assert_eq!(fields[2], "移入解压失败", "结果列应为隔离：{line}");
     assert!(
-        line.contains("解压失败"),
-        "失败原因必须随隔离记录（界面可查）：{line}"
+        fields[3].contains("broken.zip"),
+        "记录必须归属到原包：{line}"
+    );
+    assert!(
+        !fields[5].trim().is_empty(),
+        "失败原因列不得为空（X-06：逐包记录原因，界面可查）：{line}"
     );
 }
 
@@ -363,7 +376,7 @@ fn non_whitelisted_containers_are_never_opened() {
     let tmp = fixture("whitelist");
     let root = tmp.path().join("data");
     // 内容故意用合法 ZIP：引擎确实能打开，语义上却是安装介质、文档或程序包。
-    let containers: [(&str, &[u8]); 20] = [
+    let containers: [(&str, &[u8]); 18] = [
         ("visproww.cab", b"zip payload, but an install cab"),
         ("windows.iso", b"zip payload, but a disk image"),
         ("boot.wim", b"zip payload, but a system image"),
@@ -380,17 +393,11 @@ fn non_whitelisted_containers_are_never_opened() {
         ("addon.crx", b"zip payload, but a browser extension"),
         ("styles.xpi", b"zip payload, but a browser extension"),
         // X-09：白名单外格式的分卷与配不上主包的孤立编号文件，同样完全不碰。
+        // （老式 zip/rar 族尾卷不在本列：缺主包时按 X-10 归组报告，见
+        //   old_style_tails_without_main_pack_are_grouped_and_quarantined。）
         ("windows.iso.001", b"zip payload, but an image volume"),
         ("report.docx.001", b"zip payload, but a document volume"),
         ("data.001", b"zip payload, but an orphan numbered file"),
-        (
-            "orphan.z01",
-            b"zip payload, but an orphan old-style zip volume",
-        ),
-        (
-            "orphan.r00",
-            b"zip payload, but an orphan old-style rar volume",
-        ),
     ];
     for (index, (name, bytes)) in containers.iter().enumerate() {
         let stamp = 100 + i64::try_from(index).unwrap();
@@ -434,6 +441,71 @@ fn non_whitelisted_containers_are_never_opened() {
     assert_eq!(result.summary.deleted, 1);
     assert_eq!(result.summary.errors, 0);
     assert_eq!(result.summary.archives_failed, 0);
+}
+
+// 覆盖 X-10（老式 zip/rar 族只发现尾卷、没有主包时仍归组，报告缺主包）、
+// X-02（残缺但可归组的卷集计一包）、X-06（整组移入「解压失败」并记录原因）
+#[test]
+fn old_style_tails_without_main_pack_are_grouped_and_quarantined() {
+    use jchtools::db::Database;
+    let tmp = fixture("oldstyle");
+    let root = tmp.path().join("data");
+    // 老式 zip 族：report.z01 + report.z02，无 report.zip；老式 rar 族：orphan.r00，
+    // 无 orphan.rar。按 X-10 各自是一组失败包（缺主包），整组隔离并报告缺主包。
+    write_with_mtime(&root.join("report.z01"), b"old-style zip tail one", 100);
+    write_with_mtime(&root.join("report.z02"), b"old-style zip tail two", 101);
+    write_with_mtime(&root.join("orphan.r00"), b"old-style rar tail", 102);
+    // X-09 对照：白名单外孤立编号文件仍完全不碰。
+    write_with_mtime(
+        &root.join("windows.iso.001"),
+        b"zip payload, but an image volume",
+        103,
+    );
+    // X-02：确认数量按「残缺但可归组的卷集计一包」——zip 组 + rar 组 = 2。
+    assert_eq!(
+        engine::count_archives(&root, &Config::default()).unwrap(),
+        2,
+        "缺主包的老式族尾卷组应各计一包（X-02/X-10）"
+    );
+    let result = engine::extract_run_at(
+        &root,
+        Config::default(),
+        Context::default(),
+        &state_of(&tmp),
+        Some(&fake_engine(tmp.path())),
+    )
+    .unwrap();
+    assert_eq!(
+        result.summary.archives_failed, 2,
+        "两组缺主包尾卷各按一个失败包计"
+    );
+    assert_eq!(
+        result.summary.archives_quarantined, 3,
+        "整组隔离：report.z01+z02 与 orphan.r00"
+    );
+    assert!(
+        !root.join("report.z01").exists(),
+        "尾卷组应整组移入「解压失败」"
+    );
+    assert!(!root.join("report.z02").exists());
+    assert!(!root.join("orphan.r00").exists());
+    assert!(root.join("解压失败").join("report.z01").is_file());
+    assert!(root.join("解压失败").join("report.z02").is_file());
+    assert!(root.join("解压失败").join("orphan.r00").is_file());
+    assert!(
+        root.join("windows.iso.001").is_file(),
+        "X-09 对照项原样保留（不碰、不隔离）"
+    );
+    let db = Database::open(&result.directory).unwrap();
+    let events = db.event_page(0, 100).unwrap();
+    let quarantined: Vec<&String> = events
+        .iter()
+        .filter(|line| line.contains("移入解压失败"))
+        .collect();
+    assert!(
+        quarantined.iter().any(|line| line.contains("缺主包")),
+        "失败原因必须报告缺主包（X-10）：{quarantined:?}"
+    );
 }
 
 /// 恒成功引擎，且不带 -ba 的 `l` 子命令输出带多卷标志的档案头块（`--` 与

@@ -482,6 +482,10 @@ fn fetch_and_merge(git: &Path, root: &Path, upstream: &str, log: &dyn Fn(&str)) 
     let stdout = output_text(&out.stdout);
     let text = format!("{stderr}{stdout}");
     if text.contains("CONFLICT") {
+        // G-14：冲突时必须把 git merge 的输出写进日志（含 CONFLICT 与冲突文件名），
+        // 用户要靠它判断卡在哪一步；不能只挑一边流——CONFLICT 行可能落在 stdout，
+        // 也不能只给「失败」级别的信息。多行日志条目与 run() 的仓库信息同款。
+        log(&format!("git merge 冲突输出：\n{stderr}{stdout}"));
         let unresolved = run_git_ok(git, root, &["diff", "--name-only", "--diff-filter=U"])
             .map(|text| {
                 text.lines()

@@ -329,15 +329,37 @@ fn multiple_files_are_strictly_serial() {
     }
     verify(&current_subject, &current_files);
     assert!(worktree_clean(&fix.repo));
+    // G-03「每个文件 commit 后立即 push、push 成功后才进入下一个文件」必须有随
+    // push 时机变化的断言：远端历史在「逐个 commit、最后统一 push」的批量模式下
+    // 逐字节相同，只有日志顺序能区分（这些阶段行由生产代码按 G-14 写入日志）。
+    let position = |needle: &str| {
+        outcome
+            .logs
+            .iter()
+            .position(|line| line.contains(needle))
+            .unwrap_or_else(|| panic!("日志缺少「{needle}」：{:?}", outcome.logs))
+    };
+    let (a, a_done) = (position("开始处理：a.txt"), position("push 成功：a.txt"));
+    let (b, b_done) = (position("开始处理：b.txt"), position("push 成功：b.txt"));
+    let (c, c_done) = (position("开始处理：c.txt"), position("push 成功：c.txt"));
+    assert!(
+        a < a_done && a_done < b && b < b_done && b_done < c && c < c_done,
+        "必须逐文件 commit 后立即 push、成功后才处理下一个（G-03）：{:?}",
+        outcome.logs
+    );
 }
 
 // 覆盖 G-06（保护现有 staged 状态：不带入、不删除）
 #[test]
 fn preexisting_staged_content_is_protected() {
     let fix = fixture();
-    // 用户预先 staged 的内容（不属于本工具要处理的顺序首位）
+    // 用户预先 staged 的内容：两个。porcelain 把索引条目排在未跟踪条目之前——
+    // 若实现丢掉按路径限定的 commit 机制改用普通 commit -m，处理首个文件时索引里
+    // 还留着另一个 staged 项，立即产生双文件提交被远端逐提交校验拦下。只预置一个
+    // staged 文件时，它被单独提交后索引已空，该回归永远触发不了（夹具形态缺陷）。
+    fs::write(fix.repo.join("a-staged.txt"), "user staged a\n").unwrap();
     fs::write(fix.repo.join("user-staged.txt"), "user kept this staged\n").unwrap();
-    git_ok(&fix.repo, &["add", "user-staged.txt"]);
+    git_ok(&fix.repo, &["add", "a-staged.txt", "user-staged.txt"]);
     // 工具要处理的文件
     fs::write(fix.repo.join("tool-file.txt"), "processed by tool\n").unwrap();
     let outcome = run_tool(&fix.repo);
@@ -354,10 +376,11 @@ fn preexisting_staged_content_is_protected() {
     assert_eq!(
         subjects,
         vec![
+            &"update: a-staged.txt".to_string(),
             &"update: tool-file.txt".to_string(),
             &"update: user-staged.txt".to_string()
         ],
-        "两个变更各一个提交：{log:?}"
+        "三个变更各一个提交：{log:?}"
     );
     let history = git_ok(
         &fix.remote,
@@ -463,10 +486,12 @@ fn remote_ahead_triggers_fetch_merge_then_push() {
         log.contains(&"update: local.txt".to_string()),
         "本地提交最终推送成功：{log:?}"
     );
-    // merge 不改写历史：本地 init 提交仍在远端历史中
+    // G-10「不 rebase、不改写历史」：init 是早已推送的公共祖先，任何 rebase 都不会
+    // 使它从远端历史消失，该断言对 merge 与 rebase 恒真；能区分两种实现的是合并
+    // 提交本身——rebase 不产生合并提交（判定方式与 conflict_resumed 的用例一致）。
     assert!(
-        log.iter().any(|s| s == "init"),
-        "不 rebase、不改写历史：{log:?}"
+        log.iter().any(|s| s.starts_with("Merge branch")),
+        "fetch+merge 必须按 merge 语义合并（远端历史应含合并提交，rebase 不产生）：{log:?}"
     );
     assert!(
         fs::read(fix.repo.join("remote-side.txt")).is_ok(),
@@ -540,14 +565,16 @@ fn merge_conflict_stops_and_preserves_state() {
         content.contains("local version") && content.contains("remote version"),
         "不得自动选择 ours 或 theirs: {content}"
     );
-    // G-14：日志必须包含实际阶段与 git 输出细节（CONFLICT、冲突文件），不能只说「失败」
+    // G-14：日志必须包含实际阶段与 git 输出细节（CONFLICT 行），不能只说「失败」。
+    // 「开始处理：conflict.txt」「git add -- conflict.txt」这类行任何实现都会写，
+    // 不得作为 git 输出被记录的替代证据（对 rebase/merge 与否、stderr 是否转写均不敏感）。
     let joined = outcome.logs.join(
         "
 ",
     );
     assert!(
-        joined.contains("CONFLICT") || joined.contains("conflict.txt"),
-        "日志必须包含冲突细节: {joined}"
+        joined.contains("CONFLICT"),
+        "日志必须包含 git merge 的 CONFLICT 细节（G-14）: {joined}"
     );
     // 本地的单文件提交保留（未回滚），等待冲突解决后继续
     let local_head = git_ok(&fix.repo, &["log", "-1", "--format=%s"]);
