@@ -273,6 +273,12 @@
     },
     {
       "file": "src/gui.rs",
+      "name": "markdown_converter_navigation_is_isolated_before_initialization",
+      "ignored": false,
+      "cfg": null
+    },
+    {
+      "file": "src/gui.rs",
       "name": "md_and_git_start_reset_close_after",
       "ignored": false,
       "cfg": null
@@ -436,6 +442,72 @@
     {
       "file": "src/hash_cache.rs",
       "name": "degenerate_identities_are_never_cacheable",
+      "ignored": false,
+      "cfg": null
+    },
+    {
+      "file": "src/markdown.rs",
+      "name": "atomic_commit_refuses_existing_result",
+      "ignored": false,
+      "cfg": null
+    },
+    {
+      "file": "src/markdown.rs",
+      "name": "flat_collision_keeps_sorted_first_and_counts_skip",
+      "ignored": false,
+      "cfg": null
+    },
+    {
+      "file": "src/markdown.rs",
+      "name": "same_input_and_output_are_rejected",
+      "ignored": false,
+      "cfg": null
+    },
+    {
+      "file": "src/markdown.rs",
+      "name": "scan_includes_git_project_but_excludes_output_subtree",
+      "ignored": false,
+      "cfg": null
+    },
+    {
+      "file": "src/markdown_document.rs",
+      "name": "collects_root_and_embedded_processing_warnings",
+      "ignored": false,
+      "cfg": null
+    },
+    {
+      "file": "src/markdown_document.rs",
+      "name": "joins_drop_cap_paragraph",
+      "ignored": false,
+      "cfg": null
+    },
+    {
+      "file": "src/markdown_document.rs",
+      "name": "parses_markdown_and_embedded_documents",
+      "ignored": false,
+      "cfg": null
+    },
+    {
+      "file": "src/markdown_document.rs",
+      "name": "pdf_page_count_reads_page_tree",
+      "ignored": false,
+      "cfg": null
+    },
+    {
+      "file": "src/markdown_document.rs",
+      "name": "powerpoint_page_count_reads_structure_without_extraction",
+      "ignored": false,
+      "cfg": null
+    },
+    {
+      "file": "src/markdown_document.rs",
+      "name": "preserves_code_fence_entities",
+      "ignored": false,
+      "cfg": null
+    },
+    {
+      "file": "src/markdown_document.rs",
+      "name": "rejects_missing_result",
       "ignored": false,
       "cfg": null
     },
