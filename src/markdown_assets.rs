@@ -757,13 +757,16 @@ fn extract_tar_bz2_safely(
             .path()
             .map_err(|error| format!("读取 sherpa tar 路径失败：{error}"))?
             .to_path_buf();
-        let relative_string = relative.to_string_lossy().replace('\\', "/");
+        let kind = entry.header().entry_type();
+        let mut relative_string = relative.to_string_lossy().replace('\\', "/");
+        if kind.is_dir() && relative_string.ends_with('/') {
+            relative_string.pop();
+        }
         validate_relative_path(&relative_string)?;
         let relative = PathBuf::from(relative_string);
         if !seen.insert(relative.clone()) {
             return Err(format!("sherpa tar 包含重复路径：{}", relative.display()));
         }
-        let kind = entry.header().entry_type();
         if kind.is_symlink() || kind.is_hard_link() {
             return Err(format!("sherpa tar 包含链接：{}", relative.display()));
         }
@@ -902,8 +905,58 @@ fn ensure_not_cancelled(cancel: &AtomicBool) -> Result<(), String> {
 
 #[cfg(test)]
 mod tests {
-    use super::restore_backup;
-    use std::fs;
+    use super::{extract_tar_bz2_safely, restore_backup};
+    use bzip2::write::BzEncoder;
+    use bzip2::Compression;
+    use std::fs::{self, File};
+    use std::io;
+    use std::sync::atomic::AtomicBool;
+    use tar::{Builder, EntryType, Header};
+
+    // 覆盖 T-05、T-06：首次初始化应接受 sherpa 归档中的合法目录条目。
+    #[test]
+    fn sherpa_tar_accepts_directory_entry_with_trailing_slash() {
+        let root = tempfile::tempdir().expect("创建测试目录");
+        let archive = root.path().join("sherpa.tar.bz2");
+        let encoder = BzEncoder::new(
+            File::create(&archive).expect("创建归档"),
+            Compression::default(),
+        );
+        let mut builder = Builder::new(encoder);
+
+        let mut directory = Header::new_gnu();
+        directory.set_entry_type(EntryType::Directory);
+        directory.set_size(0);
+        directory.set_mode(0o755);
+        directory.set_cksum();
+        builder
+            .append_data(&mut directory, "sherpa-root/", io::empty())
+            .expect("写入带尾斜杠的目录条目");
+
+        let body = b"model data";
+        let mut file = Header::new_gnu();
+        file.set_entry_type(EntryType::Regular);
+        file.set_size(body.len() as u64);
+        file.set_mode(0o644);
+        file.set_cksum();
+        builder
+            .append_data(&mut file, "sherpa-root/model.bin", &body[..])
+            .expect("写入模型文件");
+        builder
+            .into_inner()
+            .expect("结束 tar")
+            .finish()
+            .expect("结束 bzip2");
+
+        let destination = root.path().join("out");
+        let cancelled = AtomicBool::new(false);
+        let result = extract_tar_bz2_safely(&archive, &destination, &cancelled);
+        assert!(result.is_ok(), "目录条目末尾斜杠应合法：{result:?}");
+        assert_eq!(
+            fs::read(destination.join("sherpa-root/model.bin")).expect("读取解包文件"),
+            body
+        );
+    }
 
     #[test]
     fn restore_backup_reports_failure_and_preserves_backup() {
