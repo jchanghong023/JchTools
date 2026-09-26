@@ -1,0 +1,127 @@
+{
+  "schema_version": 1,
+  "component": "markdown-assets",
+  "xberg": {
+    "tag": "v2026.9.15-0746-run36.1",
+    "archive_url": "https://github.com/jchanghong023/xberg/releases/download/v2026.9.15-0746-run36.1/xberg-cli-x86_64-pc-windows-msvc.zip",
+    "archive_size_bytes": 379091489,
+    "archive_sha256": "7c2c27017ed5f89733f946e7b66f841858271f2854880460a81ba8dc1c8302b8",
+    "members": [
+      { "path": "LICENSE", "size_bytes": 1098, "sha256": "2df0cbac46062748fa0f582c5717df32d66607de4d37af1473ce785c31b60b54" },
+      { "path": "models/models--onnx-community--whisper-tiny/snapshots/ff4177021cc41f7db950912b73ea4fdf7d01d8e7/config.json", "size_bytes": 2243, "sha256": "46aeea0a406afbeb563fc8e59ca10609203df4299af6a83f73752fef369efd2d" },
+      { "path": "models/models--onnx-community--whisper-tiny/snapshots/ff4177021cc41f7db950912b73ea4fdf7d01d8e7/onnx/decoder_model.onnx", "size_bytes": 118397483, "sha256": "ab79e3f2a9a3d98f159f853a3172120a38af7eb5f7863d706aa7d39c228f009e" },
+      { "path": "models/models--onnx-community--whisper-tiny/snapshots/ff4177021cc41f7db950912b73ea4fdf7d01d8e7/onnx/decoder_with_past_model.onnx", "size_bytes": 113638998, "sha256": "0485135066eb1d36dcb04dbabd0cc1141c7cd8c442217abd0798d55fe2bc6bed" },
+      { "path": "models/models--onnx-community--whisper-tiny/snapshots/ff4177021cc41f7db950912b73ea4fdf7d01d8e7/onnx/encoder_model.onnx", "size_bytes": 32904992, "sha256": "6642befb640f950d4a8cbbd17834d59e7e75f575b81ccf213e06b050623ab1dd" },
+      { "path": "models/models--onnx-community--whisper-tiny/snapshots/ff4177021cc41f7db950912b73ea4fdf7d01d8e7/tokenizer.json", "size_bytes": 2480466, "sha256": "27fc476bfe7f17299480be2273fc0608e4d5a99aba2ab5dec5374b4482d1a566" },
+      { "path": "models/models--xberg-io--layout-models/snapshots/c6bf493e2f7b0b9a29a5870da9880c14e20ff0a3/rtdetr/model.onnx", "size_bytes": 169089059, "sha256": "3bf2fb0ee6df87435b7ae47f0f3930ec3dc97ec56fd824acc6d57bc7a6b89ef2" },
+      { "path": "models/models--xberg-io--layout-models/snapshots/c6bf493e2f7b0b9a29a5870da9880c14e20ff0a3/tatr/model.onnx", "size_bytes": 30158413, "sha256": "c11f4033da75e9c4d41c403ef356e89caa0a37a7d111b55461e7d5ba856bb6b6" },
+      { "path": "models/models--xberg-io--paddleocr-onnx-models/snapshots/bc5ec866cf0e798e667808dfa51b0ba8ad0dafc8/v2/classifiers/PP-LCNet_x1_0_textline_ori.onnx", "size_bytes": 6775212, "sha256": "1090f9f483a115f904beefe04acc9d28edf0c0b7b08cf0dd8d0ea59a9e0f2735" },
+      { "path": "models/models--xberg-io--paddleocr-onnx-models/snapshots/bc5ec866cf0e798e667808dfa51b0ba8ad0dafc8/v6/det/tiny/model.onnx", "size_bytes": 1793140, "sha256": "7603ac05a98aef4f7284517b9210c09f37352debd1183511645e9ee03c5a0406" },
+      { "path": "models/models--xberg-io--paddleocr-onnx-models/snapshots/bc5ec866cf0e798e667808dfa51b0ba8ad0dafc8/v6/rec/tiny/dict.txt", "size_bytes": 27156, "sha256": "c5cbe34ef40c29c4df07ed012bf96569cb69a2d2a01a07027e9f13cb832bd9cd" },
+      { "path": "models/models--xberg-io--paddleocr-onnx-models/snapshots/bc5ec866cf0e798e667808dfa51b0ba8ad0dafc8/v6/rec/tiny/model.onnx", "size_bytes": 4484067, "sha256": "46c3df72875f0969a9a5e0bdc23ce685913f68ab96b9778e760962b0cb1b8ed4" },
+      { "path": "MSVCP140.dll", "size_bytes": 557728, "sha256": "0f885b509a685d2bbfa652fed26b5fb31d88fbdab0a978c641d1c7b8aa460aa9" },
+      { "path": "MSVCP140_1.dll", "size_bytes": 35952, "sha256": "bfad5aef4c63a669e3c140655cdfdf395b6c979b400a447bd5dcb65ed8826c3d" },
+      { "path": "onnxruntime.dll", "size_bytes": 14148680, "sha256": "114947d633e6844ce3c4b51ef6678f776628571d08a5763859c61642c8dcca9c" },
+      { "path": "onnxruntime_providers_shared.dll", "size_bytes": 22048, "sha256": "c10763a3764f5c292072533560c341565be64f38fd2807ed5035cd177d3bbb26" },
+      { "path": "THIRD_PARTY_LICENSES.md", "size_bytes": 6365, "sha256": "7f9a61b4ead9e7f0551fe9a1c2ffc1fb53f001e9170416412c17cdec93a0b6bd" },
+      { "path": "VCRUNTIME140.dll", "size_bytes": 124544, "sha256": "d5e4d9a3e835fa679450145d6a7d94e36573a509317111904d9b3712c30d9066" },
+      { "path": "VCRUNTIME140_1.dll", "size_bytes": 49792, "sha256": "1f2d41c4aa5db0bc33ebf7b66d72943a817d7ce6cbe880502a9403823633093f" },
+      { "path": "xberg.cmd", "size_bytes": 134, "sha256": "5b23160e06ca591d7e2b93357e258e04a4c6d0401294ccaf9f1d01ba87dc6a5a" },
+      { "path": "xberg.exe", "size_bytes": 102584832, "sha256": "0c9f6d7a19102f6939d9eca7ad6f938ecbc7a744d33bfdf6712625aab3456185" }
+    ],
+    "licenses": [
+      { "component": "Xberg CLI", "license": "MIT", "source": "https://github.com/jchanghong023/xberg" },
+      { "component": "ONNX Runtime 1.24.2", "license": "MIT", "source": "https://github.com/microsoft/onnxruntime" },
+      { "component": "RT-DETR v2", "license": "Apache-2.0", "source": "https://huggingface.co/docling-project/docling-layout-heron-onnx" },
+      { "component": "TATR INT8", "license": "MIT", "source": "https://huggingface.co/microsoft/table-transformer-structure-recognition" },
+      { "component": "PaddleOCR ONNX", "license": "Apache-2.0", "source": "https://github.com/PaddlePaddle/PaddleOCR" }
+    ]
+  },
+  "media_models": [
+    {
+      "id": "sensevoice-int8",
+      "url": "https://huggingface.co/csukuangfj/sherpa-onnx-sense-voice-zh-en-ja-ko-yue-2024-07-17/resolve/2365baeacb507f821a0c8120fcee3d484dba7a07/model.int8.onnx",
+      "relative_path": "models/sense_voice_zh_en_ja_ko_yue_2024_07_17/model.int8.onnx",
+      "size_bytes": 239233841,
+      "sha256": "c71f0ce00bec95b07744e116345e33d8cbbe08cef896382cf907bf4b51a2cd51",
+      "license": { "component": "SenseVoice INT8", "license": "MIT", "source": "https://github.com/FunAudioLLM/SenseVoice" }
+    },
+    {
+      "id": "sensevoice-tokens",
+      "url": "https://huggingface.co/csukuangfj/sherpa-onnx-sense-voice-zh-en-ja-ko-yue-2024-07-17/resolve/2365baeacb507f821a0c8120fcee3d484dba7a07/tokens.txt",
+      "relative_path": "models/sense_voice_zh_en_ja_ko_yue_2024_07_17/tokens.txt",
+      "size_bytes": 315894,
+      "sha256": "f449eb28dc567533d7fa59be34e2abca8784f771850c78a47fb731a31429a1dc",
+      "license": { "component": "sherpa-onnx token vocabulary", "license": "Apache-2.0", "source": "https://github.com/k2-fsa/sherpa-onnx" }
+    },
+    {
+      "id": "silero-vad",
+      "url": "https://github.com/k2-fsa/sherpa-onnx/releases/download/asr-models/silero_vad.onnx",
+      "relative_path": "models/vad/silero_vad.onnx",
+      "size_bytes": 643854,
+      "sha256": "9e2449e1087496d8d4caba907f23e0bd3f78d91fa552479bb9c23ac09cbb1fd6",
+      "license": { "component": "Silero VAD", "license": "MIT", "source": "https://github.com/snakers4/silero-vad" }
+    }
+  ],
+  "future_workers": [
+    {
+      "id": "media-worker-runtime",
+      "status": "ready",
+      "blocking_reason": "媒体工作进程或原生依赖缺失、校验失败；请在功能页重试初始化",
+      "assets": [
+        {
+          "id": "markdown-media-worker.exe",
+          "url": "https://github.com/jchanghong023/JchTools/releases/download/optional-components-v0.1.0/markdown-media-worker.exe",
+          "size_bytes": 935424,
+          "sha256": "703f51d1044f3775acf125018fb31a66f133a77bde7b482d9b248ec3bc2bccfd",
+          "archive_type": "file",
+          "target_root": "worker",
+          "install_path": "markdown-media-worker.exe",
+          "members": [],
+          "license": { "component": "JchTools markdown-media-worker", "license": "JchTools project license", "source": "https://github.com/jchanghong023/JchTools" }
+        },
+        {
+          "id": "ffmpeg-n9.0.2-3-ga5923073bf-win64-lgpl-9.0.zip",
+          "url": "https://github.com/BtbN/FFmpeg-Builds/releases/download/autobuild-2026-09-24-14-14/ffmpeg-n9.0.2-3-ga5923073bf-win64-lgpl-9.0.zip",
+          "size_bytes": 171546855,
+          "sha256": "ad4bddec89f4d5413f976ca4b4424c3aeec095afa029f739a2a03e9a360f06cd",
+          "archive_type": "zip",
+          "target_root": "media_models",
+          "install_path": null,
+          "members": [
+            { "path": "ffmpeg-n9.0.2-3-ga5923073bf-win64-lgpl-9.0/bin/ffmpeg.exe", "install_path": "ffmpeg/ffmpeg.exe", "size_bytes": 134496768, "sha256": "ca2b72f7607527869f8f132c504765cfbab21ab05971006c7f5dd45b72c0127f" },
+            { "path": "ffmpeg-n9.0.2-3-ga5923073bf-win64-lgpl-9.0/LICENSE.txt", "install_path": "ffmpeg/LICENSE.txt", "size_bytes": 7651, "sha256": "da7eabb7bafdf7d3ae5e9f223aa5bdc1eece45ac569dc21b3b037520b4464768" }
+          ],
+          "license": { "component": "FFmpeg 9.0.2 LGPL static build", "license": "LGPL-2.1-or-later", "source": "https://github.com/BtbN/FFmpeg-Builds" }
+        },
+        {
+          "id": "sherpa-onnx-v1.13.6-win-x64-shared-MD-Release-no-tts.tar.bz2",
+          "url": "https://github.com/k2-fsa/sherpa-onnx/releases/download/v1.13.6/sherpa-onnx-v1.13.6-win-x64-shared-MD-Release-no-tts.tar.bz2",
+          "size_bytes": 18748740,
+          "sha256": "071d6641efd737a1f60de48c9c4cd596f78d5b0980815e8ad3798c95785d2b26",
+          "archive_type": "tar.bz2",
+          "target_root": "media_models",
+          "install_path": null,
+          "members": [
+            { "path": "sherpa-onnx-v1.13.6-win-x64-shared-MD-Release-no-tts/lib/sherpa-onnx-c-api.dll", "install_path": "sherpa-onnx-c-api.dll", "size_bytes": 2866688, "sha256": "c372657098ced2cac7d0a54d2926f3ce61542b06ad0a6eb71c8aee8c186db6c9" },
+            { "path": "sherpa-onnx-v1.13.6-win-x64-shared-MD-Release-no-tts/lib/sherpa-onnx-cxx-api.dll", "install_path": "sherpa-onnx-cxx-api.dll", "size_bytes": 128512, "sha256": "a90a5e2065a23e52996b5aed2e296f6d71c85b3966ec77fbda57604d1defcbdc" },
+            { "path": "sherpa-onnx-v1.13.6-win-x64-shared-MD-Release-no-tts/bin/onnxruntime.dll", "install_path": "onnxruntime.dll", "size_bytes": 16720896, "sha256": "4ee0ae76cbf51bde6999f36829939b2b06d340ab57867ef82b61a0b674111efa" },
+            { "path": "sherpa-onnx-v1.13.6-win-x64-shared-MD-Release-no-tts/bin/onnxruntime_providers_shared.dll", "install_path": "onnxruntime_providers_shared.dll", "size_bytes": 10752, "sha256": "cd7245821ad7054d1904ac221ca3d6b913c0e8977f0b408787f3bc2c430a5403" }
+          ],
+          "license": { "component": "sherpa-onnx v1.13.6 Windows x64 shared C API", "license": "Apache-2.0", "source": "https://github.com/k2-fsa/sherpa-onnx/releases/tag/v1.13.6" }
+        },
+        {
+          "id": "sherpa-onnx-license",
+          "url": "https://raw.githubusercontent.com/k2-fsa/sherpa-onnx/v1.13.6/LICENSE",
+          "size_bytes": 11358,
+          "sha256": "cfc7749b96f63bd31c3c42b5c471bf756814053e847c10f3eb003417bc523d30",
+          "archive_type": "file",
+          "target_root": "media_models",
+          "install_path": "LICENSE-sherpa-onnx.txt",
+          "members": [],
+          "license": { "component": "sherpa-onnx v1.13.6 license text", "license": "Apache-2.0", "source": "https://github.com/k2-fsa/sherpa-onnx/blob/v1.13.6/LICENSE" }
+        }
+      ]
+    }
+  ]
+}

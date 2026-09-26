@@ -429,6 +429,26 @@ export component AppWindow inherits Window {
     in-out property <int> git-retry: 0;
     in-out property <int> git-retry-wait: 0;
     in-out property <string> git-state;
+    // 转 Markdown（T 分区）：独立可选工具的输入、输出与运行状态。
+    in-out property <string> convert-input-dir;
+    in-out property <string> convert-output-dir;
+    in-out property <string> convert-runtime-dir;
+    in-out property <bool> convert-flat: false;
+    in-out property <bool> convert-pdf: true;
+    in-out property <bool> convert-office: true;
+    in-out property <bool> convert-images: true;
+    in-out property <bool> convert-media: true;
+    in-out property <bool> convert-other: true;
+    in-out property <string> convert-timeout-secs: "21600";
+    in-out property <bool> convert-ready: false;
+    in-out property <bool> convert-runtime-confirmed: false;
+    in-out property <bool> convert-initializing: false;
+    in-out property <bool> convert-runtime-saving: false;
+    in-out property <string> convert-status: "尚未检查可选组件";
+    in-out property <string> convert-metrics: "尚未开始";
+    in-out property <string> convert-log-text;
+    in-out property <string> convert-progress-note;
+    in-out property <float> convert-progress: -1;
     callback choose-directory();
     callback root-edited();
     callback select-tool(string);
@@ -464,6 +484,15 @@ export component AppWindow inherits Window {
     callback git-choose-repo();
     callback git-start();
     callback git-stop();
+    // 转 Markdown 回调（T 分区）：组件状态、目录选择与任务控制。
+    callback convert-choose-input();
+    callback convert-choose-output();
+    callback convert-choose-runtime();
+    callback convert-runtime-edited();
+    callback convert-use-runtime();
+    callback convert-initialize();
+    callback convert-start();
+    callback convert-stop();
     callback window-drag-start(length,length);
     callback window-drag-move(length,length);
     property <length> caption-area: 138px;
@@ -532,13 +561,14 @@ export component AppWindow inherits Window {
             // 页面标题区
             HorizontalLayout { height: 32px; spacing: 12px; cross-axis-alignment: center;
                 Label { text: root.screen == 0 ? "目录整理" : root.screen == 2 ? "递归解压"
-                    : root.screen == 3 ? "MD 整理" : root.screen == 4 ? "Git 工具" : "关于 JchTools";
+                    : root.screen == 3 ? "MD 整理" : root.screen == 4 ? "Git 工具" : root.screen == 5 ? "转 Markdown" : "关于 JchTools";
                     font-size: 20px; font-weight: 700; }
                 Rectangle { width: 3px; height: 16px; border-radius: 2px; background: Design.bar; }
                 Muted { text: root.screen == 0 ? "内容去重、归类与清理（不解压）；先分析出计划，确认后才执行。"
                     : root.screen == 2 ? "递归解开压缩包；完整成功解出的原压缩包及分卷永久删除（不可恢复），失败或未完全解开的包保留。"
                     : root.screen == 3 ? "合并 MD（标题整体下移一级）与拆分 MD（UTF-8 安全、按序拼接无损还原）；原文件一律不改动。"
                     : root.screen == 4 ? "逐文件提交并推送：add → commit → push 成功后才处理下一个文件；冲突即停、失败无限重试（可停止）。"
+                    : root.screen == 5 ? "把文档、图片和媒体转换为 Markdown；可保留输入层级或选择平铺输出。"
                     : "Windows 优先的本地工具箱 · 功能持续增加";
                     horizontal-stretch: 1; wrap: no-wrap; overflow: elide; vertical-alignment: center; }
                 if root.busy: Spinner { width: 20px; height: 20px; }
@@ -1034,6 +1064,112 @@ export component AppWindow inherits Window {
                     }
                 }
             }
+            if root.screen == 5: VerticalLayout {
+                spacing: 8px;
+                Surface {
+                    VerticalLayout { padding: 12px; spacing: 8px;
+                        Muted { text: "Xberg 运行目录"; font-size: 11px; font-weight: 600; }
+                        HorizontalLayout { spacing: 10px; cross-axis-alignment: center;
+                            LineEdit { text <=> root.convert-runtime-dir; placeholder-text: "选择已安装的 Xberg 运行目录";
+                                edited => { root.convert-runtime-edited(); }
+                                enabled: !root.busy && !root.convert-initializing && !root.convert-runtime-saving && root.confirm-kind == 0;
+                                horizontal-stretch: 1; }
+                            Button { text: "选择目录…";
+                                enabled: !root.busy && !root.convert-initializing && !root.convert-runtime-saving && root.confirm-kind == 0;
+                                clicked => { root.convert-choose-runtime(); } }
+                            Button { text: root.convert-runtime-saving ? "正在校验…" : "使用此目录";
+                                enabled: !root.busy && !root.convert-initializing && !root.convert-runtime-saving && root.convert-runtime-dir != "" && root.confirm-kind == 0;
+                                clicked => { root.convert-use-runtime(); } }
+                        }
+                        Muted { text: root.convert-runtime-saving ? "正在校验并保存 Xberg 目录，请稍候…" : "必须选择并确认固定版本的 Xberg 运行目录；校验失败会显示原因。"; }
+                    }
+                }
+                Surface {
+                    VerticalLayout { padding: 12px; spacing: 8px;
+                        Muted { text: "输入目录"; font-size: 11px; font-weight: 600; }
+                        HorizontalLayout { spacing: 10px; cross-axis-alignment: center;
+                            LineEdit { text <=> root.convert-input-dir; placeholder-text: "选择或输入待转换的目录，例如 D:\\Docs";
+                                enabled: !root.busy && !root.convert-initializing && !root.convert-runtime-saving && root.confirm-kind == 0; horizontal-stretch: 1; }
+                            Button { text: "选择目录…"; enabled: !root.busy && !root.convert-initializing && !root.convert-runtime-saving && root.confirm-kind == 0; clicked => { root.convert-choose-input(); } }
+                        }
+                        Muted { text: "只读扫描 Git 项目、隐藏文件和系统属性文件；不会跟随符号链接或 junction。"; }
+                    }
+                }
+                Surface {
+                    VerticalLayout { padding: 12px; spacing: 8px;
+                        Muted { text: "输出目录"; font-size: 11px; font-weight: 600; }
+                        HorizontalLayout { spacing: 10px; cross-axis-alignment: center;
+                            LineEdit { text <=> root.convert-output-dir; placeholder-text: "选择转换结果目录";
+                                enabled: !root.busy && !root.convert-initializing && !root.convert-runtime-saving && root.confirm-kind == 0; horizontal-stretch: 1; }
+                            Button { text: "选择目录…"; enabled: !root.busy && !root.convert-initializing && !root.convert-runtime-saving && root.confirm-kind == 0; clicked => { root.convert-choose-output(); } }
+                            CheckBox { text: "平铺输出"; checked <=> root.convert-flat;
+                                enabled: !root.busy && !root.convert-initializing && !root.convert-runtime-saving && root.confirm-kind == 0; }
+                        }
+                        Muted { text: root.convert-flat ? "平铺时同名结果只处理排序第一份，其余跳过。" : "默认保留输入目录层级；输出目录位于输入目录内时会自动排除输出子树。"; }
+                    }
+                }
+                Surface {
+                    VerticalLayout { padding: 12px; spacing: 8px;
+                        Muted { text: "转换类型"; font-size: 11px; font-weight: 600; }
+                        HorizontalLayout { spacing: 14px;
+                            CheckBox { text: "PDF"; checked <=> root.convert-pdf; enabled: !root.busy && !root.convert-initializing && !root.convert-runtime-saving && root.confirm-kind == 0; }
+                            CheckBox { text: "Office"; checked <=> root.convert-office; enabled: !root.busy && !root.convert-initializing && !root.convert-runtime-saving && root.confirm-kind == 0; }
+                            CheckBox { text: "图片"; checked <=> root.convert-images; enabled: !root.busy && !root.convert-initializing && !root.convert-runtime-saving && root.confirm-kind == 0; }
+                            CheckBox { text: "MP4/M4A"; checked <=> root.convert-media; enabled: !root.busy && !root.convert-initializing && !root.convert-runtime-saving && root.confirm-kind == 0; }
+                            CheckBox { text: "其他"; checked <=> root.convert-other; enabled: !root.busy && !root.convert-initializing && !root.convert-runtime-saving && root.confirm-kind == 0; }
+                        }
+                        HorizontalLayout { spacing: 10px; cross-axis-alignment: center;
+                            Muted { text: "高级选项：单文件超时（秒）"; }
+                            LineEdit { text <=> root.convert-timeout-secs; width: 140px; horizontal-alignment: right;
+                                enabled: !root.busy && !root.convert-initializing && !root.convert-runtime-saving && root.confirm-kind == 0; }
+                            Rectangle { horizontal-stretch: 1; background: transparent; }
+                        }
+                    }
+                }
+                Surface {
+                    VerticalLayout { padding: 12px; spacing: 8px;
+                        HorizontalLayout { spacing: 10px; cross-axis-alignment: center;
+                            Label { text: root.convert-status; overflow: elide; horizontal-stretch: 1; font-weight: 600; }
+                            if !root.convert-ready && !root.convert-initializing: Button { text: "初始化可选组件"; primary: true;
+                                enabled: root.convert-runtime-confirmed && !root.convert-runtime-saving && root.confirm-kind == 0; clicked => { root.convert-initialize(); } }
+                            if root.convert-initializing: Button { text: "取消初始化";
+                                enabled: root.confirm-kind == 0; clicked => { root.convert-stop(); } }
+                        }
+                        Muted { text: "模型和转换依赖按需初始化，不随主程序打包；初始化后可离线使用。"; }
+                    }
+                }
+                Surface { vertical-stretch: 1;
+                    VerticalLayout { padding-top: 12px; padding-bottom: 12px; padding-left: 14px; padding-right: 14px; spacing: 8px;
+                        Muted { text: root.convert-progress-note == "" ? "转换日志" : root.convert-progress-note; }
+                        TextEdit { text: root.convert-log-text; read-only: true; font-family: "Consolas"; vertical-stretch: 1; }
+                    }
+                }
+                Surface {
+                    min-height: 56px;
+                    VerticalLayout { padding-top: 8px; padding-bottom: 8px; padding-left: 16px; padding-right: 14px; spacing: 8px;
+                        HorizontalLayout { spacing: 12px; cross-axis-alignment: center;
+                            VerticalLayout { horizontal-stretch: 1; spacing: 2px;
+                                HorizontalLayout { spacing: 8px; cross-axis-alignment: center;
+                                    Rectangle { width: 44px; height: 20px; border-radius: 6px;
+                                        background: root.busy ? Design.accent : Design.accent-soft;
+                                        Text { text: root.busy ? "进行中" : "状态"; font-size: 11px; font-weight: 600;
+                                            color: root.busy ? Design.on-accent : Design.accent-ink;
+                                            width: parent.width; height: parent.height;
+                                            horizontal-alignment: center; vertical-alignment: center; }
+                                    }
+                                    Label { text: root.convert-metrics; overflow: elide; horizontal-stretch: 1; font-size: 14px; }
+                                }
+                            }
+                            if root.busy: Text { text: root.convert-progress-note; wrap: no-wrap; overflow: elide; color: Design.accent-ink; font-weight: 600; }
+                            if root.busy: Button { text: "停止任务"; enabled: root.confirm-kind == 0; clicked => { root.convert-stop(); } }
+                            if !root.busy: Button { text: "开始转换"; primary: true;
+                                enabled: root.convert-ready && root.convert-input-dir != "" && root.convert-output-dir != "" && root.confirm-kind == 0;
+                                clicked => { root.convert-start(); } }
+                        }
+                        if root.busy: ProgressBar { progress: root.convert-progress; }
+                    }
+                }
+            }
             if root.screen == 1: VerticalLayout { spacing: 14px;
                 Surface {
                     VerticalLayout { padding: 18px; spacing: 14px;
@@ -1045,7 +1181,7 @@ export component AppWindow inherits Window {
                             }
                         }
                         Rectangle { height: 1px; background: Design.line-soft; }
-                        Muted { text: "Rust + Slint · 独立整理引擎 · SQLite 磁盘索引 · 随包携带完整 7-Zip\n已注册工具：递归解压、目录整理、MD 整理、Git 工具；以后通过工具注册表添加真实工具和页面。\n软件完全离线：不发起任何网络请求、不上传文件、不自动提权、不执行目录中的程序（Git 工具的 upstream 推送例外，见需求合同 P-03）。\n启动低于一秒是目标，不是未经实测的承诺。"; }
+                        Muted { text: "Rust + Slint · 独立整理引擎 · SQLite 磁盘索引 · 随包携带完整 7-Zip\n已注册工具：递归解压、目录整理、MD 整理、Git 工具、转 Markdown。\n本地处理不上传文件；Git 工具的 upstream 推送、用户主动初始化转 Markdown 可选组件时会联网（见需求合同 P-03）。\n启动低于一秒是目标，不是未经实测的承诺。"; }
                     }
                 }
                 // 主题是应用级设置，放在关于页而不是目录整理的规则分区。

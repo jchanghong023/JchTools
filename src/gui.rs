@@ -18,7 +18,8 @@ use crate::{
     db::Database,
     engine,
     git_tools::{self, GitShared, BACKOFF_UNIT},
-    md_tools,
+    markdown::{self, FormatGroup},
+    markdown_assets, md_tools,
     model::{bytes, ActionKind, Summary},
     registry,
 };
@@ -37,13 +38,14 @@ use std::{
     time::{Duration, Instant},
 };
 
-/// 当前工具（P-02 四个注册工具）：决定规则分区集合、流程与状态文案。
+/// 当前工具（P-02 五个注册工具）：决定规则分区集合、流程与状态文案。
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 enum Tool {
     Extract,
     Organizer,
     Md,
     Git,
+    MarkdownConverter,
 }
 impl Tool {
     fn sections(self) -> &'static [&'static str] {
@@ -51,7 +53,7 @@ impl Tool {
             Tool::Extract => &["解压", "安全与性能"],
             Tool::Organizer => &["去重", "归类", "清理", "安全与性能"],
             // R-01：MD 整理与 Git 工具不设规则面板，分区集合为空。
-            Tool::Md | Tool::Git => &[],
+            Tool::Md | Tool::Git | Tool::MarkdownConverter => &[],
         }
     }
     fn from_id(id: &str) -> Option<Self> {
@@ -60,6 +62,7 @@ impl Tool {
             "directory-organizer" => Some(Tool::Organizer),
             "md-organizer" => Some(Tool::Md),
             "git-tools" => Some(Tool::Git),
+            "markdown-converter" => Some(Tool::MarkdownConverter),
             _ => None,
         }
     }
@@ -72,6 +75,7 @@ enum RuntimeMode {
     Extract,
     Md,
     Git,
+    MarkdownConverter,
 }
 /// 等待覆盖确认后执行的 MD 操作（M-07/M-11）：确认（confirm-kind=4）后由界面重新发起。
 #[derive(Clone)]
@@ -122,6 +126,8 @@ struct State {
     task: Option<PathBuf>,
     control: Option<Arc<Control>>,
     logs: VecDeque<String>,
+    /// 转 Markdown 专用日志；转换任务切换到旧工具时不会污染旧工具日志。
+    convert_logs: VecDeque<String>,
     page: usize,
     page_starts: Vec<i64>,
     started: Instant,
@@ -145,6 +151,12 @@ struct State {
     md_pending: Option<MdPending>,
     /// Git 工具：运行中任务的共享进度（G-13），由事件泵轮询上屏。
     git_shared: Option<Arc<GitShared>>,
+    /// 转 Markdown：独立取消信号；不复用目录整理/解压的控制器。
+    convert_cancel: Option<Arc<std::sync::atomic::AtomicBool>>,
+    /// 转 Markdown 初始化专用取消信号。
+    convert_init_cancel: Option<Arc<std::sync::atomic::AtomicBool>>,
+    /// 转 Markdown 组件检查代际；旧检查结果不得覆盖新初始化/检查状态。
+    convert_readiness_generation: u64,
     /// 测试注入：覆盖任务状态目录；生产路径为 None，仍走 engine::prepare/apply。
     engine_overrides: Option<EngineTestOverrides>,
     /// 解压确认清点的请求代际：迟到的低代际清点事件不得刷新文案或解除门禁（X-02）。
@@ -729,7 +741,7 @@ fn visible_rows(state: &State) -> Result<Vec<RuleRow>> {
         Tool::Extract => "extract",
         Tool::Organizer => "organizer",
         // MD/Git 不设规则面板（R-01）：不会进入规则表过滤，占位即可。
-        Tool::Md | Tool::Git => "",
+        Tool::Md | Tool::Git | Tool::MarkdownConverter => "",
     };
     Ok(state
         .specs
@@ -787,6 +799,10 @@ fn invalidate(ui: &AppWindow, tool: Tool) {
             return;
         }
         ui.set_status("目录已就绪".into());
+        return;
+    }
+    if tool == Tool::MarkdownConverter {
+        ui.set_status("转 Markdown 可在页面中初始化组件并开始转换".into());
         return;
     }
     if ui.get_has_task() {
@@ -2011,7 +2027,7 @@ fn log_panel_visible(ui: &AppWindow) -> bool {
         0 => ui.get_panel() == 2,
         2 => ui.get_panel() == 1,
         // MD 整理与 Git 工具页的日志区常驻显示（无面板切换）。
-        3 | 4 => true,
+        3..=5 => true,
         _ => false,
     }
 }
@@ -2100,6 +2116,7 @@ fn wire_sync(ui: &AppWindow, state: &Rc<RefCell<State>>, out: &EventSender) {
                         Tool::Organizer => 0,
                         Tool::Md => 3,
                         Tool::Git => 4,
+                        Tool::MarkdownConverter => 5,
                     };
                     ui.set_screen(screen);
                     ui.set_active_tool_id(id.clone());
@@ -2119,6 +2136,14 @@ fn wire_sync(ui: &AppWindow, state: &Rc<RefCell<State>>, out: &EventSender) {
                     ui.set_panel(0);
                     // U-11：MD 整理回到默认子页「合并 MD」，不得停留在拆分子页。
                     ui.set_md_subpage(0);
+                    ui.set_convert_progress(-1.0);
+                    ui.set_convert_progress_note("".into());
+                    if tool == Tool::MarkdownConverter {
+                        ui.set_convert_log_text(
+                            log_panel_text(&state.borrow().convert_logs).into(),
+                        );
+                        start_markdown_readiness(&ui, &state, &out);
+                    }
                     refresh(&ui, &state.borrow());
                     // 切工具不是规则或目录改动（C-10/R-04）：就绪计划按「任务+配置+目录」
                     // 重算保持可执行，与目录重输同口径，而不是一律失效。
@@ -2625,7 +2650,85 @@ impl UiPump {
         for event in self.receiver.try_iter().take(256) {
             match event {
                 Event::Status(text) => {
-                    if !ui.get_paused() {
+                    if let Some(log) = text.strip_prefix("CONVERTER_LOG|") {
+                        let mut s = self.state.borrow_mut();
+                        push_event_log(&mut s.convert_logs, log.to_string());
+                        ui.set_convert_log_text(log_panel_text(&s.convert_logs).into());
+                    } else if let Some(rest) = text.strip_prefix("CONVERTER_READINESS|") {
+                        let mut fields = rest.splitn(3, '|');
+                        let generation = fields.next().and_then(|value| value.parse::<u64>().ok());
+                        let ready = fields.next() == Some("1");
+                        let message = fields.next().unwrap_or_default();
+                        let accepted = generation.is_some_and(|generation| {
+                            let s = self.state.borrow();
+                            s.convert_readiness_generation == generation
+                                && s.convert_init_cancel.is_none()
+                                && !ui.get_busy()
+                        });
+                        if accepted {
+                            ui.set_convert_ready(ready);
+                            ui.set_convert_status(
+                                if ready {
+                                    "已安装组件就绪，可离线使用"
+                                } else {
+                                    "可选组件未就绪，请主动初始化"
+                                }
+                                .into(),
+                            );
+                            if !message.is_empty() && !ready && ui.get_screen() == 5 {
+                                ui.set_notice_text(message.into());
+                            }
+                        }
+                    } else if let Some(progress) = text.strip_prefix("CONVERTER_INIT|") {
+                        ui.set_convert_status(progress.into());
+                    } else if let Some(rest) = text.strip_prefix("CONVERTER_STARTED|") {
+                        ui.set_convert_progress(-1.0);
+                        ui.set_convert_progress_note("正在转换".into());
+                        ui.set_convert_metrics(format!("待处理 {rest} 个文件").into());
+                    } else if let Some(rest) = text.strip_prefix("CONVERTER_FILE_STARTED|") {
+                        let mut fields = rest.splitn(4, '|');
+                        let index = fields.next().and_then(|v| v.parse::<usize>().ok());
+                        let total = fields.next().and_then(|v| v.parse::<usize>().ok());
+                        let relative = fields.next().unwrap_or_default();
+                        if let (Some(index), Some(total)) = (index, total) {
+                            let progress = if total == 0 {
+                                -1.0
+                            } else {
+                                let numerator =
+                                    u16::try_from(index.saturating_sub(1)).unwrap_or(u16::MAX);
+                                let denominator = u16::try_from(total).unwrap_or(u16::MAX);
+                                (f32::from(numerator) / f32::from(denominator)).clamp(0.0, 1.0)
+                            };
+                            ui.set_convert_progress(progress);
+                            ui.set_convert_progress_note(format!("{index} / {total}").into());
+                            ui.set_convert_metrics(format!("正在处理 {relative}").into());
+                        }
+                    } else if let Some(rest) = text.strip_prefix("CONVERTER_FILE_FINISHED|") {
+                        let mut fields = rest.splitn(5, '|');
+                        let partial = fields.next() == Some("1");
+                        let success = fields.next() == Some("1");
+                        let relative = fields.next().unwrap_or_default();
+                        let message = fields.next().unwrap_or_default();
+                        ui.set_convert_metrics(
+                            format!(
+                                "{}：{}{}",
+                                if partial {
+                                    "部分提取"
+                                } else if success {
+                                    "已完成"
+                                } else {
+                                    "失败"
+                                },
+                                relative,
+                                if message.is_empty() {
+                                    String::new()
+                                } else {
+                                    format!(" · {message}")
+                                }
+                            )
+                            .into(),
+                        );
+                    } else if !ui.get_paused() {
                         pending_status = Some(text);
                     }
                 }
@@ -2856,11 +2959,115 @@ impl UiPump {
                     }
                     apply_plan_readiness(ui, &s, snapshot.as_ref());
                 }
-                Event::Notice(text) => ui.set_notice_text(text.into()),
+                Event::Notice(text) => {
+                    if let Some(rest) = text.strip_prefix("CONVERTER_RUNTIME_SAVED|") {
+                        let mut fields = rest.splitn(2, '|');
+                        let generation = fields.next().and_then(|value| value.parse::<u64>().ok());
+                        let path = fields.next().unwrap_or_default();
+                        let accepted = generation.is_some_and(|generation| {
+                            let s = self.state.borrow();
+                            s.convert_readiness_generation == generation
+                                && ui.get_convert_runtime_saving()
+                        });
+                        if accepted {
+                            ui.set_convert_runtime_saving(false);
+                            ui.set_convert_runtime_confirmed(true);
+                            ui.set_convert_runtime_dir(path.into());
+                            ui.set_convert_status("正在检查已安装组件…".into());
+                            start_markdown_readiness(ui, &self.state, &self.out);
+                        }
+                    } else if text == "CONVERTER_INIT_OK" {
+                        let close_after = {
+                            let mut s = self.state.borrow_mut();
+                            s.convert_init_cancel = None;
+                            std::mem::take(&mut s.close_after)
+                        };
+                        ui.set_convert_initializing(false);
+                        ui.set_convert_ready(false);
+                        ui.set_convert_status("初始化完成，正在重新检查可选组件…".into());
+                        if ui.get_screen() == 5 {
+                            ui.set_notice_text(
+                                "转 Markdown 组件初始化完成，正在校验运行目录".into(),
+                            );
+                        }
+                        if close_after {
+                            let _ = slint::quit_event_loop();
+                        } else {
+                            start_markdown_readiness(ui, &self.state, &self.out);
+                        }
+                    } else if let Some(error) = text.strip_prefix("CONVERTER_INIT_CANCELLED|") {
+                        let close_after = {
+                            let mut s = self.state.borrow_mut();
+                            s.convert_init_cancel = None;
+                            std::mem::take(&mut s.close_after)
+                        };
+                        ui.set_convert_initializing(false);
+                        ui.set_convert_ready(false);
+                        ui.set_convert_status("初始化已取消，可稍后重试".into());
+                        if ui.get_screen() == 5 {
+                            ui.set_notice_text(format!("转 Markdown 初始化已取消：{error}").into());
+                        }
+                        if close_after {
+                            let _ = slint::quit_event_loop();
+                        }
+                    } else {
+                        ui.set_notice_text(text.into());
+                    }
+                }
                 // Error 更新错误文案。
                 // 计划筛选曾乐观置「加载中…」：失败必须恢复分页控件，避免永久中间态。
                 Event::Error(text) => {
-                    ui.set_error_text(text.into());
+                    if let Some(rest) = text.strip_prefix("CONVERTER_RUNTIME_ERR|") {
+                        let mut fields = rest.splitn(3, '|');
+                        let generation = fields.next().and_then(|value| value.parse::<u64>().ok());
+                        let error = fields.next().unwrap_or_default();
+                        let accepted = generation.is_some_and(|generation| {
+                            let s = self.state.borrow();
+                            s.convert_readiness_generation == generation
+                                && ui.get_convert_runtime_saving()
+                        });
+                        if accepted {
+                            ui.set_convert_runtime_saving(false);
+                            ui.set_convert_runtime_confirmed(false);
+                            ui.set_convert_ready(false);
+                            ui.set_convert_status("Xberg 运行目录不可用，请修正后重试".into());
+                            if ui.get_screen() == 5 {
+                                let mut s = self.state.borrow_mut();
+                                push_event_log(
+                                    &mut s.convert_logs,
+                                    format!("Xberg 运行目录校验失败：{error}"),
+                                );
+                                ui.set_convert_log_text(log_panel_text(&s.convert_logs).into());
+                                let first_item = error.split('；').next().unwrap_or(error);
+                                let brief: String = first_item.chars().take(90).collect();
+                                let message = if first_item.len() < error.len()
+                                    || first_item.chars().count() > 90
+                                {
+                                    format!("{brief}… 详情见转换日志")
+                                } else {
+                                    brief
+                                };
+                                ui.set_error_text(message.into());
+                            }
+                        }
+                    } else if let Some(error) = text.strip_prefix("CONVERTER_INIT_ERR|") {
+                        let close_after = {
+                            let mut s = self.state.borrow_mut();
+                            s.convert_init_cancel = None;
+                            std::mem::take(&mut s.close_after)
+                        };
+                        ui.set_convert_initializing(false);
+                        ui.set_convert_ready(false);
+                        ui.set_convert_status("可选组件未就绪，请重试初始化".into());
+                        if ui.get_screen() == 5 {
+                            ui.set_error_text(error.into());
+                        }
+                        if close_after {
+                            let _ = slint::quit_event_loop();
+                        }
+                    } else {
+                        ui.set_error_text(text.into());
+                    }
                     if ui.get_has_task() && !ui.get_busy() {
                         let s = self.state.borrow();
                         let page = s.page;
@@ -2993,6 +3200,104 @@ impl UiPump {
                     }
                 }
                 Event::MdDone(text) => {
+                    if let Some(rest) = text.strip_prefix("CONVERTER_DONE|") {
+                        let mut fields = rest.split('|');
+                        let success = fields.next().unwrap_or("0");
+                        let partial = fields.next().unwrap_or("0");
+                        let failed = fields.next().unwrap_or("0");
+                        let skipped_existing = fields.next().unwrap_or("0");
+                        let skipped_duplicate = fields.next().unwrap_or("0");
+                        let stopped = fields.next() == Some("1");
+                        let final_status = if stopped {
+                            "已停止"
+                        } else if partial != "0" || failed != "0" {
+                            "转换部分失败"
+                        } else {
+                            "转换完成"
+                        };
+                        {
+                            let mut s = self.state.borrow_mut();
+                            s.convert_cancel = None;
+                            s.runtime = RuntimeMode::Organizer;
+                            push_event_log(&mut s.convert_logs, format!(
+                                "转 Markdown {final_status}：成功 {success}，部分提取 {partial}，失败 {failed}，已有结果跳过 {skipped_existing}，重复结果跳过 {skipped_duplicate}"
+                            ));
+                            self.log_dirty.set(true);
+                        }
+                        ui.set_busy(false);
+                        ui.set_convert_progress(if stopped { -1.0 } else { 1.0 });
+                        ui.set_convert_progress_note(final_status.into());
+                        ui.set_convert_metrics(format!("成功 {success} · 部分提取 {partial} · 失败 {failed} · 已有结果跳过 {skipped_existing} · 重复结果跳过 {skipped_duplicate}").into());
+                        ui.set_convert_status(final_status.into());
+                        ui.set_convert_log_text(
+                            log_panel_text(&self.state.borrow().convert_logs).into(),
+                        );
+                        if ui.get_screen() == 5 {
+                            ui.set_status(
+                                if stopped {
+                                    "转 Markdown 已停止；已完成的输出保留"
+                                } else if partial != "0" || failed != "0" {
+                                    "转 Markdown 部分失败，详情见进度与日志"
+                                } else {
+                                    "转 Markdown 已完成，详情见进度与日志"
+                                }
+                                .into(),
+                            );
+                        }
+                        let close_after = self.state.borrow_mut().close_after;
+                        if close_after {
+                            self.state.borrow_mut().close_after = false;
+                            let _ = slint::quit_event_loop();
+                        }
+                        continue;
+                    }
+                    if let Some(error) = text.strip_prefix("CONVERTER_FAIL|") {
+                        let cancelled = self
+                            .state
+                            .borrow()
+                            .convert_cancel
+                            .as_ref()
+                            .is_some_and(|flag| flag.load(Ordering::Acquire));
+                        {
+                            let mut s = self.state.borrow_mut();
+                            s.convert_cancel = None;
+                            s.runtime = RuntimeMode::Organizer;
+                            push_event_log(
+                                &mut s.convert_logs,
+                                format!("转 Markdown 失败：{error}"),
+                            );
+                            self.log_dirty.set(true);
+                        }
+                        ui.set_busy(false);
+                        ui.set_convert_progress(-1.0);
+                        ui.set_convert_progress_note("".into());
+                        ui.set_convert_status(
+                            if cancelled {
+                                "已停止，可重新开始"
+                            } else {
+                                "转换失败，请查看日志"
+                            }
+                            .into(),
+                        );
+                        if ui.get_screen() == 5 {
+                            if cancelled {
+                                ui.set_notice_text("转 Markdown 已停止；已完成的输出保留".into());
+                                ui.set_status("转 Markdown 已停止".into());
+                            } else {
+                                ui.set_error_text(error.into());
+                                ui.set_status("转 Markdown 失败，详情见进度与日志".into());
+                            }
+                        }
+                        ui.set_convert_log_text(
+                            log_panel_text(&self.state.borrow().convert_logs).into(),
+                        );
+                        let close_after = self.state.borrow_mut().close_after;
+                        if close_after {
+                            self.state.borrow_mut().close_after = false;
+                            let _ = slint::quit_event_loop();
+                        }
+                        continue;
+                    }
                     pending_status = None;
                     terminal = true;
                     let close_after = {
@@ -3264,6 +3569,7 @@ fn initial_state() -> Result<State> {
         task: None,
         control: None,
         logs: VecDeque::new(),
+        convert_logs: VecDeque::new(),
         page: 0,
         page_starts: vec![0],
         started: Instant::now(),
@@ -3279,6 +3585,9 @@ fn initial_state() -> Result<State> {
         runtime: RuntimeMode::Organizer,
         md_pending: None,
         git_shared: None,
+        convert_cancel: None,
+        convert_init_cancel: None,
+        convert_readiness_generation: 0,
         engine_overrides: None,
         plan_load: Arc::new(PlanLoadSync::default()),
         readiness_status_pending: Cell::new(false),
@@ -3425,6 +3734,330 @@ fn wire_md_git(ui: &AppWindow, state: &Rc<RefCell<State>>, out: &EventSender) {
     }
 }
 
+/// 转 Markdown 的可选组件初始化与转换回调。组件状态、路径和任务均独立于旧工具。
+fn wire_markdown_converter(ui: &AppWindow, state: &Rc<RefCell<State>>, out: &EventSender) {
+    {
+        let weak = ui.as_weak();
+        let state = state.clone();
+        ui.on_convert_choose_runtime(move || {
+            if let Some(ui) = weak.upgrade() {
+                pick_directory(&ui, "选择 Xberg 运行目录", |ui, path| {
+                    let mut s = state.borrow_mut();
+                    s.convert_readiness_generation = s.convert_readiness_generation.wrapping_add(1);
+                    ui.set_convert_runtime_confirmed(false);
+                    ui.set_convert_ready(false);
+                    ui.set_convert_status("目录已更换，请点击「使用此目录」进行校验".into());
+                    ui.set_convert_runtime_dir(path.display().to_string().into());
+                });
+            }
+        });
+    }
+    {
+        let weak = ui.as_weak();
+        let state = state.clone();
+        ui.on_convert_runtime_edited(move || {
+            if let Some(ui) = weak.upgrade() {
+                let mut s = state.borrow_mut();
+                s.convert_readiness_generation = s.convert_readiness_generation.wrapping_add(1);
+                ui.set_convert_runtime_confirmed(false);
+                ui.set_convert_ready(false);
+                ui.set_convert_status("目录已修改，请点击「使用此目录」重新校验".into());
+            }
+        });
+    }
+    {
+        let weak = ui.as_weak();
+        let state = state.clone();
+        let out = out.clone();
+        ui.on_convert_use_runtime(move || {
+            let Some(ui) = weak.upgrade() else {
+                return;
+            };
+            let path = PathBuf::from(ui.get_convert_runtime_dir().as_str());
+            if path.as_os_str().is_empty() {
+                ui.set_convert_runtime_confirmed(false);
+                ui.set_convert_ready(false);
+                ui.set_convert_status("请先选择 Xberg 运行目录".into());
+                return;
+            }
+            let generation = {
+                let mut s = state.borrow_mut();
+                s.convert_readiness_generation = s.convert_readiness_generation.wrapping_add(1);
+                s.convert_readiness_generation
+            };
+            ui.set_convert_ready(false);
+            ui.set_convert_runtime_confirmed(false);
+            ui.set_convert_runtime_saving(true);
+            ui.set_convert_status("正在校验并保存 Xberg 运行目录…".into());
+            let out = out.clone();
+            std::thread::spawn(move || {
+                let result = markdown_assets::save_runtime_dir(&path);
+                let event = match result {
+                    Ok(()) => Event::Notice(format!(
+                        "CONVERTER_RUNTIME_SAVED|{generation}|{}",
+                        path.display()
+                    )),
+                    Err(error) => {
+                        Event::Error(format!("CONVERTER_RUNTIME_ERR|{generation}|{error}"))
+                    }
+                };
+                let _ = out.send(event);
+            });
+        });
+    }
+    {
+        let weak = ui.as_weak();
+        ui.on_convert_choose_input(move || {
+            if let Some(ui) = weak.upgrade() {
+                pick_directory(&ui, "选择待转换目录", |ui, path| {
+                    ui.set_convert_input_dir(path.display().to_string().into());
+                });
+            }
+        });
+    }
+    {
+        let weak = ui.as_weak();
+        ui.on_convert_choose_output(move || {
+            if let Some(ui) = weak.upgrade() {
+                pick_directory(&ui, "选择 Markdown 输出目录", |ui, path| {
+                    ui.set_convert_output_dir(path.display().to_string().into());
+                });
+            }
+        });
+    }
+    {
+        let weak = ui.as_weak();
+        let state = state.clone();
+        let out = out.clone();
+        ui.on_convert_initialize(move || {
+            if let Some(ui) = weak.upgrade() {
+                start_markdown_initialize(&ui, &state, &out);
+            }
+        });
+    }
+    {
+        let weak = ui.as_weak();
+        let state = state.clone();
+        let out = out.clone();
+        ui.on_convert_start(move || {
+            if let Some(ui) = weak.upgrade() {
+                start_markdown_conversion(&ui, &state, &out);
+            }
+        });
+    }
+    {
+        let weak = ui.as_weak();
+        let state = state.clone();
+        ui.on_convert_stop(move || {
+            if let Some(cancel) = &state.borrow().convert_cancel {
+                cancel.store(true, Ordering::Release);
+            }
+            if let Some(cancel) = &state.borrow().convert_init_cancel {
+                cancel.store(true, Ordering::Release);
+            }
+            if let Some(ui) = weak.upgrade() {
+                ui.set_convert_status(
+                    if ui.get_convert_initializing() {
+                        "正在取消初始化…"
+                    } else {
+                        "正在停止；当前文件完成后停止"
+                    }
+                    .into(),
+                );
+                ui.set_status(
+                    if ui.get_convert_initializing() {
+                        "正在取消转 Markdown 组件初始化"
+                    } else {
+                        "正在停止转 Markdown；当前文件完成后停止"
+                    }
+                    .into(),
+                );
+            }
+        });
+    }
+}
+
+/// 异步检查已安装的可选组件；只读校验可能很慢，绝不阻塞 Slint 事件线程。
+fn start_markdown_readiness(ui: &AppWindow, state: &Rc<RefCell<State>>, out: &EventSender) {
+    if ui.get_busy() || ui.get_convert_initializing() || ui.get_convert_runtime_saving() {
+        return;
+    }
+    if ui.get_convert_runtime_dir().trim().is_empty() {
+        ui.set_convert_runtime_confirmed(false);
+        ui.set_convert_ready(false);
+        ui.set_convert_status("请先选择并使用 Xberg 运行目录".into());
+        return;
+    }
+    if !ui.get_convert_runtime_confirmed() {
+        ui.set_convert_ready(false);
+        ui.set_convert_status("请点击「使用此目录」确认 Xberg 运行目录".into());
+        return;
+    }
+    let generation = {
+        let mut s = state.borrow_mut();
+        s.convert_readiness_generation = s.convert_readiness_generation.wrapping_add(1);
+        s.convert_readiness_generation
+    };
+    ui.set_convert_ready(false);
+    ui.set_convert_status("正在检查已安装组件…".into());
+    let out = out.clone();
+    std::thread::spawn(move || {
+        let result = markdown::readiness();
+        let (ok, message) = match result {
+            Ok(()) => (true, "已安装组件就绪，可离线使用".to_string()),
+            Err(error) => (false, error),
+        };
+        let _ = out.send(Event::Status(format!(
+            "CONVERTER_READINESS|{generation}|{}|{message}",
+            i32::from(ok)
+        )));
+    });
+}
+
+fn start_markdown_initialize(ui: &AppWindow, state: &Rc<RefCell<State>>, out: &EventSender) {
+    if ui.get_convert_ready() || ui.get_convert_initializing() || ui.get_convert_runtime_saving() {
+        return;
+    }
+    if ui.get_convert_runtime_dir().trim().is_empty() {
+        ui.set_convert_runtime_confirmed(false);
+        ui.set_convert_status("请先选择并使用 Xberg 运行目录".into());
+        return;
+    }
+    if !ui.get_convert_runtime_confirmed() {
+        ui.set_convert_status("请点击「使用此目录」确认 Xberg 运行目录".into());
+        return;
+    }
+    ui.set_convert_initializing(true);
+    ui.set_convert_status("正在初始化可选组件…".into());
+    let cancel = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    {
+        let mut s = state.borrow_mut();
+        s.convert_readiness_generation = s.convert_readiness_generation.wrapping_add(1);
+        s.convert_init_cancel = Some(cancel.clone());
+    }
+    let out = out.clone();
+    std::thread::spawn(move || {
+        let result = markdown::initialize(&cancel, |text| {
+            let _ = out.send(Event::Status(format!("CONVERTER_INIT|{text}")));
+        });
+        let event = match result {
+            Ok(()) if cancel.load(Ordering::Acquire) => {
+                Event::Notice("CONVERTER_INIT_CANCELLED|用户取消初始化".into())
+            }
+            Ok(()) => Event::Notice("CONVERTER_INIT_OK".into()),
+            Err(error) if cancel.load(Ordering::Acquire) => {
+                Event::Notice(format!("CONVERTER_INIT_CANCELLED|{error}"))
+            }
+            Err(error) => Event::Error(format!("CONVERTER_INIT_ERR|{error}")),
+        };
+        let _ = out.send(event);
+    });
+}
+
+fn start_markdown_conversion(ui: &AppWindow, state: &Rc<RefCell<State>>, out: &EventSender) {
+    if ui.get_busy() || !ui.get_convert_ready() {
+        return;
+    }
+    let input_dir = PathBuf::from(ui.get_convert_input_dir().as_str());
+    let output_dir = PathBuf::from(ui.get_convert_output_dir().as_str());
+    if !input_dir.is_dir() || !output_dir.is_dir() {
+        ui.set_error_text("输入目录或输出目录不存在或无法访问".into());
+        return;
+    }
+    let Ok(timeout_secs) = ui.get_convert_timeout_secs().parse::<u64>() else {
+        ui.set_error_text("单文件超时必须是正整数秒数".into());
+        return;
+    };
+    if timeout_secs == 0 {
+        ui.set_error_text("单文件超时必须大于 0".into());
+        return;
+    }
+    let mut groups = Vec::new();
+    if ui.get_convert_pdf() {
+        groups.push(FormatGroup::Pdf);
+    }
+    if ui.get_convert_office() {
+        groups.push(FormatGroup::Office);
+    }
+    if ui.get_convert_images() {
+        groups.push(FormatGroup::Images);
+    }
+    if ui.get_convert_media() {
+        groups.push(FormatGroup::Media);
+    }
+    if ui.get_convert_other() {
+        groups.push(FormatGroup::Other);
+    }
+    if groups.is_empty() {
+        ui.set_error_text("至少选择一种转换类型".into());
+        return;
+    }
+    let options = markdown::Options {
+        input_dir,
+        output_dir,
+        flat: ui.get_convert_flat(),
+        groups,
+        timeout_secs,
+    };
+    let cancel = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    state.borrow_mut().convert_cancel = Some(cancel.clone());
+    state.borrow_mut().runtime = RuntimeMode::MarkdownConverter;
+    ui.set_busy(true);
+    ui.set_ready(false);
+    ui.set_convert_metrics("正在扫描…".into());
+    ui.set_convert_progress(-1.0);
+    ui.set_convert_progress_note("正在扫描".into());
+    ui.set_convert_status("正在转换…".into());
+    let out = out.clone();
+    std::thread::spawn(move || {
+        let result = markdown::run(&options, &cancel, |event| {
+            let text = match event {
+                markdown::Event::Started { total } => format!("CONVERTER_STARTED|{total}"),
+                markdown::Event::FileStarted {
+                    relative,
+                    index,
+                    total,
+                } => {
+                    format!(
+                        "CONVERTER_FILE_STARTED|{index}|{total}|{}",
+                        relative.display()
+                    )
+                }
+                markdown::Event::FileFinished {
+                    relative,
+                    partial,
+                    success,
+                    message,
+                } => format!(
+                    "CONVERTER_FILE_FINISHED|{}|{}|{}|{}",
+                    i32::from(partial),
+                    i32::from(success),
+                    relative.display(),
+                    message.replace('|', "／"),
+                ),
+                markdown::Event::Log(text) => {
+                    let _ = out.send(Event::Status(format!("CONVERTER_LOG|{text}")));
+                    return;
+                }
+            };
+            let _ = out.send(Event::Status(text));
+        });
+        let text = match result {
+            Ok(summary) => format!(
+                "CONVERTER_DONE|{}|{}|{}|{}|{}|{}",
+                summary.success,
+                summary.partial,
+                summary.failed,
+                summary.skipped_existing,
+                summary.skipped_duplicate,
+                i32::from(summary.stopped)
+            ),
+            Err(error) => format!("CONVERTER_FAIL|{error}"),
+        };
+        let _ = out.send(Event::MdDone(text));
+    });
+}
+
 pub fn run_with_engine_overrides(
     hook: impl FnOnce(&AppWindow) + 'static,
     overrides: Option<EngineTestOverrides>,
@@ -3455,6 +4088,16 @@ pub fn run_with_engine_overrides(
         .collect::<Vec<_>>();
     ui.set_tool_count(i32::try_from(registry::tools().len()).unwrap_or(i32::MAX));
     ui.set_tools(Rc::new(VecModel::from(tools)).into());
+    match markdown_assets::load_saved_runtime_dir() {
+        Ok(Some(path)) => {
+            ui.set_convert_runtime_dir(
+                crate::platform::display_path_text(&path.display().to_string()).into(),
+            );
+            ui.set_convert_runtime_confirmed(true);
+        }
+        Ok(None) => ui.set_convert_status("请先选择并使用 Xberg 运行目录".into()),
+        Err(error) => ui.set_convert_status(format!("无法读取 Xberg 运行目录：{error}").into()),
+    }
     refresh(&ui, &state.borrow());
     {
         let weak = ui.as_weak();
@@ -3484,6 +4127,7 @@ pub fn run_with_engine_overrides(
     }
     wire_sync(&ui, &state, &out);
     wire_md_git(&ui, &state, &out);
+    wire_markdown_converter(&ui, &state, &out);
     // 启动落在注册表第一个工具（P-02 顺序：递归解压在前）。必须在 wire_sync 之后调用：
     // 回调接线前的 invoke 是空调用，窗口会停在目录整理页。
     ui.invoke_select_tool("recursive-extract".into());
@@ -3498,8 +4142,14 @@ pub fn run_with_engine_overrides(
                     // 任务可能已在确认框打开期间结束：此时没有可取消的对象，直接退出窗口，
                     // 否则状态停在“取消任务中”且 close_after 残留，会让之后的任务收尾时意外关闭应用。
                     let control = state.borrow().control.clone();
+                    let converter_cancel = state.borrow().convert_cancel.clone();
+                    let converter_init_cancel = state.borrow().convert_init_cancel.clone();
                     if let Some(control) = control {
                         control.cancel();
+                    } else if let Some(cancel) = converter_cancel {
+                        cancel.store(true, Ordering::Release);
+                    } else if let Some(cancel) = converter_init_cancel {
+                        cancel.store(true, Ordering::Release);
                     } else {
                         let _ = slint::quit_event_loop();
                         return;
@@ -3712,11 +4362,13 @@ pub fn run_with_engine_overrides(
         let state = state.clone();
         let weak = ui.as_weak();
         ui.window().on_close_requested(move||{
-            if let Some(ui)=weak.upgrade(){if ui.get_busy(){
-                ui.set_confirm_text("任务仍在处理文件。确认后会请求取消，等待正在进行的操作结束，再关闭窗口。已经完成的操作不会自动回滚。".into());
+                if let Some(ui)=weak.upgrade(){if ui.get_busy() || ui.get_convert_initializing(){
+                ui.set_confirm_text("任务或可选组件初始化仍在进行。确认后会请求取消，等待当前操作结束，再关闭窗口。已经完成的操作不会自动回滚。".into());
                 ui.set_confirm_kind(3);ui.set_acknowledge(false);return slint::CloseRequestResponse::KeepWindowShown;
             }}
             if let Some(control)=&state.borrow().control{control.cancel();}
+            if let Some(cancel)=&state.borrow().convert_cancel{cancel.store(true, Ordering::Release);}
+            if let Some(cancel)=&state.borrow().convert_init_cancel{cancel.store(true, Ordering::Release);}
             // Slint 1.17 的 CloseRequestResponse 只有 HideWindow / KeepWindowShown，
             // HideWindow 仅隐藏窗口、事件循环仍在跑；必须显式 quit 才能让进程真正退出。
             let _=slint::quit_event_loop();
@@ -3871,6 +4523,9 @@ mod gui_tests {
             app.ui.set_md_subpage(1);
             app.ui.invoke_select_tool("git-tools".into());
             assert_eq!(app.ui.get_screen(), 4, "Git 工具应进入独立页面（G-01）");
+            app.ui.invoke_select_tool("markdown-converter".into());
+            assert_eq!(app.ui.get_screen(), 5, "转 Markdown 应进入独立页面（T-01）");
+            assert_eq!(app.ui.get_active_tool_id(), "markdown-converter");
             // U-11：切回 MD 整理必须回到默认子页「合并 MD」，不得停留在拆分子页
             app.ui.invoke_select_tool("md-organizer".into());
             assert_eq!(app.ui.get_md_subpage(), 0, "切工具回默认子页（U-11）");
@@ -3879,6 +4534,81 @@ mod gui_tests {
             assert_eq!(app.ui.get_screen(), 2);
             app.ui.invoke_select_tool("directory-organizer".into());
             assert_eq!(app.ui.get_screen(), 0);
+        })
+        .unwrap();
+    }
+
+    // 覆盖 T-01/T-05/T-07：公开导航进入转 Markdown 页面时，默认选项完整且未初始化不得启动；
+    // 切回旧工具后状态栏不得残留新工具文案。
+    #[test]
+    fn markdown_converter_navigation_is_isolated_before_initialization() {
+        with_gui(|app| {
+            let ui = &app.ui;
+            ui.invoke_select_tool("markdown-converter".into());
+            assert_eq!(ui.get_screen(), 5, "转 Markdown 必须进入独立页面");
+            assert_eq!(ui.get_active_tool_id(), "markdown-converter");
+            assert!(ui.get_convert_pdf(), "默认应启用 PDF");
+            assert!(ui.get_convert_office(), "默认应启用 Office");
+            assert!(ui.get_convert_images(), "默认应启用图片");
+            assert!(ui.get_convert_media(), "默认应启用 MP4/M4A");
+            assert!(ui.get_convert_other(), "默认应启用其他格式");
+            assert!(!ui.get_convert_flat(), "默认应保留输入目录层级");
+            assert_eq!(ui.get_convert_timeout_secs().as_str(), "21600");
+            assert!(!ui.get_convert_ready(), "未初始化时组件不得标记为就绪");
+            assert!(!ui.get_busy(), "未初始化时不得存在转换任务");
+
+            // 通过公开回调尝试启动：未就绪必须被 GUI 门禁拦截。
+            let before = ui.get_status().to_string();
+            ui.invoke_convert_start();
+            assert!(!ui.get_busy(), "未初始化时开始转换必须保持禁用");
+            assert_eq!(ui.get_status().as_str(), before);
+
+            // 覆盖 T-23/T-24：部分失败和主动停止必须呈现不同的最终状态。
+            ui.set_busy(true);
+            app.pump
+                .out
+                .send(Event::MdDone("CONVERTER_DONE|0|0|1|0|0|0".into()))
+                .unwrap();
+            app.pump.run(ui);
+            assert_eq!(ui.get_convert_status().as_str(), "转换部分失败");
+            ui.set_busy(true);
+            app.pump
+                .out
+                .send(Event::MdDone("CONVERTER_DONE|0|1|0|0|0|0".into()))
+                .unwrap();
+            app.pump.run(ui);
+            assert_eq!(ui.get_convert_status().as_str(), "转换部分失败");
+            ui.set_busy(true);
+            app.pump
+                .out
+                .send(Event::MdDone("CONVERTER_DONE|0|0|0|0|0|1".into()))
+                .unwrap();
+            app.pump.run(ui);
+            assert_eq!(ui.get_convert_status().as_str(), "已停止");
+
+            // 覆盖 T-05/T-06：无效运行目录的长清单须保留在日志，错误横幅不能撑坏页面。
+            let generation = app.state.borrow().convert_readiness_generation;
+            ui.set_convert_runtime_saving(true);
+            let long_error = format!("xberg.exe 缺失；{}", "models/缺失项；".repeat(80));
+            app.pump
+                .out
+                .send(Event::Error(format!(
+                    "CONVERTER_RUNTIME_ERR|{generation}|{long_error}"
+                )))
+                .unwrap();
+            app.pump.run(ui);
+            assert!(ui.get_error_text().chars().count() <= 220);
+            assert!(ui.get_error_text().contains("xberg.exe"));
+            assert!(!ui.get_error_text().contains("models/"));
+            assert!(ui.get_convert_log_text().contains(&long_error));
+
+            ui.invoke_select_tool("directory-organizer".into());
+            assert_eq!(ui.get_screen(), 0, "切回目录整理必须进入旧页面");
+            assert_eq!(ui.get_status().as_str(), "请选择需要整理的目录");
+            assert!(
+                !ui.get_status().contains("转 Markdown"),
+                "旧工具状态不得残留转 Markdown 文案"
+            );
         })
         .unwrap();
     }
@@ -4266,12 +4996,12 @@ mod gui_tests {
             assert_eq!(ui.get_theme(), 0, "默认跟随系统主题");
             assert_eq!(
                 ui.get_tool_count(),
-                4,
-                "当前注册的工具数量（P-02：四个工具）"
+                5,
+                "当前注册的工具数量（P-02：五个工具）"
             );
-            // H-03：四个独立工具入口都正常可见（侧栏遍历注册表，不做隐藏、折叠或降级）。
+            // H-03：五个独立工具入口都正常可见（侧栏遍历注册表，不做隐藏、折叠或降级）。
             let tools = ui.get_tools();
-            assert_eq!(tools.row_count(), 4, "侧栏必须同时列出全部工具");
+            assert_eq!(tools.row_count(), 5, "侧栏必须同时列出全部工具");
             let ids: Vec<String> = (0..tools.row_count())
                 .filter_map(|i| tools.row_data(i))
                 .map(|tool| tool.id.to_string())
@@ -4280,8 +5010,9 @@ mod gui_tests {
                 ids.iter().any(|id| id == "recursive-extract")
                     && ids.iter().any(|id| id == "directory-organizer")
                     && ids.iter().any(|id| id == "md-organizer")
-                    && ids.iter().any(|id| id == "git-tools"),
-                "四个工具入口必须按注册表 id 出现在侧栏：{ids:?}"
+                    && ids.iter().any(|id| id == "git-tools")
+                    && ids.iter().any(|id| id == "markdown-converter"),
+                "五个工具入口必须按注册表 id 出现在侧栏：{ids:?}"
             );
             assert_eq!(ui.get_tool_search().as_str(), "", "启动不得预置搜索过滤");
         })

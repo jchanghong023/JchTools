@@ -1,0 +1,79 @@
+{
+  "use_cache": true,
+  "security_limits": {
+    "max_nesting_depth": 1000000,
+    "max_xml_depth": 1000000,
+    "max_content_size": 268435456
+  },
+  "enable_quality_processing": true,
+  "disable_ocr": false,
+  "force_ocr": false,
+  "ocr_strategy": {"mode": "auto"},
+  "output_format": "markdown",
+  "escape_markdown": true,
+  "table_anchors": false,
+  "ocr": {
+    "backend": "paddle-ocr",
+    "language": ["ch"],
+    "auto_rotate": false,
+    "paddle_ocr_config": {
+      "model_version": "pp-ocrv6",
+      "model_tier": "tiny",
+      "use_angle_cls": false,
+      "enable_table_detection": false,
+      "det_db_thresh": 0.3,
+      "det_db_box_thresh": 0.5,
+      "det_db_unclip_ratio": 1.5,
+      "det_limit_side_len": 1280,
+      "rec_batch_num": 16,
+      "padding": 10,
+      "drop_score": 0.35
+    },
+    "element_config": {
+      "include_elements": true,
+      "min_level": "line",
+      "min_confidence": 0.35,
+      "build_hierarchy": false
+    }
+  },
+  "images": {
+    "extract_images": true,
+    "run_ocr_on_images": true,
+    "ocr_text_only": true,
+    "inject_placeholders": true,
+    "classify": false,
+    "include_page_rasters": false,
+    "include_data_base64": false,
+    "max_images_per_page": 200,
+    "target_dpi": 300,
+    "auto_adjust_dpi": true,
+    "min_dpi": 72,
+    "max_dpi": 600,
+    "max_image_dimension": 4096,
+    "append_ocr_text": false
+  },
+  "pdf_options": {
+    "extract_images": true,
+    "extract_tables": true,
+    "extract_metadata": true,
+    "extract_form_fields": true,
+    "ocr_inline_images": false,
+    "extract_annotations": false,
+    "allow_single_column_tables": false,
+    "reading_order": false
+  },
+  "layout": {
+    "strategy": "auto",
+    "table_model": "tatr",
+    "table_overlap_preference": "content",
+    "apply_heuristics": true,
+    "enable_chart_understanding": false
+  },
+  "use_layout_for_markdown": true,
+  "acceleration": {"provider": "cpu"},
+  "concurrency": {"max_threads": 12},
+  "max_embedded_file_bytes": 52428800,
+  "max_archive_depth": 3,
+  "extraction_timeout_secs": 21600,
+  "max_concurrent_extractions": 1
+}

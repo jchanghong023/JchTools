@@ -1707,13 +1707,12 @@ fn prepare_writes_no_standalone_settings_file() {
     );
 }
 
-// 覆盖 P-03（完全离线：依赖清单与源码不得引入联网能力）
+// 覆盖 P-03、T-21：联网能力仅供用户主动初始化转 Markdown 资产使用。
 #[test]
 fn offline_sources_have_no_network_capabilities() {
     let manifest = fs::read_to_string(concat!(env!("CARGO_MANIFEST_DIR"), "/Cargo.toml")).unwrap();
     for crate_name in [
         "reqwest",
-        "ureq",
         "hyper",
         "curl",
         "isahc",
@@ -1729,24 +1728,38 @@ fn offline_sources_have_no_network_capabilities() {
         );
     }
     let manifest_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
-    for entry in [
-        "src/main.rs",
-        "src/lib.rs",
-        "src/engine.rs",
-        "src/gui.rs",
-        "src/platform.rs",
-        "src/db.rs",
-        "src/process.rs",
-        "build.rs",
-    ] {
-        let text = fs::read_to_string(manifest_dir.join(entry)).unwrap();
+    assert!(
+        manifest.contains("ureq ="),
+        "T-05：初始化器必须具备固定资产下载能力"
+    );
+    for source in walkdir::WalkDir::new(manifest_dir.join("src")) {
+        let source = source.unwrap();
+        if !source.file_type().is_file() || source.path().extension().is_none_or(|ext| ext != "rs")
+        {
+            continue;
+        }
+        let entry = source.path().strip_prefix(&manifest_dir).unwrap();
+        let text = fs::read_to_string(source.path()).unwrap();
         for needle in ["TcpStream", "UdpSocket", "lookup_host"] {
             assert!(
                 !text.contains(needle),
-                "P-03：{entry} 不得出现网络 API：{needle}"
+                "P-03：{} 不得出现网络 API：{needle}",
+                entry.display()
+            );
+        }
+        if entry != Path::new("src/markdown_assets.rs") {
+            assert!(
+                !text.contains("ureq::"),
+                "P-03/T-21：{} 不得调用初始化下载接口",
+                entry.display()
             );
         }
     }
+    let build_script = fs::read_to_string(manifest_dir.join("build.rs")).unwrap();
+    assert!(
+        !build_script.contains("ureq::"),
+        "构建脚本不得联网下载转换资产"
+    );
 }
 
 // 覆盖 X-01：自动解压只认用户意义上的归档文件（白名单）；安装资源、系统镜像、

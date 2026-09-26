@@ -28,6 +28,12 @@ pub fn tools() -> &'static [ToolDescriptor] {
             summary: "合并 MD（标题下移一级）· 拆分 MD（UTF-8 安全 · 无损）",
         },
         ToolDescriptor {
+            id: "markdown-converter",
+            name: "转 Markdown",
+            category: "文档",
+            summary: "文档、图片与媒体转换为 Markdown · 支持离线处理",
+        },
+        ToolDescriptor {
             id: "git-tools",
             name: "Git 工具",
             category: "开发",

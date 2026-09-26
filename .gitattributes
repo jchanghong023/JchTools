@@ -1,2 +1,8 @@
 # 校验清单（SHA256SUMS.txt）按字节计算，仓库不做换行转换，保证检出后哈希一致。
 * -text
+tests/markdown_fixtures/*.pdf binary
+tests/markdown_fixtures/*.docx binary
+tests/markdown_fixtures/*.xlsx binary
+tests/markdown_fixtures/*.pptx binary
+tests/markdown_fixtures/*.png binary
+tests/markdown_fixtures/*.mp4 binary

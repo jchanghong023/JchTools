@@ -1,6 +1,5 @@
-//! 「递归解压」「目录整理」「MD 整理」「Git 工具」四个工具的引擎独立于 GUI（P-02）。
-//! 软件完全离线（P-03，Git 工具的 upstream 网络访问例外见该条）：不主动发起网络请求、
-//! 不上传文件、日志或路径。
+//! 工具引擎独立于 GUI（P-02）；新增「转 Markdown」按 T 分区独立接入。
+//! 文件处理离线（P-03），仅 Git 任务与用户主动初始化可选转换组件按合同限定联网。
 pub mod archive;
 pub mod config;
 pub mod control;
@@ -12,6 +11,9 @@ pub mod fsutil;
 pub mod git_tools;
 pub mod hash_cache;
 pub mod hashing;
+pub mod markdown;
+pub mod markdown_assets;
+pub mod markdown_document;
 pub mod md_tools;
 pub mod model;
 pub mod perf;
