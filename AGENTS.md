@@ -14,9 +14,9 @@
 ## 1. 项目背景
 
 - **项目类型与技术栈**：自有项目 JchTools，用户个人使用的 Windows 本地工具箱，由 AI Agent 实现和维护。Rust 2021 + Slint 1.17、SQLite（rusqlite bundled）、7-Zip 引擎；产品定位与交付要求见合同 P / E 分区，打包入口为 `scripts/package-windows.ps1` 与 `installer/JchTools.iss`。
-- **工具入口**：注册表当前接入递归解压、目录整理、MD 整理和 Git 工具，对应合同 X / C / M / G 分区。联网边界只按 P-03（含 Git 工具例外）执行，不以开发说明另行扩大或缩小。新工具 `MUST` 经 `src/registry.rs` 注册 + 真实页面接入；侧栏与导航 `SHOULD NOT` 写死只服务单个工具的文案或流程。
+- **工具入口**：注册表当前接入递归解压、目录整理、MD 整理和 Git 工具，对应合同 X / C / M / G 分区。联网边界只按 P-03 执行（Git 任务与 T 分区可选组件初始化的例外各限本功能），不以开发说明另行扩大或缩小。新工具 `MUST` 经 `src/registry.rs` 注册 + 真实页面接入；侧栏与导航 `SHOULD NOT` 写死只服务单个工具的文案或流程。
 - **生产方式**：本项目全部产出（代码、测试、文档、CI）由 AI 代理完成；用户不编写任何代码或文字，只在封闭选择、看图判断与真实使用中给出意图和反馈（协作协议见第 7 节）。本文件的纪律条款用于对抗代理的自证偏差。
-- **权威分工**：`AGENTS.md` 规定开发、测试和验收纪律；固定目录 `docs/requirements/` 保存全部产品需求，当前由 `CONTRACT.md` 统一维护，按其中的功能分区定位需求。旧 `docs/CONTRACT.md` 仅保留迁移链接，兼容静态检查的文件存在性要求，不再维护需求副本。其余文档仅为辅助说明。
+- **权威分工**：`AGENTS.md` 规定开发、测试和验收纪律；固定目录 `docs/requirements/` 保存全部产品需求，`CONTRACT.md` 维护全局约束与既有工具分区，`ALL2MARKDOWN.md` 独立维护转 Markdown（T 分区）。按功能域定位唯一需求来源；明确标注的待确认草案不覆盖已确认条目。旧 `docs/CONTRACT.md` 仅保留迁移链接，兼容静态检查的文件存在性要求，不再维护需求副本。其余文档仅为辅助说明。
 - **代码入口**：`src/main.rs` → `src/gui.rs`（GUI 启动、回调与后台任务）、`ui/app.slint`（界面）、`src/registry.rs`（工具注册表）；`src/archive.rs`（递归解压）、`src/engine.rs`（整理分析与执行）、`src/md_tools.rs`（MD 合并与拆分）、`src/git_tools.rs`（Git 操作）、`resources/rules.json`（界面规则清单）。
 
 ## 2. 临时文件规则（强制）
@@ -88,6 +88,7 @@ powershell -NoProfile -File .\scripts\package-windows.ps1   # 生成含 7-Zip �
 - 验证报告 `MUST` 区分已实现、验证通过、验证失败和未验证；环境、依赖或权限不足不得报告验收通过。（无执法点 · 软法）
 - UT / 集成入口为 `cargo test`，可按目标运行 `cargo test --test md_tools`、`cargo test --test git_tools` 等。`tests/git_tools.rs` 使用真实 git 与本地 bare 远端，不覆盖真实网络及认证。
 - GUI 链路入口为 `cargo test --test gui_flow`；`src/gui.rs` 内另有 MD 真实回调测试。它们使用 Slint 测试后端，不等同于真实桌面窗口验证。`scripts/gui_smoke.py` 的 S1–S4 覆盖启动、整理与解压，未覆盖 MD / Git 的完整桌面链路；Git 从 GUI 启动到推送结果的完整 E2E 覆盖尚未确认。后续相应功能变更应补齐所需链路，不能以底层测试冒充 GUI E2E。
+- 转 Markdown 的当前依据是 `docs/requirements/ALL2MARKDOWN.md`；本仓库尚无该工具的真实页面、转换入口及专属 UT / E2E。后续实现按该文档附录 A 验证主包不包含转换专用依赖/模型、未安装组件时旧工具正常可用、主动初始化与离线真实 Xberg / OCR / 媒体转换、GUI 入口及两种交付形态；旧 all2markdown 的源码、测试或历史 CI 不能作为集成后的通过证据。实现范围按 T-30 限于迁入，不借迁移改变旧功能，也不擅自搬入旧 Python 架构。
 - 纯文档等非功能性修改按实际影响检查内容、引用和需求保留情况，不机械新增功能测试；本仓库已有基线、提交检查与 CI 完成条件仍按 0 / 3.2 / 3.3 执行，未执行项如实标注。
 
 ## 3.4 三级测试门与执行权限
@@ -133,13 +134,13 @@ powershell -NoProfile -File .\scripts\package-windows.ps1   # 生成含 7-Zip �
 ## 7. 用户协作协议（本项目用户零创作）
 
 - 代理 `MUST NOT` 要求用户编写代码、文字或文档，`MUST NOT` 让用户阅读代码 diff；需要用户输入时 `MUST` 转换为以下形式之一：附推荐项的封闭选择题、新旧并排截图的是/否判断、一条可直接复制运行的命令。
-- 新需求 `MUST` 先复述为可验收的行为断言（进入 `docs/requirements/CONTRACT.md` 草案，见第 8 节），经用户逐条确认后才可动工；影响用户可见行为的歧义 `MUST` 先以封闭问题澄清，`MUST NOT` 默认假设。
+- 新需求 `MUST` 先复述为可验收的行为断言（进入 `docs/requirements/` 中对应功能域的需求草案，见第 8 节），经用户逐条确认后才可动工；影响用户可见行为的歧义 `MUST` 先以封闭问题澄清，`MUST NOT` 默认假设。
 - 向用户报告结果 `MUST` 先给结论（通过 / 失败 / 受阻），证据（命令、退出码、关键输出行）附后；未验证的事项 `MUST NOT` 表述为已完成。
 - 本节为行为协议，无法机检，靠会话纪律与用户在交互中纠偏执行。
 
 ## 8. 固定需求目录（docs/requirements/）
 
-- `docs/requirements/` 是用户意图的唯一权威目录，当前合同文件为 `CONTRACT.md`：每行一个编号行为断言，**只写需求、不写实现状态**；「功能是否正常」以合同覆盖为准，不以代理单方面理解为准。
+- `docs/requirements/` 是用户意图的唯一权威目录，当前由 `CONTRACT.md`（全局及 X / C / M / G 等分区）与 `ALL2MARKDOWN.md`（T 分区）共同构成需求合同：每行一个编号行为断言，**只写需求、不写实现状态**；「功能是否正常」以合同覆盖为准，不以代理单方面理解为准。
 - 用户可见行为变更 `MUST` 对应至少一行合同；合同行数单调不减；增改 `MUST` 经用户确认并记录于提交信息，`MUST NOT` 由代理单方面增删。
 - 代码与合同不一致时 `MUST` 以合同为准、按缺陷流程修代码（先红后绿，见 3.2）；`MUST NOT` 为迁就代码现状而改写、削弱或删除合同条目。
 - 合同条目与测试的映射规则见 3.3（测试注释标合同编号；矩阵检查待落地）。
