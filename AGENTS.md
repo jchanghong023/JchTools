@@ -4,7 +4,7 @@
 
 ## 0. 会话快速上手（每个代理会话按此主线执行）
 
-1. 通读两份权威文档：本文件与 `docs/CONTRACT.md`；其余文档（README 等）仅供参考，`MUST NOT` 作为依据。
+1. 通读本文件与固定需求目录 `docs/requirements/` 中的全部需求文档；该目录是产品需求的唯一权威位置。其余说明文档仅供参考，不得用来覆盖需求。
 2. 明确任务类型：新需求 → 先按第 7 节协议转成合同条目并经用户确认；缺陷修复 → 先写能在修复前失败的回归测试；其余变更 → 确认不违反第 9 节可信基隔离。
 3. 动工前记录基线：`cargo test` 与 `python scripts/static_check.py` 的当前状态。
 4. 编码遵守第 4 节实现约定与合同相应分区；测试数据一律经 `python scripts/make_tmp.py` 生成。
@@ -13,11 +13,11 @@
 
 ## 1. 项目背景
 
-- **产品**：JchTools——用户个人使用的 Windows 本地工具箱，交付形态为安装包（当前用户目录、免 UAC、桌面快捷方式/开始菜单/卸载项）+ 便携 ZIP（P-05/E-04，打包脚本见 `scripts/package-windows.ps1`，安装脚本见 `installer/JchTools.iss`）。技术栈 Rust 2021 + Slint 1.17（自绘界面、fluent 风格）、SQLite（rusqlite bundled）、随包 7-Zip 引擎。产品定位与命名规范见合同 P 分区。
-- **工具**：当前两个——「递归解压」（X 分区）与「目录整理」（C 分区），各自需求见 `docs/CONTRACT.md`。产品完全离线（P-03）：源码中不得引入任何联网能力。新工具 `MUST` 经 `src/registry.rs` 注册 + 真实页面接入；侧栏与导航 `SHOULD NOT` 写死只服务单个工具的文案或流程。
+- **项目类型与技术栈**：自有项目 JchTools，用户个人使用的 Windows 本地工具箱，由 AI Agent 实现和维护。Rust 2021 + Slint 1.17、SQLite（rusqlite bundled）、7-Zip 引擎；产品定位与交付要求见合同 P / E 分区，打包入口为 `scripts/package-windows.ps1` 与 `installer/JchTools.iss`。
+- **工具入口**：注册表当前接入递归解压、目录整理、MD 整理和 Git 工具，对应合同 X / C / M / G 分区。联网边界只按 P-03（含 Git 工具例外）执行，不以开发说明另行扩大或缩小。新工具 `MUST` 经 `src/registry.rs` 注册 + 真实页面接入；侧栏与导航 `SHOULD NOT` 写死只服务单个工具的文案或流程。
 - **生产方式**：本项目全部产出（代码、测试、文档、CI）由 AI 代理完成；用户不编写任何代码或文字，只在封闭选择、看图判断与真实使用中给出意图和反馈（协作协议见第 7 节）。本文件的纪律条款用于对抗代理的自证偏差。
-- **权威文档**：仅两份——`AGENTS.md`（本文件：项目背景与过程纪律，怎么开发、怎么测试、怎么验收）与 `docs/CONTRACT.md`（需求合同：软件必须满足什么，只写需求）。其余文档仅为辅助说明，冲突时以权威文档为准。
-- **代码入口**：`src/main.rs`（GUI）、`ui/app.slint`（界面）、`resources/rules.json`（界面规则清单）、`src/registry.rs`（工具注册表）。
+- **权威分工**：`AGENTS.md` 规定开发、测试和验收纪律；固定目录 `docs/requirements/` 保存全部产品需求，当前由 `CONTRACT.md` 统一维护，按其中的功能分区定位需求。旧 `docs/CONTRACT.md` 仅保留迁移链接，兼容静态检查的文件存在性要求，不再维护需求副本。其余文档仅为辅助说明。
+- **代码入口**：`src/main.rs` → `src/gui.rs`（GUI 启动、回调与后台任务）、`ui/app.slint`（界面）、`src/registry.rs`（工具注册表）；`src/archive.rs`（递归解压）、`src/engine.rs`（整理分析与执行）、`src/md_tools.rs`（MD 合并与拆分）、`src/git_tools.rs`（Git 操作）、`resources/rules.json`（界面规则清单）。
 
 ## 2. 临时文件规则（强制）
 
@@ -30,7 +30,10 @@
 
 ## 3. 构建与测试
 
+以下命令在仓库根目录的 Windows PowerShell 中执行；Rust / MSVC / Windows SDK 条件见下文。Python 脚本需 Python 及对应依赖；Git 工具测试需 PATH 中可用的 git。完整验收和发布仍受 3.4 授权约束，列出入口不代表本次已经执行。
+
 ```powershell
+cargo run --bin JchTools   # 启动 GUI（默认 gui 特性）
 cargo build                # 开发构建（GUI）
 cargo build --release      # 发布构建
 cargo test                 # 单元与集成测试（真实引擎用例默认 #[ignore]）
@@ -47,7 +50,7 @@ powershell -NoProfile -File .\scripts\package-windows.ps1   # 生成含 7-Zip �
 
 ## 3.1 7-Zip 引擎
 
-引擎相关需求（官方来源、校验、运行期解析顺序、发布包合规）以 `docs/CONTRACT.md` 的 E 分区为准，本节只写工程事实：`scripts/fetch-7zip.ps1` 负责获取官方引擎（产物落在 `resources/7zip/`，已被 `.gitignore` 忽略，`MUST NOT` 提交）；构建时 `build.rs` 把引擎压缩编进 EXE（`src/engine_bundle.rs` 负责释放与校验），缺失引擎时构建不失败、仅不内嵌。
+引擎相关需求（官方来源、校验、运行期解析顺序、发布包合规）以 `docs/requirements/CONTRACT.md` 的 E 分区为准，本节只写工程事实：`scripts/fetch-7zip.ps1` 负责获取官方引擎（产物落在 `resources/7zip/`，已被 `.gitignore` 忽略，`MUST NOT` 提交）；构建时 `build.rs` 把引擎压缩编进 EXE（`src/engine_bundle.rs` 负责释放与校验），缺失引擎时构建不失败、仅不内嵌。
 
 ## 3.2 测试验收纪律（代码与测试均由 AI 代理产出，以下用于对抗自证偏差）
 
@@ -69,14 +72,23 @@ powershell -NoProfile -File .\scripts\package-windows.ps1   # 生成含 7-Zip �
 | 任意变更（每次提交） | `cargo test` + `python scripts/static_check.py` | 合同全部条目对应测试 |
 | 引擎 / 解压 / 删除 / 路径安全 | 上行 + `powershell -NoProfile -File .\scripts\acceptance.ps1 -WithEngine` + `tests/gui_flow.rs` | 合同 S / E 分区、C-01 |
 | UI（`ui/app.slint` / GUI 装配） | 任意变更行 + `tests/gui_flow.rs` + `scripts/gui_smoke.py` S1–S4 + 两档窗口尺寸目视检查 | 合同 C / U 分区 |
-| 递归解压端到端 | `python scripts/make_tmp.py testdata` 生成数据集 → GUI 走「开始解压 → 一段确认 → 跑完」→ 按合同 X / H 分区核对（成功原包及分卷保留、已有文件不变、冲突自动改名且后缀不变、失败原包进「解压失败」、Git 整树排除、后续新任务允许重新解压）→ `python scripts/make_tmp.py clean` 清理 | 合同 X / H 分区 |
+| 递归解压端到端 | `python scripts/make_tmp.py testdata` 生成数据集 → GUI 走「开始解压 → 一段确认 → 跑完」→ 按合同 X / H 分区核对（成功原包及实际分卷按 X-05 删除、已有文件不变、冲突自动改名且后缀不变、失败原包进「解压失败」、Git 整树排除、后续新任务允许重新解压）→ `python scripts/make_tmp.py clean` 清理 | 合同 X / H 分区 |
 | 目录整理端到端 | `python scripts/make_tmp.py testdata` 自动生成数据集到 `.tmp/testdata/` → GUI 按默认配置完整走一遍目录整理主流程 → 按合同 C / H 分区核对（Git 整树排除、成功后处理范围内无空目录、再次整理幂等）→ `python scripts/make_tmp.py clean` 清理 | 合同 C / H 分区 |
 | 打包 / 发布 / 引擎捆绑 | `scripts/package-windows.ps1` 全程 + 干净目录解包运行 | 合同 E 分区 |
 
 - 单命令入口：`powershell -NoProfile -File .\scripts\acceptance.ps1`（可选 `-WithEngine` / `-WithGuiSmoke -GuiData <目录>` / `-WithPackage`）。
 - 改动过跟踪文件后，提交前须最后用 `git -c core.quotePath=false ls-files -z | grep -zv '^SHA256SUMS.txt$' | xargs -0 sha256sum -b > SHA256SUMS.txt` 重建清单（static_check 会校验其完整性）。
-- **需求 ↔ 测试映射**：验证合同条目的测试 `MUST` 在其文档注释中标明合同编号（如 `// 覆盖 C-12`）；每个合同条目至少被一个测试引用。（现状：现有测试尚未标注合同编号，标注与执法均待落地）
+- **需求 ↔ 测试映射**：验证合同条目的测试 `MUST` 在其文档注释中标明合同编号（如 `// 覆盖 C-12`）；每个合同条目至少被一个测试引用。（现状：已有部分编号注释，但全条目覆盖尚未逐项核验，映射执法待落地。）
 - 合同条目的拆分、合并或重编号 `MUST` 经用户确认。
+
+### 自动化验证要求与当前边界
+
+- 功能开发和功能性修改 `MUST` 同时具备 UT 局部逻辑验证与从真实公开入口到可观察结果的 E2E 验证；跨模块交互按需要增加集成测试，已有有效覆盖可以复用。不得依赖用户手工读代码或人工回归保证质量。（无执法点 · 软法）
+- 测试 `MUST` 对应需求及验收条件，覆盖核心成功路径与相关关键失败路径；UT、编译、静态检查、局部模拟和“没有崩溃”不能替代完整链路的结果断言。桩与模拟仅作补充，未经验证的真实边界须明确说明。（无执法点 · 软法）
+- 验证报告 `MUST` 区分已实现、验证通过、验证失败和未验证；环境、依赖或权限不足不得报告验收通过。（无执法点 · 软法）
+- UT / 集成入口为 `cargo test`，可按目标运行 `cargo test --test md_tools`、`cargo test --test git_tools` 等。`tests/git_tools.rs` 使用真实 git 与本地 bare 远端，不覆盖真实网络及认证。
+- GUI 链路入口为 `cargo test --test gui_flow`；`src/gui.rs` 内另有 MD 真实回调测试。它们使用 Slint 测试后端，不等同于真实桌面窗口验证。`scripts/gui_smoke.py` 的 S1–S4 覆盖启动、整理与解压，未覆盖 MD / Git 的完整桌面链路；Git 从 GUI 启动到推送结果的完整 E2E 覆盖尚未确认。后续相应功能变更应补齐所需链路，不能以底层测试冒充 GUI E2E。
+- 纯文档等非功能性修改按实际影响检查内容、引用和需求保留情况，不机械新增功能测试；本仓库已有基线、提交检查与 CI 完成条件仍按 0 / 3.2 / 3.3 执行，未执行项如实标注。
 
 ## 3.4 三级测试门与执行权限
 
@@ -99,7 +111,7 @@ powershell -NoProfile -File .\scripts\package-windows.ps1   # 生成含 7-Zip �
 
 ## 4. 代码与界面实现约定
 
-产品行为类要求（控件分工、进度语义、窗口行为、缩放适配、配色令牌、命名规范）一律以 `docs/CONTRACT.md` 的 U / P / H 分区为准，本节不重复。本节只写实现层约定：
+产品行为类要求（控件分工、进度语义、窗口行为、缩放适配、配色令牌、命名规范）一律以 `docs/requirements/CONTRACT.md` 的 U / P / H 分区为准，本节不重复。本节只写实现层约定：
 
 - 注释、错误信息、界面文案用中文；标识符、模块名、提交信息用英文或中英混排均可，但同一处保持一致。
 - 界面颜色走 `ui/app.slint` 的 `Design` 全局（浅色/深色两套由 `Design.dark` 切换），不硬编码与主题冲突的颜色。
@@ -110,31 +122,34 @@ powershell -NoProfile -File .\scripts\package-windows.ps1   # 生成含 7-Zip �
 
 产品名、二进制名、图标、状态目录等一旦调整，`MUST` 同步以下位置：
 
-`Cargo.toml`（package/bin 名）· `build.rs`（链接参数与图标资源）· `ui/app.slint`（标题、品牌、关于页）· `src/config.rs`（状态目录）· `src/registry.rs`（工具名）· `scripts/*`（打包、启动、检查脚本）· `.github/workflows/check.yml` · `.github/workflows/release.yml` · `resources/windows.manifest` · `README.md` / `先读我.txt` · `AGENTS.md` §1 与 `docs/CONTRACT.md`（P 分区命名与定位）· `SHA256SUMS.txt`（用 `sha256sum -b` 重新生成并逐字节复核）。
+`Cargo.toml`（package/bin 名）· `build.rs`（链接参数与图标资源）· `ui/app.slint`（标题、品牌、关于页）· `src/config.rs`（状态目录）· `src/registry.rs`（工具名）· `scripts/*`（打包、启动、检查脚本）· `.github/workflows/check.yml` · `.github/workflows/release.yml` · `resources/windows.manifest` · `README.md` / `先读我.txt` · `AGENTS.md` §1 与 `docs/requirements/CONTRACT.md`（P 分区命名与定位）· `SHA256SUMS.txt`（用 `sha256sum -b` 重新生成并逐字节复核）。
 
 ## 6. 安全底线
 
-安全需求（不覆盖语义、删除策略、不上传等）以 `docs/CONTRACT.md` 的 S 分区与 P-03 为准，本节不重复。代理执行纪律：
+安全需求（不覆盖语义、删除策略、不上传等）以 `docs/requirements/CONTRACT.md` 的 S 分区与 P-03 为准，本节不重复。代理执行纪律：
 
 - 处理真实用户目录前 `SHOULD` 先用副本验证；未经用户亲自验收前 `MUST NOT` 声称可用于生产使用。
 
 ## 7. 用户协作协议（本项目用户零创作）
 
 - 代理 `MUST NOT` 要求用户编写代码、文字或文档，`MUST NOT` 让用户阅读代码 diff；需要用户输入时 `MUST` 转换为以下形式之一：附推荐项的封闭选择题、新旧并排截图的是/否判断、一条可直接复制运行的命令。
-- 新需求 `MUST` 先复述为可验收的行为断言（进入 `docs/CONTRACT.md` 草案，见第 8 节），经用户逐条确认后才可动工；影响用户可见行为的歧义 `MUST` 先以封闭问题澄清，`MUST NOT` 默认假设。
+- 新需求 `MUST` 先复述为可验收的行为断言（进入 `docs/requirements/CONTRACT.md` 草案，见第 8 节），经用户逐条确认后才可动工；影响用户可见行为的歧义 `MUST` 先以封闭问题澄清，`MUST NOT` 默认假设。
 - 向用户报告结果 `MUST` 先给结论（通过 / 失败 / 受阻），证据（命令、退出码、关键输出行）附后；未验证的事项 `MUST NOT` 表述为已完成。
 - 本节为行为协议，无法机检，靠会话纪律与用户在交互中纠偏执行。
 
-## 8. 需求合同（docs/CONTRACT.md）
+## 8. 固定需求目录（docs/requirements/）
 
-- `docs/CONTRACT.md` 是用户意图的唯一权威载体：每行一个编号行为断言，**只写需求、不写实现状态**；「功能是否正常」以合同覆盖为准，不以代理单方面理解为准。
+- `docs/requirements/` 是用户意图的唯一权威目录，当前合同文件为 `CONTRACT.md`：每行一个编号行为断言，**只写需求、不写实现状态**；「功能是否正常」以合同覆盖为准，不以代理单方面理解为准。
 - 用户可见行为变更 `MUST` 对应至少一行合同；合同行数单调不减；增改 `MUST` 经用户确认并记录于提交信息，`MUST NOT` 由代理单方面增删。
 - 代码与合同不一致时 `MUST` 以合同为准、按缺陷流程修代码（先红后绿，见 3.2）；`MUST NOT` 为迁就代码现状而改写、削弱或删除合同条目。
 - 合同条目与测试的映射规则见 3.3（测试注释标合同编号；矩阵检查待落地）。
 
+- 需求或预期用户可见行为变化时，`MUST` 检查并同步固定目录内对应需求文档；新独立功能域可新增文档，已有合适分区则就地维护，不按行数或代码目录机械拆分。同一需求只能有一个权威维护位置，跨文档用引用表达关系；具体需求和规划不重复写入本文件。（无执法点 · 软法）
+- 固定目录或权威体系缺失时，`MUST` 先补齐再继续实现；只变实现方式且需求不变时不制造需求变更，不改写需求来合理化缺陷。入口、命令或开发规则变化时同步本文件。（无执法点 · 软法）
+
 ## 9. 可信基与防共谋
 
-- 可信基文件：`AGENTS.md`、`scripts/static_check.py`、`scripts/test-baseline.json`、`scripts/acceptance.ps1`、`scripts/gui_smoke.py`、`scripts/make_tmp.py`、`docs/CONTRACT.md`。（`resources/rules.json` 与 `src/config.rs` 结构上由 static_check 的 config_schema 检查互锁，且加规则时二者本就合法同变，不列入可信基。）
+- 可信基文件：`AGENTS.md`、`scripts/static_check.py`、`scripts/test-baseline.json`、`scripts/acceptance.ps1`、`scripts/gui_smoke.py`、`scripts/make_tmp.py`、`docs/requirements/` 内全部需求文档及旧路径链接文件 `docs/CONTRACT.md`。（`resources/rules.json` 与 `src/config.rs` 结构上由 static_check 的 config_schema 检查互锁，且加规则时二者本就合法同变，不列入可信基。）
 - 任何变更 `MUST NOT` 同时修改产品代码（`src/`、`ui/`、`resources/`）与可信基文件；可信基变更 `MUST` 独立提交、提交信息注明理由并获用户批准。（执法：CI 按 diff 文件清单检测混合提交 · 待落地）
 - 向本文件新增 `MUST` 级条款时，同一变更 `MUST` 落地对应执法脚本检查，否则该条 `MUST` 显式标注「无执法点 · 软法」；`SHOULD` 每月审计一次无执法点的条款，补齐执法或降级措辞。
 

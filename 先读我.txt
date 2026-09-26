@@ -31,4 +31,4 @@ JchTools-Setup-x64.exe（安装到当前用户目录、免 UAC，含桌面快捷
 完整 7-Zip 引擎在构建时已内嵌进 EXE，ZIP 只附带 licenses/、NOTICE.txt 与上游源码压缩包
 （不含 7z.exe/7z.dll）。最终用户使用安装包或 ZIP 时，不需要安装 Rust、Slint 或 7-Zip。
 
-详细使用及限制见 README.md；需求语义见 docs/CONTRACT.md；机器可读静态检查明细可用 `python scripts/static_check.py` 生成（写入 .tmp/static-check.json）。
+详细使用及限制见 README.md；需求语义见 docs/requirements/CONTRACT.md；机器可读静态检查明细可用 `python scripts/static_check.py` 生成（写入 .tmp/static-check.json）。

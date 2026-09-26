@@ -131,4 +131,4 @@ powershell -NoProfile -File .\scripts\acceptance.ps1 -WithEngine   # 单命令�
 
 `src/main.rs`/`ui/app.slint`：界面；`resources/rules.json`：界面规则清单；`src/config.rs`：配置及校验；`src/registry.rs`：真实工具注册；`src/engine.rs`：阶段控制；`archive.rs`：7-Zip；`planner.rs`：计划；`platform.rs`：删除（一律永久删除，S-02）；`db.rs`/`schema.sql`：磁盘索引、计划及审计；`tests/`：测试；`scripts/`：检查/打包；`.github/workflows/check.yml`：Windows CI。
 
-技术依据和许可见 [第三方说明](THIRD_PARTY_NOTICES.md)；需求语义见 [需求合同](docs/CONTRACT.md)。
+技术依据和许可见 [第三方说明](THIRD_PARTY_NOTICES.md)；需求语义见 [需求合同](docs/requirements/CONTRACT.md)。
