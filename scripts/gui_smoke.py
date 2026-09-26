@@ -27,6 +27,7 @@ import subprocess
 import sys
 import tempfile
 import time
+import zipfile
 from collections import Counter
 from pathlib import Path
 from typing import cast
@@ -488,10 +489,7 @@ def verify_original_disposition(root: Path, originals: dict[Path, str], quaranti
     # 例如 max_ratio 上限被调小后 14-大文件 的全零包被整包推进「解压失败」）。
     leftovers = {digest: count for digest, count in quarantined.items() if count > 0}
     if leftovers:
-        msg = (
-            "「解压失败」存在无法对应到任何失败原包/分卷的多余隔离项"
-            f"（成功包可能被误伤隔离）：{leftovers}"
-        )
+        msg = f"「解压失败」存在无法对应到任何失败原包/分卷的多余隔离项（成功包可能被误伤隔离）：{leftovers}"
         raise RuntimeError(msg)
 
 
@@ -537,6 +535,23 @@ def verify_extracted_outputs(root: Path) -> None:
 def verify_extraction_results(root: Path, originals: dict[Path, str]) -> None:
     """核对成功源包删除、失败包完整隔离、既有文件不变与真实解压结果."""
     quarantined = Counter(file_digest(path) for path in (root / "解压失败").rglob("*") if path.is_file())
+    # X-06：10-压缩包-超深 的第 17 层是按深度上限预期隔离的失败项。
+    # 先严格核对这个有意保留的嵌套包，再从隔离计数中扣除一份；后续
+    # verify_original_disposition 的 leftovers 检查仍会拒绝所有其他多余项。
+    deep_failed = root / "解压失败" / "d17.zip"
+    if not deep_failed.is_file():
+        msg = "超深压缩包应按 X-06 隔离 d17.zip"
+        raise RuntimeError(msg)
+    try:
+        with zipfile.ZipFile(deep_failed) as archive:
+            members = archive.namelist()
+    except (OSError, zipfile.BadZipFile) as exc:
+        msg = "X-06 隔离的 d17.zip 不是有效压缩包"
+        raise RuntimeError(msg) from exc
+    if members != ["d18.zip"]:
+        msg = f"X-06 隔离的 d17.zip 内容不符合预期：{members}"
+        raise RuntimeError(msg)
+    quarantined[file_digest(deep_failed)] -= 1
     verify_original_disposition(root, originals, quarantined)
     verify_extracted_outputs(root)
 

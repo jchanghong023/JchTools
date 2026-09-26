@@ -470,6 +470,12 @@
       "cfg": null
     },
     {
+      "file": "src/markdown_assets.rs",
+      "name": "restore_backup_reports_failure_and_preserves_backup",
+      "ignored": false,
+      "cfg": null
+    },
+    {
       "file": "src/markdown_document.rs",
       "name": "collects_root_and_embedded_processing_warnings",
       "ignored": false,
@@ -508,6 +514,12 @@
     {
       "file": "src/markdown_document.rs",
       "name": "rejects_missing_result",
+      "ignored": false,
+      "cfg": null
+    },
+    {
+      "file": "src/markdown_document.rs",
+      "name": "warns_when_embedded_depth_limit_skips_children",
       "ignored": false,
       "cfg": null
     },
