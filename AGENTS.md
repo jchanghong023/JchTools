@@ -88,7 +88,7 @@ powershell -NoProfile -File .\scripts\package-windows.ps1   # 生成含 7-Zip �
 - 验证报告 `MUST` 区分已实现、验证通过、验证失败和未验证；环境、依赖或权限不足不得报告验收通过。（无执法点 · 软法）
 - UT / 集成入口为 `cargo test`，可按目标运行 `cargo test --test md_tools`、`cargo test --test git_tools` 等。`tests/git_tools.rs` 使用真实 git 与本地 bare 远端，不覆盖真实网络及认证。
 - GUI 链路入口为 `cargo test --test gui_flow`；`src/gui.rs` 内另有 MD 真实回调测试。它们使用 Slint 测试后端，不等同于真实桌面窗口验证。`scripts/gui_smoke.py` 的 S1–S4 覆盖启动、整理与解压，未覆盖 MD / Git 的完整桌面链路；Git 从 GUI 启动到推送结果的完整 E2E 覆盖尚未确认。后续相应功能变更应补齐所需链路，不能以底层测试冒充 GUI E2E。
-- 转 Markdown 的当前依据是 `docs/requirements/ALL2MARKDOWN.md`；本仓库尚无该工具的真实页面、转换入口及专属 UT / E2E。后续实现按该文档附录 A 验证主包不包含转换专用依赖/模型、未安装组件时旧工具正常可用、主动初始化与离线真实 Xberg / OCR / 媒体转换、GUI 入口及两种交付形态；旧 all2markdown 的源码、测试或历史 CI 不能作为集成后的通过证据。实现范围按 T-30 限于迁入，不借迁移改变旧功能，也不擅自搬入旧 Python 架构。
+- 转 Markdown 的依据是 `docs/requirements/ALL2MARKDOWN.md`；按该文档附录 A 验证主包不包含转换专用依赖/模型、未配置时旧工具正常可用、GUI 保存并校验用户指定的 Xberg 运行目录、按需初始化其余组件，以及离线真实 Xberg / OCR / 媒体转换、GUI 入口及两种交付形态；旧 all2markdown 的源码、测试或历史 CI 不能作为集成后的通过证据。实现范围按 T-30 限于迁入，不借迁移改变旧功能，也不擅自搬入旧 Python 架构。
 - 纯文档等非功能性修改按实际影响检查内容、引用和需求保留情况，不机械新增功能测试；本仓库已有基线、提交检查与 CI 完成条件仍按 0 / 3.2 / 3.3 执行，未执行项如实标注。
 
 ## 3.4 三级测试门与执行权限
