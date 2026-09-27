@@ -121,6 +121,587 @@
       "body": "14bbbf0bcd1bc86c"
     },
     {
+      "file": "optional/snap-ocr-core/src/detection.rs",
+      "name": "complete_height_duplicate_beats_row_seam_clipped_merge",
+      "ignored": false,
+      "cfg": null,
+      "body": "db188a0a8766e3eb"
+    },
+    {
+      "file": "optional/snap-ocr-core/src/detection.rs",
+      "name": "different_rows_do_not_merge_at_seam",
+      "ignored": false,
+      "cfg": null,
+      "body": "eea7bc9444a25438"
+    },
+    {
+      "file": "optional/snap-ocr-core/src/detection.rs",
+      "name": "duplicate_prefers_candidate_away_from_internal_edge",
+      "ignored": false,
+      "cfg": null,
+      "body": "59b6e112286fed18"
+    },
+    {
+      "file": "optional/snap-ocr-core/src/detection.rs",
+      "name": "duplicate_then_prefers_distance_then_score",
+      "ignored": false,
+      "cfg": null,
+      "body": "1df29fd4985aa6c7"
+    },
+    {
+      "file": "optional/snap-ocr-core/src/detection.rs",
+      "name": "four_tile_seam_chain_merges_in_forward_order",
+      "ignored": false,
+      "cfg": null,
+      "body": "966458e6957a79a7"
+    },
+    {
+      "file": "optional/snap-ocr-core/src/detection.rs",
+      "name": "four_tile_seam_chain_merges_in_reverse_order",
+      "ignored": false,
+      "cfg": null,
+      "body": "7ed13bed26ee167b"
+    },
+    {
+      "file": "optional/snap-ocr-core/src/detection.rs",
+      "name": "full_consolidation_keeps_unrelated_candidate",
+      "ignored": false,
+      "cfg": null,
+      "body": "39afdd02355b20b7"
+    },
+    {
+      "file": "optional/snap-ocr-core/src/detection.rs",
+      "name": "interior_fragment_does_not_replace_reconstructed_seam_line",
+      "ignored": false,
+      "cfg": null,
+      "body": "9a5b13d862d8482f"
+    },
+    {
+      "file": "optional/snap-ocr-core/src/detection.rs",
+      "name": "overlap_threshold_does_not_discard_one_seam_outer_edge",
+      "ignored": false,
+      "cfg": null,
+      "body": "15520da674c5dc11"
+    },
+    {
+      "file": "optional/snap-ocr-core/src/detection.rs",
+      "name": "seam_fragment_can_start_half_text_height_inside_tile",
+      "ignored": false,
+      "cfg": null,
+      "body": "67af6a191782e819"
+    },
+    {
+      "file": "optional/snap-ocr-core/src/detection.rs",
+      "name": "seam_fragments_merge_across_overlapping_tiles",
+      "ignored": false,
+      "cfg": null,
+      "body": "8fe0f0d1b68b6a91"
+    },
+    {
+      "file": "optional/snap-ocr-core/src/detection.rs",
+      "name": "transitive_duplicate_group_is_single_candidate",
+      "ignored": false,
+      "cfg": null,
+      "body": "d3eb0145e0801026"
+    },
+    {
+      "file": "optional/snap-ocr-core/src/geometry.rs",
+      "name": "test_bounding_quad",
+      "ignored": false,
+      "cfg": null,
+      "body": "d85a1cca9515c4f4"
+    },
+    {
+      "file": "optional/snap-ocr-core/src/geometry.rs",
+      "name": "test_partial_axis_aligned_overlap",
+      "ignored": false,
+      "cfg": null,
+      "body": "5f48998a3bc747ca"
+    },
+    {
+      "file": "optional/snap-ocr-core/src/geometry.rs",
+      "name": "test_rotated_quad_area_and_self_overlap",
+      "ignored": false,
+      "cfg": null,
+      "body": "4114da28a619e2db"
+    },
+    {
+      "file": "optional/snap-ocr-core/src/geometry.rs",
+      "name": "test_vertical_overlap_uses_smaller_height",
+      "ignored": false,
+      "cfg": null,
+      "body": "ce6172569358a706"
+    },
+    {
+      "file": "optional/snap-ocr-core/src/layout.rs",
+      "name": "cjk_and_ascii_use_half_width_grid",
+      "ignored": false,
+      "cfg": null,
+      "body": "c886427949979c80"
+    },
+    {
+      "file": "optional/snap-ocr-core/src/layout.rs",
+      "name": "code_indentation_and_internal_spaces_are_preserved",
+      "ignored": false,
+      "cfg": null,
+      "body": "9430be1870a6fe3b"
+    },
+    {
+      "file": "optional/snap-ocr-core/src/layout.rs",
+      "name": "collision_pushes_later_text_right",
+      "ignored": false,
+      "cfg": null,
+      "body": "7f12928e30d8ca65"
+    },
+    {
+      "file": "optional/snap-ocr-core/src/layout.rs",
+      "name": "controls_are_safely_replaced",
+      "ignored": false,
+      "cfg": null,
+      "body": "48182fc8f378fa25"
+    },
+    {
+      "file": "optional/snap-ocr-core/src/layout.rs",
+      "name": "empty_input_has_zero_stats",
+      "ignored": false,
+      "cfg": null,
+      "body": "398607e8a35541d9"
+    },
+    {
+      "file": "optional/snap-ocr-core/src/layout.rs",
+      "name": "half_cell_spacing_rounds_up_instead_of_to_even",
+      "ignored": false,
+      "cfg": null,
+      "body": "e0942c960824d159"
+    },
+    {
+      "file": "optional/snap-ocr-core/src/layout.rs",
+      "name": "large_vertical_gap_becomes_blank_rows",
+      "ignored": false,
+      "cfg": null,
+      "body": "11b9f72c7c2b0414"
+    },
+    {
+      "file": "optional/snap-ocr-core/src/layout.rs",
+      "name": "physical_gap_survives_mixed_box_cell_widths",
+      "ignored": false,
+      "cfg": null,
+      "body": "cee1f8479fd2aaa7"
+    },
+    {
+      "file": "optional/snap-ocr-core/src/layout.rs",
+      "name": "same_y_columns_stay_on_one_output_line",
+      "ignored": false,
+      "cfg": null,
+      "body": "fb11326c8f97bed4"
+    },
+    {
+      "file": "optional/snap-ocr-core/src/layout.rs",
+      "name": "scrambled_input_is_sorted_by_coordinates",
+      "ignored": false,
+      "cfg": null,
+      "body": "89ab91c2d669145d"
+    },
+    {
+      "file": "optional/snap-ocr-core/src/layout.rs",
+      "name": "shared_margin_is_cropped_but_relative_indent_remains",
+      "ignored": false,
+      "cfg": null,
+      "body": "5ca627eee52d1d61"
+    },
+    {
+      "file": "optional/snap-ocr-core/src/layout.rs",
+      "name": "trailing_spaces_and_final_newline_are_not_added",
+      "ignored": false,
+      "cfg": null,
+      "body": "a72a702311bb2ebb"
+    },
+    {
+      "file": "optional/snap-ocr-core/src/orientation.rs",
+      "name": "best_score_wins",
+      "ignored": false,
+      "cfg": null,
+      "body": "5385ad286055ea08"
+    },
+    {
+      "file": "optional/snap-ocr-core/src/orientation.rs",
+      "name": "confident_horizontal_crop_stops",
+      "ignored": false,
+      "cfg": null,
+      "body": "6a4058438a3a602a"
+    },
+    {
+      "file": "optional/snap-ocr-core/src/orientation.rs",
+      "name": "low_confidence_horizontal_crop_tries_180",
+      "ignored": false,
+      "cfg": null,
+      "body": "123ec80a8ecae9b1"
+    },
+    {
+      "file": "optional/snap-ocr-core/src/orientation.rs",
+      "name": "unrotated_wins_score_tie",
+      "ignored": false,
+      "cfg": null,
+      "body": "f167a403bc280455"
+    },
+    {
+      "file": "optional/snap-ocr-core/src/orientation.rs",
+      "name": "vertical_crop_tries_both_quarter_turns",
+      "ignored": false,
+      "cfg": null,
+      "body": "55d2e6adfb6708db"
+    },
+    {
+      "file": "optional/snap-ocr-core/src/pipeline.rs",
+      "name": "cancellation_during_final_empty_span_scan_wins_over_empty",
+      "ignored": false,
+      "cfg": null,
+      "body": "a813c8e595865676"
+    },
+    {
+      "file": "optional/snap-ocr-core/src/pipeline.rs",
+      "name": "cancellation_is_observed_after_uninterruptible_tile_call",
+      "ignored": false,
+      "cfg": null,
+      "body": "7e35af2c80aa77fd"
+    },
+    {
+      "file": "optional/snap-ocr-core/src/pipeline.rs",
+      "name": "cancellation_is_observed_between_recognition_batches",
+      "ignored": false,
+      "cfg": null,
+      "body": "796da8bf9cfd5b17"
+    },
+    {
+      "file": "optional/snap-ocr-core/src/pipeline.rs",
+      "name": "dense_code_outline_uses_targeted_horizontal_retry",
+      "ignored": false,
+      "cfg": null,
+      "body": "27550786dfc37525"
+    },
+    {
+      "file": "optional/snap-ocr-core/src/pipeline.rs",
+      "name": "dense_code_retry_does_not_replace_a_longer_initial_result",
+      "ignored": false,
+      "cfg": null,
+      "body": "ce02c8d69d668dac"
+    },
+    {
+      "file": "optional/snap-ocr-core/src/pipeline.rs",
+      "name": "only_exact_empty_string_is_dropped_before_blank_layout",
+      "ignored": false,
+      "cfg": null,
+      "body": "28561b95224e9455"
+    },
+    {
+      "file": "optional/snap-ocr-core/src/pipeline.rs",
+      "name": "orientation_policy_and_recognition_batch_size",
+      "ignored": false,
+      "cfg": null,
+      "body": "b8f42c5bac95798b"
+    },
+    {
+      "file": "optional/snap-ocr-core/src/pipeline.rs",
+      "name": "perspective_accepts_convex_quad_with_slanted_edges",
+      "ignored": false,
+      "cfg": null,
+      "body": "197e111df1a0b266"
+    },
+    {
+      "file": "optional/snap-ocr-core/src/pipeline.rs",
+      "name": "perspective_rejects_concave_quad",
+      "ignored": false,
+      "cfg": null,
+      "body": "bb0ed590ad209a61"
+    },
+    {
+      "file": "optional/snap-ocr-core/src/pipeline.rs",
+      "name": "perspective_rejects_duplicate_and_degenerate_quads",
+      "ignored": false,
+      "cfg": null,
+      "body": "302396d677c9259f"
+    },
+    {
+      "file": "optional/snap-ocr-core/src/pipeline.rs",
+      "name": "tiles_map_to_global_and_seam_fragments_are_consolidated",
+      "ignored": false,
+      "cfg": null,
+      "body": "89b501a06ca311c0"
+    },
+    {
+      "file": "optional/snap-ocr-core/src/pipeline.rs",
+      "name": "visible_text_keeps_internal_whitespace",
+      "ignored": false,
+      "cfg": null,
+      "body": "00a1eb81d829dedd"
+    },
+    {
+      "file": "optional/snap-ocr-core/src/tiling.rs",
+      "name": "test_invalid_overlap_is_rejected",
+      "ignored": false,
+      "cfg": null,
+      "body": "fbf8468cbfc03c1b"
+    },
+    {
+      "file": "optional/snap-ocr-core/src/tiling.rs",
+      "name": "test_large_axis_has_128_pixel_overlap_and_tail_coverage",
+      "ignored": false,
+      "cfg": null,
+      "body": "e68c7cc8a33dfb99"
+    },
+    {
+      "file": "optional/snap-ocr-core/src/tiling.rs",
+      "name": "test_mapping_and_internal_edge_distance",
+      "ignored": false,
+      "cfg": null,
+      "body": "53f3f1c62c940e03"
+    },
+    {
+      "file": "optional/snap-ocr-core/src/tiling.rs",
+      "name": "test_small_image_uses_one_exact_tile",
+      "ignored": false,
+      "cfg": null,
+      "body": "ec7913542693385d"
+    },
+    {
+      "file": "optional/snap-ocr-core/src/tiling.rs",
+      "name": "test_two_dimensional_tiles_cover_every_boundary",
+      "ignored": false,
+      "cfg": null,
+      "body": "5b430283b08f2b5c"
+    },
+    {
+      "file": "optional/snap-ocr-core/src/types.rs",
+      "name": "candidate_normalizes_tile_indices",
+      "ignored": false,
+      "cfg": null,
+      "body": "b26666785a255df8"
+    },
+    {
+      "file": "optional/snap-ocr-core/src/types.rs",
+      "name": "candidate_rejects_bad_scores_and_edges",
+      "ignored": false,
+      "cfg": null,
+      "body": "7e862be3c9ce8d24"
+    },
+    {
+      "file": "optional/snap-ocr-core/src/types.rs",
+      "name": "span_rejects_invalid_rotation",
+      "ignored": false,
+      "cfg": null,
+      "body": "09a0815d1941208f"
+    },
+    {
+      "file": "optional/snap-ocr-core/src/types.rs",
+      "name": "tile_internal_edges_follow_image_bounds",
+      "ignored": false,
+      "cfg": null,
+      "body": "bf19d819555e7228"
+    },
+    {
+      "file": "optional/snap-ocr-core/src/types.rs",
+      "name": "tile_rejects_nonpositive_dimensions",
+      "ignored": false,
+      "cfg": null,
+      "body": "0afcfa4aa72fef22"
+    },
+    {
+      "file": "optional/snap-ocr-core/src/types.rs",
+      "name": "tile_rejects_out_of_bounds",
+      "ignored": false,
+      "cfg": null,
+      "body": "60b658f5b75b569f"
+    },
+    {
+      "file": "optional/snap-ocr-worker/src/det_paddlex_tests.rs",
+      "name": "diff_ops_bitwise",
+      "ignored": true,
+      "cfg": null,
+      "body": "595b9678b93cd212"
+    },
+    {
+      "file": "optional/snap-ocr-worker/src/det_paddlex_tests.rs",
+      "name": "oracle_det_two_cases_bitwise",
+      "ignored": true,
+      "cfg": null,
+      "body": "c0ae74270489f1cf"
+    },
+    {
+      "file": "optional/snap-ocr-worker/src/det_paddlex_tests.rs",
+      "name": "stage_boxes_matches_manifest",
+      "ignored": true,
+      "cfg": null,
+      "body": "9cfc4e6cd7429b2a"
+    },
+    {
+      "file": "optional/snap-ocr-worker/src/det_paddlex_tests.rs",
+      "name": "stage_contours_match_manifest",
+      "ignored": true,
+      "cfg": null,
+      "body": "171d214439f4c982"
+    },
+    {
+      "file": "optional/snap-ocr-worker/src/det_paddlex_tests.rs",
+      "name": "stage_probmap_matches_dump",
+      "ignored": true,
+      "cfg": null,
+      "body": "0c9c7912d0144804"
+    },
+    {
+      "file": "optional/snap-ocr-worker/src/det_paddlex_tests.rs",
+      "name": "stage_resize_matches_dump",
+      "ignored": true,
+      "cfg": null,
+      "body": "2fa38429abddccb0"
+    },
+    {
+      "file": "optional/snap-ocr-worker/src/det_paddlex_tests.rs",
+      "name": "tiny_selection_is_padded_before_detection_resize",
+      "ignored": false,
+      "cfg": null,
+      "body": "c45672799a853f29"
+    },
+    {
+      "file": "optional/snap-ocr-worker/src/image_ops.rs",
+      "name": "buffer_length_is_validated",
+      "ignored": false,
+      "cfg": null,
+      "body": "e7a829e47c9f6b03"
+    },
+    {
+      "file": "optional/snap-ocr-worker/src/image_ops.rs",
+      "name": "resize_identity_returns_same_pixels_for_all_interpolations",
+      "ignored": false,
+      "cfg": null,
+      "body": "628ef75b4c2c34a9"
+    },
+    {
+      "file": "optional/snap-ocr-worker/src/image_ops.rs",
+      "name": "resize_lanczos4_kernel_is_normalized_at_integers",
+      "ignored": false,
+      "cfg": null,
+      "body": "9fad25bb79e205a6"
+    },
+    {
+      "file": "optional/snap-ocr-worker/src/image_ops.rs",
+      "name": "resize_linear_downscale_2x_area_fast",
+      "ignored": false,
+      "cfg": null,
+      "body": "5ec4f6467d0625fd"
+    },
+    {
+      "file": "optional/snap-ocr-worker/src/image_ops.rs",
+      "name": "resize_linear_upscale_hand_value",
+      "ignored": false,
+      "cfg": null,
+      "body": "3e5a49803aebe9ae"
+    },
+    {
+      "file": "optional/snap-ocr-worker/src/image_ops.rs",
+      "name": "rot90_roundtrip_and_orientation",
+      "ignored": false,
+      "cfg": null,
+      "body": "8cae5d4fa47fae9b"
+    },
+    {
+      "file": "optional/snap-ocr-worker/src/image_ops.rs",
+      "name": "warp_axis_aligned_corners_sample_exact_pixels",
+      "ignored": false,
+      "cfg": null,
+      "body": "a90160055b98ecb2"
+    },
+    {
+      "file": "optional/snap-ocr-worker/src/image_ops.rs",
+      "name": "warp_rejects_invalid_quads",
+      "ignored": false,
+      "cfg": null,
+      "body": "53508e4ff132b511"
+    },
+    {
+      "file": "optional/snap-ocr-worker/src/pipeline_backend.rs",
+      "name": "backend_ops_geometry",
+      "ignored": false,
+      "cfg": null,
+      "body": "a45922a187c94edc"
+    },
+    {
+      "file": "optional/snap-ocr-worker/src/pipeline_backend.rs",
+      "name": "sha256_matches_reference_vectors",
+      "ignored": false,
+      "cfg": null,
+      "body": "30790ab942709320"
+    },
+    {
+      "file": "optional/snap-ocr-worker/src/pipeline_backend_tests.rs",
+      "name": "l2_warp_crops_bitwise_oracle",
+      "ignored": true,
+      "cfg": null,
+      "body": "b2c499d6de72435e"
+    },
+    {
+      "file": "optional/snap-ocr-worker/src/pipeline_backend_tests.rs",
+      "name": "l3_full_chain_matches_oracle",
+      "ignored": true,
+      "cfg": null,
+      "body": "7d6f1d3a4ed56ab2"
+    },
+    {
+      "file": "optional/snap-ocr-worker/src/rec_paddlex.rs",
+      "name": "ctc_decode_collapse_blank_mean_and_empty",
+      "ignored": false,
+      "cfg": null,
+      "body": "7042041f1e572219"
+    },
+    {
+      "file": "optional/snap-ocr-worker/src/rec_paddlex.rs",
+      "name": "geometry_matches_paddlex_rules",
+      "ignored": false,
+      "cfg": null,
+      "body": "24976c2c018c2fcc"
+    },
+    {
+      "file": "optional/snap-ocr-worker/src/rec_paddlex.rs",
+      "name": "normalization_follows_paddlex_operation_order",
+      "ignored": false,
+      "cfg": null,
+      "body": "129db3cc602ad8a8"
+    },
+    {
+      "file": "optional/snap-ocr-worker/src/rec_paddlex.rs",
+      "name": "np_sum_matches_sequential_for_small_inputs",
+      "ignored": false,
+      "cfg": null,
+      "body": "f8d6e0a183484ec9"
+    },
+    {
+      "file": "optional/snap-ocr-worker/src/result_window.rs",
+      "name": "ocr_text_changes_visible_body_pixels",
+      "ignored": false,
+      "cfg": null,
+      "body": "24b808be470e917d"
+    },
+    {
+      "file": "optional/snap-ocr-worker/src/service.rs",
+      "name": "corrupt_settings_survive_load_until_explicit_save",
+      "ignored": false,
+      "cfg": "windows",
+      "body": "4debff3dcd7f0b3a"
+    },
+    {
+      "file": "optional/snap-ocr-worker/src/service.rs",
+      "name": "inference_failure_does_not_unload_ready_model",
+      "ignored": false,
+      "cfg": "windows",
+      "body": "1d004871bab06baf"
+    },
+    {
+      "file": "optional/snap-ocr-worker/src/service/tray.rs",
+      "name": "accepts_original_key_domain_but_rejects_invalid_combinations",
+      "ignored": false,
+      "cfg": null,
+      "body": "59d8917a1ee2df5c"
+    },
+    {
       "file": "src/archive.rs",
       "name": "delete_successful_source_stops_on_cancellation",
       "ignored": false,
@@ -580,7 +1161,7 @@
       "name": "initial_surface_lists_defaults",
       "ignored": false,
       "cfg": null,
-      "body": "3fd91c8c47666810"
+      "body": "1ac878d81cb6dd96"
     },
     {
       "file": "src/gui.rs",
@@ -2456,7 +3037,7 @@
       "name": "offline_sources_have_no_network_capabilities",
       "ignored": false,
       "cfg": null,
-      "body": "f911fb666475f580"
+      "body": "515d1a37145519d9"
     },
     {
       "file": "tests/core.rs",

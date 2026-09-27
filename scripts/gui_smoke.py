@@ -257,11 +257,13 @@ def set_directory(window: WindowSpecification, path: str) -> None:
         edit
         for edit in window.descendants(control_type="Edit")
         if abs(edit.rectangle().top - button_rect.top) < EDIT_ROW_TOLERANCE_PX
+        and edit.rectangle().right <= button_rect.left
     ]
     if not candidates:
         msg = "未找到目录输入框"
         raise RuntimeError(msg)
-    edit = min(candidates, key=lambda e: e.rectangle().left)
+    # 侧栏搜索框在小窗口下可能与目录输入框同高；取紧挨「选择目录…」左侧的 Edit。
+    edit = min(candidates, key=lambda e: button_rect.left - e.rectangle().right)
     edit.set_edit_text(path)
 
 

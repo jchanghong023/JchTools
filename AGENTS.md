@@ -14,10 +14,10 @@
 ## 1. 项目背景
 
 - **项目类型与技术栈**：自有项目 JchTools，用户个人使用的 Windows 本地工具箱，由 AI Agent 实现和维护。Rust 2021 + Slint 1.17、SQLite（rusqlite bundled）、7-Zip 引擎；产品定位与交付要求见合同 P / E 分区，打包入口为 `scripts/package-windows.ps1` 与 `installer/JchTools.iss`。
-- **工具入口**：注册表当前接入递归解压、目录整理、MD 整理和 Git 工具，对应合同 X / C / M / G 分区。联网边界只按 P-03 执行（Git 任务与 T 分区可选组件初始化的例外各限本功能），不以开发说明另行扩大或缩小。新工具 `MUST` 经 `src/registry.rs` 注册 + 真实页面接入；侧栏与导航 `SHOULD NOT` 写死只服务单个工具的文案或流程。
+- **工具入口**：当前工作树的注册表与 GUI 已接入递归解压、目录整理、MD 整理、转 Markdown、Git 工具和截图 OCR 六个入口，对应合同 X / C / M / T / G / O 分区。入口与实现代码存在不代表完整功能已验收，截图 OCR 的真实模型、桌面链路和可选资产交付仍须按 O 分区验证。联网边界只按 P-03 执行，各功能例外不得互相扩大。新工具 `MUST` 经 `src/registry.rs` 注册 + 真实页面接入；侧栏与导航 `SHOULD NOT` 写死只服务单个工具的文案或流程。
 - **生产方式**：本项目全部产出（代码、测试、文档、CI）由 AI 代理完成；用户不编写任何代码或文字，只在封闭选择、看图判断与真实使用中给出意图和反馈（协作协议见第 7 节）。本文件的纪律条款用于对抗代理的自证偏差。
-- **权威分工**：`AGENTS.md` 规定开发、测试和验收纪律；固定目录 `docs/requirements/` 保存全部产品需求，`CONTRACT.md` 维护全局约束与既有工具分区，`ALL2MARKDOWN.md` 独立维护转 Markdown（T 分区）。按功能域定位唯一需求来源；明确标注的待确认草案不覆盖已确认条目。旧 `docs/CONTRACT.md` 仅保留迁移链接，兼容静态检查的文件存在性要求，不再维护需求副本。其余文档仅为辅助说明。
-- **代码入口**：`src/main.rs` → `src/gui.rs`（GUI 启动、回调与后台任务）、`ui/app.slint`（界面）、`src/registry.rs`（工具注册表）；`src/archive.rs`（递归解压）、`src/engine.rs`（整理分析与执行）、`src/md_tools.rs`（MD 合并与拆分）、`src/git_tools.rs`（Git 操作）、`resources/rules.json`（界面规则清单）。
+- **权威分工**：`AGENTS.md` 规定开发、测试和验收纪律；固定目录 `docs/requirements/` 保存全部产品需求，`CONTRACT.md` 维护全局约束与既有工具分区，`ALL2MARKDOWN.md` 独立维护转 Markdown（T 分区），`SNAP2TEXT.md` 独立维护截图 OCR（O 分区）。按功能域定位唯一需求来源；明确标注的待确认草案不覆盖已确认条目。旧 `docs/CONTRACT.md` 仅保留迁移链接，兼容静态检查的文件存在性要求，不再维护需求副本。其余文档仅为辅助说明。
+- **代码入口**：`src/main.rs` → `src/gui.rs`（GUI 启动、回调与后台任务）、`ui/app.slint`（界面）、`src/registry.rs`（工具注册表）；`src/archive.rs`（递归解压）、`src/engine.rs`（整理分析与执行）、`src/md_tools.rs`（MD 合并与拆分）、`src/git_tools.rs`（Git 操作）、`resources/rules.json`（界面规则清单）。转 Markdown 由 `src/markdown.rs`、`src/markdown_document.rs`、`src/markdown_assets.rs` 与 `optional/markdown-media-worker/` 承接；截图 OCR 由 `src/snap_ocr_assets.rs`、`optional/snap-ocr-core/`（纯逻辑）与 `optional/snap-ocr-worker/`（推理、截图、托盘、服务和结果窗）承接，主界面回调仍在 `src/gui.rs`。
 
 ## 2. 临时文件规则（强制）
 
@@ -90,6 +90,9 @@ powershell -NoProfile -File .\scripts\package-windows.ps1   # 生成含 7-Zip �
 - GUI 链路入口为 `cargo test --test gui_flow`；`src/gui.rs` 内另有 MD 真实回调测试。它们使用 Slint 测试后端，不等同于真实桌面窗口验证。`scripts/gui_smoke.py` 的 S1–S4 覆盖启动、整理与解压，未覆盖 MD / Git 的完整桌面链路；Git 从 GUI 启动到推送结果的完整 E2E 覆盖尚未确认。后续相应功能变更应补齐所需链路，不能以底层测试冒充 GUI E2E。
 - 转 Markdown 的依据是 `docs/requirements/ALL2MARKDOWN.md`；按该文档附录 A 验证主包不包含转换专用依赖/模型、未配置时旧工具正常可用、GUI 保存并校验用户指定的 Xberg 运行目录、按需初始化其余组件，以及离线真实 Xberg / OCR / 媒体转换、GUI 入口及两种交付形态；旧 all2markdown 的源码、测试或历史 CI 不能作为集成后的通过证据。实现范围按 T-30 限于迁入，不借迁移改变旧功能，也不擅自搬入旧 Python 架构。
 - 纯文档等非功能性修改按实际影响检查内容、引用和需求保留情况，不机械新增功能测试；本仓库已有基线、提交检查与 CI 完成条件仍按 0 / 3.2 / 3.3 执行，未执行项如实标注。
+- 可选组件的 UT / 集成测试从仓库根目录分别运行 `cargo test --manifest-path optional/markdown-media-worker/Cargo.toml --all-targets`、`cargo test --manifest-path optional/snap-ocr-core/Cargo.toml --all-targets` 和 `cargo test --manifest-path optional/snap-ocr-worker/Cargo.toml --all-targets`。根 workspace 的 `default-members = ["."]`，默认 `cargo test` 不覆盖这些包；当前 `check.yml` 有三者的显式测试步骤，`acceptance.ps1` 仅显式追加媒体 worker，不能把本地默认门通过当作截图组件已验证。
+- 转 Markdown 的验收承接入口为 `scripts/markdown_acceptance.py`（`--list` 查看条目），也可经 `acceptance.ps1 -WithMarkdownAcceptance` 接入；运行依赖见 `scripts/requirements-dev.txt`，真实 GUI、Xberg、媒体组件与两种发布目录按脚本参数提供。缺资产条目为 `NOT RUN`；脚本退出码 0 仍可能包含未执行项，应逐项检查。`scripts/gui_smoke.py --stages S5` 另有转换开始/停止链路，需已配置可用组件，不在默认 S1–S4 内，不能替代转换产物断言。
+- 截图 OCR 的验收覆盖目标见 `docs/requirements/SNAP2TEXT.md` 附录 C。当前 worker 声明了 `det_paddlex_oracle` 与 `pipeline_backend_oracle` 两个资产依赖测试目标，其中 oracle 用例默认忽略，需准备测试文件头说明的 `.tmp/` 合成资产及 `ORT_DYLIB_PATH` 后显式运行对应 `--test <目标> -- --ignored`；它们分别检查检测和固定检测框之后的裁剪/识别/布局，不能替代从热键或托盘进入的桌面 E2E。已有 Slint 测试后端结果窗用例也不等于真实桌面、服务生命周期或多 DPI 验收；这些完整链路的自动化覆盖尚未确认。TextSnap 历史测试不能作为迁入版通过证据。上述入口说明不改变 3.4 的 fulltest / slowtest 逐次授权及 CI 完成条件。
 
 ## 3.4 三级测试门与执行权限
 
@@ -140,7 +143,7 @@ powershell -NoProfile -File .\scripts\package-windows.ps1   # 生成含 7-Zip �
 
 ## 8. 固定需求目录（docs/requirements/）
 
-- `docs/requirements/` 是用户意图的唯一权威目录，当前由 `CONTRACT.md`（全局及 X / C / M / G 等分区）与 `ALL2MARKDOWN.md`（T 分区）共同构成需求合同：每行一个编号行为断言，**只写需求、不写实现状态**；「功能是否正常」以合同覆盖为准，不以代理单方面理解为准。
+- `docs/requirements/` 是用户意图的唯一权威目录，当前由 `CONTRACT.md`（全局及 X / C / M / G 等分区）、`ALL2MARKDOWN.md`（T 分区）与 `SNAP2TEXT.md`（O 分区）按功能域维护需求：每行一个编号行为断言，**只写需求、不写实现状态**；需求按第 7 节确认后进入实现（O 分区已于 2026-09-27 确认），「功能是否正常」以已确认合同覆盖为准，不以代理单方面理解为准。
 - 用户可见行为变更 `MUST` 对应至少一行合同；合同行数单调不减；增改 `MUST` 经用户确认并记录于提交信息，`MUST NOT` 由代理单方面增删。
 - 代码与合同不一致时 `MUST` 以合同为准、按缺陷流程修代码（先红后绿，见 3.2）；`MUST NOT` 为迁就代码现状而改写、削弱或删除合同条目。
 - 合同条目与测试的映射规则见 3.3（测试注释标合同编号；矩阵检查待落地）。
