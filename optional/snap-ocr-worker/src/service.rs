@@ -186,10 +186,21 @@ fn root() -> Result<PathBuf, String> {
             return Ok(path);
         }
     }
-    std::env::var_os("LOCALAPPDATA")
-        .map(PathBuf::from)
-        .map(|base| base.join("JchTools").join("snap-ocr"))
-        .ok_or_else(|| "无法定位用户截图资产缓存目录".to_string())
+    // 主程序由 ProjectDirs 决定用户状态目录，不能在 worker 中重新拼 LOCALAPPDATA：
+    // Windows 上它实际位于 JchTools/data/snap-ocr。worker 总是从已校验的
+    // <资产根>/worker/<版本>/snap-ocr-worker.exe 启动，因此由自身路径回溯。
+    let executable = std::env::current_exe().map_err(|_| "无法定位截图服务程序".to_string())?;
+    let version_dir = executable
+        .parent()
+        .ok_or_else(|| "截图服务安装路径无效".to_string())?;
+    let worker_dir = version_dir
+        .parent()
+        .filter(|path| path.file_name() == Some(std::ffi::OsStr::new("worker")))
+        .ok_or_else(|| "截图服务未安装在资产目录内".to_string())?;
+    worker_dir
+        .parent()
+        .map(Path::to_path_buf)
+        .ok_or_else(|| "截图服务资产根目录无效".to_string())
 }
 
 fn verified(root: &Path, relative: &str, size: u64, expected: &str) -> Result<PathBuf, String> {
@@ -247,7 +258,7 @@ fn load_backend(root: &Path) -> Result<WorkerOcrBackend, String> {
     )?;
     let dll = verified(
         root,
-        "worker/v0.1.0/onnxruntime.dll",
+        "worker/v0.1.1/onnxruntime.dll",
         15_809_848,
         "18370c375f07357fa5874344a9d9ac17e6b6fe1eb18b1dd209d79483b4470257",
     )?;

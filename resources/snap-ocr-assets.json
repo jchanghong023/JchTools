@@ -76,7 +76,7 @@
       "members": [
         {
           "path": "onnxruntime-win-x64-1.28.0/lib/onnxruntime.dll",
-          "install_path": "worker/v0.1.0/onnxruntime.dll",
+          "install_path": "worker/v0.1.1/onnxruntime.dll",
           "size_bytes": 15809848,
           "sha256": "18370c375f07357fa5874344a9d9ac17e6b6fe1eb18b1dd209d79483b4470257"
         }
@@ -133,11 +133,11 @@
     {
       "id": "snap-ocr-worker",
       "status": "ok",
-      "url": "https://github.com/jchanghong023/JchTools/releases/download/optional-components-v0.1.0/snap-ocr-worker.exe",
+      "url": "https://github.com/jchanghong023/JchTools/releases/download/optional-components-v0.1.1/snap-ocr-worker.exe",
       "archive_type": "file",
-      "install_path": "worker/v0.1.0/snap-ocr-worker.exe",
+      "install_path": "worker/v0.1.1/snap-ocr-worker.exe",
       "size_bytes": 16744960,
-      "sha256": "5e129d54a23cb55837e0a6ad014719dfcb686d7bed4d7adcbb9090d501647212",
+      "sha256": "5c380a7daa10be612929c87f10530b34cbec7a618a82fdb7312d23d41670c724",
       "members": [],
       "license": {
         "component": "JchTools snap-ocr-worker（截图 OCR 后台服务进程）",

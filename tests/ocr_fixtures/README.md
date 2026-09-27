@@ -8,6 +8,8 @@
 
 从原 `PP-OCRv6_small_rec/inference.yml` 派生字典可运行 `python tests/ocr_fixtures/derive_dict.py <inference.yml> .tmp/ocr-assets/dict-check.txt`；脚本核对 18708 字、74947 字节和固定 SHA-256。需有 PyYAML。若将来删除冻结 Python 仓库，须另行保存其可运行源码和锁定依赖；这里保存的冻结输出只支持继续复跑 Rust 与既有质量基线的比较，不能重新测量已删除程序的速度。
 
+worker 资产根回归可运行 `python tests/ocr_fixtures/check_worker_root.py --asset-root <完整资产缓存> --worker-version v0.1.1`。脚本把资产复制到 `.tmp/`，用独立用户名和命名管道启动真实 worker，要求模型进入 `ready`，结束时通过 `shutdown` 退出。修复前的 v0.1.0 worker 返回 `{"model":"uninitialized"}`：主程序装在 `JchTools/data/snap-ocr`，旧 worker 却从 `JchTools/snap-ocr` 读取；v0.1.1 改为从 worker 自身安装位置回溯资产根。
+
 ## 2026-09-27 同图结果
 
 环境：Windows 11 专业版 10.0.26200、AMD Ryzen 9 9950X、Python 3.13.15、Rust 1.98.1；两端使用相同 PP-OCRv6 small FP32 ONNX 模型、18708 字字典和 ONNX Runtime 1.28.0。此机型不同于合同 O-04 所列 i7-13700 首轮目标。

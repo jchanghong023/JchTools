@@ -23,7 +23,7 @@ const MANIFEST: &str = include_str!(concat!(env!("OUT_DIR"), "/snap-ocr-assets.j
 const DATA_DIRECTORY: &str = "snap-ocr";
 /// worker 固定版本目录：资产清单 worker 条目的 install_path 必须落在该目录下
 /// （服务进程从这条固定路径启动，见 gui.rs 的服务监督线程）。
-const WORKER_VERSION: &str = "v0.1.0";
+const WORKER_VERSION: &str = "v0.1.1";
 const WORKER_EXE_NAME: &str = "snap-ocr-worker.exe";
 /// 构建期占位标记：打包阶段回填 worker 的真实 size/sha256 后删除该状态。
 const WORKER_STATUS_PENDING: &str = "pending-build";

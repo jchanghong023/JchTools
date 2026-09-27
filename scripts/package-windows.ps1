@@ -43,7 +43,7 @@ if (-not (Test-Path -LiteralPath $workerExe -PathType Leaf)) {throw "Optional OC
 $workerBytes = (Get-Item -LiteralPath $workerExe).Length
 if ($workerBytes -le 0) {throw 'Optional OCR worker executable is empty.'}
 $workerSha = (Get-FileHash -LiteralPath $workerExe -Algorithm SHA256).Hash.ToLowerInvariant()
-$optionalStage = Join-Path $root 'dist\optional-components-v0.1.0'
+$optionalStage = Join-Path $root 'dist\optional-components-v0.1.1'
 New-Item -ItemType Directory -Path $optionalStage -Force | Out-Null
 $stagedWorker = Join-Path $optionalStage 'snap-ocr-worker.exe'
 Copy-Item -LiteralPath $workerExe -Destination $stagedWorker -Force
@@ -54,9 +54,9 @@ if ((Get-Item -LiteralPath $stagedWorker).Length -ne $workerBytes -or
 $manifest = Get-Content -LiteralPath 'resources\snap-ocr-assets.json' -Raw -Encoding UTF8 | ConvertFrom-Json
 $workers = @($manifest.workers)
 if ($workers.Count -ne 1 -or $workers[0].id -cne 'snap-ocr-worker' -or
-    $workers[0].url -cne 'https://github.com/jchanghong023/JchTools/releases/download/optional-components-v0.1.0/snap-ocr-worker.exe' -or
+    $workers[0].url -cne 'https://github.com/jchanghong023/JchTools/releases/download/optional-components-v0.1.1/snap-ocr-worker.exe' -or
     $workers[0].archive_type -cne 'file' -or
-    $workers[0].install_path -cne 'worker/v0.1.0/snap-ocr-worker.exe' -or
+    $workers[0].install_path -cne 'worker/v0.1.1/snap-ocr-worker.exe' -or
     $workers[0].status -cne 'ok' -or
     $workers[0].size_bytes -ne $workerBytes -or
     $workers[0].sha256 -cne $workerSha) {
