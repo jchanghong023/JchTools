@@ -7,6 +7,8 @@
   S3 目录整理全链路：开始分析 → 确认执行 → 整理完成；
   S4 递归解压全链路：开始解压 → 一段确认 → 解压结束；完整成功的原包/分卷删除，既有内容保留，
      冲突自动改名、嵌套内容落盘，失败包保留在「解压失败」（H-07/X-05/X-06）。
+  S5 转 Markdown 基本链路：启动 → 切到「转 Markdown」→ 选输入/输出 → 开始 → 停止 → 关闭
+     （T 分区附录 A GUI E2E 最小段；需 Xberg 已配置且组件就绪，默认序列不含 S5，须显式 --stages 请求）。
 
 用法：
     python scripts/gui_smoke.py --exe target/debug/JchTools.exe --data <已生成的测试数据目录>
@@ -30,7 +32,7 @@ import time
 import zipfile
 from collections import Counter
 from pathlib import Path
-from typing import cast
+from typing import TYPE_CHECKING, cast
 
 import comtypes
 import pywintypes
@@ -38,6 +40,9 @@ import win32con
 import win32gui
 from pywinauto import Application, controls, findbestmatch, findwindows, timings
 from pywinauto.application import ProcessNotFoundError, WindowSpecification
+
+if TYPE_CHECKING:
+    from pywinauto.base_wrapper import BaseWrapper
 
 TIMEOUT = 60
 # 分析/执行完成等待用更长上限：真实数据、冷启动与杀软扫描都会让真实耗时远离秒级。
@@ -47,6 +52,13 @@ COMPLETION_TIMEOUT = 240
 EDIT_ROW_TOLERANCE_PX = 20
 DEFAULT_EXE = "target/debug/JchTools.exe"
 DEFAULT_DATA = ".tmp/gui-smoke/data"
+# 冒烟阶段清单：S1-S4 无需转 Markdown 资产；S5 需要（默认序列不含 S5，须显式 --stages 请求）。
+SUPPORTED_STAGES = ("S1", "S2", "S3", "S4", "S5")
+DEFAULT_STAGES = "S1,S2,S3,S4"
+CONVERT_BUSY_TIMEOUT = 60  # 点击「开始转换」后等待「停止任务」出现的上限（秒）
+CONVERT_STOP_TIMEOUT = 300  # 停止请求后等待「开始转换」恢复可用的上限（秒）
+# 转 Markdown 页「选择目录…」应有行数（Xberg 运行目录 / 输入 / 输出）。
+CONVERT_DIR_ROWS = 3
 EXTRACT_ACK = "我已确认：成功原包及分卷永久删除（不可恢复）"
 ORGANIZE_ACK = "我已确认目录、规则及可能的永久删除行为（不可恢复）"
 
@@ -84,11 +96,15 @@ class _CliArgs(argparse.Namespace):
 
     exe: str
     data: str
+    stages: str
+    list_stages: bool
 
     def __init__(self) -> None:
         super().__init__()
         self.exe = DEFAULT_EXE
         self.data = DEFAULT_DATA
+        self.stages = DEFAULT_STAGES
+        self.list_stages = False
 
 
 def wait_window(pid: int, timeout: int = TIMEOUT) -> tuple[Application, WindowSpecification]:
@@ -581,11 +597,117 @@ def s4_full_extract(exe: str, data: str) -> None:
     print("S4 PASS：进程已退出")
 
 
+def goto_converter(window: WindowSpecification) -> None:
+    click(window, find_button(window, "转 Markdown"))
+
+
+def converter_directory_rows(window: WindowSpecification) -> list[BaseWrapper]:
+    """转 Markdown 页自上而下三行「选择目录…」按钮：Xberg 运行目录 / 输入 / 输出."""
+    buttons = [b for b in window.descendants(control_type="Button") if (b.window_text() or "") == "选择目录…"]
+    buttons.sort(key=lambda b: b.rectangle().top)
+    if len(buttons) < CONVERT_DIR_ROWS:
+        msg = f"转 Markdown 页「选择目录…」按钮不足三行（实得 {len(buttons)}）"
+        raise RuntimeError(msg)
+    return buttons
+
+
+def set_converter_dirs(window: WindowSpecification, input_dir: str, output_dir: str) -> None:
+    rows = converter_directory_rows(window)
+    for button, value in ((rows[1], input_dir), (rows[2], output_dir)):
+        top = button.rectangle().top
+        candidates = [
+            edit
+            for edit in window.descendants(control_type="Edit")
+            if abs(edit.rectangle().top - top) < EDIT_ROW_TOLERANCE_PX
+        ]
+        if not candidates:
+            msg = "未找到与「选择目录…」同排的目录输入框"
+            raise RuntimeError(msg)
+        min(candidates, key=lambda e: e.rectangle().left).set_edit_text(value)
+
+
+def s5_markdown_basic_chain(exe: str) -> None:
+    """S5 转 Markdown 基本链路：启动→选输入→开始→停止→关闭.
+
+    未配置/未就绪时「开始转换」保持禁用，wait 超时即失败——不得把「未配置也通过」
+    报成基本链路通过。停止按 T-23（当前文件结束后生效、结果保留）；产物内容断言归
+    scripts/markdown_acceptance.py，本冒烟只断言链路行为。
+    """
+    proc = subprocess.Popen([exe])
+    window: WindowSpecification | None = None
+    scratch = Path(tempfile.mkdtemp(prefix="jchtools-gui-smoke-s5-"))
+    (scratch / "input").mkdir()
+    (scratch / "output").mkdir()
+    try:
+        _, window = wait_window(proc.pid)
+        goto_converter(window)
+        set_converter_dirs(window, str(scratch / "input"), str(scratch / "output"))
+        start = find_button(window, "开始转换")
+        _ = start.wait("visible enabled", timeout=COMPLETION_TIMEOUT)
+        click(window, start)
+        _ = find_button(window, "停止任务").wait("visible enabled", timeout=CONVERT_BUSY_TIMEOUT)
+        click(window, find_button(window, "停止任务"))
+        _ = find_button(window, "开始转换").wait("visible enabled", timeout=CONVERT_STOP_TIMEOUT)
+        print("S5 PASS：开始→停止链路完成（停止在当前文件后生效，界面回到可开始状态）")
+    finally:
+        if window is not None:
+            with contextlib.suppress(*TRANSIENT_GUI_ERRORS):
+                close_app(window)
+        killed, code = _wait_exit_or_kill(proc, window=window)
+        shutil.rmtree(scratch, ignore_errors=True)
+    assert_clean_exit("S5", killed=killed, code=code)
+    print("S5 PASS：进程已退出")
+
+
+def parse_stages(stages_arg: str) -> list[str]:
+    """解析并校验 --stages：逗号分隔、大小写不敏感、未知阶段立即失败."""
+    stages = [token.strip().upper() for token in stages_arg.split(",") if token.strip()]
+    unknown = [stage for stage in stages if stage not in SUPPORTED_STAGES]
+    if unknown:
+        msg = f"未知阶段：{unknown}（可选：{list(SUPPORTED_STAGES)}）"
+        raise RuntimeError(msg)
+    return stages
+
+
+def run_dataset_stages(exe: str, data: Path, stages: list[str]) -> None:
+    """S4/S2/S3 数据集阶段：每阶段前从旁路副本恢复，保证“干净语料上的完整链路”.
+
+    H-06/附录 E：所选根的任一祖先直接含 .git 时两工具拒绝整次处理。仓库根本身
+    带 .git，冒烟副本若继续放在仓库 .tmp/ 下会整次被拒（S4 确认框不再出现）。
+    改放系统临时目录（AGENTS §2 允许的 tempfile 例外；语料源目录不受影响）。
+    """
+    scratch = Path(tempfile.mkdtemp(prefix="jchtools-gui-smoke-"))
+    try:
+        fresh = scratch / "data"
+        if "S4" in stages:
+            _ = shutil.copytree(data, fresh)
+            s4_full_extract(str(exe), str(fresh))
+            shutil.rmtree(fresh, ignore_errors=True)
+        if "S2" in stages:
+            _ = shutil.copytree(data, fresh)
+            s2_analyze_only(str(exe), str(fresh))
+            shutil.rmtree(fresh, ignore_errors=True)
+        if "S3" in stages:
+            _ = shutil.copytree(data, fresh)
+            s3_full_organize(str(exe), str(fresh))
+    finally:
+        shutil.rmtree(scratch, ignore_errors=True)
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description="JchTools GUI 冒烟测试")
     _ = parser.add_argument("--exe", default=DEFAULT_EXE)
     _ = parser.add_argument("--data", default=DEFAULT_DATA)
+    _ = parser.add_argument(
+        "--stages", default=DEFAULT_STAGES, help=f"逗号分隔阶段清单（可选：{','.join(SUPPORTED_STAGES)}）"
+    )
+    _ = parser.add_argument("--list-stages", action="store_true", help="逐行打印支持的阶段号后退出")
     args = parser.parse_args(namespace=_CliArgs())
+    if args.list_stages:
+        for stage in SUPPORTED_STAGES:
+            print(stage)
+        return 0
+    stages = parse_stages(args.stages)
     exe = Path(args.exe).resolve()
     data = Path(args.data).resolve()
     if not exe.is_file():
@@ -610,25 +732,11 @@ def main() -> int:
         msg = f"拒绝在盘符根目录执行整理冒烟：{data}"
         raise RuntimeError(msg)
 
-    s1_launch_and_exit(str(exe))
-    # S4 解压与 S3 整理都会真实改写语料；每个阶段前都从旁路副本恢复，
-    # 保证“干净语料上的完整链路”（顺序：S4 解压 → S2 只分析 → S3 整理）。
-    # H-06/附录 E：所选根的任一祖先直接含 .git 时两工具拒绝整次处理。仓库根本身
-    # 带 .git，冒烟副本若继续放在仓库 .tmp/ 下会整次被拒（S4 确认框不再出现）。
-    # 改放系统临时目录（AGENTS §2 允许的 tempfile 例外；语料源目录不受影响）。
-    scratch = Path(tempfile.mkdtemp(prefix="jchtools-gui-smoke-"))
-    try:
-        fresh = scratch / "data"
-        _ = shutil.copytree(data, fresh)
-        s4_full_extract(str(exe), str(fresh))
-        shutil.rmtree(fresh, ignore_errors=True)
-        _ = shutil.copytree(data, fresh)
-        s2_analyze_only(str(exe), str(fresh))
-        shutil.rmtree(fresh, ignore_errors=True)
-        _ = shutil.copytree(data, fresh)
-        s3_full_organize(str(exe), str(fresh))
-    finally:
-        shutil.rmtree(scratch, ignore_errors=True)
+    if "S1" in stages:
+        s1_launch_and_exit(str(exe))
+    run_dataset_stages(str(exe), data, stages)
+    if "S5" in stages:
+        s5_markdown_basic_chain(str(exe))
     return 0
 
 

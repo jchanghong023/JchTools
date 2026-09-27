@@ -11,6 +11,9 @@
     -WithGuiSmoke 追加 OS 级 UIA 冒烟 S1-S4（需要 -GuiData 指向 make_tmp.py testdata
                   生成的数据集与 cargo build 产物（尊重 CARGO_TARGET_DIR，未设置时为 target\debug）；需要 pip install pywinauto）
     -WithPackage  追加发布打包自检（package-windows.ps1，需要引擎与 MSVC 工具链）
+    -WithMarkdownAcceptance 追加转 Markdown 验收承接（scripts/markdown_acceptance.py，
+                  F26 / ALL2MARKDOWN 附录 A；退出码 0=PASS、2=全部条目 NOT RUN（缺资产/
+                  被测物，如实呈现）、其他=失败。-MarkdownArgs 透传驱动器参数）
   未执行的阶段在汇总里显式打印 NOT RUN；不得把 NOT RUN 报告成通过。
   所有日志写在 .tmp\acceptance\ 下，任何已执行阶段失败即以非零码终止。
 
@@ -22,7 +25,9 @@ param(
     [switch]$WithEngine,
     [switch]$WithGuiSmoke,
     [switch]$WithPackage,
-    [string]$GuiData
+    [string]$GuiData,
+    [switch]$WithMarkdownAcceptance,
+    [string[]]$MarkdownArgs = @()
 )
 $ErrorActionPreference = 'Stop'
 Set-StrictMode -Version Latest
@@ -122,11 +127,36 @@ if ($WithGuiSmoke) {
     $null = Invoke-Logged -Name 'gui-smoke' -File $python -Arguments @('scripts/gui_smoke.py','--exe',$exe,'--data',$GuiData)
 } else {$script:Results.Add('NOT RUN  gui-smoke S1-S4（加 -WithGuiSmoke -GuiData <目录>）')}
 
+# 5.5) 可选媒体 worker 测试（workspace 成员、独立清单；F23——可选分发不等于可选验证）。
+$null = Invoke-Logged -Name 'media-worker-tests' -File 'cargo' `
+    -Arguments @('test','--manifest-path',(Join-Path $root 'optional/markdown-media-worker/Cargo.toml'),'--all-targets')
+
 # 6) 发布打包自检（可选）。
 if ($WithPackage) {
     $null = Invoke-Logged -Name 'package' -File 'powershell' `
         -Arguments @('-NoProfile','-File',(Join-Path $PSScriptRoot 'package-windows.ps1'))
 } else {$script:Results.Add('NOT RUN  package（加 -WithPackage）')}
+
+# 7) 转 Markdown 验收承接（可选；F26 / ALL2MARKDOWN 附录 A）。
+if ($WithMarkdownAcceptance) {
+    $mdArgs = @('scripts/markdown_acceptance.py') + $MarkdownArgs
+    Write-Host '==> markdown-acceptance'
+    $previous = $ErrorActionPreference
+    $ErrorActionPreference = 'Continue'
+    try {$mdOutput = & $python @mdArgs 2>&1} finally {$ErrorActionPreference = $previous}
+    $mdCode = $LASTEXITCODE
+    $mdLog = Join-Path $script:LogDir 'markdown-acceptance.log'
+    $mdOutput | ForEach-Object {$_.ToString()} | Set-Content -LiteralPath $mdLog -Encoding UTF8
+    if ($mdCode -eq 0) {
+        $script:Results.Add('PASS  markdown-acceptance')
+    } elseif ($mdCode -eq 2) {
+        # 2 = 全部条目 NOT RUN（缺真实资产/被测物）：如实呈现，不当作通过，也不阻塞其余阶段。
+        $script:Results.Add('NOT RUN  markdown-acceptance（全部条目缺资产/被测物；经 -MarkdownArgs 提供后重跑）')
+    } else {
+        $mdOutput | Select-Object -Last 12 | ForEach-Object {$_.ToString()} | Write-Host
+        throw "markdown-acceptance 失败（退出码 $mdCode），完整日志：$mdLog"
+    }
+} else {$script:Results.Add('NOT RUN  markdown-acceptance（加 -WithMarkdownAcceptance [-MarkdownArgs <透传参数>]）')}
 
 Write-Host ''
 Write-Host '==== 验收汇总 ===='
