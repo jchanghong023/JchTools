@@ -1,9 +1,10 @@
 //! 截图 OCR（O 分区）的可选资产初始化与就绪检查。
 //!
-//! 资产清单（resources/snap-ocr-assets.json）编译进主程序：det/rec ONNX、派生字典、
-//! 结果窗专用字体与推理运行库均为固定版本、固定来源、固定 SHA-256（O-05/O-09）；
-//! 只在用户于图形界面主动初始化时联网下载（O-06/O-10），安装到用户状态目录的
-//! snap-ocr/ 子树（models/、fonts/、worker/），主程序包不携带这些重资产。
+//! 资产清单（resources/snap-ocr-assets.json）编译进主程序：结果窗专用字体为
+//! 固定版本、固定来源、固定 SHA-256（O-05/O-09）；识别用的模型、推理运行库与
+//! `xberg.exe` 由固定版本 Xberg 推理组件承接，安装在状态目录的
+//! snap-ocr/xberg-inference/<tag>/ 子树（摘要级清单条目待发布 tag 落定后接入）。
+//! 只在用户于图形界面主动初始化时联网下载（O-06/O-10），主程序包不携带这些重资产。
 //! 初始化遵循 staging → 校验 → 原子落位：取消或失败删除本轮 staging，不覆盖
 //! 已经校验通过的完整资产；重试时已验证资产直接复用，不重复下载。
 
@@ -157,6 +158,8 @@ pub fn pipe_name() -> String {
 
 /// 只读检查所有已安装资产：不联网、不创建目录、不修改文件（O-09 加载前离线验证）。
 /// worker 条目仍为构建期占位时按未就绪报告，并说明原因（不冒称就绪，O-11）。
+/// Xberg 推理组件按「在位校验」检查（存在性）；其摘要清单接入前缺失时如实
+/// 报告「推理组件未配置」，不冒称就绪。
 pub fn readiness() -> Result<(), String> {
     let manifest = load_manifest()?;
     let root = asset_root();
@@ -177,6 +180,85 @@ pub fn readiness() -> Result<(), String> {
     }
     if worker_ready(worker, &root).is_err() {
         return Err("截图 OCR 工作进程未安装或校验失败".to_string());
+    }
+    xberg_inference_ready(&root).map(|_| ())
+}
+
+/// Xberg 推理组件安装根：`<资产根>/xberg-inference/`（每个发布版本一个 tag 子目录）。
+#[must_use]
+pub fn xberg_inference_root() -> PathBuf {
+    asset_root().join("xberg-inference")
+}
+
+/// 组件目录解析：开发期（仅 debug 构建）可用 `JCHTOOLS_XBERG_INFERENCE_DIR`
+/// 覆盖到本地组件树；否则取安装根下唯一的 tag 子目录。
+fn resolve_xberg_component(root: &Path) -> Result<PathBuf, String> {
+    if cfg!(debug_assertions) {
+        if let Some(path) = std::env::var_os("JCHTOOLS_XBERG_INFERENCE_DIR")
+            .map(PathBuf::from)
+            .filter(|p| p.is_absolute())
+        {
+            return Ok(path);
+        }
+    }
+    let base = root.join("xberg-inference");
+    let entries = fs::read_dir(&base).map_err(|_| xberg_not_configured())?;
+    let mut versions = Vec::new();
+    for entry in entries.flatten() {
+        if entry.path().is_dir() {
+            versions.push(entry.path());
+        }
+    }
+    match versions.len() {
+        1 => Ok(versions.remove(0)),
+        0 => Err(xberg_not_configured()),
+        _ => Err("推理组件目录存在多个版本，无法确定使用哪一个；请只保留一个版本目录".into()),
+    }
+}
+
+fn xberg_not_configured() -> String {
+    "推理组件未配置：Xberg 推理组件（xberg.exe、截图模型与 onnxruntime）尚未安装；\
+     其下载清单条目待发布版本落定后接入，开发期可设置 JCHTOOLS_XBERG_INFERENCE_DIR \
+     指向本地组件目录"
+        .into()
+}
+
+/// Xberg 推理组件的在位校验（存在性；摘要校验待清单接入后补齐，O-09 的
+/// 完整校验由后续清单条目承接）：
+/// `xberg.exe` + `models/snapshot-ocr/{det.onnx,rec.onnx,dict/dict.txt}` + `onnxruntime.dll`。
+pub fn xberg_inference_ready(root: &Path) -> Result<PathBuf, String> {
+    let component = resolve_xberg_component(root)?;
+    xberg_layout_ready(&component).map(|()| component)
+}
+
+/// 单个组件目录的在位校验（存在性，不做摘要）。
+fn xberg_layout_ready(component: &Path) -> Result<(), String> {
+    let required = [
+        component.join("xberg.exe"),
+        component
+            .join("models")
+            .join("snapshot-ocr")
+            .join("det.onnx"),
+        component
+            .join("models")
+            .join("snapshot-ocr")
+            .join("rec.onnx"),
+        component
+            .join("models")
+            .join("snapshot-ocr")
+            .join("dict")
+            .join("dict.txt"),
+        component.join("onnxruntime.dll"),
+    ];
+    for path in &required {
+        if !path.is_file() {
+            let relative = path.strip_prefix(component).unwrap_or(path);
+            return Err(format!(
+                "推理组件不完整：缺少 {}（组件目录 {}）",
+                relative.display(),
+                component.display()
+            ));
+        }
     }
     Ok(())
 }
@@ -772,5 +854,47 @@ fn ensure_not_cancelled(cancel: &AtomicBool) -> Result<(), String> {
         Err("用户已取消初始化".to_string())
     } else {
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::fs;
+
+    // 覆盖 O-11/O-13：推理组件的在位校验——缺失、不完整与齐备分别得到明确的
+    // 结论，不冒称就绪；存在性检查不要求摘要（摘要校验随清单条目接入）。
+    #[test]
+    fn xberg_component_layout_reports_missing_incomplete_and_ready() {
+        let temp = tempfile::tempdir().expect("临时目录应可创建");
+        let component = temp.path().join("v2026.9.27-test");
+
+        // 什么都没有：未配置。
+        let error = super::xberg_layout_ready(&component).expect_err("空目录应报不完整");
+        assert!(error.contains("推理组件不完整"), "unexpected: {error}");
+
+        // 只放可执行文件：仍缺模型与运行库，且错误点名缺失项。
+        fs::create_dir_all(&component).expect("组件目录应可创建");
+        fs::write(component.join("xberg.exe"), b"stub").expect("stub 写入");
+        let error = super::xberg_layout_ready(&component).expect_err("缺模型应报不完整");
+        assert!(
+            error.contains("det.onnx"),
+            "错误应点名缺失的模型文件：{error}"
+        );
+
+        // 三件模型齐了但缺 onnxruntime.dll：仍不就绪。
+        let models = component.join("models").join("snapshot-ocr");
+        fs::create_dir_all(models.join("dict")).expect("模型目录应可创建");
+        fs::write(models.join("det.onnx"), b"det").expect("stub 写入");
+        fs::write(models.join("rec.onnx"), b"rec").expect("stub 写入");
+        fs::write(models.join("dict").join("dict.txt"), b"dict").expect("stub 写入");
+        let error = super::xberg_layout_ready(&component).expect_err("缺运行库应报不完整");
+        assert!(
+            error.contains("onnxruntime.dll"),
+            "错误应点名缺失的运行库：{error}"
+        );
+
+        // 全部在位：就绪。
+        fs::write(component.join("onnxruntime.dll"), b"ort").expect("stub 写入");
+        assert!(super::xberg_layout_ready(&component).is_ok());
     }
 }

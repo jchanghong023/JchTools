@@ -1,50 +1,8 @@
 {
   "schema_version": 1,
   "component": "snap-ocr-assets",
-  "note": "截图 OCR（O 分区）可选资产清单。det/rec ONNX 为 TextSnap 固定转换产物（paddle2onnx 2.1.0 / PaddlePaddle 3.0.0.dev20250426 / opset 11），源权重来自 PaddleX 官方模型库；dict.txt 由官方 rec tar 内 inference.yml（sha256 ab0786…，150579 字节）的有序 18708 字字典派生（UTF-8 / LF / 每行一字）。全部摘要均已在本地对字节核验。worker 可执行文件在打包阶段补充条目。",
+  "note": "截图 OCR（O 分区）可选资产清单。det/rec 模型、字典与推理运行库不再由本清单下载：识别改由固定版本 Xberg 推理组件（xberg.exe + models/snapshot-ocr + onnxruntime.dll，模型字节仍为 O-07 附录 A 的 PP-OCRv6 small FP32 ONNX）承接，随 Xberg 发布物交付并在组件树内自带许可材料；本清单保留结果窗专用字体（O-21）。全部摘要均已在本地对字节核验。worker 可执行文件在打包阶段补充条目。Xberg 推理组件的下载清单条目待发布 tag 落定后另行接入。",
   "assets": [
-    {
-      "id": "snap-det-onnx",
-      "url": "https://github.com/jchanghong023/JchTools/releases/download/optional-components-v0.1.0/snap-det.onnx",
-      "archive_type": "file",
-      "install_path": "models/PP-OCRv6_small_det/inference.onnx",
-      "size_bytes": 9891707,
-      "sha256": "3914f972d833af87d23bb2338bd09238f978a48f3c4dbb8e1a4ee26a93869940",
-      "members": [],
-      "license": {
-        "component": "PP-OCRv6 small det ONNX（TextSnap paddle2onnx 固定转换产物）",
-        "license": "Apache-2.0",
-        "source": "https://paddle-model-ecology.bj.bcebos.com/paddlex/official_inference_model/paddle3.0.0/PP-OCRv6_small_det_infer.tar"
-      }
-    },
-    {
-      "id": "snap-rec-onnx",
-      "url": "https://github.com/jchanghong023/JchTools/releases/download/optional-components-v0.1.0/snap-rec.onnx",
-      "archive_type": "file",
-      "install_path": "models/PP-OCRv6_small_rec/inference.onnx",
-      "size_bytes": 21148338,
-      "sha256": "3e3def686ac9a1676b59bc9749ad896263d8f68b53f352060774de359a2e23ed",
-      "members": [],
-      "license": {
-        "component": "PP-OCRv6 small rec ONNX（TextSnap paddle2onnx 固定转换产物）",
-        "license": "Apache-2.0",
-        "source": "https://paddle-model-ecology.bj.bcebos.com/paddlex/official_inference_model/paddle3.0.0/PP-OCRv6_small_rec_infer.tar"
-      }
-    },
-    {
-      "id": "snap-rec-dict",
-      "url": "https://github.com/jchanghong023/JchTools/releases/download/optional-components-v0.1.0/snap-dict.txt",
-      "archive_type": "file",
-      "install_path": "models/PP-OCRv6_small_rec/dict.txt",
-      "size_bytes": 74947,
-      "sha256": "b5f2bfe2bdd9448429e3e82b51c789775d9b42f2403d082b00662eb77e401c5d",
-      "members": [],
-      "license": {
-        "component": "PP-OCRv6 small rec 识别字典（自官方 inference.yml 派生，18708 字有序）",
-        "license": "Apache-2.0",
-        "source": "https://paddle-model-ecology.bj.bcebos.com/paddlex/official_inference_model/paddle3.0.0/PP-OCRv6_small_rec_infer.tar"
-      }
-    },
     {
       "id": "noto-sans-mono-cjk-sc",
       "url": "https://github.com/notofonts/noto-cjk/releases/download/Sans2.004/13_NotoSansMonoCJKsc.zip",
@@ -64,54 +22,6 @@
         "component": "Noto Sans Mono CJK SC Regular",
         "license": "OFL-1.1",
         "source": "https://github.com/notofonts/noto-cjk/releases/tag/Sans2.004"
-      }
-    },
-    {
-      "id": "onnxruntime-win-x64-1.28.0",
-      "url": "https://github.com/microsoft/onnxruntime/releases/download/v1.28.0/onnxruntime-win-x64-1.28.0.zip",
-      "archive_type": "zip",
-      "install_path": null,
-      "size_bytes": 78796801,
-      "sha256": "abef733dacbe2f571547a7150b479b5cb9cc0df22f96c24983a42cadb1b4f8bc",
-      "members": [
-        {
-          "path": "onnxruntime-win-x64-1.28.0/lib/onnxruntime.dll",
-          "install_path": "worker/v0.1.1/onnxruntime.dll",
-          "size_bytes": 15809848,
-          "sha256": "18370c375f07357fa5874344a9d9ac17e6b6fe1eb18b1dd209d79483b4470257"
-        }
-      ],
-      "license": {
-        "component": "ONNX Runtime 1.28.0 win-x64 shared library",
-        "license": "MIT",
-        "source": "https://github.com/microsoft/onnxruntime/releases/tag/v1.28.0"
-      }
-    },
-    {
-      "id": "onnxruntime-license",
-      "url": "https://raw.githubusercontent.com/microsoft/onnxruntime/v1.28.0/LICENSE",
-      "archive_type": "file",
-      "install_path": "worker/LICENSE-onnxruntime.txt",
-      "size_bytes": 1073,
-      "sha256": "2f07c72751aed99790b8a4869cf2311df85a860b22ded05fa22803587a48922c",
-      "members": [],
-      "license": {
-        "component": "ONNX Runtime 1.28.0 license text",
-        "license": "MIT",
-        "source": "https://github.com/microsoft/onnxruntime/blob/v1.28.0/LICENSE"
-      }
-    },
-    {
-      "id": "paddleocr-license",
-      "url": "https://raw.githubusercontent.com/PaddlePaddle/PaddleOCR/v3.7.0/LICENSE",
-      "archive_type": "file",
-      "install_path": "worker/LICENSE-paddleocr.txt",
-      "size_bytes": 11376,
-      "sha256": "3840c5c0c61c294264d2dd77b8777be6ddd90121ef4e0e64abcd22edea581d6e",
-      "license": {
-        "component": "PaddleOCR 推理模型许可文本",
-        "license": "Apache-2.0",
-        "source": "https://github.com/PaddlePaddle/PaddleOCR/blob/v3.7.0/LICENSE"
       }
     },
     {

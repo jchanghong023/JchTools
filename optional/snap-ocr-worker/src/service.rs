@@ -1,4 +1,5 @@
 //! 当前用户会话后台 OCR 服务：管道/托盘/热键独立于 JchTools 主窗口。
+//! 识别由固定版本 Xberg 发布物承接（`xberg worker` 常驻子进程，XB-01/XB-05）；
 //! 仅资产与显式设置落盘；截图、裁剪与识别结果只在内存与剪贴板。
 
 #![cfg(windows)]
@@ -7,24 +8,56 @@ mod protocol;
 mod tray;
 
 use std::fmt::Write as _;
-use std::fs::{self, File};
-use std::io::Read;
+use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{mpsc, Arc};
 use std::time::{Duration, Instant};
 
 use serde_json::{json, Value};
-use sha2::{Digest, Sha256};
 use slint::ComponentHandle;
-use snap_ocr_core::layout::build_layout;
-use snap_ocr_core::pipeline::{
-    assemble_spans, detect_candidates, recognize_records, OcrBackend, PipelineError,
-};
 
-use crate::image_ops::{self, BgrImage};
-use crate::pipeline_backend::{build_record, WorkerOcrBackend};
+use crate::capture_win::BgrImage;
 use crate::result_window::{ProgressWindow, ResultWindowHandle, SettingsWindow};
+use crate::xberg_worker::{ClientError, SnapshotState, XbergWorkerClient};
+
+/// 推理子进程优雅关闭的等待上限；超时强杀兜底（O-16 进程级兜底）。
+const XBERG_SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(10);
+
+/// 单次识别错误（O-30 分类：取消 / 推理失败；消息不含图像内容）。
+#[derive(Debug, Clone)]
+pub(crate) enum OcrError {
+    /// 用户取消：结果窗即刻恢复，在途识别在后台完成后被丢弃。
+    Cancelled,
+    /// 推理失败（Xberg 失败响应、子进程退出或通信失败）。
+    Backend(String),
+}
+
+impl std::fmt::Display for OcrError {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Cancelled => write!(formatter, "用户取消识别"),
+            Self::Backend(message) => write!(formatter, "{message}"),
+        }
+    }
+}
+
+/// 加载失败分类（O-13：未初始化与错误分别有对应的界面入口）。
+#[derive(Debug, Clone)]
+pub(crate) enum LoadFailure {
+    /// 推理组件未安装或未配置：需要主界面初始化（或开发期环境变量覆盖）。
+    NotConfigured(String),
+    /// 组件在位但启动/预热失败：保留「重新加载模型」重试入口，不联网。
+    Failed(String),
+}
+
+impl LoadFailure {
+    fn message(&self) -> &str {
+        match self {
+            Self::NotConfigured(message) | Self::Failed(message) => message,
+        }
+    }
+}
 
 pub(crate) enum Command {
     Pipe(Value, mpsc::SyncSender<Value>),
@@ -32,8 +65,8 @@ pub(crate) enum Command {
     Image(BgrImage, (i32, i32, i32, i32)),
     CancelledSelection,
     CaptureFailed(String),
-    ModelLoaded(Result<(), String>),
-    OcrFinished(Result<Option<String>, PipelineError>, (i32, i32, i32, i32)),
+    ModelLoaded(Result<(), LoadFailure>),
+    OcrFinished(Result<Option<String>, OcrError>, (i32, i32, i32, i32)),
     WorkerStopped,
     OpenSettings,
     InitializeAssets,
@@ -51,7 +84,7 @@ enum Work {
     Stop,
 }
 
-#[derive(Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum ModelState {
     Uninitialized,
     Loading,
@@ -203,114 +236,121 @@ fn root() -> Result<PathBuf, String> {
         .ok_or_else(|| "截图服务资产根目录无效".to_string())
 }
 
-fn verified(root: &Path, relative: &str, size: u64, expected: &str) -> Result<PathBuf, String> {
-    let path = root.join(relative);
-    let mut file = File::open(&path).map_err(|_| format!("资产 {relative} 未安装"))?;
-    if file
-        .metadata()
-        .map_err(|_| "资产元数据不可读".to_string())?
-        .len()
-        != size
-    {
-        return Err(format!("资产 {relative} 尺寸不匹配"));
-    }
-    let mut digest = Sha256::new();
-    let mut block = vec![0u8; 64 * 1024];
-    loop {
-        let count = file
-            .read(&mut block)
-            .map_err(|_| "资产读取失败".to_string())?;
-        if count == 0 {
-            break;
+/// Xberg 推理组件的安装位置：`<资产根>/xberg-inference/<tag>/`。tag 由后续
+/// 发布清单锁定；清单接入前按「唯一子目录」解析。开发期（仅 debug 构建）可用
+/// `JCHTOOLS_XBERG_INFERENCE_DIR` 覆盖到本地组件树，与 `root()` 的覆盖同口径。
+fn xberg_component_dir(root: &Path) -> Result<PathBuf, LoadFailure> {
+    const NOT_CONFIGURED: &str = "推理组件未配置：请在主界面初始化截图 OCR，或（开发期）设置 \
+                                  JCHTOOLS_XBERG_INFERENCE_DIR 指向 Xberg 组件目录";
+    if cfg!(debug_assertions) {
+        if let Some(path) = std::env::var_os("JCHTOOLS_XBERG_INFERENCE_DIR")
+            .map(PathBuf::from)
+            .filter(|p| p.is_absolute())
+        {
+            return Ok(path);
         }
-        digest.update(&block[..count]);
     }
-    if format!("{:x}", digest.finalize()) != expected {
-        return Err(format!("资产 {relative} 校验失败"));
+    let base = root.join("xberg-inference");
+    let Ok(entries) = fs::read_dir(&base) else {
+        return Err(LoadFailure::NotConfigured(NOT_CONFIGURED.to_owned()));
+    };
+    let mut versions = Vec::new();
+    for entry in entries.flatten() {
+        if entry.path().is_dir() {
+            versions.push(entry.path());
+        }
     }
-    Ok(path)
+    match versions.len() {
+        1 => Ok(versions.remove(0)),
+        0 => Err(LoadFailure::NotConfigured(NOT_CONFIGURED.to_owned())),
+        _ => Err(LoadFailure::Failed(
+            "推理组件目录存在多个版本，无法确定使用哪一个；请只保留一个版本目录".into(),
+        )),
+    }
 }
 
-fn load_backend(root: &Path) -> Result<WorkerOcrBackend, String> {
-    let det = verified(
-        root,
-        "models/PP-OCRv6_small_det/inference.onnx",
-        9_891_707,
-        "3914f972d833af87d23bb2338bd09238f978a48f3c4dbb8e1a4ee26a93869940",
-    )?;
-    let rec = verified(
-        root,
-        "models/PP-OCRv6_small_rec/inference.onnx",
-        21_148_338,
-        "3e3def686ac9a1676b59bc9749ad896263d8f68b53f352060774de359a2e23ed",
-    )?;
-    let dict = verified(
-        root,
-        "models/PP-OCRv6_small_rec/dict.txt",
-        74947,
-        "b5f2bfe2bdd9448429e3e82b51c789775d9b42f2403d082b00662eb77e401c5d",
-    )?;
-    verified(
-        root,
-        "fonts/NotoSansMonoCJKsc-Regular.otf",
-        16_393_784,
-        "ec04cc376b34887cedbdf84074e2e226ed2761eeabdcb9173fc1dd7bfd153ef7",
-    )?;
-    let dll = verified(
-        root,
-        "worker/v0.1.1/onnxruntime.dll",
-        15_809_848,
-        "18370c375f07357fa5874344a9d9ac17e6b6fe1eb18b1dd209d79483b4470257",
-    )?;
-    std::env::set_var("ORT_DYLIB_PATH", dll);
-    let backend = WorkerOcrBackend::load_for_service(&det, &rec, &dict, 10)
-        .map_err(|_| "推理模型加载失败".to_string())?;
-    // 验证两条模型会话已能执行一次推理，而不是仅检查 ONNX 文件存在。
-    let white = BgrImage::from_vec(64, 64, vec![255u8; 64 * 64 * 3])
-        .map_err(|_| "预热图像无效".to_string())?;
-    backend
-        .detect(&white)
-        .map_err(|_| "检测模型预热失败".to_string())?;
-    let rec_image = BgrImage::from_vec(64, 32, vec![255u8; 64 * 32 * 3])
-        .map_err(|_| "预热图像无效".to_string())?;
-    backend
-        .recognize(&[rec_image])
-        .map_err(|_| "识别模型预热失败".to_string())?;
-    Ok(backend)
+/// 组件在位校验（存在性；摘要校验待发布清单接入后补齐，O-09）：
+/// `xberg.exe` + `models/snapshot-ocr` 三个模型文件 + `onnxruntime.dll`。
+fn verify_component(dir: &Path) -> Result<(), LoadFailure> {
+    let required = [
+        dir.join("xberg.exe"),
+        dir.join("models").join("snapshot-ocr").join("det.onnx"),
+        dir.join("models").join("snapshot-ocr").join("rec.onnx"),
+        dir.join("models")
+            .join("snapshot-ocr")
+            .join("dict")
+            .join("dict.txt"),
+        dir.join("onnxruntime.dll"),
+    ];
+    for path in &required {
+        if !path.is_file() {
+            return Err(LoadFailure::Failed(format!(
+                "推理组件不完整：缺少 {}",
+                path.strip_prefix(dir).unwrap_or(path).display()
+            )));
+        }
+    }
+    Ok(())
 }
 
+/// 启动 Xberg 推理子进程并完成预热（模型懒加载发生在首个识别请求，
+/// 预热图触发加载后 `snapshot_state` 才会是 ready，O-13）。
+fn start_inference(root: &Path) -> Result<XbergWorkerClient, LoadFailure> {
+    let font = root.join("fonts").join("NotoSansMonoCJKsc-Regular.otf");
+    if !font.is_file() {
+        return Err(LoadFailure::NotConfigured(
+            "结果窗等宽字体未安装：请在主界面初始化截图 OCR".into(),
+        ));
+    }
+    let component_dir = xberg_component_dir(root)?;
+    verify_component(&component_dir)?;
+    let mut client = XbergWorkerClient::spawn(&component_dir).map_err(LoadFailure::Failed)?;
+    warm_up(&mut client)?;
+    Ok(client)
+}
+
+/// 预热：向常驻子进程发一张 1×1 白图，触发 Xberg 侧模型懒加载，并确认通道
+/// 状态进入 ready（O-13 预热行为；无文字图片是成功响应）。
+fn warm_up(client: &mut XbergWorkerClient) -> Result<(), LoadFailure> {
+    let white = BgrImage::from_vec(1, 1, vec![255, 255, 255])
+        .map_err(|_| LoadFailure::Failed("预热图像无效".into()))?;
+    let png = white.png_bytes().map_err(LoadFailure::Failed)?;
+    let cancel = AtomicBool::new(false);
+    match client.recognize(&png, &cancel) {
+        Ok(_) => {}
+        Err(ClientError::Backend(message)) if message.contains("模型") => {
+            return Err(LoadFailure::Failed(format!("推理模型加载失败：{message}")));
+        }
+        Err(ClientError::Backend(message)) => {
+            return Err(LoadFailure::Failed(format!("推理组件预热失败：{message}")));
+        }
+        Err(error) => return Err(LoadFailure::Failed(error.to_string())),
+    }
+    match client.snapshot_state() {
+        Ok(SnapshotState::Ready) => Ok(()),
+        Ok(SnapshotState::Error(message)) => {
+            Err(LoadFailure::Failed(format!("推理模型加载失败：{message}")))
+        }
+        Ok(state) => Err(LoadFailure::Failed(format!(
+            "推理组件未进入就绪状态（{}）",
+            state.as_str()
+        ))),
+        Err(error) => Err(LoadFailure::Failed(error.to_string())),
+    }
+}
+
+/// 识别一张裁剪图：内存 PNG 编码后交给 Xberg 子进程，取回布局文本。
 fn recognize(
-    backend: &WorkerOcrBackend,
+    client: &mut XbergWorkerClient,
     image: &BgrImage,
     cancel: &AtomicBool,
-) -> Result<Option<String>, PipelineError> {
-    let width = u32::try_from(image.width())
-        .map_err(|_| PipelineError::Backend("图像宽度超出检测模型范围".into()))?;
-    let height = u32::try_from(image.height())
-        .map_err(|_| PipelineError::Backend("图像高度超出检测模型范围".into()))?;
-    let candidates = detect_candidates(backend, image, width, height, Some(cancel))?;
-    let mut records = Vec::with_capacity(candidates.len());
-    for candidate in candidates {
-        if cancel.load(Ordering::Acquire) {
-            return Err(PipelineError::Cancelled);
-        }
-        if let Ok(crop) = image_ops::warp_perspective_cubic_replicate(image, candidate.quad()) {
-            records.push(build_record(candidate, crop));
-        }
-    }
-    recognize_records(backend, &mut records, Some(cancel))?;
-    let spans = assemble_spans(&records, Some(cancel))?;
-    if spans.is_empty() {
-        return Ok(None);
-    }
-    let text = build_layout(&spans).text;
-    if cancel.load(Ordering::Acquire) {
-        return Err(PipelineError::Cancelled);
-    }
-    if text.trim().is_empty() {
-        Ok(None)
-    } else {
-        Ok(Some(text))
+) -> Result<Option<String>, OcrError> {
+    let png = image.png_bytes().map_err(OcrError::Backend)?;
+    match client.recognize(&png, cancel) {
+        Ok(Some(text)) if text.trim().is_empty() => Ok(None),
+        Ok(text) => Ok(text),
+        Err(ClientError::Cancelled) => Err(OcrError::Cancelled),
+        Err(error) => Err(OcrError::Backend(error.to_string())),
     }
 }
 
@@ -320,26 +360,30 @@ fn worker(
     events: &mpsc::Sender<Command>,
     cancel: &AtomicBool,
 ) {
-    let mut model = None;
+    let mut client: Option<XbergWorkerClient> = None;
     while let Ok(work) = receiver.recv() {
         match work {
             Work::Load => {
-                drop(model.take());
-                let outcome = load_backend(root);
+                // 重试入口（O-13）：丢弃旧子进程（Drop 关闭并回收），重新启动。
+                client.take();
+                let outcome = start_inference(root);
                 let status = outcome.as_ref().map(|_| ()).map_err(Clone::clone);
-                model = outcome.ok();
+                client = outcome.ok();
                 let _ = events.send(Command::ModelLoaded(status));
             }
             Work::Recognize(image, work) => {
-                let outcome = if let Some(model) = model.as_ref() {
+                let outcome = if let Some(model) = client.as_mut() {
                     recognize(model, &image, cancel)
                 } else {
-                    Err(PipelineError::Backend("模型未就绪".into()))
+                    Err(OcrError::Backend("模型未就绪".into()))
                 };
                 let _ = events.send(Command::OcrFinished(outcome, work));
             }
             Work::Stop => {
-                drop(model.take());
+                if let Some(model) = client.take() {
+                    // 关闭失败（含强杀失败）只意味着兜底已尽力；服务照常收尾。
+                    let _ = model.shutdown(XBERG_SHUTDOWN_TIMEOUT);
+                }
                 let _ = events.send(Command::WorkerStopped);
                 break;
             }
@@ -965,13 +1009,12 @@ impl Service {
                             }
                         }
                     }
-                    Err(reason) => {
-                        self.model = if reason.contains("未安装") {
-                            ModelState::Uninitialized
-                        } else {
-                            ModelState::Error
+                    Err(failure) => {
+                        self.model = match failure {
+                            LoadFailure::NotConfigured(_) => ModelState::Uninitialized,
+                            LoadFailure::Failed(_) => ModelState::Error,
                         };
-                        self.model_error = Some(reason);
+                        self.model_error = Some(failure.message().to_owned());
                     }
                 }
                 if self.model != ModelState::Ready && self.pending_image.take().is_some() {
@@ -1013,13 +1056,14 @@ impl Service {
                         self.restore_old();
                         self.tray.notice("选区内未识别到文字");
                     }
-                    Err(PipelineError::Cancelled) => {
+                    Err(OcrError::Cancelled) => {
+                        // 取消使结果窗立即恢复；在途识别在后台完成后被丢弃（O-19 细化）。
                         self.restore_old();
                         self.tray.notice("已取消识别");
                     }
-                    Err(_) => {
+                    Err(OcrError::Backend(reason)) => {
                         self.restore_old();
-                        self.tray.notice("OCR 推理失败，请重试截图");
+                        self.tray.notice(format!("OCR 识别失败：{reason}"));
                     }
                 }
             }
@@ -1054,7 +1098,7 @@ impl Service {
                     .exit_pending
                     .is_some_and(|at| at.elapsed() >= Duration::from_secs(10))
                 {
-                    // 只有用户显式选择强制退出才终止当前可能仍阻塞的 ONNX 调用。
+                    // 只有用户显式选择强制退出才终止当前可能仍阻塞的推理调用。
                     std::process::exit(0);
                 }
             }
@@ -1225,12 +1269,10 @@ pub fn run_service(autostart: bool) -> Result<(), String> {
 
 #[cfg(test)]
 mod tests {
-    use super::{tray, Command, ModelState, Service, Settings};
+    use super::{tray, Command, ModelState, OcrError, Service, Settings};
     use std::fs;
     use std::sync::atomic::AtomicBool;
     use std::sync::{mpsc, Arc};
-
-    use snap_ocr_core::pipeline::PipelineError;
 
     // 覆盖 O-13/O-20/O-30：单次推理错误只结束该任务，已预热的模型仍供下次截图。
     #[test]
@@ -1262,13 +1304,63 @@ mod tests {
             exit_stop_sent: false,
         };
         service.handle(Command::OcrFinished(
-            Err(PipelineError::Backend("一次性推理错误".into())),
+            Err(OcrError::Backend("一次性推理错误".into())),
             (0, 0, 20, 20),
         ));
-        assert!(service.model == ModelState::Ready);
+        assert_eq!(service.model, ModelState::Ready);
         assert!(service.model_error.is_none());
         assert!(!service.busy);
         assert_eq!(service.status()["model"], "ready");
+        Ok(())
+    }
+
+    // 覆盖 O-13：未配置与失败的加载结果分别映射到未初始化与错误状态，
+    // 两者都保留各自的界面入口（初始化 / 重试），不冒称就绪。
+    #[test]
+    fn load_failures_map_to_distinct_model_states() -> Result<(), Box<dyn std::error::Error>> {
+        let temp = tempfile::tempdir()?;
+        let (commands, _commands_rx) = mpsc::channel();
+        let (work, _work_rx) = mpsc::channel();
+        let mut service = Service {
+            root: temp.path().to_path_buf(),
+            commands,
+            self_weak: std::rc::Weak::new(),
+            settings: Settings {
+                hotkey: "Ctrl+Alt+O".into(),
+                main_exe: None,
+                warning: None,
+            },
+            tray: tray::TrayHandle::for_test(),
+            work,
+            cancel: Arc::new(AtomicBool::new(false)),
+            model: ModelState::Loading,
+            model_error: None,
+            pending_image: None,
+            busy: false,
+            result: None,
+            old_result_visible: false,
+            progress: None,
+            settings_window: None,
+            exit_pending: None,
+            exit_stop_sent: false,
+        };
+        service.handle(Command::ModelLoaded(Err(
+            super::LoadFailure::NotConfigured("推理组件未配置".into()),
+        )));
+        assert_eq!(service.model, ModelState::Uninitialized);
+        assert!(service
+            .model_error
+            .as_deref()
+            .is_some_and(|reason| reason.contains("推理组件未配置")));
+
+        // 重试入口把状态置回加载中（Work::Load 保留在通道里由真实线程消费）。
+        service.handle(Command::RetryModel);
+        assert_eq!(service.model, ModelState::Loading);
+        service.handle(Command::ModelLoaded(Err(super::LoadFailure::Failed(
+            "推理组件不完整：缺少 models/snapshot-ocr/rec.onnx".into(),
+        ))));
+        assert_eq!(service.model, ModelState::Error);
+        assert_eq!(service.status()["model"], "error");
         Ok(())
     }
 

@@ -513,167 +513,6 @@
       "body": "60b658f5b75b569f"
     },
     {
-      "file": "optional/snap-ocr-worker/src/det_paddlex_tests.rs",
-      "name": "diff_ops_bitwise",
-      "ignored": true,
-      "cfg": null,
-      "body": "595b9678b93cd212"
-    },
-    {
-      "file": "optional/snap-ocr-worker/src/det_paddlex_tests.rs",
-      "name": "oracle_det_two_cases_bitwise",
-      "ignored": true,
-      "cfg": null,
-      "body": "c0ae74270489f1cf"
-    },
-    {
-      "file": "optional/snap-ocr-worker/src/det_paddlex_tests.rs",
-      "name": "stage_boxes_matches_manifest",
-      "ignored": true,
-      "cfg": null,
-      "body": "9cfc4e6cd7429b2a"
-    },
-    {
-      "file": "optional/snap-ocr-worker/src/det_paddlex_tests.rs",
-      "name": "stage_contours_match_manifest",
-      "ignored": true,
-      "cfg": null,
-      "body": "171d214439f4c982"
-    },
-    {
-      "file": "optional/snap-ocr-worker/src/det_paddlex_tests.rs",
-      "name": "stage_probmap_matches_dump",
-      "ignored": true,
-      "cfg": null,
-      "body": "0c9c7912d0144804"
-    },
-    {
-      "file": "optional/snap-ocr-worker/src/det_paddlex_tests.rs",
-      "name": "stage_resize_matches_dump",
-      "ignored": true,
-      "cfg": null,
-      "body": "2fa38429abddccb0"
-    },
-    {
-      "file": "optional/snap-ocr-worker/src/det_paddlex_tests.rs",
-      "name": "tiny_selection_is_padded_before_detection_resize",
-      "ignored": false,
-      "cfg": null,
-      "body": "c45672799a853f29"
-    },
-    {
-      "file": "optional/snap-ocr-worker/src/image_ops.rs",
-      "name": "buffer_length_is_validated",
-      "ignored": false,
-      "cfg": null,
-      "body": "e7a829e47c9f6b03"
-    },
-    {
-      "file": "optional/snap-ocr-worker/src/image_ops.rs",
-      "name": "resize_identity_returns_same_pixels_for_all_interpolations",
-      "ignored": false,
-      "cfg": null,
-      "body": "628ef75b4c2c34a9"
-    },
-    {
-      "file": "optional/snap-ocr-worker/src/image_ops.rs",
-      "name": "resize_lanczos4_kernel_is_normalized_at_integers",
-      "ignored": false,
-      "cfg": null,
-      "body": "9fad25bb79e205a6"
-    },
-    {
-      "file": "optional/snap-ocr-worker/src/image_ops.rs",
-      "name": "resize_linear_downscale_2x_area_fast",
-      "ignored": false,
-      "cfg": null,
-      "body": "5ec4f6467d0625fd"
-    },
-    {
-      "file": "optional/snap-ocr-worker/src/image_ops.rs",
-      "name": "resize_linear_upscale_hand_value",
-      "ignored": false,
-      "cfg": null,
-      "body": "3e5a49803aebe9ae"
-    },
-    {
-      "file": "optional/snap-ocr-worker/src/image_ops.rs",
-      "name": "rot90_roundtrip_and_orientation",
-      "ignored": false,
-      "cfg": null,
-      "body": "8cae5d4fa47fae9b"
-    },
-    {
-      "file": "optional/snap-ocr-worker/src/image_ops.rs",
-      "name": "warp_axis_aligned_corners_sample_exact_pixels",
-      "ignored": false,
-      "cfg": null,
-      "body": "a90160055b98ecb2"
-    },
-    {
-      "file": "optional/snap-ocr-worker/src/image_ops.rs",
-      "name": "warp_rejects_invalid_quads",
-      "ignored": false,
-      "cfg": null,
-      "body": "53508e4ff132b511"
-    },
-    {
-      "file": "optional/snap-ocr-worker/src/pipeline_backend.rs",
-      "name": "backend_ops_geometry",
-      "ignored": false,
-      "cfg": null,
-      "body": "a45922a187c94edc"
-    },
-    {
-      "file": "optional/snap-ocr-worker/src/pipeline_backend.rs",
-      "name": "sha256_matches_reference_vectors",
-      "ignored": false,
-      "cfg": null,
-      "body": "30790ab942709320"
-    },
-    {
-      "file": "optional/snap-ocr-worker/src/pipeline_backend_tests.rs",
-      "name": "l2_warp_crops_bitwise_oracle",
-      "ignored": true,
-      "cfg": null,
-      "body": "b2c499d6de72435e"
-    },
-    {
-      "file": "optional/snap-ocr-worker/src/pipeline_backend_tests.rs",
-      "name": "l3_full_chain_matches_oracle",
-      "ignored": true,
-      "cfg": null,
-      "body": "7d6f1d3a4ed56ab2"
-    },
-    {
-      "file": "optional/snap-ocr-worker/src/rec_paddlex.rs",
-      "name": "ctc_decode_collapse_blank_mean_and_empty",
-      "ignored": false,
-      "cfg": null,
-      "body": "7042041f1e572219"
-    },
-    {
-      "file": "optional/snap-ocr-worker/src/rec_paddlex.rs",
-      "name": "geometry_matches_paddlex_rules",
-      "ignored": false,
-      "cfg": null,
-      "body": "24976c2c018c2fcc"
-    },
-    {
-      "file": "optional/snap-ocr-worker/src/rec_paddlex.rs",
-      "name": "normalization_follows_paddlex_operation_order",
-      "ignored": false,
-      "cfg": null,
-      "body": "129db3cc602ad8a8"
-    },
-    {
-      "file": "optional/snap-ocr-worker/src/rec_paddlex.rs",
-      "name": "np_sum_matches_sequential_for_small_inputs",
-      "ignored": false,
-      "cfg": null,
-      "body": "f8d6e0a183484ec9"
-    },
-    {
       "file": "optional/snap-ocr-worker/src/result_window.rs",
       "name": "ocr_text_changes_visible_body_pixels",
       "ignored": false,
@@ -692,7 +531,14 @@
       "name": "inference_failure_does_not_unload_ready_model",
       "ignored": false,
       "cfg": "windows",
-      "body": "1d004871bab06baf"
+      "body": "348459b69770042f"
+    },
+    {
+      "file": "optional/snap-ocr-worker/src/service.rs",
+      "name": "load_failures_map_to_distinct_model_states",
+      "ignored": false,
+      "cfg": "windows",
+      "body": "a1392920a91c40ff"
     },
     {
       "file": "optional/snap-ocr-worker/src/service/protocol.rs",
@@ -2093,6 +1939,13 @@
       "ignored": false,
       "cfg": null,
       "body": "f92362e5fbbdc858"
+    },
+    {
+      "file": "src/snap_ocr_assets.rs",
+      "name": "xberg_component_layout_reports_missing_incomplete_and_ready",
+      "ignored": false,
+      "cfg": null,
+      "body": "8954431a3e5f3dfe"
     },
     {
       "file": "tests/archive.rs",

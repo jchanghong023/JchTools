@@ -5,12 +5,70 @@
 
 use std::cell::RefCell;
 use std::ffi::c_void;
+use std::io::Cursor;
 use std::mem::size_of;
 use std::ptr::{null, null_mut};
 
-use crate::image_ops::BgrImage;
-
 type Handle = *mut c_void;
+
+/// BGR 交错的 8bit 图像（H×W×3 行主序）：冻结框选的裁剪产物，经内存 PNG
+/// 编码交给 Xberg 推理子进程（O-29：字节只驻内存，不落盘）。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct BgrImage {
+    width: usize,
+    height: usize,
+    data: Vec<u8>,
+}
+
+impl BgrImage {
+    /// 由现有缓冲构造，校验 `data.len() == width * height * 3`。
+    ///
+    /// # Errors
+    /// 长度不符时返回错误。
+    pub fn from_vec(width: usize, height: usize, data: Vec<u8>) -> Result<Self, String> {
+        if data.len() != width * height * 3 {
+            return Err("图像缓冲长度与宽高不符".into());
+        }
+        Ok(Self {
+            width,
+            height,
+            data,
+        })
+    }
+
+    /// 图宽（像素）。
+    #[must_use]
+    pub fn width(&self) -> usize {
+        self.width
+    }
+
+    /// 图高（像素）。
+    #[must_use]
+    pub fn height(&self) -> usize {
+        self.height
+    }
+
+    /// 编码为 PNG 字节（全内存完成）。
+    ///
+    /// # Errors
+    /// 宽高超出 PNG 上限或编码器失败。
+    pub fn png_bytes(&self) -> Result<Vec<u8>, String> {
+        let width = u32::try_from(self.width).map_err(|_| "图像宽度超出 PNG 上限".to_string())?;
+        let height = u32::try_from(self.height).map_err(|_| "图像高度超出 PNG 上限".to_string())?;
+        // BGR → RGB：交换每像素首尾通道，其余字节不动。
+        let mut rgb = self.data.clone();
+        for pixel in rgb.as_chunks_mut::<3>().0 {
+            pixel.swap(0, 2);
+        }
+        let image = image::RgbImage::from_vec(width, height, rgb)
+            .ok_or_else(|| "图像缓冲与尺寸不符".to_string())?;
+        let mut png = Vec::new();
+        image
+            .write_to(&mut Cursor::new(&mut png), image::ImageFormat::Png)
+            .map_err(|error| format!("截图 PNG 编码失败：{error}"))?;
+        Ok(png)
+    }
+}
 #[repr(C)]
 #[derive(Clone, Copy, Default)]
 struct Point {

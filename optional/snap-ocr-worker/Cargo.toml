@@ -12,28 +12,22 @@ name = "snap_ocr_worker"
 name = "snap-ocr-worker"
 path = "src/main.rs"
 
-[[test]]
-name = "det_paddlex_oracle"
-path = "src/det_paddlex_tests.rs"
-
-[[test]]
-name = "pipeline_backend_oracle"
-path = "src/pipeline_backend_tests.rs"
+# 协议测试的模拟子进程：模拟 `xberg worker` 的 stdout 行为（id 回显/状态/成功/失败/EOF）。
+# 仅供 tests/xberg_client.rs 经 CARGO_BIN_EXE_* 引用，不随资产发布。
+[[bin]]
+name = "mock-xberg-worker"
+path = "src/bin/mock-xberg-worker.rs"
 
 [dependencies]
-snap-ocr-core = { path = "../snap-ocr-core" }
-xberg-paddle-ocr = { path = "vendor/xberg-paddle-ocr", features = ["load-dynamic"] }
 image = { version = "0.25", default-features = false, features = ["png"] }
 # 结果窗（O-21）：与主程序同版本 Slint；worker 是可选资产，不进主 EXE。
 slint = { version = "=1.17.1", default-features = false, features = ["std", "compat-1-2", "backend-winit", "renderer-femtovg", "renderer-software", "unstable-fontique-010", "raw-window-handle-06"] }
 serde_json = "1"
+# 命名管道身份哈希（service/protocol）仍需 SHA-256；推理资产校验已随内嵌推理一并移除。
 sha2 = "0.10"
 raw-window-handle = "0.6"
-# det/rec 适配层直接依赖：vendored crate 的 inference 为 pub(crate)，且需要
-# 原生 Clipper（与 pyclipper 同源 6.4.2）与 load-dynamic 的 ort 会话。
-geo-clipper = "0.9"
-geo-types = "0.7"
-ort = { version = "=2.0.0-rc.13", default-features = false, features = ["std", "api-18", "load-dynamic"] }
+# 截图字节经内存 PNG 编码后以 base64 传给本地 xberg 子进程（O-29：不落盘）。
+base64 = "0.22"
 
 [dev-dependencies]
 tempfile = "3.19"
