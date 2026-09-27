@@ -68,8 +68,56 @@
       "cfg": null
     },
     {
+      "file": "src/dedup_components.rs",
+      "name": "copy_flag_does_not_reenable_same_name_by_itself",
+      "ignored": false,
+      "cfg": null
+    },
+    {
+      "file": "src/dedup_components.rs",
+      "name": "copy_name_bridge_is_transitive_and_hash_null_can_bridge",
+      "ignored": false,
+      "cfg": null
+    },
+    {
+      "file": "src/dedup_components.rs",
+      "name": "different_name_graph_matches_bruteforce_on_random_small_inputs",
+      "ignored": false,
+      "cfg": null
+    },
+    {
+      "file": "src/dedup_components.rs",
+      "name": "different_name_graph_preserves_cross_pair_topology",
+      "ignored": false,
+      "cfg": null
+    },
+    {
+      "file": "src/dedup_components.rs",
+      "name": "different_name_rule_does_not_match_copy_name_only",
+      "ignored": false,
+      "cfg": null
+    },
+    {
+      "file": "src/dedup_components.rs",
+      "name": "different_name_rule_does_not_match_same_name_only",
+      "ignored": false,
+      "cfg": null
+    },
+    {
+      "file": "src/dedup_components.rs",
+      "name": "names_are_compared_with_the_stored_key",
+      "ignored": false,
+      "cfg": null
+    },
+    {
       "file": "src/engine.rs",
       "name": "invalid_record_with_tasks_layout_falls_back_to_parent",
+      "ignored": false,
+      "cfg": null
+    },
+    {
+      "file": "src/engine.rs",
+      "name": "move_stage_guard_keeps_payload_when_cleanup_is_not_safe",
       "ignored": false,
       "cfg": null
     },
@@ -279,6 +327,12 @@
     },
     {
       "file": "src/gui.rs",
+      "name": "md_and_git_finish_reset_paused",
+      "ignored": false,
+      "cfg": null
+    },
+    {
+      "file": "src/gui.rs",
       "name": "md_and_git_start_reset_close_after",
       "ignored": false,
       "cfg": null
@@ -333,6 +387,12 @@
     },
     {
       "file": "src/gui.rs",
+      "name": "organizer_finish_does_not_replace_another_tool_panel",
+      "ignored": false,
+      "cfg": null
+    },
+    {
+      "file": "src/gui.rs",
       "name": "organizer_warning_mentions_only_organizer_deletes",
       "ignored": false,
       "cfg": null
@@ -358,6 +418,12 @@
     {
       "file": "src/gui.rs",
       "name": "plan_row_state_maps_terminal_states_to_chinese",
+      "ignored": false,
+      "cfg": null
+    },
+    {
+      "file": "src/gui.rs",
+      "name": "plan_toggle_is_gated_during_dependency_recompute",
       "ignored": false,
       "cfg": null
     },
@@ -459,6 +525,12 @@
     },
     {
       "file": "src/markdown.rs",
+      "name": "other_xberg_media_formats_are_not_selected",
+      "ignored": false,
+      "cfg": null
+    },
+    {
+      "file": "src/markdown.rs",
       "name": "same_input_and_output_are_rejected",
       "ignored": false,
       "cfg": null
@@ -466,6 +538,12 @@
     {
       "file": "src/markdown.rs",
       "name": "scan_includes_git_project_but_excludes_output_subtree",
+      "ignored": false,
+      "cfg": null
+    },
+    {
+      "file": "src/markdown.rs",
+      "name": "scan_keeps_input_subtree_when_output_is_ancestor",
       "ignored": false,
       "cfg": null
     },
@@ -633,6 +711,12 @@
     },
     {
       "file": "src/rules.rs",
+      "name": "copy_marker_scan_survives_width_changing_lowercase",
+      "ignored": false,
+      "cfg": null
+    },
+    {
+      "file": "src/rules.rs",
       "name": "digest_candidate_respects_unit_budget",
       "ignored": false,
       "cfg": null
@@ -664,6 +748,12 @@
     {
       "file": "src/rules.rs",
       "name": "identity_proves_same_file_requires_reliable_identity",
+      "ignored": false,
+      "cfg": null
+    },
+    {
+      "file": "src/rules.rs",
+      "name": "macosx_plain_file_is_not_junk",
       "ignored": false,
       "cfg": null
     },
@@ -819,6 +909,12 @@
     },
     {
       "file": "tests/archive.rs",
+      "name": "nested_directory_picks_free_index_under_occupied_parent",
+      "ignored": true,
+      "cfg": null
+    },
+    {
+      "file": "tests/archive.rs",
       "name": "non_whitelisted_containers_stay_untouched_beside_a_real_archive",
       "ignored": true,
       "cfg": null
@@ -928,6 +1024,12 @@
     {
       "file": "tests/classify_shape.rs",
       "name": "in_place_normalized_collision_resolves_once_and_stays",
+      "ignored": false,
+      "cfg": null
+    },
+    {
+      "file": "tests/classify_shape.rs",
+      "name": "in_place_unmaterialized_name_is_protected_against_newcomer",
       "ignored": false,
       "cfg": null
     },
@@ -1149,6 +1251,12 @@
     },
     {
       "file": "tests/core.rs",
+      "name": "blocked_outgoing_category_keeps_its_source_name_occupied",
+      "ignored": false,
+      "cfg": null
+    },
+    {
+      "file": "tests/core.rs",
       "name": "cancel_while_paused_makes_checkpoint_fail",
       "ignored": false,
       "cfg": null
@@ -1156,6 +1264,12 @@
     {
       "file": "tests/core.rs",
       "name": "cancelled_hash_does_not_read",
+      "ignored": false,
+      "cfg": null
+    },
+    {
+      "file": "tests/core.rs",
+      "name": "cancelling_outgoing_move_cancels_blocked_incoming_move",
       "ignored": false,
       "cfg": null
     },
@@ -1185,7 +1299,7 @@
     },
     {
       "file": "tests/core.rs",
-      "name": "cleanup_keep_files_are_not_dedup_deletions",
+      "name": "cleanup_keep_files_still_join_dedup",
       "ignored": false,
       "cfg": null
     },
@@ -1227,6 +1341,12 @@
     },
     {
       "file": "tests/core.rs",
+      "name": "cyclic_moves_are_staged_without_losing_either_source",
+      "ignored": false,
+      "cfg": null
+    },
+    {
+      "file": "tests/core.rs",
       "name": "defaults_valid_and_roundtrip",
       "ignored": false,
       "cfg": null
@@ -1246,6 +1366,12 @@
     {
       "file": "tests/core.rs",
       "name": "different_names_not_deduped_by_default",
+      "ignored": false,
+      "cfg": null
+    },
+    {
+      "file": "tests/core.rs",
+      "name": "doomed_duplicate_name_does_not_force_source_prefix",
       "ignored": false,
       "cfg": null
     },
@@ -1419,6 +1545,12 @@
     },
     {
       "file": "tests/core.rs",
+      "name": "multi_hit_cleanup_any_permanent_rule_deletes",
+      "ignored": false,
+      "cfg": null
+    },
+    {
+      "file": "tests/core.rs",
       "name": "multipart_name_covers_volume_detection_corners",
       "ignored": false,
       "cfg": null
@@ -1468,6 +1600,12 @@
     {
       "file": "tests/core.rs",
       "name": "offline_sources_have_no_network_capabilities",
+      "ignored": false,
+      "cfg": null
+    },
+    {
+      "file": "tests/core.rs",
+      "name": "outgoing_category_item_frees_name_for_incoming_item",
       "ignored": false,
       "cfg": null
     },
@@ -1641,7 +1779,19 @@
     },
     {
       "file": "tests/core.rs",
+      "name": "unselecting_move_recomputes_dependent_empty_directory_rows",
+      "ignored": false,
+      "cfg": null
+    },
+    {
+      "file": "tests/core.rs",
       "name": "user_cancelled_analysis_records_cancelled_status",
+      "ignored": false,
+      "cfg": null
+    },
+    {
+      "file": "tests/core.rs",
+      "name": "user_directory_named_like_move_stage_is_scanned",
       "ignored": false,
       "cfg": null
     },
@@ -1664,8 +1814,32 @@
       "cfg": null
     },
     {
+      "file": "tests/dedup_graph.rs",
+      "name": "connected_component_keeps_existing_hardlink_and_deletes_independent_copy",
+      "ignored": false,
+      "cfg": null
+    },
+    {
+      "file": "tests/dedup_graph.rs",
+      "name": "copy_name_bridge_forms_one_candidate_component",
+      "ignored": false,
+      "cfg": null
+    },
+    {
+      "file": "tests/dedup_graph.rs",
+      "name": "shortest_name_uses_original_utf16_length_after_case_fold",
+      "ignored": false,
+      "cfg": null
+    },
+    {
       "file": "tests/git_tools.rs",
       "name": "backoff_follows_required_sequence",
+      "ignored": false,
+      "cfg": null
+    },
+    {
+      "file": "tests/git_tools.rs",
+      "name": "bracketed_filename_commits_and_pushes_literally",
       "ignored": false,
       "cfg": null
     },
@@ -1726,6 +1900,12 @@
     {
       "file": "tests/git_tools.rs",
       "name": "preexisting_staged_content_is_protected",
+      "ignored": false,
+      "cfg": null
+    },
+    {
+      "file": "tests/git_tools.rs",
+      "name": "prestaged_deletion_commits_without_add",
       "ignored": false,
       "cfg": null
     },
@@ -1977,6 +2157,12 @@
     },
     {
       "file": "tests/split.rs",
+      "name": "ambiguous_part_rar_group_is_quarantined_without_decoding",
+      "ignored": false,
+      "cfg": null
+    },
+    {
+      "file": "tests/split.rs",
       "name": "corroborated_volume_siblings_are_deleted_together",
       "ignored": false,
       "cfg": null
@@ -2056,6 +2242,18 @@
     {
       "file": "tests/split.rs",
       "name": "partially_deleted_volume_group_reports_failure_without_quarantine",
+      "ignored": false,
+      "cfg": "windows"
+    },
+    {
+      "file": "tests/split.rs",
+      "name": "quarantine_failure_keeps_other_archives_processing",
+      "ignored": false,
+      "cfg": null
+    },
+    {
+      "file": "tests/split.rs",
+      "name": "quarantine_refuses_junction_container",
       "ignored": false,
       "cfg": "windows"
     },
