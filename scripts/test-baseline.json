@@ -695,6 +695,13 @@
       "body": "1d004871bab06baf"
     },
     {
+      "file": "optional/snap-ocr-worker/src/service/protocol.rs",
+      "name": "unfinished_client_does_not_block_next_control_request",
+      "ignored": false,
+      "cfg": null,
+      "body": "83ef38b4a92e7aa9"
+    },
+    {
       "file": "optional/snap-ocr-worker/src/service/tray.rs",
       "name": "accepts_original_key_domain_but_rejects_invalid_combinations",
       "ignored": false,
