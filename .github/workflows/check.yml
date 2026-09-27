@@ -69,6 +69,13 @@ jobs:
       - name: Core tests (no default features)
         shell: pwsh
         run: cargo test --all-targets --no-default-features
+      # F23：可选媒体 worker（workspace 成员、独立清单）显式门——可选分发不等于可选验证。
+      - name: Media worker tests (optional/markdown-media-worker)
+        shell: pwsh
+        run: cargo test --manifest-path optional/markdown-media-worker/Cargo.toml --all-targets
+      - name: Media worker clippy (optional/markdown-media-worker)
+        shell: pwsh
+        run: cargo clippy --manifest-path optional/markdown-media-worker/Cargo.toml --all-targets -- -D warnings
       # rustdoc 零告警门禁：与本地质量门同一规则（RUSTDOCFLAGS=-D warnings）。
       - name: Rustdoc zero-warning gate
         shell: pwsh
@@ -78,23 +85,38 @@ jobs:
       # Python 质量门（与本地同一命令；规则固定于 pyproject.toml）。
       # Bandit 的 B404/B603 为经逐点核实的固定角色例外：全部 subprocess 命中点均为
       # 固定 argv、无 shell、可执行文件经 which()/绝对路径解析（bash/git/7z/被测产品）。
-      - name: Python quality gate
+      # F24：pwsh run 块以末条命令退出码为步骤结论，多工具同块时前序失败会被末条
+      # 成功掩盖，故一工具一步（命令内容与顺序不变）。
+      - name: Install Python quality gate dependencies
         shell: pwsh
-        run: |
-          python -m pip install --quiet -r scripts/requirements-dev.txt -r scripts/requirements-quality.txt
-          python -m ruff format --check scripts typings
-          python -m ruff check scripts typings
-          python -m basedpyright scripts typings
-          python -m vulture scripts typings --min-confidence 100
-          python -m bandit -r scripts -s B404,B603 -q
-          # pip-audit 包名的模块形式是下划线 pip_audit（连字符名只是 console script）。
-          python -m pip_audit -r scripts/requirements-dev.txt
+        run: python -m pip install --quiet -r scripts/requirements-dev.txt -r scripts/requirements-quality.txt
+      - name: Python quality gate (ruff format --check)
+        shell: pwsh
+        run: python -m ruff format --check scripts typings
+      - name: Python quality gate (ruff check)
+        shell: pwsh
+        run: python -m ruff check scripts typings
+      - name: Python quality gate (basedpyright)
+        shell: pwsh
+        run: python -m basedpyright scripts typings
+      - name: Python quality gate (vulture)
+        shell: pwsh
+        run: python -m vulture scripts typings --min-confidence 100
+      - name: Python quality gate (bandit)
+        shell: pwsh
+        run: python -m bandit -r scripts -s B404,B603 -q
+      # pip-audit 包名的模块形式是下划线 pip_audit（连字符名只是 console script）。
+      - name: Python quality gate (pip-audit)
+        shell: pwsh
+        run: python -m pip_audit -r scripts/requirements-dev.txt
       # 供应链门禁：按 Cargo.lock 锁定的解析结果对照 RustSec advisory DB 与来源白名单。
-      - name: Install cargo-audit and cargo-deny
+      # F24：两条 cargo install 同块时前一条失败会被后一条成功掩盖，拆成独立 step。
+      - name: Install cargo-audit
         shell: pwsh
-        run: |
-          cargo install --locked cargo-audit --version 0.22.2
-          cargo install --locked cargo-deny --version 0.20.2
+        run: cargo install --locked cargo-audit --version 0.22.2
+      - name: Install cargo-deny
+        shell: pwsh
+        run: cargo install --locked cargo-deny --version 0.20.2
       - name: cargo audit
         shell: pwsh
         run: cargo audit

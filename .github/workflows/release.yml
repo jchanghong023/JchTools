@@ -17,9 +17,11 @@ jobs:
       # 保证 package-windows.ps1 能编译出安装包（免 UAC + 桌面快捷方式 + 卸载项）。
       - name: Ensure Inno Setup 6
         shell: pwsh
+        # F24：choco 失败须立即终止；末条 ISCC /? 的成功不能掩盖安装失败。
         run: |
           if (-not (Test-Path "${env:ProgramFiles(x86)}\Inno Setup 6\ISCC.exe")) {
             choco install innosetup -y --no-progress
+            if ($LASTEXITCODE -ne 0) { throw "choco install innosetup failed: $LASTEXITCODE" }
           }
           & "${env:ProgramFiles(x86)}\Inno Setup 6\ISCC.exe" /? | Select-Object -First 1
       - name: Compose release metadata
