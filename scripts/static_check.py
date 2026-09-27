@@ -506,9 +506,48 @@ def _collect_file_tests(path: Path) -> list[dict[str, object]]:
                 "name": name_match.group(1),
                 "ignored": ignored,
                 "cfg": " && ".join(cfgs) if cfgs else None,
+                # 测试体内容哈希：防「保留名字、清空/放宽断言」式削弱（基线 val 的一部分）。
+                "body": _test_body_hash(text, match.end() + name_match.end()),
             }
         )
     return rows
+
+
+# Rust 源里的注释与字符串/字符字面量（花括号配对前先抹除干扰；保持等长以便位置对齐）。
+# 近似实现：不处理嵌套块注释与含引号的原始字符串——偏差不影响哈希的确定性，只影响极罕见的跨度伸缩。
+_RUST_TRIVIA_ALTS = (
+    r"//[^\n]*",
+    r"/\*.*?\*/",
+    r'b?r#*"[^"]*"#*',
+    r'b?"(?:\\.|[^"\\\n])*"',
+    r"b?'(?:\\.|[^'\\\n])'",
+)
+_RUST_TRIVIA = re.compile("|".join(_RUST_TRIVIA_ALTS), re.DOTALL)
+
+
+def _test_body_hash(text: str, signature_end: int) -> str:
+    """取 #[test] 函数体内容并哈希（sha256 前 16 位十六进制）.
+
+    签名（参数/返回值/where 子句）内不含花括号，函数体从其后第一个 "{" 起；
+    在剔除注释与字面量后的等长文本上做朴素配对找闭合 "}"，对原文切片哈希。
+    找不到闭合时退化为「到文件尾」的哈希——仍然确定，只会更敏感。
+    """
+    scrubbed = _RUST_TRIVIA.sub(lambda m: " " * (m.end() - m.start()), text)
+    open_at = scrubbed.find("{", signature_end)
+    if open_at == -1:
+        blob = text[signature_end:]
+    else:
+        depth, end = 0, -1
+        for i in range(open_at, len(scrubbed)):
+            if scrubbed[i] == "{":
+                depth += 1
+            elif scrubbed[i] == "}":
+                depth -= 1
+                if depth == 0:
+                    end = i
+                    break
+        blob = text[signature_end:] if end == -1 else text[open_at : end + 1]
+    return hashlib.sha256(blob.encode("utf-8")).hexdigest()[:16]
 
 
 def collect_tests() -> list[dict[str, object]]:
@@ -519,7 +558,13 @@ def collect_tests() -> list[dict[str, object]]:
     # 已知残留盲区：定义在其它文件里的门禁（如 lib.rs 的 #[cfg(feature = "gui")] pub mod gui;）
     # 不在本文件扫描范围内——本检查是执法下界，不是完整 cfg 求值器。
     rows: list[dict[str, object]] = []
-    for path in [*ROOT.glob("src/**/*.rs"), *ROOT.glob("tests/**/*.rs")]:
+    # optional/ 下的可选组件 crate（如 markdown-media-worker）与 src/tests 同口径纳入基线，
+    # 防止其游离于测试清单门禁之外（是否被 cargo 实际执行由 workspace 成员关系决定）。
+    for path in [
+        *ROOT.glob("src/**/*.rs"),
+        *ROOT.glob("tests/**/*.rs"),
+        *ROOT.glob("optional/*/src/**/*.rs"),
+    ]:
         rows.extend(_collect_file_tests(path))
     keys = [(row["file"], row["name"], row["cfg"]) for row in rows]
     if len(keys) != len(set(keys)):
@@ -530,8 +575,9 @@ def collect_tests() -> list[dict[str, object]]:
 
 def write_baseline(rows: list[dict[str, object]]) -> None:
     note = (
-        "由 static_check.py --update-test-baseline 生成。删除/改名/放宽断言/新增 ignore 或平台门禁时"
-        "必须重新生成本文件，并在提交信息说明理由；这是防止「为变绿而削弱测试」的门禁。"
+        "由 static_check.py --update-test-baseline 生成。删除/改名/新增 ignore 或平台门禁、"
+        "以及任何测试体修改（含放宽或清空断言）都必须重新生成本文件，并在提交信息说明理由；"
+        "body 哈希用于防止「保留测试名、掏空测试体」式削弱。"
     )
     payload = {"note": note, "tests": sorted(rows, key=lambda row: (row["file"], row["name"]))}
     _ = (ROOT / "scripts" / "test-baseline.json").write_text(
@@ -570,8 +616,8 @@ def test_baseline() -> str:
     def key(row: dict[str, object]) -> tuple[object, object, object]:
         return (row["file"], row["name"], row.get("cfg") or None)
 
-    def val(row: dict[str, object]) -> bool:
-        return bool(row.get("ignored"))
+    def val(row: dict[str, object]) -> tuple[bool, str]:
+        return (bool(row.get("ignored")), str(row.get("body") or ""))
 
     base = {key(row): val(row) for row in _baseline_rows(path)}
     now = {key(row): val(row) for row in collect_tests()}
@@ -583,11 +629,16 @@ def test_baseline() -> str:
             {
                 "新增测试(更新基线并在提交信息说明覆盖点)": added,
                 "删除或改名(提交信息必须说明理由)": removed,
-                "ignore状态翻转(提交信息必须说明理由)": [f"{k}: ignored {base[k]} -> {now[k]}" for k in changed],
+                "ignore状态翻转(提交信息必须说明理由)": [
+                    f"{k}: ignored {base[k][0]} -> {now[k][0]}" for k in changed if base[k][0] != now[k][0]
+                ],
+                "测试体变化(审查确认非削弱后更新基线并说明理由)": [
+                    f"{k}: body {base[k][1]} -> {now[k][1]}" for k in changed if base[k][1] != now[k][1]
+                ],
                 "更新命令": "python scripts/static_check.py --update-test-baseline",
             }
         )
-    return f"{len(now)} 个测试与 scripts/test-baseline.json 完全一致（含 ignore 与平台门禁状态）。"
+    return f"{len(now)} 个测试与 scripts/test-baseline.json 完全一致（含 ignore、平台门禁与测试体哈希）。"
 
 
 def slint_blocks(ui: str) -> list[tuple[int, int, str]]:
