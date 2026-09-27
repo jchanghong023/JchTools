@@ -107,6 +107,12 @@ foreach ($component in @('snap-ocr-core','snap-ocr-worker')) {
     $null = Invoke-Logged -Name "$component-clippy" -File 'cargo' `
         -Arguments @('clippy','--manifest-path',$manifest,'--all-targets','--','-D','warnings')
 }
+if ($env:JCHTOOLS_SNAP_OCR_ASSET_ROOT) {
+    $ocrManifest = Get-Content -LiteralPath 'resources\snap-ocr-assets.json' -Raw -Encoding UTF8 | ConvertFrom-Json
+    $workerVersion = Split-Path -Leaf (Split-Path -Parent $ocrManifest.workers[0].install_path)
+    $null = Invoke-Logged -Name 'snap-ocr-worker-root' -File $python `
+        -Arguments @('tests/ocr_fixtures/check_worker_root.py','--asset-root',$env:JCHTOOLS_SNAP_OCR_ASSET_ROOT,'--worker-version',$workerVersion)
+} else {$script:Results.Add('NOT RUN  snap-ocr-worker-root（设置 JCHTOOLS_SNAP_OCR_ASSET_ROOT 为完整的已校验资产缓存）')}
 
 # 4) 真实引擎用例（可选）。
 if ($WithEngine) {

@@ -90,9 +90,10 @@ powershell -NoProfile -File .\scripts\package-windows.ps1   # 生成含 7-Zip �
 - GUI 链路入口为 `cargo test --test gui_flow`；`src/gui.rs` 内另有 MD 真实回调测试。它们使用 Slint 测试后端，不等同于真实桌面窗口验证。`scripts/gui_smoke.py` 的 S1–S4 覆盖启动、整理与解压，未覆盖 MD / Git 的完整桌面链路；Git 从 GUI 启动到推送结果的完整 E2E 覆盖尚未确认。后续相应功能变更应补齐所需链路，不能以底层测试冒充 GUI E2E。
 - 转 Markdown 的依据是 `docs/requirements/ALL2MARKDOWN.md`；按该文档附录 A 验证主包不包含转换专用依赖/模型、未配置时旧工具正常可用、GUI 保存并校验用户指定的 Xberg 运行目录、按需初始化其余组件，以及离线真实 Xberg / OCR / 媒体转换、GUI 入口及两种交付形态；旧 all2markdown 的源码、测试或历史 CI 不能作为集成后的通过证据。实现范围按 T-30 限于迁入，不借迁移改变旧功能，也不擅自搬入旧 Python 架构。
 - 纯文档等非功能性修改按实际影响检查内容、引用和需求保留情况，不机械新增功能测试；本仓库已有基线、提交检查与 CI 完成条件仍按 0 / 3.2 / 3.3 执行，未执行项如实标注。
-- 可选组件的 UT / 集成测试从仓库根目录分别运行 `cargo test --manifest-path optional/markdown-media-worker/Cargo.toml --all-targets`、`cargo test --manifest-path optional/snap-ocr-core/Cargo.toml --all-targets` 和 `cargo test --manifest-path optional/snap-ocr-worker/Cargo.toml --all-targets`。根 workspace 的 `default-members = ["."]`，默认 `cargo test` 不覆盖这些包；当前 `check.yml` 有三者的显式测试步骤，`acceptance.ps1` 仅显式追加媒体 worker，不能把本地默认门通过当作截图组件已验证。
+- 可选组件的 UT / 集成测试从仓库根目录分别运行 `cargo test --manifest-path optional/markdown-media-worker/Cargo.toml --all-targets`、`cargo test --manifest-path optional/snap-ocr-core/Cargo.toml --all-targets` 和 `cargo test --manifest-path optional/snap-ocr-worker/Cargo.toml --all-targets`。根 workspace 的 `default-members = ["."]`，默认 `cargo test` 不覆盖这些包；当前 `check.yml` 与 `acceptance.ps1` 均有三者的显式测试步骤，不能把本地默认门通过当作截图组件已验证。
 - 转 Markdown 的验收承接入口为 `scripts/markdown_acceptance.py`（`--list` 查看条目），也可经 `acceptance.ps1 -WithMarkdownAcceptance` 接入；运行依赖见 `scripts/requirements-dev.txt`，真实 GUI、Xberg、媒体组件与两种发布目录按脚本参数提供。缺资产条目为 `NOT RUN`；脚本退出码 0 仍可能包含未执行项，应逐项检查。`scripts/gui_smoke.py --stages S5` 另有转换开始/停止链路，需已配置可用组件，不在默认 S1–S4 内，不能替代转换产物断言。
 - 截图 OCR 的验收覆盖目标见 `docs/requirements/SNAP2TEXT.md` 附录 C。当前 worker 声明了 `det_paddlex_oracle` 与 `pipeline_backend_oracle` 两个资产依赖测试目标，其中 oracle 用例默认忽略，需准备测试文件头说明的 `.tmp/` 合成资产及 `ORT_DYLIB_PATH` 后显式运行对应 `--test <目标> -- --ignored`；它们分别检查检测和固定检测框之后的裁剪/识别/布局，不能替代从热键或托盘进入的桌面 E2E。已有 Slint 测试后端结果窗用例也不等于真实桌面、服务生命周期或多 DPI 验收；这些完整链路的自动化覆盖尚未确认。TextSnap 历史测试不能作为迁入版通过证据。上述入口说明不改变 3.4 的 fulltest / slowtest 逐次授权及 CI 完成条件。
+- 本地 `acceptance.ps1` 默认测试 Snap OCR core / worker 并检查资产清单；设置 `JCHTOOLS_SNAP_OCR_ASSET_ROOT` 为完整的已校验资产缓存时，追加真实 worker 从安装位置加载模型的服务测试。未设置时该资产依赖项报告 `NOT RUN`，不能据此声称桌面验收通过。
 
 ## 3.4 三级测试门与执行权限
 
