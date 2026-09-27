@@ -59,14 +59,15 @@ if ($workers.Count -ne 1 -or $workers[0].id -cne 'snap-ocr-worker' -or
 }
 $workerBytes = [long]$workers[0].size_bytes
 $workerSha = [string]$workers[0].sha256
-if ($builtWorkerBytes -eq $workerBytes -and $builtWorkerSha -ceq $workerSha) {
+if ($Offline) {
+    if ($builtWorkerBytes -ne $workerBytes -or $builtWorkerSha -cne $workerSha) {
+        throw "Offline package worker differs from the pinned asset (built $builtWorkerBytes/$builtWorkerSha; expected $workerBytes/$workerSha)."
+    }
     Copy-Item -LiteralPath $workerExe -Destination $stagedWorker -Force
-} elseif ($Offline) {
-    throw "Offline package worker differs from the pinned asset (built $builtWorkerBytes/$builtWorkerSha; expected $workerBytes/$workerSha)."
 } else {
     # The released worker is the byte identity users download. Rust/COFF toolchain
     # versions may produce different local bytes from the same source, so package
-    # that pinned asset when the just-built validation binary is not byte-identical.
+    # this pinned asset after compiling locally as a source/build check.
     $download = "$stagedWorker.download"
     try {
         Invoke-WebRequest -Uri $workers[0].url -UseBasicParsing -OutFile $download
