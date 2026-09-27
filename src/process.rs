@@ -161,9 +161,10 @@ pub fn system_tool(name: &str) -> PathBuf {
 
 /// 单流捕获上限：nettest/proxy 等调用方的正常输出很小；
 /// 超过上限说明输出异常膨胀，截断保存并标记 truncated，避免内存无界增长。
-const MAX_CAPTURE_BYTES: usize = 8 * 1024 * 1024;
+pub(crate) const MAX_CAPTURE_BYTES: usize = 8 * 1024 * 1024;
 
 /// 捕获到的子进程输出（只读查询用；无 shell）。
+#[derive(Debug)]
 pub struct CapturedOutput {
     pub status: std::process::ExitStatus,
     pub stdout: Vec<u8>,
@@ -193,11 +194,11 @@ impl CapturedOutput {
 
 /// 子进程退出后等待管道读线程收尾的宽限：正常情况下进程退出管道随即 EOF，读线程几乎立刻结束；
 /// 孙进程继承管道写端时 EOF 永不到来，若无上限的 join 会把"宿主总超时"承诺变成永久阻塞。
-const PIPE_DRAIN_GRACE: Duration = Duration::from_secs(2);
+pub(crate) const PIPE_DRAIN_GRACE: Duration = Duration::from_secs(2);
 
 /// 限时回收线程：超限后放弃（JoinHandle 落地即 detach，读线程仍在排空管道并会在
 /// 写端全部关闭后自行退出），返回 None。仅用于子进程已退出/被回收之后的收尾。
-fn join_with_deadline<T>(handle: thread::JoinHandle<T>, limit: Duration) -> Option<T> {
+pub(crate) fn join_with_deadline<T>(handle: thread::JoinHandle<T>, limit: Duration) -> Option<T> {
     let deadline = Instant::now() + limit;
     while !handle.is_finished() {
         if Instant::now() >= deadline {
@@ -208,10 +209,36 @@ fn join_with_deadline<T>(handle: thread::JoinHandle<T>, limit: Duration) -> Opti
     handle.join().ok()
 }
 
+/// 等待子进程时的取消来源：既支持旧工具链路的 [`Control`]，
+/// 也支持转 Markdown 链路的裸 [`AtomicBool`](std::sync::atomic::AtomicBool)。
+enum CancelSource<'a> {
+    Control(&'a Control),
+    Atomic(&'a std::sync::atomic::AtomicBool),
+}
+
+impl CancelSource<'_> {
+    fn is_cancelled(&self) -> bool {
+        match self {
+            Self::Control(control) => control.is_cancelled(),
+            Self::Atomic(flag) => flag.load(std::sync::atomic::Ordering::Relaxed),
+        }
+    }
+}
+
 /// 带宿主侧总超时地运行命令并捕获全部输出。
 /// 超时后 kill + wait，避免子进程卡死导致永久阻塞。
 pub fn run_with_timeout(command: &mut Command, timeout: Duration) -> Result<CapturedOutput> {
-    run_with_timeout_input(command, None, timeout)
+    run_with_timeout_ext(command, None, timeout, None)
+}
+
+/// 同 [`run_with_timeout`]，另支持外部取消标志：等待期间标志置位即 kill + wait
+/// 并返回取消错误（转 Markdown 的格式探测等探测类调用使用）。
+pub fn run_with_timeout_cancel(
+    command: &mut Command,
+    timeout: Duration,
+    cancel: &std::sync::atomic::AtomicBool,
+) -> Result<CapturedOutput> {
+    run_with_timeout_ext(command, None, timeout, Some(&CancelSource::Atomic(cancel)))
 }
 
 /// 同 [`run_with_timeout`]，可选写入 stdin 后再关闭管道（供 `bash -s` 类脚本）。
@@ -219,6 +246,15 @@ pub fn run_with_timeout_input(
     command: &mut Command,
     stdin_data: Option<&[u8]>,
     timeout: Duration,
+) -> Result<CapturedOutput> {
+    run_with_timeout_ext(command, stdin_data, timeout, None)
+}
+
+fn run_with_timeout_ext(
+    command: &mut Command,
+    stdin_data: Option<&[u8]>,
+    timeout: Duration,
+    cancel: Option<&CancelSource<'_>>,
 ) -> Result<CapturedOutput> {
     if stdin_data.is_some() {
         command.stdin(Stdio::piped());
@@ -277,7 +313,7 @@ pub fn run_with_timeout_input(
     // 但只保留前 MAX_CAPTURE_BYTES；读错误在最终结果里传播，不再用 let _ 吞掉。
     let stdout_thread = thread::spawn(move || read_all_capped(stdout_pipe, MAX_CAPTURE_BYTES));
     let stderr_thread = thread::spawn(move || read_all_capped(stderr_pipe, MAX_CAPTURE_BYTES));
-    match wait_child_with_deadline(&mut child, timeout, None) {
+    match wait_child_with_deadline(&mut child, timeout, cancel) {
         Ok(status) => {
             // 读线程被放弃时输出不完整：如实标记截断，不得把半截输出当成完整结果。
             let stdout = join_with_deadline(stdout_thread, PIPE_DRAIN_GRACE).unwrap_or_else(|| {
@@ -332,14 +368,14 @@ pub fn run_with_timeout_input(
 
 /// 有上限的整流捕获结果。
 #[derive(Default)]
-struct ReadCapture {
-    data: Vec<u8>,
-    truncated: bool,
-    error: Option<String>,
+pub(crate) struct ReadCapture {
+    pub(crate) data: Vec<u8>,
+    pub(crate) truncated: bool,
+    pub(crate) error: Option<String>,
 }
 
 /// 读满到 `limit` 后截断并继续 drain 到 EOF；读错误记入 `error`，不再静默丢弃。
-fn read_all_capped<R: Read>(mut reader: R, limit: usize) -> ReadCapture {
+pub(crate) fn read_all_capped<R: Read>(mut reader: R, limit: usize) -> ReadCapture {
     let mut capture = ReadCapture {
         data: Vec::new(),
         truncated: false,
@@ -374,12 +410,12 @@ fn read_all_capped<R: Read>(mut reader: R, limit: usize) -> ReadCapture {
 fn wait_child_with_deadline(
     child: &mut Child,
     timeout: Duration,
-    control: Option<&Control>,
+    cancel: Option<&CancelSource<'_>>,
 ) -> Result<std::process::ExitStatus> {
     let deadline = Instant::now() + timeout;
     loop {
-        if let Some(control) = control {
-            if control.is_cancelled() {
+        if let Some(source) = cancel {
+            if source.is_cancelled() {
                 let _ = child.kill();
                 let _ = child.wait();
                 bail!("操作已取消，子进程已终止");
@@ -500,7 +536,11 @@ pub fn run_with_idle_timeout(
             }
         }
         // 管道已断开后子进程仍可能挂死：限时等待，禁止无界 child.wait()。
-        let status = wait_child_with_deadline(&mut child, idle_timeout, Some(control))?;
+        let status = wait_child_with_deadline(
+            &mut child,
+            idle_timeout,
+            Some(&CancelSource::Control(control)),
+        )?;
         if !status.success() {
             let code = status
                 .code()
@@ -806,5 +846,61 @@ mod tests {
         assert!(result.is_err(), "取消后应返回错误");
         let message = format!("{:#}", result.unwrap_err());
         assert!(message.contains("取消"), "应是取消错误：{message}");
+    }
+
+    // 覆盖 F21：总超时到达时 kill+wait 并限时收尾读线程，不得永久阻塞。
+    #[test]
+    fn run_with_timeout_kills_hung_child() {
+        let mut command = silent_hung_command();
+        let started = Instant::now();
+        let result = run_with_timeout(&mut command, Duration::from_millis(300));
+        assert!(result.is_err(), "挂死子进程应按总超时失败");
+        let message = format!("{:#}", result.unwrap_err());
+        assert!(message.contains("超时"), "错误应说明超时：{message}");
+        assert!(
+            started.elapsed() < Duration::from_secs(10),
+            "超时后应尽快返回，实际 {:?}",
+            started.elapsed()
+        );
+    }
+
+    // 覆盖 F21：外部取消标志在等待期间生效，先于总超时返回。
+    #[test]
+    fn run_with_timeout_cancel_stops_promptly() {
+        use std::sync::atomic::{AtomicBool, Ordering};
+
+        let mut command = silent_hung_command();
+        let cancel = Arc::new(AtomicBool::new(false));
+        let setter = cancel.clone();
+        thread::spawn(move || {
+            thread::sleep(Duration::from_millis(200));
+            setter.store(true, Ordering::Relaxed);
+        });
+        let started = Instant::now();
+        let result = run_with_timeout_cancel(&mut command, Duration::from_secs(60), &cancel);
+        assert!(result.is_err(), "取消后应返回错误");
+        let message = format!("{:#}", result.unwrap_err());
+        assert!(message.contains("取消"), "应是取消错误：{message}");
+        assert!(
+            started.elapsed() < Duration::from_secs(5),
+            "取消后应尽快返回，实际 {:?}",
+            started.elapsed()
+        );
+    }
+
+    // 覆盖 F21：超过捕获上限的输出标记 truncated，不得静默当完整结果。
+    #[cfg(windows)]
+    #[test]
+    fn run_with_timeout_marks_truncated_huge_output() {
+        let mut command = Command::new("powershell");
+        command.args([
+            "-NoProfile",
+            "-Command",
+            "[Console]::Out.Write(('x' * 9437184))",
+        ]);
+        let output = run_with_timeout(&mut command, Duration::from_secs(60))
+            .expect("大输出进程正常退出应成功");
+        assert!(output.stdout_truncated, "stdout 超限必须标记截断");
+        assert!(output.truncation_note().is_some());
     }
 }

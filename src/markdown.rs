@@ -5,12 +5,12 @@ use std::{
     collections::BTreeSet,
     ffi::{OsStr, OsString},
     fs::{self, OpenOptions},
-    io::{Read, Write},
+    io::Write,
     path::{Component, Path, PathBuf},
     process::{Command, Stdio},
     sync::atomic::{AtomicBool, Ordering as AtomicOrdering},
     thread,
-    time::{Duration, Instant},
+    time::Duration,
 };
 
 use crate::{fsutil, markdown_assets, markdown_document};
@@ -112,7 +112,19 @@ pub fn run(
     }
     readiness()?;
     let runtime_dir = markdown_assets::runtime_dir()?;
-    let supported = supported_formats(&runtime_dir, &options.groups)?;
+    let supported = match supported_formats(&runtime_dir, &options.groups, cancel) {
+        Ok(formats) => formats,
+        Err(message) => {
+            if cancel.load(AtomicOrdering::Relaxed) {
+                // T-23：主动停止不作为错误；返回已停止的空汇总，由界面按停止收尾。
+                return Ok(Summary {
+                    stopped: true,
+                    ..Summary::default()
+                });
+            }
+            return Err(message);
+        }
+    };
     let plan = scan(options, &supported)?;
     let total = plan.items.len() + plan.summary.skipped_existing + plan.summary.skipped_duplicate;
     events(Event::Started { total });
@@ -128,14 +140,17 @@ pub fn run(
             index: index + 1,
             total,
         });
-        let timeout = Duration::from_secs(options.timeout_secs);
+        // F21/T-29：单文件预算从进入该文件起算，页数预检与转换共用同一 deadline。
+        let deadline = markdown_document::Deadline::new(Duration::from_secs(options.timeout_secs));
         let outcome = if item.is_media {
-            convert_media(&item.source, timeout).map(|markdown| markdown_document::DocumentOutput {
-                markdown,
-                warnings: Vec::new(),
+            convert_media(&item.source, &deadline).map(|markdown| {
+                markdown_document::DocumentOutput {
+                    markdown,
+                    warnings: Vec::new(),
+                }
             })
         } else {
-            let pages = markdown_document::page_count(&item.source);
+            let pages = markdown_document::page_count(&item.source, &deadline);
             let fast = pages.is_some_and(|count| count > 200);
             if fast {
                 events(Event::Log(format!(
@@ -144,7 +159,7 @@ pub fn run(
                     pages.unwrap_or_default()
                 )));
             }
-            markdown_document::convert(&item.source, &runtime_dir, fast, timeout)
+            markdown_document::convert(&item.source, &runtime_dir, fast, &deadline)
         };
         let outcome = outcome.and_then(|document| {
             write_new_markdown(&output_root, &item.target, &document.markdown)?;
@@ -217,6 +232,83 @@ fn platform_preflight() -> Result<(), String> {
     Err("转 Markdown 仅支持 Windows 11 x64".to_string())
 }
 
+/// 平铺输出名占用索引（T-11/F29）：按大小写折叠键分桶，桶内候选再用
+/// [`compare_names`]（Windows `CompareStringOrdinal` 忽略大小写）精确确认。
+/// 折叠只用于缩小候选集：语义上过桶只会多比、不会漏比，occupied 查询近似 O(1)。
+#[derive(Default)]
+struct OccupiedIndex {
+    buckets: std::collections::HashMap<Vec<u16>, Vec<OsString>>,
+}
+
+impl OccupiedIndex {
+    fn contains(&self, name: &OsStr) -> bool {
+        self.contains_with(name, &mut |left, right| {
+            compare_names(left, right) == Ordering::Equal
+        })
+    }
+
+    /// 可注入比较谓词的查询（测试用于断言比较次数增长阶）。
+    fn contains_with(
+        &self,
+        name: &OsStr,
+        is_equal: &mut dyn FnMut(&OsStr, &OsStr) -> bool,
+    ) -> bool {
+        self.buckets
+            .get(&case_fold_key(name))
+            .is_some_and(|bucket| bucket.iter().any(|existing| is_equal(existing, name)))
+    }
+
+    fn insert(&mut self, name: OsString) {
+        self.buckets
+            .entry(case_fold_key(&name))
+            .or_default()
+            .push(name);
+    }
+}
+
+/// 折叠键：逐 UTF-16 单元做简单大写折叠。ASCII 走快路径；非 ASCII 采用
+/// Unicode 单单元大写映射，多单元或无映射（含代理项）保留原单元。折叠与
+/// `CompareStringOrdinal` 的逐单元大写口径一致，不一致的极端情形只会把
+/// 候选落进不同桶后再精确比较（多比不漏比）。
+fn case_fold_key(name: &OsStr) -> Vec<u16> {
+    #[cfg(windows)]
+    {
+        use std::os::windows::ffi::OsStrExt;
+        name.encode_wide().map(fold_unit).collect()
+    }
+    #[cfg(not(windows))]
+    {
+        name.to_string_lossy()
+            .encode_utf16()
+            .map(fold_unit)
+            .collect()
+    }
+}
+
+fn fold_unit(unit: u16) -> u16 {
+    if unit < 0x80 {
+        return if (u16::from(b'a')..=u16::from(b'z')).contains(&unit) {
+            unit - 32
+        } else {
+            unit
+        };
+    }
+    if (0xD800..=0xDFFF).contains(&unit) {
+        return unit;
+    }
+    let Some(ch) = char::from_u32(u32::from(unit)) else {
+        return unit;
+    };
+    let mut upper = ch.to_uppercase();
+    let Some(mapped) = upper.next() else {
+        return unit;
+    };
+    if upper.next().is_some() || mapped.len_utf16() != 1 {
+        return unit;
+    }
+    u16::try_from(u32::from(mapped)).unwrap_or(unit)
+}
+
 fn scan(options: &Options, supported: &BTreeSet<String>) -> Result<Plan, String> {
     let input = checked_directory(&options.input_dir)?;
     let output = checked_directory(&options.output_dir)?;
@@ -259,7 +351,7 @@ fn scan(options: &Options, supported: &BTreeSet<String>) -> Result<Plan, String>
             b.strip_prefix(&input).unwrap_or(b),
         )
     });
-    let mut occupied = Vec::<OsString>::new();
+    let mut occupied = OccupiedIndex::default();
     let mut plan = Plan {
         output_root: output.clone(),
         ..Plan::default()
@@ -270,16 +362,12 @@ fn scan(options: &Options, supported: &BTreeSet<String>) -> Result<Plan, String>
             .map_err(|e| format!("输入路径超出根目录：{e}"))?
             .to_path_buf();
         let file_name = markdown_name(&source)?;
-        if options.flat
-            && occupied
-                .iter()
-                .any(|name| compare_names(name, &file_name) == Ordering::Equal)
-        {
+        if options.flat && occupied.contains(&file_name) {
             plan.summary.skipped_duplicate += 1;
             continue;
         }
         if options.flat {
-            occupied.push(file_name.clone());
+            occupied.insert(file_name.clone());
         }
         let target = if options.flat {
             output.join(file_name)
@@ -306,32 +394,62 @@ fn scan(options: &Options, supported: &BTreeSet<String>) -> Result<Plan, String>
     Ok(plan)
 }
 
+/// 格式清单探测的总超时：这是启动前的元数据查询，不受（也不占用）单文件预算，
+/// 但必须有界（F21/T-22），并响应停止请求（T-23）。
+const FORMATS_PROBE_TIMEOUT: Duration = Duration::from_secs(60);
+
 fn supported_formats(
     runtime_dir: &Path,
     groups: &[FormatGroup],
+    cancel: &AtomicBool,
 ) -> Result<BTreeSet<String>, String> {
     let mut command = Command::new(runtime_dir.join("xberg.exe"));
     command
         .args(["formats", "--format", "json"])
-        .current_dir(runtime_dir)
-        .stdin(Stdio::null());
+        .current_dir(runtime_dir);
     crate::markdown_document::apply_offline_environment(&mut command, runtime_dir);
-    #[cfg(windows)]
-    {
-        use std::os::windows::process::CommandExt;
-        command.creation_flags(0x0800_0000);
+    let output = run_formats_probe(&mut command, FORMATS_PROBE_TIMEOUT, cancel)?;
+    let mut selected = parse_formats(&output.stdout, groups)?;
+    if groups.contains(&FormatGroup::Media) {
+        selected.extend(MEDIA.iter().map(|extension| (*extension).to_string()));
     }
-    let output = command
-        .output()
-        .map_err(|e| format!("无法读取 Xberg 格式清单：{e}"))?;
+    Ok(selected)
+}
+
+/// 有界且可取消地运行格式清单探测（F21）：超时或取消后 kill + 限时收尾，
+/// 输出被截断时如实报错，不得把半截清单当完整结果。
+fn run_formats_probe(
+    command: &mut Command,
+    timeout: Duration,
+    cancel: &AtomicBool,
+) -> Result<crate::process::CapturedOutput, String> {
+    let result = crate::process::run_with_timeout_cancel(command, timeout, cancel);
+    let output = match result {
+        Ok(output) => output,
+        Err(error) => {
+            // 先判取消：停止不是错误（T-23），由调用方转为已停止汇总。
+            if cancel.load(AtomicOrdering::Relaxed) {
+                return Err("格式探测已取消".to_string());
+            }
+            return Err(format!("无法读取 Xberg 格式清单：{error:#}"));
+        }
+    };
     if !output.status.success() {
         return Err(format!(
             "Xberg 格式清单失败：{}",
             String::from_utf8_lossy(&output.stderr).trim()
         ));
     }
+    if output.stdout_truncated {
+        return Err("Xberg 格式清单输出被截断（超过捕获上限），不能当完整清单".to_string());
+    }
+    Ok(output)
+}
+
+/// 解析 Xberg formats JSON 并按分组筛入支持集（纯函数，便于回归）。
+fn parse_formats(stdout: &[u8], groups: &[FormatGroup]) -> Result<BTreeSet<String>, String> {
     let rows: Vec<serde_json::Value> =
-        serde_json::from_slice(&output.stdout).map_err(|e| format!("Xberg 格式清单无效：{e}"))?;
+        serde_json::from_slice(stdout).map_err(|e| format!("Xberg 格式清单无效：{e}"))?;
     let mut selected = BTreeSet::new();
     for row in rows {
         let Some(extension) = row.get("extension").and_then(serde_json::Value::as_str) else {
@@ -348,9 +466,6 @@ fn supported_formats(
         if selected_xberg_extension(&extension, mime, groups) {
             selected.insert(extension);
         }
-    }
-    if groups.contains(&FormatGroup::Media) {
-        selected.extend(MEDIA.iter().map(|extension| (*extension).to_string()));
     }
     Ok(selected)
 }
@@ -570,19 +685,23 @@ fn write_new_markdown(output_root: &Path, target: &Path, content: &str) -> Resul
     write_result
 }
 
-fn convert_media(path: &Path, timeout: Duration) -> Result<String, String> {
-    let worker = markdown_assets::media_worker_path();
-    if !worker.is_file() {
-        return Err("媒体工作进程未安装，请重新初始化转 Markdown 功能".to_string());
-    }
-    let mut command = Command::new(worker);
+/// 媒体工作进程一次运行的结果（F21：统一有界读 + 限时收尾）。
+#[derive(Debug)]
+struct MediaProcessOutput {
+    status: std::process::ExitStatus,
+    stdout: Vec<u8>,
+    stderr: Vec<u8>,
+}
+
+/// 运行媒体工作进程直到退出或单文件预算耗尽（F21/T-23/T-29）：读线程按
+/// 8 MiB 上限捕获，所有收尾 join 都经 `join_with_deadline` 限时，超时先经
+/// Job Object 终结整组进程（含 FFmpeg 子进程）再回收，孙进程持有管道写端时
+/// 超限放弃读线程，不永久阻塞宿主。
+fn run_media_process(
+    command: &mut Command,
+    deadline: &markdown_document::Deadline,
+) -> Result<MediaProcessOutput, String> {
     command
-        .arg("--input")
-        .arg(path)
-        .arg("--models")
-        .arg(markdown_assets::media_models_dir())
-        .env_remove("SHERPA_ONNX_DLL")
-        .env_remove("ALL2MARKDOWN_FFMPEG")
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
@@ -603,56 +722,101 @@ fn convert_media(path: &Path, timeout: Duration) -> Result<String, String> {
             return Err(error);
         }
     };
-    let stdout = child
+    let stdout_pipe = child
         .stdout
         .take()
         .ok_or_else(|| "无法读取媒体结果".to_string())?;
-    let stderr = child
+    let stderr_pipe = child
         .stderr
         .take()
         .ok_or_else(|| "无法读取媒体错误".to_string())?;
-    let output_thread = thread::spawn(move || {
-        let mut bytes = Vec::new();
-        let _ = std::io::BufReader::new(stdout).read_to_end(&mut bytes);
-        bytes
+    let stdout_thread = thread::spawn(move || {
+        crate::process::read_all_capped(stdout_pipe, crate::process::MAX_CAPTURE_BYTES)
     });
-    let error_thread = thread::spawn(move || {
-        let mut bytes = Vec::new();
-        let _ = std::io::BufReader::new(stderr).read_to_end(&mut bytes);
-        bytes
+    let stderr_thread = thread::spawn(move || {
+        crate::process::read_all_capped(stderr_pipe, crate::process::MAX_CAPTURE_BYTES)
     });
-    let started = Instant::now();
+    let terminate_and_wait = |child: &mut std::process::Child| {
+        #[cfg(windows)]
+        job.terminate();
+        #[cfg(not(windows))]
+        let _ = child.kill();
+        let _ = child.wait();
+    };
     let status = loop {
         match child.try_wait() {
             Ok(Some(status)) => break status,
-            Ok(None) if started.elapsed() >= timeout => {
-                #[cfg(windows)]
-                job.terminate();
-                #[cfg(not(windows))]
-                let _ = child.kill();
-                let _ = child.wait();
-                let _ = output_thread.join();
-                let _ = error_thread.join();
-                return Err(format!("媒体转换超过 {} 秒", timeout.as_secs()));
+            Ok(None) if deadline.expired() => {
+                terminate_and_wait(&mut child);
+                // 读线程可能因孙进程持有管道写端而不 EOF：限时收尾，超限放弃。
+                let _ = crate::process::join_with_deadline(
+                    stdout_thread,
+                    crate::process::PIPE_DRAIN_GRACE,
+                );
+                let _ = crate::process::join_with_deadline(
+                    stderr_thread,
+                    crate::process::PIPE_DRAIN_GRACE,
+                );
+                return Err(format!("媒体转换超时（{} 秒）", deadline.total().as_secs()));
             }
-            Ok(None) => thread::sleep(Duration::from_millis(100)),
-            Err(e) => return Err(format!("无法查询媒体工作进程状态：{e}")),
+            Ok(None) => thread::sleep(Duration::from_millis(50)),
+            Err(e) => {
+                terminate_and_wait(&mut child);
+                let _ = crate::process::join_with_deadline(
+                    stdout_thread,
+                    crate::process::PIPE_DRAIN_GRACE,
+                );
+                let _ = crate::process::join_with_deadline(
+                    stderr_thread,
+                    crate::process::PIPE_DRAIN_GRACE,
+                );
+                return Err(format!("无法查询媒体工作进程状态：{e}"));
+            }
         }
     };
-    let stdout = output_thread
-        .join()
-        .map_err(|_| "读取媒体结果失败".to_string())?;
-    let stderr = error_thread
-        .join()
-        .map_err(|_| "读取媒体错误失败".to_string())?;
-    if !status.success() {
+    // 正常退出后同样限时收尾：管道未能在宽限期内排空（孙进程持写端）时按
+    // 不完整处理，不得把半截输出当完整 JSON。
+    let stdout =
+        crate::process::join_with_deadline(stdout_thread, crate::process::PIPE_DRAIN_GRACE)
+            .ok_or_else(|| "媒体结果输出未能在收尾期内读满，结果可能不完整".to_string())?;
+    let stderr =
+        crate::process::join_with_deadline(stderr_thread, crate::process::PIPE_DRAIN_GRACE)
+            .unwrap_or_default();
+    if let Some(error) = stdout.error {
+        return Err(format!("读取媒体结果失败：{error}"));
+    }
+    if stdout.truncated {
+        return Err("媒体结果输出被截断（超过捕获上限），不能当完整结果".to_string());
+    }
+    Ok(MediaProcessOutput {
+        status,
+        stdout: stdout.data,
+        stderr: stderr.data,
+    })
+}
+
+fn convert_media(path: &Path, deadline: &markdown_document::Deadline) -> Result<String, String> {
+    let worker = markdown_assets::media_worker_path();
+    if !worker.is_file() {
+        return Err("媒体工作进程未安装，请重新初始化转 Markdown 功能".to_string());
+    }
+    let mut command = Command::new(worker);
+    command
+        .arg("--input")
+        .arg(path)
+        .arg("--models")
+        .arg(markdown_assets::media_models_dir())
+        .env_remove("SHERPA_ONNX_DLL")
+        .env_remove("ALL2MARKDOWN_FFMPEG");
+    let output = run_media_process(&mut command, deadline)?;
+    if !output.status.success() {
         return Err(format!(
             "媒体转换失败：{}",
-            String::from_utf8_lossy(&stderr).trim()
+            String::from_utf8_lossy(&output.stderr).trim()
         ));
     }
     let value: serde_json::Value =
-        serde_json::from_slice(&stdout).map_err(|e| format!("媒体结果格式错误：{e}"))?;
+        serde_json::from_slice(&output.stdout).map_err(|e| format!("媒体结果格式错误：{e}"))?;
     value
         .get("markdown")
         .and_then(serde_json::Value::as_str)
@@ -733,9 +897,21 @@ impl Drop for MediaProcessJob {
 #[cfg(test)]
 mod tests {
     use super::{
-        compare_paths, scan, selected_xberg_extension, write_new_markdown, FormatGroup, Options,
+        compare_names, compare_paths, parse_formats, run_formats_probe, run_media_process, scan,
+        selected_xberg_extension, write_new_markdown, FormatGroup, OccupiedIndex, Options,
     };
-    use std::{cmp::Ordering, collections::BTreeSet, fs, path::PathBuf};
+    use crate::markdown_document::Deadline;
+    use std::{
+        cmp::Ordering,
+        collections::BTreeSet,
+        ffi::{OsStr, OsString},
+        fs,
+        path::PathBuf,
+        process::Command,
+        sync::atomic::{AtomicBool, Ordering as AtomicOrdering},
+        thread,
+        time::{Duration, Instant},
+    };
 
     fn supported() -> BTreeSet<String> {
         ["pdf", "docx"].into_iter().map(str::to_string).collect()
@@ -851,5 +1027,218 @@ mod tests {
         assert!(error.contains("已有结果不会覆盖"));
         assert_eq!(fs::read(&target).unwrap(), b"old");
         assert_eq!(fs::read_dir(temp.path()).unwrap().count(), 1);
+    }
+
+    // ── F21：格式清单探测必须有界、可取消，输出截断不得当完整清单 ──
+
+    #[cfg(windows)]
+    fn hanging_command() -> Command {
+        let mut command = Command::new("powershell");
+        command.args(["-NoProfile", "-Command", "Start-Sleep -Seconds 60"]);
+        command
+    }
+
+    #[cfg(not(windows))]
+    fn hanging_command() -> Command {
+        let mut command = Command::new("sleep");
+        command.arg("60");
+        command
+    }
+
+    #[cfg(windows)]
+    fn spewing_command(mib: usize) -> Command {
+        let mut command = Command::new("powershell");
+        command.args([
+            "-NoProfile",
+            "-Command",
+            &format!("[Console]::Out.Write(('x' * {}))", mib * 1024 * 1024),
+        ]);
+        command
+    }
+
+    // 覆盖 T-22/T-24（F21）：探测进程挂起时必须受总超时约束，宿主在预算内恢复。
+    #[test]
+    fn formats_probe_times_out_on_hanging_process() {
+        let mut command = hanging_command();
+        let cancel = AtomicBool::new(false);
+        let started = Instant::now();
+        let result = run_formats_probe(&mut command, Duration::from_millis(400), &cancel);
+        assert!(result.is_err(), "挂起进程必须在探测超时后失败");
+        assert!(
+            started.elapsed() < Duration::from_secs(5),
+            "探测超时后应立即返回，实际 {:?}",
+            started.elapsed()
+        );
+    }
+
+    // 覆盖 T-23（F21）：停止请求必须立刻中断格式探测，不等满超时。
+    #[test]
+    fn formats_probe_stops_promptly_on_cancel() {
+        use std::sync::Arc;
+        let mut command = hanging_command();
+        let cancel = Arc::new(AtomicBool::new(false));
+        let setter = cancel.clone();
+        thread::spawn(move || {
+            thread::sleep(Duration::from_millis(200));
+            setter.store(true, AtomicOrdering::Relaxed);
+        });
+        let started = Instant::now();
+        let result = run_formats_probe(&mut command, Duration::from_secs(60), &cancel);
+        assert!(result.is_err(), "取消后探测应失败");
+        assert!(cancel.load(AtomicOrdering::Relaxed));
+        assert!(
+            started.elapsed() < Duration::from_secs(5),
+            "取消后应立即返回，实际 {:?}",
+            started.elapsed()
+        );
+    }
+
+    // 覆盖 T-24（F21）：探测输出超过捕获上限时报截断错误，不得当完整清单解析。
+    #[cfg(windows)]
+    #[test]
+    fn formats_probe_reports_truncated_output() {
+        let mut command = spewing_command(9);
+        let cancel = AtomicBool::new(false);
+        let result = run_formats_probe(&mut command, Duration::from_secs(60), &cancel);
+        let error = result.expect_err("截断的输出不得当成功");
+        assert!(
+            error.contains("截断") || error.contains("不完整"),
+            "应说明输出不完整：{error}"
+        );
+    }
+
+    // 覆盖 T-07/T-08（F21 守护）：探测正常返回时捕获完整输出。
+    #[cfg(windows)]
+    #[test]
+    fn formats_probe_captures_valid_output() {
+        let mut command = Command::new("powershell");
+        command.args([
+            "-NoProfile",
+            "-Command",
+            "[Console]::Out.Write('[{\"extension\":\".pdf\",\"mime_type\":\"application/pdf\"}]')",
+        ]);
+        let cancel = AtomicBool::new(false);
+        let output = run_formats_probe(&mut command, Duration::from_secs(60), &cancel)
+            .expect("正常探测应成功");
+        assert!(String::from_utf8_lossy(&output.stdout).contains("pdf"));
+    }
+
+    // 覆盖 T-07/T-08：清单行按分组与媒体例外筛入支持集（纯函数回归）。
+    #[test]
+    fn parse_formats_filters_rows_by_group() {
+        let stdout: &[u8] = concat!(
+            r#"[{"extension":".pdf","mime_type":"application/pdf"},"#,
+            r#"{"extension":".MP4","mime_type":"video/mp4"},"#,
+            r#"{"extension":"wmv","mime_type":"video/x-ms-wmv"},"#,
+            r#"{"extension":"","mime_type":"application/pdf"},"#,
+            r#"{"extension":"tar.gz","mime_type":"application/x-tar"},"#,
+            r#"{"extension":".docx","mime_type":"application/vnd.wordprocessing"}]"#
+        )
+        .as_bytes();
+        let groups = vec![FormatGroup::Pdf, FormatGroup::Office, FormatGroup::Media];
+        let selected = parse_formats(stdout, &groups).expect("合法清单应解析");
+        let expected: BTreeSet<String> = ["pdf", "mp4", "docx"]
+            .into_iter()
+            .map(str::to_string)
+            .collect();
+        assert_eq!(selected, expected);
+    }
+
+    // ── F21：媒体工作进程收尾必须有界 ──
+
+    // 覆盖 T-23/T-29（F21）：媒体进程挂死时按预算终结整组进程并恢复，不永久阻塞。
+    #[test]
+    fn media_process_deadline_recovers_from_hung_worker() {
+        let mut command = hanging_command();
+        let deadline = Deadline::new(Duration::from_millis(400));
+        let started = Instant::now();
+        let result = run_media_process(&mut command, &deadline);
+        let error = result.expect_err("挂死的媒体进程必须超时失败");
+        assert!(error.contains("媒体转换超时"), "{error}");
+        assert!(
+            started.elapsed() < Duration::from_secs(5),
+            "超时后应立即返回，实际 {:?}",
+            started.elapsed()
+        );
+    }
+
+    // 覆盖 T-25（F21）：媒体输出被截断时必须失败，不得把半截 JSON 当结果。
+    #[cfg(windows)]
+    #[test]
+    fn media_process_truncated_output_fails() {
+        let mut command = spewing_command(9);
+        let deadline = Deadline::new(Duration::from_secs(60));
+        let result = run_media_process(&mut command, &deadline);
+        let error = result.expect_err("截断的媒体输出必须失败");
+        assert!(
+            error.contains("截断") || error.contains("不完整"),
+            "应说明输出不完整：{error}"
+        );
+    }
+
+    // 覆盖 T-22（F21 守护）：正常退出进程的输出完整返回。
+    #[cfg(windows)]
+    #[test]
+    fn media_process_returns_complete_output() {
+        let mut command = Command::new("powershell");
+        command.args([
+            "-NoProfile",
+            "-Command",
+            "[Console]::Out.Write('{\"markdown\":\"ok\"}')",
+        ]);
+        let deadline = Deadline::new(Duration::from_secs(60));
+        let output = run_media_process(&mut command, &deadline).expect("正常进程应成功返回");
+        assert_eq!(output.stdout, b"{\"markdown\":\"ok\"}".to_vec());
+        assert!(output.status.success());
+    }
+
+    // ── F29：平铺占用名查询不随规模线性增长比较次数 ──
+
+    // 覆盖 T-11（F29 性能修复，语义不变）：1 千/1 万互异目标的比较次数都近似为零，
+    // 增长阶不再随占用名规模线性上升。
+    #[test]
+    fn occupied_index_compare_count_does_not_grow_with_size() {
+        for size in [1_000usize, 10_000] {
+            let mut index = OccupiedIndex::default();
+            for i in 0..size {
+                index.insert(OsString::from(format!("file{i}_pdf.md")));
+            }
+            let compares = {
+                let mut compares = 0usize;
+                let mut probe = |a: &OsStr, b: &OsStr| {
+                    compares += 1;
+                    compare_names(a, b) == Ordering::Equal
+                };
+                for i in 0..100 {
+                    let name = OsString::from(format!("probe{i}_pdf.md"));
+                    assert!(!index.contains_with(&name, &mut probe));
+                }
+                compares
+            };
+            assert_eq!(
+                compares, 0,
+                "互异目标应命中不同桶，规模 {size} 时不应发生逐一比较"
+            );
+        }
+    }
+
+    // 覆盖 T-11（F29）：大小写等价变体落入同桶，恰好一次精确比较即判重。
+    #[test]
+    fn occupied_index_case_variant_hits_single_bucket() {
+        let mut index = OccupiedIndex::default();
+        index.insert(OsString::from("Report_pdf.md"));
+        let compares = {
+            let mut compares = 0usize;
+            let mut probe = |a: &OsStr, b: &OsStr| {
+                compares += 1;
+                compare_names(a, b) == Ordering::Equal
+            };
+            let duplicate = OsString::from("REPORT_pdf.md");
+            assert!(index.contains_with(&duplicate, &mut probe));
+            let distinct = OsString::from("Reports_pdf.md");
+            assert!(!index.contains_with(&distinct, &mut probe));
+            compares
+        };
+        assert_eq!(compares, 1, "大小写变体应在同桶内一次精确确认");
     }
 }
