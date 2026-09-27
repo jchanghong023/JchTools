@@ -4476,11 +4476,22 @@ fn start_snap_initialize(ui: &AppWindow, state: &Rc<RefCell<State>>) {
 /// 每条请求打开独立管道连接；服务重启时无需保存失效句柄。
 #[cfg(windows)]
 fn snap_pipe_request(request: &serde_json::Value) -> Result<serde_json::Value, String> {
-    let mut stream = std::fs::OpenOptions::new()
-        .read(true)
-        .write(true)
-        .open(snap_ocr_assets::pipe_name())
-        .map_err(|error| format!("无法连接截图服务：{error}"))?;
+    let deadline = Instant::now() + Duration::from_secs(2);
+    let mut stream = loop {
+        match std::fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .open(snap_ocr_assets::pipe_name())
+        {
+            Ok(stream) => break stream,
+            // 服务只有一个管道实例。前一条响应写出后，它还需断开客户端并
+            // 重新等待连接；立即发送下一条请求时应等待这个正常交接窗口。
+            Err(error) if error.raw_os_error() == Some(231) && Instant::now() < deadline => {
+                std::thread::sleep(Duration::from_millis(10));
+            }
+            Err(error) => return Err(format!("无法连接截图服务：{error}")),
+        }
+    };
     let mut payload =
         serde_json::to_vec(request).map_err(|error| format!("请求编码失败：{error}"))?;
     payload.push(b'\n');
