@@ -42,6 +42,7 @@ import importlib.util
 import io
 import json
 import os
+import shlex
 import shutil
 import signal
 import subprocess
@@ -346,6 +347,13 @@ def _fulltest_stages(results: list[StageResult]) -> None:
         "-GuiData",
         str(GUI_DATA_DIR),
     ]
+    # F26：转 Markdown 验收承接（ALL2MARKDOWN 附录 A）。无资产时 acceptance.ps1 记 NOT RUN 不失败；
+    # 有被测物/资产的机器设 JCHTOOLS_MD_ACCEPTANCE_ARGS 透传参数，或 JCHTOOLS_MD_ACCEPTANCE=1 仅开入口。
+    md_args = os.environ.get("JCHTOOLS_MD_ACCEPTANCE_ARGS", "").strip()
+    if md_args:
+        acceptance_argv += ["-WithMarkdownAcceptance", "-MarkdownArgs", *shlex.split(md_args)]
+    elif os.environ.get("JCHTOOLS_MD_ACCEPTANCE", "") == "1":
+        acceptance_argv += ["-WithMarkdownAcceptance"]
     # 本机执行策略全作用域 Undefined（默认 Restricted）会拒绝任何 -File 运行 .ps1；
     # PSExecutionPolicyPreference 以 Process 作用域覆盖之，且随环境继承给
     # acceptance.ps1 内部再起的 powershell 子进程，只影响本进程树。

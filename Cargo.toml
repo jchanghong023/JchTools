@@ -78,6 +78,15 @@ name = "JchTools"
 path = "src/main.rs"
 required-features = ["gui"]
 
+[workspace]
+# F23：可选媒体 worker 纳入 workspace——统一锁文件，使根 cargo audit/deny 覆盖其依赖。
+# default-members 保持仅主包：日常 cargo build/test 与打包脚本行为不变；
+# worker 的测试与 clippy 由 CI（check.yml）与 acceptance.ps1 以 --manifest-path 显式覆盖
+#（可选分发不等于可选验证）。
+members = ["optional/markdown-media-worker"]
+default-members = ["."]
+resolver = "2"
+
 [profile.release]
 lto = "thin"
 codegen-units = 1
