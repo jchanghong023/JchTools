@@ -40,17 +40,12 @@ $releaseDir = Join-Path $targetDir 'release'
 Invoke-Cargo (@('build','--locked','--release','--manifest-path','optional/snap-ocr-worker/Cargo.toml','--bin','snap-ocr-worker') + $extra)
 $workerExe = Join-Path $releaseDir 'snap-ocr-worker.exe'
 if (-not (Test-Path -LiteralPath $workerExe -PathType Leaf)) {throw "Optional OCR worker build did not produce $workerExe"}
-$workerBytes = (Get-Item -LiteralPath $workerExe).Length
-if ($workerBytes -le 0) {throw 'Optional OCR worker executable is empty.'}
-$workerSha = (Get-FileHash -LiteralPath $workerExe -Algorithm SHA256).Hash.ToLowerInvariant()
+$builtWorkerBytes = (Get-Item -LiteralPath $workerExe).Length
+if ($builtWorkerBytes -le 0) {throw 'Optional OCR worker executable is empty.'}
+$builtWorkerSha = (Get-FileHash -LiteralPath $workerExe -Algorithm SHA256).Hash.ToLowerInvariant()
 $optionalStage = Join-Path $root 'dist\optional-components-v0.1.1'
 New-Item -ItemType Directory -Path $optionalStage -Force | Out-Null
 $stagedWorker = Join-Path $optionalStage 'snap-ocr-worker.exe'
-Copy-Item -LiteralPath $workerExe -Destination $stagedWorker -Force
-if ((Get-Item -LiteralPath $stagedWorker).Length -ne $workerBytes -or
-    (Get-FileHash -LiteralPath $stagedWorker -Algorithm SHA256).Hash.ToLowerInvariant() -cne $workerSha) {
-    throw 'Optional OCR worker staging changed the executable bytes.'
-}
 $manifest = Get-Content -LiteralPath 'resources\snap-ocr-assets.json' -Raw -Encoding UTF8 | ConvertFrom-Json
 $workers = @($manifest.workers)
 if ($workers.Count -ne 1 -or $workers[0].id -cne 'snap-ocr-worker' -or
@@ -58,9 +53,35 @@ if ($workers.Count -ne 1 -or $workers[0].id -cne 'snap-ocr-worker' -or
     $workers[0].archive_type -cne 'file' -or
     $workers[0].install_path -cne 'worker/v0.1.1/snap-ocr-worker.exe' -or
     $workers[0].status -cne 'ok' -or
-    $workers[0].size_bytes -ne $workerBytes -or
-    $workers[0].sha256 -cne $workerSha) {
-    throw 'Optional OCR worker does not match the pinned release URL, size, SHA-256, or destination; publish a new version before packaging.'
+    $workers[0].size_bytes -le 0 -or
+    $workers[0].sha256 -notmatch '^[0-9a-f]{64}$') {
+    throw 'Optional OCR worker manifest does not contain the pinned release URL, size, SHA-256, and destination.'
+}
+$workerBytes = [long]$workers[0].size_bytes
+$workerSha = [string]$workers[0].sha256
+if ($builtWorkerBytes -eq $workerBytes -and $builtWorkerSha -ceq $workerSha) {
+    Copy-Item -LiteralPath $workerExe -Destination $stagedWorker -Force
+} elseif ($Offline) {
+    throw "Offline package worker differs from the pinned asset (built $builtWorkerBytes/$builtWorkerSha; expected $workerBytes/$workerSha)."
+} else {
+    # The released worker is the byte identity users download. Rust/COFF toolchain
+    # versions may produce different local bytes from the same source, so package
+    # that pinned asset when the just-built validation binary is not byte-identical.
+    $download = "$stagedWorker.download"
+    try {
+        Invoke-WebRequest -Uri $workers[0].url -UseBasicParsing -OutFile $download
+        if ((Get-Item -LiteralPath $download).Length -ne $workerBytes -or
+            (Get-FileHash -LiteralPath $download -Algorithm SHA256).Hash.ToLowerInvariant() -cne $workerSha) {
+            throw 'Downloaded OCR worker does not match the pinned size and SHA-256.'
+        }
+        Move-Item -LiteralPath $download -Destination $stagedWorker -Force
+    } finally {
+        if (Test-Path -LiteralPath $download) {Remove-Item -LiteralPath $download -Force}
+    }
+}
+if ((Get-Item -LiteralPath $stagedWorker).Length -ne $workerBytes -or
+    (Get-FileHash -LiteralPath $stagedWorker -Algorithm SHA256).Hash.ToLowerInvariant() -cne $workerSha) {
+    throw 'Optional OCR worker staging changed the pinned executable bytes.'
 }
 $stagedManifest = Join-Path $optionalStage 'snap-ocr-assets.json'
 Copy-Item -LiteralPath 'resources\snap-ocr-assets.json' -Destination $stagedManifest -Force
