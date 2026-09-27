@@ -124,27 +124,32 @@ pub struct TaskResult {
 /// 原路径前」时残留无法自愈，扫描对其永久剪枝且无其它回收路径。残留是指向 keeper
 /// 内容的硬链接，删除后内容仍由保留文件持有。24 小时阈值与 clean_orphan_staging
 /// 一致，避免误删并发任务的临时文件。
-/// H-06：Git 目录树整树排除——识别边界后不遍历内部、不清理其中任何内容；崩溃残留
-/// 只可能出现在参与过去重的目录里，而 Git 树从不参与处理，剪枝不损失回收路径。
-fn clean_orphan_link_temps(root: &Path) -> usize {
+/// S-01/F02：清理名单只来自分析阶段登记的「本次处理范围内疑似残留」（见 scan 的
+/// link_residues：扫描时未命中任何范围剪枝规则——glob 排除、非递归深层、隐藏/系统
+/// 范围外、隔离容器、Git 整树排除等都不得越出），执行时逐项复核既有谓词：名称前缀、
+/// 仍是硬链接（链接数 ≥ 2，内容另有链接持有）、修改超过 24 小时；任一不满足即保留。
+/// 普通同名文件可能是用户文件或从压缩包解出的同名成员，静默删除即数据丢失。
+/// 残留是本工具自有临时文件：不经计划行、不按用户删除方式处置，一律永久删除；
+/// 分析日志已在确认前明示数量与清理条件（S-01：不得范围外静默删除）。
+fn clean_orphan_link_temps(job: &mut Job) -> Result<usize> {
+    let rels: Vec<String> = job.db.get("link_residues").unwrap_or_default();
+    if rels.is_empty() {
+        return Ok(0);
+    }
     let now = std::time::SystemTime::now();
     let mut removed = 0;
-    for entry in walkdir::WalkDir::new(root)
-        .follow_links(false)
-        .into_iter()
-        .filter_entry(|entry| {
-            !entry.file_type().is_dir() || !fsutil::is_git_root(entry.path()).unwrap_or(true)
-        })
-        .filter_map(std::result::Result::ok)
-    {
-        let path = entry.path();
+    for rel in &rels {
+        job.context.control.checkpoint()?;
+        let Ok(path) = fsutil::safe_join(&job.root, rel) else {
+            continue;
+        };
         let Some(name) = path.file_name().and_then(|n| n.to_str()) else {
             continue;
         };
-        if !name.starts_with(".jchtools-link-") || !entry.file_type().is_file() {
+        if !name.starts_with(".jchtools-link-") {
             continue;
         }
-        let stale = fs::symlink_metadata(path)
+        let stale = fs::symlink_metadata(&path)
             .and_then(|m| m.modified())
             .ok()
             .and_then(|m| now.duration_since(m).ok())
@@ -152,16 +157,22 @@ fn clean_orphan_link_temps(root: &Path) -> usize {
         if !stale {
             continue;
         }
-        // 只有仍是硬链接（链接数 >= 2，内容另有链接持有，与崩溃残留的不变量一致）才清扫；
-        // 普通同名文件可能是用户文件或从压缩包解出的同名成员，静默删除即数据丢失。
-        // 只有仍是硬链接（链接数 >= 2，内容另有链接持有，与崩溃残留的不变量一致）才清扫；
-        // 普通同名文件可能是用户文件或从压缩包解出的同名成员，静默删除即数据丢失。
-        let residue = fsutil::snapshot(path).is_ok_and(|s| s.links >= 2);
-        if residue && fs::remove_file(path).is_ok() {
+        let residue = fsutil::snapshot(&path).is_ok_and(|s| s.links >= 2);
+        if residue && fs::remove_file(&path).is_ok() {
             removed += 1;
         }
     }
-    removed
+    Ok(removed)
+}
+/// 解析 S-05 的受保护目录：Windows 读取 SystemRoot 并规范化（缺失或不可访问时
+/// 报错拒绝开始，不得静默失去系统目录保护）；非 Windows 无此概念，返回 None。
+#[cfg(windows)]
+fn resolve_protection() -> Result<Option<PathBuf>> {
+    Ok(Some(fsutil::protected_root()?))
+}
+#[cfg(not(windows))]
+fn resolve_protection() -> Result<Option<PathBuf>> {
+    Ok(None)
 }
 pub fn prepare(root: &Path, config: Config, context: TaskContext) -> Result<TaskResult> {
     prepare_at(root, config, context, &config::state_dir()?)
@@ -178,8 +189,22 @@ pub fn prepare_at(
     context: TaskContext,
     state: &Path,
 ) -> Result<TaskResult> {
+    let protected = resolve_protection()?;
+    prepare_at_with(root, config, context, state, protected.as_deref())
+}
+/// S-05 受保护目录参数化变体（测试注入合成受保护目录），其余行为与 [`prepare_at`] 一致。
+fn prepare_at_with(
+    root: &Path,
+    config: Config,
+    context: TaskContext,
+    state: &Path,
+    protected: Option<&Path>,
+) -> Result<TaskResult> {
     config.validate()?;
-    let root = fsutil::normalize_root(root)?;
+    // S-04：先在用户原始路径上检查链接边界（canonicalize 会解析掉 reparse 身份）；
+    // 拒绝时不创建任务库、不扫描。
+    fsutil::ensure_plain_entry(root)?;
+    let (root, protected) = fsutil::normalize_root_with(root, protected)?;
     // H-06：选定根目录直接含 .git 时整次处理不执行，明确提示且不创建任务库。
     anyhow::ensure!(!fsutil::is_git_root(&root)?, ROOT_GIT_MESSAGE);
     // H-06：祖先直接含 .git 同样拒绝整次处理（不拆散项目子树）。
@@ -213,7 +238,7 @@ pub fn prepare_at(
         // 它们被扫描永久剪枝，不影响计划正确性；清扫统一在 apply_with 执行前进行）。
         // C-01：目录整理的分析阶段只读——不解压（解压职责整体移交「递归解压」工具，X-01），
         // 扫描即终态；树里既有压缩包按普通文件参与后续去重/归类。
-        scan(&mut job, false, state)?;
+        scan(&mut job, false, state, protected.as_deref())?;
         hash_candidates(&mut job)?;
         job.context
             .status("生成去重、冲突、归类和清理计划（尚未执行这些操作）");
@@ -278,7 +303,15 @@ pub fn extract_run_at(
     state: &Path,
     engine_path: Option<&Path>,
 ) -> Result<TaskResult> {
-    extract_run_with(root, config, context, state, engine_path)
+    let protected = resolve_protection()?;
+    extract_run_with(
+        root,
+        config,
+        context,
+        state,
+        engine_path,
+        protected.as_deref(),
+    )
 }
 #[cfg_attr(
     feature = "perf-tracing",
@@ -290,9 +323,13 @@ fn extract_run_with(
     context: TaskContext,
     state: &Path,
     engine_path: Option<&Path>,
+    protected: Option<&Path>,
 ) -> Result<TaskResult> {
     config.validate()?;
-    let root = fsutil::normalize_root(root)?;
+    // S-04：先在用户原始路径上检查链接边界（canonicalize 会解析掉 reparse 身份）；
+    // 拒绝时不创建任务库、不扫描、不解压。
+    fsutil::ensure_plain_entry(root)?;
+    let (root, protected) = fsutil::normalize_root_with(root, protected)?;
     // X-07：所选根本身名为「解压失败」时不开始解压，提示先移出待重试的包。
     anyhow::ensure!(!root_is_quarantine(&root), ROOT_QUARANTINE_MESSAGE);
     // H-06：选定根目录直接含 .git 时整次处理不执行，明确提示且不创建任务库。
@@ -322,7 +359,7 @@ fn extract_run_with(
         summary: Summary::default(),
     };
     let result = (|| {
-        scan(&mut job, true, state)?;
+        scan(&mut job, true, state, protected.as_deref())?;
         let count: i64 = job.db.conn.query_row(
             "SELECT COUNT(*) FROM archives WHERE state='pending'",
             [],
@@ -396,8 +433,15 @@ fn extract_run_with(
     tracing::instrument(target = "perf", name = "count_archives", skip_all)
 )]
 pub fn count_archives(root: &Path, config: &Config) -> Result<u64> {
+    let protected = resolve_protection()?;
+    count_archives_with(root, config, protected.as_deref())
+}
+/// S-05 受保护目录参数化变体（测试注入合成受保护目录），其余行为与 [`count_archives`] 一致。
+fn count_archives_with(root: &Path, config: &Config, protected: Option<&Path>) -> Result<u64> {
     config.validate()?;
-    let root = fsutil::normalize_root(root)?;
+    // S-04：先在用户原始路径上检查链接边界（canonicalize 会解析掉 reparse 身份）。
+    fsutil::ensure_plain_entry(root)?;
+    let (root, protected_prune) = fsutil::normalize_root_with(root, protected)?;
     // X-07：所选根本身名为「解压失败」时不开始解压，确认框清点同样拒绝。
     anyhow::ensure!(!root_is_quarantine(&root), ROOT_QUARANTINE_MESSAGE);
     // H-06：选定根目录直接含 .git 时整次处理不执行，确认框清点同样拒绝。
@@ -417,6 +461,10 @@ pub fn count_archives(root: &Path, config: &Config) -> Result<u64> {
         // 选定根位于状态目录/程序目录内：扫描将整树剪枝，清点必须同为 0。
         return Ok(0);
     }
+    // S-05：根包含 Windows 系统目录时该子树整树剪枝，清点与扫描同一口径。
+    let protected_prefix = protected_prune
+        .as_ref()
+        .and_then(|dir| fsutil::relative_string(&root, dir).ok());
     // 剪枝口径与扫描共用同一个实现（避免两处各自漂移成不同范围）。
     let scope_filter = ScopeFilter {
         excluded: &excluded,
@@ -425,6 +473,7 @@ pub fn count_archives(root: &Path, config: &Config) -> Result<u64> {
         quarantine: Some(archive::QUARANTINE_DIR_NAME),
         state_prefix,
         exe_prefix,
+        protected_prefix,
         root_under_special,
     };
     // X-10：缺主包的老式族尾卷组按「残缺但可归组的卷集计一包」参与清点。
@@ -524,6 +573,10 @@ struct ScanSink {
     taint: HashSet<String>,
     /// 整树排除的 Git 目录（目录直接含 .git 的 rel）：只用于界面提示与 git_roots 表。
     git_skips: Vec<String>,
+    /// S-01/F02：位于本次处理范围内、因保留名剪枝的 .jchtools-link-* 普通文件
+    /// （疑似上次执行崩溃残留的硬链接临时文件）。只供目录整理流程登记进任务库、
+    /// 执行开始时按既有谓词清理；扫描本身仍然只读。
+    link_residues: Vec<String>,
 }
 fn lock_sink(sink: &Mutex<ScanSink>) -> std::sync::MutexGuard<'_, ScanSink> {
     // 锁中毒只可能因持锁线程 panic；本模块持锁期间不 panic，恢复数据是安全回退。
@@ -542,20 +595,38 @@ struct ScopeFilter<'a> {
     /// 状态目录/程序目录位于选定根内的相对路径前缀（剪枝其子树）。
     state_prefix: Option<String>,
     exe_prefix: Option<String>,
+    /// S-05：根包含 Windows 系统目录时该子树的相对路径前缀（整树剪枝并提示）。
+    protected_prefix: Option<String>,
     /// 选定根本身位于状态目录或程序目录内：整棵树按旧口径全部剪枝。
     root_under_special: bool,
 }
 impl ScopeFilter<'_> {
     fn prunes(&self, child_rel: &str, name: &str, metadata: &fs::Metadata) -> bool {
+        // .jchtools-link-* 是本工具崩溃残留的保留名：一律剪枝（不入盘点）；
+        // 「是否同时还在本次处理范围内」由 walk_dir 结合 prunes_other 判定后登记。
+        if name.starts_with(".jchtools-link-") {
+            return true;
+        }
+        self.prunes_other(child_rel, name, metadata)
+    }
+    /// 除 .jchtools-link-* 名称规则外的全部剪枝判定。
+    /// 供 walk_dir 判断一个 .jchtools-link-* 条目是否「仅在保留名口径下被剪枝」
+    /// （= 位于本次处理范围内，可登记为疑似残留供执行前清理）。
+    /// `name` 仅非 Windows 的点开头隐藏判定使用（P-07：产品仅在 Windows 构建）。
+    #[cfg_attr(windows, allow(unused_variables))]
+    fn prunes_other(&self, child_rel: &str, name: &str, metadata: &fs::Metadata) -> bool {
         if self.root_under_special
             || fsutil::is_link(metadata)
             || child_rel == ".jchtools-work"
             || child_rel.starts_with(".jchtools-work/")
-            || name.starts_with(".jchtools-link-")
         {
             return true;
         }
-        for prefix in [self.state_prefix.as_deref(), self.exe_prefix.as_deref()] {
+        for prefix in [
+            self.state_prefix.as_deref(),
+            self.exe_prefix.as_deref(),
+            self.protected_prefix.as_deref(),
+        ] {
             if prefix.is_some_and(|p| child_rel == p || child_rel.starts_with(&format!("{p}/"))) {
                 return true;
             }
@@ -692,6 +763,15 @@ fn walk_dir<'a>(
             format!("{rel}/{name}")
         };
         if ctx.scope.prunes(&child_rel, &name, &metadata) {
+            // S-01/F02：.jchtools-link-* 命名剪枝、且未命中任何其他范围规则的普通文件
+            // 是「位于本次处理范围内」的疑似崩溃残留：登记供执行前清理与界面明示，
+            // 删除范围不再由执行期的独立全盘扫描决定。
+            if metadata.is_file()
+                && name.starts_with(".jchtools-link-")
+                && !ctx.scope.prunes_other(&child_rel, &name, &metadata)
+            {
+                lock_sink(ctx.sink).link_residues.push(child_rel);
+            }
             // 被剪枝的条目盘上仍存在：其父目录不得按空目录处理。
             parent_tainted = true;
             continue;
@@ -897,7 +977,7 @@ fn special_prefixes(
     feature = "perf-tracing",
     tracing::instrument(target = "perf", name = "scan", skip_all)
 )]
-fn scan(job: &mut Job, enqueue: bool, state: &Path) -> Result<()> {
+fn scan(job: &mut Job, enqueue: bool, state: &Path, protected: Option<&Path>) -> Result<()> {
     job.context.status(if enqueue {
         "扫描所选目录，登记待解压的压缩包"
     } else {
@@ -911,6 +991,8 @@ fn scan(job: &mut Job, enqueue: bool, state: &Path) -> Result<()> {
     job.context.control.scanned.store(0, Ordering::Relaxed);
     let root = job.root.clone();
     let config = job.config.clone();
+    // S-05：根包含 Windows 系统目录时整树剪枝该子树（相对前缀与状态/程序目录同口径）。
+    let protected_prefix = protected.and_then(|dir| fsutil::relative_string(&root, dir).ok());
     let excluded = rules::build_exclusions(&config.exclusions)?;
     let state = fs::canonicalize(state)?;
     let executable_dir = std::env::current_exe()
@@ -948,6 +1030,12 @@ fn scan(job: &mut Job, enqueue: bool, state: &Path) -> Result<()> {
     if !config.include_system {
         reduced.push("未包含系统属性资料".into());
     }
+    if protected_prefix.is_some() {
+        // S-05 第二句：选择包含系统目录的更高层根时整树排除该系统目录并提示。
+        reduced.push(
+            "已排除 Windows 系统目录（系统目录及其全部内容不参与本次处理，也不会被改动）".into(),
+        );
+    }
     // 规则的完整文本可能很长（默认列表就跨多行），这里只报条数，规则本身在界面上可查。
     let exclusion_rules = config
         .exclusions
@@ -981,6 +1069,7 @@ fn scan(job: &mut Job, enqueue: bool, state: &Path) -> Result<()> {
         quarantine: Some(archive::QUARANTINE_DIR_NAME),
         state_prefix,
         exe_prefix,
+        protected_prefix,
         root_under_special,
     };
     let sink = Mutex::new(ScanSink::default());
@@ -1044,6 +1133,39 @@ fn scan(job: &mut Job, enqueue: bool, state: &Path) -> Result<()> {
         };
         job.log("扫描", "", "", "提示", &log_message, 0)?;
         job.context.emit(Event::Notice(notice));
+    }
+    // S-01/F02：范围内疑似崩溃残留（.jchtools-link-*，见 walk_dir 登记）随任务库
+    // 记录，供执行开始时按既有谓词清理；分析日志必须明示，不得静默处置。
+    // 残留清理只属于目录整理的执行段（apply），解压流程不清理、不登记。
+    if !enqueue {
+        let mut residues = std::mem::take(&mut sink.link_residues);
+        residues.sort();
+        residues.dedup();
+        if !residues.is_empty() {
+            job.db.set("link_residues", &residues)?;
+            let shown = residues
+                .iter()
+                .take(3)
+                .cloned()
+                .collect::<Vec<_>>()
+                .join("、");
+            let more = if residues.len() > 3 { " 等" } else { "" };
+            job.log(
+                "扫描",
+                "",
+                "",
+                "提示",
+                &format!(
+                    "发现 {} 个疑似上次执行崩溃残留的硬链接临时文件（.jchtools-link-*，均在本次处理范围内）：{shown}{more}；执行开始时将清理其中「修改超过 24 小时且仍是硬链接（链接数 ≥ 2，内容另有保留文件持有）」的项",
+                    residues.len()
+                ),
+                0,
+            )?;
+            job.context.emit(Event::Notice(format!(
+                "发现 {} 个疑似崩溃残留的硬链接临时文件，执行开始时将清理",
+                residues.len()
+            )));
+        }
     }
     // 汇总入库：按父目录分组还原深度先序；污点表供 planner 的空目录规划排除，
     // git_roots 供 planner 拒绝把内容归入 Git 工作树（H-06：不归类）。
@@ -1430,7 +1552,9 @@ pub fn apply(directory: &Path, context: TaskContext) -> Result<TaskResult> {
         bail!("任务不是待确认状态（{status}）；请重新扫描，不会盲目重放旧计划");
     }
     let root_text: String = db.get("root")?;
-    let root = fsutil::normalize_root(Path::new(&root_text))?;
+    let protection = resolve_protection()?;
+    let (root, protected) =
+        fsutil::normalize_root_with(Path::new(&root_text), protection.as_deref())?;
     // prepare 记录的是当时的规范化路径；apply 重新解析 canonicalize（会解析 junction）。
     // 两者不一致说明目录被移动或被替换成指向别处的链接，继续执行会把整理动作落到另一棵树上。
     anyhow::ensure!(
@@ -1449,15 +1573,20 @@ pub fn apply(directory: &Path, context: TaskContext) -> Result<TaskResult> {
     };
     job.db.set("status", &"executing")?;
     let outcome = (|| {
-        // 上次执行崩溃可能残留硬链接临时文件（.jchtools-link-*）：执行前清理。
-        let removed_link_temps = clean_orphan_link_temps(&job.root);
+        // S-01/F02：执行开始时清理上次执行崩溃残留的硬链接临时文件。名单来自分析
+        // 阶段登记的「本次范围内疑似残留」（不越出本次范围设置），执行时逐项复核
+        // 既有谓词；已请求停止时不清理——用户尚未授权本次执行的任何删除。
+        job.context.control.checkpoint()?;
+        let removed_link_temps = clean_orphan_link_temps(&mut job)?;
         if removed_link_temps > 0 {
             job.log(
                 "任务",
                 "",
                 "",
                 "提示",
-                &format!("已清理 {removed_link_temps} 个上次执行崩溃残留的硬链接临时文件"),
+                &format!(
+                    "已清理 {removed_link_temps} 个上次执行崩溃残留的硬链接临时文件（.jchtools-link-*，均为分析阶段在本次范围内登记并经复核的项）"
+                ),
                 0,
             )?;
         }
@@ -1528,7 +1657,7 @@ pub fn apply(directory: &Path, context: TaskContext) -> Result<TaskResult> {
         // H-05/C-07：计划动作执行完总是做最终实空清理（不可关闭、不受文件清理/删除
         // 方式选择影响）：既覆盖本次新产生的空目录与空目录链，也覆盖从未入库的目录
         // （例如实际为空的「解压失败」暂存区、归类新建但没落文件的目录）。
-        final_empty_cleanup(&mut job)?;
+        final_empty_cleanup(&mut job, protected.as_deref())?;
         Ok::<_, anyhow::Error>(())
     })();
     job.db.set("summary", &job.summary)?;
@@ -1559,10 +1688,10 @@ pub fn apply(directory: &Path, context: TaskContext) -> Result<TaskResult> {
 /// 「总是执行」：没有配置开关可关闭，也不受文件清理/删除方式选择影响——空目录清理
 /// 不属于 C-08 的六类清理项，H-05 不提供关闭这一步的选项。只尊重：选定根目录、
 /// Git 整树排除（H-06）、递归范围、用户排除与隐藏/系统开关、状态目录/程序目录/
-/// 工具工作目录，以及取消；一律永久删除（S-02）。
+/// 工具工作目录、Windows 系统目录子树（S-05），以及取消；一律永久删除（S-02）。
 /// 与扫描共用同一套范围口径（[`ScopeFilter`]），所以「解压失败」暂存区内实际为空的
 /// 目录也按 H-05 清理（C-09），但其内容一律不碰——判定只看目录项是否为空。
-fn final_empty_cleanup(job: &mut Job) -> Result<()> {
+fn final_empty_cleanup(job: &mut Job, protected: Option<&Path>) -> Result<()> {
     job.context.control.checkpoint()?;
     let errors_before_cleanup = job.summary.errors;
     let excluded = rules::build_exclusions(&job.config.exclusions)?;
@@ -1581,6 +1710,8 @@ fn final_empty_cleanup(job: &mut Job) -> Result<()> {
         // 选定根位于状态目录/程序目录内：扫描整树剪枝，这里同样不处理任何条目。
         return Ok(());
     }
+    // S-05：根包含 Windows 系统目录时该子树整树剪枝，清理与扫描同一口径。
+    let protected_prefix = protected.and_then(|dir| fsutil::relative_string(&job.root, dir).ok());
     let scope_filter = ScopeFilter {
         excluded: &excluded,
         include_hidden: job.config.include_hidden,
@@ -1589,6 +1720,7 @@ fn final_empty_cleanup(job: &mut Job) -> Result<()> {
         quarantine: None,
         state_prefix,
         exe_prefix,
+        protected_prefix,
         root_under_special,
     };
     let recursive = job.config.recursive;
@@ -2326,6 +2458,133 @@ mod lock_tests {
         assert!(
             lock_dir_for(&dir, None).is_err(),
             "非 tasks 布局且无记录必须拒绝"
+        );
+    }
+}
+
+#[cfg(test)]
+mod s05_scope_tests {
+    use super::*;
+    use crate::control::Context as TaskContext;
+    use crate::db::Database;
+
+    // 覆盖 S-05（受保护子树剪枝：命中相对前缀整树排除，兄弟目录不受影响）
+    #[test]
+    fn scope_filter_prunes_protected_subtree_only() {
+        let excluded = rules::build_exclusions("").unwrap();
+        let filter = ScopeFilter {
+            excluded: &excluded,
+            include_hidden: true,
+            include_system: true,
+            quarantine: Some(archive::QUARANTINE_DIR_NAME),
+            state_prefix: None,
+            exe_prefix: None,
+            protected_prefix: Some("WinRoot".to_string()),
+            root_under_special: false,
+        };
+        let temp = tempfile::tempdir().unwrap();
+        let probe = temp.path().join("x.txt");
+        fs::write(&probe, b"x").unwrap();
+        let meta = fs::symlink_metadata(&probe).unwrap();
+        assert!(
+            filter.prunes("WinRoot", "WinRoot", &meta),
+            "受保护子树根必须剪枝"
+        );
+        assert!(
+            filter.prunes("WinRoot/System32/a.dll", "a.dll", &meta),
+            "受保护子树后代必须剪枝"
+        );
+        assert!(
+            !filter.prunes("WinRootBackup/a.txt", "a.txt", &meta),
+            "不得按字符串前缀误伤兄弟目录"
+        );
+        assert!(!filter.prunes("other/a.txt", "a.txt", &meta));
+    }
+
+    /// S-05 合成受保护子树夹具：root/WinFake 内含「系统样」文件，root 内含普通文件。
+    /// 不用真实系统目录做破坏性实验；返回（临时目录、根、受保护目录的规范化路径）。
+    fn synthetic_fixture() -> (tempfile::TempDir, PathBuf, PathBuf) {
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path().join("data");
+        fs::create_dir_all(root.join("WinFake/System32")).unwrap();
+        fs::write(root.join("WinFake/System32/a.dll"), b"sys").unwrap();
+        fs::write(root.join("normal.txt"), b"n").unwrap();
+        let protected = fs::canonicalize(root.join("WinFake")).unwrap();
+        (temp, root, protected)
+    }
+
+    // 覆盖 S-05（端到端：合成受保护子树位于普通根内——分析扫描不进入、
+    // 确认计数只含范围内的文件、范围提示写明已排除系统目录）
+    #[test]
+    fn prepare_excludes_synthetic_protected_subtree() {
+        let (temp, root, protected) = synthetic_fixture();
+        let state = temp.path().join("state");
+        let result = prepare_at_with(
+            &root,
+            Config::default(),
+            TaskContext::default(),
+            &state,
+            Some(&protected),
+        )
+        .unwrap();
+        assert_eq!(result.summary.scanned, 1, "受保护子树内文件不入盘点");
+        let db = Database::open_existing(&result.directory).unwrap();
+        let text = db
+            .conn
+            .query_row(
+                "SELECT group_concat(reason, ' | ') FROM events",
+                [],
+                |row| row.get::<_, String>(0),
+            )
+            .unwrap();
+        assert!(
+            text.contains("已排除 Windows 系统目录"),
+            "范围提示必须写明已排除系统目录：{text}"
+        );
+    }
+
+    // 覆盖 S-05（确认框清点与扫描同口径：受保护子树内的压缩包不计入）
+    #[test]
+    fn count_archives_excludes_synthetic_protected_subtree() {
+        let (_temp, root, protected) = synthetic_fixture();
+        fs::write(root.join("WinFake/inner.zip"), b"zip").unwrap();
+        fs::write(root.join("y.zip"), b"zip").unwrap();
+        let count = count_archives_with(&root, &Config::default(), Some(&protected)).unwrap();
+        assert_eq!(count, 1, "受保护子树内的压缩包不计入清点");
+        assert_eq!(
+            count_archives_with(&root, &Config::default(), None).unwrap(),
+            2,
+            "对照组：未注入受保护目录时两包都计入"
+        );
+    }
+
+    // 覆盖 S-05, H-05（收尾空目录清理不进入受保护子树；范围外普通空目录仍正常清理）
+    #[test]
+    fn final_cleanup_keeps_synthetic_protected_subtree() {
+        let (temp, root, protected) = synthetic_fixture();
+        fs::create_dir_all(root.join("WinFake/内空")).unwrap();
+        fs::create_dir_all(root.join("普通空")).unwrap();
+        let canonical_root = fs::canonicalize(&root).unwrap();
+        let state = temp.path().join("state");
+        let mut job = Job {
+            root: canonical_root,
+            config: Config::default(),
+            context: TaskContext::default(),
+            db: Database::create(&state).unwrap(),
+            summary: crate::model::Summary::default(),
+        };
+        final_empty_cleanup(&mut job, Some(&protected)).unwrap();
+        assert!(
+            root.join("WinFake/System32/a.dll").is_file(),
+            "受保护子树内容零改动"
+        );
+        assert!(
+            root.join("WinFake/内空").is_dir(),
+            "受保护子树内的空目录同样不得清理"
+        );
+        assert!(
+            !root.join("普通空").exists(),
+            "范围外的普通空目录仍按 H-05 清理"
         );
     }
 }

@@ -1377,11 +1377,21 @@ fn quarantine(job: &mut Job, archive_rel: &str, reason: &str) -> Result<()> {
     // S-04：容器位置是 junction/符号链接时不得穿透——否则失败包会被移出所选根、
     // 落到链接目标，且界面上声称的位置与实际不符。链接与普通文件占用都按
     // 「容器被占用」走隔离失败原地保留路径，但文案区分占用类型（X-06/U-10）。
+    // H-06：容器自身是 Git 项目（.git 目录或文件）时整树保护优先——不得把失败包
+    // 移入 Git 树，也不得在树内腾挪或覆盖；同样按「隔离失败」原地保留。
     let container_blocked = match fs::symlink_metadata(&dir) {
         Ok(meta) if fsutil::is_link(&meta) => {
             Some("目标位置被链接占用，不穿透链接隔离（S-04）".to_string())
         }
-        Ok(meta) if meta.is_dir() => None,
+        Ok(meta) if meta.is_dir() => match fsutil::is_git_root(&dir) {
+            Ok(true) => Some(
+                "目标目录是 Git 项目（含 .git），按 H-06 整树保护不把失败包移入其中".to_string(),
+            ),
+            Ok(false) => None,
+            Err(error) => {
+                anyhow::bail!("无法检查「{QUARANTINE_DIR_NAME}」的 Git 边界（{error:#}）")
+            }
+        },
         _ => Some("目标位置被同名文件占用".to_string()),
     };
     if let Some(reason) = container_blocked {
@@ -2029,5 +2039,63 @@ mod tests {
         let set = volume_set(&root.join("x.rar.001")).unwrap();
         assert_eq!(set.scheme, VolumeScheme::Numbered);
         assert_eq!(set.paths.len(), 2);
+    }
+
+    /// F03 夹具：所选根下已有「解压失败」容器且容器是 Git 项目（.git 由 kind 决定
+    /// 目录或文件形态），再放一个坏包，调用隔离并断言按「隔离失败」原地保留。
+    fn quarantine_git_container_case(kind: &str) {
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path().join("data");
+        let container = root.join(QUARANTINE_DIR_NAME);
+        if kind == "dir" {
+            fs::create_dir_all(container.join(".git")).unwrap();
+        } else {
+            fs::create_dir_all(&container).unwrap();
+            fs::write(container.join(".git"), b"gitdir: elsewhere\n").unwrap();
+        }
+        let pack = root.join("pack.zip");
+        fs::write(&pack, b"broken archive bytes").unwrap();
+        let mut job = Job {
+            root: root.clone(),
+            config: Config::default(),
+            context: TaskContext::default(),
+            db: Database::create(&temp.path().join("state")).unwrap(),
+            summary: crate::model::Summary::default(),
+        };
+        let error = quarantine(&mut job, "pack.zip", "测试：无法解开的包").unwrap_err();
+        let text = format!("{error:#}");
+        assert!(
+            text.contains("Git"),
+            "隔离失败原因必须说明 Git 整树保护（H-06）：{text}"
+        );
+        assert!(pack.is_file(), "坏包必须原地保留（隔离失败，不腾挪不覆盖）");
+        assert!(
+            container.join(".git").exists(),
+            "Git 项目树不得被触碰（H-06）"
+        );
+        // 原包没有移入容器：容器内除 .git 外不得出现任何新条目。
+        let extra: Vec<_> = fs::read_dir(&container)
+            .unwrap()
+            .filter_map(std::result::Result::ok)
+            .map(|entry| entry.file_name().to_string_lossy().into_owned())
+            .filter(|name| name != ".git")
+            .collect();
+        assert!(
+            extra.is_empty(),
+            "隔离失败时不得向 Git 容器写入任何条目：{extra:?}"
+        );
+    }
+
+    // 覆盖 H-06（回归：「解压失败」容器自身是 Git 项目（.git 为目录）时，
+    // 坏包不得移入其中；修复前容器规划只拒链接/同名文件，失败包被腾入 Git 树）
+    #[test]
+    fn quarantine_refuses_git_project_container_directory() {
+        quarantine_git_container_case("dir");
+    }
+
+    // 覆盖 H-06（回归：同上，.git 为文件形态——is_git_root 两种形态都保护整树）
+    #[test]
+    fn quarantine_refuses_git_project_container_file() {
+        quarantine_git_container_case("file");
     }
 }

@@ -128,7 +128,61 @@ pub fn safe_join(root: &Path, rel: &str) -> Result<PathBuf> {
     }
     Ok(current)
 }
-pub fn normalize_root(path: &Path) -> Result<PathBuf> {
+/// S-04：所选根本身或其任一上级组件是符号链接/junction/reparse point 时拒绝开始。
+/// 检查必须作用于用户给出的原始路径（canonicalize 之前）——规范化会把链接解析成
+/// 目标路径，reparse 身份随之丢失，链接边界就再也检不出来，两工具会沿 canonicalize
+/// 结果处理链接目标树。逐组件（含根本身）用 symlink_metadata 判定并复用 [`is_link`]；
+/// 不读取链接目标、不搬移、不删除链接本身。
+pub fn ensure_plain_entry(path: &Path) -> Result<()> {
+    let mut current = PathBuf::new();
+    for component in path.components() {
+        current.push(component.as_os_str());
+        if !matches!(component, Component::Normal(_)) {
+            // 盘符前缀、根分隔符与 `.`/`..` 组件不是可判定的目录项，跳过；
+            // 路径最终是否存在、是否为目录交给 normalize_root 报告。
+            continue;
+        }
+        match fs::symlink_metadata(&current) {
+            Ok(meta) if is_link(&meta) => bail!(
+                "所选路径或其上级包含符号链接/junction（{}）；已按 S-04 拒绝开始：不跟随链接、不搬移或删除链接本身，请直接选择实际目录",
+                current.display()
+            ),
+            Ok(_) => (),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => (),
+            Err(e) => {
+                return Err(e).with_context(|| format!("无法检查路径边界：{}", current.display()));
+            }
+        }
+    }
+    Ok(())
+}
+/// S-05 受保护目录解析的纯函数核心（测试注入用，不触碰真实环境变量）：
+/// 缺失或无法规范化都报错——保护信息不可用时必须拒绝开始，不得静默失去系统目录保护。
+fn resolve_protected_root(raw: Option<&std::ffi::OsStr>) -> Result<PathBuf> {
+    let raw = raw.context(
+        "无法确定 Windows 系统目录（SystemRoot 未设置）；为避免误处理系统文件，拒绝开始处理",
+    )?;
+    fs::canonicalize(raw).with_context(|| {
+        format!(
+            "无法访问 Windows 系统目录（{}）；为避免误处理系统文件，拒绝开始处理",
+            Path::new(raw).display()
+        )
+    })
+}
+/// 读取并规范化当前系统的受保护目录（SystemRoot，以操作系统报告为准，不假定在 C 盘）。
+#[cfg(windows)]
+pub fn protected_root() -> Result<PathBuf> {
+    resolve_protected_root(std::env::var_os("SystemRoot").as_deref())
+}
+/// S-05 的参数化核心：规范化根，并给出「根包含受保护目录时需整树剪枝的子树」。
+/// - 根位于受保护目录内（含等于）：拒绝整次任务；
+/// - 根是受保护目录的严格上层：不拒绝，返回 `(根, Some(受保护目录))`，由扫描、
+///   确认框清点与收尾清理按该子树统一剪枝并提示（S-05 第二句）；
+/// - 其余：返回 `(根, None)`。`protected` 为 None 表示没有受保护目录信息（非 Windows）。
+pub fn normalize_root_with(
+    path: &Path,
+    protected: Option<&Path>,
+) -> Result<(PathBuf, Option<PathBuf>)> {
     let root = fs::canonicalize(path).context("无法访问目标目录")?;
     if !root.is_dir() || root.parent().is_none() {
         bail!("请选择普通目录，不允许直接整理整个磁盘根目录");
@@ -141,19 +195,29 @@ pub fn normalize_root(path: &Path) -> Result<PathBuf> {
         if root.components().count() <= 2 {
             bail!("不允许整理磁盘根目录");
         }
-        // S-05 只授权拒绝 Windows 安装目录及其后代；Program Files、用户目录、
-        // 盘根不自动扩大进拒绝清单，仍受其余范围与权限规则约束。
-        for var in ["SystemRoot"] {
-            if let Some(protected) = std::env::var_os(var) {
-                if let Ok(protected) = fs::canonicalize(protected) {
-                    if root.starts_with(&protected) {
-                        bail!("不允许整理 Windows 系统目录");
-                    }
-                }
-            }
+    }
+    // S-05 只授权拒绝 Windows 安装目录及其后代；Program Files、用户目录、
+    // 盘根不自动扩大进拒绝清单，仍受其余范围与权限规则约束。
+    if let Some(protected) = protected {
+        if root.starts_with(protected) {
+            bail!("不允许整理 Windows 系统目录");
+        }
+        if protected.starts_with(&root) {
+            return Ok((root, Some(protected.to_path_buf())));
         }
     }
-    Ok(root)
+    Ok((root, None))
+}
+pub fn normalize_root(path: &Path) -> Result<PathBuf> {
+    #[cfg(windows)]
+    {
+        let protected = protected_root()?;
+        Ok(normalize_root_with(path, Some(&protected))?.0)
+    }
+    #[cfg(not(windows))]
+    {
+        normalize_root_with(path, None).map(|(root, _)| root)
+    }
 }
 pub fn snapshot(path: &Path) -> Result<Snapshot> {
     let metadata = fs::symlink_metadata(path)?;
@@ -275,6 +339,45 @@ pub fn rename_noreplace(source: &Path, target: &Path) -> Result<()> {
         Ok(())
     }
 }
+/// FILETIME 换算核心（100ns 单位、1601 纪元）：接受相对 UNIX 纪元的偏移
+/// （Ok = 1970 之后，Err = 1970 之前的时长）。1601-1970 的负偏移受检折算；
+/// 早于 1601-01-01（FILETIME 合法下界）下溢返回 Err 明确报错，不得钳制成 1970
+/// 或其他静默值（S-01 忠实移动：时间写不回去就必须如实失败并保留源项）；
+/// 超出 u64 上限的远未来值钳制到 u64::MAX（SetFileTime 会拒绝非法值）。
+/// 独立成纯函数便于直接测试越界值——SystemTime 在 Windows 上无法表示早于
+/// 1601 的时刻（checked_sub 返回 None），越界分支无法经 SystemTime 构造。
+#[cfg(windows)]
+fn offset_to_filetime(
+    offset: Result<std::time::Duration, std::time::Duration>,
+) -> Result<windows_sys::Win32::Foundation::FILETIME> {
+    use windows_sys::Win32::Foundation::FILETIME;
+    const EPOCH_DELTA_100NS: u64 = 116_444_736_000_000_000;
+    let units = match offset {
+        Ok(delta) => {
+            let total = u128::from(EPOCH_DELTA_100NS) + delta.as_nanos() / 100;
+            u64::try_from(total).unwrap_or(u64::MAX)
+        }
+        Err(before) => u128::from(EPOCH_DELTA_100NS)
+            .checked_sub(before.as_nanos() / 100)
+            .and_then(|units| u64::try_from(units).ok())
+            .context("文件时间早于 1601-01-01，超出 FILETIME 可表示范围")?,
+    };
+    Ok(FILETIME {
+        dwLowDateTime: u32::try_from(units % (1u64 << 32)).unwrap_or(0),
+        dwHighDateTime: u32::try_from(units >> 32).unwrap_or(0),
+    })
+}
+/// 把 SystemTime 换算为 FILETIME；负偏移（1601-1970）按 [`offset_to_filetime`]
+/// 受检折算，越界（早于 1601）返回 Err。
+#[cfg(windows)]
+fn systemtime_to_filetime(
+    time: std::time::SystemTime,
+) -> Result<windows_sys::Win32::Foundation::FILETIME> {
+    offset_to_filetime(match time.duration_since(UNIX_EPOCH) {
+        Ok(delta) => Ok(delta),
+        Err(error) => Err(error.duration()),
+    })
+}
 /// S-01：用户文件的最终移动入口。同卷走不覆盖改名（Windows 同卷改名天然保留创建时间，
 /// 满足 S-01 忠实移动要求）；确因跨文件系统失败时按「不覆盖完整复制 → 设置创建/修改
 /// 时间 → 删除源项」执行，复制、写时间或删除任一失败都保留源项并如实报错。
@@ -342,23 +445,8 @@ fn set_created_and_modified(
         if handle == INVALID_HANDLE_VALUE {
             return Err(std::io::Error::last_os_error()).context("打开文件以写回时间失败");
         }
-        let to_filetime = |time: std::time::SystemTime| -> FILETIME {
-            const EPOCH_DELTA_100NS: u64 = 116_444_736_000_000_000;
-            // 时间换算为 100ns 单位；越界值钳制到 u64::MAX（SetFileTime 会拒绝非法值）。
-            let units = match time.duration_since(std::time::UNIX_EPOCH) {
-                Ok(delta) => {
-                    let total = u128::from(EPOCH_DELTA_100NS) + delta.as_nanos() / 100;
-                    u64::try_from(total).unwrap_or(u64::MAX)
-                }
-                Err(_) => EPOCH_DELTA_100NS,
-            };
-            FILETIME {
-                dwLowDateTime: u32::try_from(units % (1u64 << 32)).unwrap_or(0),
-                dwHighDateTime: u32::try_from(units >> 32).unwrap_or(0),
-            }
-        };
-        let created_ft = created.map(to_filetime);
-        let modified_ft = modified.map(to_filetime);
+        let created_ft = created.map(systemtime_to_filetime).transpose()?;
+        let modified_ft = modified.map(systemtime_to_filetime).transpose()?;
         let creation_ptr = created_ft
             .as_ref()
             .map_or(std::ptr::null(), std::ptr::from_ref::<FILETIME>);
@@ -609,5 +697,154 @@ mod tests {
             target.file_name().and_then(|name| name.to_str()).unwrap(),
             "资料 (1).part01.rar"
         );
+    }
+
+    /// F28 夹具：写一个临时文件并返回路径。
+    fn f28_file() -> (tempfile::TempDir, std::path::PathBuf) {
+        let temp = tempfile::tempdir().unwrap();
+        let file = temp.path().join("t.txt");
+        fs::write(&file, b"x").unwrap();
+        (temp, file)
+    }
+
+    /// 1970 纪元到 1601 纪元的换算常数（100ns 单位），即 1601-01-01 相对
+    /// UNIX_EPOCH 的纳秒偏移 ÷ 100。
+    const F28_DELTA_NS: u64 = 11_644_473_600_000_000_000;
+
+    // 平台门禁原因：验证对象是 Windows FILETIME 语义与 SetFileTime 写回，
+    // 非 Windows 分支不写创建时间，断言无意义。
+    // 覆盖 S-01, C-21（回归：1969-12-31 的负偏移必须忠实写回；
+    // 修复前 to_filetime 对 duration_since 的 Err 分支一律返回 1970-01-01）
+    #[cfg(windows)]
+    #[test]
+    fn f28_pre_epoch_created_time_is_written_faithfully() {
+        let (_temp, file) = f28_file();
+        let target = UNIX_EPOCH
+            .checked_sub(std::time::Duration::from_hours(24))
+            .unwrap();
+        set_created_time(&file, target).unwrap();
+        let back = fs::metadata(&file).unwrap().created().unwrap();
+        assert_eq!(
+            UNIX_EPOCH.duration_since(back).unwrap(),
+            std::time::Duration::from_hours(24),
+            "1969-12-31 的创建时间必须原样写回，不得被抹成 1970-01-01"
+        );
+    }
+
+    // 平台门禁原因：同上，FILETIME 1601 下界是 Windows 语义。
+    // 覆盖 S-01, C-21（回归：恰好 1601-01-01 是 FILETIME 合法下界，必须接受）
+    #[cfg(windows)]
+    #[test]
+    fn f28_accepts_exact_1601_boundary() {
+        let (_temp, file) = f28_file();
+        let boundary = UNIX_EPOCH
+            .checked_sub(std::time::Duration::from_nanos(F28_DELTA_NS))
+            .unwrap();
+        assert!(
+            set_created_time(&file, boundary).is_ok(),
+            "恰好 1601-01-01 00:00:00 UTC 可表示，必须成功写回"
+        );
+    }
+
+    // 平台门禁原因：同上。
+    // 覆盖 S-01, C-21（回归：早于 1601-01-01 一个 100ns 单位必须显式报错；
+    // 修复前负偏移一律被静默钳制成 1970。SystemTime 在 Windows 上无法表示早于
+    // 1601 的时刻（checked_sub 返回 None），越界值经纯函数核心直接构造）
+    #[cfg(windows)]
+    #[test]
+    fn f28_rejects_one_tick_before_1601() {
+        assert!(
+            offset_to_filetime(Err(std::time::Duration::from_nanos(F28_DELTA_NS + 100))).is_err(),
+            "早于 1601-01-01 一个 100ns 单位超出 FILETIME 范围，必须报错而非钳制"
+        );
+    }
+
+    // 平台门禁原因：同上。
+    // 覆盖 S-01, C-21（纪元本身 1970-01-01 必须原样写回）
+    #[cfg(windows)]
+    #[test]
+    fn f28_epoch_itself_is_written() {
+        let (_temp, file) = f28_file();
+        set_created_time(&file, UNIX_EPOCH).unwrap();
+        let back = fs::metadata(&file).unwrap().created().unwrap();
+        assert_eq!(
+            back.duration_since(UNIX_EPOCH).unwrap(),
+            std::time::Duration::ZERO
+        );
+    }
+
+    // 平台门禁原因：同上。
+    // 覆盖 S-01, C-21（现代值正偏移路径不回归）
+    #[cfg(windows)]
+    #[test]
+    fn f28_modern_time_is_written() {
+        let (_temp, file) = f28_file();
+        let modern = UNIX_EPOCH + std::time::Duration::from_secs(1_768_000_000);
+        set_created_time(&file, modern).unwrap();
+        let back = fs::metadata(&file).unwrap().created().unwrap();
+        assert_eq!(
+            back.duration_since(UNIX_EPOCH).unwrap().as_secs(),
+            1_768_000_000
+        );
+    }
+
+    // 平台门禁原因：同上。
+    // 覆盖 S-01, C-21（越界值：远早于 1601 必须报错而非钳制）
+    #[cfg(windows)]
+    #[test]
+    fn f28_rejects_far_pre_1601_value() {
+        assert!(
+            offset_to_filetime(Err(std::time::Duration::from_hours(400 * 366 * 24))).is_err(),
+            "远早于 1601 的越界值必须报错而非钳制"
+        );
+    }
+
+    // 覆盖 S-05（SystemRoot 缺失或指向不可访问路径时必须报错拒绝开始，
+    // 不得静默失去系统目录保护——修复前该分支被静默跳过）
+    #[test]
+    fn resolve_protected_root_errors_when_unavailable() {
+        assert!(
+            resolve_protected_root(None).is_err(),
+            "受保护目录信息缺失必须报错，不得静默放行"
+        );
+        assert!(
+            resolve_protected_root(Some(std::ffi::OsStr::new(r"Z:\不存在的受保护目录"))).is_err(),
+            "受保护目录无法规范化必须报错，不得静默放行"
+        );
+    }
+
+    // 覆盖 S-05（受保护目录参数化：根在其内或即其本身拒绝；根是严格上层时不拒绝、
+    // 返回需整树剪枝的子树；无关根正常放行）
+    #[test]
+    fn normalize_root_with_synthetic_protected_dir() {
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path().join("data");
+        fs::create_dir_all(root.join("win/System32")).unwrap();
+        // 受保护目录 = root/win（位于根内，用于「严格上层」分支）。
+        let win = fs::canonicalize(root.join("win")).unwrap();
+        let inside = win.join("System32");
+        fs::create_dir_all(&inside).unwrap();
+
+        assert!(
+            normalize_root_with(&inside, Some(&win)).is_err(),
+            "根位于受保护目录内必须拒绝整次任务"
+        );
+        assert!(
+            normalize_root_with(&win, Some(&win)).is_err(),
+            "根即受保护目录必须拒绝整次任务"
+        );
+        let (got, prune) = normalize_root_with(&root, Some(&win)).unwrap();
+        assert_eq!(got, fs::canonicalize(&root).unwrap());
+        assert_eq!(
+            prune.as_deref(),
+            Some(win.as_path()),
+            "根是严格上层时不拒绝，返回需整树剪枝的子树"
+        );
+        // 与根无关的受保护目录：不产生剪枝。
+        let outside = temp.path().join("elsewhere");
+        fs::create_dir_all(&outside).unwrap();
+        let outside = fs::canonicalize(&outside).unwrap();
+        let (_, prune) = normalize_root_with(&root, Some(&outside)).unwrap();
+        assert!(prune.is_none(), "受保护目录不在根内时不产生剪枝");
     }
 }
