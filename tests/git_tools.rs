@@ -153,6 +153,8 @@ fn head_paths(repo: &Path) -> Vec<String> {
     let text = git_ok(
         repo,
         &[
+            "-c",
+            "core.quotePath=false",
             "diff-tree",
             "--no-commit-id",
             "--name-only",
@@ -243,6 +245,9 @@ fn single_added_file_committed_and_pushed() {
 #[test]
 fn bracketed_filename_commits_and_pushes_literally() {
     let fix = fixture();
+    // Git 的默认 quotePath 在 CI 上会把非 ASCII 路径转义；固定此差异，
+    // head_paths 再用机器可读的原始路径断言真实提交对象。
+    git_ok(&fix.repo, &["config", "core.quotePath", "true"]);
     fs::write(
         fix.repo.join("数据[1].txt"),
         "payload
