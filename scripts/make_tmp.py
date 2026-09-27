@@ -938,6 +938,40 @@ def _clear_existing_target(root: Path, *, force: bool) -> None:
     force_remove_tree(root)
 
 
+def build_ocr_compare_bundle(repo_root: Path, model_root: str | None, font_path: str | None, *, force: bool) -> int:
+    """在 .tmp/ 下生成经模型、字体摘要校验的冻结 Python 对照 bundle."""
+    if not model_root or not font_path:
+        fail("ocr-compare 需要 --model-root 和 --font")
+    models = Path(model_root).resolve(strict=True)
+    font = Path(font_path).resolve(strict=True)
+    root = repo_root / ".tmp" / "ocr-compare-bundle"
+    guard_destination(root)
+    checks = (
+        (
+            models / "PP-OCRv6_small_det" / "inference.onnx",
+            "3914f972d833af87d23bb2338bd09238f978a48f3c4dbb8e1a4ee26a93869940",
+        ),
+        (
+            models / "PP-OCRv6_small_rec" / "inference.onnx",
+            "3e3def686ac9a1676b59bc9749ad896263d8f68b53f352060774de359a2e23ed",
+        ),
+        (font, "ec04cc376b34887cedbdf84074e2e226ed2761eeabdcb9173fc1dd7bfd153ef7"),
+    )
+    for path, expected in checks:
+        if not path.is_file() or hashlib.sha256(path.read_bytes()).hexdigest() != expected:
+            fail(f"OCR 对照资产缺失或摘要不符：{path}")
+    _clear_existing_target(root, force=force)
+    for name in ("PP-OCRv6_small_det", "PP-OCRv6_small_rec"):
+        _ = shutil.copytree(models / name, root / "models" / name)
+    dest_font = root / "assets" / "fonts" / font.name
+    dest_font.parent.mkdir(parents=True)
+    _ = shutil.copy2(font, dest_font)
+    for name in ("temp", "func_ret", "locks"):
+        (root / "runtime" / "pdx-cache" / name).mkdir(parents=True)
+    print(f"OCR 对照 bundle: {root}")
+    return 0
+
+
 def main() -> int:
     repo_root = Path(__file__).resolve().parent.parent
     parser = argparse.ArgumentParser(description="JchTools 临时目录工厂：生成与清理 .tmp/ 内容。")
@@ -967,36 +1001,7 @@ def main() -> int:
     if kind == "clean":
         return clean_tmp(repo_root)
     if kind == "ocr-compare":
-        if not arguments.model_root or not arguments.font:
-            fail("ocr-compare 需要 --model-root 和 --font")
-        models = Path(arguments.model_root).resolve(strict=True)
-        font = Path(arguments.font).resolve(strict=True)
-        root = repo_root / ".tmp" / "ocr-compare-bundle"
-        guard_destination(root)
-        checks = (
-            (
-                models / "PP-OCRv6_small_det" / "inference.onnx",
-                "3914f972d833af87d23bb2338bd09238f978a48f3c4dbb8e1a4ee26a93869940",
-            ),
-            (
-                models / "PP-OCRv6_small_rec" / "inference.onnx",
-                "3e3def686ac9a1676b59bc9749ad896263d8f68b53f352060774de359a2e23ed",
-            ),
-            (font, "ec04cc376b34887cedbdf84074e2e226ed2761eeabdcb9173fc1dd7bfd153ef7"),
-        )
-        for path, expected in checks:
-            if not path.is_file() or hashlib.sha256(path.read_bytes()).hexdigest() != expected:
-                fail(f"OCR 对照资产缺失或摘要不符：{path}")
-        _clear_existing_target(root, force=force)
-        for name in ("PP-OCRv6_small_det", "PP-OCRv6_small_rec"):
-            shutil.copytree(models / name, root / "models" / name)
-        dest_font = root / "assets" / "fonts" / font.name
-        dest_font.parent.mkdir(parents=True)
-        shutil.copy2(font, dest_font)
-        for name in ("temp", "func_ret", "locks"):
-            (root / "runtime" / "pdx-cache" / name).mkdir(parents=True)
-        print(f"OCR 对照 bundle: {root}")
-        return 0
+        return build_ocr_compare_bundle(repo_root, arguments.model_root, arguments.font, force=force)
     root = Path(destination) if destination else repo_root / ".tmp" / "testdata"
     guard_destination(root)
     # guard 内部用 resolve() 检查，但构建全程用的是原始路径；相对路径在脚本切换
