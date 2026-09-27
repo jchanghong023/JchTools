@@ -93,6 +93,14 @@ pub struct RepoInfo {
     pub branch: String,
     /// 当前分支已配置的 upstream（如 origin/main）
     pub upstream: String,
+    /// upstream 远端名（`branch.<b>.remote`；本地 upstream 时为 "."）。
+    /// F09：远端/分支不再从 upstream 显示串拆分——分支名可含斜杠，
+    /// `origin/feature/demo` 会被 `rsplit_once('/')` 拆成远端「origin/feature」、
+    /// 分支「demo」，fetch 必然 128 失败并按 G-09 无限退避；本地 upstream 的
+    /// 显示串（如 master）甚至不含斜杠。
+    pub upstream_remote: String,
+    /// upstream 分支名（`branch.<b>.merge` 去 refs/heads/ 前缀，可含斜杠）
+    pub upstream_branch: String,
 }
 
 /// 解析 git 可执行文件绝对路径：优先常见安装位置，再遍历 PATH；
@@ -196,6 +204,92 @@ fn summarize(stderr: &str, stdout: &str) -> String {
     }
 }
 
+/// 有界截断（F14/G-14）：单条日志保留的最多字符数，防止异常巨大的 git 输出
+/// 刷爆界面日志容量。
+fn bounded_text(text: &str) -> String {
+    const LIMIT: usize = 2000;
+    if text.chars().count() > LIMIT {
+        let mut cut: String = text.chars().take(LIMIT).collect();
+        cut.push_str("\n…（输出过长，已截断）");
+        cut
+    } else {
+        text.to_owned()
+    }
+}
+
+/// 把一次 git 命令的真实输出整理成日志条目（F14/G-14：成功路径也必须采集真实
+/// stdout/stderr，不能只记命令文本）。两流都为空时返回 None（git add 成功通常
+/// 无输出，不产生空条目）。
+fn output_log_entry(stdout: &str, stderr: &str) -> Option<String> {
+    let mut parts: Vec<String> = Vec::new();
+    if !stdout.trim().is_empty() {
+        parts.push(format!("stdout：\n{}", bounded_text(stdout)));
+    }
+    if !stderr.trim().is_empty() {
+        parts.push(format!("stderr：\n{}", bounded_text(stderr)));
+    }
+    (!parts.is_empty()).then(|| parts.join("\n"))
+}
+
+/// F10/P-03/G-08：读取可选的合并配置项。未设置（或读取失败）返回 None——预检只
+/// 拒绝明确配置出的危险形态，读取不到按未设置处理，不因此拒绝正常仓库。
+fn config_get_opt(git: &Path, root: &Path, key: &str) -> Option<String> {
+    let out = run_git(git, root, &["config", "--get", key]).ok()?;
+    if !out.status.success() {
+        return None;
+    }
+    let value = output_text(&out.stdout).trim().to_owned();
+    (!value.is_empty()).then_some(value)
+}
+
+/// F10/P-03/G-08：任务启动前预检裸 `git push` 的实际推送目标（全部只读检查，在任何
+/// 写命令之前执行）。用户可能配置 `branch.<b>.pushRemote` / `remote.pushDefault` /
+/// `remote.<r>.push` / `push.default=matching`，使裸 push 推到 upstream 之外的远端
+/// 或一次推多个分支，违反 P-03（只允许访问当前分支 upstream 远端）与 G-08（用
+/// upstream 推送）。有效推送远端 = `branch.<b>.pushRemote` ?: `remote.pushDefault`
+/// ?: upstream 远端（`branch.<b>.remote`，不从 @{u} 显示串猜测——分支名可含斜杠）。
+/// 与 upstream 远端不一致、配置了自定义推送 refspec 或 push.default=matching 时
+/// 拒绝启动，错误信息点名涉及的配置项。
+fn push_target_preflight(git: &Path, root: &Path, info: &RepoInfo) -> Result<()> {
+    let branch = &info.branch;
+    let upstream_remote = info.upstream_remote.trim();
+    let push_remote = config_get_opt(git, root, &format!("branch.{branch}.pushRemote"));
+    let push_default_remote = config_get_opt(git, root, "remote.pushDefault");
+    let effective = push_remote
+        .as_deref()
+        .or(push_default_remote.as_deref())
+        .unwrap_or(upstream_remote)
+        .to_owned();
+    if effective != upstream_remote {
+        let (key, value) = match (&push_remote, &push_default_remote) {
+            (Some(value), _) => (format!("branch.{branch}.pushRemote"), value.clone()),
+            _ => (
+                "remote.pushDefault".to_string(),
+                push_default_remote.clone().unwrap_or_default(),
+            ),
+        };
+        bail!(
+            "拒绝启动：{key} 配置为「{value}」，与当前分支 upstream 远端「{upstream_remote}」不一致；\
+             裸 git push 会把提交推到 {value} 而不是 upstream 远端，超出 P-03 允许的网络访问范围（G-08）。\
+             请先在仓库中修正或清除该配置后重新开始任务"
+        );
+    }
+    if let Some(refspec) = config_get_opt(git, root, &format!("remote.{effective}.push")) {
+        bail!(
+            "拒绝启动：remote.{effective}.push 配置了自定义推送 refspec（{refspec}）；\
+             裸 git push 会按它推送，无法保证只推送当前分支到 upstream（P-03/G-08）。\
+             请先移除该配置后重新开始任务"
+        );
+    }
+    if config_get_opt(git, root, "push.default").as_deref() == Some("matching") {
+        bail!(
+            "拒绝启动：push.default=matching 会让裸 git push 一次推送所有同名分支（多分支推送，P-03/G-08）。\
+             请改为 simple / upstream 等单分支取值后重新开始任务"
+        );
+    }
+    Ok(())
+}
+
 /// 一个逻辑文件变更（G-04）：Git 已识别的 rename 作为一个变更。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum FileChange {
@@ -283,6 +377,30 @@ pub fn middle_state(git: &Path, repo: &Path) -> Result<MiddleState> {
     Ok(MiddleState::Clean)
 }
 
+/// 读取当前分支 upstream 的结构化远端与分支名（F09）：远端取
+/// `branch.<b>.remote`（本地 upstream 时为 "."），分支取 `branch.<b>.merge`
+/// 去掉 `refs/heads/` 前缀（可含斜杠）。不从 upstream 显示串拆分。
+fn read_branch_upstream(git: &Path, root: &Path, branch: &str) -> Result<(String, String)> {
+    let remote = run_git_ok(
+        git,
+        root,
+        &["config", "--get", &format!("branch.{branch}.remote")],
+    )
+    .map_err(|error| anyhow::anyhow!("无法读取 branch.{branch}.remote：{error:#}"))?;
+    let merge = run_git_ok(
+        git,
+        root,
+        &["config", "--get", &format!("branch.{branch}.merge")],
+    )
+    .map_err(|error| anyhow::anyhow!("无法读取 branch.{branch}.merge：{error:#}"))?;
+    let upstream_branch = merge
+        .trim()
+        .strip_prefix("refs/heads/")
+        .unwrap_or(merge.trim())
+        .to_owned();
+    Ok((remote.trim().to_owned(), upstream_branch))
+}
+
 /// 验证仓库并读取基本信息（G-02）：目录存在、有效仓库、有检出分支、有 upstream。
 pub fn inspect(git: &Path, repo: &Path) -> Result<RepoInfo> {
     let top = run_git_ok(git, repo, &["rev-parse", "--show-toplevel"])
@@ -291,16 +409,20 @@ pub fn inspect(git: &Path, repo: &Path) -> Result<RepoInfo> {
     let branch = run_git_ok(git, repo, &["symbolic-ref", "--short", "HEAD"]).map_err(|_| {
         anyhow::anyhow!("当前没有检出的 branch（处于 detached HEAD），无法使用本工具")
     })?;
+    let branch = branch.trim().to_owned();
     let upstream = run_git_ok(
         git,
         repo,
         &["rev-parse", "--abbrev-ref", "--symbolic-full-name", "@{u}"],
     )
-    .map_err(|_| anyhow::anyhow!("当前 branch「{}」未配置 upstream，无法推送", branch.trim()))?;
+    .map_err(|_| anyhow::anyhow!("当前 branch「{branch}」未配置 upstream，无法推送"))?;
+    let (upstream_remote, upstream_branch) = read_branch_upstream(git, &root, &branch)?;
     Ok(RepoInfo {
         root,
-        branch: branch.trim().to_owned(),
+        branch,
         upstream: upstream.trim().to_owned(),
+        upstream_remote,
+        upstream_branch,
     })
 }
 
@@ -444,6 +566,10 @@ fn try_push(git: &Path, root: &Path, log: &dyn Fn(&str)) -> PushOutcome {
     let stdout = output_text(&out.stdout);
     let stderr = output_text(&out.stderr);
     if out.status.success() && !stdout.lines().any(|line| line.starts_with('!')) {
+        // F14/G-14：成功也采集真实输出（push 返回内容），不能只在失败时可见。
+        if let Some(entry) = output_log_entry(&stdout, &stderr) {
+            log(&format!("git push 输出：\n{entry}"));
+        }
         return PushOutcome::Ok;
     }
     let text = format!("{stderr}{stdout}");
@@ -464,32 +590,67 @@ enum MergeOutcome {
     /// 被本地未提交变更阻挡（G-10 尾段：停止并显示原因）。
     BlockedByDirty(String),
     Retryable(String),
+    /// 用户已停止（F13/G-15）：当前命令自然结束，不再启动后续命令。
+    Cancelled,
 }
 
-fn fetch_and_merge(git: &Path, root: &Path, upstream: &str, log: &dyn Fn(&str)) -> MergeOutcome {
-    let Some((remote, branch)) = upstream.rsplit_once('/') else {
-        return MergeOutcome::Retryable(format!("无法解析 upstream「{upstream}」"));
-    };
-    log(&format!("git fetch {remote} {branch}"));
-    if let Err(error) = run_git_ok(git, root, &["fetch", remote, branch]) {
-        return MergeOutcome::Retryable(format!("{error:#}"));
+/// fetch + merge 当前 upstream（G-10）。远端与分支来自 `branch.<b>.remote` /
+/// `branch.<b>.merge` 结构化配置（F09：不从 upstream 显示串拆分——含斜杠分支与
+/// 本地 upstream（remote=="."）都会拆错）。fetch 与 merge 是两个独立阶段（G-13），
+/// 每条命令启动前检查停止标志（F13/G-15），成功与失败都把真实输出写入日志
+/// （F14/G-14）。
+fn fetch_and_merge(
+    git: &Path,
+    root: &Path,
+    remote: &str,
+    upstream_branch: &str,
+    ctx: &Ctx<'_>,
+) -> MergeOutcome {
+    if ctx.control.is_cancelled() {
+        return MergeOutcome::Cancelled;
     }
-    log("git merge FETCH_HEAD");
+    ctx.shared.set_stage("pull/fetch");
+    (ctx.log)(&format!("git fetch {remote} {upstream_branch}"));
+    let fetch = match run_git(git, root, &["fetch", remote, upstream_branch]) {
+        Ok(out) => out,
+        Err(error) => return MergeOutcome::Retryable(format!("{error:#}")),
+    };
+    let fetch_stdout = output_text(&fetch.stdout);
+    let fetch_stderr = output_text(&fetch.stderr);
+    if !fetch.status.success() {
+        let reason = summarize(&fetch_stderr, &fetch_stdout);
+        (ctx.log)(&format!("git fetch 失败：{reason}"));
+        return MergeOutcome::Retryable(reason);
+    }
+    // F14/G-14：成功也采集真实输出
+    if let Some(entry) = output_log_entry(&fetch_stdout, &fetch_stderr) {
+        (ctx.log)(&format!("git fetch 输出：\n{entry}"));
+    }
+    // F13/G-15：fetch 自然结束后检查停止标志，不再启动 merge
+    if ctx.control.is_cancelled() {
+        return MergeOutcome::Cancelled;
+    }
+    ctx.shared.set_stage("merge");
+    (ctx.log)("git merge FETCH_HEAD");
     let out = match run_git(git, root, &["merge", "FETCH_HEAD"]) {
         Ok(out) => out,
         Err(error) => return MergeOutcome::Retryable(format!("{error:#}")),
     };
+    let stdout = output_text(&out.stdout);
+    let stderr = output_text(&out.stderr);
     if out.status.success() {
+        // F14/G-14：merge 成功的真实输出（合并统计）也进日志，且作为独立阶段呈现
+        if let Some(entry) = output_log_entry(&stdout, &stderr) {
+            (ctx.log)(&format!("git merge 输出：\n{entry}"));
+        }
         return MergeOutcome::Merged;
     }
-    let stderr = output_text(&out.stderr);
-    let stdout = output_text(&out.stdout);
     let text = format!("{stderr}{stdout}");
     if text.contains("CONFLICT") {
         // G-14：冲突时必须把 git merge 的输出写进日志（含 CONFLICT 与冲突文件名），
         // 用户要靠它判断卡在哪一步；不能只挑一边流——CONFLICT 行可能落在 stdout，
         // 也不能只给「失败」级别的信息。多行日志条目与 run() 的仓库信息同款。
-        log(&format!("git merge 冲突输出：\n{stderr}{stdout}"));
+        (ctx.log)(&format!("git merge 冲突输出：\n{}", bounded_text(&text)));
         let unresolved = run_git_ok(git, root, &["diff", "--name-only", "--diff-filter=U"])
             .map(|text| {
                 text.lines()
@@ -624,17 +785,72 @@ fn deletion_fully_staged(git: &Path, root: &Path, paths: &[String]) -> bool {
     }
     staged == paths.len()
 }
+
+/// F11/G-06：检测路径的 index/worktree 分叉（部分暂存）。porcelain 两列 X/Y 都非空
+///（MM、AM、RM、MD 等）说明暂存区与工作区各有一份不同的改动：此时 `git add` 会用
+/// 工作区内容重写用户已暂存的版本，`commit --only` 也会按工作区内容落提交——两者
+/// 都保不住 staged 版本（G-06 不得删除用户 staged 内容）。未跟踪（??）没有暂存
+/// 版本可保护，不算分叉。
+fn partial_stage_divergence(git: &Path, root: &Path, paths: &[String]) -> Result<bool> {
+    if paths.is_empty() {
+        return Ok(false);
+    }
+    let mut args: Vec<&str> = vec!["status", "--porcelain", "--"];
+    for path in paths {
+        args.push(path.as_str());
+    }
+    let out = run_git(git, root, &args)
+        .with_context(|| "执行 git status 失败（检查部分暂存状态）".to_string())?;
+    if !out.status.success() {
+        bail!(
+            "检查部分暂存状态失败：{}",
+            summarize(&output_text(&out.stderr), &output_text(&out.stdout))
+        );
+    }
+    for line in output_text(&out.stdout).lines() {
+        let bytes = line.as_bytes();
+        if bytes.len() < 2 {
+            continue;
+        }
+        let (x, y) = (bytes[0], bytes[1]);
+        if x != b' ' && x != b'?' && y != b' ' && y != b'?' {
+            return Ok(true);
+        }
+    }
+    Ok(false)
+}
 fn process_change(
     git: &Path,
     root: &Path,
     change: &FileChange,
-    upstream: &str,
+    remote: &str,
+    upstream_branch: &str,
     ctx: &Ctx<'_>,
 ) -> StepOutcome {
     let stage_paths = change.stage_paths();
     let commit_paths = change.commit_paths();
     let display = change.display_path();
     let message = format!("update: {display}");
+    // F11/G-06：处理该文件前检测部分暂存分叉——暂存区与工作区对该路径各有一份
+    // 不同改动时，add 会用工作区内容覆盖用户已暂存的版本；该文件计为失败并停止
+    // 自动处理（保护 staged 版本），不执行 add。
+    match partial_stage_divergence(git, root, &stage_paths) {
+        Ok(false) => {}
+        Ok(true) => {
+            let text = format!(
+                "{display} 处于部分暂存状态受保护：暂存区与工作区对该文件各有一份不同的改动，\
+                 继续处理会覆盖用户已暂存的版本（G-06）；该文件计为失败，未执行 add/commit，\
+                 请先自行统一该文件的暂存区与工作区状态后重新开始任务"
+            );
+            (ctx.log)(&text);
+            return StepOutcome::Fatal(text);
+        }
+        Err(error) => {
+            let text = format!("{error:#}（当前文件：{display}，阶段：add 前预检）");
+            (ctx.log)(&text);
+            return StepOutcome::Fatal(text);
+        }
+    }
     let mut added = false;
     let mut attempt = 0u64;
     loop {
@@ -649,7 +865,15 @@ fn process_change(
             }
             (ctx.log)(&format!("git add -- {}", stage_paths.join(" ")));
             match run_git(git, root, &args) {
-                Ok(out) if out.status.success() => added = true,
+                Ok(out) if out.status.success() => {
+                    // F14/G-14：成功也采集真实输出（add 通常无输出，空输出不记条目）
+                    let stdout = output_text(&out.stdout);
+                    let stderr = output_text(&out.stderr);
+                    if let Some(entry) = output_log_entry(&stdout, &stderr) {
+                        (ctx.log)(&format!("git add 输出：\n{entry}"));
+                    }
+                    added = true;
+                }
                 Ok(out) => {
                     let why = summarize(&output_text(&out.stderr), &output_text(&out.stdout));
                     (ctx.log)(&format!("git add 失败：{why}"));
@@ -680,6 +904,11 @@ fn process_change(
             }
         }
         {
+            // F13/G-15：add 成功后进入 commit 前同样检查停止标志——停止检查不能只在
+            // 循环顶：add 与 commit 同轮衔接时，add 执行期间发出的停止请求会漏过。
+            if ctx.control.is_cancelled() {
+                return StepOutcome::Cancelled;
+            }
             ctx.shared.set_stage("commit");
             let mut args: Vec<&str> = vec!["commit", "--only", "-m", &message, "--"];
             for path in &commit_paths {
@@ -690,7 +919,14 @@ fn process_change(
                 commit_paths.join(" ")
             ));
             match run_git(git, root, &args) {
-                Ok(out) if out.status.success() => {}
+                Ok(out) if out.status.success() => {
+                    // F14/G-14：成功也采集真实输出（分支、提交号与文件统计）
+                    let stdout = output_text(&out.stdout);
+                    let stderr = output_text(&out.stderr);
+                    if let Some(entry) = output_log_entry(&stdout, &stderr) {
+                        (ctx.log)(&format!("git commit 输出：\n{entry}"));
+                    }
+                }
                 Ok(out) => {
                     let stderr = output_text(&out.stderr);
                     let stdout = output_text(&out.stdout);
@@ -745,6 +981,10 @@ fn process_change(
                     continue;
                 }
             }
+            // F13/G-15：commit 自然结束后、验证命令启动前同样检查停止标志
+            if ctx.control.is_cancelled() {
+                return StepOutcome::Cancelled;
+            }
             // G-05：验证本次 commit 只包含当前文件变更
             match verify_single_path_commit(git, root, &commit_paths) {
                 Ok(true) => {}
@@ -756,7 +996,7 @@ fn process_change(
                 }
             }
         }
-        let outcome = push_with_retry(git, root, upstream, ctx, &mut attempt);
+        let outcome = push_with_retry(git, root, remote, upstream_branch, ctx, &mut attempt);
         if matches!(outcome, StepOutcome::Done) {
             (ctx.log)(&format!("push 成功：{display}"));
         }
@@ -765,11 +1005,13 @@ fn process_change(
 }
 
 /// push 当前分支（G-08~G-11）：NeedMerge 时自动 fetch+merge 后重试 push（不 rebase），
-/// 可重试失败按退避无限重试；供 process_change 的单文件流程与冲突续接的合并提交共用。
+/// 可重试失败按退避无限重试；供 process_change 的单文件流程、冲突续接的合并提交与
+/// 只推送补推流程（F12）共用。
 fn push_with_retry(
     git: &Path,
     root: &Path,
-    upstream: &str,
+    remote: &str,
+    upstream_branch: &str,
     ctx: &Ctx<'_>,
     attempt: &mut u64,
 ) -> StepOutcome {
@@ -781,10 +1023,10 @@ fn push_with_retry(
         match try_push(git, root, ctx.log) {
             PushOutcome::Ok => return StepOutcome::Done,
             PushOutcome::NeedMerge => {
-                ctx.shared.set_stage("pull/fetch");
-                match fetch_and_merge(git, root, upstream, ctx.log) {
+                match fetch_and_merge(git, root, remote, upstream_branch, ctx) {
                     // 合并成功：回到循环重试 push（不消耗重试计数，G-10）
                     MergeOutcome::Merged => {}
+                    MergeOutcome::Cancelled => return StepOutcome::Cancelled,
                     MergeOutcome::Conflict(files) => return StepOutcome::Conflict(files),
                     MergeOutcome::BlockedByDirty(reason) => {
                         return StepOutcome::Fatal(format!(
@@ -805,6 +1047,105 @@ fn push_with_retry(
                     return StepOutcome::Cancelled;
                 }
             }
+        }
+    }
+}
+
+/// F12/G-12/G-16：统计本地与 upstream 的提交差集，返回 (远端领先数, 本地领先数)。
+/// porcelain 干净只说明工作区没有未提交变更，不代表本地与远端一致——上次任务可能
+/// 在 commit 之后、push 之前被停止，本地会领先若干提交。
+fn ahead_behind(git: &Path, root: &Path) -> Result<(u64, u64)> {
+    let out = run_git(
+        git,
+        root,
+        &["rev-list", "--left-right", "--count", "@{u}...HEAD"],
+    )
+    .with_context(|| "执行 git rev-list 失败".to_string())?;
+    if !out.status.success() {
+        bail!(
+            "git rev-list 失败：{}",
+            summarize(&output_text(&out.stderr), &output_text(&out.stdout))
+        );
+    }
+    let text = output_text(&out.stdout);
+    let mut parts = text.split_whitespace();
+    let (Some(behind), Some(ahead)) = (parts.next(), parts.next()) else {
+        bail!("无法解析 git rev-list --count 输出：{text:?}");
+    };
+    let behind: u64 = behind
+        .parse()
+        .with_context(|| format!("无法解析远端领先数 {behind:?}"))?;
+    let ahead: u64 = ahead
+        .parse()
+        .with_context(|| format!("无法解析本地领先数 {ahead:?}"))?;
+    Ok((behind, ahead))
+}
+
+/// F12/G-12/G-16：工作区没有未提交变更时的收尾。porcelain 为空不代表本地与远端
+/// 一致——上次任务可能在 commit 后、push 前被停止。以 upstream 与 HEAD 的差集计数
+/// 核实（upstream 解析失败时如实说明无法核实，不得宣称一致）：本地领先则进入
+/// 只推送流程（G-09 阶段记忆——只重试 push、不重复 commit）；推送失败或分叉冲突
+/// 时如实报告「本地有 N 个提交未推送」，绝不报「工作区与远端一致」。
+fn finish_without_changes(git: &Path, info: &RepoInfo, ctx: &Ctx<'_>) -> String {
+    let shared = ctx.shared;
+    let (behind, ahead) = match ahead_behind(git, &info.root) {
+        Ok(pair) => pair,
+        Err(error) => {
+            let text = format!("没有需要提交的变更，但无法核实与远端的同步状态：{error:#}");
+            (ctx.log)(&text);
+            shared.set_state("失败");
+            return text;
+        }
+    };
+    if ahead == 0 {
+        shared.set_state("完成");
+        shared.set_stage("完成");
+        if behind == 0 {
+            return "没有需要提交的变更：工作区与远端一致".into();
+        }
+        return format!(
+            "没有需要提交的变更：本地没有领先远端的提交（远端领先 {behind} 个提交，本工具不自动拉取）"
+        );
+    }
+    (ctx.log)(&format!(
+        "工作区没有未提交变更，但本地领先 upstream {ahead} 个提交（可能在 push 前停止）；按 G-09 阶段记忆只重试 push，不重复 commit"
+    ));
+    let mut attempt = 0u64;
+    match push_with_retry(
+        git,
+        &info.root,
+        &info.upstream_remote,
+        &info.upstream_branch,
+        ctx,
+        &mut attempt,
+    ) {
+        StepOutcome::Done => {
+            shared.set_state("完成");
+            shared.set_stage("完成");
+            let text = format!("没有需要提交的变更：已补推本地领先的 {ahead} 个提交");
+            (ctx.log)(&text);
+            text
+        }
+        StepOutcome::Cancelled => {
+            shared.set_state("已停止");
+            format!("任务已停止：本地有 {ahead} 个提交未推送（可再次启动任务补推）")
+        }
+        StepOutcome::Conflict(files) => {
+            shared.set_state("冲突");
+            shared.set_stage("冲突");
+            let text = format!(
+                "补推时自动合并出现冲突（{} 个文件：{}）；本地有 {ahead} 个提交未推送。已停止并保留冲突现场，请在仓库中解决后重新开始任务（G-11）",
+                files.len(),
+                files.join("、")
+            );
+            (ctx.log)(&text);
+            text
+        }
+        StepOutcome::Fatal(reason) => {
+            shared.set_state("失败");
+            let text = format!("本地有 {ahead} 个提交未推送：{reason}");
+            (ctx.log)(&text);
+            text
         }
     }
 }
@@ -842,20 +1183,53 @@ pub fn run(
         info.branch,
         info.upstream
     ));
+    // F10/P-03/G-08：任务启动预检——在任何写命令之前核实裸 git push 的实际推送
+    // 目标确实是 upstream 远端，且没有会改变推送对象/范围的用户配置（只读检查）。
+    if let Err(error) = push_target_preflight(git, repo, &info) {
+        let text = format!("{error:#}");
+        log(&text);
+        shared.set_state("失败");
+        return format!("无法开始：{text}");
+    }
     // 中间态处理（G-06/G-11）
     match middle_state(git, repo) {
         Ok(MiddleState::Clean) => {}
         Ok(MiddleState::Merge { unresolved }) => {
             if unresolved.is_empty() {
+                // F13/G-15：完成合并提交也是一条会改仓库状态的 git 命令，启动前检查
+                // 停止标志——停止后不得再启动任何 git 命令。
+                if control.is_cancelled() {
+                    shared.set_state("已停止");
+                    return "任务已停止：合并已解决但尚未完成合并提交（可重新开始任务继续）".into();
+                }
                 // 用户已在冲突后解决并暂存：完成合并提交后继续（G-11 续段）。
                 // 合并提交必须推送成功才算完成当前任务，然后继续扫描剩余变更。
                 shared.set_stage("merge");
                 log("检测到已解决的合并：完成合并提交（git commit --no-edit）");
-                if let Err(error) = run_git_ok(git, repo, &["commit", "--no-edit"]) {
-                    let text = format!("完成合并提交失败：{error:#}");
-                    log(&text);
-                    shared.set_state("失败");
-                    return text;
+                match run_git(git, repo, &["commit", "--no-edit"]) {
+                    Ok(out) if out.status.success() => {
+                        // F14/G-14：合并提交的真实输出也进日志
+                        let stdout = output_text(&out.stdout);
+                        let stderr = output_text(&out.stderr);
+                        if let Some(entry) = output_log_entry(&stdout, &stderr) {
+                            log(&format!("git commit --no-edit 输出：\n{entry}"));
+                        }
+                    }
+                    Ok(out) => {
+                        let text = format!(
+                            "完成合并提交失败：{}",
+                            summarize(&output_text(&out.stderr), &output_text(&out.stdout))
+                        );
+                        log(&text);
+                        shared.set_state("失败");
+                        return text;
+                    }
+                    Err(error) => {
+                        let text = format!("完成合并提交失败：{error:#}");
+                        log(&text);
+                        shared.set_state("失败");
+                        return text;
+                    }
                 }
                 let ctx = Ctx {
                     control,
@@ -864,7 +1238,14 @@ pub fn run(
                     unit,
                 };
                 let mut attempt = 0u64;
-                match push_with_retry(git, repo, &info.upstream, &ctx, &mut attempt) {
+                match push_with_retry(
+                    git,
+                    repo,
+                    &info.upstream_remote,
+                    &info.upstream_branch,
+                    &ctx,
+                    &mut attempt,
+                ) {
                     StepOutcome::Done => {
                         log("合并提交已 push 成功；继续扫描剩余变更");
                     }
@@ -937,25 +1318,30 @@ pub fn run(
     shared.total.store(total, Ordering::Relaxed);
     shared.done.store(0, Ordering::Relaxed);
     log(&format!("待处理变更：{total} 个逻辑文件变更"));
-    if changes.is_empty() {
-        shared.set_state("完成");
-        shared.set_stage("完成");
-        return "没有需要提交的变更：工作区与远端一致".into();
-    }
-    let mut done = 0u64;
     let ctx = Ctx {
         control,
         shared,
         log,
         unit,
     };
+    if changes.is_empty() {
+        return finish_without_changes(git, &info, &ctx);
+    }
+    let mut done = 0u64;
     for change in &changes {
         if control.is_cancelled() {
             break;
         }
         shared.set_current(&change.display_path());
         log(&format!("开始处理：{}", change.display_path()));
-        match process_change(git, &info.root, change, &info.upstream, &ctx) {
+        match process_change(
+            git,
+            &info.root,
+            change,
+            &info.upstream_remote,
+            &info.upstream_branch,
+            &ctx,
+        ) {
             StepOutcome::Done => {
                 done += 1;
                 shared.done.store(done, Ordering::Relaxed);
