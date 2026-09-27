@@ -83,6 +83,8 @@ $python = Resolve-Python
 
 # 1) 静态检查：结构/配置/回调/SQL/测试基线/界面规则/产品名。
 $null = Invoke-Logged -Name 'static-check' -File $python -Arguments @('scripts/static_check.py')
+$null = Invoke-Logged -Name 'ocr-asset-manifest' -File $python `
+    -Arguments @('tests/ocr_fixtures/check_asset_manifest.py')
 
 # 2) 全量测试（默认特性，含 GUI 与属性测试）。
 $testLog = Invoke-Logged -Name 'cargo-test' -File 'cargo' -Arguments @('test','--all-targets')
