@@ -1271,6 +1271,14 @@ fn start_task(ui: &AppWindow, state: &Rc<RefCell<State>>, out: &EventSender, app
         ui.set_error_text("目标目录不存在或无法访问，请重新选择目录".into());
         return;
     }
+    // S-04：所选根或其上级含符号链接/junction 时在这里就拒绝（与引擎入口同口径），
+    // 不进入扫描线程。
+    if !apply {
+        if let Err(error) = crate::fsutil::ensure_plain_entry(&directory) {
+            ui.set_error_text(format!("{error:#}").into());
+            return;
+        }
+    }
     let control = Arc::new(Control::default());
     {
         let mut s = state.borrow_mut();
@@ -1609,21 +1617,25 @@ fn md_merge_run(
     }
     let progress_out = out.clone();
     let progress_control = Arc::clone(control);
-    let stats = md_tools::merge_markdown(
-        &entries,
-        output,
-        overwrite,
-        control,
-        &|index: usize, total: usize| {
-            progress_control.set_planned(u64::try_from(total).unwrap_or(0));
-            progress_control
-                .completed
-                .store(u64::try_from(index).unwrap_or(0), Ordering::Relaxed);
-            let _ = progress_out.send(Event::Status(format!("合并中：{index} / {total} 个文件")));
+    let stats =
+        md_tools::merge_markdown_with_events(&entries, output, overwrite, control, &|event| {
+            // U-03/U-12：完成计数只由 FileCompleted 驱动，单文件任务开局不得显示 1/1。
+            match event {
+                md_tools::MdProgress::FileStarted(index, total) => {
+                    progress_control.set_planned(u64::try_from(total).unwrap_or(0));
+                    let _ = progress_out
+                        .send(Event::Status(format!("合并中：{index} / {total} 个文件")));
+                }
+                md_tools::MdProgress::FileCompleted(done, total) => {
+                    progress_control.set_planned(u64::try_from(total).unwrap_or(0));
+                    progress_control
+                        .completed
+                        .store(u64::try_from(done).unwrap_or(0), Ordering::Relaxed);
+                }
+            }
             Ok(())
-        },
-    )
-    .map_err(|error| format!("{error:#}"))?;
+        })
+        .map_err(|error| format!("{error:#}"))?;
     Ok(format!(
         "合并完成：{} 个文件按创建时间顺序写入 {}",
         stats.files,
@@ -1679,22 +1691,25 @@ fn md_split_run(
     }
     let progress_out = out.clone();
     let progress_control = Arc::clone(control);
-    let written = md_tools::run_split(
-        input,
-        &plan,
-        out_dir,
-        overwrite,
-        control,
-        &|index: usize, total: usize| {
-            progress_control.set_planned(u64::try_from(total).unwrap_or(0));
-            progress_control
-                .completed
-                .store(u64::try_from(index).unwrap_or(0), Ordering::Relaxed);
-            let _ = progress_out.send(Event::Status(format!("拆分中：{index} / {total} 片")));
+    let written =
+        md_tools::run_split_with_events(input, &plan, out_dir, overwrite, control, &|event| {
+            // U-03/U-12：完成计数只由 FileCompleted 驱动（与合并同口径）。
+            match event {
+                md_tools::MdProgress::FileStarted(index, total) => {
+                    progress_control.set_planned(u64::try_from(total).unwrap_or(0));
+                    let _ =
+                        progress_out.send(Event::Status(format!("拆分中：{index} / {total} 片")));
+                }
+                md_tools::MdProgress::FileCompleted(done, total) => {
+                    progress_control.set_planned(u64::try_from(total).unwrap_or(0));
+                    progress_control
+                        .completed
+                        .store(u64::try_from(done).unwrap_or(0), Ordering::Relaxed);
+                }
+            }
             Ok(())
-        },
-    )
-    .map_err(|error| format!("{error:#}"))?;
+        })
+        .map_err(|error| format!("{error:#}"))?;
     let _ = written;
     Ok(format!(
         "拆分完成：{} 片写入 {}（每片不超过 {} 字节）",
@@ -2408,6 +2423,12 @@ fn wire_sync(ui: &AppWindow, state: &Rc<RefCell<State>>, out: &EventSender) {
                 }
                 if !directory.is_dir() {
                     show_error(&ui, "目标目录不存在或无法访问，请重新选择目录");
+                    return;
+                }
+                // S-04：先在原始路径上检查链接边界（canonicalize 会丢失 reparse 身份），
+                // 在打开确认框前拒绝。
+                if let Err(error) = crate::fsutil::ensure_plain_entry(&directory) {
+                    show_error(&ui, error);
                     return;
                 }
                 // 与清点同一口径的规范化预检（S-05 受保护目录等）：在这里就拒绝，
