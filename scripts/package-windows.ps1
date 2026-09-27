@@ -56,17 +56,17 @@ $workers = @($manifest.workers)
 if ($workers.Count -ne 1 -or $workers[0].id -cne 'snap-ocr-worker' -or
     $workers[0].url -cne 'https://github.com/jchanghong023/JchTools/releases/download/optional-components-v0.1.0/snap-ocr-worker.exe' -or
     $workers[0].archive_type -cne 'file' -or
-    $workers[0].install_path -cne 'worker/v0.1.0/snap-ocr-worker.exe') {
-    throw 'Optional OCR worker manifest identity, destination, or release URL differs from the staged asset.'
+    $workers[0].install_path -cne 'worker/v0.1.0/snap-ocr-worker.exe' -or
+    $workers[0].status -cne 'ok' -or
+    $workers[0].size_bytes -ne $workerBytes -or
+    $workers[0].sha256 -cne $workerSha) {
+    throw 'Optional OCR worker does not match the pinned release URL, size, SHA-256, or destination; publish a new version before packaging.'
 }
-$workers[0].status = 'ok'
-$workers[0].size_bytes = $workerBytes
-$workers[0].sha256 = $workerSha
-$utf8 = New-Object Text.UTF8Encoding($false)
 $stagedManifest = Join-Path $optionalStage 'snap-ocr-assets.json'
-[IO.File]::WriteAllText($stagedManifest,($manifest | ConvertTo-Json -Depth 20),$utf8)
+Copy-Item -LiteralPath 'resources\snap-ocr-assets.json' -Destination $stagedManifest -Force
+$utf8 = New-Object Text.UTF8Encoding($false)
 # build.rs embeds the exact staged manifest into JchTools.exe; restore the caller's
-# environment even if compilation fails. The tracked source manifest remains pending.
+# environment even if compilation fails.
 $previousManifest = $env:JCHTOOLS_SNAP_OCR_MANIFEST
 try {
     $env:JCHTOOLS_SNAP_OCR_MANIFEST = $stagedManifest

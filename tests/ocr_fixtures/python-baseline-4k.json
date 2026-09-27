@@ -1,0 +1,26 @@
+{
+  "actual_text": "TextSnap Layout固定测试页\nCN-D0C|中文文档：截图只在内存中处理，不上传，不写入识别历史。\nEnglish web sample: deterministic text keeps punctuation, 12345, and symbols +-=.\n中英混排 Mixed-文本：CPU / AVX2 / MKL-DNN；版本 v0.1.0。\nCODE-HEADING代码与缩进\ndef layout(spans):\n    if not spans:\n        return\"\"# EMPTY-RETURN\n    return \"left\" + \"\" + \"right\" # keep spaces\nLONG-LINE | alpha beta gamma delta epsilon | 0123456789 | 中文长行不得在瓦片接缝重复或截断 | END-LONG-LINE\nCOLUMN-HEADING双栏锚点\nLEFT-COLUMN-A 左栏第一行                                                RIGHT-COLUMN-A 右栏第一行\nLEFT-COLUMN-B 左栏第二行                                                RIGHT-COLUMN-B 右栏第二行\n                                                                        RIGHT-COLUMN-C 右栏第三行\nLEFT-COLUMN-C 左栏留白后\nINVERSE-TEXT 反色文字white-on-black 9876\n4K-SMALL-TEXT | @0|__init__.py::module|UNAVAILABLE|;paddle_adapter.py | tiny glyph regression | 中文小字锚点 |abcXYZ019 |END-4K",
+  "close_failure": null,
+  "comparison": {
+    "actual_characters": 874,
+    "actual_lines": 17,
+    "compact_actual_characters": 615,
+    "compact_cer": 0.004862236628849271,
+    "compact_distance": 3,
+    "compact_expected_characters": 617,
+    "exact_cer": 0.024581005586592177,
+    "exact_distance": 22,
+    "expected_characters": 895,
+    "expected_lines": 17
+  },
+  "initialization_seconds": 1.2634036000090418,
+  "layout_stats": {
+    "grid_cell_width": 12.96,
+    "input_spans": 19,
+    "line_count": 17,
+    "output_spans": 19,
+    "row_step": 59.5
+  },
+  "recognition_seconds": 1.3717436000006273,
+  "status": "success"
+}

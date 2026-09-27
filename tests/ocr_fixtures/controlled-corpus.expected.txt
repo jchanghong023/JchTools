@@ -1,0 +1,17 @@
+TextSnap Layout 固定测试页
+CN-DOC | 中文文档：截图只在内存中处理，不上传，不写入识别历史。
+English web sample: deterministic text keeps punctuation, 12345, and symbols +-=.
+中英混排 Mixed-文本：CPU / AVX2 / MKL-DNN；版本 v0.1.0。
+CODE-HEADING | 代码与缩进
+def layout(spans):
+    if not spans:
+        return ""  # EMPTY-RETURN
+    return "left" + "    " + "right"  # keep spaces
+LONG-LINE | alpha beta gamma delta epsilon | 0123456789 | 中文长行不得在瓦片接缝重复或截断 | END-LONG-LINE
+COLUMN-HEADING | 双栏锚点
+LEFT-COLUMN-A 左栏第一行                                                RIGHT-COLUMN-A 右栏第一行
+LEFT-COLUMN-B 左栏第二行                                                RIGHT-COLUMN-B 右栏第二行
+                                                                        RIGHT-COLUMN-C 右栏第三行
+LEFT-COLUMN-C 左栏留白后
+INVERSE-TEXT 反色文字 white-on-black 9876
+4K-SMALL-TEXT | @0|__init__.py::module|UNAVAILABLE|; paddle_adapter.py | tiny glyph regression | 中文小字锚点 | abcXYZ019 | END-4K

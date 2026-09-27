@@ -1,0 +1,91 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <title>TextSnap Layout controlled OCR corpus</title>
+  <style>
+    :root {
+      color-scheme: light;
+      font-family: "Noto Sans CJK SC", "Microsoft YaHei", sans-serif;
+      background: #eceff3;
+      color: #111;
+    }
+    * { box-sizing: border-box; }
+    html, body { margin: 0; width: 100%; min-height: 100%; }
+    body { padding: 48px; }
+    main {
+      width: 1800px;
+      margin: 0 auto;
+      background: #fff;
+      border: 2px solid #222;
+      padding: 48px;
+    }
+    h1 { margin: 0 0 30px; font-size: 46px; }
+    h2 { margin: 26px 0 12px; font-size: 30px; }
+    p { margin: 8px 0; font-size: 25px; line-height: 1.55; }
+    .mixed { font-family: "Noto Sans Mono CJK SC", Consolas, monospace; }
+    pre {
+      margin: 12px 0;
+      padding: 20px 26px;
+      font: 23px/1.45 "Noto Sans Mono CJK SC", Consolas, monospace;
+      white-space: pre;
+      overflow: hidden;
+      border: 1px solid #777;
+      background: #f6f6f6;
+    }
+    .columns {
+      display: grid;
+      grid-template-columns: 1fr 1fr;
+      column-gap: 150px;
+      align-items: start;
+    }
+    .columns section { border-top: 3px solid #222; }
+    .inverse {
+      margin-top: 24px;
+      padding: 18px 24px;
+      color: #fff;
+      background: #111;
+      font: 25px/1.5 "Noto Sans Mono CJK SC", Consolas, monospace;
+    }
+    .small-4k {
+      margin-top: 24px;
+      font: 14px/1.45 "Noto Sans Mono CJK SC", Consolas, monospace;
+    }
+  </style>
+</head>
+<body>
+  <main>
+    <h1>TextSnap Layout 固定测试页</h1>
+    <p>CN-DOC | 中文文档：截图只在内存中处理，不上传，不写入识别历史。</p>
+    <p>English web sample: deterministic text keeps punctuation, 12345, and symbols +-=.</p>
+    <p class="mixed">中英混排 Mixed-文本：CPU / AVX2 / MKL-DNN；版本 v0.1.0。</p>
+
+    <h2>CODE-HEADING | 代码与缩进</h2>
+    <pre>def layout(spans):
+    if not spans:
+        return ""  # EMPTY-RETURN
+    return "left" + "    " + "right"  # keep spaces</pre>
+
+    <p class="mixed">LONG-LINE | alpha beta gamma delta epsilon | 0123456789 | 中文长行不得在瓦片接缝重复或截断 | END-LONG-LINE</p>
+
+    <h2>COLUMN-HEADING | 双栏锚点</h2>
+    <div class="columns">
+      <section>
+        <p>LEFT-COLUMN-A 左栏第一行</p>
+        <p>LEFT-COLUMN-B 左栏第二行</p>
+        <p style="margin-top: 54px">LEFT-COLUMN-C 左栏留白后</p>
+      </section>
+      <section>
+        <p>RIGHT-COLUMN-A 右栏第一行</p>
+        <p>RIGHT-COLUMN-B 右栏第二行</p>
+        <p>RIGHT-COLUMN-C 右栏第三行</p>
+      </section>
+    </div>
+
+    <div class="inverse">INVERSE-TEXT 反色文字 white-on-black 9876</div>
+    <div class="small-4k">
+      4K-SMALL-TEXT | @0|__init__.py::module|UNAVAILABLE|; paddle_adapter.py | tiny glyph regression | 中文小字锚点 | abcXYZ019 | END-4K
+    </div>
+  </main>
+</body>
+</html>
