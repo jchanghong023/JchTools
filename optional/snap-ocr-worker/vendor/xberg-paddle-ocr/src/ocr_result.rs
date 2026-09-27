@@ -1,0 +1,199 @@
+use std::fmt::{self, Write};
+
+use serde::{Deserialize, Serialize};
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+pub struct Point {
+    pub x: u32,
+    pub y: u32,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+pub struct TextBox {
+    pub points: Vec<Point>,
+    pub score: f32,
+}
+
+impl fmt::Display for TextBox {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        if self.points.len() < 4 {
+            return write!(
+                f,
+                "TextBox [score({}), points_count({})]",
+                self.score,
+                self.points.len()
+            );
+        }
+
+        write!(
+            f,
+            "TextBox [score({}), [x: {}, y: {}], [x: {}, y: {}], [x: {}, y: {}], [x: {}, y: {}]]",
+            self.score,
+            self.points[0].x,
+            self.points[0].y,
+            self.points[1].x,
+            self.points[1].y,
+            self.points[2].x,
+            self.points[2].y,
+            self.points[3].x,
+            self.points[3].y,
+        )
+    }
+}
+
+#[derive(Debug, Default)]
+pub struct Angle {
+    pub index: i32,
+    pub score: f32,
+}
+
+impl fmt::Display for Angle {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let header = if self.index >= 0 {
+            "Angle"
+        } else {
+            "AngleDisabled"
+        };
+        write!(
+            f,
+            "{}[Index({}), Score({})]",
+            header, self.index, self.score
+        )
+    }
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
+pub struct TextLine {
+    pub text: String,
+    pub text_score: f32,
+}
+
+impl fmt::Display for TextLine {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(
+            f,
+            "TextLine[Text({}),TextScore({})]",
+            self.text, self.text_score
+        )
+    }
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct TextBlock {
+    pub box_points: Vec<Point>,
+    pub box_score: f32,
+
+    pub angle_index: i32,
+    pub angle_score: f32,
+
+    pub text: String,
+    pub text_score: f32,
+}
+
+/// A word aligned to the CTC output columns that produced it.
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
+pub struct RecognizedWord {
+    pub text: String,
+    #[serde(default)]
+    pub columns: Vec<u32>,
+    #[serde(default)]
+    pub start_column: u32,
+    #[serde(default)]
+    pub end_column: u32,
+    #[serde(default)]
+    pub confidence: f32,
+}
+
+/// A recognized line with word-level CTC alignment details.
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
+pub struct DetailedTextLine {
+    #[serde(flatten)]
+    pub line: TextLine,
+    #[serde(default)]
+    pub words: Vec<RecognizedWord>,
+    #[serde(default)]
+    pub line_column_count: f32,
+}
+
+impl From<DetailedTextLine> for TextLine {
+    fn from(value: DetailedTextLine) -> Self {
+        value.line
+    }
+}
+
+/// A recognized word with an optional source-image quadrilateral.
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
+pub struct WordBlock {
+    #[serde(flatten)]
+    pub word: RecognizedWord,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub box_points: Vec<Point>,
+}
+
+impl From<RecognizedWord> for WordBlock {
+    fn from(word: RecognizedWord) -> Self {
+        Self {
+            word,
+            box_points: Vec::new(),
+        }
+    }
+}
+
+/// A text block with word-level CTC alignment details.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct DetailedTextBlock {
+    #[serde(flatten)]
+    pub block: TextBlock,
+    #[serde(default)]
+    pub words: Vec<WordBlock>,
+    #[serde(default)]
+    pub line_column_count: f32,
+    /// Whether the classifier-requested 180-degree crop rotation was retained for recognition.
+    #[serde(default)]
+    pub rotation_retained: bool,
+}
+
+impl From<DetailedTextBlock> for TextBlock {
+    fn from(value: DetailedTextBlock) -> Self {
+        value.block
+    }
+}
+
+#[derive(Serialize, Deserialize)]
+pub struct OcrResult {
+    pub text_blocks: Vec<TextBlock>,
+}
+
+/// OCR output that retains word-level CTC alignment details.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct DetailedOcrResult {
+    #[serde(default)]
+    pub text_blocks: Vec<DetailedTextBlock>,
+}
+
+impl From<DetailedOcrResult> for OcrResult {
+    fn from(value: DetailedOcrResult) -> Self {
+        Self {
+            text_blocks: value.text_blocks.into_iter().map(Into::into).collect(),
+        }
+    }
+}
+
+impl fmt::Display for OcrResult {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let mut str_builder = String::with_capacity(0);
+        for text_block in &self.text_blocks {
+            write!(
+                str_builder,
+                "TextBlock[BoxPointsLen({}), BoxScore({}), AngleIndex({}), AngleScore({}), Text({}), TextScore({})]",
+                text_block.box_points.len(),
+                text_block.box_score,
+                text_block.angle_index,
+                text_block.angle_score,
+                text_block.text,
+                text_block.text_score
+            )?;
+        }
+        f.write_str(&str_builder)
+    }
+}

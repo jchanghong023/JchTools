@@ -391,6 +391,20 @@ fn sha256_hex(data: &[u8]) -> String {
     digest
 }
 
+/// 默认嵌入仓库清单；打包脚本先构建可选 worker，随后在 .tmp 中生成回填
+/// size/SHA-256 的清单并通过构建环境覆盖。绝不把 worker 本体放进主程序。
+fn embed_snap_ocr_manifest(manifest_dir: &std::path::Path) {
+    let source = std::env::var_os("JCHTOOLS_SNAP_OCR_MANIFEST").map_or_else(
+        || manifest_dir.join("resources/snap-ocr-assets.json"),
+        std::path::PathBuf::from,
+    );
+    println!("cargo:rerun-if-env-changed=JCHTOOLS_SNAP_OCR_MANIFEST");
+    println!("cargo:rerun-if-changed={}", source.display());
+    let output = std::path::PathBuf::from(cargo_env("OUT_DIR")).join("snap-ocr-assets.json");
+    std::fs::copy(&source, &output)
+        .unwrap_or_else(|error| panic!("无法将截图 OCR 资产清单嵌入主程序：{error}"));
+}
+
 fn main() {
     #[cfg(feature = "gui")]
     {
@@ -402,6 +416,7 @@ fn main() {
         }
     }
     let manifest_dir = std::path::PathBuf::from(cargo_env("CARGO_MANIFEST_DIR"));
+    embed_snap_ocr_manifest(&manifest_dir);
     // src/engine_bundle.rs 无条件 include! 这个生成文件，所以非 Windows 目标
     // 也必须生成；没有引擎时内容为空，只影响内嵌释放能力（平台范围按 P-07 仅 Windows）。
     embed_engine(&manifest_dir);

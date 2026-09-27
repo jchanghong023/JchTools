@@ -39,6 +39,14 @@ pub fn tools() -> &'static [ToolDescriptor] {
             category: "开发",
             summary: "逐文件提交并推送 · 自动重试 · 冲突即停",
         },
+        ToolDescriptor {
+            id: "snap-ocr",
+            name: "截图 OCR",
+            // O-01：类别沿用现有枚举（文件/文档/开发），「效率」类不存在，OCR 输出
+            // 文本内容，归入最贴近的「文档」。
+            category: "文档",
+            summary: "热键截图识别 · 布局保真文本 · 独立后台服务",
+        },
     ]
 }
 

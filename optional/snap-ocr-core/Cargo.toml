@@ -1,0 +1,45 @@
+[package]
+name = "snap-ocr-core"
+version = "0.1.0"
+edition = "2021"
+publish = false
+license = "MIT"
+description = "截图 OCR 纯逻辑核心：瓦片、几何、接缝合并、去重、方向策略与文本布局（O 分区）"
+
+## 无外部依赖：附录 B 字符宽度所需的 East Asian Width 与组合类区段表由
+## src/ucd_tables.rs 提供（Python 3.13 unicodedata 生成，与 oracle 同源）。
+
+[lints.rust]
+# 与主包同口径的零告警硬门禁（workspace lints 不自动继承到成员，需独立声明）。
+warnings = "deny"
+unsafe_op_in_unsafe_fn = "deny"
+unused_must_use = "deny"
+unreachable_patterns = "deny"
+unreachable_pub = "deny"
+unused_variables = "deny"
+future_incompatible = { level = "deny", priority = -1 }
+rust_2018_idioms = { level = "deny", priority = -1 }
+explicit_outlives_requirements = "deny"
+elided_lifetimes_in_paths = "deny"
+single_use_lifetimes = "deny"
+
+[lints.clippy]
+pedantic = { level = "deny", priority = -1 }
+cargo = { level = "deny", priority = -1 }
+unwrap_used = "deny"
+expect_used = "deny"
+dbg_macro = "deny"
+todo = "deny"
+unimplemented = "deny"
+mem_forget = "deny"
+fn_to_numeric_cast_any = "deny"
+undocumented_unsafe_blocks = "deny"
+multiple_unsafe_ops_per_block = "deny"
+doc_markdown = "allow"
+missing_errors_doc = "allow"
+missing_panics_doc = "allow"
+must_use_candidate = "allow"
+items_after_statements = "allow"
+multiple_crate_versions = "allow"
+too_many_lines = "allow"
+struct_excessive_bools = "allow"

@@ -23,6 +23,7 @@ pub mod platform;
 pub mod process;
 pub mod registry;
 pub mod rules;
+pub mod snap_ocr_assets;
 
 /// GUI 组装层（Slint 界面状态与回调装配）；仅在 gui 特性下编译。
 #[cfg(feature = "gui")]

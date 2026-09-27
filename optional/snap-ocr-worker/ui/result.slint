@@ -1,0 +1,303 @@
+// 独立截图服务的结果与设置窗口；结果正文只保存在内存和用户剪贴板。
+import { TextEdit, Button, CheckBox } from "std-widgets.slint";
+
+export component ResultWindow inherits Window {
+    callback copy-all();
+    callback close-requested();
+    in property <string> ocr-text;
+    in property <string> hint: "";
+    in property <color> token-background: #fbfbfd;
+    in property <color> token-surface: #ffffff;
+    in property <color> token-text: #1c1d22;
+    in property <color> token-text-secondary: #5b5f6b;
+    in property <color> token-accent: #2563cf;
+    in property <color> token-border: #d9dbe3;
+
+    title: "截图 OCR 结果";
+    background: root.token-background;
+    forward-focus: editor;
+
+    VerticalLayout {
+        padding: 0px;
+        Rectangle {
+            height: 40px;
+            background: root.token-surface;
+            HorizontalLayout {
+                padding-left: 12px;
+                padding-right: 8px;
+                spacing: 8px;
+                Text {
+                    text: "截图 OCR 结果";
+                    color: root.token-text;
+                    font-size: 14px;
+                    font-weight: 700;
+                    vertical-alignment: center;
+                }
+                Rectangle { horizontal-stretch: 1; }
+                Button { text: "复制全部"; clicked => { root.copy-all(); } }
+                Button { text: "关闭"; clicked => { root.close-requested(); } }
+            }
+        }
+
+        FocusScope {
+            vertical-stretch: 1;
+            horizontal-stretch: 1;
+            KeyBinding { keys: @keys(Control + C); activated => { editor.copy(); } }
+            KeyBinding { keys: @keys(Control + A); activated => { editor.select-all(); } }
+            editor := TextEdit {
+                width: 100%;
+                height: 100%;
+                text: root.ocr-text;
+                read-only: true;
+                wrap: TextWrap.no-wrap;
+                font-family: "Noto Sans Mono CJK SC";
+                font-size: 16px;
+            }
+        }
+
+        Rectangle {
+            height: 26px;
+            background: root.token-surface;
+            HorizontalLayout {
+                padding-left: 12px;
+                padding-right: 12px;
+                Text {
+                    text: "Ctrl+A 全选 · Ctrl+C/右键复制所选 · 复制全部后关闭";
+                    color: root.token-text-secondary;
+                    font-size: 11px;
+                    vertical-alignment: center;
+                }
+                Rectangle { horizontal-stretch: 1; }
+                Text {
+                    text: root.hint;
+                    color: root.token-accent;
+                    font-size: 11px;
+                    vertical-alignment: center;
+                }
+            }
+        }
+    }
+}
+
+export component ProgressWindow inherits Window {
+    callback cancel-requested();
+    in property <string> stage: "正在识别…";
+    in-out property <bool> cancelling: false;
+
+    title: "截图 OCR";
+    width: 340px;
+    height: 140px;
+    background: #fbfbfd;
+    forward-focus: key-handler;
+
+    key-handler := FocusScope {
+        key-pressed(event) => {
+            if (event.text == Key.Escape && !root.cancelling) {
+                root.cancelling = true;
+                root.cancel-requested();
+                accept
+            } else { reject }
+        }
+        VerticalLayout {
+            padding: 18px;
+            spacing: 14px;
+            Text {
+                text: root.cancelling ? "正在取消…" : root.stage;
+                color: #1c1d22;
+                font-size: 16px;
+            }
+            Rectangle { vertical-stretch: 1; }
+            HorizontalLayout {
+                Rectangle { horizontal-stretch: 1; }
+                Button {
+                    text: "取消";
+                    enabled: !root.cancelling;
+                    clicked => {
+                        root.cancelling = true;
+                        root.cancel-requested();
+                    }
+                }
+            }
+        }
+    }
+}
+
+export component SettingsWindow inherits Window {
+    callback save-settings(string, bool) -> bool;
+    callback retry-model();
+    callback initialize-assets();
+    callback cancel-recognition();
+    callback exit-service();
+    callback force-exit-service();
+    callback close-requested();
+
+    in property <string> hotkey-label: "Ctrl+Alt+O";
+    in property <bool> autostart-enabled: false;
+    in-out property <bool> autostart-draft: false;
+    in property <string> model-status: "未初始化";
+    in property <string> status-message: "";
+    in property <bool> model-loading: false;
+    in property <bool> recognizing: false;
+    in property <bool> needs-initialization: false;
+    in property <bool> exit-waiting: false;
+    in property <bool> force-exit-available: false;
+    private property <bool> recording: false;
+    in-out property <string> draft-key: "";
+    private property <bool> draft-control: false;
+    private property <bool> draft-alt: false;
+    private property <bool> draft-shift: false;
+    private property <bool> draft-meta: false;
+    private property <string> draft-label:
+        (root.draft-control ? "Ctrl+" : "") + (root.draft-alt ? "Alt+" : "")
+        + (root.draft-shift ? "Shift+" : "") + (root.draft-meta ? "Win+" : "") + root.draft-key;
+    private property <bool> confirm-exit: false;
+
+    title: "截图 OCR 设置";
+    width: 560px;
+    height: 480px;
+    background: #fbfbfd;
+
+    VerticalLayout {
+        padding: 20px;
+        spacing: 12px;
+        Text { text: "截图 OCR 设置"; font-size: 20px; font-weight: 700; color: #1c1d22; }
+        Text { text: "关闭主界面后，截图服务仍驻留托盘。"; color: #5b5f6b; }
+        HorizontalLayout {
+            spacing: 12px;
+            Text { text: "当前热键：" + root.hotkey-label; vertical-alignment: center; color: #1c1d22; }
+            Button {
+                text: root.recording ? "请按下新热键（Esc 取消）"
+                     : root.draft-key != "" ? root.draft-label + " · 点击重录" : "录制新热键";
+                clicked => { root.recording = true; hotkey-focus.focus(); }
+            }
+            Button {
+                text: "保存设置";
+                enabled: root.draft-key != "" || root.autostart-draft != root.autostart-enabled;
+                clicked => {
+                    if (root.save-settings(root.draft-key != "" ? root.draft-label : root.hotkey-label,
+                                           root.autostart-draft)) {
+                        root.draft-key = "";
+                        root.autostart-draft = root.autostart-enabled;
+                    }
+                }
+            }
+        }
+        hotkey-focus := FocusScope {
+            height: 1px;
+            focus-on-tab-navigation: false;
+            key-pressed(event) => {
+                if (root.recording) {
+                    if (event.text == Key.Escape && !event.modifiers.control
+                        && !event.modifiers.alt && !event.modifiers.shift && !event.modifiers.meta) {
+                        root.recording = false;
+                    } else if (event.text != Key.Control && event.text != Key.ControlR
+                             && event.text != Key.Alt && event.text != Key.AltGr
+                             && event.text != Key.Shift && event.text != Key.ShiftR
+                             && event.text != Key.Meta && event.text != Key.MetaR) {
+                        root.draft-key =
+                            event.text == Key.Backspace ? "Backspace"
+                            : event.text == Key.Tab ? "Tab"
+                            : event.text == Key.Return ? "Return"
+                            : event.text == Key.Escape ? "Escape"
+                            : event.text == Key.Space ? "Space"
+                            : event.text == Key.PageUp ? "PageUp"
+                            : event.text == Key.PageDown ? "PageDown"
+                            : event.text == Key.End ? "End"
+                            : event.text == Key.Home ? "Home"
+                            : event.text == Key.UpArrow ? "Up"
+                            : event.text == Key.DownArrow ? "Down"
+                            : event.text == Key.LeftArrow ? "Left"
+                            : event.text == Key.RightArrow ? "Right"
+                            : event.text == Key.Insert ? "Insert"
+                            : event.text == Key.Delete ? "Delete"
+                            : event.text == Key.F1 ? "F1"
+                            : event.text == Key.F2 ? "F2"
+                            : event.text == Key.F3 ? "F3"
+                            : event.text == Key.F4 ? "F4"
+                            : event.text == Key.F5 ? "F5"
+                            : event.text == Key.F6 ? "F6"
+                            : event.text == Key.F7 ? "F7"
+                            : event.text == Key.F8 ? "F8"
+                            : event.text == Key.F9 ? "F9"
+                            : event.text == Key.F10 ? "F10"
+                            : event.text == Key.F11 ? "F11"
+                            : event.text == Key.F12 ? "F12"
+                            : event.text == Key.F13 ? "F13"
+                            : event.text == Key.F14 ? "F14"
+                            : event.text == Key.F15 ? "F15"
+                            : event.text == Key.F16 ? "F16"
+                            : event.text == Key.F17 ? "F17"
+                            : event.text == Key.F18 ? "F18"
+                            : event.text == Key.F19 ? "F19"
+                            : event.text == Key.F20 ? "F20"
+                            : event.text == Key.F21 ? "F21"
+                            : event.text == Key.F22 ? "F22"
+                            : event.text == Key.F23 ? "F23"
+                            : event.text == Key.F24 ? "F24"
+                            : event.text;
+                        root.draft-control = event.modifiers.control;
+                        root.draft-alt = event.modifiers.alt;
+                        root.draft-shift = event.modifiers.shift;
+                        root.draft-meta = event.modifiers.meta;
+                        root.recording = false;
+                    }
+                    accept
+                } else { reject }
+            }
+        }
+        CheckBox {
+            text: "登录后自动启动截图服务";
+            checked: root.autostart-draft;
+            toggled => { root.autostart-draft = self.checked; }
+        }
+        Text { text: "移动或删除程序前，请先关闭开机启动。"; color: #5b5f6b; font-size: 12px; }
+        Rectangle { height: 1px; background: #d9dbe3; }
+        Text { text: "模型状态：" + root.model-status; color: #1c1d22; }
+        HorizontalLayout {
+            spacing: 10px;
+            if root.needs-initialization : Button {
+                text: "打开主界面初始化资产";
+                clicked => { root.initialize-assets(); }
+            }
+            Button {
+                text: "重试加载模型";
+                enabled: !root.model-loading;
+                clicked => { root.retry-model(); }
+            }
+            if root.recognizing : Button {
+                text: "取消当前识别";
+                clicked => { root.cancel-recognition(); }
+            }
+        }
+        Text { text: root.status-message; color: #2563cf; wrap: word-wrap; }
+        Rectangle { vertical-stretch: 1; }
+        if root.confirm-exit : Rectangle {
+            height: root.exit-waiting ? 76px : 54px;
+            background: #fff3e5;
+            VerticalLayout {
+                padding: 8px;
+                spacing: 4px;
+                Text {
+                    text: root.force-exit-available ? "识别未能及时停止；可选择强制退出。"
+                         : root.exit-waiting ? "正在等待识别安全结束；超过 10 秒后才可强制退出。"
+                                             : "确定退出截图服务？热键与托盘将停止。";
+                    color: #1c1d22;
+                    wrap: word-wrap;
+                }
+                HorizontalLayout {
+                    spacing: 8px;
+                    if !root.exit-waiting : Button { text: "取消"; clicked => { root.confirm-exit = false; } }
+                    if root.exit-waiting : Button { text: "隐藏设置"; clicked => { root.close-requested(); } }
+                    if !root.exit-waiting : Button { text: "确认退出"; clicked => { root.exit-service(); } }
+                    if root.force-exit-available : Button { text: "强制退出"; clicked => { root.force-exit-service(); } }
+                }
+            }
+        }
+        HorizontalLayout {
+            spacing: 8px;
+            Button { text: "退出截图服务"; clicked => { root.confirm-exit = true; } }
+            Rectangle { horizontal-stretch: 1; }
+            Button { text: "关闭设置"; clicked => { root.close-requested(); } }
+        }
+    }
+}

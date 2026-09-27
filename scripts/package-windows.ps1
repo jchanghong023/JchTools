@@ -29,14 +29,51 @@ if (-not $SkipTests) {
         Invoke-Cargo (@('test','--locked','--test','archive') + $extra + @('--','--ignored','--test-threads=1'))
     } finally {$env:JCHTOOLS_TEST_7ZIP = $previous}
 }
-Invoke-Cargo (@('build','--locked','--release','--bins') + $extra)
-# 尊重 CARGO_TARGET_DIR：未设置时回落到默认 target 目录。
+# Build the optional screenshot OCR worker separately. It is a release asset, never a
+# member of the portable ZIP or installer. Both Cargo invocations use the workspace lock.
 if ($env:CARGO_TARGET_DIR) {
-    $targetDir = $env:CARGO_TARGET_DIR
+    $targetDir = [IO.Path]::GetFullPath($env:CARGO_TARGET_DIR)
 } else {
     $targetDir = Join-Path $root 'target'
 }
 $releaseDir = Join-Path $targetDir 'release'
+Invoke-Cargo (@('build','--locked','--release','--manifest-path','optional/snap-ocr-worker/Cargo.toml','--bin','snap-ocr-worker') + $extra)
+$workerExe = Join-Path $releaseDir 'snap-ocr-worker.exe'
+if (-not (Test-Path -LiteralPath $workerExe -PathType Leaf)) {throw "Optional OCR worker build did not produce $workerExe"}
+$workerBytes = (Get-Item -LiteralPath $workerExe).Length
+if ($workerBytes -le 0) {throw 'Optional OCR worker executable is empty.'}
+$workerSha = (Get-FileHash -LiteralPath $workerExe -Algorithm SHA256).Hash.ToLowerInvariant()
+$optionalStage = Join-Path $root 'dist\optional-components-v0.1.0'
+New-Item -ItemType Directory -Path $optionalStage -Force | Out-Null
+$stagedWorker = Join-Path $optionalStage 'snap-ocr-worker.exe'
+Copy-Item -LiteralPath $workerExe -Destination $stagedWorker -Force
+if ((Get-Item -LiteralPath $stagedWorker).Length -ne $workerBytes -or
+    (Get-FileHash -LiteralPath $stagedWorker -Algorithm SHA256).Hash.ToLowerInvariant() -cne $workerSha) {
+    throw 'Optional OCR worker staging changed the executable bytes.'
+}
+$manifest = Get-Content -LiteralPath 'resources\snap-ocr-assets.json' -Raw -Encoding UTF8 | ConvertFrom-Json
+$workers = @($manifest.workers)
+if ($workers.Count -ne 1 -or $workers[0].id -cne 'snap-ocr-worker' -or
+    $workers[0].url -cne 'https://github.com/jchanghong023/JchTools/releases/download/optional-components-v0.1.0/snap-ocr-worker.exe' -or
+    $workers[0].archive_type -cne 'file' -or
+    $workers[0].install_path -cne 'worker/v0.1.0/snap-ocr-worker.exe') {
+    throw 'Optional OCR worker manifest identity, destination, or release URL differs from the staged asset.'
+}
+$workers[0].status = 'ok'
+$workers[0].size_bytes = $workerBytes
+$workers[0].sha256 = $workerSha
+$utf8 = New-Object Text.UTF8Encoding($false)
+$stagedManifest = Join-Path $optionalStage 'snap-ocr-assets.json'
+[IO.File]::WriteAllText($stagedManifest,($manifest | ConvertTo-Json -Depth 20),$utf8)
+# build.rs embeds the exact staged manifest into JchTools.exe; restore the caller's
+# environment even if compilation fails. The tracked source manifest remains pending.
+$previousManifest = $env:JCHTOOLS_SNAP_OCR_MANIFEST
+try {
+    $env:JCHTOOLS_SNAP_OCR_MANIFEST = $stagedManifest
+    Invoke-Cargo (@('build','--locked','--release','--bins') + $extra)
+} finally {
+    $env:JCHTOOLS_SNAP_OCR_MANIFEST = $previousManifest
+}
 # fail-closed：要求 build.rs 已把引擎真正编进 EXE。build.rs 部分失败只 warning，
 # 这里读 OUT_DIR/engine_embed_status.txt，不是 "ok" 就中止，避免打包出未内嵌引擎的发布包。
 $engineStatusFile = Get-ChildItem -LiteralPath $releaseDir -Recurse -Filter 'engine_embed_status.txt' -ErrorAction SilentlyContinue | Sort-Object LastWriteTime -Descending | Select-Object -First 1
@@ -57,6 +94,7 @@ Copy-Item -LiteralPath (Join-Path $releaseDir 'JchTools.exe') -Destination $fold
 # 因此最终用户拿到的是单文件程序，缺引擎时运行期从 EXE 释放并校验 sha256。
 $resources = Join-Path $folder 'resources'
 New-Item -ItemType Directory -Path $resources | Out-Null
+Copy-Item -LiteralPath $stagedManifest -Destination (Join-Path $resources 'snap-ocr-assets.json')
 $engineDir = Join-Path $resources '7zip'
 New-Item -ItemType Directory -Path $engineDir | Out-Null
 foreach ($item in @('manifest.json','NOTICE.txt','licenses')) {
@@ -97,6 +135,12 @@ foreach ($name in @('7z.exe','7z.dll')) {
     if (Test-Path -LiteralPath (Join-Path $folder "resources\7zip\$name")) {throw "Engine executable leaked into the package: $name"}
 }
 if (-not (Test-Path -LiteralPath (Join-Path $folder 'resources\7zip\manifest.json'))) {throw 'Engine manifest is missing from the package.'}
+# The main delivery carries only the small manifest, never the optional OCR payload.
+foreach ($name in @('snap-ocr-worker.exe','onnxruntime.dll','inference.onnx','NotoSansMonoCJKsc-Regular.otf')) {
+    if (@(Get-ChildItem -LiteralPath $folder -Recurse -File -Filter $name).Count -ne 0) {
+        throw "Optional OCR payload leaked into the main installer/ZIP staging directory: $name"
+    }
+}
 # ===== 安装包（P-05/E-04）：Inno Setup 双形态交付的第二产物 =====
 # ISCC 不可用时如实标注 NOT RUN 并继续产出便携 ZIP（CI 负责装 Inno Setup；本地缺件不阻断）。
 # 安装包先于 ZIP 构建：BUILD-INFO.json 需要记录安装包阶段的真实结果，且必须在
@@ -136,4 +180,5 @@ foreach ($item in (Get-ChildItem -LiteralPath $folder -Recurse -Force)) {
 }
 Compress-Archive -LiteralPath $folder -DestinationPath $zip -CompressionLevel Optimal
 Write-Host "Created: $zip"
+Write-Host "Staged optional OCR worker and pinned manifest locally: $optionalStage (NOT UPLOADED; asset release requires separate authorization)"
 Write-Host 'End users extract this ZIP and run JchTools.exe; no separate 7-Zip installation.'

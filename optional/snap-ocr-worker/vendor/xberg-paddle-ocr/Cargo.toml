@@ -1,0 +1,29 @@
+[package]
+name = "xberg-paddle-ocr"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.85"
+description = "PaddleOCR via ONNX Runtime（自 E:\\xberg crates/xberg-paddle-ocr vendored，上游 paddle-ocr-rs by mg-chao，Apache-2.0；本副本 MIT，见 LICENSE/README）"
+license = "MIT"
+publish = false
+
+[features]
+# 原生 ONNX Runtime 后端（本仓库唯一使用路径）。
+default = ["ort"]
+ort = ["dep:ort"]
+# 纯 Rust ONNX 后端（不使用；保留 feature 以最小化对 vendored 源的改动）。
+tract = ["dep:tract-onnx"]
+# 运行期经 ORT_DYLIB_PATH / 相邻目录加载 onnxruntime.dll（O-08：重运行库不静态链接）。
+load-dynamic = ["ort", "ort/load-dynamic"]
+
+[dependencies]
+geo-clipper = "0.9"
+geo-types = "0.7"
+image = { version = "0.25", default-features = false }
+imageproc = { version = "0.27", default-features = false }
+ndarray = "0.17"
+ort = { version = "=2.0.0-rc.13", default-features = false, features = ["std", "api-18", "ndarray"], optional = true }
+serde = { version = "1", features = ["derive"] }
+thiserror = "2"
+tracing = "0.1"
+tract-onnx = { version = "0.23.8", default-features = false, optional = true }

@@ -449,6 +449,30 @@ export component AppWindow inherits Window {
     in-out property <string> convert-log-text;
     in-out property <string> convert-progress-note;
     in-out property <float> convert-progress: -1;
+    // 截图 OCR：资产初始化与独立后台服务的状态分开呈现。
+    in-out property <bool> snap-ready: false;
+    in-out property <bool> snap-initializing: false;
+    in-out property <string> snap-asset-status: "尚未检查可选组件";
+    in-out property <string> snap-progress;
+    in-out property <bool> snap-connected: false;
+    in-out property <string> snap-service-status: "尚未连接后台服务";
+    in-out property <string> snap-model: "uninitialized";
+    in-out property <string> snap-task: "idle";
+    in-out property <string> snap-hotkey: "Ctrl+Alt+O";
+    in-out property <string> snap-hotkey-draft: "Ctrl+Alt+O";
+    in-out property <bool> snap-recording: false;
+    in-out property <bool> snap-autostart: false;
+    in-out property <bool> snap-autostart-draft: false;
+    in-out property <string> snap-error;
+    in-out property <bool> snap-request-pending: false;
+    callback snap-initialize();
+    callback snap-cancel-initialize();
+    callback snap-connect();
+    callback snap-record-key(string, bool, bool, bool, bool);
+    callback snap-save-settings();
+    callback snap-draft-autostart(bool);
+    callback snap-retry-load();
+    callback snap-capture();
     callback choose-directory();
     callback root-edited();
     callback select-tool(string);
@@ -561,7 +585,7 @@ export component AppWindow inherits Window {
             // 页面标题区
             HorizontalLayout { height: 32px; spacing: 12px; cross-axis-alignment: center;
                 Label { text: root.screen == 0 ? "目录整理" : root.screen == 2 ? "递归解压"
-                    : root.screen == 3 ? "MD 整理" : root.screen == 4 ? "Git 工具" : root.screen == 5 ? "转 Markdown" : "关于 JchTools";
+                    : root.screen == 3 ? "MD 整理" : root.screen == 4 ? "Git 工具" : root.screen == 5 ? "转 Markdown" : root.screen == 6 ? "截图 OCR" : "关于 JchTools";
                     font-size: 20px; font-weight: 700; }
                 Rectangle { width: 3px; height: 16px; border-radius: 2px; background: Design.bar; }
                 Muted { text: root.screen == 0 ? "内容去重、归类与清理（不解压）；先分析出计划，确认后才执行。"
@@ -569,6 +593,7 @@ export component AppWindow inherits Window {
                     : root.screen == 3 ? "合并 MD（标题整体下移一级）与拆分 MD（UTF-8 安全、按序拼接无损还原）；原文件一律不改动。"
                     : root.screen == 4 ? "逐文件提交并推送：add → commit → push 成功后才处理下一个文件；冲突即停、失败无限重试（可停止）。"
                     : root.screen == 5 ? "把文档、图片和媒体转换为 Markdown；可保留输入层级或选择平铺输出。"
+                    : root.screen == 6 ? "热键截图与识别在独立后台服务运行，关闭主窗口不影响托盘和热键。"
                     : "Windows 优先的本地工具箱 · 功能持续增加";
                     horizontal-stretch: 1; wrap: no-wrap; overflow: elide; vertical-alignment: center; }
                 if root.busy: Spinner { width: 20px; height: 20px; }
@@ -1170,6 +1195,88 @@ export component AppWindow inherits Window {
                     }
                 }
             }
+            if root.screen == 6: VerticalLayout {
+                spacing: 10px;
+                Surface {
+                    VerticalLayout { padding: 16px; spacing: 10px;
+                        Label { text: "可选组件"; font-weight: 700; }
+                        Muted { text: root.snap-asset-status; }
+                        if root.snap-initializing: ProgressBar { progress: -1; }
+                        if root.snap-initializing: Muted { text: root.snap-progress; }
+                        HorizontalLayout { spacing: 10px;
+                            if !root.snap-ready && !root.snap-initializing: Button {
+                                text: "初始化 / 重试下载"; primary: true;
+                                enabled: root.confirm-kind == 0;
+                                clicked => { root.snap-initialize(); }
+                            }
+                            if root.snap-initializing: Button {
+                                text: "取消初始化"; enabled: root.confirm-kind == 0;
+                                clicked => { root.snap-cancel-initialize(); }
+                            }
+                            Rectangle { horizontal-stretch: 1; background: transparent; }
+                        }
+                        Muted { text: "只在点击初始化后下载缺失组件；校验完成后截图识别可离线使用。取消或失败不会将不完整组件标为就绪。"; }
+                    }
+                }
+                Surface {
+                    VerticalLayout { padding: 16px; spacing: 10px;
+                        HorizontalLayout { spacing: 10px; cross-axis-alignment: center;
+                            Label { text: "后台服务"; font-weight: 700; horizontal-stretch: 1; }
+                            Button { text: root.snap-connected ? "刷新连接" : "启动 / 重连";
+                                enabled: root.snap-ready && root.confirm-kind == 0 && !root.snap-request-pending;
+                                clicked => { root.snap-connect(); } }
+                        }
+                        Muted { text: root.snap-service-status; }
+                        HorizontalLayout { spacing: 16px;
+                            Label { text: "模型：" + (root.snap-model == "ready" ? "就绪" : root.snap-model == "loading" ? "加载中" : root.snap-model == "error" ? "错误" : "未初始化"); }
+                            Label { text: "任务：" + (root.snap-task == "recognizing" ? "正在识别" : "空闲"); }
+                        }
+                        if root.snap-error != "": Text { text: root.snap-error; color: Design.danger-ink; wrap: word-wrap; }
+                        HorizontalLayout { spacing: 10px;
+                            Button { text: "重新加载模型"; enabled: root.snap-connected && root.confirm-kind == 0 && !root.snap-request-pending && root.snap-task == "idle";
+                                clicked => { root.snap-retry-load(); } }
+                            Button { text: "截图识别"; primary: true; enabled: root.snap-connected && root.confirm-kind == 0 && !root.snap-request-pending;
+                                clicked => { root.snap-capture(); } }
+                            Rectangle { horizontal-stretch: 1; background: transparent; }
+                        }
+                    }
+                }
+                Surface {
+                    VerticalLayout { padding: 16px; spacing: 10px;
+                        Label { text: "设置"; font-weight: 700; }
+                        Muted { text: "当前生效热键：" + root.snap-hotkey; }
+                        HorizontalLayout { spacing: 10px; cross-axis-alignment: center;
+                            recording := FocusScope {
+                                width: 230px; height: 34px;
+                                enabled: root.snap-connected && root.confirm-kind == 0;
+                                key-pressed(event) => {
+                                    if (!root.snap-recording) { return reject; }
+                                    if (event.text == Key.Escape && !event.modifiers.control && !event.modifiers.alt && !event.modifiers.shift && !event.modifiers.meta) {
+                                        root.snap-recording = false;
+                                        return accept;
+                                    }
+                                    root.snap-record-key(event.text,
+                                        event.modifiers.control, event.modifiers.alt,
+                                        event.modifiers.shift, event.modifiers.meta);
+                                    return accept;
+                                }
+                                Text { text: root.snap-recording ? "请按组合键（Esc 取消）" : root.snap-hotkey-draft;
+                                    color: Design.text; vertical-alignment: center; horizontal-alignment: center; }
+                            }
+                            Button { text: root.snap-recording ? "取消录制" : "录制热键";
+                                enabled: root.snap-connected && root.confirm-kind == 0 && !root.snap-request-pending;
+                                clicked => { root.snap-recording = !root.snap-recording; if (root.snap-recording) { recording.focus(); } } }
+                            Button { text: "保存设置"; enabled: root.snap-connected && !root.snap-recording && (root.snap-hotkey-draft != root.snap-hotkey || root.snap-autostart-draft != root.snap-autostart) && root.confirm-kind == 0 && !root.snap-request-pending;
+                                clicked => { root.snap-save-settings(); } }
+                        }
+                        CheckBox { text: "登录时后台启动截图服务"; checked: root.snap-autostart-draft;
+                            enabled: root.snap-connected && root.confirm-kind == 0 && !root.snap-request-pending;
+                            toggled => { root.snap-draft-autostart(self.checked); } }
+                        Muted { text: "移动或删除程序前请先关闭开机启动。托盘菜单可单独退出服务；关闭本窗口不会停止服务。"; }
+                    }
+                }
+                Rectangle { vertical-stretch: 1; background: transparent; }
+            }
             if root.screen == 1: VerticalLayout { spacing: 14px;
                 Surface {
                     VerticalLayout { padding: 18px; spacing: 14px;
@@ -1181,7 +1288,7 @@ export component AppWindow inherits Window {
                             }
                         }
                         Rectangle { height: 1px; background: Design.line-soft; }
-                        Muted { text: "Rust + Slint · 独立整理引擎 · SQLite 磁盘索引 · 随包携带完整 7-Zip\n已注册工具：递归解压、目录整理、MD 整理、Git 工具、转 Markdown。\n本地处理不上传文件；Git 工具的 upstream 推送、用户主动初始化转 Markdown 可选组件时会联网（见需求合同 P-03）。\n启动低于一秒是目标，不是未经实测的承诺。"; }
+                        Muted { text: "Rust + Slint · 独立整理引擎 · SQLite 磁盘索引 · 随包携带完整 7-Zip\n已注册工具：递归解压、目录整理、MD 整理、Git 工具、转 Markdown、截图 OCR。\n本地处理不上传文件；Git 工具的 upstream 推送、用户主动初始化转 Markdown 或截图 OCR 可选组件时会联网（见需求合同 P-03）。\n启动低于一秒是目标，不是未经实测的承诺。"; }
                     }
                 }
                 // 主题是应用级设置，放在关于页而不是目录整理的规则分区。

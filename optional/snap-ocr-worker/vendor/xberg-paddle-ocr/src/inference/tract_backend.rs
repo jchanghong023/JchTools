@@ -1,0 +1,234 @@
+//! Pure-Rust ONNX backend (`tract`), for wasm32 and the Android x86_64 emulator where
+//! `ort` cannot link.
+//!
+//! Wraps a tract [`TypedRunnableModel`] behind the runtime-neutral [`ModelBackend`]
+//! seam; `tract` types are referenced only from this module. Tensors cross this
+//! backend boundary as a raw shape plus a row-major `f32` buffer, keeping tract's own
+//! `ndarray` version (this crate is on ndarray 0.17) out of the seam entirely.
+
+use std::sync::Arc;
+
+use ndarray::{ArrayD, IxDyn};
+use tract_onnx::onnx;
+use tract_onnx::prelude::{
+    DatumType, Framework, InferenceFact, InferenceModelExt, IntoRunnable, IntoTValue, IntoTensor,
+    Tensor as TractTensor, TractError, TypedRunnableModel, tvec,
+};
+
+use super::{ModelBackend, Tensor};
+use crate::ocr_error::OcrError;
+
+/// Tract runnable-model wrapper.
+///
+/// The optimized, runnable plan executes inference through a shared `&self`
+/// reference (tract builds a fresh execution state per call internally), so the
+/// backend needs no interior mutability to stay `Send + Sync`.
+///
+/// This backend does not consume the `num_thread` budget the `ort` backend does:
+/// tract's matmul kernels run single-threaded here (the `tract-linalg`
+/// multithreading feature is not enabled), so [`TractBackend::load`] takes no thread
+/// count. WASM executes sequentially regardless.
+pub(crate) struct TractBackend {
+    model: Arc<TypedRunnableModel>,
+}
+
+impl TractBackend {
+    /// Build a runnable tract model from ONNX bytes.
+    ///
+    /// The bytes are parsed into an inference model, type-and-shape inferred and
+    /// optimized, then lowered into a runnable plan. The ONNX bytes are read from
+    /// memory, so no temporary file is written.
+    ///
+    /// `fixed_input` pins the model's input tensor to a concrete shape before
+    /// optimization, for graphs tract cannot shape-infer with a symbolic H/W (e.g. a
+    /// U-net with `Resize`-upsampled skip connections). `DbNet` passes the exact extent
+    /// the page resized to; the other nets pass `None`.
+    pub(crate) fn load(
+        model_bytes: &[u8],
+        fixed_input: Option<&[usize]>,
+    ) -> Result<Self, OcrError> {
+        let mut inference_model = onnx()
+            .model_for_read(&mut &model_bytes[..])
+            .map_err(|error| tract_error("parse the ONNX model", error))?;
+        if let Some(shape) = fixed_input {
+            let fact = InferenceFact::dt_shape(DatumType::F32, shape);
+            inference_model = inference_model
+                .with_input_fact(0, fact)
+                .map_err(|error| tract_error("pin the tract input shape", error))?;
+        }
+        let typed_model = inference_model
+            .into_optimized()
+            .map_err(|error| tract_error("optimize the ONNX model", error))?;
+        let model = typed_model
+            .into_runnable()
+            .map_err(|error| tract_error("build the runnable tract plan", error))?;
+        Ok(Self { model })
+    }
+}
+
+/// Parse ONNX bytes and discard the result, to fail a malformed model at load time.
+///
+/// Callers that build their runnable plan lazily (per input shape) have nothing else to check
+/// at load time; parsing is the cheap half of [`TractBackend::load`] -- optimization is what
+/// costs, and it is what depends on the shape.
+pub(crate) fn parse_only(model_bytes: &[u8]) -> Result<(), OcrError> {
+    onnx()
+        .model_for_read(&mut &model_bytes[..])
+        .map(|_| ())
+        .map_err(|error| tract_error("parse the ONNX model", error))
+}
+
+impl ModelBackend for TractBackend {
+    fn name(&self) -> &str {
+        "tract"
+    }
+
+    fn run(&self, input: Tensor) -> Result<Tensor, OcrError> {
+        let (shape, data) = input_buffer(input);
+        let tensor = TractTensor::from_shape(&shape, &data)
+            .map_err(|error| tract_error("build the tract input tensor", error))?;
+        let outputs = self
+            .model
+            .run(tvec!(tensor.into_tvalue()))
+            .map_err(|error| tract_error("run tract inference", error))?;
+        // DbNet, AngleNet, and CrnnNet are all single-output graphs.
+        let output = outputs
+            .into_iter()
+            .next()
+            .ok_or_else(|| OcrError::inference("tract returned no output tensor"))?;
+        let output = output.into_tensor();
+        let out_data = output
+            .to_plain_array_view::<f32>()
+            .map_err(|error| tract_error("read the tract output tensor as f32", error))?
+            .iter()
+            .copied()
+            .collect();
+        array_from_parts(output.shape(), out_data)
+    }
+}
+
+/// Move a tensor's backing buffer out in row-major order, copy-free when possible.
+///
+/// A standard-layout tensor whose buffer starts at offset 0 and is sized to the shape
+/// has that buffer taken by move (the common case, copy-free). Any other layout -- a
+/// nonzero offset, an over-long backing buffer, or a transposed view -- is
+/// materialized into a fresh contiguous buffer. Either way the returned [`Vec`]
+/// matches the tensor's logical `iter().copied()` order, so inference stays
+/// bit-identical.
+fn input_buffer(input: Tensor) -> (Vec<usize>, Vec<f32>) {
+    let shape = input.shape().to_vec();
+    let element_count: usize = shape.iter().product();
+    if input.is_standard_layout() {
+        let (data, offset) = input.into_raw_vec_and_offset();
+        let start = offset.unwrap_or(0);
+        if start == 0 && data.len() == element_count {
+            return (shape, data);
+        }
+        return (
+            shape,
+            data.into_iter().skip(start).take(element_count).collect(),
+        );
+    }
+    let (data, _) = input
+        .as_standard_layout()
+        .into_owned()
+        .into_raw_vec_and_offset();
+    (shape, data)
+}
+
+/// Rebuild an owned crate [`Tensor`] from a tract output shape and its data buffer.
+///
+/// The output shape is preserved exactly; a mismatch between the shape and the data
+/// length is surfaced as an [`OcrError::Inference`].
+fn array_from_parts(shape: &[usize], data: Vec<f32>) -> Result<Tensor, OcrError> {
+    let length = data.len();
+    ArrayD::from_shape_vec(IxDyn(shape), data).map_err(|error| OcrError::Inference {
+        message: format!("tract output shape {shape:?} does not match its element count {length}"),
+        source: Some(Box::new(error)),
+    })
+}
+
+/// Build an [`OcrError::Inference`] wrapping a tract error with operation context.
+///
+/// `TractError` is an `anyhow::Error`, which converts into a boxed
+/// [`std::error::Error`], so the underlying tract failure is preserved as the error
+/// `source` rather than only baked into the message.
+fn tract_error(operation: &str, error: TractError) -> OcrError {
+    OcrError::Inference {
+        message: format!("tract backend failed to {operation}"),
+        source: Some(error.into()),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn input_buffer_preserves_row_major_order_for_standard_layout() {
+        let expected: Vec<f32> = (0..8).map(|value| value as f32).collect();
+        let input = ArrayD::from_shape_vec(IxDyn(&[1, 2, 2, 2]), expected.clone())
+            .expect("build the tensor");
+        let manual: Vec<f32> = input.iter().copied().collect();
+
+        let (shape, data) = input_buffer(input);
+
+        assert_eq!(shape, vec![1_usize, 2, 2, 2]);
+        assert_eq!(data, manual);
+        assert_eq!(data, expected);
+    }
+
+    #[test]
+    fn input_buffer_matches_iter_order_for_non_standard_layout() {
+        let base =
+            ArrayD::from_shape_vec(IxDyn(&[2, 3]), (0..6).map(|value| value as f32).collect())
+                .expect("build the tensor");
+        let transposed = base.t().into_owned();
+        assert!(
+            !transposed.is_standard_layout(),
+            "transpose must be non-standard layout"
+        );
+        let manual: Vec<f32> = transposed.iter().copied().collect();
+
+        let (shape, data) = input_buffer(transposed);
+
+        assert_eq!(shape, vec![3_usize, 2]);
+        assert_eq!(data, manual);
+    }
+
+    #[test]
+    fn array_from_parts_preserves_shape() {
+        let data = vec![1.0_f32, 2.0, 3.0, 4.0, 5.0, 6.0];
+        let array =
+            array_from_parts(&[1, 2, 3], data.clone()).expect("shape matches element count");
+        assert_eq!(array.shape(), &[1, 2, 3]);
+        assert_eq!(array.iter().copied().collect::<Vec<_>>(), data);
+    }
+
+    #[test]
+    fn array_from_parts_errors_on_length_mismatch() {
+        let error = array_from_parts(&[2, 2], vec![1.0_f32, 2.0, 3.0])
+            .expect_err("length mismatch must fail");
+        assert!(matches!(error, OcrError::Inference { .. }));
+    }
+
+    #[test]
+    fn input_buffer_round_trips_through_a_tract_tensor() {
+        let expected: Vec<f32> = (0..12).map(|value| value as f32).collect();
+        let input =
+            ArrayD::from_shape_vec(IxDyn(&[2, 3, 2]), expected.clone()).expect("build the tensor");
+
+        let (shape, data) = input_buffer(input);
+        let tensor = TractTensor::from_shape(&shape, &data).expect("build the tract tensor");
+        let restored_data = tensor
+            .to_plain_array_view::<f32>()
+            .expect("read as f32")
+            .iter()
+            .copied()
+            .collect();
+        let restored = array_from_parts(tensor.shape(), restored_data).expect("rebuild");
+
+        assert_eq!(restored.shape(), &[2, 3, 2]);
+        assert_eq!(restored.iter().copied().collect::<Vec<_>>(), expected);
+    }
+}

@@ -21,11 +21,13 @@ use crate::{
     markdown::{self, FormatGroup},
     markdown_assets, md_tools,
     model::{bytes, ActionKind, Summary},
-    registry,
+    registry, snap_ocr_assets,
 };
 use anyhow::Result;
 use serde::Deserialize;
 use slint::{ComponentHandle, Model, ModelRc, SharedString, VecModel};
+#[cfg(windows)]
+use std::io::{BufRead, BufReader, Write};
 use std::{
     cell::{Cell, RefCell},
     collections::VecDeque,
@@ -38,14 +40,29 @@ use std::{
     time::{Duration, Instant},
 };
 
-/// 当前工具（P-02 五个注册工具）：决定规则分区集合、流程与状态文案。
-#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+/// OCR 命令由单个后台线程串行执行；心跳和主动操作共享同一连接语义。
+enum SnapCommand {
+    Ensure,
+    Request(serde_json::Value),
+}
+
+enum SnapMessage {
+    Readiness(u64, Result<(), String>),
+    Progress(u64, String),
+    Initialized(u64, Result<(), String>),
+    Service(Result<serde_json::Value, String>, bool),
+}
+
+/// 当前工具（P-02 六个注册工具）：决定规则分区集合、流程与状态文案。
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum Tool {
     Extract,
     Organizer,
     Md,
     Git,
     MarkdownConverter,
+    /// 截图 OCR（O-01）：第六个注册工具，独立后台服务 + 热键截图。
+    SnapOcr,
 }
 impl Tool {
     fn sections(self) -> &'static [&'static str] {
@@ -53,7 +70,7 @@ impl Tool {
             Tool::Extract => &["解压", "安全与性能"],
             Tool::Organizer => &["去重", "归类", "清理", "安全与性能"],
             // R-01：MD 整理与 Git 工具不设规则面板，分区集合为空。
-            Tool::Md | Tool::Git | Tool::MarkdownConverter => &[],
+            Tool::Md | Tool::Git | Tool::MarkdownConverter | Tool::SnapOcr => &[],
         }
     }
     fn from_id(id: &str) -> Option<Self> {
@@ -63,6 +80,7 @@ impl Tool {
             "md-organizer" => Some(Tool::Md),
             "git-tools" => Some(Tool::Git),
             "markdown-converter" => Some(Tool::MarkdownConverter),
+            "snap-ocr" => Some(Tool::SnapOcr),
             _ => None,
         }
     }
@@ -164,6 +182,14 @@ struct State {
     convert_init_cancel: Option<Arc<std::sync::atomic::AtomicBool>>,
     /// 转 Markdown 组件检查代际；旧检查结果不得覆盖新初始化/检查状态。
     convert_readiness_generation: u64,
+    /// 截图 OCR（O 分区）：可选组件初始化的取消信号（O-06 取消/重试语义）。
+    snap_init_cancel: Option<Arc<std::sync::atomic::AtomicBool>>,
+    /// 截图 OCR 资产检查代际：迟到的旧检查/初始化收尾不得覆盖新状态。
+    snap_generation: u64,
+    /// 截图 OCR 服务监督线程的命令端（O-11：GUI 只连接/请求，窗口关闭不停止服务）。
+    snap_commands: Option<mpsc::Sender<SnapCommand>>,
+    snap_sender: mpsc::Sender<SnapMessage>,
+    snap_receiver: RefCell<mpsc::Receiver<SnapMessage>>,
     /// 测试注入：覆盖任务状态目录；生产路径为 None，仍走 engine::prepare/apply。
     engine_overrides: Option<EngineTestOverrides>,
     /// 解压确认清点的请求代际：迟到的低代际清点事件不得刷新文案或解除门禁（X-02）。
@@ -748,7 +774,7 @@ fn visible_rows(state: &State) -> Result<Vec<RuleRow>> {
         Tool::Extract => "extract",
         Tool::Organizer => "organizer",
         // MD/Git 不设规则面板（R-01）：不会进入规则表过滤，占位即可。
-        Tool::Md | Tool::Git | Tool::MarkdownConverter => "",
+        Tool::Md | Tool::Git | Tool::MarkdownConverter | Tool::SnapOcr => "",
     };
     Ok(state
         .specs
@@ -810,6 +836,11 @@ fn invalidate(ui: &AppWindow, tool: Tool) {
     }
     if tool == Tool::MarkdownConverter {
         ui.set_status("转 Markdown 可在页面中初始化组件并开始转换".into());
+        return;
+    }
+    if tool == Tool::SnapOcr {
+        // O-01：截图 OCR 无目录输入与规则面板，状态栏用本工具中性文案。
+        ui.set_status("截图 OCR 可在页面中初始化组件并管理后台服务".into());
         return;
     }
     if ui.get_has_task() {
@@ -2150,6 +2181,7 @@ fn wire_sync(ui: &AppWindow, state: &Rc<RefCell<State>>, out: &EventSender) {
                         Tool::Md => 3,
                         Tool::Git => 4,
                         Tool::MarkdownConverter => 5,
+                        Tool::SnapOcr => 6,
                     };
                     ui.set_screen(screen);
                     ui.set_active_tool_id(id.clone());
@@ -2176,6 +2208,12 @@ fn wire_sync(ui: &AppWindow, state: &Rc<RefCell<State>>, out: &EventSender) {
                             log_panel_text(&state.borrow().convert_logs).into(),
                         );
                         start_markdown_readiness(&ui, &state, &out);
+                    }
+                    if tool == Tool::SnapOcr {
+                        // 进入页面即做只读资产复检并连上服务监督线程（O-09/O-11）；
+                        // 未初始化、服务缺失都不阻塞其他工具（O-03）。
+                        start_snap_readiness(&ui, &state, &out);
+                        ensure_snap_supervisor(&state, &out);
                     }
                     refresh(&ui, &state.borrow());
                     // 切工具不是规则或目录改动（C-10/R-04）：就绪计划按「任务+配置+目录」
@@ -2575,9 +2613,124 @@ impl UiPump {
             ui.set_log_text(log_panel_text(&self.state.borrow().logs).into());
         }
         self.apply_fail_messages(ui);
+        self.apply_snap_messages(ui);
         self.refresh_fail_list(ui);
         self.refresh_runtime(ui);
     }
+    fn apply_snap_messages(&self, ui: &AppWindow) {
+        let messages: Vec<SnapMessage> = self
+            .state
+            .borrow()
+            .snap_receiver
+            .borrow_mut()
+            .try_iter()
+            .collect();
+        for message in messages {
+            match message {
+                SnapMessage::Readiness(generation, result) => {
+                    if self.state.borrow().snap_generation != generation {
+                        continue;
+                    }
+                    match result {
+                        Ok(()) => {
+                            ui.set_snap_ready(true);
+                            ui.set_snap_asset_status("组件已校验，可离线识别".into());
+                        }
+                        Err(error) => {
+                            ui.set_snap_ready(false);
+                            ui.set_snap_asset_status(format!("组件未就绪：{error}").into());
+                        }
+                    }
+                }
+                SnapMessage::Progress(generation, progress) => {
+                    if self.state.borrow().snap_generation == generation {
+                        ui.set_snap_progress(progress.into());
+                    }
+                }
+                SnapMessage::Initialized(generation, result) => {
+                    if self.state.borrow().snap_generation != generation {
+                        continue;
+                    }
+                    self.state.borrow_mut().snap_init_cancel = None;
+                    ui.set_snap_initializing(false);
+                    match result {
+                        Ok(()) => {
+                            ui.set_snap_ready(true);
+                            ui.set_snap_asset_status("组件初始化完成，可离线使用".into());
+                            ui.set_snap_progress("".into());
+                            ensure_snap_supervisor(&self.state, &self.out);
+                        }
+                        Err(error) => {
+                            ui.set_snap_ready(false);
+                            ui.set_snap_asset_status(format!("初始化未完成：{error}").into());
+                            if error != "用户取消初始化" {
+                                ui.set_snap_error(error.into());
+                            }
+                        }
+                    }
+                    if self.state.borrow().close_after
+                        && !ui.get_busy()
+                        && !ui.get_convert_initializing()
+                    {
+                        let _ = slint::quit_event_loop();
+                    }
+                }
+                SnapMessage::Service(result, requested) => {
+                    if requested {
+                        ui.set_snap_request_pending(false);
+                    }
+                    match result {
+                        Err(error) => {
+                            ui.set_snap_connected(false);
+                            ui.set_snap_service_status(
+                                "截图服务未连接，可点击「启动 / 重连」".into(),
+                            );
+                            ui.set_snap_error(error.into());
+                        }
+                        Ok(value) if value["ok"] != true => {
+                            ui.set_snap_connected(true);
+                            ui.set_snap_error(
+                                value["error"].as_str().unwrap_or("截图服务拒绝请求").into(),
+                            );
+                            // 请求失败不等于断线；保留之前读出的设置和当前生效热键。
+                        }
+                        Ok(value) => {
+                            ui.set_snap_connected(true);
+                            ui.set_snap_service_status(
+                                "截图服务已连接 · 托盘和热键独立运行".into(),
+                            );
+                            ui.set_snap_model(
+                                value["model"].as_str().unwrap_or("uninitialized").into(),
+                            );
+                            ui.set_snap_task(value["task"].as_str().unwrap_or("idle").into());
+                            if let Some(hotkey) = value["hotkey"].as_str() {
+                                if !ui.get_snap_recording()
+                                    && ui.get_snap_hotkey_draft() == ui.get_snap_hotkey()
+                                {
+                                    ui.set_snap_hotkey_draft(hotkey.into());
+                                }
+                                ui.set_snap_hotkey(hotkey.into());
+                            }
+                            if let Some(autostart) = value["autostart"].as_bool() {
+                                if ui.get_snap_autostart_draft() == ui.get_snap_autostart() {
+                                    ui.set_snap_autostart_draft(autostart);
+                                }
+                                ui.set_snap_autostart(autostart);
+                            }
+                            if requested
+                                || value["error"]
+                                    .as_str()
+                                    .is_some_and(|error| !error.is_empty())
+                            {
+                                ui.set_snap_error(value["error"].as_str().unwrap_or("").into());
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
     /// 排空失败列表专用通道：任务目录发现与分页结果（U-10）。
     /// 迟到的结果按请求代际与当前解压任务整体丢弃，与计划页事件同一口径。
     fn apply_fail_messages(&self, ui: &AppWindow) {
@@ -3730,6 +3883,7 @@ fn apply_summary(ui: &AppWindow, state: &mut State, summary: &Summary) {
 fn initial_state() -> Result<State> {
     let specs: Vec<RuleSpec> = serde_json::from_str(include_str!("../resources/rules.json"))?;
     let (fail_sender, fail_receiver) = mpsc::channel();
+    let (snap_sender, snap_receiver) = mpsc::channel();
     Ok(State {
         config: Config::default(),
         specs,
@@ -3769,6 +3923,11 @@ fn initial_state() -> Result<State> {
         fail_sender,
         fail_receiver: RefCell::new(fail_receiver),
         extract_generation: 0,
+        snap_init_cancel: None,
+        snap_generation: 0,
+        snap_commands: None,
+        snap_sender,
+        snap_receiver: RefCell::new(snap_receiver),
     })
 }
 
@@ -4262,6 +4421,340 @@ fn start_markdown_conversion(ui: &AppWindow, state: &Rc<RefCell<State>>, out: &E
     });
 }
 
+/// 已安装资产只在工作线程校验；打开工具页不会联网。
+fn start_snap_readiness(ui: &AppWindow, state: &Rc<RefCell<State>>, _out: &EventSender) {
+    if ui.get_snap_initializing() {
+        return;
+    }
+    let (generation, sender) = {
+        let mut state = state.borrow_mut();
+        state.snap_generation = state.snap_generation.wrapping_add(1);
+        (state.snap_generation, state.snap_sender.clone())
+    };
+    ui.set_snap_ready(false);
+    ui.set_snap_asset_status("正在离线校验已安装组件…".into());
+    std::thread::spawn(move || {
+        let _ = sender.send(SnapMessage::Readiness(
+            generation,
+            snap_ocr_assets::readiness(),
+        ));
+        wake_event_loop();
+    });
+}
+
+fn start_snap_initialize(ui: &AppWindow, state: &Rc<RefCell<State>>) {
+    if ui.get_snap_ready() || ui.get_snap_initializing() {
+        return;
+    }
+    let cancel = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let (generation, sender) = {
+        let mut state = state.borrow_mut();
+        state.snap_generation = state.snap_generation.wrapping_add(1);
+        state.snap_init_cancel = Some(cancel.clone());
+        (state.snap_generation, state.snap_sender.clone())
+    };
+    ui.set_snap_ready(false);
+    ui.set_snap_initializing(true);
+    ui.set_snap_error("".into());
+    ui.set_snap_progress("正在准备组件…".into());
+    ui.set_snap_asset_status("正在初始化可选组件…".into());
+    std::thread::spawn(move || {
+        let result = snap_ocr_assets::initialize(&cancel, |progress| {
+            let _ = sender.send(SnapMessage::Progress(generation, progress));
+            wake_event_loop();
+        });
+        let result = if cancel.load(Ordering::Acquire) {
+            Err("用户取消初始化".to_owned())
+        } else {
+            result
+        };
+        let _ = sender.send(SnapMessage::Initialized(generation, result));
+        wake_event_loop();
+    });
+}
+
+/// 每条请求打开独立管道连接；服务重启时无需保存失效句柄。
+#[cfg(windows)]
+fn snap_pipe_request(request: &serde_json::Value) -> Result<serde_json::Value, String> {
+    let mut stream = std::fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .open(snap_ocr_assets::pipe_name())
+        .map_err(|error| format!("无法连接截图服务：{error}"))?;
+    let mut payload =
+        serde_json::to_vec(request).map_err(|error| format!("请求编码失败：{error}"))?;
+    payload.push(b'\n');
+    stream
+        .write_all(&payload)
+        .map_err(|error| format!("发送服务请求失败：{error}"))?;
+    stream
+        .flush()
+        .map_err(|error| format!("刷新服务请求失败：{error}"))?;
+    let mut response = String::new();
+    BufReader::new(&mut stream)
+        .read_line(&mut response)
+        .map_err(|error| format!("读取服务响应失败：{error}"))?;
+    if response.is_empty() {
+        return Err("截图服务未返回响应".into());
+    }
+    serde_json::from_str(&response).map_err(|error| format!("截图服务响应格式错误：{error}"))
+}
+
+#[cfg(not(windows))]
+fn snap_pipe_request(_request: &serde_json::Value) -> Result<serde_json::Value, String> {
+    Err("截图服务仅支持 Windows".into())
+}
+
+fn snap_named_hotkey(code: char) -> Option<&'static str> {
+    use slint::platform::Key;
+    [
+        (Key::Backspace, "Backspace"),
+        (Key::Tab, "Tab"),
+        (Key::Return, "Return"),
+        (Key::Escape, "Escape"),
+        (Key::Space, "Space"),
+        (Key::PageUp, "PageUp"),
+        (Key::PageDown, "PageDown"),
+        (Key::End, "End"),
+        (Key::Home, "Home"),
+        (Key::LeftArrow, "Left"),
+        (Key::UpArrow, "Up"),
+        (Key::RightArrow, "Right"),
+        (Key::DownArrow, "Down"),
+        (Key::Insert, "Insert"),
+        (Key::Delete, "Delete"),
+    ]
+    .into_iter()
+    .find_map(|(special, label)| (char::from(special) == code).then_some(label))
+}
+
+fn snap_attach_main_exe(ping_response: serde_json::Value) -> Result<serde_json::Value, String> {
+    if ping_response["ok"] != true {
+        return Err(ping_response["error"]
+            .as_str()
+            .unwrap_or("截图服务心跳失败")
+            .to_owned());
+    }
+    let path = std::env::current_exe().map_err(|error| format!("无法定位主程序：{error}"))?;
+    let response = snap_pipe_request(&serde_json::json!({
+        "command": "attach-main-exe",
+        "path": path,
+    }))?;
+    if response["ok"] != true {
+        return Err(response["error"]
+            .as_str()
+            .unwrap_or("截图服务更新主程序路径失败")
+            .to_owned());
+    }
+    Ok(ping_response)
+}
+
+fn snap_supervisor_ensure() -> Result<serde_json::Value, String> {
+    let ping = serde_json::json!({"command": "ping"});
+    if let Ok(response) = snap_pipe_request(&ping) {
+        return snap_attach_main_exe(response);
+    }
+    snap_ocr_assets::readiness()?;
+    let executable = snap_ocr_assets::asset_root()
+        .join("worker")
+        .join("v0.1.0")
+        .join("snap-ocr-worker.exe");
+    let main_exe = std::env::current_exe().map_err(|error| format!("无法定位主程序：{error}"))?;
+    let mut child = std::process::Command::new(&executable)
+        .arg("--service")
+        .arg("--main-exe")
+        .arg(main_exe)
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .map_err(|error| format!("无法启动截图服务：{error}"))?;
+    for _ in 0..30 {
+        std::thread::sleep(Duration::from_millis(150));
+        if let Ok(response) = snap_pipe_request(&ping) {
+            return snap_attach_main_exe(response);
+        }
+        if let Some(status) = child
+            .try_wait()
+            .map_err(|error| format!("截图服务状态不可读：{error}"))?
+        {
+            use std::io::Read;
+            let mut message = String::new();
+            if let Some(mut stderr) = child.stderr.take() {
+                let _ = stderr.read_to_string(&mut message);
+            }
+            let detail = message.trim();
+            return Err(if detail.is_empty() {
+                format!("截图服务启动失败（退出码：{status}）")
+            } else {
+                format!("截图服务启动失败：{detail}")
+            });
+        }
+    }
+    Err("截图服务启动后未响应；请检查托盘及服务状态，再点击重连".into())
+}
+
+fn ensure_snap_supervisor(state: &Rc<RefCell<State>>, _out: &EventSender) {
+    if state.borrow().snap_commands.is_none() {
+        let (sender, receiver) = mpsc::channel();
+        let output = state.borrow().snap_sender.clone();
+        std::thread::spawn(move || {
+            let mut connected = false;
+            loop {
+                let command = match receiver.recv_timeout(Duration::from_secs(2)) {
+                    Ok(command) => command,
+                    Err(mpsc::RecvTimeoutError::Timeout) if connected => {
+                        SnapCommand::Request(serde_json::json!({"command": "get-state"}))
+                    }
+                    Err(mpsc::RecvTimeoutError::Timeout) => continue,
+                    Err(mpsc::RecvTimeoutError::Disconnected) => break,
+                };
+                let (result, requested) = match command {
+                    SnapCommand::Ensure => (snap_supervisor_ensure(), true),
+                    SnapCommand::Request(request) => (
+                        snap_pipe_request(&request),
+                        request["command"] != "get-state",
+                    ),
+                };
+                connected = result.is_ok();
+                if output
+                    .send(SnapMessage::Service(result, requested))
+                    .is_err()
+                {
+                    break;
+                }
+                wake_event_loop();
+            }
+        });
+        state.borrow_mut().snap_commands = Some(sender);
+    }
+    snap_send_command(state, SnapCommand::Ensure);
+}
+
+fn snap_send_command(state: &Rc<RefCell<State>>, command: SnapCommand) {
+    if let Some(sender) = &state.borrow().snap_commands {
+        let _ = sender.send(command);
+    }
+}
+
+fn wire_snap_ocr(ui: &AppWindow, state: &Rc<RefCell<State>>, out: &EventSender) {
+    let weak = ui.as_weak();
+    let state_init = state.clone();
+    ui.on_snap_initialize(move || {
+        if let Some(ui) = weak.upgrade() {
+            start_snap_initialize(&ui, &state_init);
+        }
+    });
+    let weak = ui.as_weak();
+    let state_cancel = state.clone();
+    ui.on_snap_cancel_initialize(move || {
+        if let Some(cancel) = &state_cancel.borrow().snap_init_cancel {
+            cancel.store(true, Ordering::Release);
+        }
+        if let Some(ui) = weak.upgrade() {
+            ui.set_snap_asset_status("正在取消初始化…".into());
+        }
+    });
+    let weak = ui.as_weak();
+    let state_connect = state.clone();
+    let out_connect = out.clone();
+    ui.on_snap_connect(move || {
+        if let Some(ui) = weak.upgrade() {
+            ui.set_snap_request_pending(true);
+            ui.set_snap_service_status("正在连接截图服务…".into());
+            ensure_snap_supervisor(&state_connect, &out_connect);
+        }
+    });
+    let weak = ui.as_weak();
+    ui.on_snap_record_key(move |key, control, alt, shift, meta| {
+        let Some(ui) = weak.upgrade() else { return };
+        if !(control || alt || shift || meta) {
+            return;
+        }
+        let Some(code) = key.chars().next().filter(|_| key.chars().nth(1).is_none()) else {
+            return;
+        };
+        let mut combination = String::with_capacity(24);
+        if control {
+            combination.push_str("Ctrl+");
+        }
+        if alt {
+            combination.push_str("Alt+");
+        }
+        if shift {
+            combination.push_str("Shift+");
+        }
+        if meta {
+            combination.push_str("Win+");
+        }
+        if code.is_ascii_alphanumeric() {
+            combination.push(code.to_ascii_uppercase());
+        } else if let Some(number) = (code as u32)
+            .checked_sub(char::from(slint::platform::Key::F1) as u32)
+            .filter(|number| *number < 24)
+        {
+            let number = number + 1;
+            combination.push('F');
+            if number >= 10 {
+                if let Some(digit) = char::from_digit(number / 10, 10) {
+                    combination.push(digit);
+                }
+            }
+            if let Some(digit) = char::from_digit(number % 10, 10) {
+                combination.push(digit);
+            }
+        } else if let Some(name) = snap_named_hotkey(code) {
+            combination.push_str(name);
+        } else {
+            return;
+        }
+        ui.set_snap_hotkey_draft(combination.into());
+        ui.set_snap_recording(false);
+        ui.set_snap_error("".into());
+    });
+    let weak = ui.as_weak();
+    let state_save = state.clone();
+    ui.on_snap_save_settings(move || {
+        if let Some(ui) = weak.upgrade() {
+            ui.set_snap_request_pending(true);
+            snap_send_command(
+                &state_save,
+                SnapCommand::Request(serde_json::json!({
+                    "command": "save-settings",
+                    "hotkey": ui.get_snap_hotkey_draft().as_str(),
+                    "autostart": ui.get_snap_autostart_draft(),
+                })),
+            );
+        }
+    });
+    let weak = ui.as_weak();
+    ui.on_snap_draft_autostart(move |enabled| {
+        if let Some(ui) = weak.upgrade() {
+            ui.set_snap_autostart_draft(enabled);
+        }
+    });
+    let weak = ui.as_weak();
+    let state_retry = state.clone();
+    ui.on_snap_retry_load(move || {
+        if let Some(ui) = weak.upgrade() {
+            ui.set_snap_request_pending(true);
+            snap_send_command(
+                &state_retry,
+                SnapCommand::Request(serde_json::json!({"command": "retry-load"})),
+            );
+        }
+    });
+    let weak = ui.as_weak();
+    let state_capture = state.clone();
+    ui.on_snap_capture(move || {
+        if let Some(ui) = weak.upgrade() {
+            ui.set_snap_request_pending(true);
+            snap_send_command(
+                &state_capture,
+                SnapCommand::Request(serde_json::json!({"command": "capture"})),
+            );
+        }
+    });
+}
+
 pub fn run_with_engine_overrides(
     hook: impl FnOnce(&AppWindow) + 'static,
     overrides: Option<EngineTestOverrides>,
@@ -4332,9 +4825,14 @@ pub fn run_with_engine_overrides(
     wire_sync(&ui, &state, &out);
     wire_md_git(&ui, &state, &out);
     wire_markdown_converter(&ui, &state, &out);
+    wire_snap_ocr(&ui, &state, &out);
     // 启动落在注册表第一个工具（P-02 顺序：递归解压在前）。必须在 wire_sync 之后调用：
     // 回调接线前的 invoke 是空调用，窗口会停在目录整理页。
-    ui.invoke_select_tool("recursive-extract".into());
+    if std::env::args_os().any(|arg| arg == "--snap-ocr-settings") {
+        ui.invoke_select_tool("snap-ocr".into());
+    } else {
+        ui.invoke_select_tool("recursive-extract".into());
+    }
     {
         let weak = ui.as_weak();
         let state = state.clone();
@@ -4348,13 +4846,23 @@ pub fn run_with_engine_overrides(
                     let control = state.borrow().control.clone();
                     let converter_cancel = state.borrow().convert_cancel.clone();
                     let converter_init_cancel = state.borrow().convert_init_cancel.clone();
+                    let snap_init_cancel = state.borrow().snap_init_cancel.clone();
+                    let has_running = control.is_some()
+                        || converter_cancel.is_some()
+                        || converter_init_cancel.is_some()
+                        || snap_init_cancel.is_some();
                     if let Some(control) = control {
                         control.cancel();
                     } else if let Some(cancel) = converter_cancel {
                         cancel.store(true, Ordering::Release);
                     } else if let Some(cancel) = converter_init_cancel {
                         cancel.store(true, Ordering::Release);
-                    } else {
+                    }
+                    if let Some(cancel) = snap_init_cancel.as_ref() {
+                        // 其它工具任务与初始化可以并行，确认关窗时两者都必须取消。
+                        cancel.store(true, Ordering::Release);
+                    }
+                    if !has_running {
                         let _ = slint::quit_event_loop();
                         return;
                     }
@@ -4396,11 +4904,15 @@ pub fn run_with_engine_overrides(
             let control = state.borrow().control.clone();
             let converter_cancel = state.borrow().convert_cancel.clone();
             let converter_init_cancel = state.borrow().convert_init_cancel.clone();
+            let snap_init_cancel = state.borrow().snap_init_cancel.clone();
             if let Some(control) = control {
                 control.cancel();
             } else if let Some(cancel) = converter_cancel {
                 cancel.store(true, Ordering::Release);
             } else if let Some(cancel) = converter_init_cancel {
+                cancel.store(true, Ordering::Release);
+            } else if let Some(cancel) = snap_init_cancel {
+                // O-06：截图 OCR 初始化同属可取消操作；服务本身不受影响（O-16）。
                 cancel.store(true, Ordering::Release);
             }
             if let Some(ui) = weak.upgrade() {
@@ -4584,13 +5096,15 @@ pub fn run_with_engine_overrides(
         let state = state.clone();
         let weak = ui.as_weak();
         ui.window().on_close_requested(move||{
-                if let Some(ui)=weak.upgrade(){if ui.get_busy() || ui.get_convert_initializing(){
-                ui.set_confirm_text("任务或可选组件初始化仍在进行。确认后会请求取消，等待当前操作结束，再关闭窗口。已经完成的操作不会自动回滚。".into());
+                if let Some(ui)=weak.upgrade(){if ui.get_busy() || ui.get_convert_initializing() || ui.get_snap_initializing(){
+                ui.set_confirm_text("任务或可选组件初始化仍在进行。确认后会请求取消，等待当前操作结束，再关闭窗口。已经完成的操作不会自动回滚。已经启动的截图服务不受影响。".into());
                 ui.set_confirm_kind(3);ui.set_acknowledge(false);return slint::CloseRequestResponse::KeepWindowShown;
             }}
             if let Some(control)=&state.borrow().control{control.cancel();}
             if let Some(cancel)=&state.borrow().convert_cancel{cancel.store(true, Ordering::Release);}
             if let Some(cancel)=&state.borrow().convert_init_cancel{cancel.store(true, Ordering::Release);}
+            // O-06/O-16：取消进行中的截图 OCR 初始化；已启动的服务独立存活，不随窗口关闭停止。
+            if let Some(cancel)=&state.borrow().snap_init_cancel{cancel.store(true, Ordering::Release);}
             // Slint 1.17 的 CloseRequestResponse 只有 HideWindow / KeepWindowShown，
             // HideWindow 仅隐藏窗口、事件循环仍在跑；必须显式 quit 才能让进程真正退出。
             let _=slint::quit_event_loop();
@@ -5254,26 +5768,14 @@ mod gui_tests {
             let ui = &app.ui;
             assert!(!ui.get_ready(), "初始状态不得就绪");
             assert_eq!(ui.get_theme(), 0, "默认跟随系统主题");
-            assert_eq!(
-                ui.get_tool_count(),
-                5,
-                "当前注册的工具数量（P-02：五个工具）"
-            );
-            // H-03：五个独立工具入口都正常可见（侧栏遍历注册表，不做隐藏、折叠或降级）。
+            // O-01：截图 OCR 与原有工具并列，导航至独立工具页。
             let tools = ui.get_tools();
-            assert_eq!(tools.row_count(), 5, "侧栏必须同时列出全部工具");
-            let ids: Vec<String> = (0..tools.row_count())
-                .filter_map(|i| tools.row_data(i))
-                .map(|tool| tool.id.to_string())
-                .collect();
-            assert!(
-                ids.iter().any(|id| id == "recursive-extract")
-                    && ids.iter().any(|id| id == "directory-organizer")
-                    && ids.iter().any(|id| id == "md-organizer")
-                    && ids.iter().any(|id| id == "git-tools")
-                    && ids.iter().any(|id| id == "markdown-converter"),
-                "五个工具入口必须按注册表 id 出现在侧栏：{ids:?}"
-            );
+            let snap_visible = (0..tools.row_count())
+                .filter_map(|index| tools.row_data(index))
+                .any(|tool| tool.id == "snap-ocr");
+            assert!(snap_visible, "侧栏必须提供截图 OCR 入口");
+            ui.invoke_select_tool("snap-ocr".into());
+            assert_eq!(ui.get_screen(), 6, "截图 OCR 必须进入独立页面");
             assert_eq!(ui.get_tool_search().as_str(), "", "启动不得预置搜索过滤");
         })
         .unwrap();
