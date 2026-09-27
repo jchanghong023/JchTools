@@ -81,18 +81,21 @@
           "license": { "component": "JchTools markdown-media-worker", "license": "JchTools project license", "source": "https://github.com/jchanghong023/JchTools" }
         },
         {
-          "id": "ffmpeg-n9.0.2-3-ga5923073bf-win64-lgpl-9.0.zip",
-          "url": "https://github.com/BtbN/FFmpeg-Builds/releases/download/autobuild-2026-09-24-14-14/ffmpeg-n9.0.2-3-ga5923073bf-win64-lgpl-9.0.zip",
-          "size_bytes": 171546855,
-          "sha256": "ad4bddec89f4d5413f976ca4b4424c3aeec095afa029f739a2a03e9a360f06cd",
+          "id": "ffmpeg-n9.0.2-3-ga5923073bf-win64-lgpl-shared-9.0.zip",
+          "url": "https://github.com/BtbN/FFmpeg-Builds/releases/download/autobuild-2026-09-24-14-14/ffmpeg-n9.0.2-3-ga5923073bf-win64-lgpl-shared-9.0.zip",
+          "size_bytes": 76974101,
+          "sha256": "735bae484ba2c3342bfb34df477b9c6b0f43f9819f4d2fde011be293ee1b6517",
           "archive_type": "zip",
           "target_root": "media_models",
           "install_path": null,
           "members": [
-            { "path": "ffmpeg-n9.0.2-3-ga5923073bf-win64-lgpl-9.0/bin/ffmpeg.exe", "install_path": "ffmpeg/ffmpeg.exe", "size_bytes": 134496768, "sha256": "ca2b72f7607527869f8f132c504765cfbab21ab05971006c7f5dd45b72c0127f" },
-            { "path": "ffmpeg-n9.0.2-3-ga5923073bf-win64-lgpl-9.0/LICENSE.txt", "install_path": "ffmpeg/LICENSE.txt", "size_bytes": 7651, "sha256": "da7eabb7bafdf7d3ae5e9f223aa5bdc1eece45ac569dc21b3b037520b4464768" }
+            { "path": "ffmpeg-n9.0.2-3-ga5923073bf-win64-lgpl-shared-9.0/bin/avutil-61.dll", "install_path": "ffmpeg/avutil-61.dll", "size_bytes": 3016704, "sha256": "26ee298e9e71ec1d018d0394bc8f967f6742fc73380b9a196fa95737a1ac3a9b" },
+            { "path": "ffmpeg-n9.0.2-3-ga5923073bf-win64-lgpl-shared-9.0/bin/swresample-7.dll", "install_path": "ffmpeg/swresample-7.dll", "size_bytes": 734720, "sha256": "aea51fb6a87787276334d77fa3d472154641dad9fc7815245f690fdca41ec572" },
+            { "path": "ffmpeg-n9.0.2-3-ga5923073bf-win64-lgpl-shared-9.0/bin/avcodec-63.dll", "install_path": "ffmpeg/avcodec-63.dll", "size_bytes": 91182080, "sha256": "9d82d5c867632d3c0758edb6273b47ad8f3e97aeda66d4c4ac784f00320597f8" },
+            { "path": "ffmpeg-n9.0.2-3-ga5923073bf-win64-lgpl-shared-9.0/bin/avformat-63.dll", "install_path": "ffmpeg/avformat-63.dll", "size_bytes": 22764032, "sha256": "9b41797f2a749765f8c811b015461e737d09ef99bdf344c4c9bb5e4da30fe320" },
+            { "path": "ffmpeg-n9.0.2-3-ga5923073bf-win64-lgpl-shared-9.0/LICENSE.txt", "install_path": "ffmpeg/LICENSE.txt", "size_bytes": 7651, "sha256": "da7eabb7bafdf7d3ae5e9f223aa5bdc1eece45ac569dc21b3b037520b4464768" }
           ],
-          "license": { "component": "FFmpeg 9.0.2 LGPL static build", "license": "LGPL-2.1-or-later", "source": "https://github.com/BtbN/FFmpeg-Builds" }
+          "license": { "component": "FFmpeg n9.0.2 LGPL shared build (avutil-61/swresample-7/avcodec-63/avformat-63)", "license": "LGPL-2.1-or-later", "source": "https://github.com/BtbN/FFmpeg-Builds/releases/download/autobuild-2026-09-24-14-14/ffmpeg-n9.0.2-3-ga5923073bf-win64-lgpl-shared-9.0.zip" }
         },
         {
           "id": "sherpa-onnx-v1.13.6-win-x64-shared-MD-Release-no-tts.tar.bz2",

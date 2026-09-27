@@ -203,6 +203,45 @@ pub fn readiness() -> Result<(), String> {
     Ok(())
 }
 
+/// 单个资产的下载接缝：生产实现走固定来源的 HTTP 下载，测试注入本地供给或
+/// 失败脚本，用于验证「补缺下载」与「失败后重试不重下」语义（T-05）。
+trait AssetDownloader {
+    fn download(
+        &mut self,
+        url: &str,
+        destination: &Path,
+        expected_size: u64,
+        expected_sha256: &str,
+        cancel: &AtomicBool,
+        progress: &mut dyn FnMut(String),
+    ) -> Result<(), String>;
+}
+
+/// 生产下载器：只访问清单固定地址（T-21）。
+struct NetworkDownloader;
+
+impl AssetDownloader for NetworkDownloader {
+    fn download(
+        &mut self,
+        url: &str,
+        destination: &Path,
+        expected_size: u64,
+        expected_sha256: &str,
+        cancel: &AtomicBool,
+        progress: &mut dyn FnMut(String),
+    ) -> Result<(), String> {
+        let mut sink = |message: String| progress(message);
+        download_asset(
+            url,
+            destination,
+            expected_size,
+            expected_sha256,
+            cancel,
+            &mut sink,
+        )
+    }
+}
+
 /// 下载、校验并原子安装全部可选资产。
 ///
 /// 初始化期间只访问清单中的固定地址。取消会终止当前下载或解包阶段，
@@ -218,7 +257,15 @@ pub fn initialize(cancel: &AtomicBool, mut progress: impl FnMut(String)) -> Resu
     fs::create_dir_all(&root).map_err(|error| format!("创建资产目录失败：{error}"))?;
     let staging = root.join(format!(".staging-{}", Uuid::new_v4().simple()));
     fs::create_dir_all(&staging).map_err(|error| format!("创建临时目录失败：{error}"))?;
-    let result = initialize_staged(&manifest, cancel, &mut progress, &staging, &root);
+    let mut downloader = NetworkDownloader;
+    let result = initialize_staged(
+        &manifest,
+        cancel,
+        &mut progress,
+        &staging,
+        &root,
+        &mut downloader,
+    );
     if let Err(error) = fs::remove_dir_all(&staging) {
         if result.is_ok() {
             return Err(format!("清理初始化临时目录失败：{error}"));
@@ -233,15 +280,19 @@ fn initialize_staged(
     progress: &mut impl FnMut(String),
     staging: &Path,
     root: &Path,
+    downloader: &mut dyn AssetDownloader,
 ) -> Result<(), String> {
     if media_models_ready(manifest) {
         progress("复用已校验的媒体模型".to_string());
     } else {
-        let media_stage = staging.join("media-models");
-        fs::create_dir_all(&media_stage)
-            .map_err(|error| format!("创建媒体模型临时目录失败：{error}"))?;
         for (index, model) in manifest.media_models.iter().enumerate() {
             ensure_not_cancelled(cancel)?;
+            // T-05 逐资产复用：最终位置已校验的模型不重下（跨重试保留已验证下载）。
+            let final_path = media_models_dir().join(&model.relative_path);
+            if verify_file(&final_path, model.size_bytes, &model.sha256).is_ok() {
+                progress(format!("复用已校验的媒体模型：{}", model.id));
+                continue;
+            }
             progress(format!(
                 "下载媒体模型 {} / {}：{}",
                 index + 1,
@@ -251,28 +302,34 @@ fn initialize_staged(
             let model_relative = Path::new(&model.relative_path)
                 .strip_prefix("models")
                 .map_err(|_| format!("媒体模型 {} 必须安装在 models 子目录", model.id))?;
-            let target = media_stage.join(model_relative);
-            if let Some(parent) = target.parent() {
+            let staged = staging.join("media-models").join(model_relative);
+            if let Some(parent) = staged.parent() {
                 fs::create_dir_all(parent)
                     .map_err(|error| format!("创建媒体模型目录失败：{error}"))?;
             }
-            download_asset(
+            downloader.download(
                 &model.url,
-                &target,
+                &staged,
                 model.size_bytes,
                 &model.sha256,
                 cancel,
                 progress,
             )?;
+            // 先校验暂存内容再落位；下载器校验之外再独立复核，防伪造的"下载成功"。
+            verify_file(&staged, model.size_bytes, &model.sha256)
+                .map_err(|error| format!("媒体模型 {} 下载内容校验失败：{error}", model.id))?;
+            // T-06：最终位置已有校验通过的副本时不覆盖（失败安装不得动已验证资产）。
+            if verify_file(&final_path, model.size_bytes, &model.sha256).is_err() {
+                atomic_replace_file(&staged, &final_path)?;
+            }
         }
-        atomic_replace_dir(&media_stage, &media_models_dir().join("models"))?;
     }
 
     let notice_stage = staging.join("licenses");
     fs::create_dir_all(&notice_stage).map_err(|error| format!("创建许可证目录失败：{error}"))?;
     write_notice(&notice_stage.join("THIRD_PARTY_NOTICES.md"), manifest)?;
     atomic_replace_dir(&notice_stage, &root.join("licenses"))?;
-    initialize_worker_assets(manifest, cancel, progress, staging)?;
+    initialize_worker_assets(manifest, cancel, progress, staging, downloader)?;
     if let Err(error) = ensure_worker_ready(manifest) {
         progress("媒体资产已处理，但媒体工作进程仍未就绪".to_string());
         return Err(error);
@@ -396,6 +453,7 @@ fn initialize_worker_assets(
     cancel: &AtomicBool,
     progress: &mut impl FnMut(String),
     staging: &Path,
+    downloader: &mut dyn AssetDownloader,
 ) -> Result<(), String> {
     let worker = manifest
         .future_workers
@@ -434,7 +492,7 @@ fn initialize_worker_assets(
             asset.id
         ));
         let archive = worker_stage.join(&asset.id);
-        let download_result = download_asset(
+        let download_result = downloader.download(
             &asset.url,
             &archive,
             asset.size_bytes,
@@ -911,13 +969,337 @@ fn ensure_not_cancelled(cancel: &AtomicBool) -> Result<(), String> {
 
 #[cfg(test)]
 mod tests {
-    use super::{extract_tar_bz2_safely, restore_backup};
+    use super::{extract_tar_bz2_safely, load_manifest, restore_backup};
     use bzip2::write::BzEncoder;
     use bzip2::Compression;
     use std::fs::{self, File};
     use std::io;
     use std::sync::atomic::AtomicBool;
     use tar::{Builder, EntryType, Header};
+
+    // 覆盖 T-19/T-27/附录 D「Rust 直接调用 FFmpeg 原生接口」与 T-06 固定资产：
+    // FFmpeg 资产必须是官方 shared 构建的四个 DLL（avutil/swresample/avcodec/
+    // avformat），worker 经 libloading 直调；不得回退为 ffmpeg.exe 子进程布局。
+    #[test]
+    fn ffmpeg_asset_is_shared_dll_set() {
+        let manifest = load_manifest().expect("内置资产清单必须可解析");
+        let worker = &manifest.future_workers[0];
+        let ffmpeg = worker
+            .assets
+            .iter()
+            .find(|asset| asset.id.to_ascii_lowercase().contains("ffmpeg"))
+            .expect("清单必须包含 FFmpeg 资产");
+        let installs: Vec<&str> = ffmpeg
+            .members
+            .iter()
+            .map(|member| member.install_path.as_str())
+            .collect();
+        for dll in [
+            "ffmpeg/avutil-61.dll",
+            "ffmpeg/swresample-7.dll",
+            "ffmpeg/avcodec-63.dll",
+            "ffmpeg/avformat-63.dll",
+        ] {
+            assert!(
+                installs.contains(&dll),
+                "FFmpeg shared DLL 缺失：{dll}（实际成员：{installs:?}）"
+            );
+        }
+        assert!(
+            !installs.iter().any(|path| path.ends_with("ffmpeg.exe")),
+            "FFmpeg 资产不得再携带 ffmpeg.exe 子进程布局（实际成员：{installs:?}）"
+        );
+    }
+
+    // ===== F22：媒体模型逐资产就绪、补缺下载与失败保留（T-05/T-06）=====
+
+    use super::{
+        ensure_media_models_ready, initialize_staged, media_models_dir, worker_target_root,
+        AssetDownloader, AssetManifest, FutureWorker, LicenseEntry, MediaModel, WorkerAsset,
+        XbergManifest, XBERG_TAG,
+    };
+    use sha2::{Digest, Sha256};
+    use std::path::{Path, PathBuf};
+    use std::sync::MutexGuard;
+    use std::sync::{Mutex, OnceLock};
+
+    /// 测试与其它用例共享进程环境变量，必须串行访问资产根目录。
+    fn asset_root_lock() -> &'static Mutex<()> {
+        static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+        LOCK.get_or_init(|| Mutex::new(()))
+    }
+
+    /// 把资产根目录重定向到临时目录；Drop 时恢复环境，避免污染其它测试。
+    struct AssetRootGuard {
+        root: tempfile::TempDir,
+        _lock: MutexGuard<'static, ()>,
+    }
+
+    fn redirect_asset_root() -> AssetRootGuard {
+        let lock = asset_root_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let root = tempfile::tempdir().expect("创建资产根目录");
+        std::env::set_var("JCHTOOLS_MARKDOWN_TEST_ASSET_ROOT", root.path());
+        AssetRootGuard { root, _lock: lock }
+    }
+
+    impl Drop for AssetRootGuard {
+        fn drop(&mut self) {
+            std::env::remove_var("JCHTOOLS_MARKDOWN_TEST_ASSET_ROOT");
+        }
+    }
+
+    fn sha256_bytes(bytes: &[u8]) -> String {
+        hex::encode(Sha256::digest(bytes))
+    }
+
+    /// 可脚本化的假下载器：按 URL 供给固定字节；可指定第 N 次调用失败。
+    struct FakeDownloader {
+        blobs: Vec<(String, Vec<u8>)>,
+        fail_on_call: Option<usize>,
+        calls: Vec<String>,
+    }
+
+    impl FakeDownloader {
+        fn new(blobs: Vec<(String, Vec<u8>)>) -> Self {
+            Self {
+                blobs,
+                fail_on_call: None,
+                calls: Vec::new(),
+            }
+        }
+
+        fn urls(&self) -> Vec<String> {
+            self.calls.clone()
+        }
+    }
+
+    impl AssetDownloader for FakeDownloader {
+        fn download(
+            &mut self,
+            url: &str,
+            destination: &Path,
+            _expected_size: u64,
+            _expected_sha256: &str,
+            _cancel: &AtomicBool,
+            _progress: &mut dyn FnMut(String),
+        ) -> Result<(), String> {
+            self.calls.push(url.to_string());
+            if Some(self.calls.len()) == self.fail_on_call {
+                return Err("模拟下载失败".to_string());
+            }
+            let blob = self
+                .blobs
+                .iter()
+                .find(|(candidate, _)| candidate == url)
+                .map(|(_, bytes)| bytes.clone())
+                .ok_or_else(|| format!("假下载器没有 URL 的内容：{url}"))?;
+            if let Some(parent) = destination.parent() {
+                fs::create_dir_all(parent).map_err(|error| error.to_string())?;
+            }
+            fs::write(destination, blob).map_err(|error| error.to_string())
+        }
+    }
+
+    fn fixture_blobs() -> Vec<(String, Vec<u8>)> {
+        b"abc"
+            .iter()
+            .map(|tag| {
+                (
+                    format!("https://fixtures.invalid/model-{}.bin", *tag as char),
+                    vec![*tag; 64],
+                )
+            })
+            .collect()
+    }
+
+    /// 构造三模型 + 一个已就绪 worker 资产的最小清单；模型内容与摘要互相匹配。
+    fn fixture_manifest(blobs: &[(String, Vec<u8>)]) -> AssetManifest {
+        let models = ["a", "b", "c"]
+            .iter()
+            .enumerate()
+            .map(|(index, tag)| {
+                let url = format!("https://fixtures.invalid/model-{tag}.bin");
+                let blob = &blobs
+                    .iter()
+                    .find(|(candidate, _)| *candidate == url)
+                    .expect("每个模型都要有供给字节")
+                    .1;
+                MediaModel {
+                    id: format!("model-{tag}"),
+                    url: url.clone(),
+                    relative_path: format!("models/group{index}/model-{tag}.bin"),
+                    size_bytes: blob.len() as u64,
+                    sha256: sha256_bytes(blob),
+                    license: LicenseEntry {
+                        component: format!("model {tag}"),
+                        license: "MIT".to_string(),
+                        source: "https://fixtures.invalid".to_string(),
+                    },
+                }
+            })
+            .collect();
+        AssetManifest {
+            schema_version: 1,
+            xberg: XbergManifest {
+                tag: XBERG_TAG.to_string(),
+                archive_url: "https://fixtures.invalid/xberg.zip".to_string(),
+                archive_size_bytes: 1,
+                archive_sha256: "a".repeat(64),
+                members: Vec::new(),
+                licenses: Vec::new(),
+            },
+            media_models: models,
+            future_workers: vec![FutureWorker {
+                id: "worker".to_string(),
+                status: "ready".to_string(),
+                blocking_reason: "测试阻塞说明".to_string(),
+                assets: vec![WorkerAsset {
+                    id: "worker.exe".to_string(),
+                    url: "https://fixtures.invalid/worker.exe".to_string(),
+                    size_bytes: 13,
+                    sha256: sha256_bytes(b"worker-binary"),
+                    archive_type: "file".to_string(),
+                    target_root: "worker".to_string(),
+                    install_path: Some("worker.exe".to_string()),
+                    members: Vec::new(),
+                    license: LicenseEntry {
+                        component: "worker".to_string(),
+                        license: "MIT".to_string(),
+                        source: "https://fixtures.invalid".to_string(),
+                    },
+                }],
+            }],
+        }
+    }
+
+    /// 预置已通过校验的 worker 资产，跳过 worker 下载分支。
+    fn preinstall_worker() {
+        let target = worker_target_root("worker").join("worker.exe");
+        fs::create_dir_all(target.parent().expect("worker 路径有父目录"))
+            .expect("创建 worker 目录");
+        fs::write(&target, b"worker-binary").expect("预置 worker 资产");
+    }
+
+    fn model_path(model: &MediaModel) -> PathBuf {
+        media_models_dir().join(&model.relative_path)
+    }
+
+    fn install_model(model: &MediaModel, blob: &[u8]) {
+        let target = model_path(model);
+        fs::create_dir_all(target.parent().expect("模型路径有父目录")).expect("创建模型目录");
+        fs::write(&target, blob).expect("预置模型文件");
+    }
+
+    fn staged_run(
+        manifest: &AssetManifest,
+        guard: &AssetRootGuard,
+        downloader: &mut FakeDownloader,
+        cancel: &AtomicBool,
+    ) -> Result<(), String> {
+        let staging = guard.root.path().join("staging");
+        fs::create_dir_all(&staging).expect("创建 staging");
+        let mut progress = |_message: String| {};
+        initialize_staged(
+            manifest,
+            cancel,
+            &mut progress,
+            &staging,
+            guard.root.path(),
+            downloader,
+        )
+    }
+
+    // 覆盖 T-05「保留已校验资产」：三缺一时只下载缺失的那一个模型。
+    #[test]
+    fn media_init_downloads_only_missing_models() {
+        let guard = redirect_asset_root();
+        let blobs = fixture_blobs();
+        let manifest = fixture_manifest(&blobs);
+        preinstall_worker();
+        // 已就绪：模型 b、c；缺失：模型 a。
+        install_model(&manifest.media_models[1], &blobs[1].1);
+        install_model(&manifest.media_models[2], &blobs[2].1);
+        let mut downloader = FakeDownloader::new(blobs.clone());
+        let cancel = AtomicBool::new(false);
+
+        staged_run(&manifest, &guard, &mut downloader, &cancel).expect("补缺初始化应成功");
+
+        assert_eq!(
+            downloader.urls(),
+            vec![manifest.media_models[0].url.clone()],
+            "只应下载缺失的模型 a，实际下载了：{:?}",
+            downloader.urls()
+        );
+        ensure_media_models_ready(&manifest).expect("补缺后三模型都应就绪");
+        assert_eq!(
+            fs::read(model_path(&manifest.media_models[1])).expect("模型 b 仍在"),
+            blobs[1].1,
+            "已校验模型不得被改动"
+        );
+    }
+
+    // 覆盖 T-05「初始化可重试」：第 2 个模型下载失败后重试，不得重下第 1 个。
+    #[test]
+    fn media_init_retry_after_failure_skips_verified_downloads() {
+        let guard = redirect_asset_root();
+        let blobs = fixture_blobs();
+        let manifest = fixture_manifest(&blobs);
+        preinstall_worker();
+        let cancel = AtomicBool::new(false);
+
+        // 第一次：模型 b（第 2 次调用）失败。
+        let mut failing = FakeDownloader::new(blobs.clone());
+        failing.fail_on_call = Some(2);
+        let first = staged_run(&manifest, &guard, &mut failing, &cancel);
+        assert!(first.is_err(), "第 2 个模型失败必须使初始化失败");
+
+        // 第二次：全部成功。模型 a 已在失败前落位并通过校验，不得重下。
+        let mut retry = FakeDownloader::new(blobs.clone());
+        staged_run(&manifest, &guard, &mut retry, &cancel).expect("重试应成功");
+        assert_eq!(
+            retry.urls(),
+            vec![
+                manifest.media_models[1].url.clone(),
+                manifest.media_models[2].url.clone(),
+            ],
+            "重试只应下载缺失的 b 和 c，不得重下已校验的 a：{:?}",
+            retry.urls()
+        );
+        ensure_media_models_ready(&manifest).expect("重试后三模型都应就绪");
+    }
+
+    // 覆盖 T-05/T-06：取消初始化不得删除或覆盖最终目录中已校验的模型。
+    #[test]
+    fn media_init_cancel_preserves_existing_final_models() {
+        let guard = redirect_asset_root();
+        let blobs = fixture_blobs();
+        let manifest = fixture_manifest(&blobs);
+        preinstall_worker();
+        install_model(&manifest.media_models[1], &blobs[1].1);
+        let mut downloader = FakeDownloader::new(blobs.clone());
+        let cancel = AtomicBool::new(true);
+
+        let result = staged_run(&manifest, &guard, &mut downloader, &cancel);
+        let error = result.expect_err("已取消的初始化必须失败");
+        assert!(error.contains("取消"), "错误应说明是用户取消：{error}");
+        assert!(downloader.urls().is_empty(), "取消后不得发起任何下载");
+        assert_eq!(
+            fs::read(model_path(&manifest.media_models[1])).expect("已就绪模型必须保留"),
+            blobs[1].1,
+            "取消不得删除或改动最终目录中已校验的模型"
+        );
+        assert!(
+            !model_path(&manifest.media_models[0]).exists(),
+            "取消后不得留下半成品"
+        );
+        // 取消也不得破坏最终目录里已存在的其它资产（worker）。
+        assert!(
+            worker_target_root("worker").join("worker.exe").is_file(),
+            "取消不得删除已安装的 worker"
+        );
+    }
 
     // 覆盖 T-05、T-06：首次初始化应接受 sherpa 归档中的合法目录条目。
     #[test]
