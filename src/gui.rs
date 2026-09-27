@@ -2727,25 +2727,28 @@ impl UiPump {
                         let success = fields.next() == Some("1");
                         let relative = fields.next().unwrap_or_default();
                         let message = fields.next().unwrap_or_default();
-                        ui.set_convert_metrics(
-                            format!(
-                                "{}：{}{}",
-                                if partial {
-                                    "部分提取"
-                                } else if success {
-                                    "已完成"
-                                } else {
-                                    "失败"
-                                },
-                                relative,
-                                if message.is_empty() {
-                                    String::new()
-                                } else {
-                                    format!(" · {message}")
-                                }
-                            )
-                            .into(),
+                        let detail = format!(
+                            "{}：{}{}",
+                            if partial {
+                                "部分提取"
+                            } else if success {
+                                "已完成"
+                            } else {
+                                "失败"
+                            },
+                            relative,
+                            if message.is_empty() {
+                                String::new()
+                            } else {
+                                format!(" · {message}")
+                            }
                         );
+                        ui.set_convert_metrics(detail.clone().into());
+                        if !success || partial {
+                            let mut state = self.state.borrow_mut();
+                            push_event_log(&mut state.convert_logs, detail);
+                            ui.set_convert_log_text(log_panel_text(&state.convert_logs).into());
+                        }
                     } else if !ui.get_paused() {
                         pending_status = Some(text);
                     }
@@ -4791,12 +4794,22 @@ mod gui_tests {
 
             // 覆盖 T-23/T-24：部分失败和主动停止必须呈现不同的最终状态。
             ui.set_busy(true);
+            // 覆盖 T-24：单文件失败的文件名和原因在批次收尾后仍可从 GUI 日志查看。
+            app.pump
+                .out
+                .send(Event::Status(
+                    "CONVERTER_FILE_FINISHED|0|0|broken.pdf|解析失败".into(),
+                ))
+                .unwrap();
+            app.pump.run(ui);
             app.pump
                 .out
                 .send(Event::MdDone("CONVERTER_DONE|0|0|1|0|0|0".into()))
                 .unwrap();
             app.pump.run(ui);
             assert_eq!(ui.get_convert_status().as_str(), "转换部分失败");
+            assert!(ui.get_convert_log_text().contains("broken.pdf"));
+            assert!(ui.get_convert_log_text().contains("解析失败"));
             ui.set_busy(true);
             app.pump
                 .out
