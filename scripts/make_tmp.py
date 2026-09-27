@@ -5,9 +5,12 @@
     testdata  手工测试数据集（嵌套包、冲突、垃圾文件、边界名称等），默认生成到
               <repo>/.tmp/testdata/，每次重建前先清空目标；`_测试说明.md` 逐条
               说明每个用例与预期行为。
+    ocr-compare  从已校验的原模型和字体生成冻结 Python 版的独立测试 bundle，
+                 只写入 .tmp/ocr-compare-bundle/。
 
 用法：
     python scripts/make_tmp.py testdata [--git] [--destination <专门测试目录>] [--force]
+    python scripts/make_tmp.py ocr-compare --model-root <原模型目录> --font <固定字体文件> [--force]
     python scripts/make_tmp.py clean    # 清空整个 .tmp/ 释放磁盘；测试完成后执行，防止无限增长
 
 clean 只删除仓库内 `.tmp/` 的内容，绝不触碰仓库其他位置与仓库外目录。
@@ -907,6 +910,8 @@ class _Arguments(argparse.Namespace):
     destination: str | None = None
     git: bool = False
     force: bool = False
+    model_root: str | None = None
+    font: str | None = None
 
 
 def _clear_existing_target(root: Path, *, force: bool) -> None:
@@ -938,8 +943,8 @@ def main() -> int:
     parser = argparse.ArgumentParser(description="JchTools 临时目录工厂：生成与清理 .tmp/ 内容。")
     _ = parser.add_argument(
         "kind",
-        choices=["testdata", "clean"],
-        help="testdata=生成手工测试数据集；clean=清空整个 .tmp/ 释放磁盘",
+        choices=["testdata", "ocr-compare", "clean"],
+        help="testdata=生成手工测试数据集；ocr-compare=生成旧版 OCR 对照 bundle；clean=清空 .tmp/",
     )
     _ = parser.add_argument(
         "--destination",
@@ -947,6 +952,8 @@ def main() -> int:
         help="testdata 专用：另指定测试目录（默认 <repo>/.tmp/testdata，会先清空）",
     )
     _ = parser.add_argument("--git", action="store_true", help="testdata 专用：建立 git 基线并生成 恢复.ps1")
+    _ = parser.add_argument("--model-root", help="ocr-compare 专用：含 det/rec 目录的固定原模型根目录")
+    _ = parser.add_argument("--font", help="ocr-compare 专用：固定 NotoSansMonoCJKsc-Regular.otf")
     _ = parser.add_argument(
         "--force",
         action="store_true",
@@ -959,6 +966,37 @@ def main() -> int:
     destination = arguments.destination
     if kind == "clean":
         return clean_tmp(repo_root)
+    if kind == "ocr-compare":
+        if not arguments.model_root or not arguments.font:
+            fail("ocr-compare 需要 --model-root 和 --font")
+        models = Path(arguments.model_root).resolve(strict=True)
+        font = Path(arguments.font).resolve(strict=True)
+        root = repo_root / ".tmp" / "ocr-compare-bundle"
+        guard_destination(root)
+        checks = (
+            (
+                models / "PP-OCRv6_small_det" / "inference.onnx",
+                "3914f972d833af87d23bb2338bd09238f978a48f3c4dbb8e1a4ee26a93869940",
+            ),
+            (
+                models / "PP-OCRv6_small_rec" / "inference.onnx",
+                "3e3def686ac9a1676b59bc9749ad896263d8f68b53f352060774de359a2e23ed",
+            ),
+            (font, "ec04cc376b34887cedbdf84074e2e226ed2761eeabdcb9173fc1dd7bfd153ef7"),
+        )
+        for path, expected in checks:
+            if not path.is_file() or hashlib.sha256(path.read_bytes()).hexdigest() != expected:
+                fail(f"OCR 对照资产缺失或摘要不符：{path}")
+        _clear_existing_target(root, force=force)
+        for name in ("PP-OCRv6_small_det", "PP-OCRv6_small_rec"):
+            shutil.copytree(models / name, root / "models" / name)
+        dest_font = root / "assets" / "fonts" / font.name
+        dest_font.parent.mkdir(parents=True)
+        shutil.copy2(font, dest_font)
+        for name in ("temp", "func_ret", "locks"):
+            (root / "runtime" / "pdx-cache" / name).mkdir(parents=True)
+        print(f"OCR 对照 bundle: {root}")
+        return 0
     root = Path(destination) if destination else repo_root / ".tmp" / "testdata"
     guard_destination(root)
     # guard 内部用 resolve() 检查，但构建全程用的是原始路径；相对路径在脚本切换
