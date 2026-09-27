@@ -4,6 +4,7 @@ use std::ffi::c_void;
 use std::io::{Read, Write};
 use std::os::windows::io::FromRawHandle;
 use std::sync::mpsc::{self, Sender};
+use std::time::{Duration, Instant};
 
 use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
@@ -31,6 +32,9 @@ extern "system" {
         -> *mut c_void;
     fn CloseHandle(handle: *mut c_void) -> i32;
     fn GetCurrentProcessId() -> u32;
+    fn GetCurrentThreadId() -> u32;
+    fn OpenThread(access: u32, inherit: i32, id: u32) -> *mut c_void;
+    fn CancelSynchronousIo(thread: *mut c_void) -> i32;
     fn ProcessIdToSessionId(pid: u32, session: *mut u32) -> i32;
 }
 #[link(name = "advapi32")]
@@ -90,6 +94,58 @@ impl Drop for InstanceGuard {
     }
 }
 
+struct ThreadHandle(*mut c_void);
+impl Drop for ThreadHandle {
+    fn drop(&mut self) {
+        unsafe {
+            CloseHandle(self.0);
+        }
+    }
+}
+
+/// 单个客户端不能无限占用唯一管道实例；超时后取消本线程正在等待的同步 I/O。
+struct RequestDeadline {
+    done: Sender<()>,
+    watchdog: Option<std::thread::JoinHandle<()>>,
+}
+impl RequestDeadline {
+    fn start(thread: &ThreadHandle, timeout: Duration) -> Result<Self, String> {
+        let (done, receiver) = mpsc::channel();
+        let handle = thread.0 as usize;
+        let watchdog = std::thread::Builder::new()
+            .name("snap-ocr-pipe-deadline".into())
+            .spawn(move || {
+                if receiver.recv_timeout(timeout).is_ok() {
+                    return;
+                }
+                // 期限恰好落在两次 I/O 之间时，第一次取消可能找不到待处理请求。
+                // 持续取消直到服务线程结束该连接，避免下一次 read/flush 无限等待。
+                loop {
+                    unsafe {
+                        CancelSynchronousIo(handle as *mut c_void);
+                    }
+                    match receiver.recv_timeout(Duration::from_millis(10)) {
+                        Ok(()) | Err(mpsc::RecvTimeoutError::Disconnected) => break,
+                        Err(mpsc::RecvTimeoutError::Timeout) => {}
+                    }
+                }
+            })
+            .map_err(|error| format!("截图控制管道计时器启动失败：{error}"))?;
+        Ok(Self {
+            done,
+            watchdog: Some(watchdog),
+        })
+    }
+}
+impl Drop for RequestDeadline {
+    fn drop(&mut self) {
+        let _ = self.done.send(());
+        if let Some(watchdog) = self.watchdog.take() {
+            let _ = watchdog.join();
+        }
+    }
+}
+
 /// 单实例锁是 Local（登录会话隔离），相同用户的不同远程登录会话不互相阻塞。
 pub fn claim_instance() -> Result<Option<InstanceGuard>, String> {
     let name = wide(&format!("Local\\JchToolsSnapOcr-{}", hash()));
@@ -110,7 +166,23 @@ pub fn claim_instance() -> Result<Option<InstanceGuard>, String> {
 /// 单请求一连接；同一个管道实例在请求间 Disconnect/Connect，不留无监听者的空窗。
 /// SDDL 仅允许对象所有者（当前登录用户）及 SYSTEM；拒绝远程管道客户端。
 pub fn serve(commands: &Sender<Command>, ready: &mpsc::SyncSender<Result<(), String>>) {
-    let name = wide(&pipe_name());
+    serve_named(&pipe_name(), commands, ready, Duration::from_secs(15));
+}
+
+fn serve_named(
+    pipe_name: &str,
+    commands: &Sender<Command>,
+    ready: &mpsc::SyncSender<Result<(), String>>,
+    request_timeout: Duration,
+) {
+    let name = wide(pipe_name);
+    // CancelSynchronousIo 需要真实线程句柄及 THREAD_TERMINATE 权限。
+    let server_thread = unsafe { OpenThread(0x0001, 0, GetCurrentThreadId()) };
+    if server_thread.is_null() {
+        let _ = ready.send(Err("截图控制管道无法设置请求期限".into()));
+        return;
+    }
+    let server_thread = ThreadHandle(server_thread);
     let sddl = wide("D:P(A;;GA;;;SY)(A;;GA;;;OW)");
     let mut descriptor = std::ptr::null_mut();
     let converted = unsafe {
@@ -171,10 +243,17 @@ pub fn serve(commands: &Sender<Command>, ready: &mpsc::SyncSender<Result<(), Str
         if !connected {
             continue;
         }
+        let Ok(deadline) = RequestDeadline::start(&server_thread, request_timeout) else {
+            unsafe {
+                DisconnectNamedPipe(raw);
+            }
+            continue;
+        };
+        let started = Instant::now();
         let mut request = Vec::with_capacity(256);
         let mut byte = [0u8; 1];
         let mut terminated = false;
-        while request.len() < 4096 {
+        while request.len() < 4096 && started.elapsed() < request_timeout {
             if pipe.read_exact(&mut byte).is_err() {
                 break;
             }
@@ -183,6 +262,13 @@ pub fn serve(commands: &Sender<Command>, ready: &mpsc::SyncSender<Result<(), Str
                 break;
             }
             request.push(byte[0]);
+        }
+        if started.elapsed() >= request_timeout {
+            unsafe {
+                DisconnectNamedPipe(raw);
+            }
+            drop(deadline);
+            continue;
         }
         let response = if terminated {
             match serde_json::from_slice::<Value>(&request) {
@@ -202,13 +288,128 @@ pub fn serve(commands: &Sender<Command>, ready: &mpsc::SyncSender<Result<(), Str
         };
         if let Ok(mut line) = serde_json::to_vec(&response) {
             line.push(b'\n');
-            let _ = pipe.write_all(&line);
-            unsafe {
-                FlushFileBuffers(raw);
+            if started.elapsed() < request_timeout && pipe.write_all(&line).is_ok() {
+                unsafe {
+                    FlushFileBuffers(raw);
+                }
             }
         }
         unsafe {
             DisconnectNamedPipe(raw);
         }
+        drop(deadline);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::io::{BufRead, BufReader, Write};
+    use std::sync::atomic::{AtomicU64, Ordering};
+    use std::time::{Duration, Instant};
+
+    use serde_json::json;
+
+    use super::{serve_named, Command};
+
+    static NEXT_PIPE: AtomicU64 = AtomicU64::new(0);
+
+    // 覆盖 O-11：单个无响应客户端不能让常驻服务的控制入口永久失效。
+    #[test]
+    fn unfinished_client_does_not_block_next_control_request(
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        let name = format!(
+            r"\\.\pipe\jchtools-snap-ocr-test-{}-{}",
+            std::process::id(),
+            NEXT_PIPE.fetch_add(1, Ordering::Relaxed)
+        );
+        let (commands_tx, commands_rx) = std::sync::mpsc::channel();
+        let (ready_tx, ready_rx) = std::sync::mpsc::sync_channel(1);
+        let server_name = name.clone();
+        std::thread::spawn(move || {
+            serve_named(
+                &server_name,
+                &commands_tx,
+                &ready_tx,
+                Duration::from_millis(300),
+            );
+        });
+        ready_rx.recv_timeout(Duration::from_secs(2))??;
+        std::thread::spawn(move || {
+            while let Ok(Command::Pipe(_, response)) = commands_rx.recv() {
+                let _ = response.send(json!({"ok":true}));
+            }
+        });
+
+        let mut unfinished = std::fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .open(&name)?;
+        unfinished.write_all(b"{\"command\":\"ping\"")?;
+        std::thread::sleep(Duration::from_millis(50));
+
+        let deadline = Instant::now() + Duration::from_secs(2);
+        let mut next = loop {
+            match std::fs::OpenOptions::new()
+                .read(true)
+                .write(true)
+                .open(&name)
+            {
+                Ok(pipe) => break pipe,
+                Err(error) if Instant::now() < deadline => {
+                    let _ = error;
+                    std::thread::sleep(Duration::from_millis(20));
+                }
+                Err(error) => return Err(error.into()),
+            }
+        };
+        next.write_all(b"{\"command\":\"ping\"}\n")?;
+        let mut response = String::new();
+        BufReader::new(&mut next).read_line(&mut response)?;
+        assert_eq!(
+            serde_json::from_str::<serde_json::Value>(&response)?["ok"],
+            true
+        );
+        drop(next);
+        drop(unfinished);
+
+        // 完整请求的客户端若不读取响应，FlushFileBuffers 也不能永久占住服务。
+        let deadline = Instant::now() + Duration::from_secs(2);
+        let mut unread = loop {
+            match std::fs::OpenOptions::new()
+                .read(true)
+                .write(true)
+                .open(&name)
+            {
+                Ok(pipe) => break pipe,
+                Err(_) if Instant::now() < deadline => {
+                    std::thread::sleep(Duration::from_millis(20));
+                }
+                Err(error) => return Err(error.into()),
+            }
+        };
+        unread.write_all(b"{\"command\":\"ping\"}\n")?;
+        std::thread::sleep(Duration::from_millis(50));
+        let deadline = Instant::now() + Duration::from_secs(2);
+        let mut after_unread = loop {
+            match std::fs::OpenOptions::new()
+                .read(true)
+                .write(true)
+                .open(&name)
+            {
+                Ok(pipe) => break pipe,
+                Err(_) if Instant::now() < deadline => {
+                    std::thread::sleep(Duration::from_millis(20));
+                }
+                Err(error) => return Err(error.into()),
+            }
+        };
+        after_unread.write_all(b"{\"command\":\"ping\"}\n")?;
+        response.clear();
+        BufReader::new(&mut after_unread).read_line(&mut response)?;
+        assert_eq!(
+            serde_json::from_str::<serde_json::Value>(&response)?["ok"],
+            true
+        );
+        Ok(())
     }
 }
