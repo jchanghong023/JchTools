@@ -645,7 +645,13 @@ fn download_stream(
 ) -> Result<(), String> {
     let agent = ureq::builder()
         .redirects(3)
-        .timeout(Duration::from_secs(60))
+        // 大资产（媒体模型 ~239MB、ffmpeg ~171MB）在慢链路上的整体下载时长不可预估，
+        // 整体超时会让初始化在这类网络下永远无法完成（T-05 的可重试语义被硬上限
+        // 抵消）。改为连接超时 + 单次读超时：整体时长无上限、由用户取消控制；
+        // 单次读取停滞 60 秒即失败上抛（流级失败不进入 download_asset 的内部
+        // 重试循环，该循环只重试校验失败）。
+        .timeout_connect(Duration::from_secs(30))
+        .timeout_read(Duration::from_secs(60))
         .user_agent("JchTools-markdown-assets/1")
         .build();
     let response = agent

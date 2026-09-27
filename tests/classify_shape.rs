@@ -375,6 +375,43 @@ fn legacy_two_level_tree_is_flattened() {
     assert_eq!(again.summary.planned_move, 0);
 }
 
+// 覆盖 C-17（回归：唯一已就位项的派生名尚未物化时先保护其规范化后名称——
+// 本项就地改名物化派生名，新移入项消解；不得双方都摘要化）
+#[test]
+fn in_place_unmaterialized_name_is_protected_against_newcomer() {
+    let f = Fixture::new();
+    f.write("文档/报告 (1).pdf", b"paren"); // 已就位，派生名 报告_1.pdf 未物化
+    f.write("报告_1.pdf", b"plain"); // 根下移入项，无来源前缀
+    let task = f.plan();
+    Fixture::apply(&task);
+    let mut entries: Vec<String> = fs::read_dir(f.root.join("文档"))
+        .unwrap()
+        .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
+        .collect();
+    entries.sort();
+    assert_eq!(entries.len(), 2, "两个文件都落位：{entries:?}");
+    assert!(
+        entries.contains(&"报告_1.pdf".to_string()),
+        "已就位项以就地改名物化派生名（C-17 先保护其规范化后名称）：{entries:?}"
+    );
+    let other = entries.iter().find(|n| n.as_str() != "报告_1.pdf").unwrap();
+    let dig = digest8("报告_1.pdf");
+    assert!(
+        other.starts_with("报告_1_") && other.contains(&dig),
+        "新移入项按 C-19 摘要消解：{other}（digest {dig}）"
+    );
+    // 幂等：再次整理不再改名。
+    let again = f.plan();
+    assert_eq!(again.summary.planned_move, 0);
+    Fixture::apply(&again);
+    let mut entries2: Vec<String> = fs::read_dir(f.root.join("文档"))
+        .unwrap()
+        .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
+        .collect();
+    entries2.sort();
+    assert_eq!(entries, entries2);
+}
+
 // 覆盖 C-17 / 附录 E：目标大类目录已有「报告 (1).pdf」与「报告_1.pdf」统一消解，
 // 且再次整理不再改名（幂等）。
 #[test]
@@ -384,31 +421,32 @@ fn in_place_normalized_collision_resolves_once_and_stays() {
     f.write("文档/报告_1.pdf", b"b");
     let task = f.plan();
     Fixture::apply(&task);
-    // 两个已就位项规范化后同名 → 统一消解（其一保持、其一摘要化；紧邻「文档」段
-    // 已剔除，摘要形式无来源段）。
-    let entries: Vec<String> = fs::read_dir(f.root.join("文档"))
+    // 两个已就位项规范化后同名 → 双方统一消解（附录 E；紧邻「文档」段已剔除，
+    // 摘要形式无来源段），不覆盖、任何一个都不得独占规范化名。
+    let mut entries: Vec<String> = fs::read_dir(f.root.join("文档"))
         .unwrap()
         .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
         .collect();
+    entries.sort();
     assert_eq!(entries.len(), 2, "两个文件都在，无覆盖：{entries:?}");
+    let digest_paren = digest8("文档/报告 (1).pdf");
+    let digest_plain = digest8("文档/报告_1.pdf");
+    let expected_paren = format!("报告_1_{digest_paren}.pdf");
+    let expected_plain = format!("报告_1_{digest_plain}.pdf");
     assert!(
-        entries.contains(&"报告_1.pdf".to_string()),
-        "唯一可占名的已就位项保持原名：{entries:?}"
-    );
-    let other = entries.iter().find(|n| n.as_str() != "报告_1.pdf").unwrap();
-    let dig = digest8("文档/报告 (1).pdf");
-    assert!(
-        other.starts_with("报告_1_") && other.contains(&dig),
-        "新改者按 C-19 摘要消解：{other}（digest {dig}）"
+        entries.contains(&expected_paren) && entries.contains(&expected_plain),
+        "两个已就位项都按 C-19 摘要消解，无人独占规范化名：{entries:?}\
+         （期望 {expected_paren} 与 {expected_plain}）"
     );
     // 再次整理：不再改名（C-16/附录 E 幂等）。
     let again = f.plan();
     assert_eq!(again.summary.planned_move, 0);
     Fixture::apply(&again);
-    let entries2: Vec<String> = fs::read_dir(f.root.join("文档"))
+    let mut entries2: Vec<String> = fs::read_dir(f.root.join("文档"))
         .unwrap()
         .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
         .collect();
+    entries2.sort();
     assert_eq!(entries, entries2);
 }
 

@@ -133,6 +133,10 @@ struct State {
     started: Instant,
     close_after: bool,
     pending_selection: usize,
+    /// 勾选落库后的依赖重算仍在途；完成前不得确认执行旧计划。
+    plan_recompute_inflight: usize,
+    /// 依赖重算失败后须重新分析，不能以旧计划继续执行。
+    plan_recompute_failed: bool,
     applying: bool,
     /// 递归解压运行中：解压不写整理流程的 read_bytes/completed 计数器，实时指标与
     /// 进度说明必须走单独口径，否则解压期间会显示恒为 0 的整理指标（U-03）。
@@ -141,6 +145,9 @@ struct State {
     plan_filter: Option<String>,
     /// 本轮勾选保存中出现过失败：pending 归零时用于决定是否重载计划页
     selection_failed: bool,
+    /// 依赖重算结果到达时勾选批次仍在途，行状态变化尚未上屏（C-01：
+    /// 依赖改变必须显示给用户）——pending 归零时补一次计划页重载。
+    plan_recompute_dirty: bool,
     /// 「显示高级选项」开关：只影响显示，不落盘、不改变任何默认值
     show_advanced: bool,
     /// 当前工具：切工具时同步重置规则分区（P-02 两工具各自只显示相关分区，R-01）。
@@ -1239,8 +1246,12 @@ fn start_task(ui: &AppWindow, state: &Rc<RefCell<State>>, out: &EventSender, app
     if ui.get_busy() {
         return;
     }
-    if state.borrow().pending_selection != 0 {
-        ui.set_error_text("计划勾选仍在保存中，请稍后再试".into());
+    if state.borrow().pending_selection != 0 || state.borrow().plan_recompute_inflight != 0 {
+        ui.set_error_text("计划勾选或依赖重算仍在进行，请稍后再试".into());
+        return;
+    }
+    if apply && state.borrow().plan_recompute_failed {
+        ui.set_error_text("计划依赖重算失败，请重新分析后再执行".into());
         return;
     }
     let (configuration, task) = {
@@ -1267,6 +1278,9 @@ fn start_task(ui: &AppWindow, state: &Rc<RefCell<State>>, out: &EventSender, app
         s.started = Instant::now();
         s.close_after = false;
         s.selection_failed = false;
+        s.plan_recompute_inflight = 0;
+        s.plan_recompute_failed = false;
+        s.plan_recompute_dirty = false;
         s.readiness_status_pending.set(false);
         s.logs.clear();
         s.page = 0;
@@ -1755,6 +1769,7 @@ fn start_md_merge(ui: &AppWindow, state: &Rc<RefCell<State>>, out: &EventSender)
         });
     }
     ui.set_busy(true);
+    ui.set_paused(false);
     ui.set_error_text("".into());
     ui.set_progress(-1.0);
     ui.set_progress_note("".into());
@@ -1816,6 +1831,7 @@ fn start_md_split(ui: &AppWindow, state: &Rc<RefCell<State>>, out: &EventSender)
         });
     }
     ui.set_busy(true);
+    ui.set_paused(false);
     ui.set_error_text("".into());
     ui.set_progress(-1.0);
     ui.set_progress_note("".into());
@@ -1833,6 +1849,7 @@ fn confirm_md_override(ui: &AppWindow, state: &Rc<RefCell<State>>, out: &EventSe
     let pending = state.borrow_mut().md_pending.take();
     if let Some(pending) = pending {
         ui.set_busy(true);
+        ui.set_paused(false);
         ui.set_acknowledge(false);
         ui.set_status("已确认覆盖：正在重新扫描并写入输出".into());
         resume_md_after_confirm(pending, state, out);
@@ -1895,6 +1912,7 @@ fn start_git(ui: &AppWindow, state: &Rc<RefCell<State>>, out: &EventSender) {
         s.md_pending = None;
     }
     ui.set_busy(true);
+    ui.set_paused(false);
     ui.set_error_text("".into());
     ui.set_notice_text("".into());
     ui.set_progress(-1.0);
@@ -2852,17 +2870,113 @@ impl UiPump {
                         );
                     } else if s.task.as_ref() == Some(&path)
                         && s.pending_selection == 0
+                        && s.plan_recompute_inflight == 0
                         && !ui.get_busy()
                     {
-                        // 勾选保存成功后重算就绪：由既有计划 worker 取回快照（不开库），
-                        // 且不改写状态栏文案（收尾文案归任务事件）。
-                        load_plan_state(
-                            &self.out,
-                            &s.plan_load,
-                            path,
-                            ui.get_directory().to_string(),
-                            PlanQuery::readiness(),
-                        );
+                        // C-01：勾选批次落库后用既有分析资料重算受影响的计划（后台线程，
+                        // 不阻塞界面）；重算完成前禁止执行旧计划，失败后要求重新分析。
+                        let out = self.out.clone();
+                        let recompute_path = path.clone();
+                        // 在途勾选期间错过重算结果呈现时，这里补一次计划页重载
+                        //（C-01：依赖改变必须显示给用户；cancelled=0 的后续重算
+                        // 不会再次触发呈现）。
+                        let recompute_dirty = std::mem::take(&mut s.plan_recompute_dirty);
+                        if recompute_dirty {
+                            let start = s.page_starts.get(s.page).copied().unwrap_or(0);
+                            let (page, filter) = (s.page, s.plan_filter.clone());
+                            let plan_load = s.plan_load.clone();
+                            load_plan_state(
+                                &self.out,
+                                &plan_load,
+                                path.clone(),
+                                ui.get_directory().to_string(),
+                                PlanQuery::page(start, page, filter, false),
+                            );
+                        }
+                        s.plan_recompute_inflight += 1;
+                        ui.set_ready(false);
+                        ui.set_plan_editable(false);
+                        std::thread::spawn(move || {
+                            let result =
+                                std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                                    engine::recompute_plan(&recompute_path)
+                                }));
+                            let result = match result {
+                                Ok(Ok(cancelled)) => Ok(cancelled),
+                                Ok(Err(error)) => Err(format!("重算受影响计划失败：{error:#}")),
+                                Err(_) => Err("重算受影响计划时后台操作意外退出".into()),
+                            };
+                            let _ = out.send(Event::PlanRecomputed(recompute_path, result));
+                        });
+                        // 重算完成后再恢复就绪；提前取得的快照不能放行旧计划。
+                    }
+                }
+                Event::PlanRecomputed(path, result) => {
+                    // C-01：依赖变化只在仍显示该任务、勾选批次已落库且尚未进入执行时
+                    // 呈现；新勾选在途时记脏标志，待 pending 归零的 SelectionSaved
+                    // 补一次重载（否则行状态变化会因 cancelled=0 的后续重算而永久
+                    // 不上屏）；已切任务的迟到事件不碰界面。其它工具运行中仍须消费
+                    // 对应重算结果，否则在途计数会永久阻止整理计划执行。
+                    if self.state.borrow().task.as_ref() == Some(&path) {
+                        let busy = ui.get_busy();
+                        let mut s = self.state.borrow_mut();
+                        s.plan_recompute_inflight = s.plan_recompute_inflight.saturating_sub(1);
+                        let cancelled = match result {
+                            Ok(cancelled) => cancelled,
+                            Err(error) => {
+                                s.plan_recompute_failed = true;
+                                ui.set_ready(false);
+                                if !busy {
+                                    ui.set_error_text(error.into());
+                                }
+                                continue;
+                            }
+                        };
+                        if s.pending_selection != 0 {
+                            s.plan_recompute_dirty = true;
+                            drop(s);
+                        } else if cancelled > 0 {
+                            if !busy {
+                                ui.set_status(
+                                    format!(
+                                        "已按取消的勾选重算：{cancelled} 个依赖项失效，转为未勾选"
+                                    )
+                                    .into(),
+                                );
+                            }
+                            // 重载当前计划页让重算后的行状态可见（与勾选保存失败的
+                            // 重载同一模式，页面代际机制会丢弃迟到结果）。
+                            let page = (
+                                s.page_starts.get(s.page).copied().unwrap_or(0),
+                                s.page,
+                                s.plan_filter.clone(),
+                                s.plan_load.clone(),
+                            );
+                            drop(s);
+                            load_plan_state(
+                                &self.out,
+                                &page.3,
+                                path.clone(),
+                                ui.get_directory().to_string(),
+                                PlanQuery::page(page.0, page.1, page.2, false),
+                            );
+                        } else {
+                            drop(s);
+                        }
+                        let s = self.state.borrow();
+                        if !busy
+                            && s.plan_recompute_inflight == 0
+                            && s.pending_selection == 0
+                            && !s.plan_recompute_failed
+                        {
+                            load_plan_state(
+                                &self.out,
+                                &s.plan_load,
+                                path,
+                                ui.get_directory().to_string(),
+                                PlanQuery::readiness(),
+                            );
+                        }
                     }
                 }
                 Event::PlanPage(path, mut actions, page, gen, filter, state_gen, snapshot) => {
@@ -2938,6 +3052,8 @@ impl UiPump {
                     // 因为一次瞬时数据库失败而一直禁用。快照按当前配置/目录纯比较判定。
                     if !ui.get_busy()
                         && s.pending_selection == 0
+                        && s.plan_recompute_inflight == 0
+                        && !s.plan_recompute_failed
                         && s.task.as_ref() == Some(&path)
                         && s.plan_load.state.load(Ordering::Acquire) == state_gen
                     {
@@ -2954,7 +3070,11 @@ impl UiPump {
                         continue;
                     }
                     // 运行中与勾选在途：状态栏文案归任务事件与勾选流程，就绪重算不得改写。
-                    if ui.get_busy() || s.pending_selection != 0 {
+                    if ui.get_busy()
+                        || s.pending_selection != 0
+                        || s.plan_recompute_inflight != 0
+                        || s.plan_recompute_failed
+                    {
                         continue;
                     }
                     apply_plan_readiness(ui, &s, snapshot.as_ref());
@@ -3186,6 +3306,7 @@ impl UiPump {
                         self.log_dirty.set(true);
                     }
                     ui.set_busy(false);
+                    ui.set_paused(false);
                     ui.set_progress(-1.0);
                     ui.set_progress_note("".into());
                     if close_after {
@@ -3193,6 +3314,14 @@ impl UiPump {
                         // 检查点，操作自然结束走到这里——此时应直接退出应用，不得再弹
                         // 覆盖确认把用户留在界面里，也不得残留 close_after。
                         let _ = slint::quit_event_loop();
+                    } else if ui.get_confirm_kind() == 3 {
+                        // U-09：「停止任务并关闭」确认框打开期间任务自然走到冲突点：
+                        // busy/control 均已清空，保持关闭确认框不被破坏性覆盖确认顶替，
+                        // 用户确认后经 on_confirmed(3) 的无任务分支直接退出；冲突详情
+                        // 已写入运行日志（上面的 push_event_log）。
+                        ui.set_status(
+                            "任务已结束；检测到输出冲突（详情见运行日志），请先完成关闭确认".into(),
+                        );
                     } else {
                         ui.set_confirm_text(text.into());
                         ui.set_acknowledge(false);
@@ -3225,6 +3354,7 @@ impl UiPump {
                             self.log_dirty.set(true);
                         }
                         ui.set_busy(false);
+                        ui.set_paused(false);
                         ui.set_convert_progress(if stopped { -1.0 } else { 1.0 });
                         ui.set_convert_progress_note(final_status.into());
                         ui.set_convert_metrics(format!("成功 {success} · 部分提取 {partial} · 失败 {failed} · 已有结果跳过 {skipped_existing} · 重复结果跳过 {skipped_duplicate}").into());
@@ -3269,6 +3399,7 @@ impl UiPump {
                             self.log_dirty.set(true);
                         }
                         ui.set_busy(false);
+                        ui.set_paused(false);
                         ui.set_convert_progress(-1.0);
                         ui.set_convert_progress_note("".into());
                         ui.set_convert_status(
@@ -3312,6 +3443,7 @@ impl UiPump {
                         std::mem::take(&mut s.close_after)
                     };
                     ui.set_busy(false);
+                    ui.set_paused(false);
                     ui.set_progress(-1.0);
                     ui.set_progress_note("".into());
                     ui.set_status(text.into());
@@ -3348,6 +3480,7 @@ impl UiPump {
                         s.git_shared = None;
                     }
                     ui.set_busy(false);
+                    ui.set_paused(false);
                     ui.set_progress(-1.0);
                     ui.set_progress_note("".into());
                     ui.set_status(text.into());
@@ -3369,7 +3502,7 @@ impl UiPump {
     fn finish_task(&self, ui: &AppWindow, path: PathBuf, summary: &Summary, analysis: bool) {
         // 新计划一律回到「全部」筛选：沿用上一任务的筛选可能恰好计数为 0，
         // 造成「空列表 + 高亮禁用胶囊」的死角。
-        let filter = {
+        let (filter, organizer_visible) = {
             let mut s = self.state.borrow_mut();
             s.task = Some(path.clone());
             s.page = 0;
@@ -3379,30 +3512,34 @@ impl UiPump {
             s.extracting = false;
             s.plan_filter = None;
             apply_summary(ui, &mut s, summary);
-            None
+            (None, s.tool == Tool::Organizer)
         };
         ui.set_busy(false);
         ui.set_paused(false);
         ui.set_ready(false);
         ui.set_plan_editable(false);
         ui.set_has_task(true);
-        ui.set_panel(1);
+        if organizer_visible {
+            ui.set_panel(1);
+        }
         ui.set_plan_filter(0);
         ui.set_progress(-1.0);
         ui.set_progress_note("".into());
         ui.set_plan_prev_enabled(false);
         ui.set_plan_next_enabled(false);
-        ui.set_status(
-            if analysis {
-                "分析完成（只读）。请检查计划，然后确认执行整理。".into()
-            } else {
-                format!(
-                    "整理结束：已永久删除 {} 项（不可恢复）· 错误 {} 项；完整记录见「进度与日志」。",
-                    summary.deleted, summary.errors
-                )
-            }
-            .into(),
-        );
+        if organizer_visible {
+            ui.set_status(
+                if analysis {
+                    "分析完成（只读）。请检查计划，然后确认执行整理。".into()
+                } else {
+                    format!(
+                        "整理结束：已永久删除 {} 项（不可恢复）· 错误 {} 项；完整记录见「进度与日志」。",
+                        summary.deleted, summary.errors
+                    )
+                }
+                .into(),
+            );
+        }
         // 新任务加载落地前清空上一任务的旧行：action id 是各任务库各自的 rowid，
         // 旧行在此窗口内仍可交互，会把勾选写进新任务库的同 id 动作。
         ui.set_plans(Rc::new(VecModel::from(Vec::<PlanRow>::new())).into());
@@ -3425,8 +3562,15 @@ impl UiPump {
         }
         let s = self.state.borrow();
         let Some(control) = &s.control else {
-            ui.set_progress(-1.0);
-            ui.set_progress_note("准备中".into());
+            // 转 Markdown 任务无共享 Control（独立取消原子量）：共享进度条不得
+            // 固定显示「准备中」——如实指向转 Markdown 页的实时进度（U-03/H-02）。
+            if s.runtime == RuntimeMode::MarkdownConverter {
+                ui.set_progress(-1.0);
+                ui.set_progress_note("转换任务进行中，实时进度见转 Markdown 页".into());
+            } else {
+                ui.set_progress(-1.0);
+                ui.set_progress_note("准备中".into());
+            }
             return;
         };
         // Git：从共享进度读取全部界面字段（G-13；不写整理流程计数器）。
@@ -3575,6 +3719,9 @@ fn initial_state() -> Result<State> {
         started: Instant::now(),
         close_after: false,
         pending_selection: 0,
+        plan_recompute_inflight: 0,
+        plan_recompute_failed: false,
+        plan_recompute_dirty: false,
         applying: false,
         extracting: false,
         planned: 0,
@@ -3722,13 +3869,31 @@ fn wire_md_git(ui: &AppWindow, state: &Rc<RefCell<State>>, out: &EventSender) {
         let state = state.clone();
         ui.on_git_stop(move || {
             // G-15：停止 = 不再处理新文件、不启动下一次 retry；当前 git 命令自然结束。
-            if let Some(control) = &state.borrow().control {
+            // 其他任务运行中跨页点击时同样必须真正取消：control 为 None 时回落
+            // 转换/初始化的取消原子量（与 on_confirmed(3)、on_cancel_task 同构，H-02）。
+            let control = state.borrow().control.clone();
+            let converter_cancel = state.borrow().convert_cancel.clone();
+            let converter_init_cancel = state.borrow().convert_init_cancel.clone();
+            let stopping_converter = control.is_none();
+            let stopping_shared_non_git =
+                control.is_some() && state.borrow().runtime != RuntimeMode::Git;
+            if let Some(control) = control {
                 control.cancel();
+            } else if let Some(cancel) = converter_cancel {
+                cancel.store(true, Ordering::Release);
+            } else if let Some(cancel) = converter_init_cancel {
+                cancel.store(true, Ordering::Release);
             }
             if let Some(ui) = weak.upgrade() {
-                ui.set_status(
-                    "正在停止：等待当前 git 命令结束后不再继续；已成功推送的文件保持成功".into(),
-                );
+                ui.set_status(if stopping_converter {
+                    // 回落取消的是转 Markdown 任务：文案如实，不写 Git 专属描述。
+                    "正在停止转 Markdown；当前文件完成后停止".into()
+                } else if stopping_shared_non_git {
+                    // 取消的是其他工具的共享任务（整理/解压/MD）：通用取消口径。
+                    "正在取消；当前操作完成后停止，不会继续后续操作".into()
+                } else {
+                    "正在停止：等待当前 git 命令结束后不再继续；已成功推送的文件保持成功".into()
+                });
             }
         });
     }
@@ -3849,13 +4014,25 @@ fn wire_markdown_converter(ui: &AppWindow, state: &Rc<RefCell<State>>, out: &Eve
         let weak = ui.as_weak();
         let state = state.clone();
         ui.on_convert_stop(move || {
-            if let Some(cancel) = &state.borrow().convert_cancel {
+            // 与 on_confirmed(3)/on_cancel_task/on_git_stop 同构：其他任务运行中
+            // 跨页点击时必须真正取消共享任务，control 命中即取消之（H-02）。
+            let control = state.borrow().control.clone();
+            let converter_cancel = state.borrow().convert_cancel.clone();
+            let converter_init_cancel = state.borrow().convert_init_cancel.clone();
+            let stopping_shared_task = control.is_some();
+            if let Some(control) = control {
+                control.cancel();
+            } else if let Some(cancel) = converter_cancel {
                 cancel.store(true, Ordering::Release);
-            }
-            if let Some(cancel) = &state.borrow().convert_init_cancel {
+            } else if let Some(cancel) = converter_init_cancel {
                 cancel.store(true, Ordering::Release);
             }
             if let Some(ui) = weak.upgrade() {
+                if stopping_shared_task {
+                    // 取消的是其他工具的共享任务：文案如实按通用取消口径。
+                    ui.set_status("正在取消；当前操作完成后停止，不会继续后续操作".into());
+                    return;
+                }
                 ui.set_convert_status(
                     if ui.get_convert_initializing() {
                         "正在取消初始化…"
@@ -4003,7 +4180,10 @@ fn start_markdown_conversion(ui: &AppWindow, state: &Rc<RefCell<State>>, out: &E
     state.borrow_mut().convert_cancel = Some(cancel.clone());
     state.borrow_mut().runtime = RuntimeMode::MarkdownConverter;
     ui.set_busy(true);
+    ui.set_paused(false);
     ui.set_ready(false);
+    ui.set_error_text("".into());
+    ui.set_notice_text("".into());
     ui.set_convert_metrics("正在扫描…".into());
     ui.set_convert_progress(-1.0);
     ui.set_convert_progress_note("正在扫描".into());
@@ -4170,7 +4350,15 @@ pub fn run_with_engine_overrides(
         let weak = ui.as_weak();
         let state = state.clone();
         ui.on_pause_task(move||{if let Some(ui)=weak.upgrade(){
-            if let Some(control)=&state.borrow().control{let pause=!control.is_paused();control.pause(pause);ui.set_paused(pause);
+            let s=state.borrow();
+            // H-02/G-13：Git 与转 Markdown 任务不接入暂停检查点（Git 逐文件提交、转换
+            // 顶层串行），暂停对它们无效；如实提示而不是翻转 paused 冻结状态显示。
+            if s.runtime==RuntimeMode::Git||s.runtime==RuntimeMode::MarkdownConverter||s.control.is_none(){
+                drop(s);
+                ui.set_status("当前工具的任务不支持暂停".into());
+                return;
+            }
+            if let Some(control)=&s.control{let pause=!control.is_paused();control.pause(pause);ui.set_paused(pause);
                 ui.set_status(if pause{"已请求暂停；正在运行的压缩包在完成后暂停，Hash 和整理操作在分块/文件边界暂停"}else{"继续处理"}.into());}
         }});
     }
@@ -4178,8 +4366,18 @@ pub fn run_with_engine_overrides(
         let weak = ui.as_weak();
         let state = state.clone();
         ui.on_cancel_task(move || {
-            if let Some(control) = &state.borrow().control {
+            // 与 on_confirmed(3) 同构：转 Markdown 任务用独立取消原子量（无共享
+            // Control），control 为 None 时回落取消转换/初始化，不得谎报正在取消
+            // 而任务继续运行（H-02 取消入口可用）。
+            let control = state.borrow().control.clone();
+            let converter_cancel = state.borrow().convert_cancel.clone();
+            let converter_init_cancel = state.borrow().convert_init_cancel.clone();
+            if let Some(control) = control {
                 control.cancel();
+            } else if let Some(cancel) = converter_cancel {
+                cancel.store(true, Ordering::Release);
+            } else if let Some(cancel) = converter_init_cancel {
+                cancel.store(true, Ordering::Release);
             }
             if let Some(ui) = weak.upgrade() {
                 ui.set_status("正在取消；当前操作完成后停止，不会继续后续操作".into());
@@ -4194,7 +4392,7 @@ pub fn run_with_engine_overrides(
             let task = state.borrow().task.clone();
             if let (Some(task), Ok(id)) = (task, id.parse::<i64>()) {
                 if let Some(ui) = weak.upgrade() {
-                    if ui.get_busy() {
+                    if ui.get_busy() || state.borrow().plan_recompute_inflight != 0 {
                         return;
                     }
                     // 勾选保存中 ready 暂降，避免在途勾选时误点执行；其他项仍可在 Slint 侧继续编辑。
@@ -4509,6 +4707,34 @@ mod gui_tests {
                 "第二片写出剩余内容"
             );
             let _ = std::fs::remove_dir_all(&dir);
+        })
+        .unwrap();
+    }
+
+    // 覆盖 H-02/U-06（回归：MD/Git/转换任务收尾必须复位 paused——否则残留的
+    // paused 会丢弃后续任务的普通状态事件，并把暂停按钮显示成「继续」）
+    #[test]
+    fn md_and_git_finish_reset_paused() {
+        with_gui(|app| {
+            let ui = &app.ui;
+            ui.set_busy(true);
+            ui.set_paused(true);
+            app.pump
+                .out
+                .send(Event::MdDone("合并完成：0 个文件".into()))
+                .unwrap();
+            app.pump.run(ui);
+            assert!(!ui.get_busy(), "收尾清 busy");
+            assert!(!ui.get_paused(), "MD 收尾必须复位 paused（修复前残留）");
+            ui.set_busy(true);
+            ui.set_paused(true);
+            app.pump
+                .out
+                .send(Event::GitDone("Git 任务完成".into()))
+                .unwrap();
+            app.pump.run(ui);
+            assert!(!ui.get_busy());
+            assert!(!ui.get_paused(), "Git 收尾同样复位 paused");
         })
         .unwrap();
     }
@@ -5387,6 +5613,38 @@ mod gui_tests {
                 ui.get_status()
             );
             let _ = std::fs::remove_dir_all(&dir);
+        })
+        .unwrap();
+    }
+    // 覆盖 U-11/H-02：整理任务后台收尾时，不得把用户当前选中的另一工具面板顶走。
+    #[test]
+    fn organizer_finish_does_not_replace_another_tool_panel() {
+        with_gui(|app| {
+            let ui = &app.ui;
+            let dir = temp_test_dir("finish-while-other-tool-visible");
+            ui.invoke_select_tool("md-organizer".into());
+            ui.set_status("MD 工具正在显示".into());
+            assert_eq!(ui.get_panel(), 0);
+            app.pump
+                .finish_task(ui, dir.clone(), &Summary::default(), true);
+            assert_eq!(ui.get_active_tool_id().as_str(), "md-organizer");
+            assert_eq!(ui.get_panel(), 0, "后台整理收尾不得切换其它工具面板");
+            assert_eq!(ui.get_status().as_str(), "MD 工具正在显示");
+            let _ = std::fs::remove_dir_all(dir);
+        })
+        .unwrap();
+    }
+    // 覆盖 C-01：依赖重算在途时拒绝新的勾选保存，避免两个重算线程并发修改同一任务库。
+    #[test]
+    fn plan_toggle_is_gated_during_dependency_recompute() {
+        with_gui(|app| {
+            let dir = temp_test_dir("plan-recompute-toggle-gate");
+            app.state.borrow_mut().task = Some(dir.clone());
+            app.state.borrow_mut().plan_recompute_inflight = 1;
+            app.ui.invoke_plan_toggle("1".into(), false);
+            assert_eq!(app.state.borrow().pending_selection, 0);
+            assert_eq!(app.state.borrow().plan_recompute_inflight, 1);
+            let _ = std::fs::remove_dir_all(dir);
         })
         .unwrap();
     }

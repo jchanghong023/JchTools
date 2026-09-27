@@ -361,6 +361,11 @@ impl SevenZip {
         // 文件名仅用于发现候选；删除与展开比例只能使用引擎实际打开的连续分卷。
         // 隔离仍使用独立的可逆宽匹配，不能把该集合复用为永久删除授权。
         let named = volume_set(&archive)?;
+        // X-10：同主干混用补零模式（如 part1 与 part01 并存）是命名歧义组：
+        // 列出全部歧义卷，不猜测归属、不解码删源——整组按失败包走 X-06 隔离。
+        if let Some(ambiguity) = &named.part_ambiguity {
+            anyhow::bail!("X-10 命名歧义分卷组：{archive_rel}（{ambiguity}）");
+        }
         // X-10：老式 zip/rar 族只发现尾卷、没有主包时整组按失败包处置并报告缺主包，
         // 不把尾卷交给引擎猜格式（引擎对孤立 .zNN/.rNN 的报错只会说「无法打开」，
         // 指向不了真正原因）。
@@ -512,11 +517,11 @@ impl SevenZip {
             for index in 1u64..=1_000_000 {
                 let candidate = fsutil::suffixed_candidate(name, "", index);
                 let candidate_rel = if parent_dest.is_empty() {
-                    candidate
+                    candidate.clone()
                 } else {
                     format!("{parent_dest}/{candidate}")
                 };
-                if matches!(classify_occupancy(&join(&candidate_rel)?)?, Occupancy::Free) {
+                if matches!(classify_occupancy(&join(&candidate)?)?, Occupancy::Free) {
                     new_rel = Some(candidate_rel);
                     break;
                 }
@@ -1014,6 +1019,12 @@ fn rar_part_stem(name: &str) -> Option<&str> {
     let (stem, part) = base.rsplit_once(".part")?;
     (!part.is_empty() && part.chars().all(|c| c.is_ascii_digit())).then_some(stem)
 }
+/// part rar 族的卷号数字串（`a.part01.rar` → `01`），判定与 [`rar_part_stem`] 同构。
+fn part_digits(name: &str) -> Option<&str> {
+    let base = name.strip_suffix(".rar")?;
+    let (_, part) = base.rsplit_once(".part")?;
+    (!part.is_empty() && part.bytes().all(|b| b.is_ascii_digit())).then_some(part)
+}
 struct ArchiveVolumes {
     kind: String,
     count: usize,
@@ -1129,6 +1140,10 @@ fn numbered_entry(name: &str) -> bool {
 struct VolumeSet {
     paths: Vec<PathBuf>,
     scheme: VolumeScheme,
+    /// X-10 part rar 命名歧义组（同一卷号数值存在多种补零写法，如 part1 与
+    /// part01 并存）的描述；Some 时调用方必须整组按失败包处置——不猜测归属、
+    /// 不解码删源。宽匹配的 paths 仍是整组卷，隔离可复用。
+    part_ambiguity: Option<String>,
 }
 /// X-10：该文件是老式族尾卷、且同目录没有对应主包（`主干.zip`/`主干.rar`）。
 /// 只发现这些尾卷时整组按失败包处置并报告缺主包（X-10：缺入口仍是一组失败包）。
@@ -1179,6 +1194,7 @@ fn volume_set(archive: &Path) -> Result<VolumeSet> {
         return Ok(VolumeSet {
             paths: vec![archive.to_path_buf()],
             scheme: VolumeScheme::Single,
+            part_ambiguity: None,
         });
     };
     // 逐条目复用的匹配前缀与最少位数在扫描前算好（此前每个目录条目要 format! 两次）：
@@ -1205,16 +1221,62 @@ fn volume_set(archive: &Path) -> Result<VolumeSet> {
         }
     };
     let mut paths = vec![archive.to_path_buf()];
+    // X-10 part rar 命名歧义检测：同一卷号数值出现多种补零写法（如 part1 与
+    // part01 并存）时不猜测归属。键为卷号数值（超长数字串退化为原始串键，
+    // 不同串必不同键，不会误报）；首位写法留档，后续同号异写即歧义。
+    let mut part_ambiguity: Option<String> = None;
+    let mut part_seen: HashMap<String, String> = HashMap::new();
+    if matches!(scheme, VolumeScheme::RarParts) {
+        if let Some(digits) = part_digits(&name) {
+            part_seen.insert(
+                digits
+                    .parse::<u64>()
+                    .map_or_else(|_| format!("raw:{digits}"), |value| value.to_string()),
+                digits.to_string(),
+            );
+        }
+    }
     for entry in fs::read_dir(archive.parent().context("压缩包缺少目录")?)? {
         let entry = entry?;
         let candidate = entry.file_name().to_string_lossy().to_lowercase();
         // 主体自身已在集合里（如 part1.rar 对主干同判）；大小写不敏感路径上可能重复命名，去重交给文件系统唯一性。
         if matches_candidate(&candidate) && entry.path() != archive && entry.file_type()?.is_file()
         {
+            if matches!(scheme, VolumeScheme::RarParts) {
+                if let Some(digits) = part_digits(&candidate) {
+                    let key = digits
+                        .parse::<u64>()
+                        .map_or_else(|_| format!("raw:{digits}"), |value| value.to_string());
+                    match part_seen.get(&key) {
+                        Some(existing) if existing != digits && part_ambiguity.is_none() => {
+                            part_ambiguity = Some(format!(
+                                "同一卷号存在多种补零写法（{existing} 与 {digits} 并存）"
+                            ));
+                        }
+                        None => {
+                            part_seen.insert(key, digits.to_string());
+                        }
+                        _ => {}
+                    }
+                }
+            }
             paths.push(entry.path());
         }
     }
-    Ok(VolumeSet { paths, scheme })
+    // 列出全部歧义卷：整组卷清单随描述一并返回（X-10「列出全部歧义卷」）。
+    let part_ambiguity = part_ambiguity.map(|reason| {
+        let names = paths
+            .iter()
+            .filter_map(|path| path.file_name().and_then(|name| name.to_str()))
+            .collect::<Vec<_>>()
+            .join("、");
+        format!("{reason}；整组卷：{names}")
+    });
+    Ok(VolumeSet {
+        paths,
+        scheme,
+        part_ambiguity,
+    })
 }
 /// 目标位置的占用形态（X-04）：空闲、可合入的普通目录、或被文件/链接等占用。
 enum Occupancy {
@@ -1312,11 +1374,22 @@ fn quarantine(job: &mut Job, archive_rel: &str, reason: &str) -> Result<()> {
     if !dir.try_exists()? {
         fs::create_dir_all(&dir)?;
     }
-    anyhow::ensure!(
-        dir.is_dir(),
-        "无法建立「{QUARANTINE_DIR_NAME}」子目录：{}（目标位置被同名文件占用）",
-        dir.display()
-    );
+    // S-04：容器位置是 junction/符号链接时不得穿透——否则失败包会被移出所选根、
+    // 落到链接目标，且界面上声称的位置与实际不符。链接与普通文件占用都按
+    // 「容器被占用」走隔离失败原地保留路径，但文案区分占用类型（X-06/U-10）。
+    let container_blocked = match fs::symlink_metadata(&dir) {
+        Ok(meta) if fsutil::is_link(&meta) => {
+            Some("目标位置被链接占用，不穿透链接隔离（S-04）".to_string())
+        }
+        Ok(meta) if meta.is_dir() => None,
+        _ => Some("目标位置被同名文件占用".to_string()),
+    };
+    if let Some(reason) = container_blocked {
+        anyhow::bail!(
+            "无法建立「{QUARANTINE_DIR_NAME}」子目录：{}（{reason}）",
+            dir.display()
+        );
+    }
     // 只规划实际仍存在的源项（缺失卷不阻止整组隔离，与既有语义一致）。
     let mut present: Vec<PathBuf> = Vec::new();
     let mut names: Vec<(String, String)> = Vec::new();
@@ -1528,11 +1601,24 @@ pub fn extract_queued(job: &mut Job, engine: &SevenZip) -> Result<()> {
                     "有成员被跳过或未落盘（排除规则/Git 目录树/目标冲突无法落位）；原包保留",
                     0,
                 )?;
-                quarantine(
+                // X-06：隔离自身失败（容器被占用、无法分配目标名或某卷移动失败）时，
+                // 该失败包原地保留并记录隔离失败原因与未移动源项位置，其余包可继续。
+                if let Err(error) = quarantine(
                     job,
                     &relative,
                     "未能完全解开：有成员被跳过、被排除规则命中或位于 Git 目录树内",
-                )?;
+                ) {
+                    job.summary.errors += 1;
+                    job.log(
+                        "解压",
+                        &relative,
+                        "",
+                        "隔离失败",
+                        &format!("原包原地保留，未移动的源项仍在原位置：{error:#}"),
+                        0,
+                    )?;
+                    job.context.control.check_cancelled()?;
+                }
             }
             Err(error) => {
                 // 归档行先标 failed，避免永久停在 running。
@@ -1554,8 +1640,19 @@ pub fn extract_queued(job: &mut Job, engine: &SevenZip) -> Result<()> {
                 job.summary.errors += 1;
                 job.log("解压", &relative, "", "失败", &format!("{error:#}"), 0)?;
                 // X-06：解压出错（损坏/加密/不支持/触上限）的原包移入「解压失败」。
-                // 隔离自身失败时如实上抛，不静默丢弃原包位置信息。
-                quarantine(job, &relative, &format!("解压失败：{error:#}"))?;
+                // 隔离自身失败时记录隔离失败原因与原包位置，不中止其余包的处理。
+                if let Err(quarantine_error) =
+                    quarantine(job, &relative, &format!("解压失败：{error:#}"))
+                {
+                    job.log(
+                        "解压",
+                        &relative,
+                        "",
+                        "隔离失败",
+                        &format!("原包原地保留，未移动的源项仍在原位置：{quarantine_error:#}"),
+                        0,
+                    )?;
+                }
                 job.context.control.check_cancelled()?;
             }
         }

@@ -141,16 +141,13 @@ pub fn normalize_root(path: &Path) -> Result<PathBuf> {
         if root.components().count() <= 2 {
             bail!("不允许整理磁盘根目录");
         }
-        for var in [
-            "SystemRoot",
-            "ProgramFiles",
-            "ProgramFiles(x86)",
-            "ProgramData",
-        ] {
+        // S-05 只授权拒绝 Windows 安装目录及其后代；Program Files、用户目录、
+        // 盘根不自动扩大进拒绝清单，仍受其余范围与权限规则约束。
+        for var in ["SystemRoot"] {
             if let Some(protected) = std::env::var_os(var) {
                 if let Ok(protected) = fs::canonicalize(protected) {
                     if root.starts_with(&protected) {
-                        bail!("不允许整理 Windows / 程序安装 / 系统数据目录");
+                        bail!("不允许整理 Windows 系统目录");
                     }
                 }
             }

@@ -237,6 +237,63 @@ fn single_added_file_committed_and_pushed() {
     );
 }
 
+// 覆盖 G-04, G-05, G-09（回归：含 `[...]` 的合法 Windows 文件名必须按字面 pathspec
+// 处理——修复前 pathspec 被 wildmatch 解释为字符类，`数据[1].txt` 匹配不到自身，
+// add 进入无限重试、只能靠看门狗以「已停止」收场）
+#[test]
+fn bracketed_filename_commits_and_pushes_literally() {
+    let fix = fixture();
+    fs::write(
+        fix.repo.join("数据[1].txt"),
+        "payload
+",
+    )
+    .unwrap();
+    let outcome = run_tool(&fix.repo);
+    assert!(
+        outcome.text.contains("全部完成"),
+        "含字符类字符的文件名必须正常提交推送：{}",
+        outcome.text
+    );
+    assert!(worktree_clean(&fix.repo), "处理后工作区应干净");
+    let log = remote_log(&fix.remote);
+    assert!(
+        log.contains(&"update: 数据[1].txt".to_string()),
+        "远端提交信息按字面路径：{log:?}"
+    );
+    assert_eq!(head_paths(&fix.repo), vec!["数据[1].txt".to_string()]);
+}
+
+// 覆盖 G-04, G-06（回归：用户启动前已暂存的删除（git rm）在索引中已无条目，
+// `git add -- <path>` 必然报 pathspec 不匹配——核实 `D ` 完全暂存形态后跳过 add
+// 直接提交；修复前进入无限重试，只能靠看门狗以「已停止」收场）
+#[test]
+fn prestaged_deletion_commits_without_add() {
+    let fix = fixture();
+    fs::write(
+        fix.repo.join("gone.txt"),
+        "will remove
+",
+    )
+    .unwrap();
+    git_ok(&fix.repo, &["add", "gone.txt"]);
+    git_ok(&fix.repo, &["commit", "-q", "-m", "prepare"]);
+    git_ok(&fix.repo, &["rm", "-q", "gone.txt"]);
+    let outcome = run_tool(&fix.repo);
+    assert!(
+        outcome.text.contains("全部完成"),
+        "预暂存删除必须正常提交推送：{}",
+        outcome.text
+    );
+    assert!(worktree_clean(&fix.repo), "处理后工作区应干净");
+    let log = remote_log(&fix.remote);
+    assert!(
+        log.contains(&"update: gone.txt".to_string()),
+        "远端提交信息：{log:?}"
+    );
+    assert!(!fix.repo.join("gone.txt").exists(), "删除已生效");
+}
+
 // 覆盖 G-04（修改、删除、重命名各一类逻辑变更）
 #[test]
 fn modified_deleted_and_renamed_changes() {

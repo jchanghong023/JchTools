@@ -224,6 +224,10 @@ fn scan(options: &Options, supported: &BTreeSet<String>) -> Result<Plan, String>
         return Err("输入与输出目录不能相同".to_string());
     }
     let mut paths = Vec::new();
+    // T-09 只授权「输出位于输入目录子树内」时排除整棵输出子树；输出是输入的
+    // 祖先或两者在不同分支时不排除任何目录——否则输入子树会因前缀判定被整体
+    // 静默跳过，违反 T-07 的递归处理要求。
+    let output_in_input = path_begins_with(&output, &input);
     let mut pending = vec![input.clone()];
     while let Some(dir) = pending.pop() {
         for entry in fs::read_dir(&dir).map_err(|e| format!("无法扫描 {}：{e}", dir.display()))?
@@ -236,7 +240,7 @@ fn scan(options: &Options, supported: &BTreeSet<String>) -> Result<Plan, String>
                 continue;
             }
             if metadata.is_dir() {
-                if !path_begins_with(&path, &output) {
+                if !(output_in_input && path_begins_with(&path, &output)) {
                     pending.push(path);
                 }
             } else if metadata.is_file()
@@ -341,8 +345,7 @@ fn supported_formats(
             .get("mime_type")
             .and_then(serde_json::Value::as_str)
             .unwrap_or("");
-        let group = classify_format(&extension, mime);
-        if groups.contains(&group) {
+        if selected_xberg_extension(&extension, mime, groups) {
             selected.insert(extension);
         }
     }
@@ -350,6 +353,13 @@ fn supported_formats(
         selected.extend(MEDIA.iter().map(|extension| (*extension).to_string()));
     }
     Ok(selected)
+}
+
+fn selected_xberg_extension(extension: &str, mime: &str, groups: &[FormatGroup]) -> bool {
+    if (mime.starts_with("audio/") || mime.starts_with("video/")) && !MEDIA.contains(&extension) {
+        return false;
+    }
+    groups.contains(&classify_format(extension, mime))
 }
 
 fn classify_format(extension: &str, mime: &str) -> FormatGroup {
@@ -549,8 +559,11 @@ fn write_new_markdown(output_root: &Path, target: &Path, content: &str) -> Resul
         file.sync_all()
             .map_err(|e| format!("同步 Markdown 失败：{e}"))?;
         drop(file);
-        fs::hard_link(&temp, target)
-            .map_err(|e| format!("无法提交新结果（已有结果不会覆盖）：{e}"))?;
+        // T-25/T-12：完整成功后以不覆盖改名提交（temp 与目标同目录同卷）。
+        // 不用 fs::rename——Windows 上它会替换已存在目标；不用硬链接——
+        // exFAT/FAT 等文件系统不支持，会把输出在这些卷上的结果全部判失败。
+        fsutil::rename_noreplace(&temp, target)
+            .map_err(|e| format!("无法提交新结果（已有结果不会覆盖）：{e:#}"))?;
         Ok(())
     })();
     let _ = fs::remove_file(&temp);
@@ -719,11 +732,23 @@ impl Drop for MediaProcessJob {
 
 #[cfg(test)]
 mod tests {
-    use super::{compare_paths, scan, write_new_markdown, FormatGroup, Options};
+    use super::{
+        compare_paths, scan, selected_xberg_extension, write_new_markdown, FormatGroup, Options,
+    };
     use std::{cmp::Ordering, collections::BTreeSet, fs, path::PathBuf};
 
     fn supported() -> BTreeSet<String> {
         ["pdf", "docx"].into_iter().map(str::to_string).collect()
+    }
+
+    // 覆盖 T-07、T-08：仅 MP4/M4A 进入媒体链路，Xberg 清单中的其他媒体格式不得误入文档转换。
+    #[test]
+    fn other_xberg_media_formats_are_not_selected() {
+        let groups = [FormatGroup::Other, FormatGroup::Media];
+        assert!(!selected_xberg_extension("wmv", "video/x-ms-wmv", &groups));
+        assert!(!selected_xberg_extension("mp3", "audio/mpeg", &groups));
+        assert!(selected_xberg_extension("mp4", "video/mp4", &groups));
+        assert!(selected_xberg_extension("m4a", "audio/mp4", &groups));
     }
 
     fn options(input_dir: PathBuf, output_dir: PathBuf, flat: bool) -> Options {
@@ -783,6 +808,28 @@ mod tests {
             fs::canonicalize(&output).unwrap().join("x_pdf.md")
         );
         assert_eq!(plan.summary.skipped_duplicate, 1);
+    }
+
+    // 覆盖 T-07、T-09（输出目录是输入目录的祖先时：输入子树不被前缀判定排除，
+    // 递归处理全部匹配文件——只有输出位于输入子树内时才排除输出子树）
+    #[test]
+    fn scan_keeps_input_subtree_when_output_is_ancestor() {
+        let temp = tempfile::tempdir().unwrap();
+        let input = temp.path().join("data").join("reports");
+        let output = temp.path().join("data");
+        fs::create_dir_all(input.join("sub")).unwrap();
+        fs::write(input.join("top.PDF"), b"pdf").unwrap();
+        fs::write(input.join("sub/inner.pdf"), b"pdf").unwrap();
+
+        let plan = scan(&options(input, output.clone(), false), &supported()).unwrap();
+        assert_eq!(
+            plan.items.len(),
+            2,
+            "输出为输入祖先时子树全部纳入递归处理：{:?}",
+            plan.items
+        );
+        assert_eq!(plan.summary.skipped_existing, 0);
+        assert_eq!(plan.summary.skipped_duplicate, 0);
     }
 
     // 覆盖 T-09：输入输出重合时扫描前拒绝。

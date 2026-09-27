@@ -1,13 +1,14 @@
 use crate::{
     config::DeleteMode,
     db::FILE_COLUMNS,
+    dedup_components::{find_duplicate_groups, DedupRules},
     engine::Job,
     fsutil,
     model::{Action, ActionKind, FileRecord},
     rules,
 };
-use anyhow::{Context, Result};
-use rusqlite::{params, OptionalExtension};
+use anyhow::Result;
+use rusqlite::params;
 use std::{
     collections::{HashMap, HashSet},
     path::Path,
@@ -77,13 +78,24 @@ fn cleanup_candidates(job: &mut Job) -> Result<()> {
         for file in batch {
             job.context.control.checkpoint()?;
             cursor = file.id;
-            if let Some((kind, reason)) =
-                rules::cleanup_reason(&file.rel, file.snapshot.size, &job.config)
-            {
-                // C-08：三类清理各自独立覆盖删除方式，未覆盖时跟随全局文件删除方式。
-                let mode =
-                    rules::cleanup_delete(&job.config, kind).resolve(job.config.global_delete);
-                remove_candidate(job, &file, None, reason, mode)?;
+            // C-01/C-08：多条清理规则同时命中时逐类裁决（各类独立覆盖删除方式，
+            // 未覆盖时跟随全局）；任一已启用规则请求永久删除即形成一次清理删除，
+            // 某类选择保留只取消该类的删除请求，不否决其他类别。
+            let hits = rules::cleanup_hits(&file.rel, file.snapshot.size, &job.config);
+            let requesting: Vec<&'static str> = hits
+                .iter()
+                .filter_map(|(kind, reason)| {
+                    matches!(
+                        rules::cleanup_delete(&job.config, *kind).resolve(job.config.global_delete),
+                        DeleteMode::Permanent
+                    )
+                    .then_some(*reason)
+                })
+                .collect();
+            if !requesting.is_empty() {
+                // 计划列出实际导致删除的全部规则，不能只显示选择了保留的那项。
+                let reason = requesting.join("；");
+                remove_candidate(job, &file, None, &reason, DeleteMode::Permanent)?;
             }
         }
     }
@@ -100,83 +112,52 @@ fn deduplicate(job: &mut Job) -> Result<()> {
     }
     job.context
         .status("分析相同内容：相同名称 / 副本名称 / 不同名称分别应用规则");
-    let order = rules::ordering_sql(job.config.keep_duplicate);
-    job.db.conn.execute_batch(&format!("DROP TABLE IF EXISTS duplicate_order; CREATE TEMP TABLE duplicate_order AS SELECT ROW_NUMBER() OVER(ORDER BY hash,{order}) AS seq,id FROM files WHERE active=1 AND hash IS NOT NULL; CREATE INDEX duplicate_order_seq ON duplicate_order(seq); DELETE FROM keepers;"))?;
-    let mut cursor = 0i64;
-    loop {
-        // 一条 JOIN 语句取整页（duplicate_order 游标 × files 全列），替代逐候选的
-        // file(id) 主键单行查询；keeper 查找保留逐行——它依赖本页内已注册的 keepers。
-        // 写语句无需页内事务：engine 在 planner::build 外层已包一个整体事务。
-        let items = job.db.duplicate_page(cursor, 256)?;
-        if items.is_empty() {
-            break;
-        }
-        for (seq, file) in items {
-            cursor = seq;
+    // hash_candidates 在哈希前从 active 集合生成：只装载可能存在候选边的文件，
+    // 同时保留哈希失败后被置为 inactive 的节点作为连通图桥接项。它们的 hash
+    // 仍为空，绝不会成为保留者或删除目标。
+    let records = job.db.files(
+        &format!(
+            "SELECT {} FROM hash_candidates AS c JOIN files AS f ON f.id=c.id WHERE f.active=1 OR f.hash IS NULL ORDER BY f.id",
+            crate::db::file_columns_qualified("f")
+        ),
+        [],
+    )?;
+    let groups = find_duplicate_groups(
+        &records,
+        DedupRules {
+            same_name: job.config.dedup_same_name,
+            copy_names: job.config.dedup_copy_names,
+            other_names: job.config.dedup_other_names,
+        },
+        job.config.keep_duplicate,
+    );
+    for group in groups {
+        let keeper = &records[group.keeper];
+        for duplicate_index in group.duplicates {
+            let file = &records[duplicate_index];
             job.context.control.checkpoint()?;
-            let hash = file.hash.as_ref().context("重复候选缺少 Hash")?;
-            let keeper_id: Option<i64> = {
-                let mut statement = job.db.conn.prepare_cached(
-                    "SELECT file_id FROM keepers WHERE hash=?1 AND ((name=?2 AND ?4) OR (name<>?2 AND normal=?3 AND ?5) OR (name<>?2 AND normal<>?3 AND ?6)) ORDER BY rowid LIMIT 1")?;
-                statement
-                    .query_row(
-                        params![
-                            hash,
-                            file.name,
-                            file.normalized,
-                            job.config.dedup_same_name,
-                            job.config.dedup_copy_names,
-                            job.config.dedup_other_names
-                        ],
-                        |r| r.get(0),
-                    )
-                    .optional()?
-            };
-            if let Some(keeper_id) = keeper_id {
-                let keeper = job.db.file(keeper_id)?;
-                // C-04：只有可靠标识 + 两侧链接数证明是同一物理文件时才跳过；标识退化
-                // （如 Windows 卷不提供索引）时不得据此跳过去重，也不得重复计数。
-                if rules::identity_proves_same_file(&keeper, &file) {
-                    job.log(
-                        "去重",
-                        &file.rel,
-                        &keeper.rel,
-                        "保留",
-                        "已经是同一个文件的硬链接，不重复计算可释放空间",
-                        file.snapshot.size,
-                    )?;
-                    continue;
-                }
-                let reason = if file.name == keeper.name {
-                    "相同名称且完整 Hash 相同"
-                } else if file.normalized == keeper.normalized {
-                    "副本命名且完整 Hash 相同"
-                } else {
-                    "名称不同但完整 Hash 相同"
-                };
-                // C-04/S-02：副本处置只有「保留副本」和「永久删除副本」，随全局文件删除方式。
-                let mode = job.config.global_delete;
-                // 清理命中且该类清理的删除方式为「保留」的文件由清理规则管辖（保留承诺）：
-                // cleanup 阶段已让其保持 active，这里若无守卫，同组 keeper 先注册时它会按
-                // 全局方式被删，结果随排序翻转。
-                if rules::cleanup_reason(&file.rel, file.snapshot.size, &job.config).is_some() {
-                    job.log(
-                        "去重",
-                        &file.rel,
-                        &keeper.rel,
-                        "跳过",
-                        "文件命中清理规则且清理方式为保留；不按重复规则删除",
-                        file.snapshot.size,
-                    )?;
-                    continue;
-                }
-                remove_candidate(job, &file, Some(&keeper), reason, mode)?;
-            } else if rules::cleanup_reason(&file.rel, file.snapshot.size, &job.config).is_none() {
-                // 清理命中文件即使该类的删除方式为「保留」（remove_candidate 直接返回、文件仍 active=1）
-                // 也不得进入 keepers 成为去重唯一保留者：否则正常副本反被删除，只留下垃圾文件。
-                job.db
-                    .insert_keeper(file.id, hash, &file.name, &file.normalized)?;
+            // C-04：只有可靠标识 + 两侧链接数证明是同一物理文件时才跳过；标识退化
+            //（如 Windows 卷不提供索引）时不得据此跳过，也不得重复计数。
+            if rules::identity_proves_same_file(keeper, file) {
+                job.log(
+                    "去重",
+                    &file.rel,
+                    &keeper.rel,
+                    "保留",
+                    "已经是同一个文件的硬链接，不重复计算可释放空间",
+                    file.snapshot.size,
+                )?;
+                continue;
             }
+            let reason = if file.name == keeper.name {
+                "相同名称且完整 Hash 相同"
+            } else if file.normalized == keeper.normalized {
+                "副本命名且完整 Hash 相同"
+            } else {
+                "名称不同但完整 Hash 相同"
+            };
+            // C-04/S-02：副本处置只有「保留副本」和「永久删除副本」，随全局删除方式。
+            remove_candidate(job, file, Some(keeper), reason, job.config.global_delete)?;
         }
     }
     Ok(())
@@ -366,23 +347,104 @@ fn gather_dir_plans(job: &Job, items: &[Item], moved_roots: &[String]) -> HashMa
             .or_default()
             .push(index);
     }
+    // 在释放源名之前先判定所有目标容器是否可用。否则某项虽然看似会移出当前
+    // 目录，却因目标容器被普通文件占用而根本没有 Move 计划，原名称不得腾空。
+    let blocked_targets: HashMap<&str, String> = by_dir
+        .keys()
+        .filter_map(|&dir| {
+            let folded = fold(dir);
+            if moved_roots.iter().any(|root| {
+                let root = fold(root);
+                folded == root || folded.starts_with(&format!("{root}/"))
+            }) {
+                return None;
+            }
+            let reason = match fsutil::safe_join(&job.root, dir) {
+                Err(error) => Some(format!("目标路径不可用：{error:#}")),
+                Ok(path) => match std::fs::read_dir(path) {
+                    Ok(_) => None,
+                    Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                        blocked_by_file_ancestor(&job.root, dir)
+                    }
+                    Err(error) => Some(format!(
+                        "目标目录存在但无法读取（可能被同名文件占用）：{error}"
+                    )),
+                },
+            };
+            reason.map(|reason| (dir, reason))
+        })
+        .collect();
+    // C-17/C-18「最少级数」：已确定删除或移出本目录的文件（selected=1 且未执行的
+    // Delete/Move 源）执行后名字腾空，不构成固定占用——否则幸存者会被迫多加一级
+    // 来源前缀。口径与 empty_directories 的 doomed_sources 相同；查询失败时保守
+    // 退化为「无腾出」（等同不扩展，命名偏保守，无覆盖风险）。
+    let doomed_by_dir: HashMap<String, HashSet<String>> = (|| {
+        let mut map: HashMap<String, HashSet<String>> = HashMap::new();
+        let move_kind = serde_json::to_string(&ActionKind::Move).ok()?;
+        let delete_kind = serde_json::to_string(&ActionKind::Delete).ok()?;
+        let mut statement = job.db.conn.prepare(
+            "SELECT source FROM actions WHERE kind IN (?1, ?2) AND selected=1 AND state='pending'",
+        )
+        .ok()?;
+        let rows = statement
+            .query_map(params![move_kind, delete_kind], |row| {
+                row.get::<_, String>(0)
+            })
+            .ok()?;
+        for source in rows.collect::<rusqlite::Result<Vec<_>>>().ok()? {
+            let Some((parent, name)) = source.rsplit_once('/') else {
+                continue;
+            };
+            map.entry(parent.to_string())
+                .or_default()
+                .insert(fold(name));
+        }
+        Some(map)
+    })()
+    .unwrap_or_default();
     for (dir, members) in by_dir {
         let mut plan = DirPlan::new();
+        plan.blocked = blocked_targets.get(dir).cloned();
         let dir_folded = fold(dir);
         let under_moved_root = moved_roots.iter().any(|root| {
             let root_folded = fold(root);
             dir_folded == root_folded || dir_folded.starts_with(&format!("{root_folded}/"))
         });
         if !under_moved_root {
-            // 活动且当前就在该目录里的项：当前名执行后会腾空，从占用中排除。
-            let freeing: HashSet<String> = members
+            // 活动且当前就在该目录里的项：当前名执行后会腾空，从占用中排除；
+            // 外加本目录内已确定删除/移出的文件（同样腾空）。归类移动之间的依赖
+            // 由执行器按目标→源关系排序，环形依赖使用临时暂存，因此这里可以按
+            // C-17 把所有最终移出本目录的活动项视作会腾空。
+            let mut freeing: HashSet<String> = items
                 .iter()
-                .filter(|&&i| !items[i].settled && same_dir(items[i].source_parent(), dir))
-                .map(|&i| fold(&items[i].current_name))
+                .filter(|item| {
+                    item.failed.is_none()
+                        && !item.settled
+                        && same_dir(item.source_parent(), dir)
+                        // C-17：从当前目标目录移出的归类项也会释放原名称。
+                        // 执行器会按依赖顺序处理这些移动；环形依赖使用临时暂存，
+                        // 因而不会把“可能腾空”的名称误当成固定占用。
+                        && !same_dir(&item.target_dir, dir)
+                        && !blocked_targets.contains_key(item.target_dir.as_str())
+                })
+                .map(|item| fold(&item.current_name))
                 .collect();
-            match fsutil::safe_join(&job.root, dir) {
-                Ok(path) => match std::fs::read_dir(&path) {
-                    Ok(entries) => {
+            freeing.extend(
+                members
+                    .iter()
+                    .filter(|&&i| {
+                        !items[i].settled
+                            && items[i].failed.is_none()
+                            && same_dir(items[i].source_parent(), dir)
+                    })
+                    .map(|&i| fold(&items[i].current_name)),
+            );
+            if let Some(doomed) = doomed_by_dir.get(dir) {
+                freeing.extend(doomed.iter().cloned());
+            }
+            if plan.blocked.is_none() {
+                if let Ok(path) = fsutil::safe_join(&job.root, dir) {
+                    if let Ok(entries) = std::fs::read_dir(path) {
                         for entry in entries.flatten() {
                             if let Some(name) = entry.file_name().to_str() {
                                 let folded = fold(name);
@@ -392,21 +454,7 @@ fn gather_dir_plans(job: &Job, items: &[Item], moved_roots: &[String]) -> HashMa
                             }
                         }
                     }
-                    Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
-                        // NotFound 可能只是“目录尚未创建”，也可能是某个祖先已被普通
-                        // 文件占用（穿过文件组件报路径未找到）：逐段核对，S-01 拒绝把
-                        // 分类目录建到文件之下。
-                        if let Some(reason) = blocked_by_file_ancestor(&job.root, dir) {
-                            plan.blocked = Some(reason);
-                        }
-                    }
-                    Err(error) => {
-                        plan.blocked = Some(format!(
-                            "目标目录存在但无法读取（可能被同名文件占用）：{error}"
-                        ));
-                    }
-                },
-                Err(error) => plan.blocked = Some(format!("目标路径不可用：{error:#}")),
+                }
             }
         }
         dirs.insert(dir.to_string(), plan);
@@ -441,8 +489,9 @@ fn resolve_all(items: &mut [Item], dirs: &mut HashMap<String, DirPlan>) {
         item.candidate = item.derived();
     }
     // 按目标目录 + 派生名分组决定「已就位保持原名」（C-17 / C-21 / 附录 E）：
-    // 组内恰好一个「已就位且派生名与当前名一致」的项 → 它保持原名并作为固定占用，
-    // 其余项退让；两个及以上这样的已就位项 → 全部统一消解；没有 → 全部活动。
+    // 组内恰有一个已就位项且派生名可用 → 它占住该派生名（名字已物化则保持原名；
+    // 未物化但派生名不被磁盘固定占用时以就地改名物化），其余项退让；组内有多个
+    // 已就位项（不论名字是否已物化）→ 全部统一消解，不得只固定其中一个。
     {
         let mut groups: HashMap<(String, String), Vec<usize>> = HashMap::new();
         for (index, item) in items.iter().enumerate() {
@@ -455,13 +504,31 @@ fn resolve_all(items: &mut [Item], dirs: &mut HashMap<String, DirPlan>) {
                 .push(index);
         }
         for members in groups.values() {
+            let in_place_count = members.iter().filter(|&&i| items[i].in_place).count();
             let capable: Vec<usize> = members
                 .iter()
                 .copied()
                 .filter(|&i| items[i].in_place && items[i].derived() == items[i].current_name)
                 .collect();
+            // C-17：多个已就位项自身规范化后同名时，这些已就位项也统一消解
+            //（附录 E：`报告 (1).pdf` 与 `报告_1.pdf` 双方都改名），
+            // 新移入项不得抢占其候选名。
+            if in_place_count != 1 {
+                continue;
+            }
             if let Some(&only) = capable.first().filter(|_| capable.len() == 1) {
                 items[only].settled = true;
+            } else if let Some(only) = members.iter().copied().find(|&i| items[i].in_place) {
+                // 唯一已就位项的派生名尚未物化（如 `报告 (1).pdf` → `报告_1.pdf`）：
+                // 派生名不被该目录磁盘固定占用时先保护其规范化后名称（C-17），
+                // 由新移入项消解；本项以就地改名物化派生名（classify 阶段出计划）。
+                let derived = fold(&items[only].derived());
+                let occupied = dirs
+                    .get(&items[only].target_dir)
+                    .is_some_and(|plan| plan.fixed.contains(&derived));
+                if !occupied {
+                    items[only].settled = true;
+                }
             }
         }
     }
@@ -802,9 +869,13 @@ fn classify_files(job: &mut Job, moved_roots: &[String]) -> Result<()> {
             job.summary.errors += 1;
             continue;
         }
-        if item.settled {
+        if item.settled && same_component(&item.candidate, &item.current_name) {
+            // 已就位且名字已是派生形式：保持名称与位置（C-21）。
             continue;
         }
+        // settled 但派生名尚未物化的已就位项：以就地改名物化派生名（C-17
+        // 「先保护其规范化后名称」），fall through 生成改名计划；候选回落到自身
+        // 当前名与当前目录的防御分支在下方同样兜住。
         let target = format!("{}/{}", item.target_dir, item.candidate);
         // 候选回落到自身当前名与当前目录：无需移动（防御性，正常不会出现）。
         if same_dir(&item.target_dir, item.source_parent())

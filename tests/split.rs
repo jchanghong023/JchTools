@@ -137,6 +137,128 @@ fn organizer_scan_extracts_nothing_and_skips_failed_dir() {
     );
 }
 
+// 覆盖 S-04, X-06（回归：「解压失败」容器位置是 junction/符号链接时不得穿透链接
+// 把失败包移出所选根——按「容器被占用」走隔离失败原地保留）
+#[cfg(windows)]
+#[test]
+fn quarantine_refuses_junction_container() {
+    let tmp = fixture("quarantine-junction");
+    let root = tmp.path().join("data");
+    fs::create_dir_all(&root).unwrap();
+    write_with_mtime(&root.join("broken.zip"), b"definitely not a zip", 100);
+    let outside = tmp.path().join("outside");
+    fs::create_dir_all(&outside).unwrap();
+    let status = std::process::Command::new("cmd")
+        .args(["/C", "mklink", "/J"])
+        .arg(root.join("解压失败"))
+        .arg(&outside)
+        .status()
+        .unwrap();
+    assert!(status.success(), "无法创建 junction，用例前置条件不成立");
+    let result = engine::extract_run_at(
+        &root,
+        Config::default(),
+        Context::default(),
+        &state_of(&tmp),
+        Some(&fake_engine(tmp.path())),
+    )
+    .unwrap();
+    assert_eq!(result.summary.archives_failed, 1);
+    assert!(
+        root.join("broken.zip").exists(),
+        "链接占位时失败原包原地保留（S-04：不穿透链接）"
+    );
+    assert!(
+        !outside.join("broken.zip").exists(),
+        "失败包不得经 junction 被移出所选根"
+    );
+}
+
+// 覆盖 X-10（回归：同主干混用补零宽度的 part rar 是命名歧义组——列出全部歧义卷、
+// 不猜测归属、不解码删源，整组按失败包隔离保留）
+#[test]
+fn ambiguous_part_rar_group_is_quarantined_without_decoding() {
+    use jchtools::db::Database;
+    let tmp = fixture("part-ambiguity");
+    let root = tmp.path().join("data");
+    write_with_mtime(&root.join("a.part1.rar"), b"width-1 volume", 100);
+    write_with_mtime(&root.join("a.part01.rar"), b"width-2 one!", 200);
+    write_with_mtime(&root.join("a.part02.rar"), b"width-2 two!", 300);
+    let result = engine::extract_run_at(
+        &root,
+        Config::default(),
+        Context::default(),
+        &state_of(&tmp),
+        Some(&fake_engine(tmp.path())),
+    )
+    .unwrap();
+    assert_eq!(result.summary.archives_ok, 0, "歧义组不得解码删源");
+    let quarantined = root.join("解压失败");
+    assert!(quarantined.join("a.part1.rar").exists(), "歧义卷整组隔离");
+    assert!(quarantined.join("a.part01.rar").exists());
+    assert!(quarantined.join("a.part02.rar").exists());
+    assert!(!root.join("a.part1.rar").exists(), "原位置不得残留歧义卷");
+    let db = Database::open(&result.directory).unwrap();
+    let events = db.event_page(0, 100).unwrap();
+    assert!(
+        events.iter().any(|line| line.contains("命名歧义")),
+        "失败原因必须列出命名歧义：{events:?}"
+    );
+}
+
+// 覆盖 X-06（回归：固定「解压失败」容器被普通文件占用时，失败包原地保留并记录
+// 隔离失败，其余包可继续处理——隔离失败不得中止整次任务）
+#[test]
+fn quarantine_failure_keeps_other_archives_processing() {
+    use jchtools::db::Database;
+    let tmp = fixture("quarantine-occupied");
+    let root = tmp.path().join("data");
+    write_with_mtime(&root.join("broken.zip"), b"definitely not a zip", 100);
+    write_with_mtime(
+        &root.join("deep").join("nest.rar"),
+        b"also not an archive",
+        200,
+    );
+    // 容器位置被普通文件占用：quarantine 无法建立「解压失败」子目录。
+    write_with_mtime(&root.join("解压失败"), b"occupied by a plain file", 50);
+    let result = engine::extract_run_at(
+        &root,
+        Config::default(),
+        Context::default(),
+        &state_of(&tmp),
+        Some(&fake_engine(tmp.path())),
+    )
+    .unwrap();
+    // 修复前：第一个坏包的隔离失败直接中止整次任务（extract_run_at 返回 Err）；
+    // 修复后两个包都完成「失败 → 隔离失败 → 原地保留」处置，任务正常收尾。
+    assert_eq!(
+        result.summary.archives_failed, 2,
+        "两个坏包都按失败处置，不因隔离失败中止"
+    );
+    assert!(
+        root.join("broken.zip").exists(),
+        "隔离失败时失败原包原地保留（X-06）"
+    );
+    assert!(
+        root.join("deep").join("nest.rar").exists(),
+        "隔离失败后其余包照常处理并同样原地保留"
+    );
+    // U-10：隔离失败必须如实记录（不得写成已隔离），原因可查。
+    let db = Database::open(&result.directory).unwrap();
+    let events = db.event_page(0, 100).unwrap();
+    assert!(
+        events.iter().any(|line| line.contains("隔离失败")),
+        "日志必须记录隔离失败事件：{events:?}"
+    );
+    assert!(
+        !events.iter().any(|line| {
+            let fields: Vec<&str> = line.split(" | ").collect();
+            fields.len() == 6 && fields[2] == "移入解压失败" && fields[3].contains("broken.zip")
+        }),
+        "容器被占用时不得出现「移入解压失败」的虚假成功记录"
+    );
+}
+
 // 覆盖 X-06, X-02
 #[test]
 fn failed_archive_is_moved_to_quarantine_directory() {

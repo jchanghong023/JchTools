@@ -120,6 +120,8 @@ pub enum Event {
     PlanState(std::path::PathBuf, u64, Option<PlanSnapshot>),
     /// 第二项携带 (动作 id, 保存后的勾选值)，界面用它就地修正计划行，避免复选框与数据库不一致。
     SelectionSaved(std::path::PathBuf, Option<(i64, bool)>, Option<String>),
+    /// C-01 勾选落库后的依赖重算结果；失败时禁止直接执行旧计划。
+    PlanRecomputed(std::path::PathBuf, Result<usize, String>),
     /// 一次性提示（成功信息等），界面用中性样式展示
     Notice(String),
     /// 一次性错误（导出/计划加载失败等），界面用错误样式展示；不隐含代理/网络测试的 busy 语义

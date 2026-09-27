@@ -5,6 +5,7 @@ pub mod config;
 pub mod control;
 pub mod convert;
 pub mod db;
+pub mod dedup_components;
 pub mod engine;
 pub mod engine_bundle;
 pub mod fsutil;

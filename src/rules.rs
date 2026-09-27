@@ -122,19 +122,32 @@ fn strip_one_marker(stem: &str) -> Option<(String, CopyMarker)> {
     if let Some(base) = stem.strip_suffix("副本") {
         return Some((base.trim_end_matches(' ').to_string(), CopyMarker::Label));
     }
-    // `- Copy`：ASCII 连字符 + 可选空格 + Copy（忽略大小写）。
-    let lower = stem.to_lowercase();
-    if let Some(pos) = lower.rfind("copy") {
-        if lower[pos + 4..].is_empty() {
-            let before = &stem[..pos];
-            let trimmed = before.trim_end_matches(' ');
-            if let Some(hyphen) = trimmed.strip_suffix('-') {
-                let base = hyphen.trim_end_matches(' ').to_string();
-                return Some((base, CopyMarker::Label));
-            }
+    // `- Copy`：ASCII 连字符 + 可选空格 + Copy（忽略大小写）。比较只对 ASCII 字母
+    // 有意义；`to_lowercase` 会改变部分字符的字节长度（如 U+0130 `İ`），小写串的
+    // 字节偏移不能回切原串——改为对尾部片段做 ASCII 忽略大小写比对。
+    if let Some(before) = ascii_case_insensitive_suffix(stem, "copy") {
+        let trimmed = before.trim_end_matches(' ');
+        if let Some(hyphen) = trimmed.strip_suffix('-') {
+            let base = hyphen.trim_end_matches(' ').to_string();
+            return Some((base, CopyMarker::Label));
         }
     }
     None
+}
+/// 检查 `text` 是否以 `ascii_suffix` 结尾（仅 ASCII 字母忽略大小写，其余字节精确
+/// 相等），是则返回剥除该后缀后的前缀切片。后缀全为 ASCII 时切点必在字符边界。
+fn ascii_case_insensitive_suffix<'a>(text: &'a str, ascii_suffix: &str) -> Option<&'a str> {
+    let suffix = ascii_suffix.as_bytes();
+    let split = text.len().checked_sub(suffix.len())?;
+    if text.as_bytes()[split..]
+        .iter()
+        .zip(suffix)
+        .all(|(a, b)| a.eq_ignore_ascii_case(b))
+    {
+        Some(&text[..split])
+    } else {
+        None
+    }
 }
 /// 十进制数字串转输出序号：去前导零、全零保留 `0`（附录 B）。
 fn marker_digits_to_text(digits: &[u8]) -> String {
@@ -245,7 +258,7 @@ pub fn legalize_derived(stem: &str) -> String {
     }
     out
 }
-/// 纯参考实现：实际去重匹配在 planner::deduplicate 的 SQL 中。仅供测试对照。
+/// 名称关系参考实现：计划器以候选连通组实现 C-02；此函数供规则测试对照。
 #[cfg(test)]
 pub fn duplicate_allowed(a: &FileRecord, b: &FileRecord, cfg: &Config) -> bool {
     if a.name == b.name {
@@ -263,11 +276,23 @@ pub fn compare(a: &FileRecord, b: &FileRecord, policy: KeepPolicy) -> Ordering {
     let primary = match policy {
         KeepPolicy::Newest => b.snapshot.modified_ns.cmp(&a.snapshot.modified_ns),
         KeepPolicy::Oldest => a.snapshot.modified_ns.cmp(&b.snapshot.modified_ns),
+        // files.name 是扫描时的小写折叠键；Unicode 小写化可能改变 UTF-16
+        // 长度。C-03 必须按原始相对路径末段的完整文件名决胜。
         KeepPolicy::ShortestName => a
-            .name
+            .rel
+            .rsplit('/')
+            .next()
+            .unwrap_or(&a.name)
             .encode_utf16()
             .count()
-            .cmp(&b.name.encode_utf16().count()),
+            .cmp(
+                &b.rel
+                    .rsplit('/')
+                    .next()
+                    .unwrap_or(&b.name)
+                    .encode_utf16()
+                    .count(),
+            ),
     };
     primary
         .then_with(|| {
@@ -278,7 +303,7 @@ pub fn compare(a: &FileRecord, b: &FileRecord, policy: KeepPolicy) -> Ordering {
         })
         .then_with(|| a.rel.cmp(&b.rel))
 }
-/// SQL 排序片段（供 planner 拼接进 ORDER BY）。name16/rel16 是扫描期预计算的
+/// 数据库排序参考片段。name16/rel16 是扫描期预计算的
 /// UTF-16 单元数列；决胜列 rel 为 SQLite BINARY 文本序（与附录 B 的「UTF-16 单元逐
 /// 单元升序」仅在星形字符与 U+E000..U+FFFF 的相对顺序上有差异，且只在忽略大小写
 /// 比较仍相同的路径之间才用到，保持确定性即可）。
@@ -554,16 +579,20 @@ pub enum CleanupKind {
     Temp,
     Zero,
 }
-/// C-08：清理命中判定与类别。返回 None 表示不清理。
-/// planner 按类别解析删除方式（[`cleanup_delete`]），不得比较原因文案。
-pub fn cleanup_reason(rel: &str, size: u64, cfg: &Config) -> Option<(CleanupKind, &'static str)> {
-    let file = Path::new(rel).file_name()?.to_str()?.to_lowercase();
+/// C-08：清理命中判定。返回全部命中的已启用类别（Junk / Temp / Zero 顺序），
+/// 多类同时命中时由 planner 按 C-01 逐类裁决删除方式；返回空表示不清理。
+pub fn cleanup_hits(rel: &str, size: u64, cfg: &Config) -> Vec<(CleanupKind, &'static str)> {
+    let Some(name) = Path::new(rel).file_name().and_then(|name| name.to_str()) else {
+        return Vec::new();
+    };
+    let file = name.to_lowercase();
+    let mut hits = Vec::new();
     if cfg.clean_junk
         && (["thumbs.db", ".ds_store", "desktop.ini"].contains(&file.as_str())
             || file.starts_with("._")
-            || rel.split('/').any(|s| s.to_lowercase() == "__macosx"))
+            || is_inside_macosx_dir(rel))
     {
-        return Some((CleanupKind::Junk, "用户开启的垃圾文件规则"));
+        hits.push((CleanupKind::Junk, "用户开启的垃圾文件规则"));
     }
     if cfg.clean_temp
         && (has_ext(&file, "tmp")
@@ -571,12 +600,25 @@ pub fn cleanup_reason(rel: &str, size: u64, cfg: &Config) -> Option<(CleanupKind
             || has_ext(&file, "bak")
             || file.starts_with("~$"))
     {
-        return Some((CleanupKind::Temp, "用户开启的临时/备份文件规则"));
+        hits.push((CleanupKind::Temp, "用户开启的临时/备份文件规则"));
     }
     if cfg.clean_zero && size == 0 {
-        return Some((CleanupKind::Zero, "用户开启的零字节文件规则"));
+        hits.push((CleanupKind::Zero, "用户开启的零字节文件规则"));
     }
-    None
+    hits
+}
+/// C-08：`__MACOSX` 的清理授权对象是目录名——只比对路径的目录组件；
+/// 名为 `__MACOSX` 的普通文件自身不因此命中。
+fn is_inside_macosx_dir(rel: &str) -> bool {
+    let mut components = rel.split('/');
+    components.next_back();
+    components.any(|s| s.to_lowercase() == "__macosx")
+}
+/// C-08：清理命中判定与类别（首个命中类别）。裁决多类命中的删除方式须用
+/// [`cleanup_hits`]（C-01：任一已启用规则请求永久删除即形成一次清理删除）。
+/// planner 按类别解析删除方式（[`cleanup_delete`]），不得比较原因文案。
+pub fn cleanup_reason(rel: &str, size: u64, cfg: &Config) -> Option<(CleanupKind, &'static str)> {
+    cleanup_hits(rel, size, cfg).into_iter().next()
 }
 /// C-08：清理项的删除方式覆盖（默认跟随全局文件删除方式）。
 pub fn cleanup_delete(cfg: &Config, kind: CleanupKind) -> DeleteChoice {
@@ -856,7 +898,7 @@ mod tests {
             cleanable: false,
         }
     }
-    /// 复刻 planner::deduplicate keepers 查询中的 SQL 匹配条件（与 rust 参考实现逐分支对照）：
+    /// 按 C-02 三类名称关系逐分支对照参考实现：
     /// `(name=?2 AND ?4) OR (name<>?2 AND normal=?3 AND ?5) OR (name<>?2 AND normal<>?3 AND ?6)`
     fn sql_match(a: &FileRecord, b: &FileRecord, cfg: &Config) -> bool {
         match (a.name == b.name, a.normalized == b.normalized) {
@@ -907,6 +949,41 @@ mod tests {
                 "退化标识不得证明同一物理文件"
             );
         }
+    }
+
+    // 覆盖 C-08（__MACOSX 的清理授权对象是目录名：名为 __MACOSX 的普通文件自身不命中）
+    #[test]
+    fn macosx_plain_file_is_not_junk() {
+        let cfg = Config {
+            clean_junk: true,
+            ..Config::default()
+        };
+        assert!(
+            cleanup_reason("__MACOSX", 5, &cfg).is_none(),
+            "根直属名为 __MACOSX 的普通文件不命中垃圾清理"
+        );
+        assert!(
+            cleanup_reason("a/__macosx", 5, &cfg).is_none(),
+            "子目录内名为 __MACOSX 的普通文件不命中垃圾清理"
+        );
+        assert_eq!(
+            cleanup_reason("a/__MACOSX/x.pdf", 5, &cfg).map(|(kind, _)| kind),
+            Some(CleanupKind::Junk),
+            "目录内的普通文件命中（大小写不敏感）"
+        );
+    }
+
+    // 覆盖附录 B（回归：副本标记识别不得跨「小写化串/原串」复用字节偏移——
+    // U+0130 `İ` 的小写化改变字节长度，修复前 `İİİİİcopy` 直接越界 panic）
+    #[test]
+    fn copy_marker_scan_survives_width_changing_lowercase() {
+        // 修复前在 strip_one_marker 的切片处 panic；不 panic 即通过。
+        assert!(normal_key("İİİİİcopy.pdf").contains("copy"));
+        // `- Copy` 标记仍被剥除（ASCII 忽略大小写只作用于字母，前缀主体保持原样）。
+        assert_eq!(copy_key("İİİİİ-Copy.pdf"), "İİİİİ.pdf");
+        assert_eq!(copy_key("plan - COPY.pdf"), "plan.pdf");
+        assert_eq!(copy_key("资料 (2).pdf"), "资料.pdf");
+        assert_eq!(clean_copy_output("资料 (2).pdf"), "资料_2.pdf");
     }
 
     // 覆盖 C-08（三类清理的识别与类别归属：planner 按类别解析删除方式，不比较中文原因串）
@@ -1210,9 +1287,9 @@ mod tests {
         let seed = [
             ("a/x", "x", 5i64, 10u64),
             ("b/yy", "yy", 5, 20),
-            ("c", "zzzz", 9, 7),
-            ("d/long/name", "n", 5, 20),
-            ("e", "mm", 9, 7),
+            ("c/zzzz", "zzzz", 9, 7),
+            ("d/long/n", "n", 5, 20),
+            ("e/mm", "mm", 9, 7),
         ];
         // 纯字面量子查询：不建表、不写 DML（static_check 会按任务库 schema 逐条
         // prepare 源码中的 SQL，测试内的建表/插入语句会与 schema 校验冲突）。

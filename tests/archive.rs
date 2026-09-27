@@ -1258,6 +1258,41 @@ fn nested_archives_are_processed_exactly_once() {
     );
 }
 
+// 覆盖 X-04（回归：子目录候选序号的占位检查必须落在真实父路径上
+// （`{parent}/{candidate}`），不得双前缀拼接把检查落到不存在的路径上恒判空闲；
+// 修复前嵌套子目录恒选序号 1，撞上已占用目标导致成员级改名甚至整包失败）
+#[test]
+#[ignore = "Requires explicitly provided real 7-Zip engine"]
+fn nested_directory_picks_free_index_under_occupied_parent() {
+    let f = ArchiveFixture::new();
+    fs::create_dir_all(f.input.join("sub/inner")).unwrap();
+    fs::write(f.input.join("sub/inner/file.txt"), b"nested payload").unwrap();
+    f.archive(&f.root.join("pack.zip"), "-tzip");
+    // 目标处的 sub 已是普通目录（X-04 合入语义，父目录不改名），其下 inner 与
+    // inner (1) 被普通文件占用 → 子目录应选最小未占用序号 inner (2)。
+    fs::create_dir_all(f.root.join("sub")).unwrap();
+    fs::write(f.root.join("sub/inner"), b"occupied").unwrap();
+    fs::write(f.root.join("sub/inner (1)"), b"occupied").unwrap();
+    let result = f.run(config());
+    assert_eq!(
+        result.summary.archives_ok, 1,
+        "嵌套目录按最小未占用序号映射后整包应完整成功（X-04）"
+    );
+    assert!(
+        f.root.join("sub/inner (2)/file.txt").is_file(),
+        "子目录在真实父路径下选择真正的最小未占用序号 inner (2)（X-04）"
+    );
+    assert_eq!(
+        fs::read(f.root.join("sub/inner (2)/file.txt")).unwrap(),
+        b"nested payload"
+    );
+    assert!(
+        fs::read(f.root.join("sub/inner")).unwrap() == b"occupied"
+            && fs::read(f.root.join("sub/inner (1)")).unwrap() == b"occupied",
+        "既有占用文件必须原样保留（X-04/H-07）"
+    );
+}
+
 // 覆盖 X-04, X-03（回归：新目录名被既有文件占用时，为新目录选最小未占用序号
 // `目录 (1)`，该目录全部成员整体映射到新目录；既有文件不动，整包完整成功。
 // 修复前：含文件成员经 ensure_dir 报「目录已存在同名文件」整包失败并隔离）

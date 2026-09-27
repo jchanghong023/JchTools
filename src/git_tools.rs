@@ -152,7 +152,11 @@ fn run_git(git: &Path, cwd: &Path, args: &[&str]) -> Result<CapturedOutput> {
         .args(args)
         .current_dir(cwd)
         .env("GIT_PAGER", "cat")
-        .env("GIT_TERMINAL_PROMPT", "0");
+        .env("GIT_TERMINAL_PROMPT", "0")
+        // G-04/G-05：传入的路径是 porcelain 输出的字面文件名，必须按字面匹配；
+        // 否则含 `[...]` 等字符的合法 Windows 文件名会被 pathspec 的通配语义
+        // 解释成字符类，导致 pathspec 不匹配而无限重试、或错误暂存兄弟文件。
+        .env("GIT_LITERAL_PATHSPECS", "1");
     process::run_with_timeout(&mut command, GIT_TIMEOUT)
 }
 
@@ -589,6 +593,37 @@ impl Ctx<'_> {
 
 /// 处理一个文件变更：add → commit（--only，保护既有 staged，G-06）→ 验证（G-05）→
 /// push（含 NeedMerge 的 fetch+merge 与无限退避重试，G-08~G-11）。
+/// `git add -- <paths>` 报 pathspec 不匹配时核实：这些路径相对 HEAD 的删除是否已
+/// 完全暂存（porcelain 首列 `D`、次列空，即 `D ` 形态；工作树与索引一致）。
+/// 是则无需也无法再 add，直接进入 commit 阶段。
+fn deletion_fully_staged(git: &Path, root: &Path, paths: &[String]) -> bool {
+    if paths.is_empty() {
+        return false;
+    }
+    let mut args: Vec<&str> = vec!["status", "--porcelain", "--"];
+    for path in paths {
+        args.push(path.as_str());
+    }
+    let Ok(out) = run_git(git, root, &args) else {
+        return false;
+    };
+    if !out.status.success() {
+        return false;
+    }
+    let mut staged = 0usize;
+    for line in output_text(&out.stdout).lines() {
+        if line.trim().is_empty() {
+            continue;
+        }
+        let bytes = line.as_bytes();
+        if bytes.len() >= 2 && bytes[0] == b'D' && bytes[1] == b' ' {
+            staged += 1;
+        } else {
+            return false;
+        }
+    }
+    staged == paths.len()
+}
 fn process_change(
     git: &Path,
     root: &Path,
@@ -618,6 +653,18 @@ fn process_change(
                 Ok(out) => {
                     let why = summarize(&output_text(&out.stderr), &output_text(&out.stdout));
                     (ctx.log)(&format!("git add 失败：{why}"));
+                    // G-06：用户启动前已暂存的删除（git rm，或删除后 git add）在索引中
+                    // 已无条目，`git add -- <path>` 必然报 pathspec 不匹配——这是确定性
+                    // 状态而非可重试失败。核实这些路径的删除确已完全暂存（porcelain
+                    // `D ` 形态）后跳过 add 直接提交（G-04：删除也是合法变更，
+                    // `commit --only -- <path>` 对完全暂存删除可直接落提交）。
+                    if why.contains("did not match any files")
+                        && deletion_fully_staged(git, root, &commit_paths)
+                    {
+                        (ctx.log)("该删除已由用户预先暂存（索引已无条目），跳过 add 直接提交");
+                        added = true;
+                        continue;
+                    }
                     if !ctx.wait_retry(&mut attempt) {
                         return StepOutcome::Cancelled;
                     }

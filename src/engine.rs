@@ -1308,6 +1308,107 @@ fn lock_dir_for(directory: &Path, recorded: Option<&Path>) -> Result<PathBuf> {
         "任务库缺少有效的全局锁目录记录且任务目录已离开原位置；为避免互斥失效，请重新「解压与分析」后再执行");
     Ok(derived.to_path_buf())
 }
+/// C-01：取消勾选后仅用既有分析资料重算受影响的计划。被取消且未执行的
+/// Move/Delete 项原位置视为占用，被取消的空目录清理行自身同样占位（子目录
+/// 不删，父目录不再变空）；selected=1 的空目录清理行若其目录（含子树）内
+/// 存在占位项，依赖失效、转为未勾选——禁止删除依赖于已取消保留者移动的
+/// 其他项。用户已取消的行不翻回，不新增用户勾选，不读取文件内容。
+/// 返回本次重算取消的行数；执行期的实空复查与最终空目录清理仍独立兜底。
+pub fn recompute_plan(directory: &Path) -> Result<usize> {
+    // open_existing：任务库文件消失时不静默创建空库（apply 同口径）。
+    let db = Database::open_existing(directory)?;
+    let status: String = db.get("status")?;
+    anyhow::ensure!(
+        status == "ready",
+        "任务不是待确认状态（{status}），不重算受影响计划"
+    );
+    let move_kind = serde_json::to_string(&ActionKind::Move)?;
+    let delete_kind = serde_json::to_string(&ActionKind::Delete)?;
+    let empty_kind = serde_json::to_string(&ActionKind::EmptyDirectory)?;
+    // 占位项 = 取消且未执行的 Move/Delete 源 + 取消且未执行的空目录行自身。
+    let mut occupied: Vec<String> = Vec::new();
+    {
+        let mut statement = db.conn.prepare(
+            "SELECT source FROM actions WHERE kind IN (?1, ?2) AND selected=0 AND state='pending'",
+        )?;
+        let rows = statement.query_map(params![move_kind, delete_kind], |row| {
+            row.get::<_, String>(0)
+        })?;
+        occupied.extend(rows.collect::<rusqlite::Result<Vec<_>>>()?);
+    }
+    {
+        let mut statement = db.conn.prepare(
+            "SELECT source FROM actions WHERE kind=?1 AND selected=0 AND state='pending'",
+        )?;
+        let rows = statement.query_map(params![empty_kind], |row| row.get::<_, String>(0))?;
+        occupied.extend(rows.collect::<rusqlite::Result<Vec<_>>>()?);
+    }
+    // 取消一个 Move 后，其源仍留在盘上，可能阻挡另一条原本选中的 Move 目标。
+    // 以固定点逐轮取消，保证用户取消一条链中的任意一项都不会留下必然撞名的
+    // 执行计划；不新增勾选，也不读取文件内容。
+    let mut cancelled = 0usize;
+    let mut pending_moves: Vec<(i64, String, String)> = {
+        let mut statement = db.conn.prepare(
+            "SELECT id, source, target FROM actions WHERE kind=?1 AND selected=1 AND state='pending' AND target IS NOT NULL",
+        )?;
+        let rows = statement.query_map(params![move_kind], |row| {
+            Ok((
+                row.get(0)?,
+                row.get(1)?,
+                row.get::<_, Option<String>>(2)?.unwrap_or_default(),
+            ))
+        })?;
+        rows.collect::<rusqlite::Result<Vec<_>>>()?
+    };
+    let fold = |path: &str| {
+        if cfg!(windows) {
+            path.to_lowercase()
+        } else {
+            path.to_string()
+        }
+    };
+    while let Some(index) = pending_moves.iter().position(|(_, _, target)| {
+        let target = fold(target);
+        occupied.iter().any(|source| fold(source) == target)
+    }) {
+        let (id, source, _) = pending_moves.remove(index);
+        db.set_selected(id, false)?;
+        occupied.push(source);
+        cancelled += 1;
+    }
+    // 与 planner 的前缀区间判定同口径：Windows 折叠大小写后排序去重，二分定位。
+    if cfg!(windows) {
+        occupied = occupied.into_iter().map(|rel| rel.to_lowercase()).collect();
+    }
+    occupied.sort_unstable();
+    occupied.dedup();
+    let rows: Vec<(i64, String)> = {
+        let mut statement = db.conn.prepare(
+            "SELECT id, source FROM actions WHERE kind=?1 AND selected=1 AND state='pending'",
+        )?;
+        let rows = statement.query_map(params![empty_kind], |row| {
+            Ok((row.get::<_, i64>(0)?, row.get::<_, String>(1)?))
+        })?;
+        rows.collect::<rusqlite::Result<Vec<_>>>()?
+    };
+    for (id, rel) in rows {
+        let folded = if cfg!(windows) {
+            rel.to_lowercase()
+        } else {
+            rel.clone()
+        };
+        let probe = format!("{folded}/");
+        let index = occupied.partition_point(|item| item.as_str() < probe.as_str());
+        let blocked = occupied
+            .get(index)
+            .is_some_and(|item| item.starts_with(probe.as_str()));
+        if blocked {
+            db.set_selected(id, false)?;
+            cancelled += 1;
+        }
+    }
+    Ok(cancelled)
+}
 #[cfg_attr(
     feature = "perf-tracing",
     tracing::instrument(target = "perf", name = "organize_apply", skip_all, err)
@@ -1364,6 +1465,7 @@ pub fn apply(directory: &Path, context: TaskContext) -> Result<TaskResult> {
         // 崩溃残留清理、后面的收尾写库分开计时。
         crate::perf::perf_span!("execute_actions");
         let pool = io_pool()?;
+        let mut moves_executed = false;
         let mut cursor = 0;
         loop {
             let actions = job.db.actions_page(cursor, APPLY_BATCH)?;
@@ -1383,6 +1485,22 @@ pub fn apply(directory: &Path, context: TaskContext) -> Result<TaskResult> {
                 // IO 池上并行；移动/硬链接/未勾选保持逐项串行，语义与旧实现一致。
                 let mut index = 0;
                 while index < actions.len() {
+                    // 移动动作不能只按计划行号执行：当一个目标正是另一个移动的
+                    // 源时，必须先释放源；交换环则由 execute_planned_moves 临时
+                    // 暂存一个源后完成。该预处理只执行一次，之后本页及后续页的
+                    // Move 行已经标记 done/failed，跳过即可。
+                    if actions[index].kind == ActionKind::Move {
+                        if !moves_executed {
+                            execute_planned_moves(&mut job)?;
+                            moves_executed = true;
+                        }
+                        index += 1;
+                        continue;
+                    }
+                    if actions[index].state != "pending" {
+                        index += 1;
+                        continue;
+                    }
                     let Some(kind) = parallel_run_kind(&actions[index]) else {
                         execute_sequential(&mut job, &actions[index])?;
                         index += 1;
@@ -1826,6 +1944,251 @@ fn execute_run(
     }
     Ok(())
 }
+/// 执行所有归类/项目移动，并处理「目标是另一项源」的依赖。
+/// `a -> b` 与 `b -> c` 要先释放依赖源；交换环则先把一个源临时暂存。
+fn execute_planned_moves(job: &mut Job) -> Result<()> {
+    let mut actions = Vec::new();
+    let mut cursor = 0;
+    loop {
+        let page = job.db.actions_page_filtered(cursor, 256, Some("move"))?;
+        if page.is_empty() {
+            break;
+        }
+        cursor = page.last().map_or(cursor, |action| action.id);
+        actions.extend(page.into_iter().filter(|action| action.state == "pending"));
+    }
+    if actions.is_empty() {
+        return Ok(());
+    }
+    // 环形移动暂存在本次任务的状态目录：扫描已排除状态目录，用户根下同名
+    // 普通目录仍会参与整理。OWNER 标记限制清理范围，失败时保留唯一副本。
+    let owner = uuid::Uuid::new_v4().to_string();
+    let work = fsutil::safe_join(&job.db.directory, "move-stage")?;
+    fs::create_dir_all(&work)?;
+    let stage = work.join(&owner);
+    fs::create_dir(&stage)?;
+    fs::write(stage.join("OWNER"), &owner)?;
+    let stage_guard = MoveStageGuard {
+        directory: stage.clone(),
+        owner,
+    };
+    let mut staged: HashMap<i64, PathBuf> = HashMap::new();
+    while !actions.is_empty() {
+        if let Some(index) = actions.iter().position(|action| !action.selected) {
+            let action = actions.remove(index);
+            execute_sequential(job, &action)?;
+            continue;
+        }
+        let available = actions.iter().enumerate().find(|(index, action)| {
+            let Some(target) = action.target.as_deref() else {
+                return true;
+            };
+            let target = fold_relative(target);
+            !actions.iter().enumerate().any(|(other, candidate)| {
+                other != *index
+                    && !staged.contains_key(&candidate.id)
+                    && fold_relative(&candidate.source) == target
+            })
+        });
+        if let Some((index, _)) = available {
+            let action = actions.remove(index);
+            let staged_source = staged.remove(&action.id);
+            let had_stage = staged_source.is_some();
+            let source = match staged_source {
+                Some(path) => path,
+                None => fsutil::safe_join(&job.root, &action.source)?,
+            };
+            execute_move_sequential(
+                job,
+                &action,
+                &source,
+                !had_stage && staged.is_empty(),
+                had_stage,
+            )?;
+            continue;
+        }
+        // 所有目标都被另一项源占用，形成环；暂存第一项源后，后续动作连续收敛。
+        job.context.control.checkpoint()?;
+        let action = &actions[0];
+        let source = fsutil::safe_join(&job.root, &action.source)?;
+        let temporary = stage.join(action.id.to_string());
+        if let Err(error) = fsutil::move_file_preserving_times(&source, &temporary) {
+            let action = actions.remove(0);
+            record_move_failure(job, &action, &error)?;
+            job.context
+                .control
+                .completed
+                .fetch_add(1, Ordering::Relaxed);
+        } else {
+            staged.insert(action.id, temporary);
+        }
+    }
+    drop(stage_guard);
+    Ok(())
+}
+
+struct MoveStageGuard {
+    directory: PathBuf,
+    owner: String,
+}
+
+impl Drop for MoveStageGuard {
+    fn drop(&mut self) {
+        if fs::read_to_string(self.directory.join("OWNER"))
+            .ok()
+            .as_deref()
+            != Some(self.owner.as_str())
+        {
+            return;
+        }
+        // 暂存恢复失败时目录中可能仍有唯一副本。Drop 绝不能递归删除它；只有 OWNER
+        // 是目录内唯一条目时，才逐项删除标记并删除空目录，保留失败路径供恢复。
+        let Ok(entries) = fs::read_dir(&self.directory) else {
+            return;
+        };
+        let mut has_payload = false;
+        for entry in entries.flatten() {
+            if entry.file_name() != "OWNER" {
+                has_payload = true;
+                break;
+            }
+        }
+        if has_payload {
+            return;
+        }
+        if fs::remove_file(self.directory.join("OWNER")).is_ok()
+            && fs::remove_dir(&self.directory).is_ok()
+        {
+            if let Some(parent) = self.directory.parent() {
+                let _ = fs::remove_dir(parent);
+            }
+        }
+    }
+}
+
+fn fold_relative(path: &str) -> String {
+    if cfg!(windows) {
+        path.to_lowercase()
+    } else {
+        path.to_string()
+    }
+}
+
+fn execute_move_sequential(
+    job: &mut Job,
+    action: &Action,
+    source: &Path,
+    checkpoint: bool,
+    restore_on_error: bool,
+) -> Result<()> {
+    if checkpoint {
+        job.context.control.checkpoint()?;
+    }
+    job.context
+        .status(format!("执行 {:?}：{}", action.kind, action.source));
+    match execute_move_at(job, action, source) {
+        Ok(true) => job.db.mark_action(action.id, "done")?,
+        Ok(false) => {
+            job.summary.skipped += 1;
+            job.db.mark_action(action.id, "skipped")?;
+        }
+        Err(error) => {
+            if restore_on_error {
+                let original = fsutil::safe_join(&job.root, &action.source)?;
+                if !original.exists() && source.exists() {
+                    if let Err(restore_error) =
+                        fsutil::move_file_preserving_times(source, &original)
+                    {
+                        job.log(
+                            "移动",
+                            &action.source,
+                            "",
+                            "恢复失败",
+                            &format!(
+                                "移动目标失败后，临时暂存无法恢复到原位置：{restore_error:#}；暂存路径：{}",
+                                source.display()
+                            ),
+                            0,
+                        )?;
+                    }
+                } else if original.exists() && source.exists() {
+                    job.log(
+                        "移动",
+                        &action.source,
+                        "",
+                        "恢复失败",
+                        &format!(
+                            "原位置已被占用，无法放回暂存中的文件；请从暂存路径恢复：{}",
+                            source.display()
+                        ),
+                        0,
+                    )?;
+                } else if !original.exists() {
+                    job.log(
+                        "移动",
+                        &action.source,
+                        "",
+                        "恢复失败",
+                        &format!(
+                            "移动目标失败后原位置与临时暂存均不存在；暂存路径：{}",
+                            source.display()
+                        ),
+                        0,
+                    )?;
+                }
+            }
+            record_move_failure(job, action, &error)?;
+            job.context.control.check_cancelled()?;
+        }
+    }
+    job.context
+        .control
+        .completed
+        .fetch_add(1, Ordering::Relaxed);
+    Ok(())
+}
+
+fn record_move_failure(job: &mut Job, action: &Action, error: &anyhow::Error) -> Result<()> {
+    job.summary.errors += 1;
+    job.db.mark_action(action.id, "failed")?;
+    job.log(
+        "执行",
+        &action.source,
+        action.target.as_deref().unwrap_or(""),
+        "失败",
+        &format!("{error:#}"),
+        0,
+    )?;
+    Ok(())
+}
+
+fn execute_move_at(job: &mut Job, action: &Action, source: &Path) -> Result<bool> {
+    let target = fsutil::safe_join(
+        &job.root,
+        action.target.as_deref().context("移动操作缺少目标")?,
+    )?;
+    fsutil::ensure_parent(&job.root, &target)?;
+    job.log(
+        "移动",
+        &action.source,
+        action.target.as_deref().unwrap_or(""),
+        "准备",
+        &action.reason,
+        action.expected.as_ref().map_or(0, |snapshot| snapshot.size),
+    )?;
+    fsutil::move_file_preserving_times(source, &target)?;
+    job.summary.moved += 1;
+    job.log(
+        "移动",
+        &action.source,
+        action.target.as_deref().unwrap_or(""),
+        "成功",
+        &action.reason,
+        0,
+    )?;
+    Ok(true)
+}
+
 fn execute_action(job: &mut Job, action: &Action) -> Result<bool> {
     // P-08：处理期间假定文件不被其他程序改动，执行阶段不再做快照比对；
     // S-03/C-12：删除前 `MUST NOT` 重读文件内容做逐字节复核，去重判定完全依据
@@ -1839,35 +2202,7 @@ fn execute_action(job: &mut Job, action: &Action) -> Result<bool> {
             &action.reason,
             true,
         )? != DeleteResult::Kept),
-        ActionKind::Move => {
-            let target = fsutil::safe_join(
-                &job.root,
-                action.target.as_deref().context("移动操作缺少目标")?,
-            )?;
-            fsutil::ensure_parent(&job.root, &target)?;
-            job.log(
-                "移动",
-                &action.source,
-                action.target.as_deref().unwrap_or(""),
-                "准备",
-                &action.reason,
-                action.expected.as_ref().map_or(0, |s| s.size),
-            )?;
-            // S-01/C-21：同卷改名天然保留全部时间戳；跨卷按「复制+写回创建/修改时间+
-            // 删源」执行，任一步失败保留源项。目录移动（C-14 Git 项目整树平移）只在
-            // 同卷可行，跨卷在复制一步安全失败并保留原项目。
-            fsutil::move_file_preserving_times(&source, &target)?;
-            job.summary.moved += 1;
-            job.log(
-                "移动",
-                &action.source,
-                action.target.as_deref().unwrap_or(""),
-                "成功",
-                &action.reason,
-                0,
-            )?;
-            Ok(true)
-        }
+        ActionKind::Move => execute_move_at(job, action, &source),
         ActionKind::EmptyDirectory => {
             if !source.try_exists()? || !source.is_dir() || fs::read_dir(&source)?.next().is_some()
             {
@@ -1887,7 +2222,24 @@ mod lock_tests {
     // 平台门禁原因：仅 Windows 门禁测试使用（UNC/盘符前缀拼接），非 Windows 无使用者。
     #[cfg(windows)]
     const BSLASH: char = std::path::MAIN_SEPARATOR; // Windows 下为反斜杠
-                                                    // apply 锁目录决策：recorded 有效优先；失效时仅 tasks/ 布局可回退推导。
+
+    #[test]
+    fn move_stage_guard_keeps_payload_when_cleanup_is_not_safe() {
+        let root = tempfile::tempdir().unwrap();
+        let directory = root.path().join(".jchtools-move-work").join("owner");
+        std::fs::create_dir_all(&directory).unwrap();
+        std::fs::write(directory.join("OWNER"), "owner").unwrap();
+        std::fs::write(directory.join("唯一暂存副本"), b"payload").unwrap();
+        {
+            let _guard = MoveStageGuard {
+                directory: directory.clone(),
+                owner: "owner".into(),
+            };
+        }
+        assert!(directory.join("唯一暂存副本").is_file());
+        assert!(directory.join("OWNER").is_file());
+    }
+    // apply 锁目录决策：recorded 有效优先；失效时仅 tasks/ 布局可回退推导。
     #[test]
     fn recorded_state_dir_takes_priority() {
         let temp = tempfile::tempdir().unwrap();
