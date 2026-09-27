@@ -5,7 +5,7 @@
 
 .DESCRIPTION
   默认执行（无需参数）：static_check.py（含测试基线与界面规则检查）、cargo test、
-  构建输出 binding loop 警告扫描。可选阶段：
+  Snap OCR core/worker 的 all-targets 测试与 clippy、构建输出 binding loop 警告扫描。可选阶段：
     -WithEngine   追加真实引擎用例（JCHTOOLS_TEST_7ZIP 或 resources\7zip\7z.exe，
                   缺失时直接失败并提示先运行 fetch-7zip.ps1）
     -WithGuiSmoke 追加 OS 级 UIA 冒烟 S1-S4（需要 -GuiData 指向 make_tmp.py testdata
@@ -95,6 +95,16 @@ if ($hits.Count -gt 0) {
     throw "构建输出出现 binding loop 警告（AGENTS.md 第 4 节禁止）；详见 $testLog"
 }
 $script:Results.Add('PASS  binding-loop-scan')
+
+# 截图 OCR 是独立 workspace 成员；根 cargo test/clippy 不覆盖它们。对当前 HEAD
+# 的两个包同时运行测试和 lint，防止本地验收只依赖远程 CI 的旧结果。
+foreach ($component in @('snap-ocr-core','snap-ocr-worker')) {
+    $manifest = Join-Path $root "optional/$component/Cargo.toml"
+    $null = Invoke-Logged -Name "$component-tests" -File 'cargo' `
+        -Arguments @('test','--manifest-path',$manifest,'--all-targets')
+    $null = Invoke-Logged -Name "$component-clippy" -File 'cargo' `
+        -Arguments @('clippy','--manifest-path',$manifest,'--all-targets','--','-D','warnings')
+}
 
 # 4) 真实引擎用例（可选）。
 if ($WithEngine) {
