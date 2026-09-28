@@ -1,0 +1,2777 @@
+{
+  "schema": 1,
+  "objects": {
+    "archives/book_war_and_peace_1p.txt.gz": {
+      "sha256": "713edaa782d7167eb1061d02116b400cddb6df8adc861678dc080a22c4b57d97",
+      "size": 1630
+    },
+    "archives/documents.7z": {
+      "sha256": "8643a4b948a081fc3ca68f8221b9b99dd80a8c4a12c96e3438a930fe53cd6a41",
+      "size": 216
+    },
+    "archives/documents.tar": {
+      "sha256": "49e36ea4f25c74d9ab98e3f4c58a300f7b10eb6bb31d7ff87f7757da7a87b8b0",
+      "size": 49152
+    },
+    "archives/documents.tgz": {
+      "sha256": "ae9cd7ad22e98697ccfc7b68fc39064d6e06dabfd91273bca2bd2a82e02cc326",
+      "size": 27452
+    },
+    "archives/documents.zip": {
+      "sha256": "23ed9f56dd7ebf7bb27deb5d5f4d38043a641dfb0111e957724c7bc28a16c521",
+      "size": 26885
+    },
+    "audio/hello-world.mp3": {
+      "sha256": "bd9826b79af4b5421a7b0f624c37f6685a4fd98d6b557bba6ab7db136de7020c",
+      "size": 26253
+    },
+    "audio/hello-world.wav": {
+      "sha256": "8f1f0d9718ce2280a77579f5817ae28574e25342f8ca451cf437e2e1d206ee1e",
+      "size": 101028
+    },
+    "audio/long-35s.wav": {
+      "sha256": "7a2663829edbd04950a4a1dd6abeac0e10b14ef7ff6309a0e09354be6fd927f0",
+      "size": 1120044
+    },
+    "audio/silence-1s.wav": {
+      "sha256": "643f8a8dc8bd9c19225afffad2becfec5426180b3749cb208abdf1a6c8354efc",
+      "size": 32044
+    },
+    "audio/stereo-44k1-1s.wav": {
+      "sha256": "ca96ccef5ebcb40afa7532c2286429c8541200851173a459bf545381d3935126",
+      "size": 176444
+    },
+    "charts/arxiv_2206_p3.pdf": {
+      "sha256": "431f6b1781de8e6e62db17201b78861dd292a19833f539c66bc4aeb0590975cb",
+      "size": 362070
+    },
+    "charts/chart_bar.pdf": {
+      "sha256": "2afb9cd3c228d76658ce9762d727bf2344b5ed999d230950a9b32783b1ffc493",
+      "size": 1081
+    },
+    "charts/chart_line.pdf": {
+      "sha256": "33ddb8a6ad71fdedb523748028d1e54ca0349627457409de72fb21311226b915",
+      "size": 1287
+    },
+    "data_formats/excel_multi_sheet.ods": {
+      "sha256": "0aa8ba7f9d15f9e92c90273ce9a7755cd16a1ced18e6141a43f1633c41899da2",
+      "size": 9534
+    },
+    "data_formats/stanley_cups.ods": {
+      "sha256": "a89ceedb731b2c0713f3cd5644e0f8f0e885da65825fdb6765ad958ae128c777",
+      "size": 11904
+    },
+    "data_formats/test_01.ods": {
+      "sha256": "6ad1b04b4cf93438c5787f58de78c217e7ac1d1326af199c04fca767b90384ae",
+      "size": 183558
+    },
+    "dbf/stations.dbf": {
+      "sha256": "d959d96bb9b1d0d7a3cf0f248d64ed44a38da46bc03d8ae5e82c92ca2ad4e48b",
+      "size": 87623
+    },
+    "diagrams/pdf/cairo_graphviz_flow.pdf": {
+      "sha256": "1e59250a50f597577be0d43f8597a1d9f2da65eb6464915b74300a7a57409a4a",
+      "size": 17697
+    },
+    "diagrams/pdf/cairo_graphviz_large.pdf": {
+      "sha256": "737c5a2d53ac5c62373b79c5df730363802ee296a5380373cb23bad56e7fa910",
+      "size": 20252
+    },
+    "diagrams/pdf/cairo_graphviz_ortho.pdf": {
+      "sha256": "3c598a42451d5a1bb9b93689e45b815bb0cc541657f5edf2559c2754505ffa43",
+      "size": 17165
+    },
+    "diagrams/pdf/cairo_negative_pie_chart.pdf": {
+      "sha256": "5636a2a02c424bf709cfe6408cc5a7836c4aeb6d1eae8f5bcd5053990e7e894b",
+      "size": 18531
+    },
+    "diagrams/pdf/cairo_two_diagrams.pdf": {
+      "sha256": "84d1452c0b9a165ec122e4a2f233fc9b2b10a4e8ddca2726df8ac5127a9af754",
+      "size": 18853
+    },
+    "diagrams/pdf/libreoffice_connectors.pdf": {
+      "sha256": "8e1ad92ba5ffb7140327fbc7df15098140c80f5c46cb04a1c818e5a277bd35bf",
+      "size": 9495
+    },
+    "diagrams/pdf/skia_mermaid_flow.pdf": {
+      "sha256": "5b531153a3d550db1538680b722ad2d0ccbcdb88142010b69d5dc191ebd05901",
+      "size": 31356
+    },
+    "diagrams/pdf/skia_mixed_page.pdf": {
+      "sha256": "38d9dce35c67b7d6113e4036b8f68256bc2c1abd63f3ac2423a81d0e35f9aca0",
+      "size": 37759
+    },
+    "diagrams/pdf/skia_multipage_report.pdf": {
+      "sha256": "803405c1a127fda23ce5571d938ea1ad72e3a02ad396f70a6ee4601b96e2da17",
+      "size": 63963
+    },
+    "diagrams/pdf/skia_negative_ruled_table.pdf": {
+      "sha256": "587e8f123a02607980f96285f877571a9b7254ebab16ce50e5d282917a517b32",
+      "size": 20326
+    },
+    "doc/unit_test_lists.doc": {
+      "sha256": "fdc498588ed691e016fca96065af8da06cf7fed0fe349294bee76a5f2e98a932",
+      "size": 16384
+    },
+    "doc/vendor_renewal_letter.doc": {
+      "sha256": "61ca2d6060dc66485195a16a0eafce30c651e866b2bf4ee0a6ca04ae9cdca626",
+      "size": 17408
+    },
+    "docx/budget_fy2027_memo.docx": {
+      "sha256": "31b07e7e3bb8b90dc9b4e1fc6090d7ed58c1545dbd0aedbbc6d3400457ba5e85",
+      "size": 11721
+    },
+    "docx/docx_tables.docx": {
+      "sha256": "b628ecaaf605423654b0b857e43c1cfe015082d5d589575095b4c36849ae392b",
+      "size": 12725
+    },
+    "docx/equations.docx": {
+      "sha256": "9bfcf054a550c1facec174da3755fe3899353cc1284901a09a5638936813aeb3",
+      "size": 15017
+    },
+    "docx/extraction_test.docx": {
+      "sha256": "0a34a1e1c2d3307d6a27e037c41cb997e2f44f024a072839ca8b21cfc4805498",
+      "size": 11296
+    },
+    "docx/fake.docx": {
+      "sha256": "690b185fb657a76dfe5d304911e720f8998b328edb6677cbf2c846152284dfb3",
+      "size": 36602
+    },
+    "docx/issue_359_list_whitespace.docx": {
+      "sha256": "ceba1c83c564e8143cabd6333bf2ee14de510f06c306c52b071cf1c8f05980a0",
+      "size": 9170
+    },
+    "docx/lorem_ipsum.docx": {
+      "sha256": "bd261907c984c475b789761d31e6199fa594df0f2f79b702c9ca9e9c99042978",
+      "size": 14817
+    },
+    "docx/quarterly_operations_report.docx": {
+      "sha256": "c15104f04e95531e3b7efdeb7cdd94327806cabad855e26a22580e76a38ff936",
+      "size": 11715
+    },
+    "docx/sample_document.docx": {
+      "sha256": "ae4f3f6edd7ccd636b893ec8355d5eade6b0413fa779606452c561e334f390f7",
+      "size": 103966
+    },
+    "docx/tablecell.docx": {
+      "sha256": "4d08f40a2d3f29b03ea88ee1043ab0f3abf07ac7d1618b410f6e15b86af1232b",
+      "size": 15180
+    },
+    "docx/test_emf_docx.docx": {
+      "sha256": "ad2dc1d08e904fc3ed8b8e7debe444a6a278d1e082fb0cb4f644a4c6db64e626",
+      "size": 426097
+    },
+    "docx/textbox.docx": {
+      "sha256": "06144c1b769752bae948df16ec0f4c80967b6aebed874ddaa2b3ffbc08a3094c",
+      "size": 49206
+    },
+    "docx/unit_test_formatting.docx": {
+      "sha256": "3ad6b9c41a038c534441ce9bd84001f8873a91d4b2dd9161e351bbae25e95b30",
+      "size": 19731
+    },
+    "docx/unit_test_headers.docx": {
+      "sha256": "6ca962c5331a7c8381eef77322a0f8e7b4b61f174b663309d894de81d2e1440f",
+      "size": 13903
+    },
+    "docx/unit_test_headers_numbered.docx": {
+      "sha256": "992e67c72734021bbeecca36897e4fa8158c38930ac7dbed6aa4f72b2a6b081f",
+      "size": 16880
+    },
+    "docx/unit_test_lists.docx": {
+      "sha256": "cb7ea892ec7f51c06a16be7263c3e81a82ee61ade0a8ce3dbcc07949ef2ecf50",
+      "size": 15769
+    },
+    "docx/word_image_anchors.docx": {
+      "sha256": "5f41160551425b3f1df649e59ec81633752048d6a1ac7b7121b472b823a817f1",
+      "size": 18560
+    },
+    "docx/word_sample.docx": {
+      "sha256": "ae4f3f6edd7ccd636b893ec8355d5eade6b0413fa779606452c561e334f390f7",
+      "size": 103966
+    },
+    "docx/word_tables.docx": {
+      "sha256": "f4be87905250fc9792ed5a1910529a8998588fc06308e743744acfeddd010679",
+      "size": 16404
+    },
+    "email/attachment.msg": {
+      "sha256": "78d4806d6e90bbed42fbcaf1047409e660183ba4cd7f5ca286cb1aa636054980",
+      "size": 191488
+    },
+    "email/bad_outlook.msg": {
+      "sha256": "d2a84f4b8b650937ec8f73cd8be2c74add5a911ba64df27458ed8229da804a26",
+      "size": 12
+    },
+    "email/empty.pst": {
+      "sha256": "c16ae985d12011ad510ccb3b10f19d61b0c3b3311fa4696fb56b87812bd8d5c5",
+      "size": 271360
+    },
+    "email/fake_email.msg": {
+      "sha256": "8952cfda881c059c7c7224d215d190c478cc538c74fdf434e4034b624b2bb087",
+      "size": 11776
+    },
+    "email/msg_with_attachments_alt.msg": {
+      "sha256": "0e2ec48745ec327c60ebe0319d9c42070bb0d70c1e3a42673a49e4549c288676",
+      "size": 272896
+    },
+    "email/msg_with_png_attachment.msg": {
+      "sha256": "0af09d6bd5494fd5e2e3eb45cdd10b1723ad6c0499305830604737fb983c5e7a",
+      "size": 272384
+    },
+    "email/simple_msg.msg": {
+      "sha256": "3e2421fdef89d72d2ff08e3ee25a917c54cc2954ef7938e95343fe138ee33634",
+      "size": 8704
+    },
+    "email/simple_msg_alt.msg": {
+      "sha256": "44f38934c6bbad9ada1b00c09149e22749609c8d5ed2e6432a8a273718ec6a88",
+      "size": 8704
+    },
+    "email/test_email.msg": {
+      "sha256": "aaf05866b1fb408e8449e18a7125a797eb39f523c41569426dbd2775806160df",
+      "size": 839168
+    },
+    "email/unicode.msg": {
+      "sha256": "3c67dc70854b994e469fc14496d23bf778e718831806ebafc72436c840439f9c",
+      "size": 2045952
+    },
+    "epub/edge-cases/depth/synthetic_nested_30000.epub": {
+      "sha256": "90b231226f65c3aab5fa8ffdc48c9a187545483b6592ab2b5b1c1e1484ae2b18",
+      "size": 392285
+    },
+    "epub/edge-cases/encoding/epubcheck_ocf_encryption_unknown_valid.epub": {
+      "sha256": "dc9a685eaa19916621e07292d7c0c5dbec40dc181df1b19d874c85fa061967c2",
+      "size": 3157
+    },
+    "epub/edge-cases/encoding/epubcheck_ocf_obfuscation_valid.epub": {
+      "sha256": "1153d1ca421bf1e799d2d70cf216e17d275f54f3ca8aa16b36b9fda5d4d9d98c",
+      "size": 7055
+    },
+    "epub/edge-cases/encoding/ia_whyiamsocialist441besa_lcp.epub": {
+      "sha256": "0cf29b7753b646809d3ce3a01f4315503bd9c6837b188248fb1eb140f3a9902b",
+      "size": 1227313
+    },
+    "epub/edge-cases/encoding/synthetic_cp1252.epub": {
+      "sha256": "5b1361c037dd41e4d5b91a99c90ebfe8a41300c3598a375d0babd4ec93dc5730",
+      "size": 2181
+    },
+    "epub/edge-cases/encoding/synthetic_latin1.epub": {
+      "sha256": "7d59757ed4627556292a3a9f2e49caf567b423f94e04ca67b1fcde6d47c67a43",
+      "size": 2185
+    },
+    "epub/edge-cases/encoding/synthetic_opf_latin1.epub": {
+      "sha256": "7be3c8b04b2742406726efbdd1f2fae6d09691cf08b522fe2c4ca90af0180dcb",
+      "size": 2282
+    },
+    "epub/edge-cases/encoding/synthetic_shift_jis.epub": {
+      "sha256": "405cfa75ec479e0b3435aff3e9914317abfcff63478d55b4ac42a22a86e5ac4d",
+      "size": 2175
+    },
+    "epub/edge-cases/encoding/synthetic_utf16be.epub": {
+      "sha256": "1241a258e2b4e6fca02aad819ae974f2494c040c4b6ec47e50e7c38e3fcb59d9",
+      "size": 2342
+    },
+    "epub/edge-cases/encoding/synthetic_utf16le.epub": {
+      "sha256": "9c93a9a421ee8e8aca670976453e534b0bd685e96b4a80335101ce9862235ea8",
+      "size": 2342
+    },
+    "epub/edge-cases/encoding/w3c_ocf_font_obfuscation.epub": {
+      "sha256": "11dd9d68fb7ace03ead5cb478a3717708ee680c1f345f1def97317c7e951957a",
+      "size": 55727
+    },
+    "epub/edge-cases/entities/synthetic_bom_prelude.epub": {
+      "sha256": "3e665d43dc0090458a6291bc35fbc3e1a2945e482ff779c80d8bacb108c75298",
+      "size": 2281
+    },
+    "epub/edge-cases/entities/synthetic_entity_style.epub": {
+      "sha256": "923cfd02ab00e45ee843cef9eae47f765e57847cd669a2cfc58365f9dc4492e2",
+      "size": 3143
+    },
+    "epub/edge-cases/entities/synthetic_unparseable_chapter.epub": {
+      "sha256": "2fa647c947e1d157830bc2636759c4fb0f4237e17ff4f351ca9af89326618525",
+      "size": 2649
+    },
+    "epub/edge-cases/media-types/ia_foodresearchinst00stan.epub": {
+      "sha256": "a2fcab9bf0906e18675692dca7538252b2a8e86ff9e6b7da26813edce955d0f0",
+      "size": 13282
+    },
+    "epub/edge-cases/media-types/synthetic_media_type_labels.epub": {
+      "sha256": "ef904ba92960a3a079a3ea61d5aebfd5d3fb78d9b1248c9625f5f4244754acee",
+      "size": 4359
+    },
+    "epub/edge-cases/metadata/epublib_testbook1.epub": {
+      "sha256": "1e30fb5671604c2905143ccfc446acbd94c40e608284e86c230864d1c01ae6cd",
+      "size": 337350
+    },
+    "epub/edge-cases/metadata/pg27805_epub2.epub": {
+      "sha256": "afaacf7c948d630e5bf668e971053f64ac77d08877fb02bd6db5b891d9019ac7",
+      "size": 240203
+    },
+    "epub/edge-cases/metadata/se_frankenstein.epub": {
+      "sha256": "52f92aa83c8430e9e0edb4409571331968be188ff00598e7884a3f41bede3299",
+      "size": 685738
+    },
+    "epub/edge-cases/metadata/synthetic_cover_meta_xhtml.epub": {
+      "sha256": "54a6221beaeb2467b0f8367d992ac1c85f2c4d34d7b03b81b5df50446b657ce0",
+      "size": 3081
+    },
+    "epub/edge-cases/metadata/synthetic_dublin_core_epub2.epub": {
+      "sha256": "b3ddac99341d7845aa78e55e80c35416c8bb5db560c1d913f2566eae6d92f015",
+      "size": 2697
+    },
+    "epub/edge-cases/navigation/epubjs_alice.epub": {
+      "sha256": "deeca92b3705f7a23dad92f2d59d37369450a4336d7931aa5a28d5641f5f4f3c",
+      "size": 536540
+    },
+    "epub/edge-cases/navigation/idpf_childrens_literature.epub": {
+      "sha256": "191d14d07bcaefde647e494256f73d789f265c8edc46c404320641b23c86b76a",
+      "size": 161291
+    },
+    "epub/edge-cases/navigation/pg14838_epub3.epub": {
+      "sha256": "c1115a54a9c1ab2ded630925012df2aefbd0b4b5eba166e6dfadf8c685b82713",
+      "size": 1510370
+    },
+    "epub/edge-cases/navigation/pg1661_epub2.epub": {
+      "sha256": "4e380df6664160703b706b3b690f1a63b1242c2c5085c30ee79727f0177230b0",
+      "size": 311604
+    },
+    "epub/edge-cases/navigation/pg28885_epub3.epub": {
+      "sha256": "17bb2c40e514a7cf4f0c6d0139aadad45c82a535a2a2202aa3da3c4501186e64",
+      "size": 1475190
+    },
+    "epub/edge-cases/navigation/w3c_cnt_svg_support.epub": {
+      "sha256": "2d716ac916b9273786c1be3c5beb047de8dc53b866214f7386ecd437cd4f266c",
+      "size": 3022
+    },
+    "epub/edge-cases/navigation/w3c_lay_pp_image_only.epub": {
+      "sha256": "572e0ec4ef3af2016fc3384662071d8514470f30113ace00aaa0d7c35e2d44b9",
+      "size": 191246
+    },
+    "epub/edge-cases/navigation/w3c_nav_spine_in_spine.epub": {
+      "sha256": "0afe8029a7f432d9602a1a83dad2cd793fcd0edc8e6586eefa32e339a9248923",
+      "size": 2267
+    },
+    "epub/edge-cases/navigation/w3c_pkg_spine_order_svg.epub": {
+      "sha256": "e5407a13baf6b22526faa135dca4befa8f6b7711297ed93ef7dbfbe40987ae48",
+      "size": 2589
+    },
+    "epub/edge-cases/rendering/pg39292_epub2.epub": {
+      "sha256": "26c2857ab7501ebfa68a418a87fb6e3ebdcc6dfd9a3986b9ca90433b60aaa2a6",
+      "size": 86945
+    },
+    "epub/edge-cases/rendering/pg98_epub2.epub": {
+      "sha256": "94e22b2d9db5a53b462e82957cad4b4680ce133b33ebe32bde70d7cb8c3b30e3",
+      "size": 487514
+    },
+    "epub/edge-cases/rendering/w3c_ocf_url_link_leaking_relative.epub": {
+      "sha256": "3644ae2b58dfb8b4bbf9977c1f2841900fe73e12559e1660a9d7422612e8b34c",
+      "size": 321387
+    },
+    "epub/edge-cases/unsafe-href/epubcheck_ocf_url_leaking_in_opf.epub": {
+      "sha256": "0352c1650ad217376fa27998ddb2548bc636423b0b6cb81764c454f8b7e13217",
+      "size": 2087
+    },
+    "epub/edge-cases/unsafe-href/epubcheck_ocf_url_path_absolute.epub": {
+      "sha256": "4bee6cefa8e63111b1c96b01af45f50725fac2a343901aaa888dc19d24aa95e9",
+      "size": 2054
+    },
+    "epub/edge-cases/unsafe-href/synthetic_remote_url_spine_item.epub": {
+      "sha256": "5112a7d5a1e8d03640669ebc9ea10ff4fdd764c14149a645ae7832a1d9a0bc4a",
+      "size": 2162
+    },
+    "epub/epub2_cover.epub": {
+      "sha256": "4af73a135aa632cbf0c00b2889a5fc1d39a59a77fa294fdeff5ede72ff6ffed1",
+      "size": 11794
+    },
+    "epub/epub2_no_cover.epub": {
+      "sha256": "8369dbe5cf315f1fe00f9dd1bf7c500cc663d7648edbf0d7b6a9b4d785fedf4e",
+      "size": 3584
+    },
+    "epub/features.epub": {
+      "sha256": "efe934d5f7846256b5b06dfb624b011ac1780bd8930311864f31cba83b5bfa11",
+      "size": 8961
+    },
+    "epub/img.epub": {
+      "sha256": "f2c25e0e0612b7ac33a8d6a1c9719a86e7d2a0290472fc7d8b5068de781a822f",
+      "size": 20478
+    },
+    "epub/simple.epub": {
+      "sha256": "7bec3acf5ca153fd8a3b8bba50549c5cde3cb617ddd74c1d3b26fbc5eb9eebdf",
+      "size": 31662481
+    },
+    "epub/wasteland.epub": {
+      "sha256": "151ec5dbca33e39a4e3f6894e92fa5a101290bdeaaa792e0700595971456a278",
+      "size": 25840
+    },
+    "epub/winter_sports.epub": {
+      "sha256": "913fbb1189f656fbaf4badd5ffd618719961a1f3d7746a4ad0047e2b9451792e",
+      "size": 210376
+    },
+    "fictionbook/basic.fb2": {
+      "sha256": "63c47d7d4d46fbbd4a91128aacea7f9c642d81f6ebb2898050fd5bdf8b0543a9",
+      "size": 1400
+    },
+    "fictionbook/emphasis.fb2": {
+      "sha256": "726cb6f14c9f76d23369007237712344500181ec253f3fdf2ae6b12d82f2e3e7",
+      "size": 675
+    },
+    "fictionbook/meta.fb2": {
+      "sha256": "6e61fed9fadcf217634ba769d93ec88ea04699a98e9ebdb63dab4549d3a57ca2",
+      "size": 472
+    },
+    "fictionbook/poem.fb2": {
+      "sha256": "37205c98d4ef012b976e6487059e0f7a2d46ec1eb7254ef6e744deb1c1ddc598",
+      "size": 765
+    },
+    "fictionbook/tables.fb2": {
+      "sha256": "ad3059ec41154700347650b695706de1330dc438d02dc785840fa15ee50283be",
+      "size": 3949
+    },
+    "fictionbook/titles.fb2": {
+      "sha256": "4ac9014dfc6f8c48842f2a200cf9ed984d662e45be837cff0a38489a87570043",
+      "size": 620
+    },
+    "fictionbook/writer.fb2": {
+      "sha256": "a09bdf869271bce2b3c7713fe53f18fca5f9d517e41076d34e5776f7c0b2958e",
+      "size": 16415
+    },
+    "ground_truth/structured/parsebench/chart.jsonl": {
+      "sha256": "82eb2d660b286a5e1b8bd57f3f159a722b13849834561211dc1ccd5c5a39582b",
+      "size": 1591287
+    },
+    "ground_truth/structured/parsebench/layout.jsonl": {
+      "sha256": "97ddd0aa9b194a3082fcaa9172b562e32f4e6d1beeaa707a0fb3bf11731e68ef",
+      "size": 9567215
+    },
+    "ground_truth/structured/parsebench/text_content.jsonl": {
+      "sha256": "cb16f70704fce569ee6f9ddff471735b17e3337d56e3958deaa4ebd6f93b5b37",
+      "size": 55407895
+    },
+    "ground_truth/structured/parsebench/text_formatting.jsonl": {
+      "sha256": "4f00200322cfe0bb7199f7a0a85e04e9df3964e06882e3703faf40bb1103098d",
+      "size": 1785910
+    },
+    "hwp/converted_output.hwp": {
+      "sha256": "73a47ed24329cca8a26936ba95501580ee127cdf9f63becf87d9057ec0738194",
+      "size": 95744
+    },
+    "hwp/styled_document.hwp": {
+      "sha256": "9d65f08f8fcfcb38b2aecea1f69ca6ed43b8b32af5acda95765d78304783837c",
+      "size": 8704
+    },
+    "hwpx/simple.hwpx": {
+      "sha256": "9ce4d481ad359329de269b61fe55536ca06ff3b8a51ed540492d59a1af004a5a",
+      "size": 1769
+    },
+    "images/Hadley_Crater.jp2": {
+      "sha256": "318376a19d246216b1d087b8aaf0388fff15efdc87c073c47e99f1d1b1bd4535",
+      "size": 626560
+    },
+    "images/alpha.heif": {
+      "sha256": "c4f6239077c8db145640f633988ee9f65780beb2788beebb2b1efd38566a38ce",
+      "size": 7662
+    },
+    "images/balance_sheet_1.png": {
+      "sha256": "2a077ba1d2451109dc1dec5174a661405c8825f4c7abf54ce8064997bb5330be",
+      "size": 2726254
+    },
+    "images/bmp_24.bmp": {
+      "sha256": "66d957dfd75fd616cd88183403369da991cd8b8f8200b2c2c7781a17602e5f27",
+      "size": 480054
+    },
+    "images/chi_sim_image.jpeg": {
+      "sha256": "8bd2f7f94402a1429bf04d53de13ed93a2983da2e4183288bd59097cdbd4c0e2",
+      "size": 20104
+    },
+    "images/chinese.jpg": {
+      "sha256": "7d8f231016c6a35da879b7d79b39c45b694aef962ae30f64063d981e618fbf7f",
+      "size": 59898
+    },
+    "images/complex_document.png": {
+      "sha256": "e80abc54fbb7c1974ceaf1d91259a2156a545cfcf3de647024aad06ba434f84a",
+      "size": 28485
+    },
+    "images/complex_document_rotated_180.png": {
+      "sha256": "d17968f9aeac86a35ff85078b26084b06216e062ce99706eddf87a06282aab87",
+      "size": 27666
+    },
+    "images/complex_document_rotated_270.png": {
+      "sha256": "f40a59a781da4424ac9f6862c43e1eaca235f62175b0f529b988f788328f9eae",
+      "size": 37472
+    },
+    "images/complex_document_rotated_90.png": {
+      "sha256": "2d500ac3b438c7e97cdf847ace1d3bf77ec5838a5bfe87ae018610f34ea31c60",
+      "size": 37863
+    },
+    "images/cord_receipt_01.jpg": {
+      "sha256": "7281a7b76327ed77867b20432717f1046bb8ab91371a80fac376ab45ccbf04f9",
+      "size": 52362
+    },
+    "images/cord_receipt_02.jpg": {
+      "sha256": "ce405c567deaaec169b6700d758bcd3bb44a355c35af022f721a975f274a9f4f",
+      "size": 83667
+    },
+    "images/cord_receipt_03.jpg": {
+      "sha256": "95b97f197b17c471988759c0e039a792b6eca5636dca85204c8ef4d19e04cd05",
+      "size": 165109
+    },
+    "images/cord_receipt_04.jpg": {
+      "sha256": "c300405986f1a12bb714a1eb035179ff3c9b280ae93dba9ba2beb75e5094ce16",
+      "size": 148932
+    },
+    "images/cyrillic.png": {
+      "sha256": "cdb5e98b2adf801327d3a47879aafd7abf5bc12d726bf147ce6f0133a24d1033",
+      "size": 7970
+    },
+    "images/doclaynet_page_01.jpg": {
+      "sha256": "cd74a2f31169a464ef883150ac70be2dd614ac7718ec0e233446794b9f819629",
+      "size": 289059
+    },
+    "images/doclaynet_page_02.jpg": {
+      "sha256": "0c76bd1ee2cea37f3a2c15f4b0a2fb2208fa3caca58c8f93f139c63ebc5af11a",
+      "size": 219650
+    },
+    "images/english.png": {
+      "sha256": "f9f8c82b6b15ac6c9367c7939129395d6c45a882a2dadde33aaa810da4d450d5",
+      "size": 1740957
+    },
+    "images/english_and_korean.png": {
+      "sha256": "d4286aded62c52b4f25a5a73111e25a30ad87bc757d84efd9e06f707e866fd2f",
+      "size": 305401
+    },
+    "images/example.jpg": {
+      "sha256": "8a9d04b92d0de5836c59ede8ae421235488e4031e893e07b1fe7e4b78f6a9901",
+      "size": 32764
+    },
+    "images/example.png": {
+      "sha256": "249336d9aeae0cd6ee61d480787db260cf3ee163ec16766a71c5d97bbba20796",
+      "size": 488641
+    },
+    "images/financial_table_1.png": {
+      "sha256": "85f4634183039c7289e7b387f77ac5d47a55af4975b9fa626f428f8b53d9bd94",
+      "size": 212317
+    },
+    "images/flower_no_text.jpg": {
+      "sha256": "8a9d04b92d0de5836c59ede8ae421235488e4031e893e07b1fe7e4b78f6a9901",
+      "size": 32764
+    },
+    "images/french.jpg": {
+      "sha256": "549784c349af8a87d53e2fec897d03aa800ed73a64bb9d8de60485cdd71d1e98",
+      "size": 168376
+    },
+    "images/invoice_image.png": {
+      "sha256": "9aaea6583434eff8bf70b9fb26325951f4439431956ff30033be9a347456b8cc",
+      "size": 10411
+    },
+    "images/japanese.jpg": {
+      "sha256": "a636f5b3b497aba2f28862cdaadbeb0d0e542604cb0141670f8e0af66a639021",
+      "size": 42159
+    },
+    "images/jpn_vert.jpeg": {
+      "sha256": "afefe464ce50da90d62c49f1737ca724ebc1616ee489063dd1d870cd741a20c7",
+      "size": 35012
+    },
+    "images/kannada.png": {
+      "sha256": "e3617663349e7612de498c48226a46eca6b589c6e53f54c749aa3ccba11a8925",
+      "size": 14417
+    },
+    "images/korean.png": {
+      "sha256": "702c3dcc04ac968ea023aee6466d201fe98ec313b84c68de85e1a5e70888998e",
+      "size": 225531
+    },
+    "images/layout_parser_ocr.jpg": {
+      "sha256": "83b589c5b841b5794ea6c852b444395f41425a51724b5d74fd8d8e2f7d724a2d",
+      "size": 165505
+    },
+    "images/layout_parser_paper_with_table.jpg": {
+      "sha256": "83b589c5b841b5794ea6c852b444395f41425a51724b5d74fd8d8e2f7d724a2d",
+      "size": 165505
+    },
+    "images/ndl_meiji_vertical_01.jpg": {
+      "sha256": "94e6cf1b5beb9219c17d0a161dbd064e454c6deb823b1db14207ab063be3a155",
+      "size": 1020601
+    },
+    "images/ndl_meiji_vertical_02.jpg": {
+      "sha256": "8c0324d53abb0a606738eb4ca06e987f66340b10ac28c90e28ccb44456fa1aef",
+      "size": 1119217
+    },
+    "images/ndl_meiji_vertical_03.jpg": {
+      "sha256": "8e932769b789ad3da818135e22741776d0f693b39981cfa9cdea785004fcd1a1",
+      "size": 1074714
+    },
+    "images/ndl_meiji_vertical_04.jpg": {
+      "sha256": "195f9a8f6630227cd98cea1a79cc0b60c3ef74b4c54d8f066b9245adb446f328",
+      "size": 1329663
+    },
+    "images/ndl_meiji_vertical_05.jpg": {
+      "sha256": "0fe6353204e4ee5ca6d93cfe90cce51b95c94e4ce9c0a0e06f2dd33e0d2635f3",
+      "size": 772413
+    },
+    "images/ocr_image.jpg": {
+      "sha256": "82ae016f652e36a8b0721dca2e38f999c245c524dd1f2631968be8901123841d",
+      "size": 73717
+    },
+    "images/ocr_test_original.png": {
+      "sha256": "4cf3aa5fa772d0809a8143d86a2aa9446f1c46f52d491e4e909a42d607db1d68",
+      "size": 33383
+    },
+    "images/ocr_test_rotated_180.png": {
+      "sha256": "e21938211d791265b0deb5a5a3d27b50e55e430d6ac5fb25e5f80abc5a92ca0b",
+      "size": 33886
+    },
+    "images/ocr_test_rotated_270.png": {
+      "sha256": "fe2befea29c1d04fb3b7569c777d604ea6e987f583dcaff4580edb75176d6517",
+      "size": 41384
+    },
+    "images/ocr_test_rotated_90.png": {
+      "sha256": "9a67a012fe80a9a07c639a9a59ddb98feed64f4604d4d7dacd698e0a7d642004",
+      "size": 41532
+    },
+    "images/rust-logo-512x512-blk.jp2": {
+      "sha256": "5bd02e10645f23c519c413224d96a82af3dd2a0f8c9d085b77d8c91e6f0fc77e",
+      "size": 89445
+    },
+    "images/sample.png": {
+      "sha256": "d48ef1fff395e9f9ad0be81b1ca1e4f431b8e884b3052cc50910217232ea4fdf",
+      "size": 1022
+    },
+    "images/sample_text.bmp": {
+      "sha256": "3da4c782f8b1567816f045a5d6f6a2424fc37af5c2117286c8ed5ba5ef29ed87",
+      "size": 60138
+    },
+    "images/simple_table.png": {
+      "sha256": "c9840b62965e30024f6cbf1fe32d74887aa66c04bd28161ecb4a43bb6600d4a7",
+      "size": 10381
+    },
+    "images/telugu.png": {
+      "sha256": "e483db7373e0595ad9df25c1930b2068c73fdbfd62654e7907d214e83e21da81",
+      "size": 16373
+    },
+    "images/test.avif": {
+      "sha256": "7f3d10e8050a8485cd6d420677935c960f5449151e3310e015cdae764ba7e933",
+      "size": 355257
+    },
+    "images/test.heic": {
+      "sha256": "f0175f37bce15308eaad0c3d17842ebe735b0b93d4fc3b78554a58690398a144",
+      "size": 262342
+    },
+    "images/test.heif": {
+      "sha256": "b5e4a6288c9280667863feea1ec2adcf4924ade78b4c1fca634a4100f50cb0d0",
+      "size": 154747
+    },
+    "images/test_hello_world.png": {
+      "sha256": "a3b088cbd13c0e88faf503ffc6b7c670f0d7a553f3d4c342e5811c9f7b7a3bd2",
+      "size": 6645
+    },
+    "images/textocr_scene_01.jpg": {
+      "sha256": "14e051506881064812bd952e2abe5f6570790711d9dbf24b65ad873544a7bc29",
+      "size": 266852
+    },
+    "images/textocr_scene_02.jpg": {
+      "sha256": "27c84ed9d5405d6b90890d5a9f8dce93e875d94661a87cac0f811865905df954",
+      "size": 177156
+    },
+    "images/textocr_scene_03.jpg": {
+      "sha256": "fad13da4cce41d7de954914bf5952b67eebb9e63b035160a7fe61a2726c8a620",
+      "size": 255423
+    },
+    "images_extra/Hadley_Crater.j2k": {
+      "sha256": "318376a19d246216b1d087b8aaf0388fff15efdc87c073c47e99f1d1b1bd4535",
+      "size": 626560
+    },
+    "images_extra/complex_document.jpx": {
+      "sha256": "d1885b8d48b8d48acde8171e5ece1822922ac9585d2acd876e082ee091e8b707",
+      "size": 62261
+    },
+    "images_extra/invoice_image.jpm": {
+      "sha256": "729b044c62ece2905f73d97a53b1acac742df53ae3b6a5624c616ed3a14c0ab3",
+      "size": 11830
+    },
+    "images_extra/ocr_image.gif": {
+      "sha256": "6715d7a4772c04ed4110f711b2b2b2b4fc481adc356ce0e78d7c92504df8473b",
+      "size": 284525
+    },
+    "images_extra/ocr_image.jp2": {
+      "sha256": "69ee6c6814ed505098819fff774de19fca47baae99c504e29efeb8c1e935be4d",
+      "size": 77298
+    },
+    "images_extra/ocr_image.mj2": {
+      "sha256": "69ee6c6814ed505098819fff774de19fca47baae99c504e29efeb8c1e935be4d",
+      "size": 77298
+    },
+    "images_extra/ocr_image.pbm": {
+      "sha256": "46bba8f36cbf87806180eff9d4bc08124122dc12e0ac3b23fb25c9901ede7e47",
+      "size": 45831
+    },
+    "images_extra/ocr_image.pgm": {
+      "sha256": "b9cf33cfa4c761ada41ccb50b469360062a30d96ca41076108ed5b8df4cae5b1",
+      "size": 363096
+    },
+    "images_extra/ocr_image.pnm": {
+      "sha256": "b9cf33cfa4c761ada41ccb50b469360062a30d96ca41076108ed5b8df4cae5b1",
+      "size": 363096
+    },
+    "images_extra/ocr_image.ppm": {
+      "sha256": "e9e674064572258bb0d115ebee6a00b2f6e35f953ca3eafe391e3d6ec839ded9",
+      "size": 1089256
+    },
+    "images_extra/ocr_image.tif": {
+      "sha256": "9494fa8eb52b0afea2e4931d1ade5f300547ee69e8af6ec42e3dee96de4a3898",
+      "size": 367848
+    },
+    "images_extra/ocr_image.tiff": {
+      "sha256": "9494fa8eb52b0afea2e4931d1ade5f300547ee69e8af6ec42e3dee96de4a3898",
+      "size": 367848
+    },
+    "images_extra/ocr_image.webp": {
+      "sha256": "791c54f653625c3ba0313572d57e231201a26138cf695e67a38e56068b7501d6",
+      "size": 74502
+    },
+    "images_extra/rust-logo.j2c": {
+      "sha256": "5bd02e10645f23c519c413224d96a82af3dd2a0f8c9d085b77d8c91e6f0fc77e",
+      "size": 89445
+    },
+    "iwork/test.key": {
+      "sha256": "e7b3cffa52ca4d67465a9fbf919a13808f1ddf74bc2fd250ea9ea877d9beecd1",
+      "size": 369
+    },
+    "iwork/test.numbers": {
+      "sha256": "b9e9772b2d2866c26d773fe46a173c373c7dc1dd3df6cefc7f0253b6ab50d4c3",
+      "size": 173690
+    },
+    "iwork/test.pages": {
+      "sha256": "22ecf2c2cdb3168a59dc4bc95a5e57d490f4f83d8d76c9de81eefc822e9506c5",
+      "size": 363
+    },
+    "odp/libreoffice_impress.odp": {
+      "sha256": "ecc8129a5b22c77b378504d87774ef26245d9e4146e8b15ec30a2f58fd0ebb93",
+      "size": 24035
+    },
+    "odp/simple_text.odp": {
+      "sha256": "c786aecfc72a2ff55ede5a21c4dfda14af298cebf1e788da685262da7025c833",
+      "size": 13975
+    },
+    "odp/tika_odp_macro.odp": {
+      "sha256": "9132f1a2a5193fe415a9542f096ed705d008d69577f0ba1fab5ba83cd4e3e3f0",
+      "size": 14505
+    },
+    "odp/with_images.odp": {
+      "sha256": "1fbb574d53faa5b7f5a9ddc139ce770441b321536d57ba03edb196ff9aed7de4",
+      "size": 431290
+    },
+    "odp/with_table.odp": {
+      "sha256": "2f5d378f7ea4cd4773745ea481c641da376ebf0751b81f7657d45db5a13b4cc5",
+      "size": 28869
+    },
+    "odt/battery_storage_overview.odt": {
+      "sha256": "f05da86e7d289e837c34d27cf9d2ca95b0e20108e76f82712523691342d1c3f7",
+      "size": 8018
+    },
+    "odt/bold.odt": {
+      "sha256": "5e22b76ef68b5f9ecfe3bcd522c84c885832a5e3cd94e81135988fd807a1ea26",
+      "size": 10377
+    },
+    "odt/citation.odt": {
+      "sha256": "302e13a49cbd7ceacd0d4655e32933b90c1df25980c6b8a71b36b33c2b9fb175",
+      "size": 10842
+    },
+    "odt/endnote.odt": {
+      "sha256": "c8da4772a3cdefaff52c53de9bc23557ec3c045bb756f1cd889cf29666c04fe7",
+      "size": 10950
+    },
+    "odt/extraction_test.odt": {
+      "sha256": "a248c0a8f338c3c05e17204aa1674305a3a87684b4773ae9c87883ee71e3faf1",
+      "size": 7659
+    },
+    "odt/footnote.odt": {
+      "sha256": "fcb4edd4f84f5e51856f52f5c53aa85b798bd030eee8d69f099ba79adb1bd10e",
+      "size": 10843
+    },
+    "odt/formula.odt": {
+      "sha256": "3476df69a9bae55b22c4d7a7488da17570526beaaa88856c056046cb1a35d7b2",
+      "size": 14252
+    },
+    "odt/headers.odt": {
+      "sha256": "95e4ac87755365eba1104f9581d342f9dfdec7affac68f08dd69292b6b5384b9",
+      "size": 10515
+    },
+    "odt/imageWithCaption.odt": {
+      "sha256": "2a26ceebc6ae59d9cfc269b9b8a815be33ca838fb98b415f8db9ab08fa1e79ea",
+      "size": 33811
+    },
+    "odt/inlinedCode.odt": {
+      "sha256": "b38b89b2df49aebd785cb4a09c6369d0b2521a8c4d52e9593530d4fdcdb72511",
+      "size": 10141
+    },
+    "odt/italic.odt": {
+      "sha256": "4fd29cfb388ccd2db93497c62c5606ba8de031b035f173b0e5c766770f762c19",
+      "size": 10426
+    },
+    "odt/metadata_test.odt": {
+      "sha256": "233776609092e17503c178611954c5703e79fed0f17b57bbde4d2fac65707c57",
+      "size": 6874
+    },
+    "odt/paragraph.odt": {
+      "sha256": "fa904ca0c985bb3f7ed4ab9556f13bf722f463d560dc6f19fce242c538cc71b1",
+      "size": 8538
+    },
+    "odt/platform_sync_minutes.odt": {
+      "sha256": "864a239af47fbe0d862081f198a56cb51f491a9b32bfb134200b37e57ea7558f",
+      "size": 7796
+    },
+    "odt/simple.odt": {
+      "sha256": "19bf9eb6b3bedb7df55410c7165f3fcd0c1c4874100bfeaa513ed0867a794055",
+      "size": 7649
+    },
+    "odt/simpleTable.odt": {
+      "sha256": "2ab2ea5ba5947b03d1a0e55f2d683ff0c2da2e6d95716f1f9d107e78309699e0",
+      "size": 10705
+    },
+    "odt/simpleTableWithCaption.odt": {
+      "sha256": "374c689cb3d141ef26dd467bde28614e0e1d7433a12e75fddca7c94ef90d7c28",
+      "size": 10396
+    },
+    "odt/strikeout.odt": {
+      "sha256": "a24e0d23a0773d11d5295580a6fd464f50eaa8bcaea7166da5fff00570b4af21",
+      "size": 10582
+    },
+    "odt/table.odt": {
+      "sha256": "b16e15511822b1409dd474634a56328c2e7c03057c4d83056a1c6a19bc4f0eaa",
+      "size": 10763
+    },
+    "odt/unicode.odt": {
+      "sha256": "063faf30340be142f77bebba15b3f43e97915d192a439d05e203f34c64e85468",
+      "size": 11787
+    },
+    "odt/unorderedList.odt": {
+      "sha256": "53dbe75ad27f3d6113db2caad2ab130fc34d04e94ce2811bfeb5437b817002f8",
+      "size": 9505
+    },
+    "ordinance-2197.pdf": {
+      "sha256": "94dcfbd413fb69aedc0b2005893ddba2ea77be82da3ff3631dd17ff4c983749a",
+      "size": 538907
+    },
+    "pdf/10075815.pdf": {
+      "sha256": "57f7cbd0da6ad48055bb35c046a6ae112cd08f640e64b05eb6ad59a8ddd30add",
+      "size": 119196
+    },
+    "pdf/100_g_networking_technology_overview_slides_toronto_august_2016.pdf": {
+      "sha256": "c2827b808cf61250ae38c5768fdf11e7e3da327403150950fbe0fb37d4fab11c",
+      "size": 1516903
+    },
+    "pdf/103528129.pdf": {
+      "sha256": "f1c19cce84a4b49d4964113aaf89d67576d24c8bd0bb2eda4a7b4fc79e9c486a",
+      "size": 45758
+    },
+    "pdf/10487363.pdf": {
+      "sha256": "ab693b20a64e964faefbb7410ab3bf22826867ff362459c4d6b4db66fea9b223",
+      "size": 238431
+    },
+    "pdf/112022071.pdf": {
+      "sha256": "fd68d213ffffdbf730d9fe76df362598f55338ff05aa289f4f0b3b9438587d07",
+      "size": 460190
+    },
+    "pdf/113012366.pdf": {
+      "sha256": "c4603c3e2c05379e1a4889cba6e1b2f7c11aeb8543df9c30b30d5f9abf911d5d",
+      "size": 1095516
+    },
+    "pdf/114718155.pdf": {
+      "sha256": "5de8635612caa76f91f27f4b9381797805f6192e18923c5a866e04d33837c611",
+      "size": 1077949
+    },
+    "pdf/114759717.pdf": {
+      "sha256": "46aee9e633fae58944167963282e48c26d1be4530d11be72086b41c525239c0d",
+      "size": 977575
+    },
+    "pdf/115035639.pdf": {
+      "sha256": "55f90740b67036d4634e51aefc35ab97d53f17dbade4e96647dfd9d7514f0691",
+      "size": 263962
+    },
+    "pdf/118358642.pdf": {
+      "sha256": "647b54a37892bfae69c88b30e26b1f5360f8636a039105a9849ee014515205f0",
+      "size": 102280
+    },
+    "pdf/12247534.pdf": {
+      "sha256": "96678899d1d9312ddd4695b93ed55f6a54a9c16349c7aa2444d4d29116558714",
+      "size": 64645
+    },
+    "pdf/122536766.pdf": {
+      "sha256": "ee1816b17d0c799983500b66438e4656bb49b30ea8b7c1093a45e7823cd1fae3",
+      "size": 192422
+    },
+    "pdf/122936125.pdf": {
+      "sha256": "68f60269f7acf819b14ec5ead69350c0fc96783010729f86c6f7e89d9c0feff8",
+      "size": 1538518
+    },
+    "pdf/123416432.pdf": {
+      "sha256": "68d9115a3c3ebe51a3ed54fe9fa0f47ff261716b51c8259c78b318d42312c947",
+      "size": 136158
+    },
+    "pdf/132372701.pdf": {
+      "sha256": "b3d7b83692cb79ac882878813177eafc9f66687ae142b2af2775fcf280bd5521",
+      "size": 50285
+    },
+    "pdf/138102346.pdf": {
+      "sha256": "119b2b0c476f1b8844e5fb7ac2704a7adbbb4240f49a96d0f69ff682e3fdd612",
+      "size": 329156
+    },
+    "pdf/139609621.pdf": {
+      "sha256": "e2ac6107d60e6fedbc17409b785fde09bf27a779a449307193e293870e96358e",
+      "size": 10883039
+    },
+    "pdf/144160654.pdf": {
+      "sha256": "ea4208dfb1171ed0f2659863005a02868c29f53b7de65dda11f8647d027e3cc3",
+      "size": 215448
+    },
+    "pdf/14605416.pdf": {
+      "sha256": "9f6567e9c26da4b89c1f230ab0ab838b53391fd02dcfab10497976bc08133cda",
+      "size": 35297
+    },
+    "pdf/160428551.pdf": {
+      "sha256": "530f37f6cbb755c4acb48084886c1ba5cc23786953beda11264c944f6a004136",
+      "size": 70338
+    },
+    "pdf/167647146.pdf": {
+      "sha256": "03e0f873daafed2a34b0dff78056456503bf65143986c153d71d40de00ebe81e",
+      "size": 132903
+    },
+    "pdf/177210299.pdf": {
+      "sha256": "9f4bdd0ea8e4aedc9d270dbdf4d6637ed6895057161a52d29af566d7663611ca",
+      "size": 50283
+    },
+    "pdf/181314818.pdf": {
+      "sha256": "548941ea3791907eae338176f49a43d1ccab5d20673a1ab6fc45f7ac6151ce29",
+      "size": 26264
+    },
+    "pdf/187095617.pdf": {
+      "sha256": "23d81a7b00274e540392a3ed176b7fb87f39f8cce709da495551048821e7cf8b",
+      "size": 47801
+    },
+    "pdf/189532163.pdf": {
+      "sha256": "927e6387f7822cfacefa7f36cc266d4f833cf3cf283fbb438b8f534e8df983e5",
+      "size": 39113
+    },
+    "pdf/198320410.pdf": {
+      "sha256": "9bf1c06b6f7bf508b354e982483d63561c1dd050e120004482d62e23cbafe9e9",
+      "size": 60612
+    },
+    "pdf/2026-13845.pdf": {
+      "sha256": "34df5e526716bd994552319cc63c4a3dcb30eadf795ceca9445b9b4d21968957",
+      "size": 281140
+    },
+    "pdf/2026-14578.pdf": {
+      "sha256": "e32de17658362f84b44a776882e13754d7fb18e8c464d71f46e066b6dbfdfcbf",
+      "size": 2118095
+    },
+    "pdf/20585853.pdf": {
+      "sha256": "cbd8935761e57fb2d6e28b0ef9c9531c63e703f5e8b313b59c411d0dc66557e3",
+      "size": 55362
+    },
+    "pdf/22290867.pdf": {
+      "sha256": "bcf0b767263ea7cbc6943894055841d3395cd65b72899e52b845113c929d9a0b",
+      "size": 59460
+    },
+    "pdf/225715843.pdf": {
+      "sha256": "56a9f4d3b9640c070f4d7e6f2616eb6d61328b5608534d6d5aeb00d205d6589e",
+      "size": 45980
+    },
+    "pdf/2310495.pdf": {
+      "sha256": "d60a5a151f06152d0436f69161485ae97c2ca1cbe0b5ebba7c5ef339fc796ec1",
+      "size": 43525
+    },
+    "pdf/231425210.pdf": {
+      "sha256": "ff71364af261de74ec7eac344c3fa23047ce4235526b3168609073b6a5a3da4f",
+      "size": 45542
+    },
+    "pdf/24231810.pdf": {
+      "sha256": "42c28a6c0e471758d95250af1ec33026369015460c8d923c8cb872134ebeb981",
+      "size": 166243
+    },
+    "pdf/26614980.pdf": {
+      "sha256": "3f584153eba4767135b19d71f0eb1f8913962ffba9dc9aa319378fefc5e8a02e",
+      "size": 42000
+    },
+    "pdf/2715244.pdf": {
+      "sha256": "6c77eb6d9100ef9bfd364d8d146732975088244967be88bf031d23518db0fbe9",
+      "size": 35657
+    },
+    "pdf/276728418.pdf": {
+      "sha256": "a4bbf61d7c2188e4c4f942388a2161ca60cfad6d50af67017731c44124ba136f",
+      "size": 24980
+    },
+    "pdf/283451672.pdf": {
+      "sha256": "846e4bb44aebf0423287ed5a308aa713130d2cb191dbacbc0d3e2e2175855419",
+      "size": 145834
+    },
+    "pdf/290573779.pdf": {
+      "sha256": "2c52ae5ca2874dfbbf09d9525dc6ef36eff3287bd957977af596dd877a38d16a",
+      "size": 897624
+    },
+    "pdf/338298584.pdf": {
+      "sha256": "124f52851a620c19ab04898aa4d017ebdcf84b5542aeaee8edd2c5c3299f912b",
+      "size": 1292317
+    },
+    "pdf/35096584.pdf": {
+      "sha256": "ea317708380ae9c79b17abec49de91b66ef31126a01456b3f59337b7fbfdcf60",
+      "size": 77627
+    },
+    "pdf/3562713.pdf": {
+      "sha256": "3e03f3efa84ae57c4f73f50e6e31c8d9e56a88913ab34c7bf010c756a2d05a41",
+      "size": 147831
+    },
+    "pdf/3745414.pdf": {
+      "sha256": "26f27a21d3dcac1045fe516d892c3521a8f9eb9e53b61d49b99a06f63f2f4427",
+      "size": 55482
+    },
+    "pdf/426810068.pdf": {
+      "sha256": "b05b426a2c6d9e3b64580ae3d033b45d7f862c1816c7b808f2f1d6ea3515b6ed",
+      "size": 46370
+    },
+    "pdf/44498957.pdf": {
+      "sha256": "1c56be81494e78f5239db03fca6de75154206ae20c49e2e7f7bda4995916b304",
+      "size": 232854
+    },
+    "pdf/488807679.pdf": {
+      "sha256": "20d4037fc27c5e13dfa10d921fabacbe12b118ce6d8eaf8a990d073e4907583c",
+      "size": 623652
+    },
+    "pdf/50879965.pdf": {
+      "sha256": "41fbef9b2d2e075be44bb66f4e6bc29a83e4d01af48a2ef16e9722100437485b",
+      "size": 37710
+    },
+    "pdf/54849747.pdf": {
+      "sha256": "918fb411169cb66df996650dd861a2873ab77a80fec82d1e989cbed504a04ce1",
+      "size": 122323
+    },
+    "pdf/55581236.pdf": {
+      "sha256": "6aed3a7b42f2f3b79d1d02d43462c37e44b2d50cd198397019ce5648335925dd",
+      "size": 499393
+    },
+    "pdf/588538823.pdf": {
+      "sha256": "e24269011f7654af3cf9a24329b116f41eb6beaa29b791c1b7b040e58cf94b61",
+      "size": 5427567
+    },
+    "pdf/59616826.pdf": {
+      "sha256": "83f4ad6eccae06297a8bf0f931504b2743e69d26c283f2fa45653757519d87b2",
+      "size": 54320
+    },
+    "pdf/5_level_paging_and_5_level_ept_intel_revision_1_1_may_2017.pdf": {
+      "sha256": "adb2a5e99912c005e416f5099add45e39772d36068539446584014725a623afa",
+      "size": 187398
+    },
+    "pdf/6300586.pdf": {
+      "sha256": "a5c42e0f8959998e1bbe3dd3b0e91f4ec9b0e6f4a1011c61a6ce68a0205412a6",
+      "size": 56410
+    },
+    "pdf/631692814.pdf": {
+      "sha256": "6818692570c5a3543592c6f26792223e7f7079fc98fb14d3ce3da63b4a18bc06",
+      "size": 400811
+    },
+    "pdf/65730784.pdf": {
+      "sha256": "98f0b3f6c3f967e661b4ae3a3437ee0aca138728eafea0e922139a7448de12e5",
+      "size": 741390
+    },
+    "pdf/681693.pdf": {
+      "sha256": "133592c082044b981bb96947ccf8141c66d279375023a823fa3e681c3c8b17e5",
+      "size": 40988
+    },
+    "pdf/706944893.pdf": {
+      "sha256": "e2e5ad6df8191a51a69ff43010aa1a507b5d241813ac48cd9d5cd166180b959c",
+      "size": 1748067
+    },
+    "pdf/738677844.pdf": {
+      "sha256": "f2ee9da2c642eb0ed1080cdd4db3b81504139794d4b26a9d469da07a524c233e",
+      "size": 91816
+    },
+    "pdf/84034880.pdf": {
+      "sha256": "36963cce595a8a787d1ae7492a1dfa695d6de4810359c2be4cf1bed5194e810f",
+      "size": 11552701
+    },
+    "pdf/90050085.pdf": {
+      "sha256": "f527232321227a300e6072fb5f96b0770722db0111f680c0dcee8faed6daf12c",
+      "size": 70250
+    },
+    "pdf/92091765.pdf": {
+      "sha256": "69e70a170aeaf5bea34417aabe782ee72a8248aff5caff1c0aea84cdaa2ad491",
+      "size": 132067
+    },
+    "pdf/94986293.pdf": {
+      "sha256": "74bdeef8de1bb0a9282a2b4ed49a28cb509f71dc03e35ab46a568f9870197bbc",
+      "size": 51945
+    },
+    "pdf/95604000.pdf": {
+      "sha256": "322019ded9ff4f492a5bf94e91af60f742d9c6410b79743367e1845c4fd64dc6",
+      "size": 115332
+    },
+    "pdf/97492500.pdf": {
+      "sha256": "d6bcaf829949e41774efb72bc83fa22f90118d64894cdaa2e378e7f43f49e0e4",
+      "size": 337531
+    },
+    "pdf/C.-G.-Jung-Collected-Works-Volume-16_-The-Practice-of-Psychotherapy.pdf": {
+      "sha256": "acbcb9515608ee5678a60a4681a0a6453da0d6f47152bd0387c617d597e0ce61",
+      "size": 3946707
+    },
+    "pdf/C.-G.-Jung-Collected-Works-Volume-17_-The-Development-of-Personality.pdf": {
+      "sha256": "d54d3a64d09bc25200d5bf0f3954c4f3608c862cfd6b13fbe79d4d70db00081f",
+      "size": 1468161
+    },
+    "pdf/a_brief_introduction_to_neural_networks_neuronalenetze_en_zeta2_2col_dkrieselcom.pdf": {
+      "sha256": "3256bdeba5593398da6004a0da44002bffbd3415f9e1bac4c8377a602d764035",
+      "size": 6358127
+    },
+    "pdf/a_brief_introduction_to_the_standard_annotation_language_sal_2006.pdf": {
+      "sha256": "e477105297344ea3e672e13797c7bfd5aca0e6888b0d437bfc8996b2d2e2134b",
+      "size": 358744
+    },
+    "pdf/a_catalogue_of_optimizing_transformations_1971_allen_catalog.pdf": {
+      "sha256": "3a0661795d608b0e409c807416edb024862abe6a5fbba0e704ebb7b13ec22d08",
+      "size": 2346760
+    },
+    "pdf/a_comparison_of_programming_languages_in_economics_16_jun_2014.pdf": {
+      "sha256": "4f4650d3620c84e472c16125fbd592d768e1c953d3d374a86ce83bc6c0414cc1",
+      "size": 211355
+    },
+    "pdf/a_comprehensive_study_of_convergent_and_commutative_replicated_data_types.pdf": {
+      "sha256": "23bc48da619ea5398202c9161713a4f74e32eb07216e359ae6f4eb0fb0895665",
+      "size": 1537629
+    },
+    "pdf/a_comprehensive_study_of_main_memory_partitioning_and_its_application_to_large_scale_comparison_and_radix_sort_sigmod14_i.pdf": {
+      "sha256": "64bb7dd1d44f94d7221543ae58fda96432739588a0c44a6c610c4d04deb1f160",
+      "size": 1931978
+    },
+    "pdf/a_course_in_machine_learning_ciml_v0_9_all.pdf": {
+      "sha256": "730418d6bbd03c72583fccd8ed3896b9bef20228840cecf9cfb9b90635a311ef",
+      "size": 2636899
+    },
+    "pdf/algebra_topology_differential_calculus_and_optimization_theory_for_computer_science_and_machine_learning_2019_math_deep.pdf": {
+      "sha256": "fd3dd2ab72ab39969442736f778ffc89e279016a29ced1f9692d449aeb834877",
+      "size": 20812100
+    },
+    "pdf/an_introduction_to_statistical_learning_with_applications_in_r_islr_sixth_printing.pdf": {
+      "sha256": "fffa8137159d247dcf4984a13aba12451bcc7402bbe0bfbc7d93ff6d43689593",
+      "size": 9433354
+    },
+    "pdf/assembly_language_for_beginners_al4_b_en.pdf": {
+      "sha256": "d40fe36c5fbf82715a8e74b5889b94cdff09eb530363cac6adfc8f2c2db7b76c",
+      "size": 9068750
+    },
+    "pdf/bayesian_data_analysis_third_edition_13th_feb_2020.pdf": {
+      "sha256": "60fa725d1d7cf1c93408a1105b4540022c1e91731988a754cd9b6d921283e79a",
+      "size": 35493143
+    },
+    "pdf/code_and_formula.pdf": {
+      "sha256": "6cb63fba2ad42dd0e0afe6a26dcf3b3bff5a86919c4c06157c71c65ebc0fc9e6",
+      "size": 89031
+    },
+    "pdf/copy_protected.pdf": {
+      "sha256": "ece36293ad73801de2e9f0c1a047b90ae62717bf63900726328613fd304478ae",
+      "size": 270117
+    },
+    "pdf/corrupt_truncated.pdf": {
+      "sha256": "e5c62df5dab5c87b6a015ef3d43597074d1eec433b15f51aec63b8582d0e4ab4",
+      "size": 9
+    },
+    "pdf/docling.pdf": {
+      "sha256": "82dd470712ce8389f19f20eb9330475e2166a281f8c7990a9f1d0763d73b4d22",
+      "size": 5566575
+    },
+    "pdf/embedded_images_tables.pdf": {
+      "sha256": "00cf5fc3c334076f982b88d4e8f8bf1ecdf8273ce2b1de9d79f462b1c0a54e65",
+      "size": 109798
+    },
+    "pdf/fake_memo.pdf": {
+      "sha256": "f54e68281e2018cc3200626aa3cc970c63b4ff2f3afb89a4204207a66f5a2aeb",
+      "size": 13374
+    },
+    "pdf/flattened_form.pdf": {
+      "sha256": "e821b5cc7b28b16d738dbd9dfd7a0acad9bdee1da5ba49b35131f0192d27a6e0",
+      "size": 1152
+    },
+    "pdf/ft_ACN_2009_page_102_t0.pdf": {
+      "sha256": "f8af9cee9feb9c6fb3ab0860b3ad9189dfb776111f95c3506feb4e1f69e87123",
+      "size": 10762
+    },
+    "pdf/ft_BAX_2012_page_100_t1.pdf": {
+      "sha256": "2805296d1997a0357ea198e416135b9ed9931af324d694680489c3f337479259",
+      "size": 2003
+    },
+    "pdf/ft_BEN_2010_page_100_t0.pdf": {
+      "sha256": "00aadd05170e5e2adc2f9a4de6d11b6ca7cd0c70173ab23788e00eec525bf138",
+      "size": 3185
+    },
+    "pdf/ft_BKNG_2012_page_109_t0.pdf": {
+      "sha256": "f9f74bbc55af6cb481a6c83e72c952282e04b6840e884335bf380e6874d7d69a",
+      "size": 5203
+    },
+    "pdf/ft_CAT_2017_page_101_t1.pdf": {
+      "sha256": "875f3eabf90d2a71b8c9cb97a20464be327ee907cf077649be849844e341f250",
+      "size": 1470
+    },
+    "pdf/ft_CB_2008_page_102_t0.pdf": {
+      "sha256": "9feab424233142eee037417effdb9dc8bd6048b322068b157f337a57280a40d8",
+      "size": 1674
+    },
+    "pdf/fundamentals_of_deep_learning_2014.pdf": {
+      "sha256": "0c1f41fdb9e05739a5b41371471815ecd1c204be8c2270b1de1b42568be1ed66",
+      "size": 56715281
+    },
+    "pdf/ghostscript_inline_images_repro.pdf": {
+      "sha256": "6945490f8e16a94b071d90178b578484d84e3f7d9be79f27ef9780fe61fa2ef4",
+      "size": 116258
+    },
+    "pdf/google_doc_document.pdf": {
+      "sha256": "69f6b7f493b1bc55d518942976cbeadc4ec0a36f6d8a6dc24feffc516d35b2c9",
+      "size": 80100
+    },
+    "pdf/image_only_german_pdf.pdf": {
+      "sha256": "c6306b21866338db5960289d56b9424cacb42c47b341efdba28af364d8122863",
+      "size": 189884
+    },
+    "pdf/intel_64_and_ia_32_architectures_software_developer_s_manual_combined_volumes_1_4_june_2021_325462_sdm_vol_1_2abcd_3abcd.pdf": {
+      "sha256": "ef129f8b18963a55deb190e2fbff40f7e3bacbee4afc248c9c9087093d08be48",
+      "size": 52916900
+    },
+    "pdf/interactive_form.pdf": {
+      "sha256": "6af81fbdf83120e8ec2a85539e1a99a9a2fd217568852005b25af36b7cd8b565",
+      "size": 1445
+    },
+    "pdf/iso_21111_10_2021_road_vehicles_in_vehicle_ethernet_conformance_test_plans.pdf": {
+      "sha256": "e8823c2220c879acd864fe4e74abb6a9473ef544165ce8cba7218507bb1f5ef9",
+      "size": 2343170
+    },
+    "pdf/issue-1484-two-column-hanging-number-gutter.pdf": {
+      "sha256": "918494c7dffcf8f2c2fb2d560581f8e5de195957271c8114e0fe7923b2f48b92",
+      "size": 4823
+    },
+    "pdf/issue-1542-prose-paragraph-shredded-into-table.pdf": {
+      "sha256": "afeee069d71b17f630601f1387122a3e9677caa32f7422b744b0e0ee6ca96b7e",
+      "size": 1828
+    },
+    "pdf/issue-636-chunk-pages.pdf": {
+      "sha256": "a2050f1095efcccda02327ca56bc5cf0fcf74763265dd3ad99da06d1a4790bc2",
+      "size": 195020
+    },
+    "pdf/large.pdf": {
+      "sha256": "9ed56fdf6cdac02a1b559b59e787b18eb26bf67fbcc216f7d4ba33e72a83d593",
+      "size": 2636957
+    },
+    "pdf/medium.pdf": {
+      "sha256": "7ad9276c97ffbf1b2404e4667dc832cee40754c02883577779cd7e2b4b67e8d7",
+      "size": 245260
+    },
+    "pdf/multi_page.pdf": {
+      "sha256": "956846c28f9ed9d3b5cbe071865c082bd415f56e3e299c479aeea1f615eefa61",
+      "size": 128322
+    },
+    "pdf/multi_page_tables.pdf": {
+      "sha256": "00cf5fc3c334076f982b88d4e8f8bf1ecdf8273ce2b1de9d79f462b1c0a54e65",
+      "size": 109798
+    },
+    "pdf/multipage_marketing.pdf": {
+      "sha256": "3fc7c59491f0171faef836a59b4c91693a65f8c26b69d1118928f0f321ed80a3",
+      "size": 192415
+    },
+    "pdf/non_ascii_text.pdf": {
+      "sha256": "2d850c37535edc5272b08392e9bbc749c0b10ed8962ee1908685100d4f03a24a",
+      "size": 1799461
+    },
+    "pdf/non_searchable.pdf": {
+      "sha256": "2bc5bf096b480c08ea072f94c11543dfc96590d1dde910724c3285d0070eecc5",
+      "size": 70489
+    },
+    "pdf/nougat_001.pdf": {
+      "sha256": "cd85c3d10feab1a63252e9c7c362d3a8b3046baa2eab8570a0ff63966acf8abc",
+      "size": 525343
+    },
+    "pdf/nougat_002.pdf": {
+      "sha256": "8460114cc194a90ae3433d4a5af1dc777c868ac39f6d3910225fde8f0d727fa4",
+      "size": 126909
+    },
+    "pdf/nougat_003.pdf": {
+      "sha256": "ff5490d3ab2a13ff36e8e05cd5696970051d7ccbfd4a05d355c72fb1d0c153a7",
+      "size": 205324
+    },
+    "pdf/nougat_004.pdf": {
+      "sha256": "eb56e97eca60df97ca1466d6f9838615f9758df79ada5dae5ef8b7bddd977fac",
+      "size": 63070
+    },
+    "pdf/nougat_005.pdf": {
+      "sha256": "66a172582fc1a17de6f4ac1e0c8dbd1f85428e54477074fc4c90958955e72c71",
+      "size": 932335
+    },
+    "pdf/nougat_006.pdf": {
+      "sha256": "adc74aeda1623f75d4df389b8beb0ceb5ea05aad2ba8489728b8199f8f610f1d",
+      "size": 80325
+    },
+    "pdf/nougat_007.pdf": {
+      "sha256": "e5626924a53af4cf790190e120bf9ae81c0096029133b5479d379b4132888952",
+      "size": 185508
+    },
+    "pdf/nougat_008.pdf": {
+      "sha256": "60bbb4dfbab763e0f2f16c4c32f535258ad0cd1915cf06cdade84219359f91d5",
+      "size": 143492
+    },
+    "pdf/nougat_009.pdf": {
+      "sha256": "45df91df8328a2bfb8293565b0e5ccc9e7204dc474302e030d51d0c0f7b6f011",
+      "size": 498806
+    },
+    "pdf/nougat_010.pdf": {
+      "sha256": "a7f949be1581f4d99185e824aa39a8794881529fe6953e522ba523795d267ad8",
+      "size": 107951
+    },
+    "pdf/nougat_011.pdf": {
+      "sha256": "69bc212ef5ca3dab922be921d53f526f1bfa8ce4f2124e1a4ec37e75f52af143",
+      "size": 191109
+    },
+    "pdf/nougat_012.pdf": {
+      "sha256": "ee51d0369c4ae8c84ebeaf29d8442dd1e1f40419cbf9c82532f2febbc8f95dbb",
+      "size": 141727
+    },
+    "pdf/nougat_013.pdf": {
+      "sha256": "4abaa4d73a628cb74daf6f6aea08be432b0c65b7d65333cfbfb67d6899e02c7c",
+      "size": 61858
+    },
+    "pdf/nougat_014.pdf": {
+      "sha256": "05015d789a281dc7737a853d8bf468f0bd3002cf899cebd428b0f4d14d4e6817",
+      "size": 848830
+    },
+    "pdf/nougat_015.pdf": {
+      "sha256": "a547c2af06b92e55b5a99355e9376605806d612081ce86754bd77dbb8d6fef71",
+      "size": 46652
+    },
+    "pdf/nougat_016.pdf": {
+      "sha256": "61ba78d68f5ab21fbd2a696929c19f1fa0a29aeff7e0ab6934374184cfe820fb",
+      "size": 454010
+    },
+    "pdf/nougat_017.pdf": {
+      "sha256": "732f67cf1df28378d1a050fb4135a6dcdd5160a9b723408fca70492086f7fd13",
+      "size": 911122
+    },
+    "pdf/nougat_018.pdf": {
+      "sha256": "0f8834665b9b7f00cd186d7887a860549f496b383c6b88110f380949950af8dc",
+      "size": 516747
+    },
+    "pdf/nougat_019.pdf": {
+      "sha256": "190dea0d955470f27393a70c689a13eede327028b38aa412111273bf684169de",
+      "size": 183646
+    },
+    "pdf/nougat_020.pdf": {
+      "sha256": "51c383fb34594914caa938eb9bc0d7e20a78c1d36b44dd6d56bdc417834ef6c7",
+      "size": 115368
+    },
+    "pdf/nougat_021.pdf": {
+      "sha256": "0c482fc074a03de256b1b0f7cd46488e62c897763599c651941d5d5e21edbf18",
+      "size": 469199
+    },
+    "pdf/nougat_022.pdf": {
+      "sha256": "43334041f42c75fd162d3fe1882cb322e3dda76b865e339deeac4b6391687e59",
+      "size": 34841
+    },
+    "pdf/nougat_023.pdf": {
+      "sha256": "dc190c438b1d0480f66a442885eb791da405f64eda83876f81fea3a5cdd17c6d",
+      "size": 74186
+    },
+    "pdf/nougat_024.pdf": {
+      "sha256": "25b6f40eeaa771f466d7c1b9da6063328d29b79fbc9e2d049a5437a8088e7110",
+      "size": 46310
+    },
+    "pdf/nougat_025.pdf": {
+      "sha256": "2d61b0483aa9dcc9549cc6c2347b12e3082bbe5b3aae2f176640add966a98628",
+      "size": 2094
+    },
+    "pdf/nougat_026.pdf": {
+      "sha256": "44af20f038f0e11d67f3aebe2f683276a73d01e8167596bd691d1b047ed7012f",
+      "size": 44245
+    },
+    "pdf/nougat_027.pdf": {
+      "sha256": "7a2c360a98908f9a72ab9bd99d3c6a86747b9e3a57d9bf57ba2e0b04e426bef8",
+      "size": 390183
+    },
+    "pdf/nougat_028.pdf": {
+      "sha256": "72e2716d5d77f0a93ddc0f0d997398d63df589b011aaca5f82e3659b4a8e0f67",
+      "size": 269676
+    },
+    "pdf/nougat_029.pdf": {
+      "sha256": "87ad0b1d885897081a965be2531e61343b1c272cc6302fead4cfbd093ad93a24",
+      "size": 274635
+    },
+    "pdf/nougat_030.pdf": {
+      "sha256": "64c7354e7efd848209d79e62852274810dbc04525a050ce59f57cd8a614182cd",
+      "size": 772983
+    },
+    "pdf/nougat_031.pdf": {
+      "sha256": "a038b5aa73324cd417aceb930492d301cda3d00c2c3b0ee42b115952678cfa13",
+      "size": 40157
+    },
+    "pdf/nougat_032.pdf": {
+      "sha256": "e2ea56eaccb3119ffa64b3e5b72c72aaffd7372e71b6cc3d50f96ddaceb09512",
+      "size": 112154
+    },
+    "pdf/nougat_033.pdf": {
+      "sha256": "9f9a9016788e4c73b04e97152bfbdc301da6e9e2c9a3d3b0c677a81a1a55c2b4",
+      "size": 181946
+    },
+    "pdf/nougat_034.pdf": {
+      "sha256": "5a3fb09d318968ae643fef394d79a796b4f68fad5fc860d250b3d4e79a05464a",
+      "size": 219515
+    },
+    "pdf/nougat_035.pdf": {
+      "sha256": "a0b5443dca342368a9f6b4cbe245fa58d463c93798a2d8abdb6091d59accb764",
+      "size": 813601
+    },
+    "pdf/nougat_036.pdf": {
+      "sha256": "292ccff955d3a932acda4217beb2b8886be493b5e2adaa931914b205142d7b6e",
+      "size": 399271
+    },
+    "pdf/nougat_037.pdf": {
+      "sha256": "045bb6b5faa54323c9e8e5ce452f286762e845d3bdcce2fc597c297013733a60",
+      "size": 561676
+    },
+    "pdf/nougat_038.pdf": {
+      "sha256": "4cfb9abbec1e4213c02197d88a793dc36ced5b3c9097ac1ed4524c90f4edda86",
+      "size": 2391915
+    },
+    "pdf/nougat_039.pdf": {
+      "sha256": "70a73b4610a6257013688912c95750a813d00c813f84d80880b4d4404b744e93",
+      "size": 69496
+    },
+    "pdf/nougat_040.pdf": {
+      "sha256": "5cb8919d3c4988206481caf961fe6e66b35612634cd0a2035b384dff00e6a92c",
+      "size": 476639
+    },
+    "pdf/nougat_041.pdf": {
+      "sha256": "5a30375729c3a134ca705c5a330103ee6882d0e51015f5e021075496c3801cd4",
+      "size": 733602
+    },
+    "pdf/nougat_042.pdf": {
+      "sha256": "30d59c708270fc2518ad221a29161cae7f14ba31563c5a30c51a44eadc03df71",
+      "size": 166420
+    },
+    "pdf/nougat_043.pdf": {
+      "sha256": "31f5ebaf02f7293d458dde0f1cafb068690d50ac4acf34c964127f20edf00501",
+      "size": 119114
+    },
+    "pdf/nougat_044.pdf": {
+      "sha256": "9b86c2ec0ac952ac216e6753afacaa47f3ed0e77c049885244f54d53cae7971c",
+      "size": 107812
+    },
+    "pdf/nougat_045.pdf": {
+      "sha256": "7ad63a1e353978a3c51e07ec17fb9b575cb4d3bc5f2dafb3caee202a0a767494",
+      "size": 129544
+    },
+    "pdf/nougat_046.pdf": {
+      "sha256": "c8dbe657dbb52ee5c4124581a797bc571c85525e89cbf96d31a43fdaf423ccad",
+      "size": 594787
+    },
+    "pdf/nougat_047.pdf": {
+      "sha256": "b330fce83f6481497cb9e1f067b17eb2e5db70c2c207b1b5830526c103b82d3c",
+      "size": 420052
+    },
+    "pdf/nougat_048.pdf": {
+      "sha256": "02efa6608470c0dad5e0bc729f65083e713d3f50299191336638cb67052bda26",
+      "size": 572026
+    },
+    "pdf/nougat_049.pdf": {
+      "sha256": "ba348ca6449f1c943cf533d552a54a2f69a4f1d6a03875d3323978719feb9e2c",
+      "size": 122803
+    },
+    "pdf/nougat_050.pdf": {
+      "sha256": "25f062ad828f91633385e0104d38bbab5a1be6641d24f6c99883522900b8bdee",
+      "size": 108353
+    },
+    "pdf/ocr_test.pdf": {
+      "sha256": "73f23122e9edbdb0a115b448e03c8064a0ea8bdc21d02917ce220cf032454f31",
+      "size": 93549
+    },
+    "pdf/ocr_test_rotated_180.pdf": {
+      "sha256": "5e612719cff9ea5ab877d0ce6c1fae44f0b70ee15d4157e9231e6a5d5d7de906",
+      "size": 94703
+    },
+    "pdf/ocr_test_rotated_270.pdf": {
+      "sha256": "1b731058c6c1b68ce271e23c5ecc2fbdf07827fc04c965c897241a01c81911d9",
+      "size": 94702
+    },
+    "pdf/ocr_test_rotated_90.pdf": {
+      "sha256": "39d7fab939f52c2e88a0f51d6ae7ae5e83ece0576f6ec00860fef325ca6e6c5e",
+      "size": 94126
+    },
+    "pdf/password_protected.pdf": {
+      "sha256": "ece36293ad73801de2e9f0c1a047b90ae62717bf63900726328613fd304478ae",
+      "size": 270117
+    },
+    "pdf/pdfa_001.pdf": {
+      "sha256": "44af20f038f0e11d67f3aebe2f683276a73d01e8167596bd691d1b047ed7012f",
+      "size": 44245
+    },
+    "pdf/pdfa_002.pdf": {
+      "sha256": "7a2c360a98908f9a72ab9bd99d3c6a86747b9e3a57d9bf57ba2e0b04e426bef8",
+      "size": 390183
+    },
+    "pdf/pdfa_003.pdf": {
+      "sha256": "72e2716d5d77f0a93ddc0f0d997398d63df589b011aaca5f82e3659b4a8e0f67",
+      "size": 269676
+    },
+    "pdf/pdfa_004.pdf": {
+      "sha256": "87ad0b1d885897081a965be2531e61343b1c272cc6302fead4cfbd093ad93a24",
+      "size": 274635
+    },
+    "pdf/pdfa_005.pdf": {
+      "sha256": "64c7354e7efd848209d79e62852274810dbc04525a050ce59f57cd8a614182cd",
+      "size": 772983
+    },
+    "pdf/pdfa_006.pdf": {
+      "sha256": "a038b5aa73324cd417aceb930492d301cda3d00c2c3b0ee42b115952678cfa13",
+      "size": 40157
+    },
+    "pdf/pdfa_007.pdf": {
+      "sha256": "e2ea56eaccb3119ffa64b3e5b72c72aaffd7372e71b6cc3d50f96ddaceb09512",
+      "size": 112154
+    },
+    "pdf/pdfa_008.pdf": {
+      "sha256": "9f9a9016788e4c73b04e97152bfbdc301da6e9e2c9a3d3b0c677a81a1a55c2b4",
+      "size": 181946
+    },
+    "pdf/pdfa_009.pdf": {
+      "sha256": "5a3fb09d318968ae643fef394d79a796b4f68fad5fc860d250b3d4e79a05464a",
+      "size": 219515
+    },
+    "pdf/pdfa_010.pdf": {
+      "sha256": "a0b5443dca342368a9f6b4cbe245fa58d463c93798a2d8abdb6091d59accb764",
+      "size": 813601
+    },
+    "pdf/pdfa_011.pdf": {
+      "sha256": "292ccff955d3a932acda4217beb2b8886be493b5e2adaa931914b205142d7b6e",
+      "size": 399271
+    },
+    "pdf/pdfa_012.pdf": {
+      "sha256": "045bb6b5faa54323c9e8e5ce452f286762e845d3bdcce2fc597c297013733a60",
+      "size": 561676
+    },
+    "pdf/pdfa_013.pdf": {
+      "sha256": "4cfb9abbec1e4213c02197d88a793dc36ced5b3c9097ac1ed4524c90f4edda86",
+      "size": 2391915
+    },
+    "pdf/pdfa_014.pdf": {
+      "sha256": "70a73b4610a6257013688912c95750a813d00c813f84d80880b4d4404b744e93",
+      "size": 69496
+    },
+    "pdf/pdfa_015.pdf": {
+      "sha256": "5cb8919d3c4988206481caf961fe6e66b35612634cd0a2035b384dff00e6a92c",
+      "size": 476639
+    },
+    "pdf/pdfa_016.pdf": {
+      "sha256": "5a30375729c3a134ca705c5a330103ee6882d0e51015f5e021075496c3801cd4",
+      "size": 733602
+    },
+    "pdf/pdfa_017.pdf": {
+      "sha256": "30d59c708270fc2518ad221a29161cae7f14ba31563c5a30c51a44eadc03df71",
+      "size": 166420
+    },
+    "pdf/pdfa_018.pdf": {
+      "sha256": "31f5ebaf02f7293d458dde0f1cafb068690d50ac4acf34c964127f20edf00501",
+      "size": 119114
+    },
+    "pdf/pdfa_019.pdf": {
+      "sha256": "9b86c2ec0ac952ac216e6753afacaa47f3ed0e77c049885244f54d53cae7971c",
+      "size": 107812
+    },
+    "pdf/pdfa_020.pdf": {
+      "sha256": "7ad63a1e353978a3c51e07ec17fb9b575cb4d3bc5f2dafb3caee202a0a767494",
+      "size": 129544
+    },
+    "pdf/pdfa_021.pdf": {
+      "sha256": "c8dbe657dbb52ee5c4124581a797bc571c85525e89cbf96d31a43fdaf423ccad",
+      "size": 594787
+    },
+    "pdf/pdfa_022.pdf": {
+      "sha256": "b330fce83f6481497cb9e1f067b17eb2e5db70c2c207b1b5830526c103b82d3c",
+      "size": 420052
+    },
+    "pdf/pdfa_023.pdf": {
+      "sha256": "02efa6608470c0dad5e0bc729f65083e713d3f50299191336638cb67052bda26",
+      "size": 572026
+    },
+    "pdf/pdfa_024.pdf": {
+      "sha256": "ba348ca6449f1c943cf533d552a54a2f69a4f1d6a03875d3323978719feb9e2c",
+      "size": 122803
+    },
+    "pdf/pdfa_025.pdf": {
+      "sha256": "25f062ad828f91633385e0104d38bbab5a1be6641d24f6c99883522900b8bdee",
+      "size": 108353
+    },
+    "pdf/pdfa_026.pdf": {
+      "sha256": "bcb9e117e9c2162d20b4e32cf0c5d427e3ada92314c5332f8385f2cbc7881d7b",
+      "size": 767342
+    },
+    "pdf/pdfa_027.pdf": {
+      "sha256": "75a548463886f504f4bc1be0d9c4002bfc6e115476483a56f0546d2460984bea",
+      "size": 163606
+    },
+    "pdf/pdfa_028.pdf": {
+      "sha256": "e9152af7373c141911149583e974c8a8d137153528bf2e144839c37ef4fcc893",
+      "size": 142067
+    },
+    "pdf/pdfa_029.pdf": {
+      "sha256": "3778ea5c5308ea3a7e602461226f5cd20c2d423275a54788e1fbf92d5bc682c6",
+      "size": 5262991
+    },
+    "pdf/pdfa_030.pdf": {
+      "sha256": "9fb491ac6c3d4a0db7e8152ae7282254c6b4ea3dc9a8161613832eb26571f367",
+      "size": 110445
+    },
+    "pdf/pdfa_031.pdf": {
+      "sha256": "2d45dd647d8cb7fb5c433f6f5ee4e3739e18d9e05f1f1e035f326396d29c9336",
+      "size": 4873
+    },
+    "pdf/pdfa_032.pdf": {
+      "sha256": "d65b609c1fc311e4836bfcc1e05d7ac36839eb3e5f7582447199fbf9ba9881ff",
+      "size": 108342
+    },
+    "pdf/pdfa_033.pdf": {
+      "sha256": "1a347990545a9b15c19d81e6b0d0363f5691ad74854eb994a0926ee7936c09b0",
+      "size": 11564
+    },
+    "pdf/pdfa_034.pdf": {
+      "sha256": "f37b1cc73a8c1b8674adc097cea6d1dbf32ba2d5d42d9a9e14995d8c39486e14",
+      "size": 27491
+    },
+    "pdf/pdfa_035.pdf": {
+      "sha256": "cce42737cb1efbf321fa25074ce78bd1804587a446e84f26ddd52bbdf157e723",
+      "size": 79182
+    },
+    "pdf/pdfa_036.pdf": {
+      "sha256": "b80d374efd7ed8b02bf723c580ca1da1dd237949371b315c75377a4b4866f591",
+      "size": 409867
+    },
+    "pdf/pdfa_037.pdf": {
+      "sha256": "654feda9fa0025a0ed7a8c74e7030e2d0c91008f0b89731a4570c8cd4c152285",
+      "size": 282613
+    },
+    "pdf/pdfa_038.pdf": {
+      "sha256": "0d1cc891db1594ef1fb228b124fe45d5a6a915b28519268851d3a55094d3f6ac",
+      "size": 14168
+    },
+    "pdf/pdfa_039.pdf": {
+      "sha256": "ed3dc3cb7072bcc784f4908fd0351ad1a0362a4e41d58280bce784ef67c96639",
+      "size": 69411
+    },
+    "pdf/pdfa_040.pdf": {
+      "sha256": "f96b11f269ea90dabe0ecb870660066a51b077cb1c947ecc4b634ed610ceb681",
+      "size": 108450
+    },
+    "pdf/pdfa_041.pdf": {
+      "sha256": "88efce6edbf315f6ec54ac1d2d8d1a704aad3ffc1e3258560bc718adfc9262c4",
+      "size": 41518
+    },
+    "pdf/pdfa_042.pdf": {
+      "sha256": "517f4da2af87e1043e3be4e40c8523d671d361f79a2937fc00210b7bb9d7779b",
+      "size": 197955
+    },
+    "pdf/pdfa_043.pdf": {
+      "sha256": "8b9a441ad24ee60402ebcec0c8d0ace44e36149a35a342785d82c7b8e5b27a5c",
+      "size": 106715
+    },
+    "pdf/pdfa_044.pdf": {
+      "sha256": "3db82a9c902bfc676dd7b24b5b80dd6fcf4db780947777c276fecc8c90bbd8d5",
+      "size": 143107
+    },
+    "pdf/pdfa_045.pdf": {
+      "sha256": "ceb46d5e88e6abbe0e128416bf239bb16a98ad8d95451934d1f24fe012bfb5d0",
+      "size": 19551
+    },
+    "pdf/pdfa_046.pdf": {
+      "sha256": "55c860e03648a4d10e139590402a2936b174ddf11483984076e77a8015ab94ff",
+      "size": 246086
+    },
+    "pdf/pdfa_047.pdf": {
+      "sha256": "23062e6aaf98f80b8692d1eff1810b7496d9f397a5c3a62da0e21938cddb0015",
+      "size": 130632
+    },
+    "pdf/pdfa_048.pdf": {
+      "sha256": "3b9d52dab1a34c9d5d3e1a825d6d5d0ab9436d4bffc82c5ea312bd0ea9cb4dd1",
+      "size": 640060
+    },
+    "pdf/pdfa_049.pdf": {
+      "sha256": "857a2a5320222ac1a5e113fb4dc90972e7c1acd1e3b16d6679547992baff9d09",
+      "size": 152698
+    },
+    "pdf/pdfa_050.pdf": {
+      "sha256": "d46bc750db66fac7fcae648640e5b6ea7e63c0950c538ddcc37314152c8fd64c",
+      "size": 308633
+    },
+    "pdf/perfect_hash_functions_slides.pdf": {
+      "sha256": "ba782cb977ca6bdb9e5577a2e168b37a2abc77a90307591c5cf7b90976a0a246",
+      "size": 17159
+    },
+    "pdf/program_design_in_the_unix_environment.pdf": {
+      "sha256": "1c6c233c3b70c7b020823911462594c59f09f0936e0b889c79d712b6070a01fe",
+      "size": 26912
+    },
+    "pdf/proof_of_concept_or_gtfo_v13_october_18th_2016.pdf": {
+      "sha256": "c881c67557af52864654791a2a494f329a2fa397236bf0e961508f0769b0a3f5",
+      "size": 62061798
+    },
+    "pdf/right_to_left_01.pdf": {
+      "sha256": "30d675db2a5c9613f2b12cb03e74c8f9384f473274216ee6a271cf0c99301f14",
+      "size": 102852
+    },
+    "pdf/sample_contract.pdf": {
+      "sha256": "5c970b36c96f043f2be2ffe4f02746075e7b9210536130128f53e8d62894eb1a",
+      "size": 49647
+    },
+    "pdf/scanned.pdf": {
+      "sha256": "961c83957eb02dafc3ca79f96508fcd5c7f275c1512a29244973bf1053371e89",
+      "size": 69966
+    },
+    "pdf/searchable.pdf": {
+      "sha256": "229defbb0cee6f02673a5cde290d0673e75a0dc31cec43989c8ab2a4eca7e1bb",
+      "size": 18810
+    },
+    "pdf/sharable_web_guide.pdf": {
+      "sha256": "04c76db01e20d7641e886b2403bea2df5757dfe9b4be7a283ee44d1861081a06",
+      "size": 3990371
+    },
+    "pdf/simple.pdf": {
+      "sha256": "6cb63fba2ad42dd0e0afe6a26dcf3b3bff5a86919c4c06157c71c65ebc0fc9e6",
+      "size": 89031
+    },
+    "pdf/table_document.pdf": {
+      "sha256": "00cf5fc3c334076f982b88d4e8f8bf1ecdf8273ce2b1de9d79f462b1c0a54e65",
+      "size": 109798
+    },
+    "pdf/tatr.pdf": {
+      "sha256": "9ed56fdf6cdac02a1b559b59e787b18eb26bf67fbcc216f7d4ba33e72a83d593",
+      "size": 2636957
+    },
+    "pdf/test_article.pdf": {
+      "sha256": "688595ed9be004c04ff5767130abf5407b91362200601ce6092694bb6edf55ba",
+      "size": 284839
+    },
+    "pdf/the_hideous_name_1985_pike85hideous.pdf": {
+      "sha256": "fdcafeff1f7c21bc0ac0164c4a5c2f1463397f21ffdfe468e3b9560b9625324e",
+      "size": 32949
+    },
+    "pdf/tiny.pdf": {
+      "sha256": "167ca200dae8b2f947fe68df0b1e9a8b87a197b47a55dc6bffda6c46784a7e9f",
+      "size": 23572
+    },
+    "pdf/total_order_panic_1198_tables_path.pdf": {
+      "sha256": "2b0f94659d03557cf006056290fa7b53e25a67ac19c54d9c972b703f02948878",
+      "size": 363061
+    },
+    "pdf/total_order_panic_1198_text_path.pdf": {
+      "sha256": "e4c8a92d18482cb509d3d9fb5049328342005838d932ddfefad2be7dedd43680",
+      "size": 550979
+    },
+    "pdf/with_images.pdf": {
+      "sha256": "00cf5fc3c334076f982b88d4e8f8bf1ecdf8273ce2b1de9d79f462b1c0a54e65",
+      "size": 109798
+    },
+    "pdf/xerox_alta_link_series_mfp_sag_en_us_2.pdf": {
+      "sha256": "cc38fac83118edbbab6ebf2520c96803cad9895411c5a33dc797f926aaedc8a1",
+      "size": 2435134
+    },
+    "pdf_scanned/code_and_formula_scanned.pdf": {
+      "sha256": "76914d44110ddc3c993696c8e95239a8f312ec48e5e1f56fe5eae0673ee1e71a",
+      "size": 1131281
+    },
+    "pdf_scanned/docling_scanned.pdf": {
+      "sha256": "874bada67b7bf700d42df25265823799955ae37ba3ec0e283747d1f2cd5d94f7",
+      "size": 5225528
+    },
+    "pdf_scanned/issue_1338_scanned_no_text_layer.pdf": {
+      "sha256": "0350f7e061a91df9c11548f061ac308360f0a1a0e8389c74e1b76c1bb70d5184",
+      "size": 126609
+    },
+    "pdf_scanned/memo_prose_scanned.pdf": {
+      "sha256": "9f75e84ec7e322b71715a626f06df1ce1ebe5bd7d921e6b046807d18a981b484",
+      "size": 42912
+    },
+    "pdf_scanned/multi_page_scanned.pdf": {
+      "sha256": "cc9455385e3fa2621664ef6fc3afc58f5df29ea37139e0fdd8d5dbb3b74073e1",
+      "size": 2527028
+    },
+    "pdf_scanned/nougat_001_scanned.pdf": {
+      "sha256": "eddbe9980b0c735d6664ae952f796d5cebef095d274b527f8821c9e6b15dc219",
+      "size": 1594277
+    },
+    "pdf_scanned/nougat_002_scanned.pdf": {
+      "sha256": "4bcbb45cf6e509ccbb915c06283698148318356dd9ee2ceda9ee087ef215fa53",
+      "size": 1474470
+    },
+    "pdf_scanned/nougat_003_scanned.pdf": {
+      "sha256": "c7655560fd5bd563983d0b8efd275332fcccbc85faa878b9b4bf2bc8061663d1",
+      "size": 2688539
+    },
+    "pdf_scanned/nougat_004_scanned.pdf": {
+      "sha256": "7d20f1309fd40c5c6bc2d23f9c76ae41e377e73d31d056beda9ff851ac5f2645",
+      "size": 253556
+    },
+    "pdf_scanned/nougat_005_scanned.pdf": {
+      "sha256": "78a83b585c08d24cd90dd69d5db2b0b68f7e9541978613b26fd02dd73d4384da",
+      "size": 2521399
+    },
+    "pdf_scanned/nougat_006_scanned.pdf": {
+      "sha256": "ccc871d229eeea65ba5afe6a49e08a52f16f36a6485975de7a97bbd2fb0dfcb5",
+      "size": 1042648
+    },
+    "pdf_scanned/nougat_007_scanned.pdf": {
+      "sha256": "af9ff98b90fbdd7867370aaaa43dc6ea2411233acd3da660ec649986880d62a9",
+      "size": 1814529
+    },
+    "pdf_scanned/nougat_008_scanned.pdf": {
+      "sha256": "2e17dbba998dbf096eb14f9308b2723692a330b2c77c8f1b9e0fdfa4c4d69a92",
+      "size": 6981852
+    },
+    "pdf_scanned/nougat_009_scanned.pdf": {
+      "sha256": "23c0e67528467e0ea867c95c1e80dcfa7da1b1f51d62740f823f45f7d9411dac",
+      "size": 1427628
+    },
+    "pdf_scanned/nougat_010_scanned.pdf": {
+      "sha256": "403eeff556a8fa4299df4d94ab4349fa18fd112811a8c16c4131934d19d5040b",
+      "size": 2036796
+    },
+    "pdf_scanned/nougat_011_scanned.pdf": {
+      "sha256": "cad925481060855210fd10f1fa743378bd51784a669b045be6ed7a3b26c97819",
+      "size": 7174368
+    },
+    "pdf_scanned/nougat_012_scanned.pdf": {
+      "sha256": "2da8b562f74b778fcba92efe07fb8892aad1b279dbf84daba412ee148a4b56c8",
+      "size": 1233386
+    },
+    "pdf_scanned/ordinance_2197_scanned.pdf": {
+      "sha256": "94dcfbd413fb69aedc0b2005893ddba2ea77be82da3ff3631dd17ff4c983749a",
+      "size": 538907
+    },
+    "pdf_scanned/synthetic_math_interpolation_scanned.pdf": {
+      "sha256": "99dd205450e6dfbd638a2a4ce03058ba595436acdafe0e736e126753c5b71834",
+      "size": 14894
+    },
+    "pdf_scanned/synthetic_math_interpolation_skew_scanned.pdf": {
+      "sha256": "553023190b90aa46e6196e74a55bf71939853db478c3109aea3ef1e90c4e4fe7",
+      "size": 15586
+    },
+    "pdf_scanned/synthetic_math_matrix_scanned.pdf": {
+      "sha256": "8505715c5362ce8eb733cd3cc783d27cffa218d51dabbf2a971820cc37b09090",
+      "size": 10464
+    },
+    "pdf_scanned/synthetic_math_series_scanned.pdf": {
+      "sha256": "6dcf181fa25d84409f7d99531bb4f1cd6607f003b73f81de8dbeb34e91fb3074",
+      "size": 11751
+    },
+    "ppt/simple.ppt": {
+      "sha256": "731b1a5478f36b996e02a0a2151df3de46c1c8293b3f0e10e7eda8aa24f249ab",
+      "size": 504320
+    },
+    "pptx/pitch_deck_presentation.pptx": {
+      "sha256": "c0698b227e4d28c52fb8d684b3157f1fa9ad32b832afa507771ceac05f5b77fb",
+      "size": 4610862
+    },
+    "pptx/powerpoint_bad_text.pptx": {
+      "sha256": "88117ee568e0836f91ed01bb99d87bda94b53013f0a65ee51406962c7f96a860",
+      "size": 35632
+    },
+    "pptx/powerpoint_sample.ppsx": {
+      "sha256": "2c0eed2d84ade004ee92c28f1f0a43364b712a1a1228f7b129d33ccdcbd22df8",
+      "size": 37674
+    },
+    "pptx/powerpoint_sample.pptx": {
+      "sha256": "24191d47fda511e11984e875f8676506da5ae1fbcaefcc63d81be377d3a3950c",
+      "size": 45849
+    },
+    "pptx/powerpoint_with_image.pptm": {
+      "sha256": "ab76c90447105622a6988094fe12affbced3bdbb46b2ea22cdcd70a1e729823c",
+      "size": 69614
+    },
+    "pptx/powerpoint_with_image.pptx": {
+      "sha256": "9940ed29f542666bd8bfc0230c3ef49d6a594bbe4ac3740274a695b46c18c3b1",
+      "size": 76480
+    },
+    "pptx/pptx_reversed_slide_order_issue329.pptx": {
+      "sha256": "c927d6cbd6f5e1939bdeb2a11d1b11062de7f3b494f0dfb6b22478c6820725e6",
+      "size": 3758132
+    },
+    "pptx/sample.ppsx": {
+      "sha256": "e86b69c3250c00f4ea56320c776556294bdb2f9484dce0b70ff5a4dad973e9ad",
+      "size": 53865
+    },
+    "pptx/simple.pptx": {
+      "sha256": "90db487950ddb12485e4b2409beb079ad233bab7274125dbe9835b30cfdfcac1",
+      "size": 34865
+    },
+    "rtf/accent.rtf": {
+      "sha256": "af34e9fd55222e25f022c1c6029ec4a4e0dee3424e3ebeb5d52379ce461b9bac",
+      "size": 50
+    },
+    "rtf/ansicpg1251.rtf": {
+      "sha256": "f62c5de45cdb004bb515f8ebbda575357cd259f1a35c56b942930710a33b489a",
+      "size": 113
+    },
+    "rtf/aurora_launch_plan.rtf": {
+      "sha256": "881e9be807479ee586388ed909ebc0d1691d7cc31c9223cd242df20786588b24",
+      "size": 3669
+    },
+    "rtf/bookmark.rtf": {
+      "sha256": "5f8e16a71aaeeada342e0b7d4af77ef60b546f392a67ee449c94335f5f901926",
+      "size": 168
+    },
+    "rtf/extraction_test.rtf": {
+      "sha256": "d28643f63375230e416453e0c693f4ccd86af0814eb98a5f5d580dc81e69f26b",
+      "size": 4262
+    },
+    "rtf/footnote.rtf": {
+      "sha256": "88960ddd6739a2d18686a4ed0a54d2435a69ca85ed89b58903fe85ebf74b8a10",
+      "size": 563
+    },
+    "rtf/formatting.rtf": {
+      "sha256": "4b55944b83e72a9f5ea5b51643a13ada8e77988f3e22d11a5e8d38a49b78622f",
+      "size": 40193
+    },
+    "rtf/heading.rtf": {
+      "sha256": "81db18abfe09f1607a8a6df6a05b19903e56cf462da0a8f1af420849d248021d",
+      "size": 45457
+    },
+    "rtf/image.rtf": {
+      "sha256": "3a0c3c2773b208fe4802bab8418921aae0f27cb1f32c82791ebf2887f414e306",
+      "size": 32795
+    },
+    "rtf/link.rtf": {
+      "sha256": "887c81d22ea93e942a356fd9920bb4b8161b895215e994bcd3e23744a6997d2b",
+      "size": 261
+    },
+    "rtf/list_complex.rtf": {
+      "sha256": "7ca7be7021fe6e1af2225a1c360997499a36bb8b39698edf6fd575faac1fa556",
+      "size": 63224
+    },
+    "rtf/list_simple.rtf": {
+      "sha256": "dc666edef40b3a0782a3bc776b61aa59096e1e2f90c2c18644f864ae1795cdd2",
+      "size": 1712
+    },
+    "rtf/lorem_ipsum.rtf": {
+      "sha256": "c1fca32c999ce9214997c880849ffeb2cf7ac4649c3f75c19e99aa79a494ad36",
+      "size": 3956
+    },
+    "rtf/table_error_codes.rtf": {
+      "sha256": "261aff735836a22e8ebe9b000a1753d47d5f564fb62cce9a7275a861c26dd2cf",
+      "size": 5300
+    },
+    "rtf/table_simple.rtf": {
+      "sha256": "cbc1edf2f9c7cfdb618b835aec93a53817b515985d7e5388d7d984f993a480de",
+      "size": 241
+    },
+    "rtf/tables.rtf": {
+      "sha256": "9d8317cfa263e4b2c7d31bf856f2bcf60641f3530da56079c9c538ab4e2d35bb",
+      "size": 8499
+    },
+    "rtf/unicode.rtf": {
+      "sha256": "0724e00559b01ff7639eca25ecd6a7c0a24a253d06ba65ef0ee1dec4260639e8",
+      "size": 92
+    },
+    "rtf/word_sample.rtf": {
+      "sha256": "ac1ee347364625fcd8cecb1093e88cf65165c11f8edba06af95582e0e29aebb7",
+      "size": 163580
+    },
+    "user_reports/mp_axmp_rec_en.pdf": {
+      "sha256": "297998a11ba8ecf20cab99478fc037bd87350690b6cdbb91db8688cb4b89527e",
+      "size": 408353
+    },
+    "vendored/docling/docx/docx_grouped_images.docx": {
+      "sha256": "705e2451324bc6de7ae813ce4de792cfc5c9bad0a380578336bad31ad458160a",
+      "size": 207463
+    },
+    "vendored/docling/docx/docx_rich_cells.docx": {
+      "sha256": "24b766a2e02c8b3c541d4923f8bb10d2032988c2b0d8e3b5a2e13602806caa9d",
+      "size": 24320
+    },
+    "vendored/docling/docx/equations.docx": {
+      "sha256": "c14465de928305b99eb81b82e08dc325ab5e1d4b38ad111a77e1e0d2c2c9be09",
+      "size": 15814
+    },
+    "vendored/docling/docx/list_after_num_headers.docx": {
+      "sha256": "19c30ad4af4879ad13a70a284a5d4ed922058fab19ad167e766c895961238b95",
+      "size": 15698
+    },
+    "vendored/docling/docx/lorem_ipsum.docx": {
+      "sha256": "bd261907c984c475b789761d31e6199fa594df0f2f79b702c9ca9e9c99042978",
+      "size": 14817
+    },
+    "vendored/docling/docx/table_with_equations.docx": {
+      "sha256": "fe924e9bef7ab34a7785fcd4fd74c975142e2530ba6e5db75a9ad16421c942a8",
+      "size": 14228
+    },
+    "vendored/docling/docx/tablecell.docx": {
+      "sha256": "4d08f40a2d3f29b03ea88ee1043ab0f3abf07ac7d1618b410f6e15b86af1232b",
+      "size": 15180
+    },
+    "vendored/docling/docx/test_emf_docx.docx": {
+      "sha256": "ad2dc1d08e904fc3ed8b8e7debe444a6a278d1e082fb0cb4f644a4c6db64e626",
+      "size": 426097
+    },
+    "vendored/docling/docx/textbox.docx": {
+      "sha256": "06144c1b769752bae948df16ec0f4c80967b6aebed874ddaa2b3ffbc08a3094c",
+      "size": 49206
+    },
+    "vendored/docling/docx/unit_test_formatting.docx": {
+      "sha256": "e49e531fa6078545f6f1aeb3a11427a50bea27ef05ae576c3c602b6b1cc19589",
+      "size": 29099
+    },
+    "vendored/docling/docx/unit_test_headers.docx": {
+      "sha256": "6ca962c5331a7c8381eef77322a0f8e7b4b61f174b663309d894de81d2e1440f",
+      "size": 13903
+    },
+    "vendored/docling/docx/unit_test_headers_numbered.docx": {
+      "sha256": "992e67c72734021bbeecca36897e4fa8158c38930ac7dbed6aa4f72b2a6b081f",
+      "size": 16880
+    },
+    "vendored/docling/docx/unit_test_lists.docx": {
+      "sha256": "cb7ea892ec7f51c06a16be7263c3e81a82ee61ade0a8ce3dbcc07949ef2ecf50",
+      "size": 15769
+    },
+    "vendored/docling/docx/word_comments.docx": {
+      "sha256": "fba1ceb88fdb0b1353f5d97d94f0dbb45c8379adfb7c53d8199612ab13c05a3e",
+      "size": 37399
+    },
+    "vendored/docling/docx/word_image_anchors.docx": {
+      "sha256": "5f41160551425b3f1df649e59ec81633752048d6a1ac7b7121b472b823a817f1",
+      "size": 18560
+    },
+    "vendored/docling/docx/word_sample.docx": {
+      "sha256": "ae4f3f6edd7ccd636b893ec8355d5eade6b0413fa779606452c561e334f390f7",
+      "size": 103966
+    },
+    "vendored/docling/docx/word_tables.docx": {
+      "sha256": "f4be87905250fc9792ed5a1910529a8998588fc06308e743744acfeddd010679",
+      "size": 16404
+    },
+    "vendored/docling/pdf/2203.01017v2.pdf": {
+      "sha256": "4fa8dff93d74a84069210c84a38d14d62a39ec8f4e4c90bf955fdebdebcf6636",
+      "size": 7215177
+    },
+    "vendored/docling/pdf/2206.01062.pdf": {
+      "sha256": "5dfbd8c115a15fd3396b68409124cfee29fc8efac7b5c846634ff924e635e0dc",
+      "size": 4310680
+    },
+    "vendored/docling/pdf/2305.03393v1-pg9.pdf": {
+      "sha256": "a07f5c34601ba2c234d898cbfaa9e29a7045996ccd82ccab3012516220a1f3a4",
+      "size": 162131
+    },
+    "vendored/docling/pdf/2305.03393v1.pdf": {
+      "sha256": "62f2a2163d768d5b125a207967797aefa6c9cc113de8bb5c725c582595dd0c1d",
+      "size": 4318934
+    },
+    "vendored/docling/pdf/amt_handbook_sample.pdf": {
+      "sha256": "7099fe05ade36067cf66e72b23277972a1a2b7d2da1cb82c8d690efd70143fe0",
+      "size": 673416
+    },
+    "vendored/docling/pdf/code_and_formula.pdf": {
+      "sha256": "6cb63fba2ad42dd0e0afe6a26dcf3b3bff5a86919c4c06157c71c65ebc0fc9e6",
+      "size": 89031
+    },
+    "vendored/docling/pdf/multi_page.pdf": {
+      "sha256": "956846c28f9ed9d3b5cbe071865c082bd415f56e3e299c479aeea1f615eefa61",
+      "size": 128322
+    },
+    "vendored/docling/pdf/picture_classification.pdf": {
+      "sha256": "dc38947ee802b7bcf82915804ccb8d04c4611e1b17491c415972821a329352fb",
+      "size": 212855
+    },
+    "vendored/docling/pdf/redp5110_sampled.pdf": {
+      "sha256": "2f6bc92861997d1434c069040dc63447c3e415e8e9eadbd1a8129ba2327ddba5",
+      "size": 1277938
+    },
+    "vendored/docling/pdf/right_to_left_01.pdf": {
+      "sha256": "30d675db2a5c9613f2b12cb03e74c8f9384f473274216ee6a271cf0c99301f14",
+      "size": 102852
+    },
+    "vendored/docling/pdf/right_to_left_02.pdf": {
+      "sha256": "1f0d0b33d156b073907436b74acb2b2d2afe6ff3b037ed4e5ce87300226ec195",
+      "size": 92036
+    },
+    "vendored/docling/pdf/right_to_left_03.pdf": {
+      "sha256": "ecfb67cbdbd082308765c070ba692033d6e92fc33d03e9448f4d7ad2b398440c",
+      "size": 278131
+    },
+    "vendored/docling/pptx/powerpoint_bad_text.pptx": {
+      "sha256": "88117ee568e0836f91ed01bb99d87bda94b53013f0a65ee51406962c7f96a860",
+      "size": 35632
+    },
+    "vendored/docling/pptx/powerpoint_issue_2663.pptx": {
+      "sha256": "49606899eb5122d95ad02419dde62f18957bf8ed20d8e6fb38516f99e2ee8469",
+      "size": 43385
+    },
+    "vendored/docling/pptx/powerpoint_sample.pptx": {
+      "sha256": "24191d47fda511e11984e875f8676506da5ae1fbcaefcc63d81be377d3a3950c",
+      "size": 45849
+    },
+    "vendored/docling/xlsx/xlsx_01.xlsx": {
+      "sha256": "fd4e67c4474e6d8308b1e9a9006500bd8e055c1aa2a337d54e641c3b1f506cf2",
+      "size": 170934
+    },
+    "vendored/docling/xlsx/xlsx_03_chartsheet.xlsx": {
+      "sha256": "2b40c7e15aebc41f6677b8479e0ae655130f0daf503d20b3068d9179d2559002",
+      "size": 10491
+    },
+    "vendored/docling/xlsx/xlsx_04_inflated.xlsx": {
+      "sha256": "cf0490b02a8f6b6f632aae92c8772a1e79dc44bd101d0bb37cdbe7486052d63f",
+      "size": 171916
+    },
+    "vendored/docling/xlsx/xlsx_05_table_with_title.xlsx": {
+      "sha256": "30afc0d53b0db289a45786ce4e9dc8f68bb91f256441cb55fb8e747fae104dbe",
+      "size": 6335
+    },
+    "vendored/docling/xlsx/xlsx_06_edge_cases_.xlsx": {
+      "sha256": "382d2e5ed5ccf04895649f3ed240eb062882f1441b026d116297afbc0a11914e",
+      "size": 9504
+    },
+    "vendored/docling/xlsx/xlsx_07_gap_tolerance_.xlsx": {
+      "sha256": "701ea49d4b7cdbfff982789272c6e0486cfef1e441764216cce658538ae414c0",
+      "size": 16217
+    },
+    "vendored/markitdown/RECEIPT-2024-TXN-98765_retail_purchase.pdf": {
+      "sha256": "23b00e2e069e038d54e4c23b3868569393d2874823201e3c0b7a363ffd233fc6",
+      "size": 8459
+    },
+    "vendored/markitdown/REPAIR-2022-INV-001_multipage.pdf": {
+      "sha256": "83614c95e5cfe2207eeeba9973977b3bf054eb41bdd14eb753f5b53c1588c2fe",
+      "size": 176629
+    },
+    "vendored/markitdown/SPARSE-2024-INV-1234_borderless_table.pdf": {
+      "sha256": "784fef202eb748d5d274eaaf2ded51dfd0d0d1e92225e84fd33dafc2333d15d3",
+      "size": 19649
+    },
+    "vendored/markitdown/docx/equations.docx": {
+      "sha256": "339b064492530598859de0bde8504de7a4aefead88210baf3e9f3db0ed925b40",
+      "size": 15235
+    },
+    "vendored/markitdown/docx/rlink.docx": {
+      "sha256": "ac135ae40a3232ca4f235ca79d2f52cad36a885f20dadba21e6f1b5e5669f0b7",
+      "size": 13708
+    },
+    "vendored/markitdown/docx/test.docx": {
+      "sha256": "ee1974633f3b1e8bb54201abce779a755cb1cd5259641a08cf7b1b9b36dec42b",
+      "size": 135824
+    },
+    "vendored/markitdown/docx/test_with_comment.docx": {
+      "sha256": "296fdb38ac2869f153db77e5f85ddbd74a1f931d8a3524cd5e12e3c5936d56a0",
+      "size": 12971
+    },
+    "vendored/markitdown/epub/test.epub": {
+      "sha256": "33e65f39f54bd24f74d5f333d24213a68c62ee2f2854d12f8c4c59b15a4031a7",
+      "size": 2677
+    },
+    "vendored/markitdown/equations.docx": {
+      "sha256": "339b064492530598859de0bde8504de7a4aefead88210baf3e9f3db0ed925b40",
+      "size": 15235
+    },
+    "vendored/markitdown/masterformat_partial_numbering.pdf": {
+      "sha256": "de5bfd981f890d7b8a9544c34633f365449886e430bdfb2ea4ff6f0fad61ca63",
+      "size": 2114
+    },
+    "vendored/markitdown/msg/test_outlook_msg.msg": {
+      "sha256": "028d84ffe67e1865009669d13d4c12682943b32eccf7f84a8da1899db63b0131",
+      "size": 13312
+    },
+    "vendored/markitdown/pdf/RECEIPT-2024-TXN-98765_retail_purchase.pdf": {
+      "sha256": "23b00e2e069e038d54e4c23b3868569393d2874823201e3c0b7a363ffd233fc6",
+      "size": 8459
+    },
+    "vendored/markitdown/pdf/REPAIR-2022-INV-001_multipage.pdf": {
+      "sha256": "83614c95e5cfe2207eeeba9973977b3bf054eb41bdd14eb753f5b53c1588c2fe",
+      "size": 176629
+    },
+    "vendored/markitdown/pdf/SPARSE-2024-INV-1234_borderless_table.pdf": {
+      "sha256": "784fef202eb748d5d274eaaf2ded51dfd0d0d1e92225e84fd33dafc2333d15d3",
+      "size": 19649
+    },
+    "vendored/markitdown/pdf/masterformat_partial_numbering.pdf": {
+      "sha256": "de5bfd981f890d7b8a9544c34633f365449886e430bdfb2ea4ff6f0fad61ca63",
+      "size": 2114
+    },
+    "vendored/markitdown/pdf/test.pdf": {
+      "sha256": "77c4014cf15ea5e56663e9b8093ddc2a89a9224c15d6a9eb2aa8af2b48e1b237",
+      "size": 92971
+    },
+    "vendored/markitdown/pptx/test.pptx": {
+      "sha256": "f0b9e5252aec3730c91f276a7c3b8f4a9893a7b66540f6c6af160a49855ca507",
+      "size": 277515
+    },
+    "vendored/markitdown/rlink.docx": {
+      "sha256": "ac135ae40a3232ca4f235ca79d2f52cad36a885f20dadba21e6f1b5e5669f0b7",
+      "size": 13708
+    },
+    "vendored/markitdown/test.docx": {
+      "sha256": "ee1974633f3b1e8bb54201abce779a755cb1cd5259641a08cf7b1b9b36dec42b",
+      "size": 135824
+    },
+    "vendored/markitdown/test.epub": {
+      "sha256": "33e65f39f54bd24f74d5f333d24213a68c62ee2f2854d12f8c4c59b15a4031a7",
+      "size": 2677
+    },
+    "vendored/markitdown/test.jpg": {
+      "sha256": "9390b34525fd044df69265e022a06346abb6d203b14cbc9b2473c080c680e82e",
+      "size": 474288
+    },
+    "vendored/markitdown/test.pdf": {
+      "sha256": "77c4014cf15ea5e56663e9b8093ddc2a89a9224c15d6a9eb2aa8af2b48e1b237",
+      "size": 92971
+    },
+    "vendored/markitdown/test.pptx": {
+      "sha256": "f0b9e5252aec3730c91f276a7c3b8f4a9893a7b66540f6c6af160a49855ca507",
+      "size": 277515
+    },
+    "vendored/markitdown/test.xls": {
+      "sha256": "17a94b6514e8998f4dc25bc77265b6f62982c18614ba4401a87fa01f90f53f1d",
+      "size": 27648
+    },
+    "vendored/markitdown/test.xlsx": {
+      "sha256": "a867be6ece38a4224bcfe34312e5c296ed520a76a431e0454603ceb171fbd4af",
+      "size": 11562
+    },
+    "vendored/markitdown/test_outlook_msg.msg": {
+      "sha256": "028d84ffe67e1865009669d13d4c12682943b32eccf7f84a8da1899db63b0131",
+      "size": 13312
+    },
+    "vendored/markitdown/test_with_comment.docx": {
+      "sha256": "296fdb38ac2869f153db77e5f85ddbd74a1f931d8a3524cd5e12e3c5936d56a0",
+      "size": 12971
+    },
+    "vendored/markitdown/xls/test.xls": {
+      "sha256": "17a94b6514e8998f4dc25bc77265b6f62982c18614ba4401a87fa01f90f53f1d",
+      "size": 27648
+    },
+    "vendored/markitdown/xlsx/test.xlsx": {
+      "sha256": "a867be6ece38a4224bcfe34312e5c296ed520a76a431e0454603ceb171fbd4af",
+      "size": 11562
+    },
+    "vendored/pdfium-render/annotations-test.pdf": {
+      "sha256": "99def9b6041006bea332df0de0456f987c0d1f397012f8aace2a43f960f003af",
+      "size": 445878
+    },
+    "vendored/pdfium-render/dimensions-test.pdf": {
+      "sha256": "4a40fc73e42792453040739b48a25ccc1ea8f796fd378c47500992275a975d24",
+      "size": 60938
+    },
+    "vendored/pdfium-render/export-test.pdf": {
+      "sha256": "f5e169b53e3c4e03eb665cbd21f9c7b155eed898bec0a1bc34e69e93da26a632",
+      "size": 798341
+    },
+    "vendored/pdfium-render/form-test.pdf": {
+      "sha256": "fde4222a3ea94cd08fd445f618ade15534eaee21fb58dd4ec8145ac4dbaa2fd9",
+      "size": 1794915
+    },
+    "vendored/pdfium-render/links-test.pdf": {
+      "sha256": "cdfdf0b98d03f3382dacbb0c8fba418590d8678bf8807bfe58c56e84afb1273a",
+      "size": 6519
+    },
+    "vendored/pdfium-render/page-sizes-test.pdf": {
+      "sha256": "79898651288f3944566b9133cf76ed72ebc83f866d1749475ec46094303f8b21",
+      "size": 21182
+    },
+    "vendored/pdfium-render/path-test.pdf": {
+      "sha256": "4b0dc51b9e666d4feb935f7ff762ee5982475826cf0782c0b209ff83c0ca28f7",
+      "size": 115170
+    },
+    "vendored/pdfium-render/test-toc.pdf": {
+      "sha256": "9271393b70ae9008881744425e3e0ba3c809a611e64b9347c2b71b7a186361a9",
+      "size": 19005
+    },
+    "vendored/pdfium-render/text-test.pdf": {
+      "sha256": "f44395baef9385bf896d097375b8d99686c46370cb1b2ff24875e0b5ecd1760f",
+      "size": 67939
+    },
+    "vendored/pdfplumber/pdf/2023-06-20-PV.pdf": {
+      "sha256": "8e01f32e6a40f956aad593b0e54c5cec7684285ff4be0c7b754dce3711c67bb4",
+      "size": 35535
+    },
+    "vendored/pdfplumber/pdf/4833695495684096.pdf": {
+      "sha256": "d68eb487c9b2c9d6ec8499eaebf8cdd931a77a4d830d46f279d522d1aedc296d",
+      "size": 3759
+    },
+    "vendored/pdfplumber/pdf/WARN-Report-for-7-1-2015-to-03-25-2016.pdf": {
+      "sha256": "f52f80bd057313c8abec2e854c65c4d96658e72744c836e81d3048d8a5861046",
+      "size": 478619
+    },
+    "vendored/pdfplumber/pdf/annotations-rotated-180.pdf": {
+      "sha256": "b8910d64033eeb7560e11a1bbc397751261597f8bc781ba79ca1a77362386ceb",
+      "size": 170175
+    },
+    "vendored/pdfplumber/pdf/annotations-rotated-270.pdf": {
+      "sha256": "2fa32eb26559bd5762e70bc8f1bb85d05dd5ae2d15c2fe1e4910b05d468cf65b",
+      "size": 170175
+    },
+    "vendored/pdfplumber/pdf/annotations-rotated-90.pdf": {
+      "sha256": "0c680ab11ec73b71cd879d5af80f698dfbfce1d1e2086365fbacb6225fd23468",
+      "size": 170174
+    },
+    "vendored/pdfplumber/pdf/annotations-unicode-issues.pdf": {
+      "sha256": "e774f5c98d25a725ca2163a52b9cd36113a9694bf4a07b452e3819bf3b268250",
+      "size": 57927
+    },
+    "vendored/pdfplumber/pdf/annotations.pdf": {
+      "sha256": "ad2a4eee7b71d554f37b4e37f2447e106f0751b70b673bc0ab7c46c851d451b9",
+      "size": 132177
+    },
+    "vendored/pdfplumber/pdf/chelsea_pdta.pdf": {
+      "sha256": "e9823b5527fed648c9b4a891b0c018d75a4acfa3697f9bfa91b2f8e5097579e0",
+      "size": 2944560
+    },
+    "vendored/pdfplumber/pdf/cupertino_usd_4-6-16.pdf": {
+      "sha256": "944ab863d7c83521d6250cc8682d2c985a6ae82622de1d461bb80c21a654206a",
+      "size": 80578
+    },
+    "vendored/pdfplumber/pdf/extra-attrs-example.pdf": {
+      "sha256": "76cfc3645bdb76d2e670774ea1dc474b9ab0e3f1599f82403ab095a349f19a98",
+      "size": 15170
+    },
+    "vendored/pdfplumber/pdf/federal-register-2020-17221.pdf": {
+      "sha256": "ac419e4e084ea7a7a33a7be3f129dd07bc705b1a9e45ad751e33357f17d60f5c",
+      "size": 713992
+    },
+    "vendored/pdfplumber/pdf/figure_structure.pdf": {
+      "sha256": "46ffbb251fbefd6f0b0e7410f504a3b0370f7f5c98f374b10cd1907fb400ee65",
+      "size": 24694
+    },
+    "vendored/pdfplumber/pdf/from-oss-fuzz/load/4833695495684096.pdf": {
+      "sha256": "d68eb487c9b2c9d6ec8499eaebf8cdd931a77a4d830d46f279d522d1aedc296d",
+      "size": 3759
+    },
+    "vendored/pdfplumber/pdf/hello_structure.pdf": {
+      "sha256": "949dccc013e2cc2f44e515225ace59bd5e4aa53ee38db1297094e7640d6e4f2a",
+      "size": 2641
+    },
+    "vendored/pdfplumber/pdf/image_structure.pdf": {
+      "sha256": "ce664b97ca3f765ad6a82352c2555cbfcd687d554722341413d633178164fad4",
+      "size": 45966
+    },
+    "vendored/pdfplumber/pdf/issue-1054-example.pdf": {
+      "sha256": "87c424c0833734a4d2dff996a20b686c0cc252f3231fe067fbcffaf2d90723de",
+      "size": 15374
+    },
+    "vendored/pdfplumber/pdf/issue-1114-dedupe-chars.pdf": {
+      "sha256": "0d94eb9541b68404ce5e3fc524614dc87e6bba470cb3e83bccecaf2f873b8ed5",
+      "size": 43483
+    },
+    "vendored/pdfplumber/pdf/issue-1147-example.pdf": {
+      "sha256": "39e9d5e5876c0fc833fdc01e84019a0f5d2f74a203cf99070d359ac20603de45",
+      "size": 1826244
+    },
+    "vendored/pdfplumber/pdf/issue-1181.pdf": {
+      "sha256": "5c699a86d22a859da0f3124642ebba8bbc22b648578d94f212d97816fa023eb1",
+      "size": 13437
+    },
+    "vendored/pdfplumber/pdf/issue-1279-example.pdf": {
+      "sha256": "ebca9104debf6177df939ed8402435f3e9fd12d22b07845b280b4b71a4e80292",
+      "size": 37214
+    },
+    "vendored/pdfplumber/pdf/issue-140-example.pdf": {
+      "sha256": "0b5accf5702d12b9a58eba9f4d11295c9e268c8c6333b4cd4ac07e46768b023b",
+      "size": 5251
+    },
+    "vendored/pdfplumber/pdf/issue-192-example.pdf": {
+      "sha256": "705af4b4e52a68d4d574216618a7d037001d9fbd1b7fa5a75aba25c903e230d9",
+      "size": 169520
+    },
+    "vendored/pdfplumber/pdf/issue-316-example.pdf": {
+      "sha256": "19b0ab7b2e0cddc96c1bfaf96fd928547811d1dd2e451d0410b618308fe986f9",
+      "size": 138691
+    },
+    "vendored/pdfplumber/pdf/issue-33-lorem-ipsum.pdf": {
+      "sha256": "951e9ab1d5ec310429f89173357a7c9f84b08153fd7f81b5d060ed2487869f16",
+      "size": 60367
+    },
+    "vendored/pdfplumber/pdf/issue-336-example.pdf": {
+      "sha256": "59ad0eb8dc9601782a72bc4cabe2390ee2e4eed03d545f874c7425b6d40492cd",
+      "size": 650330
+    },
+    "vendored/pdfplumber/pdf/issue-461-example.pdf": {
+      "sha256": "34f3fe05d1c8e242f0e2d2204399f46aebcbef630834d544deb4a0d625846d63",
+      "size": 154889
+    },
+    "vendored/pdfplumber/pdf/issue-463-example.pdf": {
+      "sha256": "7337e4267970818c55692f371d1fbaeb18a6dbc2d2d58739a07df94a4e3b7999",
+      "size": 88676
+    },
+    "vendored/pdfplumber/pdf/issue-466-example.pdf": {
+      "sha256": "da49286d9f6f985136c6a1788ca4a33f20bbdcbe4ea8153b81bb87841e95cba4",
+      "size": 13569
+    },
+    "vendored/pdfplumber/pdf/issue-53-example.pdf": {
+      "sha256": "ddddc6f90cdc61457164abf04e36cfda00b16718b534b1069a34e88272ce4b5b",
+      "size": 133586
+    },
+    "vendored/pdfplumber/pdf/issue-598-example.pdf": {
+      "sha256": "022dc4c57d995bea2317537fd91ca3b08d267f1c20469b9104e3a682e0b7dad8",
+      "size": 504551
+    },
+    "vendored/pdfplumber/pdf/issue-67-example.pdf": {
+      "sha256": "517c394a000b3dc2c0f3b21198e0fad725ff65cd82c90915bbeca4f60383d176",
+      "size": 238143
+    },
+    "vendored/pdfplumber/pdf/issue-71-duplicate-chars-2.pdf": {
+      "sha256": "0acf672dc1143f49baaa12e1e130ca131070b0d54eb487e48b24921d21e53b11",
+      "size": 541788
+    },
+    "vendored/pdfplumber/pdf/issue-71-duplicate-chars.pdf": {
+      "sha256": "c0f4504ee7c5f0e98d091db6ff866c8421694baa5f053efa6b82d9e19233e8ca",
+      "size": 72467
+    },
+    "vendored/pdfplumber/pdf/issue-842-example.pdf": {
+      "sha256": "1c49e633f46097016b41113160de375ae7367d607706b3a042580baed90defeb",
+      "size": 287855
+    },
+    "vendored/pdfplumber/pdf/issue-848.pdf": {
+      "sha256": "7ac8ec08037168a6c55e770e577341483b6bff4de604c3410857248ae9f371c6",
+      "size": 71805
+    },
+    "vendored/pdfplumber/pdf/issue-90-example.pdf": {
+      "sha256": "9ed459c53bdd5ae91a08b3bacc5d93f3944dfddac9b6a140a4ea6b5e6eea2a61",
+      "size": 98330
+    },
+    "vendored/pdfplumber/pdf/issue-905.pdf": {
+      "sha256": "26bf4eadb94944ec61fb7c3120f190db74b7a067bbeb9489ea02a2b11f228a55",
+      "size": 13656
+    },
+    "vendored/pdfplumber/pdf/issue-912.pdf": {
+      "sha256": "317f8e045ec0a67a272bcfd0d38e33f6aaf1110d0a57a26faa739dbdc4bc09bb",
+      "size": 1202189
+    },
+    "vendored/pdfplumber/pdf/issue-982-example.pdf": {
+      "sha256": "c18ea7dc2e8d075f22ca0030e83000adc05cd4f75218c1d774564aa91b5edd94",
+      "size": 1029061
+    },
+    "vendored/pdfplumber/pdf/issue-987-test.pdf": {
+      "sha256": "353c84f0bdd88d17f04b87896e02bc0a54ad169da56b8ecf1aeacab9a75213bc",
+      "size": 8805
+    },
+    "vendored/pdfplumber/pdf/la-precinct-bulletin-2014-p1.pdf": {
+      "sha256": "a87eb3ca32462296ad07e6c62ab05c85527a5d7daca6f33d531eb4ae3f263b95",
+      "size": 20188
+    },
+    "vendored/pdfplumber/pdf/line-char-render-example.pdf": {
+      "sha256": "10ceede5e884a1566d96ab888bc378576167292cae53d72498a6b89388107fdf",
+      "size": 13649
+    },
+    "vendored/pdfplumber/pdf/malformed-from-issue-932.pdf": {
+      "sha256": "471f16c8716a7fa8cda228ad293a4df97fe16f184ff3d952f26fc9e38a348ff3",
+      "size": 61037
+    },
+    "vendored/pdfplumber/pdf/mcid_example.pdf": {
+      "sha256": "46ffbb251fbefd6f0b0e7410f504a3b0370f7f5c98f374b10cd1907fb400ee65",
+      "size": 24694
+    },
+    "vendored/pdfplumber/pdf/nics-background-checks-2015-11-rotated.pdf": {
+      "sha256": "3820767f7b9c8a80d20916daa8664afee49421c4bc6d6efb70bb21ae5f9a7195",
+      "size": 90415
+    },
+    "vendored/pdfplumber/pdf/nics-background-checks-2015-11.pdf": {
+      "sha256": "4f0ae6e017b0e97de211da8fd97316e55bd927af5740d6ce95e1b7b1539f9407",
+      "size": 90468
+    },
+    "vendored/pdfplumber/pdf/page-boxes-example.pdf": {
+      "sha256": "e0be9f61f14ec31f14d77fa0db26c1013eed67b662d8fdd4aa77fd4226cebb5f",
+      "size": 1187
+    },
+    "vendored/pdfplumber/pdf/pdf_structure.pdf": {
+      "sha256": "247db629cecbb2d6c58eaac7531dfb82125608881c6433e620689c807900c64c",
+      "size": 34467
+    },
+    "vendored/pdfplumber/pdf/pdffill-demo.pdf": {
+      "sha256": "2594a5364ea598047a7389b4f35a5e0908c973c7aa4bc6d8c5e8fb34baaba426",
+      "size": 108017
+    },
+    "vendored/pdfplumber/pdf/pr-136-example.pdf": {
+      "sha256": "bd7d7a3c3114e0c809d275227439e4997578a7fa3de57b5110a594172320cb74",
+      "size": 3388137
+    },
+    "vendored/pdfplumber/pdf/pr-138-example.pdf": {
+      "sha256": "20bd9ee89a10cc92f679085a0d6cab85baa05ca3f781543f23f19d1e5ea7409f",
+      "size": 89950
+    },
+    "vendored/pdfplumber/pdf/pr-88-example.pdf": {
+      "sha256": "70840f0da97cffe9b833780f4bb192e4455d0d086291cf60f35b37bb2b35d84f",
+      "size": 95332
+    },
+    "vendored/pdfplumber/pdf/scotus-transcript-p1.pdf": {
+      "sha256": "c63508c7b195e6b6c398311fb1f3a36de31f604e3ae94b486a6776f1f144b379",
+      "size": 84509
+    },
+    "vendored/pdfplumber/pdf/senate-expenditures.pdf": {
+      "sha256": "16921f0fc9b2c6039b23b694e0317917118ad7dd2b3a95a88518b7e144df527c",
+      "size": 53481
+    },
+    "vendored/pdfplumber/pdf/table-curves-example.pdf": {
+      "sha256": "d68dce5cfaae86c5282b50603d60bc2601af23ecfd26245a9966382b5d3fdb70",
+      "size": 153741
+    },
+    "vendored/pdfplumber/pdf/test-punkt.pdf": {
+      "sha256": "576e8eef9551291538bf96323776c39fc1a0f15acafb488ec90bf514cf148089",
+      "size": 14806
+    },
+    "vendored/pdfplumber/pdf/word365_structure.pdf": {
+      "sha256": "3301c8da647514abf8fa145470bd0367daa3d8b0a1e7281f1c6850b50889ee53",
+      "size": 99253
+    },
+    "vendored/pdfplumber/pdfs/2023-06-20-PV.pdf": {
+      "sha256": "8e01f32e6a40f956aad593b0e54c5cec7684285ff4be0c7b754dce3711c67bb4",
+      "size": 35535
+    },
+    "vendored/pdfplumber/pdfs/WARN-Report-for-7-1-2015-to-03-25-2016.pdf": {
+      "sha256": "f52f80bd057313c8abec2e854c65c4d96658e72744c836e81d3048d8a5861046",
+      "size": 478619
+    },
+    "vendored/pdfplumber/pdfs/annotations-rotated-180.pdf": {
+      "sha256": "b8910d64033eeb7560e11a1bbc397751261597f8bc781ba79ca1a77362386ceb",
+      "size": 170175
+    },
+    "vendored/pdfplumber/pdfs/annotations-rotated-270.pdf": {
+      "sha256": "2fa32eb26559bd5762e70bc8f1bb85d05dd5ae2d15c2fe1e4910b05d468cf65b",
+      "size": 170175
+    },
+    "vendored/pdfplumber/pdfs/annotations-rotated-90.pdf": {
+      "sha256": "0c680ab11ec73b71cd879d5af80f698dfbfce1d1e2086365fbacb6225fd23468",
+      "size": 170174
+    },
+    "vendored/pdfplumber/pdfs/annotations-unicode-issues.pdf": {
+      "sha256": "e774f5c98d25a725ca2163a52b9cd36113a9694bf4a07b452e3819bf3b268250",
+      "size": 57927
+    },
+    "vendored/pdfplumber/pdfs/annotations.pdf": {
+      "sha256": "ad2a4eee7b71d554f37b4e37f2447e106f0751b70b673bc0ab7c46c851d451b9",
+      "size": 132177
+    },
+    "vendored/pdfplumber/pdfs/cupertino_usd_4-6-16.pdf": {
+      "sha256": "944ab863d7c83521d6250cc8682d2c985a6ae82622de1d461bb80c21a654206a",
+      "size": 80578
+    },
+    "vendored/pdfplumber/pdfs/extra-attrs-example.pdf": {
+      "sha256": "76cfc3645bdb76d2e670774ea1dc474b9ab0e3f1599f82403ab095a349f19a98",
+      "size": 15170
+    },
+    "vendored/pdfplumber/pdfs/federal-register-2020-17221.pdf": {
+      "sha256": "ac419e4e084ea7a7a33a7be3f129dd07bc705b1a9e45ad751e33357f17d60f5c",
+      "size": 713992
+    },
+    "vendored/pdfplumber/pdfs/figure_structure.pdf": {
+      "sha256": "46ffbb251fbefd6f0b0e7410f504a3b0370f7f5c98f374b10cd1907fb400ee65",
+      "size": 24694
+    },
+    "vendored/pdfplumber/pdfs/from-oss-fuzz/load/4833695495684096.pdf": {
+      "sha256": "d68eb487c9b2c9d6ec8499eaebf8cdd931a77a4d830d46f279d522d1aedc296d",
+      "size": 3759
+    },
+    "vendored/pdfplumber/pdfs/hello_structure.pdf": {
+      "sha256": "949dccc013e2cc2f44e515225ace59bd5e4aa53ee38db1297094e7640d6e4f2a",
+      "size": 2641
+    },
+    "vendored/pdfplumber/pdfs/issue-1114-dedupe-chars.pdf": {
+      "sha256": "0d94eb9541b68404ce5e3fc524614dc87e6bba470cb3e83bccecaf2f873b8ed5",
+      "size": 43483
+    },
+    "vendored/pdfplumber/pdfs/issue-1181.pdf": {
+      "sha256": "5c699a86d22a859da0f3124642ebba8bbc22b648578d94f212d97816fa023eb1",
+      "size": 13437
+    },
+    "vendored/pdfplumber/pdfs/issue-1279-example.pdf": {
+      "sha256": "ebca9104debf6177df939ed8402435f3e9fd12d22b07845b280b4b71a4e80292",
+      "size": 37214
+    },
+    "vendored/pdfplumber/pdfs/issue-140-example.pdf": {
+      "sha256": "0b5accf5702d12b9a58eba9f4d11295c9e268c8c6333b4cd4ac07e46768b023b",
+      "size": 5251
+    },
+    "vendored/pdfplumber/pdfs/issue-316-example.pdf": {
+      "sha256": "19b0ab7b2e0cddc96c1bfaf96fd928547811d1dd2e451d0410b618308fe986f9",
+      "size": 138691
+    },
+    "vendored/pdfplumber/pdfs/issue-461-example.pdf": {
+      "sha256": "34f3fe05d1c8e242f0e2d2204399f46aebcbef630834d544deb4a0d625846d63",
+      "size": 154889
+    },
+    "vendored/pdfplumber/pdfs/issue-463-example.pdf": {
+      "sha256": "7337e4267970818c55692f371d1fbaeb18a6dbc2d2d58739a07df94a4e3b7999",
+      "size": 88676
+    },
+    "vendored/pdfplumber/pdfs/issue-466-example.pdf": {
+      "sha256": "da49286d9f6f985136c6a1788ca4a33f20bbdcbe4ea8153b81bb87841e95cba4",
+      "size": 13569
+    },
+    "vendored/pdfplumber/pdfs/issue-53-example.pdf": {
+      "sha256": "ddddc6f90cdc61457164abf04e36cfda00b16718b534b1069a34e88272ce4b5b",
+      "size": 133586
+    },
+    "vendored/pdfplumber/pdfs/issue-598-example.pdf": {
+      "sha256": "022dc4c57d995bea2317537fd91ca3b08d267f1c20469b9104e3a682e0b7dad8",
+      "size": 504551
+    },
+    "vendored/pdfplumber/pdfs/issue-842-example.pdf": {
+      "sha256": "1c49e633f46097016b41113160de375ae7367d607706b3a042580baed90defeb",
+      "size": 287855
+    },
+    "vendored/pdfplumber/pdfs/issue-848.pdf": {
+      "sha256": "7ac8ec08037168a6c55e770e577341483b6bff4de604c3410857248ae9f371c6",
+      "size": 71805
+    },
+    "vendored/pdfplumber/pdfs/issue-982-example.pdf": {
+      "sha256": "c18ea7dc2e8d075f22ca0030e83000adc05cd4f75218c1d774564aa91b5edd94",
+      "size": 1029061
+    },
+    "vendored/pdfplumber/pdfs/issue-987-test.pdf": {
+      "sha256": "353c84f0bdd88d17f04b87896e02bc0a54ad169da56b8ecf1aeacab9a75213bc",
+      "size": 8805
+    },
+    "vendored/pdfplumber/pdfs/la-precinct-bulletin-2014-p1.pdf": {
+      "sha256": "a87eb3ca32462296ad07e6c62ab05c85527a5d7daca6f33d531eb4ae3f263b95",
+      "size": 20188
+    },
+    "vendored/pdfplumber/pdfs/line-char-render-example.pdf": {
+      "sha256": "10ceede5e884a1566d96ab888bc378576167292cae53d72498a6b89388107fdf",
+      "size": 13649
+    },
+    "vendored/pdfplumber/pdfs/mcid_example.pdf": {
+      "sha256": "46ffbb251fbefd6f0b0e7410f504a3b0370f7f5c98f374b10cd1907fb400ee65",
+      "size": 24694
+    },
+    "vendored/pdfplumber/pdfs/nics-background-checks-2015-11-rotated.pdf": {
+      "sha256": "3820767f7b9c8a80d20916daa8664afee49421c4bc6d6efb70bb21ae5f9a7195",
+      "size": 90415
+    },
+    "vendored/pdfplumber/pdfs/nics-background-checks-2015-11.pdf": {
+      "sha256": "4f0ae6e017b0e97de211da8fd97316e55bd927af5740d6ce95e1b7b1539f9407",
+      "size": 90468
+    },
+    "vendored/pdfplumber/pdfs/page-boxes-example.pdf": {
+      "sha256": "e0be9f61f14ec31f14d77fa0db26c1013eed67b662d8fdd4aa77fd4226cebb5f",
+      "size": 1187
+    },
+    "vendored/pdfplumber/pdfs/pdf_structure.pdf": {
+      "sha256": "247db629cecbb2d6c58eaac7531dfb82125608881c6433e620689c807900c64c",
+      "size": 34467
+    },
+    "vendored/pdfplumber/pdfs/pdffill-demo.pdf": {
+      "sha256": "2594a5364ea598047a7389b4f35a5e0908c973c7aa4bc6d8c5e8fb34baaba426",
+      "size": 108017
+    },
+    "vendored/pdfplumber/pdfs/pr-138-example.pdf": {
+      "sha256": "20bd9ee89a10cc92f679085a0d6cab85baa05ca3f781543f23f19d1e5ea7409f",
+      "size": 89950
+    },
+    "vendored/pdfplumber/pdfs/pr-88-example.pdf": {
+      "sha256": "70840f0da97cffe9b833780f4bb192e4455d0d086291cf60f35b37bb2b35d84f",
+      "size": 95332
+    },
+    "vendored/pdfplumber/pdfs/scotus-transcript-p1.pdf": {
+      "sha256": "c63508c7b195e6b6c398311fb1f3a36de31f604e3ae94b486a6776f1f144b379",
+      "size": 84509
+    },
+    "vendored/pdfplumber/pdfs/senate-expenditures.pdf": {
+      "sha256": "16921f0fc9b2c6039b23b694e0317917118ad7dd2b3a95a88518b7e144df527c",
+      "size": 53481
+    },
+    "vendored/pdfplumber/pdfs/table-curves-example.pdf": {
+      "sha256": "d68dce5cfaae86c5282b50603d60bc2601af23ecfd26245a9966382b5d3fdb70",
+      "size": 153741
+    },
+    "vendored/pdfplumber/pdfs/test-punkt.pdf": {
+      "sha256": "576e8eef9551291538bf96323776c39fc1a0f15acafb488ec90bf514cf148089",
+      "size": 14806
+    },
+    "vendored/pdfplumber/pdfs/word365_structure.pdf": {
+      "sha256": "3301c8da647514abf8fa145470bd0367daa3d8b0a1e7281f1c6850b50889ee53",
+      "size": 99253
+    },
+    "vendored/python-docx/having-images.docx": {
+      "sha256": "72f40baa1b89e4849e817121dbbf148ed78e51be9bf04d8e6f4bc1494aa517b7",
+      "size": 132875
+    },
+    "vendored/python-docx/test.docx": {
+      "sha256": "fba1c76b66ff30982e5281941ca1111eaeaeb092abb6dfbe1730bed3774f40b6",
+      "size": 31773
+    },
+    "vendored/unstructured/doc/duplicate-paragraphs.doc": {
+      "sha256": "3b7fab6bbab924b3eb4c777cdb45afd2f152c80c6a8c84c0bf11fd95b8761714",
+      "size": 18432
+    },
+    "vendored/unstructured/doc/fake-doc-emphasized-text.doc": {
+      "sha256": "479dfb9f4646b8d1b70c95c5576bc1d9e710ef7582c6b33c7f9db44afb34e987",
+      "size": 27648
+    },
+    "vendored/unstructured/doc/fake.doc": {
+      "sha256": "a4f1287d6d0f638ed89c25d8be1bdeb6cef71dd41c569a5881018cef9c3f41da",
+      "size": 18432
+    },
+    "vendored/unstructured/doc/simple.doc": {
+      "sha256": "5989cce1b4582b44e6a23f7ca873e818979f514cddfe00f4390990ca6d93c14b",
+      "size": 15872
+    },
+    "vendored/unstructured/msg/fake-email-attachment.msg": {
+      "sha256": "92f65236e7eae301ea6f70a85f38cd5a9fae9f807d17fc35c5b5dbcf0f82a8ec",
+      "size": 15872
+    },
+    "vendored/unstructured/msg/fake-email-multiple-attachments.msg": {
+      "sha256": "bb93d24f5cdb15a470a810c43b5233fbe38d8ae9403390f0b14993fa014aeadc",
+      "size": 4319232
+    },
+    "vendored/unstructured/msg/fake-email-with-cc-and-bcc.msg": {
+      "sha256": "05386432955612134189df0229fda6cd0666255b46c1709cad41a58f8b7330e3",
+      "size": 13824
+    },
+    "vendored/unstructured/msg/fake-email.msg": {
+      "sha256": "8952cfda881c059c7c7224d215d190c478cc538c74fdf434e4034b624b2bb087",
+      "size": 11776
+    },
+    "vendored/unstructured/msg/fake-encrypted.msg": {
+      "sha256": "c0e51e9207e3f46d4574ccb245a1cf5007570fb4217920a3642d5b9a9773d2a5",
+      "size": 13824
+    },
+    "vendored/unstructured/rtf/fake-doc.rtf": {
+      "sha256": "8b979dd41056d977e3fce25669b6e8ff0cacb7cb67c62b289a0cf97e655c9df0",
+      "size": 408
+    },
+    "xls/test_excel.xls": {
+      "sha256": "e5650f10bdc8aa85c5ceba22477c86a878b3e4194c13ce6b411a01ceed0a0ded",
+      "size": 49664
+    },
+    "xls/tests_example.xls": {
+      "sha256": "e84f81c0dcf299a6540d7667a2e54efc5431e119f4983a0e02a32756dc891ff7",
+      "size": 16384
+    },
+    "xlsx/data-with-macros.xla": {
+      "sha256": "e5650f10bdc8aa85c5ceba22477c86a878b3e4194c13ce6b411a01ceed0a0ded",
+      "size": 49664
+    },
+    "xlsx/data-with-macros.xlam": {
+      "sha256": "5b9a5add8599ccb60b9a74e93816389f971e1ed4428268ebbda4049974a2b117",
+      "size": 170052
+    },
+    "xlsx/department_budget_2026.xlsx": {
+      "sha256": "e6d41a89e73c979dd52bb736f41020552f8c06ad7765ca7509fd6ca606cc76cb",
+      "size": 6190
+    },
+    "xlsx/excel_multi_sheet.xlsx": {
+      "sha256": "d90726f5588e36fa16ae2715ea6bb45af7945cd56f14b096eea3b0aff057a6b9",
+      "size": 6166
+    },
+    "xlsx/excel_tiny_excel.xlsx": {
+      "sha256": "d90726f5588e36fa16ae2715ea6bb45af7945cd56f14b096eea3b0aff057a6b9",
+      "size": 6166
+    },
+    "xlsx/stanley_cups.xlsx": {
+      "sha256": "e833722591ea0feaf3ef58582f44aac09920d2949372a85ab568ee4504f12605",
+      "size": 6339
+    },
+    "xlsx/test_01.xlsm": {
+      "sha256": "1c80aad1b3d836e95bdc6e545e8e1fe52affa541beea447dfb720a929f9b1404",
+      "size": 162186
+    },
+    "xlsx/test_01.xlsx": {
+      "sha256": "5b9a5add8599ccb60b9a74e93816389f971e1ed4428268ebbda4049974a2b117",
+      "size": 170052
+    },
+    "xlsx/test_xlsb.xlsb": {
+      "sha256": "20d8377e51ea8c03d29a4310e64054783f02c0eb474caa2e22800e2ac9e47fd5",
+      "size": 9429
+    },
+    "xlsx/warehouse_inventory.xlsx": {
+      "sha256": "ce32743d8c6e8657672d2d9f2b4124946f5602564d223fd12937afbf3c7a2760",
+      "size": 6361
+    }
+  }
+}

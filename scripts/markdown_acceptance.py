@@ -1937,6 +1937,9 @@ def _run_matrix_a25(item: Item, ctx: Context) -> Outcome:
         reason = f"Xberg 清单中还有 {len(missing)} 个未覆盖格式缺最小烟测样本：{missing[:12]}；"
         reason += f"请逐个放入 {sweep_dir}（无敏感内容的公开合成样本）"
         return Outcome(STATUS_NOT_RUN, reason)
+    # sweep 样本按扩展名进入通用转换条目：注入 fixtures 让 _prepare_scratch 拷贝它们。
+    item.fixtures = tuple(sorted(
+        f"matrix/format_sweep/{path.name}" for path in sweep_dir.iterdir() if path.is_file()))
     return _run_conversion_item(item, ctx, None)
 
 

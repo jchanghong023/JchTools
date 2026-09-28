@@ -1,0 +1,64 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<office:document
+    xmlns:office="urn:oasis:names:tc:opendocument:xmlns:office:1.0"
+    xmlns:draw="urn:oasis:names:tc:opendocument:xmlns:drawing:1.0"
+    xmlns:svg="urn:oasis:names:tc:opendocument:xmlns:svg-compatible:1.0"
+    xmlns:text="urn:oasis:names:tc:opendocument:xmlns:text:1.0"
+    xmlns:style="urn:oasis:names:tc:opendocument:xmlns:style:1.0"
+    xmlns:fo="urn:oasis:names:tc:opendocument:xmlns:xsl-fo-compatible:1.0"
+    office:version="1.3"
+    office:mimetype="application/vnd.oasis.opendocument.graphics">
+  <office:automatic-styles>
+    <style:style style:name="box" style:family="graphic">
+      <style:graphic-properties draw:fill="solid" draw:fill-color="#a6cee3" draw:stroke="solid"
+                                svg:stroke-color="#333333"/>
+    </style:style>
+    <style:style style:name="terminal" style:family="graphic">
+      <style:graphic-properties draw:fill="solid" draw:fill-color="#b2df8a" draw:stroke="solid"
+                                svg:stroke-color="#333333"/>
+    </style:style>
+    <style:style style:name="line" style:family="graphic">
+      <style:graphic-properties draw:fill="none" draw:stroke="solid" svg:stroke-color="#333333"
+                                draw:marker-end="Arrow" draw:marker-end-width="0.2cm"/>
+    </style:style>
+  </office:automatic-styles>
+  <office:body>
+    <office:drawing>
+      <draw:page draw:name="page1">
+        <draw:custom-shape draw:id="intake" draw:style-name="terminal"
+                           svg:x="2cm" svg:y="1cm" svg:width="4cm" svg:height="1.5cm">
+          <text:p>Intake</text:p>
+          <draw:enhanced-geometry draw:type="round-rectangle"/>
+        </draw:custom-shape>
+        <draw:custom-shape draw:id="review" draw:style-name="box"
+                           svg:x="2cm" svg:y="4cm" svg:width="4cm" svg:height="1.5cm">
+          <text:p>Review</text:p>
+          <draw:enhanced-geometry draw:type="rectangle"/>
+        </draw:custom-shape>
+        <draw:custom-shape draw:id="approve" draw:style-name="box"
+                           svg:x="8cm" svg:y="4cm" svg:width="4cm" svg:height="1.5cm">
+          <text:p>Approve</text:p>
+          <draw:enhanced-geometry draw:type="rectangle"/>
+        </draw:custom-shape>
+        <draw:custom-shape draw:id="publish" draw:style-name="terminal"
+                           svg:x="8cm" svg:y="1cm" svg:width="4cm" svg:height="1.5cm">
+          <text:p>Publish</text:p>
+          <draw:enhanced-geometry draw:type="round-rectangle"/>
+        </draw:custom-shape>
+
+        <draw:connector draw:style-name="line" draw:type="standard"
+                        draw:start-shape="intake" draw:start-glue-point="2"
+                        draw:end-shape="review" draw:end-glue-point="0"
+                        svg:x1="4cm" svg:y1="2.5cm" svg:x2="4cm" svg:y2="4cm"/>
+        <draw:connector draw:style-name="line" draw:type="standard"
+                        draw:start-shape="review" draw:start-glue-point="1"
+                        draw:end-shape="approve" draw:end-glue-point="3"
+                        svg:x1="6cm" svg:y1="4.75cm" svg:x2="8cm" svg:y2="4.75cm"/>
+        <draw:connector draw:style-name="line" draw:type="standard"
+                        draw:start-shape="approve" draw:start-glue-point="0"
+                        draw:end-shape="publish" draw:end-glue-point="2"
+                        svg:x1="10cm" svg:y1="4cm" svg:x2="10cm" svg:y2="2.5cm"/>
+      </draw:page>
+    </office:drawing>
+  </office:body>
+</office:document>

@@ -1,0 +1,26 @@
+Employee_ID	First_Name	Last_Name	Email	Department	Job_Title	Salary	Hire_Date	Performance_Rating	Manager_ID	Status	Location
+E001	James	Anderson	james.anderson@xberg.io	Engineering	Senior Engineer	125000	2019-03-15	4.8	M001	Active	San Francisco
+E002	Sarah	Mitchell	sarah.mitchell@xberg.io	Engineering	Software Engineer	95000	2020-06-22	4.5	M001	Active	San Francisco
+E003	Michael	Chen	michael.chen@xberg.io	Engineering	Staff Engineer	145000	2018-01-10	4.9	M002	Active	San Francisco
+E004	Emily	Rodriguez	emily.rodriguez@xberg.io	Product	Product Manager	110000	2020-09-01	4.6	M003	Active	New York
+E005	David	Thompson	david.thompson@xberg.io	Engineering	Junior Engineer	75000	2022-02-14	4.0	M001	Active	San Francisco
+E006	Jessica	Kim	jessica.kim@xberg.io	Design	Design Lead	105000	2019-11-05	4.7	M004	Active	New York
+E007	Robert	Johnson	robert.johnson@xberg.io	Operations	DevOps Engineer	100000	2021-05-18	4.4	M005	Active	San Francisco
+E008	Amanda	Lee	amanda.lee@xberg.io	Sales	Sales Manager	115000	2019-07-22	4.3	M006	Active	Chicago
+E009	Christopher	Williams	chris.williams@xberg.io	Marketing	Marketing Manager	98000	2020-01-08	4.2	M007	Active	New York
+E010	Rachel	Davis	rachel.davis@xberg.io	Engineering	QA Engineer	85000	2021-03-30	4.1	M001	Active	San Francisco
+E011	Daniel	Garcia	daniel.garcia@xberg.io	Finance	Financial Analyst	82000	2021-08-10	4.0	M008	Active	Chicago
+E012	Lisa	Martinez	lisa.martinez@xberg.io	HR	HR Manager	92000	2020-04-20	4.4	M009	Active	New York
+E013	Kevin	Brown	kevin.brown@xberg.io	Engineering	Platform Engineer	120000	2019-09-12	4.6	M002	Active	San Francisco
+E014	Megan	Taylor	megan.taylor@xberg.io	Product	Senior Product Manager	125000	2018-05-01	4.8	M003	On Leave	New York
+E015	Brandon	White	brandon.white@xberg.io	Engineering	ML Engineer	135000	2020-02-03	4.7	M001	Active	San Francisco
+E016	Nicole	Harris	nicole.harris@xberg.io	Design	UX Designer	92000	2021-10-15	4.3	M004	Active	New York
+E017	Jason	Clark	jason.clark@xberg.io	Operations	Infrastructure Engineer	105000	2020-11-09	4.5	M005	Active	San Francisco
+E018	Stephanie	Lewis	stephanie.lewis@xberg.io	Sales	Sales Development Rep	68000	2022-07-25	4.0	M006	Active	Chicago
+E019	Mark	Walker	mark.walker@xberg.io	Engineering	Backend Engineer	110000	2021-01-11	4.2	M002	Active	San Francisco
+E020	Heather	Hall	heather.hall@xberg.io	Finance	Senior Accountant	88000	2019-12-02	4.6	M008	Active	Chicago
+E021	Andrew	Allen	andrew.allen@xberg.io	Engineering	Frontend Engineer	105000	2020-08-17	4.4	M001	Active	San Francisco
+E022	Karen	Young	karen.young@xberg.io	Marketing	Content Strategist	85000	2021-04-26	4.1	M007	Active	New York
+E023	Patrick	Hernandez	patrick.hernandez@xberg.io	Operations	Ops Manager	108000	2019-02-14	4.7	M005	Active	San Francisco
+E024	Donna	King	donna.king@xberg.io	HR	Recruiter	78000	2022-01-31	4.2	M009	Active	New York
+E025	Paul	Wright	paul.wright@xberg.io	Product	Associate Product Manager	85000	2022-09-06	3.8	M003	Active	New York

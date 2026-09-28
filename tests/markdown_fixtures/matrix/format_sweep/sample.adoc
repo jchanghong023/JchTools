@@ -1,0 +1,733 @@
+= Marine IMU Wave-State Estimation with OU-Driven Quaternion MEKF
+mgrouch <mgrouch@users.noreply.github.com>
+{docdate}, Marine IMU Wave-State Estimation
+:imagesdir: images
+:doctype: book
+:organization: Bareboat Necessities
+:description: Bareboat Necessities, Marine IMU wave-state estimation from low-cost IMU data
+:title-logo-image: image:bareboat-necessities-logo.svg[Bareboat Necessities Logo]
+ifdef::backend-pdf[]
+:source-highlighter: rouge
+:toc-placement!: manual
+:pdf-page-size: Letter
+:plantumlconfig: plantuml.cfg
+endif::[]
+ifndef::backend-pdf[]
+:toc-placement: manual
+endif::[]
+:stem:
+:experimental:
+:reproducible:
+:toclevels: 4
+:sectnums:
+:sectnumlevels: 3
+:encoding: utf-8
+:lang: en
+:icons: font
+ifdef::env-github[]
+:tip-caption: :bulb:
+:note-caption: :information_source:
+:important-caption: :heavy_exclamation_mark:
+:caution-caption: :fire:
+:warning-caption: :warning:
+endif::[]
+:env-github:
+
+{zwsp} +
+
+ifndef::backend-pdf[]
+image::bareboat-necessities-logo.svg[Bareboat Necessities Logo]
+endif::[]
+
+{zwsp} +
+
+toc::[]
+
+== Abstract
+
+This document replaces the earlier trochoidal-wave and raw double-integration draft with the more mature estimator now developed in the Ocean IMU project.
+The current method is an OU-driven quaternion multiplicative extended Kalman filter, or Q-MEKF, for marine inertial sensing and wave-state estimation.
+It estimates attitude, heave, 3D displacement, dominant wave frequency, and horizontal wave direction from a calibrated IMU, with optional magnetometer yaw correction and vessel-specific corrections such as IMU lever arm and steady wind heel.
+
+The central change is conceptual.
+The old draft tried to infer wave height from simplified trochoidal formulas and then use those formulas to help a vertical Kalman integration scheme.
+The current method instead models the unknown world-frame wave acceleration as a stationary Ornstein-Uhlenbeck, or OU, process and lets the Kalman filter jointly estimate attitude and wave kinematics.
+Drift is controlled by a soft pseudo-measurement on the integral of displacement, with an adaptive covariance that scales with the sea state.
+
+This formulation is intended for embedded, low-cost marine IMU deployments.
+It avoids reliance on barometric pressure for wave elevation, avoids uncontrolled double integration of acceleration, and uses a real-time adaptation loop so that the same filter can remain stable across calm chop, long swell, and larger sea states.
+
+== Source and Status
+
+This document is a practical AsciiDoc distillation of the more detailed Ocean IMU mathematical draft:
+
+* https://github.com/bareboat-necessities/ocean-imu[`bareboat-necessities/ocean-imu`]
+* `doc/kalman_ou_iii/kalman_ou-w3d.tex`
+* `doc/kalman_ou_iii/w3d-*.tex-part`
+
+It is not meant to duplicate every proof, coefficient table, or plotting fixture from Ocean IMU.
+Instead, it records the model, state layout, update equations, tuning law, and validation results at a level appropriate for the Bareboat Necessities documentation.
+
+== Motivation
+
+A boat, buoy, or floating sensor experiences wave-induced translational motion, vessel attitude motion, sensor bias, vibration, magnetic disturbance, and measurement noise at the same time.
+Estimating wave height by simply rotating the accelerometer into a vertical axis and double-integrating it is not stable in practice:
+
+* accelerometer bias integrates into velocity drift and then displacement drift;
+* attitude error leaks gravity into the estimated acceleration;
+* the initial vertical velocity and displacement are generally unknown;
+* low-frequency drift is easily mistaken for long-period swell;
+* a barometer does not directly solve the problem on a moving wave surface.
+
+The mature estimator treats the problem as a coupled inertial-navigation and stochastic wave-kinematics problem.
+The wave acceleration is not assumed to be a perfect sinusoid or trochoid.
+Instead, it is treated as colored, finite-variance excitation with a correlation time tied to the dominant wave period.
+
+== Estimator Overview
+
+The estimator combines four pieces:
+
+. a quaternion left-multiplicative EKF for attitude and gyro bias;
+. a 3D linear kinematic chain for acceleration, velocity, displacement, and the integral of displacement;
+. an OU process prior for latent world-frame acceleration;
+. an online sea-state tuner that adapts the OU time constant, acceleration variance, and drift-control pseudo-measurement.
+
+At each IMU step:
+
+* the gyroscope propagates the nominal quaternion;
+* the accelerometer contributes a rank-3 EKF measurement of body-frame specific force;
+* the magnetometer, when enabled and stable, contributes a rank-3 yaw/field update;
+* the pseudo-measurement `S = 0` softly constrains long-term displacement drift;
+* the frequency tracker and tuner update the sea-state parameters.
+
+== Frames and Signals
+
+The working world frame is NED: north, east, down.
+The body frame is the calibrated IMU or vessel body frame used by the implementation.
+
+The estimator assumes calibrated triads:
+
+* gyroscope body rate stem:[omega_m];
+* accelerometer specific force stem:[f_b];
+* magnetometer field stem:[m_b], when available.
+
+The gravity vector in NED is
+
+[stem]
+++++
+g_w = [0, 0, g]^T,    g = 9.80665 m/s^2.
+++++
+
+The rotation stem:[R_wb] maps world-frame vectors into the body frame.
+The nominal attitude is stored as a unit quaternion representing world-to-body orientation.
+
+== State Vector
+
+The extended error-state vector is
+
+[stem]
+++++
+x = [delta theta, b_g, v, p, S, a_w, b_a]^T.
+++++
+
+The state components are:
+
+[cols="1,4", options="header"]
+|===
+| Symbol | Meaning
+
+| stem:[delta theta]
+| Small attitude-error vector used by the left-multiplicative EKF correction.
+
+| stem:[b_g]
+| Gyroscope bias, modeled as a random walk.
+
+| stem:[v]
+| World-frame velocity.
+
+| stem:[p]
+| World-frame displacement or position relative to the local wave-tracking origin.
+
+| stem:[S]
+| Integral of displacement, stem:[S(t) = int_0^t p(lambda) d lambda].  This auxiliary state is used for drift suppression.
+
+| stem:[a_w]
+| Latent world-frame wave acceleration, modeled as an OU process.
+
+| stem:[b_a]
+| Accelerometer bias, modeled as a random walk with optional temperature-dependent drift in the measurement model.
+|===
+
+With all components enabled, the filter has
+
+[stem]
+++++
+N_X = 3 + 3 + 3 + 3 + 3 + 3 + 3 = 21
+++++
+
+states.
+
+== Measurement Model
+
+=== Accelerometer
+
+The accelerometer measures body-frame specific force:
+
+[stem]
+++++
+f_b = R_wb (a_w - g_w) + b_a(T) + n_a.
+++++
+
+Here
+
+[stem]
+++++
+b_a(T) = b_a0 + k_a (T - T_ref)
+++++
+
+allows a temperature-dependent accelerometer bias correction, and stem:[n_a] is accelerometer measurement noise.
+
+For the left-multiplicative convention, the linearized accelerometer Jacobians are
+
+[stem]
+++++
+d f_b / d theta = -skew(f_cog,b),
+
+d f_b / d a_w = R_wb,
+
+d f_b / d b_a = I_3.
+++++
+
+The important point is that the accelerometer update does not merely tilt-correct the attitude.
+Because stem:[d f_b / d a_w = R_wb], it also corrects the latent world-frame acceleration state.
+That is what ties attitude, gravity alignment, and wave acceleration into one estimator.
+
+=== Magnetometer
+
+When magnetometer updates are enabled, the predicted magnetic field is
+
+[stem]
+++++
+m_b = R_wb B_w + n_m.
+++++
+
+The world magnetic reference stem:[B_w] is obtained from calibration and local magnetic inclination/declination.
+The attitude Jacobian is
+
+[stem]
+++++
+d m_b / d theta = -skew(m_b).
+++++
+
+In practice, magnetometer yaw correction should be delayed until the tilt estimate is stable and a reliable local magnetic reference has been accumulated.
+
+=== Integral Pseudo-Measurement
+
+To suppress long-term double-integration drift, the filter applies a zero-valued pseudo-measurement to the integral state:
+
+[stem]
+++++
+z_S = 0 = S + n_S,
+
+R_S = diag(sigma_Sx^2, sigma_Sy^2, sigma_Sz^2),
+
+d z_S / d S = I_3.
+++++
+
+This is not a physical sensor.
+It is a soft regularizer.
+Repeated application makes the triple integral behave like a leaky integral: low-frequency drift is attenuated while wave-band motion is still allowed.
+
+The choice of stem:[R_S] is critical:
+
+* small stem:[R_S] means strong drift control but risks over-regularizing long swell;
+* large stem:[R_S] means weak drift control and more low-frequency wandering;
+* adaptive stem:[R_S] lets the filter scale this tradeoff with the sea state.
+
+=== IMU Lever Arm
+
+If the IMU is not mounted at the vessel center of gravity, angular motion adds apparent acceleration.
+For a body-frame lever arm stem:[r_b], body angular velocity stem:[omega_b], and angular acceleration stem:[alpha_b], the accelerometer model becomes
+
+[stem]
+++++
+f_b = f_cog,b + alpha_b xx r_b + omega_b xx (omega_b xx r_b) + b_a(T) + n_a.
+++++
+
+The lever-arm term is treated as a known kinematic correction.
+Setting stem:[r_b = 0] recovers the center-of-gravity model.
+
+== Continuous-Time Process Model
+
+=== Quaternion Propagation
+
+The nominal quaternion is propagated from the bias-corrected gyroscope:
+
+[stem]
+++++
+d q / d t = -1/2 Omega(omega_m - b_g) q.
+++++
+
+Unit norm is enforced in implementation.
+The gyro bias follows a random walk:
+
+[stem]
+++++
+d b_g / d t = w_bg.
+++++
+
+The small left-multiplicative attitude error evolves approximately as
+
+[stem]
+++++
+d(delta theta)/dt = -skew(omega_m - b_g) delta theta + delta b_g - n_g.
+++++
+
+=== OU-Driven Kinematic Chain
+
+For each world axis, the linear chain is
+
+[stem]
+++++
+d v / d t = a_w,
+
+d p / d t = v,
+
+d S / d t = p.
+++++
+
+The latent acceleration is modeled by an OU process:
+
+[stem]
+++++
+d a_w / d t = -(1/tau) a_w + sqrt(2/tau) L_a w_a,
+
+L_a L_a^T = Sigma_aw.
+++++
+
+Here stem:[tau] is the acceleration correlation time and stem:[Sigma_aw] is the stationary acceleration covariance.
+The OU model is not claiming that the ocean surface is literally an OU process.
+It is a compact Gauss-Markov prior for colored wave excitation with bounded variance and a finite correlation time.
+That prior is useful because it is Markov, embedded-friendly, and admits analytic discretization.
+
+The accelerometer bias is modeled as
+
+[stem]
+++++
+d b_a / d t = w_ba.
+++++
+
+Its temperature correction belongs in the measurement model, not in the process model.
+
+=== Unified Error-State Form
+
+The continuous-time linearized error dynamics can be written as
+
+[stem]
+++++
+d x_err / d t = F x_err + L w,
+
+P_dot = F P + P F^T + Q_c.
+++++
+
+With measurements, the continuous Kalman-Bucy information term is
+
+[stem]
+++++
+P_dot = F P + P F^T + Q_c - P H^T R^(-1) H P.
+++++
+
+The implementation uses the corresponding discrete prediction and Joseph-form correction.
+
+== Discrete-Time Prediction
+
+For sample interval stem:[h], a linear time-invariant SDE is discretized as
+
+[stem]
+++++
+x_(k+1|k) = Phi(h) x_k,
+
+P_(k+1|k) = Phi(h) P_k Phi(h)^T + Q_d(h),
+
+Phi(h) = exp(F h),
+
+Q_d(h) = int_0^h exp(F t) L Q_c L^T exp(F^T t) d t.
+++++
+
+The Ocean IMU implementation computes the important OU-driven blocks analytically.
+This avoids numerical instability and avoids repeatedly using a general-purpose matrix exponential on small embedded targets.
+
+=== OU Axis Transition
+
+For one axis with state stem:[[v, p, S, a]^T], define
+
+[stem]
+++++
+x = h / tau,
+
+alpha = e^(-x).
+++++
+
+The per-axis transition has the form
+
+[stem]
+++++
+Phi_axis = [
+  1,       0, 0, phi_va;
+  h,       1, 0, phi_pa;
+  1/2 h^2, h, 1, phi_Sa;
+  0,       0, 0, alpha
+].
+++++
+
+The coupling terms are
+
+[stem]
+++++
+phi_va = tau (1 - alpha),
+
+phi_pa = tau^2 (x + alpha - 1),
+
+phi_Sa = tau^3 (1/2 x^2 - x - alpha + 1).
+++++
+
+The full 3D OU-chain transition is the block diagonal stacking of three such axis transitions.
+The covariance stem:[Q_d] is computed from an exact coefficient matrix for normal stem:[x] and from a Maclaurin branch for small stem:[x], followed by symmetrization and positive-semidefinite cleanup.
+
+== Rank-3 Measurement Updates
+
+The accelerometer, magnetometer, and pseudo-measurement channels are all rank-3 updates.
+For a measurement
+
+[stem]
+++++
+z = h(x) + nu,
+++++
+
+the EKF update is
+
+[stem]
+++++
+r = z - h(x^-),
+
+S_innov = H P^- H^T + R,
+
+K = P^- H^T S_innov^(-1),
+
+x^+ = x^- + K r.
+++++
+
+The covariance update should use the Joseph form:
+
+[stem]
+++++
+P^+ = (I - K H) P^- (I - K H)^T + K R K^T.
+++++
+
+After each correction, the attitude-error subvector is injected back into the nominal quaternion:
+
+[stem]
+++++
+q <- exp(1/2 delta theta) ox q,
+
+delta theta <- 0.
+++++
+
+The rank-3 structure is important for embedded use.
+The expensive inversion is only a 3 by 3 solve for each triad update.
+
+== Initialization and Reference Alignment
+
+Startup should be staged.
+The filter should not immediately trust yaw, acceleration bias, displacement, or drift-control states.
+
+A practical sequence is:
+
+. Estimate gravity direction from accelerometer data and initialize roll/pitch.
+. Leave yaw arbitrary until a stable magnetic reference is available.
+. Run an early attitude-only or reduced-state phase while the frequency tracker gathers statistics.
+. Enable the full linear wave block after the tuner has usable estimates of frequency and acceleration variance.
+. Delay magnetometer yaw correction until tilt is stable and magnetic samples have been accumulated in the tilt frame.
+. Enter live operation with online adaptation enabled.
+
+This avoids seeding displacement, bias, and pseudo-measurement states with startup transients.
+
+== Frequency Tracking
+
+Adaptive tuning requires an online estimate of the dominant wave frequency.
+The signal is derived from vertical inertial acceleration, typically as an up-positive scalar:
+
+[stem]
+++++
+a_up = -a_z,inert.
+++++
+
+Three embedded-friendly trackers are supported in Ocean IMU:
+
+[cols="1,4", options="header"]
+|===
+| Tracker | Role
+
+| KalmANF adaptive notch
+| Models the signal with a second-order notch and updates the notch parameter with a scalar Kalman step.
+
+| Aranovskiy observer
+| Uses a nonlinear sinusoidal frequency observer with a filtered input and adaptive auxiliary state.
+
+| PLL
+| Uses a band-passed signal, I/Q demodulation, and a bounded PI phase-locked loop.
+|===
+
+The raw frequency is clamped and smoothed to produce stem:[f_tune], which drives the sea-state tuner and the horizontal wave-direction estimator.
+
+== Variance-Informed Online Adaptation
+
+The tuner adapts three quantities:
+
+* OU correlation time stem:[tau];
+* stationary acceleration scale stem:[sigma_a];
+* integral pseudo-measurement level stem:[R_S].
+
+The variance estimate is tied to a fixed number of wave periods so that the adaptation horizon scales naturally between chop and swell:
+
+[stem]
+++++
+T_eff = 1 / f_tune,
+
+tau_var = clip(K_periods T_eff, tau_var,min, tau_var,max),
+
+alpha_var = 1 - e^(-Delta t / tau_var).
+++++
+
+After subtracting a configured acceleration noise floor,
+
+[stem]
+++++
+sigma_wave^2 = max(0, sigma_tot^2 - sigma_nf^2),
+++++
+
+the target parameters are
+
+[stem]
+++++
+tau_star = c_tau / (2 f_tune),
+
+sigma_a,star = c_sigma sqrt(max(sigma_wave^2, epsilon)),
+
+R_S,star = c_R sigma_a,star tau_star^3.
+++++
+
+The applied values are exponentially smoothed.
+stem:[tau] and stem:[sigma_a] use a fixed adaptation time constant.
+stem:[R_S] is smoothed with a time constant proportional to the current wave time scale, so it responds faster in short-period seas and slower in long-period swell.
+
+=== Why stem:[R_S] Scales as stem:[sigma_a tau^3]
+
+The pseudo-measurement is not arbitrary.
+The triple-integral state stem:[S] is the result of integrating acceleration three times:
+
+[stem]
+++++
+d v / d t = a,
+
+d p / d t = v,
+
+d S / d t = p.
+++++
+
+In the frequency domain, the transfer from acceleration to stem:[S] has magnitude squared proportional to stem:[1 / omega^6].
+For a broad class of wave spectra, after separating spectrum scale from spectrum shape, the natural spread of stem:[S] follows
+
+[stem]
+++++
+sigma_S ~= c_spec sigma_a tau^3.
+++++
+
+Therefore a practical sea-state-invariant pseudo-measurement law is
+
+[stem]
+++++
+R_S = k_i sigma_a tau^3.
+++++
+
+This makes a calm sea and a steep sea produce comparable normalized pseudo-measurement innovations.
+The filter does not become overly stiff in large waves or overly loose in calm conditions purely because the acceleration level changed.
+
+=== Anisotropy
+
+The implementation may use different horizontal and vertical settings:
+
+[stem]
+++++
+Sigma_aw^(1/2) = diag(S_sigma sigma_a, S_sigma sigma_a, sigma_a),
+
+R_S = diag(rho_xy R_S, rho_xy R_S, R_S).
+++++
+
+This allows stronger or weaker horizontal regularization without changing the vertical heave behavior.
+
+== Horizontal Wave Direction
+
+The filter estimates a slowly varying horizontal acceleration amplitude vector stem:[A_k].
+Let
+
+[stem]
+++++
+z_k = [a_x(k), a_y(k)]^T.
+++++
+
+For a dominant narrow-band wave with phase stem:[phi_k], the simplified observation model is
+
+[stem]
+++++
+z_k ~= cos(phi_k) A_k + eta_k.
+++++
+
+This is the online Kalman-filter form of a cosine-projection least-squares fit:
+
+[stem]
+++++
+A_LS = (sum_k cos(phi_k) z_k) / (sum_k cos(phi_k)^2).
+++++
+
+The 2D direction filter uses
+
+[stem]
+++++
+A_(k+1) = A_k + w_k,
+
+H_k = cos(phi_k) I_2,
+
+z_k = H_k A_k + eta_k.
+++++
+
+When stem:[abs(cos(phi_k))] is too small, the update is skipped because the observation carries little information near horizontal zero crossings.
+
+The wave line angle is
+
+[stem]
+++++
+d_hat = A_k / ||A_k||,
+
+theta = wrap_[0,180)(atan2(d_y, d_x) 180 / pi).
+++++
+
+This gives direction modulo stem:[180 deg].
+A separate vertical-horizontal phase discriminator can choose the travel sense along that line, producing a directed azimuth when the sign estimate is stable.
+
+== Validation Summary
+
+Ocean IMU validates the filter on synthetic directional sea states with controlled ground truth.
+The simulations use 20 minute runs at 200 Hz, with IMU and magnetometer error models representative of low-cost MEMS hardware.
+
+=== Wave Scenarios
+
+[cols="1,2,1,1,2", options="header"]
+|===
+| Scenario | Model | stem:[H_s] m | stem:[T_p] s | Directional spread
+
+| W1 | JONSWAP, PM-Stokes | 0.27 | 3.0 | +30 deg / cos-spread
+| W2 | JONSWAP, PM-Stokes | 1.50 | 5.7 | -30 deg / cos-spread
+| W3 | JONSWAP, PM-Stokes | 4.00 | 8.5 | +30 deg / cos-spread
+| W4 | JONSWAP, PM-Stokes | 8.50 | 11.4 | -30 deg / cos-spread
+|===
+
+=== Simulation Results
+
+The table below summarizes the last 60 seconds RMS window from the Ocean IMU validation run.
+`R/P/Y` are roll, pitch, and yaw RMS errors in degrees.
+`T/A/U` means Toward, Away, and Uncertain percentage of samples for the sign discriminator.
+
+[cols="1,1,1,1,1,1,1,1,1", options="header"]
+|===
+| Case | stem:[H_s] | Z RMS m | Z % stem:[H_s] | R deg | P deg | Y deg | mean theta deg | T/A/U %
+
+| JONSWAP | 0.27 | 0.026 | 9.7 | 0.42 | 0.30 | 1.11 | 29.2 | 99.5/0.0/0.5
+| JONSWAP | 1.50 | 0.085 | 5.7 | 0.45 | 0.65 | 0.34 | -32.7 | 100.0/0.0/0.1
+| JONSWAP | 4.00 | 0.297 | 7.4 | 0.60 | 1.36 | 1.59 | 31.5 | 99.3/0.7/0.0
+| JONSWAP | 8.50 | 0.453 | 5.3 | 1.37 | 0.54 | 1.06 | -30.8 | 99.0/0.6/0.4
+| PM+Stokes | 0.27 | 0.020 | 7.6 | 0.37 | 0.12 | 1.94 | 37.3 | 99.7/0.0/0.3
+| PM+Stokes | 1.50 | 0.063 | 4.2 | 0.18 | 0.17 | 2.10 | -34.5 | 99.7/0.0/0.3
+| PM+Stokes | 4.00 | 0.262 | 6.6 | 0.19 | 0.39 | 2.10 | 26.4 | 100.0/0.0/0.0
+| PM+Stokes | 8.50 | 0.537 | 6.3 | 1.00 | 0.56 | 2.21 | -19.1 | 99.8/0.0/0.2
+|===
+
+The simulation results show drift-suppressed vertical displacement while retaining realistic wave-band motion.
+The model also keeps roll, pitch, yaw, and wave-direction estimates bounded under sensor noise, residual bias, and multicomponent directional seas.
+
+== Embedded Hardware Platform
+
+The implementation has also been exercised on real embedded hardware using the M5Stack AtomS3R ESP32-S3 module.
+The purpose of this validation is to confirm real-time behavior and implementation feasibility:
+
+* fixed-rate IMU sampling;
+* bounded memory use;
+* calibrated sensor triads;
+* quaternion propagation from gyroscope data;
+* rank-3 accelerometer updates at IMU rate;
+* delayed magnetometer yaw correction when available;
+* adaptive frequency and sea-state tuning from the vertical acceleration-like signal.
+
+Quantitative wave-kinematics accuracy is evaluated in simulation, where exact displacement, velocity, acceleration, and attitude ground truth are available.
+Real hardware validates the embedded execution path and sensor-processing pipeline.
+
+== Practical Implementation Notes
+
+=== Prefer a Unified Filter Over a Pipeline
+
+The mature method does not first estimate attitude, then separately integrate acceleration, then separately estimate wave spectra.
+It keeps attitude, acceleration, velocity, displacement, and drift control in one covariance model.
+This is important because tilt error and acceleration error are coupled by gravity.
+
+=== Do Not Treat the Pseudo-Measurement as a Sensor
+
+The stem:[S = 0] pseudo-measurement is an artificial stabilizer.
+Its covariance is a tuning parameter.
+It should be adapted from frequency and acceleration variance, not chosen as a fixed physical sensor noise.
+
+=== Use Calibrated Axes
+
+All equations assume that accelerometer, gyro, and magnetometer readings have already been calibrated and mapped into the expected body-frame convention.
+Hard-iron, soft-iron, scale, axis alignment, and gyro/accelerometer bias calibration should be handled before the estimator input stage.
+
+=== Correct Lever Arm When Needed
+
+An IMU mounted away from the vessel center of gravity will see angular-acceleration and centripetal terms.
+For small boats and low-cost modules this can be a large source of error.
+Use the lever-arm correction when the installation geometry is known.
+
+=== Delay Magnetometer Trust
+
+Magnetometer data are useful for yaw, but they are easily corrupted by local magnetic disturbances.
+The estimator should initialize tilt first, accumulate a stable magnetic reference, and only then enable regular yaw updates.
+
+=== Barometer Is Not the Primary Wave Sensor
+
+A barometer can be useful for weather and slow altitude trends, but it should not be treated as a direct wave-elevation sensor on a floating platform.
+The wave surface is not a static height field measured by air pressure in the way hiking or stair-climbing algorithms assume.
+
+== Relationship to the Old Draft
+
+The old document contained useful early notes about why double integration drifts and why pressure is not a reliable wave-height source on the wave surface.
+Those points remain valid.
+However, the trochoidal reconstruction and Doppler-based approach is no longer the preferred core algorithm.
+
+The current preferred algorithm is:
+
+. calibrated IMU and optional magnetometer input;
+. quaternion MEKF for attitude and gyro bias;
+. OU-driven 3D kinematic chain for wave acceleration, velocity, displacement, and integral displacement;
+. adaptive pseudo-measurement drift control;
+. online frequency tracking and wave-direction estimation;
+. simulation validation against directional JONSWAP and PM-Stokes sea states;
+. embedded execution on ESP32-S3-class hardware.
+
+== References
+
+* Bareboat Necessities Ocean IMU project: https://github.com/bareboat-necessities/ocean-imu
+* M. S. Grushinskiy, _OU-Driven Quaternion MEKF for Marine INS and Wave-State Estimation_, draft in `ocean-imu/doc/kalman_ou_iii`.
+* R. E. Kalman, _A New Approach to Linear Filtering and Prediction Problems_, 1960.
+* G. E. Uhlenbeck and L. S. Ornstein, _On the Theory of the Brownian Motion_, 1930.
+* F. L. Markley, _Attitude Error Representations for Kalman Filtering_, 2003.
+* J. Sola, _Quaternion Kinematics for the Error-State Kalman Filter_, 2017.
+* S. M. Sharkh et al., _A Novel Kalman Filter Based Technique for Calculating the Time History of Vertical Displacement of a Boat from Measured Acceleration_, 2014.

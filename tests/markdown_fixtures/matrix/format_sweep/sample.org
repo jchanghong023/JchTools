@@ -1,0 +1,52 @@
+* Frame Wire Protocol Specification
+:PROPERTIES:
+:CUSTOM_ID: frame-wire-protocol-specification
+:END:
+This document specifies the binary framing used by the transport layer.
+All integers are *big-endian* and unsigned unless stated otherwise. The
+protocol is versioned; a receiver /must/ reject frames whose version it
+does not implement.
+
+** Frame Layout
+:PROPERTIES:
+:CUSTOM_ID: frame-layout
+:END:
+Every frame begins with a fixed 8-byte header followed by a variable
+payload. The header carries the length so a reader never blocks
+mid-frame.
+
+** Header Fields
+:PROPERTIES:
+:CUSTOM_ID: header-fields
+:END:
+| Field     | Size (bytes) | Description                           |
+|-----------+--------------+---------------------------------------|
+| =magic=   | 2            | Constant =0x5842=, identifies a frame |
+| =version= | 1            | Protocol version, currently =0x02=    |
+| =type=    | 1            | Frame kind, see the table below       |
+| =length=  | 4            | Payload byte count, excludes header   |
+
+** Frame Types
+:PROPERTIES:
+:CUSTOM_ID: frame-types
+:END:
+The =type= byte selects one of the following:
+
+- =0x01= *DATA* --- carries an application payload.
+- =0x02= *ACK* --- acknowledges a sequence number.
+- =0x03= *PING* --- liveness probe, payload is echoed.
+- =0x04= *CLOSE* --- graceful shutdown with a reason code.
+
+** Validation Rules
+:PROPERTIES:
+:CUSTOM_ID: validation-rules
+:END:
+A conformant reader enforces these invariants in order:
+
+1. Reject the frame if =magic= is not =0x5842=.
+2. Reject the frame if =length= exceeds =1048576= bytes.
+3. Treat an unknown =type= as a protocol error and send =CLOSE=.
+
+The =length= cap exists to bound memory; a sender that needs more must
+split its message across multiple =DATA= frames and set the
+/continuation/ bit in the first payload byte.
