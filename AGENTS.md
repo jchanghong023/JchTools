@@ -16,8 +16,8 @@
 - **项目类型与技术栈**：自有项目 JchTools，用户个人使用的 Windows 本地工具箱，由 AI Agent 实现和维护。Rust 2021 + Slint 1.17、SQLite（rusqlite bundled）、7-Zip 引擎；产品定位与交付要求见合同 P / E 分区，打包入口为 `scripts/package-windows.ps1` 与 `installer/JchTools.iss`。
 - **工具入口**：当前工作树的注册表与 GUI 已接入递归解压、目录整理、MD 整理、转 Markdown、Git 工具和截图 OCR 六个入口，对应合同 X / C / M / T / G / O 分区。入口与实现代码存在不代表完整功能已验收，截图 OCR 的真实模型、桌面链路和可选资产交付仍须按 O 分区验证。联网边界只按 P-03 执行，各功能例外不得互相扩大。新工具 `MUST` 经 `src/registry.rs` 注册 + 真实页面接入；侧栏与导航 `SHOULD NOT` 写死只服务单个工具的文案或流程。
 - **生产方式**：本项目全部产出（代码、测试、文档、CI）由 AI 代理完成；用户不编写任何代码或文字，只在封闭选择、看图判断与真实使用中给出意图和反馈（协作协议见第 7 节）。本文件的纪律条款用于对抗代理的自证偏差。
-- **权威分工**：`AGENTS.md` 规定开发、测试和验收纪律；固定目录 `docs/requirements/` 保存全部产品需求，`CONTRACT.md` 维护全局约束与既有工具分区，`ALL2MARKDOWN.md` 独立维护转 Markdown（T 分区），`SNAP2TEXT.md` 独立维护截图 OCR（O 分区）。按功能域定位唯一需求来源；明确标注的待确认草案不覆盖已确认条目。旧 `docs/CONTRACT.md` 仅保留迁移链接，兼容静态检查的文件存在性要求，不再维护需求副本。其余文档仅为辅助说明。
-- **代码入口**：`src/main.rs` → `src/gui.rs`（GUI 启动、回调与后台任务）、`ui/app.slint`（界面）、`src/registry.rs`（工具注册表）；`src/archive.rs`（递归解压）、`src/engine.rs`（整理分析与执行）、`src/md_tools.rs`（MD 合并与拆分）、`src/git_tools.rs`（Git 操作）、`resources/rules.json`（界面规则清单）。转 Markdown 由 `src/markdown.rs`、`src/markdown_document.rs`、`src/markdown_assets.rs` 承接，媒体转录经 Xberg 推理组件（`xberg.exe worker` stdio 协议，XB 分区）承接；截图 OCR 由 `src/snap_ocr_assets.rs`、`optional/snap-ocr-core/`（纯逻辑）与 `optional/snap-ocr-worker/`（截图、托盘、服务和结果窗，识别经 Xberg 推理组件）承接，主界面回调仍在 `src/gui.rs`。
+- **权威分工**：`AGENTS.md` 规定开发、测试和验收纪律；固定目录 `docs/requirements/` 保存全部产品需求，`CONTRACT.md` 维护全局约束与既有工具分区，`ALL2MARKDOWN.md` 独立维护转 Markdown（T 分区），`SNAP2TEXT.md` 独立维护截图 OCR（O 分区），`XBERG-INFERENCE.md` 独立维护「Xberg 作为推理提供方」集成域（XB 分区，2026-09-28 确认）。按功能域定位唯一需求来源；明确标注的待确认草案不覆盖已确认条目。旧 `docs/CONTRACT.md` 仅保留迁移链接，兼容静态检查的文件存在性要求，不再维护需求副本。目录内权威文档清单由 static_check 的 `requirements_registry` 检查执法（新增文档须同步本清单与该检查）。其余文档仅为辅助说明。
+- **代码入口**：`src/main.rs` → `src/gui.rs`（GUI 启动、回调与后台任务）、`ui/app.slint`（界面）、`src/registry.rs`（工具注册表）；`src/archive.rs`（递归解压）、`src/engine.rs`（整理分析与执行）、`src/md_tools.rs`（MD 合并与拆分）、`src/git_tools.rs`（Git 操作）、`resources/rules.json`（界面规则清单）。转 Markdown 由 `src/markdown.rs`、`src/markdown_document.rs`、`src/markdown_assets.rs` 承接，媒体转录经 Xberg 推理组件（`xberg.exe worker` stdio 协议，XB 分区）承接；截图 OCR 由 `src/snap_ocr_assets.rs`、`optional/snap-ocr-core/`（O-23～O-28 的规格参照物：workspace 内无 crate 依赖它，识别已按 XB-01/XB-02 迁至 Xberg，删除前须确认规格约束另有执法点承接）与 `optional/snap-ocr-worker/`（截图、托盘、服务和结果窗，识别经 Xberg 推理组件）承接，主界面回调仍在 `src/gui.rs`。两资产模块共用的下载/校验/原子落位/推理组件包安装核心在 `src/asset_util.rs`。
 
 ## 2. 临时文件规则（强制）
 
@@ -144,7 +144,7 @@ powershell -NoProfile -File .\scripts\package-windows.ps1   # 生成含 7-Zip �
 
 ## 8. 固定需求目录（docs/requirements/）
 
-- `docs/requirements/` 是用户意图的唯一权威目录，当前由 `CONTRACT.md`（全局及 X / C / M / G 等分区）、`ALL2MARKDOWN.md`（T 分区）与 `SNAP2TEXT.md`（O 分区）按功能域维护需求：每行一个编号行为断言，**只写需求、不写实现状态**；需求按第 7 节确认后进入实现（O 分区已于 2026-09-27 确认），「功能是否正常」以已确认合同覆盖为准，不以代理单方面理解为准。
+- `docs/requirements/` 是用户意图的唯一权威目录，当前由 `CONTRACT.md`（全局及 X / C / M / G 等分区）、`ALL2MARKDOWN.md`（T 分区）、`SNAP2TEXT.md`（O 分区）与 `XBERG-INFERENCE.md`（XB 分区）按功能域维护需求：每行一个编号行为断言，**只写需求、不写实现状态**；需求按第 7 节确认后进入实现（O 分区已于 2026-09-27 确认，XB 分区已于 2026-09-28 确认），「功能是否正常」以已确认合同覆盖为准，不以代理单方面理解为准。
 - 用户可见行为变更 `MUST` 对应至少一行合同；合同行数单调不减；增改 `MUST` 经用户确认并记录于提交信息，`MUST NOT` 由代理单方面增删。
 - 代码与合同不一致时 `MUST` 以合同为准、按缺陷流程修代码（先红后绿，见 3.2）；`MUST NOT` 为迁就代码现状而改写、削弱或删除合同条目。
 - 合同条目与测试的映射规则见 3.3（测试注释标合同编号；矩阵检查待落地）。
