@@ -14,7 +14,7 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[2]
 MANIFEST = ROOT / "resources" / "snap-ocr-assets.json"
 WORKER_URL = (
-    "https://github.com/jchanghong023/JchTools/releases/download/optional-components-v0.1.1/snap-ocr-worker.exe"
+    "https://github.com/jchanghong023/JchTools/releases/download/optional-components-v0.1.2/snap-ocr-worker.exe"
 )
 
 

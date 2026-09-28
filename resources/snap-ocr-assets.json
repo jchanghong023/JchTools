@@ -43,11 +43,11 @@
     {
       "id": "snap-ocr-worker",
       "status": "ok",
-      "url": "https://github.com/jchanghong023/JchTools/releases/download/optional-components-v0.1.1/snap-ocr-worker.exe",
+      "url": "https://github.com/jchanghong023/JchTools/releases/download/optional-components-v0.1.2/snap-ocr-worker.exe",
       "archive_type": "file",
-      "install_path": "worker/v0.1.1/snap-ocr-worker.exe",
-      "size_bytes": 16744960,
-      "sha256": "5c380a7daa10be612929c87f10530b34cbec7a618a82fdb7312d23d41670c724",
+      "install_path": "worker/v0.1.2/snap-ocr-worker.exe",
+      "size_bytes": 16235008,
+      "sha256": "c15234bb4596ab29f432bae68196fd60be87c38f7e726627f2e631e2fdd59e11",
       "members": [],
       "license": {
         "component": "JchTools snap-ocr-worker（截图 OCR 后台服务进程）",

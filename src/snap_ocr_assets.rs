@@ -24,7 +24,7 @@ const MANIFEST: &str = include_str!(concat!(env!("OUT_DIR"), "/snap-ocr-assets.j
 const DATA_DIRECTORY: &str = "snap-ocr";
 /// worker 固定版本目录：资产清单 worker 条目的 install_path 必须落在该目录下
 /// （服务进程从这条固定路径启动，见 gui.rs 的服务监督线程）。
-const WORKER_VERSION: &str = "v0.1.1";
+const WORKER_VERSION: &str = "v0.1.2";
 const WORKER_EXE_NAME: &str = "snap-ocr-worker.exe";
 /// 构建期占位标记：打包阶段回填 worker 的真实 size/sha256 后删除该状态。
 const WORKER_STATUS_PENDING: &str = "pending-build";
@@ -173,6 +173,16 @@ pub fn pipe_name() -> String {
 /// worker 条目仍为构建期占位时按未就绪报告，并说明原因（不冒称就绪，O-11）。
 /// Xberg 推理组件按「在位校验」检查（存在性）；其摘要清单接入前缺失时如实
 /// 报告「推理组件未配置」，不冒称就绪。
+/// 后台工作进程的安装路径（取清单条目的 install_path；升版只改清单）。
+pub fn worker_install_path() -> Result<PathBuf, String> {
+    let manifest = load_manifest()?;
+    let worker = manifest
+        .workers
+        .first()
+        .ok_or_else(|| "截图 OCR 工作进程清单缺失".to_string())?;
+    Ok(asset_root().join(&worker.install_path))
+}
+
 pub fn readiness() -> Result<(), String> {
     let manifest = load_manifest()?;
     let root = asset_root();

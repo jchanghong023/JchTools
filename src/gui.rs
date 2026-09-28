@@ -4566,10 +4566,7 @@ fn snap_supervisor_ensure() -> Result<serde_json::Value, String> {
         return snap_attach_main_exe(response);
     }
     snap_ocr_assets::readiness()?;
-    let executable = snap_ocr_assets::asset_root()
-        .join("worker")
-        .join("v0.1.1")
-        .join("snap-ocr-worker.exe");
+    let executable = snap_ocr_assets::worker_install_path()?;
     let main_exe = std::env::current_exe().map_err(|error| format!("无法定位主程序：{error}"))?;
     let mut child = std::process::Command::new(&executable)
         .arg("--service")
