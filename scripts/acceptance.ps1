@@ -145,9 +145,8 @@ if ($WithGuiSmoke) {
     $null = Invoke-Logged -Name 'gui-smoke' -File $python -Arguments @('scripts/gui_smoke.py','--exe',$exe,'--data',$GuiData)
 } else {$script:Results.Add('NOT RUN  gui-smoke S1-S4（加 -WithGuiSmoke -GuiData <目录>）')}
 
-# 5.5) 可选媒体 worker 测试（workspace 成员、独立清单；F23——可选分发不等于可选验证）。
-$null = Invoke-Logged -Name 'media-worker-tests' -File 'cargo' `
-    -Arguments @('test','--manifest-path',(Join-Path $root 'optional/markdown-media-worker/Cargo.toml'),'--all-targets')
+# 5.5) 旧 markdown-media-worker 已退役（XB-12：媒体转录迁移到 Xberg 推理组件）；
+#      其验收阶段随之移除，截图 OCR 组件测试见下方 snap-ocr 阶段。
 
 # 6) 发布打包自检（可选）。
 if ($WithPackage) {

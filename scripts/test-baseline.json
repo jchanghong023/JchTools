@@ -2,125 +2,6 @@
   "note": "由 static_check.py --update-test-baseline 生成。删除/改名/新增 ignore 或平台门禁、以及任何测试体修改（含放宽或清空断言）都必须重新生成本文件，并在提交信息说明理由；body 哈希用于防止「保留测试名、掏空测试体」式削弱。",
   "tests": [
     {
-      "file": "optional/markdown-media-worker/src/ffmpeg.rs",
-      "name": "ffmpeg_dll_set_is_self_contained",
-      "ignored": false,
-      "cfg": null,
-      "body": "d131e718a11bef71"
-    },
-    {
-      "file": "optional/markdown-media-worker/src/ffmpeg.rs",
-      "name": "ffmpeg_ffi_output_matches_cli_reference",
-      "ignored": false,
-      "cfg": null,
-      "body": "ce9a298b980a9bc5"
-    },
-    {
-      "file": "optional/markdown-media-worker/src/ffmpeg.rs",
-      "name": "ffmpeg_ffi_reports_missing_audio_track",
-      "ignored": false,
-      "cfg": null,
-      "body": "1f4789883969846b"
-    },
-    {
-      "file": "optional/markdown-media-worker/src/main.rs",
-      "name": "markdown_has_empty_audio_states",
-      "ignored": false,
-      "cfg": null,
-      "body": "c1ee1388edd01df9"
-    },
-    {
-      "file": "optional/markdown-media-worker/src/main.rs",
-      "name": "pcm_stream_preserves_sample_split_across_reads",
-      "ignored": false,
-      "cfg": null,
-      "body": "1b7ffb17db950aa0"
-    },
-    {
-      "file": "optional/markdown-media-worker/src/main.rs",
-      "name": "pcm_stream_rejects_truncated_final_sample",
-      "ignored": false,
-      "cfg": null,
-      "body": "4c7da58525ef0f1b"
-    },
-    {
-      "file": "optional/markdown-media-worker/src/main.rs",
-      "name": "terminology_replacements_are_fixed",
-      "ignored": false,
-      "cfg": null,
-      "body": "e98621650706c4c2"
-    },
-    {
-      "file": "optional/markdown-media-worker/src/main.rs",
-      "name": "timestamp_matches_legacy_format",
-      "ignored": false,
-      "cfg": null,
-      "body": "64698139e422aa8d"
-    },
-    {
-      "file": "optional/markdown-media-worker/src/vad.rs",
-      "name": "vad_exact_multiple_of_windows_completes",
-      "ignored": false,
-      "cfg": null,
-      "body": "0cb0333da274f7ef"
-    },
-    {
-      "file": "optional/markdown-media-worker/src/vad.rs",
-      "name": "vad_flush_tail_segment_is_transcribed_after_eof",
-      "ignored": false,
-      "cfg": null,
-      "body": "a78eb6c430d2d972"
-    },
-    {
-      "file": "optional/markdown-media-worker/src/vad.rs",
-      "name": "vad_multi_segment_stream_keeps_last_timestamps_and_content",
-      "ignored": false,
-      "cfg": null,
-      "body": "b60617a8eaf50558"
-    },
-    {
-      "file": "optional/markdown-media-worker/src/vad.rs",
-      "name": "vad_no_speech_reports_empty_without_error",
-      "ignored": false,
-      "cfg": null,
-      "body": "92a4a4c4be089af3"
-    },
-    {
-      "file": "optional/markdown-media-worker/src/vad.rs",
-      "name": "vad_pipeline_residency_bounded_for_long_stream",
-      "ignored": false,
-      "cfg": null,
-      "body": "9baee421484e8cb0"
-    },
-    {
-      "file": "optional/markdown-media-worker/src/vad.rs",
-      "name": "vad_segments_transcribe_incrementally_during_stream",
-      "ignored": false,
-      "cfg": null,
-      "body": "72d85ab49249915f"
-    },
-    {
-      "file": "optional/markdown-media-worker/src/vad.rs",
-      "name": "vad_short_audio_below_one_window_is_not_lost",
-      "ignored": false,
-      "cfg": null,
-      "body": "7b0b03d8eb9203c1"
-    },
-    {
-      "file": "optional/markdown-media-worker/src/vad.rs",
-      "name": "vad_stream_end_without_trailing_silence_keeps_final_segment",
-      "ignored": false,
-      "cfg": null,
-      "body": "e0ca94175305af8f"
-    },
-    {
-      "file": "optional/markdown-media-worker/src/vad.rs",
-      "name": "vad_trailing_silence_does_not_extend_last_segment",
-      "ignored": false,
-      "cfg": null,
-      "body": "14bbbf0bcd1bc86c"
-    },
-    {
       "file": "optional/snap-ocr-core/src/detection.rs",
       "name": "complete_height_duplicate_beats_row_seam_clipped_merge",
       "ignored": false,
@@ -1291,24 +1172,52 @@
     },
     {
       "file": "src/markdown.rs",
-      "name": "media_process_deadline_recovers_from_hung_worker",
+      "name": "media_worker_crash_fails_file_and_restarts_for_next",
       "ignored": false,
       "cfg": null,
-      "body": "f096320ef88b3aed"
+      "body": "20eddf985d0d05ac"
     },
     {
       "file": "src/markdown.rs",
-      "name": "media_process_returns_complete_output",
+      "name": "media_worker_drop_closes_stdin_for_graceful_exit",
       "ignored": false,
-      "cfg": "windows",
-      "body": "14696611b08bf215"
+      "cfg": null,
+      "body": "b8906aed4f5d456d"
     },
     {
       "file": "src/markdown.rs",
-      "name": "media_process_truncated_output_fails",
+      "name": "media_worker_garbage_response_fails_file",
       "ignored": false,
-      "cfg": "windows",
-      "body": "d449322bea26e792"
+      "cfg": null,
+      "body": "b9e4be2e7b20d107"
+    },
+    {
+      "file": "src/markdown.rs",
+      "name": "media_worker_no_audio_markdown_passthrough",
+      "ignored": false,
+      "cfg": null,
+      "body": "331b5185d8f174db"
+    },
+    {
+      "file": "src/markdown.rs",
+      "name": "media_worker_per_file_failure_keeps_worker_alive",
+      "ignored": false,
+      "cfg": null,
+      "body": "5ec51542347577e0"
+    },
+    {
+      "file": "src/markdown.rs",
+      "name": "media_worker_success_passthrough_and_batch_reuse",
+      "ignored": false,
+      "cfg": null,
+      "body": "c2ea81604f78db78"
+    },
+    {
+      "file": "src/markdown.rs",
+      "name": "media_worker_timeout_kills_worker_and_restarts",
+      "ignored": false,
+      "cfg": null,
+      "body": "301bf4dfdce34ef0"
     },
     {
       "file": "src/markdown.rs",
@@ -1361,31 +1270,80 @@
     },
     {
       "file": "src/markdown_assets.rs",
-      "name": "ffmpeg_asset_is_shared_dll_set",
+      "name": "inference_pack_bad_archive_keeps_existing_install",
       "ignored": false,
       "cfg": null,
-      "body": "1828cbcae01eafcf"
+      "body": "9f8a88507c21c082"
     },
     {
       "file": "src/markdown_assets.rs",
-      "name": "media_init_cancel_preserves_existing_final_models",
+      "name": "inference_pack_installs_members_and_prunes_old_tags",
       "ignored": false,
       "cfg": null,
-      "body": "e2512fa6aaffb922"
+      "body": "9483f8b0f2195cc4"
     },
     {
       "file": "src/markdown_assets.rs",
-      "name": "media_init_downloads_only_missing_models",
+      "name": "inference_pack_reuse_skips_download",
       "ignored": false,
       "cfg": null,
-      "body": "541cc5e8be868c21"
+      "body": "f587ac3afcc8b4d6"
     },
     {
       "file": "src/markdown_assets.rs",
-      "name": "media_init_retry_after_failure_skips_verified_downloads",
+      "name": "inference_ready_detects_tampered_member",
       "ignored": false,
       "cfg": null,
-      "body": "2aa5b1daafc0a6a3"
+      "body": "f33b2ea6abae779f"
+    },
+    {
+      "file": "src/markdown_assets.rs",
+      "name": "manifest_parses_with_xberg_segment_only",
+      "ignored": false,
+      "cfg": null,
+      "body": "58833f5d1edb32e4"
+    },
+    {
+      "file": "src/markdown_assets.rs",
+      "name": "media_component_env_override_points_at_local_tree",
+      "ignored": false,
+      "cfg": null,
+      "body": "40865280d8fc7146"
+    },
+    {
+      "file": "src/markdown_assets.rs",
+      "name": "media_component_incomplete_reports_missing_file",
+      "ignored": false,
+      "cfg": null,
+      "body": "1ed462448769a214"
+    },
+    {
+      "file": "src/markdown_assets.rs",
+      "name": "media_component_missing_reports_not_configured",
+      "ignored": false,
+      "cfg": null,
+      "body": "07e54c34f5c44763"
+    },
+    {
+      "file": "src/markdown_assets.rs",
+      "name": "media_component_ready_returns_component_dir",
+      "ignored": false,
+      "cfg": null,
+      "body": "1826e467bd8078af"
+    },
+    {
+      "file": "src/markdown_assets.rs",
+      "name": "notice_lists_only_xberg_licenses",
+      "ignored": false,
+      "cfg": null,
+      "body": "5491f08bce5d29dc"
+    },
+    {
+      "file": "src/markdown_assets.rs",
+      "name": "resolve_component_with_tag_mismatch_errors",
+      "ignored": false,
+      "cfg": null,
+      "body": "9f1434f0531d965c"
     },
     {
       "file": "src/markdown_assets.rs",
@@ -1393,13 +1351,6 @@
       "ignored": false,
       "cfg": null,
       "body": "5906a93309c754d3"
-    },
-    {
-      "file": "src/markdown_assets.rs",
-      "name": "sherpa_tar_accepts_directory_entry_with_trailing_slash",
-      "ignored": false,
-      "cfg": null,
-      "body": "ffc8b34bd4746580"
     },
     {
       "file": "src/markdown_document.rs",
@@ -3465,6 +3416,20 @@
       "ignored": false,
       "cfg": null,
       "body": "128480abd817605a"
+    },
+    {
+      "file": "tests/markdown_media_e2e.rs",
+      "name": "real_component_trackless_media_reports_no_audio",
+      "ignored": true,
+      "cfg": null,
+      "body": "5fc2b5bc7a2c2bfd"
+    },
+    {
+      "file": "tests/markdown_media_e2e.rs",
+      "name": "real_component_transcribe_returns_structured_markdown",
+      "ignored": true,
+      "cfg": null,
+      "body": "d7ffe48bd7b0cdf5"
     },
     {
       "file": "tests/md_tools.rs",

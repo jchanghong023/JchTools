@@ -558,7 +558,7 @@ def collect_tests() -> list[dict[str, object]]:
     # 已知残留盲区：定义在其它文件里的门禁（如 lib.rs 的 #[cfg(feature = "gui")] pub mod gui;）
     # 不在本文件扫描范围内——本检查是执法下界，不是完整 cfg 求值器。
     rows: list[dict[str, object]] = []
-    # optional/ 下的可选组件 crate（如 markdown-media-worker）与 src/tests 同口径纳入基线，
+    # optional/ 下的可选组件 crate（如 snap-ocr-worker）与 src/tests 同口径纳入基线，
     # 防止其游离于测试清单门禁之外（是否被 cargo 实际执行由 workspace 成员关系决定）。
     for path in [
         *ROOT.glob("src/**/*.rs"),
