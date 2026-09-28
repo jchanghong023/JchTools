@@ -328,7 +328,7 @@ def _write_pnm_binary(target: Path) -> None:
     _ = target.joinpath("p5_bin.pgm").write_bytes(
         b"P5\n3 3\n255\n" + bytes(255 - v * 127 for row in pixels for v in row)
     )
-    # P6 3×3 RGB 需要恰好 27 个栅格字节；旧值 *3 是 9 字节的截断输入，
+    # P6 3x3 RGB 需要恰好 27 个栅格字节；旧值 *3 是 9 字节的截断输入，
     # 会被 xberg 按损坏输入优雅拒绝（exit 1 + 诊断），A17 因此整项失败。
     _ = target.joinpath("p6_bin.ppm").write_bytes(b"P6\n3 3\n255\n" + bytes((0, 128, 64)) * 9)
 
