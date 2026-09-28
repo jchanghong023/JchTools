@@ -7,18 +7,23 @@
 //! 只在用户于图形界面主动初始化时联网下载（O-06/O-10），主程序包不携带这些重资产。
 //! 初始化遵循 staging → 校验 → 原子落位：取消或失败删除本轮 staging，不覆盖
 //! 已经校验通过的完整资产；重试时已验证资产直接复用，不重复下载。
+//! 下载/校验/原子落位与推理组件包安装核心与转 Markdown 共用
+//! [`crate::asset_util`]，两侧行为同源。
 
+use crate::asset_util::{
+    atomic_replace_dir, atomic_replace_file, ensure_not_cancelled, extract_zip_safely,
+    install_inference_pack, validate_relative_path, verify_file, AssetDownloader,
+    InferenceManifest,
+};
 use serde::Deserialize;
 use sha2::{Digest, Sha256};
-use std::collections::HashSet;
 use std::fmt::Write as FmtWrite;
 use std::fs::{self, File};
-use std::io::{self, Read, Write};
+use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::AtomicBool;
 use std::time::Duration;
 use uuid::Uuid;
-use zip::ZipArchive;
 
 const MANIFEST: &str = include_str!(concat!(env!("OUT_DIR"), "/snap-ocr-assets.json"));
 const DATA_DIRECTORY: &str = "snap-ocr";
@@ -231,7 +236,7 @@ fn resolve_xberg_component(root: &Path) -> Result<PathBuf, String> {
         }
     }
     let expected_tag = manifest_inference_tag();
-    crate::markdown_assets::resolve_component_with_tag(
+    crate::asset_util::resolve_component_with_tag(
         &root.join("xberg-inference"),
         expected_tag.as_deref(),
         &xberg_not_configured(),
@@ -298,49 +303,12 @@ fn xberg_layout_ready(component: &Path) -> Result<(), String> {
     Ok(())
 }
 
-/// 单个资产的下载接缝：生产实现走固定来源的 HTTP 下载；与 markdown_assets 的
-/// AssetDownloader 同构，测试可注入本地供给验证「补缺下载」与「失败后重试不重下」。
-trait SnapDownloader {
-    fn download(
-        &mut self,
-        url: &str,
-        destination: &Path,
-        expected_size: u64,
-        expected_sha256: &str,
-        cancel: &AtomicBool,
-        progress: &mut dyn FnMut(String),
-    ) -> Result<(), String>;
-}
-
-/// 生产下载器：只访问清单固定地址（O-06/O-10：仅用户主动初始化联网）。
-struct NetworkDownloader;
-
-impl SnapDownloader for NetworkDownloader {
-    fn download(
-        &mut self,
-        url: &str,
-        destination: &Path,
-        expected_size: u64,
-        expected_sha256: &str,
-        cancel: &AtomicBool,
-        progress: &mut dyn FnMut(String),
-    ) -> Result<(), String> {
-        let mut sink = |message: String| progress(message);
-        download_asset(
-            url,
-            destination,
-            expected_size,
-            expected_sha256,
-            cancel,
-            &mut sink,
-        )
-    }
-}
-
 /// 下载、校验并原子安装全部可选资产（O-06）。
 ///
 /// 取消会终止当前下载或解包阶段并删除本轮 staging 目录；最终位置已校验的资产
-/// 跨重试复用、不重下；失败不覆盖已经校验的完整资产。
+/// 跨重试复用、不重下；失败不覆盖已经校验的完整资产。下载接缝与生产下载器
+/// 共用 [`crate::asset_util::AssetDownloader`] / [`crate::asset_util::NetworkDownloader`]，
+/// 测试可注入本地供给验证「补缺下载」与「失败后重试不重下」。
 pub fn initialize(cancel: &AtomicBool, mut progress: impl FnMut(String)) -> Result<(), String> {
     if readiness().is_ok() {
         progress("截图 OCR 组件已就绪".to_string());
@@ -375,7 +343,7 @@ fn initialize_staged(
     progress: &mut impl FnMut(String),
     staging: &Path,
     root: &Path,
-    downloader: &mut dyn SnapDownloader,
+    downloader: &mut dyn AssetDownloader,
 ) -> Result<(), String> {
     let total = manifest.assets.len();
     for (index, asset) in manifest.assets.iter().enumerate() {
@@ -388,12 +356,12 @@ fn initialize_staged(
         progress(format!("下载资产 {}/{}：{}", index + 1, total, asset.id));
         install_asset(asset, staging, root, cancel, downloader, progress)?;
     }
-    // 推理组件包（XB-10）：复用 markdown 侧的整目录原子安装路径（staging 组装 +
+    // 推理组件包（XB-10）：复用共享的整目录原子安装路径（staging 组装 +
     // 成员级复核 + 目录级原子落位 + 旧版本清理），失败不留部分安装。
     if let Some(pack) = &manifest.xberg_inference {
         ensure_not_cancelled(cancel)?;
         let inference = inference_manifest_from_pack(pack);
-        if crate::markdown_assets::inference_ready(&inference, root).is_err() {
+        if crate::asset_util::inference_ready(&inference, root).is_err() {
             progress(format!(
                 "下载资产 {}/{}：{}",
                 total + 1,
@@ -401,15 +369,7 @@ fn initialize_staged(
                 pack.asset.id
             ));
         }
-        let mut adapter = PackDownloaderAdapter(downloader);
-        crate::markdown_assets::install_inference_pack(
-            &inference,
-            staging,
-            root,
-            cancel,
-            &mut adapter,
-            progress,
-        )?;
+        install_inference_pack(&inference, staging, root, cancel, downloader, progress)?;
         // XB-09：写入清单 tag 标记；截图服务进程（无法读主程序清单）按同口径
         // 校验组件目录版本。
         write_expected_tag(root, &pack.tag)?;
@@ -468,7 +428,7 @@ fn install_asset(
     staging: &Path,
     root: &Path,
     cancel: &AtomicBool,
-    downloader: &mut dyn SnapDownloader,
+    downloader: &mut dyn AssetDownloader,
     progress: &mut impl FnMut(String),
 ) -> Result<(), String> {
     let stage_dir = staging.join(&asset.id);
@@ -524,14 +484,12 @@ fn install_asset(
 /// snap 组件包条目 → 共享安装路径的推理组件清单（XB-10）。
 ///
 /// snap 清单成员的 install_path 相对资产根（serde 强制 `xberg-inference/<tag>/`
-/// 前缀），而 markdown 侧的安装按组件目录相对路径落位；转换时剥离该前缀，
+/// 前缀），而共享的安装按组件目录相对路径落位；转换时剥离该前缀，
 /// 否则组件会嵌套安装到 `xberg-inference/<tag>/xberg-inference/<tag>/`。
 /// 前缀由清单校验保证存在，剥离失败按清单损坏处理。
-fn inference_manifest_from_pack(
-    pack: &SnapInferencePack,
-) -> crate::markdown_assets::InferenceManifest {
+fn inference_manifest_from_pack(pack: &SnapInferencePack) -> InferenceManifest {
     let prefix = format!("xberg-inference/{}/", pack.tag);
-    crate::markdown_assets::InferenceManifest {
+    InferenceManifest {
         tag: pack.tag.clone(),
         url: pack.asset.url.clone(),
         size_bytes: pack.asset.size_bytes,
@@ -545,7 +503,7 @@ fn inference_manifest_from_pack(
                 let stripped = install_path
                     .strip_prefix(&prefix)
                     .unwrap_or(install_path.as_str());
-                crate::markdown_assets::InferenceMember {
+                crate::asset_util::InferenceMember {
                     path: member.path.clone(),
                     install_path: stripped.to_string(),
                     size_bytes: member.size_bytes,
@@ -553,30 +511,6 @@ fn inference_manifest_from_pack(
                 }
             })
             .collect(),
-    }
-}
-
-/// 把 snap 侧下载接缝适配为共享安装路径的下载器（同一签名，零行为差异）。
-struct PackDownloaderAdapter<'a>(&'a mut dyn SnapDownloader);
-
-impl crate::markdown_assets::AssetDownloader for PackDownloaderAdapter<'_> {
-    fn download(
-        &mut self,
-        url: &str,
-        destination: &Path,
-        expected_size: u64,
-        expected_sha256: &str,
-        cancel: &AtomicBool,
-        progress: &mut dyn FnMut(String),
-    ) -> Result<(), String> {
-        self.0.download(
-            url,
-            destination,
-            expected_size,
-            expected_sha256,
-            cancel,
-            progress,
-        )
     }
 }
 
@@ -734,52 +668,38 @@ fn worker_ready(worker: &SnapWorker, root: &Path) -> Result<(), String> {
     )
 }
 
-fn validate_relative_path(path: &str) -> Result<(), String> {
-    let path = path.replace('\\', "/");
-    let candidate = Path::new(&path);
-    if path.is_empty()
-        || candidate.is_absolute()
-        || path.starts_with('/')
-        || path.contains('\0')
-        || path
-            .split('/')
-            .any(|part| part.is_empty() || part == "." || part == "..")
-        || path.as_bytes().get(1) == Some(&b':')
-    {
-        return Err(format!("资产路径不安全：{path}"));
+/// 下载接缝共用 [`crate::asset_util::AssetDownloader`]；本文件持有唯一的
+/// HTTP 下载原语（P-03 联网边界测试按文件白名单执法：`ureq` 只允许出现在
+/// `snap_ocr_assets.rs` 与 `markdown_assets.rs`），测试可注入本地供给验证
+/// 「补缺下载」与「失败后重试不重下」。
+///
+/// 生产下载器：只访问清单固定地址（O-06/O-10：仅用户主动初始化联网）。
+struct NetworkDownloader;
+
+impl AssetDownloader for NetworkDownloader {
+    fn download(
+        &mut self,
+        url: &str,
+        destination: &Path,
+        expected_size: u64,
+        expected_sha256: &str,
+        cancel: &AtomicBool,
+        progress: &mut dyn FnMut(String),
+    ) -> Result<(), String> {
+        let mut sink = |message: String| progress(message);
+        download_asset(
+            url,
+            destination,
+            expected_size,
+            expected_sha256,
+            cancel,
+            &mut sink,
+        )
     }
-    Ok(())
 }
 
-fn verify_file(path: &Path, expected_size: u64, expected_sha256: &str) -> Result<(), String> {
-    let metadata = fs::metadata(path).map_err(|error| error.to_string())?;
-    if !metadata.is_file() {
-        return Err("不是普通文件".to_string());
-    }
-    if metadata.len() != expected_size {
-        return Err(format!("大小 {}，预期 {expected_size}", metadata.len()));
-    }
-    let actual = sha256_file(path).map_err(|error| error.to_string())?;
-    if !actual.eq_ignore_ascii_case(expected_sha256) {
-        return Err(format!("SHA256 {actual}，预期 {expected_sha256}"));
-    }
-    Ok(())
-}
-
-fn sha256_file(path: &Path) -> io::Result<String> {
-    let mut file = File::open(path)?;
-    let mut digest = Sha256::new();
-    let mut buffer = vec![0_u8; 1024 * 1024];
-    loop {
-        let read = file.read(&mut buffer)?;
-        if read == 0 {
-            break;
-        }
-        digest.update(&buffer[..read]);
-    }
-    Ok(hex::encode(digest.finalize()))
-}
-
+/// 流式下载到 `.part` 并按清单摘要校验，最多重试 3 次；成功后原子改名落位。
+/// markdown 侧的可选组件初始化复用同一原语（T-05/T-21 同口径）。
 pub(crate) fn download_asset(
     url: &str,
     destination: &Path,
@@ -824,7 +744,7 @@ fn download_stream(
 ) -> Result<(), String> {
     let agent = ureq::builder()
         .redirects(3)
-        // 与 markdown_assets 同口径：连接超时 + 单次读超时，整体时长由用户取消控制。
+        // 连接超时 + 单次读超时，整体时长由用户取消控制。
         .timeout_connect(Duration::from_secs(30))
         .timeout_read(Duration::from_secs(60))
         .user_agent("JchTools-snap-ocr-assets/1")
@@ -841,7 +761,7 @@ fn download_stream(
     let mut buffer = vec![0_u8; 1024 * 1024];
     let mut current = 0_u64;
     loop {
-        if cancel.load(Ordering::Acquire) {
+        if cancel.load(std::sync::atomic::Ordering::Acquire) {
             let _ = fs::remove_file(partial);
             return Err("用户已取消初始化".to_string());
         }
@@ -869,107 +789,6 @@ fn download_stream(
     output
         .sync_all()
         .map_err(|error| format!("同步下载文件失败：{error}"))?;
-    Ok(())
-}
-
-pub(crate) fn extract_zip_safely(
-    archive: &Path,
-    destination: &Path,
-    cancel: &AtomicBool,
-) -> Result<(), String> {
-    ensure_not_cancelled(cancel)?;
-    let file = File::open(archive).map_err(|error| format!("打开压缩包失败：{error}"))?;
-    let mut zip = ZipArchive::new(file).map_err(|error| format!("读取压缩包失败：{error}"))?;
-    let mut seen = HashSet::new();
-    for index in 0..zip.len() {
-        ensure_not_cancelled(cancel)?;
-        let mut entry = zip
-            .by_index(index)
-            .map_err(|error| format!("读取压缩包条目失败：{error}"))?;
-        let relative = entry
-            .enclosed_name()
-            .ok_or_else(|| format!("压缩包包含不安全路径：{}", entry.name()))?
-            .clone();
-        if !seen.insert(relative.clone()) {
-            return Err(format!("压缩包包含重复路径：{}", relative.display()));
-        }
-        if entry
-            .unix_mode()
-            .is_some_and(|mode| mode & 0o170_000 == 0o120_000)
-        {
-            return Err(format!("压缩包包含符号链接：{}", entry.name()));
-        }
-        let target = destination.join(&relative);
-        if entry.is_dir() {
-            fs::create_dir_all(&target).map_err(|error| format!("创建解包目录失败：{error}"))?;
-            continue;
-        }
-        if let Some(parent) = target.parent() {
-            fs::create_dir_all(parent).map_err(|error| format!("创建解包目录失败：{error}"))?;
-        }
-        let mut output =
-            File::create(&target).map_err(|error| format!("创建解包文件失败：{error}"))?;
-        io::copy(&mut entry, &mut output).map_err(|error| format!("写入解包文件失败：{error}"))?;
-        output
-            .sync_all()
-            .map_err(|error| format!("同步解包文件失败：{error}"))?;
-    }
-    Ok(())
-}
-
-fn atomic_replace_file(staged: &Path, destination: &Path) -> Result<(), String> {
-    let parent = destination
-        .parent()
-        .ok_or_else(|| format!("无法确定安装文件目录：{}", destination.display()))?;
-    fs::create_dir_all(parent).map_err(|error| format!("创建安装文件目录失败：{error}"))?;
-    let backup = parent.join(format!(".old-file-{}", Uuid::new_v4().simple()));
-    let had_existing = destination.exists();
-    if had_existing {
-        fs::rename(destination, &backup).map_err(|error| format!("暂存旧文件失败：{error}"))?;
-    }
-    if let Err(error) = fs::rename(staged, destination) {
-        let install_error = format!("原子就位文件失败：{error}");
-        if had_existing {
-            if let Err(restore_error) = fs::rename(&backup, destination) {
-                return Err(format!(
-                    "{install_error}；恢复旧文件失败：{restore_error}；旧文件仍保留在：{}",
-                    backup.display()
-                ));
-            }
-        }
-        return Err(install_error);
-    }
-    if had_existing {
-        fs::remove_file(&backup).map_err(|error| format!("清理旧文件失败：{error}"))?;
-    }
-    Ok(())
-}
-
-fn atomic_replace_dir(staged: &Path, destination: &Path) -> Result<(), String> {
-    let parent = destination
-        .parent()
-        .ok_or_else(|| format!("无法确定安装目录：{}", destination.display()))?;
-    fs::create_dir_all(parent).map_err(|error| format!("创建安装目录失败：{error}"))?;
-    let backup = parent.join(format!(".old-{}", Uuid::new_v4().simple()));
-    let had_existing = destination.exists();
-    if had_existing {
-        fs::rename(destination, &backup).map_err(|error| format!("暂存旧资产失败：{error}"))?;
-    }
-    if let Err(error) = fs::rename(staged, destination) {
-        let install_error = format!("原子就位资产失败：{error}");
-        if had_existing {
-            if let Err(restore_error) = fs::rename(&backup, destination) {
-                return Err(format!(
-                    "{install_error}；恢复旧资产失败：{restore_error}；旧资产仍保留在：{}",
-                    backup.display()
-                ));
-            }
-        }
-        return Err(install_error);
-    }
-    if had_existing {
-        fs::remove_dir_all(&backup).map_err(|error| format!("清理旧资产失败：{error}"))?;
-    }
     Ok(())
 }
 
@@ -1005,14 +824,6 @@ fn write_notice(path: &Path, manifest: &SnapAssetManifest) -> Result<(), String>
         );
     }
     fs::write(path, text).map_err(|error| format!("写入许可证 notice 失败：{error}"))
-}
-
-fn ensure_not_cancelled(cancel: &AtomicBool) -> Result<(), String> {
-    if cancel.load(Ordering::Acquire) {
-        Err("用户已取消初始化".to_string())
-    } else {
-        Ok(())
-    }
 }
 
 #[cfg(test)]
