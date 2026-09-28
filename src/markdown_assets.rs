@@ -234,7 +234,8 @@ fn xberg_media_not_configured() -> String {
         .and_then(|manifest| manifest.xberg_inference)
     {
         Some(_) => "Xberg 推理组件未配置：媒体转录所需的 xberg.exe、SenseVoice/VAD 模型与 \
-     FFmpeg/sherpa-onnx 运行库尚未安装；请在转 Markdown 页重新初始化以下载推理组件包"
+     FFmpeg/sherpa-onnx 运行库尚未安装；请在转 Markdown 页重新初始化以下载推理组件包；\
+     开发期可设置 JCHTOOLS_XBERG_INFERENCE_DIR 指向本地组件目录"
             .into(),
         None => "Xberg 推理组件未配置：媒体转录所需的 xberg.exe、SenseVoice/VAD 模型与 \
      FFmpeg/sherpa-onnx 运行库尚未安装；其下载清单条目待 Xberg 发布 tag 落定后接入，\
@@ -761,8 +762,14 @@ mod tests {
     }
 
     /// 搭建组件在位校验所需的完整文件树（存在性校验，内容任意）。
+    /// 目录名与真实清单的推理组件 tag 保持一致（清单未接线时回退固定名），
+    /// 与 `resolve_xberg_component` 的解析规则同步。
     fn install_component(base: &Path) -> PathBuf {
-        let component = base.join("xberg-inference").join("vtest");
+        let tag = load_manifest()
+            .ok()
+            .and_then(|manifest| manifest.xberg_inference.map(|inference| inference.tag))
+            .unwrap_or_else(|| "vtest".to_string());
+        let component = base.join("xberg-inference").join(tag);
         let files = [
             "xberg.exe",
             "models/sense_voice_zh_en_ja_ko_yue_2024_07_17/model.int8.onnx",

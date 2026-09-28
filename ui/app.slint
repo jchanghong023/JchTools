@@ -1160,7 +1160,7 @@ export component AppWindow inherits Window {
                             if root.convert-initializing: Button { text: "取消初始化";
                                 enabled: root.confirm-kind == 0; clicked => { root.convert-stop(); } }
                         }
-                        Muted { text: "文档转换组件按需初始化，不随主程序打包；媒体转录由 Xberg 推理组件承接，其下载清单本期未接入，缺失时初始化与检查会给出原因。"; }
+                        Muted { text: "文档转换组件按需初始化，不随主程序打包；媒体转录由 Xberg 推理组件承接，初始化时按清单下载推理组件包，缺失时初始化与检查会给出原因。"; }
                     }
                 }
                 Surface { vertical-stretch: 1;
