@@ -23,7 +23,7 @@ a35e5363588f67ef672f90625d93ce12715a6054726a983bdce624f0a2c65933 *optional/snap-
 a0a80900d1f2e4e583772ce43c85d8adbf4afecb2cc8e99e05ff4be94a817455 *optional/snap-ocr-core/src/detection.rs
 9e30631db0925baa5793d38b4379efa53e3c2f65f44782ae7ce799ac8e7e4a15 *optional/snap-ocr-core/src/geometry.rs
 f3a8fcfeade91fb6ab9ca6d336175e03994160c0c31a073d747d877b74cf3c1e *optional/snap-ocr-core/src/layout.rs
-98ceb30df1461a96b30ec63709f2ebbead0e1a9c39b2f89ce98c4607f92b98f3 *optional/snap-ocr-core/src/lib.rs
+e6cb2ff80b8755dc679a96d14a20cff0df5aa909fd3e83c03fb3f2894ca5f443 *optional/snap-ocr-core/src/lib.rs
 5e7c6d03f33a4412a822e55cf98965d9b3e1529913864a2c8a1eac164363f557 *optional/snap-ocr-core/src/orientation.rs
 9686147848c25f0463997f2a35fa7d7f11167660d77f4bf580fe3d9bfcae0750 *optional/snap-ocr-core/src/pipeline.rs
 70eb0fb305a0a01a5f44778022d18fa78e0e8335daea7b2bea9ed228f15b1a6b *optional/snap-ocr-core/src/tiling.rs
