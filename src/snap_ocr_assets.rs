@@ -392,23 +392,7 @@ fn initialize_staged(
     // 成员级复核 + 目录级原子落位 + 旧版本清理），失败不留部分安装。
     if let Some(pack) = &manifest.xberg_inference {
         ensure_not_cancelled(cancel)?;
-        let inference = crate::markdown_assets::InferenceManifest {
-            tag: pack.tag.clone(),
-            url: pack.asset.url.clone(),
-            size_bytes: pack.asset.size_bytes,
-            sha256: pack.asset.sha256.clone(),
-            members: pack
-                .asset
-                .members
-                .iter()
-                .map(|member| crate::markdown_assets::InferenceMember {
-                    path: member.path.clone(),
-                    install_path: member.install_path.clone(),
-                    size_bytes: member.size_bytes,
-                    sha256: member.sha256.clone(),
-                })
-                .collect(),
-        };
+        let inference = inference_manifest_from_pack(pack);
         if crate::markdown_assets::inference_ready(&inference, root).is_err() {
             progress(format!(
                 "下载资产 {}/{}：{}",
@@ -534,6 +518,41 @@ fn install_asset(
             Ok(())
         }
         other => Err(format!("不支持的资产归档格式：{other}")),
+    }
+}
+
+/// snap 组件包条目 → 共享安装路径的推理组件清单（XB-10）。
+///
+/// snap 清单成员的 install_path 相对资产根（serde 强制 `xberg-inference/<tag>/`
+/// 前缀），而 markdown 侧的安装按组件目录相对路径落位；转换时剥离该前缀，
+/// 否则组件会嵌套安装到 `xberg-inference/<tag>/xberg-inference/<tag>/`。
+/// 前缀由清单校验保证存在，剥离失败按清单损坏处理。
+fn inference_manifest_from_pack(
+    pack: &SnapInferencePack,
+) -> crate::markdown_assets::InferenceManifest {
+    let prefix = format!("xberg-inference/{}/", pack.tag);
+    crate::markdown_assets::InferenceManifest {
+        tag: pack.tag.clone(),
+        url: pack.asset.url.clone(),
+        size_bytes: pack.asset.size_bytes,
+        sha256: pack.asset.sha256.clone(),
+        members: pack
+            .asset
+            .members
+            .iter()
+            .map(|member| {
+                let install_path = member.install_path.replace('\\', "/");
+                let stripped = install_path
+                    .strip_prefix(&prefix)
+                    .unwrap_or(install_path.as_str());
+                crate::markdown_assets::InferenceMember {
+                    path: member.path.clone(),
+                    install_path: stripped.to_string(),
+                    size_bytes: member.size_bytes,
+                    sha256: member.sha256.clone(),
+                }
+            })
+            .collect(),
     }
 }
 
@@ -1035,5 +1054,44 @@ mod tests {
         // 全部在位：就绪。
         fs::write(component.join("onnxruntime.dll"), b"ort").expect("stub 写入");
         assert!(super::xberg_layout_ready(&component).is_ok());
+    }
+
+    // 覆盖 XB-10：snap 清单的组件包成员 install_path（资产根相对，带
+    // xberg-inference/<tag>/ 前缀）转换为 markdown 侧安装所需的组件目录相对
+    // 路径。回归反证：修复前转换原样复制前缀，组件嵌套落位到
+    // xberg-inference/<tag>/xberg-inference/<tag>/，初始化报「缺少 xberg.exe」。
+    #[test]
+    fn inference_manifest_from_pack_strips_tag_prefix() {
+        let pack = super::SnapInferencePack {
+            tag: "vtest-tag".to_string(),
+            asset: super::SnapAsset {
+                id: "xberg-inference".to_string(),
+                url: "https://fixtures.invalid/pack.zip".to_string(),
+                archive_type: "zip".to_string(),
+                install_path: None,
+                size_bytes: 42,
+                sha256: "ab".repeat(32),
+                members: vec![super::SnapMember {
+                    path: "pkg/xberg.exe".to_string(),
+                    install_path: "xberg-inference/vtest-tag/xberg.exe".to_string(),
+                    size_bytes: 7,
+                    sha256: "cd".repeat(32),
+                }],
+                license: super::SnapLicense {
+                    component: "Xberg".to_string(),
+                    license: "MIT".to_string(),
+                    source: "https://fixtures.invalid".to_string(),
+                },
+            },
+        };
+        let inference = super::inference_manifest_from_pack(&pack);
+        assert_eq!(inference.tag, "vtest-tag");
+        assert_eq!(inference.members.len(), 1);
+        let member = &inference.members[0];
+        assert_eq!(member.path, "pkg/xberg.exe");
+        assert_eq!(
+            member.install_path, "xberg.exe",
+            "install_path 必须剥离 xberg-inference/<tag>/ 前缀（组件目录相对）"
+        );
     }
 }

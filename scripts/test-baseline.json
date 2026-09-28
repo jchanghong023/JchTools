@@ -1907,6 +1907,13 @@
     },
     {
       "file": "src/snap_ocr_assets.rs",
+      "name": "inference_manifest_from_pack_strips_tag_prefix",
+      "ignored": false,
+      "cfg": null,
+      "body": "35dc3619c0c95ae8"
+    },
+    {
+      "file": "src/snap_ocr_assets.rs",
       "name": "xberg_component_layout_reports_missing_incomplete_and_ready",
       "ignored": false,
       "cfg": null,
