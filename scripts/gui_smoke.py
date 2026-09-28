@@ -56,6 +56,7 @@ DEFAULT_DATA = ".tmp/gui-smoke/data"
 SUPPORTED_STAGES = ("S1", "S2", "S3", "S4", "S5")
 DEFAULT_STAGES = "S1,S2,S3,S4"
 CONVERT_BUSY_TIMEOUT = 60  # 点击「开始转换」后等待「停止任务」出现的上限（秒）
+_S5_LAST_ATTEMPT = 2  # S5 重按「开始转换」的末次序号（共 3 次，0 起）
 CONVERT_STOP_TIMEOUT = 300  # 停止请求后等待「开始转换」恢复可用的上限（秒）
 # 转 Markdown 页「选择目录…」应有行数（Xberg 运行目录 / 输入 / 输出）。
 CONVERT_DIR_ROWS = 3
@@ -640,14 +641,32 @@ def s5_markdown_basic_chain(exe: str) -> None:
     scratch = Path(tempfile.mkdtemp(prefix="jchtools-gui-smoke-s5-"))
     (scratch / "input").mkdir()
     (scratch / "output").mkdir()
+    # 空输入的转换瞬时完成，「停止任务」运行态不可观察，开始→停止链路断言失效；
+    # 用媒体样本（转录需数秒）保证运行态可观察。样本由环境变量显式提供（真实
+    # 组件门控用例同口径），缺样本时明确失败而不是把「没开始」当通过。
+    media = os.environ.get("JCHTOOLS_S5_MEDIA", "")
+    if not media or not Path(media).is_file():
+        message = "S5 需要媒体样本以观察运行态：设置 JCHTOOLS_S5_MEDIA 指向一个真实媒体文件"
+        raise RuntimeError(message)
+    _ = shutil.copyfile(media, scratch / "input" / Path(media).name)
     try:
         _, window = wait_window(proc.pid)
         goto_converter(window)
         set_converter_dirs(window, str(scratch / "input"), str(scratch / "output"))
         start = find_button(window, "开始转换")
         _ = start.wait("visible enabled", timeout=COMPLETION_TIMEOUT)
-        click(window, start)
-        _ = find_button(window, "停止任务").wait("visible enabled", timeout=CONVERT_BUSY_TIMEOUT)
+        # 合成点击偶发落空（点击后仍停在「尚未开始」）：按当前状态重试，与
+        # confirm_dialog 同一立场——只检查「点击没报错」会把没生效的点击当成
+        # 成功。每次重按后观察一段运行态窗口，重按最多 3 次。
+        busy_timeout = CONVERT_BUSY_TIMEOUT // 3
+        for attempt in range(3):
+            click(window, find_button(window, "开始转换"))
+            try:
+                _ = find_button(window, "停止任务").wait("visible enabled", timeout=busy_timeout)
+                break
+            except timings.TimeoutError:
+                if attempt == _S5_LAST_ATTEMPT:
+                    raise
         click(window, find_button(window, "停止任务"))
         _ = find_button(window, "开始转换").wait("visible enabled", timeout=CONVERT_STOP_TIMEOUT)
         print("S5 PASS：开始→停止链路完成（停止在当前文件后生效，界面回到可开始状态）")

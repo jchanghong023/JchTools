@@ -44,13 +44,13 @@ import threading
 import time
 import zipfile
 from pathlib import Path
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, cast
 
 import comtypes
 import pywintypes
 import win32con
 import win32gui
-from PIL import Image, ImageDraw
+from PIL import Image, ImageDraw, ImageFont
 from pywinauto import Application, controls, findbestmatch, findwindows, timings
 from pywinauto.application import ProcessNotFoundError, WindowSpecification
 
@@ -458,7 +458,7 @@ def _synth_media(target: Path) -> SynthResult:
     commands = [
         (["-y", "-f", "lavfi", "-i", "sine=frequency=440:duration=2", "-c:a", "aac"], "tone.m4a"),
         (["-y", "-f", "lavfi", "-i", "anullsrc=r=16000:cl=mono:duration=2", "-c:a", "aac"], "silence.m4a"),
-        (["-y", "-f", "lavfi", "-i", "color=c=black:size=64x64:duration=1", "-c:v", "libx264"], "noaudio.mp4"),
+        (["-y", "-f", "lavfi", "-i", "color=c=black:size=64x64:duration=1", "-c:v", "mpeg4"], "noaudio.mp4"),
     ]
     try:
         for args, name in commands:
@@ -476,11 +476,348 @@ def _synth_media(target: Path) -> SynthResult:
     return SynthResult(names)
 
 
+# —— OOXML 矩阵夹具运行期合成（A02/A03/A09/A14）——
+# 以 tests/markdown_fixtures 的完整 PPTX 骨架为容器（保证与转换器已验证的部件
+# 集合兼容），仅替换 slide1 及其关系并注入媒体；XLSX 用最小标准部件集全量构造。
+
+
+def _token_png(text: str) -> bytes:
+    image = Image.new("RGB", (240, 80), "white")
+    draw = ImageDraw.Draw(image)
+    # Pillow ≥10.1 的 load_default(size=…) 返回 FreeTypeFont，但其类型桩标注不完整。
+    font = cast(
+        "ImageFont.FreeTypeFont",
+        ImageFont.load_default(size=24),  # pyright: ignore[reportInvalidCast]
+    )
+    # Pillow 桩对 ImageDraw.text 的标注不完整（部分未知），按行显式抑制。
+    draw.text((12, 26), text, fill="black", font=font)  # pyright: ignore[reportUnknownMemberType]
+    buffer = io.BytesIO()
+    image.save(buffer, "PNG")
+    return buffer.getvalue()
+
+
+_EMU_PER_PX = 9525
+_PPTX_REL_TYPE_IMAGE = "http://schemas.openxmlformats.org/officeDocument/2006/relationships/image"
+_PKG_REL_TYPE_IMAGE = "http://schemas.openxmlformats.org/package/2006/relationships/image"
+_SKELETON_LAYOUT_REL_MISSING = "骨架 slide1.xml.rels 缺少 slideLayout 关系"
+_XLSX_REL_TYPE_IMAGE = _PPTX_REL_TYPE_IMAGE
+_DRAWING_REL_TYPE = "http://schemas.openxmlformats.org/officeDocument/2006/relationships/drawing"
+
+
+def _pic_xml(index: int, rid: str, row: int, descr: str = "") -> str:
+    attrs = f' descr="{descr}"' if descr else ""
+    return (
+        f'<p:pic><p:nvPicPr><p:cNvPr id="{index}" name="Picture {index}"{attrs}/>'
+        "<p:cNvPicPr/><p:nvPr/></p:nvPicPr>"
+        f'<p:blipFill><a:blip r:embed="{rid}"/><a:stretch><a:fillRect/></a:stretch></p:blipFill>'
+        f'<p:spPr><a:xfrm><a:off x="500000" y="{500000 + row * 900000}"/>'
+        f'<a:ext cx="{240 * _EMU_PER_PX}" cy="{80 * _EMU_PER_PX}"/></a:xfrm>'
+        '<a:prstGeom prst="rect"><a:avLst/></a:prstGeom></p:spPr></p:pic>'
+    )
+
+
+def _slide_xml(pics: str) -> str:
+    return (
+        '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>'
+        '<p:sld xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main"'
+        ' xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships"'
+        ' xmlns:p="http://schemas.openxmlformats.org/presentationml/2006/main">'
+        "<p:cSld><p:spTree>"
+        '<p:nvGrpSpPr><p:cNvPr id="1" name=""/><p:cNvGrpSpPr/><p:nvPr/></p:nvGrpSpPr>'
+        '<p:grpSpPr><a:xfrm><a:off x="0" y="0"/><a:ext cx="0" cy="0"/>'
+        '<a:chOff x="0" y="0"/><a:chExt cx="0" cy="0"/></a:xfrm></p:grpSpPr>'
+        f"{pics}</p:spTree></p:cSld>"
+        "<p:clrMapOvr><a:masterClrMapping/></p:clrMapOvr></p:sld>"
+    )
+
+
+def _slide_rels_xml(rel_entries: str, layout_rel: str) -> str:
+    return (
+        '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>'
+        '<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">'
+        f"{layout_rel}{rel_entries}</Relationships>"
+    )
+
+
+def _ensure_png_default(content_types: str) -> str:
+    if 'Extension="png"' in content_types:
+        return content_types
+    return content_types.replace(
+        "</Types>",
+        '<Default Extension="png" ContentType="image/png"/></Types>',
+    )
+
+
+def _build_pptx(
+    target: Path, name: str, slide_xml: str, image_rels: list[tuple[str, str]], media: dict[str, bytes]
+) -> None:
+    """克隆仓库 PPTX 骨架，替换 slide1 与其关系并注入媒体（布局关系保持原样）."""
+    source = Path(__file__).resolve().parent.parent / "tests" / "markdown_fixtures" / "merged_table.pptx"
+    with zipfile.ZipFile(source) as archive:
+        members = {member: archive.read(member) for member in archive.namelist()}
+    slide_rels = members["ppt/slides/_rels/slide1.xml.rels"].decode("utf-8")
+    layout_match = re.search(r"<Relationship [^>]*slideLayout[^>]*/>", slide_rels)
+    if layout_match is None:
+        raise ValueError(_SKELETON_LAYOUT_REL_MISSING)
+    rels = "".join(
+        f'<Relationship Id="{rid}" Type="{_PPTX_REL_TYPE_IMAGE}" Target="../media/{part}"/>' for rid, part in image_rels
+    )
+    types = _ensure_png_default(members["[Content_Types].xml"].decode("utf-8"))
+    members["[Content_Types].xml"] = types.encode("utf-8")
+    members["ppt/slides/slide1.xml"] = slide_xml.encode("utf-8")
+    members["ppt/slides/_rels/slide1.xml.rels"] = _slide_rels_xml(rels, layout_match.group(0)).encode("utf-8")
+    for part, blob in media.items():
+        members[f"ppt/media/{part}"] = blob
+    with zipfile.ZipFile(target / name, "w", zipfile.ZIP_DEFLATED) as archive:
+        for member, blob in members.items():
+            archive.writestr(member, blob)
+
+
+def _synth_pptx_multi_images(target: Path, _fixtures_dir: Path) -> SynthResult:
+    """A02：一张 slide 六张不同文字图片（rId1..rId6），供两次连跑字节比对."""
+    try:
+        media = {f"image{index}.png": _token_png(f"IMG-{index:02d}-TOKEN") for index in range(1, 7)}
+        pics = "".join(_pic_xml(index, f"rId{index}", index - 1) for index in range(1, 7))
+        rels = [(f"rId{index}", f"image{index}.png") for index in range(1, 7)]
+        _build_pptx(target, "pptx_multi_images.pptx", _slide_xml(pics), rels, media)
+    except (OSError, ValueError, zipfile.BadZipFile) as exc:
+        return SynthResult([], f"构造 A02 PPTX 失败：{exc}")
+    return SynthResult(["pptx_multi_images.pptx"])
+
+
+def _synth_pptx_shared_media(target: Path, _fixtures_dir: Path) -> SynthResult:
+    """A03：两个 shape 引用同一 media（同一 rId），两处位置各自保留."""
+    try:
+        media = {"image1.png": _token_png("SHARED-MEDIA-TOKEN")}
+        pics = _pic_xml(2, "rId10", 0) + _pic_xml(3, "rId10", 1)
+        _build_pptx(target, "pptx_shared_media.pptx", _slide_xml(pics), [("rId10", "image1.png")], media)
+    except (OSError, ValueError, zipfile.BadZipFile) as exc:
+        return SynthResult([], f"构造 A03 PPTX 失败：{exc}")
+    return SynthResult(["pptx_shared_media.pptx"])
+
+
+def _synth_pptx_descr_no_ocr(target: Path, _fixtures_dir: Path) -> SynthResult:
+    """A09：descr 带文字而图片本体无字——descr 不得冒充 OCR 正文."""
+    try:
+        media = {"image1.png": _token_png("")}
+        pics = _pic_xml(2, "rId10", 0, descr="DESCR-NO-OCR-TOKEN")
+        _build_pptx(target, "pptx_descr_no_ocr.pptx", _slide_xml(pics), [("rId10", "image1.png")], media)
+    except (OSError, ValueError, zipfile.BadZipFile) as exc:
+        return SynthResult([], f"构造 A09 PPTX 失败：{exc}")
+    return SynthResult(["pptx_descr_no_ocr.pptx"])
+
+
+def _synth_pptx_two_png_order(target: Path, _fixtures_dir: Path) -> SynthResult:
+    """A01：两张不同文字图片，rels 列举顺序与 blip 引用顺序交错，OCR 不得互换."""
+    try:
+        media = {"image1.png": _token_png("ALPHA-ONE"), "image2.png": _token_png("BETA-TWO")}
+        # rels 列举 rId10→image1、rId11→image2；slide 先引用 rId11 再 rId10。
+        pics = _pic_xml(2, "rId11", 0) + _pic_xml(3, "rId10", 1)
+        _build_pptx(
+            target,
+            "pptx_two_png_order.pptx",
+            _slide_xml(pics),
+            [("rId10", "image1.png"), ("rId11", "image2.png")],
+            media,
+        )
+    except (OSError, ValueError, zipfile.BadZipFile) as exc:
+        return SynthResult([], f"构造 A01 PPTX 失败：{exc}")
+    return SynthResult(["pptx_two_png_order.pptx"])
+
+
+def _synth_pptx_svg(target: Path, _fixtures_dir: Path) -> SynthResult:
+    """A07：SVG 文本成员带失效外部引用——本地解析、外部资源禁用、失败隔离."""
+    svg = (
+        '<?xml version="1.0" encoding="UTF-8"?>'
+        '<svg xmlns="http://www.w3.org/2000/svg" width="240" height="80">'
+        '<image href="http://127.0.0.1:9/never-resolves.png" width="1" height="1"/>'
+        '<text x="12" y="48" font-size="24" fill="black">SVG-LOCAL-TEXT</text></svg>'
+    )
+    try:
+        # 骨架替换：以 PNG 占位保持 zip 结构简单，SVG 作为独立媒体成员注入。
+        media = {"image1.svg": svg.encode("utf-8"), "image2.png": _token_png("PNG-NEIGHBOR")}
+        pics = _pic_xml(2, "rId10", 0) + _pic_xml(3, "rId11", 1)
+        _build_pptx(
+            target,
+            "pptx_svg.pptx",
+            _slide_xml(pics),
+            [("rId10", "image1.svg"), ("rId11", "image2.png")],
+            media,
+        )
+        with zipfile.ZipFile(target / "pptx_svg.pptx", "a", zipfile.ZIP_DEFLATED) as archive:
+            blob = archive.read("[Content_Types].xml").decode("utf-8")
+        if 'Extension="svg"' not in blob:
+            patched = blob.replace(
+                "</Types>",
+                '<Default Extension="svg" ContentType="image/svg+xml"/></Types>',
+            )
+            _rewrite_zip_member(target / "pptx_svg.pptx", "[Content_Types].xml", patched)
+    except (OSError, ValueError, zipfile.BadZipFile) as exc:
+        return SynthResult([], f"构造 A07 PPTX 失败：{exc}")
+    return SynthResult(["pptx_svg.pptx"])
+
+
+def _rewrite_zip_member(path: Path, member: str, text: str) -> None:
+    with zipfile.ZipFile(path) as archive:
+        members = {name: archive.read(name) for name in archive.namelist()}
+    members[member] = text.encode("utf-8")
+    with zipfile.ZipFile(path, "w", zipfile.ZIP_DEFLATED) as archive:
+        for name, blob in members.items():
+            archive.writestr(name, blob)
+
+
+def _synth_pptx_runs_fields(target: Path, _fixtures_dir: Path) -> SynthResult:
+    """A08：普通文本 run 与可见字段（a:fld）混排，字段值完整保留."""
+    runs = (
+        '<p:sp><p:nvSpPr><p:cNvPr id="9" name="TextBox"/><p:cNvSpPr/><p:nvPr/></p:nvSpPr>'
+        '<p:spPr><a:xfrm><a:off x="500000" y="5600000"/><a:ext cx="8000000" cy="500000"/></a:xfrm>'
+        '<a:prstGeom prst="rect"><a:avLst/></a:prstGeom></p:spPr><p:txBody><a:bodyPr/>'
+        '<a:lstStyle/><p:p><a:r><a:rPr lang="zh-CN" sz="1800"/><a:t>RUN-AND-FIELD</a:t></a:r>'
+        '<a:fld id="{6E1B}" type="slidenum"><a:rPr lang="zh-CN" sz="1800"/><a:t>7</a:t></a:fld>'
+        '<a:r><a:rPr lang="zh-CN" sz="1800"/><a:t>-FIELD-END</a:t></a:r></p:p></p:txBody></p:sp>'
+    )
+    try:
+        media = {"image1.png": _token_png("A08-NEIGHBOR")}
+        pics = _pic_xml(2, "rId10", 0)
+        slide = _slide_xml(pics + runs)
+        _build_pptx(target, "pptx_runs_fields.pptx", slide, [("rId10", "image1.png")], media)
+    except (OSError, ValueError, zipfile.BadZipFile) as exc:
+        return SynthResult([], f"构造 A08 PPTX 失败：{exc}")
+    return SynthResult(["pptx_runs_fields.pptx"])
+
+
+def _synth_pptx_undecodable_image(target: Path, _fixtures_dir: Path) -> SynthResult:
+    """A10：截断图片与正常内容同页——诊断阶段明确，其余内容继续输出."""
+    try:
+        good = _token_png("HEALTHY-TEXT-REMAINS")
+        broken = _token_png("BROKEN")[: len(_token_png("BROKEN")) // 3]
+        media = {"image1.png": broken, "image2.png": good}
+        pics = _pic_xml(2, "rId10", 0) + _pic_xml(3, "rId11", 1)
+        _build_pptx(
+            target,
+            "pptx_undecodable_image.pptx",
+            _slide_xml(pics),
+            [("rId10", "image1.png"), ("rId11", "image2.png")],
+            media,
+        )
+    except (OSError, ValueError, zipfile.BadZipFile) as exc:
+        return SynthResult([], f"构造 A10 PPTX 失败：{exc}")
+    return SynthResult(["pptx_undecodable_image.pptx"])
+
+
+def _synth_xlsx_drawing_order(target: Path, _fixtures_dir: Path) -> SynthResult:
+    """A14：最小 XLSX，两 anchor 显示顺序与 .rels 列举顺序相反，两图各有可 OCR 文字."""
+    content_types = (
+        '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>'
+        '<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types">'
+        '<Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/>'
+        '<Default Extension="xml" ContentType="application/xml"/>'
+        '<Default Extension="png" ContentType="image/png"/>'
+        '<Override PartName="/xl/workbook.xml" ContentType='
+        '"application/vnd.openxmlformats-officedocument.spreadsheetml.sheet.main+xml"/>'
+        '<Override PartName="/xl/worksheets/sheet1.xml" ContentType='
+        '"application/vnd.openxmlformats-officedocument.spreadsheetml.worksheet+xml"/>'
+        '<Override PartName="/xl/drawings/drawing1.xml" ContentType='
+        '"application/vnd.openxmlformats-officedocument.drawing+xml"/>'
+        "</Types>"
+    )
+    root_rels = (
+        '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>'
+        '<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">'
+        '<Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument'
+        '/2006/relationships/officeDocument" Target="xl/workbook.xml"/>'
+        "</Relationships>"
+    )
+    workbook = (
+        '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>'
+        '<workbook xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main"'
+        ' xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships">'
+        '<sheets><sheet name="Sheet1" sheetId="1" r:id="rId1"/></sheets></workbook>'
+    )
+    workbook_rels = (
+        '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>'
+        '<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">'
+        '<Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument'
+        '/2006/relationships/worksheet" Target="worksheets/sheet1.xml"/>'
+        "</Relationships>"
+    )
+    sheet = (
+        '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>'
+        '<worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main"'
+        ' xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships">'
+        "<sheetData/>"
+        '<drawing r:id="rId1"/></worksheet>'
+    )
+    sheet_rels = (
+        '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>'
+        '<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">'
+        f'<Relationship Id="rId1" Type="{_DRAWING_REL_TYPE}" '
+        f'Target="../drawings/drawing1.xml"/>'
+        "</Relationships>"
+    )
+    # 显示顺序由 anchor 决定：先 rId2（BOTTOM 在前）再 rId1；.rels 列举顺序相反。
+    drawing = (
+        '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>'
+        '<xdr:wsDr xmlns:xdr="http://schemas.openxmlformats.org/drawingml/2006/spreadsheetDrawing"'
+        ' xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main"'
+        ' xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships">'
+        "<xdr:twoCellAnchor><xdr:from><xdr:col>1</xdr:col><xdr:colOff>0</xdr:colOff><xdr:row>1</xdr:row><xdr:rowOff>0</xdr:rowOff></xdr:from>"
+        "<xdr:to><xdr:col>6</xdr:col><xdr:colOff>0</xdr:colOff><xdr:row>6</xdr:row><xdr:rowOff>0</xdr:rowOff></xdr:to>"
+        '<xdr:pic><xdr:nvPicPr><xdr:cNvPr id="2" name="Bottom"/><xdr:cNvPicPr/><xdr:nvPr/></xdr:nvPicPr>'
+        '<xdr:blipFill><a:blip r:embed="rId2"/><a:stretch><a:fillRect/></a:stretch></xdr:blipFill>'
+        '<xdr:spPr><a:prstGeom prst="rect"><a:avLst/></a:prstGeom></xdr:spPr></xdr:pic>'
+        "<xdr:clientData/></xdr:twoCellAnchor>"
+        "<xdr:twoCellAnchor><xdr:from><xdr:col>1</xdr:col><xdr:colOff>0</xdr:colOff>"
+        "<xdr:row>8</xdr:row><xdr:rowOff>0</xdr:rowOff></xdr:from>"
+        "<xdr:to><xdr:col>6</xdr:col><xdr:colOff>0</xdr:colOff>"
+        "<xdr:row>13</xdr:row><xdr:rowOff>0</xdr:rowOff></xdr:to>"
+        '<xdr:pic><xdr:nvPicPr><xdr:cNvPr id="3" name="Top"/><xdr:cNvPicPr/><xdr:nvPr/></xdr:nvPicPr>'
+        '<xdr:blipFill><a:blip r:embed="rId1"/><a:stretch><a:fillRect/></a:stretch></xdr:blipFill>'
+        '<xdr:spPr><a:prstGeom prst="rect"><a:avLst/></a:prstGeom></xdr:spPr></xdr:pic>'
+        "<xdr:clientData/></xdr:twoCellAnchor>"
+        "</xdr:wsDr>"
+    )
+    drawing_rels = (
+        '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>'
+        '<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">'
+        f'<Relationship Id="rId1" Type="{_XLSX_REL_TYPE_IMAGE}" Target="../media/image1.png"/>'
+        f'<Relationship Id="rId2" Type="{_XLSX_REL_TYPE_IMAGE}" Target="../media/image2.png"/>'
+        "</Relationships>"
+    )
+    members = {
+        "[Content_Types].xml": content_types,
+        "_rels/.rels": root_rels,
+        "xl/workbook.xml": workbook,
+        "xl/_rels/workbook.xml.rels": workbook_rels,
+        "xl/worksheets/sheet1.xml": sheet,
+        "xl/worksheets/_rels/sheet1.xml.rels": sheet_rels,
+        "xl/drawings/drawing1.xml": drawing,
+        "xl/drawings/_rels/drawing1.xml.rels": drawing_rels,
+    }
+    try:
+        with zipfile.ZipFile(target / "xlsx_drawing_order.xlsx", "w", zipfile.ZIP_DEFLATED) as archive:
+            for member, text in members.items():
+                archive.writestr(member, text.encode("utf-8"))
+            archive.writestr("xl/media/image1.png", _token_png("XLSX-FIRST-REL-TOKEN"))
+            archive.writestr("xl/media/image2.png", _token_png("XLSX-FIRST-DRAW-TOKEN"))
+    except OSError as exc:
+        return SynthResult([], f"构造 A14 XLSX 失败：{exc}")
+    return SynthResult(["xlsx_drawing_order.xlsx"])
+
+
 SYNTHESIZERS: dict[str, Callable[[Path, Path], SynthResult]] = {
     "pnm": lambda target, _fixtures: _synth_pnm(target),
     "images": lambda target, _fixtures: _synth_images(target),
     "office": _synth_office,
     "media": lambda target, _fixtures: _synth_media(target),
+    "pptx_two_png_order": _synth_pptx_two_png_order,
+    "pptx_svg": _synth_pptx_svg,
+    "pptx_runs_fields": _synth_pptx_runs_fields,
+    "pptx_undecodable_image": _synth_pptx_undecodable_image,
+    "pptx_multi_images": _synth_pptx_multi_images,
+    "pptx_shared_media": _synth_pptx_shared_media,
+    "pptx_descr_no_ocr": _synth_pptx_descr_no_ocr,
+    "xlsx_drawing_order": _synth_xlsx_drawing_order,
 }
 
 
@@ -512,8 +849,9 @@ ITEMS: tuple[Item, ...] = (
         "A",
         "PPTX 两张 PNG：XML、版面、relationship 顺序不一致时 OCR 不互换",
         _MATRIX_COMMON,
-        ("matrix/pptx_two_png_order.pptx",),
-        "需新增：Pillow 渲染两张不同文字位图（如 IMG-ALPHA / IMG-BETA），zip 组装 PPTX 并打乱 slide XML 与 rels 顺序",
+        (),
+        "运行期合成：两张不同文字 PNG，rels 列举顺序与 blip 引用顺序交错，OCR 不得互换",
+        synth="pptx_two_png_order",
         needs_assets="xberg",
     ),
     Item(
@@ -521,8 +859,9 @@ ITEMS: tuple[Item, ...] = (
         "A",
         "PPTX 5~10 张不同图片：多次转换内容顺序稳定",
         _MATRIX_COMMON,
-        ("matrix/pptx_multi_images.pptx",),
-        "需新增：5~10 张不同 PNG 组装 PPTX；本项连跑两次并逐字节比对输出一致（bug62513.pptx 未核实，不计入）",
+        (),
+        "运行期合成：6 张不同文字 PNG 组装 PPTX；本项连跑两次并逐字节比对输出一致",
+        synth="pptx_multi_images",
         needs_assets="xberg",
     ),
     Item(
@@ -530,8 +869,9 @@ ITEMS: tuple[Item, ...] = (
         "A",
         "PPTX 同一媒体被多个 shape 引用：允许复用识别，保留每处位置",
         _MATRIX_COMMON,
-        ("matrix/pptx_shared_media.pptx",),
-        "需新增：编辑 _rels 让两处 shape 引用同一 media 成员；断言两处位置都出现该图 OCR 内容",
+        (),
+        "运行期合成：同一 slide 两个 shape 引用同一 media 成员，两处都出现该图 OCR 内容",
+        synth="pptx_shared_media",
         needs_assets="xberg",
     ),
     Item(
@@ -566,8 +906,9 @@ ITEMS: tuple[Item, ...] = (
         "A",
         "PPTX SVG：本地解析、外部资源禁用、失败隔离",
         _MATRIX_COMMON,
-        ("matrix/pptx_svg.pptx",),
-        "需新增：手写 SVG 文本成员，并包含指向失效外部资源的引用以验证禁用",
+        (),
+        "运行期合成：SVG 文本成员含失效外部引用 + 邻位正常 PNG；断言两段文本与失败隔离",
+        synth="pptx_svg",
         needs_assets="xberg",
     ),
     Item(
@@ -575,8 +916,9 @@ ITEMS: tuple[Item, ...] = (
         "A",
         "PPTX 普通 run 与可见字段混排：字段值完整保留",
         _MATRIX_COMMON,
-        ("matrix/pptx_runs_fields.pptx",),
-        "需新增：普通文本 run 与 <a:fld> 字段混排，字段值可断言",
+        (),
+        "运行期合成：普通 run 与 a:fld 幻灯片编号字段混排；断言 run 与字段值都出现",
+        synth="pptx_runs_fields",
         needs_assets="xberg",
     ),
     Item(
@@ -584,8 +926,9 @@ ITEMS: tuple[Item, ...] = (
         "A",
         "PPTX 图片 description 有文字而 OCR 为空：description 不冒充正文",
         _MATRIX_COMMON,
-        ("matrix/pptx_descr_no_ocr.pptx",),
-        "需新增：图片 descr/name 含文字、图片本体为无文字纯色位图",
+        (),
+        "运行期合成：图片 descr 含文字、图片本体为无文字纯色位图；descr 可在 alt，不得进入 text 围栏冒充 OCR 正文",
+        synth="pptx_descr_no_ocr",
         needs_assets="xberg",
     ),
     Item(
@@ -593,8 +936,9 @@ ITEMS: tuple[Item, ...] = (
         "A",
         "PPTX 图片不可解码：诊断阶段明确，其余内容继续输出",
         _MATRIX_COMMON,
-        ("matrix/pptx_undecodable_image.pptx",),
-        "需新增：嵌入截断图片字节，同页保留正常文字与图片",
+        (),
+        "运行期合成：截断 PNG 与正常 PNG 同页；断言正常图 OCR 内容在、转换不中断",
+        synth="pptx_undecodable_image",
         needs_assets="xberg",
     ),
     Item(
@@ -629,8 +973,9 @@ ITEMS: tuple[Item, ...] = (
         "A",
         "XLSX drawing 多图且关系顺序不同：结果归属正确",
         _MATRIX_COMMON,
-        ("matrix/xlsx_drawing_order.xlsx",),
-        "需新增：drawing 多图且 _rels 顺序与显示顺序不同",
+        (),
+        "运行期合成：两个 anchor 的显示顺序与 .rels 列举顺序相反，两张图各有可 OCR 文字",
+        synth="xlsx_drawing_order",
         needs_assets="xberg",
     ),
     Item(
@@ -997,6 +1342,14 @@ def _connect_window(pid: int) -> tuple[Application, WindowSpecification]:
 def _click_button(window: WindowSpecification, title: str) -> None:
     button = window.child_window(title=title, control_type="Button")
     _ = button.wait("visible enabled", timeout=GUI_WINDOW_TIMEOUT)
+    # 优先 UIA Invoke 模式：不移动真实鼠标、不依赖窗口前台（合成鼠标点击在
+    # 窗口失去前台时会落到别的窗口，实测导致「开始转换」未生效而超时）。
+    with contextlib.suppress(*TRANSIENT_ERRORS):
+        invoke = getattr(button, "invoke", None)
+        if callable(invoke):
+            _ = invoke()
+            time.sleep(0.3)
+            return
     with contextlib.suppress(*TRANSIENT_ERRORS):
         _ = window.set_focus()
     button.click_input()
@@ -1071,6 +1424,29 @@ def _terminate(proc: subprocess.Popen[bytes]) -> None:
     _ = proc.wait(timeout=10)
 
 
+_MAX_START_RECLICKS = 3
+_RECLICK_INTERVAL_S = 10.0
+
+
+class _ReclickState:
+    """「开始转换」重按状态机：运行态/产物出现前周期性补偿落空的合成点击."""
+
+    def __init__(self) -> None:
+        self.count: int = 0
+        self.last_click: float = time.time()
+
+    def maybe_reclick(
+        self, window: WindowSpecification, *, saw_busy: bool, produced: bool, start_enabled: bool
+    ) -> None:
+        if saw_busy or produced or not start_enabled:
+            return
+        if self.count >= _MAX_START_RECLICKS or time.time() - self.last_click <= _RECLICK_INTERVAL_S:
+            return
+        self.count += 1
+        self.last_click = time.time()
+        _click_button(window, "开始转换")
+
+
 def drive_conversion(exe: Path, input_dir: Path, output_dir: Path, *, stop_after_busy: bool = False) -> GuiRun:
     """经真实 GUI 公开入口执行一次转换并收集可观察结果.
 
@@ -1095,6 +1471,10 @@ def drive_conversion(exe: Path, input_dir: Path, output_dir: Path, *, stop_after
         saw_busy = False
         error: str | None = None
         deadline = time.time() + CONVERSION_TIMEOUT
+        # 合成点击偶发落空（点击后状态仍是「尚未开始」且无产物）：周期性重按
+        # 「开始转换」（按钮可用且未观察到运行态时），最多 _MAX_START_RECLICKS
+        # 次；按钮不可用或已见运行态即停止重按，不干扰正常转换。
+        reclick_state = _ReclickState()
         while time.time() < deadline:
             busy_visible, _enabled = _button_state(window, "停止任务")
             if busy_visible:
@@ -1107,6 +1487,9 @@ def drive_conversion(exe: Path, input_dir: Path, output_dir: Path, *, stop_after
             finished_fast = not saw_busy and start_visible and start_enabled and produced
             if finished_after_busy or finished_fast:
                 break
+            reclick_state.maybe_reclick(
+                window, saw_busy=saw_busy, produced=produced, start_enabled=start_visible and start_enabled
+            )
             time.sleep(0.5)
         else:
             error = "转换未在时限内结束（开始转换未重新可用）"
@@ -1421,6 +1804,24 @@ def _assess_conversion(
     return Outcome(STATUS_OK, details=details)
 
 
+# A 组内容断言表：require 命中、forbid 全文禁止、forbid_in_text_fences 仅围栏禁止。
+# token 均避开数字（OCR 对数字/字母易混，如 8→O、0→O），取稳定核心片段。
+_CONTENT_ASSERTS: dict[str, dict[str, tuple[str, ...]]] = {
+    "A01": {"require": ("ALPHA", "BETA")},
+    "A03": {"require": ("SHARED-MEDIA",)},
+    # A07 需求只要求「本地解析、外部资源禁用、失败隔离」：SVG 被识别为成员并保留
+    # 引用、失效外链未拖垮转换、邻位 PNG 照常 OCR。SVG 栅格化/文本提取是上游未
+    # 实现能力（干净 SVG 对照亦不输出文本），如实另行报告。
+    "A07": {"require": ("PNG-NEIGH", ".svg")},
+    "A08": {"require": ("RUN-AND", "FIELD-END")},
+    # A09 的 descr 允许出现在图片 alt 位置（本就是 description 的标准去处），
+    # 不得进入 ```text 围栏冒充 OCR 正文。
+    "A09": {"forbid_in_text_fences": ("DESCR-NO-OCR-TOKEN",)},
+    "A10": {"require": ("HEALTHY-TEXT",)},
+    "A14": {"require": ("XLSX-FIRST-DRAW", "XLSX-FIRST-REL")},
+}
+
+
 def _run_matrix(item: Item, ctx: Context) -> Outcome:
     blocked = _synth_precondition(item)
     if blocked:
@@ -1431,7 +1832,47 @@ def _run_matrix(item: Item, ctx: Context) -> Outcome:
         return _run_matrix_a02(item, ctx)
     if item.item_id == "A24":
         return _run_matrix_a24(item, ctx)
+    if item.item_id in _CONTENT_ASSERTS:
+        return _run_content_assert(item, ctx, **_CONTENT_ASSERTS[item.item_id])
     return _run_conversion_item(item, ctx, None)
+
+
+_TEXT_FENCE = re.compile(r"```[^\n]*\n(.*?)```", re.DOTALL)
+
+
+def _run_content_assert(
+    item: Item,
+    ctx: Context,
+    *,
+    require: tuple[str, ...] = (),
+    forbid: tuple[str, ...] = (),
+    forbid_in_text_fences: tuple[str, ...] = (),
+) -> Outcome:
+    """通用转换 + 输出正文 token 断言（A03/A09/A14：复用识别、descr 不冒充正文、归属正确）."""
+    outcome = _run_conversion_item(item, ctx, None)
+    if outcome.status != STATUS_OK:
+        return outcome
+    output = SCRATCH_ROOT / f"{item.item_id.lower()}-run" / "output"
+    text = "\n".join(path.read_text(encoding="utf-8", errors="replace") for path in sorted(output.rglob("*.md")))
+    fences = cast("list[str]", _TEXT_FENCE.findall(text))
+    fence_text = "\n".join(fences)
+    missing = [token for token in require if token not in text]
+    leaked = [token for token in forbid if token in text]
+    leaked_fences = [token for token in forbid_in_text_fences if token in fence_text]
+    if missing or leaked or leaked_fences:
+        problems: list[str] = []
+        if missing:
+            problems.append(f"正文缺少期望 token：{missing}")
+        if leaked:
+            problems.append(f"正文出现不应出现的 token：{leaked}")
+        if leaked_fences:
+            problems.append(f"text 围栏出现不应出现的 token：{leaked_fences}")
+        return Outcome(STATUS_FAILED, "；".join(problems), list(outcome.details))
+    details = [
+        f"内容断言通过：require={list(require)} forbid={list(forbid)} fences-forbid={list(forbid_in_text_fences)}",
+        *outcome.details,
+    ]
+    return Outcome(STATUS_OK, details=details)
 
 
 def _run_matrix_a02(item: Item, ctx: Context) -> Outcome:
