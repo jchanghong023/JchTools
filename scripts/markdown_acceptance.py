@@ -73,7 +73,7 @@ STATUS_NOT_RUN = "NOT RUN"
 
 # 与 src/markdown_assets.rs 的常量同口径：资产根目录、固定版本与成员相对路径。
 DATA_DIRECTORY = "markdown-assets"
-XBERG_TAG = "v2026.9.15-0746-run36.1"
+XBERG_TAG = "v2026.9.29-0212-run49.1"
 XBERG_ARCHIVE_URL = (
     f"https://github.com/jchanghong023/xberg/releases/download/{XBERG_TAG}/xberg-cli-x86_64-pc-windows-msvc.zip"
 )
@@ -328,7 +328,9 @@ def _write_pnm_binary(target: Path) -> None:
     _ = target.joinpath("p5_bin.pgm").write_bytes(
         b"P5\n3 3\n255\n" + bytes(255 - v * 127 for row in pixels for v in row)
     )
-    _ = target.joinpath("p6_bin.ppm").write_bytes(b"P6\n3 3\n255\n" + bytes((0, 128, 64)) * 3)
+    # P6 3×3 RGB 需要恰好 27 个栅格字节；旧值 *3 是 9 字节的截断输入，
+    # 会被 xberg 按损坏输入优雅拒绝（exit 1 + 诊断），A17 因此整项失败。
+    _ = target.joinpath("p6_bin.ppm").write_bytes(b"P6\n3 3\n255\n" + bytes((0, 128, 64)) * 9)
 
 
 def _synth_pnm(target: Path) -> SynthResult:

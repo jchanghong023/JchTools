@@ -17,7 +17,7 @@ use uuid::Uuid;
 
 const MANIFEST: &str = include_str!("../resources/markdown-assets.json");
 const DATA_DIRECTORY: &str = "markdown-assets";
-const XBERG_TAG: &str = "v2026.9.15-0746-run36.1";
+const XBERG_TAG: &str = "v2026.9.29-0212-run49.1";
 const RUNTIME_SELECTION_FILE: &str = "xberg-runtime-path.txt";
 
 #[derive(Debug, Deserialize)]

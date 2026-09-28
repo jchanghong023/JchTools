@@ -1,147 +1,147 @@
 {
-  "schema_version": 1,
-  "component": "snap-ocr-assets",
-  "note": "截图 OCR（O 分区）可选资产清单。det/rec 模型、字典与推理运行库不再由本清单下载：识别改由固定版本 Xberg 推理组件（xberg.exe + models/snapshot-ocr + onnxruntime.dll，模型字节仍为 O-07 附录 A 的 PP-OCRv6 small FP32 ONNX）承接，随 Xberg 发布物交付并在组件树内自带许可材料；本清单保留结果窗专用字体（O-21）。全部摘要均已在本地对字节核验。worker 可执行文件在打包阶段补充条目。Xberg 推理组件包条目已接线（xberg_inference）：按固定发布 zip 的归档与成员摘要下载校验后安装。",
-  "assets": [
+ "schema_version": 1,
+ "component": "snap-ocr-assets",
+ "note": "截图 OCR（O 分区）可选资产清单。det/rec 模型、字典与推理运行库不再由本清单下载：识别改由固定版本 Xberg 推理组件（xberg.exe + models/snapshot-ocr + onnxruntime.dll，模型字节仍为 O-07 附录 A 的 PP-OCRv6 small FP32 ONNX）承接，随 Xberg 发布物交付并在组件树内自带许可材料；本清单保留结果窗专用字体（O-21）。全部摘要均已在本地对字节核验。worker 可执行文件在打包阶段补充条目。Xberg 推理组件包条目已接线（xberg_inference）：按固定发布 zip 的归档与成员摘要下载校验后安装。",
+ "assets": [
+  {
+   "id": "noto-sans-mono-cjk-sc",
+   "url": "https://github.com/notofonts/noto-cjk/releases/download/Sans2.004/13_NotoSansMonoCJKsc.zip",
+   "archive_type": "zip",
+   "install_path": null,
+   "size_bytes": 27750553,
+   "sha256": "e252c39994f8a278676507600a955663c23c24a7827dc63a4300b2f7b427cd5d",
+   "members": [
     {
-      "id": "noto-sans-mono-cjk-sc",
-      "url": "https://github.com/notofonts/noto-cjk/releases/download/Sans2.004/13_NotoSansMonoCJKsc.zip",
-      "archive_type": "zip",
-      "install_path": null,
-      "size_bytes": 27750553,
-      "sha256": "e252c39994f8a278676507600a955663c23c24a7827dc63a4300b2f7b427cd5d",
-      "members": [
-        {
-          "path": "NotoSansMonoCJKsc-Regular.otf",
-          "install_path": "fonts/NotoSansMonoCJKsc-Regular.otf",
-          "size_bytes": 16393784,
-          "sha256": "ec04cc376b34887cedbdf84074e2e226ed2761eeabdcb9173fc1dd7bfd153ef7"
-        }
-      ],
-      "license": {
-        "component": "Noto Sans Mono CJK SC Regular",
-        "license": "OFL-1.1",
-        "source": "https://github.com/notofonts/noto-cjk/releases/tag/Sans2.004"
-      }
-    },
-    {
-      "id": "noto-cjk-ofl-license",
-      "url": "https://raw.githubusercontent.com/notofonts/noto-cjk/Sans2.004/LICENSE",
-      "archive_type": "file",
-      "install_path": "fonts/LICENSE-noto-ofl.txt",
-      "size_bytes": 4301,
-      "sha256": "6a73f9541c2de74158c0e7cf6b0a58ef774f5a780bf191f2d7ec9cc53efe2bf2",
-      "members": [],
-      "license": {
-        "component": "Noto CJK OFL 1.1 license text",
-        "license": "OFL-1.1",
-        "source": "https://github.com/notofonts/noto-cjk/blob/Sans2.004/LICENSE"
-      }
+     "path": "NotoSansMonoCJKsc-Regular.otf",
+     "install_path": "fonts/NotoSansMonoCJKsc-Regular.otf",
+     "size_bytes": 16393784,
+     "sha256": "ec04cc376b34887cedbdf84074e2e226ed2761eeabdcb9173fc1dd7bfd153ef7"
     }
-  ],
-  "workers": [
-    {
-      "id": "snap-ocr-worker",
-      "status": "ok",
-      "url": "https://github.com/jchanghong023/JchTools/releases/download/optional-components-v0.1.2/snap-ocr-worker.exe",
-      "archive_type": "file",
-      "install_path": "worker/v0.1.2/snap-ocr-worker.exe",
-      "size_bytes": 16235008,
-      "sha256": "c15234bb4596ab29f432bae68196fd60be87c38f7e726627f2e631e2fdd59e11",
-      "members": [],
-      "license": {
-        "component": "JchTools snap-ocr-worker（截图 OCR 后台服务进程）",
-        "license": "MIT",
-        "source": "https://github.com/jchanghong023/JchTools"
-      }
-    }
-  ],
-  "xberg_inference": {
-    "tag": "v2026.9.28-1442-run48.1",
-    "id": "xberg-inference",
-    "url": "https://github.com/jchanghong023/xberg/releases/download/v2026.9.28-1442-run48.1/xberg-cli-x86_64-pc-windows-msvc.zip",
-    "archive_type": "zip",
-    "install_path": null,
-    "size_bytes": 290852400,
-    "sha256": "99ff63846f9a5d9671e119ff15a8622edd8f38c64a31890b1f54845ff1835c62",
-    "members": [
-      {
-        "path": "xberg-cli-x86_64-pc-windows-msvc/xberg.exe",
-        "install_path": "xberg-inference/v2026.9.28-1442-run48.1/xberg.exe",
-        "size_bytes": 103027200,
-        "sha256": "7b96b38b92b6b24d6dd0b9be5e334d2c6f6badce290600ae80d68c5dc327695c"
-      },
-      {
-        "path": "xberg-cli-x86_64-pc-windows-msvc/models/snapshot-ocr/det.onnx",
-        "install_path": "xberg-inference/v2026.9.28-1442-run48.1/models/snapshot-ocr/det.onnx",
-        "size_bytes": 9891707,
-        "sha256": "3914f972d833af87d23bb2338bd09238f978a48f3c4dbb8e1a4ee26a93869940"
-      },
-      {
-        "path": "xberg-cli-x86_64-pc-windows-msvc/models/snapshot-ocr/rec.onnx",
-        "install_path": "xberg-inference/v2026.9.28-1442-run48.1/models/snapshot-ocr/rec.onnx",
-        "size_bytes": 21148338,
-        "sha256": "3e3def686ac9a1676b59bc9749ad896263d8f68b53f352060774de359a2e23ed"
-      },
-      {
-        "path": "xberg-cli-x86_64-pc-windows-msvc/models/snapshot-ocr/dict/dict.txt",
-        "install_path": "xberg-inference/v2026.9.28-1442-run48.1/models/snapshot-ocr/dict/dict.txt",
-        "size_bytes": 74947,
-        "sha256": "b5f2bfe2bdd9448429e3e82b51c789775d9b42f2403d082b00662eb77e401c5d"
-      },
-      {
-        "path": "xberg-cli-x86_64-pc-windows-msvc/models/paddleocr-onnx-models-LICENSE.txt",
-        "install_path": "xberg-inference/v2026.9.28-1442-run48.1/models/snapshot-ocr/LICENSE-paddleocr.txt",
-        "size_bytes": 11358,
-        "sha256": "cfc7749b96f63bd31c3c42b5c471bf756814053e847c10f3eb003417bc523d30"
-      },
-      {
-        "path": "xberg-cli-x86_64-pc-windows-msvc/onnxruntime.dll",
-        "install_path": "xberg-inference/v2026.9.28-1442-run48.1/onnxruntime.dll",
-        "size_bytes": 16720896,
-        "sha256": "4ee0ae76cbf51bde6999f36829939b2b06d340ab57867ef82b61a0b674111efa"
-      },
-      {
-        "path": "xberg-cli-x86_64-pc-windows-msvc/MSVCP140.dll",
-        "install_path": "xberg-inference/v2026.9.28-1442-run48.1/MSVCP140.dll",
-        "size_bytes": 643512,
-        "sha256": "7c26614e1d733892c2deac7e245ce115504b1d80592dd0a01b08e3e5a55f89ca"
-      },
-      {
-        "path": "xberg-cli-x86_64-pc-windows-msvc/MSVCP140_1.dll",
-        "install_path": "xberg-inference/v2026.9.28-1442-run48.1/MSVCP140_1.dll",
-        "size_bytes": 35768,
-        "sha256": "206c931bf90fdad8816de3b5e2ef80b2bcaa9406c89ecc05fe6fddffe251e982"
-      },
-      {
-        "path": "xberg-cli-x86_64-pc-windows-msvc/VCRUNTIME140.dll",
-        "install_path": "xberg-inference/v2026.9.28-1442-run48.1/VCRUNTIME140.dll",
-        "size_bytes": 178616,
-        "sha256": "d1f4225df2cd877dbf130d5668a021dce3f94118455ff5ec952061c30afc9ce7"
-      },
-      {
-        "path": "xberg-cli-x86_64-pc-windows-msvc/VCRUNTIME140_1.dll",
-        "install_path": "xberg-inference/v2026.9.28-1442-run48.1/VCRUNTIME140_1.dll",
-        "size_bytes": 50112,
-        "sha256": "a7146c08f89fe5b04541ab507cdb59ff7b44534d4ba3c668a426c6450a03434e"
-      },
-      {
-        "path": "xberg-cli-x86_64-pc-windows-msvc/LICENSE",
-        "install_path": "xberg-inference/v2026.9.28-1442-run48.1/LICENSE",
-        "size_bytes": 1098,
-        "sha256": "2df0cbac46062748fa0f582c5717df32d66607de4d37af1473ce785c31b60b54"
-      },
-      {
-        "path": "xberg-cli-x86_64-pc-windows-msvc/THIRD_PARTY_LICENSES.md",
-        "install_path": "xberg-inference/v2026.9.28-1442-run48.1/THIRD_PARTY_LICENSES.md",
-        "size_bytes": 6365,
-        "sha256": "7f9a61b4ead9e7f0551fe9a1c2ffc1fb53f001e9170416412c17cdec93a0b6bd"
-      }
-    ],
-    "license": {
-      "component": "Xberg CLI（推理组件：xberg.exe 与截图/转录模型、原生运行库）",
-      "license": "Xberg 项目许可（组件树内随附 LICENSE 与 THIRD_PARTY_LICENSES.md）",
-      "source": "https://github.com/jchanghong023/xberg/releases/download/v2026.9.28-1442-run48.1/xberg-cli-x86_64-pc-windows-msvc.zip"
-    }
+   ],
+   "license": {
+    "component": "Noto Sans Mono CJK SC Regular",
+    "license": "OFL-1.1",
+    "source": "https://github.com/notofonts/noto-cjk/releases/tag/Sans2.004"
+   }
+  },
+  {
+   "id": "noto-cjk-ofl-license",
+   "url": "https://raw.githubusercontent.com/notofonts/noto-cjk/Sans2.004/LICENSE",
+   "archive_type": "file",
+   "install_path": "fonts/LICENSE-noto-ofl.txt",
+   "size_bytes": 4301,
+   "sha256": "6a73f9541c2de74158c0e7cf6b0a58ef774f5a780bf191f2d7ec9cc53efe2bf2",
+   "members": [],
+   "license": {
+    "component": "Noto CJK OFL 1.1 license text",
+    "license": "OFL-1.1",
+    "source": "https://github.com/notofonts/noto-cjk/blob/Sans2.004/LICENSE"
+   }
   }
+ ],
+ "workers": [
+  {
+   "id": "snap-ocr-worker",
+   "status": "ok",
+   "url": "https://github.com/jchanghong023/JchTools/releases/download/optional-components-v0.1.2/snap-ocr-worker.exe",
+   "archive_type": "file",
+   "install_path": "worker/v0.1.2/snap-ocr-worker.exe",
+   "size_bytes": 16235008,
+   "sha256": "c15234bb4596ab29f432bae68196fd60be87c38f7e726627f2e631e2fdd59e11",
+   "members": [],
+   "license": {
+    "component": "JchTools snap-ocr-worker（截图 OCR 后台服务进程）",
+    "license": "MIT",
+    "source": "https://github.com/jchanghong023/JchTools"
+   }
+  }
+ ],
+ "xberg_inference": {
+  "tag": "v2026.9.29-0212-run49.1",
+  "id": "xberg-inference",
+  "url": "https://github.com/jchanghong023/xberg/releases/download/v2026.9.29-0212-run49.1/xberg-cli-x86_64-pc-windows-msvc.zip",
+  "archive_type": "zip",
+  "install_path": null,
+  "size_bytes": 291568836,
+  "sha256": "2b37e054b409496a1e1c98793b4eda18a8136d72f7653fbe0f2b0b69ed506f52",
+  "members": [
+   {
+    "path": "xberg-cli-x86_64-pc-windows-msvc/xberg.exe",
+    "install_path": "xberg-inference/v2026.9.29-0212-run49.1/xberg.exe",
+    "size_bytes": 105160192,
+    "sha256": "640ae1a2e8a744a4e11397a71b39a2a3f625edc60fc9de2d0e763d590d57f774"
+   },
+   {
+    "path": "xberg-cli-x86_64-pc-windows-msvc/models/snapshot-ocr/det.onnx",
+    "install_path": "xberg-inference/v2026.9.29-0212-run49.1/models/snapshot-ocr/det.onnx",
+    "size_bytes": 9891707,
+    "sha256": "3914f972d833af87d23bb2338bd09238f978a48f3c4dbb8e1a4ee26a93869940"
+   },
+   {
+    "path": "xberg-cli-x86_64-pc-windows-msvc/models/snapshot-ocr/rec.onnx",
+    "install_path": "xberg-inference/v2026.9.29-0212-run49.1/models/snapshot-ocr/rec.onnx",
+    "size_bytes": 21148338,
+    "sha256": "3e3def686ac9a1676b59bc9749ad896263d8f68b53f352060774de359a2e23ed"
+   },
+   {
+    "path": "xberg-cli-x86_64-pc-windows-msvc/models/snapshot-ocr/dict/dict.txt",
+    "install_path": "xberg-inference/v2026.9.29-0212-run49.1/models/snapshot-ocr/dict/dict.txt",
+    "size_bytes": 74947,
+    "sha256": "b5f2bfe2bdd9448429e3e82b51c789775d9b42f2403d082b00662eb77e401c5d"
+   },
+   {
+    "path": "xberg-cli-x86_64-pc-windows-msvc/models/paddleocr-onnx-models-LICENSE.txt",
+    "install_path": "xberg-inference/v2026.9.29-0212-run49.1/models/snapshot-ocr/LICENSE-paddleocr.txt",
+    "size_bytes": 11358,
+    "sha256": "cfc7749b96f63bd31c3c42b5c471bf756814053e847c10f3eb003417bc523d30"
+   },
+   {
+    "path": "xberg-cli-x86_64-pc-windows-msvc/onnxruntime.dll",
+    "install_path": "xberg-inference/v2026.9.29-0212-run49.1/onnxruntime.dll",
+    "size_bytes": 16720896,
+    "sha256": "4ee0ae76cbf51bde6999f36829939b2b06d340ab57867ef82b61a0b674111efa"
+   },
+   {
+    "path": "xberg-cli-x86_64-pc-windows-msvc/MSVCP140.dll",
+    "install_path": "xberg-inference/v2026.9.29-0212-run49.1/MSVCP140.dll",
+    "size_bytes": 643512,
+    "sha256": "7c26614e1d733892c2deac7e245ce115504b1d80592dd0a01b08e3e5a55f89ca"
+   },
+   {
+    "path": "xberg-cli-x86_64-pc-windows-msvc/MSVCP140_1.dll",
+    "install_path": "xberg-inference/v2026.9.29-0212-run49.1/MSVCP140_1.dll",
+    "size_bytes": 35768,
+    "sha256": "206c931bf90fdad8816de3b5e2ef80b2bcaa9406c89ecc05fe6fddffe251e982"
+   },
+   {
+    "path": "xberg-cli-x86_64-pc-windows-msvc/VCRUNTIME140.dll",
+    "install_path": "xberg-inference/v2026.9.29-0212-run49.1/VCRUNTIME140.dll",
+    "size_bytes": 178616,
+    "sha256": "d1f4225df2cd877dbf130d5668a021dce3f94118455ff5ec952061c30afc9ce7"
+   },
+   {
+    "path": "xberg-cli-x86_64-pc-windows-msvc/VCRUNTIME140_1.dll",
+    "install_path": "xberg-inference/v2026.9.29-0212-run49.1/VCRUNTIME140_1.dll",
+    "size_bytes": 50112,
+    "sha256": "a7146c08f89fe5b04541ab507cdb59ff7b44534d4ba3c668a426c6450a03434e"
+   },
+   {
+    "path": "xberg-cli-x86_64-pc-windows-msvc/LICENSE",
+    "install_path": "xberg-inference/v2026.9.29-0212-run49.1/LICENSE",
+    "size_bytes": 1098,
+    "sha256": "2df0cbac46062748fa0f582c5717df32d66607de4d37af1473ce785c31b60b54"
+   },
+   {
+    "path": "xberg-cli-x86_64-pc-windows-msvc/THIRD_PARTY_LICENSES.md",
+    "install_path": "xberg-inference/v2026.9.29-0212-run49.1/THIRD_PARTY_LICENSES.md",
+    "size_bytes": 6365,
+    "sha256": "7f9a61b4ead9e7f0551fe9a1c2ffc1fb53f001e9170416412c17cdec93a0b6bd"
+   }
+  ],
+  "license": {
+   "component": "Xberg CLI（推理组件：xberg.exe 与截图/转录模型、原生运行库）",
+   "license": "Xberg 项目许可（组件树内随附 LICENSE 与 THIRD_PARTY_LICENSES.md）",
+   "source": "https://github.com/jchanghong023/xberg/releases/download/v2026.9.29-0212-run49.1/xberg-cli-x86_64-pc-windows-msvc.zip"
+  }
+ }
 }

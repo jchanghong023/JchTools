@@ -205,3 +205,5 @@
 媒体兼容边界保持旧行为：选择第一条音轨，流式解码并重采样为 16 kHz 单声道有符号 16 位 PCM，再按原比例转换为 `f32` 样本送入 VAD；完整处理解码器、重采样器和 VAD 的尾部样本，时间戳按原采样位置计算。固定模型与原切分/识别参数保持一致，不能因为去掉 Python 包装而换成另一种识别链路。模型为离线推理资产，本功能不增加训练、导出或转换模型的 Python 工具链。
 
 选型依据用于解释原生组件的必要性，不代替附录 A 的实际验收：[Xberg 特性清单](https://raw.githubusercontent.com/jchanghong023/xberg/main/crates/xberg/Cargo.toml)区分 Rust 接口与原生推理依赖，其纯 Rust `layout-tract` 路径未承接 TATR 表格结构识别；[sherpa-onnx v1.13.6 C 接口](https://raw.githubusercontent.com/k2-fsa/sherpa-onnx/v1.13.6/sherpa-onnx/c-api/c-api.h)提供 Silero VAD 与 SenseVoice（含语言和 ITN）配置；[FFmpeg 重采样接口](https://ffmpeg.org/doxygen/trunk/group__lswr.html)直接提供采样格式、声道与采样率转换。实际可选资产仍须按 T-06 固定版本、特性、编解码支持范围及摘要，不追随这些链接的主分支自动升级。
+
+2026-09-29 接线记录（用户跨仓收尾授权）：文档转换清单与双侧推理组件清单已更新至 Xberg 发布 `v2026.9.29-0212-run49.1`；该出厂构建不含 layout-detection，`resources/markdown-xberg.json` 的 `layout` 配置块随之移除（出厂对未编译配置字段明确报错），OCR 与图片 OCR 行为不变，验收矩阵 A 组 15/15 可执行项全部通过（A08 p:p 段落提取、A17 PNM 六表示修复后全绿，见 `.tmp/markdown-acceptance-A2.json`）。

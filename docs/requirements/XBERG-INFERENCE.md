@@ -21,7 +21,7 @@
 
 ## 3. 获取与交付
 
-- **XB-10【获取方式（已确认：双轨）】** 转 Markdown 的文档转换继续使用现行钉定的 Xberg 运行目录（T-05/T-06 清单不变、零回归）；截图 OCR 与转录所需的推理组件作为新的可选资产包——来自新 Xberg 发布 zip（含截图模型集、SenseVoice/VAD 模型、sherpa-onnx 与 FFmpeg DLL），由 JchTools 既有「初始化」流程下载、按归档与成员 SHA-256 校验后安装到本功能独立管理的位置（发布 tag 由各功能资产清单钉定；两功能按 O-03 独立安装、只读复用，不得互相覆盖或混装版本）。
+- **XB-10【获取方式（已确认：双轨）】** 转 Markdown 的文档转换继续使用现行钉定的 Xberg 运行目录（T-05/T-06 清单不变、零回归；2026-09-29 清单版本经用户授权更新至 `v2026.9.29-0212-run49.1`，见第 4 节第 4 条）；截图 OCR 与转录所需的推理组件作为新的可选资产包——来自新 Xberg 发布 zip（含截图模型集、SenseVoice/VAD 模型、sherpa-onnx 与 FFmpeg DLL），由 JchTools 既有「初始化」流程下载、按归档与成员 SHA-256 校验后安装到本功能独立管理的位置（发布 tag 由各功能资产清单钉定；两功能按 O-03 独立安装、只读复用，不得互相覆盖或混装版本）。2026-09-29 双侧推理组件清单（`markdown-assets.json` 与 `snap-ocr-assets.json` 的 `xberg_inference`）已接线至同一发布 `v2026.9.29-0212-run49.1`（zip 291,568,836 B / SHA-256 `2b37e054…`，成员摘要见清单；SNAP-03 三模型字节不变）。
 - **XB-11【打包边界不变】** 主 EXE 与主安装包仍不携带模型、OCR/媒体推理运行库与专用字体（O-05 / T-05）；`package-windows.ps1` 的 fail-closed 泄漏检查与 `installer/JchTools.iss` 边界保持。
 - **XB-12【退役清单】** 对照通过并经用户确认后退役（2026-09-28 用户整体授权覆盖本项确认；对照记录见 Xberg 仓 `.tmp/contrast`：截图 OCR 与 JchTools Python 冻结基线逐字符一致、媒体新旧链路并列对比完成）：`markdown-media-worker` 进程及 `markdown-assets.json` 的 `media_models` / `future_workers` 条目；`snap-ocr-worker` 内 det/rec 推理与 vendored `xberg-paddle-ocr`；`snap-ocr-assets.json` 中 det/rec ONNX、字典、onnxruntime 条目。保留：结果窗专用字体、托盘服务进程本体、既有设置/开机启动语义。退役时同步修改 readiness/初始化逻辑与静态检查，不删除仍被引用的资产。
 - **XB-13【过渡与对照】** 截图、媒体分阶段并存：每阶段先用同批公开合成样本对照新旧实现的文本、时间戳、耗时与内存（并列报告，不作未经实测的「更好」结论），对照通过且用户确认后才移除对应旧推理代码；对照期间默认产品行为不变。
@@ -31,7 +31,7 @@
 1. **T-19（已回写）** 原「不提供云端、自动语言选择或 **Xberg 媒体后端切换**」明文禁止由 Xberg 承接媒体。现改为：「媒体转录由固定版本 Xberg 推理组件（本地 stdio worker 进程）承接：FFmpeg 解码/重采样 → Silero VAD → SenseVoice INT8；仍不提供云端、自动语言选择或后端切换，链路语义与资产摘要按 T-19/附录 C 不变」。
 2. **O-31（已回写）** 保留「不得依赖 `E:\xberg` 开发目录」；增补「允许依赖经固定版本清单校验的 Xberg 发布物（用户安装或 JchTools 按清单获取）；仍不依赖开发机源码路径，源仓库保持只读 oracle」。
 3. **O-05/O-06（已回写）** 双轨下：截图重资产的获取来源由「JchTools 可选资产清单自下载」改为「Xberg 推理组件包（来源 Xberg 发布 zip）」，初始化入口、进度/取消/重试 UX 保持；O-05 主包边界不变。
-4. **T-05/T-06** 双轨下不变（文档转换清单不动）。
+4. **T-05/T-06** 双轨下不变（文档转换清单不动）。**2026-09-29 更新（用户跨仓收尾授权「所有任务完成……继续完成 JchTools」）**：文档转换清单（`markdown-assets.json` 的 `xberg` 块）由 `v2026.9.15-0746-run36.1` 接线至 `v2026.9.29-0212-run49.1`——该发布包含 fork 的 PPTX `p:p` 段落提取与内嵌 SVG 栅格化 OCR 能力，JchTools 验收矩阵 A08/A17 依赖它；`resources/markdown-xberg.json` 移除 `layout` 顶层配置块（fork 出厂构建不含 layout-detection，按 Xberg FORK.md「未编译配置字段明确报错」边界被整包拒绝，`use_layout_for_markdown` 与 `pdf_options.reading_order:false` 保持可用）；附录 D 的「Layout 与表格结构识别」行实际范围以 Xberg 出厂 feature 集为准（TATR 本就不在出厂范围）。T-05/T-06 的机制要求（用户指定目录、固定版本清单、SHA-256 校验）不变。
 5. **T-08（已回写）** 「`.mp4`、`.m4a` 固定由本地媒体链路处理」保持，承接方注记更新为「经固定版本 Xberg 的本地离线链路」。
 6. **附录 D（T-27，已回写）** 「媒体工作进程接入 FFmpeg 和 sherpa-onnx」的装配描述更新为「Xberg 推理组件内 xberg.exe worker 承接」；实际形态为固定版本 Xberg CLI 子进程 + stdio JSON 行协议，已在附录 D 注明。
 7. **CONTRACT.md P-03（已回写）** 联网例外注记更新：转 Markdown 与截图 OCR 的初始化下载来源均增补「Xberg 推理组件包」。
