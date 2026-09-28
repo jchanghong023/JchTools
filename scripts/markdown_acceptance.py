@@ -187,9 +187,7 @@ class AssetProbe:
         return self.xberg_exe is not None
 
     def media_ready(self) -> bool:
-        return self.inference_dir is not None and not any(
-            "推理组件" in text or "媒体" in text for text in self.missing
-        )
+        return self.inference_dir is not None and not any("推理组件" in text or "媒体" in text for text in self.missing)
 
     def acquire_hint(self) -> str:
         hint = f"Xberg 运行目录：从 {XBERG_ARCHIVE_URL} 下载解压（固定 tag {XBERG_TAG}），"
@@ -218,66 +216,74 @@ def _manifest_model_paths() -> list[str]:
     members = inference.get("members") if _is_str_obj_map(inference) else None
     if not _is_str_obj_list(members):
         return []
-    return [
-        relative
-        for entry in members
-        if (relative := _str_field(entry, "install_path")) is not None
-    ]
+    return [relative for entry in members if (relative := _str_field(entry, "install_path")) is not None]
 
 
-def probe_assets() -> AssetProbe:
-    """只读核对：已保存的 Xberg 指针、xberg.exe、媒体工作进程与模型文件是否在场."""
-    missing: list[str] = []
-    root = _asset_root()
-    if root is None:
-        return AssetProbe(None, None, None, None, ["缺少 LOCALAPPDATA，无法定位资产目录"])
+def _probe_runtime_dir(root: Path, missing: list[str]) -> Path | None:
+    """只读核对运行目录指针与 xberg.exe；缺失项写入 missing."""
     selection = root / "xberg-runtime-path.txt"
     runtime_dir: Path | None = None
     if not selection.is_file():
         missing.append(f"未配置 Xberg 运行目录（未找到 {selection}）")
-    else:
-        with contextlib.suppress(OSError, ValueError):
-            runtime_dir = Path(selection.read_text(encoding="utf-8").strip())
-    xberg_exe: Path | None = None
-    if runtime_dir is not None:
-        candidate = runtime_dir / "xberg.exe"
-        if candidate.is_file():
-            xberg_exe = candidate
-        else:
-            missing.append(f"Xberg 运行目录缺 xberg.exe：{candidate}")
-    inference_dir: Path | None = None
-    # 组件目录解析与 src/markdown_assets.rs::resolve_xberg_component 同口径：
-    # 开发期可用 JCHTOOLS_XBERG_INFERENCE_DIR 指向本地组件树；否则取安装根下
-    # 唯一的 tag 子目录（0 个未安装，多于 1 个无法判定）。
+        return None
+    with contextlib.suppress(OSError, ValueError):
+        runtime_dir = Path(selection.read_text(encoding="utf-8").strip())
+    if runtime_dir is not None and not (runtime_dir / "xberg.exe").is_file():
+        missing.append(f"Xberg 运行目录缺 xberg.exe：{runtime_dir / 'xberg.exe'}")
+    return runtime_dir
+
+
+def _resolve_inference_dir(root: Path, missing: list[str]) -> Path | None:
+    """解析推理组件目录（与 Rust 侧 resolve_xberg_component 同口径）.
+
+    开发期可用 JCHTOOLS_XBERG_INFERENCE_DIR 指向本地组件树；否则取安装根下
+    唯一的 tag 子目录（0 个未安装，多于 1 个无法判定）。
+    """
     override = os.environ.get("JCHTOOLS_XBERG_INFERENCE_DIR")
     if override and Path(override).is_absolute():
-        inference_dir = Path(override)
+        return Path(override)
+    inference_root = root / INFERENCE_ROOT_RELPATH
+    tag_dirs = [entry for entry in inference_root.glob("*") if entry.is_dir()] if inference_root.is_dir() else []
+    if len(tag_dirs) == 1:
+        return tag_dirs[0]
+    if not tag_dirs:
+        missing.append(f"推理组件未安装：{inference_root}（GUI「初始化可选组件」下载）")
     else:
-        inference_root = root / INFERENCE_ROOT_RELPATH
-        tag_dirs = [entry for entry in inference_root.glob("*") if entry.is_dir()] if inference_root.is_dir() else []
-        if len(tag_dirs) == 1:
-            inference_dir = tag_dirs[0]
-        elif not tag_dirs:
-            missing.append(f"推理组件未安装：{inference_root}（GUI「初始化可选组件」下载）")
-        else:
-            names = "、".join(sorted(entry.name for entry in tag_dirs))
-            missing.append(f"推理组件目录存在多个版本，无法确定使用哪一个：{names}")
+        names = "、".join(sorted(entry.name for entry in tag_dirs))
+        missing.append(f"推理组件目录存在多个版本，无法确定使用哪一个：{names}")
+    return None
+
+
+def _check_inference_members(inference_dir: Path, missing: list[str]) -> None:
+    """在位校验：固定必需成员 + 清单声明的组件包成员；缺失项写入 missing."""
+    holes = [name for name in INFERENCE_REQUIRED if not (inference_dir / name).is_file()]
+    if holes:
+        shown = "、".join(holes[:3])
+        missing.append(f"推理组件不完整（缺 {len(holes)} 个，如 {shown}；组件目录 {inference_dir}）")
+        return
+    manifest_members = _manifest_model_paths()
+    if not manifest_members:
+        missing.append("推理组件：无法解析 resources/markdown-assets.json 的组件包成员，安装面未知")
+        return
+    member_holes = [name for name in manifest_members if not (inference_dir / name).is_file()]
+    if member_holes:
+        shown = "、".join(member_holes[:3])
+        missing.append(f"推理组件清单成员缺失（{len(member_holes)} 个，如 {shown}；组件目录 {inference_dir}）")
+
+
+def probe_assets() -> AssetProbe:
+    """只读核对：已保存的 Xberg 指针、xberg.exe 与推理组件是否在场."""
+    missing: list[str] = []
+    root = _asset_root()
+    if root is None:
+        return AssetProbe(None, None, None, None, ["缺少 LOCALAPPDATA，无法定位资产目录"])
+    runtime_dir = _probe_runtime_dir(root, missing)
+    xberg_exe = (runtime_dir / "xberg.exe") if runtime_dir is not None else None
+    if xberg_exe is not None and not xberg_exe.is_file():
+        xberg_exe = None
+    inference_dir = _resolve_inference_dir(root, missing)
     if inference_dir is not None:
-        holes = [name for name in INFERENCE_REQUIRED if not (inference_dir / name).is_file()]
-        if holes:
-            shown = "、".join(holes[:3])
-            missing.append(f"推理组件不完整（缺 {len(holes)} 个，如 {shown}；组件目录 {inference_dir}）")
-        else:
-            manifest_members = _manifest_model_paths()
-            if not manifest_members:
-                missing.append("推理组件：无法解析 resources/markdown-assets.json 的组件包成员，安装面未知")
-            else:
-                member_holes = [name for name in manifest_members if not (inference_dir / name).is_file()]
-                if member_holes:
-                    shown = "、".join(member_holes[:3])
-                    missing.append(
-                        f"推理组件清单成员缺失（{len(member_holes)} 个，如 {shown}；组件目录 {inference_dir}）"
-                    )
+        _check_inference_members(inference_dir, missing)
     return AssetProbe(root, runtime_dir, xberg_exe, inference_dir, missing)
 
 
