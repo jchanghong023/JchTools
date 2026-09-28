@@ -31,20 +31,20 @@ struct AssetManifest {
 }
 
 #[derive(Debug, Deserialize)]
-struct InferenceManifest {
-    tag: String,
-    url: String,
-    size_bytes: u64,
-    sha256: String,
-    members: Vec<InferenceMember>,
+pub(crate) struct InferenceManifest {
+    pub(crate) tag: String,
+    pub(crate) url: String,
+    pub(crate) size_bytes: u64,
+    pub(crate) sha256: String,
+    pub(crate) members: Vec<InferenceMember>,
 }
 
 #[derive(Debug, Deserialize)]
-struct InferenceMember {
-    path: String,
-    install_path: String,
-    size_bytes: u64,
-    sha256: String,
+pub(crate) struct InferenceMember {
+    pub(crate) path: String,
+    pub(crate) install_path: String,
+    pub(crate) size_bytes: u64,
+    pub(crate) sha256: String,
 }
 
 #[derive(Debug, Deserialize)]
@@ -151,7 +151,7 @@ pub fn runtime_dir() -> Result<PathBuf, String> {
 }
 
 /// Xberg 推理组件安装根：`<资产根>/xberg-inference/`（每个发布版本一个 tag
-/// 子目录）。与截图 OCR 共享同一安装（O-03 允许的只读复用）。
+/// 子目录）。与截图 OCR 各自独立安装（O-03：互不覆盖，只读复用同一发布源）。
 #[must_use]
 pub fn xberg_inference_root() -> PathBuf {
     asset_root().join("xberg-inference")
@@ -207,7 +207,18 @@ pub(crate) fn resolve_component_with_tag(
                 ))
             }
         }
-        (_, _) => Err("推理组件目录存在多个版本，无法确定使用哪一个；请只保留一个版本目录".into()),
+        // 多目录 + 有清单 tag：优先选中清单 tag 目录（一次瞬时清理失败留下的
+        // 旧版本目录不应让组件不可用；下次初始化会再尝试清理）。
+        (_, Some(tag)) => match versions
+            .iter()
+            .position(|path| path.file_name().and_then(|name| name.to_str()) == Some(tag))
+        {
+            Some(index) => Ok(versions.swap_remove(index)),
+            None => Err(format!(
+                "推理组件目录存在多个版本且无清单要求的 {tag}；请重新初始化以更新组件"
+            )),
+        },
+        (_, None) => Err("推理组件目录存在多个版本，无法确定使用哪一个；请只保留一个版本目录".into()),
     }
 }
 
@@ -343,7 +354,7 @@ fn initialize_staged(
 
 /// 单个资产的下载接缝：生产实现走固定来源的 HTTP 下载（复用截图 OCR 侧的
 /// 流式下载器），测试注入本地供给或失败脚本（T-05/T-21 语义）。
-trait AssetDownloader {
+pub(crate) trait AssetDownloader {
     fn download(
         &mut self,
         url: &str,
@@ -386,7 +397,7 @@ impl AssetDownloader for NetworkDownloader {
 /// 完成并二次校验（归档摘要 + 每成员摘要），全部通过后整目录原子落位到
 /// `xberg-inference/<tag>/`，随后移除其他版本目录（不混用版本）。取消或
 /// 失败不会触碰已验证的安装。
-fn install_inference_pack(
+pub(crate) fn install_inference_pack(
     inference: &InferenceManifest,
     staging: &Path,
     root: &Path,
@@ -396,6 +407,11 @@ fn install_inference_pack(
 ) -> Result<(), String> {
     if inference_ready(inference, root).is_ok() {
         progress("复用已校验的推理组件".to_string());
+        // 旧版本目录的清理是尽力而为：清单 tag 目录可正常解析与使用，清理失败
+        // （如目录被占用）只提示，不让「已可用」的安装报失败。
+        if let Err(error) = prune_old_inference_tags(root, &inference.tag) {
+            progress(format!("警告：{error}"));
+        }
         return Ok(());
     }
     ensure_not_cancelled(cancel)?;
@@ -446,12 +462,16 @@ fn install_inference_pack(
         &staged_component,
         &root.join("xberg-inference").join(&inference.tag),
     )?;
-    prune_old_inference_tags(root, &inference.tag)?;
+    // 落位成功后清理旧版本目录：尽力而为（清单 tag 目录已可解析使用，清理失败
+    // 只提示，不把成功的安装报成失败）。
+    if let Err(error) = prune_old_inference_tags(root, &inference.tag) {
+        progress(format!("警告：{error}"));
+    }
     Ok(())
 }
 
 /// 清单接入后推理组件的成员级摘要校验（XB-09）。
-fn inference_ready(inference: &InferenceManifest, root: &Path) -> Result<(), String> {
+pub(crate) fn inference_ready(inference: &InferenceManifest, root: &Path) -> Result<(), String> {
     let component = root.join("xberg-inference").join(&inference.tag);
     for member in &inference.members {
         verify_file(
@@ -1048,5 +1068,25 @@ mod tests {
         resolve_component_with_tag(&base, Some("vinstalled"), "未配置")
             .expect("一致时应正常解析");
         resolve_component_with_tag(&base, None, "未配置").expect("无清单 tag 时唯一目录可解析");
+    }
+
+    // 覆盖 XB-09 自愈：多目录（如一次清理失败残留旧版本）时优先选中清单 tag
+    // 目录，不阻塞使用；无清单 tag 目录才报错。
+    #[test]
+    fn resolve_component_multiple_dirs_prefers_manifest_tag() {
+        let root = tempfile::tempdir().expect("创建测试根");
+        let base = root.path().join("xberg-inference");
+        for tag in ["vnew", "vold"] {
+            fs::create_dir_all(base.join(tag)).expect("预置版本目录");
+        }
+        let resolved = resolve_component_with_tag(&base, Some("vnew"), "未配置")
+            .expect("应选中清单 tag 目录");
+        assert_eq!(
+            resolved.file_name().and_then(|name| name.to_str()),
+            Some("vnew")
+        );
+        let error = resolve_component_with_tag(&base, Some("vabsent"), "未配置")
+            .expect_err("清单 tag 不在场必须报错");
+        assert!(error.contains("vabsent"), "错误应指明缺失 tag：{error}");
     }
 }

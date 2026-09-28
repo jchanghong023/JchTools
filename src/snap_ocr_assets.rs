@@ -379,17 +379,42 @@ fn initialize_staged(
         progress(format!("下载资产 {}/{}：{}", index + 1, total, asset.id));
         install_asset(asset, staging, root, cancel, downloader, progress)?;
     }
-    // 推理组件包（XB-10）：与普通归档资产同一安装路径；成功安装清单 tag 后
-    // 移除其他版本目录（XB-09 不混用版本）。
+    // 推理组件包（XB-10）：复用 markdown 侧的整目录原子安装路径（staging 组装 +
+    // 成员级复核 + 目录级原子落位 + 旧版本清理），失败不留部分安装。
     if let Some(pack) = &manifest.xberg_inference {
         ensure_not_cancelled(cancel)?;
-        if asset_ready(&pack.asset, root).is_ok() {
-            progress("复用已校验的推理组件".to_string());
-        } else {
+        let inference = crate::markdown_assets::InferenceManifest {
+            tag: pack.tag.clone(),
+            url: pack.asset.url.clone(),
+            size_bytes: pack.asset.size_bytes,
+            sha256: pack.asset.sha256.clone(),
+            members: pack
+                .asset
+                .members
+                .iter()
+                .map(|member| crate::markdown_assets::InferenceMember {
+                    path: member.path.clone(),
+                    install_path: member.install_path.clone(),
+                    size_bytes: member.size_bytes,
+                    sha256: member.sha256.clone(),
+                })
+                .collect(),
+        };
+        if crate::markdown_assets::inference_ready(&inference, root).is_err() {
             progress(format!("下载资产 {}/{}：{}", total + 1, total + 1, pack.asset.id));
-            install_asset(&pack.asset, staging, root, cancel, downloader, progress)?;
-            crate::markdown_assets::prune_old_inference_tags(root, &pack.tag)?;
         }
+        let mut adapter = PackDownloaderAdapter(downloader);
+        crate::markdown_assets::install_inference_pack(
+            &inference,
+            staging,
+            root,
+            cancel,
+            &mut adapter,
+            progress,
+        )?;
+        // XB-09：写入清单 tag 标记；截图服务进程（无法读主程序清单）按同口径
+        // 校验组件目录版本。
+        write_expected_tag(root, &pack.tag)?;
     }
     let worker = manifest
         .workers
@@ -496,6 +521,36 @@ fn install_asset(
         }
         other => Err(format!("不支持的资产归档格式：{other}")),
     }
+}
+
+/// 把 snap 侧下载接缝适配为共享安装路径的下载器（同一签名，零行为差异）。
+struct PackDownloaderAdapter<'a>(&'a mut dyn SnapDownloader);
+
+impl crate::markdown_assets::AssetDownloader for PackDownloaderAdapter<'_> {
+    fn download(
+        &mut self,
+        url: &str,
+        destination: &Path,
+        expected_size: u64,
+        expected_sha256: &str,
+        cancel: &AtomicBool,
+        progress: &mut dyn FnMut(String),
+    ) -> Result<(), String> {
+        self.0
+            .download(url, destination, expected_size, expected_sha256, cancel, progress)
+    }
+}
+
+/// 写入推理组件的清单 tag 标记（`xberg-inference/expected-tag.txt`），供截图
+/// 服务进程做与主程序同口径的版本校验（XB-09）。
+fn write_expected_tag(root: &Path, tag: &str) -> Result<(), String> {
+    let base = root.join("xberg-inference");
+    fs::create_dir_all(&base).map_err(|error| format!("创建推理组件根目录失败：{error}"))?;
+    let marker = base.join("expected-tag.txt");
+    let temporary = base.join(format!(".expected-tag-{}", Uuid::new_v4().simple()));
+    fs::write(&temporary, format!("{tag}\n"))
+        .map_err(|error| format!("写入组件版本标记失败：{error}"))?;
+    atomic_replace_file(&temporary, &marker)
 }
 
 fn load_manifest() -> Result<SnapAssetManifest, String> {

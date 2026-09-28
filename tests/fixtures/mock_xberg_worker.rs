@@ -11,6 +11,8 @@
 //! - `exit-after-first`：应答第一条请求后立即以退出码 3 退出（模拟进程崩溃）。
 //! - `slow`：每条请求先睡 30 秒再响应（供单文件超时测试杀进程）。
 //! - `garbage`：对每条请求回一行非法 JSON（模拟协议破坏）。
+//! - `oversize`：第一条请求回一行超过 8 MiB 捕获上限的响应（模拟超长转录），
+//!   之后恢复正常——用于验证客户端按「单文件失败」处理且进程继续复用。
 //!
 //! stdin EOF 后正常退出（退出码 0）。若环境变量 `MOCK_XBERG_WORKER_EOF_MARKER`
 //! 指向可写路径，EOF 时写出一个标记文件，供测试证明「子进程收到 EOF 并自行退出」
@@ -45,6 +47,13 @@ fn main() {
                 r#"{{"id":{id},"ok":false,"error":"mock decode failure"}}"#
             ),
             "garbage" => "NOT-JSON-LINE".to_string(),
+            "oversize" if first => {
+                // 单行超过客户端的 8 MiB 捕获上限；仍是合法 JSON（超长 markdown）。
+                let padding = "x".repeat(8 * 1024 * 1024 + 64);
+                format!(
+                    r#"{{"id":{id},"ok":true,"markdown":"{padding}","segments":[],"duration_ms":1,"has_audio":true}}"#
+                )
+            }
             "slow" => {
                 std::thread::sleep(Duration::from_secs(30));
                 format!(

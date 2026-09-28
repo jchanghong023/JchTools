@@ -158,7 +158,7 @@ foreach ($name in @('7z.exe','7z.dll')) {
 }
 if (-not (Test-Path -LiteralPath (Join-Path $folder 'resources\7zip\manifest.json'))) {throw 'Engine manifest is missing from the package.'}
 # The main delivery carries only the small manifest, never the optional OCR payload.
-foreach ($name in @('snap-ocr-worker.exe','onnxruntime.dll','inference.onnx','NotoSansMonoCJKsc-Regular.otf','xberg.exe','det.onnx','rec.onnx','model.int8.onnx','silero_vad.onnx','tokens.txt','sherpa-onnx-c-api.dll','avcodec-63.dll')) {
+foreach ($name in @('snap-ocr-worker.exe','onnxruntime.dll','inference.onnx','NotoSansMonoCJKsc-Regular.otf','xberg.exe','det.onnx','rec.onnx','model.int8.onnx','silero_vad.onnx','tokens.txt','sherpa-onnx-c-api.dll','sherpa-onnx-cxx-api.dll','onnxruntime_providers_shared.dll','avcodec-63.dll','avformat-63.dll','avutil-61.dll','swresample-7.dll')) {
     if (@(Get-ChildItem -LiteralPath $folder -Recurse -File -Filter $name).Count -ne 0) {
         throw "Optional OCR payload leaked into the main installer/ZIP staging directory: $name"
     }

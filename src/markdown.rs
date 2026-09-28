@@ -719,6 +719,8 @@ struct MediaWorker {
     responses: Receiver<String>,
     reader: Option<thread::JoinHandle<()>>,
     stderr_reader: Option<thread::JoinHandle<crate::process::ReadCapture>>,
+    /// 当前在途请求 id（读线程用于超限响应的合成错误回显）。
+    pending_id: std::sync::Arc<std::sync::atomic::AtomicU64>,
     next_id: u64,
 }
 
@@ -774,22 +776,33 @@ impl MediaWorker {
             .stderr
             .take()
             .ok_or_else(|| "无法读取转录诊断".to_string())?;
-        // stdout 按行解析响应：后台线程持续排空，防止子进程写管道阻塞；带总
-        // 字节上限，失控输出按进程异常处理，不无限占用内存。
+        // stdout 按行解析响应：后台线程持续排空，防止子进程写管道阻塞。上限按
+        // 「单行（= 单次响应）」计：常驻进程的批次累计流量会随文件数自然超过任何
+        // 总量上限，误杀健康进程；单个响应超限按该文件失败处理（合成错误行回显
+        // 当前请求 id），协议行边界仍对齐，进程与批次继续。读线程经共享原子获知
+        // 当前请求 id（严格串行协议下响应只属于最新请求）。
         let (sender, responses) = mpsc::channel::<String>();
+        let pending_id = std::sync::Arc::new(std::sync::atomic::AtomicU64::new(0));
+        let reader_pending = std::sync::Arc::clone(&pending_id);
         let reader = thread::spawn(move || {
             let mut lines = BufReader::new(stdout);
             let mut line = String::new();
-            let mut total = 0_usize;
             loop {
                 line.clear();
                 match lines.read_line(&mut line) {
                     Ok(0) | Err(_) => break,
                     Ok(read) => {
-                        total += read;
-                        if total > crate::process::MAX_CAPTURE_BYTES
-                            || sender.send(line.clone()).is_err()
-                        {
+                        if read > crate::process::MAX_CAPTURE_BYTES {
+                            let id = reader_pending.load(std::sync::atomic::Ordering::Acquire);
+                            let oversize = format!(
+                                "{{\"id\":{id},\"ok\":false,\"error\":\"单次响应超过捕获上限（{read} 字节）\"}}"
+                            );
+                            if sender.send(oversize).is_err() {
+                                break;
+                            }
+                            continue;
+                        }
+                        if sender.send(line.clone()).is_err() {
                             break;
                         }
                     }
@@ -808,6 +821,7 @@ impl MediaWorker {
             responses,
             reader: Some(reader),
             stderr_reader: Some(stderr_reader),
+            pending_id,
             next_id: 1,
         })
     }
@@ -820,6 +834,8 @@ impl MediaWorker {
     ) -> Result<String, TranscribeFailure> {
         let id = self.next_id;
         self.next_id += 1;
+        self.pending_id
+            .store(id, std::sync::atomic::Ordering::Release);
         // T-21：只向本地子进程传本地媒体文件路径，不落盘、不联网。
         let request = serde_json::json!({
             "id": id,
@@ -1571,6 +1587,36 @@ mod tests {
             "错误应说明协议异常：{error}"
         );
         assert!(slot.is_none(), "协议破坏后必须弃用该进程");
+    }
+
+    // 覆盖 T-24：单次响应超过捕获上限按「该文件失败」处理——进程与协议行边界
+    // 仍完好，不得按进程异常终结（批内继续复用，不重启、不重载模型）。
+    #[test]
+    fn media_worker_oversize_response_fails_file_keeps_worker() {
+        let mut slot = None;
+        let spawns = std::rc::Rc::new(std::cell::Cell::new(0));
+        let deadline = Deadline::new(Duration::from_secs(120));
+        let error = transcribe_with_slot(
+            &mut slot,
+            Path::new("C:/m/huge.mp4"),
+            &deadline,
+            mock_spawner("oversize", spawns.clone()),
+        )
+        .expect_err("超限响应不得当成功");
+        assert!(
+            error.contains("媒体转换失败") && error.contains("捕获上限"),
+            "错误应按单文件失败并说明上限：{error}"
+        );
+        assert!(slot.is_some(), "超限响应不得终结健康进程");
+        let next = transcribe_with_slot(
+            &mut slot,
+            Path::new("C:/m/next.mp4"),
+            &deadline,
+            mock_spawner("oversize", spawns.clone()),
+        )
+        .expect("下一文件应复用进程并成功");
+        assert_eq!(next, "MOCK MARKDOWN 2");
+        assert_eq!(spawns.get(), 1, "超限响应不得触发重启");
     }
 
     // 覆盖 T-22/T-23：批结束（或用户停止）后丢弃 slot 时必须优雅关闭——关闭

@@ -236,9 +236,12 @@ fn root() -> Result<PathBuf, String> {
         .ok_or_else(|| "截图服务资产根目录无效".to_string())
 }
 
-/// Xberg 推理组件的安装位置：`<资产根>/xberg-inference/<tag>/`。tag 由后续
-/// 发布清单锁定；清单接入前按「唯一子目录」解析。开发期（仅 debug 构建）可用
-/// `JCHTOOLS_XBERG_INFERENCE_DIR` 覆盖到本地组件树，与 `root()` 的覆盖同口径。
+/// Xberg 推理组件的安装位置：`<资产根>/xberg-inference/<tag>/`。主程序安装或
+/// 复用组件时会写入 `<资产根>/xberg-inference/expected-tag.txt`（内容为清单
+/// tag，XB-09）；本服务读取该标记做同口径校验：目录名必须与之一致，多目录时
+/// 优先选中清单 tag 目录。标记缺失（旧安装/开发树）按「唯一子目录」解析。
+/// 开发期（仅 debug 构建）可用 `JCHTOOLS_XBERG_INFERENCE_DIR` 覆盖到本地组件
+/// 树，与 `root()` 的覆盖同口径。
 fn xberg_component_dir(root: &Path) -> Result<PathBuf, LoadFailure> {
     const NOT_CONFIGURED: &str = "推理组件未配置：请在主界面初始化截图 OCR，或（开发期）设置 \
                                   JCHTOOLS_XBERG_INFERENCE_DIR 指向 Xberg 组件目录";
@@ -251,6 +254,10 @@ fn xberg_component_dir(root: &Path) -> Result<PathBuf, LoadFailure> {
         }
     }
     let base = root.join("xberg-inference");
+    let expected_tag = fs::read_to_string(base.join("expected-tag.txt"))
+        .ok()
+        .map(|content| content.trim().to_string())
+        .filter(|tag| !tag.is_empty());
     let Ok(entries) = fs::read_dir(&base) else {
         return Err(LoadFailure::NotConfigured(NOT_CONFIGURED.to_owned()));
     };
@@ -260,10 +267,31 @@ fn xberg_component_dir(root: &Path) -> Result<PathBuf, LoadFailure> {
             versions.push(entry.path());
         }
     }
-    match versions.len() {
-        1 => Ok(versions.remove(0)),
-        0 => Err(LoadFailure::NotConfigured(NOT_CONFIGURED.to_owned())),
-        _ => Err(LoadFailure::Failed(
+    match (versions.len(), expected_tag.as_deref()) {
+        (0, _) => Err(LoadFailure::NotConfigured(NOT_CONFIGURED.to_owned())),
+        (1, None) => Ok(versions.remove(0)),
+        (1, Some(tag)) => {
+            let component = versions.remove(0);
+            if component.file_name().and_then(|name| name.to_str()) == Some(tag) {
+                Ok(component)
+            } else {
+                Err(LoadFailure::Failed(format!(
+                    "推理组件版本与清单不一致（安装 {}，清单要求 {tag}）；请重新初始化截图 OCR 以更新组件",
+                    component.display()
+                )))
+            }
+        }
+        // 多目录：优先清单 tag 目录（清理失败的旧版本不阻塞使用），否则失败。
+        (_, Some(tag)) => match versions
+            .iter()
+            .position(|path| path.file_name().and_then(|name| name.to_str()) == Some(tag))
+        {
+            Some(index) => Ok(versions.swap_remove(index)),
+            None => Err(LoadFailure::Failed(format!(
+                "推理组件目录存在多个版本且无清单要求的 {tag}；请重新初始化截图 OCR 以更新组件"
+            ))),
+        },
+        (_, None) => Err(LoadFailure::Failed(
             "推理组件目录存在多个版本，无法确定使用哪一个；请只保留一个版本目录".into(),
         )),
     }
