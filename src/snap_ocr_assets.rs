@@ -34,6 +34,19 @@ struct SnapAssetManifest {
     schema_version: u32,
     assets: Vec<SnapAsset>,
     workers: Vec<SnapWorker>,
+    /// Xberg 推理组件包（XB-10：xberg.exe、O-07 截图模型集与 onnxruntime，
+    /// 来源为固定发布 zip）。清单未接入该条目时为 None，组件缺失时如实报告。
+    #[serde(default)]
+    xberg_inference: Option<SnapInferencePack>,
+}
+
+/// 推理组件包条目：tag 决定安装目录 `xberg-inference/<tag>/`，其余字段与
+/// 普通归档资产同构，复用同一安装与校验路径。
+#[derive(Debug, Deserialize)]
+struct SnapInferencePack {
+    tag: String,
+    #[serde(flatten)]
+    asset: SnapAsset,
 }
 
 #[derive(Debug, Deserialize)]
@@ -181,7 +194,13 @@ pub fn readiness() -> Result<(), String> {
     if worker_ready(worker, &root).is_err() {
         return Err("截图 OCR 工作进程未安装或校验失败".to_string());
     }
-    xberg_inference_ready(&root).map(|_| ())
+    xberg_inference_ready(&root)?;
+    // 清单接入推理组件包后做成员级摘要校验（XB-09；未接入时在位校验已覆盖）。
+    if let Some(pack) = &manifest.xberg_inference {
+        asset_ready(&pack.asset, &root)
+            .map_err(|error| format!("推理组件包校验失败：{error}"))?;
+    }
+    Ok(())
 }
 
 /// Xberg 推理组件安装根：`<资产根>/xberg-inference/`（每个发布版本一个 tag 子目录）。
@@ -191,7 +210,8 @@ pub fn xberg_inference_root() -> PathBuf {
 }
 
 /// 组件目录解析：开发期（仅 debug 构建）可用 `JCHTOOLS_XBERG_INFERENCE_DIR`
-/// 覆盖到本地组件树；否则取安装根下唯一的 tag 子目录。
+/// 覆盖到本地组件树；否则按可选的清单 tag 解析唯一子目录（XB-09：目录名必须
+/// 与清单一致，不一致明确报错并指引更新；未接入时沿用「唯一子目录」启发式）。
 fn resolve_xberg_component(root: &Path) -> Result<PathBuf, String> {
     if cfg!(debug_assertions) {
         if let Some(path) = std::env::var_os("JCHTOOLS_XBERG_INFERENCE_DIR")
@@ -201,26 +221,32 @@ fn resolve_xberg_component(root: &Path) -> Result<PathBuf, String> {
             return Ok(path);
         }
     }
-    let base = root.join("xberg-inference");
-    let entries = fs::read_dir(&base).map_err(|_| xberg_not_configured())?;
-    let mut versions = Vec::new();
-    for entry in entries.flatten() {
-        if entry.path().is_dir() {
-            versions.push(entry.path());
-        }
-    }
-    match versions.len() {
-        1 => Ok(versions.remove(0)),
-        0 => Err(xberg_not_configured()),
-        _ => Err("推理组件目录存在多个版本，无法确定使用哪一个；请只保留一个版本目录".into()),
-    }
+    let expected_tag = manifest_inference_tag();
+    crate::markdown_assets::resolve_component_with_tag(
+        &root.join("xberg-inference"),
+        expected_tag.as_deref(),
+        &xberg_not_configured(),
+    )
+}
+
+/// 清单接入推理组件包时返回其 tag（读取失败按未接入处理）。
+fn manifest_inference_tag() -> Option<String> {
+    load_manifest()
+        .ok()
+        .and_then(|manifest| manifest.xberg_inference.map(|pack| pack.tag))
 }
 
 fn xberg_not_configured() -> String {
-    "推理组件未配置：Xberg 推理组件（xberg.exe、截图模型与 onnxruntime）尚未安装；\
+    if manifest_inference_tag().is_some() {
+        "推理组件未配置：Xberg 推理组件（xberg.exe、截图模型与 onnxruntime）尚未安装；\
+     请在截图 OCR 功能页重新初始化以下载推理组件包"
+            .into()
+    } else {
+        "推理组件未配置：Xberg 推理组件（xberg.exe、截图模型与 onnxruntime）尚未安装；\
      其下载清单条目待发布版本落定后接入，开发期可设置 JCHTOOLS_XBERG_INFERENCE_DIR \
      指向本地组件目录"
-        .into()
+            .into()
+    }
 }
 
 /// Xberg 推理组件的在位校验（存在性；摘要校验待清单接入后补齐，O-09 的
@@ -353,6 +379,18 @@ fn initialize_staged(
         progress(format!("下载资产 {}/{}：{}", index + 1, total, asset.id));
         install_asset(asset, staging, root, cancel, downloader, progress)?;
     }
+    // 推理组件包（XB-10）：与普通归档资产同一安装路径；成功安装清单 tag 后
+    // 移除其他版本目录（XB-09 不混用版本）。
+    if let Some(pack) = &manifest.xberg_inference {
+        ensure_not_cancelled(cancel)?;
+        if asset_ready(&pack.asset, root).is_ok() {
+            progress("复用已校验的推理组件".to_string());
+        } else {
+            progress(format!("下载资产 {}/{}：{}", total + 1, total + 1, pack.asset.id));
+            install_asset(&pack.asset, staging, root, cancel, downloader, progress)?;
+            crate::markdown_assets::prune_old_inference_tags(root, &pack.tag)?;
+        }
+    }
     let worker = manifest
         .workers
         .first()
@@ -371,8 +409,8 @@ fn initialize_staged(
     } else {
         progress(format!(
             "下载资产 {}/{}：{}",
-            total + 1,
-            total + 1,
+            total + 2,
+            total + 2,
             worker.id
         ));
         let asset = SnapAsset {
@@ -504,6 +542,32 @@ fn load_manifest() -> Result<SnapAssetManifest, String> {
         }
         validate_relative_path(&worker.install_path)?;
     }
+    if let Some(pack) = &manifest.xberg_inference {
+        let tag_ok = !pack.tag.is_empty()
+            && !pack.tag.contains('/')
+            && !pack.tag.contains('\\')
+            && !pack.tag.contains("..")
+            && !pack.tag.contains(':');
+        if !tag_ok {
+            return Err("推理组件包 tag 不合法".to_string());
+        }
+        validate_asset(&pack.asset)?;
+        if pack.asset.archive_type != "zip" || pack.asset.members.is_empty() {
+            return Err(format!(
+                "推理组件包 {} 必须是带成员清单的 zip 归档",
+                pack.asset.id
+            ));
+        }
+        for member in &pack.asset.members {
+            let under_tag = member.install_path.replace('\\', "/");
+            if !under_tag.starts_with(&format!("xberg-inference/{}/", pack.tag)) {
+                return Err(format!(
+                    "推理组件包 {} 成员 {} 必须安装在 xberg-inference/{}/ 之下",
+                    pack.asset.id, member.install_path, pack.tag
+                ));
+            }
+        }
+    }
     Ok(manifest)
 }
 
@@ -622,7 +686,7 @@ fn sha256_file(path: &Path) -> io::Result<String> {
     Ok(hex::encode(digest.finalize()))
 }
 
-fn download_asset(
+pub(crate) fn download_asset(
     url: &str,
     destination: &Path,
     expected_size: u64,
@@ -714,7 +778,7 @@ fn download_stream(
     Ok(())
 }
 
-fn extract_zip_safely(
+pub(crate) fn extract_zip_safely(
     archive: &Path,
     destination: &Path,
     cancel: &AtomicBool,

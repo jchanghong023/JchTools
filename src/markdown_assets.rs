@@ -1,22 +1,19 @@
-//! 转 Markdown 的可选本地资产初始化。
+//! 转 Markdown 的本地资产状态与校验。
 //!
-//! 该模块校验用户选择的 Xberg 运行时，并管理用户主动初始化后才需要的媒体资产。
-//! 资产清单编译进主程序，但二进制、模型和下载缓存始终落在独立的
-//! JchTools 用户数据目录中，不依赖旧 all2markdown 目录。
+//! 文档转换继续校验用户选择的 Xberg 运行目录（固定版本清单编译进主程序）。
+//! 媒体转录（T-19）的模型与推理由 Xberg 推理组件提供：清单接入 `xberg_inference`
+//! 条目后由初始化流程下载、按归档与成员 SHA-256 校验并安装到
+//! `xberg-inference/<tag>/`（XB-09/XB-10）；条目未接入时缺失组件如实报告未配置。
+//! 二进制和模型始终不进主程序包。
 
-use bzip2::read::BzDecoder;
 use serde::Deserialize;
 use sha2::{Digest, Sha256};
-use std::collections::HashSet;
 use std::fmt::Write as FmtWrite;
 use std::fs::{self, File};
-use std::io::{self, Read, Write};
+use std::io::{self, Read};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::time::Duration;
-use tar::Archive;
 use uuid::Uuid;
-use zip::ZipArchive;
 
 const MANIFEST: &str = include_str!("../resources/markdown-assets.json");
 const DATA_DIRECTORY: &str = "markdown-assets";
@@ -27,8 +24,27 @@ const RUNTIME_SELECTION_FILE: &str = "xberg-runtime-path.txt";
 struct AssetManifest {
     schema_version: u32,
     xberg: XbergManifest,
-    media_models: Vec<MediaModel>,
-    future_workers: Vec<FutureWorker>,
+    /// Xberg 推理组件包（XB-10 双轨：媒体转录所需的 xberg.exe、模型与原生
+    /// 运行库，来源为固定发布 zip）。清单未接入该条目时为 None，组件缺失
+    /// 时如实报告未配置。
+    xberg_inference: Option<InferenceManifest>,
+}
+
+#[derive(Debug, Deserialize)]
+struct InferenceManifest {
+    tag: String,
+    url: String,
+    size_bytes: u64,
+    sha256: String,
+    members: Vec<InferenceMember>,
+}
+
+#[derive(Debug, Deserialize)]
+struct InferenceMember {
+    path: String,
+    install_path: String,
+    size_bytes: u64,
+    sha256: String,
 }
 
 #[derive(Debug, Deserialize)]
@@ -39,16 +55,6 @@ struct XbergManifest {
     archive_sha256: String,
     members: Vec<AssetFile>,
     licenses: Vec<LicenseEntry>,
-}
-
-#[derive(Debug, Deserialize)]
-struct MediaModel {
-    id: String,
-    url: String,
-    relative_path: String,
-    size_bytes: u64,
-    sha256: String,
-    license: LicenseEntry,
 }
 
 #[derive(Debug, Deserialize)]
@@ -63,35 +69,6 @@ struct LicenseEntry {
     component: String,
     license: String,
     source: String,
-}
-
-#[derive(Debug, Deserialize)]
-struct FutureWorker {
-    id: String,
-    status: String,
-    blocking_reason: String,
-    assets: Vec<WorkerAsset>,
-}
-
-#[derive(Debug, Deserialize)]
-struct WorkerAsset {
-    id: String,
-    url: String,
-    size_bytes: u64,
-    sha256: String,
-    archive_type: String,
-    target_root: String,
-    install_path: Option<String>,
-    members: Vec<WorkerMember>,
-    license: LicenseEntry,
-}
-
-#[derive(Debug, Deserialize)]
-struct WorkerMember {
-    path: String,
-    install_path: String,
-    size_bytes: u64,
-    sha256: String,
 }
 
 /// 读取本功能独立保存的 Xberg 运行目录。
@@ -173,38 +150,199 @@ pub fn runtime_dir() -> Result<PathBuf, String> {
     load_saved_runtime_dir()?.ok_or_else(|| "尚未选择 Xberg 运行目录".to_string())
 }
 
-/// 返回可选媒体模型的独立安装目录。
-pub fn media_models_dir() -> PathBuf {
-    asset_root()
-        .join("media")
-        .join("sherpa-onnx")
-        .join("v1.13.6")
+/// Xberg 推理组件安装根：`<资产根>/xberg-inference/`（每个发布版本一个 tag
+/// 子目录）。与截图 OCR 共享同一安装（O-03 允许的只读复用）。
+#[must_use]
+pub fn xberg_inference_root() -> PathBuf {
+    asset_root().join("xberg-inference")
 }
 
-/// 返回可选媒体工作进程的固定路径。
-pub fn media_worker_path() -> PathBuf {
-    asset_root()
-        .join("worker")
-        .join("v0.1.0")
-        .join("markdown-media-worker.exe")
+/// 组件目录解析：开发期（仅 debug 构建）可用 `JCHTOOLS_XBERG_INFERENCE_DIR`
+/// 覆盖到本地组件树；否则取安装根下的 tag 子目录。清单已接入推理组件包时，
+/// 目录名必须与清单 tag 一致（XB-09：不混用其他版本、不因同名文件认定兼容），
+/// 不一致明确报错并指引更新；清单未接入时沿用「唯一子目录」启发式。
+/// 与 `snap_ocr_assets` 的同名解析规则保持一致（同一安装只能有一个版本）。
+fn resolve_xberg_component(root: &Path) -> Result<PathBuf, String> {
+    if cfg!(debug_assertions) {
+        if let Some(path) = std::env::var_os("JCHTOOLS_XBERG_INFERENCE_DIR")
+            .map(PathBuf::from)
+            .filter(|p| p.is_absolute())
+        {
+            return Ok(path);
+        }
+    }
+    let expected_tag = load_manifest()
+        .ok()
+        .and_then(|manifest| manifest.xberg_inference.map(|inference| inference.tag));
+    resolve_component_with_tag(&root.join("xberg-inference"), expected_tag.as_deref(), &xberg_media_not_configured())
+}
+
+/// 按可选的清单 tag 解析唯一组件目录（XB-09）：
+/// - 无 tag（清单未接入）：唯一子目录即组件目录；
+/// - 有 tag：目录名必须与清单一致，不一致明确报错并指引更新；
+/// - 零个或多个候选都视为无法确定，不静默选择。
+pub(crate) fn resolve_component_with_tag(
+    base: &Path,
+    expected_tag: Option<&str>,
+    missing_message: &str,
+) -> Result<PathBuf, String> {
+    let entries = fs::read_dir(base).map_err(|_| missing_message.to_string())?;
+    let mut versions = Vec::new();
+    for entry in entries.flatten() {
+        if entry.path().is_dir() {
+            versions.push(entry.path());
+        }
+    }
+    match (versions.len(), expected_tag) {
+        (0, _) => Err(missing_message.to_string()),
+        (1, None) => Ok(versions.remove(0)),
+        (1, Some(tag)) => {
+            let component = versions.remove(0);
+            if component.file_name().and_then(|name| name.to_str()) == Some(tag) {
+                Ok(component)
+            } else {
+                Err(format!(
+                    "推理组件版本与清单不一致（安装 {}，清单要求 {tag}）；请在对应功能页重新初始化以更新组件",
+                    component.display()
+                ))
+            }
+        }
+        (_, _) => Err("推理组件目录存在多个版本，无法确定使用哪一个；请只保留一个版本目录".into()),
+    }
+}
+
+fn xberg_media_not_configured() -> String {
+    match load_manifest().ok().and_then(|manifest| manifest.xberg_inference) {
+        Some(_) => "Xberg 推理组件未配置：媒体转录所需的 xberg.exe、SenseVoice/VAD 模型与 \
+     FFmpeg/sherpa-onnx 运行库尚未安装；请在转 Markdown 页重新初始化以下载推理组件包"
+            .into(),
+        None => "Xberg 推理组件未配置：媒体转录所需的 xberg.exe、SenseVoice/VAD 模型与 \
+     FFmpeg/sherpa-onnx 运行库尚未安装；其下载清单条目待 Xberg 发布 tag 落定后接入，\
+     开发期可设置 JCHTOOLS_XBERG_INFERENCE_DIR 指向本地组件目录"
+            .into(),
+    }
+}
+
+/// 媒体转录组件的在位校验（存在性；摘要级清单待 Xberg 发布 tag 落定后接入，
+/// 与截图 OCR 侧口径一致）：`xberg.exe` + SenseVoice/VAD 模型 + sherpa-onnx
+/// 四 DLL + FFmpeg 四 DLL。返回解析出的组件目录供转录进程注入环境变量。
+pub fn media_component_dir() -> Result<PathBuf, String> {
+    let component = resolve_xberg_component(&asset_root())?;
+    let required = [
+        component.join("xberg.exe"),
+        component
+            .join("models")
+            .join("sense_voice_zh_en_ja_ko_yue_2024_07_17")
+            .join("model.int8.onnx"),
+        component
+            .join("models")
+            .join("sense_voice_zh_en_ja_ko_yue_2024_07_17")
+            .join("tokens.txt"),
+        component.join("models").join("vad").join("silero_vad.onnx"),
+        component.join("sherpa-onnx").join("sherpa-onnx-c-api.dll"),
+        component
+            .join("sherpa-onnx")
+            .join("sherpa-onnx-cxx-api.dll"),
+        component.join("sherpa-onnx").join("onnxruntime.dll"),
+        component
+            .join("sherpa-onnx")
+            .join("onnxruntime_providers_shared.dll"),
+        component.join("ffmpeg").join("avutil-61.dll"),
+        component.join("ffmpeg").join("swresample-7.dll"),
+        component.join("ffmpeg").join("avcodec-63.dll"),
+        component.join("ffmpeg").join("avformat-63.dll"),
+    ];
+    for path in &required {
+        if !path.is_file() {
+            let relative = path.strip_prefix(&component).unwrap_or(path);
+            return Err(format!(
+                "推理组件不完整：缺少 {}（组件目录 {}）",
+                relative.display(),
+                component.display()
+            ));
+        }
+    }
+    Ok(component)
 }
 
 /// 只读检查所有已安装资产。该函数不会联网、创建目录或修改文件。
 pub fn readiness() -> Result<(), String> {
+    // 先校验内置清单本身：失效清单不得被当作可运行环境。
     let manifest = load_manifest()?;
     let runtime = runtime_dir()?;
     validate_runtime_dir(&runtime)?;
-    ensure_worker_ready(&manifest)?;
-    ensure_media_models_ready(&manifest)?;
     let notice = asset_root().join("licenses").join("THIRD_PARTY_NOTICES.md");
     if !notice.is_file() {
         return Err(format!("许可证 notice 不存在：{}", notice.display()));
     }
+    media_component_dir()?;
+    // 清单接入推理组件包后做成员级摘要校验（XB-09；未接入时在位校验已覆盖）。
+    if let Some(inference) = &manifest.xberg_inference {
+        inference_ready(inference, &asset_root())?;
+    }
     Ok(())
 }
 
-/// 单个资产的下载接缝：生产实现走固定来源的 HTTP 下载，测试注入本地供给或
-/// 失败脚本，用于验证「补缺下载」与「失败后重试不重下」语义（T-05）。
+/// 校验运行目录、写入许可证 notice，并按清单下载安装推理组件包（XB-10）。
+///
+/// 清单未接入推理组件包时不下载任何资产，组件缺失时返回明确错误并指引
+/// （不冒称就绪）。取消会删除本轮 staging 目录。
+pub fn initialize(cancel: &AtomicBool, mut progress: impl FnMut(String)) -> Result<(), String> {
+    if readiness().is_ok() {
+        progress("转 Markdown 组件已就绪".to_string());
+        return Ok(());
+    }
+    ensure_not_cancelled(cancel)?;
+    let manifest = load_manifest()?;
+    let root = asset_root();
+    fs::create_dir_all(&root).map_err(|error| format!("创建资产目录失败：{error}"))?;
+    let staging = root.join(format!(".staging-{}", Uuid::new_v4().simple()));
+    fs::create_dir_all(&staging).map_err(|error| format!("创建初始化临时目录失败：{error}"))?;
+    let mut downloader = NetworkDownloader;
+    let result = initialize_staged(
+        &manifest,
+        cancel,
+        &mut progress,
+        &staging,
+        &root,
+        &mut downloader,
+    );
+    if let Err(error) = fs::remove_dir_all(&staging) {
+        if result.is_ok() {
+            return Err(format!("清理初始化临时目录失败：{error}"));
+        }
+    }
+    result
+}
+
+fn initialize_staged(
+    manifest: &AssetManifest,
+    cancel: &AtomicBool,
+    progress: &mut impl FnMut(String),
+    staging: &Path,
+    root: &Path,
+    downloader: &mut dyn AssetDownloader,
+) -> Result<(), String> {
+    ensure_not_cancelled(cancel)?;
+    // 运行目录校验失败时如实报告：初始化不替用户修复用户指定的 Xberg 目录。
+    let runtime = runtime_dir()?;
+    validate_runtime_dir(&runtime)?;
+    let notice_stage = staging.join("licenses");
+    fs::create_dir_all(&notice_stage).map_err(|error| format!("创建许可证目录失败：{error}"))?;
+    write_notice(&notice_stage.join("THIRD_PARTY_NOTICES.md"), manifest)?;
+    atomic_replace_dir(&notice_stage, &root.join("licenses"))?;
+    // 推理组件包（XB-10）：清单接入时下载并按归档/成员 SHA-256 校验后安装；
+    // 未接入时保持只做在位校验（缺失即失败，不冒称就绪）。
+    if let Some(inference) = &manifest.xberg_inference {
+        install_inference_pack(inference, staging, root, cancel, downloader, progress)?;
+    }
+    media_component_dir()?;
+    progress("转 Markdown 组件初始化完成".to_string());
+    Ok(())
+}
+
+/// 单个资产的下载接缝：生产实现走固定来源的 HTTP 下载（复用截图 OCR 侧的
+/// 流式下载器），测试注入本地供给或失败脚本（T-05/T-21 语义）。
 trait AssetDownloader {
     fn download(
         &mut self,
@@ -231,7 +369,7 @@ impl AssetDownloader for NetworkDownloader {
         progress: &mut dyn FnMut(String),
     ) -> Result<(), String> {
         let mut sink = |message: String| progress(message);
-        download_asset(
+        crate::snap_ocr_assets::download_asset(
             url,
             destination,
             expected_size,
@@ -242,99 +380,119 @@ impl AssetDownloader for NetworkDownloader {
     }
 }
 
-/// 下载、校验并原子安装全部可选资产。
+/// 下载、校验并原子安装推理组件包（XB-09/XB-10）。
 ///
-/// 初始化期间只访问清单中的固定地址。取消会终止当前下载或解包阶段，
-/// 并删除本轮 staging 目录；已经存在的可用安装不会被覆盖。
-pub fn initialize(cancel: &AtomicBool, mut progress: impl FnMut(String)) -> Result<(), String> {
-    if readiness().is_ok() {
-        progress("转 Markdown 组件已就绪".to_string());
+/// 最终位置成员全部校验通过时不重下（跨重试复用）；下载与解包在 staging 内
+/// 完成并二次校验（归档摘要 + 每成员摘要），全部通过后整目录原子落位到
+/// `xberg-inference/<tag>/`，随后移除其他版本目录（不混用版本）。取消或
+/// 失败不会触碰已验证的安装。
+fn install_inference_pack(
+    inference: &InferenceManifest,
+    staging: &Path,
+    root: &Path,
+    cancel: &AtomicBool,
+    downloader: &mut dyn AssetDownloader,
+    progress: &mut impl FnMut(String),
+) -> Result<(), String> {
+    if inference_ready(inference, root).is_ok() {
+        progress("复用已校验的推理组件".to_string());
         return Ok(());
     }
     ensure_not_cancelled(cancel)?;
-    let manifest = load_manifest()?;
-    let root = asset_root();
-    fs::create_dir_all(&root).map_err(|error| format!("创建资产目录失败：{error}"))?;
-    let staging = root.join(format!(".staging-{}", Uuid::new_v4().simple()));
-    fs::create_dir_all(&staging).map_err(|error| format!("创建临时目录失败：{error}"))?;
-    let mut downloader = NetworkDownloader;
-    let result = initialize_staged(
-        &manifest,
+    progress(format!(
+        "下载 Xberg 推理组件包（{}，{} 字节）",
+        inference.tag, inference.size_bytes
+    ));
+    let stage_dir = staging.join("xberg-inference");
+    fs::create_dir_all(&stage_dir).map_err(|error| format!("创建推理组件临时目录失败：{error}"))?;
+    let archive = stage_dir.join("download.zip");
+    downloader.download(
+        &inference.url,
+        &archive,
+        inference.size_bytes,
+        &inference.sha256,
         cancel,
-        &mut progress,
-        &staging,
-        &root,
-        &mut downloader,
-    );
-    if let Err(error) = fs::remove_dir_all(&staging) {
-        if result.is_ok() {
-            return Err(format!("清理初始化临时目录失败：{error}"));
+        progress,
+    )?;
+    ensure_not_cancelled(cancel)?;
+    // 下载器校验之外独立复核暂存内容，防伪造的“下载成功”。
+    verify_file(&archive, inference.size_bytes, &inference.sha256)
+        .map_err(|error| format!("推理组件包下载内容校验失败：{error}"))?;
+    let extracted = stage_dir.join("extracted");
+    fs::create_dir_all(&extracted).map_err(|error| format!("创建推理组件解包目录失败：{error}"))?;
+    crate::snap_ocr_assets::extract_zip_safely(&archive, &extracted, cancel)?;
+    let staged_component = stage_dir.join("component");
+    for member in &inference.members {
+        ensure_not_cancelled(cancel)?;
+        let source = extracted.join(&member.path);
+        verify_file(&source, member.size_bytes, &member.sha256).map_err(|error| {
+            format!("推理组件成员 {} 校验失败：{error}", member.path)
+        })?;
+        let target = staged_component.join(&member.install_path);
+        if let Some(parent) = target.parent() {
+            fs::create_dir_all(parent)
+                .map_err(|error| format!("创建推理组件成员目录失败：{error}"))?;
         }
+        fs::copy(&source, &target).map_err(|error| {
+            format!(
+                "落位推理组件成员 {} 失败：{error}",
+                member.install_path
+            )
+        })?;
     }
-    result
+    // staging 内自校验通过后整目录原子落位，失败恢复旧目录。
+    inference_layout_ready(&staged_component, inference)?;
+    atomic_replace_dir(
+        &staged_component,
+        &root.join("xberg-inference").join(&inference.tag),
+    )?;
+    prune_old_inference_tags(root, &inference.tag)?;
+    Ok(())
 }
 
-fn initialize_staged(
-    manifest: &AssetManifest,
-    cancel: &AtomicBool,
-    progress: &mut impl FnMut(String),
-    staging: &Path,
-    root: &Path,
-    downloader: &mut dyn AssetDownloader,
-) -> Result<(), String> {
-    if media_models_ready(manifest) {
-        progress("复用已校验的媒体模型".to_string());
-    } else {
-        for (index, model) in manifest.media_models.iter().enumerate() {
-            ensure_not_cancelled(cancel)?;
-            // T-05 逐资产复用：最终位置已校验的模型不重下（跨重试保留已验证下载）。
-            let final_path = media_models_dir().join(&model.relative_path);
-            if verify_file(&final_path, model.size_bytes, &model.sha256).is_ok() {
-                progress(format!("复用已校验的媒体模型：{}", model.id));
-                continue;
-            }
-            progress(format!(
-                "下载媒体模型 {} / {}：{}",
-                index + 1,
-                manifest.media_models.len(),
-                model.id
-            ));
-            let model_relative = Path::new(&model.relative_path)
-                .strip_prefix("models")
-                .map_err(|_| format!("媒体模型 {} 必须安装在 models 子目录", model.id))?;
-            let staged = staging.join("media-models").join(model_relative);
-            if let Some(parent) = staged.parent() {
-                fs::create_dir_all(parent)
-                    .map_err(|error| format!("创建媒体模型目录失败：{error}"))?;
-            }
-            downloader.download(
-                &model.url,
-                &staged,
-                model.size_bytes,
-                &model.sha256,
-                cancel,
-                progress,
-            )?;
-            // 先校验暂存内容再落位；下载器校验之外再独立复核，防伪造的"下载成功"。
-            verify_file(&staged, model.size_bytes, &model.sha256)
-                .map_err(|error| format!("媒体模型 {} 下载内容校验失败：{error}", model.id))?;
-            // T-06：最终位置已有校验通过的副本时不覆盖（失败安装不得动已验证资产）。
-            if verify_file(&final_path, model.size_bytes, &model.sha256).is_err() {
-                atomic_replace_file(&staged, &final_path)?;
-            }
+/// 清单接入后推理组件的成员级摘要校验（XB-09）。
+fn inference_ready(inference: &InferenceManifest, root: &Path) -> Result<(), String> {
+    let component = root.join("xberg-inference").join(&inference.tag);
+    for member in &inference.members {
+        verify_file(
+            &component.join(&member.install_path),
+            member.size_bytes,
+            &member.sha256,
+        )
+        .map_err(|error| format!("推理组件成员 {}：{error}", member.install_path))?;
+    }
+    Ok(())
+}
+
+/// 落位前对 staging 组件树做成员级复核（存在 + 摘要），确保原子替换进来的
+/// 目录就是清单声明的完整安装。
+fn inference_layout_ready(component: &Path, inference: &InferenceManifest) -> Result<(), String> {
+    for member in &inference.members {
+        verify_file(
+            &component.join(&member.install_path),
+            member.size_bytes,
+            &member.sha256,
+        )
+        .map_err(|error| format!("推理组件成员 {}：{error}", member.install_path))?;
+    }
+    Ok(())
+}
+
+/// 成功安装清单 tag 后移除其他版本目录：同一安装只保留一个版本（XB-09）。
+pub(crate) fn prune_old_inference_tags(root: &Path, keep: &str) -> Result<(), String> {
+    let base = root.join("xberg-inference");
+    let entries = fs::read_dir(&base).map_err(|error| format!("枚举推理组件目录失败：{error}"))?;
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if path.is_dir() && path.file_name().and_then(|name| name.to_str()) != Some(keep) {
+            fs::remove_dir_all(&path).map_err(|error| {
+                format!(
+                    "移除旧版本推理组件失败（{}）：{error}",
+                    path.display()
+                )
+            })?;
         }
     }
-
-    let notice_stage = staging.join("licenses");
-    fs::create_dir_all(&notice_stage).map_err(|error| format!("创建许可证目录失败：{error}"))?;
-    write_notice(&notice_stage.join("THIRD_PARTY_NOTICES.md"), manifest)?;
-    atomic_replace_dir(&notice_stage, &root.join("licenses"))?;
-    initialize_worker_assets(manifest, cancel, progress, staging, downloader)?;
-    if let Err(error) = ensure_worker_ready(manifest) {
-        progress("媒体资产已处理，但媒体工作进程仍未就绪".to_string());
-        return Err(error);
-    }
-    progress("转 Markdown 组件初始化完成".to_string());
     Ok(())
 }
 
@@ -356,241 +514,31 @@ fn load_manifest() -> Result<AssetManifest, String> {
     {
         return Err("Xberg 固定版本归档元数据不完整".to_string());
     }
-    if manifest.media_models.len() != 3 {
-        return Err("媒体模型清单必须包含三份固定资产".to_string());
-    }
-    for model in &manifest.media_models {
-        if model.relative_path.is_empty() || model.url.is_empty() {
-            return Err(format!("媒体模型 {} 的路径或来源为空", model.id));
-        }
-        validate_relative_path(&model.relative_path)?;
-    }
     for member in &manifest.xberg.members {
         validate_relative_path(&member.path)?;
     }
-    if manifest.future_workers.len() != 1 {
-        return Err("可选媒体工作进程清单必须且只能有一个条目".to_string());
-    }
-    for worker in &manifest.future_workers {
-        if worker.id.is_empty() || worker.status.is_empty() || worker.blocking_reason.is_empty() {
-            return Err("媒体工作进程清单缺少状态或阻塞说明".to_string());
+    if let Some(inference) = &manifest.xberg_inference {
+        let tag_ok = !inference.tag.is_empty()
+            && !inference.tag.contains('/')
+            && !inference.tag.contains('\\')
+            && !inference.tag.contains("..")
+            && !inference.tag.contains(':');
+        if !tag_ok
+            || inference.url.is_empty()
+            || inference.size_bytes == 0
+            || inference.sha256.len() != 64
+        {
+            return Err("Xberg 推理组件包元数据不完整".to_string());
         }
-        for asset in &worker.assets {
-            if asset.id.is_empty()
-                || asset.url.is_empty()
-                || asset.size_bytes == 0
-                || asset.sha256.len() != 64
-                || asset.archive_type.is_empty()
-                || asset.target_root.is_empty()
-            {
-                return Err(format!("媒体工作进程资产 {} 的清单不完整", asset.id));
-            }
-            if !matches!(asset.target_root.as_str(), "worker" | "media_models") {
-                return Err(format!("媒体工作进程资产 {} 的安装根目录无效", asset.id));
-            }
-            if let Some(path) = &asset.install_path {
-                validate_relative_path(path)?;
-            }
-            if asset.archive_type == "file" && asset.install_path.is_none() {
-                return Err(format!("媒体工作进程文件 {} 缺少安装路径", asset.id));
-            }
-            if asset.archive_type != "file" && asset.members.is_empty() {
-                return Err(format!("媒体工作进程归档 {} 没有成员清单", asset.id));
-            }
-            for member in &asset.members {
-                validate_relative_path(&member.path)?;
-                validate_relative_path(&member.install_path)?;
-                if member.size_bytes == 0 || member.sha256.len() != 64 {
-                    return Err(format!("媒体工作进程成员 {} 的清单不完整", member.path));
-                }
-            }
+        if inference.members.is_empty() {
+            return Err("Xberg 推理组件包成员清单为空".to_string());
+        }
+        for member in &inference.members {
+            validate_relative_path(&member.path)?;
+            validate_relative_path(&member.install_path)?;
         }
     }
     Ok(manifest)
-}
-
-fn ensure_worker_ready(manifest: &AssetManifest) -> Result<(), String> {
-    let worker = manifest
-        .future_workers
-        .first()
-        .ok_or_else(|| "媒体工作进程清单缺失".to_string())?;
-    for asset in &worker.assets {
-        let root = worker_target_root(&asset.target_root);
-        if asset.archive_type == "file" {
-            let install_path = asset
-                .install_path
-                .as_ref()
-                .ok_or_else(|| format!("媒体工作进程资产 {} 缺少安装路径", asset.id))?;
-            verify_file(&root.join(install_path), asset.size_bytes, &asset.sha256).map_err(
-                |error| {
-                    format!(
-                        "媒体工作进程资产 {} 校验失败：{error}；{}",
-                        asset.id, worker.blocking_reason
-                    )
-                },
-            )?;
-        } else {
-            for member in &asset.members {
-                verify_file(
-                    &root.join(&member.install_path),
-                    member.size_bytes,
-                    &member.sha256,
-                )
-                .map_err(|error| {
-                    format!(
-                        "媒体工作进程资产 {} 的 {} 校验失败：{error}；{}",
-                        asset.id, member.install_path, worker.blocking_reason
-                    )
-                })?;
-            }
-        }
-    }
-    Ok(())
-}
-
-fn initialize_worker_assets(
-    manifest: &AssetManifest,
-    cancel: &AtomicBool,
-    progress: &mut impl FnMut(String),
-    staging: &Path,
-    downloader: &mut dyn AssetDownloader,
-) -> Result<(), String> {
-    let worker = manifest
-        .future_workers
-        .first()
-        .ok_or_else(|| "媒体工作进程清单缺失".to_string())?;
-    if worker_assets_ready(worker) {
-        progress("复用已校验的媒体工作进程及原生依赖".to_string());
-        return Ok(());
-    }
-    let worker_stage = staging.join("media-worker");
-    fs::create_dir_all(&worker_stage)
-        .map_err(|error| format!("创建媒体工作进程临时目录失败：{error}"))?;
-    let mut ordered_assets = Vec::with_capacity(worker.assets.len());
-    ordered_assets.extend(
-        worker
-            .assets
-            .iter()
-            .filter(|asset| asset.archive_type != "file"),
-    );
-    ordered_assets.extend(
-        worker
-            .assets
-            .iter()
-            .filter(|asset| asset.archive_type == "file"),
-    );
-    for (index, asset) in ordered_assets.into_iter().enumerate() {
-        ensure_not_cancelled(cancel)?;
-        if worker_asset_ready(asset) {
-            progress(format!("复用已校验的媒体工作进程资产：{}", asset.id));
-            continue;
-        }
-        progress(format!(
-            "下载媒体工作进程资产 {} / {}：{}",
-            index + 1,
-            worker.assets.len(),
-            asset.id
-        ));
-        let archive = worker_stage.join(&asset.id);
-        let download_result = downloader.download(
-            &asset.url,
-            &archive,
-            asset.size_bytes,
-            &asset.sha256,
-            cancel,
-            progress,
-        );
-        if let Err(error) = download_result {
-            if asset.archive_type == "file" {
-                return Err(format!("{error}；{}", worker.blocking_reason));
-            }
-            return Err(error);
-        }
-        ensure_not_cancelled(cancel)?;
-        if asset.archive_type == "file" {
-            let install_path = asset
-                .install_path
-                .as_ref()
-                .ok_or_else(|| format!("媒体工作进程文件 {} 缺少安装路径", asset.id))?;
-            let target = worker_target_root(&asset.target_root).join(install_path);
-            atomic_replace_file(&archive, &target)?;
-            continue;
-        }
-        let extracted = worker_stage.join(format!("{index}-extracted"));
-        fs::create_dir_all(&extracted)
-            .map_err(|error| format!("创建媒体依赖解包目录失败：{error}"))?;
-        match asset.archive_type.as_str() {
-            "zip" => extract_zip_safely(&archive, &extracted, cancel)?,
-            "tar.bz2" => extract_tar_bz2_safely(&archive, &extracted, cancel)?,
-            other => return Err(format!("不支持的媒体资产归档格式：{other}")),
-        }
-        for member in &asset.members {
-            let source = extracted.join(&member.path);
-            verify_file(&source, member.size_bytes, &member.sha256)
-                .map_err(|error| format!("媒体依赖 {} 校验失败：{error}", member.path))?;
-            let target = worker_target_root(&asset.target_root).join(&member.install_path);
-            atomic_replace_file(&source, &target)?;
-        }
-    }
-    Ok(())
-}
-
-fn worker_assets_ready(worker: &FutureWorker) -> bool {
-    if worker.status.is_empty() {
-        return false;
-    }
-    worker.assets.iter().all(worker_asset_ready)
-}
-
-fn worker_asset_ready(asset: &WorkerAsset) -> bool {
-    let root = worker_target_root(&asset.target_root);
-    if asset.archive_type == "file" {
-        let Some(install_path) = &asset.install_path else {
-            return false;
-        };
-        return verify_file(&root.join(install_path), asset.size_bytes, &asset.sha256).is_ok();
-    }
-    asset.members.iter().all(|member| {
-        verify_file(
-            &root.join(&member.install_path),
-            member.size_bytes,
-            &member.sha256,
-        )
-        .is_ok()
-    })
-}
-
-fn worker_target_root(target_root: &str) -> PathBuf {
-    match target_root {
-        "worker" => asset_root().join("worker").join("v0.1.0"),
-        "media_models" => media_models_dir(),
-        _ => PathBuf::new(),
-    }
-}
-
-fn ensure_media_models_ready(manifest: &AssetManifest) -> Result<(), String> {
-    let root = media_models_dir();
-    for model in &manifest.media_models {
-        verify_file(
-            &root.join(&model.relative_path),
-            model.size_bytes,
-            &model.sha256,
-        )
-        .map_err(|error| format!("媒体模型 {} 校验失败：{error}", model.relative_path))?;
-    }
-    Ok(())
-}
-
-fn media_models_ready(manifest: &AssetManifest) -> bool {
-    let root = media_models_dir();
-    manifest.media_models.iter().all(|model| {
-        verify_file(
-            &root.join(&model.relative_path),
-            model.size_bytes,
-            &model.sha256,
-        )
-        .is_ok()
-    })
 }
 
 fn asset_root() -> PathBuf {
@@ -659,208 +607,6 @@ fn sha256_file(path: &Path) -> io::Result<String> {
     Ok(hex::encode(digest.finalize()))
 }
 
-fn download_asset(
-    url: &str,
-    destination: &Path,
-    expected_size: u64,
-    expected_sha256: &str,
-    cancel: &AtomicBool,
-    progress: &mut impl FnMut(String),
-) -> Result<(), String> {
-    if let Some(parent) = destination.parent() {
-        fs::create_dir_all(parent).map_err(|error| format!("创建下载目录失败：{error}"))?;
-    }
-    let partial = destination.with_extension("part");
-    let _ = fs::remove_file(&partial);
-    for attempt in 1..=3 {
-        ensure_not_cancelled(cancel)?;
-        download_stream(url, &partial, expected_size, cancel, progress)?;
-        match verify_file(&partial, expected_size, expected_sha256) {
-            Ok(()) => {
-                fs::rename(&partial, destination)
-                    .map_err(|error| format!("写入下载资产失败：{error}"))?;
-                return Ok(());
-            }
-            Err(error) if attempt < 3 => {
-                progress(format!("资产校验失败，准备重试（{attempt}/3）：{error}"));
-                let _ = fs::remove_file(&partial);
-            }
-            Err(error) => {
-                let _ = fs::remove_file(&partial);
-                return Err(format!("下载资产校验失败：{error}"));
-            }
-        }
-    }
-    Err("下载资产失败".to_string())
-}
-
-fn download_stream(
-    url: &str,
-    partial: &Path,
-    expected_size: u64,
-    cancel: &AtomicBool,
-    progress: &mut impl FnMut(String),
-) -> Result<(), String> {
-    let agent = ureq::builder()
-        .redirects(3)
-        // 大资产（媒体模型 ~239MB、ffmpeg ~171MB）在慢链路上的整体下载时长不可预估，
-        // 整体超时会让初始化在这类网络下永远无法完成（T-05 的可重试语义被硬上限
-        // 抵消）。改为连接超时 + 单次读超时：整体时长无上限、由用户取消控制；
-        // 单次读取停滞 60 秒即失败上抛（流级失败不进入 download_asset 的内部
-        // 重试循环，该循环只重试校验失败）。
-        .timeout_connect(Duration::from_secs(30))
-        .timeout_read(Duration::from_secs(60))
-        .user_agent("JchTools-markdown-assets/1")
-        .build();
-    let response = agent
-        .get(url)
-        .call()
-        .map_err(|error| format!("下载请求失败：{error}"))?;
-    if !(200..300).contains(&response.status()) {
-        return Err(format!("下载请求返回 HTTP {}", response.status()));
-    }
-    let mut reader = response.into_reader();
-    let mut output = File::create(partial).map_err(|error| format!("创建下载文件失败：{error}"))?;
-    let mut buffer = vec![0_u8; 1024 * 1024];
-    let mut current = 0_u64;
-    loop {
-        if cancel.load(Ordering::Acquire) {
-            let _ = fs::remove_file(partial);
-            return Err("用户已取消初始化".to_string());
-        }
-        let read = reader
-            .read(&mut buffer)
-            .map_err(|error| format!("读取下载数据失败：{error}"))?;
-        if read == 0 {
-            break;
-        }
-        output
-            .write_all(&buffer[..read])
-            .map_err(|error| format!("写入下载数据失败：{error}"))?;
-        current = current.saturating_add(read as u64);
-        if expected_size > 0 {
-            let percent = current
-                .saturating_mul(100)
-                .checked_div(expected_size)
-                .unwrap_or(100)
-                .min(100);
-            progress(format!("下载进度：{percent}%"));
-        } else {
-            progress(format!("下载进度：{current} 字节"));
-        }
-    }
-    output
-        .sync_all()
-        .map_err(|error| format!("同步下载文件失败：{error}"))?;
-    Ok(())
-}
-
-fn extract_zip_safely(
-    archive: &Path,
-    destination: &Path,
-    cancel: &AtomicBool,
-) -> Result<(), String> {
-    ensure_not_cancelled(cancel)?;
-    let file = File::open(archive).map_err(|error| format!("打开 Xberg 压缩包失败：{error}"))?;
-    let mut zip =
-        ZipArchive::new(file).map_err(|error| format!("读取 Xberg 压缩包失败：{error}"))?;
-    let mut seen = HashSet::new();
-    for index in 0..zip.len() {
-        ensure_not_cancelled(cancel)?;
-        let mut entry = zip
-            .by_index(index)
-            .map_err(|error| format!("读取压缩包条目失败：{error}"))?;
-        let relative = entry
-            .enclosed_name()
-            .ok_or_else(|| format!("压缩包包含不安全路径：{}", entry.name()))?
-            .clone();
-        if !seen.insert(relative.clone()) {
-            return Err(format!("压缩包包含重复路径：{}", relative.display()));
-        }
-        if entry
-            .unix_mode()
-            .is_some_and(|mode| mode & 0o170_000 == 0o120_000)
-        {
-            return Err(format!("压缩包包含符号链接：{}", entry.name()));
-        }
-        let target = destination.join(&relative);
-        if entry.is_dir() {
-            fs::create_dir_all(&target).map_err(|error| format!("创建解包目录失败：{error}"))?;
-            continue;
-        }
-        if let Some(parent) = target.parent() {
-            fs::create_dir_all(parent).map_err(|error| format!("创建解包目录失败：{error}"))?;
-        }
-        let mut output =
-            File::create(&target).map_err(|error| format!("创建解包文件失败：{error}"))?;
-        io::copy(&mut entry, &mut output).map_err(|error| format!("写入解包文件失败：{error}"))?;
-        output
-            .sync_all()
-            .map_err(|error| format!("同步解包文件失败：{error}"))?;
-    }
-    Ok(())
-}
-
-fn extract_tar_bz2_safely(
-    archive: &Path,
-    destination: &Path,
-    cancel: &AtomicBool,
-) -> Result<(), String> {
-    ensure_not_cancelled(cancel)?;
-    let file = File::open(archive).map_err(|error| format!("打开 sherpa 压缩包失败：{error}"))?;
-    let decoder = BzDecoder::new(file);
-    let mut tar = Archive::new(decoder);
-    let entries = tar
-        .entries()
-        .map_err(|error| format!("读取 sherpa tar 条目失败：{error}"))?;
-    let mut seen = HashSet::new();
-    for entry in entries {
-        ensure_not_cancelled(cancel)?;
-        let mut entry = entry.map_err(|error| format!("读取 sherpa tar 条目失败：{error}"))?;
-        let relative = entry
-            .path()
-            .map_err(|error| format!("读取 sherpa tar 路径失败：{error}"))?
-            .to_path_buf();
-        let kind = entry.header().entry_type();
-        let mut relative_string = relative.to_string_lossy().replace('\\', "/");
-        if kind.is_dir() && relative_string.ends_with('/') {
-            relative_string.pop();
-        }
-        validate_relative_path(&relative_string)?;
-        let relative = PathBuf::from(relative_string);
-        if !seen.insert(relative.clone()) {
-            return Err(format!("sherpa tar 包含重复路径：{}", relative.display()));
-        }
-        if kind.is_symlink() || kind.is_hard_link() {
-            return Err(format!("sherpa tar 包含链接：{}", relative.display()));
-        }
-        let target = destination.join(&relative);
-        if kind.is_dir() {
-            fs::create_dir_all(&target)
-                .map_err(|error| format!("创建 sherpa 解包目录失败：{error}"))?;
-            continue;
-        }
-        if !kind.is_file() {
-            return Err(format!(
-                "sherpa tar 包含不支持的条目：{}",
-                relative.display()
-            ));
-        }
-        if let Some(parent) = target.parent() {
-            fs::create_dir_all(parent)
-                .map_err(|error| format!("创建 sherpa 解包目录失败：{error}"))?;
-        }
-        let mut output =
-            File::create(&target).map_err(|error| format!("创建 sherpa 解包文件失败：{error}"))?;
-        io::copy(&mut entry, &mut output)
-            .map_err(|error| format!("写入 sherpa 解包文件失败：{error}"))?;
-        output
-            .sync_all()
-            .map_err(|error| format!("同步 sherpa 解包文件失败：{error}"))?;
-    }
-    Ok(())
-}
-
 fn atomic_replace_file(staged: &Path, destination: &Path) -> Result<(), String> {
     let parent = destination
         .parent()
@@ -922,39 +668,13 @@ fn restore_backup(backup: &Path, destination: &Path, kind: &str) -> Result<(), S
 
 fn write_notice(path: &Path, manifest: &AssetManifest) -> Result<(), String> {
     let mut text = String::from("# JchTools 转 Markdown 可选组件许可证\n\n");
-    text.push_str("Xberg 运行目录由用户指定；媒体组件由用户主动初始化后下载。主程序安装包不包含这些资产。\n\n");
+    text.push_str("Xberg 运行目录由用户指定；主程序安装包不包含这些资产。媒体转录的模型与推理运行库由 Xberg 推理组件提供，许可随组件树自带。\n\n");
     for license in &manifest.xberg.licenses {
         let _ = writeln!(
             &mut text,
             "- {}：{}，{}",
             license.component, license.license, license.source
         );
-    }
-    for model in &manifest.media_models {
-        let _ = writeln!(
-            &mut text,
-            "- {}：{}，{}",
-            model.license.component, model.license.license, model.license.source
-        );
-    }
-    for worker in &manifest.future_workers {
-        let _ = writeln!(
-            &mut text,
-            "\n## {}\n\n状态：{}\n\n{}",
-            worker.id, worker.status, worker.blocking_reason
-        );
-        for asset in &worker.assets {
-            let _ = writeln!(
-                &mut text,
-                "- {}：{}，{}，归档大小 {} 字节，SHA256 {}，来源 {}",
-                asset.license.component,
-                asset.license.license,
-                asset.archive_type,
-                asset.size_bytes,
-                asset.sha256,
-                asset.license.source
-            );
-        }
     }
     fs::write(path, text).map_err(|error| format!("写入许可证 notice 失败：{error}"))
 }
@@ -969,381 +689,137 @@ fn ensure_not_cancelled(cancel: &AtomicBool) -> Result<(), String> {
 
 #[cfg(test)]
 mod tests {
-    use super::{extract_tar_bz2_safely, load_manifest, restore_backup};
-    use bzip2::write::BzEncoder;
-    use bzip2::Compression;
-    use std::fs::{self, File};
-    use std::io;
+    use super::{
+        inference_ready, install_inference_pack, load_manifest, media_component_dir,
+        resolve_component_with_tag, restore_backup, write_notice, AssetDownloader,
+        InferenceManifest, InferenceMember,
+    };
+    use sha2::{Digest, Sha256};
+    use std::fs;
+    use std::path::{Path, PathBuf};
     use std::sync::atomic::AtomicBool;
-    use tar::{Builder, EntryType, Header};
+    use std::sync::{Mutex, MutexGuard, OnceLock};
 
-    // 覆盖 T-19/T-27/附录 D「Rust 直接调用 FFmpeg 原生接口」与 T-06 固定资产：
-    // FFmpeg 资产必须是官方 shared 构建的四个 DLL（avutil/swresample/avcodec/
-    // avformat），worker 经 libloading 直调；不得回退为 ffmpeg.exe 子进程布局。
+    // 覆盖 T-06：内置清单必须可解析（媒体段退役后仅存 xberg 段）。
     #[test]
-    fn ffmpeg_asset_is_shared_dll_set() {
+    fn manifest_parses_with_xberg_segment_only() {
         let manifest = load_manifest().expect("内置资产清单必须可解析");
-        let worker = &manifest.future_workers[0];
-        let ffmpeg = worker
-            .assets
-            .iter()
-            .find(|asset| asset.id.to_ascii_lowercase().contains("ffmpeg"))
-            .expect("清单必须包含 FFmpeg 资产");
-        let installs: Vec<&str> = ffmpeg
-            .members
-            .iter()
-            .map(|member| member.install_path.as_str())
-            .collect();
-        for dll in [
-            "ffmpeg/avutil-61.dll",
-            "ffmpeg/swresample-7.dll",
-            "ffmpeg/avcodec-63.dll",
-            "ffmpeg/avformat-63.dll",
-        ] {
-            assert!(
-                installs.contains(&dll),
-                "FFmpeg shared DLL 缺失：{dll}（实际成员：{installs:?}）"
-            );
-        }
         assert!(
-            !installs.iter().any(|path| path.ends_with("ffmpeg.exe")),
-            "FFmpeg 资产不得再携带 ffmpeg.exe 子进程布局（实际成员：{installs:?}）"
+            !manifest.xberg.members.is_empty(),
+            "xberg 固定版本成员清单不得为空"
         );
     }
 
-    // ===== F22：媒体模型逐资产就绪、补缺下载与失败保留（T-05/T-06）=====
-
-    use super::{
-        ensure_media_models_ready, initialize_staged, media_models_dir, worker_target_root,
-        AssetDownloader, AssetManifest, FutureWorker, LicenseEntry, MediaModel, WorkerAsset,
-        XbergManifest, XBERG_TAG,
-    };
-    use sha2::{Digest, Sha256};
-    use std::path::{Path, PathBuf};
-    use std::sync::MutexGuard;
-    use std::sync::{Mutex, OnceLock};
-
-    /// 测试与其它用例共享进程环境变量，必须串行访问资产根目录。
-    fn asset_root_lock() -> &'static Mutex<()> {
+    /// 测试共享进程环境变量，组件根相关用例必须串行访问。
+    fn env_lock() -> &'static Mutex<()> {
         static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
         LOCK.get_or_init(|| Mutex::new(()))
     }
 
-    /// 把资产根目录重定向到临时目录；Drop 时恢复环境，避免污染其它测试。
-    struct AssetRootGuard {
+    /// 把资产根目录与推理组件目录都重定向到临时目录；Drop 恢复环境。
+    struct ComponentGuard {
         root: tempfile::TempDir,
         _lock: MutexGuard<'static, ()>,
     }
 
-    fn redirect_asset_root() -> AssetRootGuard {
-        let lock = asset_root_lock()
+    fn redirect_component_env() -> ComponentGuard {
+        let lock = env_lock()
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         let root = tempfile::tempdir().expect("创建资产根目录");
         std::env::set_var("JCHTOOLS_MARKDOWN_TEST_ASSET_ROOT", root.path());
-        AssetRootGuard { root, _lock: lock }
+        std::env::remove_var("JCHTOOLS_XBERG_INFERENCE_DIR");
+        ComponentGuard { root, _lock: lock }
     }
 
-    impl Drop for AssetRootGuard {
+    impl Drop for ComponentGuard {
         fn drop(&mut self) {
             std::env::remove_var("JCHTOOLS_MARKDOWN_TEST_ASSET_ROOT");
+            std::env::remove_var("JCHTOOLS_XBERG_INFERENCE_DIR");
         }
     }
 
-    fn sha256_bytes(bytes: &[u8]) -> String {
-        hex::encode(Sha256::digest(bytes))
-    }
-
-    /// 可脚本化的假下载器：按 URL 供给固定字节；可指定第 N 次调用失败。
-    struct FakeDownloader {
-        blobs: Vec<(String, Vec<u8>)>,
-        fail_on_call: Option<usize>,
-        calls: Vec<String>,
-    }
-
-    impl FakeDownloader {
-        fn new(blobs: Vec<(String, Vec<u8>)>) -> Self {
-            Self {
-                blobs,
-                fail_on_call: None,
-                calls: Vec::new(),
-            }
+    /// 搭建组件在位校验所需的完整文件树（存在性校验，内容任意）。
+    fn install_component(base: &Path) -> PathBuf {
+        let component = base.join("xberg-inference").join("vtest");
+        let files = [
+            "xberg.exe",
+            "models/sense_voice_zh_en_ja_ko_yue_2024_07_17/model.int8.onnx",
+            "models/sense_voice_zh_en_ja_ko_yue_2024_07_17/tokens.txt",
+            "models/vad/silero_vad.onnx",
+            "sherpa-onnx/sherpa-onnx-c-api.dll",
+            "sherpa-onnx/sherpa-onnx-cxx-api.dll",
+            "sherpa-onnx/onnxruntime.dll",
+            "sherpa-onnx/onnxruntime_providers_shared.dll",
+            "ffmpeg/avutil-61.dll",
+            "ffmpeg/swresample-7.dll",
+            "ffmpeg/avcodec-63.dll",
+            "ffmpeg/avformat-63.dll",
+        ];
+        for file in files {
+            let target = component.join(file);
+            fs::create_dir_all(target.parent().expect("组件路径有父目录")).expect("创建组件目录");
+            fs::write(&target, b"x").expect("预置组件文件");
         }
-
-        fn urls(&self) -> Vec<String> {
-            self.calls.clone()
-        }
+        component
     }
 
-    impl AssetDownloader for FakeDownloader {
-        fn download(
-            &mut self,
-            url: &str,
-            destination: &Path,
-            _expected_size: u64,
-            _expected_sha256: &str,
-            _cancel: &AtomicBool,
-            _progress: &mut dyn FnMut(String),
-        ) -> Result<(), String> {
-            self.calls.push(url.to_string());
-            if Some(self.calls.len()) == self.fail_on_call {
-                return Err("模拟下载失败".to_string());
-            }
-            let blob = self
-                .blobs
-                .iter()
-                .find(|(candidate, _)| candidate == url)
-                .map(|(_, bytes)| bytes.clone())
-                .ok_or_else(|| format!("假下载器没有 URL 的内容：{url}"))?;
-            if let Some(parent) = destination.parent() {
-                fs::create_dir_all(parent).map_err(|error| error.to_string())?;
-            }
-            fs::write(destination, blob).map_err(|error| error.to_string())
-        }
-    }
-
-    fn fixture_blobs() -> Vec<(String, Vec<u8>)> {
-        b"abc"
-            .iter()
-            .map(|tag| {
-                (
-                    format!("https://fixtures.invalid/model-{}.bin", *tag as char),
-                    vec![*tag; 64],
-                )
-            })
-            .collect()
-    }
-
-    /// 构造三模型 + 一个已就绪 worker 资产的最小清单；模型内容与摘要互相匹配。
-    fn fixture_manifest(blobs: &[(String, Vec<u8>)]) -> AssetManifest {
-        let models = ["a", "b", "c"]
-            .iter()
-            .enumerate()
-            .map(|(index, tag)| {
-                let url = format!("https://fixtures.invalid/model-{tag}.bin");
-                let blob = &blobs
-                    .iter()
-                    .find(|(candidate, _)| *candidate == url)
-                    .expect("每个模型都要有供给字节")
-                    .1;
-                MediaModel {
-                    id: format!("model-{tag}"),
-                    url: url.clone(),
-                    relative_path: format!("models/group{index}/model-{tag}.bin"),
-                    size_bytes: blob.len() as u64,
-                    sha256: sha256_bytes(blob),
-                    license: LicenseEntry {
-                        component: format!("model {tag}"),
-                        license: "MIT".to_string(),
-                        source: "https://fixtures.invalid".to_string(),
-                    },
-                }
-            })
-            .collect();
-        AssetManifest {
-            schema_version: 1,
-            xberg: XbergManifest {
-                tag: XBERG_TAG.to_string(),
-                archive_url: "https://fixtures.invalid/xberg.zip".to_string(),
-                archive_size_bytes: 1,
-                archive_sha256: "a".repeat(64),
-                members: Vec::new(),
-                licenses: Vec::new(),
-            },
-            media_models: models,
-            future_workers: vec![FutureWorker {
-                id: "worker".to_string(),
-                status: "ready".to_string(),
-                blocking_reason: "测试阻塞说明".to_string(),
-                assets: vec![WorkerAsset {
-                    id: "worker.exe".to_string(),
-                    url: "https://fixtures.invalid/worker.exe".to_string(),
-                    size_bytes: 13,
-                    sha256: sha256_bytes(b"worker-binary"),
-                    archive_type: "file".to_string(),
-                    target_root: "worker".to_string(),
-                    install_path: Some("worker.exe".to_string()),
-                    members: Vec::new(),
-                    license: LicenseEntry {
-                        component: "worker".to_string(),
-                        license: "MIT".to_string(),
-                        source: "https://fixtures.invalid".to_string(),
-                    },
-                }],
-            }],
-        }
-    }
-
-    /// 预置已通过校验的 worker 资产，跳过 worker 下载分支。
-    fn preinstall_worker() {
-        let target = worker_target_root("worker").join("worker.exe");
-        fs::create_dir_all(target.parent().expect("worker 路径有父目录"))
-            .expect("创建 worker 目录");
-        fs::write(&target, b"worker-binary").expect("预置 worker 资产");
-    }
-
-    fn model_path(model: &MediaModel) -> PathBuf {
-        media_models_dir().join(&model.relative_path)
-    }
-
-    fn install_model(model: &MediaModel, blob: &[u8]) {
-        let target = model_path(model);
-        fs::create_dir_all(target.parent().expect("模型路径有父目录")).expect("创建模型目录");
-        fs::write(&target, blob).expect("预置模型文件");
-    }
-
-    fn staged_run(
-        manifest: &AssetManifest,
-        guard: &AssetRootGuard,
-        downloader: &mut FakeDownloader,
-        cancel: &AtomicBool,
-    ) -> Result<(), String> {
-        let staging = guard.root.path().join("staging");
-        fs::create_dir_all(&staging).expect("创建 staging");
-        let mut progress = |_message: String| {};
-        initialize_staged(
-            manifest,
-            cancel,
-            &mut progress,
-            &staging,
-            guard.root.path(),
-            downloader,
-        )
-    }
-
-    // 覆盖 T-05「保留已校验资产」：三缺一时只下载缺失的那一个模型。
+    // 覆盖 T-05/T-06（XB-01/XB-12）：媒体组件按在位校验，齐全时返回组件目录。
     #[test]
-    fn media_init_downloads_only_missing_models() {
-        let guard = redirect_asset_root();
-        let blobs = fixture_blobs();
-        let manifest = fixture_manifest(&blobs);
-        preinstall_worker();
-        // 已就绪：模型 b、c；缺失：模型 a。
-        install_model(&manifest.media_models[1], &blobs[1].1);
-        install_model(&manifest.media_models[2], &blobs[2].1);
-        let mut downloader = FakeDownloader::new(blobs.clone());
-        let cancel = AtomicBool::new(false);
-
-        staged_run(&manifest, &guard, &mut downloader, &cancel).expect("补缺初始化应成功");
-
+    fn media_component_ready_returns_component_dir() {
+        let guard = redirect_component_env();
+        let component = install_component(guard.root.path());
+        let resolved = media_component_dir().expect("齐全组件应通过在位校验");
+        assert_eq!(resolved, component);
         assert_eq!(
-            downloader.urls(),
-            vec![manifest.media_models[0].url.clone()],
-            "只应下载缺失的模型 a，实际下载了：{:?}",
-            downloader.urls()
-        );
-        ensure_media_models_ready(&manifest).expect("补缺后三模型都应就绪");
-        assert_eq!(
-            fs::read(model_path(&manifest.media_models[1])).expect("模型 b 仍在"),
-            blobs[1].1,
-            "已校验模型不得被改动"
+            guard.root.path().join("xberg-inference"),
+            super::xberg_inference_root(),
+            "安装根必须固定在 <资产根>/xberg-inference"
         );
     }
 
-    // 覆盖 T-05「初始化可重试」：第 2 个模型下载失败后重试，不得重下第 1 个。
+    // 覆盖 T-05：组件未安装时如实报告未配置，不冒称就绪。
     #[test]
-    fn media_init_retry_after_failure_skips_verified_downloads() {
-        let guard = redirect_asset_root();
-        let blobs = fixture_blobs();
-        let manifest = fixture_manifest(&blobs);
-        preinstall_worker();
-        let cancel = AtomicBool::new(false);
-
-        // 第一次：模型 b（第 2 次调用）失败。
-        let mut failing = FakeDownloader::new(blobs.clone());
-        failing.fail_on_call = Some(2);
-        let first = staged_run(&manifest, &guard, &mut failing, &cancel);
-        assert!(first.is_err(), "第 2 个模型失败必须使初始化失败");
-
-        // 第二次：全部成功。模型 a 已在失败前落位并通过校验，不得重下。
-        let mut retry = FakeDownloader::new(blobs.clone());
-        staged_run(&manifest, &guard, &mut retry, &cancel).expect("重试应成功");
-        assert_eq!(
-            retry.urls(),
-            vec![
-                manifest.media_models[1].url.clone(),
-                manifest.media_models[2].url.clone(),
-            ],
-            "重试只应下载缺失的 b 和 c，不得重下已校验的 a：{:?}",
-            retry.urls()
+    fn media_component_missing_reports_not_configured() {
+        let _guard = redirect_component_env();
+        let error = media_component_dir().expect_err("缺失组件必须报未配置");
+        assert!(error.contains("未配置"), "错误应说明组件未配置：{error}");
+        assert!(
+            error.contains("JCHTOOLS_XBERG_INFERENCE_DIR"),
+            "错误应指引环境变量：{error}"
         );
-        ensure_media_models_ready(&manifest).expect("重试后三模型都应就绪");
     }
 
-    // 覆盖 T-05/T-06：取消初始化不得删除或覆盖最终目录中已校验的模型。
+    // 覆盖 T-06：组件不完整时明确指出缺失项，不执行不完整环境。
     #[test]
-    fn media_init_cancel_preserves_existing_final_models() {
-        let guard = redirect_asset_root();
-        let blobs = fixture_blobs();
-        let manifest = fixture_manifest(&blobs);
-        preinstall_worker();
-        install_model(&manifest.media_models[1], &blobs[1].1);
-        let mut downloader = FakeDownloader::new(blobs.clone());
-        let cancel = AtomicBool::new(true);
-
-        let result = staged_run(&manifest, &guard, &mut downloader, &cancel);
-        let error = result.expect_err("已取消的初始化必须失败");
-        assert!(error.contains("取消"), "错误应说明是用户取消：{error}");
-        assert!(downloader.urls().is_empty(), "取消后不得发起任何下载");
-        assert_eq!(
-            fs::read(model_path(&manifest.media_models[1])).expect("已就绪模型必须保留"),
-            blobs[1].1,
-            "取消不得删除或改动最终目录中已校验的模型"
+    fn media_component_incomplete_reports_missing_file() {
+        let guard = redirect_component_env();
+        let component = install_component(guard.root.path());
+        fs::remove_file(component.join("ffmpeg").join("avcodec-63.dll")).expect("删除一个 DLL");
+        let error = media_component_dir().expect_err("不完整组件必须失败");
+        assert!(
+            error.contains("avcodec-63.dll"),
+            "错误应指出缺失文件：{error}"
         );
         assert!(
-            !model_path(&manifest.media_models[0]).exists(),
-            "取消后不得留下半成品"
-        );
-        // 取消也不得破坏最终目录里已存在的其它资产（worker）。
-        assert!(
-            worker_target_root("worker").join("worker.exe").is_file(),
-            "取消不得删除已安装的 worker"
+            error.contains("推理组件不完整"),
+            "错误应说明组件不完整：{error}"
         );
     }
 
-    // 覆盖 T-05、T-06：首次初始化应接受 sherpa 归档中的合法目录条目。
+    // 覆盖 T-05：开发期环境变量可指向本地组件树（与截图 OCR 同一变量）。
     #[test]
-    fn sherpa_tar_accepts_directory_entry_with_trailing_slash() {
-        let root = tempfile::tempdir().expect("创建测试目录");
-        let archive = root.path().join("sherpa.tar.bz2");
-        let encoder = BzEncoder::new(
-            File::create(&archive).expect("创建归档"),
-            Compression::default(),
-        );
-        let mut builder = Builder::new(encoder);
-
-        let mut directory = Header::new_gnu();
-        directory.set_entry_type(EntryType::Directory);
-        directory.set_size(0);
-        directory.set_mode(0o755);
-        directory.set_cksum();
-        builder
-            .append_data(&mut directory, "sherpa-root/", io::empty())
-            .expect("写入带尾斜杠的目录条目");
-
-        let body = b"model data";
-        let mut file = Header::new_gnu();
-        file.set_entry_type(EntryType::Regular);
-        file.set_size(body.len() as u64);
-        file.set_mode(0o644);
-        file.set_cksum();
-        builder
-            .append_data(&mut file, "sherpa-root/model.bin", &body[..])
-            .expect("写入模型文件");
-        builder
-            .into_inner()
-            .expect("结束 tar")
-            .finish()
-            .expect("结束 bzip2");
-
-        let destination = root.path().join("out");
-        let cancelled = AtomicBool::new(false);
-        let result = extract_tar_bz2_safely(&archive, &destination, &cancelled);
-        assert!(result.is_ok(), "目录条目末尾斜杠应合法：{result:?}");
-        assert_eq!(
-            fs::read(destination.join("sherpa-root/model.bin")).expect("读取解包文件"),
-            body
-        );
+    fn media_component_env_override_points_at_local_tree() {
+        let guard = redirect_component_env();
+        let external = guard.root.path().join("external-component");
+        let files = ["xberg.exe"];
+        fs::create_dir_all(&external).expect("创建外部组件目录");
+        for file in files {
+            fs::write(external.join(file), b"x").expect("预置外部组件文件");
+        }
+        std::env::set_var("JCHTOOLS_XBERG_INFERENCE_DIR", &external);
+        let resolved = media_component_dir().expect_err("外部树缺模型时必须指出缺失项");
+        assert!(resolved.contains("model.int8.onnx"), "{resolved}");
     }
 
     #[test]
@@ -1361,5 +837,216 @@ mod tests {
         assert!(error.contains("旧文件仍保留在"));
         assert!(backup.exists(), "恢复失败时不得丢弃备份");
         assert!(destination.is_dir(), "冲突目标必须保持不变");
+    }
+
+    // 覆盖 T-06：notice 只携带 xberg 段的许可条目（媒体组件许可随组件树自带）。
+    #[test]
+    fn notice_lists_only_xberg_licenses() {
+        let manifest = load_manifest().expect("内置资产清单必须可解析");
+        let root = tempfile::tempdir().expect("创建测试目录");
+        let notice = root.path().join("THIRD_PARTY_NOTICES.md");
+        write_notice(&notice, &manifest).expect("写入 notice");
+        let text = fs::read_to_string(&notice).expect("读取 notice");
+        assert!(text.contains("Xberg CLI"), "应包含 Xberg CLI 条目：{text}");
+        assert!(
+            !text.contains("SenseVoice INT8"),
+            "媒体模型许可条目已退役，不得出现：{text}"
+        );
+    }
+
+    // ── Xberg 推理组件包：下载安装、复用、失败保护与版本一致性（XB-09/XB-10）──
+
+    fn sha256_bytes(bytes: &[u8]) -> String {
+        let mut hasher = Sha256::new();
+        hasher.update(bytes);
+        format!("{:x}", hasher.finalize())
+    }
+
+    /// 构造两成员（xberg.exe + 字典）的推理组件包夹具：内存 zip + 对应清单。
+    fn fixture_inference_pack() -> (InferenceManifest, Vec<u8>) {
+        let exe = b"fake-xberg-exe-bytes".to_vec();
+        let dict = b"fake-snapshot-dict".to_vec();
+        let mut cursor = std::io::Cursor::new(Vec::new());
+        {
+            use std::io::Write as IoWrite;
+            let mut writer = zip::ZipWriter::new(&mut cursor);
+            let options = zip::write::SimpleFileOptions::default();
+            writer
+                .start_file("pkg/xberg.exe", options)
+                .expect("写入 zip 成员");
+            writer.write_all(&exe).expect("写入成员字节");
+            writer
+                .start_file("pkg/models/snapshot-ocr/dict.txt", options)
+                .expect("写入 zip 成员");
+            writer.write_all(&dict).expect("写入成员字节");
+            writer.finish().expect("完成 zip");
+        }
+        let archive = cursor.into_inner();
+        let manifest = InferenceManifest {
+            tag: "vtest-inference".to_string(),
+            url: "https://fixtures.invalid/inference.zip".to_string(),
+            size_bytes: archive.len() as u64,
+            sha256: sha256_bytes(&archive),
+            members: vec![
+                InferenceMember {
+                    path: "pkg/xberg.exe".to_string(),
+                    install_path: "xberg.exe".to_string(),
+                    size_bytes: exe.len() as u64,
+                    sha256: sha256_bytes(&exe),
+                },
+                InferenceMember {
+                    path: "pkg/models/snapshot-ocr/dict.txt".to_string(),
+                    install_path: "models/snapshot-ocr/dict.txt".to_string(),
+                    size_bytes: dict.len() as u64,
+                    sha256: sha256_bytes(&dict),
+                },
+            ],
+        };
+        (manifest, archive)
+    }
+
+    /// 注入式下载器：供给内存字节、可编程失败、记录调用次数。
+    struct FakeInferenceDownloader {
+        archive: Vec<u8>,
+        fail: bool,
+        calls: usize,
+    }
+
+    impl AssetDownloader for FakeInferenceDownloader {
+        fn download(
+            &mut self,
+            _url: &str,
+            destination: &Path,
+            _expected_size: u64,
+            _expected_sha256: &str,
+            _cancel: &AtomicBool,
+            _progress: &mut dyn FnMut(String),
+        ) -> Result<(), String> {
+            self.calls += 1;
+            if self.fail {
+                return Err("模拟下载失败".to_string());
+            }
+            fs::write(destination, &self.archive).map_err(|error| error.to_string())
+        }
+    }
+
+    fn run_install(
+        inference: &InferenceManifest,
+        root: &Path,
+        downloader: &mut FakeInferenceDownloader,
+    ) -> Result<(), String> {
+        let staging = root.join("staging");
+        fs::create_dir_all(&staging).expect("创建 staging");
+        let cancel = AtomicBool::new(false);
+        let mut progress = |_message: String| {};
+        install_inference_pack(inference, &staging, root, &cancel, downloader, &mut progress)
+    }
+
+    // 覆盖 XB-10：组件包按成员落位到 xberg-inference/<tag>/，旧版本目录被移除。
+    #[test]
+    fn inference_pack_installs_members_and_prunes_old_tags() {
+        let root = tempfile::tempdir().expect("创建测试根");
+        let (manifest, archive) = fixture_inference_pack();
+        let old = root.path().join("xberg-inference").join("vold");
+        fs::create_dir_all(&old).expect("预置旧版本目录");
+        fs::write(old.join("xberg.exe"), b"old").expect("预置旧文件");
+
+        let mut downloader = FakeInferenceDownloader {
+            archive,
+            fail: false,
+            calls: 0,
+        };
+        run_install(&manifest, root.path(), &mut downloader).expect("安装推理组件包应成功");
+
+        let component = root.path().join("xberg-inference").join("vtest-inference");
+        assert_eq!(
+            fs::read(component.join("xberg.exe")).expect("xberg.exe 已安装"),
+            b"fake-xberg-exe-bytes"
+        );
+        assert_eq!(
+            fs::read(component.join("models").join("snapshot-ocr").join("dict.txt"))
+                .expect("字典已安装"),
+            b"fake-snapshot-dict"
+        );
+        assert!(!old.exists(), "旧版本目录必须被移除（不混用版本）");
+        assert_eq!(downloader.calls, 1);
+        inference_ready(&manifest, root.path()).expect("安装后成员级校验应通过");
+    }
+
+    // 覆盖 XB-10「保留已校验资产」：已验证安装不重下，下载器不得被调用。
+    #[test]
+    fn inference_pack_reuse_skips_download() {
+        let root = tempfile::tempdir().expect("创建测试根");
+        let (manifest, archive) = fixture_inference_pack();
+        let mut downloader = FakeInferenceDownloader {
+            archive,
+            fail: false,
+            calls: 0,
+        };
+        run_install(&manifest, root.path(), &mut downloader).expect("首次安装应成功");
+        run_install(&manifest, root.path(), &mut downloader).expect("复用安装应成功");
+        assert_eq!(downloader.calls, 1, "已校验组件不得重复下载");
+    }
+
+    // 覆盖 XB-09/T-05：归档摘要不符时安装失败，已有安装不受影响。
+    #[test]
+    fn inference_pack_bad_archive_keeps_existing_install() {
+        let root = tempfile::tempdir().expect("创建测试根");
+        let (manifest, archive) = fixture_inference_pack();
+        let mut downloader = FakeInferenceDownloader {
+            archive,
+            fail: false,
+            calls: 0,
+        };
+        run_install(&manifest, root.path(), &mut downloader).expect("首次安装应成功");
+
+        // 破坏一个已安装成员触发重装，再供给坏归档。
+        let component = root.path().join("xberg-inference").join(&manifest.tag);
+        fs::write(component.join("xberg.exe"), b"tampered").expect("破坏一个成员");
+        let mut corrupt = FakeInferenceDownloader {
+            archive: b"corrupt-archive".to_vec(),
+            fail: false,
+            calls: 0,
+        };
+        let error =
+            run_install(&manifest, root.path(), &mut corrupt).expect_err("摘要不符必须失败");
+        assert!(error.contains("校验失败"), "错误应说明校验失败：{error}");
+        assert_eq!(corrupt.calls, 1);
+    }
+
+    // 覆盖 XB-09：成员被篡改时成员级校验必须发现（不因同名文件认定兼容）。
+    #[test]
+    fn inference_ready_detects_tampered_member() {
+        let root = tempfile::tempdir().expect("创建测试根");
+        let (manifest, archive) = fixture_inference_pack();
+        let mut downloader = FakeInferenceDownloader {
+            archive,
+            fail: false,
+            calls: 0,
+        };
+        run_install(&manifest, root.path(), &mut downloader).expect("首次安装应成功");
+        let component = root.path().join("xberg-inference").join("vtest-inference");
+        fs::write(component.join("xberg.exe"), b"tampered").expect("篡改成员");
+        let error =
+            inference_ready(&manifest, root.path()).expect_err("篡改必须被成员级校验发现");
+        assert!(error.contains("xberg.exe"), "错误应指明成员：{error}");
+    }
+
+    // 覆盖 XB-09：目录 tag 与清单不一致时明确报错并指引更新，不静默使用。
+    #[test]
+    fn resolve_component_with_tag_mismatch_errors() {
+        let root = tempfile::tempdir().expect("创建测试根");
+        let base = root.path().join("xberg-inference");
+        let installed = base.join("vinstalled");
+        fs::create_dir_all(&installed).expect("预置安装目录");
+        let error = resolve_component_with_tag(&base, Some("vexpected"), "未配置")
+            .expect_err("版本不一致必须报错");
+        assert!(
+            error.contains("vexpected") && error.contains("更新"),
+            "错误应指明清单要求并指引更新：{error}"
+        );
+        resolve_component_with_tag(&base, Some("vinstalled"), "未配置")
+            .expect("一致时应正常解析");
+        resolve_component_with_tag(&base, None, "未配置").expect("无清单 tag 时唯一目录可解析");
     }
 }

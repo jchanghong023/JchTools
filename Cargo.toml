@@ -31,8 +31,6 @@ hex = "0.4"
 flate2 = "1.1"
 infer = "0.19"
 lopdf = { version = "=0.45.0", default-features = false }
-bzip2 = "=0.6.1"
-tar = "=0.4.46"
 rayon = "1.10"
 regex = "1.11"
 rusqlite = { version = "0.32", features = ["bundled"] }
@@ -79,11 +77,12 @@ path = "src/main.rs"
 required-features = ["gui"]
 
 [workspace]
-# F23：可选媒体 worker 纳入 workspace——统一锁文件，使根 cargo audit/deny 覆盖其依赖。
+# F23/XB-12：可选组件纳入 workspace——统一锁文件，使根 cargo audit/deny 覆盖其依赖。
+# 旧 markdown-media-worker 已随媒体转录迁移到 Xberg 推理组件退役（XB-12）。
 # default-members 保持仅主包：日常 cargo build/test 与打包脚本行为不变；
-# worker 的测试与 clippy 由 CI（check.yml）与 acceptance.ps1 以 --manifest-path 显式覆盖
+# 可选组件的测试与 clippy 由 CI（check.yml）与 acceptance.ps1 以 --manifest-path 显式覆盖
 #（可选分发不等于可选验证）。
-members = ["optional/markdown-media-worker", "optional/snap-ocr-core", "optional/snap-ocr-worker"]
+members = ["optional/snap-ocr-core", "optional/snap-ocr-worker"]
 default-members = ["."]
 resolver = "2"
 

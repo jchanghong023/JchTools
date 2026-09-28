@@ -69,14 +69,8 @@ jobs:
       - name: Core tests (no default features)
         shell: pwsh
         run: cargo test --all-targets --no-default-features
-      # F23：可选媒体 worker（workspace 成员、独立清单）显式门——可选分发不等于可选验证。
-      - name: Media worker tests (optional/markdown-media-worker)
-        shell: pwsh
-        run: cargo test --manifest-path optional/markdown-media-worker/Cargo.toml --all-targets
-      - name: Media worker clippy (optional/markdown-media-worker)
-        shell: pwsh
-        run: cargo clippy --manifest-path optional/markdown-media-worker/Cargo.toml --all-targets -- -D warnings
-      # F23 同口径：截图 OCR 纯逻辑核心与 worker（workspace 成员）显式门。
+      # F23/XB-12：旧 markdown-media-worker 已随媒体转录迁移到 Xberg 推理组件退役。
+      # 截图 OCR 纯逻辑核心与 worker（workspace 成员）显式门——可选分发不等于可选验证。
       - name: Snap OCR core tests (optional/snap-ocr-core)
         shell: pwsh
         run: cargo test --manifest-path optional/snap-ocr-core/Cargo.toml --all-targets

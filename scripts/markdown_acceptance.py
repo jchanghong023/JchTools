@@ -77,8 +77,23 @@ XBERG_TAG = "v2026.9.15-0746-run36.1"
 XBERG_ARCHIVE_URL = (
     f"https://github.com/jchanghong023/xberg/releases/download/{XBERG_TAG}/xberg-cli-x86_64-pc-windows-msvc.zip"
 )
-WORKER_RELPATH = "worker/v0.1.0/markdown-media-worker.exe"
-MODELS_ROOT_RELPATH = "media/sherpa-onnx/v1.13.6"
+# 与 src/markdown_assets.rs 同口径：推理组件安装根（每个发布版本一个 tag 子目录）
+# 与媒体转录在位校验的必需成员（存在性；SHA-256 校验由初始化/清单承接）。
+INFERENCE_ROOT_RELPATH = "xberg-inference"
+INFERENCE_REQUIRED = (
+    "xberg.exe",
+    "models/sense_voice_zh_en_ja_ko_yue_2024_07_17/model.int8.onnx",
+    "models/sense_voice_zh_en_ja_ko_yue_2024_07_17/tokens.txt",
+    "models/vad/silero_vad.onnx",
+    "sherpa-onnx/sherpa-onnx-c-api.dll",
+    "sherpa-onnx/sherpa-onnx-cxx-api.dll",
+    "sherpa-onnx/onnxruntime.dll",
+    "sherpa-onnx/onnxruntime_providers_shared.dll",
+    "ffmpeg/avutil-61.dll",
+    "ffmpeg/swresample-7.dll",
+    "ffmpeg/avcodec-63.dll",
+    "ffmpeg/avformat-63.dll",
+)
 
 # T-28 / 附录 A 的旧项目与旧缓存前置：旧目录仍在即未满足「删除旧项目后独立运行」。
 OLD_PROJECT_DIR = Path(r"D:\code1111111111\all2markdown")
@@ -165,19 +180,22 @@ class AssetProbe:
     root: Path | None
     runtime_dir: Path | None
     xberg_exe: Path | None
-    worker: Path | None
+    inference_dir: Path | None
     missing: list[str]
 
     def xberg_ready(self) -> bool:
         return self.xberg_exe is not None
 
     def media_ready(self) -> bool:
-        return self.worker is not None and not any("媒体" in text or "模型" in text for text in self.missing)
+        return self.inference_dir is not None and not any(
+            "推理组件" in text or "媒体" in text for text in self.missing
+        )
 
     def acquire_hint(self) -> str:
         hint = f"Xberg 运行目录：从 {XBERG_ARCHIVE_URL} 下载解压（固定 tag {XBERG_TAG}），"
-        hint += "在 GUI「转 Markdown」页选择并点「使用此目录」保存；媒体组件：同页「初始化可选组件」按清单下载"
-        hint += "（sensevoice-int8 / sensevoice-tokens / silero-vad + 工作进程，清单见 resources/markdown-assets.json）"
+        hint += "在 GUI「转 Markdown」页选择并点「使用此目录」保存；推理组件：同页「初始化可选组件」"
+        hint += "按清单下载 Xberg 推理组件包（媒体转录所需的 xberg.exe、SenseVoice/VAD 模型与 FFmpeg/sherpa-onnx "
+        hint += "运行库，来源与成员摘要见 resources/markdown-assets.json）"
         return hint
 
 
@@ -190,16 +208,21 @@ def _asset_root() -> Path | None:
 
 
 def _manifest_model_paths() -> list[str]:
-    """读取资产清单中媒体模型的相对路径；解析失败返回空表（调用方按未知处理）."""
+    """读取资产清单中推理组件包成员的安装相对路径；解析失败返回空表（调用方按未知处理）."""
     try:
         raw = ASSET_MANIFEST.read_text(encoding="utf-8")
     except OSError:
         return []
     parsed = _parse_json(raw)
-    models = parsed.get("media_models") if _is_str_obj_map(parsed) else None
-    if not _is_str_obj_list(models):
+    inference = parsed.get("xberg_inference") if _is_str_obj_map(parsed) else None
+    members = inference.get("members") if _is_str_obj_map(inference) else None
+    if not _is_str_obj_list(members):
         return []
-    return [relative for entry in models if (relative := _str_field(entry, "relative_path")) is not None]
+    return [
+        relative
+        for entry in members
+        if (relative := _str_field(entry, "install_path")) is not None
+    ]
 
 
 def probe_assets() -> AssetProbe:
@@ -222,20 +245,40 @@ def probe_assets() -> AssetProbe:
             xberg_exe = candidate
         else:
             missing.append(f"Xberg 运行目录缺 xberg.exe：{candidate}")
-    worker_path = root / WORKER_RELPATH
-    worker = worker_path if worker_path.is_file() else None
-    if worker is None:
-        missing.append(f"媒体工作进程未安装：{worker_path}")
-    models_root = root / MODELS_ROOT_RELPATH
-    model_names = _manifest_model_paths()
-    if not model_names:
-        missing.append("媒体模型：无法解析 resources/markdown-assets.json，模型在场情况未知")
+    inference_dir: Path | None = None
+    # 组件目录解析与 src/markdown_assets.rs::resolve_xberg_component 同口径：
+    # 开发期可用 JCHTOOLS_XBERG_INFERENCE_DIR 指向本地组件树；否则取安装根下
+    # 唯一的 tag 子目录（0 个未安装，多于 1 个无法判定）。
+    override = os.environ.get("JCHTOOLS_XBERG_INFERENCE_DIR")
+    if override and Path(override).is_absolute():
+        inference_dir = Path(override)
     else:
-        holes = [name for name in model_names if not (models_root / name).is_file()]
+        inference_root = root / INFERENCE_ROOT_RELPATH
+        tag_dirs = [entry for entry in inference_root.glob("*") if entry.is_dir()] if inference_root.is_dir() else []
+        if len(tag_dirs) == 1:
+            inference_dir = tag_dirs[0]
+        elif not tag_dirs:
+            missing.append(f"推理组件未安装：{inference_root}（GUI「初始化可选组件」下载）")
+        else:
+            names = "、".join(sorted(entry.name for entry in tag_dirs))
+            missing.append(f"推理组件目录存在多个版本，无法确定使用哪一个：{names}")
+    if inference_dir is not None:
+        holes = [name for name in INFERENCE_REQUIRED if not (inference_dir / name).is_file()]
         if holes:
             shown = "、".join(holes[:3])
-            missing.append(f"媒体模型缺失（{len(holes)} 个，如 {shown}；根目录 {models_root}）")
-    return AssetProbe(root, runtime_dir, xberg_exe, worker, missing)
+            missing.append(f"推理组件不完整（缺 {len(holes)} 个，如 {shown}；组件目录 {inference_dir}）")
+        else:
+            manifest_members = _manifest_model_paths()
+            if not manifest_members:
+                missing.append("推理组件：无法解析 resources/markdown-assets.json 的组件包成员，安装面未知")
+            else:
+                member_holes = [name for name in manifest_members if not (inference_dir / name).is_file()]
+                if member_holes:
+                    shown = "、".join(member_holes[:3])
+                    missing.append(
+                        f"推理组件清单成员缺失（{len(member_holes)} 个，如 {shown}；组件目录 {inference_dir}）"
+                    )
+    return AssetProbe(root, runtime_dir, xberg_exe, inference_dir, missing)
 
 
 def _file_digest(path: Path) -> str:
