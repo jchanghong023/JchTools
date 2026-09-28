@@ -197,8 +197,7 @@ pub fn readiness() -> Result<(), String> {
     xberg_inference_ready(&root)?;
     // 清单接入推理组件包后做成员级摘要校验（XB-09；未接入时在位校验已覆盖）。
     if let Some(pack) = &manifest.xberg_inference {
-        asset_ready(&pack.asset, &root)
-            .map_err(|error| format!("推理组件包校验失败：{error}"))?;
+        asset_ready(&pack.asset, &root).map_err(|error| format!("推理组件包校验失败：{error}"))?;
     }
     Ok(())
 }
@@ -401,7 +400,12 @@ fn initialize_staged(
                 .collect(),
         };
         if crate::markdown_assets::inference_ready(&inference, root).is_err() {
-            progress(format!("下载资产 {}/{}：{}", total + 1, total + 1, pack.asset.id));
+            progress(format!(
+                "下载资产 {}/{}：{}",
+                total + 1,
+                total + 1,
+                pack.asset.id
+            ));
         }
         let mut adapter = PackDownloaderAdapter(downloader);
         crate::markdown_assets::install_inference_pack(
@@ -536,8 +540,14 @@ impl crate::markdown_assets::AssetDownloader for PackDownloaderAdapter<'_> {
         cancel: &AtomicBool,
         progress: &mut dyn FnMut(String),
     ) -> Result<(), String> {
-        self.0
-            .download(url, destination, expected_size, expected_sha256, cancel, progress)
+        self.0.download(
+            url,
+            destination,
+            expected_size,
+            expected_sha256,
+            cancel,
+            progress,
+        )
     }
 }
 

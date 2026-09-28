@@ -174,7 +174,11 @@ fn resolve_xberg_component(root: &Path) -> Result<PathBuf, String> {
     let expected_tag = load_manifest()
         .ok()
         .and_then(|manifest| manifest.xberg_inference.map(|inference| inference.tag));
-    resolve_component_with_tag(&root.join("xberg-inference"), expected_tag.as_deref(), &xberg_media_not_configured())
+    resolve_component_with_tag(
+        &root.join("xberg-inference"),
+        expected_tag.as_deref(),
+        &xberg_media_not_configured(),
+    )
 }
 
 /// 按可选的清单 tag 解析唯一组件目录（XB-09）：
@@ -218,12 +222,17 @@ pub(crate) fn resolve_component_with_tag(
                 "推理组件目录存在多个版本且无清单要求的 {tag}；请重新初始化以更新组件"
             )),
         },
-        (_, None) => Err("推理组件目录存在多个版本，无法确定使用哪一个；请只保留一个版本目录".into()),
+        (_, None) => {
+            Err("推理组件目录存在多个版本，无法确定使用哪一个；请只保留一个版本目录".into())
+        }
     }
 }
 
 fn xberg_media_not_configured() -> String {
-    match load_manifest().ok().and_then(|manifest| manifest.xberg_inference) {
+    match load_manifest()
+        .ok()
+        .and_then(|manifest| manifest.xberg_inference)
+    {
         Some(_) => "Xberg 推理组件未配置：媒体转录所需的 xberg.exe、SenseVoice/VAD 模型与 \
      FFmpeg/sherpa-onnx 运行库尚未安装；请在转 Markdown 页重新初始化以下载推理组件包"
             .into(),
@@ -441,20 +450,15 @@ pub(crate) fn install_inference_pack(
     for member in &inference.members {
         ensure_not_cancelled(cancel)?;
         let source = extracted.join(&member.path);
-        verify_file(&source, member.size_bytes, &member.sha256).map_err(|error| {
-            format!("推理组件成员 {} 校验失败：{error}", member.path)
-        })?;
+        verify_file(&source, member.size_bytes, &member.sha256)
+            .map_err(|error| format!("推理组件成员 {} 校验失败：{error}", member.path))?;
         let target = staged_component.join(&member.install_path);
         if let Some(parent) = target.parent() {
             fs::create_dir_all(parent)
                 .map_err(|error| format!("创建推理组件成员目录失败：{error}"))?;
         }
-        fs::copy(&source, &target).map_err(|error| {
-            format!(
-                "落位推理组件成员 {} 失败：{error}",
-                member.install_path
-            )
-        })?;
+        fs::copy(&source, &target)
+            .map_err(|error| format!("落位推理组件成员 {} 失败：{error}", member.install_path))?;
     }
     // staging 内自校验通过后整目录原子落位，失败恢复旧目录。
     inference_layout_ready(&staged_component, inference)?;
@@ -506,10 +510,7 @@ pub(crate) fn prune_old_inference_tags(root: &Path, keep: &str) -> Result<(), St
         let path = entry.path();
         if path.is_dir() && path.file_name().and_then(|name| name.to_str()) != Some(keep) {
             fs::remove_dir_all(&path).map_err(|error| {
-                format!(
-                    "移除旧版本推理组件失败（{}）：{error}",
-                    path.display()
-                )
+                format!("移除旧版本推理组件失败（{}）：{error}", path.display())
             })?;
         }
     }
@@ -959,7 +960,14 @@ mod tests {
         fs::create_dir_all(&staging).expect("创建 staging");
         let cancel = AtomicBool::new(false);
         let mut progress = |_message: String| {};
-        install_inference_pack(inference, &staging, root, &cancel, downloader, &mut progress)
+        install_inference_pack(
+            inference,
+            &staging,
+            root,
+            &cancel,
+            downloader,
+            &mut progress,
+        )
     }
 
     // 覆盖 XB-10：组件包按成员落位到 xberg-inference/<tag>/，旧版本目录被移除。
@@ -984,8 +992,13 @@ mod tests {
             b"fake-xberg-exe-bytes"
         );
         assert_eq!(
-            fs::read(component.join("models").join("snapshot-ocr").join("dict.txt"))
-                .expect("字典已安装"),
+            fs::read(
+                component
+                    .join("models")
+                    .join("snapshot-ocr")
+                    .join("dict.txt")
+            )
+            .expect("字典已安装"),
             b"fake-snapshot-dict"
         );
         assert!(!old.exists(), "旧版本目录必须被移除（不混用版本）");
@@ -1047,8 +1060,7 @@ mod tests {
         run_install(&manifest, root.path(), &mut downloader).expect("首次安装应成功");
         let component = root.path().join("xberg-inference").join("vtest-inference");
         fs::write(component.join("xberg.exe"), b"tampered").expect("篡改成员");
-        let error =
-            inference_ready(&manifest, root.path()).expect_err("篡改必须被成员级校验发现");
+        let error = inference_ready(&manifest, root.path()).expect_err("篡改必须被成员级校验发现");
         assert!(error.contains("xberg.exe"), "错误应指明成员：{error}");
     }
 
@@ -1065,8 +1077,7 @@ mod tests {
             error.contains("vexpected") && error.contains("更新"),
             "错误应指明清单要求并指引更新：{error}"
         );
-        resolve_component_with_tag(&base, Some("vinstalled"), "未配置")
-            .expect("一致时应正常解析");
+        resolve_component_with_tag(&base, Some("vinstalled"), "未配置").expect("一致时应正常解析");
         resolve_component_with_tag(&base, None, "未配置").expect("无清单 tag 时唯一目录可解析");
     }
 
@@ -1079,8 +1090,8 @@ mod tests {
         for tag in ["vnew", "vold"] {
             fs::create_dir_all(base.join(tag)).expect("预置版本目录");
         }
-        let resolved = resolve_component_with_tag(&base, Some("vnew"), "未配置")
-            .expect("应选中清单 tag 目录");
+        let resolved =
+            resolve_component_with_tag(&base, Some("vnew"), "未配置").expect("应选中清单 tag 目录");
         assert_eq!(
             resolved.file_name().and_then(|name| name.to_str()),
             Some("vnew")

@@ -1200,6 +1200,13 @@
     },
     {
       "file": "src/markdown.rs",
+      "name": "media_worker_oversize_response_fails_file_keeps_worker",
+      "ignored": false,
+      "cfg": null,
+      "body": "2b99178c59f0d897"
+    },
+    {
+      "file": "src/markdown.rs",
       "name": "media_worker_per_file_failure_keeps_worker_alive",
       "ignored": false,
       "cfg": null,
@@ -1280,7 +1287,7 @@
       "name": "inference_pack_installs_members_and_prunes_old_tags",
       "ignored": false,
       "cfg": null,
-      "body": "9483f8b0f2195cc4"
+      "body": "31f0239829a0e7b8"
     },
     {
       "file": "src/markdown_assets.rs",
@@ -1294,7 +1301,7 @@
       "name": "inference_ready_detects_tampered_member",
       "ignored": false,
       "cfg": null,
-      "body": "f33b2ea6abae779f"
+      "body": "a0405b2fbdb849e6"
     },
     {
       "file": "src/markdown_assets.rs",
@@ -1340,10 +1347,17 @@
     },
     {
       "file": "src/markdown_assets.rs",
+      "name": "resolve_component_multiple_dirs_prefers_manifest_tag",
+      "ignored": false,
+      "cfg": null,
+      "body": "90c5be5e26d4827f"
+    },
+    {
+      "file": "src/markdown_assets.rs",
       "name": "resolve_component_with_tag_mismatch_errors",
       "ignored": false,
       "cfg": null,
-      "body": "9f1434f0531d965c"
+      "body": "9b1f14a4f2d5a532"
     },
     {
       "file": "src/markdown_assets.rs",
@@ -3429,7 +3443,7 @@
       "name": "real_component_transcribe_returns_structured_markdown",
       "ignored": true,
       "cfg": null,
-      "body": "d7ffe48bd7b0cdf5"
+      "body": "8438cfcf03ad66e0"
     },
     {
       "file": "tests/md_tools.rs",

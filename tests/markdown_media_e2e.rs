@@ -19,9 +19,7 @@ use std::path::PathBuf;
 
 fn env_required(name: &str) -> String {
     std::env::var(name).unwrap_or_else(|_| {
-        panic!(
-            "缺少环境变量 {name}；本测试为真实组件门控用例，运行前置见文件头注释（XB-02）"
-        )
+        panic!("缺少环境变量 {name}；本测试为真实组件门控用例，运行前置见文件头注释（XB-02）")
     })
 }
 
@@ -32,11 +30,7 @@ fn env_required(name: &str) -> String {
 fn real_component_transcribe_returns_structured_markdown() {
     let input = PathBuf::from(env_required("JCHTOOLS_MEDIA_E2E_INPUT"));
     let expected_raw = env_required("JCHTOOLS_MEDIA_E2E_EXPECT_TEXT");
-    assert!(
-        input.is_file(),
-        "输入媒体不存在：{}",
-        input.display()
-    );
+    assert!(input.is_file(), "输入媒体不存在：{}", input.display());
     let expected: Vec<&str> = expected_raw
         .split(',')
         .map(str::trim)
