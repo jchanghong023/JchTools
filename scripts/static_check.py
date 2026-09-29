@@ -280,6 +280,8 @@ def _check_delimiters(path: Path, text: str, stack: list[str]) -> None:
 def sql_syntax() -> str:
     conn = sqlite3.connect(":memory:")
     _ = conn.executescript(read_text(ROOT / "src/schema.sql"))
+    # XB-18：直接读取产品使用的应用配置 schema，避免检查器另造一份表定义。
+    _ = conn.executescript(read_text(ROOT / "src/app_settings.sql"))
     _ = conn.executescript("""CREATE TEMP TABLE duplicate_order(seq INTEGER,id INTEGER);
         CREATE TEMP TABLE empty_order(seq INTEGER,rel TEXT);
         CREATE TEMP TABLE empty_will(rel TEXT PRIMARY KEY);

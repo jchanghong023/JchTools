@@ -475,7 +475,7 @@
       "name": "recognition_timeout_downgrades_model_and_reenables_retry",
       "ignored": false,
       "cfg": "windows",
-      "body": "4155e9cd993cf6de"
+      "body": "e81c5e8d404b3941"
     },
     {
       "file": "optional/snap-ocr-worker/src/service.rs",
@@ -1609,7 +1609,7 @@
       "name": "media_component_missing_reports_not_configured",
       "ignored": false,
       "cfg": null,
-      "body": "07e54c34f5c44763"
+      "body": "cd64c746c2ca7b6b"
     },
     {
       "file": "src/markdown_assets.rs",
@@ -4298,6 +4298,34 @@
       "ignored": false,
       "cfg": null,
       "body": "5e0f0e73cb3339b0"
+    },
+    {
+      "file": "tests/xberg_settings.rs",
+      "name": "persisted_directory_survives_process_restart",
+      "ignored": false,
+      "cfg": null,
+      "body": "c1b4d2773b480b40"
+    },
+    {
+      "file": "tests/xberg_settings.rs",
+      "name": "saved_directory_is_restored_and_invalid_save_preserves_it",
+      "ignored": false,
+      "cfg": null,
+      "body": "a1315ee1df7853c4"
+    },
+    {
+      "file": "tests/xberg_settings.rs",
+      "name": "scenario_assets_and_configuration_are_independent",
+      "ignored": false,
+      "cfg": null,
+      "body": "ff827be51cd71877"
+    },
+    {
+      "file": "tests/xberg_shared_process.rs",
+      "name": "documents_reuse_process_and_snapshot_finishes_during_document",
+      "ignored": false,
+      "cfg": null,
+      "body": "6dbf6942fbbe29a7"
     }
   ]
 }
