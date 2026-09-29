@@ -173,7 +173,7 @@ fn pipe_identity() -> String {
 
 /// 截图服务命名管道名：`\\.\pipe\jchtools-snap-ocr-<hash>`，hash 为
 /// 「用户名:登录会话ID」UTF-8 字节 SHA-256 的前 16 个十六进制小写字符。
-/// 测试资产根覆盖生效时改用派生的测试专用名（C'-1，见 [`test_asset_root_override`]）。
+/// 测试资产根覆盖生效时改用派生的测试专用名（C'-1，见 `test_asset_root_override`）。
 pub fn pipe_name() -> String {
     // C'-1：同一覆盖变量驱动管道名隔离——无头 GUI 测试的监督线程只会 ping
     // 测试专用名（无服务监听，连接必然失败），不会触碰真实用户会话的服务。
@@ -306,7 +306,7 @@ fn xberg_layout_ready(component: &Path) -> Result<(), String> {
 ///
 /// 取消会终止当前下载或解包阶段并删除本轮 staging 目录；最终位置已校验的资产
 /// 跨重试复用、不重下；失败不覆盖已经校验的完整资产。下载接缝与生产下载器
-/// 共用 [`crate::asset_util::AssetDownloader`] / [`crate::asset_util::NetworkDownloader`]，
+/// 共用 `crate::asset_util::AssetDownloader` / `crate::asset_util::NetworkDownloader`，
 /// 测试可注入本地供给验证「补缺下载」与「失败后重试不重下」。
 pub fn initialize(cancel: &AtomicBool, mut progress: impl FnMut(String)) -> Result<(), String> {
     let root = asset_root();

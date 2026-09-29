@@ -5,7 +5,7 @@
 //! （O-13 常驻语义）。生命周期由调用方管理：服务退出时关闭 stdin，等待在途请求
 //! 完成后子进程正常退出，超时才强杀（O-16）。
 //!
-//! 进程级兜底（E2'-1/O-16）：子进程一律加入 kill-on-close Job（[`InferenceJob`]，
+//! 进程级兜底（E2'-1/O-16）：子进程一律加入 kill-on-close Job（`InferenceJob`，
 //! 句柄由本客户端持有）。服务进程无论经哪条路径死亡——「强制退出」的
 //! `std::process::exit(0)`（不运行任何 Drop）、被任务管理器等外部杀死、崩溃——
 //! 内核都会在回收句柄时终结组内全部进程，卡在不可中断推理中的子进程不会成为
@@ -19,7 +19,7 @@
 //! 请求级超时（XB-08/O-13）：Xberg worker 不实现内部超时（WORKER.md 故障职责
 //! 边界：单文件计时与超时杀进程由调用方负责），挂起的子进程（进程活着但不读
 //! stdin / 不写 stdout）若无客户端超时会让服务永久 busy。客户端从请求发出
-//! （含写阶段）起按 [`DEFAULT_REQUEST_TIMEOUT`] 计时，超时返回
+//! （含写阶段）起按 `DEFAULT_REQUEST_TIMEOUT` 计时，超时返回
 //! [`ClientError::Timeout`]；调用方应与「子进程退出」同路径终止子进程并降级
 //! （超时是故障，与用户取消的自动重载语义区分）。
 //!
@@ -53,7 +53,7 @@ const WRITE_CHUNK_BYTES: usize = 64 * 1024;
 /// 客户端错误（O-30 分类：取消 / 推理失败 / 子进程退出 / 通信失败 / 超时）。
 #[derive(Debug, Clone)]
 pub enum ClientError {
-    /// 用户取消：调用方应随后 [`Self::abort`] 终止子进程（XB-08）。
+    /// 用户取消：调用方应随后 `Self::abort` 终止子进程（XB-08）。
     Cancelled,
     /// Xberg 返回的失败响应（`ok:false`；消息不含图像内容）。`kind` 是响应的
     /// 结构化 `error_kind`，与 Xberg `snapshot_ocr.rs` 的取值全集对齐：
@@ -67,7 +67,7 @@ pub enum ClientError {
         kind: Option<String>,
     },
     /// 请求级超时：子进程在超时上限内未完成响应（进程可能仍活着但已挂起）。
-    /// 调用方应 [`Self::abort`] 终止子进程并降级——超时是故障，与用户取消
+    /// 调用方应 `Self::abort` 终止子进程并降级——超时是故障，与用户取消
     /// （自动重载）语义区分（XB-08/O-13）。
     Timeout,
     /// 子进程已退出（携带已知时的退出码）。
@@ -163,7 +163,7 @@ impl XbergWorkerClient {
     /// 组件目录须含 `xberg.exe`、`onnxruntime.dll` 与 `models/snapshot-ocr`
     /// 模型集；启动配置把模型根固定为组件内绝对路径（XB-06：配置在启动时固定，
     /// 请求不再携带配置），环境变量（`ORT_DYLIB_PATH` + 离线开关）经
-    /// [`inference_environment`] 注入。
+    /// `inference_environment` 注入。
     ///
     /// # Errors
     /// 子进程启动失败。
@@ -246,7 +246,7 @@ impl XbergWorkerClient {
         })
     }
 
-    /// 覆盖请求级超时（测试注入短超时；生产保持 [`DEFAULT_REQUEST_TIMEOUT`]）。
+    /// 覆盖请求级超时（测试注入短超时；生产保持 `DEFAULT_REQUEST_TIMEOUT`）。
     #[must_use]
     pub fn with_request_timeout(mut self, timeout: Duration) -> Self {
         self.request_timeout = timeout;

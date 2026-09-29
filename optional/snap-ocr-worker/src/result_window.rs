@@ -50,7 +50,7 @@ impl std::error::Error for ResultWindowError {}
 static FONT_REGISTERED: OnceLock<()> = OnceLock::new();
 
 /// 向 Slint 字体库注册 OCR 资产中的等宽字体；缺失或损坏均显式报错。进程级
-/// 只注册一次（见 [`FONT_REGISTERED`]），重复调用是幂等的。
+/// 只注册一次（见 `FONT_REGISTERED`），重复调用是幂等的。
 ///
 /// # Errors
 /// 字体文件缺失、损坏或 Slint 后端初始化失败。
