@@ -13,9 +13,7 @@ use sha2::{Digest, Sha256};
 use std::collections::HashSet;
 use std::fs::{self, File};
 use std::io::{self, Read};
-use std::path::Path;
-#[cfg(test)]
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use uuid::Uuid;
 use zip::ZipArchive;
@@ -362,6 +360,91 @@ pub(crate) fn ensure_not_cancelled(cancel: &AtomicBool) -> Result<(), String> {
         Err("用户已取消初始化".to_string())
     } else {
         Ok(())
+    }
+}
+
+// ── 两资产模块共享的初始化骨架 ─────────────────────────────────────────
+// markdown_assets 与 snap_ocr_assets 对同一安装语义（组件解析、staging 收尾、
+// 残留兜底、成员校验）此前各留一份相同实现，仅靠注释约定同步；收敛到本模块
+// 后一处修改即可同时生效（XB-09/XB-16 同口径），模块只保留各自的清单与文案。
+
+/// 组件目录解析：开发期（仅 debug 构建）可用 `JCHTOOLS_XBERG_INFERENCE_DIR`
+/// 覆盖到本地组件树；否则取应用 SQLite 保存的共享 Xberg 目录（XB-18/XB-19）。
+/// 两个功能必须用同一规则解析同一安装，不允许出现第二套目录口径。
+pub(crate) fn resolve_xberg_component() -> Result<PathBuf, String> {
+    if cfg!(debug_assertions) {
+        if let Some(path) = std::env::var_os("JCHTOOLS_XBERG_INFERENCE_DIR")
+            .map(PathBuf::from)
+            .filter(|p| p.is_absolute())
+        {
+            return Ok(path);
+        }
+    }
+    crate::xberg_settings::required()
+}
+
+/// 就绪检查的推理组件成员校验：只校验请求场景需要的成员（XB-16 场景隔离，
+/// 归属规则见 `xberg_runtime::asset_for_scenario`），逐成员做大小与 SHA-256
+/// 校验（XB-09），错误统一带成员相对路径。
+pub(crate) fn verify_inference_members_for_scenario(
+    component: &Path,
+    scenario: &str,
+    members: &[InferenceMember],
+) -> Result<(), String> {
+    for member in members {
+        if crate::xberg_runtime::asset_for_scenario(&member.install_path, scenario) {
+            verify_file(
+                &component.join(&member.install_path),
+                member.size_bytes,
+                &member.sha256,
+            )
+            .map_err(|e| format!("推理组件成员 {} 校验失败：{e}", member.install_path))?;
+        }
+    }
+    Ok(())
+}
+
+/// 初始化收尾：删除本轮 staging 目录，主结果优先返回。
+///
+/// staging 清理是尽力而为（B-1）：关键变更已成功时清理失败只经 progress
+/// 发出警告、维持 Ok（Windows 上防护软件短暂持有句柄曾把成功初始化误报为
+/// 失败）；残留目录由下次 initialize 入口的 [`cleanup_stale_staging_dirs`]
+/// 兜底收集。
+pub(crate) fn finalize_staging(
+    result: Result<(), String>,
+    staging: &Path,
+    progress: &mut dyn FnMut(String),
+) -> Result<(), String> {
+    if let Err(error) = fs::remove_dir_all(staging) {
+        if result.is_ok() {
+            progress(format!("警告：清理初始化临时目录失败：{error}"));
+        }
+    }
+    result
+}
+
+/// 兜底清理资产根下历史残留的 `.staging-*` 目录（B-2），单项失败跳过继续；
+/// 各模块特有的残留（旧选择临时文件、expected-tag 标记）由调用方在本函数
+/// 之后自行清扫。
+///
+/// 并发前提：主程序单实例，各功能的初始化由 gui.rs 对应守卫串行（单初始化
+/// 线程），入口处发现的 `.staging-*` 必为历史残留，不存在在途 staging 被误删
+/// 的并发窗口。`.staging-*` 前缀的非目录条目不是本流程产物（staging 恒为
+/// 目录），按设计跳过；资产根不存在（首次运行）时无需清理。
+pub(crate) fn cleanup_stale_staging_dirs(root: &Path) {
+    let Ok(entries) = fs::read_dir(root) else {
+        return;
+    };
+    for entry in entries.flatten() {
+        let path = entry.path();
+        let is_staging = path
+            .file_name()
+            .and_then(|name| name.to_str())
+            .is_some_and(|name| name.starts_with(".staging-"));
+        if is_staging && path.is_dir() {
+            // 尽力而为：残留被防护软件短暂锁定时跳过，下次初始化再试。
+            let _ = fs::remove_dir_all(&path);
+        }
     }
 }
 

@@ -10,8 +10,9 @@
 //! [`crate::asset_util`]，两侧行为同源。
 
 use crate::asset_util::{
-    atomic_replace_dir, atomic_replace_file, ensure_not_cancelled, extract_zip_safely,
-    validate_relative_path, verify_file, AssetDownloader, InferenceManifest,
+    atomic_replace_dir, atomic_replace_file, cleanup_stale_staging_dirs, ensure_not_cancelled,
+    extract_zip_safely, finalize_staging, resolve_xberg_component, validate_relative_path,
+    verify_file, verify_inference_members_for_scenario, AssetDownloader, InferenceManifest,
 };
 use serde::Deserialize;
 use sha2::{Digest, Sha256};
@@ -237,25 +238,18 @@ pub fn readiness() -> Result<(), String> {
 
 /// 就绪检查的推理组件段：在位校验 + 清单成员校验。
 ///
-/// 成员校验基于 [`resolve_xberg_component`] 解析出的组件目录（C-2）：该解析
-/// 支持 debug 构建的 `JCHTOOLS_XBERG_INFERENCE_DIR` 覆盖，成员校验必须与在位
-/// 校验使用同一目录——此前成员校验直接按资产根相对 install_path 进行，绕过
-/// 覆盖，导致覆盖路径在位校验通过后必报「推理组件包校验失败」、永远无法就绪。
+/// 成员校验基于共享解析规则（C-2）：解析支持 debug 构建的
+/// `JCHTOOLS_XBERG_INFERENCE_DIR` 覆盖，成员校验必须与在位校验使用同一
+/// 目录——此前成员校验直接按资产根相对 install_path 进行，绕过覆盖，导致
+/// 覆盖路径在位校验通过后必报「推理组件包校验失败」、永远无法就绪。成员
+/// 过滤与摘要校验经 [`crate::asset_util::verify_inference_members_for_scenario`]
+/// 与 markdown 侧共用同一实现。
 fn readiness_inference_pack(manifest: &SnapAssetManifest, root: &Path) -> Result<(), String> {
     let component = xberg_inference_ready(root)?;
     // 清单接入推理组件包后做成员级摘要校验（XB-09；未接入时在位校验已覆盖）。
     if let Some(pack) = &manifest.xberg_inference {
         let inference = inference_manifest_from_pack(pack)?;
-        for member in &inference.members {
-            if crate::xberg_runtime::asset_for_scenario(&member.install_path, "snapshot") {
-                verify_file(
-                    &component.join(&member.install_path),
-                    member.size_bytes,
-                    &member.sha256,
-                )
-                .map_err(|e| format!("推理组件成员 {} 校验失败：{e}", member.install_path))?;
-            }
-        }
+        verify_inference_members_for_scenario(&component, "snapshot", &inference.members)?;
     }
     Ok(())
 }
@@ -266,27 +260,13 @@ pub fn xberg_inference_root() -> PathBuf {
     asset_root().join("xberg-inference")
 }
 
-/// 组件目录解析：开发期（仅 debug 构建）可用 `JCHTOOLS_XBERG_INFERENCE_DIR`
-/// 覆盖到本地组件树；否则按可选的清单 tag 解析唯一子目录（XB-09：目录名必须
-/// 与清单一致，不一致明确报错并指引更新；未接入时沿用「唯一子目录」启发式）。
-fn resolve_xberg_component(root: &Path) -> Result<PathBuf, String> {
-    if cfg!(debug_assertions) {
-        if let Some(path) = std::env::var_os("JCHTOOLS_XBERG_INFERENCE_DIR")
-            .map(PathBuf::from)
-            .filter(|p| p.is_absolute())
-        {
-            return Ok(path);
-        }
-    }
-    let _ = root;
-    crate::xberg_settings::required()
-}
-
 /// Xberg 推理组件的在位校验（存在性；摘要校验待清单接入后补齐，O-09 的
 /// 完整校验由后续清单条目承接）：
 /// `xberg.exe` + `models/snapshot-ocr/{det.onnx,rec.onnx,dict/dict.txt}` + `onnxruntime.dll`。
-pub fn xberg_inference_ready(root: &Path) -> Result<PathBuf, String> {
-    let component = resolve_xberg_component(root)?;
+/// `_root` 形参保留调用点形状；组件目录一律由共享解析规则提供（其删除属
+/// 基线再生成事项，另行确认）。
+pub fn xberg_inference_ready(_root: &Path) -> Result<PathBuf, String> {
+    let component = resolve_xberg_component()?;
     xberg_layout_ready(&component).map(|()| component)
 }
 
@@ -354,54 +334,19 @@ pub fn initialize(cancel: &AtomicBool, mut progress: impl FnMut(String)) -> Resu
     finalize_staging(result, &staging, &mut progress)
 }
 
-/// 初始化收尾：删除本轮 staging 目录，主结果优先返回。
-///
-/// staging 清理是尽力而为（B-1，与 markdown 侧同口径）：关键变更已成功时
-/// 清理失败只经 progress 发出警告、维持 Ok（此前 Windows 上防护软件/索引器
-/// 短暂持有 staging 内文件句柄即把成功初始化误报为失败）；残留目录由下次
-/// initialize 入口的 [`cleanup_stale_staging`] 兜底收集。
-fn finalize_staging(
-    result: Result<(), String>,
-    staging: &Path,
-    progress: &mut dyn FnMut(String),
-) -> Result<(), String> {
-    if let Err(error) = fs::remove_dir_all(staging) {
-        if result.is_ok() {
-            progress(format!("警告：清理初始化临时目录失败：{error}"));
-        }
-    }
-    result
-}
-
-/// 兜底清理资产根下历史残留的 `.staging-*` 目录（B-2，与 markdown 侧同口径），
+/// 兜底清理资产根下历史残留的 `.staging-*` 目录（B-2，`.staging-*` 清扫与
+/// markdown 侧共用 [`crate::asset_util::cleanup_stale_staging_dirs`]），
 /// 并清扫 write_expected_tag 在 `xberg-inference/` 下残留的 `.expected-tag-*`
 /// 临时文件；单项失败跳过继续。
 ///
-/// 并发前提：主程序单实例，初始化由 gui.rs 的 snap_initializing 守卫串行
-///（单初始化线程），入口处发现的 `.staging-*` 必为历史残留，不存在在途
-/// staging 被误删的并发窗口。`.staging-*` 前缀的非目录条目不是本流程产物
-///（staging 恒为目录），按设计跳过；资产根不存在（首次运行）时无需清理。
+/// 不扫 `.old-*` 备份：那是原子替换路径的暂存（asset_util），其中
+/// xberg-inference/<tag> 目标的残留由下次初始化的 prune_old_inference_tags
+/// 收集，入口一概删除会把替换失败后仍可恢复的备份提前清掉。
 fn cleanup_stale_staging(root: &Path) {
-    // 资产根尚不存在（首次运行）时无需清理。
-    let Ok(entries) = fs::read_dir(root) else {
-        return;
-    };
-    for entry in entries.flatten() {
-        let path = entry.path();
-        let is_staging = path
-            .file_name()
-            .and_then(|name| name.to_str())
-            .is_some_and(|name| name.starts_with(".staging-"));
-        if is_staging && path.is_dir() {
-            // 尽力而为：残留被防护软件短暂锁定时跳过，下次初始化再试。
-            let _ = fs::remove_dir_all(&path);
-        }
-    }
+    cleanup_stale_staging_dirs(root);
     // write_expected_tag 的临时标记（xberg-inference/.expected-tag-<uuid>）在
     // 写入或原子就位失败/进程崩溃时残留（XB-09），与 .staging-* 同属入口兜底
-    // 清扫。不扫 `.old-*` 备份：那是原子替换路径的暂存（asset_util），其中
-    // xberg-inference/<tag> 目标的残留由下次初始化的 prune_old_inference_tags
-    // 收集，入口一概删除会把替换失败后仍可恢复的备份提前清掉。
+    // 清扫。
     cleanup_expected_tag_residue(&root.join("xberg-inference"));
 }
 

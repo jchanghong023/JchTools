@@ -3,8 +3,9 @@
 //! 不再下载独立的 Xberg 引擎。旧安装工具仅保留为既有协议/资产回归夹具。
 
 use crate::asset_util::{
-    atomic_replace_dir, ensure_not_cancelled, validate_relative_path, verify_file, AssetDownloader,
-    InferenceManifest,
+    atomic_replace_dir, cleanup_stale_staging_dirs, ensure_not_cancelled, finalize_staging,
+    resolve_xberg_component, validate_relative_path, verify_file,
+    verify_inference_members_for_scenario, AssetDownloader, InferenceManifest,
 };
 use serde::Deserialize;
 use std::fmt::Write as FmtWrite;
@@ -116,29 +117,14 @@ pub fn xberg_inference_root() -> PathBuf {
     asset_root().join("xberg-inference")
 }
 
-/// 组件目录解析：开发期（仅 debug 构建）可用 `JCHTOOLS_XBERG_INFERENCE_DIR`
-/// 覆盖到本地组件树；否则取安装根下的 tag 子目录。清单已接入推理组件包时，
-/// 目录名必须与清单 tag 一致（XB-09：不混用其他版本、不因同名文件认定兼容），
-/// 不一致明确报错并指引更新；清单未接入时沿用「唯一子目录」启发式。
-/// 与 `snap_ocr_assets` 的同名解析规则保持一致（同一安装只能有一个版本）。
-fn resolve_xberg_component(root: &Path) -> Result<PathBuf, String> {
-    if cfg!(debug_assertions) {
-        if let Some(path) = std::env::var_os("JCHTOOLS_XBERG_INFERENCE_DIR")
-            .map(PathBuf::from)
-            .filter(|p| p.is_absolute())
-        {
-            return Ok(path);
-        }
-    }
-    let _ = root;
-    crate::xberg_settings::required()
-}
-
+/// 组件目录解析规则与就绪成员校验共用 [`crate::asset_util`] 的共享实现
+/// （同一安装只能有一个解析口径，XB-09/XB-19）。
+///
 /// 媒体转录组件的在位校验（存在性；摘要级清单待 Xberg 发布 tag 落定后接入，
 /// 与截图 OCR 侧口径一致）：`xberg.exe` + SenseVoice/VAD 模型 + sherpa-onnx
 /// 四 DLL + FFmpeg 四 DLL。返回解析出的组件目录供转录进程注入环境变量。
 pub fn media_component_dir() -> Result<PathBuf, String> {
-    let component = resolve_xberg_component(&asset_root())?;
+    let component = resolve_xberg_component()?;
     let required = [
         component.join("xberg.exe"),
         component
@@ -197,27 +183,20 @@ pub fn readiness() -> Result<(), String> {
 
 /// 就绪检查的推理组件段：成员级摘要校验（XB-09；清单未接入时在位校验已覆盖）。
 ///
-/// 成员校验基于 [`resolve_xberg_component`] 解析出的组件目录（C-2，与截图
-/// OCR 侧同口径）：该解析支持 debug 构建的 `JCHTOOLS_XBERG_INFERENCE_DIR`
-/// 覆盖，成员校验必须与在位校验（[`media_component_dir`]）使用同一目录——
-/// 此前成员校验直接按资产根拼 `xberg-inference/<tag>/`，绕过覆盖，导致覆盖
-/// 路径在位校验通过后仍必报成员校验失败、永远无法就绪（markdown::run 阻断
-/// 转换，initialize 还会重复下载约 291MB 组件包）。markdown 清单成员的
-/// install_path 本就是组件目录相对路径（无 `xberg-inference/<tag>/` 前缀，
-/// 与 snap 清单不同），直接按组件目录拼接，无需前缀剥离。
-fn readiness_inference_pack(manifest: &AssetManifest, root: &Path) -> Result<(), String> {
+/// 成员校验基于共享解析规则（C-2，与截图 OCR 侧同口径）：解析支持 debug 构建
+/// 的 `JCHTOOLS_XBERG_INFERENCE_DIR` 覆盖，成员校验必须与在位校验
+/// （[`media_component_dir`]）使用同一目录——此前成员校验直接按资产根拼
+/// `xberg-inference/<tag>/`，绕过覆盖，导致覆盖路径在位校验通过后仍必报成员
+/// 校验失败、永远无法就绪（markdown::run 阻断转换，initialize 还会重复下载
+/// 约 291MB 组件包）。markdown 清单成员的 install_path 本就是组件目录相对
+/// 路径（无 `xberg-inference/<tag>/` 前缀，与 snap 清单不同），成员过滤与
+/// 摘要校验经 [`crate::asset_util::verify_inference_members_for_scenario`]
+/// 与截图侧共用同一实现。`_root` 形参保留调用点形状；组件目录一律由共享
+/// 解析规则提供（其删除属基线再生成事项，另行确认）。
+fn readiness_inference_pack(manifest: &AssetManifest, _root: &Path) -> Result<(), String> {
     if let Some(inference) = &manifest.xberg_inference {
-        let component = resolve_xberg_component(root)?;
-        for member in &inference.members {
-            if crate::xberg_runtime::asset_for_scenario(&member.install_path, "media") {
-                verify_file(
-                    &component.join(&member.install_path),
-                    member.size_bytes,
-                    &member.sha256,
-                )
-                .map_err(|e| format!("推理组件成员 {} 校验失败：{e}", member.install_path))?;
-            }
-        }
+        let component = resolve_xberg_component()?;
+        verify_inference_members_for_scenario(&component, "media", &inference.members)?;
     }
     Ok(())
 }
@@ -252,55 +231,31 @@ pub fn initialize(cancel: &AtomicBool, mut progress: impl FnMut(String)) -> Resu
     finalize_staging(result, &staging, &mut progress)
 }
 
-/// 初始化收尾：删除本轮 staging 目录，主结果优先返回。
-///
-/// staging 清理是尽力而为（B-1）：关键变更已成功时清理失败只经 progress
-/// 发出警告、维持 Ok（与 install_inference_pack 对 prune 清理失败的口径
-/// 一致——此前 Windows 上防护软件短暂持有句柄即把成功初始化误报为失败，
-/// gui.rs 的保存链路还会据此把 convert_runtime_confirmed 置回 false）；
-/// 残留目录由下次 initialize 入口的 [`cleanup_stale_staging`] 兜底收集。
-fn finalize_staging(
-    result: Result<(), String>,
-    staging: &Path,
-    progress: &mut dyn FnMut(String),
-) -> Result<(), String> {
-    if let Err(error) = fs::remove_dir_all(staging) {
-        if result.is_ok() {
-            progress(format!("警告：清理初始化临时目录失败：{error}"));
-        }
-    }
-    result
-}
-
 /// 兜底清理资产根下历史残留的 `.staging-*` 目录与 `.xberg-runtime-path.txt.*`
 /// 临时文件（B-2），单项失败跳过继续。
 ///
-/// 并发前提：主程序单实例，初始化由 gui.rs 的 convert_initializing 守卫
-/// 串行（单初始化线程），入口处发现的 `.staging-*` 必为历史残留，不存在
-/// 在途 staging 被误删的并发窗口。`.staging-*` 前缀的非目录条目不是本
-/// 流程产物（staging 恒为目录），按设计跳过；资产根不存在（首次运行）时
-/// 无需清理。
+/// `.staging-*` 清扫与截图 OCR 侧共用 [`crate::asset_util::
+/// cleanup_stale_staging_dirs`]；本模块只保留自己的残留策略。
+///
+/// 不扫 `.old-*` 备份：那是原子替换路径的暂存（asset_util），其中
+/// xberg-inference/<tag> 目标的残留由下次初始化的 prune_old_inference_tags
+/// 收集，入口一概删除会把替换失败后仍可恢复的备份提前清掉。
 fn cleanup_stale_staging(root: &Path) {
-    // 资产根尚不存在（首次运行）时无需清理。
+    cleanup_stale_staging_dirs(root);
+    // save_runtime_dir 的临时选择文件（.xberg-runtime-path.txt.<uuid>）在写入
+    // 或原子就位失败/进程崩溃时残留（文件非目录），与 .staging-* 同属入口兜底
+    // 清扫。
+    let selection_temp_prefix = format!(".{RUNTIME_SELECTION_FILE}.");
     let Ok(entries) = fs::read_dir(root) else {
         return;
     };
-    // save_runtime_dir 的临时选择文件（.xberg-runtime-path.txt.<uuid>）在写入
-    // 或原子就位失败/进程崩溃时残留（文件非目录），与 .staging-* 同属入口兜底
-    // 清扫。不扫 `.old-*` 备份：那是原子替换路径的暂存（asset_util），其中
-    // xberg-inference/<tag> 目标的残留由下次初始化的 prune_old_inference_tags
-    // 收集，入口一概删除会把替换失败后仍可恢复的备份提前清掉。
-    let selection_temp_prefix = format!(".{RUNTIME_SELECTION_FILE}.");
     for entry in entries.flatten() {
         let path = entry.path();
         let Some(name) = path.file_name().and_then(|name| name.to_str()) else {
             continue;
         };
-        if name.starts_with(".staging-") && path.is_dir() {
-            // 尽力而为：残留被防护软件短暂锁定时跳过，下次初始化再试。
-            let _ = fs::remove_dir_all(&path);
-        } else if name.starts_with(&selection_temp_prefix) && path.is_file() {
-            // 尽力而为：同上，单项失败跳过。
+        if name.starts_with(&selection_temp_prefix) && path.is_file() {
+            // 尽力而为：同 .staging-*，单项失败跳过。
             let _ = fs::remove_file(&path);
         }
     }
