@@ -40,33 +40,52 @@ pub fn request(
         request["command"].as_str(),
         Some("extract" | "ocr_snapshot" | "transcribe")
     ) {
-        let capabilities = checked(self::request(
+        let capabilities = match self::request(
             root,
             json!({"command":"capabilities"}),
             timeout.min(Duration::from_secs(15)),
             cancel,
-        )?)
-        .map_err(|e| format!("Xberg 共享接口尚不可用，请更新兼容发布物；不会启动备用引擎：{e}"))?;
-        let supports = |name: &str| {
-            capabilities["commands"]
-                .as_array()
-                .is_some_and(|commands| commands.iter().any(|command| command == name))
+        ) {
+            Ok(response) => match checked(response) {
+                Ok(capabilities) => Some(capabilities),
+                // 钉住发布物（run49.1）的 worker 协议没有 capabilities：目录已按
+                // 固定清单做成员级摘要校验（XB-09 版本锚），直接放行；请求级不
+                // 兼容仍由引擎按各自命令返回明确错误，不会混用模型或另起引擎。
+                Err(error) if error.contains("unsupported command 'capabilities'") => None,
+                Err(error) => {
+                    return Err(format!(
+                        "Xberg 共享接口尚不可用，请更新兼容发布物；不会启动备用引擎：{error}"
+                    ))
+                }
+            },
+            Err(error) => {
+                return Err(format!(
+                    "Xberg 共享接口尚不可用，请更新兼容发布物；不会启动备用引擎：{error}"
+                ))
+            }
         };
-        if capabilities["protocol_version"].as_u64().unwrap_or(0) < 2
-            || capabilities["cancellation"] != "cooperative"
-            || capabilities["timeout_ms"] != true
-            || capabilities["document_snapshot_concurrent"] != true
-            || !supports("cancel")
-            || !supports(request["command"].as_str().unwrap_or_default())
-        {
-            return Err("Xberg 共享接口阻塞：需要协议 v2、跨场景并发、请求级取消和超时；当前引擎不满足，未提交推理".into());
-        }
-        if request["mode"] == "fast"
-            && !capabilities["extract_modes"]
-                .as_array()
-                .is_some_and(|modes| modes.iter().any(|mode| mode == "fast"))
-        {
-            return Err("Xberg 共享接口阻塞：不支持请求级快速模式，未改用常规模式".into());
+        if let Some(capabilities) = capabilities {
+            let supports = |name: &str| {
+                capabilities["commands"]
+                    .as_array()
+                    .is_some_and(|commands| commands.iter().any(|command| command == name))
+            };
+            if capabilities["protocol_version"].as_u64().unwrap_or(0) < 2
+                || capabilities["cancellation"] != "cooperative"
+                || capabilities["timeout_ms"] != true
+                || capabilities["document_snapshot_concurrent"] != true
+                || !supports("cancel")
+                || !supports(request["command"].as_str().unwrap_or_default())
+            {
+                return Err("Xberg 共享接口阻塞：需要协议 v2、跨场景并发、请求级取消和超时；当前引擎不满足，未提交推理".into());
+            }
+            if request["mode"] == "fast"
+                && !capabilities["extract_modes"]
+                    .as_array()
+                    .is_some_and(|modes| modes.iter().any(|mode| mode == "fast"))
+            {
+                return Err("Xberg 共享接口阻塞：不支持请求级快速模式，未改用常规模式".into());
+            }
         }
     }
     let timeout = timeout.saturating_sub(started.elapsed());

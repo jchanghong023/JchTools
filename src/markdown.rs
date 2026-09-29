@@ -119,19 +119,7 @@ pub fn run(
     }
     readiness()?;
     let runtime_dir = markdown_assets::runtime_dir()?;
-    let supported = match supported_formats(&runtime_dir, &options.groups, cancel) {
-        Ok(formats) => formats,
-        Err(message) => {
-            if cancel.load(AtomicOrdering::Relaxed) {
-                // T-23：主动停止不作为错误；返回已停止的空汇总，由界面按停止收尾。
-                return Ok(Summary {
-                    stopped: true,
-                    ..Summary::default()
-                });
-            }
-            return Err(message);
-        }
-    };
+    let supported = supported_formats(&options.groups)?;
     let plan = scan(options, &supported)?;
     let total = plan.items.len() + plan.summary.skipped_existing + plan.summary.skipped_duplicate;
     events(Event::Started { total });
@@ -422,26 +410,26 @@ fn scan(options: &Options, supported: &BTreeSet<String>) -> Result<Plan, String>
     Ok(plan)
 }
 
-/// 格式清单探测的总超时：这是启动前的元数据查询，不受（也不占用）单文件预算，
-/// 但必须有界（F21/T-22），并响应停止请求（T-23）。
-const FORMATS_PROBE_TIMEOUT: Duration = Duration::from_secs(60);
-
-fn supported_formats(
-    runtime_dir: &Path,
-    groups: &[FormatGroup],
-    cancel: &AtomicBool,
-) -> Result<BTreeSet<String>, String> {
-    let response = crate::xberg_runtime::request(
-        runtime_dir,
-        serde_json::json!({"command":"formats"}),
-        FORMATS_PROBE_TIMEOUT,
-        cancel,
-    )?;
-    let response = crate::xberg_runtime::checked(response)
-        .map_err(|e| format!("共享 Xberg 缺少可用的格式查询接口：{e}"))?;
-    let rows = response
+/// 钉住发布物的格式清单：与 `markdown_assets::XBERG_TAG` 同一钉版纪律（XB-09
+/// 版本锚是发布 tag 与成员摘要，不是运行期探测）。真实发布物 run49.1 的 worker
+/// 协议只提供 `extract` / `ocr_snapshot` / `snapshot_state` / `transcribe`
+/// （`formats` / `capabilities` / `cancel` 等共享协议扩展「已实施、尚未发布验收」，
+/// 见 Xberg 仓 docs/requirements/WORKER.md），且 XB-14 禁止为查询另起 Xberg
+/// 进程，因此清单随钉住版本内置于资源，升级引擎 tag 时必须同步再生成
+/// （`xberg.exe formats --format json`，只读诊断）。
+fn supported_formats(groups: &[FormatGroup]) -> Result<BTreeSet<String>, String> {
+    let table: serde_json::Value =
+        serde_json::from_str(include_str!("../resources/markdown-xberg-formats.json"))
+            .map_err(|e| format!("内置 Xberg 格式清单无效：{e}"))?;
+    if table.get("tag").and_then(serde_json::Value::as_str) != Some(markdown_assets::XBERG_TAG) {
+        return Err(
+            "内置 Xberg 格式清单与固定版本不一致；请同步再生成 markdown-xberg-formats.json"
+                .to_string(),
+        );
+    }
+    let rows = table
         .get("formats")
-        .ok_or("共享 Xberg 格式响应缺少 formats 字段")?;
+        .ok_or("内置 Xberg 格式清单缺少 formats 字段")?;
     let bytes = serde_json::to_vec(rows).map_err(|e| e.to_string())?;
     let mut selected = parse_formats(&bytes, groups)?;
     if groups.contains(&FormatGroup::Media) {

@@ -1,0 +1,589 @@
+{
+ "tag": "v2026.9.29-0212-run49.1",
+ "formats": [
+  {
+   "extension": "7z",
+   "mime_type": "application/x-7z-compressed"
+  },
+  {
+   "extension": "adoc",
+   "mime_type": "text/asciidoc"
+  },
+  {
+   "extension": "asciidoc",
+   "mime_type": "text/asciidoc"
+  },
+  {
+   "extension": "asf",
+   "mime_type": "video/x-ms-wmv"
+  },
+  {
+   "extension": "avcs",
+   "mime_type": "image/avcs"
+  },
+  {
+   "extension": "avif",
+   "mime_type": "image/avif"
+  },
+  {
+   "extension": "bib",
+   "mime_type": "application/x-bibtex"
+  },
+  {
+   "extension": "bmp",
+   "mime_type": "image/bmp"
+  },
+  {
+   "extension": "commonmark",
+   "mime_type": "text/x-commonmark"
+  },
+  {
+   "extension": "csv",
+   "mime_type": "text/csv"
+  },
+  {
+   "extension": "db",
+   "mime_type": "application/vnd.sqlite3"
+  },
+  {
+   "extension": "dbf",
+   "mime_type": "application/vnd.dbf"
+  },
+  {
+   "extension": "dbk",
+   "mime_type": "application/docbook+xml"
+  },
+  {
+   "extension": "dj",
+   "mime_type": "text/x-djot"
+  },
+  {
+   "extension": "djot",
+   "mime_type": "text/x-djot"
+  },
+  {
+   "extension": "doc",
+   "mime_type": "application/msword"
+  },
+  {
+   "extension": "docbook",
+   "mime_type": "application/docbook+xml"
+  },
+  {
+   "extension": "docbook4",
+   "mime_type": "application/docbook+xml"
+  },
+  {
+   "extension": "docbook5",
+   "mime_type": "application/docbook+xml"
+  },
+  {
+   "extension": "docm",
+   "mime_type": "application/vnd.ms-word.document.macroEnabled.12"
+  },
+  {
+   "extension": "doctags",
+   "mime_type": "text/vnd.docling.doctags"
+  },
+  {
+   "extension": "docx",
+   "mime_type": "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
+  },
+  {
+   "extension": "dot",
+   "mime_type": "application/msword"
+  },
+  {
+   "extension": "dotm",
+   "mime_type": "application/vnd.ms-word.template.macroEnabled.12"
+  },
+  {
+   "extension": "dotx",
+   "mime_type": "application/vnd.openxmlformats-officedocument.wordprocessingml.template"
+  },
+  {
+   "extension": "eml",
+   "mime_type": "message/rfc822"
+  },
+  {
+   "extension": "enw",
+   "mime_type": "application/x-endnote+xml"
+  },
+  {
+   "extension": "epub",
+   "mime_type": "application/epub+zip"
+  },
+  {
+   "extension": "fb2",
+   "mime_type": "application/x-fictionbook+xml"
+  },
+  {
+   "extension": "fodg",
+   "mime_type": "application/vnd.oasis.opendocument.graphics-flat-xml"
+  },
+  {
+   "extension": "geojson",
+   "mime_type": "application/geo+json"
+  },
+  {
+   "extension": "gif",
+   "mime_type": "image/gif"
+  },
+  {
+   "extension": "gpkg",
+   "mime_type": "application/geopackage+sqlite3"
+  },
+  {
+   "extension": "gpkx",
+   "mime_type": "application/geopackage+sqlite3"
+  },
+  {
+   "extension": "gz",
+   "mime_type": "application/gzip"
+  },
+  {
+   "extension": "heic",
+   "mime_type": "image/heic"
+  },
+  {
+   "extension": "heics",
+   "mime_type": "image/heic-sequence"
+  },
+  {
+   "extension": "heif",
+   "mime_type": "image/heif"
+  },
+  {
+   "extension": "heifs",
+   "mime_type": "image/heif-sequence"
+  },
+  {
+   "extension": "hif",
+   "mime_type": "image/heif"
+  },
+  {
+   "extension": "htm",
+   "mime_type": "text/html"
+  },
+  {
+   "extension": "html",
+   "mime_type": "text/html"
+  },
+  {
+   "extension": "hwp",
+   "mime_type": "application/x-hwp"
+  },
+  {
+   "extension": "hwpx",
+   "mime_type": "application/haansofthwpx"
+  },
+  {
+   "extension": "ipynb",
+   "mime_type": "application/x-ipynb+json"
+  },
+  {
+   "extension": "j2c",
+   "mime_type": "image/j2c"
+  },
+  {
+   "extension": "j2k",
+   "mime_type": "image/j2c"
+  },
+  {
+   "extension": "jats",
+   "mime_type": "application/x-jats+xml"
+  },
+  {
+   "extension": "jb2",
+   "mime_type": "image/x-jbig2"
+  },
+  {
+   "extension": "jbig2",
+   "mime_type": "image/x-jbig2"
+  },
+  {
+   "extension": "jp2",
+   "mime_type": "image/jp2"
+  },
+  {
+   "extension": "jpc",
+   "mime_type": "image/j2c"
+  },
+  {
+   "extension": "jpeg",
+   "mime_type": "image/jpeg"
+  },
+  {
+   "extension": "jpg",
+   "mime_type": "image/jpeg"
+  },
+  {
+   "extension": "jpg2",
+   "mime_type": "image/jp2"
+  },
+  {
+   "extension": "json",
+   "mime_type": "application/json"
+  },
+  {
+   "extension": "jsonl",
+   "mime_type": "application/x-ndjson"
+  },
+  {
+   "extension": "key",
+   "mime_type": "application/x-iwork-keynote-sffkey"
+  },
+  {
+   "extension": "kml",
+   "mime_type": "application/vnd.google-earth.kml+xml"
+  },
+  {
+   "extension": "latex",
+   "mime_type": "application/x-latex"
+  },
+  {
+   "extension": "m1v",
+   "mime_type": "video/mpeg"
+  },
+  {
+   "extension": "m2v",
+   "mime_type": "video/mpeg"
+  },
+  {
+   "extension": "m4a",
+   "mime_type": "audio/mp4"
+  },
+  {
+   "extension": "m4v",
+   "mime_type": "video/mp4"
+  },
+  {
+   "extension": "markdown",
+   "mime_type": "text/markdown"
+  },
+  {
+   "extension": "md",
+   "mime_type": "text/markdown"
+  },
+  {
+   "extension": "mdx",
+   "mime_type": "text/mdx"
+  },
+  {
+   "extension": "mp3",
+   "mime_type": "audio/mpeg"
+  },
+  {
+   "extension": "mp4",
+   "mime_type": "video/mp4"
+  },
+  {
+   "extension": "mp4v",
+   "mime_type": "video/mp4"
+  },
+  {
+   "extension": "mpe",
+   "mime_type": "video/mpeg"
+  },
+  {
+   "extension": "mpeg",
+   "mime_type": "video/mpeg"
+  },
+  {
+   "extension": "mpg",
+   "mime_type": "video/mpeg"
+  },
+  {
+   "extension": "mpg4",
+   "mime_type": "video/mp4"
+  },
+  {
+   "extension": "mpga",
+   "mime_type": "audio/mpeg"
+  },
+  {
+   "extension": "msg",
+   "mime_type": "application/vnd.ms-outlook"
+  },
+  {
+   "extension": "nbib",
+   "mime_type": "application/x-pubmed"
+  },
+  {
+   "extension": "ndjson",
+   "mime_type": "application/x-ndjson"
+  },
+  {
+   "extension": "numbers",
+   "mime_type": "application/x-iwork-numbers-sffnumbers"
+  },
+  {
+   "extension": "nxml",
+   "mime_type": "application/x-jats+xml"
+  },
+  {
+   "extension": "odp",
+   "mime_type": "application/vnd.oasis.opendocument.presentation"
+  },
+  {
+   "extension": "ods",
+   "mime_type": "application/vnd.oasis.opendocument.spreadsheet"
+  },
+  {
+   "extension": "odt",
+   "mime_type": "application/vnd.oasis.opendocument.text"
+  },
+  {
+   "extension": "opml",
+   "mime_type": "application/xml+opml"
+  },
+  {
+   "extension": "org",
+   "mime_type": "text/org"
+  },
+  {
+   "extension": "pages",
+   "mime_type": "application/x-iwork-pages-sffpages"
+  },
+  {
+   "extension": "pbm",
+   "mime_type": "image/x-portable-bitmap"
+  },
+  {
+   "extension": "pdf",
+   "mime_type": "application/pdf"
+  },
+  {
+   "extension": "pgm",
+   "mime_type": "image/x-portable-graymap"
+  },
+  {
+   "extension": "png",
+   "mime_type": "image/png"
+  },
+  {
+   "extension": "pnm",
+   "mime_type": "image/x-portable-anymap"
+  },
+  {
+   "extension": "pot",
+   "mime_type": "application/vnd.ms-powerpoint"
+  },
+  {
+   "extension": "potm",
+   "mime_type": "application/vnd.ms-powerpoint.template.macroEnabled.12"
+  },
+  {
+   "extension": "potx",
+   "mime_type": "application/vnd.openxmlformats-officedocument.presentationml.template"
+  },
+  {
+   "extension": "ppm",
+   "mime_type": "image/x-portable-pixmap"
+  },
+  {
+   "extension": "pps",
+   "mime_type": "application/vnd.ms-powerpoint"
+  },
+  {
+   "extension": "ppsx",
+   "mime_type": "application/vnd.openxmlformats-officedocument.presentationml.slideshow"
+  },
+  {
+   "extension": "ppt",
+   "mime_type": "application/vnd.ms-powerpoint"
+  },
+  {
+   "extension": "pptm",
+   "mime_type": "application/vnd.ms-powerpoint.presentation.macroEnabled.12"
+  },
+  {
+   "extension": "pptx",
+   "mime_type": "application/vnd.openxmlformats-officedocument.presentationml.presentation"
+  },
+  {
+   "extension": "pst",
+   "mime_type": "application/vnd.ms-outlook-pst"
+  },
+  {
+   "extension": "qmd",
+   "mime_type": "text/x-quarto"
+  },
+  {
+   "extension": "ris",
+   "mime_type": "application/x-research-info-systems"
+  },
+  {
+   "extension": "rmd",
+   "mime_type": "text/x-r-markdown"
+  },
+  {
+   "extension": "rst",
+   "mime_type": "text/prs.fallenstein.rst"
+  },
+  {
+   "extension": "rtf",
+   "mime_type": "application/rtf"
+  },
+  {
+   "extension": "sqlite",
+   "mime_type": "application/vnd.sqlite3"
+  },
+  {
+   "extension": "sqlite3",
+   "mime_type": "application/vnd.sqlite3"
+  },
+  {
+   "extension": "svg",
+   "mime_type": "image/svg+xml"
+  },
+  {
+   "extension": "tar",
+   "mime_type": "application/x-tar"
+  },
+  {
+   "extension": "tex",
+   "mime_type": "application/x-latex"
+  },
+  {
+   "extension": "tgz",
+   "mime_type": "application/gzip"
+  },
+  {
+   "extension": "tif",
+   "mime_type": "image/tiff"
+  },
+  {
+   "extension": "tiff",
+   "mime_type": "image/tiff"
+  },
+  {
+   "extension": "toml",
+   "mime_type": "application/toml"
+  },
+  {
+   "extension": "tsv",
+   "mime_type": "text/tab-separated-values"
+  },
+  {
+   "extension": "txt",
+   "mime_type": "text/plain"
+  },
+  {
+   "extension": "typ",
+   "mime_type": "text/vnd.typst"
+  },
+  {
+   "extension": "typst",
+   "mime_type": "text/vnd.typst"
+  },
+  {
+   "extension": "vsd",
+   "mime_type": "application/vnd.visio"
+  },
+  {
+   "extension": "vsdm",
+   "mime_type": "application/vnd.ms-visio.drawing"
+  },
+  {
+   "extension": "vsdx",
+   "mime_type": "application/vnd.ms-visio.drawing"
+  },
+  {
+   "extension": "vtt",
+   "mime_type": "text/vtt"
+  },
+  {
+   "extension": "wav",
+   "mime_type": "audio/wav"
+  },
+  {
+   "extension": "webm",
+   "mime_type": "audio/webm"
+  },
+  {
+   "extension": "webp",
+   "mime_type": "image/webp"
+  },
+  {
+   "extension": "wmv",
+   "mime_type": "video/x-ms-wmv"
+  },
+  {
+   "extension": "wp",
+   "mime_type": "application/vnd.wordperfect"
+  },
+  {
+   "extension": "wp5",
+   "mime_type": "application/vnd.wordperfect"
+  },
+  {
+   "extension": "wp6",
+   "mime_type": "application/vnd.wordperfect"
+  },
+  {
+   "extension": "wpd",
+   "mime_type": "application/vnd.wordperfect"
+  },
+  {
+   "extension": "xht",
+   "mime_type": "application/xhtml+xml"
+  },
+  {
+   "extension": "xhtml",
+   "mime_type": "application/xhtml+xml"
+  },
+  {
+   "extension": "xla",
+   "mime_type": "application/vnd.ms-excel"
+  },
+  {
+   "extension": "xlam",
+   "mime_type": "application/vnd.ms-excel.addin.macroEnabled.12"
+  },
+  {
+   "extension": "xls",
+   "mime_type": "application/vnd.ms-excel"
+  },
+  {
+   "extension": "xlsb",
+   "mime_type": "application/vnd.ms-excel.sheet.binary.macroEnabled.12"
+  },
+  {
+   "extension": "xlsm",
+   "mime_type": "application/vnd.ms-excel.sheet.macroEnabled.12"
+  },
+  {
+   "extension": "xlsx",
+   "mime_type": "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+  },
+  {
+   "extension": "xlt",
+   "mime_type": "application/vnd.ms-excel"
+  },
+  {
+   "extension": "xltm",
+   "mime_type": "application/vnd.ms-excel.template.macroEnabled.12"
+  },
+  {
+   "extension": "xltx",
+   "mime_type": "application/vnd.openxmlformats-officedocument.spreadsheetml.template"
+  },
+  {
+   "extension": "xml",
+   "mime_type": "application/xml"
+  },
+  {
+   "extension": "yaml",
+   "mime_type": "application/yaml"
+  },
+  {
+   "extension": "yml",
+   "mime_type": "application/yaml"
+  },
+  {
+   "extension": "zip",
+   "mime_type": "application/zip"
+  }
+ ]
+}
