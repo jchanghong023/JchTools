@@ -873,39 +873,49 @@ _REQUIREMENT_DOCS = [
 ]
 
 
+_MIN_REQUIREMENT_DOC_LINES = 10
+
+
 def requirements_registry() -> str:
-    """固定需求目录的权威清单执法：四份需求文档必须在场且非空壳，目录内不得
-    出现未登记的额外 .md（新增需求文档须先更新 AGENTS.md 权威分工与本清单）。"""
+    """固定需求目录的权威清单执法：文档在场、非空壳且无未登记项.
+
+    四份需求文档必须在场且非空壳，目录内不得出现未登记的额外 .md
+    （新增需求文档须先更新 AGENTS.md 权威分工与本清单）。
+    """
     for path in _REQUIREMENT_DOCS:
         if not (ROOT / path).is_file():
-            raise AssertionError(f"权威需求文档缺失：{path}")
+            detail = f"权威需求文档缺失：{path}"
+            raise AssertionError(detail)
         lines = [line for line in read_text(ROOT / path).splitlines() if line.strip()]
-        if len(lines) < 10:
-            raise AssertionError(f"需求文档内容异常单薄（有效行 <10）：{path}")
+        if len(lines) < _MIN_REQUIREMENT_DOC_LINES:
+            detail = f"需求文档内容异常单薄（有效行 <{_MIN_REQUIREMENT_DOC_LINES}）：{path}"
+            raise AssertionError(detail)
     expected = {str(Path(p).name) for p in _REQUIREMENT_DOCS}
     names = {str(path.name) for path in (ROOT / "docs" / "requirements").glob("*.md")}
     extra = sorted(names - expected)
     if extra:
-        raise AssertionError(
-            f"docs/requirements/ 存在未登记的需求文档（先更新 AGENTS.md 权威分工与本检查清单）：{extra}"
-        )
+        detail = f"docs/requirements/ 存在未登记的需求文档（先更新 AGENTS.md 权威分工与本检查清单）：{extra}"
+        raise AssertionError(detail)
     return f"固定需求目录四份权威文档在场，无未登记文档：{sorted(expected)}"
 
 
 def snap_pipe_command_sync() -> str:
-    """截图服务命名管道协议双端同步执法：src/gui.rs 构造的每个 "command"
-    字面量都必须在 worker 服务分发表（optional/snap-ocr-worker/src/service.rs）
-    中有对应处理；两端无共享类型，本检查防协议各自演进造成静默失配。"""
+    """截图服务命名管道协议双端同步执法：gui 发出的命令服务端必须可处理.
+
+    src/gui.rs 构造的每个 "command" 字面量都必须在 worker 服务分发表
+    （optional/snap-ocr-worker/src/service.rs）中有对应处理；两端无共享类型，
+    本检查防协议各自演进造成静默失配。
+    """
     gui = read_text(ROOT / "src" / "gui.rs")
     service = read_text(ROOT / "optional" / "snap-ocr-worker" / "src" / "service.rs")
-    sent = sorted(set(re.findall(r'"command"\s*:\s*"([a-z-]+)"', gui)))
+    sent: list[str] = sorted(set(re.findall(r'"command"\s*:\s*"([a-z-]+)"', gui)))
     if not sent:
-        raise AssertionError("src/gui.rs 中未发现任何管道命令字面量（检查本身失效）")
+        detail = "src/gui.rs 中未发现任何管道命令字面量（检查本身失效）"
+        raise AssertionError(detail)
     unhandled = [cmd for cmd in sent if f'"{cmd}"' not in service]
     if unhandled:
-        raise AssertionError(
-            f"管道命令在服务端无处理：{unhandled}（gui.rs 与 service.rs 双端必须同步演进）"
-        )
+        detail = f"管道命令在服务端无处理：{unhandled}（gui.rs 与 service.rs 双端必须同步演进）"
+        raise AssertionError(detail)
     return f"gui.rs 发出的 {len(sent)} 个管道命令在服务端均有处理：{sent}"
 
 
