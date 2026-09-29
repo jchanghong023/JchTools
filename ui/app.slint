@@ -1,4 +1,4 @@
-import { Button, CheckBox, ComboBox, LineEdit, ListView, TextEdit, Spinner, AboutSlint, Palette } from "std-widgets.slint";
+import { ComboBox, ListView, TextEdit, Spinner, AboutSlint, Palette } from "std-widgets.slint";
 
 export struct RuleRow { key: string, title: string, hint: string, kind: int, checked: bool, index: int, options: [string], value: string }
 export struct PlanRow { id: string, selected: bool, kind: string, source: string, target: string, reason: string, state: string }
@@ -7,106 +7,185 @@ export struct ToolRow { id: string, name: string, summary: string }
 // 没有隔离记录时 target 为空，界面如实显示「未记录隔离位置」，不编造「已隔离」。
 export struct FailRow { stage: string, source: string, reason: string, target: string }
 // 界面配色：所有颜色都是不透明色，浅色/深色主题由 Design.dark 决定（写入方见 AppWindow）。
+// 视觉体系：中性灰阶 + 单一品牌蓝、1px 细边框卡片、统一圆角（6/8/12）与间距。
 global Design {
     in property <bool> dark: false;
-    // 主色与 fluent 标准控件同值（Palette.accent-background / accent-foreground 的取值）：
-    // Slint 1.17 的 Palette 颜色成员是 out 属性，应用层无法覆写，只能反向对齐，
-    // 否则自绘导航与标准按钮会是两种蓝。
-    in property <color> accent: dark ? #60cdff : #005fb8;
-    in property <color> accent-2: dark ? #8fd9f6 : #1570bb;
+    // 主色：品牌蓝 #2563EB（浅色）。Slint 1.17 的 Palette 颜色成员是 out 属性，应用层无法
+    // 覆写；std 控件（ComboBox/TextEdit/Spinner）仍走 Fluent 蓝，自绘控件统一走这里的品牌蓝。
+    in property <color> accent: dark ? #4C8DFF : #2563EB;
+    in property <color> accent-hover: dark ? #6AA2FF : #1D4ED8;
     in property <color> on-accent: dark ? #071620 : #ffffff;
-    in property <color> accent-ink: dark ? #9adcff : #00497f;
-    in property <color> danger: #dc2626;
+    in property <color> accent-ink: dark ? #9DBDFF : #1D4ED8;
+    in property <color> brand-1: #3B7BFF;
+    in property <color> brand-2: #1D4ED8;
+    in property <color> danger: dark ? #F87171 : #dc2626;
     in property <color> danger-ink: dark ? #fca5a5 : #b91c1c;
-    in property <color> warning: #f59e0b;
+    in property <color> warning: dark ? #fbbf24 : #d97706;
     in property <color> warning-ink: dark ? #fcd34d : #b45309;
-    // 中性底色：浅色是灰底白卡，深色是深灰底浅卡；大面积彩色渐变与光晕已移除。
-    in property <color> canvas: dark ? #15171b : #f3f4f6;
-    in property <color> rail: dark ? #1a1c21 : #eceef2;
-    in property <color> base: dark ? #1f2229 : #ffffff;
-    in property <color> ink: dark ? #eef1f8 : #16192a;
+    in property <color> success: dark ? #4ade80 : #16a34a;
+    // 中性底色：浅色是白内容区 + 浅灰侧栏；深色是深灰底浅卡。
+    in property <color> ink: dark ? #eef1f8 : #16181d;
+    in property <color> canvas: dark ? #15171b : #ffffff;
+    in property <color> rail: dark ? #191c22 : #f7f8fa;
+    in property <color> base: dark ? #1e2127 : #ffffff;
     in property <brush> text: ink;
-    in property <brush> text-muted: ink.transparentize(0.15);
-    in property <brush> bar: @linear-gradient(90deg, accent 0%, accent-2 100%);
+    in property <brush> text-muted: dark ? #a7aebb : #5c6270;
+    in property <color> muted-2: dark ? #6e7683 : #98a0ac;
+    in property <brush> bar: accent;
     in property <color> card: base;
-    // 内凹底色：分段控件底、进度轨等比卡片低一层，不再用主色染整条。
-    in property <color> sunken: dark ? #ffffff12 : #0f172a0f;
-    in property <color> line: dark ? #ffffff24 : #10182824;
-    in property <color> line-soft: dark ? #ffffff17 : #10182814;
-    in property <color> hover: dark ? #ffffff1a : #10182812;
-    in property <color> press: dark ? #ffffff2e : #1018281f;
-    in property <color> accent-soft: base.mix(accent, 0.84);
-    in property <color> accent-softer: base.mix(accent, 0.93);
-    // 提示条底色：由卡片底色派生，浅深两套都可读（不再在各处重复 mix 表达式）。
-    in property <color> info-bg: base.mix(accent, 0.90);
-    in property <color> info-line: base.mix(accent, 0.62);
-    in property <color> danger-bg: base.mix(danger, 0.90);
-    in property <color> danger-line: base.mix(danger, 0.62);
-    in property <color> warning-bg: base.mix(warning, 0.90);
-    in property <color> warning-line: base.mix(warning, 0.65);
+    // 内凹底色：分段控件底、进度轨等比卡片低一层。
+    in property <color> sunken: dark ? #262a31 : #f1f2f5;
+    in property <color> inset: dark ? #262a31 : #f1f2f5;
+    in property <color> soft: dark ? #22252b : #fafbfc;
+    in property <color> line: dark ? #2b2f37 : #e8e9ed;
+    in property <color> line-strong: dark ? #383d46 : #d8dae0;
+    in property <color> line-soft: dark ? #262a31 : #f0f1f4;
+    in property <color> hover: dark ? #2a2e36 : #eeeff3;
+    in property <color> press: dark ? #333842 : #e3e6eb;
+    in property <color> accent-soft: dark ? #23304a : #eef3ff;
+    in property <color> accent-softer: dark ? #1e2735 : #f5f8ff;
+    // 提示条底色：显式给出浅深两套，保证两主题都可读。
+    in property <color> info-bg: dark ? #23304a : #eef3ff;
+    in property <color> info-line: dark ? #31456e : #c7d8fe;
+    in property <color> danger-bg: dark ? #3a2226 : #fef2f2;
+    in property <color> danger-line: dark ? #5a2c31 : #fecaca;
+    in property <color> warning-bg: dark ? #39301e : #fef3e2;
+    in property <color> warning-line: dark ? #55482a : #f8deb8;
     // 规则说明的完整提示框：浅色主题用深色气泡、深色主题用浅色气泡，两套都保持反相差。
     in property <color> tip-bg: dark ? #343a42 : #1f2430;
     in property <color> tip-ink: dark ? #eef1f8 : #f6f7fb;
-    in property <color> tip-line: dark ? #ffffff2b : #ffffff1f;
-    in property <color> shadow: dark ? #00000066 : #0f172a1f;
+    in property <color> tip-line: dark ? #ffffff45 : #ffffff30;
+    in property <color> shadow: dark ? #00000066 : #1018280d;
+    in property <color> shadow-pop: dark ? #00000080 : #10182824;
     in property <color> scrim: dark ? #0000008c : #0f172a66;
+    // 控件细节色
+    in property <color> check-line: dark ? #4a505b : #c6cad3;
+    in property <color> disabled-bg: dark ? #2a2e35 : #eef0f3;
+    in property <color> close-hover: #e81123;
+    in property <color> kbd-bg: dark ? #262a31 : #f4f5f7;
 }
 
-component Label inherits Text { color: Design.text; font-size: 14px; }
+component Label inherits Text { color: Design.text; font-size: 13px; }
 component Muted inherits Text { color: Design.text-muted; font-size: 12px; wrap: word-wrap; }
 
 component Surface inherits Rectangle {
+    in property <length> radius: 12px;
+    in property <bool> pop: false;
     background: Design.card;
-    border-radius: 12px;
+    border-radius: root.radius;
     border-width: 1px;
     border-color: Design.line;
-    drop-shadow-color: Design.shadow;
-    drop-shadow-blur: 10px;
-    drop-shadow-offset-y: 3px;
+    drop-shadow-color: root.pop ? Design.shadow-pop : Design.shadow;
+    drop-shadow-blur: root.pop ? 8px : 3px;
+    drop-shadow-offset-y: root.pop ? 3px : 1px;
 }
 
-component LogoBadge inherits Rectangle {
-    width: 36px; height: 36px; border-radius: 12px;
-    background: Design.bar;
-    drop-shadow-color: Design.accent.transparentize(0.72);
-    drop-shadow-blur: 8px; drop-shadow-offset-y: 2px;
-    Text { text: "J"; color: Design.on-accent; font-size: 19px; font-weight: 700;
+// 标题栏与关于页的品牌徽标：蓝色渐变底 + 白色 J
+component BrandBadge inherits Rectangle {
+    in property <length> mark-size: 13px;
+    width: 24px; height: 24px; border-radius: 7px;
+    background: @linear-gradient(145deg, Design.brand-1 0%, Design.brand-2 100%);
+    drop-shadow-color: Design.accent.transparentize(0.6);
+    drop-shadow-blur: 3px; drop-shadow-offset-y: 1px;
+    Text { text: "J"; color: Design.on-accent; font-size: root.mark-size; font-weight: 700;
         width: 100%; height: 100%; horizontal-alignment: center; vertical-alignment: center; }
 }
 
-// 侧栏导航的小图标：几何图形绘制，不依赖字体或图片资源
-component NavGlyph inherits Rectangle {
-    in property <int> kind: 0;          // 0 目录，1 关于
+// 线性图标：24×24 视图框内按设计稿路径绘制，实例用 width/height 控制成品尺寸。
+// kind：0 目录整理/通用目录，1 关于，2 递归解压，3 MD 整理，4 转 Markdown，
+//       5 Git 工具，6 截图 OCR，7 盾牌（本地处理/固定规则），8 搜索，9 展开箭头，
+//      10 播放（开始），11 下载（初始化），12 刷新（重连）
+component Ico inherits Rectangle {
+    in property <int> kind: 0;
     in property <brush> tint: Design.text;
-    width: 16px; height: 16px;
+    width: 15px; height: 15px;
     background: transparent;
-
-    if kind == 0: Rectangle {           // 文件夹
-        x: 0; y: 4px; width: 16px; height: 11px; border-radius: 2px;
-        background: transparent; border-width: 1.5px; border-color: root.tint;
+    if kind == 0: Path {
+        width: parent.width; height: parent.height; viewbox-width: 24; viewbox-height: 24;
+        commands: "M3 7a2 2 0 0 1 2-2h4l2 2h8a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V7Z";
+        stroke: root.tint; stroke-width: 1.4px;
     }
-    if kind == 0: Rectangle { x: 1px; y: 1px; width: 7px; height: 4px; border-radius: 1px; background: root.tint; }
-    if kind == 1: Rectangle {
-        width: 16px; height: 16px; border-radius: 8px;
-        background: transparent; border-width: 1.5px; border-color: root.tint;
+    if kind == 1: Path {
+        width: parent.width; height: parent.height; viewbox-width: 24; viewbox-height: 24;
+        commands: "M3 12a9 9 0 1 1 18 0a9 9 0 1 1-18 0 M12 11v5 M11 8a1 1 0 1 1 2 0a1 1 0 1 1-2 0";
+        stroke: root.tint; stroke-width: 1.4px;
     }
-    if kind == 1: Rectangle { x: 7.25px; y: 4px; width: 1.5px; height: 1.5px; border-radius: 1px; background: root.tint; }
-    if kind == 1: Rectangle { x: 7.25px; y: 7px; width: 1.5px; height: 5px; border-radius: 1px; background: root.tint; }
+    if kind == 2: Path {
+        width: parent.width; height: parent.height; viewbox-width: 24; viewbox-height: 24;
+        commands: "M12 3 4 7v10l8 4 8-4V7l-8-4Z M4 7l8 4 8-4 M12 11v10";
+        stroke: root.tint; stroke-width: 1.4px;
+    }
+    if kind == 3: Path {
+        width: parent.width; height: parent.height; viewbox-width: 24; viewbox-height: 24;
+        commands: "M14 3H7a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h10a2 2 0 0 0 2-2V8l-5-5Z M14 3v5h5 M9 13h6 M9 17h6";
+        stroke: root.tint; stroke-width: 1.4px;
+    }
+    if kind == 4: Path {
+        width: parent.width; height: parent.height; viewbox-width: 24; viewbox-height: 24;
+        commands: "M14 3H7a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h10a2 2 0 0 0 2-2V8l-5-5Z M14 3v5h5 M12 12v6 M9 15l3 3 3-3";
+        stroke: root.tint; stroke-width: 1.4px;
+    }
+    if kind == 5: Path {
+        width: parent.width; height: parent.height; viewbox-width: 24; viewbox-height: 24;
+        commands: "M3.6 6a2.4 2.4 0 1 1 4.8 0a2.4 2.4 0 1 1-4.8 0 M3.6 18a2.4 2.4 0 1 1 4.8 0a2.4 2.4 0 1 1-4.8 0 M15.6 8a2.4 2.4 0 1 1 4.8 0a2.4 2.4 0 1 1-4.8 0 M6 8.4v7.2 M18 10.4c0 4.4-5 4.8-9.4 5";
+        stroke: root.tint; stroke-width: 1.4px;
+    }
+    if kind == 6: Path {
+        width: parent.width; height: parent.height; viewbox-width: 24; viewbox-height: 24;
+        commands: "M4 8V6a2 2 0 0 1 2-2h2 M16 4h2a2 2 0 0 1 2 2v2 M20 16v2a2 2 0 0 1-2 2h-2 M8 20H6a2 2 0 0 1-2-2v-2 M7 12h10";
+        stroke: root.tint; stroke-width: 1.4px;
+    }
+    if kind == 7: Path {
+        width: parent.width; height: parent.height; viewbox-width: 24; viewbox-height: 24;
+        commands: "M12 3 5 6v5c0 4.5 3 7.6 7 9 4-1.4 7-4.5 7-9V6l-7-3Z M9.5 12l2 2 3.5-3.5";
+        stroke: root.tint; stroke-width: 1.4px;
+    }
+    if kind == 8: Path {
+        width: parent.width; height: parent.height; viewbox-width: 24; viewbox-height: 24;
+        commands: "M4 11a7 7 0 1 1 14 0a7 7 0 1 1-14 0 M20 20l-3.5-3.5";
+        stroke: root.tint; stroke-width: 1.4px;
+    }
+    if kind == 9: Path {
+        width: parent.width; height: parent.height; viewbox-width: 24; viewbox-height: 24;
+        commands: "M6 9l6 6 6-6";
+        stroke: root.tint; stroke-width: 1.4px;
+    }
+    if kind == 10: Path {
+        width: parent.width; height: parent.height; viewbox-width: 24; viewbox-height: 24;
+        commands: "M7 5.5v13l11-6.5-11-6.5Z";
+        fill: root.tint;
+    }
+    if kind == 11: Path {
+        width: parent.width; height: parent.height; viewbox-width: 24; viewbox-height: 24;
+        commands: "M12 3v12 M7 10l5 5 5-5 M5 21h14";
+        stroke: root.tint; stroke-width: 1.4px;
+    }
+    if kind == 12: Path {
+        width: parent.width; height: parent.height; viewbox-width: 24; viewbox-height: 24;
+        commands: "M21 12a9 9 0 1 1-2.64-6.36 M21 3v6h-6";
+        stroke: root.tint; stroke-width: 1.4px;
+    }
 }
 
-// 侧栏与顶部导航项：整行可点，选中项带主色底和左侧色条
+// 状态小圆点：灰为空闲，琥珀为进行中，绿为就绪
+component Dot inherits Rectangle {
+    in property <brush> tone: Design.muted-2;
+    width: 7px; height: 7px; border-radius: 3.5px;
+    background: root.tone;
+}
+
+// 侧栏导航项：整行可点，选中项带品牌蓝浅底
 component NavItem inherits Rectangle {
     in property <string> text;
     in property <bool> active: false;
     in property <bool> enabled: true;
     in property <int> icon: -1;
     callback clicked();
-    height: 40px; border-radius: 8px;
+    height: 34px; border-radius: 6px;
     accessible-role: button;
     accessible-label: root.text;
     accessible-enabled: root.enabled;
     accessible-action-default => { root.clicked(); }
-    // 自绘控件默认不在 Tab 顺序里：键盘用户需要能走到导航，并在聚焦时看到焦点框。
     // FocusScope 参与 Tab 导航并接收按键；Space/回车等同于点击。
     fs := FocusScope {
         width: 100%; height: 100%;
@@ -117,36 +196,32 @@ component NavItem inherits Rectangle {
         }
     }
     border-width: fs.has-focus ? 1.5px : 0px;
-    border-color: Design.accent;
+    border-color: Design.accent-ink;
     background: !root.enabled ? transparent : root.active ? Design.accent-soft
         : (touch.pressed ? Design.press : touch.has-hover ? Design.hover : transparent);
     animate background, border-color { duration: 120ms; }
 
     touch := TouchArea { enabled: root.enabled; mouse-cursor: pointer; clicked => { root.clicked(); } }
-    if root.active: Rectangle {
-        x: 0; y: (root.height - 22px) / 2; width: 3px; height: 22px; border-radius: 2px;
-        background: Design.accent;
-    }
-    if root.icon >= 0: NavGlyph {
-        x: 14px; y: (root.height - 16px) / 2; kind: root.icon;
-        tint: !root.enabled ? Design.text-muted : (root.active ? Design.accent-ink : Design.text-muted);
+    if root.icon >= 0: Ico {
+        x: 10px; y: (root.height - self.height) / 2; kind: root.icon;
+        tint: root.active ? Design.accent : Design.muted-2;
     }
     Text {
-        // 父级宽度由固定行高与横向布局约束，不会形成绑定环；Slint 1.17 也不支持 100% 与 px 混合运算
-        x: root.icon >= 0 ? 38px : 14px; width: root.width - (root.icon >= 0 ? 48px : 24px); height: root.height;
-        text: root.text; font-size: 14px; vertical-alignment: center; overflow: elide;
-        color: !root.enabled ? Design.text-muted : (root.active ? Design.accent-ink : Design.text);
-        font-weight: root.active ? 600 : 400;
+        // 父级宽度由固定行高与横向布局约束，不会形成绑定环
+        x: root.icon >= 0 ? 32px : 12px; width: root.width - (root.icon >= 0 ? 42px : 24px); height: root.height;
+        text: root.text; font-size: 13px; vertical-alignment: center; overflow: elide;
+        color: !root.enabled ? Design.muted-2 : (root.active ? Design.accent-ink : Design.text-muted);
+        font-weight: root.active ? 600 : 500;
     }
 }
 
-// 分段式标签（规则分区、面板切换）
+// 分段式标签（规则分区、面板筛选）：内凹底容器里的白色浮起选中项
 component Pill inherits Rectangle {
     in property <string> text;
     in property <bool> active: false;
     in property <bool> enabled: true;
     callback clicked();
-    height: 34px; border-radius: 8px;
+    height: 28px; border-radius: 6px;
     accessible-role: button;
     accessible-label: root.text;
     accessible-enabled: root.enabled;
@@ -159,29 +234,31 @@ component Pill inherits Rectangle {
             return reject;
         }
     }
-    // 选中态保持实心主色（分段控件里只有选中项着色），未选中退成卡片色，整体不再染一条主色底。
-    background: !root.enabled ? Design.sunken : root.active ? Design.accent
-        : (touch.pressed ? Design.press : touch.has-hover ? Design.hover : Design.card);
-    border-width: fs.has-focus ? 2px : (root.active ? 0px : 1px);
-    border-color: fs.has-focus ? Design.accent-ink : Design.line-soft;
+    border-width: fs.has-focus ? 1.5px : 0px;
+    border-color: Design.accent-ink;
+    background: !root.enabled ? transparent : root.active ? Design.card
+        : (touch.pressed ? Design.press : touch.has-hover ? Design.hover : transparent);
+    drop-shadow-color: root.active ? Design.shadow : transparent;
+    drop-shadow-blur: 2px;
+    drop-shadow-offset-y: 1px;
     animate background, border-color { duration: 120ms; }
 
     touch := TouchArea { enabled: root.enabled; mouse-cursor: pointer; clicked => { root.clicked(); } }
     Text {
-        text: root.text; font-size: 13px; horizontal-alignment: center; vertical-alignment: center;
+        text: root.text; font-size: 12.5px; horizontal-alignment: center; vertical-alignment: center;
         width: 100%; height: 100%; overflow: elide;
-        color: !root.enabled ? Design.text-muted : (root.active ? Design.on-accent : Design.text);
+        color: !root.enabled ? Design.muted-2 : (root.active ? Design.ink : Design.text-muted);
         font-weight: root.active ? 600 : 500;
     }
 }
 
-// 面板切换用下划线标签（与分区的实心胶囊区分开，两者不同色不同形）
+// 面板切换用下划线页签（与分区的实心胶囊区分开，两者不同色不同形）
 component Tab inherits Rectangle {
     in property <string> text;
     in property <bool> active: false;
     in property <bool> enabled: true;
     callback clicked();
-    height: 34px; border-radius: 8px;
+    height: 34px;
     background: (!root.enabled || root.active) ? transparent
         : (touch.pressed ? Design.press : touch.has-hover ? Design.hover : transparent);
     accessible-role: tab;
@@ -197,26 +274,26 @@ component Tab inherits Rectangle {
         }
     }
     border-width: fs.has-focus ? 1.5px : 0px;
-    border-color: Design.accent;
+    border-color: Design.accent-ink;
 
     touch := TouchArea { enabled: root.enabled; mouse-cursor: pointer; clicked => { root.clicked(); } }
     Text {
-        x: 10px; width: root.width - 20px; height: root.height; text: root.text; font-size: 14px;
+        x: 12px; width: root.width - 24px; height: root.height; text: root.text; font-size: 13px;
         horizontal-alignment: center; vertical-alignment: center; overflow: elide;
-        color: !root.enabled ? Design.text-muted : (root.active ? Design.accent-ink : Design.text);
+        color: !root.enabled ? Design.muted-2 : (root.active ? Design.ink : Design.text-muted);
         font-weight: root.active ? 600 : 500;
     }
     animate background, border-color { duration: 120ms; }
     if root.active: Rectangle {
-        x: 12px; y: root.height - 3px; width: root.width - 24px; height: 2.5px; border-radius: 1.5px;
-        background: Design.bar;
+        x: 12px; y: root.height - 2px; width: root.width - 24px; height: 2px; border-radius: 1px;
+        background: Design.accent;
     }
 }
 
-// 进度条：已知总量用渐变填充，未知总量（扫描/哈希）用往返扫动的光带
+// 进度条：已知总量用品牌蓝填充，未知总量（扫描/哈希）用往返扫动的光带
 component ProgressBar inherits Rectangle {
     in property <float> progress: -1;
-    height: 8px; border-radius: 4px;
+    height: 6px; border-radius: 3px;
     background: Design.sunken;
     clip: true;
     accessible-role: progress-indicator;
@@ -227,19 +304,19 @@ component ProgressBar inherits Rectangle {
     property <length> bar-width: root.progress >= 0 ? max(4px, root.width * min(root.progress, 1.0)) : root.width / 4;
     Timer { interval: 850ms; running: root.progress < 0; triggered => { root.sweep = !root.sweep; } }
     Rectangle {
-        width: root.bar-width; height: parent.height; border-radius: 4px;
+        width: root.bar-width; height: parent.height; border-radius: 3px;
         background: Design.bar;
         x: root.progress >= 0 ? 0px : (root.sweep ? root.width - self.width : 0px);
         animate x { duration: 850ms; easing: ease-in-out; }
     }
 }
 
-// 自绘窗口按钮：最小化、最大化/还原、关闭
+// 自绘窗口按钮：最小化、最大化/还原、关闭（46px 方形，悬停浅灰，关闭红）
 component CaptionButton inherits Rectangle {
     in property <int> kind: 0;
     in property <bool> maximized: false;
     callback activated();
-    width: 46px; height: 32px;
+    width: 46px; height: 46px;
     accessible-role: button;
     accessible-label: kind == 0 ? "最小化" : kind == 1 ? (maximized ? "还原" : "最大化") : "关闭";
     accessible-action-default => { root.activated(); }
@@ -252,36 +329,36 @@ component CaptionButton inherits Rectangle {
     }
     border-width: fs.has-focus ? 1.5px : 0px;
     border-color: Design.accent;
-    property <brush> glyph-color: touch.has-hover && kind == 2 ? Design.on-accent : Design.text;
-    background: touch.has-hover ? (kind == 2 ? Design.danger : (touch.pressed ? Design.press : Design.hover)) : transparent;
+    property <brush> glyph-color: touch.has-hover && kind == 2 ? Design.on-accent : Design.text-muted;
+    background: touch.has-hover ? (kind == 2 ? Design.close-hover : (touch.pressed ? Design.press : Design.hover)) : transparent;
     animate background { duration: 120ms; }
 
     touch := TouchArea { mouse-cursor: pointer; clicked => { root.activated(); } }
 
     if kind == 0: Rectangle {
-        width: 10px; height: 1px; background: root.glyph-color;
-        x: (root.width - 10px) / 2; y: (root.height - 1px) / 2;
+        width: 12px; height: 1.2px; background: root.glyph-color;
+        x: (root.width - 12px) / 2; y: (root.height - 1.2px) / 2;
     }
     if kind == 1 && !maximized: Rectangle {
+        width: 11px; height: 11px; background: transparent;
+        border-width: 1.2px; border-color: root.glyph-color;
+        x: (root.width - 11px) / 2; y: (root.height - 11px) / 2;
+    }
+    if kind == 1 && maximized: Rectangle {
         width: 10px; height: 10px; background: transparent;
-        border-width: 1px; border-color: root.glyph-color;
-        x: (root.width - 10px) / 2; y: (root.height - 10px) / 2;
+        border-width: 1.2px; border-color: root.glyph-color;
+        x: (root.width - 10px) / 2 - 2px; y: (root.height - 10px) / 2 + 2px;
     }
     if kind == 1 && maximized: Rectangle {
-        width: 9px; height: 9px; background: transparent;
-        border-width: 1px; border-color: root.glyph-color;
-        x: (root.width - 9px) / 2 - 2px; y: (root.height - 9px) / 2 + 2px;
-    }
-    if kind == 1 && maximized: Rectangle {
-        width: 9px; height: 9px; background: Design.card;
-        border-width: 1px; border-color: root.glyph-color;
-        x: (root.width - 9px) / 2 + 1px; y: (root.height - 9px) / 2 - 1px;
+        width: 10px; height: 10px; background: Design.rail;
+        border-width: 1.2px; border-color: root.glyph-color;
+        x: (root.width - 10px) / 2 + 1px; y: (root.height - 10px) / 2 - 1px;
     }
     if kind == 2: Path {
-        width: 10px; height: 10px;
-        x: (root.width - 10px) / 2; y: (root.height - 10px) / 2;
-        commands: "M 0 0 L 10 10 M 10 0 L 0 10";
-        stroke: root.glyph-color; stroke-width: 1px;
+        width: 11px; height: 11px;
+        x: (root.width - 11px) / 2; y: (root.height - 11px) / 2;
+        commands: "M 0 0 L 11 11 M 11 0 L 0 11";
+        stroke: root.glyph-color; stroke-width: 1.2px;
     }
 }
 
@@ -293,13 +370,228 @@ component HintTip inherits Rectangle {
     border-radius: 8px;
     border-width: 1px;
     border-color: Design.tip-line;
-    drop-shadow-color: Design.shadow;
+    drop-shadow-color: Design.shadow-pop;
     drop-shadow-blur: 12px;
     drop-shadow-offset-y: 4px;
 
     VerticalLayout { padding: 10px;
         // 使用处宽度 400px 减去左右内边距即为正文宽度；两者需要一起改。
         Text { text: root.body; width: 380px; wrap: word-wrap; color: Design.tip-ink; font-size: 12px; }
+    }
+}
+
+// 通用按钮：primary 品牌蓝实心，secondary 白底细边框；均支持前置图标与禁用态。
+component AppButton inherits Rectangle {
+    in property <string> text;
+    in property <bool> primary: false;
+    in property <bool> enabled: true;
+    in property <int> icon: -1;
+    in property <bool> small: false;
+    callback clicked();
+    height: root.small ? 32px : 36px;
+    border-radius: 6px;
+    accessible-role: button;
+    accessible-label: root.text;
+    accessible-enabled: root.enabled;
+    accessible-action-default => { root.clicked(); }
+    fs := FocusScope {
+        width: 100%; height: 100%;
+        key-pressed(event) => {
+            if (!root.enabled) { return reject; }
+            if (event.text == " " || event.text == "\n") { root.clicked(); return accept; }
+            return reject;
+        }
+    }
+    border-width: fs.has-focus ? 1.5px : (root.primary ? 0px : 1px);
+    border-color: fs.has-focus ? Design.accent-ink : Design.line-strong;
+    background: !root.enabled ? Design.disabled-bg
+        : root.primary ? (touch.pressed ? Design.accent-hover : touch.has-hover ? Design.accent-hover : Design.accent)
+        : (touch.pressed ? Design.press : touch.has-hover ? Design.soft : Design.card);
+    drop-shadow-color: !root.enabled ? transparent
+        : root.primary ? Design.accent.transparentize(0.55) : Design.shadow;
+    drop-shadow-blur: 2px;
+    drop-shadow-offset-y: 1px;
+    animate background, border-color { duration: 120ms; }
+
+    touch := TouchArea { enabled: root.enabled; mouse-cursor: pointer; clicked => { root.clicked(); } }
+    HorizontalLayout {
+        padding-left: root.icon >= 0 ? 13px : 16px;
+        padding-right: root.icon >= 0 ? 15px : 16px;
+        spacing: 7px; cross-axis-alignment: center;
+        if root.icon >= 0: Ico {
+            kind: root.icon; width: 14px; height: 14px;
+            tint: !root.enabled ? Design.muted-2 : root.primary ? Design.on-accent : Design.text-muted;
+        }
+        Text {
+            text: root.text; font-size: root.small ? 12.5px : 13px; font-weight: 500;
+            vertical-alignment: center; horizontal-alignment: center; overflow: elide;
+            color: !root.enabled ? Design.muted-2 : root.primary ? Design.on-accent : Design.ink;
+        }
+    }
+}
+
+// 勾选框：17px 圆角方框，选中品牌蓝底白勾
+component Check inherits Rectangle {
+    in property <string> text;
+    in-out property <bool> checked: false;
+    in property <bool> enabled: true;
+    callback toggled();
+    height: 24px;
+    accessible-role: checkbox;
+    accessible-label: root.text;
+    accessible-checked: root.checked;
+    accessible-enabled: root.enabled;
+    accessible-action-default => { if (root.enabled) { root.checked = !root.checked; root.toggled(); } }
+    fs := FocusScope {
+        width: 100%; height: 100%;
+        key-pressed(event) => {
+            if (!root.enabled) { return reject; }
+            if (event.text == " " || event.text == "\n") {
+                root.checked = !root.checked; root.toggled(); return accept;
+            }
+            return reject;
+        }
+    }
+    touch := TouchArea { enabled: root.enabled; mouse-cursor: pointer;
+        clicked => { root.checked = !root.checked; root.toggled(); } }
+    HorizontalLayout { spacing: 7px; cross-axis-alignment: center;
+        Rectangle {
+            width: 17px; height: 17px; border-radius: 5px;
+            border-width: 1.5px;
+            border-color: root.checked ? Design.accent : (fs.has-focus ? Design.accent-ink : Design.check-line);
+            background: root.checked ? Design.accent : Design.card;
+            drop-shadow-color: root.checked ? Design.accent.transparentize(0.6) : transparent;
+            drop-shadow-blur: 2px; drop-shadow-offset-y: 1px;
+            if root.checked: Path {
+                width: 11px; height: 11px; x: (parent.width - self.width) / 2; y: (parent.height - self.height) / 2;
+                viewbox-width: 24; viewbox-height: 24;
+                commands: "M20 6 9 17l-5-5";
+                stroke: Design.on-accent; stroke-width: 3px;
+            }
+        }
+        if root.text != "": Text {
+            text: root.text; font-size: 12.5px; vertical-alignment: center; wrap: no-wrap;
+            color: root.enabled ? Design.text-muted : Design.muted-2;
+        }
+    }
+}
+
+// 文本输入框：36px 白底细边框，聚焦品牌蓝描边；支持右键菜单与占位符。
+component Field inherits Rectangle {
+    in-out property <string> text <=> input.text;
+    in property <string> placeholder-text: "";
+    in property <bool> enabled: true;
+    in property <bool> right-align: false;
+    in property <int> icon: -1;
+    callback edited(string);
+    forward-focus: input;
+    height: 36px;
+    border-radius: 6px;
+    border-width: 1px;
+    border-color: input.has-focus ? Design.accent : (root.enabled ? Design.line-strong : Design.line);
+    background: root.enabled ? Design.card : Design.soft;
+    drop-shadow-color: input.has-focus ? Design.accent.transparentize(0.78) : transparent;
+    drop-shadow-blur: 3px;
+    clip: true;
+    accessible-role: text-input;
+    accessible-enabled: root.enabled;
+    accessible-value <=> input.text;
+    accessible-placeholder-text: root.placeholder-text;
+    accessible-read-only: false;
+    accessible-action-set-value(v) => { root.text = v; root.edited(v); }
+
+    ta := TouchArea { clicked => { input.focus(); } }
+    HorizontalLayout {
+        padding-left: root.icon >= 0 ? 10px : 12px;
+        padding-right: 12px;
+        spacing: 8px;
+        if root.icon >= 0: Ico { kind: root.icon; tint: Design.muted-2; }
+        cma := ContextMenuArea {
+            enabled: root.enabled;
+            horizontal-stretch: 1;
+            Menu {
+                MenuItem { title: "剪切"; enabled: root.enabled;
+                    activated => { input.cut(); } }
+                MenuItem { title: "复制"; enabled: input.text != "";
+                    activated => { input.copy(); } }
+                MenuItem { title: "粘贴"; enabled: root.enabled;
+                    activated => { input.paste(); } }
+                MenuItem { title: "全选"; enabled: input.text != "";
+                    activated => { input.select-all(); } }
+            }
+            input := TextInput {
+                accessible-role: none;
+                property <length> computed-x: 0px;
+                x: min(0px, max(cma.width - self.width - self.text-cursor-width, self.computed-x));
+                width: max(cma.width - self.text-cursor-width, self.preferred-width);
+                height: 100%;
+                vertical-alignment: center;
+                single-line: true;
+                enabled: root.enabled;
+                font-size: 12.5px;
+                color: root.enabled ? Design.ink : Design.muted-2;
+                selection-background-color: Design.accent-soft;
+                selection-foreground-color: Design.ink;
+                horizontal-alignment: root.right-align ? TextHorizontalAlignment.right : TextHorizontalAlignment.left;
+                cursor-position-changed(cursor-position) => {
+                    if (cursor-position.x + self.computed_x < 0px) {
+                        self.computed-x = -cursor-position.x;
+                    } else if (cursor-position.x + self.computed_x > cma.width - self.text-cursor-width) {
+                        self.computed-x = cma.width - cursor-position.x - self.text-cursor-width;
+                    }
+                }
+                edited => { root.edited(self.text); }
+            }
+            Text {
+                width: 100%; height: 100%; accessible-role: none;
+                text: root.placeholder-text; font-size: 12.5px; color: Design.muted-2;
+                vertical-alignment: center;
+                visible: input.text == "" && input.preedit-text == "";
+            }
+        }
+    }
+}
+
+// 键帽样式的热键展示
+component Kbd inherits Rectangle {
+    in property <string> text;
+    height: 24px;
+    border-radius: 6px;
+    background: Design.kbd-bg;
+    border-width: 1px;
+    border-color: Design.line-strong;
+    HorizontalLayout { padding-left: 10px; padding-right: 10px;
+        Text { text: root.text; font-family: "Consolas"; font-size: 11.5px; color: Design.ink;
+            vertical-alignment: center; horizontal-alignment: center; }
+    }
+    Rectangle { x: 1px; y: parent.height - 2px; width: parent.width - 2px; height: 1px;
+        background: Design.line-strong; }
+}
+
+// 运行日志卡片：白色题头 + 浅底正文（等宽字体，最新在上）
+component LogCard inherits Surface {
+    in property <string> title: "运行日志";
+    in-out property <string> body: "";
+    VerticalLayout { spacing: 0px;
+        Rectangle {
+            height: 40px;
+            background: Design.card;
+            HorizontalLayout { padding-left: 16px; padding-right: 16px; cross-axis-alignment: center;
+                Text { text: root.title; font-size: 12px; color: Design.text-muted; font-weight: 500;
+                    vertical-alignment: center; overflow: elide; }
+                Rectangle { horizontal-stretch: 1; background: transparent; }
+                Text { text: "最新的消息显示在最上面 · 界面只保留最近 300 条"; font-size: 11.5px;
+                    color: Design.muted-2; vertical-alignment: center; overflow: elide; }
+            }
+            Rectangle { y: parent.height - 1px; height: 1px; width: 100%; background: Design.line-soft; }
+        }
+        Rectangle {
+            background: Design.soft;
+            vertical-stretch: 1;
+            VerticalLayout { padding-top: 10px; padding-bottom: 10px; padding-left: 14px; padding-right: 14px;
+                TextEdit { text <=> root.body; read-only: true; font-family: "Consolas"; vertical-stretch: 1; }
+            }
+        }
     }
 }
 
@@ -316,30 +608,29 @@ component RuleRowItem inherits Rectangle {
     callback rule-edited(value: string);
     height: 44px;
 
-    HorizontalLayout { padding-left: 16px; padding-right: 16px; spacing: 16px; cross-axis-alignment: center;
+    HorizontalLayout { padding-left: 20px; padding-right: 20px; spacing: 16px; cross-axis-alignment: center;
         Rectangle { horizontal-stretch: 1;
             VerticalLayout { spacing: 2px;
                 Label { text: root.rule.title; font-weight: 600; font-size: 13px; overflow: elide; }
-                Muted { text: root.rule.hint; wrap: no-wrap; overflow: elide; font-size: 11px; }
+                Muted { text: root.rule.hint; wrap: no-wrap; overflow: elide; font-size: 11px; color: Design.muted-2; }
             }
             if root.show-hint: Tooltip { HintTip { width: 400px; body: root.rule.hint; } }
         }
         // 规则控件直接写 config，模态确认期间必须与目录输入同口径禁用：
         // 否则键盘可穿透确认框改删除策略，确认文案与实际执行不符。
-        if root.rule.kind == 0: CheckBox { checked: root.rule.checked; enabled: root.editable;
-            text: "启用"; accessible-label: root.rule.title;
+        if root.rule.kind == 0: Check { checked: root.rule.checked; enabled: root.editable;
+            text: "启用";
             toggled => { root.rule-toggled(self.checked); } }
         if root.rule.kind == 1: ComboBox { width: 220px; model: root.rule.options; current-index: root.rule.index;
-            enabled: root.editable; accessible-label: root.rule.title;
+            enabled: root.editable;
             selected(value) => { root.rule-chosen(self.current-index); } }
-        if root.rule.kind == 2: LineEdit { width: 160px; text: root.rule.value; enabled: root.editable;
-            horizontal-alignment: right; accessible-label: root.rule.title;
+        if root.rule.kind == 2: Field { width: 160px; text: root.rule.value; enabled: root.editable;
+            right-align: true;
             // Slint 1.17 的 UIA 桥接会把纯数字的 accessible-value 当成数值属性上报，
             // 读屏读到的值只有 0；这里把当前值写进描述，读屏聚焦时报“当前值 N”。
-            accessible-description: "当前值 " + root.rule.value;
             edited(value) => { root.rule-edited(value); } }
     }
-    Rectangle { y: parent.height - 1px; x: 16px; height: 1px; width: parent.width - 32px;
+    Rectangle { y: parent.height - 1px; x: 20px; height: 1px; width: parent.width - 40px;
         background: Design.line-soft; }
 }
 
@@ -352,7 +643,7 @@ export component AppWindow inherits Window {
     min-width: 960px; min-height: 620px;
     background: Design.canvas;
     default-font-family: "Microsoft YaHei UI";
-    default-font-size: 14px;
+    default-font-size: 13px;
     in-out property <string> directory;
     in-out property <int> screen: 0;
     in-out property <int> panel: 0;
@@ -520,8 +811,8 @@ export component AppWindow inherits Window {
     callback window-drag-start(length,length);
     callback window-drag-move(length,length);
     property <length> caption-area: 138px;
-    property <length> rail-width: 208px;
-    property <length> page-padding: 24px;
+    property <length> rail-width: 244px;
+    property <length> page-padding: 28px;
 
     // 主题：0 跟随系统，1 浅色，2 深色；自绘配色与控件配色保持一致
     function apply-theme() {
@@ -532,9 +823,25 @@ export component AppWindow inherits Window {
     changed theme => { root.apply-theme(); }
     changed system-dark => { root.apply-theme(); }
 
+    // 页面标题（标题栏文档位与页头共用同一映射）
+    function screen-title() -> string {
+        return root.screen == 0 ? "目录整理" : root.screen == 2 ? "递归解压"
+            : root.screen == 3 ? "MD 整理" : root.screen == 4 ? "Git 工具" : root.screen == 5 ? "转 Markdown" : root.screen == 6 ? "截图 OCR" : "关于";
+    }
+    // 侧栏图标按工具 id 映射（registry 中注册的 id）
+    function tool-icon(id: string) -> int {
+        if (id == "recursive-extract") { return 2; }
+        if (id == "directory-organizer") { return 0; }
+        if (id == "md-organizer") { return 3; }
+        if (id == "markdown-converter") { return 4; }
+        if (id == "git-tools") { return 5; }
+        if (id == "snap-ocr") { return 6; }
+        return 0;
+    }
+
     // 无系统标题栏：顶部条带负责拖动与窗口按钮，其余内容与普通窗口一致
     TouchArea {
-        x: 0; y: 0; width: parent.width; height: 32px;
+        x: 0; y: 0; width: parent.width; height: 46px;
         accessible-role: button;
         accessible-label: "窗口标题栏：拖动移动窗口，双击切换最大化";
         accessible-action-default => { root.maximized = !root.maximized; }
@@ -545,775 +852,913 @@ export component AppWindow inherits Window {
         moved => { root.window-drag-move(self.mouse-x, self.mouse-y); }
     }
 
-    HorizontalLayout {
+    VerticalLayout {
         spacing: 0px;
+        // ===== 标题栏（46px）：品牌 + 产品名 + 当前工具；右侧窗口按钮见文件末尾覆盖层 =====
         Rectangle {
-            width: root.rail-width; background: Design.rail;
-            Rectangle { x: parent.width - 1px; width: 1px; height: parent.height; background: Design.line; }
-            VerticalLayout {
-                padding: 20px; padding-top: 40px; padding-bottom: 16px; spacing: 8px;
-                HorizontalLayout { spacing: 12px; cross-axis-alignment: center;
-                    LogoBadge { width: 40px; height: 40px; border-radius: 12px; }
-                    VerticalLayout { spacing: 2px;
-                        Text { text: "JchTools"; color: Design.text; font-size: 18px; font-weight: 700; }
-                        Muted { text: "本地工具箱"; font-size: 11px; }
-                    }
-                }
-                Rectangle { height: 1px; background: Design.line-soft; }
-                if root.tool-count > 5: LineEdit {
-                    text <=> root.tool-search; placeholder-text: "搜索工具";
-                    edited(value) => { root.search-tools(value); }
-                }
-                Muted { text: "工具"; font-size: 11px; font-weight: 600; }
-                for tool in root.tools: NavItem {
-                    text: tool.name;
-                    icon: 0;
-                    active: tool.id == root.active-tool-id;
-                    // 模态确认层打开时导航不可点，避免点击穿透背景控件。
-                    enabled: root.confirm-kind == 0;
-                    clicked => { root.select-tool(tool.id); }
-                }
-                Rectangle { height: 12px; background: transparent; }
-                NavItem { text: "关于"; icon: 1; active: root.screen == 1; enabled: root.confirm-kind == 0; clicked => { root.navigation(1); } }
-                Rectangle { vertical-stretch: 1; background: transparent; }
-                Rectangle { height: 1px; background: Design.line-soft; }
-                Muted { text: "本地处理 · 不上传文件\nWindows 优先"; font-size: 11px; }
+            height: 46px;
+            background: Design.rail;
+            HorizontalLayout {
+                padding-left: 16px;
+                spacing: 10px;
+                cross-axis-alignment: center;
+                BrandBadge { width: 24px; height: 24px; }
+                Text { text: "JchTools"; font-size: 13px; font-weight: 600; color: Design.ink; vertical-alignment: center; }
+                Text { text: "本地工具箱"; font-size: 11.5px; color: Design.muted-2; vertical-alignment: center; }
+                Rectangle { width: 1px; height: 14px; background: Design.line-strong; }
+                Text { text: root.screen-title(); font-size: 11.5px; color: Design.muted-2; vertical-alignment: center; overflow: elide; }
             }
+            Rectangle { y: parent.height - 1px; height: 1px; width: 100%; background: Design.line; }
         }
-        VerticalLayout {
-            padding: root.page-padding; padding-top: 36px; padding-bottom: 16px; spacing: 10px;
-            // 页面标题区
-            HorizontalLayout { height: 32px; spacing: 12px; cross-axis-alignment: center;
-                Label { text: root.screen == 0 ? "目录整理" : root.screen == 2 ? "递归解压"
-                    : root.screen == 3 ? "MD 整理" : root.screen == 4 ? "Git 工具" : root.screen == 5 ? "转 Markdown" : root.screen == 6 ? "截图 OCR" : "关于 JchTools";
-                    font-size: 20px; font-weight: 700; }
-                Rectangle { width: 3px; height: 16px; border-radius: 2px; background: Design.bar; }
-                Muted { text: root.screen == 0 ? "内容去重、归类与清理（不解压）；先分析出计划，确认后才执行。"
-                    : root.screen == 2 ? "递归解开压缩包；完整成功解出的原压缩包及分卷永久删除（不可恢复），失败或未完全解开的包保留。"
-                    : root.screen == 3 ? "合并 MD（标题整体下移一级）与拆分 MD（UTF-8 安全、按序拼接无损还原）；原文件一律不改动。"
-                    : root.screen == 4 ? "逐文件提交并推送：add → commit → push 成功后才处理下一个文件；冲突即停、失败无限重试（可停止）。"
-                    : root.screen == 5 ? "把文档、图片和媒体转换为 Markdown；可保留输入层级或选择平铺输出。"
-                    : root.screen == 6 ? "热键截图与识别在独立后台服务运行，关闭主窗口不影响托盘和热键。"
-                    : "Windows 优先的本地工具箱 · 功能持续增加";
-                    horizontal-stretch: 1; wrap: no-wrap; overflow: elide; vertical-alignment: center; }
-                if root.busy: Spinner { width: 20px; height: 20px; }
-                Rectangle { width: root.caption-area; background: transparent; }
-            }
-            if root.error-text != "": Rectangle {
-                min-height: 40px; border-radius: 10px;
-                background: Design.danger-bg;
-                border-width: 1px; border-color: Design.danger-line;
-                HorizontalLayout { padding-top: 8px; padding-bottom: 8px; padding-left: 14px; padding-right: 10px; spacing: 12px; cross-axis-alignment: center;
-                    Rectangle { width: 4px; height: 20px; border-radius: 2px; background: Design.danger; }
-                    Text { text: root.error-text; wrap: word-wrap; color: Design.danger-ink; horizontal-stretch: 1; vertical-alignment: center; }
-                    Button { text: "关闭"; clicked => { root.error-text = ""; } }
-                }
-            }
-            // 成功/中性提示与错误分开：复制完成这类消息不再用红色错误样式。
-            if root.notice-text != "": Rectangle {
-                min-height: 40px; border-radius: 10px;
-                background: Design.info-bg;
-                border-width: 1px; border-color: Design.info-line;
-                HorizontalLayout { padding-top: 8px; padding-bottom: 8px; padding-left: 14px; padding-right: 10px; spacing: 12px; cross-axis-alignment: center;
-                    Rectangle { width: 4px; height: 20px; border-radius: 2px; background: Design.accent; }
-                    Text { text: root.notice-text; wrap: word-wrap; color: Design.accent-ink; horizontal-stretch: 1; vertical-alignment: center; }
-                    Button { text: "关闭"; clicked => { root.notice-text = ""; } }
-                }
-            }
-            if root.screen == 0: VerticalLayout {
-                spacing: 8px;
-                // 目录选择：独立卡片，作为主输入
-                Surface {
-                    min-height: 48px;
-                    HorizontalLayout { padding-top: 8px; padding-bottom: 8px; padding-left: 14px; padding-right: 12px; spacing: 10px; cross-axis-alignment: center;
-                        Rectangle {
-                            width: 28px; height: 28px; border-radius: 8px;
-                            background: Design.accent-softer;
-                            NavGlyph {
-                                x: 6px; y: 6px; kind: 0;
-                                tint: Design.accent-ink;
-                            }
-                        }
-                        LineEdit { text <=> root.directory; placeholder-text: "选择或输入要整理的目录，例如 D:\\Downloads";
-                            enabled: !root.busy && root.confirm-kind == 0; horizontal-stretch: 1; edited(value) => { root.root-edited(); } }
-                        Button { text: "选择目录…"; enabled: !root.busy && root.confirm-kind == 0; clicked => { root.choose-directory(); } }
+        HorizontalLayout {
+            spacing: 0px;
+            // ===== 侧栏（244px）：搜索 + 工具导航 + 关于 + 脚注 =====
+            Rectangle {
+                width: root.rail-width;
+                background: Design.rail;
+                Rectangle { x: parent.width - 1px; width: 1px; height: parent.height; background: Design.line; }
+                VerticalLayout {
+                    padding: 12px; padding-bottom: 14px; spacing: 2px;
+                    if root.tool-count > 5: Field {
+                        height: 32px; icon: 8;
+                        placeholder-text: "搜索工具";
+                        text <=> root.tool-search;
+                        enabled: root.confirm-kind == 0;
+                        edited(value) => { root.search-tools(value); }
+                    }
+                    Rectangle { height: 14px; background: transparent; }
+                    HorizontalLayout { padding-left: 10px; padding-right: 10px;
+                        Text { text: "工具"; font-size: 11px; font-weight: 600; color: Design.muted-2; }
+                    }
+                    Rectangle { height: 6px; background: transparent; }
+                    for tool in root.tools: NavItem {
+                        text: tool.name;
+                        icon: root.tool-icon(tool.id);
+                        active: tool.id == root.active-tool-id;
+                        // 模态确认层打开时导航不可点，避免点击穿透背景控件。
+                        enabled: root.confirm-kind == 0;
+                        clicked => { root.select-tool(tool.id); }
+                    }
+                    Rectangle { height: 12px; background: transparent; }
+                    NavItem { text: "关于"; icon: 1; active: root.screen == 1; enabled: root.confirm-kind == 0; clicked => { root.navigation(1); } }
+                    Rectangle { vertical-stretch: 1; background: transparent; }
+                    Rectangle { height: 1px; background: Design.line; }
+                    HorizontalLayout {
+                        padding-top: 10px; padding-right: 10px; padding-bottom: 2px; padding-left: 10px; spacing: 8px;
+                        Ico { kind: 7; tint: Design.muted-2; width: 13px; height: 13px; }
+                        Text { text: "本地处理 · 不上传文件\nWindows 优先"; font-size: 11px; color: Design.muted-2;
+                            wrap: word-wrap; vertical-alignment: top; }
                     }
                 }
-                // 面板页签 + 任务操作
-                HorizontalLayout { height: 32px; spacing: 2px;
-                    Tab { text: "处理规则"; active: root.panel == 0; width: 104px; enabled: root.confirm-kind == 0; clicked => { root.panel = 0; } }
-                    Tab { text: "整理计划"; active: root.panel == 1; width: 104px; enabled: root.has-task && root.confirm-kind == 0; clicked => { root.panel = 1; } }
-                    Tab { text: "进度与日志"; active: root.panel == 2; width: 118px; enabled: root.confirm-kind == 0; clicked => { root.panel = 2; } }
-                    Rectangle { horizontal-stretch: 1; background: transparent; }
-                    if root.has-task: Button { text: "打开任务目录"; enabled: !root.busy && root.confirm-kind == 0; clicked => { root.open-report(); } }
+            }
+            // ===== 内容区 =====
+            VerticalLayout {
+                padding-left: root.page-padding; padding-right: root.page-padding;
+                padding-top: 12px; padding-bottom: 16px;
+                spacing: 8px;
+                // 页头：标题 + 竖分隔线 + 描述
+                HorizontalLayout { height: 28px; spacing: 12px; cross-axis-alignment: center;
+                    Label { text: root.screen == 1 ? "关于 JchTools" : root.screen-title();
+                        font-size: 19px; font-weight: 600; vertical-alignment: center; }
+                    Rectangle { width: 1px; height: 14px; background: Design.line-strong; }
+                    Muted { text: root.screen == 0 ? "内容去重、归类与清理（不解压）；先分析出计划，确认后才执行。"
+                        : root.screen == 2 ? "递归解开压缩包；完整成功解出的原压缩包及分卷永久删除（不可恢复），失败或未完全解开的包保留。"
+                        : root.screen == 3 ? "合并 MD（标题整体下移一级）与拆分 MD（UTF-8 安全、按序拼接无损还原）；原文件一律不改动。"
+                        : root.screen == 4 ? "逐文件提交并推送：add → commit → push 成功后才处理下一个文件；冲突即停、失败无限重试（可停止）。"
+                        : root.screen == 5 ? "把文档、图片和媒体转换为 Markdown；可保留输入层级或选择平铺输出。"
+                        : root.screen == 6 ? "热键截图与识别在独立后台服务运行，关闭主窗口不影响托盘和热键。"
+                        : "Windows 优先的本地工具箱 · 功能持续增加";
+                        horizontal-stretch: 1; wrap: no-wrap; overflow: elide; vertical-alignment: center; }
+                    if root.busy: Spinner { width: 18px; height: 18px; }
                 }
-                // 规则分区胶囊：内凹底 + 实心选中项
-                if root.panel == 0: Rectangle {
-                    height: 32px; border-radius: 10px;
-                    background: Design.sunken;
-                    border-width: 1px; border-color: Design.line-soft;
-                    HorizontalLayout { padding: 3px; spacing: 4px;
-                        for label[index] in ["去重", "归类", "清理", "安全与性能"]: Pill {
-                            text: label; active: root.section == index; enabled: !root.busy && root.confirm-kind == 0; horizontal-stretch: 1;
-                            height: 24px;
-                            clicked => { root.select-section(index); }
+                if root.error-text != "": Rectangle {
+                    min-height: 40px; border-radius: 8px;
+                    background: Design.danger-bg;
+                    border-width: 1px; border-color: Design.danger-line;
+                    HorizontalLayout { padding-top: 8px; padding-bottom: 8px; padding-left: 14px; padding-right: 10px; spacing: 12px; cross-axis-alignment: center;
+                        Rectangle { width: 4px; height: 20px; border-radius: 2px; background: Design.danger; }
+                        Text { text: root.error-text; wrap: word-wrap; color: Design.danger-ink; horizontal-stretch: 1; vertical-alignment: center; }
+                        AppButton { text: "关闭"; small: true; clicked => { root.error-text = ""; } }
+                    }
+                }
+                // 成功/中性提示与错误分开：复制完成这类消息不再用红色错误样式。
+                if root.notice-text != "": Rectangle {
+                    min-height: 40px; border-radius: 8px;
+                    background: Design.info-bg;
+                    border-width: 1px; border-color: Design.info-line;
+                    HorizontalLayout { padding-top: 8px; padding-bottom: 8px; padding-left: 14px; padding-right: 10px; spacing: 12px; cross-axis-alignment: center;
+                        Rectangle { width: 4px; height: 20px; border-radius: 2px; background: Design.accent; }
+                        Text { text: root.notice-text; wrap: word-wrap; color: Design.accent-ink; horizontal-stretch: 1; vertical-alignment: center; }
+                        AppButton { text: "关闭"; small: true; clicked => { root.notice-text = ""; } }
+                    }
+                }
+                // ============ 目录整理 ============
+                if root.screen == 0: VerticalLayout {
+                    spacing: 8px;
+                    // 目录选择工具条
+                    HorizontalLayout { spacing: 10px;
+                        Field { text <=> root.directory; placeholder-text: "选择或输入要整理的目录，例如 D:\\Downloads";
+                            icon: 0;
+                            enabled: !root.busy && root.confirm-kind == 0; horizontal-stretch: 1; edited(value) => { root.root-edited(); } }
+                        AppButton { text: "选择目录…"; enabled: !root.busy && root.confirm-kind == 0; clicked => { root.choose-directory(); } }
+                    }
+                    // 面板页签（下划线）+ 任务操作
+                    Rectangle {
+                        height: 35px;
+                        Rectangle { y: parent.height - 1px; height: 1px; width: 100%; background: Design.line; }
+                        HorizontalLayout { spacing: 2px;
+                            Tab { text: "处理规则"; active: root.panel == 0; width: 104px; enabled: root.confirm-kind == 0; clicked => { root.panel = 0; } }
+                            Tab { text: "整理计划"; active: root.panel == 1; width: 104px; enabled: root.has-task && root.confirm-kind == 0; clicked => { root.panel = 1; } }
+                            Tab { text: "进度与日志"; active: root.panel == 2; width: 118px; enabled: root.confirm-kind == 0; clicked => { root.panel = 2; } }
+                            Rectangle { horizontal-stretch: 1; background: transparent; }
+                            if root.has-task: AppButton { text: "打开任务目录"; small: true; enabled: !root.busy && root.confirm-kind == 0; clicked => { root.open-report(); } }
                         }
-                        // 高级选项开关：只控制是否显示专家调优项，不改变任何规则值。
-                        Pill { text: root.show-advanced ? "隐藏高级选项" : "显示高级选项"; active: root.show-advanced;
-                            width: 132px; height: 24px; enabled: !root.busy && root.confirm-kind == 0;
+                    }
+                    // 规则分区：内凹底容器 + 白色浮起选中项；右侧高级选项开关
+                    if root.panel == 0: HorizontalLayout { spacing: 10px;
+                        Rectangle {
+                            horizontal-stretch: 1;
+                            height: 34px;
+                            border-radius: 9px;
+                            background: Design.inset;
+                            border-width: 1px;
+                            border-color: Design.line;
+                            HorizontalLayout { padding: 3px; spacing: 2px;
+                                for label[index] in ["去重", "归类", "清理", "安全与性能"]: Pill {
+                                    text: label; active: root.section == index; enabled: !root.busy && root.confirm-kind == 0; horizontal-stretch: 1;
+                                    height: 26px;
+                                    clicked => { root.select-section(index); }
+                                }
+                            }
+                        }
+                        AppButton { text: root.show-advanced ? "隐藏高级选项" : "显示高级选项"; small: true; icon: 9;
+                            enabled: !root.busy && root.confirm-kind == 0;
                             clicked => { root.toggle-advanced(!root.show-advanced); } }
                     }
-                }
-                if root.panel == 0: Surface { vertical-stretch: 1;
-                    // 行高 44px：U-05 要求默认 1120×720 下「处理规则」同屏可见 9 行；
-                    // 说明文字单行省略，完整说明由行内 Tooltip 悬浮显示。
-                    ListView { for entry in root.rules: RuleRowItem {
-                        rule: entry;
-                        editable: !root.busy && root.confirm-kind == 0;
-                        show-hint: root.confirm-kind == 0;
-                        rule-toggled(value) => { root.rule-bool(entry.key, value); }
-                        rule-chosen(value) => { root.rule-choice(entry.key, value); }
-                        rule-edited(value) => { root.rule-text(entry.key, value); }
-                    }}
-                }
-                if root.panel == 1: VerticalLayout { spacing: 10px;
-                    Surface { min-height: 72px;
-                        VerticalLayout { padding-top: 12px; padding-bottom: 12px; padding-left: 14px; padding-right: 14px; spacing: 4px;
-                            Muted { text: "任务摘要"; font-size: 11px; font-weight: 600; }
-                            TextEdit { text: root.summary; read-only: true; }
-                        }
-                    }
-                    // 计划类型筛选（行高与 Pill 默认高度一致，避免胶囊被行高裁切）
-                    HorizontalLayout { height: 34px; spacing: 4px;
-                        Pill { text: "全部"; active: root.plan-filter == 0; width: 64px; enabled: !root.busy && root.confirm-kind == 0;
-                            clicked => { root.plan-filter = 0; root.filter-plan(""); } }
-                        Pill { text: "删除 " + root.plan-delete-count; active: root.plan-filter == 1; width: 88px; enabled: !root.busy && root.plan-delete-count > 0 && root.confirm-kind == 0;
-                            clicked => { root.plan-filter = 1; root.filter-plan("delete"); } }
-                        Pill { text: "移动 " + root.plan-move-count; active: root.plan-filter == 2; width: 88px; enabled: !root.busy && root.plan-move-count > 0 && root.confirm-kind == 0;
-                            clicked => { root.plan-filter = 2; root.filter-plan("move"); } }
-                        Pill { text: "Git 项目 " + root.plan-git-count; active: false; width: 96px; enabled: root.plan-git-count > 0 && root.confirm-kind == 0; }
-                        Pill { text: "空目录 " + root.plan-empty-count; active: root.plan-filter == 4; width: 96px; enabled: !root.busy && root.plan-empty-count > 0 && root.confirm-kind == 0;
-                            clicked => { root.plan-filter = 4; root.filter-plan("empty_directory"); } }
-                        Rectangle { horizontal-stretch: 1; background: transparent; }
-                    }
-                    Surface { vertical-stretch: 1;
-                        ListView { for item in root.plans: Rectangle { height: 78px;
-                            HorizontalLayout { padding-top: 10px; padding-bottom: 10px; padding-left: 14px; padding-right: 14px; spacing: 12px; cross-axis-alignment: center;
-                                // 勾选保存中 ready 短暂为 false：此时仍允许继续改其他勾选，
-                                // 否则整表被锁且主按钮文案被误切。
-                                // C-11：取消勾选的行走「已取消勾选」显示，重新勾选恢复「待执行」，
-                                // 因此两种行状态都必须可点，只有已执行/已跳过/失败的行锁死。
-                                // H-05/C-07：空目录清理是整理收尾的强制动作，不受勾选影响，
-                                // 因此这些行不得可取消勾选（勾了也会被清理，显示会与结果不符）。
-                                CheckBox { checked: item.selected; enabled: !root.busy && root.confirm-kind == 0 && (item.state == "待执行" || item.state == "已取消勾选") && item.kind != "空目录复查" && root.plan-editable;
-                                    accessible-label: item.kind + " " + item.source;
-                                    toggled => { root.plan-toggle(item.id,self.checked); } }
-                                VerticalLayout { horizontal-stretch: 1; spacing: 3px;
-                                    Label { text: item.kind + "  ·  " + item.state; font-weight: 600; color: Design.accent-ink; font-size: 13px; }
-                                    Label { text: item.source; overflow: elide; }
-                                    Muted { text: item.target == "" ? item.reason : "→ " + item.target + " · " + item.reason; overflow: elide; }
-                                }
-                            }
-                            Rectangle { y: parent.height - 1px; x: 14px; height: 1px; width: parent.width - 28px; background: Design.line-soft; }
-                        }}
-                    }
-                    HorizontalLayout { height: 32px; spacing: 8px; cross-axis-alignment: center;
-                        Button { text: "上一页"; enabled: !root.busy && root.plan-prev-enabled && root.confirm-kind == 0; clicked => { root.plan-page(-1); } }
-                        Muted { text: root.plan-page-label; wrap: no-wrap; horizontal-alignment: center; horizontal-stretch: 1; vertical-alignment: center; }
-                        Button { text: "下一页"; enabled: !root.busy && root.plan-next-enabled && root.confirm-kind == 0; clicked => { root.plan-page(1); } }
-                    }
-                }
-                if root.panel == 2: Surface { vertical-stretch: 1;
-                    VerticalLayout { padding-top: 12px; padding-bottom: 12px; padding-left: 14px; padding-right: 14px; spacing: 8px;
-                        Muted { text: "最新的消息显示在最上面；界面只保留最近 300 条。"; }
-                        TextEdit { text: root.log-text; read-only: true; font-family: "Consolas"; vertical-stretch: 1; }
-                    }
-                }
-                // 底部状态与主操作
-                Surface {
-                    min-height: 56px;
-                    VerticalLayout { padding-top: 8px; padding-bottom: 8px; padding-left: 16px; padding-right: 14px; spacing: 8px;
-                        HorizontalLayout { spacing: 12px; cross-axis-alignment: center;
-                            VerticalLayout { horizontal-stretch: 1; spacing: 2px;
-                                HorizontalLayout { spacing: 8px; cross-axis-alignment: center;
-                                    Rectangle { width: 44px; height: 20px; border-radius: 6px;
-                                        background: root.busy ? Design.accent : Design.accent-soft;
-                                        Text { text: root.busy ? "进行中" : "状态"; font-size: 11px; font-weight: 600;
-                                            color: root.busy ? Design.on-accent : Design.accent-ink;
-                                            width: parent.width; height: parent.height;
-                                            horizontal-alignment: center; vertical-alignment: center; }
-                                    }
-                                    Label { text: root.status; overflow: elide; font-weight: 600; horizontal-stretch: 1; font-size: 14px; }
-                                }
-                                Muted { text: root.metrics; wrap: no-wrap; overflow: elide; font-size: 12px; }
-                            }
-                            if root.busy: Text { text: root.progress-note; wrap: no-wrap; overflow: elide; color: Design.accent-ink; font-weight: 600; }
-                            if root.busy && root.progress >= 0: Text {
-                                text: round(root.progress * 100) + "%"; font-size: 22px; font-weight: 700; color: Design.accent-ink;
-                            }
-                            // 模态（如 kind=3 停止并关闭）与解压冲突框打开期间都禁用：键盘
-                            // 不得穿透遮罩直接暂停/取消任务，必须先处理最上层对话框。
-                            if root.busy: Button { text: root.paused ? "继续" : "暂停"; enabled: root.confirm-kind == 0; clicked => { root.pause-task(); } }
-                            if root.busy: Button { text: "取消任务"; enabled: root.confirm-kind == 0; clicked => { root.cancel-task(); } }
-                            if !root.busy && root.ready: Button { text: "确认并执行整理"; primary: true; enabled: root.confirm-kind == 0; clicked => { root.request-apply(); } }
-                            if !root.busy && !root.ready: Button { text: "开始分析"; primary: true; enabled: root.directory != "" && root.confirm-kind == 0;
-                                clicked => { root.request-start(); } }
-                        }
-                        if root.busy: ProgressBar { progress: root.progress; }
-                    }
-                }
-            }
-            if root.screen == 2: VerticalLayout {
-                spacing: 8px;
-                // 目录选择：独立卡片，作为主输入
-                Surface {
-                    min-height: 48px;
-                    HorizontalLayout { padding-top: 8px; padding-bottom: 8px; padding-left: 14px; padding-right: 12px; spacing: 10px; cross-axis-alignment: center;
-                        Rectangle {
-                            width: 28px; height: 28px; border-radius: 8px;
-                            background: Design.accent-softer;
-                            NavGlyph {
-                                x: 6px; y: 6px; kind: 0;
-                                tint: Design.accent-ink;
-                            }
-                        }
-                        LineEdit { text <=> root.directory; placeholder-text: "选择或输入要解压的目录，例如 D:\\Downloads";
-                            enabled: !root.busy && root.confirm-kind == 0; horizontal-stretch: 1; edited(value) => { root.root-edited(); } }
-                        Button { text: "选择目录…"; enabled: !root.busy && root.confirm-kind == 0; clicked => { root.choose-directory(); } }
-                    }
-                }
-                // 一段式（X-02）：只有规则、日志与失败列表三个面板，没有计划审核环节
-                HorizontalLayout { height: 32px; spacing: 2px;
-                    Tab { text: "处理规则"; active: root.panel == 0; width: 104px; enabled: root.confirm-kind == 0; clicked => { root.panel = 0; } }
-                    Tab { text: "进度与日志"; active: root.panel == 1; width: 118px; enabled: root.confirm-kind == 0; clicked => { root.panel = 1; } }
-                    Tab { text: "失败列表"; active: root.panel == 2; width: 104px; enabled: root.confirm-kind == 0; clicked => { root.panel = 2; } }
-                    Rectangle { horizontal-stretch: 1; background: transparent; }
-                }
-                // 规则分区胶囊（递归解压只有解压与安全两分区）：内凹底 + 实心选中项
-                if root.panel == 0: Rectangle {
-                    height: 32px; border-radius: 10px;
-                    background: Design.sunken;
-                    border-width: 1px; border-color: Design.line-soft;
-                    HorizontalLayout { padding: 3px; spacing: 4px;
-                        for label[index] in ["解压", "安全与性能"]: Pill {
-                            text: label; active: root.section == index; enabled: !root.busy && root.confirm-kind == 0; horizontal-stretch: 1;
-                            height: 24px;
-                            clicked => { root.select-section(index); }
-                        }
-                        // 高级选项开关：只控制是否显示专家调优项，不改变任何规则值。
-                        Pill { text: root.show-advanced ? "隐藏高级选项" : "显示高级选项"; active: root.show-advanced;
-                            width: 132px; height: 24px; enabled: !root.busy && root.confirm-kind == 0;
-                            clicked => { root.toggle-advanced(!root.show-advanced); } }
-                    }
-                }
-                if root.panel == 0: Surface { vertical-stretch: 1;
-                    // 解压侧的处置已按 X-03/X-04/X-05/X-06 固定，基础层没有可调行：
-                    // 空卡片改为固定行为的简要说明，而不是一句话顶在一整张空白大卡上。
-                    if root.rules.length == 0: Rectangle {
-                        x: 16px; y: 16px; width: parent.width - 32px;
-                        height: self.preferred-height;
-                        background: Design.sunken;
-                        border-radius: 10px;
-                        border-width: 1px; border-color: Design.line-soft;
-                        VerticalLayout { padding: 14px; spacing: 6px;
-                            Label { text: "解压处置已固定（不提供保留原包、覆盖或跳过冲突的选项）"; wrap: word-wrap; font-weight: 600; font-size: 13px; }
-                            Muted { text: "· 压缩包就地解开（含本次解出的嵌套包）；完整成功解出的原压缩包及分卷永久删除（不可恢复），已有文件一律保留"; }
-                            Muted { text: "· 目标同名时只为新解出的文件自动改名，扩展名与复合扩展名保持不变"; }
-                            Muted { text: "· 失败、部分解开或取消的包保留；无法完全解开的包移入「解压失败」子目录，原因记录在日志中"; }
-                            Muted { text: "本分区没有基础规则；点「显示高级选项」可调整防护上限（嵌套层数、条目数、展开大小与比例）。"; }
-                        }
-                    }
-                    // 行高 44px：与目录整理同口径（U-05 的可见行数约束）。
-                    ListView { for entry in root.rules: RuleRowItem {
-                        rule: entry;
-                        editable: !root.busy && root.confirm-kind == 0;
-                        show-hint: root.confirm-kind == 0;
-                        rule-toggled(value) => { root.rule-bool(entry.key, value); }
-                        rule-chosen(value) => { root.rule-choice(entry.key, value); }
-                        rule-edited(value) => { root.rule-text(entry.key, value); }
-                    }}
-                }
-                if root.panel == 1: VerticalLayout { spacing: 10px;
-                    if root.quarantined-count > 0: Rectangle {
-                        min-height: 36px; border-radius: 10px;
-                        background: Design.warning-bg;
-                        border-width: 1px; border-color: Design.warning-line;
-                        HorizontalLayout { padding-top: 8px; padding-bottom: 8px; padding-left: 12px; padding-right: 12px; spacing: 10px; cross-axis-alignment: center;
-                            Rectangle { width: 4px; height: 18px; border-radius: 2px; background: Design.warning; }
-                            Text { text: "有 " + root.quarantined-count + " 个压缩包未完全解开，原包或分卷已移入「解压失败」子目录等待人工处理；详情见下方日志。";
-                                color: Design.text; wrap: word-wrap; horizontal-stretch: 1; vertical-alignment: center; font-size: 12px; }
-                        }
-                    }
-                    Surface { vertical-stretch: 1;
-                        VerticalLayout { padding-top: 12px; padding-bottom: 12px; padding-left: 14px; padding-right: 14px; spacing: 8px;
-                            Muted { text: "最新的消息显示在最上面；界面只保留最近 300 条。"; }
-                            TextEdit { text: root.log-text; read-only: true; font-family: "Consolas"; vertical-stretch: 1; }
-                        }
-                    }
-                }
-                // U-10：本次解压失败项分页列表。每个失败包或卷集对应一项，显示原路径、
-                // 失败原因与隔离后位置；总数与翻页按钮只在对应页真实存在时启用。
-                // 运行中可查看，任务结束或取消后仍可查看；切换工具不清空。
-                if root.screen == 2 && root.panel == 2: Surface { vertical-stretch: 1;
-                    VerticalLayout { padding-top: 12px; padding-bottom: 12px; padding-left: 14px; padding-right: 14px; spacing: 8px;
-                        HorizontalLayout { spacing: 12px; cross-axis-alignment: center;
-                            Label { text: "本次解压失败项（共 " + root.fail-total + " 项）"; font-weight: 600; font-size: 13px; }
-                            Muted { text: "每个失败包或分卷集对应一项；启动下一次解压任务或退出前保留，切换工具不清空。"; horizontal-stretch: 1; overflow: elide; }
-                        }
-                        if !root.fail-ready: Muted { text: "正在关联本次解压任务…"; }
-                        if root.fail-ready && root.fail-total == 0: Muted { text: "本次任务没有失败项。"; }
-                        if root.fail-total > 0: Rectangle { vertical-stretch: 1;
-                            background: Design.sunken;
-                            border-radius: 8px;
-                            border-width: 1px; border-color: Design.line-soft;
-                            ListView { for item in root.fail-rows: Rectangle { height: 72px;
-                                VerticalLayout { padding-left: 12px; padding-right: 12px; padding-top: 6px; padding-bottom: 4px; spacing: 2px;
-                                    Label { text: item.stage + "  ·  " + item.source; font-weight: 600; font-size: 13px; overflow: elide; }
-                                    Muted { text: "原因：" + item.reason; overflow: elide; }
-                                    Muted { text: item.target == "" ? "未记录隔离位置（隔离可能失败或尚未执行；整体原因见「进度与日志」）" : "隔离后位置：" + item.target; overflow: elide; }
-                                }
-                                Rectangle { y: parent.height - 1px; x: 12px; height: 1px; width: parent.width - 24px; background: Design.line-soft; }
+                    if root.panel == 0: Surface { vertical-stretch: 1;
+                        // 行高 44px：U-05 要求默认 1120×720 下「处理规则」同屏可见 9 行；
+                        // 说明文字单行省略，完整说明由行内 Tooltip 悬浮显示。
+                        VerticalLayout { spacing: 0px;
+                            ListView { vertical-stretch: 1; for entry in root.rules: RuleRowItem {
+                                rule: entry;
+                                editable: !root.busy && root.confirm-kind == 0;
+                                show-hint: root.confirm-kind == 0;
+                                rule-toggled(value) => { root.rule-bool(entry.key, value); }
+                                rule-chosen(value) => { root.rule-choice(entry.key, value); }
+                                rule-edited(value) => { root.rule-text(entry.key, value); }
                             }}
                         }
+                    }
+                    if root.panel == 1: VerticalLayout { spacing: 8px;
+                        Surface {
+                            VerticalLayout { padding-top: 12px; padding-bottom: 12px; padding-left: 16px; padding-right: 16px; spacing: 4px;
+                                Text { text: "任务摘要"; font-size: 11px; font-weight: 600; color: Design.muted-2; }
+                                TextEdit { text: root.summary; read-only: true; }
+                            }
+                        }
+                        // 计划类型筛选（分段容器样式）
+                        Rectangle {
+                            height: 34px; border-radius: 9px;
+                            background: Design.inset;
+                            border-width: 1px;
+                            border-color: Design.line;
+                            HorizontalLayout { padding: 3px; spacing: 2px;
+                                Pill { text: "全部"; active: root.plan-filter == 0; width: 64px; height: 26px; enabled: !root.busy && root.confirm-kind == 0;
+                                    clicked => { root.plan-filter = 0; root.filter-plan(""); } }
+                                Pill { text: "删除 " + root.plan-delete-count; active: root.plan-filter == 1; width: 88px; height: 26px; enabled: !root.busy && root.plan-delete-count > 0 && root.confirm-kind == 0;
+                                    clicked => { root.plan-filter = 1; root.filter-plan("delete"); } }
+                                Pill { text: "移动 " + root.plan-move-count; active: root.plan-filter == 2; width: 88px; height: 26px; enabled: !root.busy && root.plan-move-count > 0 && root.confirm-kind == 0;
+                                    clicked => { root.plan-filter = 2; root.filter-plan("move"); } }
+                                Pill { text: "Git 项目 " + root.plan-git-count; active: false; width: 96px; height: 26px; enabled: root.plan-git-count > 0 && root.confirm-kind == 0; }
+                                Pill { text: "空目录 " + root.plan-empty-count; active: root.plan-filter == 4; width: 96px; height: 26px; enabled: !root.busy && root.plan-empty-count > 0 && root.confirm-kind == 0;
+                                    clicked => { root.plan-filter = 4; root.filter-plan("empty_directory"); } }
+                                Rectangle { horizontal-stretch: 1; background: transparent; }
+                            }
+                        }
+                        Surface { vertical-stretch: 1;
+                            VerticalLayout { spacing: 0px;
+                                ListView { vertical-stretch: 1; for item in root.plans: Rectangle { height: 78px;
+                                    HorizontalLayout { padding-top: 10px; padding-bottom: 10px; padding-left: 16px; padding-right: 16px; spacing: 12px; cross-axis-alignment: center;
+                                        // 勾选保存中 ready 短暂为 false：此时仍允许继续改其他勾选，
+                                        // 否则整表被锁且主按钮文案被误切。
+                                        // C-11：取消勾选的行走「已取消勾选」显示，重新勾选恢复「待执行」，
+                                        // 因此两种行状态都必须可点，只有已执行/已跳过/失败的行锁死。
+                                        // H-05/C-07：空目录清理是整理收尾的强制动作，不受勾选影响，
+                                        // 因此这些行不得可取消勾选（勾了也会被清理，显示会与结果不符）。
+                                        Check { checked: item.selected; enabled: !root.busy && root.confirm-kind == 0 && (item.state == "待执行" || item.state == "已取消勾选") && item.kind != "空目录复查" && root.plan-editable;
+                                            text: "";
+                                            toggled => { root.plan-toggle(item.id,self.checked); } }
+                                        VerticalLayout { horizontal-stretch: 1; spacing: 3px;
+                                            Label { text: item.kind + "  ·  " + item.state; font-weight: 600; color: Design.accent-ink; font-size: 13px; overflow: elide; }
+                                            Label { text: item.source; overflow: elide; }
+                                            Muted { text: item.target == "" ? item.reason : "→ " + item.target + " · " + item.reason; overflow: elide; color: Design.muted-2; }
+                                        }
+                                    }
+                                    Rectangle { y: parent.height - 1px; x: 16px; height: 1px; width: parent.width - 32px; background: Design.line-soft; }
+                                }}
+                            }
+                        }
                         HorizontalLayout { height: 32px; spacing: 8px; cross-axis-alignment: center;
-                            Button { text: "上一页"; enabled: root.fail-prev-enabled && root.confirm-kind == 0; clicked => { root.fail-page(-1); } }
-                            Muted { text: root.fail-page-label; wrap: no-wrap; horizontal-alignment: center; horizontal-stretch: 1; vertical-alignment: center; }
-                            Button { text: "下一页"; enabled: root.fail-next-enabled && root.confirm-kind == 0; clicked => { root.fail-page(1); } }
+                            AppButton { text: "上一页"; small: true; enabled: !root.busy && root.plan-prev-enabled && root.confirm-kind == 0; clicked => { root.plan-page(-1); } }
+                            Muted { text: root.plan-page-label; wrap: no-wrap; horizontal-alignment: center; horizontal-stretch: 1; vertical-alignment: center; }
+                            AppButton { text: "下一页"; small: true; enabled: !root.busy && root.plan-next-enabled && root.confirm-kind == 0; clicked => { root.plan-page(1); } }
                         }
                     }
-                }
-                // 底部状态与主操作
-                Surface {
-                    min-height: 56px;
-                    VerticalLayout { padding-top: 8px; padding-bottom: 8px; padding-left: 16px; padding-right: 14px; spacing: 8px;
-                        HorizontalLayout { spacing: 12px; cross-axis-alignment: center;
-                            VerticalLayout { horizontal-stretch: 1; spacing: 2px;
-                                HorizontalLayout { spacing: 8px; cross-axis-alignment: center;
-                                    Rectangle { width: 44px; height: 20px; border-radius: 6px;
-                                        background: root.busy ? Design.accent : Design.accent-soft;
+                    if root.panel == 2: LogCard { vertical-stretch: 1; body <=> root.log-text; }
+                    // 底部状态与主操作
+                    Surface { pop: true; radius: 10px; min-height: 58px;
+                        VerticalLayout { padding-top: 8px; padding-bottom: 8px; padding-left: 16px; padding-right: 16px; spacing: 6px;
+                            HorizontalLayout { spacing: 12px; cross-axis-alignment: center;
+                                Rectangle {
+                                    height: 20px; border-radius: 5px;
+                                    background: root.busy ? Design.accent : Design.accent-soft;
+                                    HorizontalLayout { padding-left: 9px; padding-right: 9px;
                                         Text { text: root.busy ? "进行中" : "状态"; font-size: 11px; font-weight: 600;
                                             color: root.busy ? Design.on-accent : Design.accent-ink;
-                                            width: parent.width; height: parent.height;
-                                            horizontal-alignment: center; vertical-alignment: center; }
+                                            vertical-alignment: center; }
                                     }
-                                    Label { text: root.status; overflow: elide; font-weight: 600; horizontal-stretch: 1; font-size: 14px; }
                                 }
-                                Muted { text: root.metrics; wrap: no-wrap; overflow: elide; font-size: 12px; }
-                            }
-                            if root.busy: Text { text: root.progress-note; wrap: no-wrap; overflow: elide; color: Design.accent-ink; font-weight: 600; }
-                            if root.busy: Button { text: root.paused ? "继续" : "暂停"; enabled: root.confirm-kind == 0; clicked => { root.pause-task(); } }
-                            if root.busy: Button { text: "取消任务"; enabled: root.confirm-kind == 0; clicked => { root.cancel-task(); } }
-                            if !root.busy: Button { text: "开始解压"; primary: true; enabled: root.directory != "" && root.confirm-kind == 0;
-                                clicked => { root.request-extract-start(); } }
-                        }
-                        if root.busy: ProgressBar { progress: root.progress; }
-                    }
-                }
-            }
-            if root.screen == 3: VerticalLayout {
-                spacing: 8px;
-                // 子功能页签（M-01：当前只有「合并 MD」与「拆分 MD」两个功能）
-                HorizontalLayout { height: 32px; spacing: 2px;
-                    Tab { text: "合并 MD"; active: root.md-subpage == 0; width: 104px; enabled: root.confirm-kind == 0; clicked => { root.md-select-subpage(0); } }
-                    Tab { text: "拆分 MD"; active: root.md-subpage == 1; width: 104px; enabled: root.confirm-kind == 0; clicked => { root.md-select-subpage(1); } }
-                    Rectangle { horizontal-stretch: 1; background: transparent; }
-                }
-                if root.md-subpage == 0: Surface {
-                    VerticalLayout { padding: 12px; spacing: 8px;
-                        Muted { text: "输入目录"; font-size: 11px; font-weight: 600; }
-                        HorizontalLayout { spacing: 10px; cross-axis-alignment: center;
-                            LineEdit { text <=> root.md-input-dir; placeholder-text: "选择或输入包含 Markdown 文件的目录，例如 D:\\Docs";
-                                enabled: !root.busy && root.confirm-kind == 0; horizontal-stretch: 1; }
-                            CheckBox { text: "递归子目录"; checked <=> root.md-recursive;
-                                enabled: !root.busy && root.confirm-kind == 0; }
-                            Button { text: "选择目录…"; enabled: !root.busy && root.confirm-kind == 0; clicked => { root.md-choose-input(); } }
-                        }
-                        Muted { text: "按文件创建时间从早到晚合并；创建时间相同时按相对路径自然排序（2.md 在 10.md 之前）。原文件不修改、不删除、不移动。"; }
-                    }
-                }
-                if root.md-subpage == 0: Surface {
-                    VerticalLayout { padding: 12px; spacing: 8px;
-                        Muted { text: "输出"; font-size: 11px; font-weight: 600; }
-                        HorizontalLayout { spacing: 10px; cross-axis-alignment: center;
-                            Label { text: "文件名"; }
-                            LineEdit { text <=> root.md-output-name; width: 200px;
-                                enabled: !root.busy && root.confirm-kind == 0; }
-                            Label { text: "输出目录"; }
-                            LineEdit { text <=> root.md-output-dir; placeholder-text: "合并结果保存位置";
-                                enabled: !root.busy && root.confirm-kind == 0; horizontal-stretch: 1; }
-                            Button { text: "选择目录…"; enabled: !root.busy && root.confirm-kind == 0; clicked => { root.md-choose-output(); } }
-                        }
-                        Muted { text: "每个原文件以「# 文件名.md」为一级标题，内部标题整体下移一级（六级封顶）。输出文件已存在时先弹确认，不静默覆盖；输出文件位于被扫描目录中时不作为输入参与合并。"; }
-                    }
-                }
-                if root.md-subpage == 1: Surface {
-                    VerticalLayout { padding: 12px; spacing: 8px;
-                        Muted { text: "输入文件"; font-size: 11px; font-weight: 600; }
-                        HorizontalLayout { spacing: 10px; cross-axis-alignment: center;
-                            LineEdit { text <=> root.md-split-file; placeholder-text: "选择要拆分的 .md 文件";
-                                enabled: !root.busy && root.confirm-kind == 0; horizontal-stretch: 1; }
-                            Button { text: "选择文件…"; enabled: !root.busy && root.confirm-kind == 0; clicked => { root.md-split-choose-file(); } }
-                        }
-                        HorizontalLayout { spacing: 10px; cross-axis-alignment: center;
-                            Label { text: "单文件上限"; }
-                            LineEdit { text <=> root.md-split-size; width: 120px; horizontal-alignment: right;
-                                enabled: !root.busy && root.confirm-kind == 0; }
-                            ComboBox { model: ["KB", "MB"]; current-index: root.md-split-unit; width: 100px;
-                                enabled: !root.busy && root.confirm-kind == 0;
-                                selected(value) => { root.md-split-unit = self.current-index; } }
-                            Rectangle { horizontal-stretch: 1; background: transparent; }
-                        }
-                        HorizontalLayout { spacing: 10px; cross-axis-alignment: center;
-                            Label { text: "输出目录"; }
-                            LineEdit { text <=> root.md-split-dir; placeholder-text: "分片保存位置";
-                                enabled: !root.busy && root.confirm-kind == 0; horizontal-stretch: 1; }
-                            Button { text: "选择目录…"; enabled: !root.busy && root.confirm-kind == 0; clicked => { root.md-split-choose-dir(); } }
-                        }
-                        Muted { text: "换算固定 1 KB = 1024 字节、1 MB = 1024 × 1024 字节；任意分片实际字节数严格不超过上限；全部分片按编号顺序拼接后与原文件完全一致，不插入任何额外文本。"; }
-                    }
-                }
-                Surface { vertical-stretch: 1;
-                    VerticalLayout { padding-top: 12px; padding-bottom: 12px; padding-left: 14px; padding-right: 14px; spacing: 8px;
-                        Muted { text: "最新的消息显示在最上面；界面只保留最近 300 条。"; }
-                        TextEdit { text: root.log-text; read-only: true; font-family: "Consolas"; vertical-stretch: 1; }
-                    }
-                }
-                // 底部状态与主操作（U-12：后台执行，界面保持响应、可取消）
-                Surface {
-                    min-height: 56px;
-                    VerticalLayout { padding-top: 8px; padding-bottom: 8px; padding-left: 16px; padding-right: 14px; spacing: 8px;
-                        HorizontalLayout { spacing: 12px; cross-axis-alignment: center;
-                            VerticalLayout { horizontal-stretch: 1; spacing: 2px;
-                                HorizontalLayout { spacing: 8px; cross-axis-alignment: center;
-                                    Rectangle { width: 44px; height: 20px; border-radius: 6px;
-                                        background: root.busy ? Design.accent : Design.accent-soft;
-                                        Text { text: root.busy ? "进行中" : "状态"; font-size: 11px; font-weight: 600;
-                                            color: root.busy ? Design.on-accent : Design.accent-ink;
-                                            width: parent.width; height: parent.height;
-                                            horizontal-alignment: center; vertical-alignment: center; }
-                                    }
-                                    Label { text: root.status; overflow: elide; font-weight: 600; horizontal-stretch: 1; font-size: 14px; }
+                                VerticalLayout { horizontal-stretch: 1; spacing: 1px;
+                                    Label { text: root.status; overflow: elide; font-weight: 600; font-size: 13px; }
+                                    Muted { text: root.metrics; wrap: no-wrap; overflow: elide; font-size: 11.5px; color: Design.muted-2; }
                                 }
-                                Muted { text: root.metrics; wrap: no-wrap; overflow: elide; font-size: 12px; }
-                            }
-                            if root.busy: Button { text: "取消任务"; enabled: root.confirm-kind == 0; clicked => { root.cancel-task(); } }
-                            if !root.busy && root.md-subpage == 0: Button { text: "开始合并"; primary: true;
-                                enabled: root.md-input-dir != "" && root.confirm-kind == 0; clicked => { root.md-merge-start(); } }
-                            if !root.busy && root.md-subpage == 1: Button { text: "开始拆分"; primary: true;
-                                enabled: root.md-split-file != "" && root.confirm-kind == 0; clicked => { root.md-split-start(); } }
-                        }
-                        if root.busy: ProgressBar { progress: root.progress; }
-                    }
-                }
-            }
-            if root.screen == 4: VerticalLayout {
-                spacing: 8px;
-                Surface {
-                    VerticalLayout { padding: 12px; spacing: 8px;
-                        Muted { text: "本地 Git 项目目录（须为有效仓库，当前分支已配置 upstream）"; font-size: 11px; font-weight: 600; }
-                        HorizontalLayout { spacing: 10px; cross-axis-alignment: center;
-                            LineEdit { text <=> root.git-repo; placeholder-text: "选择或输入 Git 项目目录，例如 D:\\code\\my-project";
-                                enabled: !root.busy && root.confirm-kind == 0; horizontal-stretch: 1; }
-                            Button { text: "选择目录…"; enabled: !root.busy && root.confirm-kind == 0; clicked => { root.git-choose-repo(); } }
-                            if !root.busy: Button { text: "开始"; primary: true;
-                                enabled: root.git-repo != "" && root.confirm-kind == 0; clicked => { root.git-start(); } }
-                            if root.busy: Button { text: "停止"; enabled: root.confirm-kind == 0; clicked => { root.git-stop(); } }
-                        }
-                        Muted { text: "严格逐个处理：一个文件单独 add → 单独 commit（只含当前文件）→ 单独 push，push 成功后才处理下一个。提交信息固定「update: 相对路径」。"; }
-                    }
-                }
-                // 实时执行信息（G-13：仓库、分支、upstream、总数、完成数、当前文件、阶段、重试、等待、总体状态）
-                Surface {
-                    VerticalLayout { padding: 12px; spacing: 6px;
-                        HorizontalLayout { spacing: 16px; cross-axis-alignment: center;
-                            VerticalLayout { spacing: 2px; horizontal-stretch: 1;
-                                Muted { text: "仓库 · 分支 · upstream"; font-size: 11px; font-weight: 600; }
-                                Label { text: (root.git-branch == "" ? "—" : root.git-branch) + "  ·  " + (root.git-upstream == "" ? "—" : root.git-upstream);
-                                    overflow: elide; font-weight: 600; }
-                            }
-                            VerticalLayout { spacing: 2px;
-                                Muted { text: "已完成 / 总数"; font-size: 11px; font-weight: 600; }
-                                Label { text: root.git-done + " / " + root.git-total; font-weight: 700; }
-                            }
-                            VerticalLayout { spacing: 2px;
-                                Muted { text: "当前阶段"; font-size: 11px; font-weight: 600; }
-                                Label { text: root.git-stage == "" ? "—" : root.git-stage; font-weight: 600; }
-                            }
-                        }
-                        HorizontalLayout { spacing: 16px; cross-axis-alignment: center;
-                            VerticalLayout { spacing: 2px; horizontal-stretch: 1;
-                                Muted { text: "当前文件"; font-size: 11px; font-weight: 600; }
-                                Label { text: root.git-current == "" ? "—" : root.git-current; overflow: elide; }
-                            }
-                            VerticalLayout { spacing: 2px;
-                                Muted { text: "重试次数"; font-size: 11px; font-weight: 600; }
-                                Label { text: root.git-retry; }
-                            }
-                            VerticalLayout { spacing: 2px;
-                                Muted { text: "下次重试等待"; font-size: 11px; font-weight: 600; }
-                                Label { text: root.git-retry-wait > 0 ? (root.git-retry-wait + " 秒") : "—"; }
-                            }
-                        }
-                        HorizontalLayout { spacing: 8px; cross-axis-alignment: center;
-                            Muted { text: "总体状态"; font-size: 11px; font-weight: 600; }
-                            Label { text: root.git-state == "" ? "—" : root.git-state; overflow: elide; horizontal-stretch: 1; font-weight: 600; }
-                        }
-                        if root.busy: ProgressBar { progress: root.progress; }
-                    }
-                }
-                // 实时日志（G-14：阶段、stdout/stderr、错误原因、push/merge 返回、retry 信息）
-                Surface { vertical-stretch: 1;
-                    VerticalLayout { padding-top: 12px; padding-bottom: 12px; padding-left: 14px; padding-right: 14px; spacing: 8px;
-                        Muted { text: "最新的消息显示在最上面；界面只保留最近 300 条。"; }
-                        TextEdit { text: root.log-text; read-only: true; font-family: "Consolas"; vertical-stretch: 1; }
-                    }
-                }
-                Surface {
-                    min-height: 48px;
-                    VerticalLayout { padding-top: 8px; padding-bottom: 8px; padding-left: 16px; padding-right: 14px; spacing: 8px;
-                        HorizontalLayout { spacing: 12px; cross-axis-alignment: center;
-                            VerticalLayout { horizontal-stretch: 1; spacing: 2px;
-                                HorizontalLayout { spacing: 8px; cross-axis-alignment: center;
-                                    Rectangle { width: 44px; height: 20px; border-radius: 6px;
-                                        background: root.busy ? Design.accent : Design.accent-soft;
-                                        Text { text: root.busy ? "进行中" : "状态"; font-size: 11px; font-weight: 600;
-                                            color: root.busy ? Design.on-accent : Design.accent-ink;
-                                            width: parent.width; height: parent.height;
-                                            horizontal-alignment: center; vertical-alignment: center; }
-                                    }
-                                    Label { text: root.status; overflow: elide; font-weight: 600; horizontal-stretch: 1; font-size: 14px; }
+                                if root.busy: Text { text: root.progress-note; wrap: no-wrap; overflow: elide; color: Design.accent-ink; font-weight: 600; }
+                                if root.busy && root.progress >= 0: Text {
+                                    text: round(root.progress * 100) + "%"; font-size: 20px; font-weight: 700; color: Design.accent-ink;
                                 }
+                                // 模态（如 kind=3 停止并关闭）与解压冲突框打开期间都禁用：键盘
+                                // 不得穿透遮罩直接暂停/取消任务，必须先处理最上层对话框。
+                                if root.busy: AppButton { text: root.paused ? "继续" : "暂停"; enabled: root.confirm-kind == 0; clicked => { root.pause-task(); } }
+                                if root.busy: AppButton { text: "取消任务"; enabled: root.confirm-kind == 0; clicked => { root.cancel-task(); } }
+                                if !root.busy && root.ready: AppButton { text: "确认并执行整理"; primary: true; icon: 10; enabled: root.confirm-kind == 0; clicked => { root.request-apply(); } }
+                                if !root.busy && !root.ready: AppButton { text: "开始分析"; primary: true; icon: 10; enabled: root.directory != "" && root.confirm-kind == 0;
+                                    clicked => { root.request-start(); } }
                             }
-                            if root.busy: Button { text: "停止任务"; enabled: root.confirm-kind == 0; clicked => { root.git-stop(); } }
+                            if root.busy: ProgressBar { progress: root.progress; }
                         }
                     }
                 }
-            }
-            if root.screen == 5: VerticalLayout {
-                spacing: 8px;
-                Surface {
-                    VerticalLayout { padding: 12px; spacing: 8px;
-                        Muted { text: "Xberg 运行目录"; font-size: 11px; font-weight: 600; }
-                        HorizontalLayout { spacing: 10px; cross-axis-alignment: center;
-                            LineEdit { text <=> root.convert-runtime-dir; placeholder-text: "选择已安装的 Xberg 运行目录";
-                                edited => { root.convert-runtime-edited(); }
-                                enabled: !root.busy && !root.convert-initializing && !root.convert-runtime-saving && root.confirm-kind == 0;
-                                horizontal-stretch: 1; }
-                            Button { text: "选择目录…";
-                                enabled: !root.busy && !root.convert-initializing && !root.convert-runtime-saving && root.confirm-kind == 0;
-                                clicked => { root.convert-choose-runtime(); } }
-                            Button { text: root.convert-runtime-saving ? "正在校验…" : "使用此目录";
-                                enabled: !root.busy && !root.convert-initializing && !root.convert-runtime-saving && root.convert-runtime-dir != "" && root.confirm-kind == 0;
-                                clicked => { root.convert-use-runtime(); } }
-                        }
-                        Muted { text: root.convert-runtime-saving ? "正在校验并保存 Xberg 目录，请稍候…" : "必须选择并确认固定版本的 Xberg 运行目录；校验失败会显示原因。"; }
+                // ============ 递归解压 ============
+                if root.screen == 2: VerticalLayout {
+                    spacing: 8px;
+                    // 目录选择工具条
+                    HorizontalLayout { spacing: 10px;
+                        Field { text <=> root.directory; placeholder-text: "选择或输入要解压的目录，例如 D:\\Downloads";
+                            icon: 2;
+                            enabled: !root.busy && root.confirm-kind == 0; horizontal-stretch: 1; edited(value) => { root.root-edited(); } }
+                        AppButton { text: "选择目录…"; enabled: !root.busy && root.confirm-kind == 0; clicked => { root.choose-directory(); } }
                     }
-                }
-                Surface {
-                    VerticalLayout { padding: 12px; spacing: 8px;
-                        Muted { text: "输入目录"; font-size: 11px; font-weight: 600; }
-                        HorizontalLayout { spacing: 10px; cross-axis-alignment: center;
-                            LineEdit { text <=> root.convert-input-dir; placeholder-text: "选择或输入待转换的目录，例如 D:\\Docs";
-                                enabled: !root.busy && !root.convert-initializing && !root.convert-runtime-saving && root.confirm-kind == 0; horizontal-stretch: 1; }
-                            Button { text: "选择目录…"; enabled: !root.busy && !root.convert-initializing && !root.convert-runtime-saving && root.confirm-kind == 0; clicked => { root.convert-choose-input(); } }
-                        }
-                        Muted { text: "只读扫描 Git 项目、隐藏文件和系统属性文件；不会跟随符号链接或 junction。"; }
-                    }
-                }
-                Surface {
-                    VerticalLayout { padding: 12px; spacing: 8px;
-                        Muted { text: "输出目录"; font-size: 11px; font-weight: 600; }
-                        HorizontalLayout { spacing: 10px; cross-axis-alignment: center;
-                            LineEdit { text <=> root.convert-output-dir; placeholder-text: "选择转换结果目录";
-                                enabled: !root.busy && !root.convert-initializing && !root.convert-runtime-saving && root.confirm-kind == 0; horizontal-stretch: 1; }
-                            Button { text: "选择目录…"; enabled: !root.busy && !root.convert-initializing && !root.convert-runtime-saving && root.confirm-kind == 0; clicked => { root.convert-choose-output(); } }
-                            CheckBox { text: "平铺输出"; checked <=> root.convert-flat;
-                                enabled: !root.busy && !root.convert-initializing && !root.convert-runtime-saving && root.confirm-kind == 0; }
-                        }
-                        Muted { text: root.convert-flat ? "平铺时同名结果只处理排序第一份，其余跳过。" : "默认保留输入目录层级；输出目录位于输入目录内时会自动排除输出子树。"; }
-                    }
-                }
-                Surface {
-                    VerticalLayout { padding: 12px; spacing: 8px;
-                        Muted { text: "转换类型"; font-size: 11px; font-weight: 600; }
-                        HorizontalLayout { spacing: 14px;
-                            CheckBox { text: "PDF"; checked <=> root.convert-pdf; enabled: !root.busy && !root.convert-initializing && !root.convert-runtime-saving && root.confirm-kind == 0; }
-                            CheckBox { text: "Office"; checked <=> root.convert-office; enabled: !root.busy && !root.convert-initializing && !root.convert-runtime-saving && root.confirm-kind == 0; }
-                            CheckBox { text: "图片"; checked <=> root.convert-images; enabled: !root.busy && !root.convert-initializing && !root.convert-runtime-saving && root.confirm-kind == 0; }
-                            CheckBox { text: "MP4/M4A"; checked <=> root.convert-media; enabled: !root.busy && !root.convert-initializing && !root.convert-runtime-saving && root.confirm-kind == 0; }
-                            CheckBox { text: "其他"; checked <=> root.convert-other; enabled: !root.busy && !root.convert-initializing && !root.convert-runtime-saving && root.confirm-kind == 0; }
-                        }
-                        HorizontalLayout { spacing: 10px; cross-axis-alignment: center;
-                            Muted { text: "高级选项：单文件超时（秒）"; }
-                            LineEdit { text <=> root.convert-timeout-secs; width: 140px; horizontal-alignment: right;
-                                enabled: !root.busy && !root.convert-initializing && !root.convert-runtime-saving && root.confirm-kind == 0; }
+                    // 一段式（X-02）：只有规则、日志与失败列表三个面板，没有计划审核环节
+                    Rectangle {
+                        height: 35px;
+                        Rectangle { y: parent.height - 1px; height: 1px; width: 100%; background: Design.line; }
+                        HorizontalLayout { spacing: 2px;
+                            Tab { text: "处理规则"; active: root.panel == 0; width: 104px; enabled: root.confirm-kind == 0; clicked => { root.panel = 0; } }
+                            Tab { text: "进度与日志"; active: root.panel == 1; width: 118px; enabled: root.confirm-kind == 0; clicked => { root.panel = 1; } }
+                            Tab { text: "失败列表"; active: root.panel == 2; width: 104px; enabled: root.confirm-kind == 0; clicked => { root.panel = 2; } }
                             Rectangle { horizontal-stretch: 1; background: transparent; }
                         }
                     }
-                }
-                Surface {
-                    VerticalLayout { padding: 12px; spacing: 8px;
-                        HorizontalLayout { spacing: 10px; cross-axis-alignment: center;
-                            Label { text: root.convert-status; overflow: elide; horizontal-stretch: 1; font-weight: 600; }
-                            if !root.convert-ready && !root.convert-initializing: Button { text: "初始化可选组件"; primary: true;
-                                enabled: root.convert-runtime-confirmed && !root.convert-runtime-saving && root.confirm-kind == 0; clicked => { root.convert-initialize(); } }
-                            if root.convert-initializing: Button { text: "取消初始化";
-                                enabled: root.confirm-kind == 0; clicked => { root.convert-stop(); } }
+                    // 规则分区（递归解压只有解压与安全两分区）
+                    if root.panel == 0: HorizontalLayout { spacing: 10px;
+                        Rectangle {
+                            horizontal-stretch: 1;
+                            height: 34px;
+                            border-radius: 9px;
+                            background: Design.inset;
+                            border-width: 1px;
+                            border-color: Design.line;
+                            HorizontalLayout { padding: 3px; spacing: 2px;
+                                for label[index] in ["解压", "安全与性能"]: Pill {
+                                    text: label; active: root.section == index; enabled: !root.busy && root.confirm-kind == 0; horizontal-stretch: 1;
+                                    height: 26px;
+                                    clicked => { root.select-section(index); }
+                                }
+                            }
                         }
-                        Muted { text: "文档转换组件按需初始化，不随主程序打包；媒体转录由 Xberg 推理组件承接，初始化时按清单下载推理组件包，缺失时初始化与检查会给出原因。"; }
+                        AppButton { text: root.show-advanced ? "隐藏高级选项" : "显示高级选项"; small: true; icon: 9;
+                            enabled: !root.busy && root.confirm-kind == 0;
+                            clicked => { root.toggle-advanced(!root.show-advanced); } }
                     }
-                }
-                Surface { vertical-stretch: 1;
-                    VerticalLayout { padding-top: 12px; padding-bottom: 12px; padding-left: 14px; padding-right: 14px; spacing: 8px;
-                        Muted { text: root.convert-progress-note == "" ? "转换日志" : root.convert-progress-note; }
-                        TextEdit { text: root.convert-log-text; read-only: true; font-family: "Consolas"; vertical-stretch: 1; }
+                    if root.panel == 0: Surface { vertical-stretch: 1;
+                        VerticalLayout { spacing: 0px;
+                            // 解压侧的处置已按 X-03/X-04/X-05/X-06 固定，基础层没有可调行：
+                            // 空卡片改为固定行为的简要说明，而不是一句话顶在一整张空白大卡上。
+                            if root.rules.length == 0: VerticalLayout {
+                                padding-top: 18px; padding-bottom: 18px; padding-left: 20px; padding-right: 20px; spacing: 10px;
+                                HorizontalLayout { spacing: 9px; cross-axis-alignment: center;
+                                    Ico { kind: 7; tint: Design.accent; width: 16px; height: 16px; }
+                                    Label { text: "解压处置已固定（不提供保留原包、覆盖或跳过冲突的选项）"; font-weight: 600; font-size: 13.5px; overflow: elide; }
+                                }
+                                HorizontalLayout { spacing: 10px;
+                                    Rectangle { width: 5px; height: 5px; border-radius: 2.5px; background: Design.accent; opacity: 0.7; }
+                                    Muted { text: "压缩包就地解开（含本次解出的嵌套包）；完整成功解出的原压缩包及分卷永久删除（不可恢复），已有文件一律保留"; font-size: 12.5px; color: Design.text-muted; }
+                                }
+                                HorizontalLayout { spacing: 10px;
+                                    Rectangle { width: 5px; height: 5px; border-radius: 2.5px; background: Design.accent; opacity: 0.7; }
+                                    Muted { text: "目标同名时只为新解出的文件自动改名，扩展名与复合扩展名保持不变"; font-size: 12.5px; color: Design.text-muted; }
+                                }
+                                HorizontalLayout { spacing: 10px;
+                                    Rectangle { width: 5px; height: 5px; border-radius: 2.5px; background: Design.accent; opacity: 0.7; }
+                                    Muted { text: "失败、部分解开或取消的包保留；无法完全解开的包移入「解压失败」子目录，原因记录在日志中"; font-size: 12.5px; color: Design.text-muted; }
+                                }
+                                HorizontalLayout { spacing: 10px;
+                                    Rectangle { width: 5px; height: 5px; border-radius: 2.5px; background: Design.accent; opacity: 0.7; }
+                                    Muted { text: "本分区没有基础规则；点「显示高级选项」可调整防护上限（嵌套层数、条目数、展开大小与比例）。"; font-size: 12.5px; color: Design.text-muted; }
+                                }
+                            }
+                            // 行高 44px：与目录整理同口径（U-05 的可见行数约束）。
+                            ListView { vertical-stretch: 1; for entry in root.rules: RuleRowItem {
+                                rule: entry;
+                                editable: !root.busy && root.confirm-kind == 0;
+                                show-hint: root.confirm-kind == 0;
+                                rule-toggled(value) => { root.rule-bool(entry.key, value); }
+                                rule-chosen(value) => { root.rule-choice(entry.key, value); }
+                                rule-edited(value) => { root.rule-text(entry.key, value); }
+                            }}
+                        }
                     }
-                }
-                Surface {
-                    min-height: 56px;
-                    VerticalLayout { padding-top: 8px; padding-bottom: 8px; padding-left: 16px; padding-right: 14px; spacing: 8px;
-                        HorizontalLayout { spacing: 12px; cross-axis-alignment: center;
-                            VerticalLayout { horizontal-stretch: 1; spacing: 2px;
-                                HorizontalLayout { spacing: 8px; cross-axis-alignment: center;
-                                    Rectangle { width: 44px; height: 20px; border-radius: 6px;
-                                        background: root.busy ? Design.accent : Design.accent-soft;
+                    if root.panel == 1: VerticalLayout { spacing: 8px;
+                        if root.quarantined-count > 0: Rectangle {
+                            min-height: 36px; border-radius: 8px;
+                            background: Design.warning-bg;
+                            border-width: 1px; border-color: Design.warning-line;
+                            HorizontalLayout { padding-top: 8px; padding-bottom: 8px; padding-left: 12px; padding-right: 12px; spacing: 10px; cross-axis-alignment: center;
+                                Rectangle { width: 4px; height: 18px; border-radius: 2px; background: Design.warning; }
+                                Text { text: "有 " + root.quarantined-count + " 个压缩包未完全解开，原包或分卷已移入「解压失败」子目录等待人工处理；详情见下方日志。";
+                                    color: Design.text; wrap: word-wrap; horizontal-stretch: 1; vertical-alignment: center; font-size: 12px; }
+                            }
+                        }
+                        LogCard { vertical-stretch: 1; body <=> root.log-text; }
+                    }
+                    // U-10：本次解压失败项分页列表。每个失败包或卷集对应一项，显示原路径、
+                    // 失败原因与隔离后位置；总数与翻页按钮只在对应页真实存在时启用。
+                    // 运行中可查看，任务结束或取消后仍可查看；切换工具不清空。
+                    if root.screen == 2 && root.panel == 2: Surface { vertical-stretch: 1;
+                        VerticalLayout { padding-top: 12px; padding-bottom: 12px; padding-left: 16px; padding-right: 16px; spacing: 8px;
+                            HorizontalLayout { spacing: 12px; cross-axis-alignment: center;
+                                Label { text: "本次解压失败项（共 " + root.fail-total + " 项）"; font-weight: 600; font-size: 13px; }
+                                Muted { text: "每个失败包或分卷集对应一项；启动下一次解压任务或退出前保留，切换工具不清空。"; horizontal-stretch: 1; overflow: elide; color: Design.muted-2; }
+                            }
+                            if !root.fail-ready: Muted { text: "正在关联本次解压任务…"; color: Design.muted-2; }
+                            if root.fail-ready && root.fail-total == 0: Muted { text: "本次任务没有失败项。"; color: Design.muted-2; }
+                            if root.fail-total > 0: Rectangle { vertical-stretch: 1;
+                                background: Design.soft;
+                                border-radius: 8px;
+                                border-width: 1px; border-color: Design.line-soft;
+                                clip: true;
+                                VerticalLayout { spacing: 0px;
+                                    ListView { vertical-stretch: 1; for item in root.fail-rows: Rectangle { height: 72px;
+                                        VerticalLayout { padding-left: 12px; padding-right: 12px; padding-top: 6px; padding-bottom: 4px; spacing: 2px;
+                                            Label { text: item.stage + "  ·  " + item.source; font-weight: 600; font-size: 13px; overflow: elide; }
+                                            Muted { text: "原因：" + item.reason; overflow: elide; color: Design.muted-2; }
+                                            Muted { text: item.target == "" ? "未记录隔离位置（隔离可能失败或尚未执行；整体原因见「进度与日志」）" : "隔离后位置：" + item.target; overflow: elide; color: Design.muted-2; }
+                                        }
+                                        Rectangle { y: parent.height - 1px; x: 12px; height: 1px; width: parent.width - 24px; background: Design.line-soft; }
+                                    }}
+                                }
+                            }
+                            HorizontalLayout { height: 32px; spacing: 8px; cross-axis-alignment: center;
+                                AppButton { text: "上一页"; small: true; enabled: root.fail-prev-enabled && root.confirm-kind == 0; clicked => { root.fail-page(-1); } }
+                                Muted { text: root.fail-page-label; wrap: no-wrap; horizontal-alignment: center; horizontal-stretch: 1; vertical-alignment: center; }
+                                AppButton { text: "下一页"; small: true; enabled: root.fail-next-enabled && root.confirm-kind == 0; clicked => { root.fail-page(1); } }
+                            }
+                        }
+                    }
+                    // 底部状态与主操作
+                    Surface { pop: true; radius: 10px; min-height: 58px;
+                        VerticalLayout { padding-top: 8px; padding-bottom: 8px; padding-left: 16px; padding-right: 16px; spacing: 6px;
+                            HorizontalLayout { spacing: 12px; cross-axis-alignment: center;
+                                Rectangle {
+                                    height: 20px; border-radius: 5px;
+                                    background: root.busy ? Design.accent : Design.accent-soft;
+                                    HorizontalLayout { padding-left: 9px; padding-right: 9px;
                                         Text { text: root.busy ? "进行中" : "状态"; font-size: 11px; font-weight: 600;
                                             color: root.busy ? Design.on-accent : Design.accent-ink;
-                                            width: parent.width; height: parent.height;
-                                            horizontal-alignment: center; vertical-alignment: center; }
+                                            vertical-alignment: center; }
                                     }
-                                    Label { text: root.convert-metrics; overflow: elide; horizontal-stretch: 1; font-size: 14px; }
                                 }
+                                VerticalLayout { horizontal-stretch: 1; spacing: 1px;
+                                    Label { text: root.status; overflow: elide; font-weight: 600; font-size: 13px; }
+                                    Muted { text: root.metrics; wrap: no-wrap; overflow: elide; font-size: 11.5px; color: Design.muted-2; }
+                                }
+                                if root.busy: Text { text: root.progress-note; wrap: no-wrap; overflow: elide; color: Design.accent-ink; font-weight: 600; }
+                                // 模态（如 kind=3 停止并关闭）与解压冲突框打开期间都禁用：键盘
+                                // 不得穿透遮罩直接暂停/取消任务，必须先处理最上层对话框。
+                                if root.busy: AppButton { text: root.paused ? "继续" : "暂停"; enabled: root.confirm-kind == 0; clicked => { root.pause-task(); } }
+                                if root.busy: AppButton { text: "取消任务"; enabled: root.confirm-kind == 0; clicked => { root.cancel-task(); } }
+                                if !root.busy: AppButton { text: "开始解压"; primary: true; icon: 10; enabled: root.directory != "" && root.confirm-kind == 0;
+                                    clicked => { root.request-extract-start(); } }
                             }
-                            if root.busy: Text { text: root.convert-progress-note; wrap: no-wrap; overflow: elide; color: Design.accent-ink; font-weight: 600; }
-                            if root.busy: Button { text: "停止任务"; enabled: root.confirm-kind == 0; clicked => { root.convert-stop(); } }
-                            if !root.busy: Button { text: "开始转换"; primary: true;
-                                enabled: root.convert-ready && root.convert-input-dir != "" && root.convert-output-dir != "" && root.confirm-kind == 0;
-                                clicked => { root.convert-start(); } }
+                            if root.busy: ProgressBar { progress: root.progress; }
                         }
-                        if root.busy: ProgressBar { progress: root.convert-progress; }
                     }
                 }
-            }
-            if root.screen == 6: VerticalLayout {
-                spacing: 10px;
-                Surface {
-                    VerticalLayout { padding: 16px; spacing: 10px;
-                        Label { text: "可选组件"; font-weight: 700; }
-                        Muted { text: root.snap-asset-status; }
-                        if root.snap-initializing: ProgressBar { progress: -1; }
-                        if root.snap-initializing: Muted { text: root.snap-progress; }
-                        HorizontalLayout { spacing: 10px;
-                            if !root.snap-ready && !root.snap-initializing: Button {
-                                text: "初始化 / 重试下载"; primary: true;
-                                enabled: root.confirm-kind == 0;
-                                clicked => { root.snap-initialize(); }
-                            }
-                            if root.snap-initializing: Button {
-                                text: "取消初始化"; enabled: root.confirm-kind == 0;
-                                clicked => { root.snap-cancel-initialize(); }
-                            }
-                            Rectangle { horizontal-stretch: 1; background: transparent; }
-                        }
-                        Muted { text: "只在点击初始化后下载缺失组件；校验完成后截图识别可离线使用。取消或失败不会将不完整组件标为就绪。"; }
-                    }
-                }
-                Surface {
-                    VerticalLayout { padding: 16px; spacing: 10px;
-                        HorizontalLayout { spacing: 10px; cross-axis-alignment: center;
-                            Label { text: "后台服务"; font-weight: 700; horizontal-stretch: 1; }
-                            Button { text: root.snap-connected ? "刷新连接" : "启动 / 重连";
-                                enabled: root.snap-ready && root.confirm-kind == 0 && !root.snap-request-pending;
-                                clicked => { root.snap-connect(); } }
-                        }
-                        Muted { text: root.snap-service-status; }
-                        HorizontalLayout { spacing: 16px;
-                            Label { text: "模型：" + (root.snap-model == "ready" ? "就绪" : root.snap-model == "loading" ? "加载中" : root.snap-model == "error" ? "错误" : "未初始化"); }
-                            Label { text: "任务：" + (root.snap-task == "recognizing" ? "正在识别" : "空闲"); }
-                        }
-                        if root.snap-error != "": Text { text: root.snap-error; color: Design.danger-ink; wrap: word-wrap; }
-                        HorizontalLayout { spacing: 10px;
-                            Button { text: "重新加载模型"; enabled: root.snap-connected && root.confirm-kind == 0 && !root.snap-request-pending && root.snap-task == "idle";
-                                clicked => { root.snap-retry-load(); } }
-                            Button { text: "截图识别"; primary: true; enabled: root.snap-connected && root.confirm-kind == 0 && !root.snap-request-pending;
-                                clicked => { root.snap-capture(); } }
+                // ============ MD 整理 ============
+                if root.screen == 3: VerticalLayout {
+                    spacing: 8px;
+                    // 子功能页签（M-01：当前只有「合并 MD」与「拆分 MD」两个功能）
+                    Rectangle {
+                        height: 35px;
+                        Rectangle { y: parent.height - 1px; height: 1px; width: 100%; background: Design.line; }
+                        HorizontalLayout { spacing: 2px;
+                            Tab { text: "合并 MD"; active: root.md-subpage == 0; width: 104px; enabled: root.confirm-kind == 0; clicked => { root.md-select-subpage(0); } }
+                            Tab { text: "拆分 MD"; active: root.md-subpage == 1; width: 104px; enabled: root.confirm-kind == 0; clicked => { root.md-select-subpage(1); } }
                             Rectangle { horizontal-stretch: 1; background: transparent; }
                         }
                     }
-                }
-                Surface {
-                    VerticalLayout { padding: 16px; spacing: 10px;
-                        Label { text: "设置"; font-weight: 700; }
-                        Muted { text: "当前生效热键：" + root.snap-hotkey; }
-                        HorizontalLayout { spacing: 10px; cross-axis-alignment: center;
-                            recording := FocusScope {
-                                width: 230px; height: 34px;
-                                enabled: root.snap-connected && root.confirm-kind == 0;
-                                key-pressed(event) => {
-                                    if (!root.snap-recording) { return reject; }
-                                    if (event.text == Key.Escape && !event.modifiers.control && !event.modifiers.alt && !event.modifiers.shift && !event.modifiers.meta) {
-                                        root.snap-recording = false;
-                                        return accept;
-                                    }
-                                    root.snap-record-key(event.text,
-                                        event.modifiers.control, event.modifiers.alt,
-                                        event.modifiers.shift, event.modifiers.meta);
-                                    return accept;
+                    if root.md-subpage == 0: Surface {
+                        VerticalLayout { spacing: 0px;
+                            Rectangle {
+                                HorizontalLayout { padding-top: 12px; padding-bottom: 12px; padding-left: 16px; padding-right: 16px; spacing: 12px; cross-axis-alignment: center;
+                                    Text { width: 96px; text: "输入目录"; font-size: 12.5px; color: Design.text-muted; vertical-alignment: center; }
+                                    Field { text <=> root.md-input-dir; placeholder-text: "选择或输入包含 Markdown 文件的目录，例如 D:\\Docs";
+                                        icon: 0;
+                                        enabled: !root.busy && root.confirm-kind == 0; horizontal-stretch: 1; }
+                                    Check { text: "递归子目录"; checked <=> root.md-recursive;
+                                        enabled: !root.busy && root.confirm-kind == 0; }
+                                    AppButton { text: "选择目录…"; enabled: !root.busy && root.confirm-kind == 0; clicked => { root.md-choose-input(); } }
                                 }
-                                Text { text: root.snap-recording ? "请按组合键（Esc 取消）" : root.snap-hotkey-draft;
-                                    color: Design.text; vertical-alignment: center; horizontal-alignment: center; }
                             }
-                            Button { text: root.snap-recording ? "取消录制" : "录制热键";
+                            Rectangle {
+                                background: Design.soft;
+                                VerticalLayout { padding-top: 10px; padding-bottom: 10px; padding-left: 16px; padding-right: 16px;
+                                    Text { text: "按文件创建时间从早到晚合并；创建时间相同时按相对路径自然排序（2.md 在 10.md 之前）。原文件不修改、不删除、不移动。"; font-size: 12px; color: Design.text-muted; wrap: word-wrap; }
+                                }
+                            }
+                        }
+                    }
+                    if root.md-subpage == 0: Surface {
+                        VerticalLayout { spacing: 0px;
+                            Rectangle {
+                                HorizontalLayout { padding-top: 12px; padding-bottom: 12px; padding-left: 16px; padding-right: 16px; spacing: 12px; cross-axis-alignment: center;
+                                    Text { width: 96px; text: "文件名"; font-size: 12.5px; color: Design.text-muted; vertical-alignment: center; }
+                                    Field { text <=> root.md-output-name; width: 200px;
+                                        enabled: !root.busy && root.confirm-kind == 0; }
+                                    Text { text: "输出目录"; font-size: 12.5px; color: Design.text-muted; vertical-alignment: center; }
+                                    Field { text <=> root.md-output-dir; placeholder-text: "合并结果保存位置";
+                                        icon: 0;
+                                        enabled: !root.busy && root.confirm-kind == 0; horizontal-stretch: 1; }
+                                    AppButton { text: "选择目录…"; enabled: !root.busy && root.confirm-kind == 0; clicked => { root.md-choose-output(); } }
+                                }
+                            }
+                            Rectangle {
+                                background: Design.soft;
+                                VerticalLayout { padding-top: 10px; padding-bottom: 10px; padding-left: 16px; padding-right: 16px;
+                                    Text { text: "每个原文件以「# 文件名.md」为一级标题，内部标题整体下移一级（六级封顶）。输出文件已存在时先弹确认，不静默覆盖；输出文件位于被扫描目录中时不作为输入参与合并。"; font-size: 12px; color: Design.text-muted; wrap: word-wrap; }
+                                }
+                            }
+                        }
+                    }
+                    if root.md-subpage == 1: Surface {
+                        VerticalLayout { spacing: 0px;
+                            Rectangle {
+                                HorizontalLayout { padding-top: 12px; padding-bottom: 12px; padding-left: 16px; padding-right: 16px; spacing: 12px; cross-axis-alignment: center;
+                                    Text { width: 96px; text: "输入文件"; font-size: 12.5px; color: Design.text-muted; vertical-alignment: center; }
+                                    Field { text <=> root.md-split-file; placeholder-text: "选择要拆分的 .md 文件";
+                                        icon: 3;
+                                        enabled: !root.busy && root.confirm-kind == 0; horizontal-stretch: 1; }
+                                    AppButton { text: "选择文件…"; enabled: !root.busy && root.confirm-kind == 0; clicked => { root.md-split-choose-file(); } }
+                                }
+                                Rectangle { y: parent.height - 1px; height: 1px; x: 16px; width: parent.width - 32px; background: Design.line-soft; }
+                            }
+                            Rectangle {
+                                HorizontalLayout { padding-top: 12px; padding-bottom: 12px; padding-left: 16px; padding-right: 16px; spacing: 12px; cross-axis-alignment: center;
+                                    Text { width: 96px; text: "单文件上限"; font-size: 12.5px; color: Design.text-muted; vertical-alignment: center; }
+                                    Field { text <=> root.md-split-size; width: 120px; right-align: true;
+                                        enabled: !root.busy && root.confirm-kind == 0; }
+                                    ComboBox { model: ["KB", "MB"]; current-index: root.md-split-unit; width: 100px;
+                                        enabled: !root.busy && root.confirm-kind == 0;
+                                        selected(value) => { root.md-split-unit = self.current-index; } }
+                                    Rectangle { horizontal-stretch: 1; background: transparent; }
+                                }
+                                Rectangle { y: parent.height - 1px; height: 1px; x: 16px; width: parent.width - 32px; background: Design.line-soft; }
+                            }
+                            Rectangle {
+                                HorizontalLayout { padding-top: 12px; padding-bottom: 12px; padding-left: 16px; padding-right: 16px; spacing: 12px; cross-axis-alignment: center;
+                                    Text { width: 96px; text: "输出目录"; font-size: 12.5px; color: Design.text-muted; vertical-alignment: center; }
+                                    Field { text <=> root.md-split-dir; placeholder-text: "分片保存位置";
+                                        icon: 0;
+                                        enabled: !root.busy && root.confirm-kind == 0; horizontal-stretch: 1; }
+                                    AppButton { text: "选择目录…"; enabled: !root.busy && root.confirm-kind == 0; clicked => { root.md-split-choose-dir(); } }
+                                }
+                            }
+                            Rectangle {
+                                background: Design.soft;
+                                VerticalLayout { padding-top: 10px; padding-bottom: 10px; padding-left: 16px; padding-right: 16px;
+                                    Text { text: "换算固定 1 KB = 1024 字节、1 MB = 1024 × 1024 字节；任意分片实际字节数严格不超过上限；全部分片按编号顺序拼接后与原文件完全一致，不插入任何额外文本。"; font-size: 12px; color: Design.text-muted; wrap: word-wrap; }
+                                }
+                            }
+                        }
+                    }
+                    LogCard { vertical-stretch: 1; body <=> root.log-text; }
+                    // 底部状态与主操作（U-12：后台执行，界面保持响应、可取消）
+                    Surface { pop: true; radius: 10px; min-height: 58px;
+                        VerticalLayout { padding-top: 8px; padding-bottom: 8px; padding-left: 16px; padding-right: 16px; spacing: 6px;
+                            HorizontalLayout { spacing: 12px; cross-axis-alignment: center;
+                                Rectangle {
+                                    height: 20px; border-radius: 5px;
+                                    background: root.busy ? Design.accent : Design.accent-soft;
+                                    HorizontalLayout { padding-left: 9px; padding-right: 9px;
+                                        Text { text: root.busy ? "进行中" : "状态"; font-size: 11px; font-weight: 600;
+                                            color: root.busy ? Design.on-accent : Design.accent-ink;
+                                            vertical-alignment: center; }
+                                    }
+                                }
+                                VerticalLayout { horizontal-stretch: 1; spacing: 1px;
+                                    Label { text: root.status; overflow: elide; font-weight: 600; font-size: 13px; }
+                                    Muted { text: root.metrics; wrap: no-wrap; overflow: elide; font-size: 11.5px; color: Design.muted-2; }
+                                }
+                                if root.busy: AppButton { text: "取消任务"; enabled: root.confirm-kind == 0; clicked => { root.cancel-task(); } }
+                                if !root.busy && root.md-subpage == 0: AppButton { text: "开始合并"; primary: true; icon: 10;
+                                    enabled: root.md-input-dir != "" && root.confirm-kind == 0; clicked => { root.md-merge-start(); } }
+                                if !root.busy && root.md-subpage == 1: AppButton { text: "开始拆分"; primary: true; icon: 10;
+                                    enabled: root.md-split-file != "" && root.confirm-kind == 0; clicked => { root.md-split-start(); } }
+                            }
+                            if root.busy: ProgressBar { progress: root.progress; }
+                        }
+                    }
+                }
+                // ============ Git 工具 ============
+                if root.screen == 4: VerticalLayout {
+                    spacing: 8px;
+                    Surface {
+                        VerticalLayout { spacing: 0px;
+                            VerticalLayout { padding-top: 12px; padding-bottom: 12px; padding-left: 16px; padding-right: 16px; spacing: 8px;
+                                Text { text: "本地 Git 项目目录（须为有效仓库，当前分支已配置 upstream）"; font-size: 12.5px; color: Design.text-muted; }
+                                HorizontalLayout { spacing: 10px; cross-axis-alignment: center;
+                                    Field { text <=> root.git-repo; placeholder-text: "选择或输入 Git 项目目录，例如 D:\\code\\my-project";
+                                        icon: 5;
+                                        enabled: !root.busy && root.confirm-kind == 0; horizontal-stretch: 1; }
+                                    AppButton { text: "选择目录…"; enabled: !root.busy && root.confirm-kind == 0; clicked => { root.git-choose-repo(); } }
+                                    if !root.busy: AppButton { text: "开始"; primary: true; icon: 10;
+                                        enabled: root.git-repo != "" && root.confirm-kind == 0; clicked => { root.git-start(); } }
+                                    if root.busy: AppButton { text: "停止"; enabled: root.confirm-kind == 0; clicked => { root.git-stop(); } }
+                                }
+                            }
+                            Rectangle {
+                                background: Design.soft;
+                                VerticalLayout { padding-top: 10px; padding-bottom: 10px; padding-left: 16px; padding-right: 16px;
+                                    Text { text: "严格逐个处理：一个文件单独 add → 单独 commit（只含当前文件）→ 单独 push，push 成功后才处理下一个。提交信息固定「update: 相对路径」。"; font-size: 12px; color: Design.text-muted; wrap: word-wrap; }
+                                }
+                            }
+                        }
+                    }
+                    // 实时执行信息（G-13：仓库、分支、upstream、总数、完成数、当前文件、阶段、重试、等待、总体状态）
+                    Surface {
+                        VerticalLayout { spacing: 0px;
+                            HorizontalLayout { spacing: 0px;
+                                VerticalLayout { horizontal-stretch: 1; padding-top: 12px; padding-bottom: 12px; padding-left: 16px; padding-right: 16px; spacing: 4px;
+                                    Text { text: "仓库 · 分支 · upstream"; font-size: 11.5px; color: Design.muted-2; font-weight: 500; }
+                                    Label { text: (root.git-branch == "" ? "—" : root.git-branch) + "  ·  " + (root.git-upstream == "" ? "—" : root.git-upstream);
+                                        overflow: elide; font-weight: 600; font-family: "Consolas"; font-size: 14px; }
+                                }
+                                Rectangle { width: 1px; background: Design.line-soft; }
+                                VerticalLayout { padding-top: 12px; padding-bottom: 12px; padding-left: 16px; padding-right: 16px; spacing: 4px;
+                                    Text { text: "已完成 / 总数"; font-size: 11.5px; color: Design.muted-2; font-weight: 500; }
+                                    Label { text: root.git-done + " / " + root.git-total; font-weight: 700; font-family: "Consolas"; font-size: 14px; }
+                                }
+                                Rectangle { width: 1px; background: Design.line-soft; }
+                                VerticalLayout { padding-top: 12px; padding-bottom: 12px; padding-left: 16px; padding-right: 16px; spacing: 4px;
+                                    Text { text: "当前阶段"; font-size: 11.5px; color: Design.muted-2; font-weight: 500; }
+                                    Label { text: root.git-stage == "" ? "—" : root.git-stage; font-weight: 600; font-size: 13px; }
+                                }
+                            }
+                            Rectangle { height: 1px; background: Design.line-soft; }
+                            HorizontalLayout { spacing: 0px;
+                                VerticalLayout { horizontal-stretch: 1; padding-top: 12px; padding-bottom: 12px; padding-left: 16px; padding-right: 16px; spacing: 4px;
+                                    Text { text: "当前文件"; font-size: 11.5px; color: Design.muted-2; font-weight: 500; }
+                                    Label { text: root.git-current == "" ? "—" : root.git-current; overflow: elide; font-size: 13px; }
+                                }
+                                Rectangle { width: 1px; background: Design.line-soft; }
+                                VerticalLayout { padding-top: 12px; padding-bottom: 12px; padding-left: 16px; padding-right: 16px; spacing: 4px;
+                                    Text { text: "重试次数"; font-size: 11.5px; color: Design.muted-2; font-weight: 500; }
+                                    Label { text: root.git-retry; font-family: "Consolas"; font-size: 14px; }
+                                }
+                                Rectangle { width: 1px; background: Design.line-soft; }
+                                VerticalLayout { padding-top: 12px; padding-bottom: 12px; padding-left: 16px; padding-right: 16px; spacing: 4px;
+                                    Text { text: "下次重试等待"; font-size: 11.5px; color: Design.muted-2; font-weight: 500; }
+                                    Label { text: root.git-retry-wait > 0 ? (root.git-retry-wait + " 秒") : "—"; font-size: 13px; }
+                                }
+                            }
+                            Rectangle { height: 1px; background: Design.line-soft; }
+                            VerticalLayout { padding-top: 12px; padding-bottom: 12px; padding-left: 16px; padding-right: 16px; spacing: 4px;
+                                Text { text: "总体状态"; font-size: 11.5px; color: Design.muted-2; font-weight: 500; }
+                                Label { text: root.git-state == "" ? "—" : root.git-state; overflow: elide; font-weight: 600; font-size: 13px; }
+                                if root.busy: ProgressBar { progress: root.progress; }
+                            }
+                        }
+                    }
+                    // 实时日志（G-14：阶段、stdout/stderr、错误原因、push/merge 返回、retry 信息）
+                    LogCard { vertical-stretch: 1; body <=> root.log-text; }
+                    Surface { pop: true; radius: 10px; min-height: 52px;
+                        VerticalLayout { padding-top: 8px; padding-bottom: 8px; padding-left: 16px; padding-right: 16px; spacing: 6px;
+                            HorizontalLayout { spacing: 12px; cross-axis-alignment: center;
+                                Rectangle {
+                                    height: 20px; border-radius: 5px;
+                                    background: root.busy ? Design.accent : Design.accent-soft;
+                                    HorizontalLayout { padding-left: 9px; padding-right: 9px;
+                                        Text { text: root.busy ? "进行中" : "状态"; font-size: 11px; font-weight: 600;
+                                            color: root.busy ? Design.on-accent : Design.accent-ink;
+                                            vertical-alignment: center; }
+                                    }
+                                }
+                                VerticalLayout { horizontal-stretch: 1; spacing: 1px;
+                                    Label { text: root.status; overflow: elide; font-weight: 600; font-size: 13px; }
+                                }
+                                if root.busy: AppButton { text: "停止任务"; enabled: root.confirm-kind == 0; clicked => { root.git-stop(); } }
+                            }
+                        }
+                    }
+                }
+                // ============ 转 Markdown ============
+                if root.screen == 5: VerticalLayout {
+                    spacing: 8px;
+                    Surface {
+                        VerticalLayout { spacing: 0px;
+                            HorizontalLayout { padding-top: 12px; padding-bottom: 12px; padding-left: 16px; padding-right: 16px; spacing: 12px; cross-axis-alignment: center;
+                                Text { width: 96px; text: "Xberg 运行目录"; font-size: 12.5px; color: Design.text-muted; vertical-alignment: center; }
+                                Field { text <=> root.convert-runtime-dir; placeholder-text: "选择已安装的 Xberg 运行目录";
+                                    edited => { root.convert-runtime-edited(); }
+                                    enabled: !root.busy && !root.convert-initializing && !root.convert-runtime-saving && root.confirm-kind == 0;
+                                    horizontal-stretch: 1; }
+                                AppButton { text: "选择目录…";
+                                    enabled: !root.busy && !root.convert-initializing && !root.convert-runtime-saving && root.confirm-kind == 0;
+                                    clicked => { root.convert-choose-runtime(); } }
+                                AppButton { text: root.convert-runtime-saving ? "正在校验…" : "使用此目录"; primary: true;
+                                    enabled: !root.busy && !root.convert-initializing && !root.convert-runtime-saving && root.convert-runtime-dir != "" && root.confirm-kind == 0;
+                                    clicked => { root.convert-use-runtime(); } }
+                            }
+                            Rectangle {
+                                background: Design.soft;
+                                VerticalLayout { padding-top: 10px; padding-bottom: 10px; padding-left: 16px; padding-right: 16px;
+                                    Text { text: root.convert-runtime-saving ? "正在校验并保存 Xberg 目录，请稍候…" : "必须选择并确认固定版本的 Xberg 运行目录；校验失败会显示原因。"; font-size: 12px; color: Design.text-muted; wrap: word-wrap; }
+                                }
+                            }
+                        }
+                    }
+                    Surface {
+                        VerticalLayout { spacing: 0px;
+                            HorizontalLayout { padding-top: 12px; padding-bottom: 12px; padding-left: 16px; padding-right: 16px; spacing: 12px; cross-axis-alignment: center;
+                                Text { width: 96px; text: "输入目录"; font-size: 12.5px; color: Design.text-muted; vertical-alignment: center; }
+                                Field { text <=> root.convert-input-dir; placeholder-text: "选择或输入待转换的目录，例如 D:\\Docs";
+                                    icon: 0;
+                                    enabled: !root.busy && !root.convert-initializing && !root.convert-runtime-saving && root.confirm-kind == 0; horizontal-stretch: 1; }
+                                AppButton { text: "选择目录…"; enabled: !root.busy && !root.convert-initializing && !root.convert-runtime-saving && root.confirm-kind == 0; clicked => { root.convert-choose-input(); } }
+                            }
+                            Rectangle {
+                                background: Design.soft;
+                                VerticalLayout { padding-top: 10px; padding-bottom: 10px; padding-left: 16px; padding-right: 16px;
+                                    Text { text: "只读扫描 Git 项目、隐藏文件和系统属性文件；不会跟随符号链接或 junction。"; font-size: 12px; color: Design.text-muted; wrap: word-wrap; }
+                                }
+                            }
+                        }
+                    }
+                    Surface {
+                        VerticalLayout { spacing: 0px;
+                            HorizontalLayout { padding-top: 12px; padding-bottom: 12px; padding-left: 16px; padding-right: 16px; spacing: 12px; cross-axis-alignment: center;
+                                Text { width: 96px; text: "输出目录"; font-size: 12.5px; color: Design.text-muted; vertical-alignment: center; }
+                                Field { text <=> root.convert-output-dir; placeholder-text: "选择转换结果目录";
+                                    icon: 0;
+                                    enabled: !root.busy && !root.convert-initializing && !root.convert-runtime-saving && root.confirm-kind == 0; horizontal-stretch: 1; }
+                                AppButton { text: "选择目录…"; enabled: !root.busy && !root.convert-initializing && !root.convert-runtime-saving && root.confirm-kind == 0; clicked => { root.convert-choose-output(); } }
+                                Check { text: "平铺输出"; checked <=> root.convert-flat;
+                                    enabled: !root.busy && !root.convert-initializing && !root.convert-runtime-saving && root.confirm-kind == 0; }
+                            }
+                            Rectangle {
+                                background: Design.soft;
+                                VerticalLayout { padding-top: 10px; padding-bottom: 10px; padding-left: 16px; padding-right: 16px;
+                                    Text { text: root.convert-flat ? "平铺时同名结果只处理排序第一份，其余跳过。" : "默认保留输入目录层级；输出目录位于输入目录内时会自动排除输出子树。"; font-size: 12px; color: Design.text-muted; wrap: word-wrap; }
+                                }
+                            }
+                        }
+                    }
+                    Surface {
+                        VerticalLayout { spacing: 0px;
+                            HorizontalLayout { padding-top: 12px; padding-bottom: 12px; padding-left: 16px; padding-right: 16px; spacing: 14px; cross-axis-alignment: center;
+                                Text { width: 96px; text: "转换类型"; font-size: 12.5px; color: Design.text-muted; vertical-alignment: center; }
+                                Check { text: "PDF"; checked <=> root.convert-pdf; enabled: !root.busy && !root.convert-initializing && !root.convert-runtime-saving && root.confirm-kind == 0; }
+                                Check { text: "Office"; checked <=> root.convert-office; enabled: !root.busy && !root.convert-initializing && !root.convert-runtime-saving && root.confirm-kind == 0; }
+                                Check { text: "图片"; checked <=> root.convert-images; enabled: !root.busy && !root.convert-initializing && !root.convert-runtime-saving && root.confirm-kind == 0; }
+                                Check { text: "MP4/M4A"; checked <=> root.convert-media; enabled: !root.busy && !root.convert-initializing && !root.convert-runtime-saving && root.confirm-kind == 0; }
+                                Check { text: "其他"; checked <=> root.convert-other; enabled: !root.busy && !root.convert-initializing && !root.convert-runtime-saving && root.confirm-kind == 0; }
+                                Rectangle { horizontal-stretch: 1; background: transparent; }
+                            }
+                            Rectangle { height: 1px; background: Design.line-soft; }
+                            HorizontalLayout { padding-top: 12px; padding-bottom: 12px; padding-left: 16px; padding-right: 16px; spacing: 12px; cross-axis-alignment: center;
+                                Text { width: 96px; text: "高级选项"; font-size: 12.5px; color: Design.text-muted; vertical-alignment: center; }
+                                Text { text: "单文件超时（秒）"; font-size: 12.5px; color: Design.text-muted; vertical-alignment: center; }
+                                Field { text <=> root.convert-timeout-secs; width: 140px; right-align: true;
+                                    enabled: !root.busy && !root.convert-initializing && !root.convert-runtime-saving && root.confirm-kind == 0; }
+                                Rectangle { horizontal-stretch: 1; background: transparent; }
+                            }
+                        }
+                    }
+                    Surface {
+                        VerticalLayout { padding-top: 12px; padding-bottom: 12px; padding-left: 16px; padding-right: 16px; spacing: 8px;
+                            HorizontalLayout { spacing: 10px; cross-axis-alignment: center;
+                                Dot { tone: root.convert-initializing ? Design.warning : root.convert-ready ? Design.success : Design.muted-2; }
+                                Label { text: root.convert-status; overflow: elide; horizontal-stretch: 1; font-weight: 600; font-size: 13px; }
+                                if !root.convert-ready && !root.convert-initializing: AppButton { text: "初始化可选组件"; primary: true; icon: 11;
+                                    enabled: root.convert-runtime-confirmed && !root.convert-runtime-saving && root.confirm-kind == 0; clicked => { root.convert-initialize(); } }
+                                if root.convert-initializing: AppButton { text: "取消初始化";
+                                    enabled: root.confirm-kind == 0; clicked => { root.convert-stop(); } }
+                            }
+                            if root.convert-initializing: ProgressBar { progress: root.convert-progress; }
+                            Muted { text: "文档转换组件按需初始化，不随主程序打包；媒体转录由 Xberg 推理组件承接，初始化时按清单下载推理组件包，缺失时初始化与检查会给出原因。"; color: Design.muted-2; }
+                        }
+                    }
+                    LogCard { vertical-stretch: 1; title: root.convert-progress-note == "" ? "转换日志" : root.convert-progress-note; body <=> root.convert-log-text; }
+                    Surface { pop: true; radius: 10px; min-height: 58px;
+                        VerticalLayout { padding-top: 8px; padding-bottom: 8px; padding-left: 16px; padding-right: 16px; spacing: 6px;
+                            HorizontalLayout { spacing: 12px; cross-axis-alignment: center;
+                                Rectangle {
+                                    height: 20px; border-radius: 5px;
+                                    background: root.busy ? Design.accent : Design.accent-soft;
+                                    HorizontalLayout { padding-left: 9px; padding-right: 9px;
+                                        Text { text: root.busy ? "进行中" : "状态"; font-size: 11px; font-weight: 600;
+                                            color: root.busy ? Design.on-accent : Design.accent-ink;
+                                            vertical-alignment: center; }
+                                    }
+                                }
+                                VerticalLayout { horizontal-stretch: 1; spacing: 1px;
+                                    Label { text: root.convert-metrics; overflow: elide; font-weight: 600; font-size: 13px; }
+                                }
+                                if root.busy: Text { text: root.convert-progress-note; wrap: no-wrap; overflow: elide; color: Design.accent-ink; font-weight: 600; }
+                                if root.busy: AppButton { text: "停止任务"; enabled: root.confirm-kind == 0; clicked => { root.convert-stop(); } }
+                                if !root.busy: AppButton { text: "开始转换"; primary: true; icon: 10;
+                                    enabled: root.convert-ready && root.convert-input-dir != "" && root.convert-output-dir != "" && root.confirm-kind == 0;
+                                    clicked => { root.convert-start(); } }
+                            }
+                            if root.busy: ProgressBar { progress: root.convert-progress; }
+                        }
+                    }
+                }
+                // ============ 截图 OCR ============
+                if root.screen == 6: VerticalLayout {
+                    spacing: 8px;
+                    Surface {
+                        VerticalLayout { padding-top: 14px; padding-bottom: 14px; padding-left: 16px; padding-right: 16px; spacing: 8px;
+                            HorizontalLayout { spacing: 10px; cross-axis-alignment: center;
+                                Label { text: "可选组件"; font-weight: 600; font-size: 13px; }
+                                Dot { tone: root.snap-initializing ? Design.warning : root.snap-ready ? Design.success : Design.muted-2; }
+                                Muted { text: root.snap-asset-status; horizontal-stretch: 1; overflow: elide; wrap: no-wrap; color: Design.muted-2; }
+                                if !root.snap-ready && !root.snap-initializing: AppButton {
+                                    text: "初始化 / 重试下载"; primary: true; icon: 11;
+                                    enabled: root.confirm-kind == 0;
+                                    clicked => { root.snap-initialize(); }
+                                }
+                                if root.snap-initializing: AppButton {
+                                    text: "取消初始化"; enabled: root.confirm-kind == 0;
+                                    clicked => { root.snap-cancel-initialize(); }
+                                }
+                            }
+                            if root.snap-initializing: ProgressBar { progress: -1; }
+                            if root.snap-initializing: Muted { text: root.snap-progress; color: Design.muted-2; }
+                            Muted { text: "只在点击初始化后下载缺失组件；校验完成后截图识别可离线使用。取消或失败不会将不完整组件标为就绪。"; color: Design.muted-2; }
+                        }
+                    }
+                    Surface {
+                        VerticalLayout { padding-top: 14px; padding-bottom: 14px; padding-left: 16px; padding-right: 16px; spacing: 8px;
+                            HorizontalLayout { spacing: 10px; cross-axis-alignment: center;
+                                Label { text: "后台服务"; font-weight: 600; font-size: 13px; horizontal-stretch: 1; }
+                                AppButton { text: root.snap-connected ? "刷新连接" : "启动 / 重连"; icon: 12;
+                                    enabled: root.snap-ready && root.confirm-kind == 0 && !root.snap-request-pending;
+                                    clicked => { root.snap-connect(); } }
+                            }
+                            HorizontalLayout { spacing: 10px; cross-axis-alignment: center;
+                                Dot { tone: root.snap-connected ? Design.success : Design.muted-2; }
+                                Muted { text: root.snap-service-status; horizontal-stretch: 1; overflow: elide; wrap: no-wrap; color: Design.muted-2; }
+                            }
+                            HorizontalLayout { spacing: 24px;
+                                Text { text: "模型：" + (root.snap-model == "ready" ? "就绪" : root.snap-model == "loading" ? "加载中" : root.snap-model == "error" ? "错误" : "未初始化"); font-size: 12.5px; color: Design.text-muted; }
+                                Text { text: "任务：" + (root.snap-task == "recognizing" ? "正在识别" : "空闲"); font-size: 12.5px; color: Design.text-muted; }
+                                Rectangle { horizontal-stretch: 1; background: transparent; }
+                                AppButton { text: "重新加载模型"; small: true; enabled: root.snap-connected && root.confirm-kind == 0 && !root.snap-request-pending && root.snap-task == "idle";
+                                    clicked => { root.snap-retry-load(); } }
+                                AppButton { text: "截图识别"; primary: true; small: true; icon: 6; enabled: root.snap-connected && root.confirm-kind == 0 && !root.snap-request-pending;
+                                    clicked => { root.snap-capture(); } }
+                            }
+                            if root.snap-error != "": Text { text: root.snap-error; color: Design.danger-ink; wrap: word-wrap; font-size: 12.5px; }
+                        }
+                    }
+                    Surface {
+                        VerticalLayout { padding-top: 14px; padding-bottom: 14px; padding-left: 16px; padding-right: 16px; spacing: 10px;
+                            Label { text: "设置"; font-weight: 600; font-size: 13px; }
+                            HorizontalLayout { spacing: 10px; cross-axis-alignment: center;
+                                Text { text: "当前生效热键"; font-size: 12.5px; color: Design.text-muted; }
+                                Kbd { text: root.snap-hotkey; }
+                            }
+                            HorizontalLayout { spacing: 10px; cross-axis-alignment: center;
+                                Text { width: 96px; text: "新热键"; font-size: 12.5px; color: Design.text-muted; vertical-alignment: center; }
+                                Rectangle {
+                                    horizontal-stretch: 1;
+                                    height: 36px;
+                                    border-radius: 6px;
+                                    border-width: 1px;
+                                    border-color: recording.has-focus ? Design.accent : Design.line-strong;
+                                    background: Design.soft;
+                                    HorizontalLayout { cross-axis-alignment: center;
+                                        recording := FocusScope {
+                                            horizontal-stretch: 1;
+                                            height: 34px;
+                                            enabled: root.snap-connected && root.confirm-kind == 0;
+                                            key-pressed(event) => {
+                                                if (!root.snap-recording) { return reject; }
+                                                if (event.text == Key.Escape && !event.modifiers.control && !event.modifiers.alt && !event.modifiers.shift && !event.modifiers.meta) {
+                                                    root.snap-recording = false;
+                                                    return accept;
+                                                }
+                                                root.snap-record-key(event.text,
+                                                    event.modifiers.control, event.modifiers.alt,
+                                                    event.modifiers.shift, event.modifiers.meta);
+                                                return accept;
+                                            }
+                                            Text { text: root.snap-recording ? "请按组合键（Esc 取消）" : root.snap-hotkey-draft;
+                                                font-family: "Consolas"; font-size: 12.5px;
+                                                color: root.snap-recording ? Design.accent-ink : Design.ink;
+                                                vertical-alignment: center; horizontal-alignment: center; }
+                                        }
+                                    }
+                                }
+                                AppButton { text: root.snap-recording ? "取消录制" : "录制热键"; icon: root.snap-recording ? -1 : 8;
+                                    enabled: root.snap-connected && root.confirm-kind == 0 && !root.snap-request-pending;
+                                    clicked => { root.snap-recording = !root.snap-recording; if (root.snap-recording) { recording.focus(); } } }
+                                AppButton { text: "保存设置"; enabled: root.snap-connected && !root.snap-recording && (root.snap-hotkey-draft != root.snap-hotkey || root.snap-autostart-draft != root.snap-autostart) && root.confirm-kind == 0 && !root.snap-request-pending;
+                                    clicked => { root.snap-save-settings(); } }
+                            }
+                            Check { text: "登录时后台启动截图服务"; checked: root.snap-autostart-draft;
                                 enabled: root.snap-connected && root.confirm-kind == 0 && !root.snap-request-pending;
-                                clicked => { root.snap-recording = !root.snap-recording; if (root.snap-recording) { recording.focus(); } } }
-                            Button { text: "保存设置"; enabled: root.snap-connected && !root.snap-recording && (root.snap-hotkey-draft != root.snap-hotkey || root.snap-autostart-draft != root.snap-autostart) && root.confirm-kind == 0 && !root.snap-request-pending;
-                                clicked => { root.snap-save-settings(); } }
+                                toggled => { root.snap-draft-autostart(self.checked); } }
+                            Muted { text: "移动或删除程序前请先关闭开机启动。托盘菜单可单独退出服务；关闭本窗口不会停止服务。"; color: Design.muted-2; }
                         }
-                        CheckBox { text: "登录时后台启动截图服务"; checked: root.snap-autostart-draft;
-                            enabled: root.snap-connected && root.confirm-kind == 0 && !root.snap-request-pending;
-                            toggled => { root.snap-draft-autostart(self.checked); } }
-                        Muted { text: "移动或删除程序前请先关闭开机启动。托盘菜单可单独退出服务；关闭本窗口不会停止服务。"; }
                     }
-                }
-                Rectangle { vertical-stretch: 1; background: transparent; }
-            }
-            if root.screen == 1: VerticalLayout { spacing: 14px;
-                Surface {
-                    VerticalLayout { padding: 18px; spacing: 14px;
-                        HorizontalLayout { spacing: 16px; cross-axis-alignment: center;
-                            LogoBadge { width: 56px; height: 56px; border-radius: 14px; }
-                            VerticalLayout { spacing: 4px;
-                                Text { text: "JchTools 0.1.0"; color: Design.text; font-size: 20px; font-weight: 700; }
-                                Muted { text: "Windows 优先的本地工具箱 · 功能持续增加"; }
+                    Rectangle { vertical-stretch: 1; background: transparent; }
+                    // 底部状态
+                    Surface { pop: true; radius: 10px; min-height: 58px;
+                        VerticalLayout { padding-top: 8px; padding-bottom: 8px; padding-left: 16px; padding-right: 16px; spacing: 6px;
+                            HorizontalLayout { spacing: 12px; cross-axis-alignment: center;
+                                Rectangle {
+                                    height: 20px; border-radius: 5px;
+                                    background: root.snap-connected ? Design.accent : Design.accent-soft;
+                                    HorizontalLayout { padding-left: 9px; padding-right: 9px;
+                                        Text { text: root.snap-connected ? "已连接" : "状态"; font-size: 11px; font-weight: 600;
+                                            color: root.snap-connected ? Design.on-accent : Design.accent-ink;
+                                            vertical-alignment: center; }
+                                    }
+                                }
+                                VerticalLayout { horizontal-stretch: 1; spacing: 1px;
+                                    Label { text: root.snap-service-status; overflow: elide; font-weight: 600; font-size: 13px; }
+                                }
                             }
                         }
-                        Rectangle { height: 1px; background: Design.line-soft; }
-                        Muted { text: "Rust + Slint · 独立整理引擎 · SQLite 磁盘索引 · 随包携带完整 7-Zip\n已注册工具：递归解压、目录整理、MD 整理、Git 工具、转 Markdown、截图 OCR。\n本地处理不上传文件；Git 工具的 upstream 推送、用户主动初始化转 Markdown 或截图 OCR 可选组件时会联网（见需求合同 P-03）。\n启动低于一秒是目标，不是未经实测的承诺。"; }
                     }
                 }
-                // 主题是应用级设置，放在关于页而不是目录整理的规则分区。
-                Surface {
-                    VerticalLayout { padding: 18px; spacing: 10px;
-                        Label { text: "外观"; font-weight: 600; font-size: 14px; }
-                        HorizontalLayout { spacing: 6px;
-                            for item[index] in ["跟随系统", "浅色", "深色"]: Pill {
-                                text: item; active: root.theme == index; width: 104px; height: 32px;
-                                enabled: root.confirm-kind == 0;
-                                clicked => { root.select-theme(index); }
+                // ============ 关于 ============
+                if root.screen == 1: VerticalLayout { spacing: 14px;
+                    Surface {
+                        VerticalLayout { padding: 18px; spacing: 14px;
+                            HorizontalLayout { spacing: 16px; cross-axis-alignment: center;
+                                BrandBadge { width: 56px; height: 56px; border-radius: 14px; mark-size: 24px; }
+                                VerticalLayout { spacing: 4px;
+                                    Text { text: "JchTools 0.1.0"; color: Design.text; font-size: 20px; font-weight: 700; }
+                                    Muted { text: "Windows 优先的本地工具箱 · 功能持续增加"; }
+                                }
                             }
-                            Rectangle { horizontal-stretch: 1; background: transparent; }
+                            Rectangle { height: 1px; background: Design.line-soft; }
+                            Muted { text: "Rust + Slint · 独立整理引擎 · SQLite 磁盘索引 · 随包携带完整 7-Zip\n已注册工具：递归解压、目录整理、MD 整理、Git 工具、转 Markdown、截图 OCR。\n本地处理不上传文件；Git 工具的 upstream 推送、用户主动初始化转 Markdown 或截图 OCR 可选组件时会联网（见需求合同 P-03）。\n启动低于一秒是目标，不是未经实测的承诺。"; }
                         }
-                        Muted { text: "立即生效；不影响整理规则，也不使已生成的计划失效。"; }
                     }
+                    // 主题是应用级设置，放在关于页而不是目录整理的规则分区。
+                    Surface {
+                        VerticalLayout { padding: 18px; spacing: 10px;
+                            Label { text: "外观"; font-weight: 600; font-size: 14px; }
+                            Rectangle {
+                                height: 40px; border-radius: 9px;
+                                background: Design.inset;
+                                border-width: 1px;
+                                border-color: Design.line;
+                                HorizontalLayout { padding: 3px; spacing: 2px;
+                                    for item[index] in ["跟随系统", "浅色", "深色"]: Pill {
+                                        text: item; active: root.theme == index; width: 104px; height: 32px;
+                                        enabled: root.confirm-kind == 0;
+                                        clicked => { root.select-theme(index); }
+                                    }
+                                    Rectangle { horizontal-stretch: 1; background: transparent; }
+                                }
+                            }
+                            Muted { text: "立即生效；不影响整理规则，也不使已生成的计划失效。"; }
+                        }
+                    }
+                    AboutSlint { }
+                    Muted { text: "本项目原创代码：MIT。Slint 使用其桌面 Royalty-free 许可并保留本署名组件。\n7-Zip：LGPL / BSD / unRAR 限制；随发布包提供许可证及对应源码。"; }
+                    Rectangle { vertical-stretch: 1; background: transparent; }
                 }
-                AboutSlint { }
-                Muted { text: "本项目原创代码：MIT。Slint 使用其桌面 Royalty-free 许可并保留本署名组件。\n7-Zip：LGPL / BSD / unRAR 限制；随发布包提供许可证及对应源码。"; }
-                Rectangle { vertical-stretch: 1; background: transparent; }
             }
         }
     }
     Rectangle {
-        x: parent.width - root.caption-area; y: 0; width: root.caption-area; height: 32px;
+        x: parent.width - root.caption-area; y: 0; width: root.caption-area; height: 46px;
         background: transparent;
         HorizontalLayout { spacing: 0px;
             CaptionButton { kind: 0; activated => { root.minimized = true; } }
@@ -1325,7 +1770,7 @@ export component AppWindow inherits Window {
     if root.confirm-kind != 0: Rectangle {
         background: Design.scrim;
         TouchArea { }
-        Surface { width: 620px; height: 335px; x: (parent.width - self.width) / 2; y: (parent.height - self.height) / 2;
+        Surface { width: 620px; height: 335px; x: (parent.width - self.width) / 2; y: (parent.height - self.height) / 2; pop: true;
             background: Design.card;
             VerticalLayout { padding: 24px; spacing: 14px;
                 Label { text: root.confirm-kind == 3 ? "停止任务并关闭" : root.confirm-kind == 4 ? "确认覆盖输出文件" : "确认文件处理范围"; font-size: 20px; font-weight: 700; }
@@ -1334,14 +1779,14 @@ export component AppWindow inherits Window {
                 // 关闭确认不处理目录文件，不需要确认勾选；解压按 X-05 只删完整成功的原包及分卷，
                 // 且 S-02 要求破坏性确认明确告知不可恢复——文案必须说清「永久删除」。
                 // 该文案同时是 gui_smoke 的固定选择器，改动必须与 scripts/gui_smoke.py 同步。
-                if root.confirm-kind == 1: CheckBox { text: "我已确认：成功原包及分卷永久删除（不可恢复）"; checked <=> root.acknowledge; }
-                if root.confirm-kind == 2: CheckBox { text: "我已确认目录、规则及可能的永久删除行为（不可恢复）"; checked <=> root.acknowledge; }
+                if root.confirm-kind == 1: Check { text: "我已确认：成功原包及分卷永久删除（不可恢复）"; checked <=> root.acknowledge; }
+                if root.confirm-kind == 2: Check { text: "我已确认目录、规则及可能的永久删除行为（不可恢复）"; checked <=> root.acknowledge; }
                 // M-07/M-11：MD 合并/拆分的输出冲突确认（不静默覆盖）
-                if root.confirm-kind == 4: CheckBox { text: "我已确认覆盖已存在的输出文件（原内容将被替换，不可恢复）"; checked <=> root.acknowledge; }
+                if root.confirm-kind == 4: Check { text: "我已确认覆盖已存在的输出文件（原内容将被替换，不可恢复）"; checked <=> root.acknowledge; }
                 HorizontalLayout { spacing: 10px;
                     Rectangle { horizontal-stretch: 1; background: transparent; }
-                    Button { text: "返回检查"; clicked => { root.confirm-kind = 0; root.acknowledge = false; root.confirm-pending = false; } }
-                    Button { text: root.confirm-kind == 3 ? "停止并关闭" : "确认"; primary: true;
+                    AppButton { text: "返回检查"; clicked => { root.confirm-kind = 0; root.acknowledge = false; root.confirm-pending = false; } }
+                    AppButton { text: root.confirm-kind == 3 ? "停止并关闭" : "确认"; primary: true;
                         enabled: root.confirm-kind == 3 || (root.acknowledge && !root.confirm-pending);
                         clicked => { root.confirmed(root.confirm-kind); root.confirm-kind = 0; root.acknowledge = false; root.confirm-pending = false; } }
                 }
