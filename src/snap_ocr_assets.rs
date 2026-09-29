@@ -391,7 +391,8 @@ fn finalize_staging(
 }
 
 /// 兜底清理资产根下历史残留的 `.staging-*` 目录（B-2，与 markdown 侧同口径），
-/// 单项失败跳过继续。
+/// 并清扫 write_expected_tag 在 `xberg-inference/` 下残留的 `.expected-tag-*`
+/// 临时文件；单项失败跳过继续。
 ///
 /// 并发前提：主程序单实例，初始化由 gui.rs 的 snap_initializing 守卫串行
 ///（单初始化线程），入口处发现的 `.staging-*` 必为历史残留，不存在在途
@@ -411,6 +412,31 @@ fn cleanup_stale_staging(root: &Path) {
         if is_staging && path.is_dir() {
             // 尽力而为：残留被防护软件短暂锁定时跳过，下次初始化再试。
             let _ = fs::remove_dir_all(&path);
+        }
+    }
+    // write_expected_tag 的临时标记（xberg-inference/.expected-tag-<uuid>）在
+    // 写入或原子就位失败/进程崩溃时残留（XB-09），与 .staging-* 同属入口兜底
+    // 清扫。不扫 `.old-*` 备份：那是原子替换路径的暂存（asset_util），其中
+    // xberg-inference/<tag> 目标的残留由下次初始化的 prune_old_inference_tags
+    // 收集，入口一概删除会把替换失败后仍可恢复的备份提前清掉。
+    cleanup_expected_tag_residue(&root.join("xberg-inference"));
+}
+
+/// 清扫 `xberg-inference/` 下顶层的 `.expected-tag-*` 残留临时文件（文件非
+/// 目录，按类型删除）；目录不存在（组件从未安装）时无需清理，单项失败跳过。
+fn cleanup_expected_tag_residue(base: &Path) {
+    let Ok(entries) = fs::read_dir(base) else {
+        return;
+    };
+    for entry in entries.flatten() {
+        let path = entry.path();
+        let is_temp = path
+            .file_name()
+            .and_then(|name| name.to_str())
+            .is_some_and(|name| name.starts_with(".expected-tag-"));
+        if is_temp && path.is_file() {
+            // 尽力而为：残留被防护软件短暂锁定时跳过，下次初始化再试。
+            let _ = fs::remove_file(&path);
         }
     }
 }
@@ -927,6 +953,20 @@ fn write_notice(path: &Path, manifest: &SnapAssetManifest) -> Result<(), String>
             asset.license.source
         );
     }
+    // XB-10/O-11：推理组件包的许可条目与 markdown 侧 notice 口径对齐——许可
+    // 文件本身随组件树安装（合规不依赖 notice），此处列出条目并指向安装目录，
+    // 与只遍历 assets + workers 的旧写法区分（修复前推理组件在 notice 中缺席）。
+    if let Some(pack) = &manifest.xberg_inference {
+        let _ = writeln!(
+            &mut text,
+            "- {}：{}，{}，来源 {}（随组件树安装于 xberg-inference/{}/，许可文件随附）",
+            pack.asset.license.component,
+            pack.asset.license.license,
+            pack.asset.archive_type,
+            pack.asset.license.source,
+            pack.tag
+        );
+    }
     for worker in &manifest.workers {
         let state = if worker.is_pending() {
             "构建期占位（打包阶段回填）"
@@ -1349,6 +1389,75 @@ mod tests {
             remaining,
             vec![".staging-locked".to_string()],
             "除被锁残留外不得留下其他 .staging-* 条目"
+        );
+    }
+
+    // 覆盖 B-2 扩展：write_expected_tag 写入失败/崩溃残留的
+    // xberg-inference/.expected-tag-<uuid> 临时文件必须在 initialize 入口被
+    // 兜底清扫——修复前入口只清 .staging-*，该残留永久滞留；.old-* 备份不在
+    // 清扫范围（由原子替换/prune 路径管理），必须保留。
+    #[test]
+    fn initialize_cleans_stale_expected_tag_residue_at_entry() {
+        let guard = redirect_component_env();
+        let root = guard.root.path();
+        let inference = root.join("xberg-inference");
+        fs::create_dir_all(&inference).expect("预置推理组件根目录");
+        let residue = inference.join(".expected-tag-deadbeef");
+        fs::write(&residue, b"v1\n").expect("预置 expected-tag 残留临时文件");
+        let keep_backup = inference.join(".old-deadbeef");
+        fs::create_dir_all(&keep_backup).expect("预置旧备份残留");
+
+        let cancel = AtomicBool::new(true);
+        let _ = super::initialize(&cancel, |_message: String| {});
+
+        assert!(
+            !residue.exists(),
+            "残留的 .expected-tag-* 临时文件必须在 initialize 入口被兜底清理（B-2）"
+        );
+        assert!(
+            keep_backup.exists(),
+            ".old-* 备份不在初始化入口清扫范围（由原子替换路径管理），必须保留"
+        );
+    }
+
+    // 覆盖 O-11 许可口径：notice 必须列出推理组件包的许可条目并指向安装目录
+    //（与 markdown 侧「许可随组件树自带」口径对称）——修复前只遍历
+    // assets + workers，不含 xberg_inference。
+    #[test]
+    fn notice_lists_xberg_inference_license() {
+        let manifest = super::SnapAssetManifest {
+            schema_version: 1,
+            assets: vec![],
+            workers: vec![],
+            xberg_inference: Some(super::SnapInferencePack {
+                tag: "vtest-tag".to_string(),
+                asset: super::SnapAsset {
+                    id: "xberg-inference".to_string(),
+                    url: "https://fixtures.invalid/pack.zip".to_string(),
+                    archive_type: "zip".to_string(),
+                    install_path: None,
+                    size_bytes: 42,
+                    sha256: "ab".repeat(32),
+                    members: vec![],
+                    license: super::SnapLicense {
+                        component: "Xberg 推理组件".to_string(),
+                        license: "MIT".to_string(),
+                        source: "https://fixtures.invalid".to_string(),
+                    },
+                },
+            }),
+        };
+        let root = tempfile::tempdir().expect("创建测试目录");
+        let notice = root.path().join("THIRD_PARTY_NOTICES.md");
+        super::write_notice(&notice, &manifest).expect("写入 notice");
+        let text = fs::read_to_string(&notice).expect("读取 notice");
+        assert!(
+            text.contains("Xberg 推理组件") && text.contains("MIT"),
+            "notice 必须列出推理组件包的许可条目：{text}"
+        );
+        assert!(
+            text.contains("xberg-inference"),
+            "推理组件条目应指向安装目录 xberg-inference/：{text}"
         );
     }
 }

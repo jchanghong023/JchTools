@@ -174,6 +174,7 @@ extern "system" {
     fn EnumWindows(callback: unsafe extern "system" fn(Handle, isize) -> i32, data: isize) -> i32;
     fn GetWindowThreadProcessId(hwnd: Handle, process: *mut u32) -> u32;
     fn IsWindowVisible(hwnd: Handle) -> i32;
+    fn IsIconic(hwnd: Handle) -> i32;
     fn IsZoomed(hwnd: Handle) -> i32;
     fn GetWindow(hwnd: Handle, command: u32) -> Handle;
     fn FrameRect(dc: Handle, rect: *const Rect, brush: Handle) -> i32;
@@ -278,13 +279,52 @@ fn wide(text: &str) -> Vec<u16> {
 fn error(step: &str) -> String {
     format!("截图失败：{step}")
 }
-/// 暂时隐藏本应用的可见顶层窗；截图完成后按原有最大化状态恢复。
-struct HiddenWindows(Vec<(usize, bool)>);
+/// 暂时隐藏本应用的可见顶层窗；截图完成后按隐藏前的窗口状态恢复。
+///
+/// 恢复语义（行为修复）：隐藏前最小化的窗口必须以 `SW_SHOWMINNOACTIVE` 恢复
+/// ——保持最小化且不抢焦点；旧实现一律 `SW_SHOW`/`SW_MAXIMIZE`，会把用户
+/// 截图前最小化的窗口强行还原成正常可见并激活，最小化状态丢失。列表里只会
+/// 出现无归属（`GW_OWNER` 为空）的顶层窗（`hide_own_window` 过滤掉可见性
+/// 不符与有归属的工具/对话框窗口），三种恢复命令对它们语义完备。
+#[derive(Clone, Copy)]
+enum RestoreState {
+    /// 隐藏前最小化（`IsIconic`）。
+    Minimized,
+    /// 隐藏前最大化（`IsZoomed`）。
+    Maximized,
+    /// 隐藏前普通可见。
+    Normal,
+}
+
+/// 由窗口当前状态判定恢复命令（隐藏期间用户无法操作该窗口，状态稳定）。
+fn restore_state(hwnd: Handle) -> RestoreState {
+    // SAFETY: 只读式查询窗口放置状态；句柄来自 EnumWindows 回调，回调期间有效。
+    unsafe {
+        if IsIconic(hwnd) != 0 {
+            RestoreState::Minimized
+        } else if IsZoomed(hwnd) != 0 {
+            RestoreState::Maximized
+        } else {
+            RestoreState::Normal
+        }
+    }
+}
+
+/// 恢复命令（ShowWindow）：SW_SHOWMINNOACTIVE / SW_MAXIMIZE / SW_SHOW。
+fn restore_command(state: RestoreState) -> i32 {
+    match state {
+        RestoreState::Minimized => 7,
+        RestoreState::Maximized => 3,
+        RestoreState::Normal => 5,
+    }
+}
+
+struct HiddenWindows(Vec<(usize, RestoreState)>);
 impl Drop for HiddenWindows {
     fn drop(&mut self) {
-        for &(hwnd, maximized) in &self.0 {
+        for &(hwnd, state) in &self.0 {
             unsafe {
-                ShowWindow(hwnd as Handle, if maximized { 3 } else { 5 });
+                ShowWindow(hwnd as Handle, restore_command(state));
             }
         }
     }
@@ -319,7 +359,9 @@ unsafe extern "system" fn hide_own_window(hwnd: Handle, data: isize) -> i32 {
     };
     if named {
         let hidden = &mut *(data as *mut HiddenWindows);
-        hidden.0.push((hwnd as usize, IsZoomed(hwnd) != 0));
+        // 隐藏前先记录放置状态（最小化/最大化/普通），Drop 时按状态恢复——
+        // 最小化窗口保持最小化（SW_SHOWMINNOACTIVE），不被强行正常化+抢焦点。
+        hidden.0.push((hwnd as usize, restore_state(hwnd)));
         ShowWindow(hwnd, 0);
     }
     1

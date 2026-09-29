@@ -16,6 +16,13 @@
 //! 恢复），调用方随后用 [`XbergWorkerClient::abort`] 杀死子进程，被放弃的请求
 //! 随进程死亡、不再阻塞后续任务；服务侧触发重载（重新 spawn + 预热）。
 //!
+//! 请求级超时（XB-08/O-13）：Xberg worker 不实现内部超时（WORKER.md 故障职责
+//! 边界：单文件计时与超时杀进程由调用方负责），挂起的子进程（进程活着但不读
+//! stdin / 不写 stdout）若无客户端超时会让服务永久 busy。客户端从请求发出
+//! （含写阶段）起按 [`DEFAULT_REQUEST_TIMEOUT`] 计时，超时返回
+//! [`ClientError::Timeout`]；调用方应与「子进程退出」同路径终止子进程并降级
+//! （超时是故障，与用户取消的自动重载语义区分）。
+//!
 //! 协议纯度：stdout 只承载协议行；Xberg 的诊断日志走 stderr，这里直接丢弃
 //! （O-29：不落盘、不进日志）。截图字节只在内存中经 base64 传递（O-29）。
 
@@ -34,13 +41,35 @@ use serde_json::{json, Value};
 /// 等待响应的轮询间隔：远小于一次识别耗时，同时保证取消及时生效。
 const POLL_INTERVAL: Duration = Duration::from_millis(8);
 
-/// 客户端错误（O-30 分类：取消 / 推理失败 / 子进程退出 / 通信失败）。
+/// 请求级超时默认值（识别请求从发出到响应的上限，含写阶段）：给慢速冷启动
+/// 模型加载与低速磁盘留足余量，同时保证挂起子进程不会让服务永久 busy。
+const DEFAULT_REQUEST_TIMEOUT: Duration = Duration::from_secs(600);
+
+/// 请求行分块写入的大小：分块只为在块间隙轮询取消与超时；管道写满且子进程
+/// 不读时单次 WriteFile 仍会阻塞在内核，由 Windows 写入看门狗（CancelIoEx）
+/// 在超时后取消挂起写入（见 [`write_request_line`]）。
+const WRITE_CHUNK_BYTES: usize = 64 * 1024;
+
+/// 客户端错误（O-30 分类：取消 / 推理失败 / 子进程退出 / 通信失败 / 超时）。
 #[derive(Debug, Clone)]
 pub enum ClientError {
     /// 用户取消：调用方应随后 [`Self::abort`] 终止子进程（XB-08）。
     Cancelled,
-    /// Xberg 返回的失败响应（`ok:false`；消息不含图像内容）。
-    Backend(String),
+    /// Xberg 返回的失败响应（`ok:false`；消息不含图像内容）。`kind` 是响应的
+    /// 结构化 `error_kind`，与 Xberg `snapshot_ocr.rs` 的取值全集对齐：
+    /// `asset_invalid` / `input_invalid` / `no_text` / `cancelled` / `internal`
+    /// （SNAP-15）；旧版 Xberg 或非快照失败响应可能缺失（`None`）。注意
+    /// `ok:true` + `error_kind:"no_text"` 是无文字图片的成功响应，不走本变体。
+    Backend {
+        /// 一行用户可读的错误摘要（不含图像内容）。
+        message: String,
+        /// 结构化错误类别（缺失为 `None`）。
+        kind: Option<String>,
+    },
+    /// 请求级超时：子进程在超时上限内未完成响应（进程可能仍活着但已挂起）。
+    /// 调用方应 [`Self::abort`] 终止子进程并降级——超时是故障，与用户取消
+    /// （自动重载）语义区分（XB-08/O-13）。
+    Timeout,
     /// 子进程已退出（携带已知时的退出码）。
     ProcessExited(Option<i32>),
     /// 与子进程的 stdin 通信失败。
@@ -51,7 +80,8 @@ impl std::fmt::Display for ClientError {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             Self::Cancelled => write!(formatter, "用户取消识别"),
-            Self::Backend(message) => write!(formatter, "{message}"),
+            Self::Backend { message, .. } => write!(formatter, "{message}"),
+            Self::Timeout => write!(formatter, "识别超时：推理子进程未在超时上限内响应"),
             Self::ProcessExited(code) => match code {
                 Some(code) => write!(formatter, "推理子进程已退出（退出码 {code}）"),
                 None => write!(formatter, "推理子进程已退出"),
@@ -114,6 +144,8 @@ pub struct XbergWorkerClient {
     responses: Arc<Mutex<HashMap<u64, Value>>>,
     reader: Option<JoinHandle<()>>,
     next_id: u64,
+    /// 请求级超时（从请求发出含写阶段起算）：见模块头「请求级超时」。
+    request_timeout: Duration,
 }
 
 impl std::fmt::Debug for XbergWorkerClient {
@@ -210,7 +242,15 @@ impl XbergWorkerClient {
             responses,
             reader: Some(reader),
             next_id: 1,
+            request_timeout: DEFAULT_REQUEST_TIMEOUT,
         })
+    }
+
+    /// 覆盖请求级超时（测试注入短超时；生产保持 [`DEFAULT_REQUEST_TIMEOUT`]）。
+    #[must_use]
+    pub fn with_request_timeout(mut self, timeout: Duration) -> Self {
+        self.request_timeout = timeout;
+        self
     }
 
     /// 推理子进程的系统 PID：仅供诊断与回归测试从外部观察子进程存活性，
@@ -223,13 +263,16 @@ impl XbergWorkerClient {
     /// 查询截图通道状态（`snapshot_state`）。
     ///
     /// # Errors
-    /// 子进程退出或通信失败；状态查询本身的失败响应也归入 [`ClientError::Backend`]。
+    /// 子进程退出、通信失败或请求级超时；状态查询本身的失败响应也归入
+    /// [`ClientError::Backend`]（携带结构化 `error_kind`，如有）。
     pub fn snapshot_state(&mut self) -> Result<SnapshotState, ClientError> {
-        let id = self.send_request(json!({"command": "snapshot_state"}))?;
-        let response = self.wait_response(id, &AtomicBool::new(false))?;
+        let cancel = AtomicBool::new(false);
+        let deadline = Instant::now() + self.request_timeout;
+        let id = self.send_request(json!({"command": "snapshot_state"}), &cancel, deadline)?;
+        let response = self.wait_response(id, &cancel, deadline)?;
         if response.get("ok").and_then(Value::as_bool) != Some(true) {
-            let message = failure_message(&response);
-            return Err(ClientError::Backend(message));
+            let (message, kind) = failure_parts(&response);
+            return Err(ClientError::Backend { message, kind });
         }
         let state = response
             .get("state")
@@ -242,21 +285,31 @@ impl XbergWorkerClient {
     /// 识别一张内存 PNG（`ocr_snapshot`）。
     ///
     /// 成功返回布局文本；无文字图片返回 `Ok(None)`（Xberg 侧 `ok:true` +
-    /// `text:""` + `error_kind:"no_text"`）。取消在轮询间隙生效（O-19）；收到
-    /// 取消后由调用方终止子进程并重载（XB-08，见 [`Self::abort`]）。
+    /// `text:""` + `error_kind:"no_text"`——这是成功响应，不是失败）。取消在
+    /// 轮询间隙生效（O-19）；收到取消后由调用方终止子进程并重载（XB-08，见
+    /// [`Self::abort`]）。请求级超时从请求发出（含写阶段）起算，超时返回
+    /// [`ClientError::Timeout`]。
     ///
     /// # Errors
-    /// 取消、子进程退出、通信失败或 Xberg 失败响应。
+    /// 取消、超时、子进程退出、通信失败或 Xberg 失败响应。
     pub fn recognize(
         &mut self,
         png: &[u8],
         cancel: &AtomicBool,
     ) -> Result<Option<String>, ClientError> {
         let encoded = base64::engine::general_purpose::STANDARD.encode(png);
-        let id = self.send_request(json!({"command": "ocr_snapshot", "image_base64": encoded}))?;
-        let response = self.wait_response(id, cancel)?;
+        // 超时从请求发出（含写阶段）起算：Xberg worker 无内部超时（WORKER.md：
+        // 超时杀进程是调用方职责），挂起的子进程由客户端按时判定。
+        let deadline = Instant::now() + self.request_timeout;
+        let id = self.send_request(
+            json!({"command": "ocr_snapshot", "image_base64": encoded}),
+            cancel,
+            deadline,
+        )?;
+        let response = self.wait_response(id, cancel, deadline)?;
         if response.get("ok").and_then(Value::as_bool) != Some(true) {
-            return Err(ClientError::Backend(failure_message(&response)));
+            let (message, kind) = failure_parts(&response);
+            return Err(ClientError::Backend { message, kind });
         }
         let text = response.get("text").and_then(Value::as_str).unwrap_or("");
         if text.is_empty() {
@@ -316,8 +369,16 @@ impl XbergWorkerClient {
         }
     }
 
-    /// 发送一行请求并返回关联 `id`；同时清理已放弃请求的过期响应。
-    fn send_request(&mut self, mut request: Value) -> Result<u64, ClientError> {
+    /// 发送一行请求并返回关联 `id`；同时清理已放弃请求的过期响应。写入从
+    /// `deadline`（请求发出时刻 + 请求级超时）起受取消与超时约束：4K 截图的
+    /// base64 约 5MB，子进程挂起（不读 stdin）时一次性 `write_all` 会无限
+    /// 阻塞在内核，分块 + 看门狗保证写阶段同样可取消/超时。
+    fn send_request(
+        &mut self,
+        mut request: Value,
+        cancel: &AtomicBool,
+        deadline: Instant,
+    ) -> Result<u64, ClientError> {
         let id = self.next_id;
         self.next_id = id.wrapping_add(1).max(1);
         request["id"] = json!(id);
@@ -325,20 +386,21 @@ impl XbergWorkerClient {
             responses.retain(|&pending, _| pending >= id);
         }
         let line = request.to_string();
-        let stdin = self
-            .stdin
-            .as_mut()
-            .ok_or(ClientError::ProcessExited(None))?;
-        let written = stdin
-            .write_all(line.as_bytes())
-            .and_then(|()| stdin.write_all(b"\n"))
-            .and_then(|()| stdin.flush());
-        match written {
+        let Some(stdin) = self.stdin.as_mut() else {
+            return Err(ClientError::ProcessExited(None));
+        };
+        match write_request_line(stdin, line.as_bytes(), cancel, deadline) {
             Ok(()) => Ok(id),
-            // 写入失败通常意味着子进程已退出；给出可重试的分类错误（O-13）。
-            Err(error) => {
+            Err(WriteStop::Cancelled) => Err(ClientError::Cancelled),
+            Err(WriteStop::TimedOut) => Err(ClientError::Timeout),
+            // 写入失败优先升级为进程退出分类（半死连接对同一连接 retry 无效，
+            // 服务侧必须据此降级，不得把退出误报成 Io 让模型冒称就绪）；进程
+            // 仍在且已到 deadline 时按超时报告。
+            Err(WriteStop::Io(error)) => {
                 if self.child.try_wait().ok().flatten().is_some() {
                     Err(ClientError::ProcessExited(self.child_exit_code()))
+                } else if Instant::now() >= deadline {
+                    Err(ClientError::Timeout)
                 } else {
                     Err(ClientError::Io(error.to_string()))
                 }
@@ -346,8 +408,15 @@ impl XbergWorkerClient {
         }
     }
 
-    /// 轮询等待指定 `id` 的响应；取消在轮询间隙生效。
-    fn wait_response(&mut self, id: u64, cancel: &AtomicBool) -> Result<Value, ClientError> {
+    /// 轮询等待指定 `id` 的响应；取消在轮询间隙生效；`deadline` 到期返回
+    /// [`ClientError::Timeout`]。子进程退出优先于超时报告（已死的进程必须如实
+    /// 报告退出而不是超时）。
+    fn wait_response(
+        &mut self,
+        id: u64,
+        cancel: &AtomicBool,
+        deadline: Instant,
+    ) -> Result<Value, ClientError> {
         loop {
             if let Some(response) = self
                 .responses
@@ -376,6 +445,9 @@ impl XbergWorkerClient {
                     return Ok(response);
                 }
                 return Err(ClientError::ProcessExited(self.child_exit_code()));
+            }
+            if Instant::now() >= deadline {
+                return Err(ClientError::Timeout);
             }
             std::thread::sleep(POLL_INTERVAL);
         }
@@ -412,39 +484,198 @@ impl Drop for XbergWorkerClient {
 
 /// 响应读取循环：逐行解析 stdout，把响应按 `id` 收纳；EOF（子进程退出）或
 /// 解析失败只是结束读取，不影响已收纳的响应被取回。
+///
+/// 协议帧完整性（E'低危4）：stdout 只承载换行终止的 JSON 行。EOF 前最后一段
+/// 不带换行终止的「半行」是截断/断连残留（进程已死或写侧损坏），不得当作有效
+/// 响应收纳——否则半死连接的垃圾残行会被当成失败响应返回（Backend），调用方
+/// 对同一连接 retry 必然无效；丢弃后由 [`XbergWorkerClient::wait_response`]
+/// 的进程退出检测给出可降级的 [`ClientError::ProcessExited`] 分类（读侧先报
+/// Io / 收到残行而 `child.try_wait()` 为 Some 时，统一升级为进程退出）。
 // Arc 按值是线程 'static 边界的要求，函数体内并未消费它。
 #[expect(
     clippy::needless_pass_by_value,
     reason = "reader 线程需要拥有 Arc 才满足 'static"
 )]
-fn pump(reader: BufReader<ChildStdout>, responses: Arc<Mutex<HashMap<u64, Value>>>) {
-    for line in reader.lines() {
-        let Ok(line) = line else {
-            break;
-        };
-        if line.trim().is_empty() {
-            continue;
+fn pump(mut reader: BufReader<ChildStdout>, responses: Arc<Mutex<HashMap<u64, Value>>>) {
+    let mut line = String::new();
+    loop {
+        line.clear();
+        match reader.read_line(&mut line) {
+            // EOF（子进程退出或写端关闭）与读错误（连接已坏）都只结束读取，
+            // 不影响已收纳的响应；存活/退出判定交给 wait_response。
+            Ok(0) | Err(_) => break,
+            Ok(_) => {
+                if !line.ends_with('\n') {
+                    // 半行：协议帧残缺，连接已死；不再读也不收纳该响应。
+                    break;
+                }
+                if line.trim().is_empty() {
+                    continue;
+                }
+                let Ok(value) = serde_json::from_str::<Value>(&line) else {
+                    continue;
+                };
+                let Some(id) = value.get("id").and_then(Value::as_u64) else {
+                    continue;
+                };
+                let Ok(mut map) = responses.lock() else {
+                    break;
+                };
+                map.insert(id, value);
+            }
         }
-        let Ok(value) = serde_json::from_str::<Value>(&line) else {
-            continue;
-        };
-        let Some(id) = value.get("id").and_then(Value::as_u64) else {
-            continue;
-        };
-        let Ok(mut map) = responses.lock() else {
-            break;
-        };
-        map.insert(id, value);
     }
 }
 
-/// 失败响应中的一行错误描述（Xberg 合同保证不含图像内容）。
-fn failure_message(response: &Value) -> String {
-    response
+/// 失败响应中的一行错误描述与结构化类别（Xberg 合同保证不含图像内容）。
+///
+/// `error_kind` 只在失败响应上读取：`ok:true` + `error_kind:"no_text"` 是
+/// 无文字图片的成功响应（SNAP-15），不是失败，不得误判。
+fn failure_parts(response: &Value) -> (String, Option<String>) {
+    let message = response
         .get("error")
         .and_then(Value::as_str)
         .unwrap_or("推理子进程返回失败")
-        .to_owned()
+        .to_owned();
+    let kind = response
+        .get("error_kind")
+        .and_then(Value::as_str)
+        .map(str::to_owned);
+    (message, kind)
+}
+
+/// 写阶段的中断原因（区分取消 / 超时 / 底层 IO，供调用方映射 ClientError）。
+enum WriteStop {
+    Cancelled,
+    TimedOut,
+    Io(std::io::Error),
+}
+
+impl From<std::io::Error> for WriteStop {
+    fn from(error: std::io::Error) -> Self {
+        Self::Io(error)
+    }
+}
+
+/// 把一行请求（payload + 换行终止符）分块写入 stdin，块间检查取消与超时
+/// （O-19/XB-08；卡死子进程不再把写阶段变成无限阻塞）。
+///
+/// Windows 上另有写入看门狗：管道写满且子进程不读时，单次 WriteFile 仍会阻塞
+/// 在内核（分块间隙的检查救不了正在阻塞的这一次写入），看门狗在超时后用
+/// `CancelIoEx` 取消 stdin 上挂起的写入，被取消的 WriteFile 以错误返回，写
+/// 循环据此按时返回超时。被取消的请求行可能只写入了一半——协议流已损坏，
+/// 调用方随后会按超时语义终止子进程，不会复用该连接。
+fn write_request_line(
+    stdin: &mut ChildStdin,
+    payload: &[u8],
+    cancel: &AtomicBool,
+    deadline: Instant,
+) -> Result<(), WriteStop> {
+    #[cfg(windows)]
+    let watchdog = WriteWatchdog::spawn(stdin, deadline);
+    let result = (|| -> Result<(), WriteStop> {
+        for chunk in payload.chunks(WRITE_CHUNK_BYTES) {
+            if cancel.load(Ordering::Acquire) {
+                return Err(WriteStop::Cancelled);
+            }
+            if Instant::now() >= deadline {
+                return Err(WriteStop::TimedOut);
+            }
+            stdin.write_all(chunk)?;
+        }
+        if cancel.load(Ordering::Acquire) {
+            return Err(WriteStop::Cancelled);
+        }
+        if Instant::now() >= deadline {
+            return Err(WriteStop::TimedOut);
+        }
+        stdin.write_all(b"\n")?;
+        Ok(())
+    })();
+    #[cfg(windows)]
+    watchdog.finish();
+    result
+}
+
+/// 写入看门狗（仅 Windows）：请求写阶段超过 deadline 后，反复对 stdin 句柄
+/// `CancelIoEx`，直到写循环结束（finish）——反复触发是为了覆盖「看门狗恰好
+/// 在两次分块写入之间触发、取消不到任何挂起操作」的竞态，保证 deadline 之后
+/// 任意时刻仍阻塞在内核的写入都会被取消。正常完成时写循环先 finish（置位并
+/// join），看门狗在 deadline 前退出，不产生任何取消。
+#[cfg(windows)]
+struct WriteWatchdog {
+    done: Arc<AtomicBool>,
+    thread: Option<JoinHandle<()>>,
+}
+
+/// 裸句柄的 Send 包装（仅 Windows，供写入看门狗线程）：句柄只是指针宽度的
+/// 值，跨线程传递本身安全；有效性由 [`WriteWatchdog::finish`] 的 join 保证
+/// ——写循环结束（join 返回）前 stdin 句柄不会被释放。
+#[cfg(windows)]
+struct SendHandle(windows_sys::Win32::Foundation::HANDLE);
+
+// SAFETY: 句柄值仅在包装后跨线程传递，不在原线程并发使用；看门狗线程在
+// finish 的 join 前返回，join 之后写循环（及 stdin）才可能被释放。
+#[cfg(windows)]
+unsafe impl Send for SendHandle {}
+
+#[cfg(windows)]
+impl SendHandle {
+    /// 取出裸句柄（消耗包装体）。经方法调用取值是为了绕开 Rust 2021 精确
+    /// 捕获（RFC 2229）：闭包体内直接解构字段会按字段路径捕获裸指针本身、
+    /// 绕过 Send 包装；方法调用捕获整个包装体，Send 约束才生效。
+    fn get(self) -> windows_sys::Win32::Foundation::HANDLE {
+        self.0
+    }
+}
+
+#[cfg(windows)]
+impl WriteWatchdog {
+    fn spawn(stdin: &ChildStdin, deadline: Instant) -> Self {
+        use std::os::windows::io::AsRawHandle;
+        let handle = SendHandle(stdin.as_raw_handle());
+        let done = Arc::new(AtomicBool::new(false));
+        let thread_done = Arc::clone(&done);
+        let thread = std::thread::Builder::new()
+            .name("snap-ocr-write-watchdog".into())
+            .spawn(move || {
+                // 经 get() 取值保证捕获 Send 包装体（精确捕获语义见其注释）。
+                let raw = handle.get();
+                while Instant::now() < deadline {
+                    if thread_done.load(Ordering::Acquire) {
+                        return;
+                    }
+                    std::thread::sleep(POLL_INTERVAL);
+                }
+                while !thread_done.load(Ordering::Acquire) {
+                    // SAFETY: stdin 句柄在 finish 的 join 之前保持有效；取消的
+                    // 是本客户端自己发起的阻塞写入，不影响其他句柄。
+                    unsafe {
+                        windows_sys::Win32::System::IO::CancelIoEx(raw, std::ptr::null());
+                    }
+                    std::thread::sleep(POLL_INTERVAL);
+                }
+            })
+            .ok();
+        Self { done, thread }
+    }
+
+    /// 写循环结束：置位并回收看门狗线程（deadline 前完成时看门狗不触发取消）。
+    fn finish(self) {
+        // 实际工作由 Drop 完成：写闭包 panic 展开时同样置位并 join，
+        // 看门狗线程不泄漏、也不在句柄失效后继续 CancelIoEx。
+        drop(self);
+    }
+}
+
+#[cfg(windows)]
+impl Drop for WriteWatchdog {
+    fn drop(&mut self) {
+        self.done.store(true, Ordering::Release);
+        if let Some(thread) = self.thread.take() {
+            let _ = thread.join();
+        }
+    }
 }
 
 /// 推理子进程的 kill-on-close Job 对象（仅 Windows）：本客户端独占 Job 句柄，
@@ -561,6 +792,13 @@ fn inference_environment(component_dir: &Path) -> Vec<(String, String)> {
         ("NO_COLOR", "1".to_string()),
         ("XBERG_ORT_EP", "cpu".to_string()),
         ("XBERG_MAX_CONCURRENT_REQUESTS", "1".to_string()),
+        (
+            "XBERG_PERF_LOG_DIR",
+            std::env::temp_dir()
+                .join("JchTools-xberg-perf")
+                .to_string_lossy()
+                .into_owned(),
+        ),
     ]
     .into_iter()
     .map(|(name, value)| (name.to_string(), value))
@@ -590,17 +828,23 @@ mod tests {
             ("XBERG_ORT_EP", "cpu"),
             ("XBERG_MAX_CONCURRENT_REQUESTS", "1"),
         ] {
+            // XBERG_PERF_LOG_DIR 单独断言（路径值含专用临时目录名）。
             assert_eq!(
                 map.get(name).map(String::as_str),
                 Some(want),
                 "{name} 应为纯开关值 {want}（与 markdown 侧离线口径一致）"
             );
         }
+        assert!(
+            map.get("XBERG_PERF_LOG_DIR")
+                .is_some_and(|v| v.contains("JchTools-xberg-perf")),
+            "XBERG_PERF_LOG_DIR 应指向专用临时目录（与 markdown 侧三处统一）"
+        );
         assert_eq!(
             map.get("ORT_DYLIB_PATH").map(String::as_str),
             Some(root.join("onnxruntime.dll").to_string_lossy().as_ref()),
             "ORT_DYLIB_PATH 应指向组件目录内的 onnxruntime.dll"
         );
-        assert_eq!(map.len(), 8, "不应混入其他变量：{vars:?}");
+        assert_eq!(map.len(), 9, "不应混入其他变量：{vars:?}");
     }
 }

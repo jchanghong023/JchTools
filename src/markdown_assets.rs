@@ -310,7 +310,8 @@ fn finalize_staging(
     result
 }
 
-/// 兜底清理资产根下历史残留的 `.staging-*` 目录（B-2），单项失败跳过继续。
+/// 兜底清理资产根下历史残留的 `.staging-*` 目录与 `.xberg-runtime-path.txt.*`
+/// 临时文件（B-2），单项失败跳过继续。
 ///
 /// 并发前提：主程序单实例，初始化由 gui.rs 的 convert_initializing 守卫
 /// 串行（单初始化线程），入口处发现的 `.staging-*` 必为历史残留，不存在
@@ -322,15 +323,23 @@ fn cleanup_stale_staging(root: &Path) {
     let Ok(entries) = fs::read_dir(root) else {
         return;
     };
+    // save_runtime_dir 的临时选择文件（.xberg-runtime-path.txt.<uuid>）在写入
+    // 或原子就位失败/进程崩溃时残留（文件非目录），与 .staging-* 同属入口兜底
+    // 清扫。不扫 `.old-*` 备份：那是原子替换路径的暂存（asset_util），其中
+    // xberg-inference/<tag> 目标的残留由下次初始化的 prune_old_inference_tags
+    // 收集，入口一概删除会把替换失败后仍可恢复的备份提前清掉。
+    let selection_temp_prefix = format!(".{RUNTIME_SELECTION_FILE}.");
     for entry in entries.flatten() {
         let path = entry.path();
-        let is_staging = path
-            .file_name()
-            .and_then(|name| name.to_str())
-            .is_some_and(|name| name.starts_with(".staging-"));
-        if is_staging && path.is_dir() {
+        let Some(name) = path.file_name().and_then(|name| name.to_str()) else {
+            continue;
+        };
+        if name.starts_with(".staging-") && path.is_dir() {
             // 尽力而为：残留被防护软件短暂锁定时跳过，下次初始化再试。
             let _ = fs::remove_dir_all(&path);
+        } else if name.starts_with(&selection_temp_prefix) && path.is_file() {
+            // 尽力而为：同上，单项失败跳过。
+            let _ = fs::remove_file(&path);
         }
     }
 }
@@ -983,6 +992,34 @@ mod tests {
             remaining,
             vec![".staging-locked".to_string()],
             "除被锁残留外不得留下其他 .staging-* 条目"
+        );
+    }
+
+    // 覆盖 B-2 扩展：save_runtime_dir 写入失败/崩溃残留的
+    // .xberg-runtime-path.txt.<uuid> 临时文件必须在 initialize 入口被兜底清扫
+    //——修复前入口只清 .staging-*，该残留永久滞留；.old-* 备份不在清扫范围
+    //（由原子替换路径管理），必须保留。
+    #[test]
+    fn initialize_cleans_stale_runtime_selection_residue_at_entry() {
+        let guard = redirect_component_env();
+        let root = guard.root.path();
+        fs::create_dir_all(root).expect("预置资产根目录");
+        let residue = root.join(".xberg-runtime-path.txt.deadbeef");
+        fs::write(&residue, b"C:\\xberg\n").expect("预置运行目录残留临时文件");
+        let keep_backup = root.join(".old-deadbeef");
+        fs::create_dir_all(&keep_backup).expect("预置旧备份残留");
+
+        let cancel = AtomicBool::new(false);
+        // 后续阶段会因未选择 Xberg 运行目录而失败，属预期；本用例只断言入口清理。
+        let _ = super::initialize(&cancel, |_message: String| {});
+
+        assert!(
+            !residue.exists(),
+            "残留的 .xberg-runtime-path.txt.* 临时文件必须在 initialize 入口被兜底清理（B-2）"
+        );
+        assert!(
+            keep_backup.exists(),
+            ".old-* 备份不在初始化入口清扫范围（由原子替换路径管理），必须保留"
         );
     }
 

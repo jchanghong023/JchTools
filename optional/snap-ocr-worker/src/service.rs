@@ -24,12 +24,16 @@ use crate::xberg_worker::{ClientError, SnapshotState, XbergWorkerClient};
 /// 推理子进程优雅关闭的等待上限；超时强杀兜底（O-16 进程级兜底）。
 const XBERG_SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(10);
 
-/// 单次识别错误（O-30 分类：取消 / 推理失败 / 子进程退出；消息不含图像内容）。
+/// 单次识别错误（O-30 分类：取消 / 超时 / 推理失败 / 子进程退出；消息不含图像内容）。
 #[derive(Debug, Clone)]
 pub(crate) enum OcrError {
     /// 用户取消：结果窗即刻恢复；按 XB-08「终止进程」路径，推理子进程已被
     /// 终止，服务随后触发后台重载（O-13）。
     Cancelled,
+    /// 识别超时：挂起的推理进程已被终止（XB-08 同路径），连接死亡、模型不可
+    /// 再复用，须降级为错误并保留重试入口；与用户取消（自动重载）区分——
+    /// 超时是故障，不得自动循环重试挂起的推理。
+    TimedOut(String),
     /// 推理子进程已退出：连接死亡、模型不可再复用，须降级为错误并保留重试
     /// 入口（O-13）；与单次 [`OcrError::Backend`] 失败（模型保持就绪）分类处理。
     ProcessExited(String),
@@ -41,8 +45,8 @@ impl std::fmt::Display for OcrError {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             Self::Cancelled => write!(formatter, "用户取消识别"),
-            // 两个失败变体的消息都已是完整用户可读文案（ClientError::Display）。
-            Self::ProcessExited(message) | Self::Backend(message) => {
+            // 三个失败变体的消息都已是完整用户可读文案（ClientError::Display）。
+            Self::TimedOut(message) | Self::ProcessExited(message) | Self::Backend(message) => {
                 write!(formatter, "{message}")
             }
         }
@@ -344,6 +348,22 @@ fn start_inference(root: &Path) -> Result<XbergWorkerClient, LoadFailure> {
     Ok(client)
 }
 
+/// 预热失败的分类文案：优先用响应的结构化 `error_kind`（与 Xberg
+/// `snapshot_ocr.rs` 的取值全集对齐：`asset_invalid` / `input_invalid` /
+/// `no_text` / `cancelled` / `internal`，SNAP-15）——`asset_invalid` 是模型/
+/// 资产加载失败（SNAP-05）；真实 Xberg 的错误文本是英文（如 "snapshot model
+/// asset missing"），旧实现只按中文子串匹配必然落空。`kind` 缺失（旧版 Xberg
+/// 或无 `error_kind` 的失败响应）时回退到既有「模型」子串启发式兼容。
+fn warm_up_failure(kind: Option<&str>, message: &str) -> String {
+    match kind {
+        Some("asset_invalid") => format!("推理模型加载失败：{message}"),
+        // kind 缺失时回退中文「模型」子串启发式（兼容旧版 Xberg）。
+        None if message.contains("模型") => format!("推理模型加载失败：{message}"),
+        // 其余 kind 与不含「模型」的回退场景都按组件预热失败分类。
+        Some(_) | None => format!("推理组件预热失败：{message}"),
+    }
+}
+
 /// 预热：向常驻子进程发一张 1×1 白图，触发 Xberg 侧模型懒加载，并确认通道
 /// 状态进入 ready（O-13 预热行为；无文字图片是成功响应）。
 fn warm_up(client: &mut XbergWorkerClient) -> Result<(), LoadFailure> {
@@ -353,11 +373,11 @@ fn warm_up(client: &mut XbergWorkerClient) -> Result<(), LoadFailure> {
     let cancel = AtomicBool::new(false);
     match client.recognize(&png, &cancel) {
         Ok(_) => {}
-        Err(ClientError::Backend(message)) if message.contains("模型") => {
-            return Err(LoadFailure::Failed(format!("推理模型加载失败：{message}")));
-        }
-        Err(ClientError::Backend(message)) => {
-            return Err(LoadFailure::Failed(format!("推理组件预热失败：{message}")));
+        Err(ClientError::Backend { message, kind }) => {
+            return Err(LoadFailure::Failed(warm_up_failure(
+                kind.as_deref(),
+                &message,
+            )));
         }
         Err(error) => return Err(LoadFailure::Failed(error.to_string())),
     }
@@ -374,6 +394,20 @@ fn warm_up(client: &mut XbergWorkerClient) -> Result<(), LoadFailure> {
     }
 }
 
+/// ClientError → OcrError 的分类映射：超时是连接级故障，与子进程退出同路径
+/// 降级（O-13/XB-08），文案直接给出「已终止挂起进程 + 重试入口」的指引；其余
+/// 分类按既有语义透传。
+fn ocr_error(error: ClientError) -> OcrError {
+    match error {
+        ClientError::Cancelled => OcrError::Cancelled,
+        ClientError::Timeout => {
+            OcrError::TimedOut("识别超时，已终止挂起的推理进程；可重试加载模型".into())
+        }
+        error @ ClientError::ProcessExited(_) => OcrError::ProcessExited(error.to_string()),
+        error => OcrError::Backend(error.to_string()),
+    }
+}
+
 /// 识别一张裁剪图：内存 PNG 编码后交给 Xberg 子进程，取回布局文本。
 fn recognize(
     client: &mut XbergWorkerClient,
@@ -384,12 +418,7 @@ fn recognize(
     match client.recognize(&png, cancel) {
         Ok(Some(text)) if text.trim().is_empty() => Ok(None),
         Ok(text) => Ok(text),
-        Err(ClientError::Cancelled) => Err(OcrError::Cancelled),
-        // 子进程退出是连接级死亡，单独分类供服务降级模型（O-13/O-30）。
-        Err(error @ ClientError::ProcessExited(_)) => {
-            Err(OcrError::ProcessExited(error.to_string()))
-        }
-        Err(error) => Err(OcrError::Backend(error.to_string())),
+        Err(error) => Err(ocr_error(error)),
     }
 }
 
@@ -417,10 +446,11 @@ fn worker(
                     Err(OcrError::Backend("模型未就绪".into()))
                 };
                 match &outcome {
-                    // 用户取消（XB-08「终止进程」路径）：stdio 单连接无法只取消
-                    // 单个请求，立即杀死子进程，被放弃的旧请求随进程死亡，不再
-                    // 阻塞后续任务；服务侧随后触发重载（O-13）。
-                    Err(OcrError::Cancelled) => {
+                    // 用户取消（XB-08「终止进程」路径）与识别超时（挂起故障）
+                    // 都立即杀死子进程：stdio 单连接无法只取消单个请求，也无法
+                    // 唤醒挂起的进程，被放弃的旧请求随进程死亡，不再阻塞后续
+                    // 任务；服务侧分别触发自动重载（取消）或降级 Error（超时）。
+                    Err(OcrError::Cancelled | OcrError::TimedOut(_)) => {
                         if let Some(mut model) = client.take() {
                             model.abort();
                         }
@@ -1135,6 +1165,16 @@ impl Service {
                             self.model_error = Some("推理线程已退出，请重新启动截图服务".into());
                         }
                     }
+                    Err(OcrError::TimedOut(reason)) => {
+                        // 识别超时：挂起进程已被 worker 线程终止，连接死亡，
+                        // 与子进程退出同路径降级为错误并保留重试入口（O-13）；
+                        // 不像取消那样自动重载——超时是故障而非用户意图，避免
+                        // 对挂起环境循环重试。
+                        self.restore_old();
+                        self.tray.notice(reason.as_str());
+                        self.model = ModelState::Error;
+                        self.model_error = Some(reason);
+                    }
                     Err(OcrError::ProcessExited(reason)) => {
                         // 子进程死亡（被误关黑窗、崩溃等）：连接不可复用，模型
                         // 从就绪降级为错误并保留重试入口（O-13/O-30），不得继续
@@ -1537,6 +1577,75 @@ mod tests {
             .is_some_and(|reason| reason.contains("推理子进程已退出")));
         assert!(!service.busy);
         assert_eq!(service.status()["model"], "error");
+        // Error 状态下重试入口恢复可用（O-13）：retry 把状态置回加载中。
+        service.handle(Command::RetryModel);
+        assert_eq!(service.model, ModelState::Loading);
+        Ok(())
+    }
+
+    // 覆盖 SNAP-05/SNAP-15（修复1回归）：预热失败分类优先读结构化 error_kind。
+    // 真实 Xberg 错误文本是英文（"snapshot model asset missing"），旧实现只按
+    // 中文「模型」子串匹配必然落空——kind=asset_invalid（模型/资产加载失败）
+    // 必须命中「模型加载失败」类文案；kind 缺失时回退子串启发式保持兼容。
+    #[test]
+    fn warm_up_failure_classifies_by_error_kind() {
+        // kind 命中：英文消息也必须分类为模型加载失败（修复前落入「组件预热失败」）。
+        let by_kind = super::warm_up_failure(Some("asset_invalid"), "snapshot model asset missing");
+        assert!(
+            by_kind.contains("推理模型加载失败"),
+            "asset_invalid 应分类为模型加载失败，实际 {by_kind}"
+        );
+        assert!(
+            by_kind.contains("snapshot model asset missing"),
+            "原始错误摘要应保留，实际 {by_kind}"
+        );
+        // 其余 kind（input_invalid/cancelled/internal 等）：组件预热失败。
+        for kind in ["input_invalid", "cancelled", "internal"] {
+            let message = super::warm_up_failure(Some(kind), "boom");
+            assert!(
+                message.contains("推理组件预热失败"),
+                "kind={kind} 应分类为组件预热失败，实际 {message}"
+            );
+        }
+        // kind 缺失回退子串启发式（兼容旧版 Xberg）：中文「模型」仍命中。
+        let legacy = super::warm_up_failure(None, "模型文件损坏");
+        assert!(legacy.contains("推理模型加载失败"), "实际 {legacy}");
+        // kind 缺失且英文消息：预热失败（修复前的既行为，非 kind 场景不改变）。
+        let fallback = super::warm_up_failure(None, "warmup crashed");
+        assert!(fallback.contains("推理组件预热失败"), "实际 {fallback}");
+    }
+
+    // 覆盖 O-13/O-30（修复2回归，服务侧）：识别超时是连接级故障，模型从就绪
+    // 降级为错误并保留重试入口；与用户取消（自动后台重载）区分——超时不得
+    // 自动发 Work::Load 循环重试挂起的推理环境。
+    #[test]
+    fn recognition_timeout_downgrades_model_and_reenables_retry(
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        let temp = tempfile::tempdir()?;
+        let (mut service, work_rx) = ready_busy_service(temp.path());
+        service.handle(Command::OcrFinished(
+            Err(OcrError::TimedOut(
+                "识别超时，已终止挂起的推理进程；可重试加载模型".into(),
+            )),
+            (0, 0, 20, 20),
+        ));
+        assert!(!service.busy, "超时后当前任务应立即结束");
+        assert_eq!(
+            service.model,
+            ModelState::Error,
+            "超时是故障：模型必须降级为错误，不得冒称就绪"
+        );
+        assert!(service
+            .model_error
+            .as_deref()
+            .is_some_and(|reason| reason.contains("识别超时")));
+        assert_eq!(service.status()["model"], "error");
+        // 与取消的自动重载区分：超时不自动发 Work::Load（对照用例
+        // cancelled_recognition_triggers_model_reload 断言取消会发）。
+        assert!(
+            matches!(work_rx.try_recv(), Err(mpsc::TryRecvError::Empty)),
+            "超时不得自动触发后台重载（故障降级，非用户意图）"
+        );
         // Error 状态下重试入口恢复可用（O-13）：retry 把状态置回加载中。
         service.handle(Command::RetryModel);
         assert_eq!(service.model, ModelState::Loading);

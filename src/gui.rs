@@ -2204,8 +2204,16 @@ fn wire_sync(ui: &AppWindow, state: &Rc<RefCell<State>>, out: &EventSender) {
                     ui.set_panel(0);
                     // U-11：MD 整理回到默认子页「合并 MD」，不得停留在拆分子页。
                     ui.set_md_subpage(0);
-                    ui.set_convert_progress(-1.0);
-                    ui.set_convert_progress_note("".into());
+                    // 转换任务运行中切页再切回时保留实时进度：无条件重置会让长任务
+                    // 期间离开再回来的进度条到下一个 CONVERTER_FILE_STARTED 前
+                    // 保持不确定。运行判定与 refresh_runtime 同口径（busy 且
+                    // runtime=MarkdownConverter）；非运行态保持原重置口径，上次
+                    // 任务的残留进度不得带到新会话。
+                    if !(ui.get_busy() && state.borrow().runtime == RuntimeMode::MarkdownConverter)
+                    {
+                        ui.set_convert_progress(-1.0);
+                        ui.set_convert_progress_note("".into());
+                    }
                     if tool == Tool::MarkdownConverter {
                         ui.set_convert_log_text(
                             log_panel_text(&state.borrow().convert_logs).into(),
@@ -2891,14 +2899,16 @@ impl UiPump {
                         let total = fields.next().and_then(|v| v.parse::<usize>().ok());
                         let relative = fields.next().unwrap_or_default();
                         if let (Some(index), Some(total)) = (index, total) {
+                            // 先按 f64 求比例再写进度属性（保持 0.0-1.0 钳制）：
+                            // 分子分母各自 u16 饱和后再相除，会让 >65535 文件的
+                            // 大批次进度失真为 1.0（仅显示口径，不影响统计）。
+                            #[allow(clippy::cast_possible_truncation, clippy::cast_precision_loss)]
                             let progress = if total == 0 {
                                 -1.0
                             } else {
-                                let numerator =
-                                    u16::try_from(index.saturating_sub(1)).unwrap_or(u16::MAX);
-                                let denominator = u16::try_from(total).unwrap_or(u16::MAX);
-                                (f32::from(numerator) / f32::from(denominator)).clamp(0.0, 1.0)
-                            };
+                                (index.saturating_sub(1)) as f64 / total as f64
+                            }
+                            .clamp(0.0, 1.0) as f32;
                             ui.set_convert_progress(progress);
                             ui.set_convert_progress_note(format!("{index} / {total}").into());
                             // T-22：记录当前文件，供 100ms 周期刷新拼出「正在处理 X · 耗时 Ns」。
@@ -3581,8 +3591,11 @@ impl UiPump {
                             .convert_cancel
                             .as_ref()
                             .is_some_and(|flag| flag.load(Ordering::Acquire));
-                        {
+                        let total_elapsed = {
                             let mut s = self.state.borrow_mut();
+                            // T-22：失败收尾的总耗时同样从任务起算到本事件到达时刻
+                            //（与 DONE 分支同口径）。
+                            let elapsed = s.started.elapsed().as_secs_f64().max(0.001);
                             s.convert_cancel = None;
                             s.runtime = RuntimeMode::Organizer;
                             s.convert_current.clear();
@@ -3591,11 +3604,26 @@ impl UiPump {
                                 format!("转 Markdown 失败：{error}"),
                             );
                             self.log_dirty.set(true);
-                        }
+                            elapsed
+                        };
                         ui.set_busy(false);
                         ui.set_paused(false);
                         ui.set_convert_progress(-1.0);
                         ui.set_convert_progress_note("".into());
+                        // 失败事件不带逐文件统计（Err 只携带原因），收尾统计行用
+                        // 失败/停止口径 + 总耗时覆盖——否则「正在处理 X」「正在扫描…」
+                        // 等运行中文案会一直残留到下一次任务（与 DONE 分支不对称）。
+                        ui.set_convert_metrics(
+                            format!(
+                                "{} · 总耗时 {total_elapsed:.1}s",
+                                if cancelled {
+                                    "已停止"
+                                } else {
+                                    "转换失败"
+                                }
+                            )
+                            .into(),
+                        );
                         ui.set_convert_status(
                             if cancelled {
                                 "已停止，可重新开始"
@@ -7669,6 +7697,146 @@ mod gui_tests {
             assert!(
                 elapsed_in_metrics(&final_metrics).is_some_and(|secs| secs >= 2.0),
                 "总耗时必须从任务起算到收尾：{final_metrics}"
+            );
+        })
+        .unwrap();
+    }
+
+    // 覆盖 T-22 对称性：CONVERTER_FAIL 收尾必须清掉运行中文案——修复前 FAIL
+    // 分支只重置 progress/note/status 不碰 metrics，失败后界面长期残留
+    //「正在处理 X」或「正在扫描…」（与 DONE 分支的收尾统计不对称）。
+    #[test]
+    fn convert_fail_clears_running_metrics_text() {
+        with_gui(|app| {
+            let ui = &app.ui;
+            ui.set_busy(true);
+            app.state.borrow_mut().runtime = RuntimeMode::MarkdownConverter;
+            app.pump
+                .out
+                .send(Event::Status("CONVERTER_STARTED|2".into()))
+                .unwrap();
+            app.pump
+                .out
+                .send(Event::Status(
+                    "CONVERTER_FILE_STARTED|1|2|docs/a.pdf".into(),
+                ))
+                .unwrap();
+            app.pump.run(ui);
+            let running = ui.get_convert_metrics().to_string();
+            assert!(
+                running.contains("正在处理"),
+                "前置：运行中指标应含运行中文案，实测：{running}"
+            );
+            app.pump
+                .out
+                .send(Event::MdDone("CONVERTER_FAIL|组件不可用".into()))
+                .unwrap();
+            app.pump.run(ui);
+            let final_metrics = ui.get_convert_metrics().to_string();
+            assert!(
+                !final_metrics.contains("正在处理") && !final_metrics.contains("正在扫描"),
+                "失败收尾后不得残留运行中文案（正在处理/正在扫描），实测：{final_metrics}"
+            );
+            assert!(
+                final_metrics.contains("总耗时"),
+                "失败收尾统计应与 DONE 分支同口径含总耗时，实测：{final_metrics}"
+            );
+            // 扫描阶段失败：metrics 残留「正在扫描…」同样必须被收尾清除。
+            ui.set_convert_metrics("正在扫描…".into());
+            app.pump
+                .out
+                .send(Event::MdDone("CONVERTER_FAIL|扫描失败".into()))
+                .unwrap();
+            app.pump.run(ui);
+            let scan_fail = ui.get_convert_metrics().to_string();
+            assert!(
+                !scan_fail.contains("正在扫描") && !scan_fail.contains("正在处理"),
+                "扫描阶段失败的收尾同样不得残留运行中文案，实测：{scan_fail}"
+            );
+        })
+        .unwrap();
+    }
+
+    // 覆盖 U-11 例外：转换任务运行中切页再切回，进度条不得被无条件重置为
+    // 不确定态——修复前 on_select_tool 无条件 set_convert_progress(-1)，长任务
+    // 期间离开再回来进度条到下一个 CONVERTER_FILE_STARTED 前保持不确定。
+    #[test]
+    fn select_tool_keeps_convert_progress_while_running() {
+        with_gui(|app| {
+            let ui = &app.ui;
+            ui.set_busy(true);
+            app.state.borrow_mut().runtime = RuntimeMode::MarkdownConverter;
+            app.pump
+                .out
+                .send(Event::Status(
+                    "CONVERTER_FILE_STARTED|2|4|docs/a.pdf".into(),
+                ))
+                .unwrap();
+            app.pump.run(ui);
+            let before = ui.get_convert_progress();
+            let note_before = ui.get_convert_progress_note().to_string();
+            assert!(
+                (before - 0.25).abs() < 0.01,
+                "前置：注入 2/4 进度应约为 0.25，实测：{before}"
+            );
+            // 切走再切回：运行态保留实时进度。
+            ui.invoke_select_tool("md-organizer".into());
+            ui.invoke_select_tool("markdown-converter".into());
+            assert!(
+                (ui.get_convert_progress() - before).abs() < f32::EPSILON,
+                "转换运行中切页再切回必须保留实时进度：{before} → {}",
+                ui.get_convert_progress()
+            );
+            assert_eq!(
+                ui.get_convert_progress_note().as_str(),
+                note_before,
+                "运行中切页不得清空进度注释"
+            );
+            // 非运行态切页：保持原重置口径（上次任务残留进度不得带到新会话）。
+            ui.set_busy(false);
+            app.state.borrow_mut().runtime = RuntimeMode::Organizer;
+            ui.invoke_select_tool("md-organizer".into());
+            ui.invoke_select_tool("markdown-converter".into());
+            assert!(
+                (ui.get_convert_progress() + 1.0).abs() < f32::EPSILON,
+                "非运行态切页仍须重置进度为不确定态，实测：{}",
+                ui.get_convert_progress()
+            );
+        })
+        .unwrap();
+    }
+
+    // 覆盖 U-01（进度口径）：CONVERTER_FILE_STARTED 的大批次进度必须先做比例
+    // 再落属性——修复前分子分母各自 u16 饱和后再相除，>65535 文件时
+    // 70000/100000 被显示为 1.0（饱和失真）。
+    #[test]
+    fn convert_file_started_progress_ratio_survives_large_totals() {
+        with_gui(|app| {
+            let ui = &app.ui;
+            app.pump
+                .out
+                .send(Event::Status(
+                    "CONVERTER_FILE_STARTED|70001|100000|docs/big.pdf".into(),
+                ))
+                .unwrap();
+            app.pump.run(ui);
+            let progress = ui.get_convert_progress();
+            assert!(
+                (progress - 0.7).abs() < 0.01,
+                "70000/100000 的进度应约为 0.7，实测：{progress}（u16 饱和会失真为 1.0）"
+            );
+            // 钳制口径不变：超出上限的比值仍不得超过 1.0。
+            app.pump
+                .out
+                .send(Event::Status(
+                    "CONVERTER_FILE_STARTED|200001|100000|docs/big.pdf".into(),
+                ))
+                .unwrap();
+            app.pump.run(ui);
+            assert!(
+                ui.get_convert_progress() <= 1.0,
+                "进度比值必须保持 0.0-1.0 钳制，实测：{}",
+                ui.get_convert_progress()
             );
         })
         .unwrap();

@@ -400,7 +400,14 @@ pub(crate) fn apply_offline_environment(command: &mut Command, runtime_dir: &Pat
             DEFAULT_MAX_REQUEST_BODY_BYTES,
         )
         .env("XBERG_API_ALLOW_LOCAL_URI_INPUTS", "1")
-        .env("NO_COLOR", "1");
+        .env("NO_COLOR", "1")
+        // 封死组件 perf-tracing feature 向 CWD 写 logs/perf.log.* 的唯一
+        // 路径（与媒体侧 media_worker_environment 三处统一；未编入 feature
+        // 时被无害忽略）。
+        .env(
+            "XBERG_PERF_LOG_DIR",
+            std::env::temp_dir().join("JchTools-xberg-perf"),
+        );
 
     let ort = runtime_dir.join(if cfg!(windows) {
         "onnxruntime.dll"

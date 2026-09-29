@@ -2,7 +2,7 @@
 //! 设置窗与结果窗由同一份 Slint 文件编译，供独立后台服务使用。
 
 use std::path::Path;
-use std::sync::Arc;
+use std::sync::{Arc, OnceLock};
 
 use raw_window_handle::{HasWindowHandle, RawWindowHandle};
 use slint::ComponentHandle;
@@ -42,15 +42,32 @@ impl std::fmt::Display for ResultWindowError {
 
 impl std::error::Error for ResultWindowError {}
 
-/// 向 Slint 字体库注册 OCR 资产中的等宽字体；缺失或损坏均显式报错。
+/// 进程级字体注册状态（O-13）：模型常驻于服务生命周期，字体文件在服务生命
+/// 周期内不变，注册一次即可。「取消 → 后台重载」路径每次 ModelLoaded(Ok) 都
+/// 会走到这里——若每次都重新读取 16MB 字体并注册新 blob，fontique 是否去重
+/// 并无保证，存在无界的重复注册内存增长风险；第二次及以后调用直接跳过读取
+/// 与注册。
+static FONT_REGISTERED: OnceLock<()> = OnceLock::new();
+
+/// 向 Slint 字体库注册 OCR 资产中的等宽字体；缺失或损坏均显式报错。进程级
+/// 只注册一次（见 [`FONT_REGISTERED`]），重复调用是幂等的。
 ///
 /// # Errors
 /// 字体文件缺失、损坏或 Slint 后端初始化失败。
 pub fn register_fonts(font_dir: &Path) -> Result<(), ResultWindowError> {
     let font = font_dir.join("NotoSansMonoCJKsc-Regular.otf");
-    let bytes = std::fs::read(font)
-        .map_err(|_| ResultWindowError::FontUnavailable("字体资产缺失或无法读取".into()))?;
-    // 共享字体库依赖已创建的平台上下文，spawn_local 初始化 Slint 后端。
+    ensure_font_registered(&FONT_REGISTERED, &font, read_font_file, register_font_blob)
+}
+
+/// 读取字体文件（独立步骤；幂等测试注入计数读取器验证只读一次）。
+fn read_font_file(font: &Path) -> Result<Vec<u8>, ResultWindowError> {
+    std::fs::read(font)
+        .map_err(|_| ResultWindowError::FontUnavailable("字体资产缺失或无法读取".into()))
+}
+
+/// 注册字体 blob（共享字体库依赖已创建的平台上下文，spawn_local 初始化
+/// Slint 后端）。
+fn register_font_blob(bytes: Vec<u8>) -> Result<(), ResultWindowError> {
     slint::spawn_local(std::future::ready(()))
         .map_err(|e| ResultWindowError::FontUnavailable(format!("窗口后端不可用：{e}")))?;
     let blob = slint::fontique_010::fontique::Blob::new(Arc::new(bytes));
@@ -59,6 +76,25 @@ pub fn register_fonts(font_dir: &Path) -> Result<(), ResultWindowError> {
         return Err(ResultWindowError::FontUnavailable("字体文件损坏".into()));
     }
     Ok(())
+}
+
+/// 幂等注册核心：`registered` 已置位时跳过读取与注册；仅成功注册后才置位，
+/// 失败不置位，下次调用（如用户重试加载模型）仍会重新读取并注册。
+fn ensure_font_registered(
+    registered: &OnceLock<()>,
+    font: &Path,
+    load: impl FnOnce(&Path) -> Result<Vec<u8>, ResultWindowError>,
+    register: impl FnOnce(Vec<u8>) -> Result<(), ResultWindowError>,
+) -> Result<(), ResultWindowError> {
+    if registered.get().is_some() {
+        return Ok(());
+    }
+    let bytes = load(font)?;
+    let outcome = register(bytes);
+    if outcome.is_ok() {
+        let _ = registered.set(());
+    }
+    outcome
 }
 
 /// US 键盘布局 Shift+符号的反向映射表（O-14 热键录制）：Slint 录制到的
@@ -244,10 +280,88 @@ impl ResultWindowHandle {
 
 #[cfg(test)]
 mod tests {
-    use super::{normalize_shift_key, ResultWindow, ResultWindowHandle, SettingsWindow};
+    use super::{
+        ensure_font_registered, normalize_shift_key, ResultWindow, ResultWindowError,
+        ResultWindowHandle, SettingsWindow,
+    };
     use slint::ComponentHandle;
     use std::cell::RefCell;
     use std::rc::Rc;
+    use std::sync::{Arc, OnceLock};
+
+    // 覆盖 O-13（修复3回归）：字体注册进程级只执行一次——「取消 → 后台重载」
+    // 路径每次 ModelLoaded(Ok) 都会调 register_fonts，若每次都重新读取 16MB
+    // 字体并注册新 blob，存在无界重复注册的内存增长风险。注入计数读取器
+    // 断言连续调用两次只读一次文件；修复前（无幂等层）读取器被调用两次。
+    #[test]
+    fn font_registration_reads_file_once_across_reloads() {
+        let reads = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let registers = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let registered = OnceLock::new();
+        let font = std::path::Path::new("fake-font.otf");
+
+        let make_load = || {
+            let reads = Arc::clone(&reads);
+            move |_font: &std::path::Path| {
+                reads.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                Ok(vec![0u8; 4])
+            }
+        };
+        let make_register = || {
+            let registers = Arc::clone(&registers);
+            move |_bytes: Vec<u8>| {
+                registers.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                Ok(())
+            }
+        };
+
+        ensure_font_registered(&registered, font, make_load(), make_register())
+            .expect("首次注册应成功");
+        ensure_font_registered(&registered, font, make_load(), make_register())
+            .expect("第二次调用（模拟重载路径）应幂等成功");
+        assert_eq!(
+            reads.load(std::sync::atomic::Ordering::SeqCst),
+            1,
+            "字体文件只允许读取一次（O-13：字体与模型同生命周期，进程级注册一次）"
+        );
+        assert_eq!(
+            registers.load(std::sync::atomic::Ordering::SeqCst),
+            1,
+            "字体 blob 只允许注册一次"
+        );
+    }
+
+    // 覆盖修复3的失败语义：注册失败不置位，下次调用仍重新读取并注册
+    // （用户重试加载模型时字体有第二次机会，失败不被缓存）。
+    #[test]
+    fn failed_font_registration_is_not_cached() {
+        let reads = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let make_load = || {
+            let reads = Arc::clone(&reads);
+            move |_font: &std::path::Path| {
+                reads.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                Ok(vec![0u8; 4])
+            }
+        };
+        let failing = move |_bytes: Vec<u8>| -> Result<(), ResultWindowError> {
+            Err(ResultWindowError::FontUnavailable("字体文件损坏".into()))
+        };
+        let registered = OnceLock::new();
+        let font = std::path::Path::new("fake-font.otf");
+        let outcome = ensure_font_registered(&registered, font, make_load(), failing);
+        assert!(outcome.is_err(), "首次注册失败应报错");
+        assert!(
+            registered.get().is_none(),
+            "失败不得置位幂等标记（否则用户重试永远拿不到字体）"
+        );
+        let succeeded = ensure_font_registered(&registered, font, make_load(), |_| Ok(()));
+        assert!(succeeded.is_ok(), "重试注册应成功");
+        assert_eq!(
+            reads.load(std::sync::atomic::Ordering::SeqCst),
+            2,
+            "失败未缓存：重试应重新读取字体文件"
+        );
+    }
 
     // 覆盖 O-14（E-4 回归）：US 布局 Shift+符号反向映射表全量核对——
     // 上下两行各 10/11 对，Shift 按下时符号必须还原为未修饰的原键，

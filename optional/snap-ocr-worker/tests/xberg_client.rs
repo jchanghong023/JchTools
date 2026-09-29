@@ -89,7 +89,10 @@ fn error_state_is_reported_with_summary() {
         .expect("关闭应干净退出");
 }
 
-// 覆盖 XB-06/XB-07：失败响应映射为可分类的 Backend 错误。
+// 覆盖 XB-06/XB-07（修复1回归）：失败响应映射为可分类的 Backend 错误，且
+// 结构化 `error_kind` 必须透传——真实 Xberg 的错误文本是英文（如 "snapshot
+// model asset missing"），服务端 warm_up 分类依赖 kind 而非中文子串；修复前
+// 客户端只取 `error` 文本、丢弃 kind，分类启发式必然落空（本测试无法编译）。
 #[test]
 fn failure_response_maps_to_backend_error() {
     let mut client = spawn_mock("fail");
@@ -97,8 +100,13 @@ fn failure_response_maps_to_backend_error() {
         .recognize(b"fake png bytes", &AtomicBool::new(false))
         .expect_err("失败响应应返回错误");
     match error {
-        ClientError::Backend(message) => {
+        ClientError::Backend { message, kind } => {
             assert!(message.contains("asset mismatch"), "unexpected: {message}");
+            assert_eq!(
+                kind.as_deref(),
+                Some("asset_invalid"),
+                "error_kind 应原样透传（与 Xberg snapshot_ocr.rs 的 5 值对齐），实际 {kind:?}"
+            );
         }
         other => panic!("应为 Backend 错误，实际 {other:?}"),
     }
@@ -170,6 +178,86 @@ fn cancel_returns_promptly_and_abort_terminates_child_immediately() {
     fresh
         .shutdown(Duration::from_secs(5))
         .expect("新客户端关闭应干净退出");
+    client
+        .shutdown(Duration::from_secs(5))
+        .expect("已终止客户端的关闭应成功");
+}
+
+// 覆盖 O-13/O-30（E'低危4 回归）：半行截断必须升级为进程退出分类。mock 写出
+// 完整 JSON 但不带换行终止后立即退出——协议帧残缺 + 进程已死，连接不可复用；
+// 若把无终止符的残行当有效响应收纳，会得到 Backend 分类，服务误以为连接仍可用，
+// 对同一连接 retry 必然无效（半死连接）。期望分类：ProcessExited。
+#[test]
+fn truncated_response_line_is_reported_as_process_exit() {
+    let mut client = spawn_mock("half-line");
+    let error = client
+        .recognize(b"payload", &AtomicBool::new(false))
+        .expect_err("截断响应应返回错误");
+    assert!(
+        matches!(error, ClientError::ProcessExited(_)),
+        "半行截断应升级为进程退出分类，实际 {error:?}"
+    );
+    client
+        .shutdown(Duration::from_secs(5))
+        .expect("已退出子进程的关闭应成功");
+}
+
+// 覆盖 XB-08/O-13（修复2回归）：挂起子进程（活着但不读 stdin/不写 stdout）
+// 必须被请求级超时解救——注入 300ms 超时后，识别在超时+余量内返回
+// ClientError::Timeout，服务同路径 abort 终止 mock 进程；修复前无超时机制，
+// wait_response 无 deadline 轮询、永久阻塞（本测试无法编译）。
+#[test]
+fn write_timeout_cancels_blocked_stdin_write() {
+    // 覆盖写阶段看门狗：payload 超过管道缓冲且子进程不读 stdin，写入阻塞在
+    // 内核；看门狗在超时后 CancelIoEx 解除阻塞，按请求级超时返回（而非永久
+    // 挂死在 write_all）。
+    let mut client = spawn_mock("hang").with_request_timeout(Duration::from_millis(300));
+    let started = std::time::Instant::now();
+    let oversized = vec![0u8; 512 * 1024];
+    let error = client
+        .recognize(&oversized, &AtomicBool::new(false))
+        .expect_err("写阻塞应按请求级超时返回错误");
+    assert!(
+        matches!(error, ClientError::Timeout),
+        "写阻塞应被看门狗解救并按超时分类，实际 {error:?}"
+    );
+    assert!(
+        started.elapsed() < Duration::from_secs(5),
+        "写阻塞应在注入超时+余量内返回，实际耗时 {:?}",
+        started.elapsed()
+    );
+}
+
+#[test]
+fn request_timeout_frees_hanging_recognition_and_child_is_terminated() {
+    let mut client = spawn_mock("hang").with_request_timeout(Duration::from_millis(300));
+    let started = std::time::Instant::now();
+    let error = client
+        .recognize(b"payload", &AtomicBool::new(false))
+        .expect_err("挂起子进程应按超时返回错误");
+    assert!(
+        matches!(error, ClientError::Timeout),
+        "应为请求级超时错误，实际 {error:?}"
+    );
+    assert!(
+        started.elapsed() < Duration::from_secs(5),
+        "识别应在注入超时+余量内返回，实际耗时 {:?}",
+        started.elapsed()
+    );
+
+    // 服务侧同路径处理（worker 线程对 TimedOut 调 abort）：挂起进程被终止，
+    // 不得残留（mock 长眠 60 秒，只有显式终止会让它先死）。
+    let pid = client.child_id();
+    client.abort();
+    let deadline = std::time::Instant::now() + Duration::from_secs(5);
+    #[cfg(windows)]
+    while process_alive(pid) {
+        assert!(
+            std::time::Instant::now() < deadline,
+            "超时 abort 后 mock 子进程（PID {pid}）仍存活：挂起进程未被终止"
+        );
+        std::thread::sleep(Duration::from_millis(50));
+    }
     client
         .shutdown(Duration::from_secs(5))
         .expect("已终止客户端的关闭应成功");

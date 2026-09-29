@@ -10,6 +10,9 @@
 //! - `fail`：`ocr_snapshot` → `ok:false`，`error_kind:"asset_invalid"`。
 //! - `slow`：`ocr_snapshot` 延迟 1 秒后成功（供取消测试）。
 //! - `exit-after-first`：应答第一条请求后以退出码 3 退出（供进程退出测试）。
+//! - `half-line`：对首条请求写一条不带换行终止的完整 JSON 响应后立即退出
+//!   （模拟协议帧截断：进程已死但读侧先收到残缺数据，供「半行截断必须升级为
+//!   进程退出分类」回归测试使用）。
 //! - `console-probe`：任何请求都以成功响应报告自身是否持有控制台窗口
 //!   （`console-present` / `no-console`），供「子进程不弹黑窗
 //!   （CREATE_NO_WINDOW）」回归测试探测。
@@ -30,13 +33,14 @@ use std::time::Duration;
 /// 参数里取第一个已知模式，其余参数忽略——生产 spawn 路径可直接驱动 mock；
 /// 参数中无模式时回退读环境变量 `MOCK_XBERG_MODE`（经继承环境注入，专供
 /// 生产 spawn 路径的回归测试选择探针模式）。
-const KNOWN_MODES: [&str; 9] = [
+const KNOWN_MODES: [&str; 10] = [
     "ok",
     "state-uninit",
     "state-error",
     "fail",
     "slow",
     "exit-after-first",
+    "half-line",
     "console-probe",
     "hang",
     "env-probe",
@@ -95,6 +99,16 @@ fn main() {
             .get("id")
             .cloned()
             .unwrap_or(serde_json::Value::Null);
+        if mode == "half-line" {
+            // 协议帧截断：写出完整 JSON 但不带换行终止，随后立即退出——读侧先
+            // 收到「残缺帧」再观察到进程死亡，模拟半死连接的最后一口数据。
+            let _ = write!(
+                stdout,
+                "{{\"id\":{id},\"ok\":false,\"error\":\"truncated response\"}}"
+            );
+            let _ = stdout.flush();
+            std::process::exit(0);
+        }
         let response = if mode == "console-probe" {
             serde_json::json!({
                 "id": id,

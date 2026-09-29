@@ -5,7 +5,7 @@ use std::{
     collections::BTreeSet,
     ffi::{OsStr, OsString},
     fs::{self, OpenOptions},
-    io::{BufRead, BufReader, Write},
+    io::{self, BufRead, BufReader, Write},
     path::{Component, Path, PathBuf},
     process::{Command, Stdio},
     sync::atomic::{AtomicBool, Ordering as AtomicOrdering},
@@ -607,6 +607,15 @@ fn compare_paths_insensitive(left: &Path, right: &Path) -> Ordering {
     }
 }
 
+// T-11 决胜序等价性论证（A'-低危2）：合同写「相同键再按原始路径 UTF-16 单元
+// 序列决胜」，本实现按「逐段原始 UTF-16（首段分出胜负即停）」。两者在决胜段内
+// 数学等价：决胜段仅在 [`compare_paths_insensitive`] 全段相等时进入，此时两路径
+// 分段数相同、前 i 段原始相等、第 i 段两两大小写不敏感相等但原始不同。大小写
+// 不敏感相等的两段不可能互为真前缀——若 c 是 d 的真前缀则 d=c+e（e 非空），逐
+// 单元折叠不消灭单元、段内也不含分隔符，fold(d)=fold(c)+fold(e)≠fold(c)，与不
+// 区分大小写相等矛盾——故第 i 段的第一差异单元必在两段内部的同一位置，逐段与
+// 整路径两种比较的第一差异单元相同，结论一致（性质由
+// `flat_tiebreak_per_component_matches_whole_path_sequence` 固定）。
 fn compare_paths_original(left: &Path, right: &Path) -> Ordering {
     let mut left_parts = left.components();
     let mut right_parts = right.components();
@@ -724,6 +733,65 @@ enum TranscribeFailure {
 /// 优雅关闭的有界等待：worker 收到 EOF 后应自行退出；超限按挂死终结。
 const WORKER_EXIT_GRACE: Duration = Duration::from_secs(10);
 
+/// 增量有界行读取（B'-6/A'-1 加固，读线程不再裸用 `read_line`）：逐块读直到
+/// `\n`，只在未超限前把字节累积进返回值——失控子进程输出超长单行时不再把整行
+/// 全额分配进内存（旧实现先 `read_line` 读完整行才判 `> MAX_CAPTURE_BYTES`）。
+///
+/// 行含结尾 `\n` 时原样返回（与 `read_line` 一致，空行与 EOF 可区分）；EOF
+/// 返回已读残余（可能为空）。行字节数（含 `\n`）超过 `cap` 时返回
+/// `InvalidData` 错误，文案沿用旧口径「单次响应超过捕获上限（N 字节）」，N 为
+/// 整行实际字节数；报错前把该行剩余字节排空到 `\n`/EOF（只计数丢弃、不再
+/// 分配），保证返回后读位置仍停在行边界、后续行照常解析（协议行边界对齐，
+/// 进程与批次继续，语义与旧实现一致）。
+fn read_line_capped(reader: &mut impl BufRead, cap: usize) -> io::Result<Vec<u8>> {
+    let mut total = 0usize; // 已观测行字节数（含结尾 \n 口径）
+    let mut line: Vec<u8> = Vec::new(); // 只在未超限前累积，内存上界即 cap
+    let mut oversize = false;
+    loop {
+        let available = match reader.fill_buf() {
+            Ok(available) => available,
+            Err(ref error) if error.kind() == io::ErrorKind::Interrupted => continue,
+            Err(error) => return Err(error),
+        };
+        if available.is_empty() {
+            // EOF：超限行到 EOF 仍未见到 \n 时 N 即整行精确长度（无结尾 \n）。
+            return if oversize {
+                Err(oversize_line_error(total))
+            } else {
+                Ok(line)
+            };
+        }
+        let newline = available.iter().position(|&byte| byte == b'\n');
+        let usable = newline.map_or(available.len(), |index| index + 1);
+        if !oversize && total + usable > cap {
+            oversize = true;
+            line = Vec::new(); // 立即释放已累积字节，后续只计数不分配
+        }
+        total += usable;
+        if oversize {
+            // 排空剩余字节凑齐整行精确长度（N），到行边界才报错。
+            reader.consume(usable);
+            if newline.is_some() {
+                return Err(oversize_line_error(total));
+            }
+            continue;
+        }
+        line.extend_from_slice(&available[..usable]);
+        reader.consume(usable);
+        if newline.is_some() {
+            return Ok(line);
+        }
+    }
+}
+
+/// 超限错误（B'-6）：`InvalidData` 便于读线程与一般读错误区分；文案沿用旧口径。
+fn oversize_line_error(total: usize) -> io::Error {
+    io::Error::new(
+        io::ErrorKind::InvalidData,
+        format!("单次响应超过捕获上限（{total} 字节）"),
+    )
+}
+
 /// 批内常驻的 Xberg 转录工作进程（T-19/T-22，Xberg WORKER.md 协议客户端）。
 ///
 /// 一个批次只付一次冷启动，文件之间进程内复用已加载的 SenseVoice 会话；调用方
@@ -795,36 +863,41 @@ impl MediaWorker {
             .stderr
             .take()
             .ok_or_else(|| "无法读取转录诊断".to_string())?;
-        // stdout 按行解析响应：后台线程持续排空，防止子进程写管道阻塞。上限按
-        // 「单行（= 单次响应）」计：常驻进程的批次累计流量会随文件数自然超过任何
-        // 总量上限，误杀健康进程；单个响应超限按该文件失败处理（合成错误行回显
-        // 当前请求 id），协议行边界仍对齐，进程与批次继续。读线程经共享原子获知
-        // 当前请求 id（严格串行协议下响应只属于最新请求）。
+        // stdout 按行解析响应：后台线程经 [`read_line_capped`] 增量有界读取并
+        // 持续排空，防止子进程写管道阻塞。上限按「单行（= 单次响应）」计：常驻
+        // 进程的批次累计流量会随文件数自然超过任何总量上限，误杀健康进程；单个
+        // 响应超限按该文件失败处理（合成错误行回显当前请求 id），超长行的剩余
+        // 字节在函数内排空到行边界、不整行分配内存，进程与批次继续。读线程经
+        // 共享原子获知当前请求 id（严格串行协议下响应只属于最新请求）。
         let (sender, responses) = mpsc::channel::<String>();
         let pending_id = std::sync::Arc::new(std::sync::atomic::AtomicU64::new(0));
         let reader_pending = std::sync::Arc::clone(&pending_id);
         let reader = thread::spawn(move || {
             let mut lines = BufReader::new(stdout);
-            let mut line = String::new();
             loop {
-                line.clear();
-                match lines.read_line(&mut line) {
-                    Ok(0) | Err(_) => break,
-                    Ok(read) => {
-                        if read > crate::process::MAX_CAPTURE_BYTES {
-                            let id = reader_pending.load(std::sync::atomic::Ordering::Acquire);
-                            let oversize = format!(
-                                "{{\"id\":{id},\"ok\":false,\"error\":\"单次响应超过捕获上限（{read} 字节）\"}}"
-                            );
-                            if sender.send(oversize).is_err() {
+                match read_line_capped(&mut lines, crate::process::MAX_CAPTURE_BYTES) {
+                    // 空行与 EOF 的区分依赖保留结尾换行的行口径。
+                    Ok(line) if line.is_empty() => break,
+                    Ok(line) => match String::from_utf8(line) {
+                        Ok(text) => {
+                            if sender.send(text).is_err() {
                                 break;
                             }
-                            continue;
                         }
-                        if sender.send(line.clone()).is_err() {
+                        // 与 read_line 的 UTF-8 校验口径一致：非法字节终止读线程。
+                        Err(_) => break,
+                    },
+                    Err(error) if error.kind() == io::ErrorKind::InvalidData => {
+                        // 超限：合成错误行回显当前请求 id（该文件失败；行边界
+                        // 已在 read_line_capped 内排空对齐，进程与批次继续）。
+                        let id = reader_pending.load(std::sync::atomic::Ordering::Acquire);
+                        let oversize =
+                            format!("{{\"id\":{id},\"ok\":false,\"error\":\"{error}\"}}");
+                        if sender.send(oversize).is_err() {
                             break;
                         }
                     }
+                    Err(_) => break,
                 }
             }
         });
@@ -1013,13 +1086,24 @@ fn stderr_tail_for_message(stderr_text: &str) -> Option<String> {
 /// 转换路径（[`markdown_document::apply_offline_environment`]）同口径的纯开关型
 /// 离线变量（XB-04：两侧同为 xberg.exe worker 子命令，离线口径必须一致，防止
 /// worker 内部 HF hub 回退联网）。不设 HF_HOME/HF_HUB_CACHE 等路径变量——媒体
-/// 组件目录结构与文档转换组件不同，不引入额外路径假设。
+/// 组件目录结构与文档转换组件不同，不引入额外路径假设。唯一例外是
+/// `XBERG_PERF_LOG_DIR`（B'-8）：把组件 perf-tracing feature 的日志目录固定到
+/// 系统临时目录（与媒体转录临时文件同口径），封死其向当前工作目录创建
+/// `logs/perf.log.*` 的唯一主动写文件路径；该变量不是离线开关、不影响 XB-04
+/// 口径，且仅当组件编入 perf feature 才生效，未编入时被无害忽略。
 fn media_worker_environment(root: &Path) -> Vec<(String, String)> {
     let path_value = |sub: &str| root.join(sub).to_string_lossy().into_owned();
     [
         ("XBERG_SENSEVOICE_MODEL_DIR", path_value("models")),
         ("XBERG_SHERPA_DLL_DIR", path_value("sherpa-onnx")),
         ("XBERG_FFMPEG_DLL_DIR", path_value("ffmpeg")),
+        (
+            "XBERG_PERF_LOG_DIR",
+            std::env::temp_dir()
+                .join("JchTools-xberg-perf")
+                .to_string_lossy()
+                .into_owned(),
+        ),
         ("HF_HUB_OFFLINE", "1".to_string()),
         ("HUGGINGFACE_HUB_OFFLINE", "1".to_string()),
         ("TRANSFORMERS_OFFLINE", "1".to_string()),
@@ -1056,6 +1140,18 @@ impl Drop for MediaWorker {
     }
 }
 
+/// 组件解析类错误的统一包装（B'-7）：媒体转录组件未就绪的各类错误（未配置、
+/// 不完整、版本与清单不一致、多版本无法确定——均产生自组件目录解析与在位校验）
+/// 一律补「重新初始化」指引，口径一致；单文件转换本身的失败（格式不支持、解码
+/// 失败等）产生自转录链路、不经本包装，不会被误加指引。
+fn media_component_error(error: &str) -> String {
+    // 部分解析错误（版本不一致等）自带重新初始化指引，避免双重指引。
+    if error.contains("重新初始化") {
+        return error.to_string();
+    }
+    format!("媒体转录组件未就绪，请重新初始化转 Markdown 功能：{error}")
+}
+
 /// 转换一个媒体文件：确保批内常驻进程在位（首个媒体文件或上一轮超时/崩溃之后
 /// 重启），串行发送 transcribe 并取回 markdown。
 fn convert_media(
@@ -1063,13 +1159,8 @@ fn convert_media(
     path: &Path,
     deadline: &markdown_document::Deadline,
 ) -> Result<String, String> {
-    let component = markdown_assets::media_component_dir().map_err(|error| {
-        if error.contains("未配置") || error.contains("不完整") {
-            format!("媒体转录组件未就绪，请重新初始化转 Markdown 功能：{error}")
-        } else {
-            error
-        }
-    })?;
+    let component =
+        markdown_assets::media_component_dir().map_err(|error| media_component_error(&error))?;
     transcribe_with_slot(worker_slot, path, deadline, || {
         MediaWorker::spawn_for_root(&component)
     })
@@ -1194,7 +1285,8 @@ impl Drop for MediaProcessJob {
 #[cfg(test)]
 mod tests {
     use super::{
-        compare_names, compare_paths, media_worker_environment, occupancy_key, parse_formats,
+        compare_names, compare_paths, compare_paths_insensitive, media_component_error,
+        media_worker_environment, occupancy_key, parse_formats, read_line_capped,
         run_formats_probe, scan, selected_xberg_extension, stderr_tail_for_message,
         transcribe_with_slot, write_new_markdown, FormatGroup, MediaWorker, OccupiedIndex, Options,
     };
@@ -1282,6 +1374,59 @@ mod tests {
             fs::canonicalize(&output).unwrap().join("x_pdf.md")
         );
         assert_eq!(plan.summary.skipped_duplicate, 1);
+    }
+
+    // 覆盖 T-11（A'-低危2）：平铺决胜段（逐段大小写不敏感全等价、同分段结构）
+    // 里「逐段原始 UTF-16（首段分出胜负即停）」与合同「原始路径 UTF-16 单元
+    // 序列」必须选出同序——等价性依据：决胜段内各段两两大小写不敏感相等，而
+    // 大小写不敏感相等的两段不可能互为真前缀（逐单元折叠不消灭单元、段内无
+    // 分隔符），故两种口径的第一差异单元必落在同一段内同一位置。本用例跨多段、
+    // 各段大小写形态不同（A\b\x.pdf vs a\B\x.pdf），固定该性质防回归。
+    #[test]
+    fn flat_tiebreak_per_component_matches_whole_path_sequence() {
+        for (left, right) in [
+            ("A/b/x.PDF", "a/B/x.pdf"),
+            ("a/A/x.pdf", "a/a/x.pdf"),
+            ("Aa/b/x.pdf", "aA/B/x.pdf"),
+            ("deep/A/b/x.PDF", "deep/a/B/x.pdf"),
+        ] {
+            let left = Path::new(left);
+            let right = Path::new(right);
+            assert_eq!(
+                compare_paths_insensitive(left, right),
+                Ordering::Equal,
+                "用例必须处于决胜段（逐段大小写不敏感等价）：{left:?} vs {right:?}"
+            );
+            assert_eq!(
+                compare_paths(left, right),
+                whole_path_original_order(left, right),
+                "逐段决胜必须与合同整路径序列决胜一致：{left:?} vs {right:?}"
+            );
+        }
+        assert_eq!(
+            compare_paths(Path::new("A/b/x.PDF"), Path::new("a/B/x.pdf")),
+            Ordering::Less,
+            "首段大写 A（U+0041）原始序数小于小写 a（U+0061），平铺跳过时保留前者"
+        );
+    }
+
+    /// 合同 T-11 的决胜口径参照实现：整条相对路径的原始 UTF-16 单元序列比较。
+    fn whole_path_original_order(left: &Path, right: &Path) -> Ordering {
+        #[cfg(windows)]
+        {
+            use std::os::windows::ffi::OsStrExt;
+            left.as_os_str()
+                .encode_wide()
+                .cmp(right.as_os_str().encode_wide())
+        }
+        #[cfg(not(windows))]
+        {
+            // 非 Windows 仅作参照：ASCII 用例下按 Unicode 标量比较与 UTF-16
+            // 单元序列同序。
+            left.as_os_str()
+                .to_string_lossy()
+                .cmp(&right.as_os_str().to_string_lossy())
+        }
     }
 
     // 覆盖 T-11、T-12、T-24（A'-1 回归，键语义单元级）：层级模式的占用键 =
@@ -1762,6 +1907,105 @@ mod tests {
         );
     }
 
+    // ── B'-6/A'-1：stdout 读线程的增量有界行读取 ──
+
+    // 覆盖 T-24（B'-6）：正常行（含未以 \n 结尾的最后一行与 EOF 空返回）与
+    // read_line 行为一致，行内容含结尾换行原样返回（空行与 EOF 可区分）。
+    #[test]
+    fn read_line_capped_reads_normal_lines() {
+        let mut reader = std::io::Cursor::new(b"first\nsecond".to_vec());
+        assert_eq!(
+            read_line_capped(&mut reader, 64).unwrap(),
+            b"first\n".to_vec()
+        );
+        assert_eq!(
+            read_line_capped(&mut reader, 64).unwrap(),
+            b"second".to_vec()
+        );
+        assert_eq!(
+            read_line_capped(&mut reader, 64).unwrap(),
+            Vec::<u8>::new(),
+            "EOF 返回空行"
+        );
+        assert_eq!(
+            read_line_capped(&mut reader, 64).unwrap(),
+            Vec::<u8>::new(),
+            "EOF 之后继续读取仍返回空行"
+        );
+    }
+
+    // 覆盖 T-24（B'-6）：行字节数（含结尾 \n）恰好等于 cap 不算超限，与旧
+    // 「read > MAX_CAPTURE_BYTES 才失败」口径一致。
+    #[test]
+    fn read_line_capped_allows_line_exactly_at_cap() {
+        let mut input = vec![b'a'; 15];
+        input.push(b'\n');
+        let mut reader = std::io::Cursor::new(input.clone());
+        assert_eq!(
+            read_line_capped(&mut reader, 16).unwrap(),
+            input,
+            "恰好 cap 的行必须照常返回"
+        );
+        assert_eq!(
+            read_line_capped(&mut reader, 16).unwrap(),
+            Vec::<u8>::new(),
+            "随后到达 EOF"
+        );
+    }
+
+    // 覆盖 T-24（B'-6）：超限行立即返回 InvalidData 错误，错误文案沿用旧口径
+    // 并给出整行实际字节数；该行剩余字节被排空到行边界且不整行分配内存——
+    // 输入的剩余部分不被吞掉，下一行照常解析（协议行边界对齐，批次可继续）。
+    #[test]
+    fn read_line_capped_errors_on_oversize_and_keeps_line_boundary() {
+        let mut input = vec![b'x'; 20]; // 含结尾 \n 共 21 字节，超过 cap=16
+        input.push(b'\n');
+        input.extend_from_slice(b"next\n");
+        let mut reader = std::io::Cursor::new(input);
+        let error = read_line_capped(&mut reader, 16).expect_err("超限行必须报错");
+        assert_eq!(
+            error.kind(),
+            std::io::ErrorKind::InvalidData,
+            "超限必须以 InvalidData 区别于一般读错误：{error}"
+        );
+        assert!(
+            error.to_string().contains("21 字节"),
+            "错误应沿用捕获上限文案口径并给出整行字节数：{error}"
+        );
+        assert_eq!(
+            read_line_capped(&mut reader, 16).unwrap(),
+            b"next\n".to_vec(),
+            "超限后读位置必须停在行边界，剩余输入照常可读"
+        );
+    }
+
+    // 覆盖 T-21（B'-7）：组件解析类错误（未配置/不完整/版本与清单不一致/多版本）
+    // 同属「组件未就绪」，经 convert_media 的包装必须统一携带初始化指引；单文件
+    // 转换本身的失败（格式不支持、解码失败等）产生自转录链路、不经本包装，不得
+    // 被误加指引（透传语义由 media_worker_per_file_failure_keeps_worker_alive
+    // 等用例锁定）。
+    #[test]
+    fn media_component_error_unifies_reinit_guidance() {
+        for resolve_error in [
+            "Xberg 推理组件未配置：媒体转录所需的模型与运行库尚未安装",
+            "推理组件不完整：缺少 models/vad/silero_vad.onnx（组件目录 C:/x）",
+            "推理组件版本与清单不一致（安装 C:/x/v1，清单要求 v2）；请在对应功能页重新初始化以更新组件",
+            "推理组件目录存在多个版本且无清单要求的 v2；请重新初始化以更新组件",
+        ] {
+            let wrapped = media_component_error(resolve_error);
+            let already_guided = resolve_error.contains("重新初始化");
+            assert_eq!(
+                wrapped.starts_with("媒体转录组件未就绪，请重新初始化转 Markdown 功能："),
+                !already_guided,
+                "自带指引的错误不得双重包装，缺指引的必须统一口径：{wrapped}"
+            );
+            assert!(
+                wrapped.contains(resolve_error),
+                "原始错误信息（含安装目录与清单 tag）必须保留：{wrapped}"
+            );
+        }
+    }
+
     // ── F29：平铺占用名查询不随规模线性增长比较次数 ──
 
     // 覆盖 T-11（F29 性能修复，语义不变）：1 千/1 万互异目标的比较次数都近似为零，
@@ -1912,6 +2156,15 @@ mod tests {
             find("XBERG_MAX_CONCURRENT_REQUESTS").as_deref(),
             Some("1"),
             "媒体转录进程必须串行处理请求"
+        );
+        // B'-8：perf 日志目录必须固定指向系统临时目录——组件若编入 perf-tracing
+        // feature 会在当前工作目录创建 logs/perf.log.*（配置发现之外唯一主动向
+        // CWD 写文件的路径），注入该变量封死；未编入时变量被无害忽略。
+        let perf_log_dir =
+            find("XBERG_PERF_LOG_DIR").unwrap_or_else(|| panic!("缺少 XBERG_PERF_LOG_DIR"));
+        assert!(
+            perf_log_dir.contains("JchTools-xberg-perf"),
+            "XBERG_PERF_LOG_DIR 应指向专用临时目录：{perf_log_dir}"
         );
         // 既有组件目录指针保持不变：仍指向组件目录内的模型与运行库。
         for (key, sub) in [
