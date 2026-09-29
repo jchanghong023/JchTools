@@ -4300,6 +4300,27 @@
       "body": "5e0f0e73cb3339b0"
     },
     {
+      "file": "tests/xberg_assets.rs",
+      "name": "scenario_rules_assign_every_fixed_manifest_member",
+      "ignored": false,
+      "cfg": null,
+      "body": "3c894772339086a8"
+    },
+    {
+      "file": "tests/xberg_assets.rs",
+      "name": "startup_config_declares_scenario_models_and_media_availability",
+      "ignored": false,
+      "cfg": null,
+      "body": "d33b3fac8239f968"
+    },
+    {
+      "file": "tests/xberg_assets.rs",
+      "name": "validate_assets_fails_closed_on_missing_size_and_digest",
+      "ignored": false,
+      "cfg": null,
+      "body": "e525ed0830c7a4be"
+    },
+    {
       "file": "tests/xberg_settings.rs",
       "name": "persisted_directory_survives_process_restart",
       "ignored": false,
@@ -4325,7 +4346,7 @@
       "name": "documents_reuse_process_and_snapshot_finishes_during_document",
       "ignored": false,
       "cfg": null,
-      "body": "6dbf6942fbbe29a7"
+      "body": "186473c9d05397b9"
     }
   ]
 }
