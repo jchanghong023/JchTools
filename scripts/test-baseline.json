@@ -395,10 +395,38 @@
     },
     {
       "file": "optional/snap-ocr-worker/src/result_window.rs",
+      "name": "non_shifted_or_letter_keys_pass_through",
+      "ignored": false,
+      "cfg": null,
+      "body": "e7012f6ca4eb6588"
+    },
+    {
+      "file": "optional/snap-ocr-worker/src/result_window.rs",
       "name": "ocr_text_changes_visible_body_pixels",
       "ignored": false,
       "cfg": null,
       "body": "24b808be470e917d"
+    },
+    {
+      "file": "optional/snap-ocr-worker/src/result_window.rs",
+      "name": "settings_window_hotkey_callback_restores_shifted_digit",
+      "ignored": false,
+      "cfg": null,
+      "body": "77b75bdfc5a0544c"
+    },
+    {
+      "file": "optional/snap-ocr-worker/src/result_window.rs",
+      "name": "shift_symbols_map_back_to_base_keys",
+      "ignored": false,
+      "cfg": null,
+      "body": "094856c1ad04338c"
+    },
+    {
+      "file": "optional/snap-ocr-worker/src/service.rs",
+      "name": "cancelled_recognition_triggers_model_reload",
+      "ignored": false,
+      "cfg": "windows",
+      "body": "0ca5ab1d793a8f8e"
     },
     {
       "file": "optional/snap-ocr-worker/src/service.rs",
@@ -422,6 +450,13 @@
       "body": "a1392920a91c40ff"
     },
     {
+      "file": "optional/snap-ocr-worker/src/service.rs",
+      "name": "process_exit_downgrades_ready_model_and_reenables_retry",
+      "ignored": false,
+      "cfg": "windows",
+      "body": "90fd0a5bfef35f75"
+    },
+    {
       "file": "optional/snap-ocr-worker/src/service/protocol.rs",
       "name": "unfinished_client_does_not_block_next_control_request",
       "ignored": false,
@@ -434,6 +469,13 @@
       "ignored": false,
       "cfg": null,
       "body": "59d8917a1ee2df5c"
+    },
+    {
+      "file": "optional/snap-ocr-worker/src/xberg_worker.rs",
+      "name": "inference_environment_carries_offline_switches_and_dylib_path",
+      "ignored": false,
+      "cfg": null,
+      "body": "cbd09971891abf0e"
     },
     {
       "file": "src/archive.rs",
@@ -525,6 +567,20 @@
       "ignored": false,
       "cfg": null,
       "body": "09e559959af1f9e3"
+    },
+    {
+      "file": "src/asset_util.rs",
+      "name": "atomic_replace_dir_cleanup_failure_still_succeeds",
+      "ignored": false,
+      "cfg": "windows",
+      "body": "8e560fb8f18d013a"
+    },
+    {
+      "file": "src/asset_util.rs",
+      "name": "atomic_replace_file_cleanup_failure_still_succeeds",
+      "ignored": false,
+      "cfg": null,
+      "body": "0248a2dcb1df1475"
     },
     {
       "file": "src/dedup_components.rs",
@@ -808,6 +864,20 @@
     },
     {
       "file": "src/gui.rs",
+      "name": "convert_metrics_show_elapsed_while_running_and_total_on_done",
+      "ignored": false,
+      "cfg": null,
+      "body": "947f70270d4f9b6e"
+    },
+    {
+      "file": "src/gui.rs",
+      "name": "convert_start_resets_started_clock",
+      "ignored": false,
+      "cfg": null,
+      "body": "7a1f57f6c2a8a388"
+    },
+    {
+      "file": "src/gui.rs",
       "name": "count_selected_pending_ignores_unselected_and_done",
       "ignored": false,
       "cfg": null,
@@ -889,6 +959,13 @@
       "ignored": false,
       "cfg": null,
       "body": "f1f620196c3a99e5"
+    },
+    {
+      "file": "src/gui.rs",
+      "name": "gui_test_assembly_isolates_real_snap_service",
+      "ignored": false,
+      "cfg": null,
+      "body": "3b180d4d552b4d57"
     },
     {
       "file": "src/gui.rs",
@@ -1067,6 +1144,41 @@
     },
     {
       "file": "src/gui.rs",
+      "name": "snap_asset_root_override_isolates_pipe_name",
+      "ignored": false,
+      "cfg": null,
+      "body": "d3bc1b2b75a21cb6"
+    },
+    {
+      "file": "src/gui.rs",
+      "name": "snap_error_clears_when_polling_reports_recovery",
+      "ignored": false,
+      "cfg": null,
+      "body": "482c611081335d2d"
+    },
+    {
+      "file": "src/gui.rs",
+      "name": "snap_pipe_read_times_out_when_service_hangs",
+      "ignored": false,
+      "cfg": "windows",
+      "body": "32c7880b722379e4"
+    },
+    {
+      "file": "src/gui.rs",
+      "name": "snap_record_key_maps_shift_symbol_to_base_key",
+      "ignored": false,
+      "cfg": null,
+      "body": "edd0b0f3cd0b22f0"
+    },
+    {
+      "file": "src/gui.rs",
+      "name": "snap_shift_symbol_map_covers_every_pair",
+      "ignored": false,
+      "cfg": null,
+      "body": "465b07a5831ae337"
+    },
+    {
+      "file": "src/gui.rs",
       "name": "split_size_accepts_integral_fractions_and_rejects_zero",
       "ignored": false,
       "cfg": null,
@@ -1172,6 +1284,20 @@
     },
     {
       "file": "src/markdown.rs",
+      "name": "hierarchical_duplicate_in_different_directories_both_convert",
+      "ignored": false,
+      "cfg": null,
+      "body": "3435cf547f95424d"
+    },
+    {
+      "file": "src/markdown.rs",
+      "name": "hierarchical_occupancy_key_collides_only_within_same_parent",
+      "ignored": false,
+      "cfg": null,
+      "body": "bfc95b59a4af5056"
+    },
+    {
+      "file": "src/markdown.rs",
       "name": "media_worker_crash_fails_file_and_restarts_for_next",
       "ignored": false,
       "cfg": null,
@@ -1183,6 +1309,13 @@
       "ignored": false,
       "cfg": null,
       "body": "b8906aed4f5d456d"
+    },
+    {
+      "file": "src/markdown.rs",
+      "name": "media_worker_environment_matches_document_offline_policy",
+      "ignored": false,
+      "cfg": null,
+      "body": "52214ed9aee93936"
     },
     {
       "file": "src/markdown.rs",
@@ -1276,6 +1409,48 @@
       "body": "1e29cea702efd43d"
     },
     {
+      "file": "src/markdown.rs",
+      "name": "stderr_tail_caps_at_300_chars_and_drops_partial_word",
+      "ignored": false,
+      "cfg": null,
+      "body": "ec4fb5eea270aea2"
+    },
+    {
+      "file": "src/markdown.rs",
+      "name": "stderr_tail_multibyte_slice_does_not_panic",
+      "ignored": false,
+      "cfg": null,
+      "body": "b94f8b35ac121b29"
+    },
+    {
+      "file": "src/markdown.rs",
+      "name": "stderr_tail_short_ascii_is_kept_whole",
+      "ignored": false,
+      "cfg": null,
+      "body": "5fb00c27c1758b2f"
+    },
+    {
+      "file": "src/markdown.rs",
+      "name": "stderr_tail_truncated_starts_after_first_whitespace",
+      "ignored": false,
+      "cfg": null,
+      "body": "0c09947eb50a65f8"
+    },
+    {
+      "file": "src/markdown_assets.rs",
+      "name": "finalize_staging_cleanup_failure_downgrades_to_warning",
+      "ignored": false,
+      "cfg": null,
+      "body": "b1cbd39774a8fc39"
+    },
+    {
+      "file": "src/markdown_assets.rs",
+      "name": "finalize_staging_keeps_original_error_over_cleanup_failure",
+      "ignored": false,
+      "cfg": null,
+      "body": "f07cb9078c945555"
+    },
+    {
       "file": "src/markdown_assets.rs",
       "name": "inference_pack_bad_archive_keeps_existing_install",
       "ignored": false,
@@ -1302,6 +1477,20 @@
       "ignored": false,
       "cfg": null,
       "body": "a0405b2fbdb849e6"
+    },
+    {
+      "file": "src/markdown_assets.rs",
+      "name": "initialize_cleans_stale_staging_residue_at_entry",
+      "ignored": false,
+      "cfg": null,
+      "body": "c7ad609514a668d7"
+    },
+    {
+      "file": "src/markdown_assets.rs",
+      "name": "initialize_skips_undeletable_stale_staging_and_continues",
+      "ignored": false,
+      "cfg": "windows",
+      "body": "d47729a8d2fcd08b"
     },
     {
       "file": "src/markdown_assets.rs",
@@ -1344,6 +1533,13 @@
       "ignored": false,
       "cfg": null,
       "body": "5491f08bce5d29dc"
+    },
+    {
+      "file": "src/markdown_assets.rs",
+      "name": "readiness_inference_pack_honors_component_dir_override",
+      "ignored": false,
+      "cfg": null,
+      "body": "7e531a0b5dc238f5"
     },
     {
       "file": "src/markdown_assets.rs",
@@ -1407,6 +1603,13 @@
       "ignored": false,
       "cfg": null,
       "body": "70c0f9f00cfef123"
+    },
+    {
+      "file": "src/markdown_document.rs",
+      "name": "fast_config_omits_layout_and_applies_fast_overrides",
+      "ignored": false,
+      "cfg": null,
+      "body": "0c77206f40d525db"
     },
     {
       "file": "src/markdown_document.rs",
@@ -1907,10 +2110,66 @@
     },
     {
       "file": "src/snap_ocr_assets.rs",
+      "name": "download_asset_fails_after_three_interruptions",
+      "ignored": false,
+      "cfg": null,
+      "body": "e622f24f7b748f31"
+    },
+    {
+      "file": "src/snap_ocr_assets.rs",
+      "name": "download_asset_retries_after_stream_interruption",
+      "ignored": false,
+      "cfg": null,
+      "body": "c20eb7bc71d6ed9e"
+    },
+    {
+      "file": "src/snap_ocr_assets.rs",
+      "name": "finalize_staging_cleanup_failure_downgrades_to_warning",
+      "ignored": false,
+      "cfg": null,
+      "body": "b1cbd39774a8fc39"
+    },
+    {
+      "file": "src/snap_ocr_assets.rs",
+      "name": "finalize_staging_keeps_original_error_over_cleanup_failure",
+      "ignored": false,
+      "cfg": null,
+      "body": "f07cb9078c945555"
+    },
+    {
+      "file": "src/snap_ocr_assets.rs",
+      "name": "inference_manifest_from_pack_rejects_member_outside_tag_prefix",
+      "ignored": false,
+      "cfg": null,
+      "body": "d4d0e278141d01a7"
+    },
+    {
+      "file": "src/snap_ocr_assets.rs",
       "name": "inference_manifest_from_pack_strips_tag_prefix",
       "ignored": false,
       "cfg": null,
-      "body": "35dc3619c0c95ae8"
+      "body": "63ad6b367a578826"
+    },
+    {
+      "file": "src/snap_ocr_assets.rs",
+      "name": "initialize_cleans_stale_staging_residue_at_entry",
+      "ignored": false,
+      "cfg": null,
+      "body": "0a8168be8c914e0f"
+    },
+    {
+      "file": "src/snap_ocr_assets.rs",
+      "name": "initialize_skips_undeletable_stale_staging_and_continues",
+      "ignored": false,
+      "cfg": "windows",
+      "body": "d13bcf71f1cfb19f"
+    },
+    {
+      "file": "src/snap_ocr_assets.rs",
+      "name": "readiness_inference_pack_honors_component_dir_override",
+      "ignored": false,
+      "cfg": null,
+      "body": "edfbd3b4b960cf77"
     },
     {
       "file": "src/snap_ocr_assets.rs",
