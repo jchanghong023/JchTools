@@ -19,6 +19,9 @@ name = "mock-xberg-worker"
 path = "src/bin/mock-xberg-worker.rs"
 
 [dependencies]
+directories-next = "2.0"
+rusqlite = { version = "0.32", features = ["bundled"] }
+fs2 = "0.4"
 image = { version = "0.25", default-features = false, features = ["png"] }
 # 结果窗（O-21）：与主程序同版本 Slint；worker 是可选资产，不进主 EXE。
 slint = { version = "=1.17.1", default-features = false, features = ["std", "compat-1-2", "backend-winit", "renderer-femtovg", "renderer-software", "unstable-fontique-010", "raw-window-handle-06"] }
@@ -42,9 +45,9 @@ slint-build = "=1.17.1"
 # O-16/E2'-1）；System_IO 供写入看门狗的 CancelIoEx（请求写阶段超时取消，
 # xberg_worker::WriteWatchdog，XB-08）。
 windows-sys = { version = "0.59", features = [
-    "Win32_Foundation",
+    "Win32_Foundation", "Win32_System_Diagnostics_ToolHelp",
     "Win32_Graphics_Gdi",
-    "Win32_Security",
+    "Win32_Security", "Win32_Security_Authorization",
     "Win32_Storage_FileSystem",
     "Win32_System_Console",
     "Win32_System_IO",

@@ -17,4 +17,9 @@
 pub mod capture_win;
 pub mod result_window;
 pub mod service;
+mod shared_xberg;
+#[path = "../../../src/xberg_runtime.rs"]
+pub mod xberg_runtime;
+#[path = "../../../src/xberg_settings.rs"]
+pub mod xberg_settings;
 pub mod xberg_worker;

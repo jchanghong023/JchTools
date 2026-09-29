@@ -19,10 +19,8 @@ use slint::ComponentHandle;
 
 use crate::capture_win::BgrImage;
 use crate::result_window::{ProgressWindow, ResultWindowHandle, SettingsWindow};
-use crate::xberg_worker::{ClientError, SnapshotState, XbergWorkerClient};
-
-/// 推理子进程优雅关闭的等待上限；超时强杀兜底（O-16 进程级兜底）。
-const XBERG_SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(10);
+use crate::shared_xberg::SharedXbergClient as XbergWorkerClient;
+use crate::xberg_worker::{ClientError, SnapshotState};
 
 /// 单次识别错误（O-30 分类：取消 / 超时 / 推理失败 / 子进程退出；消息不含图像内容）。
 #[derive(Debug, Clone)]
@@ -254,58 +252,8 @@ fn root() -> Result<PathBuf, String> {
 /// 开发期（仅 debug 构建）可用 `JCHTOOLS_XBERG_INFERENCE_DIR` 覆盖到本地组件
 /// 树，与 `root()` 的覆盖同口径。
 fn xberg_component_dir(root: &Path) -> Result<PathBuf, LoadFailure> {
-    const NOT_CONFIGURED: &str = "推理组件未配置：请在主界面初始化截图 OCR，或（开发期）设置 \
-                                  JCHTOOLS_XBERG_INFERENCE_DIR 指向 Xberg 组件目录";
-    if cfg!(debug_assertions) {
-        if let Some(path) = std::env::var_os("JCHTOOLS_XBERG_INFERENCE_DIR")
-            .map(PathBuf::from)
-            .filter(|p| p.is_absolute())
-        {
-            return Ok(path);
-        }
-    }
-    let base = root.join("xberg-inference");
-    let expected_tag = fs::read_to_string(base.join("expected-tag.txt"))
-        .ok()
-        .map(|content| content.trim().to_string())
-        .filter(|tag| !tag.is_empty());
-    let Ok(entries) = fs::read_dir(&base) else {
-        return Err(LoadFailure::NotConfigured(NOT_CONFIGURED.to_owned()));
-    };
-    let mut versions = Vec::new();
-    for entry in entries.flatten() {
-        if entry.path().is_dir() {
-            versions.push(entry.path());
-        }
-    }
-    match (versions.len(), expected_tag.as_deref()) {
-        (0, _) => Err(LoadFailure::NotConfigured(NOT_CONFIGURED.to_owned())),
-        (1, None) => Ok(versions.remove(0)),
-        (1, Some(tag)) => {
-            let component = versions.remove(0);
-            if component.file_name().and_then(|name| name.to_str()) == Some(tag) {
-                Ok(component)
-            } else {
-                Err(LoadFailure::Failed(format!(
-                    "推理组件版本与清单不一致（安装 {}，清单要求 {tag}）；请重新初始化截图 OCR 以更新组件",
-                    component.display()
-                )))
-            }
-        }
-        // 多目录：优先清单 tag 目录（清理失败的旧版本不阻塞使用），否则失败。
-        (_, Some(tag)) => match versions
-            .iter()
-            .position(|path| path.file_name().and_then(|name| name.to_str()) == Some(tag))
-        {
-            Some(index) => Ok(versions.swap_remove(index)),
-            None => Err(LoadFailure::Failed(format!(
-                "推理组件目录存在多个版本且无清单要求的 {tag}；请重新初始化截图 OCR 以更新组件"
-            ))),
-        },
-        (_, None) => Err(LoadFailure::Failed(
-            "推理组件目录存在多个版本，无法确定使用哪一个；请只保留一个版本目录".into(),
-        )),
-    }
+    let _ = root;
+    crate::xberg_settings::required().map_err(LoadFailure::NotConfigured)
 }
 
 /// 组件在位校验（存在性；摘要校验待发布清单接入后补齐，O-09）：
@@ -343,7 +291,9 @@ fn start_inference(root: &Path) -> Result<XbergWorkerClient, LoadFailure> {
     }
     let component_dir = xberg_component_dir(root)?;
     verify_component(&component_dir)?;
-    let mut client = XbergWorkerClient::spawn(&component_dir).map_err(LoadFailure::Failed)?;
+    crate::xberg_runtime::validate_assets(&component_dir, "snapshot")
+        .map_err(LoadFailure::Failed)?;
+    let mut client = XbergWorkerClient::connect(&component_dir);
     warm_up(&mut client)?;
     Ok(client)
 }
@@ -401,7 +351,7 @@ fn ocr_error(error: ClientError) -> OcrError {
     match error {
         ClientError::Cancelled => OcrError::Cancelled,
         ClientError::Timeout => {
-            OcrError::TimedOut("识别超时，已终止挂起的推理进程；可重试加载模型".into())
+            OcrError::TimedOut("当前截图识别超时；共享引擎及其他功能保持运行".into())
         }
         error @ ClientError::ProcessExited(_) => OcrError::ProcessExited(error.to_string()),
         error => OcrError::Backend(error.to_string()),
@@ -432,7 +382,7 @@ fn worker(
     while let Ok(work) = receiver.recv() {
         match work {
             Work::Load => {
-                // 重试入口（O-13）：丢弃旧子进程（Drop 关闭并回收），重新启动。
+                // 重试入口（O-13）：丢弃旧客户端并重新连接共享代理。
                 client.take();
                 let outcome = start_inference(root);
                 let status = outcome.as_ref().map(|_| ()).map_err(Clone::clone);
@@ -446,17 +396,11 @@ fn worker(
                     Err(OcrError::Backend("模型未就绪".into()))
                 };
                 match &outcome {
-                    // 用户取消（XB-08「终止进程」路径）与识别超时（挂起故障）
-                    // 都立即杀死子进程：stdio 单连接无法只取消单个请求，也无法
-                    // 唤醒挂起的进程，被放弃的旧请求随进程死亡，不再阻塞后续
-                    // 任务；服务侧分别触发自动重载（取消）或降级 Error（超时）。
-                    Err(OcrError::Cancelled | OcrError::TimedOut(_)) => {
-                        if let Some(mut model) = client.take() {
-                            model.abort();
-                        }
-                    }
-                    // 子进程已退出：死亡客户端不可复用，回收以匹配服务侧降级。
-                    Err(OcrError::ProcessExited(_)) => {
+                    // XB-17：终态只重置本场景客户端，不结束共享引擎。
+                    // 未确认结束的任务仍由代理占用本场景，防止重复提交。
+                    Err(
+                        OcrError::Cancelled | OcrError::TimedOut(_) | OcrError::ProcessExited(_),
+                    ) => {
                         drop(client.take());
                     }
                     Ok(_) | Err(OcrError::Backend(_)) => {}
@@ -464,10 +408,7 @@ fn worker(
                 let _ = events.send(Command::OcrFinished(outcome, work));
             }
             Work::Stop => {
-                if let Some(model) = client.take() {
-                    // 关闭失败（含强杀失败）只意味着兜底已尽力；服务照常收尾。
-                    let _ = model.shutdown(XBERG_SHUTDOWN_TIMEOUT);
-                }
+                drop(client.take()); // 只断开截图客户端，共享引擎保持存活。
                 let _ = events.send(Command::WorkerStopped);
                 break;
             }
@@ -653,7 +594,7 @@ struct Service {
 }
 impl Service {
     fn status(&self) -> Value {
-        json!({"ok":true,"model":self.model.as_str(),"task":if self.busy {"recognizing"} else {"idle"},
+        json!({"ok":true,"shared_xberg_protocol":2,"model":self.model.as_str(),"task":if self.busy {"recognizing"} else {"idle"},
             "hotkey":self.settings.hotkey,"autostart":autostart_enabled(),"error":self.model_error.as_ref().or(self.settings.warning.as_ref())})
     }
     fn hide_old(&mut self) {
@@ -1625,7 +1566,7 @@ mod tests {
         let (mut service, work_rx) = ready_busy_service(temp.path());
         service.handle(Command::OcrFinished(
             Err(OcrError::TimedOut(
-                "识别超时，已终止挂起的推理进程；可重试加载模型".into(),
+                "当前截图识别超时；共享引擎及其他功能保持运行".into(),
             )),
             (0, 0, 20, 20),
         ));

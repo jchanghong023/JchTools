@@ -1472,13 +1472,11 @@ export component AppWindow inherits Window {
                         }
                     }
                 }
-                // ============ 转 Markdown ============
-                if root.screen == 5: VerticalLayout {
-                    spacing: 8px;
+                if root.screen == 5 || root.screen == 6: VerticalLayout {
                     Surface {
                         VerticalLayout { spacing: 0px;
                             HorizontalLayout { padding-top: 12px; padding-bottom: 12px; padding-left: 16px; padding-right: 16px; spacing: 12px; cross-axis-alignment: center;
-                                Text { width: 96px; text: "Xberg 运行目录"; font-size: 12.5px; color: Design.text-muted; vertical-alignment: center; }
+                                Text { width: 96px; text: "共享 Xberg 目录"; font-size: 12.5px; color: Design.text-muted; vertical-alignment: center; }
                                 Field { text <=> root.convert-runtime-dir; placeholder-text: "选择已安装的 Xberg 运行目录";
                                     edited => { root.convert-runtime-edited(); }
                                     enabled: !root.busy && !root.convert-initializing && !root.convert-runtime-saving && root.confirm-kind == 0;
@@ -1486,18 +1484,22 @@ export component AppWindow inherits Window {
                                 AppButton { text: "选择目录…";
                                     enabled: !root.busy && !root.convert-initializing && !root.convert-runtime-saving && root.confirm-kind == 0;
                                     clicked => { root.convert-choose-runtime(); } }
-                                AppButton { text: root.convert-runtime-saving ? "正在校验…" : "使用此目录"; primary: true;
+                                AppButton { text: root.convert-runtime-saving ? "正在保存…" : "保存目录"; primary: true;
                                     enabled: !root.busy && !root.convert-initializing && !root.convert-runtime-saving && root.convert-runtime-dir != "" && root.confirm-kind == 0;
                                     clicked => { root.convert-use-runtime(); } }
                             }
                             Rectangle {
                                 background: Design.soft;
                                 VerticalLayout { padding-top: 10px; padding-bottom: 10px; padding-left: 16px; padding-right: 16px;
-                                    Text { text: root.convert-runtime-saving ? "正在校验并保存 Xberg 目录，请稍候…" : "必须选择并确认固定版本的 Xberg 运行目录；校验失败会显示原因。"; font-size: 12px; color: Design.text-muted; wrap: word-wrap; }
+                                    Text { text: root.convert-runtime-saving ? "正在保存 Xberg 目录，请稍候…" : root.convert-runtime-confirmed ? "目录已保存，文档转换与截图共用；重启后自动恢复。" : "文档转换与截图共用此目录，保存一次即可；各功能分别检查所需模型。"; font-size: 12px; color: Design.text-muted; wrap: word-wrap; }
                                 }
                             }
                         }
                     }
+                }
+                // ============ 转 Markdown ============
+                if root.screen == 5: VerticalLayout {
+                    spacing: 8px;
                     Surface {
                         VerticalLayout { spacing: 0px;
                             HorizontalLayout { padding-top: 12px; padding-bottom: 12px; padding-left: 16px; padding-right: 16px; spacing: 12px; cross-axis-alignment: center;

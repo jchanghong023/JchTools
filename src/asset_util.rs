@@ -13,7 +13,9 @@ use sha2::{Digest, Sha256};
 use std::collections::HashSet;
 use std::fs::{self, File};
 use std::io::{self, Read};
-use std::path::{Path, PathBuf};
+use std::path::Path;
+#[cfg(test)]
+use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
 use uuid::Uuid;
 use zip::ZipArchive;
@@ -54,6 +56,7 @@ pub(crate) trait AssetDownloader {
 /// - 无 tag（清单未接入）：唯一子目录即组件目录；
 /// - 有 tag：目录名必须与清单一致，不一致明确报错并指引更新；
 /// - 零个或多个候选都视为无法确定，不静默选择。
+#[cfg(test)]
 pub(crate) fn resolve_component_with_tag(
     base: &Path,
     expected_tag: Option<&str>,
@@ -103,6 +106,7 @@ pub(crate) fn resolve_component_with_tag(
 /// 完成并二次校验（归档摘要 + 每成员摘要），全部通过后整目录原子落位到
 /// `xberg-inference/<tag>/`，随后移除其他版本目录（不混用版本）。取消或
 /// 失败不会触碰已验证的安装。
+#[cfg(test)]
 pub(crate) fn install_inference_pack(
     inference: &InferenceManifest,
     staging: &Path,
@@ -172,6 +176,7 @@ pub(crate) fn install_inference_pack(
 }
 
 /// 清单接入后推理组件的成员级摘要校验（XB-09）。
+#[cfg(test)]
 pub(crate) fn inference_ready(inference: &InferenceManifest, root: &Path) -> Result<(), String> {
     let component = root.join("xberg-inference").join(&inference.tag);
     for member in &inference.members {
@@ -188,6 +193,7 @@ pub(crate) fn inference_ready(inference: &InferenceManifest, root: &Path) -> Res
 /// 落位前对 staging 组件树做成员级复核（存在 + 摘要），确保原子替换进来的
 /// 目录就是清单声明的完整安装。就绪检查（C-2）对解析出的组件目录复用
 /// 同一口径。
+#[cfg(test)]
 pub(crate) fn inference_layout_ready(
     component: &Path,
     inference: &InferenceManifest,
@@ -204,6 +210,7 @@ pub(crate) fn inference_layout_ready(
 }
 
 /// 成功安装清单 tag 后移除其他版本目录：同一安装只保留一个版本（XB-09）。
+#[cfg(test)]
 pub(crate) fn prune_old_inference_tags(root: &Path, keep: &str) -> Result<(), String> {
     let base = root.join("xberg-inference");
     let entries = fs::read_dir(&base).map_err(|error| format!("枚举推理组件目录失败：{error}"))?;

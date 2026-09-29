@@ -7,13 +7,11 @@
 use std::collections::HashSet;
 use std::io::{Read, Seek, SeekFrom};
 use std::path::Path;
-use std::process::Command;
 use std::time::{Duration, Instant};
 
 use serde_json::Value;
 
 const MAX_CHILD_DEPTH: usize = 5;
-const DEFAULT_MAX_REQUEST_BODY_BYTES: &str = "104857600";
 /// EOCD 搜索窗口：EOCD 固定 22 字节 + 注释最长 65535 字节（F18）。
 const EOCD_WINDOW_BYTES: u64 = 65_557;
 /// 单条目数据硬上限：docProps/app.xml 是小元数据文件，压缩或解压声明超过该值
@@ -84,47 +82,16 @@ pub fn convert(
         return Err(format!("Xberg 可执行文件不存在：{}", executable.display()));
     }
 
-    let mut command = Command::new(&executable);
-    command
-        .arg("extract")
-        .arg(path)
-        .arg("--format")
-        .arg("json")
-        .arg("--no-config-discovery")
-        .current_dir(runtime_dir);
-    apply_offline_environment(&mut command, runtime_dir);
-    command.arg("--config-json").arg(derived_config_json(fast)?);
-
-    // F21：统一走进程模块的有界运行（8 MiB 捕获上限、kill+wait、限时收尾读线程），
-    // 预检与转换共用同一 deadline，超时先于一切收尾生效。
-    let output =
-        crate::process::run_with_timeout(&mut command, deadline.remaining()).map_err(|error| {
-            if deadline.expired() {
-                format!("Xberg 单文件转换超时（{} 秒）", deadline.total().as_secs())
-            } else {
-                format!("Xberg 运行失败：{error:#}")
-            }
-        })?;
-    if output.stdout_truncated {
-        return Err(format!(
-            "Xberg 输出被截断{}，不能当完整结果解析",
-            output
-                .truncation_note()
-                .map_or_else(String::new, |note| { format!("（{note}）") })
-        ));
-    }
-    if !output.status.success() {
-        return Err(format_process_failure(&output));
-    }
-
-    let value: Value = serde_json::from_slice(&output.stdout).map_err(|error| {
-        format!(
-            "Xberg JSON 输出解析失败：{}；stdout={}；stderr={}",
-            error,
-            truncate_for_error(&output.stdout),
-            truncate_for_error(&output.stderr)
-        )
-    })?;
+    let response = crate::xberg_runtime::request(
+        runtime_dir,
+        serde_json::json!({
+            "command": "extract", "path": path, "mode": if fast { "fast" } else { "normal" }
+        }),
+        deadline.remaining(),
+        &std::sync::atomic::AtomicBool::new(false),
+    )?;
+    let response = crate::xberg_runtime::checked(response)?;
+    let value = serde_json::json!({"result": response["document"]});
     let mut document = build_document_output(&value)?;
     if fast {
         document.markdown = format!(
@@ -382,43 +349,7 @@ fn parse_xml_number(bytes: &[u8], element: &str) -> Option<usize> {
     text[start..end].trim().parse().ok()
 }
 
-pub(crate) fn apply_offline_environment(command: &mut Command, runtime_dir: &Path) {
-    let model_dir = runtime_dir.join("models");
-    let cache_dir = runtime_dir.join("cache");
-    command
-        .env("HF_HOME", runtime_dir)
-        .env("HF_HUB_CACHE", &model_dir)
-        .env("XBERG_CACHE_DIR", &cache_dir)
-        .env("HF_HUB_OFFLINE", "1")
-        .env("HUGGINGFACE_HUB_OFFLINE", "1")
-        .env("TRANSFORMERS_OFFLINE", "1")
-        .env("HF_DATASETS_OFFLINE", "1")
-        .env("XBERG_ORT_EP", "cpu")
-        .env("XBERG_MAX_CONCURRENT_REQUESTS", "1")
-        .env(
-            "XBERG_MAX_REQUEST_BODY_BYTES",
-            DEFAULT_MAX_REQUEST_BODY_BYTES,
-        )
-        .env("XBERG_API_ALLOW_LOCAL_URI_INPUTS", "1")
-        .env("NO_COLOR", "1")
-        // 封死组件 perf-tracing feature 向 CWD 写 logs/perf.log.* 的唯一
-        // 路径（与媒体侧 media_worker_environment 三处统一；未编入 feature
-        // 时被无害忽略）。
-        .env(
-            "XBERG_PERF_LOG_DIR",
-            std::env::temp_dir().join("JchTools-xberg-perf"),
-        );
-
-    let ort = runtime_dir.join(if cfg!(windows) {
-        "onnxruntime.dll"
-    } else {
-        "libonnxruntime.so"
-    });
-    if ort.is_file() {
-        command.env("ORT_DYLIB_PATH", ort);
-    }
-}
-
+#[cfg(test)]
 fn derived_config_json(fast: bool) -> Result<String, String> {
     let mut config: Value = serde_json::from_str(include_str!("../resources/markdown-xberg.json"))
         .map_err(|error| format!("内置 Xberg 配置无效：{error}"))?;
@@ -434,27 +365,6 @@ fn derived_config_json(fast: bool) -> Result<String, String> {
         config["pdf_options"]["ocr_inline_images"] = Value::Bool(false);
     }
     serde_json::to_string(&config).map_err(|error| format!("生成 Xberg 配置失败：{error}"))
-}
-
-fn format_process_failure(output: &crate::process::CapturedOutput) -> String {
-    let code = output
-        .status
-        .code()
-        .map_or_else(|| "被系统终止".to_string(), |code| code.to_string());
-    format!(
-        "Xberg 转换失败（退出码 {}）：{}",
-        code,
-        truncate_for_error(&output.stderr)
-    )
-}
-
-fn truncate_for_error(bytes: &[u8]) -> String {
-    let text = String::from_utf8_lossy(bytes).trim().to_string();
-    const LIMIT: usize = 4096;
-    if text.chars().count() <= LIMIT {
-        return text;
-    }
-    text.chars().take(LIMIT).collect::<String>() + "…"
 }
 
 fn build_document_output(envelope: &Value) -> Result<DocumentOutput, String> {

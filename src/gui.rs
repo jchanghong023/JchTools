@@ -3294,6 +3294,8 @@ impl UiPump {
                             ui.set_convert_runtime_dir(path.into());
                             ui.set_convert_status("正在检查已安装组件…".into());
                             start_markdown_readiness(ui, &self.state, &self.out);
+                            start_snap_readiness(ui, &self.state, &self.out);
+                            ui.set_notice_text("共享 Xberg 目录已保存，重启后自动恢复".into());
                         }
                     } else if text == "CONVERTER_INIT_OK" {
                         let close_after = {
@@ -3350,7 +3352,7 @@ impl UiPump {
                             ui.set_convert_runtime_confirmed(false);
                             ui.set_convert_ready(false);
                             ui.set_convert_status("Xberg 运行目录不可用，请修正后重试".into());
-                            if ui.get_screen() == 5 {
+                            if matches!(ui.get_screen(), 5 | 6) {
                                 let mut s = self.state.borrow_mut();
                                 push_event_log(
                                     &mut s.convert_logs,
@@ -4302,12 +4304,12 @@ fn start_markdown_readiness(ui: &AppWindow, state: &Rc<RefCell<State>>, out: &Ev
     if ui.get_convert_runtime_dir().trim().is_empty() {
         ui.set_convert_runtime_confirmed(false);
         ui.set_convert_ready(false);
-        ui.set_convert_status("请先选择并使用 Xberg 运行目录".into());
+        ui.set_convert_status("请先保存共享 Xberg 运行目录".into());
         return;
     }
     if !ui.get_convert_runtime_confirmed() {
         ui.set_convert_ready(false);
-        ui.set_convert_status("请点击「使用此目录」确认 Xberg 运行目录".into());
+        ui.set_convert_status("请点击「保存目录」保存共享 Xberg 运行目录".into());
         return;
     }
     let generation = {
@@ -4337,11 +4339,11 @@ fn start_markdown_initialize(ui: &AppWindow, state: &Rc<RefCell<State>>, out: &E
     }
     if ui.get_convert_runtime_dir().trim().is_empty() {
         ui.set_convert_runtime_confirmed(false);
-        ui.set_convert_status("请先选择并使用 Xberg 运行目录".into());
+        ui.set_convert_status("请先保存共享 Xberg 运行目录".into());
         return;
     }
     if !ui.get_convert_runtime_confirmed() {
-        ui.set_convert_status("请点击「使用此目录」确认 Xberg 运行目录".into());
+        ui.set_convert_status("请点击「保存目录」保存共享 Xberg 运行目录".into());
         return;
     }
     ui.set_convert_initializing(true);
@@ -4711,6 +4713,11 @@ fn snap_attach_main_exe(ping_response: serde_json::Value) -> Result<serde_json::
             .unwrap_or("截图服务心跳失败")
             .to_owned());
     }
+    if ping_response["shared_xberg_protocol"] != 2 {
+        return Err(
+            "当前截图服务不支持共享 Xberg，请退出旧服务并更新截图组件；未启动第二个引擎".into(),
+        );
+    }
     let path = std::env::current_exe().map_err(|error| format!("无法定位主程序：{error}"))?;
     let response = snap_pipe_request(&serde_json::json!({
         "command": "attach-main-exe",
@@ -4732,6 +4739,20 @@ fn snap_supervisor_ensure() -> Result<serde_json::Value, String> {
     }
     snap_ocr_assets::readiness()?;
     let executable = snap_ocr_assets::worker_install_path()?;
+    let mut probe = std::process::Command::new(&executable);
+    probe.arg("--capabilities");
+    let output = crate::process::run_with_timeout(&mut probe, std::time::Duration::from_secs(10))
+        .map_err(|error| format!("截图工作进程能力检查失败：{error}"))?;
+    let capabilities: serde_json::Value =
+        serde_json::from_slice(&output.stdout).unwrap_or_default();
+    if !output.status.success()
+        || output.stdout_truncated
+        || capabilities["shared_xberg_protocol"] != 2
+    {
+        return Err(
+            "截图工作进程尚未支持共享 Xberg，需更新可选组件发布物；不会启动旧版独占引擎".into(),
+        );
+    }
     let main_exe = std::env::current_exe().map_err(|error| format!("无法定位主程序：{error}"))?;
     let mut child = std::process::Command::new(&executable)
         .arg("--service")
@@ -4965,7 +4986,7 @@ pub fn run_with_engine_overrides(
             );
             ui.set_convert_runtime_confirmed(true);
         }
-        Ok(None) => ui.set_convert_status("请先选择并使用 Xberg 运行目录".into()),
+        Ok(None) => ui.set_convert_status("请先保存共享 Xberg 运行目录".into()),
         Err(error) => ui.set_convert_status(format!("无法读取 Xberg 运行目录：{error}").into()),
     }
     refresh(&ui, &state.borrow());

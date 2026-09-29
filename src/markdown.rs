@@ -5,13 +5,19 @@ use std::{
     collections::BTreeSet,
     ffi::{OsStr, OsString},
     fs::{self, OpenOptions},
-    io::{self, BufRead, BufReader, Write},
+    io::Write,
     path::{Component, Path, PathBuf},
-    process::{Command, Stdio},
     sync::atomic::{AtomicBool, Ordering as AtomicOrdering},
+    time::Duration,
+};
+
+#[cfg(test)]
+use std::{
+    io::{self, BufRead, BufReader},
+    process::{Command, Stdio},
     sync::mpsc::{self, Receiver, RecvTimeoutError},
     thread,
-    time::{Duration, Instant},
+    time::Instant,
 };
 
 use crate::{fsutil, markdown_assets, markdown_document};
@@ -131,9 +137,7 @@ pub fn run(
     events(Event::Started { total });
     let mut summary = plan.summary;
     let output_root = plan.output_root;
-    // 批内常驻转录进程（T-19/T-22）：首个媒体文件时启动；超时（T-29）或崩溃后
-    // 在下一媒体文件自动重启（T-24）；批结束（含用户停止，T-23）经 Drop 优雅关闭。
-    let mut media_worker: Option<MediaWorker> = None;
+    // 文档和媒体逐文件提交到会话共享引擎；批次不拥有引擎生命周期。
     for (index, item) in plan.items.iter().enumerate() {
         if cancel.load(AtomicOrdering::Relaxed) {
             events(Event::Log("已停止：当前文件之外不再开始转换".to_string()));
@@ -147,7 +151,7 @@ pub fn run(
         // F21/T-29：单文件预算从进入该文件起算，页数预检与转换共用同一 deadline。
         let deadline = markdown_document::Deadline::new(Duration::from_secs(options.timeout_secs));
         let outcome = if item.is_media {
-            convert_media(&mut media_worker, &item.source, &deadline).map(|markdown| {
+            convert_media(&item.source, &deadline).map(|markdown| {
                 markdown_document::DocumentOutput {
                     markdown,
                     warnings: Vec::new(),
@@ -199,8 +203,7 @@ pub fn run(
             }
         }
     }
-    // T-22/T-23：批结束或用户停止后不再发送请求，常驻转录进程有界优雅关闭。
-    drop(media_worker);
+    // T-22/T-23：批结束或用户停止后不再发送请求，保留共享引擎及已加载模型。
     summary.stopped = cancel.load(AtomicOrdering::Relaxed);
     Ok(summary)
 }
@@ -428,13 +431,19 @@ fn supported_formats(
     groups: &[FormatGroup],
     cancel: &AtomicBool,
 ) -> Result<BTreeSet<String>, String> {
-    let mut command = Command::new(runtime_dir.join("xberg.exe"));
-    command
-        .args(["formats", "--format", "json"])
-        .current_dir(runtime_dir);
-    crate::markdown_document::apply_offline_environment(&mut command, runtime_dir);
-    let output = run_formats_probe(&mut command, FORMATS_PROBE_TIMEOUT, cancel)?;
-    let mut selected = parse_formats(&output.stdout, groups)?;
+    let response = crate::xberg_runtime::request(
+        runtime_dir,
+        serde_json::json!({"command":"formats"}),
+        FORMATS_PROBE_TIMEOUT,
+        cancel,
+    )?;
+    let response = crate::xberg_runtime::checked(response)
+        .map_err(|e| format!("共享 Xberg 缺少可用的格式查询接口：{e}"))?;
+    let rows = response
+        .get("formats")
+        .ok_or("共享 Xberg 格式响应缺少 formats 字段")?;
+    let bytes = serde_json::to_vec(rows).map_err(|e| e.to_string())?;
+    let mut selected = parse_formats(&bytes, groups)?;
     if groups.contains(&FormatGroup::Media) {
         selected.extend(MEDIA.iter().map(|extension| (*extension).to_string()));
     }
@@ -443,6 +452,7 @@ fn supported_formats(
 
 /// 有界且可取消地运行格式清单探测（F21）：超时或取消后 kill + 限时收尾，
 /// 输出被截断时如实报错，不得把半截清单当完整结果。
+#[cfg(test)]
 fn run_formats_probe(
     command: &mut Command,
     timeout: Duration,
@@ -721,6 +731,7 @@ fn write_new_markdown(output_root: &Path, target: &Path, content: &str) -> Resul
 
 /// 批内常驻 Xberg 转录工作进程的一次请求失败分类（T-24 要求可区分）。
 #[derive(Debug)]
+#[cfg(test)]
 enum TranscribeFailure {
     /// 单文件失败（如解码失败、无响应载荷）：进程存活，批次继续复用同一进程。
     PerFile(String),
@@ -731,6 +742,7 @@ enum TranscribeFailure {
 }
 
 /// 优雅关闭的有界等待：worker 收到 EOF 后应自行退出；超限按挂死终结。
+#[cfg(test)]
 const WORKER_EXIT_GRACE: Duration = Duration::from_secs(10);
 
 /// 增量有界行读取（B'-6/A'-1 加固，读线程不再裸用 `read_line`）：逐块读直到
@@ -743,6 +755,7 @@ const WORKER_EXIT_GRACE: Duration = Duration::from_secs(10);
 /// 整行实际字节数；报错前把该行剩余字节排空到 `\n`/EOF（只计数丢弃、不再
 /// 分配），保证返回后读位置仍停在行边界、后续行照常解析（协议行边界对齐，
 /// 进程与批次继续，语义与旧实现一致）。
+#[cfg(test)]
 fn read_line_capped(reader: &mut impl BufRead, cap: usize) -> io::Result<Vec<u8>> {
     let mut total = 0usize; // 已观测行字节数（含结尾 \n 口径）
     let mut line: Vec<u8> = Vec::new(); // 只在未超限前累积，内存上界即 cap
@@ -785,6 +798,7 @@ fn read_line_capped(reader: &mut impl BufRead, cap: usize) -> io::Result<Vec<u8>
 }
 
 /// 超限错误（B'-6）：`InvalidData` 便于读线程与一般读错误区分；文案沿用旧口径。
+#[cfg(test)]
 fn oversize_line_error(total: usize) -> io::Error {
     io::Error::new(
         io::ErrorKind::InvalidData,
@@ -798,6 +812,7 @@ fn oversize_line_error(total: usize) -> io::Error {
 /// 严格串行地发送 `transcribe` 请求并逐请求等待恰好一行响应。进程组（含 FFmpeg
 /// 等子进程）由 [`MediaProcessJob`] 兜底：超时（T-29）或意外退出后终结整组，
 /// 批结束（含用户停止，T-23）时关 stdin 优雅关闭。
+#[cfg(test)]
 struct MediaWorker {
     child: std::process::Child,
     stdin: Option<std::process::ChildStdin>,
@@ -811,22 +826,9 @@ struct MediaWorker {
     next_id: u64,
 }
 
+#[cfg(test)]
 impl MediaWorker {
-    /// 以 Xberg 推理组件目录中的 xberg.exe 启动批内常驻转录进程（XB-05/XB-06）。
-    fn spawn_for_root(root: &Path) -> Result<MediaWorker, String> {
-        let mut command = Command::new(root.join("xberg.exe"));
-        command
-            .arg("worker")
-            .arg("--no-config-discovery")
-            .arg("--config-json")
-            .arg(r#"{"transcription":{"enabled":true}}"#);
-        // T-21：全部调用只经本地 stdio；环境变量只指向组件目录内的模型与运行库，
-        // 离线开关与文档转换路径同口径（XB-04，见 media_worker_environment）。
-        command.envs(media_worker_environment(root));
-        Self::spawn(&mut command)
-    }
-
-    /// 进程接缝（单测注入 mock 子进程；生产传 spawn_for_root 组装的命令）。
+    /// 旧协议回归夹具的进程接缝，仅编译进测试，不用于产品路径。
     fn spawn(command: &mut Command) -> Result<MediaWorker, String> {
         command
             .stdin(Stdio::piped())
@@ -1064,6 +1066,7 @@ impl MediaWorker {
 /// 最多 300 个**字符**（多字节 UTF-8 不得按字节切片，否则起点落在字符内部时
 /// panic 杀死转换线程，A2），发生截断时以「：…」衔接并从尾部首个空白之后
 /// 取起，未截断时仅以「：」衔接。
+#[cfg(test)]
 fn stderr_tail_for_message(stderr_text: &str) -> Option<String> {
     let tail = stderr_text.trim();
     if tail.is_empty() {
@@ -1091,6 +1094,7 @@ fn stderr_tail_for_message(stderr_text: &str) -> Option<String> {
 /// 系统临时目录（与媒体转录临时文件同口径），封死其向当前工作目录创建
 /// `logs/perf.log.*` 的唯一主动写文件路径；该变量不是离线开关、不影响 XB-04
 /// 口径，且仅当组件编入 perf feature 才生效，未编入时被无害忽略。
+#[cfg(test)]
 fn media_worker_environment(root: &Path) -> Vec<(String, String)> {
     let path_value = |sub: &str| root.join(sub).to_string_lossy().into_owned();
     [
@@ -1117,6 +1121,7 @@ fn media_worker_environment(root: &Path) -> Vec<(String, String)> {
     .collect()
 }
 
+#[cfg(test)]
 impl Drop for MediaWorker {
     fn drop(&mut self) {
         // 批结束（含用户停止，T-23）的有界优雅关闭：关 stdin 触发 worker 在
@@ -1144,6 +1149,7 @@ impl Drop for MediaWorker {
 /// 不完整、版本与清单不一致、多版本无法确定——均产生自组件目录解析与在位校验）
 /// 一律补「重新初始化」指引，口径一致；单文件转换本身的失败（格式不支持、解码
 /// 失败等）产生自转录链路、不经本包装，不会被误加指引。
+#[cfg(test)]
 fn media_component_error(error: &str) -> String {
     // 部分解析错误（版本不一致等）自带重新初始化指引，避免双重指引。
     if error.contains("重新初始化") {
@@ -1152,22 +1158,28 @@ fn media_component_error(error: &str) -> String {
     format!("媒体转录组件未就绪，请重新初始化转 Markdown 功能：{error}")
 }
 
-/// 转换一个媒体文件：确保批内常驻进程在位（首个媒体文件或上一轮超时/崩溃之后
-/// 重启），串行发送 transcribe 并取回 markdown。
-fn convert_media(
-    worker_slot: &mut Option<MediaWorker>,
-    path: &Path,
-    deadline: &markdown_document::Deadline,
-) -> Result<String, String> {
-    let component =
-        markdown_assets::media_component_dir().map_err(|error| media_component_error(&error))?;
-    transcribe_with_slot(worker_slot, path, deadline, || {
-        MediaWorker::spawn_for_root(&component)
-    })
+/// 转换一个媒体文件：验证媒体资产后，经会话共享进程请求 transcribe。
+fn convert_media(path: &Path, deadline: &markdown_document::Deadline) -> Result<String, String> {
+    let component = markdown_assets::media_component_dir().map_err(|error| {
+        format!("共享 Xberg 的媒体组件未就绪，请检查已保存目录的模型和运行库：{error}")
+    })?;
+    markdown_assets::validate_media()?;
+    let response = crate::xberg_runtime::request(
+        &component,
+        serde_json::json!({"command":"transcribe","path":path}),
+        deadline.remaining(),
+        &AtomicBool::new(false),
+    )?;
+    let response = crate::xberg_runtime::checked(response)?;
+    response["markdown"]
+        .as_str()
+        .map(str::to_owned)
+        .ok_or_else(|| "Xberg 转录响应缺少 markdown".into())
 }
 
 /// 转录一步（进程启动接缝可注入）；worker 缺失时即时启动。单测经此注入 mock
 /// 进程覆盖协议与生命周期语义（成功透传/崩溃重启/超时/优雅关闭）。
+#[cfg(test)]
 fn transcribe_with_slot(
     worker_slot: &mut Option<MediaWorker>,
     path: &Path,
@@ -1208,16 +1220,15 @@ pub fn e2e_convert_media(path: &Path, timeout_secs: u64) -> Result<String, Strin
         return Err("单文件超时必须为正整秒".to_string());
     }
     let deadline = markdown_document::Deadline::new(Duration::from_secs(timeout_secs));
-    let mut worker_slot = None;
-    convert_media(&mut worker_slot, path, &deadline)
+    convert_media(path, &deadline)
 }
 
-#[cfg(windows)]
+#[cfg(all(test, windows))]
 struct MediaProcessJob {
     handle: windows_sys::Win32::Foundation::HANDLE,
 }
 
-#[cfg(windows)]
+#[cfg(all(test, windows))]
 impl MediaProcessJob {
     fn attach(child: &std::process::Child) -> Result<Self, String> {
         use std::os::windows::io::AsRawHandle;
@@ -1273,7 +1284,7 @@ impl MediaProcessJob {
     }
 }
 
-#[cfg(windows)]
+#[cfg(all(test, windows))]
 impl Drop for MediaProcessJob {
     fn drop(&mut self) {
         use windows_sys::Win32::Foundation::CloseHandle;
@@ -1291,6 +1302,8 @@ mod tests {
         transcribe_with_slot, write_new_markdown, FormatGroup, MediaWorker, OccupiedIndex, Options,
     };
     use crate::markdown_document::Deadline;
+    use std::thread;
+    use std::time::Instant;
     use std::{
         cmp::Ordering,
         collections::BTreeSet,
@@ -1299,8 +1312,7 @@ mod tests {
         path::{Path, PathBuf},
         process::Command,
         sync::atomic::{AtomicBool, Ordering as AtomicOrdering},
-        thread,
-        time::{Duration, Instant},
+        time::Duration,
     };
 
     fn supported() -> BTreeSet<String> {

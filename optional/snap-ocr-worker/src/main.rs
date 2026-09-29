@@ -3,6 +3,16 @@
 //! 截图 OCR 独立后台进程；主界面通过本地管道连接，不提供用户命令行入口。
 
 fn main() {
+    if std::env::args().nth(1).as_deref() == Some("--capabilities") {
+        println!("{{\"shared_xberg_protocol\":2}}");
+        return;
+    }
+    if std::env::args().nth(1).as_deref() == Some("--xberg-broker") {
+        if snap_ocr_worker::xberg_runtime::serve().is_err() {
+            std::process::exit(1);
+        }
+        return;
+    }
     let autostart = match std::env::args().nth(1).as_deref() {
         Some("--service") => false,
         Some("--service--autostart") => true,

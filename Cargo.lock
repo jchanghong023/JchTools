@@ -5373,9 +5373,12 @@ name = "snap-ocr-worker"
 version = "0.1.0"
 dependencies = [
  "base64",
+ "directories-next",
+ "fs2",
  "i-slint-backend-testing",
  "image",
  "raw-window-handle",
+ "rusqlite",
  "serde_json",
  "sha2 0.10.9",
  "slint",

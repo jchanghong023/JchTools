@@ -1,21 +1,14 @@
-//! 转 Markdown 的本地资产状态与校验。
-//!
-//! 文档转换继续校验用户选择的 Xberg 运行目录（固定版本清单编译进主程序）。
-//! 媒体转录（T-19）的模型与推理由 Xberg 推理组件提供：清单接入 `xberg_inference`
-//! 条目后由初始化流程下载、按归档与成员 SHA-256 校验并安装到
-//! `xberg-inference/<tag>/`（XB-09/XB-10）；条目未接入时缺失组件如实报告未配置。
-//! 二进制和模型始终不进主程序包。staging/校验/下载/原子落位与推理组件包安装
-//! 核心与截图 OCR 共用 [`crate::asset_util`]，两侧行为同源。
+//! 转 Markdown 的本地资产校验。Xberg 目录由应用级 SQLite 统一提供。
+//! 文档与媒体分别校验自己的模型和运行库；初始化只写许可证 notice，
+//! 不再下载独立的 Xberg 引擎。旧安装工具仅保留为既有协议/资产回归夹具。
 
 use crate::asset_util::{
-    atomic_replace_dir, atomic_replace_file, ensure_not_cancelled, install_inference_pack,
-    resolve_component_with_tag, validate_relative_path, verify_file, AssetDownloader,
+    atomic_replace_dir, ensure_not_cancelled, validate_relative_path, verify_file, AssetDownloader,
     InferenceManifest,
 };
 use serde::Deserialize;
 use std::fmt::Write as FmtWrite;
 use std::fs;
-use std::io;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::AtomicBool;
 use uuid::Uuid;
@@ -59,20 +52,9 @@ struct LicenseEntry {
     source: String,
 }
 
-/// 读取本功能独立保存的 Xberg 运行目录。
+/// 读取应用级 SQLite 保存的共享 Xberg 运行目录。
 pub fn load_saved_runtime_dir() -> Result<Option<PathBuf>, String> {
-    let selection = asset_root().join(RUNTIME_SELECTION_FILE);
-    match fs::read_to_string(&selection) {
-        Ok(value) => {
-            let value = value.trim();
-            if value.is_empty() {
-                return Err(format!("Xberg 运行目录状态为空：{}", selection.display()));
-            }
-            Ok(Some(PathBuf::from(value)))
-        }
-        Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(None),
-        Err(error) => Err(format!("读取 Xberg 运行目录状态失败：{error}")),
-    }
+    crate::xberg_settings::load()
 }
 
 /// 校验用户选择的 Xberg 运行目录及其固定版本全部成员。
@@ -98,6 +80,9 @@ pub fn validate_runtime_dir(path: &Path) -> Result<(), String> {
                 .filter(|member| member.path != "xberg.exe"),
         )
     {
+        if !crate::xberg_runtime::asset_for_scenario(&member.path, "document") {
+            continue;
+        }
         if let Err(error) = verify_file(&path.join(&member.path), member.size_bytes, &member.sha256)
         {
             failures.push(format!("{}：{error}", member.path));
@@ -114,23 +99,9 @@ pub fn validate_runtime_dir(path: &Path) -> Result<(), String> {
     }
 }
 
-/// 完整校验后保存用户选择的 Xberg 运行目录。
+/// 保存共享目录到 SQLite；各功能启动前分别校验其模型和运行库。
 pub fn save_runtime_dir(path: &Path) -> Result<(), String> {
-    validate_runtime_dir(path)?;
-    let canonical =
-        fs::canonicalize(path).map_err(|error| format!("解析 Xberg 运行目录失败：{error}"))?;
-    let root = asset_root();
-    fs::create_dir_all(&root).map_err(|error| format!("创建资产状态目录失败：{error}"))?;
-    let selection = root.join(RUNTIME_SELECTION_FILE);
-    let temporary = root.join(format!(
-        ".{RUNTIME_SELECTION_FILE}.{}",
-        Uuid::new_v4().simple()
-    ));
-    fs::write(&temporary, format!("{}\n", canonical.display()))
-        .map_err(|error| format!("保存 Xberg 运行目录失败：{error}"))?;
-    atomic_replace_file(&temporary, &selection)
-        .map_err(|error| format!("原子保存 Xberg 运行目录失败：{error}"))?;
-    Ok(())
+    crate::xberg_settings::save(path)
 }
 
 /// 返回已保存的 Xberg 运行目录；未选择时返回明确错误。
@@ -159,30 +130,8 @@ fn resolve_xberg_component(root: &Path) -> Result<PathBuf, String> {
             return Ok(path);
         }
     }
-    let expected_tag = load_manifest()
-        .ok()
-        .and_then(|manifest| manifest.xberg_inference.map(|inference| inference.tag));
-    resolve_component_with_tag(
-        &root.join("xberg-inference"),
-        expected_tag.as_deref(),
-        &xberg_media_not_configured(),
-    )
-}
-
-fn xberg_media_not_configured() -> String {
-    match load_manifest()
-        .ok()
-        .and_then(|manifest| manifest.xberg_inference)
-    {
-        Some(_) => "Xberg 推理组件未配置：媒体转录所需的 xberg.exe、SenseVoice/VAD 模型与 \
-     FFmpeg/sherpa-onnx 运行库尚未安装；请在转 Markdown 页重新初始化以下载推理组件包；\
-     开发期可设置 JCHTOOLS_XBERG_INFERENCE_DIR 指向本地组件目录"
-            .into(),
-        None => "Xberg 推理组件未配置：媒体转录所需的 xberg.exe、SenseVoice/VAD 模型与 \
-     FFmpeg/sherpa-onnx 运行库尚未安装；其下载清单条目待 Xberg 发布 tag 落定后接入，\
-     开发期可设置 JCHTOOLS_XBERG_INFERENCE_DIR 指向本地组件目录"
-            .into(),
-    }
+    let _ = root;
+    crate::xberg_settings::required()
 }
 
 /// 媒体转录组件的在位校验（存在性；摘要级清单待 Xberg 发布 tag 落定后接入，
@@ -227,7 +176,12 @@ pub fn media_component_dir() -> Result<PathBuf, String> {
     Ok(component)
 }
 
-/// 只读检查所有已安装资产。该函数不会联网、创建目录或修改文件。
+/// 使用媒体能力前校验它独有的固定资产；文档初始化不要求媒体模型。
+pub fn validate_media() -> Result<(), String> {
+    readiness_inference_pack(&load_manifest()?, &asset_root())
+}
+
+/// 检查文档场景及许可证；读取应用配置时可首次迁移旧文本，不联网。
 pub fn readiness() -> Result<(), String> {
     // 先校验内置清单本身：失效清单不得被当作可运行环境。
     let manifest = load_manifest()?;
@@ -237,8 +191,7 @@ pub fn readiness() -> Result<(), String> {
     if !notice.is_file() {
         return Err(format!("许可证 notice 不存在：{}", notice.display()));
     }
-    media_component_dir()?;
-    readiness_inference_pack(&manifest, &asset_root())?;
+    let _ = manifest;
     Ok(())
 }
 
@@ -255,14 +208,23 @@ pub fn readiness() -> Result<(), String> {
 fn readiness_inference_pack(manifest: &AssetManifest, root: &Path) -> Result<(), String> {
     if let Some(inference) = &manifest.xberg_inference {
         let component = resolve_xberg_component(root)?;
-        crate::asset_util::inference_layout_ready(&component, inference)?;
+        for member in &inference.members {
+            if crate::xberg_runtime::asset_for_scenario(&member.install_path, "media") {
+                verify_file(
+                    &component.join(&member.install_path),
+                    member.size_bytes,
+                    &member.sha256,
+                )
+                .map_err(|e| format!("推理组件成员 {} 校验失败：{e}", member.install_path))?;
+            }
+        }
     }
     Ok(())
 }
 
-/// 校验运行目录、写入许可证 notice，并按清单下载安装推理组件包（XB-10）。
+/// 校验用户运行目录并写入许可证 notice；不下载 Xberg（XB-10）。
 ///
-/// 清单未接入推理组件包时不下载任何资产，组件缺失时返回明确错误并指引
+/// 组件缺失时返回明确错误并指引
 /// （不冒称就绪）。取消会删除本轮 staging 目录。
 pub fn initialize(cancel: &AtomicBool, mut progress: impl FnMut(String)) -> Result<(), String> {
     let root = asset_root();
@@ -360,12 +322,7 @@ fn initialize_staged(
     fs::create_dir_all(&notice_stage).map_err(|error| format!("创建许可证目录失败：{error}"))?;
     write_notice(&notice_stage.join("THIRD_PARTY_NOTICES.md"), manifest)?;
     atomic_replace_dir(&notice_stage, &root.join("licenses"))?;
-    // 推理组件包（XB-10）：清单接入时下载并按归档/成员 SHA-256 校验后安装；
-    // 未接入时保持只做在位校验（缺失即失败，不冒称就绪）。
-    if let Some(inference) = &manifest.xberg_inference {
-        install_inference_pack(inference, staging, root, cancel, downloader, progress)?;
-    }
-    media_component_dir()?;
+    let _ = downloader; // XB-10：用户提供 Xberg，不再下载另一份引擎。
     progress("转 Markdown 组件初始化完成".to_string());
     Ok(())
 }
@@ -555,6 +512,11 @@ mod tests {
             fs::create_dir_all(target.parent().expect("组件路径有父目录")).expect("创建组件目录");
             fs::write(&target, b"x").expect("预置组件文件");
         }
+        fs::write(
+            base.join("xberg-runtime-path.txt"),
+            component.to_str().expect("测试路径有效"),
+        )
+        .expect("模拟升级前的目录选择");
         component
     }
 
@@ -579,8 +541,8 @@ mod tests {
         let error = media_component_dir().expect_err("缺失组件必须报未配置");
         assert!(error.contains("未配置"), "错误应说明组件未配置：{error}");
         assert!(
-            error.contains("JCHTOOLS_XBERG_INFERENCE_DIR"),
-            "错误应指引环境变量：{error}"
+            error.contains("转 Markdown 或截图 OCR"),
+            "错误应指引共享配置入口：{error}"
         );
     }
 

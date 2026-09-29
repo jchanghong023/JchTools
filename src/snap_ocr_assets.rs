@@ -2,8 +2,7 @@
 //!
 //! 资产清单（resources/snap-ocr-assets.json）编译进主程序：结果窗专用字体为
 //! 固定版本、固定来源、固定 SHA-256（O-05/O-09）；识别用的模型、推理运行库与
-//! `xberg.exe` 由固定版本 Xberg 推理组件承接，安装在状态目录的
-//! `snap-ocr/xberg-inference/<tag>/` 子树（摘要级清单条目待发布 tag 落定后接入）。
+//! `xberg.exe` 从应用级 SQLite 保存的共享目录读取，按截图场景固定清单校验。
 //! 只在用户于图形界面主动初始化时联网下载（O-06/O-10），主程序包不携带这些重资产。
 //! 初始化遵循 staging → 校验 → 原子落位：取消或失败删除本轮 staging，不覆盖
 //! 已经校验通过的完整资产；重试时已验证资产直接复用，不重复下载。
@@ -12,8 +11,7 @@
 
 use crate::asset_util::{
     atomic_replace_dir, atomic_replace_file, ensure_not_cancelled, extract_zip_safely,
-    install_inference_pack, validate_relative_path, verify_file, AssetDownloader,
-    InferenceManifest,
+    validate_relative_path, verify_file, AssetDownloader, InferenceManifest,
 };
 use serde::Deserialize;
 use sha2::{Digest, Sha256};
@@ -248,7 +246,16 @@ fn readiness_inference_pack(manifest: &SnapAssetManifest, root: &Path) -> Result
     // 清单接入推理组件包后做成员级摘要校验（XB-09；未接入时在位校验已覆盖）。
     if let Some(pack) = &manifest.xberg_inference {
         let inference = inference_manifest_from_pack(pack)?;
-        crate::asset_util::inference_layout_ready(&component, &inference)?;
+        for member in &inference.members {
+            if crate::xberg_runtime::asset_for_scenario(&member.install_path, "snapshot") {
+                verify_file(
+                    &component.join(&member.install_path),
+                    member.size_bytes,
+                    &member.sha256,
+                )
+                .map_err(|e| format!("推理组件成员 {} 校验失败：{e}", member.install_path))?;
+            }
+        }
     }
     Ok(())
 }
@@ -271,32 +278,8 @@ fn resolve_xberg_component(root: &Path) -> Result<PathBuf, String> {
             return Ok(path);
         }
     }
-    let expected_tag = manifest_inference_tag();
-    crate::asset_util::resolve_component_with_tag(
-        &root.join("xberg-inference"),
-        expected_tag.as_deref(),
-        &xberg_not_configured(),
-    )
-}
-
-/// 清单接入推理组件包时返回其 tag（读取失败按未接入处理）。
-fn manifest_inference_tag() -> Option<String> {
-    load_manifest()
-        .ok()
-        .and_then(|manifest| manifest.xberg_inference.map(|pack| pack.tag))
-}
-
-fn xberg_not_configured() -> String {
-    if manifest_inference_tag().is_some() {
-        "推理组件未配置：Xberg 推理组件（xberg.exe、截图模型与 onnxruntime）尚未安装；\
-     请在截图 OCR 功能页重新初始化以下载推理组件包"
-            .into()
-    } else {
-        "推理组件未配置：Xberg 推理组件（xberg.exe、截图模型与 onnxruntime）尚未安装；\
-     其下载清单条目待发布版本落定后接入，开发期可设置 JCHTOOLS_XBERG_INFERENCE_DIR \
-     指向本地组件目录"
-            .into()
-    }
+    let _ = root;
+    crate::xberg_settings::required()
 }
 
 /// Xberg 推理组件的在位校验（存在性；摘要校验待清单接入后补齐，O-09 的
@@ -460,24 +443,8 @@ fn initialize_staged(
         progress(format!("下载资产 {}/{}：{}", index + 1, total, asset.id));
         install_asset(asset, staging, root, cancel, downloader, progress)?;
     }
-    // 推理组件包（XB-10）：复用共享的整目录原子安装路径（staging 组装 +
-    // 成员级复核 + 目录级原子落位 + 旧版本清理），失败不留部分安装。
-    if let Some(pack) = &manifest.xberg_inference {
-        ensure_not_cancelled(cancel)?;
-        let inference = inference_manifest_from_pack(pack)?;
-        if crate::asset_util::inference_ready(&inference, root).is_err() {
-            progress(format!(
-                "下载资产 {}/{}：{}",
-                total + 1,
-                total + 1,
-                pack.asset.id
-            ));
-        }
-        install_inference_pack(&inference, staging, root, cancel, downloader, progress)?;
-        // XB-09：写入清单 tag 标记；截图服务进程（无法读主程序清单）按同口径
-        // 校验组件目录版本。
-        write_expected_tag(root, &pack.tag)?;
-    }
+    // XB-10：只校验共享目录，不下载、复制或改写用户的 Xberg。
+    readiness_inference_pack(manifest, root)?;
     let worker = manifest
         .workers
         .first()
@@ -621,16 +588,6 @@ fn inference_manifest_from_pack(pack: &SnapInferencePack) -> Result<InferenceMan
 
 /// 写入推理组件的清单 tag 标记（`xberg-inference/expected-tag.txt`），供截图
 /// 服务进程做与主程序同口径的版本校验（XB-09）。
-fn write_expected_tag(root: &Path, tag: &str) -> Result<(), String> {
-    let base = root.join("xberg-inference");
-    fs::create_dir_all(&base).map_err(|error| format!("创建推理组件根目录失败：{error}"))?;
-    let marker = base.join("expected-tag.txt");
-    let temporary = base.join(format!(".expected-tag-{}", Uuid::new_v4().simple()));
-    fs::write(&temporary, format!("{tag}\n"))
-        .map_err(|error| format!("写入组件版本标记失败：{error}"))?;
-    atomic_replace_file(&temporary, &marker)
-}
-
 fn load_manifest() -> Result<SnapAssetManifest, String> {
     let manifest: SnapAssetManifest = serde_json::from_str(MANIFEST)
         .map_err(|error| format!("截图 OCR 资产清单无效：{error}"))?;
