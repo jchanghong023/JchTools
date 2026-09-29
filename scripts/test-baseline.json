@@ -395,6 +395,20 @@
     },
     {
       "file": "optional/snap-ocr-worker/src/result_window.rs",
+      "name": "failed_font_registration_is_not_cached",
+      "ignored": false,
+      "cfg": null,
+      "body": "a2e9deb0adbcabf9"
+    },
+    {
+      "file": "optional/snap-ocr-worker/src/result_window.rs",
+      "name": "font_registration_reads_file_once_across_reloads",
+      "ignored": false,
+      "cfg": null,
+      "body": "c864cd2f5db6e5cc"
+    },
+    {
+      "file": "optional/snap-ocr-worker/src/result_window.rs",
       "name": "non_shifted_or_letter_keys_pass_through",
       "ignored": false,
       "cfg": null,
@@ -457,6 +471,20 @@
       "body": "90fd0a5bfef35f75"
     },
     {
+      "file": "optional/snap-ocr-worker/src/service.rs",
+      "name": "recognition_timeout_downgrades_model_and_reenables_retry",
+      "ignored": false,
+      "cfg": "windows",
+      "body": "4155e9cd993cf6de"
+    },
+    {
+      "file": "optional/snap-ocr-worker/src/service.rs",
+      "name": "warm_up_failure_classifies_by_error_kind",
+      "ignored": false,
+      "cfg": "windows",
+      "body": "b734a3ec72d42934"
+    },
+    {
       "file": "optional/snap-ocr-worker/src/service/protocol.rs",
       "name": "unfinished_client_does_not_block_next_control_request",
       "ignored": false,
@@ -475,7 +503,7 @@
       "name": "inference_environment_carries_offline_switches_and_dylib_path",
       "ignored": false,
       "cfg": null,
-      "body": "cbd09971891abf0e"
+      "body": "4b794e83be2ead56"
     },
     {
       "file": "src/archive.rs",
@@ -864,6 +892,20 @@
     },
     {
       "file": "src/gui.rs",
+      "name": "convert_fail_clears_running_metrics_text",
+      "ignored": false,
+      "cfg": null,
+      "body": "d172528b29c33c9d"
+    },
+    {
+      "file": "src/gui.rs",
+      "name": "convert_file_started_progress_ratio_survives_large_totals",
+      "ignored": false,
+      "cfg": null,
+      "body": "17dcda930a8c44b4"
+    },
+    {
+      "file": "src/gui.rs",
       "name": "convert_metrics_show_elapsed_while_running_and_total_on_done",
       "ignored": false,
       "cfg": null,
@@ -1144,6 +1186,13 @@
     },
     {
       "file": "src/gui.rs",
+      "name": "select_tool_keeps_convert_progress_while_running",
+      "ignored": false,
+      "cfg": null,
+      "body": "ff89ad81e4e4e27f"
+    },
+    {
+      "file": "src/gui.rs",
       "name": "snap_asset_root_override_isolates_pipe_name",
       "ignored": false,
       "cfg": null,
@@ -1256,6 +1305,13 @@
     },
     {
       "file": "src/markdown.rs",
+      "name": "flat_tiebreak_per_component_matches_whole_path_sequence",
+      "ignored": false,
+      "cfg": null,
+      "body": "93c5f538f8ba6356"
+    },
+    {
+      "file": "src/markdown.rs",
       "name": "formats_probe_captures_valid_output",
       "ignored": false,
       "cfg": "windows",
@@ -1298,6 +1354,13 @@
     },
     {
       "file": "src/markdown.rs",
+      "name": "media_component_error_unifies_reinit_guidance",
+      "ignored": false,
+      "cfg": null,
+      "body": "accd3dc88f3ba0a5"
+    },
+    {
+      "file": "src/markdown.rs",
       "name": "media_worker_crash_fails_file_and_restarts_for_next",
       "ignored": false,
       "cfg": null,
@@ -1315,7 +1378,7 @@
       "name": "media_worker_environment_matches_document_offline_policy",
       "ignored": false,
       "cfg": null,
-      "body": "52214ed9aee93936"
+      "body": "140c5ecdcabfc011"
     },
     {
       "file": "src/markdown.rs",
@@ -1386,6 +1449,27 @@
       "ignored": false,
       "cfg": null,
       "body": "90c9597fe7593822"
+    },
+    {
+      "file": "src/markdown.rs",
+      "name": "read_line_capped_allows_line_exactly_at_cap",
+      "ignored": false,
+      "cfg": null,
+      "body": "e3383b0ed2b64f4d"
+    },
+    {
+      "file": "src/markdown.rs",
+      "name": "read_line_capped_errors_on_oversize_and_keeps_line_boundary",
+      "ignored": false,
+      "cfg": null,
+      "body": "e62da2b00370b90c"
+    },
+    {
+      "file": "src/markdown.rs",
+      "name": "read_line_capped_reads_normal_lines",
+      "ignored": false,
+      "cfg": null,
+      "body": "a8957772a5dee46a"
     },
     {
       "file": "src/markdown.rs",
@@ -1477,6 +1561,13 @@
       "ignored": false,
       "cfg": null,
       "body": "a0405b2fbdb849e6"
+    },
+    {
+      "file": "src/markdown_assets.rs",
+      "name": "initialize_cleans_stale_runtime_selection_residue_at_entry",
+      "ignored": false,
+      "cfg": null,
+      "body": "47051fcc66aa6031"
     },
     {
       "file": "src/markdown_assets.rs",
@@ -2152,6 +2243,13 @@
     },
     {
       "file": "src/snap_ocr_assets.rs",
+      "name": "initialize_cleans_stale_expected_tag_residue_at_entry",
+      "ignored": false,
+      "cfg": null,
+      "body": "505317f6f8daec7b"
+    },
+    {
+      "file": "src/snap_ocr_assets.rs",
       "name": "initialize_cleans_stale_staging_residue_at_entry",
       "ignored": false,
       "cfg": null,
@@ -2163,6 +2261,13 @@
       "ignored": false,
       "cfg": "windows",
       "body": "d13bcf71f1cfb19f"
+    },
+    {
+      "file": "src/snap_ocr_assets.rs",
+      "name": "notice_lists_xberg_inference_license",
+      "ignored": false,
+      "cfg": null,
+      "body": "e47da7466dc8288b"
     },
     {
       "file": "src/snap_ocr_assets.rs",
