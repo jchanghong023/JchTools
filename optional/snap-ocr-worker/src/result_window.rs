@@ -61,6 +61,51 @@ pub fn register_fonts(font_dir: &Path) -> Result<(), ResultWindowError> {
     Ok(())
 }
 
+/// US 键盘布局 Shift+符号的反向映射表（O-14 热键录制）：Slint 录制到的
+/// `event.text` 是布局映射后的符号（如 Shift+7 → "&"），而热键域（worker 的
+/// `tray::parse_hotkey` 与主程序 gui.rs 同口径）只认未修饰的原键码，录制时必须
+/// 把符号还原成原键，否则 Ctrl+Shift+7 之类组合会报「快捷键主键不支持」。
+/// 左列为 Shift 修饰后的符号，右列为原键；共 21 对（数字行 10 + 其余 11）。
+/// 主程序 gui.rs 侧维护同一张表，两边必须逐对一致。
+const SHIFT_SYMBOL_BASE_KEYS: [(&str, &str); 21] = [
+    ("!", "1"),
+    ("@", "2"),
+    ("#", "3"),
+    ("$", "4"),
+    ("%", "5"),
+    ("^", "6"),
+    ("&", "7"),
+    ("*", "8"),
+    ("(", "9"),
+    (")", "0"),
+    ("~", "`"),
+    ("_", "-"),
+    ("+", "="),
+    ("{", "["),
+    ("}", "]"),
+    ("|", "\\"),
+    (":", ";"),
+    ("\"", "'"),
+    ("<", ","),
+    (">", "."),
+    ("?", "/"),
+];
+
+/// 录制热键的主键归一化（O-14）：Shift 按下且字符命中上表时还原为原键；
+/// Shift+字母（录制到的是大写字母）、无 Shift 的按键与命名键原样返回。
+#[must_use]
+pub fn normalize_shift_key(shift: bool, key: &str) -> String {
+    if shift {
+        if let Some((_, base)) = SHIFT_SYMBOL_BASE_KEYS
+            .iter()
+            .find(|(symbol, _)| *symbol == key)
+        {
+            return (*base).to_owned();
+        }
+    }
+    key.to_owned()
+}
+
 fn activate_result_window(
     window: &ResultWindow,
     position: slint::PhysicalPosition,
@@ -199,10 +244,110 @@ impl ResultWindowHandle {
 
 #[cfg(test)]
 mod tests {
-    use super::{ResultWindow, ResultWindowHandle};
+    use super::{normalize_shift_key, ResultWindow, ResultWindowHandle, SettingsWindow};
     use slint::ComponentHandle;
     use std::cell::RefCell;
     use std::rc::Rc;
+
+    // 覆盖 O-14（E-4 回归）：US 布局 Shift+符号反向映射表全量核对——
+    // 上下两行各 10/11 对，Shift 按下时符号必须还原为未修饰的原键，
+    // 否则录制 Ctrl+Shift+7 之类组合会被 parse_hotkey 判为「主键不支持」。
+    #[test]
+    fn shift_symbols_map_back_to_base_keys() {
+        let shifted = [
+            ("!", "1"),
+            ("@", "2"),
+            ("#", "3"),
+            ("$", "4"),
+            ("%", "5"),
+            ("^", "6"),
+            ("&", "7"),
+            ("*", "8"),
+            ("(", "9"),
+            (")", "0"),
+            ("~", "`"),
+            ("_", "-"),
+            ("+", "="),
+            ("{", "["),
+            ("}", "]"),
+            ("|", "\\"),
+            (":", ";"),
+            ("\"", "'"),
+            ("<", ","),
+            (">", "."),
+            ("?", "/"),
+        ];
+        assert_eq!(shifted.len(), 21, "映射表应为 21 对（数字行 10 + 其余 11）");
+        for (symbol, base) in shifted {
+            assert_eq!(
+                normalize_shift_key(true, symbol),
+                base,
+                "Shift+{symbol} 应还原为 {base}"
+            );
+        }
+    }
+
+    // 覆盖 O-14（E-4 回归）：映射只在「Shift 按下且命中符号表」时生效——
+    // Shift+字母是已大写字母不映射；无 Shift 的符号、数字与命名键原样返回。
+    #[test]
+    fn non_shifted_or_letter_keys_pass_through() {
+        assert_eq!(normalize_shift_key(true, "A"), "A", "Shift+字母不映射");
+        assert_eq!(normalize_shift_key(true, "N"), "N");
+        assert_eq!(normalize_shift_key(true, "F5"), "F5", "功能键不映射");
+        assert_eq!(
+            normalize_shift_key(true, "Backspace"),
+            "Backspace",
+            "命名键不映射"
+        );
+        assert_eq!(
+            normalize_shift_key(false, "&"),
+            "&",
+            "无 Shift 的符号不映射"
+        );
+        assert_eq!(normalize_shift_key(false, "7"), "7");
+        assert_eq!(normalize_shift_key(false, "Backspace"), "Backspace");
+        assert_eq!(normalize_shift_key(true, ""), "", "空串原样返回");
+    }
+
+    // 覆盖 O-14（E-4 集成）：设置窗的录制归一化回调接到 Rust 映射函数后，
+    // 经 slint 回调入口输入 Shift+"&"（US 布局的 Shift+7）应得到 "7"，
+    // 组装出的 Ctrl+Shift+7 落在 parse_hotkey 的键域内。
+    #[test]
+    fn settings_window_hotkey_callback_restores_shifted_digit() {
+        assert!(
+            slint::platform::set_platform(Box::new(i_slint_backend_testing::TestingBackend::new(
+                i_slint_backend_testing::TestingBackendOptions {
+                    renderer_name: Some("software".into()),
+                    ..Default::default()
+                },
+            )))
+            .is_ok(),
+            "测试后端应只初始化一次"
+        );
+        let window =
+            SettingsWindow::new().unwrap_or_else(|error| panic!("设置窗创建失败：{error}"));
+        // 与 service.rs open_settings 的生产接线一致。
+        window.on_normalize_shift_key(|shift, key| normalize_shift_key(shift, &key).into());
+        assert_eq!(
+            window.invoke_normalize_shift_key(true, "&".into()).as_str(),
+            "7"
+        );
+        assert_eq!(
+            window
+                .invoke_normalize_shift_key(false, "&".into())
+                .as_str(),
+            "&"
+        );
+        assert_eq!(
+            window.invoke_normalize_shift_key(true, "A".into()).as_str(),
+            "A"
+        );
+        let draft = format!(
+            "Ctrl+Shift+{}",
+            window.invoke_normalize_shift_key(true, "&".into())
+        );
+        assert_eq!(draft, "Ctrl+Shift+7");
+    }
 
     // 覆盖 O-21/O-22：正文必须实际渲染，复制须保留原文。
     #[test]

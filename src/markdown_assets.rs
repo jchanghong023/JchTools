@@ -8,9 +8,9 @@
 //! 核心与截图 OCR 共用 [`crate::asset_util`]，两侧行为同源。
 
 use crate::asset_util::{
-    atomic_replace_dir, atomic_replace_file, ensure_not_cancelled, inference_ready,
-    install_inference_pack, resolve_component_with_tag, validate_relative_path, verify_file,
-    AssetDownloader, InferenceManifest,
+    atomic_replace_dir, atomic_replace_file, ensure_not_cancelled, install_inference_pack,
+    resolve_component_with_tag, validate_relative_path, verify_file, AssetDownloader,
+    InferenceManifest,
 };
 use serde::Deserialize;
 use std::fmt::Write as FmtWrite;
@@ -238,9 +238,24 @@ pub fn readiness() -> Result<(), String> {
         return Err(format!("许可证 notice 不存在：{}", notice.display()));
     }
     media_component_dir()?;
-    // 清单接入推理组件包后做成员级摘要校验（XB-09；未接入时在位校验已覆盖）。
+    readiness_inference_pack(&manifest, &asset_root())?;
+    Ok(())
+}
+
+/// 就绪检查的推理组件段：成员级摘要校验（XB-09；清单未接入时在位校验已覆盖）。
+///
+/// 成员校验基于 [`resolve_xberg_component`] 解析出的组件目录（C-2，与截图
+/// OCR 侧同口径）：该解析支持 debug 构建的 `JCHTOOLS_XBERG_INFERENCE_DIR`
+/// 覆盖，成员校验必须与在位校验（[`media_component_dir`]）使用同一目录——
+/// 此前成员校验直接按资产根拼 `xberg-inference/<tag>/`，绕过覆盖，导致覆盖
+/// 路径在位校验通过后仍必报成员校验失败、永远无法就绪（markdown::run 阻断
+/// 转换，initialize 还会重复下载约 291MB 组件包）。markdown 清单成员的
+/// install_path 本就是组件目录相对路径（无 `xberg-inference/<tag>/` 前缀，
+/// 与 snap 清单不同），直接按组件目录拼接，无需前缀剥离。
+fn readiness_inference_pack(manifest: &AssetManifest, root: &Path) -> Result<(), String> {
     if let Some(inference) = &manifest.xberg_inference {
-        inference_ready(inference, &asset_root())?;
+        let component = resolve_xberg_component(root)?;
+        crate::asset_util::inference_layout_ready(&component, inference)?;
     }
     Ok(())
 }
@@ -250,13 +265,16 @@ pub fn readiness() -> Result<(), String> {
 /// 清单未接入推理组件包时不下载任何资产，组件缺失时返回明确错误并指引
 /// （不冒称就绪）。取消会删除本轮 staging 目录。
 pub fn initialize(cancel: &AtomicBool, mut progress: impl FnMut(String)) -> Result<(), String> {
+    let root = asset_root();
+    // B-2：先兜底清理历史残留的 staging（readiness 提前返回、取消后清理
+    // 失败或进程崩溃都会残留 .staging-<uuid>，单个可超 1GB）。
+    cleanup_stale_staging(&root);
     if readiness().is_ok() {
         progress("转 Markdown 组件已就绪".to_string());
         return Ok(());
     }
     ensure_not_cancelled(cancel)?;
     let manifest = load_manifest()?;
-    let root = asset_root();
     fs::create_dir_all(&root).map_err(|error| format!("创建资产目录失败：{error}"))?;
     let staging = root.join(format!(".staging-{}", Uuid::new_v4().simple()));
     fs::create_dir_all(&staging).map_err(|error| format!("创建初始化临时目录失败：{error}"))?;
@@ -269,12 +287,52 @@ pub fn initialize(cancel: &AtomicBool, mut progress: impl FnMut(String)) -> Resu
         &root,
         &mut downloader,
     );
-    if let Err(error) = fs::remove_dir_all(&staging) {
+    finalize_staging(result, &staging, &mut progress)
+}
+
+/// 初始化收尾：删除本轮 staging 目录，主结果优先返回。
+///
+/// staging 清理是尽力而为（B-1）：关键变更已成功时清理失败只经 progress
+/// 发出警告、维持 Ok（与 install_inference_pack 对 prune 清理失败的口径
+/// 一致——此前 Windows 上防护软件短暂持有句柄即把成功初始化误报为失败，
+/// gui.rs 的保存链路还会据此把 convert_runtime_confirmed 置回 false）；
+/// 残留目录由下次 initialize 入口的 [`cleanup_stale_staging`] 兜底收集。
+fn finalize_staging(
+    result: Result<(), String>,
+    staging: &Path,
+    progress: &mut dyn FnMut(String),
+) -> Result<(), String> {
+    if let Err(error) = fs::remove_dir_all(staging) {
         if result.is_ok() {
-            return Err(format!("清理初始化临时目录失败：{error}"));
+            progress(format!("警告：清理初始化临时目录失败：{error}"));
         }
     }
     result
+}
+
+/// 兜底清理资产根下历史残留的 `.staging-*` 目录（B-2），单项失败跳过继续。
+///
+/// 并发前提：主程序单实例，初始化由 gui.rs 的 convert_initializing 守卫
+/// 串行（单初始化线程），入口处发现的 `.staging-*` 必为历史残留，不存在
+/// 在途 staging 被误删的并发窗口。`.staging-*` 前缀的非目录条目不是本
+/// 流程产物（staging 恒为目录），按设计跳过；资产根不存在（首次运行）时
+/// 无需清理。
+fn cleanup_stale_staging(root: &Path) {
+    // 资产根尚不存在（首次运行）时无需清理。
+    let Ok(entries) = fs::read_dir(root) else {
+        return;
+    };
+    for entry in entries.flatten() {
+        let path = entry.path();
+        let is_staging = path
+            .file_name()
+            .and_then(|name| name.to_str())
+            .is_some_and(|name| name.starts_with(".staging-"));
+        if is_staging && path.is_dir() {
+            // 尽力而为：残留被防护软件短暂锁定时跳过，下次初始化再试。
+            let _ = fs::remove_dir_all(&path);
+        }
+    }
 }
 
 fn initialize_staged(
@@ -418,7 +476,7 @@ mod tests {
     use std::fs;
     use std::path::{Path, PathBuf};
     use std::sync::atomic::AtomicBool;
-    use std::sync::{Mutex, MutexGuard, OnceLock};
+    use std::sync::{Mutex, MutexGuard};
 
     // 覆盖 T-06：内置清单必须可解析（媒体段退役后仅存 xberg 段）。
     #[test]
@@ -430,10 +488,11 @@ mod tests {
         );
     }
 
-    /// 测试共享进程环境变量，组件根相关用例必须串行访问。
+    /// 测试共享进程环境变量，组件根相关用例必须串行访问；锁实例与
+    /// snap_ocr_assets 的测试共用（见 asset_util::test_env），避免两模块的
+    /// 覆盖变量在并行线程中相互覆盖。
     fn env_lock() -> &'static Mutex<()> {
-        static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
-        LOCK.get_or_init(|| Mutex::new(()))
+        crate::asset_util::test_env::env_lock()
     }
 
     /// 把资产根目录与推理组件目录都重定向到临时目录；Drop 恢复环境。
@@ -804,5 +863,156 @@ mod tests {
         let error = resolve_component_with_tag(&base, Some("vabsent"), "未配置")
             .expect_err("清单 tag 不在场必须报错");
         assert!(error.contains("vabsent"), "错误应指明缺失 tag：{error}");
+    }
+
+    // ── B-1/B-2：staging 清理降级与残留兜底清理 ──
+
+    // 覆盖 B-1：staging 清理失败时，已成功的关键变更不得被误报为失败（生产
+    // 触发：防护软件/索引器短暂持有 staging 内文件句柄；gui.rs 的保存链路还
+    // 会把误报转化为 convert_runtime_confirmed=false）。注入方式：staging
+    // 路径本身是普通文件时 remove_dir_all 确定性失败，无需平台句柄。
+    #[test]
+    fn finalize_staging_cleanup_failure_downgrades_to_warning() {
+        let root = tempfile::tempdir().expect("创建测试目录");
+        let staging = root.path().join(".staging-fake");
+        fs::write(&staging, b"not-a-dir").expect("把 staging 预置为文件");
+        let mut warnings = Vec::new();
+        let mut progress = |message: String| warnings.push(message);
+
+        let result = super::finalize_staging(Ok(()), &staging, &mut progress);
+
+        assert!(result.is_ok(), "清理失败不得吞掉成功结果：{result:?}");
+        assert_eq!(
+            warnings
+                .iter()
+                .filter(|message| message.contains("警告：清理初始化临时目录失败"))
+                .count(),
+            1,
+            "应恰好发出一条清理失败警告：{warnings:?}"
+        );
+    }
+
+    // 覆盖 B-1 配套不变量：主结果失败时，清理失败不得覆盖原始错误
+    //（本用例为守护性断言，修复前后都应通过）。
+    #[test]
+    fn finalize_staging_keeps_original_error_over_cleanup_failure() {
+        let root = tempfile::tempdir().expect("创建测试目录");
+        let staging = root.path().join(".staging-fake");
+        fs::write(&staging, b"not-a-dir").expect("把 staging 预置为文件");
+        let mut progress = |_message: String| {};
+
+        let result = super::finalize_staging(Err("原始失败".to_string()), &staging, &mut progress);
+
+        assert_eq!(
+            result.expect_err("原始错误必须保留"),
+            "原始失败",
+            "清理失败不得覆盖原始错误"
+        );
+    }
+
+    // 覆盖 B-2：历史残留的 .staging-* 目录必须在 initialize 入口被兜底清理。
+    // 残留来源：readiness 提前返回、取消后清理失败、进程崩溃——修复前仅当次
+    // 收尾清理，入口不清理任何残留（残留单个可超 1GB）。
+    #[test]
+    fn initialize_cleans_stale_staging_residue_at_entry() {
+        let guard = redirect_component_env();
+        let root = guard.root.path();
+        let residue = root.join(".staging-fake");
+        fs::create_dir_all(residue.join("xberg-inference")).expect("预置残留目录");
+        fs::write(
+            residue.join("xberg-inference").join("download.zip"),
+            b"residue",
+        )
+        .expect("预置残留文件");
+
+        let cancel = AtomicBool::new(false);
+        // 后续阶段会因未选择 Xberg 运行目录而失败，属预期；本用例只断言入口清理。
+        let _ = super::initialize(&cancel, |_message: String| {});
+
+        assert!(
+            !residue.exists(),
+            "残留 staging 目录必须在 initialize 入口被兜底清理（B-2）"
+        );
+    }
+
+    // 覆盖 B-2：单个残留目录清理失败（如被防护软件锁定）必须跳过继续，不得
+    // 影响其余残留清理，也不得让初始化整体失败。注入方式：对残留内文件持有
+    // 无 FILE_SHARE_DELETE 的句柄，remove_dir_all 稳定失败（目录不涉及改名，
+    // 句柄方案可行；对照 asset_util 的目录原子替换用例）。
+    // 平台门禁原因：共享模式句柄为 Windows 独有注入；无门禁的入口清理用例
+    // 覆盖主路径（本项目按 P-07 仅支持 Windows，门禁不影响生产平台覆盖）。
+    #[cfg(windows)]
+    #[test]
+    fn initialize_skips_undeletable_stale_staging_and_continues() {
+        let guard = redirect_component_env();
+        let root = guard.root.path();
+        let locked = root.join(".staging-locked");
+        fs::create_dir_all(&locked).expect("预置被锁残留目录");
+        fs::write(locked.join("inner.txt"), b"x").expect("预置锁定文件");
+        let normal = root.join(".staging-normal");
+        fs::create_dir_all(&normal).expect("预置普通残留目录");
+        fs::write(normal.join("inner.txt"), b"x").expect("预置普通残留文件");
+        {
+            use std::os::windows::fs::OpenOptionsExt;
+            let _handle = fs::OpenOptions::new()
+                .read(true)
+                .share_mode(3)
+                .open(locked.join("inner.txt"))
+                .expect("持有无共享删除句柄");
+
+            let cancel = AtomicBool::new(false);
+            let _ = super::initialize(&cancel, |_message: String| {});
+        }
+        assert!(!normal.exists(), "普通残留必须被清理");
+        assert!(
+            locked.exists(),
+            "被锁残留必须跳过（清理尽力而为，不阻塞初始化）"
+        );
+        let remaining: Vec<String> = fs::read_dir(root)
+            .expect("枚举资产根")
+            .flatten()
+            .filter_map(|entry| {
+                entry
+                    .file_name()
+                    .into_string()
+                    .ok()
+                    .filter(|name| name.starts_with(".staging-"))
+            })
+            .collect();
+        assert_eq!(
+            remaining,
+            vec![".staging-locked".to_string()],
+            "除被锁残留外不得留下其他 .staging-* 条目"
+        );
+    }
+
+    // ── C-2（markdown 侧）：readiness 的推理包成员校验与组件目录解析同源 ──
+
+    // 覆盖 C-2（markdown 侧）：debug 组件目录覆盖（JCHTOOLS_XBERG_INFERENCE_DIR）
+    // 下，推理组件包成员校验必须基于 resolve_xberg_component 解析出的组件目录，
+    // 而非资产根相对路径——否则覆盖路径永远无法就绪（media_component_dir 通过后
+    // readiness 仍必报成员校验失败，markdown::run 阻断转换、initialize 还会重复
+    // 下载约 291MB 组件包）。markdown 清单成员的 install_path 本就是组件目录
+    // 相对路径（无 xberg-inference/<tag>/ 前缀，与 snap 清单不同），校验时
+    // 直接按组件目录拼接。
+    // 断言强度说明：清单成员摘要对应真实大文件（xberg.exe 约 105MB），测试
+    // 无法伪造同摘要字节，故以「错误来自组件目录级成员校验、点名的实际大小
+    // 取自覆盖树桩文件」证明校验路径已切换；覆盖树下真实摘要全绿路径未验证。
+    #[test]
+    fn readiness_inference_pack_honors_component_dir_override() {
+        let guard = redirect_component_env();
+        let external = guard.root.path().join("external-component");
+        fs::create_dir_all(&external).expect("创建外部组件目录");
+        fs::write(external.join("xberg.exe"), b"stub").expect("预置桩 xberg.exe");
+        std::env::set_var("JCHTOOLS_XBERG_INFERENCE_DIR", &external);
+
+        let manifest = load_manifest().expect("内置清单必须可解析");
+        let error = super::readiness_inference_pack(&manifest, guard.root.path())
+            .expect_err("桩文件摘要与清单不符必须失败");
+
+        assert!(
+            error.contains("推理组件成员 xberg.exe") && error.contains("大小 4，预期"),
+            "错误应来自组件目录级成员校验并点名桩文件实际大小：{error}"
+        );
     }
 }

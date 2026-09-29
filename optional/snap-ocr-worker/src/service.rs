@@ -24,12 +24,16 @@ use crate::xberg_worker::{ClientError, SnapshotState, XbergWorkerClient};
 /// 推理子进程优雅关闭的等待上限；超时强杀兜底（O-16 进程级兜底）。
 const XBERG_SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(10);
 
-/// 单次识别错误（O-30 分类：取消 / 推理失败；消息不含图像内容）。
+/// 单次识别错误（O-30 分类：取消 / 推理失败 / 子进程退出；消息不含图像内容）。
 #[derive(Debug, Clone)]
 pub(crate) enum OcrError {
-    /// 用户取消：结果窗即刻恢复，在途识别在后台完成后被丢弃。
+    /// 用户取消：结果窗即刻恢复；按 XB-08「终止进程」路径，推理子进程已被
+    /// 终止，服务随后触发后台重载（O-13）。
     Cancelled,
-    /// 推理失败（Xberg 失败响应、子进程退出或通信失败）。
+    /// 推理子进程已退出：连接死亡、模型不可再复用，须降级为错误并保留重试
+    /// 入口（O-13）；与单次 [`OcrError::Backend`] 失败（模型保持就绪）分类处理。
+    ProcessExited(String),
+    /// 推理失败（Xberg 失败响应或通信失败）。
     Backend(String),
 }
 
@@ -37,7 +41,10 @@ impl std::fmt::Display for OcrError {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             Self::Cancelled => write!(formatter, "用户取消识别"),
-            Self::Backend(message) => write!(formatter, "{message}"),
+            // 两个失败变体的消息都已是完整用户可读文案（ClientError::Display）。
+            Self::ProcessExited(message) | Self::Backend(message) => {
+                write!(formatter, "{message}")
+            }
         }
     }
 }
@@ -378,6 +385,10 @@ fn recognize(
         Ok(Some(text)) if text.trim().is_empty() => Ok(None),
         Ok(text) => Ok(text),
         Err(ClientError::Cancelled) => Err(OcrError::Cancelled),
+        // 子进程退出是连接级死亡，单独分类供服务降级模型（O-13/O-30）。
+        Err(error @ ClientError::ProcessExited(_)) => {
+            Err(OcrError::ProcessExited(error.to_string()))
+        }
         Err(error) => Err(OcrError::Backend(error.to_string())),
     }
 }
@@ -405,6 +416,21 @@ fn worker(
                 } else {
                     Err(OcrError::Backend("模型未就绪".into()))
                 };
+                match &outcome {
+                    // 用户取消（XB-08「终止进程」路径）：stdio 单连接无法只取消
+                    // 单个请求，立即杀死子进程，被放弃的旧请求随进程死亡，不再
+                    // 阻塞后续任务；服务侧随后触发重载（O-13）。
+                    Err(OcrError::Cancelled) => {
+                        if let Some(mut model) = client.take() {
+                            model.abort();
+                        }
+                    }
+                    // 子进程已退出：死亡客户端不可复用，回收以匹配服务侧降级。
+                    Err(OcrError::ProcessExited(_)) => {
+                        drop(client.take());
+                    }
+                    Ok(_) | Err(OcrError::Backend(_)) => {}
+                }
                 let _ = events.send(Command::OcrFinished(outcome, work));
             }
             Work::Stop => {
@@ -696,6 +722,11 @@ impl Service {
                     false
                 }
             }
+        });
+        // 热键录制主键归一化（O-14）：Shift+符号反向映射在 Rust 侧实现并单测，
+        // slint 的录制处理经此回调取回原键（与主程序 gui.rs 同表）。
+        window.on_normalize_shift_key(|shift, key| {
+            crate::result_window::normalize_shift_key(shift, &key).into()
         });
         let sender = self.commands.clone();
         window.on_retry_model(move || {
@@ -1085,11 +1116,36 @@ impl Service {
                         self.tray.notice("选区内未识别到文字");
                     }
                     Err(OcrError::Cancelled) => {
-                        // 取消使结果窗立即恢复；在途识别在后台完成后被丢弃（O-19 细化）。
+                        // 取消使结果窗立即恢复（O-19）；按 XB-08「终止进程」路径，
+                        // worker 已杀死推理子进程，模型须立即后台重载（与启动路径
+                        // 相同的 spawn + 预热），期间的新截图按 O-13「加载中允许
+                        // 截图并提示等待模型就绪」排队。
                         self.restore_old();
                         self.tray.notice("已取消识别");
+                        // 防御性复位：清掉本请求遗留的取消标志，确保后续
+                        // 加载/预热周期不被它影响（当前 warm_up 使用函数内
+                        // 局部标志、不读取服务共享的 self.cancel，且产生
+                        // pending_image 的路径必先经 request_capture 复位；
+                        // 此复位为纵深防御，并非修复已知竞态）。
+                        self.cancel.store(false, Ordering::Release);
+                        self.model = ModelState::Loading;
+                        self.model_error = None;
+                        if self.work.send(Work::Load).is_err() {
+                            self.model = ModelState::Error;
+                            self.model_error = Some("推理线程已退出，请重新启动截图服务".into());
+                        }
+                    }
+                    Err(OcrError::ProcessExited(reason)) => {
+                        // 子进程死亡（被误关黑窗、崩溃等）：连接不可复用，模型
+                        // 从就绪降级为错误并保留重试入口（O-13/O-30），不得继续
+                        // 冒称就绪导致重试按钮失效。
+                        self.restore_old();
+                        self.tray.notice("推理子进程已退出；可在设置中重试加载模型");
+                        self.model = ModelState::Error;
+                        self.model_error = Some(reason);
                     }
                     Err(OcrError::Backend(reason)) => {
+                        // 单次推理失败只结束本任务，已预热的模型保持就绪（O-13）。
                         self.restore_old();
                         self.tray.notice(format!("OCR 识别失败：{reason}"));
                     }
@@ -1127,6 +1183,10 @@ impl Service {
                     .is_some_and(|at| at.elapsed() >= Duration::from_secs(10))
                 {
                     // 只有用户显式选择强制退出才终止当前可能仍阻塞的推理调用。
+                    // exit(0) 不运行任何清理（Drop/线程回收全部跳过），推理子进程
+                    // 由 kill-on-close Job 兜底回收：本进程死亡时内核关闭 Job 句柄
+                    // 并终结子进程，不遗留无窗口孤儿（O-16/E2'-1，见
+                    // xberg_worker::InferenceJob）。
                     std::process::exit(0);
                 }
             }
@@ -1297,10 +1357,69 @@ pub fn run_service(autostart: bool) -> Result<(), String> {
 
 #[cfg(test)]
 mod tests {
-    use super::{tray, Command, ModelState, OcrError, Service, Settings};
+    use super::{tray, Command, ModelState, OcrError, Service, Settings, Work};
     use std::fs;
+    use std::path::Path;
     use std::sync::atomic::AtomicBool;
     use std::sync::{mpsc, Arc};
+    use std::time::Duration;
+
+    /// 构造可直接喂 [`Command::OcrFinished`] 的最小服务（模型就绪、任务进行中），
+    /// 返回服务与 Work 接收端（供断言后台重载指令）。
+    fn ready_busy_service(root: &Path) -> (Service, mpsc::Receiver<Work>) {
+        let (commands, _) = mpsc::channel();
+        let (work, work_rx) = mpsc::channel();
+        let service = Service {
+            root: root.to_path_buf(),
+            commands,
+            self_weak: std::rc::Weak::new(),
+            settings: Settings {
+                hotkey: "Ctrl+Alt+O".into(),
+                main_exe: None,
+                warning: None,
+            },
+            tray: tray::TrayHandle::for_test(),
+            work,
+            cancel: Arc::new(AtomicBool::new(false)),
+            model: ModelState::Ready,
+            model_error: None,
+            pending_image: None,
+            busy: true,
+            result: None,
+            old_result_visible: false,
+            progress: None,
+            settings_window: None,
+            exit_pending: None,
+            exit_stop_sent: false,
+        };
+        (service, work_rx)
+    }
+
+    // 覆盖 XB-08/O-19（E-3 回归）：取消走「终止进程」路径后，推理连接已死亡，
+    // 服务必须在取消结束的同一时刻触发后台重载（置回加载中并发 Work::Load），
+    // 让取消后的下一次截图按 O-13「加载中允许截图」等待模型，而不是把新请求
+    // 排在已被放弃的旧请求之后。
+    #[test]
+    fn cancelled_recognition_triggers_model_reload() -> Result<(), Box<dyn std::error::Error>> {
+        let temp = tempfile::tempdir()?;
+        let (mut service, work_rx) = ready_busy_service(temp.path());
+        service.handle(Command::OcrFinished(
+            Err(OcrError::Cancelled),
+            (0, 0, 20, 20),
+        ));
+        assert!(!service.busy, "取消后当前任务应立即结束");
+        assert_eq!(
+            service.model,
+            ModelState::Loading,
+            "取消终止子进程后必须触发重载（XB-08：旧连接已死，O-13：重载排队）"
+        );
+        assert_eq!(service.status()["model"], "loading");
+        assert!(
+            matches!(work_rx.recv_timeout(Duration::from_secs(1)), Ok(Work::Load)),
+            "应向推理线程发出 Work::Load 重新 spawn 子进程"
+        );
+        Ok(())
+    }
 
     // 覆盖 O-13/O-20/O-30：单次推理错误只结束该任务，已预热的模型仍供下次截图。
     #[test]
@@ -1389,6 +1508,38 @@ mod tests {
         ))));
         assert_eq!(service.model, ModelState::Error);
         assert_eq!(service.status()["model"], "error");
+        Ok(())
+    }
+
+    // 覆盖 O-13/O-30（E-2 回归）：识别中推理子进程退出属于连接死亡，必须把
+    // 模型从就绪降级为错误并保留重试入口；对照用例
+    // inference_failure_does_not_unload_ready_model 证明单次 Backend 失败不降级，
+    // 两个分类不得互相吞并。
+    #[test]
+    fn process_exit_downgrades_ready_model_and_reenables_retry(
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        let temp = tempfile::tempdir()?;
+        let (mut service, _work_rx) = ready_busy_service(temp.path());
+        service.handle(Command::OcrFinished(
+            Err(OcrError::ProcessExited(
+                "推理子进程已退出（退出码 3）".into(),
+            )),
+            (0, 0, 20, 20),
+        ));
+        assert_eq!(
+            service.model,
+            ModelState::Error,
+            "子进程死亡后模型必须降级，不得继续冒称就绪"
+        );
+        assert!(service
+            .model_error
+            .as_deref()
+            .is_some_and(|reason| reason.contains("推理子进程已退出")));
+        assert!(!service.busy);
+        assert_eq!(service.status()["model"], "error");
+        // Error 状态下重试入口恢复可用（O-13）：retry 把状态置回加载中。
+        service.handle(Command::RetryModel);
+        assert_eq!(service.model, ModelState::Loading);
         Ok(())
     }
 

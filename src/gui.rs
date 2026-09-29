@@ -178,6 +178,9 @@ struct State {
     git_shared: Option<Arc<GitShared>>,
     /// 转 Markdown：独立取消信号；不复用目录整理/解压的控制器。
     convert_cancel: Option<Arc<std::sync::atomic::AtomicBool>>,
+    /// 转 Markdown：当前正在处理的文件相对路径（T-22 实时指标的当前文件口径）；
+    /// 空 = 尚未进入单文件处理（扫描/两个文件的间隙）。
+    convert_current: String,
     /// 转 Markdown 初始化专用取消信号。
     convert_init_cancel: Option<Arc<std::sync::atomic::AtomicBool>>,
     /// 转 Markdown 组件检查代际；旧检查结果不得覆盖新初始化/检查状态。
@@ -2723,6 +2726,11 @@ impl UiPump {
                                     .is_some_and(|error| !error.is_empty())
                             {
                                 ui.set_snap_error(value["error"].as_str().unwrap_or("").into());
+                            } else if !ui.get_snap_error().is_empty() {
+                                // C'-2：纯轮询收到正常状态（ok 且无错误）时清除
+                                // 旧错误文本（如识别中的「正在识别」）；只在当前
+                                // 非空时写，避免每 2 秒空写引发无谓的界面刷新。
+                                ui.set_snap_error("".into());
                             }
                         }
                     }
@@ -2893,6 +2901,8 @@ impl UiPump {
                             };
                             ui.set_convert_progress(progress);
                             ui.set_convert_progress_note(format!("{index} / {total}").into());
+                            // T-22：记录当前文件，供 100ms 周期刷新拼出「正在处理 X · 耗时 Ns」。
+                            relative.clone_into(&mut self.state.borrow_mut().convert_current);
                             ui.set_convert_metrics(format!("正在处理 {relative}").into());
                         }
                     } else if let Some(rest) = text.strip_prefix("CONVERTER_FILE_FINISHED|") {
@@ -2917,6 +2927,8 @@ impl UiPump {
                                 format!(" · {message}")
                             }
                         );
+                        // 该文件已结束：周期刷新不再把它当作「正在处理」，改报运行耗时。
+                        self.state.borrow_mut().convert_current.clear();
                         ui.set_convert_metrics(detail.clone().into());
                         if !success || partial {
                             let mut state = self.state.borrow_mut();
@@ -3521,20 +3533,24 @@ impl UiPump {
                         } else {
                             "转换完成"
                         };
-                        {
+                        let total_elapsed = {
                             let mut s = self.state.borrow_mut();
+                            // T-22：收尾统计的总耗时从任务起算到本事件到达时刻。
+                            let elapsed = s.started.elapsed().as_secs_f64().max(0.001);
                             s.convert_cancel = None;
                             s.runtime = RuntimeMode::Organizer;
+                            s.convert_current.clear();
                             push_event_log(&mut s.convert_logs, format!(
                                 "转 Markdown {final_status}：成功 {success}，部分提取 {partial}，失败 {failed}，已有结果跳过 {skipped_existing}，重复结果跳过 {skipped_duplicate}"
                             ));
                             self.log_dirty.set(true);
-                        }
+                            elapsed
+                        };
                         ui.set_busy(false);
                         ui.set_paused(false);
                         ui.set_convert_progress(if stopped { -1.0 } else { 1.0 });
                         ui.set_convert_progress_note(final_status.into());
-                        ui.set_convert_metrics(format!("成功 {success} · 部分提取 {partial} · 失败 {failed} · 已有结果跳过 {skipped_existing} · 重复结果跳过 {skipped_duplicate}").into());
+                        ui.set_convert_metrics(format!("成功 {success} · 部分提取 {partial} · 失败 {failed} · 已有结果跳过 {skipped_existing} · 重复结果跳过 {skipped_duplicate} · 总耗时 {total_elapsed:.1}s").into());
                         ui.set_convert_status(final_status.into());
                         ui.set_convert_log_text(
                             log_panel_text(&self.state.borrow().convert_logs).into(),
@@ -3569,6 +3585,7 @@ impl UiPump {
                             let mut s = self.state.borrow_mut();
                             s.convert_cancel = None;
                             s.runtime = RuntimeMode::Organizer;
+                            s.convert_current.clear();
                             push_event_log(
                                 &mut s.convert_logs,
                                 format!("转 Markdown 失败：{error}"),
@@ -3744,6 +3761,17 @@ impl UiPump {
             if s.runtime == RuntimeMode::MarkdownConverter {
                 ui.set_progress(-1.0);
                 ui.set_progress_note("转换任务进行中，实时进度见转 Markdown 页".into());
+                // T-22：运行期间实时显示当前文件与耗时（busy 门禁保证空闲不刷）；
+                // 尚未进入单文件处理（扫描/文件间隙）时只报运行时长。
+                let elapsed = s.started.elapsed().as_secs_f64().max(0.001);
+                ui.set_convert_metrics(
+                    if s.convert_current.is_empty() {
+                        format!("已运行 {elapsed:.1}s")
+                    } else {
+                        format!("正在处理 {} · 耗时 {elapsed:.1}s", s.convert_current)
+                    }
+                    .into(),
+                );
             } else {
                 ui.set_progress(-1.0);
                 ui.set_progress_note("准备中".into());
@@ -3911,6 +3939,7 @@ fn initial_state() -> Result<State> {
         md_pending: None,
         git_shared: None,
         convert_cancel: None,
+        convert_current: String::new(),
         convert_init_cancel: None,
         convert_readiness_generation: 0,
         engine_overrides: None,
@@ -4360,8 +4389,14 @@ fn start_markdown_conversion(ui: &AppWindow, state: &Rc<RefCell<State>>, out: &E
         timeout_secs,
     };
     let cancel = Arc::new(std::sync::atomic::AtomicBool::new(false));
-    state.borrow_mut().convert_cancel = Some(cancel.clone());
-    state.borrow_mut().runtime = RuntimeMode::MarkdownConverter;
+    {
+        let mut s = state.borrow_mut();
+        s.convert_cancel = Some(cancel.clone());
+        s.runtime = RuntimeMode::MarkdownConverter;
+        // U-03/T-22：转换耗时从本次任务起算；上一任务的当前文件不得残留到本轮指标。
+        s.started = Instant::now();
+        s.convert_current.clear();
+    }
     ui.set_busy(true);
     ui.set_paused(false);
     ui.set_ready(false);
@@ -4476,12 +4511,34 @@ fn start_snap_initialize(ui: &AppWindow, state: &Rc<RefCell<State>>) {
 /// 每条请求打开独立管道连接；服务重启时无需保存失效句柄。
 #[cfg(windows)]
 fn snap_pipe_request(request: &serde_json::Value) -> Result<serde_json::Value, String> {
+    snap_pipe_request_on(
+        &snap_ocr_assets::pipe_name(),
+        request,
+        SNAP_PIPE_READ_TIMEOUT,
+    )
+}
+
+/// 截图服务读响应的 deadline（C-1）：监督线程是全部管道命令的唯一串行执行者，
+/// 服务挂起时一次永久阻塞会让界面按钮永久禁用且无恢复路径（O-11/O-30）。
+/// 心跳/控制类命令正常都在毫秒级返回；10 秒已远超正常窗口，仅用于兜底挂起。
+#[cfg(windows)]
+const SNAP_PIPE_READ_TIMEOUT: Duration = Duration::from_secs(10);
+
+/// 在指定命名管道上执行一次「单连接请求-响应」（C-1：读响应带 deadline，
+/// 服务挂起时按超时错误返回而不是永久阻塞）。生产用固定管道名与默认超时；
+/// 回归测试经管道名与超时参数注入，用本地服务端模拟挂起。
+#[cfg(windows)]
+fn snap_pipe_request_on(
+    pipe: &str,
+    request: &serde_json::Value,
+    read_timeout: Duration,
+) -> Result<serde_json::Value, String> {
     let deadline = Instant::now() + Duration::from_secs(2);
     let mut stream = loop {
         match std::fs::OpenOptions::new()
             .read(true)
             .write(true)
-            .open(snap_ocr_assets::pipe_name())
+            .open(pipe)
         {
             Ok(stream) => break stream,
             // 服务只有一个管道实例。前一条响应写出后，它还需断开客户端并
@@ -4501,19 +4558,99 @@ fn snap_pipe_request(request: &serde_json::Value) -> Result<serde_json::Value, S
     stream
         .flush()
         .map_err(|error| format!("刷新服务请求失败：{error}"))?;
-    let mut response = String::new();
-    BufReader::new(&mut stream)
-        .read_line(&mut response)
-        .map_err(|error| format!("读取服务响应失败：{error}"))?;
+    // 读响应放入独立线程、主线程限时 join（crate::process::join_with_deadline）：
+    // 超时后取消原句柄上的未决读，让读线程以错误返回并退出（防线程泄漏）。
+    let mut read_stream = stream
+        .try_clone()
+        .map_err(|error| format!("复制服务连接失败：{error}"))?;
+    let reader = std::thread::Builder::new()
+        .name("snap-pipe-read".into())
+        .spawn(move || {
+            let mut response = String::new();
+            BufReader::new(&mut read_stream)
+                .read_line(&mut response)
+                .map(|_| response)
+        })
+        .map_err(|error| format!("启动响应读取线程失败：{error}"))?;
+    let response = match crate::process::join_with_deadline(reader, read_timeout) {
+        Some(Ok(response)) => response,
+        Some(Err(error)) => return Err(format!("读取服务响应失败：{error}")),
+        None => {
+            cancel_pipe_io(&stream);
+            return Err(format!(
+                "截图服务响应超时（{read_timeout:.1?} 未返回）；请点击「启动 / 重连」重试"
+            ));
+        }
+    };
     if response.is_empty() {
         return Err("截图服务未返回响应".into());
     }
     serde_json::from_str(&response).map_err(|error| format!("截图服务响应格式错误：{error}"))
 }
 
+/// 取消句柄上的未决同步 I/O（C-1）：读线程阻塞在复制句柄的 read_line 上，
+/// 对原句柄调用 CancelIoEx 即可跨线程取消该未决读（两句柄指向同一管道实例）。
+#[cfg(windows)]
+fn cancel_pipe_io(stream: &std::fs::File) {
+    use std::os::windows::io::AsRawHandle;
+    use windows_sys::Win32::System::IO::CancelIoEx;
+    // SAFETY: stream 在调用期间存活且句柄有效；CancelIoEx 只取消该句柄关联管道
+    // 实例上的未决 I/O（lpoverlapped 为空表示取消全部），不触碰其他资源；返回值
+    // 仅指示是否存在未决 I/O，失败时读线程会随连接关闭自行退出，无需处理。
+    unsafe {
+        CancelIoEx(stream.as_raw_handle(), std::ptr::null());
+    }
+}
+
 #[cfg(not(windows))]
 fn snap_pipe_request(_request: &serde_json::Value) -> Result<serde_json::Value, String> {
     Err("截图服务仅支持 Windows".into())
+}
+
+/// 热键录制时 Shift+数字行/标点在 US 布局下的反向映射表（E-4）：带 Shift 的按键
+/// 事件文本是布局映射后的符号（如 Shift+7 → "&"），录制必须还原回基础键。
+/// 本表必须与 optional/snap-ocr-worker 侧录制逻辑的同一映射逐对保持一致
+/// （US 布局主键区 Shift 符号共 21 对：数字行 10 对 + 标点 11 对）。
+const SNAP_SHIFT_SYMBOL_BASE: [(char, char); 21] = [
+    ('!', '1'),
+    ('@', '2'),
+    ('#', '3'),
+    ('$', '4'),
+    ('%', '5'),
+    ('^', '6'),
+    ('&', '7'),
+    ('*', '8'),
+    ('(', '9'),
+    (')', '0'),
+    ('~', '`'),
+    ('_', '-'),
+    ('+', '='),
+    ('{', '['),
+    ('}', ']'),
+    ('|', '\\'),
+    (':', ';'),
+    ('"', '\''),
+    ('<', ','),
+    ('>', '.'),
+    ('?', '/'),
+];
+
+/// 录制主键归一化（E-4）：取单字符文本为主键；Shift 按下且主键为布局符号时
+/// 反向映射回基础键（"&" → '7'），其余原样返回。多字符文本（输入法组合等）返回 None。
+fn normalize_recorded_primary_key(text: &str, shift: bool) -> Option<char> {
+    let code = text
+        .chars()
+        .next()
+        .filter(|_| text.chars().nth(1).is_none())?;
+    if !shift {
+        return Some(code);
+    }
+    Some(
+        SNAP_SHIFT_SYMBOL_BASE
+            .iter()
+            .find_map(|(symbol, base)| (*symbol == code).then_some(*base))
+            .unwrap_or(code),
+    )
 }
 
 fn snap_named_hotkey(code: char) -> Option<&'static str> {
@@ -4677,7 +4814,7 @@ fn wire_snap_ocr(ui: &AppWindow, state: &Rc<RefCell<State>>, out: &EventSender) 
         if !(control || alt || shift || meta) {
             return;
         }
-        let Some(code) = key.chars().next().filter(|_| key.chars().nth(1).is_none()) else {
+        let Some(code) = normalize_recorded_primary_key(&key, shift) else {
             return;
         };
         let mut combination = String::with_capacity(24);
@@ -5680,6 +5817,20 @@ mod gui_tests {
     fn gui() -> &'static Mutex<mpsc::Sender<Job>> {
         static JOBS: OnceLock<Mutex<mpsc::Sender<Job>>> = OnceLock::new();
         JOBS.get_or_init(|| {
+            // C'-1：装配先隔离截图服务端点——本装配的 State 常驻进程，监督线程
+            // 可能在任意用例中被触发（如切换 snap-ocr 页的真实导航回调），隔离
+            // 变量一经设置不恢复。设置在共享进程环境锁内，与 snap_ocr_assets /
+            // markdown_assets 改写同一变量的用例互不覆盖；覆盖生效后管道名与
+            // 资产根都脱离生产位置，ensure 链路只能对测试专用名失败返回。
+            {
+                let _lock = crate::asset_util::test_env::env_lock()
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner);
+                std::env::set_var(
+                    "JCHTOOLS_SNAP_OCR_TEST_ASSET_ROOT",
+                    snap_test_isolated_root(),
+                );
+            }
             let (tx, rx) = mpsc::channel::<Job>();
             std::thread::Builder::new()
                 .name("gui-test-worker".into())
@@ -5703,6 +5854,10 @@ mod gui_tests {
                     let out = EventSender::new(event_tx);
                     wire_sync(&ui, &state, &out);
                     wire_md_git(&ui, &state, &out);
+                    // 截图 OCR 回调同样接入无头装配：录制热键等纯界面逻辑可经真实回调断言；
+                    // 仅装配不启动任何资产/服务线程（那些由用户主动回调触发）。
+                    wire_snap_ocr(&ui, &state, &out);
+                    wire_markdown_converter(&ui, &state, &out);
                     refresh(&ui, &state.borrow());
                     let pump = UiPump::new(event_rx, state.clone(), out);
                     let app = GuiTestApp { ui, state, pump };
@@ -5716,6 +5871,21 @@ mod gui_tests {
             Mutex::new(tx)
         })
     }
+    /// GUI 测试的截图资产隔离根（C'-1）：仓库 `.tmp/` 下固定目录，进程内首次
+    /// 访问时创建，与生产 state dir 完全分离。目录常驻进程不删除，由
+    /// `python scripts/make_tmp.py clean` 统一清理（`.tmp/` 约定）。
+    fn snap_test_isolated_root() -> PathBuf {
+        static ROOT: OnceLock<PathBuf> = OnceLock::new();
+        ROOT.get_or_init(|| {
+            let root = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+                .join(".tmp")
+                .join("gui-test-snap-assets");
+            let _ = std::fs::create_dir_all(&root);
+            root
+        })
+        .clone()
+    }
+
     /// 驱动后台结果落地：真实 worker 线程发送、真实事件泵应用，最多等 5 秒。
     /// `done` 为真即返回；超时返回 false，由调用方断言给出可读失败原因。
     fn pump_until(app: &GuiTestApp, done: impl Fn() -> bool) -> bool {
@@ -5767,6 +5937,108 @@ mod gui_tests {
             let row = rules.row_data(i).unwrap();
             (row.key.as_str() == key).then(|| row.value.to_string())
         })
+    }
+
+    // 覆盖 C'-2：识别中点「截图识别」收到 {"ok":false,"error":"正在识别"} 后
+    // requested=true 写入红字；识别结束纯轮询（requested=false）收到 ok 且
+    // error 为 null 的正常状态时必须清除旧红字——修复前该分支只在「requested
+    // 或 error 非空」时写，红字会一直残留到下一次请求。
+    #[test]
+    fn snap_error_clears_when_polling_reports_recovery() {
+        with_gui(|app| {
+            let ui = &app.ui;
+            ui.set_snap_error("".into());
+            app.state
+                .borrow()
+                .snap_sender
+                .send(SnapMessage::Service(
+                    Ok(serde_json::json!({"ok": false, "error": "正在识别"})),
+                    true,
+                ))
+                .expect("发送请求失败消息");
+            app.pump.run(ui);
+            assert_eq!(
+                ui.get_snap_error().as_str(),
+                "正在识别",
+                "请求被服务拒绝时必须显示错误文本"
+            );
+            app.state
+                .borrow()
+                .snap_sender
+                .send(SnapMessage::Service(
+                    Ok(serde_json::json!({"ok": true, "model": "loaded", "task": "idle"})),
+                    false,
+                ))
+                .expect("发送轮询消息");
+            app.pump.run(ui);
+            assert_eq!(
+                ui.get_snap_error().as_str(),
+                "",
+                "轮询恢复正常（ok 且 error 为 null）后旧红字必须清除（C'-2）"
+            );
+        })
+        .unwrap();
+    }
+
+    // 覆盖 C'-1：测试资产根覆盖必须同时隔离截图服务管道名——无头 GUI 装置的
+    // 监督线程 ping 测试派生名（不存在的管道）即失败返回，绝不触碰真实用户
+    // 会话的截图服务。修复前 pipe_name() 无视覆盖变量返回生产真名 → 本断言红
+    // （该真名可被真实服务应答，attach-main-exe 会把测试二进制写入其
+    // launcher.json，2026-09-29 本机已实际发生）。
+    #[test]
+    fn snap_asset_root_override_isolates_pipe_name() {
+        let lock = crate::asset_util::test_env::env_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let previous = std::env::var_os("JCHTOOLS_SNAP_OCR_TEST_ASSET_ROOT");
+        let root = snap_test_isolated_root();
+        std::env::set_var("JCHTOOLS_SNAP_OCR_TEST_ASSET_ROOT", &root);
+        let pipe = crate::snap_ocr_assets::pipe_name();
+        let asset_root = crate::snap_ocr_assets::asset_root();
+        match previous {
+            Some(value) => std::env::set_var("JCHTOOLS_SNAP_OCR_TEST_ASSET_ROOT", value),
+            None => std::env::remove_var("JCHTOOLS_SNAP_OCR_TEST_ASSET_ROOT"),
+        }
+        drop(lock);
+        assert_eq!(asset_root, root, "测试资产根覆盖必须同时接管资产根（C'-1）");
+        assert!(
+            pipe.starts_with(r"\\.\pipe\jchtools-snap-ocr-test-"),
+            "管道名必须派生自隔离资产根的测试专用名，不得返回生产真名（C'-1）：{pipe}"
+        );
+    }
+
+    // 覆盖 C'-1（端到端）：经真实 on_select_tool → ensure_snap_supervisor 链路
+    // 切换 snap-ocr 页，监督线程的 ping 只能命中测试专用管道名（无服务监听）、
+    // readiness 只能对 .tmp 隔离根失败，因此不得向真实 state dir 写入任何内容
+    // ——以真实 launcher.json 前后字节不变取证（该文件是既往污染的实际受害点）。
+    #[test]
+    fn gui_test_assembly_isolates_real_snap_service() {
+        with_gui(|app| {
+            let ui = &app.ui;
+            let launcher = crate::config::state_dir()
+                .ok()
+                .map(|dir| dir.join("snap-ocr").join("launcher.json"));
+            let before = launcher
+                .as_deref()
+                .and_then(|path| std::fs::read(path).ok());
+            ui.set_snap_error("".into());
+            ui.invoke_select_tool("snap-ocr".into());
+            assert_eq!(ui.get_screen(), 6, "隔离不得改变页面导航语义（O-01）");
+            // 隔离下 ensure 的确定结局：ping 测试专用名失败 → readiness 对空
+            // 隔离根失败 → Service(Err) 经真实事件泵落地为错误文本。
+            assert!(
+                pump_until(app, || !ui.get_snap_error().is_empty()),
+                "隔离下 ensure 必须以服务未连接错误落地（不得悬挂或触达真实服务）"
+            );
+            let after = launcher
+                .as_deref()
+                .and_then(|path| std::fs::read(path).ok());
+            assert_eq!(
+                before, after,
+                "切换 snap-ocr 页不得读写真实 launcher.json（C'-1）"
+            );
+        })
+        .unwrap();
     }
 
     // 覆盖 P-02, P-04, H-03
@@ -7246,5 +7518,274 @@ mod gui_tests {
             other => panic!("watcher 应回传任务目录发现消息：{other:?}"),
         }
         let _ = std::fs::remove_dir_all(&state_root);
+    }
+
+    // 覆盖 E-4（热键录制：Shift+数字行/标点在 US 布局上报为符号文本，必须反向映射
+    // 回基础键，不得静默丢弃）——通过真实回调端到端断言组合键字符串。
+    #[test]
+    fn snap_record_key_maps_shift_symbol_to_base_key() {
+        with_gui(|app| {
+            let ui = &app.ui;
+            ui.set_snap_hotkey_draft("".into());
+            ui.set_snap_recording(true);
+            // Shift+7 经键盘布局映射上报为 "&"：录制结果必须是 Ctrl+Shift+7。
+            ui.invoke_snap_record_key("&".into(), true, false, true, false);
+            assert_eq!(
+                ui.get_snap_hotkey_draft().as_str(),
+                "Ctrl+Shift+7",
+                "Shift+符号必须反向映射回基础键（E-4），不得静默丢键"
+            );
+            assert!(!ui.get_snap_recording(), "录制成功后必须退出录制态");
+            assert_eq!(ui.get_snap_error().as_str(), "", "成功录制不得报错");
+            // 对照：Shift+字母不受映射影响（布局上报已是大写字母）。
+            ui.set_snap_recording(true);
+            ui.invoke_snap_record_key("A".into(), true, false, true, false);
+            assert_eq!(ui.get_snap_hotkey_draft().as_str(), "Ctrl+Shift+A");
+            // 对照：不带 Shift 的符号不映射（保持既有行为，不扩大范围）。
+            ui.set_snap_hotkey_draft("".into());
+            ui.set_snap_recording(true);
+            ui.invoke_snap_record_key("&".into(), true, false, false, false);
+            assert_eq!(
+                ui.get_snap_hotkey_draft().as_str(),
+                "",
+                "无 Shift 的符号主键仍不构成熟知组合，保持静默拒绝"
+            );
+            assert!(ui.get_snap_recording(), "未录制成功时保持录制态");
+        })
+        .unwrap();
+    }
+
+    // 覆盖 E-4（映射表逐对审计：US 布局 Shift 符号全部还原回基础键；
+    // Shift+字母不映射；无 Shift 的符号不映射——与 worker 侧表必须逐对一致）。
+    #[test]
+    fn snap_shift_symbol_map_covers_every_pair() {
+        let pairs = [
+            ('!', '1'),
+            ('@', '2'),
+            ('#', '3'),
+            ('$', '4'),
+            ('%', '5'),
+            ('^', '6'),
+            ('&', '7'),
+            ('*', '8'),
+            ('(', '9'),
+            (')', '0'),
+            ('~', '`'),
+            ('_', '-'),
+            ('+', '='),
+            ('{', '['),
+            ('}', ']'),
+            ('|', '\\'),
+            (':', ';'),
+            ('"', '\''),
+            ('<', ','),
+            ('>', '.'),
+            ('?', '/'),
+        ];
+        assert_eq!(
+            pairs.len(),
+            SNAP_SHIFT_SYMBOL_BASE.len(),
+            "审计表与实现表长度一致"
+        );
+        for (symbol, base) in pairs {
+            assert_eq!(
+                normalize_recorded_primary_key(&symbol.to_string(), true),
+                Some(base),
+                "Shift+{symbol} 必须映射回基础键 {base}"
+            );
+        }
+        // Shift+字母：布局上报已是大写字母，不在映射表内，必须原样保留。
+        for letter in ['A', 'Z', 'a', 'z', '7'] {
+            assert_eq!(
+                normalize_recorded_primary_key(&letter.to_string(), true),
+                Some(letter),
+                "Shift+{letter} 不得被符号映射改写"
+            );
+        }
+        // 无 Shift 的符号不映射（不扩大既有录制范围）。
+        for symbol in ['&', '~', '/', '\''] {
+            assert_eq!(
+                normalize_recorded_primary_key(&symbol.to_string(), false),
+                Some(symbol),
+                "无 Shift 的 {symbol} 必须原样返回"
+            );
+        }
+        // 多字符文本（输入法组合串）不构成可录制主键。
+        assert_eq!(normalize_recorded_primary_key("ab", true), None);
+        assert_eq!(normalize_recorded_primary_key("", true), None);
+    }
+
+    // 覆盖 T-22（转 Markdown：任务状态须含耗时——运行期间实时显示，收尾统计含总耗时）。
+    // 事件驱动走真实事件泵：FILE_STARTED 后同一次 pump.run 的周期刷新即须带耗时，
+    // DONE 收尾统计行须含从任务起算的总耗时。
+    #[test]
+    fn convert_metrics_show_elapsed_while_running_and_total_on_done() {
+        with_gui(|app| {
+            let ui = &app.ui;
+            ui.set_busy(true);
+            app.state.borrow_mut().runtime = RuntimeMode::MarkdownConverter;
+            let stale = Instant::now()
+                .checked_sub(Duration::from_secs(2))
+                .expect("系统运行时间不足 2 秒，无法构造旧时钟");
+            app.state.borrow_mut().started = stale;
+            app.pump
+                .out
+                .send(Event::Status("CONVERTER_STARTED|2".into()))
+                .unwrap();
+            app.pump
+                .out
+                .send(Event::Status(
+                    "CONVERTER_FILE_STARTED|1|2|docs/a.pdf".into(),
+                ))
+                .unwrap();
+            app.pump.run(ui);
+            let running = ui.get_convert_metrics().to_string();
+            assert!(
+                running.contains("正在处理 docs/a.pdf"),
+                "运行行必须保留当前文件：{running}"
+            );
+            assert!(
+                running.contains("耗时"),
+                "转换运行期间实时指标必须显示耗时（T-22）：{running}"
+            );
+            assert!(
+                elapsed_in_metrics(&running).is_some_and(|secs| secs >= 2.0),
+                "耗时必须从任务起算（不得显示 0.0s 新时钟）：{running}"
+            );
+            app.pump
+                .out
+                .send(Event::MdDone("CONVERTER_DONE|1|0|0|0|0|0".into()))
+                .unwrap();
+            app.pump.run(ui);
+            let final_metrics = ui.get_convert_metrics().to_string();
+            assert!(
+                final_metrics.contains("成功 1"),
+                "收尾统计保留既有计数：{final_metrics}"
+            );
+            assert!(
+                final_metrics.contains("总耗时"),
+                "转换收尾统计必须含总耗时（T-22）：{final_metrics}"
+            );
+            assert!(
+                elapsed_in_metrics(&final_metrics).is_some_and(|secs| secs >= 2.0),
+                "总耗时必须从任务起算到收尾：{final_metrics}"
+            );
+        })
+        .unwrap();
+    }
+
+    // 覆盖 T-22/U-03（真实回调启动转换必须重置耗时时钟：不得沿用上次任务的旧时钟）。
+    // 组件未就绪环境：启动后真实 worker 快速以 CONVERTER_FAIL 收尾，收尾前同步断言时钟。
+    #[test]
+    fn convert_start_resets_started_clock() {
+        let dir = temp_test_dir("convert-clock");
+        std::fs::create_dir_all(&dir).unwrap();
+        let dir_text = dir.display().to_string();
+        with_gui(move |app| {
+            let ui = &app.ui;
+            ui.invoke_select_tool("markdown-converter".into());
+            ui.set_convert_ready(true);
+            ui.set_convert_input_dir(dir_text.clone().into());
+            ui.set_convert_output_dir(dir_text.clone().into());
+            let stale = Instant::now()
+                .checked_sub(Duration::from_secs(600))
+                .expect("系统运行时间不足 600 秒，无法构造旧时钟");
+            app.state.borrow_mut().started = stale;
+            ui.invoke_convert_start();
+            assert!(ui.get_busy(), "组件就绪 + 目录有效时启动必须真正进入运行态");
+            assert!(
+                app.state.borrow().started > stale,
+                "转换启动必须重置耗时时钟（T-22/U-03），不得沿用 600 秒前旧时钟"
+            );
+            // 收尾不等待真实组件探测（本机可能装有 Xberg，探测耗时不可控）：
+            // 置取消标志让真实 worker 在首个检查点自行退出，同时用合成停止事件
+            // 驱动与生产完全相同的 CONVERTER_DONE 收尾路径清 busy。
+            if let Some(cancel) = app.state.borrow().convert_cancel.clone() {
+                cancel.store(true, Ordering::Release);
+            }
+            app.pump
+                .out
+                .send(Event::MdDone("CONVERTER_DONE|0|0|0|0|0|1".into()))
+                .unwrap();
+            assert!(
+                pump_until(app, || !ui.get_busy()),
+                "停止事件必须走生产收尾路径清除 busy，测试不得悬挂"
+            );
+        })
+        .unwrap();
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    // 覆盖 C-1（snap 管道读响应必须有 deadline：服务接受连接后挂起不响应时，
+    // 请求必须按超时错误返回，监督线程不得永久阻塞导致页面按钮永久禁用，O-11/O-30）。
+    // 用注入的管道名与 300ms 小超时模拟服务挂起；生产默认 10 秒路径同一实现。
+    #[cfg(windows)]
+    #[test]
+    fn snap_pipe_read_times_out_when_service_hangs() {
+        use windows_sys::Win32::Foundation::{CloseHandle, INVALID_HANDLE_VALUE};
+        use windows_sys::Win32::Storage::FileSystem::PIPE_ACCESS_DUPLEX;
+        use windows_sys::Win32::System::Pipes::{
+            ConnectNamedPipe, CreateNamedPipeW, PIPE_READMODE_BYTE, PIPE_TYPE_BYTE, PIPE_WAIT,
+        };
+
+        // 测试专用管道名（按进程隔离）：不得占用真实服务管道名，避免与用户
+        // 正在运行的截图服务互抢实例或向其发送请求。
+        let name = format!(r"\\.\pipe\jchtools-gui-test-hang-{}", std::process::id());
+        let wide: Vec<u16> = name.encode_utf16().chain(std::iter::once(0)).collect();
+        // SAFETY: wide 以 NUL 结尾且调用期间存活；security 属性传空表示默认安全描述符。
+        let pipe = unsafe {
+            CreateNamedPipeW(
+                wide.as_ptr(),
+                PIPE_ACCESS_DUPLEX,
+                PIPE_TYPE_BYTE | PIPE_READMODE_BYTE | PIPE_WAIT,
+                1,
+                4096,
+                4096,
+                0,
+                std::ptr::null(),
+            )
+        };
+        assert!(pipe != INVALID_HANDLE_VALUE, "创建测试管道服务端失败");
+        // 服务端线程：完成连接后挂起（永不响应），模拟服务卡死。
+        #[derive(Clone, Copy)]
+        struct SendPipe(windows_sys::Win32::Foundation::HANDLE);
+        // SAFETY: 句柄经包装后仅移入服务端线程独占使用，不再被创建线程触碰；
+        // Win32 句柄本身可跨线程使用，Send 仅解除裸指针的编译期限制。
+        unsafe impl Send for SendPipe {}
+        fn serve_hung_pipe(pipe: SendPipe) {
+            let SendPipe(pipe) = pipe;
+            // SAFETY: pipe 为本线程独占的有效句柄；同步模式不使用 overlapped，
+            // 客户端先连上时返回 FALSE + ERROR_PIPE_CONNECTED(535)，同为已连接。
+            unsafe { ConnectNamedPipe(pipe, std::ptr::null_mut()) };
+            // 挂起远超测试墙钟：模拟服务进程活着但永不响应（真实挂起场景）。
+            // 线程随测试进程退出终止，用例不 join，避免拖慢测试。
+            std::thread::sleep(Duration::from_secs(30));
+            // SAFETY: 关闭本线程独占的句柄，无未完成 I/O 需要等待。
+            unsafe { CloseHandle(pipe) };
+        }
+        let pipe = SendPipe(pipe);
+        // 函数边界传递整个 SendPipe：闭包按整值捕获（Send），避免精确捕获裸句柄字段。
+        // 服务端线程随测试进程退出终止（挂起即测试目的，不 join）。
+        std::thread::spawn(move || serve_hung_pipe(pipe));
+        let started = Instant::now();
+        let result = snap_pipe_request_on(
+            &name,
+            &serde_json::json!({"command": "ping"}),
+            Duration::from_millis(300),
+        );
+        let elapsed = started.elapsed();
+        let message = result.expect_err("服务挂起时读响应必须以错误返回，不得永久阻塞");
+        assert!(
+            message.contains("超时"),
+            "错误必须说明是响应超时（C-1）：{message}"
+        );
+        assert!(
+            elapsed >= Duration::from_millis(250),
+            "必须等到 deadline 才返回（提前失败说明走的是其他错误路径）：{elapsed:.1?}"
+        );
+        assert!(
+            elapsed < Duration::from_secs(2),
+            "必须在超时 + 余量内返回（C-1 修复前此处永久挂起）：{elapsed:.1?}"
+        );
     }
 }

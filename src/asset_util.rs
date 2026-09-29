@@ -186,8 +186,12 @@ pub(crate) fn inference_ready(inference: &InferenceManifest, root: &Path) -> Res
 }
 
 /// 落位前对 staging 组件树做成员级复核（存在 + 摘要），确保原子替换进来的
-/// 目录就是清单声明的完整安装。
-fn inference_layout_ready(component: &Path, inference: &InferenceManifest) -> Result<(), String> {
+/// 目录就是清单声明的完整安装。就绪检查（C-2）对解析出的组件目录复用
+/// 同一口径。
+pub(crate) fn inference_layout_ready(
+    component: &Path,
+    inference: &InferenceManifest,
+) -> Result<(), String> {
     for member in &inference.members {
         verify_file(
             &component.join(&member.install_path),
@@ -284,7 +288,11 @@ pub(crate) fn atomic_replace_file(staged: &Path, destination: &Path) -> Result<(
         return Err(install_error);
     }
     if had_existing {
-        fs::remove_file(&backup).map_err(|error| format!("清理旧文件失败：{error}"))?;
+        // B-1：新文件已就位，关键变更成功；旧备份清理失败不构成安装失败
+        //（此前 Windows 上防护软件/索引器短暂持有句柄即可把成功误报为失败）。
+        // 残留为同目录下的 .old-file-<uuid>（罕见），不影响新资产使用，可安全
+        // 手动删除；本函数无进度通道，静默忽略。
+        let _ = fs::remove_file(&backup);
     }
     Ok(())
 }
@@ -309,7 +317,13 @@ pub(crate) fn atomic_replace_dir(staged: &Path, destination: &Path) -> Result<()
         return Err(install_error);
     }
     if had_existing {
-        fs::remove_dir_all(&backup).map_err(|error| format!("清理旧资产失败：{error}"))?;
+        // B-1：新目录已就位，关键变更成功；旧备份清理失败不构成安装失败。
+        // 残留为同目录下的 .old-<uuid>（罕见，防护软件/索引器短暂持有句柄）。
+        // 覆盖情况：xberg-inference/<tag> 目标的残留会被下次初始化的
+        // prune_old_inference_tags 一并收集（它枚举 xberg-inference 下所有
+        // 非 tag 目录删除）；其余目标（licenses 等）的残留不影响新资产使用，
+        // 可手动删除。本函数无进度通道，静默忽略。
+        let _ = fs::remove_dir_all(&backup);
     }
     Ok(())
 }
@@ -321,6 +335,19 @@ pub(crate) fn restore_backup(backup: &Path, destination: &Path, kind: &str) -> R
             backup.display()
         )
     })
+}
+
+/// 测试支持：跨模块共享的进程环境变量锁。markdown_assets 与 snap_ocr_assets
+/// 的测试都会改写 `JCHTOOLS_XBERG_INFERENCE_DIR` 与各自资产根覆盖变量，而
+/// cargo test 的并行线程共享进程环境，必须经同一把锁串行，避免相互覆盖。
+#[cfg(test)]
+pub(crate) mod test_env {
+    use std::sync::{Mutex, OnceLock};
+
+    pub(crate) fn env_lock() -> &'static Mutex<()> {
+        static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+        LOCK.get_or_init(|| Mutex::new(()))
+    }
 }
 
 pub(crate) fn ensure_not_cancelled(cancel: &AtomicBool) -> Result<(), String> {
@@ -374,4 +401,88 @@ pub(crate) fn extract_zip_safely(
             .map_err(|error| format!("同步解包文件失败：{error}"))?;
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{atomic_replace_dir, atomic_replace_file};
+    use std::fs;
+    use std::process::Command;
+
+    // 覆盖 B-1：原子就位成功后，旧备份清理失败不得把已成功的安装误报为失败。
+    // 注入方式：旧目标本身是目录时，备份（改名后的目录）无法被 remove_file
+    // 删除，稳定复现「两次关键 rename 均已成功、仅清理失败」。生产触发是
+    // 防护软件/索引器短暂持有句柄（不可控），此处以确定性删除失败替代；
+    // 勿用句柄方案：句柄需在改名前打开，而无共享删除的句柄会先阻塞第一次
+    // rename，根本走不到清理分支。
+    #[test]
+    fn atomic_replace_file_cleanup_failure_still_succeeds() {
+        let root = tempfile::tempdir().expect("创建测试目录");
+        let destination = root.path().join("asset.bin");
+        fs::create_dir(&destination).expect("旧目标预置为目录（使备份不可删除）");
+        let staged = root.path().join("staged.bin");
+        fs::write(&staged, b"new-asset").expect("写入新资产");
+
+        atomic_replace_file(&staged, &destination)
+            .expect("关键变更已就位时清理失败不得报失败（B-1）");
+
+        assert_eq!(
+            fs::read(&destination).expect("新资产必须已就位"),
+            b"new-asset",
+            "destination 必须是新资产内容"
+        );
+    }
+
+    // 覆盖 B-1：目录级原子就位成功后，备份清理失败不得报失败。
+    // 注入方式（Windows ACL）：拒绝内部文件的 DELETE（仅对象）、目标目录
+    // 继承拒绝 DC（删除子项）。目标目录整体改名只需对象自身 DELETE 权限
+    // （未被拒）仍可成功；清理时删除内部文件的两条路径（对象 DELETE /
+    // 父目录 DC）均被拒 → remove_dir_all 确定性失败。
+    // 平台门禁原因：注入依赖 icacls（Windows 独有）；「清理失败不误报成功」
+    // 的同一语义由无门禁的 atomic_replace_file 用例覆盖（本项目按 P-07 仅
+    // 支持 Windows，门禁不影响生产平台覆盖）。
+    #[cfg(windows)]
+    #[test]
+    fn atomic_replace_dir_cleanup_failure_still_succeeds() {
+        let root = tempfile::tempdir().expect("创建测试目录");
+        let destination = root.path().join("asset-dir");
+        fs::create_dir_all(destination.join("nested")).expect("预置旧资产目录");
+        fs::write(destination.join("nested").join("old.txt"), b"old").expect("预置旧资产文件");
+        let user = std::env::var("USERNAME").expect("获取当前用户名");
+        for (target, rule) in [
+            (
+                destination.join("nested").join("old.txt"),
+                format!("{user}:(D)"),
+            ),
+            (destination.clone(), format!("{user}:(OI)(CI)(DC)")),
+        ] {
+            let output = Command::new("icacls")
+                .arg(&target)
+                .args(["/deny", &rule])
+                .output()
+                .expect("调用 icacls 注入删除失败");
+            assert!(
+                output.status.success(),
+                "icacls 必须成功：{}{}",
+                String::from_utf8_lossy(&output.stdout),
+                String::from_utf8_lossy(&output.stderr)
+            );
+        }
+        let staged = root.path().join("staged-dir");
+        fs::create_dir_all(&staged).expect("创建新资产目录");
+        fs::write(staged.join("new.txt"), b"new-asset").expect("写入新资产");
+
+        let result = atomic_replace_dir(&staged, &destination);
+        // 无论结论如何先恢复 ACL，保证临时目录可被 tempfile 清理。
+        let _ = Command::new("icacls")
+            .arg(root.path())
+            .args(["/reset", "/t", "/q"])
+            .output();
+        result.expect("关键变更已就位时清理失败不得报失败（B-1）");
+        assert_eq!(
+            fs::read(destination.join("new.txt")).expect("新资产必须已就位"),
+            b"new-asset",
+            "destination 必须是新资产内容"
+        );
+    }
 }

@@ -105,16 +105,27 @@ impl SnapWorker {
     }
 }
 
+/// 测试资产根覆盖（按 `debug_assertions` 门禁；注意本仓 release profile 同样
+/// 开启 debug-assertions，故发布构建中也生效——变量以测试命名、单用户本地
+/// 工具，实际风险可控，C'-1）：`JCHTOOLS_SNAP_OCR_TEST_ASSET_ROOT`
+/// 指向绝对路径时，资产根与截图服务管道名（见 [`pipe_name`]）一并脱离生产
+/// 位置——无头测试因此既不会 spawn 真实 worker（readiness 对隔离根必然
+/// 失败），也不会向真实用户会话的服务管道发送请求（生产名可被真实服务应答，
+/// attach-main-exe 会改写其 launcher.json）。
+fn test_asset_root_override() -> Option<PathBuf> {
+    if !cfg!(debug_assertions) {
+        return None;
+    }
+    std::env::var_os("JCHTOOLS_SNAP_OCR_TEST_ASSET_ROOT")
+        .map(PathBuf::from)
+        .filter(|path| path.is_absolute())
+}
+
 /// 本功能资产根目录：用户状态目录下的 snap-ocr/（模型、字体与 worker 的缓存落盘
 /// 属于 O-06 明确允许的资产写入，与截图/识别内容无关）。
 pub fn asset_root() -> PathBuf {
-    if cfg!(debug_assertions) {
-        if let Some(path) = std::env::var_os("JCHTOOLS_SNAP_OCR_TEST_ASSET_ROOT") {
-            let path = PathBuf::from(path);
-            if path.is_absolute() {
-                return path;
-            }
-        }
+    if let Some(path) = test_asset_root_override() {
+        return path;
     }
     if let Ok(path) = crate::config::state_dir() {
         return path.join(DATA_DIRECTORY);
@@ -163,7 +174,21 @@ fn pipe_identity() -> String {
 
 /// 截图服务命名管道名：`\\.\pipe\jchtools-snap-ocr-<hash>`，hash 为
 /// 「用户名:登录会话ID」UTF-8 字节 SHA-256 的前 16 个十六进制小写字符。
+/// 测试资产根覆盖生效时改用派生的测试专用名（C'-1，见 [`test_asset_root_override`]）。
 pub fn pipe_name() -> String {
+    // C'-1：同一覆盖变量驱动管道名隔离——无头 GUI 测试的监督线程只会 ping
+    // 测试专用名（无服务监听，连接必然失败），不会触碰真实用户会话的服务。
+    if let Some(root) = test_asset_root_override() {
+        let mut identity = b"test:".to_vec();
+        identity.extend_from_slice(root.as_os_str().as_encoded_bytes());
+        let digest = Sha256::digest(&identity);
+        let mut hash = String::with_capacity(16);
+        for byte in digest.iter().take(8) {
+            // 两位十六进制，无格式化失败路径。
+            let _ = write!(&mut hash, "{byte:02x}");
+        }
+        return format!(r"\\.\pipe\jchtools-snap-ocr-test-{hash}");
+    }
     let identity = pipe_identity();
     let digest = Sha256::digest(identity.as_bytes());
     let mut hash = String::with_capacity(16);
@@ -209,10 +234,21 @@ pub fn readiness() -> Result<(), String> {
     if worker_ready(worker, &root).is_err() {
         return Err("截图 OCR 工作进程未安装或校验失败".to_string());
     }
-    xberg_inference_ready(&root)?;
+    readiness_inference_pack(&manifest, &root)
+}
+
+/// 就绪检查的推理组件段：在位校验 + 清单成员校验。
+///
+/// 成员校验基于 [`resolve_xberg_component`] 解析出的组件目录（C-2）：该解析
+/// 支持 debug 构建的 `JCHTOOLS_XBERG_INFERENCE_DIR` 覆盖，成员校验必须与在位
+/// 校验使用同一目录——此前成员校验直接按资产根相对 install_path 进行，绕过
+/// 覆盖，导致覆盖路径在位校验通过后必报「推理组件包校验失败」、永远无法就绪。
+fn readiness_inference_pack(manifest: &SnapAssetManifest, root: &Path) -> Result<(), String> {
+    let component = xberg_inference_ready(root)?;
     // 清单接入推理组件包后做成员级摘要校验（XB-09；未接入时在位校验已覆盖）。
     if let Some(pack) = &manifest.xberg_inference {
-        asset_ready(&pack.asset, &root).map_err(|error| format!("推理组件包校验失败：{error}"))?;
+        let inference = inference_manifest_from_pack(pack)?;
+        crate::asset_util::inference_layout_ready(&component, &inference)?;
     }
     Ok(())
 }
@@ -310,13 +346,16 @@ fn xberg_layout_ready(component: &Path) -> Result<(), String> {
 /// 共用 [`crate::asset_util::AssetDownloader`] / [`crate::asset_util::NetworkDownloader`]，
 /// 测试可注入本地供给验证「补缺下载」与「失败后重试不重下」。
 pub fn initialize(cancel: &AtomicBool, mut progress: impl FnMut(String)) -> Result<(), String> {
+    let root = asset_root();
+    // B-2：先兜底清理历史残留的 staging（readiness 提前返回、取消后清理
+    // 失败或进程崩溃都会残留 .staging-<uuid>，download.zip 残留可达约 291MB）。
+    cleanup_stale_staging(&root);
     if readiness().is_ok() {
         progress("截图 OCR 组件已就绪".to_string());
         return Ok(());
     }
     ensure_not_cancelled(cancel)?;
     let manifest = load_manifest()?;
-    let root = asset_root();
     fs::create_dir_all(&root).map_err(|error| format!("创建资产目录失败：{error}"))?;
     let staging = root.join(format!(".staging-{}", Uuid::new_v4().simple()));
     fs::create_dir_all(&staging).map_err(|error| format!("创建临时目录失败：{error}"))?;
@@ -329,12 +368,51 @@ pub fn initialize(cancel: &AtomicBool, mut progress: impl FnMut(String)) -> Resu
         &root,
         &mut downloader,
     );
-    if let Err(error) = fs::remove_dir_all(&staging) {
+    finalize_staging(result, &staging, &mut progress)
+}
+
+/// 初始化收尾：删除本轮 staging 目录，主结果优先返回。
+///
+/// staging 清理是尽力而为（B-1，与 markdown 侧同口径）：关键变更已成功时
+/// 清理失败只经 progress 发出警告、维持 Ok（此前 Windows 上防护软件/索引器
+/// 短暂持有 staging 内文件句柄即把成功初始化误报为失败）；残留目录由下次
+/// initialize 入口的 [`cleanup_stale_staging`] 兜底收集。
+fn finalize_staging(
+    result: Result<(), String>,
+    staging: &Path,
+    progress: &mut dyn FnMut(String),
+) -> Result<(), String> {
+    if let Err(error) = fs::remove_dir_all(staging) {
         if result.is_ok() {
-            return Err(format!("清理初始化临时目录失败：{error}"));
+            progress(format!("警告：清理初始化临时目录失败：{error}"));
         }
     }
     result
+}
+
+/// 兜底清理资产根下历史残留的 `.staging-*` 目录（B-2，与 markdown 侧同口径），
+/// 单项失败跳过继续。
+///
+/// 并发前提：主程序单实例，初始化由 gui.rs 的 snap_initializing 守卫串行
+///（单初始化线程），入口处发现的 `.staging-*` 必为历史残留，不存在在途
+/// staging 被误删的并发窗口。`.staging-*` 前缀的非目录条目不是本流程产物
+///（staging 恒为目录），按设计跳过；资产根不存在（首次运行）时无需清理。
+fn cleanup_stale_staging(root: &Path) {
+    // 资产根尚不存在（首次运行）时无需清理。
+    let Ok(entries) = fs::read_dir(root) else {
+        return;
+    };
+    for entry in entries.flatten() {
+        let path = entry.path();
+        let is_staging = path
+            .file_name()
+            .and_then(|name| name.to_str())
+            .is_some_and(|name| name.starts_with(".staging-"));
+        if is_staging && path.is_dir() {
+            // 尽力而为：残留被防护软件短暂锁定时跳过，下次初始化再试。
+            let _ = fs::remove_dir_all(&path);
+        }
+    }
 }
 
 fn initialize_staged(
@@ -360,7 +438,7 @@ fn initialize_staged(
     // 成员级复核 + 目录级原子落位 + 旧版本清理），失败不留部分安装。
     if let Some(pack) = &manifest.xberg_inference {
         ensure_not_cancelled(cancel)?;
-        let inference = inference_manifest_from_pack(pack);
+        let inference = inference_manifest_from_pack(pack)?;
         if crate::asset_util::inference_ready(&inference, root).is_err() {
             progress(format!(
                 "下载资产 {}/{}：{}",
@@ -484,34 +562,35 @@ fn install_asset(
 /// snap 组件包条目 → 共享安装路径的推理组件清单（XB-10）。
 ///
 /// snap 清单成员的 install_path 相对资产根（serde 强制 `xberg-inference/<tag>/`
-/// 前缀），而共享的安装按组件目录相对路径落位；转换时剥离该前缀，
+/// 前缀），而共享的安装与校验按组件目录相对路径进行；转换时剥离该前缀，
 /// 否则组件会嵌套安装到 `xberg-inference/<tag>/xberg-inference/<tag>/`。
-/// 前缀由清单校验保证存在，剥离失败按清单损坏处理。
-fn inference_manifest_from_pack(pack: &SnapInferencePack) -> InferenceManifest {
+/// 前缀由清单校验保证存在；剥离失败按清单损坏报错（此前静默回退原路径，
+/// 在组件目录校验口径下会嵌套出错误目录，掩盖真实问题）。
+fn inference_manifest_from_pack(pack: &SnapInferencePack) -> Result<InferenceManifest, String> {
     let prefix = format!("xberg-inference/{}/", pack.tag);
-    InferenceManifest {
+    let mut members = Vec::with_capacity(pack.asset.members.len());
+    for member in &pack.asset.members {
+        let install_path = member.install_path.replace('\\', "/");
+        let stripped = install_path.strip_prefix(&prefix).ok_or_else(|| {
+            format!(
+                "推理组件清单损坏：成员 {} 未落在 xberg-inference/{}/ 之下",
+                member.install_path, pack.tag
+            )
+        })?;
+        members.push(crate::asset_util::InferenceMember {
+            path: member.path.clone(),
+            install_path: stripped.to_string(),
+            size_bytes: member.size_bytes,
+            sha256: member.sha256.clone(),
+        });
+    }
+    Ok(InferenceManifest {
         tag: pack.tag.clone(),
         url: pack.asset.url.clone(),
         size_bytes: pack.asset.size_bytes,
         sha256: pack.asset.sha256.clone(),
-        members: pack
-            .asset
-            .members
-            .iter()
-            .map(|member| {
-                let install_path = member.install_path.replace('\\', "/");
-                let stripped = install_path
-                    .strip_prefix(&prefix)
-                    .unwrap_or(install_path.as_str());
-                crate::asset_util::InferenceMember {
-                    path: member.path.clone(),
-                    install_path: stripped.to_string(),
-                    size_bytes: member.size_bytes,
-                    sha256: member.sha256.clone(),
-                }
-            })
-            .collect(),
-    }
+        members,
+    })
 }
 
 /// 写入推理组件的清单 tag 标记（`xberg-inference/expected-tag.txt`），供截图
@@ -698,7 +777,8 @@ impl AssetDownloader for NetworkDownloader {
     }
 }
 
-/// 流式下载到 `.part` 并按清单摘要校验，最多重试 3 次；成功后原子改名落位。
+/// 流式下载到 `.part` 并按清单摘要校验；下载中断与校验失败均最多重试 3 次
+///（C-3：弱网一次中断不作废整包），成功后原子改名落位。
 /// markdown 侧的可选组件初始化复用同一原语（T-05/T-21 同口径）。
 pub(crate) fn download_asset(
     url: &str,
@@ -713,21 +793,61 @@ pub(crate) fn download_asset(
     }
     let partial = destination.with_extension("part");
     let _ = fs::remove_file(&partial);
+    let mut fetch = |partial: &Path, progress: &mut dyn FnMut(String)| {
+        download_stream(url, partial, expected_size, cancel, progress)
+    };
+    download_asset_with(
+        destination,
+        &partial,
+        expected_size,
+        expected_sha256,
+        cancel,
+        progress,
+        &mut fetch,
+    )
+}
+
+/// 下载 + 校验重试核心：单次流式拉取经 `fetch` 注入（生产为 HTTP 流式下载
+/// [`download_stream`]，测试注入中断脚本），`.part` 命名与目录准备由调用方
+/// 承担。重试语义（C-3）：拉取中断与校验失败均最多重试 3 次；第 3 次仍失败
+/// 时返回含最后一次错误信息的 Err，`.part` 不残留。
+fn download_asset_with<F>(
+    destination: &Path,
+    partial: &Path,
+    expected_size: u64,
+    expected_sha256: &str,
+    cancel: &AtomicBool,
+    progress: &mut impl FnMut(String),
+    fetch: &mut F,
+) -> Result<(), String>
+where
+    F: FnMut(&Path, &mut dyn FnMut(String)) -> Result<(), String>,
+{
     for attempt in 1..=3 {
         ensure_not_cancelled(cancel)?;
-        download_stream(url, &partial, expected_size, cancel, progress)?;
-        match verify_file(&partial, expected_size, expected_sha256) {
+        if let Err(error) = fetch(partial, progress) {
+            // 取消优先于重试语义：用户取消时不发重试提示，直接收场。
+            ensure_not_cancelled(cancel)?;
+            if attempt < 3 {
+                progress(format!("下载中断，准备重试（{attempt}/3）：{error}"));
+                let _ = fs::remove_file(partial);
+                continue;
+            }
+            let _ = fs::remove_file(partial);
+            return Err(format!("下载资产失败：{error}"));
+        }
+        match verify_file(partial, expected_size, expected_sha256) {
             Ok(()) => {
-                fs::rename(&partial, destination)
+                fs::rename(partial, destination)
                     .map_err(|error| format!("写入下载资产失败：{error}"))?;
                 return Ok(());
             }
             Err(error) if attempt < 3 => {
                 progress(format!("资产校验失败，准备重试（{attempt}/3）：{error}"));
-                let _ = fs::remove_file(&partial);
+                let _ = fs::remove_file(partial);
             }
             Err(error) => {
-                let _ = fs::remove_file(&partial);
+                let _ = fs::remove_file(partial);
                 return Err(format!("下载资产校验失败：{error}"));
             }
         }
@@ -740,7 +860,7 @@ fn download_stream(
     partial: &Path,
     expected_size: u64,
     cancel: &AtomicBool,
-    progress: &mut impl FnMut(String),
+    progress: &mut dyn FnMut(String),
 ) -> Result<(), String> {
     let agent = ureq::builder()
         .redirects(3)
@@ -829,6 +949,8 @@ fn write_notice(path: &Path, manifest: &SnapAssetManifest) -> Result<(), String>
 #[cfg(test)]
 mod tests {
     use std::fs;
+    use std::path::Path;
+    use std::sync::atomic::AtomicBool;
 
     // 覆盖 O-11/O-13：推理组件的在位校验——缺失、不完整与齐备分别得到明确的
     // 结论，不冒称就绪；存在性检查不要求摘要（摘要校验随清单条目接入）。
@@ -895,7 +1017,7 @@ mod tests {
                 },
             },
         };
-        let inference = super::inference_manifest_from_pack(&pack);
+        let inference = super::inference_manifest_from_pack(&pack).expect("合法成员前缀必须可转换");
         assert_eq!(inference.tag, "vtest-tag");
         assert_eq!(inference.members.len(), 1);
         let member = &inference.members[0];
@@ -903,6 +1025,330 @@ mod tests {
         assert_eq!(
             member.install_path, "xberg.exe",
             "install_path 必须剥离 xberg-inference/<tag>/ 前缀（组件目录相对）"
+        );
+    }
+
+    // 覆盖 C-2 配套：成员 install_path 未落在 xberg-inference/<tag>/ 之下时，
+    // 转换必须报「推理组件清单损坏」错误，不得静默回退原路径（组件目录校验
+    // 口径下回退会嵌套出错误目录）。前缀存在性由 load_manifest 校验保证，
+    // 此处为防伪造清单的守卫路径。
+    #[test]
+    fn inference_manifest_from_pack_rejects_member_outside_tag_prefix() {
+        let mut pack = super::SnapInferencePack {
+            tag: "vtest-tag".to_string(),
+            asset: super::SnapAsset {
+                id: "xberg-inference".to_string(),
+                url: "https://fixtures.invalid/pack.zip".to_string(),
+                archive_type: "zip".to_string(),
+                install_path: None,
+                size_bytes: 42,
+                sha256: "ab".repeat(32),
+                members: vec![super::SnapMember {
+                    path: "pkg/xberg.exe".to_string(),
+                    install_path: "xberg-inference/vtest-tag/xberg.exe".to_string(),
+                    size_bytes: 7,
+                    sha256: "cd".repeat(32),
+                }],
+                license: super::SnapLicense {
+                    component: "Xberg".to_string(),
+                    license: "MIT".to_string(),
+                    source: "https://fixtures.invalid".to_string(),
+                },
+            },
+        };
+        pack.asset.members[0].install_path = "elsewhere/xberg.exe".to_string();
+        let error =
+            super::inference_manifest_from_pack(&pack).expect_err("越界成员必须报清单损坏错误");
+        assert!(
+            error.contains("推理组件清单损坏") && error.contains("elsewhere/xberg.exe"),
+            "错误应说明清单损坏并点名成员：{error}"
+        );
+    }
+
+    // ── 测试环境守卫：snap 侧覆盖变量与 markdown_assets 共用同一把进程环境锁 ──
+
+    /// 测试共享进程环境变量（cargo test 并行线程），组件根相关用例必须串行；
+    /// 锁实例与 markdown_assets 的测试共用（见 asset_util::test_env），避免
+    /// 两模块同时改写 JCHTOOLS_XBERG_INFERENCE_DIR 相互覆盖。
+    struct ComponentGuard {
+        root: tempfile::TempDir,
+        /// 进入用例前的覆盖变量旧值：drop 时恢复而不是无条件删除——GUI 测试
+        /// 装配设置的隔离根必须在本用例结束后仍然生效（C'-1，监督线程常驻，
+        /// 任意时刻可能读资产根与派生管道名）。
+        previous: Option<std::ffi::OsString>,
+        _lock: std::sync::MutexGuard<'static, ()>,
+    }
+
+    fn redirect_component_env() -> ComponentGuard {
+        let lock = crate::asset_util::test_env::env_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let previous = std::env::var_os("JCHTOOLS_SNAP_OCR_TEST_ASSET_ROOT");
+        let root = tempfile::tempdir().expect("创建资产根目录");
+        std::env::set_var("JCHTOOLS_SNAP_OCR_TEST_ASSET_ROOT", root.path());
+        std::env::remove_var("JCHTOOLS_XBERG_INFERENCE_DIR");
+        ComponentGuard {
+            root,
+            previous,
+            _lock: lock,
+        }
+    }
+
+    impl Drop for ComponentGuard {
+        fn drop(&mut self) {
+            match self.previous.clone() {
+                Some(value) => {
+                    std::env::set_var("JCHTOOLS_SNAP_OCR_TEST_ASSET_ROOT", value);
+                }
+                None => std::env::remove_var("JCHTOOLS_SNAP_OCR_TEST_ASSET_ROOT"),
+            }
+            std::env::remove_var("JCHTOOLS_XBERG_INFERENCE_DIR");
+        }
+    }
+
+    // 覆盖 C-2：debug 组件目录覆盖（JCHTOOLS_XBERG_INFERENCE_DIR）下，推理
+    // 组件包成员校验必须基于 resolve_xberg_component 解析出的组件目录，而非
+    // 资产根相对 install_path——否则覆盖路径永远无法就绪（在位校验通过后
+    // 必报「推理组件包校验失败」）。
+    // 断言强度说明：清单成员摘要对应真实大文件（xberg.exe 约 105MB），测试
+    // 无法伪造同摘要字节，故以「错误来自组件目录级成员校验、点名的实际大小
+    // 取自覆盖树桩文件」证明校验路径已切换；覆盖树下真实摘要全绿路径未验证。
+    #[test]
+    fn readiness_inference_pack_honors_component_dir_override() {
+        let guard = redirect_component_env();
+        let external = guard.root.path().join("external-component");
+        let models = external.join("models").join("snapshot-ocr");
+        fs::create_dir_all(models.join("dict")).expect("创建桩组件模型目录");
+        fs::write(external.join("xberg.exe"), b"stub").expect("预置桩 xberg.exe");
+        fs::write(models.join("det.onnx"), b"det").expect("预置桩检测模型");
+        fs::write(models.join("rec.onnx"), b"rec").expect("预置桩识别模型");
+        fs::write(models.join("dict").join("dict.txt"), b"dict").expect("预置桩字典");
+        fs::write(external.join("onnxruntime.dll"), b"ort").expect("预置桩运行库");
+        std::env::set_var("JCHTOOLS_XBERG_INFERENCE_DIR", &external);
+
+        let manifest = super::load_manifest().expect("内置清单必须可解析");
+        let error = super::readiness_inference_pack(&manifest, guard.root.path())
+            .expect_err("桩文件摘要与清单不符必须失败");
+
+        assert!(
+            !error.contains("推理组件包校验失败"),
+            "成员校验不得再走资产根相对路径（C-2）：{error}"
+        );
+        assert!(
+            error.contains("推理组件成员 xberg.exe") && error.contains("大小 4，预期"),
+            "错误应来自组件目录级成员校验并点名桩文件实际大小：{error}"
+        );
+    }
+
+    // ── C-3：下载中断重试 ──
+
+    fn sha256_bytes(bytes: &[u8]) -> String {
+        use sha2::{Digest, Sha256};
+        let mut hasher = Sha256::new();
+        hasher.update(bytes);
+        format!("{:x}", hasher.finalize())
+    }
+
+    // 覆盖 C-3：拉取中断（网络错误）必须与校验失败一样进入最多 3 次重试，
+    // 不得首次中断即整体失败（约 291MB 组件包弱网一次中断即作废、.part 报废）。
+    #[test]
+    fn download_asset_retries_after_stream_interruption() {
+        let root = tempfile::tempdir().expect("创建测试目录");
+        let destination = root.path().join("asset.bin");
+        let body = b"download-body".to_vec();
+        let cancel = AtomicBool::new(false);
+        let mut messages = Vec::new();
+        let mut progress = |message: String| messages.push(message);
+        let mut calls = 0_usize;
+        let mut fetch = |partial: &Path, _progress: &mut dyn FnMut(String)| -> Result<(), String> {
+            calls += 1;
+            if calls < 3 {
+                return Err("模拟网络中断".to_string());
+            }
+            fs::write(partial, &body).map_err(|error| error.to_string())
+        };
+
+        super::download_asset_with(
+            &destination,
+            &destination.with_extension("part"),
+            body.len() as u64,
+            &sha256_bytes(&body),
+            &cancel,
+            &mut progress,
+            &mut fetch,
+        )
+        .expect("两次中断后第三次拉取应成功落位");
+
+        assert_eq!(calls, 3, "中断后必须重试");
+        assert_eq!(fs::read(&destination).expect("成功后必须原子落位"), body);
+        assert_eq!(
+            messages
+                .iter()
+                .filter(|message| message.contains("下载中断，准备重试"))
+                .count(),
+            2,
+            "应恰好发出两条中断重试提示：{messages:?}"
+        );
+    }
+
+    // 覆盖 C-3：三次拉取全部中断时返回包含最后一次错误的失败，产物与 .part
+    // 均不残留。
+    #[test]
+    fn download_asset_fails_after_three_interruptions() {
+        let root = tempfile::tempdir().expect("创建测试目录");
+        let destination = root.path().join("asset.bin");
+        let cancel = AtomicBool::new(false);
+        let mut progress = |_message: String| {};
+        let mut calls = 0_usize;
+        let mut fetch =
+            |_partial: &Path, _progress: &mut dyn FnMut(String)| -> Result<(), String> {
+                calls += 1;
+                Err("模拟网络中断".to_string())
+            };
+
+        let error = super::download_asset_with(
+            &destination,
+            &destination.with_extension("part"),
+            8,
+            &"ab".repeat(32),
+            &cancel,
+            &mut progress,
+            &mut fetch,
+        )
+        .expect_err("三次中断必须失败");
+
+        assert_eq!(calls, 3, "重试次数上限为 3");
+        assert!(
+            error.contains("模拟网络中断"),
+            "失败信息应包含最后一次错误：{error}"
+        );
+        assert!(!destination.exists(), "失败不得落位产物");
+        assert!(
+            !destination.with_extension("part").exists(),
+            "失败后 .part 必须清理"
+        );
+    }
+
+    // ── B-1/B-2：staging 清理降级与残留兜底清理（与 markdown 侧同口径）──
+
+    // 覆盖 B-1：staging 清理失败时，已成功的关键变更不得被误报为失败（生产
+    // 触发：防护软件/索引器短暂持有 staging 内文件句柄，如推理组件包
+    // download.zip 约 291MB 长下载后解包阶段的句柄）。注入方式：staging
+    // 路径本身是普通文件时 remove_dir_all 确定性失败，无需平台句柄。
+    #[test]
+    fn finalize_staging_cleanup_failure_downgrades_to_warning() {
+        let root = tempfile::tempdir().expect("创建测试目录");
+        let staging = root.path().join(".staging-fake");
+        fs::write(&staging, b"not-a-dir").expect("把 staging 预置为文件");
+        let mut warnings = Vec::new();
+        let mut progress = |message: String| warnings.push(message);
+
+        let result = super::finalize_staging(Ok(()), &staging, &mut progress);
+
+        assert!(result.is_ok(), "清理失败不得吞掉成功结果：{result:?}");
+        assert_eq!(
+            warnings
+                .iter()
+                .filter(|message| message.contains("警告：清理初始化临时目录失败"))
+                .count(),
+            1,
+            "应恰好发出一条清理失败警告：{warnings:?}"
+        );
+    }
+
+    // 覆盖 B-1 配套不变量：主结果失败时，清理失败不得覆盖原始错误
+    //（本用例为守护性断言，修复前后都应通过）。
+    #[test]
+    fn finalize_staging_keeps_original_error_over_cleanup_failure() {
+        let root = tempfile::tempdir().expect("创建测试目录");
+        let staging = root.path().join(".staging-fake");
+        fs::write(&staging, b"not-a-dir").expect("把 staging 预置为文件");
+        let mut progress = |_message: String| {};
+
+        let result = super::finalize_staging(Err("原始失败".to_string()), &staging, &mut progress);
+
+        assert_eq!(
+            result.expect_err("原始错误必须保留"),
+            "原始失败",
+            "清理失败不得覆盖原始错误"
+        );
+    }
+
+    // 覆盖 B-2：历史残留的 .staging-* 目录必须在 initialize 入口被兜底清理。
+    // 残留来源：readiness 提前返回、取消后清理失败、进程崩溃——修复前仅当次
+    // 收尾清理，入口不清理任何残留（download.zip 残留可达约 291MB）。
+    // 注入方式：cancel 预置为 true，initialize 在入口清理后即被取消返回，
+    // 不触网、不建新 staging，本用例只断言入口清理。
+    #[test]
+    fn initialize_cleans_stale_staging_residue_at_entry() {
+        let guard = redirect_component_env();
+        let root = guard.root.path();
+        let residue = root.join(".staging-fake");
+        fs::create_dir_all(residue.join("xberg-inference")).expect("预置残留目录");
+        fs::write(
+            residue.join("xberg-inference").join("download.zip"),
+            b"residue",
+        )
+        .expect("预置残留文件");
+
+        let cancel = AtomicBool::new(true);
+        let _ = super::initialize(&cancel, |_message: String| {});
+
+        assert!(
+            !residue.exists(),
+            "残留 staging 目录必须在 initialize 入口被兜底清理（B-2）"
+        );
+    }
+
+    // 覆盖 B-2：单个残留目录清理失败（如被防护软件锁定）必须跳过继续，不得
+    // 影响其余残留清理，也不得让初始化整体失败。注入方式：对残留内文件持有
+    // 无 FILE_SHARE_DELETE 的句柄，remove_dir_all 稳定失败（目录不涉及改名，
+    // 句柄方案可行；对照 asset_util 的目录原子替换用例）。cancel 预置为 true
+    // 使初始化在入口清理后立即取消，避免真实联网。
+    // 平台门禁原因：共享模式句柄为 Windows 独有注入；无门禁的入口清理用例
+    // 覆盖主路径（本项目按 P-07 仅支持 Windows，门禁不影响生产平台覆盖）。
+    #[cfg(windows)]
+    #[test]
+    fn initialize_skips_undeletable_stale_staging_and_continues() {
+        let guard = redirect_component_env();
+        let root = guard.root.path();
+        let locked = root.join(".staging-locked");
+        fs::create_dir_all(&locked).expect("预置被锁残留目录");
+        fs::write(locked.join("inner.txt"), b"x").expect("预置锁定文件");
+        let normal = root.join(".staging-normal");
+        fs::create_dir_all(&normal).expect("预置普通残留目录");
+        fs::write(normal.join("inner.txt"), b"x").expect("预置普通残留文件");
+        {
+            use std::os::windows::fs::OpenOptionsExt;
+            let _handle = fs::OpenOptions::new()
+                .read(true)
+                .share_mode(3)
+                .open(locked.join("inner.txt"))
+                .expect("持有无共享删除句柄");
+
+            let cancel = AtomicBool::new(true);
+            let _ = super::initialize(&cancel, |_message: String| {});
+        }
+        assert!(!normal.exists(), "普通残留必须被清理");
+        assert!(
+            locked.exists(),
+            "被锁残留必须跳过（清理尽力而为，不阻塞初始化）"
+        );
+        let remaining: Vec<String> = fs::read_dir(root)
+            .expect("枚举资产根")
+            .flatten()
+            .filter_map(|entry| {
+                entry
+                    .file_name()
+                    .into_string()
+                    .ok()
+                    .filter(|name| name.starts_with(".staging-"))
+            })
+            .collect();
+        assert_eq!(
+            remaining,
+            vec![".staging-locked".to_string()],
+            "除被锁残留外不得留下其他 .staging-* 条目"
         );
     }
 }

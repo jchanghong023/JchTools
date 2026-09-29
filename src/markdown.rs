@@ -238,8 +238,9 @@ fn platform_preflight() -> Result<(), String> {
     Err("转 Markdown 仅支持 Windows 11 x64".to_string())
 }
 
-/// 平铺输出名占用索引（T-11/F29）：按大小写折叠键分桶，桶内候选再用
+/// 结果名占用索引（T-11/F29）：按大小写折叠键分桶，桶内候选再用
 /// [`compare_names`]（Windows `CompareStringOrdinal` 忽略大小写）精确确认。
+/// 平铺模式登记全局结果名，层级模式登记「相对父目录+结果名」（见 `scan`）。
 /// 折叠只用于缩小候选集：语义上过桶只会多比、不会漏比，occupied 查询近似 O(1)。
 #[derive(Default)]
 struct OccupiedIndex {
@@ -315,6 +316,19 @@ fn fold_unit(unit: u16) -> u16 {
     u16::try_from(u32::from(mapped)).unwrap_or(unit)
 }
 
+/// 结果名占用键（T-11）：平铺模式为全局结果名；层级模式为「相对父目录+
+/// 结果名」——同一输出父目录内大小写不敏感等价的结果名互相挤占（提交走
+/// rename_noreplace，等价名必然失败，必须在计划阶段计为同名跳过而不是浪费
+/// 整份转换后计失败，A'-1），不同子目录互不影响（T-10 保留层级）。键经
+/// [`OccupiedIndex`] 按大小写折叠比较。
+fn occupancy_key(flat: bool, relative_parent: &Path, file_name: &OsStr) -> OsString {
+    if flat {
+        file_name.to_os_string()
+    } else {
+        relative_parent.join(file_name).into_os_string()
+    }
+}
+
 fn scan(options: &Options, supported: &BTreeSet<String>) -> Result<Plan, String> {
     let input = checked_directory(&options.input_dir)?;
     let output = checked_directory(&options.output_dir)?;
@@ -368,13 +382,18 @@ fn scan(options: &Options, supported: &BTreeSet<String>) -> Result<Plan, String>
             .map_err(|e| format!("输入路径超出根目录：{e}"))?
             .to_path_buf();
         let file_name = markdown_name(&source)?;
-        if options.flat && occupied.contains(&file_name) {
+        // 冲突决胜与平铺一致：排序靠前者保留，后续计 skipped_duplicate（T-24：
+        // 与转换失败可区分）。
+        let occupancy = occupancy_key(
+            options.flat,
+            relative.parent().unwrap_or_else(|| Path::new("")),
+            &file_name,
+        );
+        if occupied.contains(occupancy.as_os_str()) {
             plan.summary.skipped_duplicate += 1;
             continue;
         }
-        if options.flat {
-            occupied.insert(file_name.clone());
-        }
+        occupied.insert(occupancy);
         let target = if options.flat {
             output.join(file_name)
         } else {
@@ -732,11 +751,10 @@ impl MediaWorker {
             .arg("worker")
             .arg("--no-config-discovery")
             .arg("--config-json")
-            .arg(r#"{"transcription":{"enabled":true}}"#)
-            // T-21：全部调用只经本地 stdio；环境变量只指向组件目录内的模型与运行库。
-            .env("XBERG_SENSEVOICE_MODEL_DIR", root.join("models"))
-            .env("XBERG_SHERPA_DLL_DIR", root.join("sherpa-onnx"))
-            .env("XBERG_FFMPEG_DLL_DIR", root.join("ffmpeg"));
+            .arg(r#"{"transcription":{"enabled":true}}"#);
+        // T-21：全部调用只经本地 stdio；环境变量只指向组件目录内的模型与运行库，
+        // 离线开关与文档转换路径同口径（XB-04，见 media_worker_environment）。
+        command.envs(media_worker_environment(root));
         Self::spawn(&mut command)
     }
 
@@ -749,7 +767,8 @@ impl MediaWorker {
         #[cfg(windows)]
         {
             use std::os::windows::process::CommandExt;
-            // 与文档转换一致：先脱离宿主 Job，才能为子进程组建独立进程组。
+            // 0x0800_0000 = CREATE_NO_WINDOW：CUI 子进程不新建控制台黑窗
+            // （与 worker 侧 xberg spawn 同法）；子进程由 MediaProcessJob 单独收口。
             command.creation_flags(0x0800_0000);
         }
         let mut child = command
@@ -937,20 +956,8 @@ impl MediaWorker {
                 crate::process::join_with_deadline(handle, crate::process::PIPE_DRAIN_GRACE)
             {
                 let tail = String::from_utf8_lossy(&captured.data);
-                let tail = tail.trim();
-                if !tail.is_empty() {
-                    let start = tail.len().saturating_sub(300);
-                    let mut suffix = tail[start..].to_string();
-                    if start > 0 {
-                        // 从首个空白之后取起，避免把截断的半个字符当开头。
-                        if let Some(position) = suffix.find(char::is_whitespace) {
-                            suffix.drain(..position);
-                        }
-                        message.push_str("：…");
-                    } else {
-                        message.push('：');
-                    }
-                    message.push_str(suffix.trim_start());
+                if let Some(suffix) = stderr_tail_for_message(&tail) {
+                    message.push_str(&suffix);
                 }
             }
         }
@@ -978,6 +985,52 @@ impl MediaWorker {
             let _ = crate::process::join_with_deadline(handle, crate::process::PIPE_DRAIN_GRACE);
         }
     }
+}
+
+/// 进程意外丢失时 stderr 的诊断后缀（T-24）：空尾部返回 `None`；非空时取尾部
+/// 最多 300 个**字符**（多字节 UTF-8 不得按字节切片，否则起点落在字符内部时
+/// panic 杀死转换线程，A2），发生截断时以「：…」衔接并从尾部首个空白之后
+/// 取起，未截断时仅以「：」衔接。
+fn stderr_tail_for_message(stderr_text: &str) -> Option<String> {
+    let tail = stderr_text.trim();
+    if tail.is_empty() {
+        return None;
+    }
+    const TAIL_CHARS: usize = 300;
+    let total = tail.chars().count();
+    if total <= TAIL_CHARS {
+        return Some(format!("：{}", tail.trim_start()));
+    }
+    let mut suffix: String = tail.chars().skip(total - TAIL_CHARS).collect();
+    // 从首个空白之后取起，避免把截断的半个词当开头。
+    if let Some(position) = suffix.find(char::is_whitespace) {
+        suffix.drain(..position);
+    }
+    Some(format!("：…{}", suffix.trim_start()))
+}
+
+/// 组装媒体转录进程的环境变量（T-21）：组件目录内模型与运行库指针 + 与文档
+/// 转换路径（[`markdown_document::apply_offline_environment`]）同口径的纯开关型
+/// 离线变量（XB-04：两侧同为 xberg.exe worker 子命令，离线口径必须一致，防止
+/// worker 内部 HF hub 回退联网）。不设 HF_HOME/HF_HUB_CACHE 等路径变量——媒体
+/// 组件目录结构与文档转换组件不同，不引入额外路径假设。
+fn media_worker_environment(root: &Path) -> Vec<(String, String)> {
+    let path_value = |sub: &str| root.join(sub).to_string_lossy().into_owned();
+    [
+        ("XBERG_SENSEVOICE_MODEL_DIR", path_value("models")),
+        ("XBERG_SHERPA_DLL_DIR", path_value("sherpa-onnx")),
+        ("XBERG_FFMPEG_DLL_DIR", path_value("ffmpeg")),
+        ("HF_HUB_OFFLINE", "1".to_string()),
+        ("HUGGINGFACE_HUB_OFFLINE", "1".to_string()),
+        ("TRANSFORMERS_OFFLINE", "1".to_string()),
+        ("HF_DATASETS_OFFLINE", "1".to_string()),
+        ("NO_COLOR", "1".to_string()),
+        ("XBERG_ORT_EP", "cpu".to_string()),
+        ("XBERG_MAX_CONCURRENT_REQUESTS", "1".to_string()),
+    ]
+    .into_iter()
+    .map(|(name, value)| (name.to_string(), value))
+    .collect()
 }
 
 impl Drop for MediaWorker {
@@ -1141,9 +1194,9 @@ impl Drop for MediaProcessJob {
 #[cfg(test)]
 mod tests {
     use super::{
-        compare_names, compare_paths, parse_formats, run_formats_probe, scan,
-        selected_xberg_extension, transcribe_with_slot, write_new_markdown, FormatGroup,
-        MediaWorker, OccupiedIndex, Options,
+        compare_names, compare_paths, media_worker_environment, occupancy_key, parse_formats,
+        run_formats_probe, scan, selected_xberg_extension, stderr_tail_for_message,
+        transcribe_with_slot, write_new_markdown, FormatGroup, MediaWorker, OccupiedIndex, Options,
     };
     use crate::markdown_document::Deadline;
     use std::{
@@ -1229,6 +1282,68 @@ mod tests {
             fs::canonicalize(&output).unwrap().join("x_pdf.md")
         );
         assert_eq!(plan.summary.skipped_duplicate, 1);
+    }
+
+    // 覆盖 T-11、T-12、T-24（A'-1 回归，键语义单元级）：层级模式的占用键 =
+    // 「相对父目录+结果名」且大小写不敏感比较——同父目录内大小写变体结果名
+    // （对应输入 a.PDF 与 a.pdf 在大小写敏感目录共存时的等价目标）必须命中
+    // 跳过，父目录大小写变体同样等价；不同父目录不得挤占（T-10）；平铺键
+    // 不含父目录（既有平铺决胜序不变）。
+    // 物理场景说明：默认 NTFS 大小写不敏感，同目录两个大小写变体文件无法
+    // 共存（第二次写入覆盖同一文件；fsutil 启用目录级大小写敏感需要管理员
+    // 权限、CreateFileW(FILE_FLAG_POSIX_SEMANTICS) 也无法绕过），故同键跳过
+    // 以本单元断言 + 不同目录集成护栏（hierarchical_duplicate_in_different_
+    // directories_both_convert）共同锁定；scan 接线由两者与既有平铺测试约束。
+    #[test]
+    fn hierarchical_occupancy_key_collides_only_within_same_parent() {
+        let mut occupied = OccupiedIndex::default();
+        occupied.insert(occupancy_key(
+            false,
+            Path::new("docs"),
+            OsStr::new("a_pdf.md"),
+        ));
+        assert!(
+            occupied.contains(
+                occupancy_key(false, Path::new("docs"), OsStr::new("A_PDF.MD")).as_os_str()
+            ),
+            "同父目录的结果名大小写变体必须命中占用（A'-1：第二个计同名跳过而非提交失败）"
+        );
+        assert!(
+            occupied.contains(
+                occupancy_key(false, Path::new("Docs"), OsStr::new("a_pdf.md")).as_os_str()
+            ),
+            "父目录大小写变体属于同一输出父目录，同样必须命中"
+        );
+        assert!(
+            !occupied.contains(
+                occupancy_key(false, Path::new("other"), OsStr::new("a_pdf.md")).as_os_str()
+            ),
+            "不同父目录不得挤占（T-10 层级保留）"
+        );
+        assert!(
+            !occupied.contains(
+                occupancy_key(true, Path::new("docs"), OsStr::new("A_PDF.MD")).as_os_str()
+            ),
+            "平铺键不含父目录，不得被层级键误命中（平铺决胜序不受影响）"
+        );
+    }
+
+    // 覆盖 T-10、T-11（A'-1 伴随护栏）：层级模式的占用登记只约束同一输出父
+    // 目录；不同子目录的同名文件各自独立转换，不得因全局重名被误跳过。
+    #[test]
+    fn hierarchical_duplicate_in_different_directories_both_convert() {
+        let temp = tempfile::tempdir().unwrap();
+        let input = temp.path().join("input");
+        let output = temp.path().join("output");
+        fs::create_dir_all(input.join("docs")).unwrap();
+        fs::create_dir_all(input.join("notes")).unwrap();
+        fs::create_dir_all(&output).unwrap();
+        fs::write(input.join("docs/a.PDF"), b"one").unwrap();
+        fs::write(input.join("notes/a.pdf"), b"two").unwrap();
+
+        let plan = scan(&options(input, output, false), &supported()).unwrap();
+        assert_eq!(plan.items.len(), 2, "不同子目录的同名文件互不挤占");
+        assert_eq!(plan.summary.skipped_duplicate, 0);
     }
 
     // 覆盖 T-07、T-09（输出目录是输入目录的祖先时：输入子树不被前缀判定排除，
@@ -1695,5 +1810,121 @@ mod tests {
             compares
         };
         assert_eq!(compares, 1, "大小写变体应在同桶内一次精确确认");
+    }
+
+    // ── A2：进程丢失诊断的 stderr 尾部截取必须字符安全 ──
+
+    // 覆盖 T-24（A2）：lost_message 曾按字节偏移切片，多字节 stderr 起点非
+    // UTF-8 边界时直接 panic，杀死 gui spawn 的转换线程（CONVERTER_DONE/FAIL
+    // 永不发送，GUI 永久 busy）。本例 751 字节（「错」×200 +「a」+「错」×50）：
+    // 旧实现的字节起点 451 相对中文区偏移 ≡1 (mod 3)，落在「错」内部，必然
+    // panic。注：纯「ASCII 前缀 + 连续中文」不会触发（300 恰为 3 的倍数、始终
+    // 对齐），混排内容才暴露缺陷。
+    #[test]
+    fn stderr_tail_multibyte_slice_does_not_panic() {
+        let stderr = format!("{}a{}", "错".repeat(200), "错".repeat(50));
+        let suffix = stderr_tail_for_message(&stderr).expect("非空 stderr 必须有诊断尾部");
+        assert_eq!(
+            suffix,
+            format!("：{stderr}"),
+            "251 字符未超 300 字符上限，应完整保留"
+        );
+        assert!(!suffix.contains('\u{FFFD}'), "不得出现半个字符：{suffix}");
+    }
+
+    // 覆盖 T-24（A2）：超长尾部按字符截取，最多 300 个字符，截断后从首个
+    // 空白之后取起，并以「：…」衔接。
+    #[test]
+    fn stderr_tail_caps_at_300_chars_and_drops_partial_word() {
+        let stderr = format!("模块加载失败 {}", "错".repeat(400));
+        let suffix = stderr_tail_for_message(&stderr).expect("非空 stderr 必须有诊断尾部");
+        assert!(suffix.starts_with("：…"), "截断时以省略号衔接：{suffix}");
+        let body = suffix.strip_prefix("：…").unwrap();
+        assert!(
+            body.chars().count() <= 300,
+            "尾部最多 300 个字符，实际 {}",
+            body.chars().count()
+        );
+        assert!(!body.contains('\u{FFFD}'), "不得出现半个字符：{body}");
+        assert!(
+            body.chars().all(|character| character == '错'),
+            "截断应从首个空白之后取起且只保留完整字符：{body}"
+        );
+    }
+
+    // 覆盖 T-24（A2）：截断窗口内含空白时，从尾部首个空白之后的完整词开头。
+    #[test]
+    fn stderr_tail_truncated_starts_after_first_whitespace() {
+        let stderr = format!("{} abc {}", "错".repeat(200), "错".repeat(200));
+        let suffix = stderr_tail_for_message(&stderr).expect("非空 stderr 必须有诊断尾部");
+        assert!(suffix.starts_with("：…"), "总 405 字符必然截断：{suffix}");
+        let body = suffix.strip_prefix("：…").unwrap();
+        assert!(
+            body.starts_with("abc"),
+            "截断后应从首个空白之后的完整词开头：{suffix}"
+        );
+        assert!(!body.contains('\u{FFFD}'), "不得出现半个字符：{body}");
+    }
+
+    // 覆盖 T-24（A2 守护）：短 ASCII 尾部完整保留，不截断、不加省略号。
+    #[test]
+    fn stderr_tail_short_ascii_is_kept_whole() {
+        let suffix =
+            stderr_tail_for_message("  decode failed  \n").expect("非空 stderr 必须有诊断尾部");
+        assert_eq!(suffix, "：decode failed");
+    }
+
+    // ── B-3：媒体转录进程的离线环境口径与文档转换路径一致 ──
+
+    // 覆盖 T-21/XB-04（B-3）：spawn_for_root 曾只注入三个 XBERG_* 目录指针，
+    // 缺 HF/Transformers 离线开关；若 xberg worker 内部存在 HF hub 回退即违反
+    // 离线要求。两侧同为 xberg.exe worker 子命令，口径必须与文档转换路径
+    // （markdown_document::apply_offline_environment）一致；此处只补纯开关型
+    // 变量，不引入 HF_HOME/HF_HUB_CACHE 等路径假设（媒体组件目录结构不同）。
+    #[test]
+    fn media_worker_environment_matches_document_offline_policy() {
+        let root = Path::new("C:/xberg-component");
+        let env = media_worker_environment(root);
+        let find = |key: &str| -> Option<String> {
+            env.iter()
+                .find(|(name, _)| name == key)
+                .map(|(_, value)| value.clone())
+        };
+        for key in [
+            "HF_HUB_OFFLINE",
+            "HUGGINGFACE_HUB_OFFLINE",
+            "TRANSFORMERS_OFFLINE",
+            "HF_DATASETS_OFFLINE",
+            "NO_COLOR",
+        ] {
+            assert_eq!(
+                find(key).as_deref(),
+                Some("1"),
+                "媒体转录进程缺少离线开关 {key}"
+            );
+        }
+        assert_eq!(
+            find("XBERG_ORT_EP").as_deref(),
+            Some("cpu"),
+            "媒体转录进程必须固定 CPU 推理"
+        );
+        assert_eq!(
+            find("XBERG_MAX_CONCURRENT_REQUESTS").as_deref(),
+            Some("1"),
+            "媒体转录进程必须串行处理请求"
+        );
+        // 既有组件目录指针保持不变：仍指向组件目录内的模型与运行库。
+        for (key, sub) in [
+            ("XBERG_SENSEVOICE_MODEL_DIR", "models"),
+            ("XBERG_SHERPA_DLL_DIR", "sherpa-onnx"),
+            ("XBERG_FFMPEG_DLL_DIR", "ffmpeg"),
+        ] {
+            let value = find(key).unwrap_or_else(|| panic!("缺少组件目录变量 {key}"));
+            let root_name = root.file_name().unwrap().to_string_lossy();
+            assert!(
+                value.contains(root_name.as_ref()) && value.contains(sub),
+                "{key} 应指向组件目录内的 {sub}：{value}"
+            );
+        }
     }
 }

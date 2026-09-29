@@ -130,6 +130,9 @@ export component SettingsWindow inherits Window {
     callback exit-service();
     callback force-exit-service();
     callback close-requested();
+    // 热键录制主键归一化（O-14）：Shift 按下时 US 布局符号（如 "&"）在 Rust 侧
+    // 反向映射回原键（"7"）；接线在 service.rs open_settings，未接线时返回空串。
+    callback normalize-shift-key(bool, string) -> string;
 
     in property <string> hotkey-label: "Ctrl+Alt+O";
     in property <bool> autostart-enabled: false;
@@ -194,7 +197,9 @@ export component SettingsWindow inherits Window {
                              && event.text != Key.Alt && event.text != Key.AltGr
                              && event.text != Key.Shift && event.text != Key.ShiftR
                              && event.text != Key.Meta && event.text != Key.MetaR) {
-                        root.draft-key =
+                        // 带 Shift 的符号键先经 Rust 侧反向映射还原原键（O-14），
+                        // 否则 Shift+7 录成 "&" 会被热键解析拒绝。
+                        root.draft-key = root.normalize-shift-key(event.modifiers.shift,
                             event.text == Key.Backspace ? "Backspace"
                             : event.text == Key.Tab ? "Tab"
                             : event.text == Key.Return ? "Return"
@@ -234,7 +239,7 @@ export component SettingsWindow inherits Window {
                             : event.text == Key.F22 ? "F22"
                             : event.text == Key.F23 ? "F23"
                             : event.text == Key.F24 ? "F24"
-                            : event.text;
+                            : event.text);
                         root.draft-control = event.modifiers.control;
                         root.draft-alt = event.modifiers.alt;
                         root.draft-shift = event.modifiers.shift;

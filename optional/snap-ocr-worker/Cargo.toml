@@ -38,11 +38,15 @@ slint-build = "=1.17.1"
 
 [target.'cfg(windows)'.dependencies]
 # 服务/托盘/热键/管道/截图/自启动所需（模块头注有各 feature 归属；集成期裁剪）。
+# JobObjects 供推理子进程的 kill-on-close 兜底（xberg_worker::InferenceJob，
+# O-16/E2'-1）。
 windows-sys = { version = "0.59", features = [
     "Win32_Foundation",
     "Win32_Graphics_Gdi",
     "Win32_Security",
     "Win32_Storage_FileSystem",
+    "Win32_System_Console",
+    "Win32_System_JobObjects",
     "Win32_System_Pipes",
     "Win32_System_Registry",
     "Win32_System_SystemInformation",

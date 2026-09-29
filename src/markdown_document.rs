@@ -416,7 +416,9 @@ fn derived_config_json(fast: bool) -> Result<String, String> {
     let mut config: Value = serde_json::from_str(include_str!("../resources/markdown-xberg.json"))
         .map_err(|error| format!("内置 Xberg 配置无效：{error}"))?;
     if fast {
-        config["layout"] = Value::Null;
+        // A1：内置配置已无 layout 顶层键（Xberg 按字段名拒绝未知顶层字段），
+        // 此处不得写回 layout:null——IndexMut 在键不存在时会插入该键。
+        // use_layout_for_markdown=false 已完整表达 fast 模式的版面降级。
         config["use_layout_for_markdown"] = Value::Bool(false);
         config["disable_ocr"] = Value::Bool(true);
         config["images"]["extract_images"] = Value::Bool(false);
@@ -1456,5 +1458,30 @@ mod tests {
         document.trailer.set("Root", catalog_id);
         document.save(&path).unwrap();
         assert_eq!(page_count(&path, &generous_deadline()), Some(201));
+    }
+
+    // ── A1：fast 模式配置不得写回已移除的 layout 顶层键 ──
+
+    // 覆盖 T-18（A1）：Xberg run49.1 按字段名拒绝未知顶层字段，内置配置已无
+    // layout 键；fast 分支若经 IndexMut 写回 layout:null，>200 页文档必然被
+    // Xberg 拒绝（IndexMut 在键不存在时会插入，而不是无害的空操作）。
+    #[test]
+    fn fast_config_omits_layout_and_applies_fast_overrides() {
+        let fast: Value = serde_json::from_str(&derived_config_json(true).unwrap()).unwrap();
+        assert!(
+            fast.get("layout").is_none(),
+            "fast 配置不得写回 layout 顶层键：{fast}"
+        );
+        assert_eq!(fast["use_layout_for_markdown"], Value::Bool(false));
+        assert_eq!(fast["disable_ocr"], Value::Bool(true));
+        assert_eq!(fast["images"]["extract_images"], Value::Bool(false));
+        assert_eq!(fast["pdf_options"]["extract_images"], Value::Bool(false));
+
+        let full: Value = serde_json::from_str(&derived_config_json(false).unwrap()).unwrap();
+        assert!(
+            full.get("layout").is_none(),
+            "常规配置同样不得引入 layout 键：{full}"
+        );
+        assert_eq!(full["use_layout_for_markdown"], Value::Bool(true));
     }
 }

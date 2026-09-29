@@ -5,9 +5,16 @@
 //! （O-13 常驻语义）。生命周期由调用方管理：服务退出时关闭 stdin，等待在途请求
 //! 完成后子进程正常退出，超时才强杀（O-16）。
 //!
-//! 取消（O-19）语义：共享 stdio 无法对单个请求取消，`recognize` 收到取消后立即
-//! 返回 [`ClientError::Cancelled`]（结果窗即刻恢复），在途识别在 Xberg 侧完成后
-//! 其响应因无等待者而被丢弃；发送新请求前会清理这些过期条目。
+//! 进程级兜底（E2'-1/O-16）：子进程一律加入 kill-on-close Job（[`InferenceJob`]，
+//! 句柄由本客户端持有）。服务进程无论经哪条路径死亡——「强制退出」的
+//! `std::process::exit(0)`（不运行任何 Drop）、被任务管理器等外部杀死、崩溃——
+//! 内核都会在回收句柄时终结组内全部进程，卡在不可中断推理中的子进程不会成为
+//! `CREATE_NO_WINDOW` 的无窗口孤儿。
+//!
+//! 取消（O-19/XB-08）语义：共享 stdio 无法对单个请求取消，取消走「终止进程」
+//! 路径——`recognize` 收到取消后立即返回 [`ClientError::Cancelled`]（结果窗即刻
+//! 恢复），调用方随后用 [`XbergWorkerClient::abort`] 杀死子进程，被放弃的请求
+//! 随进程死亡、不再阻塞后续任务；服务侧触发重载（重新 spawn + 预热）。
 //!
 //! 协议纯度：stdout 只承载协议行；Xberg 的诊断日志走 stderr，这里直接丢弃
 //! （O-29：不落盘、不进日志）。截图字节只在内存中经 base64 传递（O-29）。
@@ -30,7 +37,7 @@ const POLL_INTERVAL: Duration = Duration::from_millis(8);
 /// 客户端错误（O-30 分类：取消 / 推理失败 / 子进程退出 / 通信失败）。
 #[derive(Debug, Clone)]
 pub enum ClientError {
-    /// 用户取消：在途请求被放弃，其结果随后台完成被丢弃。
+    /// 用户取消：调用方应随后 [`Self::abort`] 终止子进程（XB-08）。
     Cancelled,
     /// Xberg 返回的失败响应（`ok:false`；消息不含图像内容）。
     Backend(String),
@@ -100,6 +107,10 @@ impl SnapshotState {
 pub struct XbergWorkerClient {
     stdin: Option<ChildStdin>,
     child: Child,
+    /// kill-on-close Job 兜底（仅 Windows）：本客户端独占句柄，Drop 或持有
+    /// 进程死亡时内核终结组内进程（O-16/E2'-1，见 [`InferenceJob`]）。
+    #[cfg(windows)]
+    job: Option<InferenceJob>,
     responses: Arc<Mutex<HashMap<u64, Value>>>,
     reader: Option<JoinHandle<()>>,
     next_id: u64,
@@ -119,7 +130,8 @@ impl XbergWorkerClient {
     ///
     /// 组件目录须含 `xberg.exe`、`onnxruntime.dll` 与 `models/snapshot-ocr`
     /// 模型集；启动配置把模型根固定为组件内绝对路径（XB-06：配置在启动时固定，
-    /// 请求不再携带配置），`ORT_DYLIB_PATH` 只注入子进程环境。
+    /// 请求不再携带配置），环境变量（`ORT_DYLIB_PATH` + 离线开关）经
+    /// [`inference_environment`] 注入。
     ///
     /// # Errors
     /// 子进程启动失败。
@@ -139,7 +151,7 @@ impl XbergWorkerClient {
             .stdout(Stdio::piped())
             // 诊断日志一律走 stderr；丢弃即可（O-29 不落盘）。
             .stderr(Stdio::null());
-        command.env("ORT_DYLIB_PATH", component_dir.join("onnxruntime.dll"));
+        command.envs(inference_environment(component_dir));
         Self::spawn_command(command)
     }
 
@@ -148,9 +160,36 @@ impl XbergWorkerClient {
     /// # Errors
     /// 子进程启动失败。
     pub fn spawn_command(mut command: Command) -> Result<Self, String> {
+        // xberg.exe 是控制台子系统（CUI）程序，而本服务是 GUI 子系统、自身无
+        // 控制台：不加 CREATE_NO_WINDOW（0x0800_0000）时，Windows 会为每个子进程
+        // 新建常驻黑窗（占用任务栏，用户误关即杀死推理子进程，O-13 连锁失效）。
+        // 与 src/process.rs、src/markdown.rs 对同一 xberg.exe 的既有处理一致。
+        // 标志加在本注入入口而非仅 spawn()：测试 mock（同为 CUI）一并不弹窗。
+        // 不叠加 CREATE_BREAKAWAY_FROM_JOB（0x0100_0000）：主程序 spawn 本服务时
+        // 不挂 Job（src/gui.rs snap_supervisor_ensure），服务自身不在任何宿主
+        // Job 内，子进程无需脱离；随后加入的是本客户端自建的 kill-on-close Job
+        //（见下），CREATE_NO_WINDOW 与 Job 成员身份互不影响。
+        #[cfg(windows)]
+        {
+            use std::os::windows::process::CommandExt;
+            command.creation_flags(0x0800_0000);
+        }
         let mut child = command
             .spawn()
             .map_err(|error| format!("无法启动推理子进程：{error}"))?;
+        // kill-on-close Job 兜底（E2'-1/O-16）：服务进程经强退（exit(0) 不运行
+        // Drop）、被外部杀死或崩溃死亡时，内核回收 Job 句柄即终结子进程及其
+        // 后代；正常路径（abort/shutdown/Drop）仍走显式 kill，Job 只是兜底。
+        // 与 src/markdown.rs `MediaWorker` 对 xberg.exe 的 Job attach 同一模式。
+        #[cfg(windows)]
+        let job = match InferenceJob::attach(&child) {
+            Ok(job) => job,
+            Err(error) => {
+                let _ = child.kill();
+                let _ = child.wait();
+                return Err(error);
+            }
+        };
         let stdin = child.stdin.take();
         let stdout = child.stdout.take();
         let (Some(stdin), Some(stdout)) = (stdin, stdout) else {
@@ -166,10 +205,19 @@ impl XbergWorkerClient {
         Ok(Self {
             stdin: Some(stdin),
             child,
+            #[cfg(windows)]
+            job: Some(job),
             responses,
             reader: Some(reader),
             next_id: 1,
         })
+    }
+
+    /// 推理子进程的系统 PID：仅供诊断与回归测试从外部观察子进程存活性，
+    /// 不参与协议。
+    #[must_use]
+    pub fn child_id(&self) -> u32 {
+        self.child.id()
     }
 
     /// 查询截图通道状态（`snapshot_state`）。
@@ -194,8 +242,8 @@ impl XbergWorkerClient {
     /// 识别一张内存 PNG（`ocr_snapshot`）。
     ///
     /// 成功返回布局文本；无文字图片返回 `Ok(None)`（Xberg 侧 `ok:true` +
-    /// `text:""` + `error_kind:"no_text"`）。取消在轮询间隙生效（O-19 细化：
-    /// 在途识别后台完成后被丢弃）。
+    /// `text:""` + `error_kind:"no_text"`）。取消在轮询间隙生效（O-19）；收到
+    /// 取消后由调用方终止子进程并重载（XB-08，见 [`Self::abort`]）。
     ///
     /// # Errors
     /// 取消、子进程退出、通信失败或 Xberg 失败响应。
@@ -216,6 +264,21 @@ impl XbergWorkerClient {
         } else {
             Ok(Some(text.to_owned()))
         }
+    }
+
+    /// 用户取消的进程级终止（XB-08「终止进程」路径）：立即终止子进程所在进程
+    /// 组并回收（Job 覆盖子进程的后代），不等在途识别完成。stdio 单连接无法
+    /// 只取消单个请求，取消即整连接作废；客户端随后不可复用，后续识别须由
+    /// 服务侧重载（重新 spawn，O-13）。
+    pub fn abort(&mut self) {
+        self.stdin.take();
+        // 先终结整组（E2'-1：后代进程一并回收），子进程自身再显式 kill 兜底。
+        #[cfg(windows)]
+        if let Some(job) = &self.job {
+            job.terminate();
+        }
+        let _ = self.child.kill();
+        let _ = self.child.wait();
     }
 
     /// 优雅关闭：关闭 stdin，等在途请求完成后子进程自行退出；超时强杀兜底
@@ -384,7 +447,160 @@ fn failure_message(response: &Value) -> String {
         .to_owned()
 }
 
+/// 推理子进程的 kill-on-close Job 对象（仅 Windows）：本客户端独占 Job 句柄，
+/// 句柄关闭（Drop，或持有进程任何形式的死亡——`std::process::exit(0)` 强退、
+/// 被外部杀死、崩溃——时内核回收）即终结组内全部进程（含子进程的后代）。
+/// 这是 O-16「释放模型」的进程级兜底：识别卡死时用户点「强制退出」走
+/// `exit(0)`、跳过全部清理，若无此兜底，卡在不可中断推理中的 `xberg.exe`
+/// 将以 `CREATE_NO_WINDOW` 的不可见孤儿常驻（E2'-1）。与根仓 `src/markdown.rs`
+/// 的 `MediaProcessJob` 同一 Win32 模式；worker 是独立包无法共享实现，本地
+/// 复刻（Job 语义调整时须两侧同步）。
+#[cfg(windows)]
+struct InferenceJob {
+    handle: windows_sys::Win32::Foundation::HANDLE,
+}
+
+#[cfg(windows)]
+impl InferenceJob {
+    /// 为子进程组建 kill-on-close 进程组（E2'-1/O-16）。
+    ///
+    /// # Errors
+    /// Job 创建、配置或挂接失败（此时子进程已被调用方回收）。
+    fn attach(child: &Child) -> Result<Self, String> {
+        use std::os::windows::io::AsRawHandle;
+        use windows_sys::Win32::System::JobObjects::{
+            AssignProcessToJobObject, CreateJobObjectW, JobObjectExtendedLimitInformation,
+            SetInformationJobObject, JOBOBJECT_EXTENDED_LIMIT_INFORMATION,
+            JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE,
+        };
+
+        // SAFETY: 未命名 Job Object，不传入外部指针。
+        let handle = unsafe { CreateJobObjectW(std::ptr::null(), std::ptr::null()) };
+        if handle.is_null() {
+            return Err(format!(
+                "无法创建推理进程组：{}",
+                std::io::Error::last_os_error()
+            ));
+        }
+        let job = Self { handle };
+        // SAFETY: 纯 C 结构；置零后只设置 KILL_ON_JOB_CLOSE 标志。
+        let mut limits: JOBOBJECT_EXTENDED_LIMIT_INFORMATION = unsafe { std::mem::zeroed() };
+        limits.BasicLimitInformation.LimitFlags = JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE;
+        // SAFETY: Job 句柄和同步调用期间的结构体指针均有效。
+        let configured = unsafe {
+            SetInformationJobObject(
+                job.handle,
+                JobObjectExtendedLimitInformation,
+                (&raw const limits).cast(),
+                u32::try_from(std::mem::size_of::<JOBOBJECT_EXTENDED_LIMIT_INFORMATION>())
+                    .map_err(|_| "推理进程组结构大小超出范围".to_string())?,
+            )
+        };
+        if configured == 0 {
+            return Err(format!(
+                "无法配置推理进程组：{}",
+                std::io::Error::last_os_error()
+            ));
+        }
+        // SAFETY: Child 保持有效且拥有该进程句柄，Job 句柄同样有效。
+        let assigned = unsafe { AssignProcessToJobObject(job.handle, child.as_raw_handle()) };
+        if assigned == 0 {
+            return Err(format!(
+                "无法把推理子进程加入进程组：{}",
+                std::io::Error::last_os_error()
+            ));
+        }
+        Ok(job)
+    }
+
+    /// 显式终结组内全部进程（`abort` 的整组回收路径；句柄关闭的内核兜底
+    /// 之外的可选主动终止）。
+    fn terminate(&self) {
+        use windows_sys::Win32::System::JobObjects::TerminateJobObject;
+        // SAFETY: Job 句柄在本对象销毁前有效；终结组内推理子进程及其后代。
+        let _ = unsafe { TerminateJobObject(self.handle, 1) };
+    }
+}
+
+#[cfg(windows)]
+impl Drop for InferenceJob {
+    fn drop(&mut self) {
+        use windows_sys::Win32::Foundation::CloseHandle;
+        // SAFETY: 本对象独占 Job 句柄；KILL_ON_JOB_CLOSE 会回收残留子进程。
+        let _ = unsafe { CloseHandle(self.handle) };
+    }
+}
+
 /// 绝对路径序列化：启动配置里的模型根必须是本地绝对路径（O-10）。
 fn absolute(path: &Path) -> PathBuf {
     std::env::current_dir().map_or_else(|_| path.to_path_buf(), |cwd| cwd.join(path))
+}
+
+/// 组装推理子进程的环境变量（XB-04）：`ORT_DYLIB_PATH` 指向组件目录内的
+/// onnxruntime.dll（路径型），其余 7 个是与根仓 `src/markdown.rs` 的
+/// `media_worker_environment` 同口径的纯开关型离线变量——两侧同为
+/// `xberg.exe worker` 子命令，而 worker 内部可能存在 HF hub 回退，离线防线
+/// 必须一致，否则截图 OCR 的推理子进程就处于离线口径之外（B'-1）。
+/// 不设 `HF_HOME`/`HF_HUB_CACHE` 等路径型缓存变量：与 markdown 侧约定一致，
+/// 不为组件目录引入额外路径假设。该口径现有三处实现（`src/markdown.rs`
+/// `media_worker_environment`、`src/markdown_document.rs`
+/// `apply_offline_environment`、本函数），跨包无法共享；调整口径时须三处同步。
+fn inference_environment(component_dir: &Path) -> Vec<(String, String)> {
+    [
+        (
+            "ORT_DYLIB_PATH",
+            component_dir
+                .join("onnxruntime.dll")
+                .to_string_lossy()
+                .into_owned(),
+        ),
+        ("HF_HUB_OFFLINE", "1".to_string()),
+        ("HUGGINGFACE_HUB_OFFLINE", "1".to_string()),
+        ("TRANSFORMERS_OFFLINE", "1".to_string()),
+        ("HF_DATASETS_OFFLINE", "1".to_string()),
+        ("NO_COLOR", "1".to_string()),
+        ("XBERG_ORT_EP", "cpu".to_string()),
+        ("XBERG_MAX_CONCURRENT_REQUESTS", "1".to_string()),
+    ]
+    .into_iter()
+    .map(|(name, value)| (name.to_string(), value))
+    .collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use std::collections::HashMap;
+    use std::path::Path;
+
+    use super::inference_environment;
+
+    // B'-1 回归（XB-04）：环境组装恰好含 8 个变量——7 个与 markdown 侧
+    // `media_worker_environment` 同口径的纯开关 + 路径型 `ORT_DYLIB_PATH`。
+    #[test]
+    fn inference_environment_carries_offline_switches_and_dylib_path() {
+        let root = Path::new("C:\\fake\\xberg-component");
+        let vars = inference_environment(root);
+        let map: HashMap<String, String> = vars.iter().cloned().collect();
+        for (name, want) in [
+            ("HF_HUB_OFFLINE", "1"),
+            ("HUGGINGFACE_HUB_OFFLINE", "1"),
+            ("TRANSFORMERS_OFFLINE", "1"),
+            ("HF_DATASETS_OFFLINE", "1"),
+            ("NO_COLOR", "1"),
+            ("XBERG_ORT_EP", "cpu"),
+            ("XBERG_MAX_CONCURRENT_REQUESTS", "1"),
+        ] {
+            assert_eq!(
+                map.get(name).map(String::as_str),
+                Some(want),
+                "{name} 应为纯开关值 {want}（与 markdown 侧离线口径一致）"
+            );
+        }
+        assert_eq!(
+            map.get("ORT_DYLIB_PATH").map(String::as_str),
+            Some(root.join("onnxruntime.dll").to_string_lossy().as_ref()),
+            "ORT_DYLIB_PATH 应指向组件目录内的 onnxruntime.dll"
+        );
+        assert_eq!(map.len(), 8, "不应混入其他变量：{vars:?}");
+    }
 }
