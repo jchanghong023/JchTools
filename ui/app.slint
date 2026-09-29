@@ -578,10 +578,10 @@ component LogCard inherits Surface {
             background: Design.card;
             HorizontalLayout { padding-left: 16px; padding-right: 16px; cross-axis-alignment: center;
                 Text { text: root.title; font-size: 12px; color: Design.text-muted; font-weight: 500;
-                    vertical-alignment: center; overflow: elide; }
+                    vertical-alignment: center; overflow: elide; horizontal-stretch: 0; }
                 Rectangle { horizontal-stretch: 1; background: transparent; }
                 Text { text: "最新的消息显示在最上面 · 界面只保留最近 300 条"; font-size: 11.5px;
-                    color: Design.muted-2; vertical-alignment: center; overflow: elide; }
+                    color: Design.muted-2; vertical-alignment: center; overflow: elide; horizontal-stretch: 0; }
             }
             Rectangle { y: parent.height - 1px; height: 1px; width: 100%; background: Design.line-soft; }
         }
@@ -863,10 +863,11 @@ export component AppWindow inherits Window {
                 spacing: 10px;
                 cross-axis-alignment: center;
                 BrandBadge { width: 24px; height: 24px; }
-                Text { text: "JchTools"; font-size: 13px; font-weight: 600; color: Design.ink; vertical-alignment: center; }
-                Text { text: "本地工具箱"; font-size: 11.5px; color: Design.muted-2; vertical-alignment: center; }
+                Text { text: "JchTools"; font-size: 13px; font-weight: 600; color: Design.ink; vertical-alignment: center; horizontal-stretch: 0; }
+                Text { text: "本地工具箱"; font-size: 11.5px; color: Design.muted-2; vertical-alignment: center; horizontal-stretch: 0; }
                 Rectangle { width: 1px; height: 14px; background: Design.line-strong; }
-                Text { text: root.screen-title(); font-size: 11.5px; color: Design.muted-2; vertical-alignment: center; overflow: elide; }
+                Text { text: root.screen-title(); font-size: 11.5px; color: Design.muted-2; vertical-alignment: center; overflow: elide; horizontal-stretch: 0; }
+                Rectangle { horizontal-stretch: 1; background: transparent; }
             }
             Rectangle { y: parent.height - 1px; height: 1px; width: 100%; background: Design.line; }
         }
@@ -919,7 +920,7 @@ export component AppWindow inherits Window {
                 // 页头：标题 + 竖分隔线 + 描述
                 HorizontalLayout { height: 28px; spacing: 12px; cross-axis-alignment: center;
                     Label { text: root.screen == 1 ? "关于 JchTools" : root.screen-title();
-                        font-size: 19px; font-weight: 600; vertical-alignment: center; }
+                        font-size: 19px; font-weight: 600; vertical-alignment: center; horizontal-stretch: 0; }
                     Rectangle { width: 1px; height: 14px; background: Design.line-strong; }
                     Muted { text: root.screen == 0 ? "内容去重、归类与清理（不解压）；先分析出计划，确认后才执行。"
                         : root.screen == 2 ? "递归解开压缩包；完整成功解出的原压缩包及分卷永久删除（不可恢复），失败或未完全解开的包保留。"
@@ -1600,7 +1601,7 @@ export component AppWindow inherits Window {
                     Surface {
                         VerticalLayout { padding-top: 14px; padding-bottom: 14px; padding-left: 16px; padding-right: 16px; spacing: 8px;
                             HorizontalLayout { spacing: 10px; cross-axis-alignment: center;
-                                Label { text: "可选组件"; font-weight: 600; font-size: 13px; }
+                                Label { text: "可选组件"; font-weight: 600; font-size: 13px; horizontal-stretch: 0; }
                                 Dot { tone: root.snap-initializing ? Design.warning : root.snap-ready ? Design.success : Design.muted-2; }
                                 Muted { text: root.snap-asset-status; horizontal-stretch: 1; overflow: elide; wrap: no-wrap; color: Design.muted-2; }
                                 if !root.snap-ready && !root.snap-initializing: AppButton {
@@ -1631,8 +1632,8 @@ export component AppWindow inherits Window {
                                 Muted { text: root.snap-service-status; horizontal-stretch: 1; overflow: elide; wrap: no-wrap; color: Design.muted-2; }
                             }
                             HorizontalLayout { spacing: 24px;
-                                Text { text: "模型：" + (root.snap-model == "ready" ? "就绪" : root.snap-model == "loading" ? "加载中" : root.snap-model == "error" ? "错误" : "未初始化"); font-size: 12.5px; color: Design.text-muted; }
-                                Text { text: "任务：" + (root.snap-task == "recognizing" ? "正在识别" : "空闲"); font-size: 12.5px; color: Design.text-muted; }
+                                Text { text: "模型：" + (root.snap-model == "ready" ? "就绪" : root.snap-model == "loading" ? "加载中" : root.snap-model == "error" ? "错误" : "未初始化"); font-size: 12.5px; color: Design.text-muted; horizontal-stretch: 0; }
+                                Text { text: "任务：" + (root.snap-task == "recognizing" ? "正在识别" : "空闲"); font-size: 12.5px; color: Design.text-muted; horizontal-stretch: 0; }
                                 Rectangle { horizontal-stretch: 1; background: transparent; }
                                 AppButton { text: "重新加载模型"; small: true; enabled: root.snap-connected && root.confirm-kind == 0 && !root.snap-request-pending && root.snap-task == "idle";
                                     clicked => { root.snap-retry-load(); } }
@@ -1646,7 +1647,7 @@ export component AppWindow inherits Window {
                         VerticalLayout { padding-top: 14px; padding-bottom: 14px; padding-left: 16px; padding-right: 16px; spacing: 10px;
                             Label { text: "设置"; font-weight: 600; font-size: 13px; }
                             HorizontalLayout { spacing: 10px; cross-axis-alignment: center;
-                                Text { text: "当前生效热键"; font-size: 12.5px; color: Design.text-muted; }
+                                Text { text: "当前生效热键"; font-size: 12.5px; color: Design.text-muted; horizontal-stretch: 0; }
                                 Kbd { text: root.snap-hotkey; }
                             }
                             HorizontalLayout { spacing: 10px; cross-axis-alignment: center;
