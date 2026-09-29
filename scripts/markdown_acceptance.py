@@ -38,6 +38,7 @@ import os
 import re
 import shutil
 import socket
+import sqlite3
 import subprocess
 import sys
 import threading
@@ -219,17 +220,62 @@ def _manifest_model_paths() -> list[str]:
     return [relative for entry in members if (relative := _str_field(entry, "install_path")) is not None]
 
 
-def _probe_runtime_dir(root: Path, missing: list[str]) -> Path | None:
-    """只读核对运行目录指针与 xberg.exe；缺失项写入 missing."""
+def _settings_state_dir() -> Path | None:
+    """应用级设置目录，与 src/xberg_settings.rs::state_dir 同口径（XB-18）."""
+    override = os.environ.get("JCHTOOLS_TEST_STATE_DIR")
+    if override and Path(override).is_absolute():
+        return Path(override)
+    local = os.environ.get("LOCALAPPDATA")
+    if not local:
+        return None
+    return Path(local) / "JchTools" / "data"
+
+
+def _probe_legacy_runtime_dir(root: Path, missing: list[str]) -> Path | None:
+    """旧文本指针（SQLite 无值时的迁移源，与 xberg_settings::load 同口径）."""
     selection = root / "xberg-runtime-path.txt"
     runtime_dir: Path | None = None
     if not selection.is_file():
-        missing.append(f"未配置 Xberg 运行目录（未找到 {selection}）")
+        missing.append(f"未配置 Xberg 运行目录（SQLite 无记录且未找到 {selection}）")
         return None
     with contextlib.suppress(OSError, ValueError):
         runtime_dir = Path(selection.read_text(encoding="utf-8").strip())
     if runtime_dir is not None and not (runtime_dir / "xberg.exe").is_file():
         missing.append(f"Xberg 运行目录缺 xberg.exe：{runtime_dir / 'xberg.exe'}")
+    return runtime_dir
+
+
+def _fetch_xberg_directory(database: Path) -> tuple[object, ...] | None:
+    """只读读取应用级 SQLite 保存的共享 Xberg 目录；无记录返回 None."""
+    with contextlib.closing(sqlite3.connect(database.as_uri() + "?mode=ro", uri=True)) as conn:
+        cursor = conn.execute("SELECT value FROM app_settings WHERE key='xberg_directory'")
+        return cast("tuple[object, ...] | None", cursor.fetchone())
+
+
+def _probe_runtime_dir(root: Path, missing: list[str]) -> Path | None:
+    """只读核对运行目录指针与 xberg.exe；缺失项写入 missing.
+
+    XB-18 后应用把共享目录保存在应用级 SQLite（config.sqlite3 的
+    app_settings.xberg_directory）；旧文本指针仅作为 SQLite 无值时的迁移源。
+    """
+    state = _settings_state_dir()
+    if state is None:
+        return _probe_legacy_runtime_dir(root, missing)
+    database = state / "config.sqlite3"
+    if not database.is_file():
+        return _probe_legacy_runtime_dir(root, missing)
+    try:
+        row = _fetch_xberg_directory(database)
+    except sqlite3.Error as error:
+        missing.append(f"读取应用配置 SQLite 失败：{error}")
+        return None
+    stored = row[0] if row else None
+    if not isinstance(stored, str) or not stored.strip():
+        return _probe_legacy_runtime_dir(root, missing)
+    runtime_dir = Path(stored.strip())
+    if not (runtime_dir / "xberg.exe").is_file():
+        missing.append(f"Xberg 运行目录缺 xberg.exe：{runtime_dir / 'xberg.exe'}")
+        return None
     return runtime_dir
 
 
@@ -1803,6 +1849,16 @@ def _assess_conversion(
         details.insert(0, "停止路径：已完成结果保留、源文件不变即符合 T-23；完整统计断言待资产环境调校")
     if problems:
         return Outcome(STATUS_FAILED, "；".join(problems[:5]), details)
+    if not stop_mode:
+        # 反假 PASS：run.error 只覆盖驱动链路失败；「任务运行过但整体转换失败、
+        # 零产物」此前只写进 details 仍记 PASS。异常/损坏夹具按 T-25 以失败诊断
+        # 收场、不产出 md 属预期，故不要求产物数等于输入数，只要求：产物是输入
+        # 对应集合的子集（命名规则外的产物即规划缺陷），且常规条目不得零产物。
+        extra_outputs = sorted(set(produced) - set(expected))
+        if extra_outputs:
+            return Outcome(STATUS_FAILED, f"产物超出输入对应集合：{extra_outputs[:8]}", details)
+        if not produced:
+            return Outcome(STATUS_FAILED, "预期至少一份 Markdown 产物，实得 0 项（转换全部失败或未产出）", details)
     return Outcome(STATUS_OK, details=details)
 
 
