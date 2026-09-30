@@ -273,6 +273,21 @@ def _python_quality_stages(results: list[StageResult]) -> None:
         results.append(run_logged(name, argv, timeout=600.0))
 
 
+def _powershell_env() -> dict[str, str]:
+    """Windows PowerShell 5.1 兼容环境，acceptance / package 两阶段共用.
+
+    本机执行策略全作用域 Undefined（默认 Restricted）会拒绝任何 -File 运行 .ps1；
+    PSExecutionPolicyPreference 以 Process 作用域覆盖之，且随环境继承给脚本内部
+    再起的 powershell 子进程，只影响本进程树。PSModulePath 修正见
+    [`_ps51_module_path`]（本机实测，缺它时 PS 子进程加载不了模块）。
+    """
+    env = {"PSExecutionPolicyPreference": "Bypass"}
+    module_path = _ps51_module_path()
+    if module_path is not None:
+        env["PSModulePath"] = module_path
+    return env
+
+
 def _ps51_module_path() -> str | None:
     r"""给 Windows PowerShell 5.1 子进程用的 PSModulePath：剔除 PowerShell 7 的模块目录.
 
@@ -357,10 +372,7 @@ def _fulltest_stages(results: list[StageResult]) -> None:
     # 本机执行策略全作用域 Undefined（默认 Restricted）会拒绝任何 -File 运行 .ps1；
     # PSExecutionPolicyPreference 以 Process 作用域覆盖之，且随环境继承给
     # acceptance.ps1 内部再起的 powershell 子进程，只影响本进程树。
-    acceptance_env = {"PSExecutionPolicyPreference": "Bypass"}
-    module_path = _ps51_module_path()
-    if module_path is not None:
-        acceptance_env["PSModulePath"] = module_path
+    acceptance_env = _powershell_env()
     results.append(run_logged("acceptance", acceptance_argv, timeout=STAGE_TIMEOUT_DEFAULT, env_extra=acceptance_env))
     shutil.rmtree(GUI_DATA_DIR, ignore_errors=True)
     results.append(StageResult("cleanup-gui-data", STATUS_OK, f"已删除一次性数据集 {GUI_DATA_DIR}"))
@@ -395,10 +407,7 @@ def _package_stage(results: list[StageResult]) -> None:
             StageResult("package", STATUS_UNVERIFIED, "PATH 上找不到 powershell（package-windows.ps1 需要）")
         )
         return
-    env_extra = {"PSExecutionPolicyPreference": "Bypass"}
-    module_path = _ps51_module_path()
-    if module_path is not None:
-        env_extra["PSModulePath"] = module_path
+    env_extra = _powershell_env()
     results.append(
         run_logged(
             "package",

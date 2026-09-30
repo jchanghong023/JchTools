@@ -103,13 +103,13 @@ OLD_PROJECT_DIR = Path(r"D:\code1111111111\all2markdown")
 CONVERT_ROW_COUNT = 3
 
 
-def _old_cache_candidates() -> list[Path | None]:
+def _old_cache_candidates() -> list[Path]:
     local = os.environ.get("LOCALAPPDATA")
-    return [
-        OLD_PROJECT_DIR / ".venv",
-        Path(local) / "all2markdown" if local else None,
-        Path.home() / ".cache" / "all2markdown",
-    ]
+    candidates = [OLD_PROJECT_DIR / ".venv"]
+    if local:
+        candidates.append(Path(local) / "all2markdown")
+    candidates.append(Path.home() / ".cache" / "all2markdown")
+    return candidates
 
 
 # 附录 A 双形态检查：主包不得携带的转换专用资产（文件名/后缀，全部小写比较）。
@@ -587,17 +587,25 @@ def _slide_rels_xml(rel_entries: str, layout_rel: str) -> str:
     )
 
 
-def _ensure_png_default(content_types: str) -> str:
-    if 'Extension="png"' in content_types:
-        return content_types
-    return content_types.replace(
-        "</Types>",
-        '<Default Extension="png" ContentType="image/png"/></Types>',
-    )
+def _ensure_defaults(content_types: str, defaults: tuple[tuple[str, str], ...]) -> str:
+    """[Content_Types].xml 缺失的 Default 逐个补齐（按给定顺序插在 </Types> 前）."""
+    for extension, content_type in defaults:
+        if f'Extension="{extension}"' in content_types:
+            continue
+        content_types = content_types.replace(
+            "</Types>",
+            f'<Default Extension="{extension}" ContentType="{content_type}"/></Types>',
+        )
+    return content_types
 
 
-def _build_pptx(
-    target: Path, name: str, slide_xml: str, image_rels: list[tuple[str, str]], media: dict[str, bytes]
+def _build_pptx(  # noqa: PLR0913
+    target: Path,
+    name: str,
+    slide_xml: str,
+    image_rels: list[tuple[str, str]],
+    media: dict[str, bytes],
+    extra_defaults: tuple[tuple[str, str], ...] = (),
 ) -> None:
     """克隆仓库 PPTX 骨架，替换 slide1 与其关系并注入媒体（布局关系保持原样）."""
     source = Path(__file__).resolve().parent.parent / "tests" / "markdown_fixtures" / "merged_table.pptx"
@@ -610,7 +618,10 @@ def _build_pptx(
     rels = "".join(
         f'<Relationship Id="{rid}" Type="{_PPTX_REL_TYPE_IMAGE}" Target="../media/{part}"/>' for rid, part in image_rels
     )
-    types = _ensure_png_default(members["[Content_Types].xml"].decode("utf-8"))
+    types = _ensure_defaults(
+        members["[Content_Types].xml"].decode("utf-8"),
+        (("png", "image/png"), *extra_defaults),
+    )
     members["[Content_Types].xml"] = types.encode("utf-8")
     members["ppt/slides/slide1.xml"] = slide_xml.encode("utf-8")
     members["ppt/slides/_rels/slide1.xml.rels"] = _slide_rels_xml(rels, layout_match.group(0)).encode("utf-8")
@@ -691,27 +702,11 @@ def _synth_pptx_svg(target: Path, _fixtures_dir: Path) -> SynthResult:
             _slide_xml(pics),
             [("rId10", "image1.svg"), ("rId11", "image2.png")],
             media,
+            extra_defaults=(("svg", "image/svg+xml"),),
         )
-        with zipfile.ZipFile(target / "pptx_svg.pptx", "a", zipfile.ZIP_DEFLATED) as archive:
-            blob = archive.read("[Content_Types].xml").decode("utf-8")
-        if 'Extension="svg"' not in blob:
-            patched = blob.replace(
-                "</Types>",
-                '<Default Extension="svg" ContentType="image/svg+xml"/></Types>',
-            )
-            _rewrite_zip_member(target / "pptx_svg.pptx", "[Content_Types].xml", patched)
     except (OSError, ValueError, zipfile.BadZipFile) as exc:
         return SynthResult([], f"构造 A07 PPTX 失败：{exc}")
     return SynthResult(["pptx_svg.pptx"])
-
-
-def _rewrite_zip_member(path: Path, member: str, text: str) -> None:
-    with zipfile.ZipFile(path) as archive:
-        members = {name: archive.read(name) for name in archive.namelist()}
-    members[member] = text.encode("utf-8")
-    with zipfile.ZipFile(path, "w", zipfile.ZIP_DEFLATED) as archive:
-        for name, blob in members.items():
-            archive.writestr(name, blob)
 
 
 def _synth_pptx_runs_fields(target: Path, _fixtures_dir: Path) -> SynthResult:
@@ -1771,7 +1766,7 @@ def manifest_has_python_entries() -> bool:
 
 
 def _old_cache_hits() -> list[str]:
-    return [str(path) for path in _old_cache_candidates() if path is not None and path.exists()]
+    return [str(path) for path in _old_cache_candidates() if path.exists()]
 
 
 # ---------------------------------------------------------------- 条目执行。
@@ -2255,25 +2250,15 @@ def _print_report(results: list[tuple[Item, Outcome]], report_path: Path | None)
 
 
 class _Arguments(argparse.Namespace):
-    """带类型标注的解析结果；未提供的参数保留安全默认值."""
+    """带类型标注的解析结果；类属性即默认值（argparse 仅对缺失属性写默认值）."""
 
-    list_only: bool
-    only: str
-    gui_exe: str
-    portable_root: str
-    installed_root: str
-    fixtures: str
-    json_report: str
-
-    def __init__(self) -> None:
-        super().__init__()
-        self.list_only = False
-        self.only = ""
-        self.gui_exe = ""
-        self.portable_root = ""
-        self.installed_root = ""
-        self.fixtures = ""
-        self.json_report = ""
+    list_only: bool = False
+    only: str = ""
+    gui_exe: str = ""
+    portable_root: str = ""
+    installed_root: str = ""
+    fixtures: str = ""
+    json_report: str = ""
 
 
 def _select_items(selector: str) -> tuple[list[Item], str | None]:

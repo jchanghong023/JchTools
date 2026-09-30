@@ -75,11 +75,13 @@ def render(size: int) -> Image.Image:
 def main() -> int:
     RESOURCES.mkdir(exist_ok=True)
     sizes = [256, 128, 64, 48, 32, 24, 16]
-    images = {size: render(size) for size in sizes}
+    # ICO 的各尺寸子图由 Pillow 从传入的单张 256px 图自行降采样生成
+    # （IcoImagePlugin._save），只渲染这一张即可，产物逐字节一致。
+    icon = render(BASE)
     png_path = RESOURCES / "app-icon.png"
-    images[256].save(png_path)
+    icon.save(png_path)
     ico_path = RESOURCES / "app.ico"
-    images[256].save(ico_path, format="ICO", sizes=[(size, size) for size in sizes])
+    icon.save(ico_path, format="ICO", sizes=[(size, size) for size in sizes])
     print(f"wrote {png_path} ({png_path.stat().st_size} bytes)")
     print(f"wrote {ico_path} ({ico_path.stat().st_size} bytes, sizes {sizes})")
     return 0
