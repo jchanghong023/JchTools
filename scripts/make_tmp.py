@@ -60,6 +60,18 @@ def fail(message: str) -> NoReturn:
     raise SystemExit(message)
 
 
+# 内联 git 身份（baseline 与 readme 两次提交共用）：不依赖机器上全局/系统
+# git user.email / user.name 配置。
+_GIT_COMMIT_IDENTITY = [
+    "-c",
+    "core.autocrlf=false",
+    "-c",
+    "user.email=test@local",
+    "-c",
+    "user.name=testdata",
+]
+
+
 def _line(*parts: str) -> str:
     """把多段长句拼成一行（行宽限制下拆行书写；生成内容与单行长串逐字符相同）."""
     return "".join(parts)
@@ -618,16 +630,11 @@ def initialise_git(root: Path, log: list[str]) -> None:
     _ = (root / "恢复.ps1").write_text(RESTORE_SCRIPT, encoding="utf-8-sig", newline="\n")
     run(["git", "init"], cwd=root)
     run(["git", "add", "-A"], cwd=root)
-    # 内联身份提交：不依赖机器上全局/系统 git user.email / user.name 配置。
+    # 内联身份提交：见模块头 _GIT_COMMIT_IDENTITY 注释。
     run(
         [
             "git",
-            "-c",
-            "core.autocrlf=false",
-            "-c",
-            "user.email=test@local",
-            "-c",
-            "user.name=testdata",
+            *_GIT_COMMIT_IDENTITY,
             "commit",
             "-q",
             "-m",
@@ -1039,19 +1046,14 @@ def main() -> int:
     build_readme(root, log, git=use_git)
     # README 在 baseline 之后生成：必须再提交一次，否则 恢复.ps1 的 git clean -fd 会删掉说明。
     if use_git:
-        # 与 baseline 提交同款内联身份：不依赖机器上全局/系统 git user.email / user.name 配置。
+        # 与 baseline 提交同款内联身份：见模块头 _GIT_COMMIT_IDENTITY 注释。
         run(["git", "-C", str(root), "add", "-A"])
         run(
             [
                 "git",
                 "-C",
                 str(root),
-                "-c",
-                "core.autocrlf=false",
-                "-c",
-                "user.email=test@local",
-                "-c",
-                "user.name=testdata",
+                *_GIT_COMMIT_IDENTITY,
                 "commit",
                 "-m",
                 "test corpus readme",

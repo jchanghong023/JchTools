@@ -42,6 +42,8 @@ from pywinauto import Application, controls, findbestmatch, findwindows, timings
 from pywinauto.application import ProcessNotFoundError, WindowSpecification
 
 if TYPE_CHECKING:
+    from collections.abc import Callable
+
     from pywinauto.base_wrapper import BaseWrapper
 
 TIMEOUT = 60
@@ -373,19 +375,42 @@ def assert_clean_exit(tag: str, *, killed: bool, code: int | None) -> None:
         raise RuntimeError(msg)
 
 
-def s1_launch_and_exit(exe: str) -> None:
+def run_stage(
+    tag: str,
+    exe: str,
+    body: Callable[[WindowSpecification], None],
+    *,
+    pre: Callable[[], None] | None = None,
+    after: Callable[[], None] | None = None,
+) -> None:
+    """S1-S5 共用的启动/拆除脚手架：Popen →（pre）→ wait_window → body → 统一收尾.
+
+    拆除顺序（含异常路径）与拆分前逐语义相同：窗口非 None 才 close_app（wait_window
+    抛错时 window 仍为 None，跳过 close 但仍 _wait_exit_or_kill）→ _wait_exit_or_kill →
+    after 钩子（_wait_exit_or_kill 抛异常时 after 被跳过，S5 的 scratch 清理依赖此顺序）。
+    pre 在 Popen 之后、窗口等待之前执行；pre 抛异常时进程同样不被清理（S5 媒体缺失
+    路径的现状语义，刻意保留）。收尾断言与最终 PASS 行统一在此打印。
+    """
     proc = subprocess.Popen([exe])
     window: WindowSpecification | None = None
+    if pre is not None:
+        pre()
     try:
         _, window = wait_window(proc.pid)
-        print("S1 PASS：窗口启动并可见")
+        body(window)
     finally:
         if window is not None:
             with contextlib.suppress(*TRANSIENT_GUI_ERRORS):
                 close_app(window)
         killed, code = _wait_exit_or_kill(proc, window=window)
-    assert_clean_exit("S1", killed=killed, code=code)
-    print("S1 PASS：进程已退出")
+        if after is not None:
+            after()
+    assert_clean_exit(tag, killed=killed, code=code)
+    print(f"{tag} PASS：进程已退出")
+
+
+def s1_launch_and_exit(exe: str) -> None:
+    run_stage("S1", exe, lambda _window: print("S1 PASS：窗口启动并可见"))
 
 
 def goto_organizer(window: WindowSpecification) -> None:
@@ -393,38 +418,29 @@ def goto_organizer(window: WindowSpecification) -> None:
     click(window, find_button(window, "目录整理"))
 
 
+def analyze_until_ready(window: WindowSpecification, data: str) -> str:
+    """S2/S3 共用前缀：切到目录整理、设置数据集并分析到 ready，返回任务基线."""
+    goto_organizer(window)
+    setup_directory(window, data)
+    baseline = newest_task(data)
+    # C-01：分析只读，不再弹破坏性确认框——点击后直接进入分析。
+    click(window, find_button(window, "开始分析"))
+    wait_task_status(data, "ready", baseline)
+    return baseline
+
+
 def s2_analyze_only(exe: str, data: str) -> None:
-    proc = subprocess.Popen([exe])
-    window: WindowSpecification | None = None
-    try:
-        _, window = wait_window(proc.pid)
-        goto_organizer(window)
-        setup_directory(window, data)
-        baseline = newest_task(data)
-        # C-01：分析只读，不再弹破坏性确认框——点击后直接进入分析。
-        click(window, find_button(window, "开始分析"))
-        wait_task_status(data, "ready", baseline)
+    def body(window: WindowSpecification) -> None:
+        _ = analyze_until_ready(window, data)
         _ = find_button(window, "确认并执行整理").wait("visible enabled", timeout=TIMEOUT)
         print("S2 PASS：分析完成（计划已生成，执行按钮可用；分析阶段未改动文件）")
-    finally:
-        if window is not None:
-            with contextlib.suppress(*TRANSIENT_GUI_ERRORS):
-                close_app(window)
-        killed, code = _wait_exit_or_kill(proc, window=window)
-    assert_clean_exit("S2", killed=killed, code=code)
-    print("S2 PASS：进程已退出")
+
+    run_stage("S2", exe, body)
 
 
 def s3_full_organize(exe: str, data: str) -> None:
-    proc = subprocess.Popen([exe])
-    window: WindowSpecification | None = None
-    try:
-        _, window = wait_window(proc.pid)
-        goto_organizer(window)
-        setup_directory(window, data)
-        baseline = newest_task(data)
-        click(window, find_button(window, "开始分析"))
-        wait_task_status(data, "ready", baseline)
+    def body(window: WindowSpecification) -> None:
+        baseline = analyze_until_ready(window, data)
         open_confirm(window, "确认并执行整理")
         confirm_dialog(window)
         wait_task_status(data, "finished", baseline)
@@ -436,13 +452,8 @@ def s3_full_organize(exe: str, data: str) -> None:
                 msg = f"整理成功后仍残留空目录：{parent}"
                 raise RuntimeError(msg)
         print("S3 PASS：全链路整理完成（任务状态 finished）")
-    finally:
-        if window is not None:
-            with contextlib.suppress(*TRANSIENT_GUI_ERRORS):
-                close_app(window)
-        killed, code = _wait_exit_or_kill(proc, window=window)
-    assert_clean_exit("S3", killed=killed, code=code)
-    print("S3 PASS：进程已退出")
+
+    run_stage("S3", exe, body)
 
 
 # 自动解压白名单（与 src/rules.rs::archive_name 同口径）：只有这些后缀会被解压。
@@ -577,12 +588,13 @@ def verify_extraction_results(root: Path, originals: dict[Path, str]) -> None:
 
 def s4_full_extract(exe: str, data: str) -> None:
     """递归解压全链路：成功原包删除、既有文件不变，冲突另存、嵌套内容完整落盘."""
-    proc = subprocess.Popen([exe])
-    window: WindowSpecification | None = None
     root = Path(data)
-    originals = {path.relative_to(root): file_digest(path) for path in root.rglob("*") if path.is_file()}
-    try:
-        _, window = wait_window(proc.pid)
+    originals: dict[Path, str] = {}
+
+    def snapshot_originals() -> None:
+        originals.update({path.relative_to(root): file_digest(path) for path in root.rglob("*") if path.is_file()})
+
+    def body(window: WindowSpecification) -> None:
         # 启动页即递归解压，无需切换。
         setup_directory(window, data)
         baseline = newest_task(data)
@@ -591,13 +603,8 @@ def s4_full_extract(exe: str, data: str) -> None:
         wait_task_status(data, "finished", baseline)
         verify_extraction_results(root, originals)
         print("S4 PASS：成功原包及分卷删除（隔离目录无多余项）；既有内容保留，冲突自动改名，嵌套内容正确落盘")
-    finally:
-        if window is not None:
-            with contextlib.suppress(*TRANSIENT_GUI_ERRORS):
-                close_app(window)
-        killed, code = _wait_exit_or_kill(proc, window=window)
-    assert_clean_exit("S4", killed=killed, code=code)
-    print("S4 PASS：进程已退出")
+
+    run_stage("S4", exe, body, pre=snapshot_originals)
 
 
 def goto_converter(window: WindowSpecification) -> None:
@@ -636,21 +643,24 @@ def s5_markdown_basic_chain(exe: str) -> None:
     报成基本链路通过。停止按 T-23（当前文件结束后生效、结果保留）；产物内容断言归
     scripts/markdown_acceptance.py，本冒烟只断言链路行为。
     """
-    proc = subprocess.Popen([exe])
-    window: WindowSpecification | None = None
-    scratch = Path(tempfile.mkdtemp(prefix="jchtools-gui-smoke-s5-"))
-    (scratch / "input").mkdir()
-    (scratch / "output").mkdir()
-    # 空输入的转换瞬时完成，「停止任务」运行态不可观察，开始→停止链路断言失效；
-    # 用媒体样本（转录需数秒）保证运行态可观察。样本由环境变量显式提供（真实
-    # 组件门控用例同口径），缺样本时明确失败而不是把「没开始」当通过。
-    media = os.environ.get("JCHTOOLS_S5_MEDIA", "")
-    if not media or not Path(media).is_file():
-        message = "S5 需要媒体样本以观察运行态：设置 JCHTOOLS_S5_MEDIA 指向一个真实媒体文件"
-        raise RuntimeError(message)
-    _ = shutil.copyfile(media, scratch / "input" / Path(media).name)
-    try:
-        _, window = wait_window(proc.pid)
+    scratch_box: list[Path] = []
+
+    def prepare_scratch() -> None:
+        scratch = Path(tempfile.mkdtemp(prefix="jchtools-gui-smoke-s5-"))
+        (scratch / "input").mkdir()
+        (scratch / "output").mkdir()
+        # 空输入的转换瞬时完成，「停止任务」运行态不可观察，开始→停止链路断言失效；
+        # 用媒体样本（转录需数秒）保证运行态可观察。样本由环境变量显式提供（真实
+        # 组件门控用例同口径），缺样本时明确失败而不是把「没开始」当通过。
+        media = os.environ.get("JCHTOOLS_S5_MEDIA", "")
+        if not media or not Path(media).is_file():
+            message = "S5 需要媒体样本以观察运行态：设置 JCHTOOLS_S5_MEDIA 指向一个真实媒体文件"
+            raise RuntimeError(message)
+        _ = shutil.copyfile(media, scratch / "input" / Path(media).name)
+        scratch_box.append(scratch)
+
+    def body(window: WindowSpecification) -> None:
+        scratch = scratch_box[0]
         goto_converter(window)
         set_converter_dirs(window, str(scratch / "input"), str(scratch / "output"))
         start = find_button(window, "开始转换")
@@ -670,14 +680,11 @@ def s5_markdown_basic_chain(exe: str) -> None:
         click(window, find_button(window, "停止任务"))
         _ = find_button(window, "开始转换").wait("visible enabled", timeout=CONVERT_STOP_TIMEOUT)
         print("S5 PASS：开始→停止链路完成（停止在当前文件后生效，界面回到可开始状态）")
-    finally:
-        if window is not None:
-            with contextlib.suppress(*TRANSIENT_GUI_ERRORS):
-                close_app(window)
-        killed, code = _wait_exit_or_kill(proc, window=window)
-        shutil.rmtree(scratch, ignore_errors=True)
-    assert_clean_exit("S5", killed=killed, code=code)
-    print("S5 PASS：进程已退出")
+
+    def cleanup() -> None:
+        shutil.rmtree(scratch_box[0], ignore_errors=True)
+
+    run_stage("S5", exe, body, pre=prepare_scratch, after=cleanup)
 
 
 def parse_stages(stages_arg: str) -> list[str]:
@@ -699,18 +706,16 @@ def run_dataset_stages(exe: str, data: Path, stages: list[str]) -> None:
     """
     scratch = Path(tempfile.mkdtemp(prefix="jchtools-gui-smoke-"))
     try:
+        # 顺序 S4→S2→S3 固定（元组序即原顺序）；S3 为末段，随后的清理由
+        # finally 的 scratch 删除兜底（循环末尾多出的一次 fresh 删除无输出、
+        # 无异常，可观察行为不变）。
         fresh = scratch / "data"
-        if "S4" in stages:
+        for stage, runner in (("S4", s4_full_extract), ("S2", s2_analyze_only), ("S3", s3_full_organize)):
+            if stage not in stages:
+                continue
             _ = shutil.copytree(data, fresh)
-            s4_full_extract(str(exe), str(fresh))
+            runner(str(exe), str(fresh))
             shutil.rmtree(fresh, ignore_errors=True)
-        if "S2" in stages:
-            _ = shutil.copytree(data, fresh)
-            s2_analyze_only(str(exe), str(fresh))
-            shutil.rmtree(fresh, ignore_errors=True)
-        if "S3" in stages:
-            _ = shutil.copytree(data, fresh)
-            s3_full_organize(str(exe), str(fresh))
     finally:
         shutil.rmtree(scratch, ignore_errors=True)
 

@@ -927,27 +927,29 @@ if UPDATE_BASELINE:
     print(f"baseline updated: {len(rows)} tests -> scripts/test-baseline.json")
     sys.exit(0)
 
-for name, fn in [
-    ("manifests", manifests),
-    ("config_schema", config_schema),
-    ("ui_callbacks", ui_callbacks),
-    ("rust_lexical", rust_lexical),
-    ("sql_syntax", sql_syntax),
-    ("shell_syntax", shell_syntax),
-    ("ps1_utf8_bom", ps1_utf8_bom),
-    ("test_baseline", test_baseline),
-    ("requirements_registry", requirements_registry),
-    ("snap_pipe_command_sync", snap_pipe_command_sync),
-    ("slint_layout_width", slint_layout_width),
-    ("slint_colors", slint_colors),
-    ("product_naming", product_naming),
-    ("slint_modal_gating", slint_modal_gating),
-    ("build_rc_prefers_windows_kits", build_rc_prefers_windows_kits),
-    ("acceptance_respects_cargo_target_dir", acceptance_respects_cargo_target_dir),
-    ("sums_integrity", sums_integrity),
-    ("scope_and_delivery", scope_and_delivery),
+# 检查注册表：条目名即函数名（fn.__name__），新增检查只需把函数加进列表，
+# 避免名称字符串与函数名两处同步漂移。
+for fn in [
+    manifests,
+    config_schema,
+    ui_callbacks,
+    rust_lexical,
+    sql_syntax,
+    shell_syntax,
+    ps1_utf8_bom,
+    test_baseline,
+    requirements_registry,
+    snap_pipe_command_sync,
+    slint_layout_width,
+    slint_colors,
+    product_naming,
+    slint_modal_gating,
+    build_rc_prefers_windows_kits,
+    acceptance_respects_cargo_target_dir,
+    sums_integrity,
+    scope_and_delivery,
 ]:
-    check(name, fn)
+    check(fn.__name__, fn)
 
 report = {
     "kind": "lightweight static source checks only",
