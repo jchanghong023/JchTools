@@ -48,7 +48,7 @@ powershell -NoProfile -File .\scripts\package-windows.ps1   # 生成含 7-Zip �
 
 - Windows 构建机需要 Rust `x86_64-pc-windows-msvc` + VS C++ Build Tools + Windows SDK（`rc.exe` 用于把 `resources/app.ico` 嵌入 EXE）。
 - 提交前 `SHOULD` 至少跑 `cargo test` 与 `python scripts/static_check.py`，并确认构建输出没有新增 `binding loop` 警告。
-- **本机 Xberg 测试目录**：本地测试 `MUST` 使用 `C:\Users\jiang\Documents\xberg-cli-x86_64-pc-windows-msvc\xberg-cli-x86_64-pc-windows-msvc` 中现有的 Xberg 与配套资产，`MUST NOT` 为测试另行下载 Xberg 版本；目录缺失、资产不全或接口不兼容时如实报告阻塞，不自动下载替代版本。（无执法点 · 软法）
+- **本机 Xberg 测试目录**：本地测试 `MUST` 使用 `C:\Users\jiang\Documents\xberg-run53.1\xberg-cli-x86_64-pc-windows-msvc` 中现有的 Xberg 与配套资产（发布 tag `v2026.9.30-2143-run53.1`，2026-10-01 经用户确认启用；worker 协议已含 stdio 断开自退、capabilities 身份字段与 shutdown 命令），`MUST NOT` 为测试另行下载 Xberg 版本；目录缺失、资产不全或接口不兼容时如实报告阻塞，不自动下载替代版本。旧目录 `C:\Users\jiang\Documents\xberg-cli-x86_64-pc-windows-msvc\xberg-cli-x86_64-pc-windows-msvc`（run49.1 旧协议）仅作兼容对照，不用于默认测试。（无执法点 · 软法）
 
 ## 3.1 7-Zip 引擎
 
