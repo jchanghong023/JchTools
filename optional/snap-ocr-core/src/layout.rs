@@ -251,18 +251,9 @@ fn cluster_lines(mut items: Vec<LayoutItem>, body_height: f64) -> Vec<TextLine> 
         }
     }
     lines.sort_by(|a, b| {
-        a.center_y().total_cmp(&b.center_y()).then(
-            a.items
-                .iter()
-                .map(|item| item.left)
-                .fold(f64::INFINITY, f64::min)
-                .total_cmp(
-                    &b.items
-                        .iter()
-                        .map(|item| item.left)
-                        .fold(f64::INFINITY, f64::min),
-                ),
-        )
+        a.center_y()
+            .total_cmp(&b.center_y())
+            .then(min_left(a).total_cmp(&min_left(b)))
     });
     for line in &mut lines {
         line.items
@@ -434,13 +425,18 @@ pub fn build_layout(spans: &[RecognizedSpan]) -> LayoutResult {
     }
 }
 
-/// 全部条目的最左 x（`min(item.left for item in items)`）；调用时条目非空。
-fn items_left_origin(lines: &[TextLine]) -> f64 {
-    lines
+/// 单行的最左 x（`min(item.left for item in line.items)`）；空行以 +∞ 参与
+/// （min 以 +∞ 为单位元，不影响跨行结果）。
+fn min_left(line: &TextLine) -> f64 {
+    line.items
         .iter()
-        .flat_map(|line| line.items.iter())
         .map(|item| item.left)
         .fold(f64::INFINITY, f64::min)
+}
+/// 全部条目的最左 x（`min(item.left for item in items)`）；调用时条目非空。
+/// 逐行求 min 再跨行求 min 与一次遍历等价（min 可结合，坐标已校验有限）。
+fn items_left_origin(lines: &[TextLine]) -> f64 {
+    lines.iter().map(min_left).fold(f64::INFINITY, f64::min)
 }
 
 #[cfg(test)]

@@ -64,6 +64,18 @@ fn rotation_preference(rotation_degrees: u16) -> u8 {
     }
 }
 
+/// 平局决胜序（[`select_best`] 专用）：分数、非空文字、旋转偏好逐级比较；
+/// 完全并列返回 Equal（调用方保留先出现者）。
+fn attempt_rank(a: &RecognitionAttempt, b: &RecognitionAttempt) -> Ordering {
+    a.score
+        .partial_cmp(&b.score)
+        .unwrap_or(Ordering::Equal)
+        .then_with(|| (!a.text.is_empty()).cmp(&(!b.text.is_empty())))
+        .then_with(|| {
+            rotation_preference(a.rotation_degrees).cmp(&rotation_preference(b.rotation_degrees))
+        })
+}
+
 /// 选择最高置信度的尝试：分数更高者优先；分数并列时优先非空文字；
 /// 仍并列时按 0°、180°、90°、270° 偏好决胜；完全并列时保留最先出现的
 /// 尝试（与 Python `max` 保留首个最大值一致，因此不用 `max_by`）。
@@ -78,29 +90,7 @@ pub fn select_best(attempts: &[RecognitionAttempt]) -> &RecognitionAttempt {
     );
     let mut best = 0;
     for index in 1..attempts.len() {
-        let candidate = &attempts[index];
-        let incumbent = &attempts[best];
-        let better = match candidate
-            .score
-            .partial_cmp(&incumbent.score)
-            .unwrap_or(Ordering::Equal)
-        {
-            Ordering::Greater => true,
-            Ordering::Equal => {
-                let candidate_text = !candidate.text.is_empty();
-                let incumbent_text = !incumbent.text.is_empty();
-                match candidate_text.cmp(&incumbent_text) {
-                    Ordering::Greater => true,
-                    Ordering::Equal => {
-                        rotation_preference(candidate.rotation_degrees)
-                            > rotation_preference(incumbent.rotation_degrees)
-                    }
-                    Ordering::Less => false,
-                }
-            }
-            Ordering::Less => false,
-        };
-        if better {
+        if attempt_rank(&attempts[index], &attempts[best]) == Ordering::Greater {
             best = index;
         }
     }
@@ -168,5 +158,41 @@ mod tests {
             },
         ];
         assert_eq!(select_best(&attempts), &attempts[1]);
+    }
+
+    // 特征测试：分数并列时非空文字胜出（平局决胜第二键，先出现者不豁免）。
+    #[test]
+    fn score_tie_prefers_nonempty_text() {
+        let attempts = vec![
+            RecognitionAttempt {
+                text: String::new(),
+                score: 0.8,
+                rotation_degrees: 0,
+            },
+            RecognitionAttempt {
+                text: "文字".to_string(),
+                score: 0.8,
+                rotation_degrees: 270,
+            },
+        ];
+        assert_eq!(select_best(&attempts), &attempts[1]);
+    }
+
+    // 特征测试：三级全部并列时保留最先出现的尝试（Python `max` 语义）。
+    #[test]
+    fn full_tie_keeps_first_attempt() {
+        let attempts = vec![
+            RecognitionAttempt {
+                text: "甲".to_string(),
+                score: 0.8,
+                rotation_degrees: 0,
+            },
+            RecognitionAttempt {
+                text: "甲".to_string(),
+                score: 0.8,
+                rotation_degrees: 0,
+            },
+        ];
+        assert!(std::ptr::eq(select_best(&attempts), &raw const attempts[0]));
     }
 }

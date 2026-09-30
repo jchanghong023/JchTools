@@ -270,10 +270,7 @@ impl XbergWorkerClient {
         let deadline = Instant::now() + self.request_timeout;
         let id = self.send_request(json!({"command": "snapshot_state"}), &cancel, deadline)?;
         let response = self.wait_response(id, &cancel, deadline)?;
-        if response.get("ok").and_then(Value::as_bool) != Some(true) {
-            let (message, kind) = failure_parts(&response);
-            return Err(ClientError::Backend { message, kind });
-        }
+        Self::require_success(&response)?;
         let state = response
             .get("state")
             .and_then(Value::as_str)
@@ -307,10 +304,7 @@ impl XbergWorkerClient {
             deadline,
         )?;
         let response = self.wait_response(id, cancel, deadline)?;
-        if response.get("ok").and_then(Value::as_bool) != Some(true) {
-            let (message, kind) = failure_parts(&response);
-            return Err(ClientError::Backend { message, kind });
-        }
+        Self::require_success(&response)?;
         let text = response.get("text").and_then(Value::as_str).unwrap_or("");
         if text.is_empty() {
             Ok(None)
@@ -408,6 +402,24 @@ impl XbergWorkerClient {
         }
     }
 
+    /// 从响应表取走指定请求的响应（轮询与进程退出前的最后一次捞取共用）。
+    fn take_response(&self, id: u64) -> Option<Value> {
+        self.responses
+            .lock()
+            .ok()
+            .and_then(|mut map| map.remove(&id))
+    }
+
+    /// 非 `ok:true` 的响应统一转 [`ClientError::Backend`]（携带结构化
+    /// `error_kind`，如有）。
+    fn require_success(response: &Value) -> Result<(), ClientError> {
+        if response.get("ok").and_then(Value::as_bool) != Some(true) {
+            let (message, kind) = failure_parts(response);
+            return Err(ClientError::Backend { message, kind });
+        }
+        Ok(())
+    }
+
     /// 轮询等待指定 `id` 的响应；取消在轮询间隙生效；`deadline` 到期返回
     /// [`ClientError::Timeout`]。子进程退出优先于超时报告（已死的进程必须如实
     /// 报告退出而不是超时）。
@@ -418,12 +430,7 @@ impl XbergWorkerClient {
         deadline: Instant,
     ) -> Result<Value, ClientError> {
         loop {
-            if let Some(response) = self
-                .responses
-                .lock()
-                .ok()
-                .and_then(|mut map| map.remove(&id))
-            {
+            if let Some(response) = self.take_response(id) {
                 return Ok(response);
             }
             if cancel.load(Ordering::Acquire) {
@@ -436,12 +443,7 @@ impl XbergWorkerClient {
                 .is_some()
             {
                 // 先再取一次响应（可能已写出但线程尚未收纳），随后如实报告退出。
-                if let Some(response) = self
-                    .responses
-                    .lock()
-                    .ok()
-                    .and_then(|mut map| map.remove(&id))
-                {
+                if let Some(response) = self.take_response(id) {
                     return Ok(response);
                 }
                 return Err(ClientError::ProcessExited(self.child_exit_code()));

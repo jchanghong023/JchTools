@@ -313,13 +313,15 @@ pub fn detect_candidates<B: OcrBackend>(
             return Err(PipelineError::PredictorOutput);
         }
         for (quad, score) in quads.iter().zip(scores) {
-            for (x, y) in quad {
-                if !x.is_finite() || !y.is_finite() || !score.is_finite() {
-                    return Err(PipelineError::PredictorOutput);
-                }
-            }
+            // 范围判定基于偏序比较：NaN 与 ±∞ 一律不落在 0.0..=1.0 内，
+            // 无需前置 is_finite。
             if !(0.0..=1.0).contains(&score) {
                 return Err(PipelineError::PredictorOutput);
+            }
+            for (x, y) in quad {
+                if !x.is_finite() || !y.is_finite() {
+                    return Err(PipelineError::PredictorOutput);
+                }
             }
             let mut local: Quad = *quad;
             for (x, y) in &mut local {
@@ -355,7 +357,8 @@ fn predict_recognition<B: OcrBackend>(
         return Err(PipelineError::PredictorOutput);
     }
     for (_, score) in &outputs {
-        if !score.is_finite() || !(0.0..=1.0).contains(score) {
+        // 范围判定基于偏序比较：NaN 与 ±∞ 一律不落在 0.0..=1.0 内。
+        if !(0.0..=1.0).contains(score) {
             return Err(PipelineError::PredictorOutput);
         }
     }
@@ -484,15 +487,11 @@ fn recognize_dense_code_retries<B: OcrBackend>(
             if entries.len() == RECOGNITION_BATCH_SIZE
                 && !flush_dense_code_retries(backend, &mut entries, &mut images, records, cancel)?
             {
-                entries.clear();
-                images.clear();
                 return Err(PipelineError::Cancelled);
             }
         }
     }
     let completed = flush_dense_code_retries(backend, &mut entries, &mut images, records, cancel)?;
-    entries.clear();
-    images.clear();
     if !completed {
         return Err(PipelineError::Cancelled);
     }
@@ -566,15 +565,11 @@ fn recognize_rotations<B: OcrBackend>(
             if entries.len() == RECOGNITION_BATCH_SIZE
                 && !flush_rotation_retries(backend, &mut entries, &mut images, records, cancel)?
             {
-                entries.clear();
-                images.clear();
                 return Err(PipelineError::Cancelled);
             }
         }
     }
     let completed = flush_rotation_retries(backend, &mut entries, &mut images, records, cancel)?;
-    entries.clear();
-    images.clear();
     if !completed {
         return Err(PipelineError::Cancelled);
     }
@@ -837,6 +832,21 @@ mod tests {
     /// 对应 Python 测试的 `_quad(left, top, right, bottom)`。
     fn quad(left: f64, top: f64, right: f64, bottom: f64) -> Quad {
         [(left, top), (right, top), (right, bottom), (left, bottom)]
+    }
+
+    // 特征测试：非有限分数（NaN/±∞ 不落在 0.0..=1.0 的偏序范围内）必须报
+    // PredictorOutput，不得变成其他错误变体或被放行。
+    #[test]
+    fn detect_rejects_non_finite_score_as_predictor_output() {
+        for score in [f64::NAN, f64::INFINITY, f64::NEG_INFINITY] {
+            let backend = FakeBackend::new()
+                .with_detect(move |_| Ok((vec![quad(10.0, 10.0, 30.0, 30.0)], vec![score])));
+            let outcome = detect_candidates(&backend, &FakeImage::Canvas, 2500, 400, None);
+            assert!(
+                matches!(outcome, Err(PipelineError::PredictorOutput)),
+                "score={score} 应报 PredictorOutput，实际 {outcome:?}"
+            );
+        }
     }
 
     /// 构造一条识别记录：整图假瓦片 + 候选 + 带标签裁剪。
