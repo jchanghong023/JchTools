@@ -645,16 +645,21 @@ fn has_ext(name: &str, ext: &str) -> bool {
 /// 分卷只认可独立解开的第一卷：数字尾卷族认白名单后缀 + 恰好三位 `.NNN` 的入口卷
 /// （`.001`；`.000` 是可识别的非法起始编号，入队后整组失败隔离）、`.partN.rar` 认
 /// part1；其余卷（`.z01`/`.r00`/`.002`）由删除与隔离的卷集合逻辑成组处理，不单独入队。
+/// `.partN.rar` 分卷正则：[`archive_name`] 与 [`multipart_name`] 共用同一实例，
+/// 保证「只有 `.partN.rar` 才算 RAR 分卷」的口径只有一处实现。
+fn part_rar_regex() -> &'static regex::Regex {
+    static PART: OnceLock<regex::Regex> = OnceLock::new();
+    PART.get_or_init(|| match regex::Regex::new(r"\.part(\d+)\.rar$") {
+        Ok(re) => re,
+        // 常量正则语法错误只可能是开发期笔误，按不可达处理
+        Err(_) => unreachable!("constant regex"),
+    })
+}
 pub fn archive_name(name: &str) -> bool {
     let name = name.to_lowercase();
     if has_ext(&name, "rar") {
         // 只有 `.partN.rar` 的 part1 算分卷主体；`report.partial.rar` 这类普通包不受影响。
-        static PART: OnceLock<regex::Regex> = OnceLock::new();
-        let re = PART.get_or_init(|| match regex::Regex::new(r"\.part(\d+)\.rar$") {
-            Ok(re) => re,
-            // 常量正则语法错误只可能是开发期笔误，按不可达处理
-            Err(_) => unreachable!("constant regex"),
-        });
+        let re = part_rar_regex();
         if let Some(caps) = re.captures(&name) {
             return caps[1].parse::<u64>().ok() == Some(1);
         }
@@ -756,12 +761,7 @@ pub fn multipart_name(name: &str) -> bool {
     let n = name.to_lowercase();
     // 与 archive_name 对齐：只有 .partN.rar 才算 RAR 分卷；contains(".part") 会把
     // report.partial.rar 这类普通包误判为分卷。
-    static PART: OnceLock<regex::Regex> = OnceLock::new();
-    let re = PART.get_or_init(|| match regex::Regex::new(r"\.part(\d+)\.rar$") {
-        Ok(re) => re,
-        // 常量正则语法错误只可能是开发期笔误，按不可达处理
-        Err(_) => unreachable!("constant regex"),
-    });
+    let re = part_rar_regex();
     if re.is_match(&n) {
         return true;
     }
@@ -841,19 +841,14 @@ pub fn digest_candidate(
             }
         }
     }
-    // 超过 40：去掉来源段，主体从 25 起逐字符截短到 ≤40（不拆代理对）。
-    let mut stem_part = truncate_utf16_units(stem, 25);
-    loop {
-        let total = stem_part.encode_utf16().count() + fixed_no_source;
-        if total <= CONFLICT_YIELD_UNITS || stem_part.is_empty() {
-            break;
-        }
-        let next = truncate_utf16_units(&stem_part, stem_part.encode_utf16().count() - 1);
-        if next.is_empty() {
-            break;
-        }
-        stem_part = next;
-    }
+    // 超过 40：去掉来源段，主体截短到放得下（不拆代理对）；预算连第一个字符的
+    // UTF-16 单元都容不下时仍保留第一个完整字符——结果允许超过 40 但不超过 255，
+    // 与此前「逐字符剥离到剩一个字符为止」的循环终态逐一相同（含首字符为代理对、
+    // 占 2 单元的情形）。
+    let capped = truncate_utf16_units(stem, 25);
+    let budget = CONFLICT_YIELD_UNITS.saturating_sub(fixed_no_source);
+    let floor = capped.chars().next().map_or(0, char::len_utf16);
+    let stem_part = truncate_utf16_units(&capped, budget.max(floor));
     build(&stem_part, false)
 }
 /// 按 UTF-16 单元上限截断字符串：逐字符累计 len_utf16，不切开代理对。
@@ -1571,5 +1566,22 @@ mod tests {
         // 扩展名与摘要自身挤爆预算：允许超过 40 但不得超过 255；再放不下则 None。
         let huge_ext = format!(".{}", "e".repeat(300));
         assert!(digest_candidate(None, "x", "A83F21C7", &huge_ext, None).is_none());
+    }
+
+    // 特征测试（C-20 带内路径）：预算被摘要/扩展名挤到 40 以下时，主体保留一个
+    // 完整字符（结果超 40 但 ≤255），而不是返回 None。
+    #[test]
+    fn digest_candidate_keeps_one_character_when_budget_exhausted() {
+        // fixed = 1(分隔符) + 35(摘要) + 4(扩展名) = 40：预算 0，仍保留单字符主体。
+        let candidate = digest_candidate(None, "abc", &"d".repeat(35), ".txt", None).unwrap();
+        assert_eq!(candidate, format!("a_{}.txt", "d".repeat(35)));
+        assert!(candidate.encode_utf16().count() > CONFLICT_YIELD_UNITS);
+        assert!(candidate.encode_utf16().count() <= SEGMENT_LIMIT_UNITS);
+        // 首字符是代理对（2 单元）时同样保留完整字符，不拆成空。
+        let surrogate_stem = "\u{20BB7}xx";
+        let paired = digest_candidate(None, surrogate_stem, &"d".repeat(35), ".txt", None).unwrap();
+        assert!(paired.starts_with('\u{20BB7}'));
+        // 主体为空（或连第一个字符都构不成）时安全失败。
+        assert!(digest_candidate(None, "", &"d".repeat(35), ".txt", None).is_none());
     }
 }

@@ -59,22 +59,13 @@ impl GitShared {
         }
     }
     fn set_stage(&self, stage: &str) {
-        if let Ok(mut slot) = self.stage.lock() {
-            slot.clear();
-            slot.push_str(stage);
-        }
+        Self::set_text(&self.stage, stage);
     }
     fn set_state(&self, state: &str) {
-        if let Ok(mut slot) = self.state.lock() {
-            slot.clear();
-            slot.push_str(state);
-        }
+        Self::set_text(&self.state, state);
     }
     fn set_current(&self, current: &str) {
-        if let Ok(mut slot) = self.current.lock() {
-            slot.clear();
-            slot.push_str(current);
-        }
+        Self::set_text(&self.current, current);
     }
     fn set_text(slot: &Mutex<String>, value: &str) {
         if let Ok(mut guard) = slot.lock() {
@@ -301,16 +292,20 @@ pub enum FileChange {
 }
 
 impl FileChange {
+    /// 本变更的主路径：rename 用新路径（旧路径的展示与暂存语义见各调用点注释）。
+    fn path(&self) -> &str {
+        match self {
+            FileChange::Renamed(_, new) => new,
+            FileChange::Added(path) | FileChange::Modified(path) | FileChange::Deleted(path) => {
+                path
+            }
+        }
+    }
     /// add 阶段需要暂存的路径集合。rename（git mv 已把删除与新增写入 index）只暂存
     /// 新路径：旧路径在工作树与 index 中均已不存在，`git add -- 旧路径` 会因 pathspec
     /// 无匹配而失败；旧路径的删除由 commit --only 从 HEAD 与工作树状态带入提交。
     fn stage_paths(&self) -> Vec<String> {
-        match self {
-            FileChange::Renamed(_, new) => vec![new.clone()],
-            FileChange::Added(path) | FileChange::Modified(path) | FileChange::Deleted(path) => {
-                vec![path.clone()]
-            }
-        }
+        vec![self.path().to_string()]
     }
     /// commit 阶段（--only）与单文件验证（G-05）使用的路径集合：rename 含新旧两路径。
     fn commit_paths(&self) -> Vec<String> {
@@ -323,12 +318,7 @@ impl FileChange {
     }
     /// commit message 使用的路径（G-07：相对仓库根目录；rename 用新路径）。
     fn display_path(&self) -> String {
-        match self {
-            FileChange::Renamed(_, new) => new.clone(),
-            FileChange::Added(path) | FileChange::Modified(path) | FileChange::Deleted(path) => {
-                path.clone()
-            }
-        }
+        self.path().to_string()
     }
 }
 

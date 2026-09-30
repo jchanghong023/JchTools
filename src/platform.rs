@@ -39,22 +39,22 @@ pub fn remove(path: &Path, mode: DeleteMode, control: &Control) -> Result<Delete
     if mode == DeleteMode::Keep {
         return Ok(DeleteResult::Kept);
     }
-    let meta = fs::symlink_metadata(path)?;
-    if fsutil::is_link(&meta) {
-        bail!("拒绝删除链接 / reparse point");
-    }
-    if meta.is_dir() && fs::read_dir(path)?.next().is_some() {
-        bail!("目录不是空目录，不会递归删除用户目录");
-    }
+    // 拒绝链接 / 非空目录的检查块在删除前后各执行一次（防检查后类型被替换）。
+    let ensure_removal_safe = || -> Result<()> {
+        let meta = fs::symlink_metadata(path)?;
+        if fsutil::is_link(&meta) {
+            bail!("拒绝删除链接 / reparse point");
+        }
+        if meta.is_dir() && fs::read_dir(path)?.next().is_some() {
+            bail!("目录不是空目录，不会递归删除用户目录");
+        }
+        Ok(())
+    };
+    ensure_removal_safe()?;
     control.check_cancelled()?;
-    // 永久删除前再确认一次类型与空目录（防检查后类型被替换）。
+    // 永久删除前再确认一次类型与空目录。
+    ensure_removal_safe()?;
     let meta = fs::symlink_metadata(path)?;
-    if fsutil::is_link(&meta) {
-        bail!("拒绝删除链接 / reparse point");
-    }
-    if meta.is_dir() && fs::read_dir(path)?.next().is_some() {
-        bail!("目录不是空目录，不会递归删除用户目录");
-    }
     if meta.is_dir() {
         fs::remove_dir(path).context("删除空目录失败")?;
     } else {

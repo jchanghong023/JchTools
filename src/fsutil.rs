@@ -70,6 +70,16 @@ pub fn path_string(path: &Path) -> Result<String> {
 pub fn relative_string(root: &Path, path: &Path) -> Result<String> {
     Ok(path_string(path.strip_prefix(root).context("路径不在选定目录内")?)?.replace('\\', "/"))
 }
+/// Windows 路径大小写折叠（与资源管理器序数忽略大小写的近似口径一致；
+/// 非 Windows 平台原样返回）。相对路径比较前一律先经本函数折叠，
+/// 「比较前先折叠」这一不变量只有这一处实现。
+pub(crate) fn fold_rel(name: &str) -> String {
+    if cfg!(windows) {
+        name.to_lowercase()
+    } else {
+        name.to_string()
+    }
+}
 pub fn is_link(meta: &fs::Metadata) -> bool {
     if meta.file_type().is_symlink() {
         return true;

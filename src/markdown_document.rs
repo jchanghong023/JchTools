@@ -462,33 +462,26 @@ fn validate_result_shape(result: &Value) -> Result<(), String> {
             value_type_name(result)
         ));
     };
-    if let Some(content) = fields.get("content") {
-        if !content.is_string() {
-            return Err(format!(
-                "Xberg 输出协议异常：result.content 必须是字符串，实际为 {}",
-                value_type_name(content)
-            ));
+    // 字段名 → 中文类型名 → 类型判定。新增协议字段时在表中加一行即可。
+    type FieldTypeCheck = (&'static str, &'static str, fn(&Value) -> bool);
+    const EXPECTED_TYPES: [FieldTypeCheck; 3] = [
+        ("content", "字符串", Value::is_string),
+        ("ocr_elements", "数组", Value::is_array),
+        ("children", "数组", Value::is_array),
+    ];
+    for (field, expected, is_type) in EXPECTED_TYPES {
+        if let Some(value) = fields.get(field) {
+            if !is_type(value) {
+                return Err(format!(
+                    "Xberg 输出协议异常：result.{field} 必须是{expected}，实际为 {}",
+                    value_type_name(value)
+                ));
+            }
         }
     }
-    if let Some(elements) = fields.get("ocr_elements") {
-        if !elements.is_array() {
-            return Err(format!(
-                "Xberg 输出协议异常：result.ocr_elements 必须是数组，实际为 {}",
-                value_type_name(elements)
-            ));
-        }
-    }
-    if let Some(children) = fields.get("children") {
-        if !children.is_array() {
-            return Err(format!(
-                "Xberg 输出协议异常：result.children 必须是数组，实际为 {}",
-                value_type_name(children)
-            ));
-        }
-    }
-    let has_body = fields.contains_key("content")
-        || fields.contains_key("ocr_elements")
-        || fields.contains_key("children");
+    let has_body = EXPECTED_TYPES
+        .iter()
+        .any(|(field, _, _)| fields.contains_key(*field));
     if !has_body {
         return Err(
             "Xberg 输出协议异常：result 缺少 content/ocr_elements/children 必要结构".to_string(),

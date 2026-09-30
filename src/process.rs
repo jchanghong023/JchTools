@@ -225,6 +225,12 @@ impl CancelSource<'_> {
     }
 }
 
+/// 回收子进程：kill 之后必须 wait（成对不变量，拆开执行会残留进程或句柄）。
+fn reap(child: &mut Child) {
+    let _ = child.kill();
+    let _ = child.wait();
+}
+
 /// 带宿主侧总超时地运行命令并捕获全部输出。
 /// 超时后 kill + wait，避免子进程卡死导致永久阻塞。
 pub fn run_with_timeout(command: &mut Command, timeout: Duration) -> Result<CapturedOutput> {
@@ -293,16 +299,14 @@ fn run_with_timeout_ext(
 
     // take 失败时必须 kill+wait 回收子进程，并等 stdin 线程结束，避免残留与悬挂。
     let Some(stdout_pipe) = child.stdout.take() else {
-        let _ = child.kill();
-        let _ = child.wait();
+        reap(&mut child);
         if let Some(handle) = stdin_thread {
             let _ = handle.join();
         }
         bail!("缺少 stdout");
     };
     let Some(stderr_pipe) = child.stderr.take() else {
-        let _ = child.kill();
-        let _ = child.wait();
+        reap(&mut child);
         drop(stdout_pipe);
         if let Some(handle) = stdin_thread {
             let _ = handle.join();
@@ -316,18 +320,14 @@ fn run_with_timeout_ext(
     match wait_child_with_deadline(&mut child, timeout, cancel) {
         Ok(status) => {
             // 读线程被放弃时输出不完整：如实标记截断，不得把半截输出当成完整结果。
-            let stdout = join_with_deadline(stdout_thread, PIPE_DRAIN_GRACE).unwrap_or_else(|| {
-                ReadCapture {
+            let drain_abandoned = |handle: thread::JoinHandle<ReadCapture>| {
+                join_with_deadline(handle, PIPE_DRAIN_GRACE).unwrap_or_else(|| ReadCapture {
                     truncated: true,
                     ..Default::default()
-                }
-            });
-            let stderr = join_with_deadline(stderr_thread, PIPE_DRAIN_GRACE).unwrap_or_else(|| {
-                ReadCapture {
-                    truncated: true,
-                    ..Default::default()
-                }
-            });
+                })
+            };
+            let stdout = drain_abandoned(stdout_thread);
+            let stderr = drain_abandoned(stderr_thread);
             // stdin 写入失败：子进程已成功退出时多半是提前关掉 stdin（EPIPE），不必判失败；
             // 子进程未成功时上报写入错误，便于定位管道问题。
             if let Some(handle) = stdin_thread {
@@ -354,8 +354,7 @@ fn run_with_timeout_ext(
         }
         Err(error) => {
             // 超时/等待失败：先确保子进程回收，再限时收尾读线程（孙进程持写端时按放弃处理）。
-            let _ = child.kill();
-            let _ = child.wait();
+            reap(&mut child);
             let _ = join_with_deadline(stdout_thread, PIPE_DRAIN_GRACE);
             let _ = join_with_deadline(stderr_thread, PIPE_DRAIN_GRACE);
             if let Some(handle) = stdin_thread {
@@ -479,14 +478,12 @@ pub fn run_with_idle_timeout(
     let (send, recv) = mpsc::sync_channel(64);
     // spawn 成功后若 take 失败，必须 kill+wait 回收子进程，避免残留。
     let Some(stdout_pipe) = child.stdout.take() else {
-        let _ = child.kill();
-        let _ = child.wait();
+        reap(&mut child);
         bail!("缺少 stdout");
     };
     let stdout = pump(stdout_pipe, false, send.clone());
     let Some(stderr_pipe) = child.stderr.take() else {
-        let _ = child.kill();
-        let _ = child.wait();
+        reap(&mut child);
         drop(send);
         drop(recv);
         let _ = stdout.join();
@@ -554,8 +551,7 @@ pub fn run_with_idle_timeout(
         Ok(())
     })();
     if result.is_err() {
-        let _ = child.kill();
-        let _ = child.wait();
+        reap(&mut child);
     }
     drop(recv);
     // 7z 退出后管道应立即 EOF；限时收尾防止孙进程继承写端时 join 永久阻塞。

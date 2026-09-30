@@ -177,6 +177,85 @@ fn resolve_protection() -> Result<Option<PathBuf>> {
 pub fn prepare(root: &Path, config: Config, context: TaskContext) -> Result<TaskResult> {
     prepare_at(root, config, context, &config::state_dir()?)
 }
+/// 三条任务入口（prepare / extract_run / count_archives）共用的安全闸门，顺序固定：
+/// 配置校验 → S-04 原始路径链接边界 → 规范化 →（仅解压链路）X-07 隔离区名拒绝 →
+/// H-06 根含 .git 拒绝 → H-06 祖先含 .git 拒绝。任一闸门失败都不创建任务库；
+/// `check_quarantine` 只在解压链路为 true（目录整理不解压，C-01）。
+/// 返回规范化后的根目录与 S-05 受保护目录（供扫描剪枝继续使用）。
+fn preflight_root(
+    root: &Path,
+    config: &Config,
+    protected: Option<&Path>,
+    check_quarantine: bool,
+) -> Result<(PathBuf, Option<PathBuf>)> {
+    config.validate()?;
+    // S-04：先在用户原始路径上检查链接边界（canonicalize 会解析掉 reparse 身份）；
+    // 拒绝时不创建任务库、不扫描、不解压。
+    fsutil::ensure_plain_entry(root)?;
+    let (root, protected) = fsutil::normalize_root_with(root, protected)?;
+    // X-07：所选根本身名为「解压失败」时不开始解压，提示先移出待重试的包。
+    if check_quarantine {
+        anyhow::ensure!(!root_is_quarantine(&root), ROOT_QUARANTINE_MESSAGE);
+    }
+    // H-06：选定根目录直接含 .git 时整次处理不执行，明确提示且不创建任务库。
+    anyhow::ensure!(!fsutil::is_git_root(&root)?, ROOT_GIT_MESSAGE);
+    // H-06：祖先直接含 .git 同样拒绝整次处理（不拆散项目子树）。
+    fsutil::root_inside_git_project(&root)?;
+    Ok((root, protected))
+}
+/// prepare 与 extract 共用的任务库创建：持全局锁 → 任务目录命名 → 建库 →
+/// 初始化事务写入 root/config/status/summary/created/state_dir → 提交。
+/// 返回的锁守卫必须由调用方持有到任务结束（drop 即释放互斥）。
+fn create_task_db(
+    state: &Path,
+    root: &Path,
+    config: Config,
+    context: TaskContext,
+    status: &str,
+) -> Result<(fsutil::RootGuard, Job)> {
+    let guard = fsutil::RootGuard::acquire(state)?;
+    let directory = state.join("tasks").join(format!(
+        "{}-{}",
+        chrono::Utc::now().format("%Y%m%dT%H%M%S"),
+        uuid::Uuid::new_v4()
+    ));
+    let db = Database::create(&directory)?;
+    let initialization = db.conn.unchecked_transaction()?;
+    db.set("root", &fsutil::path_string(root)?)?;
+    db.set("config", &config)?;
+    db.set("status", &status)?;
+    db.set("summary", &Summary::default())?;
+    db.set("created", &chrono::Utc::now().to_rfc3339())?;
+    // 记录本次的全局锁目录：apply 若按任务目录当前位置推导锁位置，任务目录被移动后
+    // 会与这里的互斥失效（apply_with 会优先锁这个记录值）。
+    db.set("state_dir", &fsutil::path_string(state)?)?;
+    initialization.commit()?;
+    let job = Job {
+        root: root.to_path_buf(),
+        config,
+        context,
+        db,
+        summary: Summary::default(),
+    };
+    Ok((guard, job))
+}
+/// 任务失败收尾（prepare 与 extract 同口径）：用户主动取消不是失败——任务库状态
+/// 必须能区分「已取消」和「失败」，否则事后检查会误判；三个容错写库失败均不掩盖原错误。
+fn record_task_failure(job: &mut Job, error: &anyhow::Error) {
+    let cancelled = job.context.control.is_cancelled();
+    let _ = job.db.set("summary", &job.summary);
+    let _ = job
+        .db
+        .set("status", &if cancelled { "cancelled" } else { "failed" });
+    let _ = job.db.log(
+        "任务",
+        "",
+        "",
+        if cancelled { "已取消" } else { "失败" },
+        &format!("{error:#}"),
+        0,
+    );
+}
 /// 独立状态目录使核心可在无 GUI 下测试。目录整理不解压（C-01），不再接受引擎注入；
 /// 真实引擎用例走 extract_run_at（E-02：引擎只能按固定顺序获得，不向用户提供路径参数）。
 #[cfg_attr(
@@ -200,39 +279,9 @@ fn prepare_at_with(
     state: &Path,
     protected: Option<&Path>,
 ) -> Result<TaskResult> {
-    config.validate()?;
-    // S-04：先在用户原始路径上检查链接边界（canonicalize 会解析掉 reparse 身份）；
-    // 拒绝时不创建任务库、不扫描。
-    fsutil::ensure_plain_entry(root)?;
-    let (root, protected) = fsutil::normalize_root_with(root, protected)?;
-    // H-06：选定根目录直接含 .git 时整次处理不执行，明确提示且不创建任务库。
-    anyhow::ensure!(!fsutil::is_git_root(&root)?, ROOT_GIT_MESSAGE);
-    // H-06：祖先直接含 .git 同样拒绝整次处理（不拆散项目子树）。
-    fsutil::root_inside_git_project(&root)?;
-    let _guard = fsutil::RootGuard::acquire(state)?;
-    let directory = state.join("tasks").join(format!(
-        "{}-{}",
-        chrono::Utc::now().format("%Y%m%dT%H%M%S"),
-        uuid::Uuid::new_v4()
-    ));
-    let db = Database::create(&directory)?;
-    let initialization = db.conn.unchecked_transaction()?;
-    db.set("root", &fsutil::path_string(&root)?)?;
-    db.set("config", &config)?;
-    db.set("status", &"analyzing")?;
-    db.set("summary", &Summary::default())?;
-    db.set("created", &chrono::Utc::now().to_rfc3339())?;
-    // 记录本次的全局锁目录：apply 若按任务目录当前位置推导锁位置，任务目录被移动后
-    // 会与这里的互斥失效（apply_with 会优先锁这个记录值）。
-    db.set("state_dir", &fsutil::path_string(state)?)?;
-    initialization.commit()?;
-    let mut job = Job {
-        root,
-        config,
-        context,
-        db,
-        summary: Summary::default(),
-    };
+    let (root, protected) = preflight_root(root, &config, protected, false)?;
+    let (_guard, mut job) = create_task_db(state, &root, config, context, "analyzing")?;
+    let directory = job.db.directory.clone();
     let result = (|| {
         // C-01：分析阶段只读，不做任何清扫（含本工具崩溃残留的硬链接临时文件——
         // 它们被扫描永久剪枝，不影响计划正确性；清扫统一在 apply_with 执行前进行）。
@@ -272,20 +321,7 @@ fn prepare_at_with(
         })
     })();
     if let Err(error) = &result {
-        // 用户主动取消不是失败：任务库状态要能区分"已取消"和"失败"，否则事后检查会误判。
-        let cancelled = job.context.control.is_cancelled();
-        let _ = job.db.set("summary", &job.summary);
-        let _ = job
-            .db
-            .set("status", &if cancelled { "cancelled" } else { "failed" });
-        let _ = job.db.log(
-            "任务",
-            "",
-            "",
-            if cancelled { "已取消" } else { "失败" },
-            &format!("{error:#}"),
-            0,
-        );
+        record_task_failure(&mut job, error);
     }
     result
 }
@@ -325,39 +361,9 @@ fn extract_run_with(
     engine_path: Option<&Path>,
     protected: Option<&Path>,
 ) -> Result<TaskResult> {
-    config.validate()?;
-    // S-04：先在用户原始路径上检查链接边界（canonicalize 会解析掉 reparse 身份）；
-    // 拒绝时不创建任务库、不扫描、不解压。
-    fsutil::ensure_plain_entry(root)?;
-    let (root, protected) = fsutil::normalize_root_with(root, protected)?;
-    // X-07：所选根本身名为「解压失败」时不开始解压，提示先移出待重试的包。
-    anyhow::ensure!(!root_is_quarantine(&root), ROOT_QUARANTINE_MESSAGE);
-    // H-06：选定根目录直接含 .git 时整次处理不执行，明确提示且不创建任务库。
-    anyhow::ensure!(!fsutil::is_git_root(&root)?, ROOT_GIT_MESSAGE);
-    // H-06：祖先直接含 .git 同样拒绝整次处理（不拆散项目子树）。
-    fsutil::root_inside_git_project(&root)?;
-    let _guard = fsutil::RootGuard::acquire(state)?;
-    let directory = state.join("tasks").join(format!(
-        "{}-{}",
-        chrono::Utc::now().format("%Y%m%dT%H%M%S"),
-        uuid::Uuid::new_v4()
-    ));
-    let db = Database::create(&directory)?;
-    let initialization = db.conn.unchecked_transaction()?;
-    db.set("root", &fsutil::path_string(&root)?)?;
-    db.set("config", &config)?;
-    db.set("status", &"executing")?;
-    db.set("summary", &Summary::default())?;
-    db.set("created", &chrono::Utc::now().to_rfc3339())?;
-    db.set("state_dir", &fsutil::path_string(state)?)?;
-    initialization.commit()?;
-    let mut job = Job {
-        root,
-        config,
-        context,
-        db,
-        summary: Summary::default(),
-    };
+    let (root, protected) = preflight_root(root, &config, protected, true)?;
+    let (_guard, mut job) = create_task_db(state, &root, config, context, "executing")?;
+    let directory = job.db.directory.clone();
     let result = (|| {
         scan(&mut job, true, state, protected.as_deref())?;
         let count: i64 = job.db.conn.query_row(
@@ -407,19 +413,7 @@ fn extract_run_with(
         })
     })();
     if let Err(error) = &result {
-        let cancelled = job.context.control.is_cancelled();
-        let _ = job.db.set("summary", &job.summary);
-        let _ = job
-            .db
-            .set("status", &if cancelled { "cancelled" } else { "failed" });
-        let _ = job.db.log(
-            "任务",
-            "",
-            "",
-            if cancelled { "已取消" } else { "失败" },
-            &format!("{error:#}"),
-            0,
-        );
+        record_task_failure(&mut job, error);
     } else {
         job.db.set("status", &"finished")?;
     }
@@ -438,16 +432,7 @@ pub fn count_archives(root: &Path, config: &Config) -> Result<u64> {
 }
 /// S-05 受保护目录参数化变体（测试注入合成受保护目录），其余行为与 [`count_archives`] 一致。
 fn count_archives_with(root: &Path, config: &Config, protected: Option<&Path>) -> Result<u64> {
-    config.validate()?;
-    // S-04：先在用户原始路径上检查链接边界（canonicalize 会解析掉 reparse 身份）。
-    fsutil::ensure_plain_entry(root)?;
-    let (root, protected_prune) = fsutil::normalize_root_with(root, protected)?;
-    // X-07：所选根本身名为「解压失败」时不开始解压，确认框清点同样拒绝。
-    anyhow::ensure!(!root_is_quarantine(&root), ROOT_QUARANTINE_MESSAGE);
-    // H-06：选定根目录直接含 .git 时整次处理不执行，确认框清点同样拒绝。
-    anyhow::ensure!(!fsutil::is_git_root(&root)?, ROOT_GIT_MESSAGE);
-    // H-06：祖先直接含 .git 同样拒绝整次处理（不拆散项目子树）。
-    fsutil::root_inside_git_project(&root)?;
+    let (root, protected_prune) = preflight_root(root, config, protected, true)?;
     let excluded = rules::build_exclusions(&config.exclusions)?;
     // 与 scan 同源的特殊目录剪枝口径。状态目录此时可能尚不存在（首次运行先弹
     // 确认再建目录）：canonicalize 失败视为无重叠，不阻止清点。
@@ -977,6 +962,12 @@ fn special_prefixes(
     feature = "perf-tracing",
     tracing::instrument(target = "perf", name = "scan", skip_all)
 )]
+/// 预览格式化：取前 3 项以「、」连接，超出 3 项时追加「 等」（扫描日志共用）。
+fn preview3(items: &[String]) -> String {
+    let shown = items.iter().take(3).cloned().collect::<Vec<_>>().join("、");
+    let more = if items.len() > 3 { " 等" } else { "" };
+    format!("{shown}{more}")
+}
 fn scan(job: &mut Job, enqueue: bool, state: &Path, protected: Option<&Path>) -> Result<()> {
     job.context.status(if enqueue {
         "扫描所选目录，登记待解压的压缩包"
@@ -1101,17 +1092,11 @@ fn scan(job: &mut Job, enqueue: bool, state: &Path, protected: Option<&Path>) ->
         // 两者都不读取内容、不进入树内处理，但「处置结果」必须各自说清，不能都说成「跳过」。
         git_roots.sort();
         git_roots.dedup();
-        let shown = git_roots
-            .iter()
-            .take(3)
-            .cloned()
-            .collect::<Vec<_>>()
-            .join("、");
-        let more = if git_roots.len() > 3 { " 等" } else { "" };
+        let shown = preview3(&git_roots);
         let (log_message, notice) = if enqueue {
             (
                 format!(
-                    "已跳过 {} 个 Git 目录及其全部内容（含 .git 的目录整树排除：不读取、不归类、不改名、不删除，不受隐藏/递归/清理开关影响）：{shown}{more}",
+                    "已跳过 {} 个 Git 目录及其全部内容（含 .git 的目录整树排除：不读取、不归类、不改名、不删除，不受隐藏/递归/清理开关影响）：{shown}",
                     git_roots.len()
                 ),
                 format!(
@@ -1122,7 +1107,7 @@ fn scan(job: &mut Job, enqueue: bool, state: &Path, protected: Option<&Path>) ->
         } else {
             (
                 format!(
-                    "已识别 {} 个 Git 项目（含 .git 的目录整树保护：不读取内容、不进入树内改名/去重/清理；整树移入本次所选根下的「Git项目集合」，已在集合内的不再移动）：{shown}{more}",
+                    "已识别 {} 个 Git 项目（含 .git 的目录整树保护：不读取内容、不进入树内改名/去重/清理；整树移入本次所选根下的「Git项目集合」，已在集合内的不再移动）：{shown}",
                     git_roots.len()
                 ),
                 format!(
@@ -1143,20 +1128,14 @@ fn scan(job: &mut Job, enqueue: bool, state: &Path, protected: Option<&Path>) ->
         residues.dedup();
         if !residues.is_empty() {
             job.db.set("link_residues", &residues)?;
-            let shown = residues
-                .iter()
-                .take(3)
-                .cloned()
-                .collect::<Vec<_>>()
-                .join("、");
-            let more = if residues.len() > 3 { " 等" } else { "" };
+            let shown = preview3(&residues);
             job.log(
                 "扫描",
                 "",
                 "",
                 "提示",
                 &format!(
-                    "发现 {} 个疑似上次执行崩溃残留的硬链接临时文件（.jchtools-link-*，均在本次处理范围内）：{shown}{more}；执行开始时将清理其中「修改超过 24 小时且仍是硬链接（链接数 ≥ 2，内容另有保留文件持有）」的项",
+                    "发现 {} 个疑似上次执行崩溃残留的硬链接临时文件（.jchtools-link-*，均在本次处理范围内）：{shown}；执行开始时将清理其中「修改超过 24 小时且仍是硬链接（链接数 ≥ 2，内容另有保留文件持有）」的项",
                     residues.len()
                 ),
                 0,
@@ -1282,22 +1261,21 @@ fn hash_candidates(job: &mut Job) -> Result<()> {
         let control = &job.context.control;
         // C-13：先查跨运行缓存，命中的候选不再读取文件内容。缓存故障一次性
         // 降级为「其后全部重算」——缓存只是加速，正确性不依赖它。
+        // resume 是首个未消化的候选下标：缓存不可用/读取失败时从它起全部转入重算。
         let mut reused: Vec<(i64, String)> = Vec::new();
         let mut compute: Vec<&_> = Vec::new();
-        let mut index = 0;
-        while index < batch.len() {
-            let file = &batch[index];
+        let mut resume = batch.len();
+        for (index, file) in batch.iter().enumerate() {
             let Some(cache_conn) = cache.as_ref() else {
+                resume = index;
                 break;
             };
             let Ok(size) = i64::try_from(file.snapshot.size) else {
                 compute.push(file);
-                index += 1;
                 continue;
             };
             if crate::hash_cache::identity_is_degenerate(&file.snapshot.identity) {
                 compute.push(file);
-                index += 1;
                 continue;
             }
             match cache_conn.lookup(&file.snapshot.identity, size, file.snapshot.modified_ns) {
@@ -1313,12 +1291,12 @@ fn hash_candidates(job: &mut Job) -> Result<()> {
                         &format!("哈希缓存读取失败，其后全部重新计算（{error:#}）"),
                         0,
                     )?;
+                    resume = index;
                     break;
                 }
             }
-            index += 1;
         }
-        compute.extend(batch[index..].iter());
+        compute.extend(batch[resume..].iter());
         reused_total = reused_total.saturating_add(u64::try_from(reused.len()).unwrap_or(0));
         let results: Vec<_> = pool.install(|| {
             compute
@@ -1430,6 +1408,11 @@ fn lock_dir_for(directory: &Path, recorded: Option<&Path>) -> Result<PathBuf> {
         "任务库缺少有效的全局锁目录记录且任务目录已离开原位置；为避免互斥失效，请重新「解压与分析」后再执行");
     Ok(derived.to_path_buf())
 }
+/// 执行期实空复查：目录消失、类型改变或已非空时返回 false，不得按空目录清理
+/// （计划与执行之间的盘面变化以盘面实况为准）。执行段与串行路径共用同一谓词。
+fn dir_recheck_empty(path: &Path) -> Result<bool> {
+    Ok(path.try_exists()? && path.is_dir() && fs::read_dir(path)?.next().is_none())
+}
 /// C-01：取消勾选后仅用既有分析资料重算受影响的计划。被取消且未执行的
 /// Move/Delete 项原位置视为占用，被取消的空目录清理行自身同样占位（子目录
 /// 不删，父目录不再变空）；selected=1 的空目录清理行若其目录（含子树）内
@@ -1448,23 +1431,16 @@ pub fn recompute_plan(directory: &Path) -> Result<usize> {
     let delete_kind = serde_json::to_string(&ActionKind::Delete)?;
     let empty_kind = serde_json::to_string(&ActionKind::EmptyDirectory)?;
     // 占位项 = 取消且未执行的 Move/Delete 源 + 取消且未执行的空目录行自身。
-    let mut occupied: Vec<String> = Vec::new();
-    {
+    // 消费方只做等值与前缀匹配、与行序无关，三种 kind 合并为一条查询。
+    let mut occupied: Vec<String> = {
         let mut statement = db.conn.prepare(
-            "SELECT source FROM actions WHERE kind IN (?1, ?2) AND selected=0 AND state='pending'",
+            "SELECT source FROM actions WHERE kind IN (?1, ?2, ?3) AND selected=0 AND state='pending'",
         )?;
-        let rows = statement.query_map(params![move_kind, delete_kind], |row| {
+        let rows = statement.query_map(params![move_kind, delete_kind, empty_kind], |row| {
             row.get::<_, String>(0)
         })?;
-        occupied.extend(rows.collect::<rusqlite::Result<Vec<_>>>()?);
-    }
-    {
-        let mut statement = db.conn.prepare(
-            "SELECT source FROM actions WHERE kind=?1 AND selected=0 AND state='pending'",
-        )?;
-        let rows = statement.query_map(params![empty_kind], |row| row.get::<_, String>(0))?;
-        occupied.extend(rows.collect::<rusqlite::Result<Vec<_>>>()?);
-    }
+        rows.collect::<rusqlite::Result<Vec<_>>>()?
+    };
     // 取消一个 Move 后，其源仍留在盘上，可能阻挡另一条原本选中的 Move 目标。
     // 以固定点逐轮取消，保证用户取消一条链中的任意一项都不会留下必然撞名的
     // 执行计划；不新增勾选，也不读取文件内容。
@@ -1482,16 +1458,11 @@ pub fn recompute_plan(directory: &Path) -> Result<usize> {
         })?;
         rows.collect::<rusqlite::Result<Vec<_>>>()?
     };
-    let fold = |path: &str| {
-        if cfg!(windows) {
-            path.to_lowercase()
-        } else {
-            path.to_string()
-        }
-    };
     while let Some(index) = pending_moves.iter().position(|(_, _, target)| {
-        let target = fold(target);
-        occupied.iter().any(|source| fold(source) == target)
+        let target = fsutil::fold_rel(target);
+        occupied
+            .iter()
+            .any(|source| fsutil::fold_rel(source) == target)
     }) {
         let (id, source, _) = pending_moves.remove(index);
         db.set_selected(id, false)?;
@@ -1499,9 +1470,10 @@ pub fn recompute_plan(directory: &Path) -> Result<usize> {
         cancelled += 1;
     }
     // 与 planner 的前缀区间判定同口径：Windows 折叠大小写后排序去重，二分定位。
-    if cfg!(windows) {
-        occupied = occupied.into_iter().map(|rel| rel.to_lowercase()).collect();
-    }
+    occupied = occupied
+        .into_iter()
+        .map(|rel| fsutil::fold_rel(&rel))
+        .collect();
     occupied.sort_unstable();
     occupied.dedup();
     let rows: Vec<(i64, String)> = {
@@ -1514,11 +1486,7 @@ pub fn recompute_plan(directory: &Path) -> Result<usize> {
         rows.collect::<rusqlite::Result<Vec<_>>>()?
     };
     for (id, rel) in rows {
-        let folded = if cfg!(windows) {
-            rel.to_lowercase()
-        } else {
-            rel.clone()
-        };
+        let folded = fsutil::fold_rel(&rel);
         let probe = format!("{folded}/");
         let index = occupied.partition_point(|item| item.as_str() < probe.as_str());
         let blocked = occupied
@@ -1911,6 +1879,27 @@ fn parallel_run_kind(action: &Action) -> Option<ParallelKind> {
     }
 }
 /// 单个动作的串行执行（移动/硬链接/未勾选）：语义与旧逐项循环一致。
+/// 动作失败结算：用户主动取消不算失败（不计 errors、不标 failed，与 prepare
+/// 阶段取消口径一致）；其余错误计 errors、落 failed、写统一格式的失败日志。
+/// 串行路径与并行段结算共用同一口径，防止两处取消/失败判定漂移。
+fn record_action_failure(job: &mut Job, action: &Action, error: &anyhow::Error) -> Result<()> {
+    if job.context.control.is_cancelled() {
+        job.context.control.check_cancelled()?;
+    }
+    job.summary.errors += 1;
+    job.db.mark_action(action.id, "failed")?;
+    // 失败日志统一 phase「执行」、带目标，便于按口径筛选。
+    job.log(
+        "执行",
+        &action.source,
+        action.target.as_deref().unwrap_or(""),
+        "失败",
+        &format!("{error:#}"),
+        0,
+    )?;
+    job.context.control.check_cancelled()?;
+    Ok(())
+}
 fn execute_sequential(job: &mut Job, action: &Action) -> Result<()> {
     job.context.control.checkpoint()?;
     if !action.selected {
@@ -1930,23 +1919,7 @@ fn execute_sequential(job: &mut Job, action: &Action) -> Result<()> {
             job.summary.skipped += 1;
             job.db.mark_action(action.id, "skipped")?;
         }
-        Err(error) => {
-            // 用户主动取消不是失败：不计 errors、不标 failed，与 prepare 阶段取消口径一致。
-            if job.context.control.is_cancelled() {
-                job.context.control.check_cancelled()?;
-            }
-            job.summary.errors += 1;
-            job.db.mark_action(action.id, "failed")?;
-            job.log(
-                "执行",
-                &action.source,
-                action.target.as_deref().unwrap_or(""),
-                "失败",
-                &format!("{error:#}"),
-                0,
-            )?;
-            job.context.control.check_cancelled()?;
-        }
+        Err(error) => record_action_failure(job, action, &error)?,
     }
     job.context
         .control
@@ -1999,8 +1972,7 @@ fn execute_run(
                 ParallelKind::Delete => platform::remove(path, *mode, &control).map(Some),
                 ParallelKind::EmptyDir(_) => {
                     // 执行期实空复查（同旧 EmptyDirectory 分支）；同段目录互不嵌套，可并行。
-                    if !path.try_exists()? || !path.is_dir() || fs::read_dir(path)?.next().is_some()
-                    {
+                    if !dir_recheck_empty(path)? {
                         return Ok(None);
                     }
                     platform::remove(path, *mode, &control).map(Some)
@@ -2010,24 +1982,7 @@ fn execute_run(
     });
     for (action, result) in run.iter().zip(results) {
         match result {
-            Err(error) => {
-                // 用户主动取消不是失败：不计 errors、不标 failed，与串行路径口径一致。
-                if job.context.control.is_cancelled() {
-                    job.context.control.check_cancelled()?;
-                }
-                job.summary.errors += 1;
-                job.db.mark_action(action.id, "failed")?;
-                // 失败日志与串行路径同口径（phase「执行」、带目标），便于统一筛选。
-                job.log(
-                    "执行",
-                    &action.source,
-                    action.target.as_deref().unwrap_or(""),
-                    "失败",
-                    &format!("{error:#}"),
-                    0,
-                )?;
-                job.context.control.check_cancelled()?;
-            }
+            Err(error) => record_action_failure(job, action, &error)?,
             // 空目录实空复查未过（已不存在/非目录/非空）：按旧口径计跳过、不写结果日志。
             Ok(None) => {
                 job.summary.skipped += 1;
@@ -2115,11 +2070,11 @@ fn execute_planned_moves(job: &mut Job) -> Result<()> {
             let Some(target) = action.target.as_deref() else {
                 return true;
             };
-            let target = fold_relative(target);
+            let target = fsutil::fold_rel(target);
             !actions.iter().enumerate().any(|(other, candidate)| {
                 other != *index
                     && !staged.contains_key(&candidate.id)
-                    && fold_relative(&candidate.source) == target
+                    && fsutil::fold_rel(&candidate.source) == target
             })
         });
         if let Some((index, _)) = available {
@@ -2195,14 +2150,6 @@ impl Drop for MoveStageGuard {
                 let _ = fs::remove_dir(parent);
             }
         }
-    }
-}
-
-fn fold_relative(path: &str) -> String {
-    if cfg!(windows) {
-        path.to_lowercase()
-    } else {
-        path.to_string()
     }
 }
 
@@ -2336,8 +2283,7 @@ fn execute_action(job: &mut Job, action: &Action) -> Result<bool> {
         )? != DeleteResult::Kept),
         ActionKind::Move => execute_move_at(job, action, &source),
         ActionKind::EmptyDirectory => {
-            if !source.try_exists()? || !source.is_dir() || fs::read_dir(&source)?.next().is_some()
-            {
+            if !dir_recheck_empty(&source)? {
                 return Ok(false);
             }
             Ok(
@@ -2458,6 +2404,24 @@ mod lock_tests {
         assert!(
             lock_dir_for(&dir, None).is_err(),
             "非 tasks 布局且无记录必须拒绝"
+        );
+    }
+}
+
+/// 扫描日志预览格式的特征测试：锁定 preview3 的「前 3 项、顿号连接、超出追加
+/// 『 等』」口径（Git 整树提示与硬链接残留提示共用同一格式）。
+#[cfg(test)]
+mod preview_format_tests {
+    use super::preview3;
+
+    #[test]
+    fn preview3_shows_three_items_and_marks_more_with_deng() {
+        assert_eq!(preview3(&[]), "");
+        assert_eq!(preview3(&["a".into()]), "a");
+        assert_eq!(preview3(&["a".into(), "b".into(), "c".into()]), "a、b、c");
+        assert_eq!(
+            preview3(&["a".into(), "b".into(), "c".into(), "d".into()]),
+            "a、b、c 等"
         );
     }
 }

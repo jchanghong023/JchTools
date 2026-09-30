@@ -167,14 +167,9 @@ fn deduplicate(job: &mut Job) -> Result<()> {
 // C-05 / C-14 / C-16～C-21：固定归类与统一冲突消解
 // ---------------------------------------------------------------------------
 
-/// Windows 序数忽略大小写的近似折叠（与库内 targets/directories 折叠口径一致；
-/// 非 Windows 平台大小写敏感）。
+/// Windows 序数忽略大小写的近似折叠——委托 [`fsutil::fold_rel`]（唯一实现）。
 fn fold(name: &str) -> String {
-    if cfg!(windows) {
-        name.to_lowercase()
-    } else {
-        name.to_string()
-    }
+    fsutil::fold_rel(name)
 }
 fn parent_of(rel: &str) -> &str {
     match rel.rfind('/') {
@@ -183,18 +178,10 @@ fn parent_of(rel: &str) -> &str {
     }
 }
 fn same_dir(a: &str, b: &str) -> bool {
-    if cfg!(windows) {
-        a.to_lowercase() == b.to_lowercase()
-    } else {
-        a == b
-    }
+    fold(a) == fold(b)
 }
 fn same_component(a: &str, b: &str) -> bool {
-    if cfg!(windows) {
-        a.to_lowercase() == b.to_lowercase()
-    } else {
-        a == b
-    }
+    fold(a) == fold(b)
 }
 /// 附录 A 大类名 + 「大文件」的固定容器集合（C-18 来源链识别用）。
 fn is_category_label(name: &str) -> bool {
@@ -516,8 +503,8 @@ fn resolve_all(items: &mut [Item], dirs: &mut HashMap<String, DirPlan>) {
             if in_place_count != 1 {
                 continue;
             }
-            if let Some(&only) = capable.first().filter(|_| capable.len() == 1) {
-                items[only].settled = true;
+            if capable.len() == 1 {
+                items[capable[0]].settled = true;
             } else if let Some(only) = members.iter().copied().find(|&i| items[i].in_place) {
                 // 唯一已就位项的派生名尚未物化（如 `报告 (1).pdf` → `报告_1.pdf`）：
                 // 派生名不被该目录磁盘固定占用时先保护其规范化后名称（C-17），
@@ -583,7 +570,6 @@ fn resolve_all(items: &mut [Item], dirs: &mut HashMap<String, DirPlan>) {
         }
         for index in escalate_prefix {
             items[index].k += 1;
-            let no_source = items[index].digest_no_source;
             let item = &mut items[index];
             match item.current_candidate() {
                 Some(candidate) => item.candidate = candidate,
@@ -591,7 +577,6 @@ fn resolve_all(items: &mut [Item], dirs: &mut HashMap<String, DirPlan>) {
                     item.failed = Some("无法生成合法的冲突消解名称（名称与扩展名过长）".into());
                 }
             }
-            let _ = no_source;
         }
         for index in escalate_digest {
             let item = &mut items[index];
@@ -769,8 +754,7 @@ fn classify_files(job: &mut Job, moved_roots: &[String]) -> Result<()> {
             else {
                 continue;
             };
-            let (stem, extension) = rules::derive_stem_ext(current_name, &job.config);
-            let mut extension = extension;
+            let (stem, mut extension) = rules::derive_stem_ext(current_name, &job.config);
             // C-08 内容签名修正（默认关）：只在分析阶段判定最终扩展名（C-01）。
             if job.config.fix_extension && !(stem.starts_with('.') && extension.is_empty()) {
                 if let Ok(source) = fsutil::safe_join(&job.root, &file.rel) {
@@ -979,21 +963,17 @@ fn empty_directories(job: &mut Job, moved_roots: &[String]) -> Result<()> {
             .into_iter()
             .filter(|rel| !moved_roots.contains(rel))
             .collect();
-        if cfg!(windows) {
-            roots = roots.into_iter().map(|rel| rel.to_lowercase()).collect();
-        }
+        roots = roots.into_iter().map(|rel| fold(&rel)).collect();
         roots.sort();
         roots
     };
     // Windows 前缀比较按 Unicode 折叠（与 under_path 口径一致）。目标清单固定，
     // 在此预折叠一次；折叠必须在排序之前——排序结果要用于二分定位前缀区间，
     // 折叠会改变字符的字典序。折叠后相同的目标去重，每个前缀只需检查一次。
-    if cfg!(windows) {
-        move_targets = move_targets
-            .into_iter()
-            .map(|target| target.to_lowercase())
-            .collect();
-    }
+    move_targets = move_targets
+        .into_iter()
+        .map(|target| fold(&target))
+        .collect();
     move_targets.sort_unstable();
     move_targets.dedup();
     loop {
@@ -1013,11 +993,7 @@ fn empty_directories(job: &mut Job, moved_roots: &[String]) -> Result<()> {
             cursor = seq;
             job.context.control.checkpoint()?;
             // H-06：本目录或其子树内仍有保持原位的 Git 项目时不按空目录处理。
-            let rel_folded = if cfg!(windows) {
-                rel.to_lowercase()
-            } else {
-                rel.clone()
-            };
+            let rel_folded = fold(&rel);
             let probe_git = format!("{rel_folded}/");
             let holds_git = staying_git_roots
                 .iter()
@@ -1048,11 +1024,7 @@ fn empty_directories(job: &mut Job, moved_roots: &[String]) -> Result<()> {
                 continue;
             }
             // 执行后该目录（含子树）将接收被 Move 进来的内容时，不能按空目录处理。
-            let probe = if cfg!(windows) {
-                format!("{rel}/").to_lowercase()
-            } else {
-                format!("{rel}/")
-            };
+            let probe = fold(&format!("{rel}/"));
             // 有序目标表中以 probe 为前缀的目标构成连续区间：二分定位第一个 >= probe 的
             // 条目，只需检查它——若任何目标以 probe 开头，字典序最小的命中者必然是它。
             let receives_move = {

@@ -173,19 +173,59 @@ pub(crate) fn install_inference_pack(
     Ok(())
 }
 
+/// 组件在位校验（存在性，不做摘要）：清单声明的成员在组件目录内逐个存在，
+/// 缺失时报「推理组件不完整」并指明首个缺失成员与组件目录（截图 OCR 与
+/// 转 Markdown 共用同一口径与文案）。`required` 由调用方以组件目录为前缀
+/// 拼接，错误文案里的相对路径分隔符因此与各调用方的 join 链保持一致。
+pub(crate) fn require_component_members(
+    component: &Path,
+    required: &[PathBuf],
+) -> Result<(), String> {
+    for path in required {
+        if !path.is_file() {
+            let relative = path.strip_prefix(component).unwrap_or(path);
+            return Err(format!(
+                "推理组件不完整：缺少 {}（组件目录 {}）",
+                relative.display(),
+                component.display()
+            ));
+        }
+    }
+    Ok(())
+}
+
+/// 资产根目录的固定回退链（不含各功能的测试覆盖变量）：用户状态目录 →
+/// LOCALAPPDATA\JchTools → 系统临时目录；截图 OCR 与转 Markdown 两个资产
+/// 模块共用，保证回退口径只有一处实现。
+pub(crate) fn state_dir_asset_root(data_directory: &str) -> PathBuf {
+    if let Ok(path) = crate::config::state_dir() {
+        return path.join(data_directory);
+    }
+    if let Some(local_app_data) = std::env::var_os("LOCALAPPDATA") {
+        return PathBuf::from(local_app_data)
+            .join("JchTools")
+            .join(data_directory);
+    }
+    std::env::temp_dir().join("JchTools").join(data_directory)
+}
+
+/// 推理组件包 tag 合法性：非空且不含路径分隔符、`..` 与冒号（防止落位到
+/// 组件目录之外）。两侧清单校验共用同一谓词。
+pub(crate) fn valid_component_tag(tag: &str) -> bool {
+    !tag.is_empty()
+        && !tag.contains('/')
+        && !tag.contains('\\')
+        && !tag.contains("..")
+        && !tag.contains(':')
+}
+
 /// 清单接入后推理组件的成员级摘要校验（XB-09）。
 #[cfg(test)]
 pub(crate) fn inference_ready(inference: &InferenceManifest, root: &Path) -> Result<(), String> {
-    let component = root.join("xberg-inference").join(&inference.tag);
-    for member in &inference.members {
-        verify_file(
-            &component.join(&member.install_path),
-            member.size_bytes,
-            &member.sha256,
-        )
-        .map_err(|error| format!("推理组件成员 {}：{error}", member.install_path))?;
-    }
-    Ok(())
+    inference_layout_ready(
+        &root.join("xberg-inference").join(&inference.tag),
+        inference,
+    )
 }
 
 /// 落位前对 staging 组件树做成员级复核（存在 + 摘要），确保原子替换进来的
@@ -324,9 +364,10 @@ pub(crate) fn atomic_replace_dir(staged: &Path, destination: &Path) -> Result<()
     if had_existing {
         // B-1：新目录已就位，关键变更成功；旧备份清理失败不构成安装失败。
         // 残留为同目录下的 .old-<uuid>（罕见，防护软件/索引器短暂持有句柄）。
-        // 覆盖情况：xberg-inference/<tag> 目标的残留会被下次初始化的
-        // prune_old_inference_tags 一并收集（它枚举 xberg-inference 下所有
-        // 非 tag 目录删除）；其余目标（licenses 等）的残留不影响新资产使用，
+        // 覆盖情况：xberg-inference/<tag> 目标的残留按设计交给
+        // prune_old_inference_tags 收集（它枚举 xberg-inference 下所有非 tag
+        // 目录删除；该安装链当前仅在测试中启用，生产初始化只校验共享目录，
+        // XB-10）；其余目标（licenses 等）的残留不影响新资产使用，
         // 可手动删除。本函数无进度通道，静默忽略。
         let _ = fs::remove_dir_all(&backup);
     }

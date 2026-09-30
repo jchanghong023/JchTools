@@ -588,21 +588,7 @@ fn compare_paths(left: &Path, right: &Path) -> Ordering {
 }
 
 fn compare_paths_insensitive(left: &Path, right: &Path) -> Ordering {
-    let mut left_parts = left.components();
-    let mut right_parts = right.components();
-    loop {
-        match (left_parts.next(), right_parts.next()) {
-            (Some(a), Some(b)) => {
-                let order = compare_names(a.as_os_str(), b.as_os_str());
-                if order != Ordering::Equal {
-                    return order;
-                }
-            }
-            (None, Some(_)) => return Ordering::Less,
-            (Some(_), None) => return Ordering::Greater,
-            (None, None) => return Ordering::Equal,
-        }
-    }
+    compare_component_wise(left, right, compare_names)
 }
 
 // T-11 决胜序等价性论证（A'-低危2）：合同写「相同键再按原始路径 UTF-16 单元
@@ -615,12 +601,23 @@ fn compare_paths_insensitive(left: &Path, right: &Path) -> Ordering {
 // 整路径两种比较的第一差异单元相同，结论一致（性质由
 // `flat_tiebreak_per_component_matches_whole_path_sequence` 固定）。
 fn compare_paths_original(left: &Path, right: &Path) -> Ordering {
+    compare_component_wise(left, right, compare_original)
+}
+
+/// 逐段比较的公共骨架：同一分段数与短路语义下，仅段内比较器不同。
+/// T-11 决胜序（A'-低危2）依赖「两条路径同为逐段比较」这一不变量，
+/// 提取后该不变量只有一处实现。
+fn compare_component_wise(
+    left: &Path,
+    right: &Path,
+    compare: impl Fn(&OsStr, &OsStr) -> Ordering,
+) -> Ordering {
     let mut left_parts = left.components();
     let mut right_parts = right.components();
     loop {
         match (left_parts.next(), right_parts.next()) {
             (Some(a), Some(b)) => {
-                let order = compare_original(a.as_os_str(), b.as_os_str());
+                let order = compare(a.as_os_str(), b.as_os_str());
                 if order != Ordering::Equal {
                     return order;
                 }

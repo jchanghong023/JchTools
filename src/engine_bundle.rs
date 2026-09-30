@@ -63,6 +63,24 @@ pub fn resolve_executable() -> Result<PathBuf> {
     resolve_among(bundled.as_deref(), embedded_base.as_deref())
 }
 
+/// 校验单个候选目录：全部文件通过「存在 + sha256 一致」校验则返回引擎路径；
+/// 否则记录拒绝原因并压入汇总失败清单，返回 None（E-02：绝不执行、绝不删除
+/// 或改写候选中的文件）。拒绝文案与失败行文案分别由两个标签参数逐字提供。
+fn vet_candidate(
+    reject_label: &str,
+    fail_label: &str,
+    directory: &Path,
+    problems: &[Problem],
+    failures: &mut Vec<String>,
+) -> Option<PathBuf> {
+    if problems.is_empty() {
+        return Some(directory.join(engine_name()));
+    }
+    reject_candidate(reject_label, directory, problems);
+    failures.push(candidate_failure_line(fail_label, directory, problems));
+    None
+}
+
 /// 在给定候选中按 E-02 顺序解析引擎（`bundled` = 随包目录，`embedded_base` = 内嵌释放目录）。
 /// 抽出目录参数以便单元测试注入。每个候选必须在内嵌清单声明的全部文件上
 /// 通过「存在 + sha256 一致」校验后才可使用；不可用的候选只记录原因并继续下一顺位，
@@ -73,11 +91,15 @@ fn resolve_among(bundled: Option<&Path>, embedded_base: Option<&Path>) -> Result
     // 候选 1：EXE 同目录的随包引擎目录。
     if let Some(directory) = bundled {
         let problems = candidate_problems(directory);
-        if problems.is_empty() {
-            return Ok(directory.join(engine_name()));
+        if let Some(path) = vet_candidate(
+            "随包 7-Zip 引擎",
+            "随包引擎",
+            directory,
+            &problems,
+            &mut failures,
+        ) {
+            return Ok(path);
         }
-        reject_candidate("随包 7-Zip 引擎", directory, &problems);
-        failures.push(candidate_failure_line("随包引擎", directory, &problems));
     } else {
         failures.push(format!(
             "随包引擎：EXE 同目录不存在含 {} 的 resources/7zip",
@@ -101,24 +123,28 @@ fn resolve_among(bundled: Option<&Path>, embedded_base: Option<&Path>) -> Result
 
     // 候选 2a：固定释放位置（已释放的内嵌副本）。
     let mut problems = candidate_problems(base);
-    if problems.is_empty() {
-        return Ok(base.join(engine_name()));
+    if let Some(path) = vet_candidate(
+        "已释放的内嵌引擎",
+        "已释放的内嵌引擎",
+        base,
+        &problems,
+        &mut failures,
+    ) {
+        return Ok(path);
     }
-    reject_candidate("已释放的内嵌引擎", base, &problems);
-    failures.push(candidate_failure_line("已释放的内嵌引擎", base, &problems));
 
     // 候选 2b：此前因固定位置被占用而新开的独立释放目录（release-*），按目录名顺序取第一个可用者。
     for directory in existing_release_dirs(base) {
         let problems = candidate_problems(&directory);
-        if problems.is_empty() {
-            return Ok(directory.join(engine_name()));
-        }
-        reject_candidate("已释放的内嵌引擎", &directory, &problems);
-        failures.push(candidate_failure_line(
+        if let Some(path) = vet_candidate(
+            "已释放的内嵌引擎",
             "已释放的内嵌引擎",
             &directory,
             &problems,
-        ));
+            &mut failures,
+        ) {
+            return Ok(path);
+        }
     }
 
     // 候选 3a：固定位置只缺文件时从 EXE 补齐释放（已存在文件一律不覆盖），补齐后复检。
@@ -132,6 +158,7 @@ fn resolve_among(bundled: Option<&Path>, embedded_base: Option<&Path>) -> Result
             return Ok(base.join(engine_name()));
         }
         // 仍无效：固定位置存在不可覆盖的无效文件，转新的独立位置（下方）。
+        // 注意：此处复检失败不记拒绝原因与失败行（保持既有行为），由 3b 的新位置收尾。
     }
 
     // 候选 3b：固定位置被无效文件占用时，释放到新的独立自有位置（不删占用文件），仍校验后使用。
@@ -139,15 +166,15 @@ fn resolve_among(bundled: Option<&Path>, embedded_base: Option<&Path>) -> Result
         Ok(directory) => {
             cleanup_part_residue(&directory);
             let problems = candidate_problems(&directory);
-            if problems.is_empty() {
-                return Ok(directory.join(engine_name()));
-            }
-            reject_candidate("新释放的内嵌引擎", &directory, &problems);
-            failures.push(candidate_failure_line(
+            if let Some(path) = vet_candidate(
+                "新释放的内嵌引擎",
                 "新释放的内嵌引擎",
                 &directory,
                 &problems,
-            ));
+                &mut failures,
+            ) {
+                return Ok(path);
+            }
         }
         Err(error) => failures.push(format!("新位置释放内嵌引擎失败：{error:#}")),
     }

@@ -14,6 +14,70 @@ use std::{
 /// 扫描（两工具）与重跑计数默认排除它（X-07 / C-09）。
 pub const QUARANTINE_DIR_NAME: &str = "解压失败";
 
+/// X-04：目录落盘名规划（[`Staging`] 内容里的目录 → 实际落盘相对名的映射）。
+/// 默认落盘名被普通文件、链接或 junction 占用时，为新目录选最小未占用序号
+/// （`目录 (1)`、`目录 (2)`），该目录及全部后代成员整体映射到新目录；
+/// 既有文件一律不动，与既有普通目录同名则合入。规划必须在成员合入前完成：
+/// 文件成员的父链与空目录条目共用这一映射。
+fn plan_directory_renames(
+    control: &crate::control::Control,
+    stage_content: &Path,
+    base: &Path,
+) -> Result<HashMap<String, String>> {
+    let mut dir_renames: HashMap<String, String> = HashMap::new();
+    for entry in walkdir::WalkDir::new(stage_content)
+        .follow_links(false)
+        .min_depth(1)
+    {
+        control.checkpoint()?;
+        let entry = entry?;
+        if !entry.file_type().is_dir() {
+            continue;
+        }
+        let rel = fsutil::relative_string(stage_content, entry.path())?;
+        let (parent_rel, name) = match rel.rfind('/') {
+            Some(index) => (&rel[..index], &rel[index + 1..]),
+            None => ("", rel.as_str()),
+        };
+        // walkdir 保证父目录先于后代：父目录已改名时，后代在改后的父目录下规划。
+        let parent_dest = dir_renames
+            .get(parent_rel)
+            .map_or_else(|| parent_rel.to_string(), Clone::clone);
+        let join = |name: &str| -> Result<PathBuf> {
+            let rel = if parent_dest.is_empty() {
+                name.to_string()
+            } else {
+                format!("{parent_dest}/{name}")
+            };
+            Ok(base.join(fsutil::safe_relative(&rel)?))
+        };
+        if !matches!(classify_occupancy(&join(name)?)?, Occupancy::Blocked) {
+            // 目标空闲（按原名创建）或已是普通目录（按 X-04 合入）：不改名。
+            continue;
+        }
+        let mut new_rel = None;
+        for index in 1u64..=1_000_000 {
+            let candidate = fsutil::suffixed_candidate(name, "", index);
+            let candidate_rel = if parent_dest.is_empty() {
+                candidate.clone()
+            } else {
+                format!("{parent_dest}/{candidate}")
+            };
+            if matches!(classify_occupancy(&join(&candidate)?)?, Occupancy::Free) {
+                new_rel = Some(candidate_rel);
+                break;
+            }
+        }
+        let Some(new_rel) = new_rel else {
+            bail!(
+                "无法为目录 {rel} 分配不冲突的落盘名（X-04：无法生成合法目标时该包不算完整成功）"
+            );
+        };
+        dir_renames.insert(rel, new_rel);
+    }
+    Ok(dir_renames)
+}
+
 /// 条目清单结果：声明总大小、大小元数据是否完整、以及 H-06 的 Git 排除子树。
 /// `git_subtrees` 存归档内相对路径的目录前缀：该目录「直接含有 .git」，其自身及
 /// 全部后代（含 .git 的兄弟条目）在合入阶段整树跳过；空串表示归档根本身直接含
@@ -482,55 +546,7 @@ impl SevenZip {
         // 占用时，为新目录选最小未占用序号（`目录 (1)`、`目录 (2)`），该目录及全部
         // 后代成员整体映射到新目录；既有文件一律不动，与既有普通目录同名则合入。
         // 规划必须在成员合入前完成：文件成员的父链与空目录条目共用这一映射。
-        let mut dir_renames: HashMap<String, String> = HashMap::new();
-        for entry in walkdir::WalkDir::new(&stage.content)
-            .follow_links(false)
-            .min_depth(1)
-        {
-            job.context.control.checkpoint()?;
-            let entry = entry?;
-            if !entry.file_type().is_dir() {
-                continue;
-            }
-            let rel = fsutil::relative_string(&stage.content, entry.path())?;
-            let (parent_rel, name) = match rel.rfind('/') {
-                Some(index) => (&rel[..index], &rel[index + 1..]),
-                None => ("", rel.as_str()),
-            };
-            // walkdir 保证父目录先于后代：父目录已改名时，后代在改后的父目录下规划。
-            let parent_dest = dir_renames
-                .get(parent_rel)
-                .map_or_else(|| parent_rel.to_string(), Clone::clone);
-            let join = |name: &str| -> Result<PathBuf> {
-                let rel = if parent_dest.is_empty() {
-                    name.to_string()
-                } else {
-                    format!("{parent_dest}/{name}")
-                };
-                Ok(base.join(fsutil::safe_relative(&rel)?))
-            };
-            if !matches!(classify_occupancy(&join(name)?)?, Occupancy::Blocked) {
-                // 目标空闲（按原名创建）或已是普通目录（按 X-04 合入）：不改名。
-                continue;
-            }
-            let mut new_rel = None;
-            for index in 1u64..=1_000_000 {
-                let candidate = fsutil::suffixed_candidate(name, "", index);
-                let candidate_rel = if parent_dest.is_empty() {
-                    candidate.clone()
-                } else {
-                    format!("{parent_dest}/{candidate}")
-                };
-                if matches!(classify_occupancy(&join(&candidate)?)?, Occupancy::Free) {
-                    new_rel = Some(candidate_rel);
-                    break;
-                }
-            }
-            let Some(new_rel) = new_rel else {
-                bail!("无法为目录 {rel} 分配不冲突的落盘名（X-04：无法生成合法目标时该包不算完整成功）");
-            };
-            dir_renames.insert(rel, new_rel);
-        }
+        let dir_renames = plan_directory_renames(&job.context.control, &stage.content, base)?;
         // One archive is decoded once, including solid archives. Final placement is rename, never copy.
         for entry in walkdir::WalkDir::new(&stage.content)
             .follow_links(false)
@@ -1011,19 +1027,21 @@ fn is_system(path: &Path) -> bool {
 fn is_system(_path: &Path) -> bool {
     false
 }
-/// 将小写文件名解析为 RAR 新式分卷主干（去掉末尾 `.partN.rar` 后的部分）。
+/// 解析 RAR 新式分卷名：把小写文件名拆成主干与 `.partN` 的数字串。
 /// 与 rules::multipart_name 使用的 `\.part(\d+)\.rar$` 对齐：
 /// report.partial.rar 这类仅含 “.part” 子串的普通包不得当作分卷。
-fn rar_part_stem(name: &str) -> Option<&str> {
+fn split_rar_part(name: &str) -> Option<(&str, &str)> {
     let base = name.strip_suffix(".rar")?;
     let (stem, part) = base.rsplit_once(".part")?;
-    (!part.is_empty() && part.chars().all(|c| c.is_ascii_digit())).then_some(stem)
+    (!part.is_empty() && part.bytes().all(|b| b.is_ascii_digit())).then_some((stem, part))
 }
-/// part rar 族的卷号数字串（`a.part01.rar` → `01`），判定与 [`rar_part_stem`] 同构。
+/// 将小写文件名解析为 RAR 新式分卷主干（去掉末尾 `.partN.rar` 后的部分）。
+fn rar_part_stem(name: &str) -> Option<&str> {
+    split_rar_part(name).map(|(stem, _)| stem)
+}
+/// part rar 族的卷号数字串（`a.part01.rar` → `01`），判定与 [`rar_part_stem`] 同口径。
 fn part_digits(name: &str) -> Option<&str> {
-    let base = name.strip_suffix(".rar")?;
-    let (_, part) = base.rsplit_once(".part")?;
-    (!part.is_empty() && part.bytes().all(|b| b.is_ascii_digit())).then_some(part)
+    split_rar_part(name).map(|(_, part)| part)
 }
 struct ArchiveVolumes {
     kind: String,
