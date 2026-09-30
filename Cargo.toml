@@ -82,6 +82,12 @@ name = "xberg_shared_process"
 path = "tests/xberg_shared_process.rs"
 required-features = ["gui"]
 
+# 真实后台代理入口依赖 GUI 二进制，测试用合成引擎验证生命周期。
+[[test]]
+name = "background_settings"
+path = "tests/background_settings.rs"
+required-features = ["gui"]
+
 [workspace]
 # F23/XB-12：可选组件纳入 workspace——统一锁文件，使根 cargo audit/deny 覆盖其依赖。
 # 旧 markdown-media-worker 已随媒体转录迁移到 Xberg 推理组件退役（XB-12）。

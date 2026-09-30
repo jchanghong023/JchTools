@@ -11,6 +11,52 @@ static NEXT: AtomicU64 = AtomicU64::new(1);
 #[path = "xberg_runtime_windows.rs"]
 mod platform;
 
+/// XB-22/XB-23：新 GUI 会话允许启动；托盘退出后当前会话不自动复活。
+pub fn resume_background() -> Result<(), String> {
+    #[cfg(windows)]
+    {
+        platform::resume_background()
+    }
+    #[cfg(not(windows))]
+    {
+        Ok(())
+    }
+}
+pub fn background_allowed() -> Result<(), String> {
+    #[cfg(windows)]
+    {
+        platform::background_allowed()
+    }
+    #[cfg(not(windows))]
+    {
+        Err("后台服务仅支持 Windows".into())
+    }
+}
+/// 查询/退出代理不启动缺失的引擎；仅用于应用拥有的后台生命周期。
+pub fn background_control(stop: bool) -> Result<Value, String> {
+    #[cfg(windows)]
+    {
+        platform::background_control(stop)
+    }
+    #[cfg(not(windows))]
+    {
+        let _ = stop;
+        Err("后台服务仅支持 Windows".into())
+    }
+}
+
+/// O-16/XB-23：仅用户显式强退且没有其他场景任务时终结本应用引擎。
+pub fn force_background_exit() -> Result<Value, String> {
+    #[cfg(windows)]
+    {
+        platform::force_background_exit()
+    }
+    #[cfg(not(windows))]
+    {
+        Err("后台服务仅支持 Windows".into())
+    }
+}
+
 pub fn serve() -> Result<(), String> {
     #[cfg(windows)]
     {
@@ -45,19 +91,14 @@ pub fn request(
             json!({"command":"capabilities"}),
             timeout.min(Duration::from_secs(15)),
             cancel,
-        ) {
-            Ok(response) => match checked(response) {
-                Ok(capabilities) => Some(capabilities),
-                // 钉住发布物（run49.1）的 worker 协议没有 capabilities：目录已按
-                // 固定清单做成员级摘要校验（XB-09 版本锚），直接放行；请求级不
-                // 兼容仍由引擎按各自命令返回明确错误，不会混用模型或另起引擎。
-                Err(error) if error.contains("unsupported command 'capabilities'") => None,
-                Err(error) => {
-                    return Err(format!(
-                        "Xberg 共享接口尚不可用，请更新兼容发布物；不会启动备用引擎：{error}"
-                    ))
-                }
-            },
+        )
+        .and_then(checked)
+        {
+            Ok(capabilities) => Some(capabilities),
+            // 钉住发布物（run49.1）的 worker 协议没有 capabilities：目录已按
+            // 固定清单做成员级摘要校验（XB-09 版本锚），直接放行；请求级不
+            // 兼容仍由引擎按各自命令返回明确错误，不会混用模型或另起引擎。
+            Err(error) if error.contains("unsupported command 'capabilities'") => None,
             Err(error) => {
                 return Err(format!(
                     "Xberg 共享接口尚不可用，请更新兼容发布物；不会启动备用引擎：{error}"

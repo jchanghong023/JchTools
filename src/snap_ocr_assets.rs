@@ -11,8 +11,9 @@
 
 use crate::asset_util::{
     atomic_replace_dir, atomic_replace_file, cleanup_stale_staging_dirs, ensure_not_cancelled,
-    extract_zip_safely, finalize_staging, resolve_xberg_component, validate_relative_path,
-    verify_file, verify_inference_members_for_scenario, AssetDownloader, InferenceManifest,
+    extract_zip_safely, finalize_staging, require_component_members, resolve_xberg_component,
+    state_dir_asset_root, valid_component_tag, validate_relative_path, verify_file,
+    verify_inference_members_for_scenario, AssetDownloader, InferenceManifest,
 };
 use serde::Deserialize;
 use sha2::{Digest, Sha256};
@@ -121,20 +122,13 @@ fn test_asset_root_override() -> Option<PathBuf> {
 }
 
 /// 本功能资产根目录：用户状态目录下的 snap-ocr/（模型、字体与 worker 的缓存落盘
-/// 属于 O-06 明确允许的资产写入，与截图/识别内容无关）。
+/// 属于 O-06 明确允许的资产写入，与截图/识别内容无关）。回退链共用
+/// [`crate::asset_util::state_dir_asset_root`]。
 pub fn asset_root() -> PathBuf {
     if let Some(path) = test_asset_root_override() {
         return path;
     }
-    if let Ok(path) = crate::config::state_dir() {
-        return path.join(DATA_DIRECTORY);
-    }
-    if let Some(local_app_data) = std::env::var_os("LOCALAPPDATA") {
-        return PathBuf::from(local_app_data)
-            .join("JchTools")
-            .join(DATA_DIRECTORY);
-    }
-    std::env::temp_dir().join("JchTools").join(DATA_DIRECTORY)
+    state_dir_asset_root(DATA_DIRECTORY)
 }
 
 /// 命名管道身份：当前用户名与 Windows 登录会话 ID；同一用户的不同登录会话
@@ -203,7 +197,32 @@ pub fn pipe_name() -> String {
 /// Xberg 推理组件按「在位校验」检查（存在性）；其摘要清单接入前缺失时如实
 /// 报告「推理组件未配置」，不冒称就绪。
 /// 后台工作进程的安装路径（取清单条目的 install_path；升版只改清单）。
+/// XB-25：主包同目录的后台程序；测试资产隔离时不误用生产程序。
+fn bundled_worker() -> Option<PathBuf> {
+    if test_asset_root_override().is_some() {
+        return std::env::var_os("JCHTOOLS_TEST_BUNDLED_WORKER")
+            .map(PathBuf::from)
+            .filter(|p| p.is_absolute() && p.is_file());
+    }
+    let path = std::env::current_exe()
+        .ok()?
+        .parent()?
+        .join(WORKER_EXE_NAME);
+    path.is_file().then_some(path)
+}
+
 pub fn worker_install_path() -> Result<PathBuf, String> {
+    if let Some(path) = bundled_worker() {
+        let manifest = load_manifest()?;
+        let worker = manifest.workers.first().ok_or("后台服务清单缺失")?;
+        // 开发版同目录二进制由 cargo build 产生；发布目录必须匹配打包时回填的摘要。
+        let dev_output =
+            cfg!(debug_assertions) && path.parent().is_some_and(|p| p.ends_with("target/debug"));
+        if !dev_output {
+            verify_file(&path, worker.size_bytes, &worker.sha256)?;
+        }
+        return Ok(path);
+    }
     let manifest = load_manifest()?;
     let worker = manifest
         .workers
@@ -230,7 +249,7 @@ pub fn readiness() -> Result<(), String> {
             worker.id
         ));
     }
-    if worker_ready(worker, &root).is_err() {
+    if bundled_worker().is_none() && worker_ready(worker, &root).is_err() {
         return Err("截图 OCR 工作进程未安装或校验失败".to_string());
     }
     readiness_inference_pack(&manifest, &root)
@@ -289,17 +308,7 @@ fn xberg_layout_ready(component: &Path) -> Result<(), String> {
             .join("dict.txt"),
         component.join("onnxruntime.dll"),
     ];
-    for path in &required {
-        if !path.is_file() {
-            let relative = path.strip_prefix(component).unwrap_or(path);
-            return Err(format!(
-                "推理组件不完整：缺少 {}（组件目录 {}）",
-                relative.display(),
-                component.display()
-            ));
-        }
-    }
-    Ok(())
+    require_component_members(component, &required)
 }
 
 /// 下载、校验并原子安装全部可选资产（O-06）。
@@ -340,8 +349,9 @@ pub fn initialize(cancel: &AtomicBool, mut progress: impl FnMut(String)) -> Resu
 /// 临时文件；单项失败跳过继续。
 ///
 /// 不扫 `.old-*` 备份：那是原子替换路径的暂存（asset_util），其中
-/// xberg-inference/<tag> 目标的残留由下次初始化的 prune_old_inference_tags
-/// 收集，入口一概删除会把替换失败后仍可恢复的备份提前清掉。
+/// xberg-inference/<tag> 目标的残留按设计由 prune_old_inference_tags 收集
+///（该安装链当前仅在测试中启用，见 asset_util；生产初始化只校验共享目录，
+/// XB-10），入口一概删除会把替换失败后仍可恢复的备份提前清掉。
 fn cleanup_stale_staging(root: &Path) {
     cleanup_stale_staging_dirs(root);
     // write_expected_tag 的临时标记（xberg-inference/.expected-tag-<uuid>）在
@@ -403,7 +413,7 @@ fn initialize_staged(
         ));
     }
     ensure_not_cancelled(cancel)?;
-    if worker_ready(worker, root).is_ok() {
+    if bundled_worker().is_some() || worker_ready(worker, root).is_ok() {
         progress("复用已校验的工作进程".to_string());
     } else {
         progress(format!(
@@ -578,12 +588,7 @@ fn load_manifest() -> Result<SnapAssetManifest, String> {
         validate_relative_path(&worker.install_path)?;
     }
     if let Some(pack) = &manifest.xberg_inference {
-        let tag_ok = !pack.tag.is_empty()
-            && !pack.tag.contains('/')
-            && !pack.tag.contains('\\')
-            && !pack.tag.contains("..")
-            && !pack.tag.contains(':');
-        if !tag_ok {
+        if !valid_component_tag(&pack.tag) {
             return Err("推理组件包 tag 不合法".to_string());
         }
         validate_asset(&pack.asset)?;

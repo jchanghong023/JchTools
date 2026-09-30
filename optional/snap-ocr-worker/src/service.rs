@@ -1,5 +1,5 @@
 //! 当前用户会话后台 OCR 服务：管道/托盘/热键独立于 JchTools 主窗口。
-//! 识别由固定版本 Xberg 发布物承接（`xberg worker` 常驻子进程，XB-01/XB-05）；
+//! 统一后台随主包交付，识别由共享 Xberg 代理承接（XB-20～XB-25）；
 //! 仅资产与显式设置落盘；截图、裁剪与识别结果只在内存与剪贴板。
 
 #![cfg(windows)]
@@ -77,14 +77,18 @@ pub(crate) enum Command {
     ModelLoaded(Result<(), LoadFailure>),
     OcrFinished(Result<Option<String>, OcrError>, (i32, i32, i32, i32)),
     WorkerStopped,
+    HotkeyUnavailable(String),
+    OpenMain,
     OpenSettings,
     InitializeAssets,
     RetryModel,
     CancelRecognition,
     CloseSettings,
     ForceExitRequested,
+    ForceExitFinished(Result<(), String>),
     ToggleAutostart,
     ExitRequested,
+    ExitDecision(bool),
 }
 
 enum Work {
@@ -117,37 +121,39 @@ struct Settings {
     warning: Option<String>,
 }
 impl Settings {
-    fn load(root: &Path) -> Self {
-        let defaults = || Self {
+    /// 内存默认值 + 可选警告（加载失败各分支共用同一构造，警告文案逐字保留）。
+    fn defaults(root: &Path, warning: Option<&str>) -> Self {
+        Self {
             hotkey: "Ctrl+Alt+O".into(),
             main_exe: read_launcher(root),
-            warning: None,
-        };
+            warning: warning.map(str::to_string),
+        }
+    }
+    fn load(root: &Path) -> Self {
         let path = root.join("settings.json");
         let raw = match fs::read(&path) {
             Ok(raw) => raw,
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return defaults(),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                return Self::defaults(root, None);
+            }
             Err(_) => {
-                let mut settings = defaults();
-                settings.warning =
-                    Some("截图设置文件无法读取，正在使用内存默认值；原文件未覆盖".into());
-                return settings;
+                return Self::defaults(
+                    root,
+                    Some("截图设置文件无法读取，正在使用内存默认值；原文件未覆盖"),
+                );
             }
         };
         let Ok(value) = serde_json::from_slice::<Value>(&raw) else {
-            let mut settings = defaults();
-            settings.warning = Some("截图设置文件损坏，正在使用内存默认值；原文件未覆盖".into());
-            return settings;
+            return Self::defaults(
+                root,
+                Some("截图设置文件损坏，正在使用内存默认值；原文件未覆盖"),
+            );
         };
         let Some(hotkey) = value.get("hotkey").and_then(Value::as_str) else {
-            let mut settings = defaults();
-            settings.warning = Some("截图设置格式无效，原文件未覆盖".into());
-            return settings;
+            return Self::defaults(root, Some("截图设置格式无效，原文件未覆盖"));
         };
         if tray::parse_hotkey(hotkey).is_err() {
-            let mut settings = defaults();
-            settings.warning = Some("保存的截图热键无效，原文件未覆盖".into());
-            return settings;
+            return Self::defaults(root, Some("保存的截图热键无效，原文件未覆盖"));
         }
         Self {
             hotkey: hotkey.to_string(),
@@ -227,6 +233,13 @@ fn root() -> Result<PathBuf, String> {
         {
             return Ok(path);
         }
+    }
+    if std::env::current_exe()
+        .ok()
+        .and_then(|p| p.parent().map(|d| d.join("JchTools.exe")))
+        .is_some_and(|p| p.is_file())
+    {
+        return crate::xberg_settings::state_dir().map(|p| p.join("snap-ocr"));
     }
     // 主程序由 ProjectDirs 决定用户状态目录，不能在 worker 中重新拼 LOCALAPPDATA：
     // Windows 上它实际位于 JchTools/data/snap-ocr。worker 总是从已校验的
@@ -379,7 +392,45 @@ fn worker(
     cancel: &AtomicBool,
 ) {
     let mut client: Option<XbergWorkerClient> = None;
-    while let Ok(work) = receiver.recv() {
+    let mut engine_pid = None;
+    let mut verified_root = None;
+    loop {
+        let work = match receiver.recv_timeout(Duration::from_secs(3)) {
+            Ok(work) => work,
+            Err(mpsc::RecvTimeoutError::Disconnected) => break,
+            Err(mpsc::RecvTimeoutError::Timeout) => {
+                let alive = (|| {
+                    let component = crate::xberg_settings::required()?;
+                    if verified_root.as_ref() != Some(&component) {
+                        crate::xberg_runtime::validate_assets(&component, "engine")?;
+                        verified_root = Some(component.clone());
+                    }
+                    crate::xberg_runtime::request(
+                        &component,
+                        json!({"command":"keepalive"}),
+                        Duration::from_secs(15),
+                        &AtomicBool::new(false),
+                    )
+                    .and_then(crate::xberg_runtime::checked)
+                })();
+                match alive {
+                    Ok(value) => {
+                        let pid = value["jchtools_xberg_pid"].as_u64();
+                        if pid == engine_pid {
+                            continue;
+                        }
+                        engine_pid = pid;
+                        Work::Load
+                    }
+                    Err(error) => {
+                        client.take();
+                        engine_pid = None;
+                        let _ = events.send(Command::ModelLoaded(Err(LoadFailure::Failed(error))));
+                        continue;
+                    }
+                }
+            }
+        };
         match work {
             Work::Load => {
                 // 重试入口（O-13）：丢弃旧客户端并重新连接共享代理。
@@ -408,7 +459,14 @@ fn worker(
                 let _ = events.send(Command::OcrFinished(outcome, work));
             }
             Work::Stop => {
-                drop(client.take()); // 只断开截图客户端，共享引擎保持存活。
+                drop(client.take());
+                // GUI 任务已结束，截图调用已返回；请求代理排空剩余业务响应并退出。
+                loop {
+                    match crate::xberg_runtime::background_control(true) {
+                        Ok(state) if state["running"] == false => break,
+                        _ => std::thread::sleep(Duration::from_millis(200)),
+                    }
+                }
                 let _ = events.send(Command::WorkerStopped);
                 break;
             }
@@ -590,11 +648,13 @@ struct Service {
     progress: Option<ProgressWindow>,
     settings_window: Option<SettingsWindow>,
     exit_pending: Option<Instant>,
+    exit_confirming: Option<Instant>,
     exit_stop_sent: bool,
+    gui_tasks: std::collections::HashMap<u32, bool>,
 }
 impl Service {
     fn status(&self) -> Value {
-        json!({"ok":true,"shared_xberg_protocol":2,"model":self.model.as_str(),"task":if self.busy {"recognizing"} else {"idle"},
+        json!({"ok":true,"exiting":self.exit_pending.is_some(),"shared_xberg_protocol":2,"background_service_protocol":1,"model":self.model.as_str(),"task":if self.busy {"recognizing"} else {"idle"},
             "hotkey":self.settings.hotkey,"autostart":autostart_enabled(),"error":self.model_error.as_ref().or(self.settings.warning.as_ref())})
     }
     fn hide_old(&mut self) {
@@ -667,7 +727,26 @@ impl Service {
             window.set_cancelling(true);
         }
     }
+    fn open_main(&self, settings: bool) {
+        if let Some(exe) = self.settings.main_exe.as_ref().filter(|p| p.is_file()) {
+            let mut command = std::process::Command::new(exe);
+            if settings {
+                command.arg("--settings");
+            }
+            if command.spawn().is_err() {
+                self.tray.notice("无法打开 JchTools 主界面");
+            }
+        } else {
+            self.tray.notice("主程序位置已改变，请重新打开 JchTools");
+        }
+    }
     fn open_settings(&mut self) {
+        if self.exit_pending.is_none()
+            && self.settings.main_exe.as_ref().is_some_and(|p| p.is_file())
+        {
+            self.open_main(true);
+            return;
+        }
         if let Some(window) = self.settings_window.as_ref() {
             if !window.window().is_visible() {
                 window.set_draft_key("".into());
@@ -762,16 +841,26 @@ impl Service {
                 self.exit_pending
                     .is_some_and(|at| at.elapsed() >= Duration::from_secs(10)),
             );
-            let status = match (
+            // 设置警告与模型错误都有时以「；」连接，单一存在时原文上屏。
+            let status = [
                 self.settings.warning.as_deref(),
                 self.model_error.as_deref(),
-            ) {
-                (Some(warning), Some(model_error)) => format!("{warning}；{model_error}"),
-                (Some(warning), None) => warning.to_owned(),
-                (None, Some(model_error)) => model_error.to_owned(),
-                (None, None) => String::new(),
-            };
+            ]
+            .into_iter()
+            .flatten()
+            .collect::<Vec<_>>()
+            .join("；");
             window.set_status_message(status.into());
+        }
+    }
+    /// 进入「后台加载模型」状态：置 Loading、清错误并通知推理线程装载；
+    /// 线程已退出时降级为 Error（合同文案两处共用，防改一漏一）。
+    fn begin_model_load(&mut self) {
+        self.model = ModelState::Loading;
+        self.model_error = None;
+        if self.work.send(Work::Load).is_err() {
+            self.model = ModelState::Error;
+            self.model_error = Some("推理线程已退出，请重新启动截图服务".into());
         }
     }
     fn retry(&mut self) {
@@ -781,12 +870,7 @@ impl Service {
         {
             return;
         }
-        self.model = ModelState::Loading;
-        self.model_error = None;
-        if self.work.send(Work::Load).is_err() {
-            self.model = ModelState::Error;
-            self.model_error = Some("推理线程已退出，请重新启动截图服务".into());
-        }
+        self.begin_model_load();
         self.refresh_settings();
     }
     fn rollback_settings(
@@ -883,20 +967,35 @@ impl Service {
         self.refresh_settings();
     }
     fn request_exit(&mut self) {
-        if self.exit_pending.is_some() {
+        if self.exit_pending.is_some() || self.exit_confirming.is_some() {
             return;
         }
+        self.exit_confirming = Some(Instant::now());
+        let commands = self.commands.clone();
+        // 确认框不阻塞服务事件循环：GUI 心跳仍可更新在途任务和取消结果。
+        std::thread::spawn(move || {
+            let _ = commands.send(Command::ExitDecision(confirm_background_exit()));
+        });
+    }
+    fn begin_exit(&mut self) {
         self.cancel_recognition();
         self.exit_pending = Some(Instant::now());
         if self.busy || self.model == ModelState::Loading {
             self.tray
-                .notice("正在等待当前推理调用结束；超过 10 秒可在设置中选择强制退出");
-        } else {
-            self.stop_worker();
+                .notice("正在等待当前任务安全结束；退出完成前后台仍保持响应");
+            self.open_settings();
         }
     }
     fn stop_worker(&mut self) {
-        if self.exit_stop_sent {
+        if self.exit_stop_sent
+            || self
+                .exit_pending
+                .is_none_or(|at| at.elapsed() < Duration::from_secs(2))
+        {
+            return;
+        }
+        self.gui_tasks.retain(|pid, _| gui_process_alive(*pid));
+        if self.gui_tasks.values().any(|busy| *busy) {
             return;
         }
         self.exit_stop_sent = true;
@@ -915,7 +1014,17 @@ impl Service {
     fn pipe(&mut self, request: &Value) -> Value {
         let action = request.get("command").and_then(Value::as_str).unwrap_or("");
         let outcome = match action {
-            "ping" | "get-state" => Ok(()),
+            "ping" | "get-state" => {
+                if let (Some(pid), Some(busy)) = (
+                    request["gui_pid"]
+                        .as_u64()
+                        .and_then(|id| u32::try_from(id).ok()),
+                    request["gui_busy"].as_bool(),
+                ) {
+                    self.gui_tasks.insert(pid, busy);
+                }
+                Ok(())
+            }
             "open-settings" => {
                 self.open_settings();
                 Ok(())
@@ -1099,12 +1208,7 @@ impl Service {
                         // pending_image 的路径必先经 request_capture 复位；
                         // 此复位为纵深防御，并非修复已知竞态）。
                         self.cancel.store(false, Ordering::Release);
-                        self.model = ModelState::Loading;
-                        self.model_error = None;
-                        if self.work.send(Work::Load).is_err() {
-                            self.model = ModelState::Error;
-                            self.model_error = Some("推理线程已退出，请重新启动截图服务".into());
-                        }
+                        self.begin_model_load();
                     }
                     Err(OcrError::TimedOut(reason)) => {
                         // 识别超时：挂起进程已被 worker 线程终止，连接死亡，
@@ -1132,11 +1236,15 @@ impl Service {
                     }
                 }
             }
+            Command::HotkeyUnavailable(reason) => {
+                self.settings.warning = Some(reason);
+            }
+            Command::OpenMain => self.open_main(false),
             Command::OpenSettings => self.open_settings(),
             Command::InitializeAssets => {
                 if let Some(exe) = self.settings.main_exe.as_ref().filter(|p| p.is_file()) {
                     if std::process::Command::new(exe)
-                        .arg("--snap-ocr-settings")
+                        .arg("--settings")
                         .spawn()
                         .is_err()
                     {
@@ -1163,12 +1271,24 @@ impl Service {
                     .exit_pending
                     .is_some_and(|at| at.elapsed() >= Duration::from_secs(10))
                 {
-                    // 只有用户显式选择强制退出才终止当前可能仍阻塞的推理调用。
-                    // exit(0) 不运行任何清理（Drop/线程回收全部跳过），推理子进程
-                    // 由 kill-on-close Job 兜底回收：本进程死亡时内核关闭 Job 句柄
-                    // 并终结子进程，不遗留无窗口孤儿（O-16/E2'-1，见
-                    // xberg_worker::InferenceJob）。
-                    std::process::exit(0);
+                    self.gui_tasks.retain(|pid, _| gui_process_alive(*pid));
+                    if self.gui_tasks.values().any(|busy| *busy) {
+                        self.tray
+                            .notice("其他界面任务仍在处理，等待安全停止后才能强制退出截图推理");
+                    } else {
+                        let commands = self.commands.clone();
+                        std::thread::spawn(move || {
+                            let result = crate::xberg_runtime::force_background_exit()
+                                .and_then(crate::xberg_runtime::checked)
+                                .map(|_| ());
+                            let _ = commands.send(Command::ForceExitFinished(result));
+                        });
+                    }
+                }
+            }
+            Command::ForceExitFinished(result) => {
+                if let Err(error) = result {
+                    self.tray.notice(error);
                 }
             }
             Command::ToggleAutostart => {
@@ -1177,6 +1297,12 @@ impl Service {
                 }
             }
             Command::ExitRequested => self.request_exit(),
+            Command::ExitDecision(confirmed) => {
+                self.exit_confirming = None;
+                if confirmed {
+                    self.begin_exit();
+                }
+            }
             Command::WorkerStopped => {
                 self.complete_exit();
                 return;
@@ -1233,6 +1359,42 @@ fn copy_text(text: &str) -> Result<(), String> {
         }
     }
     Ok(())
+}
+
+fn gui_process_alive(pid: u32) -> bool {
+    use windows_sys::Win32::{
+        Foundation::CloseHandle,
+        System::Threading::{GetExitCodeProcess, OpenProcess, PROCESS_QUERY_LIMITED_INFORMATION},
+    };
+    // SAFETY: 只查询给定进程的退出码；句柄在本函数内关闭。
+    unsafe {
+        let handle = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, 0, pid);
+        if handle.is_null() {
+            return false;
+        }
+        let mut code = 0;
+        let alive = GetExitCodeProcess(handle, &raw mut code) != 0 && code == 259;
+        CloseHandle(handle);
+        alive
+    }
+}
+fn confirm_background_exit() -> bool {
+    use windows_sys::Win32::UI::WindowsAndMessaging::{
+        MessageBoxW, IDYES, MB_DEFBUTTON2, MB_ICONQUESTION, MB_YESNO,
+    };
+    let text = protocol::wide(
+        "退出后台服务将停止当前任务、截图及 Xberg。正在处理的内容会在安全边界结束。确定退出？",
+    );
+    let title = protocol::wide("退出 JchTools 后台服务");
+    // SAFETY: 同步系统确认框，宽字符串在调用期间有效。
+    unsafe {
+        MessageBoxW(
+            std::ptr::null_mut(),
+            text.as_ptr(),
+            title.as_ptr(),
+            MB_YESNO | MB_ICONQUESTION | MB_DEFBUTTON2,
+        ) == IDYES
+    }
 }
 
 /// 主窗口关闭不会调用此函数的退出；托盘退出才释放后台常驻模型。
@@ -1299,7 +1461,9 @@ pub fn run_service(autostart: bool) -> Result<(), String> {
         progress: None,
         settings_window: None,
         exit_pending: None,
+        exit_confirming: None,
         exit_stop_sent: false,
+        gui_tasks: std::collections::HashMap::new(),
     };
     let (ready_tx, ready_rx) = mpsc::sync_channel(1);
     let ipc = tx.clone();
@@ -1319,6 +1483,15 @@ pub fn run_service(autostart: bool) -> Result<(), String> {
             move || {
                 while let Ok(command) = rx.try_recv() {
                     service.borrow_mut().handle(command);
+                }
+                {
+                    let mut current = service.borrow_mut();
+                    if current.exit_pending.is_some()
+                        && !current.busy
+                        && current.model != ModelState::Loading
+                    {
+                        current.stop_worker();
+                    }
                 }
                 let current = service.borrow();
                 if current
@@ -1371,7 +1544,9 @@ mod tests {
             progress: None,
             settings_window: None,
             exit_pending: None,
+            exit_confirming: None,
             exit_stop_sent: false,
+            gui_tasks: std::collections::HashMap::new(),
         };
         (service, work_rx)
     }
@@ -1429,7 +1604,9 @@ mod tests {
             progress: None,
             settings_window: None,
             exit_pending: None,
+            exit_confirming: None,
             exit_stop_sent: false,
+            gui_tasks: std::collections::HashMap::new(),
         };
         service.handle(Command::OcrFinished(
             Err(OcrError::Backend("一次性推理错误".into())),
@@ -1470,7 +1647,9 @@ mod tests {
             progress: None,
             settings_window: None,
             exit_pending: None,
+            exit_confirming: None,
             exit_stop_sent: false,
+            gui_tasks: std::collections::HashMap::new(),
         };
         service.handle(Command::ModelLoaded(Err(
             super::LoadFailure::NotConfigured("推理组件未配置".into()),

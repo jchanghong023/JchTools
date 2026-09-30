@@ -135,7 +135,7 @@ fn notify(hwnd: Handle, message: Option<&str>, hotkey: &str, action: u32) -> boo
     data.flags = 0x1 | 0x2 | 0x4;
     data.callback = WM_APP_TRAY;
     data.icon = unsafe { LoadIconW(null_mut(), 32512usize as *const u16) };
-    fill(&mut data.tip, &format!("截图 OCR ({hotkey})"));
+    fill(&mut data.tip, &format!("JchTools 后台服务 ({hotkey})"));
     if let Some(message) = message {
         data.flags |= 0x10;
         fill(&mut data.info, message);
@@ -260,8 +260,13 @@ unsafe extern "system" fn wnd_proc(hwnd: Handle, msg: u32, w: usize, l: isize) -
             if !menu.is_null() {
                 // 每次打开菜单读取当前用户 Run 值，避免设置窗口或外部更改后的旧状态。
                 let autostart = super::autostart_enabled();
-                for (id, title) in [(1, "截图识别"), (2, "设置"), (3, "开机启动"), (4, "退出")]
-                {
+                for (id, title) in [
+                    (5, "打开主界面"),
+                    (1, "截图识别"),
+                    (2, "设置"),
+                    (3, "开机启动"),
+                    (4, "退出后台服务"),
+                ] {
                     let text = wide(title);
                     let flags = if id == 3 && autostart { 0x0008 } else { 0 }; // MF_CHECKED
                     AppendMenuW(menu, flags, id, text.as_ptr());
@@ -278,6 +283,7 @@ unsafe extern "system" fn wnd_proc(hwnd: Handle, msg: u32, w: usize, l: isize) -
             STATE.with(|slot| {
                 if let Some(state) = slot.borrow().as_ref() {
                     let command = match w & 0xffff {
+                        5 => Some(Command::OpenMain),
                         1 => Some(Command::CaptureRequested),
                         2 => Some(Command::OpenSettings),
                         3 => Some(Command::ToggleAutostart),
@@ -317,7 +323,7 @@ unsafe extern "system" fn wnd_proc(hwnd: Handle, msg: u32, w: usize, l: isize) -
                                     let state = slot
                                         .as_mut()
                                         .ok_or_else(|| "托盘服务已退出".to_string())?;
-                                    if name == state.hotkey {
+                                    if name == state.hotkey && state.active != 0 {
                                         return Ok(());
                                     }
                                     let next = if state.active == ID_ACTIVE {
@@ -328,7 +334,9 @@ unsafe extern "system" fn wnd_proc(hwnd: Handle, msg: u32, w: usize, l: isize) -
                                     if RegisterHotKey(hwnd, next, mods, key) == 0 {
                                         return Err("快捷键冲突；原快捷键保持有效".into());
                                     }
-                                    if UnregisterHotKey(hwnd, state.active) == 0 {
+                                    if state.active != 0
+                                        && UnregisterHotKey(hwnd, state.active) == 0
+                                    {
                                         UnregisterHotKey(hwnd, next);
                                         return Err("原快捷键无法注销；设置未更改".into());
                                     }
@@ -473,17 +481,18 @@ pub fn start(
                 return;
             }
         };
-        if RegisterHotKey(hwnd, ID_ACTIVE, modifiers, key) == 0 {
-            let _ = ready_tx.send(Err("全局快捷键冲突；截图服务未启动".into()));
-            DestroyWindow(hwnd);
-            return;
+        let hotkey_registered = RegisterHotKey(hwnd, ID_ACTIVE, modifiers, key) != 0;
+        if !hotkey_registered {
+            let _ = sender.send(Command::HotkeyUnavailable(
+                "快捷键被占用，请在截图 OCR 页设置其他组合；后台服务仍在运行".into(),
+            ));
         }
         let queue = Arc::new(Mutex::new(VecDeque::new()));
         STATE.with(|slot| {
             *slot.borrow_mut() = Some(TrayState {
                 commands: sender,
                 queue: queue.clone(),
-                active: ID_ACTIVE,
+                active: if hotkey_registered { ID_ACTIVE } else { 0 },
                 hotkey: hotkey.clone(),
             });
         });
@@ -492,7 +501,7 @@ pub fn start(
             DestroyWindow(hwnd);
             return;
         }
-        if !autostart {
+        if !autostart && hotkey_registered {
             let _ = notify(hwnd, Some(&format!("已启动，按 {hotkey} 截图")), &hotkey, 1);
         }
         let _ = ready_tx.send(Ok(TrayHandle {

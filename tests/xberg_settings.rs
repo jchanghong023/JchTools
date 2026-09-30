@@ -85,8 +85,8 @@ fn saved_directory_is_restored_and_invalid_save_preserves_it() {
         let root = std::path::PathBuf::from(root);
         let directory = root.join("中文 Xberg");
         if std::env::var("JCHTOOLS_SAVE_TEST_ACTION").unwrap() == "save" {
-            jchtools::markdown_assets::save_runtime_dir(&directory).unwrap();
-            assert!(jchtools::markdown_assets::save_runtime_dir(&root.join("不存在")).is_err());
+            jchtools::xberg_settings::save(&directory).unwrap();
+            assert!(jchtools::xberg_settings::save(&root.join("不存在")).is_err());
         } else {
             assert_eq!(
                 jchtools::markdown_assets::load_saved_runtime_dir().unwrap(),

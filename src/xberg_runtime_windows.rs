@@ -34,7 +34,7 @@ struct PendingRequest {
     lane: Option<&'static str>,
 }
 type Pending = Arc<Mutex<HashMap<String, PendingRequest>>>;
-const BROKER_PROTOCOL: u64 = 1;
+const BROKER_PROTOCOL: u64 = 2;
 
 fn identity() -> Result<String, String> {
     let mut session = 0;
@@ -52,6 +52,52 @@ fn identity() -> Result<String, String> {
 
 fn pipe_name() -> Result<String, String> {
     Ok(format!(r"\\.\pipe\jchtools-xberg-{}", identity()?))
+}
+
+fn stopped_marker() -> Result<PathBuf, String> {
+    Ok(xberg_settings::state_dir()?.join(format!("background-stopped-{}", identity()?)))
+}
+pub(super) fn resume_background() -> Result<(), String> {
+    match std::fs::remove_file(stopped_marker()?) {
+        Ok(()) => Ok(()),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(e) => Err(format!("恢复后台启动状态失败：{e}")),
+    }
+}
+pub(super) fn background_allowed() -> Result<(), String> {
+    if stopped_marker()?.exists() {
+        Err("后台已从托盘退出；重新打开 JchTools 后自动启动".into())
+    } else {
+        Ok(())
+    }
+}
+pub(super) fn background_control(stop: bool) -> Result<Value, String> {
+    background_command(if stop { "broker-stop" } else { "broker-state" })
+}
+pub(super) fn force_background_exit() -> Result<Value, String> {
+    background_command("broker-force-stop")
+}
+fn background_command(command: &str) -> Result<Value, String> {
+    if command != "broker-state" {
+        let marker = stopped_marker()?;
+        if let Some(parent) = marker.parent() {
+            std::fs::create_dir_all(parent).map_err(|e| e.to_string())?;
+        }
+        std::fs::write(marker, b"stopped").map_err(|e| e.to_string())?;
+    }
+    let name = pipe_name()?;
+    let pipe = match OpenOptions::new().read(true).write(true).open(name) {
+        Ok(pipe) => pipe,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+            return Ok(json!({"ok":true,"running":false,"active":0}))
+        }
+        Err(e) => return Err(format!("后台控制连接失败：{e}")),
+    };
+    exchange(
+        pipe,
+        &json!({"request":{"id":"background-control", "command":command}}),
+        QUERY_TIMEOUT,
+    )
 }
 
 /// 看门狗反复取消当前线程同步 I/O，覆盖期限到达恰在两次 I/O 之间的竞态。
@@ -138,6 +184,7 @@ fn connect(start: bool) -> Result<File, String> {
         return Ok(pipe);
     }
     if start {
+        background_allowed()?;
         // 代理是 JchTools/截图服务自身的内部模式；只有赢得会话锁的代理可创建引擎。
         let executable =
             if cfg!(debug_assertions) && std::env::var_os("JCHTOOLS_TEST_STATE_DIR").is_some() {
@@ -511,16 +558,58 @@ fn create_pipe(name: &str) -> Result<File, String> {
     Ok(unsafe { File::from_raw_handle(raw.cast()) })
 }
 
-fn handle(pipe: File, engine: &Mutex<Option<Engine>>) -> Result<(), String> {
+fn handle(pipe: File, engine: &Mutex<Option<Engine>>, stopping: &AtomicBool) -> Result<(), String> {
     let mut reader = BufReader::new(pipe);
     let envelope = {
         let _guard = IoDeadline::new(QUERY_TIMEOUT)?;
         read_json(&mut reader)?
     };
-    let root = PathBuf::from(envelope["runtime_dir"].as_str().ok_or("缺少 Xberg 目录")?);
     let request = envelope["request"].clone();
+    if matches!(
+        request["command"].as_str(),
+        Some("broker-state" | "broker-stop" | "broker-force-stop")
+    ) {
+        if request["command"] == "broker-stop" {
+            stopping.store(true, Ordering::Release);
+        }
+        let mut slot = engine.lock().map_err(|_| "后台状态异常")?;
+        if request["command"] == "broker-force-stop" {
+            let document_active = slot.as_ref().is_some_and(|e| {
+                e.pending
+                    .lock()
+                    .map_or(true, |p| p.values().any(|v| v.lane == Some("document")))
+            });
+            if document_active {
+                return write_json(
+                    reader.get_mut(),
+                    &json!({"id":request["id"],"ok":false,"error":"文档或媒体任务尚未结束，不能强制退出","jchtools_broker_protocol":BROKER_PROTOCOL}),
+                );
+            }
+            stopping.store(true, Ordering::Release);
+            if let Some(mut current) = slot.take() {
+                current.child.kill().map_err(|e| e.to_string())?;
+                current.child.wait().map_err(|e| e.to_string())?;
+                fail_pending(&current.pending, &current.broken);
+            }
+        }
+        let active = slot
+            .as_ref()
+            .and_then(|e| {
+                e.pending
+                    .lock()
+                    .ok()
+                    .map(|p| p.values().filter(|v| v.lane.is_some()).count())
+            })
+            .unwrap_or(0);
+        let response = json!({"id":request["id"],"ok":true,"running":true,"active":active,"stopping":stopping.load(Ordering::Acquire),"jchtools_broker_protocol":BROKER_PROTOCOL});
+        return write_json(reader.get_mut(), &response);
+    }
+    let root = PathBuf::from(envelope["runtime_dir"].as_str().ok_or("缺少 Xberg 目录")?);
     let response = (|| {
         let mut slot = engine.lock().map_err(|_| "共享引擎状态异常")?;
+        if stopping.load(Ordering::Acquire) && request["command"] != "cancel" {
+            return Err("后台正在退出，不接受新请求".into());
+        }
         if let Some(current) = slot.as_mut() {
             if current
                 .child
@@ -528,6 +617,27 @@ fn handle(pipe: File, engine: &Mutex<Option<Engine>>) -> Result<(), String> {
                 .map_err(|e| e.to_string())?
                 .is_some()
             {
+                slot.take();
+            }
+        }
+        if let Some(current) = slot.as_mut() {
+            if current.root != root {
+                let saved = std::fs::canonicalize(xberg_settings::required()?)
+                    .map_err(|e| e.to_string())?;
+                if saved != root {
+                    return Err("请求使用旧目录，请读取最新共享配置".into());
+                }
+                if current
+                    .pending
+                    .lock()
+                    .map_err(|_| "共享请求表异常")?
+                    .values()
+                    .any(|p| p.lane.is_some())
+                {
+                    return Err("新来源已保存，等待当前任务安全结束后切换".into());
+                }
+                current.child.kill().map_err(|e| e.to_string())?;
+                current.child.wait().map_err(|e| e.to_string())?;
                 slot.take();
             }
         }
@@ -541,7 +651,12 @@ fn handle(pipe: File, engine: &Mutex<Option<Engine>>) -> Result<(), String> {
         }
         let current = slot.as_ref().ok_or("共享引擎初始化失败")?;
         if current.root != root {
-            return Err("Xberg 新目录已保存；常驻引擎仍使用原目录。请结束功能并重启 Windows 后使用新目录，不会中断当前任务或启动第二个引擎".into());
+            return Err("Xberg 新目录已保存；常驻引擎仍使用原目录。请从托盘退出后台并重新打开 JchTools 后使用新目录，不会中断当前任务或启动第二个引擎".into());
+        }
+        if request["command"] == "keepalive" {
+            return Ok(
+                json!({"id":request["id"],"ok":true,"jchtools_xberg_pid":current.child.id()}),
+            );
         }
         let receive = current.submit(request.clone())?;
         let timeout =
@@ -588,7 +703,32 @@ pub(super) fn serve() -> Result<(), String> {
         Err(e) => return Err(format!("共享引擎锁失败：{e}")),
     }
     let name = pipe_name()?;
-    let engine = Arc::new(Mutex::new(None));
+    background_allowed()?;
+    let engine: Arc<Mutex<Option<Engine>>> = Arc::new(Mutex::new(None));
+    let stopping = Arc::new(AtomicBool::new(false));
+    let watch_engine = engine.clone();
+    let watch_stopping = stopping.clone();
+    std::thread::spawn(move || loop {
+        std::thread::sleep(Duration::from_millis(100));
+        if !watch_stopping.load(Ordering::Acquire) {
+            continue;
+        }
+        if let Ok(mut slot) = watch_engine.lock() {
+            let active = slot.as_ref().is_some_and(|e| {
+                e.pending
+                    .lock()
+                    .map_or(true, |p| p.values().any(|v| v.lane.is_some()))
+            });
+            if active {
+                continue;
+            }
+            if let Some(mut current) = slot.take() {
+                let _ = current.child.kill();
+                let _ = current.child.wait();
+            }
+            std::process::exit(0);
+        }
+    });
     loop {
         let pipe = create_pipe(&name)?;
         // SAFETY: 同步管道的有效句柄；客户端先连接的 ERROR_PIPE_CONNECTED 也有效。
@@ -603,8 +743,9 @@ pub(super) fn serve() -> Result<(), String> {
             continue;
         }
         let engine = Arc::clone(&engine);
+        let stopping = stopping.clone();
         std::thread::spawn(move || {
-            let _ = handle(pipe, &engine);
+            let _ = handle(pipe, &engine, &stopping);
         });
     }
 }

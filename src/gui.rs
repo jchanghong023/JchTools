@@ -191,6 +191,7 @@ struct State {
     snap_generation: u64,
     /// 截图 OCR 服务监督线程的命令端（O-11：GUI 只连接/请求，窗口关闭不停止服务）。
     snap_commands: Option<mpsc::Sender<SnapCommand>>,
+    snap_foreground_busy: Arc<std::sync::atomic::AtomicBool>,
     snap_sender: mpsc::Sender<SnapMessage>,
     snap_receiver: RefCell<mpsc::Receiver<SnapMessage>>,
     /// 测试注入：覆盖任务状态目录；生产路径为 None，仍走 engine::prepare/apply。
@@ -1252,14 +1253,23 @@ fn apply_plan_readiness(ui: &AppWindow, state: &State, snapshot: Option<&PlanSna
         ui.set_status(outcome.status_text().into());
     }
 }
+/// 数值规则行的配置真值文本：读当前配置里的 u64 值转字符串；缺失或类型不符
+/// 时为空串。非法输入回退与超范围写入失败共用，保证行显示回到同一真值。
+fn rule_config_truth_text(state: &Rc<RefCell<State>>, key: &str) -> String {
+    let cfg = serde_json::to_value(&state.borrow().config).unwrap_or_default();
+    cfg.get(key)
+        .cloned()
+        .unwrap_or_default()
+        .as_u64()
+        .map(|v| v.to_string())
+        .unwrap_or_default()
+}
 /// 计划页事件是否可应用：代际须仍是 latest，且 filter 与当前视图一致。
 /// page 不再要求与 UI 预置值一致：翻页采用「先加载、成功再提交」，加载期间 state.page 仍是旧页。
 fn plan_page_event_accepted(
     event_gen: u64,
     latest: u64,
-    _event_page: usize,
     event_filter: Option<&str>,
-    _ui_page: usize,
     ui_filter: Option<&str>,
 ) -> bool {
     event_gen == latest && event_filter == ui_filter
@@ -1275,6 +1285,25 @@ fn count_selected_pending(task: &Path) -> Result<u64> {
     )?;
     // COUNT(*) 恒非负，max(0) 仅防御损坏库；转换在 64 位平台无损。
     Ok(u64::try_from(n.max(0)).unwrap_or(0))
+}
+/// 引擎侧后台线程公共骨架：body 产出终态事件；panic 以固定文案转
+/// [`Event::Failed`]，引擎错误转 `{error:#}` 文本。发送失败静默放弃
+/// （界面事件循环已退出时无处投递）。清点等事件形状不同的站点不适用本骨架。
+fn spawn_event_worker(
+    out: &EventSender,
+    panic_text: &'static str,
+    body: impl FnOnce() -> anyhow::Result<Event> + Send + 'static,
+) {
+    let out = out.clone();
+    std::thread::spawn(move || {
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(body));
+        let event = match result {
+            Ok(Ok(event)) => event,
+            Ok(Err(error)) => Event::Failed(format!("{error:#}")),
+            Err(_) => Event::Failed(panic_text.to_string()),
+        };
+        let _ = out.send(event);
+    });
 }
 fn start_task(ui: &AppWindow, state: &Rc<RefCell<State>>, out: &EventSender, apply: bool) {
     if ui.get_busy() {
@@ -1358,7 +1387,6 @@ fn start_task(ui: &AppWindow, state: &Rc<RefCell<State>>, out: &EventSender, app
         control: control.clone(),
         events: Some(out.channel()),
     };
-    let out = out.clone();
     // 同一次 GUI 会话里可能先分析再执行：覆盖对象必须可重复使用，不能 take。
     let overrides = state
         .borrow()
@@ -1367,8 +1395,10 @@ fn start_task(ui: &AppWindow, state: &Rc<RefCell<State>>, out: &EventSender, app
         .map(|o| EngineTestOverrides {
             state_dir: o.state_dir.clone(),
         });
-    std::thread::spawn(move || {
-        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+    spawn_event_worker(
+        out,
+        "整理线程意外退出；未执行的步骤不会继续",
+        move || {
             if apply {
                 // apply 分支在函数入口已校验任务库存在；工作线程内不使用 unwrap，
                 // 若状态被并发改动则按错误返回，交给事件循环统一呈现。
@@ -1382,27 +1412,17 @@ fn start_task(ui: &AppWindow, state: &Rc<RefCell<State>>, out: &EventSender, app
                     control.set_planned(n);
                 }
                 engine::apply(task_path, context)
+                    .map(|result| Event::Done(result.directory, result.summary))
             } else {
-                match &overrides {
+                let prepare = match &overrides {
                     // 测试注入只需隔离任务库状态目录（回收站注入随 S-02 一并移除）。
                     Some(o) => engine::prepare_at(&directory, configuration, context, &o.state_dir),
                     None => engine::prepare(&directory, configuration, context),
-                }
+                };
+                prepare.map(|result| Event::Ready(result.directory, result.summary))
             }
-        }));
-        let event = match result {
-            Ok(Ok(result)) => {
-                if apply {
-                    Event::Done(result.directory, result.summary)
-                } else {
-                    Event::Ready(result.directory, result.summary)
-                }
-            }
-            Ok(Err(error)) => Event::Failed(format!("{error:#}")),
-            Err(_) => Event::Failed("整理线程意外退出；未执行的步骤不会继续".into()),
-        };
-        let _ = out.send(event);
-    });
+        },
+    );
 }
 /// 「递归解压」一段式启动（X-02）：一段确认后连续执行到结束；无计划审核环节，
 /// 结束事件 ExtractDone 只收尾摘要，不改 ready/has_task（那是目录整理两段式的状态）。
@@ -1455,7 +1475,6 @@ fn start_extract(ui: &AppWindow, state: &Rc<RefCell<State>>, out: &EventSender) 
         control: control.clone(),
         events: Some(out.channel()),
     };
-    let out = out.clone();
     let overrides = state
         .borrow()
         .engine_overrides
@@ -1463,24 +1482,23 @@ fn start_extract(ui: &AppWindow, state: &Rc<RefCell<State>>, out: &EventSender) 
         .map(|o| EngineTestOverrides {
             state_dir: o.state_dir.clone(),
         });
-    std::thread::spawn(move || {
-        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| match overrides {
-            Some(overrides) => engine::extract_run_at(
-                &directory,
-                configuration,
-                context,
-                &overrides.state_dir,
-                None,
-            ),
-            None => engine::extract_run(&directory, configuration, context),
-        }));
-        let event = match result {
-            Ok(Ok(result)) => Event::ExtractDone(result.directory, result.summary),
-            Ok(Err(error)) => Event::Failed(format!("{error:#}")),
-            Err(_) => Event::Failed("解压线程意外退出；未执行的步骤不会继续".into()),
-        };
-        let _ = out.send(event);
-    });
+    spawn_event_worker(
+        out,
+        "解压线程意外退出；未执行的步骤不会继续",
+        move || {
+            let result = match overrides {
+                Some(overrides) => engine::extract_run_at(
+                    &directory,
+                    configuration,
+                    context,
+                    &overrides.state_dir,
+                    None,
+                ),
+                None => engine::extract_run(&directory, configuration, context),
+            };
+            result.map(|result| Event::ExtractDone(result.directory, result.summary))
+        },
+    );
     // U-10：失败列表的数据源是本次任务的任务库，而任务库目录由引擎在状态目录下创建、
     // 路径随结果事件返回时任务已结束。启动前快照既有任务目录，watcher 在后台轮询新
     // 目录并回传路径（只读访问，不进界面线程）；失败列表由此在运行中即可查看。
@@ -1620,6 +1638,31 @@ fn normalize_output_name(raw: &str) -> Result<String, String> {
 
 /// MD 合并任务的公共运行段：扫描（排除输出自身）→（按 overwrite）合并（M-02~M-07）。
 /// 供首次启动（overwrite=false）与覆盖确认后的重跑共用；文件集合在执行时重新扫描。
+/// MD 合并/拆分共用的进度回调工厂：FileStarted 更新分母并上屏状态文案，
+/// FileCompleted 更新分母与完成计数（U-03/U-12：完成计数只由 FileCompleted 驱动，
+/// 单文件任务开局不得显示 1/1）。两处的计数口径只有这一份实现。
+fn md_progress_sink<'a>(
+    control: &'a Arc<Control>,
+    out: &'a EventSender,
+    status_text: impl Fn(usize, usize) -> String + 'a,
+) -> impl Fn(md_tools::MdProgress) -> anyhow::Result<()> + 'a {
+    let out = out.clone();
+    move |event| {
+        match event {
+            md_tools::MdProgress::FileStarted(index, total) => {
+                control.set_planned(u64::try_from(total).unwrap_or(0));
+                let _ = out.send(Event::Status(status_text(index, total)));
+            }
+            md_tools::MdProgress::FileCompleted(done, total) => {
+                control.set_planned(u64::try_from(total).unwrap_or(0));
+                control
+                    .completed
+                    .store(u64::try_from(done).unwrap_or(0), Ordering::Relaxed);
+            }
+        }
+        Ok(())
+    }
+}
 fn md_merge_run(
     root: &Path,
     recursive: bool,
@@ -1649,27 +1692,16 @@ fn md_merge_run(
             output.display()
         ));
     }
-    let progress_out = out.clone();
-    let progress_control = Arc::clone(control);
-    let stats =
-        md_tools::merge_markdown_with_events(&entries, output, overwrite, control, &|event| {
-            // U-03/U-12：完成计数只由 FileCompleted 驱动，单文件任务开局不得显示 1/1。
-            match event {
-                md_tools::MdProgress::FileStarted(index, total) => {
-                    progress_control.set_planned(u64::try_from(total).unwrap_or(0));
-                    let _ = progress_out
-                        .send(Event::Status(format!("合并中：{index} / {total} 个文件")));
-                }
-                md_tools::MdProgress::FileCompleted(done, total) => {
-                    progress_control.set_planned(u64::try_from(total).unwrap_or(0));
-                    progress_control
-                        .completed
-                        .store(u64::try_from(done).unwrap_or(0), Ordering::Relaxed);
-                }
-            }
-            Ok(())
-        })
-        .map_err(|error| format!("{error:#}"))?;
+    let stats = md_tools::merge_markdown_with_events(
+        &entries,
+        output,
+        overwrite,
+        control,
+        &md_progress_sink(control, out, |index, total| {
+            format!("合并中：{index} / {total} 个文件")
+        }),
+    )
+    .map_err(|error| format!("{error:#}"))?;
     Ok(format!(
         "合并完成：{} 个文件按创建时间顺序写入 {}",
         stats.files,
@@ -1723,28 +1755,17 @@ fn md_split_run(
             ));
         }
     }
-    let progress_out = out.clone();
-    let progress_control = Arc::clone(control);
-    let written =
-        md_tools::run_split_with_events(input, &plan, out_dir, overwrite, control, &|event| {
-            // U-03/U-12：完成计数只由 FileCompleted 驱动（与合并同口径）。
-            match event {
-                md_tools::MdProgress::FileStarted(index, total) => {
-                    progress_control.set_planned(u64::try_from(total).unwrap_or(0));
-                    let _ =
-                        progress_out.send(Event::Status(format!("拆分中：{index} / {total} 片")));
-                }
-                md_tools::MdProgress::FileCompleted(done, total) => {
-                    progress_control.set_planned(u64::try_from(total).unwrap_or(0));
-                    progress_control
-                        .completed
-                        .store(u64::try_from(done).unwrap_or(0), Ordering::Relaxed);
-                }
-            }
-            Ok(())
-        })
-        .map_err(|error| format!("{error:#}"))?;
-    let _ = written;
+    md_tools::run_split_with_events(
+        input,
+        &plan,
+        out_dir,
+        overwrite,
+        control,
+        &md_progress_sink(control, out, |index, total| {
+            format!("拆分中：{index} / {total} 片")
+        }),
+    )
+    .map_err(|error| format!("{error:#}"))?;
     Ok(format!(
         "拆分完成：{} 片写入 {}（每片不超过 {} 字节）",
         plan.bounds.len(),
@@ -2058,23 +2079,34 @@ fn plan_row_state(selected: bool, stored: &str) -> &str {
     }
 }
 
-/// 勾选切换时就地更新该行：勾选值与状态显示同时改，避免「取消勾选后仍显示待执行」
-/// 到数据库事件回来前的不一致；保存失败时由 SelectionSaved/重载恢复数据库真值。
-fn patch_plan_row(ui: &AppWindow, id: i64, selected: bool) {
+/// 按数值 id 在计划模型中定位行并就地修改（首行命中即停）；模型不是预期的
+/// VecModel 时静默不动。id 比较只有这一处实现：按数值比较避免每行拼一次
+/// id.to_string()（分配次数与行数同阶），也避免按字符串比较时跨任务误匹配
+/// 相同 id 的行（action id 是各任务库各自的 rowid）。
+fn mutate_plan_row(ui: &AppWindow, id: i64, mutate: impl FnOnce(&mut PlanRow)) -> bool {
     let plans = ui.get_plans();
     let Some(model) = plans.as_any().downcast_ref::<VecModel<PlanRow>>() else {
-        return;
+        return false;
     };
     for i in 0..model.row_count() {
         if let Some(mut row) = model.row_data(i) {
             if row.id.as_str().parse::<i64>() == Ok(id) {
-                row.selected = selected;
-                row.state = plan_row_state(selected, row.state.as_str()).into();
+                mutate(&mut row);
                 model.set_row_data(i, row);
-                break;
+                return true;
             }
         }
     }
+    false
+}
+
+/// 勾选切换时就地更新该行：勾选值与状态显示同时改，避免「取消勾选后仍显示待执行」
+/// 到数据库事件回来前的不一致；保存失败时由 SelectionSaved/重载恢复数据库真值。
+fn patch_plan_row(ui: &AppWindow, id: i64, selected: bool) {
+    mutate_plan_row(ui, id, |row| {
+        row.selected = selected;
+        row.state = plan_row_state(selected, row.state.as_str()).into();
+    });
 }
 
 /// 事件循环把日志写进界面环形缓冲的统一入口（U-10/S-07：界面仅保留最近 300 条）。
@@ -2224,7 +2256,9 @@ fn wire_sync(ui: &AppWindow, state: &Rc<RefCell<State>>, out: &EventSender) {
                         // 进入页面即做只读资产复检并连上服务监督线程（O-09/O-11）；
                         // 未初始化、服务缺失都不阻塞其他工具（O-03）。
                         start_snap_readiness(&ui, &state, &out);
-                        ensure_snap_supervisor(&state, &out);
+                        if state.borrow().snap_commands.is_none() {
+                            ensure_snap_supervisor(&state, &out);
+                        }
                     }
                     refresh(&ui, &state.borrow());
                     // 切工具不是规则或目录改动（C-10/R-04）：就绪计划按「任务+配置+目录」
@@ -2264,7 +2298,7 @@ fn wire_sync(ui: &AppWindow, state: &Rc<RefCell<State>>, out: &EventSender) {
                 // 「关于」不是工具：清空 active-tool-id，侧栏不高亮任何工具。
                 // 返回工具页统一走 select_tool（工具 NavItem 的点击回调），此处不再恢复列表：
                 // 该回调在生产中只被「关于」NavItem 以 1 调用，其余分支属不可达路径。
-                if screen == 1 {
+                if screen == 1 || screen == 7 {
                     ui.set_active_tool_id("".into());
                 }
             }
@@ -2311,19 +2345,19 @@ fn wire_sync(ui: &AppWindow, state: &Rc<RefCell<State>>, out: &EventSender) {
         let state = state.clone();
         ui.on_rule_choice(move |key, index| {
             if let Some(ui) = weak.upgrade() {
-                let selected = state
+                let spec = state
                     .borrow()
                     .specs
                     .iter()
                     .find(|s| s.key == key.as_str())
+                    .cloned();
+                let selected = spec
+                    .as_ref()
                     .and_then(|s| s.choices.get(usize::try_from(index.max(0)).unwrap_or(0)))
                     .map(|c| c[0].clone());
                 if let Some(value) = selected {
-                    let hint = state
-                        .borrow()
-                        .specs
-                        .iter()
-                        .find(|s| s.key == key.as_str())
+                    let hint = spec
+                        .as_ref()
                         .map(|s| hint_for(s, &serde_json::Value::from(value.as_str())));
                     if changed(&ui, &state, key.as_str(), &value.into(), false) {
                         patch_rule_row(&ui, key.as_str(), |row| {
@@ -2384,30 +2418,18 @@ fn wire_sync(ui: &AppWindow, state: &Rc<RefCell<State>>, out: &EventSender) {
                     } else {
                         // 清空/非法：不写配置，就地把该行显示改回配置真值。
                         // 禁止整表 refresh：会销毁正在编辑的 LineEdit 并丢焦点。
-                        let current = {
-                            let cfg =
-                                serde_json::to_value(&state.borrow().config).unwrap_or_default();
-                            cfg.get(key.as_str()).cloned().unwrap_or_default()
-                        };
-                        let restore = current.as_u64().map(|v| v.to_string()).unwrap_or_default();
-                        if value.is_empty() {
-                            let key = (*key).to_string();
-                            patch_rule_row(&ui, key.as_str(), |row| {
-                                row.value = restore.clone().into();
-                            });
-                            return;
+                        if !value.is_empty() {
+                            show_error(
+                                &ui,
+                                if capacity {
+                                    "该设置需要非负数字，可选单位 B/KiB/MiB/GiB/TiB（换算后须为整数字节）"
+                                } else {
+                                    "该设置需要输入非负整数"
+                                },
+                            );
                         }
-                        show_error(
-                            &ui,
-                            if capacity {
-                                "该设置需要非负数字，可选单位 B/KiB/MiB/GiB/TiB（换算后须为整数字节）"
-                            } else {
-                                "该设置需要输入非负整数"
-                            },
-                        );
-                        let key = (*key).to_string();
                         patch_rule_row(&ui, key.as_str(), |row| {
-                            row.value = restore.clone().into();
+                            row.value = rule_config_truth_text(&state, key.as_str()).into();
                         });
                         return;
                     }
@@ -2429,12 +2451,9 @@ fn wire_sync(ui: &AppWindow, state: &Rc<RefCell<State>>, out: &EventSender) {
                 } else if numeric {
                     // 数值超出字段范围（如超过 u32 上限）等写入失败：与非法文本同口径处理，
                     // 中文提示并回退行显示，避免输入框与配置真值不一致直到整表重建。
-                    let restore = {
-                        let cfg = serde_json::to_value(&state.borrow().config).unwrap_or_default();
-                        cfg.get(key.as_str()).cloned().unwrap_or_default()
-                    };
-                    let restore = restore.as_u64().map(|v| v.to_string()).unwrap_or_default();
-                    patch_rule_row(&ui, key.as_str(), |row| row.value = restore.clone().into());
+                    patch_rule_row(&ui, key.as_str(), |row| {
+                        row.value = rule_config_truth_text(&state, key.as_str()).into();
+                    });
                     show_error(&ui, "该设置超出允许的范围");
                 }
             }
@@ -2606,6 +2625,13 @@ impl UiPump {
     }
     /// 一次刷新：主题 → 排空事件 → 日志上屏 → 失败列表 → 实时指标。
     fn run(&self, ui: &AppWindow) {
+        self.state.borrow().snap_foreground_busy.store(
+            ui.get_busy()
+                || ui.get_convert_initializing()
+                || ui.get_snap_initializing()
+                || ui.get_convert_runtime_saving(),
+            Ordering::Release,
+        );
         if self.theme_poll.get().elapsed() >= Duration::from_secs(2) {
             self.theme_poll.set(Instant::now());
             ui.set_system_dark(system_dark());
@@ -2693,10 +2719,13 @@ impl UiPump {
                     match result {
                         Err(error) => {
                             ui.set_snap_connected(false);
-                            ui.set_snap_service_status(
-                                "截图服务未连接，可点击「启动 / 重连」".into(),
-                            );
-                            ui.set_snap_error(error.into());
+                            if error.starts_with("后台已从托盘退出") {
+                                ui.set_snap_service_status(error.into());
+                                ui.set_snap_error("".into());
+                            } else {
+                                ui.set_snap_service_status("后台服务未连接，请查看设置页".into());
+                                ui.set_snap_error(error.into());
+                            }
                         }
                         Ok(value) if value["ok"] != true => {
                             ui.set_snap_connected(true);
@@ -2706,40 +2735,7 @@ impl UiPump {
                             // 请求失败不等于断线；保留之前读出的设置和当前生效热键。
                         }
                         Ok(value) => {
-                            ui.set_snap_connected(true);
-                            ui.set_snap_service_status(
-                                "截图服务已连接 · 托盘和热键独立运行".into(),
-                            );
-                            ui.set_snap_model(
-                                value["model"].as_str().unwrap_or("uninitialized").into(),
-                            );
-                            ui.set_snap_task(value["task"].as_str().unwrap_or("idle").into());
-                            if let Some(hotkey) = value["hotkey"].as_str() {
-                                if !ui.get_snap_recording()
-                                    && ui.get_snap_hotkey_draft() == ui.get_snap_hotkey()
-                                {
-                                    ui.set_snap_hotkey_draft(hotkey.into());
-                                }
-                                ui.set_snap_hotkey(hotkey.into());
-                            }
-                            if let Some(autostart) = value["autostart"].as_bool() {
-                                if ui.get_snap_autostart_draft() == ui.get_snap_autostart() {
-                                    ui.set_snap_autostart_draft(autostart);
-                                }
-                                ui.set_snap_autostart(autostart);
-                            }
-                            if requested
-                                || value["error"]
-                                    .as_str()
-                                    .is_some_and(|error| !error.is_empty())
-                            {
-                                ui.set_snap_error(value["error"].as_str().unwrap_or("").into());
-                            } else if !ui.get_snap_error().is_empty() {
-                                // C'-2：纯轮询收到正常状态（ok 且无错误）时清除
-                                // 旧错误文本（如识别中的「正在识别」）；只在当前
-                                // 非空时写，避免每 2 秒空写引发无谓的界面刷新。
-                                ui.set_snap_error("".into());
-                            }
+                            self.apply_snap_service_state(ui, &value, requested);
                         }
                     }
                 }
@@ -2848,6 +2844,168 @@ impl UiPump {
     /// 排空事件通道并应用事件；返回本轮是否处理过任务收尾事件（Ready/Done/Failed/ExtractDone），
     /// 供调用方决定是否立即上屏日志（收尾日志是例外，不受刷新预算限制）。
     /// 每次刷新最多处理 256 条：单次回调里的界面工作有上界，其余事件留给下一次处理。
+    /// 独立借用下的日志上屏：写环形缓冲并标脏。仅限 borrow_mut 只服务日志的
+    /// 调用点；与其他字段共用同一借用的收尾分支不得使用（会扩大借用存活范围）。
+    fn push_log(&self, text: String) {
+        let mut s = self.state.borrow_mut();
+        push_event_log(&mut s.logs, text);
+        self.log_dirty.set(true);
+    }
+
+    /// SnapMessage::Service 的 Ok 分支：按服务状态快照上屏连接/模型/任务/热键/
+    /// 自启动，退出广播时取消全部共享任务（`exiting` 只求值一次，纯读无副作用），
+    /// 并按 C'-2 口径维护错误文本。
+    fn apply_snap_service_state(&self, ui: &AppWindow, value: &serde_json::Value, requested: bool) {
+        let exiting = value["exiting"] == true;
+        if exiting {
+            if let Some(control) = self.state.borrow().control.as_ref() {
+                control.cancel();
+            }
+            for cancel in [
+                &self.state.borrow().convert_cancel,
+                &self.state.borrow().convert_init_cancel,
+                &self.state.borrow().snap_init_cancel,
+            ]
+            .into_iter()
+            .flatten()
+            {
+                cancel.store(true, Ordering::Release);
+            }
+        }
+        ui.set_snap_connected(true);
+        ui.set_snap_service_status(
+            if exiting {
+                "正在等待任务安全结束，随后退出后台"
+            } else {
+                "后台已连接 · 托盘和热键独立运行"
+            }
+            .into(),
+        );
+        ui.set_snap_model(value["model"].as_str().unwrap_or("uninitialized").into());
+        ui.set_snap_task(value["task"].as_str().unwrap_or("idle").into());
+        if let Some(hotkey) = value["hotkey"].as_str() {
+            if !ui.get_snap_recording() && ui.get_snap_hotkey_draft() == ui.get_snap_hotkey() {
+                ui.set_snap_hotkey_draft(hotkey.into());
+            }
+            ui.set_snap_hotkey(hotkey.into());
+        }
+        if let Some(autostart) = value["autostart"].as_bool() {
+            if ui.get_snap_autostart_draft() == ui.get_snap_autostart() {
+                ui.set_snap_autostart_draft(autostart);
+            }
+            ui.set_snap_autostart(autostart);
+        }
+        if requested
+            || value["error"]
+                .as_str()
+                .is_some_and(|error| !error.is_empty())
+        {
+            ui.set_snap_error(value["error"].as_str().unwrap_or("").into());
+        } else if !ui.get_snap_error().is_empty() {
+            // C'-2：纯轮询收到正常状态（ok 且无错误）时清除旧错误文本
+            //（如识别中的「正在识别」）；只在当前非空时写，避免每 2 秒
+            // 空写引发无谓的界面刷新。
+            ui.set_snap_error("".into());
+        }
+    }
+
+    /// Event::Status 中 6 个 CONVERTER_* 协议前缀的解码与上屏（转 Markdown 页专属）；
+    /// 命中任一前缀返回 true。前缀互斥，判定顺序与拆分前一致，各分支内的副作用
+    /// 顺序原样保留。
+    fn apply_converter_status(&self, ui: &AppWindow, text: &str) -> bool {
+        if let Some(log) = text.strip_prefix("CONVERTER_LOG|") {
+            let mut s = self.state.borrow_mut();
+            push_event_log(&mut s.convert_logs, log.to_string());
+            ui.set_convert_log_text(log_panel_text(&s.convert_logs).into());
+        } else if let Some(rest) = text.strip_prefix("CONVERTER_READINESS|") {
+            let mut fields = rest.splitn(3, '|');
+            let generation = fields.next().and_then(|value| value.parse::<u64>().ok());
+            let ready = fields.next() == Some("1");
+            let message = fields.next().unwrap_or_default();
+            let accepted = generation.is_some_and(|generation| {
+                let s = self.state.borrow();
+                s.convert_readiness_generation == generation
+                    && s.convert_init_cancel.is_none()
+                    && !ui.get_busy()
+            });
+            if accepted {
+                ui.set_convert_ready(ready);
+                ui.set_convert_status(
+                    if ready {
+                        "已安装组件就绪，可离线使用"
+                    } else {
+                        "可选组件未就绪，请主动初始化"
+                    }
+                    .into(),
+                );
+                if !message.is_empty() && !ready && ui.get_screen() == 5 {
+                    ui.set_notice_text(message.into());
+                }
+            }
+        } else if let Some(progress) = text.strip_prefix("CONVERTER_INIT|") {
+            ui.set_convert_status(progress.into());
+        } else if let Some(rest) = text.strip_prefix("CONVERTER_STARTED|") {
+            ui.set_convert_progress(-1.0);
+            ui.set_convert_progress_note("正在转换".into());
+            ui.set_convert_metrics(format!("待处理 {rest} 个文件").into());
+        } else if let Some(rest) = text.strip_prefix("CONVERTER_FILE_STARTED|") {
+            let mut fields = rest.splitn(4, '|');
+            let index = fields.next().and_then(|v| v.parse::<usize>().ok());
+            let total = fields.next().and_then(|v| v.parse::<usize>().ok());
+            let relative = fields.next().unwrap_or_default();
+            if let (Some(index), Some(total)) = (index, total) {
+                // 先按 f64 求比例再写进度属性（保持 0.0-1.0 钳制）：
+                // 分子分母各自 u16 饱和后再相除，会让 >65535 文件的
+                // 大批次进度失真为 1.0（仅显示口径，不影响统计）。
+                #[allow(clippy::cast_possible_truncation, clippy::cast_precision_loss)]
+                let progress = if total == 0 {
+                    -1.0
+                } else {
+                    (index.saturating_sub(1)) as f64 / total as f64
+                }
+                .clamp(0.0, 1.0) as f32;
+                ui.set_convert_progress(progress);
+                ui.set_convert_progress_note(format!("{index} / {total}").into());
+                // T-22：记录当前文件，供 100ms 周期刷新拼出「正在处理 X · 耗时 Ns」。
+                relative.clone_into(&mut self.state.borrow_mut().convert_current);
+                ui.set_convert_metrics(format!("正在处理 {relative}").into());
+            }
+        } else if let Some(rest) = text.strip_prefix("CONVERTER_FILE_FINISHED|") {
+            let mut fields = rest.splitn(5, '|');
+            let partial = fields.next() == Some("1");
+            let success = fields.next() == Some("1");
+            let relative = fields.next().unwrap_or_default();
+            let message = fields.next().unwrap_or_default();
+            let detail = format!(
+                "{}：{}{}",
+                if partial {
+                    "部分提取"
+                } else if success {
+                    "已完成"
+                } else {
+                    "失败"
+                },
+                relative,
+                if message.is_empty() {
+                    String::new()
+                } else {
+                    format!(" · {message}")
+                }
+            );
+            // 该文件已结束：周期刷新不再把它当作「正在处理」，改报运行耗时。
+            self.state.borrow_mut().convert_current.clear();
+            ui.set_convert_metrics(detail.clone().into());
+            if !success || partial {
+                let mut state = self.state.borrow_mut();
+                push_event_log(&mut state.convert_logs, detail);
+                ui.set_convert_log_text(log_panel_text(&state.convert_logs).into());
+            }
+        } else {
+            return false;
+        }
+        true
+    }
+
     fn drain(&self, ui: &AppWindow) -> bool {
         let mut terminal = false;
         // 一轮回调返回后才会绘制，同一轮里只有最后一条状态文案会被看到：逐条 set_status
@@ -2858,102 +3016,19 @@ impl UiPump {
         for event in self.receiver.try_iter().take(256) {
             match event {
                 Event::Status(text) => {
-                    if let Some(log) = text.strip_prefix("CONVERTER_LOG|") {
-                        let mut s = self.state.borrow_mut();
-                        push_event_log(&mut s.convert_logs, log.to_string());
-                        ui.set_convert_log_text(log_panel_text(&s.convert_logs).into());
-                    } else if let Some(rest) = text.strip_prefix("CONVERTER_READINESS|") {
-                        let mut fields = rest.splitn(3, '|');
-                        let generation = fields.next().and_then(|value| value.parse::<u64>().ok());
-                        let ready = fields.next() == Some("1");
-                        let message = fields.next().unwrap_or_default();
-                        let accepted = generation.is_some_and(|generation| {
-                            let s = self.state.borrow();
-                            s.convert_readiness_generation == generation
-                                && s.convert_init_cancel.is_none()
-                                && !ui.get_busy()
-                        });
-                        if accepted {
-                            ui.set_convert_ready(ready);
-                            ui.set_convert_status(
-                                if ready {
-                                    "已安装组件就绪，可离线使用"
-                                } else {
-                                    "可选组件未就绪，请主动初始化"
-                                }
-                                .into(),
-                            );
-                            if !message.is_empty() && !ready && ui.get_screen() == 5 {
-                                ui.set_notice_text(message.into());
-                            }
-                        }
-                    } else if let Some(progress) = text.strip_prefix("CONVERTER_INIT|") {
-                        ui.set_convert_status(progress.into());
-                    } else if let Some(rest) = text.strip_prefix("CONVERTER_STARTED|") {
-                        ui.set_convert_progress(-1.0);
-                        ui.set_convert_progress_note("正在转换".into());
-                        ui.set_convert_metrics(format!("待处理 {rest} 个文件").into());
-                    } else if let Some(rest) = text.strip_prefix("CONVERTER_FILE_STARTED|") {
-                        let mut fields = rest.splitn(4, '|');
-                        let index = fields.next().and_then(|v| v.parse::<usize>().ok());
-                        let total = fields.next().and_then(|v| v.parse::<usize>().ok());
-                        let relative = fields.next().unwrap_or_default();
-                        if let (Some(index), Some(total)) = (index, total) {
-                            // 先按 f64 求比例再写进度属性（保持 0.0-1.0 钳制）：
-                            // 分子分母各自 u16 饱和后再相除，会让 >65535 文件的
-                            // 大批次进度失真为 1.0（仅显示口径，不影响统计）。
-                            #[allow(clippy::cast_possible_truncation, clippy::cast_precision_loss)]
-                            let progress = if total == 0 {
-                                -1.0
-                            } else {
-                                (index.saturating_sub(1)) as f64 / total as f64
-                            }
-                            .clamp(0.0, 1.0) as f32;
-                            ui.set_convert_progress(progress);
-                            ui.set_convert_progress_note(format!("{index} / {total}").into());
-                            // T-22：记录当前文件，供 100ms 周期刷新拼出「正在处理 X · 耗时 Ns」。
-                            relative.clone_into(&mut self.state.borrow_mut().convert_current);
-                            ui.set_convert_metrics(format!("正在处理 {relative}").into());
-                        }
-                    } else if let Some(rest) = text.strip_prefix("CONVERTER_FILE_FINISHED|") {
-                        let mut fields = rest.splitn(5, '|');
-                        let partial = fields.next() == Some("1");
-                        let success = fields.next() == Some("1");
-                        let relative = fields.next().unwrap_or_default();
-                        let message = fields.next().unwrap_or_default();
-                        let detail = format!(
-                            "{}：{}{}",
-                            if partial {
-                                "部分提取"
-                            } else if success {
-                                "已完成"
-                            } else {
-                                "失败"
-                            },
-                            relative,
-                            if message.is_empty() {
-                                String::new()
-                            } else {
-                                format!(" · {message}")
-                            }
-                        );
-                        // 该文件已结束：周期刷新不再把它当作「正在处理」，改报运行耗时。
-                        self.state.borrow_mut().convert_current.clear();
-                        ui.set_convert_metrics(detail.clone().into());
-                        if !success || partial {
-                            let mut state = self.state.borrow_mut();
-                            push_event_log(&mut state.convert_logs, detail);
-                            ui.set_convert_log_text(log_panel_text(&state.convert_logs).into());
-                        }
-                    } else if !ui.get_paused() {
+                    if let Some(message) = text.strip_prefix("SETTINGS_PROGRESS|") {
+                        ui.set_settings_status(message.into());
+                        continue;
+                    }
+
+                    if self.apply_converter_status(ui, &text) {
+                        continue;
+                    }
+                    if !ui.get_paused() {
                         pending_status = Some(text);
                     }
                 }
-                Event::Log(text) => {
-                    let mut s = self.state.borrow_mut();
-                    push_event_log(&mut s.logs, text);
-                    self.log_dirty.set(true);
-                }
+                Event::Log(text) => self.push_log(text),
                 Event::Ready(path, summary) => {
                     pending_status = None;
                     terminal = true;
@@ -3032,21 +3107,10 @@ impl UiPump {
                     let mut batch_failed = false;
                     if s.task.as_ref() == Some(&path) {
                         if let Some((id, selected)) = saved {
-                            let plans = ui.get_plans();
-                            if let Some(model) = plans.as_any().downcast_ref::<VecModel<PlanRow>>()
-                            {
-                                for i in 0..model.row_count() {
-                                    if let Some(mut row) = model.row_data(i) {
-                                        // 与 patch_plan_row 同口径比较：按数值比 id，避免每行
-                                        // 都拼一次 id.to_string()（保存一行的分配次数与行数同阶）。
-                                        if row.id.as_str().parse::<i64>() == Ok(id) {
-                                            row.selected = selected;
-                                            model.set_row_data(i, row);
-                                            break;
-                                        }
-                                    }
-                                }
-                            }
+                            // 就地回写该行勾选值为数据库真值：用户编辑会让 CheckBox 脱离
+                            // `checked: item.selected` 绑定，只有回写模型才能保证界面与数据
+                            // 一致（无障碍/自动化切换时 Slint 不一定立即重绘，更需要这一步）。
+                            mutate_plan_row(ui, id, |row| row.selected = selected);
                         }
                         if s.pending_selection == 0 && !ui.get_busy() {
                             // 失败可能发生在本轮任何一次勾选（不一定最后一个事件），只要
@@ -3188,9 +3252,7 @@ impl UiPump {
                     if !plan_page_event_accepted(
                         gen,
                         latest,
-                        page,
                         filter.as_deref(),
-                        s.page,
                         s.plan_filter.as_deref(),
                     ) {
                         continue;
@@ -3279,6 +3341,41 @@ impl UiPump {
                     apply_plan_readiness(ui, &s, snapshot.as_ref());
                 }
                 Event::Notice(text) => {
+                    if let Some(payload) = text.strip_prefix("SETTINGS_READY|") {
+                        if let Ok(value) = serde_json::from_str::<serde_json::Value>(payload) {
+                            ui.set_settings_custom_dir(
+                                value["custom"].as_str().unwrap_or_default().into(),
+                            );
+                            ui.set_settings_downloaded_dir(
+                                value["downloaded"].as_str().unwrap_or_default().into(),
+                            );
+                            ui.set_settings_source(i32::from(value["downloaded_active"] == true));
+                            let active = value["active"].as_str().unwrap_or_default();
+                            ui.set_convert_runtime_dir(active.into());
+                            ui.set_convert_runtime_confirmed(!active.is_empty());
+                            ui.set_settings_status(
+                                if active.is_empty() {
+                                    "请选择已有目录或主动下载 Xberg"
+                                } else {
+                                    "配置已持久保存；后台自动连接，重启无需重新配置"
+                                }
+                                .into(),
+                            );
+                            ui.set_convert_runtime_saving(false);
+                            ui.set_convert_initializing(false);
+                            self.state.borrow_mut().convert_init_cancel = None;
+                            if !active.is_empty() {
+                                ensure_snap_supervisor(&self.state, &self.out);
+                                start_markdown_readiness(ui, &self.state, &self.out);
+                                start_snap_readiness(ui, &self.state, &self.out);
+                            }
+                            if std::mem::take(&mut self.state.borrow_mut().close_after) {
+                                let _ = slint::quit_event_loop();
+                            }
+                        }
+                        continue;
+                    }
+
                     if let Some(rest) = text.strip_prefix("CONVERTER_RUNTIME_SAVED|") {
                         let mut fields = rest.splitn(2, '|');
                         let generation = fields.next().and_then(|value| value.parse::<u64>().ok());
@@ -3338,6 +3435,17 @@ impl UiPump {
                 // Error 更新错误文案。
                 // 计划筛选曾乐观置「加载中…」：失败必须恢复分页控件，避免永久中间态。
                 Event::Error(text) => {
+                    if let Some(error) = text.strip_prefix("SETTINGS_ERROR|") {
+                        ui.set_settings_status(error.into());
+                        ui.set_convert_initializing(false);
+                        ui.set_convert_runtime_saving(false);
+                        self.state.borrow_mut().convert_init_cancel = None;
+                        if std::mem::take(&mut self.state.borrow_mut().close_after) {
+                            let _ = slint::quit_event_loop();
+                        }
+                        continue;
+                    }
+
                     if let Some(rest) = text.strip_prefix("CONVERTER_RUNTIME_ERR|") {
                         let mut fields = rest.splitn(3, '|');
                         let generation = fields.next().and_then(|value| value.parse::<u64>().ok());
@@ -3985,6 +4093,7 @@ fn initial_state() -> Result<State> {
         snap_init_cancel: None,
         snap_generation: 0,
         snap_commands: None,
+        snap_foreground_busy: Arc::new(std::sync::atomic::AtomicBool::new(false)),
         snap_sender,
         snap_receiver: RefCell::new(snap_receiver),
     })
@@ -4142,6 +4251,72 @@ fn wire_md_git(ui: &AppWindow, state: &Rc<RefCell<State>>, out: &EventSender) {
 }
 
 /// 转 Markdown 的可选组件初始化与转换回调。组件状态、路径和任务均独立于旧工具。
+fn settings_payload() -> Result<String, String> {
+    let config = crate::xberg_settings::settings()?;
+    Ok(serde_json::json!({
+        "custom": config.custom.map(|p| crate::platform::display_path_text(&p.display().to_string())),
+        "downloaded": config.downloaded.map(|p| crate::platform::display_path_text(&p.display().to_string())),
+        "downloaded_active": config.source == crate::xberg_settings::Source::Downloaded,
+        "active": crate::xberg_settings::load()?.map(|p| crate::platform::display_path_text(&p.display().to_string()))
+    }).to_string())
+}
+fn send_settings_result(out: &EventSender, result: Result<String, String>) {
+    let event = match result {
+        Ok(payload) => Event::Notice(format!("SETTINGS_READY|{payload}")),
+        Err(error) => Event::Error(format!("SETTINGS_ERROR|{error}")),
+    };
+    let _ = out.send(event);
+}
+fn wire_settings(ui: &AppWindow, state: &Rc<RefCell<State>>, out: &EventSender) {
+    let weak = ui.as_weak();
+    let state = state.clone();
+    let out = out.clone();
+    ui.on_settings_action(move |action| {
+        let Some(ui) = weak.upgrade() else {
+            return;
+        };
+        if ui.get_busy() || ui.get_convert_initializing() || ui.get_convert_runtime_saving() {
+            return;
+        }
+        if action == "choose" {
+            pick_directory(&ui, "选择 Xberg 运行目录", |ui, path| {
+                ui.set_settings_custom_dir(path.display().to_string().into());
+            });
+            return;
+        }
+        let action = action.to_string();
+        let custom = PathBuf::from(ui.get_settings_custom_dir().as_str());
+        let cancel = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        ui.set_convert_initializing(action == "download");
+        ui.set_convert_runtime_saving(action != "download");
+        ui.set_settings_status("正在处理，请稍候…".into());
+        state.borrow_mut().convert_init_cancel = Some(cancel.clone());
+        let out = out.clone();
+        std::thread::spawn(move || {
+            let result = (|| {
+                match action.as_str() {
+                    "custom" => markdown_assets::save_runtime_dir(&custom)?,
+                    "downloaded" => {
+                        let saved = crate::xberg_settings::settings()?
+                            .downloaded
+                            .ok_or("尚未下载 Xberg")?;
+                        crate::xberg_runtime::validate_assets(&saved, "engine")?;
+                        crate::xberg_settings::select(crate::xberg_settings::Source::Downloaded)?;
+                    }
+                    "download" => {
+                        markdown_assets::download_runtime(&cancel, |message| {
+                            let _ = out.send(Event::Status(format!("SETTINGS_PROGRESS|{message}")));
+                        })?;
+                    }
+                    _ => return Err("未知设置操作".into()),
+                }
+                settings_payload()
+            })();
+            send_settings_result(&out, result);
+        });
+    });
+}
+
 fn wire_markdown_converter(ui: &AppWindow, state: &Rc<RefCell<State>>, out: &EventSender) {
     {
         let weak = ui.as_weak();
@@ -4608,7 +4783,7 @@ fn snap_pipe_request_on(
         None => {
             cancel_pipe_io(&stream);
             return Err(format!(
-                "截图服务响应超时（{read_timeout:.1?} 未返回）；请点击「启动 / 重连」重试"
+                "截图服务响应超时（{read_timeout:.1?} 未返回）；请在设置页重试后台连接"
             ));
         }
     };
@@ -4713,7 +4888,9 @@ fn snap_attach_main_exe(ping_response: serde_json::Value) -> Result<serde_json::
             .unwrap_or("截图服务心跳失败")
             .to_owned());
     }
-    if ping_response["shared_xberg_protocol"] != 2 {
+    if ping_response["shared_xberg_protocol"] != 2
+        || ping_response["background_service_protocol"] != 1
+    {
         return Err(
             "当前截图服务不支持共享 Xberg，请退出旧服务并更新截图组件；未启动第二个引擎".into(),
         );
@@ -4737,7 +4914,8 @@ fn snap_supervisor_ensure() -> Result<serde_json::Value, String> {
     if let Ok(response) = snap_pipe_request(&ping) {
         return snap_attach_main_exe(response);
     }
-    snap_ocr_assets::readiness()?;
+    crate::xberg_runtime::background_allowed()?;
+    crate::xberg_settings::required()?;
     let executable = snap_ocr_assets::worker_install_path()?;
     let mut probe = std::process::Command::new(&executable);
     probe.arg("--capabilities");
@@ -4748,6 +4926,7 @@ fn snap_supervisor_ensure() -> Result<serde_json::Value, String> {
     if !output.status.success()
         || output.stdout_truncated
         || capabilities["shared_xberg_protocol"] != 2
+        || capabilities["background_service_protocol"] != 1
     {
         return Err(
             "截图工作进程尚未支持共享 Xberg，需更新可选组件发布物；不会启动旧版独占引擎".into(),
@@ -4790,24 +4969,30 @@ fn ensure_snap_supervisor(state: &Rc<RefCell<State>>, _out: &EventSender) {
     if state.borrow().snap_commands.is_none() {
         let (sender, receiver) = mpsc::channel();
         let output = state.borrow().snap_sender.clone();
+        let foreground_busy = state.borrow().snap_foreground_busy.clone();
         std::thread::spawn(move || {
             let mut connected = false;
             loop {
-                let command = match receiver.recv_timeout(Duration::from_secs(2)) {
+                let command = match receiver.recv_timeout(Duration::from_millis(500)) {
                     Ok(command) => command,
-                    Err(mpsc::RecvTimeoutError::Timeout) if connected => {
-                        SnapCommand::Request(serde_json::json!({"command": "get-state"}))
-                    }
+                    Err(mpsc::RecvTimeoutError::Timeout) if connected => SnapCommand::Request(
+                        serde_json::json!({"command": "get-state", "gui_pid":std::process::id(), "gui_busy":foreground_busy.load(Ordering::Acquire)}),
+                    ),
                     Err(mpsc::RecvTimeoutError::Timeout) => continue,
                     Err(mpsc::RecvTimeoutError::Disconnected) => break,
                 };
-                let (result, requested) = match command {
+                let (mut result, requested) = match command {
                     SnapCommand::Ensure => (snap_supervisor_ensure(), true),
                     SnapCommand::Request(request) => (
                         snap_pipe_request(&request),
                         request["command"] != "get-state",
                     ),
                 };
+                if result.is_err() {
+                    if let Err(stopped) = crate::xberg_runtime::background_allowed() {
+                        result = Err(stopped);
+                    }
+                }
                 connected = result.is_ok();
                 if output
                     .send(SnapMessage::Service(result, requested))
@@ -4885,16 +5070,10 @@ fn wire_snap_ocr(ui: &AppWindow, state: &Rc<RefCell<State>>, out: &EventSender) 
             .checked_sub(char::from(slint::platform::Key::F1) as u32)
             .filter(|number| *number < 24)
         {
+            // number ∈ 1..=24：直接按十进制拼出 F1–F24。
             let number = number + 1;
             combination.push('F');
-            if number >= 10 {
-                if let Some(digit) = char::from_digit(number / 10, 10) {
-                    combination.push(digit);
-                }
-            }
-            if let Some(digit) = char::from_digit(number % 10, 10) {
-                combination.push(digit);
-            }
+            combination.push_str(&number.to_string());
         } else if let Some(name) = snap_named_hotkey(code) {
             combination.push_str(name);
         } else {
@@ -4979,16 +5158,6 @@ pub fn run_with_engine_overrides(
         .collect::<Vec<_>>();
     ui.set_tool_count(i32::try_from(registry::tools().len()).unwrap_or(i32::MAX));
     ui.set_tools(Rc::new(VecModel::from(tools)).into());
-    match markdown_assets::load_saved_runtime_dir() {
-        Ok(Some(path)) => {
-            ui.set_convert_runtime_dir(
-                crate::platform::display_path_text(&path.display().to_string()).into(),
-            );
-            ui.set_convert_runtime_confirmed(true);
-        }
-        Ok(None) => ui.set_convert_status("请先保存共享 Xberg 运行目录".into()),
-        Err(error) => ui.set_convert_status(format!("无法读取 Xberg 运行目录：{error}").into()),
-    }
     refresh(&ui, &state.borrow());
     {
         let weak = ui.as_weak();
@@ -5020,6 +5189,7 @@ pub fn run_with_engine_overrides(
     wire_md_git(&ui, &state, &out);
     wire_markdown_converter(&ui, &state, &out);
     wire_snap_ocr(&ui, &state, &out);
+    wire_settings(&ui, &state, &out);
     // 启动落在注册表第一个工具（P-02 顺序：递归解压在前）。必须在 wire_sync 之后调用：
     // 回调接线前的 invoke 是空调用，窗口会停在目录整理页。
     if std::env::args_os().any(|arg| arg == "--snap-ocr-settings") {
@@ -5337,6 +5507,11 @@ pub fn run_with_engine_overrides(
     // First show the window. Rules stay in memory for this session only.
     ui.show()?;
     center_window(ui.window());
+    let startup = out.clone();
+    std::thread::spawn(move || {
+        let result = crate::xberg_runtime::resume_background().and_then(|()| settings_payload());
+        send_settings_result(&startup, result);
+    });
     // 窗口刚映射时系统还会套用默认位置，稍后再居中一次，保证首屏就是居中的
     let centered = ui.as_weak();
     slint::Timer::single_shot(Duration::from_millis(120), move || {
@@ -5344,6 +5519,9 @@ pub fn run_with_engine_overrides(
             center_window(ui.window());
         }
     });
+    if std::env::args_os().any(|arg| arg == "--settings") {
+        ui.invoke_navigation(7);
+    }
     hook(&ui);
     let loop_result = slint::run_event_loop();
     // 退出后清掉唤醒钩子：它持有本次运行的 State 与事件通道，留着会跨运行泄漏。
@@ -5603,7 +5781,6 @@ mod gui_tests {
         .unwrap();
         let output = docs.join("merged.md");
         let docs_text = docs.display().to_string();
-        let output_text = output.display().to_string();
         with_gui(move |app| {
             app.ui.invoke_select_tool("md-organizer".into());
             app.ui.set_md_input_dir(docs_text.clone().into());
@@ -5647,7 +5824,6 @@ mod gui_tests {
                     .starts_with("# 甲"),
                 "原文件不得被改动（M-02）"
             );
-            let _ = output_text;
             let _ = std::fs::remove_dir_all(&dir);
         })
         .unwrap();
@@ -5704,21 +5880,19 @@ mod gui_tests {
     fn plan_page_event_rejects_stale_generation_and_filter() {
         // 低代际事件晚到：不得因 gen!=latest 而应用（列表不能被上一筛选/上一页的结果覆盖）。
         assert!(
-            !plan_page_event_accepted(5, 6, 0, None, 0, None),
+            !plan_page_event_accepted(5, 6, None, None),
             "低代际事件必须拒绝"
         );
         // 高代际且 filter 与视图一致：可应用（翻页为「先加载、成功再提交」，不校验预置页码）。
         assert!(plan_page_event_accepted(
             6,
             6,
-            0,
             Some("delete"),
-            0,
             Some("delete")
         ));
-        assert!(plan_page_event_accepted(6, 6, 1, None, 0, None));
+        assert!(plan_page_event_accepted(6, 6, None, None));
         // 同代但用户已切筛选：拒绝。
-        assert!(!plan_page_event_accepted(6, 6, 0, None, 0, Some("delete")));
+        assert!(!plan_page_event_accepted(6, 6, None, Some("delete")));
     }
     // 覆盖 S-07, U-10
     #[test]
@@ -5907,6 +6081,7 @@ mod gui_tests {
                     // 仅装配不启动任何资产/服务线程（那些由用户主动回调触发）。
                     wire_snap_ocr(&ui, &state, &out);
                     wire_markdown_converter(&ui, &state, &out);
+                    wire_settings(&ui, &state, &out);
                     refresh(&ui, &state.borrow());
                     let pump = UiPump::new(event_rx, state.clone(), out);
                     let app = GuiTestApp { ui, state, pump };
@@ -5986,6 +6161,81 @@ mod gui_tests {
             let row = rules.row_data(i).unwrap();
             (row.key.as_str() == key).then(|| row.value.to_string())
         })
+    }
+
+    // 覆盖 XB-20/XB-21/XB-24：设置页真实保存回调、持久结果和页面隔离。
+    #[test]
+    fn shared_settings_rejects_invalid_assets_and_keeps_saved_source() {
+        with_gui(|app| {
+            let _lock = crate::asset_util::test_env::env_lock()
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            let root = tempfile::tempdir().unwrap();
+            struct Restore(Option<std::ffi::OsString>);
+            impl Drop for Restore {
+                fn drop(&mut self) {
+                    if let Some(value) = &self.0 {
+                        std::env::set_var("JCHTOOLS_TEST_STATE_DIR", value);
+                    } else {
+                        std::env::remove_var("JCHTOOLS_TEST_STATE_DIR");
+                    }
+                }
+            }
+            let _restore = Restore(std::env::var_os("JCHTOOLS_TEST_STATE_DIR"));
+            std::env::set_var("JCHTOOLS_TEST_STATE_DIR", root.path());
+            std::fs::write(root.path().join("xberg.exe"), b"settings fixture").unwrap();
+            let ui = &app.ui;
+            ui.set_convert_runtime_saving(false);
+            ui.set_convert_initializing(false);
+            ui.invoke_navigation(7);
+            assert_eq!(ui.get_screen(), 7);
+            assert!(ui.get_active_tool_id().is_empty());
+            crate::xberg_settings::save(root.path()).unwrap();
+            app.pump
+                .out
+                .send(Event::Notice(format!(
+                    "SETTINGS_READY|{}",
+                    settings_payload().unwrap()
+                )))
+                .unwrap();
+            app.pump.run(ui);
+            ui.set_settings_custom_dir(root.path().display().to_string().into());
+            ui.invoke_settings_action("custom".into());
+            assert!(pump_until(app, || !ui.get_convert_runtime_saving()));
+            assert!(ui.get_convert_runtime_confirmed());
+            assert!(ui.get_settings_status().contains("Xberg 资产"));
+            assert_eq!(
+                crate::xberg_settings::required().unwrap(),
+                root.path().canonicalize().unwrap()
+            );
+            let saved = ui.get_convert_runtime_dir();
+            ui.set_settings_custom_dir(root.path().join("missing").display().to_string().into());
+            ui.invoke_settings_action("custom".into());
+            assert!(pump_until(app, || !ui.get_convert_runtime_saving()));
+            assert_eq!(ui.get_convert_runtime_dir(), saved);
+            assert!(ui.get_settings_status().contains("Xberg 资产"));
+            ui.invoke_select_tool("snap-ocr".into());
+            assert_eq!(ui.get_screen(), 6);
+            assert_eq!(ui.get_active_tool_id(), "snap-ocr");
+            // XB-23/O-30：主动退出是正常状态，不显示红色连接故障。
+            app.state
+                .borrow()
+                .snap_sender
+                .send(SnapMessage::Service(
+                    Err("后台已从托盘退出；重新打开 JchTools 后自动启动".into()),
+                    false,
+                ))
+                .unwrap();
+            app.pump.apply_snap_messages(ui);
+            assert!(!ui.get_snap_connected());
+            assert!(
+                ui.get_snap_error().is_empty(),
+                "主动退出不应显示错误：{}",
+                ui.get_snap_error()
+            );
+            assert!(ui.get_snap_service_status().contains("已从托盘退出"));
+        })
+        .unwrap();
     }
 
     // 覆盖 C'-2：识别中点「截图识别」收到 {"ok":false,"error":"正在识别"} 后

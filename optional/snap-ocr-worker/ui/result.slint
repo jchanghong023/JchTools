@@ -283,9 +283,9 @@ export component SettingsWindow inherits Window {
                 padding: 8px;
                 spacing: 4px;
                 Text {
-                    text: root.force-exit-available ? "识别未能及时停止；可选择强制退出。"
-                         : root.exit-waiting ? "正在等待识别安全结束；超过 10 秒后才可强制退出。"
-                                             : "确定退出截图服务？热键与托盘将停止。";
+                    text: root.force-exit-available ? "截图推理尚未结束；其他任务停止后可强制退出。"
+                         : root.exit-waiting ? "正在等待任务安全结束，后台退出后热键与托盘将停止。"
+                                             : "确定退出后台服务？截图与 Xberg 将停止。";
                     color: #1c1d22;
                     wrap: word-wrap;
                 }
@@ -300,7 +300,7 @@ export component SettingsWindow inherits Window {
         }
         HorizontalLayout {
             spacing: 8px;
-            Button { text: "退出截图服务"; clicked => { root.confirm-exit = true; } }
+            Button { text: "退出后台服务"; clicked => { root.confirm-exit = true; } }
             Rectangle { horizontal-stretch: 1; }
             Button { text: "关闭设置"; clicked => { root.close-requested(); } }
         }

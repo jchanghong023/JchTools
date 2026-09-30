@@ -157,8 +157,10 @@ foreach ($name in @('7z.exe','7z.dll')) {
     if (Test-Path -LiteralPath (Join-Path $folder "resources\7zip\$name")) {throw "Engine executable leaked into the package: $name"}
 }
 if (-not (Test-Path -LiteralPath (Join-Path $folder 'resources\7zip\manifest.json'))) {throw 'Engine manifest is missing from the package.'}
-# The main delivery carries only the small manifest, never the optional OCR payload.
-foreach ($name in @('snap-ocr-worker.exe','onnxruntime.dll','inference.onnx','NotoSansMonoCJKsc-Regular.otf','xberg.exe','det.onnx','rec.onnx','model.int8.onnx','silero_vad.onnx','tokens.txt','sherpa-onnx-c-api.dll','sherpa-onnx-cxx-api.dll','onnxruntime_providers_shared.dll','avcodec-63.dll','avformat-63.dll','avutil-61.dll','swresample-7.dll')) {
+# XB-25: ship the background service; inference assets remain optional.
+Copy-Item -LiteralPath $workerExe -Destination (Join-Path $folder 'snap-ocr-worker.exe')
+if ((Get-FileHash -LiteralPath (Join-Path $folder 'snap-ocr-worker.exe') -Algorithm SHA256).Hash -ne (Get-FileHash -LiteralPath $workerExe -Algorithm SHA256).Hash) {throw 'Bundled background service hash mismatch.'}
+foreach ($name in @('onnxruntime.dll','inference.onnx','NotoSansMonoCJKsc-Regular.otf','xberg.exe','det.onnx','rec.onnx','model.int8.onnx','silero_vad.onnx','tokens.txt','sherpa-onnx-c-api.dll','sherpa-onnx-cxx-api.dll','onnxruntime_providers_shared.dll','avcodec-63.dll','avformat-63.dll','avutil-61.dll','swresample-7.dll')) {
     if (@(Get-ChildItem -LiteralPath $folder -Recurse -File -Filter $name).Count -ne 0) {
         throw "Optional OCR payload leaked into the main installer/ZIP staging directory: $name"
     }

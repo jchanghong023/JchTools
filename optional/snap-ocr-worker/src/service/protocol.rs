@@ -73,8 +73,25 @@ fn identity() -> String {
 
 fn hash() -> String {
     use std::fmt::Write as _;
-    let digest = Sha256::digest(identity().as_bytes());
-    let mut text = String::with_capacity(16);
+    let isolated = if cfg!(debug_assertions) {
+        std::env::var_os("JCHTOOLS_SNAP_OCR_TEST_ASSET_ROOT")
+            .map(std::path::PathBuf::from)
+            .filter(|p| p.is_absolute())
+    } else {
+        None
+    };
+    let digest = if let Some(root) = &isolated {
+        let mut bytes = b"test:".to_vec();
+        bytes.extend_from_slice(root.as_os_str().as_encoded_bytes());
+        Sha256::digest(bytes)
+    } else {
+        Sha256::digest(identity().as_bytes())
+    };
+    let mut text = if isolated.is_some() {
+        "test-".to_string()
+    } else {
+        String::with_capacity(16)
+    };
     for byte in digest.iter().take(8) {
         let _ = write!(text, "{byte:02x}");
     }
@@ -411,5 +428,30 @@ mod tests {
             true
         );
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod background_isolation_tests {
+    use super::*;
+    // 覆盖 XB-22：真实后台测试与 GUI 使用同一隔离控制端点，不接触用户服务。
+    #[test]
+    fn isolated_background_pipe_matches_gui_endpoint() {
+        let root = tempfile::tempdir().unwrap();
+        let old = std::env::var_os("JCHTOOLS_SNAP_OCR_TEST_ASSET_ROOT");
+        std::env::set_var("JCHTOOLS_SNAP_OCR_TEST_ASSET_ROOT", root.path());
+        let mut identity = b"test:".to_vec();
+        identity.extend_from_slice(root.path().as_os_str().as_encoded_bytes());
+        let digest = format!("{:x}", Sha256::digest(&identity));
+        let actual = pipe_name();
+        if let Some(value) = old {
+            std::env::set_var("JCHTOOLS_SNAP_OCR_TEST_ASSET_ROOT", value);
+        } else {
+            std::env::remove_var("JCHTOOLS_SNAP_OCR_TEST_ASSET_ROOT");
+        }
+        assert_eq!(
+            actual,
+            format!(r"\\.\pipe\jchtools-snap-ocr-test-{}", &digest[..16])
+        );
     }
 }

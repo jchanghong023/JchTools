@@ -1,3 +1,4 @@
+import { ScrollView } from "std-widgets.slint";
 import { ComboBox, ListView, TextEdit, Spinner, AboutSlint, Palette } from "std-widgets.slint";
 
 export struct RuleRow { key: string, title: string, hint: string, kind: int, checked: bool, index: int, options: [string], value: string }
@@ -805,6 +806,12 @@ export component AppWindow inherits Window {
     callback convert-choose-runtime();
     callback convert-runtime-edited();
     callback convert-use-runtime();
+    callback settings-action(string);
+    in-out property <string> settings-custom-dir;
+    in-out property <string> settings-downloaded-dir;
+    in-out property <int> settings-source: 0;
+    in-out property <string> settings-status: "正在读取配置…";
+
     callback convert-initialize();
     callback convert-start();
     callback convert-stop();
@@ -826,7 +833,7 @@ export component AppWindow inherits Window {
     // 页面标题（标题栏文档位与页头共用同一映射）
     function screen-title() -> string {
         return root.screen == 0 ? "目录整理" : root.screen == 2 ? "递归解压"
-            : root.screen == 3 ? "MD 整理" : root.screen == 4 ? "Git 工具" : root.screen == 5 ? "转 Markdown" : root.screen == 6 ? "截图 OCR" : "关于";
+            : root.screen == 3 ? "MD 整理" : root.screen == 4 ? "Git 工具" : root.screen == 5 ? "转 Markdown" : root.screen == 6 ? "截图 OCR" : root.screen == 7 ? "设置" : "关于";
     }
     // 侧栏图标按工具 id 映射（registry 中注册的 id）
     function tool-icon(id: string) -> int {
@@ -901,6 +908,7 @@ export component AppWindow inherits Window {
                         clicked => { root.select-tool(tool.id); }
                     }
                     Rectangle { height: 12px; background: transparent; }
+                    NavItem { text: "设置"; icon: 0; active: root.screen == 7; enabled: root.confirm-kind == 0; clicked => { root.navigation(7); } }
                     NavItem { text: "关于"; icon: 1; active: root.screen == 1; enabled: root.confirm-kind == 0; clicked => { root.navigation(1); } }
                     Rectangle { vertical-stretch: 1; background: transparent; }
                     Rectangle { height: 1px; background: Design.line; }
@@ -928,6 +936,7 @@ export component AppWindow inherits Window {
                         : root.screen == 4 ? "逐文件提交并推送：add → commit → push 成功后才处理下一个文件；冲突即停、失败无限重试（可停止）。"
                         : root.screen == 5 ? "把文档、图片和媒体转换为 Markdown；可保留输入层级或选择平铺输出。"
                         : root.screen == 6 ? "热键截图与识别在独立后台服务运行，关闭主窗口不影响托盘和热键。"
+                        : root.screen == 7 ? "共享组件与后台服务 · 配置自动保存，重启自动恢复。"
                         : "Windows 优先的本地工具箱 · 功能持续增加";
                         horizontal-stretch: 1; wrap: no-wrap; overflow: elide; vertical-alignment: center; }
                     if root.busy: Spinner { width: 18px; height: 18px; }
@@ -1472,29 +1481,57 @@ export component AppWindow inherits Window {
                         }
                     }
                 }
-                if root.screen == 5 || root.screen == 6: VerticalLayout {
-                    Surface {
-                        VerticalLayout { spacing: 0px;
-                            HorizontalLayout { padding-top: 12px; padding-bottom: 12px; padding-left: 16px; padding-right: 16px; spacing: 12px; cross-axis-alignment: center;
-                                Text { width: 96px; text: "共享 Xberg 目录"; font-size: 12.5px; color: Design.text-muted; vertical-alignment: center; }
-                                Field { text <=> root.convert-runtime-dir; placeholder-text: "选择已安装的 Xberg 运行目录";
-                                    edited => { root.convert-runtime-edited(); }
-                                    enabled: !root.busy && !root.convert-initializing && !root.convert-runtime-saving && root.confirm-kind == 0;
-                                    horizontal-stretch: 1; }
-                                AppButton { text: "选择目录…";
-                                    enabled: !root.busy && !root.convert-initializing && !root.convert-runtime-saving && root.confirm-kind == 0;
-                                    clicked => { root.convert-choose-runtime(); } }
-                                AppButton { text: root.convert-runtime-saving ? "正在保存…" : "保存目录"; primary: true;
-                                    enabled: !root.busy && !root.convert-initializing && !root.convert-runtime-saving && root.convert-runtime-dir != "" && root.confirm-kind == 0;
-                                    clicked => { root.convert-use-runtime(); } }
+                if root.screen == 5: HorizontalLayout { spacing: 10px;
+                    Muted { text: root.convert-status; horizontal-stretch: 1; }
+                    AppButton { text: "前往设置"; enabled: root.confirm-kind == 0; clicked => { root.navigation(7); } }
+                }
+                if root.screen == 7: ScrollView {
+                    VerticalLayout { spacing: 12px;
+                        Surface { VerticalLayout { padding: 18px; spacing: 12px;
+                            Label { text: "共享 Xberg"; font-size: 16px; font-weight: 600; }
+                            Muted { text: "文档、截图与媒体共用一个引擎。两种来源分别保存，重启自动恢复。"; }
+                            Label { text: root.settings-source == 1 ? "当前来源：下载的 Xberg" : "当前来源：用户提供的目录"; }
+                            Field { text <=> root.settings-custom-dir; placeholder-text: "包含 xberg.exe 的已有目录";
+                                enabled: !root.busy && !root.convert-initializing && !root.convert-runtime-saving && root.confirm-kind == 0; }
+                            HorizontalLayout { spacing: 8px;
+                                AppButton { text: "选择目录…"; enabled: !root.busy && !root.convert-initializing && !root.convert-runtime-saving && root.confirm-kind == 0;
+                                    clicked => { root.settings-action("choose"); } }
+                                AppButton { text: "使用此目录"; primary: true; enabled: !root.busy && !root.convert-initializing && !root.convert-runtime-saving && root.settings-custom-dir != "" && root.confirm-kind == 0;
+                                    clicked => { root.settings-action("custom"); } }
+                                Rectangle { horizontal-stretch: 1; }
                             }
-                            Rectangle {
-                                background: Design.soft;
-                                VerticalLayout { padding-top: 10px; padding-bottom: 10px; padding-left: 16px; padding-right: 16px;
-                                    Text { text: root.convert-runtime-saving ? "正在保存 Xberg 目录，请稍候…" : root.convert-runtime-confirmed ? "目录已保存，文档转换与截图共用；重启后自动恢复。" : "文档转换与截图共用此目录，保存一次即可；各功能分别检查所需模型。"; font-size: 12px; color: Design.text-muted; wrap: word-wrap; }
-                                }
+                            Rectangle { height: 1px; background: Design.line-soft; }
+                            Muted { text: root.settings-downloaded-dir == "" ? "尚未下载 Xberg" : "下载目录：" + root.settings-downloaded-dir; }
+                            HorizontalLayout { spacing: 8px;
+                                AppButton { text: "下载 Xberg"; enabled: !root.busy && !root.convert-initializing && !root.convert-runtime-saving && root.confirm-kind == 0;
+                                    clicked => { root.settings-action("download"); } }
+                                AppButton { text: "使用已下载版本"; enabled: !root.busy && !root.convert-initializing && !root.convert-runtime-saving && root.settings-downloaded-dir != "" && root.confirm-kind == 0;
+                                    clicked => { root.settings-action("downloaded"); } }
+                                if root.convert-initializing: AppButton { text: "取消下载"; enabled: root.confirm-kind == 0; clicked => { root.convert-stop(); } }
+                                Rectangle { horizontal-stretch: 1; }
                             }
-                        }
+                            if root.convert-initializing || root.convert-runtime-saving: ProgressBar { progress: -1; }
+                            Muted { text: root.settings-status; }
+                        } }
+                        Surface { VerticalLayout { padding: 18px; spacing: 10px;
+                            Label { text: "后台与截图组件"; font-size: 16px; font-weight: 600; }
+                            Muted { text: root.snap-service-status; }
+                            Muted { text: root.snap-asset-status; }
+                            if root.snap-error != "": Text { text: root.snap-error; color: Design.danger-ink; wrap: word-wrap; }
+                            HorizontalLayout { spacing: 8px;
+                                AppButton { text: "初始化字体 / 修复组件"; enabled: !root.snap-initializing && root.confirm-kind == 0; clicked => { root.snap-initialize(); } }
+                                AppButton { text: "重试后台连接"; enabled: !root.snap-request-pending && root.confirm-kind == 0; clicked => { root.snap-connect(); } }
+                                AppButton { text: "重试模型加载"; enabled: root.snap-connected && !root.snap-request-pending && root.snap-task == "idle" && root.confirm-kind == 0; clicked => { root.snap-retry-load(); } }
+                            }
+                            if root.snap-initializing: ProgressBar { progress: -1; }
+                            if root.snap-initializing: Muted { text: root.snap-progress; }
+                            if root.snap-initializing: AppButton { text: "取消初始化"; enabled: root.confirm-kind == 0; clicked => { root.snap-cancel-initialize(); } }
+                            Check { text: "登录时自动启动后台服务"; checked: root.snap-autostart-draft;
+                                enabled: root.snap-connected && !root.snap-request-pending && root.confirm-kind == 0;
+                                toggled => { root.snap-draft-autostart(self.checked); } }
+                            AppButton { text: "保存启动设置"; enabled: root.snap-connected && !root.snap-request-pending && root.confirm-kind == 0; clicked => { root.snap-save-settings(); } }
+                            Muted { text: "关闭主窗口后后台继续运行。需要完全退出时，请使用系统托盘的「退出后台服务」。"; }
+                        } }
                     }
                 }
                 // ============ 转 Markdown ============
@@ -1597,57 +1634,10 @@ export component AppWindow inherits Window {
                         }
                     }
                 }
-                // ============ 截图 OCR ============
-                if root.screen == 6: VerticalLayout {
-                    spacing: 8px;
-                    Surface {
-                        VerticalLayout { padding-top: 14px; padding-bottom: 14px; padding-left: 16px; padding-right: 16px; spacing: 8px;
-                            HorizontalLayout { spacing: 10px; cross-axis-alignment: center;
-                                Label { text: "可选组件"; font-weight: 600; font-size: 13px; horizontal-stretch: 0; }
-                                Dot { tone: root.snap-initializing ? Design.warning : root.snap-ready ? Design.success : Design.muted-2; }
-                                Muted { text: root.snap-asset-status; horizontal-stretch: 1; overflow: elide; wrap: no-wrap; color: Design.muted-2; }
-                                if !root.snap-ready && !root.snap-initializing: AppButton {
-                                    text: "初始化 / 重试下载"; primary: true; icon: 11;
-                                    enabled: root.confirm-kind == 0;
-                                    clicked => { root.snap-initialize(); }
-                                }
-                                if root.snap-initializing: AppButton {
-                                    text: "取消初始化"; enabled: root.confirm-kind == 0;
-                                    clicked => { root.snap-cancel-initialize(); }
-                                }
-                            }
-                            if root.snap-initializing: ProgressBar { progress: -1; }
-                            if root.snap-initializing: Muted { text: root.snap-progress; color: Design.muted-2; }
-                            Muted { text: "只在点击初始化后下载缺失组件；校验完成后截图识别可离线使用。取消或失败不会将不完整组件标为就绪。"; color: Design.muted-2; }
-                        }
-                    }
-                    Surface {
-                        VerticalLayout { padding-top: 14px; padding-bottom: 14px; padding-left: 16px; padding-right: 16px; spacing: 8px;
-                            HorizontalLayout { spacing: 10px; cross-axis-alignment: center;
-                                Label { text: "后台服务"; font-weight: 600; font-size: 13px; horizontal-stretch: 1; }
-                                AppButton { text: root.snap-connected ? "刷新连接" : "启动 / 重连"; icon: 12;
-                                    enabled: root.snap-ready && root.confirm-kind == 0 && !root.snap-request-pending;
-                                    clicked => { root.snap-connect(); } }
-                            }
-                            HorizontalLayout { spacing: 10px; cross-axis-alignment: center;
-                                Dot { tone: root.snap-connected ? Design.success : Design.muted-2; }
-                                Muted { text: root.snap-service-status; horizontal-stretch: 1; overflow: elide; wrap: no-wrap; color: Design.muted-2; }
-                            }
-                            HorizontalLayout { spacing: 24px;
-                                Text { text: "模型：" + (root.snap-model == "ready" ? "就绪" : root.snap-model == "loading" ? "加载中" : root.snap-model == "error" ? "错误" : "未初始化"); font-size: 12.5px; color: Design.text-muted; horizontal-stretch: 0; }
-                                Text { text: "任务：" + (root.snap-task == "recognizing" ? "正在识别" : "空闲"); font-size: 12.5px; color: Design.text-muted; horizontal-stretch: 0; }
-                                Rectangle { horizontal-stretch: 1; background: transparent; }
-                                AppButton { text: "重新加载模型"; small: true; enabled: root.snap-connected && root.confirm-kind == 0 && !root.snap-request-pending && root.snap-task == "idle";
-                                    clicked => { root.snap-retry-load(); } }
-                                AppButton { text: "截图识别"; primary: true; small: true; icon: 6; enabled: root.snap-connected && root.confirm-kind == 0 && !root.snap-request-pending;
-                                    clicked => { root.snap-capture(); } }
-                            }
-                            if root.snap-error != "": Text { text: root.snap-error; color: Design.danger-ink; wrap: word-wrap; font-size: 12.5px; }
-                        }
-                    }
-                    Surface {
-                        VerticalLayout { padding-top: 14px; padding-bottom: 14px; padding-left: 16px; padding-right: 16px; spacing: 10px;
-                            Label { text: "设置"; font-weight: 600; font-size: 13px; }
+                // ============ 截图 OCR：仅快捷键及后台状态 ============
+                if root.screen == 6: VerticalLayout { spacing: 12px;
+                    Surface { VerticalLayout { padding: 18px; spacing: 12px;
+                        Label { text: "截图快捷键"; font-size: 16px; font-weight: 600; }
                             HorizontalLayout { spacing: 10px; cross-axis-alignment: center;
                                 Text { text: "当前生效热键"; font-size: 12.5px; color: Design.text-muted; horizontal-stretch: 0; }
                                 Kbd { text: root.snap-hotkey; }
@@ -1687,35 +1677,19 @@ export component AppWindow inherits Window {
                                 AppButton { text: root.snap-recording ? "取消录制" : "录制热键"; icon: root.snap-recording ? -1 : 8;
                                     enabled: root.snap-connected && root.confirm-kind == 0 && !root.snap-request-pending;
                                     clicked => { root.snap-recording = !root.snap-recording; if (root.snap-recording) { recording.focus(); } } }
-                                AppButton { text: "保存设置"; enabled: root.snap-connected && !root.snap-recording && (root.snap-hotkey-draft != root.snap-hotkey || root.snap-autostart-draft != root.snap-autostart) && root.confirm-kind == 0 && !root.snap-request-pending;
+                                AppButton { text: "保存快捷键"; enabled: root.snap-connected && !root.snap-recording && (root.snap-hotkey-draft != root.snap-hotkey || root.snap-autostart-draft != root.snap-autostart) && root.confirm-kind == 0 && !root.snap-request-pending;
                                     clicked => { root.snap-save-settings(); } }
                             }
-                            Check { text: "登录时后台启动截图服务"; checked: root.snap-autostart-draft;
-                                enabled: root.snap-connected && root.confirm-kind == 0 && !root.snap-request-pending;
-                                toggled => { root.snap-draft-autostart(self.checked); } }
-                            Muted { text: "移动或删除程序前请先关闭开机启动。托盘菜单可单独退出服务；关闭本窗口不会停止服务。"; color: Design.muted-2; }
-                        }
-                    }
-                    Rectangle { vertical-stretch: 1; background: transparent; }
-                    // 底部状态
-                    Surface { pop: true; radius: 10px; min-height: 58px;
-                        VerticalLayout { padding-top: 8px; padding-bottom: 8px; padding-left: 16px; padding-right: 16px; spacing: 6px;
-                            HorizontalLayout { spacing: 12px; cross-axis-alignment: center;
-                                Rectangle {
-                                    height: 20px; border-radius: 5px;
-                                    background: root.snap-connected ? Design.accent : Design.accent-soft;
-                                    HorizontalLayout { padding-left: 9px; padding-right: 9px;
-                                        Text { text: root.snap-connected ? "已连接" : "状态"; font-size: 11px; font-weight: 600;
-                                            color: root.snap-connected ? Design.on-accent : Design.accent-ink;
-                                            vertical-alignment: center; }
-                                    }
-                                }
-                                VerticalLayout { horizontal-stretch: 1; spacing: 1px;
-                                    Label { text: root.snap-service-status; overflow: elide; font-weight: 600; font-size: 13px; }
-                                }
-                            }
-                        }
-                    }
+                    } }
+                    Surface { VerticalLayout { padding: 18px; spacing: 10px;
+                        Label { text: "后台服务状态"; font-size: 16px; font-weight: 600; }
+                        Muted { text: root.snap-service-status; }
+                        Label { text: "模型：" + (root.snap-model == "ready" ? "就绪" : root.snap-model == "loading" ? "加载中" : root.snap-model == "error" ? "错误" : "未就绪"); }
+                        Muted { text: "任务：" + (root.snap-task == "recognizing" ? "正在识别" : "空闲"); }
+                        if root.snap-error != "": Text { text: root.snap-error; color: Design.danger-ink; wrap: word-wrap; }
+                        Muted { text: "使用快捷键或托盘截图。组件配置和故障恢复请前往设置。"; }
+                    } }
+                    Rectangle { vertical-stretch: 1; }
                 }
                 // ============ 关于 ============
                 if root.screen == 1: VerticalLayout { spacing: 14px;

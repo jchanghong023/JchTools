@@ -1,11 +1,12 @@
 //! 转 Markdown 的本地资产校验。Xberg 目录由应用级 SQLite 统一提供。
-//! 文档与媒体分别校验自己的模型和运行库；初始化只写许可证 notice，
-//! 不再下载独立的 Xberg 引擎。旧安装工具仅保留为既有协议/资产回归夹具。
+//! 文档与媒体分别校验自己的模型和运行库；设置页可主动下载固定发布物，
+//! 校验完整后保存为共享下载来源。文档初始化仍只写许可证 notice。
 
 use crate::asset_util::{
     atomic_replace_dir, cleanup_stale_staging_dirs, ensure_not_cancelled, finalize_staging,
-    resolve_xberg_component, validate_relative_path, verify_file,
-    verify_inference_members_for_scenario, AssetDownloader, InferenceManifest,
+    require_component_members, resolve_xberg_component, state_dir_asset_root, valid_component_tag,
+    validate_relative_path, verify_file, verify_inference_members_for_scenario, AssetDownloader,
+    InferenceManifest,
 };
 use serde::Deserialize;
 use std::fmt::Write as FmtWrite;
@@ -102,6 +103,7 @@ pub fn validate_runtime_dir(path: &Path) -> Result<(), String> {
 
 /// 保存共享目录到 SQLite；各功能启动前分别校验其模型和运行库。
 pub fn save_runtime_dir(path: &Path) -> Result<(), String> {
+    crate::xberg_runtime::validate_assets(path, "engine")?;
     crate::xberg_settings::save(path)
 }
 
@@ -149,16 +151,7 @@ pub fn media_component_dir() -> Result<PathBuf, String> {
         component.join("ffmpeg").join("avcodec-63.dll"),
         component.join("ffmpeg").join("avformat-63.dll"),
     ];
-    for path in &required {
-        if !path.is_file() {
-            let relative = path.strip_prefix(&component).unwrap_or(path);
-            return Err(format!(
-                "推理组件不完整：缺少 {}（组件目录 {}）",
-                relative.display(),
-                component.display()
-            ));
-        }
-    }
+    require_component_members(&component, &required)?;
     Ok(component)
 }
 
@@ -170,14 +163,13 @@ pub fn validate_media() -> Result<(), String> {
 /// 检查文档场景及许可证；读取应用配置时可首次迁移旧文本，不联网。
 pub fn readiness() -> Result<(), String> {
     // 先校验内置清单本身：失效清单不得被当作可运行环境。
-    let manifest = load_manifest()?;
+    load_manifest()?;
     let runtime = runtime_dir()?;
     validate_runtime_dir(&runtime)?;
     let notice = asset_root().join("licenses").join("THIRD_PARTY_NOTICES.md");
     if !notice.is_file() {
         return Err(format!("许可证 notice 不存在：{}", notice.display()));
     }
-    let _ = manifest;
     Ok(())
 }
 
@@ -219,15 +211,7 @@ pub fn initialize(cancel: &AtomicBool, mut progress: impl FnMut(String)) -> Resu
     fs::create_dir_all(&root).map_err(|error| format!("创建资产目录失败：{error}"))?;
     let staging = root.join(format!(".staging-{}", Uuid::new_v4().simple()));
     fs::create_dir_all(&staging).map_err(|error| format!("创建初始化临时目录失败：{error}"))?;
-    let mut downloader = NetworkDownloader;
-    let result = initialize_staged(
-        &manifest,
-        cancel,
-        &mut progress,
-        &staging,
-        &root,
-        &mut downloader,
-    );
+    let result = initialize_staged(&manifest, cancel, &mut progress, &staging, &root);
     finalize_staging(result, &staging, &mut progress)
 }
 
@@ -238,8 +222,9 @@ pub fn initialize(cancel: &AtomicBool, mut progress: impl FnMut(String)) -> Resu
 /// cleanup_stale_staging_dirs`]；本模块只保留自己的残留策略。
 ///
 /// 不扫 `.old-*` 备份：那是原子替换路径的暂存（asset_util），其中
-/// xberg-inference/<tag> 目标的残留由下次初始化的 prune_old_inference_tags
-/// 收集，入口一概删除会把替换失败后仍可恢复的备份提前清掉。
+/// xberg-inference/<tag> 目标的残留按设计由 prune_old_inference_tags 收集
+///（该安装链当前仅在测试中启用，见 asset_util；生产初始化只校验共享目录，
+/// XB-10），入口一概删除会把替换失败后仍可恢复的备份提前清掉。
 fn cleanup_stale_staging(root: &Path) {
     cleanup_stale_staging_dirs(root);
     // save_runtime_dir 的临时选择文件（.xberg-runtime-path.txt.<uuid>）在写入
@@ -267,7 +252,6 @@ fn initialize_staged(
     progress: &mut impl FnMut(String),
     staging: &Path,
     root: &Path,
-    downloader: &mut dyn AssetDownloader,
 ) -> Result<(), String> {
     ensure_not_cancelled(cancel)?;
     // 运行目录校验失败时如实报告：初始化不替用户修复用户指定的 Xberg 目录。
@@ -277,7 +261,8 @@ fn initialize_staged(
     fs::create_dir_all(&notice_stage).map_err(|error| format!("创建许可证目录失败：{error}"))?;
     write_notice(&notice_stage.join("THIRD_PARTY_NOTICES.md"), manifest)?;
     atomic_replace_dir(&notice_stage, &root.join("licenses"))?;
-    let _ = downloader; // XB-10：用户提供 Xberg，不再下载另一份引擎。
+    // XB-10：用户提供 Xberg 运行目录，初始化不再下载任何引擎或组件包
+    //（下载器仅媒体运行库的 download_runtime 路径仍在使用）。
     progress("转 Markdown 组件初始化完成".to_string());
     Ok(())
 }
@@ -308,6 +293,76 @@ impl AssetDownloader for NetworkDownloader {
     }
 }
 
+/// XB-20/XB-21：主动下载固定发布物；旧目录和配置在失败/取消时保持不变。
+pub fn download_runtime(
+    cancel: &AtomicBool,
+    mut progress: impl FnMut(String),
+) -> Result<PathBuf, String> {
+    download_runtime_with(
+        &load_manifest()?,
+        cancel,
+        &mut progress,
+        &mut NetworkDownloader,
+    )
+}
+
+fn download_runtime_with(
+    manifest: &AssetManifest,
+    cancel: &AtomicBool,
+    progress: &mut impl FnMut(String),
+    downloader: &mut dyn AssetDownloader,
+) -> Result<PathBuf, String> {
+    ensure_not_cancelled(cancel)?;
+    let base = crate::xberg_settings::state_dir()?.join("xberg-downloads");
+    fs::create_dir_all(&base).map_err(|e| e.to_string())?;
+    let staging = base.join(format!(".staging-{}", Uuid::new_v4()));
+    fs::create_dir(&staging).map_err(|e| e.to_string())?;
+    let result = (|| {
+        let archive = staging.join("runtime.zip");
+        let pack = &manifest.xberg;
+        downloader.download(
+            &pack.archive_url,
+            &archive,
+            pack.archive_size_bytes,
+            &pack.archive_sha256,
+            cancel,
+            progress,
+        )?;
+        ensure_not_cancelled(cancel)?;
+        verify_file(&archive, pack.archive_size_bytes, &pack.archive_sha256)?;
+        let extracted = staging.join("unpacked");
+        fs::create_dir(&extracted).map_err(|e| e.to_string())?;
+        crate::asset_util::extract_zip_safely(&archive, &extracted, cancel)?;
+        let component = extracted.join("xberg-cli-x86_64-pc-windows-msvc");
+        for member in &pack.members {
+            ensure_not_cancelled(cancel)?;
+            verify_file(
+                &component.join(&member.path),
+                member.size_bytes,
+                &member.sha256,
+            )?;
+        }
+        // 上述清单含全部场景，逐成员核对，不按当前工具过滤模型。
+        ensure_not_cancelled(cancel)?;
+        let installed = base.join(format!("{}-{}", pack.tag, Uuid::new_v4()));
+        fs::rename(&component, &installed).map_err(|e| format!("安装 Xberg 失败：{e}"))?;
+        if let Err(error) = crate::xberg_settings::save_source(
+            crate::xberg_settings::Source::Downloaded,
+            &installed,
+        ) {
+            // 仅撤销本次创建且尚未成为有效配置的目录。
+            let _ = fs::remove_dir_all(&installed);
+            return Err(error);
+        }
+        Ok(installed)
+    })();
+    let cleanup = fs::remove_dir_all(&staging);
+    if let Err(error) = cleanup {
+        progress(format!("下载临时目录清理失败：{error}"));
+    }
+    result
+}
+
 fn load_manifest() -> Result<AssetManifest, String> {
     let manifest: AssetManifest = serde_json::from_str(MANIFEST)
         .map_err(|error| format!("转 Markdown 资产清单无效：{error}"))?;
@@ -330,12 +385,7 @@ fn load_manifest() -> Result<AssetManifest, String> {
         validate_relative_path(&member.path)?;
     }
     if let Some(inference) = &manifest.xberg_inference {
-        let tag_ok = !inference.tag.is_empty()
-            && !inference.tag.contains('/')
-            && !inference.tag.contains('\\')
-            && !inference.tag.contains("..")
-            && !inference.tag.contains(':');
-        if !tag_ok
+        if !valid_component_tag(&inference.tag)
             || inference.url.is_empty()
             || inference.size_bytes == 0
             || inference.sha256.len() != 64
@@ -362,15 +412,7 @@ fn asset_root() -> PathBuf {
             }
         }
     }
-    if let Ok(path) = crate::config::state_dir() {
-        return path.join(DATA_DIRECTORY);
-    }
-    if let Some(local_app_data) = std::env::var_os("LOCALAPPDATA") {
-        return PathBuf::from(local_app_data)
-            .join("JchTools")
-            .join(DATA_DIRECTORY);
-    }
-    std::env::temp_dir().join("JchTools").join(DATA_DIRECTORY)
+    state_dir_asset_root(DATA_DIRECTORY)
 }
 
 fn write_notice(path: &Path, manifest: &AssetManifest) -> Result<(), String> {
@@ -475,6 +517,103 @@ mod tests {
         component
     }
 
+    // 覆盖 XB-20/XB-21：合成发布包经过真实下载安装核心；成员错误及取消保留原配置。
+    #[test]
+    fn installed_runtime_is_verified_before_selection() {
+        use super::{AssetFile, AssetManifest, XbergManifest};
+        use std::io::{Cursor, Write};
+        let guard = redirect_component_env();
+        let custom = guard.root.path().join("custom");
+        fs::create_dir(&custom).unwrap();
+        fs::write(custom.join("xberg.exe"), b"existing").unwrap();
+        crate::xberg_settings::save(&custom).unwrap();
+        let mut archive = zip::ZipWriter::new(Cursor::new(Vec::new()));
+        let mut members = Vec::new();
+        for (name, bytes) in [
+            ("xberg.exe", b"engine".as_slice()),
+            ("models/snapshot-ocr/det.onnx", b"model".as_slice()),
+        ] {
+            archive
+                .start_file(
+                    format!("xberg-cli-x86_64-pc-windows-msvc/{name}"),
+                    zip::write::SimpleFileOptions::default(),
+                )
+                .unwrap();
+            archive.write_all(bytes).unwrap();
+            members.push(AssetFile {
+                path: name.into(),
+                size_bytes: bytes.len() as u64,
+                sha256: format!("{:x}", Sha256::digest(bytes)),
+            });
+        }
+        let bytes = archive.finish().unwrap().into_inner();
+        struct Download(Vec<u8>);
+        impl AssetDownloader for Download {
+            fn download(
+                &mut self,
+                _: &str,
+                destination: &Path,
+                _: u64,
+                _: &str,
+                _: &AtomicBool,
+                _: &mut dyn FnMut(String),
+            ) -> Result<(), String> {
+                fs::write(destination, &self.0).map_err(|e| e.to_string())
+            }
+        }
+        let mut manifest = AssetManifest {
+            schema_version: 1,
+            xberg_inference: None,
+            xberg: XbergManifest {
+                tag: "test".into(),
+                archive_url: "https://example.invalid/synthetic.zip".into(),
+                archive_size_bytes: bytes.len() as u64,
+                archive_sha256: format!("{:x}", Sha256::digest(&bytes)),
+                members,
+                licenses: Vec::new(),
+            },
+        };
+        let mut downloader = Download(bytes);
+        let cancel = AtomicBool::new(false);
+        let installed =
+            super::download_runtime_with(&manifest, &cancel, &mut |_| {}, &mut downloader).unwrap();
+        assert_eq!(
+            fs::read(installed.join("models/snapshot-ocr/det.onnx")).unwrap(),
+            b"model"
+        );
+        assert_eq!(
+            crate::xberg_settings::required().unwrap(),
+            installed.canonicalize().unwrap()
+        );
+        assert_eq!(
+            crate::xberg_settings::settings().unwrap().custom.unwrap(),
+            custom.canonicalize().unwrap()
+        );
+        manifest.xberg.members[1].sha256 = "0".repeat(64);
+        assert!(
+            super::download_runtime_with(&manifest, &cancel, &mut |_| {}, &mut downloader).is_err()
+        );
+        assert_eq!(
+            crate::xberg_settings::required().unwrap(),
+            installed.canonicalize().unwrap()
+        );
+        assert!(super::download_runtime_with(
+            &manifest,
+            &AtomicBool::new(true),
+            &mut |_| {},
+            &mut downloader
+        )
+        .is_err());
+        assert_eq!(fs::read(custom.join("xberg.exe")).unwrap(), b"existing");
+        assert!(fs::read_dir(installed.parent().unwrap())
+            .unwrap()
+            .all(|entry| !entry
+                .unwrap()
+                .file_name()
+                .to_string_lossy()
+                .starts_with(".staging-")));
+    }
+
     // 覆盖 T-05/T-06（XB-01/XB-12）：媒体组件按在位校验，齐全时返回组件目录。
     #[test]
     fn media_component_ready_returns_component_dir() {
@@ -495,10 +634,7 @@ mod tests {
         let _guard = redirect_component_env();
         let error = media_component_dir().expect_err("缺失组件必须报未配置");
         assert!(error.contains("未配置"), "错误应说明组件未配置：{error}");
-        assert!(
-            error.contains("转 Markdown 或截图 OCR"),
-            "错误应指引共享配置入口：{error}"
-        );
+        assert!(error.contains("设置页"), "错误应指引共享配置入口：{error}");
     }
 
     // 覆盖 T-06：组件不完整时明确指出缺失项，不执行不完整环境。

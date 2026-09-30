@@ -24,7 +24,7 @@ powershell -NoProfile -File .\scripts\package-windows.ps1
 
 脚本从官方 `ip7z/7zip` 的固定 `26.03` 发布获取完整 x64 MSI 和对应源码，要求 GitHub 发布元数据提供 SHA-256 摘要；缺少摘要、校验失败或资产缺失时停止，不换非官方镜像。MSI 只在构建机生成 administrative image，提取完整 `7z.exe + 7z.dll`，不把安装步骤交给最终用户。
 
-随后生成 Cargo.lock，执行 `cargo check`、核心测试和真实引擎解压测试；先以 `cargo build --locked --release --manifest-path optional/snap-ocr-worker/Cargo.toml --bin snap-ocr-worker` 构建**独立的可选截图 OCR worker**，把原始 EXE 放到 `dist/optional-components-v0.1.0/snap-ocr-worker.exe`，按该文件的实际字节数及 SHA-256 生成同目录 `snap-ocr-assets.json`。脚本只在主程序编译期间通过 `JCHTOOLS_SNAP_OCR_MANIFEST` 让 `build.rs` 将这份清单嵌入主 EXE，不改写仓库内的占位清单；发布目录 `resources/snap-ocr-assets.json` 也包含同一清单。接着编译 GUI，校验内嵌引擎与清单，复制许可证及 7-Zip 源码（发布包不含 7z.exe/dll），生成 `dist/JchTools-Windows-x64-时间戳.zip`；构建机装有 Inno Setup 6 时还会编译出安装包 `dist/JchTools-Setup-x64.exe`（安装到当前用户目录、免管理员权限，自动创建桌面快捷方式与开始菜单入口，控制面板可卸载；缺 ISCC 时该阶段如实标注 NOT RUN，CI 发布流程保证产出）。**ZIP 和安装包只含 OCR 资产清单，不含 worker、ONNX 模型、ONNX Runtime DLL 或字体。**该构建目录的 `BUILD-INFO.json` 记录实际执行结果；脚本不会声称已完成手工 UI 或多 TB 性能验收。首次验证通过后的 Cargo.lock 应纳入仓库。
+随后生成 Cargo.lock，执行 `cargo check`、核心测试和真实引擎解压测试；先以 `cargo build --locked --release --manifest-path optional/snap-ocr-worker/Cargo.toml --bin snap-ocr-worker` 构建**独立的可选截图 OCR worker**，把原始 EXE 放到 `dist/optional-components-v0.1.0/snap-ocr-worker.exe`，按该文件的实际字节数及 SHA-256 生成同目录 `snap-ocr-assets.json`。脚本只在主程序编译期间通过 `JCHTOOLS_SNAP_OCR_MANIFEST` 让 `build.rs` 将这份清单嵌入主 EXE，不改写仓库内的占位清单；发布目录 `resources/snap-ocr-assets.json` 也包含同一清单。接着编译 GUI，校验内嵌引擎与清单，复制许可证及 7-Zip 源码（发布包不含 7z.exe/dll），生成 `dist/JchTools-Windows-x64-时间戳.zip`；构建机装有 Inno Setup 6 时还会编译出安装包 `dist/JchTools-Setup-x64.exe`（安装到当前用户目录、免管理员权限，自动创建桌面快捷方式与开始菜单入口，控制面板可卸载；缺 ISCC 时该阶段如实标注 NOT RUN，CI 发布流程保证产出）。**ZIP 和安装包包含后台服务程序 `snap-ocr-worker.exe` 与资产清单；Xberg、ONNX 模型、推理 DLL 和字体仍不随主包提供。**该构建目录的 `BUILD-INFO.json` 记录实际执行结果；脚本不会声称已完成手工 UI 或多 TB 性能验收。首次验证通过后的 Cargo.lock 应纳入仓库。
 
 `-Offline` 只供已经缓存全部 Rust 依赖和已校验引擎的构建机使用；`-SkipTests` 会在构建记录明确标为 NOT RUN，不应用于生产交付。脚本不修改执行策略，不自动安装编译器，不自动提升权限。
 
@@ -32,7 +32,7 @@ powershell -NoProfile -File .\scripts\package-windows.ps1
 
 正式发布走 GitHub Actions 的 **Release** 工作流（`.github/workflows/release.yml`）：**仅手动触发**（Actions 页 Run workflow），在 `windows-2022` 上执行同一套 `package-windows.ps1`，以 UTC 时间到分钟的 tag（`yyyyMMdd-HHmm`）创建 Release，并把便携 ZIP、安装包 `JchTools-Setup-x64.exe` 与 SHA256SUMS 校验和挂到该 Release。最终用户直接从仓库 **Releases** 页下载即可。
 
-**可选截图 OCR 资产尚未发布。**`package-windows.ps1` 只在本机构建、校验和暂存 worker/清单；不上传资产、不创建 GitHub release。主发布流程仍只提交普通 ZIP、安装包与校验和，**不会**附加 `dist/optional-components-v0.1.0/`。要使新包的截图 OCR 在线初始化真正可用，必须先在独立授权的发布操作中建立固定 tag `optional-components-v0.1.0`，上传且保持不可变的 `snap-ocr-worker.exe`（字节必须等于该批主 EXE 内嵌清单记录的 `size_bytes`/`sha256`）；还须按清单中 `snap-det.onnx`、`snap-rec.onnx`、`snap-dict.txt` 的对应 URL 上传逐字节匹配的模型/字典，确保第三方 ORT/字体/许可证源 URL 可达且实际内容通过同一清单 SHA-256 校验。现有固定下载 URL 仅是交付前提，**不是已经发布或可下载的证据**；未完成资产发布时不要将截图 OCR 描述为可初始化。离线构建可用 `-Offline`，前提是 Rust 依赖及已校验 7-Zip 引擎均已缓存在构建机；用户端离线初始化则需此前已完整安装并校验可选资产，`-Offline` 不会替用户安装这些资产。
+后台及截图服务程序随主安装包和便携 ZIP 交付，由打包时的清单校验。「设置」页统一选择主动下载固定版本 Xberg，或提供已有运行目录；两种目录与当前来源分别持久保存。结果窗字体仍由用户在设置页主动初始化。普通启动、打开功能页或模型加载不会自动下载；缺少或损坏的组件明确显示未就绪。发布物与真实模型的验收以对应提交的验证结果为准。
 
 ## 使用流程
 
@@ -41,11 +41,11 @@ powershell -NoProfile -File .\scripts\package-windows.ps1
 - **递归解压**：选目录 → 调整扫描范围与防护上限 → 点「开始解压」→ 一次确认 → 连续执行到结束。每个包就地解压，原包和分卷始终保留；不去重、不删除已有或新落地文件。目标重名时只给新文件的基础名加唯一编号，保留普通及复合扩展名。未能完全解开的包整组移入根目录的「解压失败」并记录原因；空间不足或取消则停止并保留源包，不作为坏包隔离。同一次任务不重新排队已处理的原包，新任务仍可再次解压；默认跳过「解压失败」中的包。
 - **目录整理**：选目录 → 调整规则 → 点「开始分析」（**只读**，不改任何文件）→ 查看真实文件产生的分页计划 → 确认后执行去重、归类与清理。文件动作可逐项勾选/取消，状态立即更新；空目录清理是不可取消的固定收尾步骤，清理失败不报告整理完成。
 - **MD 整理**：只读处理 Markdown。「合并 MD」按文件创建时间从早到晚（平局按相对路径自然排序）合并目录中的 .md，每个文件以「# 文件名.md」为一级标题、内部标题整体下移一级（六级封顶），fenced code block 内容原样保留；「拆分 MD」按 KB/MB 硬限制在 UTF-8 安全边界分片，分片按编号顺序拼接与原文件完全一致。原文件一律不改动；输出冲突先确认、不静默覆盖。
-- **转 Markdown**：在左侧独立页面选择并保存已有的 Xberg 运行目录，主动初始化媒体模型与工作进程，再选择输入、输出目录和转换类型。支持 PDF、Office、图片 OCR、MP4/M4A 转录及其他 Xberg 格式；默认保留输入层级，也可平铺输出。转换组件和模型不随主程序打包，Xberg 不由本程序下载；组件就绪后转换离线运行，不依赖旧 all2markdown 项目或 Python 运行环境。固定版本和校验要求见 [转 Markdown 需求](docs/requirements/ALL2MARKDOWN.md)。
+- **转 Markdown**：先在独立「设置」页下载 Xberg 或保存已有运行目录，再在工具页选择输入、输出目录和转换类型。文档、图片 OCR、媒体与截图共用当前选中的 Xberg；转换完全离线，缺少相应资产时明确提示。固定版本和校验要求见 [转 Markdown 需求](docs/requirements/ALL2MARKDOWN.md)。
 - **Git 工具**：逐文件提交并推送——一个文件单独 add → 单独 commit（只含当前文件，保护既有 staged 内容）→ 单独 push，push 成功后才处理下一个；提交信息固定「update: 相对路径」。push 被远端新提交拒绝时自动 fetch + merge（不 rebase），冲突即停并保留现场；可重试失败按 5→10→20→40→80→80… 秒无限退避，可随时停止；以 git 状态为唯一进度来源，重启不重复提交。
-- **截图 OCR**：先在独立页面主动初始化经固定清单校验的可选 worker、模型、ONNX Runtime 和字体；随后连接当前用户会话的后台进程。托盘和可录制全局热键独立于主窗口，截图时在显示器物理像素上冻结画面并拖选，结果窗可选中复制或一键复制全文。识别离线进行，取消、空结果及失败保留上一个仍可见的结果；开机启动默认关闭。尚未发布可选资产时**无法完成在线初始化**，见上方发布前提，不能据此删除原 TextSnap。
+- **截图 OCR**：页面仅设置快捷键并显示后台状态；通过快捷键或托盘截图。打开 GUI 后，已配置的 Xberg 与后台服务异步启动；GUI 关闭后服务、模型和托盘继续常驻，重新打开连接同一服务。需要完全退出时使用系统托盘「退出后台服务」，正在处理的任务先确认并安全停止。组件初始化和故障恢复统一位于「设置」页；开机启动默认关闭。
 
-导航只显示已注册工具（递归解压、目录整理、MD 整理、转 Markdown、Git 工具、截图 OCR）和关于；工具描述集中注册。「关于」包含 Slint 的 AboutSlint 署名组件。旧工具不提供独立任务记录页或设置页：规则仍只在主界面「处理规则」里会话内调整，不落盘、不导入导出；转 Markdown 的 Xberg 目录与截图 OCR 的快捷键/开机启动各自单独保存。
+导航只显示已注册工具（递归解压、目录整理、MD 整理、转 Markdown、Git 工具、截图 OCR）以及独立设置、关于；工具描述集中注册。「关于」包含 Slint 的 AboutSlint 署名组件。旧工具不提供独立任务记录页或设置页：规则仍只在主界面「处理规则」里会话内调整，不落盘、不导入导出；共享 Xberg 的下载目录、用户目录及当前来源由设置页写入 SQLite 并在重启恢复；截图快捷键与开机启动设置也持久保存。
 
 ## 窗口与外观
 

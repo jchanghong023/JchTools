@@ -92,19 +92,98 @@ pub fn load() -> Result<Option<PathBuf>, String> {
         .map_err(|e| format!("读取迁移后的配置失败：{e}"))
 }
 
-/// 先校验再提交；错误不会覆盖旧值。场景资产校验由使用方分别完成。
-pub fn save(path: &Path) -> Result<(), String> {
+/// XB-20/XB-21：两种来源各自保存，所有功能只读取一个当前来源。
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Source {
+    Custom,
+    Downloaded,
+}
+impl Source {
+    fn key(self) -> &'static str {
+        match self {
+            Self::Custom => "xberg_custom_directory",
+            Self::Downloaded => "xberg_downloaded_directory",
+        }
+    }
+    fn value(self) -> &'static str {
+        match self {
+            Self::Custom => "custom",
+            Self::Downloaded => "downloaded",
+        }
+    }
+}
+
+#[derive(Clone, Debug)]
+pub struct Settings {
+    pub source: Source,
+    pub custom: Option<PathBuf>,
+    pub downloaded: Option<PathBuf>,
+}
+
+/// 兼容旧 SQLite 与文本配置；失效路径仍保留供用户修复。
+pub fn settings() -> Result<Settings, String> {
+    let legacy = load()?;
+    let db = open(&state_dir()?)?;
+    let read = |key: &str| -> Result<Option<String>, String> {
+        db.query_row(
+            "SELECT value FROM app_settings WHERE key=?1",
+            [key],
+            |row| row.get(0),
+        )
+        .optional()
+        .map_err(|e| format!("读取 Xberg 配置失败：{e}"))
+    };
+    let source = match read("xberg_source")?.as_deref() {
+        None | Some("custom") => Source::Custom,
+        Some("downloaded") => Source::Downloaded,
+        Some(_) => return Err("保存的 Xberg 来源无效，请重新选择".into()),
+    };
+    Ok(Settings {
+        source,
+        custom: read(Source::Custom.key())?
+            .map(PathBuf::from)
+            .or_else(|| (source == Source::Custom).then_some(legacy).flatten()),
+        downloaded: read(Source::Downloaded.key())?.map(PathBuf::from),
+    })
+}
+
+pub fn select(source: Source) -> Result<(), String> {
+    let config = settings()?;
+    let path = match source {
+        Source::Custom => config.custom,
+        Source::Downloaded => config.downloaded,
+    }
+    .ok_or("该来源尚无已保存的目录")?;
+    save_source(source, &path)
+}
+
+/// 目录与来源在同一 SQLite 事务内落盘，失败不改写有效配置。
+pub fn save_source(source: Source, path: &Path) -> Result<(), String> {
     if !path.is_absolute() || !path.is_dir() || !path.join("xberg.exe").is_file() {
         return Err("请选择包含 xberg.exe 的有效绝对目录".into());
     }
     let path = std::fs::canonicalize(path).map_err(|e| format!("解析 Xberg 目录失败：{e}"))?;
     let text = path.to_str().ok_or("Xberg 路径无法编码为 Unicode")?;
-    open(&state_dir()?)?.execute(
-        "INSERT INTO app_settings(key,value) VALUES('xberg_directory',?1) ON CONFLICT(key) DO UPDATE SET value=excluded.value", [text])
-        .map_err(|e| format!("保存 Xberg 配置到 SQLite 失败：{e}"))?;
-    Ok(())
+    let mut db = open(&state_dir()?)?;
+    let tx = db.transaction().map_err(|e| e.to_string())?;
+    // 切到下载来源前，把旧版唯一目录保留为用户目录。
+    tx.execute("INSERT OR IGNORE INTO app_settings(key,value) SELECT 'xberg_custom_directory',value FROM app_settings WHERE key='xberg_directory' AND NOT EXISTS(SELECT 1 FROM app_settings WHERE key='xberg_source')", [])
+        .map_err(|e| e.to_string())?;
+    for (key, value) in [
+        (source.key(), text),
+        ("xberg_source", source.value()),
+        ("xberg_directory", text),
+    ] {
+        tx.execute("INSERT INTO app_settings(key,value) VALUES(?1,?2) ON CONFLICT(key) DO UPDATE SET value=excluded.value", [key, value])
+            .map_err(|e| format!("保存 Xberg 配置失败：{e}"))?;
+    }
+    tx.commit().map_err(|e| format!("提交 Xberg 配置失败：{e}"))
+}
+
+pub fn save(path: &Path) -> Result<(), String> {
+    save_source(Source::Custom, path)
 }
 
 pub fn required() -> Result<PathBuf, String> {
-    load()?.ok_or_else(|| "尚未配置 Xberg：请在转 Markdown 或截图 OCR 页保存共享运行目录".into())
+    load()?.ok_or_else(|| "尚未配置 Xberg：请在设置页下载 Xberg 或保存已有目录".into())
 }
