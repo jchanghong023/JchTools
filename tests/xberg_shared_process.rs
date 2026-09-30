@@ -1,5 +1,7 @@
 #![allow(clippy::unwrap_used)]
 //! 覆盖 XB-14/XB-15/XB-17：真实代理进程及管道，模拟引擎（不代表真实模型验收）。
+
+mod common;
 use jchtools::{
     markdown_document::{self, Deadline},
     xberg_runtime,
@@ -28,17 +30,38 @@ fn prepare(root: &Path) {
     std::fs::write(root.join("short.txt"), "document").unwrap();
 }
 
-struct Broker(u64);
-impl Drop for Broker {
+/// 测试守卫：同时强制结束本测试启动的共享代理与引擎。引擎是代理的子进程，
+/// 但 fixture 引擎可能经句柄继承与代理脱钩，只杀代理会留下占住会话单引擎
+/// 执法的孤儿（生产引擎 run53.1 已按 P1 随 stdio 断开自退，此处兜底测试进程）。
+struct SharedProcess {
+    broker_pid: u64,
+    engine_pid: Option<u64>,
+}
+impl Drop for SharedProcess {
     fn drop(&mut self) {
         let _ = Command::new("taskkill")
-            .args(["/PID", &self.0.to_string(), "/F"])
+            .args(["/PID", &self.broker_pid.to_string(), "/F"])
             .output();
+        if let Some(pid) = self.engine_pid {
+            let _ = Command::new("taskkill")
+                .args(["/PID", &pid.to_string(), "/F"])
+                .output();
+        }
     }
 }
 
 #[test]
 fn documents_reuse_process_and_snapshot_finishes_during_document() {
+    // 会话锁：与其他引擎测试二进制互斥（生产语义每会话至多一个 Xberg）。
+    // 只在非重入分支加锁/清场：重入子进程的父进程正持有锁，子进程再抢会互相等待。
+    let session = if std::env::var_os("JCHTOOLS_SHARED_CLIENT_ROOT").is_none() {
+        Some(common::session_lock())
+    } else {
+        None
+    };
+    if session.is_some() {
+        common::cleanup_stray_engines();
+    }
     if let Some(root) = std::env::var_os("JCHTOOLS_SHARED_CLIENT_ROOT") {
         let response = xberg_runtime::request(
             Path::new(&root),
@@ -56,6 +79,31 @@ fn documents_reuse_process_and_snapshot_finishes_during_document() {
     let temp = tempfile::tempdir().unwrap();
     let root = temp.path();
     prepare(root);
+    // 引擎获取等待：每登录会话只允许一个 Xberg（进程扫描执法）。会话锁已保证
+    // 与其他测试二进制互斥；若仍遇到「已有 Xberg」（残留孤儿），对拒绝做有界
+    // 重试。忙碌应答携带的是占用者 pid，守卫只从成功应答构造。
+    let session_deadline = Instant::now() + Duration::from_secs(60);
+    let state = loop {
+        let response = xberg_runtime::request(
+            root,
+            json!({"command":"snapshot_state"}),
+            Duration::from_secs(15),
+            &AtomicBool::new(false),
+        )
+        .unwrap();
+        let busy = response["ok"] == false
+            && response["error"]
+                .as_str()
+                .is_some_and(|error| error.contains("已有 Xberg"));
+        if !busy {
+            break response;
+        }
+        assert!(
+            Instant::now() < session_deadline,
+            "会话被既有 Xberg 占用超时（残留引擎未退出）：{response}"
+        );
+        std::thread::sleep(Duration::from_millis(500));
+    };
     // 同时抢占初始连接：代理可能启动竞争，但只有一个代理可创建引擎。
     let directory = root.to_path_buf();
     let concurrent = std::thread::spawn(move || {
@@ -67,14 +115,10 @@ fn documents_reuse_process_and_snapshot_finishes_during_document() {
         )
         .unwrap()
     });
-    let state = xberg_runtime::request(
-        root,
-        json!({"command":"snapshot_state"}),
-        Duration::from_secs(15),
-        &AtomicBool::new(false),
-    )
-    .unwrap();
-    let _broker = Broker(state["jchtools_broker_pid"].as_u64().unwrap());
+    let _shared = SharedProcess {
+        broker_pid: state["jchtools_broker_pid"].as_u64().unwrap(),
+        engine_pid: state["jchtools_xberg_pid"].as_u64(),
+    };
     assert_eq!(state["ok"], true, "代理启动失败：{state}");
     assert_eq!(
         concurrent.join().unwrap()["jchtools_xberg_pid"],
