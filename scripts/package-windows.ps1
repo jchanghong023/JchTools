@@ -131,6 +131,9 @@ Copy-Item -LiteralPath 'README.md','LICENSE','THIRD_PARTY_NOTICES.md','Cargo.loc
 Copy-Item -LiteralPath 'docs' -Destination $folder -Recurse
 Copy-Item -LiteralPath 'scripts\launch-software.cmd' -Destination $folder
 # Collect license texts from the exact resolved dependency graph, not a guessed static list.
+# cargo 的 stdout 是 UTF-8；中文 Windows 默认用 ANSI 代码页解码会破坏
+# 非 ASCII 的 crate 描述，进而让 ConvertFrom-Json 在半截字符上失败。
+[Console]::OutputEncoding = [System.Text.Encoding]::UTF8
 $metadataRaw = & cargo metadata --locked --format-version 1 @extra
 if ($LASTEXITCODE -ne 0) {throw 'Unable to enumerate dependency notices.'}
 $metadata = ($metadataRaw | Out-String) | ConvertFrom-Json
