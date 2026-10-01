@@ -99,8 +99,8 @@ INFERENCE_REQUIRED = (
 # T-28 / 附录 A 的旧项目与旧缓存前置：旧目录仍在即未满足「删除旧项目后独立运行」。
 OLD_PROJECT_DIR = Path(r"D:\code1111111111\all2markdown")
 
-# 转 Markdown 页自上而下的「选择目录…」行数：运行目录 / 输入 / 输出。
-CONVERT_ROW_COUNT = 3
+# 转 Markdown 页自上而下的「选择目录…」行数：输入 / 输出（Xberg 目录在设置页，XB-20）。
+CONVERT_ROW_COUNT = 2
 
 
 def _old_cache_candidates() -> list[Path]:
@@ -1414,7 +1414,7 @@ def _wait_start_ready(window: WindowSpecification, timeout: float) -> bool:
 
 
 def _convert_directory_rows(window: WindowSpecification) -> list[BaseWrapper]:
-    """转 Markdown 页自上而下的三行「选择目录…」按钮：运行目录 / 输入 / 输出."""
+    """转 Markdown 页自上而下的两行「选择目录…」按钮：输入 / 输出（Xberg 目录在设置页，XB-20）."""
     buttons = [b for b in window.descendants(control_type="Button") if (b.window_text() or "") == "选择目录…"]
     buttons.sort(key=lambda b: b.rectangle().top)
     return buttons
@@ -1499,10 +1499,10 @@ def drive_conversion(exe: Path, input_dir: Path, output_dir: Path, *, stop_after
         _click_button(window, "转 Markdown")
         rows = _convert_directory_rows(window)
         if len(rows) < CONVERT_ROW_COUNT:
-            message = f"转 Markdown 页「选择目录…」按钮不足三行（实得 {len(rows)}）"
+            message = f"转 Markdown 页「选择目录…」按钮不足两行（实得 {len(rows)}）"
             return GuiRun([], _window_texts(window), message)
-        _set_row_edit(window, rows[1], str(input_dir))
-        _set_row_edit(window, rows[2], str(output_dir))
+        _set_row_edit(window, rows[0], str(input_dir))
+        _set_row_edit(window, rows[1], str(output_dir))
         if not _wait_start_ready(window, READINESS_TIMEOUT):
             message = "「开始转换」始终未就绪（组件未初始化或就绪检查失败）"
             return GuiRun([], _window_texts(window), message)
@@ -1672,6 +1672,8 @@ def _gui_smoke_stages() -> tuple[tuple[str, ...], str | None]:
         [sys.executable, str(GUI_SMOKE), "--list-stages"],
         capture_output=True,
         text=True,
+        encoding="utf-8",
+        errors="replace",
         check=False,
     )
     if done.returncode != 0:
@@ -1683,8 +1685,31 @@ def _gui_smoke_stages() -> tuple[tuple[str, ...], str | None]:
 
 
 def _delegate_stage(stage: str, exe: Path, env_extra: dict[str, str] | None = None) -> Outcome:
-    argv = [sys.executable, str(GUI_SMOKE), "--exe", str(exe), "--stages", stage]
-    done = subprocess.run(argv, capture_output=True, text=True, check=False, env=os.environ | (env_extra or {}))
+    # gui_smoke 的 main() 无条件校验数据目录存在；本入口只委托 S1/S5 这类不读
+    # 数据集的阶段，提供一次性空目录即可通过校验（S2-S4 数据阶段不经此处）。
+    scratch_data = SCRATCH_ROOT / "gui-smoke-data"
+    scratch_data.mkdir(parents=True, exist_ok=True)
+    argv = [
+        sys.executable,
+        str(GUI_SMOKE),
+        "--exe",
+        str(exe),
+        "--data",
+        str(scratch_data),
+        "--stages",
+        stage,
+    ]
+    # 子进程输出按 UTF-8 强制解码：GUI 及其内部子进程会向继承的捕获管道写
+    # 本地化（GBK）诊断文本，按默认码表或严格 UTF-8 都可能解码失败。
+    done = subprocess.run(
+        argv,
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+        errors="replace",
+        check=False,
+        env=os.environ | (env_extra or {}),
+    )
     tail = "\n".join(((done.stdout or "") + (done.stderr or "")).splitlines()[-8:])
     if done.returncode == 0:
         return Outcome(STATUS_OK, details=[tail] if tail else [])
@@ -2001,7 +2026,13 @@ def _run_gui_ref(item: Item, ctx: Context) -> Outcome:
     pending = _asset_precondition(ctx, item)
     if pending:
         return Outcome(STATUS_NOT_RUN, pending)
-    return _delegate_stage(item.stage, target)
+    env_extra: dict[str, str] | None = None
+    if item.stage == "S5" and not os.environ.get("JCHTOOLS_S5_MEDIA"):
+        # S5 需要真实媒体样本以观察运行态；默认用夹具目录自带的真实中文视频。
+        media = ctx.fixtures_dir / "video-to-notes-intro-zh.mp4"
+        if media.is_file():
+            env_extra = {"JCHTOOLS_S5_MEDIA": str(media)}
+    return _delegate_stage(item.stage, target, env_extra)
 
 
 def _run_c01_installed_scan(item: Item, ctx: Context) -> Outcome:
@@ -2054,9 +2085,16 @@ def _run_c03_unconfigured(item: Item, ctx: Context) -> Outcome:
         result.details.insert(0, f"{item.item_id} 未配置状态下的 S1 启动未通过")
         return result
     downloaded = [str(path.relative_to(scratch_assets)) for path in scratch_assets.rglob("*")]
+    # app-settings/config.sqlite3 是 XB-18 应用设置库的隔离落位（debug 下
+    # JCHTOOLS_MARKDOWN_TEST_ASSET_ROOT 同时隔离设置目录，见 src/xberg_settings.rs
+    # state_dir），首启创建属正常行为；本项断言的是「不自动下载转换资产」。
+    downloaded = [path for path in downloaded if not path.startswith("app-settings")]
     if downloaded:
         return Outcome(STATUS_FAILED, f"未配置启动即写入/下载资产目录：{downloaded[:8]}")
-    return Outcome(STATUS_OK, details=[f"{item.item_id} 未配置启动正常退出，资产根目录零写入（无自动下载）"])
+    return Outcome(
+        STATUS_OK,
+        details=[f"{item.item_id} 未配置启动正常退出，资产目录仅新建隔离设置库（XB-18），无资产下载"],
+    )
 
 
 def _run_c04_offline(item: Item, ctx: Context) -> Outcome:
