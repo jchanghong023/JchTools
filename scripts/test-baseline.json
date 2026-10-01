@@ -4420,6 +4420,13 @@
     },
     {
       "file": "tests/xberg_shared_process.rs",
+      "name": "broker_does_not_hold_client_capture_pipes",
+      "ignored": false,
+      "cfg": null,
+      "body": "a482a75d41415cbd"
+    },
+    {
+      "file": "tests/xberg_shared_process.rs",
       "name": "documents_reuse_process_and_snapshot_finishes_during_document",
       "ignored": false,
       "cfg": null,
