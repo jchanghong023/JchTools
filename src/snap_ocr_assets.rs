@@ -123,7 +123,7 @@ fn test_asset_root_override() -> Option<PathBuf> {
 
 /// 本功能资产根目录：用户状态目录下的 snap-ocr/（模型、字体与 worker 的缓存落盘
 /// 属于 O-06 明确允许的资产写入，与截图/识别内容无关）。回退链共用
-/// [`crate::asset_util::state_dir_asset_root`]。
+/// `asset_util::state_dir_asset_root`（包内私有助手）。
 pub fn asset_root() -> PathBuf {
     if let Some(path) = test_asset_root_override() {
         return path;
