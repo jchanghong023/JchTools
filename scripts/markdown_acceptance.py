@@ -637,7 +637,7 @@ def _synth_pptx_multi_images(target: Path, _fixtures_dir: Path) -> SynthResult:
         media = {f"image{index}.png": _token_png(f"IMG-{index:02d}-TOKEN") for index in range(1, 7)}
         pics = "".join(_pic_xml(index, f"rId{index}", index - 1) for index in range(1, 7))
         rels = [(f"rId{index}", f"image{index}.png") for index in range(1, 7)]
-        _build_pptx(target, "pptx_multi_images.pptx", _slide_xml(pics), rels, media)
+        _build_pptx(target / "pptx_multi_images.pptx", _slide_xml(pics), rels, media)
     except (OSError, ValueError, zipfile.BadZipFile) as exc:
         return SynthResult([], f"构造 A02 PPTX 失败：{exc}")
     return SynthResult(["pptx_multi_images.pptx"])
@@ -648,7 +648,7 @@ def _synth_pptx_shared_media(target: Path, _fixtures_dir: Path) -> SynthResult:
     try:
         media = {"image1.png": _token_png("SHARED-MEDIA-TOKEN")}
         pics = _pic_xml(2, "rId10", 0) + _pic_xml(3, "rId10", 1)
-        _build_pptx(target, "pptx_shared_media.pptx", _slide_xml(pics), [("rId10", "image1.png")], media)
+        _build_pptx(target / "pptx_shared_media.pptx", _slide_xml(pics), [("rId10", "image1.png")], media)
     except (OSError, ValueError, zipfile.BadZipFile) as exc:
         return SynthResult([], f"构造 A03 PPTX 失败：{exc}")
     return SynthResult(["pptx_shared_media.pptx"])
@@ -659,7 +659,7 @@ def _synth_pptx_descr_no_ocr(target: Path, _fixtures_dir: Path) -> SynthResult:
     try:
         media = {"image1.png": _token_png("")}
         pics = _pic_xml(2, "rId10", 0, descr="DESCR-NO-OCR-TOKEN")
-        _build_pptx(target, "pptx_descr_no_ocr.pptx", _slide_xml(pics), [("rId10", "image1.png")], media)
+        _build_pptx(target / "pptx_descr_no_ocr.pptx", _slide_xml(pics), [("rId10", "image1.png")], media)
     except (OSError, ValueError, zipfile.BadZipFile) as exc:
         return SynthResult([], f"构造 A09 PPTX 失败：{exc}")
     return SynthResult(["pptx_descr_no_ocr.pptx"])
@@ -720,7 +720,7 @@ def _synth_pptx_runs_fields(target: Path, _fixtures_dir: Path) -> SynthResult:
         media = {"image1.png": _token_png("A08-NEIGHBOR")}
         pics = _pic_xml(2, "rId10", 0)
         slide = _slide_xml(pics + runs)
-        _build_pptx(target, "pptx_runs_fields.pptx", slide, [("rId10", "image1.png")], media)
+        _build_pptx(target / "pptx_runs_fields.pptx", slide, [("rId10", "image1.png")], media)
     except (OSError, ValueError, zipfile.BadZipFile) as exc:
         return SynthResult([], f"构造 A08 PPTX 失败：{exc}")
     return SynthResult(["pptx_runs_fields.pptx"])
