@@ -2085,10 +2085,25 @@ def _run_c03_unconfigured(item: Item, ctx: Context) -> Outcome:
         result.details.insert(0, f"{item.item_id} 未配置状态下的 S1 启动未通过")
         return result
     downloaded = [str(path.relative_to(scratch_assets)) for path in scratch_assets.rglob("*")]
-    # app-settings/config.sqlite3 是 XB-18 应用设置库的隔离落位（debug 下
-    # JCHTOOLS_MARKDOWN_TEST_ASSET_ROOT 同时隔离设置目录，见 src/xberg_settings.rs
-    # state_dir），首启创建属正常行为；本项断言的是「不自动下载转换资产」。
-    downloaded = [path for path in downloaded if not path.startswith("app-settings")]
+
+    # XB-18 应用设置库的隔离落位（debug 下 JCHTOOLS_MARKDOWN_TEST_ASSET_ROOT 同时
+    # 隔离设置目录，见 src/xberg_settings.rs state_dir），首启创建属正常行为；本项
+    # 断言的是「不自动下载转换资产」。豁免必须收窄到设置库与代理锁文件本身：
+    # download_runtime 的下载基目录恰为 state_dir()/xberg-downloads
+    # （src/markdown_assets.rs），即 app-settings/xberg-downloads/ 也落在设置目录
+    # 之下——整棵子树豁免会让「未配置即自动下载」回归假通过（e2e 审查确认项）。
+    def _is_settings_artifact(path: str) -> bool:
+        posix = path.replace(os.sep, "/")
+        if posix == "app-settings":
+            return True
+        name = posix.rsplit("/", 1)[-1]
+        return (
+            name == "config.sqlite3"
+            or name.startswith("config.sqlite3-")
+            or (name.startswith("xberg-") and name.endswith(".lock"))
+        )
+
+    downloaded = [path for path in downloaded if not (path.startswith("app-settings") and _is_settings_artifact(path))]
     if downloaded:
         return Outcome(STATUS_FAILED, f"未配置启动即写入/下载资产目录：{downloaded[:8]}")
     return Outcome(
