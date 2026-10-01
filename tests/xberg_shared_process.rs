@@ -8,6 +8,7 @@ use jchtools::{
 };
 use serde_json::json;
 use std::{
+    os::windows::process::CommandExt,
     path::Path,
     process::Command,
     sync::{
@@ -36,6 +37,102 @@ fn prepare(root: &Path) {
 struct SharedProcess {
     broker_pid: u64,
     engine_pid: Option<u64>,
+}
+
+/// 代理是否仍存活（tasklist 查询失败视为存活，交由后续超时兜底）。
+fn process_alive(pid: u64) -> bool {
+    Command::new("tasklist")
+        .args(["/FI", &format!("PID eq {pid}"), "/NH"])
+        .output()
+        .map_or(true, |output| {
+            String::from_utf8_lossy(&output.stdout).contains(&pid.to_string())
+        })
+}
+
+/// 覆盖 U-12 / XB-17：共享代理不得持有客户端的捕获管道。
+///
+/// 缺陷回归（e2e-20261001-1）：Rust std 在 Windows 上即使把子进程 stdio 全部
+/// 置为 null，CreateProcess 仍按可继承句柄链把祖父进程（cargo / PowerShell 的
+/// `& cmd 2>&1` 捕获）的匿名管道写端传给代理；代理常驻期间上层捕获永远等不到
+/// EOF，acceptance.ps1 的 cargo-test 阶段因此悬挂 40 分钟以上。修复要求代理
+/// 启动即关闭继承的管道句柄。本测试用 re-exec 还原三层结构：测试进程捕获
+/// mid 的 stdout，mid 以与运行时 connect() 相同的形状 spawn 代理后退出；
+/// 断言 EOF 在 mid 退出后很快到达，且代理当时仍然存活（提前退出视为被
+/// 既有引擎占用，按既有测试纪律清场后有界重试）。
+#[test]
+fn broker_does_not_hold_client_capture_pipes() {
+    if std::env::var("JT_XBERG_PIPE_MID").is_ok() {
+        // mid 层：与 xberg_runtime_windows::connect() 相同的 spawn 形状。
+        // 代理必须比 mid 活得久（常驻语义）：不 wait、不 kill，pid 交外层清理。
+        #[allow(clippy::zombie_processes)]
+        let broker = Command::new(std::env::var("JCHTOOLS_TEST_BROKER_EXE").unwrap())
+            .arg("--xberg-broker")
+            .creation_flags(0x0800_0000)
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .spawn()
+            .unwrap();
+        std::fs::write(
+            std::env::var("JT_XBERG_MID_PIDFILE").unwrap(),
+            broker.id().to_string(),
+        )
+        .unwrap();
+        std::thread::sleep(Duration::from_secs(1));
+        return;
+    }
+    use std::{io::Read, sync::mpsc, thread};
+    let _session = common::session_lock();
+    let temp = tempfile::tempdir().unwrap();
+    let root = temp.path();
+    std::env::set_var("JCHTOOLS_TEST_STATE_DIR", root.join("state"));
+    std::env::set_var("JCHTOOLS_TEST_BROKER_EXE", env!("CARGO_BIN_EXE_JchTools"));
+    let pidfile = root.join("broker-pid.txt");
+    std::env::set_var("JT_XBERG_MID_PIDFILE", &pidfile);
+    let deadline = Instant::now() + Duration::from_secs(60);
+    loop {
+        common::cleanup_stray_engines();
+        let _ = std::fs::remove_file(&pidfile);
+        let mut mid = Command::new(std::env::current_exe().unwrap())
+            .args([
+                "--exact",
+                "broker_does_not_hold_client_capture_pipes",
+                "--nocapture",
+            ])
+            .env("JT_XBERG_PIPE_MID", "1")
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::null())
+            .stdin(std::process::Stdio::null())
+            .spawn()
+            .unwrap();
+        let mut output = mid.stdout.take().unwrap();
+        let (send, receive) = mpsc::channel();
+        thread::spawn(move || {
+            let mut buffer = String::new();
+            let _ = output.read_to_string(&mut buffer);
+            let _ = send.send(());
+        });
+        let eof_in_time = receive.recv_timeout(Duration::from_secs(8)).is_ok();
+        let _ = mid.wait();
+        let broker_pid = std::fs::read_to_string(&pidfile)
+            .ok()
+            .and_then(|text| text.trim().parse::<u64>().ok())
+            .unwrap_or(0);
+        if broker_pid != 0 && process_alive(broker_pid) {
+            let _ = Command::new("taskkill")
+                .args(["/PID", &broker_pid.to_string(), "/F"])
+                .output();
+            if eof_in_time {
+                // EOF 到达且代理仍常驻：句柄链已断开，缺陷修复成立。
+                return;
+            }
+        }
+        assert!(
+            Instant::now() < deadline,
+            "共享代理持有了客户端捕获管道（EOF 未在 mid 退出后到达）"
+        );
+        std::thread::sleep(Duration::from_millis(500));
+    }
 }
 impl Drop for SharedProcess {
     fn drop(&mut self) {

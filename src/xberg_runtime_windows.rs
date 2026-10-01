@@ -687,7 +687,38 @@ fn handle(pipe: File, engine: &Mutex<Option<Engine>>, stopping: &AtomicBool) -> 
     Ok(())
 }
 
+/// 代理是内部常驻进程，只经命名管道通信，不使用任何继承来的标准句柄。
+/// Windows 上 Rust std 即使把本进程 stdio 全部置为 null，CreateProcess 仍会沿
+/// 可继承句柄链把祖父进程（cargo / PowerShell 的 `& cmd 2>&1` 捕获）的匿名管道
+/// 写端带进本进程；代理常驻会让上层捕获永远等不到 EOF，测试与验收管线悬挂
+/// （回归：tests/xberg_shared_process.rs broker_does_not_hold_client_capture_pipes）。
+/// 此处仅在 serve() 最前执行：本进程尚未创建任何自有管道，std 句柄是 NUL
+/// 字符设备，能命中的只有继承来的管道。
+fn close_inherited_pipes() {
+    use windows_sys::Win32::Foundation::{GetHandleInformation, HANDLE};
+    use windows_sys::Win32::Storage::FileSystem::{GetFileType, FILE_TYPE_PIPE};
+    for value in (4usize..65536).step_by(4) {
+        // SAFETY: handle 只是本进程句柄表的探测值，转换本身无副作用。
+        let handle: HANDLE = value as HANDLE;
+        let mut flags = 0u32;
+        // SAFETY: 探测本进程句柄表中的值；无效值由返回 0 过滤，flags 是有效输出指针。
+        let known = unsafe { GetHandleInformation(handle, &raw mut flags) };
+        if known == 0 {
+            continue;
+        }
+        // SAFETY: handle 已被 GetHandleInformation 确认有效；GetFileType 只读句柄类型。
+        let file_type = unsafe { GetFileType(handle) };
+        if file_type != FILE_TYPE_PIPE {
+            continue;
+        }
+        // SAFETY: 关闭本进程内确认有效的继承管道句柄；此后不再有任何引用。
+        let closed = unsafe { CloseHandle(handle) };
+        debug_assert_ne!(closed, 0);
+    }
+}
+
 pub(super) fn serve() -> Result<(), String> {
+    close_inherited_pipes();
     let root = xberg_settings::state_dir()?;
     std::fs::create_dir_all(&root).map_err(|e| e.to_string())?;
     let lock = OpenOptions::new()
