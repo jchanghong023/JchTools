@@ -599,9 +599,8 @@ def _ensure_defaults(content_types: str, defaults: tuple[tuple[str, str], ...]) 
     return content_types
 
 
-def _build_pptx(  # noqa: PLR0913
-    target: Path,
-    name: str,
+def _build_pptx(
+    dest: Path,
     slide_xml: str,
     image_rels: list[tuple[str, str]],
     media: dict[str, bytes],
@@ -627,7 +626,7 @@ def _build_pptx(  # noqa: PLR0913
     members["ppt/slides/_rels/slide1.xml.rels"] = _slide_rels_xml(rels, layout_match.group(0)).encode("utf-8")
     for part, blob in media.items():
         members[f"ppt/media/{part}"] = blob
-    with zipfile.ZipFile(target / name, "w", zipfile.ZIP_DEFLATED) as archive:
+    with zipfile.ZipFile(dest, "w", zipfile.ZIP_DEFLATED) as archive:
         for member, blob in members.items():
             archive.writestr(member, blob)
 
@@ -673,8 +672,7 @@ def _synth_pptx_two_png_order(target: Path, _fixtures_dir: Path) -> SynthResult:
         # rels 列举 rId10→image1、rId11→image2；slide 先引用 rId11 再 rId10。
         pics = _pic_xml(2, "rId11", 0) + _pic_xml(3, "rId10", 1)
         _build_pptx(
-            target,
-            "pptx_two_png_order.pptx",
+            target / "pptx_two_png_order.pptx",
             _slide_xml(pics),
             [("rId10", "image1.png"), ("rId11", "image2.png")],
             media,
@@ -697,8 +695,7 @@ def _synth_pptx_svg(target: Path, _fixtures_dir: Path) -> SynthResult:
         media = {"image1.svg": svg.encode("utf-8"), "image2.png": _token_png("PNG-NEIGHBOR")}
         pics = _pic_xml(2, "rId10", 0) + _pic_xml(3, "rId11", 1)
         _build_pptx(
-            target,
-            "pptx_svg.pptx",
+            target / "pptx_svg.pptx",
             _slide_xml(pics),
             [("rId10", "image1.svg"), ("rId11", "image2.png")],
             media,
@@ -737,8 +734,7 @@ def _synth_pptx_undecodable_image(target: Path, _fixtures_dir: Path) -> SynthRes
         media = {"image1.png": broken, "image2.png": good}
         pics = _pic_xml(2, "rId10", 0) + _pic_xml(3, "rId11", 1)
         _build_pptx(
-            target,
-            "pptx_undecodable_image.pptx",
+            target / "pptx_undecodable_image.pptx",
             _slide_xml(pics),
             [("rId10", "image1.png"), ("rId11", "image2.png")],
             media,
