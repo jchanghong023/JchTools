@@ -60,8 +60,8 @@ DEFAULT_STAGES = "S1,S2,S3,S4"
 CONVERT_BUSY_TIMEOUT = 60  # 点击「开始转换」后等待「停止任务」出现的上限（秒）
 _S5_LAST_ATTEMPT = 2  # S5 重按「开始转换」的末次序号（共 3 次，0 起）
 CONVERT_STOP_TIMEOUT = 300  # 停止请求后等待「开始转换」恢复可用的上限（秒）
-# 转 Markdown 页「选择目录…」应有行数（Xberg 运行目录 / 输入 / 输出）。
-CONVERT_DIR_ROWS = 3
+# 转 Markdown 页「选择目录…」应有行数（输入 / 输出；Xberg 目录在设置页，XB-20）。
+CONVERT_DIR_ROWS = 2
 EXTRACT_ACK = "我已确认：成功原包及分卷永久删除（不可恢复）"
 ORGANIZE_ACK = "我已确认目录、规则及可能的永久删除行为（不可恢复）"
 
@@ -612,18 +612,18 @@ def goto_converter(window: WindowSpecification) -> None:
 
 
 def converter_directory_rows(window: WindowSpecification) -> list[BaseWrapper]:
-    """转 Markdown 页自上而下三行「选择目录…」按钮：Xberg 运行目录 / 输入 / 输出."""
+    """转 Markdown 页自上而下两行「选择目录…」按钮：输入 / 输出（Xberg 目录在设置页，XB-20）."""
     buttons = [b for b in window.descendants(control_type="Button") if (b.window_text() or "") == "选择目录…"]
     buttons.sort(key=lambda b: b.rectangle().top)
     if len(buttons) < CONVERT_DIR_ROWS:
-        msg = f"转 Markdown 页「选择目录…」按钮不足三行（实得 {len(buttons)}）"
+        msg = f"转 Markdown 页「选择目录…」按钮不足两行（实得 {len(buttons)}）"
         raise RuntimeError(msg)
     return buttons
 
 
 def set_converter_dirs(window: WindowSpecification, input_dir: str, output_dir: str) -> None:
     rows = converter_directory_rows(window)
-    for button, value in ((rows[1], input_dir), (rows[2], output_dir)):
+    for button, value in ((rows[0], input_dir), (rows[1], output_dir)):
         top = button.rectangle().top
         candidates = [
             edit
