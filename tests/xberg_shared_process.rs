@@ -391,3 +391,29 @@ fn broken_engine_is_replaced_and_batch_continues() {
     .unwrap_or_else(|error| panic!("T-23 连坐：断裂后下一个文件失败：{error}"));
     assert_eq!(second.markdown, "document\n");
 }
+
+/// 覆盖 T-18/T-24：引擎能力清单声称支持 fast、实际 extract 拒绝时，客户端
+/// 不得把该文件记为永久失败；按常规模式重试（全能力，严格强于快速模式），
+/// 并以日志留痕。真实批次（e2e-20261003-2）：Lander v1.4/v2 两份 200+ 页
+/// 文档因此失败。
+#[test]
+fn fast_mode_rejection_falls_back_to_normal() {
+    let _session = common::session_lock();
+    common::cleanup_stray_engines();
+    let temp = tempfile::tempdir().unwrap();
+    let root = temp.path();
+    prepare(root);
+    std::fs::write(root.join("nofast.txt"), "document").unwrap();
+    let result = markdown_document::convert(
+        &root.join("nofast.txt"),
+        root,
+        true,
+        &Deadline::new(Duration::from_secs(60)),
+    )
+    .unwrap_or_else(|error| panic!("快速模式被拒后必须按常规模式成功：{error}"));
+    assert_eq!(
+        result.markdown,
+        "document
+"
+    );
+}

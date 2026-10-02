@@ -82,18 +82,42 @@ pub fn convert(
         return Err(format!("Xberg 可执行文件不存在：{}", executable.display()));
     }
 
-    let response = crate::xberg_runtime::request(
+    // T-18/T-24 回归：引擎能力清单声称支持 fast、实际 extract 拒绝时，按常规
+    // 模式重试。常规模式能力严格强于快速模式（不关闭版面识别与图片 OCR），
+    // 不构成能力降级；拒绝与重试都落诊断日志（P-10）。回退后按实际模式输出，
+    // 不得保留「快速模式已关闭图片 OCR」的声明头冒充口径。
+    let mut actual_fast = fast;
+    let first = crate::xberg_runtime::request(
         runtime_dir,
         serde_json::json!({
             "command": "extract", "path": path, "mode": if fast { "fast" } else { "normal" }
         }),
         deadline.remaining(),
         &std::sync::atomic::AtomicBool::new(false),
-    )?;
-    let response = crate::xberg_runtime::checked(response)?;
+    );
+    let response = match first.and_then(crate::xberg_runtime::checked) {
+        Ok(response) => response,
+        Err(error) if error.contains("unsupported mode 'fast'") => {
+            tracing::warn!(
+                file = %path.display(),
+                "引擎拒绝快速模式（能力清单与实现不一致），按常规模式重试"
+            );
+            actual_fast = false;
+            let retry = crate::xberg_runtime::request(
+                runtime_dir,
+                serde_json::json!({
+                    "command": "extract", "path": path, "mode": "normal"
+                }),
+                deadline.remaining(),
+                &std::sync::atomic::AtomicBool::new(false),
+            )?;
+            crate::xberg_runtime::checked(retry)?
+        }
+        Err(error) => return Err(error),
+    };
     let value = serde_json::json!({"result": response["document"]});
     let mut document = build_document_output(&value)?;
-    if fast {
+    if actual_fast {
         document.markdown = format!(
             "> 注意：大文档快速模式已启用，已关闭版面识别、图片提取和图片 OCR。\n\n{}",
             document.markdown
