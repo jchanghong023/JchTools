@@ -5,7 +5,7 @@
 //! 本模块的层只收 `jchtools` target，性能层只收 `perf` target。
 //!
 //! 落点：状态目录 `logs/jchtools.log.<日期>`，按天轮转，保留最近
-//! [`RETENTION_DAYS`] 天（初始化时清理超期文件）。GUI 与 `--xberg-broker`
+//! 14 天（初始化时清理超期文件）。GUI 与 `--xberg-broker`
 //! 代理进程都各自初始化；任何初始化失败都安静退化为无日志，绝不影响业务。
 //! 初始化成功时同时接管 panic 钩子：panic 消息先写入日志再走默认输出。
 //!
