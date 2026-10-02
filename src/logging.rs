@@ -53,27 +53,57 @@ pub fn init(state_dir: &Path) -> Option<Guard> {
         .with_writer(writer)
         .with_filter(EnvFilter::try_new(FILTER).ok()?);
     // 全局 subscriber 只能有一个：已有则安静退化（try_init 而非 init，不 panic）。
-    // perf-tracing 启用时性能层与诊断层合并进同一个 registry，性能句柄一并持有。
-    #[cfg(feature = "perf-tracing")]
-    let (perf_layer, perf_worker) = match crate::perf::layer(state_dir) {
-        Some((layer, worker)) => (Some(layer), Some(worker)),
-        None => (None, None),
+    // perf-tracing 启用时性能层（target `perf`）与诊断层合并进同一 registry，
+    // 构造内联在单一表达式块中，让具体类型流动，不为层手写泛型约束。
+    let workers = {
+        #[cfg(feature = "perf-tracing")]
+        {
+            let perf_directory = state_dir.join(crate::perf::LOG_DIR);
+            let perf_parts = std::fs::create_dir_all(&perf_directory)
+                .ok()
+                .and_then(|()| {
+                    std::panic::catch_unwind(|| {
+                        tracing_appender::rolling::daily(
+                            &perf_directory,
+                            crate::perf::LOG_FILE_PREFIX,
+                        )
+                    })
+                    .ok()
+                })
+                .map(tracing_appender::non_blocking);
+            match perf_parts {
+                Some((perf_writer, perf_worker)) => {
+                    use tracing_subscriber::fmt::format::FmtSpan;
+                    let perf_layer = tracing_subscriber::fmt::layer()
+                        .compact()
+                        .with_ansi(false)
+                        .with_span_events(FmtSpan::CLOSE)
+                        .with_writer(perf_writer)
+                        .with_filter(
+                            tracing_subscriber::EnvFilter::try_new(crate::perf::FILTER).ok(),
+                        );
+                    let registry = tracing_subscriber::registry().with(layer).with(perf_layer);
+                    registry.try_init().ok().map(|()| vec![worker, perf_worker])
+                }
+                None => tracing_subscriber::registry()
+                    .with(layer)
+                    .try_init()
+                    .ok()
+                    .map(|()| vec![worker]),
+            }
+        }
+        #[cfg(not(feature = "perf-tracing"))]
+        {
+            tracing_subscriber::registry()
+                .with(layer)
+                .try_init()
+                .ok()
+                .map(|()| vec![worker])
+        }
     };
-    #[cfg(feature = "perf-tracing")]
-    let registry = tracing_subscriber::registry().with(layer).with(perf_layer);
-    #[cfg(not(feature = "perf-tracing"))]
-    let registry = tracing_subscriber::registry().with(layer);
-    registry.try_init().ok()?;
+    let workers = workers?;
     install_panic_hook();
     tracing::info!(pid = std::process::id(), "诊断日志已初始化（P-10）");
-    // 诊断层自己的写入线程必须持到进程退出；perf-tracing 下性能句柄一并持有。
-    #[cfg(feature = "perf-tracing")]
-    let workers = perf_worker
-        .into_iter()
-        .chain(std::iter::once(worker))
-        .collect::<Vec<_>>();
-    #[cfg(not(feature = "perf-tracing"))]
-    let workers = vec![worker];
     Some(Guard { _workers: workers })
 }
 
