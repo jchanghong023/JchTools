@@ -116,7 +116,8 @@ powershell -NoProfile -File .\scripts\package-windows.ps1   # 生成含 7-Zip �
 - **配置维度稳定**：单轮质量门内 toolchain、`RUSTFLAGS`/`CARGO_ENCODED_RUSTFLAGS`、`.cargo/config*`、`CARGO_TARGET_DIR` 保持不变；feature 模式 / target triple / profile 矩阵切换属门设计本身，但同一条门命令在修复循环与最终完整验证之间必须保持同一变体，门覆盖的维度集合不得缩小。
 - **磁盘清理顺序**：废弃 triple/profile 的整目录 → 旧 toolchain 产物 → 自建临时工具产物（如 `target/miri`）；当前有效增量缓存 MUST NOT 删除；feature 差异在 `target/` 内无独立目录，禁止按目录名/时间戳/体积猜测「旧 feature 缓存」，无法证明废弃的一律保留。
 - **timings 诊断**：构建耗时占主导时用 `cargo build --timings` 定位串行瓶颈（大 crate、build.rs、proc-macro、链接阶段），Top 阻塞单元与建议写入质量门报告；宿主机实时防护（如 Windows Defender 覆盖 `target/`）仅作为环境建议披露——不改系统设置、不据此跳过任何检查。
-- **性能打点与基准**：运行期耗时打点在 `src/perf.rs`，由默认关闭的 `perf-tracing` 特性控制（`cargo run --features perf-tracing` 启用；默认构建不引入 tracing 依赖、零开销）；日志落状态目录 `perf-logs/`、按天轮转，与界面运行日志（S-07）互不影响；span 名称与字段名是跨版本可比较口径，只增不改名、不改语义（清单见该文件头注释）。`tests/perf_probe.rs` 是默认 `#[ignore]` 的性能基准（`cargo test --release --test perf_probe -- --ignored --nocapture`，规模经 `JT_PERF_GROUPS` / `JT_PERF_COPIES` / `JT_PERF_EMPTY_DIRS` 调整）：只测耗时与计数、不断言具体秒数，不进入默认验收门。
+- **性能打点与基准**：运行期耗时打点在 `src/perf.rs`，由默认关闭的 `perf-tracing` 特性控制（`cargo run --features perf-tracing` 启用；诊断日志（P-10）使 tracing 依赖常开，本特性只门控性能打点代码与 `perf-logs` 层）；性能日志落状态目录 `perf-logs/`、按天轮转，与界面运行日志（S-07）及诊断日志互不影响；span 名称与字段名是跨版本可比较口径，只增不改名、不改语义（清单见该文件头注释）。
+- **诊断日志（P-10）**：`src/logging.rs` 常开初始化，GUI 与 `--xberg-broker` 代理进程的关键步骤告警与错误写入状态目录 `logs/`（按天轮转、保留 14 天、panic 入盘），覆盖进程间通信、网络出口与关键任务；只写本地盘、不上传、不含文件正文，初始化失败安静退化不影响业务。记录范围与边界以合同 P-10 为准。`tests/perf_probe.rs` 是默认 `#[ignore]` 的性能基准（`cargo test --release --test perf_probe -- --ignored --nocapture`，规模经 `JT_PERF_GROUPS` / `JT_PERF_COPIES` / `JT_PERF_EMPTY_DIRS` 调整）：只测耗时与计数、不断言具体秒数，不进入默认验收门。
 
 ## 4. 代码与界面实现约定
 
