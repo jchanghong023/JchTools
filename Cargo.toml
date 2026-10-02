@@ -37,7 +37,8 @@ rusqlite = { version = "0.32", features = ["bundled"] }
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
 sha2 = "0.10"
-ureq = { version = "=2.12.1", default-features = false, features = ["tls"] }
+# socks-proxy：Windows 系统代理的 socks= 条目（P-09）需要 ureq 的 SOCKS 支持。
+ureq = { version = "=2.12.1", default-features = false, features = ["tls", "socks-proxy"] }
 # 供 C-08 文件名 NFC 规范化使用。
 unicode-normalization = "0.1"
 uuid = { version = "1.16", features = ["v4", "serde"] }

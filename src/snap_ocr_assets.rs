@@ -796,38 +796,85 @@ fn download_stream(
     cancel: &AtomicBool,
     progress: &mut dyn FnMut(String),
 ) -> Result<(), String> {
-    let agent = ureq::builder()
+    // P-09：下载先经 Windows 系统手动代理（例外表内的目标直连）；经代理
+    // 连接失败时自动回退直连重试一次，直连同样失败才按原口径报错。
+    let proxy = crate::system_proxy::read();
+    let endpoint = proxy.endpoint_for_url(url);
+    match download_attempt(
+        url,
+        partial,
+        expected_size,
+        cancel,
+        progress,
+        endpoint.as_deref(),
+    ) {
+        Ok(()) => Ok(()),
+        Err((proxy_message, transport)) if endpoint.is_some() && transport => {
+            progress(
+                "System proxy connection failed, automatically falling back to direct retry"
+                    .to_string(),
+            );
+            download_attempt(url, partial, expected_size, cancel, progress, None).map_err(
+                |(direct_message, _)| {
+                    format!("Both system proxy and direct connection failed — system proxy: {proxy_message}; direct connection: {direct_message}")
+                },
+            )
+        }
+        Err((message, _)) => Err(message),
+    }
+}
+
+/// 单次下载尝试；失败元组第二项标记是否为传输层（连接 / 读取）失败，供
+/// P-09 的直连回退判定——HTTP 状态错误、取消与本地磁盘错误不触发回退。
+fn download_attempt(
+    url: &str,
+    partial: &Path,
+    expected_size: u64,
+    cancel: &AtomicBool,
+    progress: &mut dyn FnMut(String),
+    proxy: Option<&str>,
+) -> Result<(), (String, bool)> {
+    let mut builder = ureq::builder()
         .redirects(3)
         // 连接超时 + 单次读超时，整体时长由用户取消控制。
         .timeout_connect(Duration::from_secs(30))
         .timeout_read(Duration::from_secs(60))
-        .user_agent("JchTools-snap-ocr-assets/1")
-        .build();
-    let response = agent
-        .get(url)
-        .call()
-        .map_err(|error| format!("下载请求失败：{error}"))?;
+        .user_agent("JchTools-snap-ocr-assets/1");
+    if let Some(proxy_url) = proxy {
+        match ureq::Proxy::new(proxy_url) {
+            Ok(parsed) => builder = builder.proxy(parsed),
+            // 端点字符串由本仓库解析生成，正常不可能非法；异常时按直连
+            // 继续，不让代理问题阻塞下载（P-09 可用性优先）。
+            Err(error) => progress(format!("系统代理地址无法解析（{error}），本次直连")),
+        }
+    }
+    let agent = builder.build();
+    let response = agent.get(url).call().map_err(|error| match error {
+        ureq::Error::Transport(transport) => (format!("下载请求失败：{transport}"), true),
+        status @ ureq::Error::Status(..) => (format!("下载请求失败：{status}"), false),
+    })?;
     if !(200..300).contains(&response.status()) {
-        return Err(format!("下载请求返回 HTTP {}", response.status()));
+        return Err((format!("下载请求返回 HTTP {}", response.status()), false));
     }
     let mut reader = response.into_reader();
-    let mut output = File::create(partial).map_err(|error| format!("创建下载文件失败：{error}"))?;
+    let mut output =
+        File::create(partial).map_err(|error| (format!("创建下载文件失败：{error}"), false))?;
     let mut buffer = vec![0_u8; 1024 * 1024];
     let mut current = 0_u64;
     loop {
         if cancel.load(std::sync::atomic::Ordering::Acquire) {
             let _ = fs::remove_file(partial);
-            return Err("用户已取消初始化".to_string());
+            return Err(("用户已取消初始化".to_string(), false));
         }
         let read = reader
             .read(&mut buffer)
-            .map_err(|error| format!("读取下载数据失败：{error}"))?;
+            .map_err(|error| (format!("读取下载数据失败：{error}"), true))?;
         if read == 0 {
             break;
         }
         output
             .write_all(&buffer[..read])
-            .map_err(|error| format!("写入下载数据失败：{error}"))?;
+            .map_err(|error| (format!("写入下载数据失败：{error}"), false))?;
         current = current.saturating_add(read as u64);
         if expected_size > 0 {
             let percent = current
@@ -842,7 +889,7 @@ fn download_stream(
     }
     output
         .sync_all()
-        .map_err(|error| format!("同步下载文件失败：{error}"))?;
+        .map_err(|error| (format!("同步下载文件失败：{error}"), false))?;
     Ok(())
 }
 

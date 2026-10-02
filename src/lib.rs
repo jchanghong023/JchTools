@@ -25,6 +25,7 @@ pub mod process;
 pub mod registry;
 pub mod rules;
 pub mod snap_ocr_assets;
+pub mod system_proxy;
 pub mod xberg_runtime;
 pub mod xberg_settings;
 

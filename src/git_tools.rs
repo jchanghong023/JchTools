@@ -146,6 +146,18 @@ pub fn find_git() -> Result<PathBuf> {
 /// 运行一条 git 命令并捕获输出（无 shell；禁终端提示防无 tty 挂死；
 /// 认证经 credential manager 等 GUI 途径正常交互）。
 fn run_git(git: &Path, cwd: &Path, args: &[&str]) -> Result<CapturedOutput> {
+    run_git_with(git, cwd, args, &[], &[])
+}
+
+/// [`run_git`] 的底层形态：可附加环境变量与移除环境变量（P-09 的代理注入
+/// 与直连回退使用），其余行为一致。
+fn run_git_with(
+    git: &Path,
+    cwd: &Path,
+    args: &[&str],
+    extra_env: &[(&str, &str)],
+    remove_env: &[&str],
+) -> Result<CapturedOutput> {
     let mut command = Command::new(git);
     command
         .args(args)
@@ -156,7 +168,58 @@ fn run_git(git: &Path, cwd: &Path, args: &[&str]) -> Result<CapturedOutput> {
         // 否则含 `[...]` 等字符的合法 Windows 文件名会被 pathspec 的通配语义
         // 解释成字符类，导致 pathspec 不匹配而无限重试、或错误暂存兄弟文件。
         .env("GIT_LITERAL_PATHSPECS", "1");
+    for (key, value) in extra_env {
+        command.env(key, value);
+    }
+    for key in remove_env {
+        command.env_remove(key);
+    }
     process::run_with_timeout(&mut command, GIT_TIMEOUT)
+}
+
+/// P-09：网络类 git 命令（fetch / push）的统一入口。系统代理开启时注入
+/// 代理环境变量；命令失败且输出符合连接类失败特征（或整体超时）时，自动
+/// 回退直连重试一次——移除全部代理变量（含继承自用户环境的），直连仍
+/// 失败按原口径返回失败。系统代理关闭时不注入也不清除，行为与现状一致。
+fn run_git_network(
+    git: &Path,
+    cwd: &Path,
+    args: &[&str],
+    log: &dyn Fn(&str),
+) -> Result<CapturedOutput> {
+    let proxy_env = crate::system_proxy::read().git_env();
+    if proxy_env.is_empty() {
+        return run_git(git, cwd, args);
+    }
+    let injected: Vec<(&str, &str)> = proxy_env
+        .iter()
+        .map(|(key, value)| (key.as_str(), value.as_str()))
+        .collect();
+    let attempt = run_git_with(git, cwd, args, &injected, &[]);
+    let needs_direct_retry = match &attempt {
+        // 启动失败或超时：超时多因代理黑洞，直连重试值得一次；启动失败
+        // 重试代价仅毫秒级，同样无害。
+        Err(_) => true,
+        Ok(out) => {
+            if out.status.success() {
+                false
+            } else {
+                let text = format!("{}{}", output_text(&out.stderr), output_text(&out.stdout));
+                crate::system_proxy::network_failure_signature(&text)
+            }
+        }
+    };
+    if !needs_direct_retry {
+        return attempt;
+    }
+    log("经系统代理连接失败，自动回退直连重试");
+    run_git_with(
+        git,
+        cwd,
+        args,
+        &[],
+        &crate::system_proxy::GIT_PROXY_ENV_KEYS,
+    )
 }
 
 fn output_text(bytes: &[u8]) -> String {
@@ -549,7 +612,7 @@ enum PushOutcome {
 /// 一次 push 尝试（G-08：不带额外远程/分支参数，用已配置 upstream）。
 fn try_push(git: &Path, root: &Path, log: &dyn Fn(&str)) -> PushOutcome {
     log("git push");
-    let out = match run_git(git, root, &["push", "--porcelain"]) {
+    let out = match run_git_network(git, root, &["push", "--porcelain"], log) {
         Ok(out) => out,
         Err(error) => return PushOutcome::Retryable(format!("{error:#}")),
     };
@@ -601,7 +664,7 @@ fn fetch_and_merge(
     }
     ctx.shared.set_stage("pull/fetch");
     (ctx.log)(&format!("git fetch {remote} {upstream_branch}"));
-    let fetch = match run_git(git, root, &["fetch", remote, upstream_branch]) {
+    let fetch = match run_git_network(git, root, &["fetch", remote, upstream_branch], ctx.log) {
         Ok(out) => out,
         Err(error) => return MergeOutcome::Retryable(format!("{error:#}")),
     };
