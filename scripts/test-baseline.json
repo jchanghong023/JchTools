@@ -1332,6 +1332,13 @@
       "body": "d8ea21cc14902895"
     },
     {
+      "file": "src/logging.rs",
+      "name": "warns_and_errors_reach_disk_file",
+      "ignored": false,
+      "cfg": null,
+      "body": "7fafadd390aef3ef"
+    },
+    {
       "file": "src/markdown.rs",
       "name": "atomic_commit_refuses_existing_result",
       "ignored": false,
