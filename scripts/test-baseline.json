@@ -4515,6 +4515,13 @@
       "ignored": false,
       "cfg": null,
       "body": "4abadcac4dbf05f1"
+    },
+    {
+      "file": "tests/xberg_shared_process.rs",
+      "name": "fast_mode_rejection_falls_back_to_normal",
+      "ignored": false,
+      "cfg": null,
+      "body": "b4770d6481283f10"
     }
   ]
 }
