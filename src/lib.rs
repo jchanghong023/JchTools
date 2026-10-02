@@ -13,6 +13,7 @@ pub mod fsutil;
 pub mod git_tools;
 pub mod hash_cache;
 pub mod hashing;
+pub mod logging;
 pub mod markdown;
 pub mod markdown_assets;
 pub mod markdown_document;

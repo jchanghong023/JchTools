@@ -31,6 +31,10 @@ sha2 = "0.10"
 raw-window-handle = "0.6"
 # 截图字节经内存 PNG 编码后以 base64 传给本地 xberg 子进程（O-29：不落盘）。
 base64 = "0.22"
+# P-10：代理分支复用主包诊断日志；共享 runtime 模块内含 tracing 埋点。
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["fmt", "env-filter"] }
+tracing-appender = "0.2"
 
 [dev-dependencies]
 tempfile = "3.19"
@@ -63,6 +67,9 @@ windows-sys = { version = "0.59", features = [
 
 [lints.rust]
 warnings = "deny"
+# 共享模块 logging.rs 按 perf-tracing 特性合并性能层；本 crate 不设该特性，
+# 只声明其取值合法，避免 unexpected_cfgs 报错（层在该 crate 恒为 absent）。
+unexpected_cfgs = { level = "allow", check-cfg = ['cfg(feature, values("perf-tracing"))'] }
 
 [lints.clippy]
 pedantic = { level = "deny", priority = -1 }

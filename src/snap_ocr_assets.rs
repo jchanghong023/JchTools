@@ -763,10 +763,12 @@ where
             // 取消优先于重试语义：用户取消时不发重试提示，直接收场。
             ensure_not_cancelled(cancel)?;
             if attempt < 3 {
+                tracing::warn!(attempt, reason = %error, "资产下载中断，准备重试");
                 progress(format!("下载中断，准备重试（{attempt}/3）：{error}"));
                 let _ = fs::remove_file(partial);
                 continue;
             }
+            tracing::error!(reason = %error, "资产下载失败（重试耗尽）");
             let _ = fs::remove_file(partial);
             return Err(format!("下载资产失败：{error}"));
         }
@@ -777,10 +779,12 @@ where
                 return Ok(());
             }
             Err(error) if attempt < 3 => {
+                tracing::warn!(attempt, reason = %error, "资产校验失败，准备重试");
                 progress(format!("资产校验失败，准备重试（{attempt}/3）：{error}"));
                 let _ = fs::remove_file(partial);
             }
             Err(error) => {
+                tracing::error!(reason = %error, "资产校验失败（重试耗尽）");
                 let _ = fs::remove_file(partial);
                 return Err(format!("下载资产校验失败：{error}"));
             }
@@ -810,17 +814,31 @@ fn download_stream(
     ) {
         Ok(()) => Ok(()),
         Err((proxy_message, transport)) if endpoint.is_some() && transport => {
+            tracing::warn!(
+                proxy = proxy_message,
+                url = url,
+                "系统代理连接失败，按 P-09 自动回退直连重试"
+            );
             progress(
                 "System proxy connection failed, automatically falling back to direct retry"
                     .to_string(),
             );
             download_attempt(url, partial, expected_size, cancel, progress, None).map_err(
                 |(direct_message, _)| {
+                    tracing::error!(
+                        proxy = proxy_message,
+                        direct = direct_message,
+                        url = url,
+                        "系统代理与直连均失败"
+                    );
                     format!("Both system proxy and direct connection failed — system proxy: {proxy_message}; direct connection: {direct_message}")
                 },
             )
         }
-        Err((message, _)) => Err(message),
+        Err((message, _)) => {
+            tracing::error!(url = url, reason = message, "资产下载失败");
+            Err(message)
+        }
     }
 }
 

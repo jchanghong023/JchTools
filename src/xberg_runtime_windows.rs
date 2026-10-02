@@ -326,6 +326,7 @@ impl Engine {
         let mut child = command
             .spawn()
             .map_err(|e| format!("共享 Xberg 启动失败：{e}"))?;
+        tracing::info!(engine_pid = child.id(), "共享 Xberg 引擎已启动");
         let job = match Job::attach(&child) {
             Ok(job) => job,
             Err(error) => {
@@ -345,7 +346,8 @@ impl Engine {
             for request in incoming {
                 let result = IoDeadline::new(QUERY_TIMEOUT)
                     .and_then(|_guard| write_json(&mut stdin, &request));
-                if result.is_err() {
+                if let Err(error) = result {
+                    tracing::warn!(%error, "共享引擎 stdin 写入失败，通信断裂");
                     fail_pending(&writer_pending, &writer_broken);
                     break;
                 }
@@ -355,9 +357,17 @@ impl Engine {
         let reader_broken = Arc::clone(&broken);
         std::thread::spawn(move || {
             let mut reader = BufReader::new(stdout);
-            while let Ok(mut response) = read_json(&mut reader) {
+            loop {
+                let mut response = match read_json(&mut reader) {
+                    Ok(response) => response,
+                    Err(error) => {
+                        tracing::warn!(%error, "共享引擎响应读取失败，通信断裂");
+                        break;
+                    }
+                };
                 response = prune_forwarded_document(response);
                 let Some(id) = response["id"].as_str() else {
+                    tracing::warn!("共享引擎响应缺少 id，通信断裂");
                     break;
                 };
                 let sender = reader_pending
@@ -384,9 +394,11 @@ impl Engine {
         let (send, receive) = mpsc::channel();
         let mut pending = self.pending.lock().map_err(|_| "共享请求表异常")?;
         if self.broken.load(Ordering::Acquire) {
+            tracing::warn!(%id, "共享请求被拒绝：引擎通信已中断");
             return Err("共享 Xberg 通信已中断；不会为仍存活的引擎启动副本".into());
         }
         if pending.len() >= 64 || pending.contains_key(&id) {
+            tracing::warn!(%id, pending = pending.len(), "共享请求被拒绝：请求队列已满或 ID 重复");
             return Err("共享 Xberg 请求队列已满或 ID 重复".into());
         }
         let lane = match request["command"].as_str() {
@@ -395,6 +407,10 @@ impl Engine {
             _ => None,
         };
         if lane.is_some() && pending.values().any(|entry| entry.lane == lane) {
+            tracing::warn!(
+                lane = lane.unwrap_or("?"),
+                "共享请求被拒绝：同场景上一请求未结束"
+            );
             return Err("该场景的上一个请求尚未确认结束，请等待其终态；其他场景可继续使用".into());
         }
         pending.insert(id.clone(), PendingRequest { sender: send, lane });
@@ -454,6 +470,7 @@ fn reject_existing_engine() -> Result<(), String> {
 
 fn fail_pending(pending: &Pending, broken: &AtomicBool) {
     broken.store(true, Ordering::Release);
+    tracing::warn!("共享引擎通信断裂：在途请求全部按失败交付");
     if let Ok(mut entries) = pending.lock() {
         for (id, send) in entries.drain() {
             let _ = send.sender.send(json!({"id":id,"ok":false,"error_kind":"process_exited","error":"共享 Xberg 通信中断或进程退出"}));
@@ -589,10 +606,9 @@ fn create_pipe(name: &str) -> Result<File, String> {
         LocalFree(descriptor);
     }
     if raw == INVALID_HANDLE_VALUE {
-        return Err(format!(
-            "创建共享管道失败：{}",
-            std::io::Error::last_os_error()
-        ));
+        let os_error = std::io::Error::last_os_error();
+        tracing::error!(%os_error, "创建共享管道失败");
+        return Err(format!("创建共享管道失败：{os_error}"));
     }
     // SAFETY: 将新建管道句柄唯一所有权交给 File。
     Ok(unsafe { File::from_raw_handle(raw.cast()) })
@@ -657,6 +673,7 @@ fn handle(pipe: File, engine: &Mutex<Option<Engine>>, stopping: &AtomicBool) -> 
                 .map_err(|e| e.to_string())?
                 .is_some()
             {
+                tracing::warn!("共享 Xberg 引擎进程已退出");
                 slot.take();
             }
         }
@@ -668,6 +685,10 @@ fn handle(pipe: File, engine: &Mutex<Option<Engine>>, stopping: &AtomicBool) -> 
             .is_some_and(|engine| engine.broken.load(Ordering::Acquire));
         if broken {
             if let Some(mut dead) = slot.take() {
+                tracing::warn!(
+                    old_pid = dead.child.id(),
+                    "共享引擎通信断裂：终结旧引擎并重建（T-23）"
+                );
                 let _ = dead.child.kill();
                 let _ = dead.child.wait();
             }
@@ -725,7 +746,14 @@ fn handle(pipe: File, engine: &Mutex<Option<Engine>>, stopping: &AtomicBool) -> 
             response
         })
     })();
-    let mut response = response.unwrap_or_else(|error: String| json!({"id":request["id"],"ok":false,"error_kind":"shared_runtime","error":error}));
+    let mut response = response.unwrap_or_else(|error: String| {
+        tracing::warn!(
+            command = request["command"].as_str().unwrap_or("?"),
+            %error,
+            "共享代理请求失败"
+        );
+        json!({"id":request["id"],"ok":false,"error_kind":"shared_runtime","error":error})
+    });
     response["jchtools_broker_protocol"] = json!(BROKER_PROTOCOL);
     response["jchtools_broker_pid"] = json!(std::process::id());
     let _guard = IoDeadline::new(QUERY_TIMEOUT)?;
@@ -782,11 +810,21 @@ pub(super) fn serve() -> Result<(), String> {
         .map_err(|e| e.to_string())?;
     match lock.try_lock_exclusive() {
         Ok(()) => {}
-        Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => return Ok(()),
-        Err(e) => return Err(format!("共享引擎锁失败：{e}")),
+        Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {
+            tracing::info!("共享代理已在运行，本进程不重复启动");
+            return Ok(());
+        }
+        Err(e) => {
+            tracing::error!(%e, "共享引擎锁失败");
+            return Err(format!("共享引擎锁失败：{e}"));
+        }
     }
     let name = pipe_name()?;
-    background_allowed()?;
+    if let Err(error) = background_allowed() {
+        tracing::warn!(%error, "共享代理被托盘退出标记阻止");
+        return Err(error);
+    }
+    tracing::info!(pid = std::process::id(), pipe = %name, "共享代理开始监听");
     let engine: Arc<Mutex<Option<Engine>>> = Arc::new(Mutex::new(None));
     let stopping = Arc::new(AtomicBool::new(false));
     let watch_engine = engine.clone();
@@ -823,12 +861,18 @@ pub(super) fn serve() -> Result<(), String> {
         };
         // SAFETY: 读取本线程紧邻 API 调用的错误码。
         if connected == 0 && unsafe { GetLastError() } != ERROR_PIPE_CONNECTED {
+            // P-10：管道接受失败是 IPC 关键异常，必须落盘（含 Windows 错误码）。
+            // SAFETY: 与上一行读取同一错误码，两次调用之间没有任何其他 API。
+            let code = unsafe { GetLastError() };
+            tracing::warn!(code, "共享管道接受客户端连接失败");
             continue;
         }
         let engine = Arc::clone(&engine);
         let stopping = stopping.clone();
         std::thread::spawn(move || {
-            let _ = handle(pipe, &engine, &stopping);
+            if let Err(error) = handle(pipe, &engine, &stopping) {
+                tracing::warn!(%error, "共享代理请求处理失败");
+            }
         });
     }
 }

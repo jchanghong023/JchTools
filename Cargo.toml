@@ -16,9 +16,10 @@ build = "build.rs"
 [features]
 default = ["gui"]
 gui = ["dep:slint", "dep:slint-build", "dep:rfd", "dep:open"]
-# 性能耗时打点（默认关闭，长期保留）：只有显式启用才编译 tracing 依赖与打点代码。
+# 性能耗时打点（默认关闭，长期保留）：诊断日志（P-10，src/logging.rs）使 tracing
+# 依赖常开，本特性只控制性能打点代码与 perf-logs 层是否参与编译。
 # 启用方式：cargo run --features perf-tracing（日志落状态目录下的 perf-logs/，见 src/perf.rs）。
-perf-tracing = ["dep:tracing", "dep:tracing-subscriber", "dep:tracing-appender"]
+perf-tracing = []
 
 [dependencies]
 anyhow = "1.0"
@@ -47,10 +48,10 @@ zip = { version = "=2.4.2", default-features = false, features = ["deflate"] }
 slint = { version = "=1.17.1", optional = true, default-features = false, features = ["std", "compat-1-2", "backend-winit", "renderer-femtovg", "renderer-software", "accessibility"] }
 rfd = { version = "0.15", optional = true }
 open = { version = "5.3", optional = true }
-# 性能打点可选依赖：只在 perf-tracing 特性下进入依赖图（dep: 写法保证不额外产生同名 feature）。
-tracing = { version = "0.1", optional = true }
-tracing-subscriber = { version = "0.3", optional = true, features = ["fmt", "env-filter"] }
-tracing-appender = { version = "0.2", optional = true }
+# 诊断日志（P-10）与性能打点共用 tracing 基建；性能打点代码仍由 perf-tracing 特性门控。
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["fmt", "env-filter"] }
+tracing-appender = "0.2"
 
 [target.'cfg(windows)'.dependencies]
 windows-sys = { version = "0.59", features = ["Win32_Foundation", "Win32_System_Diagnostics_ToolHelp", "Win32_Globalization", "Win32_Security", "Win32_Security_Authorization", "Win32_Storage_FileSystem", "Win32_System_IO", "Win32_System_JobObjects", "Win32_System_Pipes", "Win32_System_Registry", "Win32_System_SystemInformation", "Win32_System_Threading", "Win32_UI_WindowsAndMessaging"] }

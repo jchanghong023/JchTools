@@ -15,6 +15,8 @@
 //! bin 目标只接收服务内部启动参数，不提供用户命令行产品。
 
 pub mod capture_win;
+#[path = "../../../src/logging.rs"]
+pub mod logging;
 pub mod result_window;
 pub mod service;
 mod shared_xberg;

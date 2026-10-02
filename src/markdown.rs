@@ -122,6 +122,14 @@ pub fn run(
     let supported = supported_formats(&options.groups)?;
     let plan = scan(options, &supported)?;
     let total = plan.items.len() + plan.summary.skipped_existing + plan.summary.skipped_duplicate;
+    tracing::info!(
+        input = %options.input_dir.display(),
+        output = %options.output_dir.display(),
+        files = plan.items.len(),
+        skipped_existing = plan.summary.skipped_existing,
+        skipped_duplicate = plan.summary.skipped_duplicate,
+        "转 Markdown 批次开始"
+    );
     events(Event::Started { total });
     let mut summary = plan.summary;
     let output_root = plan.output_root;
@@ -165,6 +173,11 @@ pub fn run(
             Ok(warnings) => {
                 let partial = !warnings.is_empty();
                 if partial {
+                    tracing::warn!(
+                        file = %item.relative.display(),
+                        warnings = %warnings.join("；"),
+                        "转换部分内容未提取"
+                    );
                     summary.partial += 1;
                 } else {
                     summary.success += 1;
@@ -182,6 +195,11 @@ pub fn run(
             }
             Err(message) => {
                 summary.failed += 1;
+                tracing::error!(
+                    file = %item.relative.display(),
+                    reason = %message,
+                    "转换单文件失败"
+                );
                 events(Event::FileFinished {
                     relative: item.relative.clone(),
                     success: false,
@@ -193,6 +211,15 @@ pub fn run(
     }
     // T-22/T-23：批结束或用户停止后不再发送请求，保留共享引擎及已加载模型。
     summary.stopped = cancel.load(AtomicOrdering::Relaxed);
+    tracing::info!(
+        success = summary.success,
+        partial = summary.partial,
+        failed = summary.failed,
+        skipped_existing = summary.skipped_existing,
+        skipped_duplicate = summary.skipped_duplicate,
+        stopped = summary.stopped,
+        "转 Markdown 批次结束"
+    );
     Ok(summary)
 }
 

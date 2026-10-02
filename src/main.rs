@@ -2,6 +2,11 @@
 //! JchTools 图形界面入口：全部界面组装在 `jchtools::gui`（保持 bin 为薄壳，便于测试）。
 fn main() {
     if std::env::args().nth(1).as_deref() == Some("--xberg-broker") {
+        // P-10：代理进程同样落盘诊断日志（IPC 与引擎生命周期的关键证据）。
+        let _log_guard = jchtools::xberg_settings::state_dir()
+            .ok()
+            .as_deref()
+            .and_then(jchtools::logging::init);
         if jchtools::xberg_runtime::serve().is_err() {
             std::process::exit(1);
         }

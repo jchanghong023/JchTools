@@ -5138,13 +5138,13 @@ pub fn run_with_engine_overrides(
     state.borrow_mut().engine_overrides = overrides;
     // 性能耗时打点（`perf-tracing` 特性，默认关闭）：日志写在状态目录的独立子目录里，
     // 测试注入状态目录时同样隔离在注入目录内。句柄绑到本函数作用域，退出前刷盘。
-    #[cfg(feature = "perf-tracing")]
-    let _perf_guard = {
+    // P-10：诊断日志常开；perf-tracing 启用时性能层由 logging::init 一并合并。
+    let _diagnostic_log_guard = {
         let directory = state.borrow().engine_overrides.as_ref().map_or_else(
             || crate::config::state_dir().ok(),
             |o| Some(o.state_dir.clone()),
         );
-        directory.as_deref().and_then(crate::perf::init)
+        directory.as_deref().and_then(crate::logging::init)
     };
     let (channel, receiver) = mpsc::sync_channel::<Event>(256);
     let out = EventSender::new(channel);

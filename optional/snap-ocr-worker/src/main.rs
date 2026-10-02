@@ -8,6 +8,11 @@ fn main() {
             println!("{{\"shared_xberg_protocol\":2,\"background_service_protocol\":1}}");
         }
         Some("--xberg-broker") => {
+            // P-10：代理进程落盘诊断日志（IPC 与引擎生命周期的关键证据）。
+            let _log_guard = snap_ocr_worker::xberg_settings::state_dir()
+                .ok()
+                .as_deref()
+                .and_then(snap_ocr_worker::logging::init);
             if snap_ocr_worker::xberg_runtime::serve().is_err() {
                 std::process::exit(1);
             }

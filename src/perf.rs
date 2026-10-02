@@ -58,6 +58,38 @@ macro_rules! perf_span {
 }
 pub(crate) use perf_span;
 
+/// 构造性能 layer（target `perf` 过滤），供 `logging::init` 合并进同一 registry。
+///
+/// 返回的 Guard 由调用方持有到进程退出前（与 [`init`] 的句柄语义相同）；
+/// 目录/文件建不出来时返回 `None`，安静退化为不打点。
+#[cfg(feature = "perf-tracing")]
+pub fn layer(
+    state_dir: &Path,
+) -> Option<(
+    tracing_subscriber::Layer<
+        tracing_subscriber::Registry,
+        tracing_subscriber::layer::Interest,
+        tracing::Dispatch,
+    >,
+    tracing_appender::non_blocking::WorkerGuard,
+)> {
+    use std::panic::catch_unwind;
+    use tracing_subscriber::{fmt::format::FmtSpan, EnvFilter, Layer};
+
+    let directory = state_dir.join(LOG_DIR);
+    std::fs::create_dir_all(&directory).ok()?;
+    let appender =
+        catch_unwind(|| tracing_appender::rolling::daily(&directory, LOG_FILE_PREFIX)).ok()?;
+    let (writer, worker) = tracing_appender::non_blocking(appender);
+    let layer = tracing_subscriber::fmt::layer()
+        .compact()
+        .with_ansi(false)
+        .with_span_events(FmtSpan::CLOSE)
+        .with_writer(writer)
+        .with_filter(EnvFilter::try_new(FILTER).ok()?);
+    Some((layer, worker))
+}
+
 /// 性能日志句柄：只负责把后台写入线程活到调用方作用域结束，届时缓冲落盘。
 #[cfg(feature = "perf-tracing")]
 pub struct Guard {

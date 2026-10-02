@@ -315,6 +315,12 @@ fn prepare_at_with(
             job.summary.scanned_bytes,
             job.summary.errors,
         );
+        tracing::info!(
+            scanned = job.summary.scanned,
+            bytes = job.summary.scanned_bytes,
+            errors = job.summary.errors,
+            "目录整理分析完成"
+        );
         Ok(TaskResult {
             directory: directory.clone(),
             summary: job.summary.clone(),
@@ -406,6 +412,12 @@ fn extract_run_with(
             job.summary.scanned,
             job.summary.archives_ok,
             job.summary.archives_failed,
+        );
+        tracing::info!(
+            scanned = job.summary.scanned,
+            ok = job.summary.archives_ok,
+            failed = job.summary.archives_failed,
+            "递归解压结束"
         );
         Ok(TaskResult {
             directory: directory.clone(),
@@ -1646,6 +1658,13 @@ pub fn apply(directory: &Path, context: TaskContext) -> Result<TaskResult> {
         job.summary.moved,
         job.summary.skipped,
         job.summary.errors,
+    );
+    tracing::info!(
+        deleted = job.summary.deleted,
+        moved = job.summary.moved,
+        skipped = job.summary.skipped,
+        errors = job.summary.errors,
+        "目录整理执行完成"
     );
     Ok(TaskResult {
         directory: directory.to_path_buf(),
