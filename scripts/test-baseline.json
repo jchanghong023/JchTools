@@ -2396,6 +2396,13 @@
       "body": "c94474b352ac6a08"
     },
     {
+      "file": "src/xberg_runtime_windows.rs",
+      "name": "prune_keeps_product_fields_and_strips_heavy_fields_recursively",
+      "ignored": false,
+      "cfg": null,
+      "body": "606db094a205d33d"
+    },
+    {
       "file": "tests/archive.rs",
       "name": "bzip2_wrapped_tar_extracts_through_the_named_intermediate_tar",
       "ignored": true,
@@ -4480,6 +4487,13 @@
       "ignored": false,
       "cfg": null,
       "body": "ff827be51cd71877"
+    },
+    {
+      "file": "tests/xberg_shared_process.rs",
+      "name": "broken_engine_is_replaced_and_batch_continues",
+      "ignored": false,
+      "cfg": null,
+      "body": "becb1c57e2b1be06"
     },
     {
       "file": "tests/xberg_shared_process.rs",
