@@ -74,7 +74,7 @@ STATUS_NOT_RUN = "NOT RUN"
 
 # 与 src/markdown_assets.rs 的常量同口径：资产根目录、固定版本与成员相对路径。
 DATA_DIRECTORY = "markdown-assets"
-XBERG_TAG = "v2026.9.29-0212-run49.1"
+XBERG_TAG = "v2026.10.2-0920-run54.1"
 XBERG_ARCHIVE_URL = (
     f"https://github.com/jchanghong023/xberg/releases/download/{XBERG_TAG}/xberg-cli-x86_64-pc-windows-msvc.zip"
 )

@@ -4,9 +4,9 @@
 
 use crate::asset_util::{
     atomic_replace_dir, cleanup_stale_staging_dirs, ensure_not_cancelled, finalize_staging,
-    require_component_members, resolve_xberg_component, state_dir_asset_root, valid_component_tag,
-    validate_relative_path, verify_file, verify_inference_members_for_scenario, AssetDownloader,
-    InferenceManifest,
+    require_component_members, require_inference_members_for_scenario, resolve_xberg_component,
+    state_dir_asset_root, valid_component_tag, validate_relative_path, verify_file,
+    AssetDownloader, InferenceManifest,
 };
 use serde::Deserialize;
 use std::fmt::Write as FmtWrite;
@@ -17,7 +17,7 @@ use uuid::Uuid;
 
 const MANIFEST: &str = include_str!("../resources/markdown-assets.json");
 const DATA_DIRECTORY: &str = "markdown-assets";
-pub(crate) const XBERG_TAG: &str = "v2026.9.29-0212-run49.1";
+pub(crate) const XBERG_TAG: &str = "v2026.10.2-0920-run54.1";
 const RUNTIME_SELECTION_FILE: &str = "xberg-runtime-path.txt";
 
 #[derive(Debug, Deserialize)]
@@ -59,7 +59,9 @@ pub fn load_saved_runtime_dir() -> Result<Option<PathBuf>, String> {
     crate::xberg_settings::load()
 }
 
-/// 校验用户选择的 Xberg 运行目录及其固定版本全部成员。
+/// 校验用户选择的 Xberg 运行目录：只做 document 场景成员存在性检查
+/// （T-06 2026-10-02 随 XB-09 修订：不比对大小与 SHA-256，用户可自行替换
+/// 或更新引擎版本），缺失时汇总指认缺失项。
 pub fn validate_runtime_dir(path: &Path) -> Result<(), String> {
     let manifest = load_manifest()?;
     if !path.is_dir() {
@@ -68,35 +70,22 @@ pub fn validate_runtime_dir(path: &Path) -> Result<(), String> {
             path.display()
         ));
     }
-    let mut failures = Vec::new();
-    for member in manifest
-        .xberg
-        .members
-        .iter()
-        .filter(|member| member.path == "xberg.exe")
-        .chain(
-            manifest
-                .xberg
-                .members
-                .iter()
-                .filter(|member| member.path != "xberg.exe"),
-        )
-    {
+    let mut missing = Vec::new();
+    for member in &manifest.xberg.members {
         if !crate::xberg_runtime::asset_for_scenario(&member.path, "document") {
             continue;
         }
-        if let Err(error) = verify_file(&path.join(&member.path), member.size_bytes, &member.sha256)
-        {
-            failures.push(format!("{}：{error}", member.path));
+        if !path.join(&member.path).is_file() {
+            missing.push(member.path.clone());
         }
     }
-    if failures.is_empty() {
+    if missing.is_empty() {
         Ok(())
     } else {
         Err(format!(
-            "Xberg 运行目录校验失败（{} 项）：{}",
-            failures.len(),
-            failures.join("；")
+            "Xberg 运行目录缺失必需文件（{} 项）：{}",
+            missing.len(),
+            missing.join("；")
         ))
     }
 }
@@ -119,12 +108,13 @@ pub fn xberg_inference_root() -> PathBuf {
     asset_root().join("xberg-inference")
 }
 
-/// 组件目录解析规则与就绪成员校验共用 [`crate::asset_util`] 的共享实现
+/// 组件目录解析规则与就绪成员检查共用 [`crate::asset_util`] 的共享实现
 /// （同一安装只能有一个解析口径，XB-09/XB-19）。
 ///
-/// 媒体转录组件的在位校验（存在性；摘要级清单待 Xberg 发布 tag 落定后接入，
-/// 与截图 OCR 侧口径一致）：`xberg.exe` + SenseVoice/VAD 模型 + sherpa-onnx
-/// 四 DLL + FFmpeg 四 DLL。返回解析出的组件目录供转录进程注入环境变量。
+/// 媒体转录组件的在位校验（存在性；XB-09 2026-10-02 修订后运行时不比对
+/// 摘要，与截图 OCR 侧口径一致）：`xberg.exe` + SenseVoice/VAD 模型 +
+/// sherpa-onnx 四 DLL + FFmpeg 四 DLL。返回解析出的组件目录供转录进程注入
+/// 环境变量。
 pub fn media_component_dir() -> Result<PathBuf, String> {
     let component = resolve_xberg_component()?;
     let required = [
@@ -173,22 +163,23 @@ pub fn readiness() -> Result<(), String> {
     Ok(())
 }
 
-/// 就绪检查的推理组件段：成员级摘要校验（XB-09；清单未接入时在位校验已覆盖）。
+/// 就绪检查的推理组件段：成员级存在性检查（XB-09 2026-10-02 修订；清单
+/// 未接入时在位校验已覆盖）。
 ///
-/// 成员校验基于共享解析规则（C-2，与截图 OCR 侧同口径）：解析支持 debug 构建
-/// 的 `JCHTOOLS_XBERG_INFERENCE_DIR` 覆盖，成员校验必须与在位校验
+/// 成员检查基于共享解析规则（C-2，与截图 OCR 侧同口径）：解析支持 debug 构建
+/// 的 `JCHTOOLS_XBERG_INFERENCE_DIR` 覆盖，成员检查必须与在位校验
 /// （[`media_component_dir`]）使用同一目录——此前成员校验直接按资产根拼
 /// `xberg-inference/<tag>/`，绕过覆盖，导致覆盖路径在位校验通过后仍必报成员
 /// 校验失败、永远无法就绪（markdown::run 阻断转换，initialize 还会重复下载
 /// 约 291MB 组件包）。markdown 清单成员的 install_path 本就是组件目录相对
 /// 路径（无 `xberg-inference/<tag>/` 前缀，与 snap 清单不同），成员过滤与
-/// 摘要校验经 [`crate::asset_util::verify_inference_members_for_scenario`]
+/// 存在性检查经 [`crate::asset_util::require_inference_members_for_scenario`]
 /// 与截图侧共用同一实现。`_root` 形参保留调用点形状；组件目录一律由共享
 /// 解析规则提供（其删除属基线再生成事项，另行确认）。
 fn readiness_inference_pack(manifest: &AssetManifest, _root: &Path) -> Result<(), String> {
     if let Some(inference) = &manifest.xberg_inference {
         let component = resolve_xberg_component()?;
-        verify_inference_members_for_scenario(&component, "media", &inference.members)?;
+        require_inference_members_for_scenario(&component, "media", &inference.members)?;
     }
     Ok(())
 }
@@ -1076,33 +1067,68 @@ mod tests {
         );
     }
 
-    // ── C-2（markdown 侧）：readiness 的推理包成员校验与组件目录解析同源 ──
+    // ── C-2（markdown 侧）：readiness 的推理包成员检查与组件目录解析同源 ──
 
-    // 覆盖 C-2（markdown 侧）：debug 组件目录覆盖（JCHTOOLS_XBERG_INFERENCE_DIR）
-    // 下，推理组件包成员校验必须基于 resolve_xberg_component 解析出的组件目录，
-    // 而非资产根相对路径——否则覆盖路径永远无法就绪（media_component_dir 通过后
-    // readiness 仍必报成员校验失败，markdown::run 阻断转换、initialize 还会重复
-    // 下载约 291MB 组件包）。markdown 清单成员的 install_path 本就是组件目录
-    // 相对路径（无 xberg-inference/<tag>/ 前缀，与 snap 清单不同），校验时
-    // 直接按组件目录拼接。
-    // 断言强度说明：清单成员摘要对应真实大文件（xberg.exe 约 105MB），测试
-    // 无法伪造同摘要字节，故以「错误来自组件目录级成员校验、点名的实际大小
-    // 取自覆盖树桩文件」证明校验路径已切换；覆盖树下真实摘要全绿路径未验证。
+    // 覆盖 C-2（markdown 侧；XB-09 2026-10-02 修订后的存在性口径）：debug
+    // 组件目录覆盖（JCHTOOLS_XBERG_INFERENCE_DIR）下，推理组件成员检查必须
+    // 基于 resolve_xberg_component 解析出的组件目录，而非资产根相对路径。
+    // 覆盖树内全部 media 成员以桩字节（与清单摘要不同）在场：存在性口径下
+    // 必须通过——资产根下无任何组件文件，若校验仍走资产根相对路径或仍比对
+    // 摘要则必失败，一次断言同时钉住两条口径；删除成员后错误基于覆盖目录
+    // 点名缺失项。
     #[test]
     fn readiness_inference_pack_honors_component_dir_override() {
         let guard = redirect_component_env();
         let external = guard.root.path().join("external-component");
-        fs::create_dir_all(&external).expect("创建外部组件目录");
-        fs::write(external.join("xberg.exe"), b"stub").expect("预置桩 xberg.exe");
+        let manifest = load_manifest().expect("内置清单必须可解析");
+        let inference = manifest
+            .xberg_inference
+            .as_ref()
+            .expect("内置清单已接入推理组件段");
+        for member in &inference.members {
+            if !crate::xberg_runtime::asset_for_scenario(&member.install_path, "media") {
+                continue;
+            }
+            let target = external.join(&member.install_path);
+            fs::create_dir_all(target.parent().expect("成员路径有父目录"))
+                .expect("创建覆盖树成员目录");
+            fs::write(&target, b"replaced-engine").expect("预置桩成员（字节与清单不同）");
+        }
         std::env::set_var("JCHTOOLS_XBERG_INFERENCE_DIR", &external);
 
-        let manifest = load_manifest().expect("内置清单必须可解析");
-        let error = super::readiness_inference_pack(&manifest, guard.root.path())
-            .expect_err("桩文件摘要与清单不符必须失败");
+        super::readiness_inference_pack(&manifest, guard.root.path())
+            .expect("桩字节成员应通过存在性检查（替换引擎免摘要校验）");
 
+        fs::remove_file(external.join("models").join("vad").join("silero_vad.onnx"))
+            .expect("删除一个媒体模型");
+        let error = super::readiness_inference_pack(&manifest, guard.root.path())
+            .expect_err("缺失成员必须失败");
         assert!(
-            error.contains("推理组件成员 xberg.exe") && error.contains("大小 4，预期"),
-            "错误应来自组件目录级成员校验并点名桩文件实际大小：{error}"
+            error.contains("silero_vad.onnx") && error.contains("缺失"),
+            "错误应基于覆盖目录点名缺失成员：{error}"
+        );
+    }
+
+    // 覆盖 T-06（2026-10-02 随 XB-09 修订）：用户指定的 Xberg 运行目录只做
+    // document 场景成员存在性检查——文件被替换为不同字节（用户自行更新引擎
+    // 版本）必须放行；成员缺失时明确指出缺失项，不执行不完整环境。
+    #[test]
+    fn validate_runtime_dir_presence_only_accepts_replaced_engine() {
+        let temp = tempfile::tempdir().expect("创建测试目录");
+        let root = temp.path();
+        let manifest = load_manifest().expect("内置清单必须可解析");
+        for member in &manifest.xberg.members {
+            let target = root.join(&member.path);
+            fs::create_dir_all(target.parent().expect("成员路径有父目录")).expect("创建成员目录");
+            fs::write(&target, b"replaced-engine").expect("预置成员（字节与清单不同）");
+        }
+        super::validate_runtime_dir(root).expect("替换引擎文件后应放行（运行时不比对摘要）");
+
+        fs::remove_file(root.join("xberg.exe")).expect("删除引擎文件");
+        let error = super::validate_runtime_dir(root).expect_err("成员缺失必须报错");
+        assert!(
+            error.contains("xberg.exe") && error.contains("缺失"),
+            "错误应指认缺失成员：{error}"
         );
     }
 }

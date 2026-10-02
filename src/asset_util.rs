@@ -31,7 +31,12 @@ pub(crate) struct InferenceManifest {
 pub(crate) struct InferenceMember {
     pub(crate) path: String,
     pub(crate) install_path: String,
+    // 摘要与大小只被下载安装链（install_inference_pack / inference_layout_ready，
+    // 按 XB-10 当前仅在测试启用）消费；运行时存在性检查（XB-09 2026-10-02
+    // 修订）不读取，非测试构建因此允许未读。
+    #[cfg_attr(not(test), allow(dead_code))]
     pub(crate) size_bytes: u64,
+    #[cfg_attr(not(test), allow(dead_code))]
     pub(crate) sha256: String,
 }
 
@@ -424,22 +429,24 @@ pub(crate) fn resolve_xberg_component() -> Result<PathBuf, String> {
     crate::xberg_settings::required()
 }
 
-/// 就绪检查的推理组件成员校验：只校验请求场景需要的成员（XB-16 场景隔离，
-/// 归属规则见 `xberg_runtime::asset_for_scenario`），逐成员做大小与 SHA-256
-/// 校验（XB-09），错误统一带成员相对路径。
-pub(crate) fn verify_inference_members_for_scenario(
+/// 就绪检查的推理组件成员检查：只检查请求场景需要的成员是否在场（XB-16
+/// 场景隔离，归属规则见 `xberg_runtime::asset_for_scenario`），逐成员做
+/// 存在性检查（XB-09 2026-10-02 修订：运行时不比对大小与 SHA-256，用户
+/// 可自行替换引擎文件；成员缺失仍明确报错），错误统一带成员相对路径。
+pub(crate) fn require_inference_members_for_scenario(
     component: &Path,
     scenario: &str,
     members: &[InferenceMember],
 ) -> Result<(), String> {
     for member in members {
-        if crate::xberg_runtime::asset_for_scenario(&member.install_path, scenario) {
-            verify_file(
-                &component.join(&member.install_path),
-                member.size_bytes,
-                &member.sha256,
-            )
-            .map_err(|e| format!("推理组件成员 {} 校验失败：{e}", member.install_path))?;
+        if crate::xberg_runtime::asset_for_scenario(&member.install_path, scenario)
+            && !component.join(&member.install_path).is_file()
+        {
+            return Err(format!(
+                "推理组件成员 {} 缺失（组件目录 {}）",
+                member.install_path,
+                component.display()
+            ));
         }
     }
     Ok(())

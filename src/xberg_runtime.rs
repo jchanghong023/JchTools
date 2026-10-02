@@ -199,10 +199,11 @@ pub fn asset_for_scenario(path: &str, scenario: &str) -> bool {
     true
 }
 
-/// 截图服务独立启动时仍验证相同的发布清单，不能因绕过 GUI 而只检查同名文件。
+/// 运行时对共享 Xberg 目录的场景成员检查（XB-19；XB-09 2026-10-02 修订后
+/// 口径）：只检查该场景所需成员是否在场，不比对大小与 SHA-256——用户可
+/// 自行替换或更新引擎版本；成员缺失时明确报错指认，不冒称就绪。截图服务
+/// 独立启动时仍走同一检查，不能因绕过 GUI 而只检查同名文件。
 pub fn validate_assets(root: &Path, scenario: &str) -> Result<(), String> {
-    use sha2::{Digest, Sha256};
-    use std::io::Read;
     let manifest: Value = serde_json::from_str(include_str!("../resources/markdown-assets.json"))
         .map_err(|e| e.to_string())?;
     for member in manifest["xberg"]["members"]
@@ -213,26 +214,8 @@ pub fn validate_assets(root: &Path, scenario: &str) -> Result<(), String> {
         if !asset_for_scenario(path, scenario) {
             continue;
         }
-        let mut file = std::fs::File::open(root.join(path))
-            .map_err(|e| format!("Xberg 资产 {path} 不可读：{e}"))?;
-        if file.metadata().map_err(|e| e.to_string())?.len()
-            != member["size_bytes"].as_u64().ok_or("Xberg 清单大小无效")?
-        {
-            return Err(format!("Xberg 资产 {path} 大小与固定版本清单不符"));
-        }
-        let mut hash = Sha256::new();
-        let mut buffer = vec![0u8; 65536];
-        loop {
-            let count = file.read(&mut buffer).map_err(|e| e.to_string())?;
-            if count == 0 {
-                break;
-            }
-            hash.update(&buffer[..count]);
-        }
-        if format!("{:x}", hash.finalize())
-            != member["sha256"].as_str().ok_or("Xberg 清单摘要无效")?
-        {
-            return Err(format!("Xberg 资产 {path} 摘要与固定版本清单不符"));
+        if !root.join(path).is_file() {
+            return Err(format!("Xberg 资产 {path} 缺失（目录 {}）", root.display()));
         }
     }
     Ok(())

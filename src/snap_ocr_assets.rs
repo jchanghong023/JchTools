@@ -11,9 +11,9 @@
 
 use crate::asset_util::{
     atomic_replace_dir, atomic_replace_file, cleanup_stale_staging_dirs, ensure_not_cancelled,
-    extract_zip_safely, finalize_staging, require_component_members, resolve_xberg_component,
-    state_dir_asset_root, valid_component_tag, validate_relative_path, verify_file,
-    verify_inference_members_for_scenario, AssetDownloader, InferenceManifest,
+    extract_zip_safely, finalize_staging, require_component_members,
+    require_inference_members_for_scenario, resolve_xberg_component, state_dir_asset_root,
+    valid_component_tag, validate_relative_path, verify_file, AssetDownloader, InferenceManifest,
 };
 use serde::Deserialize;
 use sha2::{Digest, Sha256};
@@ -192,10 +192,10 @@ pub fn pipe_name() -> String {
     format!(r"\\.\pipe\jchtools-snap-ocr-{hash}")
 }
 
-/// 只读检查所有已安装资产：不联网、不创建目录、不修改文件（O-09 加载前离线验证）。
-/// worker 条目仍为构建期占位时按未就绪报告，并说明原因（不冒称就绪，O-11）。
-/// Xberg 推理组件按「在位校验」检查（存在性）；其摘要清单接入前缺失时如实
-/// 报告「推理组件未配置」，不冒称就绪。
+/// 只读检查所有已安装资产：不联网、不创建目录、不修改文件（O-09 加载前离线
+/// 检查所需资产存在）。worker 条目仍为构建期占位时按未就绪报告，并说明原因
+/// （不冒称就绪，O-11）。Xberg 推理组件按「在位校验 + 清单成员存在性」检查；
+/// 缺失时如实报告，不冒称就绪。
 /// 后台工作进程的安装路径（取清单条目的 install_path；升版只改清单）。
 /// XB-25：主包同目录的后台程序；测试资产隔离时不误用生产程序。
 fn bundled_worker() -> Option<PathBuf> {
@@ -255,20 +255,21 @@ pub fn readiness() -> Result<(), String> {
     readiness_inference_pack(&manifest, &root)
 }
 
-/// 就绪检查的推理组件段：在位校验 + 清单成员校验。
+/// 就绪检查的推理组件段：在位校验 + 清单成员存在性检查。
 ///
-/// 成员校验基于共享解析规则（C-2）：解析支持 debug 构建的
-/// `JCHTOOLS_XBERG_INFERENCE_DIR` 覆盖，成员校验必须与在位校验使用同一
+/// 成员检查基于共享解析规则（C-2）：解析支持 debug 构建的
+/// `JCHTOOLS_XBERG_INFERENCE_DIR` 覆盖，成员检查必须与在位校验使用同一
 /// 目录——此前成员校验直接按资产根相对 install_path 进行，绕过覆盖，导致
 /// 覆盖路径在位校验通过后必报「推理组件包校验失败」、永远无法就绪。成员
-/// 过滤与摘要校验经 [`crate::asset_util::verify_inference_members_for_scenario`]
-/// 与 markdown 侧共用同一实现。
+/// 过滤与存在性检查经 [`crate::asset_util::require_inference_members_for_scenario`]
+/// 与 markdown 侧共用同一实现（XB-09 2026-10-02 修订：不比对摘要）。
 fn readiness_inference_pack(manifest: &SnapAssetManifest, root: &Path) -> Result<(), String> {
     let component = xberg_inference_ready(root)?;
-    // 清单接入推理组件包后做成员级摘要校验（XB-09；未接入时在位校验已覆盖）。
+    // 清单接入推理组件包后做成员级存在性检查（XB-09 修订后口径；未接入时
+    // 在位校验已覆盖）。
     if let Some(pack) = &manifest.xberg_inference {
         let inference = inference_manifest_from_pack(pack)?;
-        verify_inference_members_for_scenario(&component, "snapshot", &inference.members)?;
+        require_inference_members_for_scenario(&component, "snapshot", &inference.members)?;
     }
     Ok(())
 }
@@ -279,8 +280,8 @@ pub fn xberg_inference_root() -> PathBuf {
     asset_root().join("xberg-inference")
 }
 
-/// Xberg 推理组件的在位校验（存在性；摘要校验待清单接入后补齐，O-09 的
-/// 完整校验由后续清单条目承接）：
+/// Xberg 推理组件的在位校验（存在性；XB-09 2026-10-02 修订后运行时不比对
+/// 摘要）：
 /// `xberg.exe` + `models/snapshot-ocr/{det.onnx,rec.onnx,dict/dict.txt}` + `onnxruntime.dll`。
 /// `_root` 形参保留调用点形状；组件目录一律由共享解析规则提供（其删除属
 /// 基线再生成事项，另行确认）。
@@ -1053,37 +1054,54 @@ mod tests {
         }
     }
 
-    // 覆盖 C-2：debug 组件目录覆盖（JCHTOOLS_XBERG_INFERENCE_DIR）下，推理
-    // 组件包成员校验必须基于 resolve_xberg_component 解析出的组件目录，而非
-    // 资产根相对 install_path——否则覆盖路径永远无法就绪（在位校验通过后
-    // 必报「推理组件包校验失败」）。
-    // 断言强度说明：清单成员摘要对应真实大文件（xberg.exe 约 105MB），测试
-    // 无法伪造同摘要字节，故以「错误来自组件目录级成员校验、点名的实际大小
-    // 取自覆盖树桩文件」证明校验路径已切换；覆盖树下真实摘要全绿路径未验证。
+    // 覆盖 C-2（XB-09 2026-10-02 修订后的存在性口径）：debug 组件目录覆盖
+    // （JCHTOOLS_XBERG_INFERENCE_DIR）下，推理组件成员检查必须基于
+    // resolve_xberg_component 解析出的组件目录，而非资产根相对 install_path
+    // ——否则覆盖路径永远无法就绪（在位校验通过后必报「推理组件包校验失败」）。
+    // 覆盖树内全部 snapshot 成员以桩字节（与清单摘要不同）在场：存在性口径下
+    // 必须通过；删除成员后错误基于覆盖目录点名缺失项。
     #[test]
     fn readiness_inference_pack_honors_component_dir_override() {
         let guard = redirect_component_env();
         let external = guard.root.path().join("external-component");
-        let models = external.join("models").join("snapshot-ocr");
-        fs::create_dir_all(models.join("dict")).expect("创建桩组件模型目录");
-        fs::write(external.join("xberg.exe"), b"stub").expect("预置桩 xberg.exe");
-        fs::write(models.join("det.onnx"), b"det").expect("预置桩检测模型");
-        fs::write(models.join("rec.onnx"), b"rec").expect("预置桩识别模型");
-        fs::write(models.join("dict").join("dict.txt"), b"dict").expect("预置桩字典");
-        fs::write(external.join("onnxruntime.dll"), b"ort").expect("预置桩运行库");
+        let manifest = super::load_manifest().expect("内置清单必须可解析");
+        let inference = super::inference_manifest_from_pack(
+            manifest
+                .xberg_inference
+                .as_ref()
+                .expect("内置清单已接入推理组件段"),
+        )
+        .expect("推理组件段必须可转换");
+        for member in &inference.members {
+            if !crate::xberg_runtime::asset_for_scenario(&member.install_path, "snapshot") {
+                continue;
+            }
+            let target = external.join(&member.install_path);
+            fs::create_dir_all(target.parent().expect("成员路径有父目录"))
+                .expect("创建覆盖树成员目录");
+            fs::write(&target, b"replaced-engine").expect("预置桩成员（字节与清单不同）");
+        }
         std::env::set_var("JCHTOOLS_XBERG_INFERENCE_DIR", &external);
 
-        let manifest = super::load_manifest().expect("内置清单必须可解析");
-        let error = super::readiness_inference_pack(&manifest, guard.root.path())
-            .expect_err("桩文件摘要与清单不符必须失败");
+        super::readiness_inference_pack(&manifest, guard.root.path())
+            .expect("桩字节成员应通过存在性检查（替换引擎免摘要校验）");
 
+        fs::remove_file(
+            external
+                .join("models")
+                .join("snapshot-ocr")
+                .join("rec.onnx"),
+        )
+        .expect("删除一个截图模型");
+        let error = super::readiness_inference_pack(&manifest, guard.root.path())
+            .expect_err("缺失成员必须失败");
         assert!(
-            !error.contains("推理组件包校验失败"),
-            "成员校验不得再走资产根相对路径（C-2）：{error}"
+            error.contains("rec.onnx") && (error.contains("缺失") || error.contains("缺少")),
+            "错误应基于覆盖目录点名缺失成员（在位校验与清单成员检查均为存在性口径）：{error}"
         );
         assert!(
-            error.contains("推理组件成员 xberg.exe") && error.contains("大小 4，预期"),
-            "错误应来自组件目录级成员校验并点名桩文件实际大小：{error}"
+            !error.contains("推理组件包校验失败"),
+            "成员检查不得再走资产根相对路径（C-2）：{error}"
         );
     }
 

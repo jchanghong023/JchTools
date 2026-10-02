@@ -4,7 +4,6 @@
 #![allow(clippy::unwrap_used)]
 use jchtools::xberg_runtime::{asset_for_scenario, startup_config, validate_assets};
 use serde_json::Value;
-use std::path::Path;
 
 /// 与 `validate_assets` 内置的同一份固定清单（resources/markdown-assets.json）。
 fn manifest_members() -> Vec<(String, u64)> {
@@ -90,37 +89,39 @@ fn scenario_rules_assign_every_fixed_manifest_member() {
     );
 }
 
-// 覆盖 XB-19：缺失、大小不符、摘要不符逐一明确报错，不得静默跳过或冒称就绪。
+// 覆盖 XB-19（XB-09 2026-10-02 修订后口径）：运行时对共享 Xberg 只做场景
+// 成员存在性检查——缺失时明确报错指认成员；文件在场但字节与清单摘要不同
+// （用户自行替换或更新引擎版本）必须放行，不再比对大小与摘要。
 #[test]
-fn validate_assets_fails_closed_on_missing_size_and_digest() {
+fn validate_assets_presence_only_accepts_replaced_engine_files() {
     let temp = tempfile::tempdir().unwrap();
     let root = temp.path();
-    let (path, size_bytes) = first_required("snapshot");
+    let (path, _size_bytes) = first_required("snapshot");
     let error = validate_assets(root, "snapshot").unwrap_err();
     assert!(error.contains(&path), "缺失报错须指认成员：{error}");
-    assert!(error.contains("不可读"), "{error}");
+    assert!(error.contains("缺失"), "缺失语义必须明确：{error}");
 
-    std::fs::create_dir_all(root.join(Path::new(&path).parent().unwrap())).unwrap();
-    std::fs::write(
-        root.join(&path),
-        vec![b'x'; usize::try_from(size_bytes).unwrap() + 1],
-    )
-    .unwrap();
+    // 全部 snapshot 成员以桩字节（大小与摘要均与清单不同）在场：等价于用户
+    // 手动替换引擎文件后的目录状态，存在性口径下必须整单通过。
+    let mut placed = 0_usize;
+    for (member, _size) in manifest_members() {
+        if !asset_for_scenario(&member, "snapshot") {
+            continue;
+        }
+        let target = root.join(&member);
+        std::fs::create_dir_all(target.parent().unwrap()).unwrap();
+        std::fs::write(&target, b"replaced-engine").unwrap();
+        placed += 1;
+    }
+    assert!(placed > 0, "清单须含 snapshot 场景成员");
+    validate_assets(root, "snapshot").expect("替换引擎文件后应放行（运行时不比对摘要）");
+
+    // 删除一个成员回到缺失：明确报错，不冒称就绪。
+    std::fs::remove_file(root.join(&path)).unwrap();
     let error = validate_assets(root, "snapshot").unwrap_err();
     assert!(
-        error.contains(&path) && error.contains("大小与固定版本清单不符"),
-        "{error}"
-    );
-
-    std::fs::write(
-        root.join(&path),
-        vec![0u8; usize::try_from(size_bytes).unwrap()],
-    )
-    .unwrap();
-    let error = validate_assets(root, "snapshot").unwrap_err();
-    assert!(
-        error.contains(&path) && error.contains("摘要与固定版本清单不符"),
-        "{error}"
+        error.contains(&path) && error.contains("缺失"),
+        "错误应指认被删除的成员：{error}"
     );
 }
 
@@ -147,4 +148,22 @@ fn startup_config_declares_scenario_models_and_media_availability() {
     std::fs::write(&model, b"model placeholder").unwrap();
     let config = startup_config(root).unwrap();
     assert_eq!(config["transcription"]["enabled"], true);
+}
+
+// 真实 Xberg 组件目录的端到端存在性验证（默认 #[ignore] 的真实引擎用例）：
+// 设 JCHTOOLS_REAL_XBERG_DIR 指向本机组件目录（AGENTS.md §3 的 run54.1 测试
+// 目录）后以 --ignored 运行，全部场景的存在性检查必须通过——锚定「真实完整
+// 目录必须通过」的下限；替换引擎文件后的放行语义由
+// validate_assets_presence_only_accepts_replaced_engine_files 覆盖。
+#[test]
+#[ignore = "需真实 Xberg 目录：设 JCHTOOLS_REAL_XBERG_DIR 后 --ignored 运行"]
+fn real_xberg_dir_passes_presence_checks() {
+    let dir = std::env::var("JCHTOOLS_REAL_XBERG_DIR").expect("设置 JCHTOOLS_REAL_XBERG_DIR");
+    let root = std::path::PathBuf::from(dir);
+    assert!(root.is_dir(), "目录必须存在：{}", root.display());
+    for scenario in ["engine", "snapshot", "media", "document"] {
+        validate_assets(&root, scenario).unwrap_or_else(|error| {
+            panic!("真实目录在 {scenario} 场景必须通过存在性检查：{error}")
+        });
+    }
 }

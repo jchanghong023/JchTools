@@ -1679,7 +1679,7 @@
       "name": "readiness_inference_pack_honors_component_dir_override",
       "ignored": false,
       "cfg": null,
-      "body": "7e531a0b5dc238f5"
+      "body": "802424c7b0213f4e"
     },
     {
       "file": "src/markdown_assets.rs",
@@ -1701,6 +1701,13 @@
       "ignored": false,
       "cfg": null,
       "body": "5906a93309c754d3"
+    },
+    {
+      "file": "src/markdown_assets.rs",
+      "name": "validate_runtime_dir_presence_only_accepts_replaced_engine",
+      "ignored": false,
+      "cfg": null,
+      "body": "fe1d49cb75f6b457"
     },
     {
       "file": "src/markdown_document.rs",
@@ -2330,7 +2337,7 @@
       "name": "readiness_inference_pack_honors_component_dir_override",
       "ignored": false,
       "cfg": null,
-      "body": "edfbd3b4b960cf77"
+      "body": "fdc784e4af7ca6f1"
     },
     {
       "file": "src/snap_ocr_assets.rs",
@@ -4371,6 +4378,13 @@
     },
     {
       "file": "tests/xberg_assets.rs",
+      "name": "real_xberg_dir_passes_presence_checks",
+      "ignored": true,
+      "cfg": null,
+      "body": "9a59b88617368855"
+    },
+    {
+      "file": "tests/xberg_assets.rs",
       "name": "scenario_rules_assign_every_fixed_manifest_member",
       "ignored": false,
       "cfg": null,
@@ -4385,10 +4399,10 @@
     },
     {
       "file": "tests/xberg_assets.rs",
-      "name": "validate_assets_fails_closed_on_missing_size_and_digest",
+      "name": "validate_assets_presence_only_accepts_replaced_engine_files",
       "ignored": false,
       "cfg": null,
-      "body": "e525ed0830c7a4be"
+      "body": "4ed7178a33ddbe50"
     },
     {
       "file": "tests/xberg_legacy_protocol.rs",
