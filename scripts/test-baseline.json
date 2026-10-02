@@ -2347,6 +2347,55 @@
       "body": "8954431a3e5f3dfe"
     },
     {
+      "file": "src/system_proxy.rs",
+      "name": "bypass_wildcards_match_windows_style_patterns",
+      "ignored": false,
+      "cfg": null,
+      "body": "49a6ca10c6d3b4a7"
+    },
+    {
+      "file": "src/system_proxy.rs",
+      "name": "disabled_or_unparseable_registry_falls_back_to_direct",
+      "ignored": false,
+      "cfg": null,
+      "body": "daf3b77bef4d7ebc"
+    },
+    {
+      "file": "src/system_proxy.rs",
+      "name": "git_env_maps_registry_to_curl_variables",
+      "ignored": false,
+      "cfg": null,
+      "body": "ad5b44a92ab0d6ee"
+    },
+    {
+      "file": "src/system_proxy.rs",
+      "name": "network_signature_matches_connect_failures_only",
+      "ignored": false,
+      "cfg": null,
+      "body": "004cdb2462c07bfe"
+    },
+    {
+      "file": "src/system_proxy.rs",
+      "name": "per_protocol_entries_select_endpoint_by_target_scheme",
+      "ignored": false,
+      "cfg": null,
+      "body": "171b15ad113e9e72"
+    },
+    {
+      "file": "src/system_proxy.rs",
+      "name": "single_server_applies_to_all_protocols_and_respects_bypass",
+      "ignored": false,
+      "cfg": null,
+      "body": "1a95ed08b801d300"
+    },
+    {
+      "file": "src/system_proxy.rs",
+      "name": "url_host_extraction_handles_common_authority_forms",
+      "ignored": false,
+      "cfg": null,
+      "body": "c94474b352ac6a08"
+    },
+    {
       "file": "tests/archive.rs",
       "name": "bzip2_wrapped_tar_extracts_through_the_named_intermediate_tar",
       "ignored": true,
