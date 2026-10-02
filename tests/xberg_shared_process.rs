@@ -334,3 +334,60 @@ fn documents_reuse_process_and_snapshot_finishes_during_document() {
         1
     );
 }
+
+/// 覆盖 T-23：单文件失败不能让后续文件永久失去继续处理的机会。
+///
+/// 缺陷回归（e2e-20261002-1，真实 502 文件批次）：超大文档的引擎响应超过代理
+/// 单行消息上限（实测 204 MB > 140 MB），读取断裂置 broken；引擎进程本身健康
+/// 常驻，child-exit 检查不触发，broken 又永不复位——其后每个文档请求立即失败，
+/// 一轮批次中途 264 个文件连坐。模拟引擎对 `corrupt.txt` 写一行非法 JSON 后
+/// 照常运行，复现「broken 但进程存活」现场；修复要求代理终结并重建引擎，
+/// 下一个文件正常转换。
+#[test]
+fn broken_engine_is_replaced_and_batch_continues() {
+    let _session = common::session_lock();
+    common::cleanup_stray_engines();
+    let temp = tempfile::tempdir().unwrap();
+    let root = temp.path();
+    prepare(root);
+    std::fs::write(root.join("corrupt.txt"), "document").unwrap();
+    let session_deadline = Instant::now() + Duration::from_secs(60);
+    let broker_pid = loop {
+        let response = xberg_runtime::request(
+            root,
+            json!({"command":"snapshot_state"}),
+            Duration::from_secs(15),
+            &AtomicBool::new(false),
+        )
+        .unwrap();
+        if response["ok"] == true {
+            break response["jchtools_broker_pid"].as_u64().unwrap();
+        }
+        assert!(
+            Instant::now() < session_deadline,
+            "会话被既有 Xberg 占用超时（残留引擎未退出）：{response}"
+        );
+        std::thread::sleep(Duration::from_millis(500));
+    };
+    let _guard = SharedProcess {
+        broker_pid,
+        engine_pid: None,
+    };
+    // 命中坏响应：该文件必须失败（错误可区分），这是正确的单文件失败语义。
+    let first = markdown_document::convert(
+        &root.join("corrupt.txt"),
+        root,
+        false,
+        &Deadline::new(Duration::from_secs(60)),
+    );
+    assert!(first.is_err(), "坏响应必须让该文件失败：{first:?}");
+    // ……但不得连坐：代理必须重建引擎，下一个文件正常转换。
+    let second = markdown_document::convert(
+        &root.join("short.txt"),
+        root,
+        false,
+        &Deadline::new(Duration::from_secs(60)),
+    )
+    .unwrap_or_else(|error| panic!("T-23 连坐：断裂后下一个文件失败：{error}"));
+    assert_eq!(second.markdown, "document\n");
+}

@@ -36,6 +36,15 @@ fn main() {
             }
             let payload = match command.as_str() {
                 "extract" => {
+                    // T-23 回归注入：写一行非法 JSON 后照常运行，复现「通信断裂
+                    // 但引擎进程存活」的缺陷现场（生产：响应超消息上限）。
+                    if line.contains("corrupt") {
+                        let mut out = output.lock().unwrap();
+                        writeln!(out, "{{\"id\":\"{id}\",broken-response-not-json").unwrap();
+                        out.flush().unwrap();
+                        pending.lock().unwrap().remove(&id);
+                        return;
+                    }
                     "\"document\":{\"content\":\"document\"}".to_owned()
                 }
                 "ocr_snapshot" => "\"text\":\"截图结果\",\"records\":1".into(),

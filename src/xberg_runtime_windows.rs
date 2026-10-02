@@ -28,7 +28,11 @@ extern "system" {
 use windows_sys::Win32::System::IO::CancelSynchronousIo;
 
 const QUERY_TIMEOUT: Duration = Duration::from_secs(15);
-const MAX_MESSAGE: u64 = 140 * 1024 * 1024;
+// 单行消息上限按方向共用：请求侧远小于该值；响应侧承载完整 extract 结果，
+// 含正文之外未被产物消费的图片/页/表数据（实测 50 MB 源文档可达 204 MB）。
+// 512 MB 覆盖现有批次峰值约 2.5 倍；超限属于引擎通信故障，由 broken 重建兜底，
+// 不得静默截断或冒充成功。
+const MAX_MESSAGE: u64 = 512 * 1024 * 1024;
 struct PendingRequest {
     sender: mpsc::Sender<Value>,
     lane: Option<&'static str>,
@@ -351,7 +355,8 @@ impl Engine {
         let reader_broken = Arc::clone(&broken);
         std::thread::spawn(move || {
             let mut reader = BufReader::new(stdout);
-            while let Ok(response) = read_json(&mut reader) {
+            while let Ok(mut response) = read_json(&mut reader) {
+                response = prune_forwarded_document(response);
                 let Some(id) = response["id"].as_str() else {
                     break;
                 };
@@ -452,6 +457,41 @@ fn fail_pending(pending: &Pending, broken: &AtomicBool) {
     if let Ok(mut entries) = pending.lock() {
         for (id, send) in entries.drain() {
             let _ = send.sender.send(json!({"id":id,"ok":false,"error_kind":"process_exited","error":"共享 Xberg 通信中断或进程退出"}));
+        }
+    }
+}
+
+/// 转发前剔除客户端不消费的重型字段，收窄响应体积的主要来源。
+///
+/// Markdown 产物只用 `content`、`children`、`ocr_elements` 与
+/// `processing_warnings`（markdown_document::build_final_markdown 及其告警收集）；
+/// `images`/`pages`/`tables` 不进入产物，实测却占单个响应的 95% 以上体积。
+/// 剔除只发生在代理转发侧，引擎落盘缓存与 CLI 行为不受影响；嵌入子文档
+/// 逐层递归处理，路径、正文与告警保持逐字节不变。
+fn prune_forwarded_document(mut response: Value) -> Value {
+    if let Some(document) = response.get_mut("document") {
+        prune_document_heavy_fields(document, 0);
+    }
+    response
+}
+
+fn prune_document_heavy_fields(value: &mut Value, depth: usize) {
+    // 嵌套深度与 markdown_document::MAX_CHILD_DEPTH 同量级，防御性兜底即可。
+    const MAX_PRUNE_DEPTH: usize = 8;
+    if depth > MAX_PRUNE_DEPTH {
+        return;
+    }
+    let Some(object) = value.as_object_mut() else {
+        return;
+    };
+    object.remove("images");
+    object.remove("pages");
+    object.remove("tables");
+    if let Some(children) = object.get_mut("children").and_then(Value::as_array_mut) {
+        for child in children {
+            if let Some(result) = child.get_mut("result") {
+                prune_document_heavy_fields(result, depth + 1);
+            }
         }
     }
 }
@@ -620,6 +660,18 @@ fn handle(pipe: File, engine: &Mutex<Option<Engine>>, stopping: &AtomicBool) -> 
                 slot.take();
             }
         }
+        // T-23：通信断裂（响应超限/非法行/流中断）不终止引擎进程时，broken 永不
+        // 复位会让后续所有请求连坐失败。终结断裂引擎并重建，让批次继续；在途
+        // 请求已由 fail_pending 逐个交付失败终态，此处不存在并发在途项。
+        let broken = slot
+            .as_ref()
+            .is_some_and(|engine| engine.broken.load(Ordering::Acquire));
+        if broken {
+            if let Some(mut dead) = slot.take() {
+                let _ = dead.child.kill();
+                let _ = dead.child.wait();
+            }
+        }
         if let Some(current) = slot.as_mut() {
             if current.root != root {
                 let saved = std::fs::canonicalize(xberg_settings::required()?)
@@ -778,5 +830,55 @@ pub(super) fn serve() -> Result<(), String> {
         std::thread::spawn(move || {
             let _ = handle(pipe, &engine, &stopping);
         });
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // 覆盖 T-23 修复的转发收窄：只剔除产物不消费的重型字段，正文、嵌入子文档
+    // 与告警逐字节保留；非 extract 响应（如 transcribe 的 markdown）不受影响。
+    #[test]
+    fn prune_keeps_product_fields_and_strips_heavy_fields_recursively() {
+        let response = json!({
+            "id": "r1",
+            "ok": true,
+            "document": {
+                "content": "正文",
+                "mime_type": "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+                "images": [{"path": "image_0.png", "bytes": 12345}],
+                "pages": [{"number": 1}],
+                "tables": [{"rows": 2}],
+                "processing_warnings": [{"source": "exif", "message": "no exif data found"}],
+                "children": [{
+                    "path": "word/embeddings/nested.docx",
+                    "result": {
+                        "content": "嵌入正文",
+                        "images": [{"path": "image_1.png"}],
+                        "pages": [1],
+                        "processing_warnings": [{"source": "ocr", "message": "low confidence"}]
+                    }
+                }]
+            }
+        });
+        let document = prune_forwarded_document(response)["document"].clone();
+        assert_eq!(document["content"], "正文");
+        assert_eq!(document["children"][0]["result"]["content"], "嵌入正文");
+        assert_eq!(
+            document["processing_warnings"][0]["message"],
+            "no exif data found"
+        );
+        assert_eq!(
+            document["children"][0]["result"]["processing_warnings"][0]["source"],
+            "ocr"
+        );
+        assert!(document.get("images").is_none());
+        assert!(document.get("pages").is_none());
+        assert!(document.get("tables").is_none());
+        assert!(document["children"][0]["result"].get("images").is_none());
+        assert!(document["children"][0]["result"].get("pages").is_none());
+        let media = prune_forwarded_document(json!({"id":"m1","ok":true,"markdown":"media"}));
+        assert_eq!(media["markdown"], "media");
     }
 }
