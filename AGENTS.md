@@ -51,9 +51,8 @@ powershell -NoProfile -File .\scripts\package-windows.ps1   # 生成含 7-Zip �
 
 - Windows 构建机需要 Rust `x86_64-pc-windows-msvc` + VS C++ Build Tools + Windows SDK（`rc.exe` 用于把 `resources/app.ico` 嵌入 EXE）。
 - 提交前 `SHOULD` 至少跑 `cargo test` 与 `python scripts/static_check.py`，并确认构建输出没有新增 `binding loop` 警告。
-- **本机 Xberg 测试目录**：本地测试 `MUST` 使用 `C:\Users\jiang\Documents\xberg-run54.1\xberg-cli-x86_64-pc-windows-msvc` 中现有的 Xberg 与配套资产（发布 tag `v2026.10.2-0920-run54.1`，2026-10-02 经用户确认启用；worker 协议已含 stdio 断开自退、capabilities 身份字段与 shutdown 命令），`MUST NOT` 为测试另行下载 Xberg 版本；目录缺失、资产不全或接口不兼容时如实报告阻塞，不自动下载替代版本。旧兼容对照目录（run53.1 / run49.1）已于 2026-10-03 经用户指示删除，只保留本目录；旧协议兼容由 `tests/xberg_legacy_protocol.rs` 的合成引擎继续锁定，不依赖任何本地旧发布物。（无执法点 · 软法）
-- **Xberg 源码参照（E:\xberg）**：xberg 接口的事实参照以本机 `E:\xberg` 源码为准，仅在必要时作权威接口文档查阅（2026-10-03 用户确认）。该源码 `MUST NOT` 编译、构建或产出任何测试/发布物——测试只用上一条的 run54.1 发布物目录，产品只用用户配置目录（与 O-31 的「源仓库只读 oracle」边界一致）。（无执法点 · 软法）
-）)
+- **本机 Xberg 测试引擎（2026-10-03 用户规则，以本次口径为准）**：测试只用最新版本；最新版本已存在时不重复下载；不存在时下载最新版并覆盖老引擎目录。引擎目录固定为 `C:\Users\jiang\Documents\xberg-test\xberg-cli-x86_64-pc-windows-msvc`（现内容即最新发布 `v2026.10.2-0920-run54.1`；旧协议兼容由 `tests/xberg_legacy_protocol.rs` 合成引擎锁定，不依赖本地旧发布物）。（无执法点 · 软法）
+- **Xberg 源码参照（E:\xberg）**：xberg 接口的事实参照以本机 `E:\xberg` 源码为准，仅在必要时作权威接口文档查阅（2026-10-03 用户确认）。该源码 `MUST NOT` 编译、构建或产出任何测试/发布物——测试只用上一条的固定引擎目录，产品只用用户配置目录（与 O-31 的「源仓库只读 oracle」边界一致）。（无执法点 · 软法）
 
 ## 3.1 7-Zip 引擎
 
