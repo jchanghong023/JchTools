@@ -1604,7 +1604,9 @@ fn pushurl_config_refuses_to_start() {
 #[test]
 fn conflict_resume_accepts_rewritten_rename_resolution() {
     let fix = fixture();
-    let base_lines: Vec<String> = (0..20).map(|i| format!("line {i} shared content padding\n")).collect();
+    let base_lines: Vec<String> = (0..20)
+        .map(|i| format!("line {i} shared content padding\n"))
+        .collect();
     let base = base_lines.join("");
     fs::write(fix.repo.join("file.txt"), &base).unwrap();
     git_ok(&fix.repo, &["add", "file.txt"]);
