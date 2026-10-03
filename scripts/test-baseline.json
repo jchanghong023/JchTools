@@ -1039,6 +1039,13 @@
     },
     {
       "file": "src/gui.rs",
+      "name": "git_start_pushes_real_repository_end_to_end",
+      "ignored": false,
+      "cfg": null,
+      "body": "ae4f181fee6c1806"
+    },
+    {
+      "file": "src/gui.rs",
       "name": "gui_test_assembly_isolates_real_snap_service",
       "ignored": false,
       "cfg": null,
