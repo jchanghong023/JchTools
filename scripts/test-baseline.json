@@ -527,13 +527,6 @@
       "body": "59d8917a1ee2df5c"
     },
     {
-      "file": "optional/snap-ocr-worker/src/xberg_worker.rs",
-      "name": "inference_environment_carries_offline_switches_and_dylib_path",
-      "ignored": false,
-      "cfg": null,
-      "body": "4b794e83be2ead56"
-    },
-    {
       "file": "src/archive.rs",
       "name": "delete_successful_source_stops_on_cancellation",
       "ignored": false,
