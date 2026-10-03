@@ -246,8 +246,7 @@ fn broker_survives_client_exit_and_obeys_explicit_stop() {
             // 等待新引擎留下启动记录，再进入收尾；计数断言本身不变。
             let boot = Instant::now() + Duration::from_secs(10);
             while std::fs::read_to_string(root.join("starts.txt"))
-                .map(|text| text.lines().count() < 2)
-                .unwrap_or(true)
+                .map_or(true, |text| text.lines().count() < 2)
             {
                 assert!(Instant::now() < boot, "新引擎应在 starts.txt 留下启动记录");
                 std::thread::sleep(Duration::from_millis(50));
