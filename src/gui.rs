@@ -7511,6 +7511,10 @@ mod gui_tests {
         let seed = base.join("seed");
         std::fs::create_dir_all(&seed).unwrap();
         run_git(&seed, &["init", "-q"]);
+        // 种子仓库同样需要仓库级提交身份：CI runner 与无全局 user.name/user.email
+        // 的环境下首个提交会因缺身份失败（回归：CI run 37135458960）。
+        run_git(&seed, &["config", "user.name", "JchTools Test"]);
+        run_git(&seed, &["config", "user.email", "test@jchtools.local"]);
         std::fs::write(seed.join("README.md"), "init\n").unwrap();
         run_git(&seed, &["add", "README.md"]);
         run_git(&seed, &["commit", "-q", "-m", "init"]);
