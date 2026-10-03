@@ -836,6 +836,13 @@
     },
     {
       "file": "src/fsutil.rs",
+      "name": "copy_noreplace_refuses_existing_target_without_truncation",
+      "ignored": false,
+      "cfg": null,
+      "body": "9aa670a03f3e3b9b"
+    },
+    {
+      "file": "src/fsutil.rs",
       "name": "f28_accepts_exact_1601_boundary",
       "ignored": false,
       "cfg": "windows",
@@ -1690,6 +1697,13 @@
     },
     {
       "file": "src/markdown_assets.rs",
+      "name": "readiness_for_groups_checks_only_requested_scenarios",
+      "ignored": false,
+      "cfg": null,
+      "body": "26b05f1894a34c5b"
+    },
+    {
+      "file": "src/markdown_assets.rs",
       "name": "readiness_inference_pack_honors_component_dir_override",
       "ignored": false,
       "cfg": null,
@@ -1833,7 +1847,7 @@
       "name": "pdf_page_count_reads_page_tree",
       "ignored": false,
       "cfg": null,
-      "body": "f4ad0021f27eb3ee"
+      "body": "c500d6426634b428"
     },
     {
       "file": "src/markdown_document.rs",
@@ -2023,6 +2037,13 @@
       "ignored": false,
       "cfg": null,
       "body": "dfd423c5274bbdc1"
+    },
+    {
+      "file": "src/md_tools.rs",
+      "name": "split_overwrite_hardlinked_part_keeps_input_intact",
+      "ignored": false,
+      "cfg": null,
+      "body": "2dfd752c5ee476a8"
     },
     {
       "file": "src/md_tools.rs",
@@ -2264,10 +2285,24 @@
     },
     {
       "file": "src/rules.rs",
+      "name": "numbered_volume_missing_entry_groups_recognize_tail_only_sets",
+      "ignored": false,
+      "cfg": null,
+      "body": "e8fee8e506faccb4"
+    },
+    {
+      "file": "src/rules.rs",
       "name": "ordering_sql_agrees_with_rust_compare",
       "ignored": false,
       "cfg": null,
       "body": "09d44b756790d1b5"
+    },
+    {
+      "file": "src/rules.rs",
+      "name": "part_rar_missing_first_groups_recognize_tail_only_sets",
+      "ignored": false,
+      "cfg": null,
+      "body": "2b7704a63f189cbc"
     },
     {
       "file": "src/rules.rs",
@@ -2366,6 +2401,13 @@
       "ignored": false,
       "cfg": null,
       "body": "49a6ca10c6d3b4a7"
+    },
+    {
+      "file": "src/system_proxy.rs",
+      "name": "bypassed_matches_untranslatable_override_rules",
+      "ignored": false,
+      "cfg": null,
+      "body": "8299d3130aa2b112"
     },
     {
       "file": "src/system_proxy.rs",
@@ -2817,6 +2859,27 @@
     },
     {
       "file": "tests/contract_engine.rs",
+      "name": "classify_into_freed_category_name_after_git_collection_move",
+      "ignored": false,
+      "cfg": null,
+      "body": "e40c032903071d05"
+    },
+    {
+      "file": "tests/contract_engine.rs",
+      "name": "classify_refuses_target_dir_occupied_by_git_project",
+      "ignored": false,
+      "cfg": null,
+      "body": "3728877885e396a4"
+    },
+    {
+      "file": "tests/contract_engine.rs",
+      "name": "count_archives_counts_missing_entry_volume_groups",
+      "ignored": false,
+      "cfg": null,
+      "body": "7b53c6d8b8b7965b"
+    },
+    {
+      "file": "tests/contract_engine.rs",
       "name": "count_archives_matches_scan_filtering",
       "ignored": false,
       "cfg": null,
@@ -2838,6 +2901,13 @@
     },
     {
       "file": "tests/contract_engine.rs",
+      "name": "extract_quarantines_missing_first_part_rar_group",
+      "ignored": false,
+      "cfg": null,
+      "body": "9337c765022d743b"
+    },
+    {
+      "file": "tests/contract_engine.rs",
       "name": "extraction_never_cleans_empty_directories",
       "ignored": false,
       "cfg": null,
@@ -2856,6 +2926,13 @@
       "ignored": false,
       "cfg": null,
       "body": "c09190e36c70a75b"
+    },
+    {
+      "file": "tests/contract_engine.rs",
+      "name": "git_collection_named_project_never_nests_into_itself",
+      "ignored": false,
+      "cfg": null,
+      "body": "3e30239b7a675f33"
     },
     {
       "file": "tests/contract_engine.rs",
@@ -3678,6 +3755,13 @@
     },
     {
       "file": "tests/git_tools.rs",
+      "name": "conflict_resume_refuses_extra_staged_files",
+      "ignored": false,
+      "cfg": null,
+      "body": "2001a69c42674d6f"
+    },
+    {
+      "file": "tests/git_tools.rs",
       "name": "diverged_history_conflict_reports_unpushed_honestly",
       "ignored": false,
       "cfg": null,
@@ -3773,6 +3857,20 @@
       "ignored": false,
       "cfg": null,
       "body": "7ae65d109276e9bf"
+    },
+    {
+      "file": "tests/git_tools.rs",
+      "name": "push_default_current_with_matching_upstream_name_proceeds",
+      "ignored": false,
+      "cfg": null,
+      "body": "d08d61ea01dafabb"
+    },
+    {
+      "file": "tests/git_tools.rs",
+      "name": "push_default_current_with_renamed_upstream_refuses_to_start",
+      "ignored": false,
+      "cfg": null,
+      "body": "3b119ae75f3efff4"
     },
     {
       "file": "tests/git_tools.rs",
