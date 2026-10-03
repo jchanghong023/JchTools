@@ -109,7 +109,7 @@ impl SystemProxy {
     /// P-09：目标 URL 是否命中例外表（系统代理未启用时恒为 false）。git 网络
     /// 命令注入代理前先做此判断：命中的目标直接按现状直连——libcurl 的
     /// `no_proxy` 无法表达 `<local>` 与 `192.168.*` 这类任意位置通配，仅靠
-    /// [`git_env`] 的近似翻译会丢弃这些条目，导致内网/裸主机目标仍被推入代理。
+    /// [`Self::git_env`] 的近似翻译会丢弃这些条目，导致内网/裸主机目标仍被推入代理。
     pub fn bypassed(&self, url: &str) -> bool {
         self.is_enabled()
             && split_scheme_host(url)
