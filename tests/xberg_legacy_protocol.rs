@@ -31,6 +31,7 @@ impl Drop for SharedProcess {
 
 #[test]
 fn legacy_worker_without_capabilities_still_serves_requests() {
+    common::ensure_child_reaper();
     // 会话锁：与其他引擎测试二进制互斥（生产语义每会话至多一个 Xberg）。
     let _session = common::session_lock();
     common::cleanup_stray_engines();

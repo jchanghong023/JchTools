@@ -27,6 +27,7 @@ fn child(name: &str, root: &Path, action: &str) {
 
 #[test]
 fn both_sources_survive_process_restart_and_failed_save() {
+    common::ensure_child_reaper();
     if let Ok(action) = std::env::var("JT_BACKGROUND_CASE") {
         let root = xberg_settings::state_dir().unwrap();
         let custom = root.join("用户目录");
@@ -162,6 +163,7 @@ fn ensure_engine_exit(pid: u64) {
 
 #[test]
 fn broker_survives_client_exit_and_obeys_explicit_stop() {
+    common::ensure_child_reaper();
     // 会话锁：父进程持有跨两个子进程阶段（start 与 resume-stop）；子进程
     // （JT_BACKGROUND_CASE 在场）不重复加锁，靠父进程的锁覆盖全程。
     let session = if std::env::var("JT_BACKGROUND_CASE").is_err() {

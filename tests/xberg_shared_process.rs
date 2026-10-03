@@ -63,6 +63,7 @@ fn process_alive(pid: u64) -> bool {
 // 语义：不 wait、不 kill），经用户裁定保留；锚点置于函数外以免测试体哈希漂移。
 #[test]
 fn broker_does_not_hold_client_capture_pipes() {
+    common::ensure_child_reaper();
     if std::env::var("JT_XBERG_PIPE_MID").is_ok() {
         // mid 层：与 xberg_runtime_windows::connect() 相同的 spawn 形状。
         // 代理必须比 mid 活得久（常驻语义）：不 wait、不 kill，pid 交外层清理。
@@ -151,6 +152,7 @@ impl Drop for SharedProcess {
 
 #[test]
 fn documents_reuse_process_and_snapshot_finishes_during_document() {
+    common::ensure_child_reaper();
     // 会话锁：与其他引擎测试二进制互斥（生产语义每会话至多一个 Xberg）。
     // 只在非重入分支加锁/清场：重入子进程的父进程正持有锁，子进程再抢会互相等待。
     let session = if std::env::var_os("JCHTOOLS_SHARED_CLIENT_ROOT").is_none() {
@@ -347,6 +349,7 @@ fn documents_reuse_process_and_snapshot_finishes_during_document() {
 /// 下一个文件正常转换。
 #[test]
 fn broken_engine_is_replaced_and_batch_continues() {
+    common::ensure_child_reaper();
     let _session = common::session_lock();
     common::cleanup_stray_engines();
     let temp = tempfile::tempdir().unwrap();
@@ -400,6 +403,7 @@ fn broken_engine_is_replaced_and_batch_continues() {
 /// 文档因此失败。
 #[test]
 fn fast_mode_rejection_falls_back_to_normal() {
+    common::ensure_child_reaper();
     let _session = common::session_lock();
     common::cleanup_stray_engines();
     let temp = tempfile::tempdir().unwrap();
@@ -417,5 +421,65 @@ fn fast_mode_rejection_falls_back_to_normal() {
         result.markdown,
         "document
 "
+    );
+}
+
+/// 覆盖（孤儿回收回归；缺陷 2026-10-03 两次复现：broker 无自退条件、测试清场
+/// 为扫描式可漏杀，漏杀者存活并锁住构建产物）：子测试进程以 connect() 同形
+/// 拉起常驻代理后立即退出且不做任何清理——模拟全部漏杀路径的公共形态。
+/// 派生进程的退出必须使代理随之消亡，不得存活到测试二进制之外。
+#[test]
+fn spawned_broker_reaped_when_spawning_process_exits() {
+    common::ensure_child_reaper();
+    if std::env::var_os("JT_XBERG_ORPHAN_CLIENT").is_some() {
+        // 子层：拉起代理、落 pid、立即退出、不清理（pid 交外层观测）。
+        let broker = Command::new(std::env::var_os("JCHTOOLS_TEST_BROKER_EXE").unwrap())
+            .arg("--xberg-broker")
+            .creation_flags(0x0800_0000)
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .spawn()
+            .unwrap();
+        let pidfile = std::env::var_os("JT_XBERG_ORPHAN_PIDFILE").unwrap();
+        std::fs::write(pidfile, broker.id().to_string()).unwrap();
+        std::process::exit(0);
+    }
+    // 外层：与其他引擎测试二进制互斥（cleanup_stray_engines 会按命令行特征扫杀，
+    // 并发清场会让断言空转通过）。
+    let _session = common::session_lock();
+    let temp = tempfile::tempdir().unwrap();
+    let state = temp.path().join("state");
+    std::fs::create_dir_all(&state).unwrap();
+    let pidfile = temp.path().join("orphan-broker.pid");
+    let mut child = Command::new(std::env::current_exe().unwrap())
+        .args([
+            "--exact",
+            "spawned_broker_reaped_when_spawning_process_exits",
+            "--nocapture",
+        ])
+        .env("JT_XBERG_ORPHAN_CLIENT", "1")
+        .env("JT_XBERG_ORPHAN_PIDFILE", &pidfile)
+        .env("JCHTOOLS_TEST_STATE_DIR", &state)
+        .env("JCHTOOLS_TEST_BROKER_EXE", env!("CARGO_BIN_EXE_JchTools"))
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .spawn()
+        .unwrap();
+    let status = child.wait().unwrap();
+    assert!(status.success(), "子层测试进程必须正常退出：{status:?}");
+    let pid: u32 = std::fs::read_to_string(&pidfile)
+        .unwrap_or_else(|error| panic!("子层未落 pidfile：{error}"))
+        .trim()
+        .parse()
+        .unwrap();
+    let deadline = Instant::now() + Duration::from_secs(10);
+    while process_alive(u64::from(pid)) && Instant::now() < deadline {
+        std::thread::sleep(Duration::from_millis(200));
+    }
+    assert!(
+        !process_alive(u64::from(pid)),
+        "派生代理在子测试进程退出后仍存活（孤儿泄漏复现）：pid={pid}"
     );
 }

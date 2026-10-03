@@ -7,6 +7,7 @@
 
 use std::fs::OpenOptions;
 use std::path::PathBuf;
+use std::sync::OnceLock;
 use std::time::{Duration, Instant};
 
 /// 会话锁守卫：Drop 时删除锁文件。
@@ -95,4 +96,76 @@ pub(super) fn cleanup_stray_engines() {
             .output();
         std::thread::sleep(Duration::from_millis(300));
     }
+}
+
+/// 重入层标记：持有这些标记的进程是外层测试进程的 re-exec 子层，外层已持有
+/// 回收 Job（子层经派生自动归属同一 Job）；子层若再自建 Job，其退出会关闭自有
+/// Job 句柄、误杀必须比它活得久的常驻代理（capture-pipe 等测试钉死的语义），
+/// 因此跳过自建。
+fn reexec_layer() -> bool {
+    std::env::var_os("JT_XBERG_PIPE_MID").is_some()
+        || std::env::var_os("JCHTOOLS_SHARED_CLIENT_ROOT").is_some()
+        || std::env::var_os("JT_BACKGROUND_CASE").is_some()
+}
+
+/// 回收 Job 句柄（isize 规避裸句柄的 Send 限制；故意静态持有到进程退出，
+/// 句柄随进程关闭即触发 KILL_ON_JOB_CLOSE 全树回收）。
+static REAPER_JOB: OnceLock<isize> = OnceLock::new();
+
+/// 测试进程孤儿回收根修（缺陷 2026-10-03 两次复现：`--xberg-broker` 代理无
+/// 自退条件，扫描式清场与收尾 PID 杀灭均可漏杀，漏杀者存活并锁住构建产物）：
+/// 把当前测试进程挂进 JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE 的 Job Object。此后
+/// 本测试二进制派生的全部后代（re-exec 层、代理、引擎）经派生自动归属；测试
+/// 二进制无论以何种方式退出（正常、panic、超时被 taskkill /T），Windows 连根
+/// 回收整棵进程树——漏杀在结构上不可能发生。嵌套 Job 在 Win8+ 合法（CI 步骤
+/// 外层 Job 不受影响）；任一调用失败时打印警告并降级为既有扫描清场，不使
+/// 测试失败。
+pub(super) fn ensure_child_reaper() {
+    if reexec_layer() {
+        return;
+    }
+    REAPER_JOB.get_or_init(|| {
+        use windows_sys::Win32::Foundation::CloseHandle;
+        use windows_sys::Win32::System::JobObjects::{
+            AssignProcessToJobObject, CreateJobObjectW, JobObjectExtendedLimitInformation,
+            SetInformationJobObject, JOBOBJECT_EXTENDED_LIMIT_INFORMATION,
+            JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE,
+        };
+        use windows_sys::Win32::System::Threading::GetCurrentProcess;
+        // SAFETY: 创建未命名 Job Object，不传任何外部指针。
+        let job = unsafe { CreateJobObjectW(std::ptr::null(), std::ptr::null()) };
+        if job.is_null() {
+            eprintln!("警告：孤儿回收 Job 创建失败，降级为既有扫描清场");
+            return 0;
+        }
+        // SAFETY: JOBOBJECT_EXTENDED_LIMIT_INFORMATION 是纯 C POD 结构，全零初始化合法。
+        let mut limits: JOBOBJECT_EXTENDED_LIMIT_INFORMATION = unsafe { std::mem::zeroed() };
+        limits.BasicLimitInformation.LimitFlags = JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE;
+        // SAFETY: job 为刚创建的有效句柄；limits 为本栈纯数据结构，仅本次调用读取。
+        let configured = unsafe {
+            SetInformationJobObject(
+                job,
+                JobObjectExtendedLimitInformation,
+                (&raw const limits).cast(),
+                u32::try_from(std::mem::size_of_val(&limits)).unwrap(),
+            )
+        };
+        if configured == 0 {
+            eprintln!("警告：孤儿回收 Job 参数设置失败，降级为既有扫描清场");
+            // SAFETY: job 尚未归属任何进程且仅本函数持有，关闭无回收副作用。
+            unsafe { CloseHandle(job) };
+            return 0;
+        }
+        // SAFETY: 无参调用，返回本进程伪句柄，不涉及外部资源。
+        let current = unsafe { GetCurrentProcess() };
+        // SAFETY: 把自身进程挂入刚配置的 Job；嵌套归属在 Win8+ 合法，失败仅降级。
+        let assigned = unsafe { AssignProcessToJobObject(job, current) };
+        if assigned == 0 {
+            eprintln!("警告：测试进程挂入回收 Job 失败，降级为既有扫描清场");
+            // SAFETY: 归属未生效时 job 无成员且仅本函数持有，关闭无副作用。
+            unsafe { CloseHandle(job) };
+            return 0;
+        }
+        job as isize
+    });
 }
