@@ -2957,6 +2957,7 @@ impl UiPump {
                 // 先按 f64 求比例再写进度属性（保持 0.0-1.0 钳制）：
                 // 分子分母各自 u16 饱和后再相除，会让 >65535 文件的
                 // 大批次进度失真为 1.0（仅显示口径，不影响统计）。
+                // [quality-baseline approved 2026-10-03] 显示用途转换，经用户裁定保留
                 #[allow(clippy::cast_possible_truncation, clippy::cast_precision_loss)]
                 let progress = if total == 0 {
                     -1.0
@@ -3946,6 +3947,7 @@ impl UiPump {
                 let elapsed = s.started.elapsed().as_secs_f64().max(0.001);
                 if total > 0 {
                     // 进度分数为显示用途（Slint progress 即 f32），整数→浮点无受检 API。
+                    // [quality-baseline approved 2026-10-03] 同类显示转换，经用户裁定保留
                     #[allow(clippy::cast_possible_truncation, clippy::cast_precision_loss)]
                     let progress = (done as f64 / total as f64).clamp(0.0, 1.0) as f32;
                     ui.set_progress(progress);
@@ -3969,6 +3971,7 @@ impl UiPump {
             ui.set_metrics(format!("已处理 {done} / {planned} · 耗时 {elapsed:.1}s").into());
             if planned > 0 {
                 // 进度分数为显示用途（Slint progress 即 f32），整数→浮点无受检 API。
+                // [quality-baseline approved 2026-10-03] 同类显示转换，经用户裁定保留
                 #[allow(clippy::cast_possible_truncation, clippy::cast_precision_loss)]
                 let progress = (done as f64 / planned as f64).clamp(0.0, 1.0) as f32;
                 ui.set_progress(progress);

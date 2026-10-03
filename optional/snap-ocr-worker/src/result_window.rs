@@ -175,6 +175,7 @@ fn activate_result_window(
 }
 
 // Preserve TextSnap's f32 rounding and truncation (including large work areas).
+// [quality-baseline approved 2026-10-03] 冻结行为换算豁免，经用户裁定保留
 #[allow(clippy::cast_precision_loss, clippy::cast_possible_truncation)]
 fn scaled_extent(extent: i32) -> i32 {
     ((extent as f32 * 0.8) as i32).clamp(1, extent.max(1))

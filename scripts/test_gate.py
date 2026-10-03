@@ -299,6 +299,7 @@ def _ps51_module_path() -> str | None:
     只影响本进程树继承的环境，不改系统设置。
     """
     # Windows 环境变量名大小写不敏感，官方拼写是 PSModulePath；此处按现有值读取。
+    # [quality-baseline approved 2026-10-03] 官方拼写误报，经用户裁定保留
     value = os.environ.get("PSModulePath")  # noqa: SIM112
     if not value:
         return None

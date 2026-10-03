@@ -207,6 +207,7 @@ pub fn validate_perspective(quad: &Quad) -> Result<(f64, f64), PipelineError> {
     // 面积/边长都在舍入后的值上进行（numpy.linalg.norm 在 f32 数组上以 f32
     // 求值后 float() 转 f64）。坐标已在 DetectionCandidate 校验中保证有限，
     // 截断即 oracle 的语义（asarray 舍入）。
+    // [quality-baseline approved 2026-10-03] 冻结规格逐位镜像豁免，经用户裁定保留
     #[allow(clippy::cast_possible_truncation, clippy::cast_possible_wrap)]
     let points_f32: [(f32, f32); 4] = [
         (quad[0].0 as f32, quad[0].1 as f32),
@@ -245,6 +246,7 @@ pub fn validate_perspective(quad: &Quad) -> Result<(f64, f64), PipelineError> {
         return Err(PipelineError::InvalidDetectionQuad);
     }
     // 与 Python 一致：shoelace 有向面积恰为零才判退化（有意精确比较）。
+    // [quality-baseline approved 2026-10-03] 冻结规格逐位镜像豁免，经用户裁定保留
     #[allow(clippy::float_cmp)]
     if (0..4)
         .map(|index| {
@@ -258,6 +260,7 @@ pub fn validate_perspective(quad: &Quad) -> Result<(f64, f64), PipelineError> {
         return Err(PipelineError::DegenerateDetectionQuad);
     }
     // 边长在 f32 值上以 f32 算术求范数后转 f64（numpy.linalg.norm 语义）。
+    // [quality-baseline approved 2026-10-03] 冻结规格逐位镜像豁免，经用户裁定保留
     #[allow(clippy::cast_possible_truncation)]
     fn distance_f32(a: (f64, f64), b: (f64, f64)) -> f64 {
         let dx = (a.0 as f32) - (b.0 as f32);

@@ -54,6 +54,7 @@ fn git_ok(cwd: &Path, args: &[&str]) -> String {
 struct Fixture {
     repo: PathBuf,
     remote: PathBuf,
+    // [quality-baseline approved 2026-10-03] TempDir 保活字段（有意不读取），经用户裁定保留
     #[allow(dead_code)]
     _dir: tempfile::TempDir,
 }

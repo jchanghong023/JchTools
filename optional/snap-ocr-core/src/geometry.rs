@@ -31,6 +31,7 @@ impl std::error::Error for GeometryError {}
 
 /// 返回绕质心按 `atan2` 关键字升序排序的顶点（Python `ordered_polygon`；
 /// 排序稳定，与 Python `sorted` 一致）。少于 3 个点时原样返回。
+// [quality-baseline approved 2026-10-03] 冻结规格逐位镜像豁免，经用户裁定保留
 #[allow(clippy::cast_precision_loss)] // 点数转 f64 参与质心均值，与 Python 精度语义一致
 pub fn ordered_polygon(points: &[Point]) -> Vec<Point> {
     if points.len() < 3 {
@@ -103,6 +104,7 @@ pub fn quad_baseline(quad: &Quad) -> f64 {
     let mut ys = [quad[0].1, quad[1].1, quad[2].1, quad[3].1];
     // 降序排序对应 Python `sorted(..., reverse=True)`，取前两元素。
     ys.sort_by(|first, second| second.total_cmp(first));
+    // [quality-baseline approved 2026-10-03] 冻结规格逐位镜像豁免，经用户裁定保留
     #[allow(clippy::manual_midpoint)] // 与 Python `(a + b) / 2` 逐位一致
     {
         (ys[0] + ys[1]) / 2.0

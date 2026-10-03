@@ -41,6 +41,7 @@ pub struct LayoutResult {
 /// # Panics
 /// 输入为负时 panic（对应 Python 抛出 `ValueError`）；调用点均以
 /// `max(0.0, …)` 保证非负，实际不可达。
+// [quality-baseline approved 2026-10-03] 冻结规格镜像豁免（前提不可达），经用户裁定保留
 #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
 fn round_nonnegative_half_up(value: f64) -> usize {
     assert!(
@@ -271,6 +272,7 @@ fn estimate_grid_width(items: &[LayoutItem]) -> f64 {
         let width = item.right - item.left;
         if cell_count > 0 && width > 0.0 {
             // 格数为显示单元数（≤ 文本长度量级），转 f64 不损失精度。
+            // [quality-baseline approved 2026-10-03] 冻结规格镜像豁免，经用户裁定保留
             #[allow(clippy::cast_possible_truncation, clippy::cast_precision_loss)]
             estimates.push(width / cell_count as f64);
         }

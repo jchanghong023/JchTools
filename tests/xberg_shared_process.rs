@@ -59,6 +59,8 @@ fn process_alive(pid: u64) -> bool {
 /// mid 的 stdout，mid 以与运行时 connect() 相同的形状 spawn 代理后退出；
 /// 断言 EOF 在 mid 退出后很快到达，且代理当时仍然存活（提前退出视为被
 /// 既有引擎占用，按既有测试纪律清场后有界重试）。
+// [quality-baseline approved 2026-10-03] 函数体内 zombie_processes 豁免（常驻代理测试
+// 语义：不 wait、不 kill），经用户裁定保留；锚点置于函数外以免测试体哈希漂移。
 #[test]
 fn broker_does_not_hold_client_capture_pipes() {
     if std::env::var("JT_XBERG_PIPE_MID").is_ok() {

@@ -533,11 +533,13 @@ def _token_png(text: str) -> bytes:
     image = Image.new("RGB", (240, 80), "white")
     draw = ImageDraw.Draw(image)
     # Pillow ≥10.1 的 load_default(size=…) 返回 FreeTypeFont，但其类型桩标注不完整。
+    # [quality-baseline approved 2026-10-03] Pillow 桩缺口（移除即复现），经用户裁定保留
     font = cast(
         "ImageFont.FreeTypeFont",
         ImageFont.load_default(size=24),  # pyright: ignore[reportInvalidCast]
     )
     # Pillow 桩对 ImageDraw.text 的标注不完整（部分未知），按行显式抑制。
+    # [quality-baseline approved 2026-10-03] Pillow 桩缺口（移除即复现），经用户裁定保留
     draw.text((12, 26), text, fill="black", font=font)  # pyright: ignore[reportUnknownMemberType]
     buffer = io.BytesIO()
     image.save(buffer, "PNG")
@@ -1747,6 +1749,7 @@ def _probe_offline() -> tuple[bool, str]:
 
 
 def _tasklist() -> Path | None:
+    # [quality-baseline approved 2026-10-03] 官方拼写误报，经用户裁定保留
     system_root = os.environ.get("SystemRoot")  # noqa: SIM112  # Windows 官方拼写即 SystemRoot，大小写不敏感。
     if not system_root:
         return None

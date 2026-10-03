@@ -34,8 +34,10 @@ pub(crate) struct InferenceMember {
     // 摘要与大小只被下载安装链（install_inference_pack / inference_layout_ready，
     // 按 XB-10 当前仅在测试启用）消费；运行时存在性检查（XB-09 2026-10-02
     // 修订）不读取，非测试构建因此允许未读。
+    // [quality-baseline approved 2026-10-03] 测试门控消费字段，经用户裁定保留
     #[cfg_attr(not(test), allow(dead_code))]
     pub(crate) size_bytes: u64,
+    // [quality-baseline approved 2026-10-03] 同上：测试门控消费字段
     #[cfg_attr(not(test), allow(dead_code))]
     pub(crate) sha256: String,
 }

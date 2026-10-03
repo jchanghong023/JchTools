@@ -40,6 +40,6 @@ missing_errors_doc = "allow"
 missing_panics_doc = "allow"
 must_use_candidate = "allow"
 items_after_statements = "allow"
-multiple_crate_versions = "allow"
+multiple_crate_versions = "allow" # 传递依赖版本重复（windows/slint 生态），根包同项已批准（2026-09-19）的镜像 [quality-baseline approved 2026-10-03]
 too_many_lines = "allow"
 struct_excessive_bools = "allow"

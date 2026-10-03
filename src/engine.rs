@@ -619,6 +619,7 @@ impl ScopeFilter<'_> {
     /// 供 walk_dir 判断一个 .jchtools-link-* 条目是否「仅在保留名口径下被剪枝」
     /// （= 位于本次处理范围内，可登记为疑似残留供执行前清理）。
     /// `name` 仅非 Windows 的点开头隐藏判定使用（P-07：产品仅在 Windows 构建）。
+    // [quality-baseline approved 2026-10-03] 平台口径参数，经用户裁定保留
     #[cfg_attr(windows, allow(unused_variables))]
     fn prunes_other(&self, child_rel: &str, name: &str, metadata: &fs::Metadata) -> bool {
         if self.root_under_special

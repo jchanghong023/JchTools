@@ -490,6 +490,7 @@ fn container_extension(ext: &str) -> bool {
 /// 最后一段扩展名；X-10 命名族分卷（`.7z.001`、`.partN.rar`、`.rNN`、`.zNN`）按
 /// 附录 A 说明归「压缩包」；未匹配与无扩展名归「其他」。
 // 输入已预先小写，ends_with 的字面量比较即为忽略大小写口径。
+// [quality-baseline approved 2026-10-03] 可证明误报（输入预小写），经用户裁定保留
 #[allow(clippy::case_sensitive_file_extension_comparisons)]
 pub fn category_for(name_lower: &str) -> &'static str {
     const COMPOUND: [&str; 6] = [
