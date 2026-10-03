@@ -387,11 +387,10 @@ fn extract_run_with(
             |r| r.get(0),
         )?;
         if count > 0 {
-            let engine = match engine_path {
-                Some(path) => SevenZip::with_executable(path)?,
-                None => SevenZip::from_bundle()?,
-            };
-            archive::extract_queued(&mut job, &engine)?;
+            archive::extract_queued(&mut job, || match engine_path {
+                Some(path) => SevenZip::with_executable(path),
+                None => SevenZip::from_bundle(),
+            })?;
         } else {
             job.log(
                 "解压",

@@ -425,29 +425,7 @@ impl SevenZip {
         // 文件名仅用于发现候选；删除与展开比例只能使用引擎实际打开的连续分卷。
         // 隔离仍使用独立的可逆宽匹配，不能把该集合复用为永久删除授权。
         let named = volume_set(&archive)?;
-        // X-10：同主干混用补零模式（如 part1 与 part01 并存）是命名歧义组：
-        // 列出全部歧义卷，不猜测归属、不解码删源——整组按失败包走 X-06 隔离。
-        if let Some(ambiguity) = &named.part_ambiguity {
-            anyhow::bail!("X-10 命名歧义分卷组：{archive_rel}（{ambiguity}）");
-        }
-        // X-10：老式 zip/rar 族只发现尾卷、没有主包时整组按失败包处置并报告缺主包，
-        // 不把尾卷交给引擎猜格式（引擎对孤立 .zNN/.rNN 的报错只会说「无法打开」，
-        // 指向不了真正原因）。
-        if missing_old_style_main(&archive) {
-            anyhow::bail!("老式分卷族缺主包：{archive_rel}（只发现 .zNN/.rNN 尾卷，未找到 主干.zip/主干.rar）");
-        }
-        // X-10：part rar 族缺首卷——当前卷是 partN（N≥2）且同目录没有对应宽度的
-        // part1 入口（缺首卷组由扫描按代表入队）。整组按失败包处置并报告缺首卷，
-        // 不把余卷当独立包或交给引擎猜。附录 E：a.part02+a.part03 缺 01 → 一组
-        // 缺首卷失败，不当两个完整 rar 解压。
-        if let Some(reason) = missing_part_rar_first(&archive) {
-            anyhow::bail!("part rar 分卷族缺首卷：{archive_rel}（{reason}）");
-        }
-        // X-10：数字尾卷族缺入口——.NNN（N≥2）且同目录没有 .001/.000。同上整组
-        // 失败处置，报告缺入口而不是笼统的引擎错误。
-        if let Some(stem) = missing_numbered_entry(&archive) {
-            anyhow::bail!("数字尾卷族缺起始卷：{archive_rel}（未找到 {stem}.001 入口卷）");
-        }
+        x10_volume_precheck(archive_rel, &archive, &named)?;
         let volumes = if named.paths.len() > 1
             || matches!(named.scheme, VolumeScheme::RarParts | VolumeScheme::OldRar)
         {
@@ -1177,6 +1155,40 @@ struct VolumeSet {
 }
 /// X-10：该文件是老式族尾卷、且同目录没有对应主包（`主干.zip`/`主干.rar`）。
 /// 只发现这些尾卷时整组按失败包处置并报告缺主包（X-10：缺入口仍是一组失败包）。
+/// X-10 卷集形态预检（纯文件系统判定，不依赖 7-Zip 引擎）：命名歧义组、老式族
+/// 缺主包、part rar 缺首卷、数字尾卷缺入口，任一命中即整组按失败包隔离。
+/// E-05 边界：这类隔离不是解压，不得因宿主无引擎而被整体报错吞掉——预检必须
+/// 先于引擎解析执行（回归：CI run 37131023474 上缺首卷组因引擎解析前置报错，
+/// 未能按 X-06 隔离）。
+fn x10_volume_precheck(archive_rel: &str, archive: &Path, named: &VolumeSet) -> Result<()> {
+    // X-10：同主干混用补零模式（如 part1 与 part01 并存）是命名歧义组：
+    // 列出全部歧义卷，不猜测归属、不解码删源——整组按失败包走 X-06 隔离。
+    if let Some(ambiguity) = &named.part_ambiguity {
+        anyhow::bail!("X-10 命名歧义分卷组：{archive_rel}（{ambiguity}）");
+    }
+    // X-10：老式 zip/rar 族只发现尾卷、没有主包时整组按失败包处置并报告缺主包，
+    // 不把尾卷交给引擎猜格式（引擎对孤立 .zNN/.rNN 的报错只会说「无法打开」，
+    // 指向不了真正原因）。
+    if missing_old_style_main(archive) {
+        anyhow::bail!(
+            "老式分卷族缺主包：{archive_rel}（只发现 .zNN/.rNN 尾卷，未找到 主干.zip/主干.rar）"
+        );
+    }
+    // X-10：part rar 族缺首卷——当前卷是 partN（N≥2）且同目录没有对应宽度的
+    // part1 入口（缺首卷组由扫描按代表入队）。整组按失败包处置并报告缺首卷，
+    // 不把余卷当独立包或交给引擎猜。附录 E：a.part02+a.part03 缺 01 → 一组
+    // 缺首卷失败，不当两个完整 rar 解压。
+    if let Some(reason) = missing_part_rar_first(archive) {
+        anyhow::bail!("part rar 分卷族缺首卷：{archive_rel}（{reason}）");
+    }
+    // X-10：数字尾卷族缺入口——.NNN（N≥2）且同目录没有 .001/.000。同上整组
+    // 失败处置，报告缺入口而不是笼统的引擎错误。
+    if let Some(stem) = missing_numbered_entry(archive) {
+        anyhow::bail!("数字尾卷族缺起始卷：{archive_rel}（未找到 {stem}.001 入口卷）");
+    }
+    Ok(())
+}
+
 fn missing_old_style_main(archive: &Path) -> bool {
     let Some(name) = archive.file_name().and_then(|s| s.to_str()) else {
         return false;
@@ -1610,7 +1622,7 @@ pub fn enqueue(job: &Job, archive: &Path, depth: u32) -> Result<()> {
     feature = "perf-tracing",
     tracing::instrument(target = "perf", name = "extract_batch", skip_all)
 )]
-pub fn extract_queued(job: &mut Job, engine: &SevenZip) -> Result<()> {
+pub fn extract_queued(job: &mut Job, resolve_engine: impl Fn() -> Result<SevenZip>) -> Result<()> {
     // 崩溃/强杀后 Drop 不会执行，.jchtools-work 下可能残留孤儿暂存目录；
     // 解压开始前清理超过 24 小时的残留（阈值远大于正常解压时长，避免误伤并发任务）。
     if let Ok(removed) = clean_orphan_staging(&job.root, Duration::from_hours(24)) {
@@ -1619,6 +1631,12 @@ pub fn extract_queued(job: &mut Job, engine: &SevenZip) -> Result<()> {
                 .status(format!("已清理 {removed} 个残留解压暂存目录"));
         }
     }
+    // 引擎懒解析（E-05/X-06 边界）：缺首卷/缺入口/歧义组/缺主包的整组隔离是
+    // 纯文件系统判定，不需要 7-Zip 引擎，先于引擎解析执行——无引擎宿主上这些
+    // 组仍按 X-06 隔离（回归 CI run 37131023474：引擎解析前置曾把缺首卷组整体
+    // 报错）。首个通过预检的真实解压包出现时才解析引擎；解析失败按 E-05 明确
+    // 报错并终止任务，不得把这些包静默跳过或全部隔离。
+    let mut engine: Option<SevenZip> = None;
     loop {
         job.context.control.checkpoint()?;
         let next: Option<(i64, String, u32, String)> = job
@@ -1673,8 +1691,20 @@ pub fn extract_queued(job: &mut Job, engine: &SevenZip) -> Result<()> {
             .execute("UPDATE archives SET state='running' WHERE id=?1", [id])?;
         let result = if depth >= job.config.max_depth {
             Err(anyhow::anyhow!("达到最大嵌套层数（X-08 防护上限）"))
+        } else if let Err(reason) =
+            volume_set(&path).and_then(|named| x10_volume_precheck(&relative, &path, &named))
+        {
+            Err(reason)
         } else {
-            engine.extract_one(job, &relative, depth)
+            if engine.is_none() {
+                engine = Some(resolve_engine()?);
+            }
+            // 上一分支保证引擎已解析；此处拿不到引用只能说明内部状态被破坏，
+            // 按 E-05 口径报错而不是 panic。
+            let Some(active) = engine.as_ref() else {
+                anyhow::bail!("共享 7-Zip 引擎未就绪（E-05：无引擎时解压必须明确报错并停止）");
+            };
+            active.extract_one(job, &relative, depth)
         };
         match result {
             Ok(true) => {
