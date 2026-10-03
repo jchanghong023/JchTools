@@ -4,7 +4,7 @@ use crate::{
     model::{Action, FileRecord, Snapshot, Summary},
 };
 use anyhow::Result;
-use rusqlite::{params, Connection, OptionalExtension, Params, Row};
+use rusqlite::{params, Connection, Params, Row};
 use serde::{de::DeserializeOwned, Serialize};
 use std::path::{Path, PathBuf};
 
@@ -167,20 +167,6 @@ impl Database {
         stmt.execute(params![rel])?;
         Ok(())
     }
-    pub fn mark_cleanable(&self, id: i64) -> Result<()> {
-        let mut stmt = self
-            .conn
-            .prepare_cached("UPDATE files SET cleanable=1 WHERE id=?1")?;
-        stmt.execute(params![id])?;
-        Ok(())
-    }
-    pub fn insert_keeper(&self, file_id: i64, hash: &str, name: &str, normal: &str) -> Result<()> {
-        let mut stmt = self
-            .conn
-            .prepare_cached("INSERT INTO keepers(file_id,hash,name,normal) VALUES(?1,?2,?3,?4)")?;
-        stmt.execute(params![file_id, hash, name, normal])?;
-        Ok(())
-    }
     /// 记录扫描污点：该目录里存在盘上可见但未入盘点的内容（被过滤/读取失败），
     /// 空目录规划据此（并向上传播）拒绝把它当作空目录。
     pub fn remember_taint(&self, rel: &str) -> Result<()> {
@@ -203,20 +189,6 @@ impl Database {
     pub fn file(&self, id: i64) -> Result<FileRecord> {
         let mut stmt = self.conn.prepare_cached(Self::FILE_BY_ID_SQL)?;
         stmt.query_row([id], file_row).map_err(Into::into)
-    }
-    /// 按计划顺序取一页重复候选（duplicate_order JOIN files，一条语句取整批，
-    /// 替代逐候选 file(id) 的主键单行查询）。seq 是 duplicate_order 的游标列。
-    pub fn duplicate_page(&self, after: i64, limit: i64) -> Result<Vec<(i64, FileRecord)>> {
-        let sql = format!(
-            "SELECT o.seq,{} FROM duplicate_order AS o CROSS JOIN files AS f ON f.id=o.id \
-             WHERE o.seq>?1 ORDER BY o.seq LIMIT ?2",
-            file_columns_qualified("f")
-        );
-        let mut stmt = self.conn.prepare_cached(&sql)?;
-        let rows = stmt.query_map(params![after, limit], |row| {
-            Ok((row.get::<_, i64>(0)?, file_row_offset(row, 1)?))
-        })?;
-        Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
     }
     pub fn add_action(&self, action: &Action) -> Result<i64> {
         let mut stmt = self
@@ -308,31 +280,6 @@ impl Database {
             .conn
             .prepare_cached("INSERT OR IGNORE INTO targets(path,file_id) VALUES(?1,?2)")?;
         Ok(stmt.execute(params![key, file_id])? == 1)
-    }
-    pub fn event_page(&self, before: i64, limit: usize) -> Result<Vec<String>> {
-        let before = if before <= 0 { i64::MAX } else { before };
-        let mut statement = self.conn.prepare("SELECT time,phase,result,source,target,reason FROM events WHERE id<?1 ORDER BY id DESC LIMIT ?2")?;
-        let rows = statement.query_map(
-            params![before, convert::usize_as_i64(limit.min(1000))],
-            |row| {
-                let values = (0..6)
-                    .map(|i| row.get::<_, String>(i))
-                    .collect::<rusqlite::Result<Vec<_>>>()?;
-                Ok(values.join(" | "))
-            },
-        )?;
-        let result = rows.collect::<rusqlite::Result<Vec<_>>>()?;
-        Ok(result)
-    }
-    pub fn file_by_path(&self, rel: &str) -> Result<Option<FileRecord>> {
-        Ok(self
-            .conn
-            .query_row(
-                &format!("SELECT {FILE_COLUMNS} FROM files WHERE rel=?1"),
-                [rel],
-                file_row,
-            )
-            .optional()?)
     }
 }
 pub const FILE_COLUMNS: &str =

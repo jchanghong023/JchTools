@@ -3,7 +3,6 @@ use crate::control::Control;
 use anyhow::{bail, Result};
 use std::{
     io::{BufRead, BufReader, Read, Write},
-    path::PathBuf,
     process::{Child, Command, Stdio},
     sync::mpsc,
     thread,
@@ -141,24 +140,6 @@ fn pump<R: Read + Send + 'static>(
         }
     })
 }
-/// Windows 系统工具绝对路径（`%SystemRoot%\System32\<name>`）。
-/// 避免按短名启动时被 PATH 中的同名伪造程序劫持。
-/// `name` 可含子目录，例如 `WindowsPowerShell\v1.0\powershell.exe`。
-#[cfg(windows)]
-pub fn system_tool(name: &str) -> PathBuf {
-    // 空串与缺失等价：否则会得到相对路径 `System32\...`，可被 CWD 劫持。
-    let root = match std::env::var("SystemRoot") {
-        Ok(root) if !root.trim().is_empty() => root,
-        _ => "C:\\Windows".into(),
-    };
-    PathBuf::from(root).join("System32").join(name)
-}
-
-#[cfg(not(windows))]
-pub fn system_tool(name: &str) -> PathBuf {
-    PathBuf::from(name)
-}
-
 /// 单流捕获上限：nettest/proxy 等调用方的正常输出很小；
 /// 超过上限说明输出异常膨胀，截断保存并标记 truncated，避免内存无界增长。
 pub(crate) const MAX_CAPTURE_BYTES: usize = 8 * 1024 * 1024;
@@ -245,15 +226,6 @@ pub fn run_with_timeout_cancel(
     cancel: &std::sync::atomic::AtomicBool,
 ) -> Result<CapturedOutput> {
     run_with_timeout_ext(command, None, timeout, Some(&CancelSource::Atomic(cancel)))
-}
-
-/// 同 [`run_with_timeout`]，可选写入 stdin 后再关闭管道（供 `bash -s` 类脚本）。
-pub fn run_with_timeout_input(
-    command: &mut Command,
-    stdin_data: Option<&[u8]>,
-    timeout: Duration,
-) -> Result<CapturedOutput> {
-    run_with_timeout_ext(command, stdin_data, timeout, None)
 }
 
 fn run_with_timeout_ext(

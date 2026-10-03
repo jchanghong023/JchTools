@@ -13,6 +13,26 @@ use std::{
     path::{Path, PathBuf},
 };
 
+/// events 表的测试观察入口：生产只写不读（读取 API 已随死代码清理移除），
+/// 行格式与写入列序一致：`time | phase | result | source | target | reason`。
+fn event_lines(db: &jchtools::db::Database, limit: usize) -> Vec<String> {
+    let mut statement = db
+        .conn
+        .prepare(
+            "SELECT time,phase,result,source,target,reason FROM events ORDER BY id DESC LIMIT ?1",
+        )
+        .unwrap();
+    let rows = statement
+        .query_map([i64::try_from(limit).unwrap()], |row| {
+            let values = (0..6)
+                .map(|i| row.get::<_, String>(i))
+                .collect::<rusqlite::Result<Vec<_>>>()?;
+            Ok(values.join(" | "))
+        })
+        .unwrap();
+    rows.collect::<rusqlite::Result<Vec<_>>>().unwrap()
+}
+
 /// 假引擎：一个存在但不可执行/非 PE 的文件。任何解压命令都会失败，
 /// 用于在无真实 7-Zip 的环境（CI / 本地默认）驱动「解压失败 → 隔离」路径。
 fn fake_engine(dir: &Path) -> PathBuf {
@@ -199,7 +219,7 @@ fn ambiguous_part_rar_group_is_quarantined_without_decoding() {
     assert!(quarantined.join("a.part02.rar").exists());
     assert!(!root.join("a.part1.rar").exists(), "原位置不得残留歧义卷");
     let db = Database::open(&result.directory).unwrap();
-    let events = db.event_page(0, 100).unwrap();
+    let events = event_lines(&db, 100);
     assert!(
         events.iter().any(|line| line.contains("命名歧义")),
         "失败原因必须列出命名歧义：{events:?}"
@@ -245,7 +265,7 @@ fn quarantine_failure_keeps_other_archives_processing() {
     );
     // U-10：隔离失败必须如实记录（不得写成已隔离），原因可查。
     let db = Database::open(&result.directory).unwrap();
-    let events = db.event_page(0, 100).unwrap();
+    let events = event_lines(&db, 100);
     assert!(
         events.iter().any(|line| line.contains("隔离失败")),
         "日志必须记录隔离失败事件：{events:?}"
@@ -416,12 +436,12 @@ fn quarantined_archive_reason_is_recorded_in_log() {
     )
     .unwrap();
     let db = Database::open(&result.directory).unwrap();
-    let events = db.event_page(0, 100).unwrap();
+    let events = event_lines(&db, 100);
     let line = events
         .iter()
         .find(|line| line.contains("移入解压失败"))
         .expect("日志必须记录隔离事件");
-    // 行格式为 time | phase | result | source | target | reason（db.rs 的 event_page）。
+    // 行格式为 time | phase | result | source | target | reason（event_lines 助手）。
     // 「解压失败」是「移入解压失败」的子串——contains 断言对它恒真；X-06/U-10 要求
     // 的是 reason 列有实际失败原因，必须按列拆开核对。
     let fields: Vec<&str> = line.split(" | ").collect();
@@ -619,7 +639,7 @@ fn old_style_tails_without_main_pack_are_grouped_and_quarantined() {
         "X-09 对照项原样保留（不碰、不隔离）"
     );
     let db = Database::open(&result.directory).unwrap();
-    let events = db.event_page(0, 100).unwrap();
+    let events = event_lines(&db, 100);
     let quarantined: Vec<&String> = events
         .iter()
         .filter(|line| line.contains("移入解压失败"))

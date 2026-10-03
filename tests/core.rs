@@ -22,6 +22,27 @@ use std::{
     sync::atomic::Ordering,
 };
 use tempfile::TempDir;
+
+/// events 表的测试观察入口：生产只写不读（读取 API 已随死代码清理移除），
+/// 行格式与写入列序一致：`time | phase | result | source | target | reason`。
+fn event_lines(db: &Database, limit: usize) -> Vec<String> {
+    let mut statement = db
+        .conn
+        .prepare(
+            "SELECT time,phase,result,source,target,reason FROM events ORDER BY id DESC LIMIT ?1",
+        )
+        .unwrap();
+    let rows = statement
+        .query_map([i64::try_from(limit).unwrap()], |row| {
+            let values = (0..6)
+                .map(|i| row.get::<_, String>(i))
+                .collect::<rusqlite::Result<Vec<_>>>()?;
+            Ok(values.join(" | "))
+        })
+        .unwrap();
+    rows.collect::<rusqlite::Result<Vec<_>>>().unwrap()
+}
+
 struct Fixture {
     temp: TempDir,
     root: PathBuf,
@@ -1882,7 +1903,7 @@ fn junction_named_like_category_skips_item_instead_of_failing_plan() {
     let task = f.plan(Config::default());
     let db = Database::open(&task.directory).unwrap();
     let moves = db.actions_page_filtered(0, 10, Some("move")).unwrap();
-    let events = db.event_page(i64::MAX, 20).unwrap();
+    let events = event_lines(&db, 20);
     drop(db);
     assert!(
         moves.is_empty(),
@@ -2430,7 +2451,7 @@ fn classification_target_never_enters_git_tree() {
         .into_iter()
         .filter(|a| a.source == "图片")
         .collect::<Vec<_>>();
-    let events = db.event_page(i64::MAX, 50).unwrap();
+    let events = event_lines(&db, 50);
     drop(db);
     assert_eq!(
         task.summary.scanned, 2,

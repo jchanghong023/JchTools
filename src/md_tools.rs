@@ -729,22 +729,6 @@ fn write_merge_entries(
     Ok(())
 }
 
-/// 按 M-04~M-07 把 `entries` 流式合并写入 `output`（兼容旧入口）。
-/// `overwrite=false` 且输出已存在时报错（调用方必须先完成覆盖确认）；
-/// 每个文件处理前回调 `on_file(当前序号, 总数)`，并在文件边界响应取消与进度。
-pub fn merge_markdown(
-    entries: &[MergeEntry],
-    output: &Path,
-    overwrite: bool,
-    control: &Control,
-    on_file: &dyn Fn(usize, usize) -> Result<()>,
-) -> Result<MergeStats> {
-    merge_markdown_with_events(entries, output, overwrite, control, &|event| match event {
-        MdProgress::FileStarted(index, total) => on_file(index, total),
-        MdProgress::FileCompleted(..) => Ok(()),
-    })
-}
-
 /// 拆分计划（M-09/M-10）：`bounds[i]` 是第 i 片的结束字节偏移（严格递增）。
 #[derive(Debug)]
 pub struct SplitPlan {

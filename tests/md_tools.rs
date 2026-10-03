@@ -56,7 +56,8 @@ fn blake3_smallest(bytes: &[u8]) -> u64 {
 
 fn merge_to(root: &Path, recursive: bool, output: &Path) -> md_tools::MergeStats {
     let entries = md_tools::scan_markdown(root, recursive, Some(output)).unwrap();
-    md_tools::merge_markdown(&entries, output, false, &Control::default(), &|_, _| Ok(())).unwrap()
+    md_tools::merge_markdown_with_events(&entries, output, false, &Control::default(), &|_| Ok(()))
+        .unwrap()
 }
 
 // 覆盖 M-02（不递归：只处理直属 *.md；扩展名不区分大小写）
@@ -365,12 +366,12 @@ fn merge_excludes_own_output_and_refuses_silent_overwrite() {
     write(&root.join("old-merged.md"), "上次合并的输出");
     // 第一次：输出到 old-merged.md（已存在）——不得静默覆盖
     let entries = md_tools::scan_markdown(root, true, Some(&root.join("old-merged.md"))).unwrap();
-    let error = md_tools::merge_markdown(
+    let error = md_tools::merge_markdown_with_events(
         &entries,
         &root.join("old-merged.md"),
         false,
         &Control::default(),
-        &|_, _| Ok(()),
+        &|_| Ok(()),
     )
     .expect_err("已存在且未确认覆盖必须报错");
     assert!(error.to_string().contains("未确认覆盖"), "{error:#}");
