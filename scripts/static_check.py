@@ -750,8 +750,8 @@ def slint_modal_gating() -> str:
 
 
 def build_rc_prefers_windows_kits() -> str:
-    # 与 process.rs 的 system_tool 防 PATH 劫持口径一致：build.rs 解析 rc.exe 必须
-    # 优先 Windows SDK 目录；PATH 只能作为回退（且回退时构建日志应有告警）。
+    # 防 PATH 劫持口径：build.rs 解析 rc.exe 必须优先 Windows SDK 目录；PATH 只能
+    # 作为回退（且回退时构建日志应有告警）。
     text = read_text(ROOT / "build.rs")
     kits = text.find("Windows Kits")
     from_path = text.find('var_os("PATH")')
