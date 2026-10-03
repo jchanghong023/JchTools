@@ -3765,7 +3765,7 @@
       "name": "conflict_resume_accepts_rewritten_rename_resolution",
       "ignored": false,
       "cfg": null,
-      "body": "2f5c226ad264d15c"
+      "body": "ca6b05a7f295226c"
     },
     {
       "file": "tests/git_tools.rs",
