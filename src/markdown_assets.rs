@@ -481,6 +481,24 @@ mod tests {
     // 后逐文件失败；page_readiness 允许任一场景可用即进入转换页）
     #[test]
     fn readiness_for_groups_checks_only_requested_scenarios() {
+        // 平台门槛前置分支（T-03：转 Markdown 仅支持 Windows 11 x64，不满足时
+        // 必须在启动前明确拒绝）。CI 与其他 Server 宿主（如 windows-2022 runner，
+        // build 20348 / Server 产品类型）上 platform_preflight 必须短路——此时
+        // 场景就绪组合不可观察，只断言平台错误如实透传；下方场景组合断言在
+        // Win11 开发机（fastcheck/fulltest 的 cargo test）上照常执行，覆盖不缩小。
+        // 背景：CI run 37128504702 在 Server runner 上因原测试无条件期待 Ok 而失败
+        //（validate_media 通过、readiness_for_groups 因平台门槛报错），该期望与
+        // T-03 相矛盾，故按合同纠正测试而非放宽产品行为。
+        if crate::markdown::platform_preflight().is_err() {
+            let platform_error =
+                crate::markdown::readiness_for_groups(&[crate::markdown::FormatGroup::Media])
+                    .expect_err("非 Windows 11 平台必须在启动前拒绝转换");
+            assert!(
+                platform_error.contains("Windows 11"),
+                "平台错误必须如实说明原因：{platform_error}"
+            );
+            return;
+        }
         let guard = redirect_component_env();
         let component = install_component(guard.root.path());
         // install_component 只建 media_component_dir 在位校验所需文件；

@@ -267,7 +267,7 @@ pub fn run(
 }
 
 #[cfg(windows)]
-fn platform_preflight() -> Result<(), String> {
+pub(crate) fn platform_preflight() -> Result<(), String> {
     use windows_sys::Win32::System::SystemInformation::{OSVERSIONINFOEXW, OSVERSIONINFOW};
 
     #[link(name = "ntdll")]
@@ -295,7 +295,7 @@ fn platform_preflight() -> Result<(), String> {
 }
 
 #[cfg(not(windows))]
-fn platform_preflight() -> Result<(), String> {
+pub(crate) fn platform_preflight() -> Result<(), String> {
     Err("转 Markdown 仅支持 Windows 11 x64".to_string())
 }
 
