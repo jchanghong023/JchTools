@@ -1851,6 +1851,13 @@
     },
     {
       "file": "src/markdown_document.rs",
+      "name": "pdf_page_count_rejects_indirect_count_reference",
+      "ignored": false,
+      "cfg": null,
+      "body": "76a5e3ee9687e703"
+    },
+    {
+      "file": "src/markdown_document.rs",
       "name": "powerpoint_page_count_reads_structure_without_extraction",
       "ignored": false,
       "cfg": null,
@@ -2302,7 +2309,7 @@
       "name": "part_rar_missing_first_groups_recognize_tail_only_sets",
       "ignored": false,
       "cfg": null,
-      "body": "2b7704a63f189cbc"
+      "body": "7060c601e16e335f"
     },
     {
       "file": "src/rules.rs",
@@ -3755,10 +3762,17 @@
     },
     {
       "file": "tests/git_tools.rs",
+      "name": "conflict_resume_accepts_rewritten_rename_resolution",
+      "ignored": false,
+      "cfg": null,
+      "body": "2f5c226ad264d15c"
+    },
+    {
+      "file": "tests/git_tools.rs",
       "name": "conflict_resume_refuses_extra_staged_files",
       "ignored": false,
       "cfg": null,
-      "body": "2001a69c42674d6f"
+      "body": "9947e0fae30568ff"
     },
     {
       "file": "tests/git_tools.rs",
@@ -3794,6 +3808,13 @@
       "ignored": false,
       "cfg": null,
       "body": "d39f74993376d4b7"
+    },
+    {
+      "file": "tests/git_tools.rs",
+      "name": "mirror_remote_config_refuses_to_start",
+      "ignored": false,
+      "cfg": null,
+      "body": "e18306f5dde49c4d"
     },
     {
       "file": "tests/git_tools.rs",
@@ -3892,6 +3913,13 @@
       "ignored": false,
       "cfg": null,
       "body": "117f7a2a3efb5134"
+    },
+    {
+      "file": "tests/git_tools.rs",
+      "name": "pushurl_config_refuses_to_start",
+      "ignored": false,
+      "cfg": null,
+      "body": "43eea2e9966f79ce"
     },
     {
       "file": "tests/git_tools.rs",
