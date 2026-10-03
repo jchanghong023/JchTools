@@ -7487,6 +7487,94 @@ mod gui_tests {
         let _ = std::fs::remove_dir_all(&git_dir);
     }
 
+    // 覆盖 G-03~G-08、G-13（GUI 入口端到端）：从 git-tools 页面启动任务，经引擎对
+    // 真实本地仓库逐文件提交并推送到裸远端，收尾把共享进度定格上屏。引擎行为已由
+    // tests/git_tools.rs 覆盖；本用例补 GUI 启动接缝（目录属性读取、事件回传、
+    // 完成态与 busy 复位）与真实推送结果的组合验证。
+    #[test]
+    fn git_start_pushes_real_repository_end_to_end() {
+        let dir = tempfile::tempdir().unwrap();
+        let git = crate::git_tools::find_git().expect("PATH 中需有可用 git");
+        let base = dir.path();
+        let run_git = |cwd: &std::path::Path, args: &[&str]| {
+            let ok = std::process::Command::new(&git)
+                .args(args)
+                .current_dir(cwd)
+                .status()
+                .is_ok_and(|status| status.success());
+            assert!(ok, "夹具 git 调用失败：git {args:?} @ {}", cwd.display());
+        };
+        // seed（含初始提交）→ 裸远端 → clone 出带 upstream 的工作仓库（与
+        // tests/git_tools.rs::fixture 同构）；仓库级提交身份对无全局配置的环境生效。
+        let seed = base.join("seed");
+        std::fs::create_dir_all(&seed).unwrap();
+        run_git(&seed, &["init", "-q"]);
+        std::fs::write(seed.join("README.md"), "init\n").unwrap();
+        run_git(&seed, &["add", "README.md"]);
+        run_git(&seed, &["commit", "-q", "-m", "init"]);
+        let remote = base.join("remote.git");
+        run_git(
+            base,
+            &["init", "-q", "--bare", &remote.display().to_string()],
+        );
+        run_git(
+            &seed,
+            &["push", "-q", &remote.display().to_string(), "master"],
+        );
+        let repo = base.join("repo");
+        run_git(
+            base,
+            &["clone", "-q", &remote.display().to_string(), "repo"],
+        );
+        run_git(&repo, &["config", "user.name", "JchTools Test"]);
+        run_git(&repo, &["config", "user.email", "test@jchtools.local"]);
+        // 未提交的新文件是任务的全部输入。
+        std::fs::write(repo.join("feature.md"), "from gui\n").unwrap();
+
+        let repo_text = repo.display().to_string();
+        with_gui(move |app| {
+            app.ui.invoke_select_tool("git-tools".into());
+            app.ui.set_git_repo(repo_text.into());
+            app.ui.invoke_git_start();
+            assert!(pump_until(app, || !app.ui.get_busy()), "Git 任务应正常收尾");
+            assert_eq!(
+                app.ui.get_git_state().as_str(),
+                "完成",
+                "收尾必须把共享状态定格上屏（G-13）：git_state={}",
+                app.ui.get_git_state()
+            );
+            assert_eq!(app.ui.get_git_done(), 1, "单个文件应计入完成数");
+            assert!(app.ui.get_git_total() >= 1, "总量应至少包含该文件");
+        })
+        .unwrap();
+
+        // 推送结果以远端为准（G-08）：裸远端 HEAD 与工作仓库一致，且工作区已干净。
+        let head = |cwd: &std::path::Path| {
+            let out = std::process::Command::new(&git)
+                .args(["rev-parse", "HEAD"])
+                .current_dir(cwd)
+                .output()
+                .unwrap();
+            assert!(out.status.success(), "rev-parse 失败");
+            String::from_utf8(out.stdout).unwrap().trim().to_string()
+        };
+        assert_eq!(
+            head(&repo),
+            head(&remote),
+            "GUI 启动的任务必须把提交推送到远端"
+        );
+        let status = std::process::Command::new(&git)
+            .args(["status", "--porcelain"])
+            .current_dir(&repo)
+            .output()
+            .unwrap();
+        assert!(
+            status.status.success() && status.stdout.is_empty(),
+            "提交后工作区应干净：{}",
+            String::from_utf8_lossy(&status.stdout)
+        );
+    }
+
     // 覆盖 X-02（清点为 0 时必须提示无可处理包：不解除清点门禁、确认保持不可用，
     // 不得启动空解压任务）
     #[test]
