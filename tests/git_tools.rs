@@ -12,7 +12,7 @@ use std::{
     fs,
     path::{Path, PathBuf},
     process::Command,
-    sync::{Arc, Mutex},
+    sync::{Arc, Mutex, OnceLock},
     thread::JoinHandle,
     time::{Duration, Instant},
 };
@@ -59,34 +59,97 @@ struct Fixture {
     _dir: tempfile::TempDir,
 }
 
+/// 模板仓库对：每测试二进制构建一次，逐用例以目录复制替代 7 个 git 进程建仓
+/// （2026-10-03 计时优化：原 fixture 约 0.7s/用例，复制为毫秒级）。建仓序列与
+/// 原 fixture 逐字相同（seed→bare→clone→仓库级身份）；TempDir 随静态存活到
+/// 进程退出，模板只读、用例只拿副本。
+struct RepoTemplate {
+    repo: PathBuf,
+    remote: PathBuf,
+    _keep: tempfile::TempDir,
+}
+
+static TEMPLATE: OnceLock<RepoTemplate> = OnceLock::new();
+
+fn template() -> &'static RepoTemplate {
+    TEMPLATE.get_or_init(|| {
+        let dir = tempfile::tempdir().unwrap();
+        let base = dir.path();
+        let seed = base.join("seed");
+        fs::create_dir_all(&seed).unwrap();
+        git_ok(&seed, &["init", "-q"]);
+        fs::write(seed.join("README.md"), "init\n").unwrap();
+        git_ok(&seed, &["add", "README.md"]);
+        git_ok(&seed, &["commit", "-q", "-m", "init"]);
+        let remote = base.join("remote.git");
+        git_ok(
+            base,
+            &["init", "-q", "--bare", &remote.display().to_string()],
+        );
+        git_ok(
+            &seed,
+            &["push", "-q", &remote.display().to_string(), "master"],
+        );
+        let repo = base.join("repo");
+        git_ok(
+            base,
+            &["clone", "-q", &remote.display().to_string(), "repo"],
+        );
+        // 仓库级提交身份：工具进程的 git commit 不带 -c 覆盖，CI runner 没有全局
+        // user.name/user.email 时提交必然失败。写进仓库本地配置对任何调用方生效。
+        git_ok(&repo, &["config", "user.name", "JchTools Test"]);
+        git_ok(&repo, &["config", "user.email", "test@jchtools.local"]);
+        RepoTemplate {
+            repo,
+            remote,
+            _keep: dir,
+        }
+    })
+}
+
+/// 递归复制目录（模板仓库只含普通文件与目录，无符号链接）。
+fn copy_tree(src: &Path, dst: &Path) {
+    fs::create_dir_all(dst).unwrap();
+    for entry in fs::read_dir(src).unwrap() {
+        let entry = entry.unwrap();
+        let target = dst.join(entry.file_name());
+        if entry.file_type().unwrap().is_dir() {
+            copy_tree(&entry.path(), &target);
+        } else {
+            fs::copy(entry.path(), &target).unwrap();
+        }
+    }
+}
+
 /// seed 仓库（含初始提交）→ bare 远端 → clone 出带 upstream 的工作仓库。
+/// 2026-10-03 计时优化：改为复制 [`template`] 的副本，并把副本仓库 origin 的
+/// 绝对路径改写到本用例自己的远端。git 在 config 里按转义双反斜杠存储 Windows
+/// 绝对路径（实测形态 `url = C:\\...\\remote.git`），三种可能形态都做替换。
 fn fixture() -> Fixture {
+    let tmpl = template();
     let dir = tempfile::tempdir().unwrap();
     let base = dir.path();
-    let seed = base.join("seed");
-    fs::create_dir_all(&seed).unwrap();
-    git_ok(&seed, &["init", "-q"]);
-    fs::write(seed.join("README.md"), "init\n").unwrap();
-    git_ok(&seed, &["add", "README.md"]);
-    git_ok(&seed, &["commit", "-q", "-m", "init"]);
     let remote = base.join("remote.git");
-    git_ok(
-        base,
-        &["init", "-q", "--bare", &remote.display().to_string()],
-    );
-    git_ok(
-        &seed,
-        &["push", "-q", &remote.display().to_string(), "master"],
-    );
     let repo = base.join("repo");
-    git_ok(
-        base,
-        &["clone", "-q", &remote.display().to_string(), "repo"],
+    copy_tree(&tmpl.remote, &remote);
+    copy_tree(&tmpl.repo, &repo);
+    let config = repo.join(".git").join("config");
+    let text = fs::read_to_string(&config).unwrap();
+    let old_slash = tmpl.remote.display().to_string();
+    let new_slash = remote.display().to_string();
+    let patched = text
+        .replace(
+            &old_slash.replace('\\', "\\\\"),
+            &new_slash.replace('\\', "\\\\"),
+        )
+        .replace(&old_slash, &new_slash)
+        .replace(&old_slash.replace('\\', "/"), &new_slash.replace('\\', "/"));
+    assert!(
+        patched != text,
+        "模板 origin 路径未出现在 .git/config：{}",
+        config.display()
     );
-    // 仓库级提交身份：工具进程的 git commit 不带 -c 覆盖，CI runner 没有全局
-    // user.name/user.email 时提交必然失败。写进仓库本地配置对任何调用方生效。
-    git_ok(&repo, &["config", "user.name", "JchTools Test"]);
-    git_ok(&repo, &["config", "user.email", "test@jchtools.local"]);
+    fs::write(&config, patched).unwrap();
     Fixture {
         repo,
         remote,

@@ -37,16 +37,10 @@ fn legacy_worker_without_capabilities_still_serves_requests() {
     common::cleanup_stray_engines();
     let temp = tempfile::tempdir().unwrap();
     let root = temp.path();
-    let status = Command::new("rustc")
-        .args([
-            "--edition=2021",
-            "tests/fixtures/shared_xberg_nocap.rs",
-            "-o",
-        ])
-        .arg(root.join("xberg.exe"))
-        .status()
-        .unwrap();
-    assert!(status.success());
+    common::mock_engine_copy(
+        "tests/fixtures/shared_xberg_nocap.rs",
+        &root.join("xberg.exe"),
+    );
     std::env::set_var("JCHTOOLS_TEST_STATE_DIR", root.join("state"));
     std::env::set_var("JCHTOOLS_TEST_BROKER_EXE", env!("CARGO_BIN_EXE_JchTools"));
     jchtools::xberg_settings::save(root).unwrap();

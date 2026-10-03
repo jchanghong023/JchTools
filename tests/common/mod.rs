@@ -6,9 +6,12 @@
 //! 不依赖时序运气。锁文件陈旧（超过 3 分钟无人续期）时视为持有者已死，直接抢占。
 
 use std::fs::OpenOptions;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::OnceLock;
 use std::time::{Duration, Instant};
+
+/// 仓库根（编译期定位 rustc 夹具源与 .tmp）。
+const ROOT: &str = env!("CARGO_MANIFEST_DIR");
 
 /// 会话锁守卫：Drop 时删除锁文件。
 pub(super) struct SessionLock {
@@ -57,10 +60,30 @@ pub(super) fn session_lock() -> SessionLock {
     }
 }
 
+/// 清场前的廉价探测（2026-10-03 计时优化：全量 PowerShell 扫杀每轮约 2s，而
+/// 孤儿回收 Job 落地后测试自身残留趋零）：按映像名粗查三个目标进程，全部缺席
+/// 即跳过全量清场。探测命中只会多走原全量路径（其内仍按命令行特征过滤，语义
+/// 不变）——例如用户自己的 GUI 在跑时照旧全量清场。
+fn any_engine_image_alive() -> bool {
+    ["JchTools.exe", "snap-ocr-worker.exe", "xberg.exe"]
+        .iter()
+        .any(|image| {
+            std::process::Command::new("tasklist")
+                .args(["/FI", &format!("IMAGENAME eq {image}"), "/FO", "CSV", "/NH"])
+                .output()
+                .is_ok_and(|out| {
+                    out.status.success() && String::from_utf8_lossy(&out.stdout).contains(image)
+                })
+        })
+}
+
 /// 清理本会话残留的引擎与代理（锁内调用）：上一轮失败的孤儿会占住
 /// 会话单引擎执法，让下一轮从头就「已有 Xberg」。只按命令行特征匹配
 /// 本项目派生的进程（`--xberg-broker`）与引擎映像名，不触碰其他进程。
 pub(super) fn cleanup_stray_engines() {
+    if !any_engine_image_alive() {
+        return;
+    }
     // 0) 先停截图服务本体：XB-22 常驻看护会把被杀的代理与引擎按自己的
     //    周期重新拉起，只杀代理/引擎永远赢不了（实测重跑 60s 忙碌超时）；
     //    与下方同口径，仅结束本项目派生的服务进程。GUI 打开时会按 XB-22
@@ -168,4 +191,47 @@ pub(super) fn ensure_child_reaper() {
         }
         job as isize
     });
+}
+
+/// 模拟引擎编译产物（按源文件分缓存）：每测试二进制只 rustc 编译一次。
+/// 2026-10-03 计时优化：此前每个用例现编一次（rustc 约 1.5~2s），引擎套件受
+/// 会话锁串行，成本 1:1 计入墙钟。产物按进程 PID 落在 .tmp/mock-engines/，
+/// 用例侧经 [`mock_engine_copy`] 复制到自己的临时根，互不写同一个文件。
+static MOCK_ENGINE_SHARED: OnceLock<PathBuf> = OnceLock::new();
+static MOCK_ENGINE_LEGACY: OnceLock<PathBuf> = OnceLock::new();
+
+/// 把模拟引擎（`tests/fixtures/` 下按源文件名区分）编译一次并复制到 `dest`。
+pub(super) fn mock_engine_copy(source: &str, dest: &Path) {
+    let cache = if source.ends_with("shared_xberg_nocap.rs") {
+        &MOCK_ENGINE_LEGACY
+    } else {
+        &MOCK_ENGINE_SHARED
+    };
+    let compiled = cache.get_or_init(|| compile_mock_engine(source));
+    std::fs::copy(compiled, dest).unwrap_or_else(|error| {
+        panic!(
+            "复制模拟引擎失败（{source} -> {}）：{error}",
+            dest.display()
+        )
+    });
+}
+
+/// 编译模拟引擎到 .tmp/mock-engines/<pid>-<stem>.exe（cwd 固定为仓库根，
+/// 与夹具源相对路径的既有口径一致）。
+fn compile_mock_engine(source: &str) -> PathBuf {
+    let stem = Path::new(source)
+        .file_stem()
+        .map_or_else(|| "mock".into(), |name| name.to_string_lossy().into_owned());
+    let out = Path::new(ROOT)
+        .join(".tmp/mock-engines")
+        .join(format!("{}-{stem}.exe", std::process::id()));
+    let _ = std::fs::create_dir_all(out.parent().unwrap());
+    let status = std::process::Command::new("rustc")
+        .current_dir(ROOT)
+        .args(["--edition=2021", source, "-o"])
+        .arg(&out)
+        .status()
+        .unwrap_or_else(|error| panic!("无法启动 rustc（{source}）：{error}"));
+    assert!(status.success(), "模拟引擎编译失败（{source}）：{status:?}");
+    out
 }

@@ -178,12 +178,7 @@ fn broker_survives_client_exit_and_obeys_explicit_stop() {
         let root = xberg_settings::state_dir().unwrap().join("engine");
         if action == "start" {
             std::fs::create_dir(&root).unwrap();
-            assert!(Command::new("rustc")
-                .args(["--edition=2021", "tests/fixtures/shared_xberg.rs", "-o"])
-                .arg(root.join("xberg.exe"))
-                .status()
-                .unwrap()
-                .success());
+            common::mock_engine_copy("tests/fixtures/shared_xberg.rs", &root.join("xberg.exe"));
             xberg_settings::save(&root).unwrap();
             xberg_runtime::resume_background().unwrap();
             let state = request_waiting_for_session(&root);

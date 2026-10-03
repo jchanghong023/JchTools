@@ -19,12 +19,7 @@ use std::{
 };
 
 fn prepare(root: &Path) {
-    let status = Command::new("rustc")
-        .args(["--edition=2021", "tests/fixtures/shared_xberg.rs", "-o"])
-        .arg(root.join("xberg.exe"))
-        .status()
-        .unwrap();
-    assert!(status.success());
+    common::mock_engine_copy("tests/fixtures/shared_xberg.rs", &root.join("xberg.exe"));
     std::env::set_var("JCHTOOLS_TEST_STATE_DIR", root.join("state"));
     std::env::set_var("JCHTOOLS_TEST_BROKER_EXE", env!("CARGO_BIN_EXE_JchTools"));
     jchtools::xberg_settings::save(root).unwrap();
