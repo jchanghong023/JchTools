@@ -3093,7 +3093,7 @@
       "name": "classification_target_never_enters_git_tree",
       "ignored": false,
       "cfg": null,
-      "body": "5f33a891785b3646"
+      "body": "2031040b5de6fcfb"
     },
     {
       "file": "tests/core.rs",
@@ -3352,7 +3352,7 @@
       "name": "junction_named_like_category_skips_item_instead_of_failing_plan",
       "ignored": false,
       "cfg": "windows",
-      "body": "b63ff5206ec7860f"
+      "body": "b989ac2bf4b3adf4"
     },
     {
       "file": "tests/core.rs",
@@ -4115,7 +4115,7 @@
       "name": "merge_excludes_own_output_and_refuses_silent_overwrite",
       "ignored": false,
       "cfg": null,
-      "body": "5350da424a3576c8"
+      "body": "e67cd425e060be67"
     },
     {
       "file": "tests/md_tools.rs",
@@ -4402,7 +4402,7 @@
       "name": "ambiguous_part_rar_group_is_quarantined_without_decoding",
       "ignored": false,
       "cfg": null,
-      "body": "1ec7c0054e0e5ae7"
+      "body": "0f10d262467ca589"
     },
     {
       "file": "tests/split.rs",
@@ -4479,7 +4479,7 @@
       "name": "old_style_tails_without_main_pack_are_grouped_and_quarantined",
       "ignored": false,
       "cfg": null,
-      "body": "fcdfa153be2d626f"
+      "body": "eed6ceaca01620f3"
     },
     {
       "file": "tests/split.rs",
@@ -4507,7 +4507,7 @@
       "name": "quarantine_failure_keeps_other_archives_processing",
       "ignored": false,
       "cfg": null,
-      "body": "f9e411590a9b0d80"
+      "body": "7739f9418eeed97a"
     },
     {
       "file": "tests/split.rs",
@@ -4521,7 +4521,7 @@
       "name": "quarantined_archive_reason_is_recorded_in_log",
       "ignored": false,
       "cfg": null,
-      "body": "b025507b0451cdad"
+      "body": "07c4c202d27a1219"
     },
     {
       "file": "tests/split.rs",
