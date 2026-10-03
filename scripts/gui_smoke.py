@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """JchTools GUI OS 级冒烟测试（pywinauto / UIA）.
 
-四条关键路径冒烟（2026-09-18 两工具拆分后）：
+关键路径冒烟（2026-09-18 两工具拆分后；S6-S14 为转 Markdown GUI E2E 扩展）：
   S1 启动并正常退出；
   S2 目录整理：选择目录 → 开始分析（只读，无确认框）→ 计划生成（不执行）；
   S3 目录整理全链路：开始分析 → 确认执行 → 整理完成；
@@ -9,6 +9,21 @@
      冲突自动改名、嵌套内容落盘，失败包保留在「解压失败」（H-07/X-05/X-06）。
   S5 转 Markdown 基本链路：启动 → 切到「转 Markdown」→ 选输入/输出 → 开始 → 停止 → 关闭
      （T 分区附录 A GUI E2E 最小段；需 Xberg 已配置且组件就绪，默认序列不含 S5，须显式 --stages 请求）。
+  S6 Xberg 目录选择与保存：设置页填入有效目录 → 「使用此目录」校验并持久保存
+     （XB-20；需 JCHTOOLS_SMOKE_XBERG_DIR 指向包含 xberg.exe 的有效目录，应用配置经
+     JCHTOOLS_TEST_STATE_DIR 隔离到临时目录，不写真实用户配置）。
+  S7 重启恢复：S6 保存后完全退出，再启动时设置页自动恢复来源与目录（XB-18/XB-21）。
+  S8 无效目录提示与重新选择：不存在的路径与缺 xberg.exe 的目录都被明确拒绝，
+     且界面不锁死、可再次输入重试（T-05/T-06）。
+  S9 组件缺失状态与初始化入口：未配置时转换页明确提示未就绪、开始按钮禁用、
+     初始化入口与「前往设置」可见且不自动下载（XB-19/O-06；无需任何资产）。
+  S10 输出层级与同名策略：保留层级两份同名输入各自成文；平铺只处理排序第一份、
+     其余按重复跳过计数（T-11；需真实组件，不隔离环境配置）。
+  S11 已有结果跳过：重复运行不覆盖既有产物，跳过数量如实显示（T-12）。
+  S12 输出子树排除：输出目录位于输入内时整棵输出子树不作为新输入（T-09）。
+  S13 部分失败与完成统计：单文件失败不终止批次，成功/失败可区分（T-16/T-24）。
+  S14 运行中关闭确认与安全停止：转换运行中点标题栏「关闭」弹出「停止任务并关闭」，
+     确认后当前文件结束、进程退出码 0（U-09/T-23；需 JCHTOOLS_S5_MEDIA 媒体样本）。
 
 用法：
     python scripts/gui_smoke.py --exe target/debug/JchTools.exe --data <已生成的测试数据目录>
@@ -25,11 +40,13 @@ import json
 import os
 import shutil
 import sqlite3
+import struct
 import subprocess
 import sys
 import tempfile
 import time
 import zipfile
+import zlib
 from collections import Counter
 from pathlib import Path
 from typing import TYPE_CHECKING, cast
@@ -54,8 +71,24 @@ COMPLETION_TIMEOUT = 240
 EDIT_ROW_TOLERANCE_PX = 20
 DEFAULT_EXE = "target/debug/JchTools.exe"
 DEFAULT_DATA = ".tmp/gui-smoke/data"
-# 冒烟阶段清单：S1-S4 无需转 Markdown 资产；S5 需要（默认序列不含 S5，须显式 --stages 请求）。
-SUPPORTED_STAGES = ("S1", "S2", "S3", "S4", "S5")
+# 冒烟阶段清单：S1-S4 无需转 Markdown 资产；S5 需要（默认序列不含 S5，须显式 --stages 请求）；
+# S6-S9 只需隔离的应用配置目录（JCHTOOLS_TEST_STATE_DIR）；S10-S14 复用验收环境的真实组件。
+SUPPORTED_STAGES = (
+    "S1",
+    "S2",
+    "S3",
+    "S4",
+    "S5",
+    "S6",
+    "S7",
+    "S8",
+    "S9",
+    "S10",
+    "S11",
+    "S12",
+    "S13",
+    "S14",
+)
 DEFAULT_STAGES = "S1,S2,S3,S4"
 CONVERT_BUSY_TIMEOUT = 60  # 点击「开始转换」后等待「停止任务」出现的上限（秒）
 _S5_LAST_ATTEMPT = 2  # S5 重按「开始转换」的末次序号（共 3 次，0 起）
@@ -64,6 +97,13 @@ CONVERT_STOP_TIMEOUT = 300  # 停止请求后等待「开始转换」恢复可�
 CONVERT_DIR_ROWS = 2
 EXTRACT_ACK = "我已确认：成功原包及分卷永久删除（不可恢复）"
 ORGANIZE_ACK = "我已确认目录、规则及可能的永久删除行为（不可恢复）"
+# 设置/转换页状态文案锚点（与 ui/app.slint 的文案保持同步，改动必须两侧同改）。
+SETTINGS_SAVED_TEXT = "配置已持久保存"
+SETTINGS_NEED_SETUP_TEXT = "请选择已有目录或主动下载 Xberg"
+CONVERT_NEED_RUNTIME_TEXT = "请先保存共享 Xberg 运行目录"
+CONVERT_DONE_MARKER = "总耗时"
+STOP_AND_CLOSE_TITLE = "停止任务并关闭"
+STOP_AND_CLOSE_BUTTON = "停止并关闭"
 
 # pywinauto/pywin32 窗口操作在窗口建立/销毁竞态下抛出的瞬态错误族；
 # 此元组是唯一放行集合，出现新瞬态类型须显式补充并说明：
@@ -375,23 +415,26 @@ def assert_clean_exit(tag: str, *, killed: bool, code: int | None) -> None:
         raise RuntimeError(msg)
 
 
-def run_stage(
+def run_stage(  # noqa: PLR0913 - 脚手架的收尾钩子与子进程环境天然成组
     tag: str,
     exe: str,
     body: Callable[[WindowSpecification], None],
     *,
     pre: Callable[[], None] | None = None,
     after: Callable[[], None] | None = None,
+    env: dict[str, str] | None = None,
 ) -> None:
-    """S1-S5 共用的启动/拆除脚手架：Popen →（pre）→ wait_window → body → 统一收尾.
+    """S1-S14 共用的启动/拆除脚手架：Popen →（pre）→ wait_window → body → 统一收尾.
 
     拆除顺序（含异常路径）与拆分前逐语义相同：窗口非 None 才 close_app（wait_window
     抛错时 window 仍为 None，跳过 close 但仍 _wait_exit_or_kill）→ _wait_exit_or_kill →
     after 钩子（_wait_exit_or_kill 抛异常时 after 被跳过，S5 的 scratch 清理依赖此顺序）。
     pre 在 Popen 之后、窗口等待之前执行；pre 抛异常时进程同样不被清理（S5 媒体缺失
-    路径的现状语义，刻意保留）。收尾断言与最终 PASS 行统一在此打印。
+    路径的现状语义，刻意保留）。env 非 None 时传给子进程（S6-S9 用
+    JCHTOOLS_TEST_STATE_DIR 隔离应用配置，不写真实用户配置）。
+    收尾断言与最终 PASS 行统一在此打印。
     """
-    proc = subprocess.Popen([exe])
+    proc = subprocess.Popen([exe], env=env)
     window: WindowSpecification | None = None
     if pre is not None:
         pre()
@@ -687,6 +730,461 @@ def s5_markdown_basic_chain(exe: str) -> None:
     run_stage("S5", exe, body, pre=prepare_scratch, after=cleanup)
 
 
+# ---------------------------------------------------------------- S6-S14：转 Markdown / 设置页阶段。
+
+
+def require(condition: object, message: str) -> None:
+    """S6-S14 的断言 helper：bandit B101 禁用 assert，统一 raise 口径."""
+    if not condition:
+        raise RuntimeError(message)
+
+
+def goto_settings(window: WindowSpecification) -> None:
+    click(window, find_button(window, "设置"))
+
+
+def set_settings_custom_dir(window: WindowSpecification, path: str) -> None:
+    """填设置页的 Xberg 目录输入框：取「使用此目录」按钮上方最近的 Edit.
+
+    侧栏搜索框在窗口很上方，紧贴「使用此目录」上方的 Edit 才是目录输入框。
+    """
+    button = find_button(window, "使用此目录")
+    button_rect = button.rectangle()
+    candidates = [
+        edit for edit in window.descendants(control_type="Edit") if edit.rectangle().bottom <= button_rect.top
+    ]
+    if not candidates:
+        msg = "设置页未找到 Xberg 目录输入框"
+        raise RuntimeError(msg)
+    edit = min(candidates, key=lambda e: button_rect.top - e.rectangle().bottom)
+    edit.set_edit_text(path)
+
+
+def wait_text_containing(
+    window: WindowSpecification,
+    needle: str,
+    timeout: int = COMPLETION_TIMEOUT,
+    exclude: str = "",
+) -> str:
+    """等待任一 Text 控件包含 needle 并返回其全文（设置/转换页状态断言的共用判据）.
+
+    exclude 非空时跳过与它完全相同的旧文案——重试类断言用它确保等到的是
+    新一次操作的结果，而不是仍留在界面上的上一次输出。
+    """
+    deadline = time.time() + timeout
+    last_seen = ""
+    while time.time() < deadline:
+        try:
+            for text in window.descendants(control_type="Text"):
+                value = text.window_text() or ""
+                if needle in value and value != exclude:
+                    return value
+                if value:
+                    last_seen = value
+        except TRANSIENT_GUI_ERRORS:
+            pass
+        time.sleep(0.5)
+    msg = f"等待界面文本「{needle}」超时（最后可见文本：{last_seen[:200]}）"
+    raise RuntimeError(msg)
+
+
+def find_check(window: WindowSpecification, title: str) -> WindowSpecification:
+    """按标题返回 CheckBox 控件规格（与 find_button 同构，类型注解一致）.
+
+    可见性由调用处的 wait 保证。
+    """
+    return window.child_window(title=title, control_type="CheckBox")
+
+
+def isolated_state_env(scratch_state: Path) -> dict[str, str]:
+    """S6-S9 的子进程环境：应用配置（config.sqlite3）隔离到临时目录.
+
+    JCHTOOLS_TEST_STATE_DIR 由 src/xberg_settings.rs 在 debug 构建中识别，
+    避免冒烟改写真实用户配置（XB-18）。
+    """
+    env = dict(os.environ)
+    env["JCHTOOLS_TEST_STATE_DIR"] = str(scratch_state)
+    return env
+
+
+def smoke_xberg_dir() -> str:
+    """S6/S7 需要的有效 Xberg 目录（含 xberg.exe；由验收环境提供）."""
+    directory = os.environ.get("JCHTOOLS_SMOKE_XBERG_DIR", "")
+    if not directory or not Path(directory).joinpath("xberg.exe").is_file():
+        message = "S6/S7 需要包含 xberg.exe 的有效 Xberg 目录：设置 JCHTOOLS_SMOKE_XBERG_DIR 指向该目录"
+        raise RuntimeError(message)
+    return str(Path(directory).resolve())
+
+
+def s6_save_xberg_directory(exe: str) -> None:
+    """S6 设置页选择并保存 Xberg 目录：校验通过、状态显示已持久保存."""
+    state = Path(tempfile.mkdtemp(prefix="jchtools-gui-smoke-s6-"))
+    directory = smoke_xberg_dir()
+    try:
+
+        def body(window: WindowSpecification) -> None:
+            goto_settings(window)
+            set_settings_custom_dir(window, directory)
+            click(window, find_button(window, "使用此目录"))
+            _ = wait_text_containing(window, SETTINGS_SAVED_TEXT)
+
+        run_stage("S6", exe, body, env=isolated_state_env(state))
+    finally:
+        shutil.rmtree(state, ignore_errors=True)
+    print("S6 PASS：Xberg 目录经「使用此目录」校验并持久保存（应用配置已隔离）")
+
+
+def s7_restart_restores_saved_directory(exe: str) -> None:
+    """S7 重启恢复：保存后完全退出，再启动时来源与目录自动恢复（XB-18/XB-21）."""
+    state = Path(tempfile.mkdtemp(prefix="jchtools-gui-smoke-s7-"))
+    directory = smoke_xberg_dir()
+    env = isolated_state_env(state)
+    try:
+
+        def save(window: WindowSpecification) -> None:
+            goto_settings(window)
+            set_settings_custom_dir(window, directory)
+            click(window, find_button(window, "使用此目录"))
+            _ = wait_text_containing(window, SETTINGS_SAVED_TEXT)
+
+        def restored(window: WindowSpecification) -> None:
+            goto_settings(window)
+            _ = wait_text_containing(window, SETTINGS_SAVED_TEXT)
+            _ = wait_text_containing(window, "当前来源：用户提供的目录")
+
+        run_stage("S7-first", exe, save, env=env)
+        run_stage("S7", exe, restored, env=env)
+    finally:
+        shutil.rmtree(state, ignore_errors=True)
+    print("S7 PASS：重启后自动恢复保存的 Xberg 目录与来源，无需重新输入")
+
+
+def s8_invalid_directory_is_rejected_and_retryable(exe: str) -> None:
+    """S8 无效目录提示与重新选择：不存在的路径与缺 xberg.exe 的目录都被明确拒绝."""
+    state = Path(tempfile.mkdtemp(prefix="jchtools-gui-smoke-s8-"))
+    empty = state / "empty-dir"
+    empty.mkdir()
+    env = isolated_state_env(state)
+    try:
+
+        def body(window: WindowSpecification) -> None:
+            goto_settings(window)
+            # 校验失败文案固定以「Xberg 资产 … 缺失」指认首个缺失成员
+            # （不存在的路径与空目录都走这条口径；初始文案不含该前缀）。
+            # 1) 不存在的路径：明确报错并指认缺失（不是无声失败）。
+            set_settings_custom_dir(window, str(state / "does-not-exist"))
+            click(window, find_button(window, "使用此目录"))
+            first = wait_text_containing(window, "Xberg 资产")
+            require("缺失" in first, f"错误应指认缺失项：{first}")
+            # 2) 存在但缺 xberg.exe 的目录：同样被拒绝（排除上一次的旧文案）。
+            set_settings_custom_dir(window, str(empty))
+            click(window, find_button(window, "使用此目录"))
+            second = wait_text_containing(window, "Xberg 资产", exclude=first)
+            require("缺失" in second, f"错误应指认缺失项：{second}")
+            # 3) 重新选择：界面未锁死，可再次输入并触发校验（状态重新进入处理中）。
+            set_settings_custom_dir(window, str(state / "another-invalid"))
+            click(window, find_button(window, "使用此目录"))
+            _ = wait_text_containing(window, "Xberg 资产", exclude=second)
+
+        run_stage("S8", exe, body, env=env)
+    finally:
+        shutil.rmtree(state, ignore_errors=True)
+    print("S8 PASS：无效目录明确拒绝且可重新选择（提示指认缺失项，不锁死界面）")
+
+
+def s9_unconfigured_state_shows_reason_and_no_autostart(exe: str) -> None:
+    """S9 组件缺失状态与初始化入口：未配置时如实显示未就绪，不自动下载."""
+    state = Path(tempfile.mkdtemp(prefix="jchtools-gui-smoke-s9-"))
+    env = isolated_state_env(state)
+    try:
+
+        def body(window: WindowSpecification) -> None:
+            goto_converter(window)
+            _ = wait_text_containing(window, CONVERT_NEED_RUNTIME_TEXT)
+            start = find_button(window, "开始转换")
+            _ = start.wait("visible", timeout=TIMEOUT)
+            require(not start.is_enabled(), "未配置 Xberg 时「开始转换」必须禁用")
+            initialize = find_button(window, "初始化可选组件")
+            _ = initialize.wait("visible", timeout=TIMEOUT)
+            require(not initialize.is_enabled(), "未确认目录时初始化入口必须禁用")
+            _ = find_button(window, "前往设置").wait("visible", timeout=TIMEOUT)
+            goto_settings(window)
+            _ = wait_text_containing(window, SETTINGS_NEED_SETUP_TEXT)
+            _ = find_button(window, "下载 Xberg").wait("visible enabled", timeout=TIMEOUT)
+            # O-06：不做任何下载动作——缺失状态如实可见即可，冒烟不得触发真实联网。
+
+        run_stage("S9", exe, body, env=env)
+    finally:
+        shutil.rmtree(state, ignore_errors=True)
+    print("S9 PASS：未配置状态如实显示原因与初始化入口，开始按钮禁用（不自动下载）")
+
+
+def check_flat_output(window: WindowSpecification) -> None:
+    """勾选「平铺输出」.
+
+    Slint 的 Check 不暴露 UIA TogglePattern，无法直读勾选状态；用随 convert-flat
+    切换的提示文案（app.slint 输出目录卡片）作为状态锚：点击后等「平铺时同名结果
+    只处理排序第一份」出现，未出现按点击落空重试（奇数次点击收敛到勾选态）。
+    """
+    _ = find_check(window, "平铺输出").wait("visible", timeout=TIMEOUT)
+    for _attempt in range(3):
+        click(window, find_check(window, "平铺输出"))
+        try:
+            _ = wait_text_containing(window, "平铺时同名结果只处理排序第一份", timeout=8)
+        except RuntimeError:
+            continue
+        return
+    msg = "「平铺输出」未能勾选（状态提示始终未切换为平铺文案）"
+    raise RuntimeError(msg)
+
+
+def start_conversion_and_wait_done(window: WindowSpecification, previous_done: str = "") -> str:
+    """点击「开始转换」（带重试）并等待批次完成，返回新的完成统计行文本.
+
+    小批次可能在 UIA 轮询间隔内整批完成，「停止任务」一闪而过——启动成功的
+    判据是「停止任务」出现**或**出现与上一轮不同的完成统计行（总耗时数值必变），
+    两者任一即停止重试点击；只有两者都不出现（点击落空或按钮不可用）才重按。
+    """
+    finished = ""
+    for attempt in range(3):
+        click(window, find_button(window, "开始转换"))
+        deadline = time.time() + CONVERT_BUSY_TIMEOUT
+        while time.time() < deadline:
+            try:
+                if find_button(window, "停止任务").exists(timeout=0.1):
+                    finished = ""
+                    break
+                for text in window.descendants(control_type="Text"):
+                    value = text.window_text() or ""
+                    if CONVERT_DONE_MARKER in value and value != previous_done:
+                        finished = value
+                        break
+            except TRANSIENT_GUI_ERRORS:
+                pass
+            if finished:
+                break
+            time.sleep(0.5)
+        if finished:
+            return finished
+        if attempt == _S5_LAST_ATTEMPT:
+            _ = find_button(window, "停止任务").wait("visible enabled", timeout=TIMEOUT)
+            msg = "转换既未进入运行态也未完成（开始按钮可能未生效）"
+            raise RuntimeError(msg)
+    return wait_text_containing(window, CONVERT_DONE_MARKER, exclude=previous_done)
+
+
+def s10_output_layout_and_flat_duplicate_policy(exe: str) -> None:
+    """S10 输出层级（保留/平铺）与同名策略：层次两份、平铺一份+重复跳过计数."""
+    scratch = Path(tempfile.mkdtemp(prefix="jchtools-gui-smoke-s10-"))
+    source = scratch / "input"
+    layered = scratch / "out-layered"
+    flat = scratch / "out-flat"
+    for part in ("a", "b"):
+        (source / part).mkdir(parents=True)
+        _ = (source / part / "同名.txt").write_text("same name, different path\n", encoding="utf-8")
+    layered.mkdir()
+    flat.mkdir()
+    try:
+
+        def body(window: WindowSpecification) -> None:
+            goto_converter(window)
+            # 层次模式：两份同名输入各自成文（T-11 默认保留层级）。
+            set_converter_dirs(window, str(source), str(layered))
+            metrics = start_conversion_and_wait_done(window)
+            require((layered / "a" / "同名_txt.md").is_file(), "层次输出应保留相对层级 a/")
+            require((layered / "b" / "同名_txt.md").is_file(), "层次输出应保留相对层级 b/")
+            require("重复结果跳过 0" in metrics, f"层次模式不应有同名跳过：{metrics}")
+            # 平铺模式：同名只处理排序第一份，其余按重复跳过计数。
+            set_converter_dirs(window, str(source), str(flat))
+            check_flat_output(window)
+            metrics = start_conversion_and_wait_done(window, previous_done=metrics)
+            produced = sorted(p.name for p in flat.glob("*.md"))
+            require(produced == ["同名_txt.md"], f"平铺只应有一份结果：{produced}")
+            require("重复结果跳过 1" in metrics, f"平铺同名跳过必须如实计数：{metrics}")
+
+        run_stage("S10", exe, body)
+    finally:
+        shutil.rmtree(scratch, ignore_errors=True)
+    print("S10 PASS：层级保留两份同名输入；平铺只处理一份并如实计数重复跳过")
+
+
+S11_SOURCE_FILES = ("one.txt", "two.txt")
+
+
+def s11_existing_results_are_skipped_untouched(exe: str) -> None:
+    """S11 已有结果跳过：重复运行不覆盖既有产物，跳过数量如实显示（T-12）."""
+    scratch = Path(tempfile.mkdtemp(prefix="jchtools-gui-smoke-s11-"))
+    source = scratch / "input"
+    output = scratch / "out"
+    source.mkdir()
+    output.mkdir()
+    for name in S11_SOURCE_FILES:
+        _ = (source / name).write_text(f"content of {name}\n", encoding="utf-8")
+    try:
+
+        def body(window: WindowSpecification) -> None:
+            goto_converter(window)
+            set_converter_dirs(window, str(source), str(output))
+            first = start_conversion_and_wait_done(window)
+            require(
+                "已有结果跳过 0" in first or "跳过" not in first,
+                f"首轮应全部转换：{first}",
+            )
+            existing = {path.name: (file_digest(path), path.stat().st_mtime_ns) for path in output.glob("*.md")}
+            require(
+                len(existing) == len(S11_SOURCE_FILES),
+                f"前置：两份产物（实得 {list(existing)}）",
+            )
+            second = start_conversion_and_wait_done(window, previous_done=first)
+            require(
+                f"已有结果跳过 {len(S11_SOURCE_FILES)}" in second,
+                f"重复运行必须如实显示跳过数量：{second}",
+            )
+            for path in output.glob("*.md"):
+                before = existing[path.name]
+                require(
+                    (file_digest(path), path.stat().st_mtime_ns) == before,
+                    f"已有结果的内容与修改时间必须保持不变（T-12）：{path.name}",
+                )
+
+        run_stage("S11", exe, body)
+    finally:
+        shutil.rmtree(scratch, ignore_errors=True)
+    print("S11 PASS：已有结果跳过不覆盖，内容与修改时间不变，跳过数量如实显示")
+
+
+def _tiny_png(width: int = 16, height: int = 16) -> bytes:
+    """构造最小合法灰度 PNG（无文字，转换成功即可，OCR 内容不作断言）."""
+    raw = b"".join(b"\x00" + b"\xff" * width for _ in range(height))
+
+    def chunk(kind: bytes, data: bytes) -> bytes:
+        return struct.pack(">I", len(data)) + kind + data + struct.pack(">I", zlib.crc32(kind + data) & 0xFFFFFFFF)
+
+    return (
+        b"\x89PNG\r\n\x1a\n"
+        + chunk(b"IHDR", struct.pack(">IIBBBBB", width, height, 8, 0, 0, 0, 0))
+        + chunk(b"IDAT", zlib.compress(raw))
+        + chunk(b"IEND", b"")
+    )
+
+
+def s12_output_subtree_is_excluded_from_scan(exe: str) -> None:
+    """S12 输出子树排除：输出目录位于输入内时整棵输出子树不作为新输入（T-09）."""
+    scratch = Path(tempfile.mkdtemp(prefix="jchtools-gui-smoke-s12-"))
+    source = scratch / "input"
+    output = source / "results"
+    (source / "prep").mkdir(parents=True)
+    _ = (source / "prep" / "page.png").write_bytes(_tiny_png())
+    output.mkdir()
+    _ = (output / "inner.png").write_bytes(_tiny_png())
+    try:
+
+        def body(window: WindowSpecification) -> None:
+            goto_converter(window)
+            set_converter_dirs(window, str(source), str(output))
+            metrics = start_conversion_and_wait_done(window)
+            require(
+                (output / "prep" / "page_png.md").is_file(),
+                f"输出子树外的输入应正常转换：{metrics}",
+            )
+            require(
+                not (output / "inner_png.md").exists(),
+                "输出子树内的文件不得作为新输入",
+            )
+            require(
+                not (output / "results" / "inner_png.md").exists(),
+                "不得重复嵌套输出子树",
+            )
+            require((output / "inner.png").is_file(), "输出子树内的源文件保持原样")
+
+        run_stage("S12", exe, body)
+    finally:
+        shutil.rmtree(scratch, ignore_errors=True)
+    print("S12 PASS：输出子树整树排除，不因生成了 Markdown 而重复转换")
+
+
+def s13_partial_failure_isolated_with_counts(exe: str) -> None:
+    """S13 部分失败与完成统计：单文件失败不终止批次，成功/失败可区分（T-16/T-24）."""
+    scratch = Path(tempfile.mkdtemp(prefix="jchtools-gui-smoke-s13-"))
+    source = scratch / "input"
+    output = scratch / "out"
+    source.mkdir()
+    output.mkdir()
+    _ = (source / "good.txt").write_text("convertible text\n", encoding="utf-8")
+    _ = (source / "broken.png").write_bytes(b"\x89PNG\r\n\x1a\ntruncated")
+    try:
+
+        def body(window: WindowSpecification) -> None:
+            goto_converter(window)
+            set_converter_dirs(window, str(source), str(output))
+            metrics = start_conversion_and_wait_done(window)
+            require("成功 1" in metrics, f"可转换文件必须成功（统计行：{metrics}）")
+            require("失败 1" in metrics, f"损坏文件必须计入失败（统计行：{metrics}）")
+            require((output / "good_txt.md").is_file(), "成功产物必须在场")
+            require(
+                not (output / "broken_png.md").exists(),
+                "失败文件不得留下半成品（T-25）",
+            )
+
+        run_stage("S13", exe, body)
+    finally:
+        shutil.rmtree(scratch, ignore_errors=True)
+    print("S13 PASS：部分失败不终止批次，成功/失败计数与产物边界一致")
+
+
+def close_title_bar(window: WindowSpecification) -> None:
+    """点标题栏「关闭」：同名按钮取纵坐标最小者（提示条也有「关闭」按钮）."""
+    with contextlib.suppress(*TRANSIENT_GUI_ERRORS):
+        buttons = [
+            button for button in window.descendants(control_type="Button") if (button.window_text() or "") == "关闭"
+        ]
+        if not buttons:
+            msg = "未找到「关闭」按钮"
+            raise RuntimeError(msg)
+        activate(window)
+        min(buttons, key=lambda b: b.rectangle().top).click_input()
+        time.sleep(0.3)
+
+
+def s14_close_during_conversion_confirms_and_stops(exe: str) -> None:
+    """S14 运行中关闭确认与安全停止：U-09 确认框 → T-23 安全停止 → 退出码 0."""
+    scratch_box: list[Path] = []
+
+    def prepare_scratch() -> None:
+        scratch = Path(tempfile.mkdtemp(prefix="jchtools-gui-smoke-s14-"))
+        (scratch / "input").mkdir()
+        (scratch / "output").mkdir()
+        media = os.environ.get("JCHTOOLS_S5_MEDIA", "")
+        if not media or not Path(media).is_file():
+            message = "S14 需要媒体样本以保持转换运行态：设置 JCHTOOLS_S5_MEDIA 指向一个真实媒体文件"
+            raise RuntimeError(message)
+        _ = shutil.copyfile(media, scratch / "input" / Path(media).name)
+        scratch_box.append(scratch)
+
+    def body(window: WindowSpecification) -> None:
+        scratch = scratch_box[0]
+        goto_converter(window)
+        set_converter_dirs(window, str(scratch / "input"), str(scratch / "output"))
+        for attempt in range(3):
+            click(window, find_button(window, "开始转换"))
+            try:
+                _ = find_button(window, "停止任务").wait("visible enabled", timeout=CONVERT_BUSY_TIMEOUT // 3)
+                break
+            except timings.TimeoutError:
+                if attempt == _S5_LAST_ATTEMPT:
+                    raise
+        close_title_bar(window)
+        _ = wait_text_containing(window, STOP_AND_CLOSE_TITLE, timeout=TIMEOUT)
+        click(window, find_button(window, STOP_AND_CLOSE_BUTTON))
+        # 确认后任务在当前文件结束（T-23），进程随后自然退出；退出断言由 run_stage 收尾执行。
+
+    def cleanup() -> None:
+        shutil.rmtree(scratch_box[0], ignore_errors=True)
+
+    run_stage("S14", exe, body, pre=prepare_scratch, after=cleanup)
+    print("S14 PASS：运行中关闭弹出「停止任务并关闭」，确认后安全停止并退出")
+
+
 def parse_stages(stages_arg: str) -> list[str]:
     """解析并校验 --stages：逗号分隔、大小写不敏感、未知阶段立即失败."""
     stages = [token.strip().upper() for token in stages_arg.split(",") if token.strip()]
@@ -720,6 +1218,27 @@ def run_dataset_stages(exe: str, data: Path, stages: list[str]) -> None:
         shutil.rmtree(scratch, ignore_errors=True)
 
 
+def ensure_smoke_target_is_disposable(data: Path) -> None:
+    """整理/解压阶段会真实改动数据：只允许对一次性测试副本操作.
+
+    仓库内仅放行 .tmp/（默认 .tmp/gui-smoke/data 就在这里）；用户主目录与
+    盘符根一律拒绝。
+    """
+    repo = Path(__file__).resolve().parent.parent
+    home = Path.home().resolve()
+    under_repo_tmp = repo / ".tmp" in (data, *data.parents)
+    if (data == repo or repo in data.parents) and not under_repo_tmp:
+        msg = "拒绝在仓库目录内执行 GUI 整理冒烟（请使用 .tmp/gui-smoke/data 或其它副本）"
+        raise RuntimeError(msg)
+    if not under_repo_tmp and (data == home or home in data.parents):
+        msg = "拒绝在用户主目录内执行 GUI 整理冒烟（请使用一次性测试副本）"
+        raise RuntimeError(msg)
+    # 盘符根：parts 只有 ('D:\\',) 一层；'D:\\foo' 是 2 层，不得误杀。
+    if data.drive and len(data.parts) <= 1:
+        msg = f"拒绝在盘符根目录执行整理冒烟：{data}"
+        raise RuntimeError(msg)
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description="JchTools GUI 冒烟测试")
     _ = parser.add_argument("--exe", default=DEFAULT_EXE)
@@ -742,27 +1261,26 @@ def main() -> int:
     if not data.is_dir():
         msg = f"找不到测试数据目录 {data}"
         raise RuntimeError(msg)
-    # S3 会真实执行整理：只允许对一次性测试副本操作。
-    # 仓库内仅放行 .tmp/（默认 .tmp/gui-smoke/data 就在这里）；其它路径拒绝。
-    repo = Path(__file__).resolve().parent.parent
-    home = Path.home().resolve()
-    under_repo_tmp = repo / ".tmp" in (data, *data.parents)
-    if (data == repo or repo in data.parents) and not under_repo_tmp:
-        msg = "拒绝在仓库目录内执行 GUI 整理冒烟（请使用 .tmp/gui-smoke/data 或其它副本）"
-        raise RuntimeError(msg)
-    if not under_repo_tmp and (data == home or home in data.parents):
-        msg = "拒绝在用户主目录内执行 GUI 整理冒烟（请使用一次性测试副本）"
-        raise RuntimeError(msg)
-    # 盘符根：parts 只有 ('D:\\',) 一层；'D:\\foo' 是 2 层，不得误杀。
-    if data.drive and len(data.parts) <= 1:
-        msg = f"拒绝在盘符根目录执行整理冒烟：{data}"
-        raise RuntimeError(msg)
+    ensure_smoke_target_is_disposable(data)
 
     if "S1" in stages:
         s1_launch_and_exit(str(exe))
     run_dataset_stages(str(exe), data, stages)
-    if "S5" in stages:
-        s5_markdown_basic_chain(str(exe))
+    stage_runners = {
+        "S5": s5_markdown_basic_chain,
+        "S6": s6_save_xberg_directory,
+        "S7": s7_restart_restores_saved_directory,
+        "S8": s8_invalid_directory_is_rejected_and_retryable,
+        "S9": s9_unconfigured_state_shows_reason_and_no_autostart,
+        "S10": s10_output_layout_and_flat_duplicate_policy,
+        "S11": s11_existing_results_are_skipped_untouched,
+        "S12": s12_output_subtree_is_excluded_from_scan,
+        "S13": s13_partial_failure_isolated_with_counts,
+        "S14": s14_close_during_conversion_confirms_and_stops,
+    }
+    for stage, runner in stage_runners.items():
+        if stage in stages:
+            runner(str(exe))
     return 0
 
 
