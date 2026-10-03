@@ -19,8 +19,7 @@ use slint::ComponentHandle;
 
 use crate::capture_win::BgrImage;
 use crate::result_window::{ProgressWindow, ResultWindowHandle, SettingsWindow};
-use crate::shared_xberg::SharedXbergClient as XbergWorkerClient;
-use crate::xberg_worker::{ClientError, SnapshotState};
+use crate::shared_xberg::{ClientError, SharedXbergClient, SnapshotState};
 
 /// 单次识别错误（O-30 分类：取消 / 超时 / 推理失败 / 子进程退出；消息不含图像内容）。
 #[derive(Debug, Clone)]
@@ -295,7 +294,7 @@ fn verify_component(dir: &Path) -> Result<(), LoadFailure> {
 
 /// 启动 Xberg 推理子进程并完成预热（模型懒加载发生在首个识别请求，
 /// 预热图触发加载后 `snapshot_state` 才会是 ready，O-13）。
-fn start_inference(root: &Path) -> Result<XbergWorkerClient, LoadFailure> {
+fn start_inference(root: &Path) -> Result<SharedXbergClient, LoadFailure> {
     let font = root.join("fonts").join("NotoSansMonoCJKsc-Regular.otf");
     if !font.is_file() {
         return Err(LoadFailure::NotConfigured(
@@ -306,7 +305,7 @@ fn start_inference(root: &Path) -> Result<XbergWorkerClient, LoadFailure> {
     verify_component(&component_dir)?;
     crate::xberg_runtime::validate_assets(&component_dir, "snapshot")
         .map_err(LoadFailure::Failed)?;
-    let mut client = XbergWorkerClient::connect(&component_dir);
+    let mut client = SharedXbergClient::connect(&component_dir);
     warm_up(&mut client)?;
     Ok(client)
 }
@@ -329,7 +328,7 @@ fn warm_up_failure(kind: Option<&str>, message: &str) -> String {
 
 /// 预热：向常驻子进程发一张 1×1 白图，触发 Xberg 侧模型懒加载，并确认通道
 /// 状态进入 ready（O-13 预热行为；无文字图片是成功响应）。
-fn warm_up(client: &mut XbergWorkerClient) -> Result<(), LoadFailure> {
+fn warm_up(client: &mut SharedXbergClient) -> Result<(), LoadFailure> {
     let white = BgrImage::from_vec(1, 1, vec![255, 255, 255])
         .map_err(|_| LoadFailure::Failed("预热图像无效".into()))?;
     let png = white.png_bytes().map_err(LoadFailure::Failed)?;
@@ -373,7 +372,7 @@ fn ocr_error(error: ClientError) -> OcrError {
 
 /// 识别一张裁剪图：内存 PNG 编码后交给 Xberg 子进程，取回布局文本。
 fn recognize(
-    client: &mut XbergWorkerClient,
+    client: &mut SharedXbergClient,
     image: &BgrImage,
     cancel: &AtomicBool,
 ) -> Result<Option<String>, OcrError> {
@@ -391,7 +390,7 @@ fn worker(
     events: &mpsc::Sender<Command>,
     cancel: &AtomicBool,
 ) {
-    let mut client: Option<XbergWorkerClient> = None;
+    let mut client: Option<SharedXbergClient> = None;
     let mut engine_pid = None;
     let mut verified_root = None;
     loop {

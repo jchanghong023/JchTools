@@ -12,12 +12,6 @@ name = "snap_ocr_worker"
 name = "snap-ocr-worker"
 path = "src/main.rs"
 
-# 协议测试的模拟子进程：模拟 `xberg worker` 的 stdout 行为（id 回显/状态/成功/失败/EOF）。
-# 仅供 tests/xberg_client.rs 经 CARGO_BIN_EXE_* 引用，不随资产发布。
-[[bin]]
-name = "mock-xberg-worker"
-path = "src/bin/mock-xberg-worker.rs"
-
 [dependencies]
 directories-next = "2.0"
 rusqlite = { version = "0.32", features = ["bundled"] }
@@ -45,9 +39,9 @@ slint-build = "=1.17.1"
 
 [target.'cfg(windows)'.dependencies]
 # 服务/托盘/热键/管道/截图/自启动所需（模块头注有各 feature 归属；集成期裁剪）。
-# JobObjects 供推理子进程的 kill-on-close 兜底（xberg_worker::InferenceJob，
-# O-16/E2'-1）；System_IO 供写入看门狗的 CancelIoEx（请求写阶段超时取消，
-# xberg_worker::WriteWatchdog，XB-08）。
+# System_IO 供共享运行时 Windows 代理（#[path] 编入的 src/xberg_runtime_windows.rs）
+# 的 CancelSynchronousIo 与带 OVERLAPPED 的 ConnectNamedPipe；JobObjects 供代理
+# 进程的 kill-on-close 兜底。
 windows-sys = { version = "0.59", features = [
     "Win32_Foundation", "Win32_System_Diagnostics_ToolHelp",
     "Win32_Graphics_Gdi",

@@ -13,11 +13,9 @@
 | `src/service/tray.rs` | 原生 Win32 消息循环：托盘图标、全局热键、冻结框选窗（独立于 Slint） |
 | `src/capture_win.rs` | 鼠标所在显示器物理像素 GDI 截图；内存 BGR→PNG，不落盘（O-29） |
 | `src/result_window.rs` | Slint 结果窗/设置窗（`ui/result.slint`，O-21/O-22） |
-| `src/shared_xberg.rs` | 共享引擎客户端（经主包 runtime 代理发 `ocr_snapshot` / `snapshot_state`） |
-| `src/xberg_worker.rs` | 直接驱动 `xberg worker` 子进程的客户端（id 关联、600 秒超时、取消/超时=终止进程、JobObject kill-on-close） |
-| `src/bin/mock-xberg-worker.rs` | 协议测试桩，仅供 `tests/xberg_client.rs` 经 `CARGO_BIN_EXE_*` 引用 |
+| `src/shared_xberg.rs` | 共享引擎客户端（经主包 runtime 代理发 `ocr_snapshot` / `snapshot_state`）；错误与模型状态类型（`ClientError`/`SnapshotState`）也定义在此 |
 
-**识别路径注意**：服务的实际识别走 `SharedXbergClient`（XB-14 唯一共享引擎）；`service.rs` 内以 `use crate::shared_xberg::SharedXbergClient as XbergWorkerClient` 别名引用，勿据名字误判为独立子进程路径。`xberg_worker.rs` 的独立子进程客户端现服务于 `examples/xberg_ocr.rs` 无头对照入口；`tests/xberg_client.rs` 用 mock 子进程验证其协议，不经过 `SharedXbergClient`，不能作为共享引擎或真实 OCR 验收（与根文档口径一致）。
+**识别路径注意**：服务的识别走 `SharedXbergClient`（XB-14 唯一共享引擎）。旧直连 `xberg worker` 子进程的完整路径（`src/xberg_worker.rs` 客户端、`examples/xberg_ocr.rs` 无头对照、`tests/xberg_client.rs` 协议测试、`src/bin/mock-xberg-worker.rs` 测试桩）已于 2026-10-04 经用户确认删除，本 crate 内不存在第二条引擎路径。
 
 ## 入口与命令
 
@@ -26,11 +24,9 @@
 ```powershell
 cargo test --manifest-path optional/snap-ocr-worker/Cargo.toml --all-targets
 cargo clippy --manifest-path optional/snap-ocr-worker/Cargo.toml --all-targets -- -D warnings
-cargo run --manifest-path optional/snap-ocr-worker/Cargo.toml --example xberg_ocr -- <Xberg组件目录> <image.png> <输出.json>
 ```
 
-- `src/main.rs` 只接受 `--capabilities`（版本握手，打印协议版本 JSON）、`--xberg-broker`（经主程序代理的内部入口）、`--service` / `--service--autostart`（后台服务）；无参启动退出码 2 并提示从主界面启动。bin 面：`snap-ocr-worker`（产品）与 `mock-xberg-worker`（测试专用）。
-- `examples/xberg_ocr.rs` 是同图对照的开发验收入口（需真实组件目录与 PNG），不是产品链路。
+- `src/main.rs` 只接受 `--capabilities`（版本握手，打印协议版本 JSON）、`--xberg-broker`（经主程序代理的内部入口）、`--service` / `--service--autostart`（后台服务）；无参启动退出码 2 并提示从主界面启动。bin 目标仅 `snap-ocr-worker`（产品）。
 - 热键/托盘到结果窗的真实桌面 E2E、多 DPI、服务生命周期不在现有自动化内；未执行时如实标注未验证。
 
 ## 与主包的耦合边界（改动须双端同步）
@@ -44,8 +40,8 @@ cargo run --manifest-path optional/snap-ocr-worker/Cargo.toml --example xberg_oc
 
 - 仅 Windows（`cfg(windows)` 贯穿服务、截图与托盘）；Slint 锁 `=1.17.1`，与主程序同版本。
 - 界面与错误文案中文；错误按 O-30 分类并去敏，不含截图内容或用户路径。截图字节只在内存经 base64 传子进程（O-29）；Xberg 子进程 stderr 直接丢弃，不进日志。
-- worker 协议为 stdio JSON 行；取消即终止子进程（无单请求取消），超时与进程退出同路径终止、不自动重试（XB-08）。
-- 测试专用环境变量与常量：管道前缀 `jchtools-snap-ocr-test-`（测试绝不触碰真实管道与 launcher.json）、`JCHTOOLS_SNAP_OCR_TEST_ASSET_ROOT`（测试资产根覆盖）、`MOCK_XBERG_MODE`（mock bin 模式）；`USERNAME` / `USERPROFILE` 用作管道身份哈希回退。
+- 识别经共享 Xberg 运行时代理（XB-14 唯一共享进程，不再直连子进程）；取消、超时与进程退出的语义边界见根仓 `src/xberg_runtime.rs` 与 XB 分区需求，服务侧按 `ClientError` 分类处置并触发重载，不自动重试（XB-08）。
+- 测试专用环境变量与常量：管道前缀 `jchtools-snap-ocr-test-`（测试绝不触碰真实管道与 launcher.json）、`JCHTOOLS_SNAP_OCR_TEST_ASSET_ROOT`（测试资产根覆盖）；`USERNAME` / `USERPROFILE` 用作管道身份哈希回退。
 - 日志经主包 `logging.rs` 落状态目录 `logs/`（按天轮转、保留 14 天，P-10），初始化失败安静退化。
 - lint 硬门禁在本 crate `[lints]` 独立声明：`warnings`、clippy pedantic 及 `unwrap_used` / `expect_used` / `dbg_macro` / `todo` / `unimplemented` 全 deny，编辑须维持零告警；本 crate 不设 `perf-tracing` 特性，但保留共享 `logging.rs` 引用 cfg 所需的 `unexpected_cfgs` check-cfg 声明。
 - 源码注释中的任务编号（O-xx / XB-xx / P-xx）是事实规格来源，改动前先查对应需求文档。
