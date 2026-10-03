@@ -303,6 +303,40 @@ fn download_runtime_with(
     progress: &mut impl FnMut(String),
     downloader: &mut dyn AssetDownloader,
 ) -> Result<PathBuf, String> {
+    // P-10：可选组件下载是关键功能任务，开始/结束统计必须落盘（单次下载
+    // 内部的重试与代理回退日志由下载原语记录）。
+    tracing::info!(
+        tag = %manifest.xberg.tag,
+        size_bytes = manifest.xberg.archive_size_bytes,
+        "Xberg 运行时下载任务开始"
+    );
+    let started = std::time::Instant::now();
+    let result = download_runtime_task(manifest, cancel, progress, downloader);
+    let elapsed_ms = u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX);
+    match &result {
+        Ok(installed) => tracing::info!(
+            elapsed_ms,
+            installed = %installed.display(),
+            "Xberg 运行时下载任务完成"
+        ),
+        Err(reason) if reason.contains("取消") => {
+            tracing::info!(elapsed_ms, reason = %reason, "Xberg 运行时下载任务已取消");
+        }
+        Err(reason) => tracing::error!(
+            elapsed_ms,
+            reason = %reason,
+            "Xberg 运行时下载任务失败"
+        ),
+    }
+    result
+}
+
+fn download_runtime_task(
+    manifest: &AssetManifest,
+    cancel: &AtomicBool,
+    progress: &mut impl FnMut(String),
+    downloader: &mut dyn AssetDownloader,
+) -> Result<PathBuf, String> {
     ensure_not_cancelled(cancel)?;
     let base = crate::xberg_settings::state_dir()?.join("xberg-downloads");
     fs::create_dir_all(&base).map_err(|e| e.to_string())?;

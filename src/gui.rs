@@ -5528,6 +5528,15 @@ pub fn run_with_engine_overrides(
     EVENT_LOOP_DRAIN.with(|slot| {
         let _ = slot.borrow_mut().take();
     });
+    // P-10：界面正常收场留痕（guard 在本函数结尾 drop 时刷盘）。
+    tracing::info!(
+        reason = loop_result
+            .as_ref()
+            .err()
+            .map(ToString::to_string)
+            .unwrap_or_default(),
+        "图形界面退出"
+    );
     loop_result?;
     Ok(())
 }

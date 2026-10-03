@@ -12,6 +12,22 @@
 //! 记录范围（P-10）：进程间通信（共享代理/引擎生命周期、通信断裂与重建、
 //! 请求失败）、网络出口（可选组件下载与初始化失败）、关键功能任务
 //! （开始/结束统计、逐文件失败原因）。只记路径与诊断文本，不记文件正文。
+//!
+//! # 格式与口径（Agent 只凭日志定位问题的约定）
+//!
+//! - 每条记录单行，时间戳为 UTC RFC 3339、微秒精度（满足毫秒要求），
+//!   形如 `2026-10-02T23:51:52.138532Z`，天然按时间可排序。
+//! - 结构化字段承载可变数据（`elapsed_ms`、`attempt`、`reason`、`pid` 等），
+//!   消息文本保持稳定可搜索；target 即模块名（`jchtools::<module>`），
+//!   共享模块在 snap-ocr-worker 内编译时 target 前缀是 `snap_ocr_worker`。
+//! - 级别语义：`INFO` = 关键任务/网络/IPC 的开始与结束统计及重要状态切换；
+//!   `WARN` = 可继续运行的异常（重试、回退、逐文件失败、组件不可用）；
+//!   `ERROR` = 使当前任务以失败收场的问题（重试耗尽、任务级失败、panic）。
+//!   默认过滤 `jchtools=info` 保证上述记录在正常运行配置下全部落盘。
+//! - 跨事件关联：共享引擎请求携带全局唯一请求 `id`（`<pid>-<nanos>-<seq>`），
+//!   客户端与代理两侧日志可按该 id 对齐；下载重试按 `attempt` 重建全过程。
+//! - 敏感边界：不记文件正文、不记凭据类字段；URL 只来自本仓库固定清单，
+//!   出现敏感值时按摘要而非原值记录。
 
 use std::path::Path;
 use std::time::{Duration, SystemTime};
@@ -33,6 +49,9 @@ pub struct Guard {
 }
 
 /// 初始化诊断日志并返回句柄；句柄须绑定到活到进程退出前的作用域。
+///
+/// 进程角色按命令行首参自动识别（`gui` / `xberg-broker` / `snap-ocr-service`），
+/// 写进首条启动记录，Agent 凭它区分同一日志目录里多进程的记录。
 ///
 /// 防御性初始化：目录/文件建不出、全局 subscriber 已被占用时安静返回 `None`，
 /// 业务不受影响。返回 `Some` 表示日志已生效（同时接管 panic 钩子）。
@@ -103,8 +122,23 @@ pub fn init(state_dir: &Path) -> Option<Guard> {
     };
     let workers = workers?;
     install_panic_hook();
-    tracing::info!(pid = std::process::id(), "诊断日志已初始化（P-10）");
+    tracing::info!(
+        role = detect_role(),
+        version = env!("CARGO_PKG_VERSION"),
+        pid = std::process::id(),
+        log_dir = %directory.display(),
+        "诊断日志已初始化（P-10）"
+    );
     Some(Guard { _workers: workers })
+}
+
+/// 进程角色识别：与三个入口（main.rs / worker main.rs）的分支条件同口径。
+fn detect_role() -> &'static str {
+    match std::env::args().nth(1).as_deref() {
+        Some("--xberg-broker") => "xberg-broker",
+        Some(flag) if flag.starts_with("--service") => "snap-ocr-service",
+        _ => "gui",
+    }
 }
 
 /// panic 先入日志再走默认钩子：GUI 与代理进程的崩溃现场必须有磁盘记录。
@@ -158,6 +192,8 @@ mod tests {
     // 覆盖 P-10：初始化后 WARN/ERROR 必须落到磁盘日志文件。
     // 全局 subscriber 每进程只有一个：本测试若与其他 init 竞争，
     // try_init 失败方安静退化，断言只要求磁盘文件出现记录。
+    // INFO 级与毫秒时间戳的落盘口径由 broker 实跑日志另行复核（P-10 格式
+    // 约定见本模块头注释）；不在此扩展断言以免触动可信基 test-baseline。
     #[test]
     fn warns_and_errors_reach_disk_file() {
         let temp = tempfile::tempdir().unwrap();

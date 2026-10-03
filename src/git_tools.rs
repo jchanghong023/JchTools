@@ -67,6 +67,13 @@ impl GitShared {
     fn set_current(&self, current: &str) {
         Self::set_text(&self.current, current);
     }
+    /// 当前任务终态（供收尾日志读取；锁中毒时返回空串，不影响业务）。
+    fn state(&self) -> String {
+        self.state
+            .lock()
+            .map(|guard| guard.clone())
+            .unwrap_or_default()
+    }
     fn set_text(slot: &Mutex<String>, value: &str) {
         if let Ok(mut guard) = slot.lock() {
             guard.clear();
@@ -1087,6 +1094,11 @@ fn push_with_retry(
                         ));
                     }
                     MergeOutcome::Retryable(reason) => {
+                        tracing::warn!(
+                            stage = "fetch_merge",
+                            reason = %reason,
+                            "Git fetch/merge 失败，进入退避重试"
+                        );
                         (ctx.log)(&format!("fetch/merge 失败：{reason}"));
                         if !ctx.wait_retry(attempt) {
                             return StepOutcome::Cancelled;
@@ -1095,6 +1107,11 @@ fn push_with_retry(
                 }
             }
             PushOutcome::Retryable(reason) => {
+                tracing::warn!(
+                    stage = "push",
+                    reason = %reason,
+                    "Git push 失败，进入退避重试"
+                );
                 (ctx.log)(&format!("push 失败：{reason}"));
                 if !ctx.wait_retry(attempt) {
                     return StepOutcome::Cancelled;
@@ -1207,6 +1224,29 @@ fn finish_without_changes(git: &Path, info: &RepoInfo, ctx: &Ctx<'_>) -> String 
 /// 详细过程经 `log`/`status` 回调实时上报（G-14）。
 /// `unit` 为退避基准（生产用 [`BACKOFF_UNIT`]，测试注入小值）。
 pub fn run(
+    git: &Path,
+    repo: &Path,
+    control: &Control,
+    shared: &Arc<GitShared>,
+    log: &dyn Fn(&str),
+    status: &dyn Fn(&str),
+    unit: Duration,
+) -> String {
+    // P-10：Git 工具是关键功能任务，开始/结束统计（含终态与耗时）必须落盘；
+    // 逐次 git 子进程的失败语义由下方重试日志与返回文本承载。
+    tracing::info!(repo = %repo.display(), "Git 任务开始");
+    let started = std::time::Instant::now();
+    let result = run_task(git, repo, control, shared, log, status, unit);
+    tracing::info!(
+        repo = %repo.display(),
+        state = %shared.state(),
+        elapsed_ms = u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX),
+        "Git 任务结束"
+    );
+    result
+}
+
+fn run_task(
     git: &Path,
     repo: &Path,
     control: &Control,

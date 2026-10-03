@@ -237,6 +237,29 @@ pub(super) fn request(
     timeout: Duration,
     cancel: &AtomicBool,
 ) -> Result<Value, String> {
+    let started = Instant::now();
+    let result = request_via_broker(root, value, timeout, cancel);
+    if let Err(reason) = &result {
+        // P-10：客户端侧请求失败（连接代理/等待/协议不兼容）必须落盘；代理
+        // 侧另有处理日志，两侧按请求 id 对齐。业务层（转换/识别）失败时
+        // 另记业务语义错误，此处只补技术边界（命令、耗时、阶段原因）。
+        tracing::warn!(
+            command = value["command"].as_str().unwrap_or(""),
+            id = value["id"].as_str().unwrap_or(""),
+            elapsed_ms = u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX),
+            reason = %reason,
+            "共享引擎请求失败（客户端侧）"
+        );
+    }
+    result
+}
+
+fn request_via_broker(
+    root: &Path,
+    value: &Value,
+    timeout: Duration,
+    cancel: &AtomicBool,
+) -> Result<Value, String> {
     let root = std::fs::canonicalize(root).map_err(|e| format!("Xberg 目录不可读：{e}"))?;
     let pipe = connect(true)?;
     let envelope = json!({"runtime_dir":root, "request":value});

@@ -19,6 +19,11 @@ fn main() {
         }
         Some(flag @ ("--service" | "--service--autostart")) => {
             let autostart = flag == "--service--autostart";
+            // P-10：截图服务进程同样落盘诊断日志；初始化失败安静退化不影响服务。
+            let _log_guard = snap_ocr_worker::xberg_settings::state_dir()
+                .ok()
+                .as_deref()
+                .and_then(snap_ocr_worker::logging::init);
             if let Err(error) = snap_ocr_worker::service::run_service(autostart) {
                 eprintln!("截图服务启动失败：{error}");
                 std::process::exit(1);

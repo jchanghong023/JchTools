@@ -592,6 +592,33 @@ pub fn merge_markdown_with_events(
     control: &Control,
     on_event: &dyn Fn(MdProgress) -> Result<()>,
 ) -> Result<MergeStats> {
+    // P-10：MD 合并是关键功能任务，开始/结束统计必须落盘；取消按用户意图
+    // 记 INFO，不与失败混级。
+    tracing::info!(files = entries.len(), output = %output.display(), "MD 合并任务开始");
+    let started = std::time::Instant::now();
+    let result = merge_task(entries, output, overwrite, control, on_event);
+    let elapsed_ms = u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX);
+    match &result {
+        Ok(stats) => tracing::info!(elapsed_ms, files = stats.files, "MD 合并任务完成"),
+        Err(error) if control.is_cancelled() => {
+            tracing::info!(elapsed_ms, reason = %format!("{error:#}"), "MD 合并任务已取消");
+        }
+        Err(error) => tracing::error!(
+            elapsed_ms,
+            reason = %format!("{error:#}"),
+            "MD 合并任务失败"
+        ),
+    }
+    result
+}
+
+fn merge_task(
+    entries: &[MergeEntry],
+    output: &Path,
+    overwrite: bool,
+    control: &Control,
+    on_event: &dyn Fn(MdProgress) -> Result<()>,
+) -> Result<MergeStats> {
     // 同实体拒绝先于覆盖确认：硬链接/别名输出无论如何确认都不允许写
     reject_output_aliasing_input(output, entries)?;
     if output.exists() && !overwrite {
@@ -815,6 +842,39 @@ pub fn conflicting_outputs(out_dir: &Path, names: &[String]) -> Vec<PathBuf> {
 /// `overwrite=false` 且任一目标已存在时报错（调用方必须先完成冲突确认，M-11）。
 /// 逐片分块复制，不在内存中持有整个文件（M-11 大文件实现）。
 pub fn run_split_with_events(
+    input: &Path,
+    plan: &SplitPlan,
+    out_dir: &Path,
+    overwrite: bool,
+    control: &Control,
+    on_event: &dyn Fn(MdProgress) -> Result<()>,
+) -> Result<u64> {
+    // P-10：MD 拆分是关键功能任务，开始/结束统计必须落盘；取消按用户意图
+    // 记 INFO，不与失败混级。
+    tracing::info!(
+        input = %input.display(),
+        parts = plan.bounds.len(),
+        out_dir = %out_dir.display(),
+        "MD 拆分任务开始"
+    );
+    let started = std::time::Instant::now();
+    let result = split_task(input, plan, out_dir, overwrite, control, on_event);
+    let elapsed_ms = u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX);
+    match &result {
+        Ok(bytes) => tracing::info!(elapsed_ms, bytes_written = bytes, "MD 拆分任务完成"),
+        Err(error) if control.is_cancelled() => {
+            tracing::info!(elapsed_ms, reason = %format!("{error:#}"), "MD 拆分任务已取消");
+        }
+        Err(error) => tracing::error!(
+            elapsed_ms,
+            reason = %format!("{error:#}"),
+            "MD 拆分任务失败"
+        ),
+    }
+    result
+}
+
+fn split_task(
     input: &Path,
     plan: &SplitPlan,
     out_dir: &Path,

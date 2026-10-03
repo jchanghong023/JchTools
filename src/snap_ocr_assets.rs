@@ -319,6 +319,23 @@ fn xberg_layout_ready(component: &Path) -> Result<(), String> {
 /// 共用 `crate::asset_util::AssetDownloader` / `crate::asset_util::NetworkDownloader`，
 /// 测试可注入本地供给验证「补缺下载」与「失败后重试不重下」。
 pub fn initialize(cancel: &AtomicBool, mut progress: impl FnMut(String)) -> Result<(), String> {
+    // P-10：初始化是关键功能任务，开始/结束统计必须落盘（下载内部另有
+    // 逐次重试与回退日志）。
+    tracing::info!("截图 OCR 组件初始化开始");
+    let started = std::time::Instant::now();
+    let result = initialize_task(cancel, &mut progress);
+    let elapsed_ms = u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX);
+    match &result {
+        Ok(()) => tracing::info!(elapsed_ms, "截图 OCR 组件初始化完成"),
+        Err(reason) if reason.contains("取消") => {
+            tracing::info!(elapsed_ms, reason = %reason, "截图 OCR 组件初始化已取消");
+        }
+        Err(reason) => tracing::error!(elapsed_ms, reason = %reason, "截图 OCR 组件初始化失败"),
+    }
+    result
+}
+
+fn initialize_task(cancel: &AtomicBool, progress: &mut dyn FnMut(String)) -> Result<(), String> {
     let root = asset_root();
     // B-2：先兜底清理历史残留的 staging（readiness 提前返回、取消后清理
     // 失败或进程崩溃都会残留 .staging-<uuid>，download.zip 残留可达约 291MB）。
@@ -336,12 +353,12 @@ pub fn initialize(cancel: &AtomicBool, mut progress: impl FnMut(String)) -> Resu
     let result = initialize_staged(
         &manifest,
         cancel,
-        &mut progress,
+        progress,
         &staging,
         &root,
         &mut downloader,
     );
-    finalize_staging(result, &staging, &mut progress)
+    finalize_staging(result, &staging, progress)
 }
 
 /// 兜底清理资产根下历史残留的 `.staging-*` 目录（B-2，`.staging-*` 清扫与
@@ -383,7 +400,7 @@ fn cleanup_expected_tag_residue(base: &Path) {
 fn initialize_staged(
     manifest: &SnapAssetManifest,
     cancel: &AtomicBool,
-    progress: &mut impl FnMut(String),
+    progress: &mut dyn FnMut(String),
     staging: &Path,
     root: &Path,
     downloader: &mut dyn AssetDownloader,
@@ -456,7 +473,7 @@ fn install_asset(
     root: &Path,
     cancel: &AtomicBool,
     downloader: &mut dyn AssetDownloader,
-    progress: &mut impl FnMut(String),
+    progress: &mut dyn FnMut(String),
 ) -> Result<(), String> {
     let stage_dir = staging.join(&asset.id);
     fs::create_dir_all(&stage_dir).map_err(|error| format!("创建资产临时目录失败：{error}"))?;
@@ -720,8 +737,11 @@ pub(crate) fn download_asset(
     expected_size: u64,
     expected_sha256: &str,
     cancel: &AtomicBool,
-    progress: &mut impl FnMut(String),
+    progress: &mut dyn FnMut(String),
 ) -> Result<(), String> {
+    // P-10：网络出口调用先记开始——请求若永久阻塞或进程崩溃，只有完成日志
+    // 无法指认卡在哪一步。
+    tracing::info!(url, size_bytes = expected_size, "资产下载开始");
     if let Some(parent) = destination.parent() {
         fs::create_dir_all(parent).map_err(|error| format!("创建下载目录失败：{error}"))?;
     }
@@ -751,12 +771,13 @@ fn download_asset_with<F>(
     expected_size: u64,
     expected_sha256: &str,
     cancel: &AtomicBool,
-    progress: &mut impl FnMut(String),
+    progress: &mut dyn FnMut(String),
     fetch: &mut F,
 ) -> Result<(), String>
 where
     F: FnMut(&Path, &mut dyn FnMut(String)) -> Result<(), String>,
 {
+    let started = std::time::Instant::now();
     for attempt in 1..=3 {
         ensure_not_cancelled(cancel)?;
         if let Err(error) = fetch(partial, progress) {
@@ -768,7 +789,11 @@ where
                 let _ = fs::remove_file(partial);
                 continue;
             }
-            tracing::error!(reason = %error, "资产下载失败（重试耗尽）");
+            tracing::error!(
+                reason = %error,
+                elapsed_ms = u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX),
+                "资产下载失败（重试耗尽）"
+            );
             let _ = fs::remove_file(partial);
             return Err(format!("下载资产失败：{error}"));
         }
@@ -776,6 +801,11 @@ where
             Ok(()) => {
                 fs::rename(partial, destination)
                     .map_err(|error| format!("写入下载资产失败：{error}"))?;
+                tracing::info!(
+                    elapsed_ms = u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX),
+                    bytes = expected_size,
+                    "资产下载完成"
+                );
                 return Ok(());
             }
             Err(error) if attempt < 3 => {
@@ -784,7 +814,11 @@ where
                 let _ = fs::remove_file(partial);
             }
             Err(error) => {
-                tracing::error!(reason = %error, "资产校验失败（重试耗尽）");
+                tracing::error!(
+                    reason = %error,
+                    elapsed_ms = u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX),
+                    "资产校验失败（重试耗尽）"
+                );
                 let _ = fs::remove_file(partial);
                 return Err(format!("下载资产校验失败：{error}"));
             }

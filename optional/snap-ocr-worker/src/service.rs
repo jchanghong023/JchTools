@@ -1113,6 +1113,8 @@ impl Service {
                 self.restore_old();
             }
             Command::CaptureFailed(reason) => {
+                // P-10：截图链路失败落盘（此前只进托盘提示，磁盘日志无迹可循）。
+                tracing::warn!(reason = %reason, "截图失败");
                 self.busy = false;
                 self.hide_progress();
                 self.restore_old();
@@ -1149,6 +1151,12 @@ impl Service {
                         }
                     }
                     Err(failure) => {
+                        // P-10：模型加载失败落盘（未初始化属配置缺失，记 WARN 即可）。
+                        tracing::warn!(
+                            unconfigured = matches!(failure, LoadFailure::NotConfigured(_)),
+                            reason = failure.message(),
+                            "截图模型加载失败"
+                        );
                         self.model = match failure {
                             LoadFailure::NotConfigured(_) => ModelState::Uninitialized,
                             LoadFailure::Failed(_) => ModelState::Error,
@@ -1215,6 +1223,7 @@ impl Service {
                         // 与子进程退出同路径降级为错误并保留重试入口（O-13）；
                         // 不像取消那样自动重载——超时是故障而非用户意图，避免
                         // 对挂起环境循环重试。
+                        tracing::warn!(kind = "timeout", reason = %reason, "截图识别失败");
                         self.restore_old();
                         self.tray.notice(reason.as_str());
                         self.model = ModelState::Error;
@@ -1224,6 +1233,7 @@ impl Service {
                         // 子进程死亡（被误关黑窗、崩溃等）：连接不可复用，模型
                         // 从就绪降级为错误并保留重试入口（O-13/O-30），不得继续
                         // 冒称就绪导致重试按钮失效。
+                        tracing::warn!(kind = "process_exited", reason = %reason, "截图识别失败");
                         self.restore_old();
                         self.tray.notice("推理子进程已退出；可在设置中重试加载模型");
                         self.model = ModelState::Error;
@@ -1231,6 +1241,7 @@ impl Service {
                     }
                     Err(OcrError::Backend(reason)) => {
                         // 单次推理失败只结束本任务，已预热的模型保持就绪（O-13）。
+                        tracing::warn!(kind = "backend", reason = %reason, "截图识别失败");
                         self.restore_old();
                         self.tray.notice(format!("OCR 识别失败：{reason}"));
                     }
@@ -1304,6 +1315,8 @@ impl Service {
                 }
             }
             Command::WorkerStopped => {
+                // P-10：推理 worker 停止是重要状态切换，落盘留痕。
+                tracing::info!("推理 worker 已停止");
                 self.complete_exit();
                 return;
             }

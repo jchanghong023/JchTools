@@ -56,6 +56,11 @@ impl Job {
         reason: &str,
         size: u64,
     ) -> Result<()> {
+        if result == "失败" {
+            // P-10：逐文件失败原因落盘——整理执行/清理与解压的失败都汇聚到
+            // 本口径，Agent 只凭日志即可指认失败的文件与原因。
+            tracing::warn!(phase, source, target, reason, "关键任务逐项失败");
+        }
         self.db.log(phase, source, target, result, reason, size)?;
         self.context.emit(Event::Log(format!(
             "[{phase}] {result} | {source}{} | {reason}",
@@ -243,6 +248,10 @@ fn create_task_db(
 /// 必须能区分「已取消」和「失败」，否则事后检查会误判；三个容错写库失败均不掩盖原错误。
 fn record_task_failure(job: &mut Job, error: &anyhow::Error) {
     let cancelled = job.context.control.is_cancelled();
+    // P-10：任务级失败终态落盘（取消是用户意图，不记失败）。
+    if !cancelled {
+        tracing::error!(reason = %format!("{error:#}"), "关键任务以失败收场");
+    }
     let _ = job.db.set("summary", &job.summary);
     let _ = job
         .db
