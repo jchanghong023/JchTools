@@ -2680,7 +2680,7 @@
       "name": "broker_survives_client_exit_and_obeys_explicit_stop",
       "ignored": false,
       "cfg": null,
-      "body": "bc5c3332e13db0e3"
+      "body": "cd1fc76f6a9aca44"
     },
     {
       "file": "tests/classify_shape.rs",

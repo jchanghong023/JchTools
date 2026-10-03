@@ -239,6 +239,19 @@ fn broker_survives_client_exit_and_obeys_explicit_stop() {
             xberg_runtime::resume_background().unwrap();
             let restarted = request_waiting_for_session(&root);
             assert_eq!(restarted["ok"], true);
+            // keepalive 由代理立即应答（Engine::spawn 只发起 CreateProcess，不保证
+            // 引擎进程已执行到写启动记录的 main 首行）；负载高/冷启动时新引擎
+            // 可能尚未跑到该行，若随即 stop()，代理 watch 线程会把它终结在
+            // 启动记录落盘之前，starts.txt 间歇丢一行（曾观测 1 != 2）。先有界
+            // 等待新引擎留下启动记录，再进入收尾；计数断言本身不变。
+            let boot = Instant::now() + Duration::from_secs(10);
+            while std::fs::read_to_string(root.join("starts.txt"))
+                .map(|text| text.lines().count() < 2)
+                .unwrap_or(true)
+            {
+                assert!(Instant::now() < boot, "新引擎应在 starts.txt 留下启动记录");
+                std::thread::sleep(Duration::from_millis(50));
+            }
             // 重启后刷新引擎 pid：收尾清理必须指向新引擎，否则 engine2 会以
             // 孤儿身份堵住后续测试（会话单引擎执法）。
             let new_engine = restarted["jchtools_xberg_pid"].as_u64().unwrap();
