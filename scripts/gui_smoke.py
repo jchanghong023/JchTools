@@ -99,7 +99,6 @@ EXTRACT_ACK = "我已确认：成功原包及分卷永久删除（不可恢复�
 ORGANIZE_ACK = "我已确认目录、规则及可能的永久删除行为（不可恢复）"
 # 设置/转换页状态文案锚点（与 ui/app.slint 的文案保持同步，改动必须两侧同改）。
 SETTINGS_SAVED_TEXT = "配置已持久保存"
-SETTINGS_NEED_SETUP_TEXT = "请选择已有目录或主动下载 Xberg"
 CONVERT_NEED_RUNTIME_TEXT = "请先保存共享 Xberg 运行目录"
 CONVERT_DONE_MARKER = "总耗时"
 STOP_AND_CLOSE_TITLE = "停止任务并关闭"
@@ -732,6 +731,8 @@ def s5_markdown_basic_chain(exe: str) -> None:
 
 # ---------------------------------------------------------------- S6-S14：转 Markdown / 设置页阶段。
 
+ATTEMPT_TIMEOUT = 8  # 单次「点击→等文本」的观察窗（秒）；落空即重试
+
 
 def require(condition: object, message: str) -> None:
     """S6-S14 的断言 helper：bandit B101 禁用 assert，统一 raise 口径."""
@@ -739,8 +740,30 @@ def require(condition: object, message: str) -> None:
         raise RuntimeError(message)
 
 
+def click_and_wait_text(
+    window: WindowSpecification,
+    button_title: str,
+    needle: str,
+    attempts: int = 5,
+) -> str:
+    """点击按钮并以 needle 文本出现为准——合成点击可能落空，未出现即重试.
+
+    与 confirm_dialog/open_confirm 同一立场：只检查「点击没报错」会把没生效
+    的点击当成功，后续等待必然超时。
+    """
+    for _attempt in range(attempts):
+        click(window, find_button(window, button_title))
+        try:
+            return wait_text_containing(window, needle, timeout=ATTEMPT_TIMEOUT)
+        except RuntimeError:
+            continue
+    msg = f"点击「{button_title}」后始终未出现「{needle}」（点击可能一直落空）"
+    raise RuntimeError(msg)
+
+
 def goto_settings(window: WindowSpecification) -> None:
-    click(window, find_button(window, "设置"))
+    """切到设置页：以「共享 Xberg」标题出现为准（点击落空时重试）."""
+    _ = click_and_wait_text(window, "设置", "共享 Xberg")
 
 
 def set_settings_custom_dir(window: WindowSpecification, path: str) -> None:
@@ -797,13 +820,17 @@ def find_check(window: WindowSpecification, title: str) -> WindowSpecification:
 
 
 def isolated_state_env(scratch_state: Path) -> dict[str, str]:
-    """S6-S9 的子进程环境：应用配置（config.sqlite3）隔离到临时目录.
+    """S6-S9 的子进程环境：应用配置与截图资产根全部隔离到临时目录.
 
-    JCHTOOLS_TEST_STATE_DIR 由 src/xberg_settings.rs 在 debug 构建中识别，
-    避免冒烟改写真实用户配置（XB-18）。
+    JCHTOOLS_TEST_STATE_DIR（src/xberg_settings.rs，debug 构建识别）隔离
+    config.sqlite3，避免冒烟改写真实用户配置（XB-18）；JCHTOOLS_SNAP_OCR_TEST_ASSET_ROOT
+    （src/snap_ocr_assets.rs）同时隔离截图服务管道名与 worker 安装位置——S6/S7
+    保存有效目录会触发 ensure_snap_supervisor，不隔离会 ping 真实用户会话的
+    后台服务、改写其 launcher.json 甚至启动真实 worker（XB-22/XB-25）。
     """
     env = dict(os.environ)
     env["JCHTOOLS_TEST_STATE_DIR"] = str(scratch_state)
+    env["JCHTOOLS_SNAP_OCR_TEST_ASSET_ROOT"] = str(scratch_state / "snap-assets")
     return env
 
 
@@ -899,8 +926,8 @@ def s9_unconfigured_state_shows_reason_and_no_autostart(exe: str) -> None:
     try:
 
         def body(window: WindowSpecification) -> None:
-            goto_converter(window)
-            _ = wait_text_containing(window, CONVERT_NEED_RUNTIME_TEXT)
+            # 切页点击可能落空：以目标状态文本出现为准重试（与 goto_settings 同口径）。
+            _ = click_and_wait_text(window, "转 Markdown", CONVERT_NEED_RUNTIME_TEXT)
             start = find_button(window, "开始转换")
             _ = start.wait("visible", timeout=TIMEOUT)
             require(not start.is_enabled(), "未配置 Xberg 时「开始转换」必须禁用")
@@ -909,7 +936,9 @@ def s9_unconfigured_state_shows_reason_and_no_autostart(exe: str) -> None:
             require(not initialize.is_enabled(), "未确认目录时初始化入口必须禁用")
             _ = find_button(window, "前往设置").wait("visible", timeout=TIMEOUT)
             goto_settings(window)
-            _ = wait_text_containing(window, SETTINGS_NEED_SETUP_TEXT)
+            # 「尚未下载 Xberg」绑定 settings-downloaded-dir 的静态空值，不依赖
+            # 异步 SETTINGS_READY 事件的时序（事件文案在连跑时序下可能尚未到位）。
+            _ = wait_text_containing(window, "尚未下载 Xberg")
             _ = find_button(window, "下载 Xberg").wait("visible enabled", timeout=TIMEOUT)
             # O-06：不做任何下载动作——缺失状态如实可见即可，冒烟不得触发真实联网。
 
