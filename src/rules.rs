@@ -763,16 +763,18 @@ pub fn count_tail_only_old_style_groups(names_lower: &[String]) -> u64 {
     }
     count
 }
-/// X-10 part rar 族「只有 partN（N≥2）、缺该宽度的 part1」的残缺组：返回每组
-/// 一个代表卷的文件名（清单序首个，确定性排序），供确认清点（X-02）与入队复用。
-/// 分组键 =（主干, 数字串宽度）：`part1` / `part01` / `part001` 属不同宽度模式
-/// （X-10）；同一主干混用宽度的歧义由 archive 侧整组失败处置，这里按宽度各归
-/// 各组、不猜归属。附录 E：`a.part02.rar`、`a.part03.rar` 缺 01 → 一组缺首卷
-/// 失败，不当两个完整 rar 解压。
+/// X-10 part rar 族「缺入口卷 part1」的残缺组：返回每组一个代表卷的文件名
+/// （清单序首个，确定性排序），供确认清点（X-02）与入队复用。
+/// 分组键 = 主干，入口判定按**卷号数值**：`part1` 在场即有入口——「位数超过
+/// 最小宽度时自然增长」（X-10），`a.part1.rar…a.part9.rar` 与 `a.part10.rar`
+/// 属同一族，不得把宽 2 的自然增长卷拆成「缺 part01」的伪组（完整 10+ 卷集
+/// 曾被误计为两包并可能整组误隔离）。附录 E：`a.part02.rar`、`a.part03.rar`
+/// 缺 01 → 一组缺首卷失败，不当两个完整 rar 解压；同一卷号混用补零宽度
+/// （`part1` 与 `part01` 并存）属命名歧义，由 archive 侧整组失败处置。
 pub fn part_rar_missing_first_groups(names_lower: &[String]) -> Vec<String> {
     let re = part_rar_regex();
-    // (主干, 宽度) -> (该宽度 part1 是否在场, 首个 N≥2 代表名)
-    let mut groups: HashMap<(String, usize), (bool, Option<String>)> = HashMap::new();
+    // 主干 ->（卷号 1 是否在场〔任意写法〕, 最小卷号 N≥2 的代表名）
+    let mut groups: HashMap<String, (bool, Option<(u64, String)>)> = HashMap::new();
     for name in names_lower {
         let Some(caps) = re.captures(name) else {
             continue;
@@ -784,20 +786,23 @@ pub fn part_rar_missing_first_groups(names_lower: &[String]) -> Vec<String> {
             continue;
         };
         let stem = &name[..name.len() - matched.as_str().len()];
-        let width = caps[1].len();
-        let entry = groups
-            .entry((stem.to_string(), width))
-            .or_insert((false, None));
+        let entry = groups.entry(stem.to_string()).or_insert((false, None));
         if number == 1 {
             entry.0 = true;
-        } else if entry.1.is_none() {
-            entry.1 = Some(name.clone());
+        } else {
+            let better = entry
+                .1
+                .as_ref()
+                .is_none_or(|(smallest, _)| number < *smallest);
+            if better {
+                entry.1 = Some((number, name.clone()));
+            }
         }
     }
     let mut representatives: Vec<String> = groups
         .into_values()
         .filter(|(has_first, _)| !has_first)
-        .filter_map(|(_, representative)| representative)
+        .filter_map(|(_, representative)| representative.map(|(_, name)| name))
         .collect();
     representatives.sort();
     representatives
@@ -1618,15 +1623,15 @@ mod tests {
         assert!(!multipart_name("x.iso.001"));
     }
 
-    // 覆盖 X-10, 附录 E（回归：只有 a.part02/a.part03、缺该宽度 part1 的目录
-    // 仍归为一组并给出唯一代表；修复前这种目录被静默漏掉——入口侧没有任何
-    // 包被识别，缺首卷既不计数也不隔离）
+    // 覆盖 X-10, 附录 E（回归：只有 a.part02/a.part03、缺 part1 的目录仍归为
+    // 一组并给出唯一代表；修复前这种目录被静默漏掉——入口侧没有任何包被识别，
+    // 缺首卷既不计数也不隔离。入口按卷号数值判定：`part1` 在场即有入口）
     #[test]
     fn part_rar_missing_first_groups_recognize_tail_only_sets() {
         let names = |items: &[&str]| -> Vec<String> {
             items.iter().map(std::string::ToString::to_string).collect()
         };
-        // 附录 E 原例：缺 01 的一组，代表是清单序首个余卷。
+        // 附录 E 原例：缺 01 的一组，代表是最小卷号的余卷。
         assert_eq!(
             part_rar_missing_first_groups(&names(&["a.part02.rar", "a.part03.rar"])),
             vec!["a.part02.rar".to_string()]
@@ -1635,11 +1640,33 @@ mod tests {
         assert!(
             part_rar_missing_first_groups(&names(&["a.part01.rar", "a.part02.rar"])).is_empty()
         );
-        // 不同宽度的 part1 不算该模式的入口（X-10：part1/part01 属不同宽度模式）。
+        // 独立审查发现（X-10「位数超过最小宽度时自然增长」）：无补零完整 12 卷集
+        // part1…part12 是同一族，宽 2 的 part10-12 不得拆成「缺 part01」的伪组
+        // （曾导致计数/入队翻倍并可能整组误隔离）。
+        let mut complete = vec!["a.part1.rar".to_string()];
+        for index in 2..=12 {
+            complete.push(format!("a.part{index}.rar"));
+        }
+        assert!(part_rar_missing_first_groups(&complete).is_empty());
+        // 缺 part1 的自然增长集：仍是一组，代表是最小卷号 part2。
+        let without_first: Vec<String> = complete[1..].to_vec();
         assert_eq!(
-            part_rar_missing_first_groups(&names(&["a.part1.rar", "a.part02.rar", "a.part03.rar"])),
-            vec!["a.part02.rar".to_string()]
+            part_rar_missing_first_groups(&without_first),
+            vec!["a.part2.rar".to_string()]
         );
+        // 补零 100 卷完整集（part01…part99 + part100 自然增长）同样不产生伪组。
+        let mut padded = Vec::new();
+        for index in 1..=100 {
+            padded.push(format!("a.part{index:02}.rar"));
+        }
+        assert!(part_rar_missing_first_groups(&padded).is_empty());
+        // part1（任意补零写法）在场即有入口：part02 与之同族，不另立缺首卷组。
+        assert!(part_rar_missing_first_groups(&names(&[
+            "a.part1.rar",
+            "a.part02.rar",
+            "a.part03.rar"
+        ]))
+        .is_empty());
         // 不同主干互不归组；同主干只计一组。
         assert_eq!(
             part_rar_missing_first_groups(&names(&["a.part2.rar", "a.part3.rar", "b.part02.rar"])),

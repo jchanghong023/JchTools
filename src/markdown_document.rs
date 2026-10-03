@@ -233,27 +233,42 @@ fn pdf_page_count(path: &Path, deadline: &Deadline) -> Option<usize> {
         return None;
     }
     // catalog 对象：按偏移读小窗口，找 /Pages 间接引用。
-    let root_offset = xref_object_offset(&mut file, xref_offset, root_num)?;
+    let root_offset = xref_object_offset(&mut file, xref_offset, root_num, deadline)?;
     let catalog = read_object_window(&mut file, len, root_offset)?;
     let (pages_num, _) = indirect_reference_after(&catalog, b"/Pages")?;
     if deadline.expired() {
         return None;
     }
-    let pages_offset = xref_object_offset(&mut file, xref_offset, pages_num)?;
+    let pages_offset = xref_object_offset(&mut file, xref_offset, pages_num, deadline)?;
     let pages = read_object_window(&mut file, len, pages_offset)?;
     let count_start = find_subslice(&pages, b"/Count")? + b"/Count".len();
-    let count = parse_leading_uint(skip_space(&pages[count_start..]))?;
+    // 间接 `/Count N G R`（pdftk 等工具的产出形态）不受支持：只取第一个整数
+    // 会把对象号当页数误报，必须识别出引用形态并回 None（T-18 回常规模式）。
+    let rest = skip_space(&pages[count_start..]);
+    if indirect_reference_after(&pages, b"/Count").is_some() {
+        return None;
+    }
+    let count = parse_leading_uint(rest)?;
     let count = usize::try_from(count).ok()?;
     (count > 0).then_some(count)
 }
 
 /// 传统 xref 表中对象号 → 字节偏移：解析子段头与 20 字节行（`offset gen n|f`）。
-/// 对象号不在表内或条目为 free（对象流/损坏/压缩对象）返回 None。
-fn xref_object_offset(file: &mut std::fs::File, xref_offset: u64, wanted: u64) -> Option<u64> {
+/// 对象号不在表内或条目为 free（对象流/损坏/压缩对象）返回 None；子段遍历
+/// 每轮检查单文件预算（构造的海量小子节文件不得越过 Deadline）。
+fn xref_object_offset(
+    file: &mut std::fs::File,
+    xref_offset: u64,
+    wanted: u64,
+    deadline: &Deadline,
+) -> Option<u64> {
     // trailer 内的 /Prev 链不去追：最新表找不到就按不支持处理（回常规模式）。
     file.seek(SeekFrom::Start(xref_offset + b"xref".len() as u64))
         .ok()?;
     loop {
+        if deadline.expired() {
+            return None;
+        }
         let line = read_line_bounded(file, 64)?;
         // `xref` 关键字后紧跟的行尾会先读出一个空行，跳过。
         if line.is_empty() {
@@ -1624,6 +1639,59 @@ mod tests {
     }
 
     // ── A1：fast 模式配置不得写回已移除的 layout 顶层键 ──
+
+    // 覆盖 T-18（独立审查发现：`/Count N G R` 间接引用形态被当页数误报——只取
+    // 第一个整数会把对象号当页数；修复后识别引用形态回 None 走常规模式）。
+    #[test]
+    fn pdf_page_count_rejects_indirect_count_reference() {
+        use lopdf::{dictionary, Object};
+
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join("indirect-count.pdf");
+        let mut document = lopdf::Document::with_version("1.5");
+        let count_id = document.add_object(Object::Integer(201));
+        let pages_tree_id = document.new_object_id();
+        let mut kids = Vec::new();
+        for _ in 0..3 {
+            let page_object_id = document.add_object(Object::Dictionary(dictionary! {
+                "Type" => "Page",
+                "Parent" => pages_tree_id,
+                "MediaBox" => vec![0.into(), 0.into(), 612.into(), 792.into()],
+            }));
+            kids.push(Object::Reference(page_object_id));
+        }
+        document.objects.insert(
+            pages_tree_id,
+            Object::Dictionary(dictionary! {
+                "Type" => "Pages",
+                "Kids" => kids,
+                "Count" => Object::Reference(count_id),
+            }),
+        );
+        let catalog_id = document.add_object(Object::Dictionary(dictionary! {
+            "Type" => "Catalog",
+            "Pages" => pages_tree_id,
+        }));
+        document.trailer.set("Root", catalog_id);
+        document.reference_table.cross_reference_type = lopdf::xref::XrefType::CrossReferenceTable;
+        let mut buffer = Vec::new();
+        document
+            .save_with_options(
+                &mut buffer,
+                lopdf::SaveOptions {
+                    use_object_streams: false,
+                    use_xref_streams: false,
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+        std::fs::write(&path, &buffer).unwrap();
+        assert_eq!(
+            page_count(&path, &generous_deadline()),
+            None,
+            "间接 /Count 必须回退常规模式，不得把对象号（201 的引用号）当页数"
+        );
+    }
 
     // 覆盖 T-18（A1）：Xberg run49.1 按字段名拒绝未知顶层字段，内置配置已无
     // layout 键；fast 分支若经 IndexMut 写回 layout:null，>200 页文档必然被

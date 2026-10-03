@@ -422,9 +422,13 @@ pub fn move_file_preserving_times(source: &Path, target: &Path) -> Result<()> {
             }
             // S-01：跨卷复制必须以不覆盖方式落盘——`fs::copy` 以 create+truncate
             // 打开目标，目标已存在时会被静默截断（规划缺陷或目标计算偏差都不允许
-            // 覆盖既有文件）；目标已存在按失败处理并保留源项，只清理本次新建的副本。
+            // 覆盖既有文件）。清理只针对本次新建的未完成副本：`create_new` 以
+            // AlreadyExists 失败时没有写入任何字节，目标属于既有文件，绝不能删；
+            // 其余失败（写盘中途出错）才删除本次新建的部分副本。
             if let Err(error) = copy_noreplace(source, target) {
-                let _ = fs::remove_file(target);
+                if error.kind() != std::io::ErrorKind::AlreadyExists {
+                    let _ = fs::remove_file(target);
+                }
                 let context = if error.kind() == std::io::ErrorKind::AlreadyExists {
                     format!("跨卷移动目标已存在，不覆盖既有文件（{}）", target.display())
                 } else {

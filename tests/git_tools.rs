@@ -956,10 +956,14 @@ fn conflict_resume_refuses_extra_staged_files() {
     let merge_files = git_ok(
         &fix.repo,
         &[
+            // -m --first-parent：merge 提交不带它时 diff-tree 输出恒为空（断言
+            // 变恒真）；按第一父展开才得到合并实际带入的路径集合。
             "diff-tree",
             "--no-commit-id",
             "--name-only",
             "-r",
+            "-m",
+            "--first-parent",
             &merge_commit,
         ],
     );
@@ -1514,6 +1518,156 @@ fn push_default_matching_refuses_to_start() {
         remote_log(&fix.remote),
         vec!["init".to_string()],
         "origin 不应收到任何提交"
+    );
+}
+
+// 覆盖 P-03/G-08（独立审查发现：remote.origin.mirror=true 使裸 push 变镜像
+// 推送——全部引用推到远端并删除远端多余分支，退出码 0 被当成功报告；
+// 预检必须拒绝，远端零改动）
+#[test]
+fn mirror_remote_config_refuses_to_start() {
+    let fix = fixture();
+    git_ok(&fix.repo, &["config", "remote.origin.mirror", "true"]);
+    fs::write(fix.repo.join("a.txt"), "x\n").unwrap();
+    let outcome = run_tool(&fix.repo);
+    assert!(
+        outcome.text.contains("无法开始"),
+        "必须拒绝启动：{}",
+        outcome.text
+    );
+    assert!(
+        outcome.text.contains("mirror"),
+        "错误信息必须点名涉及配置项：{}",
+        outcome.text
+    );
+    assert_eq!(
+        remote_log(&fix.remote),
+        vec!["init".to_string()],
+        "origin 不得被镜像推送改动"
+    );
+    assert_eq!(
+        git_ok(&fix.repo, &["log", "--format=%s"]).trim(),
+        "init",
+        "本地不得有新提交"
+    );
+}
+
+// 覆盖 P-03/G-08（独立审查发现：pushurl 指向 upstream 之外的地址时，裸 push
+// 实际推到另一远端且退出码 0；预检必须拒绝，两个远端都零改动）
+#[test]
+fn pushurl_config_refuses_to_start() {
+    let fix = fixture();
+    let other = add_second_remote(&fix, "other");
+    let other_url = git_ok(&fix.repo, &["remote", "get-url", "other"])
+        .trim()
+        .to_owned();
+    assert!(!other_url.is_empty(), "前置：取 other 远端 URL");
+    git_ok(
+        &fix.repo,
+        &["remote", "set-url", "--push", "origin", &other_url],
+    );
+    fs::write(fix.repo.join("a.txt"), "x\n").unwrap();
+    let outcome = run_tool(&fix.repo);
+    assert!(
+        outcome.text.contains("无法开始"),
+        "必须拒绝启动：{}",
+        outcome.text
+    );
+    assert!(
+        outcome.text.contains("pushurl"),
+        "错误信息必须点名涉及配置项：{}",
+        outcome.text
+    );
+    assert_eq!(
+        remote_log(&fix.remote),
+        vec!["init".to_string()],
+        "origin 不应收到任何提交"
+    );
+    assert!(
+        !other.join("refs/heads").exists()
+            || git_ok(&fix.repo, &["ls-remote", "--heads", "other"])
+                .trim()
+                .is_empty(),
+        "other 不应收到任何提交"
+    );
+    assert_eq!(
+        git_ok(&fix.repo, &["log", "--format=%s"]).trim(),
+        "init",
+        "本地不得有新提交"
+    );
+}
+
+// 覆盖 G-06/G-11（独立审查发现：夹带检测的两条 diff 各自做 rename 检测且基准
+// 内容对不同，rename 冲突被用户以低相似度内容整体重写解决时，`--cached` 侧
+// 检出不了 rename，旧路径被误报为「合并范围之外的已暂存文件」阻断续接；
+// 统一 --no-renames 后两侧路径集合对称，重写式解决可正常完成合并提交）
+#[test]
+fn conflict_resume_accepts_rewritten_rename_resolution() {
+    let fix = fixture();
+    let base_lines: Vec<String> = (0..20).map(|i| format!("line {i} shared content padding\n")).collect();
+    let base = base_lines.join("");
+    fs::write(fix.repo.join("file.txt"), &base).unwrap();
+    git_ok(&fix.repo, &["add", "file.txt"]);
+    git_ok(&fix.repo, &["commit", "-q", "-m", "seed file"]);
+    git_ok(&fix.repo, &["push", "-q"]);
+    // 远端：rename + 改第一行。
+    let other = fix.repo.parent().unwrap().join("other");
+    git_ok(
+        fix.repo.parent().unwrap(),
+        &["clone", "-q", &fix.remote.display().to_string(), "other"],
+    );
+    let mut remote_lines = base_lines.clone();
+    remote_lines[0] = "remote rewritten first line\n".to_string();
+    fs::rename(other.join("file.txt"), other.join("renamed.txt")).unwrap();
+    fs::write(other.join("renamed.txt"), remote_lines.join("")).unwrap();
+    git_ok(&other, &["add", "-A"]);
+    git_ok(&other, &["commit", "-q", "-m", "remote rename"]);
+    git_ok(&other, &["push", "-q"]);
+    // 本地：同一行改成不同内容（rename + modify 同行冲突）。
+    let mut local_lines = base_lines.clone();
+    local_lines[0] = "local rewritten first line\n".to_string();
+    fs::write(fix.repo.join("file.txt"), local_lines.join("")).unwrap();
+    let first = run_tool(&fix.repo);
+    assert!(
+        first.text.contains("冲突"),
+        "前置：先制造 rename 冲突：{}",
+        first.text
+    );
+    // 用户解决：新路径写与 HEAD 旧内容相似度低于 rename 检测阈值的全重写内容，
+    // 删除旧路径，一并暂存（此时 --cached 侧 diff 不再折叠出 rename）。
+    fs::write(
+        fix.repo.join("renamed.txt"),
+        "completely different resolved content with no shared lines at all\n".repeat(20),
+    )
+    .unwrap();
+    let _ = fs::remove_file(fix.repo.join("file.txt"));
+    git_ok(&fix.repo, &["add", "-A"]);
+    let second = run_tool(&fix.repo);
+    assert!(
+        second.text.contains("全部完成") || second.text.contains("没有需要提交的变更"),
+        "重写式 rename 解决不得被夹带检测误拒：{}",
+        second.text
+    );
+    let merge_commit = git_ok(&fix.repo, &["rev-list", "--merges", "-n", "1", "HEAD"])
+        .trim()
+        .to_owned();
+    assert!(!merge_commit.is_empty(), "续接后应存在合并提交");
+    // 合并提交确实处理了旧路径删除与新路径内容（--no-renames 语义下的两个路径）。
+    let merge_files = git_ok(
+        &fix.repo,
+        &[
+            "diff-tree",
+            "--no-commit-id",
+            "--name-only",
+            "-r",
+            "-m",
+            "--first-parent",
+            &merge_commit,
+        ],
+    );
+    assert!(
+        merge_files.contains("file.txt") && merge_files.contains("renamed.txt"),
+        "合并提交应同时覆盖旧路径删除与新路径内容：{merge_files}"
     );
 }
 

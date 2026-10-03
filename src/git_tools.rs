@@ -202,6 +202,9 @@ fn run_git_network(
         return run_git(git, cwd, args);
     }
     if !target_url.is_empty() && proxy.bypassed(target_url) {
+        // 口径：命中例外表 = 该目标不经**系统代理**；用户在自身环境里显式设置的
+        // http_proxy 等变量保持现状、不清除（与 P-09「系统代理关闭时不注入也不
+        // 清除」同口径），只有注入/回退路径的直连重试才移除全部代理变量。
         log("目标命中 Windows 系统代理例外表：不经系统代理，直连");
         return run_git(git, cwd, args);
     }
@@ -350,6 +353,30 @@ fn push_target_preflight(git: &Path, root: &Path, info: &RepoInfo) -> Result<()>
              请先移除该配置后重新开始任务"
         );
     }
+    // mirror：裸 push 变成镜像推送——把全部 refs 推到远端并**删除**远端多余
+    // 分支，退出码 0 会被当成功报告（实测：远端 topic 被删、remotes/tags 被推）。
+    if config_get_opt(git, root, &format!("remote.{effective}.mirror"))
+        .as_deref()
+        .is_some_and(|value| value.eq_ignore_ascii_case("true"))
+    {
+        bail!(
+            "拒绝启动：remote.{effective}.mirror=true 会让裸 git push 镜像推送全部引用并删除远端多余分支（P-03/G-08）。\
+             请先移除该配置后重新开始任务"
+        );
+    }
+    // pushurl：推送实际走另一地址（fetch URL 之外的任何主机），fetch/push 的
+    // 网络出口与 upstream 范围都无法保证；要求与 fetch URL 一致。
+    if let Some(push_url) = config_get_opt(git, root, &format!("remote.{effective}.pushurl")) {
+        let fetch_url =
+            config_get_opt(git, root, &format!("remote.{effective}.url")).unwrap_or_default();
+        if push_url != fetch_url {
+            bail!(
+                "拒绝启动：remote.{effective}.pushurl 指向「{push_url}」与 fetch 地址「{fetch_url}」不同，\
+                 裸 git push 会推送到 upstream 之外的地址（P-03/G-08）。\
+                 请先移除该配置后重新开始任务"
+            );
+        }
+    }
     if config_get_opt(git, root, "push.default").as_deref() == Some("matching") {
         bail!(
             "拒绝启动：push.default=matching 会让裸 git push 一次推送所有同名分支（多分支推送，P-03/G-08）。\
@@ -359,12 +386,12 @@ fn push_target_preflight(git: &Path, root: &Path, info: &RepoInfo) -> Result<()>
     // F10/G-08 续：push.default 的其余危险取值在预检一并拒绝（全部只读检查）。
     let push_default = config_get_opt(git, root, "push.default");
     match push_default.as_deref() {
-        // nothing：裸 push 什么都不推且以退出码 0 结束，upstream 永不更新，
-        // 工具会把「没推」当成功报告。
+        // nothing：裸 push 因「没有 refspec」以 fatal 失败，upstream 永不更新；
+        // 该失败会被按可重试错误无限退避（G-09），任务永远无法推进。
         Some("nothing") => {
             bail!(
-                "拒绝启动：push.default=nothing 会让裸 git push 不推送任何分支（退出码 0），\
-                 upstream 永远不会更新而任务仍报告成功（G-08）。\
+                "拒绝启动：push.default=nothing 会让裸 git push 因没有 refspec 而必然失败，\
+                 upstream 永远不会更新且任务陷入无限重试（G-08/G-09）。\
                  请改为 simple / upstream 等取值后重新开始任务"
             );
         }
@@ -1329,6 +1356,8 @@ fn run_task(
     // P-09：upstream 远端的实际 URL（fetch/push 的代理例外判断）。读取失败或
     // 本地 upstream（remote 为 "."）时留空——此时只走注入/回退路径，不做例外
     // 前置判断（scp 风格等无 scheme 的 URL 解析不出 host，同样保守走代理）。
+    // get-url 取 fetch URL：pushurl 与 fetch URL 不同已在预检拒绝，二者一致时
+    // 单一 URL 即同时代表 fetch 与 push 的目标。
     let remote_url = run_git_ok(
         git,
         &info.root,
@@ -1354,7 +1383,15 @@ fn run_task(
                 // 提交。合并涉及的文件必然在两个 merge 父（HEAD 与 MERGE_HEAD）的
                 // 差异集合内；该集合之外的 staged 条目即夹带项，发现即停止，不得
                 // 冒险继续（G-06：无法安全保证时停止并显示具体原因）。
-                let staged = match run_git_ok(git, repo, &["diff", "--cached", "--name-only"]) {
+                // 两条 diff 统一 --no-renames：rename 检测基于各自内容对的相似度
+                // （index↔HEAD 与 HEAD↔MERGE_HEAD 不同），同一 rename 可能一条检出、
+                // 另一条不检出，路径集合不对称会把合并内的旧路径误报成范围外；
+                // 禁用 rename 折叠后两侧都输出旧+新两个路径，子集检查恢复对称。
+                let staged = match run_git_ok(
+                    git,
+                    repo,
+                    &["diff", "--cached", "--name-only", "--no-renames"],
+                ) {
                     Ok(text) => text,
                     Err(error) => {
                         let text = format!("检查合并暂存区失败：{error:#}（G-06）");
@@ -1363,16 +1400,19 @@ fn run_task(
                         return text;
                     }
                 };
-                let merge_scope =
-                    match run_git_ok(git, repo, &["diff", "--name-only", "HEAD", "MERGE_HEAD"]) {
-                        Ok(text) => text,
-                        Err(error) => {
-                            let text = format!("无法确定合并涉及的文件范围：{error:#}（G-06）");
-                            log(&text);
-                            shared.set_state("失败");
-                            return text;
-                        }
-                    };
+                let merge_scope = match run_git_ok(
+                    git,
+                    repo,
+                    &["diff", "--name-only", "--no-renames", "HEAD", "MERGE_HEAD"],
+                ) {
+                    Ok(text) => text,
+                    Err(error) => {
+                        let text = format!("无法确定合并涉及的文件范围：{error:#}（G-06）");
+                        log(&text);
+                        shared.set_state("失败");
+                        return text;
+                    }
+                };
                 let in_scope: std::collections::HashSet<&str> = merge_scope
                     .lines()
                     .map(str::trim)

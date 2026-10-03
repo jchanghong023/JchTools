@@ -1200,11 +1200,37 @@ fn missing_part_rar_first(archive: &Path) -> Option<String> {
     if number < 2 {
         return None;
     }
-    let first = format!("{stem}.part{:0>width$}.rar", 1, width = digits.len());
-    if archive.with_file_name(&first).exists() {
+    // 入口按卷号数值判定（X-10「位数超过最小宽度时自然增长」）：`part1` 在场
+    // 即有入口，任何写法（part1/part01/part001）都算——按当前卷的补零宽度拼
+    // `part01` 会把完整无补零 10+ 卷集（…part9 + part10）误判成缺首卷。
+    if sibling_part_number_one(archive, stem) {
         return None;
     }
-    Some(format!("未找到 {stem}.part{digits} 同宽度的入口卷 {first}"))
+    let _ = digits;
+    Some(format!(
+        "未找到 {stem} 命名族的入口卷（part1，任意补零写法）"
+    ))
+}
+/// 同目录下同主干的 part rar 卷里是否存在卷号 1（任意补零写法）。
+fn sibling_part_number_one(archive: &Path, stem: &str) -> bool {
+    let Ok(entries) = std::fs::read_dir(archive.parent().unwrap_or_else(|| Path::new("."))) else {
+        // 无法枚举兄弟卷时保守视为入口在场，交由引擎整包校验兜底。
+        return true;
+    };
+    for entry in entries.flatten() {
+        let Some(name) = entry.file_name().into_string().ok() else {
+            continue;
+        };
+        let lower = name.to_lowercase();
+        let Some((sibling_stem, sibling_digits)) = split_rar_part(&lower) else {
+            continue;
+        };
+        if sibling_stem == stem && sibling_digits.parse::<u64>().is_ok_and(|n| n == 1) {
+            // 卷号 1 的任意补零写法（part1/part01/part001）都是该族入口。
+            return true;
+        }
+    }
+    false
 }
 /// X-10：该文件是数字尾卷族的 `.NNN`（编号 ≥ 2）、且同目录没有 `.001` 入口
 ///（也没有作为可识别非法起始入队的 `.000`）。返回主干名供错误指认。
