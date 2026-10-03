@@ -520,3 +520,171 @@ fn failed_empty_directory_cleanup_reports_an_incomplete_task() {
     assert_eq!(status(&task.directory), "failed");
     assert!(empty.is_dir());
 }
+
+// 覆盖 H-06/S-01（回归：目标大类目录「图片」是被留在原地的 Git 项目时——集合
+// 容器被普通文件占用导致项目无法整体移入——普通图片文件不得被移入该 Git 树，
+// 相关归类失败并保留源项；修复前 planner 把普通文件照常计划移入受保护树内）
+#[test]
+fn classify_refuses_target_dir_occupied_by_git_project() {
+    let f = Fixture::new();
+    // 大类目录「图片」本身是 Git 项目；「Git项目集合」被普通文件占用（S-01），
+    // 项目因此留在原地（gather_dir_plans 修复后它构成 blocked 目标）。
+    f.git_marker_dir("图片");
+    f.write("Git项目集合", b"occupier");
+    f.write("照片/logo.png", b"png");
+    let task = f.plan(base());
+    let db = Database::open_existing(&task.directory).unwrap();
+    let moves_into_git_tree: i64 = db
+        .conn
+        .query_row(
+            "SELECT COUNT(*) FROM actions WHERE target LIKE '图片/%' OR target = '图片'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(
+        moves_into_git_tree,
+        0,
+        "不得有任何文件被计划移入受保护的 Git 树：{}",
+        events(&task.directory)
+    );
+    drop(db);
+    // 源文件保留在原位（分类失败不移动）
+    assert!(
+        f.root.join("照片/logo.png").is_file(),
+        "归类失败的文件必须保留源项"
+    );
+    // Git 树内零改动
+    assert!(f.root.join("图片/.git/HEAD").is_file());
+    let entries: Vec<_> = fs::read_dir(f.root.join("图片"))
+        .unwrap()
+        .filter_map(std::result::Result::ok)
+        .collect();
+    assert_eq!(entries.len(), 1, "Git 树内不得新增任何条目");
+}
+
+// 覆盖 C-14（正控：Git 项目「图片」成功计划移入集合后腾出的大类目录名可正常
+// 归类使用——文件移入的是项目移走后新建的普通目录，不是 Git 树）
+#[test]
+fn classify_into_freed_category_name_after_git_collection_move() {
+    let f = Fixture::new();
+    f.git_marker_dir("图片");
+    f.write("照片/logo.png", b"png");
+    let task = f.plan(base());
+    let db = Database::open_existing(&task.directory).unwrap();
+    let project_moved: i64 = db
+        .conn
+        .query_row(
+            "SELECT COUNT(*) FROM actions WHERE source='图片' AND target='Git项目集合/图片'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    let file_classified: i64 = db
+        .conn
+        .query_row(
+            "SELECT COUNT(*) FROM actions WHERE source='照片/logo.png' AND target='图片/logo.png'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    drop(db);
+    assert_eq!(
+        project_moved,
+        1,
+        "Git 项目应整体移入集合：{}",
+        events(&task.directory)
+    );
+    assert_eq!(
+        file_classified,
+        1,
+        "腾空后的目录名应可正常归类：{}",
+        events(&task.directory)
+    );
+}
+
+// 覆盖 C-14/C-21（回归：名为「Git项目集合」的 Git 项目不得生成移入自身的
+// 自嵌套计划——集合目录不自嵌套；项目保留原位，其余文件正常归类）
+#[test]
+fn git_collection_named_project_never_nests_into_itself() {
+    let f = Fixture::new();
+    f.git_marker_dir("Git项目集合");
+    f.write("a.txt", b"x");
+    let task = f.plan(base());
+    let db = Database::open_existing(&task.directory).unwrap();
+    let nesting: i64 = db
+        .conn
+        .query_row(
+            "SELECT COUNT(*) FROM actions WHERE target LIKE 'Git项目集合/%'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    let moved_itself: i64 = db
+        .conn
+        .query_row(
+            "SELECT COUNT(*) FROM actions WHERE source='Git项目集合'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    drop(db);
+    assert_eq!(
+        nesting,
+        0,
+        "不得出现集合目录自嵌套计划：{}",
+        events(&task.directory)
+    );
+    assert_eq!(moved_itself, 0, "名为集合容器的项目自身不得被移动");
+    // 项目原地保留、树内零改动
+    assert!(f.root.join("Git项目集合/.git/HEAD").is_file());
+    // 普通文件照常归类（.txt 按附录 A 归「文档」大类）
+    engine::apply(&task.directory, Context::default()).unwrap();
+    assert!(f.root.join("文档/a.txt").is_file(), "普通文件归类不受影响");
+    assert!(
+        f.root.join("Git项目集合/.git/HEAD").is_file(),
+        "项目在集合位置原地保留"
+    );
+}
+
+// 覆盖 X-10/X-02（回归：只有 a.part02/a.part03 缺 part1 与 b.7z.002/b.7z.003
+// 缺 .001 的目录按「残缺但可归组的卷集」各计一包；修复前两者都被静默漏掉，
+// 确认框报 0 个包）
+#[test]
+fn count_archives_counts_missing_entry_volume_groups() {
+    let f = Fixture::new();
+    f.write("a.part02.rar", b"part2");
+    f.write("a.part03.rar", b"part3");
+    f.write("b.7z.002", b"2");
+    f.write("b.7z.003", b"3");
+    f.write("c.zip", b"zip");
+    assert_eq!(
+        engine::count_archives(&f.root, &base()).unwrap(),
+        3,
+        "缺首卷 part rar 一组 + 缺入口数字尾卷一组 + 普通 zip 一包"
+    );
+}
+
+// 覆盖 X-10/X-06（回归：缺首卷组在解压执行时整组按失败包隔离进「解压失败」
+// 并记录缺首卷原因；缺首卷判定先于引擎调用，无捆绑引擎也可执行）
+#[test]
+fn extract_quarantines_missing_first_part_rar_group() {
+    let f = Fixture::new();
+    f.write("a.part02.rar", b"part2");
+    f.write("a.part03.rar", b"part3");
+    let task = engine::extract_run_at(&f.root, base(), Context::default(), &f.state, None).unwrap();
+    assert!(
+        f.root.join("解压失败/a.part02.rar").is_file(),
+        "余卷必须整组隔离，不得留在原位"
+    );
+    assert!(
+        f.root.join("解压失败/a.part03.rar").is_file(),
+        "整组隔离不丢卷"
+    );
+    assert!(!f.root.join("a.part02.rar").exists(), "原位不得残留余卷");
+    let log = events(&task.directory);
+    assert!(
+        log.contains("缺首卷"),
+        "失败原因必须指明缺首卷（X-10）：{log}"
+    );
+}

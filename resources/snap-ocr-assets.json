@@ -42,12 +42,12 @@
  "workers": [
   {
    "id": "snap-ocr-worker",
-   "status": "ok",
+   "status": "pending-build",
    "url": "https://github.com/jchanghong023/JchTools/releases/download/optional-components-v0.1.2/snap-ocr-worker.exe",
    "archive_type": "file",
    "install_path": "worker/v0.1.2/snap-ocr-worker.exe",
-   "size_bytes": 16235008,
-   "sha256": "c15234bb4596ab29f432bae68196fd60be87c38f7e726627f2e631e2fdd59e11",
+   "size_bytes": 0,
+   "sha256": "PENDING-BUILD",
    "members": [],
    "license": {
     "component": "JchTools snap-ocr-worker（截图 OCR 后台服务进程）",
@@ -91,7 +91,7 @@
    },
    {
     "path": "xberg-cli-x86_64-pc-windows-msvc/models/paddleocr-onnx-models-LICENSE.txt",
-    "install_path": "xberg-inference/v2026.10.2-0920-run54.1/models/snapshot-ocr/LICENSE-paddleocr.txt",
+    "install_path": "xberg-inference/v2026.10.2-0920-run54.1/models/paddleocr-onnx-models-LICENSE.txt",
     "size_bytes": 11358,
     "sha256": "cfc7749b96f63bd31c3c42b5c471bf756814053e847c10f3eb003417bc523d30"
    },

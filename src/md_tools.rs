@@ -549,10 +549,12 @@ pub enum MdProgress {
 /// 合并的行循环每处理多少行响应一次取消/暂停（U-12：文件内也要可停，不能只在文件边界）。
 const MERGE_CHECKPOINT_LINES: usize = 512;
 
-/// 在输出目录内创建本次任务独有的临时文件（F05/M-07：先写临时文件再改名落盘，
-/// 失败或取消时不留半成品输出）。名称带进程号、纳秒时戳与递增序号且不以 `.md` 结尾，
-/// 不会被下一次扫描当作输入；`create_new` 保证绝不覆盖任何已有文件。
-fn create_merge_temp_output(dir: &Path) -> Result<(PathBuf, File)> {
+/// 在输出目录内创建本次任务独有的临时文件（F05/M-07/M-11：合并与拆分都先写
+/// 临时文件再改名落盘，失败或取消时不留半成品输出；拆分的确认覆盖经 rename
+/// 替换目录项，与已存在目标同 inode 的硬链接（如输入的另一名字）不会被截断，
+/// M-08 原文件不修改由此保证）。名称带进程号、纳秒时戳与递增序号且不以 `.md`
+/// 结尾，不会被下一次扫描当作输入；`create_new` 保证绝不覆盖任何已有文件。
+fn create_md_temp_output(dir: &Path) -> Result<(PathBuf, File)> {
     static SEQUENCE: AtomicU64 = AtomicU64::new(0);
     let mut attempt = 0u32;
     loop {
@@ -633,7 +635,7 @@ fn merge_task(
         .unwrap_or_else(|| Path::new("."));
     std::fs::create_dir_all(parent)
         .with_context(|| format!("创建输出目录失败：{}", parent.display()))?;
-    let (temp_path, target) = create_merge_temp_output(parent)?;
+    let (temp_path, target) = create_md_temp_output(parent)?;
     match write_merge_entries(entries, target, control, on_event) {
         Ok(()) => match std::fs::rename(&temp_path, output) {
             Ok(()) => Ok(MergeStats {
@@ -909,32 +911,49 @@ fn split_task(
         control.checkpoint()?;
         on_event(MdProgress::FileStarted(index + 1, plan.bounds.len()))?;
         let path = out_dir.join(&names[index]);
-        let target =
-            File::create(&path).with_context(|| format!("创建分片失败：{}", path.display()))?;
-        let mut out = BufWriter::with_capacity(256 * 1024, target);
-        reader
-            .seek(SeekFrom::Start(start))
-            .with_context(|| format!("定位输入失败：{}", input.display()))?;
-        let mut remain = end.saturating_sub(start);
-        while remain > 0 {
-            // U-12：分片复制循环内逐块响应取消/暂停，超大单片也能及时停下
-            control.checkpoint()?;
-            let want = usize::try_from(remain)
-                .unwrap_or(buffer.len())
-                .min(buffer.len());
-            let got = reader
-                .read(&mut buffer[..want])
-                .with_context(|| format!("读取输入文件失败：{}", input.display()))?;
-            if got == 0 {
-                bail!("读取输入意外结束：{}", input.display());
+        // M-08/M-11：分片先写本任务独有的临时文件，成功后 rename 到目标。
+        // rename 只替换目录项：确认覆盖的分片若与输入是同一实体的硬链接，
+        // 输入名仍指向原字节（File::create 直接截断会破坏共享 inode 的另一
+        // 个名字，即输入本身）；失败或取消时清理临时文件，不留半成品。
+        let (temp_path, target_file) = create_md_temp_output(out_dir)?;
+        let write_result = (|| -> Result<()> {
+            let mut out = BufWriter::with_capacity(256 * 1024, target_file);
+            reader
+                .seek(SeekFrom::Start(start))
+                .with_context(|| format!("定位输入失败：{}", input.display()))?;
+            let mut remain = end.saturating_sub(start);
+            while remain > 0 {
+                // U-12：分片复制循环内逐块响应取消/暂停，超大单片也能及时停下
+                control.checkpoint()?;
+                let want = usize::try_from(remain)
+                    .unwrap_or(buffer.len())
+                    .min(buffer.len());
+                let got = reader
+                    .read(&mut buffer[..want])
+                    .with_context(|| format!("读取输入文件失败：{}", input.display()))?;
+                if got == 0 {
+                    bail!("读取输入意外结束：{}", input.display());
+                }
+                out.write_all(&buffer[..got])
+                    .with_context(|| format!("写分片失败：{}", path.display()))?;
+                written += u64::try_from(got).unwrap_or(0);
+                remain -= u64::try_from(got).unwrap_or(0);
             }
-            out.write_all(&buffer[..got])
-                .with_context(|| format!("写分片失败：{}", path.display()))?;
-            written += u64::try_from(got).unwrap_or(0);
-            remain -= u64::try_from(got).unwrap_or(0);
+            out.flush()
+                .with_context(|| format!("写分片失败（磁盘可能已满）：{}", path.display()))?;
+            drop(out);
+            std::fs::rename(&temp_path, &path).with_context(|| {
+                format!(
+                    "分片落盘失败（{} → {}）：目标可能被占用或权限不足，已清理临时文件",
+                    temp_path.display(),
+                    path.display()
+                )
+            })
+        })();
+        if let Err(error) = write_result {
+            let _ = std::fs::remove_file(&temp_path);
+            return Err(error);
         }
-        out.flush()
-            .with_context(|| format!("写分片失败（磁盘可能已满）：{}", path.display()))?;
         start = *end;
         on_event(MdProgress::FileCompleted(index + 1, plan.bounds.len()))?;
     }
@@ -1101,6 +1120,65 @@ mod tests {
             fs::read(root.join("a.md")).unwrap(),
             original,
             "原始输入字节必须原封不动"
+        );
+    }
+
+    // 覆盖 M-08/M-11（回归：分片目标与输入是同一实体的硬链接时，确认覆盖经
+    // 临时文件 + rename 替换目录项，输入字节原封不动；修复前 `File::create`
+    // 直接截断共享 inode，把输入也清空，随后读取提前结束）
+    #[test]
+    fn split_overwrite_hardlinked_part_keeps_input_intact() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        let content = "# 拆分内容\n".repeat(64);
+        let input = root.join("document.md");
+        fs::write(&input, content.as_bytes()).unwrap();
+        let plan = plan_splits(&input, 1024).unwrap();
+        let out_dir = root.join("out");
+        fs::create_dir_all(&out_dir).unwrap();
+        let names = split_names("document.md", plan.bounds.len());
+        // 预置的分片恰好是输入的硬链接（用户曾用其他工具硬链接过）。
+        fs::hard_link(&input, out_dir.join(&names[0])).unwrap();
+        let written = run_split(
+            &input,
+            &plan,
+            &out_dir,
+            true, // 用户已在界面确认覆盖既有分片
+            &Control::default(),
+            &|_, _| Ok(()),
+        )
+        .unwrap();
+        assert_eq!(written, content.len() as u64, "写入字节应等于输入大小");
+        assert_eq!(
+            fs::read(&input).unwrap(),
+            content.as_bytes(),
+            "输入与分片曾是同一实体的硬链接：覆盖分片必须只替换目录项，输入字节原封不动（M-08）"
+        );
+        let mut rejoined = Vec::new();
+        let mut index = 1u32;
+        loop {
+            let path = out_dir.join(format!("document_{index:03}.md"));
+            let Ok(bytes) = fs::read(&path) else {
+                break;
+            };
+            rejoined.extend_from_slice(&bytes);
+            index += 1;
+        }
+        assert_eq!(
+            rejoined,
+            content.as_bytes(),
+            "按编号拼接必须还原输入（M-10）"
+        );
+        let leftovers: Vec<_> = fs::read_dir(&out_dir)
+            .unwrap()
+            .filter_map(|entry| {
+                let name = entry.ok()?.file_name().into_string().ok()?;
+                name.to_ascii_lowercase().ends_with(".tmp").then_some(name)
+            })
+            .collect();
+        assert!(
+            leftovers.is_empty(),
+            "成功路径不得残留临时文件：{leftovers:?}"
         );
     }
 

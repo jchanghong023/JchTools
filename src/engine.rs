@@ -537,6 +537,10 @@ fn count_archives_with(root: &Path, config: &Config, protected: Option<&Path>) -
             .filter(|name| rules::archive_name(name))
             .count() as u64;
         count += rules::count_tail_only_old_style_groups(names);
+        // X-10 缺入口的残缺组（part rar 缺首卷 / 数字尾卷缺 .001）同样按
+        // 「残缺但可归组的卷集计一包」参与清点，与扫描入队同口径。
+        count += rules::part_rar_missing_first_groups(names).len() as u64;
+        count += rules::numbered_volume_missing_entry_groups(names).len() as u64;
     }
     Ok(count)
 }
@@ -910,6 +914,46 @@ fn scan_emit(
     }
     if enqueue {
         enqueue_old_style_tail_groups(job, parent, children)?;
+        enqueue_missing_entry_groups(job, parent, children)?;
+    }
+    Ok(())
+}
+/// X-10：part rar 缺首卷组与数字尾卷缺入口组的入队——按「残缺但可归组的卷集
+/// 计一包」把每组首个卷作为代表入队，解压阶段按缺入口整组失败并隔离（X-06），
+/// 不把余卷静默漏掉。代表选择与确认清点（[`rules::part_rar_missing_first_groups`] /
+/// [`rules::numbered_volume_missing_entry_groups`]）同口径；同组只入队一次。
+fn enqueue_missing_entry_groups(job: &mut Job, parent: &str, children: &[ScanChild]) -> Result<()> {
+    let lowered: Vec<String> = children
+        .iter()
+        .filter(|child| matches!(child.kind, ScanKind::File { .. }))
+        .map(|child| child.name.to_lowercase())
+        .collect();
+    // 代表名是小写口径；入队必须用磁盘上的原始文件名（可能含大写）。
+    let mut representatives: HashSet<String> = rules::part_rar_missing_first_groups(&lowered)
+        .into_iter()
+        .collect();
+    representatives.extend(rules::numbered_volume_missing_entry_groups(&lowered));
+    if representatives.is_empty() {
+        return Ok(());
+    }
+    for child in children {
+        let ScanKind::File { .. } = &child.kind else {
+            continue;
+        };
+        let lower = child.name.to_lowercase();
+        if !representatives.remove(&lower) {
+            continue;
+        }
+        let rel = if parent.is_empty() {
+            child.name.clone()
+        } else {
+            format!("{parent}/{}", child.name)
+        };
+        // 与 archive_name 入队同口径：入队失败计错误并跳过，不中断整个扫描。
+        if let Err(error) = archive::enqueue(job, &job.root.join(&rel), 0) {
+            job.summary.errors += 1;
+            job.log("扫描", &rel, "", "跳过", &format!("{error:#}"), 0)?;
+        }
     }
     Ok(())
 }
@@ -1554,6 +1598,10 @@ pub fn apply(directory: &Path, context: TaskContext) -> Result<TaskResult> {
     let config = db.config()?;
     config.validate()?;
     let summary = db.summary()?;
+    // 执行阶段新增错误的判定基线：分析阶段已确认的错误（扫描跳过、派生名失败等）
+    // 不把「执行全部成功」的任务改判失败，但执行/清理阶段新增任一错误不得标
+    // 「finished」（C-11/C-01/H-05：部分失败不得伪装成全部成功）。
+    let errors_before_apply = summary.errors;
     let mut job = Job {
         root,
         config,
@@ -1653,7 +1701,9 @@ pub fn apply(directory: &Path, context: TaskContext) -> Result<TaskResult> {
     job.db.set("summary", &job.summary)?;
     job.db.set(
         "status",
-        &if outcome.is_ok() {
+        // C-11/C-01：执行阶段有计划行失败（errors 新增）的任务不得标「finished」；
+        // 用户取消优先于失败口径（C-10 取消不算失败）。
+        &if outcome.is_ok() && job.summary.errors == errors_before_apply {
             "finished"
         } else if job.context.control.is_cancelled() {
             "cancelled"

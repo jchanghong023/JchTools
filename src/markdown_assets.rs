@@ -476,6 +476,61 @@ mod tests {
         );
     }
 
+    // 覆盖 XB-19/T-05（回归：任务预检按所选分组分场景——纯媒体目录缺文档模型
+    // 不再被文档条件提前拒绝；缺文档模型的文档任务启动前明确报错而不是静默放行
+    // 后逐文件失败；page_readiness 允许任一场景可用即进入转换页）
+    #[test]
+    fn readiness_for_groups_checks_only_requested_scenarios() {
+        let guard = redirect_component_env();
+        let component = install_component(guard.root.path());
+        // install_component 只建 media_component_dir 在位校验所需文件；
+        // 清单成员检查还要求根级通用成员（engine 运行库与许可），一并补齐。
+        for extra in [
+            "onnxruntime.dll",
+            "onnxruntime_providers_shared.dll",
+            "LICENSE",
+            "THIRD_PARTY_LICENSES.md",
+            "MSVCP140.dll",
+            "MSVCP140_1.dll",
+            "VCRUNTIME140.dll",
+            "VCRUNTIME140_1.dll",
+            "ffmpeg/LICENSE.txt",
+            "sherpa-onnx/LICENSE",
+        ] {
+            fs::write(component.join(extra), b"stub").expect("预置通用成员");
+        }
+        // 前置：媒体场景成员齐备，文档场景成员（models/models--… 文档模型）缺位。
+        assert!(
+            super::validate_media().is_ok(),
+            "前置：媒体组件就绪（组件目录 {}）：{:?}",
+            component.display(),
+            super::validate_media()
+        );
+        // 纯媒体分组：不再被文档条件拒绝（修复前 run() 无条件 readiness()）。
+        assert!(
+            crate::markdown::readiness_for_groups(&[crate::markdown::FormatGroup::Media]).is_ok()
+        );
+        // 纯文档分组：启动前明确报文档组件未就绪，并指认缺失。
+        let error = crate::markdown::readiness_for_groups(&[crate::markdown::FormatGroup::Pdf])
+            .expect_err("缺文档模型的文档任务必须在启动前拒绝");
+        assert!(
+            error.contains("文档转换组件未就绪"),
+            "错误必须区分场景并指认文档组件：{error}"
+        );
+        // 混选分组：两个场景都必须就绪，仍报未就绪的那个。
+        let error = crate::markdown::readiness_for_groups(&[
+            crate::markdown::FormatGroup::Pdf,
+            crate::markdown::FormatGroup::Media,
+        ])
+        .expect_err("混选分组要求全部所选场景就绪");
+        assert!(
+            error.contains("文档转换组件未就绪"),
+            "错误必须指认未就绪场景：{error}"
+        );
+        // 页面门槛（XB-19）：任一场景可用即可开始，纯媒体目录可进入转换页。
+        assert!(crate::markdown::page_readiness().is_ok());
+    }
+
     /// 测试共享进程环境变量，组件根相关用例必须串行访问；锁实例与
     /// snap_ocr_assets 的测试共用（见 asset_util::test_env），避免两模块的
     /// 覆盖变量在并行线程中相互覆盖。

@@ -436,6 +436,18 @@ impl SevenZip {
         if missing_old_style_main(&archive) {
             anyhow::bail!("老式分卷族缺主包：{archive_rel}（只发现 .zNN/.rNN 尾卷，未找到 主干.zip/主干.rar）");
         }
+        // X-10：part rar 族缺首卷——当前卷是 partN（N≥2）且同目录没有对应宽度的
+        // part1 入口（缺首卷组由扫描按代表入队）。整组按失败包处置并报告缺首卷，
+        // 不把余卷当独立包或交给引擎猜。附录 E：a.part02+a.part03 缺 01 → 一组
+        // 缺首卷失败，不当两个完整 rar 解压。
+        if let Some(reason) = missing_part_rar_first(&archive) {
+            anyhow::bail!("part rar 分卷族缺首卷：{archive_rel}（{reason}）");
+        }
+        // X-10：数字尾卷族缺入口——.NNN（N≥2）且同目录没有 .001/.000。同上整组
+        // 失败处置，报告缺入口而不是笼统的引擎错误。
+        if let Some(stem) = missing_numbered_entry(&archive) {
+            anyhow::bail!("数字尾卷族缺起始卷：{archive_rel}（未找到 {stem}.001 入口卷）");
+        }
         let volumes = if named.paths.len() > 1
             || matches!(named.scheme, VolumeScheme::RarParts | VolumeScheme::OldRar)
         {
@@ -1176,6 +1188,46 @@ fn missing_old_style_main(archive: &Path) -> bool {
     !archive
         .with_file_name(format!("{}.{}", tail.stem, tail.main_ext))
         .exists()
+}
+/// X-10：该文件是 partN（N≥2）的分卷、且同目录没有同主干同宽度的 part1 入口。
+/// 返回缺首卷的说明；不是该形态或入口在场时返回 None。宽度按 X-10 的命名族
+/// 区分（part1 / part01 / part001 属不同模式），入口必须是该模式的编号 1。
+fn missing_part_rar_first(archive: &Path) -> Option<String> {
+    let name = archive.file_name().and_then(|s| s.to_str())?;
+    let lower = name.to_lowercase();
+    let (stem, digits) = split_rar_part(&lower)?;
+    let number: u64 = digits.parse().ok()?;
+    if number < 2 {
+        return None;
+    }
+    let first = format!("{stem}.part{:0>width$}.rar", 1, width = digits.len());
+    if archive.with_file_name(&first).exists() {
+        return None;
+    }
+    Some(format!("未找到 {stem}.part{digits} 同宽度的入口卷 {first}"))
+}
+/// X-10：该文件是数字尾卷族的 `.NNN`（编号 ≥ 2）、且同目录没有 `.001` 入口
+///（也没有作为可识别非法起始入队的 `.000`）。返回主干名供错误指认。
+fn missing_numbered_entry(archive: &Path) -> Option<String> {
+    let name = archive.file_name().and_then(|s| s.to_str())?;
+    let lower = name.to_lowercase();
+    if !numbered_entry(&lower) {
+        return None;
+    }
+    let stem = &lower[..lower.len() - 4];
+    let digits = &lower[lower.len() - 3..];
+    let Ok(number) = digits.parse::<u64>() else {
+        return None;
+    };
+    if number < 2 {
+        return None;
+    }
+    if archive.with_file_name(format!("{stem}.001")).exists()
+        || archive.with_file_name(format!("{stem}.000")).exists()
+    {
+        return None;
+    }
+    Some(stem.to_string())
 }
 /// 分卷组解析：返回主体自身 + 同目录下的兄弟卷（X-05 删除与 X-06 隔离的处置单位）。
 /// 非分卷包（命名不能匹配任何分卷方案）返回只含主体自身的单项集合，且**不枚举目录**：

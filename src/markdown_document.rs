@@ -139,17 +139,7 @@ pub fn page_count(path: &Path, deadline: &Deadline) -> Option<usize> {
         return None;
     }
     match path.extension()?.to_str()?.to_ascii_lowercase().as_str() {
-        "pdf" => {
-            if deadline.expired() {
-                return None;
-            }
-            let document = lopdf::Document::load(path).ok()?;
-            if document.is_encrypted() {
-                return None;
-            }
-            let count = document.get_pages().len();
-            (count > 0).then_some(count)
-        }
+        "pdf" => pdf_page_count(path, deadline),
         "docx" | "docm" | "dotx" | "dotm" => {
             let mut zip = ZipReader::open(path)?;
             let mut found = None;
@@ -178,6 +168,224 @@ pub fn page_count(path: &Path, deadline: &Deadline) -> Option<usize> {
         }
         _ => None,
     }
+}
+
+/// PDF 页数的有界结构探测（T-18/附录 D：页数探测不得把整个文件读入内存，
+/// 也不先执行 OCR）。只支持传统 xref 表 + 明文对象布局：尾部窗口找
+/// `startxref` → 定位 xref 表 → 跳过子段行读取 trailer → `/Root` 间接引用
+/// → catalog 的 `/Pages` → Pages 的 `/Count`。xref 流（PDF 1.5+ 压缩交叉
+/// 引用）、对象流内引用、加密或间接 `/Count` 一律返回 `None`（调用方按
+/// T-18 回常规模式，行为不劣于探测失败）；每个阶段检查单文件预算。
+fn pdf_page_count(path: &Path, deadline: &Deadline) -> Option<usize> {
+    let mut file = std::fs::File::open(path).ok()?;
+    let len = file.metadata().ok()?.len();
+    if len == 0 {
+        return None;
+    }
+    // 尾部有界窗口定位 startxref（增量更新链的最后一个 xref 是最新 trailer）。
+    let window_start = len.saturating_sub(64 * 1024);
+    let window_len = usize::try_from(len - window_start).ok()?;
+    let mut window = vec![0u8; window_len];
+    file.seek(SeekFrom::Start(window_start)).ok()?;
+    file.read_exact(&mut window).ok()?;
+    let marker = find_last_subslice(&window, b"startxref")?;
+    let after = &window[marker + b"startxref".len()..];
+    let offset_line = after
+        .split(|&byte| byte == b'\n' || byte == b'\r')
+        .find(|line| !line.is_empty())?;
+    let xref_offset = parse_leading_uint(offset_line)?;
+    // xref 段必须是传统表（`xref` 关键字）；xref 流对象走 None 回常规模式。
+    file.seek(SeekFrom::Start(xref_offset)).ok()?;
+    if read_line_bounded(&mut file, 32)? != b"xref" {
+        return None;
+    }
+    // 逐子段跳过固定 20 字节/行的表项，直到 `trailer`；表可能很大（百万对象），
+    // 这里只按行数 seek 跳过，不把表读入内存。
+    let trailer: Vec<u8> = loop {
+        if deadline.expired() {
+            return None;
+        }
+        let line = read_line_bounded(&mut file, 64)?;
+        if line == b"trailer" {
+            // trailer 字典到 startxref/EOF 结束；正常远小于窗口上限。
+            let remaining = len.saturating_sub(file.stream_position().ok()?);
+            let take = remaining.min(64 * 1024);
+            let mut buffer = vec![0u8; usize::try_from(take).ok()?];
+            file.read_exact(&mut buffer).ok()?;
+            break buffer;
+        }
+        let text = String::from_utf8_lossy(&line).into_owned();
+        let mut parts = text.split_whitespace();
+        let (Some(_start), Some(count)) = (parts.next(), parts.next()) else {
+            return None;
+        };
+        let count: u64 = count.parse().ok()?;
+        file.seek(SeekFrom::Current(
+            i64::try_from(count.checked_mul(20)?).ok()?,
+        ))
+        .ok()?;
+    };
+    if find_subslice(&trailer, b"/Encrypt").is_some() {
+        return None;
+    }
+    let (root_num, _) = indirect_reference_after(&trailer, b"/Root")?;
+    if deadline.expired() {
+        return None;
+    }
+    // catalog 对象：按偏移读小窗口，找 /Pages 间接引用。
+    let root_offset = xref_object_offset(&mut file, xref_offset, root_num)?;
+    let catalog = read_object_window(&mut file, len, root_offset)?;
+    let (pages_num, _) = indirect_reference_after(&catalog, b"/Pages")?;
+    if deadline.expired() {
+        return None;
+    }
+    let pages_offset = xref_object_offset(&mut file, xref_offset, pages_num)?;
+    let pages = read_object_window(&mut file, len, pages_offset)?;
+    let count_start = find_subslice(&pages, b"/Count")? + b"/Count".len();
+    let count = parse_leading_uint(skip_space(&pages[count_start..]))?;
+    let count = usize::try_from(count).ok()?;
+    (count > 0).then_some(count)
+}
+
+/// 传统 xref 表中对象号 → 字节偏移：解析子段头与 20 字节行（`offset gen n|f`）。
+/// 对象号不在表内或条目为 free（对象流/损坏/压缩对象）返回 None。
+fn xref_object_offset(file: &mut std::fs::File, xref_offset: u64, wanted: u64) -> Option<u64> {
+    // trailer 内的 /Prev 链不去追：最新表找不到就按不支持处理（回常规模式）。
+    file.seek(SeekFrom::Start(xref_offset + b"xref".len() as u64))
+        .ok()?;
+    loop {
+        let line = read_line_bounded(file, 64)?;
+        // `xref` 关键字后紧跟的行尾会先读出一个空行，跳过。
+        if line.is_empty() {
+            continue;
+        }
+        if line == b"trailer" {
+            return None;
+        }
+        let text = String::from_utf8_lossy(&line).into_owned();
+        let mut parts = text.split_whitespace();
+        let start: u64 = parts.next()?.parse().ok()?;
+        let count: u64 = parts.next()?.parse().ok()?;
+        if wanted >= start && wanted < start.checked_add(count)? {
+            let skip = wanted - start;
+            file.seek(SeekFrom::Current(
+                i64::try_from(skip.checked_mul(20)?).ok()?,
+            ))
+            .ok()?;
+            let entry = read_line_bounded(file, 20)?;
+            let text = String::from_utf8_lossy(&entry).into_owned();
+            // 条目固定三段：`offset generation n|f`——kind 是第三段。
+            let mut fields = text.split_whitespace();
+            let offset: u64 = fields.next()?.parse().ok()?;
+            let _generation = fields.next()?;
+            let kind = fields.next()?;
+            if kind.starts_with('n') && offset > 0 {
+                return Some(offset);
+            }
+            return None;
+        }
+        file.seek(SeekFrom::Current(
+            i64::try_from(count.checked_mul(20)?).ok()?,
+        ))
+        .ok()?;
+    }
+}
+
+/// 在对象偏移处读有界窗口（8 KiB）：跳过 `N G obj` 头，返回其后内容供键查找。
+fn read_object_window(file: &mut std::fs::File, len: u64, offset: u64) -> Option<Vec<u8>> {
+    if offset >= len {
+        return None;
+    }
+    file.seek(SeekFrom::Start(offset)).ok()?;
+    let head = read_line_bounded(file, 64)?;
+    if !head.ends_with(b"obj") {
+        return None;
+    }
+    let take = len
+        .saturating_sub(file.stream_position().ok()?)
+        .min(8 * 1024);
+    let mut buffer = vec![0u8; usize::try_from(take).ok()?];
+    file.read_exact(&mut buffer).ok()?;
+    Some(buffer)
+}
+
+/// 读一行（到 \n 或 \r），含去 CR；空行返回空切片。超长或 EOF 返回 None。
+fn read_line_bounded(file: &mut std::fs::File, max: usize) -> Option<Vec<u8>> {
+    let mut line = Vec::with_capacity(32);
+    let mut byte = [0u8; 1];
+    while line.len() < max {
+        match file.read(&mut byte) {
+            Ok(1) => {}
+            _ => return if line.is_empty() { None } else { Some(line) },
+        }
+        if byte[0] == b'\n' {
+            break;
+        }
+        line.push(byte[0]);
+    }
+    while line.last() == Some(&b'\r') {
+        line.pop();
+    }
+    Some(line)
+}
+
+fn find_subslice(haystack: &[u8], needle: &[u8]) -> Option<usize> {
+    if needle.is_empty() || haystack.len() < needle.len() {
+        return None;
+    }
+    haystack
+        .windows(needle.len())
+        .position(|window| window == needle)
+}
+
+fn find_last_subslice(haystack: &[u8], needle: &[u8]) -> Option<usize> {
+    if needle.is_empty() || haystack.len() < needle.len() {
+        return None;
+    }
+    haystack
+        .windows(needle.len())
+        .rposition(|window| window == needle)
+}
+
+fn skip_space(bytes: &[u8]) -> &[u8] {
+    let start = bytes
+        .iter()
+        .position(|byte| !byte.is_ascii_whitespace())
+        .unwrap_or(bytes.len());
+    &bytes[start..]
+}
+
+/// 解析开头的 ASCII 十进制数（跳过前导空白）。
+fn parse_leading_uint(bytes: &[u8]) -> Option<u64> {
+    let digits = skip_space(bytes);
+    let end = digits
+        .iter()
+        .position(|byte| !byte.is_ascii_digit())
+        .unwrap_or(digits.len());
+    if end == 0 {
+        return None;
+    }
+    std::str::from_utf8(&digits[..end]).ok()?.parse().ok()
+}
+
+/// 查找 `key` 后的间接引用 `N G R`，返回 (对象号, 代号)。
+fn indirect_reference_after(bytes: &[u8], key: &[u8]) -> Option<(u64, u64)> {
+    let start = find_subslice(bytes, key)? + key.len();
+    let number = parse_leading_uint(&bytes[start..])?;
+    let rest = skip_uint(&bytes[start..])?;
+    let generation = parse_leading_uint(rest)?;
+    let rest = skip_space(skip_uint(rest)?);
+    (rest.first() == Some(&b'R')).then_some((number, generation))
+}
+
+/// 跳过开头的 ASCII 十进制数字段（先跳空白），返回其余部分；没有数字段返回 None。
+fn skip_uint(bytes: &[u8]) -> Option<&[u8]> {
+    let rest = skip_space(bytes);
+    let end = rest
+        .iter()
+        .position(|byte| !byte.is_ascii_digit())
+        .unwrap_or(rest.len());
+    (end > 0).then(|| &rest[end..])
 }
 
 #[derive(Debug, Clone)]
@@ -1390,8 +1598,29 @@ mod tests {
             "Pages" => pages_tree_id,
         }));
         document.trailer.set("Root", catalog_id);
-        document.save(&path).unwrap();
+        // 传统 xref 表布局（本解析器的支持形态；lopdf 0.45 的 Document::new
+        // 默认 cross_reference_type = CrossReferenceStream 且 save 选项只在
+        // 开启时改写类型，必须显式切回传统表并关闭对象流才能生成明文表）。
+        document.reference_table.cross_reference_type = lopdf::xref::XrefType::CrossReferenceTable;
+        let mut buffer = Vec::new();
+        document
+            .save_with_options(
+                &mut buffer,
+                lopdf::SaveOptions {
+                    use_object_streams: false,
+                    use_xref_streams: false,
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+        std::fs::write(&path, &buffer).unwrap();
         assert_eq!(page_count(&path, &generous_deadline()), Some(201));
+        // xref 流布局（lopdf 默认形态）：不在本解析器支持范围，按 T-18 回退
+        // 常规模式而不是误报页数。
+        document.reference_table.cross_reference_type = lopdf::xref::XrefType::CrossReferenceStream;
+        let modern = temp.path().join("pages-modern.pdf");
+        document.save(&modern).unwrap();
+        assert_eq!(page_count(&modern, &generous_deadline()), None);
     }
 
     // ── A1：fast 模式配置不得写回已移除的 layout 顶层键 ──

@@ -106,6 +106,16 @@ impl SystemProxy {
         }
     }
 
+    /// P-09：目标 URL 是否命中例外表（系统代理未启用时恒为 false）。git 网络
+    /// 命令注入代理前先做此判断：命中的目标直接按现状直连——libcurl 的
+    /// `no_proxy` 无法表达 `<local>` 与 `192.168.*` 这类任意位置通配，仅靠
+    /// [`git_env`] 的近似翻译会丢弃这些条目，导致内网/裸主机目标仍被推入代理。
+    pub fn bypassed(&self, url: &str) -> bool {
+        self.is_enabled()
+            && split_scheme_host(url)
+                .is_some_and(|(_, host)| self.bypass.iter().any(|rule| rule_matches(rule, &host)))
+    }
+
     /// git 网络命令的环境变量注入（P-09）：仅在系统代理开启时非空，键固定为
     /// 小写（libcurl 优先识别小写）。`no_proxy` 无法表达 `<local>` 与任意位置
     /// 通配，按近似规则翻译（`*.foo.com` → `foo.com`，`*` → `*`，无法表达的
@@ -469,6 +479,40 @@ mod tests {
         assert_eq!(
             proxy.endpoint_for_url("https://github.com/a"),
             Some("http://127.0.0.1:7890".to_string())
+        );
+    }
+
+    // 覆盖 P-09（回归：`<local>`、`192.168.*` 这类 no_proxy 表达不了的例外
+    // 规则经 bypassed() 前置判断命中——git 网络命令因此直连而不被注入代理；
+    // 修复前这些条目在 git_env 的 no_proxy 近似翻译中被丢弃，内网目标仍被推入代理）
+    #[test]
+    fn bypassed_matches_untranslatable_override_rules() {
+        let proxy = SystemProxy::from_registry_values(
+            1,
+            Some("127.0.0.1:7890"),
+            Some("<local>;192.168.*;*.corp.example;github.com"),
+        );
+        assert!(
+            proxy.bypassed("http://intranet/wiki"),
+            "<local>：无点主机命中"
+        );
+        assert!(
+            proxy.bypassed("http://192.168.1.23/git"),
+            "192.168.* 前缀通配命中"
+        );
+        assert!(
+            proxy.bypassed("https://git.corp.example/repo.git"),
+            "*.suffix 命中"
+        );
+        assert!(proxy.bypassed("https://github.com/a"), "精确条目命中");
+        assert!(!proxy.bypassed("https://example.com/a"), "例外之外不命中");
+        // 未启用时恒不例外（调用方据此走注入/回退路径）。
+        let disabled =
+            SystemProxy::from_registry_values(0, Some("127.0.0.1:7890"), Some("<local>"));
+        assert!(!disabled.bypassed("http://intranet/wiki"));
+        assert!(
+            !proxy.bypassed("not-a-url"),
+            "解析不出 host 的目标保守处理为不例外"
         );
     }
 

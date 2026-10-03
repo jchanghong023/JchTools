@@ -46,60 +46,36 @@ $builtWorkerSha = (Get-FileHash -LiteralPath $workerExe -Algorithm SHA256).Hash.
 $optionalStage = Join-Path $root 'dist\optional-components-v0.1.2'
 New-Item -ItemType Directory -Path $optionalStage -Force | Out-Null
 $stagedWorker = Join-Path $optionalStage 'snap-ocr-worker.exe'
+Copy-Item -LiteralPath $workerExe -Destination $stagedWorker -Force
+# 构建期占位回填（设计见 src/snap_ocr_assets.rs 的 pending-build 状态）：仓库清单的
+# worker 条目保持 pending-build 占位，打包阶段用本次构建的真实字节生成 staged 清单
+# ——build.rs 把它嵌入 JchTools.exe，发布目录的 resources/ 也用同一份。嵌入清单与
+# 随包交付的 worker 因此逐字节一致（XB-25：worker 随主包交付，运行期安装按清单
+# 校验大小与 SHA-256）；不再要求本地构建与某个已发布 release 字节相同（Rust/COFF
+# 工具链版本不同会失配，旧口径在源码演进后离线打包必失败、在线打包则嵌入旧清单
+# 交付新 worker，运行期校验拒绝服务）。
 $manifest = Get-Content -LiteralPath 'resources\snap-ocr-assets.json' -Raw -Encoding UTF8 | ConvertFrom-Json
 $workers = @($manifest.workers)
 if ($workers.Count -ne 1 -or $workers[0].id -cne 'snap-ocr-worker' -or
     $workers[0].url -cne 'https://github.com/jchanghong023/JchTools/releases/download/optional-components-v0.1.2/snap-ocr-worker.exe' -or
     $workers[0].archive_type -cne 'file' -or
     $workers[0].install_path -cne 'worker/v0.1.2/snap-ocr-worker.exe' -or
-    $workers[0].status -cne 'ok' -or
-    $workers[0].size_bytes -le 0 -or
-    $workers[0].sha256 -notmatch '^[0-9a-f]{64}$') {
-    throw 'Optional OCR worker manifest does not contain the pinned release URL, size, SHA-256, and destination.'
+    (@($workers[0].members)).Count -ne 0) {
+    throw 'Optional OCR worker manifest does not contain the pinned release URL and destination.'
 }
-$workerBytes = [long]$workers[0].size_bytes
-$workerSha = [string]$workers[0].sha256
-if ($Offline) {
-    if ($builtWorkerBytes -ne $workerBytes -or $builtWorkerSha -cne $workerSha) {
-        throw "Offline package worker differs from the pinned asset (built $builtWorkerBytes/$builtWorkerSha; expected $workerBytes/$workerSha)."
-    }
-    Copy-Item -LiteralPath $workerExe -Destination $stagedWorker -Force
-} else {
-    # The released worker is the byte identity users download. Rust/COFF toolchain
-    # versions may produce different local bytes from the same source, so package
-    # this pinned asset after compiling locally as a source/build check.
-    # The pinned size/SHA-256 check runs on every attempt; flaky networks only
-    # stretch the wall clock, never weaken integrity.
-    $download = "$stagedWorker.download"
-    $maxAttempts = 5
-    $moved = $false
-    try {
-        for ($attempt = 1; $attempt -le $maxAttempts -and -not $moved; $attempt++) {
-            try {
-                Invoke-WebRequest -Uri $workers[0].url -UseBasicParsing -OutFile $download
-                if ((Get-Item -LiteralPath $download).Length -ne $workerBytes -or
-                    (Get-FileHash -LiteralPath $download -Algorithm SHA256).Hash.ToLowerInvariant() -cne $workerSha) {
-                    throw 'Downloaded OCR worker does not match the pinned size and SHA-256.'
-                }
-                Move-Item -LiteralPath $download -Destination $stagedWorker -Force
-                $moved = $true
-            } catch {
-                if (Test-Path -LiteralPath $download) {Remove-Item -LiteralPath $download -Force}
-                if ($attempt -ge $maxAttempts) {throw}
-                Write-Host "Worker asset download attempt $attempt failed: $($_.Exception.Message); retrying in 10s"
-                Start-Sleep -Seconds 10
-            }
-        }
-    } finally {
-        if (Test-Path -LiteralPath $download) {Remove-Item -LiteralPath $download -Force}
-    }
+if ($workers[0].status -cne 'pending-build') {
+    throw 'Optional OCR worker manifest must stay pending-build in the repository; packaging backfills the real size and SHA-256.'
 }
-if ((Get-Item -LiteralPath $stagedWorker).Length -ne $workerBytes -or
-    (Get-FileHash -LiteralPath $stagedWorker -Algorithm SHA256).Hash.ToLowerInvariant() -cne $workerSha) {
-    throw 'Optional OCR worker staging changed the pinned executable bytes.'
-}
+$workers[0].status = 'ok'
+$workers[0].size_bytes = [long]$builtWorkerBytes
+$workers[0].sha256 = $builtWorkerSha
 $stagedManifest = Join-Path $optionalStage 'snap-ocr-assets.json'
-Copy-Item -LiteralPath 'resources\snap-ocr-assets.json' -Destination $stagedManifest -Force
+$utf8NoBom = New-Object Text.UTF8Encoding($false)
+[IO.File]::WriteAllText($stagedManifest, ($manifest | ConvertTo-Json -Depth 20), $utf8NoBom)
+if ((Get-Item -LiteralPath $stagedWorker).Length -ne $builtWorkerBytes -or
+    (Get-FileHash -LiteralPath $stagedWorker -Algorithm SHA256).Hash.ToLowerInvariant() -cne $builtWorkerSha) {
+    throw 'Optional OCR worker staging changed the built executable bytes.'
+}
 $utf8 = New-Object Text.UTF8Encoding($false)
 # build.rs embeds the exact staged manifest into JchTools.exe; restore the caller's
 # environment even if compilation fails.

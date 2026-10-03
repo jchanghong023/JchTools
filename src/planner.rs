@@ -348,8 +348,19 @@ fn gather_dir_plans(job: &Job, items: &[Item], moved_roots: &[String]) -> HashMa
             }
             let reason = match fsutil::safe_join(&job.root, dir) {
                 Err(error) => Some(format!("目标路径不可用：{error:#}")),
-                Ok(path) => match std::fs::read_dir(path) {
-                    Ok(_) => None,
+                Ok(path) => match std::fs::read_dir(&path) {
+                    // 目录可复用还必须不是受保护树：固定容器名（大类、「Git项目集合」）
+                    // 被留在原地的 Git 项目占用时不得向树内移入任何文件（H-06/S-01），
+                    // 依赖它的项全部失败并保留源项；边界无法检查时同样不放行。
+                    Ok(_) => match fsutil::is_git_root(&path) {
+                        Ok(true) => Some(format!(
+                            "目标目录「{dir}」是受保护的 Git 项目：不进入树内，相关项保留源项（H-06）"
+                        )),
+                        Ok(false) => None,
+                        Err(error) => Some(format!(
+                            "无法检查目标目录「{dir}」的 Git 边界：{error:#}；相关项保留源项"
+                        )),
+                    },
                     Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
                         blocked_by_file_ancestor(&job.root, dir)
                     }
@@ -623,6 +634,12 @@ fn git_collection(job: &mut Job) -> Result<Vec<String>> {
         let Some(name) = Path::new(rel).file_name().and_then(|s| s.to_str()) else {
             continue;
         };
+        // 项目自身就叫「Git项目集合」：它占据的就是集合容器位置，移动目标会落进
+        // 自己内部（Git项目集合/Git项目集合 自嵌套，C-14/C-21 明确禁止）——视同
+        // 已在集合位置，保留原位不生成移动计划。
+        if same_component(name, GIT_COLLECTION_DIR) {
+            continue;
+        }
         let parent = parent_of(rel).to_string();
         // 项目来源排除分类层级与直接集合容器（C-14）；项目无大类段可比对剔除。
         let sources = source_levels(&parent, true, false);

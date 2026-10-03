@@ -6,7 +6,12 @@ use crate::{
 use anyhow::{bail, Result};
 use globset::{GlobBuilder, GlobSet, GlobSetBuilder};
 use sha2::{Digest, Sha256};
-use std::{cmp::Ordering, collections::HashSet, path::Path, sync::OnceLock};
+use std::{
+    cmp::Ordering,
+    collections::{HashMap, HashSet},
+    path::Path,
+    sync::OnceLock,
+};
 use unicode_normalization::UnicodeNormalization;
 
 // ---------------------------------------------------------------------------
@@ -757,6 +762,73 @@ pub fn count_tail_only_old_style_groups(names_lower: &[String]) -> u64 {
         count += 1;
     }
     count
+}
+/// X-10 part rar 族「只有 partN（N≥2）、缺该宽度的 part1」的残缺组：返回每组
+/// 一个代表卷的文件名（清单序首个，确定性排序），供确认清点（X-02）与入队复用。
+/// 分组键 =（主干, 数字串宽度）：`part1` / `part01` / `part001` 属不同宽度模式
+/// （X-10）；同一主干混用宽度的歧义由 archive 侧整组失败处置，这里按宽度各归
+/// 各组、不猜归属。附录 E：`a.part02.rar`、`a.part03.rar` 缺 01 → 一组缺首卷
+/// 失败，不当两个完整 rar 解压。
+pub fn part_rar_missing_first_groups(names_lower: &[String]) -> Vec<String> {
+    let re = part_rar_regex();
+    // (主干, 宽度) -> (该宽度 part1 是否在场, 首个 N≥2 代表名)
+    let mut groups: HashMap<(String, usize), (bool, Option<String>)> = HashMap::new();
+    for name in names_lower {
+        let Some(caps) = re.captures(name) else {
+            continue;
+        };
+        let Ok(number) = caps[1].parse::<u64>() else {
+            continue;
+        };
+        let Some(matched) = caps.get(0) else {
+            continue;
+        };
+        let stem = &name[..name.len() - matched.as_str().len()];
+        let width = caps[1].len();
+        let entry = groups
+            .entry((stem.to_string(), width))
+            .or_insert((false, None));
+        if number == 1 {
+            entry.0 = true;
+        } else if entry.1.is_none() {
+            entry.1 = Some(name.clone());
+        }
+    }
+    let mut representatives: Vec<String> = groups
+        .into_values()
+        .filter(|(has_first, _)| !has_first)
+        .filter_map(|(_, representative)| representative)
+        .collect();
+    representatives.sort();
+    representatives
+}
+/// X-10 数字尾卷族「只有 `.NNN`（N≥2）、缺 `.001` 入口（也无 `.000` 非法起始
+/// 标记）」的残缺组：返回每组一个代表卷的文件名。`.000` 由 [`archive_name`]
+/// 作为可识别非法起始直接入队，这里只收集完全没有入口的组；同族多次出现只计
+/// 一组（一组仅入队、计数、判定一次）。
+pub fn numbered_volume_missing_entry_groups(names_lower: &[String]) -> Vec<String> {
+    // 主干 ->（入口 `.000`/`.001` 是否在场, 首个 N≥2 代表名）
+    let mut groups: HashMap<String, (bool, Option<String>)> = HashMap::new();
+    for name in names_lower {
+        let Some((stem, digits)) = numbered_volume_tail(name) else {
+            continue;
+        };
+        let entry = groups.entry(stem.to_string()).or_insert((false, None));
+        if digits == "000" || digits == "001" {
+            // `.001` 是合法入口、`.000` 是可识别的非法起始编号，两者都已由
+            // [`archive_name`] 作为该组入口入队，不属「缺入口」组。
+            entry.0 = true;
+        } else if entry.1.is_none() {
+            entry.1 = Some(name.clone());
+        }
+    }
+    let mut representatives: Vec<String> = groups
+        .into_values()
+        .filter(|(has_entry, _)| !has_entry)
+        .filter_map(|(_, representative)| representative)
+        .collect();
+    representatives.sort();
+    representatives
 }
 pub fn multipart_name(name: &str) -> bool {
     let n = name.to_lowercase();
@@ -1544,6 +1616,59 @@ mod tests {
         // 白名单外与孤立编号不是组入口（X-09）。
         assert!(!multipart_name("data.001"));
         assert!(!multipart_name("x.iso.001"));
+    }
+
+    // 覆盖 X-10, 附录 E（回归：只有 a.part02/a.part03、缺该宽度 part1 的目录
+    // 仍归为一组并给出唯一代表；修复前这种目录被静默漏掉——入口侧没有任何
+    // 包被识别，缺首卷既不计数也不隔离）
+    #[test]
+    fn part_rar_missing_first_groups_recognize_tail_only_sets() {
+        let names = |items: &[&str]| -> Vec<String> {
+            items.iter().map(std::string::ToString::to_string).collect()
+        };
+        // 附录 E 原例：缺 01 的一组，代表是清单序首个余卷。
+        assert_eq!(
+            part_rar_missing_first_groups(&names(&["a.part02.rar", "a.part03.rar"])),
+            vec!["a.part02.rar".to_string()]
+        );
+        // 同宽度的 part1 在场：正常入口组（archive_name 已入队），不是缺首卷。
+        assert!(
+            part_rar_missing_first_groups(&names(&["a.part01.rar", "a.part02.rar"])).is_empty()
+        );
+        // 不同宽度的 part1 不算该模式的入口（X-10：part1/part01 属不同宽度模式）。
+        assert_eq!(
+            part_rar_missing_first_groups(&names(&["a.part1.rar", "a.part02.rar", "a.part03.rar"])),
+            vec!["a.part02.rar".to_string()]
+        );
+        // 不同主干互不归组；同主干只计一组。
+        assert_eq!(
+            part_rar_missing_first_groups(&names(&["a.part2.rar", "a.part3.rar", "b.part02.rar"])),
+            vec!["a.part2.rar".to_string(), "b.part02.rar".to_string()]
+        );
+        // 普通 .rar 与 report.partial.rar 不参与。
+        assert!(
+            part_rar_missing_first_groups(&names(&["solo.rar", "report.partial.rar"])).is_empty()
+        );
+    }
+
+    // 覆盖 X-10（回归：数字尾卷族只有 .NNN（N≥2）、缺 .001/.000 入口时按一组
+    // 计；入口在场（含 .000 非法起始）的组不属「缺入口」，白名单外孤立编号不归组）
+    #[test]
+    fn numbered_volume_missing_entry_groups_recognize_tail_only_sets() {
+        let names = |items: &[&str]| -> Vec<String> {
+            items.iter().map(std::string::ToString::to_string).collect()
+        };
+        assert_eq!(
+            numbered_volume_missing_entry_groups(&names(&["b.7z.002", "b.7z.003"])),
+            vec!["b.7z.002".to_string()]
+        );
+        // .001 入口在场：断号组由入口包成组处理（引擎报分卷不全），不是缺入口。
+        assert!(numbered_volume_missing_entry_groups(&names(&["b.7z.001", "b.7z.003"])).is_empty());
+        // .000 是可识别的非法起始（archive_name 已入队），同样不算缺入口。
+        assert!(numbered_volume_missing_entry_groups(&names(&["b.7z.000", "b.7z.002"])).is_empty());
+        // 入口自身与白名单外孤立编号不归组（X-09）。
+        assert!(numbered_volume_missing_entry_groups(&names(&["c.zip.001"])).is_empty());
+        assert!(numbered_volume_missing_entry_groups(&names(&["data.002"])).is_empty());
     }
 
     // 覆盖 C-20（长度受限摘要候选：≤40 退让、扩展名不截断、超限返回 None）

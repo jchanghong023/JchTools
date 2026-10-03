@@ -185,19 +185,27 @@ fn run_git_with(
 }
 
 /// P-09：网络类 git 命令（fetch / push）的统一入口。系统代理开启时注入
-/// 代理环境变量；命令失败且输出符合连接类失败特征（或整体超时）时，自动
-/// 回退直连重试一次——移除全部代理变量（含继承自用户环境的），直连仍
-/// 失败按原口径返回失败。系统代理关闭时不注入也不清除，行为与现状一致。
+/// 代理环境变量；目标 URL 命中系统代理例外表（`<local>`、`192.168.*` 等
+/// `no_proxy` 表达不了的条目）时不注入、按现状直连；命令失败且输出符合连接类
+/// 失败特征（或整体超时）时，自动回退直连重试一次——移除全部代理变量（含继承
+/// 自用户环境的），直连仍失败按原口径返回失败。系统代理关闭时不注入也不清除，
+/// 行为与现状一致。`target_url` 为空（未知目标）时只走注入/回退路径。
 fn run_git_network(
     git: &Path,
     cwd: &Path,
     args: &[&str],
+    target_url: &str,
     log: &dyn Fn(&str),
 ) -> Result<CapturedOutput> {
-    let proxy_env = crate::system_proxy::read().git_env();
-    if proxy_env.is_empty() {
+    let proxy = crate::system_proxy::read();
+    if !proxy.is_enabled() {
         return run_git(git, cwd, args);
     }
+    if !target_url.is_empty() && proxy.bypassed(target_url) {
+        log("目标命中 Windows 系统代理例外表：不经系统代理，直连");
+        return run_git(git, cwd, args);
+    }
+    let proxy_env = proxy.git_env();
     let injected: Vec<(&str, &str)> = proxy_env
         .iter()
         .map(|(key, value)| (key.as_str(), value.as_str()))
@@ -347,6 +355,32 @@ fn push_target_preflight(git: &Path, root: &Path, info: &RepoInfo) -> Result<()>
             "拒绝启动：push.default=matching 会让裸 git push 一次推送所有同名分支（多分支推送，P-03/G-08）。\
              请改为 simple / upstream 等单分支取值后重新开始任务"
         );
+    }
+    // F10/G-08 续：push.default 的其余危险取值在预检一并拒绝（全部只读检查）。
+    let push_default = config_get_opt(git, root, "push.default");
+    match push_default.as_deref() {
+        // nothing：裸 push 什么都不推且以退出码 0 结束，upstream 永不更新，
+        // 工具会把「没推」当成功报告。
+        Some("nothing") => {
+            bail!(
+                "拒绝启动：push.default=nothing 会让裸 git push 不推送任何分支（退出码 0），\
+                 upstream 永远不会更新而任务仍报告成功（G-08）。\
+                 请改为 simple / upstream 等取值后重新开始任务"
+            );
+        }
+        // current：推送目标是「远端上的同名分支」。本地分支名与 upstream 分支名
+        // 不同时（如 topic 跟踪 origin/main），裸 push 会静默新建 origin/topic，
+        // upstream 未更新却报告全部完成（实测复现）。
+        Some("current") if info.upstream_branch.as_str() != branch.as_str() => {
+            bail!(
+                "拒绝启动：push.default=current 且本地分支「{branch}」与 upstream 分支\
+                 「{}」不同名，裸 git push 会推送到 {}/{branch} 而不是 upstream（G-08），\
+                 并在远端新建分支。请改用 push.default=simple/upstream 或改用同名 upstream 分支后重新开始任务",
+                info.upstream_branch,
+                effective
+            );
+        }
+        _ => {}
     }
     Ok(())
 }
@@ -617,9 +651,9 @@ enum PushOutcome {
 }
 
 /// 一次 push 尝试（G-08：不带额外远程/分支参数，用已配置 upstream）。
-fn try_push(git: &Path, root: &Path, log: &dyn Fn(&str)) -> PushOutcome {
+fn try_push(git: &Path, root: &Path, remote_url: &str, log: &dyn Fn(&str)) -> PushOutcome {
     log("git push");
-    let out = match run_git_network(git, root, &["push", "--porcelain"], log) {
+    let out = match run_git_network(git, root, &["push", "--porcelain"], remote_url, log) {
         Ok(out) => out,
         Err(error) => return PushOutcome::Retryable(format!("{error:#}")),
     };
@@ -671,7 +705,13 @@ fn fetch_and_merge(
     }
     ctx.shared.set_stage("pull/fetch");
     (ctx.log)(&format!("git fetch {remote} {upstream_branch}"));
-    let fetch = match run_git_network(git, root, &["fetch", remote, upstream_branch], ctx.log) {
+    let fetch = match run_git_network(
+        git,
+        root,
+        &["fetch", remote, upstream_branch],
+        &ctx.remote_url,
+        ctx.log,
+    ) {
         Ok(out) => out,
         Err(error) => return MergeOutcome::Retryable(format!("{error:#}")),
     };
@@ -784,12 +824,14 @@ enum StepOutcome {
     Fatal(String),
 }
 
-/// 逐文件处理的公共上下文：任务控制、界面共享状态、日志回调与退避基准。
+/// 逐文件处理的公共上下文：任务控制、界面共享状态、日志回调、退避基准与
+/// upstream 远端的实际 URL（P-09 例外表判断用；解析失败/本地 upstream 为空串）。
 struct Ctx<'a> {
     control: &'a Control,
     shared: &'a GitShared,
     log: &'a dyn Fn(&str),
     unit: Duration,
+    remote_url: String,
 }
 
 impl Ctx<'_> {
@@ -1080,7 +1122,7 @@ fn push_with_retry(
             return StepOutcome::Cancelled;
         }
         ctx.shared.set_stage("push");
-        match try_push(git, root, ctx.log) {
+        match try_push(git, root, &ctx.remote_url, ctx.log) {
             PushOutcome::Ok => return StepOutcome::Done,
             PushOutcome::NeedMerge => {
                 match fetch_and_merge(git, root, remote, upstream_branch, ctx) {
@@ -1284,6 +1326,16 @@ fn run_task(
         shared.set_state("失败");
         return format!("无法开始：{text}");
     }
+    // P-09：upstream 远端的实际 URL（fetch/push 的代理例外判断）。读取失败或
+    // 本地 upstream（remote 为 "."）时留空——此时只走注入/回退路径，不做例外
+    // 前置判断（scp 风格等无 scheme 的 URL 解析不出 host，同样保守走代理）。
+    let remote_url = run_git_ok(
+        git,
+        &info.root,
+        &["remote", "get-url", &info.upstream_remote],
+    )
+    .map(|text| text.trim().to_owned())
+    .unwrap_or_default();
     // 中间态处理（G-06/G-11）
     match middle_state(git, repo) {
         Ok(MiddleState::Clean) => {}
@@ -1297,6 +1349,50 @@ fn run_task(
                 }
                 // 用户已在冲突后解决并暂存：完成合并提交后继续（G-11 续段）。
                 // 合并提交必须推送成功才算完成当前任务，然后继续扫描剩余变更。
+                // G-06 夹带检测：`git commit --no-edit` 不带 pathspec，会把整个暂存区
+                // 一起提交——用户在解决冲突期间另行 stage 的无关文件会被夹带进合并
+                // 提交。合并涉及的文件必然在两个 merge 父（HEAD 与 MERGE_HEAD）的
+                // 差异集合内；该集合之外的 staged 条目即夹带项，发现即停止，不得
+                // 冒险继续（G-06：无法安全保证时停止并显示具体原因）。
+                let staged = match run_git_ok(git, repo, &["diff", "--cached", "--name-only"]) {
+                    Ok(text) => text,
+                    Err(error) => {
+                        let text = format!("检查合并暂存区失败：{error:#}（G-06）");
+                        log(&text);
+                        shared.set_state("失败");
+                        return text;
+                    }
+                };
+                let merge_scope =
+                    match run_git_ok(git, repo, &["diff", "--name-only", "HEAD", "MERGE_HEAD"]) {
+                        Ok(text) => text,
+                        Err(error) => {
+                            let text = format!("无法确定合并涉及的文件范围：{error:#}（G-06）");
+                            log(&text);
+                            shared.set_state("失败");
+                            return text;
+                        }
+                    };
+                let in_scope: std::collections::HashSet<&str> = merge_scope
+                    .lines()
+                    .map(str::trim)
+                    .filter(|line| !line.is_empty())
+                    .collect();
+                let extras: Vec<&str> = staged
+                    .lines()
+                    .map(str::trim)
+                    .filter(|line| !line.is_empty() && !in_scope.contains(line))
+                    .collect();
+                if !extras.is_empty() {
+                    let text = format!(
+                        "仓库存在合并范围之外的已暂存文件（{}）：完成合并提交会把它们一并带入（G-06）。\
+                         请先在仓库中取消暂存或另行处理这些文件后重新开始任务",
+                        extras.join("、")
+                    );
+                    log(&text);
+                    shared.set_state("失败");
+                    return text;
+                }
                 shared.set_stage("merge");
                 log("检测到已解决的合并：完成合并提交（git commit --no-edit）");
                 match run_git(git, repo, &["commit", "--no-edit"]) {
@@ -1329,6 +1425,7 @@ fn run_task(
                     shared,
                     log,
                     unit,
+                    remote_url: remote_url.clone(),
                 };
                 let mut attempt = 0u64;
                 match push_with_retry(
@@ -1416,6 +1513,7 @@ fn run_task(
         shared,
         log,
         unit,
+        remote_url,
     };
     if changes.is_empty() {
         return finish_without_changes(git, &info, &ctx);

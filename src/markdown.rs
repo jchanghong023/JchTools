@@ -101,6 +101,49 @@ pub fn readiness() -> Result<(), String> {
     markdown_assets::readiness()
 }
 
+/// 任务启动前的场景化预检（XB-19：单独使用一种功能不强制初始化另一种）。
+/// 所选分组决定需要检查的场景：Media 组走媒体链路（SenseVoice/VAD/sherpa/FFmpeg
+/// 成员存在性），其余分组（PDF/Office/图片/其他）走文档场景；混选时两个场景
+/// 都必须就绪，缺失原因汇总指认。修复前 run() 无条件用文档条件预检——纯媒体
+/// 目录缺文档模型会被提前拒绝，缺媒体资产则要等任务开始后才逐文件报错。
+pub fn readiness_for_groups(groups: &[FormatGroup]) -> Result<(), String> {
+    platform_preflight()?;
+    let needs_document = groups
+        .iter()
+        .any(|group| !matches!(group, FormatGroup::Media));
+    let needs_media = groups.contains(&FormatGroup::Media);
+    let mut problems = Vec::new();
+    if needs_document {
+        if let Err(error) = markdown_assets::readiness() {
+            problems.push(format!("文档转换组件未就绪：{error}"));
+        }
+    }
+    if needs_media {
+        if let Err(error) = markdown_assets::validate_media() {
+            problems.push(format!("媒体转录组件未就绪：{error}"));
+        }
+    }
+    if problems.is_empty() {
+        Ok(())
+    } else {
+        Err(problems.join("；"))
+    }
+}
+
+/// 转换页的就绪门槛（XB-19 场景独立）：文档或媒体任一场景就绪即允许开始任务，
+/// 让纯媒体环境（缺文档模型）与纯文档环境（缺媒体模型）都能进入转换页；
+/// 本次任务所选分组的精确检查在 [`run`] 启动前执行。
+pub fn page_readiness() -> Result<(), String> {
+    let document = readiness();
+    let media = markdown_assets::validate_media();
+    match (&document, &media) {
+        (Ok(()), _) | (_, Ok(())) => Ok(()),
+        (Err(document_error), Err(media_error)) => Err(format!(
+            "文档与媒体组件均未就绪：{document_error}；{media_error}"
+        )),
+    }
+}
+
 pub fn initialize(cancel: &AtomicBool, progress: impl FnMut(String)) -> Result<(), String> {
     platform_preflight()?;
     markdown_assets::initialize(cancel, progress)
@@ -117,7 +160,7 @@ pub fn run(
     if options.groups.is_empty() {
         return Err("至少选择一组文件类型".to_string());
     }
-    readiness()?;
+    readiness_for_groups(&options.groups)?;
     let runtime_dir = markdown_assets::runtime_dir()?;
     let supported = supported_formats(&options.groups)?;
     let plan = scan(options, &supported)?;

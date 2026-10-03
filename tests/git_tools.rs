@@ -828,6 +828,152 @@ fn conflict_resolved_resume_pushes_and_does_not_recommit() {
     );
 }
 
+// 覆盖 G-08（回归：本地 topic 跟踪 origin/master 且 push.default=current 时，
+// 裸 git push 会静默创建并推送 origin/topic，upstream 未更新却报告全部完成；
+// 修复后启动预检拒绝并点名配置，远端不出现任何新分支）
+#[test]
+fn push_default_current_with_renamed_upstream_refuses_to_start() {
+    let fix = fixture();
+    git_ok(&fix.repo, &["checkout", "-q", "-b", "topic"]);
+    git_ok(&fix.repo, &["config", "branch.topic.remote", "origin"]);
+    git_ok(
+        &fix.repo,
+        &["config", "branch.topic.merge", "refs/heads/master"],
+    );
+    git_ok(&fix.repo, &["config", "push.default", "current"]);
+    fs::write(fix.repo.join("a.txt"), "x\n").unwrap();
+    let outcome = run_tool(&fix.repo);
+    assert!(
+        outcome.text.contains("无法开始"),
+        "必须拒绝启动：{}",
+        outcome.text
+    );
+    assert!(
+        outcome.text.contains("push.default") && outcome.text.contains("current"),
+        "错误信息必须点名涉及配置项：{}",
+        outcome.text
+    );
+    // 远端不得出现 origin/topic，也不得收到任何提交
+    let heads = git_ok(&fix.repo, &["ls-remote", "--heads", "origin"]);
+    assert!(!heads.contains("topic"), "不得在远端创建同名分支：{heads}");
+    assert_eq!(
+        remote_log(&fix.remote),
+        vec!["init".to_string()],
+        "origin 不应收到任何提交"
+    );
+    assert_eq!(
+        git_ok(&fix.repo, &["log", "--format=%s"]).trim(),
+        "init",
+        "本地不得有新提交"
+    );
+}
+
+// 覆盖 G-08（正控：push.default=current 且 upstream 分支与本地同名时，裸 push
+// 的目标就是 upstream，不属于危险配置，预检放行且任务正常完成）
+#[test]
+fn push_default_current_with_matching_upstream_name_proceeds() {
+    let fix = fixture();
+    git_ok(&fix.repo, &["checkout", "-q", "-b", "topic"]);
+    git_ok(&fix.repo, &["config", "branch.topic.remote", "origin"]);
+    git_ok(
+        &fix.repo,
+        &["config", "branch.topic.merge", "refs/heads/topic"],
+    );
+    git_ok(&fix.repo, &["config", "push.default", "current"]);
+    // 在远端建立同名分支，使 @{u} 可解析（G-02 的 upstream 验证依赖
+    // remote-tracking 引用存在；仅配置 merge 目标时它指向不存在的远端分支）。
+    git_ok(
+        &fix.repo,
+        &["push", "-q", "origin", "topic:refs/heads/topic"],
+    );
+    fs::write(fix.repo.join("a.txt"), "x\n").unwrap();
+    let outcome = run_tool(&fix.repo);
+    assert!(
+        outcome.text.contains("全部完成"),
+        "同名 upstream 不应被预检拒绝：{}",
+        outcome.text
+    );
+    let heads = git_ok(&fix.repo, &["ls-remote", "--heads", "origin"]);
+    assert!(heads.contains("topic"), "应推送到 upstream：{heads}");
+}
+
+// 覆盖 G-06（回归：用户解决冲突后另行 stage 的无关文件不得被夹带进合并提交；
+// 修复前 `git commit --no-edit` 不带 pathspec，会把整个暂存区一起提交）
+#[test]
+fn conflict_resume_refuses_extra_staged_files() {
+    let fix = fixture();
+    fs::write(fix.repo.join("conflict.txt"), "local version\n").unwrap();
+    let other = fix.repo.parent().unwrap().join("other");
+    git_ok(
+        fix.repo.parent().unwrap(),
+        &["clone", "-q", &fix.remote.display().to_string(), "other"],
+    );
+    fs::write(other.join("conflict.txt"), "remote version\n").unwrap();
+    git_ok(&other, &["add", "conflict.txt"]);
+    git_ok(&other, &["commit", "-q", "-m", "remote conflict"]);
+    git_ok(&other, &["push", "-q"]);
+    let first = run_tool(&fix.repo);
+    assert!(first.text.contains("冲突"), "先制造冲突：{}", first.text);
+
+    // 用户解决冲突并暂存冲突文件，随后又另行暂存了一个无关文件
+    fs::write(fix.repo.join("conflict.txt"), "resolved version\n").unwrap();
+    git_ok(&fix.repo, &["add", "conflict.txt"]);
+    fs::write(fix.repo.join("unrelated.txt"), "unrelated\n").unwrap();
+    git_ok(&fix.repo, &["add", "unrelated.txt"]);
+
+    // 重启任务：必须检测到合并范围之外的暂存文件并停止，不得完成合并提交
+    let second = run_tool(&fix.repo);
+    assert!(
+        second.text.contains("unrelated.txt"),
+        "错误信息必须点名夹带文件：{}",
+        second.text
+    );
+    assert!(
+        second.text.contains("G-06"),
+        "错误信息必须说明 G-06 保护原因：{}",
+        second.text
+    );
+    assert!(
+        fix.repo.join(".git").join("MERGE_HEAD").is_file(),
+        "合并现场必须保留（MERGE_HEAD 仍在），等待用户处理暂存区"
+    );
+
+    // 用户取消暂存无关文件后重启：自动完成合并提交并推送，提交不得包含 unrelated.txt
+    git_ok(&fix.repo, &["restore", "--staged", "unrelated.txt"]);
+    let third = run_tool(&fix.repo);
+    assert!(
+        third.text.contains("全部完成") || third.text.contains("没有需要提交的变更"),
+        "清理暂存区后续接应完成：{}",
+        third.text
+    );
+    // 合并提交本身（两个父提交的那次）不得包含无关文件；用户取消暂存后
+    // unrelated.txt 回到未跟踪状态，由 G-12 的重新扫描按流程单独提交推送，
+    // 这是正常续接行为，与「夹带进合并提交」必须区分。
+    let merge_commit = git_ok(&fix.repo, &["rev-list", "--merges", "-n", "1", "HEAD"])
+        .trim()
+        .to_owned();
+    assert!(!merge_commit.is_empty(), "续接后应存在合并提交");
+    let merge_files = git_ok(
+        &fix.repo,
+        &[
+            "diff-tree",
+            "--no-commit-id",
+            "--name-only",
+            "-r",
+            &merge_commit,
+        ],
+    );
+    assert!(
+        !merge_files.contains("unrelated.txt"),
+        "合并提交不得包含无关文件：{merge_files}"
+    );
+    let log = remote_log(&fix.remote);
+    assert!(
+        log.contains(&"update: unrelated.txt".to_string()),
+        "取消暂存后的无关文件应作为独立提交推送（G-12）：{log:?}"
+    );
+}
+
 // 覆盖 G-12（以 git 为状态来源：成功 push 后重启不重复提交）
 #[test]
 fn completed_files_not_reprocessed_on_restart() {

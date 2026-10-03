@@ -4499,7 +4499,9 @@ fn start_markdown_readiness(ui: &AppWindow, state: &Rc<RefCell<State>>, out: &Ev
     ui.set_convert_status("正在检查已安装组件…".into());
     let out = out.clone();
     std::thread::spawn(move || {
-        let result = markdown::readiness();
+        // XB-19 场景独立就绪：文档或媒体任一场景可用即可开始任务；本次所选
+        // 分组的精确检查在 markdown::run 启动前按 readiness_for_groups 执行。
+        let result = markdown::page_readiness();
         let (ok, message) = match result {
             Ok(()) => (true, "已安装组件就绪，可离线使用".to_string()),
             Err(error) => (false, error),

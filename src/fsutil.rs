@@ -349,6 +349,17 @@ pub fn rename_noreplace(source: &Path, target: &Path) -> Result<()> {
         Ok(())
     }
 }
+/// S-01：不覆盖复制（跨卷移动的落盘核心）。目标已存在时按 `AlreadyExists`
+/// 失败，绝不截断既有文件；失败时调用方只清理本次新建的未完成副本。
+fn copy_noreplace(source: &Path, target: &Path) -> std::io::Result<()> {
+    let mut input = File::open(source)?;
+    let mut output = OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(target)?;
+    std::io::copy(&mut input, &mut output)?;
+    output.sync_all()
+}
 /// FILETIME 换算核心（100ns 单位、1601 纪元）：接受相对 UNIX 纪元的偏移
 /// （Ok = 1970 之后，Err = 1970 之前的时长）。1601-1970 的负偏移受检折算；
 /// 早于 1601-01-01（FILETIME 合法下界）下溢返回 Err 明确报错，不得钳制成 1970
@@ -409,11 +420,17 @@ pub fn move_file_preserving_times(source: &Path, target: &Path) -> Result<()> {
             if !cross_volume {
                 return Err(error);
             }
-            // fs::copy 不会覆盖已存在目标的打开语义由调用方保证（规划期已预留目标名，
-            // 执行用不覆盖兜底再核一次），复制失败不删除源项。
-            if let Err(error) = fs::copy(source, target) {
+            // S-01：跨卷复制必须以不覆盖方式落盘——`fs::copy` 以 create+truncate
+            // 打开目标，目标已存在时会被静默截断（规划缺陷或目标计算偏差都不允许
+            // 覆盖既有文件）；目标已存在按失败处理并保留源项，只清理本次新建的副本。
+            if let Err(error) = copy_noreplace(source, target) {
                 let _ = fs::remove_file(target);
-                return Err(anyhow::Error::new(error).context("跨卷复制失败，源文件已保留"));
+                let context = if error.kind() == std::io::ErrorKind::AlreadyExists {
+                    format!("跨卷移动目标已存在，不覆盖既有文件（{}）", target.display())
+                } else {
+                    "跨卷复制失败，源文件已保留".to_string()
+                };
+                return Err(anyhow::Error::new(error).context(context));
             }
             if let Err(error) = set_created_and_modified(target, created, modified) {
                 let _ = fs::remove_file(target);
@@ -807,6 +824,38 @@ mod tests {
             offset_to_filetime(Err(std::time::Duration::from_hours(400 * 366 * 24))).is_err(),
             "远早于 1601 的越界值必须报错而非钳制"
         );
+    }
+
+    // 覆盖 S-01（回归：跨卷移动的复制核心对已存在目标必须失败且不截断既有
+    // 字节；修复前 fs::copy 以 create+truncate 打开目标，D→C 实测静默覆盖旧
+    // 内容后删除源文件）
+    #[test]
+    fn copy_noreplace_refuses_existing_target_without_truncation() {
+        let temp = tempfile::tempdir().unwrap();
+        let source = temp.path().join("src.txt");
+        let target = temp.path().join("dst.txt");
+        fs::write(&source, b"new content from source").unwrap();
+        fs::write(&target, b"existing target bytes").unwrap();
+        let error = copy_noreplace(&source, &target).expect_err("目标已存在必须失败");
+        assert_eq!(
+            error.kind(),
+            std::io::ErrorKind::AlreadyExists,
+            "失败原因必须是目标已存在"
+        );
+        assert_eq!(
+            fs::read(&target).unwrap(),
+            b"existing target bytes",
+            "既有目标字节不得被截断或改写"
+        );
+        assert_eq!(
+            fs::read(&source).unwrap(),
+            b"new content from source",
+            "源文件保持原状"
+        );
+        // 正常路径：目标不存在时完整复制。
+        let fresh = temp.path().join("fresh.txt");
+        copy_noreplace(&source, &fresh).unwrap();
+        assert_eq!(fs::read(&fresh).unwrap(), b"new content from source");
     }
 
     // 覆盖 S-05（SystemRoot 缺失或指向不可访问路径时必须报错拒绝开始，
