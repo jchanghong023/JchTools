@@ -516,15 +516,15 @@ fn process_alive(pid: u32) -> bool {
         OpenProcess, WaitForSingleObject, PROCESS_SYNCHRONIZE,
     };
     const WAIT_TIMEOUT: u32 = 258;
-    // SAFETY: 只读式句柄打开与短等待；句柄随即关闭，不跨线程共享。
-    unsafe {
-        let handle = OpenProcess(PROCESS_SYNCHRONIZE, 0, pid);
-        if handle.is_null() {
-            // 进程已不存在（同用户测试进程，权限不足情形可忽略）。
-            return false;
-        }
-        let waited = WaitForSingleObject(handle, 200);
-        CloseHandle(handle);
-        waited == WAIT_TIMEOUT
+    // SAFETY: 只请求同步权限打开测试进程句柄；失败返回 null 即视为已退出。
+    let handle = unsafe { OpenProcess(PROCESS_SYNCHRONIZE, 0, pid) };
+    if handle.is_null() {
+        // 进程已不存在（同用户测试进程，权限不足情形可忽略）。
+        return false;
     }
+    // SAFETY: 句柄刚打开且仅在本函数使用，短等待不产生副作用。
+    let waited = unsafe { WaitForSingleObject(handle, 200) };
+    // SAFETY: 等待结束即关闭句柄，此后不再使用。
+    unsafe { CloseHandle(handle) };
+    waited == WAIT_TIMEOUT
 }

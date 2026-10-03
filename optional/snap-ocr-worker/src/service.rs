@@ -521,54 +521,63 @@ fn run_value() -> Result<Option<String>, String> {
     let mut key = 0usize;
     let path = protocol::wide(RUN_KEY);
     let name = protocol::wide(VALUE);
-    unsafe {
-        let opened = RegOpenKeyExW(HKEY_CURRENT_USER, path.as_ptr(), 0, 0x0001, &raw mut key);
-        if opened == 2 {
-            return Ok(None);
-        }
-        if opened != 0 {
-            return Err("无法读取当前用户开机启动项".into());
-        }
-        let mut ty = 0u32;
-        let mut size = 0u32;
-        let code = RegQueryValueExW(
+    // SAFETY: 预定义键 HKCU 与 NUL 结尾宽字符串路径；key 出参指向本栈变量，由本函数关闭。
+    let opened =
+        unsafe { RegOpenKeyExW(HKEY_CURRENT_USER, path.as_ptr(), 0, 0x0001, &raw mut key) };
+    if opened == 2 {
+        return Ok(None);
+    }
+    if opened != 0 {
+        return Err("无法读取当前用户开机启动项".into());
+    }
+    let mut ty = 0u32;
+    let mut size = 0u32;
+    // SAFETY: key 为刚打开的 HKCU Run 子键句柄；类型/大小指针指向本栈变量，本次不取数据。
+    let code = unsafe {
+        RegQueryValueExW(
             key,
             name.as_ptr(),
             std::ptr::null_mut(),
             &raw mut ty,
             std::ptr::null_mut(),
             &raw mut size,
-        );
-        if code == 2 {
-            RegCloseKey(key);
-            return Ok(None);
-        }
-        if code != 0 || ty != 1 || size > 32768 {
-            RegCloseKey(key);
-            return Err("开机启动项类型无效".into());
-        }
-        let mut data = vec![0u8; size as usize];
-        let status = RegQueryValueExW(
+        )
+    };
+    if code == 2 {
+        // SAFETY: key 由上文打开，本分支关闭后不再使用。
+        unsafe { RegCloseKey(key) };
+        return Ok(None);
+    }
+    if code != 0 || ty != 1 || size > 32768 {
+        // SAFETY: 同上，key 仅在此关闭一次。
+        unsafe { RegCloseKey(key) };
+        return Err("开机启动项类型无效".into());
+    }
+    let mut data = vec![0u8; size as usize];
+    // SAFETY: data 按首查大小分配；写回的 size 不超过分配长度，仍以字节为单位。
+    let status = unsafe {
+        RegQueryValueExW(
             key,
             name.as_ptr(),
             std::ptr::null_mut(),
             &raw mut ty,
             data.as_mut_ptr(),
             &raw mut size,
-        );
-        RegCloseKey(key);
-        if status != 0 {
-            return Err("无法读取当前用户开机启动项".into());
-        }
-        let units = data
-            .as_chunks::<2>()
-            .0
-            .iter()
-            .map(|pair| u16::from_le_bytes(*pair))
-            .take_while(|unit| *unit != 0)
-            .collect::<Vec<_>>();
-        Ok(Some(String::from_utf16_lossy(&units)))
+        )
+    };
+    // SAFETY: 第二次查询结束（无论成败）即关闭 key，与原实现一致。
+    unsafe { RegCloseKey(key) };
+    if status != 0 {
+        return Err("无法读取当前用户开机启动项".into());
     }
+    let units = data
+        .as_chunks::<2>()
+        .0
+        .iter()
+        .map(|pair| u16::from_le_bytes(*pair))
+        .take_while(|unit| *unit != 0)
+        .collect::<Vec<_>>();
+    Ok(Some(String::from_utf16_lossy(&units)))
 }
 fn set_autostart(enabled: bool) -> Result<(), String> {
     let command = if enabled {
@@ -595,8 +604,9 @@ fn set_autostart(enabled: bool) -> Result<(), String> {
     let path = protocol::wide(RUN_KEY);
     let name = protocol::wide(VALUE);
     // Windows Run 项仅修改本功能的值，不动其他应用。
-    unsafe {
-        if RegCreateKeyExW(
+    // SAFETY: HKCU 预定义键与 NUL 结尾宽字符串；key 出参指向本栈变量，由本函数关闭。
+    if unsafe {
+        RegCreateKeyExW(
             HKEY_CURRENT_USER,
             path.as_ptr(),
             0,
@@ -606,26 +616,29 @@ fn set_autostart(enabled: bool) -> Result<(), String> {
             std::ptr::null(),
             &raw mut key,
             std::ptr::null_mut(),
-        ) != 0
-        {
-            return Err("无法打开当前用户开机启动项".into());
-        }
-        let status = if let Some((bytes, length)) = value.as_ref() {
-            RegSetValueExW(key, name.as_ptr(), 0, 1, bytes.as_ptr().cast(), *length)
-        } else {
-            let code = RegDeleteValueW(key, name.as_ptr());
-            if code == 2 {
-                0
-            } else {
-                code
-            }
-        };
-        RegCloseKey(key);
-        if status != 0 {
-            return Err("开机启动设置更新失败".into());
-        }
-        Ok(())
+        )
+    } != 0
+    {
+        return Err("无法打开当前用户开机启动项".into());
     }
+    let status = if let Some((bytes, length)) = value.as_ref() {
+        // SAFETY: key 为刚创建/打开的句柄；bytes 为 NUL 结尾宽字符串数据，长度按字节计。
+        unsafe { RegSetValueExW(key, name.as_ptr(), 0, 1, bytes.as_ptr().cast(), *length) }
+    } else {
+        // SAFETY: key 有效；删除本功能条目，返回 2（值不存在）按成功处理。
+        let code = unsafe { RegDeleteValueW(key, name.as_ptr()) };
+        if code == 2 {
+            0
+        } else {
+            code
+        }
+    };
+    // SAFETY: 写入/删除已完成，key 关闭后不再使用。
+    unsafe { RegCloseKey(key) };
+    if status != 0 {
+        return Err("开机启动设置更新失败".into());
+    }
+    Ok(())
 }
 fn autostart_enabled() -> bool {
     run_value().ok().flatten().is_some()
@@ -1348,28 +1361,38 @@ fn copy_text(text: &str) -> Result<(), String> {
         .len()
         .checked_mul(2)
         .ok_or_else(|| "文本过长无法复制".to_string())?;
-    unsafe {
-        let handle = GlobalAlloc(2, size);
-        if handle.is_null() {
-            return Err("剪贴板内存分配失败".into());
-        }
-        let data = GlobalLock(handle);
-        if data.is_null() {
-            GlobalFree(handle);
-            return Err("剪贴板内存访问失败".into());
-        }
-        std::ptr::copy_nonoverlapping(wide.as_ptr(), data.cast::<u16>(), wide.len());
-        GlobalUnlock(handle);
-        if OpenClipboard(std::ptr::null_mut()) == 0 {
-            GlobalFree(handle);
-            return Err("剪贴板被其他程序占用".into());
-        }
-        let copied = EmptyClipboard() != 0 && !SetClipboardData(13, handle).is_null();
-        CloseClipboard();
-        if !copied {
-            GlobalFree(handle);
-            return Err("复制到剪贴板失败".into());
-        }
+    // SAFETY: GMEM_MOVEABLE(2) 按字节长度分配；失败返回 null，由本函数检查。
+    let handle = unsafe { GlobalAlloc(2, size) };
+    if handle.is_null() {
+        return Err("剪贴板内存分配失败".into());
+    }
+    // SAFETY: handle 为刚分配的可移动内存句柄；锁定失败返回 null。
+    let data = unsafe { GlobalLock(handle) };
+    if data.is_null() {
+        // SAFETY: 分配成功但锁定失败，所有权仍在手，由本函数释放。
+        unsafe { GlobalFree(handle) };
+        return Err("剪贴板内存访问失败".into());
+    }
+    // SAFETY: 源为存活宽字符串切片，目标为锁定内存且按 u16 计数不越界。
+    unsafe { std::ptr::copy_nonoverlapping(wide.as_ptr(), data.cast::<u16>(), wide.len()) };
+    // SAFETY: 解锁刚锁定的句柄；解锁后 data 指针不再使用。
+    unsafe { GlobalUnlock(handle) };
+    // SAFETY: 以 null 关联当前线程；失败即被占用，句柄仍由本函数释放。
+    if unsafe { OpenClipboard(std::ptr::null_mut()) } == 0 {
+        // SAFETY: 尚未交给剪贴板的所有权重归本函数。
+        unsafe { GlobalFree(handle) };
+        return Err("剪贴板被其他程序占用".into());
+    }
+    // SAFETY: 清空剪贴板为设置数据的前置步骤。
+    let emptied = unsafe { EmptyClipboard() != 0 };
+    // SAFETY: 句柄数据已填好；成功后所有权移交系统，失败时由本函数释放。
+    let copied = emptied && !(unsafe { SetClipboardData(13, handle) }).is_null();
+    // SAFETY: 关闭剪贴板结束本线程占用。
+    unsafe { CloseClipboard() };
+    if !copied {
+        // SAFETY: 设置失败时系统未接管句柄，由本函数释放。
+        unsafe { GlobalFree(handle) };
+        return Err("复制到剪贴板失败".into());
     }
     Ok(())
 }
@@ -1379,17 +1402,17 @@ fn gui_process_alive(pid: u32) -> bool {
         Foundation::CloseHandle,
         System::Threading::{GetExitCodeProcess, OpenProcess, PROCESS_QUERY_LIMITED_INFORMATION},
     };
-    // SAFETY: 只查询给定进程的退出码；句柄在本函数内关闭。
-    unsafe {
-        let handle = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, 0, pid);
-        if handle.is_null() {
-            return false;
-        }
-        let mut code = 0;
-        let alive = GetExitCodeProcess(handle, &raw mut code) != 0 && code == 259;
-        CloseHandle(handle);
-        alive
+    // SAFETY: 只请求受限查询权限；pid 来自共享配置，句柄仅在本函数内使用并关闭。
+    let handle = unsafe { OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, 0, pid) };
+    if handle.is_null() {
+        return false;
     }
+    let mut code = 0;
+    // SAFETY: 句柄刚打开且仅查询退出码；code 为本栈出参。
+    let alive = unsafe { GetExitCodeProcess(handle, &raw mut code) } != 0 && code == 259;
+    // SAFETY: 查询完成即关闭句柄，此后不再使用。
+    unsafe { CloseHandle(handle) };
+    alive
 }
 fn confirm_background_exit() -> bool {
     use windows_sys::Win32::UI::WindowsAndMessaging::{

@@ -8,8 +8,9 @@ use raw_window_handle::{HasWindowHandle, RawWindowHandle};
 use slint::ComponentHandle;
 
 // Slint 1.17.1 生成代码在内部嵌入桩发射 todo!，并在生成的属性升级路径使用
-// unwrap；与主窗口相同，仅隔离生成模块，不放宽本文件的业务实现。
-#[allow(clippy::unwrap_used, clippy::todo)]
+// unwrap、生成大量对外不可达的 pub 项；与主窗口相同，仅隔离生成模块，
+// 不放宽本文件的业务实现。
+#[allow(clippy::unwrap_used, clippy::todo, unreachable_pub)]
 mod generated_ui {
     slint::include_modules!();
 }
@@ -158,12 +159,15 @@ fn activate_result_window(
     if let Ok(native) = handle.window_handle() {
         if let RawWindowHandle::Win32(win) = native.as_raw() {
             let hwnd = win.hwnd.get() as windows_sys::Win32::Foundation::HWND;
-            // SAFETY: HWND belongs to this live Slint window; no permanent topmost flag is set.
+            // SAFETY: HWND 属于当前存活的 Slint 窗口；显示不改变置顶等持久标志。
             unsafe {
                 windows_sys::Win32::UI::WindowsAndMessaging::ShowWindow(
                     hwnd,
                     windows_sys::Win32::UI::WindowsAndMessaging::SW_SHOW,
                 );
+            }
+            // SAFETY: 同一存活窗口句柄；前台切换失败仅表现为窗口不被前置，无副作用。
+            unsafe {
                 windows_sys::Win32::UI::WindowsAndMessaging::SetForegroundWindow(hwnd);
             }
         }

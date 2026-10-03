@@ -54,7 +54,7 @@ struct SecurityAttributes {
     inherit: i32,
 }
 
-pub fn wide(text: &str) -> Vec<u16> {
+pub(crate) fn wide(text: &str) -> Vec<u16> {
     text.encode_utf16().chain(std::iter::once(0)).collect()
 }
 
@@ -65,8 +65,11 @@ fn identity() -> String {
         .or_else(|| std::env::var("USERPROFILE").ok().filter(|s| !s.is_empty()))
         .unwrap_or_else(|| "anonymous".to_string());
     let mut session = u32::MAX;
+    // SAFETY: GetCurrentProcessId 无参数、无副作用，任意线程可安全调用。
+    let pid = unsafe { GetCurrentProcessId() };
+    // SAFETY: session 指向本栈上类型与宽度都匹配 DWORD 的变量；调用失败时保留 u32::MAX 兜底值。
     unsafe {
-        ProcessIdToSessionId(GetCurrentProcessId(), &raw mut session);
+        ProcessIdToSessionId(pid, &raw mut session);
     }
     format!("{user}:{session}")
 }
@@ -98,13 +101,15 @@ fn hash() -> String {
     text
 }
 
-pub fn pipe_name() -> String {
+pub(crate) fn pipe_name() -> String {
     format!(r"\\.\pipe\jchtools-snap-ocr-{}", hash())
 }
 
-pub struct InstanceGuard(*mut c_void);
+pub(crate) struct InstanceGuard(*mut c_void);
 impl Drop for InstanceGuard {
     fn drop(&mut self) {
+        // SAFETY: self.0 是 CreateMutexW 返回并由本 guard 独占持有的互斥体句柄，
+        // Drop 恰好关闭一次；句柄从未交给 File::from_raw_handle 等其他所有者，不会双重释放。
         unsafe {
             CloseHandle(self.0);
         }
@@ -114,6 +119,8 @@ impl Drop for InstanceGuard {
 struct ThreadHandle(*mut c_void);
 impl Drop for ThreadHandle {
     fn drop(&mut self) {
+        // SAFETY: self.0 是 OpenThread 返回并由本类型独占持有的线程句柄，
+        // Drop 恰好关闭一次；CloseHandle 只释放句柄不终止线程，服务线程生命周期不受影响。
         unsafe {
             CloseHandle(self.0);
         }
@@ -138,6 +145,9 @@ impl RequestDeadline {
                 // 期限恰好落在两次 I/O 之间时，第一次取消可能找不到待处理请求。
                 // 持续取消直到服务线程结束该连接，避免下一次 read/flush 无限等待。
                 loop {
+                    // SAFETY: 句柄值拷贝自 OpenThread(THREAD_TERMINATE) 打开的本服务线程，底层
+                    // 句柄由 serve_named 里的 ThreadHandle 独占持有，watchdog 运行期间保持有效；
+                    // 目标线程没有等待中的同步 I/O 时调用仅返回错误，忽略返回值由循环重试兜底。
                     unsafe {
                         CancelSynchronousIo(handle as *mut c_void);
                     }
@@ -164,25 +174,28 @@ impl Drop for RequestDeadline {
 }
 
 /// 单实例锁是 Local（登录会话隔离），相同用户的不同远程登录会话不互相阻塞。
-pub fn claim_instance() -> Result<Option<InstanceGuard>, String> {
+pub(crate) fn claim_instance() -> Result<Option<InstanceGuard>, String> {
     let name = wide(&format!("Local\\JchToolsSnapOcr-{}", hash()));
-    // SAFETY: NUL 结尾宽字符串在调用期间保持有效，句柄由 guard 释放。
-    unsafe {
-        let handle = CreateMutexW(std::ptr::null(), 0, name.as_ptr());
-        if handle.is_null() {
-            return Err("截图服务单实例锁创建失败".into());
-        }
-        if GetLastError() == 183 {
-            CloseHandle(handle);
-            return Ok(None);
-        }
-        Ok(Some(InstanceGuard(handle)))
+    // SAFETY: name 是 NUL 结尾宽字符串且在本函数存续期间有效；返回 NULL 表示创建失败。
+    let handle = unsafe { CreateMutexW(std::ptr::null(), 0, name.as_ptr()) };
+    if handle.is_null() {
+        return Err("截图服务单实例锁创建失败".into());
     }
+    // SAFETY: 紧接 CreateMutexW 之后读取错误码，其间无其它 API 调用，183（ERROR_ALREADY_EXISTS）语义有效。
+    let last_error = unsafe { GetLastError() };
+    if last_error == 183 {
+        // SAFETY: 句柄非空且尚未交给 InstanceGuard，所有权仍在本函数，关闭一次不与 Drop 双重释放。
+        unsafe {
+            CloseHandle(handle);
+        }
+        return Ok(None);
+    }
+    Ok(Some(InstanceGuard(handle)))
 }
 
 /// 单请求一连接；同一个管道实例在请求间 Disconnect/Connect，不留无监听者的空窗。
 /// SDDL 仅允许对象所有者（当前登录用户）及 SYSTEM；拒绝远程管道客户端。
-pub fn serve(commands: &Sender<Command>, ready: &mpsc::SyncSender<Result<(), String>>) {
+pub(crate) fn serve(commands: &Sender<Command>, ready: &mpsc::SyncSender<Result<(), String>>) {
     serve_named(&pipe_name(), commands, ready, Duration::from_secs(15));
 }
 
@@ -194,7 +207,11 @@ fn serve_named(
 ) {
     let name = wide(pipe_name);
     // CancelSynchronousIo 需要真实线程句柄及 THREAD_TERMINATE 权限。
-    let server_thread = unsafe { OpenThread(0x0001, 0, GetCurrentThreadId()) };
+    // SAFETY: GetCurrentThreadId 无参数且无副作用，仅返回当前线程 ID。
+    let thread_id = unsafe { GetCurrentThreadId() };
+    // SAFETY: thread_id 即当前线程，以 THREAD_TERMINATE(0x0001)——CancelSynchronousIo 所需的
+    // 访问权限——打开；返回 NULL 时由下方判空退出，非空句柄交给 ThreadHandle 唯一释放。
+    let server_thread = unsafe { OpenThread(0x0001, 0, thread_id) };
     if server_thread.is_null() {
         let _ = ready.send(Err("截图控制管道无法设置请求期限".into()));
         return;
@@ -202,6 +219,8 @@ fn serve_named(
     let server_thread = ThreadHandle(server_thread);
     let sddl = wide("D:P(A;;GA;;;SY)(A;;GA;;;OW)");
     let mut descriptor = std::ptr::null_mut();
+    // SAFETY: sddl 是 NUL 结尾宽字符串且在调用期间有效；descriptor 出参指向本栈变量，成功时
+    // 承接由 LocalFree 释放的安全描述符，失败时保持初始 NULL；revision=1 即 SDDL_REVISION_1。
     let converted = unsafe {
         ConvertStringSecurityDescriptorToSecurityDescriptorW(
             sddl.as_ptr(),
@@ -211,13 +230,15 @@ fn serve_named(
         )
     };
     if converted == 0 {
-        let _ = ready.send(Err(format!(
-            "截图控制管道权限初始化失败：{}",
-            unsafe { GetLastError() }
-        )));
+        // SAFETY: 读取 ConvertStringSecurityDescriptorToSecurityDescriptorW 失败留下的错误码，
+        // 其间未调用会改写错误码的其它 API。
+        let convert_error = unsafe { GetLastError() };
+        let _ = ready.send(Err(format!("截图控制管道权限初始化失败：{convert_error}")));
         return;
     }
     let Ok(length) = u32::try_from(std::mem::size_of::<SecurityAttributes>()) else {
+        // SAFETY: descriptor 是上方转换成功返回、尚未释放的本地分配指针；本分支直接返回，
+        // 不会再构造 attributes 或使用该指针，此处恰好释放一次。
         unsafe {
             LocalFree(descriptor);
         }
@@ -231,6 +252,9 @@ fn serve_named(
     };
     // PIPE_ACCESS_DUPLEX；PIPE_TYPE_BYTE | PIPE_READMODE_BYTE | PIPE_WAIT |
     // PIPE_REJECT_REMOTE_CLIENTS。只有对象所有者及 SYSTEM 能读写。
+    // SAFETY: name 是 NUL 结尾宽字符串且在调用期间有效；attributes 指向本栈上 repr(C) 布局与
+    // Win32 SECURITY_ATTRIBUTES 一致的结构，调用只读取不保留指针；失败返回 INVALID_HANDLE_VALUE(-1)，
+    // 由下方判断处理。
     let raw = unsafe {
         CreateNamedPipeW(
             name.as_ptr(),
@@ -243,7 +267,10 @@ fn serve_named(
             (&raw const attributes).cast(),
         )
     };
+    // SAFETY: 在 CreateNamedPipeW 之后、LocalFree 之前读取，错误码属于本次管道创建。
     let create_error = unsafe { GetLastError() };
+    // SAFETY: descriptor 是转换成功返回的本地分配指针；CreateNamedPipeW 已读取完安全属性，
+    // 此后不再使用该指针，恰好释放一次。
     unsafe {
         LocalFree(descriptor);
     }
@@ -255,12 +282,17 @@ fn serve_named(
     let mut pipe = unsafe { std::fs::File::from_raw_handle(raw) };
     let _ = ready.send(Ok(()));
     loop {
-        let connected =
-            unsafe { ConnectNamedPipe(raw, std::ptr::null_mut()) != 0 || GetLastError() == 535 };
+        // SAFETY: raw 是本服务创建的管道实例句柄，在循环存续期间有效；同步等待客户端连接。
+        let connect_result = unsafe { ConnectNamedPipe(raw, std::ptr::null_mut()) };
+        // SAFETY: 535（ERROR_NO_DATA）表示客户端已连接后断开，视为已连接；仅在
+        // ConnectNamedPipe 返回 0 时经 || 短路求值读取，错误码属于本次连接调用。
+        let connected = connect_result != 0 || unsafe { GetLastError() } == 535;
         if !connected {
             continue;
         }
         let Ok(deadline) = RequestDeadline::start(&server_thread, request_timeout) else {
+            // SAFETY: raw 是刚连接的本服务管道实例句柄；Disconnect 只断开客户端连接不关闭句柄，
+            // 句柄仍由 pipe（File）独占持有，继续下一轮连接。
             unsafe {
                 DisconnectNamedPipe(raw);
             }
@@ -281,6 +313,8 @@ fn serve_named(
             request.push(byte[0]);
         }
         if started.elapsed() >= request_timeout {
+            // SAFETY: raw 是本服务管道实例句柄；断开超时客户端不关闭句柄，
+            // 句柄仍由 pipe（File）独占持有，继续下一轮连接。
             unsafe {
                 DisconnectNamedPipe(raw);
             }
@@ -306,11 +340,15 @@ fn serve_named(
         if let Ok(mut line) = serde_json::to_vec(&response) {
             line.push(b'\n');
             if started.elapsed() < request_timeout && pipe.write_all(&line).is_ok() {
+                // SAFETY: raw 与刚完成 write_all 的 pipe 是同一独占句柄；阻塞刷新确保响应送达，
+                // 失败仅影响本次响应，忽略返回值后进入断开与下一轮连接。
                 unsafe {
                     FlushFileBuffers(raw);
                 }
             }
         }
+        // SAFETY: raw 是本服务管道实例句柄；请求处理完毕断开客户端不关闭句柄，
+        // 句柄仍由 pipe（File）独占持有，继续下一轮连接。
         unsafe {
             DisconnectNamedPipe(raw);
         }

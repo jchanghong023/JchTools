@@ -6,11 +6,11 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
-pub struct SharedXbergClient {
+pub(crate) struct SharedXbergClient {
     root: PathBuf,
 }
 impl SharedXbergClient {
-    pub fn connect(root: &Path) -> Self {
+    pub(crate) fn connect(root: &Path) -> Self {
         Self {
             root: root.to_path_buf(),
         }
@@ -39,7 +39,7 @@ impl SharedXbergClient {
         }
         Ok(result)
     }
-    pub fn recognize(
+    pub(crate) fn recognize(
         &mut self,
         png: &[u8],
         cancel: &AtomicBool,
@@ -53,7 +53,7 @@ impl SharedXbergClient {
             .ok_or_else(|| ClientError::Io("截图响应缺少 text 字段".into()))?;
         Ok((!text.trim().is_empty()).then(|| text.to_owned()))
     }
-    pub fn snapshot_state(&mut self) -> Result<SnapshotState, ClientError> {
+    pub(crate) fn snapshot_state(&mut self) -> Result<SnapshotState, ClientError> {
         let response =
             self.request(json!({"command":"snapshot_state"}), &AtomicBool::new(false))?;
         Ok(match response["state"].as_str() {

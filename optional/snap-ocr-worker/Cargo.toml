@@ -65,8 +65,20 @@ windows-sys = { version = "0.59", features = [
     "Win32_UI_WindowsAndMessaging",
 ] }
 
+# 与主包/ snap-ocr-core 同口径的零告警硬门禁（workspace lints 不自动继承到成员，
+# 需独立声明）；2026-10-03 质量门复检补齐此前缺失的 rust 组与 restriction 项。
 [lints.rust]
 warnings = "deny"
+unsafe_op_in_unsafe_fn = "deny"
+unused_must_use = "deny"
+unreachable_patterns = "deny"
+unreachable_pub = "deny"
+unused_variables = "deny"
+future_incompatible = { level = "deny", priority = -1 }
+rust_2018_idioms = { level = "deny", priority = -1 }
+explicit_outlives_requirements = "deny"
+elided_lifetimes_in_paths = "deny"
+single_use_lifetimes = "deny"
 # 共享模块 logging.rs 按 perf-tracing 特性合并性能层；本 crate 不设该特性，
 # 只声明其取值合法，避免 unexpected_cfgs 报错（层在该 crate 恒为 absent）。
 unexpected_cfgs = { level = "allow", check-cfg = ['cfg(feature, values("perf-tracing"))'] }
@@ -78,6 +90,10 @@ expect_used = "deny"
 dbg_macro = "deny"
 todo = "deny"
 unimplemented = "deny"
+mem_forget = "deny"
+fn_to_numeric_cast_any = "deny"
+undocumented_unsafe_blocks = "deny"
+multiple_unsafe_ops_per_block = "deny"
 doc_markdown = "allow"
 missing_errors_doc = "allow"
 missing_panics_doc = "allow"

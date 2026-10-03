@@ -116,8 +116,11 @@ const WM_APP_CONTROL: u32 = 0x8000 + 19;
 const WM_CLOSE: u32 = 0x10;
 const ID_ACTIVE: i32 = 0x5453;
 const ID_STANDBY: i32 = 0x5454;
-static TASKBAR_CREATED: LazyLock<u32> =
-    LazyLock::new(|| unsafe { RegisterWindowMessageW(wide("TaskbarCreated").as_ptr()) });
+static TASKBAR_CREATED: LazyLock<u32> = LazyLock::new(|| {
+    // SAFETY: RegisterWindowMessageW 只读取传入的宽字符串；wide() 已追加 NUL 终止符，
+    // 临时 Vec 存活至调用结束，注册失败仅返回 0。
+    unsafe { RegisterWindowMessageW(wide("TaskbarCreated").as_ptr()) }
+});
 
 fn fill<const N: usize>(buffer: &mut [u16; N], value: &str) {
     for (dst, src) in buffer.iter_mut().zip(value.encode_utf16().take(N - 1)) {
@@ -125,6 +128,7 @@ fn fill<const N: usize>(buffer: &mut [u16; N], value: &str) {
     }
 }
 fn notify(hwnd: Handle, message: Option<&str>, hotkey: &str, action: u32) -> bool {
+    // SAFETY: NotifyIconData 是 repr(C) 纯数据结构，全零是有效初始值（句柄为 null、数值为 0）。
     let mut data: NotifyIconData = unsafe { std::mem::zeroed() };
     let Ok(size) = u32::try_from(size_of::<NotifyIconData>()) else {
         return false;
@@ -134,6 +138,8 @@ fn notify(hwnd: Handle, message: Option<&str>, hotkey: &str, action: u32) -> boo
     data.id = 1;
     data.flags = 0x1 | 0x2 | 0x4;
     data.callback = WM_APP_TRAY;
+    // SAFETY: 实例句柄为 null、名称为系统预定义常量 IDI_APPLICATION(32512)，
+    // 按 MAKEINTRESOURCE 语义传整数标识，LoadIconW 不解引用该指针。
     data.icon = unsafe { LoadIconW(null_mut(), 32512usize as *const u16) };
     fill(&mut data.tip, &format!("JchTools 后台服务 ({hotkey})"));
     if let Some(message) = message {
@@ -142,12 +148,14 @@ fn notify(hwnd: Handle, message: Option<&str>, hotkey: &str, action: u32) -> boo
         fill(&mut data.info_title, "截图 OCR");
         data.info_flags = 1;
     }
+    // SAFETY: data 为本函数栈上已填好的 NOTIFYICONDATAW（cb_size 已设置），
+    // &raw mut 指针在调用期间独占有效。
     unsafe { Shell_NotifyIconW(action, &raw mut data) != 0 }
 }
 
 /// 原 TextSnap 热键键域：修饰键 + 字母/数字/F1～F24/固定命名键；
 /// 解析只做固定映射，注册是否可用由 Win32 RegisterHotKey 决定。
-pub fn parse_hotkey(raw: &str) -> Result<(u32, u32), String> {
+pub(crate) fn parse_hotkey(raw: &str) -> Result<(u32, u32), String> {
     let mut flags = 0x4000;
     let mut key = None;
     for part in raw.split('+') {
@@ -256,7 +264,8 @@ unsafe extern "system" fn wnd_proc(hwnd: Handle, msg: u32, w: usize, l: isize) -
             return 0;
         }
         WM_APP_TRAY if l == 0x205 || l == 0x204 => {
-            let menu = CreatePopupMenu();
+            // SAFETY: 无参数调用，仅返回菜单句柄，失败时为 null 由下方判空处理。
+            let menu = unsafe { CreatePopupMenu() };
             if !menu.is_null() {
                 // 每次打开菜单读取当前用户 Run 值，避免设置窗口或外部更改后的旧状态。
                 let autostart = super::autostart_enabled();
@@ -269,13 +278,18 @@ unsafe extern "system" fn wnd_proc(hwnd: Handle, msg: u32, w: usize, l: isize) -
                 ] {
                     let text = wide(title);
                     let flags = if id == 3 && autostart { 0x0008 } else { 0 }; // MF_CHECKED
-                    AppendMenuW(menu, flags, id, text.as_ptr());
+                                                                               // SAFETY: menu 已判空，text 为 wide() 生成的 NUL 结尾宽字符串，指针在调用期间存活。
+                    unsafe { AppendMenuW(menu, flags, id, text.as_ptr()) };
                 }
                 let mut point = Point::default();
-                GetCursorPos(&raw mut point);
-                SetForegroundWindow(hwnd);
-                TrackPopupMenu(menu, 0, point.x, point.y, 0, hwnd, null());
-                DestroyMenu(menu);
+                // SAFETY: point 为栈上已初始化的 POINT，输出指针在调用期间有效。
+                unsafe { GetCursorPos(&raw mut point) };
+                // SAFETY: 仅按值传递窗口句柄。
+                unsafe { SetForegroundWindow(hwnd) };
+                // SAFETY: menu 已判空，rect 允许传 null，其余参数按值传递。
+                unsafe { TrackPopupMenu(menu, 0, point.x, point.y, 0, hwnd, null()) };
+                // SAFETY: menu 为本次打开的有效菜单句柄，按值传递，销毁失败仅返回 0。
+                unsafe { DestroyMenu(menu) };
             }
             return 0;
         }
@@ -331,13 +345,16 @@ unsafe extern "system" fn wnd_proc(hwnd: Handle, msg: u32, w: usize, l: isize) -
                                     } else {
                                         ID_ACTIVE
                                     };
-                                    if RegisterHotKey(hwnd, next, mods, key) == 0 {
+                                    // SAFETY: 参数均为句柄、热键 ID 与键值按值传递，hwnd 属于本线程。
+                                    if unsafe { RegisterHotKey(hwnd, next, mods, key) } == 0 {
                                         return Err("快捷键冲突；原快捷键保持有效".into());
                                     }
                                     if state.active != 0
-                                        && UnregisterHotKey(hwnd, state.active) == 0
+                                        // SAFETY: 仅按值传递窗口句柄与本线程注册的热键 ID。
+                                        && unsafe { UnregisterHotKey(hwnd, state.active) } == 0
                                     {
-                                        UnregisterHotKey(hwnd, next);
+                                        // SAFETY: 仅按值传递窗口句柄与上一步刚注册的热键 ID。
+                                        unsafe { UnregisterHotKey(hwnd, next) };
                                         return Err("原快捷键无法注销；设置未更改".into());
                                     }
                                     state.active = next;
@@ -358,7 +375,8 @@ unsafe extern "system" fn wnd_proc(hwnd: Handle, msg: u32, w: usize, l: isize) -
                             notify(hwnd, Some(&message), &name, 1);
                         }
                         Control::Stop(response) => {
-                            DestroyWindow(hwnd);
+                            // SAFETY: 仅按值传递本线程创建的窗口句柄。
+                            unsafe { DestroyWindow(hwnd) };
                             let _ = response.send(());
                             return 0;
                         }
@@ -368,26 +386,30 @@ unsafe extern "system" fn wnd_proc(hwnd: Handle, msg: u32, w: usize, l: isize) -
             return 0;
         }
         WM_CLOSE => {
-            DestroyWindow(hwnd);
+            // SAFETY: 仅按值传递本线程创建的窗口句柄。
+            unsafe { DestroyWindow(hwnd) };
             return 0;
         }
         0x0002 => {
             STATE.with(|slot| {
                 if let Some(state) = slot.borrow_mut().take() {
-                    UnregisterHotKey(hwnd, state.active);
+                    // SAFETY: 仅按值传递窗口句柄与本线程注册的热键 ID。
+                    unsafe { UnregisterHotKey(hwnd, state.active) };
                     notify(hwnd, None, &state.hotkey, 2);
                 }
             });
-            PostQuitMessage(0);
+            // SAFETY: 仅传递整数退出码，向本线程消息队列投递 WM_QUIT。
+            unsafe { PostQuitMessage(0) };
             return 0;
         }
         _ => {}
     }
-    DefWindowProcW(hwnd, msg, w, l)
+    // SAFETY: 参数均为按值标量，默认窗口过程只在对应窗口的线程上下文内调用。
+    unsafe { DefWindowProcW(hwnd, msg, w, l) }
 }
 
 #[derive(Clone)]
-pub struct TrayHandle {
+pub(crate) struct TrayHandle {
     hwnd: usize,
     queue: Arc<Mutex<VecDeque<Control>>>,
 }
@@ -397,23 +419,24 @@ impl TrayHandle {
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .push_back(command);
+        // SAFETY: 仅按值传递句柄与常量；窗口已销毁时 PostMessageW 仅返回 0，不产生未定义行为。
         unsafe {
             PostMessageW(self.hwnd as Handle, WM_APP_CONTROL, 0, 0);
         }
     }
-    pub fn trigger(&self) {
+    pub(crate) fn trigger(&self) {
         self.send(Control::Trigger);
     }
-    pub fn notice(&self, text: impl Into<String>) {
+    pub(crate) fn notice(&self, text: impl Into<String>) {
         self.send(Control::Notice(text.into()));
     }
-    pub fn replace(&self, name: String) -> Result<(), String> {
+    pub(crate) fn replace(&self, name: String) -> Result<(), String> {
         let (tx, rx) = mpsc::sync_channel(1);
         self.send(Control::Replace(name, tx));
         rx.recv_timeout(std::time::Duration::from_secs(2))
             .unwrap_or_else(|_| Err("快捷键更新超时".into()))
     }
-    pub fn stop(&self) {
+    pub(crate) fn stop(&self) {
         let (tx, rx) = mpsc::sync_channel(1);
         self.send(Control::Stop(tx));
         let _ = rx.recv_timeout(std::time::Duration::from_secs(2));
@@ -430,15 +453,16 @@ impl TrayHandle {
     }
 }
 
-pub fn start(
+pub(crate) fn start(
     sender: mpsc::Sender<Command>,
     hotkey: String,
     autostart: bool,
 ) -> Result<TrayHandle, String> {
     let (ready_tx, ready_rx) = mpsc::sync_channel(1);
-    std::thread::spawn(move || unsafe {
+    std::thread::spawn(move || {
         let class_name = wide("JchToolsSnapOcrTray");
-        let instance = GetModuleHandleW(null());
+        // SAFETY: 模块名传 null 表示取当前进程可执行文件的句柄，不解引用任何指针。
+        let instance = unsafe { GetModuleHandleW(null()) };
         let wnd = WndClass {
             style: 0,
             proc: Some(wnd_proc),
@@ -451,24 +475,29 @@ pub fn start(
             menu: null(),
             class: class_name.as_ptr(),
         };
-        if RegisterClassW(&raw const wnd) == 0 {
+        // SAFETY: wnd 为栈上已填好的 WNDCLASSW，其 class 字段指向仍存活的 class_name（NUL 结尾宽字符串）。
+        if unsafe { RegisterClassW(&raw const wnd) } == 0 {
             let _ = ready_tx.send(Err("托盘窗口类型注册失败".into()));
             return;
         }
-        let hwnd = CreateWindowExW(
-            0,
-            class_name.as_ptr(),
-            class_name.as_ptr(),
-            0,
-            0,
-            0,
-            0,
-            0,
-            null_mut(),
-            null_mut(),
-            instance,
-            null_mut(),
-        );
+        // SAFETY: class 与 title 均指向仍存活的 class_name（NUL 结尾宽字符串），
+        // 其余句柄为 null 或当前实例句柄，lpParam 为 null。
+        let hwnd = unsafe {
+            CreateWindowExW(
+                0,
+                class_name.as_ptr(),
+                class_name.as_ptr(),
+                0,
+                0,
+                0,
+                0,
+                0,
+                null_mut(),
+                null_mut(),
+                instance,
+                null_mut(),
+            )
+        };
         if hwnd.is_null() {
             let _ = ready_tx.send(Err("托盘消息窗口创建失败".into()));
             return;
@@ -477,11 +506,13 @@ pub fn start(
             Ok(keys) => keys,
             Err(reason) => {
                 let _ = ready_tx.send(Err(reason));
-                DestroyWindow(hwnd);
+                // SAFETY: 仅按值传递本线程刚创建的窗口句柄，销毁失败仅返回非零。
+                unsafe { DestroyWindow(hwnd) };
                 return;
             }
         };
-        let hotkey_registered = RegisterHotKey(hwnd, ID_ACTIVE, modifiers, key) != 0;
+        // SAFETY: 参数均为句柄、热键 ID 与键值按值传递，hwnd 属于本线程。
+        let hotkey_registered = unsafe { RegisterHotKey(hwnd, ID_ACTIVE, modifiers, key) } != 0;
         if !hotkey_registered {
             let _ = sender.send(Command::HotkeyUnavailable(
                 "快捷键被占用，请在截图 OCR 页设置其他组合；后台服务仍在运行".into(),
@@ -498,7 +529,8 @@ pub fn start(
         });
         if !notify(hwnd, None, &hotkey, 0) {
             let _ = ready_tx.send(Err("通知区图标创建失败；截图服务未启动".into()));
-            DestroyWindow(hwnd);
+            // SAFETY: 仅按值传递本线程刚创建的窗口句柄，销毁失败仅返回非零。
+            unsafe { DestroyWindow(hwnd) };
             return;
         }
         if !autostart && hotkey_registered {
@@ -509,12 +541,16 @@ pub fn start(
             queue,
         }));
         loop {
-            let mut msg = std::mem::zeroed::<Msg>();
-            if GetMessageW(&raw mut msg, null_mut(), 0, 0) <= 0 {
+            // SAFETY: Msg 为纯数据 C 结构体，全零是有效初始值，字段随后由 GetMessageW 填写。
+            let mut msg = unsafe { std::mem::zeroed::<Msg>() };
+            // SAFETY: msg 为栈上有效输出缓冲，指针在调用期间有效；hwnd 传 null 表示取本线程全部消息。
+            if unsafe { GetMessageW(&raw mut msg, null_mut(), 0, 0) } <= 0 {
                 break;
             }
-            TranslateMessage(&raw const msg);
-            DispatchMessageW(&raw const msg);
+            // SAFETY: msg 已由 GetMessageW 填成有效消息结构，只读指针在调用期间有效。
+            unsafe { TranslateMessage(&raw const msg) };
+            // SAFETY: msg 为同一有效消息结构，只读指针在调用期间有效。
+            unsafe { DispatchMessageW(&raw const msg) };
         }
     });
     ready_rx
