@@ -68,14 +68,28 @@ if ($Offline) {
     # The released worker is the byte identity users download. Rust/COFF toolchain
     # versions may produce different local bytes from the same source, so package
     # this pinned asset after compiling locally as a source/build check.
+    # The pinned size/SHA-256 check runs on every attempt; flaky networks only
+    # stretch the wall clock, never weaken integrity.
     $download = "$stagedWorker.download"
+    $maxAttempts = 5
+    $moved = $false
     try {
-        Invoke-WebRequest -Uri $workers[0].url -UseBasicParsing -OutFile $download
-        if ((Get-Item -LiteralPath $download).Length -ne $workerBytes -or
-            (Get-FileHash -LiteralPath $download -Algorithm SHA256).Hash.ToLowerInvariant() -cne $workerSha) {
-            throw 'Downloaded OCR worker does not match the pinned size and SHA-256.'
+        for ($attempt = 1; $attempt -le $maxAttempts -and -not $moved; $attempt++) {
+            try {
+                Invoke-WebRequest -Uri $workers[0].url -UseBasicParsing -OutFile $download
+                if ((Get-Item -LiteralPath $download).Length -ne $workerBytes -or
+                    (Get-FileHash -LiteralPath $download -Algorithm SHA256).Hash.ToLowerInvariant() -cne $workerSha) {
+                    throw 'Downloaded OCR worker does not match the pinned size and SHA-256.'
+                }
+                Move-Item -LiteralPath $download -Destination $stagedWorker -Force
+                $moved = $true
+            } catch {
+                if (Test-Path -LiteralPath $download) {Remove-Item -LiteralPath $download -Force}
+                if ($attempt -ge $maxAttempts) {throw}
+                Write-Host "Worker asset download attempt $attempt failed: $($_.Exception.Message); retrying in 10s"
+                Start-Sleep -Seconds 10
+            }
         }
-        Move-Item -LiteralPath $download -Destination $stagedWorker -Force
     } finally {
         if (Test-Path -LiteralPath $download) {Remove-Item -LiteralPath $download -Force}
     }
