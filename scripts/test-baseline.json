@@ -2687,7 +2687,7 @@
       "name": "broker_survives_client_exit_and_obeys_explicit_stop",
       "ignored": false,
       "cfg": null,
-      "body": "82dbbd4b8dbf9832"
+      "body": "65de3c6badc49d20"
     },
     {
       "file": "tests/classify_shape.rs",
@@ -4479,7 +4479,7 @@
       "name": "legacy_worker_without_capabilities_still_serves_requests",
       "ignored": false,
       "cfg": null,
-      "body": "d5c6c19ee5bf9769"
+      "body": "9c7782bffdbbb290"
     },
     {
       "file": "tests/xberg_settings.rs",
