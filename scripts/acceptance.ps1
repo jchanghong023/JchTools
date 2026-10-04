@@ -192,6 +192,9 @@ if ($WithMarkdownAcceptance) {
     if (-not $mdStateRoot) {$mdStateRoot = Join-Path $script:LogDir 'markdown-state'}
     $mdAssetRoot = [IO.Path]::GetFullPath($mdAssetRoot)
     $mdStateRoot = [IO.Path]::GetFullPath($mdStateRoot)
+    # 转换验收只初始化文档组件；截图资产使用独立空目录，防止配置保存时
+    # 唤起生产目录里的旧 worker 并占用用户会话唯一引擎。
+    $mdSnapAssetRoot = Join-Path $script:LogDir 'markdown-snap-assets'
     $mdExe = $env:JCHTOOLS_TEST_GUI_EXE
     if (-not $mdExe) {
         $mdTargetDir = if ($env:CARGO_TARGET_DIR) {[IO.Path]::GetFullPath($env:CARGO_TARGET_DIR)} else {Join-Path $root 'target'}
@@ -220,13 +223,14 @@ if ($WithMarkdownAcceptance) {
     $previous = $ErrorActionPreference
     $ErrorActionPreference = 'Continue'
     $savedMarkdownEnv = @{}
-    foreach ($key in @('JCHTOOLS_MARKDOWN_TEST_ASSET_ROOT','JCHTOOLS_TEST_ASSET_ROOT','JCHTOOLS_TEST_STATE_DIR','JCHTOOLS_TEST_GUI_EXE')) {
+    foreach ($key in @('JCHTOOLS_MARKDOWN_TEST_ASSET_ROOT','JCHTOOLS_TEST_ASSET_ROOT','JCHTOOLS_TEST_STATE_DIR','JCHTOOLS_TEST_GUI_EXE','JCHTOOLS_SNAP_OCR_TEST_ASSET_ROOT')) {
         $savedMarkdownEnv[$key] = [Environment]::GetEnvironmentVariable($key)
     }
     try {
         Set-Item -Path Env:JCHTOOLS_MARKDOWN_TEST_ASSET_ROOT -Value $mdAssetRoot
         Set-Item -Path Env:JCHTOOLS_TEST_ASSET_ROOT -Value $mdAssetRoot
         Set-Item -Path Env:JCHTOOLS_TEST_STATE_DIR -Value $mdStateRoot
+        Set-Item -Path Env:JCHTOOLS_SNAP_OCR_TEST_ASSET_ROOT -Value $mdSnapAssetRoot
         Set-Item -Path Env:JCHTOOLS_TEST_GUI_EXE -Value $mdExe
         if ($testXberg) {
             $null = Invoke-Logged -Name 'markdown-gui-initialize' -File $python `

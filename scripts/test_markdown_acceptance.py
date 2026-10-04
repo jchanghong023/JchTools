@@ -4,13 +4,16 @@ from __future__ import annotations
 
 import hashlib
 import os
+import posixpath
 import sqlite3
 import tempfile
 import unittest
+import zipfile
 from pathlib import Path
 from typing import TYPE_CHECKING, cast
 from unittest.mock import patch
 
+from defusedxml import ElementTree
 from pywinauto import timings
 
 if TYPE_CHECKING:
@@ -93,6 +96,17 @@ def _digest(path: Path) -> str:
 
 class MediaPostconditionTests(unittest.TestCase):
     """验证 T-14 图片目录与 A26 横切断言的边界。."""
+
+    def test_docx_mixed_media_fixture_relationships_resolve_to_real_members(self) -> None:
+        # 覆盖 T-14/T-15：A13 的健康图片必须真实可达，不能以坏夹具制造产品失败。
+        path = markdown_acceptance.FIXTURES_DEFAULT / "matrix/docx_emf_wmf_raster.docx"
+        with zipfile.ZipFile(path) as archive:
+            relationships = ElementTree.fromstring(archive.read("word/_rels/document.xml.rels"))
+            names = set(archive.namelist())
+            for relationship in relationships:
+                if relationship.get("Type", "").endswith("/image"):
+                    member = posixpath.normpath("word/" + relationship.attrib["Target"])
+                    assert member in names  # nosec B101: 回归测试断言，不用于产品权限或输入校验。
 
     def test_svg_rasterization_does_not_require_svg_suffix_in_markdown(self) -> None:
         # 覆盖 T-13/T-14：SVG 可由引擎栅格化为 PNG，必须验证真实媒体而非源扩展名字面量。
@@ -390,6 +404,11 @@ class MediaPostconditionTests(unittest.TestCase):
         assert "PYTHONIOENCODING" in acceptance  # nosec B101: 回归测试断言，不用于产品权限或输入校验。
         assert "PYTHONUTF8" in acceptance  # nosec B101: 回归测试断言，不用于产品权限或输入校验。
         assert "Set-Content -LiteralPath $log -Encoding UTF8" in acceptance  # nosec B101: 回归测试断言，不用于产品权限或输入校验。
+
+    def test_markdown_acceptance_isolates_snap_assets(self) -> None:
+        # 覆盖 XB-14：转换 GUI 初始化不能唤起生产截图服务，抢占用户会话引擎。
+        acceptance = Path(__file__).with_name("acceptance.ps1").read_text(encoding="utf-8")
+        assert "Set-Item -Path Env:JCHTOOLS_SNAP_OCR_TEST_ASSET_ROOT -Value $mdSnapAssetRoot" in acceptance  # nosec B101: 回归测试断言，不用于产品权限或输入校验。
 
 
 if __name__ == "__main__":
