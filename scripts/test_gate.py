@@ -58,6 +58,7 @@ if TYPE_CHECKING:
 ROOT = Path(__file__).resolve().parent.parent
 LOG_DIR = ROOT / ".tmp" / "test-gate"
 GUI_DATA_DIR = LOG_DIR / "gui-data"
+FIXED_XBERG_TEST_DIR = Path(r"C:\Users\jiang\Documents\xberg-test\xberg-cli-x86_64-pc-windows-msvc")
 
 FASTCHECK_DEADLINE_SECONDS = 60.0
 STAGE_TIMEOUT_DEFAULT = 3600.0
@@ -174,6 +175,32 @@ def _scan_binding_loop(result: StageResult) -> StageResult:
     return StageResult(result.name, STATUS_FAILED, detail, result.log)
 
 
+def acceptance_coverage_gaps(text: str) -> list[str]:
+    """提取 acceptance 汇总中的必要覆盖缺口；package 的 NOT RUN 不在本级范围。."""
+    required = ("markdown-acceptance", "snap-ocr-worker-root")
+    gaps: list[str] = []
+    lines = text.splitlines()
+    for name in required:
+        summaries = [line.strip() for line in lines if name in line and line.strip()]
+        if not summaries:
+            gaps.append(f"缺少必要覆盖汇总：{name}")
+            continue
+        if any(line.startswith(("NOT RUN ", "PARTIAL ")) for line in summaries):
+            gaps.append(next(line for line in summaries if line.startswith(("NOT RUN ", "PARTIAL "))))
+    return gaps
+
+
+def _assess_acceptance_coverage(result: StageResult) -> StageResult:
+    if result.status != STATUS_OK or result.log is None:
+        return result
+    text = result.log.read_text(encoding="utf-8", errors="replace")
+    gaps = acceptance_coverage_gaps(text)
+    if not gaps:
+        return result
+    detail = "必要验收覆盖未形成完整 PASS：\n" + "\n".join(gaps)
+    return StageResult(result.name, STATUS_UNVERIFIED, detail, result.log)
+
+
 def _has_blocking(results: list[StageResult]) -> bool:
     return any(result.status in (STATUS_FAILED, STATUS_TIMED_OUT) for result in results)
 
@@ -223,8 +250,8 @@ def cmd_fastcheck(deadline_seconds: float) -> int:
     plan: list[tuple[str, list[str]]] = [
         ("static-check", [sys.executable, str(ROOT / "scripts" / "static_check.py")]),
         ("rustfmt-check", [cargo, "fmt", "--all", "--", "--check"]),
-        ("clippy", [cargo, "clippy", "--all-targets", "--", "-D", "warnings"]),
-        ("cargo-test", [cargo, "test", "--all-targets"]),
+        ("clippy", [cargo, "clippy", "--all-targets", "--features", "test-hooks", "--", "-D", "warnings"]),
+        ("cargo-test", [cargo, "test", "--all-targets", "--features", "test-hooks"]),
     ]
     over_budget = False
     for name, argv in plan:
@@ -264,6 +291,11 @@ def _python_quality_stages(results: list[StageResult]) -> None:
         ("pyquality-bandit", "bandit", [sys.executable, "-m", "bandit", "-r", "scripts", "-s", "B404,B603", "-q"]),
         # pip-audit 的模块名是下划线形式 pip_audit（连字符只是 console script 名）。
         ("pyquality-pip-audit", "pip_audit", [sys.executable, "-m", "pip_audit", "-r", "scripts/requirements-dev.txt"]),
+        (
+            "markdown-acceptance-unit",
+            "unittest",
+            [sys.executable, "-m", "unittest", "scripts.test_markdown_acceptance"],
+        ),
     ]
     for name, module, argv in stages:
         if importlib.util.find_spec(module) is None:
@@ -285,6 +317,24 @@ def _powershell_env() -> dict[str, str]:
     module_path = _ps51_module_path()
     if module_path is not None:
         env["PSModulePath"] = module_path
+    # 仅传递已存在的隔离测试引擎目录；不运行 xberg CLI 做前置探测。
+    # 运行时资产与 SQLite 隔离根由 acceptance.ps1/调用方布置，禁止回退生产目录。
+    if (FIXED_XBERG_TEST_DIR / "xberg.exe").is_file():
+        env["JCHTOOLS_TEST_XBERG_DIR"] = str(FIXED_XBERG_TEST_DIR)
+    # acceptance.ps1 会在本阶段构建该 EXE；保留调用方显式路径，并尊重
+    # CARGO_TARGET_DIR，不猜测旧产物。
+    explicit_gui = os.environ.get("JCHTOOLS_TEST_GUI_EXE")
+    if explicit_gui:
+        env["JCHTOOLS_TEST_GUI_EXE"] = explicit_gui
+    else:
+        target_raw = os.environ.get("CARGO_TARGET_DIR")
+        if target_raw:
+            target_dir = Path(target_raw)
+            if not target_dir.is_absolute():
+                target_dir = ROOT / target_dir
+        else:
+            target_dir = ROOT / "target"
+        env["JCHTOOLS_TEST_GUI_EXE"] = str(target_dir.resolve() / "debug" / "JchTools.exe")
     return env
 
 
@@ -326,14 +376,29 @@ def _fulltest_stages(results: list[StageResult]) -> None:
     if _has_blocking(results):
         return
     results.append(run_logged("rustfmt-check", [cargo, "fmt", "--all", "--", "--check"], timeout=300.0))
-    results.append(run_logged("clippy", [cargo, "clippy", "--all-targets", "--", "-D", "warnings"], timeout=1800.0))
+    results.append(
+        run_logged(
+            "clippy",
+            [cargo, "clippy", "--all-targets", "--features", "test-hooks", "--", "-D", "warnings"],
+            timeout=1800.0,
+        )
+    )
     # perf-tracing 是文档化的性能打点构建配置（src/perf.rs、tests/perf_probe.rs），默认特性构建
     # 覆盖不到它：曾因 `Summary.linked` 字段删除后遗漏调用点而整个配置编译失败。单独构建该特性，
     # 防止只改字段/签名的变更再次打断这个配置。
     results.append(
         run_logged(
             "clippy-perf-tracing",
-            [cargo, "clippy", "--all-targets", "--features", "perf-tracing", "--", "-D", "warnings"],
+            [
+                cargo,
+                "clippy",
+                "--all-targets",
+                "--features",
+                "perf-tracing,test-hooks",
+                "--",
+                "-D",
+                "warnings",
+            ],
             timeout=1800.0,
         )
     )
@@ -363,18 +428,21 @@ def _fulltest_stages(results: list[StageResult]) -> None:
         "-GuiData",
         str(GUI_DATA_DIR),
     ]
-    # F26：转 Markdown 验收承接（ALL2MARKDOWN 附录 A）。无资产时 acceptance.ps1 记 NOT RUN 不失败；
-    # 有被测物/资产的机器设 JCHTOOLS_MD_ACCEPTANCE_ARGS 透传参数，或 JCHTOOLS_MD_ACCEPTANCE=1 仅开入口。
+    # F26：转 Markdown 验收承接（ALL2MARKDOWN 附录 A）默认进入 fulltest/slowtest。
+    # 无资产或被测物时 acceptance.ps1 记 NOT RUN，不把缺资产伪报为通过；
+    # JCHTOOLS_MD_ACCEPTANCE_ARGS 仅用于向默认入口透传被测物/双形态参数。
+    acceptance_argv += ["-WithMarkdownAcceptance"]
     md_args = os.environ.get("JCHTOOLS_MD_ACCEPTANCE_ARGS", "").strip()
     if md_args:
-        acceptance_argv += ["-WithMarkdownAcceptance", "-MarkdownArgs", *shlex.split(md_args)]
-    elif os.environ.get("JCHTOOLS_MD_ACCEPTANCE", "") == "1":
-        acceptance_argv += ["-WithMarkdownAcceptance"]
+        acceptance_argv += ["-MarkdownArgs", *shlex.split(md_args)]
     # 本机执行策略全作用域 Undefined（默认 Restricted）会拒绝任何 -File 运行 .ps1；
     # PSExecutionPolicyPreference 以 Process 作用域覆盖之，且随环境继承给
     # acceptance.ps1 内部再起的 powershell 子进程，只影响本进程树。
     acceptance_env = _powershell_env()
-    results.append(run_logged("acceptance", acceptance_argv, timeout=STAGE_TIMEOUT_DEFAULT, env_extra=acceptance_env))
+    acceptance_result = run_logged(
+        "acceptance", acceptance_argv, timeout=STAGE_TIMEOUT_DEFAULT, env_extra=acceptance_env
+    )
+    results.append(_assess_acceptance_coverage(acceptance_result))
     shutil.rmtree(GUI_DATA_DIR, ignore_errors=True)
     results.append(StageResult("cleanup-gui-data", STATUS_OK, f"已删除一次性数据集 {GUI_DATA_DIR}"))
 

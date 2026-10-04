@@ -415,6 +415,20 @@
       "body": "60b658f5b75b569f"
     },
     {
+      "file": "optional/snap-ocr-worker/src/capture_win.rs",
+      "name": "all_black_frame_is_not_marked_unusable",
+      "ignored": false,
+      "cfg": "windows",
+      "body": "65ed2d391031ac37"
+    },
+    {
+      "file": "optional/snap-ocr-worker/src/capture_win.rs",
+      "name": "failed_message_loop_is_reported_as_error",
+      "ignored": false,
+      "cfg": "windows",
+      "body": "5691b50119f4cf97"
+    },
+    {
       "file": "optional/snap-ocr-worker/src/result_window.rs",
       "name": "failed_font_registration_is_not_cached",
       "ignored": false,
@@ -447,7 +461,7 @@
       "name": "settings_window_hotkey_callback_restores_shifted_digit",
       "ignored": false,
       "cfg": null,
-      "body": "77b75bdfc5a0544c"
+      "body": "75f4f77bce6ce2d6"
     },
     {
       "file": "optional/snap-ocr-worker/src/result_window.rs",
@@ -455,6 +469,27 @@
       "ignored": false,
       "cfg": null,
       "body": "094856c1ad04338c"
+    },
+    {
+      "file": "optional/snap-ocr-worker/src/result_window.rs",
+      "name": "theme_tokens_have_distinct_light_and_dark_palettes",
+      "ignored": false,
+      "cfg": null,
+      "body": "4103f44907720204"
+    },
+    {
+      "file": "optional/snap-ocr-worker/src/service.rs",
+      "name": "asset_invalid_downgrades_ready_model_and_reenables_retry",
+      "ignored": false,
+      "cfg": "windows",
+      "body": "ea63fb233c5cacaa"
+    },
+    {
+      "file": "optional/snap-ocr-worker/src/service.rs",
+      "name": "cancelled_image_arriving_late_does_not_start_recognition",
+      "ignored": false,
+      "cfg": "windows",
+      "body": "266e1e31b757255b"
     },
     {
       "file": "optional/snap-ocr-worker/src/service.rs",
@@ -465,6 +500,13 @@
     },
     {
       "file": "optional/snap-ocr-worker/src/service.rs",
+      "name": "communication_failure_downgrades_ready_model_and_reenables_retry",
+      "ignored": false,
+      "cfg": "windows",
+      "body": "664605acafdf0afb"
+    },
+    {
+      "file": "optional/snap-ocr-worker/src/service.rs",
       "name": "corrupt_settings_survive_load_until_explicit_save",
       "ignored": false,
       "cfg": "windows",
@@ -472,17 +514,24 @@
     },
     {
       "file": "optional/snap-ocr-worker/src/service.rs",
+      "name": "font_readiness_rejects_missing_manifest_assets",
+      "ignored": false,
+      "cfg": "windows",
+      "body": "7e40381bf94837a3"
+    },
+    {
+      "file": "optional/snap-ocr-worker/src/service.rs",
       "name": "inference_failure_does_not_unload_ready_model",
       "ignored": false,
       "cfg": "windows",
-      "body": "c14cf151b8a285a2"
+      "body": "19ebcf28d2e45a86"
     },
     {
       "file": "optional/snap-ocr-worker/src/service.rs",
       "name": "load_failures_map_to_distinct_model_states",
       "ignored": false,
       "cfg": "windows",
-      "body": "114e6a55f1b73bcd"
+      "body": "07e1910353f82b7b"
     },
     {
       "file": "optional/snap-ocr-worker/src/service.rs",
@@ -497,6 +546,20 @@
       "ignored": false,
       "cfg": "windows",
       "body": "e81c5e8d404b3941"
+    },
+    {
+      "file": "optional/snap-ocr-worker/src/service.rs",
+      "name": "stale_selection_cancel_generation_cannot_cancel_new_task",
+      "ignored": false,
+      "cfg": "windows",
+      "body": "5eaa144017e26cd8"
+    },
+    {
+      "file": "optional/snap-ocr-worker/src/service.rs",
+      "name": "stop_background_retries_are_bounded_on_error",
+      "ignored": false,
+      "cfg": "windows",
+      "body": "e1b40d5f4d3b6616"
     },
     {
       "file": "optional/snap-ocr-worker/src/service.rs",
@@ -525,6 +588,34 @@
       "ignored": false,
       "cfg": null,
       "body": "59d8917a1ee2df5c"
+    },
+    {
+      "file": "optional/snap-ocr-worker/src/service/tray.rs",
+      "name": "failed_message_loop_requires_tray_cleanup",
+      "ignored": false,
+      "cfg": null,
+      "body": "899ec920b1ee602f"
+    },
+    {
+      "file": "optional/snap-ocr-worker/src/shared_xberg.rs",
+      "name": "classifies_runtime_process_and_timeout_errors",
+      "ignored": false,
+      "cfg": null,
+      "body": "da9342c2e7df5295"
+    },
+    {
+      "file": "optional/snap-ocr-worker/src/shared_xberg.rs",
+      "name": "classifies_unresolved_broker_timeout_as_timeout",
+      "ignored": false,
+      "cfg": null,
+      "body": "106d37f1c471fd67"
+    },
+    {
+      "file": "optional/snap-ocr-worker/src/shared_xberg.rs",
+      "name": "preserves_asset_invalid_response_kind",
+      "ignored": false,
+      "cfg": null,
+      "body": "3c689931a6286f11"
     },
     {
       "file": "src/archive.rs",
@@ -630,6 +721,13 @@
       "ignored": false,
       "cfg": null,
       "body": "0248a2dcb1df1475"
+    },
+    {
+      "file": "src/asset_util.rs",
+      "name": "verify_file_with_cancel_stops_before_hashing",
+      "ignored": false,
+      "cfg": null,
+      "body": "5ee8daa7f5cd7883"
     },
     {
       "file": "src/dedup_components.rs",
@@ -948,10 +1046,31 @@
     },
     {
       "file": "src/gui.rs",
+      "name": "convert_same_input_output_rejected_before_busy",
+      "ignored": false,
+      "cfg": null,
+      "body": "98e3f5c3012c7cf1"
+    },
+    {
+      "file": "src/gui.rs",
       "name": "convert_start_resets_started_clock",
       "ignored": false,
       "cfg": null,
-      "body": "7a1f57f6c2a8a388"
+      "body": "130edf051ab71426"
+    },
+    {
+      "file": "src/gui.rs",
+      "name": "convert_timeout_overflow_rejected_before_busy",
+      "ignored": false,
+      "cfg": null,
+      "body": "636f2127b117e983"
+    },
+    {
+      "file": "src/gui.rs",
+      "name": "converter_readiness_long_detail_stays_in_log",
+      "ignored": false,
+      "cfg": null,
+      "body": "b24a046679c6c8cd"
     },
     {
       "file": "src/gui.rs",
@@ -1053,6 +1172,13 @@
     },
     {
       "file": "src/gui.rs",
+      "name": "gui_test_cases_do_not_share_late_background_errors",
+      "ignored": false,
+      "cfg": null,
+      "body": "d1ace55ec995f212"
+    },
+    {
+      "file": "src/gui.rs",
       "name": "initial_surface_lists_defaults",
       "ignored": false,
       "cfg": null,
@@ -1070,7 +1196,7 @@
       "name": "markdown_converter_navigation_is_isolated_before_initialization",
       "ignored": false,
       "cfg": null,
-      "body": "bdf22ece49306ac8"
+      "body": "e9477ed7675b5d22"
     },
     {
       "file": "src/gui.rs",
@@ -1340,6 +1466,13 @@
     },
     {
       "file": "src/logging.rs",
+      "name": "panic_payload_is_not_written_to_diagnostic_log",
+      "ignored": false,
+      "cfg": null,
+      "body": "bc6176bd22b99bc8"
+    },
+    {
+      "file": "src/logging.rs",
       "name": "warns_and_errors_reach_disk_file",
       "ignored": false,
       "cfg": null,
@@ -1413,7 +1546,7 @@
       "name": "media_dir_name_sanitizes_and_avoids_file_occupancy",
       "ignored": false,
       "cfg": null,
-      "body": "d669a3ba168247c0"
+      "body": "b7bf7b08b40438a3"
     },
     {
       "file": "src/markdown.rs",
@@ -1427,7 +1560,7 @@
       "name": "media_write_failure_rolls_back_and_fails_file",
       "ignored": false,
       "cfg": null,
-      "body": "5a03d64146767c57"
+      "body": "7ee85ef5e52583a7"
     },
     {
       "file": "src/markdown.rs",
@@ -1477,6 +1610,13 @@
       "ignored": false,
       "cfg": null,
       "body": "1e29cea702efd43d"
+    },
+    {
+      "file": "src/markdown_assets.rs",
+      "name": "cleanup_owned_download_staging_preserves_unowned_and_valid_versions",
+      "ignored": false,
+      "cfg": null,
+      "body": "1c5dc7f0a137faa7"
     },
     {
       "file": "src/markdown_assets.rs",
@@ -1546,7 +1686,7 @@
       "name": "installed_runtime_is_verified_before_selection",
       "ignored": false,
       "cfg": null,
-      "body": "4657bc22ee9b64c9"
+      "body": "25a615de1e2cfe6e"
     },
     {
       "file": "src/markdown_assets.rs",
@@ -1676,6 +1816,27 @@
     },
     {
       "file": "src/markdown_document.rs",
+      "name": "duplicate_children_with_images_are_deduplicated_before_media_prefixing",
+      "ignored": false,
+      "cfg": null,
+      "body": "26b218f2aa6d6ff2"
+    },
+    {
+      "file": "src/markdown_document.rs",
+      "name": "empty_embedded_results_are_reported_with_nested_context",
+      "ignored": false,
+      "cfg": null,
+      "body": "061c9424b109224a"
+    },
+    {
+      "file": "src/markdown_document.rs",
+      "name": "entity_at_markdown_marker_position_is_escaped_without_decoding_code",
+      "ignored": false,
+      "cfg": null,
+      "body": "b7a311892938262a"
+    },
+    {
+      "file": "src/markdown_document.rs",
       "name": "fast_config_omits_layout_and_applies_fast_overrides",
       "ignored": false,
       "cfg": null,
@@ -1683,10 +1844,31 @@
     },
     {
       "file": "src/markdown_document.rs",
+      "name": "fast_output_removes_image_links_and_media_files",
+      "ignored": false,
+      "cfg": null,
+      "body": "f8335b162e9f37a4"
+    },
+    {
+      "file": "src/markdown_document.rs",
       "name": "fence_close_requires_bare_marker_line",
       "ignored": false,
       "cfg": null,
       "body": "ae3f6a1ee7ed7c81"
+    },
+    {
+      "file": "src/markdown_document.rs",
+      "name": "huge_deadline_creation_does_not_panic",
+      "ignored": false,
+      "cfg": null,
+      "body": "95d6e4e6b7594445"
+    },
+    {
+      "file": "src/markdown_document.rs",
+      "name": "image_rewrite_only_changes_link_destinations_and_avoids_media_dir_self_hits",
+      "ignored": false,
+      "cfg": null,
+      "body": "2476d26240712d07"
     },
     {
       "file": "src/markdown_document.rs",
@@ -1704,10 +1886,17 @@
     },
     {
       "file": "src/markdown_document.rs",
+      "name": "inline_code_keeps_longer_inner_backtick_runs_literal",
+      "ignored": false,
+      "cfg": null,
+      "body": "12ce5fc1c86dec10"
+    },
+    {
+      "file": "src/markdown_document.rs",
       "name": "joins_drop_cap_paragraph",
       "ignored": false,
       "cfg": null,
-      "body": "3b0300c13cda8980"
+      "body": "3521793d6cc8c389"
     },
     {
       "file": "src/markdown_document.rs",
@@ -1722,6 +1911,13 @@
       "ignored": false,
       "cfg": null,
       "body": "b477752293d31a9d"
+    },
+    {
+      "file": "src/markdown_document.rs",
+      "name": "malformed_referenced_image_is_reported_as_partial",
+      "ignored": false,
+      "cfg": null,
+      "body": "2b1f45bd62f2da1b"
     },
     {
       "file": "src/markdown_document.rs",
@@ -1757,6 +1953,13 @@
       "ignored": false,
       "cfg": null,
       "body": "827c3a6de17c8ad6"
+    },
+    {
+      "file": "src/markdown_document.rs",
+      "name": "pdf_name_probe_ignores_names_inside_literal_strings",
+      "ignored": false,
+      "cfg": null,
+      "body": "522afb2ce1d7abd9"
     },
     {
       "file": "src/markdown_document.rs",
@@ -1823,10 +2026,24 @@
     },
     {
       "file": "src/markdown_document.rs",
+      "name": "strict_base64_rejects_bad_padding_and_empty_payloads",
+      "ignored": false,
+      "cfg": null,
+      "body": "5370b64fededb9e5"
+    },
+    {
+      "file": "src/markdown_document.rs",
       "name": "structured_ocr_only_result_succeeds",
       "ignored": false,
       "cfg": null,
       "body": "5982ced8ca51bf2e"
+    },
+    {
+      "file": "src/markdown_document.rs",
+      "name": "structured_ocr_uses_geometry_and_avoids_parent_word_duplication",
+      "ignored": false,
+      "cfg": null,
+      "body": "8ddb712bf5f34ece"
     },
     {
       "file": "src/markdown_document.rs",
@@ -1847,7 +2064,7 @@
       "name": "tmp_real_envelope_media_diagnostic",
       "ignored": false,
       "cfg": null,
-      "body": "2ba8df811ec5485e"
+      "body": "8728d46e6352a04f"
     },
     {
       "file": "src/md_tools.rs",
@@ -2236,6 +2453,13 @@
     },
     {
       "file": "src/snap_ocr_assets.rs",
+      "name": "checked_download_total_rejects_payload_over_manifest_size",
+      "ignored": false,
+      "cfg": null,
+      "body": "b3f58e6e55c50bc7"
+    },
+    {
+      "file": "src/snap_ocr_assets.rs",
       "name": "download_asset_fails_after_three_interruptions",
       "ignored": false,
       "cfg": null,
@@ -2296,6 +2520,13 @@
       "ignored": false,
       "cfg": "windows",
       "body": "d13bcf71f1cfb19f"
+    },
+    {
+      "file": "src/snap_ocr_assets.rs",
+      "name": "missing_worker_reports_repair_without_downloading_another_version",
+      "ignored": false,
+      "cfg": null,
+      "body": "15032196c2a78ed8"
     },
     {
       "file": "src/snap_ocr_assets.rs",
@@ -2375,11 +2606,81 @@
       "body": "c94474b352ac6a08"
     },
     {
+      "file": "src/xberg_runtime.rs",
+      "name": "document_startup_uses_markdown_and_keeps_image_ocr",
+      "ignored": false,
+      "cfg": null,
+      "body": "a77c977def16b1f1"
+    },
+    {
+      "file": "src/xberg_runtime.rs",
+      "name": "legacy_capabilities_without_handshake_fields_are_rejected",
+      "ignored": false,
+      "cfg": null,
+      "body": "88f53360bc087bbc"
+    },
+    {
+      "file": "src/xberg_runtime.rs",
+      "name": "unsupported_capabilities_response_is_explicitly_rejected",
+      "ignored": false,
+      "cfg": null,
+      "body": "527a36c08b7bf527"
+    },
+    {
+      "file": "src/xberg_runtime_windows.rs",
+      "name": "background_stop_marker_is_not_written_for_rejected_response",
+      "ignored": false,
+      "cfg": null,
+      "body": "bed5e360ea2d9550"
+    },
+    {
+      "file": "src/xberg_runtime_windows.rs",
+      "name": "duration_max_is_rejected_before_broker_start",
+      "ignored": false,
+      "cfg": null,
+      "body": "2433d2a9729e2d5e"
+    },
+    {
+      "file": "src/xberg_runtime_windows.rs",
+      "name": "oversized_line_is_drained_without_retaining_payload",
+      "ignored": false,
+      "cfg": null,
+      "body": "fc87af1954d2600f"
+    },
+    {
       "file": "src/xberg_runtime_windows.rs",
       "name": "prune_keeps_product_fields_and_strips_heavy_fields_recursively",
       "ignored": false,
       "cfg": null,
       "body": "aba81bd1ebee7875"
+    },
+    {
+      "file": "src/xberg_runtime_windows.rs",
+      "name": "response_id_scanner_honors_json_escapes_and_depth",
+      "ignored": false,
+      "cfg": null,
+      "body": "f1f06d1c9bd12c57"
+    },
+    {
+      "file": "src/xberg_runtime_windows.rs",
+      "name": "response_id_scanner_ignores_structural_characters_inside_payload_strings",
+      "ignored": false,
+      "cfg": null,
+      "body": "4d66b48eac5c24e0"
+    },
+    {
+      "file": "src/xberg_settings.rs",
+      "name": "explicit_test_directory_policy_preserves_isolation",
+      "ignored": false,
+      "cfg": null,
+      "body": "2ec52880e649543b"
+    },
+    {
+      "file": "src/xberg_settings.rs",
+      "name": "production_directory_policy_ignores_test_environment",
+      "ignored": false,
+      "cfg": null,
+      "body": "b11cad6f8bdd3826"
     },
     {
       "file": "tests/archive.rs",
@@ -3972,6 +4273,27 @@
     },
     {
       "file": "tests/markdown_convert_gate.rs",
+      "name": "media_commit_refuses_existing_image_without_deleting_it",
+      "ignored": false,
+      "cfg": null,
+      "body": "49ce21ffde853121"
+    },
+    {
+      "file": "tests/markdown_convert_gate.rs",
+      "name": "media_directories_are_unique_after_name_sanitization",
+      "ignored": false,
+      "cfg": null,
+      "body": "62d7379deb7d9de9"
+    },
+    {
+      "file": "tests/markdown_convert_gate.rs",
+      "name": "media_directory_occupancy_uses_target_parent",
+      "ignored": false,
+      "cfg": null,
+      "body": "8e735b74db7e972a"
+    },
+    {
+      "file": "tests/markdown_convert_gate.rs",
       "name": "public_page_count_falls_back_on_corrupt_container",
       "ignored": false,
       "cfg": null,
@@ -3990,6 +4312,13 @@
       "ignored": false,
       "cfg": null,
       "body": "128480abd817605a"
+    },
+    {
+      "file": "tests/markdown_convert_gate.rs",
+      "name": "scan_honors_cancellation_before_traversal",
+      "ignored": false,
+      "cfg": null,
+      "body": "6ad4d7363124c588"
     },
     {
       "file": "tests/markdown_media_e2e.rs",
@@ -4518,10 +4847,10 @@
     },
     {
       "file": "tests/xberg_legacy_protocol.rs",
-      "name": "legacy_worker_without_capabilities_still_serves_requests",
+      "name": "legacy_worker_without_capabilities_rejects_inference",
       "ignored": false,
       "cfg": null,
-      "body": "9c7782bffdbbb290"
+      "body": "c1e91bcb17998389"
     },
     {
       "file": "tests/xberg_settings.rs",
@@ -4560,6 +4889,13 @@
     },
     {
       "file": "tests/xberg_shared_process.rs",
+      "name": "cancel_ack_without_terminal_keeps_document_lane_and_snapshot_alive",
+      "ignored": false,
+      "cfg": null,
+      "body": "d52d0fdd4134142a"
+    },
+    {
+      "file": "tests/xberg_shared_process.rs",
       "name": "documents_reuse_process_and_snapshot_finishes_during_document",
       "ignored": false,
       "cfg": null,
@@ -4567,10 +4903,10 @@
     },
     {
       "file": "tests/xberg_shared_process.rs",
-      "name": "fast_mode_rejection_falls_back_to_normal",
+      "name": "fast_mode_rejection_is_reported_without_normal_fallback",
       "ignored": false,
       "cfg": null,
-      "body": "03e7c34fa1f2ba5b"
+      "body": "5cee03c85d752e2a"
     },
     {
       "file": "tests/xberg_shared_process.rs",

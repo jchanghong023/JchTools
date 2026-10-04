@@ -20,17 +20,19 @@ if (-not (Test-Path -LiteralPath $archiveEngine) -or -not (Test-Path -LiteralPat
 $extra = @()
 if ($Offline) {$extra += '--offline'}
 if (-not (Test-Path -LiteralPath 'Cargo.lock')) {Invoke-Cargo (@('generate-lockfile') + $extra)}
-Invoke-Cargo (@('check','--locked','--all-targets') + $extra)
+Invoke-Cargo (@('check','--locked','--all-targets','--features','test-hooks') + $extra)
 if (-not $SkipTests) {
-    Invoke-Cargo (@('test','--locked','--all-targets') + $extra)
+    Invoke-Cargo (@('test','--locked','--all-targets','--features','test-hooks') + $extra)
     $previous = $env:JCHTOOLS_TEST_7ZIP
     try {
         $env:JCHTOOLS_TEST_7ZIP = $archiveEngine
-        Invoke-Cargo (@('test','--locked','--test','archive') + $extra + @('--','--ignored','--test-threads=1'))
+        Invoke-Cargo (@('test','--locked','--test','archive','--features','test-hooks') + $extra + @('--','--ignored','--test-threads=1'))
     } finally {$env:JCHTOOLS_TEST_7ZIP = $previous}
 }
-# Build the optional screenshot OCR worker separately. It is a release asset, never a
-# member of the portable ZIP or installer. Both Cargo invocations use the workspace lock.
+# Build the screenshot OCR worker separately. It is shipped beside the main executable
+# in both delivery forms (XB-25); the optional-components directory below is only a
+# staging area for the build-time manifest backfill. Both Cargo invocations use the
+# workspace lock.
 if ($env:CARGO_TARGET_DIR) {
     $targetDir = [IO.Path]::GetFullPath($env:CARGO_TARGET_DIR)
 } else {

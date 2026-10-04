@@ -23,6 +23,8 @@
         --json .tmp/markdown-acceptance/report.json
 
 依赖：pywinauto / Pillow /（媒体合成另需 PATH 上的 ffmpeg），见 scripts/requirements-dev.txt。
+验收隔离：资产根必须由调用方通过 `JCHTOOLS_TEST_ASSET_ROOT`（或
+`JCHTOOLS_MARKDOWN_TEST_ASSET_ROOT`）提供；脚本不读取生产 SQLite、生产资产或截图数据。
 退出码：任一 FAIL→1；全部 NOT RUN→2；其余（有 PASS、无 FAIL）→0；参数错误→3。
 """
 
@@ -34,6 +36,7 @@ import dataclasses
 import hashlib
 import io
 import json
+import ntpath
 import os
 import re
 import shutil
@@ -51,6 +54,7 @@ import comtypes
 import pywintypes
 import win32con
 import win32gui
+import win32process
 from PIL import Image, ImageDraw, ImageFont
 from pywinauto import Application, controls, findbestmatch, findwindows, timings
 from pywinauto.application import ProcessNotFoundError, WindowSpecification
@@ -66,6 +70,7 @@ FIXTURES_DEFAULT = ROOT / "tests" / "markdown_fixtures"
 SCRATCH_ROOT = ROOT / ".tmp" / "markdown-acceptance"
 GUI_SMOKE = ROOT / "scripts" / "gui_smoke.py"
 ASSET_MANIFEST = ROOT / "resources" / "markdown-assets.json"
+FORMAT_MANIFEST = ROOT / "resources" / "markdown-xberg-formats.json"
 
 # 状态常量名避开 pass 字样（质量门 S105 把含该字样的变量名当疑似硬编码口令）。
 STATUS_OK = "PASS"
@@ -102,6 +107,23 @@ OLD_PROJECT_DIR = Path(r"D:\code1111111111\all2markdown")
 # 转 Markdown 页自上而下的「选择目录…」行数：输入 / 输出（Xberg 目录在设置页，XB-20）。
 CONVERT_ROW_COUNT = 2
 
+# T-08/A18：固定运行时清单目前只声明这三个 JPEG 2000 扩展名。
+# JPX/JPM/MJ2 属于未承诺格式，验收必须明确列为 unsupported，不能因上游
+# 变化或夹具在场就把它们扩展为产品支持范围。
+A18_SUPPORTED_EXTENSIONS = ("jp2", "j2k", "j2c")
+A18_UNSUPPORTED_EXTENSIONS = ("jpx", "jpm", "mj2")
+
+# A02 合成输入的图片数量；所有生成、媒体落盘和正文断言共用此常量。
+A02_IMAGE_COUNT = 6
+A02_IMAGE_TOKENS = (
+    "ALPHA-TOKEN",
+    "BETA-TOKEN",
+    "GAMMA-TOKEN",
+    "DELTA-TOKEN",
+    "EPSILON-TOKEN",
+    "ZETA-TOKEN",
+)
+
 
 def _old_cache_candidates() -> list[Path]:
     local = os.environ.get("LOCALAPPDATA")
@@ -122,6 +144,7 @@ READINESS_TIMEOUT = 180
 BUSY_TIMEOUT = 30
 CONVERSION_TIMEOUT = 1800  # 真实 OCR/媒体转录按分钟级计，验收宁等勿假。
 EDIT_ROW_TOLERANCE_PX = 20
+PHYSICAL_OVERLAP_THRESHOLD = 0.8
 
 # pywinauto/pywin32 窗口操作在窗口建立/销毁竞态下的瞬态错误族；枚举与 gui_smoke.py
 # 的 TRANSIENT_GUI_ERRORS 同源（那边附有逐项理由），此处等待循环内一律按可重试处理。
@@ -155,6 +178,25 @@ def _str_field(entry: object, key: str) -> str | None:
         if isinstance(got, str):
             return got
     return None
+
+
+def _fixed_format_extensions() -> tuple[set[str], str | None]:
+    """读取与产品内置清单相同的固定格式集合（只读，不调用引擎）。."""
+    try:
+        parsed = _parse_json(FORMAT_MANIFEST.read_text(encoding="utf-8"))
+    except (OSError, ValueError) as error:
+        return set(), f"固定 Xberg 格式清单无法读取：{error}"
+    if not _is_str_obj_map(parsed):
+        return set(), "固定 Xberg 格式清单不是 JSON 对象"
+    rows = parsed.get("formats")
+    if not _is_str_obj_list(rows):
+        return set(), "固定 Xberg 格式清单缺少 formats 数组"
+    extensions = {
+        token
+        for row in rows
+        if (token := (_str_field(row, "extension") or "").strip().lstrip(".").lower()) and "." not in token
+    }
+    return extensions, None
 
 
 def _reconfigure_stdout() -> None:
@@ -199,11 +241,12 @@ class AssetProbe:
 
 
 def _asset_root() -> Path | None:
-    local = os.environ.get("LOCALAPPDATA")
-    if not local:
-        return None
-    # 与 src/config.rs::state_dir（ProjectDirs data_local_dir）同口径。
-    return Path(local) / "JchTools" / "data" / DATA_DIRECTORY
+    # 验收只能使用调用方明确布置的隔离资产根，禁止读取用户生产资产目录。
+    for name in ("JCHTOOLS_TEST_ASSET_ROOT", "JCHTOOLS_MARKDOWN_TEST_ASSET_ROOT"):
+        override = os.environ.get(name)
+        if override and Path(override).is_absolute():
+            return Path(override)
+    return None
 
 
 def _manifest_model_paths() -> list[str]:
@@ -221,14 +264,11 @@ def _manifest_model_paths() -> list[str]:
 
 
 def _settings_state_dir() -> Path | None:
-    """应用级设置目录，与 src/xberg_settings.rs::state_dir 同口径（XB-18）."""
+    """返回调用方提供的隔离设置目录，禁止读取生产 SQLite（XB-18）。."""
     override = os.environ.get("JCHTOOLS_TEST_STATE_DIR")
     if override and Path(override).is_absolute():
         return Path(override)
-    local = os.environ.get("LOCALAPPDATA")
-    if not local:
-        return None
-    return Path(local) / "JchTools" / "data"
+    return None
 
 
 def _probe_legacy_runtime_dir(root: Path, missing: list[str]) -> Path | None:
@@ -258,24 +298,25 @@ def _probe_runtime_dir(root: Path, missing: list[str]) -> Path | None:
     XB-18 后应用把共享目录保存在应用级 SQLite（config.sqlite3 的
     app_settings.xberg_directory）；旧文本指针仅作为 SQLite 无值时的迁移源。
     """
+    runtime_dir: Path | None = None
     state = _settings_state_dir()
-    if state is None:
-        return _probe_legacy_runtime_dir(root, missing)
-    database = state / "config.sqlite3"
-    if not database.is_file():
-        return _probe_legacy_runtime_dir(root, missing)
-    try:
-        row = _fetch_xberg_directory(database)
-    except sqlite3.Error as error:
-        missing.append(f"读取应用配置 SQLite 失败：{error}")
-        return None
-    stored = row[0] if row else None
-    if not isinstance(stored, str) or not stored.strip():
-        return _probe_legacy_runtime_dir(root, missing)
-    runtime_dir = Path(stored.strip())
-    if not (runtime_dir / "xberg.exe").is_file():
+    database = state / "config.sqlite3" if state is not None else None
+    if database is None or not database.is_file():
+        runtime_dir = _probe_legacy_runtime_dir(root, missing)
+    else:
+        try:
+            row = _fetch_xberg_directory(database)
+        except sqlite3.Error as error:
+            missing.append(f"读取应用配置 SQLite 失败：{error}")
+        else:
+            stored = row[0] if row else None
+            if isinstance(stored, str) and stored.strip():
+                runtime_dir = Path(stored.strip())
+            else:
+                runtime_dir = _probe_legacy_runtime_dir(root, missing)
+    if runtime_dir is not None and not (runtime_dir / "xberg.exe").is_file():
         missing.append(f"Xberg 运行目录缺 xberg.exe：{runtime_dir / 'xberg.exe'}")
-        return None
+        runtime_dir = None
     return runtime_dir
 
 
@@ -322,7 +363,7 @@ def probe_assets() -> AssetProbe:
     missing: list[str] = []
     root = _asset_root()
     if root is None:
-        return AssetProbe(None, None, None, None, ["缺少 LOCALAPPDATA，无法定位资产目录"])
+        return AssetProbe(None, None, None, None, ["未提供隔离验收资产根（JCHTOOLS_TEST_ASSET_ROOT）"])
     runtime_dir = _probe_runtime_dir(root, missing)
     xberg_exe = (runtime_dir / "xberg.exe") if runtime_dir is not None else None
     if xberg_exe is not None and not xberg_exe.is_file():
@@ -611,7 +652,9 @@ def _build_pptx(
     """克隆仓库 PPTX 骨架，替换 slide1 与其关系并注入媒体（布局关系保持原样）."""
     source = Path(__file__).resolve().parent.parent / "tests" / "markdown_fixtures" / "merged_table.pptx"
     with zipfile.ZipFile(source) as archive:
-        members = {member: archive.read(member) for member in archive.namelist()}
+        # 骨架自带的旧 media 成员不属于本次合成输入；保留会让 A02 误得到
+        # 7 张图片（6 张目标图 + 1 张骨架残留），从而掩盖关系归属问题。
+        members = {member: archive.read(member) for member in archive.namelist() if not member.startswith("ppt/media/")}
     slide_rels = members["ppt/slides/_rels/slide1.xml.rels"].decode("utf-8")
     layout_match = re.search(r"<Relationship [^>]*slideLayout[^>]*/>", slide_rels)
     if layout_match is None:
@@ -636,9 +679,10 @@ def _build_pptx(
 def _synth_pptx_multi_images(target: Path, _fixtures_dir: Path) -> SynthResult:
     """A02：一张 slide 六张不同文字图片（rId1..rId6），供两次连跑字节比对."""
     try:
-        media = {f"image{index}.png": _token_png(f"IMG-{index:02d}-TOKEN") for index in range(1, 7)}
-        pics = "".join(_pic_xml(index, f"rId{index}", index - 1) for index in range(1, 7))
-        rels = [(f"rId{index}", f"image{index}.png") for index in range(1, 7)]
+        indexes = range(1, A02_IMAGE_COUNT + 1)
+        media = {f"image{index}.png": _token_png(A02_IMAGE_TOKENS[index - 1]) for index in indexes}
+        pics = "".join(_pic_xml(index, f"rId{index}", index - 1) for index in indexes)
+        rels = [(f"rId{index}", f"image{index}.png") for index in indexes]
         _build_pptx(target / "pptx_multi_images.pptx", _slide_xml(pics), rels, media)
     except (OSError, ValueError, zipfile.BadZipFile) as exc:
         return SynthResult([], f"构造 A02 PPTX 失败：{exc}")
@@ -1057,7 +1101,7 @@ ITEMS: tuple[Item, ...] = (
     Item(
         "A18",
         "A",
-        "JP2、J2K、J2C、JPX、JPM、MJ2：特殊图片解码与失败诊断",
+        "JP2、J2K、J2C：固定清单支持；JPX、JPM、MJ2 明确不支持",
         _MATRIX_COMMON,
         (
             "matrix/jpeg2000/jp2.jp2",
@@ -1067,7 +1111,7 @@ ITEMS: tuple[Item, ...] = (
             "matrix/jpeg2000/jpm.jpm",
             "matrix/jpeg2000/mj2.mj2",
         ),
-        "需新增：jp2/j2k 可由带 openjpeg 的 Pillow 生成；其余需 OpenJPEG opj_compress 或公开语料（openjpeg-data）",
+        "固定 Xberg 清单仅声明 jp2/j2k/j2c；jpx/jpm/mj2 必须作为 unsupported 明确排除，不扩大产品支持集合",
         needs_assets="xberg",
     ),
     Item(
@@ -1141,7 +1185,7 @@ ITEMS: tuple[Item, ...] = (
     Item(
         "A26",
         "A",
-        "所有最终产物：每顶层输入一份 Markdown、不含 Base64、不生成图片文件、源文件不变",
+        "所有最终产物：每顶层输入一份 Markdown、保留并完整引用同名 _media、不含 Base64、源文件不变",
         _MATRIX_COMMON,
         ("test_hello_world.png", "sample_with_images.docx", "video-to-notes-intro-zh.mp4"),
         AVAILABLE,
@@ -1381,8 +1425,20 @@ def _connect_window(pid: int) -> tuple[Application, WindowSpecification]:
 
 
 def _click_button(window: WindowSpecification, title: str) -> None:
-    button = window.child_window(title=title, control_type="Button")
-    _ = button.wait("visible enabled", timeout=GUI_WINDOW_TIMEOUT)
+    deadline = time.time() + GUI_WINDOW_TIMEOUT
+    button: BaseWrapper | None = None
+    while time.time() < deadline:
+        candidates = unique_visible_buttons(window, title)
+        for candidate in candidates:
+            if candidate.is_visible() and candidate.is_enabled():
+                button = candidate
+                break
+        if button is not None:
+            break
+        time.sleep(0.2)
+    if button is None:
+        message = f"按钮「{title}」未找到唯一可见可用控件"
+        raise RuntimeError(message)
     # 优先 UIA Invoke 模式：不移动真实鼠标、不依赖窗口前台（合成鼠标点击在
     # 窗口失去前台时会落到别的窗口，实测导致「开始转换」未生效而超时）。
     with contextlib.suppress(*TRANSIENT_ERRORS):
@@ -1400,8 +1456,9 @@ def _click_button(window: WindowSpecification, title: str) -> None:
 def _button_state(window: WindowSpecification, title: str) -> tuple[bool, bool]:
     """返回（可见, 可用）；元素未解析按（False, False）处理，由调用方轮询."""
     try:
-        button = window.child_window(title=title, control_type="Button")
-        return button.exists() and button.is_visible(), bool(button.is_enabled())
+        candidates = unique_visible_buttons(window, title)
+        visible = [button for button in candidates if button.is_visible()]
+        return bool(visible), bool(visible and visible[0].is_enabled())
     except TRANSIENT_ERRORS:
         return False, False
 
@@ -1416,10 +1473,33 @@ def _wait_start_ready(window: WindowSpecification, timeout: float) -> bool:
 
 
 def _convert_directory_rows(window: WindowSpecification) -> list[BaseWrapper]:
-    """转 Markdown 页自上而下的两行「选择目录…」按钮：输入 / 输出（Xberg 目录在设置页，XB-20）."""
-    buttons = [b for b in window.descendants(control_type="Button") if (b.window_text() or "") == "选择目录…"]
-    buttons.sort(key=lambda b: b.rectangle().top)
-    return buttons
+    """按可见按钮的物理矩形去重，返回输入/输出两行控件。."""
+    return unique_visible_buttons(window, "选择目录…")
+
+
+def _same_physical_control(left: BaseWrapper, right: BaseWrapper) -> bool:
+    left_rect = left.rectangle()
+    right_rect = right.rectangle()
+    intersection_width = max(0, min(left_rect.right, right_rect.right) - max(left_rect.left, right_rect.left))
+    intersection_height = max(0, min(left_rect.bottom, right_rect.bottom) - max(left_rect.top, right_rect.top))
+    intersection = intersection_width * intersection_height
+    left_area = max(1, (left_rect.right - left_rect.left) * (left_rect.bottom - left_rect.top))
+    right_area = max(1, (right_rect.right - right_rect.left) * (right_rect.bottom - right_rect.top))
+    return intersection / min(left_area, right_area) >= PHYSICAL_OVERLAP_THRESHOLD
+
+
+def unique_visible_buttons(window: WindowSpecification, title: str) -> list[BaseWrapper]:
+    candidates: list[BaseWrapper] = []
+    for button in window.descendants(control_type="Button"):
+        if (button.window_text() or "") != title:
+            continue
+        if not button.is_visible():
+            continue
+        if any(_same_physical_control(button, existing) for existing in candidates):
+            continue
+        candidates.append(button)
+    candidates.sort(key=lambda button: (button.rectangle().top, button.rectangle().left))
+    return candidates
 
 
 def _set_row_edit(window: WindowSpecification, row_button: BaseWrapper, value: str) -> None:
@@ -1446,16 +1526,23 @@ def _window_texts(window: WindowSpecification) -> str:
 
 
 def _request_close(window: WindowSpecification) -> None:
-    """按用户路径点标题栏「关闭」；合成点击落空时兜底 WM_CLOSE（与 gui_smoke 同口径）."""
+    """先发 WM_CLOSE；鼠标兜底前验证前台窗口 PID 属于目标 GUI。."""
+    handle = window.handle
+    target_pid = win32process.GetWindowThreadProcessId(handle)[1]
+    win32gui.PostMessage(handle, win32con.WM_CLOSE, 0, 0)
+    time.sleep(0.3)
     with contextlib.suppress(*TRANSIENT_ERRORS):
-        for button in window.descendants(control_type="Button"):
-            if (button.window_text() or "") == "关闭":
-                _ = window.set_focus()
-                button.click_input()
-                time.sleep(0.3)
-                return
-    with contextlib.suppress(*TRANSIENT_ERRORS):
-        win32gui.PostMessage(window.handle, win32con.WM_CLOSE, 0, 0)
+        if not window.exists():
+            return
+    foreground = win32gui.GetForegroundWindow()
+    foreground_pid = win32process.GetWindowThreadProcessId(foreground)[1]
+    if foreground_pid != target_pid:
+        message = "关闭兜底拒绝操作：前台窗口 PID 不属于被测 GUI"
+        raise RuntimeError(message)
+    for button in unique_visible_buttons(window, "关闭"):
+        button.click_input()
+        time.sleep(0.3)
+        return
 
 
 def _terminate(proc: subprocess.Popen[bytes]) -> None:
@@ -1551,7 +1638,26 @@ def drive_conversion(exe: Path, input_dir: Path, output_dir: Path, *, stop_after
 
 DATA_URI_PATTERN = re.compile(r"data:image/[a-zA-Z0-9.+-]+;base64")
 TEMP_LEFTOVER_MARKER = ".jch-markdown-"
-IMAGE_SUFFIXES = (".png", ".jpg", ".jpeg", ".gif", ".tif", ".tiff", ".bmp", ".webp", ".jp2", ".j2k")
+IMAGE_SUFFIXES = (
+    ".png",
+    ".jpg",
+    ".jpeg",
+    ".gif",
+    ".tif",
+    ".tiff",
+    ".bmp",
+    ".webp",
+    ".jp2",
+    ".j2k",
+    ".j2c",
+    ".jpx",
+    ".jpm",
+    ".mj2",
+    ".svg",
+)
+MARKDOWN_IMAGE_LINK_PATTERN = re.compile(r"!\[[^\]\n]*\]\(\s*(?P<target><[^>\n]+>|[^)\n]+?)\s*\)")
+MARKDOWN_FENCE_PATTERN = re.compile(r"(?s)(```.*?```|~~~.*?~~~)")
+MARKDOWN_INLINE_CODE_PATTERN = re.compile(r"(?<!`)`+(?!`)[^`\n]+`+(?!`)")
 
 
 def _expected_markdown_names(files: list[str]) -> list[str]:
@@ -1563,19 +1669,71 @@ def _expected_markdown_names(files: list[str]) -> list[str]:
     return names
 
 
+def _collect_media_references(markdown: Path, output_dir: Path) -> tuple[list[str], set[Path]]:
+    """收集一份 Markdown 中的实际图片链接及其问题。."""
+    problems: list[str] = []
+    referenced: set[Path] = set()
+    text = markdown.read_text(encoding="utf-8", errors="replace")
+    rendered = MARKDOWN_FENCE_PATTERN.sub("", text)
+    rendered = MARKDOWN_INLINE_CODE_PATTERN.sub("", rendered)
+    for match in MARKDOWN_IMAGE_LINK_PATTERN.finditer(rendered):
+        raw = match.group("target").strip()
+        raw = raw[1:-1] if raw.startswith("<") and raw.endswith(">") else raw.split(maxsplit=1)[0]
+        if not raw or raw.startswith("#") or "://" in raw:
+            continue
+        if raw.startswith("//") and ntpath.isabs(raw.replace("/", "\\")):
+            problems.append(f"图片引用逃出输出目录：{markdown.relative_to(output_dir)} -> {raw}")
+            continue
+        target = (markdown.parent / Path(raw.replace("/", "\\"))).resolve()
+        try:
+            _ = target.relative_to(output_dir.resolve())
+        except ValueError:
+            problems.append(f"图片引用逃出输出目录：{markdown.relative_to(output_dir)} -> {raw}")
+            continue
+        if not target.is_file():
+            problems.append(f"图片引用目标不存在：{markdown.relative_to(output_dir)} -> {raw}")
+        else:
+            referenced.add(target)
+    return problems, referenced
+
+
+def _verify_media_references(output_dir: Path) -> list[str]:
+    """验证 T-14 图片落盘位置、正文引用和引用目标的一致性。."""
+    problems: list[str] = []
+    referenced: set[Path] = set()
+    for markdown in output_dir.rglob("*.md"):
+        if markdown.is_file():
+            markdown_problems, markdown_references = _collect_media_references(markdown, output_dir)
+            problems.extend(markdown_problems)
+            referenced.update(markdown_references)
+    output_root = output_dir.resolve()
+    for image in output_dir.rglob("*"):
+        if not image.is_file():
+            continue
+        is_media_file = image.parent.name.endswith("_media")
+        if image.suffix.lower() not in IMAGE_SUFFIXES and not is_media_file:
+            continue
+        relative = image.relative_to(output_dir)
+        if not image.parent.name.endswith("_media"):
+            problems.append(f"图片未放入产物媒体目录：{relative}")
+        if image.resolve() not in referenced:
+            problems.append(f"图片没有正文引用：{relative}")
+        try:
+            _ = image.resolve().relative_to(output_root)
+        except ValueError:
+            problems.append(f"图片路径逃出输出目录：{relative}")
+    return problems
+
+
 def verify_common_postconditions(source_dir: Path, output_dir: Path, sources: dict[Path, str]) -> list[str]:
-    """附录 A 第 26 项横切断言：无 Base64、无图片文件、源不变、无临时残留."""
+    """附录 A 第 26 项横切断言：媒体引用完整、无 Base64、源不变、无临时残留."""
     problems = [
         f"源文件被改动：{relative}"
         for relative, digest in sources.items()
         if not (source_dir / relative).is_file() or _file_digest(source_dir / relative) != digest
     ]
     problems.extend(f"输出残留临时文件：{leftover}" for leftover in output_dir.rglob(f"*{TEMP_LEFTOVER_MARKER}*"))
-    problems.extend(
-        f"输出出现图片文件：{image.relative_to(output_dir)}"
-        for image in output_dir.rglob("*")
-        if image.is_file() and image.suffix.lower() in IMAGE_SUFFIXES
-    )
+    problems.extend(_verify_media_references(output_dir))
     problems.extend(
         f"结果含 Base64 图片：{markdown.relative_to(output_dir)}"
         for markdown in output_dir.rglob("*.md")
@@ -1869,6 +2027,18 @@ def _assess_conversion(
     if problems:
         return Outcome(STATUS_FAILED, "；".join(problems[:5]), details)
     if not stop_mode:
+        if item.item_id == "A26":
+            if len(produced) != len(expected) or set(produced) != set(expected):
+                return Outcome(
+                    STATUS_FAILED,
+                    f"A26 顶层输入与 Markdown 产物未一一对应：预期 {expected}，实得 {produced}",
+                    details,
+                )
+            empty = [
+                path.name for path in run.outputs if not path.read_text(encoding="utf-8", errors="replace").strip()
+            ]
+            if empty:
+                return Outcome(STATUS_FAILED, f"A26 产物正文为空：{empty}", details)
         # 反假 PASS：run.error 只覆盖驱动链路失败；「任务运行过但整体转换失败、
         # 零产物」此前只写进 details 仍记 PASS。异常/损坏夹具按 T-25 以失败诊断
         # 收场、不产出 md 属预期，故不要求产物数等于输入数，只要求：产物是输入
@@ -1903,12 +2073,15 @@ def _run_matrix(item: Item, ctx: Context) -> Outcome:
     blocked = _synth_precondition(item)
     if blocked:
         return Outcome(STATUS_NOT_RUN, blocked)
-    if item.item_id == "A25":
-        return _run_matrix_a25(item, ctx)
-    if item.item_id == "A02":
-        return _run_matrix_a02(item, ctx)
-    if item.item_id == "A24":
-        return _run_matrix_a24(item, ctx)
+    special_handlers = {
+        "A25": _run_matrix_a25,
+        "A02": _run_matrix_a02,
+        "A24": _run_matrix_a24,
+        "A18": _run_matrix_a18,
+    }
+    handler = special_handlers.get(item.item_id)
+    if handler is not None:
+        return handler(item, ctx)
     if item.item_id in _CONTENT_ASSERTS:
         return _run_content_assert(item, ctx, **_CONTENT_ASSERTS[item.item_id])
     return _run_conversion_item(item, ctx, None)
@@ -1952,6 +2125,20 @@ def _run_content_assert(
     return Outcome(STATUS_OK, details=details)
 
 
+def _verify_a02_content(output: Path) -> str | None:
+    """核对 A02 恰有合成图片及其正文 token，拒绝空正文或额外媒体."""
+    media_files = [path for path in output.rglob("*") if path.is_file() and path.parent.name.endswith("_media")]
+    if len(media_files) != A02_IMAGE_COUNT:
+        return f"A02 应保留 {A02_IMAGE_COUNT} 张合成图片，实际媒体文件 {len(media_files)} 项"
+    text = "\n".join(path.read_text(encoding="utf-8", errors="replace") for path in sorted(output.rglob("*.md")))
+    if not text.strip():
+        return "A02 转换产物正文为空"
+    missing = [token for token in A02_IMAGE_TOKENS if token not in text]
+    if missing:
+        return f"A02 正文缺少合成图片内容：{missing}"
+    return None
+
+
 def _run_matrix_a02(item: Item, ctx: Context) -> Outcome:
     first = _run_conversion_item(item, ctx, None, tag_suffix="first")
     if first.status != STATUS_OK:
@@ -1968,7 +2155,13 @@ def _run_matrix_a02(item: Item, ctx: Context) -> Outcome:
     for name in left_files:
         if (left / name).read_bytes() != (right / name).read_bytes():
             return Outcome(STATUS_FAILED, f"两次转换内容不稳定：{name}")
-    return Outcome(STATUS_OK, details=["两次转换产物逐字节一致"])
+    problem = _verify_a02_content(left)
+    if problem is not None:
+        return Outcome(STATUS_FAILED, problem)
+    return Outcome(
+        STATUS_OK,
+        details=[f"两次转换产物逐字节一致，且包含 {A02_IMAGE_COUNT} 张合成图片正文内容"],
+    )
 
 
 def _verify_a24_outputs() -> str | None:
@@ -2000,6 +2193,43 @@ def _run_matrix_a24(item: Item, ctx: Context) -> Outcome:
     return Outcome(STATUS_OK, details=["真实中文转录、时间戳结构、损坏音轨失败隔离全部符合"])
 
 
+def _run_matrix_a18(item: Item, ctx: Context) -> Outcome:
+    """A18：按 T-08 固定清单验证支持边界，不把 JPX/JPM/MJ2 冒称为支持。."""
+    fixture_error = _fixture_precondition(item, ctx.fixtures_dir)
+    if fixture_error is not None:
+        return Outcome(STATUS_NOT_RUN, fixture_error)
+    fixed, error = _fixed_format_extensions()
+    if error is not None:
+        return Outcome(STATUS_NOT_RUN, error)
+    unsupported_advertised = sorted(set(A18_UNSUPPORTED_EXTENSIONS) & fixed)
+    if unsupported_advertised:
+        return Outcome(
+            STATUS_FAILED,
+            f"固定格式清单错误声明不支持格式为可用：{unsupported_advertised}",
+        )
+    missing_supported = sorted(set(A18_SUPPORTED_EXTENSIONS) - fixed)
+    if missing_supported:
+        return Outcome(
+            STATUS_NOT_RUN,
+            f"固定格式清单未声明 A18 支持格式：{missing_supported}；不据此声称支持",
+        )
+    supported_fixtures = tuple(
+        name for name in item.fixtures if Path(name).suffix.lstrip(".").lower() in A18_SUPPORTED_EXTENSIONS
+    )
+    supported_item = dataclasses.replace(item, fixtures=supported_fixtures)
+    outcome = _run_conversion_item(supported_item, ctx, None, tag_suffix="supported")
+    if outcome.status != STATUS_OK:
+        return outcome
+    unsupported = ", ".join(f".{extension}" for extension in A18_UNSUPPORTED_EXTENSIONS)
+    return Outcome(
+        STATUS_OK,
+        details=[
+            *outcome.details,
+            f"固定清单明确 unsupported：{unsupported}；未将其送入产品转换支持集合",
+        ],
+    )
+
+
 def _run_matrix_a25(item: Item, ctx: Context) -> Outcome:
     if ctx.assets.xberg_exe is None:
         return Outcome(STATUS_NOT_RUN, f"资产未就绪。获取方式：{ctx.assets.acquire_hint()}")
@@ -2029,13 +2259,17 @@ def _run_gui_ref(item: Item, ctx: Context) -> Outcome:
     pending = _asset_precondition(ctx, item)
     if pending:
         return Outcome(STATUS_NOT_RUN, pending)
-    env_extra: dict[str, str] | None = None
-    if item.stage == "S5" and not os.environ.get("JCHTOOLS_S5_MEDIA"):
-        # S5 需要真实媒体样本以观察运行态；默认用夹具目录自带的真实中文视频。
+    env_extra: dict[str, str] = {}
+    if item.stage in ("S6", "S7") and ctx.assets.runtime_dir is not None:
+        # S6/S7 各自使用隔离 SQLite；目录环境变量必须来自同一份已探测配置，
+        # 不能让固定提示路径与 GUI 实际保存的目录分叉。
+        env_extra["JCHTOOLS_SMOKE_XBERG_DIR"] = str(ctx.assets.runtime_dir)
+    if item.stage in ("S5", "S14") and not os.environ.get("JCHTOOLS_S5_MEDIA"):
+        # S5/S14 需要真实媒体样本观察运行态；默认使用已有夹具中的真实视频。
         media = ctx.fixtures_dir / "video-to-notes-intro-zh.mp4"
         if media.is_file():
-            env_extra = {"JCHTOOLS_S5_MEDIA": str(media)}
-    return _delegate_stage(item.stage, target, env_extra)
+            env_extra["JCHTOOLS_S5_MEDIA"] = str(media)
+    return _delegate_stage(item.stage, target, env_extra or None)
 
 
 def _run_c01_installed_scan(item: Item, ctx: Context) -> Outcome:
@@ -2071,8 +2305,8 @@ def _run_c03_unconfigured(item: Item, ctx: Context) -> Outcome:
     target, blocked = _resolve_gui(ctx)
     if blocked is not None or target is None:
         return Outcome(STATUS_NOT_RUN, blocked or "被测 GUI 缺失")
-    # JCHTOOLS_MARKDOWN_TEST_ASSET_ROOT 仅 debug 构建生效（src/markdown_assets.rs 的
-    # cfg!(debug_assertions) 门）：release EXE 会读到真实用户配置，本项结论随之无效。
+    # 此入口由 acceptance.ps1 构建带 test-hooks 的隔离测试 EXE。
+    # 默认生产构建不接受这些环境覆盖，不能用于本项隔离验收。
     if "target" not in target.parts or "debug" not in target.parts:
         message = "本项要求 debug 构建被测 EXE（release 忽略资产根覆盖环境变量，会读到真实用户配置）"
         return Outcome(STATUS_NOT_RUN, message)
@@ -2082,14 +2316,17 @@ def _run_c03_unconfigured(item: Item, ctx: Context) -> Outcome:
     scratch_assets = SCRATCH_ROOT / "c03-asset-root"
     shutil.rmtree(scratch_assets, ignore_errors=True)
     _ = scratch_assets.mkdir(parents=True)
-    env = {"JCHTOOLS_MARKDOWN_TEST_ASSET_ROOT": str(scratch_assets)}
+    env = {
+        "JCHTOOLS_MARKDOWN_TEST_ASSET_ROOT": str(scratch_assets),
+        "JCHTOOLS_TEST_STATE_DIR": str(scratch_assets / "app-settings"),
+    }
     result = _delegate_stage("S1", target, env_extra=env)
     if result.status != STATUS_OK:
         result.details.insert(0, f"{item.item_id} 未配置状态下的 S1 启动未通过")
         return result
     downloaded = [str(path.relative_to(scratch_assets)) for path in scratch_assets.rglob("*")]
 
-    # XB-18 应用设置库的隔离落位（debug 下 JCHTOOLS_MARKDOWN_TEST_ASSET_ROOT 同时
+    # XB-18 应用设置库的隔离落位（test-hooks 下 JCHTOOLS_MARKDOWN_TEST_ASSET_ROOT 同时
     # 隔离设置目录，见 src/xberg_settings.rs state_dir），首启创建属正常行为；本项
     # 断言的是「不自动下载转换资产」。豁免必须收窄到设置库与代理锁文件本身：
     # download_runtime 的下载基目录恰为 state_dir()/xberg-downloads
@@ -2311,6 +2548,31 @@ class _Arguments(argparse.Namespace):
     installed_root: str = ""
     fixtures: str = ""
     json_report: str = ""
+    seed_state: str = ""
+    seed_xberg: str = ""
+
+
+def _seed_isolated_state(state_root: Path, xberg_root: Path) -> None:
+    """为开发验收 GUI 写入与驱动同源的隔离 Xberg 配置。."""
+    if not state_root.is_absolute() or not xberg_root.is_absolute():
+        message = "隔离状态目录与 Xberg 目录必须是绝对路径"
+        raise ValueError(message)
+    database = state_root / "config.sqlite3"
+    schema = ROOT / "src" / "app_settings.sql"
+    state_root.mkdir(parents=True, exist_ok=True)
+    with contextlib.closing(sqlite3.connect(database)) as connection:
+        _ = connection.executescript(schema.read_text(encoding="utf-8"))
+        update_sql = """INSERT INTO app_settings(key,value) VALUES('xberg_directory',?) ON CONFLICT(key)
+DO UPDATE SET value=excluded.value"""
+        _ = connection.execute(update_sql, (str(xberg_root),))
+        custom_sql = """INSERT INTO app_settings(key,value) VALUES('xberg_custom_directory',?) ON CONFLICT(key)
+DO UPDATE SET value=excluded.value"""
+        _ = connection.execute(custom_sql, (str(xberg_root),))
+        source_sql = """INSERT INTO app_settings(key,value) VALUES('xberg_source','custom') ON CONFLICT(key)
+DO UPDATE SET value=excluded.value"""
+        _ = connection.execute(source_sql)
+        _ = connection.execute("DELETE FROM app_settings WHERE key='xberg_downloaded_directory'")
+        connection.commit()
 
 
 def _select_items(selector: str) -> tuple[list[Item], str | None]:
@@ -2338,15 +2600,26 @@ def main() -> int:
     _ = parser.add_argument("--installed-root", default="", help="安装版目录（默认形态为安装器写入的位置）")
     _ = parser.add_argument("--fixtures", default="", help="夹具目录（默认 tests/markdown_fixtures）")
     _ = parser.add_argument("--json", dest="json_report", default="", help="JSON 报告输出路径（留档）")
+    _ = parser.add_argument("--seed-state", default="", help=argparse.SUPPRESS)
+    _ = parser.add_argument("--seed-xberg", default="", help=argparse.SUPPRESS)
     args = parser.parse_args(namespace=_Arguments())
+    if bool(args.seed_state) != bool(args.seed_xberg):
+        parser.error("--seed-state 与 --seed-xberg 必须成对提供")
+    if args.seed_state:
+        _seed_isolated_state(Path(args.seed_state).resolve(), Path(args.seed_xberg).resolve())
+        return 0
     if args.list_only:
         return print_list()
     selected, error = _select_items(args.only)
     if error is not None:
         print(error)
         return 3
+    discovered_gui = os.environ.get("JCHTOOLS_TEST_GUI_EXE")
+    if not discovered_gui:
+        candidate = ROOT / "target" / "debug" / "JchTools.exe"
+        discovered_gui = str(candidate) if candidate.is_file() else ""
     ctx = Context(
-        Path(args.gui_exe).resolve() if args.gui_exe else None,
+        Path(args.gui_exe or discovered_gui).resolve() if (args.gui_exe or discovered_gui) else None,
         Path(args.installed_root).resolve() if args.installed_root else None,
         Path(args.portable_root).resolve() if args.portable_root else None,
         Path(args.fixtures).resolve() if args.fixtures else FIXTURES_DEFAULT,

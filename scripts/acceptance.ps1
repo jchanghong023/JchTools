@@ -57,6 +57,13 @@ function Invoke-Logged {
     $previous = $ErrorActionPreference
     $ErrorActionPreference = 'Continue'
     $saved = @{}
+    # Python 3.13 默认输出 UTF-8；显式固定子进程编码，避免 Windows PowerShell
+    # 按系统代码页解码中文日志后再以乱码写入验收记录。
+    foreach ($key in @('PYTHONIOENCODING','PYTHONUTF8')) {
+        $saved[$key] = [Environment]::GetEnvironmentVariable($key)
+        $encoding = if ($key -eq 'PYTHONIOENCODING') {'utf-8'} else {'1'}
+        Set-Item -Path ("Env:" + $key) -Value $encoding
+    }
     if ($Environment) {foreach ($key in $Environment.Keys) {
         $saved[$key] = [Environment]::GetEnvironmentVariable($key)
         Set-Item -Path ("Env:" + $key) -Value $Environment[$key]
@@ -80,6 +87,14 @@ function Invoke-Logged {
 }
 
 $python = Resolve-Python
+# UT/集成测试自己布置隔离环境。验收提供的真实资产和状态目录只用于
+# 后面的桌面驱动，不能覆盖各测试的 tempfile 配置。
+$testEnvironment = @{}
+foreach ($key in @('JCHTOOLS_TEST_STATE_DIR','JCHTOOLS_TEST_ASSET_ROOT',
+    'JCHTOOLS_MARKDOWN_TEST_ASSET_ROOT','JCHTOOLS_SNAP_OCR_TEST_ASSET_ROOT',
+    'JCHTOOLS_XBERG_INFERENCE_DIR','JCHTOOLS_TEST_BROKER_EXE')) {
+    $testEnvironment[$key] = $null
+}
 
 # 1) 静态检查：结构/配置/回调/SQL/测试基线/界面规则/产品名。
 $null = Invoke-Logged -Name 'static-check' -File $python -Arguments @('scripts/static_check.py')
@@ -87,7 +102,7 @@ $null = Invoke-Logged -Name 'ocr-asset-manifest' -File $python `
     -Arguments @('tests/ocr_fixtures/check_asset_manifest.py')
 
 # 2) 全量测试（默认特性，含 GUI 与属性测试）。
-$testLog = Invoke-Logged -Name 'cargo-test' -File 'cargo' -Arguments @('test','--all-targets')
+$testLog = Invoke-Logged -Name 'cargo-test' -File 'cargo' -Arguments @('test','--all-targets','--features','test-hooks') -Environment $testEnvironment
 
 # 3) binding loop 警告扫描：AGENTS.md 第 4 节禁止布局绑定环。
 #    注意增量构建可能不再重放旧警告；全量告警以干净构建（CI / package 步骤）为准。
@@ -103,9 +118,9 @@ $script:Results.Add('PASS  binding-loop-scan')
 foreach ($component in @('snap-ocr-core','snap-ocr-worker')) {
     $manifest = Join-Path $root "optional/$component/Cargo.toml"
     $null = Invoke-Logged -Name "$component-tests" -File 'cargo' `
-        -Arguments @('test','--manifest-path',$manifest,'--all-targets')
+        -Arguments @('test','--manifest-path',$manifest,'--all-targets','--features','test-hooks') -Environment $testEnvironment
     $null = Invoke-Logged -Name "$component-clippy" -File 'cargo' `
-        -Arguments @('clippy','--manifest-path',$manifest,'--all-targets','--','-D','warnings')
+        -Arguments @('clippy','--manifest-path',$manifest,'--all-targets','--features','test-hooks','--','-D','warnings')
 }
 if ($env:JCHTOOLS_SNAP_OCR_ASSET_ROOT) {
     $ocrManifest = Get-Content -LiteralPath 'resources\snap-ocr-assets.json' -Raw -Encoding UTF8 | ConvertFrom-Json
@@ -123,7 +138,7 @@ if ($WithEngine) {
     }
     if (-not $engine) {throw '-WithEngine 需要真实引擎：设置 JCHTOOLS_TEST_7ZIP，或先运行 scripts/fetch-7zip.ps1'}
     $null = Invoke-Logged -Name 'engine-tests' -File 'cargo' `
-        -Arguments @('test','--test','archive','--','--ignored','--test-threads=1') `
+        -Arguments @('test','--features','test-hooks','--test','archive','--','--ignored','--test-threads=1') `
         -Environment @{JCHTOOLS_TEST_7ZIP = $engine}
 } else {$script:Results.Add('NOT RUN  engine-tests（加 -WithEngine）')}
 
@@ -156,16 +171,72 @@ if ($WithPackage) {
 
 # 7) 转 Markdown 验收承接（可选；F26 / ALL2MARKDOWN 附录 A）。
 if ($WithMarkdownAcceptance) {
+    # Markdown 驱动需要 test-hooks：它只在开发验收 EXE 中启用隔离资产根，
+    # 发布构建与生产运行不启用该 feature。GUI 冒烟使用的生产维度构建已在上方
+    # 完成；这里单独记录一次开发验收构建，避免测试环境变量被生产 EXE 忽略。
+    $null = Invoke-Logged -Name 'markdown-gui-build' -File 'cargo' `
+        -Arguments @('build','--features','test-hooks')
+    $mdAssetRoot = $env:JCHTOOLS_MARKDOWN_TEST_ASSET_ROOT
+    if (-not $mdAssetRoot) {$mdAssetRoot = Join-Path $script:LogDir 'markdown-assets'}
+    $mdStateRoot = $env:JCHTOOLS_TEST_STATE_DIR
+    if (-not $mdStateRoot) {$mdStateRoot = Join-Path $script:LogDir 'markdown-state'}
+    $mdAssetRoot = [IO.Path]::GetFullPath($mdAssetRoot)
+    $mdStateRoot = [IO.Path]::GetFullPath($mdStateRoot)
+    $mdExe = $env:JCHTOOLS_TEST_GUI_EXE
+    if (-not $mdExe) {
+        $mdTargetDir = if ($env:CARGO_TARGET_DIR) {[IO.Path]::GetFullPath($env:CARGO_TARGET_DIR)} else {Join-Path $root 'target'}
+        $mdExe = Join-Path $mdTargetDir 'debug\JchTools.exe'
+    }
+    New-Item -ItemType Directory -Path $mdAssetRoot -Force | Out-Null
+    New-Item -ItemType Directory -Path $mdStateRoot -Force | Out-Null
+    $tmpRoot = [IO.Path]::GetFullPath((Join-Path $root '.tmp'))
+    $tmpPrefix = $tmpRoot.TrimEnd([IO.Path]::DirectorySeparatorChar,[IO.Path]::AltDirectorySeparatorChar) + [IO.Path]::DirectorySeparatorChar
+    if (-not $mdStateRoot.StartsWith($tmpPrefix, [StringComparison]::OrdinalIgnoreCase)) {
+        throw "Markdown 隔离状态目录必须位于仓库 .tmp 下，拒绝写入生产 SQLite：$mdStateRoot"
+    }
+    $testXberg = $env:JCHTOOLS_TEST_XBERG_DIR
+    if ($testXberg) {
+        $testXberg = [IO.Path]::GetFullPath($testXberg)
+        if (-not (Test-Path -LiteralPath (Join-Path $testXberg 'xberg.exe') -PathType Leaf)) {
+            throw "JCHTOOLS_TEST_XBERG_DIR 缺少 xberg.exe：$testXberg"
+        }
+        # 驱动与 GUI 必须读取同一份隔离 SQLite；清除旧 downloaded 指针，避免
+        # 测试引擎通过固定环境变量报 ready、GUI 却读取另一条路径。
+        $null = Invoke-Logged -Name 'markdown-state-seed' -File $python `
+            -Arguments @('scripts/markdown_acceptance.py','--seed-state',$mdStateRoot,'--seed-xberg',$testXberg)
+    }
     $mdArgs = @('scripts/markdown_acceptance.py') + $MarkdownArgs
     Write-Host '==> markdown-acceptance'
     $previous = $ErrorActionPreference
     $ErrorActionPreference = 'Continue'
-    try {$mdOutput = & $python @mdArgs 2>&1} finally {$ErrorActionPreference = $previous}
+    $savedMarkdownEnv = @{}
+    foreach ($key in @('JCHTOOLS_MARKDOWN_TEST_ASSET_ROOT','JCHTOOLS_TEST_ASSET_ROOT','JCHTOOLS_TEST_STATE_DIR','JCHTOOLS_TEST_GUI_EXE')) {
+        $savedMarkdownEnv[$key] = [Environment]::GetEnvironmentVariable($key)
+    }
+    try {
+        Set-Item -Path Env:JCHTOOLS_MARKDOWN_TEST_ASSET_ROOT -Value $mdAssetRoot
+        Set-Item -Path Env:JCHTOOLS_TEST_ASSET_ROOT -Value $mdAssetRoot
+        Set-Item -Path Env:JCHTOOLS_TEST_STATE_DIR -Value $mdStateRoot
+        Set-Item -Path Env:JCHTOOLS_TEST_GUI_EXE -Value $mdExe
+        $mdOutput = & $python @mdArgs 2>&1
+    } finally {
+        foreach ($key in $savedMarkdownEnv.Keys) {
+            if ($null -eq $savedMarkdownEnv[$key]) {Remove-Item ("Env:" + $key) -ErrorAction SilentlyContinue}
+            else {Set-Item -Path ("Env:" + $key) -Value $savedMarkdownEnv[$key]}
+        }
+        $ErrorActionPreference = $previous
+    }
     $mdCode = $LASTEXITCODE
     $mdLog = Join-Path $script:LogDir 'markdown-acceptance.log'
     $mdOutput | ForEach-Object {$_.ToString()} | Set-Content -LiteralPath $mdLog -Encoding UTF8
     if ($mdCode -eq 0) {
-        $script:Results.Add('PASS  markdown-acceptance')
+        # 驱动器可能只有部分条目执行；保留逐项状态，不把跳过当成全覆盖通过。
+        $notRun = @($mdOutput | Where-Object { $_.ToString() -match 'NOT RUN' })
+        if ($notRun.Count -gt 0) {
+            $script:Results.Add('PARTIAL  markdown-acceptance（已执行项通过，仍有 NOT RUN；详见 markdown-acceptance.log）')
+        } else {
+            $script:Results.Add('PASS  markdown-acceptance')
+        }
     } elseif ($mdCode -eq 2) {
         # 2 = 全部条目 NOT RUN（缺真实资产/被测物）：如实呈现，不当作通过，也不阻塞其余阶段。
         $script:Results.Add('NOT RUN  markdown-acceptance（全部条目缺资产/被测物；经 -MarkdownArgs 提供后重跑）')

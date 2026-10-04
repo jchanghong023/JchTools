@@ -7,11 +7,13 @@
               说明每个用例与预期行为。
     ocr-compare  从已校验的原模型和字体生成冻结 Python 版的独立测试 bundle，
                  只写入 .tmp/ocr-compare-bundle/。
+    workspace  创建验证工作目录，不清空既有内容；供日志、修复前反证和隔离资产使用。
 
 用法：
     python scripts/make_tmp.py testdata [--git] [--destination <专门测试目录>] [--force]
     python scripts/make_tmp.py ocr-compare --model-root <原模型目录> --font <固定字体文件> [--force]
     python scripts/make_tmp.py clean    # 清空整个 .tmp/ 释放磁盘；测试完成后执行，防止无限增长
+    python scripts/make_tmp.py workspace [--destination <.tmp 内目录>]
 
 clean 只删除仓库内 `.tmp/` 的内容，绝不触碰仓库其他位置与仓库外目录。
 """
@@ -984,13 +986,13 @@ def main() -> int:
     parser = argparse.ArgumentParser(description="JchTools 临时目录工厂：生成与清理 .tmp/ 内容。")
     _ = parser.add_argument(
         "kind",
-        choices=["testdata", "ocr-compare", "clean"],
-        help="testdata=生成手工测试数据集；ocr-compare=生成旧版 OCR 对照 bundle；clean=清空 .tmp/",
+        choices=["testdata", "ocr-compare", "workspace", "clean"],
+        help="testdata=生成测试数据；ocr-compare=生成旧 OCR 对照；workspace=创建隔离目录；clean=清空 .tmp/",
     )
     _ = parser.add_argument(
         "--destination",
         default=None,
-        help="testdata 专用：另指定测试目录（默认 <repo>/.tmp/testdata，会先清空）",
+        help="testdata/workspace：另指定 .tmp 内的目录；testdata 会先清空，workspace 保留既有内容",
     )
     _ = parser.add_argument("--git", action="store_true", help="testdata 专用：建立 git 基线并生成 恢复.ps1")
     _ = parser.add_argument("--model-root", help="ocr-compare 专用：含 det/rec 目录的固定原模型根目录")
@@ -1009,6 +1011,15 @@ def main() -> int:
         return clean_tmp(repo_root)
     if kind == "ocr-compare":
         return build_ocr_compare_bundle(repo_root, arguments.model_root, arguments.font, force=force)
+    if kind == "workspace":
+        root = Path(destination) if destination else repo_root / ".tmp" / "validation"
+        guard_destination(root)
+        root = root.expanduser().resolve()
+        if not root.is_relative_to(repo_root / ".tmp"):
+            fail("验证工作目录必须在仓库 .tmp/ 内")
+        root.mkdir(parents=True, exist_ok=True)
+        print(f"workspace: {root}")
+        return 0
     root = Path(destination) if destination else repo_root / ".tmp" / "testdata"
     guard_destination(root)
     # guard 内部用 resolve() 检查，但构建全程用的是原始路径；相对路径在脚本切换

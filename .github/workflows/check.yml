@@ -39,6 +39,21 @@ jobs:
       - name: Install Python script dependencies
         shell: pwsh
         run: python -m pip install --quiet -r scripts/requirements-dev.txt
+      # F26：转 Markdown 验收入口默认执行；CI 未提供真实 Xberg/GUI 时必须如实为
+      # NOT RUN，不把缺资产环境伪报为通过。提供资产与被测物时由同一入口执行实际条目。
+      - name: Markdown acceptance entry
+        shell: pwsh
+        run: |
+          python scripts/markdown_acceptance.py
+          $code = $LASTEXITCODE
+          if ($code -eq 2) {
+            Write-Host 'Markdown acceptance: NOT RUN（缺少真实 Xberg、GUI 或其他验收资产）'
+            exit 0
+          }
+          if ($code -ne 0) { throw "Markdown acceptance failed: $code" }
+      - name: Markdown acceptance postcondition unit tests
+        shell: pwsh
+        run: python -m unittest scripts.test_markdown_acceptance
       - name: Static checks
         shell: pwsh
         run: python scripts/static_check.py
@@ -55,7 +70,7 @@ jobs:
           # 输出，-D warnings 管不住它，须显式扫描编译日志（与 acceptance.ps1 /
           # fastcheck 同口径；增量缓存不重放旧警告，故挂在首个冷编译步骤上）。
           $log = Join-Path $env:RUNNER_TEMP 'clippy-default.log'
-          cargo clippy --all-targets -- -D warnings *> $log
+          cargo clippy --all-targets --features test-hooks -- -D warnings *> $log
           Get-Content -LiteralPath $log
           if ($LASTEXITCODE -ne 0) { throw "clippy (default features) failed: $LASTEXITCODE" }
           $hits = @(Select-String -LiteralPath $log -Pattern 'binding loop' -SimpleMatch)
@@ -65,24 +80,24 @@ jobs:
           }
       - name: Clippy zero-warning gate (no default features)
         shell: pwsh
-        run: cargo clippy --all-targets --no-default-features -- -D warnings
+        run: cargo clippy --all-targets --no-default-features --features test-hooks -- -D warnings
       - name: Core tests (no default features)
         shell: pwsh
-        run: cargo test --all-targets --no-default-features
+        run: cargo test --all-targets --no-default-features --features test-hooks
       # F23/XB-12：旧 markdown-media-worker 已随媒体转录迁移到 Xberg 推理组件退役。
       # 截图 OCR 纯逻辑核心与 worker（workspace 成员）显式门——可选分发不等于可选验证。
       - name: Snap OCR core tests (optional/snap-ocr-core)
         shell: pwsh
-        run: cargo test --manifest-path optional/snap-ocr-core/Cargo.toml --all-targets
+        run: cargo test --manifest-path optional/snap-ocr-core/Cargo.toml --all-targets --features test-hooks
       - name: Snap OCR core clippy (optional/snap-ocr-core)
         shell: pwsh
-        run: cargo clippy --manifest-path optional/snap-ocr-core/Cargo.toml --all-targets -- -D warnings
+        run: cargo clippy --manifest-path optional/snap-ocr-core/Cargo.toml --all-targets --features test-hooks -- -D warnings
       - name: Snap OCR worker tests (optional/snap-ocr-worker)
         shell: pwsh
-        run: cargo test --manifest-path optional/snap-ocr-worker/Cargo.toml --all-targets
+        run: cargo test --manifest-path optional/snap-ocr-worker/Cargo.toml --all-targets --features test-hooks
       - name: Snap OCR worker clippy (optional/snap-ocr-worker)
         shell: pwsh
-        run: cargo clippy --manifest-path optional/snap-ocr-worker/Cargo.toml --all-targets -- -D warnings
+        run: cargo clippy --manifest-path optional/snap-ocr-worker/Cargo.toml --all-targets --features test-hooks -- -D warnings
       # rustdoc 零告警门禁：与本地质量门同一规则（RUSTDOCFLAGS=-D warnings）。
       - name: Rustdoc zero-warning gate
         shell: pwsh

@@ -6,7 +6,7 @@
 
 1. 通读本文件与固定需求目录 `docs/requirements/` 中的全部需求文档；该目录是产品需求的唯一权威位置。其余说明文档仅供参考，不得用来覆盖需求。
 2. 明确任务类型：新需求 → 先按第 7 节协议转成合同条目并经用户确认；缺陷修复 → 先写能在修复前失败的回归测试；其余变更 → 确认不违反第 9 节可信基隔离。
-3. 动工前记录基线：`cargo test` 与 `python scripts/static_check.py` 的当前状态。
+3. 动工前记录基线：`cargo test --features test-hooks` 与 `python scripts/static_check.py` 的当前状态。
 4. 编码遵守第 4 节实现约定与合同相应分区；测试数据一律经 `python scripts/make_tmp.py` 生成。
 5. 完成后按 3.3 验收矩阵执行相应层级验证；需要 CI 结论时按 3.4 跑 slowtest（`check.yml` 现仅手动触发，slowtest 是它的唯一自动入口），等 CI 转绿后按第 7 节格式报告（结论先行 + 命令/退出码/关键输出 + CI run 链接）。
 6. 收尾：`python scripts/make_tmp.py clean` 清空 `.tmp/`，按第 8 节与 3.2 提交纪律写提交信息。
@@ -40,7 +40,7 @@
 cargo run --bin JchTools   # 启动 GUI（默认 gui 特性）
 cargo build                # 开发构建（GUI）
 cargo build --release      # 发布构建
-cargo test                 # 单元与集成测试（真实引擎用例默认 #[ignore]）
+cargo test --features test-hooks                 # 单元与集成测试（真实引擎用例默认 #[ignore]）
 python scripts/static_check.py      # 结构/配置/回调/SQL/测试基线/界面规则静态检查
 python scripts/test_gate.py fastcheck   # 三级测试门之快速门（AI 可自主，≤60s 硬超时；其余两级见 3.4）
 powershell -NoProfile -File .\scripts\acceptance.ps1 -WithEngine   # 单命令验收（见 3.2）
@@ -50,9 +50,11 @@ powershell -NoProfile -File .\scripts\package-windows.ps1   # 生成含 7-Zip �
 手工测试集：`python scripts/make_tmp.py testdata`（默认自动生成到 `.tmp/testdata/`，会先清空该目录；也可 `--destination` 另指专门测试目录，仓库内 `.tmp` 之外的位置会被拒绝）。普通处理验收不使用 `--git`：根目录含 `.git` 时按 H-06 拒绝整次处理；`--git` 仅可用于验证该拒绝行为。需要还原普通数据集时重新运行生成命令；测试完成后用 `python scripts/make_tmp.py clean` 清理。
 
 - Windows 构建机需要 Rust `x86_64-pc-windows-msvc` + VS C++ Build Tools + Windows SDK（`rc.exe` 用于把 `resources/app.ico` 嵌入 EXE）。
-- 提交前 `SHOULD` 至少跑 `cargo test` 与 `python scripts/static_check.py`，并确认构建输出没有新增 `binding loop` 警告。
+- 提交前 `SHOULD` 至少跑 `cargo test --features test-hooks` 与 `python scripts/static_check.py`，并确认构建输出没有新增 `binding loop` 警告。
 - **本机 Xberg 测试引擎（2026-10-03 用户规则，以本次口径为准）**：测试只用最新版本；最新版本已存在时不重复下载；不存在时下载最新版并覆盖老引擎目录。引擎目录固定为 `C:\Users\jiang\Documents\xberg-test\xberg-cli-x86_64-pc-windows-msvc`（现内容即最新发布 `v2026.10.2-0920-run54.1`；旧协议兼容由 `tests/xberg_legacy_protocol.rs` 合成引擎锁定，不依赖本地旧发布物）。（无执法点 · 软法）
 - **Xberg 源码参照（E:\xberg）**：xberg 接口的事实参照以本机 `E:\xberg` 源码为准，仅在必要时作权威接口文档查阅（2026-10-03 用户确认）。该源码 `MUST NOT` 编译、构建或产出任何测试/发布物——测试只用上一条的固定引擎目录，产品只用用户配置目录（与 O-31 的「源仓库只读 oracle」边界一致）。（无执法点 · 软法）
+
+> 隔离测试显式启用 `test-hooks`；该特性不在默认特性中，生产与打包构建不启用。它允许测试目录和测试代理覆盖；`debug-assertions` 本身不再授予这些覆盖。测试门同时保持生产构建维度。临时验证工作目录可用 `python scripts/make_tmp.py workspace --destination .tmp/validation` 创建。
 
 ## 3.1 7-Zip 引擎
 
@@ -63,7 +65,7 @@ powershell -NoProfile -File .\scripts\package-windows.ps1   # 生成含 7-Zip �
 - **回归测试先行**：修复任何缺陷 `MUST` 先写能在修复前失败的回归测试，并在提交信息记录反证证据（复现命令 + 修复前失败输出摘要，slowtest 触发的 CI run 转绿后附 run 链接）。只有「修复后通过」而没有「修复前失败」证据的修复不算完成。
 - **禁止削弱测试**：删除、改名、放宽断言、新增 `#[ignore]` 或平台门禁（`#[cfg(...)]`）`MUST` 同步更新 `scripts/test-baseline.json`（用 `python scripts/static_check.py --update-test-baseline` 重新生成）并在提交信息写明理由；`MUST NOT` 只为了让测试变绿而做上述改动。平台门禁 `MUST` 附带原因注释，且被门禁的行为 `SHOULD` 在另一平台仍有覆盖。
 - **提交纪律**：提交信息按变更性质 `MUST` 携带对应记录——缺陷修复附回归反证（复现命令 + 修复前失败输出摘要）；合同增改附用户确认结果；可信基变更附理由与用户批准记录；基线再生成附 `[基线已确认]` 标记；宣称完成附 slowtest 触发的 CI run 链接（见下条「CI 权威」）。缺对应记录的提交 `MUST NOT` 合入。
-- **完成条件**：见 3.3 验收矩阵；`MUST NOT` 只跑默认 `cargo test` 就宣称引擎 / UI / 发布相关工作已验证。
+- **完成条件**：见 3.3 验收矩阵；`MUST NOT` 只跑默认 `cargo test --features test-hooks` 就宣称引擎 / UI / 发布相关工作已验证。
 - **独立复核**：涉及引擎、删除路径、解压安全（`fsutil` / 覆盖语义）或用户可见行为的实质变更，`SHOULD` 由未参与实现的独立代理会话复跑验证并给出证据格式：命令、环境（OS / rustc / 是否真实引擎）、退出码、关键输出行。
 - **CI 权威**：本地验证通过只是临时结论；对应 CI（`.github/workflows/`）run 转绿之前 `MUST NOT` 宣称变更已完成，宣称完成 `MUST` 附 CI run 链接；本地自报证据（提交信息、终端输出）视为线索而非判决。`check.yml` 现仅 `workflow_dispatch` 手动触发（push / PR 不触发），其 run 只能由 slowtest（`python scripts/test_gate.py slowtest --authorized`）或人类明确手动 dispatch 产生；未跑 slowtest 的变更只能如实标注「未验证」，`MUST NOT` 宣称完成。（无执法点 · 软法：无法机器判定「是否宣称完成」，靠会话纪律 + 3.4 的 `--authorized` 入口守卫）
 - **flaky 政策**：`MUST NOT` 重跑到绿。测试间歇性失败必须查因；确属 flaky 的要在提交信息记录现象与原因，不得静默重跑。
@@ -75,7 +77,7 @@ powershell -NoProfile -File .\scripts\package-windows.ps1   # 生成含 7-Zip �
 
 | 场景 / 变更类型 | 必须通过 | 覆盖 |
 |---|---|---|
-| 任意变更（每次提交） | `cargo test` + `python scripts/static_check.py` | 合同全部条目对应测试 |
+| 任意变更（每次提交） | `cargo test --features test-hooks` + `python scripts/static_check.py` | 合同全部条目对应测试 |
 | 引擎 / 解压 / 删除 / 路径安全 | 上行 + `powershell -NoProfile -File .\scripts\acceptance.ps1 -WithEngine` + `tests/gui_flow.rs` | 合同 S / E 分区、C-01 |
 | UI（`ui/app.slint` / GUI 装配） | 任意变更行 + `tests/gui_flow.rs` + `scripts/gui_smoke.py` S1–S4 + 两档窗口尺寸目视检查 | 合同 C / U 分区 |
 | 递归解压端到端 | `python scripts/make_tmp.py testdata` 生成数据集 → GUI 走「开始解压 → 一段确认 → 跑完」→ 按合同 X / H 分区核对（成功原包及实际分卷按 X-05 删除、已有文件不变、冲突自动改名且后缀不变、失败原包进「解压失败」、Git 整树排除、后续新任务允许重新解压）→ `python scripts/make_tmp.py clean` 清理 | 合同 X / H 分区 |
@@ -92,12 +94,12 @@ powershell -NoProfile -File .\scripts\package-windows.ps1   # 生成含 7-Zip �
 - 功能开发和功能性修改 `MUST` 同时具备 UT 局部逻辑验证与从真实公开入口到可观察结果的 E2E 验证；跨模块交互按需要增加集成测试，已有有效覆盖可以复用。不得依赖用户手工读代码或人工回归保证质量。（无执法点 · 软法）
 - 测试 `MUST` 对应需求及验收条件，覆盖核心成功路径与相关关键失败路径；UT、编译、静态检查、局部模拟和“没有崩溃”不能替代完整链路的结果断言。桩与模拟仅作补充，未经验证的真实边界须明确说明。（无执法点 · 软法）
 - 验证报告 `MUST` 区分已实现、验证通过、验证失败和未验证；环境、依赖或权限不足不得报告验收通过。（无执法点 · 软法）
-- UT / 集成入口为 `cargo test`，可按目标运行 `cargo test --test md_tools`、`cargo test --test git_tools` 等。`tests/git_tools.rs` 使用真实 git 与本地 bare 远端，不覆盖真实网络及认证。
-- Xberg 集成入口为 `cargo test --test xberg_settings --test xberg_shared_process`（默认 `gui` 特性）。前者覆盖 SQLite 保存、旧配置迁移、独立进程恢复及场景资产选择；后者启动真实 JchTools 代理和命名管道，但使用由 `rustc` 编译的模拟引擎，验证进程复用、转换期间截图响应及请求隔离。它们不覆盖 Windows 重启、真实模型常驻或热键/托盘到结果的桌面 E2E；完整验收仍按 XB 第 5.2 / 6 节执行。
-- GUI 链路入口为 `cargo test --test gui_flow`；`src/gui.rs` 内另有 MD 真实回调测试。它们使用 Slint 测试后端，不等同于真实桌面窗口验证。`scripts/gui_smoke.py` 的 S1–S4 覆盖启动、整理与解压，未覆盖 MD / Git 的完整桌面链路；Git 从 GUI 启动到推送结果的完整 E2E 覆盖尚未确认。后续相应功能变更应补齐所需链路，不能以底层测试冒充 GUI E2E。
+- UT / 集成入口为 `cargo test --features test-hooks`，可按目标运行 `cargo test --features test-hooks --test md_tools`、`cargo test --features test-hooks --test git_tools` 等。`tests/git_tools.rs` 使用真实 git 与本地 bare 远端，不覆盖真实网络及认证。
+- Xberg 集成入口为 `cargo test --features test-hooks --test xberg_settings --test xberg_shared_process`（默认 `gui` 特性）。前者覆盖 SQLite 保存、旧配置迁移、独立进程恢复及场景资产选择；后者启动真实 JchTools 代理和命名管道，但使用由 `rustc` 编译的模拟引擎，验证进程复用、转换期间截图响应及请求隔离。它们不覆盖 Windows 重启、真实模型常驻或热键/托盘到结果的桌面 E2E；完整验收仍按 XB 第 5.2 / 6 节执行。
+- GUI 链路入口为 `cargo test --features test-hooks --test gui_flow`；`src/gui.rs` 内另有 MD 真实回调测试。它们使用 Slint 测试后端，不等同于真实桌面窗口验证。`scripts/gui_smoke.py` 的 S1–S4 覆盖启动、整理与解压，未覆盖 MD / Git 的完整桌面链路；Git 从 GUI 启动到推送结果的完整 E2E 覆盖尚未确认。后续相应功能变更应补齐所需链路，不能以底层测试冒充 GUI E2E。
 - 转 Markdown 的依据是 `docs/requirements/ALL2MARKDOWN.md`；按该文档附录 A 验证主包不包含转换专用依赖/模型、未配置时旧工具正常可用、GUI 保存并校验用户指定的 Xberg 运行目录、按需初始化其余组件，以及离线真实 Xberg / OCR / 媒体转换、GUI 入口及两种交付形态；旧 all2markdown 的源码、测试或历史 CI 不能作为集成后的通过证据。实现范围按 T-30 限于迁入，不借迁移改变旧功能，也不擅自搬入旧 Python 架构。
 - 纯文档等非功能性修改按实际影响检查内容、引用和需求保留情况，不机械新增功能测试；本仓库已有基线、提交检查与 CI 完成条件仍按 0 / 3.2 / 3.3 执行，未执行项如实标注。
-- 可选组件的 UT / 集成测试从仓库根目录分别运行 `cargo test --manifest-path optional/snap-ocr-core/Cargo.toml --all-targets` 和 `cargo test --manifest-path optional/snap-ocr-worker/Cargo.toml --all-targets`。根 workspace 的 `default-members = ["."]`，默认 `cargo test` 不覆盖这些包；当前 `check.yml` 与 `acceptance.ps1` 均有二者的显式测试步骤，不能把本地默认门通过当作截图组件已验证。旧 `optional/markdown-media-worker` 已按 XB-12 退役（媒体转录迁移到 Xberg 推理组件），其测试与打包步骤一并移除。
+- 可选组件的 UT / 集成测试从仓库根目录分别运行 `cargo test --features test-hooks --manifest-path optional/snap-ocr-core/Cargo.toml --all-targets` 和 `cargo test --features test-hooks --manifest-path optional/snap-ocr-worker/Cargo.toml --all-targets`。根 workspace 的 `default-members = ["."]`，默认 `cargo test --features test-hooks` 不覆盖这些包；当前 `check.yml` 与 `acceptance.ps1` 均有二者的显式测试步骤，不能把本地默认门通过当作截图组件已验证。旧 `optional/markdown-media-worker` 已按 XB-12 退役（媒体转录迁移到 Xberg 推理组件），其测试与打包步骤一并移除。
 - 转 Markdown 的验收承接入口为 `scripts/markdown_acceptance.py`（`--list` 查看条目），也可经 `acceptance.ps1 -WithMarkdownAcceptance` 接入；运行依赖见 `scripts/requirements-dev.txt`，真实 GUI、Xberg、媒体组件与两种发布目录按脚本参数提供。缺资产条目为 `NOT RUN`；脚本退出码 0 仍可能包含未执行项，应逐项检查。`scripts/gui_smoke.py --stages S5` 另有转换开始/停止链路，需已配置可用组件，不在默认 S1–S4 内，不能替代转换产物断言。
 - 截图 OCR 的验收覆盖目标见 `docs/requirements/SNAP2TEXT.md` 附录 C。迁至 Xberg 后，worker 已无 `det_paddlex_oracle` / `pipeline_backend_oracle` 测试目标；旧直连引擎路径（`xberg_worker.rs` 客户端、`tests/xberg_client.rs` 协议测试、`examples/xberg_ocr.rs` 无头对照、`mock-xberg-worker` 测试桩）已于 2026-10-04 经用户确认删除，服务仅经 `SharedXbergClient` 使用共享引擎（XB-14）。已有 Slint 测试后端结果窗用例不等于热键/托盘、服务生命周期或多 DPI 的真实桌面 E2E；这些完整链路的自动化覆盖尚未确认。`tests/ocr_fixtures/README.md` 中的旧 `ocr_compare` 命令及 TextSnap 历史结果不作为当前迁入版通过证据。上述入口说明不改变 3.4 的 fulltest / slowtest 逐次授权及 CI 完成条件。
 - 本地 `acceptance.ps1` 默认测试 Snap OCR core / worker 并检查资产清单；设置 `JCHTOOLS_SNAP_OCR_ASSET_ROOT` 为完整的已校验资产缓存时，追加真实 worker 从安装位置加载模型的服务测试。未设置时该资产依赖项报告 `NOT RUN`，不能据此声称桌面验收通过。
@@ -106,7 +108,7 @@ powershell -NoProfile -File .\scripts\package-windows.ps1   # 生成含 7-Zip �
 
 统一入口 `python scripts/test_gate.py <fastcheck|fulltest|slowtest>`；三级语义固定，`MUST NOT` 按需要改写层级含义，也 `MUST NOT` 把耗时或远程阶段塞进更低层级。平台范围按合同 P-07 仅 Windows：不设任何跨平台/跨 WSL 验证阶段。
 
-- **fastcheck**：static_check + rustfmt + clippy + cargo test（含 binding loop 扫描）；总墙钟硬上限 60 秒，超时即失败并终止整个进程树，`MUST NOT` 把超时报成成功；AI 代理 `MAY` 自主执行，但其通过不代表完整验证。（执法点：test_gate.py 的预算终止与退出码）
+- **fastcheck**：static_check + rustfmt + clippy + cargo test --features test-hooks（含 binding loop 扫描）；总墙钟硬上限 60 秒，超时即失败并终止整个进程树，`MUST NOT` 把超时报成成功；AI 代理 `MAY` 自主执行，但其通过不代表完整验证。（执法点：test_gate.py 的预算终止与退出码）
 - **fulltest**：当前平台（Windows，唯一支持平台）全部本地验证——Python 质量门（与 CI 同命令）+ fmt/clippy + `acceptance.ps1 -WithEngine -WithGuiSmoke`；`MUST NOT` 触发远程流水线。不含发布打包自检（打包只在 slowtest）。每次运行 `MUST` 有人类明确授权。（执法点：test_gate.py 的 `--authorized` 入口守卫；越过入口直接执行内部命令属规避行为 · 无执法点 · 软法）
 - **slowtest**：fulltest 全部阶段 + 发布打包自检（`scripts/package-windows.ps1` 全程，验证引擎内嵌、许可证合规、无引擎泄漏与两种交付产物；本地阶段未全部 PASS 时不执行）+ 远程 `check.yml`（该工作流仅 `workflow_dispatch`，由本门经 `gh workflow run` 触发并轮询到最终状态，`MUST NOT` 把「已触发」当「通过」；push / PR 不自动触发）。每次运行 `MUST` 有人类明确授权。（执法点：同上 `--authorized` 入口守卫；同上软法）
 - `release.yml` 是真实发布（自动打时间戳 tag 并发布产物），`MUST NOT` 纳入 slowtest 自动触发；发布需用户单独明确该次目标。（执法点：test_gate.py 不包含该阶段）
@@ -122,7 +124,7 @@ powershell -NoProfile -File .\scripts\package-windows.ps1   # 生成含 7-Zip �
 - **磁盘清理顺序**：废弃 triple/profile 的整目录 → 旧 toolchain 产物 → 自建临时工具产物（如 `target/miri`）；当前有效增量缓存 MUST NOT 删除；feature 差异在 `target/` 内无独立目录，禁止按目录名/时间戳/体积猜测「旧 feature 缓存」，无法证明废弃的一律保留。
 - **timings 诊断**：构建耗时占主导时用 `cargo build --timings` 定位串行瓶颈（大 crate、build.rs、proc-macro、链接阶段），Top 阻塞单元与建议写入质量门报告；宿主机实时防护（如 Windows Defender 覆盖 `target/`）仅作为环境建议披露——不改系统设置、不据此跳过任何检查。
 - **性能打点与基准**：运行期耗时打点在 `src/perf.rs`，由默认关闭的 `perf-tracing` 特性控制（`cargo run --features perf-tracing` 启用；诊断日志（P-10）使 tracing 依赖常开，本特性只门控性能打点代码与 `perf-logs` 层）；性能日志落状态目录 `perf-logs/`、按天轮转，与界面运行日志（S-07）及诊断日志互不影响；span 名称与字段名是跨版本可比较口径，只增不改名、不改语义（清单见该文件头注释）。
-- **诊断日志（P-10）**：`src/logging.rs` 常开初始化，GUI 与 `--xberg-broker` 代理进程的关键步骤告警与错误写入状态目录 `logs/`（按天轮转、保留 14 天、panic 入盘），覆盖进程间通信、网络出口与关键任务；只写本地盘、不上传、不含文件正文，初始化失败安静退化不影响业务。记录范围与边界以合同 P-10 为准。`tests/perf_probe.rs` 是默认 `#[ignore]` 的性能基准（`cargo test --release --test perf_probe -- --ignored --nocapture`，规模经 `JT_PERF_GROUPS` / `JT_PERF_COPIES` / `JT_PERF_EMPTY_DIRS` 调整）：只测耗时与计数、不断言具体秒数，不进入默认验收门。
+- **诊断日志（P-10）**：`src/logging.rs` 常开初始化，GUI 与 `--xberg-broker` 代理进程的关键步骤告警与错误写入状态目录 `logs/`（按天轮转、保留 14 天、panic 入盘），覆盖进程间通信、网络出口与关键任务；只写本地盘、不上传、不含文件正文，初始化失败安静退化不影响业务。记录范围与边界以合同 P-10 为准。`tests/perf_probe.rs` 是默认 `#[ignore]` 的性能基准（`cargo test --features test-hooks --release --test perf_probe -- --ignored --nocapture`，规模经 `JT_PERF_GROUPS` / `JT_PERF_COPIES` / `JT_PERF_EMPTY_DIRS` 调整）：只测耗时与计数、不断言具体秒数，不进入默认验收门。
 
 ## 4. 代码与界面实现约定
 

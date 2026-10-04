@@ -55,8 +55,10 @@ import comtypes
 import pywintypes
 import win32con
 import win32gui
+import win32process
 from pywinauto import Application, controls, findbestmatch, findwindows, timings
 from pywinauto.application import ProcessNotFoundError, WindowSpecification
+from pywinauto.uia_defines import NoPatternInterfaceError
 
 if TYPE_CHECKING:
     from collections.abc import Callable
@@ -69,6 +71,7 @@ TIMEOUT = 60
 COMPLETION_TIMEOUT = 240
 # 目录输入框与「选择目录…」按钮视为同一行的纵坐标容差（像素）。
 EDIT_ROW_TOLERANCE_PX = 20
+PHYSICAL_OVERLAP_THRESHOLD = 0.8
 DEFAULT_EXE = "target/debug/JchTools.exe"
 DEFAULT_DATA = ".tmp/gui-smoke/data"
 # 冒烟阶段清单：S1-S4 无需转 Markdown 资产；S5 需要（默认序列不含 S5，须显式 --stages 请求）；
@@ -149,6 +152,39 @@ class _CliArgs(argparse.Namespace):
         self.list_stages = False
 
 
+class _OwnedProcessTree:
+    """仅按本阶段 Popen PID 回收 GUI 与其子进程，不按进程名误杀."""
+
+    def __init__(self, proc: subprocess.Popen[bytes]) -> None:
+        self._proc: subprocess.Popen[bytes] = proc
+        self._pid: int = proc.pid
+        system_root = os.environ.get("SYSTEMROOT") or r"C:\Windows"
+        self._taskkill: Path = Path(system_root) / "System32" / "taskkill.exe"
+
+    def terminate(self, proc: subprocess.Popen[bytes]) -> None:
+        """只终止本阶段 GUI；/T 同时回收其 worker/broker 子进程."""
+        self._kill_tree()
+        with contextlib.suppress(OSError, ProcessLookupError):
+            if proc.poll() is None:
+                proc.kill()
+
+    def close(self) -> None:
+        """GUI 正常退出后再按自己的 PID 清理仍存活的子服务."""
+        self._kill_tree()
+
+    def _kill_tree(self) -> None:
+        # 父 PID 已退出时不可再按 PID 操作，避免 PID 复用误杀其他进程；正常
+        # 退出后的后台服务按产品生命周期继续运行，由产品自身负责回收。
+        if self._proc.poll() is not None or not self._taskkill.is_file():
+            return
+        with contextlib.suppress(OSError, subprocess.SubprocessError):
+            _ = subprocess.run(
+                [str(self._taskkill), "/PID", str(self._pid), "/T", "/F"],
+                capture_output=True,
+                check=False,
+            )
+
+
 def wait_window(pid: int, timeout: int = TIMEOUT) -> tuple[Application, WindowSpecification]:
     deadline = time.time() + timeout
     last: Exception | None = None
@@ -165,11 +201,43 @@ def wait_window(pid: int, timeout: int = TIMEOUT) -> tuple[Application, WindowSp
     raise RuntimeError(msg)
 
 
+def _same_physical_control(left: BaseWrapper, right: BaseWrapper) -> bool:
+    left_rect = left.rectangle()
+    right_rect = right.rectangle()
+    width = max(0, min(left_rect.right, right_rect.right) - max(left_rect.left, right_rect.left))
+    height = max(0, min(left_rect.bottom, right_rect.bottom) - max(left_rect.top, right_rect.top))
+    overlap = width * height
+    left_area = max(1, (left_rect.right - left_rect.left) * (left_rect.bottom - left_rect.top))
+    right_area = max(1, (right_rect.right - right_rect.left) * (right_rect.bottom - right_rect.top))
+    return overlap / min(left_area, right_area) >= PHYSICAL_OVERLAP_THRESHOLD
+
+
 def find_button(window: WindowSpecification, title: str) -> WindowSpecification:
-    return window.child_window(title=title, control_type="Button")
+    """返回同一物理按钮组中唯一的可见控件，去除 Slint 外/内层重复节点.
+
+    未找到当前可见节点时仍返回可轮询的 WindowSpecification。旧调用约定会
+    对结果调用 ``exists()`` 判断按钮是否尚未出现；此处直接抛错会把正常的
+    「运行态按钮尚未出现」误报成阶段失败。真正需要按钮的 ``wait``/``click``
+    仍会在超时后失败。
+    """
+    matching = [button for button in window.descendants(control_type="Button") if (button.window_text() or "") == title]
+    buttons: list[BaseWrapper] = []
+    for button in matching:
+        if (button.window_text() or "") != title:
+            continue
+        if any(_same_physical_control(button, existing) for existing in buttons):
+            continue
+        buttons.append(button)
+    visible = [button for button in buttons if button.is_visible()]
+    candidates = visible or buttons
+    if not candidates:
+        return window.child_window(title=title, control_type="Button")
+    candidates.sort(key=lambda button: (button.rectangle().top, button.rectangle().left))
+    chosen_index = next(index for index, button in enumerate(matching) if button is candidates[0])
+    return window.child_window(title=title, control_type="Button", found_index=chosen_index)
 
 
-def activate(window: WindowSpecification) -> None:
+def activate(window: WindowSpecification | BaseWrapper) -> None:
     """把应用窗口提到前台，并抬到 z 序最上层.
 
     click_input 是真实鼠标点击：窗口被资源管理器等程序遮挡时，点击会落到遮挡窗口上。
@@ -191,8 +259,25 @@ def activate(window: WindowSpecification) -> None:
     time.sleep(0.3)
 
 
-def click(window: WindowSpecification, control: WindowSpecification) -> None:
+def click(window: WindowSpecification, control: WindowSpecification | BaseWrapper) -> None:
     activate(window)
+    try:
+        invoke = getattr(control, "invoke", None)
+    except TRANSIENT_GUI_ERRORS:
+        invoke = None
+    if callable(invoke):
+        try:
+            _ = invoke()
+        except (NoPatternInterfaceError, *TRANSIENT_GUI_ERRORS):
+            pass
+        else:
+            time.sleep(0.3)
+            return
+    target_pid = win32process.GetWindowThreadProcessId(window.handle)[1]
+    foreground_pid = win32process.GetWindowThreadProcessId(win32gui.GetForegroundWindow())[1]
+    if foreground_pid != target_pid:
+        message = "鼠标兜底拒绝操作：前台窗口 PID 不属于被测 GUI"
+        raise RuntimeError(message)
     control.click_input()
     time.sleep(0.3)
 
@@ -350,20 +435,23 @@ def open_confirm(window: WindowSpecification, button_title: str, timeout: int = 
 
 
 def close_app(window: WindowSpecification) -> None:
-    """按用户路径请求关闭：激活窗口后点标题栏「关闭」.
-
-    合成鼠标点击在本环境可能落空或点到同窗其他控件（实测 S2 会误开确认层并卡住），
-    因此 _wait_exit_or_kill 的后续重试允许升级为 WM_CLOSE 兜底；首次尝试只走这条
-    用户路径，避免「标题栏按钮点击失效」这类回归被兜底掩盖。
-    """
-    with contextlib.suppress(*TRANSIENT_GUI_ERRORS):
-        for button in window.descendants(control_type="Button"):
-            if (button.window_text() or "") == "关闭":
-                # 与 click() 同口径：先激活窗口再点，避免合成点击落到别的窗口。
-                activate(window)
-                button.click_input()
-                time.sleep(0.3)
-                return
+    """先发 WM_CLOSE；鼠标兜底前验证前台窗口 PID 属于被测 GUI."""
+    handle = window.handle
+    target_pid = win32process.GetWindowThreadProcessId(handle)[1]
+    win32gui.PostMessage(handle, win32con.WM_CLOSE, 0, 0)
+    time.sleep(0.3)
+    with contextlib.suppress(*TRANSIENT_GUI_ERRORS, RuntimeError):
+        if not window.exists():
+            return
+    foreground = win32gui.GetForegroundWindow()
+    foreground_pid = win32process.GetWindowThreadProcessId(foreground)[1]
+    if foreground_pid != target_pid:
+        message = "关闭兜底拒绝操作：前台窗口 PID 不属于被测 GUI"
+        raise RuntimeError(message)
+    for button in [b for b in window.descendants(control_type="Button") if (b.window_text() or "") == "关闭"]:
+        button.click_input()
+        time.sleep(0.3)
+        return
 
 
 def _escalate_close(window: WindowSpecification) -> None:
@@ -376,6 +464,7 @@ def _wait_exit_or_kill(
     proc: subprocess.Popen[bytes],
     timeout: int = 15,
     window: WindowSpecification | None = None,
+    owner: _OwnedProcessTree | None = None,
 ) -> tuple[bool, int | None]:
     """等待进程退出，超时则强制结束（避免异常路径泄漏进程），并返回是否被强杀与退出码.
 
@@ -392,15 +481,20 @@ def _wait_exit_or_kill(
         except subprocess.TimeoutExpired:
             attempts += 1
             if window is not None:
-                with contextlib.suppress(*TRANSIENT_GUI_ERRORS):
+                with contextlib.suppress(*TRANSIENT_GUI_ERRORS, RuntimeError):
                     if attempts <= 1:
                         close_app(window)
                     else:
                         _escalate_close(window)
         else:
             return False, proc.returncode
-    proc.kill()
-    _ = proc.wait(timeout=10)
+    if owner is not None:
+        owner.terminate(proc)
+    else:
+        with contextlib.suppress(OSError, ProcessLookupError):
+            proc.kill()
+    with contextlib.suppress(subprocess.TimeoutExpired, OSError):
+        _ = proc.wait(timeout=10)
     return True, proc.returncode
 
 
@@ -425,28 +519,35 @@ def run_stage(  # noqa: PLR0913 - 脚手架的收尾钩子与子进程环境天�
 ) -> None:
     """S1-S14 共用的启动/拆除脚手架：Popen →（pre）→ wait_window → body → 统一收尾.
 
-    拆除顺序（含异常路径）与拆分前逐语义相同：窗口非 None 才 close_app（wait_window
-    抛错时 window 仍为 None，跳过 close 但仍 _wait_exit_or_kill）→ _wait_exit_or_kill →
-    after 钩子（_wait_exit_or_kill 抛异常时 after 被跳过，S5 的 scratch 清理依赖此顺序）。
-    pre 在 Popen 之后、窗口等待之前执行；pre 抛异常时进程同样不被清理（S5 媒体缺失
-    路径的现状语义，刻意保留）。env 非 None 时传给子进程（S6-S9 用
+    拆除顺序（含异常路径）为：窗口非 None 才 close_app；随后等待/结束本次 Job
+    Object 的 GUI 及其子服务；最后无论前面哪一步失败都执行 after。pre 也在统一
+    try/finally 内，因此媒体缺失等前置失败不会泄漏已启动的 GUI。Job Object 只绑定
+    本函数刚启动的 PID，不能触碰其他用户实例。env 非 None 时传给子进程（S6-S9 用
     JCHTOOLS_TEST_STATE_DIR 隔离应用配置，不写真实用户配置）。
     收尾断言与最终 PASS 行统一在此打印。
     """
     proc = subprocess.Popen([exe], env=env)
+    owner: _OwnedProcessTree | None = None
     window: WindowSpecification | None = None
-    if pre is not None:
-        pre()
     try:
+        owner = _OwnedProcessTree(proc)
+        if pre is not None:
+            pre()
         _, window = wait_window(proc.pid)
         body(window)
     finally:
         if window is not None:
-            with contextlib.suppress(*TRANSIENT_GUI_ERRORS):
+            with contextlib.suppress(*TRANSIENT_GUI_ERRORS, RuntimeError):
                 close_app(window)
-        killed, code = _wait_exit_or_kill(proc, window=window)
-        if after is not None:
-            after()
+        try:
+            killed, code = _wait_exit_or_kill(proc, window=window, owner=owner)
+        finally:
+            try:
+                if after is not None:
+                    after()
+            finally:
+                if owner is not None:
+                    owner.close()
     assert_clean_exit(tag, killed=killed, code=code)
     print(f"{tag} PASS：进程已退出")
 
@@ -656,7 +757,13 @@ def goto_converter(window: WindowSpecification) -> None:
 def converter_directory_rows(window: WindowSpecification) -> list[BaseWrapper]:
     """转 Markdown 页自上而下两行「选择目录…」按钮：输入 / 输出（Xberg 目录在设置页，XB-20）."""
     buttons = [b for b in window.descendants(control_type="Button") if (b.window_text() or "") == "选择目录…"]
-    buttons.sort(key=lambda b: b.rectangle().top)
+    unique: list[BaseWrapper] = []
+    for button in buttons:
+        if not button.is_visible() or any(_same_physical_control(button, existing) for existing in unique):
+            continue
+        unique.append(button)
+    unique.sort(key=lambda b: (b.rectangle().top, b.rectangle().left))
+    buttons = unique
     if len(buttons) < CONVERT_DIR_ROWS:
         msg = f"转 Markdown 页「选择目录…」按钮不足两行（实得 {len(buttons)}）"
         raise RuntimeError(msg)
@@ -676,6 +783,34 @@ def set_converter_dirs(window: WindowSpecification, input_dir: str, output_dir: 
             msg = "未找到与「选择目录…」同排的目录输入框"
             raise RuntimeError(msg)
         min(candidates, key=lambda e: e.rectangle().left).set_edit_text(value)
+
+
+def unique_visible_buttons(window: WindowSpecification, title: str) -> list[BaseWrapper]:
+    """按矩形去除 Slint 外层/内层重复 UIA Button 节点."""
+    candidates: list[BaseWrapper] = []
+    for button in window.descendants(control_type="Button"):
+        if (button.window_text() or "") != title or not button.is_visible():
+            continue
+        if any(_same_physical_control(button, existing) for existing in candidates):
+            continue
+        candidates.append(button)
+    candidates.sort(key=lambda button: (button.rectangle().top, button.rectangle().left))
+    return candidates
+
+
+def wait_button(window: WindowSpecification, title: str, timeout: float, *, enabled: bool = False) -> BaseWrapper:
+    """动态等待唯一可见按钮，避免页面切换时缓存空 WindowSpecification."""
+    deadline = time.time() + timeout
+    while time.time() < deadline:
+        try:
+            buttons = unique_visible_buttons(window, title)
+            if buttons and (not enabled or any(button.is_enabled() for button in buttons)):
+                return next(button for button in buttons if not enabled or button.is_enabled())
+        except TRANSIENT_GUI_ERRORS:
+            pass
+        time.sleep(0.2)
+    message = f"等待可见{('可用' if enabled else '')}按钮超时：{title}"
+    raise RuntimeError(message)
 
 
 def s5_markdown_basic_chain(exe: str) -> None:
@@ -705,8 +840,7 @@ def s5_markdown_basic_chain(exe: str) -> None:
         scratch = scratch_box[0]
         goto_converter(window)
         set_converter_dirs(window, str(scratch / "input"), str(scratch / "output"))
-        start = find_button(window, "开始转换")
-        _ = start.wait("visible enabled", timeout=COMPLETION_TIMEOUT)
+        _ = wait_button(window, "开始转换", COMPLETION_TIMEOUT, enabled=True)
         # 合成点击偶发落空（点击后仍停在「尚未开始」）：按当前状态重试，与
         # confirm_dialog 同一立场——只检查「点击没报错」会把没生效的点击当成
         # 成功。每次重按后观察一段运行态窗口，重按最多 3 次。
@@ -714,13 +848,13 @@ def s5_markdown_basic_chain(exe: str) -> None:
         for attempt in range(3):
             click(window, find_button(window, "开始转换"))
             try:
-                _ = find_button(window, "停止任务").wait("visible enabled", timeout=busy_timeout)
+                _ = wait_button(window, "停止任务", busy_timeout, enabled=True)
                 break
-            except timings.TimeoutError:
+            except (timings.TimeoutError, RuntimeError):
                 if attempt == _S5_LAST_ATTEMPT:
                     raise
         click(window, find_button(window, "停止任务"))
-        _ = find_button(window, "开始转换").wait("visible enabled", timeout=CONVERT_STOP_TIMEOUT)
+        _ = wait_button(window, "开始转换", CONVERT_STOP_TIMEOUT, enabled=True)
         print("S5 PASS：开始→停止链路完成（停止在当前文件后生效，界面回到可开始状态）")
 
     def cleanup() -> None:
@@ -762,8 +896,17 @@ def click_and_wait_text(
 
 
 def goto_settings(window: WindowSpecification) -> None:
-    """切到设置页：以「共享 Xberg」标题出现为准（点击落空时重试）."""
-    _ = click_and_wait_text(window, "设置", "共享 Xberg")
+    """切到设置页：等待设置专属「下载 Xberg」控件，避免命中转换页状态文案."""
+    for _attempt in range(5):
+        click(window, find_button(window, "设置"))
+        try:
+            _ = find_button(window, "下载 Xberg").wait("visible", timeout=ATTEMPT_TIMEOUT)
+        except (RuntimeError, timings.TimeoutError):
+            continue
+        else:
+            return
+    message = "点击「设置」后始终未出现设置页专属「下载 Xberg」控件"
+    raise RuntimeError(message)
 
 
 def set_settings_custom_dir(window: WindowSpecification, path: str) -> None:
@@ -1162,17 +1305,10 @@ def s13_partial_failure_isolated_with_counts(exe: str) -> None:
 
 
 def close_title_bar(window: WindowSpecification) -> None:
-    """点标题栏「关闭」：同名按钮取纵坐标最小者（提示条也有「关闭」按钮）."""
-    with contextlib.suppress(*TRANSIENT_GUI_ERRORS):
-        buttons = [
-            button for button in window.descendants(control_type="Button") if (button.window_text() or "") == "关闭"
-        ]
-        if not buttons:
-            msg = "未找到「关闭」按钮"
-            raise RuntimeError(msg)
-        activate(window)
-        min(buttons, key=lambda b: b.rectangle().top).click_input()
-        time.sleep(0.3)
+    """直接向目标 GUI 窗口发送 WM_CLOSE，并等待停止确认弹窗出现."""
+    handle = window.handle
+    win32gui.PostMessage(handle, win32con.WM_CLOSE, 0, 0)
+    _ = wait_text_containing(window, STOP_AND_CLOSE_TITLE, timeout=TIMEOUT)
 
 
 def s14_close_during_conversion_confirms_and_stops(exe: str) -> None:
@@ -1203,7 +1339,6 @@ def s14_close_during_conversion_confirms_and_stops(exe: str) -> None:
                 if attempt == _S5_LAST_ATTEMPT:
                     raise
         close_title_bar(window)
-        _ = wait_text_containing(window, STOP_AND_CLOSE_TITLE, timeout=TIMEOUT)
         click(window, find_button(window, STOP_AND_CLOSE_BUTTON))
         # 确认后任务在当前文件结束（T-23），进程随后自然退出；退出断言由 run_stage 收尾执行。
 
