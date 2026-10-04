@@ -1098,9 +1098,9 @@ fn replace_outside_fences(text: &str, from: &str, to: &str) -> String {
 fn decode_base64(input: &str) -> Option<Vec<u8>> {
     fn value(byte: u8) -> Option<u32> {
         match byte {
-            b'A'..=b'Z' => Some((byte - b'A') as u32),
-            b'a'..=b'z' => Some((byte - b'a' + 26) as u32),
-            b'0'..=b'9' => Some((byte - b'0' + 52) as u32),
+            b'A'..=b'Z' => Some(u32::from(byte - b'A')),
+            b'a'..=b'z' => Some(u32::from(byte - b'a' + 26)),
+            b'0'..=b'9' => Some(u32::from(byte - b'0' + 52)),
             b'+' => Some(62),
             b'/' => Some(63),
             _ => None,
