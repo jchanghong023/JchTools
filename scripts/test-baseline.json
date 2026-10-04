@@ -1697,13 +1697,6 @@
     },
     {
       "file": "src/markdown_assets.rs",
-      "name": "media_component_env_override_points_at_local_tree",
-      "ignored": false,
-      "cfg": null,
-      "body": "40865280d8fc7146"
-    },
-    {
-      "file": "src/markdown_assets.rs",
       "name": "media_component_incomplete_reports_missing_file",
       "ignored": false,
       "cfg": null,
@@ -1725,6 +1718,13 @@
     },
     {
       "file": "src/markdown_assets.rs",
+      "name": "media_component_saved_dir_points_at_local_tree",
+      "ignored": false,
+      "cfg": null,
+      "body": "0ad15113b072cf58"
+    },
+    {
+      "file": "src/markdown_assets.rs",
       "name": "notice_lists_only_xberg_licenses",
       "ignored": false,
       "cfg": null,
@@ -1739,10 +1739,10 @@
     },
     {
       "file": "src/markdown_assets.rs",
-      "name": "readiness_inference_pack_honors_component_dir_override",
+      "name": "readiness_inference_pack_honors_configured_component_dir",
       "ignored": false,
       "cfg": null,
-      "body": "802424c7b0213f4e"
+      "body": "a5c19298904dc5d8"
     },
     {
       "file": "src/markdown_assets.rs",
@@ -1777,56 +1777,56 @@
       "name": "content_is_final_and_children_are_ignored",
       "ignored": false,
       "cfg": null,
-      "body": "9bc1ef5d23976aa4"
+      "body": "a79d363a23343062"
     },
     {
       "file": "src/markdown_document.rs",
       "name": "data_array_fallback_when_base64_absent",
       "ignored": false,
       "cfg": null,
-      "body": "62d6c7c3fb3688fa"
+      "body": "5a2f79c61d07e9db"
     },
     {
       "file": "src/markdown_document.rs",
       "name": "fenced_reference_is_literal_but_real_reference_is_rewritten",
       "ignored": false,
       "cfg": null,
-      "body": "0950464e84913e7b"
+      "body": "e6b25dc5fec713a9"
     },
     {
       "file": "src/markdown_document.rs",
       "name": "invalid_images_field_warns",
       "ignored": false,
       "cfg": null,
-      "body": "5e605d48365cea2a"
+      "body": "6ba06269a238dfac"
     },
     {
       "file": "src/markdown_document.rs",
       "name": "protocol_shape_errors_are_explicit",
       "ignored": false,
       "cfg": null,
-      "body": "6c586fe162657807"
+      "body": "94426d07770a666f"
     },
     {
       "file": "src/markdown_document.rs",
       "name": "referenced_image_without_data_warns",
       "ignored": false,
       "cfg": null,
-      "body": "c3018989462c5f21"
+      "body": "96e07bbd4829fe5c"
     },
     {
       "file": "src/markdown_document.rs",
       "name": "unreferenced_image_is_not_materialized",
       "ignored": false,
       "cfg": null,
-      "body": "144f2e9fd5692708"
+      "body": "a96ef35379be7ec2"
     },
     {
       "file": "src/markdown_document.rs",
       "name": "warnings_are_relayed_and_exif_noise_filtered",
       "ignored": false,
       "cfg": null,
-      "body": "340dc72dc11d72da"
+      "body": "fe0fc6ec3b07f3f1"
     },
     {
       "file": "src/md_tools.rs",
@@ -2299,10 +2299,10 @@
     },
     {
       "file": "src/snap_ocr_assets.rs",
-      "name": "readiness_inference_pack_honors_component_dir_override",
+      "name": "readiness_inference_pack_honors_configured_component_dir",
       "ignored": false,
       "cfg": null,
-      "body": "fdc784e4af7ca6f1"
+      "body": "439b642ca5f86145"
     },
     {
       "file": "src/snap_ocr_assets.rs",
@@ -2369,10 +2369,10 @@
     },
     {
       "file": "src/xberg_runtime.rs",
-      "name": "document_startup_uses_markdown_and_keeps_image_ocr",
+      "name": "document_startup_baseline_pins_only_engine_differences",
       "ignored": false,
       "cfg": null,
-      "body": "a77c977def16b1f1"
+      "body": "e58cfc2d398b4eea"
     },
     {
       "file": "src/xberg_runtime.rs",
@@ -4066,14 +4066,14 @@
       "name": "real_component_trackless_media_reports_no_audio",
       "ignored": true,
       "cfg": null,
-      "body": "5fc2b5bc7a2c2bfd"
+      "body": "acc2b39453e63a98"
     },
     {
       "file": "tests/markdown_media_e2e.rs",
       "name": "real_component_transcribe_returns_structured_markdown",
       "ignored": true,
       "cfg": null,
-      "body": "8438cfcf03ad66e0"
+      "body": "b61bdb59225e0c29"
     },
     {
       "file": "tests/md_tools.rs",
@@ -4577,7 +4577,7 @@
       "name": "startup_config_declares_scenario_models_and_media_availability",
       "ignored": false,
       "cfg": null,
-      "body": "d33b3fac8239f968"
+      "body": "d2dc2144f5880f0c"
     },
     {
       "file": "tests/xberg_assets.rs",
@@ -4612,7 +4612,7 @@
       "name": "scenario_assets_and_configuration_are_independent",
       "ignored": false,
       "cfg": null,
-      "body": "ee198e002c8720dd"
+      "body": "2ee2032048504b5b"
     },
     {
       "file": "tests/xberg_shared_process.rs",
