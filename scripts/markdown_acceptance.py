@@ -114,6 +114,7 @@ A18_UNSUPPORTED_EXTENSIONS = ("jpx", "jpm", "mj2")
 
 # A02 合成输入的图片数量；所有生成、媒体落盘和正文断言共用此常量。
 A02_IMAGE_COUNT = 6
+A07_IMAGE_COUNT = 2
 A02_IMAGE_TOKENS = (
     "ALPHA-TOKEN",
     "BETA-TOKEN",
@@ -2037,10 +2038,9 @@ def _assess_conversion(
 _CONTENT_ASSERTS: dict[str, dict[str, tuple[str, ...]]] = {
     "A01": {"require": ("ALPHA", "BETA")},
     "A03": {"require": ("SHARED-MEDIA",)},
-    # A07 需求只要求「本地解析、外部资源禁用、失败隔离」：SVG 被识别为成员并保留
-    # 引用、失效外链未拖垮转换、邻位 PNG 照常 OCR。SVG 栅格化/文本提取是上游未
-    # 实现能力（干净 SVG 对照亦不输出文本），如实另行报告。
-    "A07": {"require": ("PNG-NEIGH", ".svg")},
+    # SVG 栅格化后可按 PNG 落盘；源扩展名字面量不是 T-14 的产物要求。
+    # 邻位 PNG 仍须 OCR；两张独立的可解码媒体由 verify_svg_raster_media 核对。
+    "A07": {"require": ("PNG-NEIGH",)},
     "A08": {"require": ("RUN-AND", "FIELD-END")},
     # A09 的 descr 允许出现在图片 alt 位置（本就是 description 的标准去处），
     # 不得进入 ```text 围栏冒充 OCR 正文。
@@ -2084,6 +2084,10 @@ def _run_content_assert(
     if outcome.status != STATUS_OK:
         return outcome
     output = SCRATCH_ROOT / f"{item.item_id.lower()}-run" / "output"
+    if item.item_id == "A07":
+        error = verify_svg_raster_media(output)
+        if error is not None:
+            return Outcome(STATUS_FAILED, error, list(outcome.details))
     text = "\n".join(path.read_text(encoding="utf-8", errors="replace") for path in sorted(output.rglob("*.md")))
     fences = cast("list[str]", _TEXT_FENCE.findall(text))
     fence_text = "\n".join(fences)
@@ -2104,6 +2108,22 @@ def _run_content_assert(
         *outcome.details,
     ]
     return Outcome(STATUS_OK, details=details)
+
+
+def verify_svg_raster_media(output: Path) -> str | None:
+    """A07/T-14：SVG 和邻位 PNG 都须有独立、可解码的媒体资源."""
+    media = [path for path in output.rglob("*") if path.is_file() and path.parent.name.endswith("_media")]
+    if len(media) != A07_IMAGE_COUNT:
+        return f"A07 应保留 SVG 栅格化结果与邻位 PNG 共 {A07_IMAGE_COUNT} 张图片，实得 {len(media)} 张"
+    if len({_file_digest(path) for path in media}) != A07_IMAGE_COUNT:
+        return "A07 两个不同源图片不得被同一份媒体字节替代"
+    try:
+        for path in media:
+            with Image.open(path) as picture:
+                picture.verify()
+    except (OSError, ValueError) as error:
+        return f"A07 落盘图片无法解码：{error}"
+    return None
 
 
 def _verify_a02_content(output: Path) -> str | None:

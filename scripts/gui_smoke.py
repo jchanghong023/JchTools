@@ -24,6 +24,9 @@
   S13 部分失败与完成统计：单文件失败不终止批次，成功/失败可区分（T-16/T-24）。
   S14 运行中关闭确认与安全停止：转换运行中点标题栏「关闭」弹出「停止任务并关闭」，
      确认后当前文件结束、进程退出码 0（U-09/T-23；需 JCHTOOLS_S5_MEDIA 媒体样本）。
+  S15 MD 合并/拆分真实 GUI：验证标题下移、原文件不变与 UTF-8 分片无损还原。
+  S16 Git 真实 GUI：使用一次性仓库和本地 bare 远端，验证逐文件提交及推送结果。
+  S17 在已保存有效 Xberg 的隔离配置下，从转换页初始化本地 notice 并核对就绪状态。
 
 用法：
     python scripts/gui_smoke.py --exe target/debug/JchTools.exe --data <已生成的测试数据目录>
@@ -72,6 +75,9 @@ COMPLETION_TIMEOUT = 240
 # 目录输入框与「选择目录…」按钮视为同一行的纵坐标容差（像素）。
 EDIT_ROW_TOLERANCE_PX = 20
 PHYSICAL_OVERLAP_THRESHOLD = 0.8
+CONFIRM_CLOSED_OBSERVATIONS = 2
+MD_SPLIT_LIMIT_BYTES = 1024
+STOP_MEDIA_FILE_COUNT = 16
 DEFAULT_EXE = "target/debug/JchTools.exe"
 DEFAULT_DATA = ".tmp/gui-smoke/data"
 # 冒烟阶段清单：S1-S4 无需转 Markdown 资产；S5 需要（默认序列不含 S5，须显式 --stages 请求）；
@@ -91,8 +97,11 @@ SUPPORTED_STAGES = (
     "S12",
     "S13",
     "S14",
+    "S15",
+    "S16",
+    "S17",
 )
-DEFAULT_STAGES = "S1,S2,S3,S4"
+DEFAULT_STAGES = "S1,S2,S3,S4,S15,S16"
 CONVERT_BUSY_TIMEOUT = 60  # 点击「开始转换」后等待「停止任务」出现的上限（秒）
 _S5_LAST_ATTEMPT = 2  # S5 重按「开始转换」的末次序号（共 3 次，0 起）
 CONVERT_STOP_TIMEOUT = 300  # 停止请求后等待「开始转换」恢复可用的上限（秒）
@@ -298,13 +307,21 @@ def confirm_dialog(window: WindowSpecification, timeout: int = TIMEOUT, *, extra
         time.sleep(0.3)  # 让对话框完成滑入，避免点到动画中途的位置
         attempts += 1
         click(window, ok if ok.is_enabled() else checkbox)
+        closed_observations = 0
         for _ in range(20):
             time.sleep(0.3)
             try:
-                if not checkbox.is_visible():
+                # Slint 删除/重建 UIA 节点时旧 CheckBox 可能暂时不可读；
+                # 用新枚举且非空的页面树连续两次确认模态标题消失。
+                texts = [text.window_text() or "" for text in window.descendants(control_type="Text")]
+                if texts and "确认文件处理范围" not in texts:
+                    closed_observations += 1
+                else:
+                    closed_observations = 0
+                if closed_observations >= CONFIRM_CLOSED_OBSERVATIONS:
                     return
             except TRANSIENT_GUI_ERRORS:
-                return
+                closed_observations = 0
         print(f"  确认框仍未关闭，重试第 {attempts} 次")
     msg = "确认对话框没有关闭：勾选或确认点击未生效"
     raise RuntimeError(msg)
@@ -534,6 +551,15 @@ def run_stage(  # noqa: PLR0913 - 脚手架的收尾钩子与子进程环境天�
         if pre is not None:
             pre()
         _, window = wait_window(proc.pid)
+        effective_env = os.environ if env is None else env
+        if effective_env.get("JCHTOOLS_TEST_STATE_DIR"):
+            isolated_db = Path(effective_env["JCHTOOLS_TEST_STATE_DIR"]) / "config.sqlite3"
+            deadline = time.time() + TIMEOUT
+            while not isolated_db.is_file() and time.time() < deadline:
+                time.sleep(0.1)
+            if not isolated_db.is_file():
+                message = "GUI 未建立隔离配置；请先 cargo build --features test-hooks，禁止写入真实用户配置"
+                raise RuntimeError(message)
         body(window)
     finally:
         if window is not None:
@@ -833,7 +859,8 @@ def s5_markdown_basic_chain(exe: str) -> None:
         if not media or not Path(media).is_file():
             message = "S5 需要媒体样本以观察运行态：设置 JCHTOOLS_S5_MEDIA 指向一个真实媒体文件"
             raise RuntimeError(message)
-        _ = shutil.copyfile(media, scratch / "input" / Path(media).name)
+        for index in range(STOP_MEDIA_FILE_COUNT):
+            _ = shutil.copyfile(media, scratch / "input" / f"{index:02}_{Path(media).name}")
         scratch_box.append(scratch)
 
     def body(window: WindowSpecification) -> None:
@@ -855,6 +882,9 @@ def s5_markdown_basic_chain(exe: str) -> None:
                     raise
         click(window, find_button(window, "停止任务"))
         _ = wait_button(window, "开始转换", CONVERT_STOP_TIMEOUT, enabled=True)
+        _ = wait_text_containing(window, "已停止")
+        produced = list((scratch / "output").glob("*.md"))
+        require(len(produced) < STOP_MEDIA_FILE_COUNT, "停止后不得继续转换全部后续文件")
         print("S5 PASS：开始→停止链路完成（停止在当前文件后生效，界面回到可开始状态）")
 
     def cleanup() -> None:
@@ -965,7 +995,7 @@ def find_check(window: WindowSpecification, title: str) -> WindowSpecification:
 def isolated_state_env(scratch_state: Path) -> dict[str, str]:
     """S6-S9 的子进程环境：应用配置与截图资产根全部隔离到临时目录.
 
-    JCHTOOLS_TEST_STATE_DIR（src/xberg_settings.rs，debug 构建识别）隔离
+    JCHTOOLS_TEST_STATE_DIR（src/xberg_settings.rs，test-hooks 构建识别）隔离
     config.sqlite3，避免冒烟改写真实用户配置（XB-18）；JCHTOOLS_SNAP_OCR_TEST_ASSET_ROOT
     （src/snap_ocr_assets.rs）同时隔离截图服务管道名与 worker 安装位置——S6/S7
     保存有效目录会触发 ensure_snap_supervisor，不隔离会 ping 真实用户会话的
@@ -1323,7 +1353,8 @@ def s14_close_during_conversion_confirms_and_stops(exe: str) -> None:
         if not media or not Path(media).is_file():
             message = "S14 需要媒体样本以保持转换运行态：设置 JCHTOOLS_S5_MEDIA 指向一个真实媒体文件"
             raise RuntimeError(message)
-        _ = shutil.copyfile(media, scratch / "input" / Path(media).name)
+        for index in range(STOP_MEDIA_FILE_COUNT):
+            _ = shutil.copyfile(media, scratch / "input" / f"{index:02}_{Path(media).name}")
         scratch_box.append(scratch)
 
     def body(window: WindowSpecification) -> None:
@@ -1347,6 +1378,125 @@ def s14_close_during_conversion_confirms_and_stops(exe: str) -> None:
 
     run_stage("S14", exe, body, pre=prepare_scratch, after=cleanup)
     print("S14 PASS：运行中关闭弹出「停止任务并关闭」，确认后安全停止并退出")
+
+
+def set_edit_before_button(window: WindowSpecification, button: BaseWrapper, value: str) -> None:
+    """填写选择按钮左侧最近的同排输入框，避免误选文件名或侧栏搜索框."""
+    rect = button.rectangle()
+    candidates = [
+        edit
+        for edit in window.descendants(control_type="Edit")
+        if abs(edit.rectangle().top - rect.top) < EDIT_ROW_TOLERANCE_PX and edit.rectangle().right <= rect.left
+    ]
+    require(candidates, "未找到选择按钮左侧输入框")
+    min(candidates, key=lambda edit: rect.left - edit.rectangle().right).set_edit_text(value)
+
+
+def s15_markdown_merge_and_split(exe: str) -> None:
+    """覆盖 M-01/M-04/M-08/M-10：真实页面到可核对的合并与拆分产物."""
+    with tempfile.TemporaryDirectory(prefix="jchtools-gui-md-") as temporary:
+        scratch = Path(temporary)
+        source, merged, split = (scratch / name for name in ("input", "merged", "split"))
+        for directory in (source, merged, split):
+            directory.mkdir()
+        originals = {"a.md": b"# Alpha\nfirst\n", "b.md": "# 中文\n第二份\n".encode()}
+        for name, content in originals.items():
+            _ = (source / name).write_bytes(content)
+        split_source = scratch / "document.md"
+        original = ("中文与 UTF-8 分片测试\n" * 150).encode()
+        _ = split_source.write_bytes(original)
+
+        def body(window: WindowSpecification) -> None:
+            click(window, find_button(window, "MD 整理"))
+            rows = unique_visible_buttons(window, "选择目录…")
+            require(len(rows) == CONVERT_DIR_ROWS, "合并页应有输入与输出目录两行")
+            for button, directory in zip(rows, (source, merged), strict=True):
+                set_edit_before_button(window, button, str(directory))
+            click(window, find_button(window, "开始合并"))
+            _ = wait_text_containing(window, "合并完成")
+            result = (merged / "merged.md").read_text(encoding="utf-8")
+            require("# a.md" in result and "## Alpha" in result, "合并必须保留文件标题并下移正文标题")
+            require("# b.md" in result and "## 中文" in result, "中文 Markdown 必须正常合并")
+            for name, content in originals.items():
+                require((source / name).read_bytes() == content, "合并不得改写输入")
+            click(window, window.child_window(title="拆分 MD", control_type="TabItem"))
+            files = unique_visible_buttons(window, "选择文件…")
+            directories = unique_visible_buttons(window, "选择目录…")
+            require(len(files) == 1 and len(directories) == 1, "拆分页应有文件与输出目录入口")
+            set_edit_before_button(window, files[0], str(split_source))
+            set_edit_before_button(window, directories[0], str(split))
+            click(window, find_button(window, "开始拆分"))
+            _ = wait_text_containing(window, "拆分完成")
+            pieces = sorted(split.glob("document_*.md"))
+            require(len(pieces) > 1, "1 KB 上限应产生多个分片")
+            require(b"".join(path.read_bytes() for path in pieces) == original, "分片拼接必须逐字节还原")
+            require(all(path.stat().st_size <= MD_SPLIT_LIMIT_BYTES for path in pieces), "分片不得超过 1 KB")
+            require(split_source.read_bytes() == original, "拆分不得改写原文件")
+
+        run_stage("S15", exe, body)
+    print("S15 PASS：MD 合并与拆分产物正确，原文件不变，UTF-8 分片可无损拼接")
+
+
+def s16_git_commit_and_push(exe: str) -> None:
+    """覆盖 G-01/G-04/G-05/G-13：真实 GUI 到本地 bare 远端的逐文件提交推送."""
+    git = shutil.which("git")
+    require(git is not None, "Git GUI 验证需要可用 git")
+    if git is None:
+        return
+    with tempfile.TemporaryDirectory(prefix="jchtools-gui-git-") as temporary:
+        scratch = Path(temporary)
+        repo, remote = scratch / "repo", scratch / "remote.git"
+        repo.mkdir()
+
+        def git_output(directory: Path, *args: str) -> str:
+            result = subprocess.run([git, *args], cwd=directory, capture_output=True, text=True, check=True)
+            return result.stdout.strip()
+
+        _ = git_output(scratch, "init", "--bare", str(remote))
+        _ = git_output(repo, "init", "--initial-branch=main")
+        _ = git_output(repo, "config", "user.name", "Synthetic GUI test")
+        _ = git_output(repo, "config", "user.email", "gui-test@local")
+        _ = (repo / "one.txt").write_text("initial\n", encoding="utf-8")
+        _ = git_output(repo, "add", "one.txt")
+        _ = git_output(repo, "commit", "-m", "initial synthetic fixture")
+        _ = git_output(repo, "remote", "add", "origin", str(remote))
+        _ = git_output(repo, "push", "--set-upstream", "origin", "main")
+        _ = (repo / "one.txt").write_text("changed\n", encoding="utf-8")
+        _ = (repo / "two.txt").write_text("second\n", encoding="utf-8")
+
+        def body(window: WindowSpecification) -> None:
+            click(window, find_button(window, "Git 工具"))
+            set_directory(window, str(repo))
+            click(window, find_button(window, "开始"))
+            _ = wait_text_containing(window, "全部完成：2 / 2")
+            require(git_output(repo, "status", "--porcelain") == "", "GUI 操作后工作树必须干净")
+            require(
+                git_output(repo, "rev-parse", "HEAD") == git_output(remote, "rev-parse", "main"), "远端必须收到全部提交"
+            )
+            for commit in ("HEAD", "HEAD~1"):
+                files = git_output(repo, "diff-tree", "--no-commit-id", "--name-only", "-r", commit).splitlines()
+                require(len(files) == 1, "每个 GUI 提交只能包含一个文件")
+            require(git_output(remote, "show", "main:one.txt") == "changed", "远端修改内容必须正确")
+            require(git_output(remote, "show", "main:two.txt") == "second", "远端新增内容必须正确")
+
+        run_stage("S16", exe, body)
+    print("S16 PASS：GUI 逐文件提交并推送成功，本地工作树与远端内容正确")
+
+
+def s17_initialize_configured_components(exe: str) -> None:
+    """覆盖 T-05/T-06：使用真实初始化入口准备隔离资产，不伪造就绪标记."""
+
+    def body(window: WindowSpecification) -> None:
+        goto_converter(window)
+        try:
+            _ = wait_text_containing(window, "已安装组件就绪，可离线使用", timeout=ATTEMPT_TIMEOUT)
+        except RuntimeError:
+            initialize = wait_button(window, "初始化可选组件", TIMEOUT, enabled=True)
+            click(window, initialize)
+        _ = wait_text_containing(window, "已安装组件就绪，可离线使用")
+
+    run_stage("S17", exe, body)
+    print("S17 PASS：真实 GUI 初始化成功，已配置的 Xberg 可离线使用")
 
 
 def parse_stages(stages_arg: str) -> list[str]:
@@ -1441,6 +1591,9 @@ def main() -> int:
         "S12": s12_output_subtree_is_excluded_from_scan,
         "S13": s13_partial_failure_isolated_with_counts,
         "S14": s14_close_during_conversion_confirms_and_stops,
+        "S15": s15_markdown_merge_and_split,
+        "S16": s16_git_commit_and_push,
+        "S17": s17_initialize_configured_components,
     }
     for stage, runner in stage_runners.items():
         if stage in stages:

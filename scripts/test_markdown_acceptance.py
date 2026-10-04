@@ -11,12 +11,14 @@ from pathlib import Path
 from typing import TYPE_CHECKING, cast
 from unittest.mock import patch
 
+from pywinauto import timings
+
 if TYPE_CHECKING:
     from collections.abc import Callable
 
     from pywinauto.application import WindowSpecification
 
-from scripts import markdown_acceptance
+from scripts import gui_smoke, markdown_acceptance
 from scripts.gui_smoke import find_button as smoke_find_button
 from scripts.markdown_acceptance import unique_visible_buttons, verify_common_postconditions
 from scripts.test_gate import acceptance_coverage_gaps
@@ -66,12 +68,143 @@ class _FakeSmokeWindow:
         return self
 
 
+class _UnreadableConfirmCheckbox:
+    def wait(self, _condition: str, *, timeout: int) -> None:
+        del timeout
+
+    def is_visible(self) -> bool:
+        message = "UIA 暂时不可读"
+        raise timings.TimeoutError(message)
+
+
+class _UnreadableConfirmWindow:
+    def child_window(self, **_kwargs: object) -> _UnreadableConfirmCheckbox:
+        return _UnreadableConfirmCheckbox()
+
+    def descendants(self, *, control_type: str) -> list[object]:
+        del control_type
+        message = "UIA 暂时不可读"
+        raise timings.TimeoutError(message)
+
+
 def _digest(path: Path) -> str:
     return hashlib.sha256(path.read_bytes()).hexdigest()
 
 
 class MediaPostconditionTests(unittest.TestCase):
     """验证 T-14 图片目录与 A26 横切断言的边界。."""
+
+    def test_svg_rasterization_does_not_require_svg_suffix_in_markdown(self) -> None:
+        # 覆盖 T-13/T-14：SVG 可由引擎栅格化为 PNG，必须验证真实媒体而非源扩展名字面量。
+        with tempfile.TemporaryDirectory() as temporary:
+            scratch = Path(temporary)
+            output = scratch / "a07-run" / "output"
+            media = output / "sample_media"
+            media.mkdir(parents=True)
+            token_png = cast("Callable[[str], bytes]", getattr(markdown_acceptance, "_" + "token_png"))
+            _ = (media / "image_0.png").write_bytes(token_png("SVG-LOCAL"))
+            _ = (media / "image_1.png").write_bytes(token_png("PNG-NEIGHBOR"))
+            _ = (output / "sample.md").write_text(
+                "![](sample_media/image_0.png)\n![](sample_media/image_1.png)\nPNG-NEIGHBOR\n",
+                encoding="utf-8",
+            )
+            item = next(item for item in markdown_acceptance.ITEMS if item.item_id == "A07")
+            run_matrix = cast(
+                "Callable[[markdown_acceptance.Item, markdown_acceptance.Context], markdown_acceptance.Outcome]",
+                getattr(markdown_acceptance, "_" + "run_matrix"),
+            )
+            with (
+                patch.object(markdown_acceptance, "SCRATCH_ROOT", scratch),
+                patch(
+                    "scripts.markdown_acceptance._run_conversion_item", return_value=markdown_acceptance.Outcome("PASS")
+                ),
+            ):
+                outcome = run_matrix(item, cast("markdown_acceptance.Context", object()))
+            assert outcome.status == "PASS", outcome.reason  # nosec B101: 回归测试断言。
+
+    def test_svg_case_rejects_missing_or_duplicated_media(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            media = root / "sample_media"
+            _ = media.mkdir()
+            token_png = cast("Callable[[str], bytes]", getattr(markdown_acceptance, "_" + "token_png"))
+            data = token_png("PNG-NEIGHBOR")
+            _ = (media / "image_0.png").write_bytes(data)
+            assert markdown_acceptance.verify_svg_raster_media(root) is not None  # nosec B101: 回归测试断言。
+            _ = (media / "image_1.png").write_bytes(data)
+            assert markdown_acceptance.verify_svg_raster_media(root) is not None  # nosec B101: 回归测试断言。
+
+    def test_stop_fixture_contains_work_after_current_file(self) -> None:
+        # 覆盖 T-23：单个文件自然结束不能冒充已请求停止并阻止后续文件。
+        with tempfile.TemporaryDirectory() as temporary:
+            media = Path(temporary) / "synthetic.mp4"
+            _ = media.write_bytes(b"synthetic fixture")
+
+            def inspect_batch(
+                _tag: str,
+                _exe: str,
+                _body: object,
+                *,
+                pre: Callable[[], None],
+                after: Callable[[], None],
+            ) -> None:
+                try:
+                    pre()
+                    inputs = [path for path in Path(temporary).rglob("*.mp4") if path != media]
+                    assert len(inputs) > 1  # nosec B101: 停止必须面对尚未开始的后续工作。
+                finally:
+                    after()
+
+            scratch = Path(temporary) / "batch"
+            _ = scratch.mkdir()
+            with (
+                patch.dict(os.environ, {"JCHTOOLS_S5_MEDIA": str(media)}),
+                patch("scripts.gui_smoke.tempfile.mkdtemp", return_value=str(scratch)),
+                patch.object(gui_smoke, "run_stage", side_effect=inspect_batch),
+            ):
+                gui_smoke.s5_markdown_basic_chain("synthetic.exe")
+
+    def test_confirm_read_failure_does_not_report_success(self) -> None:
+        # 覆盖 X-02：读取确认框的瞬态异常不能冒充用户已确认并启动任务。
+        with (
+            patch.object(gui_smoke, "find_button"),
+            patch.object(gui_smoke, "click"),
+            patch("scripts.gui_smoke.time.sleep"),
+            patch("scripts.gui_smoke.time.time", side_effect=[0, 0, 100]),
+        ):
+            try:
+                gui_smoke.confirm_dialog(
+                    cast("WindowSpecification", cast("object", _UnreadableConfirmWindow())),
+                    timeout=1,
+                )
+            except RuntimeError:
+                pass
+            else:
+                self.fail("UIA 异常不得冒充确认成功")
+
+    def test_isolated_gui_rejects_binary_without_test_hooks_before_body(self) -> None:
+        # 覆盖 XB-18/XB-21：测试配置尚未隔离时不得写入真实用户设置。
+        with (
+            tempfile.TemporaryDirectory() as temporary,
+            patch("scripts.gui_smoke.subprocess.Popen"),
+            patch.object(gui_smoke, "_OwnedProcessTree"),
+            patch.object(gui_smoke, "wait_window", return_value=(None, None)),
+            patch.object(gui_smoke, "_wait_exit_or_kill", return_value=(False, 0)),
+            patch("scripts.gui_smoke.time.sleep"),
+            patch("scripts.gui_smoke.time.time", side_effect=[0, 100]),
+            patch.object(gui_smoke, "assert_clean_exit"),
+        ):
+            try:
+                gui_smoke.run_stage(
+                    "isolation",
+                    "synthetic.exe",
+                    lambda _window: None,
+                    env={"JCHTOOLS_TEST_STATE_DIR": temporary},
+                )
+            except RuntimeError:
+                pass
+            else:
+                self.fail("未隔离的 GUI 不得执行测试写入")
 
     def test_legal_media_directory_and_reference_pass(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:

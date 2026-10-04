@@ -8,7 +8,7 @@
   Snap OCR core/worker 的 all-targets 测试与 clippy、构建输出 binding loop 警告扫描。可选阶段：
     -WithEngine   追加真实引擎用例（JCHTOOLS_TEST_7ZIP 或 resources\7zip\7z.exe，
                   缺失时直接失败并提示先运行 fetch-7zip.ps1）
-    -WithGuiSmoke 追加 OS 级 UIA 冒烟 S1-S4（需要 -GuiData 指向 make_tmp.py testdata
+    -WithGuiSmoke 追加 OS 级 UIA 冒烟 S1-S4/S15/S16（需要 -GuiData 指向 make_tmp.py testdata
                   生成的数据集与 cargo build 产物（尊重 CARGO_TARGET_DIR，未设置时为 target\debug）；需要 pip install pywinauto）
     -WithPackage  追加发布打包自检（package-windows.ps1，需要引擎与 MSVC 工具链）
     -WithMarkdownAcceptance 追加转 Markdown 验收承接（scripts/markdown_acceptance.py，
@@ -156,9 +156,19 @@ if ($WithGuiSmoke) {
     $exe = Join-Path $targetDir 'debug\JchTools.exe'
     # 无条件重建：target 下残留旧 exe 时跳过构建会让冒烟作用于陈旧二进制，
     # 验证结论与当前源码脱节（AGENTS.md 3.2 对抗自证偏差）。
-    $null = Invoke-Logged -Name 'gui-build' -File 'cargo' -Arguments @('build')
-    $null = Invoke-Logged -Name 'gui-smoke' -File $python -Arguments @('scripts/gui_smoke.py','--exe',$exe,'--data',$GuiData)
-} else {$script:Results.Add('NOT RUN  gui-smoke S1-S4（加 -WithGuiSmoke -GuiData <目录>）')}
+    # 保留普通生产构建维度；真实桌面测试启用显式隔离，不能启动用户常驻后台，
+    # 否则后面的隔离 Markdown broker 会按 XB-14 拒绝第二个引擎。
+    $null = Invoke-Logged -Name 'gui-production-build' -File 'cargo' -Arguments @('build')
+    $null = Invoke-Logged -Name 'gui-build' -File 'cargo' -Arguments @('build','--features','test-hooks')
+    $guiState = Join-Path $script:LogDir 'gui-state'
+    $guiEnvironment = @{
+        JCHTOOLS_TEST_STATE_DIR = $guiState
+        JCHTOOLS_SNAP_OCR_TEST_ASSET_ROOT = Join-Path $script:LogDir 'gui-snap-assets'
+        JCHTOOLS_MARKDOWN_TEST_ASSET_ROOT = Join-Path $script:LogDir 'gui-markdown-assets'
+    }
+    $null = Invoke-Logged -Name 'gui-smoke' -File $python `
+        -Arguments @('scripts/gui_smoke.py','--exe',$exe,'--data',$GuiData) -Environment $guiEnvironment
+} else {$script:Results.Add('NOT RUN  gui-smoke S1-S4/S15/S16（加 -WithGuiSmoke -GuiData <目录>）')}
 
 # 5.5) 旧 markdown-media-worker 已退役（XB-12：媒体转录迁移到 Xberg 推理组件）；
 #      其验收阶段随之移除，截图 OCR 组件测试见下方 snap-ocr 阶段。
@@ -218,6 +228,10 @@ if ($WithMarkdownAcceptance) {
         Set-Item -Path Env:JCHTOOLS_TEST_ASSET_ROOT -Value $mdAssetRoot
         Set-Item -Path Env:JCHTOOLS_TEST_STATE_DIR -Value $mdStateRoot
         Set-Item -Path Env:JCHTOOLS_TEST_GUI_EXE -Value $mdExe
+        if ($testXberg) {
+            $null = Invoke-Logged -Name 'markdown-gui-initialize' -File $python `
+                -Arguments @('scripts/gui_smoke.py','--exe',$mdExe,'--data',$mdAssetRoot,'--stages','S17')
+        }
         $mdOutput = & $python @mdArgs 2>&1
     } finally {
         foreach ($key in $savedMarkdownEnv.Keys) {
