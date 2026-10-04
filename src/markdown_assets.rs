@@ -5,12 +5,13 @@
 use crate::asset_util::{
     atomic_replace_dir, cleanup_stale_staging_dirs, ensure_not_cancelled, finalize_staging,
     require_component_members, require_inference_members_for_scenario, resolve_xberg_component,
-    state_dir_asset_root, valid_component_tag, validate_relative_path, verify_file,
+    state_dir_asset_root, valid_component_tag, validate_relative_path, verify_file_with_cancel,
     AssetDownloader, InferenceManifest,
 };
 use serde::Deserialize;
 use std::fmt::Write as FmtWrite;
-use std::fs;
+use std::fs::{self, File, OpenOptions};
+use std::io::Write as IoWrite;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::AtomicBool;
 use uuid::Uuid;
@@ -19,6 +20,7 @@ const MANIFEST: &str = include_str!("../resources/markdown-assets.json");
 const DATA_DIRECTORY: &str = "markdown-assets";
 pub(crate) const XBERG_TAG: &str = "v2026.10.2-0920-run54.1";
 const RUNTIME_SELECTION_FILE: &str = "xberg-runtime-path.txt";
+const XBERG_DOWNLOAD_STAGING_MARKER: &str = ".jchtools-xberg-download-staging-v1";
 
 #[derive(Debug, Deserialize)]
 struct AssetManifest {
@@ -340,8 +342,26 @@ fn download_runtime_task(
     ensure_not_cancelled(cancel)?;
     let base = crate::xberg_settings::state_dir()?.join("xberg-downloads");
     fs::create_dir_all(&base).map_err(|e| e.to_string())?;
+    cleanup_owned_download_staging(&base, progress);
     let staging = base.join(format!(".staging-{}", Uuid::new_v4()));
     fs::create_dir(&staging).map_err(|e| e.to_string())?;
+    let mut staging_lock = match open_download_staging_lock(&staging) {
+        Ok(file) => file,
+        Err(error) => {
+            let _ = fs::remove_dir_all(&staging);
+            return Err(error);
+        }
+    };
+    if let Err(error) = staging_lock.write_all(b"JchTools Xberg download staging\n") {
+        drop(staging_lock);
+        let _ = fs::remove_dir_all(&staging);
+        return Err(format!("创建下载临时目录所有权标记失败：{error}"));
+    }
+    if let Err(error) = staging_lock.sync_all() {
+        drop(staging_lock);
+        let _ = fs::remove_dir_all(&staging);
+        return Err(format!("同步下载临时目录所有权标记失败：{error}"));
+    }
     let result = (|| {
         let archive = staging.join("runtime.zip");
         let pack = &manifest.xberg;
@@ -354,17 +374,23 @@ fn download_runtime_task(
             progress,
         )?;
         ensure_not_cancelled(cancel)?;
-        verify_file(&archive, pack.archive_size_bytes, &pack.archive_sha256)?;
+        verify_file_with_cancel(
+            &archive,
+            pack.archive_size_bytes,
+            &pack.archive_sha256,
+            cancel,
+        )?;
         let extracted = staging.join("unpacked");
         fs::create_dir(&extracted).map_err(|e| e.to_string())?;
         crate::asset_util::extract_zip_safely(&archive, &extracted, cancel)?;
         let component = extracted.join("xberg-cli-x86_64-pc-windows-msvc");
         for member in &pack.members {
             ensure_not_cancelled(cancel)?;
-            verify_file(
+            verify_file_with_cancel(
                 &component.join(&member.path),
                 member.size_bytes,
                 &member.sha256,
+                cancel,
             )?;
         }
         // 上述清单含全部场景，逐成员核对，不按当前工具过滤模型。
@@ -381,11 +407,66 @@ fn download_runtime_task(
         }
         Ok(installed)
     })();
+    // 校验与安装已经结束；先释放禁止删除共享的 Windows marker 句柄。
+    drop(staging_lock);
     let cleanup = fs::remove_dir_all(&staging);
     if let Err(error) = cleanup {
         progress(format!("下载临时目录清理失败：{error}"));
     }
     result
+}
+
+fn open_download_staging_lock(staging: &Path) -> Result<File, String> {
+    let marker = staging.join(XBERG_DOWNLOAD_STAGING_MARKER);
+    #[cfg(windows)]
+    {
+        use std::os::windows::fs::OpenOptionsExt;
+        OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .share_mode(0b011)
+            .open(&marker)
+            .map_err(|error| format!("创建下载临时目录所有权标记失败：{error}"))
+    }
+    #[cfg(not(windows))]
+    {
+        OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&marker)
+            .map_err(|error| format!("创建下载临时目录所有权标记失败：{error}"))
+    }
+}
+
+/// 只清理本流程创建并带有精确所有权标记的下载 staging 目录。
+///
+/// `xberg-downloads` 可能由用户自行创建或包含用户文件；没有标记的目录一律
+/// 保留。有效下载版本目录不是 `.staging-*`，因此不会被触碰。
+fn cleanup_owned_download_staging(root: &Path, progress: &mut impl FnMut(String)) {
+    let Ok(entries) = fs::read_dir(root) else {
+        return;
+    };
+    for entry in entries.flatten() {
+        let path = entry.path();
+        let is_staging = path
+            .file_name()
+            .and_then(|name| name.to_str())
+            .is_some_and(|name| name.starts_with(".staging-"));
+        let Ok(metadata) = fs::symlink_metadata(&path) else {
+            continue;
+        };
+        if !is_staging || !metadata.file_type().is_dir() || metadata.file_type().is_symlink() {
+            continue;
+        }
+        let marker = path.join(XBERG_DOWNLOAD_STAGING_MARKER);
+        let owned = fs::read_to_string(&marker)
+            .is_ok_and(|value| value == "JchTools Xberg download staging\n");
+        if owned {
+            if let Err(error) = fs::remove_dir_all(&path) {
+                progress(format!("警告：清理旧 Xberg 下载临时目录失败：{error}"));
+            }
+        }
+    }
 }
 
 fn load_manifest() -> Result<AssetManifest, String> {
@@ -429,7 +510,7 @@ fn load_manifest() -> Result<AssetManifest, String> {
 }
 
 fn asset_root() -> PathBuf {
-    if cfg!(debug_assertions) {
+    if cfg!(test) || cfg!(feature = "test-hooks") {
         if let Some(path) = std::env::var_os("JCHTOOLS_MARKDOWN_TEST_ASSET_ROOT") {
             let path = PathBuf::from(path);
             if path.is_absolute() {
@@ -474,6 +555,34 @@ mod tests {
             !manifest.xberg.members.is_empty(),
             "xberg 固定版本成员清单不得为空"
         );
+    }
+
+    #[test]
+    fn cleanup_owned_download_staging_preserves_unowned_and_valid_versions() {
+        let root = tempfile::tempdir().expect("创建测试目录");
+        let owned = root.path().join(".staging-owned");
+        fs::create_dir_all(&owned).expect("创建自有 staging");
+        fs::write(
+            owned.join(super::XBERG_DOWNLOAD_STAGING_MARKER),
+            b"JchTools Xberg download staging\n",
+        )
+        .expect("写入自有 staging 标记");
+        fs::write(owned.join("runtime.zip"), b"partial").expect("写入残留下载");
+
+        let unowned = root.path().join(".staging-user");
+        fs::create_dir_all(&unowned).expect("创建用户 staging");
+        fs::write(unowned.join("user.txt"), b"keep").expect("写入用户文件");
+
+        let version = root.path().join("v2026.10.2-0920-run54.1-uuid");
+        fs::create_dir_all(&version).expect("创建有效版本目录");
+        fs::write(version.join("xberg.exe"), b"valid").expect("写入有效版本");
+
+        let mut progress = |_message: String| {};
+        super::cleanup_owned_download_staging(root.path(), &mut progress);
+
+        assert!(!owned.exists(), "带所有权标记的残留 staging 必须回收");
+        assert!(unowned.exists(), "无所有权标记的目录不得删除");
+        assert!(version.exists(), "有效下载版本目录不得删除");
     }
 
     // 覆盖 XB-19/T-05（回归：任务预检按所选分组分场景——纯媒体目录缺文档模型
@@ -625,6 +734,12 @@ mod tests {
         fs::create_dir(&custom).unwrap();
         fs::write(custom.join("xberg.exe"), b"existing").unwrap();
         crate::xberg_settings::save(&custom).unwrap();
+        let user_staging = crate::xberg_settings::state_dir()
+            .unwrap()
+            .join("xberg-downloads")
+            .join(".staging-user");
+        fs::create_dir_all(&user_staging).unwrap();
+        fs::write(user_staging.join("user.txt"), b"keep").unwrap();
         let mut archive = zip::ZipWriter::new(Cursor::new(Vec::new()));
         let mut members = Vec::new();
         for (name, bytes) in [
@@ -703,13 +818,26 @@ mod tests {
         )
         .is_err());
         assert_eq!(fs::read(custom.join("xberg.exe")).unwrap(), b"existing");
-        assert!(fs::read_dir(installed.parent().unwrap())
+        assert!(
+            user_staging.exists(),
+            "无 ownership marker 的用户 staging 必须保留"
+        );
+        let remaining_staging: Vec<String> = fs::read_dir(installed.parent().unwrap())
             .unwrap()
-            .all(|entry| !entry
-                .unwrap()
-                .file_name()
-                .to_string_lossy()
-                .starts_with(".staging-")));
+            .flatten()
+            .filter_map(|entry| {
+                entry
+                    .file_name()
+                    .to_str()
+                    .map(str::to_string)
+                    .filter(|name| name.starts_with(".staging-"))
+            })
+            .collect();
+        assert_eq!(
+            remaining_staging,
+            vec![".staging-user".to_string()],
+            "本轮带 ownership marker 的 staging 必须清除，用户目录必须保留"
+        );
     }
 
     // 覆盖 T-05/T-06（XB-01/XB-12）：媒体组件按在位校验，齐全时返回组件目录。

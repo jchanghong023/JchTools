@@ -76,7 +76,7 @@ fn identity() -> String {
 
 fn hash() -> String {
     use std::fmt::Write as _;
-    let isolated = if cfg!(debug_assertions) {
+    let isolated = if cfg!(any(test, feature = "test-hooks")) {
         std::env::var_os("JCHTOOLS_SNAP_OCR_TEST_ASSET_ROOT")
             .map(std::path::PathBuf::from)
             .filter(|p| p.is_absolute())

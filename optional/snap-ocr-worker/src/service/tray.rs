@@ -153,6 +153,29 @@ fn notify(hwnd: Handle, message: Option<&str>, hotkey: &str, action: u32) -> boo
     unsafe { Shell_NotifyIconW(action, &raw mut data) != 0 }
 }
 
+fn message_loop_requires_cleanup(code: i32) -> bool {
+    code <= 0
+}
+
+fn cleanup_tray_state(hwnd: Handle, failure: Option<&str>) {
+    STATE.with(|slot| {
+        if let Some(state) = slot.borrow_mut().take() {
+            if state.active != 0 {
+                // SAFETY: state.active 是本线程成功注册的热键 ID；0 表示未注册。
+                unsafe { UnregisterHotKey(hwnd, state.active) };
+            }
+            // SAFETY: hwnd 与图标 ID 属于本线程创建的通知区图标；删除失败不影响
+            // 其余句柄清理。
+            notify(hwnd, None, &state.hotkey, 2);
+            if let Some(reason) = failure {
+                let _ = state
+                    .commands
+                    .send(Command::HotkeyUnavailable(reason.to_owned()));
+            }
+        }
+    });
+}
+
 /// 原 TextSnap 热键键域：修饰键 + 字母/数字/F1～F24/固定命名键；
 /// 解析只做固定映射，注册是否可用由 Win32 RegisterHotKey 决定。
 pub(crate) fn parse_hotkey(raw: &str) -> Result<(u32, u32), String> {
@@ -375,6 +398,7 @@ unsafe extern "system" fn wnd_proc(hwnd: Handle, msg: u32, w: usize, l: isize) -
                             notify(hwnd, Some(&message), &name, 1);
                         }
                         Control::Stop(response) => {
+                            let _ = crate::capture_win::cancel_selection();
                             // SAFETY: 仅按值传递本线程创建的窗口句柄。
                             unsafe { DestroyWindow(hwnd) };
                             let _ = response.send(());
@@ -391,13 +415,7 @@ unsafe extern "system" fn wnd_proc(hwnd: Handle, msg: u32, w: usize, l: isize) -
             return 0;
         }
         0x0002 => {
-            STATE.with(|slot| {
-                if let Some(state) = slot.borrow_mut().take() {
-                    // SAFETY: 仅按值传递窗口句柄与本线程注册的热键 ID。
-                    unsafe { UnregisterHotKey(hwnd, state.active) };
-                    notify(hwnd, None, &state.hotkey, 2);
-                }
-            });
+            cleanup_tray_state(hwnd, None);
             // SAFETY: 仅传递整数退出码，向本线程消息队列投递 WM_QUIT。
             unsafe { PostQuitMessage(0) };
             return 0;
@@ -427,6 +445,10 @@ impl TrayHandle {
     pub(crate) fn trigger(&self) {
         self.send(Control::Trigger);
     }
+    /// 请求当前冻结框选结束；服务取消/退出路径可在不阻塞托盘线程的情况下调用。
+    pub(crate) fn cancel_selection() -> bool {
+        crate::capture_win::cancel_selection()
+    }
     pub(crate) fn notice(&self, text: impl Into<String>) {
         self.send(Control::Notice(text.into()));
     }
@@ -437,6 +459,7 @@ impl TrayHandle {
             .unwrap_or_else(|_| Err("快捷键更新超时".into()))
     }
     pub(crate) fn stop(&self) {
+        let _ = Self::cancel_selection();
         let (tx, rx) = mpsc::sync_channel(1);
         self.send(Control::Stop(tx));
         let _ = rx.recv_timeout(std::time::Duration::from_secs(2));
@@ -544,7 +567,13 @@ pub(crate) fn start(
             // SAFETY: Msg 为纯数据 C 结构体，全零是有效初始值，字段随后由 GetMessageW 填写。
             let mut msg = unsafe { std::mem::zeroed::<Msg>() };
             // SAFETY: msg 为栈上有效输出缓冲，指针在调用期间有效；hwnd 传 null 表示取本线程全部消息。
-            if unsafe { GetMessageW(&raw mut msg, null_mut(), 0, 0) } <= 0 {
+            let code = unsafe { GetMessageW(&raw mut msg, null_mut(), 0, 0) };
+            if message_loop_requires_cleanup(code) {
+                if code < 0 {
+                    cleanup_tray_state(hwnd, Some("托盘消息循环失败；快捷键与托盘已清理"));
+                } else {
+                    cleanup_tray_state(hwnd, None);
+                }
                 break;
             }
             // SAFETY: msg 已由 GetMessageW 填成有效消息结构，只读指针在调用期间有效。
@@ -560,7 +589,7 @@ pub(crate) fn start(
 
 #[cfg(test)]
 mod tests {
-    use super::parse_hotkey;
+    use super::{message_loop_requires_cleanup, parse_hotkey};
 
     // 覆盖 O-14：可设置原版命名键与功能键；重复修饰键/无修饰键不得注册。
     #[test]
@@ -571,5 +600,13 @@ mod tests {
         for invalid in ["O", "Ctrl+F25", "Ctrl+Ctrl+O", "Alt+O+P", "Ctrl+"] {
             assert!(parse_hotkey(invalid).is_err(), "{invalid} 不应替换有效热键");
         }
+    }
+
+    // 覆盖 O-11/O-14/O-16 回归：消息循环异常退出也必须进入托盘清理路径。
+    #[test]
+    fn failed_message_loop_requires_tray_cleanup() {
+        assert!(message_loop_requires_cleanup(-1));
+        assert!(message_loop_requires_cleanup(0));
+        assert!(!message_loop_requires_cleanup(1));
     }
 }

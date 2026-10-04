@@ -13,7 +13,8 @@ use crate::asset_util::{
     atomic_replace_dir, atomic_replace_file, cleanup_stale_staging_dirs, ensure_not_cancelled,
     extract_zip_safely, finalize_staging, require_component_members,
     require_inference_members_for_scenario, resolve_xberg_component, state_dir_asset_root,
-    valid_component_tag, validate_relative_path, verify_file, AssetDownloader, InferenceManifest,
+    valid_component_tag, validate_relative_path, verify_file, verify_file_with_cancel,
+    AssetDownloader, InferenceManifest,
 };
 use serde::Deserialize;
 use sha2::{Digest, Sha256};
@@ -93,6 +94,7 @@ struct SnapWorker {
     size_bytes: u64,
     sha256: String,
     #[serde(default)]
+    #[allow(dead_code)]
     members: Vec<SnapMember>,
     license: SnapLicense,
 }
@@ -105,15 +107,13 @@ impl SnapWorker {
     }
 }
 
-/// 测试资产根覆盖（按 `debug_assertions` 门禁；注意本仓 release profile 同样
-/// 开启 debug-assertions，故发布构建中也生效——变量以测试命名、单用户本地
-/// 工具，实际风险可控，C'-1）：`JCHTOOLS_SNAP_OCR_TEST_ASSET_ROOT`
+/// 测试支持构建的资产根覆盖：`JCHTOOLS_SNAP_OCR_TEST_ASSET_ROOT`
 /// 指向绝对路径时，资产根与截图服务管道名（见 [`pipe_name`]）一并脱离生产
 /// 位置——无头测试因此既不会 spawn 真实 worker（readiness 对隔离根必然
 /// 失败），也不会向真实用户会话的服务管道发送请求（生产名可被真实服务应答，
 /// attach-main-exe 会改写其 launcher.json）。
 fn test_asset_root_override() -> Option<PathBuf> {
-    if !cfg!(debug_assertions) {
+    if !(cfg!(test) || cfg!(feature = "test-hooks")) {
         return None;
     }
     std::env::var_os("JCHTOOLS_SNAP_OCR_TEST_ASSET_ROOT")
@@ -431,30 +431,13 @@ fn initialize_staged(
         ));
     }
     ensure_not_cancelled(cancel)?;
-    if bundled_worker().is_some() || worker_ready(worker, root).is_ok() {
+    let bundled_present = bundled_worker().is_some();
+    let bundled_ready = bundled_present && worker_install_path().is_ok();
+    let cached_ready = !bundled_present && worker_ready(worker, root).is_ok();
+    if bundled_ready || cached_ready {
         progress("复用已校验的工作进程".to_string());
     } else {
-        progress(format!(
-            "下载资产 {}/{}：{}",
-            total + 2,
-            total + 2,
-            worker.id
-        ));
-        let asset = SnapAsset {
-            id: worker.id.clone(),
-            url: worker.url.clone(),
-            archive_type: worker.archive_type.clone(),
-            install_path: Some(worker.install_path.clone()),
-            size_bytes: worker.size_bytes,
-            sha256: worker.sha256.clone(),
-            members: worker.members.clone(),
-            license: SnapLicense {
-                component: worker.license.component.clone(),
-                license: worker.license.license.clone(),
-                source: worker.license.source.clone(),
-            },
-        };
-        install_asset(&asset, staging, root, cancel, downloader, progress)?;
+        return Err(worker_repair_message(worker));
     }
     let notice_stage = staging.join("licenses");
     fs::create_dir_all(&notice_stage).map_err(|error| format!("创建许可证目录失败：{error}"))?;
@@ -463,6 +446,13 @@ fn initialize_staged(
     readiness()?;
     progress("截图 OCR 组件初始化完成".to_string());
     Ok(())
+}
+
+fn worker_repair_message(worker: &SnapWorker) -> String {
+    format!(
+        "截图 OCR 工作进程未安装或与当前清单摘要不匹配（{}）；请重新安装当前 JchTools 包修复 worker，不会下载其他版本",
+        worker.install_path
+    )
 }
 
 /// 下载单个资产（文件或归档）并按清单落位：先在 staging 校验，再原子替换到最终
@@ -488,7 +478,7 @@ fn install_asset(
     )?;
     ensure_not_cancelled(cancel)?;
     // 下载器校验之外独立复核暂存内容，防伪造的“下载成功”。
-    verify_file(&archive, asset.size_bytes, &asset.sha256)
+    verify_file_with_cancel(&archive, asset.size_bytes, &asset.sha256, cancel)
         .map_err(|error| format!("资产 {} 下载内容校验失败：{error}", asset.id))?;
     match asset.archive_type.as_str() {
         "file" => {
@@ -497,7 +487,8 @@ fn install_asset(
                 .as_ref()
                 .ok_or_else(|| format!("文件资产 {} 缺少安装路径", asset.id))?;
             let target = root.join(install_path);
-            if verify_file(&target, asset.size_bytes, &asset.sha256).is_err() {
+            if verify_file_with_cancel(&target, asset.size_bytes, &asset.sha256, cancel).is_err() {
+                ensure_not_cancelled(cancel)?;
                 atomic_replace_file(&archive, &target)?;
             }
             Ok(())
@@ -511,11 +502,15 @@ fn install_asset(
             }
             for member in &asset.members {
                 let source = extracted.join(&member.path);
-                verify_file(&source, member.size_bytes, &member.sha256).map_err(|error| {
-                    format!("资产 {} 成员 {} 校验失败：{error}", asset.id, member.path)
-                })?;
+                verify_file_with_cancel(&source, member.size_bytes, &member.sha256, cancel)
+                    .map_err(|error| {
+                        format!("资产 {} 成员 {} 校验失败：{error}", asset.id, member.path)
+                    })?;
                 let target = root.join(&member.install_path);
-                if verify_file(&target, member.size_bytes, &member.sha256).is_err() {
+                if verify_file_with_cancel(&target, member.size_bytes, &member.sha256, cancel)
+                    .is_err()
+                {
+                    ensure_not_cancelled(cancel)?;
                     atomic_replace_file(&source, &target)?;
                 }
             }
@@ -797,8 +792,12 @@ where
             let _ = fs::remove_file(partial);
             return Err(format!("下载资产失败：{error}"));
         }
-        match verify_file(partial, expected_size, expected_sha256) {
+        match verify_file_with_cancel(partial, expected_size, expected_sha256, cancel) {
             Ok(()) => {
+                if let Err(error) = ensure_not_cancelled(cancel) {
+                    let _ = fs::remove_file(partial);
+                    return Err(error);
+                }
                 fs::rename(partial, destination)
                     .map_err(|error| format!("写入下载资产失败：{error}"))?;
                 tracing::info!(
@@ -807,6 +806,10 @@ where
                     "资产下载完成"
                 );
                 return Ok(());
+            }
+            Err(_) if cancel.load(std::sync::atomic::Ordering::Acquire) => {
+                let _ = fs::remove_file(partial);
+                return Err("用户已取消初始化".to_string());
             }
             Err(error) if attempt < 3 => {
                 tracing::warn!(attempt, reason = %error, "资产校验失败，准备重试");
@@ -853,10 +856,7 @@ fn download_stream(
                 url = url,
                 "系统代理连接失败，按 P-09 自动回退直连重试"
             );
-            progress(
-                "System proxy connection failed, automatically falling back to direct retry"
-                    .to_string(),
-            );
+            progress("系统代理连接失败，自动回退直连重试".to_string());
             download_attempt(url, partial, expected_size, cancel, progress, None).map_err(
                 |(direct_message, _)| {
                     tracing::error!(
@@ -865,7 +865,9 @@ fn download_stream(
                         url = url,
                         "系统代理与直连均失败"
                     );
-                    format!("Both system proxy and direct connection failed — system proxy: {proxy_message}; direct connection: {direct_message}")
+                    format!(
+                        "系统代理与直连均失败——系统代理：{proxy_message}；直连：{direct_message}"
+                    )
                 },
             )
         }
@@ -915,6 +917,7 @@ fn download_attempt(
     let mut current = 0_u64;
     loop {
         if cancel.load(std::sync::atomic::Ordering::Acquire) {
+            drop(output);
             let _ = fs::remove_file(partial);
             return Err(("用户已取消初始化".to_string(), false));
         }
@@ -924,10 +927,22 @@ fn download_attempt(
         if read == 0 {
             break;
         }
+        let next = match checked_download_total(
+            current,
+            u64::try_from(read).unwrap_or(u64::MAX),
+            expected_size,
+        ) {
+            Ok(next) => next,
+            Err(error) => {
+                drop(output);
+                let _ = fs::remove_file(partial);
+                return Err((error, false));
+            }
+        };
         output
             .write_all(&buffer[..read])
             .map_err(|error| (format!("写入下载数据失败：{error}"), false))?;
-        current = current.saturating_add(read as u64);
+        current = next;
         if expected_size > 0 {
             let percent = current
                 .saturating_mul(100)
@@ -943,6 +958,15 @@ fn download_attempt(
         .sync_all()
         .map_err(|error| (format!("同步下载文件失败：{error}"), false))?;
     Ok(())
+}
+
+fn checked_download_total(current: u64, chunk: u64, expected_size: u64) -> Result<u64, String> {
+    let next = current.saturating_add(chunk);
+    if expected_size > 0 && next > expected_size {
+        Err(format!("下载数据超过清单大小（预期 {expected_size} 字节）"))
+    } else {
+        Ok(next)
+    }
 }
 
 fn write_notice(path: &Path, manifest: &SnapAssetManifest) -> Result<(), String> {
@@ -998,6 +1022,40 @@ mod tests {
     use std::fs;
     use std::path::Path;
     use std::sync::atomic::AtomicBool;
+
+    #[test]
+    fn checked_download_total_rejects_payload_over_manifest_size() {
+        assert_eq!(
+            super::checked_download_total(4, 6, 10).expect("边界大小应允许"),
+            10
+        );
+        let error =
+            super::checked_download_total(4, 7, 10).expect_err("超过清单大小必须在写盘前拒绝");
+        assert!(error.contains("超过清单大小"));
+    }
+
+    #[test]
+    fn missing_worker_reports_repair_without_downloading_another_version() {
+        let worker = super::SnapWorker {
+            id: "snap-ocr-worker".to_string(),
+            status: "ok".to_string(),
+            url: "https://example.invalid/snap-ocr-worker.exe".to_string(),
+            archive_type: "file".to_string(),
+            install_path: "worker/v0.1.2/snap-ocr-worker.exe".to_string(),
+            size_bytes: 1,
+            sha256: "00".repeat(32),
+            members: vec![],
+            license: super::SnapLicense {
+                component: "worker".to_string(),
+                license: "MIT".to_string(),
+                source: "https://example.invalid".to_string(),
+            },
+        };
+
+        let message = super::worker_repair_message(&worker);
+        assert!(message.contains("重新安装当前 JchTools 包"));
+        assert!(message.contains("不会下载其他版本"));
+    }
 
     // 覆盖 O-11/O-13：推理组件的在位校验——缺失、不完整与齐备分别得到明确的
     // 结论，不冒称就绪；存在性检查不要求摘要（摘要校验随清单条目接入）。

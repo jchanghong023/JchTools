@@ -10,7 +10,12 @@ use slint::ComponentHandle;
 // Slint 1.17.1 生成代码在内部嵌入桩发射 todo!，并在生成的属性升级路径使用
 // unwrap、生成大量对外不可达的 pub 项；与主窗口相同，仅隔离生成模块，
 // 不放宽本文件的业务实现。
-#[allow(clippy::unwrap_used, clippy::todo, unreachable_pub)]
+#[allow(
+    clippy::unwrap_used,
+    clippy::todo,
+    unreachable_pub,
+    single_use_lifetimes
+)]
 mod generated_ui {
     slint::include_modules!();
 }
@@ -143,13 +148,135 @@ pub fn normalize_shift_key(shift: bool, key: &str) -> String {
     key.to_owned()
 }
 
+/// 结果/进度/设置窗共用的主题颜色值。窗口自身以 Slint `Palette` 为默认来源，
+/// 此公开辅助 API 供服务接线在需要显式同步主题时使用。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ThemeColors {
+    pub background: (u8, u8, u8),
+    pub surface: (u8, u8, u8),
+    pub text: (u8, u8, u8),
+    pub secondary_text: (u8, u8, u8),
+    pub accent: (u8, u8, u8),
+    pub border: (u8, u8, u8),
+}
+
+#[must_use]
+pub fn theme_colors(dark: bool) -> ThemeColors {
+    if dark {
+        ThemeColors {
+            background: (21, 23, 27),
+            surface: (30, 33, 39),
+            text: (238, 241, 248),
+            secondary_text: (167, 174, 187),
+            accent: (106, 162, 255),
+            border: (56, 61, 70),
+        }
+    } else {
+        ThemeColors {
+            background: (251, 251, 253),
+            surface: (255, 255, 255),
+            text: (28, 29, 34),
+            secondary_text: (91, 95, 107),
+            accent: (37, 99, 207),
+            border: (217, 219, 227),
+        }
+    }
+}
+
+macro_rules! apply_theme_tokens {
+    ($window:expr, $dark:expr) => {{
+        let colors = theme_colors($dark);
+        let theme = SnapTheme::get($window);
+        theme.set_dark($dark);
+        theme.set_background(slint::Color::from_rgb_u8(
+            colors.background.0,
+            colors.background.1,
+            colors.background.2,
+        ));
+        theme.set_surface(slint::Color::from_rgb_u8(
+            colors.surface.0,
+            colors.surface.1,
+            colors.surface.2,
+        ));
+        theme.set_text(slint::Color::from_rgb_u8(
+            colors.text.0,
+            colors.text.1,
+            colors.text.2,
+        ));
+        theme.set_text_secondary(slint::Color::from_rgb_u8(
+            colors.secondary_text.0,
+            colors.secondary_text.1,
+            colors.secondary_text.2,
+        ));
+        theme.set_accent(slint::Color::from_rgb_u8(
+            colors.accent.0,
+            colors.accent.1,
+            colors.accent.2,
+        ));
+        theme.set_border(slint::Color::from_rgb_u8(
+            colors.border.0,
+            colors.border.1,
+            colors.border.2,
+        ));
+    }};
+}
+
+/// 读取 Windows 当前用户的应用主题；非 Windows 后端保持浅色默认。
+#[cfg(windows)]
+fn system_theme_is_dark() -> bool {
+    use windows_sys::Win32::System::Registry::{RegGetValueW, HKEY_CURRENT_USER, RRF_RT_REG_DWORD};
+    let path: Vec<u16> = "Software\\Microsoft\\Windows\\CurrentVersion\\Themes\\Personalize"
+        .encode_utf16()
+        .chain(std::iter::once(0))
+        .collect();
+    let name: Vec<u16> = "AppsUseLightTheme"
+        .encode_utf16()
+        .chain(std::iter::once(0))
+        .collect();
+    let mut value = 1u32;
+    let mut size = u32::try_from(std::mem::size_of::<u32>()).unwrap_or(u32::MAX);
+    // SAFETY: path/name 均为 NUL 结尾的 UTF-16；value/size 是配套 DWORD 输出缓冲区。
+    let status = unsafe {
+        RegGetValueW(
+            HKEY_CURRENT_USER,
+            path.as_ptr(),
+            name.as_ptr(),
+            RRF_RT_REG_DWORD,
+            std::ptr::null_mut(),
+            (&raw mut value).cast(),
+            &raw mut size,
+        )
+    };
+    status == 0 && value == 0
+}
+
+#[cfg(not(windows))]
+fn system_theme_is_dark() -> bool {
+    false
+}
+
+/// 将 worker 窗口主题同步到当前用户系统主题，供服务接线使用。
+pub fn apply_system_theme(window: &ResultWindow) {
+    apply_theme_tokens!(window, system_theme_is_dark());
+}
+
+/// 将 worker 进度窗主题同步到当前用户系统主题，供服务接线使用。
+pub fn apply_progress_theme(window: &ProgressWindow) {
+    apply_theme_tokens!(window, system_theme_is_dark());
+}
+
+/// 将 worker 设置窗主题同步到当前用户系统主题，供服务接线使用。
+pub fn apply_settings_theme(window: &SettingsWindow) {
+    apply_theme_tokens!(window, system_theme_is_dark());
+}
+
 fn activate_result_window(
     window: &ResultWindow,
     position: slint::PhysicalPosition,
     size: slint::PhysicalSize,
-) {
+) -> bool {
     if !window.window().is_visible() {
-        return;
+        return false;
     }
     // 窗口首次显示后才能得到目标显示器的 DPI；此时重新指定物理尺寸，
     // 避免首次建窗的逻辑尺寸按 150% 缩放成超出工作区的大窗口。
@@ -167,11 +294,34 @@ fn activate_result_window(
                 );
             }
             // SAFETY: 同一存活窗口句柄；前台切换失败仅表现为窗口不被前置，无副作用。
-            unsafe {
-                windows_sys::Win32::UI::WindowsAndMessaging::SetForegroundWindow(hwnd);
-            }
+            let foreground =
+                unsafe { windows_sys::Win32::UI::WindowsAndMessaging::SetForegroundWindow(hwnd) }
+                    != 0;
+            return foreground;
         }
     }
+    false
+}
+
+fn schedule_activation(
+    window: slint::Weak<ResultWindow>,
+    position: slint::PhysicalPosition,
+    size: slint::PhysicalSize,
+    attempt: u8,
+) {
+    let delay = if attempt == 0 { 1 } else { 16 };
+    slint::Timer::single_shot(std::time::Duration::from_millis(delay), move || {
+        if let Some(window) = window.upgrade() {
+            if activate_result_window(&window, position, size) {
+                return;
+            }
+            if attempt < 2 {
+                schedule_activation(window.as_weak(), position, size, attempt + 1);
+            } else {
+                window.set_hint("结果窗已显示，请从任务栏切换到截图 OCR 结果".into());
+            }
+        }
+    });
 }
 
 // Preserve TextSnap's f32 rounding and truncation (including large work areas).
@@ -202,6 +352,7 @@ impl ResultWindowHandle {
     {
         let window =
             ResultWindow::new().map_err(|e| ResultWindowError::CreateFailed(e.to_string()))?;
+        apply_system_theme(&window);
         window.set_ocr_text(text.into());
 
         // Slint 的窗口 API 使用物理像素；尺寸与位置取截图屏幕自己的工作区。
@@ -254,12 +405,7 @@ impl ResultWindowHandle {
             .map_err(|e| ResultWindowError::CreateFailed(e.to_string()))?;
         let position = slint::PhysicalPosition::new(wx + (ww - width) / 2, wy + (wh - height) / 2);
         // winit 首次事件循环迭代后才保证 HWND 可用。
-        let activate = window.as_weak();
-        slint::Timer::single_shot(std::time::Duration::from_millis(1), move || {
-            if let Some(w) = activate.upgrade() {
-                activate_result_window(&w, position, size);
-            }
-        });
+        schedule_activation(window.as_weak(), position, size, 0);
         Ok(Self { inner: window })
     }
 
@@ -276,6 +422,11 @@ impl ResultWindowHandle {
         self.inner.window().is_visible()
     }
 
+    /// 刷新当前结果窗的系统主题；服务定时调用以覆盖运行期间的主题切换。
+    pub fn refresh_theme(&self) {
+        apply_system_theme(&self.inner);
+    }
+
     /// 主动关闭并清空（新截图前隐藏旧结果，O-20）。
     pub fn hide_and_clear(&self) {
         self.inner.set_ocr_text("".into());
@@ -286,7 +437,7 @@ impl ResultWindowHandle {
 #[cfg(test)]
 mod tests {
     use super::{
-        ensure_font_registered, normalize_shift_key, ResultWindow, ResultWindowError,
+        ensure_font_registered, normalize_shift_key, theme_colors, ResultWindow, ResultWindowError,
         ResultWindowHandle, SettingsWindow,
     };
     use slint::ComponentHandle;
@@ -428,6 +579,15 @@ mod tests {
         assert_eq!(normalize_shift_key(true, ""), "", "空串原样返回");
     }
 
+    // 覆盖 P-04/O-21 回归：worker 窗口必须提供成对的浅色/深色 token，
+    // 不能把深色系统下的结果窗固定成白底黑字。
+    #[test]
+    fn theme_tokens_have_distinct_light_and_dark_palettes() {
+        assert_ne!(theme_colors(false), theme_colors(true));
+        assert_eq!(theme_colors(true).background, (21, 23, 27));
+        assert_eq!(theme_colors(false).background, (251, 251, 253));
+    }
+
     // 覆盖 O-14（E-4 集成）：设置窗的录制归一化回调接到 Rust 映射函数后，
     // 经 slint 回调入口输入 Shift+"&"（US 布局的 Shift+7）应得到 "7"，
     // 组装出的 Ctrl+Shift+7 落在 parse_hotkey 的键域内。
@@ -461,6 +621,13 @@ mod tests {
             window.invoke_normalize_shift_key(true, "A".into()).as_str(),
             "A"
         );
+        // O-30/UX：长诊断默认折叠，主动展开后仍可收起，不挤出底部操作。
+        assert!(!window.get_status_detail_open());
+        window.set_status_message("组件未初始化；请前往设置页检查 Xberg、字体和许可文件".into());
+        window.set_status_detail_open(true);
+        assert!(window.get_status_detail_open());
+        window.set_status_detail_open(false);
+        assert!(!window.get_status_detail_open());
         let draft = format!(
             "Ctrl+Shift+{}",
             window.invoke_normalize_shift_key(true, "&".into())

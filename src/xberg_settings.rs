@@ -1,34 +1,45 @@
 //! XB-18：独立于任务库的应用设置。主程序和截图服务编译同一份实现。
+use std::ffi::OsString;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use rusqlite::{Connection, OptionalExtension};
 
 pub fn state_dir() -> Result<PathBuf, String> {
-    if cfg!(debug_assertions) {
-        if let Some(path) = std::env::var_os("JCHTOOLS_TEST_STATE_DIR") {
+    if let Some(path) = test_directory_override(cfg!(any(test, feature = "test-hooks")), |key| {
+        std::env::var_os(key)
+    })? {
+        return Ok(path);
+    }
+    directories_next::ProjectDirs::from("", "", "JchTools")
+        .map(|dirs| dirs.data_local_dir().to_path_buf())
+        .ok_or_else(|| "无法定位 JchTools 用户配置目录".into())
+}
+
+/// 显式测试策略只负责隔离根；生产策略不查询这些环境变量。
+fn test_directory_override(
+    enabled: bool,
+    read: impl Fn(&str) -> Option<OsString>,
+) -> Result<Option<PathBuf>, String> {
+    if enabled {
+        if let Some(path) = read("JCHTOOLS_TEST_STATE_DIR") {
             let path = PathBuf::from(path);
             if !path.is_absolute() {
                 return Err("测试状态目录必须为绝对路径".into());
             }
-            return Ok(path);
+            return Ok(Some(path));
         }
         // 现有隔离测试不应读写真实用户配置。
         for key in [
             "JCHTOOLS_MARKDOWN_TEST_ASSET_ROOT",
             "JCHTOOLS_SNAP_OCR_TEST_ASSET_ROOT",
         ] {
-            if let Some(path) = std::env::var_os(key)
-                .map(PathBuf::from)
-                .filter(|p| p.is_absolute())
-            {
-                return Ok(path.join("app-settings"));
+            if let Some(path) = read(key).map(PathBuf::from).filter(|p| p.is_absolute()) {
+                return Ok(Some(path.join("app-settings")));
             }
         }
     }
-    directories_next::ProjectDirs::from("", "", "JchTools")
-        .map(|dirs| dirs.data_local_dir().to_path_buf())
-        .ok_or_else(|| "无法定位 JchTools 用户配置目录".into())
+    Ok(None)
 }
 
 fn open(root: &Path) -> Result<Connection, String> {
@@ -64,7 +75,7 @@ pub fn load() -> Result<Option<PathBuf>, String> {
         }
         return Ok(Some(path));
     }
-    let legacy_root = if cfg!(debug_assertions) {
+    let legacy_root = if cfg!(any(test, feature = "test-hooks")) {
         std::env::var_os("JCHTOOLS_MARKDOWN_TEST_ASSET_ROOT").map(PathBuf::from)
     } else {
         None
@@ -186,4 +197,35 @@ pub fn save(path: &Path) -> Result<(), String> {
 
 pub fn required() -> Result<PathBuf, String> {
     load()?.ok_or_else(|| "尚未配置 Xberg：请在设置页下载 Xberg 或保存已有目录".into())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::test_directory_override;
+    use std::ffi::OsString;
+    use std::path::PathBuf;
+
+    // 覆盖 XB-18/XB-21：生产策略不读取任何测试环境变量，不能重定向配置。
+    #[test]
+    fn production_directory_policy_ignores_test_environment() {
+        let override_root =
+            test_directory_override(false, |_| panic!("生产策略不能访问测试环境变量"));
+        assert_eq!(override_root, Ok(None));
+    }
+
+    // 覆盖 XB-18：隔离测试可显式选择根目录，且不触碰真实用户配置。
+    #[test]
+    fn explicit_test_directory_policy_preserves_isolation() {
+        let root = PathBuf::from("C:/synthetic-jchtools-state");
+        assert_eq!(
+            test_directory_override(true, |key| {
+                (key == "JCHTOOLS_TEST_STATE_DIR").then(|| root.clone().into_os_string())
+            }),
+            Ok(Some(root))
+        );
+        assert!(test_directory_override(true, |key| {
+            (key == "JCHTOOLS_TEST_STATE_DIR").then(|| OsString::from("relative-state"))
+        })
+        .is_err());
+    }
 }

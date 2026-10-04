@@ -1,7 +1,6 @@
 #![allow(clippy::unwrap_used)]
-//! 特征测试：钉住 run49.1 旧发布物 worker 协议（引擎不认识 capabilities 命令）
-//! 的回退行为——能力查询失败（仅限 unsupported command）时请求必须直接放行
-//! 进入实际命令，而不是被「Xberg 共享接口尚不可用」拒绝（XB 分区兼容语义）。
+//! 覆盖 XB-09/XB-14/XB-15：旧 worker 未声明取消、超时和跨场景并发能力时，
+//! 明确拒绝推理，不能以不存在的成员摘要验证把未知协议当成兼容。
 //! 与 tests/xberg_shared_process.rs 分文件：两侧都改写进程级环境变量，
 //! 分开成独立测试进程避免竞争。
 
@@ -30,7 +29,7 @@ impl Drop for SharedProcess {
 }
 
 #[test]
-fn legacy_worker_without_capabilities_still_serves_requests() {
+fn legacy_worker_without_capabilities_rejects_inference() {
     common::ensure_child_reaper();
     // 会话锁：与其他引擎测试二进制互斥（生产语义每会话至多一个 Xberg）。
     let _session = common::session_lock();
@@ -74,12 +73,19 @@ fn legacy_worker_without_capabilities_still_serves_requests() {
         broker_pid: state["jchtools_broker_pid"].as_u64().unwrap(),
         engine_pid: state["jchtools_xberg_pid"].as_u64(),
     };
-    let screenshot = xberg_runtime::request(
+    let error = xberg_runtime::request(
         Path::new(root),
         json!({"command":"ocr_snapshot","image_base64":"fixture"}),
         Duration::from_secs(20),
         &AtomicBool::new(false),
     )
-    .unwrap_or_else(|error| panic!("旧协议引擎的能力查询失败必须放行实际请求，被拒：{error}"));
-    assert_eq!(screenshot["text"], "截图结果");
+    .unwrap_err();
+    assert!(
+        error.contains("共享接口"),
+        "未知能力必须明确阻止推理：{error}"
+    );
+    assert!(
+        error.contains("capabilities"),
+        "错误必须说明能力握手失败：{error}"
+    );
 }

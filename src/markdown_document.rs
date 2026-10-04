@@ -21,24 +21,29 @@ const MAX_ENTRY_DATA_BYTES: u64 = 8 * 1024 * 1024;
 #[derive(Clone, Copy, Debug)]
 pub struct Deadline {
     total: Duration,
-    at: Instant,
+    at: Option<Instant>,
 }
 
 impl Deadline {
     pub fn new(total: Duration) -> Self {
+        let now = Instant::now();
         Self {
             total,
-            at: Instant::now() + total,
+            // Extremely large user supplied values must not panic in `Instant` addition.
+            // `None` is an unbounded deadline; normal UI values still use a precise instant.
+            at: now.checked_add(total),
         }
     }
 
     /// 距预算耗尽的剩余时间；已耗尽时为零。
     pub fn remaining(&self) -> Duration {
-        self.at.saturating_duration_since(Instant::now())
+        self.at.map_or(Duration::MAX, |at| {
+            at.saturating_duration_since(Instant::now())
+        })
     }
 
     pub fn expired(&self) -> bool {
-        Instant::now() >= self.at
+        self.at.is_some_and(|at| Instant::now() >= at)
     }
 
     /// 配置的预算总长（用于超时提示）。
@@ -70,6 +75,7 @@ pub struct MediaFile {
 struct MediaCollector {
     dir: String,
     files: Vec<MediaFile>,
+    warnings: Vec<String>,
     child_seq: u32,
 }
 
@@ -78,6 +84,7 @@ impl MediaCollector {
         Self {
             dir: dir.to_string(),
             files: Vec::new(),
+            warnings: Vec::new(),
             child_seq: 0,
         }
     }
@@ -94,12 +101,18 @@ impl MediaCollector {
         Self {
             dir: self.dir.clone(),
             files: Vec::new(),
+            warnings: Vec::new(),
             child_seq: self.child_seq,
         }
     }
 
     fn adopt(&mut self, probe: Self) {
         self.files.extend(probe.files);
+        self.warnings.extend(probe.warnings);
+    }
+
+    fn warning(&mut self, message: impl Into<String>) {
+        self.warnings.push(message.into());
     }
 }
 
@@ -131,42 +144,27 @@ pub fn convert(
         return Err(format!("Xberg 可执行文件不存在：{}", executable.display()));
     }
 
-    // T-18/T-24 回归：引擎能力清单声称支持 fast、实际 extract 拒绝时，按常规
-    // 模式重试。常规模式能力严格强于快速模式（不关闭版面识别与图片 OCR），
-    // 不构成能力降级；拒绝与重试都落诊断日志（P-10）。回退后按实际模式输出，
-    // 不得保留「快速模式已关闭图片 OCR」的声明头冒充口径。
-    let mut actual_fast = fast;
-    let first = crate::xberg_runtime::request(
+    // T-18：已知超过 200 页时必须使用快速模式。引擎拒绝快速模式属于能力/配置
+    // 错误，不能静默改用常规模式，否则 GUI 的分流日志与实际产物会不一致。
+    let response = crate::xberg_runtime::request(
         runtime_dir,
         serde_json::json!({
             "command": "extract", "path": path, "mode": if fast { "fast" } else { "normal" }
         }),
         deadline.remaining(),
         &std::sync::atomic::AtomicBool::new(false),
-    );
-    let response = match first.and_then(crate::xberg_runtime::checked) {
-        Ok(response) => response,
-        Err(error) if error.contains("unsupported mode 'fast'") => {
-            tracing::warn!(
-                file = %path.display(),
-                "引擎拒绝快速模式（能力清单与实现不一致），按常规模式重试"
-            );
-            actual_fast = false;
-            let retry = crate::xberg_runtime::request(
-                runtime_dir,
-                serde_json::json!({
-                    "command": "extract", "path": path, "mode": "normal"
-                }),
-                deadline.remaining(),
-                &std::sync::atomic::AtomicBool::new(false),
-            )?;
-            crate::xberg_runtime::checked(retry)?
+    )
+    .and_then(crate::xberg_runtime::checked)
+    .map_err(|error| {
+        if fast && error.contains("unsupported mode 'fast'") {
+            format!("大文档快速模式不可用，未改用常规模式：{error}")
+        } else {
+            error
         }
-        Err(error) => return Err(error),
-    };
+    })?;
     let value = serde_json::json!({"result": response["document"]});
-    let mut document = build_document_output(&value, media_dir)?;
-    if actual_fast {
+    let mut document = build_document_output_with_media(&value, media_dir, !fast)?;
+    if fast {
         document.markdown = format!(
             "> 注意：大文档快速模式已启用，已关闭版面识别、图片提取和图片 OCR。\n\n{}",
             document.markdown
@@ -274,7 +272,7 @@ fn pdf_page_count(path: &Path, deadline: &Deadline) -> Option<usize> {
         ))
         .ok()?;
     };
-    if find_subslice(&trailer, b"/Encrypt").is_some() {
+    if find_pdf_name(&trailer, b"/Encrypt").is_some() {
         return None;
     }
     let (root_num, _) = indirect_reference_after(&trailer, b"/Root")?;
@@ -290,7 +288,7 @@ fn pdf_page_count(path: &Path, deadline: &Deadline) -> Option<usize> {
     }
     let pages_offset = xref_object_offset(&mut file, xref_offset, pages_num, deadline)?;
     let pages = read_object_window(&mut file, len, pages_offset)?;
-    let count_start = find_subslice(&pages, b"/Count")? + b"/Count".len();
+    let count_start = find_pdf_name(&pages, b"/Count")? + b"/Count".len();
     // 间接 `/Count N G R`（pdftk 等工具的产出形态）不受支持：只取第一个整数
     // 会把对象号当页数误报，必须识别出引用形态并回 None（T-18 回常规模式）。
     let rest = skip_space(&pages[count_start..]);
@@ -393,15 +391,6 @@ fn read_line_bounded(file: &mut std::fs::File, max: usize) -> Option<Vec<u8>> {
     Some(line)
 }
 
-fn find_subslice(haystack: &[u8], needle: &[u8]) -> Option<usize> {
-    if needle.is_empty() || haystack.len() < needle.len() {
-        return None;
-    }
-    haystack
-        .windows(needle.len())
-        .position(|window| window == needle)
-}
-
 fn find_last_subslice(haystack: &[u8], needle: &[u8]) -> Option<usize> {
     if needle.is_empty() || haystack.len() < needle.len() {
         return None;
@@ -409,6 +398,69 @@ fn find_last_subslice(haystack: &[u8], needle: &[u8]) -> Option<usize> {
     haystack
         .windows(needle.len())
         .rposition(|window| window == needle)
+}
+
+/// Find a PDF name outside comments, literal strings, and hexadecimal strings.
+/// This is intentionally small and bounded for the page probe; it prevents text such as
+/// `(/Pages 2 0 R)` in a catalog metadata string from being mistaken for a dictionary key.
+fn find_pdf_name(bytes: &[u8], needle: &[u8]) -> Option<usize> {
+    let mut index = 0;
+    while index + needle.len() <= bytes.len() {
+        match bytes[index] {
+            b'%' => {
+                while index < bytes.len() && bytes[index] != b'\n' && bytes[index] != b'\r' {
+                    index += 1;
+                }
+            }
+            b'(' => {
+                let mut depth = 1usize;
+                index += 1;
+                while index < bytes.len() && depth != 0 {
+                    if bytes[index] == b'\\' {
+                        index = index.saturating_add(2);
+                    } else if bytes[index] == b'(' {
+                        depth += 1;
+                        index += 1;
+                    } else if bytes[index] == b')' {
+                        depth -= 1;
+                        index += 1;
+                    } else {
+                        index += 1;
+                    }
+                }
+            }
+            b'<' if bytes.get(index + 1) == Some(&b'<') => {
+                index += 2;
+            }
+            b'<' => {
+                index += 1;
+                while index < bytes.len() && bytes[index] != b'>' {
+                    index += 1;
+                }
+                index = index.saturating_add(1);
+            }
+            _ if bytes[index..].starts_with(needle) => {
+                let before = index.checked_sub(1).and_then(|i| bytes.get(i)).copied();
+                let after = bytes.get(index + needle.len()).copied();
+                let is_name_char = |byte: Option<u8>| {
+                    byte.is_some_and(|byte| {
+                        !byte.is_ascii_whitespace()
+                            && !matches!(
+                                byte,
+                                b'(' | b')' | b'<' | b'>' | b'[' | b']' | b'{' | b'}' | b'/' | b'%'
+                            )
+                    })
+                };
+                let slash_name = needle.first() == Some(&b'/');
+                if (slash_name || !is_name_char(before)) && !is_name_char(after) {
+                    return Some(index);
+                }
+                index += needle.len();
+            }
+            _ => index += 1,
+        }
+    }
+    None
 }
 
 fn skip_space(bytes: &[u8]) -> &[u8] {
@@ -434,7 +486,7 @@ fn parse_leading_uint(bytes: &[u8]) -> Option<u64> {
 
 /// 查找 `key` 后的间接引用 `N G R`，返回 (对象号, 代号)。
 fn indirect_reference_after(bytes: &[u8], key: &[u8]) -> Option<(u64, u64)> {
-    let start = find_subslice(bytes, key)? + key.len();
+    let start = find_pdf_name(bytes, key)? + key.len();
     let number = parse_leading_uint(&bytes[start..])?;
     let rest = skip_uint(&bytes[start..])?;
     let generation = parse_leading_uint(rest)?;
@@ -664,14 +716,32 @@ fn derived_config_json(fast: bool) -> Result<String, String> {
     serde_json::to_string(&config).map_err(|error| format!("生成 Xberg 配置失败：{error}"))
 }
 
+#[cfg(test)]
 fn build_document_output(envelope: &Value, media_dir: &str) -> Result<DocumentOutput, String> {
+    build_document_output_with_media(envelope, media_dir, true)
+}
+
+fn build_document_output_with_media(
+    envelope: &Value,
+    media_dir: &str,
+    include_media: bool,
+) -> Result<DocumentOutput, String> {
     let mut media = MediaCollector::new(media_dir);
-    let markdown = build_final_markdown(envelope, &mut media)?;
+    let markdown = build_final_markdown_with_media(envelope, &mut media, include_media)?;
     let result = envelope
         .get("result")
         .ok_or_else(|| "Xberg JSON 缺少 result 字段".to_string())?;
     let mut warnings = Vec::new();
     collect_warnings(result, "主文档", &mut warnings);
+    if markdown.trim().is_empty()
+        && result
+            .get("ocr_elements")
+            .and_then(Value::as_array)
+            .is_some()
+    {
+        warnings.push("主文档 · ocr：未识别到文字".to_string());
+    }
+    warnings.extend(media.warnings.iter().cloned());
     Ok(DocumentOutput {
         markdown,
         warnings,
@@ -768,13 +838,26 @@ fn value_type_name(value: &Value) -> &'static str {
     }
 }
 
+#[cfg(test)]
 fn build_final_markdown(envelope: &Value, media: &mut MediaCollector) -> Result<String, String> {
+    build_final_markdown_with_media(envelope, media, true)
+}
+
+fn build_final_markdown_with_media(
+    envelope: &Value,
+    media: &mut MediaCollector,
+    include_media: bool,
+) -> Result<String, String> {
     let result = envelope
         .get("result")
         .ok_or_else(|| "Xberg JSON 缺少 result 字段".to_string())?;
     validate_result_shape(result)?;
     let mut root = render_document_root(result);
-    attach_media(result, &mut root, media, None);
+    if include_media {
+        attach_media(result, &mut root, media, None);
+    } else {
+        root = strip_image_links(&root);
+    }
     let mut parts = vec![root];
     let mut seen = HashSet::new();
     if let Some(digest) = content_digest(parts[0].as_str()) {
@@ -790,6 +873,7 @@ fn build_final_markdown(envelope: &Value, media: &mut MediaCollector) -> Result<
         "",
         parts[0].as_str(),
         media,
+        include_media,
     );
     for (display, content) in children {
         parts.push(String::new());
@@ -823,12 +907,14 @@ fn collect_children(
     prefix: &str,
     root_content: &str,
     media: &mut MediaCollector,
+    include_media: bool,
 ) {
     let Some(children) = children.and_then(Value::as_array) else {
         return;
     };
     for child in children {
         let Some(path) = child.get("path").and_then(Value::as_str) else {
+            media.warning("嵌入文档结果缺少 path，已跳过该子文档");
             continue;
         };
         let Some(result) = child.get("result") else {
@@ -839,7 +925,16 @@ fn collect_children(
         } else {
             format!("{prefix}/{path}")
         };
+        if let Err(error) = validate_result_shape(result) {
+            media.warning(format!("嵌入文档 {display} · extraction：{error}"));
+            continue;
+        }
         let content = render_document_root(result);
+        let content = if include_media {
+            content
+        } else {
+            strip_image_links(&content)
+        };
         if is_raw_archive_dump(&content) {
             add_unique(
                 output,
@@ -848,6 +943,7 @@ fn collect_children(
                 format!(
                     "Embedded archive content was not parsed; raw archive listing omitted for {display}."
                 ),
+                None,
             );
         } else if is_contained_in_root(root_content, &content) {
             // T-17（2026-10-04 收缩为引擎原生优先）：引擎已把该嵌入对象并入宿主
@@ -856,12 +952,17 @@ fn collect_children(
             continue;
         } else {
             let tag = media.next_child_tag();
+            let dedup_content = content.clone();
             let mut landed = content;
             // 试装配:正文判重被丢弃的重复子文档不登记媒体(无孤儿文件)。
             let mut probe = media.probe();
-            attach_media(result, &mut landed, &mut probe, Some(&tag));
-            if add_unique(output, seen, display.clone(), landed) {
+            if include_media {
+                attach_media(result, &mut landed, &mut probe, Some(&tag));
+            }
+            if add_unique(output, seen, display.clone(), landed, Some(&dedup_content)) {
                 media.adopt(probe);
+            } else {
+                media.warnings.extend(probe.warnings);
             }
         }
         collect_children(
@@ -871,6 +972,7 @@ fn collect_children(
             &display,
             root_content,
             media,
+            include_media,
         );
     }
 }
@@ -880,8 +982,9 @@ fn add_unique(
     seen: &mut HashSet<String>,
     display: String,
     content: String,
+    digest_source: Option<&str>,
 ) -> bool {
-    if let Some(digest) = content_digest(&content) {
+    if let Some(digest) = content_digest(digest_source.unwrap_or(&content)) {
         if seen.insert(digest) {
             output.push((display, content));
             return true;
@@ -960,22 +1063,8 @@ fn normalize_markdown(text: &str) -> String {
             index += 1;
             continue;
         }
-        let drop_cap = if line.len() == 1 && line.as_bytes()[0].is_ascii_alphabetic() {
-            lines.get(index + 1).is_some_and(|next| {
-                next.chars()
-                    .next()
-                    .is_some_and(|ch| ch.is_ascii_lowercase())
-            })
-        } else {
-            false
-        };
-        if drop_cap {
-            output.push(normalize_inline(&format!("{}{}", line, lines[index + 1])));
-            index += 2;
-        } else {
-            output.push(normalize_inline(line));
-            index += 1;
-        }
+        output.push(normalize_inline(line));
+        index += 1;
     }
     output.join("\n")
 }
@@ -991,18 +1080,25 @@ fn attach_media(
     media: &mut MediaCollector,
     child_tag: Option<&str>,
 ) {
-    let Some(images) = document.get("images").and_then(Value::as_array) else {
+    let Some(images_value) = document.get("images") else {
+        return;
+    };
+    let Some(images) = images_value.as_array() else {
+        media.warning("图片资源字段类型无效，已保留占位引用");
         return;
     };
     for image in images {
         let Some(index) = image.get("image_index").and_then(Value::as_u64) else {
+            media.warning("图片资源缺少 image_index，已保留占位引用");
             continue;
         };
         let Some(format) = image.get("format").and_then(Value::as_str) else {
+            media.warning(format!("图片 image_{index} 缺少格式，已保留占位引用"));
             continue;
         };
         // 扩展名只接受字母数字：它既进文件名也进引用，异常值宁可保占位不改写。
         if format.is_empty() || !format.bytes().all(|byte| byte.is_ascii_alphanumeric()) {
+            media.warning(format!("图片 image_{index} 的格式无效，已保留占位引用"));
             continue;
         }
         let source = format!("image_{index}.{format}");
@@ -1012,13 +1108,20 @@ fn attach_media(
         };
         let target_ref = format!("{}/{file_name}", media.dir);
         let Some(data) = image.get("data_base64").and_then(Value::as_str) else {
+            if rewrite_image_links(content, Some(&source), None).1 {
+                media.warning(format!("图片 {source} 缺少数据，已保留占位引用"));
+            }
             continue;
         };
         let Some(bytes) = decode_base64(data) else {
+            if rewrite_image_links(content, Some(&source), None).1 {
+                media.warning(format!("图片 {source} 的 Base64 数据损坏，已保留占位引用"));
+            }
             continue;
         };
-        let rewritten = replace_outside_fences(content, &source, &target_ref);
-        if rewritten == *content {
+        let (rewritten, referenced) =
+            rewrite_image_links(content, Some(&source), Some(&target_ref));
+        if !referenced {
             // 正文未引用该图片：不落盘（上游 CLI 对未引用图片同样不入产物）。
             continue;
         }
@@ -1030,16 +1133,13 @@ fn attach_media(
     }
 }
 
-/// 围栏感知的整词替换（T-14）：``` / ~~~ 围栏内是字面文本不重写，缩进口径与
-/// [`normalize_markdown`] 一致。引用不含空白也不跨行，因此逐行处理、行内逐段
-/// 定位；命中词之后必须是边界（下一段不得是字母数字），`ximage_0.png` 这类
-/// 粘连词不误替换。`\r` 与 `\n` 原样保留。
-fn replace_outside_fences(text: &str, from: &str, to: &str) -> String {
-    if !text.contains(from) {
-        return text.to_string();
-    }
+/// 围栏和行内代码感知的图片链接目标改写（T-14）。只处理 Markdown 图片链接的
+/// destination，不碰普通文字、alt text、行内代码或已改写媒体目录中的同名片段。
+/// `from=None` 用于快速模式移除所有 `image_N.ext` 图片链接并保留 alt 文本。
+fn rewrite_image_links(text: &str, from: Option<&str>, to: Option<&str>) -> (String, bool) {
     let mut result = String::with_capacity(text.len());
     let mut fence: Option<(char, usize)> = None;
+    let mut changed = false;
     for line in text.split_inclusive('\n') {
         let (body, newline) = match line.strip_suffix('\n') {
             Some(body) => (body, "\n"),
@@ -1065,32 +1165,85 @@ fn replace_outside_fences(text: &str, from: &str, to: &str) -> String {
             result.push_str(newline);
             continue;
         }
-        let mut replaced = String::with_capacity(body.len());
-        let mut rest = body;
-        while let Some(position) = rest.find(from) {
-            // 词边界双侧校验:命中词前后都不得是字母数字,`ximage_0.png`、
-            // `image_0.pnga` 这类粘连词是不同 token,不误替换。
-            let before_ok = position == 0 || !rest.as_bytes()[position - 1].is_ascii_alphanumeric();
-            let after = &rest[position + from.len()..];
-            let after_ok = after
-                .bytes()
-                .next()
-                .is_none_or(|byte| !byte.is_ascii_alphanumeric());
-            if before_ok && after_ok {
-                replaced.push_str(&rest[..position]);
-                replaced.push_str(to);
-                rest = after;
-            } else {
-                replaced.push_str(&rest[..position + from.len()]);
-                rest = after;
-            }
-        }
-        replaced.push_str(rest);
-        result.push_str(&replaced);
+        let (rewritten, line_changed) = rewrite_image_links_in_line(body, from, to);
+        changed |= line_changed;
+        result.push_str(&rewritten);
         result.push_str(carriage);
         result.push_str(newline);
     }
-    result
+    (result, changed)
+}
+
+fn rewrite_image_links_in_line(line: &str, from: Option<&str>, to: Option<&str>) -> (String, bool) {
+    let mut out = String::with_capacity(line.len());
+    let mut i = 0;
+    let mut inline_code: Option<usize> = None;
+    let bytes = line.as_bytes();
+    let mut changed = false;
+    while i < bytes.len() {
+        if bytes[i] == b'`' {
+            let run = bytes[i..].iter().take_while(|&&byte| byte == b'`').count();
+            if let Some(open_len) = inline_code {
+                if run == open_len {
+                    inline_code = None;
+                }
+            } else {
+                inline_code = Some(run);
+            }
+            out.push_str(&line[i..i + run]);
+            i += run;
+            continue;
+        }
+        if inline_code.is_none() && line[i..].starts_with("![") {
+            let Some(close_alt) = line[i + 2..].find("](") else {
+                out.push('!');
+                i += 1;
+                continue;
+            };
+            let close_alt = i + 2 + close_alt;
+            let destination_start = close_alt + 2;
+            let Some(close_link_rel) = line[destination_start..].find(')') else {
+                out.push('!');
+                i += 1;
+                continue;
+            };
+            let close_link = destination_start + close_link_rel;
+            let destination = line[destination_start..close_link].trim_start();
+            let leading = line[destination_start..close_link].len() - destination.len();
+            let token_end = destination
+                .char_indices()
+                .find(|(_, character)| character.is_whitespace())
+                .map_or(destination.len(), |(index, _)| index);
+            let token = &destination[..token_end];
+            let matches = match from {
+                Some(from) => token == from,
+                None => token.starts_with("image_") && token.contains('.'),
+            };
+            if matches {
+                if let Some(to) = to {
+                    out.push_str(&line[i..destination_start + leading]);
+                    out.push_str(to);
+                    out.push_str(&line[destination_start + leading + token.len()..close_link]);
+                    out.push(')');
+                } else {
+                    out.push_str(&line[i + 2..close_alt]);
+                }
+                i = close_link + 1;
+                changed = true;
+                continue;
+            }
+        }
+        let Some(ch) = line[i..].chars().next() else {
+            break;
+        };
+        out.push(ch);
+        i += ch.len_utf8();
+    }
+    (out, changed)
+}
+
+fn strip_image_links(text: &str) -> String {
+    rewrite_image_links(text, None, None).0
 }
 
 /// 标准 base64（RFC 4648 字母表）解码，自足实现与本模块 crc32 同风格——
@@ -1106,21 +1259,51 @@ fn decode_base64(input: &str) -> Option<Vec<u8>> {
             _ => None,
         }
     }
-    let mut out = Vec::with_capacity(input.len() / 4 * 3 + 3);
-    let mut accumulator: u32 = 0;
-    let mut bits = 0u32;
-    for byte in input.bytes() {
-        if byte == b'=' {
-            break;
+    let input: Vec<u8> = input
+        .bytes()
+        .filter(|byte| !byte.is_ascii_whitespace())
+        .collect();
+    if input.is_empty() || !input.len().is_multiple_of(4) {
+        return None;
+    }
+    let mut out = Vec::with_capacity(input.len() / 4 * 3);
+    let (chunks, remainder) = input.as_chunks::<4>();
+    if !remainder.is_empty() {
+        return None;
+    }
+    for (chunk_index, chunk) in chunks.iter().enumerate() {
+        let last = chunk_index + 1 == input.len() / 4;
+        let a = value(chunk[0])?;
+        let b = value(chunk[1])?;
+        let c = if chunk[2] == b'=' {
+            None
+        } else {
+            Some(value(chunk[2])?)
+        };
+        let d = if chunk[3] == b'=' {
+            None
+        } else {
+            Some(value(chunk[3])?)
+        };
+        if (!last && (c.is_none() || d.is_none())) || (c.is_none() && d.is_some()) {
+            return None;
         }
-        if byte.is_ascii_whitespace() {
-            continue;
+        if c.is_none() && (b & 0x0f) != 0 {
+            return None;
         }
-        accumulator = (accumulator << 6) | value(byte)?;
-        bits += 6;
-        if bits >= 8 {
-            bits -= 8;
-            out.push(((accumulator >> bits) & 0xFF) as u8);
+        if d.is_none() {
+            if let Some(c) = c {
+                if (c & 0x03) != 0 {
+                    return None;
+                }
+            }
+        }
+        out.push(u8::try_from((a << 2) | (b >> 4)).ok()?);
+        if let Some(c) = c {
+            out.push(u8::try_from(((b & 0x0f) << 4) | (c >> 2)).ok()?);
+            if let Some(d) = d {
+                out.push(u8::try_from(((c & 0x03) << 6) | d).ok()?);
+            }
         }
     }
     Some(out)
@@ -1173,19 +1356,38 @@ fn normalize_inline(line: &str) -> String {
             break;
         };
         let run = rest[start..].chars().take_while(|ch| *ch == '`').count();
-        let delimiter = "`".repeat(run);
         let after_start = &rest[start + run..];
-        let Some(end) = after_start.find(&delimiter) else {
+        let Some((end, close_len)) = find_inline_code_close(after_start, run) else {
             output.push_str(&decode_entities(rest));
             break;
         };
         output.push_str(&decode_entities(&rest[..start]));
-        let close_end = end + run;
+        let close_end = end + close_len;
         output.push_str(&rest[start..start + run]);
         output.push_str(&after_start[..close_end]);
         rest = &after_start[close_end..];
     }
     output
+}
+
+fn find_inline_code_close(text: &str, open_len: usize) -> Option<(usize, usize)> {
+    let bytes = text.as_bytes();
+    let mut index = 0;
+    while index < bytes.len() {
+        if bytes[index] != b'`' {
+            index += text[index..].chars().next()?.len_utf8();
+            continue;
+        }
+        let run = bytes[index..]
+            .iter()
+            .take_while(|&&byte| byte == b'`')
+            .count();
+        if run == open_len {
+            return Some((index, run));
+        }
+        index += run;
+    }
+    None
 }
 
 fn decode_entities(text: &str) -> String {
@@ -1205,13 +1407,27 @@ fn decode_entities(text: &str) -> String {
             entity.parse::<u32>().ok()
         };
         if let Some(code) = value.filter(|code| *code <= 0x0010_ffff) {
-            output.push(match code {
+            let character = match code {
                 9 => '\t',
                 10 => '\n',
                 160 => ' ',
                 32..=0x0010_ffff => char::from_u32(code).unwrap_or(' '),
                 _ => ' ',
-            });
+            };
+            let at_line_start = output.is_empty() || output.ends_with('\n');
+            let next = rest[start + end + 1..].chars().next();
+            let escape_marker = match character {
+                '#' | '-' | '+' => at_line_start && next.is_some_and(char::is_whitespace),
+                '>' => at_line_start,
+                '*' | '_' => {
+                    at_line_start || output.chars().last().is_some_and(char::is_whitespace)
+                }
+                _ => false,
+            };
+            if escape_marker {
+                output.push('\\');
+            }
+            output.push(character);
         } else {
             output.push_str(&rest[start..=start + end]);
         }
@@ -1223,17 +1439,134 @@ fn decode_entities(text: &str) -> String {
 
 fn spatial_ocr_markdown(document: &Value) -> Option<String> {
     let elements = document.get("ocr_elements").and_then(Value::as_array)?;
-    let mut lines = Vec::new();
-    for element in elements {
+    #[derive(Clone)]
+    struct OcrItem {
+        text: String,
+        page: u64,
+        x: f64,
+        y: f64,
+        width: f64,
+        height: f64,
+        order: usize,
+    }
+
+    fn level(value: &Value) -> &str {
+        value.get("level").and_then(Value::as_str).unwrap_or("")
+    }
+    fn geometry(value: &Value) -> Option<(f64, f64, f64, f64)> {
+        let geometry = value.get("geometry").or_else(|| value.get("bbox"))?;
+        if geometry.get("type").and_then(Value::as_str) == Some("rectangle") {
+            let left = geometry.get("left").and_then(Value::as_f64)?;
+            let top = geometry.get("top").and_then(Value::as_f64)?;
+            let width = geometry.get("width").and_then(Value::as_f64)?;
+            let height = geometry.get("height").and_then(Value::as_f64)?;
+            return Some((left, top, width, height));
+        }
+        if let Some(points) = geometry.get("points").and_then(Value::as_array) {
+            let points = points
+                .iter()
+                .filter_map(|point| {
+                    Some((
+                        point.get("x").and_then(Value::as_f64)?,
+                        point.get("y").and_then(Value::as_f64)?,
+                    ))
+                })
+                .collect::<Vec<_>>();
+            if !points.is_empty() {
+                let min_x = points
+                    .iter()
+                    .map(|point| point.0)
+                    .fold(f64::INFINITY, f64::min);
+                let max_x = points
+                    .iter()
+                    .map(|point| point.0)
+                    .fold(f64::NEG_INFINITY, f64::max);
+                let min_y = points
+                    .iter()
+                    .map(|point| point.1)
+                    .fold(f64::INFINITY, f64::min);
+                let max_y = points
+                    .iter()
+                    .map(|point| point.1)
+                    .fold(f64::NEG_INFINITY, f64::max);
+                return Some((min_x, min_y, max_x - min_x, max_y - min_y));
+            }
+        }
+        None
+    }
+
+    let preferred = ["line", "paragraph", "word", "block", "page"]
+        .into_iter()
+        .find(|candidate| elements.iter().any(|element| level(element) == *candidate));
+    let mut items = Vec::new();
+    for (order, element) in elements.iter().enumerate() {
         let text = element
             .get("text")
             .and_then(Value::as_str)
             .unwrap_or_default();
-        if !text.is_empty() {
-            lines.push(text.to_string());
+        if text.is_empty() || preferred.is_some_and(|candidate| level(element) != candidate) {
+            continue;
+        }
+        let fallback_y = f64::from(u32::try_from(order).unwrap_or(u32::MAX)) * 1000.0;
+        let (x, y, width, height) = geometry(element).unwrap_or((0.0, fallback_y, 0.0, 0.0));
+        items.push(OcrItem {
+            text: text.to_string(),
+            page: element
+                .get("page_number")
+                .and_then(Value::as_u64)
+                .unwrap_or(1),
+            x,
+            y,
+            width,
+            height,
+            order,
+        });
+    }
+    items.sort_by(|left, right| {
+        left.page
+            .cmp(&right.page)
+            .then_with(|| left.y.total_cmp(&right.y))
+            .then_with(|| left.x.total_cmp(&right.x))
+            .then_with(|| left.order.cmp(&right.order))
+    });
+    let mut lines: Vec<(u64, f64, f64, f64, String)> = Vec::new();
+    for item in items {
+        let same_line = lines.last().is_some_and(|(page, y, height, _, _)| {
+            if *page != item.page {
+                return false;
+            }
+            let tolerance = 4.0_f64.max(height.max(item.height) * 0.5);
+            (item.y - *y).abs() <= tolerance
+        });
+        if same_line {
+            let Some((_, _, _, previous_right, line)) = lines.last_mut() else {
+                continue;
+            };
+            let gap = item.x - *previous_right;
+            line.push_str(if gap > item.height.max(4.0) {
+                "    "
+            } else {
+                " "
+            });
+            line.push_str(&item.text);
+            *previous_right = item.x + item.width;
+        } else {
+            lines.push((
+                item.page,
+                item.y,
+                item.height,
+                item.x + item.width,
+                item.text,
+            ));
         }
     }
-    (!lines.is_empty()).then(|| lines.join("\n"))
+    (!lines.is_empty()).then(|| {
+        lines
+            .into_iter()
+            .map(|(_, _, _, _, text)| text)
+            .collect::<Vec<_>>()
+            .join("\n")
+    })
 }
 
 #[cfg(test)]
@@ -1275,7 +1608,7 @@ mod tests {
 
     #[test]
     fn joins_drop_cap_paragraph() {
-        assert_eq!(normalize_markdown("D\nrops are text"), "Drops are text");
+        assert_eq!(normalize_markdown("D\nrops are text"), "D\nrops are text");
     }
 
     // 覆盖 T-16/T-24（F19）：result 存在但为 null 时是协议异常，必须计失败，
@@ -1436,6 +1769,39 @@ mod tests {
         assert!(output.warnings[0].contains("主文档 · ocr"));
         assert!(output.warnings[1].contains("chart.xlsx · table"));
         assert!(output.warnings[2].contains("missing.docx · extraction"));
+    }
+
+    #[test]
+    fn empty_embedded_results_are_reported_with_nested_context() {
+        let envelope = serde_json::json!({
+            "result": {
+                "content": "root",
+                "children": [{
+                    "path": "outer.docx",
+                    "result": {
+                        "content": "outer",
+                        "children": [{
+                            "path": "nested.xlsx",
+                            "result": {}
+                        }]
+                    }
+                }, {
+                    "path": "empty.docx",
+                    "result": {}
+                }]
+            }
+        });
+        let output = build_document_output(&envelope, "x_media").expect("output should parse");
+        assert!(output
+            .warnings
+            .iter()
+            .any(|warning| warning.contains("empty.docx") && warning.contains("extraction")));
+        assert!(output
+            .warnings
+            .iter()
+            .any(|warning| warning.contains("outer.docx/nested.xlsx")
+                && warning.contains("extraction")));
+        assert!(!output.markdown.contains("Embedded document: empty.docx"));
     }
 
     // 覆盖 T-18：仅读 ZIP 结构，超过 200 张幻灯片才启用快速模式。
@@ -1833,36 +2199,22 @@ mod tests {
         assert_eq!(fast["images"]["include_data_base64"], Value::Bool(false));
     }
 
-    // 临时诊断（提交前移除）：用真实引擎回包驱动装配，观察媒体装配各环节。
+    // 覆盖 T-14：用自含确定信封固定真实装配协议，不读取仓库临时诊断文件。
     #[test]
     fn tmp_real_envelope_media_diagnostic() {
-        let path = std::path::Path::new(".tmp/e2e/probe-response.json");
-        let Ok(text) = std::fs::read_to_string(path) else {
-            eprintln!("诊断信封不存在，跳过");
-            return;
-        };
-        let envelope: Value = serde_json::from_str(&text).unwrap();
-        let envelope = serde_json::json!({ "result": envelope["document"] });
-        let images = envelope["result"]["images"].as_array().unwrap();
-        eprintln!("images={}", images.len());
-        eprintln!(
-            "first keys={:?}",
-            images[0].as_object().unwrap().keys().collect::<Vec<_>>()
-        );
-        eprintln!(
-            "content has image_0.jpeg={}",
-            envelope["result"]["content"]
-                .as_str()
-                .unwrap()
-                .contains("image_0.jpeg")
-        );
+        let envelope = serde_json::json!({
+            "result": {
+                "content": "![image](image_0.jpeg)",
+                "images": [{
+                    "image_index": 0,
+                    "format": "jpeg",
+                    "data_base64": "/9j/4AAQSkZJRg=="
+                }]
+            }
+        });
         let output = build_document_output(&envelope, "media").unwrap();
-        eprintln!("media files={}", output.media.len());
-        eprintln!(
-            "markdown rewritten={}",
-            output.markdown.contains("](media/image_0.")
-        );
-        assert!(!output.media.is_empty(), "真实信封必须产出媒体文件");
+        assert_eq!(output.media.len(), 1);
+        assert!(output.markdown.contains("](media/image_0.jpeg)"));
     }
 
     // 覆盖 T-14（2026-10-04）：正文引用改写为 `<media 目录>/image_N.ext`，
@@ -1931,6 +2283,140 @@ mod tests {
         assert_eq!(output.media[0].bytes, b"root");
         assert_eq!(output.media[1].relative, "m/doc001-image_0.png");
         assert_eq!(output.media[1].bytes, b"child");
+    }
+
+    #[test]
+    fn duplicate_children_with_images_are_deduplicated_before_media_prefixing() {
+        let envelope = serde_json::json!({
+            "result": {
+                "content": "root",
+                "children": [
+                    {"path": "a.docx", "result": {
+                        "content": "child ![x](image_0.png)",
+                        "images": [{"image_index": 0, "format": "png", "data_base64": "YQ=="}]
+                    }},
+                    {"path": "b.docx", "result": {
+                        "content": "child ![x](image_0.png)",
+                        "images": [{"image_index": 0, "format": "png", "data_base64": "YQ=="}]
+                    }}
+                ]
+            }
+        });
+        let output = build_document_output(&envelope, "m").unwrap();
+        assert_eq!(output.markdown.matches("## Embedded document:").count(), 1);
+        assert_eq!(output.media.len(), 1);
+    }
+
+    #[test]
+    fn image_rewrite_only_changes_link_destinations_and_avoids_media_dir_self_hits() {
+        let envelope = serde_json::json!({
+            "result": {
+                "content": "literal image_0.png\n![a](image_0.png) ![b](image_1.png)",
+                "images": [
+                    {"image_index": 0, "format": "png", "data_base64": "YQ=="},
+                    {"image_index": 1, "format": "png", "data_base64": "Yg=="}
+                ]
+            }
+        });
+        let output = build_document_output(&envelope, "report_image_1.png_media").unwrap();
+        assert!(output.markdown.contains("literal image_0.png"));
+        assert!(output
+            .markdown
+            .contains("report_image_1.png_media/image_0.png"));
+        assert!(output
+            .markdown
+            .contains("report_image_1.png_media/image_1.png"));
+        assert!(!output.markdown.contains("report_report_image_1.png_media"));
+    }
+
+    #[test]
+    fn fast_output_removes_image_links_and_media_files() {
+        let envelope = serde_json::json!({
+            "result": {
+                "content": "![alt](image_0.png)",
+                "images": [{"image_index": 0, "format": "png", "data_base64": "YQ=="}]
+            }
+        });
+        let output = build_document_output_with_media(&envelope, "m", false).unwrap();
+        assert_eq!(output.markdown, "alt\n");
+        assert!(output.media.is_empty());
+    }
+
+    #[test]
+    fn strict_base64_rejects_bad_padding_and_empty_payloads() {
+        assert!(decode_base64("").is_none());
+        assert!(decode_base64("a=").is_none());
+        assert!(decode_base64("YQ==junk").is_none());
+        assert_eq!(decode_base64("aGk="), Some(b"hi".to_vec()));
+        assert_eq!(decode_base64("aGVsbG8="), Some(b"hello".to_vec()));
+        assert_eq!(decode_base64("/////w=="), Some(vec![255; 4]));
+        assert!(decode_base64("YQ==YQ==").is_none());
+    }
+
+    #[test]
+    fn malformed_referenced_image_is_reported_as_partial() {
+        let envelope = serde_json::json!({
+            "result": {
+                "content": "![broken](image_0.png)",
+                "images": [{"image_index": 0, "format": "png", "data_base64": "%%%"}]
+            }
+        });
+        let output = build_document_output(&envelope, "m").unwrap();
+        assert!(output.markdown.contains("image_0.png"));
+        assert!(output
+            .warnings
+            .iter()
+            .any(|warning| warning.contains("Base64")));
+    }
+
+    #[test]
+    fn structured_ocr_uses_geometry_and_avoids_parent_word_duplication() {
+        let envelope = serde_json::json!({"result": {
+            "ocr_elements": [
+                {"text": "整行", "level": "line", "page_number": 1,
+                 "geometry": {"type": "rectangle", "left": 0, "top": 0, "width": 100, "height": 20}},
+                {"text": "整", "level": "word", "page_number": 1, "parent_id": "line-1",
+                 "geometry": {"type": "rectangle", "left": 0, "top": 0, "width": 20, "height": 20}},
+                {"text": "行", "level": "word", "page_number": 1, "parent_id": "line-1",
+                 "geometry": {"type": "rectangle", "left": 80, "top": 0, "width": 20, "height": 20}},
+                {"text": "下一行", "level": "line", "page_number": 1,
+                 "geometry": {"type": "rectangle", "left": 0, "top": 40, "width": 100, "height": 20}}
+            ]
+        }});
+        let output = build_document_output(&envelope, "m").unwrap();
+        assert_eq!(output.markdown, "整行\n下一行\n");
+    }
+
+    #[test]
+    fn inline_code_keeps_longer_inner_backtick_runs_literal() {
+        assert_eq!(normalize_markdown("`a `` &#35;`"), "`a `` &#35;`");
+    }
+
+    #[test]
+    fn entity_at_markdown_marker_position_is_escaped_without_decoding_code() {
+        assert_eq!(
+            normalize_markdown("&#35; 标题\n&#42;文字&#42;"),
+            "\\# 标题\n\\*文字*"
+        );
+    }
+
+    #[test]
+    fn huge_deadline_creation_does_not_panic() {
+        let deadline = Deadline::new(Duration::MAX);
+        assert!(!deadline.expired() || deadline.remaining().is_zero());
+    }
+
+    #[test]
+    fn pdf_name_probe_ignores_names_inside_literal_strings() {
+        let object = b"<< /Title (/Pages 2 0 R) /Type /Catalog /Pages 3 0 R >>";
+        let first = find_pdf_name(object, b"/Pages").expect("real PDF name should exist");
+        assert_eq!(&object[first..first + 6], b"/Pages");
+        assert_eq!(indirect_reference_after(object, b"/Pages"), Some((3, 0)));
+        let named_prefix = b"<< /Pages-tree 1 0 R /Pages 2 0 R >>";
+        assert_eq!(
+            indirect_reference_after(named_prefix, b"/Pages"),
+            Some((2, 0))
+        );
     }
 
     // 覆盖 T-14：正文未引用的图片不落盘；base64 损坏的条目保持占位引用原样

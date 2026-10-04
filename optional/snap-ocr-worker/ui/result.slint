@@ -1,17 +1,27 @@
 // 独立截图服务的结果与设置窗口；结果正文只保存在内存和用户剪贴板。
-import { TextEdit, Button, CheckBox } from "std-widgets.slint";
+import { TextEdit, Button, CheckBox, Palette, ScrollView } from "std-widgets.slint";
+
+export global SnapTheme {
+    in-out property <bool> dark: Palette.color-scheme == ColorScheme.dark;
+    in-out property <color> background: dark ? #15171b : #fbfbfd;
+    in-out property <color> surface: dark ? #1e2127 : #ffffff;
+    in-out property <color> text: dark ? #eef1f8 : #1c1d22;
+    in-out property <color> text-secondary: dark ? #a7aebb : #5b5f6b;
+    in-out property <color> accent: dark ? #6aa2ff : #2563cf;
+    in-out property <color> border: dark ? #383d46 : #d9dbe3;
+}
 
 export component ResultWindow inherits Window {
     callback copy-all();
     callback close-requested();
     in property <string> ocr-text;
     in property <string> hint: "";
-    in property <color> token-background: #fbfbfd;
-    in property <color> token-surface: #ffffff;
-    in property <color> token-text: #1c1d22;
-    in property <color> token-text-secondary: #5b5f6b;
-    in property <color> token-accent: #2563cf;
-    in property <color> token-border: #d9dbe3;
+    in property <color> token-background: SnapTheme.background;
+    in property <color> token-surface: SnapTheme.surface;
+    in property <color> token-text: SnapTheme.text;
+    in property <color> token-text-secondary: SnapTheme.text-secondary;
+    in property <color> token-accent: SnapTheme.accent;
+    in property <color> token-border: SnapTheme.border;
 
     title: "截图 OCR 结果";
     background: root.token-background;
@@ -87,7 +97,7 @@ export component ProgressWindow inherits Window {
     title: "截图 OCR";
     width: 340px;
     height: 140px;
-    background: #fbfbfd;
+    background: SnapTheme.background;
     forward-focus: key-handler;
 
     key-handler := FocusScope {
@@ -103,7 +113,7 @@ export component ProgressWindow inherits Window {
             spacing: 14px;
             Text {
                 text: root.cancelling ? "正在取消…" : root.stage;
-                color: #1c1d22;
+                color: SnapTheme.text;
                 font-size: 16px;
             }
             Rectangle { vertical-stretch: 1; }
@@ -144,6 +154,7 @@ export component SettingsWindow inherits Window {
     in property <bool> needs-initialization: false;
     in property <bool> exit-waiting: false;
     in property <bool> force-exit-available: false;
+    in-out property <bool> status-detail-open: false;
     private property <bool> recording: false;
     in-out property <string> draft-key: "";
     private property <bool> draft-control: false;
@@ -154,20 +165,21 @@ export component SettingsWindow inherits Window {
         (root.draft-control ? "Ctrl+" : "") + (root.draft-alt ? "Alt+" : "")
         + (root.draft-shift ? "Shift+" : "") + (root.draft-meta ? "Win+" : "") + root.draft-key;
     private property <bool> confirm-exit: false;
+    changed status-message => { root.status-detail-open = false; }
 
     title: "截图 OCR 设置";
     width: 560px;
     height: 480px;
-    background: #fbfbfd;
+    background: SnapTheme.background;
 
     VerticalLayout {
         padding: 20px;
         spacing: 12px;
-        Text { text: "截图 OCR 设置"; font-size: 20px; font-weight: 700; color: #1c1d22; }
-        Text { text: "关闭主界面后，截图服务仍驻留托盘。"; color: #5b5f6b; }
+        Text { text: "截图 OCR 设置"; font-size: 20px; font-weight: 700; color: SnapTheme.text; }
+        Text { text: "关闭主界面后，截图服务仍驻留托盘。"; color: SnapTheme.text-secondary; }
         HorizontalLayout {
             spacing: 12px;
-            Text { text: "当前热键：" + root.hotkey-label; vertical-alignment: center; color: #1c1d22; }
+            Text { text: "当前热键：" + root.hotkey-label; vertical-alignment: center; color: SnapTheme.text; }
             Button {
                 text: root.recording ? "请按下新热键（Esc 取消）"
                      : root.draft-key != "" ? root.draft-label + " · 点击重录" : "录制新热键";
@@ -255,9 +267,9 @@ export component SettingsWindow inherits Window {
             checked: root.autostart-draft;
             toggled => { root.autostart-draft = self.checked; }
         }
-        Text { text: "移动或删除程序前，请先关闭开机启动。"; color: #5b5f6b; font-size: 12px; }
-        Rectangle { height: 1px; background: #d9dbe3; }
-        Text { text: "模型状态：" + root.model-status; color: #1c1d22; }
+        Text { text: "移动或删除程序前，请先关闭开机启动。"; color: SnapTheme.text-secondary; font-size: 12px; }
+        Rectangle { height: 1px; background: SnapTheme.border; }
+        Text { text: "模型状态：" + root.model-status; color: SnapTheme.text; }
         HorizontalLayout {
             spacing: 10px;
             if root.needs-initialization : Button {
@@ -274,11 +286,39 @@ export component SettingsWindow inherits Window {
                 clicked => { root.cancel-recognition(); }
             }
         }
-        Text { text: root.status-message; color: #2563cf; wrap: word-wrap; }
+        if root.status-message != "": VerticalLayout {
+            spacing: 4px;
+            HorizontalLayout {
+                height: 24px;
+                Text {
+                    text: root.status-message;
+                    color: SnapTheme.accent;
+                    overflow: elide;
+                    vertical-alignment: center;
+                    horizontal-stretch: 1;
+                }
+                Button {
+                    text: root.status-detail-open ? "收起详情" : "查看详情";
+                    clicked => { root.status-detail-open = !root.status-detail-open; }
+                }
+            }
+            if root.status-detail-open : status-details := ScrollView {
+                height: 96px;
+                viewport-width: status-details.visible-width;
+                Text {
+                    x: 0px; y: 0px; width: status-details.visible-width;
+                    height: self.preferred-height;
+                    text: root.status-message;
+                    color: SnapTheme.accent;
+                    wrap: word-wrap;
+                    vertical-alignment: top;
+                }
+            }
+        }
         Rectangle { vertical-stretch: 1; }
         if root.confirm-exit : Rectangle {
             height: root.exit-waiting ? 76px : 54px;
-            background: #fff3e5;
+            background: SnapTheme.surface;
             VerticalLayout {
                 padding: 8px;
                 spacing: 4px;
@@ -286,7 +326,7 @@ export component SettingsWindow inherits Window {
                     text: root.force-exit-available ? "截图推理尚未结束；其他任务停止后可强制退出。"
                          : root.exit-waiting ? "正在等待任务安全结束，后台退出后热键与托盘将停止。"
                                              : "确定退出后台服务？截图与 Xberg 将停止。";
-                    color: #1c1d22;
+                    color: SnapTheme.text;
                     wrap: word-wrap;
                 }
                 HorizontalLayout {

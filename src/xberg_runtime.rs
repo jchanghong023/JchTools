@@ -86,48 +86,21 @@ pub fn request(
         request["command"].as_str(),
         Some("extract" | "ocr_snapshot" | "transcribe")
     ) {
-        let capabilities = match self::request(
+        let capabilities = self::request(
             root,
             json!({"command":"capabilities"}),
             timeout.min(Duration::from_secs(15)),
             cancel,
         )
         .and_then(checked)
-        {
-            Ok(capabilities) => Some(capabilities),
-            // 钉住发布物（run49.1）的 worker 协议没有 capabilities：目录已按
-            // 固定清单做成员级摘要校验（XB-09 版本锚），直接放行；请求级不
-            // 兼容仍由引擎按各自命令返回明确错误，不会混用模型或另起引擎。
-            Err(error) if error.contains("unsupported command 'capabilities'") => None,
-            Err(error) => {
-                return Err(format!(
-                    "Xberg 共享接口尚不可用，请更新兼容发布物；不会启动备用引擎：{error}"
-                ))
-            }
-        };
-        if let Some(capabilities) = capabilities {
-            let supports = |name: &str| {
-                capabilities["commands"]
-                    .as_array()
-                    .is_some_and(|commands| commands.iter().any(|command| command == name))
-            };
-            if capabilities["protocol_version"].as_u64().unwrap_or(0) < 2
-                || capabilities["cancellation"] != "cooperative"
-                || capabilities["timeout_ms"] != true
-                || capabilities["document_snapshot_concurrent"] != true
-                || !supports("cancel")
-                || !supports(request["command"].as_str().unwrap_or_default())
-            {
-                return Err("Xberg 共享接口阻塞：需要协议 v2、跨场景并发、请求级取消和超时；当前引擎不满足，未提交推理".into());
-            }
-            if request["mode"] == "fast"
-                && !capabilities["extract_modes"]
-                    .as_array()
-                    .is_some_and(|modes| modes.iter().any(|mode| mode == "fast"))
-            {
-                return Err("Xberg 共享接口阻塞：不支持请求级快速模式，未改用常规模式".into());
-            }
-        }
+        .map_err(|error| {
+            format!("Xberg 共享接口不可用：能力握手失败（不会启动备用引擎）：{error}")
+        })?;
+        validate_capabilities(
+            &capabilities,
+            request["command"].as_str().unwrap_or_default(),
+            request["mode"] == "fast",
+        )?;
     }
     let timeout = timeout.saturating_sub(started.elapsed());
     if timeout.is_zero() {
@@ -155,6 +128,31 @@ pub fn request(
         let _ = (root, request);
         Err("共享 Xberg 仅支持 Windows".into())
     }
+}
+
+fn validate_capabilities(capabilities: &Value, command: &str, fast: bool) -> Result<(), String> {
+    let supports = |name: &str| {
+        capabilities["commands"]
+            .as_array()
+            .is_some_and(|commands| commands.iter().any(|command| command == name))
+    };
+    if capabilities["protocol_version"].as_u64().unwrap_or(0) < 2
+        || capabilities["cancellation"] != "cooperative"
+        || capabilities["timeout_ms"] != true
+        || capabilities["document_snapshot_concurrent"] != true
+        || !supports("cancel")
+        || !supports(command)
+    {
+        return Err("Xberg 共享接口阻塞：需要协议 v2、跨场景并发、请求级取消和超时；当前引擎不满足，未提交推理".into());
+    }
+    if fast
+        && !capabilities["extract_modes"]
+            .as_array()
+            .is_some_and(|modes| modes.iter().any(|mode| mode == "fast"))
+    {
+        return Err("Xberg 共享接口阻塞：不支持请求级快速模式，未改用常规模式".into());
+    }
+    Ok(())
 }
 
 pub fn checked(response: Value) -> Result<Value, String> {
@@ -219,4 +217,45 @@ pub fn validate_assets(root: &Path, scenario: &str) -> Result<(), String> {
         }
     }
     Ok(())
+}
+
+#[cfg(any(test, feature = "test-hooks"))]
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // 覆盖 T-13/T-14：共享 worker 必须渲染 Markdown，否则 PPTX 图片占位和
+    // 跟随占位的 OCR 正文会被纯文本模式吞掉，得到被误报成功的空产物。
+    #[test]
+    fn document_startup_uses_markdown_and_keeps_image_ocr() {
+        let root = tempfile::tempdir().expect("创建隔离运行目录");
+        let config = startup_config(root.path()).expect("生成共享配置");
+        assert_eq!(config["output_format"], "markdown");
+        assert_eq!(config["images"]["extract_images"], true);
+        assert_eq!(config["images"]["inject_placeholders"], true);
+        assert_eq!(config["images"]["run_ocr_on_images"], true);
+        assert_eq!(config["images"]["append_ocr_text"], true);
+        assert_eq!(config["images"]["include_data_base64"], true);
+    }
+
+    #[test]
+    fn legacy_capabilities_without_handshake_fields_are_rejected() {
+        let legacy = json!({
+            "ok": true,
+            "commands": ["extract", "ocr_snapshot", "cancel"]
+        });
+        let error = validate_capabilities(&legacy, "extract", false)
+            .expect_err("缺少能力握手字段不得按旧成员清单放行");
+        assert!(error.contains("协议 v2"));
+    }
+
+    #[test]
+    fn unsupported_capabilities_response_is_explicitly_rejected() {
+        let error = checked(json!({
+            "ok": false,
+            "error": "unsupported command 'capabilities'"
+        }))
+        .expect_err("旧 worker 不支持 capabilities 时必须明确失败");
+        assert!(error.contains("unsupported command 'capabilities'"));
+    }
 }

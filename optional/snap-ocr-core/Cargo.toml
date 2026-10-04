@@ -6,6 +6,11 @@ publish = false
 license = "MIT"
 description = "截图 OCR 纯逻辑核心：瓦片、几何、接缝合并、去重、方向策略与文本布局（O 分区）"
 
+[features]
+default = []
+# 与统一测试门同一参数；纯逻辑参照物不读取运行环境覆盖。
+test-hooks = []
+
 ## 无外部依赖：附录 B 字符宽度所需的 East Asian Width 与组合类区段表由
 ## src/ucd_tables.rs 提供（Python 3.13 unicodedata 生成，与 oracle 同源）。
 

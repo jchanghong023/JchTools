@@ -14,6 +14,9 @@ fn main() {
     let pending = Arc::new(Mutex::new(HashMap::<String, Arc<AtomicBool>>::new()));
     for line in io::stdin().lock().lines() {
         let line = line.unwrap(); let id = field(&line, "id"); let command = field(&line, "command");
+        if command == "extract" && line.contains("nofast.txt") {
+            writeln!(OpenOptions::new().create(true).append(true).open("nofast-modes.txt").unwrap(), "{}", field(&line, "mode")).unwrap();
+        }
         let output = output.clone();
         let flag = Arc::new(AtomicBool::new(false));
         if command == "cancel" {
@@ -23,10 +26,11 @@ fn main() {
         std::thread::spawn(move || {
             let timeout = line.split("\"timeout_ms\":").nth(1).and_then(|s| s.split(|c: char| !c.is_ascii_digit()).next()).and_then(|s| s.parse::<u64>().ok()).unwrap_or(60000);
             let end = Instant::now() + Duration::from_millis(timeout);
-            let waiting = (command == "extract" && line.contains("long.txt")) || (command == "ocr_snapshot" && field(&line,"image_base64") == "wait");
+            let waiting = (command == "extract" && (line.contains("long.txt") || line.contains("unresponsive.txt"))) || (command == "ocr_snapshot" && field(&line,"image_base64") == "wait");
             if waiting {
                 std::fs::write(if command == "extract" {"document-started"} else {"snapshot-started"}, "1").unwrap();
-                while !(flag.load(Ordering::Acquire) || Instant::now() >= end || command == "extract" && std::path::Path::new("release-document").exists()) { std::thread::sleep(Duration::from_millis(5)); }
+                let unresponsive = command == "extract" && line.contains("unresponsive.txt");
+                while unresponsive || !(flag.load(Ordering::Acquire) || Instant::now() >= end || command == "extract" && std::path::Path::new("release-document").exists()) { std::thread::sleep(Duration::from_millis(5)); }
             }
             if flag.load(Ordering::Acquire) || Instant::now() >= end {
                 let kind = if Instant::now() >= end {"timeout"} else {"cancelled"};

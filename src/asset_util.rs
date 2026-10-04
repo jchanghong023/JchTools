@@ -12,7 +12,7 @@ use serde::Deserialize;
 use sha2::{Digest, Sha256};
 use std::collections::HashSet;
 use std::fs::{self, File};
-use std::io::{self, Read};
+use std::io::{self, Read, Write};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use uuid::Uuid;
@@ -292,6 +292,25 @@ pub(crate) fn verify_file(
     expected_size: u64,
     expected_sha256: &str,
 ) -> Result<(), String> {
+    verify_file_inner(path, expected_size, expected_sha256, None)
+}
+
+/// 与 [`verify_file`] 相同，但在大文件哈希期间按块响应取消。
+pub(crate) fn verify_file_with_cancel(
+    path: &Path,
+    expected_size: u64,
+    expected_sha256: &str,
+    cancel: &AtomicBool,
+) -> Result<(), String> {
+    verify_file_inner(path, expected_size, expected_sha256, Some(cancel))
+}
+
+fn verify_file_inner(
+    path: &Path,
+    expected_size: u64,
+    expected_sha256: &str,
+    cancel: Option<&AtomicBool>,
+) -> Result<(), String> {
     let metadata = fs::metadata(path).map_err(|error| error.to_string())?;
     if !metadata.is_file() {
         return Err("不是普通文件".to_string());
@@ -299,18 +318,30 @@ pub(crate) fn verify_file(
     if metadata.len() != expected_size {
         return Err(format!("大小 {}，预期 {expected_size}", metadata.len()));
     }
-    let actual = sha256_file(path).map_err(|error| error.to_string())?;
+    let actual = sha256_file_inner(path, cancel).map_err(|error| {
+        if error.kind() == io::ErrorKind::Interrupted {
+            "用户已取消初始化".to_string()
+        } else {
+            error.to_string()
+        }
+    })?;
     if !actual.eq_ignore_ascii_case(expected_sha256) {
         return Err(format!("SHA256 {actual}，预期 {expected_sha256}"));
     }
     Ok(())
 }
 
-fn sha256_file(path: &Path) -> io::Result<String> {
+fn sha256_file_inner(path: &Path, cancel: Option<&AtomicBool>) -> io::Result<String> {
     let mut file = File::open(path)?;
     let mut digest = Sha256::new();
     let mut buffer = vec![0_u8; 1024 * 1024];
     loop {
+        if cancel.is_some_and(|flag| flag.load(Ordering::Acquire)) {
+            return Err(io::Error::new(
+                io::ErrorKind::Interrupted,
+                "用户已取消初始化",
+            ));
+        }
         let read = file.read(&mut buffer)?;
         if read == 0 {
             break;
@@ -416,11 +447,11 @@ pub(crate) fn ensure_not_cancelled(cancel: &AtomicBool) -> Result<(), String> {
 // 残留兜底、成员校验）此前各留一份相同实现，仅靠注释约定同步；收敛到本模块
 // 后一处修改即可同时生效（XB-09/XB-16 同口径），模块只保留各自的清单与文案。
 
-/// 组件目录解析：开发期（仅 debug 构建）可用 `JCHTOOLS_XBERG_INFERENCE_DIR`
+/// 组件目录解析：测试支持构建可用 `JCHTOOLS_XBERG_INFERENCE_DIR`
 /// 覆盖到本地组件树；否则取应用 SQLite 保存的共享 Xberg 目录（XB-18/XB-19）。
 /// 两个功能必须用同一规则解析同一安装，不允许出现第二套目录口径。
 pub(crate) fn resolve_xberg_component() -> Result<PathBuf, String> {
-    if cfg!(debug_assertions) {
+    if cfg!(test) || cfg!(feature = "test-hooks") {
         if let Some(path) = std::env::var_os("JCHTOOLS_XBERG_INFERENCE_DIR")
             .map(PathBuf::from)
             .filter(|p| p.is_absolute())
@@ -535,7 +566,19 @@ pub(crate) fn extract_zip_safely(
         }
         let mut output =
             File::create(&target).map_err(|error| format!("创建解包文件失败：{error}"))?;
-        io::copy(&mut entry, &mut output).map_err(|error| format!("写入解包文件失败：{error}"))?;
+        let mut buffer = vec![0_u8; 1024 * 1024];
+        loop {
+            ensure_not_cancelled(cancel)?;
+            let read = entry
+                .read(&mut buffer)
+                .map_err(|error| format!("读取解包文件失败：{error}"))?;
+            if read == 0 {
+                break;
+            }
+            output
+                .write_all(&buffer[..read])
+                .map_err(|error| format!("写入解包文件失败：{error}"))?;
+        }
         output
             .sync_all()
             .map_err(|error| format!("同步解包文件失败：{error}"))?;
@@ -545,9 +588,22 @@ pub(crate) fn extract_zip_safely(
 
 #[cfg(test)]
 mod tests {
-    use super::{atomic_replace_dir, atomic_replace_file};
+    use super::{atomic_replace_dir, atomic_replace_file, verify_file_with_cancel};
     use std::fs;
     use std::process::Command;
+    use std::sync::atomic::AtomicBool;
+
+    #[test]
+    fn verify_file_with_cancel_stops_before_hashing() {
+        let root = tempfile::tempdir().expect("创建测试目录");
+        let file = root.path().join("asset.bin");
+        fs::write(&file, b"asset").expect("写入资产");
+        let cancel = AtomicBool::new(true);
+
+        let error = verify_file_with_cancel(&file, 5, &"00".repeat(32), &cancel)
+            .expect_err("已取消的哈希校验必须立即停止");
+        assert_eq!(error, "用户已取消初始化");
+    }
 
     // 覆盖 B-1：原子就位成功后，旧备份清理失败不得把已成功的安装误报为失败。
     // 注入方式：旧目标本身是目录时，备份（改名后的目录）无法被 remove_file

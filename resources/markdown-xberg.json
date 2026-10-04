@@ -1,4 +1,5 @@
 {
+ "output_format": "markdown",
  "use_layout_for_markdown": true,
  "ocr": {
   "backend": "paddle-ocr",

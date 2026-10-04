@@ -6,14 +6,14 @@
 //!
 //! 运行前置（显式提供，测试自身不联网、不合成）：
 //! - `JCHTOOLS_XBERG_INFERENCE_DIR`：完整的 Xberg 推理组件目录（xberg.exe +
-//!   SenseVoice/VAD 模型 + sherpa-onnx/FFmpeg DLL，见 XB-10）。仅 debug 构建
+//!   SenseVoice/VAD 模型 + sherpa-onnx/FFmpeg DLL，见 XB-10）。仅显式 test-hooks 构建
 //!   生效（与 `src/markdown_assets.rs` 的解析规则一致）。
 //! - `JCHTOOLS_MEDIA_E2E_INPUT`：待转录的合成媒体文件（MP4/M4A，公开合成，
 //!   不含业务内容，T-26）。
 //! - `JCHTOOLS_MEDIA_E2E_EXPECT_TEXT`：期望在转录正文中出现的文本片段
 //!   （逗号分隔多个候选，命中任一即通过）。
 //!
-//! 运行：`cargo test --test markdown_media_e2e -- --ignored`。
+//! 运行：`cargo test --features test-hooks --test markdown_media_e2e -- --ignored`。
 
 use std::path::PathBuf;
 

@@ -8,6 +8,7 @@ use std::ffi::c_void;
 use std::io::Cursor;
 use std::mem::size_of;
 use std::ptr::{null, null_mut};
+use std::sync::atomic::{AtomicUsize, Ordering};
 
 type Handle = *mut c_void;
 
@@ -279,6 +280,20 @@ fn wide(text: &str) -> Vec<u16> {
 fn error(step: &str) -> String {
     format!("截图失败：{step}")
 }
+
+/// 只拒绝没有完整 BGRA 像素的缓冲；全黑画面本身是合法截图内容。
+fn capture_pixels_are_unusable(pixels: &[u8]) -> bool {
+    pixels.is_empty() || !pixels.len().is_multiple_of(4)
+}
+
+/// 将 Win32 消息循环结果映射为继续、正常退出或截图链路故障。
+fn interpret_message_result(code: i32) -> Result<bool, String> {
+    match code.cmp(&0) {
+        std::cmp::Ordering::Less => Err(error("框选消息循环失败")),
+        std::cmp::Ordering::Equal => Ok(false),
+        std::cmp::Ordering::Greater => Ok(true),
+    }
+}
 /// 暂时隐藏本应用的可见顶层窗；截图完成后按隐藏前的窗口状态恢复。
 ///
 /// 恢复语义（行为修复）：隐藏前最小化的窗口必须以 `SW_SHOWMINNOACTIVE` 恢复
@@ -425,7 +440,7 @@ pub fn enable_per_monitor_v2() -> Result<(), String> {
     Ok(())
 }
 
-/// 从鼠标所在屏幕取得无鼠标指针的物理像素；全黑表面视为不可捕获。
+/// 从鼠标所在屏幕取得无鼠标指针的物理像素；系统 API 失败时返回捕获错误。
 pub fn capture() -> Result<CaptureFrame, String> {
     let mut cursor = Point::default();
     // SAFETY: cursor 是本栈上已初始化的 Point，本函数独占可写。
@@ -558,13 +573,8 @@ pub fn capture() -> Result<CaptureFrame, String> {
     if !good {
         return Err(error("桌面像素读取失败"));
     }
-    if pixels
-        .as_chunks::<4>()
-        .0
-        .iter()
-        .all(|p| p[0] == 0 && p[1] == 0 && p[2] == 0)
-    {
-        return Err(error("当前安全桌面或受保护表面无法捕获"));
+    if capture_pixels_are_unusable(&pixels) {
+        return Err(error("桌面像素缓冲无效"));
     }
     Ok(CaptureFrame {
         width: usize::try_from(w).map_err(|_| error("显示器尺寸无效"))?,
@@ -602,6 +612,21 @@ impl Drop for Overlay {
     }
 }
 thread_local! { static OVERLAY: RefCell<Option<Overlay>> = const { RefCell::new(None) }; }
+static ACTIVE_OVERLAY: AtomicUsize = AtomicUsize::new(0);
+
+/// 请求当前框选窗口结束并按取消处理；可从服务或托盘控制线程安全调用。
+///
+/// # Returns
+/// 当前存在框选窗口且消息已投递时返回 `true`。
+pub fn cancel_selection() -> bool {
+    let hwnd = ACTIVE_OVERLAY.load(Ordering::Acquire);
+    if hwnd == 0 {
+        return false;
+    }
+    // SAFETY: ACTIVE_OVERLAY 只保存 select 创建且尚未销毁的 HWND；消息投递失败
+    // 仅表示窗口已在退出，不解引用该句柄。
+    unsafe { PostMessageW(hwnd as Handle, WM_DONE, 0, 0) != 0 }
+}
 fn point_from_lparam(l: isize) -> Point {
     // Win32 mouse lParam stores signed 16-bit x/y coordinates in its low two words.
     let bytes = l.to_le_bytes();
@@ -896,20 +921,27 @@ pub fn select(frame: CaptureFrame) -> Result<SelectedImage, String> {
         });
         return Err(error("无法创建冻结框选窗口"));
     }
+    ACTIVE_OVERLAY.store(hwnd as usize, Ordering::Release);
     // SAFETY: hwnd 是刚创建的有效窗口；SW_SHOW 只负责显示，不改变放置状态。
     unsafe { ShowWindow(hwnd, 5) };
     // SAFETY: 同一有效窗口；置前失败仅影响激活顺序，不破坏窗口本身。
     unsafe { SetForegroundWindow(hwnd) };
     // SAFETY: 同一有效窗口；请求一次立即重绘。
     unsafe { UpdateWindow(hwnd) };
+    let mut message_error = None;
     loop {
         // SAFETY: Msg 是仅含句柄与整数的 C POD 结构，全零是合法初始状态。
         let mut msg = unsafe { std::mem::zeroed::<Msg>() };
         // SAFETY: msg 是本栈上刚清零的合法 Msg；窗口过滤传 null 表示接收本线程
         // 全部窗口的消息，消息 ID 范围 0..=0 不过滤。
         let code = unsafe { GetMessageW(&raw mut msg, null_mut(), 0, 0) };
-        if code <= 0 {
-            break;
+        match interpret_message_result(code) {
+            Ok(true) => {}
+            Ok(false) => break,
+            Err(reason) => {
+                message_error = Some(reason);
+                break;
+            }
         }
         if msg.hwnd == hwnd && msg.message == WM_DONE {
             break;
@@ -921,10 +953,16 @@ pub fn select(frame: CaptureFrame) -> Result<SelectedImage, String> {
     }
     // SAFETY: hwnd 是本函数创建的窗口；消息循环退出后销毁，随后才 take 掉
     // OVERLAY 释放冻结图像。
+    ACTIVE_OVERLAY.store(0, Ordering::Release);
+    // SAFETY: hwnd 是本函数创建的窗口；消息循环退出后销毁，随后才 take 掉
+    // OVERLAY 释放冻结图像。
     unsafe { DestroyWindow(hwnd) };
     let Some(state) = OVERLAY.with(|slot| slot.borrow_mut().take()) else {
         return Err(error("框选状态丢失"));
     };
+    if let Some(reason) = message_error {
+        return Err(reason);
+    }
     let Some(rect) = state.selected else {
         return Ok(None);
     };
@@ -953,4 +991,23 @@ pub fn select(frame: CaptureFrame) -> Result<SelectedImage, String> {
     BgrImage::from_vec(width, height, bgr)
         .map(|image| Some((image, state.frame.work)))
         .map_err(|_| error("裁剪图像无效"))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{capture_pixels_are_unusable, interpret_message_result};
+
+    // 覆盖 O-17/O-18 回归：全黑是合法截图内容，不能仅凭像素全零拒绝捕获。
+    #[test]
+    fn all_black_frame_is_not_marked_unusable() {
+        assert!(!capture_pixels_are_unusable(&[0; 4 * 16 * 16]));
+    }
+
+    // 覆盖 O-18/O-30 回归：GetMessageW 的 -1 是截图链路故障，不能伪装成取消。
+    #[test]
+    fn failed_message_loop_is_reported_as_error() {
+        assert!(interpret_message_result(-1).is_err());
+        assert!(!interpret_message_result(0).unwrap());
+        assert!(interpret_message_result(1).unwrap());
+    }
 }

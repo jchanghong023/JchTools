@@ -735,8 +735,11 @@ export component AppWindow inherits Window {
     in-out property <bool> convert-ready: false;
     in-out property <bool> convert-runtime-confirmed: false;
     in-out property <bool> convert-initializing: false;
+    in-out property <bool> convert-preparing: false;
     in-out property <bool> convert-runtime-saving: false;
     in-out property <string> convert-status: "尚未检查可选组件";
+    in-out property <string> convert-detail-text;
+    in-out property <bool> convert-detail-open: false;
     in-out property <string> convert-metrics: "尚未开始";
     in-out property <string> convert-log-text;
     in-out property <string> convert-progress-note;
@@ -745,6 +748,8 @@ export component AppWindow inherits Window {
     in-out property <bool> snap-ready: false;
     in-out property <bool> snap-initializing: false;
     in-out property <string> snap-asset-status: "尚未检查可选组件";
+    in-out property <string> snap-asset-detail;
+    in-out property <bool> snap-detail-open: false;
     in-out property <string> snap-progress;
     in-out property <bool> snap-connected: false;
     in-out property <string> snap-service-status: "尚未连接后台服务";
@@ -813,6 +818,7 @@ export component AppWindow inherits Window {
     in-out property <string> settings-status: "正在读取配置…";
 
     callback convert-initialize();
+    callback convert-selection-changed();
     callback convert-start();
     callback convert-stop();
     callback window-drag-start(length,length);
@@ -943,22 +949,24 @@ export component AppWindow inherits Window {
                 }
                 if root.error-text != "": Rectangle {
                     min-height: 40px; border-radius: 8px;
+                    clip: true;
                     background: Design.danger-bg;
                     border-width: 1px; border-color: Design.danger-line;
                     HorizontalLayout { padding-top: 8px; padding-bottom: 8px; padding-left: 14px; padding-right: 10px; spacing: 12px; cross-axis-alignment: center;
                         Rectangle { width: 4px; height: 20px; border-radius: 2px; background: Design.danger; }
-                        Text { text: root.error-text; wrap: word-wrap; color: Design.danger-ink; horizontal-stretch: 1; vertical-alignment: center; }
+                        Text { text: root.error-text; wrap: no-wrap; overflow: elide; color: Design.danger-ink; horizontal-stretch: 1; vertical-alignment: center; }
                         AppButton { text: "关闭"; small: true; clicked => { root.error-text = ""; } }
                     }
                 }
                 // 成功/中性提示与错误分开：复制完成这类消息不再用红色错误样式。
                 if root.notice-text != "": Rectangle {
                     min-height: 40px; border-radius: 8px;
+                    clip: true;
                     background: Design.info-bg;
                     border-width: 1px; border-color: Design.info-line;
                     HorizontalLayout { padding-top: 8px; padding-bottom: 8px; padding-left: 14px; padding-right: 10px; spacing: 12px; cross-axis-alignment: center;
                         Rectangle { width: 4px; height: 20px; border-radius: 2px; background: Design.accent; }
-                        Text { text: root.notice-text; wrap: word-wrap; color: Design.accent-ink; horizontal-stretch: 1; vertical-alignment: center; }
+                        Text { text: root.notice-text; wrap: no-wrap; overflow: elide; color: Design.accent-ink; horizontal-stretch: 1; vertical-alignment: center; }
                         AppButton { text: "关闭"; small: true; clicked => { root.notice-text = ""; } }
                     }
                 }
@@ -1482,7 +1490,7 @@ export component AppWindow inherits Window {
                     }
                 }
                 if root.screen == 5: HorizontalLayout { spacing: 10px;
-                    Muted { text: root.convert-status; horizontal-stretch: 1; }
+                            Rectangle { horizontal-stretch: 1; }
                     AppButton { text: "前往设置"; enabled: root.confirm-kind == 0; clicked => { root.navigation(7); } }
                 }
                 if root.screen == 7: ScrollView {
@@ -1492,20 +1500,20 @@ export component AppWindow inherits Window {
                             Muted { text: "文档、截图与媒体共用一个引擎。两种来源分别保存，重启自动恢复。"; }
                             Label { text: root.settings-source == 1 ? "当前来源：下载的 Xberg" : "当前来源：用户提供的目录"; }
                             Field { text <=> root.settings-custom-dir; placeholder-text: "包含 xberg.exe 的已有目录";
-                                enabled: !root.busy && !root.convert-initializing && !root.convert-runtime-saving && root.confirm-kind == 0; }
+                                enabled: !root.busy && !root.convert-initializing && !root.convert-preparing && !root.convert-runtime-saving && root.confirm-kind == 0; }
                             HorizontalLayout { spacing: 8px;
-                                AppButton { text: "选择目录…"; enabled: !root.busy && !root.convert-initializing && !root.convert-runtime-saving && root.confirm-kind == 0;
+                                AppButton { text: "选择目录…"; enabled: !root.busy && !root.convert-initializing && !root.convert-preparing && !root.convert-runtime-saving && root.confirm-kind == 0;
                                     clicked => { root.settings-action("choose"); } }
-                                AppButton { text: "使用此目录"; primary: true; enabled: !root.busy && !root.convert-initializing && !root.convert-runtime-saving && root.settings-custom-dir != "" && root.confirm-kind == 0;
+                                AppButton { text: "使用此目录"; primary: true; enabled: !root.busy && !root.convert-initializing && !root.convert-preparing && !root.convert-runtime-saving && root.settings-custom-dir != "" && root.confirm-kind == 0;
                                     clicked => { root.settings-action("custom"); } }
                                 Rectangle { horizontal-stretch: 1; }
                             }
                             Rectangle { height: 1px; background: Design.line-soft; }
                             Muted { text: root.settings-downloaded-dir == "" ? "尚未下载 Xberg" : "下载目录：" + root.settings-downloaded-dir; }
                             HorizontalLayout { spacing: 8px;
-                                AppButton { text: "下载 Xberg"; enabled: !root.busy && !root.convert-initializing && !root.convert-runtime-saving && root.confirm-kind == 0;
+                                AppButton { text: "下载 Xberg"; enabled: !root.busy && !root.convert-initializing && !root.convert-preparing && !root.convert-runtime-saving && root.confirm-kind == 0;
                                     clicked => { root.settings-action("download"); } }
-                                AppButton { text: "使用已下载版本"; enabled: !root.busy && !root.convert-initializing && !root.convert-runtime-saving && root.settings-downloaded-dir != "" && root.confirm-kind == 0;
+                                AppButton { text: "使用已下载版本"; enabled: !root.busy && !root.convert-initializing && !root.convert-preparing && !root.convert-runtime-saving && root.settings-downloaded-dir != "" && root.confirm-kind == 0;
                                     clicked => { root.settings-action("downloaded"); } }
                                 if root.convert-initializing: AppButton { text: "取消下载"; enabled: root.confirm-kind == 0; clicked => { root.convert-stop(); } }
                                 Rectangle { horizontal-stretch: 1; }
@@ -1518,7 +1526,16 @@ export component AppWindow inherits Window {
                             Label { text: "后台与截图组件"; font-size: 16px; font-weight: 600; }
                             Muted { text: root.snap-service-status; }
                             Muted { text: root.snap-asset-status; }
-                            if root.snap-error != "": Text { text: root.snap-error; color: Design.danger-ink; wrap: word-wrap; }
+                            if root.snap-asset-detail != "" || root.snap-error != "": snap-settings-detail := ScrollView {
+                                height: 120px; viewport-width: snap-settings-detail.visible-width;
+                                Text {
+                                    x: 0px; y: 0px; width: snap-settings-detail.visible-width;
+                                    height: self.preferred-height;
+                                    vertical-alignment: top;
+                                    text: root.snap-error != "" ? root.snap-error : root.snap-asset-detail;
+                                    color: Design.danger-ink; wrap: word-wrap;
+                                }
+                            }
                             HorizontalLayout { spacing: 8px;
                                 AppButton { text: "初始化字体 / 修复组件"; enabled: !root.snap-initializing && root.confirm-kind == 0; clicked => { root.snap-initialize(); } }
                                 AppButton { text: "重试后台连接"; enabled: !root.snap-request-pending && root.confirm-kind == 0; clicked => { root.snap-connect(); } }
@@ -1536,7 +1553,10 @@ export component AppWindow inherits Window {
                     }
                 }
                 // ============ 转 Markdown ============
-                if root.screen == 5: VerticalLayout {
+                if root.screen == 5: converter-scroll := ScrollView {
+                    vertical-stretch: 1;
+                    viewport-width: converter-scroll.visible-width;
+                    VerticalLayout { width: converter-scroll.visible-width;
                     spacing: 8px;
                     Surface {
                         VerticalLayout { spacing: 0px;
@@ -1544,8 +1564,8 @@ export component AppWindow inherits Window {
                                 Text { width: 96px; text: "输入目录"; font-size: 12.5px; color: Design.text-muted; vertical-alignment: center; }
                                 Field { text <=> root.convert-input-dir; placeholder-text: "选择或输入待转换的目录，例如 D:\\Docs";
                                     icon: 0;
-                                    enabled: !root.busy && !root.convert-initializing && !root.convert-runtime-saving && root.confirm-kind == 0; horizontal-stretch: 1; }
-                                AppButton { text: "选择目录…"; enabled: !root.busy && !root.convert-initializing && !root.convert-runtime-saving && root.confirm-kind == 0; clicked => { root.convert-choose-input(); } }
+                                    enabled: !root.busy && !root.convert-initializing && !root.convert-preparing && !root.convert-runtime-saving && root.confirm-kind == 0; horizontal-stretch: 1; }
+                                AppButton { text: "选择目录…"; enabled: !root.busy && !root.convert-initializing && !root.convert-preparing && !root.convert-runtime-saving && root.confirm-kind == 0; clicked => { root.convert-choose-input(); } }
                             }
                             Rectangle {
                                 background: Design.soft;
@@ -1561,10 +1581,10 @@ export component AppWindow inherits Window {
                                 Text { width: 96px; text: "输出目录"; font-size: 12.5px; color: Design.text-muted; vertical-alignment: center; }
                                 Field { text <=> root.convert-output-dir; placeholder-text: "选择转换结果目录";
                                     icon: 0;
-                                    enabled: !root.busy && !root.convert-initializing && !root.convert-runtime-saving && root.confirm-kind == 0; horizontal-stretch: 1; }
-                                AppButton { text: "选择目录…"; enabled: !root.busy && !root.convert-initializing && !root.convert-runtime-saving && root.confirm-kind == 0; clicked => { root.convert-choose-output(); } }
+                                    enabled: !root.busy && !root.convert-initializing && !root.convert-preparing && !root.convert-runtime-saving && root.confirm-kind == 0; horizontal-stretch: 1; }
+                                AppButton { text: "选择目录…"; enabled: !root.busy && !root.convert-initializing && !root.convert-preparing && !root.convert-runtime-saving && root.confirm-kind == 0; clicked => { root.convert-choose-output(); } }
                                 Check { text: "平铺输出"; checked <=> root.convert-flat;
-                                    enabled: !root.busy && !root.convert-initializing && !root.convert-runtime-saving && root.confirm-kind == 0; }
+                                    enabled: !root.busy && !root.convert-initializing && !root.convert-preparing && !root.convert-runtime-saving && root.confirm-kind == 0; }
                             }
                             Rectangle {
                                 background: Design.soft;
@@ -1578,11 +1598,11 @@ export component AppWindow inherits Window {
                         VerticalLayout { spacing: 0px;
                             HorizontalLayout { padding-top: 12px; padding-bottom: 12px; padding-left: 16px; padding-right: 16px; spacing: 14px; cross-axis-alignment: center;
                                 Text { width: 96px; text: "转换类型"; font-size: 12.5px; color: Design.text-muted; vertical-alignment: center; }
-                                Check { text: "PDF"; checked <=> root.convert-pdf; enabled: !root.busy && !root.convert-initializing && !root.convert-runtime-saving && root.confirm-kind == 0; }
-                                Check { text: "Office"; checked <=> root.convert-office; enabled: !root.busy && !root.convert-initializing && !root.convert-runtime-saving && root.confirm-kind == 0; }
-                                Check { text: "图片"; checked <=> root.convert-images; enabled: !root.busy && !root.convert-initializing && !root.convert-runtime-saving && root.confirm-kind == 0; }
-                                Check { text: "MP4/M4A"; checked <=> root.convert-media; enabled: !root.busy && !root.convert-initializing && !root.convert-runtime-saving && root.confirm-kind == 0; }
-                                Check { text: "其他"; checked <=> root.convert-other; enabled: !root.busy && !root.convert-initializing && !root.convert-runtime-saving && root.confirm-kind == 0; }
+                                Check { text: "PDF"; checked <=> root.convert-pdf; enabled: !root.busy && !root.convert-initializing && !root.convert-preparing && !root.convert-runtime-saving && root.confirm-kind == 0; toggled => { root.convert-selection-changed(); } }
+                                Check { text: "Office"; checked <=> root.convert-office; enabled: !root.busy && !root.convert-initializing && !root.convert-preparing && !root.convert-runtime-saving && root.confirm-kind == 0; toggled => { root.convert-selection-changed(); } }
+                                Check { text: "图片"; checked <=> root.convert-images; enabled: !root.busy && !root.convert-initializing && !root.convert-preparing && !root.convert-runtime-saving && root.confirm-kind == 0; toggled => { root.convert-selection-changed(); } }
+                                Check { text: "MP4/M4A"; checked <=> root.convert-media; enabled: !root.busy && !root.convert-initializing && !root.convert-preparing && !root.convert-runtime-saving && root.confirm-kind == 0; toggled => { root.convert-selection-changed(); } }
+                                Check { text: "其他"; checked <=> root.convert-other; enabled: !root.busy && !root.convert-initializing && !root.convert-preparing && !root.convert-runtime-saving && root.confirm-kind == 0; toggled => { root.convert-selection-changed(); } }
                                 Rectangle { horizontal-stretch: 1; background: transparent; }
                             }
                             Rectangle { height: 1px; background: Design.line-soft; }
@@ -1605,8 +1625,22 @@ export component AppWindow inherits Window {
                                 if root.convert-initializing: AppButton { text: "取消初始化";
                                     enabled: root.confirm-kind == 0; clicked => { root.convert-stop(); } }
                             }
+                            if root.convert-detail-text != "": HorizontalLayout { spacing: 8px; cross-axis-alignment: center;
+                                Muted { text: "有详细诊断信息"; horizontal-stretch: 1; }
+                                AppButton { text: root.convert-detail-open ? "收起详情" : "查看详情"; small: true;
+                                    clicked => { root.convert-detail-open = !root.convert-detail-open; } }
+                            }
+                            if root.convert-detail-open: convert-detail-scroll := ScrollView {
+                                height: 120px; viewport-width: convert-detail-scroll.visible-width;
+                                Text {
+                                    x: 0px; y: 0px; width: convert-detail-scroll.visible-width;
+                                    height: self.preferred-height;
+                                    vertical-alignment: top;
+                                    text: root.convert-detail-text; wrap: word-wrap; color: Design.danger-ink;
+                                }
+                            }
                             if root.convert-initializing: ProgressBar { progress: root.convert-progress; }
-                            Muted { text: "文档转换组件按需初始化，不随主程序打包；媒体转录由 Xberg 推理组件承接，初始化时按清单下载推理组件包，缺失时初始化与检查会给出原因。"; color: Design.muted-2; }
+                            Muted { text: "组件未随主程序打包；缺失项和故障原因可在详情中查看。"; color: Design.muted-2; }
                         }
                     }
                     LogCard { vertical-stretch: 1; title: root.convert-progress-note == "" ? "转换日志" : root.convert-progress-note; body <=> root.convert-log-text; }
@@ -1626,13 +1660,14 @@ export component AppWindow inherits Window {
                                     Label { text: root.convert-metrics; overflow: elide; font-weight: 600; font-size: 13px; }
                                 }
                                 if root.busy: Text { text: root.convert-progress-note; wrap: no-wrap; overflow: elide; color: Design.accent-ink; font-weight: 600; }
-                                if root.busy: AppButton { text: "停止任务"; enabled: root.confirm-kind == 0; clicked => { root.convert-stop(); } }
+                                if root.busy || root.convert-preparing: AppButton { text: root.convert-preparing ? "取消检查" : "停止任务"; enabled: root.confirm-kind == 0; clicked => { root.convert-stop(); } }
                                 if !root.busy: AppButton { text: "开始转换"; primary: true; icon: 10;
-                                    enabled: root.convert-ready && root.convert-input-dir != "" && root.convert-output-dir != "" && root.confirm-kind == 0;
+                                    enabled: root.convert-ready && !root.convert-preparing && root.convert-input-dir != "" && root.convert-output-dir != "" && root.confirm-kind == 0;
                                     clicked => { root.convert-start(); } }
                             }
                             if root.busy: ProgressBar { progress: root.convert-progress; }
                         }
+                    }
                     }
                 }
                 // ============ 截图 OCR：仅快捷键及后台状态 ============
@@ -1687,8 +1722,28 @@ export component AppWindow inherits Window {
                         Muted { text: root.snap-service-status; }
                         Label { text: "模型：" + (root.snap-model == "ready" ? "就绪" : root.snap-model == "loading" ? "加载中" : root.snap-model == "error" ? "错误" : "未就绪"); }
                         Muted { text: "任务：" + (root.snap-task == "recognizing" ? "正在识别" : "空闲"); }
-                        if root.snap-error != "": Text { text: root.snap-error; color: Design.danger-ink; wrap: word-wrap; }
-                        Muted { text: "使用快捷键或托盘截图。组件配置和故障恢复请前往设置。"; }
+                        Muted { text: root.snap-asset-status; }
+                        if root.snap-error != "" || root.snap-asset-detail != "": VerticalLayout { spacing: 6px;
+                            HorizontalLayout { spacing: 8px; cross-axis-alignment: center;
+                                Text { text: "后台组件未就绪，请前往设置查看详情"; color: Design.danger-ink; horizontal-stretch: 1; }
+                                AppButton { text: root.snap-detail-open ? "收起详情" : "查看详情"; small: true;
+                                    clicked => { root.snap-detail-open = !root.snap-detail-open; } }
+                            }
+                            if root.snap-detail-open: snap-page-detail := ScrollView {
+                                height: 120px; viewport-width: snap-page-detail.visible-width;
+                                Text {
+                                    x: 0px; y: 0px; width: snap-page-detail.visible-width;
+                                    height: self.preferred-height;
+                                    vertical-alignment: top;
+                                    text: root.snap-error != "" ? root.snap-error : root.snap-asset-detail;
+                                    color: Design.danger-ink; wrap: word-wrap;
+                                }
+                            }
+                        }
+                        HorizontalLayout { spacing: 8px; cross-axis-alignment: center;
+                            Muted { text: "使用快捷键或托盘截图。组件配置和故障恢复请前往设置。"; horizontal-stretch: 1; }
+                            AppButton { text: "前往设置"; enabled: root.confirm-kind == 0; clicked => { root.navigation(7); } }
+                        }
                     } }
                     Rectangle { vertical-stretch: 1; }
                 }

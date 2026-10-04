@@ -75,6 +75,47 @@ impl SnapshotState {
     }
 }
 
+fn classify_backend_response(result: &Value) -> Option<ClientError> {
+    if result["ok"] == true {
+        return None;
+    }
+    let message = result["error"]
+        .as_str()
+        .unwrap_or("共享 Xberg 请求失败")
+        .to_owned();
+    let kind = result["error_kind"].as_str().map(str::to_owned);
+    if kind.as_deref() == Some("cancelled") {
+        return Some(ClientError::Cancelled);
+    }
+    if matches!(kind.as_deref(), Some("timeout" | "timed_out"))
+        || (kind.as_deref() == Some("shared_runtime") && message.contains("未返回请求终态"))
+    {
+        return Some(ClientError::Timeout);
+    }
+    if kind.as_deref() == Some("process_exited") {
+        return Some(ClientError::ProcessExited(None));
+    }
+    Some(ClientError::Backend { message, kind })
+}
+
+fn classify_runtime_error(message: String) -> ClientError {
+    let lower = message.to_ascii_lowercase();
+    if message.contains("超时")
+        || message.contains("未返回请求终态")
+        || lower.contains("timeout")
+        || lower.contains("timed out")
+    {
+        ClientError::Timeout
+    } else if message.contains("进程已退出")
+        || message.contains("响应线程退出")
+        || lower.contains("process exited")
+    {
+        ClientError::ProcessExited(None)
+    } else {
+        ClientError::Io(message)
+    }
+}
+
 pub(crate) struct SharedXbergClient {
     root: PathBuf,
 }
@@ -87,21 +128,9 @@ impl SharedXbergClient {
     fn request(&self, value: Value, cancel: &AtomicBool) -> Result<Value, ClientError> {
         let result =
             crate::xberg_runtime::request(&self.root, value, Duration::from_secs(600), cancel)
-                .map_err(ClientError::Io)?;
-        match result["error_kind"].as_str() {
-            Some("cancelled") => return Err(ClientError::Cancelled),
-            Some("timeout" | "timed_out") => return Err(ClientError::Timeout),
-            Some("process_exited") => return Err(ClientError::ProcessExited(None)),
-            _ => {}
-        }
-        if result["ok"] != true {
-            return Err(ClientError::Backend {
-                message: result["error"]
-                    .as_str()
-                    .unwrap_or("共享 Xberg 请求失败")
-                    .to_owned(),
-                kind: result["error_kind"].as_str().map(str::to_owned),
-            });
+                .map_err(classify_runtime_error)?;
+        if let Some(error) = classify_backend_response(&result) {
+            return Err(error);
         }
         if cancel.load(Ordering::Acquire) {
             return Err(ClientError::Cancelled);
@@ -136,5 +165,51 @@ impl SharedXbergClient {
                     .into(),
             ),
         })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{classify_backend_response, classify_runtime_error, ClientError};
+    use serde_json::json;
+
+    #[test]
+    fn preserves_asset_invalid_response_kind() {
+        let error = classify_backend_response(&json!({
+            "ok": false,
+            "error_kind": "asset_invalid",
+            "error": "snapshot model asset missing"
+        }))
+        .expect("失败响应必须分类");
+        assert!(matches!(
+            error,
+            ClientError::Backend {
+                kind: Some(kind),
+                ..
+            } if kind == "asset_invalid"
+        ));
+    }
+
+    #[test]
+    fn classifies_unresolved_broker_timeout_as_timeout() {
+        let error = classify_backend_response(&json!({
+            "ok": false,
+            "error_kind": "shared_runtime",
+            "error": "共享 Xberg 未返回请求终态；未终止其他任务"
+        }))
+        .expect("失败响应必须分类");
+        assert!(matches!(error, ClientError::Timeout));
+    }
+
+    #[test]
+    fn classifies_runtime_process_and_timeout_errors() {
+        assert!(matches!(
+            classify_runtime_error("Xberg 请求已超时".into()),
+            ClientError::Timeout
+        ));
+        assert!(matches!(
+            classify_runtime_error("共享 Xberg 进程已退出".into()),
+            ClientError::ProcessExited(None)
+        ));
     }
 }

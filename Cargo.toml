@@ -20,6 +20,8 @@ gui = ["dep:slint", "dep:slint-build", "dep:rfd", "dep:open"]
 # 依赖常开，本特性只控制性能打点代码与 perf-logs 层是否参与编译。
 # 启用方式：cargo run --features perf-tracing（日志落状态目录下的 perf-logs/，见 src/perf.rs）。
 perf-tracing = []
+# 仅隔离测试使用：允许测试目录/代理入口覆盖。发布与普通启动不启用。
+test-hooks = []
 
 [dependencies]
 anyhow = "1.0"
@@ -82,19 +84,34 @@ required-features = ["gui"]
 [[test]]
 name = "xberg_shared_process"
 path = "tests/xberg_shared_process.rs"
-required-features = ["gui"]
+required-features = ["gui", "test-hooks"]
 
 # 真实后台代理入口依赖 GUI 二进制，测试用合成引擎验证生命周期。
 [[test]]
 name = "background_settings"
 path = "tests/background_settings.rs"
-required-features = ["gui"]
+required-features = ["gui", "test-hooks"]
 
-# 旧协议兼容特征测试同样依赖 GUI 代理二进制拉起合成引擎（run49.1 直通锁定）。
+# 旧协议必须明确拒绝未声明共享能力的推理；仅隔离测试可拉起合成引擎。
 [[test]]
 name = "xberg_legacy_protocol"
 path = "tests/xberg_legacy_protocol.rs"
-required-features = ["gui"]
+required-features = ["gui", "test-hooks"]
+
+[[test]]
+name = "xberg_settings"
+path = "tests/xberg_settings.rs"
+required-features = ["test-hooks"]
+
+[[test]]
+name = "markdown_convert_gate"
+path = "tests/markdown_convert_gate.rs"
+required-features = ["test-hooks"]
+
+[[test]]
+name = "markdown_media_e2e"
+path = "tests/markdown_media_e2e.rs"
+required-features = ["test-hooks"]
 
 [workspace]
 # F23/XB-12：可选组件纳入 workspace——统一锁文件，使根 cargo audit/deny 覆盖其依赖。

@@ -5,6 +5,11 @@ edition = "2021"
 publish = false
 license = "MIT"
 
+[features]
+default = []
+# 仅隔离测试显式启用；发布的后台程序不能读取测试路径覆盖。
+test-hooks = []
+
 [lib]
 name = "snap_ocr_worker"
 

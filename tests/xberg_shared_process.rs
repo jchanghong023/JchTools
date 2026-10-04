@@ -336,6 +336,85 @@ fn documents_reuse_process_and_snapshot_finishes_during_document() {
     );
 }
 
+/// 覆盖 XB-08/XB-17：取消 ACK 不等于原请求终态。取消接口若已确认但模拟引擎
+/// 永不返回原 extract 终态，客户端必须在有界收尾时间内报错，同时代理继续保留
+/// document lane，拒绝重复文档请求；snapshot lane 仍可用且复用同一引擎 PID。
+#[test]
+fn cancel_ack_without_terminal_keeps_document_lane_and_snapshot_alive() {
+    common::ensure_child_reaper();
+    let _session = common::session_lock();
+    common::cleanup_stray_engines();
+    let temp = tempfile::tempdir().unwrap();
+    let root = temp.path();
+    prepare(root);
+
+    let state = xberg_runtime::request(
+        root,
+        json!({"command":"snapshot_state"}),
+        Duration::from_secs(15),
+        &AtomicBool::new(false),
+    )
+    .unwrap();
+    assert_eq!(state["ok"], true);
+    let pid = state["jchtools_xberg_pid"].clone();
+    let _shared = SharedProcess {
+        broker_pid: state["jchtools_broker_pid"].as_u64().unwrap(),
+        engine_pid: state["jchtools_xberg_pid"].as_u64(),
+    };
+
+    std::fs::write(root.join("unresponsive.txt"), "document").unwrap();
+    let directory = root.to_path_buf();
+    let started = Instant::now();
+    let unresponsive = std::thread::spawn(move || {
+        xberg_runtime::request(
+            &directory,
+            json!({"command":"extract","path":directory.join("unresponsive.txt"),"mode":"normal"}),
+            Duration::from_millis(300),
+            &AtomicBool::new(false),
+        )
+    });
+    let marker_deadline = Instant::now() + Duration::from_secs(2);
+    while !root.join("document-started").exists() {
+        assert!(
+            Instant::now() < marker_deadline,
+            "模拟引擎未进入无响应 extract"
+        );
+        std::thread::sleep(Duration::from_millis(5));
+    }
+
+    let rejected = xberg_runtime::request(
+        root,
+        json!({"command":"extract","path":root.join("short.txt"),"mode":"normal"}),
+        Duration::from_secs(3),
+        &AtomicBool::new(false),
+    )
+    .expect("lane 拒绝应通过共享协议返回结构化失败");
+    assert_eq!(rejected["ok"], false);
+    assert!(rejected["error"]
+        .as_str()
+        .unwrap_or_default()
+        .contains("上一个请求尚未确认结束"));
+
+    let snapshot = xberg_runtime::request(
+        root,
+        json!({"command":"ocr_snapshot","image_base64":"fixture"}),
+        Duration::from_secs(3),
+        &AtomicBool::new(false),
+    )
+    .unwrap();
+    assert_eq!(snapshot["ok"], true);
+    assert_eq!(snapshot["jchtools_xberg_pid"], pid);
+
+    let result = unresponsive.join().unwrap();
+    assert!(result.is_err(), "无响应 extract 不得伪报成功：{result:?}");
+    assert!(started.elapsed() < Duration::from_secs(3));
+    assert!(
+        result.as_ref().err().is_some_and(
+            |error| error.contains("未在 1 秒内结束") && error.contains("保留未结束任务")
+        )
+    );
+}
+
 /// 覆盖 T-23：单文件失败不能让后续文件永久失去继续处理的机会。
 ///
 /// 缺陷回归（e2e-20261002-1，真实 502 文件批次）：超大文档的引擎响应超过代理
@@ -396,12 +475,10 @@ fn broken_engine_is_replaced_and_batch_continues() {
     assert_eq!(second.markdown, "document\n");
 }
 
-/// 覆盖 T-18/T-24：引擎能力清单声称支持 fast、实际 extract 拒绝时，客户端
-/// 不得把该文件记为永久失败；按常规模式重试（全能力，严格强于快速模式），
-/// 并以日志留痕。真实批次（e2e-20261003-2）：Lander v1.4/v2 两份 200+ 页
-/// 文档因此失败。
+/// 覆盖 T-18/T-24：fast 被拒绝时明确报告单文件失败，不能暗中执行高开销
+/// 常规模式并把结果标成快速模式；其他文件仍可继续使用同一个共享引擎。
 #[test]
-fn fast_mode_rejection_falls_back_to_normal() {
+fn fast_mode_rejection_is_reported_without_normal_fallback() {
     common::ensure_child_reaper();
     let _session = common::session_lock();
     common::cleanup_stray_engines();
@@ -409,19 +486,41 @@ fn fast_mode_rejection_falls_back_to_normal() {
     let root = temp.path();
     prepare(root);
     std::fs::write(root.join("nofast.txt"), "document").unwrap();
-    let result = markdown_document::convert(
+    let state = xberg_runtime::request(
+        root,
+        json!({"command":"snapshot_state"}),
+        Duration::from_secs(15),
+        &AtomicBool::new(false),
+    )
+    .unwrap();
+    assert_eq!(state["ok"], true);
+    let _guard = SharedProcess {
+        broker_pid: state["jchtools_broker_pid"].as_u64().unwrap(),
+        engine_pid: state["jchtools_xberg_pid"].as_u64(),
+    };
+    let error = markdown_document::convert(
         &root.join("nofast.txt"),
         root,
         true,
         "x_media",
         &Deadline::new(Duration::from_secs(60)),
     )
-    .unwrap_or_else(|error| panic!("快速模式被拒后必须按常规模式成功：{error}"));
+    .unwrap_err();
+    assert!(error.contains("快速模式不可用"));
+    assert!(error.contains("未改用常规模式"));
     assert_eq!(
-        result.markdown,
-        "document
-"
+        std::fs::read_to_string(root.join("nofast-modes.txt")).unwrap(),
+        "fast\n"
     );
+    let next = markdown_document::convert(
+        &root.join("short.txt"),
+        root,
+        false,
+        "x_media",
+        &Deadline::new(Duration::from_secs(15)),
+    )
+    .unwrap();
+    assert_eq!(next.markdown, "document\n");
 }
 
 /// 覆盖（孤儿回收回归；缺陷 2026-10-03 两次复现：broker 无自退条件、测试清场

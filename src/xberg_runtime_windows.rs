@@ -6,7 +6,7 @@ use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
 use std::collections::HashMap;
 use std::fs::{File, OpenOptions};
-use std::io::{BufRead, BufReader, Read, Write};
+use std::io::{BufRead, BufReader, Write};
 use std::os::windows::io::{AsRawHandle, FromRawHandle};
 use std::os::windows::process::CommandExt;
 use std::path::{Path, PathBuf};
@@ -31,8 +31,9 @@ const QUERY_TIMEOUT: Duration = Duration::from_secs(15);
 // 单行消息上限按方向共用：请求侧远小于该值；响应侧承载完整 extract 结果，
 // 含正文之外未被产物消费的图片/页/表数据（实测 50 MB 源文档可达 204 MB）。
 // 512 MB 覆盖现有批次峰值约 2.5 倍；超限属于引擎通信故障，由 broken 重建兜底，
-// 不得静默截断或冒充成功。
+// 可定位请求时只失败该请求，无法定位时才重建；不得静默截断或冒充成功。
 const MAX_MESSAGE: u64 = 512 * 1024 * 1024;
+const MAX_RESPONSE_ID_BYTES: usize = 4096;
 struct PendingRequest {
     sender: mpsc::Sender<Value>,
     lane: Option<&'static str>,
@@ -82,26 +83,44 @@ pub(super) fn force_background_exit() -> Result<Value, String> {
     background_command("broker-force-stop")
 }
 fn background_command(command: &str) -> Result<Value, String> {
-    if command != "broker-state" {
-        let marker = stopped_marker()?;
-        if let Some(parent) = marker.parent() {
-            std::fs::create_dir_all(parent).map_err(|e| e.to_string())?;
-        }
-        std::fs::write(marker, b"stopped").map_err(|e| e.to_string())?;
-    }
     let name = pipe_name()?;
     let pipe = match OpenOptions::new().read(true).write(true).open(name) {
         Ok(pipe) => pipe,
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
-            return Ok(json!({"ok":true,"running":false,"active":0}))
+            let response = json!({"ok":true,"running":false,"active":0});
+            if command != "broker-state" {
+                mark_background_stopped()?;
+            }
+            return Ok(response);
         }
         Err(e) => return Err(format!("后台控制连接失败：{e}")),
     };
-    exchange(
+    let response = exchange(
         pipe,
         &json!({"request":{"id":"background-control", "command":command}}),
         QUERY_TIMEOUT,
-    )
+    )?;
+    // 只有代理确认接受停止（或已明确不在运行）后才阻止后续自动拉起。
+    // 拒绝、协议错误和 IPC 失败都保留当前后台状态，避免一次失败的退出请求
+    // 把仍在运行的服务永久标成 stopped。
+    if should_mark_background_stopped(command, &response) {
+        mark_background_stopped()?;
+    }
+    Ok(response)
+}
+
+fn should_mark_background_stopped(command: &str, response: &Value) -> bool {
+    command != "broker-state"
+        && response["ok"] == true
+        && (response["stopping"] == true || response["running"] == false)
+}
+
+fn mark_background_stopped() -> Result<(), String> {
+    let marker = stopped_marker()?;
+    if let Some(parent) = marker.parent() {
+        std::fs::create_dir_all(parent).map_err(|e| e.to_string())?;
+    }
+    std::fs::write(marker, b"stopped").map_err(|e| e.to_string())
 }
 
 /// 看门狗反复取消当前线程同步 I/O，覆盖期限到达恰在两次 I/O 之间的竞态。
@@ -158,16 +177,248 @@ impl Drop for IoDeadline {
     }
 }
 
-fn read_json(reader: &mut impl BufRead) -> Result<Value, String> {
-    let mut bytes = Vec::new();
-    reader
-        .take(MAX_MESSAGE + 1)
-        .read_until(b'\n', &mut bytes)
-        .map_err(|e| format!("共享 Xberg 读取失败：{e}"))?;
-    if bytes.len() as u64 > MAX_MESSAGE || bytes.last() != Some(&b'\n') {
-        return Err("共享 Xberg 响应中断或超过消息上限".into());
+enum BoundedLine {
+    Complete(Vec<u8>),
+    Oversized { id: Option<String>, bytes: u64 },
+}
+
+#[derive(Clone, Copy)]
+enum CapturedString {
+    Key,
+    IdValue,
+}
+
+/// 在排空超限行时只保留顶层 `id`，不依赖字段顺序，也不把嵌套对象中的
+/// 同名字段误认为请求 ID。字符串按 JSON 转义规则扫描，正文永不进入日志。
+// 各布尔状态对应 JSON 层级、转义、键和值的独立词法条件。
+#[allow(clippy::struct_excessive_bools)]
+struct ResponseIdScanner {
+    depth: usize,
+    in_string: bool,
+    escaped: bool,
+    expecting_key: bool,
+    key_complete: bool,
+    expecting_value: bool,
+    pending_id: bool,
+    capture: Option<(CapturedString, Vec<u8>, bool)>,
+    id: Option<String>,
+}
+
+impl ResponseIdScanner {
+    fn new() -> Self {
+        Self {
+            depth: 0,
+            in_string: false,
+            escaped: false,
+            expecting_key: false,
+            key_complete: false,
+            expecting_value: false,
+            pending_id: false,
+            capture: None,
+            id: None,
+        }
     }
-    serde_json::from_slice(&bytes).map_err(|_| "共享 Xberg 返回了无效 JSON".into())
+
+    fn feed(&mut self, bytes: &[u8]) {
+        for &byte in bytes {
+            self.feed_byte(byte);
+        }
+    }
+
+    fn feed_byte(&mut self, byte: u8) {
+        if self.in_string {
+            if self.escaped {
+                self.push_captured(byte);
+                self.escaped = false;
+                return;
+            }
+            if byte == b'\\' {
+                self.push_captured(byte);
+                self.escaped = true;
+                return;
+            }
+            if byte == b'"' {
+                self.push_captured(byte);
+                self.finish_string();
+                self.in_string = false;
+                return;
+            }
+            self.push_captured(byte);
+            return;
+        }
+
+        match byte {
+            b'{' => {
+                if self.depth == 1 && self.expecting_value {
+                    self.expecting_value = false;
+                    self.pending_id = false;
+                }
+                self.depth = self.depth.saturating_add(1);
+                if self.depth == 1 {
+                    self.expecting_key = true;
+                    self.key_complete = false;
+                    self.expecting_value = false;
+                    self.pending_id = false;
+                }
+            }
+            b'}' => {
+                self.depth = self.depth.saturating_sub(1);
+                if self.depth == 0 {
+                    self.expecting_key = false;
+                    self.expecting_value = false;
+                    self.pending_id = false;
+                }
+            }
+            b'[' => {
+                if self.depth == 1 && self.expecting_value {
+                    self.expecting_value = false;
+                    self.pending_id = false;
+                }
+                self.depth = self.depth.saturating_add(1);
+            }
+            b']' => self.depth = self.depth.saturating_sub(1),
+            b',' if self.depth == 1 => {
+                self.expecting_key = true;
+                self.key_complete = false;
+                self.expecting_value = false;
+                self.pending_id = false;
+            }
+            b':' if self.depth == 1 && self.key_complete => {
+                self.expecting_key = false;
+                self.expecting_value = true;
+            }
+            b'"' if self.depth == 1 && self.expecting_key => {
+                self.in_string = true;
+                self.escaped = false;
+                self.capture = Some((CapturedString::Key, vec![b'"'], false));
+            }
+            b'"' if self.depth == 1 && self.expecting_value && self.pending_id => {
+                self.in_string = true;
+                self.escaped = false;
+                self.capture = Some((CapturedString::IdValue, vec![b'"'], false));
+            }
+            b'"' => {
+                // 非 ID 字符串也必须按字符串跳过，正文中的括号和逗号
+                // 不能改变 JSON 层级或被当作顶层字段。
+                self.in_string = true;
+                self.escaped = false;
+                self.capture = None;
+                if self.depth == 1 && self.expecting_value {
+                    self.expecting_value = false;
+                    self.pending_id = false;
+                }
+            }
+            byte if self.depth == 1 && self.expecting_value && !byte.is_ascii_whitespace() => {
+                self.expecting_value = false;
+                self.pending_id = false;
+            }
+            _ => {}
+        }
+    }
+
+    fn push_captured(&mut self, byte: u8) {
+        if let Some((_, bytes, overflowed)) = self.capture.as_mut() {
+            if bytes.len() < MAX_RESPONSE_ID_BYTES {
+                bytes.push(byte);
+            } else {
+                *overflowed = true;
+            }
+        }
+    }
+
+    fn finish_string(&mut self) {
+        let Some((kind, bytes, overflowed)) = self.capture.take() else {
+            return;
+        };
+        if overflowed {
+            if matches!(kind, CapturedString::Key) {
+                self.key_complete = true;
+                self.pending_id = false;
+            }
+            return;
+        }
+        match kind {
+            CapturedString::Key => {
+                self.key_complete = true;
+                self.pending_id =
+                    serde_json::from_slice::<String>(&bytes).is_ok_and(|key| key == "id");
+            }
+            CapturedString::IdValue => {
+                self.id = serde_json::from_slice(&bytes).ok();
+                self.expecting_value = false;
+            }
+        }
+    }
+}
+
+/// 逐块读取一行；超过上限后继续排空该行，但不再保留正文，避免一条异常
+/// 响应把代理一次性推到无界内存。只有上限以内的行才交给 serde_json 解码。
+fn read_bounded_line(reader: &mut impl BufRead, limit: u64) -> Result<BoundedLine, String> {
+    let mut data = Vec::new();
+    let mut id_scanner = ResponseIdScanner::new();
+    let mut total = 0u64;
+    let mut oversized = false;
+    loop {
+        let chunk = reader
+            .fill_buf()
+            .map_err(|e| format!("共享 Xberg 读取失败：{e}"))?;
+        if chunk.is_empty() {
+            return Err("共享 Xberg 响应中断或缺少换行".into());
+        }
+        let consumed = chunk
+            .iter()
+            .position(|byte| *byte == b'\n')
+            .map_or(chunk.len(), |index| index + 1);
+        let part = &chunk[..consumed];
+        total = total.saturating_add(part.len() as u64);
+        id_scanner.feed(part);
+        if !oversized {
+            if total <= limit {
+                data.extend_from_slice(part);
+            } else {
+                oversized = true;
+                data.clear();
+                data.shrink_to_fit();
+            }
+        }
+        let ended = part.last() == Some(&b'\n');
+        reader.consume(consumed);
+        if ended {
+            return if oversized {
+                Ok(BoundedLine::Oversized {
+                    id: id_scanner.id,
+                    bytes: total,
+                })
+            } else {
+                Ok(BoundedLine::Complete(data))
+            };
+        }
+    }
+}
+
+fn read_json(reader: &mut impl BufRead) -> Result<Value, String> {
+    match read_bounded_line(reader, MAX_MESSAGE)? {
+        BoundedLine::Complete(bytes) => {
+            serde_json::from_slice(&bytes).map_err(|_| "共享 Xberg 返回了无效 JSON".into())
+        }
+        BoundedLine::Oversized { bytes, .. } => {
+            Err(format!("共享 Xberg 响应超过消息上限（{bytes} 字节）"))
+        }
+    }
+}
+
+enum EngineResponse {
+    Json(Value),
+    Oversized { id: Option<String>, bytes: u64 },
+}
+
+fn read_engine_response(reader: &mut impl BufRead) -> Result<EngineResponse, String> {
+    match read_bounded_line(reader, MAX_MESSAGE)? {
+        BoundedLine::Complete(bytes) => serde_json::from_slice(&bytes)
+            .map(EngineResponse::Json)
+            .map_err(|_| "共享 Xberg 返回了无效 JSON".into()),
+        BoundedLine::Oversized { id, bytes } => Ok(EngineResponse::Oversized { id, bytes }),
+    }
 }
 fn write_json(writer: &mut impl Write, value: &Value) -> Result<(), String> {
     let mut bytes = serde_json::to_vec(value).map_err(|e| e.to_string())?;
@@ -181,22 +432,26 @@ fn write_json(writer: &mut impl Write, value: &Value) -> Result<(), String> {
         .map_err(|e| format!("共享 Xberg 写入失败：{e}"))
 }
 
-fn connect(start: bool) -> Result<File, String> {
+fn connect(start: bool, deadline: Instant) -> Result<File, String> {
     let name = pipe_name()?;
     let open = || OpenOptions::new().read(true).write(true).open(&name);
+    if Instant::now() >= deadline {
+        return Err("共享 Xberg 代理连接期限已到".into());
+    }
     if let Ok(pipe) = open() {
         return Ok(pipe);
     }
     if start {
         background_allowed()?;
         // 代理是 JchTools/截图服务自身的内部模式；只有赢得会话锁的代理可创建引擎。
-        let executable =
-            if cfg!(debug_assertions) && std::env::var_os("JCHTOOLS_TEST_STATE_DIR").is_some() {
-                std::env::var_os("JCHTOOLS_TEST_BROKER_EXE").map(PathBuf::from)
-            } else {
-                None
-            }
-            .map_or_else(|| std::env::current_exe().map_err(|e| e.to_string()), Ok)?;
+        let executable = if cfg!(feature = "test-hooks")
+            && std::env::var_os("JCHTOOLS_TEST_STATE_DIR").is_some()
+        {
+            std::env::var_os("JCHTOOLS_TEST_BROKER_EXE").map(PathBuf::from)
+        } else {
+            None
+        }
+        .map_or_else(|| std::env::current_exe().map_err(|e| e.to_string()), Ok)?;
         Command::new(executable)
             .arg("--xberg-broker")
             .creation_flags(0x0800_0000)
@@ -206,15 +461,16 @@ fn connect(start: bool) -> Result<File, String> {
             .spawn()
             .map_err(|e| format!("无法启动共享 Xberg 代理：{e}"))?;
     }
-    let end = Instant::now() + QUERY_TIMEOUT;
     loop {
         if let Ok(pipe) = open() {
             return Ok(pipe);
         }
-        if Instant::now() >= end {
+        if Instant::now() >= deadline {
             return Err("共享 Xberg 代理连接超时".into());
         }
-        std::thread::sleep(Duration::from_millis(20));
+        std::thread::sleep(
+            Duration::from_millis(20).min(deadline.saturating_duration_since(Instant::now())),
+        );
     }
 }
 
@@ -239,15 +495,14 @@ pub(super) fn request(
 ) -> Result<Value, String> {
     let started = Instant::now();
     let result = request_via_broker(root, value, timeout, cancel);
-    if let Err(reason) = &result {
+    if result.is_err() {
         // P-10：客户端侧请求失败（连接代理/等待/协议不兼容）必须落盘；代理
         // 侧另有处理日志，两侧按请求 id 对齐。业务层（转换/识别）失败时
-        // 另记业务语义错误，此处只补技术边界（命令、耗时、阶段原因）。
+        // 另记业务语义错误，此处只补技术边界；不把引擎原始错误文本写入日志。
         tracing::warn!(
             command = value["command"].as_str().unwrap_or(""),
             id = value["id"].as_str().unwrap_or(""),
             elapsed_ms = u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX),
-            reason = %reason,
             "共享引擎请求失败（客户端侧）"
         );
     }
@@ -260,18 +515,52 @@ fn request_via_broker(
     timeout: Duration,
     cancel: &AtomicBool,
 ) -> Result<Value, String> {
+    if timeout.is_zero() {
+        return Err("共享 Xberg 请求期限已到".into());
+    }
+    let _exchange_extra = timeout
+        .checked_add(QUERY_TIMEOUT)
+        .ok_or("Xberg 请求期限过大，未启动共享代理")?;
+    let deadline = Instant::now()
+        .checked_add(timeout)
+        .ok_or("Xberg 请求期限过大，未启动共享代理")?;
     let root = std::fs::canonicalize(root).map_err(|e| format!("Xberg 目录不可读：{e}"))?;
-    let pipe = connect(true)?;
+    let pipe = connect(true, deadline)?;
+    let remaining = deadline.saturating_duration_since(Instant::now());
+    if remaining.is_zero() {
+        return Err("Xberg 请求期限已到，未提交推理".into());
+    }
+    let exchange_timeout = remaining
+        .checked_add(QUERY_TIMEOUT)
+        .ok_or("Xberg 请求期限过大，未提交推理")?;
     let envelope = json!({"runtime_dir":root, "request":value});
     let cloned = envelope.clone();
     let (send, receive) = mpsc::channel();
     let reader = std::thread::spawn(move || {
-        let _ = send.send(exchange(pipe, &cloned, timeout + QUERY_TIMEOUT));
+        let _ = send.send(exchange(pipe, &cloned, exchange_timeout));
     });
-    let end = Instant::now() + timeout;
+    let end = deadline;
     let mut cancellation_sent = false;
     let mut cancellation_error = None;
+    let mut cancellation_io_deadline = None;
+    let mut cancellation_receive: Option<mpsc::Receiver<Result<(), String>>> = None;
+    let mut timed_out = false;
     loop {
+        if let Some(receiver) = cancellation_receive.as_ref() {
+            match receiver.try_recv() {
+                Ok(result) => {
+                    cancellation_receive = None;
+                    if let Err(error) = result {
+                        cancellation_error = Some(error);
+                    }
+                }
+                Err(mpsc::TryRecvError::Disconnected) => {
+                    cancellation_receive = None;
+                    cancellation_error = Some("取消接口线程退出".into());
+                }
+                Err(mpsc::TryRecvError::Empty) => {}
+            }
+        }
         match receive.recv_timeout(Duration::from_millis(10)) {
             Ok(result) => {
                 let _ = reader.join();
@@ -286,14 +575,52 @@ fn request_via_broker(
             }
             Err(mpsc::RecvTimeoutError::Timeout) => {}
         }
+        if cancellation_sent
+            && cancellation_io_deadline.is_some_and(|deadline| Instant::now() >= deadline)
+        {
+            let reason = if cancellation_receive.is_some() {
+                if timed_out {
+                    "Xberg 请求超时且取消接口未在 1 秒内确认"
+                } else {
+                    "请求已取消但取消接口未在 1 秒内确认"
+                }
+            } else if cancellation_error.is_some() {
+                if timed_out {
+                    "Xberg 请求超时且取消接口失败，原请求未在 1 秒内结束"
+                } else {
+                    "取消接口失败，原请求未在 1 秒内结束"
+                }
+            } else if timed_out {
+                "Xberg 请求超时且取消已确认，原请求未在 1 秒内结束"
+            } else {
+                "请求已取消且取消已确认，原请求未在 1 秒内结束"
+            };
+            return Err(format!("{reason}；代理仍保留未结束任务，阻止同场景重入"));
+        }
         if !cancellation_sent && (cancel.load(Ordering::Acquire) || Instant::now() >= end) {
             cancellation_sent = true;
+            timed_out = Instant::now() >= end && !cancel.load(Ordering::Acquire);
             let cancellation = json!({"runtime_dir":root,"request":{"id":format!("cancel-{}", value["id"].as_str().unwrap_or_default()),"command":"cancel","target_id":value["id"]}});
-            let result =
-                connect(false).and_then(|pipe| exchange(pipe, &cancellation, QUERY_TIMEOUT));
-            if let Err(error) = result.and_then(super::checked) {
-                cancellation_error = Some(error);
-            }
+            let io_deadline = Instant::now()
+                .checked_add(Duration::from_secs(1))
+                .ok_or("取消接口期限无效")?;
+            let (cancel_send, cancel_receive) = mpsc::channel();
+            let cancel_deadline = io_deadline;
+            std::thread::spawn(move || {
+                let result = connect(false, cancel_deadline)
+                    .and_then(|pipe| {
+                        let remaining = cancel_deadline.saturating_duration_since(Instant::now());
+                        if remaining.is_zero() {
+                            return Err("取消接口期限已到".into());
+                        }
+                        exchange(pipe, &cancellation, remaining)
+                    })
+                    .and_then(super::checked)
+                    .map(|_| ());
+                let _ = cancel_send.send(result);
+            });
+            cancellation_io_deadline = Some(io_deadline);
+            cancellation_receive = Some(cancel_receive);
             // 接受取消不等于任务结束；继续等待原请求的终态，禁止伪报成功。
         }
     }
@@ -344,7 +671,7 @@ impl Engine {
             )
             .env(
                 "XBERG_PERF_LOG_DIR",
-                std::env::temp_dir().join("JchTools-xberg-perf"),
+                xberg_settings::state_dir()?.join("perf-logs").join("xberg"),
             );
         let mut child = command
             .spawn()
@@ -381,8 +708,27 @@ impl Engine {
         std::thread::spawn(move || {
             let mut reader = BufReader::new(stdout);
             loop {
-                let mut response = match read_json(&mut reader) {
-                    Ok(response) => response,
+                let mut response = match read_engine_response(&mut reader) {
+                    Ok(EngineResponse::Json(response)) => response,
+                    Ok(EngineResponse::Oversized { id, bytes }) => {
+                        if let Some(id) = id {
+                            let sender = reader_pending
+                                .lock()
+                                .ok()
+                                .and_then(|mut entries| entries.remove(&id));
+                            if let Some(sender) = sender {
+                                let _ = sender.sender.send(json!({
+                                    "id": id,
+                                    "ok": false,
+                                    "error_kind": "response_too_large",
+                                    "error": format!("共享 Xberg 响应超过消息上限（{bytes} 字节）")
+                                }));
+                                continue;
+                            }
+                        }
+                        tracing::warn!(bytes, "共享引擎返回超限响应且无法定位请求");
+                        break;
+                    }
                     Err(error) => {
                         tracing::warn!(%error, "共享引擎响应读取失败，通信断裂");
                         break;
@@ -512,11 +858,6 @@ fn fail_pending(pending: &Pending, broken: &AtomicBool) {
 fn prune_forwarded_document(mut response: Value) -> Value {
     if let Some(document) = response.get_mut("document") {
         prune_document_heavy_fields(document, 0);
-        // 临时诊断（T-14 验证用，验证后移除）：环境变量给出路径时转储转发后的
-        // document，确认图片数据是否随转发放行。
-        if let Ok(dump) = std::env::var("JCHTOOLS_DUMP_FORWARDED") {
-            let _ = std::fs::write(&dump, document.to_string().as_bytes());
-        }
     }
     response
 }
@@ -777,7 +1118,6 @@ fn handle(pipe: File, engine: &Mutex<Option<Engine>>, stopping: &AtomicBool) -> 
     let mut response = response.unwrap_or_else(|error: String| {
         tracing::warn!(
             command = request["command"].as_str().unwrap_or("?"),
-            %error,
             "共享代理请求失败"
         );
         json!({"id":request["id"],"ok":false,"error_kind":"shared_runtime","error":error})
@@ -898,8 +1238,8 @@ pub(super) fn serve() -> Result<(), String> {
         let engine = Arc::clone(&engine);
         let stopping = stopping.clone();
         std::thread::spawn(move || {
-            if let Err(error) = handle(pipe, &engine, &stopping) {
-                tracing::warn!(%error, "共享代理请求处理失败");
+            if handle(pipe, &engine, &stopping).is_err() {
+                tracing::warn!("共享代理请求处理失败");
             }
         });
     }
@@ -955,5 +1295,78 @@ mod tests {
         assert!(document["children"][0]["result"].get("pages").is_none());
         let media = prune_forwarded_document(json!({"id":"m1","ok":true,"markdown":"media"}));
         assert_eq!(media["markdown"], "media");
+    }
+
+    /// 覆盖 XB-05/XB-17：超限响应只排空当前 JSON 行并流式提取顶层 ID，
+    /// 即使 document 位于 id 之前且正文含嵌套伪 id，也不把另一场景的
+    /// pending 请求一并标成通信断裂。
+    #[test]
+    fn oversized_line_is_drained_without_retaining_payload() {
+        let mut input = std::io::Cursor::new(
+            br#"{"document":{"nested":{"id":"fake"},"content":"0123456789"},"id":"document-1"}
+{"id":"snapshot-1","ok":true}
+"#
+            .to_vec(),
+        );
+        let first = read_bounded_line(&mut input, 16).expect("第一行应能排空");
+        match first {
+            BoundedLine::Oversized { id, bytes } => {
+                assert!(bytes > 16);
+                assert_eq!(id.as_deref(), Some("document-1"));
+            }
+            BoundedLine::Complete(_) => panic!("超限行不应保留完整正文"),
+        }
+        let second = read_bounded_line(&mut input, MAX_MESSAGE).expect("下一行应保持同步");
+        match second {
+            BoundedLine::Complete(bytes) => {
+                let response: Value = serde_json::from_slice(&bytes).expect("JSON 应完整");
+                assert_eq!(response["id"], "snapshot-1");
+            }
+            BoundedLine::Oversized { .. } => panic!("第二行不应超限"),
+        }
+    }
+
+    #[test]
+    fn response_id_scanner_honors_json_escapes_and_depth() {
+        let mut scanner = ResponseIdScanner::new();
+        scanner
+            .feed(br#"{"document":{"id":"fake","text":"quote \"id\": fake"},"id":"real-\u0031"}"#);
+        assert_eq!(scanner.id.as_deref(), Some("real-1"));
+    }
+
+    #[test]
+    fn response_id_scanner_ignores_structural_characters_inside_payload_strings() {
+        // 覆盖 XB-14：正文不能影响响应 ID 和请求隔离。
+        let mut scanner = ResponseIdScanner::new();
+        scanner.feed(br#"{"document":{"text":"}], {\"id\":\"fake\"}"},"note":"{,}","id":"real"}"#);
+        assert_eq!(scanner.id.as_deref(), Some("real"));
+    }
+
+    #[test]
+    fn background_stop_marker_is_not_written_for_rejected_response() {
+        let response = json!({
+            "ok": false,
+            "error": "文档任务仍在运行"
+        });
+        assert!(!should_mark_background_stopped(
+            "broker-force-stop",
+            &response
+        ));
+        assert!(should_mark_background_stopped(
+            "broker-stop",
+            &json!({"ok":true,"running":true,"stopping":true})
+        ));
+    }
+
+    #[test]
+    fn duration_max_is_rejected_before_broker_start() {
+        let error = request_via_broker(
+            Path::new("C:\\this-path-is-not-read"),
+            &json!({"id":"duration-max","command":"keepalive"}),
+            Duration::MAX,
+            &AtomicBool::new(false),
+        )
+        .expect_err("Duration::MAX 必须在启动代理前明确拒绝");
+        assert!(error.contains("未启动共享代理"));
     }
 }

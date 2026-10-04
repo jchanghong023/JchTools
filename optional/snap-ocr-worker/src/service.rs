@@ -8,13 +8,15 @@ mod protocol;
 mod tray;
 
 use std::fmt::Write as _;
-use std::fs;
+use std::fs::{self, File};
+use std::io::Read;
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{mpsc, Arc};
 use std::time::{Duration, Instant};
 
 use serde_json::{json, Value};
+use sha2::{Digest, Sha256};
 use slint::ComponentHandle;
 
 use crate::capture_win::BgrImage;
@@ -34,16 +36,24 @@ pub(crate) enum OcrError {
     /// 推理子进程已退出：连接死亡、模型不可再复用，须降级为错误并保留重试
     /// 入口（O-13）；与单次 [`OcrError::Backend`] 失败（模型保持就绪）分类处理。
     ProcessExited(String),
-    /// 推理失败（Xberg 失败响应或通信失败）。
+    /// 单次推理失败（模型仍可复用）。
     Backend(String),
+    /// 共享代理通信失败，当前客户端不可安全复用。
+    Communication(String),
+    /// 模型或其资产在运行中失效，保留重新加载入口。
+    ModelFailure(String),
 }
 
 impl std::fmt::Display for OcrError {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             Self::Cancelled => write!(formatter, "用户取消识别"),
-            // 三个失败变体的消息都已是完整用户可读文案（ClientError::Display）。
-            Self::TimedOut(message) | Self::ProcessExited(message) | Self::Backend(message) => {
+            // 各失败变体的消息都已是完整用户可读文案（ClientError::Display）。
+            Self::TimedOut(message)
+            | Self::ProcessExited(message)
+            | Self::Backend(message)
+            | Self::Communication(message)
+            | Self::ModelFailure(message) => {
                 write!(formatter, "{message}")
             }
         }
@@ -76,6 +86,7 @@ pub(crate) enum Command {
     ModelLoaded(Result<(), LoadFailure>),
     OcrFinished(Result<Option<String>, OcrError>, (i32, i32, i32, i32)),
     WorkerStopped,
+    WorkerStopFailed(String),
     HotkeyUnavailable(String),
     OpenMain,
     OpenSettings,
@@ -94,6 +105,26 @@ enum Work {
     Load,
     Recognize(BgrImage, (i32, i32, i32, i32)),
     Stop,
+}
+
+const WORKER_STOP_ATTEMPTS: usize = 3;
+
+fn stop_background_with_retry<F>(mut control: F) -> Result<(), String>
+where
+    F: FnMut() -> Result<Value, String>,
+{
+    let mut last_error = None;
+    for attempt in 0..WORKER_STOP_ATTEMPTS {
+        match control() {
+            Ok(state) if state["running"] == false => return Ok(()),
+            Ok(_) => last_error = Some("共享后台仍在运行".to_string()),
+            Err(error) => last_error = Some(error),
+        }
+        if attempt + 1 < WORKER_STOP_ATTEMPTS {
+            std::thread::sleep(Duration::from_millis(200));
+        }
+    }
+    Err(last_error.unwrap_or_else(|| "共享后台停止未完成".to_string()))
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -225,7 +256,7 @@ fn replace_file(from: &Path, to: &Path) -> Result<(), String> {
 }
 
 fn root() -> Result<PathBuf, String> {
-    if cfg!(debug_assertions) {
+    if cfg!(any(test, feature = "test-hooks")) {
         if let Some(path) = std::env::var_os("JCHTOOLS_SNAP_OCR_TEST_ASSET_ROOT")
             .map(PathBuf::from)
             .filter(|p| p.is_absolute())
@@ -261,7 +292,7 @@ fn root() -> Result<PathBuf, String> {
 /// 复用组件时会写入 `<资产根>/xberg-inference/expected-tag.txt`（内容为清单
 /// tag，XB-09）；本服务读取该标记做同口径校验：目录名必须与之一致，多目录时
 /// 优先选中清单 tag 目录。标记缺失（旧安装/开发树）按「唯一子目录」解析。
-/// 开发期（仅 debug 构建）可用 `JCHTOOLS_XBERG_INFERENCE_DIR` 覆盖到本地组件
+/// 测试支持构建可用 `JCHTOOLS_XBERG_INFERENCE_DIR` 覆盖到本地组件
 /// 树，与 `root()` 的覆盖同口径。
 fn xberg_component_dir(root: &Path) -> Result<PathBuf, LoadFailure> {
     let _ = root;
@@ -292,15 +323,113 @@ fn verify_component(dir: &Path) -> Result<(), LoadFailure> {
     Ok(())
 }
 
+const SNAP_ASSET_MANIFEST: &str = include_str!("../../../resources/snap-ocr-assets.json");
+const SNAP_FONT_MEMBER: &str = "fonts/NotoSansMonoCJKsc-Regular.otf";
+const SNAP_FONT_LICENSE: &str = "fonts/LICENSE-noto-ofl.txt";
+
+fn verify_manifest_file(
+    path: &Path,
+    size: u64,
+    expected_sha256: &str,
+    label: &str,
+) -> Result<(), LoadFailure> {
+    let metadata = match fs::metadata(path) {
+        Ok(metadata) => metadata,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            return Err(LoadFailure::NotConfigured(format!("{label}未安装")))
+        }
+        Err(_) => return Err(LoadFailure::Failed(format!("{label}无法读取"))),
+    };
+    if !metadata.is_file() || metadata.len() != size {
+        return Err(LoadFailure::Failed(format!("{label}大小校验失败")));
+    }
+    if expected_sha256.len() != 64 || !expected_sha256.bytes().all(|byte| byte.is_ascii_hexdigit())
+    {
+        return Err(LoadFailure::Failed(format!("{label}清单摘要无效")));
+    }
+    let mut file = File::open(path).map_err(|_| LoadFailure::Failed(format!("{label}无法读取")))?;
+    let mut hasher = Sha256::new();
+    let mut buffer = vec![0u8; 64 * 1024];
+    loop {
+        let count = file
+            .read(&mut buffer)
+            .map_err(|_| LoadFailure::Failed(format!("{label}读取失败")))?;
+        if count == 0 {
+            break;
+        }
+        hasher.update(&buffer[..count]);
+    }
+    let actual = format!("{:x}", hasher.finalize());
+    if !actual.eq_ignore_ascii_case(expected_sha256) {
+        return Err(LoadFailure::Failed(format!("{label}摘要校验失败")));
+    }
+    Ok(())
+}
+
+fn verify_font_assets(root: &Path) -> Result<(), LoadFailure> {
+    let manifest: Value = serde_json::from_str(SNAP_ASSET_MANIFEST)
+        .map_err(|_| LoadFailure::Failed("截图字体清单损坏".into()))?;
+    let assets = manifest["assets"]
+        .as_array()
+        .ok_or_else(|| LoadFailure::Failed("截图字体清单缺少资产".into()))?;
+    let font = assets
+        .iter()
+        .find(|asset| asset["id"] == "noto-sans-mono-cjk-sc")
+        .ok_or_else(|| LoadFailure::Failed("截图字体清单缺少字体条目".into()))?;
+    if font["license"]["license"] != "OFL-1.1"
+        || font["license"]["component"].as_str().is_none()
+        || font["license"]["source"].as_str().is_none()
+    {
+        return Err(LoadFailure::Failed("截图字体许可清单无效".into()));
+    }
+    let member = font["members"]
+        .as_array()
+        .and_then(|members| {
+            members
+                .iter()
+                .find(|member| member["install_path"] == SNAP_FONT_MEMBER)
+        })
+        .ok_or_else(|| LoadFailure::Failed("截图字体清单缺少字体文件".into()))?;
+    let size = member["size_bytes"]
+        .as_u64()
+        .ok_or_else(|| LoadFailure::Failed("截图字体大小清单无效".into()))?;
+    let sha256 = member["sha256"]
+        .as_str()
+        .ok_or_else(|| LoadFailure::Failed("截图字体摘要清单无效".into()))?;
+    verify_manifest_file(&root.join(SNAP_FONT_MEMBER), size, sha256, "截图字体")?;
+
+    let license = assets
+        .iter()
+        .find(|asset| asset["id"] == "noto-cjk-ofl-license")
+        .ok_or_else(|| LoadFailure::Failed("截图字体清单缺少许可文件".into()))?;
+    if license["license"]["license"] != "OFL-1.1"
+        || license["license"]["component"].as_str().is_none()
+        || license["license"]["source"].as_str().is_none()
+    {
+        return Err(LoadFailure::Failed("截图字体许可条目无效".into()));
+    }
+    let license_path = license["install_path"]
+        .as_str()
+        .filter(|path| *path == SNAP_FONT_LICENSE)
+        .ok_or_else(|| LoadFailure::Failed("截图字体许可路径无效".into()))?;
+    let license_size = license["size_bytes"]
+        .as_u64()
+        .ok_or_else(|| LoadFailure::Failed("截图字体许可大小清单无效".into()))?;
+    let license_sha256 = license["sha256"]
+        .as_str()
+        .ok_or_else(|| LoadFailure::Failed("截图字体许可摘要清单无效".into()))?;
+    verify_manifest_file(
+        &root.join(license_path),
+        license_size,
+        license_sha256,
+        "截图字体许可文件",
+    )
+}
+
 /// 启动 Xberg 推理子进程并完成预热（模型懒加载发生在首个识别请求，
 /// 预热图触发加载后 `snapshot_state` 才会是 ready，O-13）。
 fn start_inference(root: &Path) -> Result<SharedXbergClient, LoadFailure> {
-    let font = root.join("fonts").join("NotoSansMonoCJKsc-Regular.otf");
-    if !font.is_file() {
-        return Err(LoadFailure::NotConfigured(
-            "结果窗等宽字体未安装：请在主界面初始化截图 OCR".into(),
-        ));
-    }
+    verify_font_assets(root)?;
     let component_dir = xberg_component_dir(root)?;
     verify_component(&component_dir)?;
     crate::xberg_runtime::validate_assets(&component_dir, "snapshot")
@@ -366,6 +495,15 @@ fn ocr_error(error: ClientError) -> OcrError {
             OcrError::TimedOut("当前截图识别超时；共享引擎及其他功能保持运行".into())
         }
         error @ ClientError::ProcessExited(_) => OcrError::ProcessExited(error.to_string()),
+        ClientError::Backend {
+            message,
+            kind: Some(kind),
+        } if kind == "asset_invalid" => OcrError::ModelFailure(message),
+        ClientError::Backend {
+            message,
+            kind: Some(kind),
+        } if kind == "shared_runtime" => OcrError::Communication(message),
+        ClientError::Io(message) => OcrError::Communication(message),
         error => OcrError::Backend(error.to_string()),
     }
 }
@@ -449,7 +587,11 @@ fn worker(
                     // XB-17：终态只重置本场景客户端，不结束共享引擎。
                     // 未确认结束的任务仍由代理占用本场景，防止重复提交。
                     Err(
-                        OcrError::Cancelled | OcrError::TimedOut(_) | OcrError::ProcessExited(_),
+                        OcrError::Cancelled
+                        | OcrError::TimedOut(_)
+                        | OcrError::ProcessExited(_)
+                        | OcrError::Communication(_)
+                        | OcrError::ModelFailure(_),
                     ) => {
                         drop(client.take());
                     }
@@ -460,14 +602,16 @@ fn worker(
             Work::Stop => {
                 drop(client.take());
                 // GUI 任务已结束，截图调用已返回；请求代理排空剩余业务响应并退出。
-                loop {
-                    match crate::xberg_runtime::background_control(true) {
-                        Ok(state) if state["running"] == false => break,
-                        _ => std::thread::sleep(Duration::from_millis(200)),
+                match stop_background_with_retry(|| crate::xberg_runtime::background_control(true))
+                {
+                    Ok(()) => {
+                        let _ = events.send(Command::WorkerStopped);
+                        break;
+                    }
+                    Err(error) => {
+                        let _ = events.send(Command::WorkerStopFailed(error));
                     }
                 }
-                let _ = events.send(Command::WorkerStopped);
-                break;
             }
         }
     }
@@ -651,6 +795,7 @@ struct Service {
     tray: tray::TrayHandle,
     work: mpsc::Sender<Work>,
     cancel: Arc<AtomicBool>,
+    cancel_generation: Arc<AtomicU64>,
     model: ModelState,
     model_error: Option<String>,
     pending_image: Option<(BgrImage, (i32, i32, i32, i32))>,
@@ -659,11 +804,22 @@ struct Service {
     old_result_visible: bool,
     progress: Option<ProgressWindow>,
     settings_window: Option<SettingsWindow>,
+    last_theme_sync: Instant,
     exit_pending: Option<Instant>,
     exit_confirming: Option<Instant>,
     exit_stop_sent: bool,
+    stop_retry_at: Option<Instant>,
     gui_tasks: std::collections::HashMap<u32, bool>,
 }
+
+fn selection_cancel_is_current(
+    cancel: &AtomicBool,
+    generation_token: &AtomicU64,
+    generation: u64,
+) -> bool {
+    generation_token.load(Ordering::Acquire) == generation && cancel.load(Ordering::Acquire)
+}
+
 impl Service {
     fn status(&self) -> Value {
         json!({"ok":true,"exiting":self.exit_pending.is_some(),"shared_xberg_protocol":2,"background_service_protocol":1,"model":self.model.as_str(),"task":if self.busy {"recognizing"} else {"idle"},
@@ -695,6 +851,7 @@ impl Service {
     fn show_progress(&mut self, stage: &str) -> Result<(), String> {
         if self.progress.is_none() {
             let window = ProgressWindow::new().map_err(|_| "识别进度窗口创建失败".to_string())?;
+            crate::result_window::apply_progress_theme(&window);
             let weak = self.self_weak.clone();
             window.on_cancel_requested(move || {
                 if let Some(service) = weak.upgrade() {
@@ -714,6 +871,7 @@ impl Service {
             .progress
             .as_ref()
             .ok_or_else(|| "识别进度窗口不可用".to_string())?;
+        crate::result_window::apply_progress_theme(window);
         window.set_stage(stage.into());
         window.set_cancelling(false);
         window
@@ -725,11 +883,42 @@ impl Service {
             let _ = window.hide();
         }
     }
+    fn request_selection_cancel(
+        cancel: Arc<AtomicBool>,
+        generation_token: Arc<AtomicU64>,
+        generation: u64,
+    ) {
+        if crate::capture_win::cancel_selection() {
+            return;
+        }
+        // 退出请求可能与托盘的 Trigger 消息竞态：遮罩尚未创建时，单次投递
+        // 会落空。短暂重试只发送 WM_DONE，不读取或保存截图内容。
+        std::thread::spawn(move || {
+            for _ in 0..50 {
+                std::thread::sleep(Duration::from_millis(10));
+                // 新任务会复位取消标志，旧取消重试不得关闭新任务的选区。
+                if !selection_cancel_is_current(&cancel, &generation_token, generation) {
+                    break;
+                }
+                if crate::capture_win::cancel_selection() {
+                    break;
+                }
+            }
+        });
+    }
     fn cancel_recognition(&mut self) {
         if !self.busy {
             return;
         }
         self.cancel.store(true, Ordering::Release);
+        // 框选窗口运行在托盘线程的消息循环中；取消请求必须显式投递到
+        // 当前选区，否则退出/取消只能等用户再次操作遮罩窗口。
+        let generation = self.cancel_generation.load(Ordering::Acquire);
+        Self::request_selection_cancel(
+            Arc::clone(&self.cancel),
+            Arc::clone(&self.cancel_generation),
+            generation,
+        );
         if self.pending_image.take().is_some() {
             self.busy = false;
             self.hide_progress();
@@ -764,6 +953,7 @@ impl Service {
                 window.set_draft_key("".into());
                 window.set_autostart_draft(window.get_autostart_enabled());
             }
+            crate::result_window::apply_settings_theme(window);
             let _ = window.show();
             return;
         }
@@ -771,6 +961,7 @@ impl Service {
             self.tray.notice("截图设置窗口创建失败");
             return;
         };
+        crate::result_window::apply_settings_theme(&window);
         let weak = self.self_weak.clone();
         window.on_save_settings(move |hotkey, enabled| {
             let Some(service) = weak.upgrade() else {
@@ -825,7 +1016,23 @@ impl Service {
             let _ = window.show();
         }
     }
-    fn refresh_settings(&self) {
+    fn refresh_theme_if_due(&mut self) {
+        if self.last_theme_sync.elapsed() < Duration::from_secs(2) {
+            return;
+        }
+        if let Some(window) = self.settings_window.as_ref() {
+            crate::result_window::apply_settings_theme(window);
+        }
+        if let Some(window) = self.progress.as_ref() {
+            crate::result_window::apply_progress_theme(window);
+        }
+        if let Some(window) = self.result.as_ref() {
+            window.refresh_theme();
+        }
+        self.last_theme_sync = Instant::now();
+    }
+    fn refresh_settings(&mut self) {
+        self.refresh_theme_if_due();
         if let Some(window) = self.settings_window.as_ref() {
             window.set_hotkey_label(self.settings.hotkey.as_str().into());
             window.set_model_status(
@@ -972,6 +1179,7 @@ impl Service {
             self.tray.notice("正在识别");
             return;
         }
+        self.cancel_generation.fetch_add(1, Ordering::AcqRel);
         self.cancel.store(false, Ordering::Release);
         self.busy = true;
         self.hide_old();
@@ -1006,6 +1214,10 @@ impl Service {
         {
             return;
         }
+        if self.stop_retry_at.is_some_and(|at| Instant::now() < at) {
+            return;
+        }
+        self.stop_retry_at = None;
         self.gui_tasks.retain(|pid, _| gui_process_alive(*pid));
         if self.gui_tasks.values().any(|busy| *busy) {
             return;
@@ -1084,8 +1296,10 @@ impl Service {
             }
             Command::CaptureRequested => self.request_capture(),
             Command::Image(image, work) => {
-                if self.exit_pending.is_some() {
+                if self.exit_pending.is_some() || self.cancel.load(Ordering::Acquire) {
                     self.busy = false;
+                    self.pending_image = None;
+                    self.hide_progress();
                     self.restore_old();
                 } else {
                     match self.model {
@@ -1126,7 +1340,7 @@ impl Service {
             }
             Command::CaptureFailed(reason) => {
                 // P-10：截图链路失败落盘（此前只进托盘提示，磁盘日志无迹可循）。
-                tracing::warn!(reason = %reason, "截图失败");
+                tracing::warn!(kind = "capture_failed", "截图失败");
                 self.busy = false;
                 self.hide_progress();
                 self.restore_old();
@@ -1166,7 +1380,6 @@ impl Service {
                         // P-10：模型加载失败落盘（未初始化属配置缺失，记 WARN 即可）。
                         tracing::warn!(
                             unconfigured = matches!(failure, LoadFailure::NotConfigured(_)),
-                            reason = failure.message(),
                             "截图模型加载失败"
                         );
                         self.model = match failure {
@@ -1235,7 +1448,7 @@ impl Service {
                         // 与子进程退出同路径降级为错误并保留重试入口（O-13）；
                         // 不像取消那样自动重载——超时是故障而非用户意图，避免
                         // 对挂起环境循环重试。
-                        tracing::warn!(kind = "timeout", reason = %reason, "截图识别失败");
+                        tracing::warn!(kind = "timeout", "截图识别失败");
                         self.restore_old();
                         self.tray.notice(reason.as_str());
                         self.model = ModelState::Error;
@@ -1245,7 +1458,7 @@ impl Service {
                         // 子进程死亡（被误关黑窗、崩溃等）：连接不可复用，模型
                         // 从就绪降级为错误并保留重试入口（O-13/O-30），不得继续
                         // 冒称就绪导致重试按钮失效。
-                        tracing::warn!(kind = "process_exited", reason = %reason, "截图识别失败");
+                        tracing::warn!(kind = "process_exited", "截图识别失败");
                         self.restore_old();
                         self.tray.notice("推理子进程已退出；可在设置中重试加载模型");
                         self.model = ModelState::Error;
@@ -1253,9 +1466,23 @@ impl Service {
                     }
                     Err(OcrError::Backend(reason)) => {
                         // 单次推理失败只结束本任务，已预热的模型保持就绪（O-13）。
-                        tracing::warn!(kind = "backend", reason = %reason, "截图识别失败");
+                        tracing::warn!(kind = "backend", "截图识别失败");
                         self.restore_old();
                         self.tray.notice(format!("OCR 识别失败：{reason}"));
+                    }
+                    Err(OcrError::ModelFailure(reason)) => {
+                        tracing::warn!(kind = "asset_invalid", "截图模型资产失效");
+                        self.restore_old();
+                        self.tray.notice("截图模型资产失效；可在设置中重试加载模型");
+                        self.model = ModelState::Error;
+                        self.model_error = Some(reason);
+                    }
+                    Err(OcrError::Communication(reason)) => {
+                        tracing::warn!(kind = "communication", "截图推理通信失败");
+                        self.restore_old();
+                        self.tray.notice("截图推理通信失败；可在设置中重试加载模型");
+                        self.model = ModelState::Error;
+                        self.model_error = Some(reason);
                     }
                 }
             }
@@ -1331,6 +1558,14 @@ impl Service {
                 tracing::info!("推理 worker 已停止");
                 self.complete_exit();
                 return;
+            }
+            Command::WorkerStopFailed(error) => {
+                tracing::warn!(kind = "worker_stop_failed", "推理 worker 停止未完成");
+                self.exit_stop_sent = false;
+                self.stop_retry_at = Some(Instant::now() + Duration::from_secs(1));
+                self.tray
+                    .notice("后台停止暂未完成，将继续重试；仍可使用强制退出");
+                let _ = error;
             }
         }
         if self.exit_pending.is_some() && !self.busy && self.model != ModelState::Loading {
@@ -1487,6 +1722,7 @@ pub fn run_service(autostart: bool) -> Result<(), String> {
         self_weak: std::rc::Weak::new(),
         work: work_tx,
         cancel,
+        cancel_generation: Arc::new(AtomicU64::new(0)),
         model: ModelState::Loading,
         model_error: None,
         pending_image: None,
@@ -1495,9 +1731,11 @@ pub fn run_service(autostart: bool) -> Result<(), String> {
         old_result_visible: false,
         progress: None,
         settings_window: None,
+        last_theme_sync: Instant::now(),
         exit_pending: None,
         exit_confirming: None,
         exit_stop_sent: false,
+        stop_retry_at: None,
         gui_tasks: std::collections::HashMap::new(),
     };
     let (ready_tx, ready_rx) = mpsc::sync_channel(1);
@@ -1527,6 +1765,7 @@ pub fn run_service(autostart: bool) -> Result<(), String> {
                     {
                         current.stop_worker();
                     }
+                    current.refresh_theme_if_due();
                 }
                 let current = service.borrow();
                 if current
@@ -1549,9 +1788,9 @@ mod tests {
     use super::{tray, Command, ModelState, OcrError, Service, Settings, Work};
     use std::fs;
     use std::path::Path;
-    use std::sync::atomic::AtomicBool;
+    use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
     use std::sync::{mpsc, Arc};
-    use std::time::Duration;
+    use std::time::{Duration, Instant};
 
     /// 构造可直接喂 [`Command::OcrFinished`] 的最小服务（模型就绪、任务进行中），
     /// 返回服务与 Work 接收端（供断言后台重载指令）。
@@ -1570,6 +1809,7 @@ mod tests {
             tray: tray::TrayHandle::for_test(),
             work,
             cancel: Arc::new(AtomicBool::new(false)),
+            cancel_generation: Arc::new(AtomicU64::new(0)),
             model: ModelState::Ready,
             model_error: None,
             pending_image: None,
@@ -1578,9 +1818,11 @@ mod tests {
             old_result_visible: false,
             progress: None,
             settings_window: None,
+            last_theme_sync: Instant::now(),
             exit_pending: None,
             exit_confirming: None,
             exit_stop_sent: false,
+            stop_retry_at: None,
             gui_tasks: std::collections::HashMap::new(),
         };
         (service, work_rx)
@@ -1630,6 +1872,7 @@ mod tests {
             tray: tray::TrayHandle::for_test(),
             work,
             cancel: Arc::new(AtomicBool::new(false)),
+            cancel_generation: Arc::new(AtomicU64::new(0)),
             model: ModelState::Ready,
             model_error: None,
             pending_image: None,
@@ -1638,9 +1881,11 @@ mod tests {
             old_result_visible: false,
             progress: None,
             settings_window: None,
+            last_theme_sync: Instant::now(),
             exit_pending: None,
             exit_confirming: None,
             exit_stop_sent: false,
+            stop_retry_at: None,
             gui_tasks: std::collections::HashMap::new(),
         };
         service.handle(Command::OcrFinished(
@@ -1652,6 +1897,84 @@ mod tests {
         assert!(!service.busy);
         assert_eq!(service.status()["model"], "ready");
         Ok(())
+    }
+
+    #[test]
+    fn asset_invalid_downgrades_ready_model_and_reenables_retry(
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        let temp = tempfile::tempdir()?;
+        let (mut service, _work_rx) = ready_busy_service(temp.path());
+        service.handle(Command::OcrFinished(
+            Err(OcrError::ModelFailure("模型资产失效".into())),
+            (0, 0, 20, 20),
+        ));
+        assert_eq!(service.model, ModelState::Error);
+        assert!(service.model_error.is_some());
+        assert!(!service.busy);
+        service.handle(Command::RetryModel);
+        assert_eq!(service.model, ModelState::Loading);
+        Ok(())
+    }
+
+    #[test]
+    fn communication_failure_downgrades_ready_model_and_reenables_retry(
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        let temp = tempfile::tempdir()?;
+        let (mut service, _work_rx) = ready_busy_service(temp.path());
+        service.handle(Command::OcrFinished(
+            Err(OcrError::Communication("共享代理响应线程退出".into())),
+            (0, 0, 20, 20),
+        ));
+        assert_eq!(service.model, ModelState::Error);
+        assert!(service.model_error.is_some());
+        service.handle(Command::RetryModel);
+        assert_eq!(service.model, ModelState::Loading);
+        Ok(())
+    }
+
+    #[test]
+    fn cancelled_image_arriving_late_does_not_start_recognition(
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        let temp = tempfile::tempdir()?;
+        let (mut service, work_rx) = ready_busy_service(temp.path());
+        service.cancel.store(true, Ordering::Release);
+        let image = crate::capture_win::BgrImage::from_vec(8, 8, vec![0; 8 * 8 * 3])
+            .map_err(std::io::Error::other)?;
+        service.handle(Command::Image(image, (0, 0, 8, 8)));
+        assert!(!service.busy);
+        assert!(matches!(work_rx.try_recv(), Err(mpsc::TryRecvError::Empty)));
+        Ok(())
+    }
+
+    #[test]
+    fn stop_background_retries_are_bounded_on_error() {
+        let mut calls = 0;
+        let result = super::stop_background_with_retry(|| {
+            calls += 1;
+            Err("代理不可用".to_string())
+        });
+        assert!(result.is_err());
+        assert_eq!(calls, super::WORKER_STOP_ATTEMPTS);
+    }
+
+    #[test]
+    fn font_readiness_rejects_missing_manifest_assets() -> Result<(), Box<dyn std::error::Error>> {
+        let temp = tempfile::tempdir()?;
+        assert!(matches!(
+            super::verify_font_assets(temp.path()),
+            Err(super::LoadFailure::NotConfigured(_))
+        ));
+        Ok(())
+    }
+
+    #[test]
+    fn stale_selection_cancel_generation_cannot_cancel_new_task() {
+        let cancel = AtomicBool::new(true);
+        let generation = AtomicU64::new(2);
+        assert!(super::selection_cancel_is_current(&cancel, &generation, 2));
+        generation.store(3, Ordering::Release);
+        cancel.store(false, Ordering::Release);
+        assert!(!super::selection_cancel_is_current(&cancel, &generation, 2));
     }
 
     // 覆盖 O-13：未配置与失败的加载结果分别映射到未初始化与错误状态，
@@ -1673,6 +1996,7 @@ mod tests {
             tray: tray::TrayHandle::for_test(),
             work,
             cancel: Arc::new(AtomicBool::new(false)),
+            cancel_generation: Arc::new(AtomicU64::new(0)),
             model: ModelState::Loading,
             model_error: None,
             pending_image: None,
@@ -1681,9 +2005,11 @@ mod tests {
             old_result_visible: false,
             progress: None,
             settings_window: None,
+            last_theme_sync: Instant::now(),
             exit_pending: None,
             exit_confirming: None,
             exit_stop_sent: false,
+            stop_retry_at: None,
             gui_tasks: std::collections::HashMap::new(),
         };
         service.handle(Command::ModelLoaded(Err(

@@ -7,7 +7,7 @@
 //! 落点：状态目录 `logs/jchtools.log.<日期>`，按天轮转，保留最近
 //! 14 天（初始化时清理超期文件）。GUI 与 `--xberg-broker`
 //! 代理进程都各自初始化；任何初始化失败都安静退化为无日志，绝不影响业务。
-//! 初始化成功时同时接管 panic 钩子：panic 消息先写入日志再走默认输出。
+//! 初始化成功时同时接管 panic 钩子：只记类型与去敏源码位置，任意 payload 不入盘。
 //!
 //! 记录范围（P-10）：进程间通信（共享代理/引擎生命周期、通信断裂与重建、
 //! 请求失败）、网络出口（可选组件下载与初始化失败）、关键功能任务
@@ -141,21 +141,23 @@ fn detect_role() -> &'static str {
     }
 }
 
-/// panic 先入日志再走默认钩子：GUI 与代理进程的崩溃现场必须有磁盘记录。
+/// panic 元数据先入日志再走默认钩子；payload 可能携带正文，绝不持久化。
 fn install_panic_hook() {
     let default_hook = std::panic::take_hook();
     std::panic::set_hook(Box::new(move |info| {
-        let message = info
-            .payload()
-            .downcast_ref::<&str>()
-            .map(|s| (*s).to_string())
-            .or_else(|| info.payload().downcast_ref::<String>().cloned())
-            .unwrap_or_else(|| "非字符串 panic payload".to_string());
+        let payload_kind = if info.payload().is::<&str>() || info.payload().is::<String>() {
+            "字符串"
+        } else {
+            "非字符串"
+        };
         let location = info
             .location()
-            .map(|l| format!("{}:{}:{}", l.file(), l.line(), l.column()))
+            .map(|l| {
+                let file = l.file().rsplit(['/', '\\']).next().unwrap_or("?");
+                format!("{file}:{}:{}", l.line(), l.column())
+            })
             .unwrap_or_default();
-        tracing::error!(%message, %location, thread = std::thread::current().name().unwrap_or("?"), "进程 panic");
+        tracing::error!(payload_kind, %location, "进程 panic");
         default_hook(info);
     }));
 }
@@ -188,6 +190,44 @@ fn prune_expired(directory: &Path) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // 覆盖 P-10/O-29/O-30：任意 panic 正文不得成为持久诊断日志内容。
+    #[test]
+    fn panic_payload_is_not_written_to_diagnostic_log() {
+        use std::io::{self, Write};
+        use std::sync::{Arc, Mutex};
+
+        #[derive(Clone)]
+        struct CapturedLog(Arc<Mutex<Vec<u8>>>);
+        impl Write for CapturedLog {
+            fn write(&mut self, bytes: &[u8]) -> io::Result<usize> {
+                self.0.lock().unwrap().extend_from_slice(bytes);
+                Ok(bytes.len())
+            }
+            fn flush(&mut self) -> io::Result<()> {
+                Ok(())
+            }
+        }
+        let bytes = Arc::new(Mutex::new(Vec::new()));
+        let writer = Arc::clone(&bytes);
+        let subscriber = tracing_subscriber::fmt()
+            .with_ansi(false)
+            .with_writer(move || CapturedLog(Arc::clone(&writer)))
+            .finish();
+        let previous = std::panic::take_hook();
+        install_panic_hook();
+        let result = tracing::subscriber::with_default(subscriber, || {
+            std::panic::catch_unwind(|| {
+                std::panic::panic_any("synthetic OCR payload C:/synthetic/private-image.png");
+            })
+        });
+        std::panic::set_hook(previous);
+        assert!(result.is_err());
+        let captured = String::from_utf8(bytes.lock().unwrap().clone()).unwrap();
+        assert!(captured.contains("进程 panic"));
+        assert!(!captured.contains("synthetic OCR payload"));
+        assert!(!captured.contains("private-image.png"));
+    }
 
     // 覆盖 P-10：初始化后 WARN/ERROR 必须落到磁盘日志文件。
     // 全局 subscriber 每进程只有一个：本测试若与其他 init 竞争，

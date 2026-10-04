@@ -2,7 +2,7 @@
 
 use std::{
     cmp::Ordering,
-    collections::BTreeSet,
+    collections::{BTreeMap, BTreeSet},
     ffi::{OsStr, OsString},
     fs::{self, OpenOptions},
     io::Write,
@@ -81,6 +81,7 @@ struct Item {
     relative: PathBuf,
     target: PathBuf,
     is_media: bool,
+    media_dir: String,
 }
 
 #[derive(Clone, Debug, Default)]
@@ -157,7 +158,25 @@ pub fn run(
     readiness_for_groups(&options.groups)?;
     let runtime_dir = markdown_assets::runtime_dir()?;
     let supported = supported_formats(&options.groups)?;
-    let plan = scan(options, &supported)?;
+    if cancel.load(AtomicOrdering::Acquire) {
+        events(Event::Started { total: 0 });
+        return Ok(Summary {
+            stopped: true,
+            ..Summary::default()
+        });
+    }
+    let plan = match scan_cancelable(options, &supported, cancel) {
+        Ok(plan) => plan,
+        Err(_) if cancel.load(AtomicOrdering::Acquire) => {
+            events(Event::Started { total: 0 });
+            events(Event::Log("已停止：扫描期间未开始转换".to_string()));
+            return Ok(Summary {
+                stopped: true,
+                ..Summary::default()
+            });
+        }
+        Err(error) => return Err(error),
+    };
     let total = plan.items.len() + plan.summary.skipped_existing + plan.summary.skipped_duplicate;
     tracing::info!(
         input = %options.input_dir.display(),
@@ -183,7 +202,7 @@ pub fn run(
         });
         // F21/T-29：单文件预算从进入该文件起算，页数预检与转换共用同一 deadline。
         let deadline = markdown_document::Deadline::new(Duration::from_secs(options.timeout_secs));
-        let media_dir = media_dir_name(&output_root, &item.target);
+        let media_dir = &item.media_dir;
         let outcome = if item.is_media {
             convert_media(&item.source, &deadline).map(|markdown| {
                 markdown_document::DocumentOutput {
@@ -202,7 +221,7 @@ pub fn run(
                     pages.unwrap_or_default()
                 )));
             }
-            markdown_document::convert(&item.source, &runtime_dir, fast, &media_dir, &deadline)
+            markdown_document::convert(&item.source, &runtime_dir, fast, media_dir, &deadline)
         };
         let outcome = outcome.and_then(|document| {
             write_new_markdown(
@@ -219,7 +238,7 @@ pub fn run(
                 if partial {
                     tracing::warn!(
                         file = %item.relative.display(),
-                        warnings = %warnings.join("；"),
+                        warning_count = warnings.len(),
                         "转换部分内容未提取"
                     );
                     summary.partial += 1;
@@ -241,7 +260,8 @@ pub fn run(
                 summary.failed += 1;
                 tracing::error!(
                     file = %item.relative.display(),
-                    reason = %message,
+                    // 引擎错误可包含文档片段，只记录失败位置；详情仅供任务界面呈现。
+                    kind = if message.contains("超时") { "timeout" } else { "conversion_or_output" },
                     "转换单文件失败"
                 );
                 events(Event::FileFinished {
@@ -391,7 +411,20 @@ fn occupancy_key(flat: bool, relative_parent: &Path, file_name: &OsStr) -> OsStr
     }
 }
 
+#[cfg(test)]
 fn scan(options: &Options, supported: &BTreeSet<String>) -> Result<Plan, String> {
+    let cancel = AtomicBool::new(false);
+    scan_cancelable(options, supported, &cancel)
+}
+
+fn scan_cancelable(
+    options: &Options,
+    supported: &BTreeSet<String>,
+    cancel: &AtomicBool,
+) -> Result<Plan, String> {
+    if cancel.load(AtomicOrdering::Acquire) {
+        return Err("扫描已取消".to_string());
+    }
     let input = checked_directory(&options.input_dir)?;
     let output = checked_directory(&options.output_dir)?;
     if path_equal(&input, &output) {
@@ -404,8 +437,14 @@ fn scan(options: &Options, supported: &BTreeSet<String>) -> Result<Plan, String>
     let output_in_input = path_begins_with(&output, &input);
     let mut pending = vec![input.clone()];
     while let Some(dir) = pending.pop() {
+        if cancel.load(AtomicOrdering::Acquire) {
+            return Err("扫描已取消".to_string());
+        }
         for entry in fs::read_dir(&dir).map_err(|e| format!("无法扫描 {}：{e}", dir.display()))?
         {
+            if cancel.load(AtomicOrdering::Acquire) {
+                return Err("扫描已取消".to_string());
+            }
             let entry = entry.map_err(|e| format!("无法读取 {} 的目录项：{e}", dir.display()))?;
             let path = entry.path();
             let metadata = fs::symlink_metadata(&path)
@@ -434,6 +473,7 @@ fn scan(options: &Options, supported: &BTreeSet<String>) -> Result<Plan, String>
         )
     });
     let mut occupied = OccupiedIndex::default();
+    let mut media_occupied: BTreeMap<PathBuf, OccupiedIndex> = BTreeMap::new();
     let mut plan = Plan {
         output_root: output.clone(),
         ..Plan::default()
@@ -471,11 +511,19 @@ fn scan(options: &Options, supported: &BTreeSet<String>) -> Result<Plan, String>
             .extension()
             .and_then(OsStr::to_str)
             .is_some_and(|ext| MEDIA.contains(&ext.to_ascii_lowercase().as_str()));
+        let media_dir = if is_media {
+            String::new()
+        } else {
+            let parent = target.parent().unwrap_or(&output);
+            let occupied_media = media_occupied.entry(parent.to_path_buf()).or_default();
+            media_dir_name_reserved(parent, &target, occupied_media)?
+        };
         plan.items.push(Item {
             source,
             relative,
             target,
             is_media,
+            media_dir,
         });
     }
     Ok(plan)
@@ -741,9 +789,19 @@ fn compare_original(left: &OsStr, right: &OsStr) -> Ordering {
 }
 
 /// T-14：媒体目录名 = 产物主干（空白折叠为下划线，去掉尾部点/空格）+ `_media`。
-/// 与输出目录内的普通文件同名（S-01 占用）时追加序号让路；同名目录视为本任务
-/// 可复用目标（重跑覆盖本任务同名图片），不算占用。
-fn media_dir_name(output_root: &Path, target: &Path) -> String {
+/// 与目标所在输出父目录内已有普通项同名时追加序号让路；链接/junction 直接拒绝。
+/// 同一批次内已分配的媒体目录也计入占用，避免空白折叠后的名称碰撞。
+fn media_dir_name(output_root: &Path, target: &Path) -> Result<String, String> {
+    let parent = target.parent().unwrap_or(output_root);
+    let mut occupied = OccupiedIndex::default();
+    media_dir_name_reserved(parent, target, &mut occupied)
+}
+
+fn media_dir_name_reserved(
+    parent: &Path,
+    target: &Path,
+    occupied: &mut OccupiedIndex,
+) -> Result<String, String> {
     let stem = target
         .file_stem()
         .and_then(|stem| stem.to_str())
@@ -755,13 +813,78 @@ fn media_dir_name(output_root: &Path, target: &Path) -> String {
     }
     let mut candidate = format!("{base}_media");
     let mut sequence = 1u32;
-    while fs::symlink_metadata(output_root.join(&candidate))
-        .is_ok_and(|metadata| metadata.is_file())
-    {
-        sequence += 1;
-        candidate = format!("{base}_{sequence}_media");
+    loop {
+        if occupied.contains(OsStr::new(&candidate)) {
+            sequence = sequence.saturating_add(1);
+            candidate = format!("{base}_{sequence}_media");
+            continue;
+        }
+        let path = parent.join(&candidate);
+        match fs::symlink_metadata(&path) {
+            Ok(metadata) if fsutil::is_link(&metadata) => {
+                return Err(format!("媒体目录含符号链接或 junction：{}", path.display()));
+            }
+            Ok(_) => {
+                sequence = sequence.saturating_add(1);
+                candidate = format!("{base}_{sequence}_media");
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                occupied.insert(OsString::from(&candidate));
+                return Ok(candidate);
+            }
+            Err(error) => {
+                return Err(format!("无法检查媒体目录 {}：{error}", path.display()));
+            }
+        }
     }
-    candidate
+}
+
+fn prepare_media_destination(
+    parent: &Path,
+    relative: &str,
+    created_dirs: &mut Vec<PathBuf>,
+) -> Result<PathBuf, String> {
+    let components: Vec<_> = Path::new(relative).components().collect();
+    if components.is_empty() {
+        return Err("媒体图片路径为空".to_string());
+    }
+    let mut current = parent.to_path_buf();
+    for (index, component) in components.iter().enumerate() {
+        let Component::Normal(name) = component else {
+            return Err("媒体图片路径含非法目录段".to_string());
+        };
+        current.push(name);
+        let is_file = index + 1 == components.len();
+        match fs::symlink_metadata(&current) {
+            Ok(metadata) if fsutil::is_link(&metadata) => {
+                return Err(format!(
+                    "媒体输出路径含符号链接或 junction：{}",
+                    current.display()
+                ));
+            }
+            Ok(_) if is_file => {
+                return Err(format!(
+                    "媒体图片目标已存在，不会覆盖：{}",
+                    current.display()
+                ));
+            }
+            Ok(metadata) if metadata.is_dir() => {}
+            Ok(_) => return Err(format!("媒体输出路径不是目录：{}", current.display())),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound && !is_file => {
+                fs::create_dir(&current)
+                    .map_err(|error| format!("无法创建媒体目录 {}：{error}", current.display()))?;
+                created_dirs.push(current.clone());
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) => {
+                return Err(format!(
+                    "无法检查媒体输出路径 {}：{error}",
+                    current.display()
+                ));
+            }
+        }
+    }
+    Ok(current)
 }
 
 fn write_new_markdown(
@@ -800,16 +923,22 @@ fn write_new_markdown(
     // md 在场即代表 media 已完整（T-25：不留半成品）；中途失败回滚本次已写
     // 图片并删除空媒体目录，不触碰既有文件。
     let mut created: Vec<std::path::PathBuf> = Vec::new();
+    let mut created_dirs: Vec<std::path::PathBuf> = Vec::new();
     let media_result = (|| -> Result<(), String> {
         for file in media {
-            let destination = parent.join(&file.relative);
-            if let Some(dir) = destination.parent() {
-                fs::create_dir_all(dir)
-                    .map_err(|e| format!("无法创建媒体目录 {}：{e}", dir.display()))?;
-            }
-            fs::write(&destination, &file.bytes)
+            let destination = prepare_media_destination(parent, &file.relative, &mut created_dirs)?;
+            let mut output = OpenOptions::new()
+                .write(true)
+                .create_new(true)
+                .open(&destination)
+                .map_err(|e| format!("无法创建图片 {}：{e}", destination.display()))?;
+            created.push(destination.clone());
+            output
+                .write_all(&file.bytes)
                 .map_err(|e| format!("无法写入图片 {}：{e}", destination.display()))?;
-            created.push(destination);
+            output
+                .sync_all()
+                .map_err(|e| format!("同步图片失败 {}：{e}", destination.display()))?;
         }
         Ok(())
     })();
@@ -817,21 +946,18 @@ fn write_new_markdown(
         for path in created.iter().rev() {
             let _ = fs::remove_file(path);
         }
-        // 只删本次的媒体目录（relative 首段），且仅在为空时删得掉——不碰输出根。
-        if let Some(file) = media.first() {
-            if let Some((dir, _name)) = file.relative.rsplit_once('/') {
-                let _ = fs::remove_dir(parent.join(dir));
-            }
+        for path in created_dirs.iter().rev() {
+            let _ = fs::remove_dir(path);
         }
         return Err(error);
     }
     let temp = parent.join(format!(".jch-markdown-{}.tmp", uuid::Uuid::new_v4()));
-    let mut file = OpenOptions::new()
-        .write(true)
-        .create_new(true)
-        .open(&temp)
-        .map_err(|e| format!("无法创建临时结果：{e}"))?;
     let write_result = (|| -> Result<(), String> {
+        let mut file = OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&temp)
+            .map_err(|e| format!("无法创建临时结果：{e}"))?;
         file.write_all(content.as_bytes())
             .map_err(|e| format!("写入 Markdown 失败：{e}"))?;
         file.sync_all()
@@ -851,10 +977,8 @@ fn write_new_markdown(
         for path in created.iter().rev() {
             let _ = fs::remove_file(path);
         }
-        if let Some(file) = media.first() {
-            if let Some((dir, _name)) = file.relative.rsplit_once('/') {
-                let _ = fs::remove_dir(parent.join(dir));
-            }
+        for path in created_dirs.iter().rev() {
+            let _ = fs::remove_dir(path);
         }
     }
     write_result
@@ -873,10 +997,13 @@ fn convert_media(path: &Path, deadline: &markdown_document::Deadline) -> Result<
         &AtomicBool::new(false),
     )?;
     let response = crate::xberg_runtime::checked(response)?;
-    response["markdown"]
+    let markdown = response["markdown"]
         .as_str()
-        .map(str::to_owned)
-        .ok_or_else(|| "Xberg 转录响应缺少 markdown".into())
+        .ok_or_else(|| "Xberg 转录响应缺少 markdown".to_string())?;
+    if markdown.trim().is_empty() {
+        return Err("Xberg 转录响应的 markdown 为空，未生成有效媒体结果".to_string());
+    }
+    Ok(markdown.to_owned())
 }
 
 /// E2E 专用接缝（#[doc(hidden)]）：单个媒体文件的真实转录路径（组件解析 →
@@ -889,6 +1016,47 @@ pub fn e2e_convert_media(path: &Path, timeout_secs: u64) -> Result<String, Strin
     }
     let deadline = markdown_document::Deadline::new(Duration::from_secs(timeout_secs));
     convert_media(path, &deadline)
+}
+
+#[doc(hidden)]
+pub fn test_write_new_markdown(
+    output_root: &Path,
+    target: &Path,
+    content: &str,
+    media: &[markdown_document::MediaFile],
+) -> Result<(), String> {
+    write_new_markdown(output_root, target, content, media)
+}
+
+#[doc(hidden)]
+pub fn test_media_dir_name(output_root: &Path, target: &Path) -> Result<String, String> {
+    media_dir_name(output_root, target)
+}
+
+#[doc(hidden)]
+pub fn test_scan_media_dirs(options: &Options) -> Result<Vec<String>, String> {
+    let supported: BTreeSet<String> = [
+        "docx", "docm", "dotx", "dotm", "pptx", "pptm", "ppsx", "potx", "potm", "xlsx", "xlsm",
+        "xlsb", "xltx", "xltm", "xlam", "odt", "ods", "odp",
+    ]
+    .into_iter()
+    .map(str::to_string)
+    .collect();
+    let cancel = AtomicBool::new(false);
+    Ok(scan_cancelable(options, &supported, &cancel)?
+        .items
+        .into_iter()
+        .map(|item| item.media_dir)
+        .collect())
+}
+
+#[doc(hidden)]
+pub fn test_scan_count_with_cancel(
+    options: &Options,
+    cancel: &AtomicBool,
+) -> Result<usize, String> {
+    let supported: BTreeSet<String> = ["pdf", "docx"].into_iter().map(str::to_string).collect();
+    Ok(scan_cancelable(options, &supported, cancel)?.items.len())
 }
 
 #[cfg(test)]
@@ -1165,17 +1333,25 @@ mod tests {
     fn media_write_failure_rolls_back_and_fails_file() {
         let temp = tempfile::tempdir().unwrap();
         let target = temp.path().join("a_docx.md");
+        fs::write(temp.path().join("a_docx_media"), b"occupied").unwrap();
         let media = vec![MediaFile {
-            relative: String::new(),
+            relative: "a_docx_media/image_0.png".to_string(),
             bytes: b"img".to_vec(),
         }];
         let error = write_new_markdown(temp.path(), &target, "body", &media).unwrap_err();
-        assert!(error.contains("无法写入图片"), "{error}");
+        assert!(
+            error.contains("不是目录") || error.contains("已存在"),
+            "{error}"
+        );
         assert!(!target.exists(), "md 不得提交");
         assert_eq!(
             fs::read_dir(temp.path()).unwrap().count(),
-            0,
-            "目录应回到空"
+            1,
+            "既有占用项不得被删除"
+        );
+        assert_eq!(
+            fs::read(temp.path().join("a_docx_media")).unwrap(),
+            b"occupied"
         );
     }
 
@@ -1185,13 +1361,13 @@ mod tests {
         let temp = tempfile::tempdir().unwrap();
         let target = temp.path().join("my report_docx.md");
         assert_eq!(
-            media_dir_name(temp.path(), &target),
+            media_dir_name(temp.path(), &target).unwrap(),
             "my_report_docx_media",
             "空白折叠为下划线"
         );
         fs::write(temp.path().join("my_report_docx_media"), "占用".as_bytes()).unwrap();
         assert_eq!(
-            media_dir_name(temp.path(), &target),
+            media_dir_name(temp.path(), &target).unwrap(),
             "my_report_docx_2_media",
             "与普通文件同名时追加序号让路"
         );
