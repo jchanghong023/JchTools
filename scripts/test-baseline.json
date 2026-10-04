@@ -1774,297 +1774,59 @@
     },
     {
       "file": "src/markdown_document.rs",
-      "name": "collects_root_and_embedded_processing_warnings",
+      "name": "content_is_final_and_children_are_ignored",
       "ignored": false,
       "cfg": null,
-      "body": "a21f63359dbf4531"
+      "body": "9bc1ef5d23976aa4"
     },
     {
       "file": "src/markdown_document.rs",
-      "name": "corrupt_zip64_and_encrypted_metadata_fall_back",
+      "name": "data_array_fallback_when_base64_absent",
       "ignored": false,
       "cfg": null,
-      "body": "03a54793198c4615"
+      "body": "62d6c7c3fb3688fa"
     },
     {
       "file": "src/markdown_document.rs",
-      "name": "docx_metadata_deflate_expansion_is_capped",
+      "name": "fenced_reference_is_literal_but_real_reference_is_rewritten",
       "ignored": false,
       "cfg": null,
-      "body": "aec1f8e0f95d4054"
+      "body": "0950464e84913e7b"
     },
     {
       "file": "src/markdown_document.rs",
-      "name": "docx_metadata_truncated_stream_falls_back",
+      "name": "invalid_images_field_warns",
       "ignored": false,
       "cfg": null,
-      "body": "85721c7a8cfdcd25"
+      "body": "5e605d48365cea2a"
     },
     {
       "file": "src/markdown_document.rs",
-      "name": "docx_metadata_with_lying_uncompressed_size_falls_back",
+      "name": "protocol_shape_errors_are_explicit",
       "ignored": false,
       "cfg": null,
-      "body": "7718ac79cefc1c40"
+      "body": "6c586fe162657807"
     },
     {
       "file": "src/markdown_document.rs",
-      "name": "docx_page_count_reads_only_metadata_entry",
+      "name": "referenced_image_without_data_warns",
       "ignored": false,
       "cfg": null,
-      "body": "70c0f9f00cfef123"
+      "body": "c3018989462c5f21"
     },
     {
       "file": "src/markdown_document.rs",
-      "name": "duplicate_children_with_images_are_deduplicated_before_media_prefixing",
+      "name": "unreferenced_image_is_not_materialized",
       "ignored": false,
       "cfg": null,
-      "body": "26b218f2aa6d6ff2"
+      "body": "144f2e9fd5692708"
     },
     {
       "file": "src/markdown_document.rs",
-      "name": "empty_embedded_results_are_reported_with_nested_context",
+      "name": "warnings_are_relayed_and_exif_noise_filtered",
       "ignored": false,
       "cfg": null,
-      "body": "061c9424b109224a"
-    },
-    {
-      "file": "src/markdown_document.rs",
-      "name": "entity_at_markdown_marker_position_is_escaped_without_decoding_code",
-      "ignored": false,
-      "cfg": null,
-      "body": "b7a311892938262a"
-    },
-    {
-      "file": "src/markdown_document.rs",
-      "name": "fast_config_omits_layout_and_applies_fast_overrides",
-      "ignored": false,
-      "cfg": null,
-      "body": "2f9ba6010725272c"
-    },
-    {
-      "file": "src/markdown_document.rs",
-      "name": "fast_output_removes_image_links_and_media_files",
-      "ignored": false,
-      "cfg": null,
-      "body": "f8335b162e9f37a4"
-    },
-    {
-      "file": "src/markdown_document.rs",
-      "name": "fence_close_requires_bare_marker_line",
-      "ignored": false,
-      "cfg": null,
-      "body": "ae3f6a1ee7ed7c81"
-    },
-    {
-      "file": "src/markdown_document.rs",
-      "name": "huge_deadline_creation_does_not_panic",
-      "ignored": false,
-      "cfg": null,
-      "body": "95d6e4e6b7594445"
-    },
-    {
-      "file": "src/markdown_document.rs",
-      "name": "image_rewrite_only_changes_link_destinations_and_avoids_media_dir_self_hits",
-      "ignored": false,
-      "cfg": null,
-      "body": "2476d26240712d07"
-    },
-    {
-      "file": "src/markdown_document.rs",
-      "name": "indented_fences_follow_commonmark_indent_rules",
-      "ignored": false,
-      "cfg": null,
-      "body": "dac24a2801e9ea5d"
-    },
-    {
-      "file": "src/markdown_document.rs",
-      "name": "inline_code_and_entities_untouched_by_fence_fix",
-      "ignored": false,
-      "cfg": null,
-      "body": "acbf156a8427e691"
-    },
-    {
-      "file": "src/markdown_document.rs",
-      "name": "inline_code_keeps_longer_inner_backtick_runs_literal",
-      "ignored": false,
-      "cfg": null,
-      "body": "12ce5fc1c86dec10"
-    },
-    {
-      "file": "src/markdown_document.rs",
-      "name": "joins_drop_cap_paragraph",
-      "ignored": false,
-      "cfg": null,
-      "body": "3521793d6cc8c389"
-    },
-    {
-      "file": "src/markdown_document.rs",
-      "name": "legal_empty_document_still_succeeds",
-      "ignored": false,
-      "cfg": null,
-      "body": "a4c29f0e7f2071a1"
-    },
-    {
-      "file": "src/markdown_document.rs",
-      "name": "longer_fence_keeps_shorter_marker_lines_verbatim",
-      "ignored": false,
-      "cfg": null,
-      "body": "b477752293d31a9d"
-    },
-    {
-      "file": "src/markdown_document.rs",
-      "name": "malformed_referenced_image_is_reported_as_partial",
-      "ignored": false,
-      "cfg": null,
-      "body": "2b1f45bd62f2da1b"
-    },
-    {
-      "file": "src/markdown_document.rs",
-      "name": "media_child_images_get_collision_prefix",
-      "ignored": false,
-      "cfg": null,
-      "body": "7eb0e7ca6a3caaed"
-    },
-    {
-      "file": "src/markdown_document.rs",
-      "name": "media_refs_rewrite_and_collect_bytes",
-      "ignored": false,
-      "cfg": null,
-      "body": "866397cab8c83f9c"
-    },
-    {
-      "file": "src/markdown_document.rs",
-      "name": "media_unreferenced_or_corrupt_entries_are_skipped",
-      "ignored": false,
-      "cfg": null,
-      "body": "a23d793e1fae90b8"
-    },
-    {
-      "file": "src/markdown_document.rs",
-      "name": "page_count_returns_promptly_when_deadline_expired",
-      "ignored": false,
-      "cfg": null,
-      "body": "9c6eb86967a1cb09"
-    },
-    {
-      "file": "src/markdown_document.rs",
-      "name": "parses_markdown_and_embedded_documents",
-      "ignored": false,
-      "cfg": null,
-      "body": "827c3a6de17c8ad6"
-    },
-    {
-      "file": "src/markdown_document.rs",
-      "name": "pdf_name_probe_ignores_names_inside_literal_strings",
-      "ignored": false,
-      "cfg": null,
-      "body": "522afb2ce1d7abd9"
-    },
-    {
-      "file": "src/markdown_document.rs",
-      "name": "pdf_page_count_reads_page_tree",
-      "ignored": false,
-      "cfg": null,
-      "body": "c500d6426634b428"
-    },
-    {
-      "file": "src/markdown_document.rs",
-      "name": "pdf_page_count_rejects_indirect_count_reference",
-      "ignored": false,
-      "cfg": null,
-      "body": "76a5e3ee9687e703"
-    },
-    {
-      "file": "src/markdown_document.rs",
-      "name": "powerpoint_page_count_reads_structure_without_extraction",
-      "ignored": false,
-      "cfg": null,
-      "body": "ed79e3128c981874"
-    },
-    {
-      "file": "src/markdown_document.rs",
-      "name": "preserves_code_fence_entities",
-      "ignored": false,
-      "cfg": null,
-      "body": "87d832264bd2e97c"
-    },
-    {
-      "file": "src/markdown_document.rs",
-      "name": "rejects_missing_result",
-      "ignored": false,
-      "cfg": null,
-      "body": "2f03fa5ae0566fc5"
-    },
-    {
-      "file": "src/markdown_document.rs",
-      "name": "result_content_wrong_type_is_protocol_failure",
-      "ignored": false,
-      "cfg": null,
-      "body": "c101f74443efed26"
-    },
-    {
-      "file": "src/markdown_document.rs",
-      "name": "result_empty_object_is_protocol_failure",
-      "ignored": false,
-      "cfg": null,
-      "body": "3a442026082afd06"
-    },
-    {
-      "file": "src/markdown_document.rs",
-      "name": "result_null_is_protocol_failure",
-      "ignored": false,
-      "cfg": null,
-      "body": "a0c6c6d4ed9a4538"
-    },
-    {
-      "file": "src/markdown_document.rs",
-      "name": "result_scalar_is_protocol_failure",
-      "ignored": false,
-      "cfg": null,
-      "body": "20cc618ae38c8975"
-    },
-    {
-      "file": "src/markdown_document.rs",
-      "name": "strict_base64_rejects_bad_padding_and_empty_payloads",
-      "ignored": false,
-      "cfg": null,
-      "body": "5370b64fededb9e5"
-    },
-    {
-      "file": "src/markdown_document.rs",
-      "name": "structured_ocr_only_result_succeeds",
-      "ignored": false,
-      "cfg": null,
-      "body": "5982ced8ca51bf2e"
-    },
-    {
-      "file": "src/markdown_document.rs",
-      "name": "structured_ocr_uses_geometry_and_avoids_parent_word_duplication",
-      "ignored": false,
-      "cfg": null,
-      "body": "8ddb712bf5f34ece"
-    },
-    {
-      "file": "src/markdown_document.rs",
-      "name": "tilde_fence_opens_and_closes_independently",
-      "ignored": false,
-      "cfg": null,
-      "body": "fb728afc63913314"
-    },
-    {
-      "file": "src/markdown_document.rs",
-      "name": "tilde_lines_inside_backtick_fence_are_content",
-      "ignored": false,
-      "cfg": null,
-      "body": "a938253661ba1ce2"
-    },
-    {
-      "file": "src/markdown_document.rs",
-      "name": "tmp_real_envelope_media_diagnostic",
-      "ignored": false,
-      "cfg": null,
-      "body": "8728d46e6352a04f"
+      "body": "340dc72dc11d72da"
     },
     {
       "file": "src/md_tools.rs",
@@ -2617,7 +2379,7 @@
       "name": "legacy_capabilities_without_handshake_fields_are_rejected",
       "ignored": false,
       "cfg": null,
-      "body": "88f53360bc087bbc"
+      "body": "462a325c30b08ea3"
     },
     {
       "file": "src/xberg_runtime.rs",
@@ -2953,7 +2715,7 @@
       "name": "broker_survives_client_exit_and_obeys_explicit_stop",
       "ignored": false,
       "cfg": null,
-      "body": "259f3467442b78b7"
+      "body": "42b4836311f811d1"
     },
     {
       "file": "tests/classify_shape.rs",
@@ -4294,27 +4056,6 @@
     },
     {
       "file": "tests/markdown_convert_gate.rs",
-      "name": "public_page_count_falls_back_on_corrupt_container",
-      "ignored": false,
-      "cfg": null,
-      "body": "802f7f7f6a180b14"
-    },
-    {
-      "file": "tests/markdown_convert_gate.rs",
-      "name": "public_page_count_reports_exact_pages",
-      "ignored": false,
-      "cfg": null,
-      "body": "4653d27b4e5442ec"
-    },
-    {
-      "file": "tests/markdown_convert_gate.rs",
-      "name": "public_page_count_respects_expired_deadline",
-      "ignored": false,
-      "cfg": null,
-      "body": "128480abd817605a"
-    },
-    {
-      "file": "tests/markdown_convert_gate.rs",
       "name": "scan_honors_cancellation_before_traversal",
       "ignored": false,
       "cfg": null,
@@ -4878,7 +4619,7 @@
       "name": "broken_engine_is_replaced_and_batch_continues",
       "ignored": false,
       "cfg": null,
-      "body": "57a0e4c696f83977"
+      "body": "b2b68ccb1dd752a8"
     },
     {
       "file": "tests/xberg_shared_process.rs",
@@ -4899,14 +4640,7 @@
       "name": "documents_reuse_process_and_snapshot_finishes_during_document",
       "ignored": false,
       "cfg": null,
-      "body": "5b2dc17952fd789b"
-    },
-    {
-      "file": "tests/xberg_shared_process.rs",
-      "name": "fast_mode_rejection_is_reported_without_normal_fallback",
-      "ignored": false,
-      "cfg": null,
-      "body": "5cee03c85d752e2a"
+      "body": "fec296820be7231f"
     },
     {
       "file": "tests/xberg_shared_process.rs",
