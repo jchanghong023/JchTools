@@ -1350,7 +1350,7 @@
       "name": "atomic_commit_refuses_existing_result",
       "ignored": false,
       "cfg": null,
-      "body": "4b54fe7bbce1dde6"
+      "body": "01cf45e01efa5c4f"
     },
     {
       "file": "src/markdown.rs",
@@ -1410,73 +1410,24 @@
     },
     {
       "file": "src/markdown.rs",
-      "name": "media_component_error_unifies_reinit_guidance",
+      "name": "media_dir_name_sanitizes_and_avoids_file_occupancy",
       "ignored": false,
       "cfg": null,
-      "body": "accd3dc88f3ba0a5"
+      "body": "d669a3ba168247c0"
     },
     {
       "file": "src/markdown.rs",
-      "name": "media_worker_crash_fails_file_and_restarts_for_next",
+      "name": "media_files_written_before_markdown_commit",
       "ignored": false,
       "cfg": null,
-      "body": "20eddf985d0d05ac"
+      "body": "831f0f511cd494ec"
     },
     {
       "file": "src/markdown.rs",
-      "name": "media_worker_drop_closes_stdin_for_graceful_exit",
+      "name": "media_write_failure_rolls_back_and_fails_file",
       "ignored": false,
       "cfg": null,
-      "body": "b8906aed4f5d456d"
-    },
-    {
-      "file": "src/markdown.rs",
-      "name": "media_worker_environment_matches_document_offline_policy",
-      "ignored": false,
-      "cfg": null,
-      "body": "140c5ecdcabfc011"
-    },
-    {
-      "file": "src/markdown.rs",
-      "name": "media_worker_garbage_response_fails_file",
-      "ignored": false,
-      "cfg": null,
-      "body": "b9e4be2e7b20d107"
-    },
-    {
-      "file": "src/markdown.rs",
-      "name": "media_worker_no_audio_markdown_passthrough",
-      "ignored": false,
-      "cfg": null,
-      "body": "331b5185d8f174db"
-    },
-    {
-      "file": "src/markdown.rs",
-      "name": "media_worker_oversize_response_fails_file_keeps_worker",
-      "ignored": false,
-      "cfg": null,
-      "body": "2b99178c59f0d897"
-    },
-    {
-      "file": "src/markdown.rs",
-      "name": "media_worker_per_file_failure_keeps_worker_alive",
-      "ignored": false,
-      "cfg": null,
-      "body": "5ec51542347577e0"
-    },
-    {
-      "file": "src/markdown.rs",
-      "name": "media_worker_success_passthrough_and_batch_reuse",
-      "ignored": false,
-      "cfg": null,
-      "body": "c2ea81604f78db78"
-    },
-    {
-      "file": "src/markdown.rs",
-      "name": "media_worker_timeout_kills_worker_and_restarts",
-      "ignored": false,
-      "cfg": null,
-      "body": "301bf4dfdce34ef0"
+      "body": "5a03d64146767c57"
     },
     {
       "file": "src/markdown.rs",
@@ -1508,27 +1459,6 @@
     },
     {
       "file": "src/markdown.rs",
-      "name": "read_line_capped_allows_line_exactly_at_cap",
-      "ignored": false,
-      "cfg": null,
-      "body": "e3383b0ed2b64f4d"
-    },
-    {
-      "file": "src/markdown.rs",
-      "name": "read_line_capped_errors_on_oversize_and_keeps_line_boundary",
-      "ignored": false,
-      "cfg": null,
-      "body": "e62da2b00370b90c"
-    },
-    {
-      "file": "src/markdown.rs",
-      "name": "read_line_capped_reads_normal_lines",
-      "ignored": false,
-      "cfg": null,
-      "body": "a8957772a5dee46a"
-    },
-    {
-      "file": "src/markdown.rs",
       "name": "same_input_and_output_are_rejected",
       "ignored": false,
       "cfg": null,
@@ -1547,34 +1477,6 @@
       "ignored": false,
       "cfg": null,
       "body": "1e29cea702efd43d"
-    },
-    {
-      "file": "src/markdown.rs",
-      "name": "stderr_tail_caps_at_300_chars_and_drops_partial_word",
-      "ignored": false,
-      "cfg": null,
-      "body": "ec4fb5eea270aea2"
-    },
-    {
-      "file": "src/markdown.rs",
-      "name": "stderr_tail_multibyte_slice_does_not_panic",
-      "ignored": false,
-      "cfg": null,
-      "body": "b94f8b35ac121b29"
-    },
-    {
-      "file": "src/markdown.rs",
-      "name": "stderr_tail_short_ascii_is_kept_whole",
-      "ignored": false,
-      "cfg": null,
-      "body": "5fb00c27c1758b2f"
-    },
-    {
-      "file": "src/markdown.rs",
-      "name": "stderr_tail_truncated_starts_after_first_whitespace",
-      "ignored": false,
-      "cfg": null,
-      "body": "0c09947eb50a65f8"
     },
     {
       "file": "src/markdown_assets.rs",
@@ -1735,7 +1637,7 @@
       "name": "collects_root_and_embedded_processing_warnings",
       "ignored": false,
       "cfg": null,
-      "body": "cc26bde3ef436e2a"
+      "body": "a21f63359dbf4531"
     },
     {
       "file": "src/markdown_document.rs",
@@ -1777,7 +1679,7 @@
       "name": "fast_config_omits_layout_and_applies_fast_overrides",
       "ignored": false,
       "cfg": null,
-      "body": "0c77206f40d525db"
+      "body": "2f9ba6010725272c"
     },
     {
       "file": "src/markdown_document.rs",
@@ -1812,7 +1714,7 @@
       "name": "legal_empty_document_still_succeeds",
       "ignored": false,
       "cfg": null,
-      "body": "495bb61ed94e1cdf"
+      "body": "a4c29f0e7f2071a1"
     },
     {
       "file": "src/markdown_document.rs",
@@ -1820,6 +1722,27 @@
       "ignored": false,
       "cfg": null,
       "body": "b477752293d31a9d"
+    },
+    {
+      "file": "src/markdown_document.rs",
+      "name": "media_child_images_get_collision_prefix",
+      "ignored": false,
+      "cfg": null,
+      "body": "7eb0e7ca6a3caaed"
+    },
+    {
+      "file": "src/markdown_document.rs",
+      "name": "media_refs_rewrite_and_collect_bytes",
+      "ignored": false,
+      "cfg": null,
+      "body": "866397cab8c83f9c"
+    },
+    {
+      "file": "src/markdown_document.rs",
+      "name": "media_unreferenced_or_corrupt_entries_are_skipped",
+      "ignored": false,
+      "cfg": null,
+      "body": "a23d793e1fae90b8"
     },
     {
       "file": "src/markdown_document.rs",
@@ -1833,7 +1756,7 @@
       "name": "parses_markdown_and_embedded_documents",
       "ignored": false,
       "cfg": null,
-      "body": "155ba0f1e5f46f30"
+      "body": "827c3a6de17c8ad6"
     },
     {
       "file": "src/markdown_document.rs",
@@ -1868,42 +1791,42 @@
       "name": "rejects_missing_result",
       "ignored": false,
       "cfg": null,
-      "body": "f1ccc6d23ebda492"
+      "body": "2f03fa5ae0566fc5"
     },
     {
       "file": "src/markdown_document.rs",
       "name": "result_content_wrong_type_is_protocol_failure",
       "ignored": false,
       "cfg": null,
-      "body": "ddcab678a5f730d4"
+      "body": "c101f74443efed26"
     },
     {
       "file": "src/markdown_document.rs",
       "name": "result_empty_object_is_protocol_failure",
       "ignored": false,
       "cfg": null,
-      "body": "48eb94af01d604b2"
+      "body": "3a442026082afd06"
     },
     {
       "file": "src/markdown_document.rs",
       "name": "result_null_is_protocol_failure",
       "ignored": false,
       "cfg": null,
-      "body": "a4b0ce92e76876de"
+      "body": "a0c6c6d4ed9a4538"
     },
     {
       "file": "src/markdown_document.rs",
       "name": "result_scalar_is_protocol_failure",
       "ignored": false,
       "cfg": null,
-      "body": "207e0b882b64e5f6"
+      "body": "20cc618ae38c8975"
     },
     {
       "file": "src/markdown_document.rs",
       "name": "structured_ocr_only_result_succeeds",
       "ignored": false,
       "cfg": null,
-      "body": "aeff82f2630c33ce"
+      "body": "5982ced8ca51bf2e"
     },
     {
       "file": "src/markdown_document.rs",
@@ -1921,10 +1844,10 @@
     },
     {
       "file": "src/markdown_document.rs",
-      "name": "warns_when_embedded_depth_limit_skips_children",
+      "name": "tmp_real_envelope_media_diagnostic",
       "ignored": false,
       "cfg": null,
-      "body": "ca2024f4e4707763"
+      "body": "2ba8df811ec5485e"
     },
     {
       "file": "src/md_tools.rs",
@@ -2456,7 +2379,7 @@
       "name": "prune_keeps_product_fields_and_strips_heavy_fields_recursively",
       "ignored": false,
       "cfg": null,
-      "body": "606db094a205d33d"
+      "body": "aba81bd1ebee7875"
     },
     {
       "file": "tests/archive.rs",
@@ -2729,7 +2652,7 @@
       "name": "broker_survives_client_exit_and_obeys_explicit_stop",
       "ignored": false,
       "cfg": null,
-      "body": "65de3c6badc49d20"
+      "body": "259f3467442b78b7"
     },
     {
       "file": "tests/classify_shape.rs",
@@ -4619,14 +4542,14 @@
       "name": "scenario_assets_and_configuration_are_independent",
       "ignored": false,
       "cfg": null,
-      "body": "ff827be51cd71877"
+      "body": "ee198e002c8720dd"
     },
     {
       "file": "tests/xberg_shared_process.rs",
       "name": "broken_engine_is_replaced_and_batch_continues",
       "ignored": false,
       "cfg": null,
-      "body": "e9698790425cfbd1"
+      "body": "57a0e4c696f83977"
     },
     {
       "file": "tests/xberg_shared_process.rs",
@@ -4640,14 +4563,14 @@
       "name": "documents_reuse_process_and_snapshot_finishes_during_document",
       "ignored": false,
       "cfg": null,
-      "body": "5db86b51c2c79541"
+      "body": "5b2dc17952fd789b"
     },
     {
       "file": "tests/xberg_shared_process.rs",
       "name": "fast_mode_rejection_falls_back_to_normal",
       "ignored": false,
       "cfg": null,
-      "body": "0b147e57162dbec7"
+      "body": "03e7c34fa1f2ba5b"
     },
     {
       "file": "tests/xberg_shared_process.rs",
