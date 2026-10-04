@@ -422,8 +422,8 @@ pub(crate) fn restore_backup(backup: &Path, destination: &Path, kind: &str) -> R
 }
 
 /// 测试支持：跨模块共享的进程环境变量锁。markdown_assets 与 snap_ocr_assets
-/// 的测试都会改写 `JCHTOOLS_XBERG_INFERENCE_DIR` 与各自资产根覆盖变量，而
-/// cargo test 的并行线程共享进程环境，必须经同一把锁串行，避免相互覆盖。
+/// 的测试都会改写各自资产根覆盖变量，而 cargo test 的并行线程共享进程环境，
+/// 必须经同一把锁串行，避免相互覆盖。
 #[cfg(test)]
 pub(crate) mod test_env {
     use std::sync::{Mutex, OnceLock};
@@ -447,18 +447,11 @@ pub(crate) fn ensure_not_cancelled(cancel: &AtomicBool) -> Result<(), String> {
 // 残留兜底、成员校验）此前各留一份相同实现，仅靠注释约定同步；收敛到本模块
 // 后一处修改即可同时生效（XB-09/XB-16 同口径），模块只保留各自的清单与文案。
 
-/// 组件目录解析：测试支持构建可用 `JCHTOOLS_XBERG_INFERENCE_DIR`
-/// 覆盖到本地组件树；否则取应用 SQLite 保存的共享 Xberg 目录（XB-18/XB-19）。
-/// 两个功能必须用同一规则解析同一安装，不允许出现第二套目录口径。
+/// 组件目录解析：只取应用 SQLite 保存的共享 Xberg 目录（XB-18/XB-19），
+/// 即设置页保存的目录或产品内下载后保存的目录（2026-10-04 用户指示删除
+/// `JCHTOOLS_XBERG_INFERENCE_DIR` 环境变量覆盖）。两个功能必须用同一规则
+/// 解析同一安装，不允许出现第二套目录口径。
 pub(crate) fn resolve_xberg_component() -> Result<PathBuf, String> {
-    if cfg!(test) || cfg!(feature = "test-hooks") {
-        if let Some(path) = std::env::var_os("JCHTOOLS_XBERG_INFERENCE_DIR")
-            .map(PathBuf::from)
-            .filter(|p| p.is_absolute())
-        {
-            return Ok(path);
-        }
-    }
     crate::xberg_settings::required()
 }
 

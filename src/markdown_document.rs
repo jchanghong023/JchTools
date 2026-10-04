@@ -437,7 +437,7 @@ mod tests {
     use super::*;
     use serde_json::json;
 
-    fn response(document: Value) -> Value {
+    fn response(document: &Value) -> Value {
         json!({"id": 1, "ok": true, "document": document, "warnings": []})
     }
 
@@ -446,7 +446,7 @@ mod tests {
     // 由引擎负责，适配器忽略。
     #[test]
     fn content_is_final_and_children_are_ignored() {
-        let envelope = response(json!({
+        let envelope = response(&json!({
             "content": "# 报告\n\n![图](image_0.png)\n",
             "images": [
                 {"image_index": 0, "format": "png", "data_base64": "aGVsbG8="}
@@ -457,7 +457,10 @@ mod tests {
             ]
         }));
         let output = parse_document_response(&envelope, "a_docx_media").unwrap();
-        assert_eq!(output.markdown, "# 报告\n\n![图](a_docx_media/image_0.png)\n");
+        assert_eq!(
+            output.markdown,
+            "# 报告\n\n![图](a_docx_media/image_0.png)\n"
+        );
         assert_eq!(output.media.len(), 1);
         assert_eq!(output.media[0].relative, "a_docx_media/image_0.png");
         assert_eq!(output.media[0].bytes, b"hello".to_vec());
@@ -468,7 +471,7 @@ mod tests {
     // 正文真实引用照常加前缀并登记落盘。
     #[test]
     fn fenced_reference_is_literal_but_real_reference_is_rewritten() {
-        let envelope = response(json!({
+        let envelope = response(&json!({
             "content": "正文 ![图](image_0.png)\n\n```text\nimage_0.png\n```\n",
             "images": [{"image_index": 0, "format": "png", "data_base64": "aGVsbG8="}]
         }));
@@ -481,7 +484,7 @@ mod tests {
     // 覆盖 T-14：正文未引用的图片不落盘（引擎引用↔字节一一对应口径）。
     #[test]
     fn unreferenced_image_is_not_materialized() {
-        let envelope = response(json!({
+        let envelope = response(&json!({
             "content": "正文没有图片\n",
             "images": [{"image_index": 0, "format": "png", "data_base64": "aGVsbG8="}]
         }));
@@ -494,20 +497,23 @@ mod tests {
     // 覆盖 T-16：被引用但字节缺失/损坏时保留占位引用并告警，不冒充成功。
     #[test]
     fn referenced_image_without_data_warns() {
-        let envelope = response(json!({
+        let envelope = response(&json!({
             "content": "![图](image_0.png)",
             "images": [{"image_index": 0, "format": "png"}]
         }));
         let output = parse_document_response(&envelope, "m").unwrap();
         assert_eq!(output.markdown, "![图](image_0.png)");
         assert!(output.media.is_empty());
-        assert_eq!(output.warnings, vec!["图片 image_0.png 缺少有效数据，已保留占位引用"]);
+        assert_eq!(
+            output.warnings,
+            vec!["图片 image_0.png 缺少有效数据，已保留占位引用"]
+        );
     }
 
     // 覆盖 T-16：data_base64 缺失时回退 data 数字数组取字节。
     #[test]
     fn data_array_fallback_when_base64_absent() {
-        let envelope = response(json!({
+        let envelope = response(&json!({
             "content": "![图](image_0.png)",
             "images": [{"image_index": 0, "format": "png", "data": [104, 105]}]
         }));
@@ -520,7 +526,7 @@ mod tests {
     // exif 噪声按既有口径过滤，不改变其余文案。
     #[test]
     fn warnings_are_relayed_and_exif_noise_filtered() {
-        let mut envelope = response(json!({"content": "正文"}));
+        let mut envelope = response(&json!({"content": "正文"}));
         envelope["warnings"] = json!([
             {"source": "exif", "message": "No EXIF data found"},
             {"source": "auto_mode",
@@ -541,10 +547,10 @@ mod tests {
         let error = parse_document_response(&missing, "m").unwrap_err();
         assert!(error.contains("协议异常"), "{error}");
         assert!(error.contains("document"), "{error}");
-        let not_object = response(json!("content"));
+        let not_object = response(&json!("content"));
         let error = parse_document_response(&not_object, "m").unwrap_err();
         assert!(error.contains("必须是对象"), "{error}");
-        let bad_content = response(json!({"content": 3}));
+        let bad_content = response(&json!({"content": 3}));
         let error = parse_document_response(&bad_content, "m").unwrap_err();
         assert!(error.contains("content"), "{error}");
     }
@@ -552,10 +558,13 @@ mod tests {
     // 覆盖 T-16：images 字段类型异常时告警并保留正文，不按协议失败。
     #[test]
     fn invalid_images_field_warns() {
-        let envelope = response(json!({"content": "正文", "images": 3}));
+        let envelope = response(&json!({"content": "正文", "images": 3}));
         let output = parse_document_response(&envelope, "m").unwrap();
         assert_eq!(output.markdown, "正文");
         assert!(output.media.is_empty());
-        assert_eq!(output.warnings, vec!["图片资源字段类型无效，已保留占位引用"]);
+        assert_eq!(
+            output.warnings,
+            vec!["图片资源字段类型无效，已保留占位引用"]
+        );
     }
 }

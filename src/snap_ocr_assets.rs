@@ -257,10 +257,11 @@ pub fn readiness() -> Result<(), String> {
 
 /// 就绪检查的推理组件段：在位校验 + 清单成员存在性检查。
 ///
-/// 成员检查基于共享解析规则（C-2）：解析支持 debug 构建的
-/// `JCHTOOLS_XBERG_INFERENCE_DIR` 覆盖，成员检查必须与在位校验使用同一
-/// 目录——此前成员校验直接按资产根相对 install_path 进行，绕过覆盖，导致
-/// 覆盖路径在位校验通过后必报「推理组件包校验失败」、永远无法就绪。成员
+/// 成员检查基于共享解析规则（C-2）：组件目录只来自应用 SQLite 保存的共享
+/// Xberg 目录（设置页保存或产品内下载；2026-10-04 起不再有环境变量覆盖），
+/// 成员检查必须与在位校验使用同一目录——此前成员校验直接按资产根相对
+/// install_path 进行，绕过共享解析，导致配置目录在位校验通过后必报
+/// 「推理组件包校验失败」、永远无法就绪。成员
 /// 过滤与存在性检查经 [`crate::asset_util::require_inference_members_for_scenario`]
 /// 与 markdown 侧共用同一实现（XB-09 2026-10-02 修订：不比对摘要）。
 fn readiness_inference_pack(manifest: &SnapAssetManifest, root: &Path) -> Result<(), String> {
@@ -1174,7 +1175,7 @@ mod tests {
 
     /// 测试共享进程环境变量（cargo test 并行线程），组件根相关用例必须串行；
     /// 锁实例与 markdown_assets 的测试共用（见 asset_util::test_env），避免
-    /// 两模块同时改写 JCHTOOLS_XBERG_INFERENCE_DIR 相互覆盖。
+    /// 两模块同时改写各自资产根覆盖变量相互覆盖。
     struct ComponentGuard {
         root: tempfile::TempDir,
         /// 进入用例前的覆盖变量旧值：drop 时恢复而不是无条件删除——GUI 测试
@@ -1191,7 +1192,6 @@ mod tests {
         let previous = std::env::var_os("JCHTOOLS_SNAP_OCR_TEST_ASSET_ROOT");
         let root = tempfile::tempdir().expect("创建资产根目录");
         std::env::set_var("JCHTOOLS_SNAP_OCR_TEST_ASSET_ROOT", root.path());
-        std::env::remove_var("JCHTOOLS_XBERG_INFERENCE_DIR");
         ComponentGuard {
             root,
             previous,
@@ -1207,18 +1207,17 @@ mod tests {
                 }
                 None => std::env::remove_var("JCHTOOLS_SNAP_OCR_TEST_ASSET_ROOT"),
             }
-            std::env::remove_var("JCHTOOLS_XBERG_INFERENCE_DIR");
         }
     }
 
-    // 覆盖 C-2（XB-09 2026-10-02 修订后的存在性口径）：debug 组件目录覆盖
-    // （JCHTOOLS_XBERG_INFERENCE_DIR）下，推理组件成员检查必须基于
-    // resolve_xberg_component 解析出的组件目录，而非资产根相对 install_path
-    // ——否则覆盖路径永远无法就绪（在位校验通过后必报「推理组件包校验失败」）。
+    // 覆盖 C-2（XB-09 2026-10-02 修订后的存在性口径）：设置页保存的组件目录
+    // 下，推理组件成员检查必须基于 resolve_xberg_component 解析出的组件目录，
+    // 而非资产根相对 install_path——否则配置目录永远无法就绪（在位校验通过后
+    // 必报「推理组件包校验失败」）。
     // 覆盖树内全部 snapshot 成员以桩字节（与清单摘要不同）在场：存在性口径下
-    // 必须通过；删除成员后错误基于覆盖目录点名缺失项。
+    // 必须通过；删除成员后错误基于保存目录点名缺失项。
     #[test]
-    fn readiness_inference_pack_honors_component_dir_override() {
+    fn readiness_inference_pack_honors_configured_component_dir() {
         let guard = redirect_component_env();
         let external = guard.root.path().join("external-component");
         let manifest = super::load_manifest().expect("内置清单必须可解析");
@@ -1238,7 +1237,8 @@ mod tests {
                 .expect("创建覆盖树成员目录");
             fs::write(&target, b"replaced-engine").expect("预置桩成员（字节与清单不同）");
         }
-        std::env::set_var("JCHTOOLS_XBERG_INFERENCE_DIR", &external);
+        fs::write(external.join("xberg.exe"), b"engine").expect("预置引擎文件供设置链校验");
+        crate::xberg_settings::save(&external).expect("经设置链保存组件目录");
 
         super::readiness_inference_pack(&manifest, guard.root.path())
             .expect("桩字节成员应通过存在性检查（替换引擎免摘要校验）");
@@ -1254,7 +1254,7 @@ mod tests {
             .expect_err("缺失成员必须失败");
         assert!(
             error.contains("rec.onnx") && (error.contains("缺失") || error.contains("缺少")),
-            "错误应基于覆盖目录点名缺失成员（在位校验与清单成员检查均为存在性口径）：{error}"
+            "错误应基于保存目录点名缺失成员（在位校验与清单成员检查均为存在性口径）：{error}"
         );
         assert!(
             !error.contains("推理组件包校验失败"),

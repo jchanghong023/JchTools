@@ -83,9 +83,8 @@ XBERG_TAG = "v2026.10.2-0920-run54.1"
 XBERG_ARCHIVE_URL = (
     f"https://github.com/jchanghong023/xberg/releases/download/{XBERG_TAG}/xberg-cli-x86_64-pc-windows-msvc.zip"
 )
-# 与 src/markdown_assets.rs 同口径：推理组件安装根（每个发布版本一个 tag 子目录）
-# 与媒体转录在位校验的必需成员（存在性；SHA-256 校验由初始化/清单承接）。
-INFERENCE_ROOT_RELPATH = "xberg-inference"
+# 与 src/markdown_assets.rs 同口径：媒体转录在位校验的必需成员
+# （存在性；SHA-256 校验由初始化/清单承接；组件目录与运行目录同口径）。
 INFERENCE_REQUIRED = (
     "xberg.exe",
     "models/sense_voice_zh_en_ja_ko_yue_2024_07_17/model.int8.onnx",
@@ -320,27 +319,6 @@ def _probe_runtime_dir(root: Path, missing: list[str]) -> Path | None:
     return runtime_dir
 
 
-def _resolve_inference_dir(root: Path, missing: list[str]) -> Path | None:
-    """解析推理组件目录（与 Rust 侧 resolve_xberg_component 同口径）.
-
-    开发期可用 JCHTOOLS_XBERG_INFERENCE_DIR 指向本地组件树；否则取安装根下
-    唯一的 tag 子目录（0 个未安装，多于 1 个无法判定）。
-    """
-    override = os.environ.get("JCHTOOLS_XBERG_INFERENCE_DIR")
-    if override and Path(override).is_absolute():
-        return Path(override)
-    inference_root = root / INFERENCE_ROOT_RELPATH
-    tag_dirs = [entry for entry in inference_root.glob("*") if entry.is_dir()] if inference_root.is_dir() else []
-    if len(tag_dirs) == 1:
-        return tag_dirs[0]
-    if not tag_dirs:
-        missing.append(f"推理组件未安装：{inference_root}（GUI「初始化可选组件」下载）")
-    else:
-        names = "、".join(sorted(entry.name for entry in tag_dirs))
-        missing.append(f"推理组件目录存在多个版本，无法确定使用哪一个：{names}")
-    return None
-
-
 def _check_inference_members(inference_dir: Path, missing: list[str]) -> None:
     """在位校验：固定必需成员 + 清单声明的组件包成员；缺失项写入 missing."""
     holes = [name for name in INFERENCE_REQUIRED if not (inference_dir / name).is_file()]
@@ -368,7 +346,10 @@ def probe_assets() -> AssetProbe:
     xberg_exe = (runtime_dir / "xberg.exe") if runtime_dir is not None else None
     if xberg_exe is not None and not xberg_exe.is_file():
         xberg_exe = None
-    inference_dir = _resolve_inference_dir(root, missing)
+    # 推理组件目录与运行目录同口径（resolve_xberg_component 即
+    # xberg_settings::required()，2026-10-04 起无环境变量覆盖）：未配置时的
+    # 缺失原因已由 _probe_runtime_dir 报告，这里只做组件成员检查。
+    inference_dir = runtime_dir
     if inference_dir is not None:
         _check_inference_members(inference_dir, missing)
     return AssetProbe(root, runtime_dir, xberg_exe, inference_dir, missing)

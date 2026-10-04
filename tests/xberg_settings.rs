@@ -7,15 +7,15 @@ fn scenario_assets_and_configuration_are_independent() {
     use jchtools::xberg_runtime::{asset_for_scenario, startup_config};
     let root = tempfile::tempdir().unwrap();
     let config = startup_config(root.path()).unwrap();
-    assert_eq!(
-        config["snapshot_ocr"]["models_dir"],
-        root.path().join("models/snapshot-ocr").to_str().unwrap()
+    assert!(
+        config.get("snapshot_ocr").is_none(),
+        "截图模型目录交还引擎 exe 旁回退（同一共享运行目录布局）"
     );
     assert_eq!(config["transcription"]["enabled"], false);
-    // T-13（2026-10-04 确认）：调参细节交还引擎默认，顶层 disable_ocr 不再下发；
-    // 文档 OCR 保持启用改由场景配置断言。
-    assert_eq!(config["ocr"]["backend"], "paddle-ocr");
-    assert_eq!(config["images"]["run_ocr_on_images"], true);
+    // T-13（2026-10-04 确认）：调参细节交还引擎默认；启动基线只保留与引擎
+    // 默认不同的关键差异——Markdown 输出、中文 OCR 与图片字节通道。
+    assert_eq!(config["ocr"]["language"][0], "ch");
+    assert_eq!(config["images"]["include_data_base64"], true);
     for scenario in ["document", "snapshot", "media"] {
         assert!(asset_for_scenario("xberg.exe", scenario));
         assert_eq!(

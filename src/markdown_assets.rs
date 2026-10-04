@@ -168,12 +168,13 @@ pub fn readiness() -> Result<(), String> {
 /// 就绪检查的推理组件段：成员级存在性检查（XB-09 2026-10-02 修订；清单
 /// 未接入时在位校验已覆盖）。
 ///
-/// 成员检查基于共享解析规则（C-2，与截图 OCR 侧同口径）：解析支持 debug 构建
-/// 的 `JCHTOOLS_XBERG_INFERENCE_DIR` 覆盖，成员检查必须与在位校验
+/// 成员检查基于共享解析规则（C-2，与截图 OCR 侧同口径）：组件目录只来自
+/// 应用 SQLite 保存的共享 Xberg 目录（设置页保存或产品内下载；2026-10-04
+/// 起不再有环境变量覆盖），成员检查必须与在位校验
 /// （[`media_component_dir`]）使用同一目录——此前成员校验直接按资产根拼
-/// `xberg-inference/<tag>/`，绕过覆盖，导致覆盖路径在位校验通过后仍必报成员
-/// 校验失败、永远无法就绪（markdown::run 阻断转换，initialize 还会重复下载
-/// 约 291MB 组件包）。markdown 清单成员的 install_path 本就是组件目录相对
+/// `xberg-inference/<tag>/`，绕过共享解析，导致配置目录在位校验通过后仍必报
+/// 成员校验失败、永远无法就绪（markdown::run 阻断转换，initialize 还会重复
+/// 下载约 291MB 组件包）。markdown 清单成员的 install_path 本就是组件目录相对
 /// 路径（无 `xberg-inference/<tag>/` 前缀，与 snap 清单不同），成员过滤与
 /// 存在性检查经 [`crate::asset_util::require_inference_members_for_scenario`]
 /// 与截图侧共用同一实现。`_root` 形参保留调用点形状；组件目录一律由共享
@@ -677,14 +678,12 @@ mod tests {
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         let root = tempfile::tempdir().expect("创建资产根目录");
         std::env::set_var("JCHTOOLS_MARKDOWN_TEST_ASSET_ROOT", root.path());
-        std::env::remove_var("JCHTOOLS_XBERG_INFERENCE_DIR");
         ComponentGuard { root, _lock: lock }
     }
 
     impl Drop for ComponentGuard {
         fn drop(&mut self) {
             std::env::remove_var("JCHTOOLS_MARKDOWN_TEST_ASSET_ROOT");
-            std::env::remove_var("JCHTOOLS_XBERG_INFERENCE_DIR");
         }
     }
 
@@ -880,17 +879,16 @@ mod tests {
         );
     }
 
-    // 覆盖 T-05：开发期环境变量可指向本地组件树（与截图 OCR 同一变量）。
+    // 覆盖 T-05：设置页保存的本地目录即组件目录（2026-10-04 起组件目录只能
+    // 经配置页保存或产品内下载，环境变量覆盖已删除）；缺媒体模型时明确指出
+    // 缺失项，不执行不完整环境。
     #[test]
-    fn media_component_env_override_points_at_local_tree() {
+    fn media_component_saved_dir_points_at_local_tree() {
         let guard = redirect_component_env();
         let external = guard.root.path().join("external-component");
-        let files = ["xberg.exe"];
         fs::create_dir_all(&external).expect("创建外部组件目录");
-        for file in files {
-            fs::write(external.join(file), b"x").expect("预置外部组件文件");
-        }
-        std::env::set_var("JCHTOOLS_XBERG_INFERENCE_DIR", &external);
+        fs::write(external.join("xberg.exe"), b"x").expect("预置外部组件文件");
+        crate::xberg_settings::save(&external).expect("经设置链保存本地组件目录");
         let resolved = media_component_dir().expect_err("外部树缺模型时必须指出缺失项");
         assert!(resolved.contains("model.int8.onnx"), "{resolved}");
     }
@@ -1304,15 +1302,14 @@ mod tests {
 
     // ── C-2（markdown 侧）：readiness 的推理包成员检查与组件目录解析同源 ──
 
-    // 覆盖 C-2（markdown 侧；XB-09 2026-10-02 修订后的存在性口径）：debug
-    // 组件目录覆盖（JCHTOOLS_XBERG_INFERENCE_DIR）下，推理组件成员检查必须
-    // 基于 resolve_xberg_component 解析出的组件目录，而非资产根相对路径。
-    // 覆盖树内全部 media 成员以桩字节（与清单摘要不同）在场：存在性口径下
-    // 必须通过——资产根下无任何组件文件，若校验仍走资产根相对路径或仍比对
-    // 摘要则必失败，一次断言同时钉住两条口径；删除成员后错误基于覆盖目录
-    // 点名缺失项。
+    // 覆盖 C-2（markdown 侧；XB-09 2026-10-02 修订后的存在性口径）：设置页
+    // 保存的组件目录下，推理组件成员检查必须基于 resolve_xberg_component
+    // 解析出的组件目录，而非资产根相对路径。覆盖树内全部 media 成员以桩字节
+    // （与清单摘要不同）在场：存在性口径下必须通过——资产根下无任何组件文件，
+    // 若校验仍走资产根相对路径或仍比对摘要则必失败，一次断言同时钉住两条口径；
+    // 删除成员后错误基于保存目录点名缺失项。
     #[test]
-    fn readiness_inference_pack_honors_component_dir_override() {
+    fn readiness_inference_pack_honors_configured_component_dir() {
         let guard = redirect_component_env();
         let external = guard.root.path().join("external-component");
         let manifest = load_manifest().expect("内置清单必须可解析");
@@ -1329,7 +1326,8 @@ mod tests {
                 .expect("创建覆盖树成员目录");
             fs::write(&target, b"replaced-engine").expect("预置桩成员（字节与清单不同）");
         }
-        std::env::set_var("JCHTOOLS_XBERG_INFERENCE_DIR", &external);
+        fs::write(external.join("xberg.exe"), b"engine").expect("预置引擎文件供设置链校验");
+        crate::xberg_settings::save(&external).expect("经设置链保存组件目录");
 
         super::readiness_inference_pack(&manifest, guard.root.path())
             .expect("桩字节成员应通过存在性检查（替换引擎免摘要校验）");
@@ -1340,7 +1338,7 @@ mod tests {
             .expect_err("缺失成员必须失败");
         assert!(
             error.contains("silero_vad.onnx") && error.contains("缺失"),
-            "错误应基于覆盖目录点名缺失成员：{error}"
+            "错误应基于保存目录点名缺失成员：{error}"
         );
     }
 

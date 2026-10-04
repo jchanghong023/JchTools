@@ -158,11 +158,12 @@ pub fn checked(response: Value) -> Result<Value, String> {
     ))
 }
 
-/// 启动时同时声明三条独立能力，不改全局配置。
+/// 启动基线只声明与引擎默认不同的文档场景差异（Markdown 输出、中文 OCR、
+/// 图片字节通道），并按模型在位声明媒体转录可用性；截图模型目录交还引擎
+/// exe 旁回退，其余等价键一律不下发（2026-10-04 零配置改造）。
 pub fn startup_config(root: &Path) -> Result<Value, String> {
     let mut config: Value = serde_json::from_str(include_str!("../resources/markdown-xberg.json"))
         .map_err(|e| e.to_string())?;
-    config["snapshot_ocr"] = json!({"models_dir": root.join("models/snapshot-ocr")});
     config["transcription"] = json!({"enabled": root.join("models/sense_voice_zh_en_ja_ko_yue_2024_07_17/model.int8.onnx").is_file()});
     Ok(config)
 }
@@ -216,18 +217,17 @@ pub fn validate_assets(root: &Path, scenario: &str) -> Result<(), String> {
 mod tests {
     use super::*;
 
-    // 覆盖 T-13/T-14：共享 worker 必须渲染 Markdown，否则 PPTX 图片占位和
-    // 跟随占位的 OCR 正文会被纯文本模式吞掉，得到被误报成功的空产物。
+    // 覆盖 T-13（2026-10-04 零配置改造）：启动基线只携带与引擎默认不同的
+    // 关键差异——Markdown 输出、中文 OCR、图片字节通道；等价键交还引擎默认，
+    // 截图模型目录交还 exe 旁回退。
     #[test]
-    fn document_startup_uses_markdown_and_keeps_image_ocr() {
+    fn document_startup_baseline_pins_only_engine_differences() {
         let root = tempfile::tempdir().expect("创建隔离运行目录");
         let config = startup_config(root.path()).expect("生成共享配置");
         assert_eq!(config["output_format"], "markdown");
-        assert_eq!(config["images"]["extract_images"], true);
-        assert_eq!(config["images"]["inject_placeholders"], true);
-        assert_eq!(config["images"]["run_ocr_on_images"], true);
-        assert_eq!(config["images"]["append_ocr_text"], true);
+        assert_eq!(config["ocr"]["language"][0], "ch");
         assert_eq!(config["images"]["include_data_base64"], true);
+        assert!(config.get("snapshot_ocr").is_none());
     }
 
     #[test]

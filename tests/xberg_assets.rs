@@ -125,8 +125,8 @@ fn validate_assets_presence_only_accepts_replaced_engine_files() {
     );
 }
 
-// 覆盖 XB-16：启动配置一次声明三个场景——截图模型目录指向共享运行目录，
-// 媒体转录可用性由 SenseVoice 模型在位决定，文档配置来自内置基线。
+// 覆盖 XB-16：启动配置声明文档基线与媒体转录可用性；截图模型目录交还引擎
+// exe 旁回退（同一共享运行目录布局），媒体可用性由 SenseVoice 模型在位决定。
 #[test]
 fn startup_config_declares_scenario_models_and_media_availability() {
     let temp = tempfile::tempdir().unwrap();
@@ -136,10 +136,9 @@ fn startup_config_declares_scenario_models_and_media_availability() {
         config.get("ocr").is_some(),
         "文档场景配置须来自内置基线（markdown-xberg.json）"
     );
-    assert_eq!(
-        config["snapshot_ocr"]["models_dir"].as_str(),
-        root.join("models/snapshot-ocr").to_str(),
-        "截图模型目录须指向共享运行目录内"
+    assert!(
+        config.get("snapshot_ocr").is_none(),
+        "截图模型目录交还引擎 exe 旁回退（同一共享运行目录布局）"
     );
     assert_eq!(config["transcription"]["enabled"], false);
 

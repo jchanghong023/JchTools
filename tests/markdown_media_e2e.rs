@@ -5,9 +5,11 @@
 //! 断言转录正文与结构，不以「模型加载成功/程序未崩溃」代替结果断言。
 //!
 //! 运行前置（显式提供，测试自身不联网、不合成）：
-//! - `JCHTOOLS_XBERG_INFERENCE_DIR`：完整的 Xberg 推理组件目录（xberg.exe +
-//!   SenseVoice/VAD 模型 + sherpa-onnx/FFmpeg DLL，见 XB-10）。仅显式 test-hooks 构建
-//!   生效（与 `src/markdown_assets.rs` 的解析规则一致）。
+//! - `JCHTOOLS_MEDIA_E2E_COMPONENT_DIR`：完整的 Xberg 推理组件目录（xberg.exe +
+//!   SenseVoice/VAD 模型 + sherpa-onnx/FFmpeg DLL，见 XB-10）。测试自身把它经
+//!   `xberg_settings::save` 存入隔离临时状态目录——组件目录不再有任何环境变量
+//!   覆盖（2026-10-04 删除 `JCHTOOLS_XBERG_INFERENCE_DIR`），只能经设置页保存
+//!   或产品内下载，本测试走的正是同一条设置链。
 //! - `JCHTOOLS_MEDIA_E2E_INPUT`：待转录的合成媒体文件（MP4/M4A，公开合成，
 //!   不含业务内容，T-26）。
 //! - `JCHTOOLS_MEDIA_E2E_EXPECT_TEXT`：期望在转录正文中出现的文本片段
@@ -16,6 +18,7 @@
 //! 运行：`cargo test --features test-hooks --test markdown_media_e2e -- --ignored`。
 
 use std::path::PathBuf;
+use std::sync::{Mutex, MutexGuard};
 
 fn env_required(name: &str) -> String {
     std::env::var(name).unwrap_or_else(|_| {
@@ -23,11 +26,47 @@ fn env_required(name: &str) -> String {
     })
 }
 
+/// `JCHTOOLS_TEST_STATE_DIR` 是进程级环境变量，两个门控用例可能并行运行，
+/// 布置隔离状态目录必须串行。
+static STATE_DIR_LOCK: Mutex<()> = Mutex::new(());
+
+struct ComponentSettings {
+    /// 泄漏以保住状态目录存活到进程结束（TempDir 会在 drop 时删除目录，
+    /// 而常驻引擎/SQLite 都位于其中）。
+    _state: &'static tempfile::TempDir,
+    _lock: MutexGuard<'static, ()>,
+}
+
+/// 把环境提供的完整组件目录经真实设置链（SQLite 保存）接入隔离状态目录；
+/// 生产代码不读取任何组件目录环境变量。
+fn configure_component_via_settings() -> ComponentSettings {
+    let lock = STATE_DIR_LOCK
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let component = PathBuf::from(env_required("JCHTOOLS_MEDIA_E2E_COMPONENT_DIR"));
+    assert!(
+        component.is_absolute() && component.join("xberg.exe").is_file(),
+        "组件目录必须是含 xberg.exe 的绝对路径：{}",
+        component.display()
+    );
+    let state = Box::leak(Box::new(
+        tempfile::tempdir().unwrap_or_else(|error| panic!("创建隔离状态目录失败：{error}")),
+    ));
+    std::env::set_var("JCHTOOLS_TEST_STATE_DIR", state.path());
+    jchtools::xberg_settings::save(&component)
+        .unwrap_or_else(|error| panic!("经设置链保存组件目录失败：{error}"));
+    ComponentSettings {
+        _state: state,
+        _lock: lock,
+    }
+}
+
 // 覆盖 XB-02/T-19/T-20：真实 Xberg 推理组件上转录合成媒体，断言 SV-06 结构
 // 与期望文本命中；并断言第二文件复用常驻进程语义由 e2e 接缝外层承载。
 #[test]
 #[ignore = "Requires real Xberg inference components and a synthetic media file (env-provided)"]
 fn real_component_transcribe_returns_structured_markdown() {
+    let _settings = configure_component_via_settings();
     let input = PathBuf::from(env_required("JCHTOOLS_MEDIA_E2E_INPUT"));
     let expected_raw = env_required("JCHTOOLS_MEDIA_E2E_EXPECT_TEXT");
     assert!(input.is_file(), "输入媒体不存在：{}", input.display());
@@ -69,6 +108,7 @@ fn real_component_transcribe_returns_structured_markdown() {
 #[test]
 #[ignore = "Requires real Xberg inference components and a trackless synthetic media file"]
 fn real_component_trackless_media_reports_no_audio() {
+    let _settings = configure_component_via_settings();
     let input = PathBuf::from(env_required("JCHTOOLS_MEDIA_E2E_INPUT"));
     assert!(input.is_file(), "输入媒体不存在：{}", input.display());
     let markdown = jchtools::markdown::e2e_convert_media(&input, 600)

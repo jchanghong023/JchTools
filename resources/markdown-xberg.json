@@ -1,37 +1,9 @@
 {
  "output_format": "markdown",
- "use_layout_for_markdown": true,
  "ocr": {
-  "backend": "paddle-ocr",
-  "language": ["ch"],
-  "paddle_ocr_config": {
-   "model_version": "pp-ocrv6",
-   "model_tier": "tiny"
-  },
-  "element_config": {
-   "include_elements": true,
-   "min_confidence": 0.35
-  }
+  "language": ["ch"]
  },
  "images": {
-  "extract_images": true,
-  "run_ocr_on_images": true,
-  "ocr_text_only": false,
-  "inject_placeholders": true,
-  "include_data_base64": true,
-  "append_ocr_text": true
- },
- "security_limits": {
-  "max_nesting_depth": 1000000,
-  "max_xml_depth": 1000000,
-  "max_content_size": 268435456
- },
- "extraction_timeout_secs": 21600,
- "max_concurrent_extractions": 1,
- "acceleration": {
-  "provider": "cpu"
- },
- "concurrency": {
-  "max_threads": 12
+  "include_data_base64": true
  }
 }

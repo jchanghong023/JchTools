@@ -292,8 +292,8 @@ fn root() -> Result<PathBuf, String> {
 /// 复用组件时会写入 `<资产根>/xberg-inference/expected-tag.txt`（内容为清单
 /// tag，XB-09）；本服务读取该标记做同口径校验：目录名必须与之一致，多目录时
 /// 优先选中清单 tag 目录。标记缺失（旧安装/开发树）按「唯一子目录」解析。
-/// 测试支持构建可用 `JCHTOOLS_XBERG_INFERENCE_DIR` 覆盖到本地组件
-/// 树，与 `root()` 的覆盖同口径。
+/// 实际目录一律取应用 SQLite 保存的共享 Xberg 目录（与主程序共享解析同口径，
+/// 不提供环境变量覆盖）。
 fn xberg_component_dir(root: &Path) -> Result<PathBuf, LoadFailure> {
     let _ = root;
     crate::xberg_settings::required().map_err(LoadFailure::NotConfigured)
