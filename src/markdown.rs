@@ -200,7 +200,7 @@ pub fn run(
             index: index + 1,
             total,
         });
-        // F21/T-29：单文件预算从进入该文件起算，页数预检与转换共用同一 deadline。
+        // F21/T-29：单文件预算从进入该文件起算。
         let deadline = markdown_document::Deadline::new(Duration::from_secs(options.timeout_secs));
         let media_dir = &item.media_dir;
         let outcome = if item.is_media {
@@ -212,16 +212,10 @@ pub fn run(
                 }
             })
         } else {
-            let pages = markdown_document::page_count(&item.source, &deadline);
-            let fast = pages.is_some_and(|count| count > 200);
-            if fast {
-                events(Event::Log(format!(
-                    "{}：{} 页，快速模式关闭版面识别与图片 OCR",
-                    item.relative.display(),
-                    pages.unwrap_or_default()
-                )));
-            }
-            markdown_document::convert(&item.source, &runtime_dir, fast, media_dir, &deadline)
+            // 零配置（2026-10-04 跨仓接口改造）：不探测页数、不传 mode；页数
+            // 自动分流内化引擎，auto_mode 降级等引擎警告经 warnings 转达，
+            // 由下方 partial 语义如实呈现（T-18 界面披露义务随之满足）。
+            markdown_document::convert(&item.source, &runtime_dir, media_dir, &deadline)
         };
         let outcome = outcome.and_then(|document| {
             write_new_markdown(

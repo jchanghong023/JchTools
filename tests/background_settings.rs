@@ -197,7 +197,6 @@ fn broker_survives_client_exit_and_obeys_explicit_stop() {
                 jchtools::markdown_document::convert(
                     &document_root.join("long.txt"),
                     &document_root,
-                    false,
                     "x_media",
                     &jchtools::markdown_document::Deadline::new(Duration::from_secs(30)),
                 )

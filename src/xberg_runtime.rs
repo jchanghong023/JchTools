@@ -99,7 +99,6 @@ pub fn request(
         validate_capabilities(
             &capabilities,
             request["command"].as_str().unwrap_or_default(),
-            request["mode"] == "fast",
         )?;
     }
     let timeout = timeout.saturating_sub(started.elapsed());
@@ -130,7 +129,7 @@ pub fn request(
     }
 }
 
-fn validate_capabilities(capabilities: &Value, command: &str, fast: bool) -> Result<(), String> {
+fn validate_capabilities(capabilities: &Value, command: &str) -> Result<(), String> {
     let supports = |name: &str| {
         capabilities["commands"]
             .as_array()
@@ -144,13 +143,6 @@ fn validate_capabilities(capabilities: &Value, command: &str, fast: bool) -> Res
         || !supports(command)
     {
         return Err("Xberg 共享接口阻塞：需要协议 v2、跨场景并发、请求级取消和超时；当前引擎不满足，未提交推理".into());
-    }
-    if fast
-        && !capabilities["extract_modes"]
-            .as_array()
-            .is_some_and(|modes| modes.iter().any(|mode| mode == "fast"))
-    {
-        return Err("Xberg 共享接口阻塞：不支持请求级快速模式，未改用常规模式".into());
     }
     Ok(())
 }
@@ -166,7 +158,7 @@ pub fn checked(response: Value) -> Result<Value, String> {
     ))
 }
 
-/// 启动时同时声明三条独立能力，文件级快速模式由请求选择，不改全局配置。
+/// 启动时同时声明三条独立能力，不改全局配置。
 pub fn startup_config(root: &Path) -> Result<Value, String> {
     let mut config: Value = serde_json::from_str(include_str!("../resources/markdown-xberg.json"))
         .map_err(|e| e.to_string())?;
@@ -244,7 +236,7 @@ mod tests {
             "ok": true,
             "commands": ["extract", "ocr_snapshot", "cancel"]
         });
-        let error = validate_capabilities(&legacy, "extract", false)
+        let error = validate_capabilities(&legacy, "extract")
             .expect_err("缺少能力握手字段不得按旧成员清单放行");
         assert!(error.contains("协议 v2"));
     }

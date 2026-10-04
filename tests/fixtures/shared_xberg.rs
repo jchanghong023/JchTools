@@ -14,9 +14,6 @@ fn main() {
     let pending = Arc::new(Mutex::new(HashMap::<String, Arc<AtomicBool>>::new()));
     for line in io::stdin().lock().lines() {
         let line = line.unwrap(); let id = field(&line, "id"); let command = field(&line, "command");
-        if command == "extract" && line.contains("nofast.txt") {
-            writeln!(OpenOptions::new().create(true).append(true).open("nofast-modes.txt").unwrap(), "{}", field(&line, "mode")).unwrap();
-        }
         let output = output.clone();
         let flag = Arc::new(AtomicBool::new(false));
         if command == "cancel" {
@@ -40,15 +37,6 @@ fn main() {
             }
             let payload = match command.as_str() {
                 "extract" => {
-                    // T-18 回归注入：对 nofast 请求拒绝 fast 模式（复现引擎能力
-                    // 清单声称支持 fast、实际 extract 拒绝的不一致场景）。
-                    if line.contains("nofast") && line.contains("\"mode\":\"fast\"") {
-                        let mut out = output.lock().unwrap();
-                        writeln!(out, "{{\"id\":\"{id}\",\"ok\":false,\"error_kind\":\"invalid_request\",\"error\":\"unsupported mode 'fast': only 'normal' is supported\"}}").unwrap();
-                        out.flush().unwrap();
-                        pending.lock().unwrap().remove(&id);
-                        return;
-                    }
                     // T-23 回归注入：写一行非法 JSON 后照常运行，复现「通信断裂
                     // 但引擎进程存活」的缺陷现场（生产：响应超消息上限）。
                     if line.contains("corrupt") {
@@ -58,7 +46,9 @@ fn main() {
                         pending.lock().unwrap().remove(&id);
                         return;
                     }
-                    "\"document\":{\"content\":\"document\"}".to_owned()
+                    // 2026-10-04 协议：document.content 为引擎最终 Markdown，
+                    // warnings 恒在；images 可缺席（空数组为超集情形）。
+                    "\"document\":{\"content\":\"document\",\"images\":[]},\"warnings\":[]".to_owned()
                 }
                 "ocr_snapshot" => "\"text\":\"截图结果\",\"records\":1".into(),
                 "transcribe" => "\"markdown\":\"media\"".into(),

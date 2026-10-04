@@ -224,12 +224,11 @@ fn documents_reuse_process_and_snapshot_finishes_during_document() {
         let result = markdown_document::convert(
             &root.join("short.txt"),
             root,
-            false,
             "x_media",
             &Deadline::new(Duration::from_secs(30)),
         )
         .unwrap();
-        assert_eq!(result.markdown, "document\n");
+        assert_eq!(result.markdown, "document");
     }
     assert_eq!(
         std::fs::read_to_string(root.join("starts.txt"))
@@ -246,7 +245,6 @@ fn documents_reuse_process_and_snapshot_finishes_during_document() {
         markdown_document::convert(
             &directory.join("long.txt"),
             &directory,
-            true,
             "x_media",
             &Deadline::new(Duration::from_secs(30)),
         )
@@ -458,7 +456,6 @@ fn broken_engine_is_replaced_and_batch_continues() {
     let first = markdown_document::convert(
         &root.join("corrupt.txt"),
         root,
-        false,
         "x_media",
         &Deadline::new(Duration::from_secs(60)),
     );
@@ -467,60 +464,11 @@ fn broken_engine_is_replaced_and_batch_continues() {
     let second = markdown_document::convert(
         &root.join("short.txt"),
         root,
-        false,
         "x_media",
         &Deadline::new(Duration::from_secs(60)),
     )
     .unwrap_or_else(|error| panic!("T-23 连坐：断裂后下一个文件失败：{error}"));
-    assert_eq!(second.markdown, "document\n");
-}
-
-/// 覆盖 T-18/T-24：fast 被拒绝时明确报告单文件失败，不能暗中执行高开销
-/// 常规模式并把结果标成快速模式；其他文件仍可继续使用同一个共享引擎。
-#[test]
-fn fast_mode_rejection_is_reported_without_normal_fallback() {
-    common::ensure_child_reaper();
-    let _session = common::session_lock();
-    common::cleanup_stray_engines();
-    let temp = tempfile::tempdir().unwrap();
-    let root = temp.path();
-    prepare(root);
-    std::fs::write(root.join("nofast.txt"), "document").unwrap();
-    let state = xberg_runtime::request(
-        root,
-        json!({"command":"snapshot_state"}),
-        Duration::from_secs(15),
-        &AtomicBool::new(false),
-    )
-    .unwrap();
-    assert_eq!(state["ok"], true);
-    let _guard = SharedProcess {
-        broker_pid: state["jchtools_broker_pid"].as_u64().unwrap(),
-        engine_pid: state["jchtools_xberg_pid"].as_u64(),
-    };
-    let error = markdown_document::convert(
-        &root.join("nofast.txt"),
-        root,
-        true,
-        "x_media",
-        &Deadline::new(Duration::from_secs(60)),
-    )
-    .unwrap_err();
-    assert!(error.contains("快速模式不可用"));
-    assert!(error.contains("未改用常规模式"));
-    assert_eq!(
-        std::fs::read_to_string(root.join("nofast-modes.txt")).unwrap(),
-        "fast\n"
-    );
-    let next = markdown_document::convert(
-        &root.join("short.txt"),
-        root,
-        false,
-        "x_media",
-        &Deadline::new(Duration::from_secs(15)),
-    )
-    .unwrap();
-    assert_eq!(next.markdown, "document\n");
+    assert_eq!(second.markdown, "document");
 }
 
 /// 覆盖（孤儿回收回归；缺陷 2026-10-03 两次复现：broker 无自退条件、测试清场

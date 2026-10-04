@@ -849,12 +849,12 @@ fn fail_pending(pending: &Pending, broken: &AtomicBool) {
 
 /// 转发前剔除客户端不消费的重型字段，收窄响应体积的主要来源。
 ///
-/// Markdown 产物消费 `content`、`children`、`ocr_elements`、
-/// `processing_warnings`（markdown_document::build_final_markdown 及其告警收集），
-/// 以及 T-14（2026-10-04）起产物要保留的 `images`（`data_base64` 是图片落盘的
-/// 唯一数据通道，转发侧必须放行）；`pages`/`tables` 仍不进入产物。剔除只发生
-/// 在代理转发侧，引擎落盘缓存与 CLI 行为不受影响；嵌入子文档逐层递归处理，
-/// 路径、正文与告警保持逐字节不变。
+/// Markdown 产物消费 `content`（引擎最终 Markdown，markdown_document 零改写
+/// 采用）、`warnings`（顶层副本，恒在）以及 T-14（2026-10-04）起产物要保留的
+/// `images`（`data_base64`/`data` 是图片落盘的数据通道，转发侧必须放行）；
+/// `pages`/`tables` 仍剔除，`children`/`ocr_elements` 虽不再被文档适配器消费，
+/// 仍按原样转发。剔除只发生在代理转发侧，引擎落盘缓存与 CLI 行为不受影响；
+/// 嵌入子文档逐层递归处理，路径、正文与告警保持逐字节不变。
 fn prune_forwarded_document(mut response: Value) -> Value {
     if let Some(document) = response.get_mut("document") {
         prune_document_heavy_fields(document, 0);
