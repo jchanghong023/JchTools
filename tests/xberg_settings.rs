@@ -12,7 +12,10 @@ fn scenario_assets_and_configuration_are_independent() {
         root.path().join("models/snapshot-ocr").to_str().unwrap()
     );
     assert_eq!(config["transcription"]["enabled"], false);
-    assert_eq!(config["disable_ocr"], false);
+    // T-13（2026-10-04 确认）：调参细节交还引擎默认，顶层 disable_ocr 不再下发；
+    // 文档 OCR 保持启用改由场景配置断言。
+    assert_eq!(config["ocr"]["backend"], "paddle-ocr");
+    assert_eq!(config["images"]["run_ocr_on_images"], true);
     for scenario in ["document", "snapshot", "media"] {
         assert!(asset_for_scenario("xberg.exe", scenario));
         assert_eq!(

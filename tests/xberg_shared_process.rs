@@ -225,6 +225,7 @@ fn documents_reuse_process_and_snapshot_finishes_during_document() {
             &root.join("short.txt"),
             root,
             false,
+            "x_media",
             &Deadline::new(Duration::from_secs(30)),
         )
         .unwrap();
@@ -246,6 +247,7 @@ fn documents_reuse_process_and_snapshot_finishes_during_document() {
             &directory.join("long.txt"),
             &directory,
             true,
+            "x_media",
             &Deadline::new(Duration::from_secs(30)),
         )
     });
@@ -378,6 +380,7 @@ fn broken_engine_is_replaced_and_batch_continues() {
         &root.join("corrupt.txt"),
         root,
         false,
+        "x_media",
         &Deadline::new(Duration::from_secs(60)),
     );
     assert!(first.is_err(), "坏响应必须让该文件失败：{first:?}");
@@ -386,6 +389,7 @@ fn broken_engine_is_replaced_and_batch_continues() {
         &root.join("short.txt"),
         root,
         false,
+        "x_media",
         &Deadline::new(Duration::from_secs(60)),
     )
     .unwrap_or_else(|error| panic!("T-23 连坐：断裂后下一个文件失败：{error}"));
@@ -409,6 +413,7 @@ fn fast_mode_rejection_falls_back_to_normal() {
         &root.join("nofast.txt"),
         root,
         true,
+        "x_media",
         &Deadline::new(Duration::from_secs(60)),
     )
     .unwrap_or_else(|error| panic!("快速模式被拒后必须按常规模式成功：{error}"));

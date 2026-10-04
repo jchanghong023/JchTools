@@ -12,13 +12,7 @@ use std::{
 };
 
 #[cfg(test)]
-use std::{
-    io::{self, BufRead, BufReader},
-    process::{Command, Stdio},
-    sync::mpsc::{self, Receiver, RecvTimeoutError},
-    thread,
-    time::Instant,
-};
+use std::process::Command;
 
 use crate::{fsutil, markdown_assets, markdown_document};
 
@@ -189,11 +183,13 @@ pub fn run(
         });
         // F21/T-29：单文件预算从进入该文件起算，页数预检与转换共用同一 deadline。
         let deadline = markdown_document::Deadline::new(Duration::from_secs(options.timeout_secs));
+        let media_dir = media_dir_name(&output_root, &item.target);
         let outcome = if item.is_media {
             convert_media(&item.source, &deadline).map(|markdown| {
                 markdown_document::DocumentOutput {
                     markdown,
                     warnings: Vec::new(),
+                    media: Vec::new(),
                 }
             })
         } else {
@@ -206,10 +202,15 @@ pub fn run(
                     pages.unwrap_or_default()
                 )));
             }
-            markdown_document::convert(&item.source, &runtime_dir, fast, &deadline)
+            markdown_document::convert(&item.source, &runtime_dir, fast, &media_dir, &deadline)
         };
         let outcome = outcome.and_then(|document| {
-            write_new_markdown(&output_root, &item.target, &document.markdown)?;
+            write_new_markdown(
+                &output_root,
+                &item.target,
+                &document.markdown,
+                &document.media,
+            )?;
             Ok(document.warnings)
         });
         match outcome {
@@ -739,8 +740,42 @@ fn compare_original(left: &OsStr, right: &OsStr) -> Ordering {
     left.cmp(right)
 }
 
-fn write_new_markdown(output_root: &Path, target: &Path, content: &str) -> Result<(), String> {
+/// T-14：媒体目录名 = 产物主干（空白折叠为下划线，去掉尾部点/空格）+ `_media`。
+/// 与输出目录内的普通文件同名（S-01 占用）时追加序号让路；同名目录视为本任务
+/// 可复用目标（重跑覆盖本任务同名图片），不算占用。
+fn media_dir_name(output_root: &Path, target: &Path) -> String {
+    let stem = target
+        .file_stem()
+        .and_then(|stem| stem.to_str())
+        .unwrap_or("media");
+    let mut base = stem.split_whitespace().collect::<Vec<_>>().join("_");
+    base = base.trim_end_matches(['.', ' ']).to_string();
+    if base.is_empty() {
+        base = "media".to_string();
+    }
+    let mut candidate = format!("{base}_media");
+    let mut sequence = 1u32;
+    while fs::symlink_metadata(output_root.join(&candidate))
+        .is_ok_and(|metadata| metadata.is_file())
+    {
+        sequence += 1;
+        candidate = format!("{base}_{sequence}_media");
+    }
+    candidate
+}
+
+fn write_new_markdown(
+    output_root: &Path,
+    target: &Path,
+    content: &str,
+    media: &[markdown_document::MediaFile],
+) -> Result<(), String> {
     let parent = target.parent().ok_or_else(|| "结果目录无效".to_string())?;
+    // T-12 保险丝：扫描已跳过既有结果，这里目标再出现属并发/外部改动——
+    // 在动任何 media 文件之前直接拒绝，避免「md 旧、图新」的错位组合。
+    if fs::symlink_metadata(target).is_ok() {
+        return Err("无法提交新结果（已有结果不会覆盖）：目标已存在".to_string());
+    }
     let relative_parent = parent
         .strip_prefix(output_root)
         .map_err(|e| format!("结果不在输出目录内：{e}"))?;
@@ -760,6 +795,35 @@ fn write_new_markdown(output_root: &Path, target: &Path, content: &str) -> Resul
         if fsutil::is_link(&metadata) || !metadata.is_dir() {
             return Err(format!("输出路径不是普通目录：{}", current.display()));
         }
+    }
+    // T-14：先落图片（本次任务的未提交材料），md 最后以不覆盖改名提交——
+    // md 在场即代表 media 已完整（T-25：不留半成品）；中途失败回滚本次已写
+    // 图片并删除空媒体目录，不触碰既有文件。
+    let mut created: Vec<std::path::PathBuf> = Vec::new();
+    let media_result = (|| -> Result<(), String> {
+        for file in media {
+            let destination = parent.join(&file.relative);
+            if let Some(dir) = destination.parent() {
+                fs::create_dir_all(dir)
+                    .map_err(|e| format!("无法创建媒体目录 {}：{e}", dir.display()))?;
+            }
+            fs::write(&destination, &file.bytes)
+                .map_err(|e| format!("无法写入图片 {}：{e}", destination.display()))?;
+            created.push(destination);
+        }
+        Ok(())
+    })();
+    if let Err(error) = media_result {
+        for path in created.iter().rev() {
+            let _ = fs::remove_file(path);
+        }
+        // 只删本次的媒体目录（relative 首段），且仅在为空时删得掉——不碰输出根。
+        if let Some(file) = media.first() {
+            if let Some((dir, _name)) = file.relative.rsplit_once('/') {
+                let _ = fs::remove_dir(parent.join(dir));
+            }
+        }
+        return Err(error);
     }
     let temp = parent.join(format!(".jch-markdown-{}.tmp", uuid::Uuid::new_v4()));
     let mut file = OpenOptions::new()
@@ -781,436 +845,19 @@ fn write_new_markdown(output_root: &Path, target: &Path, content: &str) -> Resul
         Ok(())
     })();
     let _ = fs::remove_file(&temp);
+    if write_result.is_err() {
+        // 提交失败（含目标被外部占用的保险丝）：回滚本次已写图片并删除空
+        // 媒体目录，不把无主媒体留给旧结果（T-25）。
+        for path in created.iter().rev() {
+            let _ = fs::remove_file(path);
+        }
+        if let Some(file) = media.first() {
+            if let Some((dir, _name)) = file.relative.rsplit_once('/') {
+                let _ = fs::remove_dir(parent.join(dir));
+            }
+        }
+    }
     write_result
-}
-
-/// 批内常驻 Xberg 转录工作进程的一次请求失败分类（T-24 要求可区分）。
-#[derive(Debug)]
-#[cfg(test)]
-enum TranscribeFailure {
-    /// 单文件失败（如解码失败、无响应载荷）：进程存活，批次继续复用同一进程。
-    PerFile(String),
-    /// 进程意外退出或协议破坏：终结整组进程并丢弃，下一文件重启新进程。
-    WorkerLost(String),
-    /// 单文件预算耗尽（T-29）：终结整组进程，该文件记失败。
-    Timeout(String),
-}
-
-/// 优雅关闭的有界等待：worker 收到 EOF 后应自行退出；超限按挂死终结。
-#[cfg(test)]
-const WORKER_EXIT_GRACE: Duration = Duration::from_secs(10);
-
-/// 增量有界行读取（B'-6/A'-1 加固，读线程不再裸用 `read_line`）：逐块读直到
-/// `\n`，只在未超限前把字节累积进返回值——失控子进程输出超长单行时不再把整行
-/// 全额分配进内存（旧实现先 `read_line` 读完整行才判 `> MAX_CAPTURE_BYTES`）。
-///
-/// 行含结尾 `\n` 时原样返回（与 `read_line` 一致，空行与 EOF 可区分）；EOF
-/// 返回已读残余（可能为空）。行字节数（含 `\n`）超过 `cap` 时返回
-/// `InvalidData` 错误，文案沿用旧口径「单次响应超过捕获上限（N 字节）」，N 为
-/// 整行实际字节数；报错前把该行剩余字节排空到 `\n`/EOF（只计数丢弃、不再
-/// 分配），保证返回后读位置仍停在行边界、后续行照常解析（协议行边界对齐，
-/// 进程与批次继续，语义与旧实现一致）。
-#[cfg(test)]
-fn read_line_capped(reader: &mut impl BufRead, cap: usize) -> io::Result<Vec<u8>> {
-    let mut total = 0usize; // 已观测行字节数（含结尾 \n 口径）
-    let mut line: Vec<u8> = Vec::new(); // 只在未超限前累积，内存上界即 cap
-    let mut oversize = false;
-    loop {
-        let available = match reader.fill_buf() {
-            Ok(available) => available,
-            Err(ref error) if error.kind() == io::ErrorKind::Interrupted => continue,
-            Err(error) => return Err(error),
-        };
-        if available.is_empty() {
-            // EOF：超限行到 EOF 仍未见到 \n 时 N 即整行精确长度（无结尾 \n）。
-            return if oversize {
-                Err(oversize_line_error(total))
-            } else {
-                Ok(line)
-            };
-        }
-        let newline = available.iter().position(|&byte| byte == b'\n');
-        let usable = newline.map_or(available.len(), |index| index + 1);
-        if !oversize && total + usable > cap {
-            oversize = true;
-            line = Vec::new(); // 立即释放已累积字节，后续只计数不分配
-        }
-        total += usable;
-        if oversize {
-            // 排空剩余字节凑齐整行精确长度（N），到行边界才报错。
-            reader.consume(usable);
-            if newline.is_some() {
-                return Err(oversize_line_error(total));
-            }
-            continue;
-        }
-        line.extend_from_slice(&available[..usable]);
-        reader.consume(usable);
-        if newline.is_some() {
-            return Ok(line);
-        }
-    }
-}
-
-/// 超限错误（B'-6）：`InvalidData` 便于读线程与一般读错误区分；文案沿用旧口径。
-#[cfg(test)]
-fn oversize_line_error(total: usize) -> io::Error {
-    io::Error::new(
-        io::ErrorKind::InvalidData,
-        format!("单次响应超过捕获上限（{total} 字节）"),
-    )
-}
-
-/// 批内常驻的 Xberg 转录工作进程（T-19/T-22，Xberg WORKER.md 协议客户端）。
-///
-/// 一个批次只付一次冷启动，文件之间进程内复用已加载的 SenseVoice 会话；调用方
-/// 严格串行地发送 `transcribe` 请求并逐请求等待恰好一行响应。进程组（含 FFmpeg
-/// 等子进程）由 [`MediaProcessJob`] 兜底：超时（T-29）或意外退出后终结整组，
-/// 批结束（含用户停止，T-23）时关 stdin 优雅关闭。
-#[cfg(test)]
-struct MediaWorker {
-    child: std::process::Child,
-    stdin: Option<std::process::ChildStdin>,
-    #[cfg(windows)]
-    job: Option<MediaProcessJob>,
-    responses: Receiver<String>,
-    reader: Option<thread::JoinHandle<()>>,
-    stderr_reader: Option<thread::JoinHandle<crate::process::ReadCapture>>,
-    /// 当前在途请求 id（读线程用于超限响应的合成错误回显）。
-    pending_id: std::sync::Arc<std::sync::atomic::AtomicU64>,
-    next_id: u64,
-}
-
-#[cfg(test)]
-impl MediaWorker {
-    /// 旧协议回归夹具的进程接缝，仅编译进测试，不用于产品路径。
-    fn spawn(command: &mut Command) -> Result<MediaWorker, String> {
-        command
-            .stdin(Stdio::piped())
-            .stdout(Stdio::piped())
-            .stderr(Stdio::piped());
-        #[cfg(windows)]
-        {
-            use std::os::windows::process::CommandExt;
-            // 0x0800_0000 = CREATE_NO_WINDOW：CUI 子进程不新建控制台黑窗
-            // （与 worker 侧 xberg spawn 同法）；子进程由 MediaProcessJob 单独收口。
-            command.creation_flags(0x0800_0000);
-        }
-        let mut child = command
-            .spawn()
-            .map_err(|e| format!("无法启动媒体转录进程：{e}"))?;
-        #[cfg(windows)]
-        let job = match MediaProcessJob::attach(&child) {
-            Ok(job) => job,
-            Err(error) => {
-                let _ = child.kill();
-                let _ = child.wait();
-                return Err(error);
-            }
-        };
-        let stdin = child
-            .stdin
-            .take()
-            .ok_or_else(|| "无法写入转录请求".to_string())?;
-        let stdout = child
-            .stdout
-            .take()
-            .ok_or_else(|| "无法读取转录结果".to_string())?;
-        let stderr = child
-            .stderr
-            .take()
-            .ok_or_else(|| "无法读取转录诊断".to_string())?;
-        // stdout 按行解析响应：后台线程经 [`read_line_capped`] 增量有界读取并
-        // 持续排空，防止子进程写管道阻塞。上限按「单行（= 单次响应）」计：常驻
-        // 进程的批次累计流量会随文件数自然超过任何总量上限，误杀健康进程；单个
-        // 响应超限按该文件失败处理（合成错误行回显当前请求 id），超长行的剩余
-        // 字节在函数内排空到行边界、不整行分配内存，进程与批次继续。读线程经
-        // 共享原子获知当前请求 id（严格串行协议下响应只属于最新请求）。
-        let (sender, responses) = mpsc::channel::<String>();
-        let pending_id = std::sync::Arc::new(std::sync::atomic::AtomicU64::new(0));
-        let reader_pending = std::sync::Arc::clone(&pending_id);
-        let reader = thread::spawn(move || {
-            let mut lines = BufReader::new(stdout);
-            loop {
-                match read_line_capped(&mut lines, crate::process::MAX_CAPTURE_BYTES) {
-                    // 空行与 EOF 的区分依赖保留结尾换行的行口径。
-                    Ok(line) if line.is_empty() => break,
-                    Ok(line) => match String::from_utf8(line) {
-                        Ok(text) => {
-                            if sender.send(text).is_err() {
-                                break;
-                            }
-                        }
-                        // 与 read_line 的 UTF-8 校验口径一致：非法字节终止读线程。
-                        Err(_) => break,
-                    },
-                    Err(error) if error.kind() == io::ErrorKind::InvalidData => {
-                        // 超限：合成错误行回显当前请求 id（该文件失败；行边界
-                        // 已在 read_line_capped 内排空对齐，进程与批次继续）。
-                        let id = reader_pending.load(std::sync::atomic::Ordering::Acquire);
-                        let oversize =
-                            format!("{{\"id\":{id},\"ok\":false,\"error\":\"{error}\"}}");
-                        if sender.send(oversize).is_err() {
-                            break;
-                        }
-                    }
-                    Err(_) => break,
-                }
-            }
-        });
-        // stderr 同样必须持续排空（诊断日志写满管道会卡死 worker）。
-        let stderr_reader = thread::spawn(move || {
-            crate::process::read_all_capped(stderr, crate::process::MAX_CAPTURE_BYTES)
-        });
-        Ok(Self {
-            child,
-            stdin: Some(stdin),
-            #[cfg(windows)]
-            job: Some(job),
-            responses,
-            reader: Some(reader),
-            stderr_reader: Some(stderr_reader),
-            pending_id,
-            next_id: 1,
-        })
-    }
-
-    /// 串行发送一个 transcribe 请求并等待恰好一行响应（严格串行，T-22）。
-    fn transcribe(
-        &mut self,
-        path: &Path,
-        deadline: &markdown_document::Deadline,
-    ) -> Result<String, TranscribeFailure> {
-        let id = self.next_id;
-        self.next_id += 1;
-        self.pending_id
-            .store(id, std::sync::atomic::Ordering::Release);
-        // T-21：只向本地子进程传本地媒体文件路径，不落盘、不联网。
-        let request = serde_json::json!({
-            "id": id,
-            "command": "transcribe",
-            "path": path.to_string_lossy(),
-        });
-        let sent = match self.stdin.as_mut() {
-            Some(stdin) => stdin
-                .write_all(request.to_string().as_bytes())
-                .and_then(|()| stdin.write_all(b"\n"))
-                .and_then(|()| stdin.flush()),
-            None => Err(std::io::Error::new(
-                std::io::ErrorKind::BrokenPipe,
-                "stdin 已关闭",
-            )),
-        };
-        if let Err(error) = sent {
-            return Err(TranscribeFailure::WorkerLost(format!(
-                "无法向媒体转录进程发送请求：{error}"
-            )));
-        }
-        let line = self.wait_response(id, deadline)?;
-        Self::parse_response(id, &line)
-    }
-
-    /// 等待本请求的响应行；预算耗尽按超时（T-29），进程退出按意外丢失。
-    fn wait_response(
-        &mut self,
-        id: u64,
-        deadline: &markdown_document::Deadline,
-    ) -> Result<String, TranscribeFailure> {
-        loop {
-            let remaining = deadline.remaining();
-            if remaining.is_zero() {
-                return Err(TranscribeFailure::Timeout(format!(
-                    "媒体转换超时（{} 秒）",
-                    deadline.total().as_secs()
-                )));
-            }
-            match self.responses.recv_timeout(remaining) {
-                Ok(line) => {
-                    let echoed = serde_json::from_str::<serde_json::Value>(&line)
-                        .ok()
-                        .and_then(|value| value.get("id").cloned())
-                        .is_some_and(|echoed| echoed == id);
-                    if !echoed {
-                        return Err(TranscribeFailure::WorkerLost(format!(
-                            "媒体转录响应与请求不匹配：{}",
-                            line.trim()
-                        )));
-                    }
-                    return Ok(line);
-                }
-                Err(RecvTimeoutError::Timeout) => {}
-                Err(RecvTimeoutError::Disconnected) => {
-                    return Err(TranscribeFailure::WorkerLost(self.lost_message()));
-                }
-            }
-        }
-    }
-
-    /// 解析响应行：成功取 markdown 字段透传（T-20 结构由 Xberg 生成，
-    /// has_audio=false 的说明性 markdown 同样透传）；失败按类别上抛。
-    fn parse_response(id: u64, line: &str) -> Result<String, TranscribeFailure> {
-        let value: serde_json::Value = serde_json::from_str(line).map_err(|error| {
-            TranscribeFailure::WorkerLost(format!("媒体转录响应格式错误：{error}"))
-        })?;
-        if !value
-            .get("ok")
-            .and_then(serde_json::Value::as_bool)
-            .unwrap_or(false)
-        {
-            let message = value
-                .get("error")
-                .and_then(serde_json::Value::as_str)
-                .unwrap_or("未知错误");
-            return Err(TranscribeFailure::PerFile(format!(
-                "媒体转换失败：{message}"
-            )));
-        }
-        value
-            .get("markdown")
-            .and_then(serde_json::Value::as_str)
-            .map(str::to_owned)
-            .ok_or_else(|| {
-                TranscribeFailure::WorkerLost(format!("媒体转录响应缺少 Markdown（id {id}）"))
-            })
-    }
-
-    /// 进程意外丢失时的诊断消息：携带退出状态与 stderr 尾部（不回传正文）。
-    fn lost_message(&mut self) -> String {
-        let status = self.child.try_wait().ok().flatten();
-        let mut message = match status {
-            Some(status) => format!("媒体转录进程意外退出（{status}）"),
-            None => "媒体转录进程意外退出".to_string(),
-        };
-        if let Some(handle) = self.stderr_reader.take() {
-            if let Some(captured) =
-                crate::process::join_with_deadline(handle, crate::process::PIPE_DRAIN_GRACE)
-            {
-                let tail = String::from_utf8_lossy(&captured.data);
-                if let Some(suffix) = stderr_tail_for_message(&tail) {
-                    message.push_str(&suffix);
-                }
-            }
-        }
-        message
-    }
-
-    /// 立即终结整组进程并回收读线程（超时/协议破坏后调用，T-24/T-29）。
-    fn terminate(&mut self) {
-        self.stdin.take();
-        #[cfg(windows)]
-        if let Some(job) = &self.job {
-            job.terminate();
-        }
-        let _ = self.child.kill();
-        let _ = self.child.wait();
-        self.reap_readers();
-    }
-
-    /// 读线程限时收尾：孙进程持管道写端时超限放弃，不永久阻塞宿主（F21）。
-    fn reap_readers(&mut self) {
-        if let Some(handle) = self.reader.take() {
-            let _ = crate::process::join_with_deadline(handle, crate::process::PIPE_DRAIN_GRACE);
-        }
-        if let Some(handle) = self.stderr_reader.take() {
-            let _ = crate::process::join_with_deadline(handle, crate::process::PIPE_DRAIN_GRACE);
-        }
-    }
-}
-
-/// 进程意外丢失时 stderr 的诊断后缀（T-24）：空尾部返回 `None`；非空时取尾部
-/// 最多 300 个**字符**（多字节 UTF-8 不得按字节切片，否则起点落在字符内部时
-/// panic 杀死转换线程，A2），发生截断时以「：…」衔接并从尾部首个空白之后
-/// 取起，未截断时仅以「：」衔接。
-#[cfg(test)]
-fn stderr_tail_for_message(stderr_text: &str) -> Option<String> {
-    let tail = stderr_text.trim();
-    if tail.is_empty() {
-        return None;
-    }
-    const TAIL_CHARS: usize = 300;
-    let total = tail.chars().count();
-    if total <= TAIL_CHARS {
-        return Some(format!("：{}", tail.trim_start()));
-    }
-    let mut suffix: String = tail.chars().skip(total - TAIL_CHARS).collect();
-    // 从首个空白之后取起，避免把截断的半个词当开头。
-    if let Some(position) = suffix.find(char::is_whitespace) {
-        suffix.drain(..position);
-    }
-    Some(format!("：…{}", suffix.trim_start()))
-}
-
-/// 组装媒体转录进程的环境变量（T-21）：组件目录内模型与运行库指针 + 与文档
-/// 转换路径（[`markdown_document::apply_offline_environment`]）同口径的纯开关型
-/// 离线变量（XB-04：两侧同为 xberg.exe worker 子命令，离线口径必须一致，防止
-/// worker 内部 HF hub 回退联网）。不设 HF_HOME/HF_HUB_CACHE 等路径变量——媒体
-/// 组件目录结构与文档转换组件不同，不引入额外路径假设。唯一例外是
-/// `XBERG_PERF_LOG_DIR`（B'-8）：把组件 perf-tracing feature 的日志目录固定到
-/// 系统临时目录（与媒体转录临时文件同口径），封死其向当前工作目录创建
-/// `logs/perf.log.*` 的唯一主动写文件路径；该变量不是离线开关、不影响 XB-04
-/// 口径，且仅当组件编入 perf feature 才生效，未编入时被无害忽略。
-#[cfg(test)]
-fn media_worker_environment(root: &Path) -> Vec<(String, String)> {
-    let path_value = |sub: &str| root.join(sub).to_string_lossy().into_owned();
-    [
-        ("XBERG_SENSEVOICE_MODEL_DIR", path_value("models")),
-        ("XBERG_SHERPA_DLL_DIR", path_value("sherpa-onnx")),
-        ("XBERG_FFMPEG_DLL_DIR", path_value("ffmpeg")),
-        (
-            "XBERG_PERF_LOG_DIR",
-            std::env::temp_dir()
-                .join("JchTools-xberg-perf")
-                .to_string_lossy()
-                .into_owned(),
-        ),
-        ("HF_HUB_OFFLINE", "1".to_string()),
-        ("HUGGINGFACE_HUB_OFFLINE", "1".to_string()),
-        ("TRANSFORMERS_OFFLINE", "1".to_string()),
-        ("HF_DATASETS_OFFLINE", "1".to_string()),
-        ("NO_COLOR", "1".to_string()),
-        ("XBERG_ORT_EP", "cpu".to_string()),
-        ("XBERG_MAX_CONCURRENT_REQUESTS", "1".to_string()),
-    ]
-    .into_iter()
-    .map(|(name, value)| (name.to_string(), value))
-    .collect()
-}
-
-#[cfg(test)]
-impl Drop for MediaWorker {
-    fn drop(&mut self) {
-        // 批结束（含用户停止，T-23）的有界优雅关闭：关 stdin 触发 worker 在
-        // EOF 后自行退出；超限按挂死终结整组进程（KILL_ON_JOB_CLOSE 再兜底）。
-        self.stdin.take();
-        let grace_end = Instant::now() + WORKER_EXIT_GRACE;
-        loop {
-            match self.child.try_wait() {
-                Ok(Some(_)) | Err(_) => break,
-                Ok(None) if Instant::now() >= grace_end => break,
-                Ok(None) => thread::sleep(Duration::from_millis(25)),
-            }
-        }
-        #[cfg(windows)]
-        if let Some(job) = &self.job {
-            job.terminate();
-        }
-        let _ = self.child.kill();
-        let _ = self.child.wait();
-        self.reap_readers();
-    }
-}
-
-/// 组件解析类错误的统一包装（B'-7）：媒体转录组件未就绪的各类错误（未配置、
-/// 不完整、版本与清单不一致、多版本无法确定——均产生自组件目录解析与在位校验）
-/// 一律补「重新初始化」指引，口径一致；单文件转换本身的失败（格式不支持、解码
-/// 失败等）产生自转录链路、不经本包装，不会被误加指引。
-#[cfg(test)]
-fn media_component_error(error: &str) -> String {
-    // 部分解析错误（版本不一致等）自带重新初始化指引，避免双重指引。
-    if error.contains("重新初始化") {
-        return error.to_string();
-    }
-    format!("媒体转录组件未就绪，请重新初始化转 Markdown 功能：{error}")
 }
 
 /// 转换一个媒体文件：验证媒体资产后，经会话共享进程请求 transcribe。
@@ -1232,40 +879,6 @@ fn convert_media(path: &Path, deadline: &markdown_document::Deadline) -> Result<
         .ok_or_else(|| "Xberg 转录响应缺少 markdown".into())
 }
 
-/// 转录一步（进程启动接缝可注入）；worker 缺失时即时启动。单测经此注入 mock
-/// 进程覆盖协议与生命周期语义（成功透传/崩溃重启/超时/优雅关闭）。
-#[cfg(test)]
-fn transcribe_with_slot(
-    worker_slot: &mut Option<MediaWorker>,
-    path: &Path,
-    deadline: &markdown_document::Deadline,
-    mut spawn: impl FnMut() -> Result<MediaWorker, String>,
-) -> Result<String, String> {
-    if worker_slot.is_none() {
-        *worker_slot = Some(spawn()?);
-    }
-    let Some(worker) = worker_slot.as_mut() else {
-        // 不变量：上一分支已确保槽位在位；防御性分支仅在不变量被破坏时到达。
-        return Err("媒体转录进程意外缺失".to_string());
-    };
-    let failure = match worker.transcribe(path, deadline) {
-        Ok(markdown) => return Ok(markdown),
-        Err(failure) => failure,
-    };
-    match failure {
-        // 逐文件失败（解码失败等）：进程存活，下一个文件继续复用（T-24）。
-        TranscribeFailure::PerFile(message) => Err(message),
-        // 超时（T-29）或进程/协议异常：终结整组进程并丢弃；该文件记失败，
-        // 下一个媒体文件自动重启新进程（T-24 隔离）。
-        TranscribeFailure::Timeout(message) | TranscribeFailure::WorkerLost(message) => {
-            if let Some(mut worker) = worker_slot.take() {
-                worker.terminate();
-            }
-            Err(message)
-        }
-    }
-}
-
 /// E2E 专用接缝（#[doc(hidden)]）：单个媒体文件的真实转录路径（组件解析 →
 /// 常驻进程 → 协议请求 → markdown）。批处理语义（T-22/T-23/T-24/T-29）由
 /// [`run`] 承载；本接缝仅供自动化验收从真实实现驱动一次完整转录。
@@ -1278,85 +891,14 @@ pub fn e2e_convert_media(path: &Path, timeout_secs: u64) -> Result<String, Strin
     convert_media(path, &deadline)
 }
 
-#[cfg(all(test, windows))]
-struct MediaProcessJob {
-    handle: windows_sys::Win32::Foundation::HANDLE,
-}
-
-#[cfg(all(test, windows))]
-impl MediaProcessJob {
-    fn attach(child: &std::process::Child) -> Result<Self, String> {
-        use std::os::windows::io::AsRawHandle;
-        use windows_sys::Win32::System::JobObjects::{
-            AssignProcessToJobObject, CreateJobObjectW, JobObjectExtendedLimitInformation,
-            SetInformationJobObject, JOBOBJECT_EXTENDED_LIMIT_INFORMATION,
-            JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE,
-        };
-
-        // SAFETY: 未命名 Job Object，不传入外部指针。
-        let handle = unsafe { CreateJobObjectW(std::ptr::null(), std::ptr::null()) };
-        if handle.is_null() {
-            return Err(format!(
-                "无法创建媒体进程组：{}",
-                std::io::Error::last_os_error()
-            ));
-        }
-        let job = Self { handle };
-        // SAFETY: 纯 C 结构；置零后只设置 KILL_ON_JOB_CLOSE 标志。
-        let mut limits: JOBOBJECT_EXTENDED_LIMIT_INFORMATION = unsafe { std::mem::zeroed() };
-        limits.BasicLimitInformation.LimitFlags = JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE;
-        // SAFETY: Job 句柄和同步调用期间的结构体指针均有效。
-        let configured = unsafe {
-            SetInformationJobObject(
-                job.handle,
-                JobObjectExtendedLimitInformation,
-                (&raw const limits).cast(),
-                u32::try_from(std::mem::size_of::<JOBOBJECT_EXTENDED_LIMIT_INFORMATION>())
-                    .map_err(|_| "媒体进程组结构大小超出范围".to_string())?,
-            )
-        };
-        if configured == 0 {
-            return Err(format!(
-                "无法配置媒体进程组：{}",
-                std::io::Error::last_os_error()
-            ));
-        }
-        // SAFETY: Child 保持有效且拥有该进程句柄，Job 句柄同样有效。
-        let assigned = unsafe { AssignProcessToJobObject(job.handle, child.as_raw_handle()) };
-        if assigned == 0 {
-            return Err(format!(
-                "无法把媒体工作进程加入进程组：{}",
-                std::io::Error::last_os_error()
-            ));
-        }
-        Ok(job)
-    }
-
-    fn terminate(&self) {
-        use windows_sys::Win32::System::JobObjects::TerminateJobObject;
-        // SAFETY: Job 句柄在本对象销毁前有效；结束组内的 worker 和 FFmpeg。
-        let _ = unsafe { TerminateJobObject(self.handle, 1) };
-    }
-}
-
-#[cfg(all(test, windows))]
-impl Drop for MediaProcessJob {
-    fn drop(&mut self) {
-        use windows_sys::Win32::Foundation::CloseHandle;
-        // SAFETY: 本对象独占 Job 句柄；KILL_ON_JOB_CLOSE 会回收残留子进程。
-        let _ = unsafe { CloseHandle(self.handle) };
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::{
-        compare_names, compare_paths, compare_paths_insensitive, media_component_error,
-        media_worker_environment, occupancy_key, parse_formats, read_line_capped,
-        run_formats_probe, scan, selected_xberg_extension, stderr_tail_for_message,
-        transcribe_with_slot, write_new_markdown, FormatGroup, MediaWorker, OccupiedIndex, Options,
+        compare_names, compare_paths, compare_paths_insensitive, media_dir_name, occupancy_key,
+        parse_formats, run_formats_probe, scan, selected_xberg_extension, write_new_markdown,
+        FormatGroup, OccupiedIndex, Options,
     };
-    use crate::markdown_document::Deadline;
+    use crate::markdown_document::MediaFile;
     use std::thread;
     use std::time::Instant;
     use std::{
@@ -1595,10 +1137,64 @@ mod tests {
         let temp = tempfile::tempdir().unwrap();
         let target = temp.path().join("a_pdf.md");
         fs::write(&target, b"old").unwrap();
-        let error = write_new_markdown(temp.path(), &target, "new").unwrap_err();
+        let error = write_new_markdown(temp.path(), &target, "new", &[]).unwrap_err();
         assert!(error.contains("已有结果不会覆盖"));
         assert_eq!(fs::read(&target).unwrap(), b"old");
         assert_eq!(fs::read_dir(temp.path()).unwrap().count(), 1);
+    }
+
+    // 覆盖 T-14/T-25：媒体文件先落盘、md 最后提交；引用的图片与 md 同批可见。
+    #[test]
+    fn media_files_written_before_markdown_commit() {
+        let temp = tempfile::tempdir().unwrap();
+        let target = temp.path().join("a_docx.md");
+        let media = vec![MediaFile {
+            relative: "a_docx_media/image_0.png".to_string(),
+            bytes: b"img".to_vec(),
+        }];
+        write_new_markdown(temp.path(), &target, "body", &media).unwrap();
+        assert_eq!(
+            fs::read(temp.path().join("a_docx_media").join("image_0.png")).unwrap(),
+            b"img"
+        );
+        assert_eq!(fs::read(&target).unwrap(), b"body");
+    }
+
+    // 覆盖 T-25：媒体写入失败时本次已写图片回滚、md 不提交，不留半成品。
+    #[test]
+    fn media_write_failure_rolls_back_and_fails_file() {
+        let temp = tempfile::tempdir().unwrap();
+        let target = temp.path().join("a_docx.md");
+        let media = vec![MediaFile {
+            relative: String::new(),
+            bytes: b"img".to_vec(),
+        }];
+        let error = write_new_markdown(temp.path(), &target, "body", &media).unwrap_err();
+        assert!(error.contains("无法写入图片"), "{error}");
+        assert!(!target.exists(), "md 不得提交");
+        assert_eq!(
+            fs::read_dir(temp.path()).unwrap().count(),
+            0,
+            "目录应回到空"
+        );
+    }
+
+    // 覆盖 T-14：媒体目录名折叠空白、避开与既有普通文件的占用（追加序号）。
+    #[test]
+    fn media_dir_name_sanitizes_and_avoids_file_occupancy() {
+        let temp = tempfile::tempdir().unwrap();
+        let target = temp.path().join("my report_docx.md");
+        assert_eq!(
+            media_dir_name(temp.path(), &target),
+            "my_report_docx_media",
+            "空白折叠为下划线"
+        );
+        fs::write(temp.path().join("my_report_docx_media"), "占用".as_bytes()).unwrap();
+        assert_eq!(
+            media_dir_name(temp.path(), &target),
+            "my_report_docx_2_media",
+            "与普通文件同名时追加序号让路"
+        );
     }
 
     // ── F21：格式清单探测必须有界、可取消，输出截断不得当完整清单 ──
@@ -1716,363 +1312,6 @@ mod tests {
         assert_eq!(selected, expected);
     }
 
-    // ── 常驻 Xberg 转录进程的协议与生命周期（mock 子进程，T-19/T-22/T-23/T-24/T-29）──
-
-    /// 编译（带缓存）并返回 mock worker 子进程的可执行文件路径。
-    fn mock_worker_exe() -> PathBuf {
-        static EXE: std::sync::OnceLock<PathBuf> = std::sync::OnceLock::new();
-        EXE.get_or_init(|| {
-            let source = Path::new(env!("CARGO_MANIFEST_DIR"))
-                .join("tests")
-                .join("fixtures")
-                .join("mock_xberg_worker.rs");
-            let output = std::env::temp_dir().join("jch-mock-xberg-worker.exe");
-            let status = std::process::Command::new("rustc")
-                .arg("--edition")
-                .arg("2021")
-                .arg("-D")
-                .arg("warnings")
-                .arg(&source)
-                .arg("-o")
-                .arg(&output)
-                .status()
-                .expect("启动 rustc 编译 mock worker 失败");
-            assert!(status.success(), "mock worker 编译失败");
-            output
-        })
-        .clone()
-    }
-
-    /// 构造注入 [`transcribe_with_slot`] 的 spawn 闭包，并统计实际启动次数。
-    fn mock_spawner(
-        mode: &'static str,
-        spawns: std::rc::Rc<std::cell::Cell<usize>>,
-    ) -> impl FnMut() -> Result<MediaWorker, String> {
-        let mut command = Command::new(mock_worker_exe());
-        command.arg(mode);
-        move || {
-            spawns.set(spawns.get() + 1);
-            MediaWorker::spawn(&mut command)
-        }
-    }
-
-    // 覆盖 T-19/T-20/T-22：成功响应按行解析并透传 markdown；批内串行复用同一
-    // 常驻进程（两个文件只启动一次），响应 id 逐请求关联。
-    #[test]
-    fn media_worker_success_passthrough_and_batch_reuse() {
-        let mut slot = None;
-        let spawns = std::rc::Rc::new(std::cell::Cell::new(0));
-        let deadline = Deadline::new(Duration::from_secs(60));
-        let first = transcribe_with_slot(
-            &mut slot,
-            Path::new("C:/m/a.mp4"),
-            &deadline,
-            mock_spawner("ok", spawns.clone()),
-        )
-        .expect("成功转录应返回 markdown");
-        assert_eq!(first, "MOCK MARKDOWN 1");
-        let second = transcribe_with_slot(&mut slot, Path::new("C:/m/b.mp4"), &deadline, || {
-            unreachable!("slot 已在位，不得重启进程")
-        })
-        .expect("第二个文件应复用同一常驻进程");
-        assert_eq!(second, "MOCK MARKDOWN 2");
-        assert_eq!(spawns.get(), 1, "批内两个文件必须复用同一常驻进程");
-    }
-
-    // 覆盖 T-20：has_audio=false 的成功响应同样透传 markdown（内含说明文本，
-    // 由 Xberg 生成；本测断言客户端不丢弃该结果）。
-    #[test]
-    fn media_worker_no_audio_markdown_passthrough() {
-        let mut slot = None;
-        let spawns = std::rc::Rc::new(std::cell::Cell::new(0));
-        let deadline = Deadline::new(Duration::from_secs(60));
-        let markdown = transcribe_with_slot(
-            &mut slot,
-            Path::new("C:/m/silent.mp4"),
-            &deadline,
-            mock_spawner("noaudio", spawns),
-        )
-        .expect("无音轨的成功响应应返回 markdown");
-        assert_eq!(markdown, "MOCK NOAUDIO MARKDOWN");
-    }
-
-    // 覆盖 T-24：单文件失败（ok:false）只让该文件失败；worker 存活，下一文件
-    // 继续复用同一进程，不重启。
-    #[test]
-    fn media_worker_per_file_failure_keeps_worker_alive() {
-        let mut slot = None;
-        let spawns = std::rc::Rc::new(std::cell::Cell::new(0));
-        let deadline = Deadline::new(Duration::from_secs(60));
-        let error = transcribe_with_slot(
-            &mut slot,
-            Path::new("C:/m/broken.mp4"),
-            &deadline,
-            mock_spawner("fail-then-ok", spawns.clone()),
-        )
-        .expect_err("解码失败必须让该文件失败");
-        assert!(
-            error.contains("媒体转换失败：mock decode failure"),
-            "错误应携带响应中的原因：{error}"
-        );
-        assert!(slot.is_some(), "逐文件失败不得丢弃常驻进程");
-        let markdown =
-            transcribe_with_slot(&mut slot, Path::new("C:/m/next.mp4"), &deadline, || {
-                unreachable!("逐文件失败后不得重启进程")
-            })
-            .expect("下一个文件应继续复用进程并成功");
-        assert_eq!(markdown, "MOCK MARKDOWN 2");
-        assert_eq!(spawns.get(), 1, "逐文件失败不得触发重启");
-    }
-
-    // 覆盖 T-24：worker 崩溃使该文件失败，下一个文件自动重启新进程。
-    #[test]
-    fn media_worker_crash_fails_file_and_restarts_for_next() {
-        let mut slot = None;
-        let spawns = std::rc::Rc::new(std::cell::Cell::new(0));
-        let deadline = Deadline::new(Duration::from_secs(60));
-        let first = transcribe_with_slot(
-            &mut slot,
-            Path::new("C:/m/a.mp4"),
-            &deadline,
-            mock_spawner("exit-after-first", spawns.clone()),
-        )
-        .expect("第一条请求应成功");
-        assert_eq!(first, "MOCK MARKDOWN 1");
-        let error = transcribe_with_slot(
-            &mut slot,
-            Path::new("C:/m/b.mp4"),
-            &deadline,
-            mock_spawner("exit-after-first", spawns.clone()),
-        )
-        .expect_err("进程崩溃必须让该文件失败");
-        assert!(
-            error.contains("意外退出") || error.contains("无法向媒体转录进程发送请求"),
-            "错误应说明进程退出或断连：{error}"
-        );
-        assert!(slot.is_none(), "崩溃后必须丢弃旧进程槽位");
-        let restarted = transcribe_with_slot(
-            &mut slot,
-            Path::new("C:/m/c.mp4"),
-            &deadline,
-            mock_spawner("exit-after-first", spawns.clone()),
-        )
-        .expect("下一个文件必须自动重启新进程并成功");
-        assert_eq!(restarted, "MOCK MARKDOWN 1");
-        // 三次请求只应启动两个进程：初始一个 + 崩溃后为下一文件重启一个。
-        assert_eq!(spawns.get(), 2, "崩溃后应为下一文件重启一次进程");
-    }
-
-    // 覆盖 T-23/T-29（F21）：单文件预算耗尽必须终结整组进程并让该文件失败，
-    // 下一文件自动重启，宿主不永久阻塞。
-    #[test]
-    fn media_worker_timeout_kills_worker_and_restarts() {
-        let mut slot = None;
-        let spawns = std::rc::Rc::new(std::cell::Cell::new(0));
-        let started = Instant::now();
-        let deadline = Deadline::new(Duration::from_millis(400));
-        let error = transcribe_with_slot(
-            &mut slot,
-            Path::new("C:/m/hang.mp4"),
-            &deadline,
-            mock_spawner("slow", spawns.clone()),
-        )
-        .expect_err("挂死的转录必须按预算超时");
-        assert!(error.contains("媒体转换超时"), "{error}");
-        assert!(slot.is_none(), "超时后必须丢弃进程槽位");
-        assert!(
-            started.elapsed() < Duration::from_secs(5),
-            "超时后应立即恢复，实际 {:?}",
-            started.elapsed()
-        );
-        let deadline = Deadline::new(Duration::from_millis(400));
-        let error = transcribe_with_slot(
-            &mut slot,
-            Path::new("C:/m/next.mp4"),
-            &deadline,
-            mock_spawner("slow", spawns.clone()),
-        )
-        .expect_err("下一文件应重启新进程并再次按预算超时");
-        assert!(error.contains("媒体转换超时"), "{error}");
-        assert_eq!(spawns.get(), 2, "超时后应为下一文件重启一次进程");
-    }
-
-    // 覆盖 T-24：协议破坏（响应行非法 JSON）按进程异常处理，该文件失败并弃用进程。
-    #[test]
-    fn media_worker_garbage_response_fails_file() {
-        let mut slot = None;
-        let spawns = std::rc::Rc::new(std::cell::Cell::new(0));
-        let deadline = Deadline::new(Duration::from_secs(60));
-        let error = transcribe_with_slot(
-            &mut slot,
-            Path::new("C:/m/a.mp4"),
-            &deadline,
-            mock_spawner("garbage", spawns),
-        )
-        .expect_err("非法响应不得当成功");
-        assert!(
-            error.contains("响应与请求不匹配") || error.contains("意外退出"),
-            "错误应说明协议异常：{error}"
-        );
-        assert!(slot.is_none(), "协议破坏后必须弃用该进程");
-    }
-
-    // 覆盖 T-24：单次响应超过捕获上限按「该文件失败」处理——进程与协议行边界
-    // 仍完好，不得按进程异常终结（批内继续复用，不重启、不重载模型）。
-    #[test]
-    fn media_worker_oversize_response_fails_file_keeps_worker() {
-        let mut slot = None;
-        let spawns = std::rc::Rc::new(std::cell::Cell::new(0));
-        let deadline = Deadline::new(Duration::from_secs(120));
-        let error = transcribe_with_slot(
-            &mut slot,
-            Path::new("C:/m/huge.mp4"),
-            &deadline,
-            mock_spawner("oversize", spawns.clone()),
-        )
-        .expect_err("超限响应不得当成功");
-        assert!(
-            error.contains("媒体转换失败") && error.contains("捕获上限"),
-            "错误应按单文件失败并说明上限：{error}"
-        );
-        assert!(slot.is_some(), "超限响应不得终结健康进程");
-        let next = transcribe_with_slot(
-            &mut slot,
-            Path::new("C:/m/next.mp4"),
-            &deadline,
-            mock_spawner("oversize", spawns.clone()),
-        )
-        .expect("下一文件应复用进程并成功");
-        assert_eq!(next, "MOCK MARKDOWN 2");
-        assert_eq!(spawns.get(), 1, "超限响应不得触发重启");
-    }
-
-    // 覆盖 T-22/T-23：批结束（或用户停止）后丢弃 slot 时必须优雅关闭——关闭
-    // stdin 让子进程收到 EOF 并自行退出（由 mock 的 EOF 标记文件证明），而非强杀。
-    #[test]
-    fn media_worker_drop_closes_stdin_for_graceful_exit() {
-        let marker_dir = tempfile::tempdir().expect("创建标记目录");
-        let marker = marker_dir.path().join("eof-marker");
-        let mut command = Command::new(mock_worker_exe());
-        command
-            .arg("ok")
-            .env("MOCK_XBERG_WORKER_EOF_MARKER", &marker);
-        let mut worker = MediaWorker::spawn(&mut command).expect("启动 mock worker");
-        let deadline = Deadline::new(Duration::from_secs(60));
-        let markdown = worker
-            .transcribe(Path::new("C:/m/a.mp4"), &deadline)
-            .expect("转录应成功");
-        assert_eq!(markdown, "MOCK MARKDOWN 1");
-        assert!(!marker.exists(), "EOF 前不得出现标记文件");
-        drop(worker);
-        let deadline = Instant::now() + Duration::from_secs(5);
-        while !marker.exists() && Instant::now() < deadline {
-            thread::sleep(Duration::from_millis(20));
-        }
-        assert!(
-            marker.exists(),
-            "丢弃 slot 必须触发 stdin EOF 并让子进程自行退出"
-        );
-    }
-
-    // ── B'-6/A'-1：stdout 读线程的增量有界行读取 ──
-
-    // 覆盖 T-24（B'-6）：正常行（含未以 \n 结尾的最后一行与 EOF 空返回）与
-    // read_line 行为一致，行内容含结尾换行原样返回（空行与 EOF 可区分）。
-    #[test]
-    fn read_line_capped_reads_normal_lines() {
-        let mut reader = std::io::Cursor::new(b"first\nsecond".to_vec());
-        assert_eq!(
-            read_line_capped(&mut reader, 64).unwrap(),
-            b"first\n".to_vec()
-        );
-        assert_eq!(
-            read_line_capped(&mut reader, 64).unwrap(),
-            b"second".to_vec()
-        );
-        assert_eq!(
-            read_line_capped(&mut reader, 64).unwrap(),
-            Vec::<u8>::new(),
-            "EOF 返回空行"
-        );
-        assert_eq!(
-            read_line_capped(&mut reader, 64).unwrap(),
-            Vec::<u8>::new(),
-            "EOF 之后继续读取仍返回空行"
-        );
-    }
-
-    // 覆盖 T-24（B'-6）：行字节数（含结尾 \n）恰好等于 cap 不算超限，与旧
-    // 「read > MAX_CAPTURE_BYTES 才失败」口径一致。
-    #[test]
-    fn read_line_capped_allows_line_exactly_at_cap() {
-        let mut input = vec![b'a'; 15];
-        input.push(b'\n');
-        let mut reader = std::io::Cursor::new(input.clone());
-        assert_eq!(
-            read_line_capped(&mut reader, 16).unwrap(),
-            input,
-            "恰好 cap 的行必须照常返回"
-        );
-        assert_eq!(
-            read_line_capped(&mut reader, 16).unwrap(),
-            Vec::<u8>::new(),
-            "随后到达 EOF"
-        );
-    }
-
-    // 覆盖 T-24（B'-6）：超限行立即返回 InvalidData 错误，错误文案沿用旧口径
-    // 并给出整行实际字节数；该行剩余字节被排空到行边界且不整行分配内存——
-    // 输入的剩余部分不被吞掉，下一行照常解析（协议行边界对齐，批次可继续）。
-    #[test]
-    fn read_line_capped_errors_on_oversize_and_keeps_line_boundary() {
-        let mut input = vec![b'x'; 20]; // 含结尾 \n 共 21 字节，超过 cap=16
-        input.push(b'\n');
-        input.extend_from_slice(b"next\n");
-        let mut reader = std::io::Cursor::new(input);
-        let error = read_line_capped(&mut reader, 16).expect_err("超限行必须报错");
-        assert_eq!(
-            error.kind(),
-            std::io::ErrorKind::InvalidData,
-            "超限必须以 InvalidData 区别于一般读错误：{error}"
-        );
-        assert!(
-            error.to_string().contains("21 字节"),
-            "错误应沿用捕获上限文案口径并给出整行字节数：{error}"
-        );
-        assert_eq!(
-            read_line_capped(&mut reader, 16).unwrap(),
-            b"next\n".to_vec(),
-            "超限后读位置必须停在行边界，剩余输入照常可读"
-        );
-    }
-
-    // 覆盖 T-21（B'-7）：组件解析类错误（未配置/不完整/版本与清单不一致/多版本）
-    // 同属「组件未就绪」，经 convert_media 的包装必须统一携带初始化指引；单文件
-    // 转换本身的失败（格式不支持、解码失败等）产生自转录链路、不经本包装，不得
-    // 被误加指引（透传语义由 media_worker_per_file_failure_keeps_worker_alive
-    // 等用例锁定）。
-    #[test]
-    fn media_component_error_unifies_reinit_guidance() {
-        for resolve_error in [
-            "Xberg 推理组件未配置：媒体转录所需的模型与运行库尚未安装",
-            "推理组件不完整：缺少 models/vad/silero_vad.onnx（组件目录 C:/x）",
-            "推理组件版本与清单不一致（安装 C:/x/v1，清单要求 v2）；请在对应功能页重新初始化以更新组件",
-            "推理组件目录存在多个版本且无清单要求的 v2；请重新初始化以更新组件",
-        ] {
-            let wrapped = media_component_error(resolve_error);
-            let already_guided = resolve_error.contains("重新初始化");
-            assert_eq!(
-                wrapped.starts_with("媒体转录组件未就绪，请重新初始化转 Markdown 功能："),
-                !already_guided,
-                "自带指引的错误不得双重包装，缺指引的必须统一口径：{wrapped}"
-            );
-            assert!(
-                wrapped.contains(resolve_error),
-                "原始错误信息（含安装目录与清单 tag）必须保留：{wrapped}"
-            );
-        }
-    }
-
     // ── F29：平铺占用名查询不随规模线性增长比较次数 ──
 
     // 覆盖 T-11（F29 性能修复，语义不变）：1 千/1 万互异目标的比较次数都近似为零，
@@ -2121,130 +1360,5 @@ mod tests {
             compares
         };
         assert_eq!(compares, 1, "大小写变体应在同桶内一次精确确认");
-    }
-
-    // ── A2：进程丢失诊断的 stderr 尾部截取必须字符安全 ──
-
-    // 覆盖 T-24（A2）：lost_message 曾按字节偏移切片，多字节 stderr 起点非
-    // UTF-8 边界时直接 panic，杀死 gui spawn 的转换线程（CONVERTER_DONE/FAIL
-    // 永不发送，GUI 永久 busy）。本例 751 字节（「错」×200 +「a」+「错」×50）：
-    // 旧实现的字节起点 451 相对中文区偏移 ≡1 (mod 3)，落在「错」内部，必然
-    // panic。注：纯「ASCII 前缀 + 连续中文」不会触发（300 恰为 3 的倍数、始终
-    // 对齐），混排内容才暴露缺陷。
-    #[test]
-    fn stderr_tail_multibyte_slice_does_not_panic() {
-        let stderr = format!("{}a{}", "错".repeat(200), "错".repeat(50));
-        let suffix = stderr_tail_for_message(&stderr).expect("非空 stderr 必须有诊断尾部");
-        assert_eq!(
-            suffix,
-            format!("：{stderr}"),
-            "251 字符未超 300 字符上限，应完整保留"
-        );
-        assert!(!suffix.contains('\u{FFFD}'), "不得出现半个字符：{suffix}");
-    }
-
-    // 覆盖 T-24（A2）：超长尾部按字符截取，最多 300 个字符，截断后从首个
-    // 空白之后取起，并以「：…」衔接。
-    #[test]
-    fn stderr_tail_caps_at_300_chars_and_drops_partial_word() {
-        let stderr = format!("模块加载失败 {}", "错".repeat(400));
-        let suffix = stderr_tail_for_message(&stderr).expect("非空 stderr 必须有诊断尾部");
-        assert!(suffix.starts_with("：…"), "截断时以省略号衔接：{suffix}");
-        let body = suffix.strip_prefix("：…").unwrap();
-        assert!(
-            body.chars().count() <= 300,
-            "尾部最多 300 个字符，实际 {}",
-            body.chars().count()
-        );
-        assert!(!body.contains('\u{FFFD}'), "不得出现半个字符：{body}");
-        assert!(
-            body.chars().all(|character| character == '错'),
-            "截断应从首个空白之后取起且只保留完整字符：{body}"
-        );
-    }
-
-    // 覆盖 T-24（A2）：截断窗口内含空白时，从尾部首个空白之后的完整词开头。
-    #[test]
-    fn stderr_tail_truncated_starts_after_first_whitespace() {
-        let stderr = format!("{} abc {}", "错".repeat(200), "错".repeat(200));
-        let suffix = stderr_tail_for_message(&stderr).expect("非空 stderr 必须有诊断尾部");
-        assert!(suffix.starts_with("：…"), "总 405 字符必然截断：{suffix}");
-        let body = suffix.strip_prefix("：…").unwrap();
-        assert!(
-            body.starts_with("abc"),
-            "截断后应从首个空白之后的完整词开头：{suffix}"
-        );
-        assert!(!body.contains('\u{FFFD}'), "不得出现半个字符：{body}");
-    }
-
-    // 覆盖 T-24（A2 守护）：短 ASCII 尾部完整保留，不截断、不加省略号。
-    #[test]
-    fn stderr_tail_short_ascii_is_kept_whole() {
-        let suffix =
-            stderr_tail_for_message("  decode failed  \n").expect("非空 stderr 必须有诊断尾部");
-        assert_eq!(suffix, "：decode failed");
-    }
-
-    // ── B-3：媒体转录进程的离线环境口径与文档转换路径一致 ──
-
-    // 覆盖 T-21/XB-04（B-3）：spawn_for_root 曾只注入三个 XBERG_* 目录指针，
-    // 缺 HF/Transformers 离线开关；若 xberg worker 内部存在 HF hub 回退即违反
-    // 离线要求。两侧同为 xberg.exe worker 子命令，口径必须与文档转换路径
-    // （markdown_document::apply_offline_environment）一致；此处只补纯开关型
-    // 变量，不引入 HF_HOME/HF_HUB_CACHE 等路径假设（媒体组件目录结构不同）。
-    #[test]
-    fn media_worker_environment_matches_document_offline_policy() {
-        let root = Path::new("C:/xberg-component");
-        let env = media_worker_environment(root);
-        let find = |key: &str| -> Option<String> {
-            env.iter()
-                .find(|(name, _)| name == key)
-                .map(|(_, value)| value.clone())
-        };
-        for key in [
-            "HF_HUB_OFFLINE",
-            "HUGGINGFACE_HUB_OFFLINE",
-            "TRANSFORMERS_OFFLINE",
-            "HF_DATASETS_OFFLINE",
-            "NO_COLOR",
-        ] {
-            assert_eq!(
-                find(key).as_deref(),
-                Some("1"),
-                "媒体转录进程缺少离线开关 {key}"
-            );
-        }
-        assert_eq!(
-            find("XBERG_ORT_EP").as_deref(),
-            Some("cpu"),
-            "媒体转录进程必须固定 CPU 推理"
-        );
-        assert_eq!(
-            find("XBERG_MAX_CONCURRENT_REQUESTS").as_deref(),
-            Some("1"),
-            "媒体转录进程必须串行处理请求"
-        );
-        // B'-8：perf 日志目录必须固定指向系统临时目录——组件若编入 perf-tracing
-        // feature 会在当前工作目录创建 logs/perf.log.*（配置发现之外唯一主动向
-        // CWD 写文件的路径），注入该变量封死；未编入时变量被无害忽略。
-        let perf_log_dir =
-            find("XBERG_PERF_LOG_DIR").unwrap_or_else(|| panic!("缺少 XBERG_PERF_LOG_DIR"));
-        assert!(
-            perf_log_dir.contains("JchTools-xberg-perf"),
-            "XBERG_PERF_LOG_DIR 应指向专用临时目录：{perf_log_dir}"
-        );
-        // 既有组件目录指针保持不变：仍指向组件目录内的模型与运行库。
-        for (key, sub) in [
-            ("XBERG_SENSEVOICE_MODEL_DIR", "models"),
-            ("XBERG_SHERPA_DLL_DIR", "sherpa-onnx"),
-            ("XBERG_FFMPEG_DLL_DIR", "ffmpeg"),
-        ] {
-            let value = find(key).unwrap_or_else(|| panic!("缺少组件目录变量 {key}"));
-            let root_name = root.file_name().unwrap().to_string_lossy();
-            assert!(
-                value.contains(root_name.as_ref()) && value.contains(sub),
-                "{key} 应指向组件目录内的 {sub}：{value}"
-            );
-        }
     }
 }

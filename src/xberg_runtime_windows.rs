@@ -503,20 +503,26 @@ fn fail_pending(pending: &Pending, broken: &AtomicBool) {
 
 /// 转发前剔除客户端不消费的重型字段，收窄响应体积的主要来源。
 ///
-/// Markdown 产物只用 `content`、`children`、`ocr_elements` 与
-/// `processing_warnings`（markdown_document::build_final_markdown 及其告警收集）；
-/// `images`/`pages`/`tables` 不进入产物，实测却占单个响应的 95% 以上体积。
-/// 剔除只发生在代理转发侧，引擎落盘缓存与 CLI 行为不受影响；嵌入子文档
-/// 逐层递归处理，路径、正文与告警保持逐字节不变。
+/// Markdown 产物消费 `content`、`children`、`ocr_elements`、
+/// `processing_warnings`（markdown_document::build_final_markdown 及其告警收集），
+/// 以及 T-14（2026-10-04）起产物要保留的 `images`（`data_base64` 是图片落盘的
+/// 唯一数据通道，转发侧必须放行）；`pages`/`tables` 仍不进入产物。剔除只发生
+/// 在代理转发侧，引擎落盘缓存与 CLI 行为不受影响；嵌入子文档逐层递归处理，
+/// 路径、正文与告警保持逐字节不变。
 fn prune_forwarded_document(mut response: Value) -> Value {
     if let Some(document) = response.get_mut("document") {
         prune_document_heavy_fields(document, 0);
+        // 临时诊断（T-14 验证用，验证后移除）：环境变量给出路径时转储转发后的
+        // document，确认图片数据是否随转发放行。
+        if let Ok(dump) = std::env::var("JCHTOOLS_DUMP_FORWARDED") {
+            let _ = std::fs::write(&dump, document.to_string().as_bytes());
+        }
     }
     response
 }
 
 fn prune_document_heavy_fields(value: &mut Value, depth: usize) {
-    // 嵌套深度与 markdown_document::MAX_CHILD_DEPTH 同量级，防御性兜底即可。
+    // 嵌套深度与引擎提取期的归档/嵌入深度上限同量级，防御性兜底即可。
     const MAX_PRUNE_DEPTH: usize = 8;
     if depth > MAX_PRUNE_DEPTH {
         return;
@@ -524,7 +530,6 @@ fn prune_document_heavy_fields(value: &mut Value, depth: usize) {
     let Some(object) = value.as_object_mut() else {
         return;
     };
-    object.remove("images");
     object.remove("pages");
     object.remove("tables");
     if let Some(children) = object.get_mut("children").and_then(Value::as_array_mut) {
@@ -940,10 +945,13 @@ mod tests {
             document["children"][0]["result"]["processing_warnings"][0]["source"],
             "ocr"
         );
-        assert!(document.get("images").is_none());
+        // T-14（2026-10-04）：images 是图片落盘的唯一数据通道，转发侧必须放行
+        //（含嵌入子文档逐层放行）；pages/tables 仍不进产物。
+        assert!(document.get("images").is_some());
+        assert_eq!(document["images"][0]["path"], "image_0.png");
+        assert!(document["children"][0]["result"].get("images").is_some());
         assert!(document.get("pages").is_none());
         assert!(document.get("tables").is_none());
-        assert!(document["children"][0]["result"].get("images").is_none());
         assert!(document["children"][0]["result"].get("pages").is_none());
         let media = prune_forwarded_document(json!({"id":"m1","ok":true,"markdown":"media"}));
         assert_eq!(media["markdown"], "media");

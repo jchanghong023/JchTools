@@ -11,7 +11,6 @@ use std::time::{Duration, Instant};
 
 use serde_json::Value;
 
-const MAX_CHILD_DEPTH: usize = 5;
 /// EOCD 搜索窗口：EOCD 固定 22 字节 + 注释最长 65535 字节（F18）。
 const EOCD_WINDOW_BYTES: u64 = 65_557;
 /// 单条目数据硬上限：docProps/app.xml 是小元数据文件，压缩或解压声明超过该值
@@ -53,6 +52,55 @@ impl Deadline {
 pub struct DocumentOutput {
     pub markdown: String,
     pub warnings: Vec<String>,
+    /// T-14：随产物写入 `<产物名>_media/` 的图片本体（相对产物目录的路径 + 字节）。
+    pub media: Vec<MediaFile>,
+}
+
+/// 一张待落盘图片：`relative` 为相对产物所在目录的路径（`<media 目录>/文件名`），
+/// 分隔符统一 `/`；字节为上游 `images[].data_base64` 的解码结果。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MediaFile {
+    pub relative: String,
+    pub bytes: Vec<u8>,
+}
+
+/// T-14 逐层媒体装配器：目录名固定为调用方给定的 `<产物主干>_media`；
+/// 主文档图片保持上游命名 `image_N.扩展名`，嵌入子文档加 `docNNN-` 前缀
+/// 防止跨文档同名碰撞。正文未引用的图片不落盘（与上游 CLI 同口径）。
+struct MediaCollector {
+    dir: String,
+    files: Vec<MediaFile>,
+    child_seq: u32,
+}
+
+impl MediaCollector {
+    fn new(dir: &str) -> Self {
+        Self {
+            dir: dir.to_string(),
+            files: Vec::new(),
+            child_seq: 0,
+        }
+    }
+
+    fn next_child_tag(&mut self) -> String {
+        self.child_seq += 1;
+        format!("doc{:03}-", self.child_seq)
+    }
+
+    /// 试装配用的空白清单（同目录、不共享文件列表与序号）：
+    /// 先往 probe 里装配，正文确定被采纳后再用 [`Self::adopt`] 并入，
+    /// 判重丢弃的重复子文档就不会留下孤儿图片。
+    fn probe(&self) -> Self {
+        Self {
+            dir: self.dir.clone(),
+            files: Vec::new(),
+            child_seq: self.child_seq,
+        }
+    }
+
+    fn adopt(&mut self, probe: Self) {
+        self.files.extend(probe.files);
+    }
 }
 
 /// Run the fixed local Xberg CLI and return the final Markdown.
@@ -69,6 +117,7 @@ pub fn convert(
     path: &Path,
     runtime_dir: &Path,
     fast: bool,
+    media_dir: &str,
     deadline: &Deadline,
 ) -> Result<DocumentOutput, String> {
     if !path.is_file() {
@@ -116,7 +165,7 @@ pub fn convert(
         Err(error) => return Err(error),
     };
     let value = serde_json::json!({"result": response["document"]});
-    let mut document = build_document_output(&value)?;
+    let mut document = build_document_output(&value, media_dir)?;
     if actual_fast {
         document.markdown = format!(
             "> 注意：大文档快速模式已启用，已关闭版面识别、图片提取和图片 OCR。\n\n{}",
@@ -608,21 +657,26 @@ fn derived_config_json(fast: bool) -> Result<String, String> {
         config["disable_ocr"] = Value::Bool(true);
         config["images"]["extract_images"] = Value::Bool(false);
         config["images"]["run_ocr_on_images"] = Value::Bool(false);
+        config["images"]["include_data_base64"] = Value::Bool(false);
         config["pdf_options"]["extract_images"] = Value::Bool(false);
         config["pdf_options"]["ocr_inline_images"] = Value::Bool(false);
     }
     serde_json::to_string(&config).map_err(|error| format!("生成 Xberg 配置失败：{error}"))
 }
 
-fn build_document_output(envelope: &Value) -> Result<DocumentOutput, String> {
-    let markdown = build_final_markdown(envelope)?;
+fn build_document_output(envelope: &Value, media_dir: &str) -> Result<DocumentOutput, String> {
+    let mut media = MediaCollector::new(media_dir);
+    let markdown = build_final_markdown(envelope, &mut media)?;
     let result = envelope
         .get("result")
         .ok_or_else(|| "Xberg JSON 缺少 result 字段".to_string())?;
     let mut warnings = Vec::new();
     collect_warnings(result, "主文档", &mut warnings);
-    collect_depth_limit_warnings(result.get("children"), &mut warnings, "主文档", 0);
-    Ok(DocumentOutput { markdown, warnings })
+    Ok(DocumentOutput {
+        markdown,
+        warnings,
+        media: media.files,
+    })
 }
 
 fn collect_warnings(document: &Value, context: &str, warnings: &mut Vec<String>) {
@@ -662,40 +716,6 @@ fn collect_warnings(document: &Value, context: &str, warnings: &mut Vec<String>)
         } else {
             warnings.push(format!("{child_context} · extraction：缺少子文档结果"));
         }
-    }
-}
-
-fn collect_depth_limit_warnings(
-    children: Option<&Value>,
-    warnings: &mut Vec<String>,
-    prefix: &str,
-    depth: usize,
-) {
-    let Some(children) = children.and_then(Value::as_array) else {
-        return;
-    };
-    for child in children {
-        let path = child
-            .get("path")
-            .and_then(Value::as_str)
-            .unwrap_or("<未知嵌入文档>");
-        let display = format!("{prefix} / {path}");
-        let Some(result) = child.get("result") else {
-            continue;
-        };
-        if depth >= MAX_CHILD_DEPTH {
-            let skipped = result
-                .get("children")
-                .and_then(Value::as_array)
-                .map_or(0, Vec::len);
-            if skipped > 0 {
-                warnings.push(format!(
-                    "{display} · extraction：嵌入内容递归深度已达到上限（{MAX_CHILD_DEPTH} 层），已跳过 {skipped} 个子文档"
-                ));
-            }
-            continue;
-        }
-        collect_depth_limit_warnings(result.get("children"), warnings, &display, depth + 1);
     }
 }
 
@@ -748,18 +768,29 @@ fn value_type_name(value: &Value) -> &'static str {
     }
 }
 
-fn build_final_markdown(envelope: &Value) -> Result<String, String> {
+fn build_final_markdown(envelope: &Value, media: &mut MediaCollector) -> Result<String, String> {
     let result = envelope
         .get("result")
         .ok_or_else(|| "Xberg JSON 缺少 result 字段".to_string())?;
     validate_result_shape(result)?;
-    let mut parts = vec![render_document_root(result)];
+    let mut root = render_document_root(result);
+    attach_media(result, &mut root, media, None);
+    let mut parts = vec![root];
     let mut seen = HashSet::new();
     if let Some(digest) = content_digest(parts[0].as_str()) {
         seen.insert(digest);
     }
     let mut children = Vec::new();
-    collect_children(result.get("children"), &mut children, &mut seen, "", 0);
+    // T-17（2026-10-04 收缩为引擎原生优先）：root 最终正文作为包含性判重基准
+    // 传入，引擎已并入宿主正文的嵌入对象不再重复分节。
+    collect_children(
+        result.get("children"),
+        &mut children,
+        &mut seen,
+        "",
+        parts[0].as_str(),
+        media,
+    );
     for (display, content) in children {
         parts.push(String::new());
         parts.push(format!("## Embedded document: {display}"));
@@ -790,11 +821,9 @@ fn collect_children(
     output: &mut Vec<(String, String)>,
     seen: &mut HashSet<String>,
     prefix: &str,
-    depth: usize,
+    root_content: &str,
+    media: &mut MediaCollector,
 ) {
-    if depth > MAX_CHILD_DEPTH {
-        return;
-    }
     let Some(children) = children.and_then(Value::as_array) else {
         return;
     };
@@ -811,26 +840,38 @@ fn collect_children(
             format!("{prefix}/{path}")
         };
         let content = render_document_root(result);
-        if is_visio_page_part(&display) {
-            if let Some(visio) = extract_visio_page_text(&content) {
-                add_unique(output, seen, display.clone(), visio);
-            }
-        } else if is_ooxml_internal_part(&display) {
-            collect_children(result.get("children"), output, seen, &display, depth + 1);
-            continue;
-        } else if is_raw_archive_dump(&content) {
+        if is_raw_archive_dump(&content) {
             add_unique(
                 output,
                 seen,
                 display.clone(),
                 format!(
-                    "Embedded archive content was not parsed by Xberg; raw archive listing omitted for {display}."
+                    "Embedded archive content was not parsed; raw archive listing omitted for {display}."
                 ),
             );
+        } else if is_contained_in_root(root_content, &content) {
+            // T-17（2026-10-04 收缩为引擎原生优先）：引擎已把该嵌入对象并入宿主
+            // 正文，不再重复分节，也不登记媒体；其子层级同随引擎原生正文，不再
+            // 递归展开。
+            continue;
         } else {
-            add_unique(output, seen, display.clone(), content);
+            let tag = media.next_child_tag();
+            let mut landed = content;
+            // 试装配:正文判重被丢弃的重复子文档不登记媒体(无孤儿文件)。
+            let mut probe = media.probe();
+            attach_media(result, &mut landed, &mut probe, Some(&tag));
+            if add_unique(output, seen, display.clone(), landed) {
+                media.adopt(probe);
+            }
         }
-        collect_children(result.get("children"), output, seen, &display, depth + 1);
+        collect_children(
+            result.get("children"),
+            output,
+            seen,
+            &display,
+            root_content,
+            media,
+        );
     }
 }
 
@@ -839,12 +880,14 @@ fn add_unique(
     seen: &mut HashSet<String>,
     display: String,
     content: String,
-) {
+) -> bool {
     if let Some(digest) = content_digest(&content) {
         if seen.insert(digest) {
             output.push((display, content));
+            return true;
         }
     }
+    false
 }
 
 fn content_digest(content: &str) -> Option<String> {
@@ -862,82 +905,19 @@ fn content_digest(content: &str) -> Option<String> {
     Some(format!("{hash:016x}"))
 }
 
-fn is_ooxml_internal_part(path: &str) -> bool {
-    let normalized_path = path.replace('\\', "/");
-    let parts = normalized_path
-        .split('/')
-        .filter(|part| !part.is_empty())
-        .collect::<Vec<_>>();
-    if parts.is_empty() || parts.contains(&"[Content_Types].xml") {
-        return true;
-    }
-    let roots = [
-        "word",
-        "ppt",
-        "xl",
-        "visio",
-        "_rels",
-        "docProps",
-        "customXml",
-        "glossary",
-    ];
-    let Some(index) = parts.iter().rposition(|part| roots.contains(part)) else {
-        return false;
-    };
-    let package = &parts[index..];
-    if package
-        .iter()
-        .any(|part| *part == "embeddings" || *part == "attachments")
-    {
-        return false;
-    }
-    if package.len() >= 2
-        && (package[1] == "media"
-            || package[1] == "diagrams"
-            || package[1] == "theme"
-            || package[1] == "_rels")
-    {
-        return true;
-    }
-    let extension = package.last().and_then(|name| {
-        name.rsplit_once('.')
-            .map(|(_, ext)| ext.to_ascii_lowercase())
-    });
-    matches!(
-        extension.as_deref(),
-        Some("xml" | "rels" | "vml" | "bin" | "dll" | "ttf" | "odttf" | "css")
-    )
-}
-
-fn is_visio_page_part(path: &str) -> bool {
-    let normalized = path.replace('\\', "/").to_ascii_lowercase();
-    normalized.contains("/visio/pages/page")
-        && normalized
-            .rsplit_once('.')
-            .is_some_and(|(_, extension)| extension.eq_ignore_ascii_case("xml"))
-}
-
-fn extract_visio_page_text(content: &str) -> Option<String> {
-    let mut in_text = false;
-    let mut values = Vec::new();
-    for raw in content.lines() {
-        let line = raw.trim();
-        if line == "#### Text" {
-            in_text = true;
-            continue;
-        }
-        if !in_text {
-            continue;
-        }
-        if line.starts_with('#') && line.chars().take(4).all(|ch| ch == '#') {
-            in_text = false;
-            continue;
-        }
-        if !line.is_empty() && !line.starts_with("#####") && !line.starts_with("######") {
-            values.push(line);
-        }
-    }
-    (!values.is_empty()).then(|| format!("```text\n{}\n```", values.join("\n")))
+/// T-17（2026-10-04 收缩为引擎原生优先）：两侧正文各做「连续空白折叠为单空格」
+/// 的归一后，判定宿主正文是否已包含子文档正文——包含即引擎已原生并入，不再
+/// 重复分节。该归一只用于判重，不改写产物正文。
+fn is_contained_in_root(root_content: &str, child_content: &str) -> bool {
+    let root_normalized = root_content
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ");
+    let child_normalized = child_content
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ");
+    !child_normalized.is_empty() && root_normalized.contains(&child_normalized)
 }
 
 fn is_raw_archive_dump(text: &str) -> bool {
@@ -998,6 +978,152 @@ fn normalize_markdown(text: &str) -> String {
         }
     }
     output.join("\n")
+}
+
+/// T-14：把本层 `images` 的图片字节登记进待落盘清单，并把该层正文中的
+/// `image_N.<扩展名>` 引用改写为指向 `<media 目录>` 的相对路径。与上游同口径：
+/// 主文档保持 `image_N.扩展名`，嵌入子文档用 `child_tag` 加前缀防碰撞；正文
+/// 未引用的图片不落盘；围栏内字面 `image_N.ext`（清单、OCR 误像）不重写；
+/// 字节缺失或损坏时保持占位引用原样（降级如实，不改写）。
+fn attach_media(
+    document: &Value,
+    content: &mut String,
+    media: &mut MediaCollector,
+    child_tag: Option<&str>,
+) {
+    let Some(images) = document.get("images").and_then(Value::as_array) else {
+        return;
+    };
+    for image in images {
+        let Some(index) = image.get("image_index").and_then(Value::as_u64) else {
+            continue;
+        };
+        let Some(format) = image.get("format").and_then(Value::as_str) else {
+            continue;
+        };
+        // 扩展名只接受字母数字：它既进文件名也进引用，异常值宁可保占位不改写。
+        if format.is_empty() || !format.bytes().all(|byte| byte.is_ascii_alphanumeric()) {
+            continue;
+        }
+        let source = format!("image_{index}.{format}");
+        let file_name = match child_tag {
+            Some(tag) => format!("{tag}{source}"),
+            None => source.clone(),
+        };
+        let target_ref = format!("{}/{file_name}", media.dir);
+        let Some(data) = image.get("data_base64").and_then(Value::as_str) else {
+            continue;
+        };
+        let Some(bytes) = decode_base64(data) else {
+            continue;
+        };
+        let rewritten = replace_outside_fences(content, &source, &target_ref);
+        if rewritten == *content {
+            // 正文未引用该图片：不落盘（上游 CLI 对未引用图片同样不入产物）。
+            continue;
+        }
+        *content = rewritten;
+        media.files.push(MediaFile {
+            relative: target_ref,
+            bytes,
+        });
+    }
+}
+
+/// 围栏感知的整词替换（T-14）：``` / ~~~ 围栏内是字面文本不重写，缩进口径与
+/// [`normalize_markdown`] 一致。引用不含空白也不跨行，因此逐行处理、行内逐段
+/// 定位；命中词之后必须是边界（下一段不得是字母数字），`ximage_0.png` 这类
+/// 粘连词不误替换。`\r` 与 `\n` 原样保留。
+fn replace_outside_fences(text: &str, from: &str, to: &str) -> String {
+    if !text.contains(from) {
+        return text.to_string();
+    }
+    let mut result = String::with_capacity(text.len());
+    let mut fence: Option<(char, usize)> = None;
+    for line in text.split_inclusive('\n') {
+        let (body, newline) = match line.strip_suffix('\n') {
+            Some(body) => (body, "\n"),
+            None => (line, ""),
+        };
+        let (body, carriage) = match body.strip_suffix('\r') {
+            Some(body) => (body, "\r"),
+            None => (body, ""),
+        };
+        if let Some((open_char, open_len)) = fence {
+            if closes_fence(body, open_char, open_len) {
+                fence = None;
+            }
+            result.push_str(body);
+            result.push_str(carriage);
+            result.push_str(newline);
+            continue;
+        }
+        if let Some((ch, run, _indent)) = opening_fence(body) {
+            fence = Some((ch, run));
+            result.push_str(body);
+            result.push_str(carriage);
+            result.push_str(newline);
+            continue;
+        }
+        let mut replaced = String::with_capacity(body.len());
+        let mut rest = body;
+        while let Some(position) = rest.find(from) {
+            // 词边界双侧校验:命中词前后都不得是字母数字,`ximage_0.png`、
+            // `image_0.pnga` 这类粘连词是不同 token,不误替换。
+            let before_ok = position == 0 || !rest.as_bytes()[position - 1].is_ascii_alphanumeric();
+            let after = &rest[position + from.len()..];
+            let after_ok = after
+                .bytes()
+                .next()
+                .is_none_or(|byte| !byte.is_ascii_alphanumeric());
+            if before_ok && after_ok {
+                replaced.push_str(&rest[..position]);
+                replaced.push_str(to);
+                rest = after;
+            } else {
+                replaced.push_str(&rest[..position + from.len()]);
+                rest = after;
+            }
+        }
+        replaced.push_str(rest);
+        result.push_str(&replaced);
+        result.push_str(carriage);
+        result.push_str(newline);
+    }
+    result
+}
+
+/// 标准 base64（RFC 4648 字母表）解码，自足实现与本模块 crc32 同风格——
+/// 不为单图解码引入新依赖。遇到非法字符返回 None（调用方保持占位原样）。
+fn decode_base64(input: &str) -> Option<Vec<u8>> {
+    fn value(byte: u8) -> Option<u32> {
+        match byte {
+            b'A'..=b'Z' => Some((byte - b'A') as u32),
+            b'a'..=b'z' => Some((byte - b'a' + 26) as u32),
+            b'0'..=b'9' => Some((byte - b'0' + 52) as u32),
+            b'+' => Some(62),
+            b'/' => Some(63),
+            _ => None,
+        }
+    }
+    let mut out = Vec::with_capacity(input.len() / 4 * 3 + 3);
+    let mut accumulator: u32 = 0;
+    let mut bits = 0u32;
+    for byte in input.bytes() {
+        if byte == b'=' {
+            break;
+        }
+        if byte.is_ascii_whitespace() {
+            continue;
+        }
+        accumulator = (accumulator << 6) | value(byte)?;
+        bits += 6;
+        if bits >= 8 {
+            bits -= 8;
+            out.push(((accumulator >> bits) & 0xFF) as u8);
+        }
+    }
+    Some(out)
 }
 
 /// 识别围栏开启行：缩进 ≤3 个空格、行首连续 ≥3 个反引号或波浪线。
@@ -1124,15 +1250,19 @@ mod tests {
                     "path": "word/embeddings/nested.docx",
                     "result": {"content": "Child"}
                 }, {
-                    "path": "word/document.xml",
-                    "result": {"content": "internal"}
+                    // T-17（2026-10-04 收缩为引擎原生优先）：引擎已并入宿主正文的
+                    // 嵌入对象（正文含于 root）不再重复分节；"A" 的摘要与 root
+                    // 不同，只有包含性判重能跳过它。
+                    "path": "word/embeddings/merged.docx",
+                    "result": {"content": "A"}
                 }]
             }
         });
-        let rendered = build_final_markdown(&envelope).expect("render should succeed");
+        let rendered = build_final_markdown(&envelope, &mut MediaCollector::new("x_media"))
+            .expect("render should succeed");
         assert!(rendered.contains("A B"));
         assert!(rendered.contains("## Embedded document: word/embeddings/nested.docx"));
-        assert!(!rendered.contains("internal"));
+        assert!(!rendered.contains("Embedded document: word/embeddings/merged.docx"));
     }
 
     #[test]
@@ -1152,16 +1282,22 @@ mod tests {
     // 不得把空壳信封当成功拼出空结果。
     #[test]
     fn result_null_is_protocol_failure() {
-        let error = build_final_markdown(&serde_json::json!({"result": null}))
-            .expect_err("result 为 null 必须计失败");
+        let error = build_final_markdown(
+            &serde_json::json!({"result": null}),
+            &mut MediaCollector::new("x_media"),
+        )
+        .expect_err("result 为 null 必须计失败");
         assert!(error.contains("Xberg 输出协议异常"), "{error}");
     }
 
     // 覆盖 T-16/T-24（F19）：result 为标量同样是协议异常。
     #[test]
     fn result_scalar_is_protocol_failure() {
-        let error = build_final_markdown(&serde_json::json!({"result": 42}))
-            .expect_err("result 为标量必须计失败");
+        let error = build_final_markdown(
+            &serde_json::json!({"result": 42}),
+            &mut MediaCollector::new("x_media"),
+        )
+        .expect_err("result 为标量必须计失败");
         assert!(error.contains("Xberg 输出协议异常"), "{error}");
     }
 
@@ -1169,16 +1305,22 @@ mod tests {
     // 一个都没有）时必须计失败，不得静默产出空 Markdown。
     #[test]
     fn result_empty_object_is_protocol_failure() {
-        let error = build_final_markdown(&serde_json::json!({"result": {}}))
-            .expect_err("空 result 必须计失败");
+        let error = build_final_markdown(
+            &serde_json::json!({"result": {}}),
+            &mut MediaCollector::new("x_media"),
+        )
+        .expect_err("空 result 必须计失败");
         assert!(error.contains("Xberg 输出协议异常"), "{error}");
     }
 
     // 覆盖 T-16/T-24（F19）：content 类型错误是协议异常，错误信息须指出字段。
     #[test]
     fn result_content_wrong_type_is_protocol_failure() {
-        let error = build_final_markdown(&serde_json::json!({"result": {"content": ["a"]}}))
-            .expect_err("content 类型错误必须计失败");
+        let error = build_final_markdown(
+            &serde_json::json!({"result": {"content": ["a"]}}),
+            &mut MediaCollector::new("x_media"),
+        )
+        .expect_err("content 类型错误必须计失败");
         assert!(error.contains("Xberg 输出协议异常"), "{error}");
         assert!(error.contains("content"), "{error}");
     }
@@ -1186,8 +1328,9 @@ mod tests {
     // 覆盖 T-25/T-16（F19）：结构完整而正文为空的合法空白文档仍是成功。
     #[test]
     fn legal_empty_document_still_succeeds() {
-        let output = build_document_output(&serde_json::json!({"result": {"content": ""}}))
-            .expect("结构完整的空白文档应成功");
+        let output =
+            build_document_output(&serde_json::json!({"result": {"content": ""}}), "x_media")
+                .expect("结构完整的空白文档应成功");
         assert_eq!(output.markdown, "\n");
         assert!(output.warnings.is_empty());
     }
@@ -1198,7 +1341,7 @@ mod tests {
         let envelope = serde_json::json!({"result": {
             "ocr_elements": [{"text": "第一行"}, {"text": ""}, {"text": "第二行"}]
         }});
-        let output = build_document_output(&envelope).expect("结构化 OCR 结果应成功");
+        let output = build_document_output(&envelope, "x_media").expect("结构化 OCR 结果应成功");
         assert_eq!(output.markdown, "第一行\n第二行\n");
     }
 
@@ -1259,7 +1402,9 @@ mod tests {
 
     #[test]
     fn rejects_missing_result() {
-        let error = build_final_markdown(&serde_json::json!({})).expect_err("result is required");
+        let error =
+            build_final_markdown(&serde_json::json!({}), &mut MediaCollector::new("x_media"))
+                .expect_err("result is required");
         assert!(error.contains("result"));
     }
 
@@ -1286,46 +1431,11 @@ mod tests {
                 }]
             }
         });
-        let output = build_document_output(&envelope).expect("output should parse");
+        let output = build_document_output(&envelope, "x_media").expect("output should parse");
         assert_eq!(output.warnings.len(), 3);
         assert!(output.warnings[0].contains("主文档 · ocr"));
         assert!(output.warnings[1].contains("chart.xlsx · table"));
         assert!(output.warnings[2].contains("missing.docx · extraction"));
-    }
-
-    // 覆盖 T-16：嵌入递归达到固定上限时说明跳过范围，不能伪报完整转换。
-    #[test]
-    fn warns_when_embedded_depth_limit_skips_children() {
-        let mut limited = serde_json::json!({
-            "content": "depth-limit",
-            "children": [{
-                "path": "skipped.docx",
-                "result": {"content": "skipped"}
-            }]
-        });
-        for index in (0..MAX_CHILD_DEPTH).rev() {
-            limited = serde_json::json!({
-                "content": format!("depth-{index}"),
-                "children": [{
-                    "path": format!("embedded-{index}"),
-                    "result": limited
-                }]
-            });
-        }
-        let envelope = serde_json::json!({
-            "result": {
-                "content": "root",
-                "children": [{"path": "embedded-root", "result": limited}]
-            }
-        });
-
-        let output = build_document_output(&envelope).expect("output should parse");
-        assert!(output
-            .warnings
-            .iter()
-            .any(|warning| warning.contains("递归深度已达到上限")
-                && warning.contains("跳过 1 个子文档")));
-        assert!(!output.markdown.contains("Embedded document: skipped.docx"));
     }
 
     // 覆盖 T-18：仅读 ZIP 结构，超过 200 张幻灯片才启用快速模式。
@@ -1714,5 +1824,134 @@ mod tests {
             "常规配置同样不得引入 layout 键：{full}"
         );
         assert_eq!(full["use_layout_for_markdown"], Value::Bool(true));
+        // T-14（2026-10-04）：常规配置走上游图片口径——图片本体随结果携带，
+        // 占位引用保留、OCR 文本跟随；不再丢弃图片数据。
+        assert_eq!(full["images"]["ocr_text_only"], Value::Bool(false));
+        assert_eq!(full["images"]["include_data_base64"], Value::Bool(true));
+        assert_eq!(full["images"]["append_ocr_text"], Value::Bool(true));
+        // 快速模式（T-18）不提取图片，也不得携带 base64 载荷。
+        assert_eq!(fast["images"]["include_data_base64"], Value::Bool(false));
+    }
+
+    // 临时诊断（提交前移除）：用真实引擎回包驱动装配，观察媒体装配各环节。
+    #[test]
+    fn tmp_real_envelope_media_diagnostic() {
+        let path = std::path::Path::new(".tmp/e2e/probe-response.json");
+        let Ok(text) = std::fs::read_to_string(path) else {
+            eprintln!("诊断信封不存在，跳过");
+            return;
+        };
+        let envelope: Value = serde_json::from_str(&text).unwrap();
+        let envelope = serde_json::json!({ "result": envelope["document"] });
+        let images = envelope["result"]["images"].as_array().unwrap();
+        eprintln!("images={}", images.len());
+        eprintln!(
+            "first keys={:?}",
+            images[0].as_object().unwrap().keys().collect::<Vec<_>>()
+        );
+        eprintln!(
+            "content has image_0.jpeg={}",
+            envelope["result"]["content"]
+                .as_str()
+                .unwrap()
+                .contains("image_0.jpeg")
+        );
+        let output = build_document_output(&envelope, "media").unwrap();
+        eprintln!("media files={}", output.media.len());
+        eprintln!(
+            "markdown rewritten={}",
+            output.markdown.contains("](media/image_0.")
+        );
+        assert!(!output.media.is_empty(), "真实信封必须产出媒体文件");
+    }
+
+    // 覆盖 T-14（2026-10-04）：正文引用改写为 `<media 目录>/image_N.ext`，
+    // 图片字节进入待落盘清单；围栏内的字面 `image_N.ext` 不重写。
+    #[test]
+    fn media_refs_rewrite_and_collect_bytes() {
+        let envelope = serde_json::json!({
+            "result": {
+                "content": "before ![a](image_0.png) after\n```text\nimage_0.png literal\n```\n",
+                "images": [
+                    {"image_index": 0, "format": "png", "data_base64": "aGk="}
+                ]
+            }
+        });
+        let output = build_document_output(&envelope, "doc_media").unwrap();
+        assert!(
+            output.markdown.contains("](doc_media/image_0.png)"),
+            "引用必须指向媒体目录：{}",
+            output.markdown
+        );
+        assert!(
+            output
+                .markdown
+                .contains("```text\nimage_0.png literal\n```"),
+            "围栏内字面文本不得重写：{}",
+            output.markdown
+        );
+        assert_eq!(output.media.len(), 1);
+        assert_eq!(output.media[0].relative, "doc_media/image_0.png");
+        assert_eq!(output.media[0].bytes, b"hi");
+    }
+
+    // 覆盖 T-14：主文档与嵌入子文档的同序号图片互不碰撞——子文档加 docNNN-
+    // 前缀；根文档保持上游命名。
+    #[test]
+    fn media_child_images_get_collision_prefix() {
+        let envelope = serde_json::json!({
+            "result": {
+                "content": "root ![r](image_0.png)",
+                "images": [
+                    {"image_index": 0, "format": "png", "data_base64": "cm9vdA=="}
+                ],
+                "children": [
+                    {"path": "embedded.docx", "result": {
+                        "content": "child ![c](image_0.png)",
+                        "images": [
+                            {"image_index": 0, "format": "png", "data_base64": "Y2hpbGQ="}
+                        ]
+                    }}
+                ]
+            }
+        });
+        let output = build_document_output(&envelope, "m").unwrap();
+        assert!(
+            output.markdown.contains("](m/image_0.png)"),
+            "{}",
+            output.markdown
+        );
+        assert!(
+            output.markdown.contains("](m/doc001-image_0.png)"),
+            "{}",
+            output.markdown
+        );
+        assert_eq!(output.media.len(), 2);
+        assert_eq!(output.media[0].relative, "m/image_0.png");
+        assert_eq!(output.media[0].bytes, b"root");
+        assert_eq!(output.media[1].relative, "m/doc001-image_0.png");
+        assert_eq!(output.media[1].bytes, b"child");
+    }
+
+    // 覆盖 T-14：正文未引用的图片不落盘；base64 损坏的条目保持占位引用原样
+    //（如实降级，不改写也不产生半字节文件）。
+    #[test]
+    fn media_unreferenced_or_corrupt_entries_are_skipped() {
+        let envelope = serde_json::json!({
+            "result": {
+                "content": "only ![b](image_1.png)",
+                "images": [
+                    {"image_index": 0, "format": "png", "data_base64": "aGk="},
+                    {"image_index": 1, "format": "png", "data_base64": "%%%not-base64%%%"}
+                ]
+            }
+        });
+        let output = build_document_output(&envelope, "m").unwrap();
+        assert!(
+            output.markdown.contains("](image_1.png)"),
+            "损坏条目必须保持占位引用：{}",
+            output.markdown
+        );
+        assert_eq!(output.media.len(), 0);
     }
 }
