@@ -92,7 +92,7 @@ $python = Resolve-Python
 $testEnvironment = @{}
 foreach ($key in @('JCHTOOLS_TEST_STATE_DIR','JCHTOOLS_TEST_ASSET_ROOT',
     'JCHTOOLS_MARKDOWN_TEST_ASSET_ROOT','JCHTOOLS_SNAP_OCR_TEST_ASSET_ROOT',
-    'JCHTOOLS_XBERG_INFERENCE_DIR','JCHTOOLS_TEST_BROKER_EXE')) {
+    'JCHTOOLS_TEST_BROKER_EXE')) {
     $testEnvironment[$key] = $null
 }
 
