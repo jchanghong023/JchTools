@@ -133,6 +133,8 @@ powershell -NoProfile -File .\scripts\acceptance.ps1 -WithEngine   # 单命令�
 
 `gui_smoke.py` 与 `markdown_acceptance.py` 仅对自己启动的验收实例使用 Windows Job Object；GUI 正常或异常退出后都会回收所属后台，避免上一阶段遗留的 Xberg 阻塞下一阶段，不影响用户已有实例。Markdown 验收同时识别未观察到忙态的瞬时失败收尾，保留真实失败统计与无产物结果，不将其误报为驱动超时。
 
+无头 GUI 测试对真实后台结果最多等待 30 秒；该上限只约束测试驱动，不改变产品超时或任务行为。Git 用例仍断言完成状态、文件计数、工作区及远端内容；Windows 进程启动开销不再因原 5 秒等待值被误报成功能失败。完整测试门的总超时仍由当次执行的硬上限约束。
+
 ## 工程入口
 
 `src/main.rs`/`ui/app.slint`：界面；`resources/rules.json`：界面规则清单；`src/config.rs`：配置及校验；`src/registry.rs`：真实工具注册；`src/engine.rs`：阶段控制；`archive.rs`：7-Zip；`planner.rs`：计划；`platform.rs`：删除（一律永久删除，S-02）；`db.rs`/`schema.sql`：磁盘索引、计划及审计；`tests/`：测试；`scripts/`：检查/打包；`.github/workflows/check.yml`：Windows CI。

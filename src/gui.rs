@@ -6709,10 +6709,11 @@ mod gui_tests {
         .clone()
     }
 
-    /// 驱动后台结果落地：真实 worker 线程发送、真实事件泵应用，最多等 5 秒。
+    /// 驱动后台结果落地：真实 worker 线程发送、真实事件泵应用，最多等 30 秒。
+    /// Windows 上逐条启动 Git 的开销可能超过 5 秒；不以该偶然耗时替代功能断言。
     /// `done` 为真即返回；超时返回 false，由调用方断言给出可读失败原因。
     fn pump_until(app: &GuiTestApp, done: impl Fn() -> bool) -> bool {
-        let deadline = Instant::now() + Duration::from_secs(5);
+        let deadline = Instant::now() + Duration::from_secs(30);
         loop {
             app.pump.run(&app.ui);
             if done() {
