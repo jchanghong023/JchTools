@@ -61,8 +61,10 @@ from typing import TYPE_CHECKING, cast
 
 import comtypes
 import pywintypes
+import win32api
 import win32con
 import win32gui
+import win32job
 import win32process
 from pywinauto import Application, controls, findbestmatch, findwindows, timings
 from pywinauto.application import ProcessNotFoundError, WindowSpecification
@@ -177,36 +179,60 @@ class _CliArgs(argparse.Namespace):
 
 
 class _OwnedProcessTree:
-    """仅按本阶段 Popen PID 回收 GUI 与其子进程，不按进程名误杀."""
+    """Windows Job Object 持有所属进程树；父 GUI 退出后仍能安全回收后台."""
 
     def __init__(self, proc: subprocess.Popen[bytes]) -> None:
-        self._proc: subprocess.Popen[bytes] = proc
-        self._pid: int = proc.pid
-        system_root = os.environ.get("SYSTEMROOT") or r"C:\Windows"
-        self._taskkill: Path = Path(system_root) / "System32" / "taskkill.exe"
+        # types-pywin32 的 Job API 返回值/参数漏标；按实际 Win32 签名收口，不修改第三方桩。
+        create_job = cast("Callable[[object, str], int]", win32job.CreateJobObject)
+        query_information = cast("Callable[[int, int], dict[str, object]]", vars(win32job)["QueryInformationJobObject"])
+        set_information = cast(
+            "Callable[[int, int, dict[str, object]], None]", vars(win32job)["SetInformationJobObject"]
+        )
+        job = create_job(None, "")
+        assigned = False
+        try:
+            information = query_information(job, win32job.JobObjectExtendedLimitInformation)
+            limits = cast("dict[str, int]", information["BasicLimitInformation"])
+            limits["LimitFlags"] |= win32job.JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE
+            set_information(job, win32job.JobObjectExtendedLimitInformation, information)
+            process = win32api.OpenProcess(win32con.PROCESS_SET_QUOTA | win32con.PROCESS_TERMINATE, 0, proc.pid)
+            try:
+                win32job.AssignProcessToJobObject(job, process)
+            finally:
+                win32api.CloseHandle(process)
+            assigned = True
+        finally:
+            if not assigned:
+                win32api.CloseHandle(job)
+        self._job: int | None = job
 
     def terminate(self, proc: subprocess.Popen[bytes]) -> None:
-        """只终止本阶段 GUI；/T 同时回收其 worker/broker 子进程."""
+        """只终止本轮 Job Object 中的 GUI 与后台，不按名称或已退出父 PID 操作."""
         self._kill_tree()
         with contextlib.suppress(OSError, ProcessLookupError):
             if proc.poll() is None:
                 proc.kill()
 
     def close(self) -> None:
-        """GUI 正常退出后再按自己的 PID 清理仍存活的子服务."""
-        self._kill_tree()
+        """正常或异常退出后回收所属后台并释放 Job 句柄；重复关闭无副作用."""
+        job = self._job
+        if job is None:
+            return
+        try:
+            self._kill_tree()
+        finally:
+            self._job = None
+            win32api.CloseHandle(job)
 
     def _kill_tree(self) -> None:
-        # 父 PID 已退出时不可再按 PID 操作，避免 PID 复用误杀其他进程；正常
-        # 退出后的后台服务按产品生命周期继续运行，由产品自身负责回收。
-        if self._proc.poll() is not None or not self._taskkill.is_file():
-            return
-        with contextlib.suppress(OSError, subprocess.SubprocessError):
-            _ = subprocess.run(
-                [str(self._taskkill), "/PID", str(self._pid), "/T", "/F"],
-                capture_output=True,
-                check=False,
-            )
+        if self._job is not None:
+            terminate_job = cast("Callable[[int, int], None]", vars(win32job)["TerminateJobObject"])
+            terminate_job(self._job, 0)
+
+
+def own_process_tree(proc: subprocess.Popen[bytes]) -> _OwnedProcessTree:
+    """为各真实 GUI 验收驱动提供同一套进程所有权与收尾策略."""
+    return _OwnedProcessTree(proc)
 
 
 def wait_window(pid: int, timeout: int = TIMEOUT) -> tuple[Application, WindowSpecification]:

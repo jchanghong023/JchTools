@@ -59,6 +59,10 @@ from PIL import Image, ImageDraw, ImageFont
 from pywinauto import Application, controls, findbestmatch, findwindows, timings
 from pywinauto.application import ProcessNotFoundError, WindowSpecification
 
+if not __package__:
+    sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+from scripts.gui_smoke import completion_confirms_new_run, own_process_tree
+
 if TYPE_CHECKING:
     from collections.abc import Callable
     from typing import TypeIs
@@ -1567,6 +1571,21 @@ def _terminate(proc: subprocess.Popen[bytes]) -> None:
     _ = proc.wait(timeout=10)
 
 
+def _close_conversion_gui(
+    proc: subprocess.Popen[bytes], window: WindowSpecification | None, close_tree: Callable[[], None] | None
+) -> None:
+    """关闭真实窗口并始终回收本轮后台，包括 UIA 关闭失败的路径."""
+    try:
+        if window is not None:
+            _request_close(window)
+    finally:
+        try:
+            _terminate(proc)
+        finally:
+            if close_tree is not None:
+                close_tree()
+
+
 _MAX_START_RECLICKS = 3
 _RECLICK_INTERVAL_S = 10.0
 
@@ -1598,7 +1617,9 @@ def drive_conversion(exe: Path, input_dir: Path, output_dir: Path, *, stop_after
     """
     proc: subprocess.Popen[bytes] = subprocess.Popen([str(exe)])
     window: WindowSpecification | None = None
+    owner = None
     try:
+        owner = own_process_tree(proc)
         _, window = _connect_window(proc.pid)
         _click_button(window, "转 Markdown")
         rows = _convert_directory_rows(window)
@@ -1610,6 +1631,7 @@ def drive_conversion(exe: Path, input_dir: Path, output_dir: Path, *, stop_after
         if not _wait_start_ready(window, READINESS_TIMEOUT):
             message = "「开始转换」始终未就绪（组件未初始化或就绪检查失败）"
             return GuiRun([], _window_texts(window), message)
+        previous_texts = _window_texts(window)
         _click_button(window, "开始转换")
         saw_busy = False
         error: str | None = None
@@ -1627,7 +1649,12 @@ def drive_conversion(exe: Path, input_dir: Path, output_dir: Path, *, stop_after
             start_visible, start_enabled = _button_state(window, "开始转换")
             produced = any(output_dir.rglob("*.md"))
             finished_after_busy = saw_busy and start_visible and start_enabled
-            finished_fast = not saw_busy and start_visible and start_enabled and produced
+            finished_fast = (
+                not saw_busy
+                and start_visible
+                and start_enabled
+                and (produced or completion_confirms_new_run(_window_texts(window), previous_texts, None, None))
+            )
             if finished_after_busy or finished_fast:
                 break
             reclick_state.maybe_reclick(
@@ -1643,9 +1670,7 @@ def drive_conversion(exe: Path, input_dir: Path, output_dir: Path, *, stop_after
         outputs = sorted(path for path in output_dir.rglob("*.md") if path.is_file())
         return GuiRun(outputs, _window_texts(window), None)
     finally:
-        if window is not None:
-            _request_close(window)
-        _terminate(proc)
+        _close_conversion_gui(proc, window, None if owner is None else owner.close)
 
 
 # ---------------------------------------------------------------- 结果核验。

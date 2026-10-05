@@ -17,6 +17,9 @@ from pathlib import Path
 from typing import TYPE_CHECKING, cast
 from unittest.mock import patch
 
+import win32api
+import win32con
+import win32event
 from defusedxml import ElementTree
 from pywinauto import timings
 
@@ -272,6 +275,75 @@ class MediaPostconditionTests(unittest.TestCase):
                 pass
             else:
                 self.fail("未隔离的 GUI 不得执行测试写入")
+
+    def test_owned_gui_exit_reaps_child_without_ending_unrelated_process(self) -> None:
+        # 覆盖 XB-14/XB-22：测试 GUI 正常退出后只回收自己创建的后台，不能占用后续验收。
+        parent_source = (
+            "import pathlib, subprocess, sys, time\n"
+            "root = pathlib.Path(sys.argv[1])\n"
+            "while not (root / 'start').exists(): time.sleep(0.01)\n"
+            "child = subprocess.Popen([sys.executable, '-c', 'import time; time.sleep(900)'])\n"
+            "(root / 'child-pid').write_text(str(child.pid), encoding='ascii')\n"
+        )
+        with tempfile.TemporaryDirectory(prefix="jchtools-owned-tree-") as temporary:
+            proc: subprocess.Popen[bytes] = subprocess.Popen([sys.executable, "-c", parent_source, temporary])
+            unrelated: subprocess.Popen[bytes] = subprocess.Popen(
+                [sys.executable, "-c", "import time; time.sleep(900)"]
+            )
+            owner = None
+            try:
+                owner = gui_smoke.own_process_tree(proc)
+                _ = (Path(temporary) / "start").write_text("go", encoding="ascii")
+                assert proc.wait(timeout=900) == 0  # nosec B101: 验证父进程自然成功退出。
+                child_pid = int((Path(temporary) / "child-pid").read_text(encoding="ascii"))
+                child = win32api.OpenProcess(win32con.SYNCHRONIZE | win32con.PROCESS_TERMINATE, 0, child_pid)
+                try:
+                    owner.close()
+                    status = win32event.WaitForSingleObject(child, 1000)
+                    assert status == win32event.WAIT_OBJECT_0, "GUI 已退出但所属后台仍存活"  # nosec B101: 实际子进程必须退出。
+                    assert unrelated.poll() is None, "不得结束无关实例"  # nosec B101: 所有权边界。
+                finally:
+                    if win32event.WaitForSingleObject(child, 0) == win32event.WAIT_TIMEOUT:
+                        win32api.TerminateProcess(child, 0)
+                    win32api.CloseHandle(child)
+            finally:
+                if owner is not None:
+                    owner.close()
+                if proc.poll() is None:
+                    proc.kill()
+                _ = proc.wait(timeout=900)
+                unrelated.terminate()
+                _ = unrelated.wait(timeout=900)
+
+    def test_fast_failed_conversion_finishes_without_outputs(self) -> None:
+        # 覆盖 T-24：未观察到忙态且全部瞬间失败时，应收集失败诊断而不是空等到转换超时。
+        completed = "成功 0 · 部分提取 0 · 失败 1 · 已有结果跳过 0 · 重复结果跳过 0 · 总耗时 0.1s"
+
+        def available_button(_window: object, title: str) -> tuple[bool, bool]:
+            return title == "开始转换", True
+
+        with (
+            tempfile.TemporaryDirectory() as temporary,
+            patch("scripts.markdown_acceptance.subprocess.Popen"),
+            patch("scripts.markdown_acceptance.own_process_tree", create=True),
+            patch.object(markdown_acceptance, "_connect_window", return_value=(None, object())),
+            patch.object(markdown_acceptance, "_click_button"),
+            patch.object(markdown_acceptance, "_convert_directory_rows", return_value=[object(), object()]),
+            patch.object(markdown_acceptance, "_set_row_edit"),
+            patch.object(markdown_acceptance, "_wait_start_ready", return_value=True),
+            patch.object(markdown_acceptance, "_button_state", side_effect=available_button),
+            patch.object(markdown_acceptance, "_window_texts", side_effect=["尚未开始", completed, completed]),
+            patch.object(markdown_acceptance, "_request_close"),
+            patch.object(markdown_acceptance, "_terminate"),
+            patch.object(markdown_acceptance, "CONVERSION_TIMEOUT", 1),
+            patch("scripts.markdown_acceptance.time.time", side_effect=[0.0, 0.0, 0.0, 0.0, 2.0]),
+            patch("scripts.markdown_acceptance.time.sleep"),
+        ):
+            root = Path(temporary)
+            run = markdown_acceptance.drive_conversion(root / "gui.exe", root, root)
+        assert run.error is None, "收尾状态不能误判为驱动超时"  # nosec B101: 瞬间失败的状态转换回归。
+        assert run.outputs == [], "失败批次不得伪造产物"  # nosec B101: 失败产物边界。
+        assert "失败 1" in run.texts  # nosec B101: 必须保留真实失败诊断。
 
     def test_legal_media_directory_and_reference_pass(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
