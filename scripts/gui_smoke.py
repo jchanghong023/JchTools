@@ -18,7 +18,10 @@
   S9 组件缺失状态与初始化入口：未配置时转换页明确提示未就绪、开始按钮禁用、
      初始化入口与「前往设置」可见且不自动下载（XB-19/O-06；无需任何资产）。
   S10 输出层级与同名策略：保留层级两份同名输入各自成文；平铺只处理排序第一份、
-     其余按重复跳过计数（T-11；需真实组件，不隔离环境配置）。
+     其余按重复跳过计数（T-11；需真实组件，Xberg 目录可真实，状态目录仍须隔离）。
+     S5/S10-S14/S17 受统一隔离守卫：独立调用需验收编排布置的隔离环境变量在场
+     （JCHTOOLS_TEST_STATE_DIR 与 JCHTOOLS_SNAP_OCR_TEST_ASSET_ROOT），缺则拒绝
+     启动并提示经 acceptance.ps1 入口执行；确需独立运行时显式 --allow-isolated-run。
   S11 已有结果跳过：重复运行不覆盖既有产物，跳过数量如实显示（T-12）。
   S12 输出子树排除：输出目录位于输入内时整棵输出子树不作为新输入（T-09）。
   S13 部分失败与完成统计：单文件失败不终止批次，成功/失败可区分（T-16/T-24）。
@@ -30,6 +33,8 @@
 
 用法：
     python scripts/gui_smoke.py --exe target/debug/JchTools.exe --data <已生成的测试数据目录>
+    受隔离守卫的阶段（S5/S10-S14/S17）独立调用时须已布置隔离环境变量或加
+    --allow-isolated-run；推荐经 scripts/acceptance.ps1 编排执行。
 
 依赖：pip install pywinauto（需要可交互桌面会话）。
 """
@@ -64,7 +69,7 @@ from pywinauto.application import ProcessNotFoundError, WindowSpecification
 from pywinauto.uia_defines import NoPatternInterfaceError
 
 if TYPE_CHECKING:
-    from collections.abc import Callable
+    from collections.abc import Callable, Mapping
 
     from pywinauto.base_wrapper import BaseWrapper
 
@@ -115,6 +120,14 @@ CONVERT_NEED_RUNTIME_TEXT = "请先保存共享 Xberg 运行目录"
 CONVERT_DONE_MARKER = "总耗时"
 STOP_AND_CLOSE_TITLE = "停止任务并关闭"
 STOP_AND_CLOSE_BUTTON = "停止并关闭"
+# S11-07 统一隔离守卫：这些阶段的 run_stage 不自建隔离环境（不同于 S6-S9 的
+# isolated_state_env），独立调用会直接读写真实用户状态目录（config.sqlite3）并
+# 可能连接/唤起常驻服务（保存目录会触发 ensure_snap_supervisor）。因此要求经验收
+# 编排布置的隔离环境（下述两个变量由 acceptance.ps1 的 gui-smoke / markdown 分支
+# 统一布置）或显式 --allow-isolated-run 才放行；Xberg 运行目录本身允许指向真实
+# 引擎目录——状态隔离必须，组件目录可真实。
+ISOLATION_GUARDED_STAGES = ("S5", "S10", "S11", "S12", "S13", "S14", "S17")
+ISOLATION_REQUIRED_ENV_KEYS = ("JCHTOOLS_TEST_STATE_DIR", "JCHTOOLS_SNAP_OCR_TEST_ASSET_ROOT")
 
 # pywinauto/pywin32 窗口操作在窗口建立/销毁竞态下抛出的瞬态错误族；
 # 此元组是唯一放行集合，出现新瞬态类型须显式补充并说明：
@@ -152,6 +165,7 @@ class _CliArgs(argparse.Namespace):
     data: str
     stages: str
     list_stages: bool
+    allow_isolated_run: bool
 
     def __init__(self) -> None:
         super().__init__()
@@ -159,6 +173,7 @@ class _CliArgs(argparse.Namespace):
         self.data = DEFAULT_DATA
         self.stages = DEFAULT_STAGES
         self.list_stages = False
+        self.allow_isolated_run = False
 
 
 class _OwnedProcessTree:
@@ -1093,7 +1108,7 @@ def s8_invalid_directory_is_rejected_and_retryable(exe: str) -> None:
 
 
 def s9_unconfigured_state_shows_reason_and_no_autostart(exe: str) -> None:
-    """S9 组件缺失状态与初始化入口：未配置时如实显示未就绪，不自动下载."""
+    """S9 组件缺失状态与设置页指引：未配置时如实显示未就绪，不自动下载."""
     state = Path(tempfile.mkdtemp(prefix="jchtools-gui-smoke-s9-"))
     env = isolated_state_env(state)
     try:
@@ -1104,9 +1119,8 @@ def s9_unconfigured_state_shows_reason_and_no_autostart(exe: str) -> None:
             start = find_button(window, "开始转换")
             _ = start.wait("visible", timeout=TIMEOUT)
             require(not start.is_enabled(), "未配置 Xberg 时「开始转换」必须禁用")
-            initialize = find_button(window, "初始化可选组件")
-            _ = initialize.wait("visible", timeout=TIMEOUT)
-            require(not initialize.is_enabled(), "未确认目录时初始化入口必须禁用")
+            # 转换页初始化入口已移除（S3-01：初始化集中到设置页，保存/下载自动
+            # 完成）；未就绪时的正确指引是「前往设置」。
             _ = find_button(window, "前往设置").wait("visible", timeout=TIMEOUT)
             goto_settings(window)
             # 「尚未下载 Xberg」绑定 settings-downloaded-dir 的静态空值，不依赖
@@ -1140,13 +1154,107 @@ def check_flat_output(window: WindowSpecification) -> None:
     raise RuntimeError(msg)
 
 
-def start_conversion_and_wait_done(window: WindowSpecification, previous_done: str = "") -> str:
+def produced_snapshot(directory: Path) -> frozenset[tuple[str, int, int]]:
+    """输出目录产物快照（相对路径、mtime_ns、大小）；目录不可读时返回空快照.
+
+    转换页没有可观察的任务计数或时间戳文本（收尾统计行的总耗时只保留 0.1s 精度，
+    两轮可以逐字相同），用「点击开始前后的产物快照变化」作任务代次锚（S11-06）。
+
+    全有或全无语义（复审修正）：枚举或 stat 中途失败（Windows 写锁/杀软扫描
+    句柄）返回空快照而不是部分集合——部分快照相对完整 before 必然「已变化」，
+    会把陈旧完成行误判为新完成；空快照在 completion_confirms_new_run 侧被
+    视为「无锚」（与 None 同路），宁可退回文本判据也不假锚。
+    """
+    snapshot: list[tuple[str, int, int]] = []
+    try:
+        for path in directory.rglob("*"):
+            if path.is_file():
+                info = path.stat()
+                snapshot.append((str(path.relative_to(directory)), info.st_mtime_ns, info.st_size))
+    except OSError:
+        return frozenset()
+    return frozenset(snapshot)
+
+
+def completion_confirms_new_run(
+    value: str,
+    previous_done: str,
+    produced_before: frozenset[tuple[str, int, int]] | None,
+    produced_now: frozenset[tuple[str, int, int]] | None,
+) -> bool:
+    """S11-06 新一轮批次完成判据（纯函数；单测见 scripts/test_gui_smoke.py）.
+
+    含完成标记且统计行文本不同于上一轮 → 新完成；文本与上一轮逐字相同时，若
+    调用方提供了输出快照且快照已变化（新产出/更新了产物文件）也判为新一轮完成。
+    空快照按「无锚」处理（与 None 同路）：真实转换必然产出至少一个文件，空快照
+    只可能是目录不可读（部分快照已被 produced_snapshot 归零），不得当「已变化」。
+    纯跳过批次若统计行也逐字相同则不存在任何可观察锚点（现有各阶段的成功/跳过
+    计数必然变化，不命中该死角）。
+    """
+    if CONVERT_DONE_MARKER not in value:
+        return False
+    if value != previous_done:
+        return True
+    if not produced_now:
+        return False
+    return produced_before is not None and produced_now != produced_before
+
+
+def _confirm_new_completion(
+    value: str,
+    previous_done: str,
+    produced_dir: Path | None,
+    before: frozenset[tuple[str, int, int]] | None,
+) -> bool:
+    """以 completion_confirms_new_run 判定 value；快照只在完成标记在场后才取（S11-06）."""
+    if CONVERT_DONE_MARKER not in value:
+        return False
+    now = produced_snapshot(produced_dir) if produced_dir is not None else None
+    return completion_confirms_new_run(value, previous_done, before, now)
+
+
+def _wait_completion_with_anchor(
+    window: WindowSpecification,
+    previous_done: str,
+    produced_dir: Path | None,
+    before: frozenset[tuple[str, int, int]] | None,
+) -> str:
+    """已确认进入运行态后等待本次收尾统计行（S11-06：快照锚兜底）.
+
+    不能用 exclude=previous_done 的纯文本等待——统计行与上一轮逐字相同时会把
+    新完成误判为旧文案残留而超时假失败，由产物快照锚兜底识别。
+    """
+    deadline = time.time() + COMPLETION_TIMEOUT
+    last_seen = ""
+    while time.time() < deadline:
+        try:
+            for text in window.descendants(control_type="Text"):
+                value = text.window_text() or ""
+                if _confirm_new_completion(value, previous_done, produced_dir, before):
+                    return value
+                if value:
+                    last_seen = value
+        except TRANSIENT_GUI_ERRORS:
+            pass
+        time.sleep(0.5)
+    msg = f"等待新一轮转换收尾统计超时（上一轮统计：{previous_done[:120]}；最后可见文本：{last_seen[:200]}）"
+    raise RuntimeError(msg)
+
+
+def start_conversion_and_wait_done(
+    window: WindowSpecification,
+    previous_done: str = "",
+    produced_dir: Path | None = None,
+) -> str:
     """点击「开始转换」（带重试）并等待批次完成，返回新的完成统计行文本.
 
     小批次可能在 UIA 轮询间隔内整批完成，「停止任务」一闪而过——启动成功的
     判据是「停止任务」出现**或**出现与上一轮不同的完成统计行（总耗时数值必变），
     两者任一即停止重试点击；只有两者都不出现（点击落空或按钮不可用）才重按。
+    produced_dir 非空时在统计行与上一轮逐字相同的情况下，以「输出目录产物快照
+    相对点击前的变化」作任务代次锚识别新完成（S11-06），避免误按开始导致假失败。
     """
+    before = produced_snapshot(produced_dir) if produced_dir is not None else None
     finished = ""
     for attempt in range(3):
         click(window, find_button(window, "开始转换"))
@@ -1158,7 +1266,7 @@ def start_conversion_and_wait_done(window: WindowSpecification, previous_done: s
                     break
                 for text in window.descendants(control_type="Text"):
                     value = text.window_text() or ""
-                    if CONVERT_DONE_MARKER in value and value != previous_done:
+                    if _confirm_new_completion(value, previous_done, produced_dir, before):
                         finished = value
                         break
             except TRANSIENT_GUI_ERRORS:
@@ -1172,7 +1280,8 @@ def start_conversion_and_wait_done(window: WindowSpecification, previous_done: s
             _ = find_button(window, "停止任务").wait("visible enabled", timeout=TIMEOUT)
             msg = "转换既未进入运行态也未完成（开始按钮可能未生效）"
             raise RuntimeError(msg)
-    return wait_text_containing(window, CONVERT_DONE_MARKER, exclude=previous_done)
+    # 上方重试已确认进入运行态（「停止任务」出现过），交给快照锚感知的收尾等待。
+    return _wait_completion_with_anchor(window, previous_done, produced_dir, before)
 
 
 def s10_output_layout_and_flat_duplicate_policy(exe: str) -> None:
@@ -1192,14 +1301,14 @@ def s10_output_layout_and_flat_duplicate_policy(exe: str) -> None:
             goto_converter(window)
             # 层次模式：两份同名输入各自成文（T-11 默认保留层级）。
             set_converter_dirs(window, str(source), str(layered))
-            metrics = start_conversion_and_wait_done(window)
+            metrics = start_conversion_and_wait_done(window, produced_dir=layered)
             require((layered / "a" / "同名_txt.md").is_file(), "层次输出应保留相对层级 a/")
             require((layered / "b" / "同名_txt.md").is_file(), "层次输出应保留相对层级 b/")
             require("重复结果跳过 0" in metrics, f"层次模式不应有同名跳过：{metrics}")
             # 平铺模式：同名只处理排序第一份，其余按重复跳过计数。
             set_converter_dirs(window, str(source), str(flat))
             check_flat_output(window)
-            metrics = start_conversion_and_wait_done(window, previous_done=metrics)
+            metrics = start_conversion_and_wait_done(window, previous_done=metrics, produced_dir=flat)
             produced = sorted(p.name for p in flat.glob("*.md"))
             require(produced == ["同名_txt.md"], f"平铺只应有一份结果：{produced}")
             require("重复结果跳过 1" in metrics, f"平铺同名跳过必须如实计数：{metrics}")
@@ -1227,7 +1336,7 @@ def s11_existing_results_are_skipped_untouched(exe: str) -> None:
         def body(window: WindowSpecification) -> None:
             goto_converter(window)
             set_converter_dirs(window, str(source), str(output))
-            first = start_conversion_and_wait_done(window)
+            first = start_conversion_and_wait_done(window, produced_dir=output)
             require(
                 "已有结果跳过 0" in first or "跳过" not in first,
                 f"首轮应全部转换：{first}",
@@ -1237,7 +1346,7 @@ def s11_existing_results_are_skipped_untouched(exe: str) -> None:
                 len(existing) == len(S11_SOURCE_FILES),
                 f"前置：两份产物（实得 {list(existing)}）",
             )
-            second = start_conversion_and_wait_done(window, previous_done=first)
+            second = start_conversion_and_wait_done(window, previous_done=first, produced_dir=output)
             require(
                 f"已有结果跳过 {len(S11_SOURCE_FILES)}" in second,
                 f"重复运行必须如实显示跳过数量：{second}",
@@ -1284,7 +1393,7 @@ def s12_output_subtree_is_excluded_from_scan(exe: str) -> None:
         def body(window: WindowSpecification) -> None:
             goto_converter(window)
             set_converter_dirs(window, str(source), str(output))
-            metrics = start_conversion_and_wait_done(window)
+            metrics = start_conversion_and_wait_done(window, produced_dir=output)
             require(
                 (output / "prep" / "page_png.md").is_file(),
                 f"输出子树外的输入应正常转换：{metrics}",
@@ -1319,7 +1428,7 @@ def s13_partial_failure_isolated_with_counts(exe: str) -> None:
         def body(window: WindowSpecification) -> None:
             goto_converter(window)
             set_converter_dirs(window, str(source), str(output))
-            metrics = start_conversion_and_wait_done(window)
+            metrics = start_conversion_and_wait_done(window, produced_dir=output)
             require("成功 1" in metrics, f"可转换文件必须成功（统计行：{metrics}）")
             require("失败 1" in metrics, f"损坏文件必须计入失败（统计行：{metrics}）")
             require((output / "good_txt.md").is_file(), "成功产物必须在场")
@@ -1484,19 +1593,34 @@ def s16_git_commit_and_push(exe: str) -> None:
 
 
 def s17_initialize_configured_components(exe: str) -> None:
-    """覆盖 T-05/T-06：使用真实初始化入口准备隔离资产，不伪造就绪标记."""
+    """覆盖 T-05/T-06：经设置页真实保存入口初始化组件，不伪造就绪标记."""
+    engine_dir = os.environ.get("JCHTOOLS_TEST_XBERG_DIR", "").strip()
+    require(
+        bool(engine_dir) and Path(engine_dir, "xberg.exe").is_file(),
+        "S17 需要 JCHTOOLS_TEST_XBERG_DIR 指向含 xberg.exe 的真实测试引擎目录",
+    )
 
     def body(window: WindowSpecification) -> None:
-        goto_converter(window)
-        try:
-            _ = wait_text_containing(window, "已安装组件就绪，可离线使用", timeout=ATTEMPT_TIMEOUT)
-        except RuntimeError:
-            initialize = wait_button(window, "初始化可选组件", TIMEOUT, enabled=True)
-            click(window, initialize)
-        _ = wait_text_containing(window, "已安装组件就绪，可离线使用")
+        # 隔离 SQLite 已由 --seed-state 播种目录来源，但许可证 notice 尚未落盘；
+        # 转换页初始化入口移除后（S3-01），初始化随「使用此目录」真实保存自动
+        # 完成（保存成功即写 notice，S5-03 同源闭环）。保存为异步动作，就绪探
+        # 测可能在保存完成前发生，用重试收敛。
+        for _attempt in range(3):
+            goto_converter(window)
+            try:
+                _ = wait_text_containing(window, "已安装组件就绪，可离线使用", timeout=ATTEMPT_TIMEOUT)
+                break
+            except RuntimeError:
+                pass
+            goto_settings(window)
+            set_settings_custom_dir(window, engine_dir)
+            click(window, find_button(window, "使用此目录"))
+        else:
+            msg = "S17：经设置页保存真实引擎目录后组件仍未就绪"
+            raise RuntimeError(msg)
 
     run_stage("S17", exe, body)
-    print("S17 PASS：真实 GUI 初始化成功，已配置的 Xberg 可离线使用")
+    print("S17 PASS：真实 GUI 经设置页保存并自动初始化成功，已配置的 Xberg 可离线使用")
 
 
 def parse_stages(stages_arg: str) -> list[str]:
@@ -1507,6 +1631,34 @@ def parse_stages(stages_arg: str) -> list[str]:
         msg = f"未知阶段：{unknown}（可选：{list(SUPPORTED_STAGES)}）"
         raise RuntimeError(msg)
     return stages
+
+
+def missing_isolation_env(env: Mapping[str, str]) -> list[str]:
+    """返回隔离守卫要求但当前环境缺失的变量键（纯函数；单测见 scripts/test_gui_smoke.py）."""
+    return [key for key in ISOLATION_REQUIRED_ENV_KEYS if not env.get(key)]
+
+
+def require_orchestrated_isolation(stages: list[str], env: Mapping[str, str], *, allow_isolated_run: bool) -> None:
+    """S11-07 统一隔离守卫：受守卫阶段未经编排隔离不得独立运行.
+
+    受守卫阶段（S5/S10-S14/S17）的 run_stage 不自建隔离环境，独立调用会读写真实
+    用户状态目录并可能连接常驻服务；在启动任何 GUI 之前整批拒绝，避免半程执行。
+    经 acceptance.ps1 编排（或已手工布置同等隔离变量）时两个变量在场，不受影响；
+    组件目录（Xberg 运行目录）允许为真实引擎目录，不做隔离检查。
+    """
+    guarded = [stage for stage in stages if stage in ISOLATION_GUARDED_STAGES]
+    if not guarded or allow_isolated_run:
+        return
+    missing = missing_isolation_env(env)
+    if not missing:
+        return
+    msg = (
+        f"阶段 {','.join(guarded)} 独立运行会读写真实应用状态目录并可能连接常驻服务，"
+        f"当前缺少隔离环境变量：{','.join(missing)}。"
+        "请经 scripts/acceptance.ps1 执行（-WithGuiSmoke / -WithMarkdownAcceptance 会布置隔离"
+        "状态目录与资产根）；确需独立运行时显式加 --allow-isolated-run 自担隔离责任。"
+    )
+    raise RuntimeError(msg)
 
 
 def run_dataset_stages(exe: str, data: Path, stages: list[str]) -> None:
@@ -1561,12 +1713,19 @@ def main() -> int:
         "--stages", default=DEFAULT_STAGES, help=f"逗号分隔阶段清单（可选：{','.join(SUPPORTED_STAGES)}）"
     )
     _ = parser.add_argument("--list-stages", action="store_true", help="逐行打印支持的阶段号后退出")
+    _ = parser.add_argument(
+        "--allow-isolated-run",
+        action="store_true",
+        help="允许受隔离守卫的阶段（S5/S10-S14/S17）在本进程独立运行（默认需经 acceptance.ps1 布置的隔离环境）",
+    )
     args = parser.parse_args(namespace=_CliArgs())
     if args.list_stages:
         for stage in SUPPORTED_STAGES:
             print(stage)
         return 0
     stages = parse_stages(args.stages)
+    # S11-07：受守卫阶段在启动任何 GUI 之前统一校验隔离环境，缺则拒绝并指引入口。
+    require_orchestrated_isolation(stages, os.environ, allow_isolated_run=args.allow_isolated_run)
     exe = Path(args.exe).resolve()
     data = Path(args.data).resolve()
     if not exe.is_file():

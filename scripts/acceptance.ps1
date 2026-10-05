@@ -8,8 +8,11 @@
   Snap OCR core/worker 的 all-targets 测试与 clippy、构建输出 binding loop 警告扫描。可选阶段：
     -WithEngine   追加真实引擎用例（JCHTOOLS_TEST_7ZIP 或 resources\7zip\7z.exe，
                   缺失时直接失败并提示先运行 fetch-7zip.ps1）
-    -WithGuiSmoke 追加 OS 级 UIA 冒烟 S1-S4/S15/S16（需要 -GuiData 指向 make_tmp.py testdata
-                  生成的数据集与 cargo build 产物（尊重 CARGO_TARGET_DIR，未设置时为 target\debug）；需要 pip install pywinauto）
+    -WithGuiSmoke 追加 OS 级 UIA 冒烟（默认 S1-S4/S15/S16；资产就绪时自动扩展：
+                  S6-S9 需含 xberg.exe 的有效目录，S5/S10-S14/S17 需 JCHTOOLS_TEST_XBERG_DIR
+                  有效引擎（S5/S14 另需媒体样本），缺资产如实记 NOT RUN，不伪报已覆盖。
+                  需要 -GuiData 指向 make_tmp.py testdata 生成的数据集与 cargo build 产物
+                  （尊重 CARGO_TARGET_DIR，未设置时为 target\debug）；需要 pip install pywinauto）
     -WithPackage  追加发布打包自检（package-windows.ps1，需要引擎与 MSVC 工具链）
     -WithMarkdownAcceptance 追加转 Markdown 验收承接（scripts/markdown_acceptance.py，
                   F26 / ALL2MARKDOWN 附录 A；退出码 0=PASS、2=全部条目 NOT RUN（缺资产/
@@ -142,7 +145,7 @@ if ($WithEngine) {
         -Environment @{JCHTOOLS_TEST_7ZIP = $engine}
 } else {$script:Results.Add('NOT RUN  engine-tests（加 -WithEngine）')}
 
-# 5) OS 级 GUI 冒烟 S1-S4（可选）。
+# 5) OS 级 GUI 冒烟（可选）：默认 S1-S4/S15/S16，资产就绪时自动扩展（S11-01）。
 if ($WithGuiSmoke) {
     if (-not $GuiData) {throw '-WithGuiSmoke 需要 -GuiData 指向 make_tmp.py testdata 生成的数据集目录'}
     if (-not (Test-Path -LiteralPath $GuiData)) {throw "数据集目录不存在：$GuiData"}
@@ -166,9 +169,55 @@ if ($WithGuiSmoke) {
         JCHTOOLS_SNAP_OCR_TEST_ASSET_ROOT = Join-Path $script:LogDir 'gui-snap-assets'
         JCHTOOLS_MARKDOWN_TEST_ASSET_ROOT = Join-Path $script:LogDir 'gui-markdown-assets'
     }
+    # S11-01 阶段自动扩展：默认序列保持 S1-S4/S15/S16（无资产环境行为不变）；
+    # 本分支已具备 test-hooks EXE（上方 gui-build）与隔离状态目录/资产根，资产
+    # 就绪时按前置逐组追加并向 gui_smoke 传 --stages；任一前置缺失只记 NOT RUN
+    # 说明（不 fail），不得把缺资产伪报为已覆盖。
+    $smokeStages = @('S1','S2','S3','S4','S15','S16')
+    # 前置（设置页组 S6-S9）：S6/S7 需要包含 xberg.exe 的有效目录（优先
+    # JCHTOOLS_SMOKE_XBERG_DIR，回落 JCHTOOLS_TEST_XBERG_DIR）；S8/S9 本身无需
+    # 资产，但随设置页组整组扩展，保证无资产环境的默认序列不变。
+    $smokeXberg = $env:JCHTOOLS_SMOKE_XBERG_DIR
+    if (-not $smokeXberg) {$smokeXberg = $env:JCHTOOLS_TEST_XBERG_DIR}
+    if ($smokeXberg -and (Test-Path -LiteralPath (Join-Path $smokeXberg 'xberg.exe') -PathType Leaf)) {
+        $smokeStages += @('S6','S7','S8','S9')
+        $guiEnvironment['JCHTOOLS_SMOKE_XBERG_DIR'] = [IO.Path]::GetFullPath($smokeXberg)
+    } else {
+        $script:Results.Add('NOT RUN  gui-smoke S6-S9 设置页阶段（缺包含 xberg.exe 的有效目录：JCHTOOLS_SMOKE_XBERG_DIR / JCHTOOLS_TEST_XBERG_DIR；S8/S9 随设置页组整组扩展）')
+    }
+    # 前置（转换组 S5/S10-S14，S17 经下方先行调用覆盖）：需 JCHTOOLS_TEST_XBERG_DIR
+    # 指向有效引擎；隔离状态先经 --seed-state 播种，再以 S17 先行真实初始化组件
+    # （gui_smoke 的固定阶段顺序把 S17 排在 S5 之后，就绪必须在主序列之前建立，
+    # 故拆成先行调用）；S5/S14 另需媒体样本（优先 JCHTOOLS_S5_MEDIA，回落公开
+    # 合成夹具，与 markdown_acceptance 的缺省同源）。
+    $convXberg = $env:JCHTOOLS_TEST_XBERG_DIR
+    $mediaSample = $env:JCHTOOLS_S5_MEDIA
+    if (-not $mediaSample) {
+        $mediaCandidate = Join-Path $root 'tests\markdown_fixtures\video-to-notes-intro-zh.mp4'
+        if (Test-Path -LiteralPath $mediaCandidate -PathType Leaf) {$mediaSample = $mediaCandidate}
+    }
+    if ($convXberg -and (Test-Path -LiteralPath (Join-Path $convXberg 'xberg.exe') -PathType Leaf)) {
+        $convXberg = [IO.Path]::GetFullPath($convXberg)
+        $null = Invoke-Logged -Name 'gui-smoke-seed-state' -File $python `
+            -Arguments @('scripts/markdown_acceptance.py','--seed-state',$guiState,'--seed-xberg',$convXberg)
+        $null = Invoke-Logged -Name 'gui-smoke-convert-init' -File $python `
+            -Arguments @('scripts/gui_smoke.py','--exe',$exe,'--data',$GuiData,'--stages','S17') -Environment $guiEnvironment
+        $smokeStages += @('S10','S11','S12','S13')
+        if ($mediaSample) {
+            $smokeStages += @('S5','S14')
+            $guiEnvironment['JCHTOOLS_S5_MEDIA'] = [IO.Path]::GetFullPath($mediaSample)
+        } else {
+            $script:Results.Add('NOT RUN  gui-smoke S5/S14 运行态链路（缺媒体样本：JCHTOOLS_S5_MEDIA 或 tests/markdown_fixtures/video-to-notes-intro-zh.mp4）')
+        }
+    } else {
+        $script:Results.Add('NOT RUN  gui-smoke S5/S10-S14/S17 转换阶段（缺有效 Xberg 引擎目录：JCHTOOLS_TEST_XBERG_DIR）')
+        if (-not $mediaSample) {
+            $script:Results.Add('NOT RUN  gui-smoke S5/S14 运行态链路（缺媒体样本：JCHTOOLS_S5_MEDIA 或 tests/markdown_fixtures/video-to-notes-intro-zh.mp4）')
+        }
+    }
     $null = Invoke-Logged -Name 'gui-smoke' -File $python `
-        -Arguments @('scripts/gui_smoke.py','--exe',$exe,'--data',$GuiData) -Environment $guiEnvironment
-} else {$script:Results.Add('NOT RUN  gui-smoke S1-S4/S15/S16（加 -WithGuiSmoke -GuiData <目录>）')}
+        -Arguments @('scripts/gui_smoke.py','--exe',$exe,'--data',$GuiData,'--stages',($smokeStages -join ',')) -Environment $guiEnvironment
+} else {$script:Results.Add('NOT RUN  gui-smoke（默认 S1-S4/S15/S16，资产就绪自动扩展；加 -WithGuiSmoke -GuiData <目录>）')}
 
 # 5.5) 旧 markdown-media-worker 已退役（XB-12：媒体转录迁移到 Xberg 推理组件）；
 #      其验收阶段随之移除，截图 OCR 组件测试见下方 snap-ocr 阶段。

@@ -429,6 +429,27 @@
       "body": "5691b50119f4cf97"
     },
     {
+      "file": "optional/snap-ocr-worker/src/capture_win.rs",
+      "name": "gdi_selection_rejects_null_and_hgdi_error",
+      "ignored": false,
+      "cfg": "windows",
+      "body": "efd0f50ca4e60348"
+    },
+    {
+      "file": "optional/snap-ocr-worker/src/capture_win.rs",
+      "name": "main_window_hidden_only_by_full_registered_path",
+      "ignored": false,
+      "cfg": "windows",
+      "body": "db93ab5beb5fe5dc"
+    },
+    {
+      "file": "optional/snap-ocr-worker/src/result_window.rs",
+      "name": "copy_failure_hint_uses_error_state",
+      "ignored": false,
+      "cfg": null,
+      "body": "886c92458fa84c7c"
+    },
+    {
       "file": "optional/snap-ocr-worker/src/result_window.rs",
       "name": "failed_font_registration_is_not_cached",
       "ignored": false,
@@ -441,6 +462,13 @@
       "ignored": false,
       "cfg": null,
       "body": "c864cd2f5db6e5cc"
+    },
+    {
+      "file": "optional/snap-ocr-worker/src/result_window.rs",
+      "name": "non_positive_work_area_rejects_result_window",
+      "ignored": false,
+      "cfg": null,
+      "body": "bf1d88f30670c080"
     },
     {
       "file": "optional/snap-ocr-worker/src/result_window.rs",
@@ -475,7 +503,7 @@
       "name": "theme_tokens_have_distinct_light_and_dark_palettes",
       "ignored": false,
       "cfg": null,
-      "body": "4103f44907720204"
+      "body": "734535504bd4382d"
     },
     {
       "file": "optional/snap-ocr-worker/src/service.rs",
@@ -483,6 +511,13 @@
       "ignored": false,
       "cfg": "windows",
       "body": "ea63fb233c5cacaa"
+    },
+    {
+      "file": "optional/snap-ocr-worker/src/service.rs",
+      "name": "autostart_value_classification_rejects_corrupt_entries",
+      "ignored": false,
+      "cfg": "windows",
+      "body": "ee32e94edbf1b510"
     },
     {
       "file": "optional/snap-ocr-worker/src/service.rs",
@@ -514,6 +549,13 @@
     },
     {
       "file": "optional/snap-ocr-worker/src/service.rs",
+      "name": "delayed_hotkey_failure_reports_and_keeps_old",
+      "ignored": false,
+      "cfg": "windows",
+      "body": "fa4921faeec47ac6"
+    },
+    {
+      "file": "optional/snap-ocr-worker/src/service.rs",
       "name": "font_readiness_rejects_missing_manifest_assets",
       "ignored": false,
       "cfg": "windows",
@@ -521,17 +563,24 @@
     },
     {
       "file": "optional/snap-ocr-worker/src/service.rs",
+      "name": "hotkey_receipt_final_timeout_self_heals_to_old",
+      "ignored": false,
+      "cfg": "windows",
+      "body": "4a6eeef9826a1efc"
+    },
+    {
+      "file": "optional/snap-ocr-worker/src/service.rs",
       "name": "inference_failure_does_not_unload_ready_model",
       "ignored": false,
       "cfg": "windows",
-      "body": "19ebcf28d2e45a86"
+      "body": "3cb09081c7c627b0"
     },
     {
       "file": "optional/snap-ocr-worker/src/service.rs",
       "name": "load_failures_map_to_distinct_model_states",
       "ignored": false,
       "cfg": "windows",
-      "body": "07e1910353f82b7b"
+      "body": "11c96ce68cff0642"
     },
     {
       "file": "optional/snap-ocr-worker/src/service.rs",
@@ -549,6 +598,13 @@
     },
     {
       "file": "optional/snap-ocr-worker/src/service.rs",
+      "name": "reload_plan_reuses_only_ready_engine",
+      "ignored": false,
+      "cfg": "windows",
+      "body": "c169ea9850c82b5c"
+    },
+    {
+      "file": "optional/snap-ocr-worker/src/service.rs",
       "name": "stale_selection_cancel_generation_cannot_cancel_new_task",
       "ignored": false,
       "cfg": "windows",
@@ -560,6 +616,13 @@
       "ignored": false,
       "cfg": "windows",
       "body": "e1b40d5f4d3b6616"
+    },
+    {
+      "file": "optional/snap-ocr-worker/src/service.rs",
+      "name": "timeout_hotkey_save_is_not_reported_failure",
+      "ignored": false,
+      "cfg": "windows",
+      "body": "4b50170495aa9666"
     },
     {
       "file": "optional/snap-ocr-worker/src/service.rs",
@@ -598,6 +661,13 @@
     },
     {
       "file": "optional/snap-ocr-worker/src/shared_xberg.rs",
+      "name": "cancel_flag_overrides_timeout_and_io_classification",
+      "ignored": false,
+      "cfg": null,
+      "body": "9f38198f17c308af"
+    },
+    {
+      "file": "optional/snap-ocr-worker/src/shared_xberg.rs",
       "name": "classifies_runtime_process_and_timeout_errors",
       "ignored": false,
       "cfg": null,
@@ -609,6 +679,13 @@
       "ignored": false,
       "cfg": null,
       "body": "106d37f1c471fd67"
+    },
+    {
+      "file": "optional/snap-ocr-worker/src/shared_xberg.rs",
+      "name": "entry_cancel_message_classifies_as_cancelled",
+      "ignored": false,
+      "cfg": null,
+      "body": "b7aaa6a95ec5fb8e"
     },
     {
       "file": "optional/snap-ocr-worker/src/shared_xberg.rs",
@@ -1046,6 +1123,13 @@
     },
     {
       "file": "src/gui.rs",
+      "name": "convert_page_has_no_initialize_entry",
+      "ignored": false,
+      "cfg": null,
+      "body": "5f6bddb7beb63269"
+    },
+    {
+      "file": "src/gui.rs",
       "name": "convert_same_input_output_rejected_before_busy",
       "ignored": false,
       "cfg": null,
@@ -1064,6 +1148,20 @@
       "ignored": false,
       "cfg": null,
       "body": "636f2127b117e983"
+    },
+    {
+      "file": "src/gui.rs",
+      "name": "converter_done_rechecks_readiness_dropped_while_busy",
+      "ignored": false,
+      "cfg": null,
+      "body": "72d268d2145e0ac8"
+    },
+    {
+      "file": "src/gui.rs",
+      "name": "converter_log_rebuild_is_throttled_to_visible_page",
+      "ignored": false,
+      "cfg": null,
+      "body": "9eb55107ca417d23"
     },
     {
       "file": "src/gui.rs",
@@ -1175,7 +1273,7 @@
       "name": "gui_test_cases_do_not_share_late_background_errors",
       "ignored": false,
       "cfg": null,
-      "body": "d1ace55ec995f212"
+      "body": "91935808fb269531"
     },
     {
       "file": "src/gui.rs",
@@ -1246,6 +1344,13 @@
       "ignored": false,
       "cfg": null,
       "body": "39c1c0502b3f09f5"
+    },
+    {
+      "file": "src/gui.rs",
+      "name": "media_only_selection_computes_readiness_without_page_initialize",
+      "ignored": false,
+      "cfg": null,
+      "body": "0a4b0e9e9f38449e"
     },
     {
       "file": "src/gui.rs",
@@ -1361,6 +1466,13 @@
     },
     {
       "file": "src/gui.rs",
+      "name": "settings_result_while_task_running_keeps_close_after",
+      "ignored": false,
+      "cfg": null,
+      "body": "53790436f60fd833"
+    },
+    {
+      "file": "src/gui.rs",
       "name": "shared_settings_rejects_invalid_assets_and_keeps_saved_source",
       "ignored": false,
       "cfg": null,
@@ -1372,6 +1484,13 @@
       "ignored": false,
       "cfg": null,
       "body": "d3bc1b2b75a21cb6"
+    },
+    {
+      "file": "src/gui.rs",
+      "name": "snap_cancelled_initialize_is_not_shown_as_error",
+      "ignored": false,
+      "cfg": null,
+      "body": "9fd2b3f1adc69686"
     },
     {
       "file": "src/gui.rs",
@@ -1407,6 +1526,13 @@
       "ignored": false,
       "cfg": null,
       "body": "57c6af8e4e479553"
+    },
+    {
+      "file": "src/gui.rs",
+      "name": "startup_settings_snapshot_keeps_running_initialization_state",
+      "ignored": false,
+      "cfg": null,
+      "body": "b32f489942f0ab51"
     },
     {
       "file": "src/gui.rs",
@@ -1483,7 +1609,21 @@
       "name": "atomic_commit_refuses_existing_result",
       "ignored": false,
       "cfg": null,
-      "body": "01cf45e01efa5c4f"
+      "body": "628ba234e1d62af2"
+    },
+    {
+      "file": "src/markdown.rs",
+      "name": "expired_deadline_blocks_final_commit_without_temp_leftover",
+      "ignored": false,
+      "cfg": null,
+      "body": "35159d5892bbe711"
+    },
+    {
+      "file": "src/markdown.rs",
+      "name": "expired_deadline_blocks_media_write_and_rolls_back",
+      "ignored": false,
+      "cfg": null,
+      "body": "24b581552338a1a1"
     },
     {
       "file": "src/markdown.rs",
@@ -1498,6 +1638,13 @@
       "ignored": false,
       "cfg": null,
       "body": "93c5f538f8ba6356"
+    },
+    {
+      "file": "src/markdown.rs",
+      "name": "fold_key_agrees_with_compare_string_ordinal_on_greek_ypogegrammeni",
+      "ignored": false,
+      "cfg": "windows",
+      "body": "e6f8841c487bd5a6"
     },
     {
       "file": "src/markdown.rs",
@@ -1550,17 +1697,24 @@
     },
     {
       "file": "src/markdown.rs",
+      "name": "media_dir_reservation_failure_fails_file_not_batch",
+      "ignored": false,
+      "cfg": null,
+      "body": "1c444b3dff47eb97"
+    },
+    {
+      "file": "src/markdown.rs",
       "name": "media_files_written_before_markdown_commit",
       "ignored": false,
       "cfg": null,
-      "body": "831f0f511cd494ec"
+      "body": "e62602f0a2d2124d"
     },
     {
       "file": "src/markdown.rs",
       "name": "media_write_failure_rolls_back_and_fails_file",
       "ignored": false,
       "cfg": null,
-      "body": "7ee85ef5e52583a7"
+      "body": "42a7ef39f8a0bd1d"
     },
     {
       "file": "src/markdown.rs",
@@ -1612,11 +1766,32 @@
       "body": "1e29cea702efd43d"
     },
     {
+      "file": "src/markdown.rs",
+      "name": "unbounded_deadline_keeps_normal_commit",
+      "ignored": false,
+      "cfg": null,
+      "body": "e62602f0a2d2124d"
+    },
+    {
       "file": "src/markdown_assets.rs",
       "name": "cleanup_owned_download_staging_preserves_unowned_and_valid_versions",
       "ignored": false,
       "cfg": null,
       "body": "1c5dc7f0a137faa7"
+    },
+    {
+      "file": "src/markdown_assets.rs",
+      "name": "download_cancel_before_commit_keeps_config_untouched",
+      "ignored": false,
+      "cfg": null,
+      "body": "60e4363d8053c21f"
+    },
+    {
+      "file": "src/markdown_assets.rs",
+      "name": "download_runtime_write_notice_closes_readiness_loop",
+      "ignored": false,
+      "cfg": null,
+      "body": "0e1c8e05016dce22"
     },
     {
       "file": "src/markdown_assets.rs",
@@ -1687,6 +1862,13 @@
       "ignored": false,
       "cfg": null,
       "body": "25a615de1e2cfe6e"
+    },
+    {
+      "file": "src/markdown_assets.rs",
+      "name": "manifest_cross_segment_drift_is_rejected",
+      "ignored": false,
+      "cfg": null,
+      "body": "4eae729d65b9d13e"
     },
     {
       "file": "src/markdown_assets.rs",
@@ -1764,6 +1946,13 @@
       "ignored": false,
       "cfg": null,
       "body": "5906a93309c754d3"
+    },
+    {
+      "file": "src/markdown_assets.rs",
+      "name": "save_runtime_dir_writes_notice_for_custom_directory",
+      "ignored": false,
+      "cfg": null,
+      "body": "07d157200ea68e54"
     },
     {
       "file": "src/markdown_assets.rs",
@@ -2306,6 +2495,20 @@
     },
     {
       "file": "src/snap_ocr_assets.rs",
+      "name": "readiness_reports_distinct_asset_failure_kinds",
+      "ignored": false,
+      "cfg": null,
+      "body": "49b708c8d67e2796"
+    },
+    {
+      "file": "src/snap_ocr_assets.rs",
+      "name": "worker_readiness_rejects_corrupted_bundled_worker",
+      "ignored": false,
+      "cfg": null,
+      "body": "70d204165f5c3aca"
+    },
+    {
+      "file": "src/snap_ocr_assets.rs",
       "name": "xberg_component_layout_reports_missing_incomplete_and_ready",
       "ignored": false,
       "cfg": null,
@@ -2341,10 +2544,24 @@
     },
     {
       "file": "src/system_proxy.rs",
+      "name": "ipv6_bracket_bypass_entries_match_bare_url_host",
+      "ignored": false,
+      "cfg": null,
+      "body": "cd3c80d83e5eed3b"
+    },
+    {
+      "file": "src/system_proxy.rs",
       "name": "network_signature_matches_connect_failures_only",
       "ignored": false,
       "cfg": null,
       "body": "004cdb2462c07bfe"
+    },
+    {
+      "file": "src/system_proxy.rs",
+      "name": "no_proxy_translation_unwraps_ipv6_brackets",
+      "ignored": false,
+      "cfg": null,
+      "body": "95aa8ea341193fe3"
     },
     {
       "file": "src/system_proxy.rs",
@@ -3712,6 +3929,27 @@
       "body": "c02685cdeb58c535"
     },
     {
+      "file": "tests/engine_cleanup_filter.rs",
+      "name": "cleanup_keeps_user_owned_xberg_image_alive",
+      "ignored": false,
+      "cfg": null,
+      "body": "99bd6e31cfaa6664"
+    },
+    {
+      "file": "tests/engine_cleanup_filter.rs",
+      "name": "cleanup_still_kills_test_owned_xberg_image",
+      "ignored": false,
+      "cfg": null,
+      "body": "2f245ef6c8d74560"
+    },
+    {
+      "file": "tests/engine_cleanup_filter.rs",
+      "name": "engine_cleanup_filter_selects_only_test_owned_paths",
+      "ignored": false,
+      "cfg": null,
+      "body": "ed1ed6dde9cda9f3"
+    },
+    {
       "file": "tests/git_tools.rs",
       "name": "backoff_follows_required_sequence",
       "ignored": false,
@@ -4021,6 +4259,13 @@
     },
     {
       "file": "tests/gui_flow.rs",
+      "name": "settings_markdown_and_snap_pages_gate_and_status_end_to_end",
+      "ignored": false,
+      "cfg": "feature = \"gui\"",
+      "body": "2d5eccc04128f45a"
+    },
+    {
+      "file": "tests/gui_flow.rs",
       "name": "stop_and_close_during_md_merge_quits_when_merge_finishes",
       "ignored": false,
       "cfg": "feature = \"gui\"",
@@ -4066,7 +4311,7 @@
       "name": "real_component_trackless_media_reports_no_audio",
       "ignored": true,
       "cfg": null,
-      "body": "acc2b39453e63a98"
+      "body": "f7d87c10bdf85a97"
     },
     {
       "file": "tests/markdown_media_e2e.rs",
@@ -4644,10 +4889,31 @@
     },
     {
       "file": "tests/xberg_shared_process.rs",
+      "name": "late_cancel_after_engine_death_does_not_respawn_engine",
+      "ignored": false,
+      "cfg": null,
+      "body": "f866d68c9bd85921"
+    },
+    {
+      "file": "tests/xberg_shared_process.rs",
       "name": "spawned_broker_reaped_when_spawning_process_exits",
       "ignored": false,
       "cfg": null,
       "body": "5fd49244744b6bb2"
+    },
+    {
+      "file": "tests/xberg_shared_process.rs",
+      "name": "watchdog_exit_flushes_diagnostic_log_before_process_exit",
+      "ignored": false,
+      "cfg": null,
+      "body": "73afd3e59d1db5cd"
+    },
+    {
+      "file": "tests/xberg_unknown_response.rs",
+      "name": "unknown_id_response_fails_waiter_and_releases_lane",
+      "ignored": false,
+      "cfg": null,
+      "body": "6c895bc3bb653f78"
     }
   ]
 }
