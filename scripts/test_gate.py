@@ -317,9 +317,12 @@ def _powershell_env() -> dict[str, str]:
     module_path = _ps51_module_path()
     if module_path is not None:
         env["PSModulePath"] = module_path
-    # 仅传递已存在的隔离测试引擎目录；不运行 xberg CLI 做前置探测。
-    # 运行时资产与 SQLite 隔离根由 acceptance.ps1/调用方布置，禁止回退生产目录。
-    if (FIXED_XBERG_TEST_DIR / "xberg.exe").is_file():
+    # 保留调用方明确选定的隔离测试引擎，即使路径无效也由 acceptance 报错，
+    # 不能静默改测固定目录里的旧二进制。未指定时才回落固定测试目录。
+    explicit_xberg = os.environ.get("JCHTOOLS_TEST_XBERG_DIR")
+    if explicit_xberg:
+        env["JCHTOOLS_TEST_XBERG_DIR"] = explicit_xberg
+    elif (FIXED_XBERG_TEST_DIR / "xberg.exe").is_file():
         env["JCHTOOLS_TEST_XBERG_DIR"] = str(FIXED_XBERG_TEST_DIR)
     # acceptance.ps1 会在本阶段构建该 EXE；保留调用方显式路径，并尊重
     # CARGO_TARGET_DIR，不猜测旧产物。
@@ -361,6 +364,23 @@ def _ps51_module_path() -> str | None:
         and "\\documents\\powershell\\" not in f"{part.lower()}\\"
     ]
     return os.pathsep.join(keep) or None
+
+
+def _powershell_literal(value: str | Path) -> str:
+    """编码 PowerShell 单引号字面量，路径/参数中的单引号不成为可执行语法."""
+    return "'" + str(value).replace("'", "''") + "'"
+
+
+def _acceptance_argv(powershell: str, script: Path, gui_data: Path, markdown_args: list[str]) -> list[str]:
+    """通过真实数组表达式绑定 MarkdownArgs；Windows PowerShell 5.1 -File 不能传多值数组."""
+    command = (
+        f"& {_powershell_literal(script)} -WithEngine -WithGuiSmoke "
+        f"-GuiData {_powershell_literal(gui_data)} -WithMarkdownAcceptance"
+    )
+    if markdown_args:
+        values = ", ".join(_powershell_literal(value) for value in markdown_args)
+        command += f" -MarkdownArgs @({values})"
+    return [powershell, "-NoProfile", "-Command", command]
 
 
 def _fulltest_stages(results: list[StageResult]) -> None:
@@ -418,26 +438,14 @@ def _fulltest_stages(results: list[StageResult]) -> None:
         return
     # 单命令复用可信基验收入口：static_check + 全量测试 + binding 扫描 + 真实引擎用例
     # + GUI 冒烟（内含 gui-build）。发布打包自检不在本级（只在 slowtest，见 _package_stage）。
-    acceptance_argv = [
-        powershell,
-        "-NoProfile",
-        "-File",
-        str(ROOT / "scripts" / "acceptance.ps1"),
-        "-WithEngine",
-        "-WithGuiSmoke",
-        "-GuiData",
-        str(GUI_DATA_DIR),
-    ]
+    markdown_args = shlex.split(os.environ.get("JCHTOOLS_MD_ACCEPTANCE_ARGS", "").strip())
+    acceptance_argv = _acceptance_argv(powershell, ROOT / "scripts" / "acceptance.ps1", GUI_DATA_DIR, markdown_args)
     # F26：转 Markdown 验收承接（ALL2MARKDOWN 附录 A）默认进入 fulltest/slowtest。
     # 无资产或被测物时 acceptance.ps1 记 NOT RUN，不把缺资产伪报为通过；
     # JCHTOOLS_MD_ACCEPTANCE_ARGS 仅用于向默认入口透传被测物/双形态参数。
-    acceptance_argv += ["-WithMarkdownAcceptance"]
-    md_args = os.environ.get("JCHTOOLS_MD_ACCEPTANCE_ARGS", "").strip()
-    if md_args:
-        acceptance_argv += ["-MarkdownArgs", *shlex.split(md_args)]
-    # 本机执行策略全作用域 Undefined（默认 Restricted）会拒绝任何 -File 运行 .ps1；
-    # PSExecutionPolicyPreference 以 Process 作用域覆盖之，且随环境继承给
-    # acceptance.ps1 内部再起的 powershell 子进程，只影响本进程树。
+    # 本机执行策略全作用域 Undefined（默认 Restricted）会拒绝执行 .ps1；
+    # PSExecutionPolicyPreference 以 Process 作用域覆盖之，随环境继承给
+    # acceptance.ps1 内部的 powershell 子进程，只影响本进程树。
     acceptance_env = _powershell_env()
     acceptance_result = run_logged(
         "acceptance", acceptance_argv, timeout=STAGE_TIMEOUT_DEFAULT, env_extra=acceptance_env

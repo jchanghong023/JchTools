@@ -11,7 +11,31 @@
   校验，不重写文件）：`test_hello_world.png`、`large_210_pages.pdf`（常规模式
   回归，低于引擎 `auto_fast_pages=500` 阈值）、`large_501_pages.pdf`（超过
   阈值，用于断言 `auto_mode` 降级披露）、`scanned_hello.pdf`（单页图像型扫描
-  形态）、`matrix/format_sweep/sample.jsonl`（纯合成 JSONL）。
+  形态）、`matrix/format_sweep/sample.jsonl`（纯合成 JSONL）、
+  `matrix/jbig2_standalone.jb2`（320×96 白底黑字，Pillow Group4 MMR 加完整
+  JBIG2 单页顺序段流）、`matrix/format_sweep/sample.hwp`（无压缩 HWP 5.0.0.0，
+  CFB v3 + miniFAT，正文为 `HWP SYNTH CHECK`）。JBIG2 以独立 MuPDF 渲染逐像素
+  核对，不能用引擎自身解码结果当唯一真值。旧 JBIG2 样本声明存在页数却缺少
+  页数字段，不再冒充健康输入。
+  - HWP 按[Hancom 官方格式说明](https://tech.hancom.com/python-hwp-parsing-2/)构造
+    `BodyText/Section0`：22 字节 `PARA_HEADER`（5.0.0.0 无后续版本扩展）、
+    UTF-16LE `PARA_TEXT`、字形引用、行布局、区段定义及 A4 页面定义；DocInfo
+    含文档属性、ID 映射、七语言字体、字形、制表位、段落样式和命名样式。
+    所有字体/样式引用均有对应定义，无下载样本、旧正文或元数据。
+  - 独立读取使用 `olefile 0.47` 与 `pyhwp 0.1b15`：CFB 流可枚举，版本为
+    `(5, 0, 0, 0)`、flags=0，DocInfo 与正文模型完整解析，无残留字节；
+    `ParaText` 独立解出区段控制、`HWP SYNTH CHECK` 和段落结束符。受管 `--check`
+    对确定性容器、miniFAT、记录和正文逐字节断言，不以 Xberg 能接受为有效性定义。
+    CFB 另按 [MS-CFB §2.6.4](https://learn.microsoft.com/en-us/openspecs/windows_protocols/ms-cfb/d30e462c-5f8a-435b-9c4c-cc0b9ea89956)
+    校验名称先按 UTF-16 长度、再按大写码点排序及红黑树性质；根子树顺序为
+    `DocInfo < PrvText < BodyText < FileHeader`，并非普通字符串字典序。
+    `BodyText` 黑节点左右为 `DocInfo` 黑节点和 `FileHeader` 黑节点；
+    `DocInfo` 的右节点 `PrvText` 为红，所有路径黑高相等、无连续红节点。
+  - 旧 HWP 虽有 Section0，却使用 zlib 包装压缩、零长度段落头和错误的
+    `0x50/0x51` 段落/文本标签（规范为 `0x42/0x43`），不能作为健康格式样本。
+    2026-10-05 替换前原件保留在 `.tmp/hwp-fixture-evidence/original-invalid.hwp`；
+    原件 SHA-256 为 `73a47ed24329cca8a26936ba95501580ee127cdf9f63becf87d9057ec0738194`。
+    仅替换格式输入，不改变 A25 判定或将失败重新分类。
 - `matrix/` 内的 Office/PDF 构造文件（如 `docx_all_sources.docx`、
   `docx_emf_wmf_raster.docx`、`pdf_repeat_softmask.pdf`）为接线期就地合成的
   无来源样本；`matrix/format_sweep/` 其余样本为 A25 格式清点布置的无敏感内容
@@ -34,9 +58,7 @@
   - `video-to-notes-intro-zh.mp4`：真实中文语音样本，A24 的真实转录链路
     必需，无离线 TTS 等价替代；
   - `matrix/jpeg2000/`：JPEG 2000 家族公开样本，requirements-dev 无对应
-    编码库；
-  - `matrix/jbig2_standalone.jb2`：JBIG2 位图编码样本（A25 格式清点在场），
-    同样无对应编码库，按现状保留。
+    编码库。
 
 ## 历史接线记录（非当前验收结论）
 

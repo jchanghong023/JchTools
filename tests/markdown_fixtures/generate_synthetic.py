@@ -13,11 +13,14 @@
 from __future__ import annotations
 
 import argparse
+import io
 import json
+import re
+import struct
 from pathlib import Path
 from typing import cast
 
-from PIL import Image, ImageDraw, ImageFont
+from PIL import Image, ImageDraw, ImageFont, ImageOps
 
 DIRECTORY = Path(__file__).resolve().parent
 
@@ -72,8 +75,6 @@ _FIXED_PDF_DATE = b"D:20260101000000Z"
 
 
 def _pin_pdf_timestamp(target: Path) -> None:
-    import re
-
     data = target.read_bytes()
     patched, count = re.subn(
         rb"/(CreationDate|ModDate) \([^)]*\)",
@@ -81,7 +82,7 @@ def _pin_pdf_timestamp(target: Path) -> None:
         data,
     )
     if count:
-        target.write_bytes(patched)
+        _ = target.write_bytes(patched)
 
 
 def _pdf_page_count(data: bytes) -> int:
@@ -92,6 +93,223 @@ def _pdf_page_count(data: bytes) -> int:
 def _write_jsonl(target: Path) -> None:
     lines = [json.dumps(row, ensure_ascii=False) for row in SYNTHETIC_JSONL_ROWS]
     _ = target.write_text("\n".join(lines) + "\n", encoding="utf-8")
+
+
+def _write_jbig2(target: Path) -> None:
+    """从零生成单页顺序 JBIG2：PageInformation + MMR generic region + EOF.
+
+    Pillow 的 Group4 TIFF 提供 T.6 编码，不需要 JBIG2 专用编码库。
+    TIFF 默认 BlackIsZero；JBIG2 的 MMR 位极性相反，先反转编码输入，
+    保证最终图仍是白底黑字。该构造已与独立 MuPDF 解码逐像素对照。
+    """
+    width, height = 320, 96
+    picture = Image.new("1", (width, height), 1)
+    draw = ImageDraw.Draw(picture)
+    font = cast("ImageFont.FreeTypeFont", cast("object", ImageFont.load_default(size=24)))
+    draw.text((12, 24), "JBIG2 SYNTH CHECK", fill=0, font=font)  # pyright: ignore[reportUnknownMemberType]
+    encoded = io.BytesIO()
+    ImageOps.invert(picture.convert("L")).convert("1").save(encoded, "TIFF", compression="group4")
+    tiff_bytes = encoded.getvalue()
+    with Image.open(io.BytesIO(tiff_bytes)) as tiff:
+        offsets = cast("tuple[int, ...]", tiff.tag_v2[273])  # pyright: ignore[reportAttributeAccessIssue]
+        lengths = cast("tuple[int, ...]", tiff.tag_v2[279])  # pyright: ignore[reportAttributeAccessIssue]
+        mmr = b"".join(tiff_bytes[offset : offset + length] for offset, length in zip(offsets, lengths, strict=True))
+
+    def segment(number: int, kind: int, page: int, payload: bytes) -> bytes:
+        return struct.pack(">IBBBI", number, kind, 0, page, len(payload)) + payload
+
+    page_info = struct.pack(">IIIIBH", width, height, 72, 72, 0, 0)
+    region_info = struct.pack(">IIIIBB", width, height, 0, 0, 0, 1)
+    data = (
+        b"\x97JB2\r\n\x1a\n\x01"
+        + struct.pack(">I", 1)
+        + segment(0, 48, 1, page_info)
+        + segment(1, 38, 1, region_info + mmr)
+        + segment(2, 49, 1, b"")
+        + segment(3, 51, 0, b"")
+    )
+    _ = target.write_bytes(data)
+
+
+HWP_SYNTH_TEXT = "HWP SYNTH CHECK"
+_CFB_FREE = 0xFFFFFFFF
+_CFB_END = 0xFFFFFFFE
+_HWP_DIRECTORY_MAX_ID = 5
+
+
+def _hwp_record(tag: int, level: int, payload: bytes) -> bytes:
+    """HWP5 记录头：tag/level/size 各占 10/10/12 位（本样本无需扩展长度）."""
+    return struct.pack("<I", tag | (level << 10) | (len(payload) << 20)) + payload
+
+
+def _hwp_string(text: str) -> bytes:
+    return struct.pack("<H", len(text)) + text.encode("utf-16le")
+
+
+def _hwp_streams() -> dict[str, bytes]:
+    """从零构造无压缩 HWP 5.0.0.0，引用均指向实际定义的默认样式."""
+    header = b"HWP Document File".ljust(32, b"\0") + struct.pack("<II", 0x05000000, 0) + bytes(216)
+    properties = struct.pack("<7H3I", 1, 1, 1, 1, 1, 1, 1, 0, 0, 0)
+    mappings = struct.pack("<15I", 0, 1, 1, 1, 1, 1, 1, 1, 0, 1, 1, 0, 0, 1, 1)
+    font = b"\x01" + _hwp_string("Arial")
+    char_shape = (
+        bytes(14)
+        + bytes([100]) * 7
+        + bytes(7)
+        + bytes([100]) * 7
+        + bytes(7)
+        + struct.pack("<iIbb4I", 1000, 0, 0, 0, 0, 0, 0xFFFFFFFF, 0)
+    )
+    para_shape = struct.pack("<I6i7H", 4, 0, 0, 0, 0, 0, 160, 0, 0, 0, 0, 0, 0, 0)
+    style = _hwp_string("Normal") + _hwp_string("Normal") + struct.pack("<BBhHHH", 0, 0, 1033, 0, 0, 0)
+    doc_info = (
+        _hwp_record(16, 0, properties)
+        + _hwp_record(17, 0, mappings)
+        + b"".join(_hwp_record(19, 1, font) for _ in range(7))
+        + _hwp_record(21, 1, char_shape)
+        + _hwp_record(22, 1, bytes(8))
+        + _hwp_record(25, 1, para_shape)
+        + _hwp_record(26, 1, style)
+    )
+    # Section-definition extended control occupies eight UTF-16 code units.
+    # Paragraph character count includes that control and the final CR.
+    text = struct.pack("<H", 2) + b"dces" + bytes(8) + struct.pack("<H", 2)
+    text += (HWP_SYNTH_TEXT + "\r").encode("utf-16le")
+    para_header = struct.pack("<IIHBBHHHI", 0x80000000 | (len(text) // 2), 4, 0, 0, 1, 1, 0, 1, 1)
+    section_def = b"dces" + struct.pack("<I3HI5H", 0, 0, 0, 0, 4000, 0, 1, 1, 1, 1)
+    page_def = struct.pack("<10I", 59528, 84188, 8504, 8504, 5669, 4252, 4252, 4252, 0, 0)
+    line_seg = struct.pack("<8iI", 0, 0, 1000, 1000, 850, 600, 0, 42520, 0x00060000)
+    body = (
+        _hwp_record(66, 0, para_header)
+        + _hwp_record(67, 1, text)
+        + _hwp_record(68, 1, struct.pack("<II", 0, 0))
+        + _hwp_record(69, 1, line_seg)
+        + _hwp_record(71, 1, section_def)
+        + _hwp_record(73, 2, page_def)
+    )
+    return {"FileHeader": header, "DocInfo": doc_info, "Section0": body, "PrvText": HWP_SYNTH_TEXT.encode("utf-16le")}
+
+
+def _hwp_bytes() -> bytes:
+    """最小 CFB v3 容器：512 字节扇区、64 字节 mini-sector、合法目录红黑树."""
+    streams = _hwp_streams()
+    mini_fat: list[int] = []
+    mini_data = bytearray()
+    starts: dict[str, int] = {}
+    for name, payload in streams.items():
+        starts[name] = len(mini_fat)
+        count = (len(payload) + 63) // 64
+        for index in range(count):
+            mini_fat.append(len(mini_fat) + 1 if index + 1 < count else _CFB_END)
+        mini_data.extend(payload.ljust(count * 64, b"\0"))
+    mini_size = len(mini_data)
+    mini_sectors = (mini_size + 511) // 512
+    mini_data.extend(bytes(mini_sectors * 512 - mini_size))
+    minifat_sector = 2 + mini_sectors
+    fat_sector = minifat_sector + 1
+
+    def entry(  # noqa: PLR0913  # MS-CFB 目录项的八个固定字段，不引入重复记录模型。
+        name: str, kind: int, color: int, left: int, right: int, child: int, start: int, size: int
+    ) -> bytes:
+        encoded = (name + "\0").encode("utf-16le")
+        return (
+            encoded.ljust(64, b"\0")
+            + struct.pack("<HBBIII", len(encoded), kind, color, left, right, child)
+            + bytes(36)
+            + struct.pack("<IQ", start, size)
+        )
+
+    free = _CFB_FREE
+    directory = (
+        # MS-CFB §2.6.4 orders names by UTF-16 byte length FIRST, then uppercase
+        # code units: DocInfo < PrvText < BodyText < FileHeader (not lexical).
+        # BodyText(B) has DocInfo(B)/FileHeader(B); DocInfo has PrvText(R).
+        entry("Root Entry", 5, 1, free, free, 1, 2, mini_size)
+        + entry("BodyText", 1, 1, 2, 3, 5, 0, 0)
+        + entry("DocInfo", 2, 1, free, 4, free, starts["DocInfo"], len(streams["DocInfo"]))
+        + entry("FileHeader", 2, 1, free, free, free, starts["FileHeader"], len(streams["FileHeader"]))
+        + entry("PrvText", 2, 0, free, free, free, starts["PrvText"], len(streams["PrvText"]))
+        + entry("Section0", 2, 1, free, free, free, starts["Section0"], len(streams["Section0"]))
+    ).ljust(1024, b"\0")
+    fat = [1, _CFB_END]
+    fat.extend(3 + index if index + 1 < mini_sectors else _CFB_END for index in range(mini_sectors))
+    fat.extend([_CFB_END, 0xFFFFFFFD])
+    fat.extend([free] * (128 - len(fat)))
+    header = (
+        b"\xd0\xcf\x11\xe0\xa1\xb1\x1a\xe1"
+        + bytes(16)
+        + struct.pack("<HHHHH", 0x003E, 3, 0xFFFE, 9, 6)
+        + bytes(6)
+        + struct.pack("<9I", 0, 1, 0, 0, 4096, minifat_sector, 1, _CFB_END, 0)
+        + struct.pack("<109I", fat_sector, *([free] * 108))
+    )
+    return (
+        header
+        + directory
+        + bytes(mini_data)
+        + struct.pack("<128I", *mini_fat, *([free] * (128 - len(mini_fat))))
+        + struct.pack("<128I", *fat)
+    )
+
+
+def _write_hwp(target: Path) -> None:
+    _ = target.write_bytes(_hwp_bytes())
+
+
+def _check_hwp(target: Path) -> str | None:
+    """校验确定性字节及 MS-CFB 长度优先排序、无连续红节点和等黑高."""
+    data = target.read_bytes()
+    if data != _hwp_bytes():
+        return f"{target.name} 不符合受管 HWP5 容器/记录结构或稳定正文"
+    try:
+        _validate_hwp_directory(data)
+    except ValueError as error:
+        return f"{target.name}：{error}"
+    return None
+
+
+def _validate_hwp_directory(data: bytes) -> None:
+    """独立遍历 MS-CFB 目录，按规范检查排序和红黑树不变量。."""
+    visited: set[int] = set()
+
+    def walk(index: int, lower: tuple[int, str] | None, upper: tuple[int, str] | None, *, red: bool) -> int:
+        if index == _CFB_FREE:
+            return 1
+        if not 1 <= index <= _HWP_DIRECTORY_MAX_ID or index in visited:
+            message = "目录节点重复或越界"
+            raise ValueError(message)
+        visited.add(index)
+        offset = 512 + index * 128
+        length = struct.unpack_from("<H", data, offset + 64)[0]
+        name = data[offset : offset + length - 2].decode("utf-16le")
+        # Managed names are ASCII: upper() exactly implements simple UTF-16
+        # uppercase here, without Unicode expansion or surrogate ambiguity.
+        if not name.isascii():
+            message = "受管目录名称必须为 ASCII"
+            raise ValueError(message)
+        key = (length, name.upper())
+        if (lower is not None and key <= lower) or (upper is not None and key >= upper):
+            message = "目录名称未按长度优先的 MS-CFB 规则排序"
+            raise ValueError(message)
+        color = data[offset + 67]
+        if color not in (0, 1) or (red and color == 0):
+            message = "目录红黑颜色无效"
+            raise ValueError(message)
+        left, right = struct.unpack_from("<II", data, offset + 68)
+        left_height = walk(left, lower, key, red=color == 0)
+        right_height = walk(right, key, upper, red=color == 0)
+        if left_height != right_height:
+            message = "目录红黑树黑高不一致"
+            raise ValueError(message)
+        return left_height + color
+
+    root_child = struct.unpack_from("<I", data, 512 + 76)[0]
+    _ = walk(root_child, None, None, red=True)
+    section_child = struct.unpack_from("<I", data, 512 + 128 + 76)[0]
+    _ = walk(section_child, None, None, red=True)
+    if visited != set(range(1, _HWP_DIRECTORY_MAX_ID + 1)):
+        message = "目录含不可达节点"
+        raise ValueError(message)
 
 
 def managed_files() -> dict[Path, str]:
@@ -105,6 +323,8 @@ def managed_files() -> dict[Path, str]:
         ),
         DIRECTORY / "scanned_hello.pdf": "单页图像型 PDF（扫描页形态：正文即整页位图）",
         sweep / "sample.jsonl": "合成 JSONL 样本（A25 格式清点；无外部语料路径）",
+        DIRECTORY / "matrix" / "jbig2_standalone.jb2": "JBIG2 合成文字位图（A19）：完整文件头与 MMR 区域",
+        sweep / "sample.hwp": "HWP5 合成正文（A25）：真实 Section0 段落与默认字体/样式",
     }
 
 
@@ -120,6 +340,10 @@ def _regenerate_one(target: Path) -> None:
         _pin_pdf_timestamp(target)
     elif target.name == "sample.jsonl":
         _write_jsonl(target)
+    elif target.name == "jbig2_standalone.jb2":
+        _write_jbig2(target)
+    elif target.name == "sample.hwp":
+        _write_hwp(target)
 
 
 def regenerate() -> list[str]:
@@ -157,6 +381,23 @@ def _check_plain(target: Path) -> str | None:
         for line in text.splitlines():
             if line.strip() and not isinstance(json.loads(line), dict):
                 return f"{target.name} 存在非 JSON 对象行"
+    if target.suffix in {".jb2", ".hwp"}:
+        checker = _check_jbig2 if target.suffix == ".jb2" else _check_hwp
+        return checker(target)
+    return None
+
+
+def _check_jbig2(target: Path) -> str | None:
+    """校验合成 JBIG2 页信息与文件收尾，截断输入明确报错。."""
+    data = target.read_bytes()
+    if data[:13] != b"\x97JB2\r\n\x1a\n\x01\x00\x00\x00\x01":
+        return f"{target.name} 缺少完整单页 JBIG2 文件头"
+    if data[13:24] != struct.pack(">IBBBI", 0, 48, 0, 1, 19):
+        return f"{target.name} 缺少 PageInformation 段"
+    if data[24:32] != struct.pack(">II", 320, 96):
+        return f"{target.name} 页面尺寸不符"
+    if data[-11:] != struct.pack(">IBBBI", 3, 51, 0, 0, 0):
+        return f"{target.name} 缺少 EndOfFile 段"
     return None
 
 

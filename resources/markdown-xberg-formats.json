@@ -18,14 +18,6 @@
    "mime_type": "video/x-ms-wmv"
   },
   {
-   "extension": "avcs",
-   "mime_type": "image/avcs"
-  },
-  {
-   "extension": "avif",
-   "mime_type": "image/avif"
-  },
-  {
    "extension": "bib",
    "mime_type": "application/x-bibtex"
   },
@@ -140,26 +132,6 @@
   {
    "extension": "gz",
    "mime_type": "application/gzip"
-  },
-  {
-   "extension": "heic",
-   "mime_type": "image/heic"
-  },
-  {
-   "extension": "heics",
-   "mime_type": "image/heic-sequence"
-  },
-  {
-   "extension": "heif",
-   "mime_type": "image/heif"
-  },
-  {
-   "extension": "heifs",
-   "mime_type": "image/heif-sequence"
-  },
-  {
-   "extension": "hif",
-   "mime_type": "image/heif"
   },
   {
    "extension": "htm",

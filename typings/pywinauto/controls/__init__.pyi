@@ -2,4 +2,5 @@
 
 from pywinauto.base_wrapper import InvalidElement as InvalidElement
 
+from . import uia_controls as uia_controls
 from .hwndwrapper import InvalidWindowHandle as InvalidWindowHandle
