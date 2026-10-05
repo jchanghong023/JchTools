@@ -1102,6 +1102,13 @@
     },
     {
       "file": "src/gui.rs",
+      "name": "cancel_button_cancels_control_and_falls_back_to_dedicated_atoms",
+      "ignored": false,
+      "cfg": null,
+      "body": "abde03d9176aeb4c"
+    },
+    {
+      "file": "src/gui.rs",
       "name": "convert_fail_clears_running_metrics_text",
       "ignored": false,
       "cfg": null,
@@ -1130,6 +1137,13 @@
     },
     {
       "file": "src/gui.rs",
+      "name": "convert_runtime_edit_and_use_directory_revalidation_flow",
+      "ignored": false,
+      "cfg": null,
+      "body": "96285bc1d56a57e9"
+    },
+    {
+      "file": "src/gui.rs",
       "name": "convert_same_input_output_rejected_before_busy",
       "ignored": false,
       "cfg": null,
@@ -1141,6 +1155,13 @@
       "ignored": false,
       "cfg": null,
       "body": "130edf051ab71426"
+    },
+    {
+      "file": "src/gui.rs",
+      "name": "convert_stop_reports_each_phase_and_cancels_shared_task",
+      "ignored": false,
+      "cfg": null,
+      "body": "ecd30a9a006429ba"
     },
     {
       "file": "src/gui.rs",
@@ -1263,6 +1284,13 @@
     },
     {
       "file": "src/gui.rs",
+      "name": "git_stop_cancels_control_and_reports_per_runtime",
+      "ignored": false,
+      "cfg": null,
+      "body": "7bc292ca9be691b8"
+    },
+    {
+      "file": "src/gui.rs",
       "name": "gui_test_assembly_isolates_real_snap_service",
       "ignored": false,
       "cfg": null,
@@ -1347,6 +1375,13 @@
     },
     {
       "file": "src/gui.rs",
+      "name": "md_subpage_tabs_switch_via_real_callback",
+      "ignored": false,
+      "cfg": null,
+      "body": "8624c204750d43a1"
+    },
+    {
+      "file": "src/gui.rs",
       "name": "media_only_selection_computes_readiness_without_page_initialize",
       "ignored": false,
       "cfg": null,
@@ -1375,6 +1410,13 @@
     },
     {
       "file": "src/gui.rs",
+      "name": "open_report_without_task_is_a_safe_noop",
+      "ignored": false,
+      "cfg": null,
+      "body": "f31b9ded69008f71"
+    },
+    {
+      "file": "src/gui.rs",
       "name": "organizer_finish_does_not_replace_another_tool_panel",
       "ignored": false,
       "cfg": null,
@@ -1389,6 +1431,13 @@
     },
     {
       "file": "src/gui.rs",
+      "name": "pause_button_toggles_organizer_and_reports_unsupported_runtimes",
+      "ignored": false,
+      "cfg": null,
+      "body": "b8ba7dcc76c744d6"
+    },
+    {
+      "file": "src/gui.rs",
       "name": "plan_editable_recovers_when_ready_task_is_shown_again",
       "ignored": false,
       "cfg": null,
@@ -1400,6 +1449,13 @@
       "ignored": false,
       "cfg": null,
       "body": "362de7869aa5383e"
+    },
+    {
+      "file": "src/gui.rs",
+      "name": "plan_pagination_and_kind_filter_via_real_callbacks",
+      "ignored": false,
+      "cfg": null,
+      "body": "9cc2412b8110856f"
     },
     {
       "file": "src/gui.rs",
@@ -1438,6 +1494,13 @@
     },
     {
       "file": "src/gui.rs",
+      "name": "rule_choice_updates_value_and_ignores_out_of_range_index",
+      "ignored": false,
+      "cfg": null,
+      "body": "f25fb3c9d762cd11"
+    },
+    {
+      "file": "src/gui.rs",
       "name": "rules_and_config_expose_only_contracted_switches",
       "ignored": false,
       "cfg": null,
@@ -1466,6 +1529,13 @@
     },
     {
       "file": "src/gui.rs",
+      "name": "settings_actions_are_gated_while_busy_and_reject_unknown_action",
+      "ignored": false,
+      "cfg": null,
+      "body": "73e7a1372a518f78"
+    },
+    {
+      "file": "src/gui.rs",
       "name": "settings_result_while_task_running_keeps_close_after",
       "ignored": false,
       "cfg": null,
@@ -1484,6 +1554,13 @@
       "ignored": false,
       "cfg": null,
       "body": "d3bc1b2b75a21cb6"
+    },
+    {
+      "file": "src/gui.rs",
+      "name": "snap_buttons_immediate_feedback_and_initialize_reentry_gating",
+      "ignored": false,
+      "cfg": null,
+      "body": "3c500709055e638b"
     },
     {
       "file": "src/gui.rs",
