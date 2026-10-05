@@ -5417,6 +5417,83 @@ pub fn run_with_engine_overrides(
     } else {
         ui.invoke_select_tool("recursive-extract".into());
     }
+    wire_task_lifecycle(&ui, &state, &out);
+    // 事件泵：100ms 轮询负责进度/耗时/主题刷新与兜底排空；结果事件由 worker 唤醒后
+    // 立即排空（`EventSender` → `invoke_from_event_loop` → 事件循环线程上的排空钩子），
+    // 因此结果上屏不受轮询周期限制（H-02）。绘制频率仍由这里的 100ms 上界约束。
+    let pump = Rc::new(UiPump::new(receiver, state.clone(), out.clone()));
+    let timer = slint::Timer::default();
+    {
+        let weak = ui.as_weak();
+        let pump = pump.clone();
+        timer.start(
+            slint::TimerMode::Repeated,
+            Duration::from_millis(100),
+            move || {
+                if let Some(ui) = weak.upgrade() {
+                    pump.run(&ui);
+                }
+            },
+        );
+    }
+    // 唤醒钩子只在事件循环线程登记：worker 侧 post 的空闭包在这里执行，立即排空事件通道。
+    // 事件循环退出后必须清掉钩子，否则本次运行的界面状态会被留在线程局部存储里。
+    EVENT_LOOP_DRAIN.with(|slot| {
+        let weak = ui.as_weak();
+        let pump = pump.clone();
+        *slot.borrow_mut() = Some(Rc::new(move || {
+            if let Some(ui) = weak.upgrade() {
+                pump.run(&ui);
+            }
+        }));
+    });
+    // First show the window. Rules stay in memory for this session only.
+    ui.show()?;
+    center_window(ui.window());
+    let startup = out.clone();
+    std::thread::spawn(move || {
+        // S1-01：启动快照用独立前缀，界面侧不把它当设置操作终态（不清标志、
+        // 不消费 close_after），避免迟到快照在任务运行中提前退出或抹掉初始化状态。
+        let event =
+            match crate::xberg_runtime::resume_background().and_then(|()| settings_payload()) {
+                Ok(payload) => Event::Notice(format!("SETTINGS_LOADED|{payload}")),
+                Err(error) => Event::Error(format!("SETTINGS_LOAD_ERR|{error}")),
+            };
+        let _ = startup.send(event);
+    });
+    // 窗口刚映射时系统还会套用默认位置，稍后再居中一次，保证首屏就是居中的
+    let centered = ui.as_weak();
+    slint::Timer::single_shot(Duration::from_millis(120), move || {
+        if let Some(ui) = centered.upgrade() {
+            center_window(ui.window());
+        }
+    });
+    if std::env::args_os().any(|arg| arg == "--settings") {
+        ui.invoke_navigation(7);
+    }
+    hook(&ui);
+    let loop_result = slint::run_event_loop();
+    // 退出后清掉唤醒钩子：它持有本次运行的 State 与事件通道，留着会跨运行泄漏。
+    EVENT_LOOP_DRAIN.with(|slot| {
+        let _ = slot.borrow_mut().take();
+    });
+    // P-10：界面正常收场留痕（guard 在本函数结尾 drop 时刷盘）。
+    tracing::info!(
+        reason = loop_result
+            .as_ref()
+            .err()
+            .map(ToString::to_string)
+            .unwrap_or_default(),
+        "图形界面退出"
+    );
+    loop_result?;
+    Ok(())
+}
+
+/// 任务生命周期与窗口控制回调（确认、暂停、取消、勾选、计划翻页/筛选、
+/// 打开任务目录、自绘标题栏拖动、关窗确认）：生产装配与无头测试装配共用同一
+/// 接线，保证经 invoke 层驱动的用例走与产品完全一致的处理器。
+fn wire_task_lifecycle(ui: &AppWindow, state: &Rc<RefCell<State>>, out: &EventSender) {
     {
         let weak = ui.as_weak();
         let state = state.clone();
@@ -5696,78 +5773,7 @@ pub fn run_with_engine_overrides(
             slint::CloseRequestResponse::HideWindow
         });
     }
-    // 事件泵：100ms 轮询负责进度/耗时/主题刷新与兜底排空；结果事件由 worker 唤醒后
-    // 立即排空（`EventSender` → `invoke_from_event_loop` → 事件循环线程上的排空钩子），
-    // 因此结果上屏不受轮询周期限制（H-02）。绘制频率仍由这里的 100ms 上界约束。
-    let pump = Rc::new(UiPump::new(receiver, state.clone(), out.clone()));
-    let timer = slint::Timer::default();
-    {
-        let weak = ui.as_weak();
-        let pump = pump.clone();
-        timer.start(
-            slint::TimerMode::Repeated,
-            Duration::from_millis(100),
-            move || {
-                if let Some(ui) = weak.upgrade() {
-                    pump.run(&ui);
-                }
-            },
-        );
-    }
-    // 唤醒钩子只在事件循环线程登记：worker 侧 post 的空闭包在这里执行，立即排空事件通道。
-    // 事件循环退出后必须清掉钩子，否则本次运行的界面状态会被留在线程局部存储里。
-    EVENT_LOOP_DRAIN.with(|slot| {
-        let weak = ui.as_weak();
-        let pump = pump.clone();
-        *slot.borrow_mut() = Some(Rc::new(move || {
-            if let Some(ui) = weak.upgrade() {
-                pump.run(&ui);
-            }
-        }));
-    });
-    // First show the window. Rules stay in memory for this session only.
-    ui.show()?;
-    center_window(ui.window());
-    let startup = out.clone();
-    std::thread::spawn(move || {
-        // S1-01：启动快照用独立前缀，界面侧不把它当设置操作终态（不清标志、
-        // 不消费 close_after），避免迟到快照在任务运行中提前退出或抹掉初始化状态。
-        let event =
-            match crate::xberg_runtime::resume_background().and_then(|()| settings_payload()) {
-                Ok(payload) => Event::Notice(format!("SETTINGS_LOADED|{payload}")),
-                Err(error) => Event::Error(format!("SETTINGS_LOAD_ERR|{error}")),
-            };
-        let _ = startup.send(event);
-    });
-    // 窗口刚映射时系统还会套用默认位置，稍后再居中一次，保证首屏就是居中的
-    let centered = ui.as_weak();
-    slint::Timer::single_shot(Duration::from_millis(120), move || {
-        if let Some(ui) = centered.upgrade() {
-            center_window(ui.window());
-        }
-    });
-    if std::env::args_os().any(|arg| arg == "--settings") {
-        ui.invoke_navigation(7);
-    }
-    hook(&ui);
-    let loop_result = slint::run_event_loop();
-    // 退出后清掉唤醒钩子：它持有本次运行的 State 与事件通道，留着会跨运行泄漏。
-    EVENT_LOOP_DRAIN.with(|slot| {
-        let _ = slot.borrow_mut().take();
-    });
-    // P-10：界面正常收场留痕（guard 在本函数结尾 drop 时刷盘）。
-    tracing::info!(
-        reason = loop_result
-            .as_ref()
-            .err()
-            .map(ToString::to_string)
-            .unwrap_or_default(),
-        "图形界面退出"
-    );
-    loop_result?;
-    Ok(())
 }
-
 /// 默认入口：无额外装配钩子。
 pub fn run() -> Result<()> {
     run_with_pre_loop_hook(|_| ())
@@ -6682,6 +6688,7 @@ mod gui_tests {
                         wire_snap_ocr(&ui, &state, &out);
                         wire_markdown_converter(&ui, &state, &out);
                         wire_settings(&ui, &state, &out);
+                        wire_task_lifecycle(&ui, &state, &out);
                         refresh(&ui, &state.borrow());
                         let pump = UiPump::new(event_rx, state.clone(), out);
                         let app = GuiTestApp { ui, state, pump };
@@ -8980,5 +8987,475 @@ mod gui_tests {
             elapsed < Duration::from_secs(2),
             "必须在超时 + 余量内返回（C-1 修复前此处永久挂起）：{elapsed:.1?}"
         );
+    }
+
+    // 覆盖 H-02 / G-13（暂停按钮：整理/解压任务经真实 Control 暂停与继续；
+    // Git、转 Markdown 与无任务时如实提示不支持，不翻转 paused 显示）
+    #[test]
+    fn pause_button_toggles_organizer_and_reports_unsupported_runtimes() {
+        with_gui(|app| {
+            let ui = &app.ui;
+            // 无任务（control=None）：不得伪装暂停成功
+            ui.invoke_pause_task();
+            assert!(
+                ui.get_status().contains("不支持暂停"),
+                "无任务时暂停必须如实提示"
+            );
+            // 目录整理任务：真实 Control 上暂停/继续切换（H-02 处理状态可见）
+            let control = Arc::new(Control::default());
+            app.state.borrow_mut().control = Some(control.clone());
+            app.state.borrow_mut().runtime = RuntimeMode::Organizer;
+            ui.invoke_pause_task();
+            assert!(ui.get_paused(), "暂停后界面必须呈现已暂停");
+            assert!(control.is_paused(), "暂停必须写入真实控制通道");
+            assert!(ui.get_status().contains("已请求暂停"));
+            ui.invoke_pause_task();
+            assert!(!ui.get_paused(), "再次点击恢复处理");
+            assert!(!control.is_paused());
+            assert_eq!(ui.get_status().as_str(), "继续处理");
+            // Git / 转 Markdown 运行口径不接入暂停检查点（G-13）：如实提示且不动 paused
+            for unsupported in [RuntimeMode::Git, RuntimeMode::MarkdownConverter] {
+                app.state.borrow_mut().runtime = unsupported;
+                ui.invoke_pause_task();
+                assert!(ui.get_status().contains("不支持暂停"));
+                assert!(!ui.get_paused(), "不支持的工具不得翻转 paused 显示");
+            }
+        })
+        .unwrap();
+    }
+
+    // 覆盖 H-02（取消入口可用：control 命中即取消；无共享控制器的转换、组件初始化
+    // 与截图初始化各自回落独立取消原子量，不谎报取消而任务继续）
+    #[test]
+    fn cancel_button_cancels_control_and_falls_back_to_dedicated_atoms() {
+        with_gui(|app| {
+            let ui = &app.ui;
+            let control = Arc::new(Control::default());
+            app.state.borrow_mut().control = Some(control.clone());
+            ui.invoke_cancel_task();
+            assert!(control.is_cancelled(), "取消必须写入真实控制通道");
+            assert!(ui.get_status().contains("正在取消"));
+
+            let convert_cancel = Arc::new(std::sync::atomic::AtomicBool::new(false));
+            app.state.borrow_mut().control = None;
+            app.state.borrow_mut().convert_cancel = Some(convert_cancel.clone());
+            ui.invoke_cancel_task();
+            assert!(
+                convert_cancel.load(Ordering::Acquire),
+                "转 Markdown 任务必须经独立原子量取消"
+            );
+
+            let init_cancel = Arc::new(std::sync::atomic::AtomicBool::new(false));
+            app.state.borrow_mut().convert_cancel = None;
+            app.state.borrow_mut().convert_init_cancel = Some(init_cancel.clone());
+            ui.invoke_cancel_task();
+            assert!(
+                init_cancel.load(Ordering::Acquire),
+                "转 Markdown 组件初始化必须可取消"
+            );
+
+            let snap_cancel = Arc::new(std::sync::atomic::AtomicBool::new(false));
+            app.state.borrow_mut().convert_init_cancel = None;
+            app.state.borrow_mut().snap_init_cancel = Some(snap_cancel.clone());
+            ui.invoke_cancel_task();
+            assert!(
+                snap_cancel.load(Ordering::Acquire),
+                "截图 OCR 初始化取消入口必须可用（O-06）"
+            );
+        })
+        .unwrap();
+    }
+
+    // 覆盖 G-15（Git 停止：真正取消共享控制器、不再处理新文件；跨工具停止共享
+    // 任务与转 Markdown 回落分支的文案如实区分）
+    #[test]
+    fn git_stop_cancels_control_and_reports_per_runtime() {
+        with_gui(|app| {
+            let ui = &app.ui;
+            let control = Arc::new(Control::default());
+            app.state.borrow_mut().control = Some(control.clone());
+            app.state.borrow_mut().runtime = RuntimeMode::Git;
+            ui.invoke_git_stop();
+            assert!(control.is_cancelled(), "停止必须真正取消 Git 任务（G-15）");
+            assert!(ui.get_status().contains("已成功推送的文件保持成功"));
+
+            // 其他工具的共享任务（整理/解压/MD）：通用取消口径
+            app.state.borrow_mut().runtime = RuntimeMode::Organizer;
+            let shared = Arc::new(Control::default());
+            app.state.borrow_mut().control = Some(shared.clone());
+            ui.invoke_git_stop();
+            assert!(shared.is_cancelled());
+            assert!(ui.get_status().contains("正在取消；当前操作完成后停止"));
+
+            // control 为 None：回落取消转 Markdown 任务（转换页「停止任务」同源）
+            let convert_cancel = Arc::new(std::sync::atomic::AtomicBool::new(false));
+            app.state.borrow_mut().control = None;
+            app.state.borrow_mut().convert_cancel = Some(convert_cancel.clone());
+            ui.invoke_git_stop();
+            assert!(convert_cancel.load(Ordering::Acquire));
+            assert!(ui.get_status().contains("正在停止转 Markdown"));
+        })
+        .unwrap();
+    }
+
+    // 覆盖 T-23（停止转 Markdown：运行/启动前检查/初始化三种在途阶段文案如实；
+    // 跨工具停止共享任务时按通用取消口径，不改写转换页状态行）
+    #[test]
+    fn convert_stop_reports_each_phase_and_cancels_shared_task() {
+        with_gui(|app| {
+            let ui = &app.ui;
+            let cancel = Arc::new(std::sync::atomic::AtomicBool::new(false));
+            app.state.borrow_mut().convert_cancel = Some(cancel.clone());
+            ui.invoke_convert_stop();
+            assert!(cancel.load(Ordering::Acquire), "停止必须写入转换取消原子量");
+            assert_eq!(
+                ui.get_convert_status().as_str(),
+                "正在停止；当前文件完成后停止"
+            );
+            assert!(ui.get_status().contains("正在停止转 Markdown"));
+
+            let prep_cancel = Arc::new(std::sync::atomic::AtomicBool::new(false));
+            app.state.borrow_mut().convert_cancel = Some(prep_cancel.clone());
+            ui.set_convert_preparing(true);
+            ui.invoke_convert_stop();
+            assert!(prep_cancel.load(Ordering::Acquire));
+            assert!(ui.get_convert_status().contains("正在取消启动前检查"));
+
+            ui.set_convert_preparing(false);
+            ui.set_convert_initializing(true);
+            let init_cancel = Arc::new(std::sync::atomic::AtomicBool::new(false));
+            app.state.borrow_mut().convert_cancel = None;
+            app.state.borrow_mut().convert_init_cancel = Some(init_cancel.clone());
+            ui.invoke_convert_stop();
+            assert!(init_cancel.load(Ordering::Acquire));
+            assert!(ui.get_convert_status().contains("正在取消初始化"));
+
+            // 其他工具共享任务运行中：control 命中即取消，文案按通用口径且不改写转换状态行
+            ui.set_convert_initializing(false);
+            let control = Arc::new(Control::default());
+            app.state.borrow_mut().control = Some(control.clone());
+            ui.invoke_convert_stop();
+            assert!(control.is_cancelled());
+            assert_eq!(
+                ui.get_status().as_str(),
+                "正在取消；当前操作完成后停止，不会继续后续操作"
+            );
+            assert!(
+                ui.get_convert_status().contains("正在取消初始化"),
+                "停止共享任务不得改写转换页状态行"
+            );
+        })
+        .unwrap();
+    }
+
+    // 「打开任务目录」按钮无任务时的安全无操作：不打开外部程序、不报错
+    //（入口只在 has-task 时渲染；无独立合同行，行为边界与 C-11 计划页一致）
+    #[test]
+    fn open_report_without_task_is_a_safe_noop() {
+        with_gui(|app| {
+            let before = app.ui.get_status().to_string();
+            app.ui.invoke_open_report();
+            assert_eq!(app.ui.get_status().as_str(), before);
+            assert!(app.ui.get_error_text().is_empty());
+        })
+        .unwrap();
+    }
+
+    // 覆盖 C-11（计划页经真实回调翻页与类型筛选：按钮只在对应页真实存在时可用；
+    // 末页再点下一页保持原页；切换类型筛选回到第一页且只显示所选类型）
+    #[test]
+    fn plan_pagination_and_kind_filter_via_real_callbacks() {
+        use crate::config::DeleteMode;
+        use crate::model::{Action, ActionKind};
+        let dir = temp_test_dir("plan-paging");
+        {
+            let db = Database::create(&dir).unwrap();
+            for i in 0..120 {
+                db.add_action(&Action {
+                    id: 0,
+                    kind: ActionKind::Delete,
+                    source: format!("del-{i}.txt"),
+                    target: None,
+                    reason: String::new(),
+                    expected: None,
+                    keeper: None,
+                    hash: None,
+                    mode: DeleteMode::Keep,
+                    selected: true,
+                    state: "pending".into(),
+                })
+                .unwrap();
+            }
+            for i in 0..10 {
+                db.add_action(&Action {
+                    id: 0,
+                    kind: ActionKind::Move,
+                    source: format!("mv-{i}.txt"),
+                    target: None,
+                    reason: String::new(),
+                    expected: None,
+                    keeper: None,
+                    hash: None,
+                    mode: DeleteMode::Keep,
+                    selected: true,
+                    state: "pending".into(),
+                })
+                .unwrap();
+            }
+        }
+        let cleanup = dir.clone();
+        with_gui(move |app| {
+            let ui = &app.ui;
+            app.state.borrow_mut().task = Some(dir.clone());
+            app.state.borrow_mut().page = 0;
+            app.state.borrow_mut().page_starts = vec![0];
+            ui.invoke_filter_plan("".into());
+            assert!(
+                pump_until(app, || ui.get_plans().row_count() == 100),
+                "全部筛选的第一页应显示 100 条：{}",
+                ui.get_plans().row_count()
+            );
+            assert!(!ui.get_plan_prev_enabled() && ui.get_plan_next_enabled());
+            assert!(ui.get_plan_page_label().contains("第 1 页"));
+
+            ui.invoke_plan_page(1);
+            assert!(
+                pump_until(app, || ui.get_plan_page_label().contains("第 2 页")),
+                "下一页应提交第二页：{}",
+                ui.get_plan_page_label()
+            );
+            assert_eq!(ui.get_plans().row_count(), 30, "第二页应只剩 30 条");
+            assert!(ui.get_plan_prev_enabled() && !ui.get_plan_next_enabled());
+
+            // 末页再点下一页：没有可发起的请求，页面保持第二页
+            ui.invoke_plan_page(1);
+            app.pump.run(ui);
+            assert!(ui.get_plan_page_label().contains("第 2 页"));
+            assert_eq!(app.state.borrow().page, 1);
+
+            ui.invoke_plan_page(-1);
+            assert!(
+                pump_until(app, || ui.get_plan_page_label().contains("第 1 页")),
+                "上一页应回到第一页"
+            );
+            assert_eq!(ui.get_plans().row_count(), 100);
+
+            // 类型筛选：回到第一页且只显示移动项（C-11）
+            ui.invoke_filter_plan("move".into());
+            assert!(
+                pump_until(app, || ui.get_plans().row_count() == 10),
+                "筛选 move 后应只显示 10 条：{}",
+                ui.get_plans().row_count()
+            );
+            assert!(ui.get_plan_page_label().contains("第 1 页"));
+            assert!(!ui.get_plan_prev_enabled() && !ui.get_plan_next_enabled());
+            let rows = ui.get_plans();
+            for i in 0..rows.row_count() {
+                assert_eq!(
+                    rows.row_data(i).unwrap().kind.as_str(),
+                    "移动/重命名",
+                    "筛选后不得混入其他类型"
+                );
+            }
+        })
+        .unwrap();
+        let _ = std::fs::remove_dir_all(&cleanup);
+    }
+
+    // 覆盖 R-01（规则面板 choice 行经真实回调取值：索引映射 choices 值并同步
+    // 行内下拉；越界索引安全忽略，不改动当前值）
+    #[test]
+    fn rule_choice_updates_value_and_ignores_out_of_range_index() {
+        use crate::config::DeleteMode;
+        with_gui(|app| {
+            let ui = &app.ui;
+            ui.invoke_select_section(3); // 安全与性能：全局删除方式在此分区
+                                         // choice 行的取值以配置与行内下拉索引为口径（row.value 不随选择就地改写）
+            let choice_index = |ui: &AppWindow| -> i32 {
+                let rules = ui.get_rules();
+                (0..rules.row_count())
+                    .find_map(|i| {
+                        let row = rules.row_data(i).unwrap();
+                        (row.key.as_str() == "global_delete").then_some(row.index)
+                    })
+                    .unwrap_or(-1)
+            };
+            assert_eq!(
+                app.state.borrow().config.global_delete,
+                DeleteMode::Permanent,
+                "默认值应为永久删除"
+            );
+            assert_eq!(choice_index(ui), 1, "行内下拉应停在默认选项");
+            ui.invoke_rule_choice("global_delete".into(), 0);
+            assert_eq!(
+                app.state.borrow().config.global_delete,
+                DeleteMode::Keep,
+                "选择索引 0 应切换为保留"
+            );
+            assert_eq!(choice_index(ui), 0, "行内下拉应同步到所选选项");
+            ui.invoke_rule_choice("global_delete".into(), 7);
+            assert_eq!(
+                app.state.borrow().config.global_delete,
+                DeleteMode::Keep,
+                "越界索引必须安全忽略"
+            );
+            assert_eq!(choice_index(ui), 0, "越界索引不得改动行内下拉");
+            ui.invoke_rule_choice("global_delete".into(), 1);
+            assert_eq!(
+                app.state.borrow().config.global_delete,
+                DeleteMode::Permanent
+            );
+            assert_eq!(choice_index(ui), 1);
+        })
+        .unwrap();
+    }
+
+    // 覆盖 O-06（初始化不重入、取消状态如实提示）与管道按钮的即时反馈：
+    // 命令按钮点击即置「请求在途」，服务未连接时命令侧安全无操作（挂起兜底另有专测）
+    #[test]
+    fn snap_buttons_immediate_feedback_and_initialize_reentry_gating() {
+        with_gui(|app| {
+            let ui = &app.ui;
+            // 已就绪：初始化按钮不得重新进入初始化
+            ui.set_snap_ready(true);
+            ui.invoke_snap_initialize();
+            assert!(!ui.get_snap_initializing());
+            assert_eq!(
+                app.state.borrow().snap_generation,
+                0,
+                "已就绪时不得发起新初始化"
+            );
+            // 初始化在途：同样不重入
+            ui.set_snap_ready(false);
+            ui.set_snap_initializing(true);
+            ui.invoke_snap_initialize();
+            assert_eq!(
+                app.state.borrow().snap_generation,
+                0,
+                "初始化在途时不得重入"
+            );
+            // 取消按钮：状态行如实提示（O-06 取消语义）
+            ui.invoke_snap_cancel_initialize();
+            assert!(ui.get_snap_asset_status().contains("正在取消初始化"));
+            // 管道按钮：点击即置请求在途标志并给出状态反馈
+            ui.invoke_snap_connect();
+            assert!(ui.get_snap_request_pending());
+            assert!(ui.get_snap_service_status().contains("正在连接"));
+            ui.set_snap_request_pending(false);
+            ui.invoke_snap_capture();
+            assert!(ui.get_snap_request_pending());
+            ui.set_snap_request_pending(false);
+            ui.invoke_snap_retry_load();
+            assert!(ui.get_snap_request_pending());
+            ui.set_snap_request_pending(false);
+            ui.invoke_snap_save_settings();
+            assert!(ui.get_snap_request_pending());
+            // 自启动草稿开关：真实回调写草稿值（生效另经 save-settings 命令）
+            ui.invoke_snap_draft_autostart(true);
+            assert!(ui.get_snap_autostart_draft());
+            ui.invoke_snap_draft_autostart(false);
+            assert!(!ui.get_snap_autostart_draft());
+        })
+        .unwrap();
+    }
+
+    // 覆盖 T-06 / XB-19（共享 Xberg 目录：编辑即失效就绪与已确认；空目录直接拒绝；
+    // 无效目录后台校验失败回传后不得标记已确认）
+    #[test]
+    fn convert_runtime_edit_and_use_directory_revalidation_flow() {
+        with_gui(|app| {
+            let ui = &app.ui;
+            ui.set_convert_ready(true);
+            ui.set_convert_runtime_confirmed(true);
+            ui.invoke_convert_runtime_edited();
+            assert!(!ui.get_convert_ready(), "目录编辑后必须失效就绪");
+            assert!(!ui.get_convert_runtime_confirmed());
+            assert!(ui.get_convert_status().contains("重新校验"));
+
+            // 空目录：使用前校验直接拒绝并给出指引
+            ui.set_convert_runtime_dir("".into());
+            ui.invoke_convert_use_runtime();
+            assert!(!ui.get_convert_runtime_saving());
+            assert!(ui.get_convert_status().contains("请先选择 Xberg 运行目录"));
+
+            // 无效目录：隔离设置状态目录后走真实保存线程，失败事件回传不标记已确认
+            let _lock = crate::asset_util::test_env::env_lock()
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            let root = tempfile::tempdir().unwrap();
+            struct Restore(Option<std::ffi::OsString>);
+            impl Drop for Restore {
+                fn drop(&mut self) {
+                    match &self.0 {
+                        Some(value) => std::env::set_var("JCHTOOLS_TEST_STATE_DIR", value.clone()),
+                        None => std::env::remove_var("JCHTOOLS_TEST_STATE_DIR"),
+                    }
+                }
+            }
+            let _restore = Restore(std::env::var_os("JCHTOOLS_TEST_STATE_DIR"));
+            std::env::set_var("JCHTOOLS_TEST_STATE_DIR", root.path());
+            ui.set_convert_runtime_dir(root.path().display().to_string().into());
+            ui.invoke_convert_use_runtime();
+            assert!(ui.get_convert_runtime_saving(), "点击使用后进入保存校验中");
+            assert!(
+                pump_until(app, || !ui.get_convert_runtime_saving()),
+                "无效目录校验必须以失败收尾"
+            );
+            assert!(
+                !ui.get_convert_runtime_confirmed(),
+                "校验失败不得标记已确认"
+            );
+            assert!(!ui.get_convert_ready());
+            assert!(ui.get_convert_status().contains("Xberg 运行目录不可用"));
+        })
+        .unwrap();
+    }
+
+    // 覆盖 XB-20（设置页操作门禁：任务、启动前检查等在途时不接受新操作；
+    // 未知操作以设置页状态行报错，不静默）
+    #[test]
+    fn settings_actions_are_gated_while_busy_and_reject_unknown_action() {
+        with_gui(|app| {
+            let ui = &app.ui;
+            assert_eq!(ui.get_settings_status().as_str(), "正在读取配置…");
+            ui.set_busy(true);
+            ui.invoke_settings_action("custom".into());
+            assert!(
+                !ui.get_convert_runtime_saving() && !ui.get_convert_initializing(),
+                "任务运行中设置操作必须被门禁"
+            );
+            assert_eq!(ui.get_settings_status().as_str(), "正在读取配置…");
+            ui.set_busy(false);
+            ui.set_convert_preparing(true);
+            ui.invoke_settings_action("custom".into());
+            assert!(!ui.get_convert_runtime_saving(), "预检在途同样门禁");
+            assert_eq!(ui.get_settings_status().as_str(), "正在读取配置…");
+            ui.set_convert_preparing(false);
+            ui.invoke_settings_action("bogus".into());
+            assert!(
+                pump_until(app, || ui.get_settings_status().contains("未知设置操作")),
+                "未知操作必须报错：{}",
+                ui.get_settings_status()
+            );
+            assert!(
+                !ui.get_convert_runtime_saving(),
+                "失败收尾必须复位保存中标志"
+            );
+        })
+        .unwrap();
+    }
+
+    // 覆盖 U-11 / M-01（MD 子页页签经真实回调切换；无效页号安全忽略）
+    #[test]
+    fn md_subpage_tabs_switch_via_real_callback() {
+        with_gui(|app| {
+            app.ui.invoke_md_select_subpage(1);
+            assert_eq!(app.ui.get_md_subpage(), 1, "页签应切到拆分子页");
+            app.ui.invoke_md_select_subpage(0);
+            assert_eq!(app.ui.get_md_subpage(), 0, "页签应切回合并子页");
+            app.ui.invoke_md_select_subpage(2);
+            assert_eq!(app.ui.get_md_subpage(), 0, "无效页号必须安全忽略");
+        })
+        .unwrap();
     }
 }

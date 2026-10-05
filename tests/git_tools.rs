@@ -257,7 +257,8 @@ fn spawn_run(
 
 /// 轮询等待日志中出现包含 needle 的条目（最多 30 秒；超时 panic 带全部日志）。
 fn wait_log_contains(logs: &Arc<Mutex<Vec<String>>>, needle: &str) {
-    let deadline = Instant::now() + Duration::from_secs(30);
+    // 与 wait_trace 同口径：真实 git 链路在本机时延风暴下需要更大的同步预算。
+    let deadline = Instant::now() + Duration::from_secs(120);
     loop {
         let found = logs
             .lock()
@@ -1261,9 +1262,11 @@ fn trace_lines(dir: &Path) -> Vec<String> {
         .collect()
 }
 
-/// 等待命令轨迹中出现以 prefix 开头的行（最多 30 秒），返回其行号。
+/// 等待命令轨迹中出现以 prefix 开头的行（最多 120 秒），返回其行号。预算按
+/// Windows 本机偶发的子进程时延风暴（杀软扫描/负载尖峰下每条 git 命令可达 ~2 秒，
+/// 任务前置探查就有 15+ 条）留足余量；健康机器整条链路 3 秒内完成。
 fn wait_trace(dir: &Path, prefix: &str) -> usize {
-    let deadline = Instant::now() + Duration::from_secs(30);
+    let deadline = Instant::now() + Duration::from_secs(120);
     loop {
         let lines = trace_lines(dir);
         if let Some(index) = lines.iter().position(|l| l.starts_with(prefix)) {
