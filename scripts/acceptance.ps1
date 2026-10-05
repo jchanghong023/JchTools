@@ -298,7 +298,8 @@ if ($WithMarkdownAcceptance) {
     $mdOutput | ForEach-Object {$_.ToString()} | Set-Content -LiteralPath $mdLog -Encoding UTF8
     if ($mdCode -eq 0) {
         # 驱动器可能只有部分条目执行；保留逐项状态，不把跳过当成全覆盖通过。
-        $notRun = @($mdOutput | Where-Object { $_.ToString() -match 'NOT RUN' })
+        # 只识别真实条目行；汇总中的「NOT RUN 0」不是未执行条目。
+        $notRun = @($mdOutput | Where-Object { $_.ToString() -match '^\s*NOT RUN\s+[A-Z]\d+\b' })
         if ($notRun.Count -gt 0) {
             $script:Results.Add('PARTIAL  markdown-acceptance（已执行项通过，仍有 NOT RUN；详见 markdown-acceptance.log）')
         } else {

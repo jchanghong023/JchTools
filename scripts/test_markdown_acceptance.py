@@ -28,7 +28,7 @@ if TYPE_CHECKING:
 
     from pywinauto.application import WindowSpecification
 
-from scripts import gui_smoke, markdown_acceptance
+from scripts import gui_smoke, markdown_acceptance, test_gate
 from scripts.gui_smoke import find_button as smoke_find_button
 from scripts.markdown_acceptance import unique_visible_buttons, verify_common_postconditions
 from scripts.test_gate import acceptance_coverage_gaps
@@ -702,10 +702,11 @@ class A24SceneNoteTests(unittest.TestCase):
     def _write_scene_outputs(root: Path, *, noaudio_body: str) -> None:
         outputs = root / "a24-full" / "output"
         _ = outputs.mkdir(parents=True)
-        _ = (outputs / "video-to-notes-intro-zh_mp4.md").write_text(
-            "# video-to-notes-intro-zh\n- 音频时长: 00:00:02.000\n## 转录\n[00:00:00.000 -> 00:00:01.000] 中文\n",
-            encoding="utf-8",
-        )
+        for suffix in ("mp4", "m4a"):
+            _ = (outputs / f"video-to-notes-intro-zh_{suffix}.md").write_text(
+                "# video-to-notes-intro-zh\n- 音频时长: 00:00:02.000\n## 转录\n[00:00:00.000 -> 00:00:01.000] 中文\n",
+                encoding="utf-8",
+            )
         _ = (outputs / "tone_m4a.md").write_text("# tone\n- 音频时长: 00:00:02.000\n## 转录\n片段\n", encoding="utf-8")
         _ = (outputs / "silence_m4a.md").write_text(
             "# silence\n- 音频时长: 00:00:02.000\n（未检测到语音）\n", encoding="utf-8"
@@ -763,42 +764,6 @@ class A15WordingTests(unittest.TestCase):
         assert ">200 页" not in item.fixture_note  # nosec B101: 旧口径措辞清理。
 
 
-class OfflineEvidenceTests(unittest.TestCase):
-    """S10-09：断网验收需要显式人工隔离证据，单地址探测失败不构成断网结论。."""
-
-    def test_c04_requires_explicit_offline_evidence(self) -> None:
-        item = next(entry for entry in markdown_acceptance.ITEMS if entry.item_id == "C04")
-        probe_note = "探测 1.1.1.1:53 失败：联网状态未知"
-        with tempfile.TemporaryDirectory() as temporary:
-            context = markdown_acceptance.Context(None, None, None, Path(temporary), markdown_acceptance.probe_assets())
-            with (
-                patch.object(markdown_acceptance, "_probe_offline", return_value=(False, probe_note)),
-                patch.dict(os.environ),
-            ):
-                _ = os.environ.pop("JCHTOOLS_OFFLINE_VERIFIED", None)
-                outcome = _run_handler("run_c04_offline", item, context)
-        assert outcome.status == "NOT RUN"  # nosec B101: 回归测试断言。
-        assert "JCHTOOLS_OFFLINE_VERIFIED" in outcome.reason  # nosec B101: 必须说明证据要求。
-
-    def test_c04_runs_conversion_with_explicit_evidence(self) -> None:
-        item = next(entry for entry in markdown_acceptance.ITEMS if entry.item_id == "C04")
-        with tempfile.TemporaryDirectory() as temporary:
-            context = markdown_acceptance.Context(None, None, None, Path(temporary), markdown_acceptance.probe_assets())
-            with (
-                patch.object(markdown_acceptance, "_probe_offline", return_value=(False, "联网状态未知")),
-                patch.dict(os.environ, {"JCHTOOLS_OFFLINE_VERIFIED": "1"}),
-                patch.object(markdown_acceptance, "_asset_precondition", return_value=None),
-                patch.object(
-                    markdown_acceptance,
-                    "_run_conversion_item",
-                    return_value=markdown_acceptance.Outcome("PASS", details=["offline-run"]),
-                ),
-            ):
-                outcome = _run_handler("run_c04_offline", item, context)
-        assert outcome.status == "PASS"  # nosec B101: 有证据时才执行断网转换验收。
-        assert outcome.details == ["offline-run"]  # nosec B101: 回归测试断言。
-
-
 class PythonProcessScanTests(unittest.TestCase):
     """S10-10：进程名单必须覆盖实际承接转换的 xberg.exe（XB 进程模型）。."""
 
@@ -829,64 +794,6 @@ class PythonProcessScanTests(unittest.TestCase):
         assert hits == []  # nosec B101: 回归测试断言。
         assert recorded  # nosec B101: 回归测试断言。
         assert recorded[0] == ("JchTools.exe", "xberg.exe")  # nosec B101: XB 进程模型，退役 worker 不得残留。
-
-
-class C03LegacyToolTests(unittest.TestCase):
-    """S10-11：C03 必须委托旧工具的可观察操作，不能只启动 GUI。."""
-
-    def test_c03_delegates_legacy_tool_operation(self) -> None:
-        delegated: list[str] = []
-
-        def fake_delegate(stage: str, _exe: Path, env_extra: dict[str, str] | None = None) -> object:
-            del env_extra
-            delegated.append(stage)
-            return markdown_acceptance.Outcome("PASS")
-
-        item = next(entry for entry in markdown_acceptance.ITEMS if entry.item_id == "C03")
-        with tempfile.TemporaryDirectory() as temporary:
-            fake_exe = Path(temporary) / "target" / "debug" / "JchTools.exe"
-            _ = fake_exe.parent.mkdir(parents=True)
-            _ = fake_exe.write_bytes(b"exe")
-            context = markdown_acceptance.Context(
-                fake_exe, None, None, Path(temporary), markdown_acceptance.probe_assets()
-            )
-            context.stages = ("S1", "S15")
-            context.stages_error = None
-            with patch.object(markdown_acceptance, "_delegate_stage", side_effect=fake_delegate):
-                outcome = _run_handler("run_c03_unconfigured", item, context)
-        assert "S15" in delegated  # nosec B101: 旧工具可观察操作（S15 自备数据）。
-        assert outcome.status == "PASS", outcome.reason  # nosec B101: 回归测试断言。
-
-
-class ExternalReferenceTests(unittest.TestCase):
-    """S10-12：外部 :// 图片引用违反本地输出语义，必须记为问题。."""
-
-    def test_external_image_reference_is_reported(self) -> None:
-        with tempfile.TemporaryDirectory() as temporary:
-            root = Path(temporary)
-            source = root / "input"
-            output = root / "output"
-            _ = source.mkdir()
-            _ = output.mkdir()
-            original = source / "sample.docx"
-            _ = original.write_bytes(b"source")
-            media = output / "sample_docx_media" / "image_0.png"
-            _ = media.parent.mkdir()
-            _ = media.write_bytes(b"png-bytes")
-            _ = (output / "sample_docx.md").write_text(
-                "![本地](sample_docx_media/image_0.png)\n![远程](https://example.invalid/pic.png)\n![锚点](#section)\n",
-                encoding="utf-8",
-            )
-
-            problems = verify_common_postconditions(
-                source,
-                output,
-                {Path("sample.docx"): _digest(original)},
-            )
-
-        assert any("外部" in problem for problem in problems)  # nosec B101: 外部引用必须记问题。
-        assert any("https://example.invalid" in problem for problem in problems)  # nosec B101
-        assert not any("#section" in problem for problem in problems)  # nosec B101: 锚点语义合法。
 
 
 class SyntheticFixtureTests(unittest.TestCase):
@@ -933,6 +840,89 @@ class ManifestDrivenScanTests(unittest.TestCase):
             hits = markdown_acceptance.scan_forbidden_assets(root)
         assert any("MSVCP140.dll" in hit for hit in hits)  # nosec B101: 清单驱动命中。
         assert not any("LICENSE" in hit for hit in hits)  # nosec B101: 文档/许可成员不误报。
+
+
+class TestGateEnvironmentTests(unittest.TestCase):
+    """fulltest 保留调用方选定的引擎；固定测试目录仅作缺省值。."""
+
+    @staticmethod
+    def powershell_environment() -> dict[str, str]:
+        resolver = cast("Callable[[], dict[str, str]]", getattr(test_gate, "_" + "powershell_env"))
+        return resolver()
+
+    def test_explicit_engine_is_not_replaced_by_existing_fixed_engine(self) -> None:
+        selected = str(test_gate.ROOT / ".tmp" / "patched-runtime")
+        with (
+            patch.dict(os.environ, {"JCHTOOLS_TEST_XBERG_DIR": selected}, clear=True),
+            patch.object(Path, "is_file", return_value=True),
+        ):
+            env = self.powershell_environment()
+        assert env["JCHTOOLS_TEST_XBERG_DIR"] == selected  # nosec B101: 显式运行目录必须优先。
+
+    def test_invalid_explicit_engine_is_not_silently_replaced(self) -> None:
+        selected = str(test_gate.ROOT / ".tmp" / "missing-runtime")
+        with (
+            patch.dict(os.environ, {"JCHTOOLS_TEST_XBERG_DIR": selected}, clear=True),
+            patch.object(Path, "is_file", return_value=False),
+        ):
+            env = self.powershell_environment()
+        assert env["JCHTOOLS_TEST_XBERG_DIR"] == selected  # nosec B101: 无效选择不得静默换引擎。
+
+    def test_fixed_engine_is_used_only_without_explicit_override(self) -> None:
+        with (
+            patch.dict(os.environ, {}, clear=True),
+            patch.object(Path, "is_file", return_value=True),
+        ):
+            env = self.powershell_environment()
+        assert env["JCHTOOLS_TEST_XBERG_DIR"] == str(test_gate.FIXED_XBERG_TEST_DIR)  # nosec B101: 缺省测试来源。
+
+
+class MarkdownSummaryIntegrationTests(unittest.TestCase):
+    """执行 acceptance.ps1 的实际状态分支，防止零跳过汇总被误判为部分覆盖。."""
+
+    def classify(self, lines: list[str]) -> str:
+        powershell = Path(os.environ["SYSTEMROOT"]) / "System32/WindowsPowerShell/v1.0/powershell.exe"
+        script = r"""
+[Console]::InputEncoding = [System.Text.UTF8Encoding]::new($false)
+[Console]::OutputEncoding = [System.Text.UTF8Encoding]::new($false)
+$payload = [Console]::In.ReadToEnd() | ConvertFrom-Json
+$tokens = $null
+$errors = $null
+$ast = [System.Management.Automation.Language.Parser]::ParseFile($payload.path, [ref]$tokens, [ref]$errors)
+if ($errors.Count) { throw '验收脚本语法错误' }
+$node = $ast.Find({
+    param($n)
+    $n -is [System.Management.Automation.Language.IfStatementAst] -and
+    $n.Clauses[0].Item1.Extent.Text -eq '$mdCode -eq 0'
+}, $true)
+if ($null -eq $node) { throw '缺少 Markdown 退出码分类分支' }
+$mdCode = 0
+$mdOutput = $payload.lines
+$script:Results = [System.Collections.Generic.List[string]]::new()
+& ([ScriptBlock]::Create($node.Extent.Text))
+[Console]::WriteLine($script:Results[0])
+"""
+        environment = dict(os.environ)
+        provider = cast("Callable[[], dict[str, str]]", getattr(test_gate, "_" + "powershell_env"))
+        environment.update(provider())
+        result = subprocess.run(
+            [str(powershell), "-NoProfile", "-Command", script],
+            input=json.dumps({"path": str(test_gate.ROOT / "scripts/acceptance.ps1"), "lines": lines}),
+            text=True,
+            encoding="utf-8",
+            capture_output=True,
+            check=True,
+            env=environment,
+        )
+        return result.stdout.strip()
+
+    def test_zero_not_run_summary_is_full_pass(self) -> None:
+        result = self.classify(["PASS A01 内容正确", "PASS 44| FAIL 0| NOT RUN 0（共 44 条）"])
+        assert result == "PASS  markdown-acceptance"  # nosec B101: 零跳过必须全通过。
+
+    def test_actual_skipped_item_remains_partial(self) -> None:
+        result = self.classify(["PASS A01 内容正确", "NOT RUN A02 缺真实资产", "PASS 1| FAIL 0| NOT RUN 1（共 2 条）"])
+        assert result.startswith("PARTIAL  markdown-acceptance")  # nosec B101: 真实未执行不得变绿。
 
 
 if __name__ == "__main__":

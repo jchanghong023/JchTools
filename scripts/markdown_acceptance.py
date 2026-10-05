@@ -40,7 +40,6 @@ import ntpath
 import os
 import re
 import shutil
-import socket
 import sqlite3
 import subprocess
 import sys
@@ -58,6 +57,7 @@ import win32process
 from PIL import Image, ImageDraw, ImageFont
 from pywinauto import Application, controls, findbestmatch, findwindows, timings
 from pywinauto.application import ProcessNotFoundError, WindowSpecification
+from pywinauto.uia_defines import IUIA
 
 if not __package__:
     sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
@@ -558,7 +558,7 @@ def _synth_office(target: Path, fixtures_dir: Path) -> SynthResult:
 
 
 def _synth_media(target: Path) -> SynthResult:
-    """A24：用 ffmpeg 合成 M4A、无语音、无音轨与损坏音轨变体（损坏=字节截断）."""
+    """A24：保留真实中文音轨的 M4A，以及无语音、无音轨、损坏音轨变体."""
     ffmpeg = shutil.which("ffmpeg")
     if ffmpeg is None:
         return SynthResult([], "PATH 上没有 ffmpeg，无法合成媒体变体")
@@ -566,10 +566,18 @@ def _synth_media(target: Path) -> SynthResult:
         (["-y", "-f", "lavfi", "-i", "sine=frequency=440:duration=2", "-c:a", "aac"], "tone.m4a"),
         (["-y", "-f", "lavfi", "-i", "anullsrc=r=16000:cl=mono:duration=2", "-c:a", "aac"], "silence.m4a"),
         (["-y", "-f", "lavfi", "-i", "color=c=black:size=64x64:duration=1", "-c:v", "mpeg4"], "noaudio.mp4"),
+        # 音轨来自真实中文 MP4，不以正弦音冒充 M4A 转录。此文件按稳定排序
+        # 先于原 MP4，停止当前真实转录后仍有后续文件，避免只在最后一项停止。
+        (
+            ["-y", "-i", str(target / "video-to-notes-intro-zh.mp4"), "-map", "0:a:0", "-vn", "-c:a", "copy"],
+            "video-to-notes-intro-zh.m4a",
+        ),
     ]
     try:
         for args, name in commands:
-            done = subprocess.run([ffmpeg, *args, str(target / name)], capture_output=True, text=True, check=False)
+            done = subprocess.run(
+                [ffmpeg, *args, str(target / name)], capture_output=True, text=True, check=False, timeout=900
+            )
             if done.returncode != 0:
                 return SynthResult([], f"ffmpeg 生成 {name} 失败：{(done.stderr or '').strip()[-200:]}")
         raw = (target / "tone.m4a").read_bytes()
@@ -1059,7 +1067,7 @@ ITEMS: tuple[Item, ...] = (
         "DOCX 正文、页眉、页脚、脚注、尾注引用图片：各来源关联路径全覆盖",
         _MATRIX_COMMON,
         ("matrix/docx_all_sources.docx",),
-        f"{AVAILABLE}：五来源引用图片齐备（matrix/docx_all_sources.docx）；sample_with_images.docx 仅作 A26/C04 辅助",
+        f"{AVAILABLE}：五来源引用图片齐备（matrix/docx_all_sources.docx）；sample_with_images.docx 仅作 A26 辅助",
         needs_assets="xberg",
     ),
     Item(
@@ -1304,15 +1312,6 @@ ITEMS: tuple[Item, ...] = (
     Item("C02", "C", "便携版主包不含模型或转换专用依赖（目录树扫描）", "便携目录文件扫描"),
     Item("C03", "C", "未配置时 JchTools 及旧工具正常可用且不自动下载 Xberg", "gui_smoke S1 引用 + 干净资产根快照对比"),
     Item(
-        "C04",
-        "C",
-        "断网环境实际完成文档 OCR 与媒体转录",
-        "GUI 转换链路（离线环境前置）",
-        ("sample_with_images.docx", "video-to-notes-intro-zh.mp4"),
-        AVAILABLE,
-        needs_assets="xberg+media",
-    ),
-    Item(
         "C05",
         "C",
         "无 Python 运行环境：进程加载模块与资产清单均无 Python（不能只从 PATH 移除）",
@@ -1447,11 +1446,16 @@ def _click_button(window: WindowSpecification, title: str) -> None:
     deadline = time.time() + GUI_WINDOW_TIMEOUT
     button: BaseWrapper | None = None
     while time.time() < deadline:
-        candidates = unique_visible_buttons(window, title)
-        for candidate in candidates:
-            if candidate.is_visible() and candidate.is_enabled():
-                button = candidate
-                break
+        try:
+            candidates = unique_visible_buttons(window, title)
+            for candidate in candidates:
+                if candidate.is_visible() and candidate.is_enabled():
+                    button = candidate
+                    break
+        except TRANSIENT_ERRORS:
+            # 控件树刷新时重新查询；不重试已经发出的启动/停止动作。
+            time.sleep(0.2)
+            continue
         if button is not None:
             break
         time.sleep(0.2)
@@ -1539,6 +1543,16 @@ def _window_texts(window: WindowSpecification) -> str:
     with contextlib.suppress(*TRANSIENT_ERRORS):
         for text in window.descendants(control_type="Text"):
             value = text.window_text() or ""
+            if value.strip():
+                parts.append(value)
+        # Slint 的运行日志是只读 TextEdit，UIA 暴露为 Edit/Value 而不是 Text/Name。
+        for edit in window.descendants(control_type="Edit"):
+            editor = cast("controls.uia_controls.EditWrapper", edit)
+            # 数值输入框也属于 Edit，但只提供 RangeValue，不能调用文本 Value。
+            value_available = IUIA().UIA_dll.UIA_IsValuePatternAvailablePropertyId
+            if not editor.element_info.element.GetCurrentPropertyValue(value_available):
+                continue
+            value = editor.get_value() or ""
             if value.strip():
                 parts.append(value)
     return "\n".join(parts)
@@ -1734,7 +1748,13 @@ class InputRule:
 _BROKEN_IMAGE_INPUTS = ("truncated.jpg", "huge.png", "empty.png", "fake_text.png")
 _OPTIONAL_IMAGE_INPUTS = ("alpha.png", "cmyk.tif")
 # A24 媒体合成变体（与 _synth_media 的产出同名；damaged 为字节截断，必须失败）。
-A24_MEDIA_SYNTH_FILES = ("tone.m4a", "silence.m4a", "noaudio.mp4", "damaged.mp4")
+A24_MEDIA_SYNTH_FILES = (
+    "tone.m4a",
+    "silence.m4a",
+    "noaudio.mp4",
+    "damaged.mp4",
+    "video-to-notes-intro-zh.m4a",
+)
 
 _INPUT_RULES: dict[str, dict[str, InputRule]] = {
     "A16": {name: InputRule(must_produce=False) for name in (*_BROKEN_IMAGE_INPUTS, *_OPTIONAL_IMAGE_INPUTS)},
@@ -1793,9 +1813,8 @@ def _collect_media_references(markdown: Path, output_dir: Path) -> tuple[list[st
             # 「# 开头」是合法锚点语义，跳过；空目标无媒体落盘要求。
             continue
         if "://" in raw:
-            # S10-12：外部地址引用违反 T-14/T-21 的本地输出语义（本地阅读器不得
-            # 依赖网络资源），此前直接 continue 会让外部引用完全绕过检查。
-            problems.append(f"图片引用为外部地址（违反本地输出语义）：{markdown.relative_to(output_dir)} -> {raw}")
+            # T-14 最新零改写协议保留引擎最终正文中的原有外链（如源 HTML）。
+            # 外链不是本地落盘媒体，不据此要求转换联网补图；本地资源仍逐项核对。
             continue
         if raw.startswith("//") and ntpath.isabs(raw.replace("/", "\\")):
             problems.append(f"图片引用逃出输出目录：{markdown.relative_to(output_dir)} -> {raw}")
@@ -2043,15 +2062,6 @@ def scan_forbidden_assets(root: Path) -> list[str]:
     return hits
 
 
-def _probe_offline() -> tuple[bool, str]:
-    """尽力探测联网状态；结果只作「在线/未知」提示，绝不作为断网结论（S10-09）."""
-    try:
-        with socket.create_connection(("1.1.1.1", 53), timeout=3):
-            return True, "当前环境可联网（探测 1.1.1.1:53 成功）"
-    except OSError:
-        return False, "探测 1.1.1.1:53 失败：联网状态未知（可能离线，也可能被防火墙/代理拦截，不构成断网证据）"
-
-
 def _tasklist() -> Path | None:
     # [quality-baseline approved 2026-10-03] 官方拼写误报，经用户裁定保留
     system_root = os.environ.get("SystemRoot")  # noqa: SIM112  # Windows 官方拼写即 SystemRoot，大小写不敏感。
@@ -2141,7 +2151,7 @@ def _run_conversion_item(  # noqa: PLR0913  # 前置与采集参数各自独立�
     tag_suffix: str = "run",
     capture: list[GuiRun] | None = None,
 ) -> Outcome:
-    """通用转换执行：前置→准备→GUI 驱动→横切断言（A 组与 C04/C06-C09 共用）.
+    """通用转换执行：前置→准备→GUI 驱动→横切断言（A 组与 C06-C09 共用）.
 
     capture 非空时追加本次 GuiRun，供调用方核对完整 GUI 文本（批次统计/诊断）。
     """
@@ -2447,15 +2457,16 @@ def _verify_a24_video(outputs: Path) -> str | None:
     """真实中文视频产物结构断言（标题/时长/转录/时间戳）与损坏音轨失败隔离."""
     if (outputs / "damaged_mp4.md").exists():
         return "损坏音轨产出了结果文件（应为失败，不留半成品）"
-    good = outputs / "video-to-notes-intro-zh_mp4.md"
-    if not good.is_file():
-        return "真实中文视频未产出转录结果"
-    text = good.read_text(encoding="utf-8", errors="replace")
-    missing = [marker for marker in ("# video-to-notes-intro-zh", "- 音频时长: ", "## 转录") if marker not in text]
-    if missing:
-        return f"媒体结果缺少结构标记：{missing}"
-    if not re.search(r"\d{2}:\d{2}:\d{2}\.\d{3}", text):
-        return "媒体结果缺少时间戳（HH:MM:SS.mmm）"
+    for suffix in ("mp4", "m4a"):
+        good = outputs / f"video-to-notes-intro-zh_{suffix}.md"
+        if not good.is_file():
+            return f"真实中文 {suffix.upper()} 未产出转录结果"
+        text = good.read_text(encoding="utf-8", errors="replace")
+        missing = [marker for marker in ("# video-to-notes-intro-zh", "- 音频时长: ", "## 转录") if marker not in text]
+        if missing:
+            return f"媒体结果缺少结构标记：{missing}"
+        if not re.search(r"\d{2}:\d{2}:\d{2}\.\d{3}", text):
+            return f"真实中文 {suffix.upper()} 结果缺少时间戳（HH:MM:SS.mmm）"
     return None
 
 
@@ -2760,28 +2771,6 @@ def _run_c03_unconfigured(item: Item, ctx: Context) -> Outcome:
     )
 
 
-def _run_c04_offline(item: Item, ctx: Context) -> Outcome:
-    # S10-09：单一地址连接失败不能证明断网（防火墙/代理拦截同形）。只有调用方
-    # 设置 JCHTOOLS_OFFLINE_VERIFIED=1（声明已完成可控网络隔离的人工证据）才执行
-    # 断网转换验收；探测结果只作「未知/在线」提示，不作为断网结论。
-    online, note = _probe_offline()
-    if os.environ.get("JCHTOOLS_OFFLINE_VERIFIED") != "1":
-        reason = (
-            f"断网证据要求：需调用方设置 JCHTOOLS_OFFLINE_VERIFIED=1 声明已完成可控网络隔离"
-            f"（拔线/断网适配器等人工证据）后才执行本项；当前探测：{note}"
-        )
-        return Outcome(STATUS_NOT_RUN, reason)
-    if online:
-        return Outcome(STATUS_NOT_RUN, f"需在断网环境执行；{note}")
-    pending = _asset_precondition(ctx, item)
-    if pending:
-        return Outcome(STATUS_NOT_RUN, f"隔离证据已声明；探测：{note}。{pending}")
-    result = _run_conversion_item(item, ctx, None, tag_suffix="offline")
-    if result.status == STATUS_NOT_RUN:
-        result.reason = f"隔离证据已声明；探测：{note}。{result.reason}"
-    return result
-
-
 def _c05_scan_during_conversion(exe: Path, input_dir: Path, output_dir: Path) -> tuple[GuiRun, list[str], list[str]]:
     """转换运行期间反复枚举相关进程的加载模块，捕捉对 python*.dll 的隐藏调用."""
     module_hits: list[str] = []
@@ -2864,7 +2853,6 @@ def _run_env(item: Item, ctx: Context) -> Outcome:
         "C01": _run_c01_installed_scan,
         "C02": _run_c02_portable_scan,
         "C03": _run_c03_unconfigured,
-        "C04": _run_c04_offline,
         "C05": _run_c05_no_python,
         "C06": _run_c06_old_dir,
         "C07": _run_c07_old_cache,

@@ -1288,8 +1288,7 @@ def start_conversion_and_wait_done(
         while time.time() < deadline:
             try:
                 if find_button(window, "停止任务").exists(timeout=0.1):
-                    finished = ""
-                    break
+                    return _wait_completion_with_anchor(window, previous_done, produced_dir, before)
                 for text in window.descendants(control_type="Text"):
                     value = text.window_text() or ""
                     if _confirm_new_completion(value, previous_done, produced_dir, before):
@@ -1306,8 +1305,8 @@ def start_conversion_and_wait_done(
             _ = find_button(window, "停止任务").wait("visible enabled", timeout=TIMEOUT)
             msg = "转换既未进入运行态也未完成（开始按钮可能未生效）"
             raise RuntimeError(msg)
-    # 上方重试已确认进入运行态（「停止任务」出现过），交给快照锚感知的收尾等待。
-    return _wait_completion_with_anchor(window, previous_done, produced_dir, before)
+    msg = "转换既未进入运行态也未完成（开始按钮可能未生效）"
+    raise RuntimeError(msg)
 
 
 def s10_output_layout_and_flat_duplicate_policy(exe: str) -> None:
