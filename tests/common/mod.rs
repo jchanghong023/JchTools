@@ -269,13 +269,12 @@ pub(super) fn mock_engine_copy(source: &str, dest: &Path) {
         let mut map = cache
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
-        match map.get(source) {
-            Some(path) => path.clone(),
-            None => {
-                let path = compile_mock_engine(source);
-                map.insert(source.to_string(), path.clone());
-                path
-            }
+        if let Some(path) = map.get(source) {
+            path.clone()
+        } else {
+            let path = compile_mock_engine(source);
+            map.insert(source.to_string(), path.clone());
+            path
         }
     };
     std::fs::copy(compiled, dest).unwrap_or_else(|error| {
