@@ -79,10 +79,15 @@ STATUS_NOT_RUN = "NOT RUN"
 
 # 与 src/markdown_assets.rs 的常量同口径：资产根目录、固定版本与成员相对路径。
 DATA_DIRECTORY = "markdown-assets"
+# 产品钉死 tag（resources/markdown-assets.json 的 xberg.tag，只读引用勿随本文件改）。
+# 本机测试引擎不使用该 tag：测试一律用 LOCAL_TEST_XBERG_DIR 的最新版（S10-01 两个口径）。
 XBERG_TAG = "v2026.10.2-0920-run54.1"
 XBERG_ARCHIVE_URL = (
     f"https://github.com/jchanghong023/xberg/releases/download/{XBERG_TAG}/xberg-cli-x86_64-pc-windows-msvc.zip"
 )
+# 本机测试引擎固定目录（AGENTS.md §3，与 scripts/test_gate.py 的同名常量同口径）：
+# 测试只用该目录下的最新版引擎，最新版已存在时不重复下载；勿用产品钉死 tag 覆盖它。
+LOCAL_TEST_XBERG_DIR = Path(r"C:\Users\jiang\Documents\xberg-test\xberg-cli-x86_64-pc-windows-msvc")
 # 与 src/markdown_assets.rs 同口径：媒体转录在位校验的必需成员
 # （存在性；SHA-256 校验由初始化/清单承接；组件目录与运行目录同口径）。
 INFERENCE_REQUIRED = (
@@ -135,9 +140,17 @@ def _old_cache_candidates() -> list[Path]:
 
 
 # 附录 A 双形态检查：主包不得携带的转换专用资产（文件名/后缀，全部小写比较）。
+# 固定清单只作兜底；可执行/模型类成员名按 resources/markdown-assets.json 清单驱动
+# （见 _manifest_forbidden_names），清单新增成员自动纳入扫描。EXE 内嵌内容的
+# 检测做不到，维持文件粒度现状（不过度设计）。
 FORBIDDEN_SUFFIXES = (".onnx",)
 FORBIDDEN_NAMES = ("xberg.exe", "markdown-media-worker.exe")
 FORBIDDEN_DLL_PREFIXES = ("python", "onnxruntime", "sherpa", "avcodec", "avformat", "swresample", "ffmpeg")
+# 清单驱动扫描的成员筛选口径：可执行/原生库/模型成员按扩展名纳入，模型词表
+# 文件按显式名单纳入（tokens.txt/dict.txt 属于模型资产）；许可/说明等文档类
+# 成员不纳入——盲目按成员名匹配会把交付物自身的 LICENSE 误报为违禁资产。
+_MANIFEST_MEMBER_SUFFIXES = (".exe", ".dll", ".onnx", ".cmd")
+_MANIFEST_MEMBER_ASSET_NAMES = frozenset({"tokens.txt", "dict.txt"})
 
 GUI_WINDOW_TIMEOUT = 60
 READINESS_TIMEOUT = 180
@@ -233,10 +246,18 @@ class AssetProbe:
         return self.inference_dir is not None and not any("推理组件" in text or "媒体" in text for text in self.missing)
 
     def acquire_hint(self) -> str:
-        hint = f"Xberg 运行目录：从 {XBERG_ARCHIVE_URL} 下载解压（固定 tag {XBERG_TAG}），"
-        hint += "在 GUI「转 Markdown」页选择并点「使用此目录」保存；推理组件：同页「初始化可选组件」"
-        hint += "按清单下载 Xberg 推理组件包（媒体转录所需的 xberg.exe、SenseVoice/VAD 模型与 FFmpeg/sherpa-onnx "
-        hint += "运行库，来源与成员摘要见 resources/markdown-assets.json）"
+        # 两个口径分开表述（S10-01）：测试引擎优先用本机固定目录的最新版；产品钉死
+        # tag 只描述产品下载链路的来源，不作为测试引擎的获取建议。
+        hint = "Xberg 运行目录两种口径——测试（优先）：将 JCHTOOLS_TEST_XBERG_DIR 指向本机固定测试引擎目录 "
+        hint += f"{LOCAL_TEST_XBERG_DIR}（AGENTS.md §3，只放最新版，已存在不重复下载；验收经 --seed-state "
+        hint += "写入隔离 SQLite）；产品钉死 tag："
+        hint += f"{_manifest_xberg_tag()}（来源 resources/markdown-assets.json，产品下载链路使用，勿在本脚本内改动）。"
+        hint += "配置入口：GUI「设置」页「共享 Xberg」区填入/选择目录并点「使用此目录」保存"
+        hint += "（XB-20；保存或下载成功后自动完成组件初始化与许可证 notice 落盘，"
+        hint += "「转 Markdown」页不再需要单独的初始化步骤）。"
+        hint += "推理组件：媒体转录所需的 xberg.exe、SenseVoice/VAD 模型与 FFmpeg/sherpa-onnx "
+        hint += "运行库来自同一 Xberg 目录（成员与摘要见 resources/markdown-assets.json），"
+        hint += "保存目录后按所选场景自动校验。"
         return hint
 
 
@@ -247,6 +268,17 @@ def _asset_root() -> Path | None:
         if override and Path(override).is_absolute():
             return Path(override)
     return None
+
+
+def _manifest_xberg_tag() -> str:
+    """只读读取产品钉死 tag（resources/markdown-assets.json）；不可读时回退内置常量。."""
+    try:
+        parsed = _parse_json(ASSET_MANIFEST.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return XBERG_TAG
+    section = parsed.get("xberg") if _is_str_obj_map(parsed) else None
+    tag = _str_field(section, "tag") if _is_str_obj_map(section) else None
+    return tag or XBERG_TAG
 
 
 def _manifest_model_paths() -> list[str]:
@@ -540,7 +572,7 @@ def _synth_media(target: Path) -> SynthResult:
         _ = (target / "damaged.mp4").write_bytes(raw[: max(1, len(raw) // 4)])
     except OSError as exc:
         return SynthResult([], f"构造媒体夹具失败：{exc}")
-    names = ["tone.m4a", "silence.m4a", "noaudio.mp4", "damaged.mp4"]
+    names: list[str] = list(A24_MEDIA_SYNTH_FILES)
     holes = [name for name in names if not (target / name).is_file()]
     if holes:
         return SynthResult([], f"媒体变体生成不完整：{holes}")
@@ -1013,8 +1045,8 @@ ITEMS: tuple[Item, ...] = (
         "A",
         "PPTX OLE 本体失败、preview OCR 成功：两者分别诊断和输出",
         _MATRIX_COMMON,
-        ("pptx_with_embedded_office.pptx",),
-        f"{AVAILABLE}（嵌入对象在场）；「本体失败+预览成功」注入变体另需新增 matrix/pptx_ole_broken_preview.pptx",
+        ("pptx_with_embedded_office.pptx", "matrix/pptx_ole_broken_preview.pptx"),
+        "需新增 matrix/pptx_ole_broken_preview.pptx（本体失败+预览成功注入变体）；缺它时本项 NOT RUN，不得只查存在性",
         needs_assets="xberg",
     ),
     Item(
@@ -1023,7 +1055,7 @@ ITEMS: tuple[Item, ...] = (
         "DOCX 正文、页眉、页脚、脚注、尾注引用图片：各来源关联路径全覆盖",
         _MATRIX_COMMON,
         ("matrix/docx_all_sources.docx",),
-        "需新增：五来源各引用一张不同可 OCR 图片；sample_with_images.docx 仅覆盖正文来源，作辅助不单独满足本项",
+        f"{AVAILABLE}：五来源引用图片齐备（matrix/docx_all_sources.docx）；sample_with_images.docx 仅作 A26/C04 辅助",
         needs_assets="xberg",
     ),
     Item(
@@ -1032,7 +1064,7 @@ ITEMS: tuple[Item, ...] = (
         "DOCX EMF、WMF 与栅格图片混排：单图失败不影响其余",
         _MATRIX_COMMON,
         ("matrix/docx_emf_wmf_raster.docx",),
-        "需新增：EMF+WMF+栅格混排，其一损坏",
+        f"{AVAILABLE}：EMF+WMF+栅格混排夹具在场，顶层产物必须保留（单图失败只降级为部分提取）",
         needs_assets="xberg",
     ),
     Item(
@@ -1055,9 +1087,10 @@ ITEMS: tuple[Item, ...] = (
             "scanned_hello.pdf",
             "mixed_native_scanned.pdf",
             "large_210_pages.pdf",
+            "large_501_pages.pdf",
             "matrix/pdf_repeat_softmask.pdf",
         ),
-        f"{AVAILABLE}：前四个（原生/扫描/混合/>200 页分流）；需新增 matrix/pdf_repeat_softmask.pdf（软蒙版）",
+        f"{AVAILABLE}：原生/扫描/混合/软蒙版/210 页常规回归/501 页 auto_mode 披露",
         needs_assets="xberg",
     ),
     Item(
@@ -1642,13 +1675,83 @@ MARKDOWN_FENCE_PATTERN = re.compile(r"(?s)(```.*?```|~~~.*?~~~)")
 MARKDOWN_INLINE_CODE_PATTERN = re.compile(r"(?<!`)`+(?!`)[^`\n]+`+(?!`)")
 
 
+def _expected_markdown_name(name: str) -> str:
+    stem = Path(name).stem
+    suffix = Path(name).suffix.lstrip(".").lower()
+    return f"{stem}_{suffix}.md" if suffix else f"{stem}.md"
+
+
 def _expected_markdown_names(files: list[str]) -> list[str]:
-    names: list[str] = []
+    return [_expected_markdown_name(name) for name in files]
+
+
+# ---------------------------------------------------------------- 逐输入断言（S10-02/04）。
+
+
+@dataclasses.dataclass(frozen=True)
+class InputRule:
+    """逐输入验收期望：健康必须有产物，预期失败必须有失败诊断.
+
+    must_produce：健康输入，必须有对应顶层 Markdown 产物；
+    expect_failure：损坏/截断等预期失败输入，不得有产物且 GUI 日志须含失败诊断
+    （T-16/T-24：文件、阶段与原因必须可区分，不得静默消失）；
+    两者都为 False 是宽松输入（成功或失败均可接受，如空白透明图的空 OCR）。
+    """
+
+    must_produce: bool = True
+    expect_failure: bool = False
+
+
+# 图像合成器（A16/A20 共用）产出的变体分类：截断/超大/空文件/错误扩展名
+# 按 T-25 预期为失败——A20 对这四项强制 expect_failure（必须有失败诊断），
+# A16 登记为宽松（不索产物也不索诊断，保守不假 PASS）；透明背景与异常色彩
+# 空间成功（空 OCR）或失败均可。
+_BROKEN_IMAGE_INPUTS = ("truncated.jpg", "huge.png", "empty.png", "fake_text.png")
+_OPTIONAL_IMAGE_INPUTS = ("alpha.png", "cmyk.tif")
+# A24 媒体合成变体（与 _synth_media 的产出同名；damaged 为字节截断，必须失败）。
+A24_MEDIA_SYNTH_FILES = ("tone.m4a", "silence.m4a", "noaudio.mp4", "damaged.mp4")
+
+_INPUT_RULES: dict[str, dict[str, InputRule]] = {
+    "A16": {name: InputRule(must_produce=False) for name in (*_BROKEN_IMAGE_INPUTS, *_OPTIONAL_IMAGE_INPUTS)},
+    "A18": {f"{name}.{name}": InputRule(must_produce=False) for name in A18_UNSUPPORTED_EXTENSIONS},
+    "A20": {name: InputRule(must_produce=False, expect_failure=True) for name in _BROKEN_IMAGE_INPUTS}
+    | {name: InputRule(must_produce=False) for name in _OPTIONAL_IMAGE_INPUTS},
+    "A24": {"damaged.mp4": InputRule(must_produce=False, expect_failure=True)},
+}
+
+# 条目级默认规则：A25 的格式清点集合由引擎清单运行期决定，保留子集语义
+# （未验证不得列为通过，由「至少一份产物」兜底；逐格式行为不强断言）。
+_ITEM_DEFAULT_RULES: dict[str, InputRule] = {"A25": InputRule(must_produce=False)}
+
+# A25 动态规则（S10-02 复审）：拿到引擎实查清单后，由 _run_matrix_a25 按
+# 「引擎声明的格式必须有产物、未声明格式保留宽松兜底」重写——静态默认的
+# 全宽松会让「引擎停止转换某格式」这类回归以假 PASS 溜过。验收单线程，
+# 模块级重写安全；单测直接构造该表锁定判定。
+_A25_RULES: dict[str, InputRule] = {}
+
+
+def _input_rule(item_id: str, filename: str) -> InputRule:
+    """查单个输入的验收期望；未登记的健康输入默认必须有产物。."""
+    if item_id == "A25":
+        return _A25_RULES.get(filename, _ITEM_DEFAULT_RULES.get(item_id, InputRule()))
+    return _INPUT_RULES.get(item_id, {}).get(filename, _ITEM_DEFAULT_RULES.get(item_id, InputRule()))
+
+
+def _per_input_problems(item_id: str, files: list[str], produced: list[str], texts: str) -> list[str]:
+    """逐输入断言：健康输入必须有产物；预期失败输入不得有产物且须有失败诊断。."""
+    problems: list[str] = []
+    produced_names = set(produced)
     for name in files:
-        stem = Path(name).stem
-        suffix = Path(name).suffix.lstrip(".").lower()
-        names.append(f"{stem}_{suffix}.md" if suffix else f"{stem}.md")
-    return names
+        rule = _input_rule(item_id, name)
+        expected = _expected_markdown_name(name)
+        if rule.must_produce and expected not in produced_names:
+            problems.append(f"健康输入未产出对应 Markdown：{name}（预期 {expected}）")
+        if rule.expect_failure:
+            if expected in produced_names:
+                problems.append(f"预期失败输入产出了结果（应失败不留半成品，T-25）：{name}")
+            elif name not in texts:
+                problems.append(f"预期失败输入缺少失败诊断（T-16/T-24 须显示文件与原因）：{name}")
+    return problems
 
 
 def _collect_media_references(markdown: Path, output_dir: Path) -> tuple[list[str], set[Path]]:
@@ -1661,7 +1764,13 @@ def _collect_media_references(markdown: Path, output_dir: Path) -> tuple[list[st
     for match in MARKDOWN_IMAGE_LINK_PATTERN.finditer(rendered):
         raw = match.group("target").strip()
         raw = raw[1:-1] if raw.startswith("<") and raw.endswith(">") else raw.split(maxsplit=1)[0]
-        if not raw or raw.startswith("#") or "://" in raw:
+        if not raw or raw.startswith("#"):
+            # 「# 开头」是合法锚点语义，跳过；空目标无媒体落盘要求。
+            continue
+        if "://" in raw:
+            # S10-12：外部地址引用违反 T-14/T-21 的本地输出语义（本地阅读器不得
+            # 依赖网络资源），此前直接 continue 会让外部引用完全绕过检查。
+            problems.append(f"图片引用为外部地址（违反本地输出语义）：{markdown.relative_to(output_dir)} -> {raw}")
             continue
         if raw.startswith("//") and ntpath.isabs(raw.replace("/", "\\")):
             problems.append(f"图片引用逃出输出目录：{markdown.relative_to(output_dir)} -> {raw}")
@@ -1861,8 +1970,38 @@ def _delegate_stage(stage: str, exe: Path, env_extra: dict[str, str] | None = No
 # ---------------------------------------------------------------- C 组检查件。
 
 
+def _manifest_forbidden_names() -> frozenset[str]:
+    """从资产清单只读收集禁止随主包携带的成员文件名（S10-14 清单驱动）.
+
+    只纳入可执行/原生库/模型类成员与模型词表显式名单；清单缺失或不可解析时
+    返回空集，由固定模式兜底（不把清单故障放大为扫描失败）。
+    """
+    try:
+        parsed = _parse_json(ASSET_MANIFEST.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return frozenset()
+    names: set[str] = set(_MANIFEST_MEMBER_ASSET_NAMES)
+    if _is_str_obj_map(parsed):
+        for section_key in ("xberg", "xberg_inference"):
+            section = parsed.get(section_key)
+            members = section.get("members") if _is_str_obj_map(section) else None
+            if not _is_str_obj_list(members):
+                continue
+            for entry in members:
+                relative = _str_field(entry, "install_path") or _str_field(entry, "path") or ""
+                base = relative.replace("/", "\\").rsplit("\\", 1)[-1].lower()
+                if base and base.endswith(_MANIFEST_MEMBER_SUFFIXES):
+                    names.add(base)
+    return frozenset(names)
+
+
 def scan_forbidden_assets(root: Path) -> list[str]:
-    """扫描交付目录树，报告任何模型/转换专用依赖（文件粒度，只读）."""
+    """扫描交付目录树，报告任何模型/转换专用依赖（文件粒度，只读）.
+
+    模式清单驱动：resources/markdown-assets.json 新增的可执行/库/模型成员自动
+    纳入；固定文件名/后缀/DLL 前缀兜底保持。EXE 内嵌内容检测做不到，维持现状。
+    """
+    forbidden_names = set(FORBIDDEN_NAMES) | _manifest_forbidden_names()
     hits: list[str] = []
     for path in root.rglob("*"):
         if not path.is_file():
@@ -1870,7 +2009,7 @@ def scan_forbidden_assets(root: Path) -> list[str]:
         name = path.name.lower()
         stem = name.rsplit(".", 1)[0]
         forbidden = (
-            name in FORBIDDEN_NAMES
+            name in forbidden_names
             or path.suffix.lower() in FORBIDDEN_SUFFIXES
             or (name.endswith(".dll") and stem.startswith(FORBIDDEN_DLL_PREFIXES))
         )
@@ -1880,12 +2019,12 @@ def scan_forbidden_assets(root: Path) -> list[str]:
 
 
 def _probe_offline() -> tuple[bool, str]:
-    """尽力探测联网状态；探测失败只代表「未知」，不得据此宣称离线."""
+    """尽力探测联网状态；结果只作「在线/未知」提示，绝不作为断网结论（S10-09）."""
     try:
         with socket.create_connection(("1.1.1.1", 53), timeout=3):
             return True, "当前环境可联网（探测 1.1.1.1:53 成功）"
     except OSError:
-        return False, "探测 1.1.1.1:53 失败（可能离线，也可能被防火墙拦截；结论需人工确认）"
+        return False, "探测 1.1.1.1:53 失败：联网状态未知（可能离线，也可能被防火墙/代理拦截，不构成断网证据）"
 
 
 def _tasklist() -> Path | None:
@@ -1968,10 +2107,19 @@ def _prepare_scratch(item: Item, ctx: Context, tag: str) -> PreparedInputs:
     return prepared
 
 
-def _run_conversion_item(
-    item: Item, ctx: Context, exe: Path | None, *, stop_mode: bool = False, tag_suffix: str = "run"
+def _run_conversion_item(  # noqa: PLR0913  # 前置与采集参数各自独立语义，收拢成结构体反而掩盖调用契约
+    item: Item,
+    ctx: Context,
+    exe: Path | None,
+    *,
+    stop_mode: bool = False,
+    tag_suffix: str = "run",
+    capture: list[GuiRun] | None = None,
 ) -> Outcome:
-    """通用转换执行：前置→准备→GUI 驱动→横切断言（A 组与 C04/C06-C09 共用）."""
+    """通用转换执行：前置→准备→GUI 驱动→横切断言（A 组与 C04/C06-C09 共用）.
+
+    capture 非空时追加本次 GuiRun，供调用方核对完整 GUI 文本（批次统计/诊断）。
+    """
     target, blocked = _resolve_gui(ctx, exe)
     if blocked is not None or target is None:
         return Outcome(STATUS_NOT_RUN, blocked or "被测 GUI 缺失")
@@ -1989,12 +2137,14 @@ def _run_conversion_item(
         if path.is_file()
     }
     run = drive_conversion(target, prepared.input_dir, prepared.output_dir, stop_after_busy=stop_mode)
+    if capture is not None:
+        capture.append(run)
     if run.error is not None:
         return Outcome(STATUS_FAILED, run.error, run.texts.splitlines()[-8:])
     return _assess_conversion(item, prepared, sources, run, stop_mode=stop_mode)
 
 
-def _assess_conversion(
+def _assess_conversion(  # noqa: PLR0911  # 前置失败类别各自独立呈现，合并会吞掉具体原因
     item: Item, prepared: PreparedInputs, sources: dict[Path, str], run: GuiRun, *, stop_mode: bool = False
 ) -> Outcome:
     problems = verify_common_postconditions(prepared.input_dir, prepared.output_dir, sources)
@@ -2005,48 +2155,88 @@ def _assess_conversion(
         *run.texts.splitlines()[-6:],
     ]
     if stop_mode:
+        # 停止语义（T-23）只断言已完成结果保留与源不变；「后续文件未处理」由
+        # 调用方按条目补充（如 A24 的 _verify_a24_stop）。
         details.insert(0, "停止路径：已完成结果保留、源文件不变即符合 T-23；完整统计断言待资产环境调校")
+        if problems:
+            return Outcome(STATUS_FAILED, "；".join(problems[:5]), details)
+        return Outcome(STATUS_OK, details=details)
     if problems:
         return Outcome(STATUS_FAILED, "；".join(problems[:5]), details)
-    if not stop_mode:
-        if item.item_id == "A26":
-            if len(produced) != len(expected) or set(produced) != set(expected):
-                return Outcome(
-                    STATUS_FAILED,
-                    f"A26 顶层输入与 Markdown 产物未一一对应：预期 {expected}，实得 {produced}",
-                    details,
-                )
-            empty = [
-                path.name for path in run.outputs if not path.read_text(encoding="utf-8", errors="replace").strip()
-            ]
-            if empty:
-                return Outcome(STATUS_FAILED, f"A26 产物正文为空：{empty}", details)
-        # 反假 PASS：run.error 只覆盖驱动链路失败；「任务运行过但整体转换失败、
-        # 零产物」此前只写进 details 仍记 PASS。异常/损坏夹具按 T-25 以失败诊断
-        # 收场、不产出 md 属预期，故不要求产物数等于输入数，只要求：产物是输入
-        # 对应集合的子集（命名规则外的产物即规划缺陷），且常规条目不得零产物。
-        extra_outputs = sorted(set(produced) - set(expected))
-        if extra_outputs:
-            return Outcome(STATUS_FAILED, f"产物超出输入对应集合：{extra_outputs[:8]}", details)
-        if not produced:
-            return Outcome(STATUS_FAILED, "预期至少一份 Markdown 产物，实得 0 项（转换全部失败或未产出）", details)
+    if item.item_id == "A26":
+        if len(produced) != len(expected) or set(produced) != set(expected):
+            return Outcome(
+                STATUS_FAILED,
+                f"A26 顶层输入与 Markdown 产物未一一对应：预期 {expected}，实得 {produced}",
+                details,
+            )
+        empty = [path.name for path in run.outputs if not path.read_text(encoding="utf-8", errors="replace").strip()]
+        if empty:
+            return Outcome(STATUS_FAILED, f"A26 产物正文为空：{empty}", details)
+    # 反假 PASS（S10-02）：健康输入逐个必须有对应产物（此前「子集 + 至少一份」
+    # 允许任一家族全失败仍 PASS）；损坏/预期失败输入按 T-25 不得留半成品且须有
+    # 失败诊断；命名规则外的产物仍视为规划缺陷。
+    extra_outputs = sorted(set(produced) - set(expected))
+    if extra_outputs:
+        return Outcome(STATUS_FAILED, f"产物超出输入对应集合：{extra_outputs[:8]}", details)
+    input_problems = _per_input_problems(item.item_id, prepared.files, produced, run.texts)
+    if input_problems:
+        return Outcome(STATUS_FAILED, "；".join(input_problems[:6]), details)
+    if not produced:
+        return Outcome(STATUS_FAILED, "预期至少一份 Markdown 产物，实得 0 项（转换全部失败或未产出）", details)
     return Outcome(STATUS_OK, details=details)
 
 
-# A 组内容断言表：require 命中、forbid 全文禁止、forbid_in_text_fences 仅围栏禁止。
-# token 均避开数字（OCR 对数字/字母易混，如 8→O、0→O），取稳定核心片段。
-_CONTENT_ASSERTS: dict[str, dict[str, tuple[str, ...]]] = {
-    "A01": {"require": ("ALPHA", "BETA")},
-    "A03": {"require": ("SHARED-MEDIA",)},
+# A 组内容断言表（S10-03 断言强度扩展）：require 命中、forbid 全文禁止、
+# forbid_in_text_fences 仅围栏禁止、require_counts 恰好次数（A03 两处引用）、
+# require_patterns 正则命中（A08 字段值存活于两段 run 之间）、ordered_tokens
+# 显示顺序 + 图文邻近归属（A01/A14 换图可检出）、forbid_outside_alt 只允许
+# 出现在图片 alt 位置（A09 descr 不冒充正文）、require_in_texts GUI 任务文本
+# 必含（A10 部分提取诊断 / A15 auto_mode 披露）。token 均避开数字（OCR 对
+# 数字/字母易混，如 8→O、0→O），取稳定核心片段。
+
+
+@dataclasses.dataclass(frozen=True)
+class ContentSpec:
+    """单条目的正文与 GUI 任务文本断言集合。."""
+
+    require: tuple[str, ...] = ()
+    forbid: tuple[str, ...] = ()
+    forbid_in_text_fences: tuple[str, ...] = ()
+    require_counts: tuple[tuple[str, int], ...] = ()
+    require_patterns: tuple[str, ...] = ()
+    ordered_tokens: tuple[str, ...] = ()
+    forbid_outside_alt: tuple[str, ...] = ()
+    require_in_texts: tuple[str, ...] = ()
+
+
+_CONTENT_ASSERTS: dict[str, ContentSpec] = {
+    # A01 夹具 slide 显示顺序为先 rId11（BETA）后 rId10（ALPHA）且与 rels 列举
+    # 顺序交错：ordered_tokens 锁定显示顺序，邻近断言锁定图文归属（互换可检出）。
+    "A01": ContentSpec(ordered_tokens=("BETA", "ALPHA")),
+    # A03 同一 media 被两个 shape 引用：T-14 要求保留每处位置，正文恰出现两次。
+    "A03": ContentSpec(require_counts=(("SHARED-MEDIA", 2),)),
     # SVG 栅格化后可按 PNG 落盘；源扩展名字面量不是 T-14 的产物要求。
     # 邻位 PNG 仍须 OCR；两张独立的可解码媒体由 verify_svg_raster_media 核对。
-    "A07": {"require": ("PNG-NEIGH",)},
-    "A08": {"require": ("RUN-AND", "FIELD-END")},
+    "A07": ContentSpec(require=("PNG-NEIGH",)),
+    # A08 字段值（幻灯片编号一位字符）必须存活在两段 run 之间，不能只查首尾。
+    "A08": ContentSpec(
+        require=("RUN-AND", "FIELD-END"),
+        require_patterns=(r"RUN-AND-FIELD\s{0,3}\S\s{0,3}-FIELD-END",),
+    ),
     # A09 的 descr 允许出现在图片 alt 位置（本就是 description 的标准去处），
-    # 不得进入 ```text 围栏冒充 OCR 正文。
-    "A09": {"forbid_in_text_fences": ("DESCR-NO-OCR-TOKEN",)},
-    "A10": {"require": ("HEALTHY-TEXT",)},
-    "A14": {"require": ("XLSX-FIRST-DRAW", "XLSX-FIRST-REL")},
+    # 围栏内与围栏外正文都不得冒充 OCR 正文。
+    "A09": ContentSpec(
+        forbid_in_text_fences=("DESCR-NO-OCR-TOKEN",),
+        forbid_outside_alt=("DESCR-NO-OCR-TOKEN",),
+    ),
+    # A10 截断图按 T-16 必须留下「部分提取 + 文件名 + 原因」的界面诊断。
+    "A10": ContentSpec(require=("HEALTHY-TEXT",), require_in_texts=("部分提取", "pptx_undecodable_image")),
+    # A14 两个 anchor 的显示顺序（rId2/rId1）与 .rels 列举顺序相反，归属不得互换。
+    "A14": ContentSpec(ordered_tokens=("XLSX-FIRST-DRAW", "XLSX-FIRST-REL")),
+    # A15（S10-08）：>500 页夹具必须经 processing_warnings 披露 auto_mode 降级
+    # （T-18 修订：阈值默认 500，JchTools 只转达引擎警告并按文件呈现）。
+    "A15": ContentSpec(require_in_texts=("auto_mode", "large_501_pages")),
 }
 
 
@@ -2064,23 +2254,85 @@ def _run_matrix(item: Item, ctx: Context) -> Outcome:
     if handler is not None:
         return handler(item, ctx)
     if item.item_id in _CONTENT_ASSERTS:
-        return _run_content_assert(item, ctx, **_CONTENT_ASSERTS[item.item_id])
+        return _run_content_assert(item, ctx)
     return _run_conversion_item(item, ctx, None)
 
 
 _TEXT_FENCE = re.compile(r"```[^\n]*\n(.*?)```", re.DOTALL)
 
 
-def _run_content_assert(
-    item: Item,
-    ctx: Context,
-    *,
-    require: tuple[str, ...] = (),
-    forbid: tuple[str, ...] = (),
-    forbid_in_text_fences: tuple[str, ...] = (),
-) -> Outcome:
-    """通用转换 + 输出正文 token 断言（A03/A09/A14：复用识别、descr 不冒充正文、归属正确）."""
-    outcome = _run_conversion_item(item, ctx, None)
+def _token_image_order_problems(text: str, ordered_tokens: tuple[str, ...]) -> list[str]:
+    """图文归属断言（A01/A14）：token 按显示顺序出现，且各自邻近不同的图片引用.
+
+    换图/错配可检出：token 顺序颠倒、或多个 token 邻近同一引用、或邻近引用
+    顺序与显示顺序不一致，都判为归属错误（T-15 对应关系稳定）。
+    """
+    problems: list[str] = []
+    positions: list[int] = []
+    for token in ordered_tokens:
+        index = text.find(token)
+        if index < 0:
+            return [f"正文缺少期望 token：{token}"]
+        positions.append(index)
+    if positions != sorted(positions):
+        return [f"token 顺序与显示顺序不一致（可能互换）：{list(zip(ordered_tokens, positions, strict=True))}"]
+    references = [match.start() for match in MARKDOWN_IMAGE_LINK_PATTERN.finditer(text)]
+    if len(references) < len(ordered_tokens):
+        return [f"图片引用数（{len(references)}）少于 token 数（{len(ordered_tokens)}），无法核对图文归属"]
+    nearest: list[int] = []
+    for token, position in zip(ordered_tokens, positions, strict=True):
+        before = [start for start in references if start < position]
+        if not before:
+            return [f"token {token} 之前没有任何图片引用，图文归属无法核对"]
+        nearest.append(max(before))
+    if len(set(nearest)) != len(nearest):
+        problems.append(f"多个 token 邻近同一图片引用，图文归属不可区分（可能互换）：{ordered_tokens}")
+    elif nearest != sorted(nearest):
+        problems.append(f"token 与各自邻近图片引用的顺序不一致（可能互换）：{ordered_tokens}")
+    return problems
+
+
+def _content_problems(text: str, gui_texts: str, spec: ContentSpec) -> list[str]:
+    """按 ContentSpec 汇总正文与 GUI 任务文本的内容问题（纯函数，供单测锁定）."""
+    problems: list[str] = []
+    fences = cast("list[str]", _TEXT_FENCE.findall(text))
+    fence_text = "\n".join(fences)
+    missing = [token for token in spec.require if token not in text]
+    if missing:
+        problems.append(f"正文缺少期望 token：{missing}")
+    leaked = [token for token in spec.forbid if token in text]
+    if leaked:
+        problems.append(f"正文出现不应出现的 token：{leaked}")
+    leaked_fences = [token for token in spec.forbid_in_text_fences if token in fence_text]
+    if leaked_fences:
+        problems.append(f"text 围栏出现不应出现的 token：{leaked_fences}")
+    wrong_counts = [
+        f"{token} 出现 {text.count(token)} 次（预期 {expected} 次）"
+        for token, expected in spec.require_counts
+        if text.count(token) != expected
+    ]
+    if wrong_counts:
+        problems.append(f"token 出现次数不符合预期：{wrong_counts}")
+    missing_patterns = [pattern for pattern in spec.require_patterns if not re.search(pattern, text)]
+    if missing_patterns:
+        problems.append(f"正文未命中期望模式（如字段值丢失）：{missing_patterns}")
+    if spec.ordered_tokens:
+        problems.extend(_token_image_order_problems(text, spec.ordered_tokens))
+    # 图片引用整段剔除后，剩余正文不得再出现 descr（alt 是唯一合法去处）。
+    outside_alt = MARKDOWN_IMAGE_LINK_PATTERN.sub("", text)
+    leaked_alt = [token for token in spec.forbid_outside_alt if token in outside_alt]
+    if leaked_alt:
+        problems.append(f"token 出现在 alt 之外冒充正文：{leaked_alt}")
+    missing_texts = [token for token in spec.require_in_texts if token not in gui_texts]
+    if missing_texts:
+        problems.append(f"GUI 任务文本缺少期望诊断/披露：{missing_texts}")
+    return problems
+
+
+def _run_content_assert(item: Item, ctx: Context) -> Outcome:
+    """通用转换 + 逐条目内容断言（A01/A03/A07~A10/A14/A15）."""
+    captured: list[GuiRun] = []
+    outcome = _run_conversion_item(item, ctx, None, capture=captured)
     if outcome.status != STATUS_OK:
         return outcome
     output = SCRATCH_ROOT / f"{item.item_id.lower()}-run" / "output"
@@ -2089,22 +2341,23 @@ def _run_content_assert(
         if error is not None:
             return Outcome(STATUS_FAILED, error, list(outcome.details))
     text = "\n".join(path.read_text(encoding="utf-8", errors="replace") for path in sorted(output.rglob("*.md")))
-    fences = cast("list[str]", _TEXT_FENCE.findall(text))
-    fence_text = "\n".join(fences)
-    missing = [token for token in require if token not in text]
-    leaked = [token for token in forbid if token in text]
-    leaked_fences = [token for token in forbid_in_text_fences if token in fence_text]
-    if missing or leaked or leaked_fences:
-        problems: list[str] = []
-        if missing:
-            problems.append(f"正文缺少期望 token：{missing}")
-        if leaked:
-            problems.append(f"正文出现不应出现的 token：{leaked}")
-        if leaked_fences:
-            problems.append(f"text 围栏出现不应出现的 token：{leaked_fences}")
+    gui_texts = captured[0].texts if captured else ""
+    spec = _CONTENT_ASSERTS[item.item_id]
+    problems = _content_problems(text, gui_texts, spec)
+    if problems:
         return Outcome(STATUS_FAILED, "；".join(problems), list(outcome.details))
+    spec_summary = " ".join(
+        (
+            f"require={list(spec.require)}",
+            f"counts={spec.require_counts}",
+            f"patterns={list(spec.require_patterns)}",
+            f"ordered={spec.ordered_tokens}",
+            f"alt-forbid={list(spec.forbid_outside_alt)}",
+            f"texts={list(spec.require_in_texts)}",
+        )
+    )
     details = [
-        f"内容断言通过：require={list(require)} forbid={list(forbid)} fences-forbid={list(forbid_in_text_fences)}",
+        f"内容断言通过：{spec_summary}",
         *outcome.details,
     ]
     return Outcome(STATUS_OK, details=details)
@@ -2165,8 +2418,8 @@ def _run_matrix_a02(item: Item, ctx: Context) -> Outcome:
     )
 
 
-def _verify_a24_outputs() -> str | None:
-    outputs = SCRATCH_ROOT / "a24-full" / "output"
+def _verify_a24_video(outputs: Path) -> str | None:
+    """真实中文视频产物结构断言（标题/时长/转录/时间戳）与损坏音轨失败隔离."""
     if (outputs / "damaged_mp4.md").exists():
         return "损坏音轨产出了结果文件（应为失败，不留半成品）"
     good = outputs / "video-to-notes-intro-zh_mp4.md"
@@ -2181,21 +2434,103 @@ def _verify_a24_outputs() -> str | None:
     return None
 
 
+def _scene_marker_problem(outputs: Path, result_name: str, markers: tuple[str, ...], scene: str) -> str | None:
+    """单场景说明文本断言：结果文件在场且包含 T-20 要求的说明标记。."""
+    result = outputs / result_name
+    if not result.is_file():
+        return f"{scene}未产出结果文件（T-20 不能产生无解释的空文件）"
+    missing = [marker for marker in markers if marker not in result.read_text(encoding="utf-8", errors="replace")]
+    if missing:
+        return f"{scene}缺少说明标记（T-20）：{missing}"
+    return None
+
+
+def _verify_a24_tone(outputs: Path) -> str | None:
+    """正弦音场景：时长行必须在场；转录片段与「未检测到语音」说明取其一。."""
+    problem = _scene_marker_problem(outputs, "tone_m4a.md", ("- 音频时长: ",), "正弦音场景")
+    if problem is not None:
+        return problem
+    text = (outputs / "tone_m4a.md").read_text(encoding="utf-8", errors="replace")
+    if "## 转录" in text or "未检测到语音" in text:
+        return None
+    return "正弦音场景缺少转录片段或「未检测到语音」说明（T-20）"
+
+
+def _verify_a24_scenes(outputs: Path) -> str | None:
+    """S10-07：tone/silence/noaudio 三场景按 T-20 各自有明确说明文本，不能只查存在。."""
+    return (
+        _scene_marker_problem(outputs, "noaudio_mp4.md", ("无音频轨道",), "无音轨场景")
+        or _scene_marker_problem(outputs, "silence_m4a.md", ("未检测到语音",), "有音轨但无语音场景")
+        or _verify_a24_tone(outputs)
+    )
+
+
+def _verify_a24_outputs() -> str | None:
+    outputs = SCRATCH_ROOT / "a24-full" / "output"
+    return _verify_a24_video(outputs) or _verify_a24_scenes(outputs)
+
+
+def _verify_a24_stop(produced: int, convertible: int, texts: str) -> str | None:
+    """S10-07：停止相必须证明「后续文件未处理」（T-23），不能只看驱动链路成功。."""
+    if "已停止" not in texts:
+        return "停止相未观察到「已停止」界面状态（T-23 须显示停止请求已生效）"
+    if produced >= convertible:
+        return (
+            f"停止后产物 {produced} 份不少于可转换输入 {convertible} 份，"
+            "「当前文件结束后不再开始下一文件」的语义未被验证（判据形态同 gui_smoke S5）"
+        )
+    return None
+
+
 def _run_matrix_a24(item: Item, ctx: Context) -> Outcome:
-    stop_phase = _run_conversion_item(item, ctx, None, stop_mode=True, tag_suffix="stop")
+    stopped_runs: list[GuiRun] = []
+    stop_phase = _run_conversion_item(item, ctx, None, stop_mode=True, tag_suffix="stop", capture=stopped_runs)
     if stop_phase.status != STATUS_OK:
         return stop_phase
+    files = [Path(name).name for name in item.fixtures] + list(A24_MEDIA_SYNTH_FILES)
+    convertible = sum(1 for name in files if _input_rule("A24", name).must_produce)
+    stop_problem = _verify_a24_stop(
+        len(stopped_runs[0].outputs) if stopped_runs else 0,
+        convertible,
+        stopped_runs[0].texts if stopped_runs else "",
+    )
+    if stop_problem is not None:
+        return Outcome(STATUS_FAILED, stop_problem)
     full = _run_conversion_item(item, ctx, None, tag_suffix="full")
     if full.status != STATUS_OK:
         return full
     problem = _verify_a24_outputs()
     if problem is not None:
         return Outcome(STATUS_FAILED, problem)
-    return Outcome(STATUS_OK, details=["真实中文转录、时间戳结构、损坏音轨失败隔离全部符合"])
+    return Outcome(
+        STATUS_OK,
+        details=["真实中文转录、时间戳结构、无音轨/无语音/正弦音说明、停止后后续文件未处理、损坏音轨失败隔离全部符合"],
+    )
 
 
-def _run_matrix_a18(item: Item, ctx: Context) -> Outcome:
-    """A18：按 T-08 固定清单验证支持边界，不把 JPX/JPM/MJ2 冒称为支持。."""
+def _verify_a18_unsupported_rejected(output_dir: Path, texts: str) -> str | None:
+    """S10-06：未承诺格式不得产出结果，且批次统计证明它们未进入转换（T-07/T-08）."""
+    if not output_dir.is_dir():
+        return f"混跑输出目录缺失：{output_dir}"
+    leftovers = sorted(
+        path.name for path in output_dir.rglob("*.md") if path.name.endswith(("_jpx.md", "_jpm.md", "_mj2.md"))
+    )
+    if leftovers:
+        return f"未承诺格式产出了结果文件（应作为 unsupported 明确拒绝）：{leftovers}"
+    summary = re.findall(r"成功 (\d+)，部分提取 (\d+)，失败 (\d+)", texts)
+    if not summary:
+        return "混跑后未观察到批次统计（成功/部分提取/失败），无法核对 unsupported 排除"
+    counted = sum(int(field) for field in cast("list[str]", summary[-1]))
+    if counted != len(A18_SUPPORTED_EXTENSIONS):
+        return (
+            f"批次统计计入 {counted} 个文件，预期仅 {len(A18_SUPPORTED_EXTENSIONS)} 个支持格式；"
+            "未承诺格式必须被明确跳过/拒绝（T-07 未承诺类型不进入待转换列表）"
+        )
+    return None
+
+
+def _a18_manifest_guard(item: Item, ctx: Context) -> Outcome | None:
+    """清单边界前置：夹具在场、固定清单声明与 A18 支持边界一致；None 即通过."""
     fixture_error = _fixture_precondition(item, ctx.fixtures_dir)
     if fixture_error is not None:
         return Outcome(STATUS_NOT_RUN, fixture_error)
@@ -2214,6 +2549,14 @@ def _run_matrix_a18(item: Item, ctx: Context) -> Outcome:
             STATUS_NOT_RUN,
             f"固定格式清单未声明 A18 支持格式：{missing_supported}；不据此声称支持",
         )
+    return None
+
+
+def _run_matrix_a18(item: Item, ctx: Context) -> Outcome:
+    """A18：按 T-08 固定清单验证支持边界，并实跑混入 jpx/jpm/mj2 的转换核对拒绝。."""
+    guarded = _a18_manifest_guard(item, ctx)
+    if guarded is not None:
+        return guarded
     supported_fixtures = tuple(
         name for name in item.fixtures if Path(name).suffix.lstrip(".").lower() in A18_SUPPORTED_EXTENSIONS
     )
@@ -2221,12 +2564,22 @@ def _run_matrix_a18(item: Item, ctx: Context) -> Outcome:
     outcome = _run_conversion_item(supported_item, ctx, None, tag_suffix="supported")
     if outcome.status != STATUS_OK:
         return outcome
+    # S10-06：jpx/jpm/mj2 只在清单层声明 unsupported 不构成行为证据；把它们与支持
+    # 格式同目录再转一次，断言无对应成功产物且批次统计只计入支持格式。
+    mixed_runs: list[GuiRun] = []
+    mixed_outcome = _run_conversion_item(item, ctx, None, tag_suffix="mixed", capture=mixed_runs)
+    if mixed_outcome.status != STATUS_OK:
+        return mixed_outcome
+    mixed_texts = mixed_runs[0].texts if mixed_runs else ""
+    problem = _verify_a18_unsupported_rejected(SCRATCH_ROOT / "a18-mixed" / "output", mixed_texts)
+    if problem is not None:
+        return Outcome(STATUS_FAILED, problem, list(mixed_outcome.details))
     unsupported = ", ".join(f".{extension}" for extension in A18_UNSUPPORTED_EXTENSIONS)
     return Outcome(
         STATUS_OK,
         details=[
             *outcome.details,
-            f"固定清单明确 unsupported：{unsupported}；未将其送入产品转换支持集合",
+            f"固定清单明确 unsupported：{unsupported}；混跑确认无对应产物且批次统计仅计入支持格式",
         ],
     )
 
@@ -2244,7 +2597,15 @@ def _run_matrix_a25(item: Item, ctx: Context) -> Outcome:
         reason += f"请逐个放入 {sweep_dir}（无敏感内容的公开合成样本）"
         return Outcome(STATUS_NOT_RUN, reason)
     # sweep 样本按扩展名进入通用转换条目：注入 fixtures 让 _prepare_scratch 拷贝它们。
-    item.fixtures = tuple(sorted(f"matrix/format_sweep/{path.name}" for path in sweep_dir.iterdir() if path.is_file()))
+    # 逐输入规则按引擎实查清单收紧（S10-02 复审）：引擎声明的格式必须有产物，
+    # 未声明格式（引擎回归或清单外的历史样本）保留宽松兜底。
+    sweep_files = sorted(path for path in sweep_dir.iterdir() if path.is_file())
+    declared = {ext.strip().lower() for ext in extensions}
+    _A25_RULES.clear()
+    for path in sweep_files:
+        ext = path.suffix.lstrip(".").lower()
+        _A25_RULES[path.name] = InputRule(must_produce=ext in declared)
+    item.fixtures = tuple(sorted(f"matrix/format_sweep/{path.name}" for path in sweep_files))
     return _run_conversion_item(item, ctx, None)
 
 
@@ -2302,6 +2663,23 @@ def _run_c02_portable_scan(item: Item, ctx: Context) -> Outcome:
     return Outcome(STATUS_OK, details=[f"{item.item_id} 扫描 {root}：无模型/转换专用依赖"])
 
 
+def _c03_delegate_stages(item_id: str, target: Path, env: dict[str, str]) -> Outcome | None:
+    """S10-11：同一隔离环境委托 S1 启动与 S15（MD 整理合并/拆分，自备数据）.
+
+    只启动 GUI 不能证明「旧工具正常可用」；S15 用 tempfile 样本驱动旧工具的
+    真实可观察操作。非 None 即未通过。
+    """
+    result = _delegate_stage("S1", target, env_extra=env)
+    if result.status != STATUS_OK:
+        result.details.insert(0, f"{item_id} 未配置状态下的 S1 启动未通过")
+        return result
+    legacy = _delegate_stage("S15", target, env_extra=env)
+    if legacy.status != STATUS_OK:
+        legacy.details.insert(0, f"{item_id} 未配置状态下旧工具（MD 整理 S15）可观察操作未通过")
+        return legacy
+    return None
+
+
 def _run_c03_unconfigured(item: Item, ctx: Context) -> Outcome:
     target, blocked = _resolve_gui(ctx)
     if blocked is not None or target is None:
@@ -2312,8 +2690,10 @@ def _run_c03_unconfigured(item: Item, ctx: Context) -> Outcome:
         message = "本项要求 debug 构建被测 EXE（release 忽略资产根覆盖环境变量，会读到真实用户配置）"
         return Outcome(STATUS_NOT_RUN, message)
     stages, error = ctx.cached_stages()
-    if error is not None or "S1" not in stages:
-        return Outcome(STATUS_NOT_RUN, error or "gui_smoke 未提供 S1 阶段选择器（补丁未应用）")
+    missing_stages = [stage for stage in ("S1", "S15") if stage not in stages]
+    if error is not None or missing_stages:
+        reason = error or f"gui_smoke 未提供 {missing_stages} 阶段（S1 启动/S15 旧工具操作无法委托）"
+        return Outcome(STATUS_NOT_RUN, reason)
     scratch_assets = SCRATCH_ROOT / "c03-asset-root"
     shutil.rmtree(scratch_assets, ignore_errors=True)
     _ = scratch_assets.mkdir(parents=True)
@@ -2321,10 +2701,9 @@ def _run_c03_unconfigured(item: Item, ctx: Context) -> Outcome:
         "JCHTOOLS_MARKDOWN_TEST_ASSET_ROOT": str(scratch_assets),
         "JCHTOOLS_TEST_STATE_DIR": str(scratch_assets / "app-settings"),
     }
-    result = _delegate_stage("S1", target, env_extra=env)
-    if result.status != STATUS_OK:
-        result.details.insert(0, f"{item.item_id} 未配置状态下的 S1 启动未通过")
-        return result
+    delegated = _c03_delegate_stages(item.item_id, target, env)
+    if delegated is not None:
+        return delegated
     downloaded = [str(path.relative_to(scratch_assets)) for path in scratch_assets.rglob("*")]
 
     # XB-18 应用设置库的隔离落位（test-hooks 下 JCHTOOLS_MARKDOWN_TEST_ASSET_ROOT 同时
@@ -2349,20 +2728,32 @@ def _run_c03_unconfigured(item: Item, ctx: Context) -> Outcome:
         return Outcome(STATUS_FAILED, f"未配置启动即写入/下载资产目录：{downloaded[:8]}")
     return Outcome(
         STATUS_OK,
-        details=[f"{item.item_id} 未配置启动正常退出，资产目录仅新建隔离设置库（XB-18），无资产下载"],
+        details=[
+            f"{item.item_id} 未配置启动正常退出，资产目录仅新建隔离设置库（XB-18），无资产下载",
+            f"{item.item_id} 同环境下旧工具（MD 整理 S15 合并/拆分）可观察操作通过，未受未配置状态影响",
+        ],
     )
 
 
 def _run_c04_offline(item: Item, ctx: Context) -> Outcome:
+    # S10-09：单一地址连接失败不能证明断网（防火墙/代理拦截同形）。只有调用方
+    # 设置 JCHTOOLS_OFFLINE_VERIFIED=1（声明已完成可控网络隔离的人工证据）才执行
+    # 断网转换验收；探测结果只作「未知/在线」提示，不作为断网结论。
     online, note = _probe_offline()
+    if os.environ.get("JCHTOOLS_OFFLINE_VERIFIED") != "1":
+        reason = (
+            f"断网证据要求：需调用方设置 JCHTOOLS_OFFLINE_VERIFIED=1 声明已完成可控网络隔离"
+            f"（拔线/断网适配器等人工证据）后才执行本项；当前探测：{note}"
+        )
+        return Outcome(STATUS_NOT_RUN, reason)
     if online:
         return Outcome(STATUS_NOT_RUN, f"需在断网环境执行；{note}")
     pending = _asset_precondition(ctx, item)
     if pending:
-        return Outcome(STATUS_NOT_RUN, f"离线探测：{note}。{pending}")
+        return Outcome(STATUS_NOT_RUN, f"隔离证据已声明；探测：{note}。{pending}")
     result = _run_conversion_item(item, ctx, None, tag_suffix="offline")
     if result.status == STATUS_NOT_RUN:
-        result.reason = f"离线探测：{note}。{result.reason}"
+        result.reason = f"隔离证据已声明；探测：{note}。{result.reason}"
     return result
 
 
@@ -2374,7 +2765,9 @@ def _c05_scan_during_conversion(exe: Path, input_dir: Path, output_dir: Path) ->
 
     def scanner() -> None:
         while not finished.is_set():
-            hits, error = scan_python_modules(("JchTools.exe", "markdown-media-worker.exe", "ffmpeg.exe"))
+            # S10-10：XB 进程模型下承接转换的是 JchTools.exe 与共享引擎 xberg.exe；
+            # markdown-media-worker 已按 XB-12 退役，不得残留在扫描名单。
+            hits, error = scan_python_modules(("JchTools.exe", "xberg.exe"))
             if error is not None:
                 scan_errors.append(error)
                 return

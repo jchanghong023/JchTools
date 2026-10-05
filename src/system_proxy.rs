@@ -220,7 +220,8 @@ fn normalize_host_port(target: &str) -> Option<String> {
 }
 
 /// 解析 `ProxyOverride` 例外表；`<-loopback>` 是「不例外回环」的否定标记，
-/// 与默认行为一致，直接忽略。
+/// 与默认行为一致，直接忽略。精确条目经 [`override_host`] 做方括号与端口
+/// 规范化后存储，与 URL 侧 [`split_scheme_host`] 输出的裸主机口径统一。
 fn parse_override(override_list: Option<&str>) -> Vec<BypassRule> {
     let Some(list) = override_list else {
         return Vec::new();
@@ -236,10 +237,34 @@ fn parse_override(override_list: Option<&str>) -> Vec<BypassRule> {
             } else if lowered.contains('*') {
                 BypassRule::Pattern(lowered)
             } else {
-                BypassRule::Exact(lowered)
+                BypassRule::Exact(override_host(&lowered).to_string())
             }
         })
         .collect()
+}
+
+/// 例外条目到 URL 侧主机比对口径的规范化：`[::1]` / `[::1]:8080` 去方括号得
+/// 裸 IPv6 主机 `::1`（方括号内按 IPv6 字面量处理，不再剥端口段）；无方括号
+/// 时仅当形如 `主机:数字端口` 才剥端口，含多个冒号的裸 IPv6 与其他形态原样
+/// 返回（保守不命中）。括号不成对的畸形条目原样返回。
+fn override_host(entry: &str) -> &str {
+    if let Some(rest) = entry.strip_prefix('[') {
+        if let Some((host, _tail)) = rest.split_once(']') {
+            return host;
+        }
+        return entry;
+    }
+    match entry.split_once(':') {
+        Some((host, port))
+            if !host.is_empty()
+                && !host.contains(':')
+                && !port.is_empty()
+                && port.chars().all(|char| char.is_ascii_digit()) =>
+        {
+            host
+        }
+        _ => entry,
+    }
 }
 
 /// 单条例外规则对目标主机是否命中（host 已小写、不含端口）。`*.suffix` 是
@@ -257,7 +282,10 @@ fn rule_matches(rule: &BypassRule, host: &str) -> bool {
             }
         }
         BypassRule::Exact(entry) => {
-            entry == host || entry.split(':').next().unwrap_or(entry) == host
+            // 条目在 parse_override 已规范化；此处再过一遍 [`override_host`]
+            // 保证任何来源构造的规则都与 URL 侧裸主机口径一致（含方括号 IPv6）。
+            let host_part = override_host(entry);
+            host_part == host || host_part.split(':').next().unwrap_or(host_part) == host
         }
     }
 }
@@ -293,6 +321,8 @@ fn wildcard_match(pattern: &str, text: &str) -> bool {
 }
 
 /// 例外条目到 libcurl `no_proxy` 条目的近似翻译；无法表达的返回 `None`。
+/// 条目先经 [`override_host`] 规范化：方括号 IPv6 去括号（`no_proxy` 不带
+/// 括号口径），`主机:端口` 剥端口。
 fn translate_no_proxy(rule: &BypassRule) -> Option<String> {
     match rule {
         BypassRule::Local => None,
@@ -303,7 +333,7 @@ fn translate_no_proxy(rule: &BypassRule) -> Option<String> {
                 pattern.strip_prefix("*.").map(str::to_string)
             }
         }
-        BypassRule::Exact(entry) => Some(entry.split(':').next().unwrap_or(entry).to_string()),
+        BypassRule::Exact(entry) => Some(override_host(entry).to_string()),
     }
 }
 
@@ -559,6 +589,46 @@ mod tests {
             " ! [rejected]        main -> main (non-fast-forward)"
         ));
         assert!(!super::network_failure_signature(""));
+    }
+
+    // 覆盖 P-09（回归：例外表带方括号的 IPv6 条目与 URL 侧解析出的裸 IPv6
+    // 主机统一口径——修复前 `[::1]` / `[::1]:8080` 条目经 `split(':')` 被切成
+    // `[`，永不命中，`::1` 目标仍被推入代理；no_proxy 翻译同样产出损坏条目）。
+    #[test]
+    fn ipv6_bracket_bypass_entries_match_bare_url_host() {
+        // 例外表只写方括号形态（WinInet 的 IPv6 常见写法）；裸写 `::1` 本就
+        // 按整串比较命中，不在此重复覆盖。
+        let proxy =
+            SystemProxy::from_registry_values(1, Some("127.0.0.1:7890"), Some("[::1];[::1]:8080"));
+        // URL 侧 `split_scheme_host` 把 `[::1]:8080` 剥成裸主机 `::1`：例外条目
+        // 无论带端口、带方括号还是裸写都必须按主机命中。
+        assert_eq!(proxy.endpoint_for_url("http://[::1]:9999/x"), None);
+        assert_eq!(proxy.endpoint_for_url("https://[::1]/a"), None);
+        assert_eq!(proxy.endpoint_for_url("https://[::1]:8080/git"), None);
+        // 同主机 IPv6 目标之外的地址仍走代理，不因方括号条目扩大例外范围。
+        assert_eq!(
+            proxy.endpoint_for_url("https://[::2]/a"),
+            Some("http://127.0.0.1:7890".to_string())
+        );
+        assert!(proxy.bypassed("http://[::1]/wiki"));
+    }
+
+    // 覆盖 P-09：方括号 IPv6 例外条目翻译为 no_proxy 时去方括号（libcurl
+    // `no_proxy` 不带括号口径）；普通 host:port 条目仍剥端口。
+    #[test]
+    fn no_proxy_translation_unwraps_ipv6_brackets() {
+        let proxy = SystemProxy::from_registry_values(
+            1,
+            Some("127.0.0.1:7890"),
+            Some("[::1]:8080;proxyhost:443;*.corp.example"),
+        );
+        let env = proxy.git_env();
+        let no_proxy = env
+            .iter()
+            .find(|(key, _)| key == "no_proxy")
+            .map(|(_, value)| value.clone())
+            .unwrap_or_default();
+        assert_eq!(no_proxy, "::1,proxyhost,corp.example");
     }
 
     // 覆盖 P-09：URL 主机解析覆盖 userinfo、端口、IPv6 与尾点 FQDN 形态。

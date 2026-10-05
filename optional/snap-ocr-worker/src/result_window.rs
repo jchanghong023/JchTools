@@ -157,6 +157,7 @@ pub struct ThemeColors {
     pub text: (u8, u8, u8),
     pub secondary_text: (u8, u8, u8),
     pub accent: (u8, u8, u8),
+    pub danger: (u8, u8, u8),
     pub border: (u8, u8, u8),
 }
 
@@ -169,6 +170,8 @@ pub fn theme_colors(dark: bool) -> ThemeColors {
             text: (238, 241, 248),
             secondary_text: (167, 174, 187),
             accent: (106, 162, 255),
+            // S9-02（U-06）：错误提示的红色令牌，浅/深两套都提供。
+            danger: (229, 72, 77),
             border: (56, 61, 70),
         }
     } else {
@@ -178,6 +181,7 @@ pub fn theme_colors(dark: bool) -> ThemeColors {
             text: (28, 29, 34),
             secondary_text: (91, 95, 107),
             accent: (37, 99, 207),
+            danger: (220, 38, 38),
             border: (217, 219, 227),
         }
     }
@@ -212,6 +216,11 @@ macro_rules! apply_theme_tokens {
             colors.accent.0,
             colors.accent.1,
             colors.accent.2,
+        ));
+        theme.set_danger(slint::Color::from_rgb_u8(
+            colors.danger.0,
+            colors.danger.1,
+            colors.danger.2,
         ));
         theme.set_border(slint::Color::from_rgb_u8(
             colors.border.0,
@@ -318,6 +327,8 @@ fn schedule_activation(
             if attempt < 2 {
                 schedule_activation(window.as_weak(), position, size, attempt + 1);
             } else {
+                // 信息性提示保持 accent 蓝色（U-06：信息蓝、错误红）。
+                window.set_hint_error(false);
                 window.set_hint("结果窗已显示，请从任务栏切换到截图 OCR 结果".into());
             }
         }
@@ -357,6 +368,13 @@ impl ResultWindowHandle {
 
         // Slint 的窗口 API 使用物理像素；尺寸与位置取截图屏幕自己的工作区。
         let (wx, wy, ww, wh) = monitor_work_area;
+        // S9-12：非正工作区（宽或高 ≤ 0）显式拒绝，不得经 scaled_extent 钳成
+        // 1×1 继续建窗（截图侧 capture() 已同步校验，此处为结果窗侧防线）。
+        if ww <= 0 || wh <= 0 {
+            return Err(ResultWindowError::CreateFailed(
+                "显示器工作区尺寸无效".into(),
+            ));
+        }
         let width = scaled_extent(ww);
         let height = scaled_extent(wh);
         let size = slint::PhysicalSize::new(
@@ -380,7 +398,12 @@ impl ResultWindowHandle {
                         w.set_ocr_text("".into());
                         let _ = w.hide();
                     }
-                    Err(reason) => w.set_hint(format!("复制失败：{reason}").into()),
+                    // S9-02（U-06：错误用红色）：复制失败是错误提示，置错误态
+                    // 走 danger 令牌，不再用 accent 蓝色。
+                    Err(reason) => {
+                        w.set_hint_error(true);
+                        w.set_hint(format!("复制失败：{reason}").into());
+                    }
                 }
             }
         });
@@ -586,6 +609,58 @@ mod tests {
         assert_ne!(theme_colors(false), theme_colors(true));
         assert_eq!(theme_colors(true).background, (21, 23, 27));
         assert_eq!(theme_colors(false).background, (251, 251, 253));
+        // S9-02：danger 令牌浅/深两套都提供且互不相同（错误红色，U-06）。
+        assert_eq!(theme_colors(true).danger, (229, 72, 77));
+        assert_eq!(theme_colors(false).danger, (220, 38, 38));
+        assert_ne!(theme_colors(true).danger, theme_colors(true).accent);
+        assert_ne!(
+            theme_colors(false).danger,
+            theme_colors(false).accent,
+            "错误红不得与信息蓝相同（U-06）"
+        );
+    }
+
+    // 覆盖 S9-02（U-06：错误用红色）：复制失败必须置 hint 错误态（danger
+    // 令牌），信息性提示保持非错误态（accent）。
+    #[test]
+    fn copy_failure_hint_uses_error_state() {
+        assert!(
+            slint::platform::set_platform(Box::new(i_slint_backend_testing::TestingBackend::new(
+                i_slint_backend_testing::TestingBackendOptions {
+                    renderer_name: Some("software".into()),
+                    ..Default::default()
+                },
+            )))
+            .is_ok(),
+            "测试后端应只初始化一次"
+        );
+        let handle =
+            ResultWindowHandle::show_for_monitor("OCR 文本", (10, 20, 1920, 1080), |_| Ok(()))
+                .unwrap_or_else(|error| panic!("结果窗创建失败：{error}"));
+        let window = handle
+            .as_weak()
+            .upgrade()
+            .unwrap_or_else(|| panic!("窗口句柄已失效"));
+        assert!(!window.get_hint_error(), "初始提示不是错误态");
+        drop(window);
+        let failing =
+            ResultWindowHandle::show_for_monitor("OCR 文本", (10, 20, 1920, 1080), |_| {
+                Err("剪贴板被其他程序占用".to_string())
+            })
+            .unwrap_or_else(|error| panic!("结果窗创建失败：{error}"));
+        let failure_window = failing
+            .as_weak()
+            .upgrade()
+            .unwrap_or_else(|| panic!("窗口句柄已失效"));
+        failure_window.invoke_copy_all();
+        assert!(
+            failure_window.get_hint().contains("复制失败"),
+            "复制失败须给出失败提示"
+        );
+        assert!(
+            failure_window.get_hint_error(),
+            "复制失败必须置错误态走 danger 红色（U-06/S9-02）"
+        );
     }
 
     // 覆盖 O-14（E-4 集成）：设置窗的录制归一化回调接到 Rust 映射函数后，
@@ -633,6 +708,29 @@ mod tests {
             window.invoke_normalize_shift_key(true, "&".into())
         );
         assert_eq!(draft, "Ctrl+Shift+7");
+    }
+
+    // 覆盖 S9-12：非正工作区尺寸（宽或高 ≤ 0）必须在 show_for_monitor 入口
+    // 显式拒绝（CreateFailed），不得经 scaled_extent 钳成 1×1 继续建窗。
+    #[test]
+    fn non_positive_work_area_rejects_result_window() {
+        assert!(
+            slint::platform::set_platform(Box::new(i_slint_backend_testing::TestingBackend::new(
+                i_slint_backend_testing::TestingBackendOptions {
+                    renderer_name: Some("software".into()),
+                    ..Default::default()
+                },
+            )))
+            .is_ok(),
+            "测试后端应只初始化一次"
+        );
+        for area in [(10, 20, 0, 0), (10, 20, 1920, -5), (10, 20, -1920, 1080)] {
+            let outcome = ResultWindowHandle::show_for_monitor("文本", area, |_| Ok(()));
+            assert!(
+                matches!(outcome, Err(ResultWindowError::CreateFailed(_))),
+                "非正工作区 {area:?} 必须拒绝建窗，不得钳成 1×1"
+            );
+        }
     }
 
     // 覆盖 O-21/O-22：正文必须实际渲染，复制须保留原文。

@@ -89,6 +89,10 @@ struct Plan {
     output_root: PathBuf,
     items: Vec<Item>,
     summary: Summary,
+    /// S4-03/T-24：扫描期的单文件失败（相对路径 + 带阶段的原因），由 `run`
+    /// 在批次开始后逐条呈现并计入统计；目录级全局错误（如 `read_dir` 失败）
+    /// 仍直接中止整次扫描，不进入此列表。
+    scan_failures: Vec<(PathBuf, String)>,
 }
 
 pub fn readiness() -> Result<(), String> {
@@ -139,11 +143,6 @@ pub fn page_readiness() -> Result<(), String> {
     }
 }
 
-pub fn initialize(cancel: &AtomicBool, progress: impl FnMut(String)) -> Result<(), String> {
-    platform_preflight()?;
-    markdown_assets::initialize(cancel, progress)
-}
-
 pub fn run(
     options: &Options,
     cancel: &AtomicBool,
@@ -177,7 +176,10 @@ pub fn run(
         }
         Err(error) => return Err(error),
     };
-    let total = plan.items.len() + plan.summary.skipped_existing + plan.summary.skipped_duplicate;
+    let total = plan.items.len()
+        + plan.summary.skipped_existing
+        + plan.summary.skipped_duplicate
+        + plan.scan_failures.len();
     tracing::info!(
         input = %options.input_dir.display(),
         output = %options.output_dir.display(),
@@ -187,6 +189,21 @@ pub fn run(
         "转 Markdown 批次开始"
     );
     events(Event::Started { total });
+    // S4-03/T-24：扫描期已定的单文件失败先逐条呈现（文件 + 阶段 + 原因，
+    // 与转换失败同一事件格式），统计随 plan.summary 带入；不中止批次。
+    for (relative, message) in &plan.scan_failures {
+        tracing::warn!(
+            file = %relative.display(),
+            kind = "scan_media_dir",
+            "转换单文件失败"
+        );
+        events(Event::FileFinished {
+            relative: relative.clone(),
+            success: false,
+            partial: false,
+            message: message.clone(),
+        });
+    }
     let mut summary = plan.summary;
     let output_root = plan.output_root;
     // 文档和媒体逐文件提交到会话共享引擎；批次不拥有引擎生命周期。
@@ -223,6 +240,7 @@ pub fn run(
                 &item.target,
                 &document.markdown,
                 &document.media,
+                &deadline,
             )?;
             Ok(document.warnings)
         });
@@ -349,10 +367,11 @@ impl OccupiedIndex {
     }
 }
 
-/// 折叠键：逐 UTF-16 单元做简单大写折叠。ASCII 走快路径；非 ASCII 采用
-/// Unicode 单单元大写映射，多单元或无映射（含代理项）保留原单元。折叠与
-/// `CompareStringOrdinal` 的逐单元大写口径一致，不一致的极端情形只会把
-/// 候选落进不同桶后再精确比较（多比不漏比）。
+/// 折叠键：逐 UTF-16 单元做简单大写折叠。ASCII 走快路径；非 ASCII 先查内嵌
+/// 简单大写映射表（见 [`simple_upper_unit`]），再采用 Unicode 单单元大写映射，
+/// 多单元或无映射（含代理项）保留原单元。折叠与 `CompareStringOrdinal` 的
+/// 逐单元大写口径一致，不一致的极端情形只会把候选落进不同桶后再精确比较
+/// （多比不漏比）。
 fn case_fold_key(name: &OsStr) -> Vec<u16> {
     #[cfg(windows)]
     {
@@ -368,6 +387,27 @@ fn case_fold_key(name: &OsStr) -> Vec<u16> {
     }
 }
 
+/// Unicode 简单（单单元）大写映射中与 Rust `to_uppercase` 全映射发散、且经
+/// 本机 `CompareStringOrdinal` 忽略大小写运行时核实为判等的块（S4-04）：
+/// 0x1F80–0x1F87/0x1F90–0x1F97/0x1FA0–0x1FA7 段按简单大写 +8、0x1FB3→0x1FBC、
+/// 0x1FC3→0x1FCC、0x1FF3→0x1FFC 逐对判等（含 0x1F82↔0x1F8A 等中段样本），
+/// 而 0x1F88 与 0x1F08 不判等（OS 按简单表折叠且标题形大写保持自身）。
+/// 注意边界：带额外声调的变体（0x1FB2、0x1FB4、0x1FB7 等）虽在 UnicodeData
+/// 有单单元简单大写（指向 0x1FBA 等裸大写形），OS 实测【不】判等——
+/// 不得纳入本表（该组反例已由测试锁定）。带 ypogegrammeni 的希腊预组合
+/// 小写全大写为两个字符，`to_uppercase` 路线会保持原单元导致漏比；表内
+/// 目标单元（0x1F88 段、0x1FBC 等标题形字符）全大写同为多字符、折叠时
+/// 保持原样，两侧落入同桶。
+fn simple_upper_unit(unit: u16) -> Option<u16> {
+    match unit {
+        0x1F80..=0x1F87 | 0x1F90..=0x1F97 | 0x1FA0..=0x1FA7 => Some(unit + 0x08),
+        0x1FB3 => Some(0x1FBC),
+        0x1FC3 => Some(0x1FCC),
+        0x1FF3 => Some(0x1FFC),
+        _ => None,
+    }
+}
+
 fn fold_unit(unit: u16) -> u16 {
     if unit < 0x80 {
         return if (u16::from(b'a')..=u16::from(b'z')).contains(&unit) {
@@ -378,6 +418,12 @@ fn fold_unit(unit: u16) -> u16 {
     }
     if (0xD800..=0xDFFF).contains(&unit) {
         return unit;
+    }
+    // S4-04：先查简单大写映射——「全大写多字符但简单大写单单元」的单元
+    // （希腊 ypogegrammeni 预组合等）必须按简单映射折叠，才能与
+    // `CompareStringOrdinal` 的逐单元大写口径一致（否则占用索引漏比）。
+    if let Some(simple) = simple_upper_unit(unit) {
+        return simple;
     }
     let Some(ch) = char::from_u32(u32::from(unit)) else {
         return unit;
@@ -510,7 +556,18 @@ fn scan_cancelable(
         } else {
             let parent = target.parent().unwrap_or(&output);
             let occupied_media = media_occupied.entry(parent.to_path_buf()).or_default();
-            media_dir_name_reserved(parent, &target, occupied_media)?
+            // S4-03/T-24：媒体目录分配失败是单文件问题（该文件的输出位置被
+            // 链接占用或无法检查）——计入失败统计并继续其余文件；目录级全局
+            // 错误（遍历期的 read_dir 等）不经过这里，仍保持整批中止。
+            match media_dir_name_reserved(parent, &target, occupied_media) {
+                Ok(name) => name,
+                Err(message) => {
+                    plan.summary.failed += 1;
+                    plan.scan_failures
+                        .push((relative.clone(), format!("分配媒体目录失败：{message}")));
+                    continue;
+                }
+            }
         };
         plan.items.push(Item {
             source,
@@ -881,11 +938,18 @@ fn prepare_media_destination(
     Ok(current)
 }
 
+/// T-29（S4-02）：单文件预算是否已耗尽——`remaining` 为零即耗尽；无界预算
+/// （`Deadline` 内部 `None`）的 `remaining` 为 `Duration::MAX`，恒不耗尽。
+fn deadline_exhausted(deadline: &markdown_document::Deadline) -> bool {
+    deadline.remaining() == Duration::ZERO
+}
+
 fn write_new_markdown(
     output_root: &Path,
     target: &Path,
     content: &str,
     media: &[markdown_document::MediaFile],
+    deadline: &markdown_document::Deadline,
 ) -> Result<(), String> {
     let parent = target.parent().ok_or_else(|| "结果目录无效".to_string())?;
     // T-12 保险丝：扫描已跳过既有结果，这里目标再出现属并发/外部改动——
@@ -920,6 +984,11 @@ fn write_new_markdown(
     let mut created_dirs: Vec<std::path::PathBuf> = Vec::new();
     let media_result = (|| -> Result<(), String> {
         for file in media {
+            // T-29（S4-02）：预算耗尽后不再开始写下一张图（每张图写入前检查，
+            // 等价于上一张图后的边界）；失败走既有回滚，不留半成品。
+            if deadline_exhausted(deadline) {
+                return Err("单文件处理超时：写入图片前预算已耗尽，本次结果未提交".to_string());
+            }
             let destination = prepare_media_destination(parent, &file.relative, &mut created_dirs)?;
             let mut output = OpenOptions::new()
                 .write(true)
@@ -947,6 +1016,11 @@ fn write_new_markdown(
     }
     let temp = parent.join(format!(".jch-markdown-{}.tmp", uuid::Uuid::new_v4()));
     let write_result = (|| -> Result<(), String> {
+        // T-29（S4-02）：最终提交前同样受预算约束；检查点在 temp 写入与改名
+        // 之前，超时走失败与回滚，不把慢盘上的半成品计成功。
+        if deadline_exhausted(deadline) {
+            return Err("单文件处理超时：提交结果前预算已耗尽，本次结果未提交".to_string());
+        }
         let mut file = OpenOptions::new()
             .write(true)
             .create_new(true)
@@ -957,6 +1031,11 @@ fn write_new_markdown(
         file.sync_all()
             .map_err(|e| format!("同步 Markdown 失败：{e}"))?;
         drop(file);
+        // T-29（S4-02）：检查点紧贴改名提交——慢盘写正文+sync 耗尽预算时不得
+        // 把结果改名为可见产物（检查点放在 rename 之后无法回滚对外可见状态）。
+        if deadline_exhausted(deadline) {
+            return Err("单文件处理超时：提交前预算已耗尽，本次结果未提交".to_string());
+        }
         // T-25/T-12：完整成功后以不覆盖改名提交（temp 与目标同目录同卷）。
         // 不用 fs::rename——Windows 上它会替换已存在目标；不用硬链接——
         // exFAT/FAT 等文件系统不支持，会把输出在这些卷上的结果全部判失败。
@@ -1019,7 +1098,16 @@ pub fn test_write_new_markdown(
     content: &str,
     media: &[markdown_document::MediaFile],
 ) -> Result<(), String> {
-    write_new_markdown(output_root, target, content, media)
+    // 既有接缝签名不变：内部按无界预算驱动（Duration::MAX 经 checked_add 溢出
+    // 退化为不限时），专注 T-12/T-14/T-25 语义；超时约束由带 deadline 的新
+    // 用例经 `write_new_markdown` 直接覆盖。
+    write_new_markdown(
+        output_root,
+        target,
+        content,
+        media,
+        &markdown_document::Deadline::new(Duration::MAX),
+    )
 }
 
 #[doc(hidden)]
@@ -1056,11 +1144,11 @@ pub fn test_scan_count_with_cancel(
 #[cfg(test)]
 mod tests {
     use super::{
-        compare_names, compare_paths, compare_paths_insensitive, media_dir_name, occupancy_key,
-        parse_formats, run_formats_probe, scan, selected_xberg_extension, write_new_markdown,
-        FormatGroup, OccupiedIndex, Options,
+        case_fold_key, compare_names, compare_paths, compare_paths_insensitive, media_dir_name,
+        occupancy_key, parse_formats, run_formats_probe, scan, selected_xberg_extension,
+        write_new_markdown, FormatGroup, OccupiedIndex, Options,
     };
-    use crate::markdown_document::MediaFile;
+    use crate::markdown_document::{Deadline, MediaFile};
     use std::thread;
     use std::time::Instant;
     use std::{
@@ -1299,7 +1387,8 @@ mod tests {
         let temp = tempfile::tempdir().unwrap();
         let target = temp.path().join("a_pdf.md");
         fs::write(&target, b"old").unwrap();
-        let error = write_new_markdown(temp.path(), &target, "new", &[]).unwrap_err();
+        let error = write_new_markdown(temp.path(), &target, "new", &[], &unbounded_deadline())
+            .unwrap_err();
         assert!(error.contains("已有结果不会覆盖"));
         assert_eq!(fs::read(&target).unwrap(), b"old");
         assert_eq!(fs::read_dir(temp.path()).unwrap().count(), 1);
@@ -1314,7 +1403,7 @@ mod tests {
             relative: "a_docx_media/image_0.png".to_string(),
             bytes: b"img".to_vec(),
         }];
-        write_new_markdown(temp.path(), &target, "body", &media).unwrap();
+        write_new_markdown(temp.path(), &target, "body", &media, &unbounded_deadline()).unwrap();
         assert_eq!(
             fs::read(temp.path().join("a_docx_media").join("image_0.png")).unwrap(),
             b"img"
@@ -1332,7 +1421,8 @@ mod tests {
             relative: "a_docx_media/image_0.png".to_string(),
             bytes: b"img".to_vec(),
         }];
-        let error = write_new_markdown(temp.path(), &target, "body", &media).unwrap_err();
+        let error = write_new_markdown(temp.path(), &target, "body", &media, &unbounded_deadline())
+            .unwrap_err();
         assert!(
             error.contains("不是目录") || error.contains("已存在"),
             "{error}"
@@ -1364,6 +1454,139 @@ mod tests {
             media_dir_name(temp.path(), &target).unwrap(),
             "my_report_docx_2_media",
             "与普通文件同名时追加序号让路"
+        );
+    }
+
+    // ── S4-02：单文件超时必须约束落盘，慢盘不得把超时文件计成功 ──
+
+    /// 已耗尽的预算（Duration::ZERO 即刻到期；remaining 恒为零）。
+    fn expired_deadline() -> Deadline {
+        Deadline::new(Duration::ZERO)
+    }
+
+    /// 无界预算（checked_add 溢出退化为不限时），供不受超时约束的既有用例使用。
+    fn unbounded_deadline() -> Deadline {
+        Deadline::new(Duration::MAX)
+    }
+
+    // 覆盖 T-29（S4-02 回归）：预算耗尽后不得再写图片——图片写入前检查点命中，
+    // 失败带回滚清理本次输出，不留半成品、不提交 md。
+    #[test]
+    fn expired_deadline_blocks_media_write_and_rolls_back() {
+        let temp = tempfile::tempdir().unwrap();
+        let target = temp.path().join("a_docx.md");
+        let media = vec![MediaFile {
+            relative: "a_docx_media/image_0.png".to_string(),
+            bytes: b"img".to_vec(),
+        }];
+        let error = write_new_markdown(temp.path(), &target, "body", &media, &expired_deadline())
+            .unwrap_err();
+        assert!(error.contains("超时"), "应按超时报错：{error}");
+        assert!(!target.exists(), "md 不得提交");
+        assert!(
+            !temp.path().join("a_docx_media").exists(),
+            "媒体目录不得残留"
+        );
+        assert_eq!(
+            fs::read_dir(temp.path()).unwrap().count(),
+            0,
+            "不留半成品（T-29/T-25）"
+        );
+    }
+
+    // 覆盖 T-29（S4-02 回归）：无图片时最终提交前同样受预算约束——超时不得
+    // 走完 temp 写入与改名提交，失败后目录内无残留临时文件。
+    #[test]
+    fn expired_deadline_blocks_final_commit_without_temp_leftover() {
+        let temp = tempfile::tempdir().unwrap();
+        let target = temp.path().join("a_docx.md");
+        let error =
+            write_new_markdown(temp.path(), &target, "body", &[], &expired_deadline()).unwrap_err();
+        assert!(
+            error.contains("超时") && error.contains("提交"),
+            "提交前检查点应按超时报错：{error}"
+        );
+        assert!(!target.exists(), "md 不得提交");
+        assert_eq!(
+            fs::read_dir(temp.path()).unwrap().count(),
+            0,
+            "不得残留 .jch-markdown-*.tmp 临时文件"
+        );
+    }
+
+    // 覆盖 T-29（S4-02 护栏）：预算充足时落盘行为不变（图片 + md 正常提交）。
+    #[test]
+    fn unbounded_deadline_keeps_normal_commit() {
+        let temp = tempfile::tempdir().unwrap();
+        let target = temp.path().join("a_docx.md");
+        let media = vec![MediaFile {
+            relative: "a_docx_media/image_0.png".to_string(),
+            bytes: b"img".to_vec(),
+        }];
+        write_new_markdown(temp.path(), &target, "body", &media, &unbounded_deadline()).unwrap();
+        assert_eq!(
+            fs::read(temp.path().join("a_docx_media").join("image_0.png")).unwrap(),
+            b"img"
+        );
+        assert_eq!(fs::read(&target).unwrap(), b"body");
+    }
+
+    // ── S4-03：扫描期单文件失败不得中止整批（T-24）──
+
+    /// 在 link 处创建目录链接：Windows 用 junction（mklink /J，无需管理员），
+    /// 其他平台用符号链接；`fsutil::is_link` 两者都识别。
+    #[cfg(windows)]
+    fn make_dir_link(link: &Path, target: &Path) -> std::io::Result<()> {
+        let output = Command::new("cmd")
+            .args(["/C", "mklink", "/J"])
+            .arg(link)
+            .arg(target)
+            .output()
+            .map_err(|error| {
+                std::io::Error::other(format!("无法启动 cmd 创建 junction：{error}"))
+            })?;
+        if output.status.success() {
+            Ok(())
+        } else {
+            Err(std::io::Error::other(format!(
+                "mklink /J 失败：{}",
+                String::from_utf8_lossy(&output.stderr).trim()
+            )))
+        }
+    }
+
+    #[cfg(not(windows))]
+    fn make_dir_link(link: &Path, target: &Path) -> std::io::Result<()> {
+        std::os::unix::fs::symlink(target, link)
+    }
+
+    // 覆盖 T-24（S4-03 回归）：单个文件的媒体目录名被链接占用时只失败该文件
+    // ——批次继续、失败计入统计、失败文件与原因可呈现；不得把整批扫描变成 Err。
+    #[test]
+    fn media_dir_reservation_failure_fails_file_not_batch() {
+        let temp = tempfile::tempdir().unwrap();
+        let input = temp.path().join("input");
+        let output = temp.path().join("output");
+        fs::create_dir_all(&input).unwrap();
+        fs::create_dir_all(&output).unwrap();
+        fs::write(input.join("a.docx"), b"one").unwrap();
+        fs::write(input.join("b.docx"), b"two").unwrap();
+        make_dir_link(&output.join("b_docx_media"), temp.path()).expect("创建目录链接");
+
+        let plan = scan(&options(input, output, false), &supported()).unwrap();
+        assert_eq!(
+            plan.items.len(),
+            1,
+            "批次必须继续：其余文件保留在计划中（T-24）"
+        );
+        assert_eq!(plan.items[0].relative, PathBuf::from("a.docx"));
+        assert_eq!(plan.summary.failed, 1, "单文件失败计入统计");
+        assert_eq!(plan.scan_failures.len(), 1);
+        assert_eq!(plan.scan_failures[0].0, PathBuf::from("b.docx"));
+        assert!(
+            plan.scan_failures[0].1.contains("媒体目录"),
+            "失败原因须可呈现并指明阶段：{}",
+            plan.scan_failures[0].1
         );
     }
 
@@ -1508,6 +1731,86 @@ mod tests {
             assert_eq!(
                 compares, 0,
                 "互异目标应命中不同桶，规模 {size} 时不应发生逐一比较"
+            );
+        }
+    }
+
+    // 覆盖 T-11（S4-04 回归）：占用折叠键与 `CompareStringOrdinal` 忽略大小写
+    // 口径必须一致。运行时直接询问操作系统比较器（不依赖记忆中的 Unicode 表）：
+    // 带 ypogegrammeni 的希腊预组合小写（U+1F80 段、U+1FB3/1FC3/1FF3）被 OS 按
+    // 简单（单单元）大写表折到对应大写变体——Rust `to_uppercase` 是全映射（多
+    // 字符），`fold_unit` 若保持原样会把 OS 判等的对分进不同桶，占用检查漏比
+    // （第二文件提交期失败而非占用跳过，违反 T-11 分类语义）。
+    #[cfg(windows)]
+    #[test]
+    fn fold_key_agrees_with_compare_string_ordinal_on_greek_ypogegrammeni() {
+        use std::os::windows::ffi::OsStringExt;
+        fn wide_name(unit: u16) -> OsString {
+            std::ffi::OsString::from_wide(&[unit])
+        }
+        // OS 判等（忽略大小写相等）的样本对：折叠键必须同桶，否则漏比。
+        // 全部经本机 CompareStringOrdinal 运行时核实（S4-04）。
+        let equal_pairs: &[(u16, u16)] = &[
+            (0x1F80, 0x1F88),
+            (0x1F81, 0x1F89),
+            (0x1F82, 0x1F8A),
+            (0x1F84, 0x1F8C),
+            (0x1F86, 0x1F8E),
+            (0x1F90, 0x1F98),
+            (0x1F91, 0x1F99),
+            (0x1F95, 0x1F9D),
+            (0x1FA0, 0x1FA8),
+            (0x1FA2, 0x1FAA),
+            (0x1FA5, 0x1FAD),
+            (0x1FB3, 0x1FBC),
+            (0x1FC3, 0x1FCC),
+            (0x1FF3, 0x1FFC),
+        ];
+        for (lower, upper) in equal_pairs {
+            let left = wide_name(*lower);
+            let right = wide_name(*upper);
+            assert_eq!(
+                compare_names(left.as_os_str(), right.as_os_str()),
+                Ordering::Equal,
+                "前置：CompareStringOrdinal 应把 {lower:#06x} 与 {upper:#06x} 判为忽略大小写相等"
+            );
+            assert_eq!(
+                case_fold_key(left.as_os_str()),
+                case_fold_key(right.as_os_str()),
+                "OS 判等的对必须落入同一折叠桶（S4-04：不得漏比）"
+            );
+        }
+        // OS 不判等的对照对：折叠不得把不同字母误并桶（多比无害，误并会造成
+        // 假「已占用」跳过）。两组运行时核实结论（S4-04 探针）：①OS 折叠在
+        // ypogegrammeni 系列内部按简单大写 +8（见 equal_pairs），②带额外声调
+        // 的变体（1FB2/1FB4/1FB7 等，其 UnicodeData 简单大写指向无 ypogegrammeni
+        // 的大写形如 1FBA）一律不判等——折叠表不得映射它们。
+        let distinct_pairs: &[(u16, u16)] = &[
+            (0x1F88, 0x1F08), // 标题形大写 ≠ 无附加符号的普通大写
+            (0x1F80, 0x1F81), // 附加符号不同的两个小写
+            (0x1FB2, 0x1FB3), // 变体声调不同（1FB2 的简单大写 1FBA 不参与 OS 折叠）
+            (0x1FB2, 0x1FBA), // OS 不跨 ypogegrammeni 边界折叠到裸大写形
+            (0x1FB4, 0x1FBB),
+            (0x1FC2, 0x1FCA),
+            (0x1FC4, 0x1FCB),
+            (0x1FF2, 0x1FFA),
+            (0x1FF4, 0x1FFB),
+            (0x1FB7, 0x1FB6),
+            (0x1FC7, 0x1FC6),
+            (0x1FF7, 0x1FF6),
+        ];
+        for (left_unit, right_unit) in distinct_pairs {
+            let left = wide_name(*left_unit);
+            let right = wide_name(*right_unit);
+            assert_ne!(
+                compare_names(left.as_os_str(), right.as_os_str()),
+                Ordering::Equal,
+                "前置：CompareStringOrdinal 不应把 {left_unit:#06x} 与 {right_unit:#06x} 判等"
+            );
+            assert_ne!(
+                case_fold_key(left.as_os_str()),
+                case_fold_key(right.as_os_str()),
+                "OS 不判等的对不得被折叠误并同桶"
             );
         }
     }

@@ -5,9 +5,10 @@
 //! 用 `.tmp/` 下的锁文件把「需要会话引擎」的测试串行化，互斥由文件系统保证，
 //! 不依赖时序运气。锁文件陈旧（超过 3 分钟无人续期）时视为持有者已死，直接抢占。
 
+use std::collections::HashMap;
 use std::fs::OpenOptions;
 use std::path::{Path, PathBuf};
-use std::sync::OnceLock;
+use std::sync::{Mutex, OnceLock};
 use std::time::{Duration, Instant};
 
 /// 仓库根（编译期定位 rustc 夹具源与 .tmp）。
@@ -78,8 +79,10 @@ fn any_engine_image_alive() -> bool {
 }
 
 /// 清理本会话残留的引擎与代理（锁内调用）：上一轮失败的孤儿会占住
-/// 会话单引擎执法，让下一轮从头就「已有 Xberg」。只按命令行特征匹配
-/// 本项目派生的进程（`--xberg-broker`）与引擎映像名，不触碰其他进程。
+/// 会话单引擎执法，让下一轮从头就「已有 Xberg」。只结束本项目派生的进程：
+/// 代理按命令行特征（`--xberg-broker`）过滤，引擎按可执行路径过滤
+/// （[`test_owned_engine_prefixes`]，与 [`is_test_owned_engine_path`] 同源），
+/// 不触碰用户自行运行的进程。
 pub(super) fn cleanup_stray_engines() {
     if !any_engine_image_alive() {
         return;
@@ -112,13 +115,71 @@ pub(super) fn cleanup_stray_engines() {
         ])
         .output();
     std::thread::sleep(Duration::from_millis(400));
-    // 2) 清引擎，两遍（防监督者在窗口期重启）。
+    // 2) 清引擎，两遍（防监督者在窗口期重启）。只结束测试派生的 xberg.exe：
+    //    可执行文件位于仓库 `.tmp\` 下，或系统临时目录的 tempfile 目录
+    //    （`%TEMP%\.tmp*`——本仓测试经 tempfile::tempdir 安装模拟引擎）。
+    //    不按映像名全杀：那会误杀用户自行运行的 Xberg（XB-23 同口径：
+    //    不操作用户自行启动的其他 Xberg，含真实引擎测试目录）。
+    let script = test_owned_engine_kill_script();
     for _ in 0..2 {
-        let _ = std::process::Command::new("taskkill")
-            .args(["/IM", "xberg.exe", "/F"])
+        let _ = std::process::Command::new("powershell")
+            .args([
+                "-NoProfile",
+                "-ExecutionPolicy",
+                "Bypass",
+                "-Command",
+                &script,
+            ])
             .output();
         std::thread::sleep(Duration::from_millis(300));
     }
+}
+
+/// 构造「只结束测试派生 xberg.exe」的 PowerShell 清场脚本；路径过滤与
+/// [`is_test_owned_engine_path`] 使用同一前缀集合（[`test_owned_engine_prefixes`]）。
+fn test_owned_engine_kill_script() -> String {
+    let prefixes = test_owned_engine_prefixes();
+    let [a, b] = &prefixes[..] else {
+        unreachable!("测试派生前缀集合固定为两项");
+    };
+    format!(
+        "Get-CimInstance Win32_Process | Where-Object {{ $_.Name -eq 'xberg.exe' -and \
+         $_.ExecutablePath -and ($_.ExecutablePath.ToLowerInvariant().StartsWith({a_path}) -or \
+         $_.ExecutablePath.ToLowerInvariant().StartsWith({b_path})) }} | \
+         ForEach-Object {{ Stop-Process -Id $_.ProcessId -Force }}",
+        a_path = ps_quote(a),
+        b_path = ps_quote(b),
+    )
+}
+
+/// 测试派生引擎路径前缀（小写、反斜杠、正斜杠已归一）：仓库根 `.tmp\` 与
+/// `%TEMP%\.tmp`（tempfile::tempdir 的目录前缀）。与
+/// [`is_test_owned_engine_path`] 及清场脚本共用同一集合。
+fn test_owned_engine_prefixes() -> Vec<String> {
+    let repo_tmp = format!("{ROOT}\\.tmp\\").to_lowercase().replace('/', "\\");
+    let temp_root = std::env::temp_dir()
+        .to_string_lossy()
+        .to_lowercase()
+        .replace('/', "\\");
+    let temp_root = temp_root.trim_end_matches('\\').to_string();
+    vec![repo_tmp, format!("{temp_root}\\.tmp")]
+}
+
+/// 判定 xberg.exe 可执行路径是否为本仓测试派生（前缀匹配，大小写不敏感、
+/// 正斜杠归一）。用户自行运行的 Xberg（任意其他路径）一律不命中。
+// 仅被 tests/engine_cleanup_filter.rs（专用的过滤判定单测二进制）引用；其余
+// 引擎测试二进制经 `mod common` 整体引入本模块但不直接调用，故按需消警。
+#[allow(dead_code)]
+pub(super) fn is_test_owned_engine_path(path: &str) -> bool {
+    let normalized = path.to_lowercase().replace('/', "\\");
+    test_owned_engine_prefixes()
+        .iter()
+        .any(|prefix| normalized.starts_with(prefix))
+}
+
+/// PowerShell 单引号字面量转义（单引号翻倍）。
+fn ps_quote(value: &str) -> String {
+    format!("'{}'", value.replace('\'', "''"))
 }
 
 /// 重入层标记：持有这些标记的进程是外层测试进程的 re-exec 子层，外层已持有
@@ -193,21 +254,30 @@ pub(super) fn ensure_child_reaper() {
     });
 }
 
-/// 模拟引擎编译产物（按源文件分缓存）：每测试二进制只 rustc 编译一次。
+/// 模拟引擎编译产物缓存：每个 fixture 源文件每测试二进制只 rustc 编译一次。
 /// 2026-10-03 计时优化：此前每个用例现编一次（rustc 约 1.5~2s），引擎套件受
 /// 会话锁串行，成本 1:1 计入墙钟。产物按进程 PID 落在 .tmp/mock-engines/，
 /// 用例侧经 [`mock_engine_copy`] 复制到自己的临时根，互不写同一个文件。
-static MOCK_ENGINE_SHARED: OnceLock<PathBuf> = OnceLock::new();
-static MOCK_ENGINE_LEGACY: OnceLock<PathBuf> = OnceLock::new();
+/// 复审 R5-4 修正：缓存键改为完整源文件名——此前「非 nocap 即共享」的二分
+/// 会让同一测试二进制内的第二个不同 fixture 静默拿到错误引擎。
+static MOCK_ENGINE_CACHE: OnceLock<Mutex<HashMap<String, PathBuf>>> = OnceLock::new();
 
 /// 把模拟引擎（`tests/fixtures/` 下按源文件名区分）编译一次并复制到 `dest`。
 pub(super) fn mock_engine_copy(source: &str, dest: &Path) {
-    let cache = if source.ends_with("shared_xberg_nocap.rs") {
-        &MOCK_ENGINE_LEGACY
-    } else {
-        &MOCK_ENGINE_SHARED
+    let cache = MOCK_ENGINE_CACHE.get_or_init(|| Mutex::new(HashMap::new()));
+    let compiled = {
+        let mut map = cache
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        match map.get(source) {
+            Some(path) => path.clone(),
+            None => {
+                let path = compile_mock_engine(source);
+                map.insert(source.to_string(), path.clone());
+                path
+            }
+        }
     };
-    let compiled = cache.get_or_init(|| compile_mock_engine(source));
     std::fs::copy(compiled, dest).unwrap_or_else(|error| {
         panic!(
             "复制模拟引擎失败（{source} -> {}）：{error}",

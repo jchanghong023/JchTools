@@ -743,9 +743,15 @@ impl Engine {
                     .lock()
                     .ok()
                     .and_then(|mut entries| entries.remove(id));
-                if let Some(sender) = sender {
-                    let _ = sender.sender.send(response);
-                }
+                let Some(sender) = sender else {
+                    // 未知 id（含重复响应）是引擎侧协议异常：静默丢弃会让等待者
+                    // 只能靠超时报错，而在途项不随超时删除，场景 lane 被永久占用
+                    // 直到引擎死亡。与超限响应无法定位请求的路径同口径：warn 后
+                    // 按通信断裂交付全部在途失败并释放 lane（XB-05/XB-07）。
+                    tracing::warn!(id, "共享引擎返回未知请求 ID 的响应，通信断裂");
+                    break;
+                };
+                let _ = sender.sender.send(response);
             }
             fail_pending(&reader_pending, &reader_broken);
         });
@@ -1084,6 +1090,13 @@ fn handle(pipe: File, engine: &Mutex<Option<Engine>>, stopping: &AtomicBool) -> 
             }
         }
         if slot.is_none() {
+            // 取消的目标只存在于引擎内的在途任务；引擎不在场（进程退出、通信
+            // 断裂终结后的空档或停止窗口）时目标必然已按失败终态交付，为一条
+            // 取消重新拉起引擎只会白付进程启动与模型加载，停止窗口内还会被
+            // 看门狗立刻终结。按「无事可取消」直接应答，不进入 spawn 分支。
+            if request["command"] == "cancel" {
+                return Ok(json!({"id":request["id"],"ok":true,"accepted":false}));
+            }
             let saved = std::fs::canonicalize(xberg_settings::required()?)
                 .map_err(|e| format!("已保存的 Xberg 目录不可读：{e}"))?;
             if saved != root {
@@ -1200,6 +1213,26 @@ pub(super) fn serve() -> Result<(), String> {
     std::thread::spawn(move || loop {
         std::thread::sleep(Duration::from_millis(100));
         if !watch_stopping.load(Ordering::Acquire) {
+            // T-23 复审：reader 线程通信断裂时只能置 broken 并交付在途失败；
+            // 引擎进程本体若此后再无请求，会带着模型内存一直存活到代理退出。
+            // 非停止期巡检 broken 引擎并立即终结，把该窗口从「下一请求」
+            // 收敛到本循环周期；期间 handle() 的 T-23 重建分支同样以空槽重建，
+            // 两者不冲突（槽锁互斥）。
+            if let Ok(mut slot) = watch_engine.lock() {
+                let broken = slot
+                    .as_ref()
+                    .is_some_and(|engine| engine.broken.load(Ordering::Acquire));
+                if broken {
+                    if let Some(mut dead) = slot.take() {
+                        let _ = dead.child.kill();
+                        let _ = dead.child.wait();
+                        tracing::info!(
+                            engine_pid = dead.child.id(),
+                            "看门狗已终结通信断裂的共享引擎（T-23）"
+                        );
+                    }
+                }
+            }
             continue;
         }
         if let Ok(mut slot) = watch_engine.lock() {
@@ -1214,7 +1247,16 @@ pub(super) fn serve() -> Result<(), String> {
             if let Some(mut current) = slot.take() {
                 let _ = current.child.kill();
                 let _ = current.child.wait();
+                tracing::info!(
+                    engine_pid = current.child.id(),
+                    "停止看门狗已终结共享引擎（XB-23）"
+                );
             }
+            // P-10：exit(0) 会跳过 main 栈上的日志句柄析构，非阻塞写入线程
+            // 缓冲中的关键记录（含上方终结记录与本行）会整批丢失；退出前
+            // 显式刷盘，再终止进程。
+            tracing::info!("共享代理退出前刷盘诊断日志（P-10）");
+            crate::logging::flush_before_exit();
             std::process::exit(0);
         }
     });

@@ -817,7 +817,8 @@ export component AppWindow inherits Window {
     in-out property <int> settings-source: 0;
     in-out property <string> settings-status: "正在读取配置…";
 
-    callback convert-initialize();
+    // S3-01：转换页的初始化回调与按钮入口已一并移除
+    //（XB-19：初始化集中在设置页，页内保留「前往设置」入口）。
     callback convert-selection-changed();
     callback convert-start();
     callback convert-stop();
@@ -1610,7 +1611,7 @@ export component AppWindow inherits Window {
                                 Text { width: 96px; text: "高级选项"; font-size: 12.5px; color: Design.text-muted; vertical-alignment: center; }
                                 Text { text: "单文件超时（秒）"; font-size: 12.5px; color: Design.text-muted; vertical-alignment: center; }
                                 Field { text <=> root.convert-timeout-secs; width: 140px; right-align: true;
-                                    enabled: !root.busy && !root.convert-initializing && !root.convert-runtime-saving && root.confirm-kind == 0; }
+                                    enabled: !root.busy && !root.convert-initializing && !root.convert-preparing && !root.convert-runtime-saving && root.confirm-kind == 0; }
                                 Rectangle { horizontal-stretch: 1; background: transparent; }
                             }
                         }
@@ -1620,8 +1621,6 @@ export component AppWindow inherits Window {
                             HorizontalLayout { spacing: 10px; cross-axis-alignment: center;
                                 Dot { tone: root.convert-initializing ? Design.warning : root.convert-ready ? Design.success : Design.muted-2; }
                                 Label { text: root.convert-status; overflow: elide; horizontal-stretch: 1; font-weight: 600; font-size: 13px; }
-                                if !root.convert-ready && !root.convert-initializing: AppButton { text: "初始化可选组件"; primary: true; icon: 11;
-                                    enabled: root.convert-runtime-confirmed && !root.convert-runtime-saving && root.confirm-kind == 0; clicked => { root.convert-initialize(); } }
                                 if root.convert-initializing: AppButton { text: "取消初始化";
                                     enabled: root.confirm-kind == 0; clicked => { root.convert-stop(); } }
                             }

@@ -431,6 +431,18 @@ pub(crate) struct TrayHandle {
     hwnd: usize,
     queue: Arc<Mutex<VecDeque<Control>>>,
 }
+
+/// 托盘热键替换回执（S8-01）：2 秒内回执的同步结果，或超时后的迟到回执
+/// 通道——排队的替换操作在托盘线程恢复泵消息后仍会执行，超时不得被当作
+/// 失败终态，须由调用方持有通道等待迟到回执再裁决。
+pub(crate) enum HotkeyReceipt {
+    /// 托盘线程在时限内完成并回执。
+    Done(Result<(), String>),
+    /// 时限内未回执；接管接收端继续等待（有界通道容量 1，托盘稍后的
+    /// send 仍会成功入队，不会丢失回执）。
+    Late(mpsc::Receiver<Result<(), String>>),
+}
+
 impl TrayHandle {
     fn send(&self, command: Control) {
         self.queue
@@ -452,11 +464,20 @@ impl TrayHandle {
     pub(crate) fn notice(&self, text: impl Into<String>) {
         self.send(Control::Notice(text.into()));
     }
-    pub(crate) fn replace(&self, name: String) -> Result<(), String> {
+    /// 请求替换热键：等待 2 秒；超时不报失败，改为交出迟到回执通道（S8-01）。
+    pub(crate) fn replace(&self, name: String) -> HotkeyReceipt {
         let (tx, rx) = mpsc::sync_channel(1);
         self.send(Control::Replace(name, tx));
-        rx.recv_timeout(std::time::Duration::from_secs(2))
-            .unwrap_or_else(|_| Err("快捷键更新超时".into()))
+        match rx.recv_timeout(std::time::Duration::from_secs(2)) {
+            Ok(result) => HotkeyReceipt::Done(result),
+            Err(_) => HotkeyReceipt::Late(rx),
+        }
+    }
+    /// 只排队替换、不等待回执（S8-01 回执超时后的自愈路径：FIFO 重排当前
+    /// 期望的热键；托盘侧对「已是当前热键」的替换直接回成功，幂等）。
+    pub(crate) fn replace_detached(&self, name: String) {
+        let (tx, _rx) = mpsc::sync_channel(1);
+        self.send(Control::Replace(name, tx));
     }
     pub(crate) fn stop(&self) {
         let _ = Self::cancel_selection();

@@ -189,6 +189,9 @@ struct State {
     convert_pending_options: Option<markdown::Options>,
     /// 转 Markdown 组件检查代际；旧检查结果不得覆盖新初始化/检查状态。
     convert_readiness_generation: u64,
+    /// S1-05：当前代的就绪结果在任务运行中被丢弃（busy 时无法上屏）——任务终态
+    /// （CONVERTER_DONE/FAIL 收尾）须补查一次，页面不得长期停留过期就绪状态。
+    convert_readiness_missed: bool,
     /// 转 Markdown 启动前场景预检代际。
     convert_preflight_generation: u64,
     /// 截图 OCR（O 分区）：可选组件初始化的取消信号（O-06 取消/重试语义）。
@@ -2615,6 +2618,10 @@ struct UiPump {
     /// 日志呈现是否落后于环形缓冲：面板不可见时只置脏（重建 300 行文本浪费），
     /// 打开后的下一次刷新按 state.logs 补齐，保持最新在上的 300 条记录。
     log_dirty: Cell<bool>,
+    /// 转换日志呈现是否落后于环形缓冲（S1-03）：CONVERTER_LOG 只置脏，由轮询
+    /// 尾部在转换页可见时统一重建——一批 N 条日志只做一次整段重排；收尾与
+    /// 校验失败事件仍直接上屏保证立即可见。
+    convert_log_dirty: Cell<bool>,
     /// 失败列表当前页的上次自动刷新时间：运行中低频节流刷新（U-10，见 refresh_fail_list）。
     fail_refreshed: Cell<Instant>,
 }
@@ -2640,6 +2647,7 @@ impl UiPump {
                     .unwrap_or_else(Instant::now),
             ),
             log_dirty: Cell::new(false),
+            convert_log_dirty: Cell::new(false),
             fail_refreshed: Cell::new(
                 Instant::now()
                     .checked_sub(FAIL_REFRESH_MIN)
@@ -2673,6 +2681,12 @@ impl UiPump {
             self.log_refreshed.set(Instant::now());
             self.log_dirty.set(false);
             ui.set_log_text(log_panel_text(&self.state.borrow().logs).into());
+        }
+        // 转换日志同口径（S1-03）：面板只在转 Markdown 页实例化，离开页面时整段
+        // 重建纯属浪费；置脏后在页面可见的下一次刷新按环形缓冲补齐。
+        if self.convert_log_dirty.get() && ui.get_screen() == 5 {
+            self.convert_log_dirty.set(false);
+            ui.set_convert_log_text(log_panel_text(&self.state.borrow().convert_logs).into());
         }
         self.apply_fail_messages(ui);
         self.apply_snap_messages(ui);
@@ -2727,16 +2741,23 @@ impl UiPump {
                         }
                         Err(error) => {
                             ui.set_snap_ready(false);
-                            ui.set_snap_asset_status("组件初始化未完成，请前往设置重试".into());
-                            ui.set_snap_asset_detail(error.clone().into());
-                            if error != "用户取消初始化" {
+                            if error == "用户取消初始化" {
+                                // U-06/S3-04：用户主动取消不是组件故障——中性状态行
+                                // 提示即可，不写红色错误、不汇入「组件未就绪」详情。
+                                ui.set_snap_asset_status("初始化已取消，可稍后前往设置重试".into());
+                                ui.set_snap_asset_detail("".into());
+                            } else {
+                                ui.set_snap_asset_status("组件初始化未完成，请前往设置重试".into());
+                                ui.set_snap_asset_detail(error.clone().into());
                                 ui.set_snap_error(error.into());
                             }
                         }
                     }
                     if self.state.borrow().close_after
                         && !ui.get_busy()
+                        && !ui.get_convert_preparing()
                         && !ui.get_convert_initializing()
+                        && !ui.get_convert_runtime_saving()
                     {
                         let _ = slint::quit_event_loop();
                     }
@@ -2945,7 +2966,9 @@ impl UiPump {
         if let Some(log) = text.strip_prefix("CONVERTER_LOG|") {
             let mut s = self.state.borrow_mut();
             push_event_log(&mut s.convert_logs, log.to_string());
-            ui.set_convert_log_text(log_panel_text(&s.convert_logs).into());
+            // S1-03：与通用日志的 log_dirty 同口径——只置脏，由轮询尾部按面板
+            // 可见性统一重建上屏，一批 N 条日志只做一次整段重排。
+            self.convert_log_dirty.set(true);
         } else if let Some(rest) = text.strip_prefix("CONVERTER_PREFLIGHT|") {
             let mut fields = rest.splitn(3, '|');
             let generation = fields.next().and_then(|value| value.parse::<u64>().ok());
@@ -2986,13 +3009,16 @@ impl UiPump {
             let generation = fields.next().and_then(|value| value.parse::<u64>().ok());
             let ready = fields.next() == Some("1");
             let message = fields.next().unwrap_or_default();
-            let accepted = generation.is_some_and(|generation| {
+            let current = generation.is_some_and(|generation| {
                 let s = self.state.borrow();
-                s.convert_readiness_generation == generation
-                    && s.convert_init_cancel.is_none()
-                    && !ui.get_busy()
+                s.convert_readiness_generation == generation && s.convert_init_cancel.is_none()
             });
-            if accepted {
+            if current && ui.get_busy() {
+                // S1-05：当前代就绪结果在任务运行中无法上屏——标记「结果被错过」，
+                // 由任务终态（DONE/FAIL 收尾）补查一次，避免页面长期停留过期状态。
+                self.state.borrow_mut().convert_readiness_missed = true;
+            }
+            if current && !ui.get_busy() {
                 ui.set_convert_ready(ready);
                 if ready {
                     ui.set_convert_detail_text("".into());
@@ -3073,6 +3099,53 @@ impl UiPump {
             return false;
         }
         true
+    }
+
+    /// SETTINGS_LOADED（启动快照）与 SETTINGS_READY（设置操作收尾）共用的上屏。
+    /// `terminal` 为真表示这是设置操作自己的终态：清掉该操作置起的保存/初始化
+    /// 标志，且仅在没有任何运行中任务/前置检查/截图初始化时消费 close_after
+    /// （U-09/S1-01：任务运行中到达的收尾事件不得提前退出事件循环，关闭由任务
+    /// 终态统一完成，镜像 on_close_requested 的守卫口径）；为假（启动快照）时
+    /// 两者都不碰——迟到快照不得抹掉运行中的初始化状态。
+    fn apply_settings_snapshot(&self, ui: &AppWindow, payload: &str, terminal: bool) {
+        let Ok(value) = serde_json::from_str::<serde_json::Value>(payload) else {
+            return;
+        };
+        ui.set_settings_custom_dir(value["custom"].as_str().unwrap_or_default().into());
+        ui.set_settings_downloaded_dir(value["downloaded"].as_str().unwrap_or_default().into());
+        ui.set_settings_source(i32::from(value["downloaded_active"] == true));
+        let active = value["active"].as_str().unwrap_or_default();
+        ui.set_convert_runtime_dir(active.into());
+        ui.set_convert_runtime_confirmed(!active.is_empty());
+        ui.set_settings_status(
+            if active.is_empty() {
+                "请选择已有目录或主动下载 Xberg"
+            } else {
+                "配置已持久保存；后台自动连接，重启无需重新配置"
+            }
+            .into(),
+        );
+        if terminal {
+            ui.set_convert_runtime_saving(false);
+            ui.set_convert_initializing(false);
+            self.state.borrow_mut().convert_init_cancel = None;
+        }
+        if !active.is_empty() {
+            ensure_snap_supervisor(&self.state, &self.out);
+            start_markdown_readiness(ui, &self.state, &self.out);
+            start_snap_readiness(ui, &self.state, &self.out);
+        }
+        if terminal {
+            // close_after 消费守卫：仅在无任何运行任务时才随设置终态退出。
+            // 与 on_close_requested 相比少查 convert_initializing/convert_runtime_
+            // saving——这两个标志在本函数 terminal 分支已被先行清理（设置操作
+            // 自身的终态），此处再查恒为 false，属同口径而非遗漏。
+            let quiet =
+                !ui.get_busy() && !ui.get_convert_preparing() && !ui.get_snap_initializing();
+            if quiet && std::mem::take(&mut self.state.borrow_mut().close_after) {
+                let _ = slint::quit_event_loop();
+            }
+        }
     }
 
     fn drain(&self, ui: &AppWindow) -> bool {
@@ -3410,38 +3483,15 @@ impl UiPump {
                     apply_plan_readiness(ui, &s, snapshot.as_ref());
                 }
                 Event::Notice(text) => {
+                    if let Some(payload) = text.strip_prefix("SETTINGS_LOADED|") {
+                        // S1-01：启动线程的设置快照不是任何设置操作的终态——只刷新
+                        // 界面字段，不清进行中的保存/初始化标志、不消费 close_after，
+                        // 关闭留给真正在跑的任务或初始化自己的终态事件（U-09）。
+                        self.apply_settings_snapshot(ui, payload, false);
+                        continue;
+                    }
                     if let Some(payload) = text.strip_prefix("SETTINGS_READY|") {
-                        if let Ok(value) = serde_json::from_str::<serde_json::Value>(payload) {
-                            ui.set_settings_custom_dir(
-                                value["custom"].as_str().unwrap_or_default().into(),
-                            );
-                            ui.set_settings_downloaded_dir(
-                                value["downloaded"].as_str().unwrap_or_default().into(),
-                            );
-                            ui.set_settings_source(i32::from(value["downloaded_active"] == true));
-                            let active = value["active"].as_str().unwrap_or_default();
-                            ui.set_convert_runtime_dir(active.into());
-                            ui.set_convert_runtime_confirmed(!active.is_empty());
-                            ui.set_settings_status(
-                                if active.is_empty() {
-                                    "请选择已有目录或主动下载 Xberg"
-                                } else {
-                                    "配置已持久保存；后台自动连接，重启无需重新配置"
-                                }
-                                .into(),
-                            );
-                            ui.set_convert_runtime_saving(false);
-                            ui.set_convert_initializing(false);
-                            self.state.borrow_mut().convert_init_cancel = None;
-                            if !active.is_empty() {
-                                ensure_snap_supervisor(&self.state, &self.out);
-                                start_markdown_readiness(ui, &self.state, &self.out);
-                                start_snap_readiness(ui, &self.state, &self.out);
-                            }
-                            if std::mem::take(&mut self.state.borrow_mut().close_after) {
-                                let _ = slint::quit_event_loop();
-                            }
-                        }
+                        self.apply_settings_snapshot(ui, payload, true);
                         continue;
                     }
 
@@ -3504,12 +3554,24 @@ impl UiPump {
                 // Error 更新错误文案。
                 // 计划筛选曾乐观置「加载中…」：失败必须恢复分页控件，避免永久中间态。
                 Event::Error(text) => {
+                    if let Some(error) = text.strip_prefix("SETTINGS_LOAD_ERR|") {
+                        // S1-01：启动线程装载设置失败只落到设置页状态行——它不是
+                        // 设置操作的终态，不动运行中标志、不消费 close_after。
+                        ui.set_settings_status(error.into());
+                        continue;
+                    }
+
                     if let Some(error) = text.strip_prefix("SETTINGS_ERROR|") {
                         ui.set_settings_status(error.into());
                         ui.set_convert_initializing(false);
                         ui.set_convert_runtime_saving(false);
                         self.state.borrow_mut().convert_init_cancel = None;
-                        if std::mem::take(&mut self.state.borrow_mut().close_after) {
+                        // U-09/S1-01：任务运行中不得消费 close_after 提前退出，关闭由
+                        // 任务终态统一完成（镜像 on_close_requested 的守卫口径）。
+                        let quiet = !ui.get_busy()
+                            && !ui.get_convert_preparing()
+                            && !ui.get_snap_initializing();
+                        if quiet && std::mem::take(&mut self.state.borrow_mut().close_after) {
                             let _ = slint::quit_event_loop();
                         }
                         continue;
@@ -3538,6 +3600,8 @@ impl UiPump {
                                     format!("Xberg 运行目录校验失败：{error}"),
                                 );
                                 ui.set_convert_log_text(log_panel_text(&s.convert_logs).into());
+                                // 直接上屏后文本已是最新，清掉脏标记避免尾部重复重建。
+                                self.convert_log_dirty.set(false);
                                 let first_item = error.split('；').next().unwrap_or(error);
                                 let brief: String = first_item.chars().take(90).collect();
                                 let message = if first_item.len() < error.len()
@@ -3738,6 +3802,11 @@ impl UiPump {
                             self.log_dirty.set(true);
                             elapsed
                         };
+                        // S1-05：收尾消费「busy 期间错过的就绪结果」标记。
+                        let readiness_missed = {
+                            let mut s = self.state.borrow_mut();
+                            std::mem::take(&mut s.convert_readiness_missed)
+                        };
                         ui.set_busy(false);
                         ui.set_paused(false);
                         ui.set_convert_progress(if stopped { -1.0 } else { 1.0 });
@@ -3747,6 +3816,8 @@ impl UiPump {
                         ui.set_convert_log_text(
                             log_panel_text(&self.state.borrow().convert_logs).into(),
                         );
+                        // 收尾日志直接上屏（S1-03 的例外路径），并清掉脏标记。
+                        self.convert_log_dirty.set(false);
                         if ui.get_screen() == 5 {
                             ui.set_status(
                                 if stopped {
@@ -3763,6 +3834,11 @@ impl UiPump {
                         if close_after {
                             self.state.borrow_mut().close_after = false;
                             let _ = slint::quit_event_loop();
+                        } else if readiness_missed {
+                            // S1-05/T-05/T-06：busy 期间被丢弃的就绪结果在任务收尾
+                            // 补查一次（此刻发起侧的忙碌拒绝已解除），页面就绪状态
+                            // 回到当前真值，不得长期停留过期就绪状态。
+                            start_markdown_readiness(ui, &self.state, &self.out);
                         }
                         continue;
                     }
@@ -3787,6 +3863,11 @@ impl UiPump {
                             );
                             self.log_dirty.set(true);
                             elapsed
+                        };
+                        // S1-05：失败收尾同样消费并补查「busy 期间错过的就绪结果」。
+                        let readiness_missed = {
+                            let mut s = self.state.borrow_mut();
+                            std::mem::take(&mut s.convert_readiness_missed)
                         };
                         ui.set_busy(false);
                         ui.set_paused(false);
@@ -3826,10 +3907,15 @@ impl UiPump {
                         ui.set_convert_log_text(
                             log_panel_text(&self.state.borrow().convert_logs).into(),
                         );
+                        // 收尾日志直接上屏（S1-03 的例外路径），并清掉脏标记。
+                        self.convert_log_dirty.set(false);
                         let close_after = self.state.borrow_mut().close_after;
                         if close_after {
                             self.state.borrow_mut().close_after = false;
                             let _ = slint::quit_event_loop();
+                        } else if readiness_missed {
+                            // S1-05/T-05/T-06：与 DONE 分支同口径的补查。
+                            start_markdown_readiness(ui, &self.state, &self.out);
                         }
                         continue;
                     }
@@ -4156,6 +4242,7 @@ fn initial_state() -> Result<State> {
         convert_preparing: false,
         convert_pending_options: None,
         convert_readiness_generation: 0,
+        convert_readiness_missed: false,
         convert_preflight_generation: 0,
         engine_overrides: None,
         plan_load: Arc::new(PlanLoadSync::default()),
@@ -4383,6 +4470,10 @@ fn wire_settings(ui: &AppWindow, state: &Rc<RefCell<State>>, out: &EventSender) 
                             .ok_or("尚未下载 Xberg")?;
                         crate::xberg_runtime::validate_assets(&saved, "engine")?;
                         crate::xberg_settings::select(crate::xberg_settings::Source::Downloaded)?;
+                        // S3-01：转换页初始化入口移除后，历史「已下载但未写
+                        // notice」的用户没有其它修复入口，切换来源时补齐
+                        // notice（已存在则幂等），避免 readiness 卡死无解。
+                        markdown_assets::ensure_document_notice()?;
                     }
                     "download" => {
                         markdown_assets::download_runtime(&cancel, |message| {
@@ -4485,16 +4576,6 @@ fn wire_markdown_converter(ui: &AppWindow, state: &Rc<RefCell<State>>, out: &Eve
                 pick_directory(&ui, "选择 Markdown 输出目录", |ui, path| {
                     ui.set_convert_output_dir(path.display().to_string().into());
                 });
-            }
-        });
-    }
-    {
-        let weak = ui.as_weak();
-        let state = state.clone();
-        let out = out.clone();
-        ui.on_convert_initialize(move || {
-            if let Some(ui) = weak.upgrade() {
-                start_markdown_initialize(&ui, &state, &out);
             }
         });
     }
@@ -4624,45 +4705,10 @@ fn start_markdown_readiness(ui: &AppWindow, state: &Rc<RefCell<State>>, out: &Ev
     });
 }
 
-fn start_markdown_initialize(ui: &AppWindow, state: &Rc<RefCell<State>>, out: &EventSender) {
-    if ui.get_convert_ready() || ui.get_convert_initializing() || ui.get_convert_runtime_saving() {
-        return;
-    }
-    if ui.get_convert_runtime_dir().trim().is_empty() {
-        ui.set_convert_runtime_confirmed(false);
-        ui.set_convert_status("请先保存共享 Xberg 运行目录".into());
-        return;
-    }
-    if !ui.get_convert_runtime_confirmed() {
-        ui.set_convert_status("请点击「保存目录」保存共享 Xberg 运行目录".into());
-        return;
-    }
-    ui.set_convert_initializing(true);
-    ui.set_convert_status("正在初始化可选组件…".into());
-    let cancel = Arc::new(std::sync::atomic::AtomicBool::new(false));
-    {
-        let mut s = state.borrow_mut();
-        s.convert_readiness_generation = s.convert_readiness_generation.wrapping_add(1);
-        s.convert_init_cancel = Some(cancel.clone());
-    }
-    let out = out.clone();
-    std::thread::spawn(move || {
-        let result = markdown::initialize(&cancel, |text| {
-            let _ = out.send(Event::Status(format!("CONVERTER_INIT|{text}")));
-        });
-        let event = match result {
-            Ok(()) if cancel.load(Ordering::Acquire) => {
-                Event::Notice("CONVERTER_INIT_CANCELLED|用户取消初始化".into())
-            }
-            Ok(()) => Event::Notice("CONVERTER_INIT_OK".into()),
-            Err(error) if cancel.load(Ordering::Acquire) => {
-                Event::Notice(format!("CONVERTER_INIT_CANCELLED|{error}"))
-            }
-            Err(error) => Event::Error(format!("CONVERTER_INIT_ERR|{error}")),
-        };
-        let _ = out.send(event);
-    });
-}
+// S3-01：转换页的「初始化可选组件」入口已移除（XB-19：初始化集中在设置页，
+// markdown_assets::initialize 只按文档成员校验，纯媒体用户点击会误报失败）。
+// start_markdown_initialize 及其回调接线随之删除；组件状态统一由按场景的
+// start_markdown_readiness 呈现，修复入口经页内「前往设置」进入设置页。
 
 fn start_markdown_conversion(ui: &AppWindow, state: &Rc<RefCell<State>>, out: &EventSender) {
     if ui.get_busy() || ui.get_convert_preparing() || !ui.get_convert_ready() {
@@ -4707,6 +4753,8 @@ fn start_markdown_conversion(ui: &AppWindow, state: &Rc<RefCell<State>>, out: &E
         s.convert_cancel = Some(cancel.clone());
         s.convert_preparing = true;
         s.convert_pending_options = Some(options.clone());
+        // S1-05：新任务不继承上一任务错过的就绪补查标记。
+        s.convert_readiness_missed = false;
         s.convert_preflight_generation = s.convert_preflight_generation.wrapping_add(1);
         s.convert_preflight_generation
     };
@@ -5682,8 +5730,14 @@ pub fn run_with_engine_overrides(
     center_window(ui.window());
     let startup = out.clone();
     std::thread::spawn(move || {
-        let result = crate::xberg_runtime::resume_background().and_then(|()| settings_payload());
-        send_settings_result(&startup, result);
+        // S1-01：启动快照用独立前缀，界面侧不把它当设置操作终态（不清标志、
+        // 不消费 close_after），避免迟到快照在任务运行中提前退出或抹掉初始化状态。
+        let event =
+            match crate::xberg_runtime::resume_background().and_then(|()| settings_payload()) {
+                Ok(payload) => Event::Notice(format!("SETTINGS_LOADED|{payload}")),
+                Err(error) => Event::Error(format!("SETTINGS_LOAD_ERR|{error}")),
+            };
+        let _ = startup.send(event);
     });
     // 窗口刚映射时系统还会套用默认位置，稍后再居中一次，保证首屏就是居中的
     let centered = ui.as_weak();
@@ -5988,17 +6042,288 @@ mod gui_tests {
     }
 
     // 覆盖 T-05/T-06/U：上一用例迟到的后台事件不得串入新用例的界面。
+    // S1-04（复审修正）：测试 harness 每个用例新建独立窗口与事件通道，receiver
+    // 随上一用例的装配一起 drop——这一结构性事实就是隔离本身。原版与第一版
+    // 重写都只在断言端「排空后无红字」，而旧 sender 的 send 必然 Err 且被吞，
+    // 断言对「共享通道」回归不敏感（恒真）。现直接锁住结构性事实：新用例中
+    // 上一用例的 sender 必须 send Err（断连）；若有人把 harness 改成共享通道，
+    // 该断言即红。阳性对照证明「错误事件送达本用例通道必然上屏」，保证断言
+    // 机制本身有效。
     #[test]
     fn gui_test_cases_do_not_share_late_background_errors() {
-        let previous = with_gui(|app| app.pump.out.clone()).unwrap();
-        with_gui(move |app| {
-            let _ = previous.send(Event::Error("上一用例的迟到错误".into()));
+        // 阳性对照：错误事件送达「本用例」通道时必然上屏为红字。
+        with_gui(|app| {
+            app.pump
+                .out
+                .send(Event::Error("上一用例的迟到错误".into()))
+                .unwrap();
             app.pump.run(&app.ui);
-            assert!(
-                app.ui.get_error_text().is_empty(),
-                "旧事件污染新界面：{}",
-                app.ui.get_error_text()
+            assert_eq!(
+                app.ui.get_error_text().as_str(),
+                "上一用例的迟到错误",
+                "阳性对照失败：送达本用例通道的错误必须上屏"
             );
+        })
+        .unwrap();
+        // 取出上一用例的 sender（经 with_gui 返回值带出），带进下一个用例
+        // 验证它已随旧装配断连。
+        let stale = with_gui(|app| app.pump.out.clone()).unwrap();
+        with_gui(move |app| {
+            let outcome = stale.send(Event::Error("上一用例的迟到错误".into()));
+            assert!(
+                outcome.is_err(),
+                "上一用例的 sender 仍然连通：用例间事件通道未隔离，迟到事件可污染新用例"
+            );
+            // 防御性保持：即便未来出现其它迟到路径，新用例界面也不得有红字。
+            let ui = &app.ui;
+            let deadline = Instant::now() + Duration::from_millis(200);
+            while Instant::now() < deadline {
+                app.pump.run(ui);
+                std::thread::sleep(Duration::from_millis(5));
+            }
+            assert!(
+                ui.get_error_text().is_empty(),
+                "旧事件污染新界面：{}",
+                ui.get_error_text()
+            );
+        })
+        .unwrap();
+    }
+
+    // 覆盖 U-09（S1-01）：任务运行中迟到的设置收尾事件不得消费 close_after 提前
+    // 退出——关闭必须留给任务终态（CONVERTER_DONE/FAIL 等）统一完成。
+    #[test]
+    fn settings_result_while_task_running_keeps_close_after() {
+        with_gui(|app| {
+            let ui = &app.ui;
+            ui.set_busy(true);
+            app.state.borrow_mut().close_after = true;
+            app.pump
+                .out
+                .send(Event::Notice(
+                    "SETTINGS_READY|{\"custom\":null,\"downloaded\":null,\"downloaded_active\":false,\"active\":\"\"}"
+                        .into(),
+                ))
+                .unwrap();
+            app.pump.run(ui);
+            assert!(
+                app.state.borrow().close_after,
+                "任务运行中 SETTINGS_READY 不得消费 close_after（U-09）"
+            );
+            app.pump
+                .out
+                .send(Event::Error("SETTINGS_ERROR|校验失败".into()))
+                .unwrap();
+            app.pump.run(ui);
+            assert!(
+                app.state.borrow().close_after,
+                "任务运行中 SETTINGS_ERROR 不得消费 close_after（U-09）"
+            );
+        })
+        .unwrap();
+    }
+
+    // 覆盖 U-09/XB-20（S1-01）：启动线程的设置快照（SETTINGS_LOADED）不是设置
+    // 操作的终态——到达时不得抹掉进行中的初始化状态，也不得消费 close_after。
+    #[test]
+    fn startup_settings_snapshot_keeps_running_initialization_state() {
+        with_gui(|app| {
+            let ui = &app.ui;
+            let cancel = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+            ui.set_convert_initializing(true);
+            app.state.borrow_mut().convert_init_cancel = Some(cancel);
+            app.state.borrow_mut().close_after = true;
+            app.pump
+                .out
+                .send(Event::Notice(
+                    "SETTINGS_LOADED|{\"custom\":null,\"downloaded\":null,\"downloaded_active\":false,\"active\":\"\"}"
+                        .into(),
+                ))
+                .unwrap();
+            app.pump.run(ui);
+            assert!(
+                ui.get_convert_initializing(),
+                "启动快照不得抹掉进行中的初始化状态"
+            );
+            assert!(
+                app.state.borrow().convert_init_cancel.is_some(),
+                "启动快照不得清掉初始化取消句柄"
+            );
+            assert!(
+                app.state.borrow().close_after,
+                "启动快照不得消费 close_after（U-09）"
+            );
+        })
+        .unwrap();
+    }
+
+    // 覆盖 U-10/S-07（S1-03）：CONVERTER_LOG 只置脏、由轮询尾部按面板可见性统一
+    // 重建——页面不在转换页时不得逐条整段重排上屏；回到转换页后的第一次刷新
+    // 按环形缓冲补齐最新日志。
+    #[test]
+    fn converter_log_rebuild_is_throttled_to_visible_page() {
+        with_gui(|app| {
+            let ui = &app.ui;
+            ui.invoke_select_tool("markdown-converter".into());
+            app.pump
+                .out
+                .send(Event::Status("CONVERTER_LOG|screen5-line".into()))
+                .unwrap();
+            app.pump.run(ui);
+            assert!(
+                ui.get_convert_log_text().contains("screen5-line"),
+                "转换页可见时日志必须在轮询尾部上屏"
+            );
+            ui.invoke_select_tool("directory-organizer".into());
+            assert_eq!(ui.get_screen(), 0);
+            app.pump
+                .out
+                .send(Event::Status("CONVERTER_LOG|away-line".into()))
+                .unwrap();
+            app.pump.run(ui);
+            assert!(
+                !ui.get_convert_log_text().contains("away-line"),
+                "面板不可见时 CONVERTER_LOG 不得逐条整段重建上屏（S1-03）"
+            );
+            ui.invoke_select_tool("markdown-converter".into());
+            app.pump.run(ui);
+            assert!(
+                ui.get_convert_log_text().contains("away-line"),
+                "回到转换页后的刷新必须按环形缓冲补齐最新日志"
+            );
+        })
+        .unwrap();
+    }
+
+    // 覆盖 T-05/T-06（S1-05）：busy 期间到达的当前代就绪结果被丢弃后，任务终态
+    // （DONE/FAIL 收尾）必须补查一次就绪，页面不得长期停留在过期的就绪状态。
+    #[test]
+    fn converter_done_rechecks_readiness_dropped_while_busy() {
+        with_gui(|app| {
+            let ui = &app.ui;
+            ui.invoke_select_tool("markdown-converter".into());
+            ui.set_convert_runtime_dir("C:\\xberg".into());
+            ui.set_convert_runtime_confirmed(true);
+            let generation = app.state.borrow().convert_readiness_generation;
+            ui.set_busy(true);
+            app.pump
+                .out
+                .send(Event::Status(format!(
+                    "CONVERTER_READINESS|{generation}|0|组件缺失"
+                )))
+                .unwrap();
+            app.pump.run(ui);
+            assert!(!ui.get_convert_ready(), "busy 期间就绪结果不得直接上屏");
+            app.pump
+                .out
+                .send(Event::MdDone("CONVERTER_DONE|1|0|0|0|0|0".into()))
+                .unwrap();
+            app.pump.run(ui);
+            assert!(
+                app.state.borrow().convert_readiness_generation > generation,
+                "任务终态必须对 busy 期间被丢弃的就绪结果发起补查（S1-05/T-05）"
+            );
+            assert_eq!(
+                ui.get_convert_status().as_str(),
+                "正在检查已安装组件…",
+                "补查发起后状态应进入检查中"
+            );
+        })
+        .unwrap();
+    }
+
+    // 覆盖 XB-19/T-05（S3-01）：初始化入口集中在设置页——转换页不得再保留
+    // 「初始化可选组件」按钮（该入口只按文档成员校验，纯媒体用户点击会误报
+    // 失败），页面呈现就绪状态并提供「前往设置」。
+    #[test]
+    fn convert_page_has_no_initialize_entry() {
+        let source = std::fs::read_to_string(
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("ui/app.slint"),
+        )
+        .unwrap();
+        assert!(
+            !source.contains("convert-initialize"),
+            "转换页不得保留初始化回调入口（S3-01/XB-19）"
+        );
+        assert!(
+            !source.contains("初始化可选组件"),
+            "转换页不得保留「初始化可选组件」按钮文案（S3-01/XB-19）"
+        );
+        let strip = source
+            .split("if root.screen == 5")
+            .nth(1)
+            .unwrap_or_default()
+            .split("if root.screen == 7")
+            .next()
+            .unwrap_or_default();
+        assert!(
+            strip.contains("前往设置"),
+            "转换页必须保留「前往设置」入口（XB-19）"
+        );
+    }
+
+    // 覆盖 T-05/T-06/XB-19（S3-01）：入口移除后，纯媒体场景的就绪状态仍按勾选
+    // 场景计算——只勾 MP4/M4A 时走正常就绪检查，不要求文档组件初始化。
+    #[test]
+    fn media_only_selection_computes_readiness_without_page_initialize() {
+        with_gui(|app| {
+            let ui = &app.ui;
+            ui.invoke_select_tool("markdown-converter".into());
+            ui.set_convert_runtime_dir("C:\\xberg".into());
+            ui.set_convert_runtime_confirmed(true);
+            ui.set_convert_pdf(false);
+            ui.set_convert_office(false);
+            ui.set_convert_images(false);
+            ui.set_convert_media(true);
+            ui.set_convert_other(false);
+            let generation = app.state.borrow().convert_readiness_generation;
+            ui.invoke_convert_selection_changed();
+            assert!(
+                app.state.borrow().convert_readiness_generation > generation,
+                "纯媒体勾选必须触发按场景就绪检查（XB-19）"
+            );
+            assert_eq!(
+                ui.get_convert_status().as_str(),
+                "正在检查已安装组件…",
+                "就绪检查应正常发起，不得要求文档组件初始化"
+            );
+        })
+        .unwrap();
+    }
+
+    // 覆盖 U-06（S3-04）：用户主动取消初始化不得显示为红色组件错误——取消只更新
+    // 中性状态行，红色错误文本与「组件未就绪」详情都必须保持空。
+    #[test]
+    fn snap_cancelled_initialize_is_not_shown_as_error() {
+        with_gui(|app| {
+            let ui = &app.ui;
+            ui.set_snap_error("".into());
+            ui.set_snap_asset_detail("".into());
+            let generation = app.state.borrow().snap_generation;
+            app.state
+                .borrow()
+                .snap_sender
+                .send(SnapMessage::Initialized(
+                    generation,
+                    Err("用户取消初始化".into()),
+                ))
+                .expect("发送取消消息");
+            app.pump.apply_snap_messages(ui);
+            assert!(
+                ui.get_snap_error().is_empty(),
+                "用户取消不得写入红色错误文本（U-06）"
+            );
+            assert_eq!(
+                ui.get_snap_asset_detail().as_str(),
+                "",
+                "用户取消不得汇入「后台组件未就绪」红色详情（U-06）"
+            );
+            assert!(
+                ui.get_snap_asset_status().contains("取消"),
+                "取消应以中性状态行提示：{}",
+                ui.get_snap_asset_status()
+            );
+            assert!(!ui.get_snap_ready());
         })
         .unwrap();
     }

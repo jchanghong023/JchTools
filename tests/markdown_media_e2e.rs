@@ -10,10 +10,13 @@
 //!   `xberg_settings::save` 存入隔离临时状态目录——组件目录不再有任何环境变量
 //!   覆盖（2026-10-04 删除 `JCHTOOLS_XBERG_INFERENCE_DIR`），只能经设置页保存
 //!   或产品内下载，本测试走的正是同一条设置链。
-//! - `JCHTOOLS_MEDIA_E2E_INPUT`：待转录的合成媒体文件（MP4/M4A，公开合成，
-//!   不含业务内容，T-26）。
-//! - `JCHTOOLS_MEDIA_E2E_EXPECT_TEXT`：期望在转录正文中出现的文本片段
-//!   （逗号分隔多个候选，命中任一即通过）。
+//! - `JCHTOOLS_MEDIA_E2E_INPUT`：第一个用例（含语音转录）的合成媒体文件
+//!   （MP4/M4A，公开合成，不含业务内容，T-26），必须包含真实语音。
+//! - `JCHTOOLS_MEDIA_E2E_TRACKLESS_INPUT`：第二个用例（无音轨/无语音）的合成
+//!   媒体文件；未设置时该用例跳过（打印说明后返回），不与第一个用例共用输入
+//!   ——两者对正文的断言方向相反（S4-08），同一文件不可能同时满足。
+//! - `JCHTOOLS_MEDIA_E2E_EXPECT_TEXT`：期望在第一个用例转录正文中出现的文本
+//!   片段（逗号分隔多个候选，命中任一即通过）。
 //!
 //! 运行：`cargo test --features test-hooks --test markdown_media_e2e -- --ignored`。
 
@@ -103,13 +106,24 @@ fn real_component_transcribe_returns_structured_markdown() {
     );
 }
 
-// 覆盖 T-20/T-24：无音轨输入产出明确说明（不产生无解释空文件）；该用例可用
-// 无音轨的合成媒体单独驱动（期望文本环境变量留空即跳过正文断言）。
+// 覆盖 T-20/T-24：无音轨输入产出明确说明（不产生无解释空文件）；该用例使用
+// 独立输入 JCHTOOLS_MEDIA_E2E_TRACKLESS_INPUT（S4-08：与「含语音」用例共用
+// 同一输入时两断言方向相反，按文件头命令一起运行必有一败），未设置时跳过。
 #[test]
 #[ignore = "Requires real Xberg inference components and a trackless synthetic media file"]
 fn real_component_trackless_media_reports_no_audio() {
+    let Some(trackless) = std::env::var("JCHTOOLS_MEDIA_E2E_TRACKLESS_INPUT")
+        .ok()
+        .filter(|value| !value.trim().is_empty())
+    else {
+        eprintln!(
+            "未设置 JCHTOOLS_MEDIA_E2E_TRACKLESS_INPUT，跳过无音轨门控用例 \
+             （运行前置见文件头注释，XB-02/T-20）"
+        );
+        return;
+    };
     let _settings = configure_component_via_settings();
-    let input = PathBuf::from(env_required("JCHTOOLS_MEDIA_E2E_INPUT"));
+    let input = PathBuf::from(trackless);
     assert!(input.is_file(), "输入媒体不存在：{}", input.display());
     let markdown = jchtools::markdown::e2e_convert_media(&input, 600)
         .unwrap_or_else(|error| panic!("真实组件转录无音轨媒体必须成功返回说明：{error}"));

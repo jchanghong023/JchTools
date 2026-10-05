@@ -41,14 +41,36 @@ jobs:
         run: python -m pip install --quiet -r scripts/requirements-dev.txt
       # F26：转 Markdown 验收入口默认执行；CI 未提供真实 Xberg/GUI 时必须如实为
       # NOT RUN，不把缺资产环境伪报为通过。提供资产与被测物时由同一入口执行实际条目。
-      - name: Markdown acceptance entry
+      # S11-04：本步绿灯≠验收覆盖——runner 无真实 Xberg 引擎与已校验模型资产缓存、
+      # 无可交互桌面会话（pywinauto 冒烟与 worker-root 服务测试无法在 CI 承载，也不
+      # 为凑覆盖而添加 CI 无法承载的阶段）。退出码 2（全部 NOT RUN）保持不失败，但
+      # NOT RUN 逐项明细与缺口原因经 --json 报告写入 GITHUB_STEP_SUMMARY，step 名
+      # 同时标注，缺口对人类可见；部分 NOT RUN（退出码 0）同样入 Summary。
+      - name: Markdown acceptance entry (含 NOT RUN 时见 Step Summary)
         shell: pwsh
         run: |
-          python scripts/markdown_acceptance.py
+          $jsonReport = Join-Path $env:RUNNER_TEMP 'markdown-acceptance-report.json'
+          python scripts/markdown_acceptance.py --json $jsonReport
           $code = $LASTEXITCODE
-          if ($code -eq 2) {
-            Write-Host 'Markdown acceptance: NOT RUN（缺少真实 Xberg、GUI 或其他验收资产）'
-            exit 0
+          $notRun = @()
+          $countsLine = ''
+          if (Test-Path -LiteralPath $jsonReport) {
+            $report = Get-Content -LiteralPath $jsonReport -Raw -Encoding UTF8 | ConvertFrom-Json
+            $notRun = @($report.items | Where-Object { $_.status -eq 'NOT RUN' } |
+              ForEach-Object { "- $($_.id) $($_.title)：$($_.reason)" })
+            $countsLine = "PASS $($report.summary.pass)| FAIL $($report.summary.fail)| NOT RUN $($report.summary.not_run)（共 $($report.items.Count) 条）"
+          }
+          if (($code -eq 2) -or (($code -eq 0) -and ($notRun.Count -gt 0))) {
+            $summary = $env:GITHUB_STEP_SUMMARY
+            if ($summary) {
+              $lines = @(
+                '### Markdown acceptance：含 NOT RUN（本步绿灯≠验收覆盖）',
+                "退出码 $code；$countsLine；缺口原因见下（完整逐项状态见本步骤日志）："
+              ) + $notRun
+              $lines | Add-Content -LiteralPath $summary -Encoding UTF8
+            }
+            Write-Host "Markdown acceptance: 含 NOT RUN（$($notRun.Count) 条），详见 Step Summary 与 $jsonReport"
+            if ($code -eq 2) { exit 0 }
           }
           if ($code -ne 0) { throw "Markdown acceptance failed: $code" }
       - name: Markdown acceptance postcondition unit tests

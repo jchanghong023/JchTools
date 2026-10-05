@@ -30,6 +30,7 @@
 //!   出现敏感值时按摘要而非原值记录。
 
 use std::path::Path;
+use std::sync::Mutex;
 use std::time::{Duration, SystemTime};
 
 /// 诊断日志子目录名（相对状态目录）。
@@ -130,6 +131,41 @@ pub fn init(state_dir: &Path) -> Option<Guard> {
         "诊断日志已初始化（P-10）"
     );
     Some(Guard { _workers: workers })
+}
+
+/// 进程级日志句柄存放处：供跳过 main 栈析构的强退路径在 exit 前显式刷盘。
+/// 用 `Mutex<Option<Guard>>` 而非 OnceLock：刷盘需要取走并 drop Guard，
+/// OnceLock 无法移出已写入的值。
+static PROCESS_GUARD: Mutex<Option<Guard>> = Mutex::new(None);
+
+/// 把日志句柄登记为进程全局（P-10）：此后调用方不再自行持有句柄。静态量不随
+/// 进程退出析构，正常返回路径与强退路径都必须显式调用 [`flush_before_exit`]
+/// 完成落盘（见 main.rs 代理分支与共享代理停止看门狗）。
+pub fn hold_for_process(guard: Guard) {
+    if let Ok(mut slot) = PROCESS_GUARD.lock() {
+        *slot = Some(guard);
+    }
+}
+
+/// exit 前显式刷盘：取走全局句柄并 drop（WorkerGuard 析构会 join 非阻塞写入
+/// 线程并清空缓冲，未登记时安静返回）。幂等且线程安全：并发调用经互斥串行，
+/// 后到者取到空槽直接返回。取走之后再产生的日志只会丢失、不会阻塞或 panic
+/// ——与直接 exit 相比是严格改进，关键记录已在此前写入。
+pub fn flush_before_exit() {
+    if let Ok(mut slot) = PROCESS_GUARD.lock() {
+        drop(slot.take());
+    }
+}
+
+/// 本地 RAII：析构时调用 [`flush_before_exit`]。guard 存于静态量后不随 panic
+/// 展开析构，main 的代理分支用它兜住 unwind 路径（P-10：panic 记录必须落盘）；
+/// 正常返回路径的显式 flush 与此处经同一互斥量幂等，先到先刷、后到空转。
+pub struct FlushOnDrop;
+
+impl Drop for FlushOnDrop {
+    fn drop(&mut self) {
+        flush_before_exit();
+    }
 }
 
 /// 进程角色识别：与三个入口（main.rs / worker main.rs）的分支条件同口径。

@@ -8,6 +8,8 @@ export global SnapTheme {
     in-out property <color> text: dark ? #eef1f8 : #1c1d22;
     in-out property <color> text-secondary: dark ? #a7aebb : #5b5f6b;
     in-out property <color> accent: dark ? #6aa2ff : #2563cf;
+    // S9-02（U-06）：错误提示红色令牌，浅/深两套。
+    in-out property <color> danger: dark ? #e5484d : #dc2626;
     in-out property <color> border: dark ? #383d46 : #d9dbe3;
 }
 
@@ -16,11 +18,14 @@ export component ResultWindow inherits Window {
     callback close-requested();
     in property <string> ocr-text;
     in property <string> hint: "";
+    // S9-02（U-06）：错误提示（如复制失败）置 true 走 danger 红色；信息性提示保持 accent 蓝色。
+    in property <bool> hint-error: false;
     in property <color> token-background: SnapTheme.background;
     in property <color> token-surface: SnapTheme.surface;
     in property <color> token-text: SnapTheme.text;
     in property <color> token-text-secondary: SnapTheme.text-secondary;
     in property <color> token-accent: SnapTheme.accent;
+    in property <color> token-danger: SnapTheme.danger;
     in property <color> token-border: SnapTheme.border;
 
     title: "截图 OCR 结果";
@@ -80,7 +85,7 @@ export component ResultWindow inherits Window {
                 Rectangle { horizontal-stretch: 1; }
                 Text {
                     text: root.hint;
-                    color: root.token-accent;
+                    color: root.hint-error ? root.token-danger : root.token-accent;
                     font-size: 11px;
                     vertical-alignment: center;
                 }

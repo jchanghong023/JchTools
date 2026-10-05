@@ -15,6 +15,17 @@ import yaml
 EXPECTED_SHA256 = "b5f2bfe2bdd9448429e3e82b51c789775d9b42f2403d082b00662eb77e401c5d"
 EXPECTED_CHARACTERS = 18708
 EXPECTED_BYTES = 74947
+REPO_ROOT = Path(__file__).resolve().parents[2]
+
+
+def ensure_repo_tmp_output(path: Path) -> Path:
+    """输出必须位于仓库根的 .tmp/ 之下（AGENTS.md §2）；拒绝仓库外同名 .tmp."""
+    resolved = path.resolve()
+    tmp_root = (REPO_ROOT / ".tmp").resolve()
+    if tmp_root not in resolved.parents:
+        message = f"输出必须位于仓库 {tmp_root} 之下：{resolved}"
+        raise ValueError(message)
+    return resolved
 
 
 def main() -> int:
@@ -22,9 +33,7 @@ def main() -> int:
     parser.add_argument("source", type=Path)
     parser.add_argument("output", type=Path)
     args = parser.parse_args()
-    if ".tmp" not in args.output.resolve().parts:
-        message = "输出必须位于 .tmp/ 下"
-        raise ValueError(message)
+    output = ensure_repo_tmp_output(args.output)
     source = yaml.safe_load(args.source.read_text(encoding="utf-8"))
     chars = source["PostProcess"]["character_dict"]
     if len(chars) != EXPECTED_CHARACTERS or not all(isinstance(char, str) and len(char) == 1 for char in chars):
@@ -34,7 +43,7 @@ def main() -> int:
     if len(content) != EXPECTED_BYTES or hashlib.sha256(content).hexdigest() != EXPECTED_SHA256:
         message = "派生字典与发布资产摘要不符"
         raise ValueError(message)
-    args.output.write_bytes(content)
+    output.write_bytes(content)
     print(f"PASS 字典 {len(chars)} 字，SHA-256 {EXPECTED_SHA256}")
     return 0
 

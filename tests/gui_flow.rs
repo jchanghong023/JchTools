@@ -592,3 +592,142 @@ fn stop_and_close_skips_override_confirm_and_quits() {
         "U-09/M-07：停止并关闭路径不得覆盖已有输出"
     );
 }
+
+// 覆盖 XB-19 / XB-20 / T-06（S3-05）：设置、转 Markdown、截图 OCR 三页的最小端到端。
+// 真实事件循环内导航三页：未配置共享 Xberg 时转换页不得标记就绪且呈现未就绪指引
+//（T-06：未配置禁止开始转换；XB-19），设置页呈现「请选择已有目录或主动下载
+// Xberg」的初始指引（XB-20，快照经启动线程 SETTINGS_LOADED 回传），截图页对隔离
+// 资产根呈现「组件未就绪」状态且不阻塞页面（XB-19/O-03）。两页的「前往设置」
+// 按钮与页面导航共用 navigation(7) 回调，此处按同一回调验证导航可达；按钮元素
+// 本体的可见性属 Slint 内部元素，无头断言只覆盖到该回调层。
+#[test]
+fn settings_markdown_and_snap_pages_gate_and_status_end_to_end() {
+    let fixture = tempfile::tempdir().unwrap();
+    let state_dir: PathBuf = fixture.path().join("state");
+    fs::create_dir_all(&state_dir).unwrap();
+    let xberg_state: PathBuf = fixture.path().join("xberg-state");
+    fs::create_dir_all(&xberg_state).unwrap();
+    let snap_root = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join(".tmp")
+        .join("gui-flow-snap-assets");
+    let overrides = EngineTestOverrides { state_dir };
+    run_gui_job(move || {
+        // C'-1 同款隔离（S3-05）：截图资产根指到仓库 .tmp 下的专用目录，管道名随
+        // 之派生为测试专用名，监督线程绝不触碰真实用户会话的截图服务（一经设置
+        // 不恢复，与 src/gui.rs 测试装配同口径）；设置 SQLite 指到注入目录，保证
+        // 「未配置」呈现确定（用后恢复）。
+        fs::create_dir_all(&snap_root).unwrap();
+        std::env::set_var("JCHTOOLS_SNAP_OCR_TEST_ASSET_ROOT", &snap_root);
+        let previous_state_dir = std::env::var_os("JCHTOOLS_TEST_STATE_DIR");
+        struct Restore(Option<std::ffi::OsString>);
+        impl Drop for Restore {
+            fn drop(&mut self) {
+                match self.0.clone() {
+                    Some(value) => std::env::set_var("JCHTOOLS_TEST_STATE_DIR", value),
+                    None => std::env::remove_var("JCHTOOLS_TEST_STATE_DIR"),
+                }
+            }
+        }
+        let _restore = Restore(previous_state_dir);
+        std::env::set_var("JCHTOOLS_TEST_STATE_DIR", &xberg_state);
+
+        let failures: Failures = Arc::new(Mutex::new(Vec::new()));
+        let failure_sink = Arc::clone(&failures);
+        let steps = Rc::new(Cell::new(0u32));
+        let ticks = Rc::new(Cell::new(0u32));
+        gui::run_with_engine_overrides(
+            move |ui| {
+                let ui = ui.as_weak();
+                let steps = steps.clone();
+                let ticks = ticks.clone();
+                let failures = Arc::clone(&failure_sink);
+                let driver = slint::Timer::default();
+                driver.start(
+                    slint::TimerMode::Repeated,
+                    Duration::from_millis(200),
+                    move || {
+                        ticks.set(ticks.get() + 1);
+                        if ticks.get() >= 150 {
+                            record_failure(
+                                &failures,
+                                format!("驱动超时：流程卡在步骤 {}", steps.get()),
+                            );
+                            return;
+                        }
+                        let Some(ui) = ui.upgrade() else { return };
+                        match steps.get() {
+                            0 => {
+                                // XB-19/T-06：转 Markdown 页未配置时不得就绪，
+                                // 就绪指引指明先保存共享目录。
+                                ui.invoke_select_tool("markdown-converter".into());
+                                if ui.get_screen() != 5 {
+                                    record_failure(&failures, "必须进入转 Markdown 页".into());
+                                }
+                                if ui.get_convert_ready() {
+                                    record_failure(
+                                        &failures,
+                                        "T-06：未配置组件不得标记就绪".into(),
+                                    );
+                                }
+                                if !ui.get_convert_status().contains("请先保存共享 Xberg") {
+                                    record_failure(
+                                        &failures,
+                                        format!(
+                                            "XB-19：未就绪指引缺失：{}",
+                                            ui.get_convert_status()
+                                        ),
+                                    );
+                                }
+                                // 「前往设置」入口与页面按钮共用 navigation(7)。
+                                ui.invoke_navigation(7);
+                                steps.set(1);
+                            }
+                            1 => {
+                                // XB-20：设置页呈现未配置初始指引
+                                //（快照经启动线程 SETTINGS_LOADED 回传上屏）。
+                                if ui.get_screen() == 7
+                                    && ui
+                                        .get_settings_status()
+                                        .contains("请选择已有目录或主动下载")
+                                {
+                                    ui.invoke_select_tool("snap-ocr".into());
+                                    steps.set(2);
+                                }
+                            }
+                            2 => {
+                                // XB-19/O-03：截图页对隔离资产根呈现「组件未就绪」
+                                // 状态，页面导航不被阻塞。
+                                let status = ui.get_snap_asset_status().to_string();
+                                if ui.get_screen() == 6 && status.contains("未就绪") {
+                                    if ui.get_snap_ready() {
+                                        record_failure(
+                                            &failures,
+                                            "隔离资产根下截图组件不得就绪".into(),
+                                        );
+                                    }
+                                    // 截图页「前往设置」入口同样走 navigation(7)。
+                                    ui.invoke_navigation(7);
+                                    steps.set(3);
+                                }
+                            }
+                            3 if ui.get_screen() == 7 => {
+                                steps.set(4);
+                                let _ = slint::quit_event_loop();
+                            }
+                            _ => {}
+                        }
+                    },
+                );
+                DRIVER.with(|slot| *slot.borrow_mut() = Some(driver));
+            },
+            Some(overrides),
+        )
+        .expect("GUI 流程失败");
+        let recorded = take_failures(&failures);
+        assert!(
+            recorded.is_empty(),
+            "三页端到端失败：{}",
+            recorded.join("\n")
+        );
+    });
+}

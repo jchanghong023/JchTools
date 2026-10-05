@@ -215,12 +215,7 @@ pub fn worker_install_path() -> Result<PathBuf, String> {
     if let Some(path) = bundled_worker() {
         let manifest = load_manifest()?;
         let worker = manifest.workers.first().ok_or("后台服务清单缺失")?;
-        // 开发版同目录二进制由 cargo build 产生；发布目录必须匹配打包时回填的摘要。
-        let dev_output =
-            cfg!(debug_assertions) && path.parent().is_some_and(|p| p.ends_with("target/debug"));
-        if !dev_output {
-            verify_file(&path, worker.size_bytes, &worker.sha256)?;
-        }
+        verify_bundled_worker(&path, worker)?;
         return Ok(path);
     }
     let manifest = load_manifest()?;
@@ -231,12 +226,40 @@ pub fn worker_install_path() -> Result<PathBuf, String> {
     Ok(asset_root().join(&worker.install_path))
 }
 
+/// bundled worker 的启动链口径完整性校验：开发版同目录二进制由 cargo build
+/// 产生（target/debug），免摘要；发布目录必须匹配打包时回填的 size/SHA-256。
+/// 就绪检查与启动链（`worker_install_path`）共用本判据（S7-02 同口径要求）。
+fn verify_bundled_worker(path: &Path, worker: &SnapWorker) -> Result<(), String> {
+    let dev_output =
+        cfg!(debug_assertions) && path.parent().is_some_and(|p| p.ends_with("target/debug"));
+    if !dev_output {
+        verify_file(path, worker.size_bytes, &worker.sha256)?;
+    }
+    Ok(())
+}
+
+/// 就绪检查的工作进程段：bundled 在场时走启动链同口径校验（S7-02：损坏的
+/// worker 必须在 readiness 阶段即报未就绪并携带原因，不得拖到启动链才失败，
+/// O-09「自有可选资产不完整必须阻止使用并明确提示」）；缓存安装按清单校验。
+fn worker_readiness(worker: &SnapWorker, root: &Path) -> Result<(), String> {
+    if let Some(path) = bundled_worker() {
+        return verify_bundled_worker(&path, worker)
+            .map_err(|error| format!("截图 OCR 工作进程校验失败：{error}"));
+    }
+    if worker_ready(worker, root).is_err() {
+        return Err("截图 OCR 工作进程未安装或校验失败".to_string());
+    }
+    Ok(())
+}
+
 pub fn readiness() -> Result<(), String> {
     let manifest = load_manifest()?;
     let root = asset_root();
     for asset in &manifest.assets {
-        if asset_ready(asset, &root).is_err() {
-            return Err(format!("资产 {} 未安装或校验失败", asset.id));
+        // S7-05：透传具体失败原因（缺失/大小/摘要），GUI 侧直接展示该文案；
+        // 压缩成统一「未安装或校验失败」会丢失失败种类（O-09/O-30）。
+        if let Err(error) = asset_ready(asset, &root) {
+            return Err(format!("资产 {}：{}", asset.id, error));
         }
     }
     let worker = manifest
@@ -249,9 +272,7 @@ pub fn readiness() -> Result<(), String> {
             worker.id
         ));
     }
-    if bundled_worker().is_none() && worker_ready(worker, &root).is_err() {
-        return Err("截图 OCR 工作进程未安装或校验失败".to_string());
-    }
+    worker_readiness(worker, &root)?;
     readiness_inference_pack(&manifest, &root)
 }
 
@@ -1182,6 +1203,9 @@ mod tests {
         /// 装配设置的隔离根必须在本用例结束后仍然生效（C'-1，监督线程常驻，
         /// 任意时刻可能读资产根与派生管道名）。
         previous: Option<std::ffi::OsString>,
+        /// bundled worker 覆盖旧值（S7-02 用例设置）：drop 时同样恢复，避免
+        /// 泄漏到同进程其他用例的 bundled_worker() 读取。
+        previous_worker: Option<std::ffi::OsString>,
         _lock: std::sync::MutexGuard<'static, ()>,
     }
 
@@ -1190,11 +1214,13 @@ mod tests {
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         let previous = std::env::var_os("JCHTOOLS_SNAP_OCR_TEST_ASSET_ROOT");
+        let previous_worker = std::env::var_os("JCHTOOLS_TEST_BUNDLED_WORKER");
         let root = tempfile::tempdir().expect("创建资产根目录");
         std::env::set_var("JCHTOOLS_SNAP_OCR_TEST_ASSET_ROOT", root.path());
         ComponentGuard {
             root,
             previous,
+            previous_worker,
             _lock: lock,
         }
     }
@@ -1206,6 +1232,12 @@ mod tests {
                     std::env::set_var("JCHTOOLS_SNAP_OCR_TEST_ASSET_ROOT", value);
                 }
                 None => std::env::remove_var("JCHTOOLS_SNAP_OCR_TEST_ASSET_ROOT"),
+            }
+            match self.previous_worker.clone() {
+                Some(value) => {
+                    std::env::set_var("JCHTOOLS_TEST_BUNDLED_WORKER", value);
+                }
+                None => std::env::remove_var("JCHTOOLS_TEST_BUNDLED_WORKER"),
             }
         }
     }
@@ -1262,14 +1294,122 @@ mod tests {
         );
     }
 
-    // ── C-3：下载中断重试 ──
-
     fn sha256_bytes(bytes: &[u8]) -> String {
         use sha2::{Digest, Sha256};
         let mut hasher = Sha256::new();
         hasher.update(bytes);
         format!("{:x}", hasher.finalize())
     }
+
+    // ── S7-02/S7-05：就绪检查的完整性校验与失败原因透传 ──
+
+    // 覆盖 O-09（S7-02）：bundled worker 文件在场但损坏（与清单大小/摘要不符）时，
+    // 就绪检查的工作进程段必须与启动链同口径报「未就绪」并携带具体原因——修复前
+    // 该分支只检查 path.is_file()，损坏 worker 在 readiness 报已就绪、启动链才失败。
+    // 内置清单当前为 pending-build，readiness() 会在更早的占位检查处短路，无法端到
+    // 端触达 bundled 分支；本用例以合成 worker 直接驱动工作进程段，与启动链共用
+    // verify_bundled_worker 判据保证同口径。
+    #[test]
+    fn worker_readiness_rejects_corrupted_bundled_worker() {
+        let guard = redirect_component_env();
+        let worker_dir = tempfile::tempdir().expect("创建 bundled worker 目录");
+        let worker_path = worker_dir.path().join("snap-ocr-worker.exe");
+        fs::write(&worker_path, b"corrupted-worker").expect("写入损坏的 worker");
+        std::env::set_var("JCHTOOLS_TEST_BUNDLED_WORKER", &worker_path);
+
+        let worker = super::SnapWorker {
+            id: "snap-ocr-worker".to_string(),
+            status: "ok".to_string(),
+            url: "https://example.invalid/snap-ocr-worker.exe".to_string(),
+            archive_type: "file".to_string(),
+            install_path: "worker/v0.1.2/snap-ocr-worker.exe".to_string(),
+            // 大小与摘要均为「正确内容」的期望值：实际文件是另一种字节（损坏）。
+            size_bytes: b"healthy-worker".len() as u64,
+            sha256: sha256_bytes(b"healthy-worker"),
+            members: vec![],
+            license: super::SnapLicense {
+                component: "worker".to_string(),
+                license: "MIT".to_string(),
+                source: "https://example.invalid".to_string(),
+            },
+        };
+
+        // 大小不符：必须报未就绪，且错误点名大小差异。
+        let error = super::worker_readiness(&worker, guard.root.path())
+            .expect_err("损坏的 bundled worker 必须在就绪检查报未就绪");
+        assert!(
+            error.contains("校验失败") || error.contains("未就绪"),
+            "提示必须明确指出工作进程未通过校验：{error}"
+        );
+        assert!(
+            error.contains("大小") || error.contains("SHA256"),
+            "提示必须携带具体失败原因（大小或摘要）：{error}"
+        );
+
+        // 大小正确、摘要不符：错误改为点名摘要差异（两种失败可区分）。
+        fs::write(&worker_path, b"healthy-workXr").expect("写入摘要不符的 worker");
+        let error = super::worker_readiness(&worker, guard.root.path())
+            .expect_err("摘要不符的 bundled worker 必须报未就绪");
+        assert!(
+            error.contains("SHA256") && error.contains("预期"),
+            "摘要不符必须点名摘要差异：{error}"
+        );
+
+        // 内容正确的 bundled worker：通过（就绪判定不得误伤完好文件）。
+        fs::write(&worker_path, b"healthy-worker").expect("写入完好的 worker");
+        super::worker_readiness(&worker, guard.root.path())
+            .expect("完好的 bundled worker 必须通过就绪检查");
+    }
+
+    // 覆盖 O-09/O-30（S7-05）：readiness 对资产的具体失败原因（缺失、大小不符、
+    // 摘要不符）必须透传到返回文案，不得压成统一的「未安装或校验失败」——修复前
+    // GUI 只能显示压缩文案，失败种类丢失。以首个资产（字体 zip 成员）驱动三类。
+    #[test]
+    fn readiness_reports_distinct_asset_failure_kinds() {
+        let guard = redirect_component_env();
+        let manifest = super::load_manifest().expect("内置清单必须可解析");
+        let font = &manifest.assets[0];
+        let member = &font.members[0];
+        let target = guard.root.path().join(&member.install_path);
+
+        // 缺失：点名资产 id，且不得出现压缩文案或大小/摘要标记。
+        let missing = super::readiness().expect_err("字体缺失必须报未就绪");
+        assert!(missing.contains(&font.id), "必须点名失败资产：{missing}");
+        assert!(
+            !missing.contains("未安装或校验失败"),
+            "压缩文案必须被具体原因取代：{missing}"
+        );
+        assert!(
+            !missing.contains("大小") && !missing.contains("SHA256"),
+            "缺失类不得混入大小/摘要标记：{missing}"
+        );
+
+        // 大小不符：透传「大小 X，预期 Y」。
+        fs::create_dir_all(target.parent().expect("成员路径有父目录")).expect("创建字体目录");
+        fs::write(&target, b"too-short").expect("写入过短的字体成员");
+        let sized = super::readiness().expect_err("大小不符必须报未就绪");
+        assert!(
+            sized.contains("大小") && sized.contains(&member.size_bytes.to_string()),
+            "必须透传大小原因：{sized}"
+        );
+        assert!(sized.contains(&font.id), "必须点名失败资产：{sized}");
+
+        // 摘要不符（大小正确、内容错误）：透传「SHA256 ...，预期 ...」。
+        {
+            use std::io::Write as _;
+            let size = usize::try_from(member.size_bytes).expect("清单大小必须可转换");
+            let mut file = fs::File::create(&target).expect("创建字体成员文件");
+            file.write_all(&vec![0_u8; size])
+                .expect("写入内容错误的字体成员");
+        }
+        let digest = super::readiness().expect_err("摘要不符必须报未就绪");
+        assert!(
+            digest.contains("SHA256") && digest.contains(&member.sha256),
+            "必须透传摘要原因：{digest}"
+        );
+    }
+
+    // ── C-3：下载中断重试 ──
 
     // 覆盖 C-3：拉取中断（网络错误）必须与校验失败一样进入最多 3 次重试，
     // 不得首次中断即整体失败（约 291MB 组件包弱网一次中断即作废、.part 报废）。

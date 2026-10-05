@@ -471,6 +471,175 @@ fn broken_engine_is_replaced_and_batch_continues() {
     assert_eq!(second.markdown, "document");
 }
 
+/// 覆盖 XB-08/XB-17（缺陷 S6-02）：引擎死亡后迟到的取消请求不得重新拉起引擎。
+/// 取消的目标只存在于引擎内的在途任务；引擎槽位已空（进程退出或通信断裂
+/// 终结后的空档、停止看门狗窗口）时目标必然已按失败终态交付，为一条取消
+/// 重启引擎只会白付进程启动与模型加载，停止窗口内还会被看门狗立刻终结。
+#[test]
+fn late_cancel_after_engine_death_does_not_respawn_engine() {
+    common::ensure_child_reaper();
+    let _session = common::session_lock();
+    common::cleanup_stray_engines();
+    let temp = tempfile::tempdir().unwrap();
+    let root = temp.path();
+    prepare(root);
+    let session_deadline = Instant::now() + Duration::from_secs(60);
+    let state = loop {
+        let response = xberg_runtime::request(
+            root,
+            json!({"command":"snapshot_state"}),
+            Duration::from_secs(15),
+            &AtomicBool::new(false),
+        )
+        .unwrap();
+        let busy = response["ok"] == false
+            && response["error"]
+                .as_str()
+                .is_some_and(|error| error.contains("已有 Xberg"));
+        if !busy {
+            break response;
+        }
+        assert!(
+            Instant::now() < session_deadline,
+            "会话被既有 Xberg 占用超时（残留引擎未退出）：{response}"
+        );
+        std::thread::sleep(Duration::from_millis(500));
+    };
+    assert_eq!(state["ok"], true, "代理启动失败：{state}");
+    let engine_pid = state["jchtools_xberg_pid"].as_u64().unwrap();
+    let _guard = SharedProcess {
+        broker_pid: state["jchtools_broker_pid"].as_u64().unwrap(),
+        engine_pid: Some(engine_pid),
+    };
+    // 模拟引擎异常死亡（外部终结）；代理侧槽位在下一请求到达时才惰性清理。
+    let _ = Command::new("taskkill")
+        .args(["/PID", &engine_pid.to_string(), "/F"])
+        .output()
+        .unwrap();
+    let gone = Instant::now() + Duration::from_secs(10);
+    while process_alive(engine_pid) && Instant::now() < gone {
+        std::thread::sleep(Duration::from_millis(100));
+    }
+    assert!(!process_alive(engine_pid), "测试前提：模拟引擎应已被终结");
+    // 迟到的取消：必须按「无事可取消」立即应答，不得进入 spawn 分支。
+    let cancel = xberg_runtime::request(
+        root,
+        json!({"command":"cancel","target_id":"late-target"}),
+        Duration::from_secs(5),
+        &AtomicBool::new(false),
+    )
+    .unwrap();
+    assert_eq!(
+        cancel["ok"], true,
+        "引擎不在场时取消应按 noop 成功应答：{cancel}"
+    );
+    assert_eq!(
+        cancel["accepted"], false,
+        "无事可取消必须显式标记 accepted=false：{cancel}"
+    );
+    assert!(
+        cancel.get("jchtools_xberg_pid").is_none(),
+        "取消响应不得携带引擎 PID（未为此 spawn 引擎）：{cancel}"
+    );
+    assert_eq!(
+        std::fs::read_to_string(root.join("starts.txt"))
+            .unwrap()
+            .lines()
+            .count(),
+        1,
+        "取消请求不得重新拉起引擎（starts.txt 启动计数应保持 1）"
+    );
+}
+
+/// 覆盖 P-10（缺陷 S6-06）：停止看门狗以 `std::process::exit(0)` 收尾会跳过
+/// main 栈上日志句柄的析构，非阻塞写入线程缓冲中的关键记录（引擎终结、退出
+/// 事件本身）随之丢失。修复要求退出路径显式刷盘：代理进程消亡后，退出前写入
+/// 的记录必须已经在磁盘日志文件中，而不是停留在内存缓冲里。
+#[test]
+fn watchdog_exit_flushes_diagnostic_log_before_process_exit() {
+    common::ensure_child_reaper();
+    let _session = common::session_lock();
+    common::cleanup_stray_engines();
+    let temp = tempfile::tempdir().unwrap();
+    let root = temp.path();
+    prepare(root);
+    let session_deadline = Instant::now() + Duration::from_secs(60);
+    let state = loop {
+        let response = xberg_runtime::request(
+            root,
+            json!({"command":"snapshot_state"}),
+            Duration::from_secs(15),
+            &AtomicBool::new(false),
+        )
+        .unwrap();
+        let busy = response["ok"] == false
+            && response["error"]
+                .as_str()
+                .is_some_and(|error| error.contains("已有 Xberg"));
+        if !busy {
+            break response;
+        }
+        assert!(
+            Instant::now() < session_deadline,
+            "会话被既有 Xberg 占用超时（残留引擎未退出）：{response}"
+        );
+        std::thread::sleep(Duration::from_millis(500));
+    };
+    assert_eq!(state["ok"], true, "代理启动失败：{state}");
+    let broker_pid = state["jchtools_broker_pid"].as_u64().unwrap();
+    let engine_pid = state["jchtools_xberg_pid"].as_u64();
+    // 触发托盘统一退出（XB-23）：无在途任务时看门狗应终结引擎并退出代理。
+    // 停止确认与 background_settings 的 stop() 同口径：看门狗最快 100ms 后
+    // 退出，响应先于退出写回；管道竞态时有界重试（代理消失后按未运行应答）。
+    let stop_deadline = Instant::now() + Duration::from_secs(10);
+    let stop = loop {
+        match xberg_runtime::background_control(true) {
+            Ok(response) => break response,
+            Err(error) => {
+                assert!(Instant::now() < stop_deadline, "停止请求持续失败：{error}");
+                std::thread::sleep(Duration::from_millis(50));
+            }
+        }
+    };
+    assert_eq!(stop["ok"], true, "停止请求被拒绝：{stop}");
+    let deadline = Instant::now() + Duration::from_secs(10);
+    while process_alive(broker_pid) && Instant::now() < deadline {
+        std::thread::sleep(Duration::from_millis(100));
+    }
+    assert!(!process_alive(broker_pid), "停止后代理进程必须退出");
+    // P-10：退出前写入的关键记录必须已经落盘（exit 前显式刷盘），不能停留在
+    // 非阻塞写入线程的缓冲里随 exit(0) 整批丢失。
+    let log_dir = root.join("state").join("logs");
+    let mut logs = String::new();
+    for entry in std::fs::read_dir(&log_dir).unwrap().flatten() {
+        logs.push_str(&std::fs::read_to_string(entry.path()).unwrap_or_default());
+    }
+    assert!(
+        logs.contains("共享代理开始监听"),
+        "日志应含启动记录（证明初始化本身生效）：目录 {log_dir:?}"
+    );
+    assert!(
+        logs.contains("停止看门狗已终结共享引擎"),
+        "退出前的引擎终结记录必须落盘（P-10）：{logs}"
+    );
+    assert!(
+        logs.contains("共享代理退出前刷盘诊断日志"),
+        "退出事件自身的记录必须落盘（P-10）：{logs}"
+    );
+    // 收尾：引擎应随代理的 Job 句柄关闭被回收；仍存活则有界强清，避免占会话。
+    if let Some(pid) = engine_pid {
+        let deadline = Instant::now() + Duration::from_secs(8);
+        while process_alive(pid) && Instant::now() < deadline {
+            std::thread::sleep(Duration::from_millis(200));
+        }
+        if process_alive(pid) {
+            let _ = Command::new("taskkill")
+                .args(["/PID", &pid.to_string(), "/F"])
+                .output();
+        }
+    }
+}
+
 /// 覆盖（孤儿回收回归；缺陷 2026-10-03 两次复现：broker 无自退条件、测试清场
 /// 为扫描式可漏杀，漏杀者存活并锁住构建产物）：子测试进程以 connect() 同形
 /// 拉起常驻代理后立即退出且不做任何清理——模拟全部漏杀路径的公共形态。

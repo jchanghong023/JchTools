@@ -7,10 +7,46 @@ use std::cell::RefCell;
 use std::ffi::c_void;
 use std::io::Cursor;
 use std::mem::size_of;
+use std::path::Path;
 use std::ptr::{null, null_mut};
 use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::Mutex;
 
 type Handle = *mut c_void;
+
+/// GDI SelectObject 摘下旧对象的成败判定（S9-10）：失败返回空句柄或
+/// HGDI_ERROR(-1)，两种都要判——只判 is_null 会漏 HGDI_ERROR，把失败位图
+/// 选入当作成功继续绘制。主截图路径与遮罩路径同口径使用本函数。
+fn gdi_replaced_ok(old: Handle) -> bool {
+    !old.is_null() && old as isize != -1
+}
+
+/// 已登记的主程序完整映像路径（S9-11）：截图期间按完整进程路径比对，只
+/// 隐藏属于本安装的主程序窗口；launcher.json 更新（attach-main-exe）时由
+/// 服务侧刷新。None 表示未登记——此时不按名字隐藏主程序窗口，宁可少隐藏
+/// 也不误隐藏用户另装的实例/同名进程。
+static MAIN_EXE_IMAGE: Mutex<Option<String>> = Mutex::new(None);
+
+/// 登记主程序完整路径（服务启动与 attach-main-exe 时调用）。
+pub fn register_main_exe(path: Option<&Path>) {
+    let mut slot = MAIN_EXE_IMAGE
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    *slot = path.map(|p| p.to_string_lossy().into_owned());
+}
+
+/// 进程映像路径的比对键：去掉 `\\?\` 前缀并统一小写（Windows 路径不区分
+/// 大小写；来源分别是 QueryFullProcessImageNameW 与登记的 current_exe，
+/// 前缀形态可能不同）。
+fn image_key(path: &str) -> String {
+    path.trim_start_matches(r"\\?\").to_ascii_lowercase()
+}
+
+/// S9-11：候选窗口的进程映像是否属于已登记的本安装主程序（完整路径相等；
+/// basename 撞名的其他实例不隐藏）。
+fn image_belongs_to_main(image: &str, main_exe: Option<&str>) -> bool {
+    main_exe.is_some_and(|main| image_key(image) == image_key(main))
+}
 
 /// BGR 交错的 8bit 图像（H×W×3 行主序）：冻结框选的裁剪产物，经内存 PNG
 /// 编码交给 Xberg 推理子进程（O-29：字节只驻内存，不落盘）。
@@ -387,11 +423,18 @@ unsafe extern "system" fn hide_own_window(hwnd: Handle, data: isize) -> i32 {
             };
             // SAFETY: process 由上方 OpenProcess 打开且尚无其他引用，关闭恰一次。
             unsafe { CloseHandle(process) };
-            let got = queried != 0;
-            got && String::from_utf16_lossy(&path[..count as usize])
-                .rsplit(['\\', '/'])
-                .next()
-                .is_some_and(|name| name.eq_ignore_ascii_case("JchTools.exe"))
+            // S9-11：按完整进程路径与已登记主程序比对——basename 撞名的
+            // 用户另装实例/同名进程不隐藏（旧实现只看 basename 会误隐藏）。
+            queried != 0 && {
+                let main = MAIN_EXE_IMAGE
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner)
+                    .clone();
+                image_belongs_to_main(
+                    &String::from_utf16_lossy(&path[..count as usize]),
+                    main.as_deref(),
+                )
+            }
         }
     };
     if named {
@@ -469,6 +512,11 @@ pub fn capture() -> Result<CaptureFrame, String> {
     if w <= 0 || h <= 0 {
         return Err(error("显示器尺寸无效"));
     }
+    // S9-12：工作区非正尺寸（任务栏挤满等异常）在此显式报错，不把非正值
+    // 传给结果窗的 scaled_extent（旧实现会钳成 1×1 继续建窗）。
+    if info.work.right <= info.work.left || info.work.bottom <= info.work.top {
+        return Err(error("显示器工作区尺寸无效"));
+    }
     let len = usize::try_from(w)
         .ok()
         .and_then(|w| usize::try_from(h).ok().and_then(|h| w.checked_mul(h)))
@@ -518,11 +566,10 @@ pub fn capture() -> Result<CaptureFrame, String> {
         },
         colors: [0],
     };
-    let copied = !old.is_null()
-        && old as isize != -1
-        // SAFETY: mem/screen 是本函数创建且尚未释放的 DC；源坐标取自
-        // GetMonitorInfoW 返回的显示器矩形，CAPTUREBLT 连分层窗口一并捕获。
+    let copied = gdi_replaced_ok(old)
         && unsafe {
+            // SAFETY: mem/screen 是本函数创建且尚未释放的 DC；源坐标取自
+            // GetMonitorInfoW 返回的显示器矩形，CAPTUREBLT 连分层窗口一并捕获。
             BitBlt(
                 mem,
                 0,
@@ -535,7 +582,7 @@ pub fn capture() -> Result<CaptureFrame, String> {
                 SRCCOPY_CAPTUREBLT,
             )
         } != 0;
-    let restored = if !old.is_null() && old as isize != -1 {
+    let restored = if gdi_replaced_ok(old) {
         // SAFETY: old 是当初 SelectObject 摘下的 DC 原有默认位图；选回后 bitmap
         // 不再被该 DC 引用，满足下方 GetDIBits 的前置条件。
         unsafe { SelectObject(mem, old) }
@@ -543,9 +590,7 @@ pub fn capture() -> Result<CaptureFrame, String> {
         null_mut()
     };
     // GetDIBits 要求 bitmap 未选入任何 DC；使用源屏幕 DC 读取已摘下的位图。
-    let good = copied
-        && !restored.is_null()
-        && restored as isize != -1
+    let good = copied && gdi_replaced_ok(restored)
         // SAFETY: screen 有效且 bitmap 已摘出 DC；pixels 容量按 w*h*4 预分配，
         // bmi 已填成自顶向下的 32bit 描述，两者在本栈上独占可写。
         && unsafe {
@@ -863,14 +908,17 @@ pub fn select(frame: CaptureFrame) -> Result<SelectedImage, String> {
         // 句柄，供 Drop 时选回。
         unsafe { SelectObject(shade_dc, shade_bitmap) }
     };
-    if !shade_old.is_null() {
+    // S9-10：与主截图路径同口径——SelectObject 失败返回空句柄或 HGDI_ERROR(-1)，
+    // 两种都判；HGDI_ERROR 时不得把失败选入当作成功继续涂黑。
+    let shade_ready = !shade_bitmap.is_null() && gdi_replaced_ok(shade_old);
+    if shade_ready {
         // SAFETY: shade_dc 有效且 shade_bitmap 已选入；BLACKNESS 只写该 1×1 内存
         // 位图，不触碰屏幕。
         unsafe { PatBlt(shade_dc, 0, 0, 1, 1, 0x0000_0042) };
     }
     // SAFETY: screen 是本函数获取的屏幕 DC，用完即归还系统恰一次。
     unsafe { ReleaseDC(null_mut(), screen) };
-    if shade_old.is_null() {
+    if !shade_ready {
         if !shade_bitmap.is_null() {
             // SAFETY: shade_bitmap 非空且未选入任何 DC，删除即释放。
             unsafe { DeleteObject(shade_bitmap) };
@@ -995,7 +1043,10 @@ pub fn select(frame: CaptureFrame) -> Result<SelectedImage, String> {
 
 #[cfg(test)]
 mod tests {
-    use super::{capture_pixels_are_unusable, interpret_message_result};
+    use super::{
+        capture_pixels_are_unusable, gdi_replaced_ok, image_belongs_to_main,
+        interpret_message_result,
+    };
 
     // 覆盖 O-17/O-18 回归：全黑是合法截图内容，不能仅凭像素全零拒绝捕获。
     #[test]
@@ -1009,5 +1060,47 @@ mod tests {
         assert!(interpret_message_result(-1).is_err());
         assert!(!interpret_message_result(0).unwrap());
         assert!(interpret_message_result(1).unwrap());
+    }
+
+    // 覆盖 S9-10：SelectObject 摘下旧对象的失败形态有空句柄与 HGDI_ERROR(-1)
+    // 两种，只判 is_null 会漏掉 -1——遮罩路径此前与主路径口径不一致。
+    #[test]
+    fn gdi_selection_rejects_null_and_hgdi_error() {
+        assert!(gdi_replaced_ok(0x1234_usize as *mut std::ffi::c_void));
+        assert!(!gdi_replaced_ok(std::ptr::null_mut::<std::ffi::c_void>()));
+        assert!(
+            !gdi_replaced_ok((-1_isize) as *mut std::ffi::c_void),
+            "HGDI_ERROR(-1) 必须判为失败（S9-10）"
+        );
+    }
+
+    // 覆盖 S9-11：隐藏候选窗口按完整进程路径比对——basename 撞名的另装
+    // 实例不隐藏；大小写与 \\?\ 前缀差异不影响判定；未登记主程序时一律
+    // 不按名字隐藏。
+    #[test]
+    fn main_window_hidden_only_by_full_registered_path() {
+        let main = r"C:\Program Files\JchTools\JchTools.exe";
+        // 大小写不敏感。
+        assert!(image_belongs_to_main(
+            r"c:\program files\jchtools\JchTools.exe",
+            Some(main)
+        ));
+        // \\?\ 前缀差异不影响。
+        assert!(image_belongs_to_main(
+            r"\\?\C:\Program Files\JchTools\JchTools.exe",
+            Some(main)
+        ));
+        assert!(
+            !image_belongs_to_main(r"D:\tools\JchTools\JchTools.exe", Some(main)),
+            "另装实例（basename 相同、完整路径不同）不得隐藏（S9-11）"
+        );
+        assert!(
+            !image_belongs_to_main(r"C:\Program Files\JchTools\JchTools.exe", None),
+            "未登记主程序路径时不按名字隐藏"
+        );
+        assert!(!image_belongs_to_main(
+            r"C:\Windows\System32\cmd.exe",
+            Some(main)
+        ));
     }
 }

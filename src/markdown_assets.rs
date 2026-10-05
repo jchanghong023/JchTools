@@ -1,6 +1,8 @@
 //! 转 Markdown 的本地资产校验。Xberg 目录由应用级 SQLite 统一提供。
 //! 文档与媒体分别校验自己的模型和运行库；设置页可主动下载固定发布物，
-//! 校验完整后保存为共享下载来源。文档初始化仍只写许可证 notice。
+//! 校验完整后保存为共享下载来源；下载安装、保存共享目录与切换到已下载
+//! 来源都会经 [`ensure_document_notice`] 原子补写许可证 notice
+//!（完成即满足文档场景 readiness，不再要求补一次初始化）。
 
 use crate::asset_util::{
     atomic_replace_dir, cleanup_stale_staging_dirs, ensure_not_cancelled, finalize_staging,
@@ -93,11 +95,43 @@ pub fn validate_runtime_dir(path: &Path) -> Result<(), String> {
 }
 
 /// 保存共享目录到 SQLite；各功能启动前分别校验其模型和运行库。
+///
+/// 保存成功后同步闭合文档场景就绪链（T-06/XB-19，S3-01 集成：转换页初始
+/// 化入口移除后这里是 notice 的生产写点之一）：notice 缺失时原子补写。
+/// notice 写入失败不回滚已保存的目录，但错误文本明确告知保存已生效，
+/// 避免用户把有效目录当坏目录（目录本身有效，仅记录写入受阻）。
 pub fn save_runtime_dir(path: &Path) -> Result<(), String> {
     crate::xberg_runtime::validate_assets(path, "engine")?;
-    crate::xberg_settings::save(path)
+    crate::xberg_settings::save(path)?;
+    ensure_document_notice().map_err(|error| {
+        format!(
+            "目录已保存，但许可证 notice 写入失败（文档场景就绪检查会被阻断，可重试保存）：{error}"
+        )
+    })
 }
 
+/// 确保文档场景就绪链的许可证 notice 已落盘（T-06）。
+///
+/// 已存在时幂等返回；缺失时经 staging 目录原子就位（与 [`initialize_staged`]
+/// 同口径），半途失败不留半成品、不破坏既有文件——非原子直写曾在复审中
+/// 被指出可能在磁盘满/杀软锁时截断旧 notice，把原本有效的安装打成
+/// 「notice 不存在」。设置页保存与下载共用此闭环。
+pub fn ensure_document_notice() -> Result<(), String> {
+    let manifest = load_manifest()?;
+    let root = asset_root();
+    let target = root.join("licenses").join("THIRD_PARTY_NOTICES.md");
+    if target.is_file() {
+        return Ok(());
+    }
+    let staging = root.join(format!(".notice-staging-{}", Uuid::new_v4().simple()));
+    fs::create_dir_all(&staging).map_err(|error| format!("创建许可证临时目录失败：{error}"))?;
+    let result = write_notice(&staging.join("THIRD_PARTY_NOTICES.md"), &manifest)
+        .and_then(|()| atomic_replace_dir(&staging, &root.join("licenses")));
+    if result.is_err() {
+        let _ = fs::remove_dir_all(&staging);
+    }
+    result
+}
 /// 返回已保存的 Xberg 运行目录；未选择时返回明确错误。
 pub fn runtime_dir() -> Result<PathBuf, String> {
     load_saved_runtime_dir()?.ok_or_else(|| "尚未选择 Xberg 运行目录".to_string())
@@ -397,7 +431,23 @@ fn download_runtime_task(
         // 上述清单含全部场景，逐成员核对，不按当前工具过滤模型。
         ensure_not_cancelled(cancel)?;
         let installed = base.join(format!("{}-{}", pack.tag, Uuid::new_v4()));
+        // 提交段（rename → notice → save_source）取消检查点：紧贴 rename 再查
+        // 一次，把「检查通过后用户才取消」的窗口收窄到提交动作本身；取消被
+        // 观测到时不进入提交（T-05：可重试，staging 随后整体清理）。
+        ensure_not_cancelled(cancel)?;
         fs::rename(&component, &installed).map_err(|e| format!("安装 Xberg 失败：{e}"))?;
+        // 下载安装成功即确保许可证 notice（T-06，S3-01 集成后与保存共用
+        // [`ensure_document_notice`] 原子闭环）：失败按未完成安装处理——
+        // 撤销目录且不写 SQLite（与 save_source 失败同一回滚口径）。
+        if let Err(error) = ensure_document_notice() {
+            let _ = fs::remove_dir_all(&installed);
+            return Err(error);
+        }
+        // save_source 前最后一次取消检查（XB-20：下载取消不覆盖有效配置）——
+        // 取消在 SQLite 写入前被观测到时不切换来源；已 rename 落位的目录按
+        // T-05「保留已校验资产」保留，不做删除回滚（残留目录不阻塞任何功能，
+        // 下次下载安装到新目录）。
+        ensure_not_cancelled(cancel)?;
         if let Err(error) = crate::xberg_settings::save_source(
             crate::xberg_settings::Source::Downloaded,
             &installed,
@@ -471,8 +521,14 @@ fn cleanup_owned_download_staging(root: &Path, progress: &mut impl FnMut(String)
 }
 
 fn load_manifest() -> Result<AssetManifest, String> {
-    let manifest: AssetManifest = serde_json::from_str(MANIFEST)
-        .map_err(|error| format!("转 Markdown 资产清单无效：{error}"))?;
+    parse_manifest(MANIFEST)
+}
+
+/// 解析并校验资产清单文本：各段自身完整性 + 段间交叉一致性。拆出纯文本
+/// 入参是为了让篡改清单（段间漂移）可用单测覆盖（内置常量无法在运行期改写）。
+fn parse_manifest(text: &str) -> Result<AssetManifest, String> {
+    let manifest: AssetManifest =
+        serde_json::from_str(text).map_err(|error| format!("转 Markdown 资产清单无效：{error}"))?;
     if manifest.schema_version != 1 {
         return Err(format!("不支持的资产清单版本：{}", manifest.schema_version));
     }
@@ -505,6 +561,20 @@ fn load_manifest() -> Result<AssetManifest, String> {
         for member in &inference.members {
             validate_relative_path(&member.path)?;
             validate_relative_path(&member.install_path)?;
+        }
+        // 段间交叉校验：两段描述同一发布物（设置页下载 xberg 段、媒体成员
+        // 校验用 xberg_inference 段），四值必须一致；漂移会让下载 tag 与媒体
+        // 成员校验口径分叉，按无效清单拒绝，不静默放行。
+        let fixed = &manifest.xberg;
+        if inference.tag != fixed.tag
+            || inference.url != fixed.archive_url
+            || inference.size_bytes != fixed.archive_size_bytes
+            || inference.sha256 != fixed.archive_sha256
+        {
+            return Err(
+                "资产清单 xberg 与 xberg_inference 段元数据不一致：两段必须指向同一发布物（tag/URL/大小/SHA-256）"
+                    .to_string(),
+            );
         }
     }
     Ok(manifest)
@@ -910,7 +980,232 @@ mod tests {
         assert!(destination.is_dir(), "冲突目标必须保持不变");
     }
 
-    // 覆盖 T-06：notice 只携带 xberg 段的许可条目（媒体组件许可随组件树自带）。
+    // 覆盖 T-05/XB-20：取消在任何提交动作（rename/notice/save_source）之前的
+    // 检查点被观测到时，任务必须以取消错误结束——SQLite 不写 downloaded、
+    // 不留已安装目录、staging 清理（取消不覆盖有效配置）。
+    #[test]
+    fn download_cancel_before_commit_keeps_config_untouched() {
+        use super::{AssetFile, AssetManifest, XbergManifest};
+        use std::sync::atomic::Ordering;
+        let _guard = redirect_component_env();
+        let mut writer = zip::ZipWriter::new(std::io::Cursor::new(Vec::new()));
+        writer
+            .start_file(
+                "xberg-cli-x86_64-pc-windows-msvc/xberg.exe",
+                zip::write::SimpleFileOptions::default(),
+            )
+            .unwrap();
+        use std::io::Write as _;
+        writer.write_all(b"engine").unwrap();
+        let bytes = writer.finish().unwrap().into_inner();
+        // 下载完成后置取消：任务必须在进入提交段前停止。
+        struct CancelAtEnd(Vec<u8>);
+        impl AssetDownloader for CancelAtEnd {
+            fn download(
+                &mut self,
+                _: &str,
+                destination: &Path,
+                _: u64,
+                _: &str,
+                cancel: &AtomicBool,
+                _: &mut dyn FnMut(String),
+            ) -> Result<(), String> {
+                fs::write(destination, &self.0).map_err(|e| e.to_string())?;
+                cancel.store(true, Ordering::Release);
+                Ok(())
+            }
+        }
+        let manifest = AssetManifest {
+            schema_version: 1,
+            xberg_inference: None,
+            xberg: XbergManifest {
+                tag: "vcancel-test".into(),
+                archive_url: "https://example.invalid/synthetic.zip".into(),
+                archive_size_bytes: bytes.len() as u64,
+                archive_sha256: sha256_bytes(&bytes),
+                members: vec![AssetFile {
+                    path: "xberg.exe".into(),
+                    size_bytes: 6,
+                    sha256: sha256_bytes(b"engine"),
+                }],
+                licenses: Vec::new(),
+            },
+        };
+        let cancel = AtomicBool::new(false);
+        let error =
+            super::download_runtime_with(&manifest, &cancel, &mut |_| {}, &mut CancelAtEnd(bytes))
+                .expect_err("下载尾置取消必须在提交前停止");
+        assert!(error.contains("取消"), "错误必须是取消语义：{error}");
+        assert!(
+            crate::xberg_settings::settings()
+                .unwrap()
+                .downloaded
+                .is_none(),
+            "取消后不得写 downloaded 来源"
+        );
+        let base = crate::xberg_settings::state_dir()
+            .unwrap()
+            .join("xberg-downloads");
+        let leftovers: Vec<String> = fs::read_dir(&base)
+            .map(|entries| {
+                entries
+                    .flatten()
+                    .filter_map(|entry| entry.file_name().to_str().map(str::to_string))
+                    .collect()
+            })
+            .unwrap_or_default();
+        assert!(
+            leftovers.is_empty(),
+            "取消后不得残留 staging 或已安装目录：{leftovers:?}"
+        );
+    }
+
+    // 覆盖 T-05/T-06（回归：设置页下载安装成功后必须直接满足文档场景
+    // readiness——修复前 notice 唯一写点在 initialize_staged，下载完成后
+    // readiness 仍因「许可证 notice 不存在」阻断转换，用户还得再点一次初始化）。
+    #[test]
+    fn download_runtime_write_notice_closes_readiness_loop() {
+        use super::{AssetFile, AssetManifest, XbergManifest};
+        use std::io::Write as _;
+        let guard = redirect_component_env();
+        // 合成发布包：覆盖真实清单 xberg 段全部成员（字节为桩，清单值按桩字节
+        // 计算），使安装后 validate_runtime_dir 的 document 场景存在性检查通过；
+        // 断言核心是 readiness 的 notice 检查不再失败。
+        let real = load_manifest().expect("内置清单必须可解析");
+        let mut archive = zip::ZipWriter::new(std::io::Cursor::new(Vec::new()));
+        let mut members = Vec::new();
+        for member in &real.xberg.members {
+            let bytes = format!("stub-{}", member.path).into_bytes();
+            archive
+                .start_file(
+                    format!("xberg-cli-x86_64-pc-windows-msvc/{}", member.path),
+                    zip::write::SimpleFileOptions::default(),
+                )
+                .unwrap();
+            archive.write_all(&bytes).unwrap();
+            members.push(AssetFile {
+                path: member.path.clone(),
+                size_bytes: bytes.len() as u64,
+                sha256: sha256_bytes(&bytes),
+            });
+        }
+        let bytes = archive.finish().unwrap().into_inner();
+        struct Download(Vec<u8>);
+        impl AssetDownloader for Download {
+            fn download(
+                &mut self,
+                _: &str,
+                destination: &Path,
+                _: u64,
+                _: &str,
+                _: &AtomicBool,
+                _: &mut dyn FnMut(String),
+            ) -> Result<(), String> {
+                fs::write(destination, &self.0).map_err(|e| e.to_string())
+            }
+        }
+        let manifest = AssetManifest {
+            schema_version: 1,
+            xberg_inference: None,
+            xberg: XbergManifest {
+                tag: "vdownload-notice-test".into(),
+                archive_url: "https://example.invalid/synthetic.zip".into(),
+                archive_size_bytes: bytes.len() as u64,
+                archive_sha256: sha256_bytes(&bytes),
+                members,
+                licenses: Vec::new(),
+            },
+        };
+        let cancel = AtomicBool::new(false);
+        let installed =
+            super::download_runtime_with(&manifest, &cancel, &mut |_| {}, &mut Download(bytes))
+                .expect("合成下载安装应成功");
+        // 媒体场景不受影响：无推理段时在位校验照常。
+        assert!(super::validate_media().is_ok());
+        // 断言链：notice 存在且文档场景 readiness 通过（修复前在此失败）。
+        let notice = guard
+            .root
+            .path()
+            .join("licenses")
+            .join("THIRD_PARTY_NOTICES.md");
+        assert!(
+            notice.is_file(),
+            "下载安装成功后必须写入 notice：{}",
+            notice.display()
+        );
+        assert!(
+            super::readiness().is_ok(),
+            "下载完成即应满足文档场景 readiness：{:?}",
+            super::readiness()
+        );
+        assert!(installed.is_dir());
+    }
+
+    // 覆盖 T-06/XB-19（回归 S3-01 集成：转换页初始化入口移除后，「使用此
+    // 目录」保存必须与下载一样落许可证 notice——修复前 save 只写 SQLite，
+    // 自选目录用户保存后仍被 readiness 的 notice 检查阻断，且界面已无初始
+    // 化按钮可补救）。
+    #[test]
+    fn save_runtime_dir_writes_notice_for_custom_directory() {
+        let guard = redirect_component_env();
+        let real = load_manifest().expect("内置清单必须可解析");
+        let engine = tempfile::tempdir().expect("创建自选引擎目录");
+        for member in &real.xberg.members {
+            let path = engine.path().join(&member.path);
+            fs::create_dir_all(path.parent().expect("成员路径有父目录")).expect("创建成员父目录");
+            fs::write(&path, format!("stub-{}", member.path)).expect("写入成员桩文件");
+        }
+        super::save_runtime_dir(engine.path()).expect("保存自选目录必须成功");
+        let notice = guard
+            .root
+            .path()
+            .join("licenses")
+            .join("THIRD_PARTY_NOTICES.md");
+        assert!(
+            notice.is_file(),
+            "保存自选目录后必须写入 notice：{}",
+            notice.display()
+        );
+        assert!(
+            super::readiness().is_ok(),
+            "保存自选目录即应满足文档场景 readiness：{:?}",
+            super::readiness()
+        );
+    }
+
+    // 覆盖 T-06/XB-10（回归：清单 xberg 与 xberg_inference 两段的
+    // tag/URL/大小/SHA-256 四值重复但各段独立校验——漂移会让设置页下载与
+    // 媒体成员校验口径分叉；交叉校验必须在漂移时报错，不能静默放行）。
+    #[test]
+    fn manifest_cross_segment_drift_is_rejected() {
+        let mark = "\"xberg_inference\"";
+        let tamper = |from: &str, to: &str| {
+            let position = super::MANIFEST.find(mark).expect("内置清单包含推理段");
+            let (head, tail) = super::MANIFEST.split_at(position);
+            format!("{head}{}", tail.replacen(from, to, 1))
+        };
+        // tag 漂移（换成另一合法形态 tag，先通过单段校验再触发段间校验）。
+        let tampered = tamper(super::XBERG_TAG, "v2026.10.9-9999-run99.1");
+        let error = super::parse_manifest(&tampered).expect_err("推理段 tag 漂移必须报错");
+        assert!(
+            error.contains("不一致"),
+            "错误应说明段间元数据不一致：{error}"
+        );
+        // sha256 漂移（等长 64 位十六进制，单段长度检查照常通过）。
+        let sha = load_manifest()
+            .expect("内置清单必须可解析")
+            .xberg
+            .archive_sha256
+            .clone();
+        let tampered = tamper(&sha, &"0".repeat(64));
+        assert!(
+            super::parse_manifest(&tampered).is_err(),
+            "推理段 sha256 漂移必须报错"
+        );
+        // 对照：内置清单两段一致，必须照常通过。
+        super::parse_manifest(super::MANIFEST).expect("内置清单两段一致必须通过");
+    }
+
     #[test]
     fn notice_lists_only_xberg_licenses() {
         let manifest = load_manifest().expect("内置资产清单必须可解析");

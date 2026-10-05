@@ -3,10 +3,14 @@
 from __future__ import annotations
 
 import hashlib
+import json
 import os
 import posixpath
 import sqlite3
+import subprocess
+import sys
 import tempfile
+import threading
 import unittest
 import zipfile
 from pathlib import Path
@@ -28,6 +32,55 @@ from scripts.test_gate import acceptance_coverage_gaps
 
 EXPECTED_COVERAGE_GAPS = 2
 EXPECTED_PHYSICAL_ROWS = 2
+AUTO_FAST_PAGES_THRESHOLD = 500
+
+
+def _content_spec(item_id: str) -> markdown_acceptance.ContentSpec:
+    """经 getattr 取私有断言表项（沿用本文件的私有成员访问惯例，避开 SLF001）。."""
+    table = cast(
+        "dict[str, markdown_acceptance.ContentSpec]",
+        getattr(markdown_acceptance, "_" + "CONTENT_ASSERTS"),
+    )
+    return table[item_id]
+
+
+def _content_problems(text: str, gui_texts: str, item_id: str) -> list[str]:
+    checker = cast(
+        "Callable[[str, str, markdown_acceptance.ContentSpec], list[str]]",
+        getattr(markdown_acceptance, "_" + "content_problems"),
+    )
+    return checker(text, gui_texts, _content_spec(item_id))
+
+
+def _per_input_problems(item_id: str, files: list[str], produced: list[str], texts: str) -> list[str]:
+    checker = cast(
+        "Callable[[str, list[str], list[str], str], list[str]]",
+        getattr(markdown_acceptance, "_" + "per_input_problems"),
+    )
+    return checker(item_id, files, produced, texts)
+
+
+def _input_rule(item_id: str, filename: str) -> markdown_acceptance.InputRule:
+    checker = cast(
+        "Callable[[str, str], markdown_acceptance.InputRule]",
+        getattr(markdown_acceptance, "_" + "input_rule"),
+    )
+    return checker(item_id, filename)
+
+
+def _a25_rules() -> dict[str, markdown_acceptance.InputRule]:
+    return cast(
+        "dict[str, markdown_acceptance.InputRule]",
+        getattr(markdown_acceptance, "_" + "A25_RULES"),
+    )
+
+
+def _run_handler(name: str, item: object, ctx: object) -> markdown_acceptance.Outcome:
+    runner = cast(
+        "Callable[[object, object], markdown_acceptance.Outcome]",
+        getattr(markdown_acceptance, "_" + name),
+    )
+    return runner(item, ctx)
 
 
 class _FakeRect:
@@ -409,6 +462,405 @@ class MediaPostconditionTests(unittest.TestCase):
         # 覆盖 XB-14：转换 GUI 初始化不能唤起生产截图服务，抢占用户会话引擎。
         acceptance = Path(__file__).with_name("acceptance.ps1").read_text(encoding="utf-8")
         assert "Set-Item -Path Env:JCHTOOLS_SNAP_OCR_TEST_ASSET_ROOT -Value $mdSnapAssetRoot" in acceptance  # nosec B101: 回归测试断言，不用于产品权限或输入校验。
+
+
+class AcquireHintTests(unittest.TestCase):
+    """S10-01：资产获取提示必须区分测试引擎与产品钉死 tag，并指向设置页。."""
+
+    def test_hint_guides_settings_page_and_test_engine_paths(self) -> None:
+        probe = markdown_acceptance.AssetProbe(None, None, None, None, ["未提供隔离验收资产根"])
+        hint = probe.acquire_hint()
+        # 测试引擎口径优先：固定测试目录 + 环境变量入口。
+        assert "JCHTOOLS_TEST_XBERG_DIR" in hint  # nosec B101: 回归测试断言，不用于产品权限或输入校验。
+        assert str(markdown_acceptance.LOCAL_TEST_XBERG_DIR) in hint  # nosec B101: 回归测试断言。
+        # 配置入口在设置页（XB-20），不得再引导到「转 Markdown」页选择运行目录。
+        assert "「设置」页" in hint  # nosec B101: 回归测试断言。
+        assert "「转 Markdown」页选择并点" not in hint  # nosec B101: 回归测试断言。
+        # 产品钉死 tag 只读自清单，两个口径不得混写。
+        manifest = cast(
+            "dict[str, object]",
+            json.loads(markdown_acceptance.ASSET_MANIFEST.read_text(encoding="utf-8")),
+        )
+        section = cast("dict[str, object]", manifest["xberg"])
+        pinned = section["tag"]
+        assert isinstance(pinned, str)  # nosec B101: 回归测试断言。
+        assert pinned in hint  # nosec B101: 回归测试断言。
+        assert "resources/markdown-assets.json" in hint  # nosec B101: 回归测试断言。
+
+
+class PerInputRuleTests(unittest.TestCase):
+    """S10-02/04：逐输入断言——整族失败、缺诊断、夹具不足都不得假 PASS。."""
+
+    def test_a25_dynamic_rules_tighten_engine_declared_formats(self) -> None:
+        # S10-02 复审：引擎声明的格式必须有产物（防引擎回归假 PASS）；未声明
+        # 格式保留宽松兜底；动态规则缺席时回落静态默认（全宽松）。
+        rules = _a25_rules()
+        old_rules = dict(rules)
+        try:
+            rules["sample_odt.odt"] = markdown_acceptance.InputRule(must_produce=True)
+            rules["sample_legacy.wpd"] = markdown_acceptance.InputRule(must_produce=False)
+            assert _input_rule("A25", "sample_odt.odt").must_produce  # nosec B101: 回归测试断言。
+            assert not _input_rule("A25", "sample_legacy.wpd").must_produce  # nosec B101: 回归测试断言。
+        finally:
+            rules.clear()
+            rules.update(old_rules)
+        assert not _input_rule("A25", "sample_odt.odt").must_produce  # nosec B101: 回归测试断言。
+
+    def test_healthy_family_all_failing_is_reported(self) -> None:
+        # A21：即使 DOCM/DOTX/DOTM 全失败（只产出一份 docx），也必须报问题。
+        files = ["chartex.docx", "chartex_as_docm.docm", "chartex_as_dotx.dotx", "chartex_as_dotm.dotm"]
+        assert _per_input_problems("A21", files, ["chartex_docx.md"], "")  # nosec B101: 回归测试断言。
+
+    def test_expected_failure_requires_diagnosis(self) -> None:
+        assert _per_input_problems("A20", ["empty.png"], [], "")  # nosec B101: 无产物且无失败诊断。
+        diagnosed = "失败：empty.png · 解码失败"
+        assert _per_input_problems("A20", ["empty.png"], [], diagnosed) == []  # nosec B101
+        assert _per_input_problems("A20", ["empty.png"], ["empty_png.md"], diagnosed)  # nosec B101: 不留半成品。
+
+    def test_optional_and_sweep_inputs_do_not_require_product(self) -> None:
+        assert _per_input_problems("A16", ["alpha.png"], [], "") == []  # nosec B101: 宽松输入。
+        assert _per_input_problems("A25", ["sample.rst"], [], "") == []  # nosec B101: 格式清点子集语义保留。
+
+    def test_a11_requires_broken_preview_fixture_to_run(self) -> None:
+        # A11：「本体失败+预览成功」注入变体缺场时必须 NOT RUN，不得以嵌入对象在场冒充。
+        item = next(entry for entry in markdown_acceptance.ITEMS if entry.item_id == "A11")
+        assert "matrix/pptx_ole_broken_preview.pptx" in item.fixtures  # nosec B101: 回归测试断言。
+        missing = markdown_acceptance.FIXTURES_DEFAULT / "matrix/pptx_ole_broken_preview.pptx"
+        assert not missing.is_file()  # nosec B101: 夹具缺场时前置检查使整项 NOT RUN。
+
+
+class ContentAssertStrengthTests(unittest.TestCase):
+    """S10-03/05：A01/A03/A08/A09/A14 的次数、顺序、邻近、字段值与 alt 断言。."""
+
+    def test_a03_requires_exact_shared_media_count(self) -> None:
+        assert _content_spec("A03").require_counts == (("SHARED-MEDIA", 2),)  # nosec B101
+        assert _content_problems("SHARED-MEDIA 只出现一次", "", "A03")  # nosec B101
+        assert _content_problems("SHARED-MEDIA\nSHARED-MEDIA", "", "A03") == []  # nosec B101
+
+    def test_a01_token_image_order_detects_swap(self) -> None:
+        good = "![a](m/image_0.png)\nBETA-TWO\n![b](m/image_1.png)\nALPHA-ONE\n"
+        assert _content_problems(good, "", "A01") == []  # nosec B101
+        swapped = "![a](m/image_0.png)\nALPHA-ONE\n![b](m/image_1.png)\nBETA-TWO\n"
+        assert _content_problems(swapped, "", "A01")  # nosec B101: 换图后必须可检出。
+
+    def test_a08_field_value_must_survive_between_runs(self) -> None:
+        assert _content_problems("RUN-AND-FIELD7-FIELD-END", "", "A08") == []  # nosec B101
+        assert _content_problems("RUN-AND-FIELD 7 -FIELD-END", "", "A08") == []  # nosec B101
+        assert _content_problems("RUN-AND-FIELD-FIELD-END", "", "A08")  # nosec B101: 字段值丢失。
+
+    def test_a09_description_only_allowed_in_alt(self) -> None:
+        ok = "![DESCR-NO-OCR-TOKEN](m/image_0.png)\n"
+        assert _content_problems(ok, "", "A09") == []  # nosec B101: alt 位置合法。
+        leaked = "![DESCR-NO-OCR-TOKEN](m/image_0.png)\n正文 DESCR-NO-OCR-TOKEN\n"
+        assert _content_problems(leaked, "", "A09")  # nosec B101: 围栏外正文禁止。
+
+    def test_a10_requires_partial_diagnosis_in_texts(self) -> None:
+        text = "HEALTHY-TEXT-REMAINS"
+        diagnosed = "部分提取：pptx_undecodable_image.pptx · 部分内容未提取：解码失败"
+        assert _content_problems(text, diagnosed, "A10") == []  # nosec B101
+        assert _content_problems(text, "一切正常，无诊断", "A10")  # nosec B101: T-16 诊断必须在场。
+
+    def test_a14_belongs_to_display_order(self) -> None:
+        good = "![a](m/image_0.png)\nXLSX-FIRST-DRAW-TOKEN\n![b](m/image_1.png)\nXLSX-FIRST-REL-TOKEN\n"
+        assert _content_problems(good, "", "A14") == []  # nosec B101
+        bad = "XLSX-FIRST-REL-TOKEN\nXLSX-FIRST-DRAW-TOKEN\n"
+        assert _content_problems(bad, "", "A14")  # nosec B101: 显示顺序错配必须可检出。
+
+
+class A18UnsupportedBoundaryTests(unittest.TestCase):
+    """S10-06：jpx/jpm/mj2 必须经真实转换拒绝，不得只在清单层声明。."""
+
+    def test_mixed_conversion_run_is_executed_and_verified(self) -> None:
+        calls: list[str] = []
+        summary = "转 Markdown 转换完成：成功 3，部分提取 0，失败 0，已有结果跳过 0，重复结果跳过 0"
+
+        def fake_run(
+            _item: object,
+            _ctx: object,
+            _exe: object,
+            *,
+            stop_mode: bool = False,
+            tag_suffix: str = "run",
+            capture: list[markdown_acceptance.GuiRun] | None = None,
+        ) -> markdown_acceptance.Outcome:
+            del stop_mode
+            calls.append(tag_suffix)
+            if capture is not None:
+                capture.append(markdown_acceptance.GuiRun([], summary, None))
+            return markdown_acceptance.Outcome("PASS")
+
+        item = next(entry for entry in markdown_acceptance.ITEMS if entry.item_id == "A18")
+        with tempfile.TemporaryDirectory() as temporary:
+            context = markdown_acceptance.Context(None, None, None, Path(temporary), markdown_acceptance.probe_assets())
+            _ = (Path(temporary) / "a18-mixed" / "output").mkdir(parents=True)
+            with (
+                patch.object(markdown_acceptance, "SCRATCH_ROOT", Path(temporary)),
+                patch("scripts.markdown_acceptance._run_conversion_item", side_effect=fake_run),
+                patch.object(
+                    markdown_acceptance, "_fixed_format_extensions", return_value=({"jp2", "j2k", "j2c", "png"}, None)
+                ),
+                patch.object(markdown_acceptance, "_fixture_precondition", return_value=None),
+            ):
+                outcome = _run_handler("run_matrix_a18", item, context)
+        assert outcome.status == "PASS", outcome.reason  # nosec B101: 回归测试断言。
+        assert "supported" in calls  # nosec B101: 支持格式先行转换。
+        assert "mixed" in calls  # nosec B101: 必须追加混跑转换。
+
+    def test_unsupported_products_or_missing_summary_are_rejected(self) -> None:
+        verify = cast(
+            "Callable[[Path, str], str | None]",
+            getattr(markdown_acceptance, "_" + "verify_a18_unsupported_rejected"),
+        )
+        with tempfile.TemporaryDirectory() as temporary:
+            outputs = Path(temporary)
+            summary = "转 Markdown 转换完成：成功 3，部分提取 0，失败 0，已有结果跳过 0，重复结果跳过 0"
+            assert verify(outputs, summary) is None  # nosec B101: 统计只计支持格式。
+            _ = (outputs / "jpx_jpx.md").write_text("leak", encoding="utf-8")
+            assert verify(outputs, summary) is not None  # nosec B101: 未承诺格式产出即失败。
+            _ = (outputs / "jpx_jpx.md").unlink()
+            assert verify(outputs, "没有任何统计文本") is not None  # nosec B101: 缺批次统计不可核对。
+            counted = "转 Markdown 转换完成：成功 6，部分提取 0，失败 0，已有结果跳过 0，重复结果跳过 0"
+            assert verify(outputs, counted) is not None  # nosec B101: 未承诺格式计入批次即失败。
+
+
+class A24SceneNoteTests(unittest.TestCase):
+    """S10-07：tone/silence/noaudio 说明文本与停止相「后续未处理」断言。."""
+
+    @staticmethod
+    def _write_scene_outputs(root: Path, *, noaudio_body: str) -> None:
+        outputs = root / "a24-full" / "output"
+        _ = outputs.mkdir(parents=True)
+        _ = (outputs / "video-to-notes-intro-zh_mp4.md").write_text(
+            "# video-to-notes-intro-zh\n- 音频时长: 00:00:02.000\n## 转录\n[00:00:00.000 -> 00:00:01.000] 中文\n",
+            encoding="utf-8",
+        )
+        _ = (outputs / "tone_m4a.md").write_text("# tone\n- 音频时长: 00:00:02.000\n## 转录\n片段\n", encoding="utf-8")
+        _ = (outputs / "silence_m4a.md").write_text(
+            "# silence\n- 音频时长: 00:00:02.000\n（未检测到语音）\n", encoding="utf-8"
+        )
+        _ = (outputs / "noaudio_mp4.md").write_text(noaudio_body, encoding="utf-8")
+
+    @staticmethod
+    def _verify_a24_outputs() -> str | None:
+        checker = cast("Callable[[], str | None]", getattr(markdown_acceptance, "_" + "verify_a24_outputs"))
+        return checker()
+
+    def test_scene_notes_are_asserted(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            self._write_scene_outputs(Path(temporary), noaudio_body="# noaudio\n- 音频时长: 无音频轨道\n")
+            with patch.object(markdown_acceptance, "SCRATCH_ROOT", Path(temporary)):
+                assert self._verify_a24_outputs() is None  # nosec B101: 三场景说明齐全。
+        with tempfile.TemporaryDirectory() as temporary:
+            # 无音轨场景缺少「无音频轨道」说明：T-20 要求不能产生无解释的空文件。
+            self._write_scene_outputs(Path(temporary), noaudio_body="# noaudio\n（空白）\n")
+            with patch.object(markdown_acceptance, "SCRATCH_ROOT", Path(temporary)):
+                assert self._verify_a24_outputs() is not None  # nosec B101
+
+    def test_stop_phase_requires_unprocessed_followups(self) -> None:
+        verify_stop = cast(
+            "Callable[[int, int, str], str | None]",
+            getattr(markdown_acceptance, "_" + "verify_a24_stop"),
+        )
+        assert verify_stop(3, 4, "已停止") is None  # nosec B101: 后续文件未处理。
+        assert verify_stop(4, 4, "已停止") is not None  # nosec B101: 全部完成即停止语义未验证。
+        assert verify_stop(0, 4, "") is not None  # nosec B101: 未观察到已停止状态。
+
+
+class A15AutoModeTests(unittest.TestCase):
+    """S10-08：>500 页夹具在场，A15 断言 auto_mode 披露（T-18 修订口径）。."""
+
+    def test_over_500_pages_fixture_and_assertions_are_registered(self) -> None:
+        item = next(entry for entry in markdown_acceptance.ITEMS if entry.item_id == "A15")
+        assert "large_501_pages.pdf" in item.fixtures  # nosec B101: 回归测试断言。
+        assert "auto_mode" in _content_spec("A15").require_in_texts  # nosec B101: 回归测试断言。
+        assert "large_501_pages" in _content_spec("A15").require_in_texts  # nosec B101: 回归测试断言。
+        fixture = markdown_acceptance.FIXTURES_DEFAULT / "large_501_pages.pdf"
+        assert fixture.is_file()  # nosec B101: 回归测试断言。
+        data = fixture.read_bytes()
+        pages = data.count(b"/Type /Page") - data.count(b"/Type /Pages")
+        assert pages > AUTO_FAST_PAGES_THRESHOLD  # nosec B101: 必须超过引擎 auto_fast_pages。
+
+
+class A15WordingTests(unittest.TestCase):
+    """S10-08：210 页场景保留为常规模式回归，旧 200 页口径措辞清理。."""
+
+    def test_a15_keeps_210_pages_as_normal_mode_regression(self) -> None:
+        item = next(entry for entry in markdown_acceptance.ITEMS if entry.item_id == "A15")
+        assert "large_210_pages.pdf" in item.fixtures  # nosec B101: 回归测试断言。
+        assert "200 页" not in item.fixture_note  # nosec B101: 旧口径措辞清理。
+        assert ">200 页" not in item.fixture_note  # nosec B101: 旧口径措辞清理。
+
+
+class OfflineEvidenceTests(unittest.TestCase):
+    """S10-09：断网验收需要显式人工隔离证据，单地址探测失败不构成断网结论。."""
+
+    def test_c04_requires_explicit_offline_evidence(self) -> None:
+        item = next(entry for entry in markdown_acceptance.ITEMS if entry.item_id == "C04")
+        probe_note = "探测 1.1.1.1:53 失败：联网状态未知"
+        with tempfile.TemporaryDirectory() as temporary:
+            context = markdown_acceptance.Context(None, None, None, Path(temporary), markdown_acceptance.probe_assets())
+            with (
+                patch.object(markdown_acceptance, "_probe_offline", return_value=(False, probe_note)),
+                patch.dict(os.environ),
+            ):
+                _ = os.environ.pop("JCHTOOLS_OFFLINE_VERIFIED", None)
+                outcome = _run_handler("run_c04_offline", item, context)
+        assert outcome.status == "NOT RUN"  # nosec B101: 回归测试断言。
+        assert "JCHTOOLS_OFFLINE_VERIFIED" in outcome.reason  # nosec B101: 必须说明证据要求。
+
+    def test_c04_runs_conversion_with_explicit_evidence(self) -> None:
+        item = next(entry for entry in markdown_acceptance.ITEMS if entry.item_id == "C04")
+        with tempfile.TemporaryDirectory() as temporary:
+            context = markdown_acceptance.Context(None, None, None, Path(temporary), markdown_acceptance.probe_assets())
+            with (
+                patch.object(markdown_acceptance, "_probe_offline", return_value=(False, "联网状态未知")),
+                patch.dict(os.environ, {"JCHTOOLS_OFFLINE_VERIFIED": "1"}),
+                patch.object(markdown_acceptance, "_asset_precondition", return_value=None),
+                patch.object(
+                    markdown_acceptance,
+                    "_run_conversion_item",
+                    return_value=markdown_acceptance.Outcome("PASS", details=["offline-run"]),
+                ),
+            ):
+                outcome = _run_handler("run_c04_offline", item, context)
+        assert outcome.status == "PASS"  # nosec B101: 有证据时才执行断网转换验收。
+        assert outcome.details == ["offline-run"]  # nosec B101: 回归测试断言。
+
+
+class PythonProcessScanTests(unittest.TestCase):
+    """S10-10：进程名单必须覆盖实际承接转换的 xberg.exe（XB 进程模型）。."""
+
+    def test_c05_scans_xberg_and_drops_retired_worker(self) -> None:
+        recorded: list[tuple[str, ...]] = []
+        first_round = threading.Event()
+
+        def fake_scan(names: tuple[str, ...]) -> tuple[list[str], None]:
+            recorded.append(names)
+            first_round.set()
+            return [], None
+
+        def fake_drive(_exe: Path, _input: Path, _output: Path, *, stop_after_busy: bool = False) -> object:
+            del stop_after_busy
+            assert first_round.wait(timeout=10)  # nosec B101: 扫描至少完成一轮再返回。
+            return markdown_acceptance.GuiRun([], "", None)
+
+        with (
+            patch.object(markdown_acceptance, "scan_python_modules", side_effect=fake_scan),
+            patch.object(markdown_acceptance, "drive_conversion", side_effect=fake_drive),
+        ):
+            scanner = cast(
+                "Callable[[Path, Path, Path], tuple[object, list[str], list[str]]]",
+                getattr(markdown_acceptance, "_" + "c05_scan_during_conversion"),
+            )
+            _run, hits, errors = scanner(Path("exe"), Path("in"), Path("out"))
+        assert errors == []  # nosec B101: 回归测试断言。
+        assert hits == []  # nosec B101: 回归测试断言。
+        assert recorded  # nosec B101: 回归测试断言。
+        assert recorded[0] == ("JchTools.exe", "xberg.exe")  # nosec B101: XB 进程模型，退役 worker 不得残留。
+
+
+class C03LegacyToolTests(unittest.TestCase):
+    """S10-11：C03 必须委托旧工具的可观察操作，不能只启动 GUI。."""
+
+    def test_c03_delegates_legacy_tool_operation(self) -> None:
+        delegated: list[str] = []
+
+        def fake_delegate(stage: str, _exe: Path, env_extra: dict[str, str] | None = None) -> object:
+            del env_extra
+            delegated.append(stage)
+            return markdown_acceptance.Outcome("PASS")
+
+        item = next(entry for entry in markdown_acceptance.ITEMS if entry.item_id == "C03")
+        with tempfile.TemporaryDirectory() as temporary:
+            fake_exe = Path(temporary) / "target" / "debug" / "JchTools.exe"
+            _ = fake_exe.parent.mkdir(parents=True)
+            _ = fake_exe.write_bytes(b"exe")
+            context = markdown_acceptance.Context(
+                fake_exe, None, None, Path(temporary), markdown_acceptance.probe_assets()
+            )
+            context.stages = ("S1", "S15")
+            context.stages_error = None
+            with patch.object(markdown_acceptance, "_delegate_stage", side_effect=fake_delegate):
+                outcome = _run_handler("run_c03_unconfigured", item, context)
+        assert "S15" in delegated  # nosec B101: 旧工具可观察操作（S15 自备数据）。
+        assert outcome.status == "PASS", outcome.reason  # nosec B101: 回归测试断言。
+
+
+class ExternalReferenceTests(unittest.TestCase):
+    """S10-12：外部 :// 图片引用违反本地输出语义，必须记为问题。."""
+
+    def test_external_image_reference_is_reported(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            source = root / "input"
+            output = root / "output"
+            _ = source.mkdir()
+            _ = output.mkdir()
+            original = source / "sample.docx"
+            _ = original.write_bytes(b"source")
+            media = output / "sample_docx_media" / "image_0.png"
+            _ = media.parent.mkdir()
+            _ = media.write_bytes(b"png-bytes")
+            _ = (output / "sample_docx.md").write_text(
+                "![本地](sample_docx_media/image_0.png)\n![远程](https://example.invalid/pic.png)\n![锚点](#section)\n",
+                encoding="utf-8",
+            )
+
+            problems = verify_common_postconditions(
+                source,
+                output,
+                {Path("sample.docx"): _digest(original)},
+            )
+
+        assert any("外部" in problem for problem in problems)  # nosec B101: 外部引用必须记问题。
+        assert any("https://example.invalid" in problem for problem in problems)  # nosec B101
+        assert not any("#section" in problem for problem in problems)  # nosec B101: 锚点语义合法。
+
+
+class SyntheticFixtureTests(unittest.TestCase):
+    """S10-13：夹具合成化——无外部语料路径、无来源元数据、生成脚本可校验。."""
+
+    def test_format_sweep_jsonl_is_synthetic(self) -> None:
+        path = markdown_acceptance.FIXTURES_DEFAULT / "matrix" / "format_sweep" / "sample.jsonl"
+        text = path.read_text(encoding="utf-8")
+        assert "docs/" not in text  # nosec B101: 无外部语料路径。
+        assert ".pdf" not in text  # nosec B101: 无外部语料路径。
+        lines = [line for line in text.splitlines() if line.strip()]
+        assert lines  # nosec B101: 回归测试断言。
+        for line in lines:
+            _ = cast("dict[str, object]", json.loads(line))  # 每行必须是合法 JSON 对象。
+
+    def test_fixture_readme_has_no_source_provenance(self) -> None:
+        text = (markdown_acceptance.FIXTURES_DEFAULT / "README.md").read_text(encoding="utf-8")
+        assert "118957872982e44b08ab430c20147f74cf3ef494" not in text  # nosec B101: 源提交号可反查来源。
+        assert "逐字节迁自" not in text  # nosec B101: 迁移来源元数据。
+        assert "generate_synthetic.py" in text  # nosec B101: 新的合成来源说明。
+
+    def test_synthetic_generator_check_passes(self) -> None:
+        script = markdown_acceptance.FIXTURES_DEFAULT / "generate_synthetic.py"
+        assert script.is_file()  # nosec B101: 回归测试断言。
+        done = subprocess.run(
+            [sys.executable, str(script), "--check"],
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            check=False,
+        )
+        assert done.returncode == 0, done.stderr  # nosec B101: 在场夹具必须满足结构断言。
+
+
+class ManifestDrivenScanTests(unittest.TestCase):
+    """S10-14：禁止资产扫描按清单成员驱动，文档类成员不得误报。."""
+
+    def test_manifest_member_names_are_forbidden(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            _ = (root / "MSVCP140.dll").write_bytes(b"x")  # 清单成员、静态模式抓不到。
+            _ = (root / "LICENSE").write_text("product license", encoding="utf-8")
+            hits = markdown_acceptance.scan_forbidden_assets(root)
+        assert any("MSVCP140.dll" in hit for hit in hits)  # nosec B101: 清单驱动命中。
+        assert not any("LICENSE" in hit for hit in hits)  # nosec B101: 文档/许可成员不误报。
 
 
 if __name__ == "__main__":
