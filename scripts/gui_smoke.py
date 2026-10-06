@@ -610,11 +610,11 @@ def run_stage(  # noqa: PLR0913 - 脚手架的收尾钩子与子进程环境天�
             killed, code = _wait_exit_or_kill(proc, window=window, owner=owner)
         finally:
             try:
-                if after is not None:
-                    after()
-            finally:
                 if owner is not None:
                     owner.close()
+            finally:
+                if after is not None:
+                    after()
     assert_clean_exit(tag, killed=killed, code=code)
     print(f"{tag} PASS：进程已退出")
 
@@ -641,8 +641,25 @@ def analyze_until_ready(window: WindowSpecification, data: str) -> str:
 
 def s2_analyze_only(exe: str, data: str) -> None:
     def body(window: WindowSpecification) -> None:
+        root = Path(data)
+        before_paths = frozenset(path.relative_to(root) for path in root.rglob("*"))
+        before_files = {
+            path.relative_to(root): (file_digest(path), path.stat().st_mtime_ns)
+            for path in root.rglob("*")
+            if path.is_file()
+        }
         _ = analyze_until_ready(window, data)
         _ = find_button(window, "确认并执行整理").wait("visible enabled", timeout=TIMEOUT)
+        after_paths = frozenset(path.relative_to(root) for path in root.rglob("*"))
+        after_files = {
+            path.relative_to(root): (file_digest(path), path.stat().st_mtime_ns)
+            for path in root.rglob("*")
+            if path.is_file()
+        }
+        require(
+            before_paths == after_paths and before_files == after_files,
+            "分析阶段不得改动测试数据（路径、内容或修改时间发生变化）",
+        )
         print("S2 PASS：分析完成（计划已生成，执行按钮可用；分析阶段未改动文件）")
 
     run_stage("S2", exe, body)
@@ -891,6 +908,7 @@ def s5_markdown_basic_chain(exe: str) -> None:
 
     def prepare_scratch() -> None:
         scratch = Path(tempfile.mkdtemp(prefix="jchtools-gui-smoke-s5-"))
+        scratch_box.append(scratch)
         (scratch / "input").mkdir()
         (scratch / "output").mkdir()
         # 空输入的转换瞬时完成，「停止任务」运行态不可观察，开始→停止链路断言失效；
@@ -902,7 +920,6 @@ def s5_markdown_basic_chain(exe: str) -> None:
             raise RuntimeError(message)
         for index in range(STOP_MEDIA_FILE_COUNT):
             _ = shutil.copyfile(media, scratch / "input" / f"{index:02}_{Path(media).name}")
-        scratch_box.append(scratch)
 
     def body(window: WindowSpecification) -> None:
         scratch = scratch_box[0]
@@ -929,7 +946,8 @@ def s5_markdown_basic_chain(exe: str) -> None:
         print("S5 PASS：开始→停止链路完成（停止在当前文件后生效，界面回到可开始状态）")
 
     def cleanup() -> None:
-        shutil.rmtree(scratch_box[0], ignore_errors=True)
+        if scratch_box:
+            shutil.rmtree(scratch_box.pop(), ignore_errors=True)
 
     run_stage("S5", exe, body, pre=prepare_scratch, after=cleanup)
 
@@ -980,11 +998,8 @@ def goto_settings(window: WindowSpecification) -> None:
     raise RuntimeError(message)
 
 
-def set_settings_custom_dir(window: WindowSpecification, path: str) -> None:
-    """填设置页的 Xberg 目录输入框：取「使用此目录」按钮上方最近的 Edit.
-
-    侧栏搜索框在窗口很上方，紧贴「使用此目录」上方的 Edit 才是目录输入框。
-    """
+def _settings_custom_dir_edit(window: WindowSpecification) -> BaseWrapper:
+    """返回「使用此目录」按钮上方最近的 Xberg 目录输入框."""
     button = find_button(window, "使用此目录")
     button_rect = button.rectangle()
     candidates = [
@@ -993,8 +1008,18 @@ def set_settings_custom_dir(window: WindowSpecification, path: str) -> None:
     if not candidates:
         msg = "设置页未找到 Xberg 目录输入框"
         raise RuntimeError(msg)
-    edit = min(candidates, key=lambda e: button_rect.top - e.rectangle().bottom)
-    edit.set_edit_text(path)
+    return min(candidates, key=lambda e: button_rect.top - e.rectangle().bottom)
+
+
+def set_settings_custom_dir(window: WindowSpecification, path: str) -> None:
+    """填设置页的 Xberg 目录输入框."""
+    _settings_custom_dir_edit(window).set_edit_text(path)
+
+
+def settings_custom_dir_value(window: WindowSpecification) -> str:
+    """读取设置页当前 Xberg 目录输入框的值."""
+    edit = cast("controls.uia_controls.EditWrapper", _settings_custom_dir_edit(window))
+    return edit.get_value() or ""
 
 
 def wait_text_containing(
@@ -1060,8 +1085,8 @@ def smoke_xberg_dir() -> str:
 def s6_save_xberg_directory(exe: str) -> None:
     """S6 设置页选择并保存 Xberg 目录：校验通过、状态显示已持久保存."""
     state = Path(tempfile.mkdtemp(prefix="jchtools-gui-smoke-s6-"))
-    directory = smoke_xberg_dir()
     try:
+        directory = smoke_xberg_dir()
 
         def body(window: WindowSpecification) -> None:
             goto_settings(window)
@@ -1076,11 +1101,11 @@ def s6_save_xberg_directory(exe: str) -> None:
 
 
 def s7_restart_restores_saved_directory(exe: str) -> None:
-    """S7 重启恢复：保存后完全退出，再启动时来源与目录自动恢复（XB-18/XB-21）."""
+    """S7 重启恢复：保存后完全退出，再启动时设置页自动恢复来源与目录（XB-18/XB-21）."""
     state = Path(tempfile.mkdtemp(prefix="jchtools-gui-smoke-s7-"))
-    directory = smoke_xberg_dir()
-    env = isolated_state_env(state)
     try:
+        directory = smoke_xberg_dir()
+        env = isolated_state_env(state)
 
         def save(window: WindowSpecification) -> None:
             goto_settings(window)
@@ -1092,6 +1117,11 @@ def s7_restart_restores_saved_directory(exe: str) -> None:
             goto_settings(window)
             _ = wait_text_containing(window, SETTINGS_SAVED_TEXT)
             _ = wait_text_containing(window, "当前来源：用户提供的目录")
+            actual_directory = settings_custom_dir_value(window)
+            require(
+                Path(actual_directory).resolve() == Path(directory).resolve(),
+                "S7 重启后未恢复已保存的 Xberg 目录",
+            )
 
         run_stage("S7-first", exe, save, env=env)
         run_stage("S7", exe, restored, env=env)
@@ -1110,22 +1140,26 @@ def s8_invalid_directory_is_rejected_and_retryable(exe: str) -> None:
 
         def body(window: WindowSpecification) -> None:
             goto_settings(window)
-            # 校验失败文案固定以「Xberg 资产 … 缺失」指认首个缺失成员
-            # （不存在的路径与空目录都走这条口径；初始文案不含该前缀）。
-            # 1) 不存在的路径：明确报错并指认缺失（不是无声失败）。
+            # 保存校验只要求 xberg.exe 在场（XB-19/XB-26：场景资产按各功能就绪
+            # 检查分别校验，不在保存时强制）；无效目录被明确拒绝并说明目录要求。
+            # 两次无效目录的报错文案相同：中间插入一次成功保存作为切换点——成功
+            # 文案既证明报错后界面未锁死（可再次输入并触发校验），也让第二次报错
+            # 的出现无歧义（上一次可见文案是成功文案）。
+            # 1) 不存在的路径：明确报错并说明要求（不是无声失败）。
             set_settings_custom_dir(window, str(state / "does-not-exist"))
             click(window, find_button(window, "使用此目录"))
-            first = wait_text_containing(window, "Xberg 资产")
-            require("缺失" in first, f"错误应指认缺失项：{first}")
-            # 2) 存在但缺 xberg.exe 的目录：同样被拒绝（排除上一次的旧文案）。
+            rejected = wait_text_containing(window, "xberg.exe")
+            require("有效绝对目录" in rejected, f"错误应说明有效目录要求：{rejected}")
+            # 2) 报错后重试有效目录：校验通过、状态切换为已持久保存。
+            set_settings_custom_dir(window, smoke_xberg_dir())
+            click(window, find_button(window, "使用此目录"))
+            _ = wait_text_containing(window, SETTINGS_SAVED_TEXT)
+            # 3) 已有有效配置后再次输入无效目录（缺 xberg.exe 的空目录）：同样被
+            #    拒绝，报错重新出现且说明要求。
             set_settings_custom_dir(window, str(empty))
             click(window, find_button(window, "使用此目录"))
-            second = wait_text_containing(window, "Xberg 资产", exclude=first)
-            require("缺失" in second, f"错误应指认缺失项：{second}")
-            # 3) 重新选择：界面未锁死，可再次输入并触发校验（状态重新进入处理中）。
-            set_settings_custom_dir(window, str(state / "another-invalid"))
-            click(window, find_button(window, "使用此目录"))
-            _ = wait_text_containing(window, "Xberg 资产", exclude=second)
+            second = wait_text_containing(window, "xberg.exe", exclude=SETTINGS_SAVED_TEXT)
+            require("有效绝对目录" in second, f"错误应说明有效目录要求：{second}")
 
         run_stage("S8", exe, body, env=env)
     finally:
@@ -1481,6 +1515,7 @@ def s14_close_during_conversion_confirms_and_stops(exe: str) -> None:
 
     def prepare_scratch() -> None:
         scratch = Path(tempfile.mkdtemp(prefix="jchtools-gui-smoke-s14-"))
+        scratch_box.append(scratch)
         (scratch / "input").mkdir()
         (scratch / "output").mkdir()
         media = os.environ.get("JCHTOOLS_S5_MEDIA", "")
@@ -1489,7 +1524,6 @@ def s14_close_during_conversion_confirms_and_stops(exe: str) -> None:
             raise RuntimeError(message)
         for index in range(STOP_MEDIA_FILE_COUNT):
             _ = shutil.copyfile(media, scratch / "input" / f"{index:02}_{Path(media).name}")
-        scratch_box.append(scratch)
 
     def body(window: WindowSpecification) -> None:
         scratch = scratch_box[0]
@@ -1508,7 +1542,8 @@ def s14_close_during_conversion_confirms_and_stops(exe: str) -> None:
         # 确认后任务在当前文件结束（T-23），进程随后自然退出；退出断言由 run_stage 收尾执行。
 
     def cleanup() -> None:
-        shutil.rmtree(scratch_box[0], ignore_errors=True)
+        if scratch_box:
+            shutil.rmtree(scratch_box.pop(), ignore_errors=True)
 
     run_stage("S14", exe, body, pre=prepare_scratch, after=cleanup)
     print("S14 PASS：运行中关闭弹出「停止任务并关闭」，确认后安全停止并退出")

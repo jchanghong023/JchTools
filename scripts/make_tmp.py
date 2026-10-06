@@ -80,11 +80,12 @@ def _line(*parts: str) -> str:
 
 
 def force_remove_tree(path: Path) -> None:
-    """删除目录树，先清掉只读属性（git 对象文件是只读的，Windows 上直接删会拒绝访问）.
+    """删除目录树；遇到根或内部 reparse point 时只移除链接本身，不遍历其目标."""
+    root_reparse = _reparse_point_status(path)
+    if root_reparse is not None:
+        _remove_reparse_point(path, root_reparse)
+        return
 
-    删除失败的路径会被收集并打印；清理后目录若仍存在也视为失败，避免在残留内容上重建。
-    Windows 上先移除目录型 reparse point，避免 Python<3.12 的 rmtree 穿透 junction 删到目标外。
-    """
     failed: list[str] = []
 
     def on_error(function: Callable[..., object], target: str, _error: BaseException) -> None:
@@ -95,6 +96,11 @@ def force_remove_tree(path: Path) -> None:
             failed.append(f"{target}（{exc}）")
 
     _remove_reparse_points(path, failed)
+    if failed:
+        print(f"清理失败：以下 {len(failed)} 个路径无法安全移除：", file=sys.stderr)
+        for item in failed:
+            print(f"  {item}", file=sys.stderr)
+        fail(f"清理未完成；为避免越过 reparse point，已中止递归删除：{path}")
     # onexc 是 3.12+ 的 rmtree 回调参数；项目按 py313 目标运行，不再保留旧 onerror 分支。
     shutil.rmtree(path, onexc=on_error)
     if failed:
@@ -106,36 +112,68 @@ def force_remove_tree(path: Path) -> None:
         fail(f"清理后目录仍存在（可能有残留）：{path}")
 
 
+def _reparse_point_status(path: Path) -> os.stat_result | None:
+    """Windows 下返回 reparse point 的 lstat；不解析链接目标."""
+    if os.name != "nt":
+        return None
+    st = os.lstat(path)
+    file_attributes = getattr(st, "st_file_attributes", 0)
+    reparse_flag = getattr(stat, "FILE_ATTRIBUTE_REPARSE_POINT", 0x400)
+    return st if stat.S_ISLNK(st.st_mode) or file_attributes & reparse_flag else None
+
+
+def _remove_reparse_point(path: Path, st: os.stat_result) -> None:
+    """只解除 reparse point 本身，不递归删除或解析其目标."""
+    file_attributes = getattr(st, "st_file_attributes", 0)
+    directory_flag = getattr(stat, "FILE_ATTRIBUTE_DIRECTORY", 0x10)
+    if stat.S_ISDIR(st.st_mode) or file_attributes & directory_flag:
+        path.rmdir()
+    else:
+        path.unlink()
+
+
 def _remove_reparse_points(path: Path, failed: list[str]) -> None:
-    """Windows 上先移除目录型 reparse point（junction/符号链接），避免 rmtree 穿透到目标外."""
+    """Windows 上移除目录型 reparse point 并剪枝，避免遍历或删除其目标."""
     if os.name != "nt":
         return
-    for dirpath, dirnames, _filenames in os.walk(path, topdown=False):
-        for name in dirnames:
+    for dirpath, dirnames, _filenames in os.walk(path, topdown=True):
+        for name in list(dirnames):
             p = Path(dirpath) / name
             try:
-                st = os.lstat(p)
-            except OSError:
+                st = _reparse_point_status(p)
+            except FileNotFoundError:
+                dirnames.remove(name)
                 continue
-            file_attributes = getattr(st, "st_file_attributes", 0)
-            reparse_flag = getattr(stat, "FILE_ATTRIBUTE_REPARSE_POINT", 0x400)
-            reparse = bool(file_attributes & reparse_flag)
-            if stat.S_ISLNK(st.st_mode) or reparse:
+            except OSError as exc:
+                dirnames.remove(name)
+                failed.append(f"{p}（无法检查 reparse point：{exc}）")
+                continue
+            if st is not None:
+                dirnames.remove(name)
                 try:
-                    p.rmdir()
+                    _remove_reparse_point(p, st)
                 except OSError as exc:
                     failed.append(f"{p}（无法移除 reparse point：{exc}）")
 
 
 def measure_tree(root: Path) -> tuple[int, int]:
-    """统计目录内文件数量与总字节数，用于清空前摘要."""
+    """统计目录内文件数量与总字节数，不跟随 reparse point 或符号链接."""
     count = 0
     size = 0
-    for dirpath, _dirnames, filenames in os.walk(root):
+    for dirpath, dirnames, filenames in os.walk(root, topdown=True):
+        if os.name == "nt":
+            for name in list(dirnames):
+                try:
+                    reparse = _reparse_point_status(Path(dirpath) / name)
+                except OSError:
+                    dirnames.remove(name)
+                    continue
+                if reparse is not None:
+                    dirnames.remove(name)
         for name in filenames:
             count += 1
             with contextlib.suppress(OSError):
-                size += (Path(dirpath) / name).stat().st_size
+                size += (Path(dirpath) / name).lstat().st_size
     return count, size
 
 
@@ -211,7 +249,7 @@ def build_duplicates(root: Path, _seven: Path, log: list[str]) -> None:
     section = root / "02-重复内容"
     write(section / "same-name.bin", PAYLOAD)
     write(section / "其它" / "same-name.bin", PAYLOAD)  # 同名同内容
-    for name in ("dup.txt", "dup (1).txt", "dup - 副本.txt", "dup copy.txt"):
+    for name in ("dup.txt", "dup (1).txt", "dup - 副本.txt", "dup - copy.txt"):
         write(section / name, PAYLOAD)  # 副本命名
     write(section / "完全无关的名字.bin", PAYLOAD)  # 不同名同内容
     log.append(
@@ -288,7 +326,7 @@ def build_formats(root: Path, _seven: Path, log: list[str]) -> None:
     buffer = root / "06-格式识别" / ".tmp-zip-source"
     zip_members(buffer / "inner.txt", {"inner.txt": b"real zip container\n"})
     _ = shutil.move(str(buffer / "inner.txt"), str(section / "其实是ZIP.dat"))
-    shutil.rmtree(buffer, ignore_errors=True)
+    force_remove_tree(buffer)
     docx = section / "真实文档.docx"
     with zipfile.ZipFile(docx, "w", zipfile.ZIP_DEFLATED) as archive:
         archive.writestr("[Content_Types].xml", "<Types/>")
@@ -310,6 +348,7 @@ def build_formats(root: Path, _seven: Path, log: list[str]) -> None:
 
 def build_archives(root: Path, seven: Path, log: list[str]) -> None:
     section = root / "07-压缩包-各格式"
+    section.mkdir(parents=True, exist_ok=True)
     source = root / ".build-07"
     write(source / "alpha.txt", b"alpha member\n")
     write(source / "beta.txt", b"beta member\n")
@@ -339,7 +378,7 @@ def build_archives(root: Path, seven: Path, log: list[str]) -> None:
     with tarfile.open(fileobj=buffer, mode="w") as archive:
         _add_tar_members(archive, members, source)
     _ = (section / "bundle.tar.lzma").write_bytes(lzma.compress(buffer.getvalue(), format=lzma.FORMAT_ALONE))
-    shutil.rmtree(source, ignore_errors=True)
+    force_remove_tree(source)
     log.append(
         _line(
             "| `07-压缩包-各格式/` | 白名单内的 7z / zip / tar / tar.gz / tgz / tar.bz2 / tar.xz / gz / bz2 / xz /",
@@ -388,7 +427,7 @@ def build_containers(root: Path, _seven: Path, log: list[str]) -> None:
             ],
             cwd=source,
         )
-        shutil.rmtree(source, ignore_errors=True)
+        force_remove_tree(source)
     else:
         zip_members(section / "visproww.cab", {"alpha.txt": b"alpha member\n"})
     log.append(
@@ -428,7 +467,7 @@ def build_nested(root: Path, seven: Path, log: list[str]) -> None:
         archive.add(stage / "level4.zip", arcname="level4.zip")
     run([str(seven), "a", "-t7z", "-y", str(stage / "level2.7z"), str(stage / "level3.tar.gz")], cwd=stage)
     zip_members(section / "level1.zip", {"level2.7z": (stage / "level2.7z").read_bytes()})
-    shutil.rmtree(stage, ignore_errors=True)
+    force_remove_tree(stage)
     log.append(
         _line(
             "| `09-压缩包-嵌套/` | zip -> 7z -> tar.gz -> zip -> xz 共 5 层 | ",
@@ -465,12 +504,13 @@ def build_broken(root: Path, seven: Path, log: list[str]) -> None:
     for name in ("good.zip", "good.7z"):
         data = (stage / name).read_bytes()
         write(section / f"truncated{Path(name).suffix}", data[: int(len(data) * 0.6)])
-    shutil.rmtree(stage, ignore_errors=True)
+    force_remove_tree(stage)
     log.append("| `11-压缩包-损坏/` | 被截断的 zip / 7z | 应报错并移入「解压失败」，不删除原包、不落盘未校验结果 |")
 
 
 def build_encrypted(root: Path, seven: Path, log: list[str]) -> None:
     section = root / "12-压缩包-加密"
+    section.mkdir(parents=True, exist_ok=True)
     stage = root / ".build-12"
     write(stage / "secret.txt", b"encrypted payload\n")
     # 直接用 7z 从临时目录创建加密 zip，不先写明文容器（避免中途留下未加密的 secret.zip）。
@@ -487,7 +527,7 @@ def build_encrypted(root: Path, seven: Path, log: list[str]) -> None:
         ],
         cwd=stage,
     )
-    shutil.rmtree(stage, ignore_errors=True)
+    force_remove_tree(stage)
     log.append(
         _line(
             "| `12-压缩包-加密/` | 带密码的 zip（密码 123456） | ",
@@ -498,13 +538,14 @@ def build_encrypted(root: Path, seven: Path, log: list[str]) -> None:
 
 def build_multipart(root: Path, seven: Path, log: list[str]) -> None:
     section = root / "13-压缩包-分卷"
+    section.mkdir(parents=True, exist_ok=True)
     stage = root / ".build-13"
     write(stage / "big.bin", random_bytes(2 * 1024 * 1024 + 12345))
     run(
         [str(seven), "a", "-t7z", "-mx=1", "-v1m", "-y", str(section / "multipart.7z"), str(stage / "big.bin")],
         cwd=stage,
     )
-    shutil.rmtree(stage, ignore_errors=True)
+    force_remove_tree(stage)
     volumes = sorted(section.glob("multipart.7z.*"))
     log.append(
         _line(
@@ -521,7 +562,7 @@ def build_large(root: Path, seven: Path, log: list[str]) -> None:
     stage = root / ".build-14"
     write(stage / "zeros.bin", bytes(64 * 1024 * 1024))
     run([str(seven), "a", "-t7z", "-mx=9", "-y", str(section / "zeros-64MiB.7z"), str(stage / "zeros.bin")], cwd=stage)
-    shutil.rmtree(stage, ignore_errors=True)
+    force_remove_tree(stage)
     log.append(
         _line(
             "| `14-大文件/` | 两个同大小不同内容的 32 MiB 文件 + 一个 64 MiB 全零包 | ",
@@ -537,8 +578,10 @@ def build_hidden(root: Path, _seven: Path, log: list[str]) -> None:
     system = section / "system-file.txt"
     write(system, b"system\n")
     if sys.platform == "win32":
-        ctypes.windll.kernel32.SetFileAttributesW(str(hidden), 0x02)
-        ctypes.windll.kernel32.SetFileAttributesW(str(system), 0x04)
+        if not ctypes.windll.kernel32.SetFileAttributesW(str(hidden), 0x02):
+            fail(f"无法设置测试隐藏属性：{hidden}")
+        if not ctypes.windll.kernel32.SetFileAttributesW(str(system), 0x04):
+            fail(f"无法设置测试系统属性：{system}")
     log.append(
         _line(
             "| `15-隐藏与系统/` | 带隐藏属性 / 系统属性的文件 | 默认两者都扫描；",
@@ -567,7 +610,7 @@ def build_hostile(root: Path, _seven: Path, log: list[str]) -> None:
     log.append(
         _line(
             "| `16-恶意条目/` | 含 `../`、绝对路径与符号链接的压缩包 | ",
-            "绝对路径/越界条目应被拒绝或跳过并记录；含链接的包应整体拒绝（不会写出目录之外的文件） |",
+            "绝对路径/越界条目应判整包失败并隔离，不合入任何成员；含链接的包也应整体拒绝 |",
         )
     )
 
@@ -848,11 +891,7 @@ def _reject_system_names(resolved: Path) -> None:
 
 
 def robust_rmtree(path: Path) -> None:
-    r"""Windows 健壮删除：超长路径加 \\?\ 前缀，只读文件先清只读位，目录删除竞态短暂重试.
-
-    细节：git 对象等只读文件删除报 WinError 5；目录删除竞态报 WinError 145；
-    深层嵌套路径总长可超 MAX_PATH，删除中途会“找不到路径”而留下深层尾巴.
-    """
+    r"""Windows 健壮删除；根或内部 reparse point 只移除链接本身，不触碰目标."""
 
     def on_error(func: Callable[..., object], target: str, _exc_info: BaseException) -> None:
         last: BaseException | None = None
@@ -870,12 +909,21 @@ def robust_rmtree(path: Path) -> None:
             raise AssertionError(detail)
         raise last
 
-    # 长路径前缀交给系统按扩展长度路径处理。仅内部清理使用；
-    # 用户输入的扩展前缀仍由 guard_destination 直接拒绝。
-    # 前缀必须加在根上：rmtree 的子路径由根拼接而来，中途遇到超长子路径再补就晚了。
+    if os.name == "nt":
+        root_reparse = _reparse_point_status(path)
+        if root_reparse is not None:
+            _remove_reparse_point(path, root_reparse)
+            return
+        failed: list[str] = []
+        _remove_reparse_points(path, failed)
+        if failed:
+            raise OSError("无法安全移除 reparse point：" + "；".join(failed))
+
+    # 长路径前缀交给系统按扩展长度路径处理。使用 abspath 而非 resolve，
+    # 避免解析根路径中的 junction 后递归删除链接目标。
     target: str | Path = path
     if os.name == "nt":
-        target = r"\\?\\" + str(path.resolve())
+        target = r"\\?\\" + os.path.abspath(path)  # noqa: PTH100  # 有意不 resolve：解析 junction 会把删除引导到链接目标
     shutil.rmtree(target, onexc=on_error)
 
 
@@ -891,7 +939,10 @@ def clean_tmp(repo_root: Path) -> int:
     failures: list[tuple[Path, str]] = []
     for entry in tmp.iterdir():
         try:
-            if entry.is_dir() and not entry.is_symlink():
+            reparse = _reparse_point_status(entry)
+            if reparse is not None:
+                _remove_reparse_point(entry, reparse)
+            elif entry.is_dir() and not entry.is_symlink():
                 robust_rmtree(entry)
             else:
                 entry.chmod(stat.S_IWRITE)
@@ -927,6 +978,8 @@ def _clear_existing_target(root: Path, *, force: bool) -> None:
     """目标已存在时：非目录直接拒绝；非空时统计并（按需确认）清空."""
     if not root.exists():
         return
+    if _reparse_point_status(root) is not None:
+        fail(f"拒绝清理 reparse point 目标：{root}")
     if not root.is_dir():
         fail(f"目标不是目录：{root}；请改用专门的测试目录。")
     entries = list(root.iterdir())

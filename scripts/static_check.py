@@ -516,11 +516,11 @@ def _collect_file_tests(path: Path) -> list[dict[str, object]]:
 
 
 # Rust 源里的注释与字符串/字符字面量（花括号配对前先抹除干扰；保持等长以便位置对齐）。
-# 近似实现：不处理嵌套块注释与含引号的原始字符串——偏差不影响哈希的确定性，只影响极罕见的跨度伸缩。
+# 近似实现：不处理嵌套块注释；原始字符串按开头 # 数量匹配结束分隔符。
 _RUST_TRIVIA_ALTS = (
     r"//[^\n]*",
     r"/\*.*?\*/",
-    r'b?r#*"[^"]*"#*',
+    r'b?r(?P<raw_hashes>#{0,})".*?"(?P=raw_hashes)',
     r'b?"(?:\\.|[^"\\\n])*"',
     r"b?'(?:\\.|[^'\\\n])'",
 )
@@ -621,7 +621,18 @@ def test_baseline() -> str:
     def val(row: dict[str, object]) -> tuple[bool, str]:
         return (bool(row.get("ignored")), str(row.get("body") or ""))
 
-    base = {key(row): val(row) for row in _baseline_rows(path)}
+    baseline_rows = _baseline_rows(path)
+    seen_keys: set[tuple[object, object, object]] = set()
+    duplicate_keys: set[tuple[object, object, object]] = set()
+    for row in baseline_rows:
+        row_key = key(row)
+        if row_key in seen_keys:
+            duplicate_keys.add(row_key)
+        else:
+            seen_keys.add(row_key)
+    if duplicate_keys:
+        raise AssertionError({"scripts/test-baseline.json 含重复测试键 (file, name, cfg)": sorted(duplicate_keys)})
+    base = {key(row): val(row) for row in baseline_rows}
     now = {key(row): val(row) for row in collect_tests()}
     added = sorted(set(now) - set(base))
     removed = sorted(set(base) - set(now))

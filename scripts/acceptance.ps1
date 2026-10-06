@@ -50,6 +50,91 @@ function Resolve-Python {
     }
     throw '未找到 python；static_check.py 需要 Python 3.11+（tomllib）。'
 }
+function Test-AbsoluteWindowsPath {
+    param([string]$Path)
+    return ($Path -match '^[A-Za-z]:[\\/]') -or $Path.StartsWith('\\',[StringComparison]::Ordinal)
+}
+
+function Resolve-PhysicalPath {
+    param([string]$Path)
+    if (-not ('JchAcceptancePath' -as [type])) {
+        $typeDefinition = @'
+using System;
+using System.ComponentModel;
+using System.Runtime.InteropServices;
+using System.Text;
+using Microsoft.Win32.SafeHandles;
+
+public static class JchAcceptancePath
+{
+    [DllImport("kernel32.dll", EntryPoint = "CreateFileW", CharSet = CharSet.Unicode, SetLastError = true)]
+    private static extern SafeFileHandle CreateFile(
+        string fileName, uint desiredAccess, uint shareMode, IntPtr securityAttributes,
+        uint creationDisposition, uint flags, IntPtr templateFile);
+
+    [DllImport("kernel32.dll", EntryPoint = "GetFinalPathNameByHandleW", CharSet = CharSet.Unicode, SetLastError = true)]
+    private static extern uint GetFinalPathNameByHandle(SafeFileHandle file, StringBuilder path, uint pathLength, uint flags);
+
+    public static string TryResolveExistingPath(string path)
+    {
+        using (SafeFileHandle handle = CreateFile(path, 0, 7, IntPtr.Zero, 3, 0x02000000, IntPtr.Zero))
+        {
+            if (handle.IsInvalid)
+            {
+                int error = Marshal.GetLastWin32Error();
+                if (error == 2 || error == 3) return null;
+                throw new Win32Exception(error);
+            }
+
+            uint required = GetFinalPathNameByHandle(handle, null, 0, 0);
+            if (required == 0) throw new Win32Exception(Marshal.GetLastWin32Error());
+            StringBuilder result = new StringBuilder((int)required + 1);
+            uint written = GetFinalPathNameByHandle(handle, result, (uint)result.Capacity, 0);
+            if (written == 0 || written >= result.Capacity) throw new Win32Exception(Marshal.GetLastWin32Error());
+            string finalPath = result.ToString();
+            if (finalPath.StartsWith(@"\\?\UNC\", StringComparison.OrdinalIgnoreCase))
+                return @"\\" + finalPath.Substring(8);
+            if (finalPath.StartsWith(@"\\?\", StringComparison.OrdinalIgnoreCase))
+                return finalPath.Substring(4);
+            return finalPath;
+        }
+    }
+}
+'@
+        Add-Type -TypeDefinition $typeDefinition | Out-Null
+    }
+
+    $fullPath = [IO.Path]::GetFullPath($Path)
+    $rootPath = [IO.Path]::GetPathRoot($fullPath)
+    $existingPath = $fullPath.TrimEnd([IO.Path]::DirectorySeparatorChar,[IO.Path]::AltDirectorySeparatorChar)
+    if ($existingPath.Length -lt $rootPath.Length) {$existingPath = $rootPath}
+    $remaining = [Collections.Generic.List[string]]::new()
+    $resolvedPath = [JchAcceptancePath]::TryResolveExistingPath($existingPath)
+    while ($null -eq $resolvedPath) {
+        $parent = [IO.Directory]::GetParent($existingPath)
+        $segment = [IO.Path]::GetFileName($existingPath)
+        if (($null -eq $parent) -or (-not $segment)) {throw "无法解析隔离目录路径：$Path"}
+        $remaining.Insert(0,$segment)
+        $existingPath = $parent.FullName
+        $resolvedPath = [JchAcceptancePath]::TryResolveExistingPath($existingPath)
+    }
+    foreach ($segment in $remaining) {$resolvedPath = Join-Path $resolvedPath $segment}
+    return [IO.Path]::GetFullPath($resolvedPath)
+}
+
+function Assert-MarkdownIsolationRoot {
+    param([string]$Name,[string]$Path,[string]$TempRoot,[string]$TempPrefix)
+    if (-not (Test-AbsoluteWindowsPath $Path)) {
+        throw "$Name 必须是仓库 .tmp 下的绝对隔离路径，拒绝使用：$Path"
+    }
+    $resolvedPath = Resolve-PhysicalPath $Path
+    if (-not ($resolvedPath.Equals($TempRoot, [StringComparison]::OrdinalIgnoreCase) -or
+        $resolvedPath.StartsWith($TempPrefix, [StringComparison]::OrdinalIgnoreCase))) {
+        throw "$Name 必须位于仓库 .tmp 下，拒绝创建或写入：$Path"
+    }
+    return $resolvedPath
+}
+
 
 function Invoke-Logged {
     # 以 PS 5.1 兼容的方式运行原生命令：临时放宽 EAP 避免 stderr（cargo 进度）被当成
@@ -230,17 +315,25 @@ if ($WithPackage) {
 
 # 7) 转 Markdown 验收承接（可选；F26 / ALL2MARKDOWN 附录 A）。
 if ($WithMarkdownAcceptance) {
+    $mdAssetRoot = $env:JCHTOOLS_MARKDOWN_TEST_ASSET_ROOT
+    if (-not $mdAssetRoot) {$mdAssetRoot = Join-Path $script:LogDir 'markdown-assets'}
+    $mdStateRoot = $env:JCHTOOLS_TEST_STATE_DIR
+    if (-not $mdStateRoot) {$mdStateRoot = Join-Path $script:LogDir 'markdown-state'}
+
+    # 在构建或创建隔离目录前校验绝对路径及实际 reparse 目标，避免 .tmp 外写入。
+    $physicalRoot = Resolve-PhysicalPath $root
+    $tmpRoot = [IO.Path]::GetFullPath((Join-Path $physicalRoot '.tmp'))
+    $tmpPrefix = $tmpRoot.TrimEnd([IO.Path]::DirectorySeparatorChar,[IO.Path]::AltDirectorySeparatorChar) + [IO.Path]::DirectorySeparatorChar
+    $mdAssetRoot = Assert-MarkdownIsolationRoot -Name 'JCHTOOLS_MARKDOWN_TEST_ASSET_ROOT' `
+        -Path $mdAssetRoot -TempRoot $tmpRoot -TempPrefix $tmpPrefix
+    $mdStateRoot = Assert-MarkdownIsolationRoot -Name 'JCHTOOLS_TEST_STATE_DIR' `
+        -Path $mdStateRoot -TempRoot $tmpRoot -TempPrefix $tmpPrefix
+
     # Markdown 驱动需要 test-hooks：它只在开发验收 EXE 中启用隔离资产根，
     # 发布构建与生产运行不启用该 feature。GUI 冒烟使用的生产维度构建已在上方
     # 完成；这里单独记录一次开发验收构建，避免测试环境变量被生产 EXE 忽略。
     $null = Invoke-Logged -Name 'markdown-gui-build' -File 'cargo' `
         -Arguments @('build','--features','test-hooks')
-    $mdAssetRoot = $env:JCHTOOLS_MARKDOWN_TEST_ASSET_ROOT
-    if (-not $mdAssetRoot) {$mdAssetRoot = Join-Path $script:LogDir 'markdown-assets'}
-    $mdStateRoot = $env:JCHTOOLS_TEST_STATE_DIR
-    if (-not $mdStateRoot) {$mdStateRoot = Join-Path $script:LogDir 'markdown-state'}
-    $mdAssetRoot = [IO.Path]::GetFullPath($mdAssetRoot)
-    $mdStateRoot = [IO.Path]::GetFullPath($mdStateRoot)
     # 转换验收只初始化文档组件；截图资产使用独立空目录，防止配置保存时
     # 唤起生产目录里的旧 worker 并占用用户会话唯一引擎。
     $mdSnapAssetRoot = Join-Path $script:LogDir 'markdown-snap-assets'
@@ -251,11 +344,6 @@ if ($WithMarkdownAcceptance) {
     }
     New-Item -ItemType Directory -Path $mdAssetRoot -Force | Out-Null
     New-Item -ItemType Directory -Path $mdStateRoot -Force | Out-Null
-    $tmpRoot = [IO.Path]::GetFullPath((Join-Path $root '.tmp'))
-    $tmpPrefix = $tmpRoot.TrimEnd([IO.Path]::DirectorySeparatorChar,[IO.Path]::AltDirectorySeparatorChar) + [IO.Path]::DirectorySeparatorChar
-    if (-not $mdStateRoot.StartsWith($tmpPrefix, [StringComparison]::OrdinalIgnoreCase)) {
-        throw "Markdown 隔离状态目录必须位于仓库 .tmp 下，拒绝写入生产 SQLite：$mdStateRoot"
-    }
     $testXberg = $env:JCHTOOLS_TEST_XBERG_DIR
     if ($testXberg) {
         $testXberg = [IO.Path]::GetFullPath($testXberg)
@@ -297,13 +385,20 @@ if ($WithMarkdownAcceptance) {
     $mdLog = Join-Path $script:LogDir 'markdown-acceptance.log'
     $mdOutput | ForEach-Object {$_.ToString()} | Set-Content -LiteralPath $mdLog -Encoding UTF8
     if ($mdCode -eq 0) {
-        # 驱动器可能只有部分条目执行；保留逐项状态，不把跳过当成全覆盖通过。
-        # 只识别真实条目行；汇总中的「NOT RUN 0」不是未执行条目。
-        $notRun = @($mdOutput | Where-Object { $_.ToString() -match '^\s*NOT RUN\s+[A-Z]\d+\b' })
-        if ($notRun.Count -gt 0) {
-            $script:Results.Add('PARTIAL  markdown-acceptance（已执行项通过，仍有 NOT RUN；详见 markdown-acceptance.log）')
+        # 退出码 0 也可能只是 --list / --seed-state 等非验收操作；必须看到真实条目结果行才可报通过。
+        $itemResults = @($mdOutput | Where-Object {
+            $_.ToString() -match '^\s*(?:PASS|FAIL|NOT RUN)\s+[A-Z]\d+\b'
+        })
+        if ($itemResults.Count -eq 0) {
+            $script:Results.Add('NOT RUN  markdown-acceptance（未执行验收条目；详见 markdown-acceptance.log）')
         } else {
-            $script:Results.Add('PASS  markdown-acceptance')
+            # 驱动器可能只执行部分条目；保留逐项状态，不把跳过当成全覆盖通过。
+            $notRun = @($itemResults | Where-Object { $_.ToString() -match '^\s*NOT RUN\s+[A-Z]\d+\b' })
+            if ($notRun.Count -gt 0) {
+                $script:Results.Add('PARTIAL  markdown-acceptance（已执行项通过，仍有 NOT RUN；详见 markdown-acceptance.log）')
+            } else {
+                $script:Results.Add('PASS  markdown-acceptance')
+            }
         }
     } elseif ($mdCode -eq 2) {
         # 2 = 全部条目 NOT RUN（缺真实资产/被测物）：如实呈现，不当作通过，也不阻塞其余阶段。
