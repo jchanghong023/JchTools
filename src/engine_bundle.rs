@@ -7,10 +7,10 @@
 //! 3. 从 EXE 内嵌的压缩数据释放：固定位置只缺文件时补齐；固定位置被无效文件占用时，
 //!    释放到新的独立自有位置（`release-*` 子目录），不删占用文件。
 //!
-//! 每个候选必须在内嵌清单声明的全部文件上通过「存在 + sha256 一致」校验后才可使用；
-//! 缺失或校验失败的候选绝不执行，只记录原因（stderr + engine-warnings.log）并继续下一顺位。
-//! 构建未内嵌引擎时没有可校验的清单，随包目录退化为最小完整性检查
-//! （主程序存在 + Windows 上 7z.dll 存在）。全部候选不可用时按 E-05 口径报错停止，
+//! 每个候选必须在适用清单声明的全部必需文件上通过「存在 + sha256 一致」校验后才可使用；
+//! 内嵌构建以 EXE 内清单校验，未内嵌构建只接受随包 `manifest.json` 声明且通过哈希校验的引擎。
+//! 缺失清单或校验失败的候选绝不执行，只记录原因（stderr + engine-warnings.log）并继续下一顺位。
+//! 无可信清单时没有可用引擎；全部候选不可用时按 E-05 口径报错停止，
 //! 错误信息逐候选给出原因。
 use anyhow::{bail, Context, Result};
 use sha2::{Digest, Sha256};
@@ -109,9 +109,8 @@ fn resolve_among(bundled: Option<&Path>, embedded_base: Option<&Path>) -> Result
 
     // 候选 2/3 都依赖内嵌引擎；构建未内嵌时到此为止（E-05）。
     if !embedded_available() {
-        let mut message = format!(
-            "未找到 7-Zip 引擎：resources/7zip 里没有 {}, 本构建也没有内嵌引擎。请运行 scripts/fetch-7zip.ps1 获取官方完整引擎后重新构建。",
-            engine_name()
+        let mut message = String::from(
+            "未找到可用的 7-Zip 引擎：随包候选不存在或未通过清单校验，本构建也没有内嵌引擎。请运行 scripts/fetch-7zip.ps1 获取官方完整引擎后重新构建。",
         );
         if !failures.is_empty() {
             message.push_str("\n各候选不可用的原因：\n- ");
@@ -219,65 +218,148 @@ fn candidate_failure_line(context: &str, directory: &Path, problems: &[Problem])
     )
 }
 
-/// 本目标平台必需的引擎文件（文件名 + 期望 sha256，来自内嵌清单）。
-/// 以本构建实际内嵌的文件（embedded::FILES）为准：交叉编译时清单里可能同时有其他平台的条目，
-/// 那些不参与校验。构建未内嵌引擎时返回 None（候选退化为最小完整性检查）。
-fn required_engine_files() -> Option<Vec<(String, String)>> {
-    if !embedded_available() {
-        return None;
+/// 确认未内嵌时使用的外部清单符合官方获取脚本生成的固定版本格式。
+fn validate_external_manifest(manifest: &serde_json::Value) -> Result<()> {
+    let version = manifest["version"]
+        .as_str()
+        .context("随包引擎清单缺少 version")?;
+    let version_bytes = version.as_bytes();
+    if version_bytes.len() != 5
+        || version_bytes[0..2]
+            .iter()
+            .any(|byte| !byte.is_ascii_digit())
+        || version_bytes[2] != b'.'
+        || version_bytes[3..].iter().any(|byte| !byte.is_ascii_digit())
+    {
+        bail!("随包引擎清单的 version 格式无效");
     }
-    let mut files = Vec::new();
-    for (name, _) in embedded::FILES {
-        let expected = manifest_expectation(name)?;
-        files.push(((*name).to_string(), expected));
+    if manifest["upstream"].as_str() != Some("https://www.7-zip.org/") {
+        bail!("随包引擎清单的 upstream 不是官方地址");
     }
-    (!files.is_empty()).then_some(files)
+
+    let version_digits = version.replace('.', "");
+    for (kind, expected_name) in [
+        ("installer", format!("7z{version_digits}-x64.msi")),
+        ("source", format!("7z{version_digits}-src.tar.xz")),
+    ] {
+        let asset = manifest[kind]
+            .as_object()
+            .with_context(|| format!("随包引擎清单缺少 {kind} 信息"))?;
+        let name = asset["name"]
+            .as_str()
+            .with_context(|| format!("随包引擎清单缺少 {kind} 名称"))?;
+        if name != expected_name.as_str() {
+            bail!("随包引擎清单的 {kind} 名称与版本不匹配");
+        }
+        let expected_url =
+            format!("https://github.com/ip7z/7zip/releases/download/{version}/{name}");
+        if asset["url"].as_str() != Some(expected_url.as_str()) {
+            bail!("随包引擎清单的 {kind} URL 不是对应官方 release");
+        }
+        let hash = asset["sha256"]
+            .as_str()
+            .with_context(|| format!("随包引擎清单缺少 {kind} 的 sha256"))?;
+        if !valid_sha256(hash) {
+            bail!("随包引擎清单中的 {kind} sha256 格式无效");
+        }
+    }
+    Ok(())
+}
+
+fn valid_sha256(hash: &str) -> bool {
+    hash.len() == 64 && hash.bytes().all(|byte| byte.is_ascii_hexdigit())
+}
+
+/// 本目标平台必需的引擎文件（文件名 + 期望 sha256）。
+/// 内嵌构建以本构建实际内嵌的文件为准；未内嵌构建从随包目录的 `manifest.json`
+/// 读取其期望摘要。两种来源均缺少清单或必需条目时都不能退化为仅存在性检查。
+fn required_engine_files(directory: &Path) -> Result<Vec<(String, String)>> {
+    if embedded_available() {
+        let mut files = Vec::new();
+        for (name, _) in embedded::FILES {
+            let expected = manifest_expectation(name)
+                .with_context(|| format!("内嵌清单缺少引擎文件 {name} 的 sha256"))?;
+            files.push(((*name).to_string(), expected));
+        }
+        if files.is_empty() {
+            bail!("内嵌引擎清单没有必需文件");
+        }
+        return Ok(files);
+    }
+
+    let manifest_path = directory.join("manifest.json");
+    let manifest_text = std::fs::read_to_string(&manifest_path)
+        .with_context(|| format!("读取随包引擎清单失败：{}", manifest_path.display()))?;
+    let manifest: serde_json::Value = serde_json::from_str(&manifest_text)
+        .with_context(|| format!("解析随包引擎清单失败：{}", manifest_path.display()))?;
+    validate_external_manifest(&manifest)?;
+    let entries = manifest["files"]
+        .as_array()
+        .context("随包引擎清单缺少 files 数组")?;
+    let mut names = vec![engine_name()];
+    #[cfg(windows)]
+    names.push("7z.dll");
+
+    let mut files = Vec::with_capacity(names.len());
+    for required_name in names {
+        let mut expected = None;
+        for entry in entries {
+            if entry["name"]
+                .as_str()
+                .is_some_and(|name| name.eq_ignore_ascii_case(required_name))
+            {
+                if expected.is_some() {
+                    bail!("随包引擎清单重复声明 {required_name}");
+                }
+                let hash = entry["sha256"]
+                    .as_str()
+                    .with_context(|| format!("随包引擎清单缺少 {required_name} 的 sha256"))?;
+                if !valid_sha256(hash) {
+                    bail!("随包引擎清单中的 {required_name} sha256 格式无效");
+                }
+                expected = Some(hash.to_ascii_lowercase());
+            }
+        }
+        files.push((
+            required_name.to_string(),
+            expected.with_context(|| format!("随包引擎清单缺少必需文件 {required_name}"))?,
+        ));
+    }
+    Ok(files)
 }
 
 /// 按必需清单逐文件校验候选目录（存在 + sha256 一致），返回问题列表（空 = 可用）。
 /// 本函数只读：绝不修改候选目录里的文件；「不覆盖占用文件」的释放策略由 resolve_among 处理。
 fn candidate_problems(directory: &Path) -> Vec<Problem> {
-    let mut problems = Vec::new();
-    if let Some(files) = required_engine_files() {
-        for (name, expected) in files {
-            let path = directory.join(&name);
-            if !path.is_file() {
-                problems.push(Problem {
-                    description: format!("缺少 {name}"),
-                    missing: true,
-                });
-                continue;
-            }
-            match hash_matches(&path, &expected) {
-                Ok(true) => {}
-                Ok(false) => problems.push(Problem {
-                    description: format!("{name} 的 sha256 与内嵌清单不一致"),
-                    missing: false,
-                }),
-                Err(error) => problems.push(Problem {
-                    description: format!("{name} 无法读取以校验 sha256：{error}"),
-                    missing: false,
-                }),
-            }
+    let files = match required_engine_files(directory) {
+        Ok(files) => files,
+        Err(error) => {
+            return vec![Problem {
+                description: format!("无法验证 7-Zip 清单：{error:#}"),
+                missing: false,
+            }]
         }
-    } else {
-        // 无内嵌清单（构建未内嵌引擎）：没有可校验的清单，退化为最小完整性检查。
-        // Windows 上 7z.dll 缺失不是「用户替换了引擎」，而是不完整引擎（例如只拷了 exe）。
-        let name = engine_name();
-        if !directory.join(name).is_file() {
+    };
+    let mut problems = Vec::new();
+    for (name, expected) in files {
+        let path = directory.join(&name);
+        if !path.is_file() {
             problems.push(Problem {
                 description: format!("缺少 {name}"),
                 missing: true,
             });
+            continue;
         }
-        #[cfg(windows)]
-        {
-            if !directory.join("7z.dll").is_file() {
-                problems.push(Problem {
-                    description: "缺少 7z.dll（引擎不完整）".to_string(),
-                    missing: true,
-                });
-            }
+        match hash_matches(&path, &expected) {
+            Ok(true) => {}
+            Ok(false) => problems.push(Problem {
+                description: format!("{name} 的 sha256 与清单不一致"),
+                missing: false,
+            }),
+            Err(error) => problems.push(Problem {
+                description: format!("{name} 无法读取以校验 sha256：{error}"),
+                missing: false,
+            }),
         }
     }
     problems
@@ -630,6 +712,82 @@ mod tests {
             path.display()
         );
     }
+    fn write_external_manifest(directory: &Path, executable: &[u8], library: &[u8]) {
+        let digest = |bytes: &[u8]| hex::encode(Sha256::digest(bytes));
+        let manifest = serde_json::json!({
+            "version": "26.03",
+            "upstream": "https://www.7-zip.org/",
+            "installer": {
+                "name": "7z2603-x64.msi",
+                "sha256": "a".repeat(64),
+                "url": "https://github.com/ip7z/7zip/releases/download/26.03/7z2603-x64.msi"
+            },
+            "source": {
+                "name": "7z2603-src.tar.xz",
+                "sha256": "b".repeat(64),
+                "url": "https://github.com/ip7z/7zip/releases/download/26.03/7z2603-src.tar.xz"
+            },
+            "files": [
+                {"name": engine_name(), "sha256": digest(executable)},
+                {"name": "7z.dll", "sha256": digest(library)}
+            ]
+        });
+        std::fs::write(
+            directory.join("manifest.json"),
+            serde_json::to_vec(&manifest).unwrap(),
+        )
+        .unwrap();
+    }
+
+    /// 构建未内嵌引擎时，只接受随包目录中声明并校验通过的清单。
+    // 覆盖 E-01 / E-02 / E-05
+    #[test]
+    fn resolve_without_embedded_validates_bundled_manifest() {
+        if embedded_available() {
+            return; // 仅无内嵌构建执行（该配置合法，见 embedded_available_matches_build_configuration）
+        }
+        let bundled = tempfile::tempdir().unwrap();
+        let executable = b"external 7-Zip executable";
+        let library = b"external 7-Zip library";
+        std::fs::write(bundled.path().join(engine_name()), executable).unwrap();
+        std::fs::write(bundled.path().join("7z.dll"), library).unwrap();
+        write_external_manifest(bundled.path(), executable, library);
+        let path = resolve_among(Some(bundled.path()), None).unwrap();
+        assert_eq!(path, bundled.path().join(engine_name()));
+        let expected = hex::encode(Sha256::digest(executable));
+        assert!(
+            hash_matches(&path, &expected).unwrap(),
+            "通过外部清单校验的引擎应保留其声明字节"
+        );
+
+        std::fs::write(&path, b"modified executable").unwrap();
+        let error = resolve_among(Some(bundled.path()), None).unwrap_err();
+        let message = format!("{error:#}");
+        assert!(
+            message.contains("sha256 与清单不一致"),
+            "与外部清单不匹配的引擎必须被拒绝：{message}"
+        );
+    }
+
+    /// 外部清单声明 Windows 必需文件但文件缺失时，错误须指出缺失成员。
+    // 覆盖 E-01 / E-02 / E-05
+    #[test]
+    fn resolve_without_embedded_reports_missing_manifest_member() {
+        if embedded_available() {
+            return; // 仅无内嵌构建执行
+        }
+        let bundled = tempfile::tempdir().unwrap();
+        let executable = b"only main exe";
+        std::fs::write(bundled.path().join(engine_name()), executable).unwrap();
+        write_external_manifest(bundled.path(), executable, b"missing library");
+        let error = resolve_among(Some(bundled.path()), None).unwrap_err();
+        let message = format!("{error:#}");
+        #[cfg(windows)]
+        assert!(
+            message.contains("7z.dll"),
+            "报错应说明随包清单声明的 7z.dll 缺失：{message}"
+        );
+    }
 
     /// 候选均不可用时的最终报错必须包含各候选的原因（哪份引擎、哪个文件、什么问题）。
     // 覆盖 E-02 / E-05
@@ -653,7 +811,7 @@ mod tests {
             "报错应说明随包候选被拒：{message}"
         );
         assert!(
-            message.contains("sha256 与内嵌清单不一致"),
+            message.contains("7z.exe 的 sha256 与清单不一致"),
             "报错应给出具体文件与不一致原因：{message}"
         );
         assert!(

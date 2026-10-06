@@ -72,16 +72,21 @@ impl DisjointSet {
 
 /// 候选优先级比较（Python `_candidate_rank` 的元组 `(not touches,
 /// internal_edge_distance, detection_score)` 取 max）：不接触内部边缘优先，
-/// 其次边缘距离更大，再次检测分数更高。`total_cmp` 在有限值上与 Python
-/// 浮点比较逐一对应。
+/// 其次边缘距离更大，再次检测分数更高。相等值（包括正负零）保持
+/// Python 的浮点数值比较语义。
 fn rank_cmp(left: &DetectionCandidate, right: &DetectionCandidate) -> Ordering {
     (!left.touches_internal_edge())
         .cmp(&(!right.touches_internal_edge()))
         .then_with(|| {
             left.internal_edge_distance()
-                .total_cmp(&right.internal_edge_distance())
+                .partial_cmp(&right.internal_edge_distance())
+                .unwrap_or(Ordering::Equal)
         })
-        .then_with(|| left.detection_score().total_cmp(&right.detection_score()))
+        .then_with(|| {
+            left.detection_score()
+                .partial_cmp(&right.detection_score())
+                .unwrap_or(Ordering::Equal)
+        })
 }
 
 /// 在同一组件内取最优候选下标；与 Python `max(component, key=...)` 一致，
@@ -339,8 +344,9 @@ pub fn merge_seam_fragments_with(
         .collect();
     decorated.sort_by(|left, right| {
         left.0
-            .total_cmp(&right.0)
-            .then_with(|| left.1.total_cmp(&right.1))
+            .partial_cmp(&right.0)
+            .unwrap_or(Ordering::Equal)
+            .then_with(|| left.1.partial_cmp(&right.1).unwrap_or(Ordering::Equal))
     });
     decorated
         .into_iter()
@@ -398,8 +404,9 @@ pub fn deduplicate_candidates_with(
         .collect();
     decorated.sort_by(|left, right| {
         left.0
-            .total_cmp(&right.0)
-            .then_with(|| left.1.total_cmp(&right.1))
+            .partial_cmp(&right.0)
+            .unwrap_or(Ordering::Equal)
+            .then_with(|| left.1.partial_cmp(&right.1).unwrap_or(Ordering::Equal))
             .then_with(|| left.2.cmp(&right.2))
     });
     decorated
@@ -450,6 +457,19 @@ mod tests {
             TileRegion::new(1, 1088, 0, 1216, 400, 2500, 400).unwrap(),
             TileRegion::new(2, 2176, 0, 324, 400, 2500, 400).unwrap(),
         )
+    }
+
+    // 覆盖 O-25：数值相等的浮点平局（包括正负零）保留首个候选。
+    #[test]
+    fn duplicate_rank_keeps_first_for_signed_zero_score_tie() {
+        let (tile0, tile1, _) = base_tiles();
+        let quad = rect_quad(100.0, 20.0, 300.0, 50.0);
+        let first = candidate(quad, -0.0, tile1, 1.0, false);
+        let second = candidate(quad, 0.0, tile0, 1.0, false);
+        assert_eq!(
+            deduplicate_candidates(&[first.clone(), second]).as_slice(),
+            &[first]
+        );
     }
 
     // 覆盖 O-25：test_duplicate_prefers_candidate_away_from_internal_edge

@@ -897,6 +897,78 @@ fn push_default_current_with_matching_upstream_name_proceeds() {
     let heads = git_ok(&fix.repo, &["ls-remote", "--heads", "origin"]);
     assert!(heads.contains("topic"), "应推送到 upstream：{heads}");
 }
+// 覆盖 G-08/G-09：push.default=simple 在本地与 upstream 分支异名时必然拒绝裸 push；
+// 应在提交前识别该确定性失败，而不是无限重试 push。
+#[test]
+fn push_default_simple_with_renamed_upstream_refuses_to_start() {
+    let fix = fixture();
+    git_ok(&fix.repo, &["checkout", "-q", "-b", "topic"]);
+    git_ok(&fix.repo, &["config", "branch.topic.remote", "origin"]);
+    git_ok(
+        &fix.repo,
+        &["config", "branch.topic.merge", "refs/heads/master"],
+    );
+    git_ok(&fix.repo, &["config", "push.default", "simple"]);
+    fs::write(fix.repo.join("a.txt"), "x\n").unwrap();
+
+    let outcome = run_tool(&fix.repo);
+    assert!(
+        outcome.text.contains("无法开始")
+            && outcome.text.contains("push.default")
+            && outcome.text.contains("simple"),
+        "必须在写入前拒绝必然失败的推送配置：{}",
+        outcome.text
+    );
+    assert_eq!(
+        remote_log(&fix.remote),
+        vec!["init".to_string()],
+        "预检拒绝后不得推送"
+    );
+    assert_eq!(
+        git_ok(&fix.repo, &["log", "--format=%s"]).trim(),
+        "init",
+        "预检拒绝后不得提交"
+    );
+    assert!(
+        git_ok(&fix.repo, &["status", "--porcelain"]).contains("?? a.txt"),
+        "预检拒绝后工作区文件保持未处理"
+    );
+}
+
+// 覆盖 G-09：非法 push.default 会使裸 git push 稳定失败；不得在本地提交后无限重试。
+#[test]
+fn unsupported_push_default_refuses_to_start() {
+    let fix = fixture();
+    git_ok(&fix.repo, &["config", "push.default", "unsupported"]);
+    fs::write(fix.repo.join("a.txt"), "x\n").unwrap();
+
+    let outcome = run_tool(&fix.repo);
+    assert!(
+        outcome.text.contains("无法开始")
+            && outcome.text.contains("push.default")
+            && outcome.text.contains("unsupported"),
+        "必须在写入前拒绝非法 push.default：{}",
+        outcome.text
+    );
+    assert_eq!(
+        remote_log(&fix.remote),
+        vec!["init".to_string()],
+        "非法推送配置不得更改远端"
+    );
+    // git 对非法 push.default 值在任何读取配置的命令（含本测试后续 log/status）
+    // 中都致命失败；git config 自身的写/删不做语义校验（上面写入已证明），
+    // 先还原配置再做未提交/未改动验证。
+    git_ok(&fix.repo, &["config", "--unset", "push.default"]);
+    assert_eq!(
+        git_ok(&fix.repo, &["log", "--format=%s"]).trim(),
+        "init",
+        "预检拒绝后不得提交"
+    );
+    assert!(
+        git_ok(&fix.repo, &["status", "--porcelain"]).contains("?? a.txt"),
+        "预检拒绝后工作区文件保持未处理"
+    );
+}
 
 // 覆盖 G-06（回归：用户解决冲突后另行 stage 的无关文件不得被夹带进合并提交；
 // 修复前 `git commit --no-edit` 不带 pathspec，会把整个暂存区一起提交）
@@ -1553,6 +1625,91 @@ fn mirror_remote_config_refuses_to_start() {
         "init",
         "本地不得有新提交"
     );
+}
+// 覆盖 P-03/G-08（remote.<name>.mirror 的布尔真值允许 Git 配置同义词；
+// 只识别字面 true 会放过 yes/on/1，随后裸 push 会镜像全部引用）
+#[test]
+fn mirror_remote_config_boolean_alias_refuses_to_start() {
+    for value in ["yes", "on", "1"] {
+        let fix = fixture();
+        git_ok(&fix.repo, &["config", "remote.origin.mirror", value]);
+        fs::write(fix.repo.join("a.txt"), "x\n").unwrap();
+
+        let outcome = run_tool(&fix.repo);
+        assert!(
+            outcome.text.contains("无法开始") && outcome.text.contains("mirror"),
+            "remote.origin.mirror={value} 必须在写入前被拒绝：{}",
+            outcome.text
+        );
+        assert_eq!(
+            remote_log(&fix.remote),
+            vec!["init".to_string()],
+            "镜像推送不得改动远端"
+        );
+        assert_eq!(
+            git_ok(&fix.repo, &["log", "--format=%s"]).trim(),
+            "init",
+            "预检拒绝后不得产生本地提交"
+        );
+    }
+}
+
+// 覆盖 P-03/G-08（remote.<name>.url 可重复；Git push 会推送到全部 URL，
+// 预检只看首个 fetch URL 会遗漏 upstream 之外的额外推送地址）
+#[test]
+fn multiple_upstream_urls_refuse_to_start() {
+    let fix = fixture();
+    let other = add_second_remote(&fix, "other");
+    git_ok(
+        &fix.repo,
+        &[
+            "remote",
+            "set-url",
+            "--add",
+            "origin",
+            &other.display().to_string(),
+        ],
+    );
+    fs::write(fix.repo.join("a.txt"), "x\n").unwrap();
+
+    let outcome = run_tool(&fix.repo);
+    assert!(
+        outcome.text.contains("无法开始") && outcome.text.contains("pushurl"),
+        "必须拒绝 upstream remote 的额外推送 URL：{}",
+        outcome.text
+    );
+    assert_start_refused_and_nothing_moved(&fix, &other);
+}
+// 覆盖 P-03/P-09/G-08：url.<base>.pushInsteadOf 会重写裸 push 的真实目标；
+// 预检必须按 Git 展开后的 push URL 拒绝 upstream 之外的目标。
+#[test]
+fn push_instead_of_rewrite_refuses_to_start() {
+    let fix = fixture();
+    let other = add_second_remote(&fix, "other");
+    let upstream_url = "https://upstream.invalid/repo.git";
+    let other_url = git_ok(&fix.repo, &["remote", "get-url", "other"])
+        .trim()
+        .replace('\\', "/");
+    let other_url = format!("file:///{}", other_url.trim_start_matches('/'));
+    git_ok(&fix.repo, &["remote", "set-url", "origin", upstream_url]);
+    git_ok(
+        &fix.repo,
+        &[
+            "config",
+            "--add",
+            &format!("url.\"{other_url}\".pushInsteadOf"),
+            upstream_url,
+        ],
+    );
+    fs::write(fix.repo.join("a.txt"), "x\n").unwrap();
+
+    let outcome = run_tool(&fix.repo);
+    assert!(
+        outcome.text.contains("无法开始") && outcome.text.contains("pushInsteadOf"),
+        "必须拒绝被 pushInsteadOf 改写到 upstream 之外的 URL：{}",
+        outcome.text
+    );
+    assert_start_refused_and_nothing_moved(&fix, &other);
 }
 
 // 覆盖 P-03/G-08（独立审查发现：pushurl 指向 upstream 之外的地址时，裸 push

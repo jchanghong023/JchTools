@@ -15,3 +15,9 @@ fn archive_collision_preserves_compound_extension_and_existing_files() {
     assert_eq!(fs::read(&original).unwrap(), b"original");
     assert_eq!(fs::read(&first).unwrap(), b"first");
 }
+#[test]
+fn git_marker_name_is_case_insensitive() {
+    let root = tempfile::tempdir().unwrap();
+    fs::write(root.path().join(".GIT"), b"gitdir: elsewhere").unwrap();
+    assert!(fsutil::is_git_root(root.path()).unwrap());
+}

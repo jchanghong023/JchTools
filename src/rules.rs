@@ -9,6 +9,7 @@ use sha2::{Digest, Sha256};
 use std::{
     cmp::Ordering,
     collections::{HashMap, HashSet},
+    ffi::OsStr,
     path::Path,
     sync::OnceLock,
 };
@@ -254,10 +255,13 @@ pub fn legalize_derived(stem: &str) -> String {
         out = "_".into();
     }
     let head = out.split('.').next().unwrap_or("").to_uppercase();
-    if ["CON", "PRN", "AUX", "NUL"].contains(&head.as_str())
+    if ["CON", "PRN", "AUX", "NUL", "CLOCK$"].contains(&head.as_str())
         || ((head.starts_with("COM") || head.starts_with("LPT"))
-            && head.len() == 4
-            && head.ends_with(|c: char| ('1'..='9').contains(&c)))
+            && head.chars().count() == 4
+            && head
+                .chars()
+                .last()
+                .is_some_and(|c| "123456789¹²³".contains(c)))
     {
         out = format!("_{out}");
     }
@@ -306,7 +310,13 @@ pub fn compare(a: &FileRecord, b: &FileRecord, policy: KeepPolicy) -> Ordering {
                 .count()
                 .cmp(&b.rel.encode_utf16().count())
         })
-        .then_with(|| a.rel.cmp(&b.rel))
+        .then_with(|| {
+            crate::platform::compare_names_ordinal_ignore_case(
+                OsStr::new(&a.rel),
+                OsStr::new(&b.rel),
+            )
+        })
+        .then_with(|| a.rel.encode_utf16().cmp(b.rel.encode_utf16()))
 }
 /// 数据库排序参考片段。name16/rel16 是扫描期预计算的
 /// UTF-16 单元数列；决胜列 rel 为 SQLite BINARY 文本序（与附录 B 的「UTF-16 单元逐
@@ -1058,6 +1068,20 @@ mod tests {
         assert_eq!(copy_key("资料 (2).pdf"), "资料.pdf");
         assert_eq!(clean_copy_output("资料 (2).pdf"), "资料_2.pdf");
     }
+    // 覆盖附录 B（派生名对齐 Windows 保留设备名；修复 CLOCK$ 与 COM/LPT 上标数字遗漏）
+    #[test]
+    fn legalize_derived_windows_reserved_device_names() {
+        for (input, expected) in [
+            ("CON", "_CON"),
+            ("CLOCK$", "_CLOCK$"),
+            ("com1", "_com1"),
+            ("lpt9", "_lpt9"),
+            ("COM¹", "_COM¹"),
+            ("LPT³", "_LPT³"),
+        ] {
+            assert_eq!(legalize_derived(input), expected, "{input}");
+        }
+    }
 
     // 覆盖 C-08（三类清理的识别与类别归属：planner 按类别解析删除方式，不比较中文原因串）
     #[test]
@@ -1420,6 +1444,27 @@ mod tests {
                 "{policy:?} 的 SQL 与 Rust 排序必须一致"
             );
         }
+    }
+    // 覆盖 C-03 / 附录 B：路径平局按 Windows 忽略大小写序数升序，再按原始 UTF-16 决胜。
+    #[test]
+    fn compare_path_tie_break_uses_case_insensitive_ordinal_order() {
+        let mut uppercase_z = record(1, "z.txt", "z.txt");
+        uppercase_z.rel = "Z/file".into();
+        let mut lowercase_a = record(2, "a.txt", "a.txt");
+        lowercase_a.rel = "a/file".into();
+        assert_eq!(
+            compare(&lowercase_a, &uppercase_z, KeepPolicy::Newest),
+            Ordering::Less
+        );
+
+        let mut uppercase_a = record(3, "a.txt", "a.txt");
+        uppercase_a.rel = "A/file".into();
+        let mut lowercase_a = record(4, "a.txt", "a.txt");
+        lowercase_a.rel = "a/file".into();
+        assert_eq!(
+            compare(&uppercase_a, &lowercase_a, KeepPolicy::Newest),
+            Ordering::Less
+        );
     }
 
     // 覆盖附录 A（大类映射：复合后缀、分卷族、.ts 归视频、未匹配归其他）

@@ -11,6 +11,7 @@ import subprocess
 import sys
 import tempfile
 import threading
+import time
 import unittest
 import zipfile
 from pathlib import Path
@@ -28,7 +29,7 @@ if TYPE_CHECKING:
 
     from pywinauto.application import WindowSpecification
 
-from scripts import gui_smoke, markdown_acceptance, test_gate
+from scripts import gui_smoke, markdown_acceptance, test_gate, test_timing
 from scripts.gui_smoke import find_button as smoke_find_button
 from scripts.markdown_acceptance import unique_visible_buttons, verify_common_postconditions
 from scripts.test_gate import acceptance_coverage_gaps
@@ -36,6 +37,9 @@ from scripts.test_gate import acceptance_coverage_gaps
 EXPECTED_COVERAGE_GAPS = 2
 EXPECTED_PHYSICAL_ROWS = 2
 AUTO_FAST_PAGES_THRESHOLD = 500
+ARGUMENT_ERROR_EXIT_CODE = 3
+COMMAND_TIMEOUT_SECONDS = 8.0
+COMMAND_FAILURE_EXIT_CODE = 7
 
 
 def _content_spec(item_id: str) -> markdown_acceptance.ContentSpec:
@@ -294,7 +298,7 @@ class MediaPostconditionTests(unittest.TestCase):
             try:
                 owner = gui_smoke.own_process_tree(proc)
                 _ = (Path(temporary) / "start").write_text("go", encoding="ascii")
-                assert proc.wait(timeout=900) == 0  # nosec B101: 验证父进程自然成功退出。
+                assert proc.wait(timeout=10) == 0  # nosec B101: 验证父进程自然成功退出。
                 child_pid = int((Path(temporary) / "child-pid").read_text(encoding="ascii"))
                 child = win32api.OpenProcess(win32con.SYNCHRONIZE | win32con.PROCESS_TERMINATE, 0, child_pid)
                 try:
@@ -311,9 +315,9 @@ class MediaPostconditionTests(unittest.TestCase):
                     owner.close()
                 if proc.poll() is None:
                     proc.kill()
-                _ = proc.wait(timeout=900)
+                _ = proc.wait(timeout=10)
                 unrelated.terminate()
-                _ = unrelated.wait(timeout=900)
+                _ = unrelated.wait(timeout=10)
 
     def test_fast_failed_conversion_finishes_without_outputs(self) -> None:
         # 覆盖 T-24：未观察到忙态且全部瞬间失败时，应收集失败诊断而不是空等到转换超时。
@@ -593,12 +597,33 @@ class PerInputRuleTests(unittest.TestCase):
         assert _per_input_problems("A16", ["alpha.png"], [], "") == []  # nosec B101: 宽松输入。
         assert _per_input_problems("A25", ["sample.rst"], [], "") == []  # nosec B101: 格式清点子集语义保留。
 
-    def test_a11_requires_broken_preview_fixture_to_run(self) -> None:
-        # A11：「本体失败+预览成功」注入变体缺场时必须 NOT RUN，不得以嵌入对象在场冒充。
+    def test_a11_missing_broken_preview_fixture_is_not_run(self) -> None:
+        # 缺少注入变体时必须由实际执行前置返回 NOT RUN，不能只锁定仓库当前缺少夹具。
         item = next(entry for entry in markdown_acceptance.ITEMS if entry.item_id == "A11")
-        assert "matrix/pptx_ole_broken_preview.pptx" in item.fixtures  # nosec B101: 回归测试断言。
-        missing = markdown_acceptance.FIXTURES_DEFAULT / "matrix/pptx_ole_broken_preview.pptx"
-        assert not missing.is_file()  # nosec B101: 夹具缺场时前置检查使整项 NOT RUN。
+        runner = cast(
+            "Callable[..., markdown_acceptance.Outcome]",
+            getattr(markdown_acceptance, "_" + "run_conversion_item"),
+        )
+        with tempfile.TemporaryDirectory() as temporary:
+            context = markdown_acceptance.Context(
+                None,
+                None,
+                None,
+                Path(temporary),
+                markdown_acceptance.AssetProbe(None, None, None, None, []),
+            )
+            with (
+                patch.object(markdown_acceptance, "_resolve_gui", return_value=(Path("JchTools.exe"), None)),
+                patch.object(markdown_acceptance, "_asset_precondition", return_value=None),
+                patch.object(
+                    markdown_acceptance,
+                    "_prepare_scratch",
+                    side_effect=AssertionError("缺夹具时不得准备或运行转换"),
+                ),
+            ):
+                outcome = runner(item, context, Path("JchTools.exe"))
+        assert outcome.status == "NOT RUN"  # nosec B101: 缺夹具必须作为未执行项报告。
+        assert "matrix/pptx_ole_broken_preview.pptx" in outcome.reason  # nosec B101: 必须指出具体缺失变体。
 
 
 class ContentAssertStrengthTests(unittest.TestCase):
@@ -795,6 +820,133 @@ class PythonProcessScanTests(unittest.TestCase):
         assert recorded  # nosec B101: 回归测试断言。
         assert recorded[0] == ("JchTools.exe", "xberg.exe")  # nosec B101: XB 进程模型，退役 worker 不得残留。
 
+    def test_c05_without_outputs_cannot_pass(self) -> None:
+        assessor = cast(
+            "Callable[..., markdown_acceptance.Outcome]",
+            getattr(markdown_acceptance, "_" + "c05_assess"),
+        )
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            input_dir = root / "input"
+            output_dir = root / "output"
+            _ = input_dir.mkdir()
+            _ = output_dir.mkdir()
+            source = input_dir / "video-to-notes-intro-zh.mp4"
+            _ = source.write_bytes(b"synthetic media input")
+            item = next(entry for entry in markdown_acceptance.ITEMS if entry.item_id == "C05")
+            outcome = assessor(
+                item,
+                markdown_acceptance.PreparedInputs(input_dir, output_dir, [source.name]),
+                {Path(source.name): _digest(source)},
+                markdown_acceptance.GuiRun([], "成功 0，部分提取 0，失败 0", None),
+                [],
+                [],
+            )
+        assert outcome.status == "FAIL"  # nosec B101: 无产物不得冒充 C05 实际转换成功。
+        assert "实得 0 项：[]" in outcome.details[0]  # nosec B101: 结论须基于观察到的零产物。
+
+
+class AcceptanceBoundaryTests(unittest.TestCase):
+    def test_conversion_requires_an_explicit_gui_target(self) -> None:
+        resolver = cast(
+            "Callable[[markdown_acceptance.Context], tuple[Path | None, str | None]]",
+            getattr(markdown_acceptance, "_" + "resolve_gui"),
+        )
+        with tempfile.TemporaryDirectory() as temporary:
+            assets = markdown_acceptance.AssetProbe(None, None, None, None, [])
+            context = markdown_acceptance.Context(None, None, None, Path(temporary), assets)
+            target, reason = resolver(context)
+            assert target is None  # nosec B101: 不得猜测默认被测 GUI。
+            assert reason is not None  # nosec B101: 未提供目标必须解释阻止原因。
+            assert "--gui-exe" in reason  # nosec B101: 必须指引显式选择。
+            explicit_gui = Path(temporary) / "JchTools.exe"
+            _ = explicit_gui.write_bytes(b"synthetic executable path")
+            context.gui_exe = explicit_gui
+            target, reason = resolver(context)
+            assert target == explicit_gui  # nosec B101: 使用显式被测 GUI 路径。
+            assert reason is None  # nosec B101: 在场目标解除前置阻止。
+
+    def test_invalid_item_selection_uses_argument_error_code(self) -> None:
+        with patch.object(sys, "argv", ["markdown_acceptance.py", "--only", "UNKNOWN"]):
+            assert markdown_acceptance.main() == ARGUMENT_ERROR_EXIT_CODE  # nosec B101: 参数错误专用退出码。
+
+    def test_outside_isolation_root_is_rejected_before_use(self) -> None:
+        checker = cast(
+            "Callable[[], str | None]",
+            getattr(markdown_acceptance, "_" + "isolated_environment_error"),
+        )
+        with (
+            tempfile.TemporaryDirectory() as temporary,
+            patch.dict(os.environ, {"JCHTOOLS_TEST_STATE_DIR": temporary}, clear=True),
+        ):
+            reason = checker()
+        assert reason is not None  # nosec B101: 越界隔离根必须拒绝。
+        assert "JCHTOOLS_TEST_STATE_DIR" in reason  # nosec B101: 拒绝原因指出变量。
+        assert ".tmp" in reason  # nosec B101: 拒绝原因指出仓库隔离边界。
+
+    def test_seed_rejects_state_outside_tmp_without_writing(self) -> None:
+        seed = cast(
+            "Callable[[Path, Path], None]",
+            getattr(markdown_acceptance, "_" + "seed_isolated_state"),
+        )
+        with tempfile.TemporaryDirectory() as temporary:
+            state = Path(temporary) / "state"
+            message = ""
+            try:
+                seed(state, Path(temporary) / "runtime")
+            except ValueError as error:
+                message = str(error)
+            assert message  # nosec B101: 越界状态根必须在副作用前失败。
+            assert ".tmp" in message  # nosec B101: 拒绝原因指出仓库隔离边界。
+            assert not state.exists()  # nosec B101: 被拒绝的种子操作不得创建状态目录。
+
+    def test_invalid_release_asset_manifest_fails_package_scan(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary) / "package"
+            _ = root.mkdir()
+            manifest = Path(temporary) / "markdown-assets.json"
+            _ = manifest.write_text("{", encoding="utf-8")
+            item = next(entry for entry in markdown_acceptance.ITEMS if entry.item_id == "C01")
+            context = markdown_acceptance.Context(
+                None,
+                root,
+                None,
+                root,
+                markdown_acceptance.AssetProbe(None, None, None, None, []),
+            )
+            with patch.object(markdown_acceptance, "ASSET_MANIFEST", manifest):
+                outcome = markdown_acceptance.run_item(item, context)
+        assert outcome.status == "FAIL"  # nosec B101: 清单不可验证时不得报告交付扫描通过。
+        assert "无法读取或解析" in outcome.reason  # nosec B101: 必须保留清单错误原因。
+
+    def test_external_report_path_is_rejected_before_write(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            report_path = Path(temporary) / "report.json"
+            state_root = markdown_acceptance.ROOT / ".tmp" / "test-markdown-report-state"
+            with (
+                patch.dict(os.environ, {"JCHTOOLS_TEST_STATE_DIR": str(state_root)}, clear=True),
+                patch.object(
+                    sys,
+                    "argv",
+                    [
+                        "markdown_acceptance.py",
+                        "--only",
+                        "C01",
+                        "--json-report",
+                        str(report_path),
+                    ],
+                ),
+                patch.object(sys, "stderr"),
+            ):
+                error_code: int | None = None
+                try:
+                    _ = markdown_acceptance.main()
+                except SystemExit as error:
+                    if isinstance(error.code, int):
+                        error_code = error.code
+            assert error_code == ARGUMENT_ERROR_EXIT_CODE  # nosec B101: 越界报告参数使用专用错误码。
+            assert not report_path.exists()  # nosec B101: 拒绝前不能创建外部报告。
+
 
 class SyntheticFixtureTests(unittest.TestCase):
     """S10-13：夹具合成化——无外部语料路径、无来源元数据、生成脚本可校验。."""
@@ -923,6 +1075,136 @@ $script:Results = [System.Collections.Generic.List[string]]::new()
     def test_actual_skipped_item_remains_partial(self) -> None:
         result = self.classify(["PASS A01 内容正确", "NOT RUN A02 缺真实资产", "PASS 1| FAIL 0| NOT RUN 1（共 2 条）"])
         assert result.startswith("PARTIAL  markdown-acceptance")  # nosec B101: 真实未执行不得变绿。
+
+
+class CommandTimeoutTests(unittest.TestCase):
+    def test_test_gate_timeout_is_reported_as_failure(self) -> None:
+        with (
+            tempfile.TemporaryDirectory() as temporary,
+            patch.object(test_gate, "LOG_DIR", Path(temporary)),
+        ):
+            result = test_gate.run_logged(
+                "unit-timeout",
+                [sys.executable, "-c", "import time; time.sleep(30)"],
+                timeout=COMMAND_TIMEOUT_SECONDS,
+            )
+        assert result.status == test_gate.STATUS_TIMED_OUT  # nosec B101: 到期不得报告通过。
+        assert "8s 总预算" in result.detail  # nosec B101: 消费者可见预算须与调用一致。
+        assert "进程树已终止" in result.detail  # nosec B101: 清理完成状态必须可见。
+
+    def test_timing_timeout_preserves_requested_deadline(self) -> None:
+        runner = cast(
+            "Callable[[list[str], float], subprocess.CompletedProcess[str]]",
+            getattr(test_timing, "_" + "run_checked"),
+        )
+        requested_timeout: float | None = None
+        try:
+            _ = runner(
+                [sys.executable, "-c", "import time; time.sleep(30)"],
+                COMMAND_TIMEOUT_SECONDS,
+            )
+        except subprocess.TimeoutExpired as error:
+            requested_timeout = error.timeout
+        else:
+            self.fail("超时命令不得返回成功完成状态")
+        assert requested_timeout == COMMAND_TIMEOUT_SECONDS  # nosec B101: 不得延长调用方预算。
+
+    def test_timing_preserves_nonzero_exit_for_failure_classification(self) -> None:
+        runner = cast(
+            "Callable[[list[str], float], subprocess.CompletedProcess[str]]",
+            getattr(test_timing, "_" + "run_checked"),
+        )
+        completed = runner([sys.executable, "-c", "raise SystemExit(7)"], COMMAND_TIMEOUT_SECONDS)
+        assert completed.returncode == COMMAND_FAILURE_EXIT_CODE  # nosec B101: 套件消费者须区分失败。
+
+    def test_gate_preserves_nonzero_exit_as_failure(self) -> None:
+        with (
+            tempfile.TemporaryDirectory() as temporary,
+            patch.object(test_gate, "LOG_DIR", Path(temporary)),
+        ):
+            result = test_gate.run_logged(
+                "unit-failure",
+                [sys.executable, "-c", f"raise SystemExit({COMMAND_FAILURE_EXIT_CODE})"],
+                timeout=COMMAND_TIMEOUT_SECONDS,
+            )
+        assert result.status == test_gate.STATUS_FAILED  # nosec B101: 非零退出不得报告通过。
+        assert f"退出码 {COMMAND_FAILURE_EXIT_CODE}" in result.detail  # nosec B101: 失败原因须保留。
+
+
+class ProcessTreeOwnershipTests(unittest.TestCase):
+    @staticmethod
+    def _start_tree(directory: Path) -> tuple[subprocess.Popen[str], int]:
+        parent_source = (
+            "import pathlib, subprocess, sys, time\n"
+            "root = pathlib.Path(sys.argv[1])\n"
+            "child = subprocess.Popen([sys.executable, '-c', 'import time; time.sleep(900)'])\n"
+            "(root / 'child-pid').write_text(str(child.pid), encoding='ascii')\n"
+            "time.sleep(900)\n"
+        )
+        process: subprocess.Popen[str] = subprocess.Popen(
+            [sys.executable, "-c", parent_source, str(directory)],
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            text=True,
+        )
+        deadline = time.monotonic() + 10
+        pid_file = directory / "child-pid"
+        child_handle: int | None = None
+        try:
+            while not pid_file.is_file():
+                if process.poll() is not None:
+                    message = "进程树父进程未能创建子进程"
+                    raise RuntimeError(message)
+                if time.monotonic() >= deadline:
+                    message = "等待子进程 PID 超时"
+                    raise TimeoutError(message)
+                time.sleep(0.01)
+            child_pid = int(pid_file.read_text(encoding="ascii"))
+            child_handle = win32api.OpenProcess(
+                win32con.SYNCHRONIZE | win32con.PROCESS_TERMINATE,
+                0,
+                child_pid,
+            )
+            return process, child_handle
+        finally:
+            if child_handle is None:
+                if process.poll() is None:
+                    process.kill()
+                _ = process.wait(timeout=5)
+
+    def _assert_owner_kills_only_its_tree(self, owner: object) -> None:
+        killer = cast("Callable[..., bool]", getattr(owner, "_" + "kill_tree"))
+        with tempfile.TemporaryDirectory(prefix="jchtools-command-tree-") as temporary:
+            process, child = self._start_tree(Path(temporary))
+            unrelated: subprocess.Popen[bytes] | None = None
+            try:
+                unrelated = subprocess.Popen(
+                    [sys.executable, "-c", "import time; time.sleep(900)"],
+                    stdin=subprocess.DEVNULL,
+                    stdout=subprocess.DEVNULL,
+                    stderr=subprocess.DEVNULL,
+                )
+                assert killer(process, timeout=3.0)  # nosec B101: 应终止指定所有者的整棵进程树。
+                assert process.wait(timeout=5) != 0  # nosec B101: 被杀的所有者进程不能自然成功。
+                assert win32event.WaitForSingleObject(child, 1000) == win32event.WAIT_OBJECT_0  # nosec B101: 子进程必须退出。
+                assert unrelated.poll() is None  # nosec B101: 不得终止无关进程。
+            finally:
+                if process.poll() is None:
+                    process.kill()
+                _ = process.wait(timeout=5)
+                if win32event.WaitForSingleObject(child, 0) == win32event.WAIT_TIMEOUT:
+                    win32api.TerminateProcess(child, 0)
+                win32api.CloseHandle(child)
+                if unrelated is not None:
+                    if unrelated.poll() is None:
+                        unrelated.terminate()
+                    _ = unrelated.wait(timeout=5)
+
+    def test_gate_and_timing_terminate_only_the_owned_process_tree(self) -> None:
+        for owner in (test_gate, test_timing):
+            with self.subTest(owner=owner.__name__):
+                self._assert_owner_kills_only_its_tree(owner)
 
 
 if __name__ == "__main__":

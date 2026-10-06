@@ -333,7 +333,8 @@ pub(crate) fn platform_preflight() -> Result<(), String> {
 }
 
 /// 结果名占用索引（T-11/F29）：按大小写折叠键分桶，桶内候选再用
-/// [`compare_names`]（Windows `CompareStringOrdinal` 忽略大小写）精确确认。
+/// [`crate::platform::compare_names_ordinal_ignore_case`]（Windows `CompareStringOrdinal`
+/// 忽略大小写）精确确认。
 /// 平铺模式登记全局结果名，层级模式登记「相对父目录+结果名」（见 `scan`）。
 /// 折叠只用于缩小候选集：语义上过桶只会多比、不会漏比，occupied 查询近似 O(1)。
 #[derive(Default)]
@@ -344,7 +345,7 @@ struct OccupiedIndex {
 impl OccupiedIndex {
     fn contains(&self, name: &OsStr) -> bool {
         self.contains_with(name, &mut |left, right| {
-            compare_names(left, right) == Ordering::Equal
+            crate::platform::compare_names_ordinal_ignore_case(left, right) == Ordering::Equal
         })
     }
 
@@ -742,7 +743,11 @@ fn path_begins_with(path: &Path, prefix: &Path) -> bool {
         let Some(path_part) = path_parts.next() else {
             return false;
         };
-        if compare_names(path_part.as_os_str(), prefix_part.as_os_str()) != Ordering::Equal {
+        if crate::platform::compare_names_ordinal_ignore_case(
+            path_part.as_os_str(),
+            prefix_part.as_os_str(),
+        ) != Ordering::Equal
+        {
             return false;
         }
     }
@@ -758,7 +763,11 @@ fn compare_paths(left: &Path, right: &Path) -> Ordering {
 }
 
 fn compare_paths_insensitive(left: &Path, right: &Path) -> Ordering {
-    compare_component_wise(left, right, compare_names)
+    compare_component_wise(
+        left,
+        right,
+        crate::platform::compare_names_ordinal_ignore_case,
+    )
 }
 
 // T-11 决胜序等价性论证（A'-低危2）：合同写「相同键再按原始路径 UTF-16 单元
@@ -797,35 +806,6 @@ fn compare_component_wise(
             (None, None) => return Ordering::Equal,
         }
     }
-}
-
-#[cfg(windows)]
-fn compare_names(left: &OsStr, right: &OsStr) -> Ordering {
-    use std::os::windows::ffi::OsStrExt;
-    use windows_sys::Win32::Globalization::CompareStringOrdinal;
-
-    let a: Vec<_> = left.encode_wide().collect();
-    let b: Vec<_> = right.encode_wide().collect();
-    let Ok(a_len) = i32::try_from(a.len()) else {
-        return a.cmp(&b);
-    };
-    let Ok(b_len) = i32::try_from(b.len()) else {
-        return a.cmp(&b);
-    };
-    // SAFETY: 两个 UTF-16 缓冲区在整个同步调用期间有效，长度与缓冲区一致。
-    match unsafe { CompareStringOrdinal(a.as_ptr(), a_len, b.as_ptr(), b_len, 1) } {
-        1 => Ordering::Less,
-        2 => Ordering::Equal,
-        3 => Ordering::Greater,
-        _ => a.cmp(&b),
-    }
-}
-
-#[cfg(not(windows))]
-fn compare_names(left: &OsStr, right: &OsStr) -> Ordering {
-    left.to_string_lossy()
-        .to_lowercase()
-        .cmp(&right.to_string_lossy().to_lowercase())
 }
 
 #[cfg(windows)]
@@ -1144,11 +1124,12 @@ pub fn test_scan_count_with_cancel(
 #[cfg(test)]
 mod tests {
     use super::{
-        case_fold_key, compare_names, compare_paths, compare_paths_insensitive, media_dir_name,
-        occupancy_key, parse_formats, run_formats_probe, scan, selected_xberg_extension,
-        write_new_markdown, FormatGroup, OccupiedIndex, Options,
+        case_fold_key, compare_paths, compare_paths_insensitive, media_dir_name, occupancy_key,
+        parse_formats, run_formats_probe, scan, selected_xberg_extension, write_new_markdown,
+        FormatGroup, OccupiedIndex, Options,
     };
     use crate::markdown_document::{Deadline, MediaFile};
+    use crate::platform::compare_names_ordinal_ignore_case as compare_names;
     use std::thread;
     use std::time::Instant;
     use std::{

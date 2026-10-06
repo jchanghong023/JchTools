@@ -26,14 +26,13 @@ use crate::shared_xberg::{ClientError, SharedXbergClient, SnapshotState};
 /// 单次识别错误（O-30 分类：取消 / 超时 / 推理失败 / 子进程退出；消息不含图像内容）。
 #[derive(Debug, Clone)]
 pub(crate) enum OcrError {
-    /// 用户取消：结果窗即刻恢复；按 XB-08「终止进程」路径，推理子进程已被
-    /// 终止，服务随后触发后台重载（O-13）。
+    /// 用户取消：结果窗即刻恢复；共享 Xberg 保持运行，服务随后检查模型状态，
+    /// 仍就绪则复用，否则按 O-13 重载。
     Cancelled,
-    /// 识别超时：挂起的推理进程已被终止（XB-08 同路径），连接死亡、模型不可
-    /// 再复用，须降级为错误并保留重试入口；与用户取消（自动重载）区分——
-    /// 超时是故障，不得自动循环重试挂起的推理。
+    /// 识别请求超时：仅结束本次请求，连接不可复用；共享 Xberg 不被终止，
+    /// 模型降级为错误并保留重试入口，避免自动循环重试挂起请求。
     TimedOut(String),
-    /// 推理子进程已退出：连接死亡、模型不可再复用，须降级为错误并保留重试
+    /// 共享推理进程已退出：连接死亡、模型不可再复用，须降级为错误并保留重试
     /// 入口（O-13）；与单次 [`OcrError::Backend`] 失败（模型保持就绪）分类处理。
     ProcessExited(String),
     /// 单次推理失败（模型仍可复用）。
@@ -308,18 +307,12 @@ fn root() -> Result<PathBuf, String> {
         .ok_or_else(|| "截图服务资产根目录无效".to_string())
 }
 
-/// Xberg 推理组件的安装位置：`<资产根>/xberg-inference/<tag>/`。主程序安装或
-/// 复用组件时会写入 `<资产根>/xberg-inference/expected-tag.txt`（内容为清单
-/// tag，XB-09）；本服务读取该标记做同口径校验：目录名必须与之一致，多目录时
-/// 优先选中清单 tag 目录。标记缺失（旧安装/开发树）按「唯一子目录」解析。
-/// 实际目录一律取应用 SQLite 保存的共享 Xberg 目录（与主程序共享解析同口径，
-/// 不提供环境变量覆盖）。
-fn xberg_component_dir(root: &Path) -> Result<PathBuf, LoadFailure> {
-    let _ = root;
+/// 截图服务使用应用级 SQLite 保存的共享 Xberg 目录，不提供环境变量覆盖。
+fn xberg_component_dir() -> Result<PathBuf, LoadFailure> {
     crate::xberg_settings::required().map_err(LoadFailure::NotConfigured)
 }
 
-/// 组件在位校验（存在性；摘要校验待发布清单接入后补齐，O-09）：
+/// 组件在位校验（XB-09：运行时只检查场景所需成员是否存在，不校验摘要）：
 /// `xberg.exe` + `models/snapshot-ocr` 三个模型文件 + `onnxruntime.dll`。
 fn verify_component(dir: &Path) -> Result<(), LoadFailure> {
     let required = [
@@ -341,6 +334,16 @@ fn verify_component(dir: &Path) -> Result<(), LoadFailure> {
         }
     }
     Ok(())
+}
+
+/// 共享运行时的缺失资产错误会附带用户提供的 Xberg 目录；服务提示不暴露该路径。
+fn redact_user_path(message: &str, directory: &Path) -> String {
+    let path = directory.display().to_string();
+    if path.is_empty() {
+        message.to_owned()
+    } else {
+        message.replace(&path, "共享推理目录")
+    }
 }
 
 const SNAP_ASSET_MANIFEST: &str = include_str!("../../../resources/snap-ocr-assets.json");
@@ -446,14 +449,14 @@ fn verify_font_assets(root: &Path) -> Result<(), LoadFailure> {
     )
 }
 
-/// 启动 Xberg 推理子进程并完成预热（模型懒加载发生在首个识别请求，
+/// 连接共享 Xberg 客户端并完成预热（模型懒加载发生在首个识别请求，
 /// 预热图触发加载后 `snapshot_state` 才会是 ready，O-13）。
 fn start_inference(root: &Path) -> Result<SharedXbergClient, LoadFailure> {
     verify_font_assets(root)?;
-    let component_dir = xberg_component_dir(root)?;
+    let component_dir = xberg_component_dir()?;
     verify_component(&component_dir)?;
     crate::xberg_runtime::validate_assets(&component_dir, "snapshot")
-        .map_err(LoadFailure::Failed)?;
+        .map_err(|error| LoadFailure::Failed(redact_user_path(&error, &component_dir)))?;
     let mut client = SharedXbergClient::connect(&component_dir);
     warm_up(&mut client)?;
     Ok(client)
@@ -575,7 +578,8 @@ fn worker(
                 let alive = (|| {
                     let component = crate::xberg_settings::required()?;
                     if verified_root.as_ref() != Some(&component) {
-                        crate::xberg_runtime::validate_assets(&component, "engine")?;
+                        crate::xberg_runtime::validate_assets(&component, "engine")
+                            .map_err(|error| redact_user_path(&error, &component))?;
                         verified_root = Some(component.clone());
                     }
                     crate::xberg_runtime::request(
@@ -2647,6 +2651,18 @@ mod tests {
             classify_autostart(Some(""), current),
             AutostartValue::Stale,
             "损坏值不得触发启动重写（S8-05）"
+        );
+    }
+    #[test]
+    fn xberg_validation_errors_hide_the_user_directory() {
+        let directory = Path::new(r"C:\Users\example\Documents\xberg");
+        let error = format!(
+            "Xberg 资产 models/snapshot-ocr/rec.onnx 缺失（目录 {}）",
+            directory.display()
+        );
+        assert_eq!(
+            super::redact_user_path(&error, directory),
+            "Xberg 资产 models/snapshot-ocr/rec.onnx 缺失（目录 共享推理目录）"
         );
     }
 }

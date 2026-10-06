@@ -315,6 +315,7 @@ component ProgressBar inherits Rectangle {
 // 自绘窗口按钮：最小化、最大化/还原、关闭（46px 方形，悬停浅灰，关闭红）
 component CaptionButton inherits Rectangle {
     in property <int> kind: 0;
+    in property <bool> enabled: true;
     in property <bool> maximized: false;
     callback activated();
     width: 46px; height: 46px;
@@ -324,6 +325,7 @@ component CaptionButton inherits Rectangle {
     fs := FocusScope {
         width: 100%; height: 100%;
         key-pressed(event) => {
+            if (!root.enabled) { return reject; }
             if (event.text == " " || event.text == "\n") { root.activated(); return accept; }
             return reject;
         }
@@ -334,7 +336,7 @@ component CaptionButton inherits Rectangle {
     background: touch.has-hover ? (kind == 2 ? Design.close-hover : (touch.pressed ? Design.press : Design.hover)) : transparent;
     animate background { duration: 120ms; }
 
-    touch := TouchArea { mouse-cursor: pointer; clicked => { root.activated(); } }
+    touch := TouchArea { enabled: root.enabled; mouse-cursor: pointer; clicked => { root.activated(); } }
 
     if kind == 0: Rectangle {
         width: 12px; height: 1.2px; background: root.glyph-color;
@@ -956,7 +958,7 @@ export component AppWindow inherits Window {
                     HorizontalLayout { padding-top: 8px; padding-bottom: 8px; padding-left: 14px; padding-right: 10px; spacing: 12px; cross-axis-alignment: center;
                         Rectangle { width: 4px; height: 20px; border-radius: 2px; background: Design.danger; }
                         Text { text: root.error-text; wrap: no-wrap; overflow: elide; color: Design.danger-ink; horizontal-stretch: 1; vertical-alignment: center; }
-                        AppButton { text: "关闭"; small: true; clicked => { root.error-text = ""; } }
+                        AppButton { text: "关闭"; small: true; enabled: root.confirm-kind == 0; clicked => { root.error-text = ""; } }
                     }
                 }
                 // 成功/中性提示与错误分开：复制完成这类消息不再用红色错误样式。
@@ -968,7 +970,7 @@ export component AppWindow inherits Window {
                     HorizontalLayout { padding-top: 8px; padding-bottom: 8px; padding-left: 14px; padding-right: 10px; spacing: 12px; cross-axis-alignment: center;
                         Rectangle { width: 4px; height: 20px; border-radius: 2px; background: Design.accent; }
                         Text { text: root.notice-text; wrap: no-wrap; overflow: elide; color: Design.accent-ink; horizontal-stretch: 1; vertical-alignment: center; }
-                        AppButton { text: "关闭"; small: true; clicked => { root.notice-text = ""; } }
+                        AppButton { text: "关闭"; small: true; enabled: root.confirm-kind == 0; clicked => { root.notice-text = ""; } }
                     }
                 }
                 // ============ 目录整理 ============
@@ -1627,7 +1629,7 @@ export component AppWindow inherits Window {
                             if root.convert-detail-text != "": HorizontalLayout { spacing: 8px; cross-axis-alignment: center;
                                 Muted { text: "有详细诊断信息"; horizontal-stretch: 1; }
                                 AppButton { text: root.convert-detail-open ? "收起详情" : "查看详情"; small: true;
-                                    clicked => { root.convert-detail-open = !root.convert-detail-open; } }
+                                    enabled: root.confirm-kind == 0; clicked => { root.convert-detail-open = !root.convert-detail-open; } }
                             }
                             if root.convert-detail-open: convert-detail-scroll := ScrollView {
                                 height: 120px; viewport-width: convert-detail-scroll.visible-width;
@@ -1726,7 +1728,7 @@ export component AppWindow inherits Window {
                             HorizontalLayout { spacing: 8px; cross-axis-alignment: center;
                                 Text { text: "后台组件未就绪，请前往设置查看详情"; color: Design.danger-ink; horizontal-stretch: 1; }
                                 AppButton { text: root.snap-detail-open ? "收起详情" : "查看详情"; small: true;
-                                    clicked => { root.snap-detail-open = !root.snap-detail-open; } }
+                                    enabled: root.confirm-kind == 0; clicked => { root.snap-detail-open = !root.snap-detail-open; } }
                             }
                             if root.snap-detail-open: snap-page-detail := ScrollView {
                                 height: 120px; viewport-width: snap-page-detail.visible-width;
@@ -1793,9 +1795,9 @@ export component AppWindow inherits Window {
         x: parent.width - root.caption-area; y: 0; width: root.caption-area; height: 46px;
         background: transparent;
         HorizontalLayout { spacing: 0px;
-            CaptionButton { kind: 0; activated => { root.minimized = true; } }
-            CaptionButton { kind: 1; maximized: root.maximized; activated => { root.maximized = !root.maximized; } }
-            CaptionButton { kind: 2; activated => { root.close(); } }
+            CaptionButton { kind: 0; enabled: root.confirm-kind == 0; activated => { root.minimized = true; } }
+            CaptionButton { kind: 1; enabled: root.confirm-kind == 0; maximized: root.maximized; activated => { root.maximized = !root.maximized; } }
+            CaptionButton { kind: 2; enabled: root.confirm-kind == 0; activated => { root.close(); } }
         }
     }
     // 确认层是唯一的模态层：任务运行中收到关闭请求时（confirm-kind=3）显示在最上层。

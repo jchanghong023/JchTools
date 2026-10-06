@@ -61,6 +61,7 @@ GUI_DATA_DIR = LOG_DIR / "gui-data"
 FIXED_XBERG_TEST_DIR = Path(r"C:\Users\jiang\Documents\xberg-test\xberg-cli-x86_64-pc-windows-msvc")
 
 FASTCHECK_DEADLINE_SECONDS = 60.0
+PROCESS_TREE_CLEANUP_SECONDS = 5.0
 STAGE_TIMEOUT_DEFAULT = 3600.0
 # 远程工作流等待上限：check.yml 约 30-40 分钟。
 REMOTE_CHECK_WATCH_SECONDS = 5400.0
@@ -113,17 +114,29 @@ def _reconfigure_stdout() -> None:
             stream.reconfigure(encoding="utf-8", errors="replace")
 
 
-def _kill_tree(proc: subprocess.Popen[bytes]) -> None:
-    # 超时必须终止整个进程树（cargo 会派生 rustc / 测试二进制子进程），
-    # 只杀父进程会留下继续占用 target/ 锁的孤儿进程。
+def _kill_tree(proc: subprocess.Popen[bytes], *, timeout: float) -> bool:
+    # 超时必须终止整个进程树（cargo 会派生 rustc / 测试二进制子进程）。
     if sys.platform == "win32":
         taskkill = shutil.which("taskkill")
-        if taskkill is not None:
-            _ = subprocess.run([taskkill, "/T", "/F", "/PID", str(proc.pid)], capture_output=True, check=False)
-    else:
-        # POSIX 侧 run_logged 以 start_new_session 启动，killpg 可达整组。
-        with contextlib.suppress(ProcessLookupError, PermissionError):
-            os.killpg(os.getpgid(proc.pid), signal.SIGKILL)
+        if taskkill is None:
+            return False
+        try:
+            result = subprocess.run(
+                [taskkill, "/T", "/F", "/PID", str(proc.pid)],
+                capture_output=True,
+                check=False,
+                timeout=min(timeout, 2.0),
+            )
+        except subprocess.TimeoutExpired:
+            return False
+        return result.returncode == 0
+    try:
+        os.killpg(os.getpgid(proc.pid), signal.SIGKILL)
+    except ProcessLookupError:
+        return True
+    except PermissionError:
+        return False
+    return True
 
 
 def _tail(log: Path, limit: int = 12) -> str:
@@ -133,10 +146,13 @@ def _tail(log: Path, limit: int = 12) -> str:
 
 def run_logged(name: str, argv: list[str], *, timeout: float, env_extra: dict[str, str] | None = None) -> StageResult:
     """运行单个命令阶段：完整输出落 .tmp/test-gate/<name>.log，凭退出码判定成败."""
+    started = time.monotonic()
     log = LOG_DIR / f"{name}.log"
     LOG_DIR.mkdir(parents=True, exist_ok=True)
     env = os.environ | (env_extra or {})
-    started = time.monotonic()
+    cleanup_budget = min(PROCESS_TREE_CLEANUP_SECONDS, timeout * 0.25)
+    if timeout <= cleanup_budget:
+        return StageResult(name, STATUS_TIMED_OUT, f"阶段预算 {timeout:.1f}s 不足以启动并清理进程树")
     with log.open("wb") as sink:
         proc = subprocess.Popen(
             argv,
@@ -147,15 +163,26 @@ def run_logged(name: str, argv: list[str], *, timeout: float, env_extra: dict[st
             start_new_session=sys.platform != "win32",
         )
         timed_out = False
+        tree_terminated = True
         try:
-            _ = proc.wait(timeout=timeout)
+            _ = proc.wait(timeout=timeout - cleanup_budget)
         except subprocess.TimeoutExpired:
             timed_out = True
-            _kill_tree(proc)
-            _ = proc.wait(timeout=30)
+            cleanup_deadline = started + timeout
+            kill_timeout = min(2.0, max(0.0, cleanup_deadline - time.monotonic()))
+            tree_terminated = _kill_tree(proc, timeout=kill_timeout)
+            if not tree_terminated and proc.poll() is None:
+                proc.kill()
+            try:
+                _ = proc.wait(timeout=max(0.0, cleanup_deadline - time.monotonic()))
+            except subprocess.TimeoutExpired:
+                tree_terminated = False
+                if proc.poll() is None:
+                    proc.kill()
     elapsed = time.monotonic() - started
     if timed_out:
-        detail = f"超过 {timeout:.0f}s 限制（已耗时 {elapsed:.1f}s），进程树已终止；完整日志：{log}"
+        cleanup = "进程树已终止" if tree_terminated else "未能确认进程树已终止"
+        detail = f"达到 {timeout:.0f}s 总预算（已耗时 {elapsed:.1f}s）；{cleanup}；完整日志：{log}"
         return StageResult(name, STATUS_TIMED_OUT, detail, log)
     if proc.returncode == 0:
         return StageResult(name, STATUS_OK, f"{elapsed:.1f}s；完整日志：{log}", log)
@@ -240,6 +267,9 @@ def _print_summary(
 
 
 def cmd_fastcheck(deadline_seconds: float) -> int:
+    if sys.platform != "win32":
+        print("fastcheck 按合同 P-07 仅支持 Windows；拒绝在其他平台执行。")
+        return 2
     started = time.monotonic()
     deadline = started + deadline_seconds
     results: list[StageResult] = []

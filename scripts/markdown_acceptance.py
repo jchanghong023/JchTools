@@ -4,9 +4,8 @@
 定位与边界（如实声明，不得虚构）：
   本脚本只建立「承接入口」：把附录 A 的 26 项格式矩阵、界面 E2E 与双形态/环境前置
   落成逐项可执行的验收条目。真实 Xberg 运行时、媒体模型、被测 GUI 二进制或发布包
-  不在场时，对应条目一律 NOT RUN 并列出所需资产与获取方式，绝不在缺资产环境下把
-  条目报成 PASS。当前环境没有媒体组件与被测 GUI，默认运行预期是「全部 NOT RUN、
-  退出码 2」，这正是要如实呈现的状态。
+  缺失时，对应条目一律 NOT RUN 并列出所需前置，不得报为 PASS。未提供被测 GUI、
+  隔离资产根及发布目录参数时，默认运行预期全部 NOT RUN、退出码 2。
 
 入口形态结论（依据 T-04 与 src/main.rs）：转 Markdown 只提供 GUI 入口，仓库没有
   CLI 子命令，src/markdown.rs::run 是库函数而非公开入口。因此 A 组矩阵条目的
@@ -23,8 +22,9 @@
         --json .tmp/markdown-acceptance/report.json
 
 依赖：pywinauto / Pillow /（媒体合成另需 PATH 上的 ffmpeg），见 scripts/requirements-dev.txt。
-验收隔离：资产根必须由调用方通过 `JCHTOOLS_TEST_ASSET_ROOT`（或
-`JCHTOOLS_MARKDOWN_TEST_ASSET_ROOT`）提供；脚本不读取生产 SQLite、生产资产或截图数据。
+验收隔离：资产根与 `JCHTOOLS_TEST_STATE_DIR` 必须位于仓库 `.tmp/` 下；脚本拒绝读取或
+写入仓库外状态库/资产根，不自动猜测 `target/debug` 中可能陈旧的 GUI。被测 GUI 须由
+`--gui-exe` 或 `JCHTOOLS_TEST_GUI_EXE` 显式指定。
 退出码：任一 FAIL→1；全部 NOT RUN→2；其余（有 PASS、无 FAIL）→0；参数错误→3。
 """
 
@@ -47,7 +47,7 @@ import threading
 import time
 import zipfile
 from pathlib import Path
-from typing import TYPE_CHECKING, cast
+from typing import TYPE_CHECKING, cast, override
 
 import comtypes
 import pywintypes
@@ -65,16 +65,39 @@ from scripts.gui_smoke import completion_confirms_new_run, own_process_tree
 
 if TYPE_CHECKING:
     from collections.abc import Callable
-    from typing import TypeIs
+    from typing import NoReturn, TypeIs
 
     from pywinauto.base_wrapper import BaseWrapper
 
 ROOT = Path(__file__).resolve().parent.parent
+TMP_ROOT = ROOT / ".tmp"
 FIXTURES_DEFAULT = ROOT / "tests" / "markdown_fixtures"
-SCRATCH_ROOT = ROOT / ".tmp" / "markdown-acceptance"
+SCRATCH_ROOT = TMP_ROOT / "markdown-acceptance"
 GUI_SMOKE = ROOT / "scripts" / "gui_smoke.py"
 ASSET_MANIFEST = ROOT / "resources" / "markdown-assets.json"
 FORMAT_MANIFEST = ROOT / "resources" / "markdown-xberg-formats.json"
+
+
+def _is_under_tmp(path: Path) -> bool:
+    """解析链接后确认路径仍位于仓库 .tmp，避免验收输入/产物绕出隔离区."""
+    try:
+        resolved = path.resolve()
+    except (OSError, RuntimeError, ValueError):
+        return False
+    return resolved.is_relative_to(TMP_ROOT)
+
+
+def _isolated_environment_error() -> str | None:
+    """拒绝将生产状态库或资产目录通过验收环境变量伪装成隔离根."""
+    for name in ("JCHTOOLS_TEST_ASSET_ROOT", "JCHTOOLS_MARKDOWN_TEST_ASSET_ROOT", "JCHTOOLS_TEST_STATE_DIR"):
+        value = os.environ.get(name)
+        if not value:
+            continue
+        path = Path(value)
+        if not path.is_absolute() or not _is_under_tmp(path):
+            return f"{name} 必须是仓库 .tmp/ 下的绝对隔离路径，拒绝读取或写入：{value}"
+    return None
+
 
 # 状态常量名避开 pass 字样（质量门 S105 把含该字样的变量名当疑似硬编码口令）。
 STATUS_OK = "PASS"
@@ -2015,27 +2038,33 @@ def _delegate_stage(stage: str, exe: Path, env_extra: dict[str, str] | None = No
 
 
 def _manifest_forbidden_names() -> frozenset[str]:
-    """从资产清单只读收集禁止随主包携带的成员文件名（S10-14 清单驱动）.
-
-    只纳入可执行/原生库/模型类成员与模型词表显式名单；清单缺失或不可解析时
-    返回空集，由固定模式兜底（不把清单故障放大为扫描失败）。
-    """
+    """从资产清单只读收集禁止随主包携带的成员文件名；无法解析时拒绝给出假 PASS."""
     try:
         parsed = _parse_json(ASSET_MANIFEST.read_text(encoding="utf-8"))
-    except (OSError, ValueError):
-        return frozenset()
+    except (OSError, ValueError) as error:
+        message = f"转换资产清单无法读取或解析：{error}"
+        raise ValueError(message) from error
+    if not _is_str_obj_map(parsed):
+        message = "转换资产清单不是 JSON 对象"
+        raise ValueError(message)
     names: set[str] = set(_MANIFEST_MEMBER_ASSET_NAMES)
-    if _is_str_obj_map(parsed):
-        for section_key in ("xberg", "xberg_inference"):
-            section = parsed.get(section_key)
-            members = section.get("members") if _is_str_obj_map(section) else None
-            if not _is_str_obj_list(members):
-                continue
-            for entry in members:
-                relative = _str_field(entry, "install_path") or _str_field(entry, "path") or ""
-                base = relative.replace("/", "\\").rsplit("\\", 1)[-1].lower()
-                if base and base.endswith(_MANIFEST_MEMBER_SUFFIXES):
-                    names.add(base)
+    for section_key in ("xberg", "xberg_inference"):
+        section = parsed.get(section_key)
+        members = section.get("members") if _is_str_obj_map(section) else None
+        if not _is_str_obj_list(members) or not members:
+            message = f"转换资产清单缺少非空 {section_key}.members 数组"
+            raise ValueError(message)
+        for entry in members:
+            relative = _str_field(entry, "install_path") or _str_field(entry, "path")
+            if not relative:
+                message = f"转换资产清单 {section_key}.members 存在缺少路径的成员"
+                raise ValueError(message)
+            base = relative.replace("/", "\\").rsplit("\\", 1)[-1].lower()
+            if not base:
+                message = f"转换资产清单 {section_key}.members 存在无文件名的成员路径：{relative}"
+                raise ValueError(message)
+            if base.endswith(_MANIFEST_MEMBER_SUFFIXES):
+                names.add(base)
     return frozenset(names)
 
 
@@ -2658,9 +2687,10 @@ def _run_gui_ref(item: Item, ctx: Context) -> Outcome:
     if pending:
         return Outcome(STATUS_NOT_RUN, pending)
     env_extra: dict[str, str] = {}
-    if item.stage in ("S6", "S7") and ctx.assets.runtime_dir is not None:
-        # S6/S7 各自使用隔离 SQLite；目录环境变量必须来自同一份已探测配置，
-        # 不能让固定提示路径与 GUI 实际保存的目录分叉。
+    if item.stage in ("S6", "S7", "S8") and ctx.assets.runtime_dir is not None:
+        # S6-S8 各自使用隔离 SQLite；目录环境变量必须来自同一份已探测配置，
+        # 不能让固定提示路径与 GUI 实际保存的目录分叉。S8 的重试步同样要保存
+        # 有效目录（两次无效目录报错文案相同，靠成功保存做切换点）。
         env_extra["JCHTOOLS_SMOKE_XBERG_DIR"] = str(ctx.assets.runtime_dir)
     if item.stage in ("S5", "S14") and not os.environ.get("JCHTOOLS_S5_MEDIA"):
         # S5/S14 需要真实媒体样本观察运行态；默认使用已有夹具中的真实视频。
@@ -2798,14 +2828,33 @@ def _c05_scan_during_conversion(exe: Path, input_dir: Path, output_dir: Path) ->
     return run, module_hits, scan_errors
 
 
-def _c05_assess(item_id: str, run: GuiRun, module_hits: list[str], scan_errors: list[str]) -> Outcome:
+def _c05_assess(  # noqa: PLR0913  # 验证结果、输入快照与进程扫描证据具有独立语义
+    item: Item,
+    prepared: PreparedInputs,
+    sources: dict[Path, str],
+    run: GuiRun,
+    module_hits: list[str],
+    scan_errors: list[str],
+) -> Outcome:
     if scan_errors:
         return Outcome(STATUS_NOT_RUN, scan_errors[0])
     if run.error is not None:
-        return Outcome(STATUS_FAILED, f"{item_id} 转换链路失败：{run.error}")
+        return Outcome(STATUS_FAILED, f"{item.item_id} 转换链路失败：{run.error}")
     if module_hits:
         return Outcome(STATUS_FAILED, f"转换期间进程加载了 python 模块：{module_hits[:4]}")
-    return Outcome(STATUS_OK, details=[f"{item_id} 转换运行期间进程模块与资产清单均无 Python"])
+    conversion = _assess_conversion(item, prepared, sources, run)
+    if conversion.status != STATUS_OK:
+        return Outcome(STATUS_FAILED, f"{item.item_id} 未证明真实转换成功：{conversion.reason}", conversion.details)
+    empty = [path.name for path in run.outputs if not path.read_text(encoding="utf-8", errors="replace").strip()]
+    if empty:
+        return Outcome(STATUS_FAILED, f"{item.item_id} 转换产物正文为空：{empty}", conversion.details)
+    return Outcome(
+        STATUS_OK,
+        details=[
+            f"{item.item_id} 转换产物与源文件断言通过，运行期间进程模块及资产清单均无 Python",
+            *conversion.details,
+        ],
+    )
 
 
 def _run_c05_no_python(item: Item, ctx: Context) -> Outcome:
@@ -2820,8 +2869,13 @@ def _run_c05_no_python(item: Item, ctx: Context) -> Outcome:
     prepared = _prepare_scratch(item, ctx, "python-scan")
     if prepared.error is not None or not prepared.files:
         return Outcome(STATUS_NOT_RUN, f"夹具准备失败：{prepared.error or '输入为空'}")
+    sources = {
+        path.relative_to(prepared.input_dir): _file_digest(path)
+        for path in prepared.input_dir.rglob("*")
+        if path.is_file()
+    }
     run, module_hits, scan_errors = _c05_scan_during_conversion(target, prepared.input_dir, prepared.output_dir)
-    return _c05_assess(item.item_id, run, module_hits, scan_errors)
+    return _c05_assess(item, prepared, sources, run, module_hits, scan_errors)
 
 
 def _run_c06_old_dir(item: Item, ctx: Context) -> Outcome:
@@ -2945,6 +2999,15 @@ def _print_report(results: list[tuple[Item, Outcome]], report_path: Path | None)
     return 0
 
 
+class _ArgumentParser(argparse.ArgumentParser):
+    """验收入口参数错误使用文档承诺的退出码 3（测试未运行仍专用退出码 2）."""
+
+    @override
+    def error(self, message: str) -> NoReturn:
+        self.print_usage(sys.stderr)
+        self.exit(3, f"{self.prog}: error: {message}\n")
+
+
 class _Arguments(argparse.Namespace):
     """带类型标注的解析结果；类属性即默认值（argparse 仅对缺失属性写默认值）."""
 
@@ -2960,11 +3023,22 @@ class _Arguments(argparse.Namespace):
 
 
 def _seed_isolated_state(state_root: Path, xberg_root: Path) -> None:
-    """为开发验收 GUI 写入与驱动同源的隔离 Xberg 配置。."""
+    """为开发验收 GUI 写入与驱动同源的隔离 Xberg 配置."""
     if not state_root.is_absolute() or not xberg_root.is_absolute():
         message = "隔离状态目录与 Xberg 目录必须是绝对路径"
         raise ValueError(message)
+    state_root = state_root.resolve()
+    xberg_root = xberg_root.resolve()
+    if not _is_under_tmp(state_root):
+        message = f"隔离状态目录必须位于仓库 .tmp/ 下，拒绝写入：{state_root}"
+        raise ValueError(message)
+    if not (xberg_root / "xberg.exe").is_file():
+        message = f"隔离 Xberg 目录缺少 xberg.exe：{xberg_root}"
+        raise ValueError(message)
     database = state_root / "config.sqlite3"
+    if not _is_under_tmp(database):
+        message = f"隔离设置库目标必须位于仓库 .tmp/ 下，拒绝写入：{database}"
+        raise ValueError(message)
     schema = ROOT / "src" / "app_settings.sql"
     state_root.mkdir(parents=True, exist_ok=True)
     with contextlib.closing(sqlite3.connect(database)) as connection:
@@ -2999,21 +3073,28 @@ def _select_items(selector: str) -> tuple[list[Item], str | None]:
 def main() -> int:
     _reconfigure_stdout()
     description = "转 Markdown 验收承接驱动器（附录 A；缺资产一律 NOT RUN，不虚构 PASS）"
-    parser = argparse.ArgumentParser(description=description)
+    parser = _ArgumentParser(description=description)
     _ = parser.add_argument("--list", dest="list_only", action="store_true", help="列出全部条目与夹具/资产映射，不执行")
     _ = parser.add_argument("--only", default="", help="只执行指定组（A/B/C）或条目（如 A24），逗号分隔")
-    _ = parser.add_argument("--gui-exe", default="", help="被测 JchTools.exe（debug 构建支持干净资产根覆盖）")
+    _ = parser.add_argument(
+        "--gui-exe",
+        default="",
+        help="被测 JchTools.exe（必须显式提供，或由 JCHTOOLS_TEST_GUI_EXE 指定）",
+    )
     _ = parser.add_argument("--portable-root", default="", help="解包的便携版目录（含 JchTools.exe）")
     _ = parser.add_argument("--installed-root", default="", help="安装版目录（默认形态为安装器写入的位置）")
     _ = parser.add_argument("--fixtures", default="", help="夹具目录（默认 tests/markdown_fixtures）")
-    _ = parser.add_argument("--json", dest="json_report", default="", help="JSON 报告输出路径（留档）")
+    _ = parser.add_argument("--json", dest="json_report", default="", help="JSON 报告输出路径（必须位于仓库 .tmp/）")
     _ = parser.add_argument("--seed-state", default="", help=argparse.SUPPRESS)
     _ = parser.add_argument("--seed-xberg", default="", help=argparse.SUPPRESS)
     args = parser.parse_args(namespace=_Arguments())
     if bool(args.seed_state) != bool(args.seed_xberg):
         parser.error("--seed-state 与 --seed-xberg 必须成对提供")
     if args.seed_state:
-        _seed_isolated_state(Path(args.seed_state).resolve(), Path(args.seed_xberg).resolve())
+        try:
+            _seed_isolated_state(Path(args.seed_state), Path(args.seed_xberg))
+        except (OSError, RuntimeError, ValueError, sqlite3.Error) as error:
+            parser.error(str(error))
         return 0
     if args.list_only:
         return print_list()
@@ -3021,12 +3102,22 @@ def main() -> int:
     if error is not None:
         print(error)
         return 3
-    discovered_gui = os.environ.get("JCHTOOLS_TEST_GUI_EXE")
-    if not discovered_gui:
-        candidate = ROOT / "target" / "debug" / "JchTools.exe"
-        discovered_gui = str(candidate) if candidate.is_file() else ""
+    environment_error = _isolated_environment_error()
+    if environment_error is not None:
+        parser.error(environment_error)
+    if args.json_report:
+        try:
+            report_path = Path(args.json_report).resolve()
+        except (OSError, RuntimeError, ValueError) as error:
+            parser.error(f"--json 输出路径无效：{error}")
+        if not _is_under_tmp(report_path):
+            parser.error(f"--json 输出路径必须位于仓库 .tmp/ 下，拒绝写入：{report_path}")
+    else:
+        report_path = None
+    explicit_gui = os.environ.get("JCHTOOLS_TEST_GUI_EXE")
+    gui_source = args.gui_exe or explicit_gui
     ctx = Context(
-        Path(args.gui_exe or discovered_gui).resolve() if (args.gui_exe or discovered_gui) else None,
+        Path(gui_source).resolve() if gui_source else None,
         Path(args.installed_root).resolve() if args.installed_root else None,
         Path(args.portable_root).resolve() if args.portable_root else None,
         Path(args.fixtures).resolve() if args.fixtures else FIXTURES_DEFAULT,
@@ -3034,7 +3125,6 @@ def main() -> int:
     )
     SCRATCH_ROOT.mkdir(parents=True, exist_ok=True)
     results = [(item, run_item(item, ctx)) for item in selected]
-    report_path = Path(args.json_report).resolve() if args.json_report else None
     return _print_report(results, report_path)
 
 

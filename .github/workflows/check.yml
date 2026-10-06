@@ -49,7 +49,9 @@ jobs:
       - name: Markdown acceptance entry (含 NOT RUN 时见 Step Summary)
         shell: pwsh
         run: |
-          $jsonReport = Join-Path $env:RUNNER_TEMP 'markdown-acceptance-report.json'
+          $reportDirectory = Join-Path $env:GITHUB_WORKSPACE '.tmp'
+          New-Item -ItemType Directory -Path $reportDirectory -Force | Out-Null
+          $jsonReport = Join-Path $reportDirectory 'markdown-acceptance-report.json'
           python scripts/markdown_acceptance.py --json $jsonReport
           $code = $LASTEXITCODE
           $notRun = @()

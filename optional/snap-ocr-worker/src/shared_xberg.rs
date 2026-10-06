@@ -11,7 +11,7 @@ use std::time::Duration;
 /// 客户端错误（O-30 分类：取消 / 推理失败 / 子进程退出 / 通信失败 / 超时）。
 #[derive(Debug, Clone)]
 pub(crate) enum ClientError {
-    /// 用户取消：调用方应随后终止引擎并重载（XB-08）。
+    /// 用户取消：请求级协作取消；调用方可重建本场景客户端，但不得终止共享引擎（XB-08/XB-17）。
     Cancelled,
     /// Xberg 返回的失败响应（`ok:false`；消息不含图像内容）。`kind` 是响应的
     /// 结构化 `error_kind`，与 Xberg `snapshot_ocr.rs` 的取值全集对齐：

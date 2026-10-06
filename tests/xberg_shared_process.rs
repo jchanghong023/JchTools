@@ -334,6 +334,68 @@ fn documents_reuse_process_and_snapshot_finishes_during_document() {
     );
 }
 
+/// O-16/XB-17：显式强退必须等待所有场景任务结束，不能只保护文档 lane。
+#[test]
+fn force_exit_keeps_shared_engine_while_snapshot_task_active() {
+    common::ensure_child_reaper();
+    let _session = common::session_lock();
+    common::cleanup_stray_engines();
+    let temp = tempfile::tempdir().unwrap();
+    let root = temp.path();
+    prepare(root);
+
+    let state = xberg_runtime::request(
+        root,
+        json!({"command":"snapshot_state"}),
+        Duration::from_secs(15),
+        &AtomicBool::new(false),
+    )
+    .unwrap();
+    assert_eq!(state["ok"], true, "代理启动失败：{state}");
+    let pid = state["jchtools_xberg_pid"].clone();
+    let _shared = SharedProcess {
+        broker_pid: state["jchtools_broker_pid"].as_u64().unwrap(),
+        engine_pid: state["jchtools_xberg_pid"].as_u64(),
+    };
+
+    let cancellation = Arc::new(AtomicBool::new(false));
+    let token = cancellation.clone();
+    let directory = root.to_path_buf();
+    let snapshot = std::thread::spawn(move || {
+        xberg_runtime::request(
+            &directory,
+            json!({"command":"ocr_snapshot","image_base64":"wait"}),
+            Duration::from_secs(15),
+            &token,
+        )
+    });
+    let deadline = Instant::now() + Duration::from_secs(5);
+    while !root.join("snapshot-started").exists() {
+        assert!(Instant::now() < deadline, "模拟引擎未进入等待中的截图请求");
+        std::thread::sleep(Duration::from_millis(5));
+    }
+
+    let rejected = xberg_runtime::force_background_exit().unwrap();
+    assert_eq!(
+        rejected["ok"], false,
+        "截图仍在执行时强退不得终结共享引擎：{rejected}"
+    );
+    assert!(!snapshot.is_finished(), "拒绝强退不得中断截图请求");
+    cancellation.store(true, Ordering::Release);
+    let cancelled = snapshot.join().unwrap().unwrap();
+    assert_eq!(cancelled["error_kind"], "cancelled");
+
+    let state = xberg_runtime::request(
+        root,
+        json!({"command":"snapshot_state"}),
+        Duration::from_secs(5),
+        &AtomicBool::new(false),
+    )
+    .unwrap();
+    assert_eq!(state["jchtools_xberg_pid"], pid);
+    assert_eq!(xberg_runtime::force_background_exit().unwrap()["ok"], true);
+}
+
 /// 覆盖 XB-08/XB-17：取消 ACK 不等于原请求终态。取消接口若已确认但模拟引擎
 /// 永不返回原 extract 终态，客户端必须在有界收尾时间内报错，同时代理继续保留
 /// document lane，拒绝重复文档请求；snapshot lane 仍可用且复用同一引擎 PID。

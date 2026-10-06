@@ -859,79 +859,170 @@ fn download_stream(
     cancel: &AtomicBool,
     progress: &mut dyn FnMut(String),
 ) -> Result<(), String> {
-    // P-09：下载先经 Windows 系统手动代理（例外表内的目标直连）；经代理
-    // 连接失败时自动回退直连重试一次，直连同样失败才按原口径报错。
+    // P-09 的 ProxyOverride 按每个实际请求目标匹配，不能沿用初始 URL 的代理
+    // 策略处理重定向；每跳失败时仅对该目标执行一次代理→直连回退。
     let proxy = crate::system_proxy::read();
-    let endpoint = proxy.endpoint_for_url(url);
-    match download_attempt(
-        url,
-        partial,
-        expected_size,
-        cancel,
-        progress,
-        endpoint.as_deref(),
-    ) {
-        Ok(()) => Ok(()),
-        Err((proxy_message, transport)) if endpoint.is_some() && transport => {
-            tracing::warn!(
-                proxy = proxy_message,
-                url = url,
-                "系统代理连接失败，按 P-09 自动回退直连重试"
-            );
-            progress("系统代理连接失败，自动回退直连重试".to_string());
-            download_attempt(url, partial, expected_size, cancel, progress, None).map_err(
-                |(direct_message, _)| {
-                    tracing::error!(
-                        proxy = proxy_message,
-                        direct = direct_message,
-                        url = url,
-                        "系统代理与直连均失败"
-                    );
-                    format!(
-                        "系统代理与直连均失败——系统代理：{proxy_message}；直连：{direct_message}"
-                    )
-                },
-            )
-        }
-        Err((message, _)) => {
-            tracing::error!(url = url, reason = message, "资产下载失败");
-            Err(message)
-        }
-    }
+    download_attempt(url, partial, expected_size, cancel, progress, &proxy).map_err(
+        |(message, _)| {
+            tracing::error!(url, reason = message, "资产下载失败");
+            message
+        },
+    )
 }
 
-/// 单次下载尝试；失败元组第二项标记是否为传输层（连接 / 读取）失败，供
-/// P-09 的直连回退判定——HTTP 状态错误、取消与本地磁盘错误不触发回退。
+/// 单次下载尝试：逐跳重新选择系统代理；仅代理传输失败时对当前目标直连重试一次。
+/// 重定向上限与锁定的 ureq 2.12.1 `.redirects(3)` 行为一致（最多跟随两跳）。
 fn download_attempt(
     url: &str,
     partial: &Path,
     expected_size: u64,
     cancel: &AtomicBool,
     progress: &mut dyn FnMut(String),
-    proxy: Option<&str>,
+    proxy: &crate::system_proxy::SystemProxy,
 ) -> Result<(), (String, bool)> {
-    let mut builder = ureq::builder()
-        .redirects(3)
-        // 连接超时 + 单次读超时，整体时长由用户取消控制。
-        .timeout_connect(Duration::from_secs(30))
-        .timeout_read(Duration::from_secs(60))
-        .user_agent("JchTools-snap-ocr-assets/1");
-    if let Some(proxy_url) = proxy {
-        match ureq::Proxy::new(proxy_url) {
-            Ok(parsed) => builder = builder.proxy(parsed),
-            // 端点字符串由本仓库解析生成，正常不可能非法；异常时按直连
-            // 继续，不让代理问题阻塞下载（P-09 可用性优先）。
-            Err(error) => progress(format!("系统代理地址无法解析（{error}），本次直连")),
+    let mut current_url = url.to_string();
+    let mut redirects_followed = 0_u32;
+    let mut retry_direct = false;
+    let mut proxy_failure = None;
+    loop {
+        if cancel.load(std::sync::atomic::Ordering::Acquire) {
+            let _ = fs::remove_file(partial);
+            return Err(("用户已取消初始化".to_string(), false));
+        }
+        let endpoint = if retry_direct {
+            None
+        } else {
+            proxy.endpoint_for_url(&current_url)
+        };
+        let response = match download_request(&current_url, endpoint.as_deref(), progress) {
+            Ok(response) => response,
+            Err((proxy_message, true)) if endpoint.is_some() => {
+                tracing::warn!(
+                    proxy = proxy_message,
+                    url = current_url,
+                    "系统代理连接失败，按 P-09 自动回退直连重试"
+                );
+                progress("系统代理连接失败，自动回退直连重试".to_string());
+                proxy_failure = Some(proxy_message);
+                retry_direct = true;
+                continue;
+            }
+            Err((direct_message, _)) => {
+                return Err(download_attempt_error(
+                    &current_url,
+                    &mut proxy_failure,
+                    direct_message,
+                ));
+            }
+        };
+
+        let status = response.status();
+        // ureq checks the redirect limit before looking up Location, including
+        // a third 3xx response without a Location header.
+        if (300..400).contains(&status) && redirects_followed + 1 >= 3 {
+            return Err(download_attempt_error(
+                &current_url,
+                &mut proxy_failure,
+                format!("下载请求失败：达到重定向次数上限（3）：{current_url}"),
+            ));
+        }
+        let location = if matches!(status, 301 | 302 | 303 | 307 | 308) {
+            response.header("location").map(str::to_owned)
+        } else {
+            None
+        };
+        if let Some(location) = location {
+            let request_url = match ureq::get(&current_url).request_url() {
+                Ok(url) => url,
+                Err(error) => {
+                    return Err(download_attempt_error(
+                        &current_url,
+                        &mut proxy_failure,
+                        format!("下载请求失败：{error}"),
+                    ));
+                }
+            };
+            let next_url = match request_url.as_url().join(&location) {
+                Ok(url) => url,
+                Err(error) => {
+                    return Err(download_attempt_error(
+                        &current_url,
+                        &mut proxy_failure,
+                        format!("下载重定向地址无效：{error}"),
+                    ));
+                }
+            };
+            drop(response);
+            current_url = next_url.to_string();
+            redirects_followed += 1;
+            retry_direct = false;
+            proxy_failure = None;
+            continue;
+        }
+        if !(200..300).contains(&status) {
+            return Err(download_attempt_error(
+                &current_url,
+                &mut proxy_failure,
+                format!("下载请求返回 HTTP {status}"),
+            ));
+        }
+
+        match download_response_body(response, partial, expected_size, cancel, progress) {
+            Ok(()) => return Ok(()),
+            Err((proxy_message, true)) if endpoint.is_some() => {
+                tracing::warn!(
+                    proxy = proxy_message,
+                    url = current_url,
+                    "系统代理连接失败，按 P-09 自动回退直连重试"
+                );
+                progress("系统代理连接失败，自动回退直连重试".to_string());
+                let _ = fs::remove_file(partial);
+                proxy_failure = Some(proxy_message);
+                retry_direct = true;
+            }
+            Err((direct_message, _)) => {
+                return Err(download_attempt_error(
+                    &current_url,
+                    &mut proxy_failure,
+                    direct_message,
+                ));
+            }
         }
     }
-    let agent = builder.build();
-    let response = agent.get(url).call().map_err(|error| match error {
-        ureq::Error::Transport(transport) => (format!("下载请求失败：{transport}"), true),
-        status @ ureq::Error::Status(..) => (format!("下载请求失败：{status}"), false),
-    })?;
-    if !(200..300).contains(&response.status()) {
-        return Err((format!("下载请求返回 HTTP {}", response.status()), false));
+}
+
+fn download_attempt_error(
+    url: &str,
+    proxy_failure: &mut Option<String>,
+    direct_message: String,
+) -> (String, bool) {
+    if let Some(proxy_message) = proxy_failure.take() {
+        proxy_direct_failure(url, &proxy_message, &direct_message)
+    } else {
+        (direct_message, false)
     }
+}
+
+fn proxy_direct_failure(url: &str, proxy_message: &str, direct_message: &str) -> (String, bool) {
+    tracing::error!(
+        proxy = proxy_message,
+        direct = direct_message,
+        url,
+        "系统代理与直连均失败"
+    );
+    (
+        format!("系统代理与直连均失败——系统代理：{proxy_message}；直连：{direct_message}"),
+        false,
+    )
+}
+
+fn download_response_body(
+    response: ureq::Response,
+    partial: &Path,
+    expected_size: u64,
+    cancel: &AtomicBool,
+    progress: &mut dyn FnMut(String),
+) -> Result<(), (String, bool)> {
     let mut reader = response.into_reader();
     let mut output =
         File::create(partial).map_err(|error| (format!("创建下载文件失败：{error}"), false))?;
@@ -980,6 +1071,42 @@ fn download_attempt(
         .sync_all()
         .map_err(|error| (format!("同步下载文件失败：{error}"), false))?;
     Ok(())
+}
+
+/// 发起一个不自动跟随重定向的 GET；调用方按新 URL 重新应用系统代理策略。
+fn download_request(
+    url: &str,
+    proxy: Option<&str>,
+    progress: &mut dyn FnMut(String),
+) -> Result<ureq::Response, (String, bool)> {
+    let mut builder = ureq::builder()
+        .redirects(0)
+        // 连接超时 + 单次读超时，整体时长由用户取消控制。
+        .timeout_connect(Duration::from_secs(30))
+        .timeout_read(Duration::from_secs(60))
+        .user_agent("JchTools-snap-ocr-assets/1");
+    if let Some(proxy_url) = proxy {
+        match ureq::Proxy::new(proxy_url) {
+            Ok(parsed) => builder = builder.proxy(parsed),
+            // 端点字符串由本仓库解析生成，正常不可能非法；异常时按直连
+            // 继续，不让代理问题阻塞下载（P-09 可用性优先）。
+            Err(error) => progress(format!("系统代理地址无法解析（{error}），本次直连")),
+        }
+    }
+    let agent = builder.build();
+    agent.get(url).call().map_err(|error| match error {
+        error @ ureq::Error::Transport(_) => {
+            let retryable = matches!(
+                error.kind(),
+                ureq::ErrorKind::Dns
+                    | ureq::ErrorKind::ConnectionFailed
+                    | ureq::ErrorKind::ProxyConnect
+                    | ureq::ErrorKind::Io
+            );
+            (format!("下载请求失败：{error}"), retryable)
+        }
+        status @ ureq::Error::Status(..) => (format!("下载请求失败：{status}"), false),
+    })
 }
 
 fn checked_download_total(current: u64, chunk: u64, expected_size: u64) -> Result<u64, String> {
@@ -1681,5 +1808,120 @@ mod tests {
             text.contains("xberg-inference"),
             "推理组件条目应指向安装目录 xberg-inference/：{text}"
         );
+    }
+    // P-09: 重定向到 ProxyOverride 命中目标时必须直连，不能继承首跳代理。
+    #[test]
+    fn redirect_rechecks_proxy_override_for_each_target() {
+        use std::io::{Read, Write};
+        use std::net::{TcpListener, TcpStream};
+        use std::time::Instant;
+
+        fn accept_with_timeout(listener: &TcpListener) -> TcpStream {
+            listener
+                .set_nonblocking(true)
+                .expect("设置本地测试监听器非阻塞");
+            let deadline = Instant::now() + std::time::Duration::from_secs(3);
+            loop {
+                match listener.accept() {
+                    Ok((stream, _)) => return stream,
+                    Err(error)
+                        if error.kind() == std::io::ErrorKind::WouldBlock
+                            && Instant::now() < deadline =>
+                    {
+                        std::thread::sleep(std::time::Duration::from_millis(10));
+                    }
+                    Err(error) => panic!("等待本地 HTTP 请求失败：{error}"),
+                }
+            }
+        }
+
+        fn read_request(stream: &mut TcpStream) -> String {
+            stream
+                .set_read_timeout(Some(std::time::Duration::from_secs(3)))
+                .expect("设置本地 HTTP 读取超时");
+            let mut bytes = Vec::new();
+            let mut buffer = [0_u8; 512];
+            loop {
+                let count = stream.read(&mut buffer).expect("读取本地 HTTP 请求");
+                if count == 0 {
+                    break;
+                }
+                bytes.extend_from_slice(&buffer[..count]);
+                if bytes.windows(4).any(|window| window == b"\r\n\r\n") {
+                    break;
+                }
+            }
+            String::from_utf8_lossy(&bytes).into_owned()
+        }
+
+        let target_listener =
+            TcpListener::bind(("127.0.0.1", 0)).expect("启动直连重定向目标监听器");
+        let target_addr = target_listener.local_addr().expect("读取目标监听地址");
+        let body = b"redirected-asset";
+        let target = std::thread::spawn(move || {
+            let mut stream = accept_with_timeout(&target_listener);
+            let request = read_request(&mut stream);
+            let response = format!(
+                "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                body.len()
+            );
+            stream
+                .write_all(response.as_bytes())
+                .expect("发送直连响应头");
+            stream.write_all(body).expect("发送直连响应内容");
+            request
+        });
+
+        let proxy_listener = TcpListener::bind(("127.0.0.1", 0)).expect("启动系统代理模拟监听器");
+        let proxy_addr = proxy_listener.local_addr().expect("读取代理监听地址");
+        let redirect_url = format!("http://127.0.0.1:{}/asset", target_addr.port());
+        let proxy = std::thread::spawn(move || {
+            let mut stream = accept_with_timeout(&proxy_listener);
+            let request = read_request(&mut stream);
+            let response = format!(
+                "HTTP/1.1 302 Found\r\nLocation: {redirect_url}\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"
+            );
+            stream
+                .write_all(response.as_bytes())
+                .expect("发送代理重定向响应");
+            request
+        });
+
+        let proxy_setting = format!("http=127.0.0.1:{}", proxy_addr.port());
+        let system_proxy = crate::system_proxy::SystemProxy::from_registry_values(
+            1,
+            Some(&proxy_setting),
+            Some("127.0.0.1"),
+        );
+        let source_url = "http://origin.example/asset";
+        let target_url = format!("http://127.0.0.1:{}/asset", target_addr.port());
+        assert!(system_proxy.endpoint_for_url(source_url).is_some());
+        assert_eq!(system_proxy.endpoint_for_url(&target_url), None);
+
+        let temp = tempfile::tempdir().expect("创建临时下载目录");
+        let partial = temp.path().join("redirect.part");
+        let cancel = AtomicBool::new(false);
+        let mut progress = |_message: String| {};
+        let result = super::download_attempt(
+            source_url,
+            &partial,
+            u64::try_from(body.len()).expect("测试资产大小可转换"),
+            &cancel,
+            &mut progress,
+            &system_proxy,
+        );
+
+        let proxy_request = proxy.join().expect("代理线程完成");
+        let target_request = target.join().expect("目标线程完成");
+        assert!(
+            proxy_request.starts_with("GET http://origin.example/asset HTTP/1.1"),
+            "首跳应经系统代理：{proxy_request}"
+        );
+        assert!(
+            target_request.starts_with("GET /asset HTTP/1.1"),
+            "重定向目标应直接请求：{target_request}"
+        );
+        result.expect("逐跳按 ProxyOverride 路由后下载成功");
+        assert_eq!(fs::read(partial).expect("读取下载结果"), body);
     }
 }

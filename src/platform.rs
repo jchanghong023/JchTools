@@ -1,6 +1,34 @@
 use crate::{config::DeleteMode, control::Control, fsutil};
 use anyhow::{bail, Context, Result};
-use std::{fs, path::Path};
+use std::{cmp::Ordering, ffi::OsStr, fs, path::Path};
+
+/// Windows 序数忽略大小写比较；仅返回主比较结果，不追加大小写决胜。
+pub(crate) fn compare_names_ordinal_ignore_case(a: &OsStr, b: &OsStr) -> Ordering {
+    #[cfg(windows)]
+    {
+        use std::os::windows::ffi::OsStrExt;
+        use windows_sys::Win32::Globalization::CompareStringOrdinal;
+
+        let a: Vec<_> = a.encode_wide().collect();
+        let b: Vec<_> = b.encode_wide().collect();
+        let (Ok(a_len), Ok(b_len)) = (i32::try_from(a.len()), i32::try_from(b.len())) else {
+            return a.cmp(&b);
+        };
+        // SAFETY: 两个 UTF-16 缓冲区在同步调用期间有效，长度与各自缓冲区一致。
+        match unsafe { CompareStringOrdinal(a.as_ptr(), a_len, b.as_ptr(), b_len, 1) } {
+            1 => Ordering::Less,
+            2 => Ordering::Equal,
+            3 => Ordering::Greater,
+            _ => a.cmp(&b),
+        }
+    }
+    #[cfg(not(windows))]
+    {
+        a.to_string_lossy()
+            .to_lowercase()
+            .cmp(&b.to_string_lossy().to_lowercase())
+    }
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum DeleteResult {
@@ -66,6 +94,29 @@ pub fn remove(path: &Path, mode: DeleteMode, control: &Control) -> Result<Delete
 #[cfg(test)]
 mod tests {
     use super::{display_path_text, display_time_text};
+    #[test]
+    fn ordinal_ignore_case_comparison_has_no_case_tiebreak() {
+        use std::ffi::OsStr;
+
+        assert_eq!(
+            super::compare_names_ordinal_ignore_case(OsStr::new("A"), OsStr::new("a")),
+            std::cmp::Ordering::Equal
+        );
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn ordinal_ignore_case_does_not_expand_full_lowercase_mappings() {
+        use std::ffi::OsStr;
+
+        assert_ne!(
+            super::compare_names_ordinal_ignore_case(
+                OsStr::new("\u{0130}"),
+                OsStr::new("i\u{0307}")
+            ),
+            std::cmp::Ordering::Equal
+        );
+    }
 
     #[test]
     fn display_path_text_strips_extended_prefix() {

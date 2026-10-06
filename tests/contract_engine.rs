@@ -647,6 +647,50 @@ fn git_collection_named_project_never_nests_into_itself() {
     );
 }
 
+// 覆盖 C-14/C-21：名称等于集合容器的嵌套 Git 项目仍应平铺移入根集合；
+// 仅根目录本身的集合容器不得移动到自身内部。
+#[test]
+fn nested_git_project_named_collection_is_moved() {
+    let f = Fixture::new();
+    f.git_marker_dir("nested/Git项目集合");
+    f.write("nested/Git项目集合/README.md", b"project");
+
+    let task = f.plan(base());
+    assert_eq!(task.summary.planned_git, 1);
+    engine::apply(&task.directory, Context::default()).unwrap();
+
+    let moved = f.root.join("Git项目集合/Git项目集合");
+    assert!(moved.join(".git/HEAD").is_file(), "项目名按原样保留");
+    assert!(
+        moved.join("README.md").is_file(),
+        "Git 项目必须作为整树移动"
+    );
+    assert!(
+        !f.root.join("nested/Git项目集合").exists(),
+        "源项目移动后不得残留"
+    );
+}
+
+// 覆盖 C-18/C-14：项目直接集合容器被剔除后，紧邻的标准大类目录也应剔除。
+#[test]
+fn git_project_sources_skip_collection_and_category_levels() {
+    let f = Fixture::new();
+    f.git_marker_dir("branchA/文档/Git项目集合/tools");
+    f.git_marker_dir("branchB/文档/Git项目集合/tools");
+
+    let task = f.plan(base());
+    assert_eq!(task.summary.planned_git, 2);
+    engine::apply(&task.directory, Context::default()).unwrap();
+
+    assert!(f.root.join("Git项目集合/branchA_tools/.git").is_dir());
+    assert!(f.root.join("Git项目集合/branchB_tools/.git").is_dir());
+    assert!(
+        !f.root.join("branchA/文档/Git项目集合").exists()
+            && !f.root.join("branchB/文档/Git项目集合").exists(),
+        "移动后旧的类别与集合路径应清空"
+    );
+}
+
 // 覆盖 X-10/X-02（回归：只有 a.part02/a.part03 缺 part1 与 b.7z.002/b.7z.003
 // 缺 .001 的目录按「残缺但可归组的卷集」各计一包；修复前两者都被静默漏掉，
 // 确认框报 0 个包）

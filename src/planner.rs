@@ -200,16 +200,16 @@ fn source_levels(parent: &str, drop_collection: bool, normalize: bool) -> Vec<St
         .filter(|s| !s.is_empty())
         .map(str::to_string)
         .collect();
-    if let Some(last) = segments.last() {
-        if is_category_label(last) {
-            segments.pop();
-        }
-    }
     if drop_collection {
         if let Some(last) = segments.last() {
             if same_component(last, GIT_COLLECTION_DIR) {
                 segments.pop();
             }
+        }
+    }
+    if let Some(last) = segments.last() {
+        if is_category_label(last) {
+            segments.pop();
         }
     }
     // 最近一级在前（k=1 只加最近的父目录；level_prefix 拼接时再转回外→内顺序）。
@@ -634,10 +634,9 @@ fn git_collection(job: &mut Job) -> Result<Vec<String>> {
         let Some(name) = Path::new(rel).file_name().and_then(|s| s.to_str()) else {
             continue;
         };
-        // 项目自身就叫「Git项目集合」：它占据的就是集合容器位置，移动目标会落进
-        // 自己内部（Git项目集合/Git项目集合 自嵌套，C-14/C-21 明确禁止）——视同
-        // 已在集合位置，保留原位不生成移动计划。
-        if same_component(name, GIT_COLLECTION_DIR) {
+        // 根本身就叫「Git项目集合」时，目标路径会落入项目自身，必须原位保留。
+        // 嵌套目录下同名的项目目标是根集合下的子项，并非自嵌套，仍须整体移动。
+        if same_component(rel, GIT_COLLECTION_DIR) {
             continue;
         }
         let parent = parent_of(rel).to_string();

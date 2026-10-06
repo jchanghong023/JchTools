@@ -7,14 +7,15 @@
 报告由旧仓库 scripts/evaluate_ocr_fixture.py 和本仓库 ocr_compare example 产生。
 
 退出码约定：0 = Rust 指标在阈值内通过；1 = CER 或布局锚点偏差超阈（JSON 的
-failures 逐条标注原因）；命令行缺参为 argparse 的退出码 2；未捕获异常统一为退出码 3（崩溃诊断，不产出 JSON）。阈值门只作用于
-Rust（迁入版）的紧凑 CER 与锚点行列偏差；Python 是冻结参照，数值只记录不
-设门。紧凑 CER 即 2026-09-27 基线与附录 C「正文字符错误率 ≤ 2%」的度量口径
-——含空白的 exact CER 只记录不设门（冻结 Python 基线自身约 2.2%，以其设门
-会把与基线逐字符一致的健康结果误判为失败；空白回归由锚点偏差与
-texts_identical 报告承接）。布局列按 East Asian Width 半角单元计（W/F 计 2、
-组合字符计 0，与 SNAP2TEXT 附录 B 的 Rust 侧口径一致）。--out 只接受仓库根
-.tmp/ 之下的路径（AGENTS.md §2），拒绝仓库外同名 .tmp。
+failures 逐条标注原因）；命令行缺参为 argparse 的退出码 2；未捕获异常统一为
+退出码 3（崩溃诊断，不产出 JSON）。阈值门只作用于 Rust（迁入版）的紧凑 CER
+与锚点行列偏差；Python 是冻结参照，数值只记录不设门。紧凑 CER 即 2026-09-27
+基线与附录 C「正文字符错误率 ≤ 2%」的度量口径——含空白的 exact CER 只记录
+不设门（冻结 Python 基线自身约 2.2%，以其设门会把与基线逐字符一致的健康结果
+误判为失败；空白回归由锚点偏差与 texts_identical 报告承接）。布局列按 East
+Asian Width 半角单元计（W/F 计 2、组合字符计 0，与 SNAP2TEXT 附录 B 的 Rust
+侧口径一致）。--out 只接受仓库根 .tmp/ 之下的路径（AGENTS.md §2），拒绝仓库
+外同名 .tmp。
 """
 
 from __future__ import annotations
@@ -27,6 +28,7 @@ import tempfile
 import unicodedata
 from pathlib import Path
 from typing import Any
+from unittest.mock import patch
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 
@@ -99,11 +101,13 @@ def load_reports(paths: list[Path]) -> tuple[str, list[float], list[float]]:
 
 
 def ensure_repo_tmp_output(path: Path) -> Path:
-    """输出必须位于仓库根的 .tmp/ 之下（AGENTS.md §2）；拒绝仓库外同名 .tmp."""
+    """输出必须位于仓库根的真实 .tmp/ 之下（AGENTS.md §2），拒绝重解析点逃逸."""
     resolved = path.resolve()
+    repo_root = REPO_ROOT.resolve()
+    expected_tmp_root = repo_root / ".tmp"
     tmp_root = (REPO_ROOT / ".tmp").resolve()
-    if tmp_root not in resolved.parents:
-        message = f"输出必须位于仓库 {tmp_root} 之下：{resolved}"
+    if tmp_root != expected_tmp_root or tmp_root not in resolved.parents:
+        message = f"输出必须位于仓库 {expected_tmp_root} 之下：{resolved}"
         raise ValueError(message)
     return resolved
 
@@ -111,13 +115,14 @@ def ensure_repo_tmp_output(path: Path) -> Path:
 def evaluate_thresholds(
     names: list[str],
     reference_anchors: dict[str, dict[str, int] | None],
-    rust_anchors: dict[str, dict[str, int] | None],
-    compact_cer: float,
+    rust_metrics: dict[str, Any],
     max_cer: float,
     max_anchor_delta: int,
 ) -> list[str]:
     """按附录 C 口径评估 Rust 指标，返回逐条失败原因（空列表 = 通过）."""
     failures: list[str] = []
+    compact_cer = rust_metrics["compact_cer"]
+    rust_anchors = rust_metrics["anchors"]
     if compact_cer > max_cer:
         failures.append(f"rust compact_cer {compact_cer:.6f} 超过阈值 {max_cer}")
     for name in names:
@@ -138,9 +143,9 @@ def evaluate_thresholds(
 
 
 def self_test() -> None:
-    """内嵌自测（--self-test）：锚点列宽度口径与输出路径守卫，不写任何文件."""
+    """内嵌自测（--self-test）：锚点列宽度与输出路径守卫，仅在仓库 .tmp/ 下创建临时项."""
     # 全宽（F）与中文（W）各计 2：ａｂ中文 = 8 个半角单元，x 的网格列 = 8。
-    assert anchors("ａｂ中文x", ["x"]) == {"x": {"row": 0, "column": 8}}
+    assert anchors("\uff41\uff42中文x", ["x"]) == {"x": {"row": 0, "column": 8}}
     # 组合字符计 0：cafe + combining acute 后 END 起始列 = 4（不是码点数 5）。
     assert anchors("cafe\u0301END", ["END"]) == {"END": {"row": 0, "column": 4}}
     # 纯 ASCII 半宽：码点数即列数，口径不回归。
@@ -153,8 +158,10 @@ def self_test() -> None:
     failures = evaluate_thresholds(
         ["A", "B", "C"],
         {"A": {"row": 0, "column": 2}, "B": {"row": 1, "column": 8}, "C": {"row": 2, "column": 4}},
-        {"A": {"row": 0, "column": 4}, "B": None, "C": {"row": 4, "column": 4}},
-        compact_cer=0.03,
+        {
+            "compact_cer": 0.03,
+            "anchors": {"A": {"row": 0, "column": 4}, "B": None, "C": {"row": 4, "column": 4}},
+        },
         max_cer=0.02,
         max_anchor_delta=1,
     )
@@ -179,6 +186,37 @@ def self_test() -> None:
         message = f"越界输出路径必须被拒绝：{rejected}"
         raise AssertionError(message)
 
+    # 若仓库 .tmp 根本身或测试路径中的 .tmp 被重解析到其根外，都必须拒绝。
+    repo_tmp = REPO_ROOT / ".tmp"
+    expected_repo_tmp = REPO_ROOT.resolve() / ".tmp"
+    if repo_tmp.resolve() != expected_repo_tmp:
+        try:
+            ensure_repo_tmp_output(repo_tmp / "escaped.json")
+        except ValueError:
+            return
+        message = "仓库 .tmp 重解析到根外时必须拒绝输出"
+        raise AssertionError(message)
+    repo_tmp.mkdir(parents=True, exist_ok=True)
+    with tempfile.TemporaryDirectory(prefix="compare-path-", dir=repo_tmp) as temporary:
+        sandbox = Path(temporary)
+        fake_repo = sandbox / "repo"
+        outside = sandbox / "outside"
+        fake_repo.mkdir()
+        outside.mkdir()
+        linked_tmp = fake_repo / ".tmp"
+        try:
+            linked_tmp.symlink_to(outside, target_is_directory=True)
+        except (NotImplementedError, OSError):
+            return
+        with patch(f"{__name__}.REPO_ROOT", fake_repo):
+            try:
+                ensure_repo_tmp_output(linked_tmp / "escaped.json")
+            except ValueError:
+                pass
+            else:
+                message = "仓库 .tmp 重解析到根外时必须拒绝输出"
+                raise AssertionError(message)
+
 
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
@@ -188,7 +226,9 @@ def main() -> int:
     parser.add_argument("--rust", dest="rust_reports", type=Path, action="append")
     parser.add_argument("--out", type=Path)
     parser.add_argument("--max-cer", type=float, default=0.02, help="Rust 端 CER 阈值（附录 C：≤ 2%%）")
-    parser.add_argument("--max-anchor-delta", type=int, default=1, help="锚点行/列偏差阈值（附录 C：一个半角单元或一行）")
+    parser.add_argument(
+        "--max-anchor-delta", type=int, default=1, help="锚点行/列偏差阈值（附录 C：一个半角单元或一行）"
+    )
     parser.add_argument("--self-test", action="store_true", help="运行内嵌自测后退出，不读写报告")
     args = parser.parse_args()
     if args.self_test:
@@ -208,8 +248,11 @@ def main() -> int:
     ]
     if missing:
         parser.error("比较模式缺少必填参数：" + ", ".join(missing))
-    assert args.expected is not None and args.manifest is not None and args.out is not None
-    assert args.python_reports is not None and args.rust_reports is not None
+    assert args.expected is not None
+    assert args.manifest is not None
+    assert args.out is not None
+    assert args.python_reports is not None
+    assert args.rust_reports is not None
 
     output = ensure_repo_tmp_output(args.out)
     expected = args.expected.read_text(encoding="utf-8").rstrip("\n").replace("\r\n", "\n")
@@ -235,8 +278,7 @@ def main() -> int:
     failures = evaluate_thresholds(
         names,
         reference_anchors,
-        new["anchors"],
-        new["compact_cer"],
+        new,
         args.max_cer,
         args.max_anchor_delta,
     )
@@ -279,9 +321,8 @@ if __name__ == "__main__":
     # 冲突且不产出 JSON，自动化门无法区分「超阈」与「脚本报错」。崩溃路径
     # 统一收敛为退出码 3 并输出简明诊断；argparse 缺参仍为 2。
     try:
-        raise SystemExit(main())
-    except SystemExit:
-        raise
-    except Exception as error:  # noqa: BLE001  # 崩溃路径统一诊断后以专用码退出
+        exit_code = main()
+    except Exception as error:
         print(f"CRASH compare.py 执行异常（退出码 3）：{error!r}")
         raise SystemExit(3) from error
+    raise SystemExit(exit_code)

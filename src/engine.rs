@@ -11,7 +11,7 @@ use crate::{
 };
 use anyhow::{bail, Context as _, Result};
 use rayon::prelude::*;
-use rusqlite::params;
+use rusqlite::{params, OptionalExtension};
 use std::{
     collections::{HashMap, HashSet},
     fs,
@@ -193,7 +193,11 @@ fn preflight_root(
     protected: Option<&Path>,
     check_quarantine: bool,
 ) -> Result<(PathBuf, Option<PathBuf>)> {
-    config.validate()?;
+    if check_quarantine {
+        config.validate_extract()?;
+    } else {
+        config.validate_organizer()?;
+    }
     // S-04：先在用户原始路径上检查链接边界（canonicalize 会解析掉 reparse 身份）；
     // 拒绝时不创建任务库、不扫描、不解压。
     fsutil::ensure_plain_entry(root)?;
@@ -484,23 +488,48 @@ fn count_archives_with(root: &Path, config: &Config, protected: Option<&Path>) -
     // X-10：缺主包的老式族尾卷组按「残缺但可归组的卷集计一包」参与清点。
     // 归组依赖同目录兄弟关系，先按目录收集文件名再统一计数，与扫描的兄弟判定同源。
     let mut names_by_dir: HashMap<PathBuf, Vec<String>> = HashMap::new();
+    let mut boundary_error = None;
+    let mut filter_error = None;
     for entry in walkdir::WalkDir::new(&root)
         .follow_links(false)
         .min_depth(1)
         .max_depth(if config.recursive { usize::MAX } else { 1 })
         .into_iter()
         .filter_entry(|entry| {
-            let Ok(meta) = fs::symlink_metadata(entry.path()) else {
-                // 与正式扫描一致：元数据不可读的条目按跳过处理，不计入清点。
-                return false;
+            let meta = match fs::symlink_metadata(entry.path()) {
+                Ok(meta) => meta,
+                Err(error) => {
+                    filter_error.get_or_insert_with(|| {
+                        format!("无法读取目录项元数据 {}：{error}", entry.path().display())
+                    });
+                    return false;
+                }
             };
             // H-06：目录直接含 .git（目录或文件）时整树排除，识别后不遍历内部。
-            // 边界判定失败时同样剪枝：内容未知的目录不得计入清点。
-            if entry.file_type().is_dir() && fsutil::is_git_root(entry.path()).unwrap_or(true) {
-                return false;
+            // 边界判定失败时必须中止清点，不可将未知目录当作已排除。
+            if entry.file_type().is_dir() {
+                match fsutil::is_git_root(entry.path()) {
+                    Ok(true) => return false,
+                    Ok(false) => {}
+                    Err(error) => {
+                        boundary_error.get_or_insert_with(|| {
+                            format!("{}：{error:#}", entry.path().display())
+                        });
+                        return false;
+                    }
+                }
             }
-            let Ok(rel) = fsutil::relative_string(&root, entry.path()) else {
-                return false;
+            let rel = match fsutil::relative_string(&root, entry.path()) {
+                Ok(rel) => rel,
+                Err(error) => {
+                    filter_error.get_or_insert_with(|| {
+                        format!(
+                            "无法确定目录项相对路径 {}：{error:#}",
+                            entry.path().display()
+                        )
+                    });
+                    return false;
+                }
             };
             // 选定根目录自身不参与隐藏/系统/名称等判定——扫描同口径：筛选只作用于
             // 根目录的子项，隐藏的选定根目录不会把整棵树剪掉（否则确认框报 0，
@@ -518,7 +547,10 @@ fn count_archives_with(root: &Path, config: &Config, protected: Option<&Path>) -
             continue;
         }
         let Some(name) = entry.file_name().to_str() else {
-            continue;
+            bail!(
+                "无法完成确认框清点：文件名不能无损表示为 UTF-8：{}",
+                entry.path().display()
+            );
         };
         let parent = entry
             .path()
@@ -528,6 +560,10 @@ fn count_archives_with(root: &Path, config: &Config, protected: Option<&Path>) -
             .entry(parent)
             .or_default()
             .push(name.to_lowercase());
+    }
+    ensure_git_boundary_checked(boundary_error.as_deref())?;
+    if let Some(error) = filter_error {
+        bail!("无法完成确认框清点，目录项检查失败：{error}");
     }
     let mut count = 0u64;
     for names in names_by_dir.values() {
@@ -582,10 +618,18 @@ struct ScanSink {
     taint: HashSet<String>,
     /// 整树排除的 Git 目录（目录直接含 .git 的 rel）：只用于界面提示与 git_roots 表。
     git_skips: Vec<String>,
+    /// 必要 Git 边界检查失败时拒绝继续扫描/处理，不能把未知目录当作已排除。
+    git_boundary_error: Option<String>,
     /// S-01/F02：位于本次处理范围内、因保留名剪枝的 .jchtools-link-* 普通文件
     /// （疑似上次执行崩溃残留的硬链接临时文件）。只供目录整理流程登记进任务库、
     /// 执行开始时按既有谓词清理；扫描本身仍然只读。
     link_residues: Vec<String>,
+}
+fn ensure_git_boundary_checked(error: Option<&str>) -> Result<()> {
+    if let Some(error) = error {
+        bail!("无法完成必要的 Git 边界判定（H-06），拒绝继续处理：{error}");
+    }
+    Ok(())
 }
 fn lock_sink(sink: &Mutex<ScanSink>) -> std::sync::MutexGuard<'_, ScanSink> {
     // 锁中毒只可能因持锁线程 panic；本模块持锁期间不 panic，恢复数据是安全回退。
@@ -712,6 +756,8 @@ fn walk_dir<'a>(
             message: format!("无法判定是否含 .git，已整树跳过：{error:#}"),
         });
         sink.taint.insert(rel.clone());
+        sink.git_boundary_error
+            .get_or_insert_with(|| format!("{}：{error:#}", dir.display()));
         return;
     }
     let read = match fs::read_dir(dir) {
@@ -804,6 +850,8 @@ fn walk_dir<'a>(
                         message: format!("无法判定是否含 .git，已整树跳过：{error:#}"),
                     });
                     sink.taint.insert(child_rel);
+                    sink.git_boundary_error
+                        .get_or_insert_with(|| format!("{}：{error:#}", entry.path().display()));
                     continue;
                 }
             }
@@ -1151,6 +1199,7 @@ fn scan(job: &mut Job, enqueue: bool, state: &Path, protected: Option<&Path>) ->
         job.log("扫描", &note.path, "", "跳过", &note.message, 0)?;
     }
     let mut git_roots = std::mem::take(&mut sink.git_skips);
+    ensure_git_boundary_checked(sink.git_boundary_error.as_deref())?;
     if !git_roots.is_empty() {
         // H-06：Git 整树保护必须明确提示处置结果（界面蓝条 + 日志），不静默跳过。
         // 解压流程里 Git 项目整树排除；目录整理流程里按 C-14 固定行为整体移入「Git项目集合」，
@@ -1240,6 +1289,11 @@ fn scan(job: &mut Job, enqueue: bool, state: &Path, protected: Option<&Path>) ->
                 statement.execute(params![rel])?;
             }
         }
+        if !enqueue {
+            // 盘点用 git_roots 是连接内临时表；重算计划需在重新打开任务库后
+            // 知道哪些 C-14 Move 未完成，故同时持久化这份边界清单。
+            job.db.set("git_roots", &git_roots)?;
+        }
         let mut count = 0u64;
         scan_emit(job, &by_parent, enqueue, "", 1, &mut count)?;
         Ok::<_, anyhow::Error>(())
@@ -1268,16 +1322,22 @@ fn hash_candidates(job: &mut Job) -> Result<()> {
         .build()?;
     job.context.status("计算候选文件的完整 Hash");
     job.db.conn.execute_batch("DROP TABLE IF EXISTS hash_candidates; CREATE TEMP TABLE hash_candidates(id INTEGER PRIMARY KEY);")?;
-    // C-12：候选范围只依据扫描期已获得的信息（大小与名称关系），完整哈希在一次遍历内
-    // 完成，不设预哈希/完整哈希两阶段。内容相同必然同尺寸，所以「同尺寸不止一个」
-    // 永远是安全下界；默认（不同名去重关闭）还可再收窄——去重配对只可能发生在
-    // 「名称完全相同」（planner 比较 files.name）或「归一化名称完全相同」
-    // （planner 比较 files.normal）两组之间，取两种分组并集仍是安全下界。
+    // C-12：候选范围只依据扫描期已获得的信息（大小与启用的名称关系），完整哈希在一次
+    // 遍历内完成，不设预哈希/完整哈希两阶段。同尺寸是安全下界；仅在不同名去重开启时
+    // 扩到全部同尺寸项。副本名关系按 normal 分组，需保留同名节点作连通组桥接项。
     if job.config.dedup_other_names {
-        job.db.conn.execute("INSERT OR IGNORE INTO hash_candidates SELECT id FROM files WHERE active=1 AND size IN (SELECT size FROM files WHERE active=1 GROUP BY size HAVING COUNT(*)>1)",[])?;
+        // 整条 SQL 保持单个字符串字面量（不含花括号）：static_check 的 sql_syntax
+        // 逐字面量抽取校验，跨字面量拼接会让尾段单独受检而误报。
+        const SQL: &str = "INSERT OR IGNORE INTO hash_candidates SELECT id FROM files WHERE active=1 AND size IN (SELECT size FROM files WHERE active=1 GROUP BY size HAVING COUNT(*)>1)";
+        job.db.conn.execute(SQL, [])?;
     } else {
-        for key in ["name", "normal"] {
-            job.db.conn.execute(&format!("INSERT OR IGNORE INTO hash_candidates SELECT id FROM files WHERE active=1 AND (size,{key}) IN (SELECT size,{key} FROM files WHERE active=1 GROUP BY size,{key} HAVING COUNT(*)>1)"),[])?;
+        const SAME_NAME: &str = "INSERT OR IGNORE INTO hash_candidates SELECT id FROM files WHERE active=1 AND (size,name) IN (SELECT size,name FROM files WHERE active=1 GROUP BY size,name HAVING COUNT(*)>1)";
+        const COPY_NAME: &str = "INSERT OR IGNORE INTO hash_candidates SELECT id FROM files WHERE active=1 AND (size,normal) IN (SELECT size,normal FROM files WHERE active=1 GROUP BY size,normal HAVING COUNT(*)>1)";
+        if job.config.dedup_same_name {
+            job.db.conn.execute(SAME_NAME, [])?;
+        }
+        if job.config.dedup_copy_names {
+            job.db.conn.execute(COPY_NAME, [])?;
         }
     }
     // C-13：跨运行哈希缓存放在状态目录根（每次 prepare 都新建任务库，缓存必须
@@ -1478,12 +1538,50 @@ fn lock_dir_for(directory: &Path, recorded: Option<&Path>) -> Result<PathBuf> {
 fn dir_recheck_empty(path: &Path) -> Result<bool> {
     Ok(path.try_exists()? && path.is_dir() && fs::read_dir(path)?.next().is_none())
 }
+fn path_is_at_or_below(path: &str, root: &str) -> bool {
+    path == root
+        || path
+            .strip_prefix(root)
+            .is_some_and(|suffix| suffix.starts_with('/'))
+}
+fn task_git_roots(db: &Database) -> Result<Vec<String>> {
+    let move_kind = serde_json::to_string(&ActionKind::Move)?;
+    let mut roots: Vec<String> = if let Some(value) = db
+        .conn
+        .query_row(
+            "SELECT value FROM metadata WHERE key=?1",
+            ["git_roots"],
+            |row| row.get::<_, String>(0),
+        )
+        .optional()?
+    {
+        serde_json::from_str(&value)?
+    } else {
+        // 兼容此前生成的待确认任务：C-14 Move 的目标进入固定集合容器。
+        let collection_target = format!("{}/%", planner::GIT_COLLECTION_DIR);
+        let mut statement = db
+            .conn
+            .prepare("SELECT source FROM actions WHERE kind=?1 AND target LIKE ?2")?;
+        let rows = statement.query_map(params![move_kind, collection_target], |row| {
+            row.get::<_, String>(0)
+        })?;
+        rows.collect::<rusqlite::Result<Vec<_>>>()?
+    };
+    roots = roots
+        .into_iter()
+        .map(|rel| fsutil::fold_rel(&rel))
+        .collect();
+    roots.sort_unstable();
+    roots.dedup();
+    Ok(roots)
+}
 /// C-01：取消勾选后仅用既有分析资料重算受影响的计划。被取消且未执行的
 /// Move/Delete 项原位置视为占用，被取消的空目录清理行自身同样占位（子目录
 /// 不删，父目录不再变空）；selected=1 的空目录清理行若其目录（含子树）内
 /// 存在占位项，依赖失效、转为未勾选——禁止删除依赖于已取消保留者移动的
 /// 其他项。用户已取消的行不翻回，不新增用户勾选，不读取文件内容。
 /// 返回本次重算取消的行数；执行期的实空复查与最终空目录清理仍独立兜底。
+/// H-06：保留原位的 Git 根及其后代/祖先不作为可写目标或空目录清理项。
 pub fn recompute_plan(directory: &Path) -> Result<usize> {
     // open_existing：任务库文件消失时不静默创建空库（apply 同口径）。
     let db = Database::open_existing(directory)?;
@@ -1523,14 +1621,34 @@ pub fn recompute_plan(directory: &Path) -> Result<usize> {
         })?;
         rows.collect::<rusqlite::Result<Vec<_>>>()?
     };
+    let git_roots = task_git_roots(&db)?;
+    // 计划中的项目 Move 尚未执行时可释放原路径；取消其 Move 后即转为 staying，
+    // 其根目录及后代目标不得再被其他 Move/空目录清理项触碰。
+    let mut pending_git_moves: HashSet<String> = pending_moves
+        .iter()
+        .map(|(_, source, _)| fsutil::fold_rel(source))
+        .filter(|source| git_roots.binary_search(source).is_ok())
+        .collect();
+    let mut staying_git_roots: Vec<String> = git_roots
+        .iter()
+        .filter(|root| !pending_git_moves.contains(root.as_str()))
+        .cloned()
+        .collect();
     while let Some(index) = pending_moves.iter().position(|(_, _, target)| {
         let target = fsutil::fold_rel(target);
         occupied
             .iter()
             .any(|source| fsutil::fold_rel(source) == target)
+            || staying_git_roots
+                .iter()
+                .any(|root| path_is_at_or_below(&target, root))
     }) {
         let (id, source, _) = pending_moves.remove(index);
         db.set_selected(id, false)?;
+        let folded_source = fsutil::fold_rel(&source);
+        if pending_git_moves.remove(&folded_source) {
+            staying_git_roots.push(folded_source);
+        }
         occupied.push(source);
         cancelled += 1;
     }
@@ -1554,9 +1672,13 @@ pub fn recompute_plan(directory: &Path) -> Result<usize> {
         let folded = fsutil::fold_rel(&rel);
         let probe = format!("{folded}/");
         let index = occupied.partition_point(|item| item.as_str() < probe.as_str());
-        let blocked = occupied
+        let blocked_by_occupied = occupied
             .get(index)
             .is_some_and(|item| item.starts_with(probe.as_str()));
+        let blocked_by_git = staying_git_roots
+            .iter()
+            .any(|root| path_is_at_or_below(&folded, root) || path_is_at_or_below(root, &folded));
+        let blocked = blocked_by_occupied || blocked_by_git;
         if blocked {
             db.set_selected(id, false)?;
             cancelled += 1;
@@ -1595,11 +1717,10 @@ pub fn apply(directory: &Path, context: TaskContext) -> Result<TaskResult> {
         "目录位置已改变或被链接替换（{root_text}）；请重新扫描生成新计划后再执行"
     );
     let config = db.config()?;
-    config.validate()?;
+    config.validate_organizer()?;
     let summary = db.summary()?;
     // 执行阶段新增错误的判定基线：分析阶段已确认的错误（扫描跳过、派生名失败等）
     // 不把「执行全部成功」的任务改判失败，但执行/清理阶段新增任一错误不得标
-    // 「finished」（C-11/C-01/H-05：部分失败不得伪装成全部成功）。
     let errors_before_apply = summary.errors;
     let mut job = Job {
         root,
@@ -2111,6 +2232,7 @@ fn execute_run(
 }
 /// 执行所有归类/项目移动，并处理「目标是另一项源」的依赖。
 /// `a -> b` 与 `b -> c` 要先释放依赖源；交换环则先把一个源临时暂存。
+/// Git 项目根始终受保护，直到其 C-14 Move 真正成功；失败后拒绝树内目标，独立项继续执行。
 fn execute_planned_moves(job: &mut Job) -> Result<()> {
     let mut actions = Vec::new();
     let mut cursor = 0;
@@ -2125,6 +2247,14 @@ fn execute_planned_moves(job: &mut Job) -> Result<()> {
     if actions.is_empty() {
         return Ok(());
     }
+    let mut protected_git_roots: HashSet<String> = task_git_roots(&job.db)?.into_iter().collect();
+    // 包含尚未移动、未勾选或无法完成归类的根；只有成功移动后才从保护集中移除。
+    let mut pending_git_moves: HashSet<String> = actions
+        .iter()
+        .filter(|action| action.selected)
+        .map(|action| fsutil::fold_rel(&action.source))
+        .filter(|source| protected_git_roots.contains(source))
+        .collect();
     // 环形移动暂存在本次任务的状态目录：扫描已排除状态目录，用户根下同名
     // 普通目录仍会参与整理。OWNER 标记限制清理范围，失败时保留唯一副本。
     let owner = uuid::Uuid::new_v4().to_string();
@@ -2149,11 +2279,17 @@ fn execute_planned_moves(job: &mut Job) -> Result<()> {
                 return true;
             };
             let target = fsutil::fold_rel(target);
-            !actions.iter().enumerate().any(|(other, candidate)| {
-                other != *index
-                    && !staged.contains_key(&candidate.id)
-                    && fsutil::fold_rel(&candidate.source) == target
-            })
+            let source = fsutil::fold_rel(&action.source);
+            // 普通 Move 暂候选中 Git 根的 C-14 Move；成功后其原路径方可接收归类目标。
+            let waits_for_git_move = pending_git_moves
+                .iter()
+                .any(|root| source.as_str() != root.as_str() && path_is_at_or_below(&target, root));
+            !waits_for_git_move
+                && !actions.iter().enumerate().any(|(other, candidate)| {
+                    other != *index
+                        && !staged.contains_key(&candidate.id)
+                        && fsutil::fold_rel(&candidate.source) == target
+                })
         });
         if let Some((index, _)) = available {
             let action = actions.remove(index);
@@ -2163,13 +2299,19 @@ fn execute_planned_moves(job: &mut Job) -> Result<()> {
                 Some(path) => path,
                 None => fsutil::safe_join(&job.root, &action.source)?,
             };
-            execute_move_sequential(
+            let folded_source = fsutil::fold_rel(&action.source);
+            pending_git_moves.remove(&folded_source);
+            let moved = execute_move_sequential(
                 job,
                 &action,
                 &source,
                 !had_stage && staged.is_empty(),
                 had_stage,
+                &protected_git_roots,
             )?;
+            if moved {
+                protected_git_roots.remove(&folded_source);
+            }
             continue;
         }
         // 所有目标都被另一项源占用，形成环；暂存第一项源后，后续动作连续收敛。
@@ -2179,6 +2321,7 @@ fn execute_planned_moves(job: &mut Job) -> Result<()> {
         let temporary = stage.join(action.id.to_string());
         if let Err(error) = fsutil::move_file_preserving_times(&source, &temporary) {
             let action = actions.remove(0);
+            pending_git_moves.remove(&fsutil::fold_rel(&action.source));
             record_move_failure(job, &action, &error)?;
             job.context
                 .control
@@ -2237,17 +2380,34 @@ fn execute_move_sequential(
     source: &Path,
     checkpoint: bool,
     restore_on_error: bool,
-) -> Result<()> {
+    protected_git_roots: &HashSet<String>,
+) -> Result<bool> {
     if checkpoint {
         job.context.control.checkpoint()?;
     }
     job.context
         .status(format!("执行 {:?}：{}", action.kind, action.source));
-    match execute_move_at(job, action, source) {
-        Ok(true) => job.db.mark_action(action.id, "done")?,
+    let protected_root = action.target.as_deref().and_then(|target| {
+        let target = fsutil::fold_rel(target);
+        protected_git_roots
+            .iter()
+            .find(|root| path_is_at_or_below(&target, root))
+    });
+    let result = match protected_root {
+        Some(root) => Err(anyhow::anyhow!(
+            "移动目标位于仍受保护的 Git 项目「{root}」内，按 H-06 保留源项"
+        )),
+        None => execute_move_at(job, action, source),
+    };
+    let moved = match result {
+        Ok(true) => {
+            job.db.mark_action(action.id, "done")?;
+            true
+        }
         Ok(false) => {
             job.summary.skipped += 1;
             job.db.mark_action(action.id, "skipped")?;
+            false
         }
         Err(error) => {
             if restore_on_error {
@@ -2296,13 +2456,14 @@ fn execute_move_sequential(
             }
             record_move_failure(job, action, &error)?;
             job.context.control.check_cancelled()?;
+            false
         }
-    }
+    };
     job.context
         .control
         .completed
         .fetch_add(1, Ordering::Relaxed);
-    Ok(())
+    Ok(moved)
 }
 
 fn record_move_failure(job: &mut Job, action: &Action, error: &anyhow::Error) -> Result<()> {
@@ -2379,6 +2540,79 @@ mod lock_tests {
     #[cfg(windows)]
     const BSLASH: char = std::path::MAIN_SEPARATOR; // Windows 下为反斜杠
 
+    #[test]
+    fn failed_git_boundary_check_aborts_processing() {
+        let error = ensure_git_boundary_checked(Some("access denied")).unwrap_err();
+        assert!(error.to_string().contains("H-06"));
+        assert!(ensure_git_boundary_checked(None).is_ok());
+    }
+
+    #[test]
+    fn git_root_protection_uses_path_component_boundaries() {
+        assert!(path_is_at_or_below("图片", "图片"));
+        assert!(path_is_at_or_below("图片/logo.png", "图片"));
+        assert!(!path_is_at_or_below("图片旧/logo.png", "图片"));
+        assert!(!path_is_at_or_below("other/图片/logo.png", "图片"));
+    }
+
+    #[test]
+    fn failed_git_move_blocks_tree_targets_but_not_independent_moves() {
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path().join("data");
+        std::fs::create_dir_all(root.join("图片/.git")).unwrap();
+        std::fs::write(root.join("图片/.git/HEAD"), b"ref").unwrap();
+        std::fs::write(root.join("photo.png"), b"photo").unwrap();
+        std::fs::write(root.join("other.txt"), b"other").unwrap();
+
+        let state = temp.path().join("state");
+        std::fs::create_dir_all(&state).unwrap();
+        let db = Database::create(&state.join("task")).unwrap();
+        db.set("git_roots", &vec!["图片".to_string()]).unwrap();
+        let git_id = db
+            .add_action(&Action {
+                kind: ActionKind::Move,
+                source: "图片".into(),
+                target: Some("图片/inner".into()),
+                reason: "test Git move failure".into(),
+                ..Action::default()
+            })
+            .unwrap();
+        let photo_id = db
+            .add_action(&Action {
+                kind: ActionKind::Move,
+                source: "photo.png".into(),
+                target: Some("图片/photo.png".into()),
+                reason: "test protected-tree target".into(),
+                ..Action::default()
+            })
+            .unwrap();
+        let other_id = db
+            .add_action(&Action {
+                kind: ActionKind::Move,
+                source: "other.txt".into(),
+                target: Some("文档/other.txt".into()),
+                reason: "independent move".into(),
+                ..Action::default()
+            })
+            .unwrap();
+        let mut job = Job {
+            root: root.clone(),
+            config: Config::default(),
+            context: TaskContext::default(),
+            db,
+            summary: Summary::default(),
+        };
+
+        execute_planned_moves(&mut job).unwrap();
+
+        assert_eq!(job.db.action(git_id).unwrap().state, "failed");
+        assert_eq!(job.db.action(photo_id).unwrap().state, "failed");
+        assert_eq!(job.db.action(other_id).unwrap().state, "done");
+        assert!(root.join("图片/.git/HEAD").exists());
+        assert!(root.join("photo.png").exists());
+        assert!(!root.join("图片/photo.png").exists());
+        assert!(root.join("文档/other.txt").exists());
+    }
     #[test]
     fn move_stage_guard_keeps_payload_when_cleanup_is_not_safe() {
         let root = tempfile::tempdir().unwrap();

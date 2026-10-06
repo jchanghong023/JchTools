@@ -314,14 +314,23 @@ fn config_get_opt(git: &Path, root: &Path, key: &str) -> Option<String> {
     (!value.is_empty()).then_some(value)
 }
 
-/// F10/P-03/G-08：任务启动前预检裸 `git push` 的实际推送目标（全部只读检查，在任何
-/// 写命令之前执行）。用户可能配置 `branch.<b>.pushRemote` / `remote.pushDefault` /
-/// `remote.<r>.push` / `push.default=matching`，使裸 push 推到 upstream 之外的远端
-/// 或一次推多个分支，违反 P-03（只允许访问当前分支 upstream 远端）与 G-08（用
-/// upstream 推送）。有效推送远端 = `branch.<b>.pushRemote` ?: `remote.pushDefault`
-/// ?: upstream 远端（`branch.<b>.remote`，不从 @{u} 显示串猜测——分支名可含斜杠）。
-/// 与 upstream 远端不一致、配置了自定义推送 refspec 或 push.default=matching 时
-/// 拒绝启动，错误信息点名涉及的配置项。
+/// 读取 Git 布尔配置，由 Git 规范化 yes/on/1 等真值同义词。
+fn config_get_bool(git: &Path, root: &Path, key: &str) -> Option<bool> {
+    let out = run_git(git, root, &["config", "--bool", "--get", key]).ok()?;
+    if !out.status.success() {
+        return None;
+    }
+    match output_text(&out.stdout).trim() {
+        "true" => Some(true),
+        "false" => Some(false),
+        _ => None,
+    }
+}
+
+/// F10/P-03/G-08：任务启动前只读预检裸 `git push` 的目标。除 remote 及 refspec
+/// 选择外，还核实最终 push URL 与 upstream fetch URL 一致：`remote.<r>.url` /
+/// `pushurl` 可重复，`insteadOf` / `pushInsteadOf` 会改写实际地址，必须按 Git
+/// 展开的全部 URL 判断，避免访问 upstream 之外的地址或系统代理按错目标判例外。
 fn push_target_preflight(git: &Path, root: &Path, info: &RepoInfo) -> Result<()> {
     let branch = &info.branch;
     let upstream_remote = info.upstream_remote.trim();
@@ -353,39 +362,47 @@ fn push_target_preflight(git: &Path, root: &Path, info: &RepoInfo) -> Result<()>
              请先移除该配置后重新开始任务"
         );
     }
-    // mirror：裸 push 变成镜像推送——把全部 refs 推到远端并**删除**远端多余
-    // 分支，退出码 0 会被当成功报告（实测：远端 topic 被删、remotes/tags 被推）。
-    if config_get_opt(git, root, &format!("remote.{effective}.mirror"))
-        .as_deref()
-        .is_some_and(|value| value.eq_ignore_ascii_case("true"))
-    {
+    // mirror 是 Git 布尔配置，yes/on/1 与无值项同样表示 true；让 Git 负责规范化。
+    if config_get_bool(git, root, &format!("remote.{effective}.mirror")) == Some(true) {
         bail!(
             "拒绝启动：remote.{effective}.mirror=true 会让裸 git push 镜像推送全部引用并删除远端多余分支（P-03/G-08）。\
              请先移除该配置后重新开始任务"
         );
     }
-    // pushurl：推送实际走另一地址（fetch URL 之外的任何主机），fetch/push 的
-    // 网络出口与 upstream 范围都无法保证；要求与 fetch URL 一致。
-    if let Some(push_url) = config_get_opt(git, root, &format!("remote.{effective}.pushurl")) {
-        let fetch_url =
-            config_get_opt(git, root, &format!("remote.{effective}.url")).unwrap_or_default();
-        if push_url != fetch_url {
+    // 比较 Git 展开后的实际 URL，覆盖多值 url/pushurl 以及 insteadOf/pushInsteadOf
+    // 改写；`--all` 列出裸 push 将使用的全部地址，fetch 默认使用首个 URL。
+    if effective != "." {
+        let fetch_url = run_git_ok(git, root, &["remote", "get-url", &effective])
+            .with_context(|| format!("读取 upstream 远端「{effective}」的 fetch URL 失败"))?;
+        let fetch_url = fetch_url.trim();
+        let push_urls = run_git_ok(
+            git,
+            root,
+            &["remote", "get-url", "--push", "--all", &effective],
+        )
+        .with_context(|| format!("读取 upstream 远端「{effective}」的 push URL 失败"))?;
+        let push_urls: Vec<String> = push_urls
+            .lines()
+            .map(str::trim)
+            .filter(|url| !url.is_empty())
+            .map(str::to_owned)
+            .collect();
+        if push_urls.is_empty() || push_urls.iter().any(|url| url != fetch_url) {
             bail!(
-                "拒绝启动：remote.{effective}.pushurl 指向「{push_url}」与 fetch 地址「{fetch_url}」不同，\
-                 裸 git push 会推送到 upstream 之外的地址（P-03/G-08）。\
-                 请先移除该配置后重新开始任务"
+                "拒绝启动：remote.{effective}.url / remote.{effective}.pushurl 或 url.*.insteadOf/pushInsteadOf\
+                 使裸 git push 的实际目标不同于 upstream fetch 地址，可能访问 upstream 之外的地址（P-03/G-08/P-09）。\
+                 请修正导致地址分叉的配置后重新开始任务"
             );
         }
     }
-    if config_get_opt(git, root, "push.default").as_deref() == Some("matching") {
-        bail!(
-            "拒绝启动：push.default=matching 会让裸 git push 一次推送所有同名分支（多分支推送，P-03/G-08）。\
-             请改为 simple / upstream 等单分支取值后重新开始任务"
-        );
-    }
-    // F10/G-08 续：push.default 的其余危险取值在预检一并拒绝（全部只读检查）。
     let push_default = config_get_opt(git, root, "push.default");
     match push_default.as_deref() {
+        Some("matching") => {
+            bail!(
+                "拒绝启动：push.default=matching 会让裸 git push 一次推送所有同名分支（多分支推送，P-03/G-08）。\
+                 请改为 simple / upstream 等单分支取值后重新开始任务"
+            );
+        }
         // nothing：裸 push 因「没有 refspec」以 fatal 失败，upstream 永不更新；
         // 该失败会被按可重试错误无限退避（G-09），任务永远无法推进。
         Some("nothing") => {
@@ -393,6 +410,16 @@ fn push_target_preflight(git: &Path, root: &Path, info: &RepoInfo) -> Result<()>
                 "拒绝启动：push.default=nothing 会让裸 git push 因没有 refspec 而必然失败，\
                  upstream 永远不会更新且任务陷入无限重试（G-08/G-09）。\
                  请改为 simple / upstream 等取值后重新开始任务"
+            );
+        }
+        // simple 是现代 Git 的默认值；upstream 名与本地分支不同时，裸 push 会
+        // 因名称不匹配而失败并陷入 G-09 无限重试，必须在任何写操作前拒绝。
+        Some("simple") | None if info.upstream_branch.as_str() != branch.as_str() => {
+            bail!(
+                "拒绝启动：push.default=simple（未设置时的默认行为）且本地分支「{branch}」\
+                 与 upstream 分支「{}」不同名，裸 git push 会因分支名不匹配而必然失败并无限重试（G-08/G-09）。\
+                 请改用 push.default=upstream 或配置同名 upstream 后重新开始任务",
+                info.upstream_branch
             );
         }
         // current：推送目标是「远端上的同名分支」。本地分支名与 upstream 分支名
@@ -407,7 +434,13 @@ fn push_target_preflight(git: &Path, root: &Path, info: &RepoInfo) -> Result<()>
                 effective
             );
         }
-        _ => {}
+        Some("simple" | "current" | "upstream" | "tracking") | None => {}
+        Some(value) => {
+            bail!(
+                "拒绝启动：push.default={value} 不是受支持的 Git 取值，裸 git push 将必然失败并陷入无限重试（G-08/G-09）。\
+                 请改为 simple、current、upstream 或 tracking 后重新开始任务"
+            );
+        }
     }
     Ok(())
 }

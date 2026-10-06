@@ -101,7 +101,6 @@ pub fn validate_runtime_dir(path: &Path) -> Result<(), String> {
 /// notice 写入失败不回滚已保存的目录，但错误文本明确告知保存已生效，
 /// 避免用户把有效目录当坏目录（目录本身有效，仅记录写入受阻）。
 pub fn save_runtime_dir(path: &Path) -> Result<(), String> {
-    crate::xberg_runtime::validate_assets(path, "engine")?;
     crate::xberg_settings::save(path)?;
     ensure_document_notice().map_err(|error| {
         format!(
@@ -1141,21 +1140,33 @@ mod tests {
         assert!(installed.is_dir());
     }
 
-    // 覆盖 T-06/XB-19（回归 S3-01 集成：转换页初始化入口移除后，「使用此
-    // 目录」保存必须与下载一样落许可证 notice——修复前 save 只写 SQLite，
-    // 自选目录用户保存后仍被 readiness 的 notice 检查阻断，且界面已无初始
-    // 化按钮可补救）。
+    // 覆盖 XB-19：保存共享目录时不强制其他场景的模型就绪；每个功能仅在自身
+    // 启动前按场景检查。即使目录缺少截图和媒体模型，文档所需成员齐全也可保存。
     #[test]
-    fn save_runtime_dir_writes_notice_for_custom_directory() {
+    fn save_runtime_dir_allows_other_scenarios_to_be_unready() {
         let guard = redirect_component_env();
-        let real = load_manifest().expect("内置清单必须可解析");
+        let manifest = load_manifest().expect("内置清单必须可解析");
         let engine = tempfile::tempdir().expect("创建自选引擎目录");
-        for member in &real.xberg.members {
+        for member in &manifest.xberg.members {
+            if !crate::xberg_runtime::asset_for_scenario(&member.path, "document") {
+                continue;
+            }
             let path = engine.path().join(&member.path);
             fs::create_dir_all(path.parent().expect("成员路径有父目录")).expect("创建成员父目录");
             fs::write(&path, format!("stub-{}", member.path)).expect("写入成员桩文件");
         }
-        super::save_runtime_dir(engine.path()).expect("保存自选目录必须成功");
+
+        crate::xberg_runtime::validate_assets(engine.path(), "document").expect("文档场景成员齐全");
+        assert!(
+            crate::xberg_runtime::validate_assets(engine.path(), "snapshot").is_err(),
+            "缺截图模型时截图场景应仍未就绪"
+        );
+        assert!(
+            crate::xberg_runtime::validate_assets(engine.path(), "media").is_err(),
+            "缺媒体模型时媒体场景应仍未就绪"
+        );
+
+        super::save_runtime_dir(engine.path()).expect("文档可用的自选目录必须可保存");
         let notice = guard
             .root
             .path()

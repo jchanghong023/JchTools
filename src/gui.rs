@@ -985,7 +985,13 @@ fn changed(
         Ok(()) => {
             // 立刻反馈规则之间的依赖（例如“修正扩展名”需要先开“检测真实类型”），
             // 不要让用户等到点「开始分析 / 开始解压」才知道配置不成立。
-            match state.config.validate() {
+            let validation = match tool {
+                Tool::Organizer => state.config.validate_organizer(),
+                Tool::Extract => state.config.validate_extract(),
+                // 主题设置不属于任一工具的规则面板。
+                Tool::Md | Tool::Git | Tool::MarkdownConverter | Tool::SnapOcr => Ok(()),
+            };
+            match validation {
                 Ok(()) => ui.set_error_text("".into()),
                 Err(error) => ui.set_error_text(format!("{error:#}").into()),
             }
@@ -1229,12 +1235,11 @@ fn classify_plan_snapshot(
     if snapshot.requested_directory != directory {
         return PlanReadyState::Changed;
     }
-    // 任务状态是第一道闸：已执行/已取消/失败的计划页重新加载时不能把 ready 重新点亮。
-    if snapshot
-        .status
-        .as_deref()
-        .is_none_or(|status| status != "ready")
-    {
+    // 任务状态是第一道闸；缺失状态不能冒称任务已结束，也不能重新点亮 ready。
+    let Some(status) = snapshot.status.as_deref() else {
+        return PlanReadyState::Unavailable;
+    };
+    if status != "ready" {
         return PlanReadyState::Finished;
     }
     let Some(db_config) = snapshot.config_json.as_ref() else {
@@ -1326,11 +1331,16 @@ fn start_task(ui: &AppWindow, state: &Rc<RefCell<State>>, out: &EventSender, app
         ui.set_error_text("计划依赖重算失败，请重新分析后再执行".into());
         return;
     }
-    let (configuration, task) = {
+    let (configuration, task, tool) = {
         let s = state.borrow();
-        (s.config.clone(), s.task.clone())
+        (s.config.clone(), s.task.clone(), s.tool)
     };
-    if let Err(error) = configuration.validate() {
+    let validation = match tool {
+        Tool::Organizer => configuration.validate_organizer(),
+        Tool::Extract => configuration.validate_extract(),
+        Tool::Md | Tool::Git | Tool::MarkdownConverter | Tool::SnapOcr => Ok(()),
+    };
+    if let Err(error) = validation {
         ui.set_error_text(format!("{error:#}").into());
         return;
     }
@@ -1443,7 +1453,7 @@ fn start_extract(ui: &AppWindow, state: &Rc<RefCell<State>>, out: &EventSender) 
         let s = state.borrow();
         s.config.clone()
     };
-    if let Err(error) = configuration.validate() {
+    if let Err(error) = configuration.validate_extract() {
         ui.set_error_text(format!("{error:#}").into());
         return;
     }
@@ -1998,13 +2008,31 @@ fn start_git(ui: &AppWindow, state: &Rc<RefCell<State>>, out: &EventSender) {
     ui.set_progress_note("".into());
     ui.set_log_text("".into());
     ui.set_git_state("检查仓库".into());
+    // 新任务预检期间不显示上一仓库的分支、文件与重试进度。
+    ui.set_git_branch("".into());
+    ui.set_git_upstream("".into());
+    ui.set_git_current("".into());
+    ui.set_git_stage("扫描".into());
+    ui.set_git_retry(0);
+    ui.set_git_retry_wait(0);
+    ui.set_git_total(0);
+    ui.set_git_done(0);
     ui.set_status("正在验证仓库（分支、upstream 与仓库状态）…".into());
     let worker_out = out.clone();
     std::thread::spawn(move || {
         let git = match git_tools::find_git() {
             Ok(git) => git,
             Err(error) => {
-                let _ = worker_out.send(Event::Failed(format!("{error:#}")));
+                let text = format!("{error:#}");
+                if let Ok(mut state) = shared.state.lock() {
+                    state.clear();
+                    state.push_str("失败");
+                }
+                if let Ok(mut stage) = shared.stage.lock() {
+                    stage.clear();
+                    stage.push_str("失败");
+                }
+                let _ = worker_out.send(Event::GitDone(format!("无法启动 Git 任务：{text}")));
                 return;
             }
         };
@@ -2507,7 +2535,7 @@ fn wire_sync(ui: &AppWindow, state: &Rc<RefCell<State>>, out: &EventSender) {
                 if ui.get_busy() {
                     return;
                 }
-                if let Err(error) = state.borrow().config.validate() {
+                if let Err(error) = state.borrow().config.validate_extract() {
                     show_error(&ui, error);
                     return;
                 }
@@ -2753,12 +2781,7 @@ impl UiPump {
                             }
                         }
                     }
-                    if self.state.borrow().close_after
-                        && !ui.get_busy()
-                        && !ui.get_convert_preparing()
-                        && !ui.get_convert_initializing()
-                        && !ui.get_convert_runtime_saving()
-                    {
+                    if self.close_after_if_idle(ui) {
                         let _ = slint::quit_event_loop();
                     }
                 }
@@ -2976,9 +2999,7 @@ impl UiPump {
             let message = fields.next().unwrap_or_default().to_string();
             let accepted = generation.is_some_and(|generation| {
                 let s = self.state.borrow();
-                s.convert_preparing
-                    && s.convert_preflight_generation == generation
-                    && !ui.get_busy()
+                s.convert_preparing && s.convert_preflight_generation == generation
             });
             if accepted {
                 let options = {
@@ -2989,7 +3010,26 @@ impl UiPump {
                 ui.set_convert_preparing(false);
                 if ok {
                     if let Some(options) = options {
-                        launch_markdown_conversion(ui, &self.state, &self.out, options);
+                        let closing = self.state.borrow().close_after;
+                        if closing
+                            || ui.get_busy()
+                            || ui.get_convert_initializing()
+                            || ui.get_convert_runtime_saving()
+                        {
+                            self.state.borrow_mut().convert_cancel = None;
+                            ui.set_convert_status(
+                                if closing {
+                                    "正在等待其他任务安全结束，随后关闭"
+                                } else {
+                                    "其他任务或组件操作仍在进行；启动检查已通过，请稍后重新开始"
+                                }
+                                .into(),
+                            );
+                        } else {
+                            launch_markdown_conversion(ui, &self.state, &self.out, options);
+                        }
+                    } else {
+                        self.state.borrow_mut().convert_cancel = None;
                     }
                 } else {
                     self.state.borrow_mut().convert_cancel = None;
@@ -2997,11 +3037,16 @@ impl UiPump {
                         ui.set_convert_status("检查已取消，可稍后重试".into());
                     } else {
                         ui.set_convert_status("开始前检查失败，请修正后重试".into());
-                        ui.set_error_text(message.into());
+                        if ui.get_screen() == 5 {
+                            ui.set_error_text(message.into());
+                        } else {
+                            ui.set_convert_detail_text(message.into());
+                            ui.set_convert_detail_open(false);
+                        }
                     }
-                    if std::mem::take(&mut self.state.borrow_mut().close_after) {
-                        let _ = slint::quit_event_loop();
-                    }
+                }
+                if self.close_after_if_idle(ui) {
+                    let _ = slint::quit_event_loop();
                 }
             }
         } else if let Some(rest) = text.strip_prefix("CONVERTER_READINESS|") {
@@ -3136,16 +3181,22 @@ impl UiPump {
             start_snap_readiness(ui, &self.state, &self.out);
         }
         if terminal {
-            // close_after 消费守卫：仅在无任何运行任务时才随设置终态退出。
-            // 与 on_close_requested 相比少查 convert_initializing/convert_runtime_
-            // saving——这两个标志在本函数 terminal 分支已被先行清理（设置操作
-            // 自身的终态），此处再查恒为 false，属同口径而非遗漏。
-            let quiet =
-                !ui.get_busy() && !ui.get_convert_preparing() && !ui.get_snap_initializing();
-            if quiet && std::mem::take(&mut self.state.borrow_mut().close_after) {
+            // 设置操作自身的标志已在上面清理；统一守卫仍会等待其它任务、转换预检/
+            // 初始化及截图初始化完成后再消费 close_after。
+            if self.close_after_if_idle(ui) {
                 let _ = slint::quit_event_loop();
             }
         }
+    }
+
+    /// 仅在所有 GUI 管理的操作均空闲后消费已确认的关闭请求。
+    fn close_after_if_idle(&self, ui: &AppWindow) -> bool {
+        let idle = !ui.get_busy()
+            && !ui.get_convert_initializing()
+            && !ui.get_convert_preparing()
+            && !ui.get_convert_runtime_saving()
+            && !ui.get_snap_initializing();
+        idle && std::mem::take(&mut self.state.borrow_mut().close_after)
     }
 
     fn drain(&self, ui: &AppWindow) -> bool {
@@ -3230,7 +3281,7 @@ impl UiPump {
                         let page = self.state.borrow().fail_page;
                         request_fail_page(&self.state, page);
                     }
-                    if self.state.borrow().close_after {
+                    if self.close_after_if_idle(ui) {
                         let _ = slint::quit_event_loop();
                     }
                 }
@@ -3241,18 +3292,14 @@ impl UiPump {
                         ui.set_error_text(error.into());
                         s.selection_failed = true;
                     }
-                    // 就地把该行勾选值改成数据库里的真实值：用户编辑会让 CheckBox 脱离
-                    // `checked: item.selected` 绑定，只有这里回写模型才能保证界面与数据一致
-                    //（无障碍/自动化切换时 Slint 不一定立即重绘，更需要这一步）。
-                    // 只在当前展示的仍是该任务时回写：action id 是各任务库各自的 rowid，
-                    // 载入别的任务后可能恰好出现相同 id，不能按 id 跨任务匹配。
+                    // 勾选写入由单线程按用户操作顺序落库；仍有写入在途时，只保留回调中的最新
+                    // 即时选择，避免较早完成事件把用户刚取消的勾选重新显示为选中。
                     let mut batch_failed = false;
                     if s.task.as_ref() == Some(&path) {
-                        if let Some((id, selected)) = saved {
-                            // 就地回写该行勾选值为数据库真值：用户编辑会让 CheckBox 脱离
-                            // `checked: item.selected` 绑定，只有回写模型才能保证界面与数据
-                            // 一致（无障碍/自动化切换时 Slint 不一定立即重绘，更需要这一步）。
-                            mutate_plan_row(ui, id, |row| row.selected = selected);
+                        if s.pending_selection == 0 {
+                            if let Some((id, selected)) = saved {
+                                mutate_plan_row(ui, id, |row| row.selected = selected);
+                            }
                         }
                         if s.pending_selection == 0 && !ui.get_busy() {
                             // 失败可能发生在本轮任何一次勾选（不一定最后一个事件），只要
@@ -3512,13 +3559,12 @@ impl UiPump {
                             start_markdown_readiness(ui, &self.state, &self.out);
                             start_snap_readiness(ui, &self.state, &self.out);
                             ui.set_notice_text("共享 Xberg 目录已保存，重启后自动恢复".into());
+                            if self.close_after_if_idle(ui) {
+                                let _ = slint::quit_event_loop();
+                            }
                         }
                     } else if text == "CONVERTER_INIT_OK" {
-                        let close_after = {
-                            let mut s = self.state.borrow_mut();
-                            s.convert_init_cancel = None;
-                            std::mem::take(&mut s.close_after)
-                        };
+                        self.state.borrow_mut().convert_init_cancel = None;
                         ui.set_convert_initializing(false);
                         ui.set_convert_ready(false);
                         ui.set_convert_status("初始化完成，正在重新检查可选组件…".into());
@@ -3527,24 +3573,21 @@ impl UiPump {
                                 "转 Markdown 组件初始化完成，正在校验运行目录".into(),
                             );
                         }
-                        if close_after {
+                        let closing = self.state.borrow().close_after;
+                        if self.close_after_if_idle(ui) {
                             let _ = slint::quit_event_loop();
-                        } else {
+                        } else if !closing {
                             start_markdown_readiness(ui, &self.state, &self.out);
                         }
                     } else if let Some(error) = text.strip_prefix("CONVERTER_INIT_CANCELLED|") {
-                        let close_after = {
-                            let mut s = self.state.borrow_mut();
-                            s.convert_init_cancel = None;
-                            std::mem::take(&mut s.close_after)
-                        };
+                        self.state.borrow_mut().convert_init_cancel = None;
                         ui.set_convert_initializing(false);
                         ui.set_convert_ready(false);
                         ui.set_convert_status("初始化已取消，可稍后重试".into());
                         if ui.get_screen() == 5 {
                             ui.set_notice_text(format!("转 Markdown 初始化已取消：{error}").into());
                         }
-                        if close_after {
+                        if self.close_after_if_idle(ui) {
                             let _ = slint::quit_event_loop();
                         }
                     } else {
@@ -3568,10 +3611,7 @@ impl UiPump {
                         self.state.borrow_mut().convert_init_cancel = None;
                         // U-09/S1-01：任务运行中不得消费 close_after 提前退出，关闭由
                         // 任务终态统一完成（镜像 on_close_requested 的守卫口径）。
-                        let quiet = !ui.get_busy()
-                            && !ui.get_convert_preparing()
-                            && !ui.get_snap_initializing();
-                        if quiet && std::mem::take(&mut self.state.borrow_mut().close_after) {
+                        if self.close_after_if_idle(ui) {
                             let _ = slint::quit_event_loop();
                         }
                         continue;
@@ -3613,13 +3653,12 @@ impl UiPump {
                                 };
                                 ui.set_error_text(message.into());
                             }
+                            if self.close_after_if_idle(ui) {
+                                let _ = slint::quit_event_loop();
+                            }
                         }
                     } else if let Some(error) = text.strip_prefix("CONVERTER_INIT_ERR|") {
-                        let close_after = {
-                            let mut s = self.state.borrow_mut();
-                            s.convert_init_cancel = None;
-                            std::mem::take(&mut s.close_after)
-                        };
+                        self.state.borrow_mut().convert_init_cancel = None;
                         ui.set_convert_initializing(false);
                         ui.set_convert_ready(false);
                         ui.set_convert_status("可选组件未就绪，请重试初始化".into());
@@ -3627,7 +3666,7 @@ impl UiPump {
                             ui.set_convert_detail_text(error.into());
                             ui.set_convert_detail_open(false);
                         }
-                        if close_after {
+                        if self.close_after_if_idle(ui) {
                             let _ = slint::quit_event_loop();
                         }
                     } else {
@@ -3734,7 +3773,7 @@ impl UiPump {
                         let page = self.state.borrow().fail_page;
                         request_fail_page(&self.state, page);
                     }
-                    if self.state.borrow().close_after {
+                    if self.close_after_if_idle(ui) {
                         let _ = slint::quit_event_loop();
                     }
                 }
@@ -3754,12 +3793,12 @@ impl UiPump {
                     ui.set_paused(false);
                     ui.set_progress(-1.0);
                     ui.set_progress_note("".into());
-                    if close_after {
+                    if close_after && self.close_after_if_idle(ui) {
                         // U-09：用户已确认「停止并关闭」。MD 扫描与冲突检查不经过任务
                         // 检查点，操作自然结束走到这里——此时应直接退出应用，不得再弹
                         // 覆盖确认把用户留在界面里，也不得残留 close_after。
                         let _ = slint::quit_event_loop();
-                    } else if ui.get_confirm_kind() == 3 {
+                    } else if close_after || ui.get_confirm_kind() == 3 {
                         // U-09：「停止任务并关闭」确认框打开期间任务自然走到冲突点：
                         // busy/control 均已清空，保持关闭确认框不被破坏性覆盖确认顶替，
                         // 用户确认后经 on_confirmed(3) 的无任务分支直接退出；冲突详情
@@ -3830,11 +3869,10 @@ impl UiPump {
                                 .into(),
                             );
                         }
-                        let close_after = self.state.borrow_mut().close_after;
-                        if close_after {
-                            self.state.borrow_mut().close_after = false;
+                        let closing = self.state.borrow().close_after;
+                        if self.close_after_if_idle(ui) {
                             let _ = slint::quit_event_loop();
-                        } else if readiness_missed {
+                        } else if !closing && readiness_missed {
                             // S1-05/T-05/T-06：busy 期间被丢弃的就绪结果在任务收尾
                             // 补查一次（此刻发起侧的忙碌拒绝已解除），页面就绪状态
                             // 回到当前真值，不得长期停留过期就绪状态。
@@ -3909,11 +3947,10 @@ impl UiPump {
                         );
                         // 收尾日志直接上屏（S1-03 的例外路径），并清掉脏标记。
                         self.convert_log_dirty.set(false);
-                        let close_after = self.state.borrow_mut().close_after;
-                        if close_after {
-                            self.state.borrow_mut().close_after = false;
+                        let closing = self.state.borrow().close_after;
+                        if self.close_after_if_idle(ui) {
                             let _ = slint::quit_event_loop();
-                        } else if readiness_missed {
+                        } else if !closing && readiness_missed {
                             // S1-05/T-05/T-06：与 DONE 分支同口径的补查。
                             start_markdown_readiness(ui, &self.state, &self.out);
                         }
@@ -3921,23 +3958,19 @@ impl UiPump {
                     }
                     pending_status = None;
                     terminal = true;
-                    let close_after = {
+                    {
                         let mut s = self.state.borrow_mut();
                         s.control = None;
                         s.runtime = RuntimeMode::Organizer;
                         push_event_log(&mut s.logs, text.clone());
                         self.log_dirty.set(true);
-                        // U-09：close_after 在此消费；MD 扫描与合并不经过任务检查点，
-                        // 「停止并关闭」确认后任务会自然结束——结束时必须关闭窗口，
-                        // 而不是把窗口留在运行完成状态、把请求残留到之后的任务。
-                        std::mem::take(&mut s.close_after)
-                    };
+                    }
                     ui.set_busy(false);
                     ui.set_paused(false);
                     ui.set_progress(-1.0);
                     ui.set_progress_note("".into());
                     ui.set_status(text.into());
-                    if close_after {
+                    if self.close_after_if_idle(ui) {
                         let _ = slint::quit_event_loop();
                     }
                 }
@@ -3974,7 +4007,7 @@ impl UiPump {
                     ui.set_progress(-1.0);
                     ui.set_progress_note("".into());
                     ui.set_status(text.into());
-                    if self.state.borrow().close_after {
+                    if self.close_after_if_idle(ui) {
                         let _ = slint::quit_event_loop();
                     }
                 }
@@ -4041,7 +4074,7 @@ impl UiPump {
             ui.get_directory().to_string(),
             PlanQuery::page(0, 0, filter, false),
         );
-        if self.state.borrow().close_after {
+        if self.close_after_if_idle(ui) {
             let _ = slint::quit_event_loop();
         }
     }
@@ -4454,11 +4487,12 @@ fn wire_settings(ui: &AppWindow, state: &Rc<RefCell<State>>, out: &EventSender) 
         }
         let action = action.to_string();
         let custom = PathBuf::from(ui.get_settings_custom_dir().as_str());
-        let cancel = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let cancel =
+            (action == "download").then(|| Arc::new(std::sync::atomic::AtomicBool::new(false)));
         ui.set_convert_initializing(action == "download");
         ui.set_convert_runtime_saving(action != "download");
         ui.set_settings_status("正在处理，请稍候…".into());
-        state.borrow_mut().convert_init_cancel = Some(cancel.clone());
+        state.borrow_mut().convert_init_cancel.clone_from(&cancel);
         let out = out.clone();
         std::thread::spawn(move || {
             let result = (|| {
@@ -4476,7 +4510,10 @@ fn wire_settings(ui: &AppWindow, state: &Rc<RefCell<State>>, out: &EventSender) 
                         markdown_assets::ensure_document_notice()?;
                     }
                     "download" => {
-                        markdown_assets::download_runtime(&cancel, |message| {
+                        let cancel = cancel
+                            .as_ref()
+                            .ok_or_else(|| "下载取消信号不可用".to_string())?;
+                        markdown_assets::download_runtime(cancel, |message| {
                             let _ = out.send(Event::Status(format!("SETTINGS_PROGRESS|{message}")));
                         })?;
                     }
@@ -4711,15 +4748,16 @@ fn start_markdown_readiness(ui: &AppWindow, state: &Rc<RefCell<State>>, out: &Ev
 // start_markdown_readiness 呈现，修复入口经页内「前往设置」进入设置页。
 
 fn start_markdown_conversion(ui: &AppWindow, state: &Rc<RefCell<State>>, out: &EventSender) {
-    if ui.get_busy() || ui.get_convert_preparing() || !ui.get_convert_ready() {
+    if ui.get_busy()
+        || ui.get_convert_preparing()
+        || ui.get_convert_initializing()
+        || ui.get_convert_runtime_saving()
+        || !ui.get_convert_ready()
+    {
         return;
     }
     let input_dir = PathBuf::from(ui.get_convert_input_dir().as_str());
     let output_dir = PathBuf::from(ui.get_convert_output_dir().as_str());
-    if !input_dir.is_dir() || !output_dir.is_dir() {
-        ui.set_error_text("输入目录或输出目录不存在或无法访问".into());
-        return;
-    }
     let Ok(timeout_secs) = ui.get_convert_timeout_secs().parse::<u64>() else {
         ui.set_error_text("单文件超时必须是正整数秒数".into());
         return;
@@ -4771,8 +4809,14 @@ fn start_markdown_conversion(ui: &AppWindow, state: &Rc<RefCell<State>>, out: &E
             }
             let input = std::fs::canonicalize(&options.input_dir)
                 .map_err(|error| format!("无法访问输入目录：{error}"))?;
+            if !input.is_dir() {
+                return Err("输入路径不是目录".to_string());
+            }
             let output = std::fs::canonicalize(&options.output_dir)
                 .map_err(|error| format!("无法访问输出目录：{error}"))?;
+            if !output.is_dir() {
+                return Err("输出路径不是目录".to_string());
+            }
             if input == output {
                 return Err("输入与输出目录不能相同".to_string());
             }
@@ -5494,6 +5538,23 @@ pub fn run_with_engine_overrides(
 /// 打开任务目录、自绘标题栏拖动、关窗确认）：生产装配与无头测试装配共用同一
 /// 接线，保证经 invoke 层驱动的用例走与产品完全一致的处理器。
 fn wire_task_lifecycle(ui: &AppWindow, state: &Rc<RefCell<State>>, out: &EventSender) {
+    let (selection_writer, selection_queue) = mpsc::channel::<(PathBuf, i64, bool)>();
+    let selection_out = out.clone();
+    std::thread::spawn(move || {
+        while let Ok((task, id, selected)) = selection_queue.recv() {
+            let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                Database::open_existing(&task).and_then(|db| db.set_selected(id, selected))
+            }));
+            let result =
+                result.unwrap_or_else(|_| Err(anyhow::anyhow!("保存勾选时后台操作意外退出")));
+            let saved = result.is_ok().then_some((id, selected));
+            let _ = selection_out.send(Event::SelectionSaved(
+                task,
+                saved,
+                result.err().map(|error| format!("{error:#}")),
+            ));
+        }
+    });
     {
         let weak = ui.as_weak();
         let state = state.clone();
@@ -5502,26 +5563,35 @@ fn wire_task_lifecycle(ui: &AppWindow, state: &Rc<RefCell<State>>, out: &EventSe
             if let Some(ui) = weak.upgrade() {
                 if kind == 3 {
                     state.borrow_mut().close_after = true;
-                    // 任务可能已在确认框打开期间结束：此时没有可取消的对象，直接退出窗口，
-                    // 否则状态停在“取消任务中”且 close_after 残留，会让之后的任务收尾时意外关闭应用。
-                    let control = state.borrow().control.clone();
-                    let converter_cancel = state.borrow().convert_cancel.clone();
-                    let converter_init_cancel = state.borrow().convert_init_cancel.clone();
-                    let snap_init_cancel = state.borrow().snap_init_cancel.clone();
+                    // 各 GUI 操作可并行（例如旧工具任务与字体初始化），关闭必须请求全部可取消阶段停止。
+                    let (control, converter_cancel, converter_init_cancel, snap_init_cancel) = {
+                        let state = state.borrow();
+                        (
+                            state.control.clone(),
+                            state.convert_cancel.clone(),
+                            state.convert_init_cancel.clone(),
+                            state.snap_init_cancel.clone(),
+                        )
+                    };
                     let has_running = control.is_some()
                         || converter_cancel.is_some()
                         || converter_init_cancel.is_some()
                         || snap_init_cancel.is_some()
-                        || ui.get_convert_runtime_saving();
+                        || ui.get_busy()
+                        || ui.get_convert_initializing()
+                        || ui.get_convert_preparing()
+                        || ui.get_convert_runtime_saving()
+                        || ui.get_snap_initializing();
                     if let Some(control) = control {
                         control.cancel();
-                    } else if let Some(cancel) = converter_cancel {
-                        cancel.store(true, Ordering::Release);
-                    } else if let Some(cancel) = converter_init_cancel {
+                    }
+                    if let Some(cancel) = converter_cancel {
                         cancel.store(true, Ordering::Release);
                     }
-                    if let Some(cancel) = snap_init_cancel.as_ref() {
-                        // 其它工具任务与初始化可以并行，确认关窗时两者都必须取消。
+                    if let Some(cancel) = converter_init_cancel {
+                        cancel.store(true, Ordering::Release);
+                    }
+                    if let Some(cancel) = snap_init_cancel {
                         cancel.store(true, Ordering::Release);
                     }
                     if !has_running {
@@ -5560,21 +5630,26 @@ fn wire_task_lifecycle(ui: &AppWindow, state: &Rc<RefCell<State>>, out: &EventSe
         let weak = ui.as_weak();
         let state = state.clone();
         ui.on_cancel_task(move || {
-            // 与 on_confirmed(3) 同构：转 Markdown 任务用独立取消原子量（无共享
-            // Control），control 为 None 时回落取消转换/初始化，不得谎报正在取消
-            // 而任务继续运行（H-02 取消入口可用）。
-            let control = state.borrow().control.clone();
-            let converter_cancel = state.borrow().convert_cancel.clone();
-            let converter_init_cancel = state.borrow().convert_init_cancel.clone();
-            let snap_init_cancel = state.borrow().snap_init_cancel.clone();
+            // 不同 GUI 阶段可并行；独立请求所有取消信号，截图服务本身不受影响。
+            let (control, converter_cancel, converter_init_cancel, snap_init_cancel) = {
+                let state = state.borrow();
+                (
+                    state.control.clone(),
+                    state.convert_cancel.clone(),
+                    state.convert_init_cancel.clone(),
+                    state.snap_init_cancel.clone(),
+                )
+            };
             if let Some(control) = control {
                 control.cancel();
-            } else if let Some(cancel) = converter_cancel {
+            }
+            if let Some(cancel) = converter_cancel {
                 cancel.store(true, Ordering::Release);
-            } else if let Some(cancel) = converter_init_cancel {
+            }
+            if let Some(cancel) = converter_init_cancel {
                 cancel.store(true, Ordering::Release);
-            } else if let Some(cancel) = snap_init_cancel {
-                // O-06：截图 OCR 初始化同属可取消操作；服务本身不受影响（O-16）。
+            }
+            if let Some(cancel) = snap_init_cancel {
                 cancel.store(true, Ordering::Release);
             }
             if let Some(ui) = weak.upgrade() {
@@ -5585,6 +5660,7 @@ fn wire_task_lifecycle(ui: &AppWindow, state: &Rc<RefCell<State>>, out: &EventSe
     {
         let state = state.clone();
         let out = out.clone();
+        let selection_writer = selection_writer.clone();
         let weak = ui.as_weak();
         ui.on_plan_toggle(move |id, selected| {
             let task = state.borrow().task.clone();
@@ -5600,22 +5676,14 @@ fn wire_task_lifecycle(ui: &AppWindow, state: &Rc<RefCell<State>>, out: &EventSe
                     patch_plan_row(&ui, id, selected);
                 }
                 state.borrow_mut().pending_selection += 1;
-                let out = out.clone();
-                std::thread::spawn(move || {
-                    // 与 async_work 一致地拦截 panic：否则 pending_selection 永远减不到 0，
-                    // 会静默阻断后续的开始执行与历史载入。
-                    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                        Database::open_existing(&task).and_then(|db| db.set_selected(id, selected))
-                    }));
-                    let result = result
-                        .unwrap_or_else(|_| Err(anyhow::anyhow!("保存勾选时后台操作意外退出")));
-                    let saved = result.is_ok().then_some((id, selected));
+                if let Err(error) = selection_writer.send((task, id, selected)) {
+                    let (task, _, _) = error.0;
                     let _ = out.send(Event::SelectionSaved(
                         task,
-                        saved,
-                        result.err().map(|e| format!("{e:#}")),
+                        None,
+                        Some("保存勾选时后台操作意外退出".into()),
                     ));
-                });
+                }
             }
         });
     }
@@ -6124,6 +6192,119 @@ mod gui_tests {
             assert!(
                 app.state.borrow().close_after,
                 "任务运行中 SETTINGS_ERROR 不得消费 close_after（U-09）"
+            );
+        })
+        .unwrap();
+    }
+
+    // U-09：重叠的 GUI 任务与组件操作都完成前不得消费关闭请求。
+    #[test]
+    fn close_after_waits_for_concurrent_task_and_converter_initialization() {
+        with_gui(|app| {
+            let ui = &app.ui;
+            ui.set_busy(true);
+            ui.set_convert_initializing(true);
+            app.state.borrow_mut().close_after = true;
+
+            app.pump
+                .out
+                .send(Event::MdDone("其他任务完成".into()))
+                .unwrap();
+            app.pump.run(ui);
+            assert!(!ui.get_busy());
+            assert!(ui.get_convert_initializing());
+            assert!(
+                app.state.borrow().close_after,
+                "任务收尾不得越过仍在进行的组件初始化关闭窗口（U-09）"
+            );
+
+            ui.set_busy(true);
+            app.pump
+                .out
+                .send(Event::Notice("CONVERTER_INIT_OK".into()))
+                .unwrap();
+            app.pump.run(ui);
+            assert!(!ui.get_convert_initializing());
+            assert!(
+                app.state.borrow().close_after,
+                "初始化收尾不得越过仍在运行的任务关闭窗口（U-09）"
+            );
+
+            app.pump
+                .out
+                .send(Event::MdDone("剩余任务完成".into()))
+                .unwrap();
+            app.pump.run(ui);
+            assert!(
+                !app.state.borrow().close_after,
+                "全部 GUI 管理的操作收尾后应消费关闭请求"
+            );
+            // 其它无 busy 标志的 GUI 阶段也必须挡住关闭；只有全部空闲时才消费请求。
+            app.state.borrow_mut().close_after = true;
+            ui.set_convert_preparing(true);
+            assert!(!app.pump.close_after_if_idle(ui), "转换预检在途时不得关闭");
+            assert!(app.state.borrow().close_after);
+            ui.set_convert_preparing(false);
+
+            ui.set_convert_runtime_saving(true);
+            assert!(!app.pump.close_after_if_idle(ui), "配置保存在途时不得关闭");
+            assert!(app.state.borrow().close_after);
+            ui.set_convert_runtime_saving(false);
+
+            ui.set_snap_initializing(true);
+            assert!(
+                !app.pump.close_after_if_idle(ui),
+                "截图字体初始化在途时不得关闭"
+            );
+            assert!(app.state.borrow().close_after);
+            ui.set_snap_initializing(false);
+            assert!(
+                app.pump.close_after_if_idle(ui),
+                "所有操作空闲后应消费关闭请求"
+            );
+        })
+        .unwrap();
+    }
+
+    // 转换启动预检与旧工具任务可并行；预检终态即使在 busy 时到达也必须清除
+    // pending 状态，不能让转换页面永久停在“正在检查”。
+    #[test]
+    fn converter_preflight_result_does_not_strand_when_other_task_runs() {
+        with_gui(|app| {
+            let ui = &app.ui;
+            let generation = 7;
+            {
+                let mut state = app.state.borrow_mut();
+                state.convert_preparing = true;
+                state.convert_preflight_generation = generation;
+                state.convert_pending_options = Some(markdown::Options {
+                    input_dir: PathBuf::new(),
+                    output_dir: PathBuf::new(),
+                    flat: false,
+                    groups: Vec::new(),
+                    timeout_secs: 1,
+                });
+                state.convert_cancel = Some(Arc::new(std::sync::atomic::AtomicBool::new(false)));
+            }
+            ui.set_convert_preparing(true);
+            ui.set_busy(true);
+
+            app.pump
+                .out
+                .send(Event::Status(format!(
+                    "CONVERTER_PREFLIGHT|{generation}|1|已通过"
+                )))
+                .unwrap();
+            app.pump.run(ui);
+
+            assert!(!ui.get_convert_preparing());
+            assert!(!app.state.borrow().convert_preparing);
+            assert!(app.state.borrow().convert_pending_options.is_none());
+            assert!(app.state.borrow().convert_cancel.is_none());
+            assert!(ui.get_busy(), "预检事件不得结束另一个工具的任务");
+            assert!(
+                ui.get_convert_status().contains("其他任务"),
+                "转换页需明确提示其它任务运行中且可稍后重试"
             );
         })
         .unwrap();
@@ -6810,7 +6991,9 @@ mod gui_tests {
             ui.invoke_settings_action("custom".into());
             assert!(pump_until(app, || !ui.get_convert_runtime_saving()));
             assert!(ui.get_convert_runtime_confirmed());
-            assert!(ui.get_settings_status().contains("Xberg 资产"));
+            // XB-19/XB-26：保存只要求 xberg.exe 在场（含根可执行），场景资产按
+            // 各功能就绪检查分别校验；成功必须给出持久保存确认（XB-18）。
+            assert!(ui.get_settings_status().contains("配置已持久保存"));
             assert_eq!(
                 crate::xberg_settings::required().unwrap(),
                 root.path().canonicalize().unwrap()
@@ -6820,7 +7003,9 @@ mod gui_tests {
             ui.invoke_settings_action("custom".into());
             assert!(pump_until(app, || !ui.get_convert_runtime_saving()));
             assert_eq!(ui.get_convert_runtime_dir(), saved);
-            assert!(ui.get_settings_status().contains("Xberg 资产"));
+            // 保存校验不再强制无关场景资产：缺目录由 xberg.exe 在场校验直接拒绝，
+            // 状态行必须说明具体拒绝原因（XB-20），已保存来源保持不变。
+            assert!(ui.get_settings_status().contains("xberg.exe"));
             ui.invoke_select_tool("snap-ocr".into());
             assert_eq!(ui.get_screen(), 6);
             assert_eq!(ui.get_active_tool_id(), "snap-ocr");
@@ -7370,6 +7555,113 @@ mod gui_tests {
         })
         .unwrap();
     }
+    // C-01：快速连续勾选按用户顺序串行保存，数据库与即时 UI 最终都保留最后一次选择。
+    #[test]
+    fn rapid_plan_toggles_persist_last_intent() {
+        with_gui(|app| {
+            let task = temp_test_dir("plan-toggle-order");
+            let id = {
+                let db = Database::create(&task).unwrap();
+                db.set("status", &"ready".to_string()).unwrap();
+                db.add_action(&crate::model::Action {
+                    id: 0,
+                    kind: crate::model::ActionKind::Delete,
+                    source: "synthetic.txt".into(),
+                    target: None,
+                    reason: "测试".into(),
+                    expected: None,
+                    keeper: None,
+                    hash: None,
+                    mode: crate::config::DeleteMode::Permanent,
+                    selected: false,
+                    state: "pending".into(),
+                })
+                .unwrap()
+            };
+            app.state.borrow_mut().task = Some(task.clone());
+            app.ui.set_plans(
+                Rc::new(VecModel::from(vec![PlanRow {
+                    id: id.to_string().into(),
+                    selected: false,
+                    kind: "删除".into(),
+                    source: "synthetic.txt".into(),
+                    target: "".into(),
+                    reason: "测试".into(),
+                    state: "已取消勾选".into(),
+                }]))
+                .into(),
+            );
+            app.ui.invoke_plan_toggle(id.to_string().into(), true);
+            app.ui.invoke_plan_toggle(id.to_string().into(), false);
+            assert_eq!(app.state.borrow().pending_selection, 2);
+            assert!(
+                !app.ui.get_plans().row_data(0).unwrap().selected,
+                "最后一次取消勾选必须即时生效"
+            );
+            // 阻止测试计划进入依赖重算；保存路径仍是 GUI 回调与真实任务库。
+            app.state.borrow_mut().plan_recompute_inflight = 1;
+            assert!(
+                pump_until(app, || app.state.borrow().pending_selection == 0),
+                "排队的勾选写入应收尾"
+            );
+            assert!(
+                !Database::open_existing(&task)
+                    .unwrap()
+                    .action(id)
+                    .unwrap()
+                    .selected,
+                "数据库必须保留最后一次明确取消勾选"
+            );
+            assert!(
+                !app.ui.get_plans().row_data(0).unwrap().selected,
+                "较早保存完成不得把更新的 UI 勾选改回"
+            );
+            let _ = std::fs::remove_dir_all(task);
+        })
+        .unwrap();
+    }
+
+    // C-01：即使较早成功事件先到，仍在途的较新意图也不得被回写覆盖。
+    #[test]
+    fn stale_selection_completion_keeps_latest_ui_choice() {
+        with_gui(|app| {
+            let task = PathBuf::from("stale-selection-event");
+            app.state.borrow_mut().task = Some(task.clone());
+            app.state.borrow_mut().pending_selection = 2;
+            app.ui.set_busy(true);
+            app.ui.set_plans(
+                Rc::new(VecModel::from(vec![PlanRow {
+                    id: "41".into(),
+                    selected: false,
+                    kind: "删除".into(),
+                    source: "synthetic.txt".into(),
+                    target: "".into(),
+                    reason: "测试".into(),
+                    state: "已取消勾选".into(),
+                }]))
+                .into(),
+            );
+
+            app.pump
+                .out
+                .send(Event::SelectionSaved(task.clone(), Some((41, true)), None))
+                .unwrap();
+            app.pump.run(&app.ui);
+            assert_eq!(app.state.borrow().pending_selection, 1);
+            assert!(
+                !app.ui.get_plans().row_data(0).unwrap().selected,
+                "较早勾选完成事件不得撤销用户较新的取消勾选"
+            );
+
+            app.pump
+                .out
+                .send(Event::SelectionSaved(task, Some((41, false)), None))
+                .unwrap();
+            app.pump.run(&app.ui);
+            assert!(!app.ui.get_plans().row_data(0).unwrap().selected);
+        })
+        .unwrap();
+    }
     // 覆盖 U-11（切工具回到默认面板；共享面板索引不得停留在另一工具才有的面板）
     #[test]
     fn switching_tools_resets_shared_panel_to_default() {
@@ -7601,6 +7893,15 @@ mod gui_tests {
             ),
             PlanReadyState::Finished
         ));
+        // 任务库快照缺少状态元数据时不得误报成已结束。
+        assert!(matches!(
+            classify_plan_snapshot(
+                Some(&snapshot(None, directory, true, &config)),
+                directory,
+                &config
+            ),
+            PlanReadyState::Unavailable
+        ));
         // 任务库读不到（快照缺失）：fail-closed。
         assert!(matches!(
             classify_plan_snapshot(None, directory, &config),
@@ -7796,6 +8097,28 @@ mod gui_tests {
         .unwrap();
     }
 
+    // 覆盖 X-02/R-02：递归解压入口必须按解压专属规则校验并在错误时不启动。
+    #[test]
+    fn extract_start_validates_extract_configuration() {
+        let root = temp_test_dir("extract-config-validation");
+        with_gui(move |app| {
+            let ui = &app.ui;
+            ui.set_directory(root.display().to_string().into());
+            app.state.borrow_mut().config.max_depth = 0;
+
+            start_extract(ui, &app.state, &app.pump.out);
+
+            assert!(
+                ui.get_error_text().contains("嵌套层数"),
+                "无效解压配置必须显示对应错误：{}",
+                ui.get_error_text()
+            );
+            assert!(!ui.get_busy(), "校验失败不得启动解压任务");
+            let _ = std::fs::remove_dir_all(&root);
+        })
+        .unwrap();
+    }
+
     // 覆盖 X-02, S-05（受保护目录在打开确认框之前就被拒绝，不得进入"清点中"占位态）
     // 平台门禁原因：S-05 的安装目录保护分支依赖 Windows 环境变量与路径语义。
     #[cfg(windows)]
@@ -7938,7 +8261,7 @@ mod gui_tests {
         .unwrap();
     }
 
-    /// 构造 MD 合并输入/输出目录：`file_count` 个带内容的 .md 文件（让合并耗时可观测）。
+    /// 构造 MD 输入/输出目录：`file_count` 个带内容的 .md 文件。
     fn make_md_fixture(tag: &str, file_count: usize) -> (PathBuf, PathBuf, PathBuf) {
         let dir = temp_test_dir(tag);
         let docs = dir.join("docs");
@@ -7952,18 +8275,11 @@ mod gui_tests {
         (docs, out_dir, dir)
     }
 
-    /// 从实时指标文本解析「耗时 N s」的秒数（MD/Git 指标口径）。
-    fn elapsed_in_metrics(metrics: &str) -> Option<f64> {
-        let index = metrics.find("耗时 ")?;
-        let rest = metrics[index + "耗时 ".len()..].trim_end_matches('s');
-        rest.parse().ok()
-    }
-
-    // 覆盖 U-03（MD 合并/拆分启动时耗时必须从本次任务起算，不得沿用上次任务的时钟）
+    // 覆盖 U-03：真实完成事件使用本次任务时钟，合并/拆分都不能继承旧 started。
     #[test]
     fn md_start_resets_started_clock() {
-        // 合并：上次任务遗留 10 分钟前的旧时钟，启动后实时耗时必须回到本次任务口径。
-        let (docs, out_dir, dir) = make_md_fixture("md-clock-merge", 20);
+        let (docs, out_dir, dir) = make_md_fixture("md-clock-merge", 1);
+        let merged_output = out_dir.join("merged.md");
         let docs_text = docs.display().to_string();
         let out_text = out_dir.display().to_string();
         with_gui(move |app| {
@@ -7972,25 +8288,25 @@ mod gui_tests {
                 .checked_sub(Duration::from_secs(600))
                 .expect("系统运行时间不足 600 秒，无法构造旧时钟");
             app.state.borrow_mut().started = stale;
-            app.ui.set_md_input_dir(docs_text.clone().into());
+            app.ui.set_md_input_dir(docs_text.into());
             app.ui.set_md_output_name("merged.md".into());
             app.ui.set_md_output_dir(out_text.into());
             app.ui.invoke_md_merge_start();
             assert!(
-                pump_until(app, || {
-                    app.ui.get_busy()
-                        && elapsed_in_metrics(app.ui.get_metrics().as_str())
-                            .is_some_and(|secs| secs < 120.0)
-                }),
-                "MD 合并启动后耗时必须从本次任务起算（不得显示 600s+ 旧时钟）：metrics={}",
-                app.ui.get_metrics()
+                app.state.borrow().started > stale,
+                "合并启动必须同步重置任务时钟"
             );
-            assert!(pump_until(app, || !app.ui.get_busy()), "合并应正常收尾");
+            assert!(
+                pump_until(app, || app.ui.get_status().contains("合并完成")),
+                "真实合并完成结果应上屏：{}",
+                app.ui.get_status()
+            );
         })
         .unwrap();
+        assert!(merged_output.is_file(), "合并完成必须生成真实输出");
         let _ = std::fs::remove_dir_all(&dir);
-        // 拆分：同一口径
-        let (docs, out_dir, dir) = make_md_fixture("md-clock-split", 8);
+
+        let (docs, out_dir, dir) = make_md_fixture("md-clock-split", 1);
         let input = docs.join("doc000.md");
         let input_text = input.display().to_string();
         let out_text = out_dir.display().to_string();
@@ -8003,21 +8319,26 @@ mod gui_tests {
             app.state.borrow_mut().started = stale;
             app.ui.set_md_split_file(input_text.into());
             app.ui.set_md_split_size("1".into());
-            app.ui.set_md_split_unit(1); // MB：单文件上限 1MB，多片写出保证耗时可观测
+            app.ui.set_md_split_unit(1);
             app.ui.set_md_split_dir(out_text.into());
             app.ui.invoke_md_split_start();
             assert!(
-                pump_until(app, || {
-                    app.ui.get_busy()
-                        && elapsed_in_metrics(app.ui.get_metrics().as_str())
-                            .is_some_and(|secs| secs < 120.0)
-                }),
-                "MD 拆分启动后耗时必须从本次任务起算：metrics={}",
-                app.ui.get_metrics()
+                app.state.borrow().started > stale,
+                "拆分启动必须同步重置任务时钟"
             );
-            assert!(pump_until(app, || !app.ui.get_busy()), "拆分应正常收尾");
+            assert!(
+                pump_until(app, || app.ui.get_status().contains("拆分完成")),
+                "真实拆分完成结果应上屏：{}",
+                app.ui.get_status()
+            );
         })
         .unwrap();
+        assert!(
+            std::fs::read_dir(&out_dir)
+                .unwrap()
+                .any(|entry| entry.unwrap().path().is_file()),
+            "拆分完成必须生成真实分片"
+        );
         let _ = std::fs::remove_dir_all(&dir);
     }
 
@@ -8071,12 +8392,42 @@ mod gui_tests {
             app.ui.invoke_select_tool("git-tools".into());
             app.state.borrow_mut().close_after = true;
             app.ui.set_git_repo(git_text.into());
+            app.ui.set_git_branch("旧分支".into());
+            app.ui.set_git_upstream("旧远端".into());
+            app.ui.set_git_current("旧文件.md".into());
+            app.ui.set_git_stage("push".into());
+            app.ui.set_git_retry(3);
+            app.ui.set_git_retry_wait(80);
+            app.ui.set_git_total(12);
+            app.ui.set_git_done(9);
+            app.ui.set_git_state("完成".into());
             app.ui.invoke_git_start();
+            assert_eq!(app.ui.get_git_branch().as_str(), "", "新任务不得保留旧分支");
+            assert_eq!(
+                app.ui.get_git_upstream().as_str(),
+                "",
+                "新任务不得保留旧 upstream"
+            );
+            assert_eq!(
+                app.ui.get_git_current().as_str(),
+                "",
+                "新任务不得保留旧文件"
+            );
+            assert_eq!(app.ui.get_git_retry(), 0, "新任务重试次数从零开始");
+            assert_eq!(app.ui.get_git_retry_wait(), 0, "新任务不得保留旧退避计时");
+            assert_eq!(app.ui.get_git_total(), 0, "新任务待处理总数从零开始");
+            assert_eq!(app.ui.get_git_done(), 0, "新任务完成数从零开始");
+            assert_eq!(app.ui.get_git_state().as_str(), "检查仓库");
             assert!(
                 !app.state.borrow().close_after,
                 "Git 启动必须重置 close_after（U-09）"
             );
             assert!(pump_until(app, || !app.ui.get_busy()), "Git 任务应快速收尾");
+            assert_eq!(
+                app.ui.get_git_state().as_str(),
+                "失败",
+                "无效仓库收尾不得残留检查仓库状态"
+            );
         })
         .unwrap();
         let _ = std::fs::remove_dir_all(&git_dir);
@@ -8093,6 +8444,10 @@ mod gui_tests {
         let base = dir.path();
         let run_git = |cwd: &std::path::Path, args: &[&str]| {
             let ok = std::process::Command::new(&git)
+                // 固定夹具默认分支为 master（与 tests/git_tools.rs::git_ok 一致，
+                // 只作用于本次调用）：全局 init.defaultBranch 非 master 时，
+                // 后续 push master 与裸远端 HEAD 指向都会失败。
+                .args(["-c", "init.defaultBranch=master"])
                 .args(args)
                 .current_dir(cwd)
                 .status()
@@ -8613,6 +8968,14 @@ mod gui_tests {
         assert_eq!(normalize_recorded_primary_key("", true), None);
     }
 
+    /// 从指标行的「耗时 N.Ns」/「总耗时 N.Ns」提取耗时秒数（T-22 测试辅助）：
+    /// `find("耗时")` 同时命中「总耗时」后半段，取其后首个 f64。
+    fn elapsed_in_metrics(metrics: &str) -> Option<f64> {
+        let tail = &metrics[metrics.find("耗时")? + "耗时".len()..];
+        let end = tail.find('s')?;
+        tail[..end].trim().parse().ok()
+    }
+
     // 覆盖 T-22（转 Markdown：任务状态须含耗时——运行期间实时显示，收尾统计含总耗时）。
     // 事件驱动走真实事件泵：FILE_STARTED 后同一次 pump.run 的周期刷新即须带耗时，
     // DONE 收尾统计行须含从任务起算的总耗时。
@@ -8888,6 +9251,54 @@ mod gui_tests {
         .unwrap();
         let _ = std::fs::remove_dir_all(&dir);
     }
+    // T-07/H-02：目录元数据检查必须留在后台预检，网络路径等慢 I/O 不得阻塞 GUI。
+    #[test]
+    fn convert_directory_validation_runs_in_background_preflight() {
+        let root = temp_test_dir("convert-directory-preflight");
+        let output = root.join("output");
+        std::fs::create_dir_all(&output).unwrap();
+        let input = root.join("missing-input");
+        let input_text = input.display().to_string();
+        let output_text = output.display().to_string();
+        with_gui(move |app| {
+            let ui = &app.ui;
+            ui.invoke_select_tool("markdown-converter".into());
+            ui.set_convert_ready(true);
+            ui.set_convert_input_dir(input_text.into());
+            ui.set_convert_output_dir(output_text.into());
+
+            ui.invoke_convert_start();
+            assert!(ui.get_convert_preparing(), "目录检查应先进入后台预检");
+            assert!(!ui.get_busy(), "目录预检失败前不应开始转换");
+            assert!(pump_until(app, || ui
+                .get_error_text()
+                .contains("无法访问输入目录")));
+            assert!(!ui.get_busy(), "无效输入目录不得启动转换任务");
+        })
+        .unwrap();
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    // XB-20：组件初始化或共享目录保存期间，不允许旧的 ready 快照启动转换。
+    #[test]
+    fn convert_start_is_gated_during_settings_operations() {
+        with_gui(|app| {
+            let ui = &app.ui;
+            ui.invoke_select_tool("markdown-converter".into());
+            ui.set_convert_ready(true);
+            ui.set_convert_initializing(true);
+            ui.invoke_convert_start();
+            assert!(!ui.get_convert_preparing());
+            assert!(ui.get_error_text().is_empty());
+
+            ui.set_convert_initializing(false);
+            ui.set_convert_runtime_saving(true);
+            ui.invoke_convert_start();
+            assert!(!ui.get_convert_preparing());
+            assert!(ui.get_error_text().is_empty());
+        })
+        .unwrap();
+    }
 
     // 覆盖 T-29：超出 Instant 可表示范围的正整数必须如实报错，不钳制后
     // 进入后台；修复前 u64::MAX 会在 Deadline::new 的 Instant 加法处 panic，
@@ -9062,6 +9473,52 @@ mod gui_tests {
                 snap_cancel.load(Ordering::Acquire),
                 "截图 OCR 初始化取消入口必须可用（O-06）"
             );
+            let control = Arc::new(Control::default());
+            let convert_cancel = Arc::new(std::sync::atomic::AtomicBool::new(false));
+            let convert_init_cancel = Arc::new(std::sync::atomic::AtomicBool::new(false));
+            let snap_cancel = Arc::new(std::sync::atomic::AtomicBool::new(false));
+            {
+                let mut state = app.state.borrow_mut();
+                state.control = Some(control.clone());
+                state.convert_cancel = Some(convert_cancel.clone());
+                state.convert_init_cancel = Some(convert_init_cancel.clone());
+                state.snap_init_cancel = Some(snap_cancel.clone());
+            }
+            ui.set_busy(true);
+            ui.set_convert_preparing(true);
+            ui.set_convert_initializing(true);
+            ui.set_snap_initializing(true);
+            ui.invoke_cancel_task();
+            assert!(control.is_cancelled());
+            assert!(convert_cancel.load(Ordering::Acquire));
+            assert!(convert_init_cancel.load(Ordering::Acquire));
+            assert!(snap_cancel.load(Ordering::Acquire));
+
+            let control = Arc::new(Control::default());
+            let convert_cancel = Arc::new(std::sync::atomic::AtomicBool::new(false));
+            let convert_init_cancel = Arc::new(std::sync::atomic::AtomicBool::new(false));
+            let snap_cancel = Arc::new(std::sync::atomic::AtomicBool::new(false));
+            {
+                let mut state = app.state.borrow_mut();
+                state.control = Some(control.clone());
+                state.convert_cancel = Some(convert_cancel.clone());
+                state.convert_init_cancel = Some(convert_init_cancel.clone());
+                state.snap_init_cancel = Some(snap_cancel.clone());
+            }
+            ui.invoke_confirmed(3);
+            assert!(control.is_cancelled());
+            assert!(convert_cancel.load(Ordering::Acquire));
+            assert!(convert_init_cancel.load(Ordering::Acquire));
+            assert!(snap_cancel.load(Ordering::Acquire));
+            ui.set_busy(false);
+            ui.set_convert_preparing(false);
+            ui.set_convert_initializing(false);
+            ui.set_snap_initializing(false);
+            let mut state = app.state.borrow_mut();
+            state.control = None;
+            state.convert_cancel = None;
+            state.convert_init_cancel = None;
+            state.snap_init_cancel = None;
         })
         .unwrap();
     }

@@ -106,7 +106,8 @@ fn exists_somewhere(root: &Path, name: &str) -> bool {
 #[test]
 fn defaults_valid_and_roundtrip() {
     let cfg = Config::default();
-    cfg.validate().unwrap();
+    cfg.validate_organizer().unwrap();
+    cfg.validate_extract().unwrap();
     let text = serde_json::to_string(&cfg).unwrap();
     let back = Config::from_json_text(&text).unwrap();
     assert_eq!(
@@ -162,17 +163,20 @@ fn coupled_validation_and_bounds() {
     // 校验不再把「只开 fix_extension」判为非法（直接改字段也无法构造持久化的不同步状态）。
     c.fix_extension = true;
     c.detect_type = true;
-    assert!(c.validate().is_ok());
+    assert!(c.validate_organizer().is_ok());
+    assert!(c.validate_extract().is_ok());
     let synced = Config::from_json_text(&serde_json::to_string(&c).unwrap()).unwrap();
     assert_eq!(
         synced.detect_type, synced.fix_extension,
         "影子键必须同值回读"
     );
     c.hash_workers = 0;
-    assert!(c.validate().is_err());
+    assert!(c.validate_organizer().is_err());
+    assert!(c.validate_extract().is_ok(), "整理线程数不属于解压配置");
     c.hash_workers = 2;
     c.reserve_bytes = u64::MAX;
-    assert!(c.validate().is_err());
+    assert!(c.validate_extract().is_err());
+    assert!(c.validate_organizer().is_ok(), "磁盘预留不属于整理配置");
 }
 // 覆盖 S-05
 #[test]
@@ -415,6 +419,57 @@ fn copy_names_can_be_disabled_independently() {
     let mut cfg = base();
     cfg.dedup_copy_names = false;
     assert_eq!(f.plan(cfg).summary.planned_delete, 0);
+}
+// 覆盖 H-01, C-02, C-12（只哈希启用的名称关系候选，避免读取关闭规则的文件）
+#[test]
+fn hash_candidates_respect_enabled_name_relationships() {
+    let f = Fixture::new();
+    f.write("same-a/report.txt", b"same", 10);
+    f.write("same-b/report.txt", b"same", 20);
+    f.write("copy-a/draft.txt", b"copy", 30);
+    f.write("copy-b/draft (1).txt", b"copy", 40);
+    let cfg = Config {
+        dedup_same_name: true,
+        dedup_copy_names: false,
+        dedup_other_names: false,
+        ..base()
+    };
+    let context = Context::default();
+    let control = context.control.clone();
+    let task = engine::prepare_at(&f.root, cfg, context, &f.state).unwrap();
+    assert_eq!(task.summary.planned_delete, 1, "仅相同名称关系参与去重");
+    assert_eq!(
+        control.read_bytes.load(Ordering::Relaxed),
+        8,
+        "关闭副本名去重后，不应读取仅匹配副本关系的文件内容"
+    );
+}
+
+// 覆盖 C-02, C-12（仅副本名关系仍须保留同名节点作为连通组桥接项）
+#[test]
+fn copy_name_only_hashing_keeps_same_name_bridge_candidates() {
+    let f = Fixture::new();
+    f.write("a/report.txt", b"same", 10);
+    f.write("b/report.txt", b"same", 20);
+    f.write("c/report (1).txt", b"same", 30);
+    let cfg = Config {
+        dedup_same_name: false,
+        dedup_copy_names: true,
+        dedup_other_names: false,
+        ..base()
+    };
+    let context = Context::default();
+    let control = context.control.clone();
+    let task = engine::prepare_at(&f.root, cfg, context, &f.state).unwrap();
+    assert_eq!(
+        task.summary.planned_delete, 2,
+        "两份同名文件经副本名边连接后仍属于同一候选连通组"
+    );
+    assert_eq!(
+        control.read_bytes.load(Ordering::Relaxed),
+        12,
+        "副本名候选连通组的所有桥接节点都需参与哈希"
+    );
 }
 // 覆盖 C-02, S-03
 #[test]
@@ -2030,9 +2085,14 @@ fn offline_sources_have_no_network_capabilities() {
         }
         let entry = source.path().strip_prefix(&manifest_dir).unwrap();
         let text = fs::read_to_string(source.path()).unwrap();
+        // P-03/O-31 约束的是产品运行时能力；#[cfg(test)] 区域只在 cargo test 下编译，
+        // 不进入生产二进制，允许测试用回环套接字模拟服务器（如 snap_ocr_assets 的
+        // 逐跳代理重定向回归）。本仓库约定 cfg(test) 模块位于文件尾部，取首个标记
+        // 之前的产品部分扫描。
+        let production = text.split("#[cfg(test)]").next().unwrap();
         for needle in ["TcpListener", "TcpStream", "UdpSocket", "lookup_host"] {
             assert!(
-                !text.contains(needle),
+                !production.contains(needle),
                 "P-03/O-31：{} 不得出现网络 API：{needle}",
                 entry.display()
             );
@@ -2041,7 +2101,7 @@ fn offline_sources_have_no_network_capabilities() {
             && entry != Path::new("src/snap_ocr_assets.rs")
         {
             assert!(
-                !text.contains("ureq::"),
+                !production.contains("ureq::"),
                 "P-03：{} 不得调用可选组件初始化下载接口",
                 entry.display()
             );
@@ -2485,6 +2545,53 @@ fn classification_target_never_enters_git_tree() {
         f.root.join("Git项目集合/图片/.git/config").exists(),
         "Git 树随项目整体移动，内容不得被归类写入或改动"
     );
+}
+
+// 覆盖 H-06, C-01（取消 Git 项目整体移动后，不得把普通文件移入仍受保护的原树）
+#[test]
+fn cancelling_git_move_cancels_moves_into_retained_git_tree() {
+    let f = Fixture::new();
+    f.write(
+        "图片/.git/config",
+        b"[core]\nrepositoryformatversion = 0\n",
+        10,
+    );
+    let photo = f.write("photo.png", b"photo", 20);
+    let task = f.plan(base());
+    let db = Database::open(&task.directory).unwrap();
+    let actions = db.actions_page(0, 100).unwrap();
+    let git_move = actions
+        .iter()
+        .find(|action| {
+            action.source == "图片" && action.target.as_deref() == Some("Git项目集合/图片")
+        })
+        .expect("C-14 Git 项目整体移动");
+    let photo_move = actions
+        .iter()
+        .find(|action| {
+            action.source == "photo.png" && action.target.as_deref() == Some("图片/photo.png")
+        })
+        .expect("普通文件分类目标原本位于 Git 项目目录");
+    db.set_selected(git_move.id, false).unwrap();
+    let photo_move_id = photo_move.id;
+    drop(db);
+
+    assert_eq!(engine::recompute_plan(&task.directory).unwrap(), 1);
+    let db = Database::open(&task.directory).unwrap();
+    let actions = db.actions_page(0, 100).unwrap();
+    assert!(
+        !actions
+            .iter()
+            .find(|action| action.id == photo_move_id)
+            .unwrap()
+            .selected,
+        "Git 根仍占位时，目标落入其树内的 Move 必须自动取消"
+    );
+    drop(db);
+    Fixture::apply(&task);
+    assert!(f.root.join("图片/.git/config").exists());
+    assert!(photo.exists());
+    assert!(!f.root.join("图片/photo.png").exists());
 }
 
 // 覆盖 H-06, C-07（Git 树整树随项目移动且内容原样；移走后腾空的祖先按 C-07 消失）

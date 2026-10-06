@@ -4,6 +4,8 @@
 //! 裁剪。数值语义逐位对齐 Python（`f64`、`_EPSILON = 1e-9`、`atan2` 关键字
 //! 稳定排序、分支与运算顺序一致）。
 
+use std::cmp::Ordering;
+
 use std::fmt;
 
 use crate::types::{Point, Quad};
@@ -43,8 +45,10 @@ pub fn ordered_polygon(points: &[Point]) -> Vec<Point> {
     ordered.sort_by(|first, second| {
         let first_key = (first.1 - center_y).atan2(first.0 - center_x);
         let second_key = (second.1 - center_y).atan2(second.0 - center_x);
-        // f64 全序排序对应 Python 的浮点比较全序。
-        first_key.total_cmp(&second_key)
+        // partial_cmp 将 +0.0 与 -0.0 视为相等，sort_by 因而保留原顺序。
+        first_key
+            .partial_cmp(&second_key)
+            .unwrap_or(Ordering::Equal)
     });
     ordered
 }
@@ -103,7 +107,7 @@ pub fn quad_center(quad: &Quad) -> Point {
 pub fn quad_baseline(quad: &Quad) -> f64 {
     let mut ys = [quad[0].1, quad[1].1, quad[2].1, quad[3].1];
     // 降序排序对应 Python `sorted(..., reverse=True)`，取前两元素。
-    ys.sort_by(|first, second| second.total_cmp(first));
+    ys.sort_by(|first, second| second.partial_cmp(first).unwrap_or(Ordering::Equal));
     // [quality-baseline approved 2026-10-03] 冻结规格逐位镜像豁免，经用户裁定保留
     #[allow(clippy::manual_midpoint)] // 与 Python `(a + b) / 2` 逐位一致
     {
@@ -295,6 +299,18 @@ mod tests {
             (actual - expected).abs() < 0.5e-7,
             "actual={actual:?} expected={expected:?}"
         );
+    }
+
+    // 覆盖 O-25：浮点数值相等时的稳定顺序与 Python 一致（+0.0 == -0.0）。
+    #[test]
+    fn signed_zero_float_ties_preserve_input_order() {
+        let points = [(0.0, 0.0), (3.0, 0.0), (4.0, -0.0), (0.0, 0.0)];
+        let ordered = ordered_polygon(&points);
+        assert_eq!(ordered[0], points[1]);
+        assert_eq!(ordered[1], points[2]);
+
+        let quad: Quad = [(0.0, -0.0), (1.0, -0.0), (2.0, 0.0), (3.0, 0.0)];
+        assert_eq!(quad_baseline(&quad).to_bits(), (-0.0_f64).to_bits());
     }
 
     // 覆盖 O-25

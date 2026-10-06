@@ -1181,8 +1181,22 @@ fn x10_volume_precheck(archive_rel: &str, archive: &Path, named: &VolumeSet) -> 
     if let Some(reason) = missing_part_rar_first(archive) {
         anyhow::bail!("part rar 分卷族缺首卷：{archive_rel}（{reason}）");
     }
-    // X-10：数字尾卷族缺入口——.NNN（N≥2）且同目录没有 .001/.000。同上整组
-    // 失败处置，报告缺入口而不是笼统的引擎错误。
+    // X-10：.000 不是入口；它即使与 .001 或后续卷共存也使整组非法。
+    // 入口扫描会将 .000 入队，后续卷检查也必须能从卷集合中发现它。
+    if named.scheme == VolumeScheme::Numbered {
+        if let Some(zero) = named.paths.iter().find(|path| {
+            path.file_name()
+                .and_then(|name| name.to_str())
+                .is_some_and(|name| name.ends_with(".000"))
+        }) {
+            anyhow::bail!(
+                "数字尾卷族包含非法起始卷：{archive_rel}（{}）",
+                zero.display()
+            );
+        }
+    }
+    // X-10：数字尾卷族缺入口——.NNN（N≥2）且同目录没有 .001 入口。
+    // .000 已在上面作为非法起始卷单独拒绝，不得用它替代 .001。
     if let Some(stem) = missing_numbered_entry(archive) {
         anyhow::bail!("数字尾卷族缺起始卷：{archive_rel}（未找到 {stem}.001 入口卷）");
     }
@@ -1197,9 +1211,8 @@ fn missing_old_style_main(archive: &Path) -> bool {
     let Some(tail) = rules::old_style_tail(&lower) else {
         return false;
     };
-    !archive
-        .with_file_name(format!("{}.{}", tail.stem, tail.main_ext))
-        .exists()
+    !fs::symlink_metadata(archive.with_file_name(format!("{}.{}", tail.stem, tail.main_ext)))
+        .is_ok_and(|metadata| metadata.file_type().is_file())
 }
 /// X-10：该文件是 partN（N≥2）的分卷、且同目录没有同主干同宽度的 part1 入口。
 /// 返回缺首卷的说明；不是该形态或入口在场时返回 None。宽度按 X-10 的命名族
@@ -1267,6 +1280,11 @@ fn missing_numbered_entry(archive: &Path) -> Option<String> {
     }
     Some(stem.to_string())
 }
+/// RAR part 编号中显式前导零代表最小补零宽度；无前导零时返回 None。
+fn part_padding_width(digits: &str) -> Option<usize> {
+    let natural_width = digits.trim_start_matches('0').len().max(1);
+    (digits.len() > natural_width).then_some(digits.len())
+}
 /// 分卷组解析：返回主体自身 + 同目录下的兄弟卷（X-05 删除与 X-06 隔离的处置单位）。
 /// 非分卷包（命名不能匹配任何分卷方案）返回只含主体自身的单项集合，且**不枚举目录**：
 /// 单卷 7z/tar/gz 等格式没有可匹配的兄弟卷命名，逐包扫描目录是纯粹的重复工作。
@@ -1329,10 +1347,10 @@ fn volume_set(archive: &Path) -> Result<VolumeSet> {
         }
     };
     let mut paths = vec![archive.to_path_buf()];
-    // X-10 part rar 命名歧义检测：同一卷号数值出现多种补零写法（如 part1 与
-    // part01 并存）时不猜测归属。键为卷号数值（超长数字串退化为原始串键，
-    // 不同串必不同键，不会误报）；首位写法留档，后续同号异写即歧义。
+    // X-10 part rar 命名歧义检测：混用补零宽度或同一卷号有不同写法都不猜测归属。
+    // 键为卷号数值（超长数字串退化为原始串键）；明确的前导零宽度还须覆盖所有卷号。
     let mut part_ambiguity: Option<String> = None;
+    let mut padded_width: Option<usize> = None;
     let mut part_seen: HashMap<String, String> = HashMap::new();
     if matches!(scheme, VolumeScheme::RarParts) {
         if let Some(digits) = part_digits(&name) {
@@ -1342,6 +1360,7 @@ fn volume_set(archive: &Path) -> Result<VolumeSet> {
                     .map_or_else(|_| format!("raw:{digits}"), |value| value.to_string()),
                 digits.to_string(),
             );
+            padded_width = part_padding_width(digits);
         }
     }
     for entry in fs::read_dir(archive.parent().context("压缩包缺少目录")?)? {
@@ -1352,6 +1371,16 @@ fn volume_set(archive: &Path) -> Result<VolumeSet> {
         {
             if matches!(scheme, VolumeScheme::RarParts) {
                 if let Some(digits) = part_digits(&candidate) {
+                    if let Some(width) = part_padding_width(digits) {
+                        match padded_width {
+                            Some(existing) if existing != width => {
+                                part_ambiguity
+                                    .get_or_insert_with(|| "同一主干混用不同补零位数".to_string());
+                            }
+                            None => padded_width = Some(width),
+                            _ => {}
+                        }
+                    }
                     let key = digits
                         .parse::<u64>()
                         .map_or_else(|_| format!("raw:{digits}"), |value| value.to_string());
@@ -1370,6 +1399,16 @@ fn volume_set(archive: &Path) -> Result<VolumeSet> {
             }
             paths.push(entry.path());
         }
+    }
+    if part_ambiguity.is_none()
+        && padded_width.is_some_and(|width| {
+            part_seen.values().any(|digits| {
+                let natural_width = digits.trim_start_matches('0').len().max(1);
+                digits.len() != width.max(natural_width)
+            })
+        })
+    {
+        part_ambiguity = Some("同一主干混用补零模式".to_string());
     }
     // 列出全部歧义卷：整组卷清单随描述一并返回（X-10「列出全部歧义卷」）。
     let part_ambiguity = part_ambiguity.map(|reason| {
@@ -2165,6 +2204,73 @@ mod tests {
         let set = volume_set(&root.join("x.rar.001")).unwrap();
         assert_eq!(set.scheme, VolumeScheme::Numbered);
         assert_eq!(set.paths.len(), 2);
+    }
+    // 覆盖 X-10（回归：.000 即使与其他分卷同组也必须在引擎解析前按非法起始卷拒绝）。
+    #[test]
+    fn numbered_volume_zero_is_rejected_by_precheck() {
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path().join("data");
+        fs::create_dir(&root).unwrap();
+        let zero = root.join("x.7z.000");
+        fs::write(&zero, b"invalid start").unwrap();
+        fs::write(root.join("x.7z.002"), b"later volume").unwrap();
+
+        let named = volume_set(&zero).unwrap();
+        assert!(
+            x10_volume_precheck("x.7z.000", &zero, &named).is_err(),
+            ".000 是可识别的非法起始卷，必须在引擎解析前走整组失败隔离（X-10）"
+        );
+
+        let second = root.join("x.7z.002");
+        let named = volume_set(&second).unwrap();
+        assert!(
+            x10_volume_precheck("x.7z.002", &second, &named).is_err(),
+            "从后续卷检查时也必须识别同组的非法 .000 起始卷（X-10）"
+        );
+    }
+
+    // 覆盖 X-10/E-05（同名目录不是老式分卷族的主包文件，缺引擎时也须在预检拒绝）。
+    #[test]
+    fn old_style_main_directory_does_not_satisfy_precheck() {
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path().join("data");
+        fs::create_dir(&root).unwrap();
+        let main = root.join("x.rar");
+        fs::create_dir(&main).unwrap();
+        let tail = root.join("x.r00");
+
+        assert!(
+            missing_old_style_main(&tail),
+            "同名目录不能代替老式分卷族的主包文件（X-10/E-05）"
+        );
+
+        fs::remove_dir(&main).unwrap();
+        fs::write(&main, b"main archive").unwrap();
+        assert!(
+            !missing_old_style_main(&tail),
+            "实际普通文件主包应满足老式分卷族入口检查"
+        );
+    }
+
+    // 覆盖 X-10（回归：混用最小补零宽度即使卷号不同也属于命名歧义）。
+    #[test]
+    fn part_rar_mixed_padding_widths_are_rejected() {
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path().join("data");
+        fs::create_dir(&root).unwrap();
+        fs::write(root.join("x.part01.rar"), b"padded first volume").unwrap();
+        let second = root.join("x.part2.rar");
+        fs::write(&second, b"unpadded second volume").unwrap();
+
+        let named = volume_set(&second).unwrap();
+        assert!(
+            named.part_ambiguity.is_some(),
+            "part01 与 part2 混用补零模式，即使卷号不同也必须识别为歧义（X-10）"
+        );
+        assert!(
+            x10_volume_precheck("x.part2.rar", &second, &named).is_err(),
+            "命名歧义组必须在引擎解析前按整组失败处置（X-10）"
+        );
     }
 
     /// F03 夹具：所选根下已有「解压失败」容器且容器是 Git 项目（.git 由 kind 决定

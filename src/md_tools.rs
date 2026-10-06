@@ -415,11 +415,16 @@ fn is_block_start(body: &[u8]) -> bool {
             Some(&second) => second == b' ' || second == b'\t',
         },
         b'>' => true, // 引用块：`>` 后不需要空格
-        b'0'..=b'9' => rest
-            .iter()
-            .skip(1)
-            .find(|b| !b.is_ascii_digit())
-            .is_some_and(|b| *b == b'.' || *b == b')'),
+        b'0'..=b'9' => {
+            let Some(marker_end) = rest.iter().position(|b| !b.is_ascii_digit()) else {
+                return false;
+            };
+            marker_end <= 9
+                && rest
+                    .get(marker_end)
+                    .is_some_and(|b| *b == b'.' || *b == b')')
+                && rest.get(marker_end + 1).is_none_or(u8::is_ascii_whitespace)
+        }
         _ => false,
     }
 }

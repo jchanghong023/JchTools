@@ -116,11 +116,29 @@ impl Default for Config {
     }
 }
 impl Config {
-    /// 附录 D 的数字范围校验：非法值、溢出或超范围一律报错，不自动截断或钳制。
-    pub fn validate(&self) -> Result<()> {
+    fn validate_shared(&self) -> Result<()> {
+        crate::rules::build_exclusions(&self.exclusions)?;
+        Ok(())
+    }
+
+    /// R-02 / 附录 D：只校验目录整理使用的规则及当前启用的附属输入。
+    pub fn validate_organizer(&self) -> Result<()> {
+        self.validate_shared()?;
         if !(1..=16).contains(&self.hash_workers) {
             bail!("Hash 工作线程必须在 1～16 之间");
         }
+        if self.large_files
+            && (self.large_threshold_bytes == 0
+                || i64::try_from(self.large_threshold_bytes).is_err())
+        {
+            bail!("大文件阈值必须至少 1 字节且不超出 64 位范围");
+        }
+        Ok(())
+    }
+
+    /// R-02 / 附录 D：只校验递归解压使用的规则及共享扫描输入。
+    pub fn validate_extract(&self) -> Result<()> {
+        self.validate_shared()?;
         if !(1..=64).contains(&self.max_depth) {
             bail!("嵌套层数必须在 1～64 之间");
         }
@@ -131,13 +149,6 @@ impl Config {
             bail!("最大展开比例必须在 0～1000000000 之间（0 为关闭）");
         }
         i64::try_from(self.reserve_bytes).context("磁盘预留超出范围")?;
-        if self.large_threshold_bytes == 0 || i64::try_from(self.large_threshold_bytes).is_err() {
-            bail!("大文件阈值必须至少 1 字节且不超出 64 位范围");
-        }
-        if !["system", "light", "dark"].contains(&self.theme.as_str()) {
-            bail!("主题参数无效");
-        }
-        crate::rules::build_exclusions(&self.exclusions)?;
         Ok(())
     }
     /// 规则仅会话内生效（R-01：不落盘、不导入导出）；配置只随任务库序列化保存，
@@ -240,8 +251,57 @@ impl Config {
         )
     }
 }
+
 pub fn state_dir() -> Result<PathBuf> {
     let dirs =
         directories_next::ProjectDirs::from("", "", "JchTools").context("无法确定用户数据目录")?;
     Ok(dirs.data_local_dir().to_path_buf())
+}
+#[cfg(test)]
+mod tests {
+    use super::Config;
+
+    #[test]
+    fn validation_is_scoped_to_the_active_tool() {
+        let extract_only_invalid = Config {
+            hash_workers: 0,
+            large_threshold_bytes: 0,
+            ..Config::default()
+        };
+        assert!(extract_only_invalid.validate_extract().is_ok());
+        assert!(extract_only_invalid.validate_organizer().is_err());
+
+        let organizer_only_invalid = Config {
+            max_depth: 0,
+            ..Config::default()
+        };
+        assert!(organizer_only_invalid.validate_organizer().is_ok());
+        assert!(organizer_only_invalid.validate_extract().is_err());
+    }
+
+    #[test]
+    fn organizer_validates_large_threshold_only_when_enabled() {
+        let disabled = Config {
+            large_threshold_bytes: 0,
+            ..Config::default()
+        };
+        assert!(disabled.validate_organizer().is_ok());
+
+        let enabled = Config {
+            large_files: true,
+            large_threshold_bytes: 0,
+            ..Config::default()
+        };
+        assert!(enabled.validate_organizer().is_err());
+    }
+
+    #[test]
+    fn both_tools_validate_shared_exclusions() {
+        let config = Config {
+            exclusions: "../outside".into(),
+            ..Config::default()
+        };
+        assert!(config.validate_organizer().is_err());
+        assert!(config.validate_extract().is_err());
+    }
 }

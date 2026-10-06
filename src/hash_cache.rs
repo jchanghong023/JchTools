@@ -18,9 +18,9 @@ pub struct HashCache {
 /// 部分文件系统不提供索引号（恒为 0）：此时不同文件共用同一键，复用会
 /// 误判重复，`MUST NOT` 入缓存（C-13）；非三段结构一律视为退化。
 pub fn identity_is_degenerate(identity: &str) -> bool {
-    let parts: Vec<&str> = identity.split(':').collect();
-    match parts.as_slice() {
-        [_, high, low] => high == &"0" && low == &"0",
+    let mut parts = identity.split(':');
+    match (parts.next(), parts.next(), parts.next(), parts.next()) {
+        (Some(_), Some(high), Some(low), None) => high == "0" && low == "0",
         _ => true,
     }
 }
@@ -61,6 +61,9 @@ impl HashCache {
                  ON CONFLICT(identity,size,mtime) DO UPDATE SET hash=excluded.hash,updated=excluded.updated",
             )?;
             for (identity, size, mtime, hash) in entries {
+                if identity_is_degenerate(identity) {
+                    continue;
+                }
                 stmt.execute(params![identity, size, mtime, hash, updated])?;
             }
             Ok::<_, anyhow::Error>(())
@@ -78,7 +81,7 @@ impl HashCache {
 
 #[cfg(test)]
 mod tests {
-    use super::identity_is_degenerate;
+    use super::{identity_is_degenerate, HashCache};
 
     // 覆盖 C-13
     #[test]
@@ -91,5 +94,22 @@ mod tests {
         assert!(identity_is_degenerate("1:2:3:4"));
         // 正常的「卷:索引高:索引低」可入缓存。
         assert!(!identity_is_degenerate("123:4:567"));
+    }
+
+    #[test]
+    fn store_omits_degenerate_identities() -> anyhow::Result<()> {
+        let directory = tempfile::tempdir()?;
+        let cache = HashCache::open(directory.path())?;
+        cache.store(&[
+            ("123:0:0".into(), 1, 2, "degenerate".into()),
+            ("123:4:567".into(), 1, 2, "reliable".into()),
+        ])?;
+
+        assert_eq!(cache.lookup("123:0:0", 1, 2)?, None);
+        assert_eq!(
+            cache.lookup("123:4:567", 1, 2)?.as_deref(),
+            Some("reliable")
+        );
+        Ok(())
     }
 }

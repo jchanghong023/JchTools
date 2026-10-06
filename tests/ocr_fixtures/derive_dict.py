@@ -19,11 +19,13 @@ REPO_ROOT = Path(__file__).resolve().parents[2]
 
 
 def ensure_repo_tmp_output(path: Path) -> Path:
-    """输出必须位于仓库根的 .tmp/ 之下（AGENTS.md §2）；拒绝仓库外同名 .tmp."""
+    """输出必须位于仓库根的真实 .tmp/ 之下（AGENTS.md §2），拒绝重解析点逃逸."""
     resolved = path.resolve()
+    repo_root = REPO_ROOT.resolve()
+    expected_tmp_root = repo_root / ".tmp"
     tmp_root = (REPO_ROOT / ".tmp").resolve()
-    if tmp_root not in resolved.parents:
-        message = f"输出必须位于仓库 {tmp_root} 之下：{resolved}"
+    if tmp_root != expected_tmp_root or tmp_root not in resolved.parents:
+        message = f"输出必须位于仓库 {expected_tmp_root} 之下：{resolved}"
         raise ValueError(message)
     return resolved
 

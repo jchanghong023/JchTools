@@ -79,39 +79,36 @@ fn any_engine_image_alive() -> bool {
 }
 
 /// 清理本会话残留的引擎与代理（锁内调用）：上一轮失败的孤儿会占住
-/// 会话单引擎执法，让下一轮从头就「已有 Xberg」。只结束本项目派生的进程：
-/// 代理按命令行特征（`--xberg-broker`）过滤，引擎按可执行路径过滤
-/// （[`test_owned_engine_prefixes`]，与 [`is_test_owned_engine_path`] 同源），
-/// 不触碰用户自行运行的进程。
+/// 会话单引擎执法，让下一轮从头就「已有 Xberg」。只结束可证明由测试派生的进程：
+/// 引擎与 worker 按测试临时可执行路径过滤；主程序代理须拥有测试临时根下的引擎子进程。
 pub(super) fn cleanup_stray_engines() {
     if !any_engine_image_alive() {
         return;
     }
-    // 0) 先停截图服务本体：XB-22 常驻看护会把被杀的代理与引擎按自己的
-    //    周期重新拉起，只杀代理/引擎永远赢不了（实测重跑 60s 忙碌超时）；
-    //    与下方同口径，仅结束本项目派生的服务进程。GUI 打开时会按 XB-22
-    //    重新拉起服务，dev 机测试窗口期内不保留。
-    let stop_service = "Get-CimInstance Win32_Process | Where-Object { $_.Name -eq 'snap-ocr-worker.exe' -and $_.CommandLine -match '--service' } | ForEach-Object { Stop-Process -Id $_.ProcessId -Force }";
+    // 0) 先停测试派生的截图服务本体：XB-22 常驻看护会把被杀的代理与引擎按自己的
+    //    周期重新拉起，只杀代理/引擎永远赢不了。仅匹配测试临时根下的 worker。
+    let stop_service = test_owned_service_kill_script();
     let _ = std::process::Command::new("powershell")
         .args([
             "-NoProfile",
             "-ExecutionPolicy",
             "Bypass",
             "-Command",
-            stop_service,
+            &stop_service,
         ])
         .output();
     std::thread::sleep(Duration::from_millis(300));
-    // 1) 再杀「托管代理」：主程序代理与截图服务代理（后者按 XB-22 常驻保活，
-    //    会把被杀的引擎立刻重新拉起，必须先于引擎处理）。
-    let script = "Get-CimInstance Win32_Process | Where-Object { ($_.Name -eq 'JchTools.exe' -or $_.Name -eq 'snap-ocr-worker.exe') -and $_.CommandLine -match '--xberg-broker' } | ForEach-Object { Stop-Process -Id $_.ProcessId -Force }";
+    // 1) 再杀测试派生的代理。worker 自身位于测试临时根；主程序代理则须
+    //    仍拥有一个路径位于测试临时根下的 xberg.exe 子进程，不能只凭
+    //    内部命令行参数或与用户 GUI 相同的 JchTools.exe 路径判为测试进程。
+    let script = test_owned_broker_kill_script();
     let _ = std::process::Command::new("powershell")
         .args([
             "-NoProfile",
             "-ExecutionPolicy",
             "Bypass",
             "-Command",
-            script,
+            &script,
         ])
         .output();
     std::thread::sleep(Duration::from_millis(400));
@@ -135,20 +132,54 @@ pub(super) fn cleanup_stray_engines() {
     }
 }
 
-/// 构造「只结束测试派生 xberg.exe」的 PowerShell 清场脚本；路径过滤与
-/// [`is_test_owned_engine_path`] 使用同一前缀集合（[`test_owned_engine_prefixes`]）。
-fn test_owned_engine_kill_script() -> String {
+/// 构造匹配测试隔离临时根下可执行文件的 PowerShell 条件（大小写不敏感）。
+pub(super) fn test_owned_executable_filter() -> String {
     let prefixes = test_owned_engine_prefixes();
     let [a, b] = &prefixes[..] else {
         unreachable!("测试派生前缀集合固定为两项");
     };
     format!(
-        "Get-CimInstance Win32_Process | Where-Object {{ $_.Name -eq 'xberg.exe' -and \
-         $_.ExecutablePath -and ($_.ExecutablePath.ToLowerInvariant().StartsWith({a_path}) -or \
-         $_.ExecutablePath.ToLowerInvariant().StartsWith({b_path})) }} | \
-         ForEach-Object {{ Stop-Process -Id $_.ProcessId -Force }}",
+        "($_.ExecutablePath -and \
+         ($_.ExecutablePath.ToLowerInvariant().StartsWith({a_path}) -or \
+         $_.ExecutablePath.ToLowerInvariant().StartsWith({b_path})))",
         a_path = ps_quote(a),
         b_path = ps_quote(b),
+    )
+}
+
+/// 构造只结束测试临时根下截图服务的 PowerShell 清场脚本。
+pub(super) fn test_owned_service_kill_script() -> String {
+    let owned_executable = test_owned_executable_filter();
+    format!(
+        "Get-CimInstance Win32_Process | Where-Object {{ $_.Name -eq 'snap-ocr-worker.exe' -and \
+         {owned_executable} -and $_.CommandLine -match '--service' }} | \
+         ForEach-Object {{ Stop-Process -Id $_.ProcessId -Force }}"
+    )
+}
+
+/// 构造只结束测试派生代理的 PowerShell 清场脚本。
+pub(super) fn test_owned_broker_kill_script() -> String {
+    let owned_executable = test_owned_executable_filter();
+    format!(
+        "$ownedTestEngineBrokerIds = @(Get-CimInstance Win32_Process | \
+         Where-Object {{ $_.Name -eq 'xberg.exe' -and {owned_executable} }} | \
+         ForEach-Object {{ $_.ParentProcessId }}); \
+         Get-CimInstance Win32_Process | Where-Object {{ \
+         (($_.Name -eq 'JchTools.exe' -and $_.CommandLine -match '--xberg-broker' -and \
+         $_.ProcessId -in $ownedTestEngineBrokerIds) -or \
+         ($_.Name -eq 'snap-ocr-worker.exe' -and {owned_executable} -and \
+         $_.CommandLine -match '--xberg-broker')) }} | \
+         ForEach-Object {{ Stop-Process -Id $_.ProcessId -Force }}"
+    )
+}
+
+/// 构造「只结束测试派生 xberg.exe」的 PowerShell 清场脚本。
+fn test_owned_engine_kill_script() -> String {
+    let owned_executable = test_owned_executable_filter();
+    format!(
+        "Get-CimInstance Win32_Process | Where-Object {{ \
+         $_.Name -eq 'xberg.exe' -and {owned_executable} }} | \
+         ForEach-Object {{ Stop-Process -Id $_.ProcessId -Force }}"
     )
 }
 

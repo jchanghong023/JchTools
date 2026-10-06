@@ -94,6 +94,23 @@ fn take_failures(failures: &Failures) -> Vec<String> {
     )
 }
 
+fn dispatch_click(ui: &gui::AppWindow, x: f32, y: f32) {
+    let position = slint::LogicalPosition::new(x, y);
+    for event in [
+        slint::platform::WindowEvent::PointerMoved { position },
+        slint::platform::WindowEvent::PointerPressed {
+            position,
+            button: slint::platform::PointerEventButton::Left,
+        },
+        slint::platform::WindowEvent::PointerReleased {
+            position,
+            button: slint::platform::PointerEventButton::Left,
+        },
+    ] {
+        ui.window().dispatch_event(event);
+    }
+}
+
 fn make_fixture() -> tempfile::TempDir {
     let dir = tempfile::tempdir().unwrap();
     let data = dir.path().join("data");
@@ -727,6 +744,104 @@ fn settings_markdown_and_snap_pages_gate_and_status_end_to_end() {
         assert!(
             recorded.is_empty(),
             "三页端到端失败：{}",
+            recorded.join("\n")
+        );
+    });
+}
+
+// 通过既有 winit-software GUI 后端派发真实指针事件，覆盖确认层打开时背景控件不响应，
+// 「返回检查」可关闭确认层，随后背景按钮重新可用。
+#[test]
+fn confirmation_blocks_background_controls_and_return_remains_available() {
+    let fixture = tempfile::tempdir().unwrap();
+    let state_dir = fixture.path().join("state");
+    fs::create_dir_all(&state_dir).unwrap();
+    let overrides = EngineTestOverrides { state_dir };
+
+    run_gui_job(move || {
+        let failures: Failures = Arc::new(Mutex::new(Vec::new()));
+        let failure_sink = Arc::clone(&failures);
+        let ticks = Rc::new(Cell::new(0u32));
+        gui::run_with_engine_overrides(
+            move |ui| {
+                ui.set_busy(true);
+                ui.set_error_text("modal gate".into());
+                ui.set_confirm_kind(1);
+                let ui = ui.as_weak();
+                let ticks = ticks.clone();
+                let failures = Arc::clone(&failure_sink);
+                let driver = slint::Timer::default();
+                driver.start(
+                    slint::TimerMode::Repeated,
+                    Duration::from_millis(100),
+                    move || {
+                        ticks.set(ticks.get() + 1);
+                        if ticks.get() >= 40 {
+                            record_failure(&failures, "U-09：确认控件交互流程超时".to_string());
+                            return;
+                        }
+                        let Some(ui) = ui.upgrade() else { return };
+                        match ticks.get() {
+                            2 => {
+                                // 1120×720 逻辑窗口中点击背景错误条关闭和标题栏关闭。
+                                dispatch_click(&ui, 1055.0, 114.0);
+                                dispatch_click(&ui, 1097.0, 23.0);
+                                if ui.get_confirm_kind() != 1 {
+                                    record_failure(
+                                        &failures,
+                                        "U-09：确认层打开时标题栏关闭控件不得执行".into(),
+                                    );
+                                }
+                                if ui.get_error_text().as_str() != "modal gate" {
+                                    record_failure(
+                                        &failures,
+                                        "U-09：确认层打开时背景按钮不得清除错误提示".into(),
+                                    );
+                                }
+                            }
+                            3 => {
+                                // 620×335 居中确认框右下方「返回检查」按钮。
+                                dispatch_click(&ui, 736.0, 485.0);
+                                if ui.get_confirm_kind() != 0 {
+                                    record_failure(
+                                        &failures,
+                                        "U-09：「返回检查」交互必须关闭确认层".into(),
+                                    );
+                                }
+                            }
+                            4 => {
+                                dispatch_click(&ui, 1055.0, 114.0);
+                                if !ui.get_error_text().is_empty() {
+                                    record_failure(
+                                        &failures,
+                                        "U-09：确认层关闭后背景按钮应恢复可用".into(),
+                                    );
+                                }
+                                // busy 保持为真；标题栏关闭重新可用后应打开关闭确认。
+                                dispatch_click(&ui, 1097.0, 23.0);
+                                if ui.get_confirm_kind() != 3 {
+                                    record_failure(
+                                        &failures,
+                                        "U-09：确认层关闭后标题栏关闭控件应恢复可用".into(),
+                                    );
+                                }
+                                ui.set_confirm_kind(0);
+                                ui.set_busy(false);
+                                let _ = slint::quit_event_loop();
+                            }
+                            _ => {}
+                        }
+                    },
+                );
+                DRIVER.with(|slot| *slot.borrow_mut() = Some(driver));
+            },
+            Some(overrides),
+        )
+        .expect("GUI 确认控件流程失败");
+        let recorded = take_failures(&failures);
+        assert!(
+            recorded.is_empty(),
+            "确认控件交互失败：{}",
             recorded.join("\n")
         );
     });

@@ -107,9 +107,9 @@ impl SystemProxy {
     }
 
     /// P-09：目标 URL 是否命中例外表（系统代理未启用时恒为 false）。git 网络
-    /// 命令注入代理前先做此判断：命中的目标直接按现状直连——libcurl 的
-    /// `no_proxy` 无法表达 `<local>` 与 `192.168.*` 这类任意位置通配，仅靠
-    /// [`Self::git_env`] 的近似翻译会丢弃这些条目，导致内网/裸主机目标仍被推入代理。
+    /// 命中的目标直接按现状直连。libcurl `no_proxy` 无法表达 `<local>`、任意位置
+    /// 通配或精确主机（普通主机条目还会匹配子域），必须先按 Windows 规则判断；
+    /// 只依赖环境变量会漏掉例外，或意外扩大例外范围。
     pub fn bypassed(&self, url: &str) -> bool {
         self.is_enabled()
             && split_scheme_host(url)
@@ -117,9 +117,8 @@ impl SystemProxy {
     }
 
     /// git 网络命令的环境变量注入（P-09）：仅在系统代理开启时非空，键固定为
-    /// 小写（libcurl 优先识别小写）。`no_proxy` 无法表达 `<local>` 与任意位置
-    /// 通配，按近似规则翻译（`*.foo.com` → `foo.com`，`*` → `*`，无法表达的
-    /// 条目丢弃），不影响例外表以外的行为。
+    /// 小写（libcurl 优先识别小写）。`no_proxy` 仅近似表达可保持匹配范围的规则
+    /// （`*.foo.com` → `foo.com`、`*` → `*`）；无法表达的条目丢弃。
     pub fn git_env(&self) -> Vec<(String, String)> {
         if !self.is_enabled() {
             return Vec::new();
@@ -159,6 +158,7 @@ pub const GIT_PROXY_ENV_KEYS: [&str; 6] = [
 pub fn network_failure_signature(text: &str) -> bool {
     let lower = text.to_ascii_lowercase();
     [
+        "could not resolve proxy",
         "could not resolve host",
         "failed to connect",
         "couldn't connect",
@@ -321,11 +321,11 @@ fn wildcard_match(pattern: &str, text: &str) -> bool {
 }
 
 /// 例外条目到 libcurl `no_proxy` 条目的近似翻译；无法表达的返回 `None`。
-/// 条目先经 [`override_host`] 规范化：方括号 IPv6 去括号（`no_proxy` 不带
-/// 括号口径），`主机:端口` 剥端口。
+/// libcurl 的普通主机名条目还匹配该主机的子域，因此精确规则不能安全翻译；
+/// 调用方先用 [`SystemProxy::bypassed`] 按 Windows 规则精确预判。
 fn translate_no_proxy(rule: &BypassRule) -> Option<String> {
     match rule {
-        BypassRule::Local => None,
+        BypassRule::Local | BypassRule::Exact(_) => None,
         BypassRule::Pattern(pattern) => {
             if pattern == "*" {
                 Some((*pattern).clone())
@@ -333,7 +333,6 @@ fn translate_no_proxy(rule: &BypassRule) -> Option<String> {
                 pattern.strip_prefix("*.").map(str::to_string)
             }
         }
-        BypassRule::Exact(entry) => Some(override_host(entry).to_string()),
     }
 }
 
@@ -582,6 +581,9 @@ mod tests {
         assert!(super::network_failure_signature(
             "fatal: unable to access 'https://github.com/': Could not resolve host: github.com"
         ));
+        assert!(super::network_failure_signature(
+            "fatal: unable to access 'https://github.com/a/b/': Could not resolve proxy: proxy.example"
+        ));
         assert!(!super::network_failure_signature(
             "remote: HTTP Basic: Access denied\nfatal: Authentication failed for 'https://github.com/a/b/'"
         ));
@@ -613,14 +615,14 @@ mod tests {
         assert!(proxy.bypassed("http://[::1]/wiki"));
     }
 
-    // 覆盖 P-09：方括号 IPv6 例外条目翻译为 no_proxy 时去方括号（libcurl
-    // `no_proxy` 不带括号口径）；普通 host:port 条目仍剥端口。
+    // 覆盖 P-09：no_proxy 仅翻译能保持匹配范围的规则；libcurl 会让普通主机条目
+    // 同时匹配所有子域，精确例外由调用方的 Windows 规则预判处理。
     #[test]
-    fn no_proxy_translation_unwraps_ipv6_brackets() {
+    fn no_proxy_translation_drops_exact_rules() {
         let proxy = SystemProxy::from_registry_values(
             1,
             Some("127.0.0.1:7890"),
-            Some("[::1]:8080;proxyhost:443;*.corp.example"),
+            Some("[::1]:8080;github.com;proxyhost:443;*.corp.example"),
         );
         let env = proxy.git_env();
         let no_proxy = env
@@ -628,7 +630,7 @@ mod tests {
             .find(|(key, _)| key == "no_proxy")
             .map(|(_, value)| value.clone())
             .unwrap_or_default();
-        assert_eq!(no_proxy, "::1,proxyhost,corp.example");
+        assert_eq!(no_proxy, "corp.example");
     }
 
     // 覆盖 P-09：URL 主机解析覆盖 userinfo、端口、IPv6 与尾点 FQDN 形态。

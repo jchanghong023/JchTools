@@ -3,8 +3,7 @@ name = "jchtools"
 version = "0.1.0"
 edition = "2021"
 # 最低支持工具链（MSRV）：CI 用 dtolnay/rust-toolchain@1.98.1 固定精确版本，
-# 两处同步更新；本地不强制固定（rust-toolchain.toml 的在线下载在本机网络下不可靠），
-# 靠本下限拒绝过旧的工具链。
+# 与本字段同步更新；本仓库不固定本地工具链，由 Cargo rust-version 拒绝过旧工具链。
 rust-version = "1.98.1"
 license = "MIT"
 description = "Windows-first extensible local toolbox and directory organizer"

@@ -174,6 +174,20 @@ fn merge_converts_setext_headings() {
     let expected = "# s.md\n\n## 标题甲\n\n正文段\n\n### 标题乙\n\n尾段\n";
     assert_eq!(text, expected, "Setext 下划线转 ATX 且下划线行不再输出");
 }
+// 覆盖 M-05（小数点后的数字不是有序列表标记，后接 Setext 下划线仍须转换）
+#[test]
+fn merge_converts_setext_after_decimal_text() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path();
+    write(&root.join("decimal.md"), "3.14\n---\n\n1. 列表项\n---\n");
+    let output = root.join("merged.md");
+    merge_to(root, true, &output);
+    let text = fs::read_to_string(&output).unwrap();
+    assert_eq!(
+        text, "# decimal.md\n\n### 3.14\n\n1. 列表项\n---\n",
+        "普通数字文本后面的 Setext 下划线应转换，有序列表不应误转：{text:?}"
+    );
+}
 
 // 覆盖 M-04/M-05（带 UTF-8 BOM 的文件：首行 ATX 标题仍须下移一级，BOM 剥除不残留）
 #[test]

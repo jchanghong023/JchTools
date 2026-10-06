@@ -116,9 +116,18 @@ foreach ($item in @('manifest.json','NOTICE.txt','licenses')) {
     if (-not (Test-Path -LiteralPath $source)) {throw "Bundled engine license material is missing from resources\7zip: $item. Run fetch-7zip.ps1 on a connected build machine."}
     Copy-Item -LiteralPath $source -Destination $engineDir -Recurse
 }
-$sourceArchives = @(Get-ChildItem -LiteralPath 'resources\7zip' -File | Where-Object {$_.Name -like '7z*-src.tar.xz'})
-if ($sourceArchives.Count -eq 0) {throw 'The upstream 7-Zip source archive is missing from resources\7zip: run fetch-7zip.ps1 on a connected build machine.'}
-$sourceArchives | ForEach-Object {Copy-Item -LiteralPath $_.FullName -Destination $engineDir}
+$sourceEntry = $engineManifest.source
+if ($null -eq $sourceEntry -or
+    [string]$sourceEntry.name -notmatch '^7z\d{4}-src\.tar\.xz$' -or
+    [string]$sourceEntry.sha256 -notmatch '^[0-9a-fA-F]{64}$') {
+    throw 'The 7-Zip manifest is missing a valid source archive name or SHA-256.'
+}
+$sourceArchive = Join-Path 'resources\7zip' $sourceEntry.name
+if (-not (Test-Path -LiteralPath $sourceArchive -PathType Leaf) -or
+    (Get-FileHash -LiteralPath $sourceArchive -Algorithm SHA256).Hash.ToLowerInvariant() -cne ([string]$sourceEntry.sha256).ToLowerInvariant()) {
+    throw 'The 7-Zip source archive does not match the SHA-256 recorded in the manifest.'
+}
+Copy-Item -LiteralPath $sourceArchive -Destination $engineDir
 Copy-Item -LiteralPath 'README.md','LICENSE','THIRD_PARTY_NOTICES.md','Cargo.lock' -Destination $folder
 Copy-Item -LiteralPath 'docs' -Destination $folder -Recurse
 Copy-Item -LiteralPath 'scripts\launch-software.cmd' -Destination $folder

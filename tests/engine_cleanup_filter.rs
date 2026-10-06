@@ -42,6 +42,110 @@ fn engine_cleanup_filter_selects_only_test_owned_paths() {
     assert!(!common::is_test_owned_engine_path(""));
 }
 
+#[derive(Debug, Clone, Copy)]
+enum WorkerMode {
+    Service,
+    Broker,
+}
+
+impl WorkerMode {
+    fn label(self) -> &'static str {
+        match self {
+            Self::Service => "service",
+            Self::Broker => "broker",
+        }
+    }
+
+    fn argument(self) -> &'static str {
+        match self {
+            Self::Service => "--service",
+            Self::Broker => "--xberg-broker",
+        }
+    }
+}
+
+fn assert_worker_cleanup(mode: WorkerMode, test_owned: bool, expected_alive: bool) {
+    let _session = common::session_lock();
+    let owner = if test_owned { "test" } else { "user" };
+    let parent = if test_owned {
+        std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join(".tmp")
+    } else {
+        std::env::temp_dir()
+    };
+    let dir = parent.join(format!(
+        "jchtools-s501-{owner}-{}-{}",
+        mode.label(),
+        std::process::id()
+    ));
+    std::fs::create_dir_all(&dir).unwrap();
+    let executable = dir.join("snap-ocr-worker.exe");
+    common::mock_engine_copy("tests/fixtures/shared_xberg.rs", &executable);
+    let mut child = std::process::Command::new(&executable)
+        .arg(mode.argument())
+        .current_dir(&dir)
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .spawn()
+        .unwrap();
+
+    let marker = dir.join("starts.txt");
+    let start_deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+    let started = loop {
+        if marker.is_file() {
+            break true;
+        }
+        if child.try_wait().unwrap().is_some() || std::time::Instant::now() >= start_deadline {
+            break false;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(20));
+    };
+    if !started {
+        let _ = child.kill();
+        let _ = child.wait();
+        let _ = std::fs::remove_dir_all(&dir);
+        panic!("模拟 {owner} {mode:?} worker 未进入稳定运行状态");
+    }
+
+    common::cleanup_stray_engines();
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+    let alive = loop {
+        match child.try_wait().unwrap() {
+            Some(_) => break false,
+            None if expected_alive => break true,
+            None if std::time::Instant::now() >= deadline => break true,
+            None => std::thread::sleep(std::time::Duration::from_millis(100)),
+        }
+    };
+    let _ = child.kill();
+    let _ = child.wait();
+    let _ = std::fs::remove_dir_all(&dir);
+    assert_eq!(
+        alive, expected_alive,
+        "清场对 {owner} {mode:?} worker 的存活结果不符合所有权边界"
+    );
+}
+
+#[test]
+fn cleanup_keeps_user_owned_service_alive() {
+    assert_worker_cleanup(WorkerMode::Service, false, true);
+}
+
+#[test]
+fn cleanup_stops_test_owned_service() {
+    assert_worker_cleanup(WorkerMode::Service, true, false);
+}
+
+#[test]
+fn cleanup_keeps_user_owned_broker_worker_alive() {
+    assert_worker_cleanup(WorkerMode::Broker, false, true);
+}
+
+#[test]
+fn cleanup_stops_test_owned_broker_worker() {
+    assert_worker_cleanup(WorkerMode::Broker, true, false);
+}
+
 /// 用户路径的 xberg.exe（临时目录中、但不在测试派生前缀内）必须在清场后存活。
 #[test]
 fn cleanup_keeps_user_owned_xberg_image_alive() {

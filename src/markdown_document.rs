@@ -155,7 +155,8 @@ fn collect_media(
             continue;
         }
         let source = format!("image_{index}.{format}");
-        let target_ref = format!("{media_dir}/{source}");
+        let target_ref = format!("{}/{}", encode_markdown_dir(media_dir), source);
+        let relative = format!("{media_dir}/{source}");
         // 先试改写：围栏/行内代码内的字面量不算正文引用（不落盘、不改写）。
         let (rewritten, referenced) = rewrite_image_links(content, &source, &target_ref);
         if !referenced {
@@ -164,10 +165,7 @@ fn collect_media(
         match image_bytes(image) {
             Some(bytes) if !bytes.is_empty() => {
                 *content = rewritten;
-                files.push(MediaFile {
-                    relative: target_ref,
-                    bytes,
-                });
+                files.push(MediaFile { relative, bytes });
             }
             _ => warnings.push(format!("图片 {source} 缺少有效数据，已保留占位引用")),
         }
@@ -236,6 +234,7 @@ fn value_type_name(value: &Value) -> &'static str {
 fn rewrite_image_links(text: &str, from: &str, to: &str) -> (String, bool) {
     let mut result = String::with_capacity(text.len());
     let mut fence: Option<(char, usize)> = None;
+    let mut inline_code: Option<usize> = None;
     let mut changed = false;
     for line in text.split_inclusive('\n') {
         let (body, newline) = match line.strip_suffix('\n') {
@@ -256,13 +255,15 @@ fn rewrite_image_links(text: &str, from: &str, to: &str) -> (String, bool) {
             continue;
         }
         if let Some((ch, run, _indent)) = opening_fence(body) {
+            inline_code = None;
             fence = Some((ch, run));
             result.push_str(body);
             result.push_str(carriage);
             result.push_str(newline);
             continue;
         }
-        let (rewritten, line_changed) = rewrite_image_links_in_line(body, from, to);
+        let (rewritten, line_changed) =
+            rewrite_image_links_in_line(body, from, to, &mut inline_code);
         changed |= line_changed;
         result.push_str(&rewritten);
         result.push_str(carriage);
@@ -270,22 +271,52 @@ fn rewrite_image_links(text: &str, from: &str, to: &str) -> (String, bool) {
     }
     (result, changed)
 }
+/// Encode the media directory for a CommonMark link target using Xberg's caller contract.
+fn encode_markdown_dir(name: &str) -> String {
+    let mut encoded = String::with_capacity(name.len());
+    for character in name.chars() {
+        let escaped = match character {
+            ' ' => Some("%20"),
+            '(' => Some("%28"),
+            ')' => Some("%29"),
+            '<' => Some("%3C"),
+            '>' => Some("%3E"),
+            '"' => Some("%22"),
+            '`' => Some("%60"),
+            '%' => Some("%25"),
+            '#' => Some("%23"),
+            '?' => Some("%3F"),
+            _ if character.is_control() => continue,
+            _ => None,
+        };
+        if let Some(escaped) = escaped {
+            encoded.push_str(escaped);
+        } else {
+            encoded.push(character);
+        }
+    }
+    encoded
+}
 
-fn rewrite_image_links_in_line(line: &str, from: &str, to: &str) -> (String, bool) {
+fn rewrite_image_links_in_line(
+    line: &str,
+    from: &str,
+    to: &str,
+    inline_code: &mut Option<usize>,
+) -> (String, bool) {
     let mut out = String::with_capacity(line.len());
     let mut i = 0;
-    let mut inline_code: Option<usize> = None;
     let bytes = line.as_bytes();
     let mut changed = false;
     while i < bytes.len() {
         if bytes[i] == b'`' {
             let run = bytes[i..].iter().take_while(|&&byte| byte == b'`').count();
-            if let Some(open_len) = inline_code {
+            if let Some(open_len) = *inline_code {
                 if run == open_len {
-                    inline_code = None;
+                    *inline_code = None;
                 }
             } else {
-                inline_code = Some(run);
+                *inline_code = Some(run);
             }
             out.push_str(&line[i..i + run]);
             i += run;
@@ -465,6 +496,22 @@ mod tests {
         assert_eq!(output.media[0].relative, "a_docx_media/image_0.png");
         assert_eq!(output.media[0].bytes, b"hello".to_vec());
         assert!(output.warnings.is_empty());
+    }
+
+    // 覆盖 T-14：媒体目录名按 CommonMark 链接目标编码，跨行行内代码引用保持原样。
+    #[test]
+    fn media_prefix_is_encoded_and_multiline_inline_code_is_untouched() {
+        let envelope = response(&json!({
+            "content": "before `literal\n![代码](image_0.png)` after\n![图](image_0.png)",
+            "images": [{"image_index": 0, "format": "png", "data_base64": "aGVsbG8="}]
+        }));
+        let output = parse_document_response(&envelope, "a_(1)%#").unwrap();
+        assert_eq!(
+            output.markdown,
+            "before `literal\n![代码](image_0.png)` after\n![图](a_%281%29%25%23/image_0.png)"
+        );
+        assert_eq!(output.media.len(), 1);
+        assert_eq!(output.media[0].relative, "a_(1)%#/image_0.png");
     }
 
     // 覆盖 T-14：围栏与行内代码内的 image_N.ext 字样是字面文本，不改写；

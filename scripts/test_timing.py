@@ -27,6 +27,9 @@ import argparse
 import contextlib
 import io
 import json
+import os
+import shutil
+import signal
 import subprocess
 import sys
 import time
@@ -38,6 +41,7 @@ ROOT = Path(__file__).resolve().parent.parent
 OUT_DIR = ROOT / ".tmp" / "test-timing"
 SLOW_SUITE_SECONDS = 5.0
 SINGLE_TEST_TIMEOUT = 300.0
+PROCESS_TREE_CLEANUP_SECONDS = 5.0
 LIST_HEADER = "Running "
 LIST_SUFFIX = ".exe)"
 
@@ -81,16 +85,66 @@ class PerTestRow:
     note: str
 
 
+def _kill_tree(proc: subprocess.Popen[str], *, timeout: float) -> bool:
+    if sys.platform == "win32":
+        taskkill = shutil.which("taskkill")
+        if taskkill is None:
+            return False
+        try:
+            result = subprocess.run(
+                [taskkill, "/T", "/F", "/PID", str(proc.pid)],
+                capture_output=True,
+                check=False,
+                timeout=timeout,
+            )
+        except subprocess.TimeoutExpired:
+            return False
+        return result.returncode == 0
+    try:
+        os.killpg(os.getpgid(proc.pid), signal.SIGKILL)
+    except ProcessLookupError:
+        return True
+    except PermissionError:
+        return False
+    return True
+
+
 def _run_checked(argv: list[str], timeout: float) -> subprocess.CompletedProcess[str]:
-    return subprocess.run(
+    cleanup_budget = PROCESS_TREE_CLEANUP_SECONDS
+    if timeout <= cleanup_budget:
+        message = f"阶段预算 {timeout:.1f}s 不足以启动并清理进程树"
+        raise ValueError(message)
+    started = time.monotonic()
+    deadline = started + timeout
+    with subprocess.Popen(
         argv,
         cwd=ROOT,
-        capture_output=True,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
         text=True,
         errors="replace",
-        timeout=timeout,
-        check=False,
-    )
+        start_new_session=sys.platform != "win32",
+    ) as proc:
+        try:
+            stdout, stderr = proc.communicate(timeout=timeout - cleanup_budget)
+        except subprocess.TimeoutExpired as error:
+            kill_timeout = min(2.0, max(0.0, deadline - time.monotonic()))
+            tree_terminated = _kill_tree(proc, timeout=kill_timeout)
+            if not tree_terminated and proc.poll() is None:
+                proc.kill()
+            try:
+                _ = proc.wait(timeout=max(0.0, deadline - time.monotonic()))
+            except subprocess.TimeoutExpired as wait_error:
+                if proc.poll() is None:
+                    proc.kill()
+                message = f"命令超时后未能在预算内确认进程退出：{argv[0]}"
+                raise RuntimeError(message) from wait_error
+            if not tree_terminated:
+                message = f"命令超时后无法确认进程树已终止：{argv[0]}"
+                raise RuntimeError(message) from error
+            raise subprocess.TimeoutExpired(argv, timeout) from error
+        returncode = proc.wait()
+    return subprocess.CompletedProcess(argv, returncode, stdout, stderr)
 
 
 def _cargo_base(target_dir: Path | None) -> list[str]:
@@ -275,6 +329,9 @@ def write_report(suites: list[Suite], rows: list[PerTestRow], budget: float) -> 
 
 
 def main(argv: list[str] | None = None) -> int:
+    if sys.platform != "win32":
+        print("test_timing 按合同 P-07 仅支持 Windows；拒绝执行测试计时。")
+        return 2
     _reconfigure_stdout()
     parser = argparse.ArgumentParser(description="采集全部测试的套件级与用例级耗时数据")
     _ = parser.add_argument("--skip-build", action="store_true", help="复用已构建的测试二进制")

@@ -70,16 +70,66 @@ pub fn path_string(path: &Path) -> Result<String> {
 pub fn relative_string(root: &Path, path: &Path) -> Result<String> {
     Ok(path_string(path.strip_prefix(root).context("路径不在选定目录内")?)?.replace('\\', "/"))
 }
-/// Windows 路径大小写折叠（与资源管理器序数忽略大小写的近似口径一致；
-/// 非 Windows 平台原样返回）。相对路径比较前一律先经本函数折叠，
-/// 「比较前先折叠」这一不变量只有这一处实现。
+/// Windows 序数忽略大小写比较键，保留 UTF-16 单元顺序；非 Windows 平台原样返回。
+/// 相对路径比较前一律先经本函数折叠，「比较前先折叠」这一不变量只有这一处实现。
 pub(crate) fn fold_rel(name: &str) -> String {
-    if cfg!(windows) {
-        name.to_lowercase()
-    } else {
+    #[cfg(windows)]
+    {
+        let mut key = String::new();
+        for unit in name.encode_utf16().map(ordinal_fold_unit) {
+            // 字符串键需保持 UTF-16 单元的顺序，包括代理项；将代理项映射到其间隔
+            // 区域，再把更大的 BMP 单元整体平移，使 String 排序等价于单元序数排序。
+            let code_point = u32::from(unit);
+            let code_point = if code_point >= 0xD800 {
+                code_point + 0x800
+            } else {
+                code_point
+            };
+            if let Some(character) = char::from_u32(code_point) {
+                key.push(character);
+            }
+        }
+        key
+    }
+    #[cfg(not(windows))]
+    {
         name.to_string()
     }
 }
+
+#[cfg(windows)]
+fn ordinal_fold_unit(unit: u16) -> u16 {
+    if unit < 0x80 {
+        return if (u16::from(b'a')..=u16::from(b'z')).contains(&unit) {
+            unit - 32
+        } else {
+            unit
+        };
+    }
+    if (0xD800..=0xDFFF).contains(&unit) {
+        return unit;
+    }
+    // CompareStringOrdinal 使用逐 UTF-16 单元的大写映射；这些希腊字母的简单
+    // 单元映射与 Rust 全大写结果不同，按操作系统的序数比较行为折叠。
+    match unit {
+        0x1F80..=0x1F87 | 0x1F90..=0x1F97 | 0x1FA0..=0x1FA7 => return unit + 0x08,
+        0x1FB3 => return 0x1FBC,
+        0x1FC3 => return 0x1FCC,
+        0x1FF3 => return 0x1FFC,
+        _ => {}
+    }
+    let Some(mut uppercase) = char::from_u32(u32::from(unit)).map(char::to_uppercase) else {
+        return unit;
+    };
+    let Some(mapped) = uppercase.next() else {
+        return unit;
+    };
+    if uppercase.next().is_some() || mapped.len_utf16() != 1 {
+        return unit;
+    }
+    u16::try_from(u32::from(mapped)).unwrap_or(unit)
+}
+
 pub fn is_link(meta: &fs::Metadata) -> bool {
     if meta.file_type().is_symlink() {
         return true;
@@ -95,14 +145,37 @@ pub fn is_link(meta: &fs::Metadata) -> bool {
 }
 /// 只检查目录边界，不遍历 Git 工作树内部；`.git` 文件与目录均保护整树。
 pub fn is_git_root(path: &Path) -> Result<bool> {
-    match fs::symlink_metadata(path.join(".git")) {
-        Ok(_) => Ok(true),
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(false),
+    let entries = match fs::read_dir(path) {
+        Ok(entries) => entries,
+        // 路径不存在或不是目录（如解压流程里按折叠键重建的成员路径）：
+        // 与旧口径（path/.git 的 symlink_metadata NotFound → 无边界）一致，
+        // 视为无 .git 边界而不是任务失败。
+        Err(error)
+            if matches!(
+                error.kind(),
+                std::io::ErrorKind::NotFound | std::io::ErrorKind::NotADirectory
+            ) =>
+        {
+            return Ok(false);
+        }
         Err(error) => {
-            Err(error).with_context(|| format!("无法检查 Git 目录边界：{}", path.display()))
+            return Err(error)
+                .with_context(|| format!("无法检查 Git 目录边界：{}", path.display()));
+        }
+    };
+    for entry in entries {
+        let entry = entry.with_context(|| format!("无法检查 Git 目录边界：{}", path.display()))?;
+        if entry
+            .file_name()
+            .to_str()
+            .is_some_and(|name| name.eq_ignore_ascii_case(".git"))
+        {
+            return Ok(true);
         }
     }
+    Ok(false)
 }
+
 /// H-06：沿所选根的祖先到卷根检查直接目录项；任一祖先直接含 `.git` 说明所选根
 /// 位于 Git 项目内部，两工具都必须拒绝整次处理（不拆散项目子树）。
 pub fn root_inside_git_project(root: &Path) -> Result<()> {
@@ -358,7 +431,28 @@ fn copy_noreplace(source: &Path, target: &Path) -> std::io::Result<()> {
         .create_new(true)
         .open(target)?;
     std::io::copy(&mut input, &mut output)?;
-    output.sync_all()
+    output.sync_all()?;
+    close_file(output)
+}
+
+#[cfg(windows)]
+fn close_file(file: File) -> std::io::Result<()> {
+    use std::os::windows::io::IntoRawHandle;
+    use windows_sys::Win32::Foundation::CloseHandle;
+
+    let handle = file.into_raw_handle();
+    // SAFETY: handle 由 File 转移所有权，本函数只关闭一次且不再访问。
+    if unsafe { CloseHandle(handle) } == 0 {
+        Err(std::io::Error::last_os_error())
+    } else {
+        Ok(())
+    }
+}
+
+#[cfg(not(windows))]
+fn close_file(file: File) -> std::io::Result<()> {
+    drop(file);
+    Ok(())
 }
 /// FILETIME 换算核心（100ns 单位、1601 纪元）：接受相对 UNIX 纪元的偏移
 /// （Ok = 1970 之后，Err = 1970 之前的时长）。1601-1970 的负偏移受检折算；
@@ -403,9 +497,6 @@ fn systemtime_to_filetime(
 /// 满足 S-01 忠实移动要求）；确因跨文件系统失败时按「不覆盖完整复制 → 设置创建/修改
 /// 时间 → 删除源项」执行，复制、写时间或删除任一失败都保留源项并如实报错。
 pub fn move_file_preserving_times(source: &Path, target: &Path) -> Result<()> {
-    let metadata = fs::symlink_metadata(source)?;
-    let created = metadata.created().ok();
-    let modified = metadata.modified().ok();
     match rename_noreplace(source, target) {
         Ok(()) => Ok(()),
         Err(error) => {
@@ -420,11 +511,24 @@ pub fn move_file_preserving_times(source: &Path, target: &Path) -> Result<()> {
             if !cross_volume {
                 return Err(error);
             }
+            let metadata = fs::symlink_metadata(source).context("无法读取跨卷移动源文件属性")?;
+            #[cfg(windows)]
+            let created = Some(
+                metadata
+                    .created()
+                    .context("跨卷移动无法读取源文件创建时间")?,
+            );
+            #[cfg(not(windows))]
+            let created = metadata.created().ok();
+            let modified = Some(
+                metadata
+                    .modified()
+                    .context("跨卷移动无法读取源文件修改时间")?,
+            );
             // S-01：跨卷复制必须以不覆盖方式落盘——`fs::copy` 以 create+truncate
-            // 打开目标，目标已存在时会被静默截断（规划缺陷或目标计算偏差都不允许
-            // 覆盖既有文件）。清理只针对本次新建的未完成副本：`create_new` 以
-            // AlreadyExists 失败时没有写入任何字节，目标属于既有文件，绝不能删；
-            // 其余失败（写盘中途出错）才删除本次新建的部分副本。
+            // 打开目标，目标已存在时会被静默截断。只清理本次新建的未完成副本：
+            // `create_new` 以 AlreadyExists 失败时没有写入字节，目标属于既有文件，
+            // 绝不能删；其余写盘或关闭失败才删除本次新建的部分副本。
             if let Err(error) = copy_noreplace(source, target) {
                 if error.kind() != std::io::ErrorKind::AlreadyExists {
                     let _ = fs::remove_file(target);
@@ -460,6 +564,8 @@ fn set_created_and_modified(
             CreateFileW, SetFileTime, FILE_ATTRIBUTE_NORMAL, FILE_FLAG_BACKUP_SEMANTICS,
             FILE_SHARE_READ, FILE_SHARE_WRITE, FILE_WRITE_ATTRIBUTES, OPEN_EXISTING,
         };
+        let created_ft = created.map(systemtime_to_filetime).transpose()?;
+        let modified_ft = modified.map(systemtime_to_filetime).transpose()?;
         let path16: Vec<u16> = path.as_os_str().encode_wide().chain(Some(0)).collect();
         // SAFETY: path16 是 NUL 结尾的 UTF-16 缓冲区；句柄在本函数内关闭，指针不出作用域。
         let handle = unsafe {
@@ -476,8 +582,6 @@ fn set_created_and_modified(
         if handle == INVALID_HANDLE_VALUE {
             return Err(std::io::Error::last_os_error()).context("打开文件以写回时间失败");
         }
-        let created_ft = created.map(systemtime_to_filetime).transpose()?;
-        let modified_ft = modified.map(systemtime_to_filetime).transpose()?;
         let creation_ptr = created_ft
             .as_ref()
             .map_or(std::ptr::null(), std::ptr::from_ref::<FILETIME>);
@@ -486,10 +590,18 @@ fn set_created_and_modified(
             .map_or(std::ptr::null(), std::ptr::from_ref::<FILETIME>);
         // SAFETY: handle 有效；两个指针指向本函数栈上的 FILETIME 或为 NULL（表示不修改）。
         let ok = unsafe { SetFileTime(handle, creation_ptr, std::ptr::null(), modified_ptr) };
+        let set_error = if ok == 0 {
+            Some(std::io::Error::last_os_error())
+        } else {
+            None
+        };
         // SAFETY: 关闭本函数打开的句柄。
-        unsafe { CloseHandle(handle) };
-        if ok == 0 {
-            return Err(std::io::Error::last_os_error()).context("写回创建/修改时间失败");
+        let close_ok = unsafe { CloseHandle(handle) };
+        if let Some(error) = set_error {
+            return Err(error).context("写回创建/修改时间失败");
+        }
+        if close_ok == 0 {
+            return Err(std::io::Error::last_os_error()).context("关闭文件时间句柄失败");
         }
         Ok(())
     }
@@ -642,9 +754,11 @@ pub fn unique_target(root: &Path, requested: &Path) -> Result<PathBuf> {
         }
         // 符号链接/坏链视为占用并试下一个序号（与 planner::target_will_be_free 对齐），
         // 不得因 safe_join 的链接拒绝而整函数失败。
-        if let Err(error) = fs::symlink_metadata(&path) {
-            if error.kind() == std::io::ErrorKind::NotFound {
-                return Ok(path);
+        match fs::symlink_metadata(&path) {
+            Ok(_) => {}
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(path),
+            Err(error) => {
+                return Err(error).with_context(|| format!("无法检查目标占用：{}", path.display()));
             }
         }
     }
@@ -677,6 +791,17 @@ impl Drop for RootGuard {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[cfg(windows)]
+    #[test]
+    fn fold_rel_matches_windows_ordinal_case_and_order() {
+        assert_ne!(fold_rel("\u{0130}"), fold_rel("i\u{0307}"));
+        assert_eq!(fold_rel("\u{1f80}"), fold_rel("\u{1f88}"));
+        assert!(
+            fold_rel("\u{10000}") < fold_rel("\u{e000}"),
+            "折叠键顺序必须保留 Windows UTF-16 序数顺序"
+        );
+    }
 
     // 覆盖 X-10, 附录 B（回归：part rar 的 `.partN.rar` 是不可拆分后缀，
     // 冲突改名的序号插在整个后缀之前，如 `资料 (1).part01.rar`）

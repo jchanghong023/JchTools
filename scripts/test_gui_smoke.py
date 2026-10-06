@@ -43,8 +43,10 @@ class ProducedSnapshotTests(unittest.TestCase):
             assert updated != produced  # nosec B101: 内容更新（大小变化）必须改变快照。
 
     def test_snapshot_of_missing_directory_is_empty(self) -> None:
-        missing = Path(tempfile.gettempdir()) / "jchtools-smoke-unit-does-not-exist"
-        assert gui_smoke.produced_snapshot(missing) == frozenset()  # nosec B101: 目录不可读返回空快照。
+        with tempfile.TemporaryDirectory(prefix="jchtools-smoke-missing-") as temporary:
+            missing = Path(temporary) / "missing"
+            assert not missing.exists()  # nosec B101: 本次隔离的子目录必须确实缺失。
+            assert gui_smoke.produced_snapshot(missing) == frozenset()  # nosec B101: 目录不可读返回空快照。
 
 
 class CompletionConfirmsNewRunTests(unittest.TestCase):

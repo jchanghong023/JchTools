@@ -1005,15 +1005,15 @@ fn handle(pipe: File, engine: &Mutex<Option<Engine>>, stopping: &AtomicBool) -> 
         }
         let mut slot = engine.lock().map_err(|_| "后台状态异常")?;
         if request["command"] == "broker-force-stop" {
-            let document_active = slot.as_ref().is_some_and(|e| {
+            let task_active = slot.as_ref().is_some_and(|e| {
                 e.pending
                     .lock()
-                    .map_or(true, |p| p.values().any(|v| v.lane == Some("document")))
+                    .map_or(true, |p| p.values().any(|v| v.lane.is_some()))
             });
-            if document_active {
+            if task_active {
                 return write_json(
                     reader.get_mut(),
-                    &json!({"id":request["id"],"ok":false,"error":"文档或媒体任务尚未结束，不能强制退出","jchtools_broker_protocol":BROKER_PROTOCOL}),
+                    &json!({"id":request["id"],"ok":false,"error":"文档、媒体或截图任务尚未结束，不能强制退出","jchtools_broker_protocol":BROKER_PROTOCOL}),
                 );
             }
             stopping.store(true, Ordering::Release);
