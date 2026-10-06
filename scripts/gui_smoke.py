@@ -1117,10 +1117,20 @@ def s7_restart_restores_saved_directory(exe: str) -> None:
             goto_settings(window)
             _ = wait_text_containing(window, SETTINGS_SAVED_TEXT)
             _ = wait_text_containing(window, "当前来源：用户提供的目录")
+            # 快照上屏与 UIA 取值之间有竞态（fulltest 重负载下曾读到陈旧值）：
+            # 在有界窗口内轮询字段直到与期望一致，超时仍不一致才判失败；
+            # 断言本身不变（仍要求解析后相等），失败信息带实际值便于取证。
+            expected_directory = str(Path(directory).resolve())
+            deadline = time.monotonic() + 20.0
             actual_directory = settings_custom_dir_value(window)
+            while (
+                Path(actual_directory).resolve() != Path(expected_directory).resolve() and time.monotonic() < deadline
+            ):
+                time.sleep(0.5)
+                actual_directory = settings_custom_dir_value(window)
             require(
-                Path(actual_directory).resolve() == Path(directory).resolve(),
-                "S7 重启后未恢复已保存的 Xberg 目录",
+                Path(actual_directory).resolve() == Path(expected_directory).resolve(),
+                f"S7 重启后未恢复已保存的 Xberg 目录（实际：{actual_directory!r}，期望：{expected_directory}）",
             )
 
         run_stage("S7-first", exe, save, env=env)
