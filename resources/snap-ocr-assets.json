@@ -57,83 +57,83 @@
   }
  ],
  "xberg_inference": {
-  "tag": "v2026.10.2-0920-run54.1",
+  "tag": "v2026.10.6-0420-run58.1",
   "id": "xberg-inference",
-  "url": "https://github.com/jchanghong023/xberg/releases/download/v2026.10.2-0920-run54.1/xberg-cli-x86_64-pc-windows-msvc.zip",
+  "url": "https://github.com/jchanghong023/xberg/releases/download/v2026.10.6-0420-run58.1/xberg-cli-x86_64-pc-windows-msvc.zip",
   "archive_type": "zip",
   "install_path": null,
-  "size_bytes": 292258404,
-  "sha256": "07f86e8f0af6b21119d0502d89df1037c5771947506e69ac6d9da7cb45311b18",
+  "size_bytes": 292313324,
+  "sha256": "10dcf679c325734b50e6693268348422db4cb5a05c11c6249af1ebce334060fc",
   "members": [
    {
     "path": "xberg-cli-x86_64-pc-windows-msvc/xberg.exe",
-    "install_path": "xberg-inference/v2026.10.2-0920-run54.1/xberg.exe",
-    "size_bytes": 106220032,
-    "sha256": "1ba9f36b268fc3d87ab79a7403b9ea6bcd43a8cbb1501dc37d1ca9ac63b2f39c"
+    "install_path": "xberg-inference/v2026.10.6-0420-run58.1/xberg.exe",
+    "size_bytes": 106363392,
+    "sha256": "fdd9176167cf92d77aafc193400ff0fdc4dba3cb6a96d21dbcb36128a125d09b"
    },
    {
     "path": "xberg-cli-x86_64-pc-windows-msvc/models/snapshot-ocr/det.onnx",
-    "install_path": "xberg-inference/v2026.10.2-0920-run54.1/models/snapshot-ocr/det.onnx",
+    "install_path": "xberg-inference/v2026.10.6-0420-run58.1/models/snapshot-ocr/det.onnx",
     "size_bytes": 9891707,
     "sha256": "3914f972d833af87d23bb2338bd09238f978a48f3c4dbb8e1a4ee26a93869940"
    },
    {
     "path": "xberg-cli-x86_64-pc-windows-msvc/models/snapshot-ocr/rec.onnx",
-    "install_path": "xberg-inference/v2026.10.2-0920-run54.1/models/snapshot-ocr/rec.onnx",
+    "install_path": "xberg-inference/v2026.10.6-0420-run58.1/models/snapshot-ocr/rec.onnx",
     "size_bytes": 21148338,
     "sha256": "3e3def686ac9a1676b59bc9749ad896263d8f68b53f352060774de359a2e23ed"
    },
    {
     "path": "xberg-cli-x86_64-pc-windows-msvc/models/snapshot-ocr/dict/dict.txt",
-    "install_path": "xberg-inference/v2026.10.2-0920-run54.1/models/snapshot-ocr/dict/dict.txt",
+    "install_path": "xberg-inference/v2026.10.6-0420-run58.1/models/snapshot-ocr/dict/dict.txt",
     "size_bytes": 74947,
     "sha256": "b5f2bfe2bdd9448429e3e82b51c789775d9b42f2403d082b00662eb77e401c5d"
    },
    {
     "path": "xberg-cli-x86_64-pc-windows-msvc/models/paddleocr-onnx-models-LICENSE.txt",
-    "install_path": "xberg-inference/v2026.10.2-0920-run54.1/models/paddleocr-onnx-models-LICENSE.txt",
+    "install_path": "xberg-inference/v2026.10.6-0420-run58.1/models/paddleocr-onnx-models-LICENSE.txt",
     "size_bytes": 11358,
     "sha256": "cfc7749b96f63bd31c3c42b5c471bf756814053e847c10f3eb003417bc523d30"
    },
    {
     "path": "xberg-cli-x86_64-pc-windows-msvc/onnxruntime.dll",
-    "install_path": "xberg-inference/v2026.10.2-0920-run54.1/onnxruntime.dll",
+    "install_path": "xberg-inference/v2026.10.6-0420-run58.1/onnxruntime.dll",
     "size_bytes": 16720896,
     "sha256": "4ee0ae76cbf51bde6999f36829939b2b06d340ab57867ef82b61a0b674111efa"
    },
    {
     "path": "xberg-cli-x86_64-pc-windows-msvc/MSVCP140.dll",
-    "install_path": "xberg-inference/v2026.10.2-0920-run54.1/MSVCP140.dll",
+    "install_path": "xberg-inference/v2026.10.6-0420-run58.1/MSVCP140.dll",
     "size_bytes": 643512,
     "sha256": "7c26614e1d733892c2deac7e245ce115504b1d80592dd0a01b08e3e5a55f89ca"
    },
    {
     "path": "xberg-cli-x86_64-pc-windows-msvc/MSVCP140_1.dll",
-    "install_path": "xberg-inference/v2026.10.2-0920-run54.1/MSVCP140_1.dll",
+    "install_path": "xberg-inference/v2026.10.6-0420-run58.1/MSVCP140_1.dll",
     "size_bytes": 35768,
     "sha256": "206c931bf90fdad8816de3b5e2ef80b2bcaa9406c89ecc05fe6fddffe251e982"
    },
    {
     "path": "xberg-cli-x86_64-pc-windows-msvc/VCRUNTIME140.dll",
-    "install_path": "xberg-inference/v2026.10.2-0920-run54.1/VCRUNTIME140.dll",
+    "install_path": "xberg-inference/v2026.10.6-0420-run58.1/VCRUNTIME140.dll",
     "size_bytes": 178616,
     "sha256": "d1f4225df2cd877dbf130d5668a021dce3f94118455ff5ec952061c30afc9ce7"
    },
    {
     "path": "xberg-cli-x86_64-pc-windows-msvc/VCRUNTIME140_1.dll",
-    "install_path": "xberg-inference/v2026.10.2-0920-run54.1/VCRUNTIME140_1.dll",
+    "install_path": "xberg-inference/v2026.10.6-0420-run58.1/VCRUNTIME140_1.dll",
     "size_bytes": 50112,
     "sha256": "a7146c08f89fe5b04541ab507cdb59ff7b44534d4ba3c668a426c6450a03434e"
    },
    {
     "path": "xberg-cli-x86_64-pc-windows-msvc/LICENSE",
-    "install_path": "xberg-inference/v2026.10.2-0920-run54.1/LICENSE",
+    "install_path": "xberg-inference/v2026.10.6-0420-run58.1/LICENSE",
     "size_bytes": 1098,
     "sha256": "2df0cbac46062748fa0f582c5717df32d66607de4d37af1473ce785c31b60b54"
    },
    {
     "path": "xberg-cli-x86_64-pc-windows-msvc/THIRD_PARTY_LICENSES.md",
-    "install_path": "xberg-inference/v2026.10.2-0920-run54.1/THIRD_PARTY_LICENSES.md",
+    "install_path": "xberg-inference/v2026.10.6-0420-run58.1/THIRD_PARTY_LICENSES.md",
     "size_bytes": 6365,
     "sha256": "7f9a61b4ead9e7f0551fe9a1c2ffc1fb53f001e9170416412c17cdec93a0b6bd"
    }
@@ -141,7 +141,7 @@
   "license": {
    "component": "Xberg CLI（推理组件：xberg.exe 与截图/转录模型、原生运行库）",
    "license": "Xberg 项目许可（组件树内随附 LICENSE 与 THIRD_PARTY_LICENSES.md）",
-   "source": "https://github.com/jchanghong023/xberg/releases/download/v2026.10.2-0920-run54.1/xberg-cli-x86_64-pc-windows-msvc.zip"
+   "source": "https://github.com/jchanghong023/xberg/releases/download/v2026.10.6-0420-run58.1/xberg-cli-x86_64-pc-windows-msvc.zip"
   }
  }
 }

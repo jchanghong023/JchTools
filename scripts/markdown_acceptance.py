@@ -108,7 +108,7 @@ STATUS_NOT_RUN = "NOT RUN"
 DATA_DIRECTORY = "markdown-assets"
 # 产品钉死 tag（resources/markdown-assets.json 的 xberg.tag，只读引用勿随本文件改）。
 # 本机测试引擎不使用该 tag：测试一律用 LOCAL_TEST_XBERG_DIR 的最新版（S10-01 两个口径）。
-XBERG_TAG = "v2026.10.2-0920-run54.1"
+XBERG_TAG = "v2026.10.6-0420-run58.1"
 XBERG_ARCHIVE_URL = (
     f"https://github.com/jchanghong023/xberg/releases/download/{XBERG_TAG}/xberg-cli-x86_64-pc-windows-msvc.zip"
 )

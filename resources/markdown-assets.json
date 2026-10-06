@@ -2,10 +2,10 @@
  "schema_version": 1,
  "component": "markdown-assets",
  "xberg": {
-  "tag": "v2026.10.2-0920-run54.1",
-  "archive_url": "https://github.com/jchanghong023/xberg/releases/download/v2026.10.2-0920-run54.1/xberg-cli-x86_64-pc-windows-msvc.zip",
-  "archive_size_bytes": 292258404,
-  "archive_sha256": "07f86e8f0af6b21119d0502d89df1037c5771947506e69ac6d9da7cb45311b18",
+  "tag": "v2026.10.6-0420-run58.1",
+  "archive_url": "https://github.com/jchanghong023/xberg/releases/download/v2026.10.6-0420-run58.1/xberg-cli-x86_64-pc-windows-msvc.zip",
+  "archive_size_bytes": 292313324,
+  "archive_sha256": "10dcf679c325734b50e6693268348422db4cb5a05c11c6249af1ebce334060fc",
   "members": [
    {
     "path": "LICENSE",
@@ -164,8 +164,8 @@
    },
    {
     "path": "xberg.exe",
-    "size_bytes": 106220032,
-    "sha256": "1ba9f36b268fc3d87ab79a7403b9ea6bcd43a8cbb1501dc37d1ca9ac63b2f39c"
+    "size_bytes": 106363392,
+    "sha256": "fdd9176167cf92d77aafc193400ff0fdc4dba3cb6a96d21dbcb36128a125d09b"
    }
   ],
   "licenses": [
@@ -197,16 +197,16 @@
   ]
  },
  "xberg_inference": {
-  "tag": "v2026.10.2-0920-run54.1",
-  "url": "https://github.com/jchanghong023/xberg/releases/download/v2026.10.2-0920-run54.1/xberg-cli-x86_64-pc-windows-msvc.zip",
-  "size_bytes": 292258404,
-  "sha256": "07f86e8f0af6b21119d0502d89df1037c5771947506e69ac6d9da7cb45311b18",
+  "tag": "v2026.10.6-0420-run58.1",
+  "url": "https://github.com/jchanghong023/xberg/releases/download/v2026.10.6-0420-run58.1/xberg-cli-x86_64-pc-windows-msvc.zip",
+  "size_bytes": 292313324,
+  "sha256": "10dcf679c325734b50e6693268348422db4cb5a05c11c6249af1ebce334060fc",
   "members": [
    {
     "path": "xberg-cli-x86_64-pc-windows-msvc/xberg.exe",
     "install_path": "xberg.exe",
-    "size_bytes": 106220032,
-    "sha256": "1ba9f36b268fc3d87ab79a7403b9ea6bcd43a8cbb1501dc37d1ca9ac63b2f39c"
+    "size_bytes": 106363392,
+    "sha256": "fdd9176167cf92d77aafc193400ff0fdc4dba3cb6a96d21dbcb36128a125d09b"
    },
    {
     "path": "xberg-cli-x86_64-pc-windows-msvc/onnxruntime.dll",

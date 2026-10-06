@@ -20,7 +20,7 @@ use uuid::Uuid;
 
 const MANIFEST: &str = include_str!("../resources/markdown-assets.json");
 const DATA_DIRECTORY: &str = "markdown-assets";
-pub(crate) const XBERG_TAG: &str = "v2026.10.2-0920-run54.1";
+pub(crate) const XBERG_TAG: &str = "v2026.10.6-0420-run58.1";
 const RUNTIME_SELECTION_FILE: &str = "xberg-runtime-path.txt";
 const XBERG_DOWNLOAD_STAGING_MARKER: &str = ".jchtools-xberg-download-staging-v1";
 
@@ -643,7 +643,7 @@ mod tests {
         fs::create_dir_all(&unowned).expect("创建用户 staging");
         fs::write(unowned.join("user.txt"), b"keep").expect("写入用户文件");
 
-        let version = root.path().join("v2026.10.2-0920-run54.1-uuid");
+        let version = root.path().join("v2026.10.6-0420-run58.1-uuid");
         fs::create_dir_all(&version).expect("创建有效版本目录");
         fs::write(version.join("xberg.exe"), b"valid").expect("写入有效版本");
 
