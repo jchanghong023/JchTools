@@ -505,6 +505,29 @@ fn count_archives_with(root: &Path, config: &Config, protected: Option<&Path>) -
                     return false;
                 }
             };
+            let rel = match fsutil::relative_string(&root, entry.path()) {
+                Ok(rel) => rel,
+                Err(error) => {
+                    filter_error.get_or_insert_with(|| {
+                        format!(
+                            "无法确定目录项相对路径 {}：{error:#}",
+                            entry.path().display()
+                        )
+                    });
+                    return false;
+                }
+            };
+            let name = entry.file_name();
+            let name = name.to_string_lossy();
+            // 选定根目录自身不参与隐藏/系统/名称等判定——扫描同口径：筛选只作用于
+            // 根目录的子项，隐藏的选定根目录不会把整棵树剪掉（否则确认框报 0，
+            // 正式扫描却能找到包）。
+            // 范围剪枝先于 Git 边界判定（与扫描同口径：walk_dir 只下钻未剪枝目录），
+            // 被范围规则剪掉的目录不做边界判定，用户排除的不可读目录不得让清点失败。
+            let in_scope = rel.is_empty() || !scope_filter.prunes(&rel, &name, &meta);
+            if !in_scope {
+                return false;
+            }
             // H-06：目录直接含 .git（目录或文件）时整树排除，识别后不遍历内部。
             // 边界判定失败时必须中止清点，不可将未知目录当作已排除。
             if entry.file_type().is_dir() {
@@ -519,27 +542,7 @@ fn count_archives_with(root: &Path, config: &Config, protected: Option<&Path>) -
                     }
                 }
             }
-            let rel = match fsutil::relative_string(&root, entry.path()) {
-                Ok(rel) => rel,
-                Err(error) => {
-                    filter_error.get_or_insert_with(|| {
-                        format!(
-                            "无法确定目录项相对路径 {}：{error:#}",
-                            entry.path().display()
-                        )
-                    });
-                    return false;
-                }
-            };
-            // 选定根目录自身不参与隐藏/系统/名称等判定——扫描同口径：筛选只作用于
-            // 根目录的子项，隐藏的选定根目录不会把整棵树剪掉（否则确认框报 0，
-            // 正式扫描却能找到包）。
-            if rel.is_empty() {
-                return true;
-            }
-            let name = entry.file_name();
-            let name = name.to_string_lossy();
-            !scope_filter.prunes(&rel, &name, &meta)
+            true
         })
     {
         let entry = entry?;
@@ -2832,6 +2835,56 @@ mod s05_scope_tests {
             2,
             "对照组：未注入受保护目录时两包都计入"
         );
+    }
+
+    /// 用 icacls 拒绝 Everyone 的列目录权构造 read_dir 被拒目录：deny ACE 优先于
+    /// allow，普通权限即可复现；结束后移除该 ACE 以便临时目录清理。
+    #[cfg(windows)] // 平台门禁原因：icacls 与 deny ACE 仅 Windows 存在
+    fn set_dir_list_denied(path: &Path, denied: bool) {
+        let mut command = std::process::Command::new("icacls");
+        command.arg(path);
+        if denied {
+            command.args(["/deny", "*S-1-1-0:(RD)"]);
+        } else {
+            command.args(["/remove:d", "*S-1-1-0"]);
+        }
+        let output = command.output().expect("icacls 应为 Windows 内置命令");
+        assert!(
+            output.status.success(),
+            "icacls 执行失败：{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+
+    // 覆盖 X-03/H-06（清点与扫描同口径：被范围规则剪枝的目录不做 Git 边界判定，
+    // 用户排除的不可读目录不得让清点失败；范围内不可读目录仍按 H-06 中止）
+    #[cfg(windows)] // 平台门禁原因：icacls 与 deny ACE 仅 Windows 存在
+    #[test]
+    fn count_skips_boundary_check_for_scope_pruned_dirs() {
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path().join("data");
+        fs::create_dir_all(root.join("denied")).unwrap();
+        fs::write(root.join("a.zip"), b"zip").unwrap();
+        let root = fs::canonicalize(root).unwrap();
+        set_dir_list_denied(&root.join("denied"), true);
+
+        // 范围内的不可读目录：边界无法判定必须中止清点（有意 fail-closed，与扫描一致）。
+        let error = count_archives_with(&root, &Config::default(), None).unwrap_err();
+        assert!(error.to_string().contains("Git 边界判定"), "{error:#}");
+
+        // 同一目录被用户排除规则剪枝后：正式扫描只对未剪枝目录做边界判定
+        // （walk_dir 仅下钻未剪枝目录），清点必须同口径成功而不是拒绝启动。
+        let config = Config {
+            exclusions: "denied".into(),
+            ..Config::default()
+        };
+        assert_eq!(
+            count_archives_with(&root, &config, None).unwrap(),
+            1,
+            "被范围规则剪枝的不可读目录不得让清点失败"
+        );
+
+        set_dir_list_denied(&root.join("denied"), false);
     }
 
     // 覆盖 S-05, H-05（收尾空目录清理不进入受保护子树；范围外普通空目录仍正常清理）
