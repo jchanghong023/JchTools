@@ -864,6 +864,13 @@
     },
     {
       "file": "src/config.rs",
+      "name": "state_directory_honors_explicit_test_isolation",
+      "ignored": false,
+      "cfg": null,
+      "body": "cc95a0bd30692b94"
+    },
+    {
+      "file": "src/config.rs",
       "name": "validation_is_scoped_to_the_active_tool",
       "ignored": false,
       "cfg": null,
@@ -1294,7 +1301,7 @@
       "name": "convert_stop_reports_each_phase_and_cancels_shared_task",
       "ignored": false,
       "cfg": null,
-      "body": "ecd30a9a006429ba"
+      "body": "88095303dcd4641b"
     },
     {
       "file": "src/gui.rs",
@@ -1330,6 +1337,13 @@
       "ignored": false,
       "cfg": null,
       "body": "b24a046679c6c8cd"
+    },
+    {
+      "file": "src/gui.rs",
+      "name": "converter_stop_with_failure_preserves_failed_final_state_and_diagnostic",
+      "ignored": false,
+      "cfg": null,
+      "body": "43cc983a58874681"
     },
     {
       "file": "src/gui.rs",
@@ -1858,6 +1872,13 @@
     },
     {
       "file": "src/markdown.rs",
+      "name": "cancellation_classification_preserves_actual_errors",
+      "ignored": false,
+      "cfg": null,
+      "body": "c11da1628758bbce"
+    },
+    {
+      "file": "src/markdown.rs",
       "name": "expired_deadline_blocks_final_commit_without_temp_leftover",
       "ignored": false,
       "cfg": null,
@@ -2107,6 +2128,34 @@
       "ignored": false,
       "cfg": null,
       "body": "25a615de1e2cfe6e"
+    },
+    {
+      "file": "src/markdown_assets.rs",
+      "name": "latest_metadata_rejects_changed_source_and_duplicate_archives",
+      "ignored": false,
+      "cfg": null,
+      "body": "57a31c996d0e7efd"
+    },
+    {
+      "file": "src/markdown_assets.rs",
+      "name": "latest_metadata_replaces_pinned_engine_but_preserves_model_identity",
+      "ignored": false,
+      "cfg": null,
+      "body": "17ead6b834a01b9e"
+    },
+    {
+      "file": "src/markdown_assets.rs",
+      "name": "latest_metadata_without_digest_fails_without_mutating_pinned_pack",
+      "ignored": false,
+      "cfg": null,
+      "body": "8856c2143a42951e"
+    },
+    {
+      "file": "src/markdown_assets.rs",
+      "name": "latest_runtime_is_reused_without_repeating_archive_download",
+      "ignored": false,
+      "cfg": null,
+      "body": "3bcd4aa3a0e70525"
     },
     {
       "file": "src/markdown_assets.rs",
@@ -2785,7 +2834,7 @@
       "name": "redirect_rechecks_proxy_override_for_each_target",
       "ignored": false,
       "cfg": null,
-      "body": "e367a4fac64c76f1"
+      "body": "5540f7b029c9581f"
     },
     {
       "file": "src/snap_ocr_assets.rs",
@@ -5264,6 +5313,27 @@
       "ignored": false,
       "cfg": null,
       "body": "2ee2032048504b5b"
+    },
+    {
+      "file": "tests/xberg_shared_process.rs",
+      "name": "batch_stop_cancels_current_document_and_keeps_shared_snapshot_alive",
+      "ignored": false,
+      "cfg": null,
+      "body": "d7997430ce6e0da1"
+    },
+    {
+      "file": "tests/xberg_shared_process.rs",
+      "name": "batch_stop_cancels_current_media_and_keeps_shared_snapshot_alive",
+      "ignored": false,
+      "cfg": null,
+      "body": "f22a05c58d8559e8"
+    },
+    {
+      "file": "tests/xberg_shared_process.rs",
+      "name": "batch_stop_preserves_unfinished_request_diagnostic_and_snapshot_alive",
+      "ignored": false,
+      "cfg": null,
+      "body": "a7267d8af4befeb7"
     },
     {
       "file": "tests/xberg_shared_process.rs",

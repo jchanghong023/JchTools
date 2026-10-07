@@ -727,10 +727,14 @@ def product_naming() -> str:
     if not re.search(r'title:\s*"JchTools"', ui):
         detail = "窗口标题必须是产品名 JchTools"
         raise AssertionError(detail)
-    if '"JchTools"' not in config:
-        detail = 'src/config.rs 的用户数据目录名必须是 "JchTools"'
+    # 状态定位可由 config 委托给应用共享设置；检查实际定位方，不能要求
+    # 调用方为满足字符串检查重复维护产品目录名。
+    shared_settings = read_text(ROOT / "src" / "xberg_settings.rs")
+    locator = shared_settings if "crate::xberg_settings::state_dir()" in config else config
+    if not re.search(r'ProjectDirs::from\(\s*""\s*,\s*""\s*,\s*"JchTools"\s*\)', locator):
+        detail = '实际状态定位方的用户数据目录名必须是 "JchTools"'
         raise AssertionError(detail)
-    for rel in ["ui/app.slint", "src/config.rs", "src/registry.rs", "Cargo.toml"]:
+    for rel in ["ui/app.slint", "src/config.rs", "src/xberg_settings.rs", "src/registry.rs", "Cargo.toml"]:
         if "MyTools" in read_text(ROOT / rel):
             detail = f"{rel} 残留旧产品名 MyTools"
             raise AssertionError(detail)

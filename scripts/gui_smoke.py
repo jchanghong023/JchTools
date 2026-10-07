@@ -26,10 +26,11 @@
   S12 输出子树排除：输出目录位于输入内时整棵输出子树不作为新输入（T-09）。
   S13 部分失败与完成统计：单文件失败不终止批次，成功/失败可区分（T-16/T-24）。
   S14 运行中关闭确认与安全停止：转换运行中点标题栏「关闭」弹出「停止任务并关闭」，
-     确认后当前文件结束、进程退出码 0（U-09/T-23；需 JCHTOOLS_S5_MEDIA 媒体样本）。
+     确认后取消当前文件、清理未完成产物、进程退出码 0（U-09/T-23；需真实媒体样本）。
   S15 MD 合并/拆分真实 GUI：验证标题下移、原文件不变与 UTF-8 分片无损还原。
   S16 Git 真实 GUI：使用一次性仓库和本地 bare 远端，验证逐文件提交及推送结果。
   S17 在已保存有效 Xberg 的隔离配置下，从转换页初始化本地 notice 并核对就绪状态。
+  S18 在两档窗口尺寸下逐页检查主要操作控件边界与重叠，自动判定布局结果。
 
 用法：
     python scripts/gui_smoke.py --exe target/debug/JchTools.exe --data <已生成的测试数据目录>
@@ -68,7 +69,7 @@ import win32job
 import win32process
 from pywinauto import Application, controls, findbestmatch, findwindows, timings
 from pywinauto.application import ProcessNotFoundError, WindowSpecification
-from pywinauto.uia_defines import NoPatternInterfaceError
+from pywinauto.uia_defines import IUIA, NoPatternInterfaceError
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Mapping
@@ -107,11 +108,12 @@ SUPPORTED_STAGES = (
     "S15",
     "S16",
     "S17",
+    "S18",
 )
-DEFAULT_STAGES = "S1,S2,S3,S4,S15,S16"
+DEFAULT_STAGES = "S1,S2,S3,S4,S15,S16,S18"
 CONVERT_BUSY_TIMEOUT = 60  # 点击「开始转换」后等待「停止任务」出现的上限（秒）
 _S5_LAST_ATTEMPT = 2  # S5 重按「开始转换」的末次序号（共 3 次，0 起）
-CONVERT_STOP_TIMEOUT = 300  # 停止请求后等待「开始转换」恢复可用的上限（秒）
+CONVERT_STOP_TIMEOUT = 15  # T-23：停止不得等待当前媒体自然结束。
 # 转 Markdown 页「选择目录…」应有行数（输入 / 输出；Xberg 目录在设置页，XB-20）。
 CONVERT_DIR_ROWS = 2
 EXTRACT_ACK = "我已确认：成功原包及分卷永久删除（不可恢复）"
@@ -228,6 +230,13 @@ class _OwnedProcessTree:
         if self._job is not None:
             terminate_job = cast("Callable[[int, int], None]", vars(win32job)["TerminateJobObject"])
             terminate_job(self._job, 0)
+            query = cast("Callable[[int, int], dict[str, int]]", vars(win32job)["QueryInformationJobObject"])
+            deadline = time.monotonic() + 15.0
+            while query(self._job, win32job.JobObjectBasicAccountingInformation)["ActiveProcesses"]:
+                if time.monotonic() >= deadline:
+                    message = "本轮测试 Job Object 的子进程未在清理期限内退出"
+                    raise RuntimeError(message)
+                time.sleep(0.05)
 
 
 def own_process_tree(proc: subprocess.Popen[bytes]) -> _OwnedProcessTree:
@@ -369,7 +378,14 @@ def confirm_dialog(window: WindowSpecification, timeout: int = TIMEOUT, *, extra
 
 
 def state_dir() -> Path:
-    r"""与 src/config.rs::state_dir 一致：%LOCALAPPDATA%\JchTools\data."""
+    r"""任务库与 GUI 使用同一隔离状态根，缺覆盖时为 %LOCALAPPDATA%\JchTools\data."""
+    isolated = os.environ.get("JCHTOOLS_TEST_STATE_DIR")
+    if isolated is not None:
+        path = Path(isolated)
+        if not path.is_absolute():
+            msg = "JCHTOOLS_TEST_STATE_DIR 必须为绝对路径，拒绝回退到真实任务目录"
+            raise RuntimeError(msg)
+        return path
     local = os.environ.get("LOCALAPPDATA")
     if not local:
         msg = "缺少 LOCALAPPDATA，无法定位任务目录"
@@ -666,11 +682,16 @@ def s2_analyze_only(exe: str, data: str) -> None:
 
 
 def s3_full_organize(exe: str, data: str) -> None:
+    root = Path(data)
+    expected = prepare_organize_witnesses(root)
+    git_before = tree_snapshot(root / "__gui_witness" / "project")
+
     def body(window: WindowSpecification) -> None:
         baseline = analyze_until_ready(window, data)
         open_confirm(window, "确认并执行整理")
         confirm_dialog(window)
         wait_task_status(data, "finished", baseline)
+        verify_organize_witnesses(root, expected, git_before)
         for parent, dirs, files in os.walk(data):
             if ".git" in dirs or ".git" in files:
                 dirs.clear()
@@ -678,9 +699,98 @@ def s3_full_organize(exe: str, data: str) -> None:
             if Path(parent) != Path(data) and not dirs and not files:
                 msg = f"整理成功后仍残留空目录：{parent}"
                 raise RuntimeError(msg)
-        print("S3 PASS：全链路整理完成（任务状态 finished）")
+        before_repeat = tree_snapshot(root)
+        # 相同目录已保留在页面，重复 set_edit_text 不触发目录变化，状态仍显示上次结束；
+        # 从真实「开始分析」入口重新建计划，避免把“目录已就绪”当成唯一空闲状态。
+        baseline = newest_task(data)
+        _ = wait_button(window, "开始分析", TIMEOUT, enabled=True)
+        click(window, find_button(window, "开始分析"))
+        wait_task_status(data, "ready", baseline)
+        open_confirm(window, "确认并执行整理")
+        confirm_dialog(window)
+        wait_task_status(data, "finished", baseline)
+        require(tree_snapshot(root) == before_repeat, "相同默认规则再次整理改变了路径、内容或修改时间")
+        print("S3 PASS：默认分类、两类去重保留最新、不同名保留、内容冲突保留、Git整树归类及再次整理幂等")
 
     run_stage("S3", exe, body)
+
+
+def tree_snapshot(root: Path) -> tuple[frozenset[str], dict[str, tuple[str, int]]]:
+    """测试侧记录全部路径及字节/mtime，包含 Git 内部空目录，供整体平移与幂等判定。."""
+    paths = frozenset(path.relative_to(root).as_posix() for path in root.rglob("*"))
+    files = {
+        path.relative_to(root).as_posix(): (file_digest(path), path.stat().st_mtime_ns)
+        for path in root.rglob("*")
+        if path.is_file()
+    }
+    return paths, files
+
+
+def prepare_organize_witnesses(root: Path) -> dict[str, tuple[str, int]]:
+    """覆盖 C-02/C-03/C-04/C-05/C-08/C-14：给工厂语料的一次性副本补充结果明确的见证。."""
+    source = root / "__gui_witness"
+    require(not source.exists(), "测试语料已占用 GUI 见证目录")
+    old_stamp, new_stamp = 1_700_000_000_000_000_000, 1_760_000_000_000_000_000
+    # 期望由合同直接给定，不从计划库或产品归类函数反推结果。
+    entries = (
+        ("old/same.txt", "文档/same.txt", b"GUI same-name witness", old_stamp, False),
+        ("new/same.txt", "文档/same.txt", b"GUI same-name witness", new_stamp, True),
+        ("old/copy.txt", "文档/copy_2.txt", b"GUI copy-name witness", old_stamp, False),
+        ("new/copy (2).txt", "文档/copy_2.txt", b"GUI copy-name witness", new_stamp, True),
+        ("left/different-a.txt", "文档/different-a.txt", b"GUI different-name witness", old_stamp, True),
+        ("right/different-b.txt", "文档/different-b.txt", b"GUI different-name witness", new_stamp, True),
+        ("left/conflict.txt", "文档/left_conflict.txt", b"GUI conflict first", old_stamp, True),
+        ("right/conflict.txt", "文档/right_conflict.txt", b"GUI conflict other", new_stamp, True),
+        ("nested/witness.png", "图片/witness.png", b"GUI category image", old_stamp, True),
+        ("nested/witness.mp4", "视频/witness.mp4", b"GUI category video", old_stamp, True),
+        ("nested/witness.mp3", "音频/witness.mp3", b"GUI category audio", old_stamp, True),
+        ("nested/witness.zip", "压缩包/witness.zip", b"GUI category archive", old_stamp, True),
+        ("nested/witness.exe", "程序/witness.exe", b"GUI category program", old_stamp, True),
+        ("nested/witness.unknown", "其他/witness.unknown", b"GUI category fallback", old_stamp, True),
+    )
+    expected: dict[str, tuple[str, int]] = {}
+    for name, target, content, stamp, survives in entries:
+        path = source / name
+        path.parent.mkdir(parents=True, exist_ok=True)
+        _ = path.write_bytes(content)
+        os.utime(path, ns=(stamp, stamp))
+        if survives:
+            expected[target] = (file_digest(path), stamp)
+    project = source / "project"
+    for name, content in (
+        (".git/marker", b"synthetic Git boundary"),
+        ("Thumbs.db", b"Git internal junk must survive"),
+        ("copy.txt", b"Git duplicate must survive"),
+        ("copy (1).txt", b"Git duplicate must survive"),
+    ):
+        path = project / name
+        path.parent.mkdir(parents=True, exist_ok=True)
+        _ = path.write_bytes(content)
+    (project / "empty").mkdir()
+    return expected
+
+
+def verify_organize_witnesses(
+    root: Path,
+    expected: dict[str, tuple[str, int]],
+    git_before: tuple[frozenset[str], dict[str, tuple[str, int]]],
+) -> None:
+    """任务完成之外核对真实产物，拒绝未移动、错误去重、改写及 Git 内部清理。."""
+    for name, (digest, stamp) in expected.items():
+        path = root / name
+        require(path.is_file(), f"默认整理缺少合同期望产物：{name}")
+        require(file_digest(path) == digest, f"整理改变了文件内容：{name}")
+        require(path.stat().st_mtime_ns == stamp, f"去重保留者不是最新文件或归类改变了 mtime：{name}")
+    expected_counts = Counter(digest for digest, _stamp in expected.values())
+    actual_counts: Counter[str] = Counter()
+    for path in root.rglob("*"):
+        if path.is_file():
+            digest = file_digest(path)
+            if digest in expected_counts:
+                actual_counts[digest] += 1
+    require(actual_counts == expected_counts, "默认去重的副本数量或不同名保留数量不符合合同")
+    require(not (root / "__gui_witness").exists(), "已搬空的 GUI 见证来源目录没有清理")
+    require(tree_snapshot(root / "Git项目集合" / "project") == git_before, "Git 项目未整体归类或内部被改动")
 
 
 # 自动解压白名单（与 src/rules.rs::archive_name 同口径）：只有这些后缀会被解压。
@@ -901,8 +1011,8 @@ def s5_markdown_basic_chain(exe: str) -> None:
     """S5 转 Markdown 基本链路：启动→选输入→开始→停止→关闭.
 
     未配置/未就绪时「开始转换」保持禁用，wait 超时即失败——不得把「未配置也通过」
-    报成基本链路通过。停止按 T-23（当前文件结束后生效、结果保留）；产物内容断言归
-    scripts/markdown_acceptance.py，本冒烟只断言链路行为。
+    报成基本链路通过。覆盖 T-23/P-12：观察当前媒体运行态，取消后已有成品逐字节
+    不变、当前及后续产物不存在，临时文件和图片也不得留下。
     """
     scratch_box: list[Path] = []
 
@@ -918,7 +1028,8 @@ def s5_markdown_basic_chain(exe: str) -> None:
         if not media or not Path(media).is_file():
             message = "S5 需要媒体样本以观察运行态：设置 JCHTOOLS_S5_MEDIA 指向一个真实媒体文件"
             raise RuntimeError(message)
-        for index in range(STOP_MEDIA_FILE_COUNT):
+        _ = (scratch / "input" / "00_complete.txt").write_text("completed before cancellation\n", encoding="utf-8")
+        for index in range(1, STOP_MEDIA_FILE_COUNT + 1):
             _ = shutil.copyfile(media, scratch / "input" / f"{index:02}_{Path(media).name}")
 
     def body(window: WindowSpecification) -> None:
@@ -938,12 +1049,17 @@ def s5_markdown_basic_chain(exe: str) -> None:
             except (timings.TimeoutError, RuntimeError):
                 if attempt == _S5_LAST_ATTEMPT:
                     raise
+        current = f"01_{Path(os.environ['JCHTOOLS_S5_MEDIA']).name}"
+        _ = wait_text_containing(window, f"正在处理 {current}")
+        before = snapshot_output_bytes(scratch / "output")
+        require("00_complete_txt.md" in before, "停止测试必须先观察一份已完成产物")
+        require(len(before) == 1, "当前媒体尚未完成时才可发出停止请求")
         click(window, find_button(window, "停止任务"))
         _ = wait_button(window, "开始转换", CONVERT_STOP_TIMEOUT, enabled=True)
         _ = wait_text_containing(window, "已停止")
-        produced = list((scratch / "output").glob("*.md"))
-        require(len(produced) < STOP_MEDIA_FILE_COUNT, "停止后不得继续转换全部后续文件")
-        print("S5 PASS：开始→停止链路完成（停止在当前文件后生效，界面回到可开始状态）")
+        _ = wait_log_containing(window, f"已取消：{current}；未完成结果不提交")
+        verify_cancelled_outputs(scratch / "output", before)
+        print("S5 PASS：当前媒体及时取消；已完成产物不变，当前/后续/临时产物均未提交")
 
     def cleanup() -> None:
         if scratch_box:
@@ -961,6 +1077,17 @@ def require(condition: object, message: str) -> None:
     """S6-S14 的断言 helper：bandit B101 禁用 assert，统一 raise 口径."""
     if not condition:
         raise RuntimeError(message)
+
+
+def snapshot_output_bytes(root: Path) -> dict[str, str]:
+    """P-12：结果内容快照包含图片与临时文件，不能只数 Markdown。."""
+    return {str(path.relative_to(root)): file_digest(path) for path in root.rglob("*") if path.is_file()}
+
+
+def verify_cancelled_outputs(root: Path, completed: dict[str, str]) -> None:
+    """覆盖 T-23/T-25：取消不得提交当前/后续输出，也不得更改此前成品。."""
+    require(snapshot_output_bytes(root) == completed, "取消后成品被修改，或留下当前/后续/临时文件")
+    require(not any(path.is_dir() for path in root.rglob("*")), "取消后不得留下未完成媒体目录")
 
 
 def click_and_wait_text(
@@ -1048,6 +1175,26 @@ def wait_text_containing(
         time.sleep(0.5)
     msg = f"等待界面文本「{needle}」超时（最后可见文本：{last_seen[:200]}）"
     raise RuntimeError(msg)
+
+
+def wait_log_containing(window: WindowSpecification, needle: str) -> str:
+    """T-23：Slint 只读日志暴露为 Edit/Value，不能以 Text/Name 读取。."""
+    deadline = time.monotonic() + CONVERT_STOP_TIMEOUT
+    while time.monotonic() < deadline:
+        try:
+            for control in window.descendants(control_type="Edit"):
+                editor = cast("controls.uia_controls.EditWrapper", control)
+                available = IUIA().UIA_dll.UIA_IsValuePatternAvailablePropertyId
+                if not editor.element_info.element.GetCurrentPropertyValue(available):
+                    continue
+                value = editor.get_value() or ""
+                if needle in value:
+                    return value
+        except TRANSIENT_GUI_ERRORS:
+            pass
+        time.sleep(0.1)
+    message = f"等待真实 GUI 只读日志超时：{needle}"
+    raise RuntimeError(message)
 
 
 def find_check(window: WindowSpecification, title: str) -> WindowSpecification:
@@ -1374,7 +1521,7 @@ def s10_output_layout_and_flat_duplicate_policy(exe: str) -> None:
     flat = scratch / "out-flat"
     for part in ("a", "b"):
         (source / part).mkdir(parents=True)
-        _ = (source / part / "同名.txt").write_text("same name, different path\n", encoding="utf-8")
+        _ = (source / part / "同名.txt").write_text(f"stable first input {part}\n", encoding="utf-8")
     layered.mkdir()
     flat.mkdir()
     try:
@@ -1393,6 +1540,11 @@ def s10_output_layout_and_flat_duplicate_policy(exe: str) -> None:
             metrics = start_conversion_and_wait_done(window, previous_done=metrics, produced_dir=flat)
             produced = sorted(p.name for p in flat.glob("*.md"))
             require(produced == ["同名_txt.md"], f"平铺只应有一份结果：{produced}")
+            result = (flat / "同名_txt.md").read_text(encoding="utf-8")
+            require(
+                "stable first input a" in result and "stable first input b" not in result,
+                "平铺须选排序第一份的实际内容",
+            )
             require("重复结果跳过 1" in metrics, f"平铺同名跳过必须如实计数：{metrics}")
 
         run_stage("S10", exe, body)
@@ -1532,6 +1684,14 @@ def close_title_bar(window: WindowSpecification) -> None:
     _ = wait_text_containing(window, STOP_AND_CLOSE_TITLE, timeout=TIMEOUT)
 
 
+def wait_window_closed_after_cancel(window: WindowSpecification) -> None:
+    """T-23/U-09：任务关闭必须在取消预算内自然生效。."""
+    deadline = time.monotonic() + CONVERT_STOP_TIMEOUT
+    while window.exists() and time.monotonic() < deadline:
+        time.sleep(0.1)
+    require(not window.exists(), "确认关闭后不得等待当前媒体自然完成")
+
+
 def s14_close_during_conversion_confirms_and_stops(exe: str) -> None:
     """S14 运行中关闭确认与安全停止：U-09 确认框 → T-23 安全停止 → 退出码 0."""
     scratch_box: list[Path] = []
@@ -1545,7 +1705,8 @@ def s14_close_during_conversion_confirms_and_stops(exe: str) -> None:
         if not media or not Path(media).is_file():
             message = "S14 需要媒体样本以保持转换运行态：设置 JCHTOOLS_S5_MEDIA 指向一个真实媒体文件"
             raise RuntimeError(message)
-        for index in range(STOP_MEDIA_FILE_COUNT):
+        _ = (scratch / "input" / "00_complete.txt").write_text("completed before closing\n", encoding="utf-8")
+        for index in range(1, STOP_MEDIA_FILE_COUNT + 1):
             _ = shutil.copyfile(media, scratch / "input" / f"{index:02}_{Path(media).name}")
 
     def body(window: WindowSpecification) -> None:
@@ -1560,16 +1721,21 @@ def s14_close_during_conversion_confirms_and_stops(exe: str) -> None:
             except timings.TimeoutError:
                 if attempt == _S5_LAST_ATTEMPT:
                     raise
+        current = f"01_{Path(os.environ['JCHTOOLS_S5_MEDIA']).name}"
+        _ = wait_text_containing(window, f"正在处理 {current}")
+        before = snapshot_output_bytes(scratch / "output")
+        require("00_complete_txt.md" in before and len(before) == 1, "关闭前须确认首份已完成且当前媒体尚未完成")
         close_title_bar(window)
         click(window, find_button(window, STOP_AND_CLOSE_BUTTON))
-        # 确认后任务在当前文件结束（T-23），进程随后自然退出；退出断言由 run_stage 收尾执行。
+        wait_window_closed_after_cancel(window)
+        verify_cancelled_outputs(scratch / "output", before)
 
     def cleanup() -> None:
         if scratch_box:
             shutil.rmtree(scratch_box.pop(), ignore_errors=True)
 
     run_stage("S14", exe, body, pre=prepare_scratch, after=cleanup)
-    print("S14 PASS：运行中关闭弹出「停止任务并关闭」，确认后安全停止并退出")
+    print("S14 PASS：运行中关闭确认后取消当前媒体，成品保留，无当前/后续半成品，正常退出")
 
 
 def set_edit_before_button(window: WindowSpecification, button: BaseWrapper, value: str) -> None:
@@ -1706,6 +1872,57 @@ def s17_initialize_configured_components(exe: str) -> None:
     print("S17 PASS：真实 GUI 经设置页保存并自动初始化成功，已配置的 Xberg 可离线使用")
 
 
+LAYOUT_PAGES = (
+    ("递归解压", ("开始解压",)),
+    ("目录整理", ("开始分析",)),
+    ("MD 整理", ("开始合并",)),
+    ("转 Markdown", ("开始转换",)),
+    ("Git 工具", ("开始",)),
+    ("截图 OCR", ()),
+    ("设置", ("下载 Xberg", "使用此目录")),
+    ("关于", ()),
+)
+
+
+def verify_control_rectangles(bounds: tuple[int, int, int, int], rectangles: list[tuple[int, int, int, int]]) -> None:
+    """覆盖 U-05/P-13：主要按钮应有正面积，处于窗口内且彼此不遮盖。."""
+    left, top, right, bottom = bounds
+    for index, (x1, y1, x2, y2) in enumerate(rectangles):
+        require(left <= x1 < x2 <= right and top <= y1 < y2 <= bottom, "主要操作控件被裁切或移出窗口")
+        for a1, b1, a2, b2 in rectangles[:index]:
+            require(min(x2, a2) <= max(x1, a1) or min(y2, b2) <= max(y1, b1), "主要操作控件互相重叠")
+
+
+def s18_layout_at_two_window_sizes(exe: str) -> None:
+    """真实 GUI 入口，自动检查两档尺寸与全部页面的主要控件；不冒充全面像素审美验收。."""
+
+    def body(window: WindowSpecification) -> None:
+        original = window.rectangle()
+        sizes = (
+            (original.right - original.left, original.bottom - original.top),
+            (original.right - original.left + 200, original.bottom - original.top + 150),
+        )
+        for width, height in sizes:
+            win32gui.SetWindowPos(window.handle, 0, 0, 0, width, height, win32con.SWP_NOMOVE | win32con.SWP_NOZORDER)
+            time.sleep(0.5)
+            for page, titles in LAYOUT_PAGES:
+                click(window, find_button(window, page))
+                if page == "截图 OCR":
+                    _ = wait_text_containing(window, "截图快捷键")
+                elif page == "关于":
+                    _ = wait_text_containing(window, "关于 JchTools")
+                buttons = [wait_button(window, title, TIMEOUT) for title in titles]
+                bounds = window.rectangle()
+                rectangles = [button.rectangle() for button in buttons]
+                verify_control_rectangles(
+                    (bounds.left, bounds.top, bounds.right, bounds.bottom),
+                    [(rect.left, rect.top, rect.right, rect.bottom) for rect in rectangles],
+                )
+
+    run_stage("S18", exe, body)
+    print("S18 PASS：两档窗口尺寸逐页到达，所列主要按钮未裁切、未重叠（未覆盖全部视觉细节）")
+
+
 def parse_stages(stages_arg: str) -> list[str]:
     """解析并校验 --stages：逗号分隔、大小写不敏感、未知阶段立即失败."""
     stages = [token.strip().upper() for token in stages_arg.split(",") if token.strip()]
@@ -1836,6 +2053,7 @@ def main() -> int:
         "S15": s15_markdown_merge_and_split,
         "S16": s16_git_commit_and_push,
         "S17": s17_initialize_configured_components,
+        "S18": s18_layout_at_two_window_sizes,
     }
     for stage, runner in stage_runners.items():
         if stage in stages:

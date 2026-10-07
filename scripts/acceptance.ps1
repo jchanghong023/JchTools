@@ -8,14 +8,14 @@
   Snap OCR core/worker 的 all-targets 测试与 clippy、构建输出 binding loop 警告扫描。可选阶段：
     -WithEngine   追加真实引擎用例（JCHTOOLS_TEST_7ZIP 或 resources\7zip\7z.exe，
                   缺失时直接失败并提示先运行 fetch-7zip.ps1）
-    -WithGuiSmoke 追加 OS 级 UIA 冒烟（默认 S1-S4/S15/S16；资产就绪时自动扩展：
+    -WithGuiSmoke 追加 OS 级 UIA 冒烟（默认 S1-S4/S15/S16/S18；资产就绪时自动扩展：
                   S6-S9 需含 xberg.exe 的有效目录，S5/S10-S14/S17 需 JCHTOOLS_TEST_XBERG_DIR
                   有效引擎（S5/S14 另需媒体样本），缺资产如实记 NOT RUN，不伪报已覆盖。
                   需要 -GuiData 指向 make_tmp.py testdata 生成的数据集与 cargo build 产物
                   （尊重 CARGO_TARGET_DIR，未设置时为 target\debug）；需要 pip install pywinauto）
     -WithPackage  追加发布打包自检（package-windows.ps1，需要引擎与 MSVC 工具链）
     -WithMarkdownAcceptance 追加转 Markdown 验收承接（scripts/markdown_acceptance.py，
-                  F26 / ALL2MARKDOWN 附录 A；退出码 0=PASS、2=全部条目 NOT RUN（缺资产/
+                  F26 / ALL2MARKDOWN 附录 A；退出码 0=PASS、2=存在条目 NOT RUN（缺资产/
                   被测物，如实呈现）、其他=失败。-MarkdownArgs 透传驱动器参数）
   未执行的阶段在汇总里显式打印 NOT RUN；不得把 NOT RUN 报告成通过。
   所有日志写在 .tmp\acceptance\ 下，任何已执行阶段失败即以非零码终止。
@@ -230,7 +230,7 @@ if ($WithEngine) {
         -Environment @{JCHTOOLS_TEST_7ZIP = $engine}
 } else {$script:Results.Add('NOT RUN  engine-tests（加 -WithEngine）')}
 
-# 5) OS 级 GUI 冒烟（可选）：默认 S1-S4/S15/S16，资产就绪时自动扩展（S11-01）。
+# 5) OS 级 GUI 冒烟（可选）：默认 S1-S4/S15/S16/S18，资产就绪时自动扩展（S11-01）。
 if ($WithGuiSmoke) {
     if (-not $GuiData) {throw '-WithGuiSmoke 需要 -GuiData 指向 make_tmp.py testdata 生成的数据集目录'}
     if (-not (Test-Path -LiteralPath $GuiData)) {throw "数据集目录不存在：$GuiData"}
@@ -254,11 +254,11 @@ if ($WithGuiSmoke) {
         JCHTOOLS_SNAP_OCR_TEST_ASSET_ROOT = Join-Path $script:LogDir 'gui-snap-assets'
         JCHTOOLS_MARKDOWN_TEST_ASSET_ROOT = Join-Path $script:LogDir 'gui-markdown-assets'
     }
-    # S11-01 阶段自动扩展：默认序列保持 S1-S4/S15/S16（无资产环境行为不变）；
+    # S11-01 阶段自动扩展：默认序列保持 S1-S4/S15/S16/S18（无资产环境行为不变）；
     # 本分支已具备 test-hooks EXE（上方 gui-build）与隔离状态目录/资产根，资产
     # 就绪时按前置逐组追加并向 gui_smoke 传 --stages；任一前置缺失只记 NOT RUN
     # 说明（不 fail），不得把缺资产伪报为已覆盖。
-    $smokeStages = @('S1','S2','S3','S4','S15','S16')
+    $smokeStages = @('S1','S2','S3','S4','S15','S16','S18')
     # 前置（设置页组 S6-S9）：S6/S7 需要包含 xberg.exe 的有效目录（优先
     # JCHTOOLS_SMOKE_XBERG_DIR，回落 JCHTOOLS_TEST_XBERG_DIR）；S8/S9 本身无需
     # 资产，但随设置页组整组扩展，保证无资产环境的默认序列不变。
@@ -302,7 +302,7 @@ if ($WithGuiSmoke) {
     }
     $null = Invoke-Logged -Name 'gui-smoke' -File $python `
         -Arguments @('scripts/gui_smoke.py','--exe',$exe,'--data',$GuiData,'--stages',($smokeStages -join ',')) -Environment $guiEnvironment
-} else {$script:Results.Add('NOT RUN  gui-smoke（默认 S1-S4/S15/S16，资产就绪自动扩展；加 -WithGuiSmoke -GuiData <目录>）')}
+} else {$script:Results.Add('NOT RUN  gui-smoke（默认 S1-S4/S15/S16/S18，资产就绪自动扩展；加 -WithGuiSmoke -GuiData <目录>）')}
 
 # 5.5) 旧 markdown-media-worker 已退役（XB-12：媒体转录迁移到 Xberg 推理组件）；
 #      其验收阶段随之移除，截图 OCR 组件测试见下方 snap-ocr 阶段。
@@ -401,8 +401,8 @@ if ($WithMarkdownAcceptance) {
             }
         }
     } elseif ($mdCode -eq 2) {
-        # 2 = 全部条目 NOT RUN（缺真实资产/被测物）：如实呈现，不当作通过，也不阻塞其余阶段。
-        $script:Results.Add('NOT RUN  markdown-acceptance（全部条目缺资产/被测物；经 -MarkdownArgs 提供后重跑）')
+        # 2 = 存在条目 NOT RUN（缺真实资产/被测物）：如实呈现，不当作通过，也不阻塞其余阶段。
+        $script:Results.Add('NOT RUN  markdown-acceptance（存在未执行条目；缺资产或 --only 子集不能冒充完整验收；详见 markdown-acceptance.log）')
     } else {
         $mdOutput | Select-Object -Last 12 | ForEach-Object {$_.ToString()} | Write-Host
         throw "markdown-acceptance 失败（退出码 $mdCode），完整日志：$mdLog"
