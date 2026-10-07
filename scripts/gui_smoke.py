@@ -1075,11 +1075,24 @@ def isolated_state_env(scratch_state: Path) -> dict[str, str]:
 
 def smoke_xberg_dir() -> str:
     """S6/S7 需要的有效 Xberg 目录（含 xberg.exe；由验收环境提供）."""
-    directory = os.environ.get("JCHTOOLS_SMOKE_XBERG_DIR", "")
+    directory = plain_windows_path(os.environ.get("JCHTOOLS_SMOKE_XBERG_DIR", ""))
     if not directory or not Path(directory).joinpath("xberg.exe").is_file():
         message = "S6/S7 需要包含 xberg.exe 的有效 Xberg 目录：设置 JCHTOOLS_SMOKE_XBERG_DIR 指向该目录"
         raise RuntimeError(message)
     return str(Path(directory).resolve())
+
+
+def plain_windows_path(text: str) -> str:
+    """剥除 Windows verbatim 前缀（与 src/platform.rs display_path_text 同口径）.
+
+    应用保存目录经 fs::canonicalize 落盘为带 verbatim 前缀的路径，界面显示则剥前缀；
+    断言两侧必须先归一，否则同一目录会因表示形式不同而误判。
+    """
+    if text.startswith("\\\\?\\UNC\\"):
+        return "\\\\" + text[len("\\\\?\\UNC\\") :]
+    if text.startswith("\\\\?\\"):
+        return text[len("\\\\?\\") :]
+    return text
 
 
 def s6_save_xberg_directory(exe: str) -> None:
@@ -1122,12 +1135,12 @@ def s7_restart_restores_saved_directory(exe: str) -> None:
             # 断言本身不变（仍要求解析后相等），失败信息带实际值便于取证。
             expected_directory = str(Path(directory).resolve())
             deadline = time.monotonic() + 20.0
-            actual_directory = settings_custom_dir_value(window)
+            actual_directory = plain_windows_path(settings_custom_dir_value(window))
             while (
                 Path(actual_directory).resolve() != Path(expected_directory).resolve() and time.monotonic() < deadline
             ):
                 time.sleep(0.5)
-                actual_directory = settings_custom_dir_value(window)
+                actual_directory = plain_windows_path(settings_custom_dir_value(window))
             require(
                 Path(actual_directory).resolve() == Path(expected_directory).resolve(),
                 f"S7 重启后未恢复已保存的 Xberg 目录（实际：{actual_directory!r}，期望：{expected_directory}）",
