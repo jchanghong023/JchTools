@@ -100,9 +100,23 @@ fn assert_batch_stop_cancels_current_file(media: bool) {
     } else {
         "document-started"
     });
-    let start_deadline = Instant::now() + Duration::from_secs(10);
-    while !marker.exists() {
-        assert!(Instant::now() < start_deadline, "批次未开始当前文件");
+    // CI runner 在整套测试并行进程压力下，批处理初始化（能力握手/资产就绪）
+    // 可能明显慢于本地；等待窗口与本文件其他会话等待一致放宽到 60s。批处理若
+    // 在当前文件开始前提前结束（run() 提前返回），立即报告其结果而非盲等；
+    // T-23 的「停止必须尽快生效」断言在标记出现之后仍按 3s 严格计时。
+    let start_deadline = Instant::now() + Duration::from_secs(60);
+    loop {
+        if marker.exists() {
+            break;
+        }
+        if let Ok(early) = receive.try_recv() {
+            panic!("批次在当前文件开始前结束：{early:?}（已观察 FileStarted：{:?}）", started.lock().unwrap());
+        }
+        assert!(
+            Instant::now() < start_deadline,
+            "批次未开始当前文件（已观察 FileStarted：{:?}）",
+            started.lock().unwrap(),
+        );
         std::thread::sleep(Duration::from_millis(10));
     }
     let completed = output.join(format!("01-complete_{extension}.md"));
@@ -220,8 +234,15 @@ fn batch_stop_preserves_unfinished_request_diagnostic_and_snapshot_alive() {
         let result = jchtools::markdown::run(&options, &token, |event| events.push(event));
         send.send((result, events)).unwrap();
     });
-    let start_deadline = Instant::now() + Duration::from_secs(10);
-    while !root.join("document-started").exists() {
+    // 同批处理标记等待口径：提前结束立即报告批处理结果，慢负载由 60s 窗口吸收。
+    let start_deadline = Instant::now() + Duration::from_secs(60);
+    loop {
+        if root.join("document-started").exists() {
+            break;
+        }
+        if let Ok(early) = receive.try_recv() {
+            panic!("批次在无响应请求开始前结束：{early:?}");
+        }
         assert!(Instant::now() < start_deadline, "批次未进入无响应请求");
         std::thread::sleep(Duration::from_millis(10));
     }
