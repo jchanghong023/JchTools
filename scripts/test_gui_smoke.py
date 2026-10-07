@@ -57,31 +57,46 @@ class ProducedSnapshotTests(unittest.TestCase):
 class CancelledOutputTests(unittest.TestCase):
     """覆盖 T-23/P-11/P-12：对真实 GUI 用例的业务判据做反例回归。."""
 
-    def test_completed_output_survives_but_current_and_temporary_outputs_are_rejected(self) -> None:
+    def test_completed_output_survives_and_in_flight_output_is_allowed_before_stop_lands(self) -> None:
+        # 停止请求存在 UIA/调度时延：当前文件若在停止落地前自然完成，其成品按
+        # T-23「已完成产物保留」合法提交；后续文件与临时产物仍然必须被拒绝。
         with tempfile.TemporaryDirectory(prefix="jchtools-stop-unit-") as temporary:
             root = Path(temporary)
             completed = root / "done.md"
             _ = completed.write_bytes(b"completed")
             before = gui_smoke.snapshot_output_bytes(root)
-            gui_smoke.verify_cancelled_outputs(root, before)
-            for name in ("current.md", "next.md", ".jch-markdown-partial"):
+            gui_smoke.verify_cancelled_outputs(root, before, "current.md")
+            _ = (root / "current.md").write_bytes(b"in-flight finished just before stop landed")
+            gui_smoke.verify_cancelled_outputs(root, before, "current.md")
+            for name in ("next.md", ".jch-markdown-partial"):
                 artifact = root / name
                 _ = artifact.write_bytes(b"partial")
                 try:
-                    gui_smoke.verify_cancelled_outputs(root, before)
+                    gui_smoke.verify_cancelled_outputs(root, before, "current.md")
                 except RuntimeError:
                     pass
                 else:
-                    message = f"取消判据必须拒绝额外产物：{name}"
+                    message = f"取消判据必须拒绝当前文件之外的产物：{name}"
                     raise AssertionError(message)
                 artifact.unlink()
             _ = completed.write_bytes(b"modified")
             try:
-                gui_smoke.verify_cancelled_outputs(root, before)
+                gui_smoke.verify_cancelled_outputs(root, before, "current.md")
             except RuntimeError:
                 pass
             else:
                 message = "取消判据必须拒绝此前成品被改写"
+                raise AssertionError(message)
+            _ = completed.write_bytes(b"completed")
+            _ = (root / "current.md").unlink()
+            lost = root / "done.md"
+            _ = lost.unlink()
+            try:
+                gui_smoke.verify_cancelled_outputs(root, before, "current.md")
+            except RuntimeError:
+                pass
+            else:
+                message = "取消判据必须拒绝此前成品丢失"
                 raise AssertionError(message)
 
 
@@ -145,7 +160,7 @@ class LayoutAndCoverageTests(unittest.TestCase):
             root = Path(temporary)
             (root / "current_media").mkdir()
             try:
-                gui_smoke.verify_cancelled_outputs(root, {})
+                gui_smoke.verify_cancelled_outputs(root, {}, "current.md")
             except RuntimeError:
                 pass
             else:
