@@ -1088,10 +1088,17 @@
     },
     {
       "file": "src/engine_bundle.rs",
+      "name": "resolve_without_embedded_rejects_bundled_dir_without_manifest",
+      "ignored": false,
+      "cfg": null,
+      "body": "8a249b2a7498d61f"
+    },
+    {
+      "file": "src/engine_bundle.rs",
       "name": "resolve_without_embedded_reports_incomplete_bundled_dir",
       "ignored": false,
       "cfg": null,
-      "body": "23af6b821edb198d"
+      "body": "1fa52f0b83e30828"
     },
     {
       "file": "src/engine_bundle.rs",
@@ -1099,13 +1106,6 @@
       "ignored": false,
       "cfg": null,
       "body": "88d9742220399619"
-    },
-    {
-      "file": "src/engine_bundle.rs",
-      "name": "resolve_without_embedded_uses_minimal_bundled_checks",
-      "ignored": false,
-      "cfg": null,
-      "body": "ee8a0bab810632a3"
     },
     {
       "file": "src/engine_bundle.rs",
