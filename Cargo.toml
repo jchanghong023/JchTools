@@ -91,6 +91,12 @@ name = "background_settings"
 path = "tests/background_settings.rs"
 required-features = ["gui", "test-hooks"]
 
+# 与 xberg_shared_process 同口径：从真实代理进程拉起测试，依赖 GUI 二进制。
+[[test]]
+name = "xberg_unknown_response"
+path = "tests/xberg_unknown_response.rs"
+required-features = ["gui", "test-hooks"]
+
 # 旧协议必须明确拒绝未声明共享能力的推理；仅隔离测试可拉起合成引擎。
 [[test]]
 name = "xberg_legacy_protocol"

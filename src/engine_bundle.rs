@@ -920,10 +920,11 @@ mod tests {
         assert_eq!(path, bundled.path().join(engine_name()));
     }
 
-    /// 构建未内嵌引擎时的候选口径：最小完整性检查（主程序存在 + Windows 上 7z.dll 存在）。
+    /// 构建未内嵌引擎且随包目录缺少清单时：即使主程序与 7z.dll 齐备也拒绝
+    ///（E-02：候选必须按清单逐文件校验，不存在「最小检查」旁路）。
     // 覆盖 E-02 / E-05
     #[test]
-    fn resolve_without_embedded_uses_minimal_bundled_checks() {
+    fn resolve_without_embedded_rejects_bundled_dir_without_manifest() {
         if embedded_available() {
             return; // 仅无内嵌构建执行（该配置合法，见 embedded_available_matches_build_configuration）
         }
@@ -931,12 +932,15 @@ mod tests {
         std::fs::write(bundled.path().join(engine_name()), b"user supplied engine").unwrap();
         #[cfg(windows)]
         std::fs::write(bundled.path().join("7z.dll"), b"user supplied engine").unwrap();
-        let base = tempfile::tempdir().unwrap();
-        let path = resolve_among(Some(bundled.path()), Some(base.path())).unwrap();
-        assert_eq!(path, bundled.path().join(engine_name()));
+        let error = resolve_among(Some(bundled.path()), None).unwrap_err();
+        let message = format!("{error:#}");
+        assert!(
+            message.contains("无法验证 7-Zip 清单"),
+            "报错应说明随包引擎清单不可验证：{message}"
+        );
     }
 
-    /// 构建未内嵌引擎且随包目录不完整（Windows 缺 7z.dll）时：显式报错并说明原因。
+    /// 构建未内嵌引擎且随包清单声明的主程序缺失时：显式报错并说明缺失成员。
     // 覆盖 E-02 / E-05
     #[test]
     fn resolve_without_embedded_reports_incomplete_bundled_dir() {
@@ -944,13 +948,15 @@ mod tests {
             return; // 仅无内嵌构建执行
         }
         let bundled = tempfile::tempdir().unwrap();
-        std::fs::write(bundled.path().join(engine_name()), b"only main exe").unwrap();
+        let library = b"only 7z.dll";
+        std::fs::write(bundled.path().join("7z.dll"), library).unwrap();
+        write_external_manifest(bundled.path(), b"missing executable", library);
         let error = resolve_among(Some(bundled.path()), None).unwrap_err();
         let message = format!("{error:#}");
         #[cfg(windows)]
         assert!(
-            message.contains("7z.dll"),
-            "报错应说明随包引擎缺少 7z.dll：{message}"
+            message.contains("缺少 7z.exe"),
+            "报错应说明随包引擎缺少清单声明的主程序：{message}"
         );
     }
 }
