@@ -2829,7 +2829,7 @@ def _c05_scan_during_conversion(exe: Path, input_dir: Path, output_dir: Path) ->
     return run, module_hits, scan_errors
 
 
-def _c05_assess(  # noqa: PLR0913  # 验证结果、输入快照与进程扫描证据具有独立语义
+def _c05_assess(  # noqa: PLR0913, PLR0917  # 验证结果、输入快照与进程扫描证据具有独立语义
     item: Item,
     prepared: PreparedInputs,
     sources: dict[Path, str],
