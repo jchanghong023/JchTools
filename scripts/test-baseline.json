@@ -5319,21 +5319,21 @@
       "name": "batch_stop_cancels_current_document_and_keeps_shared_snapshot_alive",
       "ignored": false,
       "cfg": null,
-      "body": "d7997430ce6e0da1"
+      "body": "eb15f4a63df3ac88"
     },
     {
       "file": "tests/xberg_shared_process.rs",
       "name": "batch_stop_cancels_current_media_and_keeps_shared_snapshot_alive",
       "ignored": false,
       "cfg": null,
-      "body": "f22a05c58d8559e8"
+      "body": "334d62a4a74fb9a5"
     },
     {
       "file": "tests/xberg_shared_process.rs",
       "name": "batch_stop_preserves_unfinished_request_diagnostic_and_snapshot_alive",
       "ignored": false,
       "cfg": null,
-      "body": "19df67b6bcfff6f6"
+      "body": "168adec1e88a41ee"
     },
     {
       "file": "tests/xberg_shared_process.rs",
