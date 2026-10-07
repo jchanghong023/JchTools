@@ -110,7 +110,10 @@ fn assert_batch_stop_cancels_current_file(media: bool) {
             break;
         }
         if let Ok(early) = receive.try_recv() {
-            panic!("批次在当前文件开始前结束：{early:?}（已观察 FileStarted：{:?}）", started.lock().unwrap());
+            panic!(
+                "批次在当前文件开始前结束：{early:?}（已观察 FileStarted：{:?}）",
+                started.lock().unwrap()
+            );
         }
         assert!(
             Instant::now() < start_deadline,
