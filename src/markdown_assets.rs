@@ -116,7 +116,7 @@ pub fn save_runtime_dir(path: &Path) -> Result<(), String> {
 
 /// 确保文档场景就绪链的许可证 notice 已落盘（T-06）。
 ///
-/// 已存在时幂等返回；缺失时经 staging 目录原子就位（与 [`initialize_staged`]
+/// 已存在时幂等返回；缺失时经 staging 目录原子就位（与私有 `initialize_staged`
 /// 同口径），半途失败不留半成品、不破坏既有文件——非原子直写曾在复审中
 /// 被指出可能在磁盘满/杀软锁时截断旧 notice，把原本有效的安装打成
 /// 「notice 不存在」。设置页保存与下载共用此闭环。
