@@ -1074,6 +1074,56 @@ fn download_response_body(
 }
 
 /// 发起一个不自动跟随重定向的 GET；调用方按新 URL 重新应用系统代理策略。
+/// XB-10：查询固定发布源的元数据，沿用 P-09 系统代理及一次直连回退。
+pub(crate) fn fetch_release_json(
+    url: &str,
+    cancel: &AtomicBool,
+    progress: &mut dyn FnMut(String),
+) -> Result<serde_json::Value, String> {
+    const MAX_METADATA_BYTES: usize = 2 * 1024 * 1024;
+    let proxy = crate::system_proxy::read();
+    let endpoint = proxy.endpoint_for_url(url);
+    let mut direct = false;
+    loop {
+        let attempt = (|| -> Result<serde_json::Value, (String, bool)> {
+            ensure_not_cancelled(cancel).map_err(|error| (error, false))?;
+            let response = download_request(
+                url,
+                if direct { None } else { endpoint.as_deref() },
+                progress,
+            )?;
+            let mut reader = response.into_reader();
+            let mut bytes = Vec::new();
+            let mut buffer = [0_u8; 8192];
+            loop {
+                ensure_not_cancelled(cancel).map_err(|error| (error, false))?;
+                let read = reader
+                    .read(&mut buffer)
+                    .map_err(|error| (format!("读取发布元数据失败：{error}"), true))?;
+                if read == 0 {
+                    break;
+                }
+                if bytes.len().saturating_add(read) > MAX_METADATA_BYTES {
+                    return Err(("发布元数据超过大小上限".into(), false));
+                }
+                bytes.extend_from_slice(&buffer[..read]);
+            }
+            ensure_not_cancelled(cancel).map_err(|error| (error, false))?;
+            serde_json::from_slice(&bytes)
+                .map_err(|error| (format!("发布元数据不是有效 JSON：{error}"), false))
+        })();
+        match attempt {
+            Ok(value) => return Ok(value),
+            Err((message, true)) if endpoint.is_some() && !direct => {
+                progress(format!("系统代理查询失败，直连重试一次：{message}"));
+                direct = true;
+            }
+            Err((message, _)) => return Err(message),
+        }
+    }
+}
+
+/// 发起一个不自动跟随重定向的 GET；调用方按新 URL 重新应用系统代理策略。
 fn download_request(
     url: &str,
     proxy: Option<&str>,
@@ -1823,7 +1873,12 @@ mod tests {
             let deadline = Instant::now() + std::time::Duration::from_secs(3);
             loop {
                 match listener.accept() {
-                    Ok((stream, _)) => return stream,
+                    Ok((stream, _)) => {
+                        // Windows 接收的连接可能继承监听器非阻塞模式；HTTP 读取
+                        // 使用下方 read_timeout，不以请求恰好已到达来掩盖调度竞态。
+                        stream.set_nonblocking(false).expect("设置测试连接阻塞读取");
+                        return stream;
+                    }
                     Err(error)
                         if error.kind() == std::io::ErrorKind::WouldBlock
                             && Instant::now() < deadline =>

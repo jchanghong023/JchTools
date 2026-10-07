@@ -62,6 +62,9 @@ pub enum Event {
         partial: bool,
         message: String,
     },
+    FileCancelled {
+        relative: PathBuf,
+    },
     Log(String),
 }
 
@@ -221,7 +224,7 @@ pub fn run(
         let deadline = markdown_document::Deadline::new(Duration::from_secs(options.timeout_secs));
         let media_dir = &item.media_dir;
         let outcome = if item.is_media {
-            convert_media(&item.source, &deadline).map(|markdown| {
+            convert_media(&item.source, &deadline, cancel).map(|markdown| {
                 markdown_document::DocumentOutput {
                     markdown,
                     warnings: Vec::new(),
@@ -232,15 +235,22 @@ pub fn run(
             // 零配置（2026-10-04 跨仓接口改造）：不探测页数、不传 mode；页数
             // 自动分流内化引擎，auto_mode 降级等引擎警告经 warnings 转达，
             // 由下方 partial 语义如实呈现（T-18 界面披露义务随之满足）。
-            markdown_document::convert(&item.source, &runtime_dir, media_dir, &deadline)
+            markdown_document::convert_cancelable(
+                &item.source,
+                &runtime_dir,
+                media_dir,
+                &deadline,
+                cancel,
+            )
         };
         let outcome = outcome.and_then(|document| {
-            write_new_markdown(
+            write_new_markdown_cancelable(
                 &output_root,
                 &item.target,
                 &document.markdown,
                 &document.media,
                 &deadline,
+                cancel,
             )?;
             Ok(document.warnings)
         });
@@ -267,6 +277,15 @@ pub fn run(
                         "转换成功".to_string()
                     },
                 });
+            }
+            Err(ref message)
+                if cancel.load(AtomicOrdering::Acquire) && confirmed_cancellation(message) =>
+            {
+                tracing::info!(file = %item.relative.display(), "当前转换文件已取消");
+                events(Event::FileCancelled {
+                    relative: item.relative.clone(),
+                });
+                break;
             }
             Err(message) => {
                 summary.failed += 1;
@@ -297,6 +316,15 @@ pub fn run(
         "转 Markdown 批次结束"
     );
     Ok(summary)
+}
+
+/// T-23/T-24：停止原子量不证明引擎已结束；只把明确确认的取消作为普通取消，
+/// 取消接口失败、原请求未结束和其他实际错误仍需保留原诊断。
+fn confirmed_cancellation(message: &str) -> bool {
+    let message = message
+        .strip_prefix("Xberg 共享接口不可用：能力握手失败（不会启动备用引擎）：")
+        .unwrap_or(message);
+    matches!(message, "请求已取消" | "用户已取消初始化") || message.starts_with("Xberg cancelled：")
 }
 
 #[cfg(windows)]
@@ -931,6 +959,25 @@ fn write_new_markdown(
     media: &[markdown_document::MediaFile],
     deadline: &markdown_document::Deadline,
 ) -> Result<(), String> {
+    write_new_markdown_cancelable(
+        output_root,
+        target,
+        content,
+        media,
+        deadline,
+        &AtomicBool::new(false),
+    )
+}
+
+fn write_new_markdown_cancelable(
+    output_root: &Path,
+    target: &Path,
+    content: &str,
+    media: &[markdown_document::MediaFile],
+    deadline: &markdown_document::Deadline,
+    cancel: &AtomicBool,
+) -> Result<(), String> {
+    crate::asset_util::ensure_not_cancelled(cancel)?;
     let parent = target.parent().ok_or_else(|| "结果目录无效".to_string())?;
     // T-12 保险丝：扫描已跳过既有结果，这里目标再出现属并发/外部改动——
     // 在动任何 media 文件之前直接拒绝，避免「md 旧、图新」的错位组合。
@@ -942,6 +989,7 @@ fn write_new_markdown(
         .map_err(|e| format!("结果不在输出目录内：{e}"))?;
     let mut current = output_root.to_path_buf();
     for component in relative_parent.components() {
+        crate::asset_util::ensure_not_cancelled(cancel)?;
         if !matches!(component, Component::Normal(_)) {
             return Err("输出路径含非法目录段".to_string());
         }
@@ -964,6 +1012,7 @@ fn write_new_markdown(
     let mut created_dirs: Vec<std::path::PathBuf> = Vec::new();
     let media_result = (|| -> Result<(), String> {
         for file in media {
+            crate::asset_util::ensure_not_cancelled(cancel)?;
             // T-29（S4-02）：预算耗尽后不再开始写下一张图（每张图写入前检查，
             // 等价于上一张图后的边界）；失败走既有回滚，不留半成品。
             if deadline_exhausted(deadline) {
@@ -996,6 +1045,7 @@ fn write_new_markdown(
     }
     let temp = parent.join(format!(".jch-markdown-{}.tmp", uuid::Uuid::new_v4()));
     let write_result = (|| -> Result<(), String> {
+        crate::asset_util::ensure_not_cancelled(cancel)?;
         // T-29（S4-02）：最终提交前同样受预算约束；检查点在 temp 写入与改名
         // 之前，超时走失败与回滚，不把慢盘上的半成品计成功。
         if deadline_exhausted(deadline) {
@@ -1011,6 +1061,7 @@ fn write_new_markdown(
         file.sync_all()
             .map_err(|e| format!("同步 Markdown 失败：{e}"))?;
         drop(file);
+        crate::asset_util::ensure_not_cancelled(cancel)?;
         // T-29（S4-02）：检查点紧贴改名提交——慢盘写正文+sync 耗尽预算时不得
         // 把结果改名为可见产物（检查点放在 rename 之后无法回滚对外可见状态）。
         if deadline_exhausted(deadline) {
@@ -1038,7 +1089,12 @@ fn write_new_markdown(
 }
 
 /// 转换一个媒体文件：验证媒体资产后，经会话共享进程请求 transcribe。
-fn convert_media(path: &Path, deadline: &markdown_document::Deadline) -> Result<String, String> {
+fn convert_media(
+    path: &Path,
+    deadline: &markdown_document::Deadline,
+    cancel: &AtomicBool,
+) -> Result<String, String> {
+    crate::asset_util::ensure_not_cancelled(cancel)?;
     let component = markdown_assets::media_component_dir().map_err(|error| {
         format!("共享 Xberg 的媒体组件未就绪，请检查已保存目录的模型和运行库：{error}")
     })?;
@@ -1047,9 +1103,10 @@ fn convert_media(path: &Path, deadline: &markdown_document::Deadline) -> Result<
         &component,
         serde_json::json!({"command":"transcribe","path":path}),
         deadline.remaining(),
-        &AtomicBool::new(false),
+        cancel,
     )?;
     let response = crate::xberg_runtime::checked(response)?;
+    crate::asset_util::ensure_not_cancelled(cancel)?;
     let markdown = response["markdown"]
         .as_str()
         .ok_or_else(|| "Xberg 转录响应缺少 markdown".to_string())?;
@@ -1068,7 +1125,7 @@ pub fn e2e_convert_media(path: &Path, timeout_secs: u64) -> Result<String, Strin
         return Err("单文件超时必须为正整秒".to_string());
     }
     let deadline = markdown_document::Deadline::new(Duration::from_secs(timeout_secs));
-    convert_media(path, &deadline)
+    convert_media(path, &deadline, &AtomicBool::new(false))
 }
 
 #[doc(hidden)]
@@ -1145,6 +1202,34 @@ mod tests {
 
     fn supported() -> BTreeSet<String> {
         ["pdf", "docx"].into_iter().map(str::to_string).collect()
+    }
+
+    // 覆盖 T-23/T-24：仅明确取消终态不计失败，能力包装不能吞掉取消接口异常。
+    #[test]
+    fn cancellation_classification_preserves_actual_errors() {
+        let capability_prefix = "Xberg 共享接口不可用：能力握手失败（不会启动备用引擎）：";
+        for message in [
+            "请求已取消",
+            "用户已取消初始化",
+            "Xberg cancelled：fixture stopped",
+        ] {
+            assert!(super::confirmed_cancellation(message));
+            assert!(super::confirmed_cancellation(&format!(
+                "{capability_prefix}{message}"
+            )));
+        }
+        for message in [
+            "请求已取消但取消接口未在 1 秒内确认；代理仍保留未结束任务，阻止同场景重入",
+            "请求已取消且取消已确认，原请求未在 1 秒内结束；代理仍保留未结束任务，阻止同场景重入",
+            "取消接口失败：连接失败",
+            "Xberg timeout：fixture stopped",
+            "同步 Markdown 失败：磁盘写入错误",
+        ] {
+            assert!(!super::confirmed_cancellation(message));
+            assert!(!super::confirmed_cancellation(&format!(
+                "{capability_prefix}{message}"
+            )));
+        }
     }
 
     // 覆盖 T-07、T-08：仅 MP4/M4A 进入媒体链路，Xberg 清单中的其他媒体格式不得误入文档转换。

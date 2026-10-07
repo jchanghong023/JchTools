@@ -3110,6 +3110,13 @@ impl UiPump {
                 relative.clone_into(&mut self.state.borrow_mut().convert_current);
                 ui.set_convert_metrics(format!("正在处理 {relative}").into());
             }
+        } else if let Some(relative) = text.strip_prefix("CONVERTER_FILE_CANCELLED|") {
+            let detail = format!("已取消：{relative}；未完成结果不提交");
+            ui.set_convert_metrics(detail.clone().into());
+            let mut state = self.state.borrow_mut();
+            state.convert_current.clear();
+            push_event_log(&mut state.convert_logs, detail);
+            ui.set_convert_log_text(log_panel_text(&state.convert_logs).into());
         } else if let Some(rest) = text.strip_prefix("CONVERTER_FILE_FINISHED|") {
             let mut fields = rest.splitn(5, '|');
             let partial = fields.next() == Some("1");
@@ -3821,7 +3828,9 @@ impl UiPump {
                         let skipped_existing = fields.next().unwrap_or("0");
                         let skipped_duplicate = fields.next().unwrap_or("0");
                         let stopped = fields.next() == Some("1");
-                        let final_status = if stopped {
+                        let final_status = if stopped && failed != "0" {
+                            "已停止，转换失败"
+                        } else if stopped {
                             "已停止"
                         } else if partial != "0" || failed != "0" {
                             "转换部分失败"
@@ -3859,7 +3868,9 @@ impl UiPump {
                         self.convert_log_dirty.set(false);
                         if ui.get_screen() == 5 {
                             ui.set_status(
-                                if stopped {
+                                if stopped && failed != "0" {
+                                    "转 Markdown 已停止，但存在转换失败，详情见进度与日志"
+                                } else if stopped {
                                     "转 Markdown 已停止；已完成的输出保留"
                                 } else if partial != "0" || failed != "0" {
                                     "转 Markdown 部分失败，详情见进度与日志"
@@ -4435,7 +4446,7 @@ fn wire_md_git(ui: &AppWindow, state: &Rc<RefCell<State>>, out: &EventSender) {
             if let Some(ui) = weak.upgrade() {
                 ui.set_status(if stopping_converter {
                     // 回落取消的是转 Markdown 任务：文案如实，不写 Git 专属描述。
-                    "正在停止转 Markdown；当前文件完成后停止".into()
+                    "正在停止转 Markdown；正在取消当前文件".into()
                 } else if stopping_shared_non_git {
                     // 取消的是其他工具的共享任务（整理/解压/MD）：通用取消口径。
                     "正在取消；当前操作完成后停止，不会继续后续操作".into()
@@ -4655,7 +4666,7 @@ fn wire_markdown_converter(ui: &AppWindow, state: &Rc<RefCell<State>>, out: &Eve
                     } else if ui.get_convert_initializing() {
                         "正在取消初始化…"
                     } else {
-                        "正在停止；当前文件完成后停止"
+                        "正在停止；正在取消当前文件"
                     }
                     .into(),
                 );
@@ -4665,7 +4676,7 @@ fn wire_markdown_converter(ui: &AppWindow, state: &Rc<RefCell<State>>, out: &Eve
                     } else if ui.get_convert_initializing() {
                         "正在取消转 Markdown 组件初始化"
                     } else {
-                        "正在停止转 Markdown；当前文件完成后停止"
+                        "正在停止转 Markdown；正在取消当前文件"
                     }
                     .into(),
                 );
@@ -4894,6 +4905,9 @@ fn launch_markdown_conversion(
                 markdown::Event::Log(text) => {
                     let _ = out.send(Event::Status(format!("CONVERTER_LOG|{text}")));
                     return;
+                }
+                markdown::Event::FileCancelled { relative } => {
+                    format!("CONVERTER_FILE_CANCELLED|{}", relative.display())
                 }
             };
             let _ = out.send(Event::Status(text));
@@ -6081,6 +6095,54 @@ mod gui_tests {
                 !ui.get_status().contains("转 Markdown"),
                 "旧工具状态不得残留转 Markdown 文案"
             );
+        })
+        .unwrap();
+    }
+
+    // 覆盖 T-23/T-24/XB-08：停止请求不能掩盖取消异常，原请求未结束的诊断应保留。
+    #[test]
+    fn converter_stop_with_failure_preserves_failed_final_state_and_diagnostic() {
+        with_gui(|app| {
+            let ui = &app.ui;
+            ui.invoke_select_tool("markdown-converter".into());
+            ui.set_busy(true);
+            let diagnostic = "取消后原转换请求仍未结束，无法安全继续共享会话";
+            app.pump
+                .out
+                .send(Event::Status(format!(
+                    "CONVERTER_FILE_FINISHED|0|0|blocked.pdf|{diagnostic}"
+                )))
+                .unwrap();
+            app.pump
+                .out
+                .send(Event::MdDone("CONVERTER_DONE|0|0|1|0|0|1".into()))
+                .unwrap();
+            app.pump.run(ui);
+            assert_eq!(ui.get_convert_status().as_str(), "已停止，转换失败");
+            assert!(ui.get_status().contains("已停止"));
+            assert!(ui.get_status().contains("失败"));
+            assert!(ui.get_convert_progress_note().contains("失败"));
+            assert!(ui.get_convert_metrics().contains("失败 1"));
+            assert!(ui.get_convert_log_text().contains("blocked.pdf"));
+            assert!(ui.get_convert_log_text().contains(diagnostic));
+            assert!(!ui.get_busy());
+
+            ui.set_busy(true);
+            app.pump
+                .out
+                .send(Event::MdDone("CONVERTER_DONE|0|0|0|0|0|1".into()))
+                .unwrap();
+            app.pump.run(ui);
+            assert_eq!(ui.get_convert_status().as_str(), "已停止");
+            assert!(!ui.get_status().contains("失败"), "正常取消不报告转换失败");
+
+            ui.set_busy(true);
+            app.pump
+                .out
+                .send(Event::MdDone("CONVERTER_DONE|0|0|1|0|0|0".into()))
+                .unwrap();
+            app.pump.run(ui);
+            assert_eq!(ui.get_convert_status().as_str(), "转换部分失败");
         })
         .unwrap();
     }
@@ -9567,7 +9629,7 @@ mod gui_tests {
             assert!(cancel.load(Ordering::Acquire), "停止必须写入转换取消原子量");
             assert_eq!(
                 ui.get_convert_status().as_str(),
-                "正在停止；当前文件完成后停止"
+                "正在停止；正在取消当前文件"
             );
             assert!(ui.get_status().contains("正在停止转 Markdown"));
 

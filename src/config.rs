@@ -253,13 +253,44 @@ impl Config {
 }
 
 pub fn state_dir() -> Result<PathBuf> {
-    let dirs =
-        directories_next::ProjectDirs::from("", "", "JchTools").context("无法确定用户数据目录")?;
-    Ok(dirs.data_local_dir().to_path_buf())
+    // 任务库、哈希缓存与应用配置共用状态定位，测试时不能写入真实用户目录。
+    crate::xberg_settings::state_dir().map_err(anyhow::Error::msg)
 }
 #[cfg(test)]
 mod tests {
     use super::Config;
+
+    // 覆盖 P-11/P-13：GUI 验收的任务库、缓存与配置必须同用显式隔离根，
+    // 不能只隔离 Xberg SQLite 而把普通工具任务写入真实用户状态目录。
+    #[test]
+    fn state_directory_honors_explicit_test_isolation() {
+        let _lock = crate::asset_util::test_env::env_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        struct Restore(Option<std::ffi::OsString>);
+        impl Drop for Restore {
+            fn drop(&mut self) {
+                if let Some(previous) = self.0.take() {
+                    std::env::set_var("JCHTOOLS_TEST_STATE_DIR", previous);
+                } else {
+                    std::env::remove_var("JCHTOOLS_TEST_STATE_DIR");
+                }
+            }
+        }
+        let _restore = Restore(std::env::var_os("JCHTOOLS_TEST_STATE_DIR"));
+        let directory = tempfile::tempdir().expect("创建隔离状态根");
+        std::env::set_var("JCHTOOLS_TEST_STATE_DIR", directory.path());
+        assert_eq!(
+            super::state_dir().expect("状态目录解析成功"),
+            directory.path(),
+            "普通工具的任务库也必须落入测试根"
+        );
+        std::env::set_var("JCHTOOLS_TEST_STATE_DIR", "relative-state");
+        assert!(
+            super::state_dir().is_err(),
+            "无效的测试根必须拒绝，不得回落真实用户目录"
+        );
+    }
 
     #[test]
     fn validation_is_scoped_to_the_active_tool() {

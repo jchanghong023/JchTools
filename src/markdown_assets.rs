@@ -1,5 +1,5 @@
 //! 转 Markdown 的本地资产校验。Xberg 目录由应用级 SQLite 统一提供。
-//! 文档与媒体分别校验自己的模型和运行库；设置页可主动下载固定发布物，
+//! 文档与媒体分别校验自己的模型和运行库；设置页主动解析最新版并固定本次发布物，
 //! 校验完整后保存为共享下载来源；下载安装、保存共享目录与切换到已下载
 //! 来源都会经 [`ensure_document_notice`] 原子补写许可证 notice
 //!（完成即满足文档场景 readiness，不再要求补一次初始化）。
@@ -10,7 +10,8 @@ use crate::asset_util::{
     state_dir_asset_root, valid_component_tag, validate_relative_path, verify_file_with_cancel,
     AssetDownloader, InferenceManifest,
 };
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
 use std::fmt::Write as FmtWrite;
 use std::fs::{self, File, OpenOptions};
 use std::io::Write as IoWrite;
@@ -23,6 +24,10 @@ const DATA_DIRECTORY: &str = "markdown-assets";
 pub(crate) const XBERG_TAG: &str = "v2026.10.6-0420-run58.1";
 const RUNTIME_SELECTION_FILE: &str = "xberg-runtime-path.txt";
 const XBERG_DOWNLOAD_STAGING_MARKER: &str = ".jchtools-xberg-download-staging-v1";
+const XBERG_RELEASE_RECEIPT: &str = ".jchtools-xberg-release.json";
+const XBERG_LATEST_RELEASE_URL: &str =
+    "https://api.github.com/repos/jchanghong023/xberg/releases/latest";
+const XBERG_ARCHIVE_NAME: &str = "xberg-cli-x86_64-pc-windows-msvc.zip";
 
 #[derive(Debug, Deserialize)]
 struct AssetManifest {
@@ -44,7 +49,7 @@ struct XbergManifest {
     licenses: Vec<LicenseEntry>,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, Serialize)]
 struct AssetFile {
     path: String,
     size_bytes: u64,
@@ -325,12 +330,137 @@ pub fn download_runtime(
     cancel: &AtomicBool,
     mut progress: impl FnMut(String),
 ) -> Result<PathBuf, String> {
-    download_runtime_with(
-        &load_manifest()?,
+    ensure_not_cancelled(cancel)?;
+    progress("正在查询 Xberg 最新发布版本…".into());
+    let release = crate::snap_ocr_assets::fetch_release_json(
+        XBERG_LATEST_RELEASE_URL,
         cancel,
         &mut progress,
-        &mut NetworkDownloader,
-    )
+    )?;
+    let mut manifest = load_manifest()?;
+    apply_latest_release(&mut manifest.xberg, &release)?;
+    progress(format!("最新发布版本：{}", manifest.xberg.tag));
+    download_runtime_with(&manifest, cancel, &mut progress, &mut NetworkDownloader)
+}
+
+/// XB-10：只接受固定官方源的 Windows 发布包与上游 SHA-256，不回退钉死版本。
+fn apply_latest_release(
+    pack: &mut XbergManifest,
+    release: &serde_json::Value,
+) -> Result<(), String> {
+    let tag = release["tag_name"]
+        .as_str()
+        .filter(|tag| valid_component_tag(tag))
+        .ok_or_else(|| "最新 Xberg 发布缺少合法版本标识".to_string())?;
+    if release["draft"] == true || release["prerelease"] == true {
+        return Err("最新发布接口返回草稿或预发布版本，未开始下载".into());
+    }
+    let matches: Vec<_> = release["assets"]
+        .as_array()
+        .ok_or_else(|| "最新 Xberg 发布缺少资产列表".to_string())?
+        .iter()
+        .filter(|asset| asset["name"] == XBERG_ARCHIVE_NAME)
+        .collect();
+    if matches.len() != 1 {
+        return Err("最新 Xberg 发布必须恰好包含一个 Windows x64 CLI 包".into());
+    }
+    let asset = matches[0];
+    let url = format!(
+        "https://github.com/jchanghong023/xberg/releases/download/{tag}/{XBERG_ARCHIVE_NAME}"
+    );
+    if asset["browser_download_url"].as_str() != Some(url.as_str()) {
+        return Err("最新 Xberg 发布包来源与固定官方源不一致".into());
+    }
+    let size = asset["size"]
+        .as_u64()
+        .filter(|size| *size > 0)
+        .ok_or_else(|| "最新 Xberg 发布包大小无效".to_string())?;
+    let digest = asset["digest"]
+        .as_str()
+        .and_then(|digest| digest.strip_prefix("sha256:"))
+        .filter(|digest| digest.len() == 64 && digest.bytes().all(|byte| byte.is_ascii_hexdigit()))
+        .ok_or_else(|| "最新 Xberg 发布包缺少上游 SHA-256，未开始下载".to_string())?;
+    pack.tag = tag.into();
+    pack.archive_url = url;
+    pack.archive_size_bytes = size;
+    pack.archive_sha256 = digest.to_ascii_lowercase();
+    // 归档按最新上游摘要校验；可变引擎/DLL/许可不使用旧发布成员摘要。
+    // 既定模型身份仍保留，其他场景成员仍必须存在，不静默缩小功能。
+    for member in &mut pack.members {
+        if !member.path.starts_with("models/") {
+            member.size_bytes = 0;
+            member.sha256.clear();
+        }
+    }
+    Ok(())
+}
+
+fn runtime_recipe(pack: &XbergManifest) -> Result<String, String> {
+    let bytes = serde_json::to_vec(&pack.members).map_err(|error| error.to_string())?;
+    Ok(format!("{:x}", Sha256::digest(bytes)))
+}
+
+fn reusable_runtime(
+    base: &Path,
+    pack: &XbergManifest,
+    cancel: &AtomicBool,
+) -> Result<Option<PathBuf>, String> {
+    let recipe = runtime_recipe(pack)?;
+    let entries = match fs::read_dir(base) {
+        Ok(entries) => entries,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(error) => return Err(format!("无法检查已下载版本：{error}")),
+    };
+    let mut candidates = Vec::new();
+    for entry in entries {
+        let entry = entry.map_err(|error| error.to_string())?;
+        let name = entry.file_name();
+        let Some(suffix) = name
+            .to_str()
+            .and_then(|name| name.strip_prefix(&format!("{}-", pack.tag)))
+        else {
+            continue;
+        };
+        if Uuid::parse_str(suffix).is_err() {
+            continue;
+        }
+        let path = entry.path();
+        let receipt = path.join(XBERG_RELEASE_RECEIPT);
+        let Ok(bytes) = fs::read(&receipt) else {
+            continue;
+        };
+        let Ok(value) = serde_json::from_slice::<serde_json::Value>(&bytes) else {
+            continue;
+        };
+        if value["owner"] == "JchTools-xberg-download-v1"
+            && value["tag"] == pack.tag
+            && value["archive_sha256"] == pack.archive_sha256
+            && value["archive_size_bytes"] == pack.archive_size_bytes
+            && value["members_recipe"] == recipe
+            && pack
+                .members
+                .iter()
+                .all(|member| path.join(&member.path).is_file())
+        {
+            // 仅用户主动获取最新版时核验自有缓存身份；正常运行和用户自供
+            // 目录仍按 XB-09 做存在性检查，不在启动/转换/截图中计算摘要。
+            let Some(expected) = value["engine_sha256"].as_str() else {
+                continue;
+            };
+            ensure_not_cancelled(cancel)?;
+            let Ok(actual) =
+                crate::asset_util::sha256_file_inner(&path.join("xberg.exe"), Some(cancel))
+            else {
+                ensure_not_cancelled(cancel)?;
+                continue;
+            };
+            if actual == expected {
+                candidates.push(path);
+            }
+        }
+    }
+    candidates.sort();
+    Ok(candidates.into_iter().next())
 }
 
 fn download_runtime_with(
@@ -377,6 +507,17 @@ fn download_runtime_task(
     let base = crate::xberg_settings::state_dir()?.join("xberg-downloads");
     fs::create_dir_all(&base).map_err(|e| e.to_string())?;
     cleanup_owned_download_staging(&base, progress);
+    if let Some(installed) = reusable_runtime(&base, &manifest.xberg, cancel)? {
+        ensure_not_cancelled(cancel)?;
+        ensure_document_notice()?;
+        ensure_not_cancelled(cancel)?;
+        crate::xberg_settings::save_source(crate::xberg_settings::Source::Downloaded, &installed)?;
+        progress(format!(
+            "已存在 {}，复用已校验安装，不重复下载",
+            manifest.xberg.tag
+        ));
+        return Ok(installed);
+    }
     let staging = base.join(format!(".staging-{}", Uuid::new_v4()));
     fs::create_dir(&staging).map_err(|e| e.to_string())?;
     let mut staging_lock = match open_download_staging_lock(&staging) {
@@ -420,13 +561,44 @@ fn download_runtime_task(
         let component = extracted.join("xberg-cli-x86_64-pc-windows-msvc");
         for member in &pack.members {
             ensure_not_cancelled(cancel)?;
-            verify_file_with_cancel(
-                &component.join(&member.path),
-                member.size_bytes,
-                &member.sha256,
-                cancel,
-            )?;
+            let path = component.join(&member.path);
+            if member.sha256.is_empty() {
+                if !path.is_file() {
+                    return Err(format!("最新 Xberg 发布缺少所需成员：{}", member.path));
+                }
+            } else {
+                verify_file_with_cancel(&path, member.size_bytes, &member.sha256, cancel)?;
+            }
         }
+        let engine_sha256 = if let Some(member) = pack
+            .members
+            .iter()
+            .find(|member| member.path == "xberg.exe" && !member.sha256.is_empty())
+        {
+            // 此成员已在上面的循环验证，不重复读取相同文件。
+            member.sha256.clone()
+        } else {
+            crate::asset_util::sha256_file_inner(&component.join("xberg.exe"), Some(cancel))
+                .map_err(|error| error.to_string())?
+        };
+        let receipt = serde_json::json!({
+            "owner":"JchTools-xberg-download-v1",
+            "tag":pack.tag,
+            "archive_sha256":pack.archive_sha256,
+            "archive_size_bytes":pack.archive_size_bytes,
+            "members_recipe":runtime_recipe(pack)?,
+            "engine_sha256":engine_sha256,
+        });
+        let mut receipt_file = OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(component.join(XBERG_RELEASE_RECEIPT))
+            .map_err(|error| format!("写入已校验发布记录失败：{error}"))?;
+        receipt_file
+            .write_all(&serde_json::to_vec(&receipt).map_err(|error| error.to_string())?)
+            .map_err(|error| error.to_string())?;
+        receipt_file.sync_all().map_err(|error| error.to_string())?;
+        drop(receipt_file);
         // 上述清单含全部场景，逐成员核对，不按当前工具过滤模型。
         ensure_not_cancelled(cancel)?;
         let installed = base.join(format!("{}-{}", pack.tag, Uuid::new_v4()));
@@ -793,6 +965,155 @@ mod tests {
     }
 
     // 覆盖 XB-20/XB-21：合成发布包经过真实下载安装核心；成员错误及取消保留原配置。
+    fn release_metadata(tag: &str) -> serde_json::Value {
+        serde_json::json!({
+            "tag_name":tag,
+            "draft":false,
+            "prerelease":false,
+            "assets":[{
+                "name":super::XBERG_ARCHIVE_NAME,
+                "browser_download_url":format!(
+                    "https://github.com/jchanghong023/xberg/releases/download/{tag}/{}",
+                    super::XBERG_ARCHIVE_NAME
+                ),
+                "size":12345,
+                "digest":format!("sha256:{}", "a".repeat(64))
+            }]
+        })
+    }
+
+    // 覆盖 XB-10/O-07：采用实际最新发布元数据，不能仍钉死内置 tag 或引擎摘要。
+    #[test]
+    fn latest_metadata_replaces_pinned_engine_but_preserves_model_identity() {
+        let mut pack = super::load_manifest().unwrap().xberg;
+        let model = pack
+            .members
+            .iter()
+            .find(|member| member.path.starts_with("models/"))
+            .unwrap();
+        let model_path = model.path.clone();
+        let model_hash = model.sha256.clone();
+        super::apply_latest_release(&mut pack, &release_metadata("v2099.1.1")).unwrap();
+        assert_eq!(pack.tag, "v2099.1.1");
+        assert_eq!(pack.archive_size_bytes, 12345);
+        assert_eq!(pack.archive_sha256, "a".repeat(64));
+        assert!(pack
+            .members
+            .iter()
+            .find(|member| member.path == "xberg.exe")
+            .unwrap()
+            .sha256
+            .is_empty());
+        assert_eq!(
+            pack.members
+                .iter()
+                .find(|member| member.path == model_path)
+                .unwrap()
+                .sha256,
+            model_hash
+        );
+    }
+
+    // 覆盖 XB-10：没有上游摘要不得下载，也不得静默改用旧版本。
+    #[test]
+    fn latest_metadata_without_digest_fails_without_mutating_pinned_pack() {
+        let mut pack = super::load_manifest().unwrap().xberg;
+        let old_tag = pack.tag.clone();
+        let mut release = release_metadata("v2099.1.1");
+        release["assets"][0]["digest"] = serde_json::Value::Null;
+        assert!(super::apply_latest_release(&mut pack, &release)
+            .unwrap_err()
+            .contains("SHA-256"));
+        assert_eq!(pack.tag, old_tag);
+    }
+
+    // 覆盖 P-03/XB-10：元数据不能扩大固定来源，歧义包也不得猜测。
+    #[test]
+    fn latest_metadata_rejects_changed_source_and_duplicate_archives() {
+        let mut pack = super::load_manifest().unwrap().xberg;
+        let mut release = release_metadata("v2099.1.1");
+        release["assets"][0]["browser_download_url"] =
+            serde_json::json!("https://example.invalid/engine.zip");
+        assert!(super::apply_latest_release(&mut pack, &release).is_err());
+        let mut release = release_metadata("v2099.1.1");
+        let duplicate = release["assets"][0].clone();
+        release["assets"].as_array_mut().unwrap().push(duplicate);
+        assert!(super::apply_latest_release(&mut pack, &release).is_err());
+    }
+
+    // 覆盖 XB-10：同一已校验最新版再次选择下载，应复用而非再次下载与安装。
+    #[test]
+    fn latest_runtime_is_reused_without_repeating_archive_download() {
+        use super::{AssetFile, AssetManifest, XbergManifest};
+        use sha2::{Digest, Sha256};
+        use std::io::{Cursor, Write};
+        let _guard = redirect_component_env();
+        let payload = b"synthetic engine";
+        let mut zip = zip::ZipWriter::new(Cursor::new(Vec::new()));
+        zip.start_file(
+            "xberg-cli-x86_64-pc-windows-msvc/xberg.exe",
+            zip::write::SimpleFileOptions::default(),
+        )
+        .unwrap();
+        zip.write_all(payload).unwrap();
+        let archive = zip.finish().unwrap().into_inner();
+        struct Download {
+            archive: Vec<u8>,
+            calls: usize,
+        }
+        impl AssetDownloader for Download {
+            fn download(
+                &mut self,
+                _: &str,
+                destination: &Path,
+                _: u64,
+                _: &str,
+                _: &AtomicBool,
+                _: &mut dyn FnMut(String),
+            ) -> Result<(), String> {
+                self.calls += 1;
+                fs::write(destination, &self.archive).map_err(|error| error.to_string())
+            }
+        }
+        let manifest = AssetManifest {
+            schema_version: 1,
+            xberg_inference: None,
+            xberg: XbergManifest {
+                tag: "latest-reuse-test".into(),
+                archive_url: "https://example.invalid/latest.zip".into(),
+                archive_size_bytes: u64::try_from(archive.len()).unwrap(),
+                archive_sha256: format!("{:x}", Sha256::digest(&archive)),
+                members: vec![AssetFile {
+                    path: "xberg.exe".into(),
+                    size_bytes: u64::try_from(payload.len()).unwrap(),
+                    sha256: format!("{:x}", Sha256::digest(payload)),
+                }],
+                licenses: Vec::new(),
+            },
+        };
+        let mut downloader = Download { archive, calls: 0 };
+        let cancel = AtomicBool::new(false);
+        let first =
+            super::download_runtime_with(&manifest, &cancel, &mut |_| {}, &mut downloader).unwrap();
+        let second =
+            super::download_runtime_with(&manifest, &cancel, &mut |_| {}, &mut downloader).unwrap();
+        assert_eq!(first, second, "已安装的最新版必须复用同一目录");
+        assert_eq!(downloader.calls, 1, "已有最新版不得重复下载");
+        // XB-10：主动再次获取最新版时，旧标记不能证明已被手工替换的引擎仍是该发布。
+        // 正常运行及用户自供目录仍按 XB-09 只检查存在性，不受此下载身份检查影响。
+        fs::write(first.join("xberg.exe"), b"manually replaced older engine").unwrap();
+        let repaired =
+            super::download_runtime_with(&manifest, &cancel, &mut |_| {}, &mut downloader).unwrap();
+        assert_ne!(repaired, first, "被替换的缓存不能冒充可复用的最新版");
+        assert_eq!(fs::read(repaired.join("xberg.exe")).unwrap(), payload);
+        assert_eq!(downloader.calls, 2, "缓存身份失效时必须重新获取该次最新版");
+        assert_eq!(
+            fs::read(first.join("xberg.exe")).unwrap(),
+            b"manually replaced older engine",
+            "重新获取不得覆盖旧缓存中用户改写的文件"
+        );
+    }
+
     #[test]
     fn installed_runtime_is_verified_before_selection() {
         use super::{AssetFile, AssetManifest, XbergManifest};

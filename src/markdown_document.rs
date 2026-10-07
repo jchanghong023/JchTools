@@ -70,6 +70,24 @@ pub fn convert(
     media_dir: &str,
     deadline: &Deadline,
 ) -> Result<DocumentOutput, String> {
+    convert_cancelable(
+        path,
+        runtime_dir,
+        media_dir,
+        deadline,
+        &std::sync::atomic::AtomicBool::new(false),
+    )
+}
+
+/// T-23/XB-17：按请求取消当前文件，不结束共享引擎或另一场景的任务。
+pub fn convert_cancelable(
+    path: &Path,
+    runtime_dir: &Path,
+    media_dir: &str,
+    deadline: &Deadline,
+    cancel: &std::sync::atomic::AtomicBool,
+) -> Result<DocumentOutput, String> {
+    crate::asset_util::ensure_not_cancelled(cancel)?;
     if !path.is_file() {
         return Err(format!("输入文件不存在或不可读：{}", path.display()));
     }
@@ -84,9 +102,10 @@ pub fn convert(
         runtime_dir,
         serde_json::json!({"command": "extract", "path": path}),
         deadline.remaining(),
-        &std::sync::atomic::AtomicBool::new(false),
+        cancel,
     )
     .and_then(crate::xberg_runtime::checked)?;
+    crate::asset_util::ensure_not_cancelled(cancel)?;
     parse_document_response(&response, media_dir)
 }
 

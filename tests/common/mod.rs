@@ -328,7 +328,15 @@ fn compile_mock_engine(source: &str) -> PathBuf {
     let _ = std::fs::create_dir_all(out.parent().unwrap());
     let status = std::process::Command::new("rustc")
         .current_dir(ROOT)
-        .args(["--edition=2021", source, "-o"])
+        // 与主包一样静态链接 CRT，避免资产存在性夹具中的占位 VCRUNTIME DLL
+        // 被 Windows 加载器当作模拟引擎依赖，造成与协议无关的启动失败。
+        .args([
+            "--edition=2021",
+            "-C",
+            "target-feature=+crt-static",
+            source,
+            "-o",
+        ])
         .arg(&out)
         .status()
         .unwrap_or_else(|error| panic!("无法启动 rustc（{source}）：{error}"));

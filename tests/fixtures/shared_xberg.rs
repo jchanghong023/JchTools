@@ -23,11 +23,11 @@ fn main() {
         std::thread::spawn(move || {
             let timeout = line.split("\"timeout_ms\":").nth(1).and_then(|s| s.split(|c: char| !c.is_ascii_digit()).next()).and_then(|s| s.parse::<u64>().ok()).unwrap_or(60000);
             let end = Instant::now() + Duration::from_millis(timeout);
-            let waiting = (command == "extract" && (line.contains("long.txt") || line.contains("unresponsive.txt"))) || (command == "ocr_snapshot" && field(&line,"image_base64") == "wait");
+            let waiting = (command == "extract" && (line.contains("long.txt") || line.contains("unresponsive.txt"))) || (command == "transcribe" && line.contains("long.mp4")) || (command == "ocr_snapshot" && field(&line,"image_base64") == "wait");
             if waiting {
-                std::fs::write(if command == "extract" {"document-started"} else {"snapshot-started"}, "1").unwrap();
+                std::fs::write(match command.as_str() {"extract" => "document-started", "transcribe" => "media-started", _ => "snapshot-started"}, "1").unwrap();
                 let unresponsive = command == "extract" && line.contains("unresponsive.txt");
-                while unresponsive || !(flag.load(Ordering::Acquire) || Instant::now() >= end || command == "extract" && std::path::Path::new("release-document").exists()) { std::thread::sleep(Duration::from_millis(5)); }
+                while unresponsive || !(flag.load(Ordering::Acquire) || Instant::now() >= end || matches!(command.as_str(), "extract" | "transcribe") && std::path::Path::new("release-document").exists()) { std::thread::sleep(Duration::from_millis(5)); }
             }
             if flag.load(Ordering::Acquire) || Instant::now() >= end {
                 let kind = if Instant::now() >= end {"timeout"} else {"cancelled"};

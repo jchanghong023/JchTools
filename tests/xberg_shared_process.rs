@@ -26,6 +26,252 @@ fn prepare(root: &Path) {
     std::fs::write(root.join("short.txt"), "document").unwrap();
 }
 
+/// 覆盖 T-23/T-25/XB-15/XB-17：从批处理公开入口停止当前文件，保留已完成
+/// 结果且不开始下一文件；截图及唯一共享引擎继续可用。合成引擎只用于协议
+/// 回归，不替代真实 GUI / 模型验收。超时后释放夹具并收尾，避免反证遗留进程。
+fn assert_batch_stop_cancels_current_file(media: bool) {
+    common::ensure_child_reaper();
+    let _session = common::session_lock();
+    common::cleanup_stray_engines();
+    let temporary = tempfile::tempdir().unwrap();
+    let root = temporary.path();
+    prepare(root);
+    let manifest: serde_json::Value =
+        serde_json::from_str(include_str!("../resources/markdown-assets.json")).unwrap();
+    for member in manifest["xberg"]["members"].as_array().unwrap() {
+        let relative = member["path"].as_str().unwrap();
+        if relative != "xberg.exe" {
+            let target = root.join(relative);
+            std::fs::create_dir_all(target.parent().unwrap()).unwrap();
+            std::fs::write(target, b"synthetic asset").unwrap();
+        }
+    }
+    jchtools::markdown_assets::save_runtime_dir(root).unwrap();
+    let input = root.join("input");
+    let output = root.join("output");
+    std::fs::create_dir(&input).unwrap();
+    std::fs::create_dir(&output).unwrap();
+    let extension = if media { "mp4" } else { "txt" };
+    for name in ["01-complete", "02-long", "03-next"] {
+        std::fs::write(
+            input.join(format!("{name}.{extension}")),
+            b"synthetic input",
+        )
+        .unwrap();
+    }
+    let state = xberg_runtime::request(
+        root,
+        json!({"command":"snapshot_state"}),
+        Duration::from_secs(15),
+        &AtomicBool::new(false),
+    )
+    .unwrap();
+    assert_eq!(state["ok"], true, "合成引擎启动失败：{state}");
+    let _shared = SharedProcess {
+        broker_pid: state["jchtools_broker_pid"].as_u64().unwrap(),
+        engine_pid: state["jchtools_xberg_pid"].as_u64(),
+    };
+    let options = jchtools::markdown::Options {
+        input_dir: input,
+        output_dir: output.clone(),
+        flat: false,
+        groups: vec![if media {
+            jchtools::markdown::FormatGroup::Media
+        } else {
+            jchtools::markdown::FormatGroup::Other
+        }],
+        timeout_secs: 15,
+    };
+    let cancel = Arc::new(AtomicBool::new(false));
+    let token = cancel.clone();
+    let started = Arc::new(std::sync::Mutex::new(Vec::new()));
+    let observed = started.clone();
+    let (send, receive) = std::sync::mpsc::channel();
+    let batch = std::thread::spawn(move || {
+        let result = jchtools::markdown::run(&options, &token, |event| {
+            if let jchtools::markdown::Event::FileStarted { relative, .. } = event {
+                observed.lock().unwrap().push(relative);
+            }
+        });
+        send.send(result).unwrap();
+    });
+    let marker = root.join(if media {
+        "media-started"
+    } else {
+        "document-started"
+    });
+    let start_deadline = Instant::now() + Duration::from_secs(10);
+    while !marker.exists() {
+        assert!(Instant::now() < start_deadline, "批次未开始当前文件");
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    let completed = output.join(format!("01-complete_{extension}.md"));
+    let completed_bytes = std::fs::read(&completed).unwrap();
+    let screenshot = xberg_runtime::request(
+        root,
+        json!({"command":"ocr_snapshot","image_base64":"fixture"}),
+        Duration::from_secs(5),
+        &AtomicBool::new(false),
+    )
+    .unwrap();
+    assert_eq!(
+        screenshot["jchtools_xberg_pid"],
+        state["jchtools_xberg_pid"]
+    );
+    cancel.store(true, Ordering::Release);
+    let first = receive.recv_timeout(Duration::from_secs(3));
+    let prompt = first.is_ok();
+    let result = if let Ok(result) = first {
+        result
+    } else {
+        // 修复前失败时也先释放夹具、回收线程和进程，再报告反证。
+        std::fs::write(root.join("release-document"), b"release").unwrap();
+        receive.recv_timeout(Duration::from_secs(15)).unwrap()
+    };
+    batch.join().unwrap();
+    let after = xberg_runtime::request(
+        root,
+        json!({"command":"ocr_snapshot","image_base64":"fixture"}),
+        Duration::from_secs(5),
+        &AtomicBool::new(false),
+    )
+    .unwrap();
+    assert_eq!(after["text"], "截图结果");
+    assert_eq!(after["jchtools_xberg_pid"], state["jchtools_xberg_pid"]);
+    assert!(
+        prompt,
+        "停止请求必须尽快取消当前文件，不得等待当前文件自然结束"
+    );
+    let summary = result.unwrap();
+    assert!(summary.stopped);
+    assert_eq!(summary.success, 1, "取消的当前文件不得计为成功");
+    assert_eq!(summary.failed, 0, "用户取消不得计为失败");
+    assert_eq!(std::fs::read(completed).unwrap(), completed_bytes);
+    assert!(!output.join(format!("02-long_{extension}.md")).exists());
+    assert!(!output.join(format!("02-long_{extension}_media")).exists());
+    assert!(!output.join(format!("03-next_{extension}.md")).exists());
+    assert_eq!(started.lock().unwrap().len(), 2, "停止后不得开始下一文件");
+}
+
+// 覆盖 T-23/T-25/XB-15/XB-17。
+#[test]
+fn batch_stop_cancels_current_document_and_keeps_shared_snapshot_alive() {
+    assert_batch_stop_cancels_current_file(false);
+}
+
+// 覆盖 T-19/T-23/T-25/XB-15/XB-17。
+#[test]
+fn batch_stop_cancels_current_media_and_keeps_shared_snapshot_alive() {
+    assert_batch_stop_cancels_current_file(true);
+}
+
+/// 覆盖 T-23/T-24/XB-17：用户停止时，取消确认不能冒充原请求已经结束；
+/// 未结束诊断必须经过批处理公开入口保留，停止后不开始下一文件，截图仍可用。
+#[test]
+fn batch_stop_preserves_unfinished_request_diagnostic_and_snapshot_alive() {
+    common::ensure_child_reaper();
+    let _session = common::session_lock();
+    common::cleanup_stray_engines();
+    let temporary = tempfile::tempdir().unwrap();
+    let root = temporary.path();
+    prepare(root);
+    let manifest: serde_json::Value =
+        serde_json::from_str(include_str!("../resources/markdown-assets.json")).unwrap();
+    for member in manifest["xberg"]["members"].as_array().unwrap() {
+        let relative = member["path"].as_str().unwrap();
+        if relative != "xberg.exe" {
+            let target = root.join(relative);
+            std::fs::create_dir_all(target.parent().unwrap()).unwrap();
+            std::fs::write(target, b"synthetic asset").unwrap();
+        }
+    }
+    jchtools::markdown_assets::save_runtime_dir(root).unwrap();
+    let input = root.join("input");
+    let output = root.join("output");
+    std::fs::create_dir(&input).unwrap();
+    std::fs::create_dir(&output).unwrap();
+    for name in ["01-unresponsive.txt", "02-next.txt"] {
+        std::fs::write(input.join(name), b"synthetic input").unwrap();
+    }
+    let state = xberg_runtime::request(
+        root,
+        json!({"command":"snapshot_state"}),
+        Duration::from_secs(15),
+        &AtomicBool::new(false),
+    )
+    .unwrap();
+    assert_eq!(state["ok"], true);
+    let _shared = SharedProcess {
+        broker_pid: state["jchtools_broker_pid"].as_u64().unwrap(),
+        engine_pid: state["jchtools_xberg_pid"].as_u64(),
+    };
+    let options = jchtools::markdown::Options {
+        input_dir: input,
+        output_dir: output.clone(),
+        flat: false,
+        groups: vec![jchtools::markdown::FormatGroup::Other],
+        timeout_secs: 15,
+    };
+    let cancel = Arc::new(AtomicBool::new(false));
+    let token = cancel.clone();
+    let (send, receive) = std::sync::mpsc::channel();
+    let batch = std::thread::spawn(move || {
+        let mut events = Vec::new();
+        let result = jchtools::markdown::run(&options, &token, |event| events.push(event));
+        send.send((result, events)).unwrap();
+    });
+    let start_deadline = Instant::now() + Duration::from_secs(10);
+    while !root.join("document-started").exists() {
+        assert!(Instant::now() < start_deadline, "批次未进入无响应请求");
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    cancel.store(true, Ordering::Release);
+    let (result, events) = receive.recv_timeout(Duration::from_secs(3)).unwrap();
+    batch.join().unwrap();
+    let after = xberg_runtime::request(
+        root,
+        json!({"command":"ocr_snapshot","image_base64":"fixture"}),
+        Duration::from_secs(5),
+        &AtomicBool::new(false),
+    )
+    .unwrap();
+    assert_eq!(after["text"], "截图结果");
+    assert_eq!(after["jchtools_xberg_pid"], state["jchtools_xberg_pid"]);
+    let summary = result.unwrap();
+    assert!(summary.stopped);
+    assert_eq!(
+        summary.failed, 1,
+        "取消接口已确认但原请求未结束必须保留为异常"
+    );
+    assert!(
+        events.iter().any(|event| matches!(
+            event,
+            jchtools::markdown::Event::FileFinished { success: false, message, .. }
+                if message.contains("未在 1 秒内结束") && message.contains("保留未结束任务")
+        )),
+        "必须向界面保留原请求未结束的具体诊断：{events:?}"
+    );
+    assert!(
+        !events
+            .iter()
+            .any(|event| matches!(event, jchtools::markdown::Event::FileCancelled { .. })),
+        "取消失败不得冒充普通取消"
+    );
+    assert_eq!(
+        events
+            .iter()
+            .filter(|event| matches!(event, jchtools::markdown::Event::FileStarted { .. }))
+            .count(),
+        1,
+        "停止后不得继续下一文件"
+    );
+    assert_eq!(
+        std::fs::read_dir(output).unwrap().count(),
+        0,
+        "不得留下未完成结果"
+    );
+}
+
 /// 测试守卫：同时强制结束本测试启动的共享代理与引擎。引擎是代理的子进程，
 /// 但 fixture 引擎可能经句柄继承与代理脱钩，只杀代理会留下占住会话单引擎
 /// 执法的孤儿（生产引擎 run53.1 已按 P1 随 stdio 断开自退，此处兜底测试进程）。

@@ -331,7 +331,7 @@ fn verify_file_inner(
     Ok(())
 }
 
-fn sha256_file_inner(path: &Path, cancel: Option<&AtomicBool>) -> io::Result<String> {
+pub(crate) fn sha256_file_inner(path: &Path, cancel: Option<&AtomicBool>) -> io::Result<String> {
     let mut file = File::open(path)?;
     let mut digest = Sha256::new();
     let mut buffer = vec![0_u8; 1024 * 1024];
