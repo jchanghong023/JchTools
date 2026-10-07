@@ -330,6 +330,20 @@ def _settings_state_dir() -> Path | None:
     return None
 
 
+def _plain_windows_path(text: str) -> str:
+    r"""剥除 Windows verbatim 前缀（与 src/platform.rs display_path_text 同口径）.
+
+    应用保存目录经 Rust fs::canonicalize 落盘为 `\\?\C:\...` / `\\?\UNC\...`，
+    界面显示与测试期望均为常规路径；测试链在读取侧归一，避免同一目录因
+    表示形式不同而误判。
+    """
+    if text.startswith("\\\\?\\UNC\\"):
+        return "\\\\" + text[len("\\\\?\\UNC\\") :]
+    if text.startswith("\\\\?\\"):
+        return text[len("\\\\?\\") :]
+    return text
+
+
 def _probe_legacy_runtime_dir(root: Path, missing: list[str]) -> Path | None:
     """旧文本指针（SQLite 无值时的迁移源，与 xberg_settings::load 同口径）."""
     selection = root / "xberg-runtime-path.txt"
@@ -338,7 +352,7 @@ def _probe_legacy_runtime_dir(root: Path, missing: list[str]) -> Path | None:
         missing.append(f"未配置 Xberg 运行目录（SQLite 无记录且未找到 {selection}）")
         return None
     with contextlib.suppress(OSError, ValueError):
-        runtime_dir = Path(selection.read_text(encoding="utf-8").strip())
+        runtime_dir = Path(_plain_windows_path(selection.read_text(encoding="utf-8").strip()))
     if runtime_dir is not None and not (runtime_dir / "xberg.exe").is_file():
         missing.append(f"Xberg 运行目录缺 xberg.exe：{runtime_dir / 'xberg.exe'}")
     return runtime_dir
@@ -370,7 +384,7 @@ def _probe_runtime_dir(root: Path, missing: list[str]) -> Path | None:
         else:
             stored = row[0] if row else None
             if isinstance(stored, str) and stored.strip():
-                runtime_dir = Path(stored.strip())
+                runtime_dir = Path(_plain_windows_path(stored.strip()))
             else:
                 runtime_dir = _probe_legacy_runtime_dir(root, missing)
     if runtime_dir is not None and not (runtime_dir / "xberg.exe").is_file():
