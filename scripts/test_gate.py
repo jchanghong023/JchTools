@@ -43,6 +43,7 @@ import importlib.util
 import io
 import json
 import os
+import re
 import shlex
 import shutil
 import signal
@@ -87,6 +88,15 @@ STATUS_UNVERIFIED = "UNVERIFIED"
 STATUS_NOT_RUN = "NOT RUN"
 ERROR_NO_MORE_FILES = 18
 ERROR_INVALID_PARAMETER = 87
+
+# 环境受限验收条目（AGENTS.md 3.4 例外）：C08/C09 要求在独立 Windows 用户会话中
+# 真实驱动正式包 GUI；无该会话的机器与 CI 一律 fail-closed NOT RUN，且 CI 自身同样
+# 无法执行（check.yml 把 markdown 验收退出码 2 视为不失败）。仅剩这些条目 NOT RUN
+# 不构成覆盖缺口，不阻塞 slowtest 的打包自检与远程 CI；条目本身保持如实 NOT RUN。
+ENVIRONMENT_BLOCKED_ACCEPTANCE_ITEMS: frozenset[str] = frozenset({"C08", "C09"})
+# 从 acceptance 汇总行提取未执行条目号（acceptance.ps1 在汇总行携带条目号清单；
+# 逐项行与汇总行两种形态都按「字母+两位数字」在行内任意位置提取）。
+_NOT_RUN_ITEM_ID_PATTERN = re.compile(r"\b([A-Z]\d{2})\b")
 
 # json.loads 的返回含 Any；经固定签名别名收口为 object，再用 TypeIs 守卫逐层收窄。
 _parse_json: Callable[[str], object] = json.loads
@@ -401,7 +411,13 @@ def _scan_binding_loop(result: StageResult) -> StageResult:
 
 
 def acceptance_coverage_gaps(text: str) -> list[str]:
-    """提取 acceptance 汇总中的必要覆盖缺口；package 的 NOT RUN 不在本级范围。."""
+    """提取 acceptance 汇总中的必要覆盖缺口；package 的 NOT RUN 不在本级范围.
+
+    markdown-acceptance 的 NOT RUN / PARTIAL 仅在可提取条目号、且条目号全部属于
+    环境受限集合（C08/C09，须独立 Windows 用户会话驱动正式包 GUI；AGENTS.md 3.4
+    例外）时放行；提取不到条目号一律按缺口处理（fail-closed），防止缺资产类
+    NOT RUN 被静默放行。放行不改变条目本身的 NOT RUN 事实，不表述为已验证。
+    """
     required = ("markdown-acceptance", "snap-ocr-worker-root")
     gaps: list[str] = []
     lines = text.splitlines()
@@ -410,8 +426,16 @@ def acceptance_coverage_gaps(text: str) -> list[str]:
         if not summaries:
             gaps.append(f"缺少必要覆盖汇总：{name}")
             continue
-        if any(line.startswith(("NOT RUN ", "PARTIAL ")) for line in summaries):
-            gaps.append(next(line for line in summaries if line.startswith(("NOT RUN ", "PARTIAL "))))
+        blocking = [line for line in summaries if line.startswith(("NOT RUN ", "PARTIAL "))]
+        if not blocking:
+            continue
+        if name == "markdown-acceptance":
+            item_ids: set[str] = set()
+            for line in blocking:
+                item_ids.update(_NOT_RUN_ITEM_ID_PATTERN.findall(line))
+            if item_ids and item_ids <= ENVIRONMENT_BLOCKED_ACCEPTANCE_ITEMS:
+                continue
+        gaps.append(blocking[0])
     return gaps
 
 

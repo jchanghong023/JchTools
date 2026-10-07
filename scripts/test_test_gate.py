@@ -38,6 +38,27 @@ class _FakeMonotonic:
         self._current += seconds
 
 
+class AcceptanceCoverageGapTests(unittest.TestCase):
+    """acceptance 覆盖缺口判定：仅剩环境受限条目（C08/C09）NOT RUN 时不得阻塞测试门。."""
+
+    def test_only_environment_blocked_items_are_not_a_gap(self) -> None:
+        summary = "NOT RUN  markdown-acceptance（存在未执行条目：C08、C09；缺资产或 --only 子集不能冒充完整验收）"
+        text = f"PASS  snap-ocr-worker-root\n{summary}"
+        assert test_gate.acceptance_coverage_gaps(text) == []  # nosec B101: 环境受限条目不构成缺口。
+
+    def test_other_not_run_items_remain_gaps(self) -> None:
+        summary = "NOT RUN  markdown-acceptance（存在未执行条目：A25、C08；详见 markdown-acceptance.log）"
+        text = f"PASS  snap-ocr-worker-root\n{summary}"
+        gaps = test_gate.acceptance_coverage_gaps(text)
+        assert gaps  # nosec B101: A25 缺样本不属环境受限，不得放行。
+
+    def test_not_run_without_item_ids_remains_gap(self) -> None:
+        summary = "NOT RUN  markdown-acceptance（存在未执行条目；详见 markdown-acceptance.log）"
+        text = f"PASS  snap-ocr-worker-root\n{summary}"
+        gaps = test_gate.acceptance_coverage_gaps(text)
+        assert gaps  # nosec B101: 提取不到条目号时 fail-closed，不得静默放行。
+
+
 class RunLoggedSetupBudgetTests(unittest.TestCase):
     """run_logged 必须把进程启动/Job 绑定耗时计入阶段预算（绝对截止）。."""
 
