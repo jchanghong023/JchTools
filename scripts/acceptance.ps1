@@ -393,16 +393,23 @@ if ($WithMarkdownAcceptance) {
             $script:Results.Add('NOT RUN  markdown-acceptance（未执行验收条目；详见 markdown-acceptance.log）')
         } else {
             # 驱动器可能只执行部分条目；保留逐项状态，不把跳过当成全覆盖通过。
-            $notRun = @($itemResults | Where-Object { $_.ToString() -match '^\s*NOT RUN\s+[A-Z]\d+\b' })
-            if ($notRun.Count -gt 0) {
-                $script:Results.Add('PARTIAL  markdown-acceptance（已执行项通过，仍有 NOT RUN；详见 markdown-acceptance.log）')
+            # 汇总行携带条目号清单：测试门按 AGENTS.md 3.4 环境受限例外（C08/C09）
+            # 判定缺口时需要它们；取不到条目号时按缺口 fail-closed 处理。
+            $notRunIds = @($itemResults | Where-Object { $_.ToString() -match '^\s*NOT RUN\s+[A-Z]\d+\b' } |
+                ForEach-Object { $_.ToString() -replace '^\s*NOT RUN\s+([A-Z]\d+)\b.*$', '$1' })
+            $idList = if ($notRunIds.Count -gt 0) { $notRunIds -join '、' } else { '（未取得条目号）' }
+            if ($notRunIds.Count -gt 0) {
+                $script:Results.Add("PARTIAL  markdown-acceptance（已执行项通过，仍有 NOT RUN：$idList；详见 markdown-acceptance.log）")
             } else {
                 $script:Results.Add('PASS  markdown-acceptance')
             }
         }
     } elseif ($mdCode -eq 2) {
         # 2 = 存在条目 NOT RUN（缺真实资产/被测物）：如实呈现，不当作通过，也不阻塞其余阶段。
-        $script:Results.Add('NOT RUN  markdown-acceptance（存在未执行条目；缺资产或 --only 子集不能冒充完整验收；详见 markdown-acceptance.log）')
+        $notRunIds = @($mdOutput | Where-Object { $_.ToString() -match '^\s*NOT RUN\s+[A-Z]\d+\b' } |
+            ForEach-Object { $_.ToString() -replace '^\s*NOT RUN\s+([A-Z]\d+)\b.*$', '$1' })
+        $idList = if ($notRunIds.Count -gt 0) { $notRunIds -join '、' } else { '（未取得条目号）' }
+        $script:Results.Add("NOT RUN  markdown-acceptance（存在未执行条目：$idList；缺资产或 --only 子集不能冒充完整验收；详见 markdown-acceptance.log）")
     } else {
         $mdOutput | Select-Object -Last 12 | ForEach-Object {$_.ToString()} | Write-Host
         throw "markdown-acceptance 失败（退出码 $mdCode），完整日志：$mdLog"
