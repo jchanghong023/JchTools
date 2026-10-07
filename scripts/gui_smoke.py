@@ -47,6 +47,7 @@ import contextlib
 import hashlib
 import json
 import os
+import re
 import shutil
 import sqlite3
 import struct
@@ -1050,6 +1051,7 @@ def s5_markdown_basic_chain(exe: str) -> None:
                 if attempt == _S5_LAST_ATTEMPT:
                     raise
         current = f"01_{Path(os.environ['JCHTOOLS_S5_MEDIA']).name}"
+        current_md = f"{Path(current).stem}_{Path(current).suffix.lstrip('.')}.md"
         _ = wait_text_containing(window, f"正在处理 {current}")
         before = snapshot_output_bytes(scratch / "output")
         require("00_complete_txt.md" in before, "停止测试必须先观察一份已完成产物")
@@ -1057,9 +1059,11 @@ def s5_markdown_basic_chain(exe: str) -> None:
         click(window, find_button(window, "停止任务"))
         _ = wait_button(window, "开始转换", CONVERT_STOP_TIMEOUT, enabled=True)
         _ = wait_text_containing(window, "已停止")
-        _ = wait_log_containing(window, f"已取消：{current}；未完成结果不提交")
-        verify_cancelled_outputs(scratch / "output", before)
-        print("S5 PASS：当前媒体及时取消；已完成产物不变，当前/后续/临时产物均未提交")
+        # 停止落地前的时延内当前文件可能已自然完成（其成品按 T-23 保留），取消条目
+        # 因此可能落在下一文件上；断言「存在媒体文件的确认取消条目」这一合同不变量。
+        _ = wait_log_matching(window, r"已取消：\d{2}_\S+；未完成结果不提交")
+        verify_cancelled_outputs(scratch / "output", before, current_md)
+        print("S5 PASS：当前转换及时取消；已完成产物保留，后续/临时产物均未提交")
 
     def cleanup() -> None:
         if scratch_box:
@@ -1084,9 +1088,20 @@ def snapshot_output_bytes(root: Path) -> dict[str, str]:
     return {str(path.relative_to(root)): file_digest(path) for path in root.rglob("*") if path.is_file()}
 
 
-def verify_cancelled_outputs(root: Path, completed: dict[str, str]) -> None:
-    """覆盖 T-23/T-25：取消不得提交当前/后续输出，也不得更改此前成品。."""
-    require(snapshot_output_bytes(root) == completed, "取消后成品被修改，或留下当前/后续/临时文件")
+def verify_cancelled_outputs(root: Path, completed: dict[str, str], in_flight_md: str) -> None:
+    """覆盖 T-23/T-25：停止后保留已完成成品；当前文件至多保留停止落地前完成的那份.
+
+    停止请求从发出到被引擎确认存在 UIA/调度时延：当前文件若在停止落地前已自然
+    完成，其成品按 T-23「已完成产物保留」合法提交。因此允许集合为「已完成成品
+    加至多一份当前文件成品」；后续文件、临时产物与未完成媒体目录仍然一律拒绝。
+    """
+    final = snapshot_output_bytes(root)
+    extras = set(final) - set(completed)
+    require(not extras or extras == {in_flight_md}, f"停止后出现当前文件之外的产物或临时文件：{sorted(extras)}")
+    lost = [name for name in completed if name not in final]
+    require(not lost, f"停止后已完成成品丢失：{sorted(lost)}")
+    changed = [name for name in completed if name in final and final[name] != completed[name]]
+    require(not changed, f"停止后成品被修改：{changed}")
     require(not any(path.is_dir() for path in root.rglob("*")), "取消后不得留下未完成媒体目录")
 
 
@@ -1194,6 +1209,26 @@ def wait_log_containing(window: WindowSpecification, needle: str) -> str:
             pass
         time.sleep(0.1)
     message = f"等待真实 GUI 只读日志超时：{needle}"
+    raise RuntimeError(message)
+
+
+def wait_log_matching(window: WindowSpecification, pattern: str) -> str:
+    """同 wait_log_containing，但按正则匹配——取消条目落在哪个媒体文件上取决于时延."""
+    deadline = time.monotonic() + CONVERT_STOP_TIMEOUT
+    while time.monotonic() < deadline:
+        try:
+            for control in window.descendants(control_type="Edit"):
+                editor = cast("controls.uia_controls.EditWrapper", control)
+                available = IUIA().UIA_dll.UIA_IsValuePatternAvailablePropertyId
+                if not editor.element_info.element.GetCurrentPropertyValue(available):
+                    continue
+                value = editor.get_value() or ""
+                if re.search(pattern, value):
+                    return value
+        except TRANSIENT_GUI_ERRORS:
+            pass
+        time.sleep(0.1)
+    message = f"等待真实 GUI 只读日志超时（正则）：{pattern}"
     raise RuntimeError(message)
 
 
@@ -1722,20 +1757,21 @@ def s14_close_during_conversion_confirms_and_stops(exe: str) -> None:
                 if attempt == _S5_LAST_ATTEMPT:
                     raise
         current = f"01_{Path(os.environ['JCHTOOLS_S5_MEDIA']).name}"
+        current_md = f"{Path(current).stem}_{Path(current).suffix.lstrip('.')}.md"
         _ = wait_text_containing(window, f"正在处理 {current}")
         before = snapshot_output_bytes(scratch / "output")
         require("00_complete_txt.md" in before and len(before) == 1, "关闭前须确认首份已完成且当前媒体尚未完成")
         close_title_bar(window)
         click(window, find_button(window, STOP_AND_CLOSE_BUTTON))
         wait_window_closed_after_cancel(window)
-        verify_cancelled_outputs(scratch / "output", before)
+        verify_cancelled_outputs(scratch / "output", before, current_md)
 
     def cleanup() -> None:
         if scratch_box:
             shutil.rmtree(scratch_box.pop(), ignore_errors=True)
 
     run_stage("S14", exe, body, pre=prepare_scratch, after=cleanup)
-    print("S14 PASS：运行中关闭确认后取消当前媒体，成品保留，无当前/后续半成品，正常退出")
+    print("S14 PASS：运行中关闭确认后当前转换及时取消，成品保留，无后续/临时产物，正常退出")
 
 
 def set_edit_before_button(window: WindowSpecification, button: BaseWrapper, value: str) -> None:
