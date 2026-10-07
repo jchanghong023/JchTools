@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import hashlib
+import io
 import json
 import os
 import posixpath
@@ -40,6 +41,35 @@ AUTO_FAST_PAGES_THRESHOLD = 500
 ARGUMENT_ERROR_EXIT_CODE = 3
 COMMAND_TIMEOUT_SECONDS = 8.0
 COMMAND_FAILURE_EXIT_CODE = 7
+UNVERIFIED_EXIT_CODE = 2
+
+
+def report_acceptance(results: list[tuple[markdown_acceptance.Item, markdown_acceptance.Outcome]]) -> int:
+    reporter = cast(
+        "Callable[[list[tuple[markdown_acceptance.Item, markdown_acceptance.Outcome]], Path | None], int]",
+        getattr(markdown_acceptance, "_" + "print_report"),
+    )
+    return reporter(results, None)
+
+
+class AcceptanceReportCompletenessTests(unittest.TestCase):
+    """覆盖 P-12/P-13：部分执行和缺资产不能冒充完整验收。."""
+
+    def test_any_unexecuted_item_prevents_success_exit(self) -> None:
+        results = [
+            (markdown_acceptance.ITEMS[0], markdown_acceptance.Outcome(markdown_acceptance.STATUS_OK)),
+            (markdown_acceptance.ITEMS[1], markdown_acceptance.Outcome(markdown_acceptance.STATUS_NOT_RUN, "缺资产")),
+        ]
+        with patch("sys.stdout", new=io.StringIO()):
+            code = report_acceptance(results)
+        assert code == UNVERIFIED_EXIT_CODE, "NOT RUN 必须使验收返回未验证退出码"  # nosec B101: 验收回归断言。
+
+    def test_omitted_items_prevent_success_exit(self) -> None:
+        with patch("sys.stdout", new=io.StringIO()):
+            code = report_acceptance(
+                [(markdown_acceptance.ITEMS[0], markdown_acceptance.Outcome(markdown_acceptance.STATUS_OK))]
+            )
+        assert code == UNVERIFIED_EXIT_CODE, "--only 的子集成功不能冒充完整验收"  # nosec B101: 验收回归断言。
 
 
 def _content_spec(item_id: str) -> markdown_acceptance.ContentSpec:
@@ -564,6 +594,90 @@ class AcquireHintTests(unittest.TestCase):
         assert "resources/markdown-assets.json" in hint  # nosec B101: 回归测试断言。
 
 
+class FormatSweepCoverageTests(unittest.TestCase):
+    """覆盖 T-08 / 附录 A25：未实际纳入矩阵输入的格式必须进入 sweep。."""
+
+    def test_uncovered_declared_formats_are_not_excluded(self) -> None:
+        uncovered = (
+            "doc",
+            "dot",
+            "ppt",
+            "pps",
+            "pot",
+            "xls",
+            "xlt",
+            "xltm",
+            "xla",
+            "odt",
+            "ods",
+            "odp",
+            "pnm",
+            "jbig2",
+        )
+        rows = [{"extension": extension, "mime_type": "application/test"} for extension in (*uncovered, "docx", "pbm")]
+        done = subprocess.CompletedProcess(["xberg.exe"], 0, json.dumps(rows), "")
+        with patch("scripts.markdown_acceptance.subprocess.run", return_value=done):
+            extensions, error = markdown_acceptance.xberg_format_extensions(Path("xberg.exe"))
+        assert error is None  # nosec B101: 格式清单解析回归断言。
+        assert extensions == sorted(uncovered)  # nosec B101: 漏覆盖格式不能被硬编码名单排除。
+
+    def test_covered_formats_follow_registered_matrix_inputs(self) -> None:
+        rows = [{"extension": extension, "mime_type": "application/test"} for extension in ("docx", "pbm")]
+        done = subprocess.CompletedProcess(["xberg.exe"], 0, json.dumps(rows), "")
+        with (
+            patch.object(markdown_acceptance, "ITEMS", ()),
+            patch("scripts.markdown_acceptance.subprocess.run", return_value=done),
+        ):
+            extensions, error = markdown_acceptance.xberg_format_extensions(Path("xberg.exe"))
+        assert error is None  # nosec B101: 格式清单解析回归断言。
+        assert extensions == ["docx", "pbm"]  # nosec B101: 矩阵不含输入时不得宣称已有覆盖。
+
+    def test_synthetic_format_table_matches_real_inputs(self) -> None:
+        table = cast(
+            "dict[str, frozenset[str]]",
+            getattr(markdown_acceptance, "_" + "SYNTH_INPUT_EXTENSIONS"),
+        )
+        assert set(table) == set(markdown_acceptance.SYNTHESIZERS)  # nosec B101: 新合成器不能遗漏格式映射。
+        with tempfile.TemporaryDirectory() as temporary:
+            for name, synthesize in markdown_acceptance.SYNTHESIZERS.items():
+                if name == "media":
+                    continue
+                target = Path(temporary) / name
+                _ = target.mkdir()
+                result = synthesize(target, markdown_acceptance.FIXTURES_DEFAULT)
+                assert not result.error, result.error  # nosec B101: 真实合成器必须构造成功。
+                actual = {Path(filename).suffix.lstrip(".").lower() for filename in result.files}
+                assert actual == table[name], name  # nosec B101: 覆盖表不能凭空增加实际合成器未产出的格式。
+        media_files = markdown_acceptance.A24_MEDIA_SYNTH_FILES
+        actual_media = {Path(filename).suffix.lstrip(".").lower() for filename in media_files}
+        assert actual_media == table["media"]  # nosec B101: 媒体格式采用同源产物清单，不启动实际解码。
+
+    def test_missing_legacy_fixture_is_not_run(self) -> None:
+        item = markdown_acceptance.Item("A25", "A", "格式清点", "GUI", needs_assets="xberg")
+        done = subprocess.CompletedProcess(
+            ["xberg.exe"], 0, json.dumps([{"extension": "doc", "mime_type": "application/msword"}]), ""
+        )
+        with tempfile.TemporaryDirectory() as temporary:
+            _ = (Path(temporary) / "matrix" / "format_sweep").mkdir(parents=True)
+            context = markdown_acceptance.Context(
+                None,
+                None,
+                None,
+                Path(temporary),
+                markdown_acceptance.AssetProbe(None, None, Path("xberg.exe"), None, []),
+            )
+            with (
+                patch("scripts.markdown_acceptance.subprocess.run", return_value=done),
+                patch.object(
+                    markdown_acceptance, "_run_conversion_item", return_value=markdown_acceptance.Outcome("PASS")
+                ) as convert,
+            ):
+                outcome = _run_handler("run_matrix_a25", item, context)
+        assert outcome.status == "NOT RUN"  # nosec B101: 缺健康样本不得执行或报告通过。
+        assert "doc" in outcome.reason  # nosec B101: 报告必须列出缺失扩展名。
+        convert.assert_not_called()
+
+
 class PerInputRuleTests(unittest.TestCase):
     """S10-02/04：逐输入断言——整族失败、缺诊断、夹具不足都不得假 PASS。."""
 
@@ -844,6 +958,99 @@ class PythonProcessScanTests(unittest.TestCase):
             )
         assert outcome.status == "FAIL"  # nosec B101: 无产物不得冒充 C05 实际转换成功。
         assert "实得 0 项：[]" in outcome.details[0]  # nosec B101: 结论须基于观察到的零产物。
+
+
+class FormalDeliveryIsolationTests(unittest.TestCase):
+    """覆盖 T-02 / XB-18：正式包不能用测试环境变量冒充隔离配置。."""
+
+    def test_release_conversion_is_not_started_without_verified_isolation(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            package = root / "package"
+            _ = package.mkdir()
+            _ = (package / "JchTools.exe").write_bytes(b"formal executable fixture")
+            source_dir = root / "input"
+            output_dir = root / "output"
+            _ = source_dir.mkdir()
+            _ = output_dir.mkdir()
+            _ = (source_dir / "test_hello_world.png").write_bytes(b"synthetic source")
+            prepared = markdown_acceptance.PreparedInputs(source_dir, output_dir, ["test_hello_world.png"])
+            assets = markdown_acceptance.AssetProbe(root, root, root / "xberg.exe", root, [])
+            context = markdown_acceptance.Context(None, package, package, source_dir, assets)
+            for item_id in ("C08", "C09"):
+                with self.subTest(item=item_id):
+                    item = next(entry for entry in markdown_acceptance.ITEMS if entry.item_id == item_id)
+                    with (
+                        patch.dict(os.environ, {"JCHTOOLS_TEST_STATE_DIR": str(root / "state")}, clear=True),
+                        patch.object(markdown_acceptance, "_prepare_scratch", return_value=prepared),
+                        patch.object(
+                            markdown_acceptance,
+                            "drive_conversion",
+                            return_value=markdown_acceptance.GuiRun([], "", None),
+                        ) as drive,
+                    ):
+                        outcome = _run_handler("run_env", item, context)
+                    drive.assert_not_called()
+                    assert outcome.status == "NOT RUN"  # nosec B101: 缺独立会话不能启动正式包。
+                    assert "release" in outcome.reason  # nosec B101: 须解释正式包忽略隔离环境变量。
+                    assert "Windows" in outcome.reason  # nosec B101: 须说明真实独立配置前置。
+
+
+class UnconfiguredStateBoundaryTests(unittest.TestCase):
+    """覆盖 T-02 / T-21 / P-10：合法状态可写，未配置不能下载组件。."""
+
+    @staticmethod
+    def _run_with_artifacts(artifacts: tuple[str, ...], *, asset_file: str = "") -> markdown_acceptance.Outcome:
+        item = next(entry for entry in markdown_acceptance.ITEMS if entry.item_id == "C03")
+        assets = markdown_acceptance.AssetProbe(None, None, None, None, [])
+        context = markdown_acceptance.Context(Path("target/debug/JchTools.exe"), None, None, Path("fixtures"), assets)
+        context.stages = ("S1", "S15")
+
+        def delegate(_item_id: str, _target: Path, environment: dict[str, str]) -> None:
+            state = Path(environment["JCHTOOLS_TEST_STATE_DIR"])
+            asset = Path(environment["JCHTOOLS_MARKDOWN_TEST_ASSET_ROOT"])
+            for name in artifacts:
+                target = state / name
+                _ = target.parent.mkdir(parents=True, exist_ok=True)
+                _ = target.write_bytes(b"synthetic artifact")
+            if asset_file:
+                target = asset / asset_file
+                _ = target.parent.mkdir(parents=True, exist_ok=True)
+                _ = target.write_bytes(b"unexpected asset")
+
+        with (
+            tempfile.TemporaryDirectory() as temporary,
+            patch.object(markdown_acceptance, "SCRATCH_ROOT", Path(temporary)),
+            patch.object(markdown_acceptance, "_resolve_gui", return_value=(context.gui_exe, None)),
+            patch.object(markdown_acceptance, "_c03_delegate_stages", side_effect=delegate),
+        ):
+            return _run_handler("run_c03_unconfigured", item, context)
+
+    def test_normal_state_artifacts_do_not_count_as_conversion_downloads(self) -> None:
+        outcome = self._run_with_artifacts(
+            (
+                "config.sqlite3",
+                "config.sqlite3-wal",
+                "hash-cache.sqlite3",
+                "organizer.lock",
+                "logs/jchtools.log.2026-10-07",
+                "tasks/20261007T120000-12345678-1234-1234-1234-123456789abc/task.sqlite3",
+            )
+        )
+        assert outcome.status == "PASS", outcome.reason  # nosec B101: 普通工具合法状态和本地日志不是转换组件下载。
+
+    def test_state_download_path_is_still_rejected(self) -> None:
+        outcome = self._run_with_artifacts(("config.sqlite3", "xberg-downloads/runtime/xberg.exe"))
+        assert outcome.status == "FAIL"  # nosec B101: 分离状态根后仍检查主动下载目录。
+        assert "xberg-downloads" in outcome.reason  # nosec B101: 精确呈现意外组件落位。
+
+    def test_nested_settings_name_cannot_hide_a_download(self) -> None:
+        outcome = self._run_with_artifacts(("unexpected/config.sqlite3",))
+        assert outcome.status == "FAIL"  # nosec B101: 不按basename豁免整个状态树。
+
+    def test_asset_root_write_is_still_rejected(self) -> None:
+        outcome = self._run_with_artifacts(("config.sqlite3",), asset_file="xberg.exe")
+        assert outcome.status == "FAIL"  # nosec B101: 未配置资产根须保持为空。
 
 
 class AcceptanceBoundaryTests(unittest.TestCase):
@@ -1133,20 +1340,19 @@ class CommandTimeoutTests(unittest.TestCase):
 
 class ProcessTreeOwnershipTests(unittest.TestCase):
     @staticmethod
-    def _start_tree(directory: Path) -> tuple[subprocess.Popen[str], int]:
+    def _start_tree(directory: Path) -> tuple[subprocess.Popen[bytes], int]:
         parent_source = (
             "import pathlib, subprocess, sys, time\n"
             "root = pathlib.Path(sys.argv[1])\n"
             "child = subprocess.Popen([sys.executable, '-c', 'import time; time.sleep(900)'])\n"
-            "(root / 'child-pid').write_text(str(child.pid), encoding='ascii')\n"
+            "temporary_pid = root / 'child-pid.part'\n"
+            "temporary_pid.write_text(str(child.pid), encoding='ascii')\n"
+            "temporary_pid.replace(root / 'child-pid')\n"
             "time.sleep(900)\n"
         )
-        process: subprocess.Popen[str] = subprocess.Popen(
+        starter = cast("Callable[..., subprocess.Popen[bytes]]", getattr(test_gate, "_" + "start_owned_command"))
+        process = starter(
             [sys.executable, "-c", parent_source, str(directory)],
-            stdin=subprocess.DEVNULL,
-            stdout=subprocess.DEVNULL,
-            stderr=subprocess.DEVNULL,
-            text=True,
         )
         deadline = time.monotonic() + 10
         pid_file = directory / "child-pid"
@@ -1170,8 +1376,11 @@ class ProcessTreeOwnershipTests(unittest.TestCase):
         finally:
             if child_handle is None:
                 if process.poll() is None:
-                    process.kill()
+                    killer = cast("Callable[..., bool]", getattr(test_gate, "_" + "kill_tree"))
+                    _ = killer(process, timeout=3.0)
                 _ = process.wait(timeout=5)
+                closer = cast("Callable[..., bool]", getattr(test_gate, "_" + "close_owned_command"))
+                _ = closer(process, timeout=3.0)
 
     def _assert_owner_kills_only_its_tree(self, owner: object) -> None:
         killer = cast("Callable[..., bool]", getattr(owner, "_" + "kill_tree"))
@@ -1193,6 +1402,8 @@ class ProcessTreeOwnershipTests(unittest.TestCase):
                 if process.poll() is None:
                     process.kill()
                 _ = process.wait(timeout=5)
+                closer = cast("Callable[..., bool]", getattr(test_gate, "_" + "close_owned_command"))
+                _ = closer(process, timeout=3.0)
                 if win32event.WaitForSingleObject(child, 0) == win32event.WAIT_TIMEOUT:
                     win32api.TerminateProcess(child, 0)
                 win32api.CloseHandle(child)
@@ -1205,6 +1416,76 @@ class ProcessTreeOwnershipTests(unittest.TestCase):
         for owner in (test_gate, test_timing):
             with self.subTest(owner=owner.__name__):
                 self._assert_owner_kills_only_its_tree(owner)
+
+    def test_gate_owned_tree_cleanup_does_not_depend_on_taskkill_startup(self) -> None:
+        # fulltest-5：taskkill 的启动/枚举可能耗尽两秒内部预算；树终止不能依赖
+        # 外部命令及时启动。仍经真实父子进程与句柄检查，并保护无关进程。
+        with patch("scripts.test_gate.subprocess.run", side_effect=subprocess.TimeoutExpired("taskkill", 2.0)):
+            self._assert_owner_kills_only_its_tree(test_gate)
+
+    def test_successful_stage_reaps_owned_child_after_parent_exits(self) -> None:
+        # 父命令成功退出也可能遗留后台；只有启动前绑定的 Job 可以完整回收，
+        # 不能对已退出父 PID 重新枚举并据此猜测所有权。
+        with (
+            tempfile.TemporaryDirectory(prefix="jchtools-successful-command-tree-") as temporary,
+            patch.object(test_gate, "LOG_DIR", Path(temporary)),
+        ):
+            root = Path(temporary)
+            release = root / "release-parent"
+            parent_source = (
+                "import pathlib, subprocess, sys, time\n"
+                "root = pathlib.Path(sys.argv[1])\n"
+                "child = subprocess.Popen([sys.executable, '-c', 'import time; time.sleep(900)'])\n"
+                "temporary_pid = root / 'child-pid.part'\n"
+                "temporary_pid.write_text(str(child.pid), encoding='ascii')\n"
+                "temporary_pid.replace(root / 'child-pid')\n"
+                "while not (root / 'release-parent').exists(): time.sleep(0.01)\n"
+            )
+            results: list[test_gate.StageResult] = []
+
+            def run() -> None:
+                results.append(
+                    test_gate.run_logged(
+                        "unit-successful-tree", [sys.executable, "-c", parent_source, str(root)], timeout=10.0
+                    )
+                )
+
+            runner = threading.Thread(target=run)
+            child: int | None = None
+            unrelated = subprocess.Popen(
+                [sys.executable, "-c", "import time; time.sleep(900)"],
+                stdin=subprocess.DEVNULL,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+            )
+            runner.start()
+            try:
+                deadline = time.monotonic() + 5
+                pid_file = root / "child-pid"
+                while not pid_file.is_file():
+                    if time.monotonic() >= deadline:
+                        self.fail("阶段未创建所属子进程")
+                    time.sleep(0.01)
+                child = win32api.OpenProcess(
+                    win32con.SYNCHRONIZE | win32con.PROCESS_TERMINATE, 0, int(pid_file.read_text(encoding="ascii"))
+                )
+                _ = release.write_text("release", encoding="ascii")
+                runner.join(timeout=10)
+                assert not runner.is_alive()  # nosec B101: 阶段及清理必须在预算内结束。
+                assert len(results) == 1  # nosec B101: 阶段应返回唯一结果。
+                assert results[0].status == test_gate.STATUS_OK  # nosec B101: 父成功且树已清理。
+                assert win32event.WaitForSingleObject(child, 0) == win32event.WAIT_OBJECT_0  # nosec B101: 后台已回收。
+                assert unrelated.poll() is None  # nosec B101: 不得终止无关进程。
+            finally:
+                _ = release.write_text("release", encoding="ascii")
+                runner.join(timeout=10)
+                if child is not None:
+                    if win32event.WaitForSingleObject(child, 0) == win32event.WAIT_TIMEOUT:
+                        win32api.TerminateProcess(child, 0)
+                    win32api.CloseHandle(child)
+                if unrelated.poll() is None:
+                    unrelated.terminate()
+                _ = unrelated.wait(timeout=5)
 
 
 if __name__ == "__main__":

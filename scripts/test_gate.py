@@ -37,6 +37,7 @@ from __future__ import annotations
 
 import argparse
 import contextlib
+import ctypes
 import dataclasses
 import importlib.util
 import io
@@ -49,11 +50,17 @@ import subprocess
 import sys
 import time
 from pathlib import Path
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, cast, final
+
+import pywintypes
+import win32api
+import win32con
+import win32event
+import win32job
 
 if TYPE_CHECKING:
     from collections.abc import Callable
-    from typing import TypeIs
+    from typing import IO, TypeIs
 
 ROOT = Path(__file__).resolve().parent.parent
 LOG_DIR = ROOT / ".tmp" / "test-gate"
@@ -61,6 +68,9 @@ GUI_DATA_DIR = LOG_DIR / "gui-data"
 FIXED_XBERG_TEST_DIR = Path(r"C:\Users\jiang\Documents\xberg-test\xberg-cli-x86_64-pc-windows-msvc")
 
 FASTCHECK_DEADLINE_SECONDS = 60.0
+# 终局守卫的会计容差：各阶段已有绝对截止（run_logged），阶段间只剩亚秒级调度空隙；
+# 守卫只拦会计性越界（>0.5s），不改变 60 秒硬上限本身。
+FASTCHECK_GUARD_TOLERANCE_SECONDS = 0.5
 PROCESS_TREE_CLEANUP_SECONDS = 5.0
 STAGE_TIMEOUT_DEFAULT = 3600.0
 # 远程工作流等待上限：check.yml 约 30-40 分钟。
@@ -75,9 +85,14 @@ STATUS_FAILED = "FAIL"
 STATUS_TIMED_OUT = "TIMEOUT"
 STATUS_UNVERIFIED = "UNVERIFIED"
 STATUS_NOT_RUN = "NOT RUN"
+ERROR_NO_MORE_FILES = 18
+ERROR_INVALID_PARAMETER = 87
 
 # json.loads 的返回含 Any；经固定签名别名收口为 object，再用 TypeIs 守卫逐层收窄。
 _parse_json: Callable[[str], object] = json.loads
+
+# 墙钟接缝：生产即 time.monotonic；回归测试注入假时钟，确定性复现预算超限（不真实睡眠）。
+_monotonic: Callable[[], float] = time.monotonic
 
 
 def _is_str_obj_map(value: object) -> TypeIs[dict[str, object]]:
@@ -114,22 +129,201 @@ def _reconfigure_stdout() -> None:
             stream.reconfigure(encoding="utf-8", errors="replace")
 
 
+@final
+class _ThreadEntry(ctypes.Structure):
+    """Toolhelp 的 THREADENTRY32 布局，用于恢复尚未执行的所属初始线程。."""
+
+    _fields_ = (
+        ("size", ctypes.c_uint32),
+        ("usage", ctypes.c_uint32),
+        ("thread_id", ctypes.c_uint32),
+        ("owner_pid", ctypes.c_uint32),
+        ("priority", ctypes.c_int32),
+        ("delta_priority", ctypes.c_int32),
+        ("flags", ctypes.c_uint32),
+    )
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.size: int = ctypes.sizeof(self)
+        self.thread_id: int = 0
+        self.owner_pid: int = 0
+
+
+def _resume_owned_process(pid: int) -> None:
+    """进程先以 CREATE_SUSPENDED 启动并绑定 Job，之后才允许派生任何后代。."""
+    kernel = ctypes.WinDLL("kernel32", use_last_error=True)
+    create_snapshot = cast(
+        "Callable[[int, int], int]",
+        ctypes.WINFUNCTYPE(ctypes.c_void_p, ctypes.c_uint32, ctypes.c_uint32, use_last_error=True)(
+            ("CreateToolhelp32Snapshot", kernel)
+        ),
+    )
+    signature = ctypes.WINFUNCTYPE(ctypes.c_int, ctypes.c_void_p, ctypes.c_void_p, use_last_error=True)
+    first = cast("Callable[[int, object], int]", signature(("Thread32First", kernel)))
+    next_entry = cast("Callable[[int, object], int]", signature(("Thread32Next", kernel)))
+    open_thread = cast(
+        "Callable[[int, int, int], int]",
+        ctypes.WINFUNCTYPE(ctypes.c_void_p, ctypes.c_uint32, ctypes.c_int, ctypes.c_uint32, use_last_error=True)(
+            ("OpenThread", kernel)
+        ),
+    )
+    resume_thread = cast(
+        "Callable[[int], int]",
+        ctypes.WINFUNCTYPE(ctypes.c_uint32, ctypes.c_void_p, use_last_error=True)(("ResumeThread", kernel)),
+    )
+    snapshot = create_snapshot(4, 0)  # TH32CS_SNAPTHREAD
+    if snapshot == ctypes.c_void_p(-1).value:
+        raise ctypes.WinError(ctypes.get_last_error())
+    try:
+        entry = _ThreadEntry()
+        found = first(snapshot, ctypes.byref(entry))
+        while found:
+            if entry.owner_pid == pid:
+                handle = open_thread(2, 0, entry.thread_id)  # THREAD_SUSPEND_RESUME
+                if not handle:
+                    raise ctypes.WinError(ctypes.get_last_error())
+                try:
+                    if resume_thread(handle) == ctypes.c_uint32(-1).value:
+                        raise ctypes.WinError(ctypes.get_last_error())
+                finally:
+                    win32api.CloseHandle(handle)
+                return
+            found = next_entry(snapshot, ctypes.byref(entry))
+        if ctypes.get_last_error() != ERROR_NO_MORE_FILES:
+            raise ctypes.WinError(ctypes.get_last_error())
+        message = "所属暂停进程没有可恢复的初始线程"
+        raise OSError(message)
+    finally:
+        win32api.CloseHandle(snapshot)
+
+
+@final
+class _CommandJob:
+    """仅本次创建的 Windows 命令树，无桌面或 UI 运行依赖。."""
+
+    def __init__(self, proc: subprocess.Popen[bytes]) -> None:
+        create = cast("Callable[[object, str], int]", win32job.CreateJobObject)
+        query = cast("Callable[[int, int], dict[str, object]]", vars(win32job)["QueryInformationJobObject"])
+        configure = cast("Callable[[int, int, dict[str, object]], None]", vars(win32job)["SetInformationJobObject"])
+        self.process = proc
+        self.job = create(None, "")
+        try:
+            information = query(self.job, win32job.JobObjectExtendedLimitInformation)
+            limits = cast("dict[str, int]", information["BasicLimitInformation"])
+            limits["LimitFlags"] |= win32job.JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE
+            configure(self.job, win32job.JobObjectExtendedLimitInformation, information)
+            handle = win32api.OpenProcess(win32con.PROCESS_SET_QUOTA | win32con.PROCESS_TERMINATE, 0, proc.pid)
+            try:
+                win32job.AssignProcessToJobObject(self.job, handle)
+            finally:
+                win32api.CloseHandle(handle)
+        except (OSError, pywintypes.error):
+            win32api.CloseHandle(self.job)
+            raise
+
+    def process_handles(self) -> list[int]:
+        query_ids = cast("Callable[[int, int], tuple[int, ...]]", vars(win32job)["QueryInformationJobObject"])
+        belongs = cast("Callable[[int, int], bool]", vars(win32job)["IsProcessInJob"])
+        handles: list[int] = []
+        try:
+            for pid in query_ids(self.job, win32job.JobObjectBasicProcessIdList):
+                try:
+                    handle = win32api.OpenProcess(win32con.SYNCHRONIZE | win32con.PROCESS_QUERY_INFORMATION, 0, pid)
+                except pywintypes.error as error:
+                    if error.winerror != ERROR_INVALID_PARAMETER:
+                        raise
+                    continue  # 成员已退出，不对复用 PID 作终止操作。
+                handles.append(handle)
+                if not belongs(handle, self.job):
+                    _ = handles.pop()
+                    win32api.CloseHandle(handle)
+        except pywintypes.error:
+            for handle in handles:
+                win32api.CloseHandle(handle)
+            raise
+        else:
+            return handles
+
+    def terminate(self, timeout: float) -> bool:
+        terminate = cast("Callable[[int, int], None]", vars(win32job)["TerminateJobObject"])
+        query = cast("Callable[[int, int], dict[str, int]]", vars(win32job)["QueryInformationJobObject"])
+        deadline = time.monotonic() + max(0.0, timeout)
+        handles: list[int] = []
+        try:
+            handles = self.process_handles()
+            terminate(self.job, 1)
+            while query(self.job, win32job.JobObjectBasicAccountingInformation)["ActiveProcesses"]:
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    return False
+                time.sleep(min(0.01, remaining))
+            return _wait_process_handles(handles, deadline)
+        except pywintypes.error:
+            return False
+        finally:
+            for handle in handles:
+                win32api.CloseHandle(handle)
+
+
+def _wait_process_handles(handles: list[int], deadline: float) -> bool:
+    # Job 活动计数归零并不等于所有进程句柄已经发出终态信号，仍须等待持有句柄。
+    return all(
+        win32event.WaitForSingleObject(handle, max(0, int((deadline - time.monotonic()) * 1000)))
+        == win32event.WAIT_OBJECT_0
+        for handle in handles
+    )
+
+
+_COMMAND_JOBS: dict[int, _CommandJob] = {}
+
+
+def _start_owned_command(
+    argv: list[str], *, stdout: IO[bytes] | int = subprocess.DEVNULL, env: dict[str, str] | None = None
+) -> subprocess.Popen[bytes]:
+    proc = subprocess.Popen(
+        argv,
+        cwd=ROOT,
+        stdin=subprocess.DEVNULL,
+        stdout=stdout,
+        stderr=subprocess.STDOUT,
+        env=env,
+        creationflags=win32con.CREATE_SUSPENDED if sys.platform == "win32" else 0,
+        start_new_session=sys.platform != "win32",
+    )
+    if sys.platform == "win32":
+        owner: _CommandJob | None = None
+        try:
+            owner = _CommandJob(proc)
+            _COMMAND_JOBS[proc.pid] = owner
+            _resume_owned_process(proc.pid)
+        except (OSError, pywintypes.error):
+            _ = _COMMAND_JOBS.pop(proc.pid, None)
+            if owner is not None:
+                win32api.CloseHandle(owner.job)
+            proc.kill()
+            _ = proc.wait()
+            raise
+    return proc
+
+
+def _close_owned_command(proc: subprocess.Popen[bytes], *, timeout: float) -> bool:
+    owner = _COMMAND_JOBS.get(proc.pid)
+    if owner is None or owner.process is not proc:
+        return sys.platform != "win32"
+    _ = _COMMAND_JOBS.pop(proc.pid)
+    try:
+        return owner.terminate(timeout)
+    finally:
+        win32api.CloseHandle(owner.job)
+
+
 def _kill_tree(proc: subprocess.Popen[bytes], *, timeout: float) -> bool:
     # 超时必须终止整个进程树（cargo 会派生 rustc / 测试二进制子进程）。
     if sys.platform == "win32":
-        taskkill = shutil.which("taskkill")
-        if taskkill is None:
-            return False
-        try:
-            result = subprocess.run(
-                [taskkill, "/T", "/F", "/PID", str(proc.pid)],
-                capture_output=True,
-                check=False,
-                timeout=min(timeout, 2.0),
-            )
-        except subprocess.TimeoutExpired:
-            return False
-        return result.returncode == 0
+        owner = _COMMAND_JOBS.get(proc.pid)
+        # 没有启动时持有的 Job，不能仅凭 PID 或单次快照宣称终止整棵树。
+        return owner.terminate(timeout) if owner is not None and owner.process is proc else False
     try:
         os.killpg(os.getpgid(proc.pid), signal.SIGKILL)
     except ProcessLookupError:
@@ -146,7 +340,7 @@ def _tail(log: Path, limit: int = 12) -> str:
 
 def run_logged(name: str, argv: list[str], *, timeout: float, env_extra: dict[str, str] | None = None) -> StageResult:
     """运行单个命令阶段：完整输出落 .tmp/test-gate/<name>.log，凭退出码判定成败."""
-    started = time.monotonic()
+    started = _monotonic()
     log = LOG_DIR / f"{name}.log"
     LOG_DIR.mkdir(parents=True, exist_ok=True)
     env = os.environ | (env_extra or {})
@@ -154,37 +348,41 @@ def run_logged(name: str, argv: list[str], *, timeout: float, env_extra: dict[st
     if timeout <= cleanup_budget:
         return StageResult(name, STATUS_TIMED_OUT, f"阶段预算 {timeout:.1f}s 不足以启动并清理进程树")
     with log.open("wb") as sink:
-        proc = subprocess.Popen(
-            argv,
-            cwd=ROOT,
-            stdout=sink,
-            stderr=subprocess.STDOUT,
-            env=env,
-            start_new_session=sys.platform != "win32",
-        )
+        proc = _start_owned_command(argv, stdout=sink, env=env)
         timed_out = False
         tree_terminated = True
+        # 等待窗口按绝对截止计算：进程启动与 Job 绑定的耗时从命令等待预算中扣除，
+        # 否则固定等待叠加上述启动耗时会把总墙钟推过硬上限；同时保留原定 cleanup
+        # 预算给进程树终止收尾，不得让等待吃满全部预算后挤压清理窗口。
+        # 等待预算已被启动耗尽时 wait(timeout=0) 仍会轮询一次：只有已退出的命令才能通过。
+        wait_budget = max(0.0, started + timeout - cleanup_budget - _monotonic())
         try:
-            _ = proc.wait(timeout=timeout - cleanup_budget)
+            _ = proc.wait(timeout=wait_budget)
         except subprocess.TimeoutExpired:
             timed_out = True
             cleanup_deadline = started + timeout
-            kill_timeout = min(2.0, max(0.0, cleanup_deadline - time.monotonic()))
+            kill_timeout = min(2.0, max(0.0, cleanup_deadline - _monotonic()))
             tree_terminated = _kill_tree(proc, timeout=kill_timeout)
             if not tree_terminated and proc.poll() is None:
                 proc.kill()
             try:
-                _ = proc.wait(timeout=max(0.0, cleanup_deadline - time.monotonic()))
+                _ = proc.wait(timeout=max(0.0, cleanup_deadline - _monotonic()))
             except subprocess.TimeoutExpired:
                 tree_terminated = False
                 if proc.poll() is None:
                     proc.kill()
-    elapsed = time.monotonic() - started
+        finally:
+            tree_terminated = (
+                _close_owned_command(proc, timeout=max(0.0, started + timeout - _monotonic())) and tree_terminated
+            )
+    elapsed = _monotonic() - started
     if timed_out:
         cleanup = "进程树已终止" if tree_terminated else "未能确认进程树已终止"
         detail = f"达到 {timeout:.0f}s 总预算（已耗时 {elapsed:.1f}s）；{cleanup}；完整日志：{log}"
         return StageResult(name, STATUS_TIMED_OUT, detail, log)
     if proc.returncode == 0:
+        if not tree_terminated:
+            return StageResult(name, STATUS_FAILED, "命令已退出，但未能确认所属子进程全部退出", log)
         return StageResult(name, STATUS_OK, f"{elapsed:.1f}s；完整日志：{log}", log)
     detail = f"退出码 {proc.returncode}（已耗时 {elapsed:.1f}s）；日志尾部：\n{_tail(log)}"
     return StageResult(name, STATUS_FAILED, detail, log)
@@ -270,7 +468,7 @@ def cmd_fastcheck(deadline_seconds: float) -> int:
     if sys.platform != "win32":
         print("fastcheck 按合同 P-07 仅支持 Windows；拒绝在其他平台执行。")
         return 2
-    started = time.monotonic()
+    started = _monotonic()
     deadline = started + deadline_seconds
     results: list[StageResult] = []
     cargo = shutil.which("cargo")
@@ -288,7 +486,7 @@ def cmd_fastcheck(deadline_seconds: float) -> int:
         if over_budget:
             results.append(StageResult(name, STATUS_NOT_RUN, "时间预算已耗尽（前置阶段超时）"))
             continue
-        remaining = deadline - time.monotonic()
+        remaining = deadline - _monotonic()
         if remaining <= 0:
             over_budget = True
             budget = f"时间预算 {deadline_seconds:.0f}s 已耗尽，本阶段未能在预算内完成"
@@ -302,7 +500,19 @@ def cmd_fastcheck(deadline_seconds: float) -> int:
             over_budget = True
         elif result.status != STATUS_OK:
             break
-    elapsed = time.monotonic() - started
+    elapsed = _monotonic() - started
+    # 终局墙钟守卫：单阶段超时只能拦住「本阶段超时」，拦不住「各阶段都过但累计越界」
+    # （独立复核反例：最后阶段启动 6s + 等待 55s → 总墙钟 61s 仍报 PASS）。
+    # 越过硬上限（含会计容差）时无条件判 TIMEOUT，超时即失败。
+    if elapsed > deadline_seconds + FASTCHECK_GUARD_TOLERANCE_SECONDS:
+        tolerance = f"{FASTCHECK_GUARD_TOLERANCE_SECONDS:.1f}"
+        results.append(
+            StageResult(
+                "wall-clock-budget",
+                STATUS_TIMED_OUT,
+                f"总墙钟 {elapsed:.1f}s 超过 {deadline_seconds:.0f}s 硬上限（容差 {tolerance}s）；超时即失败",
+            )
+        )
     note = f"墙钟：{elapsed:.1f}s / 预算 {deadline_seconds:.0f}s（60 秒为硬上限，超时即失败）"
     return _print_summary("fastcheck", results, [], wall_note=note)
 
@@ -325,6 +535,16 @@ def _python_quality_stages(results: list[StageResult]) -> None:
             "markdown-acceptance-unit",
             "unittest",
             [sys.executable, "-m", "unittest", "scripts.test_markdown_acceptance"],
+        ),
+        (
+            "gui-automation-unit",
+            "unittest",
+            [sys.executable, "-m", "unittest", "scripts.test_gui_smoke"],
+        ),
+        (
+            "test-gate-unit",
+            "unittest",
+            [sys.executable, "-m", "unittest", "scripts.test_test_gate"],
         ),
     ]
     for name, module, argv in stages:
@@ -413,6 +633,24 @@ def _acceptance_argv(powershell: str, script: Path, gui_data: Path, markdown_arg
     return [powershell, "-NoProfile", "-Command", command]
 
 
+def _prepare_fulltest_engine_and_inventory(results: list[StageResult]) -> bool:
+    # 实际模型/桌面测试只能使用当次官方最新引擎；已存在时核验并复用。
+    latest_result = run_logged(
+        "xberg-latest", [sys.executable, str(ROOT / "scripts" / "xberg_test_engine.py")], timeout=900.0
+    )
+    results.append(latest_result)
+    if latest_result.status != STATUS_OK:
+        return False
+    results.append(
+        run_logged(
+            "requirement-reference-inventory",
+            [sys.executable, str(ROOT / "scripts" / "requirement_coverage.py")],
+            timeout=60.0,
+        )
+    )
+    return not _has_blocking(results)
+
+
 def _fulltest_stages(results: list[StageResult]) -> None:
     cargo = shutil.which("cargo")
     powershell = shutil.which("powershell")
@@ -421,6 +659,8 @@ def _fulltest_stages(results: list[StageResult]) -> None:
         return
     if powershell is None:
         results.append(StageResult("powershell", STATUS_UNVERIFIED, "PATH 上找不到 powershell（acceptance.ps1 需要）"))
+        return
+    if not _prepare_fulltest_engine_and_inventory(results):
         return
     _python_quality_stages(results)
     if _has_blocking(results):

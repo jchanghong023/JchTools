@@ -77,7 +77,7 @@ jobs:
           if ($code -ne 0) { throw "Markdown acceptance failed: $code" }
       - name: Markdown acceptance postcondition unit tests
         shell: pwsh
-        run: python -m unittest scripts.test_markdown_acceptance
+        run: python -m unittest scripts.test_markdown_acceptance scripts.test_gui_smoke scripts.test_test_gate
       - name: Static checks
         shell: pwsh
         run: python scripts/static_check.py

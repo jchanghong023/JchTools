@@ -25,7 +25,7 @@
 验收隔离：资产根与 `JCHTOOLS_TEST_STATE_DIR` 必须位于仓库 `.tmp/` 下；脚本拒绝读取或
 写入仓库外状态库/资产根，不自动猜测 `target/debug` 中可能陈旧的 GUI。被测 GUI 须由
 `--gui-exe` 或 `JCHTOOLS_TEST_GUI_EXE` 显式指定。
-退出码：任一 FAIL→1；全部 NOT RUN→2；其余（有 PASS、无 FAIL）→0；参数错误→3。
+退出码：任一 FAIL→1；任一 NOT RUN（包括未选择的条目）→2；全部 PASS→0；参数错误→3。
 """
 
 from __future__ import annotations
@@ -1917,6 +1917,33 @@ def verify_common_postconditions(source_dir: Path, output_dir: Path, sources: di
 # ---------------------------------------------------------------- A25：Xberg 清单枚举。
 
 
+# 合成器的顶层输入扩展名；Office 从实际容器变体表导出，其余与各合成器产出一致。
+# 这里不包含嵌入图片类型：PPTX 内含 PNG 不等于验证过独立 PNG 公开入口。
+_SYNTH_INPUT_EXTENSIONS: dict[str, frozenset[str]] = {
+    "pnm": frozenset(("pbm", "pgm", "ppm")),
+    "images": frozenset(("jpg", "jpeg", "gif", "tif", "tiff", "bmp", "webp", "png")),
+    "office": frozenset(suffix for _, variants in _OFFICE_VARIANTS.values() for suffix, _ in variants),
+    "media": frozenset(("mp4", "m4a")),
+    "xlsx_drawing_order": frozenset(("xlsx",)),
+}
+_SYNTH_INPUT_EXTENSIONS.update({name: frozenset(("pptx",)) for name in SYNTHESIZERS if name.startswith("pptx_")})
+
+
+def _matrix_input_extensions() -> set[str]:
+    """A25 只排除 A01-A24 已登记真实顶层夹具或合成输入的扩展名。."""
+    covered: set[str] = set()
+    for item in ITEMS:
+        if item.group != "A" or item.item_id == "A25":
+            continue
+        extensions = {Path(name).suffix.lstrip(".").lower() for name in item.fixtures}
+        if item.item_id == "A18":
+            extensions.difference_update(A18_UNSUPPORTED_EXTENSIONS)
+        covered.update(extensions)
+        if item.synth:
+            covered.update(_SYNTH_INPUT_EXTENSIONS[item.synth])
+    return covered
+
+
 def xberg_format_extensions(xberg_exe: Path) -> tuple[list[str], str | None]:
     """与 src/markdown.rs::supported_formats 同参数只读调用，用于确定 sweep 集合."""
     done = subprocess.run(
@@ -1931,57 +1958,7 @@ def xberg_format_extensions(xberg_exe: Path) -> tuple[list[str], str | None]:
     parsed = _parse_json(done.stdout or "[]")
     if not _is_str_obj_list(parsed):
         return [], "xberg formats 输出不是 JSON 数组"
-    covered = {
-        "pdf",
-        "doc",
-        "docx",
-        "docm",
-        "dot",
-        "dotx",
-        "dotm",
-        "ppt",
-        "pptx",
-        "pptm",
-        "pps",
-        "ppsx",
-        "pot",
-        "potx",
-        "potm",
-        "xls",
-        "xlsx",
-        "xlsm",
-        "xlsb",
-        "xlt",
-        "xltx",
-        "xltm",
-        "xla",
-        "xlam",
-        "odt",
-        "ods",
-        "odp",
-        "png",
-        "jpg",
-        "jpeg",
-        "webp",
-        "bmp",
-        "gif",
-        "tif",
-        "tiff",
-        "jp2",
-        "j2k",
-        "j2c",
-        "jpx",
-        "jpm",
-        "mj2",
-        "jbig2",
-        "jb2",
-        "pnm",
-        "pbm",
-        "pgm",
-        "ppm",
-        "mp4",
-        "m4a",
-    }
+    covered = _matrix_input_extensions()
     extensions: list[str] = []
     for entry in parsed:
         extension = _str_field(entry, "extension")
@@ -2550,13 +2527,13 @@ def _verify_a24_outputs() -> str | None:
 
 
 def _verify_a24_stop(produced: int, convertible: int, texts: str) -> str | None:
-    """S10-07：停止相必须证明「后续文件未处理」（T-23），不能只看驱动链路成功。."""
+    """A24 补充检查停止状态及批次计数；T-23 当前文件取消与产物边界由 B01/S5 验证。."""
     if "已停止" not in texts:
         return "停止相未观察到「已停止」界面状态（T-23 须显示停止请求已生效）"
     if produced >= convertible:
         return (
             f"停止后产物 {produced} 份不少于可转换输入 {convertible} 份，"
-            "「当前文件结束后不再开始下一文件」的语义未被验证（判据形态同 gui_smoke S5）"
+            "停止批次未处理全部输入的计数边界未被验证；当前文件取消另须通过 B01/S5"
         )
     return None
 
@@ -2672,7 +2649,7 @@ def _run_matrix_a25(item: Item, ctx: Context) -> Outcome:
     sweep_dir = ctx.fixtures_dir / "matrix" / "format_sweep"
     missing = [ext for ext in extensions if next(sweep_dir.glob(f"*.{ext}"), None) is None]
     if missing:
-        reason = f"Xberg 清单中还有 {len(missing)} 个未覆盖格式缺最小烟测样本：{missing[:12]}；"
+        reason = f"Xberg 清单中还有 {len(missing)} 个未覆盖格式缺最小烟测样本：{missing}；"
         reason += f"请逐个放入 {sweep_dir}（无敏感内容的公开合成样本）"
         return Outcome(STATUS_NOT_RUN, reason)
     # sweep 样本按扩展名进入通用转换条目：注入 fixtures 让 _prepare_scratch 拷贝它们。
@@ -2760,6 +2737,24 @@ def _c03_delegate_stages(item_id: str, target: Path, env: dict[str, str]) -> Out
     return None
 
 
+def _c03_normal_state_artifact(path: Path, state_root: Path) -> bool:
+    """只允许源码声明的普通状态落位，不按名称豁免未知子树或下载目录。."""
+    relative = path.relative_to(state_root).as_posix()
+    task_directory = r"tasks/\d{8}T\d{6}-[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}"
+    if path.is_dir():
+        return relative in ("logs", "tasks") or re.fullmatch(task_directory, relative) is not None
+    return any(
+        re.fullmatch(pattern, relative) is not None
+        for pattern in (
+            r"organizer\.lock",
+            r"(?:config|hash-cache)\.sqlite3(?:-(?:wal|shm|journal))?",
+            r"xberg-[A-Za-z0-9_.-]+\.lock",
+            r"logs/jchtools\.log\.\d{4}-\d{2}-\d{2}",
+            task_directory + r"/task\.sqlite3(?:-(?:wal|shm|journal))?",
+        )
+    )
+
+
 def _run_c03_unconfigured(item: Item, ctx: Context) -> Outcome:
     target, blocked = _resolve_gui(ctx)
     if blocked is not None or target is None:
@@ -2775,41 +2770,33 @@ def _run_c03_unconfigured(item: Item, ctx: Context) -> Outcome:
         reason = error or f"gui_smoke 未提供 {missing_stages} 阶段（S1 启动/S15 旧工具操作无法委托）"
         return Outcome(STATUS_NOT_RUN, reason)
     scratch_assets = SCRATCH_ROOT / "c03-asset-root"
-    shutil.rmtree(scratch_assets, ignore_errors=True)
-    _ = scratch_assets.mkdir(parents=True)
+    scratch_state = SCRATCH_ROOT / "c03-state-root"
+    for directory in (scratch_assets, scratch_state):
+        shutil.rmtree(directory, ignore_errors=True)
+        _ = directory.mkdir(parents=True)
     env = {
         "JCHTOOLS_MARKDOWN_TEST_ASSET_ROOT": str(scratch_assets),
-        "JCHTOOLS_TEST_STATE_DIR": str(scratch_assets / "app-settings"),
+        "JCHTOOLS_TEST_ASSET_ROOT": str(scratch_assets),
+        "JCHTOOLS_TEST_STATE_DIR": str(scratch_state),
     }
     delegated = _c03_delegate_stages(item.item_id, target, env)
     if delegated is not None:
         return delegated
-    downloaded = [str(path.relative_to(scratch_assets)) for path in scratch_assets.rglob("*")]
-
-    # XB-18 应用设置库的隔离落位（test-hooks 下 JCHTOOLS_MARKDOWN_TEST_ASSET_ROOT 同时
-    # 隔离设置目录，见 src/xberg_settings.rs state_dir），首启创建属正常行为；本项
-    # 断言的是「不自动下载转换资产」。豁免必须收窄到设置库与代理锁文件本身：
-    # download_runtime 的下载基目录恰为 state_dir()/xberg-downloads
-    # （src/markdown_assets.rs），即 app-settings/xberg-downloads/ 也落在设置目录
-    # 之下——整棵子树豁免会让「未配置即自动下载」回归假通过（e2e 审查确认项）。
-    def _is_settings_artifact(path: str) -> bool:
-        posix = path.replace(os.sep, "/")
-        if posix == "app-settings":
-            return True
-        name = posix.rsplit("/", 1)[-1]
-        return (
-            name == "config.sqlite3"
-            or name.startswith("config.sqlite3-")
-            or (name.startswith("xberg-") and name.endswith(".lock"))
-        )
-
-    downloaded = [path for path in downloaded if not (path.startswith("app-settings") and _is_settings_artifact(path))]
+    # config::state_dir 与 xberg_settings 共用隔离根，P-10 日志和普通工具任务/哈希
+    # 缓存均为合法状态。资产根独立检查须为空；状态根只豁免源码明确声明的落位。
+    # xberg-downloads 在状态根下，不能因状态与资产分开便漏掉自动下载反例。
+    downloaded = [f"assets/{path.relative_to(scratch_assets).as_posix()}" for path in scratch_assets.rglob("*")]
+    downloaded.extend(
+        f"state/{path.relative_to(scratch_state).as_posix()}"
+        for path in scratch_state.rglob("*")
+        if not _c03_normal_state_artifact(path, scratch_state)
+    )
     if downloaded:
         return Outcome(STATUS_FAILED, f"未配置启动即写入/下载资产目录：{downloaded[:8]}")
     return Outcome(
         STATUS_OK,
         details=[
-            f"{item.item_id} 未配置启动正常退出，资产目录仅新建隔离设置库（XB-18），无资产下载",
+            f"{item.item_id} 未配置启动正常退出，隔离设置、日志与普通工具状态落位正常，无资产下载",
             f"{item.item_id} 同环境下旧工具（MD 整理 S15 合并/拆分）可观察操作通过，未受未配置状态影响",
         ],
     )
@@ -2906,14 +2893,19 @@ def _run_c07_old_cache(item: Item, ctx: Context) -> Outcome:
     return _run_conversion_item(item, ctx, None, tag_suffix="nooldcache")
 
 
-def _run_c08_c09(item: Item, ctx: Context, root: Path | None, label: str) -> Outcome:
+def _run_c08_c09(item: Item, _ctx: Context, root: Path | None, label: str) -> Outcome:
     if root is None or not root.is_dir():
         switch = "--installed-root" if item.item_id == "C08" else "--portable-root"
         return Outcome(STATUS_NOT_RUN, f"未提供{label}目录（{switch}）")
     exe = root / "JchTools.exe"
     if not exe.is_file():
         return Outcome(STATUS_NOT_RUN, f"{label}目录缺少 JchTools.exe：{exe}")
-    return _run_conversion_item(item, ctx, exe, tag_suffix=f"form-{item.item_id.lower()}")
+    # 当前驱动只支持 test-hooks 隔离。正式包必须在独立 Windows 用户会话中经
+    # 真实设置页配置；仅给 release 传测试环境变量会读写生产 KnownFolder。
+    # 尚无可核对的独立会话承接入口，不能启动正式包或用 debug EXE 冒充两种交付。
+    reason = f"{label} release 忽略测试状态/资产根环境变量；当前驱动缺少可核对的独立 Windows "
+    reason += "会话与真实配置，禁止启动正式 EXE 或读写生产配置。须在独立 Windows 会话中经真实设置页配置后验证。"
+    return Outcome(STATUS_NOT_RUN, reason, [f"{item.item_id} 未启动被测正式 EXE：{exe}"])
 
 
 def _run_env(item: Item, ctx: Context) -> Outcome:
@@ -2972,6 +2964,9 @@ def print_list() -> int:
 
 
 def _print_report(results: list[tuple[Item, Outcome]], report_path: Path | None) -> int:
+    # P-12/P-13：固定验收全集；--only 只控制执行，不能缩小报告分母。
+    observed = {item.item_id: outcome for item, outcome in results}
+    results = [(item, observed.get(item.item_id, Outcome(STATUS_NOT_RUN, "本次未选择执行"))) for item in ITEMS]
     print()
     print("==== 转 Markdown 验收汇总 ====")
     for item, outcome in results:
@@ -3008,7 +3003,7 @@ def _print_report(results: list[tuple[Item, Outcome]], report_path: Path | None)
         print(f"JSON 报告：{report_path}")
     if counts[STATUS_FAILED]:
         return 1
-    if counts[STATUS_OK] == 0:
+    if counts[STATUS_NOT_RUN] or counts[STATUS_OK] == 0:
         return 2
     return 0
 
