@@ -13,10 +13,12 @@
 from __future__ import annotations
 
 import argparse
+import contextlib
 import io
 import json
 import re
 import struct
+import sys
 from pathlib import Path
 from typing import cast
 
@@ -420,6 +422,12 @@ class _Arguments(argparse.Namespace):
 
 def main() -> int:
     """入口：默认重建受管夹具，--check 只做结构校验。."""
+    # 中文输出走管道时默认编码是 ANSI 代码页（CI 英文 runner 为 cp1252），打印
+    # 即崩（UnicodeEncodeError 掩盖真实校验结果）；与 test_gate 同口径强制 UTF-8。
+    with contextlib.suppress(AttributeError):
+        stream = sys.stdout
+        if isinstance(stream, io.TextIOWrapper):
+            stream.reconfigure(encoding="utf-8", errors="replace")
     parser = argparse.ArgumentParser(description="合成/校验 tests/markdown_fixtures 的可再生公开夹具（T-26）")
     _ = parser.add_argument("--check", dest="check_only", action="store_true", help="只校验在场夹具，不重写文件")
     args = parser.parse_args(namespace=_Arguments())
