@@ -171,9 +171,9 @@ foreach ($name in @('onnxruntime.dll','inference.onnx','NotoSansMonoCJKsc-Regula
 }
 # ===== 安装包（P-05/E-04）：Inno Setup 双形态交付的第二产物 =====
 # ISCC 不可用时如实标注 NOT RUN 并继续产出便携 ZIP（CI 负责装 Inno Setup；本地缺件不阻断）。
-# 安装包先于 ZIP 构建：BUILD-INFO.json 需要记录安装包阶段的真实结果，且必须在
-# Compress-Archive 之前写入 $folder，否则不会进入便携 ZIP（此前时序相反导致两份
-# 产物都不含构建记录，NOT RUN/NOT VERIFIED 标注只剩 CI 日志可见）。
+# ISCC 编译前先写共同构建记录，使安装包也包含测试 NOT RUN 与未验证项。
+# 安装包内的 installer 状态只能记录编译前事实，不能预报成功；
+# 编译结束后更新便携目录中的真实结果，再生成 ZIP。
 $version = (Select-String -LiteralPath 'Cargo.toml' -Pattern '^version\s*=\s*"([^"]+)"' | Select-Object -First 1).Matches[0].Groups[1].Value
 $setupSummary = 'NOT RUN (ISCC not found on this machine; CI release job builds the installer)'
 # Get-Command 找不到 ISCC 时返回 $null；Set-StrictMode Latest 下直接取 .Source 会抛
@@ -186,6 +186,8 @@ if (-not $isccPath) {
         "$env:ProgramFiles\Inno Setup 6\ISCC.exe"
     ) | Where-Object { Test-Path -LiteralPath $_ } | Select-Object -First 1
 }
+$info = @{created=(Get-Date).ToUniversalTime().ToString('o');rustc=(& rustc --version | Out-String).Trim();tests= $(if($SkipTests){'NOT RUN'}else{'cargo tests and real-engine archive tests passed on this build machine'});installer=$(if($isccPath){'NOT VERIFIED (this record was captured before the installer compiler completed)'}else{$setupSummary});windows_ui_manual='NOT VERIFIED BY THIS SCRIPT';multi_tb_benchmark='NOT VERIFIED BY THIS SCRIPT';source_validation='See git history and CI runs for validation evidence.'}
+[IO.File]::WriteAllText((Join-Path $folder 'BUILD-INFO.json'),($info | ConvertTo-Json -Depth 5),$utf8)
 if ($isccPath) {
     & $isccPath "/DSourceDir=$folder" "/DOutputDir=$(Join-Path $root 'dist')" "/DVersion=$version" (Join-Path $root 'installer\JchTools.iss')
     if ($LASTEXITCODE -ne 0) { throw "Inno Setup compiler failed: $LASTEXITCODE" }
@@ -196,7 +198,7 @@ if ($isccPath) {
 } else {
     Write-Warning "Inno Setup (ISCC.exe) not found: installer NOT RUN; portable ZIP is still produced."
 }
-$info = @{created=(Get-Date).ToUniversalTime().ToString('o');rustc=(& rustc --version | Out-String).Trim();tests= $(if($SkipTests){'NOT RUN'}else{'cargo tests and real-engine archive tests passed on this build machine'});installer=$setupSummary;windows_ui_manual='NOT VERIFIED BY THIS SCRIPT';multi_tb_benchmark='NOT VERIFIED BY THIS SCRIPT';source_validation='See git history and CI runs for validation evidence.'}
+$info.installer = $setupSummary
 [IO.File]::WriteAllText((Join-Path $folder 'BUILD-INFO.json'),($info | ConvertTo-Json -Depth 5),$utf8)
 $zip = "$folder.zip"
 # Compress-Archive 逐条目写入 LastWriteTime；早于 1980-01-01（ZIP DOS 纪元）的时间无法

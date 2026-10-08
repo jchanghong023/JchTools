@@ -10,8 +10,8 @@
 入口形态结论（依据 T-04 与 src/main.rs）：转 Markdown 只提供 GUI 入口，仓库没有
   CLI 子命令，src/markdown.rs::run 是库函数而非公开入口。因此 A 组矩阵条目的
   「真实公开入口」唯一形态是 GUI（pywinauto 驱动）；B 组引用 scripts/gui_smoke.py
-  的阶段；A25 的格式清单枚举与 src/markdown.rs::supported_formats 同参数只读调用
-  xberg.exe（formats --format json），仅用于确定待测格式集合，转换本身仍走 GUI。
+  的阶段；A18/A25 通过现有会话 broker 只读查询同一共享引擎的 formats，
+  不单独启动 xberg.exe，不以仓库内固定清单代替实际能力；转换本身仍走 GUI。
 
 用法：
     python scripts/markdown_acceptance.py --list
@@ -45,15 +45,22 @@ import subprocess
 import sys
 import threading
 import time
+import uuid
 import zipfile
 from pathlib import Path
 from typing import TYPE_CHECKING, cast, override
 
 import comtypes
 import pywintypes
+import win32api
 import win32con
+import win32event
+import win32file
 import win32gui
+import win32pipe
 import win32process
+import win32ts
+import winerror
 from PIL import Image, ImageDraw, ImageFont
 from pywinauto import Application, controls, findbestmatch, findwindows, timings
 from pywinauto.application import ProcessNotFoundError, WindowSpecification
@@ -61,12 +68,16 @@ from pywinauto.uia_defines import IUIA
 
 if not __package__:
     sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
-from scripts.gui_smoke import completion_confirms_new_run, own_process_tree
+from scripts.gui_smoke import completion_confirms_new_run, missing_isolation_env, own_process_tree
 
 if TYPE_CHECKING:
-    from collections.abc import Callable
+    from collections.abc import Buffer, Callable
     from typing import NoReturn, TypeIs
 
+    from _win32typing import (  # pyright: ignore[reportMissingModuleSource]  # 官方 pywin32 类型桩专用模块。
+        PyHANDLE,
+        PyOVERLAPPED,
+    )
     from pywinauto.base_wrapper import BaseWrapper
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -75,7 +86,11 @@ FIXTURES_DEFAULT = ROOT / "tests" / "markdown_fixtures"
 SCRATCH_ROOT = TMP_ROOT / "markdown-acceptance"
 GUI_SMOKE = ROOT / "scripts" / "gui_smoke.py"
 ASSET_MANIFEST = ROOT / "resources" / "markdown-assets.json"
-FORMAT_MANIFEST = ROOT / "resources" / "markdown-xberg-formats.json"
+BROKER_FORMATS_TIMEOUT = 15.0
+BROKER_PROTOCOL = 2
+BROKER_READ_CHUNK = 64 * 1024
+BROKER_MAX_MESSAGE = 512 * 1024 * 1024
+MANDATORY_DOCUMENT_EXTENSIONS = frozenset(("pdf", "docx", "pptx", "xlsx"))
 
 
 def _is_under_tmp(path: Path) -> bool:
@@ -89,7 +104,12 @@ def _is_under_tmp(path: Path) -> bool:
 
 def _isolated_environment_error() -> str | None:
     """拒绝将生产状态库或资产目录通过验收环境变量伪装成隔离根."""
-    for name in ("JCHTOOLS_TEST_ASSET_ROOT", "JCHTOOLS_MARKDOWN_TEST_ASSET_ROOT", "JCHTOOLS_TEST_STATE_DIR"):
+    for name in (
+        "JCHTOOLS_TEST_ASSET_ROOT",
+        "JCHTOOLS_MARKDOWN_TEST_ASSET_ROOT",
+        "JCHTOOLS_TEST_STATE_DIR",
+        "JCHTOOLS_SNAP_OCR_TEST_ASSET_ROOT",
+    ):
         value = os.environ.get(name)
         if not value:
             continue
@@ -103,6 +123,9 @@ def _isolated_environment_error() -> str | None:
 STATUS_OK = "PASS"
 STATUS_FAILED = "FAIL"
 STATUS_NOT_RUN = "NOT RUN"
+STATUS_OPTIONAL = "OPTIONAL"
+COMMON_FORMATS = frozenset(("doc", "docx", "xls", "xlsx", "ppt", "pptx", "pdf", "mp4"))
+OPTIONAL_COMMON_ITEMS = frozenset(("A16", "A17", "A18", "A19", "A20"))
 
 # 与 src/markdown_assets.rs 的常量同口径：资产根目录、固定版本与成员相对路径。
 DATA_DIRECTORY = "markdown-assets"
@@ -138,11 +161,8 @@ OLD_PROJECT_DIR = Path(r"D:\code1111111111\all2markdown")
 # 转 Markdown 页自上而下的「选择目录…」行数：输入 / 输出（Xberg 目录在设置页，XB-20）。
 CONVERT_ROW_COUNT = 2
 
-# T-08/A18：固定运行时清单目前只声明这三个 JPEG 2000 扩展名。
-# JPX/JPM/MJ2 属于未承诺格式，验收必须明确列为 unsupported，不能因上游
-# 变化或夹具在场就把它们扩展为产品支持范围。
-A18_SUPPORTED_EXTENSIONS = ("jp2", "j2k", "j2c")
-A18_UNSUPPORTED_EXTENSIONS = ("jpx", "jpm", "mj2")
+# A18 的合成夹具全集；支持/未支持分区只能由本轮共享引擎的实际 formats 决定。
+A18_INPUT_EXTENSIONS = ("jp2", "j2k", "j2c", "jpx", "jpm", "mj2")
 
 # A02 合成输入的图片数量；所有生成、媒体落盘和正文断言共用此常量。
 A02_IMAGE_COUNT = 6
@@ -218,25 +238,6 @@ def _str_field(entry: object, key: str) -> str | None:
         if isinstance(got, str):
             return got
     return None
-
-
-def _fixed_format_extensions() -> tuple[set[str], str | None]:
-    """读取与产品内置清单相同的固定格式集合（只读，不调用引擎）。."""
-    try:
-        parsed = _parse_json(FORMAT_MANIFEST.read_text(encoding="utf-8"))
-    except (OSError, ValueError) as error:
-        return set(), f"固定 Xberg 格式清单无法读取：{error}"
-    if not _is_str_obj_map(parsed):
-        return set(), "固定 Xberg 格式清单不是 JSON 对象"
-    rows = parsed.get("formats")
-    if not _is_str_obj_list(rows):
-        return set(), "固定 Xberg 格式清单缺少 formats 数组"
-    extensions = {
-        token
-        for row in rows
-        if (token := (_str_field(row, "extension") or "").strip().lstrip(".").lower()) and "." not in token
-    }
-    return extensions, None
 
 
 def _reconfigure_stdout() -> None:
@@ -1165,7 +1166,7 @@ ITEMS: tuple[Item, ...] = (
     Item(
         "A18",
         "A",
-        "JP2、J2K、J2C：固定清单支持；JPX、JPM、MJ2 明确不支持",
+        "JP2、J2K、J2C、JPX、JPM、MJ2：按当前共享引擎能力验证支持与排除",
         _MATRIX_COMMON,
         (
             "matrix/jpeg2000/jp2.jp2",
@@ -1175,7 +1176,7 @@ ITEMS: tuple[Item, ...] = (
             "matrix/jpeg2000/jpm.jpm",
             "matrix/jpeg2000/mj2.mj2",
         ),
-        "固定 Xberg 清单仅声明 jp2/j2k/j2c；jpx/jpm/mj2 必须作为 unsupported 明确排除，不扩大产品支持集合",
+        "本轮 broker formats 决定支持分区；声明支持须逐输入产物，未声明须混跑明确排除",
         needs_assets="xberg",
     ),
     Item(
@@ -1240,7 +1241,7 @@ ITEMS: tuple[Item, ...] = (
     Item(
         "A25",
         "A",
-        "固定 Xberg 格式清单中的其余格式：逐项最小烟测（旧 Office、OpenDocument 等）",
+        "当前共享 Xberg 格式清单中的其余格式：逐项最小烟测（旧 Office、OpenDocument 等）",
         _MATRIX_COMMON,
         (),
         "需真实 Xberg 在场枚举 formats 清单后确定集合；样本放 matrix/format_sweep/<扩展名> 各一",
@@ -1407,11 +1408,21 @@ class Context:
     assets: AssetProbe
     stages: tuple[str, ...] | None = None
     stages_error: str | None = None
+    format_rows: list[object] | None = None
+    formats_error: str | None = None
+    broker_process: subprocess.Popen[bytes] | None = None
+    broker_close: Callable[[], None] | None = None
+    profile: str = "full"
 
     def cached_stages(self) -> tuple[tuple[str, ...], str | None]:
         if self.stages is None:
             self.stages, self.stages_error = _gui_smoke_stages()
         return self.stages, self.stages_error
+
+    def cached_formats(self) -> tuple[list[object], str | None]:
+        if self.format_rows is None:
+            self.format_rows, self.formats_error = _shared_format_rows(self)
+        return self.format_rows, self.formats_error
 
 
 def _resolve_gui(ctx: Context, exe: Path | None = None) -> tuple[Path | None, str | None]:
@@ -1660,28 +1671,91 @@ class _ReclickState:
         _click_button(window, "开始转换")
 
 
+def _process_isolation_ready(state: Path, pid: int, role: str, offsets: dict[Path, int]) -> bool:
+    """要求隔离 SQLite 及本轮同角色/PID 的新增启动日志，预播种或旧日志不算证明。."""
+    database = state / "config.sqlite3"
+    if not database.is_file() or not _is_under_tmp(database):
+        return False
+    for path in (state / "logs").glob("jchtools.log.*"):
+        if not path.is_file() or not _is_under_tmp(path):
+            continue
+        try:
+            with path.open("rb") as stream:
+                _ = stream.seek(offsets.get(path, 0))
+                text = stream.read().decode("utf-8", errors="replace")
+        except OSError:
+            continue
+        for line in text.splitlines():
+            if (
+                "诊断日志已初始化（P-10）" in line
+                and re.search(rf'(?:^|\s)role="{re.escape(role)}"(?:\s|$)', line)
+                and re.search(rf"(?:^|\s)pid={pid}(?:\s|$)", line)
+            ):
+                return True
+    return False
+
+
+def _wait_process_isolation(
+    state: Path, proc: subprocess.Popen[bytes], role: str, offsets: dict[Path, int], deadline: float
+) -> bool:
+    """在发起业务操作前有界等待实际隔离证据，无法证明时 fail-closed 拒绝。."""
+    while time.monotonic() < deadline:
+        if _process_isolation_ready(state, proc.pid, role, offsets):
+            return True
+        if proc.poll() is not None:
+            return False
+        time.sleep(min(0.1, max(0.0, deadline - time.monotonic())))
+    return False
+
+
+def _conversion_preflight_error() -> str | None:
+    """启动 GUI 前同时检查必需隔离键与隔离根，保持原拒绝诊断。."""
+    missing = missing_isolation_env(os.environ)
+    if missing:
+        return f"GUI 验收缺少隔离环境变量：{missing}，拒绝启动"
+    return _isolated_environment_error()
+
+
+def _configure_conversion_paths(window: WindowSpecification, input_dir: Path, output_dir: Path) -> str | None:
+    """进入转换页、设置输入输出并等待开始就绪，不参与进程归属或启动守卫。."""
+    _click_button(window, "转 Markdown")
+    rows = _convert_directory_rows(window)
+    if len(rows) < CONVERT_ROW_COUNT:
+        return f"转 Markdown 页「选择目录…」按钮不足两行（实得 {len(rows)}）"
+    _set_row_edit(window, rows[0], str(input_dir))
+    _set_row_edit(window, rows[1], str(output_dir))
+    if not _wait_start_ready(window, READINESS_TIMEOUT):
+        return "「开始转换」始终未就绪（组件未初始化或就绪检查失败）"
+    return None
+
+
 def drive_conversion(exe: Path, input_dir: Path, output_dir: Path, *, stop_after_busy: bool = False) -> GuiRun:
     """经真实 GUI 公开入口执行一次转换并收集可观察结果.
 
     注意：本函数只在资产齐全的真实环境被调用（前置检查先行）；无资产环境从不执行，
     其内部链路未在当前环境验证——这与 NOT RUN 的如实呈现是同一立场，不得虚构已验证。
     """
+    environment_error = _conversion_preflight_error()
+    if environment_error is not None:
+        return GuiRun([], "", environment_error)
+    state = Path(os.environ["JCHTOOLS_TEST_STATE_DIR"])
+    offsets = {path: path.stat().st_size for path in (state / "logs").glob("jchtools.log.*") if path.is_file()}
+    startup_deadline = time.monotonic() + GUI_WINDOW_TIMEOUT
     proc: subprocess.Popen[bytes] = subprocess.Popen([str(exe)])
     window: WindowSpecification | None = None
     owner = None
     try:
         owner = own_process_tree(proc)
         _, window = _connect_window(proc.pid)
-        _click_button(window, "转 Markdown")
-        rows = _convert_directory_rows(window)
-        if len(rows) < CONVERT_ROW_COUNT:
-            message = f"转 Markdown 页「选择目录…」按钮不足两行（实得 {len(rows)}）"
-            return GuiRun([], _window_texts(window), message)
-        _set_row_edit(window, rows[0], str(input_dir))
-        _set_row_edit(window, rows[1], str(output_dir))
-        if not _wait_start_ready(window, READINESS_TIMEOUT):
-            message = "「开始转换」始终未就绪（组件未初始化或就绪检查失败）"
-            return GuiRun([], _window_texts(window), message)
+        if not _wait_process_isolation(state, proc, "gui", offsets, startup_deadline):
+            return GuiRun(
+                [],
+                "",
+                "GUI 未证明使用隔离配置（须隔离 SQLite 与本轮 GUI PID 启动日志）；请使用 test-hooks 构建",
+            )
+        setup_error = _configure_conversion_paths(window, input_dir, output_dir)
+        if setup_error is not None:
+            return GuiRun([], _window_texts(window), setup_error)
         previous_texts = _window_texts(window)
         _click_button(window, "开始转换")
         saw_busy = False
@@ -1795,7 +1869,6 @@ A24_MEDIA_SYNTH_FILES = (
 
 _INPUT_RULES: dict[str, dict[str, InputRule]] = {
     "A16": {name: InputRule(must_produce=False) for name in (*_BROKEN_IMAGE_INPUTS, *_OPTIONAL_IMAGE_INPUTS)},
-    "A18": {f"{name}.{name}": InputRule(must_produce=False) for name in A18_UNSUPPORTED_EXTENSIONS},
     "A20": {name: InputRule(must_produce=False, expect_failure=True) for name in _BROKEN_IMAGE_INPUTS}
     | {name: InputRule(must_produce=False) for name in _OPTIONAL_IMAGE_INPUTS},
     "A24": {"damaged.mp4": InputRule(must_produce=False, expect_failure=True)},
@@ -1831,7 +1904,7 @@ def _per_input_problems(item_id: str, files: list[str], produced: list[str], tex
         if rule.expect_failure:
             if expected in produced_names:
                 problems.append(f"预期失败输入产出了结果（应失败不留半成品，T-25）：{name}")
-            elif name not in texts:
+            elif re.search(rf"(?m)^失败：{re.escape(name)} · \S[^\n]*$", texts) is None:
                 problems.append(f"预期失败输入缺少失败诊断（T-16/T-24 须显示文件与原因）：{name}")
     return problems
 
@@ -1936,39 +2009,247 @@ def _matrix_input_extensions() -> set[str]:
         if item.group != "A" or item.item_id == "A25":
             continue
         extensions = {Path(name).suffix.lstrip(".").lower() for name in item.fixtures}
-        if item.item_id == "A18":
-            extensions.difference_update(A18_UNSUPPORTED_EXTENSIONS)
         covered.update(extensions)
         if item.synth:
             covered.update(_SYNTH_INPUT_EXTENSIONS[item.synth])
     return covered
 
 
-def xberg_format_extensions(xberg_exe: Path) -> tuple[list[str], str | None]:
-    """与 src/markdown.rs::supported_formats 同参数只读调用，用于确定 sweep 集合."""
-    done = subprocess.run(
-        [str(xberg_exe), "formats", "--format", "json"],
-        capture_output=True,
-        text=True,
-        check=False,
-        cwd=str(xberg_exe.parent),
+def _broker_pipe_identity(state: str) -> tuple[str, str]:
+    """与 xberg_runtime_windows::Identity 共用原始状态路径和当前 Windows 会话身份。."""
+    session_query = cast("Callable[[int], int]", vars(win32ts)["ProcessIdToSessionId"])
+    digest = hashlib.sha256(f"{state}:{session_query(os.getpid())}".encode()).hexdigest()
+    return rf"\\.\pipe\jchtools-xberg-{digest}", digest
+
+
+def _formats_pipe_is_live(pipe: PyHANDLE) -> bool:
+    """仅接受仍存活的代理连接；上个 GUI Job 的关闭端点不是新请求连接。."""
+    try:
+        server_query = cast("Callable[[int], int]", vars(win32pipe)["GetNamedPipeServerProcessId"])
+        server_pid = server_query(pipe.handle)
+        process = win32api.OpenProcess(win32con.SYNCHRONIZE, 0, server_pid)
+    except pywintypes.error as error:
+        if error.winerror in (
+            winerror.ERROR_BROKEN_PIPE,
+            winerror.ERROR_PIPE_NOT_CONNECTED,
+            winerror.ERROR_NO_DATA,
+            winerror.ERROR_INVALID_PARAMETER,
+        ):
+            return False
+        raise
+    try:
+        status = win32event.WaitForSingleObject(process, 0)
+        if status == win32event.WAIT_OBJECT_0:
+            return False
+        if status != win32event.WAIT_TIMEOUT:
+            message = "无法核验共享 formats 管道的代理进程状态"
+            raise RuntimeError(message)
+        return True
+    finally:
+        win32api.CloseHandle(process)
+
+
+def _connect_live_formats_pipe(name: str) -> PyHANDLE:
+    candidate = win32file.CreateFile(
+        name,
+        win32con.GENERIC_READ | win32con.GENERIC_WRITE,
+        0,
+        None,
+        win32con.OPEN_EXISTING,
+        win32con.FILE_FLAG_OVERLAPPED,
+        None,
     )
-    if done.returncode != 0:
-        return [], f"xberg formats 调用失败（退出码 {done.returncode}）：{(done.stderr or '').strip()[:200]}"
-    parsed = _parse_json(done.stdout or "[]")
-    if not _is_str_obj_list(parsed):
-        return [], "xberg formats 输出不是 JSON 数组"
-    covered = _matrix_input_extensions()
-    extensions: list[str] = []
-    for entry in parsed:
+    accepted = False
+    try:
+        accepted = _formats_pipe_is_live(candidate)
+        if accepted:
+            return candidate
+    finally:
+        if not accepted:
+            candidate.Close()
+    # 尚未发送协议请求；连接层仅排除已经退出的旧代理。
+    raise pywintypes.error(winerror.ERROR_PIPE_NOT_CONNECTED, "formats connect", "旧代理已经退出")
+
+
+def _open_formats_pipe(ctx: Context, state: str, deadline: float) -> PyHANDLE:
+    pipe, digest = _broker_pipe_identity(state)
+    launched = False
+    while time.monotonic() < deadline:
+        try:
+            return _connect_live_formats_pipe(pipe)
+        except pywintypes.error as error:
+            if error.winerror not in (
+                winerror.ERROR_FILE_NOT_FOUND,
+                winerror.ERROR_PIPE_BUSY,
+                winerror.ERROR_PIPE_NOT_CONNECTED,
+                winerror.ERROR_NO_DATA,
+            ):
+                raise
+            if error.winerror != winerror.ERROR_PIPE_BUSY and not launched:
+                if (Path(state) / f"background-stopped-{digest}").exists():
+                    message = "当前隔离会话已停止后台；formats 查询不得重新启动服务"
+                    raise RuntimeError(message) from error
+                exe, reason = _resolve_gui(ctx)
+                if reason is not None or exe is None:
+                    raise RuntimeError(reason or "缺少 JchTools GUI 可执行文件") from error
+                root = Path(state)
+                offsets = {
+                    path: path.stat().st_size for path in (root / "logs").glob("jchtools.log.*") if path.is_file()
+                }
+                proc: subprocess.Popen[bytes] = subprocess.Popen(
+                    [str(exe), "--xberg-broker"],
+                    stdin=subprocess.DEVNULL,
+                    stdout=subprocess.DEVNULL,
+                    stderr=subprocess.DEVNULL,
+                    creationflags=subprocess.CREATE_NO_WINDOW,
+                )
+                ctx.broker_process = proc
+                owner = own_process_tree(proc)
+                ctx.broker_close = owner.close
+                launched = True
+                if not _wait_process_isolation(root, proc, "xberg-broker", offsets, deadline):
+                    message = "新启动 broker 未证明隔离 SQLite 与本轮 PID；请使用 test-hooks 构建"
+                    raise RuntimeError(message) from error
+        time.sleep(min(0.02, max(0.0, deadline - time.monotonic())))
+    message = "连接共享 formats 管道超时"
+    raise TimeoutError(message)
+
+
+def _finish_pipe_io(handle: int, overlap: PyOVERLAPPED, status: int, deadline: float) -> int:
+    if status == winerror.ERROR_IO_PENDING:
+        remaining = max(0, int((deadline - time.monotonic()) * 1000))
+        if win32event.WaitForSingleObject(overlap.hEvent, remaining) != win32event.WAIT_OBJECT_0:
+            # 所有 I/O 都由本线程在独立连接发起；CancelIo 不会取消其他连接/线程。
+            win32file.CancelIo(handle)
+            # 取消必须到达终态才释放 OVERLAPPED/read buffer，不能遗留后台 I/O。
+            with contextlib.suppress(pywintypes.error):
+                _ = win32file.GetOverlappedResult(handle, overlap, 1)
+            message = "共享 formats 读写超时"
+            raise TimeoutError(message)
+    return win32file.GetOverlappedResult(handle, overlap, 0)
+
+
+def _exchange_formats(pipe: PyHANDLE, runtime: Path, request_id: str, deadline: float) -> object:
+    root = str(runtime.resolve(strict=True))
+    if not root.startswith("\\\\?\\"):
+        root = "\\\\?\\UNC\\" + root[2:] if root.startswith("\\\\") else "\\\\?\\" + root
+    envelope = {
+        "runtime_dir": root,
+        "request": {"id": request_id, "command": "formats", "timeout_ms": int(BROKER_FORMATS_TIMEOUT * 1000)},
+    }
+    payload = (json.dumps(envelope, ensure_ascii=False) + "\n").encode("utf-8")
+    event = win32event.CreateEvent(None, 1, 0, None)
+    try:
+        if time.monotonic() >= deadline:
+            message = "共享 formats 请求期限已到"
+            raise TimeoutError(message)
+        overlap = pywintypes.OVERLAPPED()
+        overlap.hEvent = int(event)
+        status, _ = win32file.WriteFile(pipe.handle, payload, overlap)
+        if _finish_pipe_io(pipe.handle, overlap, status, deadline) != len(payload):
+            message = "共享 formats 请求未完整发送"
+            raise RuntimeError(message)
+        response = bytearray()
+        while time.monotonic() < deadline:
+            win32event.ResetEvent(int(event))
+            overlap = pywintypes.OVERLAPPED()
+            overlap.hEvent = int(event)
+            buffer = win32file.AllocateReadBuffer(BROKER_READ_CHUNK)
+            status, _ = win32file.ReadFile(pipe.handle, buffer, overlap)
+            count = _finish_pipe_io(pipe.handle, overlap, status, deadline)
+            if not count:
+                message = "共享 formats 管道未返回完整 JSON 行"
+                raise RuntimeError(message)
+            view = memoryview(cast("Buffer", cast("object", buffer)))
+            response.extend(view[:count])
+            if len(response) > BROKER_MAX_MESSAGE:
+                message = "共享 formats 响应超过 broker 消息边界"
+                raise RuntimeError(message)
+            newline = response.find(b"\n")
+            if newline >= 0:
+                return _parse_json(response[:newline].decode("utf-8"))
+        message = "共享 formats 响应超时"
+        raise TimeoutError(message)
+    finally:
+        win32api.CloseHandle(event)
+
+
+def _formats_request_inputs(ctx: Context) -> tuple[str, Path] | str:
+    """准备现有 broker 请求的隔离状态与运行时输入，失败保留原具体诊断。."""
+    missing = missing_isolation_env(os.environ)
+    if missing:
+        return f"共享 formats 查询缺少隔离环境：{missing}，拒绝启动"
+    state = os.environ["JCHTOOLS_TEST_STATE_DIR"]
+    environment_error = _isolated_environment_error()
+    if environment_error is not None:
+        return environment_error
+    runtime = ctx.assets.runtime_dir
+    if runtime is None:
+        return "当前 Xberg 目录不可用，无法查询共享引擎能力"
+    return state, runtime
+
+
+def _shared_format_rows(ctx: Context) -> tuple[list[object], str | None]:
+    """仅复用会话 broker 的 formats；不直启引擎，不重试协议失败、不回退静态清单。."""
+    inputs = _formats_request_inputs(ctx)
+    if isinstance(inputs, str):
+        return [], inputs
+    state, runtime = inputs
+    deadline = time.monotonic() + BROKER_FORMATS_TIMEOUT
+    request_id = f"acceptance-formats-{uuid.uuid4().hex}"
+    try:
+        pipe = _open_formats_pipe(ctx, state, deadline)
+        try:
+            response = _exchange_formats(pipe, runtime, request_id, deadline)
+        finally:
+            pipe.Close()
+    except (OSError, RuntimeError, ValueError, pywintypes.error) as error:
+        return [], f"共享 formats 查询失败：{error}"
+    if (
+        not _is_str_obj_map(response)
+        or response.get("id") != request_id
+        or response.get("jchtools_broker_protocol") != BROKER_PROTOCOL
+        or response.get("ok") is not True
+    ):
+        return [], "共享 formats 响应身份、协议或成功状态不可验证"
+    rows = response.get("formats")
+    if not _is_str_obj_list(rows):
+        return [], "共享 formats 响应缺少 formats 数组"
+    return rows, None
+
+
+def _runtime_format_extensions(ctx: Context) -> tuple[set[str], str | None]:
+    rows, error = ctx.cached_formats()
+    if error is not None:
+        return set(), error
+    extensions: set[str] = set()
+    for entry in rows:
         extension = _str_field(entry, "extension")
         mime = _str_field(entry, "mime_type")
         if extension is None or mime is None:
-            continue
+            return set(), "共享 formats 含不可解析条目，不据此声明覆盖"
         token = extension.strip().lstrip(".").lower()
-        if token and "." not in token and token not in covered and not mime.startswith(("audio/", "video/")):
-            extensions.append(token)
-    return sorted(set(extensions)), None
+        if not token or "." in token or not mime.strip():
+            return set(), "共享 formats 含无效扩展名/MIME，不据此声明覆盖"
+        extensions.add(token)
+    missing = sorted(MANDATORY_DOCUMENT_EXTENSIONS - extensions)
+    if missing:
+        return set(), f"当前共享引擎未声明产品必需格式：{missing}，不能据旧清单声明就绪"
+    return extensions, None
+
+
+def xberg_format_extensions(ctx: Context) -> tuple[list[str], str | None]:
+    """A25 枚举当前共享引擎能力，排除其他矩阵已登记的真实输入扩展名。."""
+    extensions, error = _runtime_format_extensions(ctx)
+    if error is not None:
+        return [], error
+    rows, _ = ctx.cached_formats()
+    # A18 按其六种实际声明逐项验证；A25 只枚举其余文档/图片，不扩大媒体范围。
+    for entry in rows:
+        if (_str_field(entry, "mime_type") or "").startswith(("audio/", "video/")):
+            token = (_str_field(entry, "extension") or "").strip().lstrip(".").lower()
+            extensions.discard(token)
+    return sorted(extensions - _matrix_input_extensions()), None
 
 
 # ---------------------------------------------------------------- B 组：gui_smoke 阶段引用。
@@ -2473,11 +2754,11 @@ def _run_matrix_a02(item: Item, ctx: Context) -> Outcome:
     )
 
 
-def _verify_a24_video(outputs: Path) -> str | None:
+def _verify_a24_video(outputs: Path, suffixes: tuple[str, ...] = ("mp4", "m4a")) -> str | None:
     """真实中文视频产物结构断言（标题/时长/转录/时间戳）与损坏音轨失败隔离."""
     if (outputs / "damaged_mp4.md").exists():
         return "损坏音轨产出了结果文件（应为失败，不留半成品）"
-    for suffix in ("mp4", "m4a"):
+    for suffix in suffixes:
         good = outputs / f"video-to-notes-intro-zh_{suffix}.md"
         if not good.is_file():
             return f"真实中文 {suffix.upper()} 未产出转录结果"
@@ -2487,6 +2768,11 @@ def _verify_a24_video(outputs: Path) -> str | None:
             return f"媒体结果缺少结构标记：{missing}"
         if not re.search(r"\d{2}:\d{2}:\d{2}\.\d{3}", text):
             return f"真实中文 {suffix.upper()} 结果缺少时间戳（HH:MM:SS.mmm）"
+        transcript = text.partition("## 转录")[2]
+        if not re.search(
+            r"\[\d{2}:\d{2}:\d{2}\.\d{3}\s+-{1,2}>\s+\d{2}:\d{2}:\d{2}\.\d{3}\]\s+[^\n]*[\u4e00-\u9fff]", transcript
+        ):
+            return f"真实中文 {suffix.upper()} 缺少带时间戳的中文转录正文"
     return None
 
 
@@ -2538,7 +2824,19 @@ def _verify_a24_stop(produced: int, convertible: int, texts: str) -> str | None:
     return None
 
 
+def _run_common_mp4(item: Item, ctx: Context) -> Outcome:
+    outcome = _run_conversion_item(item, ctx, None, tag_suffix="common-mp4")
+    if outcome.status != STATUS_OK:
+        return outcome
+    problem = _verify_a24_video(SCRATCH_ROOT / "a24-common-mp4" / "output", ("mp4",))
+    if problem is not None:
+        return Outcome(STATUS_FAILED, problem, outcome.details)
+    return Outcome(STATUS_OK, details=["既有 MP4 中文转录与时间戳、原文件保护通过", *outcome.details])
+
+
 def _run_matrix_a24(item: Item, ctx: Context) -> Outcome:
+    if ctx.profile == "common":
+        return _run_common_mp4(item, ctx)
     stopped_runs: list[GuiRun] = []
     stop_phase = _run_conversion_item(item, ctx, None, stop_mode=True, tag_suffix="stop", capture=stopped_runs)
     if stop_phase.status != STATUS_OK:
@@ -2564,86 +2862,92 @@ def _run_matrix_a24(item: Item, ctx: Context) -> Outcome:
     )
 
 
-def _verify_a18_unsupported_rejected(output_dir: Path, texts: str) -> str | None:
-    """S10-06：未承诺格式不得产出结果，且批次统计证明它们未进入转换（T-07/T-08）."""
+def _verify_a18_unsupported_rejected(output_dir: Path, texts: str, supported: set[str]) -> str | None:
+    """S10-06/T-08：按实际能力分区，未声明格式无产物且不进入批次统计。."""
     if not output_dir.is_dir():
         return f"混跑输出目录缺失：{output_dir}"
-    leftovers = sorted(
-        path.name for path in output_dir.rglob("*.md") if path.name.endswith(("_jpx.md", "_jpm.md", "_mj2.md"))
-    )
+    unsupported_suffixes = tuple(f"_{name}.md" for name in A18_INPUT_EXTENSIONS if name not in supported)
+    leftovers = sorted(path.name for path in output_dir.rglob("*.md") if path.name.endswith(unsupported_suffixes))
     if leftovers:
-        return f"未承诺格式产出了结果文件（应作为 unsupported 明确拒绝）：{leftovers}"
+        return f"当前引擎未声明格式产出了结果文件（应明确跳过）：{leftovers}"
     summary = re.findall(r"成功 (\d+)，部分提取 (\d+)，失败 (\d+)", texts)
     if not summary:
         return "混跑后未观察到批次统计（成功/部分提取/失败），无法核对 unsupported 排除"
     counted = sum(int(field) for field in cast("list[str]", summary[-1]))
-    if counted != len(A18_SUPPORTED_EXTENSIONS):
+    if counted != len(supported):
         return (
-            f"批次统计计入 {counted} 个文件，预期仅 {len(A18_SUPPORTED_EXTENSIONS)} 个支持格式；"
-            "未承诺格式必须被明确跳过/拒绝（T-07 未承诺类型不进入待转换列表）"
+            f"批次统计计入 {counted} 个文件，预期仅 {len(supported)} 个实际支持格式；"
+            "未声明格式必须被明确跳过（T-07 未承诺类型不进入待转换列表）"
         )
     return None
 
 
-def _a18_manifest_guard(item: Item, ctx: Context) -> Outcome | None:
-    """清单边界前置：夹具在场、固定清单声明与 A18 支持边界一致；None 即通过."""
+def _a18_supported_extensions(item: Item, ctx: Context) -> set[str] | Outcome:
+    """A18 行为执行前确认全部夹具与实际能力，不以静态清单代替。."""
     fixture_error = _fixture_precondition(item, ctx.fixtures_dir)
     if fixture_error is not None:
         return Outcome(STATUS_NOT_RUN, fixture_error)
-    fixed, error = _fixed_format_extensions()
+    extensions, error = _runtime_format_extensions(ctx)
     if error is not None:
         return Outcome(STATUS_NOT_RUN, error)
-    unsupported_advertised = sorted(set(A18_UNSUPPORTED_EXTENSIONS) & fixed)
-    if unsupported_advertised:
-        return Outcome(
-            STATUS_FAILED,
-            f"固定格式清单错误声明不支持格式为可用：{unsupported_advertised}",
-        )
-    missing_supported = sorted(set(A18_SUPPORTED_EXTENSIONS) - fixed)
-    if missing_supported:
-        return Outcome(
-            STATUS_NOT_RUN,
-            f"固定格式清单未声明 A18 支持格式：{missing_supported}；不据此声称支持",
-        )
-    return None
+    supported = {str(extension) for extension in A18_INPUT_EXTENSIONS if extension in extensions}
+    if not supported:
+        return Outcome(STATUS_NOT_RUN, "当前共享引擎未声明 A18 六种夹具中的任何格式，不能据静态清单声称支持")
+    return supported
 
 
 def _run_matrix_a18(item: Item, ctx: Context) -> Outcome:
-    """A18：按 T-08 固定清单验证支持边界，并实跑混入 jpx/jpm/mj2 的转换核对拒绝。."""
-    guarded = _a18_manifest_guard(item, ctx)
-    if guarded is not None:
-        return guarded
-    supported_fixtures = tuple(
-        name for name in item.fixtures if Path(name).suffix.lstrip(".").lower() in A18_SUPPORTED_EXTENSIONS
-    )
+    """A18：同一共享引擎的实际能力决定支持产物及混跑排除规则。."""
+    supported = _a18_supported_extensions(item, ctx)
+    if isinstance(supported, Outcome):
+        return supported
+    _INPUT_RULES["A18"] = {
+        Path(name).name: InputRule(must_produce=Path(name).suffix.lstrip(".").lower() in supported)
+        for name in item.fixtures
+    }
+    supported_fixtures = tuple(name for name in item.fixtures if Path(name).suffix.lstrip(".").lower() in supported)
     supported_item = dataclasses.replace(item, fixtures=supported_fixtures)
     outcome = _run_conversion_item(supported_item, ctx, None, tag_suffix="supported")
     if outcome.status != STATUS_OK:
         return outcome
-    # S10-06：jpx/jpm/mj2 只在清单层声明 unsupported 不构成行为证据；把它们与支持
-    # 格式同目录再转一次，断言无对应成功产物且批次统计只计入支持格式。
+    # 仅清单声明不构成行为证据：混跑六种真实夹具，逐输入核对支持产物并核对未声明排除。
     mixed_runs: list[GuiRun] = []
     mixed_outcome = _run_conversion_item(item, ctx, None, tag_suffix="mixed", capture=mixed_runs)
     if mixed_outcome.status != STATUS_OK:
         return mixed_outcome
     mixed_texts = mixed_runs[0].texts if mixed_runs else ""
-    problem = _verify_a18_unsupported_rejected(SCRATCH_ROOT / "a18-mixed" / "output", mixed_texts)
+    problem = _verify_a18_unsupported_rejected(SCRATCH_ROOT / "a18-mixed" / "output", mixed_texts, supported)
     if problem is not None:
         return Outcome(STATUS_FAILED, problem, list(mixed_outcome.details))
-    unsupported = ", ".join(f".{extension}" for extension in A18_UNSUPPORTED_EXTENSIONS)
+    unsupported = ", ".join(f".{name}" for name in A18_INPUT_EXTENSIONS if name not in supported) or "无"
     return Outcome(
         STATUS_OK,
         details=[
             *outcome.details,
-            f"固定清单明确 unsupported：{unsupported}；混跑确认无对应产物且批次统计仅计入支持格式",
+            f"当前共享引擎未声明格式：{unsupported}；混跑确认逐输入产物与统计均符合实际能力",
         ],
     )
 
 
+def _run_common_old_office(item: Item, ctx: Context) -> Outcome:
+    outcome = _run_conversion_item(item, ctx, None, tag_suffix="common-office")
+    if outcome.status != STATUS_OK:
+        return outcome
+    output = SCRATCH_ROOT / "a25-common-office" / "output"
+    for suffix in ("doc", "xls", "ppt"):
+        result = output / f"legacy_{suffix}.md"
+        expected = f"JCHTOOLS-LEGACY-{suffix.upper()}"
+        if not result.is_file() or expected not in result.read_text(encoding="utf-8"):
+            return Outcome(STATUS_FAILED, f"旧 Office {suffix.upper()} 缺少合成正文标记", outcome.details)
+    return outcome
+
+
 def _run_matrix_a25(item: Item, ctx: Context) -> Outcome:
+    if ctx.profile == "common":
+        return _run_common_old_office(item, ctx)
     if ctx.assets.xberg_exe is None:
         return Outcome(STATUS_NOT_RUN, f"资产未就绪。获取方式：{ctx.assets.acquire_hint()}")
-    extensions, error = xberg_format_extensions(ctx.assets.xberg_exe)
+    extensions, error = xberg_format_extensions(ctx)
     if error:
         return Outcome(STATUS_NOT_RUN, error)
     sweep_dir = ctx.fixtures_dir / "matrix" / "format_sweep"
@@ -2698,6 +3002,8 @@ def _run_c01_installed_scan(item: Item, ctx: Context) -> Outcome:
         return Outcome(STATUS_NOT_RUN, message)
     if not root.is_dir():
         return Outcome(STATUS_NOT_RUN, f"安装目录不存在：{root}")
+    if not (root / "JchTools.exe").is_file():
+        return Outcome(STATUS_FAILED, f"安装目录缺少 JchTools.exe：{root}")
     hits = scan_forbidden_assets(root)
     if hits:
         message = f"安装版携带转换专用资产 {len(hits)} 项：{hits[:8]}"
@@ -2778,6 +3084,7 @@ def _run_c03_unconfigured(item: Item, ctx: Context) -> Outcome:
         "JCHTOOLS_MARKDOWN_TEST_ASSET_ROOT": str(scratch_assets),
         "JCHTOOLS_TEST_ASSET_ROOT": str(scratch_assets),
         "JCHTOOLS_TEST_STATE_DIR": str(scratch_state),
+        "JCHTOOLS_SNAP_OCR_TEST_ASSET_ROOT": str(scratch_assets),
     }
     delegated = _c03_delegate_stages(item.item_id, target, env)
     if delegated is not None:
@@ -2963,10 +3270,52 @@ def print_list() -> int:
     return 0
 
 
-def _print_report(results: list[tuple[Item, Outcome]], report_path: Path | None) -> int:
+def profile_items(profile: str) -> list[Item]:
+    """当前用户确认的必验范围；保留原完整矩阵供显式扩展使用。."""
+    if profile == "full":
+        return list(ITEMS)
+    result: list[Item] = []
+    for original in ITEMS:
+        item = dataclasses.replace(original)
+        if item.group == "A" and item.item_id not in OPTIONAL_COMMON_ITEMS:
+            item.fixtures = tuple(
+                name for name in item.fixtures if Path(name).suffix.lstrip(".").lower() in COMMON_FORMATS
+            )
+            if item.synth == "office":
+                item.synth = ""
+            if item.item_id in ("A21", "A22", "A23"):
+                extension = {"A21": "DOCX", "A22": "PPTX", "A23": "XLSX"}[item.item_id]
+                item.title = f"{extension}：真实正文与原文件保护（其余变体为可选扩展）"
+            if item.item_id == "A24":
+                item.title = "MP4：真实中文转录、时间戳与原文件保护"
+                item.synth = ""
+            if item.item_id == "A25":
+                item.title = "旧 Office DOC/XLS/PPT：真实正文与原文件保护"
+                item.fixtures = ("common/legacy.doc", "common/legacy.xls", "common/legacy.ppt")
+        result.append(item)
+    return result
+
+
+def _print_report(results: list[tuple[Item, Outcome]], report_path: Path | None, profile: str = "full") -> int:
     # P-12/P-13：固定验收全集；--only 只控制执行，不能缩小报告分母。
     observed = {item.item_id: outcome for item, outcome in results}
-    results = [(item, observed.get(item.item_id, Outcome(STATUS_NOT_RUN, "本次未选择执行"))) for item in ITEMS]
+    results = [
+        (
+            item,
+            observed.get(
+                item.item_id,
+                Outcome(
+                    STATUS_OPTIONAL
+                    if profile == "common" and item.item_id in OPTIONAL_COMMON_ITEMS
+                    else STATUS_NOT_RUN,
+                    "保留的扩展格式测试，本次不属于必验范围"
+                    if profile == "common" and item.item_id in OPTIONAL_COMMON_ITEMS
+                    else "本次未选择执行",
+                ),
+            ),
+        )
+        for item in profile_items(profile)
+    ]
     print()
     print("==== 转 Markdown 验收汇总 ====")
     for item, outcome in results:
@@ -2975,13 +3324,14 @@ def _print_report(results: list[tuple[Item, Outcome]], report_path: Path | None)
             print(f"         原因：{outcome.reason}")
         for detail in outcome.details:
             print(f"         {detail}")
-    counts = {STATUS_OK: 0, STATUS_FAILED: 0, STATUS_NOT_RUN: 0}
+    counts = {STATUS_OK: 0, STATUS_FAILED: 0, STATUS_NOT_RUN: 0, STATUS_OPTIONAL: 0}
     for _, outcome in results:
         counts[outcome.status] += 1
     print("-" * 118)
     total = len(results)
     line = f"PASS {counts[STATUS_OK]}| FAIL {counts[STATUS_FAILED]}| NOT RUN {counts[STATUS_NOT_RUN]}（共 {total} 条）"
     print(line)
+    print(f"profile={profile}；OPTIONAL {counts[STATUS_OPTIONAL]}（保留，不计为通过）")
     if report_path is not None:
         report_path.parent.mkdir(parents=True, exist_ok=True)
         payload = {
@@ -2997,7 +3347,13 @@ def _print_report(results: list[tuple[Item, Outcome]], report_path: Path | None)
                 }
                 for item, outcome in results
             ],
-            "summary": {"pass": counts[STATUS_OK], "fail": counts[STATUS_FAILED], "not_run": counts[STATUS_NOT_RUN]},
+            "profile": profile,
+            "summary": {
+                "pass": counts[STATUS_OK],
+                "fail": counts[STATUS_FAILED],
+                "not_run": counts[STATUS_NOT_RUN],
+                "optional": counts[STATUS_OPTIONAL],
+            },
         }
         _ = report_path.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
         print(f"JSON 报告：{report_path}")
@@ -3022,6 +3378,7 @@ class _Arguments(argparse.Namespace):
 
     list_only: bool = False
     only: str = ""
+    profile: str = "common"
     gui_exe: str = ""
     portable_root: str = ""
     installed_root: str = ""
@@ -3079,11 +3436,40 @@ def _select_items(selector: str) -> tuple[list[Item], str | None]:
     return selected, None
 
 
+def _cli_execution_context(args: _Arguments, parser: _ArgumentParser) -> tuple[Context, Path | None]:
+    """准备 CLI 执行环境和报告路径，保留参数错误及路径隔离边界。."""
+    environment_error = _isolated_environment_error()
+    if environment_error is not None:
+        parser.error(environment_error)
+    if args.json_report:
+        try:
+            report_path = Path(args.json_report).resolve()
+        except (OSError, RuntimeError, ValueError) as error:
+            parser.error(f"--json 输出路径无效：{error}")
+        if not _is_under_tmp(report_path):
+            parser.error(f"--json 输出路径必须位于仓库 .tmp/ 下，拒绝写入：{report_path}")
+    else:
+        report_path = None
+    explicit_gui = os.environ.get("JCHTOOLS_TEST_GUI_EXE")
+    gui_source = args.gui_exe or explicit_gui
+    ctx = Context(
+        Path(gui_source).resolve() if gui_source else None,
+        Path(args.installed_root).resolve() if args.installed_root else None,
+        Path(args.portable_root).resolve() if args.portable_root else None,
+        Path(args.fixtures).resolve() if args.fixtures else FIXTURES_DEFAULT,
+        probe_assets(),
+    )
+    return ctx, report_path
+
+
 def main() -> int:
     _reconfigure_stdout()
     description = "转 Markdown 验收承接驱动器（附录 A；缺资产一律 NOT RUN，不虚构 PASS）"
     parser = _ArgumentParser(description=description)
     _ = parser.add_argument("--list", dest="list_only", action="store_true", help="列出全部条目与夹具/资产映射，不执行")
+    _ = parser.add_argument(
+        "--profile", choices=("common", "full"), default="common", help="默认常用格式；full 保留原扩展矩阵"
+    )
     _ = parser.add_argument("--only", default="", help="只执行指定组（A/B/C）或条目（如 A24），逗号分隔")
     _ = parser.add_argument(
         "--gui-exe",
@@ -3111,30 +3497,27 @@ def main() -> int:
     if error is not None:
         print(error)
         return 3
-    environment_error = _isolated_environment_error()
-    if environment_error is not None:
-        parser.error(environment_error)
-    if args.json_report:
-        try:
-            report_path = Path(args.json_report).resolve()
-        except (OSError, RuntimeError, ValueError) as error:
-            parser.error(f"--json 输出路径无效：{error}")
-        if not _is_under_tmp(report_path):
-            parser.error(f"--json 输出路径必须位于仓库 .tmp/ 下，拒绝写入：{report_path}")
-    else:
-        report_path = None
-    explicit_gui = os.environ.get("JCHTOOLS_TEST_GUI_EXE")
-    gui_source = args.gui_exe or explicit_gui
-    ctx = Context(
-        Path(gui_source).resolve() if gui_source else None,
-        Path(args.installed_root).resolve() if args.installed_root else None,
-        Path(args.portable_root).resolve() if args.portable_root else None,
-        Path(args.fixtures).resolve() if args.fixtures else FIXTURES_DEFAULT,
-        probe_assets(),
-    )
+    ctx, report_path = _cli_execution_context(args, parser)
+    ctx.profile = args.profile
+    selected_ids = {item.item_id for item in selected}
+    selected = [
+        item
+        for item in profile_items(args.profile)
+        if item.item_id in selected_ids and not (args.profile == "common" and item.item_id in OPTIONAL_COMMON_ITEMS)
+    ]
     SCRATCH_ROOT.mkdir(parents=True, exist_ok=True)
-    results = [(item, run_item(item, ctx)) for item in selected]
-    return _print_report(results, report_path)
+    try:
+        results = [(item, run_item(item, ctx)) for item in selected]
+        return _print_report(results, report_path, args.profile)
+    finally:
+        if ctx.broker_close is not None:
+            ctx.broker_close()
+        elif ctx.broker_process is not None and ctx.broker_process.poll() is None:
+            # Job 归属建立失败时尚未发送 formats；只回收自己刚启动的精确进程句柄。
+            ctx.broker_process.kill()
+            _ = ctx.broker_process.wait(timeout=15.0)
+        if ctx.broker_process is not None:
+            _ = ctx.broker_process.poll()
 
 
 if __name__ == "__main__":

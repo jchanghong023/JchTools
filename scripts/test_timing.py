@@ -149,7 +149,7 @@ def _run_checked(argv: list[str], timeout: float) -> subprocess.CompletedProcess
 
 def _cargo_base(target_dir: Path | None) -> list[str]:
     """公共 cargo 前缀；--target-dir 以显式旗标传递（相对仓库根解析）."""
-    prefix = ["cargo", "test", "--workspace", "--all-targets", "--locked"]
+    prefix = ["cargo", "test", "--workspace", "--all-targets", "--locked", "--features", "test-hooks"]
     if target_dir is not None:
         prefix += ["--target-dir", str(target_dir)]
     return prefix

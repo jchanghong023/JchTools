@@ -14,8 +14,8 @@
               打包自检——它验证的是发布产物而非平台功能，只在 slowtest 执行。
               不触发远程流水线；每次运行都需要人类明确授权（--authorized）。
   slowtest    fulltest 全部阶段 + 发布打包自检（package-windows.ps1 全程）
-              + 远程 CI（check.yml：gh 触发后轮询到最终状态，TRIGGERED 不等于
-              PASS）。平台范围按合同 P-07 仅 Windows，不设跨平台/跨 WSL 阶段。
+              + 远程 CI（check.yml：默认仅触发并报告 UNVERIFIED；显式 --wait 才
+              轮询到最终状态，TRIGGERED 不等于 PASS）。平台范围仅 Windows。
               同样需要人类本次明确授权。release.yml 是真实发布（自动打时间戳
               tag 并发布产物），不属于 slowtest，只能单独显式授权手动触发。
 
@@ -31,6 +31,7 @@ fulltest / slowtest 打印本次运行的源码快照（HEAD、工作区是否�
     python scripts/test_gate.py fastcheck --deadline-seconds 3   # 仅允许调低，用于验证超时路径
     python scripts/test_gate.py fulltest --authorized
     python scripts/test_gate.py slowtest --authorized
+    python scripts/test_gate.py slowtest --authorized --wait   # 本次明确要求等待最终状态
 """
 
 from __future__ import annotations
@@ -69,9 +70,6 @@ GUI_DATA_DIR = LOG_DIR / "gui-data"
 FIXED_XBERG_TEST_DIR = Path(r"C:\Users\jiang\Documents\xberg-test\xberg-cli-x86_64-pc-windows-msvc")
 
 FASTCHECK_DEADLINE_SECONDS = 60.0
-# 终局守卫的会计容差：各阶段已有绝对截止（run_logged），阶段间只剩亚秒级调度空隙；
-# 守卫只拦会计性越界（>0.5s），不改变 60 秒硬上限本身。
-FASTCHECK_GUARD_TOLERANCE_SECONDS = 0.5
 PROCESS_TREE_CLEANUP_SECONDS = 5.0
 STAGE_TIMEOUT_DEFAULT = 3600.0
 # 远程工作流等待上限：check.yml 约 30-40 分钟。
@@ -129,6 +127,7 @@ class _Arguments(argparse.Namespace):
     gate: str = ""
     deadline_seconds: float = FASTCHECK_DEADLINE_SECONDS
     authorized: bool = False
+    wait: bool = False
 
 
 def _reconfigure_stdout() -> None:
@@ -413,10 +412,10 @@ def _scan_binding_loop(result: StageResult) -> StageResult:
 def acceptance_coverage_gaps(text: str) -> list[str]:
     """提取 acceptance 汇总中的必要覆盖缺口；package 的 NOT RUN 不在本级范围.
 
-    markdown-acceptance 的 NOT RUN / PARTIAL 仅在可提取条目号、且条目号全部属于
-    环境受限集合（C08/C09，须独立 Windows 用户会话驱动正式包 GUI；AGENTS.md 3.4
-    例外）时放行；提取不到条目号一律按缺口处理（fail-closed），防止缺资产类
-    NOT RUN 被静默放行。放行不改变条目本身的 NOT RUN 事实，不表述为已验证。
+    markdown-acceptance 的 NOT RUN 仅在可提取条目号、且条目号全部属于环境受限
+    集合（C08/C09，须独立 Windows 用户会话驱动正式包 GUI；AGENTS.md 3.4 例外）
+    时放行；PARTIAL 始终阻塞。提取不到条目号一律按缺口处理（fail-closed），
+    放行不改变条目本身的 NOT RUN 事实，不表述为已验证。
     """
     required = ("markdown-acceptance", "snap-ocr-worker-root")
     gaps: list[str] = []
@@ -429,7 +428,7 @@ def acceptance_coverage_gaps(text: str) -> list[str]:
         blocking = [line for line in summaries if line.startswith(("NOT RUN ", "PARTIAL "))]
         if not blocking:
             continue
-        if name == "markdown-acceptance":
+        if name == "markdown-acceptance" and all(line.startswith("NOT RUN ") for line in blocking):
             item_ids: set[str] = set()
             for line in blocking:
                 item_ids.update(_NOT_RUN_ITEM_ID_PATTERN.findall(line))
@@ -527,14 +526,13 @@ def cmd_fastcheck(deadline_seconds: float) -> int:
     elapsed = _monotonic() - started
     # 终局墙钟守卫：单阶段超时只能拦住「本阶段超时」，拦不住「各阶段都过但累计越界」
     # （独立复核反例：最后阶段启动 6s + 等待 55s → 总墙钟 61s 仍报 PASS）。
-    # 越过硬上限（含会计容差）时无条件判 TIMEOUT，超时即失败。
-    if elapsed > deadline_seconds + FASTCHECK_GUARD_TOLERANCE_SECONDS:
-        tolerance = f"{FASTCHECK_GUARD_TOLERANCE_SECONDS:.1f}"
+    # 越过硬上限时无条件判 TIMEOUT，亚秒级超限同样不得报成功。
+    if elapsed > deadline_seconds:
         results.append(
             StageResult(
                 "wall-clock-budget",
                 STATUS_TIMED_OUT,
-                f"总墙钟 {elapsed:.1f}s 超过 {deadline_seconds:.0f}s 硬上限（容差 {tolerance}s）；超时即失败",
+                f"总墙钟 {elapsed:.1f}s 超过 {deadline_seconds:.0f}s 硬上限；超时即失败",
             )
         )
     note = f"墙钟：{elapsed:.1f}s / 预算 {deadline_seconds:.0f}s（60 秒为硬上限，超时即失败）"
@@ -798,7 +796,7 @@ def _str_field(entry: object, key: str) -> str | None:
 
 
 def _git_output(git: str, args: list[str]) -> str | None:
-    done = subprocess.run([git, *args], cwd=ROOT, capture_output=True, text=True, check=False)
+    done = subprocess.run([git, *args], cwd=ROOT, capture_output=True, text=True, encoding="utf-8", check=False)
     if done.returncode != 0:
         return None
     return done.stdout.strip()
@@ -844,8 +842,8 @@ def _snapshot_lines() -> list[str]:
     return lines
 
 
-def _trigger_workflow(git: str, gh: str, workflow: str) -> tuple[str, str] | StageResult:
-    """前置检查并触发远程工作流；成功返回 (head, branch)，失败返回对应阶段结果."""
+def _trigger_workflow(git: str, gh: str, workflow: str) -> tuple[str, str, frozenset[int]] | StageResult:
+    """触发前记录既有 run，成功返回 (head, branch, previous_ids)，失败返回阶段结果。."""
     stage = f"remote-{workflow}"
     head = _git_output(git, ["rev-parse", "HEAD"])
     if head is None:
@@ -857,6 +855,10 @@ def _trigger_workflow(git: str, gh: str, workflow: str) -> tuple[str, str] | Sta
     branch = _git_output(git, ["rev-parse", "--abbrev-ref", "HEAD"])
     if branch is None:
         return StageResult(stage, STATUS_UNVERIFIED, "无法解析当前分支名")
+    previous = _workflow_runs(gh, workflow, branch)
+    if previous is None or any(_run_id(entry) is None for entry in previous):
+        return StageResult(stage, STATUS_UNVERIFIED, "无法核验触发前的流水线运行身份，未触发远程验证")
+    previous_ids = frozenset(identifier for entry in previous if (identifier := _run_id(entry)) is not None)
     triggered = subprocess.run(
         [gh, "workflow", "run", workflow, "--ref", branch], cwd=ROOT, capture_output=True, text=True, check=False
     )
@@ -864,12 +866,20 @@ def _trigger_workflow(git: str, gh: str, workflow: str) -> tuple[str, str] | Sta
         stderr = (triggered.stderr or "").strip()
         detail = f"gh workflow run 失败（退出码 {triggered.returncode}）：{stderr}"
         return StageResult(stage, STATUS_FAILED, detail)
-    return head, branch
+    return head, branch, previous_ids
 
 
-def _find_run(gh: str, workflow: str, branch: str, head: str) -> tuple[str | None, str | None, str] | None:
-    """查询该提交对应的 run；返回 (status, conclusion, url)，查不到或查询失败返回 None."""
-    json_fields = "headSha,status,conclusion,url"
+def _run_id(entry: object) -> int | None:
+    if _is_str_obj_map(entry):
+        identifier = entry.get("databaseId")
+        if isinstance(identifier, int) and not isinstance(identifier, bool):
+            return identifier
+    return None
+
+
+def _workflow_runs(gh: str, workflow: str, branch: str) -> list[object] | None:
+    """取得同一查询口径的最近 run；无法解析时按未验证处理。."""
+    json_fields = "databaseId,event,headSha,status,conclusion,url"
     listing = subprocess.run(
         [gh, "run", "list", "--workflow", workflow, "--branch", branch, "--limit", "10", "--json", json_fields],
         cwd=ROOT,
@@ -879,21 +889,40 @@ def _find_run(gh: str, workflow: str, branch: str, head: str) -> tuple[str | Non
     )
     if listing.returncode != 0:
         return None
-    entries = _parse_json(listing.stdout)
-    if not _is_obj_list(entries):
+    try:
+        entries = _parse_json(listing.stdout)
+    except ValueError:
+        return None
+    return entries if _is_obj_list(entries) else None
+
+
+def _find_run(
+    gh: str, workflow: str, branch: str, head: str, previous_ids: frozenset[int]
+) -> tuple[str | None, str | None, str] | None:
+    """只查询触发后新出现的同提交 dispatch run，不借用历史运行结果。."""
+    entries = _workflow_runs(gh, workflow, branch)
+    if entries is None:
         return None
     for entry in entries:
-        if _str_field(entry, "headSha") != head:
+        identifier = _run_id(entry)
+        if (
+            identifier is None
+            or identifier in previous_ids
+            or _str_field(entry, "event") != "workflow_dispatch"
+            or _str_field(entry, "headSha") != head
+        ):
             continue
         url = _str_field(entry, "url") or "（未取得 run 链接）"
         return _str_field(entry, "status"), _str_field(entry, "conclusion"), url
     return None
 
 
-def _find_completed_run(gh: str, workflow: str, branch: str, head: str) -> StageResult | None:
-    """查询该提交的 run；已完结返回最终结果，未完结或查询失败返回 None."""
+def _find_completed_run(
+    gh: str, workflow: str, branch: str, head: str, previous_ids: frozenset[int]
+) -> StageResult | None:
+    """查询本次触发后的 run；已完结返回最终结果，未完结或查询失败返回 None."""
     stage = f"remote-{workflow}"
-    info = _find_run(gh, workflow, branch, head)
+    info = _find_run(gh, workflow, branch, head, previous_ids)
     if info is None:
         return None
     status, conclusion, url = info
@@ -904,22 +933,32 @@ def _find_completed_run(gh: str, workflow: str, branch: str, head: str) -> Stage
     return StageResult(stage, STATUS_FAILED, f"流水线最终状态 {conclusion}；run：{url} @ {head[:12]}")
 
 
-def _stage_remote_workflow(git: str, gh: str, workflow: str, *, watch_seconds: float) -> StageResult:
-    """触发远程验证流水线并轮询到最终状态；「已成功触发」不等于「流水线通过」."""
+def _stage_remote_workflow(git: str, gh: str, workflow: str, *, watch_seconds: float | None) -> StageResult:
+    """触发远程验证；仅显式提供等待预算时轮询到最终状态。."""
     context = _trigger_workflow(git, gh, workflow)
     if isinstance(context, StageResult):
         return context
-    head, branch = context
+    head, branch, previous_ids = context
     stage = f"remote-{workflow}"
+    if watch_seconds is None:
+        running = _find_run(gh, workflow, branch, head, previous_ids)
+        detail = "已触发，未等待最终状态（未验证，不得报告为通过）"
+        if running is not None:
+            status, _conclusion, url = running
+            detail += f"；当前状态 {status or '未知'}；run：{url} @ {head[:12]}"
+        else:
+            detail += "；本次 run 尚未取得链接"
+        detail += f"；续查：gh run list --workflow {workflow} --branch {branch} --limit 5"
+        return StageResult(stage, STATUS_UNVERIFIED, detail)
     deadline = time.monotonic() + watch_seconds
     while time.monotonic() < deadline:
         time.sleep(REMOTE_POLL_INTERVAL_SECONDS)
-        found = _find_completed_run(gh, workflow, branch, head)
+        found = _find_completed_run(gh, workflow, branch, head, previous_ids)
         if found is not None:
             return found
     minutes = watch_seconds / 60
     detail = f"等待 {minutes:.0f} 分钟仍未完结（未验证完成，不得报告为通过）"
-    running = _find_run(gh, workflow, branch, head)
+    running = _find_run(gh, workflow, branch, head, previous_ids)
     if running is not None:
         status, _conclusion, url = running
         detail = (
@@ -929,7 +968,7 @@ def _stage_remote_workflow(git: str, gh: str, workflow: str, *, watch_seconds: f
     return StageResult(stage, STATUS_UNVERIFIED, detail)
 
 
-def cmd_slowtest() -> int:
+def cmd_slowtest(*, wait: bool = False) -> int:
     if sys.platform != "win32":
         message = (
             "slowtest 按 Windows 主机设计（Windows fulltest + 远程 CI）；请在 Windows 上运行（合同 P-07 仅 Windows）"
@@ -962,7 +1001,8 @@ def cmd_slowtest() -> int:
         if auth.returncode != 0:
             results.append(StageResult("remote-ci", STATUS_UNVERIFIED, "gh 未登录（先 gh auth login）"))
         else:
-            results.append(_stage_remote_workflow(git, gh, "check.yml", watch_seconds=REMOTE_CHECK_WATCH_SECONDS))
+            watch_seconds = REMOTE_CHECK_WATCH_SECONDS if wait else None
+            results.append(_stage_remote_workflow(git, gh, "check.yml", watch_seconds=watch_seconds))
     elif git is None or gh is None:
         state = f"git={'有' if git else '缺'} gh={'有' if gh else '缺'}；远程阶段无法验证"
         results.append(StageResult("remote-ci", STATUS_UNVERIFIED, state))
@@ -1001,6 +1041,7 @@ def main(argv: list[str] | None = None) -> int:
     _ = full.add_argument("--authorized", action="store_true", help="确认本次运行已由人类明确授权")
     slow = sub.add_parser("slowtest", help="fulltest + 远程 CI（check.yml）")
     _ = slow.add_argument("--authorized", action="store_true", help="确认本次运行已由人类明确授权")
+    _ = slow.add_argument("--wait", action="store_true", help="本次明确要求轮询远程 CI 到最终状态；默认仅触发")
     arguments = parser.parse_args(argv, namespace=_Arguments())
     if arguments.gate == "fastcheck":
         deadline = arguments.deadline_seconds
@@ -1016,7 +1057,7 @@ def main(argv: list[str] | None = None) -> int:
         return 2
     if arguments.gate == "fulltest":
         return cmd_fulltest()
-    return cmd_slowtest()
+    return cmd_slowtest(wait=arguments.wait)
 
 
 if __name__ == "__main__":

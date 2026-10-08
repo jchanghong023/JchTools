@@ -9,17 +9,49 @@
    也 ``MUST`` 判 FAIL，不得报退出码 0。
 
 确定性：用注入假时钟替代 ``time.monotonic``，不真实睡眠 61 秒；唯一真实进程
-用 0.4s 睡眠命令，预算差额远大于进程启动抖动。只写 .tmp/test-gate 日志目录，
-不触碰仓库其它位置。
+用 0.4s 睡眠命令，预算差额远大于进程启动抖动。日志及真实清理夹具仅写
+.tmp/test-gate 与 .tmp/parallel-review；CI 触发身份和默认等待边界使用模拟响应。
 """
 
 from __future__ import annotations
 
+import contextlib
+import io
+import json
+import shutil
+import subprocess
 import sys
+import tempfile
 import unittest
+from pathlib import Path
 from unittest.mock import patch
 
-from scripts import test_gate
+from scripts import make_tmp, test_gate
+from scripts.test_gate import (
+    _stage_remote_workflow,  # pyright: ignore[reportPrivateUsage]  # 身份回归直接验证内部门接缝。
+)
+
+
+class GitSnapshotEncodingTests(unittest.TestCase):
+    """覆盖 P-11/P-13：中文工作树快照不受宿主默认代码页影响。."""
+
+    def test_chinese_git_status_uses_utf8_under_gbk_host(self) -> None:
+        git = shutil.which("git")
+        assert git is not None  # nosec B101: 测试依赖必须存在，缺失不能冒充通过。
+        workspace = test_gate.ROOT / ".tmp" / "release-validation" / "encoding-regression"
+        with patch.object(sys, "argv", ["make_tmp.py", "workspace", "--destination", str(workspace)]):
+            code = make_tmp.main()
+            assert code == 0  # nosec B101: 必须真实创建隔离测试目录。
+        with tempfile.TemporaryDirectory(dir=workspace) as temporary:
+            root = Path(temporary)
+            _ = subprocess.run([git, "init", "-q", str(root)], check=True, capture_output=True)
+            _ = (root / "路径中文.txt").write_text("公开合成数据", encoding="utf-8")
+            # 仅强制子进程默认解码接缝为 GBK；真实 git 仍输出实际 UTF-8 文件名。
+            with patch.object(test_gate, "ROOT", root), patch("subprocess._text_encoding", return_value="gbk"):
+                output = test_gate._git_output(  # noqa: SLF001  # pyright: ignore[reportPrivateUsage]  # 真实快照读取回归接缝。
+                    git, ["-c", "core.quotePath=false", "status", "--porcelain"]
+                )
+            assert output == "?? 路径中文.txt"  # nosec B101: 真实文件名必须完整保留。
 
 
 class _FakeMonotonic:
@@ -57,6 +89,113 @@ class AcceptanceCoverageGapTests(unittest.TestCase):
         text = f"PASS  snap-ocr-worker-root\n{summary}"
         gaps = test_gate.acceptance_coverage_gaps(text)
         assert gaps  # nosec B101: 提取不到条目号时 fail-closed，不得静默放行。
+
+    def test_partial_environment_blocked_items_remain_gaps(self) -> None:
+        text = "PARTIAL  markdown-acceptance（仍有 NOT RUN：C08、C09）\nPASS  snap-ocr-worker-root"
+        gaps = test_gate.acceptance_coverage_gaps(text)
+        assert gaps  # nosec B101: 环境例外仅放行 NOT RUN，PARTIAL 必须仍阻塞。
+
+
+class RemoteWorkflowIdentityTests(unittest.TestCase):
+    """新触发的流水线不能借用同提交历史运行的成功结果。."""
+
+    def test_old_success_for_same_head_is_not_current_dispatch(self) -> None:
+        head = "a" * 40
+        historical = [
+            {
+                "databaseId": 123,
+                "event": "workflow_dispatch",
+                "headSha": head,
+                "status": "completed",
+                "conclusion": "success",
+                "url": "https://github.com/example/repo/actions/runs/123",
+            }
+        ]
+        response = subprocess.CompletedProcess(["gh"], 0, json.dumps(historical), "")
+        with (
+            patch.object(test_gate, "_git_output", side_effect=[head, "origin/main", "main"]),
+            patch("scripts.test_gate.subprocess.run", return_value=response),
+            patch("scripts.test_gate.time.sleep"),
+            patch("scripts.test_gate.time.monotonic", side_effect=[0.0, 0.0, 2.0]),
+        ):
+            result = _stage_remote_workflow("git", "gh", "check.yml", watch_seconds=1.0)
+        assert result.status == test_gate.STATUS_UNVERIFIED  # nosec B101: 本次 run 尚未出现，旧 success 不能冒充。
+
+    def test_new_dispatch_success_is_observed_when_wait_requested(self) -> None:
+        head = "a" * 40
+        new_run = [
+            {
+                "databaseId": 124,
+                "event": "workflow_dispatch",
+                "headSha": head,
+                "status": "completed",
+                "conclusion": "success",
+                "url": "https://github.com/example/repo/actions/runs/124",
+            }
+        ]
+        previous = subprocess.CompletedProcess(["gh"], 0, "[]", "")
+        triggered = subprocess.CompletedProcess(["gh"], 0, "", "")
+        current = subprocess.CompletedProcess(["gh"], 0, json.dumps(new_run), "")
+        with (
+            patch.object(test_gate, "_git_output", side_effect=[head, "origin/main", "main"]),
+            patch("scripts.test_gate.subprocess.run", side_effect=[previous, triggered, current]),
+            patch("scripts.test_gate.time.sleep"),
+            patch("scripts.test_gate.time.monotonic", side_effect=[0.0, 0.0]),
+        ):
+            result = _stage_remote_workflow("git", "gh", "check.yml", watch_seconds=1.0)
+        assert result.status == test_gate.STATUS_OK  # nosec B101: 身份隔离不得阻止本次真实新 run 的最终成功。
+        assert "actions/runs/124" in result.detail  # nosec B101: 最终证据绑定新 run。
+
+
+class SlowtestDispatchBoundaryTests(unittest.TestCase):
+    """默认 slowtest 触发后如实未验证，不自动等待远程结论。."""
+
+    def test_default_slowtest_reports_new_run_without_waiting(self) -> None:
+        head = "a" * 40
+        new_run = [
+            {
+                "databaseId": 124,
+                "event": "workflow_dispatch",
+                "headSha": head,
+                "status": "queued",
+                "conclusion": "",
+                "url": "https://github.com/example/repo/actions/runs/124",
+            }
+        ]
+        ok = subprocess.CompletedProcess(["gh"], 0, "", "")
+        previous = subprocess.CompletedProcess(["gh"], 0, "[]", "")
+        current = subprocess.CompletedProcess(["gh"], 0, json.dumps(new_run), "")
+        output = io.StringIO()
+        with (
+            patch.object(test_gate, "_snapshot_lines", return_value=[]),
+            patch.object(test_gate, "_fulltest_stages"),
+            patch.object(test_gate, "_package_stage"),
+            patch("scripts.test_gate.shutil.which", return_value="tool"),
+            patch.object(test_gate, "_git_output", side_effect=[head, "origin/main", "main"]),
+            patch("scripts.test_gate.subprocess.run", side_effect=[ok, previous, ok, current]),
+            patch("scripts.test_gate.time.sleep", side_effect=AssertionError("默认触发不得轮询等待")),
+            contextlib.redirect_stdout(output),
+        ):
+            code = test_gate.cmd_slowtest()
+        assert code != 0  # nosec B101: 新 run 未完成，整门不能宣称 PASS。
+        assert "actions/runs/124" in output.getvalue()  # nosec B101: 交接必须提供本次触发的 run 链接。
+        assert "UNVERIFIED" in output.getvalue()  # nosec B101: 触发不能冒充最终通过。
+
+
+class TemporaryCleanupPathTests(unittest.TestCase):
+    """临时目录删除契约由真实合成目录消费者验证。."""
+
+    def test_cleanup_removes_real_owned_directory(self) -> None:
+        workspace = test_gate.ROOT / ".tmp" / "parallel-review"
+        with patch.object(sys, "argv", ["make_tmp.py", "workspace", "--destination", str(workspace)]):
+            code = make_tmp.main()
+        assert code == 0  # nosec B101: 合成夹具根由项目临时工厂生成，CI 同样自包含。
+        with tempfile.TemporaryDirectory(dir=workspace) as temporary:
+            directory = Path(temporary) / "owned"
+            directory.mkdir()
+            _ = (directory / "payload.txt").write_text("synthetic cleanup payload", encoding="utf-8")
+            make_tmp.robust_rmtree(directory)
+            assert not directory.exists()  # nosec B101: 真实 Windows 消费者删除必须完成，不仅检查字符串。
 
 
 class RunLoggedSetupBudgetTests(unittest.TestCase):
@@ -105,6 +244,11 @@ class FastcheckWallClockGuardTests(unittest.TestCase):
         clock = _FakeMonotonic([0.0])
         exit_code = self._run_fastcheck(clock, last_stage_end=61.0)
         assert exit_code != 0  # nosec B101: 总墙钟 61s > 60s 硬上限时不得报成功。
+
+    def test_fractional_overrun_cannot_use_accounting_tolerance(self) -> None:
+        clock = _FakeMonotonic([0.0])
+        exit_code = self._run_fastcheck(clock, last_stage_end=60.25)
+        assert exit_code != 0  # nosec B101: 60 秒是硬上限，不得给亚秒超限成功豁免。
 
     def test_total_wall_clock_within_budget_still_passes(self) -> None:
         # 正向对照：终局守卫不得误伤预算内的正常 fastcheck。

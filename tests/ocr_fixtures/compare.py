@@ -60,11 +60,16 @@ def anchors(text: str, names: list[str]) -> dict[str, dict[str, int] | None]:
     """定位锚点所在行及半角网格列（列按 halfwidth_units 口径，行按行号计）."""
     result: dict[str, dict[str, int] | None] = {}
     for name in names:
-        hits = [
-            (row, halfwidth_units(line[: line.index(name)]))
-            for row, line in enumerate(text.splitlines())
-            if name in line
-        ]
+        hits: list[tuple[int, int]] = []
+        for row, line in enumerate(text.splitlines()):
+            start = 0
+            while (column := line.find(name, start)) >= 0:
+                hits.append((row, halfwidth_units(line[:column])))
+                if len(hits) > 1:
+                    break
+                start = column + 1
+            if len(hits) > 1:
+                break
         result[name] = {"row": hits[0][0], "column": hits[0][1]} if len(hits) == 1 else None
     return result
 
@@ -154,6 +159,9 @@ def self_test() -> None:
     assert anchors("前\n中文END", ["END"]) == {"END": {"row": 1, "column": 4}}
     # 锚点出现多次时不可度量，保持 None。
     assert anchors("x\nx", ["x"]) == {"x": None}
+    # 同行重复及重叠出现也不具有唯一布局位置。
+    assert anchors("A A", ["A"]) == {"A": None}
+    assert anchors("AAA", ["AA"]) == {"AA": None}
     # 阈值评估：紧凑 CER 超限、锚点缺失、行列超差逐条给出原因。
     failures = evaluate_thresholds(
         ["A", "B", "C"],

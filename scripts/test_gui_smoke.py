@@ -13,7 +13,15 @@ import tempfile
 import unittest
 import zipfile
 from pathlib import Path
+from typing import TYPE_CHECKING, cast
 from unittest.mock import patch
+
+import pytest
+
+if TYPE_CHECKING:
+    from collections.abc import Callable
+
+    from pywinauto.application import WindowSpecification
 
 from scripts import gui_smoke, requirement_coverage, xberg_test_engine
 
@@ -325,8 +333,82 @@ class IsolationGuardTests(unittest.TestCase):
 
     def test_guard_passes_with_isolated_env_or_unguarded_stages_or_explicit_flag(self) -> None:
         gui_smoke.require_orchestrated_isolation(["S5", "S17"], ISOLATED_ENV, allow_isolated_run=False)
-        gui_smoke.require_orchestrated_isolation(["S1", "S4", "S15"], {}, allow_isolated_run=False)
+        with pytest.raises(RuntimeError):
+            gui_smoke.require_orchestrated_isolation(["S1", "S4", "S15"], {}, allow_isolated_run=False)
         gui_smoke.require_orchestrated_isolation(["S5", "S14"], {}, allow_isolated_run=True)
+
+    def test_every_non_self_isolating_stage_rejects_missing_state(self) -> None:
+        """覆盖 P-11/P-13/XB-22：所有会启动 GUI 的非自隔离阶段必须守卫。."""
+        for stage in ("S1", "S2", "S3", "S4", "S5", "S10", "S11", "S12", "S13", "S14", "S15", "S16", "S17", "S18"):
+            with self.subTest(stage=stage), pytest.raises(RuntimeError):
+                gui_smoke.require_orchestrated_isolation([stage], {}, allow_isolated_run=False)
+
+    def test_public_stage_setup_rejects_missing_isolation_before_spawning(self) -> None:
+        """覆盖 P-11/P-13/XB-22：直接调用公共入口也不得启动生产状态 GUI。."""
+        environments: tuple[dict[str, str] | None, ...] = (None, {})
+        for supplied in environments:
+            with (
+                self.subTest(env=supplied),
+                patch.dict(os.environ, {}, clear=True),
+                patch(
+                    "scripts.gui_smoke.subprocess.Popen", side_effect=AssertionError("隔离拒绝前不得启动进程")
+                ) as spawn,
+                pytest.raises(RuntimeError),
+            ):
+                gui_smoke.run_stage("S1", "unused.exe", lambda _window: None, env=supplied)
+            spawn.assert_not_called()
+
+
+class StageSelectionTests(unittest.TestCase):
+    def test_empty_stage_selection_is_rejected(self) -> None:
+        """覆盖 P-13：零阶段执行不能报告验收成功。."""
+        for selection in ("", " ", ",", " , , "):
+            with self.subTest(selection=selection), pytest.raises(RuntimeError):
+                _ = gui_smoke.parse_stages(selection)
+
+
+class ExistingResultsPreservationTests(unittest.TestCase):
+    def test_second_run_rejects_deleted_existing_results(self) -> None:
+        """覆盖 T-12/P-11/P-12：跳过统计不能掩盖一份或全部既有结果丢失。."""
+        for remove_all in (False, True):
+            with self.subTest(remove_all=remove_all):
+                calls = 0
+
+                def convert(
+                    _window: WindowSpecification,
+                    previous_done: str = "",
+                    produced_dir: Path | None = None,
+                    *,
+                    _remove_all: bool = remove_all,
+                ) -> str:
+                    nonlocal calls
+                    if previous_done != ("" if calls == 0 else DONE_LINE):
+                        message = "回归必须从第一轮完成统计启动第二轮"
+                        raise AssertionError(message)
+                    if produced_dir is None:
+                        message = "回归必须使用真实输出目录"
+                        raise AssertionError(message)
+                    calls += 1
+                    if calls == 1:
+                        for name in ("one_txt.md", "two_txt.md"):
+                            _ = (produced_dir / name).write_bytes(b"completed result")
+                        return DONE_LINE
+                    (produced_dir / "one_txt.md").unlink()
+                    if _remove_all:
+                        (produced_dir / "two_txt.md").unlink()
+                    return DIFFERENT_LINE
+
+                def stage(_tag: str, _exe: str, body: Callable[[WindowSpecification], None]) -> None:
+                    body(cast("WindowSpecification", object()))
+
+                with (
+                    patch("scripts.gui_smoke.run_stage", side_effect=stage),
+                    patch("scripts.gui_smoke.goto_converter"),
+                    patch("scripts.gui_smoke.set_converter_dirs"),
+                    patch("scripts.gui_smoke.start_conversion_and_wait_done", side_effect=convert),
+                    pytest.raises(RuntimeError),
+                ):
+                    gui_smoke.s11_existing_results_are_skipped_untouched("unused.exe")
 
 
 class StateDirectoryTests(unittest.TestCase):

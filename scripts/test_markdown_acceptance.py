@@ -17,8 +17,9 @@ import unittest
 import zipfile
 from pathlib import Path
 from typing import TYPE_CHECKING, cast
-from unittest.mock import patch
+from unittest.mock import MagicMock, patch
 
+import pywintypes
 import win32api
 import win32con
 import win32event
@@ -70,6 +71,88 @@ class AcceptanceReportCompletenessTests(unittest.TestCase):
                 [(markdown_acceptance.ITEMS[0], markdown_acceptance.Outcome(markdown_acceptance.STATUS_OK))]
             )
         assert code == UNVERIFIED_EXIT_CODE, "--only 的子集成功不能冒充完整验收"  # nosec B101: 验收回归断言。
+
+
+class CommonFormatAcceptanceTests(unittest.TestCase):
+    """覆盖 P-12/T-18/T-19：用户确认的常用格式范围不豁免结果及安全判据。."""
+
+    def test_common_profile_keeps_office_pdf_mp4_without_media_synthesis(self) -> None:
+        items = {item.item_id: item for item in markdown_acceptance.profile_items("common")}
+        required = [item for key, item in items.items() if key not in markdown_acceptance.OPTIONAL_COMMON_ITEMS]
+        formats = {Path(name).suffix.lstrip(".") for item in required if item.group == "A" for name in item.fixtures}
+        assert formats == markdown_acceptance.COMMON_FORMATS  # nosec B101: 验收判据回归断言。
+        assert items["A25"].fixtures == ("common/legacy.doc", "common/legacy.xls", "common/legacy.ppt")  # nosec B101: 验收判据回归断言。
+        assert items["A24"].synth == ""  # nosec B101: 验收判据回归断言。
+        assert all(item.synth != "office" for item in required)  # nosec B101: 验收判据回归断言。
+        assert {item.item_id for item in required if item.group != "A"} == {  # nosec B101: 验收判据回归断言。
+            item.item_id for item in markdown_acceptance.ITEMS if item.group != "A"
+        }
+
+    def test_full_profile_preserves_existing_matrix_and_synthesis(self) -> None:
+        items = markdown_acceptance.profile_items("full")
+        assert items == list(markdown_acceptance.ITEMS)  # nosec B101: 验收判据回归断言。
+        assert next(item for item in items if item.item_id == "A24").synth == "media"  # nosec B101: 验收判据回归断言。
+
+    def test_mp4_duration_without_transcript_is_rejected(self) -> None:
+        verifier = cast(
+            "Callable[[Path, tuple[str, ...]], str | None]",
+            getattr(markdown_acceptance, "_" + "verify_a24_video"),
+        )
+        with tempfile.TemporaryDirectory() as temporary:
+            output = Path(temporary)
+            result = output / "video-to-notes-intro-zh_mp4.md"
+            header = "# video-to-notes-intro-zh\n- 音频时长: 00:01:19.125\n## 转录\n"
+            _ = result.write_text(header, encoding="utf-8")
+            assert verifier(output, ("mp4",)) is not None  # nosec B101: 验收判据回归断言。
+            _ = result.write_text(header + "[00:00:00.108 --> 00:00:02.508] 长视频想快速获取要点。\n", encoding="utf-8")
+            assert verifier(output, ("mp4",)) is None  # nosec B101: 验收判据回归断言。
+
+    def test_old_office_outputs_cannot_exchange_document_markers(self) -> None:
+        item = next(item for item in markdown_acceptance.profile_items("common") if item.item_id == "A25")
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            output = root / "a25-common-office" / "output"
+            output.mkdir(parents=True)
+            for extension in ("doc", "xls", "ppt"):
+                _ = (output / f"legacy_{extension}.md").write_text("JCHTOOLS-LEGACY-DOC", encoding="utf-8")
+            with (
+                patch("scripts.markdown_acceptance.SCRATCH_ROOT", root),
+                patch(
+                    "scripts.markdown_acceptance._run_conversion_item",
+                    return_value=markdown_acceptance.Outcome(markdown_acceptance.STATUS_OK),
+                ),
+            ):
+                outcome = _run_handler("run_common_old_office", item, MagicMock(spec=markdown_acceptance.Context))
+                assert outcome.status == markdown_acceptance.STATUS_FAILED  # nosec B101: 验收判据回归断言。
+
+    def test_optional_items_do_not_count_as_pass_or_hide_missing_required_item(self) -> None:
+        reporter = cast(
+            "Callable[[list[tuple[markdown_acceptance.Item, markdown_acceptance.Outcome]], Path | None, str], int]",
+            getattr(markdown_acceptance, "_" + "print_report"),
+        )
+        required = [
+            (item, markdown_acceptance.Outcome(markdown_acceptance.STATUS_OK))
+            for item in markdown_acceptance.profile_items("common")
+            if item.item_id not in markdown_acceptance.OPTIONAL_COMMON_ITEMS
+        ]
+        with tempfile.TemporaryDirectory() as temporary, patch("sys.stdout", new=io.StringIO()):
+            report = Path(temporary) / "report.json"
+            assert reporter(required, report, "common") == 0  # nosec B101: 验收判据回归断言。
+            payload = cast("dict[str, dict[str, int]]", json.loads(report.read_text(encoding="utf-8")))
+            assert payload["summary"]["pass"] == len(required)  # nosec B101: 验收判据回归断言。
+            assert payload["summary"]["optional"] == len(markdown_acceptance.OPTIONAL_COMMON_ITEMS)  # nosec B101: 验收判据回归断言。
+            assert (  # nosec B101: 验收判据回归断言。
+                reporter([(item, result) for item, result in required if item.item_id != "A25"], None, "common")
+                == UNVERIFIED_EXIT_CODE
+            )
+            failed = [
+                (
+                    item,
+                    markdown_acceptance.Outcome(markdown_acceptance.STATUS_FAILED) if item.item_id == "A24" else result,
+                )
+                for item, result in required
+            ]
+            assert reporter(failed, None, "common") == 1  # nosec B101: 验收判据回归断言。
 
 
 def _content_spec(item_id: str) -> markdown_acceptance.ContentSpec:
@@ -358,6 +441,17 @@ class MediaPostconditionTests(unittest.TestCase):
 
         with (
             tempfile.TemporaryDirectory() as temporary,
+            patch.dict(
+                os.environ,
+                {
+                    "JCHTOOLS_TEST_STATE_DIR": str(markdown_acceptance.ROOT / ".tmp" / "parallel-review" / "state"),
+                    "JCHTOOLS_SNAP_OCR_TEST_ASSET_ROOT": str(
+                        markdown_acceptance.ROOT / ".tmp" / "parallel-review" / "snap"
+                    ),
+                },
+                clear=True,
+            ),
+            patch.object(markdown_acceptance, "_wait_process_isolation", return_value=True),
             patch("scripts.markdown_acceptance.subprocess.Popen"),
             patch("scripts.markdown_acceptance.own_process_tree", create=True),
             patch.object(markdown_acceptance, "_connect_window", return_value=(None, object())),
@@ -614,23 +708,27 @@ class FormatSweepCoverageTests(unittest.TestCase):
             "pnm",
             "jbig2",
         )
-        rows = [{"extension": extension, "mime_type": "application/test"} for extension in (*uncovered, "docx", "pbm")]
-        done = subprocess.CompletedProcess(["xberg.exe"], 0, json.dumps(rows), "")
-        with patch("scripts.markdown_acceptance.subprocess.run", return_value=done):
-            extensions, error = markdown_acceptance.xberg_format_extensions(Path("xberg.exe"))
+        rows: list[object] = [
+            {"extension": extension, "mime_type": "application/test"}
+            for extension in (*uncovered, "pdf", "docx", "pptx", "xlsx", "pbm")
+        ]
+        context = markdown_acceptance.Context(None, None, None, Path(), markdown_acceptance.probe_assets())
+        with patch.object(markdown_acceptance, "_shared_format_rows", return_value=(rows, None)):
+            extensions, error = markdown_acceptance.xberg_format_extensions(context)
         assert error is None  # nosec B101: 格式清单解析回归断言。
         assert extensions == sorted(uncovered)  # nosec B101: 漏覆盖格式不能被硬编码名单排除。
 
     def test_covered_formats_follow_registered_matrix_inputs(self) -> None:
-        rows = [{"extension": extension, "mime_type": "application/test"} for extension in ("docx", "pbm")]
-        done = subprocess.CompletedProcess(["xberg.exe"], 0, json.dumps(rows), "")
+        declared = ("pdf", "docx", "pptx", "xlsx", "pbm")
+        rows: list[object] = [{"extension": extension, "mime_type": "application/test"} for extension in declared]
+        context = markdown_acceptance.Context(None, None, None, Path(), markdown_acceptance.probe_assets())
         with (
             patch.object(markdown_acceptance, "ITEMS", ()),
-            patch("scripts.markdown_acceptance.subprocess.run", return_value=done),
+            patch.object(markdown_acceptance, "_shared_format_rows", return_value=(rows, None)),
         ):
-            extensions, error = markdown_acceptance.xberg_format_extensions(Path("xberg.exe"))
+            extensions, error = markdown_acceptance.xberg_format_extensions(context)
         assert error is None  # nosec B101: 格式清单解析回归断言。
-        assert extensions == ["docx", "pbm"]  # nosec B101: 矩阵不含输入时不得宣称已有覆盖。
+        assert extensions == sorted(declared)  # nosec B101: 矩阵不含输入时不得宣称已有覆盖。
 
     def test_synthetic_format_table_matches_real_inputs(self) -> None:
         table = cast(
@@ -654,9 +752,10 @@ class FormatSweepCoverageTests(unittest.TestCase):
 
     def test_missing_legacy_fixture_is_not_run(self) -> None:
         item = markdown_acceptance.Item("A25", "A", "格式清点", "GUI", needs_assets="xberg")
-        done = subprocess.CompletedProcess(
-            ["xberg.exe"], 0, json.dumps([{"extension": "doc", "mime_type": "application/msword"}]), ""
-        )
+        rows: list[object] = [
+            {"extension": extension, "mime_type": "application/msword"}
+            for extension in ("pdf", "docx", "pptx", "xlsx", "doc")
+        ]
         with tempfile.TemporaryDirectory() as temporary:
             _ = (Path(temporary) / "matrix" / "format_sweep").mkdir(parents=True)
             context = markdown_acceptance.Context(
@@ -665,9 +764,9 @@ class FormatSweepCoverageTests(unittest.TestCase):
                 None,
                 Path(temporary),
                 markdown_acceptance.AssetProbe(None, None, Path("xberg.exe"), None, []),
+                format_rows=rows,
             )
             with (
-                patch("scripts.markdown_acceptance.subprocess.run", return_value=done),
                 patch.object(
                     markdown_acceptance, "_run_conversion_item", return_value=markdown_acceptance.Outcome("PASS")
                 ) as convert,
@@ -707,9 +806,20 @@ class PerInputRuleTests(unittest.TestCase):
         assert _per_input_problems("A20", ["empty.png"], [], diagnosed) == []  # nosec B101
         assert _per_input_problems("A20", ["empty.png"], ["empty_png.md"], diagnosed)  # nosec B101: 不留半成品。
 
+    def test_expected_failure_requires_failure_diagnostic(self) -> None:
+        # 覆盖 T-24/P-12：当前文件、统计或无原因的失败行不证明该输入已失败。
+        for texts in ("当前文件：empty.png", "empty.png\n失败 1", "失败：empty.png"):
+            with self.subTest(texts=texts):
+                assert _per_input_problems("A20", ["empty.png"], [], texts)  # nosec B101: 必须有该文件的失败原因。
+        assert _per_input_problems("A20", ["empty.png"], [], "失败：empty.png · 解码失败") == []  # nosec B101
+
     def test_optional_and_sweep_inputs_do_not_require_product(self) -> None:
         assert _per_input_problems("A16", ["alpha.png"], [], "") == []  # nosec B101: 宽松输入。
-        assert _per_input_problems("A25", ["sample.rst"], [], "") == []  # nosec B101: 格式清点子集语义保留。
+        with patch.dict(_a25_rules(), clear=True):
+            assert _per_input_problems("A25", ["sample.rst"], [], "") == []  # nosec B101: 未声明时保留子集语义。
+            _a25_rules()["sample.rst"] = markdown_acceptance.InputRule(must_produce=True)
+            assert _per_input_problems("A25", ["sample.rst"], [], "")  # nosec B101: 本轮声明支持则缺产物必须失败。
+            assert _per_input_problems("A25", ["sample.rst"], ["sample_rst.md"], "") == []  # nosec B101: 有对应产物才通过。
 
     def test_a11_missing_broken_preview_fixture_is_not_run(self) -> None:
         # 缺少注入变体时必须由实际执行前置返回 NOT RUN，不能只锁定仓库当前缺少夹具。
@@ -779,7 +889,7 @@ class ContentAssertStrengthTests(unittest.TestCase):
 
 
 class A18UnsupportedBoundaryTests(unittest.TestCase):
-    """S10-06：jpx/jpm/mj2 必须经真实转换拒绝，不得只在清单层声明。."""
+    """S10-06：实际引擎未声明的格式必须经混跑排除，不得只在清单层声明。."""
 
     def test_mixed_conversion_run_is_executed_and_verified(self) -> None:
         calls: list[str] = []
@@ -808,7 +918,7 @@ class A18UnsupportedBoundaryTests(unittest.TestCase):
                 patch.object(markdown_acceptance, "SCRATCH_ROOT", Path(temporary)),
                 patch("scripts.markdown_acceptance._run_conversion_item", side_effect=fake_run),
                 patch.object(
-                    markdown_acceptance, "_fixed_format_extensions", return_value=({"jp2", "j2k", "j2c", "png"}, None)
+                    markdown_acceptance, "_runtime_format_extensions", return_value=({"jp2", "j2k", "j2c", "png"}, None)
                 ),
                 patch.object(markdown_acceptance, "_fixture_precondition", return_value=None),
             ):
@@ -819,19 +929,227 @@ class A18UnsupportedBoundaryTests(unittest.TestCase):
 
     def test_unsupported_products_or_missing_summary_are_rejected(self) -> None:
         verify = cast(
-            "Callable[[Path, str], str | None]",
+            "Callable[[Path, str, set[str]], str | None]",
             getattr(markdown_acceptance, "_" + "verify_a18_unsupported_rejected"),
         )
+        supported = {"jp2", "j2k", "j2c"}
         with tempfile.TemporaryDirectory() as temporary:
             outputs = Path(temporary)
             summary = "转 Markdown 转换完成：成功 3，部分提取 0，失败 0，已有结果跳过 0，重复结果跳过 0"
-            assert verify(outputs, summary) is None  # nosec B101: 统计只计支持格式。
+            assert verify(outputs, summary, supported) is None  # nosec B101: 统计只计实际支持格式。
             _ = (outputs / "jpx_jpx.md").write_text("leak", encoding="utf-8")
-            assert verify(outputs, summary) is not None  # nosec B101: 未承诺格式产出即失败。
+            assert verify(outputs, summary, supported) is not None  # nosec B101: 未声明格式产出即失败。
             _ = (outputs / "jpx_jpx.md").unlink()
-            assert verify(outputs, "没有任何统计文本") is not None  # nosec B101: 缺批次统计不可核对。
+            assert verify(outputs, "没有任何统计文本", supported) is not None  # nosec B101: 缺批次统计不可核对。
             counted = "转 Markdown 转换完成：成功 6，部分提取 0，失败 0，已有结果跳过 0，重复结果跳过 0"
-            assert verify(outputs, counted) is not None  # nosec B101: 未承诺格式计入批次即失败。
+            assert verify(outputs, counted, supported) is not None  # nosec B101: 未声明格式计入批次即失败。
+
+
+class DynamicFormatAcceptanceTests(unittest.TestCase):
+    """覆盖 T-08/XB-14/XB-26：实际引擎能力决定产物规则，静态清单不能代替查询。."""
+
+    @staticmethod
+    def _evaluate(
+        declared: tuple[str, ...], *, failed: tuple[str, ...] = (), error: str | None = None, item_id: str = "A18"
+    ) -> markdown_acceptance.Outcome:
+        rows: list[object] = [
+            {"extension": name, "mime_type": "video/mj2" if name == "mj2" else "application/test"}
+            for name in (*declared, "pdf", "docx", "pptx", "xlsx")
+        ]
+        item = next(entry for entry in markdown_acceptance.ITEMS if entry.item_id == item_id)
+        # A25 会改 fixtures；本用例使用独立表项，避免影响其他矩阵消费者。
+        item = markdown_acceptance.Item(
+            item.item_id, item.group, item.title, item.entry, item.fixtures, needs_assets=item.needs_assets
+        )
+
+        def convert(_exe: Path, inputs: Path, outputs: Path, *, stop_after_busy: bool = False) -> object:
+            del stop_after_busy
+            products: list[Path] = []
+            failures = 0
+            for source in inputs.iterdir():
+                extension = source.suffix.lstrip(".").lower()
+                if extension in failed:
+                    failures += 1
+                    continue
+                if extension not in declared:
+                    continue
+                product = outputs / f"{source.stem}_{extension}.md"
+                _ = product.write_text("公开合成转换正文\n", encoding="utf-8")
+                products.append(product)
+            summary = f"转换完成：成功 {len(products)}，部分提取 0，失败 {failures}"
+            return markdown_acceptance.GuiRun(products, summary, None)
+
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            context = markdown_acceptance.Context(
+                root / "JchTools.exe",
+                None,
+                None,
+                markdown_acceptance.FIXTURES_DEFAULT,
+                markdown_acceptance.AssetProbe(root, root, root / "xberg.exe", root, []),
+            )
+            with (
+                patch.dict(_a25_rules(), clear=True),
+                patch.object(markdown_acceptance, "SCRATCH_ROOT", root / "scratch"),
+                patch.object(markdown_acceptance, "_resolve_gui", return_value=(context.gui_exe, None)),
+                patch.object(markdown_acceptance, "_asset_precondition", return_value=None),
+                patch.object(markdown_acceptance, "_shared_format_rows", return_value=(rows, error)),
+                patch.object(markdown_acceptance, "drive_conversion", side_effect=convert),
+            ):
+                return markdown_acceptance.run_item(item, context)
+
+    def test_runtime_supported_jpx_is_verified_as_supported(self) -> None:
+        outcome = self._evaluate(("jp2", "j2k", "j2c", "jpx", "mj2"))
+        assert outcome.status == "PASS", outcome.reason  # nosec B101: 当前引擎支持 JPX 时须验其真实产物。
+
+    def test_runtime_supported_jpx_without_product_fails(self) -> None:
+        outcome = self._evaluate(("jp2", "j2k", "j2c", "jpx"), failed=("jpx",))
+        assert outcome.status == "FAIL"  # nosec B101: 声明支持却转换失败不能冒充 unsupported 跳过。
+
+    def test_undeclared_jpx_counted_as_failure_is_rejected(self) -> None:
+        outcome = self._evaluate(("jp2", "j2k", "j2c"), failed=("jpx",))
+        assert outcome.status == "FAIL"  # nosec B101: T-07 未声明格式不可进入失败计数冒充已排除。
+        assert "批次统计计入 4" in outcome.reason  # nosec B101: 核对实际统计，不仅核对有无文件。
+
+    def test_missing_runtime_formats_cannot_use_stale_static_manifest(self) -> None:
+        outcome = self._evaluate(("jp2", "j2k", "j2c"), error="当前共享引擎清单不可验证")
+        assert outcome.status == "NOT RUN"  # nosec B101: 旧固定清单不得替代缺失的当前能力证明。
+
+    def test_a25_queries_shared_broker_without_starting_another_engine(self) -> None:
+        with patch(
+            "scripts.markdown_acceptance.subprocess.run",
+            side_effect=AssertionError("不得单独启动 xberg formats"),
+        ) as direct_query:
+            outcome = self._evaluate(("rst",), item_id="A25")
+        assert outcome.status == "PASS", outcome.reason  # nosec B101: 消费共享清单并实际核对 rst 产物。
+        direct_query.assert_not_called()
+
+
+class ClosedFormatConnectionTests(unittest.TestCase):
+    def test_closed_previous_broker_is_replaced_before_formats_request(self) -> None:
+        """覆盖 P-13/XB-14：已退出代理的遗留端点不能冒充有效连接。."""
+        root = markdown_acceptance.ROOT / ".tmp" / "release-validation" / "pipe-regression"
+        state = root / "state"
+        context = markdown_acceptance.Context(
+            root / "JchTools.exe",
+            None,
+            None,
+            markdown_acceptance.FIXTURES_DEFAULT,
+            markdown_acceptance.AssetProbe(root, root, root / "xberg.exe", root, []),
+        )
+        old_pipe, live_pipe = MagicMock(), MagicMock()
+        close_old = MagicMock()
+        old_pipe.Close = close_old
+        old_pipe.handle, live_pipe.handle = 1, 2
+        process = MagicMock()
+        process.pid = 987
+        expected = [
+            {"extension": extension, "mime_type": "application/test"} for extension in ("pdf", "docx", "pptx", "xlsx")
+        ]
+
+        def exchange(pipe: object, _runtime: Path, request_id: str, _deadline: float) -> object:
+            if pipe is old_pipe:
+                raise pywintypes.error(232, "WriteFile", "管道正在被关闭")
+            return {"id": request_id, "ok": True, "jchtools_broker_protocol": 2, "formats": expected}
+
+        with (
+            patch.dict(
+                os.environ,
+                {
+                    "JCHTOOLS_TEST_STATE_DIR": str(state),
+                    "JCHTOOLS_MARKDOWN_TEST_ASSET_ROOT": str(root / "assets"),
+                    "JCHTOOLS_TEST_ASSET_ROOT": str(root / "assets"),
+                    "JCHTOOLS_SNAP_OCR_TEST_ASSET_ROOT": str(root / "snap"),
+                },
+            ),
+            patch("win32file.CreateFile", side_effect=[old_pipe, live_pipe]),
+            patch("win32pipe.GetNamedPipeServerProcessId", side_effect=[111, 987]),
+            patch("win32api.OpenProcess", return_value=123),
+            patch("win32api.CloseHandle"),
+            patch("win32event.WaitForSingleObject", side_effect=[win32event.WAIT_OBJECT_0, win32event.WAIT_TIMEOUT]),
+            patch.object(markdown_acceptance, "_resolve_gui", return_value=(root / "JchTools.exe", None)),
+            patch.object(markdown_acceptance, "_wait_process_isolation", return_value=True),
+            patch.object(markdown_acceptance, "own_process_tree"),
+            patch("scripts.markdown_acceptance.subprocess.Popen", return_value=process) as start,
+            patch.object(markdown_acceptance, "_exchange_formats", side_effect=exchange) as request,
+        ):
+            rows, error = context.cached_formats()
+        assert error is None, error  # nosec B101: 关闭的旧端点必须在请求前被识别。
+        assert rows == expected  # nosec B101: 必须消费本轮有效代理的协议响应。
+        start.assert_called_once()
+        request.assert_called_once()
+        close_old.assert_called_once()
+
+
+class SharedFormatProtocolTests(unittest.TestCase):
+    """失效/异版本 broker 响应必须使真实 A18 消费者 NOT RUN，不能使用旧固定清单。."""
+
+    @staticmethod
+    def _protocol_outcome(fields: dict[str, object]) -> markdown_acceptance.Outcome:
+        def reply(_pipe: object, _runtime: Path, request_id: str, _deadline: float) -> object:
+            response: dict[str, object] = {
+                "id": request_id,
+                "ok": True,
+                "jchtools_broker_protocol": 2,
+                "formats": [
+                    {"extension": extension, "mime_type": "application/test"}
+                    for extension in ("pdf", "docx", "pptx", "xlsx", "jp2", "j2k", "j2c")
+                ],
+            }
+            response.update(fields)
+            return response
+
+        item = next(entry for entry in markdown_acceptance.ITEMS if entry.item_id == "A18")
+        state = markdown_acceptance.ROOT / ".tmp" / "parallel-review" / "protocol-state"
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            context = markdown_acceptance.Context(
+                root / "JchTools.exe",
+                None,
+                None,
+                markdown_acceptance.FIXTURES_DEFAULT,
+                markdown_acceptance.AssetProbe(root, root, root / "xberg.exe", root, []),
+            )
+            with (
+                patch.dict(
+                    os.environ,
+                    {
+                        "JCHTOOLS_TEST_STATE_DIR": str(state),
+                        "JCHTOOLS_SNAP_OCR_TEST_ASSET_ROOT": str(state),
+                    },
+                    clear=True,
+                ),
+                patch.object(markdown_acceptance, "SCRATCH_ROOT", root / "scratch"),
+                patch.object(markdown_acceptance, "_open_formats_pipe"),
+                patch.object(markdown_acceptance, "_exchange_formats", side_effect=reply),
+                patch.object(markdown_acceptance, "_asset_precondition", return_value=None),
+                patch.object(
+                    markdown_acceptance,
+                    "drive_conversion",
+                    side_effect=AssertionError("无有效当前能力证明不得启动 GUI 转换"),
+                ),
+            ):
+                return markdown_acceptance.run_item(item, context)
+
+    def test_stale_response_id_cannot_pass_a18(self) -> None:
+        outcome = self._protocol_outcome({"id": "stale-request"})
+        assert outcome.status == "NOT RUN"  # nosec B101: 其他请求的旧清单不能证明本轮能力。
+
+    def test_incompatible_broker_protocol_cannot_pass_a18(self) -> None:
+        outcome = self._protocol_outcome({"jchtools_broker_protocol": 1})
+        assert outcome.status == "NOT RUN"  # nosec B101: 不兼容协议不可当作当前会话。
+
+    def test_worker_failure_cannot_fall_back_to_manifest(self) -> None:
+        outcome = self._protocol_outcome({"ok": False, "error_kind": "backend_error", "error": "formats unavailable"})
+        assert outcome.status == "NOT RUN"  # nosec B101: 实际查询失败不能以仓库清单冒充能力。
+
+    def test_missing_required_documents_cannot_claim_current_engine_ready(self) -> None:
+        outcome = self._protocol_outcome(
+            {
+                "formats": [{"extension": extension, "mime_type": "image/test"} for extension in ("jp2", "j2k", "j2c")],
+            }
+        )
+        assert outcome.status == "NOT RUN"  # nosec B101: 缺四类必需文档支持的引擎不得声明就绪。
 
 
 class A24SceneNoteTests(unittest.TestCase):
@@ -999,6 +1317,36 @@ class FormalDeliveryIsolationTests(unittest.TestCase):
 class UnconfiguredStateBoundaryTests(unittest.TestCase):
     """覆盖 T-02 / T-21 / P-10：合法状态可写，未配置不能下载组件。."""
 
+    def test_unconfigured_launch_isolates_screenshot_service(self) -> None:
+        # 覆盖 XB-14/XB-22：未配置启动仍会连接后台，必须隔离截图管道身份。
+        item = next(entry for entry in markdown_acceptance.ITEMS if entry.item_id == "C03")
+        context = markdown_acceptance.Context(
+            Path("target/debug/JchTools.exe"),
+            None,
+            None,
+            Path("fixtures"),
+            markdown_acceptance.AssetProbe(None, None, None, None, []),
+        )
+        context.stages = ("S1", "S15")
+        environments: list[dict[str, str]] = []
+
+        def delegate(_item_id: str, _target: Path, environment: dict[str, str]) -> None:
+            environments.append(environment)
+
+        with (
+            tempfile.TemporaryDirectory() as temporary,
+            patch.object(markdown_acceptance, "SCRATCH_ROOT", Path(temporary)),
+            patch.object(markdown_acceptance, "_resolve_gui", return_value=(context.gui_exe, None)),
+            patch.object(markdown_acceptance, "_c03_delegate_stages", side_effect=delegate),
+        ):
+            outcome = _run_handler("run_c03_unconfigured", item, context)
+        assert outcome.status == "PASS", outcome.reason  # nosec B101: 合法隔离启动保持可用。
+        assert environments  # nosec B101: 必须委托真实阶段。
+        assert (
+            environments[0].get("JCHTOOLS_SNAP_OCR_TEST_ASSET_ROOT")
+            == environments[0]["JCHTOOLS_MARKDOWN_TEST_ASSET_ROOT"]
+        )  # nosec B101: 截图服务与其他资产根均隔离到同一临时根。
+
     @staticmethod
     def _run_with_artifacts(artifacts: tuple[str, ...], *, asset_file: str = "") -> markdown_acceptance.Outcome:
         item = next(entry for entry in markdown_acceptance.ITEMS if entry.item_id == "C03")
@@ -1091,6 +1439,82 @@ class AcceptanceBoundaryTests(unittest.TestCase):
         assert "JCHTOOLS_TEST_STATE_DIR" in reason  # nosec B101: 拒绝原因指出变量。
         assert ".tmp" in reason  # nosec B101: 拒绝原因指出仓库隔离边界。
 
+    def test_conversion_without_isolation_does_not_launch_gui(self) -> None:
+        # 覆盖 XB-14/XB-22：缺状态或截图隔离根时，不得先启动可能触及生产配置的 GUI。
+        state = str(markdown_acceptance.ROOT / ".tmp" / "parallel-review" / "conversion-state")
+        snap = str(markdown_acceptance.ROOT / ".tmp" / "parallel-review" / "conversion-snap")
+        for environment in (
+            {},
+            {"JCHTOOLS_TEST_STATE_DIR": state},
+            {"JCHTOOLS_SNAP_OCR_TEST_ASSET_ROOT": snap},
+        ):
+            with (
+                self.subTest(environment=environment),
+                patch.dict(os.environ, environment, clear=True),
+                patch(
+                    "scripts.markdown_acceptance.subprocess.Popen", side_effect=AssertionError("不得启动 GUI")
+                ) as launch,
+            ):
+                run = markdown_acceptance.drive_conversion(Path("gui.exe"), Path("input"), Path("output"))
+            launch.assert_not_called()
+            assert run.error is not None  # nosec B101: 隔离前置缺失必须明确拒绝。
+
+    def test_conversion_isolation_requires_fresh_matching_gui_pid(self) -> None:
+        # 覆盖 XB-18/XB-22：预播种数据库、旧启动记录及其他 PID 不能证明本轮隔离。
+        checker = cast(
+            "Callable[[Path, int, str, dict[Path, int]], bool]",
+            getattr(markdown_acceptance, "_" + "process_isolation_ready"),
+        )
+        with tempfile.TemporaryDirectory() as temporary:
+            state = Path(temporary)
+            database = state / "config.sqlite3"
+            _ = database.write_bytes(b"seeded database")
+            logs = state / "logs"
+            _ = logs.mkdir()
+            log = logs / "jchtools.log.2026-10-08"
+            good = '诊断日志已初始化（P-10） role="gui" pid=123 log_dir="isolated"\n'
+            _ = log.write_text(good, encoding="utf-8")
+            offsets = {log: log.stat().st_size}
+            with patch.object(markdown_acceptance, "TMP_ROOT", state):
+                assert not checker(state, 123, "gui", offsets)  # nosec B101: 旧记录不能证明当前进程。
+                with log.open("a", encoding="utf-8") as stream:
+                    _ = stream.write(good.replace("pid=123", "pid=1234"))
+                assert not checker(state, 123, "gui", offsets)  # nosec B101: PID 必须精确匹配。
+                with log.open("a", encoding="utf-8") as stream:
+                    _ = stream.write(good.replace('role="gui"', 'role="xberg-broker"'))
+                assert not checker(state, 123, "gui", offsets)  # nosec B101: 代理进程不证明 GUI 的状态隔离。
+                with log.open("a", encoding="utf-8") as stream:
+                    _ = stream.write(good)
+                assert checker(state, 123, "gui", offsets)  # nosec B101: 本轮同 PID 的 GUI 启动记录有效。
+                database.unlink()
+                assert not checker(state, 123, "gui", offsets)  # nosec B101: 日志不能替代隔离 SQLite。
+
+    def test_outside_snap_isolation_root_is_rejected(self) -> None:
+        # 覆盖 XB-14/XB-22：截图资产根决定服务管道，不能继承生产位置。
+        checker = cast(
+            "Callable[[], str | None]",
+            getattr(markdown_acceptance, "_" + "isolated_environment_error"),
+        )
+        with (
+            tempfile.TemporaryDirectory() as temporary,
+            patch.dict(os.environ, {"JCHTOOLS_SNAP_OCR_TEST_ASSET_ROOT": temporary}, clear=True),
+        ):
+            reason = checker()
+        assert reason is not None  # nosec B101: 仓库外的截图资产根必须拒绝。
+        assert "JCHTOOLS_SNAP_OCR_TEST_ASSET_ROOT" in reason  # nosec B101: 拒绝原因指出变量。
+
+    def test_installed_scan_requires_executable(self) -> None:
+        # 覆盖 T-02/P-12：空目录不构成安装交付，不能因无违禁资产而 PASS。
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            item = next(entry for entry in markdown_acceptance.ITEMS if entry.item_id == "C01")
+            context = markdown_acceptance.Context(
+                None, root, None, root, markdown_acceptance.AssetProbe(None, None, None, None, [])
+            )
+            outcome = markdown_acceptance.run_item(item, context)
+        assert outcome.status == "FAIL"  # nosec B101: 安装目录必须包含主程序。
+        assert "JchTools.exe" in outcome.reason  # nosec B101: 明确缺失成员。
+
     def test_seed_rejects_state_outside_tmp_without_writing(self) -> None:
         seed = cast(
             "Callable[[Path, Path], None]",
@@ -1111,6 +1535,7 @@ class AcceptanceBoundaryTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary) / "package"
             _ = root.mkdir()
+            _ = (root / "JchTools.exe").write_bytes(b"synthetic executable fixture")
             manifest = Path(temporary) / "markdown-assets.json"
             _ = manifest.write_text("{", encoding="utf-8")
             item = next(entry for entry in markdown_acceptance.ITEMS if entry.item_id == "C01")
@@ -1358,15 +1783,20 @@ class ProcessTreeOwnershipTests(unittest.TestCase):
         pid_file = directory / "child-pid"
         child_handle: int | None = None
         try:
-            while not pid_file.is_file():
-                if process.poll() is not None:
-                    message = "进程树父进程未能创建子进程"
-                    raise RuntimeError(message)
-                if time.monotonic() >= deadline:
-                    message = "等待子进程 PID 超时"
-                    raise TimeoutError(message)
-                time.sleep(0.01)
-            child_pid = int(pid_file.read_text(encoding="ascii"))
+            while True:
+                try:
+                    child_pid = int(pid_file.read_text(encoding="ascii"))
+                    break
+                except (FileNotFoundError, PermissionError, ValueError):
+                    # 文件已改名可见但 Windows 的句柄共享状态可能尚未释放。
+                    # 仍须在原有期限内取得完整 PID，不能跳过实际后代退出断言。
+                    if process.poll() is not None:
+                        message = "进程树父进程未能创建子进程"
+                        raise RuntimeError(message) from None
+                    if time.monotonic() >= deadline:
+                        message = "等待可读取的完整子进程 PID 超时"
+                        raise TimeoutError(message) from None
+                    time.sleep(0.01)
             child_handle = win32api.OpenProcess(
                 win32con.SYNCHRONIZE | win32con.PROCESS_TERMINATE,
                 0,
@@ -1462,13 +1892,17 @@ class ProcessTreeOwnershipTests(unittest.TestCase):
             try:
                 deadline = time.monotonic() + 5
                 pid_file = root / "child-pid"
-                while not pid_file.is_file():
-                    if time.monotonic() >= deadline:
-                        self.fail("阶段未创建所属子进程")
-                    time.sleep(0.01)
-                child = win32api.OpenProcess(
-                    win32con.SYNCHRONIZE | win32con.PROCESS_TERMINATE, 0, int(pid_file.read_text(encoding="ascii"))
-                )
+                while True:
+                    try:
+                        child_pid = int(pid_file.read_text(encoding="ascii"))
+                        break
+                    except (FileNotFoundError, PermissionError, ValueError):
+                        # 原子改名已可见时，写入进程的 Windows 共享句柄可能尚未释放。
+                        # 仅等待原有五秒预算，不跳过后续真实进程句柄与退出断言。
+                        if time.monotonic() >= deadline:
+                            self.fail("阶段未创建可读取的完整子进程 PID")
+                        time.sleep(0.01)
+                child = win32api.OpenProcess(win32con.SYNCHRONIZE | win32con.PROCESS_TERMINATE, 0, child_pid)
                 _ = release.write_text("release", encoding="ascii")
                 runner.join(timeout=10)
                 assert not runner.is_alive()  # nosec B101: 阶段及清理必须在预算内结束。
