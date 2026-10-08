@@ -1466,7 +1466,7 @@ class AcceptanceBoundaryTests(unittest.TestCase):
             getattr(markdown_acceptance, "_" + "process_isolation_ready"),
         )
         with tempfile.TemporaryDirectory() as temporary:
-            state = Path(temporary)
+            state = Path(temporary).resolve()
             database = state / "config.sqlite3"
             _ = database.write_bytes(b"seeded database")
             logs = state / "logs"
@@ -1488,6 +1488,14 @@ class AcceptanceBoundaryTests(unittest.TestCase):
                 assert checker(state, 123, "gui", offsets)  # nosec B101: 本轮同 PID 的 GUI 启动记录有效。
                 database.unlink()
                 assert not checker(state, 123, "gui", offsets)  # nosec B101: 日志不能替代隔离 SQLite。
+
+    def test_conversion_isolation_fixture_handles_windows_short_temp_root(self) -> None:
+        # CI 的 RUNNER~1 临时目录会解析到完整用户名；夹具须遵守产品隔离根的规范路径口径。
+        with (
+            tempfile.TemporaryDirectory(prefix="jchtools-ci-short-path-") as temporary,
+            patch("tempfile.tempdir", win32api.GetShortPathName(temporary)),
+        ):
+            self.test_conversion_isolation_requires_fresh_matching_gui_pid()
 
     def test_outside_snap_isolation_root_is_rejected(self) -> None:
         # 覆盖 XB-14/XB-22：截图资产根决定服务管道，不能继承生产位置。

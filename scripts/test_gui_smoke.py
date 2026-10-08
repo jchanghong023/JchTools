@@ -16,8 +16,6 @@ from pathlib import Path
 from typing import TYPE_CHECKING, cast
 from unittest.mock import patch
 
-import pytest
-
 if TYPE_CHECKING:
     from collections.abc import Callable
 
@@ -333,14 +331,14 @@ class IsolationGuardTests(unittest.TestCase):
 
     def test_guard_passes_with_isolated_env_or_unguarded_stages_or_explicit_flag(self) -> None:
         gui_smoke.require_orchestrated_isolation(["S5", "S17"], ISOLATED_ENV, allow_isolated_run=False)
-        with pytest.raises(RuntimeError):
+        with self.assertRaises(RuntimeError):  # noqa: PT027 - 标准库 unittest 入口，不引入额外运行依赖。
             gui_smoke.require_orchestrated_isolation(["S1", "S4", "S15"], {}, allow_isolated_run=False)
         gui_smoke.require_orchestrated_isolation(["S5", "S14"], {}, allow_isolated_run=True)
 
     def test_every_non_self_isolating_stage_rejects_missing_state(self) -> None:
         """覆盖 P-11/P-13/XB-22：所有会启动 GUI 的非自隔离阶段必须守卫。."""
         for stage in ("S1", "S2", "S3", "S4", "S5", "S10", "S11", "S12", "S13", "S14", "S15", "S16", "S17", "S18"):
-            with self.subTest(stage=stage), pytest.raises(RuntimeError):
+            with self.subTest(stage=stage), self.assertRaises(RuntimeError):  # noqa: PT027 - 标准库 unittest 入口，不引入额外运行依赖。
                 gui_smoke.require_orchestrated_isolation([stage], {}, allow_isolated_run=False)
 
     def test_public_stage_setup_rejects_missing_isolation_before_spawning(self) -> None:
@@ -353,7 +351,7 @@ class IsolationGuardTests(unittest.TestCase):
                 patch(
                     "scripts.gui_smoke.subprocess.Popen", side_effect=AssertionError("隔离拒绝前不得启动进程")
                 ) as spawn,
-                pytest.raises(RuntimeError),
+                self.assertRaises(RuntimeError),  # noqa: PT027 - 标准库 unittest 入口，不引入额外运行依赖。
             ):
                 gui_smoke.run_stage("S1", "unused.exe", lambda _window: None, env=supplied)
             spawn.assert_not_called()
@@ -363,7 +361,7 @@ class StageSelectionTests(unittest.TestCase):
     def test_empty_stage_selection_is_rejected(self) -> None:
         """覆盖 P-13：零阶段执行不能报告验收成功。."""
         for selection in ("", " ", ",", " , , "):
-            with self.subTest(selection=selection), pytest.raises(RuntimeError):
+            with self.subTest(selection=selection), self.assertRaises(RuntimeError):  # noqa: PT027 - 标准库 unittest 入口，不引入额外运行依赖。
                 _ = gui_smoke.parse_stages(selection)
 
 
@@ -406,7 +404,7 @@ class ExistingResultsPreservationTests(unittest.TestCase):
                     patch("scripts.gui_smoke.goto_converter"),
                     patch("scripts.gui_smoke.set_converter_dirs"),
                     patch("scripts.gui_smoke.start_conversion_and_wait_done", side_effect=convert),
-                    pytest.raises(RuntimeError),
+                    self.assertRaises(RuntimeError),  # noqa: PT027 - 标准库 unittest 入口，不引入额外运行依赖。
                 ):
                     gui_smoke.s11_existing_results_are_skipped_untouched("unused.exe")
 

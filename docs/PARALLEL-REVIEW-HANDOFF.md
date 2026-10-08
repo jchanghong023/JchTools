@@ -74,3 +74,5 @@
 |复合后缀错误拆分|`powershell -NoProfile -ExecutionPolicy Bypass -File .tmp/release-validation/red-evidence/run-fsutil-evidence.ps1`；旧函数测试 101、3 failed，report.tar.pdf/x.part0.rar/a.zip.7z.001 主体错误|当前函数测试 0、3 passed|
 
 最终 slowtest、对应 CI 与 release 结果以本次实际运行链接及结论为准。本段不声明这些后续阶段已通过。独立 Windows 用户会话 C08/C09 保持 NOT RUN；真实网络认证、TB 级数据和其它 DPI 不在本机通过证据内。
+
+首次 `slowtest --authorized --wait` 的本地阶段全部 PASS（acceptance 636.6 秒、package 539.8 秒，常用矩阵 37 PASS / 0 FAIL / 2 NOT RUN / 5 OPTIONAL）；远程 [run 37710985115](https://github.com/jchanghong023/JchTools/actions/runs/37710985115) 在 Python 单测失败，整门 FAIL、退出 1，未触发发布。原因是 GUI 单测的 pytest 未声明，以及 CI 的 `RUNNER~1` 短路径夹具未规范化。用真实 C 盘 8.3 临时路径复现原 PID 回归同一失败（1 failed）；仅将夹具 `Path(temporary)` 规范化，并将五处异常断言等价换为标准库 `assertRaises(RuntimeError)`，产品隔离检查不变。保留五个旧日志、PID、角色、有效记录、缺 SQLite 判据，并增加短路径回归。修正后 Python 134 项通过；独立 AcceptanceBoundaryTests + test_gui_smoke 38 项通过。后续须用新提交重跑门，不能把旧失败 run 写成成功。
