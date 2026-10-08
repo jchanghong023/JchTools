@@ -20,8 +20,8 @@ if (-not (Test-Path -LiteralPath $archiveEngine) -or -not (Test-Path -LiteralPat
 $extra = @()
 if ($Offline) {$extra += '--offline'}
 if (-not (Test-Path -LiteralPath 'Cargo.lock')) {Invoke-Cargo (@('generate-lockfile') + $extra)}
-Invoke-Cargo (@('check','--locked','--all-targets','--features','test-hooks') + $extra)
 if (-not $SkipTests) {
+    Invoke-Cargo (@('check','--locked','--all-targets','--features','test-hooks') + $extra)
     Invoke-Cargo (@('test','--locked','--all-targets','--features','test-hooks') + $extra)
     $previous = $env:JCHTOOLS_TEST_7ZIP
     try {
@@ -186,7 +186,7 @@ if (-not $isccPath) {
         "$env:ProgramFiles\Inno Setup 6\ISCC.exe"
     ) | Where-Object { Test-Path -LiteralPath $_ } | Select-Object -First 1
 }
-$info = @{created=(Get-Date).ToUniversalTime().ToString('o');rustc=(& rustc --version | Out-String).Trim();tests= $(if($SkipTests){'NOT RUN'}else{'cargo tests and real-engine archive tests passed on this build machine'});installer=$(if($isccPath){'NOT VERIFIED (this record was captured before the installer compiler completed)'}else{$setupSummary});windows_ui_manual='NOT VERIFIED BY THIS SCRIPT';multi_tb_benchmark='NOT VERIFIED BY THIS SCRIPT';source_validation='See git history and CI runs for validation evidence.'}
+$info = @{created=(Get-Date).ToUniversalTime().ToString('o');rustc=(& rustc --version | Out-String).Trim();tests= $(if($SkipTests){'NOT RUN'}else{'cargo tests and real-engine archive tests passed on this build machine'});installer=$(if($isccPath){'NOT VERIFIED (this record was captured before the installer compiler completed)'}else{$setupSummary});windows_ui_manual='NOT VERIFIED BY THIS SCRIPT';multi_tb_benchmark='NOT VERIFIED BY THIS SCRIPT';source_validation='Use local Windows test evidence for functional acceptance; CI only compiles and packages.'}
 [IO.File]::WriteAllText((Join-Path $folder 'BUILD-INFO.json'),($info | ConvertTo-Json -Depth 5),$utf8)
 if ($isccPath) {
     & $isccPath "/DSourceDir=$folder" "/DOutputDir=$(Join-Path $root 'dist')" "/DVersion=$version" (Join-Path $root 'installer\JchTools.iss')

@@ -2,7 +2,7 @@
 
 Windows 优先的 Rust + Slint 本地工具箱。当前通过工具注册表接入「递归解压」「目录整理」「MD 整理」「转 Markdown」「Git 工具」「截图 OCR」六个工具。文件转换与已初始化的截图 OCR 完全离线；网络仅用于用户主动启动的 Git 任务及转 Markdown、截图 OCR 可选组件初始化，边界见需求合同 P-03、T-21 与 [截图 OCR 需求](docs/requirements/SNAP2TEXT.md)。
 
-> **验证以对应提交的结果为准**：本地 `fulltest` 覆盖 Python 质量门、Rust 格式与 Clippy、静态检查、单元与集成测试、真实 7-Zip 用例及 GUI S1–S4；发布验收还要求 `slowtest` 的本地打包与远程 `check.yml` 全部通过。安装包、便携 ZIP 与发布记录见 [Releases](https://github.com/jchanghong023/JchTools/releases)。没有引擎时构建不内嵌，运行期解压会给出明确错误；运行 `scripts/fetch-7zip.ps1` 获取官方引擎后，构建会自动把它压缩内嵌进 EXE。发布包由 `scripts/package-windows.ps1` 生成，只附带许可证与上游源码，不含引擎可执行文件。
+> **验证以对应提交的结果为准**：本地 `fulltest` 覆盖 Python 质量门、Rust 格式与 Clippy、静态检查、单元与集成测试、真实 7-Zip 用例及 GUI S1–S4；功能验收以 Windows 本地结果为准；CI 仅编译、打包和发布，不重复运行完整测试。安装包、便携 ZIP 与发布记录见 [Releases](https://github.com/jchanghong023/JchTools/releases)。没有引擎时构建不内嵌，运行期解压会给出明确错误；运行 `scripts/fetch-7zip.ps1` 获取官方引擎后，构建会自动把它压缩内嵌进 EXE。发布包由 `scripts/package-windows.ps1` 生成，只附带许可证与上游源码，不含引擎可执行文件。
 
 `python scripts/test_gate.py slowtest --authorized` 在本地阶段允许继续后默认只触发远程 `check.yml`，不等待最终结果，状态仍为 `UNVERIFIED`；取得本次新 run 时报告其链接，尚未取得时明确标注并给出续查入口，不借用同提交的历史 run。仅当用户明确要求等待结果时使用 `python scripts/test_gate.py slowtest --authorized --wait`；只有对应新 run 最终通过后才能报告 CI 通过。此入口不触发 `release.yml`，真实发布仍须单独授权。
 
@@ -109,7 +109,7 @@ powershell -NoProfile -File .\scripts\package-windows.ps1
 
 加密包整体移入「解压失败」（密码不写入进程命令行，没有密码输入/密码存储）；分卷包按 X-10 精确命名族归组，完整成功后删除实际卷集、失败整组隔离。「解压失败」整树固定排除于两工具的文件处理范围，但其中实际为空的目录仍参与整理的强制空目录清理（C-09/X-07）。格式修正仅显式开启时按有效结构及必要类型标识判型，不凭几个相同头字节猜测；无法可靠确认时不改名，ZIP 容器的 DOCX/EPUB 等不误改成 ZIP。路径里有 Windows 不支持的名称、无法无损表示的名称或危险条目时安全失败；归档任一危险成员使整包失败，不把跳过后的安全子集视为成功。
 
-界面目视检查覆盖 150% DPI 下的 1120×720、960×620 两档窗口与深浅主题；自动化结果以对应提交的 Actions 记录及发布包 `BUILD-INFO.json` 为准。未验证：网络盘、非 150% DPI、无 GPU 显示、RAR 多版本与多卷、大固实包、多个 TB 的真实性能。处理期间被其他程序修改文件的情形不在需求与防御范围内（P-08）；路径检查不等于对恶意并发文件系统攻击的形式化安全保证。首次运行必须使用副本或测试目录；经用户亲自验收后再决定生产使用。
+界面目视检查覆盖 150% DPI 下的 1120×720、960×620 两档窗口与深浅主题；功能自动化结果以对应提交的本地验证记录为准，Actions 与发布包 `BUILD-INFO.json` 记录编译和交付结果。未验证：网络盘、非 150% DPI、无 GPU 显示、RAR 多版本与多卷、大固实包、多个 TB 的真实性能。处理期间被其他程序修改文件的情形不在需求与防御范围内（P-08）；路径检查不等于对恶意并发文件系统攻击的形式化安全保证。首次运行必须使用副本或测试目录；经用户亲自验收后再决定生产使用。
 
 ## 手工测试数据集
 

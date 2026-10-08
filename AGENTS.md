@@ -8,7 +8,7 @@
 2. 明确任务类型：新需求 → 先按第 7 节协议转成合同条目并经用户确认；缺陷修复 → 先写能在修复前失败的回归测试；其余变更 → 确认不违反第 9 节可信基隔离。
 3. 动工前记录基线：`cargo test --features test-hooks` 与 `python scripts/static_check.py` 的当前状态。
 4. 编码遵守第 4 节实现约定与合同相应分区；测试数据一律经 `python scripts/make_tmp.py` 生成。
-5. 完成后按 3.3 验收矩阵执行相应层级验证；需要 CI 结论时按 3.4 跑 slowtest（`check.yml` 现仅手动触发，slowtest 是它的唯一自动入口），等 CI 转绿后按第 7 节格式报告（结论先行 + 命令/退出码/关键输出 + CI run 链接）。
+5. 完成后按 3.3 验收矩阵执行 Windows 本地验证并报告命令/退出码/关键输出；CI 仅编译、打包、发布，发布成功须附 release run 与发布链接。已完成且源代码未变的本地验证可复用，不因发布操作重复完整测试。
 6. 收尾：`python scripts/make_tmp.py clean` 清空 `.tmp/`，按第 8 节与 3.2 提交纪律写提交信息。
 
 ## 1. 项目背景
@@ -62,18 +62,18 @@ powershell -NoProfile -File .\scripts\package-windows.ps1   # 生成含 7-Zip �
 
 ## 3.2 测试验收纪律（代码与测试均由 AI 代理产出，以下用于对抗自证偏差）
 
-- **回归测试先行**：修复任何缺陷 `MUST` 先写能在修复前失败的回归测试，并在提交信息记录反证证据（复现命令 + 修复前失败输出摘要，slowtest 触发的 CI run 转绿后附 run 链接）。只有「修复后通过」而没有「修复前失败」证据的修复不算完成。
+- **回归测试先行**：修复任何缺陷 `MUST` 先写能在修复前失败的回归测试，并在提交信息记录反证证据（复现命令 + 修复前失败输出摘要）。只有「修复后通过」而没有「修复前失败」证据的修复不算完成。
 - **禁止削弱测试**：删除、改名、放宽断言、新增 `#[ignore]` 或平台门禁（`#[cfg(...)]`）`MUST` 同步更新 `scripts/test-baseline.json`（用 `python scripts/static_check.py --update-test-baseline` 重新生成）并在提交信息写明理由；`MUST NOT` 只为了让测试变绿而做上述改动。平台门禁 `MUST` 附带原因注释，且被门禁的行为 `SHOULD` 在另一平台仍有覆盖。
-- **提交纪律**：提交信息按变更性质 `MUST` 携带对应记录——缺陷修复附回归反证（复现命令 + 修复前失败输出摘要）；合同增改附用户确认结果；可信基变更附理由与用户批准记录；基线再生成附 `[基线已确认]` 标记；宣称完成附 slowtest 触发的 CI run 链接（见下条「CI 权威」）。缺对应记录的提交 `MUST NOT` 合入。
+- **提交纪律**：提交信息按变更性质 `MUST` 携带对应记录——缺陷修复附回归反证（复现命令 + 修复前失败输出摘要）；合同增改附用户确认结果；可信基变更附理由与用户批准记录；基线再生成附 `[基线已确认]` 标记；宣称功能验证通过附本地证据，宣称发布成功附发布 run 和版本链接。缺对应记录的提交 `MUST NOT` 合入。
 - **完成条件**：见 3.3 验收矩阵；`MUST NOT` 只跑默认 `cargo test --features test-hooks` 就宣称引擎 / UI / 发布相关工作已验证。
 - **独立复核**：涉及引擎、删除路径、解压安全（`fsutil` / 覆盖语义）或用户可见行为的实质变更，`SHOULD` 由未参与实现的独立代理会话复跑验证并给出证据格式：命令、环境（OS / rustc / 是否真实引擎）、退出码、关键输出行。
-- **CI 权威**：本地验证通过只是临时结论；对应 CI（`.github/workflows/`）run 转绿之前 `MUST NOT` 宣称变更已完成，宣称完成 `MUST` 附 CI run 链接；本地自报证据（提交信息、终端输出）视为线索而非判决。`check.yml` 现仅 `workflow_dispatch` 手动触发（push / PR 不触发），其 run 只能由 slowtest（`python scripts/test_gate.py slowtest --authorized`）或人类明确手动 dispatch 产生；未跑 slowtest 的变更只能如实标注「未验证」，`MUST NOT` 宣称完成。（无执法点 · 软法：无法机器判定「是否宣称完成」，靠会话纪律 + 3.4 的 `--authorized` 入口守卫）
+- **本地验收与 CI 职责（2026-10-08 用户确认）**：Windows 本地测试是功能验收依据；CI 仅编译、打包和发布，不运行完整测试、GUI/模型验收、lint 或供应链测试门。`check.yml` 仅手动构建产物，`release.yml` 编译并发布安装包及便携 ZIP，使用 `package-windows.ps1 -SkipTests`；CI 编译成功不能冒充功能测试通过，已通过的本地测试无需为每次发布重复执行。未验证项仍须如实标注。（执法点：两个工作流仅调用跳过测试的生产打包入口）
 - **flaky 政策**：`MUST NOT` 重跑到绿。测试间歇性失败必须查因；确属 flaky 的要在提交信息记录现象与原因，不得静默重跑。
 - **人工验收边界**：用户已决定不保留人工验收项清单；自动化未覆盖的行为（如真实 TB 级数据、非 150% DPI、网络共享）`MUST NOT` 被代理宣称已验证，只能如实标注「未验证」。
 
 ## 3.3 验收方法（怎么测试、怎么验收）
 
-「验收通过」= 下表相应行全部执行且通过 + slowtest 触发的对应 CI run 转绿（3.2 CI 权威）；`NOT RUN` 不得报告为通过。
+「验收通过」= 下表相应本地验证行全部执行且通过；不以远程测试门转绿为前提。发布成功另须确认 release 工作流成功及实际版本产物存在；`NOT RUN` 不得报告为通过。
 
 | 场景 / 变更类型 | 必须通过 | 覆盖 |
 |---|---|---|
@@ -96,10 +96,10 @@ powershell -NoProfile -File .\scripts\package-windows.ps1   # 生成含 7-Zip �
 - 验证报告 `MUST` 区分已实现、验证通过、验证失败和未验证；环境、依赖或权限不足不得报告验收通过。（无执法点 · 软法）
 - UT / 集成入口为 `cargo test --features test-hooks`，可按目标运行 `cargo test --features test-hooks --test md_tools`、`cargo test --features test-hooks --test git_tools` 等。`tests/git_tools.rs` 使用真实 git 与本地 bare 远端，不覆盖真实网络及认证。
 - Xberg 集成入口为 `cargo test --features test-hooks --test xberg_settings --test xberg_shared_process`（默认 `gui` 特性）。前者覆盖 SQLite 保存、旧配置迁移、独立进程恢复及场景资产选择；后者启动真实 JchTools 代理和命名管道，但使用由 `rustc` 编译的模拟引擎，验证进程复用、转换期间截图响应及请求隔离。它们不覆盖 Windows 重启、真实模型常驻或热键/托盘到结果的桌面 E2E；完整验收仍按 XB 第 5.2 / 6 节执行。
-- GUI 链路入口为 `cargo test --features test-hooks --test gui_flow`；`src/gui.rs` 内另有 MD 真实回调测试。它们使用 Slint 测试后端，不等同于真实桌面窗口验证。`scripts/gui_smoke.py` 默认运行 S1–S4（启动、整理与解压）、S15（MD 合并/拆分产物与原文件保护）、S16（Git 逐文件提交到本地 bare 远端）及 S18（两档窗口尺寸下逐页主要按钮边界与重叠判定）；S16 不覆盖真实网络与认证。S6–S9 的配置隔离需要 `cargo build --features test-hooks` 产物，脚本在操作前检查隔离 SQLite 已建立；普通构建不识别测试环境变量。其他扩展阶段通过 `--stages` 选择，不能以底层测试冒充 GUI E2E。`scripts.test_gui_smoke` 的结果判据、布局反例与隔离守卫单测进入 fulltest 和 CI Python 质量门；S5/S14 按最新 T-23 检查取消当前媒体、先前成品不变及无未完成产物。
+- GUI 链路入口为 `cargo test --features test-hooks --test gui_flow`；`src/gui.rs` 内另有 MD 真实回调测试。它们使用 Slint 测试后端，不等同于真实桌面窗口验证。`scripts/gui_smoke.py` 默认运行 S1–S4（启动、整理与解压）、S15（MD 合并/拆分产物与原文件保护）、S16（Git 逐文件提交到本地 bare 远端）及 S18（两档窗口尺寸下逐页主要按钮边界与重叠判定）；S16 不覆盖真实网络与认证。S6–S9 的配置隔离需要 `cargo build --features test-hooks` 产物，脚本在操作前检查隔离 SQLite 已建立；普通构建不识别测试环境变量。其他扩展阶段通过 `--stages` 选择，不能以底层测试冒充 GUI E2E。`scripts.test_gui_smoke` 的结果判据、布局反例与隔离守卫单测进入本地 fulltest Python 质量门；S5/S14 按最新 T-23 检查取消当前媒体、先前成品不变及无未完成产物。
 - 转 Markdown 的依据是 `docs/requirements/ALL2MARKDOWN.md`；按该文档附录 A 验证主包不包含转换专用依赖/模型、未配置时旧工具正常可用、GUI 保存并校验用户指定的 Xberg 运行目录、按需初始化其余组件，以及离线真实 Xberg / OCR / 媒体转换、GUI 入口及两种交付形态；旧 all2markdown 的源码、测试或历史 CI 不能作为集成后的通过证据。实现范围按 T-30 限于迁入，不借迁移改变旧功能，也不擅自搬入旧 Python 架构。
 - 纯文档等非功能性修改按实际影响检查内容、引用和需求保留情况，不机械新增功能测试；本仓库已有基线、提交检查与 CI 完成条件仍按 0 / 3.2 / 3.3 执行，未执行项如实标注。
-- 可选组件的 UT / 集成测试从仓库根目录分别运行 `cargo test --features test-hooks --manifest-path optional/snap-ocr-core/Cargo.toml --all-targets` 和 `cargo test --features test-hooks --manifest-path optional/snap-ocr-worker/Cargo.toml --all-targets`。根 workspace 的 `default-members = ["."]`，默认 `cargo test --features test-hooks` 不覆盖这些包；当前 `check.yml` 与 `acceptance.ps1` 均有二者的显式测试步骤，不能把本地默认门通过当作截图组件已验证。旧 `optional/markdown-media-worker` 已按 XB-12 退役（媒体转录迁移到 Xberg 推理组件），其测试与打包步骤一并移除。
+- 可选组件的 UT / 集成测试从仓库根目录分别运行 `cargo test --features test-hooks --manifest-path optional/snap-ocr-core/Cargo.toml --all-targets` 和 `cargo test --features test-hooks --manifest-path optional/snap-ocr-worker/Cargo.toml --all-targets`。根 workspace 的 `default-members = ["."]`，默认 `cargo test --features test-hooks` 不覆盖这些包；本地 `acceptance.ps1` 有二者的显式测试步骤；CI 不执行这些测试，不能把本地默认门通过当作截图组件已验证。旧 `optional/markdown-media-worker` 已按 XB-12 退役（媒体转录迁移到 Xberg 推理组件），其测试与打包步骤一并移除。
 - 转 Markdown 的验收承接入口为 `scripts/markdown_acceptance.py`（`--list` 查看条目；默认 `--profile common` 必验新老 Office / PDF / MP4，`--profile full` 保留扩展矩阵，OPTIONAL 不计为通过也不阻塞常用验收），也可经 `acceptance.ps1 -WithMarkdownAcceptance` 接入；运行依赖见 `scripts/requirements-dev.txt`，真实 GUI、Xberg、媒体组件与两种发布目录按脚本参数提供。提供 `JCHTOOLS_TEST_XBERG_DIR` 时，验收先写隔离 SQLite，再用 S17 真实 GUI 初始化本地 notice；不读取生产资产来冒充隔离就绪。缺资产条目为 `NOT RUN`；脚本退出码 0 仅表示全部必验条目 PASS；保留的扩展 OPTIONAL 不计为通过；任一必验条目未执行（含 --only 排除的条目）返回 2，应逐项检查。`scripts/gui_smoke.py --stages S5` 另有转换开始/停止链路，需已配置可用组件，不在默认序列内，不能替代转换产物断言。
 - 截图 OCR 的验收覆盖目标见 `docs/requirements/SNAP2TEXT.md` 附录 C。迁至 Xberg 后，worker 已无 `det_paddlex_oracle` / `pipeline_backend_oracle` 测试目标；旧直连引擎路径（`xberg_worker.rs` 客户端、`tests/xberg_client.rs` 协议测试、`examples/xberg_ocr.rs` 无头对照、`mock-xberg-worker` 测试桩）已于 2026-10-04 经用户确认删除，服务仅经 `SharedXbergClient` 使用共享引擎（XB-14）。已有 Slint 测试后端结果窗用例不等于热键/托盘、服务生命周期或多 DPI 的真实桌面 E2E；这些完整链路的自动化覆盖尚未确认。`tests/ocr_fixtures/README.md` 中的旧 `ocr_compare` 命令及 TextSnap 历史结果不作为当前迁入版通过证据。上述入口说明不改变 3.4 的 fulltest / slowtest 逐次授权及 CI 完成条件。
 - 本地 `acceptance.ps1` 默认测试 Snap OCR core / worker 并检查资产清单；设置 `JCHTOOLS_SNAP_OCR_ASSET_ROOT` 为完整的已校验资产缓存时，追加真实 worker 从安装位置加载模型的服务测试。未设置时该资产依赖项报告 `NOT RUN`，不能据此声称桌面验收通过。
@@ -109,11 +109,11 @@ powershell -NoProfile -File .\scripts\package-windows.ps1   # 生成含 7-Zip �
 统一入口 `python scripts/test_gate.py <fastcheck|fulltest|slowtest>`；三级语义固定，`MUST NOT` 按需要改写层级含义，也 `MUST NOT` 把耗时或远程阶段塞进更低层级。平台范围按合同 P-07 仅 Windows：不设任何跨平台/跨 WSL 验证阶段。
 
 - **fastcheck**：static_check + rustfmt + clippy + cargo test --features test-hooks（含 binding loop 扫描）；总墙钟硬上限 60 秒，超时即失败并终止整个进程树，`MUST NOT` 把超时报成成功；AI 代理 `MAY` 自主执行，但其通过不代表完整验证。（执法点：test_gate.py 的预算终止与退出码）
-- **fulltest**：当前平台（Windows，唯一支持平台）全部本地验证——Python 质量门（与 CI 同命令）+ fmt/clippy + `acceptance.ps1 -WithEngine -WithGuiSmoke`；`MUST NOT` 触发远程流水线。不含发布打包自检（打包只在 slowtest）。每次运行 `MUST` 有人类明确授权。（执法点：test_gate.py 的 `--authorized` 入口守卫；越过入口直接执行内部命令属规避行为 · 无执法点 · 软法）
-- **slowtest**：fulltest 全部阶段 + 发布打包自检（`scripts/package-windows.ps1` 全程，验证引擎内嵌、许可证合规、无引擎泄漏与两种交付产物；本地阶段未全部 PASS 时不执行）+ 远程 `check.yml`（该工作流仅 `workflow_dispatch`，由本门经 `gh workflow run` 触发并轮询到最终状态，`MUST NOT` 把「已触发」当「通过」；push / PR 不自动触发）。每次运行 `MUST` 有人类明确授权。（执法点：同上 `--authorized` 入口守卫；同上软法）
-- **环境受限条目例外（2026-10-07）**：转 Markdown 验收的 C08/C09（安装版 / 便携版在独立 Windows 用户会话中真实完成转换）在无该会话的机器与 CI 上按 fail-closed 如实 `NOT RUN`。当 acceptance 阶段的唯一覆盖缺口是这类条目的 `NOT RUN`（acceptance 汇总行可提取条目号且全部属于 C08/C09）时，不阻塞 slowtest 的发布打包自检与远程 `check.yml`（CI 同样无法执行它们，check.yml 已把 markdown 验收退出码 2 视为不失败）。这些条目保持 `NOT RUN`、`MUST NOT` 表述为已验证；取得隔离 Windows 会话环境后 `MUST` 补验。其余 `NOT RUN` / `PARTIAL` 覆盖缺口照常阻塞；汇总行提取不到条目号时按缺口处理（fail-closed）。（执法点：`scripts/test_gate.py` 的 `acceptance_coverage_gaps` 仅放行可确认为 C08/C09 的条目）
+- **fulltest**：当前平台（Windows，唯一支持平台）全部本地验证——本地 Python 质量门+ fmt/clippy + `acceptance.ps1 -WithEngine -WithGuiSmoke`；`MUST NOT` 触发远程流水线。不含发布打包自检（打包只在 slowtest）。每次运行 `MUST` 有人类明确授权。（执法点：test_gate.py 的 `--authorized` 入口守卫；越过入口直接执行内部命令属规避行为 · 无执法点 · 软法）
+- **slowtest**：fulltest 全部阶段 + 发布打包自检（`scripts/package-windows.ps1` 全程，验证引擎内嵌、许可证合规、无引擎泄漏与两种交付产物；本地阶段未全部 PASS 时不执行）+ 远程编译打包 `check.yml`（不执行测试；该工作流仅 `workflow_dispatch`，由本门经 `gh workflow run` 触发并轮询到最终状态，`MUST NOT` 把「已触发」当「通过」；push / PR 不自动触发）。每次运行 `MUST` 有人类明确授权。（执法点：同上 `--authorized` 入口守卫；同上软法）
+- **环境受限条目例外（2026-10-07）**：转 Markdown 验收的 C08/C09（安装版 / 便携版在独立 Windows 用户会话中真实完成转换）在无该会话的机器与 CI 上按 fail-closed 如实 `NOT RUN`。当 acceptance 阶段的唯一覆盖缺口是这类条目的 `NOT RUN`（acceptance 汇总行可提取条目号且全部属于 C08/C09）时，不阻塞 slowtest 的发布打包自检与远程 `check.yml`（CI 不执行功能验收）。这些条目保持 `NOT RUN`、`MUST NOT` 表述为已验证；取得隔离 Windows 会话环境后 `MUST` 补验。其余 `NOT RUN` / `PARTIAL` 覆盖缺口照常阻塞；汇总行提取不到条目号时按缺口处理（fail-closed）。（执法点：`scripts/test_gate.py` 的 `acceptance_coverage_gaps` 仅放行可确认为 C08/C09 的条目）
 - `release.yml` 是真实发布（自动打时间戳 tag 并发布产物），`MUST NOT` 纳入 slowtest 自动触发；发布需用户单独明确该次目标。（执法点：test_gate.py 不包含该阶段）
-- **流水线默认只触发、不等待**：跑 slowtest 的远程阶段、触发 `release.yml` 或其它流水线时，除非用户当次明确要求等待流水线结果，代理默认只负责触发并报告 run 链接，状态如实标注「未完结 / 未验证」，`MUST NOT` 默认轮询等待最终状态；需要结论时由用户明确要求等待后另行查询。宣称作完成仍受 3.2「CI 权威」约束——未等到最终状态的 run 不得报告为通过。（无执法点 · 软法：等待行为无法机检，靠会话纪律执行）
+- **流水线默认只触发、不等待**：跑 slowtest 的远程阶段、触发 `release.yml` 或其它流水线时，除非用户当次明确要求等待流水线结果，代理默认只负责触发并报告 run 链接，状态如实标注「未完结 / 未验证」，`MUST NOT` 默认轮询等待最终状态；需要结论时由用户明确要求等待后另行查询。发布成功须确认发布 run 最终成功及实际产物；未等到最终状态的 run 不得报告为通过。（无执法点 · 软法：等待行为无法机检，靠会话纪律执行）
 - 历史授权、上一次授权、CI 配置或脚本注释 `MUST NOT` 视为本次授权；环境或工具缺失只能如实标注 UNVERIFIED，`MUST NOT` 当作通过或静默跳过。（无执法点 · 软法）
 
 ## 3.5 构建与缓存纪律

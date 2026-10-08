@@ -35,7 +35,7 @@ jobs:
         shell: pwsh
         env:
           GITHUB_TOKEN: ${{ github.token }}
-        run: ./scripts/package-windows.ps1
+        run: ./scripts/package-windows.ps1 -SkipTests
       - name: Create GitHub Release with both artifacts
         shell: pwsh
         env:

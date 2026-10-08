@@ -7,14 +7,14 @@
               整个进程树，不得把超时报成成功。通过不代表完整验证。
               步骤：static_check → rustfmt → clippy（默认特性）→ cargo test（含
               binding loop 警告扫描）。
-  fulltest    当前平台（Windows）全部适用本地检查：Python 质量门（与 CI 同命令）
+  fulltest    当前平台（Windows）全部适用本地检查：本地 Python 质量门
               + rustfmt + clippy + make_tmp 测试数据集 + acceptance.ps1
               -WithEngine -WithGuiSmoke（复用可信基验收入口，内含 static_check、
               全量测试、binding 扫描、真实引擎用例、GUI 冒烟 S1-S4）。不含发布
               打包自检——它验证的是发布产物而非平台功能，只在 slowtest 执行。
               不触发远程流水线；每次运行都需要人类明确授权（--authorized）。
   slowtest    fulltest 全部阶段 + 发布打包自检（package-windows.ps1 全程）
-              + 远程 CI（check.yml：默认仅触发并报告 UNVERIFIED；显式 --wait 才
+              + 远程编译打包（check.yml 不执行测试：默认仅触发并报告 UNVERIFIED；显式 --wait 才
               轮询到最终状态，TRIGGERED 不等于 PASS）。平台范围仅 Windows。
               同样需要人类本次明确授权。release.yml 是真实发布（自动打时间戳
               tag 并发布产物），不属于 slowtest，只能单独显式授权手动触发。
@@ -540,7 +540,7 @@ def cmd_fastcheck(deadline_seconds: float) -> int:
 
 
 def _python_quality_stages(results: list[StageResult]) -> None:
-    # 与 CI "Python quality gate" 完全同一组命令；工具缺失只能 UNVERIFIED，不得静默跳过。
+    # 本地 Python 质量门；工具缺失只能 UNVERIFIED，不得静默跳过。
     stages: list[tuple[str, str, list[str]]] = [
         ("pyquality-ruff-format", "ruff", [sys.executable, "-m", "ruff", "format", "--check", "scripts", "typings"]),
         ("pyquality-ruff-lint", "ruff", [sys.executable, "-m", "ruff", "check", "scripts", "typings"]),

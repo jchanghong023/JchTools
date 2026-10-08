@@ -80,3 +80,9 @@
 第二轮 slowtest 的本地阶段再次全部 PASS，实际安装包与 ZIP 解包后主程序/worker 字节一致、清单大小与 SHA-256 相符、无转换模型或裸 7-Zip 二进制泄漏。远程 [run 37713010730](https://github.com/jchanghong023/JchTools/actions/runs/37713010730) 已通过 Python、两档 Clippy；无默认特性 UT 280 PASS，core 106 PASS / 3 FAIL。日志明确构建时缺完整 7-Zip、未内嵌；三个合法 7z/RAR 签名正例无法获得引擎证据，按产品 fail-closed 保留旧后缀。修正仅在首次编译前调用现有官方 `fetch-7zip.ps1`，不改产品、断言或 ignore；13 条 Cargo 命令及原矩阵完全保留，经独立复核。带真实引擎的 `cargo test --all-targets --no-default-features --features test-hooks` 本地退出 0，三项原失败回归通过；`cargo audit` / `cargo deny check advisories sources` 退出 0。远程后续仍须用修正后的提交验证，发布尚未触发。
 
 后续本地打包曾因 GitHub 匿名 API 限流失败；改为当前登录凭据读取官方元数据后完整本地门通过，凭据只存在进程环境，未落盘。远程 [run 37717029364](https://github.com/jchanghong023/JchTools/actions/runs/37717029364) 已将 core 的 109 项（含原三失败）全部验证通过，继续到 `batch_uses_selected_engine_formats` 时因缺代理宿主 EXE 报 `os error 2`（4 PASS / 1 FAIL）。`JchTools` bin 要求 gui 特性，无默认特性测试及 Clippy 不生成该 EXE；CI 现补充 `cargo build --locked --features test-hooks --bin JchTools` 前置宿主，再执行原核心命令。宿主用 `--xberg-broker`，不进入 GUI；隔离钩子与独立状态目录保留。原 13 条 Cargo 命令不变，新增后 14 条，经独立复核。本机相同无默认特性回归退出 0、1 PASS，远程后续仍待验证。
+
+## 2026-10-08 用户更新 CI 职责并授权发布
+
+用户明确指示停止完整远程测试：“本地测试就够了，ci只用来编译，发布版本包”，随后要求“发布版本直到成功”。此指示覆盖以上历史 CI 权威及重复完整测试规则。功能验收采用已执行的 Windows 本地证据；CI 仅生产编译、打包和发布，两个工作流使用 `package-windows.ps1 -SkipTests`。跳过模式不再编译测试钩子或测试目标，发布记录仍如实标记该构建机测试为 NOT RUN，不把编译等同功能验收。原有本地测试与 832 项基线均保留。
+
+最新已执行本地阶段：acceptance PASS（605.6 秒），完整 package PASS（465.6 秒）；常用格式矩阵 37 PASS / 0 FAIL / 5 OPTIONAL / C08、C09 NOT RUN。产品源码自上述本地验证后未改，本次仅调整 CI/打包入口与职责文档，复用该本地证据。发布结果以实际 release run 和版本资产为准。

@@ -16,7 +16,7 @@ Git 工具逐文件提交并推送（add → commit → push 成功后才下一�
 所选根目录直接含 .git 时拒绝任务。各工具不会自动串联。
 
 验证结果必须对应具体提交，不能把旧版本的通过记录当作当前源码的结论。
-fulltest 覆盖本地质量门、真实引擎与 GUI S1–S4；slowtest 在此基础上
+fulltest 覆盖本地质量门、真实引擎与 GUI S1–S4；功能验收以 Windows 本地结果为准，CI 仅编译、打包和发布。slowtest 在此基础上
 增加发布打包和远程 check.yml，二者每次运行均需明确授权。
 命令退出码、对应提交的 Actions 记录与包内 BUILD-INFO.json 共同记录验证范围；
 正式交付的安装包、便携 ZIP 和校验和见仓库 Releases 页。
