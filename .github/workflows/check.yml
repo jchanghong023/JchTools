@@ -87,6 +87,14 @@ jobs:
         run: cargo fmt --all -- --check
       # clippy 零告警硬门禁：默认特性（含 GUI 与 Windows 专属代码）与
       # --no-default-features（无 GUI 核心库）双侧覆盖；任何告警即失败。
+      # C-08/附录 B 的 7z/RAR 签名正例通过已校验官方引擎解析结构。
+      # 不可用时产品按 E-05 拒绝猜测，因此须在首次编译/核心回归之前准备，
+      # 不能等最后的 package-windows.ps1 才下载；测试断言与矩阵保持不变。
+      - name: Prepare verified 7-Zip for signature and archive tests
+        shell: pwsh
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+        run: ./scripts/fetch-7zip.ps1
       - name: Clippy zero-warning gate (default features)
         shell: pwsh
         run: |
