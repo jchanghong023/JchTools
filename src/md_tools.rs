@@ -398,10 +398,11 @@ fn is_blank(body: &[u8]) -> bool {
 /// 是否为其他块结构起始行（列表、引用等）：这些行不能作为 Setext 标题文本，
 /// 其后的下划线行按原样内容（thematic break 等）输出。
 fn is_block_start(body: &[u8]) -> bool {
-    if leading_spaces(body) >= 4 {
+    let indent = leading_spaces(body);
+    if indent >= 4 {
         return true; // 缩进代码块
     }
-    let rest = trim_trailing_spaces(body);
+    let rest = trim_trailing_spaces(&body[indent..]);
     let Some(&first) = rest.first() else {
         return true; // 空行
     };
@@ -731,6 +732,8 @@ fn write_merge_entries(
         on_event(MdProgress::FileCompleted(index + 1, entries.len()))?;
     }
     out.flush().context("写输出文件失败（磁盘可能已满）")?;
+    // 最后一个完成事件之后仍可能收到停止请求；正式落盘前保持取消安全边界。
+    control.checkpoint()?;
     Ok(())
 }
 
@@ -1473,6 +1476,69 @@ mod tests {
             seen.borrow()
         );
         assert!(!output.exists(), "中止的合并不得留下半成品输出");
+    }
+
+    // 覆盖 M-07/U-12：最后一个文件完成回调收到取消时，正式提交前仍须停止，保护旧输出。
+    #[test]
+    fn merge_cancelled_on_final_completion_keeps_existing_output() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        write(&root.join("a.md"), "# 甲\n");
+        let output = root.join("merged.md");
+        let original = b"existing output";
+        fs::write(&output, original).unwrap();
+        let entries = scan_markdown(root, true, Some(&output)).unwrap();
+        let control = Control::default();
+        let error = merge_markdown_with_events(&entries, &output, true, &control, &|event| {
+            if event == MdProgress::FileCompleted(1, 1) {
+                control.cancel();
+            }
+            Ok(())
+        })
+        .expect_err("正式提交前取消必须停止合并");
+        assert!(format!("{error:#}").contains("取消"), "{error:#}");
+        assert_eq!(fs::read(&output).unwrap(), original, "取消不得覆盖旧输出");
+        assert_eq!(fs::read(root.join("a.md")).unwrap(), "# 甲\n".as_bytes());
+        for entry in fs::read_dir(root).unwrap() {
+            let name = entry.unwrap().file_name().to_string_lossy().into_owned();
+            assert!(
+                !name.starts_with(".jchtools-md-out-"),
+                "取消收尾不得残留临时文件：{name}"
+            );
+        }
+    }
+
+    // 覆盖 M-04/M-05：一至三格缩进的列表和引用仍是块结构，不得误改成 Setext 标题。
+    #[test]
+    fn merge_keeps_indented_block_starts_untouched() {
+        for indent in 1..=3 {
+            for block in [
+                "- 列表项",
+                "* 列表项",
+                "+ 列表项",
+                "> 引用",
+                "1. 列表项",
+                "1) 列表项",
+            ] {
+                let dir = tempfile::tempdir().unwrap();
+                let source = format!("{}{block}\n---\n", " ".repeat(indent));
+                let text = merge_single(dir.path(), "block.md", &source);
+                assert_eq!(
+                    text,
+                    format!("# block.md\n\n{source}"),
+                    "缩进块结构不得转换成标题：{source:?}"
+                );
+            }
+            let dir = tempfile::tempdir().unwrap();
+            let spaces = " ".repeat(indent);
+            let source = format!("{spaces}普通文本\n===\n");
+            let text = merge_single(dir.path(), "text.md", &source);
+            assert_eq!(
+                text,
+                format!("# text.md\n\n{spaces}## 普通文本\n"),
+                "缩进普通文本的 Setext 转换必须保留"
+            );
+        }
     }
 
     // 覆盖 U-12（合并的文件内循环必须有停止检查点：暂停 rendezvous 证明任务停在

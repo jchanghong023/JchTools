@@ -5,6 +5,7 @@
 // 测试代码允许 unwrap/expect：断言失败即测试失败，属合理用法
 // （与 clippy.toml 的 allow-*-in-tests 策略一致，集成测试 crate 不在其覆盖范围内）。
 #![allow(clippy::unwrap_used, clippy::expect_used)]
+mod common;
 use jchtools::markdown::{
     test_media_dir_name, test_scan_count_with_cancel, test_scan_media_dirs,
     test_write_new_markdown, FormatGroup, Options,
@@ -86,4 +87,75 @@ fn scan_honors_cancellation_before_traversal() {
     let cancel = AtomicBool::new(true);
     let error = test_scan_count_with_cancel(&options, &cancel).unwrap_err();
     assert!(error.contains("取消"));
+}
+
+// 覆盖 T-08/XB-09/XB-26：使用当前配置引擎的格式集合，不把内置发布清单
+// 当作用户替换后的能力；共享合成引擎支持 txt 和必需文档类型，不支持 rtf。
+#[test]
+fn batch_uses_selected_engine_formats() {
+    common::ensure_child_reaper();
+    let _session = common::session_lock();
+    common::cleanup_stray_engines();
+    let temp = tempfile::tempdir().unwrap();
+    let root = temp.path();
+    common::mock_engine_copy("tests/fixtures/shared_xberg.rs", &root.join("xberg.exe"));
+    std::env::set_var("JCHTOOLS_TEST_STATE_DIR", root.join("state"));
+    std::env::set_var("JCHTOOLS_TEST_BROKER_EXE", env!("CARGO_BIN_EXE_JchTools"));
+    let manifest: serde_json::Value =
+        serde_json::from_str(include_str!("../resources/markdown-assets.json")).unwrap();
+    for member in manifest["xberg"]["members"].as_array().unwrap() {
+        let relative = member["path"].as_str().unwrap();
+        if relative != "xberg.exe" {
+            let target = root.join(relative);
+            std::fs::create_dir_all(target.parent().unwrap()).unwrap();
+            std::fs::write(target, b"synthetic asset").unwrap();
+        }
+    }
+    jchtools::markdown_assets::save_runtime_dir(root).unwrap();
+    let input = root.join("input");
+    let output = root.join("output");
+    std::fs::create_dir(&input).unwrap();
+    std::fs::create_dir(&output).unwrap();
+    std::fs::write(input.join("a.txt"), b"synthetic text").unwrap();
+    std::fs::write(input.join("b.rtf"), b"synthetic unsupported input").unwrap();
+    let state = jchtools::xberg_runtime::request(
+        root,
+        serde_json::json!({"command":"snapshot_state"}),
+        std::time::Duration::from_secs(15),
+        &AtomicBool::new(false),
+    )
+    .and_then(jchtools::xberg_runtime::checked)
+    .unwrap();
+    struct BrokerGuard(u64);
+    impl Drop for BrokerGuard {
+        fn drop(&mut self) {
+            let _ = std::process::Command::new("taskkill")
+                .args(["/PID", &self.0.to_string(), "/T", "/F"])
+                .output();
+        }
+    }
+    let _broker = BrokerGuard(state["jchtools_broker_pid"].as_u64().unwrap());
+    let options = Options {
+        input_dir: input.clone(),
+        output_dir: output.clone(),
+        flat: false,
+        groups: vec![FormatGroup::Other],
+        timeout_secs: 15,
+    };
+    let mut started = Vec::new();
+    let summary = jchtools::markdown::run(&options, &AtomicBool::new(false), |event| {
+        if let jchtools::markdown::Event::FileStarted { relative, .. } = event {
+            started.push(relative);
+        }
+    })
+    .unwrap();
+    assert_eq!(summary.success, 1, "引擎未声明的 rtf 不得入队转换");
+    assert_eq!(summary.failed, 0);
+    assert_eq!(started, vec![std::path::PathBuf::from("a.txt")]);
+    assert_eq!(std::fs::read(output.join("a_txt.md")).unwrap(), b"document");
+    assert!(!output.join("b_rtf.md").exists());
+    assert_eq!(
+        std::fs::read(input.join("b.rtf")).unwrap(),
+        b"synthetic unsupported input"
+    );
 }

@@ -123,3 +123,55 @@ fn saved_directory_is_restored_and_invalid_save_preserves_it() {
         .join("markdown-assets/xberg-runtime-path.txt")
         .exists());
 }
+
+/// 覆盖 XB-18/XB-21：首次保存下载来源也迁移未读取的旧文本，并跨进程保留双来源。
+#[test]
+fn downloaded_save_preserves_unloaded_legacy_text() {
+    use jchtools::xberg_settings::{self, Source};
+    if let Some(root) = std::env::var_os("JCHTOOLS_MIGRATION_TEST_CHILD") {
+        let root = std::path::PathBuf::from(root);
+        let custom = root.join("旧用户目录");
+        let downloaded = root.join("下载目录");
+        if std::env::var("JCHTOOLS_MIGRATION_TEST_ACTION").unwrap() == "save" {
+            xberg_settings::save_source(Source::Downloaded, &downloaded).unwrap();
+        } else {
+            let saved = xberg_settings::settings().unwrap();
+            assert_eq!(saved.source, Source::Downloaded);
+            assert_eq!(saved.custom, Some(custom));
+            assert_eq!(saved.downloaded, Some(downloaded.canonicalize().unwrap()));
+            assert_eq!(
+                xberg_settings::required().unwrap(),
+                downloaded.canonicalize().unwrap()
+            );
+        }
+        return;
+    }
+    let root = tempfile::tempdir().unwrap();
+    let custom = root.path().join("旧用户目录");
+    let downloaded = root.path().join("下载目录");
+    std::fs::create_dir(&downloaded).unwrap();
+    std::fs::write(downloaded.join("xberg.exe"), b"configuration fixture").unwrap();
+    let legacy_root = root.path().join("markdown-assets");
+    std::fs::create_dir(&legacy_root).unwrap();
+    let legacy = legacy_root.join("xberg-runtime-path.txt");
+    std::fs::write(&legacy, custom.to_str().unwrap()).unwrap();
+    for action in ["save", "read"] {
+        assert!(Command::new(std::env::current_exe().unwrap())
+            .args([
+                "--exact",
+                "downloaded_save_preserves_unloaded_legacy_text",
+                "--nocapture"
+            ])
+            .env("JCHTOOLS_MIGRATION_TEST_CHILD", root.path())
+            .env("JCHTOOLS_MIGRATION_TEST_ACTION", action)
+            .env("JCHTOOLS_TEST_STATE_DIR", root.path())
+            .env("JCHTOOLS_MARKDOWN_TEST_ASSET_ROOT", &legacy_root)
+            .status()
+            .unwrap()
+            .success());
+    }
+    assert_eq!(
+        std::fs::read_to_string(legacy).unwrap(),
+        custom.to_str().unwrap()
+    );
+}

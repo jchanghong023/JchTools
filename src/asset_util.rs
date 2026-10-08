@@ -280,7 +280,7 @@ pub(crate) fn validate_relative_path(path: &str) -> Result<(), String> {
         || path
             .split('/')
             .any(|part| part.is_empty() || part == "." || part == "..")
-        || path.as_bytes().get(1) == Some(&b':')
+        || path.contains(':')
     {
         return Err(format!("资产路径不安全：{path}"));
     }
@@ -536,6 +536,10 @@ pub(crate) fn extract_zip_safely(
         let mut entry = zip
             .by_index(index)
             .map_err(|error| format!("读取压缩包条目失败：{error}"))?;
+        // Windows 冒号可寻址替代数据流，enclosed_name 只保证路径不越界。
+        if entry.name().contains(':') {
+            return Err(format!("压缩包包含不安全路径：{}", entry.name()));
+        }
         let relative = entry
             .enclosed_name()
             .ok_or_else(|| format!("压缩包包含不安全路径：{}", entry.name()))?
@@ -557,8 +561,12 @@ pub(crate) fn extract_zip_safely(
         if let Some(parent) = target.parent() {
             fs::create_dir_all(parent).map_err(|error| format!("创建解包目录失败：{error}"))?;
         }
-        let mut output =
-            File::create(&target).map_err(|error| format!("创建解包文件失败：{error}"))?;
+        // 使用文件系统的实际同名规则拒绝碰撞，保留已解出的首个成员。
+        let mut output = File::options()
+            .write(true)
+            .create_new(true)
+            .open(&target)
+            .map_err(|error| format!("创建解包文件失败：{error}"))?;
         let mut buffer = vec![0_u8; 1024 * 1024];
         loop {
             ensure_not_cancelled(cancel)?;
@@ -585,6 +593,60 @@ mod tests {
     use std::fs;
     use std::process::Command;
     use std::sync::atomic::AtomicBool;
+
+    // 覆盖 XB-10 / T-06 / O-09：Windows 等价成员不能覆盖已解出的成员。
+    #[test]
+    fn zip_case_collision_preserves_first_member() {
+        let root = tempfile::tempdir().expect("创建测试目录");
+        let archive = root.path().join("assets.zip");
+        let mut writer = zip::ZipWriter::new(fs::File::create(&archive).expect("创建压缩包"));
+        for (name, bytes) in [("asset.bin", b"first".as_slice()), ("ASSET.BIN", b"second")] {
+            writer
+                .start_file(name, zip::write::SimpleFileOptions::default())
+                .expect("创建压缩包成员");
+            std::io::Write::write_all(&mut writer, bytes).expect("写入成员");
+        }
+        writer.finish().expect("完成压缩包");
+        let extracted = root.path().join("extracted");
+        fs::create_dir(&extracted).expect("创建解包目录");
+
+        let result = super::extract_zip_safely(&archive, &extracted, &AtomicBool::new(false));
+
+        assert!(result.is_err(), "Windows 同名成员必须拒绝而非覆盖");
+        assert_eq!(fs::read(extracted.join("asset.bin")).unwrap(), b"first");
+    }
+
+    // 覆盖 XB-10 / T-06 / O-09：资产成员路径不能寻址 Windows 替代数据流。
+    #[test]
+    fn asset_path_rejects_alternate_data_stream() {
+        for path in ["dir/file:stream", "file.bin:stream", "dir/file::$DATA"] {
+            assert!(
+                super::validate_relative_path(path).is_err(),
+                "必须拒绝替代数据流路径：{path}"
+            );
+        }
+        assert!(super::validate_relative_path("dir/file.bin").is_ok());
+    }
+
+    // 覆盖 XB-10 / T-06 / O-09：下载归档的成员同样不能写入替代数据流。
+    #[test]
+    fn zip_rejects_alternate_data_stream_member() {
+        let root = tempfile::tempdir().expect("创建测试目录");
+        let archive = root.path().join("assets.zip");
+        let mut writer = zip::ZipWriter::new(fs::File::create(&archive).expect("创建压缩包"));
+        writer
+            .start_file("dir/file:stream", zip::write::SimpleFileOptions::default())
+            .expect("创建压缩包成员");
+        std::io::Write::write_all(&mut writer, b"stream").expect("写入成员");
+        writer.finish().expect("完成压缩包");
+        let extracted = root.path().join("extracted");
+        fs::create_dir(&extracted).expect("创建解包目录");
+
+        let result = super::extract_zip_safely(&archive, &extracted, &AtomicBool::new(false));
+
+        assert!(result.is_err(), "压缩包替代数据流成员必须拒绝");
+        assert!(!extracted.join("dir/file").exists(), "不能创建流的宿主文件");
+    }
 
     #[test]
     fn verify_file_with_cancel_stops_before_hashing() {

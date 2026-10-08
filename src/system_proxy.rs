@@ -274,7 +274,10 @@ fn rule_matches(rule: &BypassRule, host: &str) -> bool {
     match rule {
         BypassRule::Local => !host.contains('.'),
         BypassRule::Pattern(pattern) => {
-            if let Some(suffix) = pattern.strip_prefix("*.") {
+            if let Some(suffix) = pattern
+                .strip_prefix("*.")
+                .filter(|suffix| !suffix.contains('*'))
+            {
                 let suffix = suffix.trim_end_matches('.');
                 host == suffix || host.ends_with(&format!(".{suffix}"))
             } else {
@@ -330,7 +333,10 @@ fn translate_no_proxy(rule: &BypassRule) -> Option<String> {
             if pattern == "*" {
                 Some((*pattern).clone())
             } else {
-                pattern.strip_prefix("*.").map(str::to_string)
+                pattern
+                    .strip_prefix("*.")
+                    .filter(|suffix| !suffix.contains('*'))
+                    .map(str::to_string)
             }
         }
     }
@@ -508,6 +514,28 @@ mod tests {
         assert_eq!(
             proxy.endpoint_for_url("https://github.com/a"),
             Some("http://127.0.0.1:7890".to_string())
+        );
+
+        // P-09：多星号例外不能误走字面后缀快径，也不能导出为 curl 后缀条目。
+        let multiple_wildcards =
+            SystemProxy::from_registry_values(1, Some("127.0.0.1:7890"), Some("*.corp.*"));
+        assert_eq!(
+            multiple_wildcards.endpoint_for_url("https://git.corp.example/repo.git"),
+            None,
+            "多星号例外应按通配匹配，目标直连"
+        );
+        assert!(multiple_wildcards.bypassed("https://git.corp.example/repo.git"));
+        assert_eq!(
+            multiple_wildcards.endpoint_for_url("https://xcorp.example/repo.git"),
+            Some("http://127.0.0.1:7890".to_string()),
+            "多星号例外仍须保留字面点边界"
+        );
+        assert!(
+            multiple_wildcards
+                .git_env()
+                .iter()
+                .all(|(key, _)| key != "no_proxy"),
+            "curl 无法表达多星号例外，不应导出 no_proxy"
         );
     }
 

@@ -328,6 +328,16 @@ fn rewrite_image_links_in_line(
     let bytes = line.as_bytes();
     let mut changed = false;
     while i < bytes.len() {
+        // CommonMark 正文中的反斜杠转义只作用于 ASCII 标点；代码跨度内
+        // 则是普通字符。成对消费也保留 \\ 后的真实图片/反引号语义。
+        if inline_code.is_none()
+            && bytes[i] == b'\\'
+            && bytes.get(i + 1).is_some_and(u8::is_ascii_punctuation)
+        {
+            out.push_str(&line[i..i + 2]);
+            i += 2;
+            continue;
+        }
         if bytes[i] == b'`' {
             let run = bytes[i..].iter().take_while(|&&byte| byte == b'`').count();
             if let Some(open_len) = *inline_code {
@@ -531,6 +541,26 @@ mod tests {
         );
         assert_eq!(output.media.len(), 1);
         assert_eq!(output.media[0].relative, "a_(1)%#/image_0.png");
+    }
+
+    // 覆盖 T-14/T-17：转义图片标记和反引号都是正文字符，不产生图片或代码跨度。
+    #[test]
+    fn escaped_image_markers_remain_literal() {
+        let envelope = response(&json!({
+            "content": "\\![字面](image_0.png)\n\\` ![图](image_1.png)",
+            "images": [
+                {"image_index": 0, "format": "png", "data_base64": "aGVsbG8="},
+                {"image_index": 1, "format": "png", "data_base64": "aGVsbG8="}
+            ]
+        }));
+        let output = parse_document_response(&envelope, "m").unwrap();
+        assert_eq!(
+            output.markdown,
+            "\\![字面](image_0.png)\n\\` ![图](m/image_1.png)"
+        );
+        assert_eq!(output.media.len(), 1);
+        assert_eq!(output.media[0].relative, "m/image_1.png");
+        assert!(output.warnings.is_empty());
     }
 
     // 覆盖 T-14：围栏与行内代码内的 image_N.ext 字样是字面文本，不改写；

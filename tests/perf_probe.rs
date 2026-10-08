@@ -20,38 +20,73 @@ fn env_or(name: &str, default: usize) -> usize {
         .unwrap_or(default)
 }
 
+/// 每个探针独占一个测试进程，避免全局 tracing subscriber 指向前一探针的临时目录。
+/// 子进程沿用规模参数；进程启动时间不进入任务耗时测量。
+fn isolate_probe(name: &str) -> bool {
+    const CHILD: &str = "JT_PERF_PROBE_CHILD";
+    if std::env::var(CHILD).as_deref() == Ok(name) {
+        return false;
+    }
+    let status = std::process::Command::new(std::env::current_exe().unwrap())
+        .args([
+            "--exact",
+            name,
+            "--ignored",
+            "--nocapture",
+            "--test-threads=1",
+        ])
+        .env(CHILD, name)
+        .status()
+        .unwrap();
+    assert!(status.success(), "独立进程中的 {name} 探针必须通过");
+    true
+}
+
 /// 启用 perf-tracing 特性时初始化性能日志（落在 state/perf-logs/），结束时打印 span 行。
 /// 未启用特性时是空操作；这也让基准顺带充当 perf-tracing 端到端的冒烟验证。
 #[cfg(feature = "perf-tracing")]
-fn perf_init(state: &std::path::Path) -> Option<jchtools::perf::Guard> {
-    jchtools::perf::init(state)
+fn perf_init(state: &std::path::Path) -> jchtools::perf::Guard {
+    jchtools::perf::init(state).expect("独立探针进程必须成功初始化性能日志")
 }
 #[cfg(not(feature = "perf-tracing"))]
 fn perf_init(state: &std::path::Path) -> Option<()> {
     let _ = state;
     None
 }
-fn perf_dump(state: &std::path::Path) {
+/// 读取日志前等待当前探针的非阻塞写入退出刷盘。
+#[cfg(feature = "perf-tracing")]
+fn perf_flush(guard: jchtools::perf::Guard) {
+    drop(guard);
+}
+#[cfg(not(feature = "perf-tracing"))]
+fn perf_flush(guard: Option<()>) {
+    let _ = guard;
+}
+fn perf_dump(state: &std::path::Path, expected_spans: &[(&str, usize)]) {
     #[cfg(feature = "perf-tracing")]
     {
         let dir = state.join(jchtools::perf::LOG_DIR);
-        let Ok(entries) = fs::read_dir(&dir) else {
-            return;
-        };
+        let entries = fs::read_dir(&dir).expect("性能日志目录必须存在");
+        let mut spans = Vec::new();
         for entry in entries.flatten() {
-            let Ok(text) = fs::read_to_string(entry.path()) else {
-                continue;
-            };
+            let text = fs::read_to_string(entry.path()).expect("性能日志必须可读取");
             for line in text.lines() {
                 if line.contains("time.busy") {
                     println!("[perf] {line}");
+                    spans.push(line.to_owned());
                 }
             }
+        }
+        for (expected, minimum) in expected_spans {
+            assert!(
+                spans.iter().filter(|line| line.contains(*expected)).count() >= *minimum,
+                "性能日志必须包含至少 {minimum} 次 {expected} 的关闭耗时"
+            );
         }
     }
     #[cfg(not(feature = "perf-tracing"))]
     {
-        let _ = state;
+        let _ = (state, expected_spans);
     }
 }
 
@@ -60,6 +95,9 @@ fn perf_dump(state: &std::path::Path) {
 #[test]
 #[ignore = "性能基准：生成与运行耗时数十秒，仅手动运行"]
 fn organizer_dedup_probe() {
+    if isolate_probe("organizer_dedup_probe") {
+        return;
+    }
     let groups = env_or("JT_PERF_GROUPS", 5000);
     let copies = env_or("JT_PERF_COPIES", 8);
     let temp = TempDir::new().unwrap();
@@ -87,7 +125,7 @@ fn organizer_dedup_probe() {
         groups * copies,
         gen.elapsed().as_secs_f64()
     );
-    let _perf_guard = perf_init(&state);
+    let perf_guard = perf_init(&state);
     let t0 = Instant::now();
     let prepared =
         engine::prepare_at(&root, Config::default(), Context::default(), &state).unwrap();
@@ -114,7 +152,8 @@ fn organizer_dedup_probe() {
         "[dedup] deleted={} moved={}",
         done.summary.deleted, done.summary.moved
     );
-    perf_dump(&state);
+    perf_flush(perf_guard);
+    perf_dump(&state, &[("organize_analyze", 1), ("organize_apply", 1)]);
 }
 
 /// 去重复用场景（C-13）：同一数据、同一状态目录连跑两次分析。
@@ -125,6 +164,9 @@ fn organizer_dedup_probe() {
 #[test]
 #[ignore = "性能基准：生成与运行耗时数十秒，仅手动运行"]
 fn organizer_dedup_reuse_probe() {
+    if isolate_probe("organizer_dedup_reuse_probe") {
+        return;
+    }
     let groups = env_or("JT_PERF_GROUPS", 5000);
     let copies = env_or("JT_PERF_COPIES", 8);
     let fixed_kib = env_or("JT_PERF_FILE_KIB", 0);
@@ -160,6 +202,7 @@ fn organizer_dedup_reuse_probe() {
         },
         gen.elapsed().as_secs_f64()
     );
+    let perf_guard = perf_init(&state);
     let t0 = Instant::now();
     let cold = engine::prepare_at(&root, Config::default(), Context::default(), &state).unwrap();
     let t_cold = t0.elapsed();
@@ -191,12 +234,17 @@ fn organizer_dedup_reuse_probe() {
         (1.0 - t_warm.as_secs_f64() / t_cold.as_secs_f64()) * 100.0,
         cold.summary.planned_delete
     );
+    perf_flush(perf_guard);
+    perf_dump(&state, &[("organize_analyze", 2)]);
 }
 
 /// 空目录场景：N 个嵌套空目录，覆盖 plan_empty_dirs 物化临时表与 apply 自底向上删除。
 #[test]
 #[ignore = "性能基准：生成与运行耗时数十秒，仅手动运行"]
 fn organizer_empty_dirs_probe() {
+    if isolate_probe("organizer_empty_dirs_probe") {
+        return;
+    }
     let total = env_or("JT_PERF_EMPTY_DIRS", 12000);
     let temp = TempDir::new().unwrap();
     let root = temp.path().join("data");
@@ -222,7 +270,7 @@ fn organizer_empty_dirs_probe() {
         "[empty] 数据生成：{total} 个空目录，{:.2}s（不计入测量）",
         gen.elapsed().as_secs_f64()
     );
-    let _perf_guard = perf_init(&state);
+    let perf_guard = perf_init(&state);
     let t0 = Instant::now();
     let prepared =
         engine::prepare_at(&root, Config::default(), Context::default(), &state).unwrap();
@@ -247,5 +295,6 @@ fn organizer_empty_dirs_probe() {
         "[empty] deleted={} moved={}",
         done.summary.deleted, done.summary.moved
     );
-    perf_dump(&state);
+    perf_flush(perf_guard);
+    perf_dump(&state, &[("organize_analyze", 1), ("organize_apply", 1)]);
 }

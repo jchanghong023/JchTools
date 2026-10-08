@@ -127,8 +127,8 @@ pub struct TaskResult {
 }
 /// 清理硬链接执行的崩溃残留（.jchtools-link-{uuid}）：崩溃发生在「源已删、改名回
 /// 原路径前」时残留无法自愈，扫描对其永久剪枝且无其它回收路径。残留是指向 keeper
-/// 内容的硬链接，删除后内容仍由保留文件持有。24 小时阈值与 clean_orphan_staging
-/// 一致，避免误删并发任务的临时文件。
+/// 内容的硬链接，删除后内容仍由保留文件持有。24 小时阈值用于避免误删并发任务
+/// 的临时文件。
 /// S-01/F02：清理名单只来自分析阶段登记的「本次处理范围内疑似残留」（见 scan 的
 /// link_residues：扫描时未命中任何范围剪枝规则——glob 排除、非递归深层、隐藏/系统
 /// 范围外、隔离容器、Git 整树排除等都不得越出），执行时逐项复核既有谓词：名称前缀、
@@ -312,6 +312,7 @@ fn prepare_at_with(
                 return Err(error);
             }
         }
+        job.context.control.checkpoint()?;
         job.db.set("summary", &job.summary)?;
         job.db.set("status", &"ready")?;
         job.log(
@@ -487,7 +488,7 @@ fn count_archives_with(root: &Path, config: &Config, protected: Option<&Path>) -
     };
     // X-10：缺主包的老式族尾卷组按「残缺但可归组的卷集计一包」参与清点。
     // 归组依赖同目录兄弟关系，先按目录收集文件名再统一计数，与扫描的兄弟判定同源。
-    let mut names_by_dir: HashMap<PathBuf, Vec<String>> = HashMap::new();
+    let mut names_by_dir: HashMap<PathBuf, (Vec<String>, HashSet<String>)> = HashMap::new();
     let mut boundary_error = None;
     let mut filter_error = None;
     for entry in walkdir::WalkDir::new(&root)
@@ -559,21 +560,20 @@ fn count_archives_with(root: &Path, config: &Config, protected: Option<&Path>) -
             .path()
             .parent()
             .map_or_else(|| root.clone(), Path::to_path_buf);
-        names_by_dir
-            .entry(parent)
-            .or_default()
-            .push(name.to_lowercase());
+        let (names, entry_groups) = names_by_dir.entry(parent).or_default();
+        // 入口键必须使用原名：Unicode 小写转换会破坏 Windows ordinal 主干比较。
+        if let Some(key) = rules::archive_entry_key(name) {
+            entry_groups.insert(key);
+        }
+        names.push(name.to_ascii_lowercase());
     }
     ensure_git_boundary_checked(boundary_error.as_deref())?;
     if let Some(error) = filter_error {
         bail!("无法完成确认框清点，目录项检查失败：{error}");
     }
     let mut count = 0u64;
-    for names in names_by_dir.values() {
-        count += names
-            .iter()
-            .filter(|name| rules::archive_name(name))
-            .count() as u64;
+    for (names, entry_groups) in names_by_dir.values() {
+        count += entry_groups.len() as u64;
         count += rules::count_tail_only_old_style_groups(names);
         // X-10 缺入口的残缺组（part rar 缺首卷 / 数字尾卷缺 .001）同样按
         // 「残缺但可归组的卷集计一包」参与清点，与扫描入队同口径。
@@ -642,7 +642,7 @@ fn lock_sink(sink: &Mutex<ScanSink>) -> std::sync::MutexGuard<'_, ScanSink> {
 /// 处理范围剪枝口径：扫描、确认框清点（X-02）与整理收尾实空清理共用同一套判定，
 /// 三处不会各自漂移出不同范围。Git 整树排除（H-06）由调用方在枚举目录前单独判定。
 struct ScopeFilter<'a> {
-    excluded: &'a globset::GlobSet,
+    excluded: &'a rules::Exclusions,
     include_hidden: bool,
     include_system: bool,
     /// 「解压失败」暂存区：扫描与清点整树跳过（C-09/X-07）；收尾实空清理不跳过
@@ -896,7 +896,7 @@ fn walk_dir<'a>(
     {
         let mut sink = lock_sink(ctx.sink);
         // 目录名小写折叠在这里补齐（供 directories.name 的 Windows 折叠匹配）；
-        // 文件名的小写折叠与 UTF-16 计数由 db.insert_file 统一完成。
+        // 文件名的 Windows ordinal 匹配键与 UTF-16 计数由 db.insert_file 统一完成。
         for child in &mut children {
             if let ScanKind::Dir { lower } = &mut child.kind {
                 *lower = child.name.to_lowercase();
@@ -932,6 +932,8 @@ fn scan_emit(
     let Some(children) = by_parent.get(parent) else {
         return Ok(());
     };
+    // 同目录的歧义入口只选一个代表；不同目录递归调用各自维护卷族集合。
+    let mut archive_entries = enqueue.then(HashSet::new);
     for child in children {
         *count += 1;
         if (*count).is_multiple_of(2048) {
@@ -952,11 +954,15 @@ fn scan_emit(
                 job.db.insert_file(&rel, &child.name, normal, snapshot)?;
                 job.summary.scanned += 1;
                 job.summary.scanned_bytes = job.summary.scanned_bytes.saturating_add(snapshot.size);
-                if enqueue && rules::archive_name(&child.name) {
-                    // 入队失败按旧口径计错误并跳过该包，不中断整个扫描（文件行已入库）。
-                    if let Err(error) = archive::enqueue(job, &job.root.join(&rel), 0) {
-                        job.summary.errors += 1;
-                        job.log("扫描", &rel, "", "跳过", &format!("{error:#}"), 0)?;
+                if let Some(entry_groups) = archive_entries.as_mut() {
+                    if rules::archive_entry_key(&child.name)
+                        .is_some_and(|key| entry_groups.insert(key))
+                    {
+                        // 同一卷族只入队一次；入队失败计错，但不重新处理另一个歧义入口。
+                        if let Err(error) = archive::enqueue(job, &job.root.join(&rel), 0) {
+                            job.summary.errors += 1;
+                            job.log("扫描", &rel, "", "跳过", &format!("{error:#}"), 0)?;
+                        }
                     }
                 }
             }
@@ -976,7 +982,7 @@ fn enqueue_missing_entry_groups(job: &mut Job, parent: &str, children: &[ScanChi
     let lowered: Vec<String> = children
         .iter()
         .filter(|child| matches!(child.kind, ScanKind::File { .. }))
-        .map(|child| child.name.to_lowercase())
+        .map(|child| child.name.to_ascii_lowercase())
         .collect();
     // 代表名是小写口径；入队必须用磁盘上的原始文件名（可能含大写）。
     let mut representatives: HashSet<String> = rules::part_rar_missing_first_groups(&lowered)
@@ -990,7 +996,7 @@ fn enqueue_missing_entry_groups(job: &mut Job, parent: &str, children: &[ScanChi
         let ScanKind::File { .. } = &child.kind else {
             continue;
         };
-        let lower = child.name.to_lowercase();
+        let lower = child.name.to_ascii_lowercase();
         if !representatives.remove(&lower) {
             continue;
         }
@@ -1019,14 +1025,14 @@ fn enqueue_old_style_tail_groups(
     let siblings: HashSet<String> = children
         .iter()
         .filter(|child| matches!(child.kind, ScanKind::File { .. }))
-        .map(|child| child.name.to_lowercase())
+        .map(|child| child.name.to_ascii_lowercase())
         .collect();
     let mut seen: HashSet<(String, &'static str)> = HashSet::new();
     for child in children {
         let ScanKind::File { .. } = &child.kind else {
             continue;
         };
-        let lower = child.name.to_lowercase();
+        let lower = child.name.to_ascii_lowercase();
         let Some(tail) = rules::old_style_tail(&lower) else {
             continue;
         };
@@ -2182,9 +2188,33 @@ fn execute_run(
             })
             .collect()
     });
+    settle_parallel_results(job, run, results)
+}
+
+fn settle_parallel_results(
+    job: &mut Job,
+    run: &[Action],
+    results: Vec<Result<Option<DeleteResult>>>,
+) -> Result<()> {
+    let size = |action: &Action| action.expected.as_ref().map_or(0, |snapshot| snapshot.size);
+    let mut cancellation = None;
     for (action, result) in run.iter().zip(results) {
         match result {
-            Err(error) => record_action_failure(job, action, &error)?,
+            Err(error) if job.context.control.is_cancelled() => {
+                // 并行文件操作已全部返回；先登记同批成功项，再按取消收尾。
+                // 未启动/未完成的取消项保持 pending，不计失败或完成数。
+                cancellation.get_or_insert(error);
+                continue;
+            }
+            Err(error) => {
+                if let Err(error) = record_action_failure(job, action, &error) {
+                    if !job.context.control.is_cancelled() {
+                        return Err(error);
+                    }
+                    cancellation.get_or_insert(error);
+                    continue;
+                }
+            }
             // 空目录实空复查未过（已不存在/非目录/非空）：按旧口径计跳过、不写结果日志。
             Ok(None) => {
                 job.summary.skipped += 1;
@@ -2230,6 +2260,9 @@ fn execute_run(
             .control
             .completed
             .fetch_add(1, Ordering::Relaxed);
+    }
+    if let Some(error) = cancellation {
+        return Err(error);
     }
     Ok(())
 }
@@ -2542,6 +2575,159 @@ mod lock_tests {
     // 平台门禁原因：仅 Windows 门禁测试使用（UNC/盘符前缀拼接），非 Windows 无使用者。
     #[cfg(windows)]
     const BSLASH: char = std::path::MAIN_SEPARATOR; // Windows 下为反斜杠
+
+    // 覆盖 C-10/C-11：取消不丢失同批已完成的删除结果。
+    #[test]
+    fn cancelled_parallel_run_records_completed_deletions() {
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path().join("data");
+        fs::create_dir(&root).unwrap();
+        fs::write(root.join("cancelled.txt"), b"keep").unwrap();
+        fs::write(root.join("completed.txt"), b"done").unwrap();
+        let db = Database::create(&temp.path().join("state")).unwrap();
+        let mut actions = Vec::new();
+        for source in ["cancelled.txt", "completed.txt"] {
+            let mut action = Action {
+                source: source.into(),
+                expected: Some(fsutil::snapshot(&root.join(source)).unwrap()),
+                ..Action::default()
+            };
+            action.id = db.add_action(&action).unwrap();
+            actions.push(action);
+        }
+        fs::remove_file(root.join("completed.txt")).unwrap();
+        let context = TaskContext::default();
+        context.control.cancel();
+        let mut job = Job {
+            root: root.clone(),
+            config: Config::default(),
+            context,
+            db,
+            summary: Summary::default(),
+        };
+        let result = settle_parallel_results(
+            &mut job,
+            &actions,
+            vec![
+                Err(anyhow::anyhow!("任务已取消")),
+                Ok(Some(DeleteResult::Permanent)),
+            ],
+        );
+        assert!(result.is_err(), "任务仍应按取消收尾");
+        assert_eq!(job.db.action(actions[1].id).unwrap().state, "done");
+        assert_eq!(job.db.action(actions[0].id).unwrap().state, "pending");
+        assert_eq!(job.summary.deleted, 1);
+        assert_eq!(job.summary.permanent_bytes, 4);
+        assert_eq!(job.summary.errors, 0);
+        assert_eq!(job.context.control.completed.load(Ordering::Relaxed), 1);
+        assert!(root.join("cancelled.txt").exists());
+        assert!(!root.join("completed.txt").exists());
+    }
+
+    fn ambiguous_volume_entries_fixture() -> (tempfile::TempDir, PathBuf) {
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path().join("data");
+        fs::create_dir_all(root.join("a")).unwrap();
+        fs::create_dir_all(root.join("b")).unwrap();
+        for name in [
+            "data.zip.000",
+            "data.zip.001",
+            "data.zip",
+            "project.part1.rar",
+            "project.part01.rar",
+            "project.part001.rar",
+            "a/data.zip.001",
+            "b/data.zip.001",
+            "unsupported.iso.000",
+            "unsupported.iso.001",
+        ] {
+            fs::write(root.join(name), name.as_bytes()).unwrap();
+        }
+        (temp, root)
+    }
+
+    // 覆盖 X-02/X-10：同目录歧义入口同族一包，不合并不同目录或独立单包。
+    #[test]
+    fn ambiguous_volume_entries_count_once() {
+        let (_temp, root) = ambiguous_volume_entries_fixture();
+        assert_eq!(
+            count_archives_with(&root, &Config::default(), None).unwrap(),
+            5,
+            "数字起始歧义一组、part 首卷宽度歧义一组、独立 ZIP 与两目录各一包"
+        );
+    }
+
+    #[test]
+    fn ambiguous_volume_entries_enqueue_once() {
+        let (temp, root) = ambiguous_volume_entries_fixture();
+        let state = temp.path().join("state");
+        let db = Database::create(&state).unwrap();
+        let mut job = Job {
+            root: fs::canonicalize(root).unwrap(),
+            config: Config::default(),
+            context: TaskContext::default(),
+            db,
+            summary: Summary::default(),
+        };
+        scan(&mut job, true, &state, None).unwrap();
+        let queued: i64 = job
+            .db
+            .conn
+            .query_row("SELECT count(*) FROM archives", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(queued, 5, "扫描入队必须与确认框同族一包口径一致");
+        assert_eq!(job.summary.errors, 0);
+        assert_eq!(job.summary.scanned, 10, "归组不遗漏普通文件扫描记录");
+    }
+
+    fn ordinal_volume_tail_fixture() -> (tempfile::TempDir, PathBuf) {
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path().join("data");
+        fs::create_dir(&root).unwrap();
+        for name in [
+            "İ.zip.002",
+            "i\u{0307}.zip.003",
+            "İ.part02.rar",
+            "i\u{0307}.part03.rar",
+        ] {
+            fs::write(root.join(name), name.as_bytes()).unwrap();
+        }
+        (temp, root)
+    }
+
+    // 覆盖 X-10：Unicode lowercase 的展开结果不能合并 Windows ordinal 不同主干。
+    #[test]
+    fn ordinal_volume_tail_count() {
+        let (_temp, root) = ordinal_volume_tail_fixture();
+        assert_eq!(
+            count_archives_with(&root, &Config::default(), None).unwrap(),
+            4,
+            "İ 与 i 加组合点不是相同主干，各自数字族与 part 族共四个残缺组"
+        );
+    }
+
+    #[test]
+    fn ordinal_volume_tail_enqueue() {
+        let (temp, root) = ordinal_volume_tail_fixture();
+        let state = temp.path().join("state");
+        let db = Database::create(&state).unwrap();
+        let mut job = Job {
+            root: fs::canonicalize(root).unwrap(),
+            config: Config::default(),
+            context: TaskContext::default(),
+            db,
+            summary: Summary::default(),
+        };
+        scan(&mut job, true, &state, None).unwrap();
+        let queued: i64 = job
+            .db
+            .conn
+            .query_row("SELECT count(*) FROM archives", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(queued, 4, "不同 Unicode 主干的四个残缺卷族都必须单独入队");
+        assert_eq!(job.summary.errors, 0);
+        assert_eq!(job.summary.scanned, 4);
+    }
 
     #[test]
     fn failed_git_boundary_check_aborts_processing() {

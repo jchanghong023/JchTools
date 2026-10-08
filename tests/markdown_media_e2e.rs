@@ -13,7 +13,7 @@
 //! - `JCHTOOLS_MEDIA_E2E_INPUT`：第一个用例（含语音转录）的合成媒体文件
 //!   （MP4/M4A，公开合成，不含业务内容，T-26），必须包含真实语音。
 //! - `JCHTOOLS_MEDIA_E2E_TRACKLESS_INPUT`：第二个用例（无音轨/无语音）的合成
-//!   媒体文件；未设置时该用例跳过（打印说明后返回），不与第一个用例共用输入
+//!   媒体文件；显式运行时未设置即失败，不与第一个用例共用输入
 //!   ——两者对正文的断言方向相反（S4-08），同一文件不可能同时满足。
 //! - `JCHTOOLS_MEDIA_E2E_EXPECT_TEXT`：期望在第一个用例转录正文中出现的文本
 //!   片段（逗号分隔多个候选，命中任一即通过）。
@@ -108,20 +108,15 @@ fn real_component_transcribe_returns_structured_markdown() {
 
 // 覆盖 T-20/T-24：无音轨输入产出明确说明（不产生无解释空文件）；该用例使用
 // 独立输入 JCHTOOLS_MEDIA_E2E_TRACKLESS_INPUT（S4-08：与「含语音」用例共用
-// 同一输入时两断言方向相反，按文件头命令一起运行必有一败），未设置时跳过。
+// 同一输入时两断言方向相反，按文件头命令一起运行必有一败），缺依赖不得计通过。
 #[test]
 #[ignore = "Requires real Xberg inference components and a trackless synthetic media file"]
 fn real_component_trackless_media_reports_no_audio() {
-    let Some(trackless) = std::env::var("JCHTOOLS_MEDIA_E2E_TRACKLESS_INPUT")
-        .ok()
-        .filter(|value| !value.trim().is_empty())
-    else {
-        eprintln!(
-            "未设置 JCHTOOLS_MEDIA_E2E_TRACKLESS_INPUT，跳过无音轨门控用例 \
-             （运行前置见文件头注释，XB-02/T-20）"
-        );
-        return;
-    };
+    let trackless = env_required("JCHTOOLS_MEDIA_E2E_TRACKLESS_INPUT");
+    assert!(
+        !trackless.trim().is_empty(),
+        "JCHTOOLS_MEDIA_E2E_TRACKLESS_INPUT 不得为空；缺少夹具不能冒充验收通过"
+    );
     let _settings = configure_component_via_settings();
     let input = PathBuf::from(trackless);
     assert!(input.is_file(), "输入媒体不存在：{}", input.display());

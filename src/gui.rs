@@ -30,7 +30,7 @@ use slint::{ComponentHandle, Model, ModelRc, SharedString, VecModel};
 use std::io::{BufRead, BufReader, Write};
 use std::{
     cell::{Cell, RefCell},
-    collections::VecDeque,
+    collections::{HashMap, VecDeque},
     path::{Path, PathBuf},
     rc::Rc,
     sync::{
@@ -140,6 +140,8 @@ struct RuleSpec {
 struct State {
     config: Config,
     specs: Vec<RuleSpec>,
+    /// 附录 D：不能表示为配置数字的编辑草稿，保留到用户修正；不得以旧值执行。
+    invalid_rule_inputs: HashMap<String, String>,
     section: String,
     task: Option<PathBuf>,
     control: Option<Arc<Control>>,
@@ -714,7 +716,7 @@ fn rule_row(spec: &RuleSpec, data: &serde_json::Value) -> RuleRow {
 }
 /// 解析规则数字输入。附录 D：计数/比例项只接受非负十进制整数；容量项（capacity）
 /// 额外接受可选的 B/KiB/MiB/GiB/TiB 单位（不区分大小写），换算后必须为整数字节，
-/// 否则按非法输入处理（报错并回退，不自动截断）。全程整数运算，不做浮点换算。
+/// 否则按非法输入处理（保留输入并阻止开始，不自动截断）。全程整数运算，不做浮点换算。
 fn parse_capacity(value: &str, capacity: bool) -> Result<u64, ()> {
     if !capacity {
         return value.parse::<u64>().map_err(|_| ());
@@ -797,7 +799,13 @@ fn visible_rows(state: &State) -> Result<Vec<RuleRow>> {
                 && s.tools.iter().any(|t| t == tool)
                 && rule_visible(s, &state.config, state.show_advanced)
         })
-        .map(|spec| rule_row(spec, &data))
+        .map(|spec| {
+            let mut row = rule_row(spec, &data);
+            if let Some(draft) = state.invalid_rule_inputs.get(&spec.key) {
+                row.value = draft.as_str().into();
+            }
+            row
+        })
         .collect())
 }
 fn rule_rows(state: &State) -> Result<ModelRc<RuleRow>> {
@@ -991,6 +999,8 @@ fn changed(
                 // 主题设置不属于任一工具的规则面板。
                 Tool::Md | Tool::Git | Tool::MarkdownConverter | Tool::SnapOcr => Ok(()),
             };
+            let validation = invalid_number_error(&state, tool)
+                .map_or(validation, |error| Err(anyhow::anyhow!(error)));
             match validation {
                 Ok(()) => ui.set_error_text("".into()),
                 Err(error) => ui.set_error_text(format!("{error:#}").into()),
@@ -1262,21 +1272,49 @@ fn classify_plan_snapshot(
 fn apply_plan_readiness(ui: &AppWindow, state: &State, snapshot: Option<&PlanSnapshot>) {
     let outcome = classify_plan_snapshot(snapshot, ui.get_directory().as_str(), &state.config);
     ui.set_plan_editable(outcome.editable());
-    ui.set_ready(matches!(outcome, PlanReadyState::Ready));
+    ui.set_ready(
+        matches!(outcome, PlanReadyState::Ready)
+            && invalid_number_error(state, Tool::Organizer).is_none(),
+    );
     if state.tool == Tool::Organizer && state.readiness_status_pending.replace(false) {
         ui.set_status(outcome.status_text().into());
     }
 }
-/// 数值规则行的配置真值文本：读当前配置里的 u64 值转字符串；缺失或类型不符
-/// 时为空串。非法输入回退与超范围写入失败共用，保证行显示回到同一真值。
-fn rule_config_truth_text(state: &Rc<RefCell<State>>, key: &str) -> String {
-    let cfg = serde_json::to_value(&state.borrow().config).unwrap_or_default();
-    cfg.get(key)
-        .cloned()
-        .unwrap_or_default()
-        .as_u64()
-        .map(|v| v.to_string())
-        .unwrap_or_default()
+/// 附录 D：仅当前工具实际启用的数字字段参与门禁。
+fn invalid_number_error(state: &State, tool: Tool) -> Option<String> {
+    let owner = match tool {
+        Tool::Extract => "extract",
+        Tool::Organizer => "organizer",
+        Tool::Md | Tool::Git | Tool::MarkdownConverter | Tool::SnapOcr => return None,
+    };
+    state.specs.iter().find_map(|spec| {
+        if !state.invalid_rule_inputs.contains_key(&spec.key)
+            || !spec.tools.iter().any(|item| item == owner)
+            || (spec.key == "large_threshold_bytes" && !state.config.large_files)
+        {
+            return None;
+        }
+        Some(format!(
+            "{}：{}",
+            spec.title,
+            if spec.unit.as_deref() == Some("bytes") {
+                "需要非负数字，可选单位 B/KiB/MiB/GiB/TiB（换算后须为整数字节且不超出允许范围）"
+            } else {
+                "需要输入非负整数，且不得超出允许范围"
+            }
+        ))
+    })
+}
+fn retain_invalid_number(ui: &AppWindow, state: &Rc<RefCell<State>>, key: &str, value: &str) {
+    let (tool, error) = {
+        let mut s = state.borrow_mut();
+        s.invalid_rule_inputs
+            .insert(key.to_string(), value.to_string());
+        (s.tool, invalid_number_error(&s, s.tool))
+    };
+    patch_rule_row(ui, key, |row| row.value = value.into());
+    invalidate(ui, tool);
+    ui.set_error_text(error.unwrap_or_default().into());
 }
 /// 计划页事件是否可应用：代际须仍是 latest，且 filter 与当前视图一致。
 /// page 不再要求与 UI 预置值一致：翻页采用「先加载、成功再提交」，加载期间 state.page 仍是旧页。
@@ -1329,6 +1367,10 @@ fn start_task(ui: &AppWindow, state: &Rc<RefCell<State>>, out: &EventSender, app
     }
     if apply && state.borrow().plan_recompute_failed {
         ui.set_error_text("计划依赖重算失败，请重新分析后再执行".into());
+        return;
+    }
+    if let Some(error) = invalid_number_error(&state.borrow(), state.borrow().tool) {
+        show_error(ui, error);
         return;
     }
     let (configuration, task, tool) = {
@@ -1449,6 +1491,10 @@ fn start_extract(ui: &AppWindow, state: &Rc<RefCell<State>>, out: &EventSender) 
     if ui.get_busy() {
         return;
     }
+    if let Some(error) = invalid_number_error(&state.borrow(), Tool::Extract) {
+        show_error(ui, error);
+        return;
+    }
     let configuration = {
         let s = state.borrow();
         s.config.clone()
@@ -1566,19 +1612,20 @@ fn extract_confirm_text(count_text: &str, directory: &str) -> String {
 fn show_error(ui: &AppWindow, error: impl std::fmt::Display) {
     ui.set_error_text(error.to_string().into());
 }
-/// 通用目录选择（U-07）：标题按用途传入；从 `directory` 输入框的已有值起步，
-/// 选择后经 `apply` 写回对应输入框（MD/Git 各自的目录输入互不影响）。
-fn pick_directory(ui: &AppWindow, title: &str, apply: impl FnOnce(&AppWindow, PathBuf)) {
+/// 目录选择起点策略；各页面传入自己的当前字段，不共享输入状态。
+fn directory_dialog_start(entered: &str) -> Option<PathBuf> {
+    let entered = PathBuf::from(entered);
+    entered.is_dir().then_some(entered)
+}
+fn pick_directory(
+    ui: &AppWindow,
+    title: &str,
+    entered: &str,
+    apply: impl FnOnce(&AppWindow, PathBuf),
+) {
     let mut dialog = rfd::FileDialog::new().set_title(title);
-    let entered = PathBuf::from(ui.get_directory().to_string());
-    if entered.is_dir() {
-        dialog = dialog.set_directory(entered);
-    } else {
-        // 主输入为空或无效时，退到 MD 输入目录起步（U-07 不无故回到其他位置）。
-        let md_input = PathBuf::from(ui.get_md_input_dir().to_string());
-        if md_input.is_dir() {
-            dialog = dialog.set_directory(md_input);
-        }
+    if let Some(start) = directory_dialog_start(entered) {
+        dialog = dialog.set_directory(start);
     }
     if let Some(path) = dialog.pick_folder() {
         apply(ui, path);
@@ -2466,31 +2513,22 @@ fn wire_sync(ui: &AppWindow, state: &Rc<RefCell<State>>, out: &EventSender) {
                     .find(|s| s.key == key.as_str())
                     .cloned();
                 let numeric = spec.as_ref().is_some_and(|s| s.kind == "number");
-                let capacity = spec.as_ref().is_some_and(|s| s.unit.as_deref() == Some("bytes"));
+                let capacity = spec
+                    .as_ref()
+                    .is_some_and(|s| s.unit.as_deref() == Some("bytes"));
                 let parsed = if numeric {
                     if let Ok(v) = parse_capacity(value.as_str(), capacity) {
                         serde_json::Value::from(v)
                     } else {
-                        // 清空/非法：不写配置，就地把该行显示改回配置真值。
-                        // 禁止整表 refresh：会销毁正在编辑的 LineEdit 并丢焦点。
-                        if !value.is_empty() {
-                            show_error(
-                                &ui,
-                                if capacity {
-                                    "该设置需要非负数字，可选单位 B/KiB/MiB/GiB/TiB（换算后须为整数字节）"
-                                } else {
-                                    "该设置需要输入非负整数"
-                                },
-                            );
-                        }
-                        patch_rule_row(&ui, key.as_str(), |row| {
-                            row.value = rule_config_truth_text(&state, key.as_str()).into();
-                        });
+                        retain_invalid_number(&ui, &state, key.as_str(), value.as_str());
                         return;
                     }
                 } else {
                     serde_json::Value::from(value.to_string())
                 };
+                if numeric {
+                    state.borrow_mut().invalid_rule_inputs.remove(key.as_str());
+                }
                 if changed(&ui, &state, key.as_str(), &parsed, false) {
                     // 模型行里的 value 是重建列表（切分区、恢复默认规则）时的唯一来源，必须跟着更新，
                     // 否则重建后这一行会拿旧值覆盖刚改好的设置。
@@ -2504,12 +2542,7 @@ fn wire_sync(ui: &AppWindow, state: &Rc<RefCell<State>>, out: &EventSender) {
                     // 与 on_rule_choice 同步可见性，增量插删不重建整表。
                     sync_rules(&ui, &state.borrow());
                 } else if numeric {
-                    // 数值超出字段范围（如超过 u32 上限）等写入失败：与非法文本同口径处理，
-                    // 中文提示并回退行显示，避免输入框与配置真值不一致直到整表重建。
-                    patch_rule_row(&ui, key.as_str(), |row| {
-                        row.value = rule_config_truth_text(&state, key.as_str()).into();
-                    });
-                    show_error(&ui, "该设置超出允许的范围");
+                    retain_invalid_number(&ui, &state, key.as_str(), value.as_str());
                 }
             }
         });
@@ -2533,6 +2566,10 @@ fn wire_sync(ui: &AppWindow, state: &Rc<RefCell<State>>, out: &EventSender) {
         ui.on_request_extract_start(move || {
             if let Some(ui) = weak.upgrade() {
                 if ui.get_busy() {
+                    return;
+                }
+                if let Some(error) = invalid_number_error(&state.borrow(), Tool::Extract) {
+                    show_error(&ui, error);
                     return;
                 }
                 if let Err(error) = state.borrow().config.validate_extract() {
@@ -4257,6 +4294,7 @@ fn initial_state() -> Result<State> {
     Ok(State {
         config: Config::default(),
         specs,
+        invalid_rule_inputs: HashMap::new(),
         section: "去重".into(),
         task: None,
         control: None,
@@ -4331,9 +4369,14 @@ fn wire_md_git(ui: &AppWindow, state: &Rc<RefCell<State>>, out: &EventSender) {
         let weak = ui.as_weak();
         ui.on_md_choose_input(move || {
             if let Some(ui) = weak.upgrade() {
-                pick_directory(&ui, "选择要合并的目录", |ui, path| {
-                    ui.set_md_input_dir(path.display().to_string().into());
-                });
+                pick_directory(
+                    &ui,
+                    "选择要合并的目录",
+                    ui.get_md_input_dir().as_str(),
+                    |ui, path| {
+                        ui.set_md_input_dir(path.display().to_string().into());
+                    },
+                );
             }
         });
     }
@@ -4341,9 +4384,14 @@ fn wire_md_git(ui: &AppWindow, state: &Rc<RefCell<State>>, out: &EventSender) {
         let weak = ui.as_weak();
         ui.on_md_choose_output(move || {
             if let Some(ui) = weak.upgrade() {
-                pick_directory(&ui, "选择合并输出目录", |ui, path| {
-                    ui.set_md_output_dir(path.display().to_string().into());
-                });
+                pick_directory(
+                    &ui,
+                    "选择合并输出目录",
+                    ui.get_md_output_dir().as_str(),
+                    |ui, path| {
+                        ui.set_md_output_dir(path.display().to_string().into());
+                    },
+                );
             }
         });
     }
@@ -4351,9 +4399,14 @@ fn wire_md_git(ui: &AppWindow, state: &Rc<RefCell<State>>, out: &EventSender) {
         let weak = ui.as_weak();
         ui.on_md_split_choose_dir(move || {
             if let Some(ui) = weak.upgrade() {
-                pick_directory(&ui, "选择拆分输出目录", |ui, path| {
-                    ui.set_md_split_dir(path.display().to_string().into());
-                });
+                pick_directory(
+                    &ui,
+                    "选择拆分输出目录",
+                    ui.get_md_split_dir().as_str(),
+                    |ui, path| {
+                        ui.set_md_split_dir(path.display().to_string().into());
+                    },
+                );
             }
         });
     }
@@ -4387,9 +4440,14 @@ fn wire_md_git(ui: &AppWindow, state: &Rc<RefCell<State>>, out: &EventSender) {
         let weak = ui.as_weak();
         ui.on_git_choose_repo(move || {
             if let Some(ui) = weak.upgrade() {
-                pick_directory(&ui, "选择 Git 项目目录", |ui, path| {
-                    ui.set_git_repo(path.display().to_string().into());
-                });
+                pick_directory(
+                    &ui,
+                    "选择 Git 项目目录",
+                    ui.get_git_repo().as_str(),
+                    |ui, path| {
+                        ui.set_git_repo(path.display().to_string().into());
+                    },
+                );
             }
         });
     }
@@ -4491,9 +4549,14 @@ fn wire_settings(ui: &AppWindow, state: &Rc<RefCell<State>>, out: &EventSender) 
             return;
         }
         if action == "choose" {
-            pick_directory(&ui, "选择 Xberg 运行目录", |ui, path| {
-                ui.set_settings_custom_dir(path.display().to_string().into());
-            });
+            pick_directory(
+                &ui,
+                "选择 Xberg 运行目录",
+                ui.get_settings_custom_dir().as_str(),
+                |ui, path| {
+                    ui.set_settings_custom_dir(path.display().to_string().into());
+                },
+            );
             return;
         }
         let action = action.to_string();
@@ -4543,14 +4606,20 @@ fn wire_markdown_converter(ui: &AppWindow, state: &Rc<RefCell<State>>, out: &Eve
         let state = state.clone();
         ui.on_convert_choose_runtime(move || {
             if let Some(ui) = weak.upgrade() {
-                pick_directory(&ui, "选择 Xberg 运行目录", |ui, path| {
-                    let mut s = state.borrow_mut();
-                    s.convert_readiness_generation = s.convert_readiness_generation.wrapping_add(1);
-                    ui.set_convert_runtime_confirmed(false);
-                    ui.set_convert_ready(false);
-                    ui.set_convert_status("目录已更换，请点击「使用此目录」进行校验".into());
-                    ui.set_convert_runtime_dir(path.display().to_string().into());
-                });
+                pick_directory(
+                    &ui,
+                    "选择 Xberg 运行目录",
+                    ui.get_convert_runtime_dir().as_str(),
+                    |ui, path| {
+                        let mut s = state.borrow_mut();
+                        s.convert_readiness_generation =
+                            s.convert_readiness_generation.wrapping_add(1);
+                        ui.set_convert_runtime_confirmed(false);
+                        ui.set_convert_ready(false);
+                        ui.set_convert_status("目录已更换，请点击「使用此目录」进行校验".into());
+                        ui.set_convert_runtime_dir(path.display().to_string().into());
+                    },
+                );
             }
         });
     }
@@ -4611,9 +4680,14 @@ fn wire_markdown_converter(ui: &AppWindow, state: &Rc<RefCell<State>>, out: &Eve
         let weak = ui.as_weak();
         ui.on_convert_choose_input(move || {
             if let Some(ui) = weak.upgrade() {
-                pick_directory(&ui, "选择待转换目录", |ui, path| {
-                    ui.set_convert_input_dir(path.display().to_string().into());
-                });
+                pick_directory(
+                    &ui,
+                    "选择待转换目录",
+                    ui.get_convert_input_dir().as_str(),
+                    |ui, path| {
+                        ui.set_convert_input_dir(path.display().to_string().into());
+                    },
+                );
             }
         });
     }
@@ -4621,9 +4695,14 @@ fn wire_markdown_converter(ui: &AppWindow, state: &Rc<RefCell<State>>, out: &Eve
         let weak = ui.as_weak();
         ui.on_convert_choose_output(move || {
             if let Some(ui) = weak.upgrade() {
-                pick_directory(&ui, "选择 Markdown 输出目录", |ui, path| {
-                    ui.set_convert_output_dir(path.display().to_string().into());
-                });
+                pick_directory(
+                    &ui,
+                    "选择 Markdown 输出目录",
+                    ui.get_convert_output_dir().as_str(),
+                    |ui, path| {
+                        ui.set_convert_output_dir(path.display().to_string().into());
+                    },
+                );
             }
         });
     }
@@ -7514,9 +7593,9 @@ mod gui_tests {
         })
         .unwrap();
     }
-    // 覆盖 U-06（非法输入红条提示并回退显示）
+    // 覆盖 U-06 / 附录 D：非法输入保留供修正，并阻止以旧配置开始。
     #[test]
-    fn invalid_number_input_reports_error_and_reverts_value() {
+    fn invalid_number_input_reports_error_preserves_value_and_blocks_start() {
         with_gui(|app| {
             let ui = &app.ui;
             ui.invoke_select_tool("recursive-extract".into());
@@ -7529,12 +7608,124 @@ mod gui_tests {
             );
             assert_eq!(
                 rule_value_at(ui, "max_depth").as_deref(),
-                Some("16"),
-                "非法输入必须回退为配置真值"
+                Some("abc"),
+                "非法输入必须保留，不能替用户恢复旧配置"
+            );
+            let root = temp_test_dir("invalid-number-start");
+            ui.set_directory(root.display().to_string().into());
+            ui.invoke_request_extract_start();
+            assert_eq!(ui.get_confirm_kind(), 0, "非法数字不得启动解压清点");
+            assert!(!ui.get_busy(), "非法数字不得启动解压任务");
+            ui.invoke_rule_text("max_depth".into(), "16".into());
+            assert!(ui.get_error_text().is_empty(), "修正输入后必须恢复合法状态");
+        })
+        .unwrap();
+    }
+    #[test]
+    fn invalid_number_draft_survives_navigation_and_empty_and_overflow_inputs() {
+        with_gui(|app| {
+            let ui = &app.ui;
+            ui.invoke_select_tool("recursive-extract".into());
+            ui.invoke_toggle_advanced(true);
+            for text in ["", "18446744073709551616", "4294967296"] {
+                ui.invoke_rule_text("max_depth".into(), text.into());
+                ui.invoke_select_section(1);
+                ui.invoke_select_section(0);
+                assert_eq!(rule_value_at(ui, "max_depth").as_deref(), Some(text));
+                ui.invoke_request_extract_start();
+                assert_eq!(ui.get_confirm_kind(), 0);
+                assert!(!ui.get_error_text().is_empty(), "空值/溢出须显示字段错误");
+            }
+        })
+        .unwrap();
+    }
+
+    #[test]
+    fn invalid_large_threshold_is_ignored_only_until_rule_reenabled() {
+        let root = temp_test_dir("invalid-large-threshold");
+        with_gui(move |app| {
+            let ui = &app.ui;
+            ui.invoke_select_tool("directory-organizer".into());
+            ui.invoke_select_section(1);
+            ui.invoke_toggle_advanced(true);
+            ui.invoke_rule_bool("large_files".into(), true);
+            ui.invoke_rule_text("large_threshold_bytes".into(), "abc".into());
+            ui.invoke_rule_bool("large_files".into(), false);
+            assert!(
+                ui.get_error_text().is_empty(),
+                "关闭附属规则不应阻止无关处理"
+            );
+            ui.invoke_select_tool("recursive-extract".into());
+            ui.set_directory(root.display().to_string().into());
+            ui.invoke_request_extract_start();
+            assert_eq!(ui.get_confirm_kind(), 1, "整理草稿不得阻止独立解压工具");
+            ui.set_confirm_kind(0);
+            ui.invoke_select_tool("directory-organizer".into());
+            ui.invoke_select_section(1);
+            ui.invoke_rule_bool("large_files".into(), true);
+            ui.invoke_request_start();
+            assert!(!ui.get_busy(), "重新启用非法附属字段必须禁止分析");
+            assert!(!ui.get_error_text().is_empty());
+            assert_eq!(
+                rule_value_at(ui, "large_threshold_bytes").as_deref(),
+                Some("abc")
             );
         })
         .unwrap();
     }
+    #[test]
+    fn directory_dialog_uses_own_field_start() {
+        let root = temp_test_dir("directory-dialog-fields");
+        let fields = [
+            "shared",
+            "md-input",
+            "md-output",
+            "md-split",
+            "git",
+            "runtime",
+            "custom",
+            "convert-input",
+            "convert-output",
+        ];
+        for field in fields {
+            std::fs::create_dir_all(root.join(field)).unwrap();
+        }
+        with_gui(move |app| {
+            let ui = &app.ui;
+            ui.set_directory(root.join("shared").display().to_string().into());
+            ui.set_md_input_dir(root.join("md-input").display().to_string().into());
+            ui.set_md_output_dir(root.join("md-output").display().to_string().into());
+            ui.set_md_split_dir(root.join("md-split").display().to_string().into());
+            ui.set_git_repo(root.join("git").display().to_string().into());
+            ui.set_convert_runtime_dir(root.join("runtime").display().to_string().into());
+            ui.set_settings_custom_dir(root.join("custom").display().to_string().into());
+            ui.set_convert_input_dir(root.join("convert-input").display().to_string().into());
+            ui.set_convert_output_dir(root.join("convert-output").display().to_string().into());
+            for entered in [
+                ui.get_md_input_dir(),
+                ui.get_md_output_dir(),
+                ui.get_md_split_dir(),
+                ui.get_git_repo(),
+                ui.get_convert_runtime_dir(),
+                ui.get_settings_custom_dir(),
+                ui.get_convert_input_dir(),
+                ui.get_convert_output_dir(),
+            ] {
+                assert_eq!(
+                    directory_dialog_start(entered.as_str()),
+                    Some(PathBuf::from(entered.as_str())),
+                    "U-07：每个目录选择须使用当前字段，而不是其他工具的目录"
+                );
+            }
+            assert_eq!(
+                directory_dialog_start(""),
+                None,
+                "空输入不得回退其他工具字段"
+            );
+        })
+        .unwrap();
+    }
+
     // 覆盖 C-10, P-04
     #[test]
     fn theme_choice_keeps_plan_ready_but_rule_change_invalidates() {

@@ -28,13 +28,15 @@ blake3 = "1.8"
 chrono = { version = "0.4", default-features = false, features = ["clock", "serde"] }
 directories-next = "2.0"
 fs2 = "0.4"
-globset = "0.4"
 hex = "0.4"
 flate2 = "1.1"
-infer = "0.19"
+# C-08：仅显式开启内容签名修正时验证图像结构，复用 workspace 已锁定解码器。
+image = { version = "=0.25.10", default-features = false, features = ["png", "jpeg", "gif", "bmp", "tiff", "webp"] }
 lopdf = { version = "=0.45.0", default-features = false }
 rayon = "1.10"
 regex = "1.11"
+# C-08：解析 OOXML 内容类型声明，不能以 XML 文本片段冒充有效文档结构。
+roxmltree = "=0.21.1"
 rusqlite = { version = "0.32", features = ["bundled"] }
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"

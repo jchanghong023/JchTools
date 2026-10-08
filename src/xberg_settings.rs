@@ -53,6 +53,31 @@ fn open(root: &Path) -> Result<Connection, String> {
     Ok(db)
 }
 
+fn read_legacy(root: &Path) -> Result<Option<String>, String> {
+    let legacy_root = if cfg!(any(test, feature = "test-hooks")) {
+        std::env::var_os("JCHTOOLS_MARKDOWN_TEST_ASSET_ROOT").map(PathBuf::from)
+    } else {
+        None
+    }
+    .unwrap_or_else(|| root.join("markdown-assets"));
+    match std::fs::read_to_string(legacy_root.join("xberg-runtime-path.txt")) {
+        Ok(value) => Ok(Some(value)),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),
+        Err(e) => Err(format!("读取旧 Xberg 配置失败：{e}")),
+    }
+}
+
+fn legacy_directory_value(value: &str) -> Result<&str, String> {
+    let value = value.trim();
+    if value.is_empty() {
+        return Err("旧 Xberg 运行目录配置为空".into());
+    }
+    if !Path::new(value).is_absolute() {
+        return Err("旧 Xberg 运行目录不是绝对路径，未迁移或覆盖配置".into());
+    }
+    Ok(value)
+}
+
 /// 仅首次迁移旧文本。SQLite 有值时不读取旧文本，迁移失败不删除原件。
 pub fn load() -> Result<Option<PathBuf>, String> {
     let root = state_dir()?;
@@ -75,24 +100,10 @@ pub fn load() -> Result<Option<PathBuf>, String> {
         }
         return Ok(Some(path));
     }
-    let legacy_root = if cfg!(any(test, feature = "test-hooks")) {
-        std::env::var_os("JCHTOOLS_MARKDOWN_TEST_ASSET_ROOT").map(PathBuf::from)
-    } else {
-        None
-    }
-    .unwrap_or_else(|| root.join("markdown-assets"));
-    let value = match std::fs::read_to_string(legacy_root.join("xberg-runtime-path.txt")) {
-        Ok(value) => value,
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
-        Err(e) => return Err(format!("读取旧 Xberg 配置失败：{e}")),
+    let Some(value) = read_legacy(&root)? else {
+        return Ok(None);
     };
-    let value = value.trim();
-    if value.is_empty() {
-        return Err("旧 Xberg 运行目录配置为空".into());
-    }
-    if !Path::new(value).is_absolute() {
-        return Err("旧 Xberg 运行目录不是绝对路径，未迁移或覆盖配置".into());
-    }
+    let value = legacy_directory_value(&value)?;
     db.execute(
         "INSERT OR IGNORE INTO app_settings(key,value) VALUES('xberg_directory',?1)",
         [value],
@@ -175,11 +186,31 @@ pub fn save_source(source: Source, path: &Path) -> Result<(), String> {
     }
     let path = std::fs::canonicalize(path).map_err(|e| format!("解析 Xberg 目录失败：{e}"))?;
     let text = path.to_str().ok_or("Xberg 路径无法编码为 Unicode")?;
-    let mut db = open(&state_dir()?)?;
+    let root = state_dir()?;
+    let mut db = open(&root)?;
     let tx = db.transaction().map_err(|e| e.to_string())?;
     // 切到下载来源前，把旧版唯一目录保留为用户目录。
     tx.execute("INSERT OR IGNORE INTO app_settings(key,value) SELECT 'xberg_custom_directory',value FROM app_settings WHERE key='xberg_directory' AND NOT EXISTS(SELECT 1 FROM app_settings WHERE key='xberg_source')", [])
         .map_err(|e| e.to_string())?;
+    if source == Source::Downloaded {
+        let migrate_text: bool = tx
+            .query_row(
+                "SELECT NOT EXISTS(SELECT 1 FROM app_settings WHERE key IN ('xberg_source','xberg_custom_directory'))",
+                [],
+                |row| row.get(0),
+            )
+            .map_err(|e| format!("读取旧 Xberg 来源配置失败：{e}"))?;
+        if migrate_text {
+            if let Some(value) = read_legacy(&root)? {
+                let value = legacy_directory_value(&value)?;
+                tx.execute(
+                    "INSERT INTO app_settings(key,value) VALUES('xberg_custom_directory',?1)",
+                    [value],
+                )
+                .map_err(|e| format!("迁移旧 Xberg 用户目录失败：{e}"))?;
+            }
+        }
+    }
     for (key, value) in [
         (source.key(), text),
         ("xberg_source", source.value()),

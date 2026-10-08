@@ -732,3 +732,35 @@ fn extract_quarantines_missing_first_part_rar_group() {
         "失败原因必须指明缺首卷（X-10）：{log}"
     );
 }
+
+// 覆盖 X-08：上次任务遗留的工作区不是本次所有物，不得按历史年龄自动删除。
+#[test]
+fn review_extraction_preserves_foreign_staging() {
+    let f = Fixture::new();
+    let owner = "11111111-1111-4111-8111-111111111111";
+    let work = f.dir(&format!(".jchtools-work/{owner}"));
+    fs::write(work.join("OWNER"), owner).unwrap();
+    fs::create_dir(work.join("content")).unwrap();
+    fs::write(work.join("content/keep.txt"), b"foreign task payload").unwrap();
+    filetime::set_file_mtime(&work, filetime::FileTime::from_unix_time(0, 0)).unwrap();
+    let task = engine::extract_run_at(&f.root, base(), Context::default(), &f.state, None).unwrap();
+    assert_eq!(task.summary.archives_ok + task.summary.archives_failed, 0);
+    assert_eq!(
+        fs::read(work.join("content/keep.txt")).unwrap(),
+        b"foreign task payload",
+        "无本次所有权的旧暂存资料必须保留"
+    );
+    assert_eq!(fs::read_to_string(work.join("OWNER")).unwrap(), owner);
+    // 空扫描不会启动解压；再用纯文件系统缺首卷路径触发真实 extract_queued。
+    f.write("trigger.part02.rar", b"missing first volume");
+    let active =
+        engine::extract_run_at(&f.root, base(), Context::default(), &f.state, None).unwrap();
+    assert_eq!(active.summary.archives_ok, 0);
+    assert_eq!(active.summary.archives_failed, 1);
+    assert_eq!(
+        fs::read(work.join("content/keep.txt")).unwrap(),
+        b"foreign task payload",
+        "处理真实队列同样不得清理其他任务历史工作区"
+    );
+    assert_eq!(fs::read_to_string(work.join("OWNER")).unwrap(), owner);
+}

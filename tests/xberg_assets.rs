@@ -45,6 +45,12 @@ fn scenario_rules_assign_every_fixed_manifest_member() {
         ("xberg.cmd", false, false, false),
         ("models/snapshot-ocr/infer.onnx", true, false, false),
         (
+            "models/paddleocr-onnx-models-LICENSE.txt",
+            true,
+            false,
+            true,
+        ),
+        (
             "models/sense_voice_zh_en_ja_ko_yue_2024_07_17/model.int8.onnx",
             false,
             true,
@@ -73,6 +79,12 @@ fn scenario_rules_assign_every_fixed_manifest_member() {
             assert!(
                 path.starts_with("samples/") || path == "xberg.cmd",
                 "清单成员 {path} 不被任何场景校验，须显式声明为 samples/xberg.cmd 例外"
+            );
+        } else if path == "models/paddleocr-onnx-models-LICENSE.txt" {
+            assert_eq!(
+                matched,
+                [true, false, true],
+                "PaddleOCR 许可必须由截图与文档共用，媒体不依赖它"
             );
         } else if path.starts_with("models/") {
             assert_eq!(count, 1, "模型成员 {path} 必须恰好归属一个场景");

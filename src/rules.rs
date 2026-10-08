@@ -4,7 +4,6 @@ use crate::{
     model::FileRecord,
 };
 use anyhow::{bail, Result};
-use globset::{GlobBuilder, GlobSet, GlobSetBuilder};
 use sha2::{Digest, Sha256};
 use std::{
     cmp::Ordering,
@@ -15,42 +14,57 @@ use std::{
 };
 use unicode_normalization::UnicodeNormalization;
 
+#[path = "rules/signature.rs"]
+mod signature;
+pub use signature::detect_extension;
+
 // ---------------------------------------------------------------------------
 // 附录 C：扫描排除 glob（S-04 / R-03）
 // ---------------------------------------------------------------------------
 
-/// 附录 C：把一段用户模式翻译为 globset 等价模式。合同语法只保留两个通配符——
-/// `*`（零个或多个字符，可跨 `/`）与 `?`（恰好一个字符，不跨 `/`），其余一律字面匹配：
-/// - `\` 视为目录分隔符，统一改写成 `/`（不是转义符）；
-/// - 连续多个 `*` 折叠成一个（globset 会把 `**` 解释成递归前缀/后缀等独立语义，
-///   如 `**/cache` 会命中根级 cache，与合同「连续星号等同单个星号」相悖）；
-/// - `?` 译成否定字符类 `[!/]`（globset 0.4 语法，编译为 `[^/]`）：在
-///   literal_separator(false) 下 globset 的 `?` 本可跨 `/`，必须收紧成不跨；
-/// - `[`、`]`、`{`、`}` 用单元素字符类表达字面量（globset 没有转义语法，且类内
-///   首个 `]` 按字面、其余括号按普通字符解析）：`[[]`、`[]]`、`[{]`、`[}]`；
-///   `,` 只在花括号展开内有特殊义，展开已被逐字转义，故保持原样即为字面量。
-///
-/// 翻译只做一遍，翻译产物不会再被二次转义。
+/// 附录 C：仅支持 * / ? 的 Unicode 匹配器；所有字面量复用 Windows 序数比较键。
+pub struct Exclusions {
+    patterns: regex::RegexSet,
+}
+
+impl Exclusions {
+    pub fn is_match<P: AsRef<Path>>(&self, path: P) -> bool {
+        if self.patterns.is_empty() {
+            return false;
+        }
+        path.as_ref()
+            .to_str()
+            .is_some_and(|text| self.patterns.is_match(fsutil::fold_rel(text).as_str()))
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.patterns.is_empty()
+    }
+}
+
 fn translate_exclusion_part(part: &str) -> String {
-    let mut out = String::with_capacity(part.len());
-    let mut chars = part.chars().peekable();
+    let folded = fsutil::fold_rel(&part.replace('\\', "/"));
+    let mut out = String::from(r"\A");
+    let mut chars = folded.chars().peekable();
     while let Some(c) = chars.next() {
         match c {
-            '\\' => out.push('/'),
             '*' => {
                 while chars.peek() == Some(&'*') {
                     chars.next();
                 }
-                out.push('*');
+                out.push_str("(?s:.*)");
             }
-            '?' => out.push_str("[!/]"),
-            '[' => out.push_str("[[]"),
-            ']' => out.push_str("[]]"),
-            '{' => out.push_str("[{]"),
-            '}' => out.push_str("[}]"),
-            c => out.push(c),
+            '?' if cfg!(windows) => {
+                // fold_rel 把 UTF-16 代理单元无损映射到 E000..E7FF，原始 BMP
+                // 字符整体避开此区间。一个 Unicode 字符对应一个非代理单元或
+                // 一对代理单元；不能让 ? 只吃掉 emoji 的一半。
+                out.push_str(r"(?:[\x{E000}-\x{E3FF}][\x{E400}-\x{E7FF}]|[^\x{E000}-\x{E7FF}/])");
+            }
+            '?' => out.push_str("[^/]"),
+            c => out.push_str(&regex::escape(&c.to_string())),
         }
     }
+    out.push_str(r"\z");
     out
 }
 
@@ -70,22 +84,19 @@ fn invalid_exclusion_reason(part: &str) -> Option<&'static str> {
     None
 }
 
-pub fn build_exclusions(text: &str) -> Result<GlobSet> {
-    let mut builder = GlobSetBuilder::new();
+pub fn build_exclusions(text: &str) -> Result<Exclusions> {
+    let mut patterns = Vec::new();
     for part in text.split(';').map(str::trim).filter(|s| !s.is_empty()) {
         // 附录 C：盘符、绝对路径与独立 .. 段是无效模式，阻止开始并指出错误段，
         // 不悄悄忽略（否则该模式变成永不命中的死规则，排除保护静默失效）。
         if let Some(reason) = invalid_exclusion_reason(part) {
             bail!("排除规则段「{part}」无效：{reason}；不支持盘符、绝对路径或独立的 .. 路径段（附录 C）");
         }
-        builder.add(
-            GlobBuilder::new(&translate_exclusion_part(part))
-                .case_insensitive(true)
-                .literal_separator(false)
-                .build()?,
-        );
+        patterns.push(translate_exclusion_part(part));
     }
-    Ok(builder.build()?)
+    Ok(Exclusions {
+        patterns: regex::RegexSet::new(patterns)?,
+    })
 }
 // ---------------------------------------------------------------------------
 // 附录 B：副本标记与名称规范化（C-02 / C-08 / C-16）
@@ -185,15 +196,15 @@ pub fn clean_copy_output(name: &str) -> String {
     format!("{out}{extension}")
 }
 /// C-02 副本名键：剥除全部末尾标记的主体 + 未改变的扩展名（附录 B：键只按
-/// 副本标记剥除后连同扩展名做忽略大小写比较；小写折叠由 files.name 列的存储口径完成）。
+/// 副本标记剥除后连同扩展名做序数忽略大小写比较，折叠由 normal_key 完成）。
 pub fn copy_key(name: &str) -> String {
     let (stem, extension) = fsutil::split_compound_name(name);
     let (base, _) = split_copy_markers(stem);
     format!("{base}{extension}")
 }
-/// C-02 名称关系判定的 `normal` 列取值：副本名键的小写折叠。
+/// C-02 名称关系判定的 `normal` 列取值：副本名的 Windows 序数比较键。
 pub fn normal_key(name: &str) -> String {
-    copy_key(name).to_lowercase()
+    fsutil::fold_rel(&copy_key(name))
 }
 /// C-08 NFC 与连续空白规范化（单一开关）：对主体做 NFC，把 Unicode White_Space
 /// 属性字符的连续串压成一个 ASCII 空格，去主体首尾空白；不改扩展名。
@@ -241,7 +252,7 @@ pub fn legalize_derived(stem: &str) -> String {
     let mut out: String = stem
         .chars()
         .map(|c| {
-            if c.is_control() || "<>:\"/\\|?*".contains(c) {
+            if c <= '\u{1f}' || "<>:\"/\\|?*".contains(c) {
                 '_'
             } else {
                 c
@@ -285,8 +296,8 @@ pub fn compare(a: &FileRecord, b: &FileRecord, policy: KeepPolicy) -> Ordering {
     let primary = match policy {
         KeepPolicy::Newest => b.snapshot.modified_ns.cmp(&a.snapshot.modified_ns),
         KeepPolicy::Oldest => a.snapshot.modified_ns.cmp(&b.snapshot.modified_ns),
-        // files.name 是扫描时的小写折叠键；Unicode 小写化可能改变 UTF-16
-        // 长度。C-03 必须按原始相对路径末段的完整文件名决胜。
+        // files.name 是序数比较键，不是原始名称；C-03 必须按原始
+        // 相对路径末段的完整文件名决胜。
         KeepPolicy::ShortestName => a
             .rel
             .rsplit('/')
@@ -341,22 +352,14 @@ pub fn identity_proves_same_file(a: &FileRecord, b: &FileRecord) -> bool {
         && !(cfg!(windows) && crate::hash_cache::identity_is_degenerate(&a.snapshot.identity))
 }
 /// C-08 / 附录 B：按内容签名修正错误扩展名的保守判定。true = 旧扩展名确实错误、可以改名。
-/// 只有承诺可修正的类型才作为改名目标，且只有旧后缀能对应到附录 A 已列格式时才谈得上
-/// 「现后缀不正确」；无法可靠判型、识别结果比旧后缀更粗、旧后缀是 X-10 卷尾/复合后缀
-/// 或本就是同义写法时一律不改名。
+/// 只有有效结构与必要类型标识确认的承诺类型才作为目标；旧后缀未知或为空
+/// 不会否决可靠判型。只识别到 ZIP 外层时仍保护专用容器后缀，复合/分卷后缀
+/// 和合法同义写法也始终保留。
 pub fn extension_needs_fix(old: &str, detected: &str) -> bool {
     !equivalent_extension(old, detected)
         && !unsplittable_suffix(old)
-        && known_format_suffix(old)
         && !coarser_detection(old, detected)
         && correctable_type(detected)
-}
-/// 附录 A 是本产品认得并用于归类的格式清单，也是判断「现后缀不正确」的唯一依据：
-/// 后缀对应不上任何大类（`.bin`、`.dat`、`.odg`、`.xps`、`.cbz` 等）时，识别到的
-/// 只是外层容器，无法确定其真实类型，按 C-08「签名不足以确定实际类型时不改名」保留，
-/// 不得猜成压缩包后缀。
-fn known_format_suffix(old: &str) -> bool {
-    !old.is_empty() && category_for(&format!("x.{old}")) != "其他"
 }
 /// 同义扩展名（同一格式的常见写法），不算错误扩展名。
 fn equivalent_extension(old: &str, detected: &str) -> bool {
@@ -368,8 +371,7 @@ fn equivalent_extension(old: &str, detected: &str) -> bool {
 }
 /// 附录 B 552-557：只有这些类型是「可确定识别并修正」的改名目标；
 /// 未承诺的类型不进行修正，不以模糊特征强行分类。
-/// 其中 docm/xlsm/pptm/odt/ods/odp/epub 是 ZIP 内层类型标识才能确认的类型，`infer`
-/// 给不出的粒度，列入只为与合同清单一致。
+/// ZIP 内部类型由 signature 模块的有效 MIME 标识确认，包括宏文档与 ODF/EPUB。
 fn correctable_type(ext: &str) -> bool {
     matches!(
         ext,
@@ -415,17 +417,10 @@ fn unsplittable_suffix(ext: &str) -> bool {
     }
     false
 }
-/// 识别结果比旧后缀更粗（或由同一容器证据得出）时不得改名：
-/// - 内层类型未确认（只识别到 ZIP 容器）：保留 Office（含旧式 doc/xls/ppt）、ODF、EPUB 与
-///   X-09 其他已列容器后缀，不降级为 `.zip`（附录 B 557、C-08）。
-/// - 只识别到 OOXML 基础类型 docx/xlsx/pptx（`infer` 对宏/模板变体只报基础类型，见 C-08 例）：
-///   更具体的变体与同族容器后缀不得据此改粗。
+/// 只确认 ZIP 外层、无法确认专用容器内型时，不能把文档或程序包改粗。
 fn coarser_detection(old: &str, detected: &str) -> bool {
-    match detected {
-        "zip" => office_extension(old) || legacy_office_extension(old) || container_extension(old),
-        "docx" | "xlsx" | "pptx" => ooxml_variant_extension(old) || container_extension(old),
-        _ => false,
-    }
+    detected == "zip"
+        && (office_extension(old) || legacy_office_extension(old) || container_extension(old))
 }
 /// 旧式 Office 后缀（OLE 文档）：内容识别为 ZIP 容器时它已不是旧式文档，但也无法确定
 /// 是不是伪装成该后缀的 OOXML，按 C-08 不猜测、不降级为压缩包后缀。
@@ -453,10 +448,6 @@ fn office_extension(ext: &str) -> bool {
             | "ppsm"
     )
 }
-/// OOXML 模板/宏变体：`infer` 对它们只报基础类型 docx/xlsx/pptx，按更粗的结果改名会改错。
-fn ooxml_variant_extension(ext: &str) -> bool {
-    office_extension(ext) && !matches!(ext, "docx" | "xlsx" | "pptx")
-}
 /// ODF、EPUB 与 X-09 其他已列容器格式：识别结果只有外层 ZIP 容器时保留原后缀。
 fn container_extension(ext: &str) -> bool {
     matches!(
@@ -465,6 +456,19 @@ fn container_extension(ext: &str) -> bool {
             | "ods"
             | "odp"
             | "epub"
+            | "odg"
+            | "odf"
+            | "xps"
+            | "vsdx"
+            | "sldx"
+            | "thmx"
+            | "cbz"
+            | "kmz"
+            | "sxw"
+            | "ott"
+            | "ots"
+            | "otp"
+            | "odm"
             | "cab"
             | "msi"
             | "msix"
@@ -508,6 +512,10 @@ fn container_extension(ext: &str) -> bool {
 // [quality-baseline approved 2026-10-03] 可证明误报（输入预小写），经用户裁定保留
 #[allow(clippy::case_sensitive_file_extension_comparisons)]
 pub fn category_for(name_lower: &str) -> &'static str {
+    // 附录 B：首位点之后没有其他点的名称整体是主体，不存在扩展名。
+    if name_lower.starts_with('.') && !name_lower[1..].contains('.') {
+        return "其他";
+    }
     const COMPOUND: [&str; 6] = [
         ".tar.gz",
         ".tar.bz2",
@@ -538,15 +546,6 @@ pub fn category_for(name_lower: &str) -> &'static str {
     }
     if name_lower.ends_with(".rar") {
         return "压缩包";
-    }
-    // part rar 分卷：主干.partN.rar。
-    if let Some(pos) = name_lower.rfind(".part") {
-        let after = &name_lower[pos + 5..];
-        if let Some(rar) = after.rfind(".rar") {
-            if after[..rar].bytes().all(|b| b.is_ascii_digit()) && !after[..rar].is_empty() {
-                return "压缩包";
-            }
-        }
     }
     // 老式尾卷族：.r00～.r99 / .z01～.z99（附录 A：整理中的 X-10 命名族分卷归「压缩包」；
     // zip 族起始编号是 01，z00 不属命名族；data.001 这类无格式孤立编号仍归「其他」）。
@@ -579,10 +578,6 @@ pub fn category_for(name_lower: &str) -> &'static str {
         | "ps1" | "apk" => "程序",
         _ => "其他",
     }
-}
-/// 兼容旧调用点（测试）：按单个扩展名（不带点、小写）取大类。
-pub fn category(extension: &str) -> &'static str {
-    category_for(&format!(".{extension}"))
 }
 // ---------------------------------------------------------------------------
 // 清理项（C-08）
@@ -665,7 +660,7 @@ fn has_ext(name: &str, ext: &str) -> bool {
 /// 保证「只有 `.partN.rar` 才算 RAR 分卷」的口径只有一处实现。
 fn part_rar_regex() -> &'static regex::Regex {
     static PART: OnceLock<regex::Regex> = OnceLock::new();
-    PART.get_or_init(|| match regex::Regex::new(r"\.part(\d+)\.rar$") {
+    PART.get_or_init(|| match regex::Regex::new(r"\.part(0*[1-9][0-9]*)\.rar$") {
         Ok(re) => re,
         // 常量正则语法错误只可能是开发期笔误，按不可达处理
         Err(_) => unreachable!("constant regex"),
@@ -677,7 +672,7 @@ pub fn archive_name(name: &str) -> bool {
         // 只有 `.partN.rar` 的 part1 算分卷主体；`report.partial.rar` 这类普通包不受影响。
         let re = part_rar_regex();
         if let Some(caps) = re.captures(&name) {
-            return caps[1].parse::<u64>().ok() == Some(1);
+            return caps[1].trim_start_matches('0') == "1";
         }
         return true;
     }
@@ -699,11 +694,29 @@ pub fn archive_name(name: &str) -> bool {
     // 白名单外格式的卷（`.iso.001`）与配不上主包的孤立编号文件（`data.001`）同样不匹配。
     ARCHIVE_SUFFIXES.iter().any(|suffix| name.ends_with(suffix))
 }
+/// X-02/X-10：同目录候选入口的唯一包键；非法 `.000` 与 `.001`、歧义
+/// `part1/part01/part001` 各只计一包，普通主包与数字尾卷族严格分开。
+pub fn archive_entry_key(name: &str) -> Option<String> {
+    if !archive_name(name) {
+        return None;
+    }
+    let name = name.to_ascii_lowercase();
+    if let Some((rest, _)) = numbered_volume_tail(&name) {
+        return Some(format!("numbered:{}", fsutil::fold_rel(rest)));
+    }
+    if let Some(matched) = part_rar_regex().find(&name) {
+        return Some(format!(
+            "part-rar:{}",
+            fsutil::fold_rel(&name[..matched.start()])
+        ));
+    }
+    Some(format!("single:{}", fsutil::fold_rel(&name)))
+}
 /// X-01 白名单后缀（小写；压缩流允许前面再带一层 `.tar` 的复合形式由 `.gz` 等
 /// 流后缀整体覆盖）。数字尾卷族按 [`numbered_volume_tail`] 另行判定。
-const ARCHIVE_SUFFIXES: [&str; 13] = [
-    ".zip", ".7z", ".tar", ".gz", ".bz2", ".xz", ".zst", ".lzma", ".z", ".tgz", ".tbz2", ".txz",
-    ".tzst",
+const ARCHIVE_SUFFIXES: [&str; 14] = [
+    ".zip", ".7z", ".rar", ".tar", ".gz", ".bz2", ".xz", ".zst", ".lzma", ".z", ".tgz", ".tbz2",
+    ".txz", ".tzst",
 ];
 /// X-10 数字尾卷族：名称（小写）以恰好三位 ASCII 十进制数字 `.NNN` 结尾，且去掉
 /// `.NNN` 后的剩余部分以 X-01 白名单任一后缀结尾（`.tar.gz` 天然被 `.gz` 覆盖）时
@@ -753,20 +766,34 @@ pub fn old_style_tail(name_lower: &str) -> Option<OldStyleTail<'_>> {
     }
     Some(OldStyleTail { stem, main_ext })
 }
-/// X-10/X-02：对一份目录内的文件名清单（小写）统计「只发现尾卷、没有主包」的
-/// 老式族组数——残缺但可归组的卷集计一包；主包（`主干.zip`/`主干.rar`）在场的
+/// X-10/X-02：文件名清单只做 ASCII 语法小写，保留 Unicode 主干，再按 Windows 序数
+/// 忽略大小写统计老式族组数——残缺但可归组的卷集计一包；主包在场的
 /// 尾卷属于其卷集，不计；同主干同族的多个尾卷只计一组（一组仅入队、计数、判定一次）。
 pub fn count_tail_only_old_style_groups(names_lower: &[String]) -> u64 {
-    let files: HashSet<&str> = names_lower.iter().map(String::as_str).collect();
-    let mut seen: HashSet<(&str, &'static str)> = HashSet::new();
+    let files: HashSet<String> = names_lower
+        .iter()
+        .map(|name| fsutil::fold_rel(name))
+        .collect();
+    let mut seen: HashSet<(String, &'static str)> = HashSet::new();
+    let rar_suffix = fsutil::fold_rel(".rar");
+    let zip_suffix = fsutil::fold_rel(".zip");
     let mut count = 0u64;
     for name in names_lower {
         let Some(tail) = old_style_tail(name) else {
             continue;
         };
-        if files.contains(format!("{}.{}", tail.stem, tail.main_ext).as_str())
-            || !seen.insert((tail.stem, tail.main_ext))
-        {
+        let mut key = fsutil::fold_rel(tail.stem);
+        let stem_length = key.len();
+        key.push_str(if tail.main_ext == "rar" {
+            &rar_suffix
+        } else {
+            &zip_suffix
+        });
+        if files.contains(&key) {
+            continue;
+        }
+        key.truncate(stem_length);
+        if !seen.insert((key, tail.main_ext)) {
             continue;
         }
         count += 1;
@@ -784,28 +811,28 @@ pub fn count_tail_only_old_style_groups(names_lower: &[String]) -> u64 {
 pub fn part_rar_missing_first_groups(names_lower: &[String]) -> Vec<String> {
     let re = part_rar_regex();
     // 主干 ->（卷号 1 是否在场〔任意写法〕, 最小卷号 N≥2 的代表名）
-    let mut groups: HashMap<String, (bool, Option<(u64, String)>)> = HashMap::new();
+    let mut groups: HashMap<String, (bool, Option<(String, String)>)> = HashMap::new();
     for name in names_lower {
         let Some(caps) = re.captures(name) else {
             continue;
         };
-        let Ok(number) = caps[1].parse::<u64>() else {
-            continue;
-        };
+        // 正整数不受机器字宽限制；去掉前导零后按位数与字典序比较。
+        let number = caps[1].trim_start_matches('0');
         let Some(matched) = caps.get(0) else {
             continue;
         };
         let stem = &name[..name.len() - matched.as_str().len()];
-        let entry = groups.entry(stem.to_string()).or_insert((false, None));
-        if number == 1 {
+        let entry = groups
+            .entry(fsutil::fold_rel(stem))
+            .or_insert((false, None));
+        if number == "1" {
             entry.0 = true;
         } else {
-            let better = entry
-                .1
-                .as_ref()
-                .is_none_or(|(smallest, _)| number < *smallest);
+            let better = entry.1.as_ref().is_none_or(|(smallest, _)| {
+                (number.len(), number) < (smallest.len(), smallest.as_str())
+            });
             if better {
-                entry.1 = Some((number, name.clone()));
+                entry.1 = Some((number.to_string(), name.clone()));
             }
         }
     }
@@ -828,7 +855,9 @@ pub fn numbered_volume_missing_entry_groups(names_lower: &[String]) -> Vec<Strin
         let Some((stem, digits)) = numbered_volume_tail(name) else {
             continue;
         };
-        let entry = groups.entry(stem.to_string()).or_insert((false, None));
+        let entry = groups
+            .entry(fsutil::fold_rel(stem))
+            .or_insert((false, None));
         if digits == "000" || digits == "001" {
             // `.001` 是合法入口、`.000` 是可识别的非法起始编号，两者都已由
             // [`archive_name`] 作为该组入口入队，不属「缺入口」组。
@@ -964,6 +993,71 @@ mod tests {
     use super::*;
     use crate::model::Snapshot;
 
+    // 覆盖附录 A/B/C、X-10：完整后缀、无扩展名和 Unicode 排除边界。
+    #[test]
+    fn review_rule_volume_boundary() {
+        assert!(archive_name("x.rar.001"));
+        assert_eq!(
+            numbered_volume_missing_entry_groups(&["x.rar.002".into()]),
+            vec!["x.rar.002".to_string()]
+        );
+        assert!(archive_name("x.part١.rar"));
+        assert!(!multipart_name("x.part١.rar"));
+    }
+
+    #[test]
+    fn review_rule_unbounded_part_number() {
+        let name = "x.part18446744073709551616.rar".to_string();
+        assert_eq!(
+            part_rar_missing_first_groups(std::slice::from_ref(&name)),
+            vec![name]
+        );
+    }
+
+    #[test]
+    fn review_rule_zero_part_is_ordinary_rar() {
+        for name in ["x.part0.rar", "x.part000.rar"] {
+            assert!(archive_name(name));
+            assert!(!multipart_name(name));
+            assert!(part_rar_missing_first_groups(&[name.to_string()]).is_empty());
+        }
+    }
+
+    #[test]
+    fn review_rule_ordinal_volume_groups() {
+        assert_eq!(
+            part_rar_missing_first_groups(&["σ.part2.rar".into(), "ς.part3.rar".into()]).len(),
+            1,
+        );
+        assert_eq!(
+            count_tail_only_old_style_groups(&["σ.rar".into(), "ς.r00".into()]),
+            0,
+        );
+    }
+
+    #[test]
+    fn review_rule_category_boundaries() {
+        assert_eq!(category_for("a.part1.rar.txt"), "文档");
+        assert_eq!(category_for(".jpg"), "其他");
+    }
+
+    #[test]
+    fn review_rule_unicode_globs() {
+        assert!(build_exclusions("a/?.txt").unwrap().is_match("a/中.txt"));
+        assert!(build_exclusions("a/?.txt").unwrap().is_match("a/😀.txt"));
+        assert!(!build_exclusions("a/?.txt").unwrap().is_match("a/中文.txt"));
+    }
+
+    #[test]
+    fn review_rule_ordinal_globs() {
+        assert!(build_exclusions("Ä.txt").unwrap().is_match("ä.txt"));
+    }
+
+    #[test]
+    fn review_rule_ordinal_copy_keys() {
+        assert_eq!(normal_key("Σ (1).txt"), normal_key("ς.txt"));
+        assert_ne!(normal_key("İ.txt"), normal_key("i\u{307}.txt"));
+    }
     fn record(id: i64, name: &str, normalized: &str) -> FileRecord {
         FileRecord {
             id,
@@ -1061,7 +1155,7 @@ mod tests {
     #[test]
     fn copy_marker_scan_survives_width_changing_lowercase() {
         // 修复前在 strip_one_marker 的切片处 panic；不 panic 即通过。
-        assert!(normal_key("İİİİİcopy.pdf").contains("copy"));
+        assert!(normal_key("İİİİİcopy.pdf").contains(&fsutil::fold_rel("copy")));
         // `- Copy` 标记仍被剥除（ASCII 忽略大小写只作用于字母，前缀主体保持原样）。
         assert_eq!(copy_key("İİİİİ-Copy.pdf"), "İİİİİ.pdf");
         assert_eq!(copy_key("plan - COPY.pdf"), "plan.pdf");
@@ -1139,14 +1233,15 @@ mod tests {
             );
         }
         // 复合/包格式：更粗的识别结果不得把专用扩展名改粗（C-08 例：Office ZIP 容器）。
-        // OOXML 模板/宏变体：infer 只报基础类型 docx/xlsx/pptx，不得据此改粗。
+        // 有效 ZIP/MIME 能区分真实宏/模板类型；只有外层 ZIP 的结果仍不能改粗。
         for old in [
             "docm", "dotx", "dotm", "xlsm", "xltx", "xltm", "xlsb", "potx", "potm", "ppsx", "ppsm",
         ] {
             for detected in ["zip", "docx", "xlsx", "pptx"] {
-                assert!(
-                    !extension_needs_fix(old, detected),
-                    "{old} 的具体变体扩展名不得按 {detected} 改粗"
+                assert_eq!(
+                    extension_needs_fix(old, detected),
+                    detected != "zip",
+                    "{old} 只在内型已确认且后缀确实错误时修正为 {detected}"
                 );
             }
         }
@@ -1188,9 +1283,10 @@ mod tests {
             "com",
         ] {
             for detected in ["zip", "docx", "xlsx", "pptx"] {
-                assert!(
-                    !extension_needs_fix(old, detected),
-                    "{old} 是容器/文档容器后缀，不得按 {detected} 改粗或降级"
+                assert_eq!(
+                    extension_needs_fix(old, detected),
+                    detected != "zip",
+                    "{old} 外层 ZIP 不降级，明确文档内型才可修正为 {detected}"
                 );
             }
         }
@@ -1215,8 +1311,6 @@ mod tests {
         // 附录 A 未列出的后缀（含 ZIP 家族容器文档）：识别到的只是外层容器，
         // 无法确定真实类型，按 C-08「签名不足以确定实际类型时不改名」保留。
         for (old, detected) in [
-            ("bin", "zip"),
-            ("dat", "7z"),
             ("odg", "zip"),
             ("odf", "zip"),
             ("xps", "zip"),
@@ -1226,11 +1320,6 @@ mod tests {
             ("cbz", "zip"),
             ("kmz", "zip"),
             ("sxw", "zip"),
-            ("ott", "odt"),
-            ("ots", "ods"),
-            ("otp", "odp"),
-            ("odm", "odt"),
-            ("xyz", "rar"),
         ] {
             assert!(
                 !extension_needs_fix(old, detected),
@@ -1253,6 +1342,15 @@ mod tests {
             ("zip", "rar"),
             ("7z", "zip"),
             ("tar", "rar"),
+            ("bin", "zip"),
+            ("dat", "7z"),
+            ("xyz", "rar"),
+            ("ott", "odt"),
+            ("ots", "ods"),
+            ("otp", "odp"),
+            ("odm", "odt"),
+            ("", "png"),
+            ("bin", "png"),
         ] {
             assert!(
                 extension_needs_fix(old, detected),

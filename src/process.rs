@@ -167,8 +167,7 @@ impl CapturedOutput {
             _ => return None,
         };
         Some(format!(
-            "子进程{which}输出不完整（超过 {} MiB 捕获上限被截断，或子进程退出后管道未能排空、读取超时被放弃）",
-            MAX_CAPTURE_BYTES / (1024 * 1024)
+            "子进程{which}输出不完整（超过捕获上限被截断，或子进程退出后管道未能排空、读取超时被放弃）"
         ))
     }
 }
@@ -215,7 +214,7 @@ fn reap(child: &mut Child) {
 /// 带宿主侧总超时地运行命令并捕获全部输出。
 /// 超时后 kill + wait，避免子进程卡死导致永久阻塞。
 pub fn run_with_timeout(command: &mut Command, timeout: Duration) -> Result<CapturedOutput> {
-    run_with_timeout_ext(command, None, timeout, None)
+    run_with_timeout_ext(command, None, timeout, None, MAX_CAPTURE_BYTES, false)
 }
 
 /// 同 [`run_with_timeout`]，另支持外部取消标志：等待期间标志置位即 kill + wait
@@ -225,7 +224,122 @@ pub fn run_with_timeout_cancel(
     timeout: Duration,
     cancel: &std::sync::atomic::AtomicBool,
 ) -> Result<CapturedOutput> {
-    run_with_timeout_ext(command, None, timeout, Some(&CancelSource::Atomic(cancel)))
+    run_with_timeout_ext(
+        command,
+        None,
+        timeout,
+        Some(&CancelSource::Atomic(cancel)),
+        MAX_CAPTURE_BYTES,
+        false,
+    )
+}
+
+/// 只读判型查询：使用调用方的单流捕获上限及任务取消来源。
+/// Windows 下先暂停创建，再加入 kill-on-close Job 后恢复，保证后代也在回收边界内。
+/// 任一流超限视为失败，不返回可被误当完整结果解析的截断输出。
+pub fn run_with_timeout_control_limit(
+    command: &mut Command,
+    timeout: Duration,
+    control: &Control,
+    capture_limit: usize,
+) -> Result<CapturedOutput> {
+    control.check_cancelled()?;
+    run_with_timeout_ext(
+        command,
+        None,
+        timeout,
+        Some(&CancelSource::Control(control)),
+        capture_limit,
+        true,
+    )
+}
+
+#[cfg(windows)]
+struct ProcessTreeJob(std::os::windows::io::OwnedHandle);
+
+#[cfg(windows)]
+impl ProcessTreeJob {
+    fn attach_and_resume(child: &Child) -> Result<Self> {
+        use anyhow::Context;
+        use std::os::windows::io::{AsRawHandle, FromRawHandle, OwnedHandle};
+        use windows_sys::Win32::{
+            Foundation::INVALID_HANDLE_VALUE,
+            System::{
+                Diagnostics::ToolHelp::{
+                    CreateToolhelp32Snapshot, Thread32First, Thread32Next, TH32CS_SNAPTHREAD,
+                    THREADENTRY32,
+                },
+                JobObjects::{
+                    AssignProcessToJobObject, CreateJobObjectW, JobObjectExtendedLimitInformation,
+                    SetInformationJobObject, JOBOBJECT_EXTENDED_LIMIT_INFORMATION,
+                    JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE,
+                },
+                Threading::{OpenThread, ResumeThread, THREAD_SUSPEND_RESUME},
+            },
+        };
+        // SAFETY: 无继承的未命名 Job；成功后将唯一句柄交给 OwnedHandle 关闭。
+        let handle = unsafe { CreateJobObjectW(std::ptr::null(), std::ptr::null()) };
+        if handle.is_null() {
+            return Err(std::io::Error::last_os_error()).context("无法创建查询进程组");
+        }
+        // SAFETY: 句柄有效且尚未转移所有权。
+        let job = Self(unsafe { OwnedHandle::from_raw_handle(handle.cast()) });
+        let handle = job.0.as_raw_handle().cast();
+        // SAFETY: C POD 结构允许全零初始化，配置结构与尺寸配套。
+        let mut limits: JOBOBJECT_EXTENDED_LIMIT_INFORMATION = unsafe { std::mem::zeroed() };
+        limits.BasicLimitInformation.LimitFlags = JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE;
+        let limits_size = u32::try_from(std::mem::size_of_val(&limits))?;
+        // SAFETY: 有效 Job 句柄与配套 POD 配置指针，尺寸已经受检转换。
+        if unsafe {
+            SetInformationJobObject(
+                handle,
+                JobObjectExtendedLimitInformation,
+                (&raw const limits).cast(),
+                limits_size,
+            )
+        } == 0
+        {
+            return Err(std::io::Error::last_os_error()).context("无法配置查询进程组");
+        }
+        // SAFETY: 子进程仍处于 CREATE_SUSPENDED，尚不能创建未受 Job 管理的后代。
+        if unsafe { AssignProcessToJobObject(handle, child.as_raw_handle().cast()) } == 0 {
+            return Err(std::io::Error::last_os_error()).context("无法加入查询进程组");
+        }
+        // Rust 的主线程句柄接口尚不稳定；暂停创建的子进程只有一个初始线程，
+        // 用系统线程快照取得它，加入 Job 后才恢复执行。
+        // SAFETY: 只读系统线程快照，失败的 INVALID_HANDLE_VALUE 不交给 OwnedHandle。
+        let snapshot = unsafe { CreateToolhelp32Snapshot(TH32CS_SNAPTHREAD, 0) };
+        if snapshot == INVALID_HANDLE_VALUE {
+            return Err(std::io::Error::last_os_error()).context("无法查询暂停进程的线程");
+        }
+        // SAFETY: 成功的快照句柄有效且尚未转移所有权。
+        let snapshot = unsafe { OwnedHandle::from_raw_handle(snapshot.cast()) };
+        // SAFETY: C POD 结构允许全零初始化，dwSize 声明缓冲区实际大小。
+        let mut entry: THREADENTRY32 = unsafe { std::mem::zeroed() };
+        entry.dwSize = u32::try_from(std::mem::size_of_val(&entry))?;
+        // SAFETY: 有效快照句柄及配套线程信息缓冲区。
+        let mut present = unsafe { Thread32First(snapshot.as_raw_handle().cast(), &raw mut entry) };
+        while present != 0 {
+            if entry.th32OwnerProcessID == child.id() {
+                // SAFETY: 快照中的线程属于暂停子进程，仅请求恢复权限且不继承句柄。
+                let thread = unsafe { OpenThread(THREAD_SUSPEND_RESUME, 0, entry.th32ThreadID) };
+                if thread.is_null() {
+                    return Err(std::io::Error::last_os_error()).context("无法打开暂停进程的线程");
+                }
+                // SAFETY: 成功的线程句柄有效且尚未转移所有权。
+                let thread = unsafe { OwnedHandle::from_raw_handle(thread.cast()) };
+                // SAFETY: 有效初始线程句柄，子进程已加入拥有的 Job。
+                if unsafe { ResumeThread(thread.as_raw_handle().cast()) } == u32::MAX {
+                    return Err(std::io::Error::last_os_error()).context("无法恢复查询进程");
+                }
+                return Ok(job);
+            }
+            entry.dwSize = u32::try_from(std::mem::size_of_val(&entry))?;
+            // SAFETY: 有效快照句柄及配套线程信息缓冲区。
+            present = unsafe { Thread32Next(snapshot.as_raw_handle().cast(), &raw mut entry) };
+        }
+        bail!("找不到暂停查询进程的初始线程");
+    }
 }
 
 fn run_with_timeout_ext(
@@ -233,6 +347,8 @@ fn run_with_timeout_ext(
     stdin_data: Option<&[u8]>,
     timeout: Duration,
     cancel: Option<&CancelSource<'_>>,
+    capture_limit: usize,
+    terminate_tree: bool,
 ) -> Result<CapturedOutput> {
     if stdin_data.is_some() {
         command.stdin(Stdio::piped());
@@ -244,7 +360,13 @@ fn run_with_timeout_ext(
     #[cfg(windows)]
     {
         use std::os::windows::process::CommandExt;
-        command.creation_flags(0x0800_0000);
+        let flags = 0x0800_0000
+            | if terminate_tree {
+                windows_sys::Win32::System::Threading::CREATE_SUSPENDED
+            } else {
+                0
+            };
+        command.creation_flags(flags);
     }
     // 错误必须带上程序名与系统原因：调用方（nettest/proxy）用 `to_string()` 展示，
     // 只取最外层文本；一旦只写"无法启动子进程"，用户就无从判断是哪个程序、为何失败。
@@ -254,6 +376,18 @@ fn run_with_timeout_ext(
             command.get_program().to_string_lossy()
         )
     })?;
+    #[cfg(windows)]
+    let job = if terminate_tree {
+        match ProcessTreeJob::attach_and_resume(&child) {
+            Ok(job) => Some(job),
+            Err(error) => {
+                reap(&mut child);
+                return Err(error);
+            }
+        }
+    } else {
+        None
+    };
 
     // stdin 必须在独立线程写入：子进程可能在读完 stdin 前持续写 stdout。
     // 若在本线程同步 write_all，双方会分别卡在 stdin/stdout 管道满上形成互锁，
@@ -286,11 +420,24 @@ fn run_with_timeout_ext(
         bail!("缺少 stderr");
     };
     // 截断/读错误必须让调用方感知：超限时继续 drain 到 EOF（避免子进程写满管道卡死），
-    // 但只保留前 MAX_CAPTURE_BYTES；读错误在最终结果里传播，不再用 let _ 吞掉。
-    let stdout_thread = thread::spawn(move || read_all_capped(stdout_pipe, MAX_CAPTURE_BYTES));
-    let stderr_thread = thread::spawn(move || read_all_capped(stderr_pipe, MAX_CAPTURE_BYTES));
-    match wait_child_with_deadline(&mut child, timeout, cancel) {
+    // 旧入口仍只保留 MAX_CAPTURE_BYTES；判型入口超限时通知等待循环回收进程树。
+    let exceeded =
+        terminate_tree.then(|| std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)));
+    let stdout_exceeded = exceeded.clone();
+    let stdout_thread = thread::spawn(move || match stdout_exceeded.as_deref() {
+        Some(exceeded) => read_all_capped_ext(stdout_pipe, capture_limit, Some(exceeded)),
+        None => read_all_capped(stdout_pipe, capture_limit),
+    });
+    let stderr_exceeded = exceeded.clone();
+    let stderr_thread = thread::spawn(move || match stderr_exceeded.as_deref() {
+        Some(exceeded) => read_all_capped_ext(stderr_pipe, capture_limit, Some(exceeded)),
+        None => read_all_capped(stderr_pipe, capture_limit),
+    });
+    match wait_child_with_deadline(&mut child, timeout, cancel, exceeded.as_deref()) {
         Ok(status) => {
+            // 初始进程已退出仍可能有持管道的后代；先关闭 Job 再排空输出。
+            #[cfg(windows)]
+            drop(job);
             // 读线程被放弃时输出不完整：如实标记截断，不得把半截输出当成完整结果。
             let drain_abandoned = |handle: thread::JoinHandle<ReadCapture>| {
                 join_with_deadline(handle, PIPE_DRAIN_GRACE).unwrap_or_else(|| ReadCapture {
@@ -300,6 +447,9 @@ fn run_with_timeout_ext(
             };
             let stdout = drain_abandoned(stdout_thread);
             let stderr = drain_abandoned(stderr_thread);
+            if terminate_tree && (stdout.truncated || stderr.truncated) {
+                bail!("查询子进程输出超过捕获上限或管道未能排空，已拒绝解析");
+            }
             // stdin 写入失败：子进程已成功退出时多半是提前关掉 stdin（EPIPE），不必判失败；
             // 子进程未成功时上报写入错误，便于定位管道问题。
             if let Some(handle) = stdin_thread {
@@ -326,6 +476,8 @@ fn run_with_timeout_ext(
         }
         Err(error) => {
             // 超时/等待失败：先确保子进程回收，再限时收尾读线程（孙进程持写端时按放弃处理）。
+            #[cfg(windows)]
+            drop(job);
             reap(&mut child);
             let _ = join_with_deadline(stdout_thread, PIPE_DRAIN_GRACE);
             let _ = join_with_deadline(stderr_thread, PIPE_DRAIN_GRACE);
@@ -346,7 +498,15 @@ pub(crate) struct ReadCapture {
 }
 
 /// 读满到 `limit` 后截断并继续 drain 到 EOF；读错误记入 `error`，不再静默丢弃。
-pub(crate) fn read_all_capped<R: Read>(mut reader: R, limit: usize) -> ReadCapture {
+pub(crate) fn read_all_capped<R: Read>(reader: R, limit: usize) -> ReadCapture {
+    read_all_capped_ext(reader, limit, None)
+}
+
+fn read_all_capped_ext<R: Read>(
+    mut reader: R,
+    limit: usize,
+    exceeded: Option<&std::sync::atomic::AtomicBool>,
+) -> ReadCapture {
     let mut capture = ReadCapture {
         data: Vec::new(),
         truncated: false,
@@ -367,6 +527,9 @@ pub(crate) fn read_all_capped<R: Read>(mut reader: R, limit: usize) -> ReadCaptu
                 } else {
                     capture.data.extend_from_slice(&chunk[..room]);
                     capture.truncated = true;
+                    if let Some(exceeded) = exceeded {
+                        exceeded.store(true, std::sync::atomic::Ordering::Release);
+                    }
                 }
             }
             Err(error) => {
@@ -382,6 +545,7 @@ fn wait_child_with_deadline(
     child: &mut Child,
     timeout: Duration,
     cancel: Option<&CancelSource<'_>>,
+    exceeded: Option<&std::sync::atomic::AtomicBool>,
 ) -> Result<std::process::ExitStatus> {
     let deadline = Instant::now() + timeout;
     loop {
@@ -391,6 +555,9 @@ fn wait_child_with_deadline(
                 let _ = child.wait();
                 bail!("操作已取消，子进程已终止");
             }
+        }
+        if exceeded.is_some_and(|flag| flag.load(std::sync::atomic::Ordering::Acquire)) {
+            bail!("查询子进程输出超过捕获上限，已拒绝解析");
         }
         match child.try_wait() {
             Ok(Some(status)) => return Ok(status),
@@ -509,6 +676,7 @@ pub fn run_with_idle_timeout(
             &mut child,
             idle_timeout,
             Some(&CancelSource::Control(control)),
+            None,
         )?;
         if !status.success() {
             let code = status
@@ -870,5 +1038,127 @@ mod tests {
             .expect("大输出进程正常退出应成功");
         assert!(output.stdout_truncated, "stdout 超限必须标记截断");
         assert!(output.truncation_note().is_some());
+
+        // C-08：只读判型入口必须支持预取消、双流独立上限及成功查询。
+        let cancelled = Control::default();
+        cancelled.cancel();
+        let error = run_with_timeout_control_limit(
+            &mut Command::new("jchtools-must-not-spawn-pre-cancelled.exe"),
+            Duration::from_secs(10),
+            &cancelled,
+            64 * 1024,
+        )
+        .unwrap_err();
+        assert!(error.to_string().contains("取消"), "{error}");
+        for stream in ["Out", "Error"] {
+            let mut command = Command::new("powershell");
+            command.args([
+                "-NoProfile",
+                "-Command",
+                &format!("[Console]::{stream}.Write(('x' * 65537)); Start-Sleep -Seconds 30"),
+            ]);
+            let error = run_with_timeout_control_limit(
+                &mut command,
+                Duration::from_secs(10),
+                &Control::default(),
+                64 * 1024,
+            )
+            .unwrap_err();
+            assert!(error.to_string().contains("捕获上限"), "{stream}: {error}");
+        }
+        let mut command = Command::new("powershell");
+        command.args(["-NoProfile", "-Command", "[Console]::Out.Write('ok')"]);
+        let output = run_with_timeout_control_limit(
+            &mut command,
+            Duration::from_secs(10),
+            &Control::default(),
+            64 * 1024,
+        )
+        .unwrap();
+        assert!(output.status.success());
+        assert_eq!(output.stdout, b"ok");
+        assert!(!output.stdout_truncated && !output.stderr_truncated);
+
+        // C-08：真实后代不能在取消、超时或超限返回后仍存活。
+        // 仅在开发临时区内生成公开合成 PID 握手，不读取用户数据或清理其他临时目录。
+        use std::os::windows::io::{AsRawHandle, FromRawHandle, OwnedHandle};
+        use windows_sys::Win32::{
+            Foundation::WAIT_OBJECT_0,
+            System::Threading::{OpenProcess, WaitForSingleObject, PROCESS_SYNCHRONIZE},
+        };
+        std::fs::create_dir_all(".tmp/parallel-review").unwrap();
+        for mode in ["取消", "超时", "捕获上限"] {
+            let dir = tempfile::Builder::new()
+                .prefix("process-tree-")
+                .tempdir_in(".tmp/parallel-review")
+                .unwrap();
+            let pid_path = dir.path().join("child.pid");
+            let path = pid_path.to_string_lossy().replace('\'', "''");
+            let ending = if mode == "捕获上限" {
+                "[Console]::Out.Write(('x' * 65537)); Start-Sleep -Seconds 30"
+            } else {
+                "Start-Sleep -Seconds 30"
+            };
+            let script = format!(
+                "$child = Start-Process -FilePath \"$PSHOME\\powershell.exe\" \
+                 -ArgumentList '-NoProfile','-Command','Start-Sleep -Seconds 30' \
+                 -NoNewWindow -PassThru; \
+                 [IO.File]::WriteAllText('{path}', [string]$child.Id); {ending}"
+            );
+            let control = Arc::new(Control::default());
+            let cancel_thread = if mode == "取消" {
+                let control = control.clone();
+                let path = pid_path.clone();
+                Some(thread::spawn(move || {
+                    let deadline = Instant::now() + Duration::from_secs(5);
+                    while Instant::now() < deadline {
+                        if std::fs::read_to_string(&path)
+                            .ok()
+                            .and_then(|pid| pid.trim().parse::<u32>().ok())
+                            .is_some()
+                        {
+                            break;
+                        }
+                        thread::sleep(Duration::from_millis(20));
+                    }
+                    control.cancel();
+                }))
+            } else {
+                None
+            };
+            let mut command = Command::new("powershell");
+            command.args(["-NoProfile", "-Command", &script]);
+            let error = run_with_timeout_control_limit(
+                &mut command,
+                Duration::from_secs(if mode == "取消" { 10 } else { 5 }),
+                &control,
+                64 * 1024,
+            )
+            .unwrap_err();
+            if let Some(handle) = cancel_thread {
+                handle.join().unwrap();
+            }
+            assert!(error.to_string().contains(mode), "{mode}: {error}");
+            let pid: u32 = std::fs::read_to_string(&pid_path)
+                .expect("后代必须真实启动并写入握手")
+                .trim()
+                .parse()
+                .unwrap();
+            // SAFETY: 仅打开本用例合成后代的同步句柄，不继承、不修改其状态。
+            let handle = unsafe { OpenProcess(PROCESS_SYNCHRONIZE, 0, pid) };
+            if handle.is_null() {
+                assert_eq!(
+                    std::io::Error::last_os_error().raw_os_error(),
+                    Some(windows_sys::Win32::Foundation::ERROR_INVALID_PARAMETER.cast_signed()),
+                    "只能将后代 PID 已消失视为退出，不能把权限失败当成成功"
+                );
+            } else {
+                // SAFETY: 有效同步句柄唯一所有权交给 OwnedHandle。
+                let handle = unsafe { OwnedHandle::from_raw_handle(handle.cast()) };
+                // SAFETY: 仅有界等待本用例后代的有效同步句柄，不修改进程状态。
+                let status = unsafe { WaitForSingleObject(handle.as_raw_handle().cast(), 2000) };
+                assert_eq!(status, WAIT_OBJECT_0, "{mode}后后代仍存活");
+            }
+        }
     }
 }

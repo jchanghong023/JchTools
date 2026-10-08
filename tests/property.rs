@@ -75,7 +75,7 @@ proptest! {
             prop_assert!(!s.is_empty() && s != "." && s != "..", "{:?}", s);
             let last = s.chars().last().unwrap();
             prop_assert!(last != '.' && !last.is_whitespace(), "尾随点/空白必须已被拒绝：{:?}", s);
-            prop_assert!(!s.chars().any(|c| c.is_control() || "<>:\"/\\|?*".contains(c)), "{:?}", s);
+            prop_assert!(!s.chars().any(|c| c <= '\u{1f}' || "<>:\"/\\|?*".contains(c)), "{:?}", s);
             let stem = s.split('.').next().unwrap().to_uppercase();
             prop_assert!(!["CON", "PRN", "AUX", "NUL", "CLOCK$"].contains(&stem.as_str()), "{:?}", s);
             let com_lpt = stem.starts_with("COM") || stem.starts_with("LPT");
@@ -85,7 +85,7 @@ proptest! {
         }
     }
 
-    /// 尾随点 / 各类 Unicode 空白、Windows 非法字符、控制字符注入后必须被拒绝。
+    /// 尾随点 / 各类 Unicode 空白、Windows 非法字符、C0 控制字符注入后必须被拒绝。
     // 覆盖 S-05
     #[test]
     fn validate_component_rejects_trailing_and_injected_chars(
@@ -102,6 +102,18 @@ proptest! {
         let byte_index = s.char_indices().nth(position % (s.chars().count() + 1)).map_or(s.len(), |(b, _)| b);
         injected.insert(byte_index, bad);
         prop_assert!(fsutil::validate_component(&injected).is_err(), "注入 {:?}", bad);
+        // 附录 B：DEL/C1 不在 Windows 禁用的 U+0000..U+001F 范围内；
+        // 放在主体中间，避免与尾随空白的独立规则混淆。
+        for character in ['\u{7f}', '\u{80}', '\u{85}', '\u{9f}'] {
+            let name = format!("a{character}b");
+            prop_assert!(fsutil::validate_component(&name).is_ok(), "合法字符 {:?}", character);
+            prop_assert_eq!(jchtools::rules::legalize_derived(&name), name);
+        }
+        for codepoint in 0u8..=31 {
+            let name = format!("a{}b", char::from(codepoint));
+            prop_assert!(fsutil::validate_component(&name).is_err(), "禁止 C0 {:?}", codepoint);
+            prop_assert_eq!(jchtools::rules::legalize_derived(&name), "a_b");
+        }
     }
 
     /// 官方保留设备名的拒绝边界：COM0/LPT0 不是保留名；COM1-9 / LPT1-9（含上标 ¹²³ 变体）是。

@@ -174,6 +174,9 @@ pub fn asset_for_scenario(path: &str, scenario: &str) -> bool {
     if path.starts_with("samples/") || path == "xberg.cmd" {
         return false;
     }
+    if path == "models/paddleocr-onnx-models-LICENSE.txt" {
+        return matches!(scenario, "document" | "snapshot");
+    }
     if path.starts_with("models/snapshot-ocr/") {
         return scenario == "snapshot";
     }
@@ -216,6 +219,34 @@ pub fn validate_assets(root: &Path, scenario: &str) -> Result<(), String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// 覆盖 O-09/T-06/XB-19：共同 PaddleOCR 许可也是截图必需成员，
+    /// 缺失时不可报告就绪；该许可不扩大为媒体场景依赖。
+    #[test]
+    fn snapshot_requires_shared_paddleocr_license() {
+        let root = tempfile::tempdir().expect("创建隔离运行目录");
+        let license = "models/paddleocr-onnx-models-LICENSE.txt";
+        let manifest: Value =
+            serde_json::from_str(include_str!("../resources/markdown-assets.json"))
+                .expect("读取共享资产清单");
+        for member in manifest["xberg"]["members"].as_array().expect("资产成员") {
+            let path = member["path"].as_str().expect("成员路径");
+            if path == license || !asset_for_scenario(path, "snapshot") {
+                continue;
+            }
+            let target = root.path().join(path);
+            std::fs::create_dir_all(target.parent().expect("成员父目录")).expect("创建成员目录");
+            std::fs::write(target, b"synthetic asset").expect("写入存在性夹具");
+        }
+        let error = validate_assets(root.path(), "snapshot")
+            .expect_err("缺少共享 PaddleOCR 许可不得报告截图资产就绪");
+        assert!(error.contains(license), "必须明确指出缺失许可：{error}");
+        assert!(asset_for_scenario(license, "document"));
+        assert!(!asset_for_scenario(license, "media"));
+        std::fs::write(root.path().join(license), b"synthetic license")
+            .expect("补齐许可存在性夹具");
+        validate_assets(root.path(), "snapshot").expect("补齐共同许可后截图资产就绪");
+    }
 
     // 覆盖 T-13（2026-10-04 零配置改造）：启动基线只携带与引擎默认不同的
     // 关键差异——Markdown 输出、中文 OCR、图片字节通道；等价键交还引擎默认，

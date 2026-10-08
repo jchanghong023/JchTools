@@ -116,7 +116,7 @@ fn organizer() -> Config {
         ..Config::default()
     }
 }
-// 覆盖 X-05, H-07：RAR 新式编号由档案头决定，不能把 report1.r00 当成 report2.rar。
+// 覆盖 X-05/X-10/H-07：档案头确认精确 part 族卷数，不吸入旧式相似兄弟卷。
 #[test]
 #[ignore = "Requires explicitly provided real 7-Zip engine"]
 fn successful_cleanup_uses_rar_header_volume_naming() {
@@ -130,16 +130,20 @@ fn successful_cleanup_uses_rar_header_volume_naming() {
         0x52, 0x61, 0x72, 0x21, 0x1a, 0x07, 0x00, 0x19, 0x7a, 0x73, 0x11, 0x00, 0x0d, 0x00, 0x00,
         0x00, 0x00, 0x00, 0x00, 0x00, 0x09, 0xa7, 0x7b, 0x08, 0x00, 0x09, 0x00, 0x01, 0x00,
     ];
-    fs::write(f.root.join("report1.rar"), first).unwrap();
-    fs::write(f.root.join("report2.rar"), last).unwrap();
-    fs::write(f.root.join("report1.r00"), b"unrelated old-style sibling").unwrap();
+    fs::write(f.root.join("report.part1.rar"), first).unwrap();
+    fs::write(f.root.join("report.part2.rar"), last).unwrap();
+    fs::write(
+        f.root.join("report.part1.r00"),
+        b"unrelated old-style sibling",
+    )
+    .unwrap();
     let result = f.run(config());
     assert_eq!(
-        fs::read(f.root.join("report1.r00")).unwrap(),
+        fs::read(f.root.join("report.part1.r00")).unwrap(),
         b"unrelated old-style sibling"
     );
-    assert!(!f.root.join("report1.rar").exists());
-    assert!(!f.root.join("report2.rar").exists());
+    assert!(!f.root.join("report.part1.rar").exists());
+    assert!(!f.root.join("report.part2.rar").exists());
     assert_eq!(result.summary.archives_ok, 1);
     assert_eq!(result.summary.deleted, 2);
     assert_eq!(result.summary.errors, 0);
@@ -169,14 +173,14 @@ fn successful_cleanup_preserves_unused_volume_named_siblings() {
     assert_eq!(result.summary.deleted, 1);
 }
 
-// 覆盖 X-05, H-07：真实分卷只删除引擎报告的数量，不删除断号后的同名尾卷或目录。
+// 覆盖 X-05/X-09/X-10：非三位数字后缀旁观项不动；精确卷族断号整组失败。
 #[test]
 #[ignore = "Requires explicitly provided real 7-Zip engine"]
 fn successful_cleanup_preserves_unused_volume_tail_after_gap() {
     let f = ArchiveFixture::new();
     let count = f.split_set(&f.root.join("part.zip"));
-    fs::write(f.root.join("part.zip.999"), b"unrelated tail").unwrap();
-    fs::create_dir(f.root.join("part.zip.1000")).unwrap();
+    fs::write(f.root.join("part.zip.1000"), b"unrelated tail").unwrap();
+    fs::create_dir(f.root.join("part.zip.1001")).unwrap();
     let result = f.run(config());
     assert_eq!(result.summary.archives_ok, 1);
     assert_eq!(result.summary.deleted, u64::try_from(count).unwrap());
@@ -184,15 +188,30 @@ fn successful_cleanup_preserves_unused_volume_tail_after_gap() {
         assert!(!f.root.join(format!("part.zip.{index:03}")).exists());
     }
     assert_eq!(
-        fs::read(f.root.join("part.zip.999")).unwrap(),
+        fs::read(f.root.join("part.zip.1000")).unwrap(),
         b"unrelated tail"
     );
-    assert!(f.root.join("part.zip.1000").is_dir());
+    assert!(f.root.join("part.zip.1001").is_dir());
     for index in 0..6 {
         assert_eq!(
             fs::read(f.root.join(format!("f{index}.txt"))).unwrap(),
             fs::read(f.input.join(format!("f{index}.txt"))).unwrap()
         );
+    }
+    let f = ArchiveFixture::new();
+    let count = f.split_set(&f.root.join("gap.zip"));
+    assert!(count >= 3);
+    fs::remove_file(f.root.join("gap.zip.002")).unwrap();
+    let result = f.run(config());
+    assert_eq!(result.summary.archives_ok, 0);
+    assert_eq!(result.summary.archives_failed, 1, "断号整组计一个失败包");
+    assert_eq!(result.summary.deleted, 0, "断号不得删源");
+    for index in (1..=count).filter(|index| *index != 2) {
+        assert!(f
+            .root
+            .join(format!("解压失败/gap.zip.{index:03}"))
+            .is_file());
+        assert!(!f.root.join(format!("gap.zip.{index:03}")).exists());
     }
 }
 
@@ -398,6 +417,23 @@ fn nested_archives_are_processed_recursively() {
     let result = f.run(config());
     assert_eq!(result.summary.archives_ok, 2);
     assert!(f.root.join("payload.txt").exists());
+    // 覆盖 R-03：关闭递归时新解出的子目录包保留，但根层包仍可处理。
+    let f = ArchiveFixture::new();
+    fs::write(f.input.join("payload.txt"), b"nested payload").unwrap();
+    let inner = f.tmp.path().join("inner.zip");
+    f.archive(&inner, "-tzip");
+    fs::remove_file(f.input.join("payload.txt")).unwrap();
+    fs::create_dir(f.input.join("sub")).unwrap();
+    fs::rename(inner, f.input.join("sub/inner.zip")).unwrap();
+    f.archive(&f.root.join("outer.zip"), "-tzip");
+    let result = f.run(Config {
+        recursive: false,
+        ..config()
+    });
+    assert_eq!(result.summary.archives_ok, 1);
+    assert_eq!(result.summary.archives_failed, 0);
+    assert!(f.root.join("sub/inner.zip").is_file());
+    assert!(!f.root.join("sub/payload.txt").exists());
 }
 // 覆盖 X-08, X-06
 #[test]
@@ -420,6 +456,19 @@ fn nested_archive_depth_limit_quarantines_unprocessed_package() {
         "超限包移入「解压失败」并记录原因（X-08）"
     );
     assert!(!f.root.join("payload.txt").exists());
+    // 覆盖 X-10/H-04：本次解出的缺首卷组仍须发现并整组隔离。
+    let f = ArchiveFixture::new();
+    fs::create_dir(f.input.join("sub")).unwrap();
+    fs::write(f.input.join("sub/missing.part02.rar"), b"part2").unwrap();
+    fs::write(f.input.join("sub/missing.part03.rar"), b"part3").unwrap();
+    f.archive(&f.root.join("outer.zip"), "-tzip");
+    let result = f.run(config());
+    assert_eq!(result.summary.archives_ok, 1);
+    assert_eq!(result.summary.archives_failed, 1);
+    assert!(f.root.join("解压失败/missing.part02.rar").is_file());
+    assert!(f.root.join("解压失败/missing.part03.rar").is_file());
+    assert!(!f.root.join("sub/missing.part02.rar").exists());
+    assert!(!f.root.join("sub/missing.part03.rar").exists());
 }
 // 覆盖 X-03
 #[test]
@@ -447,15 +496,18 @@ fn bzip2_wrapped_tar_extracts_through_the_named_intermediate_tar() {
         &["-tbzip2"],
         &["bundle.tar"],
     );
-    let result = f.run(config());
+    let result = f.run(Config {
+        max_depth: 1,
+        ..config()
+    });
     assert_eq!(
-        result.summary.archives_ok, 2,
-        "外层 bz2 与中间 tar 都应处理"
+        result.summary.archives_ok, 1,
+        "复合流整体只计一个包和一层（X-01）"
     );
-    assert!(
-        !f.root.join("bundle.tar").exists() && !f.root.join("bundle.tar.bz2").exists(),
-        "中间 tar 按去掉一层压缩后缀命名并作为嵌套包处理，两者都按 X-05 永久删除"
-    );
+    assert_eq!(result.summary.archives_failed, 0);
+    assert_eq!(result.summary.deleted, 1, "只删源复合包，中间tar不正式落盘");
+    assert!(!f.root.join("bundle.tar").exists());
+    assert!(!f.root.join("bundle.tar.bz2").exists());
     assert_eq!(
         fs::read(f.root.join("payload.txt")).unwrap(),
         b"stream payload\n"
@@ -469,15 +521,18 @@ fn tgz_shorthand_restores_the_tar_suffix() {
     fs::write(f.input.join("payload.txt"), b"stream payload\n").unwrap();
     f.pack(&f.input.join("bundle.tar"), &["-ttar"], &["payload.txt"]);
     f.pack(&f.root.join("bundle.tgz"), &["-tgzip"], &["bundle.tar"]);
-    let result = f.run(config());
+    let result = f.run(Config {
+        max_depth: 1,
+        ..config()
+    });
     assert_eq!(
-        result.summary.archives_ok, 2,
-        "外层 tgz 与中间 tar 都应处理"
+        result.summary.archives_ok, 1,
+        "tgz整体只计一个包和一层（X-01）"
     );
-    assert!(
-        !f.root.join("bundle.tar").exists() && !f.root.join("bundle.tgz").exists(),
-        "tgz 还原出的中间 tar 被当作嵌套包再次处理，两者都按 X-05 永久删除"
-    );
+    assert_eq!(result.summary.archives_failed, 0);
+    assert_eq!(result.summary.deleted, 1);
+    assert!(!f.root.join("bundle.tar").exists());
+    assert!(!f.root.join("bundle.tgz").exists());
     assert_eq!(
         fs::read(f.root.join("payload.txt")).unwrap(),
         b"stream payload\n"
@@ -1027,10 +1082,10 @@ fn identical_member_in_another_directory_is_not_skipped() {
     assert_eq!(result.summary.extracted, 1);
 }
 
-// 覆盖 H-06（回归：目标位于既有 Git 目录树内的成员必须跳过，该树整树不动）
+// 覆盖 H-06 / X-04：保护既有 Git 整树，新解出的同名目录另选未占用名称。
 #[test]
 #[ignore = "Requires explicitly provided real 7-Zip engine"]
-fn member_targeting_existing_git_tree_is_skipped_and_tree_untouched() {
+fn member_targeting_existing_git_tree_is_renamed_and_tree_untouched() {
     let f = ArchiveFixture::new();
     fs::create_dir_all(f.root.join("repo/.git")).unwrap();
     fs::write(f.root.join("repo/.git/config"), b"original git metadata").unwrap();
@@ -1051,16 +1106,18 @@ fn member_targeting_existing_git_tree_is_skipped_and_tree_untouched() {
     );
     assert!(
         !f.root.join("repo/file.txt").exists(),
-        "目标位于 Git 目录树内的成员必须跳过（H-06：整树排除、不解压）"
+        "成员不得落入既有 Git 目录树（H-06）"
     );
     assert_eq!(
-        result.summary.archives_ok, 0,
-        "有成员未解开时不得宣称成功（X-06）"
+        fs::read(f.root.join("repo (1)/file.txt")).unwrap(),
+        b"incoming member",
+        "新目录另选未占用位置，全部成员完整落盘（X-04）"
     );
-    assert!(
-        f.root.join("解压失败/one.zip").is_file(),
-        "未完全解开的原包移入「解压失败」且不删除（X-06）"
-    );
+    assert_eq!(result.summary.archives_ok, 1);
+    assert_eq!(result.summary.archives_failed, 0);
+    assert_eq!(result.summary.deleted, 1);
+    assert!(!f.root.join("one.zip").exists(), "完整落盘后删源（X-05）");
+    assert!(!f.root.join("解压失败/one.zip").exists());
 }
 
 // 覆盖 H-06（回归：压缩包内某目录含 .git 时，该子树连同 .git 的兄弟条目整树不解出）
@@ -1235,18 +1292,18 @@ fn nested_archives_are_processed_exactly_once() {
     let result = f.run(config());
     assert_eq!(result.summary.archives_failed, 0);
     assert_eq!(
-        result.summary.archives_ok, 3,
-        "预置 tar、tar.gz 与本次解出的嵌套 tar 各处理一次，不得反复入队"
+        result.summary.archives_ok, 2,
+        "预置tar与复合tar.gz各处理一次，中间tar不成为正式嵌套包（X-01）"
     );
     assert_eq!(
-        result.summary.deleted, 3,
-        "三个包各自完整解开：原包都按 X-05 永久删除"
+        result.summary.deleted, 2,
+        "两个用户包各自完整解开，复合包的中间tar不计删源"
     );
     assert!(
         !f.root.join("bundle.tar").exists()
             && !f.root.join("bundle.tar.gz").exists()
             && !f.root.join("bundle (1).tar").exists(),
-        "无论成员以哪个名字落盘，它都是被处理的包并在成功后删除"
+        "只保留最终成员，中间层不在正式位置留下"
     );
     assert_eq!(
         fs::read(f.root.join("payload.txt")).unwrap(),
@@ -1254,7 +1311,7 @@ fn nested_archives_are_processed_exactly_once() {
     );
     assert!(
         f.root.join("payload (1).txt").is_file(),
-        "嵌套包成员与既有文件冲突时改名落盘（X-04）"
+        "两包解出同名成员时改名落盘（X-04）"
     );
 }
 
@@ -1360,31 +1417,69 @@ fn empty_directory_name_taken_by_file_lands_under_a_new_number() {
     );
 }
 
-// 覆盖 X-08, X-07：scan 按任意层级组件剪枝「解压失败」（C-09/X-07）后，子目录归档解出
-// 同名组件成员也会落进两工具的永久盲区——按危险条目在清单阶段整包拒绝并隔离（X-06）。
+// 覆盖 X-07/X-05：新解出的隔离容器正常落盘，仅停止其中嵌套包的后续递归。
 #[test]
 #[ignore = "Requires explicitly provided real 7-Zip engine"]
 fn quarantine_component_member_in_subdir_archive_is_rejected_as_dangerous() {
     let f = ArchiveFixture::new();
     fs::create_dir(f.input.join("解压失败")).unwrap();
-    fs::write(f.input.join("解压失败").join("x.txt"), b"shadow").unwrap();
+    fs::write(f.input.join("解压失败/x.txt"), b"shadow").unwrap();
+    fs::write(f.input.join("解压失败/inner.zip"), b"must not be decoded").unwrap();
     fs::create_dir(f.root.join("sub")).unwrap();
     f.archive(&f.root.join("sub").join("a.zip"), "-tzip");
     let result = f.run(config());
-    assert!(
-        !f.root.join("sub").join("解压失败").join("x.txt").exists(),
-        "成员不得落盘到 scan 剪枝区（两工具永久盲区）"
+    assert_eq!(
+        fs::read(f.root.join("sub/解压失败/x.txt")).unwrap(),
+        b"shadow"
     );
     assert_eq!(
-        result.summary.archives_ok, 0,
-        "含危险条目的包不算完整成功（X-08）"
+        fs::read(f.root.join("sub/解压失败/inner.zip")).unwrap(),
+        b"must not be decoded"
     );
+    assert_eq!(result.summary.archives_ok, 1, "外层全部成员落盘即完整成功");
     assert_eq!(
-        result.summary.archives_quarantined, 1,
-        "整包按 X-06 隔离保留"
+        result.summary.archives_failed, 0,
+        "容器内包属于范围排除，不是新失败"
     );
-    assert!(
-        f.root.join("解压失败").join("a.zip").is_file(),
-        "原包移入「解压失败」等待人工处理（X-06）"
+    assert_eq!(result.summary.archives_quarantined, 0);
+    assert_eq!(result.summary.deleted, 1);
+    assert!(!f.root.join("sub/a.zip").exists());
+}
+
+// X-04/X-10：一个卷的落点冲突不得拆散新卷族或混入既有缺首卷组。
+#[test]
+#[ignore = "Requires explicitly provided real 7-Zip engine"]
+fn review_nested_volume_collision_keeps_families_independent() {
+    let f = ArchiveFixture::new();
+    let count = f.split_set(&f.input.join("z-nested.zip"));
+    assert!(count > 2);
+    let mut names: Vec<String> = fs::read_dir(&f.input)
+        .unwrap()
+        .map(|entry| entry.unwrap().file_name().into_string().unwrap())
+        .filter(|name| name.starts_with("z-nested.zip."))
+        .collect();
+    names.sort();
+    let sources: Vec<&str> = names.iter().map(String::as_str).collect();
+    f.pack(&f.root.join("a-outer.7z"), &["-t7z"], &sources);
+    let old = b"independent old user tail";
+    fs::write(f.root.join("z-nested.zip.002"), old).unwrap();
+    let result = f.run(config());
+    assert_eq!(
+        result.summary.archives_ok, 2,
+        "outer 与新完整 nested 族都须成功"
     );
+    assert_eq!(result.summary.archives_failed, 1, "仅初始旧缺首卷组失败");
+    assert_eq!(
+        fs::read(f.root.join("解压失败/z-nested.zip.002")).unwrap(),
+        old,
+        "旧组原始字节不得被新卷族消费或替换"
+    );
+    for index in 0..6 {
+        assert_eq!(
+            fs::read(f.root.join(format!("f{index}.txt"))).unwrap(),
+            fs::read(f.input.join(format!("f{index}.txt"))).unwrap(),
+            "新卷族成员必须经真实引擎完整校验并落盘"
+        );
+    }
+    assert!(!f.root.join("a-outer.7z").exists());
 }

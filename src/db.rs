@@ -9,11 +9,10 @@ use serde::{de::DeserializeOwned, Serialize};
 use std::path::{Path, PathBuf};
 
 pub const SCHEMA: &str = include_str!("schema.sql");
-/// 当前代码已知的任务库 schema 版本；库版本高于此值时 fail-fast，避免用旧逻辑读新库；
-/// 低于此值时同样拒绝——旧库的计划基于已废止的归类规则（5 起：归类目标由「大类/功能分类」
-/// 改为「大类」一级结构，结构未变、版本号标记归类口径代次），按 R-04 必须重新
-/// 分析，不做数据迁移。
-pub const SCHEMA_VERSION: i64 = 5;
+/// 当前任务库 schema 版本；不兼容的既有库一律拒绝，按 R-04 重新分析，不做迁移。
+/// 5 起归类改为「大类」一级结构；6 起文件名称与目标占用键采用 Windows 序数
+/// 忽略大小写语义，不能复用旧 Unicode 小写键生成的计划。
+pub const SCHEMA_VERSION: i64 = 6;
 pub struct Database {
     pub conn: Connection,
     pub directory: PathBuf,
@@ -38,16 +37,16 @@ impl Database {
     }
     fn open_impl(directory: &Path, existing_only: bool) -> Result<Self> {
         let path = directory.join("task.sqlite3");
+        let existed = path.is_file();
         if existing_only {
-            anyhow::ensure!(path.is_file(), "任务库文件不存在：{}", path.display());
+            anyhow::ensure!(existed, "任务库文件不存在：{}", path.display());
         }
         let conn = Connection::open(path)?;
         conn.busy_timeout(std::time::Duration::from_secs(5))?;
         conn.execute_batch("PRAGMA journal_mode=WAL; PRAGMA synchronous=NORMAL; PRAGMA temp_store=FILE; PRAGMA cache_size=-65536; PRAGMA foreign_keys=ON;")?;
-        // 版本检查只对“打开既有库”生效：新建库 user_version 恒为 0，建库事务随后写入
-        // 当前版本。库版本与当前已知版本不一致则拒绝（fail-fast）：高版本结构未知，
-        // 低版本库基于已废止的归类规则，按 R-04 必须重新分析。
-        if existing_only {
+        // 新建库版本为 0，建库事务随后写入当前版本；所有既有库（包括普通打开和
+        // create 的入口）都必须拒绝不兼容版本，不能执行旧计划或将其重标为当前版本。
+        if existed {
             let version: i64 = conn.query_row("PRAGMA user_version", [], |row| row.get(0))?;
             anyhow::ensure!(
                 version == SCHEMA_VERSION,
@@ -110,7 +109,7 @@ impl Database {
         ])?;
         Ok(())
     }
-    /// `name` 传分析时的原文件名；`name` 列的小写折叠与 name16/rel16（C-03 平局规则
+    /// `name` 传分析时的原文件名；`name` 列的序数比较键与 name16/rel16（C-03 平局规则
     /// 用的 UTF-16 单元数）在此统一计算，调用方不再各自预折叠。
     pub fn insert_file(
         &self,
@@ -119,7 +118,7 @@ impl Database {
         normal: &str,
         snapshot: &Snapshot,
     ) -> Result<()> {
-        let folded = name.to_lowercase();
+        let folded = crate::fsutil::fold_rel(name);
         let mut stmt = self.conn.prepare_cached(
             "INSERT INTO files(rel,name,normal,size,mtime,created,name16,rel16,identity,links) VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9,?10)",
         )?;
@@ -137,7 +136,7 @@ impl Database {
         ])?;
         Ok(())
     }
-    /// 扫描登记目录行。name 由调用方小写后传入（与 files.name 同口径）。
+    /// 扫描登记目录行。name 由调用方小写后传入，仅供目录名称匹配。
     pub fn insert_dir(&self, rel: &str, name: &str, depth: i64) -> Result<()> {
         let mut stmt = self
             .conn
@@ -270,12 +269,7 @@ impl Database {
         Ok(())
     }
     pub fn reserve_target(&self, target: &str, file_id: i64) -> Result<bool> {
-        // 仅 Windows 大小写不敏感文件系统上折叠大小写；Linux 等平台 Report.txt 与 report.txt 是不同目标。
-        let key = if cfg!(windows) {
-            target.to_lowercase()
-        } else {
-            target.to_string()
-        };
+        let key = crate::fsutil::fold_rel(target);
         let mut stmt = self
             .conn
             .prepare_cached("INSERT OR IGNORE INTO targets(path,file_id) VALUES(?1,?2)")?;
@@ -334,4 +328,74 @@ fn action_row(row: &Row<'_>) -> rusqlite::Result<Action> {
     action.selected = row.get(2)?;
     action.state = row.get(3)?;
     Ok(action)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{Database, SCHEMA_VERSION};
+
+    // 覆盖 R-04、C-10：既有旧计划不能被普通打开或重新建库绕过版本拒绝。
+    #[test]
+    fn existing_database_version_is_checked() -> anyhow::Result<()> {
+        let temp = tempfile::tempdir()?;
+        for version in [0, SCHEMA_VERSION - 1, SCHEMA_VERSION + 1] {
+            let directory = temp.path().join(version.to_string());
+            let db = Database::create(&directory)?;
+            db.conn.pragma_update(None, "user_version", version)?;
+            drop(db);
+
+            assert!(
+                Database::open_existing(&directory).is_err(),
+                "打开既有库必须拒绝不兼容版本 {version}"
+            );
+            assert!(
+                Database::open(&directory).is_err(),
+                "普通打开不能绕过不兼容版本 {version}"
+            );
+            assert!(
+                Database::create(&directory).is_err(),
+                "重新建库不能把不兼容版本 {version} 标为当前版本"
+            );
+            let conn = rusqlite::Connection::open(directory.join("task.sqlite3"))?;
+            let actual: i64 = conn.query_row("PRAGMA user_version", [], |row| row.get(0))?;
+            assert_eq!(actual, version, "拒绝时保留原库版本");
+        }
+        Ok(())
+    }
+
+    // 覆盖 C-02、附录 B、S-01：名称键与目标预留均使用 Windows 序数忽略大小写。
+    #[test]
+    fn windows_ordinal_database_keys() -> anyhow::Result<()> {
+        let temp = tempfile::tempdir()?;
+        let db = Database::create(temp.path())?;
+        let snapshot = crate::model::Snapshot {
+            size: 1,
+            modified_ns: 0,
+            created_ns: None,
+            identity: String::new(),
+            links: 1,
+        };
+        for (rel, name) in [
+            ("a/Σ.txt", "Σ.txt"),
+            ("b/ς.txt", "ς.txt"),
+            ("a/İ.txt", "İ.txt"),
+            ("b/i\u{0307}.txt", "i\u{0307}.txt"),
+        ] {
+            db.insert_file(rel, name, "", &snapshot)?;
+        }
+        assert_eq!(db.file(1)?.name, db.file(2)?.name, "Σ 与 ς 是序数同名");
+        assert_ne!(
+            db.file(3)?.name,
+            db.file(4)?.name,
+            "İ 与 i 加组合点不是序数同名"
+        );
+        assert!(db.reserve_target("文档/Σ.txt", 1)?);
+        assert!(!db.reserve_target("文档/ς.txt", 2)?, "序数同名目标必须冲突");
+        assert!(db.reserve_target("文档/İ.txt", 3)?);
+        assert!(
+            db.reserve_target("文档/i\u{0307}.txt", 4)?,
+            "不同序数目标不可错误冲突"
+        );
+        Ok(())
+    }
 }

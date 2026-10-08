@@ -223,7 +223,9 @@ pub fn worker_install_path() -> Result<PathBuf, String> {
         .workers
         .first()
         .ok_or_else(|| "截图 OCR 工作进程清单缺失".to_string())?;
-    Ok(asset_root().join(&worker.install_path))
+    let root = asset_root();
+    worker_ready(worker, &root).map_err(|error| format!("截图 OCR 工作进程校验失败：{error}"))?;
+    Ok(root.join(&worker.install_path))
 }
 
 /// bundled worker 的启动链口径完整性校验：开发版同目录二进制由 cargo build
@@ -1479,6 +1481,26 @@ mod tests {
     }
 
     // ── S7-02/S7-05：就绪检查的完整性校验与失败原因透传 ──
+    // 覆盖 O-09：自动启动直接取得 worker 路径，缓存副本必须先通过完整性校验。
+    #[test]
+    fn worker_install_path_rejects_unverified_cached_worker() {
+        let guard = redirect_component_env();
+        std::env::remove_var("JCHTOOLS_TEST_BUNDLED_WORKER");
+        let manifest = super::load_manifest().expect("内置清单必须可解析");
+        let target = guard.root.path().join(&manifest.workers[0].install_path);
+
+        let missing = super::worker_install_path().expect_err("缺失缓存 worker 不得交给启动链");
+        assert!(missing.contains("工作进程"), "必须点名工作进程：{missing}");
+
+        fs::create_dir_all(target.parent().expect("worker 路径有父目录"))
+            .expect("创建缓存 worker 目录");
+        fs::write(&target, b"unverified-worker").expect("预置未校验缓存 worker");
+        let corrupted = super::worker_install_path().expect_err("损坏缓存 worker 不得交给启动链");
+        assert!(
+            corrupted.contains("校验失败"),
+            "必须说明缓存 worker 校验失败：{corrupted}"
+        );
+    }
 
     // 覆盖 O-09（S7-02）：bundled worker 文件在场但损坏（与清单大小/摘要不符）时，
     // 就绪检查的工作进程段必须与启动链同口径报「未就绪」并携带具体原因——修复前

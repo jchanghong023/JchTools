@@ -57,15 +57,17 @@ pub struct Guard {
 /// 防御性初始化：目录/文件建不出、全局 subscriber 已被占用时安静返回 `None`，
 /// 业务不受影响。返回 `Some` 表示日志已生效（同时接管 panic 钩子）。
 pub fn init(state_dir: &Path) -> Option<Guard> {
-    use std::panic::catch_unwind;
     use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt, EnvFilter, Layer};
 
     prune_expired(&state_dir.join(LOG_DIR));
     let directory = state_dir.join(LOG_DIR);
     std::fs::create_dir_all(&directory).ok()?;
-    // tracing-appender 在日志文件建不出来时会 panic；诊断日志不得拖垮业务。
-    let appender =
-        catch_unwind(|| tracing_appender::rolling::daily(&directory, LOG_FILE_PREFIX)).ok()?;
+    // 使用可失败的构造器，避免打开失败先触发进程 panic 钩子。
+    let appender = tracing_appender::rolling::RollingFileAppender::builder()
+        .rotation(tracing_appender::rolling::Rotation::DAILY)
+        .filename_prefix(LOG_FILE_PREFIX)
+        .build(&directory)
+        .ok()?;
     let (writer, worker) = tracing_appender::non_blocking(appender);
     let layer = tracing_subscriber::fmt::layer()
         .compact()
@@ -82,13 +84,11 @@ pub fn init(state_dir: &Path) -> Option<Guard> {
             let perf_parts = std::fs::create_dir_all(&perf_directory)
                 .ok()
                 .and_then(|()| {
-                    std::panic::catch_unwind(|| {
-                        tracing_appender::rolling::daily(
-                            &perf_directory,
-                            crate::perf::LOG_FILE_PREFIX,
-                        )
-                    })
-                    .ok()
+                    tracing_appender::rolling::RollingFileAppender::builder()
+                        .rotation(tracing_appender::rolling::Rotation::DAILY)
+                        .filename_prefix(crate::perf::LOG_FILE_PREFIX)
+                        .build(&perf_directory)
+                        .ok()
                 })
                 .map(tracing_appender::non_blocking);
             match perf_parts {
@@ -226,6 +226,58 @@ fn prune_expired(directory: &Path) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // 覆盖 P-10：日志文件无法打开时安静退化，不触发进程 panic 钩子。
+    #[test]
+    fn failed_log_file_initialization_does_not_call_panic_hook() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        use std::sync::Arc;
+
+        const CHILD: &str = "JCHTOOLS_LOG_INIT_FAILURE_CHILD";
+        if std::env::var_os(CHILD).is_none() {
+            let status = std::process::Command::new(std::env::current_exe().unwrap())
+                .args([
+                    "--exact",
+                    "logging::tests::failed_log_file_initialization_does_not_call_panic_hook",
+                    "--nocapture",
+                ])
+                .env(CHILD, "1")
+                .status()
+                .unwrap();
+            assert!(status.success(), "隔离进程中的初始化退化断言必须通过");
+            return;
+        }
+
+        let temp = tempfile::tempdir().unwrap();
+        let directory = temp.path().join(LOG_DIR);
+        std::fs::create_dir_all(&directory).unwrap();
+        let appender = tracing_appender::rolling::daily(&directory, LOG_FILE_PREFIX);
+        drop(appender);
+        let path = std::fs::read_dir(&directory)
+            .unwrap()
+            .next()
+            .unwrap()
+            .unwrap()
+            .path();
+        std::fs::remove_file(&path).unwrap();
+        std::fs::create_dir(&path).unwrap();
+
+        let panic_count = Arc::new(AtomicUsize::new(0));
+        let hook_count = Arc::clone(&panic_count);
+        let previous = std::panic::take_hook();
+        std::panic::set_hook(Box::new(move |_| {
+            hook_count.fetch_add(1, Ordering::Relaxed);
+        }));
+        let result = std::panic::catch_unwind(|| init(temp.path()));
+        std::panic::set_hook(previous);
+
+        assert!(result.unwrap().is_none(), "日志失败必须退化为 None");
+        assert_eq!(
+            panic_count.load(Ordering::Relaxed),
+            0,
+            "不得触发 panic 钩子"
+        );
+    }
 
     // 覆盖 P-10/O-29/O-30：任意 panic 正文不得成为持久诊断日志内容。
     #[test]

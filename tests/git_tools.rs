@@ -700,6 +700,55 @@ fn remote_ahead_triggers_fetch_merge_then_push() {
     );
 }
 
+// 覆盖 G-10/G-11：分支默认合并选项不得自动选择冲突的一方，必须保留冲突现场。
+#[test]
+fn merge_options_ours_preserves_conflict() {
+    let fix = fixture();
+    fs::write(fix.repo.join("conflict.txt"), "local version\n").unwrap();
+    let other = fix.repo.parent().unwrap().join("other");
+    git_ok(
+        fix.repo.parent().unwrap(),
+        &["clone", "-q", &fix.remote.display().to_string(), "other"],
+    );
+    fs::write(other.join("conflict.txt"), "remote version\n").unwrap();
+    git_ok(&other, &["add", "conflict.txt"]);
+    git_ok(&other, &["commit", "-q", "-m", "remote conflict"]);
+    git_ok(&other, &["push", "-q"]);
+    git_ok(
+        &fix.repo,
+        &["config", "branch.master.mergeOptions", "-Xours"],
+    );
+    let before = remote_log(&fix.remote);
+
+    let outcome = run_tool(&fix.repo);
+    assert!(
+        outcome.text.contains("冲突"),
+        "默认策略不得自动选择冲突一方：{}",
+        outcome.text
+    );
+    assert_eq!(remote_log(&fix.remote), before, "不得改变远端历史");
+    assert_eq!(
+        git_ok(&fix.repo, &["log", "-1", "--format=%s"]).trim(),
+        "update: conflict.txt",
+        "已完成的单文件提交保留"
+    );
+    assert!(fix.repo.join(".git").join("MERGE_HEAD").is_file());
+    let content = fs::read_to_string(fix.repo.join("conflict.txt")).unwrap();
+    assert!(
+        content.contains("local version") && content.contains("remote version"),
+        "双方内容必须保留在冲突现场：{content}"
+    );
+    assert_eq!(
+        git_ok(
+            &fix.repo,
+            &["config", "--get", "branch.master.mergeOptions"]
+        )
+        .trim(),
+        "-Xours",
+        "不得改写用户持久配置"
+    );
+}
+
 // 覆盖 G-10 尾段（合并被本地未提交变更阻挡：停止并显示原因）
 #[test]
 fn merge_blocked_by_dirty_worktree_stops_with_reason() {
@@ -1272,9 +1321,14 @@ const GIT_WRAPPER_CMD: &str = concat!(
     "@echo off\r\n",
     "setlocal\r\n",
     "set \"WDIR=%~dp0\"\r\n",
-    ">>\"%WDIR%trace.txt\" echo %*\r\n",
     "set /p REALGIT=<\"%WDIR%real-git.txt\"\r\n",
     "set \"SUB=%~1\"\r\n",
+    "if /I \"%SUB%\"==\"-c\" set \"SUB=%~3\"\r\n",
+    "if /I \"%~1\"==\"-c\" (\r\n",
+    "  >>\"%WDIR%trace.txt\" echo %SUB% %*\r\n",
+    ") else (\r\n",
+    "  >>\"%WDIR%trace.txt\" echo %*\r\n",
+    ")\r\n",
     "if /I \"%SUB%\"==\"add\" call :mark ADD\r\n",
     "if /I \"%SUB%\"==\"commit\" call :mark COMMIT\r\n",
     "if /I \"%SUB%\"==\"push\" call :mark PUSH\r\n",
@@ -2356,5 +2410,115 @@ fn real_output_captured_for_success_and_failure_paths() {
         failed_outcome.text.contains("任务已停止"),
         "失败路径收尾：{}",
         failed_outcome.text
+    );
+}
+
+fn fixture_with_submodule() -> (Fixture, PathBuf) {
+    let fix = fixture();
+    let subremote = add_second_remote(&fix, "subremote");
+    git_ok(&fix.repo, &["push", "-q", "subremote", "master"]);
+    git_ok(
+        &fix.repo,
+        &[
+            "-c",
+            "protocol.file.allow=always",
+            "submodule",
+            "add",
+            "-q",
+            &subremote.display().to_string(),
+            "child",
+        ],
+    );
+    git_ok(&fix.repo, &["commit", "-q", "-m", "prepare submodule"]);
+    git_ok(&fix.repo, &["push", "-q"]);
+    (fix, subremote)
+}
+
+// 覆盖 P-03/G-08：配置递归推送也不能访问当前分支upstream之外的子模块远端。
+#[test]
+fn recursive_push_does_not_update_submodule_remote() {
+    let (fix, subremote) = fixture_with_submodule();
+    let before = git_ok(&subremote, &["rev-parse", "master"]);
+    let child = fix.repo.join("child");
+    fs::write(child.join("new.txt"), "submodule change\n").unwrap();
+    git_ok(&child, &["add", "new.txt"]);
+    git_ok(&child, &["commit", "-q", "-m", "submodule pending"]);
+    git_ok(
+        &fix.repo,
+        &["config", "push.recurseSubmodules", "on-demand"],
+    );
+
+    let outcome = run_tool(&fix.repo);
+    assert!(
+        outcome.text.contains("全部完成"),
+        "当前upstream的gitlink更新应正常推送：{}",
+        outcome.text
+    );
+    assert_eq!(
+        git_ok(&subremote, &["rev-parse", "master"]),
+        before,
+        "不得递归推送到upstream之外的子模块远端"
+    );
+    assert_eq!(
+        git_ok(&fix.remote, &["rev-parse", "master:child"]).trim(),
+        git_ok(&child, &["rev-parse", "HEAD"]).trim(),
+        "只推送superproject中的gitlink更新"
+    );
+}
+
+// 覆盖 P-03/G-10：fetch不能因递归配置而访问子模块自己的远端。
+#[test]
+fn recursive_fetch_does_not_update_submodule_tracking_ref() {
+    let (fix, subremote) = fixture_with_submodule();
+    let child = fix.repo.join("child");
+    let before = git_ok(&child, &["rev-parse", "origin/master"]);
+    let base = fix.repo.parent().unwrap();
+    git_ok(
+        base,
+        &[
+            "clone",
+            "-q",
+            &subremote.display().to_string(),
+            "other-child",
+        ],
+    );
+    let other_child = base.join("other-child");
+    fs::write(other_child.join("new.txt"), "remote submodule change\n").unwrap();
+    git_ok(&other_child, &["add", "new.txt"]);
+    git_ok(&other_child, &["commit", "-q", "-m", "remote submodule"]);
+    git_ok(&other_child, &["push", "-q"]);
+    let new_oid = git_ok(&other_child, &["rev-parse", "HEAD"]);
+    git_ok(
+        base,
+        &["clone", "-q", &fix.remote.display().to_string(), "other"],
+    );
+    let other = base.join("other");
+    git_ok(
+        &other,
+        &[
+            "update-index",
+            "--cacheinfo",
+            &format!("160000,{},child", new_oid.trim()),
+        ],
+    );
+    git_ok(&other, &["commit", "-q", "-m", "remote gitlink"]);
+    git_ok(&other, &["push", "-q"]);
+    fs::write(fix.repo.join("local.txt"), "local change\n").unwrap();
+    git_ok(&fix.repo, &["config", "fetch.recurseSubmodules", "true"]);
+
+    let outcome = run_tool(&fix.repo);
+    assert!(
+        outcome.text.contains("全部完成"),
+        "当前upstream的新提交应正常合并推送：{}",
+        outcome.text
+    );
+    assert_eq!(
+        git_ok(&child, &["rev-parse", "origin/master"]),
+        before,
+        "不得递归fetch子模块自己的远端"
+    );
+    assert!(
+        remote_log(&fix.remote).contains(&"update: local.txt".to_string()),
+        "superproject当前文件应已推送"
     );
 }

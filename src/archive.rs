@@ -7,7 +7,6 @@ use std::{
     path::{Path, PathBuf},
     process::Command,
     sync::atomic::Ordering,
-    time::{Duration, SystemTime},
 };
 
 /// 「解压失败」子目录名（X-06）：建在所选目录根下，收纳未能完全解开的原包。
@@ -40,9 +39,8 @@ fn plan_directory_renames(
             None => ("", rel.as_str()),
         };
         // walkdir 保证父目录先于后代：父目录已改名时，后代在改后的父目录下规划。
-        let parent_dest = dir_renames
-            .get(parent_rel)
-            .map_or_else(|| parent_rel.to_string(), Clone::clone);
+        let parent_dest =
+            mapped_entry_rel(&dir_renames, parent_rel).unwrap_or_else(|| parent_rel.to_string());
         let join = |name: &str| -> Result<PathBuf> {
             let rel = if parent_dest.is_empty() {
                 name.to_string()
@@ -51,8 +49,15 @@ fn plan_directory_renames(
             };
             Ok(base.join(fsutil::safe_relative(&rel)?))
         };
-        if !matches!(classify_occupancy(&join(name)?)?, Occupancy::Blocked) {
-            // 目标空闲（按原名创建）或已是普通目录（按 X-04 合入）：不改名。
+        let destination = join(name)?;
+        let occupancy = classify_occupancy(&destination)?;
+        let protected_directory = matches!(occupancy, Occupancy::PlainDir)
+            && (destination
+                .file_name()
+                .is_some_and(|name| name == QUARANTINE_DIR_NAME)
+                || fsutil::is_git_root(&destination)?);
+        if !protected_directory && !matches!(occupancy, Occupancy::Blocked) {
+            // 目标空闲或普通目录可合入；Git 项目和既有隔离容器另选新目录名。
             continue;
         }
         let mut new_rel = None;
@@ -78,8 +83,160 @@ fn plan_directory_renames(
     Ok(dir_renames)
 }
 
+fn volume_family_key(name: &str) -> Option<String> {
+    if let Some(key) = rules::archive_entry_key(name) {
+        return Some(key);
+    }
+    let lower = name.to_ascii_lowercase();
+    if let Some(stem) = rar_part_stem(&lower) {
+        return rules::archive_entry_key(&format!("{stem}.part1.rar"));
+    }
+    if numbered_entry(&lower) {
+        return rules::archive_entry_key(&format!("{}.001", &name[..name.len() - 4]));
+    }
+    let tail = rules::old_style_tail(&lower)?;
+    rules::archive_entry_key(&format!("{}.{}", tail.stem, tail.main_ext))
+}
+
+/// X-04/X-10：新解出的同族卷统一占位、统一改主体，不能与旧目录里的卷拼接。
+fn plan_volume_renames(
+    job: &Job,
+    content: &Path,
+    base: &Path,
+    directories: &HashMap<String, String>,
+    exclusions: &rules::Exclusions,
+    git: &mut GitBoundaries,
+) -> Result<HashMap<String, PathBuf>> {
+    let mut families: BTreeMap<(PathBuf, String), Vec<(String, PathBuf)>> = BTreeMap::new();
+    let mut reserved = HashSet::new();
+    for entry in walkdir::WalkDir::new(content)
+        .follow_links(false)
+        .min_depth(1)
+    {
+        job.context.control.checkpoint()?;
+        let entry = entry?;
+        let relative = fsutil::relative_string(content, entry.path())?;
+        let mapped = mapped_entry_rel(directories, &relative);
+        let destination = base.join(fsutil::safe_relative(
+            mapped.as_deref().unwrap_or(&relative),
+        )?);
+        reserved.insert(fsutil::fold_rel(&fsutil::path_string(&destination)?));
+        if !entry.file_type().is_file() {
+            continue;
+        }
+        let name = entry.file_name().to_str().context("分卷成员名无效")?;
+        let Some(key) = volume_family_key(name) else {
+            continue;
+        };
+        let parent = destination.parent().context("分卷成员缺少父目录")?;
+        let root_rel = fsutil::relative_string(&job.root, parent)?;
+        if member_excluded(exclusions, &root_rel)
+            || excluded_destination(&job.root, parent, &job.config, git)?
+        {
+            continue;
+        }
+        families
+            .entry((parent.to_path_buf(), key))
+            .or_default()
+            .push((relative, destination));
+    }
+    let mut existing: HashMap<PathBuf, HashSet<String>> = HashMap::new();
+    let mut renames = HashMap::new();
+    for ((parent, key), members) in families {
+        // 普通单文件包仍走 H-07；zip/rar 主包也必须避开既有老式尾卷族。
+        if members.len() == 1 && key.starts_with("single:") {
+            let name = members[0]
+                .1
+                .file_name()
+                .and_then(|name| name.to_str())
+                .context("归档目标名无效")?;
+            let primary = name.rsplit_once('.').is_some_and(|(_, extension)| {
+                extension.eq_ignore_ascii_case("zip") || extension.eq_ignore_ascii_case("rar")
+            });
+            if !primary && rules::old_style_tail(&name.to_ascii_lowercase()).is_none() {
+                continue;
+            }
+        }
+        if !existing.contains_key(&parent) {
+            let mut keys = HashSet::new();
+            match fs::read_dir(&parent) {
+                Ok(entries) => {
+                    for entry in entries {
+                        let entry = entry?;
+                        if let Some(name) = entry.file_name().to_str() {
+                            if let Some(key) = volume_family_key(name) {
+                                keys.insert(key);
+                            }
+                        }
+                    }
+                }
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+                Err(error) => return Err(error.into()),
+            }
+            existing.insert(parent.clone(), keys);
+        }
+        if !existing
+            .get(&parent)
+            .is_some_and(|keys| keys.contains(&key))
+        {
+            continue;
+        }
+        let mut selected = None;
+        let first_name = members[0]
+            .1
+            .file_name()
+            .and_then(|name| name.to_str())
+            .context("分卷目标名无效")?;
+        let stem = fsutil::split_compound_name(first_name).0;
+        let max_suffix_units = members.iter().try_fold(0usize, |max, (_, destination)| {
+            let name = destination
+                .file_name()
+                .and_then(|name| name.to_str())
+                .context("分卷目标名无效")?;
+            Ok::<_, anyhow::Error>(
+                max.max(fsutil::split_compound_name(name).1.encode_utf16().count()),
+            )
+        })?;
+        for index in 1u64..=1_000_000 {
+            let common_stem = family_candidate_stem(stem, max_suffix_units, index)?;
+            let mut targets = Vec::with_capacity(members.len());
+            let mut claimed = HashSet::new();
+            for (_, destination) in &members {
+                let name = destination
+                    .file_name()
+                    .and_then(|name| name.to_str())
+                    .context("分卷目标名无效")?;
+                let (_, suffix) = fsutil::split_compound_name(name);
+                let candidate = format!("{common_stem}{suffix}");
+                ensure!(candidate.ends_with(suffix), "分卷冲突目标无法保留完整后缀");
+                fsutil::validate_component(&candidate)?;
+                let target = parent.join(candidate);
+                let target_key = fsutil::fold_rel(&fsutil::path_string(&target)?);
+                if reserved.contains(&target_key)
+                    || !claimed.insert(target_key)
+                    || !matches!(classify_occupancy(&target)?, Occupancy::Free)
+                {
+                    targets.clear();
+                    break;
+                }
+                targets.push(target);
+            }
+            if targets.len() == members.len() {
+                selected = Some(targets);
+                break;
+            }
+        }
+        let targets = selected.context("无法为完整新分卷族分配统一合法主体")?;
+        for ((relative, _), target) in members.into_iter().zip(targets) {
+            reserved.insert(fsutil::fold_rel(&fsutil::path_string(&target)?));
+            renames.insert(relative, target);
+        }
+    }
+    Ok(renames)
+}
+
 /// 条目清单结果：声明总大小、大小元数据是否完整、以及 H-06 的 Git 排除子树。
-/// `git_subtrees` 存归档内相对路径的目录前缀：该目录「直接含有 .git」，其自身及
+/// `git_subtrees` 存经 Windows 序数折叠的归档相对目录前缀：该目录「直接含有 .git」，其自身及
 /// 全部后代（含 .git 的兄弟条目）在合入阶段整树跳过；空串表示归档根本身直接含
 /// .git，整个暂存根都不解出。
 struct Listing {
@@ -88,14 +245,14 @@ struct Listing {
     git_subtrees: HashSet<String>,
 }
 
-/// 成员路径里出现 `.git` 组件时，返回「直接含该 .git 的那个目录」的归档相对路径
+/// 成员路径里出现 `.git` 组件时，返回「直接含该 .git 的那个目录」的序数折叠相对路径
 /// （空串 = 归档根）。H-06 的边界按目录项识别，不深入 Git 树内部。
 fn git_boundary_prefix(rel: &str) -> Option<String> {
     let parts: Vec<&str> = rel.split('/').collect();
     let index = parts
         .iter()
         .position(|part| part.eq_ignore_ascii_case(".git"))?;
-    Some(parts[..index].join("/"))
+    Some(fsutil::fold_rel(&parts[..index].join("/")))
 }
 
 /// 成员（或空目录）是否落在某个「直接含 .git 的目录」子树内：H-06 要求该目录及
@@ -105,17 +262,12 @@ fn inside_git_subtree(subtrees: &HashSet<String>, rel: &str) -> bool {
     if subtrees.is_empty() {
         return false;
     }
-    let mut prefix = String::new();
-    for part in rel.split('/') {
-        if !prefix.is_empty() {
-            prefix.push('/');
-        }
-        prefix.push_str(part);
-        if subtrees.contains(&prefix) {
-            return true;
-        }
-    }
-    false
+    let folded = fsutil::fold_rel(rel);
+    folded
+        .match_indices('/')
+        .map(|(end, _)| end)
+        .chain(std::iter::once(folded.len()))
+        .any(|end| subtrees.contains(&folded[..end]))
 }
 
 /// Git 边界判定缓存（H-06）：同一目录在一次解压里被反复询问（同一包的兄弟成员、
@@ -124,6 +276,10 @@ fn inside_git_subtree(subtrees: &HashSet<String>, rel: &str) -> bool {
 #[derive(Default)]
 struct GitBoundaries {
     known: HashMap<PathBuf, bool>,
+    #[cfg(windows)]
+    system_checked: bool,
+    #[cfg(windows)]
+    system_prefix: Option<String>,
 }
 
 impl GitBoundaries {
@@ -131,6 +287,27 @@ impl GitBoundaries {
     /// 直接含 `.git` 即为真。用户选定的根本身不参与判定——根即 Git 根属整次任务的
     /// 前置拒绝，不在解压层处理。
     fn blocked(&mut self, root: &Path, directory: &Path) -> Result<bool> {
+        // S-05：只解析一次实际系统目录；仅所选根包含它时逐目标检查序数路径前缀。
+        #[cfg(windows)]
+        {
+            if !self.system_checked {
+                let protected = fsutil::protected_root()?;
+                let protected_key =
+                    fsutil::fold_rel(&fsutil::path_string(&protected)?.replace('\\', "/"));
+                let root_key = fsutil::fold_rel(&fsutil::path_string(root)?.replace('\\', "/"));
+                let root_key = root_key.trim_end_matches('/');
+                if protected_key == root_key || protected_key.starts_with(&format!("{root_key}/")) {
+                    self.system_prefix = Some(format!("{protected_key}/"));
+                }
+                self.system_checked = true;
+            }
+            if let Some(prefix) = &self.system_prefix {
+                let key = fsutil::fold_rel(&fsutil::path_string(directory)?.replace('\\', "/"));
+                if key == prefix.trim_end_matches('/') || key.starts_with(prefix) {
+                    return Ok(true);
+                }
+            }
+        }
         if let Some(&cached) = self.known.get(directory) {
             return Ok(cached);
         }
@@ -168,7 +345,100 @@ fn volume_bytes(volumes: &[PathBuf]) -> Result<u64> {
     for path in volumes {
         total = total.saturating_add(fs::metadata(path)?.len());
     }
-    Ok(total.max(1))
+    Ok(total)
+}
+
+/// X-08：每步解码前按已知新增逻辑大小检查比例与目标卷预留。
+fn check_expansion_space(
+    job: &Job,
+    declared: Option<u64>,
+    packed: u64,
+    prior_decoded: u64,
+) -> Result<()> {
+    if let Some(total) = declared {
+        let decoded = prior_decoded
+            .checked_add(total)
+            .context("累计解压字节计数溢出")?;
+        if job.config.max_ratio > 0 {
+            ensure!(
+                decoded <= packed.saturating_mul(job.config.max_ratio),
+                "压缩包展开比例超过用户设置的上限"
+            );
+        }
+    }
+    let reserve = job.config.reserve_bytes;
+    let free = fs2::available_space(&job.root)
+        .map_err(|error| StopExtraction(format!("无法查询磁盘可用空间：{error}")))?;
+    if let Some(total) = declared {
+        if total.checked_add(reserve).context("容量计算溢出")? > free {
+            return Err(StopExtraction(format!(
+                "可用空间不足：本包需 {}，预留 {}，当前 {}；已保留原包并停止本次解压，未合入任何解压文件",
+                bytes(total), bytes(reserve), bytes(free)
+            )).into());
+        }
+    }
+    Ok(())
+}
+
+fn skip_git_root(job: &mut Job, archive_rel: &str, subtrees: &HashSet<String>) -> Result<bool> {
+    if !subtrees.contains("") {
+        return Ok(false);
+    }
+    job.summary.skipped += 1;
+    job.log(
+        "解压",
+        archive_rel,
+        "",
+        "跳过",
+        "压缩包根目录含 .git：按 H-06 整树排除，未解出任何成员；原包保留",
+        0,
+    )?;
+    Ok(true)
+}
+
+/// X-08：完整暂存结果先检查，再允许任何成员合入。未知声明大小同样检查实际比例。
+fn validate_staging(
+    job: &Job,
+    content: &Path,
+    declared: Option<u64>,
+    packed: u64,
+    prior_decoded: u64,
+) -> Result<u64> {
+    let mut expanded = 0u64;
+    for entry in walkdir::WalkDir::new(content)
+        .follow_links(false)
+        .min_depth(1)
+    {
+        job.context.control.checkpoint()?;
+        let entry = entry?;
+        let metadata = fs::symlink_metadata(entry.path())?;
+        ensure!(
+            !fsutil::is_link(&metadata),
+            "解压结果出现链接，拒绝整包合入"
+        );
+        let relative = fsutil::relative_string(content, entry.path())?;
+        fsutil::safe_relative(&relative)?;
+        if metadata.is_file() {
+            expanded = expanded
+                .checked_add(metadata.len())
+                .context("解压字节计数溢出")?;
+        } else {
+            ensure!(metadata.is_dir(), "解压结果含非普通文件");
+        }
+    }
+    if let Some(total) = declared {
+        ensure!(expanded == total, "解压总量与条目清单不一致，原包保留");
+    }
+    let decoded = prior_decoded
+        .checked_add(expanded)
+        .context("累计解压字节计数溢出")?;
+    if job.config.max_ratio > 0 {
+        ensure!(
+            decoded <= packed.saturating_mul(job.config.max_ratio),
+            "压缩包实际展开比例超过用户设置的上限"
+        );
+    }
+    Ok(decoded)
 }
 
 /// 任务级中止信号（X-05/X-06/X-08）：空间不足、以及成功原包/分卷删除失败都不是包
@@ -266,17 +536,10 @@ impl SevenZip {
             }) {
                 bail!("拒绝压缩包中的程序工作区/系统目录条目：{raw}");
             }
-            // 保留命名空间（按成员的落盘位置对齐 scan 剪枝口径）：任意层
-            // .jchtools-link-* 组件与 scan 按名剪枝同构；「解压失败」组件在 scan 按
-            // 任意层级组件整树剪枝（C-09/X-07），成员一旦落盘就处于两工具都看不到、
-            // 用户无法管理的永久盲区。影子成员落盘不会删除原包（X-06 隔离而非 X-05
-            // 删除）；故在清单阶段就按危险条目拒绝并整包隔离（可逆、有日志）。
-            if raw
-                .split('/')
-                .any(|s| s.eq_ignore_ascii_case(QUARANTINE_DIR_NAME))
-                || raw.split('/').any(|s| s.starts_with(".jchtools-link-"))
-            {
-                bail!("拒绝压缩包中的「解压失败」暂存区或内部链接标记条目：{raw}");
+            // X-07：「解压失败」同名普通成员正常落盘，但不继续递归处理其子树；
+            // 内部链接标记不是用户命名空间，仍在完整预检阶段拒绝。
+            if raw.split('/').any(|s| s.starts_with(".jchtools-link-")) {
+                bail!("拒绝压缩包中的内部链接标记条目：{raw}");
             }
             // H-06：成员路径里出现 .git 组件时，登记「直接含该 .git 的目录」为整树
             // 排除边界。边界必须在合入前从完整条目清单确定：该目录及全部后代整树
@@ -419,6 +682,51 @@ impl SevenZip {
             new_rar_names,
         })
     }
+    fn decode_into(&self, job: &Job, archive: &Path, output: &Path, label: &str) -> Result<()> {
+        let mut command = self.command();
+        command
+            .args([
+                "x",
+                "-aou",
+                "-y",
+                "-bb0",
+                "-bsp1",
+                "-bso1",
+                "-bse2",
+                "-sccUTF-8",
+                "-p-",
+                "-mmt=2",
+            ])
+            .arg(format!("-o{}", fsutil::path_string(output)?))
+            .arg("--")
+            .arg(archive);
+        process::run(
+            &mut command,
+            &job.context.control,
+            |err, line| {
+                if !err && line.contains('%') {
+                    job.context
+                        .status(format!("正在解压 {label} · {}", line.trim()));
+                }
+                Ok(())
+            },
+            || {
+                if fs2::available_space(&job.root)
+                    .map_err(|error| StopExtraction(format!("无法查询磁盘可用空间：{error}")))?
+                    < job.config.reserve_bytes
+                {
+                    return Err(StopExtraction(format!(
+                        "磁盘剩余空间低于预留阈值 {}，已停止解压并保留原包",
+                        bytes(job.config.reserve_bytes)
+                    ))
+                    .into());
+                }
+                Ok(())
+            },
+        )
+        .with_context(|| "解压失败（可能已损坏、加密或格式不受支持）")
+    }
+
     fn extract_one(&self, job: &mut Job, archive_rel: &str, depth: u32) -> Result<bool> {
         let archive = fsutil::safe_join(&job.root, archive_rel)?;
         job.context.status(format!("检查压缩包：{archive_rel}"));
@@ -439,105 +747,95 @@ impl SevenZip {
         let Listing {
             total,
             sizes_complete,
-            git_subtrees,
+            mut git_subtrees,
         } = self.list(&archive, job)?;
-        // H-06：归档根直接含 .git 时整个暂存根都不解出——落盘会让归档所在目录（或
-        // 其上级）变成 Git 树，两工具随后会整体拒绝该目录，且半个 Git 树对用户无用。
-        // 先于容量/比例判定：本包根本不会落盘，不适用展开防护。
-        if git_subtrees.contains("") {
-            job.summary.skipped += 1;
-            job.log(
-                "解压",
-                archive_rel,
-                "",
-                "跳过",
-                "压缩包根目录含 .git：按 H-06 整树排除，未解出任何成员；原包保留",
-                0,
-            )?;
+        let composite = composite_stream(&archive);
+        if !composite && skip_git_root(job, archive_rel, &git_subtrees)? {
             return Ok(false);
         }
-        // X-08：展开比例＝解出体积 ÷ 包体积，分卷包按实际卷集合合计。用乘法比较
-        // 避免整数除法截断导致边界上更宽松。
-        if job.config.max_ratio > 0 && sizes_complete {
-            let limit = packed.saturating_mul(job.config.max_ratio);
-            if total > limit {
-                bail!("压缩包展开比例超过用户设置的上限");
-            }
-        }
-        let reserve = job.config.reserve_bytes;
-        let free = fs2::available_space(&job.root)
-            .map_err(|error| StopExtraction(format!("无法查询磁盘可用空间：{error}")))?;
-        // 大小元数据不完整时只校验预留空间，避免对流式格式误报容量不足。
-        if sizes_complete && total.checked_add(reserve).context("容量计算溢出")? > free {
-            // X-06/X-08：空间不足不是包损坏——保留原包、报错并停止整个解压任务，
-            // 不隔离本包，也不继续批量隔离后续正常包。
-            return Err(StopExtraction(format!(
-                "可用空间不足：本包需 {}，预留 {}，当前 {}；已保留原包并停止本次解压，未写入任何解压文件",
-                bytes(total),
-                bytes(reserve),
-                bytes(free)
-            ))
-            .into());
-        }
-        // X-08：单包/单文件展开体积不设上限后，流式包（无 Size 元数据）只受
-        // 磁盘预留与运行期剩余空间检查约束（预留 0 也不取消磁盘写入失败处理）。
-        let stage = Staging::new(&job.root)?;
-        let mut command = self.command();
-        command
-            .args([
-                "x",
-                "-aou",
-                "-y",
-                "-bb0",
-                "-bsp1",
-                "-bso1",
-                "-bse2",
-                "-sccUTF-8",
-                "-p-",
-                "-mmt=2",
-            ])
-            .arg(format!("-o{}", fsutil::path_string(&stage.content)?))
-            .arg("--")
-            .arg(&archive);
-        let ctl = job.context.control.clone();
-        let context = job.context.clone();
-        let root = job.root.clone();
-        process::run(
-            &mut command,
-            &ctl,
-            |err, line| {
-                if !err && line.contains('%') {
-                    context.status(format!("正在解压 {archive_rel} · {}", line.trim()));
-                }
-                Ok(())
-            },
-            || {
-                if fs2::available_space(&root)
-                    .map_err(|error| StopExtraction(format!("无法查询磁盘可用空间：{error}")))?
-                    < reserve
+        check_expansion_space(job, sizes_complete.then_some(total), packed, 0)?;
+        let mut stage = Staging::new(&job.root)?;
+        self.decode_into(job, &archive, &stage.content, archive_rel)?;
+        // -ba 列项可能透过复合流直接列出 tar 成员，首步解码却只生成中间 tar。
+        // 中间物只在本次所有权暂存树内存在，不按最终清单总量校验、不正式落盘入队。
+        let mut decoded = validate_staging(
+            job,
+            &stage.content,
+            (!composite && sizes_complete).then_some(total),
+            packed,
+            0,
+        )?;
+        if composite {
+            let numbered = matches!(named.scheme, VolumeScheme::Numbered);
+            let mut opened_tar = false;
+            // 数字卷可能先重组压缩流；允许这一额外内部步骤，复合包仍只计一层。
+            for layer in 0..=u8::from(numbered) {
+                let mut member = None;
+                for entry in walkdir::WalkDir::new(&stage.content)
+                    .follow_links(false)
+                    .min_depth(1)
                 {
-                    // X-08：预留阈值被击穿即保留原包并停止整个任务（不隔离、不继续）。
-                    return Err(StopExtraction(format!(
-                        "磁盘剩余空间低于预留阈值 {}，已停止解压并保留原包",
-                        bytes(reserve)
-                    ))
-                    .into());
+                    job.context.control.checkpoint()?;
+                    let entry = entry?;
+                    if entry.file_type().is_file() {
+                        ensure!(member.is_none(), "复合压缩流解码结果不是单一内部容器");
+                        member = Some(entry.into_path());
+                    }
                 }
-                Ok(())
-            },
-        )
-        .with_context(|| "解压失败（可能已损坏、加密或格式不受支持）")?;
+                let member = member.context("复合压缩流缺少内部 tar 容器")?;
+                let format = self.archive_volume_count(&member, job)?.kind;
+                let tar = format.eq_ignore_ascii_case("tar");
+                ensure!(
+                    tar || (numbered && layer == 0 && compressed_stream_kind(&format)),
+                    "复合压缩流未生成合法 tar 容器"
+                );
+                let listing = self.list(&member, job)?;
+                if tar && skip_git_root(job, archive_rel, &listing.git_subtrees)? {
+                    return Ok(false);
+                }
+                check_expansion_space(
+                    job,
+                    listing.sizes_complete.then_some(listing.total),
+                    packed,
+                    decoded,
+                )?;
+                let next = Staging::new(&job.root)?;
+                self.decode_into(job, &member, &next.content, archive_rel)?;
+                decoded = validate_staging(
+                    job,
+                    &next.content,
+                    (tar && listing.sizes_complete).then_some(listing.total),
+                    packed,
+                    decoded,
+                )?;
+                stage = next;
+                if tar {
+                    git_subtrees = listing.git_subtrees;
+                    opened_tar = true;
+                    break;
+                }
+            }
+            ensure!(opened_tar, "复合压缩流缺少完整 tar 解码结果");
+        }
         let mut complete = true;
         let exclusions = rules::build_exclusions(&job.config.exclusions)?;
         let mut git = GitBoundaries::default();
-        let mut expanded = 0u64;
         let base = archive.parent().context("压缩包缺少父目录")?;
         // X-04：目录落盘名规划。压缩包目录的默认落盘名被普通文件、链接或 junction
         // 占用时，为新目录选最小未占用序号（`目录 (1)`、`目录 (2)`），该目录及全部
         // 后代成员整体映射到新目录；既有文件一律不动，与既有普通目录同名则合入。
         // 规划必须在成员合入前完成：文件成员的父链与空目录条目共用这一映射。
         let dir_renames = plan_directory_renames(&job.context.control, &stage.content, base)?;
+        let volume_renames = plan_volume_renames(
+            job,
+            &stage.content,
+            base,
+            &dir_renames,
+            &exclusions,
+            &mut git,
+        )?;
         // One archive is decoded once, including solid archives. Final placement is rename, never copy.
+        let mut nested_members: BTreeMap<PathBuf, BTreeMap<String, PathBuf>> = BTreeMap::new();
         for entry in walkdir::WalkDir::new(&stage.content)
             .follow_links(false)
             .min_depth(1)
@@ -554,27 +852,23 @@ impl SevenZip {
             if !meta.is_file() {
                 bail!("解压结果含非普通文件");
             }
-            expanded = expanded
-                .checked_add(meta.len())
-                .context("解压字节计数溢出")?;
-            if sizes_complete && expanded > total {
-                bail!("实际解压量超过压缩包声明，已停止合入");
-            }
             let relative = fsutil::relative_string(&stage.content, entry.path())?;
             let mut destination = base.join(fsutil::safe_relative(&relative)?);
             // X-04：祖先目录因被既有文件占用而整体改名时，成员落盘路径跟随映射。
             if let Some(mapped) = mapped_entry_rel(&dir_renames, &relative) {
                 destination = base.join(fsutil::safe_relative(&mapped)?);
             }
+            if let Some(target) = volume_renames.get(&relative) {
+                destination.clone_from(target);
+            }
             // 压缩包里含有与压缩包同名的成员（gzip 头会记录原始文件名，base.tgz 里就可能是 base.tgz）：
             // 绝不能覆盖仍在使用的源包。流式包的解压结果其实就是去掉一层压缩后的内容，
             // 用真实名字（base.tar）落盘并按正常冲突策略处理；其他格式改名放置。
             // 路径相等判断仅在 Windows 上忽略大小写（NTFS 不区分）；其他平台区分大小写。
-            // Windows 必须用 Unicode 大小写折叠（to_lowercase），不能退回 ASCII 比较：
-            // NTFS 大小写折叠是 Unicode 表驱动的，Ä/ä 这类非 ASCII 对在文件系统层视为同一路径。
+            // 与 Windows 文件系统相同的序数键比较，Unicode lowercase 会错误展开主体。
             let collides_with_source = if cfg!(windows) {
-                fsutil::path_string(&destination)?.to_lowercase()
-                    == fsutil::path_string(&archive)?.to_lowercase()
+                fsutil::fold_rel(&fsutil::path_string(&destination)?)
+                    == fsutil::fold_rel(&fsutil::path_string(&archive)?)
             } else {
                 destination == archive
             };
@@ -677,14 +971,45 @@ impl SevenZip {
             }
             // X-08：继续处理本次解出的嵌套压缩包（层数上限沿用 max_depth）；
             // H-06：落点若位于 Git 目录树内则不处理该包（该树整树排除，不解压）。
-            if rules::archive_name(&final_path.to_string_lossy())
-                && !git.blocked(&job.root, final_path.parent().context("成员缺少父目录")?)?
+            if potential_archive_member(
+                final_path
+                    .file_name()
+                    .and_then(|name| name.to_str())
+                    .context("成员文件名无效")?,
+            ) && !git.blocked(&job.root, final_path.parent().context("成员缺少父目录")?)?
             {
-                enqueue(job, &final_path, depth + 1)?;
+                let excluded_tree = relative
+                    .split('/')
+                    .chain(final_rel.split('/'))
+                    .any(|component| component.eq_ignore_ascii_case(QUARANTINE_DIR_NAME));
+                let below_root = final_path.parent().is_some_and(|parent| parent != job.root);
+                if excluded_tree || (!job.config.recursive && below_root) {
+                    job.summary.skipped += 1;
+                    job.log(
+                        "解压",
+                        archive_rel,
+                        &final_rel,
+                        "跳过",
+                        if excluded_tree {
+                            "新成员已落盘；隔离容器同名目录不继续递归解压"
+                        } else {
+                            "新成员已落盘；未开启递归，不继续处理子目录嵌套包"
+                        },
+                        meta.len(),
+                    )?;
+                } else {
+                    let parent = final_path.parent().context("成员缺少父目录")?.to_path_buf();
+                    let name = final_path
+                        .file_name()
+                        .and_then(|name| name.to_str())
+                        .context("成员文件名无效")?
+                        .to_ascii_lowercase();
+                    nested_members
+                        .entry(parent)
+                        .or_default()
+                        .insert(name, final_path);
+                }
             }
-        }
-        if sizes_complete && expanded != total {
-            bail!("解压总量与条目清单不一致，原包保留");
         }
         // Preserve empty archive directories too. Do not merge them before checking for file/dir collisions.
         for entry in walkdir::WalkDir::new(&stage.content)
@@ -794,6 +1119,7 @@ impl SevenZip {
                 }
             }
         }
+        enqueue_nested_groups(job, nested_members, depth + 1)?;
         // X-05：只有整包解码与校验成功、全部成员（含空目录）完整落盘后，才永久删除
         // 原包及其实际分卷；失败、部分解开或取消都不启动删除，也不删除仅同主干的文件。
         if complete {
@@ -852,6 +1178,120 @@ fn delete_successful_source(job: &mut Job, archive_rel: &str, volumes: &[PathBuf
     }
     Ok(())
 }
+fn composite_stream(archive: &Path) -> bool {
+    let Some(name) = archive.file_name().and_then(|name| name.to_str()) else {
+        return false;
+    };
+    let name = match name.rsplit_once('.') {
+        Some((rest, digits))
+            if digits.len() == 3 && digits.bytes().all(|digit| digit.is_ascii_digit()) =>
+        {
+            rest
+        }
+        _ => name,
+    };
+    [
+        ".tgz",
+        ".tbz2",
+        ".txz",
+        ".tzst",
+        ".tar.gz",
+        ".tar.bz2",
+        ".tar.xz",
+        ".tar.zst",
+        ".tar.lzma",
+        ".tar.z",
+    ]
+    .iter()
+    .any(|suffix| {
+        name.get(name.len().saturating_sub(suffix.len())..)
+            .is_some_and(|ending| ending.eq_ignore_ascii_case(suffix))
+    })
+}
+
+fn compressed_stream_kind(kind: &str) -> bool {
+    ["gzip", "bzip2", "xz", "zstd", "lzma", "lzma86", "z"]
+        .iter()
+        .any(|supported| kind.eq_ignore_ascii_case(supported))
+}
+
+fn potential_archive_member(name: &str) -> bool {
+    if rules::archive_name(name) {
+        return true;
+    }
+    let Some((base, suffix)) = name.rsplit_once('.') else {
+        return false;
+    };
+    if suffix.eq_ignore_ascii_case("rar") {
+        return rar_part_stem(&name.to_ascii_lowercase()).is_some();
+    }
+    if suffix.len() == 3 && suffix.bytes().all(|byte| byte.is_ascii_digit()) {
+        return rules::archive_name(base);
+    }
+    if suffix.len() == 3
+        && matches!(suffix.as_bytes()[0], b'r' | b'R' | b'z' | b'Z')
+        && suffix.as_bytes()[1..].iter().all(u8::is_ascii_digit)
+    {
+        return rules::old_style_tail(&name.to_ascii_lowercase()).is_some();
+    }
+    false
+}
+
+fn enqueue_nested_groups(
+    job: &Job,
+    directories: BTreeMap<PathBuf, BTreeMap<String, PathBuf>>,
+    depth: u32,
+) -> Result<()> {
+    for members in directories.into_values() {
+        let mut seen = HashSet::new();
+        for (name, path) in &members {
+            if let Some(key) = rules::archive_entry_key(name) {
+                if seen.insert(key) {
+                    enqueue(job, path, depth)?;
+                }
+            }
+        }
+        let names: Vec<String> = members.keys().cloned().collect();
+        for name in rules::part_rar_missing_first_groups(&names) {
+            let path = members.get(&name).context("缺首卷候选不存在")?;
+            if missing_part_rar_first(path).is_none() {
+                continue;
+            }
+            let stem = rar_part_stem(&name).context("缺首卷候选形态无效")?;
+            let key = rules::archive_entry_key(&format!("{stem}.part1.rar"))
+                .context("缺首卷族无法归组")?;
+            if seen.insert(key) {
+                enqueue(job, path, depth)?;
+            }
+        }
+        for name in rules::numbered_volume_missing_entry_groups(&names) {
+            let path = members.get(&name).context("缺入口候选不存在")?;
+            if missing_numbered_entry(path).is_none() {
+                continue;
+            }
+            let key = rules::archive_entry_key(&format!("{}.001", &name[..name.len() - 4]))
+                .context("缺入口族无法归组")?;
+            if seen.insert(key) {
+                enqueue(job, path, depth)?;
+            }
+        }
+        for (name, path) in &members {
+            let Some(tail) = rules::old_style_tail(name) else {
+                continue;
+            };
+            if !missing_old_style_main(path) {
+                continue;
+            }
+            let key = rules::archive_entry_key(&format!("{}.{}", tail.stem, tail.main_ext))
+                .context("缺主包族无法归组")?;
+            if seen.insert(key) {
+                enqueue(job, path, depth)?;
+            }
+        }
+    }
+    Ok(())
+}
+
 /// 流式压缩包去掉**一层**压缩后缀后的名字；不是流式格式时返回 None。
 /// 后缀集合与 X-01 白名单里的压缩流一致（`.tar.<流后缀>` 只去一层，剩下的 `.tar`
 /// 由 tar 处理逻辑继续展开）。
@@ -894,7 +1334,7 @@ fn stream_member_name(archive: &Path) -> String {
 /// 成员排除判定与扫描剪枝口径对齐：扫描对目录 X 整树剪枝，因此裸目录名 `X`
 /// 也必须排除其下成员 `X/y.txt`，否则成员落盘成为扫描不可见的影子，且原包每轮
 /// 因目录 X 命中排除而强制保留、重复解压永不收敛。
-fn member_excluded(exclusions: &globset::GlobSet, rel: &str) -> bool {
+fn member_excluded(exclusions: &rules::Exclusions, rel: &str) -> bool {
     let bytes = rel.as_bytes();
     for i in 0..=bytes.len() {
         if i == bytes.len() || bytes[i] == b'/' {
@@ -1018,12 +1458,15 @@ fn is_system(_path: &Path) -> bool {
     false
 }
 /// 解析 RAR 新式分卷名：把小写文件名拆成主干与 `.partN` 的数字串。
-/// 与 rules::multipart_name 使用的 `\.part(\d+)\.rar$` 对齐：
-/// report.partial.rar 这类仅含 “.part” 子串的普通包不得当作分卷。
+/// 与 rules 的分卷规则对齐：ASCII 正整数，允许前导零且不受整数机器宽度限制；
+/// report.partial.rar、report.part0.rar 不得当作分卷。
 fn split_rar_part(name: &str) -> Option<(&str, &str)> {
     let base = name.strip_suffix(".rar")?;
     let (stem, part) = base.rsplit_once(".part")?;
-    (!part.is_empty() && part.bytes().all(|b| b.is_ascii_digit())).then_some((stem, part))
+    (!part.is_empty()
+        && part.bytes().all(|b| b.is_ascii_digit())
+        && part.bytes().any(|b| b != b'0'))
+    .then_some((stem, part))
 }
 /// 将小写文件名解析为 RAR 新式分卷主干（去掉末尾 `.partN.rar` 后的部分）。
 fn rar_part_stem(name: &str) -> Option<&str> {
@@ -1068,10 +1511,22 @@ impl VolumeScheme {
             .file_name()
             .and_then(|name| name.to_str())
             .context("无效分卷名称")?;
-        // RAR4 由 NewVolName 标志决定；RAR5 总用新式规则。新式取扩展名前最后一段数字，
-        // 不要求叫 part1：report1.rar → report2.rar，数字后的文字与前导零也保持不变。
+        // X-10：档案头证明卷数，但不能扩大精确命名族的删除授权。
+        ensure!(
+            self != Self::OldRar || (!info.new_rar_names && !kind.eq_ignore_ascii_case("rar5")),
+            "RAR 新式卷名不属于老式 .rNN 命名族，保留源包"
+        );
+        ensure!(
+            match self {
+                Self::Numbered => count <= 999,
+                Self::OldRar => count <= 101,
+                Self::SplitZip => count <= 100,
+                _ => true,
+            },
+            "实际卷数超出 X-10 精确命名族，保留源包"
+        );
         let base = &name[..name.len() - 4];
-        let mut rar_number = if info.new_rar_names || kind.eq_ignore_ascii_case("rar5") {
+        let mut rar_number = if self == Self::RarParts {
             base.as_bytes()
                 .iter()
                 .rposition(u8::is_ascii_digit)
@@ -1111,11 +1566,7 @@ impl VolumeScheme {
                             &name[*end..]
                         )
                     } else {
-                        let extension = u32::try_from((index - 1) / 100)?
-                            .checked_add(u32::from('r'))
-                            .and_then(char::from_u32)
-                            .context("RAR 分卷编号超出范围")?;
-                        format!("{base}.{extension}{:02}", (index - 1) % 100)
+                        format!("{base}.r{:02}", index - 1)
                     }
                 }
                 Self::Numbered => format!("{base}.{:03}", index + 1),
@@ -1200,6 +1651,52 @@ fn x10_volume_precheck(archive_rel: &str, archive: &Path, named: &VolumeSet) -> 
     if let Some(stem) = missing_numbered_entry(archive) {
         anyhow::bail!("数字尾卷族缺起始卷：{archive_rel}（未找到 {stem}.001 入口卷）");
     }
+    if named.scheme != VolumeScheme::Single {
+        let mut numbers = Vec::with_capacity(named.paths.len());
+        for path in &named.paths {
+            let name = path
+                .file_name()
+                .and_then(|s| s.to_str())
+                .context("分卷名称无法无损表示")?
+                .to_ascii_lowercase();
+            let number = match named.scheme {
+                VolumeScheme::Numbered => name[name.len() - 3..].parse::<u64>()?,
+                VolumeScheme::RarParts => part_digits(&name)
+                    .context("无效 part 分卷名")?
+                    .parse::<u64>()
+                    .map_err(|_| {
+                        anyhow::anyhow!(
+                            "X-10 分卷不全：{archive_rel}（编号超出本组可能的连续范围）"
+                        )
+                    })?,
+                VolumeScheme::OldRar | VolumeScheme::SplitZip => {
+                    if rules::old_style_tail(&name).is_some() {
+                        let number = name[name.len() - 2..].parse::<u64>()?;
+                        if named.scheme == VolumeScheme::OldRar {
+                            number + 1
+                        } else {
+                            number
+                        }
+                    } else {
+                        0
+                    }
+                }
+                VolumeScheme::Single => unreachable!(),
+            };
+            numbers.push(number);
+        }
+        numbers.sort_unstable();
+        let start = u64::from(matches!(
+            named.scheme,
+            VolumeScheme::Numbered | VolumeScheme::RarParts
+        ));
+        for (offset, number) in numbers.into_iter().enumerate() {
+            ensure!(
+                number == start + u64::try_from(offset)?,
+                "X-10 分卷不全：{archive_rel}（缺起始编号或中间断号）"
+            );
+        }
+    }
     Ok(())
 }
 
@@ -1207,7 +1704,7 @@ fn missing_old_style_main(archive: &Path) -> bool {
     let Some(name) = archive.file_name().and_then(|s| s.to_str()) else {
         return false;
     };
-    let lower = name.to_lowercase();
+    let lower = name.to_ascii_lowercase();
     let Some(tail) = rules::old_style_tail(&lower) else {
         return false;
     };
@@ -1215,14 +1712,14 @@ fn missing_old_style_main(archive: &Path) -> bool {
         .is_ok_and(|metadata| metadata.file_type().is_file())
 }
 /// X-10：该文件是 partN（N≥2）的分卷、且同目录没有同主干同宽度的 part1 入口。
-/// 返回缺首卷的说明；不是该形态或入口在场时返回 None。宽度按 X-10 的命名族
-/// 区分（part1 / part01 / part001 属不同模式），入口必须是该模式的编号 1。
+/// 返回缺首卷的说明；不是该形态或入口在场时返回 None。任意补零写法均以卷号 1 为入口，
+/// 同主干宽度冲突由 volume_set 另行判为命名歧义。
 fn missing_part_rar_first(archive: &Path) -> Option<String> {
     let name = archive.file_name().and_then(|s| s.to_str())?;
-    let lower = name.to_lowercase();
+    let lower = name.to_ascii_lowercase();
     let (stem, digits) = split_rar_part(&lower)?;
-    let number: u64 = digits.parse().ok()?;
-    if number < 2 {
+    let number = digits.trim_start_matches('0');
+    if number == "1" {
         return None;
     }
     // 入口按卷号数值判定（X-10「位数超过最小宽度时自然增长」）：`part1` 在场
@@ -1231,7 +1728,6 @@ fn missing_part_rar_first(archive: &Path) -> Option<String> {
     if sibling_part_number_one(archive, stem) {
         return None;
     }
-    let _ = digits;
     Some(format!(
         "未找到 {stem} 命名族的入口卷（part1，任意补零写法）"
     ))
@@ -1242,15 +1738,19 @@ fn sibling_part_number_one(archive: &Path, stem: &str) -> bool {
         // 无法枚举兄弟卷时保守视为入口在场，交由引擎整包校验兜底。
         return true;
     };
+    let stem_key = fsutil::fold_rel(stem);
     for entry in entries.flatten() {
         let Some(name) = entry.file_name().into_string().ok() else {
             continue;
         };
-        let lower = name.to_lowercase();
+        let lower = name.to_ascii_lowercase();
         let Some((sibling_stem, sibling_digits)) = split_rar_part(&lower) else {
             continue;
         };
-        if sibling_stem == stem && sibling_digits.parse::<u64>().is_ok_and(|n| n == 1) {
+        if fsutil::fold_rel(sibling_stem) == stem_key
+            && sibling_digits.trim_start_matches('0') == "1"
+            && entry.file_type().is_ok_and(|kind| kind.is_file())
+        {
             // 卷号 1 的任意补零写法（part1/part01/part001）都是该族入口。
             return true;
         }
@@ -1261,7 +1761,7 @@ fn sibling_part_number_one(archive: &Path, stem: &str) -> bool {
 ///（也没有作为可识别非法起始入队的 `.000`）。返回主干名供错误指认。
 fn missing_numbered_entry(archive: &Path) -> Option<String> {
     let name = archive.file_name().and_then(|s| s.to_str())?;
-    let lower = name.to_lowercase();
+    let lower = name.to_ascii_lowercase();
     if !numbered_entry(&lower) {
         return None;
     }
@@ -1295,7 +1795,7 @@ fn volume_set(archive: &Path) -> Result<VolumeSet> {
         .file_name()
         .and_then(|s| s.to_str())
         .context("无效压缩包名称")?
-        .to_lowercase();
+        .to_ascii_lowercase();
     let (stem, scheme) = if let Some(stem) = rar_part_stem(&name) {
         (stem.to_string(), VolumeScheme::RarParts)
     } else if numbered_entry(&name) {
@@ -1323,41 +1823,36 @@ fn volume_set(archive: &Path) -> Result<VolumeSet> {
             part_ambiguity: None,
         });
     };
-    // 逐条目复用的匹配前缀与最少位数在扫描前算好（此前每个目录条目要 format! 两次）：
-    // rar 的 `.partN` 判定走 rar_part_stem，没有固定前缀；编号命名最少 3 位
-    // （7-Zip 多卷可到 .1000+，001/1000 都算兄弟卷，不写死恰好 3 位），宽命名至少 2 位。
-    let (prefix, min_digits) = match scheme {
-        VolumeScheme::Numbered => (Some(format!("{stem}.")), 3),
-        VolumeScheme::OldRar => (Some(format!("{stem}.r")), 2),
-        VolumeScheme::SplitZip => (Some(format!("{stem}.z")), 2),
-        VolumeScheme::RarParts | VolumeScheme::Single => (None, 0),
-    };
+    // 语法只折叠 ASCII；主干用文件系统序数键，不能先 Unicode 展开再猜测卷归属。
+    let stem_key = fsutil::fold_rel(&stem);
     let matches_candidate = |candidate: &str| -> bool {
         match scheme {
-            // 与主体识别同口径：只认同主干的 .partN.rar，不用 starts_with 宽匹配。
-            VolumeScheme::RarParts => rar_part_stem(candidate).is_some_and(|s| s == stem),
-            VolumeScheme::Numbered | VolumeScheme::OldRar | VolumeScheme::SplitZip => {
-                prefix.as_deref().is_some_and(|prefix| {
-                    candidate.strip_prefix(prefix).is_some_and(|digits| {
-                        digits.len() >= min_digits && digits.chars().all(|c| c.is_ascii_digit())
-                    })
-                })
+            VolumeScheme::RarParts => {
+                rar_part_stem(candidate).is_some_and(|stem| fsutil::fold_rel(stem) == stem_key)
             }
+            VolumeScheme::Numbered => candidate.rsplit_once('.').is_some_and(|(stem, digits)| {
+                digits.len() == 3
+                    && digits.bytes().all(|digit| digit.is_ascii_digit())
+                    && fsutil::fold_rel(stem) == stem_key
+            }),
+            VolumeScheme::OldRar | VolumeScheme::SplitZip => rules::old_style_tail(candidate)
+                .is_some_and(|tail| {
+                    (tail.main_ext == "rar") == (scheme == VolumeScheme::OldRar)
+                        && fsutil::fold_rel(tail.stem) == stem_key
+                }),
             VolumeScheme::Single => false,
         }
     };
     let mut paths = vec![archive.to_path_buf()];
     // X-10 part rar 命名歧义检测：混用补零宽度或同一卷号有不同写法都不猜测归属。
-    // 键为卷号数值（超长数字串退化为原始串键）；明确的前导零宽度还须覆盖所有卷号。
+    // 键为去前导零的十进制串，正整数卷号不受机器整数宽度限制。
     let mut part_ambiguity: Option<String> = None;
     let mut padded_width: Option<usize> = None;
     let mut part_seen: HashMap<String, String> = HashMap::new();
     if matches!(scheme, VolumeScheme::RarParts) {
         if let Some(digits) = part_digits(&name) {
             part_seen.insert(
-                digits
-                    .parse::<u64>()
-                    .map_or_else(|_| format!("raw:{digits}"), |value| value.to_string()),
+                digits.trim_start_matches('0').to_string(),
                 digits.to_string(),
             );
             padded_width = part_padding_width(digits);
@@ -1365,7 +1860,11 @@ fn volume_set(archive: &Path) -> Result<VolumeSet> {
     }
     for entry in fs::read_dir(archive.parent().context("压缩包缺少目录")?)? {
         let entry = entry?;
-        let candidate = entry.file_name().to_string_lossy().to_lowercase();
+        let name = entry.file_name();
+        let Some(name) = name.to_str() else {
+            continue;
+        };
+        let candidate = name.to_ascii_lowercase();
         // 主体自身已在集合里（如 part1.rar 对主干同判）；大小写不敏感路径上可能重复命名，去重交给文件系统唯一性。
         if matches_candidate(&candidate) && entry.path() != archive && entry.file_type()?.is_file()
         {
@@ -1381,17 +1880,15 @@ fn volume_set(archive: &Path) -> Result<VolumeSet> {
                             _ => {}
                         }
                     }
-                    let key = digits
-                        .parse::<u64>()
-                        .map_or_else(|_| format!("raw:{digits}"), |value| value.to_string());
-                    match part_seen.get(&key) {
+                    let key = digits.trim_start_matches('0');
+                    match part_seen.get(key) {
                         Some(existing) if existing != digits && part_ambiguity.is_none() => {
                             part_ambiguity = Some(format!(
                                 "同一卷号存在多种补零写法（{existing} 与 {digits} 并存）"
                             ));
                         }
                         None => {
-                            part_seen.insert(key, digits.to_string());
+                            part_seen.insert(key.to_string(), digits.to_string());
                         }
                         _ => {}
                     }
@@ -1466,6 +1963,32 @@ fn mapped_entry_rel(renames: &HashMap<String, String>, rel: &str) -> Option<Stri
     let (mapped, matched_len) = matched?;
     Some(format!("{mapped}{}", &rel[matched_len..]))
 }
+/// 所有卷按最长原后缀留出相同预算，整个族只生成一次主体，绝不截断编号或后缀。
+fn family_candidate_stem(stem: &str, max_suffix_units: usize, index: u64) -> Result<String> {
+    let separator_units = index.ilog10() as usize + 4;
+    let budget = 255usize
+        .checked_sub(separator_units)
+        .and_then(|budget| budget.checked_sub(max_suffix_units))
+        .filter(|budget| *budget > 0)
+        .context("无法为整族分卷主体保留合法字符")?;
+    let mut end = 0;
+    let mut units = 0;
+    for (offset, ch) in stem.char_indices() {
+        let width = ch.len_utf16();
+        if units + width > budget {
+            break;
+        }
+        end = offset + ch.len_utf8();
+        units += width;
+    }
+    let prefix = stem[..end].trim_end_matches(|ch: char| ch == '.' || ch.is_whitespace());
+    ensure!(!prefix.is_empty(), "无法为整族分卷主体保留合法字符");
+    let mut candidate = String::with_capacity(prefix.len() + separator_units);
+    candidate.push_str(prefix);
+    std::fmt::Write::write_fmt(&mut candidate, format_args!(" ({index})"))?;
+    Ok(candidate)
+}
+
 /// X-06/X-10：隔离整组一次规划目标名。先试原名；任一目标被占用时，选最小正整数
 /// N 使整组以「主干 (N)原后缀」统一改名后全部未占用——后缀、编号及补零原样保留
 /// （命名歧义组各卷后缀不同，也按各自原后缀保持，不改造成看似完整的卷集）。
@@ -1474,14 +1997,24 @@ fn quarantine_targets(dir: &Path, names: &[(String, String)]) -> Result<Option<V
     if names.is_empty() {
         return Ok(Some(Vec::new()));
     }
+    let max_suffix_units = names
+        .iter()
+        .map(|(_, ext)| ext.encode_utf16().count())
+        .max()
+        .unwrap_or(0);
     let build = |index: Option<u64>| -> Result<Vec<PathBuf>> {
+        let common_stem = index
+            .map(|index| family_candidate_stem(&names[0].0, max_suffix_units, index))
+            .transpose()?;
         let mut targets = Vec::with_capacity(names.len());
         let mut claimed = HashSet::new();
         for (stem, ext) in names {
-            let name = match index {
+            let name = match &common_stem {
                 None => format!("{stem}{ext}"),
-                Some(index) => fsutil::suffixed_candidate(stem, ext, index),
+                Some(stem) => format!("{stem}{ext}"),
             };
+            ensure!(name.ends_with(ext), "隔离目标无法完整保留分卷后缀：{ext}");
+            fsutil::validate_component(&name)?;
             if !claimed.insert(name.clone()) {
                 return Ok(Vec::new());
             }
@@ -1512,10 +2045,8 @@ fn quarantine_targets(dir: &Path, names: &[(String, String)]) -> Result<Option<V
 /// 等待人工处理。
 fn quarantine(job: &mut Job, archive_rel: &str, reason: &str) -> Result<()> {
     let archive = fsutil::safe_join(&job.root, archive_rel)?;
-    // 隔离可逆（改名进「解压失败」，用户可移回）：宽命名兄弟卷保持整组隔离。
-    // 真 PKZIP/旧 RAR 分卷集失败时常无法从主体取得 Volume Index 佐证，若在此也
-    // 设门会把真兄弟卷残留在原目录（.zNN/.rNN 不在扫描口径内，永远不会再被处理）；
-    // 误隔离可还原、有日志，误删除不可逆——佐证门只设在删除路径（extract_one）。
+    // 隔离使用 X-10 精确命名族的在场卷；失败包未必能由引擎确认卷数，
+    // 因此不把成功删源所需的档案头佐证作为可逆隔离的前置条件。
     let sources = volume_set(&archive)?.paths;
     let dir = job.root.join(QUARANTINE_DIR_NAME);
     if !dir.try_exists()? {
@@ -1662,14 +2193,6 @@ pub fn enqueue(job: &Job, archive: &Path, depth: u32) -> Result<()> {
     tracing::instrument(target = "perf", name = "extract_batch", skip_all)
 )]
 pub fn extract_queued(job: &mut Job, resolve_engine: impl Fn() -> Result<SevenZip>) -> Result<()> {
-    // 崩溃/强杀后 Drop 不会执行，.jchtools-work 下可能残留孤儿暂存目录；
-    // 解压开始前清理超过 24 小时的残留（阈值远大于正常解压时长，避免误伤并发任务）。
-    if let Ok(removed) = clean_orphan_staging(&job.root, Duration::from_hours(24)) {
-        if removed > 0 {
-            job.context
-                .status(format!("已清理 {removed} 个残留解压暂存目录"));
-        }
-    }
     // 引擎懒解析（E-05/X-06 边界）：缺首卷/缺入口/歧义组/缺主包的整组隔离是
     // 纯文件系统判定，不需要 7-Zip 引擎，先于引擎解析执行——无引擎宿主上这些
     // 组仍按 X-06 隔离（回归 CI run 37131023474：引擎解析前置曾把缺首卷组整体
@@ -1876,50 +2399,6 @@ impl Drop for Staging {
             }
         }
     }
-}
-/// 清理崩溃/断电后残留的孤儿暂存目录（`<root>/.jchtools-work/<uuid>`）。
-/// 只删除带 OWNER 标记且内容与目录名一致的条目（Staging::new 写入的归属标记），
-/// 并且目录年龄超过 max_age 才处理——阈值须远大于正常解压时长，避免误删并发任务
-/// 正在使用的暂存区。返回清理数量；错误一律跳过单个条目，不影响主流程。
-pub fn clean_orphan_staging(root: &Path, max_age: Duration) -> Result<usize> {
-    let Ok(work) = fsutil::safe_join(root, ".jchtools-work") else {
-        return Ok(0);
-    };
-    let Ok(entries) = fs::read_dir(&work) else {
-        return Ok(0);
-    };
-    let now = SystemTime::now();
-    let mut removed = 0usize;
-    for entry in entries.flatten() {
-        let path = entry.path();
-        if !path.is_dir() {
-            continue;
-        }
-        // OWNER 内容必须与目录名一致：这是 Staging::new 写入的归属标记。
-        let owner = fs::read_to_string(path.join("OWNER")).unwrap_or_default();
-        if owner != entry.file_name().to_string_lossy() {
-            continue;
-        }
-        let Ok(meta) = fs::metadata(&path) else {
-            continue;
-        };
-        let Ok(modified) = meta.modified() else {
-            continue;
-        };
-        let Ok(age) = now.duration_since(modified) else {
-            continue;
-        };
-        if age < max_age {
-            continue;
-        }
-        if fs::remove_dir_all(&path).is_ok() {
-            removed += 1;
-        }
-    }
-    if removed > 0 {
-        let _ = fs::remove_dir(&work);
-    } // 仅当父目录已空时才会成功
-    Ok(removed)
 }
 
 #[cfg(test)]
@@ -2329,5 +2808,312 @@ mod tests {
     #[test]
     fn quarantine_refuses_git_project_container_file() {
         quarantine_git_container_case("file");
+    }
+    // 覆盖 X-09/X-10：相似但不属于精确卷族的文件不得加入隔离集合。
+    #[test]
+    fn review_exact_volume_families_exclude_wide_numeric_suffixes() {
+        let temp = tempfile::tempdir().unwrap();
+        for (entry, included, excluded) in [
+            ("a.zip", "a.z01", "a.z001"),
+            ("b.rar", "b.r00", "b.r000"),
+            ("c.7z.001", "c.7z.002", "c.7z.1000"),
+        ] {
+            for name in [entry, included, excluded] {
+                fs::write(temp.path().join(name), b"volume").unwrap();
+            }
+            let set = volume_set(&temp.path().join(entry)).unwrap();
+            assert!(set.paths.contains(&temp.path().join(included)));
+            assert!(
+                !set.paths.contains(&temp.path().join(excluded)),
+                "非精确卷族文件不得隔离：{excluded}"
+            );
+        }
+    }
+
+    // 覆盖 X-04/H-06：普通目录若是 Git 项目，应为新目录另选名字。
+    #[test]
+    fn review_directory_collision_with_git_tree_uses_new_name() {
+        let root = tempfile::tempdir().unwrap();
+        let stage = tempfile::tempdir().unwrap();
+        fs::create_dir_all(root.path().join("repo/.git")).unwrap();
+        fs::write(root.path().join("repo/keep.txt"), b"original").unwrap();
+        fs::create_dir_all(stage.path().join("repo/sub")).unwrap();
+        let renames =
+            plan_directory_renames(&Control::default(), stage.path(), root.path()).unwrap();
+        assert_eq!(
+            mapped_entry_rel(&renames, "repo/sub/member.txt"),
+            Some("repo (1)/sub/member.txt".to_string())
+        );
+        assert_eq!(
+            fs::read(root.path().join("repo/keep.txt")).unwrap(),
+            b"original"
+        );
+        assert!(!root.path().join("repo/sub").exists());
+        fs::create_dir(root.path().join(QUARANTINE_DIR_NAME)).unwrap();
+        fs::write(root.path().join("解压失败/old.zip"), b"old user archive").unwrap();
+        fs::create_dir(stage.path().join(QUARANTINE_DIR_NAME)).unwrap();
+        let renames =
+            plan_directory_renames(&Control::default(), stage.path(), root.path()).unwrap();
+        assert_eq!(
+            mapped_entry_rel(&renames, "解压失败/new.zip"),
+            Some("解压失败 (1)/new.zip".to_string()),
+            "新目录不得向已有隔离容器合入"
+        );
+        assert_eq!(
+            fs::read(root.path().join("解压失败/old.zip")).unwrap(),
+            b"old user archive"
+        );
+    }
+
+    // 覆盖 X-04：祖先改名必须传递至任意深度的占用规划。
+    #[test]
+    fn review_directory_mapping_propagates_through_unrenamed_parents() {
+        let root = tempfile::tempdir().unwrap();
+        let stage = tempfile::tempdir().unwrap();
+        fs::write(root.path().join("a"), b"occupier").unwrap();
+        fs::create_dir_all(stage.path().join("a/b/c")).unwrap();
+        let renames =
+            plan_directory_renames(&Control::default(), stage.path(), root.path()).unwrap();
+        assert_eq!(
+            mapped_entry_rel(&renames, "a/b/c/member.txt"),
+            Some("a (1)/b/c/member.txt".to_string())
+        );
+    }
+
+    // 覆盖 X-10：非 part 名字中的数字不能授权吸入另一个独立 rar。
+    #[test]
+    fn review_rar_numeric_stem_does_not_authorize_other_archives() {
+        let root = tempfile::tempdir().unwrap();
+        let archive = root.path().join("report1.rar");
+        fs::write(&archive, b"first").unwrap();
+        fs::write(root.path().join("report2.rar"), b"independent").unwrap();
+        let info = ArchiveVolumes {
+            kind: "rar5".to_string(),
+            count: 2,
+            new_rar_names: true,
+        };
+        assert!(
+            VolumeScheme::OldRar.actual_paths(&archive, &info).is_err(),
+            "非精确族的第二个独立包不得成为删源集合"
+        );
+        assert_eq!(
+            fs::read(root.path().join("report2.rar")).unwrap(),
+            b"independent"
+        );
+    }
+
+    // 覆盖 X-10：冲突序号不能以截断分卷后缀来腾位。
+    #[test]
+    fn review_quarantine_preserves_long_volume_suffix_or_fails() {
+        let root = tempfile::tempdir().unwrap();
+        let ext = format!(".part{}.rar", "1".repeat(245));
+        fs::write(root.path().join(format!("a{ext}")), b"occupier").unwrap();
+        assert!(
+            quarantine_targets(root.path(), &[("a".to_string(), ext)]).is_err(),
+            "不能完整保留后缀时必须安全失败"
+        );
+    }
+
+    // Windows 项目既有脚本引擎夹具惯例：只模拟输出，检查真实落盘/删源接口。
+    fn review_script_engine(root: &Path, listing: &str, contents: &str) -> SevenZip {
+        let path = root.join("review-engine.cmd");
+        let body = format!(
+            "@echo off\r\nif \"%~1\"==\"l\" (\r\n{listing}\r\nexit /b 0\r\n)\r\n\
+             :args\r\nif \"%~1\"==\"\" exit /b 1\r\nset \"arg=%~1\"\r\n\
+             if \"%arg:~0,2%\"==\"-o\" goto extract\r\nshift\r\ngoto args\r\n\
+             :extract\r\nset \"output=%arg:~2%\"\r\n{contents}\r\nexit /b 0\r\n"
+        );
+        fs::write(&path, body).unwrap();
+        SevenZip::with_executable(&path).unwrap()
+    }
+
+    fn review_job(root: &Path, state: &Path, max_ratio: u64) -> Job {
+        Job {
+            root: root.to_path_buf(),
+            config: Config {
+                reserve_bytes: 0,
+                max_ratio,
+                ..Config::default()
+            },
+            context: TaskContext::default(),
+            db: Database::create(state).unwrap(),
+            summary: crate::model::Summary::default(),
+        }
+    }
+
+    // 覆盖 X-08：未知Size仍按实际解码逻辑量限制比例，不得绕过防护并删源。
+    #[test]
+    fn review_unknown_size_stream_obeys_expansion_ratio() {
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path().join("data");
+        fs::create_dir(&root).unwrap();
+        fs::write(root.join("pack.gz"), b"x").unwrap();
+        let engine = review_script_engine(
+            temp.path(),
+            "echo Path = payload.txt\r\necho Packed Size = 1\r\necho.",
+            "echo 0123456789> \"%output%\\payload.txt\"",
+        );
+        let mut job = review_job(&root, &temp.path().join("state"), 1);
+        assert!(engine.extract_one(&mut job, "pack.gz", 0).is_err());
+        assert!(root.join("pack.gz").is_file(), "超比例不删源");
+        assert!(!root.join("payload.txt").exists(), "检查完成前不得合入成员");
+    }
+
+    // 覆盖 X-08：整包实际逻辑量不符必须先拒绝，不能合入安全子集。
+    #[test]
+    fn review_staging_size_validation_precedes_every_merge() {
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path().join("data");
+        fs::create_dir(&root).unwrap();
+        fs::write(root.join("pack.7z"), b"x").unwrap();
+        let engine = review_script_engine(
+            temp.path(),
+            "echo Path = payload.txt\r\necho Size = 99\r\necho.",
+            "echo short> \"%output%\\payload.txt\"",
+        );
+        let mut job = review_job(&root, &temp.path().join("state"), 0);
+        assert!(engine.extract_one(&mut job, "pack.7z", 0).is_err());
+        assert!(root.join("pack.7z").is_file());
+        assert!(
+            !root.join("payload.txt").exists(),
+            "总量检查失败的包不得合入任何成员"
+        );
+    }
+
+    // 覆盖 X-10：精确命名族缺中间卷时，解码前直接拒绝整组。
+    #[test]
+    fn review_exact_volume_gaps_are_rejected_before_engine() {
+        let root = tempfile::tempdir().unwrap();
+        for (first, later) in [
+            ("numbered.7z.001", "numbered.7z.003"),
+            ("part.part1.rar", "part.part3.rar"),
+            ("old.rar", "old.r01"),
+            ("zip.zip", "zip.z02"),
+        ] {
+            let archive = root.path().join(first);
+            fs::write(&archive, b"first").unwrap();
+            fs::write(root.path().join(later), b"later").unwrap();
+            let named = volume_set(&archive).unwrap();
+            assert!(
+                x10_volume_precheck(first, &archive, &named).is_err(),
+                "中间断号必须拒绝：{first} / {later}"
+            );
+        }
+    }
+
+    // 覆盖 S-05：只读目标判定不得把系统属性“包含”解释成允许写入系统目录。
+    #[test]
+    fn review_system_directory_destination_is_excluded() {
+        let protected = fsutil::protected_root().unwrap();
+        let root = protected.parent().unwrap();
+        let destination = protected.join("jchtools-review-never-created.txt");
+        assert!(
+            excluded_destination(
+                root,
+                &destination,
+                &Config::default(),
+                &mut GitBoundaries::default(),
+            )
+            .unwrap(),
+            "实际系统目录及其后代必须排除；本测试只读路径，不创建任何系统文件"
+        );
+    }
+
+    // 覆盖 H-06：归档内同目录的大小写变体仍属于同一 Git 排除子树。
+    #[test]
+    fn review_git_subtree_matches_windows_case_variants() {
+        let subtrees = HashSet::from([git_boundary_prefix("project/.GIT/config").unwrap()]);
+        assert!(inside_git_subtree(&subtrees, "PROJECT/README.md"));
+        assert!(inside_git_subtree(&subtrees, "Project/src/member.txt"));
+        assert!(!inside_git_subtree(&subtrees, "project-other/README.md"));
+    }
+
+    // X-10：Unicode 小写扩展不是 Windows 序数等价，独立族不得参与彼此删源。
+    #[test]
+    fn review_ordinal_volume_families() {
+        let root = tempfile::tempdir().unwrap();
+        let first = root.path().join("i\u{0307}.zip.001");
+        let unrelated = root.path().join("\u{0130}.zip.002");
+        fs::write(&first, b"selected volume").unwrap();
+        fs::write(&unrelated, b"independent user volume").unwrap();
+        assert_ne!(
+            fsutil::fold_rel("i\u{0307}.zip"),
+            fsutil::fold_rel("\u{0130}.zip"),
+        );
+        assert_eq!(volume_set(&first).unwrap().paths, vec![first]);
+        assert_eq!(fs::read(unrelated).unwrap(), b"independent user volume");
+        let one = root.path().join("σ.zip.001");
+        let two = root.path().join("ς.zip.002");
+        fs::write(&one, b"first").unwrap();
+        fs::write(&two, b"second").unwrap();
+        assert_eq!(volume_set(&one).unwrap().paths, vec![one, two]);
+    }
+
+    #[test]
+    fn review_quarantine_common_long_family_stem() {
+        let dir = tempfile::tempdir().unwrap();
+        let stem = "x".repeat(244);
+        let names = vec![
+            (stem.clone(), ".part1.rar".to_string()),
+            (stem.clone(), ".part10.rar".to_string()),
+        ];
+        let old = dir.path().join(format!("{stem}.part1.rar"));
+        fs::write(&old, b"old user archive").unwrap();
+        let targets = quarantine_targets(dir.path(), &names).unwrap().unwrap();
+        let one = targets[0].file_name().unwrap().to_str().unwrap();
+        let two = targets[1].file_name().unwrap().to_str().unwrap();
+        assert!(one.ends_with(".part1.rar"));
+        assert!(two.ends_with(".part10.rar"));
+        assert_eq!(
+            fsutil::split_compound_name(one).0,
+            fsutil::split_compound_name(two).0
+        );
+        assert_eq!(fs::read(old).unwrap(), b"old user archive");
+    }
+
+    #[test]
+    fn review_placement_common_long_family_stem() {
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path().join("data");
+        let content = temp.path().join("content");
+        fs::create_dir(&root).unwrap();
+        fs::create_dir(&content).unwrap();
+        let stem = "x".repeat(244);
+        let one = format!("{stem}.part1.rar");
+        let two = format!("{stem}.part10.rar");
+        fs::write(content.join(&one), b"new first").unwrap();
+        fs::write(content.join(&two), b"new tenth").unwrap();
+        fs::write(root.join(&one), b"old user archive").unwrap();
+        let job = review_job(&root, &temp.path().join("task.sqlite3"), 0);
+        let targets = plan_volume_renames(
+            &job,
+            &content,
+            &root,
+            &HashMap::new(),
+            &rules::build_exclusions("").unwrap(),
+            &mut GitBoundaries::default(),
+        )
+        .unwrap();
+        let first = targets
+            .get(&one)
+            .unwrap()
+            .file_name()
+            .unwrap()
+            .to_str()
+            .unwrap();
+        let tenth = targets
+            .get(&two)
+            .unwrap()
+            .file_name()
+            .unwrap()
+            .to_str()
+            .unwrap();
+        assert!(first.ends_with(".part1.rar"));
+        assert!(tenth.ends_with(".part10.rar"));
+        assert_eq!(
+            fsutil::split_compound_name(first).0,
+            fsutil::split_compound_name(tenth).0
+        );
+        assert_eq!(fs::read(root.join(&one)).unwrap(), b"old user archive");
     }
 }

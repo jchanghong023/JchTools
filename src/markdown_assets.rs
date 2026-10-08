@@ -234,11 +234,11 @@ pub fn initialize(cancel: &AtomicBool, mut progress: impl FnMut(String)) -> Resu
     // B-2：先兜底清理历史残留的 staging（readiness 提前返回、取消后清理
     // 失败或进程崩溃都会残留 .staging-<uuid>，单个可超 1GB）。
     cleanup_stale_staging(&root);
+    ensure_not_cancelled(cancel)?;
     if readiness().is_ok() {
         progress("转 Markdown 组件已就绪".to_string());
         return Ok(());
     }
-    ensure_not_cancelled(cancel)?;
     let manifest = load_manifest()?;
     fs::create_dir_all(&root).map_err(|error| format!("创建资产目录失败：{error}"))?;
     let staging = root.join(format!(".staging-{}", Uuid::new_v4().simple()));
@@ -1896,6 +1896,34 @@ mod tests {
             remaining,
             vec![".staging-locked".to_string()],
             "除被锁残留外不得留下其他 .staging-* 条目"
+        );
+    }
+
+    // 覆盖 T-05：已就绪环境也必须响应预置取消，不能显示初始化成功。
+    #[test]
+    fn initialize_cancelled_ready_runtime_reports_cancel() {
+        let guard = redirect_component_env();
+        let runtime = guard.root.path().join("runtime");
+        for member in load_manifest().expect("读取清单").xberg.members {
+            if !crate::xberg_runtime::asset_for_scenario(&member.path, "document") {
+                continue;
+            }
+            let target = runtime.join(&member.path);
+            fs::create_dir_all(target.parent().expect("成员父目录")).expect("创建成员目录");
+            fs::write(target, b"replaced-engine").expect("预置成员");
+        }
+        super::save_runtime_dir(&runtime).expect("保存就绪运行目录");
+        super::readiness().expect("前置：文档环境已就绪");
+        let mut messages = Vec::new();
+        let result = super::initialize(&AtomicBool::new(true), |message| messages.push(message));
+        assert!(
+            result.is_err(),
+            "预置取消必须返回取消状态，不能报告就绪成功：{result:?}"
+        );
+        assert!(result.expect_err("取消结果").contains("取消"));
+        assert!(
+            messages.is_empty(),
+            "预置取消不得发出初始化成功进度：{messages:?}"
         );
     }
 

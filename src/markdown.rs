@@ -159,7 +159,6 @@ pub fn run(
     }
     readiness_for_groups(&options.groups)?;
     let runtime_dir = markdown_assets::runtime_dir()?;
-    let supported = supported_formats(&options.groups)?;
     if cancel.load(AtomicOrdering::Acquire) {
         events(Event::Started { total: 0 });
         return Ok(Summary {
@@ -167,6 +166,20 @@ pub fn run(
             ..Summary::default()
         });
     }
+    let supported = match supported_formats(&runtime_dir, &options.groups, cancel) {
+        Ok(supported) => supported,
+        Err(message)
+            if cancel.load(AtomicOrdering::Acquire) && confirmed_cancellation(&message) =>
+        {
+            events(Event::Started { total: 0 });
+            events(Event::Log("已停止：格式查询期间未开始转换".to_string()));
+            return Ok(Summary {
+                stopped: true,
+                ..Summary::default()
+            });
+        }
+        Err(error) => return Err(error),
+    };
     let plan = match scan_cancelable(options, &supported, cancel) {
         Ok(plan) => plan,
         Err(_) if cancel.load(AtomicOrdering::Acquire) => {
@@ -609,28 +622,41 @@ fn scan_cancelable(
     Ok(plan)
 }
 
-/// 钉住发布物的格式清单：与 `markdown_assets::XBERG_TAG` 同一钉版纪律（XB-09
-/// 版本锚是发布 tag 与成员摘要，不是运行期探测）。真实发布物 run49.1 的 worker
-/// 协议只提供 `extract` / `ocr_snapshot` / `snapshot_state` / `transcribe`
-/// （`formats` / `capabilities` / `cancel` 等共享协议扩展「已实施、尚未发布验收」，
-/// 见 Xberg 仓 docs/requirements/WORKER.md），且 XB-14 禁止为查询另起 Xberg
-/// 进程，因此清单随钉住版本内置于资源，升级引擎 tag 时必须同步再生成
-/// （`xberg.exe formats --format json`，只读诊断）。
-fn supported_formats(groups: &[FormatGroup]) -> Result<BTreeSet<String>, String> {
-    let table: serde_json::Value =
-        serde_json::from_str(include_str!("../resources/markdown-xberg-formats.json"))
-            .map_err(|e| format!("内置 Xberg 格式清单无效：{e}"))?;
-    if table.get("tag").and_then(serde_json::Value::as_str) != Some(markdown_assets::XBERG_TAG) {
-        return Err(
-            "内置 Xberg 格式清单与固定版本不一致；请同步再生成 markdown-xberg-formats.json"
-                .to_string(),
-        );
+/// T-08/XB-09/XB-26：格式能力取自当前选中的共享引擎，不用发布清单限制
+/// 用户替换后的引擎。纯媒体任务仍只处理固定 MP4/M4A，不依赖文档格式能力。
+fn supported_formats(
+    runtime_dir: &Path,
+    groups: &[FormatGroup],
+    cancel: &AtomicBool,
+) -> Result<BTreeSet<String>, String> {
+    let mut selected = BTreeSet::new();
+    if groups.iter().any(|group| *group != FormatGroup::Media) {
+        let response = crate::xberg_runtime::request(
+            runtime_dir,
+            serde_json::json!({"command": "formats"}),
+            Duration::from_secs(15),
+            cancel,
+        )
+        .and_then(crate::xberg_runtime::checked)?;
+        let rows = response
+            .get("formats")
+            .and_then(serde_json::Value::as_array)
+            .ok_or("Xberg 格式清单协议异常：formats 必须是数组")?;
+        for required in ["pdf", "docx", "pptx", "xlsx"] {
+            if !rows.iter().any(|row| {
+                row.get("extension")
+                    .and_then(serde_json::Value::as_str)
+                    .is_some_and(|extension| {
+                        extension
+                            .trim_start_matches('.')
+                            .eq_ignore_ascii_case(required)
+                    })
+            }) {
+                return Err(format!("当前 Xberg 不支持必需文档格式：{required}"));
+            }
+        }
+        selected = parse_format_rows(rows, groups);
     }
-    let rows = table
-        .get("formats")
-        .ok_or("内置 Xberg 格式清单缺少 formats 字段")?;
-    let bytes = serde_json::to_vec(rows).map_err(|e| e.to_string())?;
-    let mut selected = parse_formats(&bytes, groups)?;
     if groups.contains(&FormatGroup::Media) {
         selected.extend(MEDIA.iter().map(|extension| (*extension).to_string()));
     }
@@ -669,9 +695,15 @@ fn run_formats_probe(
 }
 
 /// 解析 Xberg formats JSON 并按分组筛入支持集（纯函数，便于回归）。
+#[cfg(test)]
 fn parse_formats(stdout: &[u8], groups: &[FormatGroup]) -> Result<BTreeSet<String>, String> {
     let rows: Vec<serde_json::Value> =
         serde_json::from_slice(stdout).map_err(|e| format!("Xberg 格式清单无效：{e}"))?;
+    Ok(parse_format_rows(&rows, groups))
+}
+
+/// 直接读取共享响应中的格式行，不序列化再解析同一份 JSON。
+fn parse_format_rows(rows: &[serde_json::Value], groups: &[FormatGroup]) -> BTreeSet<String> {
     let mut selected = BTreeSet::new();
     for row in rows {
         let Some(extension) = row.get("extension").and_then(serde_json::Value::as_str) else {
@@ -689,7 +721,7 @@ fn parse_formats(stdout: &[u8], groups: &[FormatGroup]) -> Result<BTreeSet<Strin
             selected.insert(extension);
         }
     }
-    Ok(selected)
+    selected
 }
 
 fn selected_xberg_extension(extension: &str, mime: &str, groups: &[FormatGroup]) -> bool {

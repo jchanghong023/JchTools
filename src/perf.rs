@@ -68,17 +68,18 @@ pub struct Guard {
 ///
 /// 返回的句柄要绑定到活到进程退出前的作用域（见 `gui::run_with_engine_overrides`）；
 /// 写成 `let _ = ...` 会立刻丢弃句柄，失去退出前刷盘的保证。
-/// 任何一步失败都安静退化成「不打点」，绝不影响业务：目录建不出来、日志文件建不出来
-/// （tracing-appender 此时会 panic）、已有全局 subscriber、过滤指令非法。
+/// 任何一步失败都安静退化成「不打点」，绝不影响业务：目录建不出来、日志文件建不出来、
+/// 已有全局 subscriber、过滤指令非法。
 #[cfg(feature = "perf-tracing")]
 pub fn init(state_dir: &Path) -> Option<Guard> {
-    use std::panic::catch_unwind;
-
     let directory = state_dir.join(LOG_DIR);
     std::fs::create_dir_all(&directory).ok()?;
-    // tracing-appender 在日志文件建不出来时会 panic；性能日志初始化不得把 GUI 拖下来。
-    let appender =
-        catch_unwind(|| tracing_appender::rolling::daily(&directory, LOG_FILE_PREFIX)).ok()?;
+    // 可失败的构造器不会因日志文件打开失败触发进程 panic 钩子。
+    let appender = tracing_appender::rolling::RollingFileAppender::builder()
+        .rotation(tracing_appender::rolling::Rotation::DAILY)
+        .filename_prefix(LOG_FILE_PREFIX)
+        .build(&directory)
+        .ok()?;
     let (writer, worker) = tracing_appender::non_blocking(appender);
     let layer = tracing_subscriber::fmt::layer()
         .compact()

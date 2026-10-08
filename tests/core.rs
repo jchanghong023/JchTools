@@ -1797,13 +1797,325 @@ fn normalize_names_collapses_whitespace_and_applies_nfc() {
     assert!(!f.root.join(raw_name).exists(), "旧分解形式名称不得残留");
 }
 
+// 覆盖 C-08 / 附录 B：孤立魔数不能证明文件有效结构或授权修正扩展名。
+#[test]
+fn fix_extension_rejects_short_magic_without_valid_structure() {
+    let f = Fixture::new();
+    let samples: [(&str, &[u8]); 4] = [
+        ("png.txt", b"\x89PNG\r\n\x1a\n\0\0\0\rIHDR"),
+        ("zip.txt", b"PK\x03\x04\0\0\0\0"),
+        ("seven.txt", b"\x37\x7a\xbc\xaf\x27\x1c\0\0\0\0"),
+        ("rar.txt", b"Rar!\x1a\x07\0payload"),
+    ];
+    for (name, bytes) in samples {
+        f.write(name, bytes, 10);
+    }
+    let cfg = Config {
+        fix_extension: true,
+        detect_type: true,
+        ..Config::default()
+    };
+    let task = f.plan(cfg);
+    let db = Database::open(&task.directory).unwrap();
+    let moves = db.actions_page_filtered(0, 100, Some("move")).unwrap();
+    assert_eq!(moves.len(), samples.len());
+    for (name, _) in samples {
+        let expected = format!("文档/{name}");
+        let action = moves.iter().find(|action| action.source == name).unwrap();
+        assert_eq!(
+            action.target.as_deref(),
+            Some(expected.as_str()),
+            "{action:?}"
+        );
+    }
+    drop(db);
+    Fixture::apply(&task);
+    for (name, bytes) in samples {
+        assert_eq!(fs::read(f.root.join("文档").join(name)).unwrap(), bytes);
+    }
+}
+
+fn valid_zip_fixture(entries: &[(&str, &[u8])]) -> Vec<u8> {
+    let mut writer = zip::ZipWriter::new(std::io::Cursor::new(Vec::new()));
+    for (name, bytes) in entries {
+        writer
+            .start_file(
+                *name,
+                zip::write::SimpleFileOptions::default()
+                    .compression_method(zip::CompressionMethod::Stored),
+            )
+            .unwrap();
+        std::io::Write::write_all(&mut writer, bytes).unwrap();
+    }
+    writer.finish().unwrap().into_inner()
+}
+
+fn valid_word_fixture(main_content_type: &str) -> Vec<u8> {
+    let content_types = format!(
+        r#"<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types"><Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/><Default Extension="xml" ContentType="application/xml"/><Override PartName="/word/document.xml" ContentType="{main_content_type}"/></Types>"#
+    );
+    valid_zip_fixture(&[
+        ("[Content_Types].xml", content_types.as_bytes()),
+        ("_rels/.rels", br#"<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument" Target="word/document.xml"/></Relationships>"#),
+        ("word/document.xml", br#"<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"><w:body><w:p/></w:body></w:document>"#),
+    ])
+}
+
+fn valid_empty_rar_fixture() -> Vec<u8> {
+    let mut bytes = b"Rar!\x1a\x07\0".to_vec();
+    for header in [
+        &[0x73, 0, 0, 13, 0, 0, 0, 0, 0, 0, 0][..],
+        &[0x7b, 0, 0, 7, 0][..],
+    ] {
+        let mut crc = flate2::Crc::new();
+        crc.update(header);
+        bytes.extend_from_slice(&crc.sum().to_le_bytes()[..2]);
+        bytes.extend_from_slice(header);
+    }
+    bytes
+}
+
+fn rar5_fixture(main_header: &[u8]) -> Vec<u8> {
+    let mut bytes = Vec::with_capacity(21 + main_header.len());
+    bytes.extend_from_slice(b"Rar!\x1a\x07\x01\0");
+    for header in [main_header, &[5, 0, 0][..]] {
+        assert!(header.len() < 128, "本夹具只使用单字节 size vint");
+        let size = u8::try_from(header.len()).unwrap();
+        let mut crc = flate2::Crc::new();
+        crc.update(&[size]);
+        crc.update(header);
+        bytes.extend_from_slice(&crc.sum().to_le_bytes());
+        bytes.push(size);
+        bytes.extend_from_slice(header);
+    }
+    bytes
+}
+
+fn seven_zip_fixture(next_header: &[u8]) -> Vec<u8> {
+    let mut crc = flate2::Crc::new();
+    crc.update(next_header);
+    let mut start_header = [0u8; 20];
+    start_header[8..16].copy_from_slice(&(next_header.len() as u64).to_le_bytes());
+    start_header[16..20].copy_from_slice(&crc.sum().to_le_bytes());
+    crc.reset();
+    crc.update(&start_header);
+    let mut bytes = b"\x37\x7a\xbc\xaf\x27\x1c\0\x04".to_vec();
+    bytes.extend_from_slice(&crc.sum().to_le_bytes());
+    bytes.extend_from_slice(&start_header);
+    bytes.extend_from_slice(next_header);
+    bytes
+}
+
+fn flac_fixture(subframe: &[u8]) -> Vec<u8> {
+    let frame_size = u32::try_from(9 + subframe.len()).unwrap().to_be_bytes();
+    let mut info = [0u8; 34];
+    info[..4].copy_from_slice(&[0, 16, 0, 16]);
+    info[4..7].copy_from_slice(&frame_size[1..]);
+    info[7..10].copy_from_slice(&frame_size[1..]);
+    info[10..18].copy_from_slice(&((44_100u64 << 44) | (15u64 << 36) | 16).to_be_bytes());
+    let header = [0xff, 0xf8, 0x69, 0x08, 0, 15];
+    let mut crc8 = 0u8;
+    for byte in header {
+        crc8 ^= byte;
+        for _ in 0..8 {
+            crc8 = if crc8 & 0x80 != 0 {
+                (crc8 << 1) ^ 7
+            } else {
+                crc8 << 1
+            };
+        }
+    }
+    let mut bytes = Vec::with_capacity(51 + subframe.len());
+    bytes.extend_from_slice(b"fLaC\x80\0\0\x22");
+    bytes.extend_from_slice(&info);
+    let frame_start = bytes.len();
+    bytes.extend_from_slice(&header);
+    bytes.push(crc8);
+    bytes.extend_from_slice(subframe);
+    let mut crc16 = 0u16;
+    for byte in &bytes[frame_start..] {
+        crc16 ^= u16::from(*byte) << 8;
+        for _ in 0..8 {
+            crc16 = if crc16 & 0x8000 != 0 {
+                (crc16 << 1) ^ 0x8005
+            } else {
+                crc16 << 1
+            };
+        }
+    }
+    bytes.extend_from_slice(&crc16.to_be_bytes());
+    bytes
+}
+
+// 覆盖 C-08 / 附录 B：可靠识别不以旧后缀是否在大类映射中为前提。
+#[test]
+fn fix_extension_corrects_valid_png_with_unknown_or_missing_extension() {
+    let f = Fixture::new();
+    let png = include_bytes!("markdown_fixtures/test_hello_world.png");
+    f.write("photo.bin", png, 10);
+    f.write("image", png, 20);
+    f.write(".hidden", png, 30);
+    let cfg = Config {
+        fix_extension: true,
+        detect_type: true,
+        include_hidden: true,
+        ..Config::default()
+    };
+    let task = f.plan(cfg);
+    let db = Database::open(&task.directory).unwrap();
+    let moves = db.actions_page_filtered(0, 100, Some("move")).unwrap();
+    let targets: Vec<_> = ["photo.bin", "image", ".hidden"]
+        .into_iter()
+        .map(|source| {
+            moves
+                .iter()
+                .find(|action| action.source == source)
+                .and_then(|action| action.target.as_deref())
+        })
+        .collect();
+    assert_eq!(
+        targets,
+        [
+            Some("图片/photo.png"),
+            Some("图片/image.png"),
+            Some("图片/.hidden.png"),
+        ]
+    );
+    drop(db);
+    Fixture::apply(&task);
+    assert_eq!(fs::read(f.root.join("图片/photo.png")).unwrap(), png);
+    assert_eq!(fs::read(f.root.join("图片/image.png")).unwrap(), png);
+    assert_eq!(fs::read(f.root.join("图片/.hidden.png")).unwrap(), png);
+}
+
+// 覆盖 C-08：相邻 OOXML 家族后缀并非合法同义形式，依实际包类型修正。
+#[test]
+fn fix_extension_corrects_valid_docx_mislabeled_as_docm() {
+    let f = Fixture::new();
+    let docx = valid_word_fixture(
+        "application/vnd.openxmlformats-officedocument.wordprocessingml.document.main+xml",
+    );
+    f.write("文档.docm", &docx, 10);
+    let cfg = Config {
+        fix_extension: true,
+        detect_type: true,
+        ..Config::default()
+    };
+    let task = f.plan(cfg);
+    let db = Database::open(&task.directory).unwrap();
+    let moves = db.actions_page_filtered(0, 100, Some("move")).unwrap();
+    assert_eq!(moves.len(), 1);
+    assert_eq!(moves[0].target.as_deref(), Some("文档/文档.docx"));
+    drop(db);
+    Fixture::apply(&task);
+    assert_eq!(fs::read(f.root.join("文档/文档.docx")).unwrap(), docx);
+    assert!(!exists_somewhere(&f.root, "文档.docm"));
+}
+
+// 覆盖附录 B：CRC 正确不能使非法 7z Header property 变成有效结构。
+#[test]
+fn review_signature_7z_invalid_property_rejects_complete_crc_header() {
+    let f = Fixture::new();
+    let invalid = seven_zip_fixture(&[1, 0xff, 0]);
+    let valid = seven_zip_fixture(&[1, 0]); // kHeader、kEnd：有效空包。
+    f.write("invalid.bin", &invalid, 10);
+    f.write("valid.txt", &valid, 20);
+    let task = f.plan(Config {
+        fix_extension: true,
+        detect_type: true,
+        ..Config::default()
+    });
+    let db = Database::open(&task.directory).unwrap();
+    let moves = db.actions_page_filtered(0, 100, Some("move")).unwrap();
+    let targets: Vec<_> = ["invalid.bin", "valid.txt"]
+        .into_iter()
+        .map(|source| {
+            moves
+                .iter()
+                .find(|action| action.source == source)
+                .and_then(|action| action.target.as_deref())
+        })
+        .collect();
+    assert_eq!(targets, [Some("其他/invalid.bin"), Some("压缩包/valid.7z")]);
+    drop(db);
+    Fixture::apply(&task);
+    assert_eq!(fs::read(f.root.join("其他/invalid.bin")).unwrap(), invalid);
+    assert_eq!(fs::read(f.root.join("压缩包/valid.7z")).unwrap(), valid);
+}
+
+// 覆盖附录 B：完整 RAR5 header CRC 不能豁免非法 extra TLV。
+#[test]
+fn review_signature_rar5_invalid_extra_rejects_complete_crc_header() {
+    let f = Fixture::new();
+    let invalid = rar5_fixture(&[1, 1, 1, 0, 0xff]);
+    let valid = rar5_fixture(&[1, 0, 0]);
+    f.write("invalid.bin", &invalid, 10);
+    f.write("valid.txt", &valid, 20);
+    let task = f.plan(Config {
+        fix_extension: true,
+        detect_type: true,
+        ..Config::default()
+    });
+    let db = Database::open(&task.directory).unwrap();
+    let moves = db.actions_page_filtered(0, 100, Some("move")).unwrap();
+    let targets: Vec<_> = ["invalid.bin", "valid.txt"]
+        .into_iter()
+        .map(|source| {
+            moves
+                .iter()
+                .find(|action| action.source == source)
+                .and_then(|action| action.target.as_deref())
+        })
+        .collect();
+    assert_eq!(
+        targets,
+        [Some("其他/invalid.bin"), Some("压缩包/valid.rar")]
+    );
+    drop(db);
+    Fixture::apply(&task);
+    assert_eq!(fs::read(f.root.join("其他/invalid.bin")).unwrap(), invalid);
+    assert_eq!(fs::read(f.root.join("压缩包/valid.rar")).unwrap(), valid);
+    assert!(!f.root.join("压缩包/invalid.rar").exists());
+}
+
+// 覆盖附录 B：FLAC frame CRC 正确不能使非法 subframe 成为有效音频结构。
+#[test]
+fn review_signature_flac_invalid_subframe_rejects_complete_crc_frame() {
+    let f = Fixture::new();
+    let invalid = flac_fixture(&[0xff, 0xff, 0]);
+    let valid = flac_fixture(&[0, 0, 0]);
+    f.write("invalid.bin", &invalid, 10);
+    f.write("valid.txt", &valid, 20);
+    let task = f.plan(Config {
+        fix_extension: true,
+        detect_type: true,
+        ..Config::default()
+    });
+    let db = Database::open(&task.directory).unwrap();
+    let moves = db.actions_page_filtered(0, 100, Some("move")).unwrap();
+    let targets: Vec<_> = ["invalid.bin", "valid.txt"]
+        .into_iter()
+        .map(|source| {
+            moves
+                .iter()
+                .find(|action| action.source == source)
+                .and_then(|action| action.target.as_deref())
+        })
+        .collect();
+    assert_eq!(targets, [Some("其他/invalid.bin"), Some("音频/valid.flac")]);
+    drop(db);
+    Fixture::apply(&task);
+    assert_eq!(fs::read(f.root.join("其他/invalid.bin")).unwrap(), invalid);
+    assert_eq!(fs::read(f.root.join("音频/valid.flac")).unwrap(), valid);
+    assert!(!f.root.join("音频/invalid.flac").exists());
+}
+
 // 覆盖 C-08（按内容签名修正错误扩展名：改名列入计划可见）
 #[test]
 fn fix_extension_plans_rename_to_detected_type() {
     let f = Fixture::new();
-    let mut png = vec![0x89, b'P', b'N', b'G', 0x0D, 0x0A, 0x1A, 0x0A];
-    png.extend_from_slice(&[0, 0, 0, 13, b'I', b'H', b'D', b'R']);
-    f.write("photo.txt", &png, 10);
+    let png = include_bytes!("markdown_fixtures/test_hello_world.png");
+    f.write("photo.txt", png, 10);
     let mut cfg = base();
     cfg.detect_type = true;
     cfg.fix_extension = true;
@@ -1825,30 +2137,36 @@ fn fix_extension_plans_rename_to_detected_type() {
 // 覆盖 C-08（只修正「错误」扩展名：同类容器与别名扩展名不得按更粗的识别结果改粗）
 #[test]
 fn fix_extension_keeps_specialized_container_and_alias_extensions() {
-    // 最小 ZIP 头：签名 + 26 字节本地文件头 + 条目名（infer 只看 0x1E 起的条目名）。
-    fn minimal_zip_entry(entry: &str) -> Vec<u8> {
-        let mut bytes = Vec::from(*b"PK\x03\x04");
-        bytes.extend_from_slice(&[0u8; 26]);
-        bytes.extend_from_slice(entry.as_bytes());
-        bytes
-    }
     let f = Fixture::new();
-    // 条目名为 word/：infer 对 OOXML 家族（含宏启用/模板变体）只识别到 docx 这一粒度，
-    // 此前 dotx/docm 会被当作「错误扩展名」改名成 docx。两个 OOXML 样本内嵌不同条目，
-    // 避免互为同内容副本被去重删除（本用例只考扩展名修正口径）。
-    f.write("报告.docm", &minimal_zip_entry("word/document.xml"), 10);
-    f.write("模板.dotx", &minimal_zip_entry("word/footer.xml"), 15);
-    // 条目名非 OOXML：识别结果只有容器类型 zip，whl 的扩展名本身是正确信息。
-    f.write("包.whl", &minimal_zip_entry("data.txt"), 18);
-    // gzip 流：识别结果只有容器类型 gz（svgz 是压缩 SVG）。
-    f.write("图标.svgz", &[0x1F, 0x8B, 0x08, 0x00, 0x00, 0x00], 19);
+    // 完整 ZIP 中的类型标识区分宏启用文档与模板，不能只看 word/ 路径。
+    f.write(
+        "报告.docm",
+        &valid_word_fixture("application/vnd.ms-word.document.macroEnabled.main+xml"),
+        10,
+    );
+    f.write(
+        "模板.dotx",
+        &valid_word_fixture(
+            "application/vnd.openxmlformats-officedocument.wordprocessingml.template.main+xml",
+        ),
+        15,
+    );
+    // 未承诺的容器后缀不能因外层 ZIP 被改粗。
+    f.write("包.whl", &valid_zip_fixture(&[("data.txt", b"wheel")]), 18);
+    let mut gzip = flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::default());
+    std::io::Write::write_all(&mut gzip, b"<svg/>").unwrap();
+    f.write("图标.svgz", &gzip.finish().unwrap(), 19);
     // 同义别名：htm→html、mid→midi 都不算「错误扩展名」。
     f.write(
         "index.htm",
         b"<!DOCTYPE html><html><body>hi</body></html>",
         20,
     );
-    f.write("歌曲.mid", b"MThd\x00\x00\x00\x06", 22);
+    f.write(
+        "歌曲.mid",
+        b"MThd\0\0\0\x06\0\0\0\x01\0\x60MTrk\0\0\0\x04\0\xff\x2f\0",
+        22,
+    );
     let mut cfg = base();
     cfg.detect_type = true;
     cfg.fix_extension = true;
@@ -1875,6 +2193,7 @@ fn fix_extension_keeps_specialized_container_and_alias_extensions() {
         "这些都是正确扩展名，不得按更粗的识别结果改名：{moves:?}"
     );
     assert_eq!(moves.len(), 6, "六个文件都应只有归类移动：{moves:#?}");
+    Fixture::apply(&task);
     for name in [
         "报告.docm",
         "模板.dotx",
@@ -1891,26 +2210,26 @@ fn fix_extension_keeps_specialized_container_and_alias_extensions() {
 // 无法由签名证明后缀错误的后缀与 X-10 卷尾后缀保留）
 #[test]
 fn fix_extension_corrects_promised_containers_but_not_volume_tails() {
-    // 最小 ZIP 头：签名 + 26 字节本地文件头 + 条目名（infer 只看 0x1E 起的条目名）。
-    fn minimal_zip_entry(entry: &str) -> Vec<u8> {
-        let mut bytes = Vec::from(*b"PK\x03\x04");
-        bytes.extend_from_slice(&[0u8; 26]);
-        bytes.extend_from_slice(entry.as_bytes());
-        bytes
-    }
     let f = Fixture::new();
     // 已知格式后缀 + 真实压缩包内容：识别结果为 zip / 7z / rar，应按识别结果改名。
-    f.write("备份.txt", &minimal_zip_entry("data.txt"), 10);
-    f.write(
-        "数据.mp4",
-        &[0x37, 0x7A, 0xBC, 0xAF, 0x27, 0x1C, 0, 0, 0, 0],
-        12,
-    );
-    f.write("老包.png", b"Rar!\x1A\x07\x00payload", 14);
+    f.write("备份.txt", &valid_zip_fixture(&[("data.txt", b"zip")]), 10);
+    f.write("数据.mp4", &seven_zip_fixture(&[1, 0]), 12);
+    f.write("老包.png", &valid_empty_rar_fixture(), 14);
     // X-10 数字尾卷：整组后缀不可拆，识别到 zip 也不得改名（内容与其它样本不同，避免去重）。
-    f.write("分卷.zip.001", &minimal_zip_entry("part.bin"), 16);
-    // 附录 A 未列出的后缀：识别到的只是外层容器，无法确定真实类型，保留原后缀（C-08）。
-    f.write("图纸.odg", &minimal_zip_entry("content.xml"), 18);
+    f.write(
+        "分卷.zip.001",
+        &valid_zip_fixture(&[("part.bin", b"volume")]),
+        16,
+    );
+    // 未承诺的 ODF graphics 类型即使 ZIP 完整也保留，不降级成 zip。
+    f.write(
+        "图纸.odg",
+        &valid_zip_fixture(&[
+            ("mimetype", b"application/vnd.oasis.opendocument.graphics"),
+            ("content.xml", b"<document-content/>"),
+        ]),
+        18,
+    );
     let mut cfg = base();
     cfg.detect_type = true;
     cfg.fix_extension = true;
@@ -1935,6 +2254,10 @@ fn fix_extension_corrects_promised_containers_but_not_volume_tails() {
             Some(expected.as_str()),
             "{source} 应计划为 {expected}；实际 {planned:#?}"
         );
+    }
+    Fixture::apply(&task);
+    for (_, target) in planned {
+        assert!(f.root.join(target).is_file(), "计划目标必须实际落盘");
     }
 }
 

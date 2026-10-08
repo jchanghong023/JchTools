@@ -21,7 +21,7 @@ pub fn validate_component(name: &str) -> Result<()> {
     }
     if name
         .chars()
-        .any(|c| c.is_control() || "<>:\"/\\|?*".contains(c))
+        .any(|c| c <= '\u{1f}' || "<>:\"/\\|?*".contains(c))
     {
         bail!("文件名包含 Windows 不支持的字符：{name:?}");
     }
@@ -673,8 +673,8 @@ fn truncate_utf16(text: &str, max_units: usize) -> String {
     }
     out
 }
-/// X-10 / 附录 B 不可拆分后缀的白名单组件：编号尾卷 `.NNN` 向左逐段并入时，
-/// 只认 X-01 白名单扩展名与 `.tar.<流后缀>` 组合的各段（含 tgz 等别名）。
+/// X-10：数字尾卷 `.NNN` 前只并入最后一个白名单扩展名；
+/// `.tar.<流后缀>` 再按附录 B 整体并入一层。
 fn is_volume_suffix_component(component: &str) -> bool {
     [
         "gz", "bz2", "xz", "zst", "lzma", "z", "7z", "zip", "rar", "tar", "tgz", "tbz2", "txz",
@@ -684,20 +684,34 @@ fn is_volume_suffix_component(component: &str) -> bool {
     .any(|kind| component.eq_ignore_ascii_case(kind))
 }
 
-/// 内段是否为 part rar 的编号段（`part<数字>`，至少一位数字；X-10 / 附录 B）。
+/// 附录 B：只有六类压缩流允许与紧邻的 `.tar` 组成复合扩展名。
+fn tar_stream_split(stem: &str, extension: &str) -> Option<usize> {
+    if !["gz", "bz2", "xz", "zst", "lzma", "z"]
+        .iter()
+        .any(|kind| extension.eq_ignore_ascii_case(kind))
+    {
+        return None;
+    }
+    stem.rfind('.')
+        .filter(|&dot| dot > 0 && stem[dot + 1..].eq_ignore_ascii_case("tar"))
+}
+
+/// 内段是否为 part rar 的编号段（`part<正整数>`；X-10 / 附录 B）。
 fn is_part_rar_component(component: &str) -> bool {
     // 先验证切分点在字符边界上，避免多字节字符处切出 panic。
     component.len() > 4 && component.is_char_boundary(4) && {
         let (head, tail) = component.split_at(4);
-        head.eq_ignore_ascii_case("part") && tail.bytes().all(|byte| byte.is_ascii_digit())
+        head.eq_ignore_ascii_case("part")
+            && tail.bytes().all(|byte| byte.is_ascii_digit())
+            && tail.bytes().any(|byte| byte != b'0')
     }
 }
 
 /// 分离文件名主体与完整扩展名；扩展名含前导点，直接借用原串。
 /// 不可拆分后缀（X-10 / 附录 B）：
-/// - 数字尾卷 `.NNN`（恰好三位 ASCII 数字）向左逐段并入白名单后缀组件：
-///   `x.tar.gz.001` → 主体 `x` + 扩展名 `.tar.gz.001`；非白名单组件不并入
-///   （`foo.bar.001` 保持主体 `foo.bar`）。
+/// - 数字尾卷 `.NNN`（恰好三位 ASCII 数字）只并入前一白名单扩展名及允许的
+///   一层 `.tar.<流后缀>`：`x.tar.gz.001` → 主体 `x` + 扩展名 `.tar.gz.001`；
+///   非白名单组件不并入（`foo.bar.001` 保持主体 `foo.bar`）。
 /// - part rar 的 `.partN.rar` 整体并入扩展名（`资料.part01.rar` → `资料`）。
 /// - 普通复合压缩流仍按「`.tar` + 流后缀」并入一层（`资料.tar.gz` → `资料`）。
 pub fn split_compound_name(name: &str) -> (&str, &str) {
@@ -708,14 +722,11 @@ pub fn split_compound_name(name: &str) -> (&str, &str) {
     let numbered_tail =
         extension.len() == 4 && extension.as_bytes()[1..].iter().all(u8::is_ascii_digit);
     if numbered_tail {
-        // 向左逐段并入白名单组件；遇到非白名单组件或抵达主体即停。
-        let mut current = stem;
-        while let Some(dot) = current.rfind('.').filter(|&index| index > 0) {
-            if !is_volume_suffix_component(&current[dot + 1..]) {
-                break;
+        if let Some(dot) = stem.rfind('.').filter(|&index| index > 0) {
+            let component = &stem[dot + 1..];
+            if is_volume_suffix_component(component) {
+                split = tar_stream_split(&stem[..dot], component).unwrap_or(dot);
             }
-            current = &current[..dot];
-            split = dot;
         }
         return name.split_at(split);
     }
@@ -726,11 +737,8 @@ pub fn split_compound_name(name: &str) -> (&str, &str) {
             }
         }
     }
-    if let Some(inner_dot) = stem.rfind('.').filter(|&index| index > 0) {
-        let inner = &stem[inner_dot + 1..];
-        if inner.eq_ignore_ascii_case("tar") {
-            split = inner_dot;
-        }
+    if let Some(inner_dot) = tar_stream_split(stem, &extension[1..]) {
+        split = inner_dot;
     }
     name.split_at(split)
 }
@@ -820,10 +828,13 @@ mod tests {
         // part 段必须带数字；`.partN.zip` 不属于 part rar 族。
         assert_eq!(split_compound_name("x.part.rar"), ("x.part", ".rar"));
         assert_eq!(split_compound_name("x.part01.zip"), ("x.part01", ".zip"));
+        // X-10 的 N 是正整数；全零不是 part rar 卷集后缀。
+        assert_eq!(split_compound_name("x.part0.rar"), ("x.part0", ".rar"));
+        assert_eq!(split_compound_name("x.part000.rar"), ("x.part000", ".rar"));
     }
 
-    // 覆盖 X-10, 附录 B（回归：数字尾卷 `.NNN` 向左逐段并入白名单后缀组件；
-    // 非白名单组件不得并入）
+    // 覆盖 X-10, 附录 B（数字尾卷只并入前一白名单扩展名及一层 tar 压缩流；
+    // 主体中碰巧同名的白名单段不得继续并入）
     #[test]
     fn split_merges_whitelisted_components_behind_numbered_tail() {
         assert_eq!(split_compound_name("x.tar.gz.001"), ("x", ".tar.gz.001"));
@@ -831,12 +842,26 @@ mod tests {
         assert_eq!(split_compound_name("y.tbz2.001"), ("y", ".tbz2.001"));
         assert_eq!(split_compound_name("foo.bar.001"), ("foo.bar", ".001"));
         assert_eq!(split_compound_name("x.tar.foo.001"), ("x.tar.foo", ".001"));
+        assert_eq!(split_compound_name("a.zip.7z.001"), ("a.zip", ".7z.001"));
+        assert_eq!(
+            split_compound_name("a.tar.tar.gz.001"),
+            ("a.tar", ".tar.gz.001")
+        );
     }
 
     // 覆盖 H-07（复合压缩流扩展名整体保留；既有行为不回归）
     #[test]
     fn split_keeps_compound_stream_suffix() {
         assert_eq!(split_compound_name("资料.tar.gz"), ("资料", ".tar.gz"));
+        assert_eq!(
+            split_compound_name("report.tar.pdf"),
+            ("report.tar", ".pdf")
+        );
+        assert_eq!(
+            split_compound_name("report.tar.zip"),
+            ("report.tar", ".zip")
+        );
+        assert_eq!(split_compound_name("report.tar"), ("report", ".tar"));
         assert_eq!(split_compound_name("a.txt"), ("a", ".txt"));
         assert_eq!(split_compound_name("无扩展名"), ("无扩展名", ""));
         assert_eq!(split_compound_name("combo.z01"), ("combo", ".z01"));

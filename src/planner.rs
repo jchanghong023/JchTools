@@ -17,6 +17,15 @@ use std::{
 /// C-14 固定集合容器名（建在本次所选根下）。
 pub const GIT_COLLECTION_DIR: &str = "Git项目集合";
 
+fn try_detect_extension(
+    source: &Path,
+    control: &crate::control::Control,
+) -> Result<Option<&'static str>> {
+    let detected = rules::detect_extension(source, control);
+    control.check_cancelled()?;
+    Ok(detected.ok().flatten())
+}
+
 fn action(file: &FileRecord, kind: ActionKind, reason: &str, mode: DeleteMode) -> Action {
     Action {
         id: 0,
@@ -772,21 +781,18 @@ fn classify_files(job: &mut Job, moved_roots: &[String]) -> Result<()> {
             };
             let (stem, mut extension) = rules::derive_stem_ext(current_name, &job.config);
             // C-08 内容签名修正（默认关）：只在分析阶段判定最终扩展名（C-01）。
-            if job.config.fix_extension && !(stem.starts_with('.') && extension.is_empty()) {
+            if job.config.fix_extension {
                 if let Ok(source) = fsutil::safe_join(&job.root, &file.rel) {
-                    if let Ok(Some(kind)) = infer::get_from_path(&source) {
+                    if let Some(detected) = try_detect_extension(&source, &job.context.control)? {
                         let old = extension.trim_start_matches('.').to_lowercase();
-                        if rules::extension_needs_fix(&old, kind.extension()) {
-                            extension = format!(".{}", kind.extension());
+                        if rules::extension_needs_fix(&old, detected) {
+                            extension = format!(".{detected}");
                             job.log(
                                 "类型检测",
                                 &file.rel,
                                 "",
                                 "发现",
-                                &format!(
-                                    "扩展名 {old}，内容识别为 {}，将按识别结果修正",
-                                    kind.extension()
-                                ),
+                                &format!("扩展名 {old}，内容识别为 {detected}，将按识别结果修正"),
                                 file.snapshot.size,
                             )?;
                         }
@@ -1116,4 +1122,40 @@ pub fn build(job: &mut Job) -> Result<()> {
     classify_files(job, &moved_roots)?;
     empty_directories(job, &moved_roots)?;
     Ok(())
+}
+
+#[cfg(test)]
+mod signature_control_tests {
+    use super::*;
+    use crate::control::Control;
+
+    #[test]
+    fn signature_detection_cancellation_is_not_swallowed() {
+        let temp = tempfile::tempdir().unwrap();
+        let source = temp.path().join("valid.txt");
+        std::fs::write(
+            &source,
+            include_bytes!("../tests/markdown_fixtures/test_hello_world.png"),
+        )
+        .unwrap();
+        let control = Control::default();
+        control.cancel();
+        assert!(
+            try_detect_extension(&source, &control).is_err(),
+            "真实 detector 返回的用户取消必须传播，不能按未知类型继续并标记 ready"
+        );
+    }
+
+    #[test]
+    fn signature_detection_unreliable_content_keeps_existing_extension() {
+        let temp = tempfile::tempdir().unwrap();
+        let source = temp.path().join("unreliable.txt");
+        let bytes = b"\x89PNG\r\n\x1a\n\0\0\0\0";
+        std::fs::write(&source, bytes).unwrap();
+        let control = Control::default();
+        assert_eq!(try_detect_extension(&source, &control).unwrap(), None);
+        assert_eq!(std::fs::read(&source).unwrap(), bytes);
+        assert_eq!(source.extension().unwrap(), "txt");
+        assert!(!control.is_cancelled());
+    }
 }

@@ -151,7 +151,6 @@ fn resolve_among(bundled: Option<&Path>, embedded_base: Option<&Path>) -> Result
         if let Err(error) = release(base) {
             failures.push(format!("向固定位置释放内嵌引擎失败：{error:#}"));
         }
-        cleanup_part_residue(base);
         problems = candidate_problems(base);
         if problems.is_empty() {
             return Ok(base.join(engine_name()));
@@ -163,7 +162,6 @@ fn resolve_among(bundled: Option<&Path>, embedded_base: Option<&Path>) -> Result
     // 候选 3b：固定位置被无效文件占用时，释放到新的独立自有位置（不删占用文件），仍校验后使用。
     match fresh_release_dir(base).and_then(|directory| release(&directory).map(|()| directory)) {
         Ok(directory) => {
-            cleanup_part_residue(&directory);
             let problems = candidate_problems(&directory);
             if let Some(path) = vet_candidate(
                 "新释放的内嵌引擎",
@@ -447,31 +445,6 @@ fn persist_engine_warning(message: &str) {
     }
 }
 
-/// 清理本应用引擎目录里崩溃残留的 `.part-*` 临时文件（write_atomic 的中间产物）。
-/// 只匹配本应用命名模式（引擎文件名 + `.part-` + 进程号）且仅为文件时删除；
-/// 用户自备文件与旧版本目录一律不动，避免误删。
-fn cleanup_part_residue(directory: &Path) {
-    let Ok(entries) = std::fs::read_dir(directory) else {
-        return;
-    };
-    for entry in entries.filter_map(std::result::Result::ok) {
-        let path = entry.path();
-        let name = path
-            .file_name()
-            .and_then(|n| n.to_str())
-            .unwrap_or_default();
-        let is_residue = path.is_file()
-            && ["7z.exe", "7z.dll", "7zz"].iter().any(|engine| {
-                name.strip_prefix(engine)
-                    .and_then(|rest| rest.strip_prefix(".part-"))
-                    .is_some_and(|pid| !pid.is_empty() && pid.chars().all(|c| c.is_ascii_digit()))
-            });
-        if is_residue {
-            let _ = std::fs::remove_file(&path);
-        }
-    }
-}
-
 /// 目录中已存在同名引擎文件时的口径：保留该文件（绝不覆盖），按内嵌清单比对哈希并记录警告。
 /// 与清单不一致时只记录、不替换；所在目录能否被使用由 resolve_among 的逐文件校验决定。
 fn keep_existing_engine_file(target: &Path, name: &str, expected: &str) {
@@ -578,16 +551,16 @@ fn inflate(compressed: &[u8]) -> Result<Vec<u8>> {
 fn write_atomic(target: &Path, bytes: &[u8]) -> Result<()> {
     use std::io::Write as _;
     let directory = target.parent().context("引擎目录缺少父级")?;
-    let temporary = directory.join(format!(
-        "{}.part-{}",
-        target
-            .file_name()
-            .and_then(|name| name.to_str())
-            .unwrap_or("engine"),
-        std::process::id()
-    ));
-    {
-        let mut file = std::fs::File::create(&temporary)?;
+    // 随机名称加独占创建：不截断既有文件，也不与本进程的其他释放操作共用临时路径。
+    let temporary = directory.join(format!(".engine-part-{}", uuid::Uuid::new_v4().simple()));
+    let file = std::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(&temporary)?;
+    // create_new 成功后才拥有该路径；写入、同步或改名失败只清理本次创建的文件，
+    // 不扫描或删除仅名称相似的历史残留及其他进程的临时文件。
+    let result = (|| -> Result<()> {
+        let mut file = file;
         file.write_all(bytes)?;
         // Linux 等 unix：先设执行位再 fsync，保证权限与内容一并落盘。
         // 否则断电后可能出现「内容完整但无执行位」且被 keep_existing 长期信任。
@@ -598,19 +571,58 @@ fn write_atomic(target: &Path, bytes: &[u8]) -> Result<()> {
         }
         // rename 前 fsync：避免断电后改名成功但内容未落盘，留下损坏的可执行文件。
         file.sync_all()?;
+        drop(file);
+        crate::fsutil::rename_noreplace(&temporary, target)
+    })();
+    if result.is_err() {
+        let _ = std::fs::remove_file(&temporary);
     }
-    match crate::fsutil::rename_noreplace(&temporary, target) {
-        Ok(()) => Ok(()),
-        Err(error) => {
-            let _ = std::fs::remove_file(&temporary);
-            Err(error)
-        }
-    }
+    result
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// 释放临时文件不得覆盖碰巧使用旧命名格式的既有文件。
+    // 覆盖 E-02
+    #[test]
+    fn write_atomic_preserves_preexisting_part_file() {
+        let directory = tempfile::tempdir().unwrap();
+        let target = directory.path().join(engine_name());
+        let sentinel =
+            directory
+                .path()
+                .join(format!("{}.part-{}", engine_name(), std::process::id()));
+        std::fs::write(&sentinel, b"user owned temporary file").unwrap();
+        write_atomic(&target, b"new engine").unwrap();
+        assert_eq!(std::fs::read(&target).unwrap(), b"new engine");
+        assert_eq!(
+            std::fs::read(&sentinel).unwrap(),
+            b"user owned temporary file",
+            "释放不得改写或移除既有临时文件"
+        );
+    }
+
+    /// 候选目录中的旧命名临时文件不因名称匹配而获得删除授权。
+    // 覆盖 E-02
+    #[test]
+    fn resolve_preserves_unowned_part_files() {
+        if !embedded_available() {
+            eprintln!("warning: 未内嵌 7-Zip，引擎释放的临时文件所有权用例未执行");
+            return;
+        }
+        let directory = tempfile::tempdir().unwrap();
+        let sentinel = directory.path().join("7z.exe.part-12345");
+        std::fs::write(&sentinel, b"user owned temporary file").unwrap();
+        let executable = resolve_among(None, Some(directory.path())).unwrap();
+        assert_valid_executable(&executable);
+        assert_eq!(
+            std::fs::read(&sentinel).unwrap(),
+            b"user owned temporary file",
+            "候选解析不得按名称清理无所有权文件"
+        );
+    }
 
     /// 未内嵌引擎时 embedded_available 必须返回 false（合法开发配置，不是失败）；
     /// 内嵌时返回 true，且与 FILES / MANIFEST 一致。
