@@ -113,6 +113,12 @@ jobs:
       - name: Clippy zero-warning gate (no default features)
         shell: pwsh
         run: cargo clippy --all-targets --no-default-features --features test-hooks -- -D warnings
+      # 无 GUI 库的公开批处理仍通过真实共享代理调用合成引擎。
+      # JchTools bin 要求 gui 特性，Clippy 不产出 EXE；先构建带隔离钩子的
+      # 代理宿主，再由原无默认特性测试驱动 --xberg-broker，不启动桌面窗口。
+      - name: Build isolated broker host for core integration tests
+        shell: pwsh
+        run: cargo build --locked --features test-hooks --bin JchTools
       - name: Core tests (no default features)
         shell: pwsh
         run: cargo test --all-targets --no-default-features --features test-hooks
