@@ -19,9 +19,9 @@
      初始化入口与「前往设置」可见且不自动下载（XB-19/O-06；无需任何资产）。
   S10 输出层级与同名策略：保留层级两份同名输入各自成文；平铺只处理排序第一份、
      其余按重复跳过计数（T-11；需真实组件，Xberg 目录可真实，状态目录仍须隔离）。
-     S5/S10-S14/S17 受统一隔离守卫：独立调用需验收编排布置的隔离环境变量在场
+     所有非自隔离阶段受统一隔离守卫：独立调用需验收编排布置的隔离环境变量在场
      （JCHTOOLS_TEST_STATE_DIR 与 JCHTOOLS_SNAP_OCR_TEST_ASSET_ROOT），缺则拒绝
-     启动并提示经 acceptance.ps1 入口执行；确需独立运行时显式 --allow-isolated-run。
+     启动并提示经 acceptance.ps1 入口执行；公共启动入口始终要求状态与资产根隔离。
   S11 已有结果跳过：重复运行不覆盖既有产物，跳过数量如实显示（T-12）。
   S12 输出子树排除：输出目录位于输入内时整棵输出子树不作为新输入（T-09）。
   S13 部分失败与完成统计：单文件失败不终止批次，成功/失败可区分（T-16/T-24）。
@@ -34,8 +34,8 @@
 
 用法：
     python scripts/gui_smoke.py --exe target/debug/JchTools.exe --data <已生成的测试数据目录>
-    受隔离守卫的阶段（S5/S10-S14/S17）独立调用时须已布置隔离环境变量或加
-    --allow-isolated-run；推荐经 scripts/acceptance.ps1 编排执行。
+    非自隔离阶段独立调用时须已布置隔离环境变量；推荐经 scripts/acceptance.ps1
+    编排执行。--allow-isolated-run 仅跳过 CLI 前置检查，不能绕过公共启动入口的隔离。
 
 依赖：pip install pywinauto（需要可交互桌面会话）。
 """
@@ -125,13 +125,13 @@ CONVERT_NEED_RUNTIME_TEXT = "请先保存共享 Xberg 运行目录"
 CONVERT_DONE_MARKER = "总耗时"
 STOP_AND_CLOSE_TITLE = "停止任务并关闭"
 STOP_AND_CLOSE_BUTTON = "停止并关闭"
-# S11-07 统一隔离守卫：这些阶段的 run_stage 不自建隔离环境（不同于 S6-S9 的
+# 统一隔离守卫：所有非自隔离阶段的 run_stage 不自建隔离环境（不同于 S6-S9 的
 # isolated_state_env），独立调用会直接读写真实用户状态目录（config.sqlite3）并
 # 可能连接/唤起常驻服务（保存目录会触发 ensure_snap_supervisor）。因此要求经验收
 # 编排布置的隔离环境（下述两个变量由 acceptance.ps1 的 gui-smoke / markdown 分支
-# 统一布置）或显式 --allow-isolated-run 才放行；Xberg 运行目录本身允许指向真实
+# 统一布置）才可启动；--allow-isolated-run 不绕过公共启动入口。Xberg 目录可指向真实
 # 引擎目录——状态隔离必须，组件目录可真实。
-ISOLATION_GUARDED_STAGES = ("S5", "S10", "S11", "S12", "S13", "S14", "S17")
+ISOLATION_GUARDED_STAGES = tuple(stage for stage in SUPPORTED_STAGES if stage not in ("S6", "S7", "S8", "S9"))
 ISOLATION_REQUIRED_ENV_KEYS = ("JCHTOOLS_TEST_STATE_DIR", "JCHTOOLS_SNAP_OCR_TEST_ASSET_ROOT")
 
 # pywinauto/pywin32 窗口操作在窗口建立/销毁竞态下抛出的瞬态错误族；
@@ -599,9 +599,15 @@ def run_stage(  # noqa: PLR0913 - 脚手架的收尾钩子与子进程环境天�
     try/finally 内，因此媒体缺失等前置失败不会泄漏已启动的 GUI。Job Object 只绑定
     本函数刚启动的 PID，不能触碰其他用户实例。env 非 None 时传给子进程（S6-S9 用
     JCHTOOLS_TEST_STATE_DIR 隔离应用配置，不写真实用户配置）。
+    Popen 前始终检查两个隔离变量，直接调用及 CLI 前置检查逃生口均不能绕过。
     收尾断言与最终 PASS 行统一在此打印。
     """
-    proc = subprocess.Popen([exe], env=env)
+    effective_env = dict(os.environ if env is None else env)
+    missing = missing_isolation_env(effective_env)
+    if missing:
+        message = f"GUI 启动前必须隔离状态目录与资产根，缺少：{','.join(missing)}；请经 scripts/acceptance.ps1 执行"
+        raise RuntimeError(message)
+    proc = subprocess.Popen([exe], env=effective_env)
     owner: _OwnedProcessTree | None = None
     window: WindowSpecification | None = None
     try:
@@ -609,7 +615,6 @@ def run_stage(  # noqa: PLR0913 - 脚手架的收尾钩子与子进程环境天�
         if pre is not None:
             pre()
         _, window = wait_window(proc.pid)
-        effective_env = os.environ if env is None else env
         if effective_env.get("JCHTOOLS_TEST_STATE_DIR"):
             isolated_db = Path(effective_env["JCHTOOLS_TEST_STATE_DIR"]) / "config.sqlite3"
             deadline = time.time() + TIMEOUT
@@ -1620,12 +1625,11 @@ def s11_existing_results_are_skipped_untouched(exe: str) -> None:
                 f"已有结果跳过 {len(S11_SOURCE_FILES)}" in second,
                 f"重复运行必须如实显示跳过数量：{second}",
             )
-            for path in output.glob("*.md"):
-                before = existing[path.name]
-                require(
-                    (file_digest(path), path.stat().st_mtime_ns) == before,
-                    f"已有结果的内容与修改时间必须保持不变（T-12）：{path.name}",
-                )
+            final = {path.name: (file_digest(path), path.stat().st_mtime_ns) for path in output.glob("*.md")}
+            require(
+                final == existing,
+                "已有结果的文件集合、内容与修改时间必须保持不变（T-12）",
+            )
 
         run_stage("S11", exe, body)
     finally:
@@ -1962,6 +1966,9 @@ def s18_layout_at_two_window_sizes(exe: str) -> None:
 def parse_stages(stages_arg: str) -> list[str]:
     """解析并校验 --stages：逗号分隔、大小写不敏感、未知阶段立即失败."""
     stages = [token.strip().upper() for token in stages_arg.split(",") if token.strip()]
+    if not stages:
+        message = "阶段清单不能为空，未执行任何阶段不能报告成功"
+        raise RuntimeError(message)
     unknown = [stage for stage in stages if stage not in SUPPORTED_STAGES]
     if unknown:
         msg = f"未知阶段：{unknown}（可选：{list(SUPPORTED_STAGES)}）"
@@ -1977,7 +1984,7 @@ def missing_isolation_env(env: Mapping[str, str]) -> list[str]:
 def require_orchestrated_isolation(stages: list[str], env: Mapping[str, str], *, allow_isolated_run: bool) -> None:
     """S11-07 统一隔离守卫：受守卫阶段未经编排隔离不得独立运行.
 
-    受守卫阶段（S5/S10-S14/S17）的 run_stage 不自建隔离环境，独立调用会读写真实
+    受守卫的非自隔离阶段不自建隔离环境，独立调用会读写真实
     用户状态目录并可能连接常驻服务；在启动任何 GUI 之前整批拒绝，避免半程执行。
     经 acceptance.ps1 编排（或已手工布置同等隔离变量）时两个变量在场，不受影响；
     组件目录（Xberg 运行目录）允许为真实引擎目录，不做隔离检查。
@@ -1992,7 +1999,7 @@ def require_orchestrated_isolation(stages: list[str], env: Mapping[str, str], *,
         f"阶段 {','.join(guarded)} 独立运行会读写真实应用状态目录并可能连接常驻服务，"
         f"当前缺少隔离环境变量：{','.join(missing)}。"
         "请经 scripts/acceptance.ps1 执行（-WithGuiSmoke / -WithMarkdownAcceptance 会布置隔离"
-        "状态目录与资产根）；确需独立运行时显式加 --allow-isolated-run 自担隔离责任。"
+        "状态目录与资产根）；--allow-isolated-run 仅跳过本项前置检查，公共启动入口仍要求隔离。"
     )
     raise RuntimeError(msg)
 
@@ -2052,7 +2059,7 @@ def main() -> int:
     _ = parser.add_argument(
         "--allow-isolated-run",
         action="store_true",
-        help="允许受隔离守卫的阶段（S5/S10-S14/S17）在本进程独立运行（默认需经 acceptance.ps1 布置的隔离环境）",
+        help="跳过 CLI 编排前置检查；公共启动入口仍必须具有隔离状态目录与资产根（推荐 acceptance.ps1）",
     )
     args = parser.parse_args(namespace=_CliArgs())
     if args.list_stages:

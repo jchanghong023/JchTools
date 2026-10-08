@@ -556,6 +556,13 @@
     },
     {
       "file": "optional/snap-ocr-worker/src/service.rs",
+      "name": "copy_all_round_trips_on_isolated_clipboard",
+      "ignored": false,
+      "cfg": "windows",
+      "body": "62bdcbfffe5d7f2c"
+    },
+    {
+      "file": "optional/snap-ocr-worker/src/service.rs",
       "name": "corrupt_settings_survive_load_until_explicit_save",
       "ignored": false,
       "cfg": "windows",
@@ -615,7 +622,14 @@
       "name": "reload_plan_reuses_only_ready_engine",
       "ignored": false,
       "cfg": "windows",
-      "body": "c169ea9850c82b5c"
+      "body": "6ff582bbb147a956"
+    },
+    {
+      "file": "optional/snap-ocr-worker/src/service.rs",
+      "name": "reuse_requires_verified_font_assets",
+      "ignored": false,
+      "cfg": "windows",
+      "body": "d5d25a29408c10a4"
     },
     {
       "file": "optional/snap-ocr-worker/src/service.rs",
@@ -815,6 +829,97 @@
     },
     {
       "file": "src/archive.rs",
+      "name": "review_directory_collision_with_git_tree_uses_new_name",
+      "ignored": false,
+      "cfg": null,
+      "body": "2657691b1db66643"
+    },
+    {
+      "file": "src/archive.rs",
+      "name": "review_directory_mapping_propagates_through_unrenamed_parents",
+      "ignored": false,
+      "cfg": null,
+      "body": "e7eb4f03aeb5d783"
+    },
+    {
+      "file": "src/archive.rs",
+      "name": "review_exact_volume_families_exclude_wide_numeric_suffixes",
+      "ignored": false,
+      "cfg": null,
+      "body": "f21a39f5bce413a0"
+    },
+    {
+      "file": "src/archive.rs",
+      "name": "review_exact_volume_gaps_are_rejected_before_engine",
+      "ignored": false,
+      "cfg": null,
+      "body": "01949fa4fb57598a"
+    },
+    {
+      "file": "src/archive.rs",
+      "name": "review_git_subtree_matches_windows_case_variants",
+      "ignored": false,
+      "cfg": null,
+      "body": "c45ac320379435ff"
+    },
+    {
+      "file": "src/archive.rs",
+      "name": "review_ordinal_volume_families",
+      "ignored": false,
+      "cfg": null,
+      "body": "2a4dbaa24144a73f"
+    },
+    {
+      "file": "src/archive.rs",
+      "name": "review_placement_common_long_family_stem",
+      "ignored": false,
+      "cfg": null,
+      "body": "047315e4cff58de6"
+    },
+    {
+      "file": "src/archive.rs",
+      "name": "review_quarantine_common_long_family_stem",
+      "ignored": false,
+      "cfg": null,
+      "body": "63262c015427045a"
+    },
+    {
+      "file": "src/archive.rs",
+      "name": "review_quarantine_preserves_long_volume_suffix_or_fails",
+      "ignored": false,
+      "cfg": null,
+      "body": "7c1a6b82ffad7552"
+    },
+    {
+      "file": "src/archive.rs",
+      "name": "review_rar_numeric_stem_does_not_authorize_other_archives",
+      "ignored": false,
+      "cfg": null,
+      "body": "6421915f8abc2854"
+    },
+    {
+      "file": "src/archive.rs",
+      "name": "review_staging_size_validation_precedes_every_merge",
+      "ignored": false,
+      "cfg": null,
+      "body": "ee8e0718a81be4ee"
+    },
+    {
+      "file": "src/archive.rs",
+      "name": "review_system_directory_destination_is_excluded",
+      "ignored": false,
+      "cfg": null,
+      "body": "6a7a7c32d7a629b4"
+    },
+    {
+      "file": "src/archive.rs",
+      "name": "review_unknown_size_stream_obeys_expansion_ratio",
+      "ignored": false,
+      "cfg": null,
+      "body": "5a4dd5864792c9a3"
+    },
+    {
+      "file": "src/archive.rs",
       "name": "volume_set_groups_compound_numbered_volumes",
       "ignored": false,
       "cfg": null,
@@ -826,6 +931,13 @@
       "ignored": false,
       "cfg": null,
       "body": "09e559959af1f9e3"
+    },
+    {
+      "file": "src/asset_util.rs",
+      "name": "asset_path_rejects_alternate_data_stream",
+      "ignored": false,
+      "cfg": null,
+      "body": "400aae9bec36d00a"
     },
     {
       "file": "src/asset_util.rs",
@@ -847,6 +959,20 @@
       "ignored": false,
       "cfg": null,
       "body": "5ee8daa7f5cd7883"
+    },
+    {
+      "file": "src/asset_util.rs",
+      "name": "zip_case_collision_preserves_first_member",
+      "ignored": false,
+      "cfg": null,
+      "body": "4a5447b5abc64084"
+    },
+    {
+      "file": "src/asset_util.rs",
+      "name": "zip_rejects_alternate_data_stream_member",
+      "ignored": false,
+      "cfg": null,
+      "body": "b9d7f4f4413a03f9"
     },
     {
       "file": "src/config.rs",
@@ -875,6 +1001,20 @@
       "ignored": false,
       "cfg": null,
       "body": "a878b366d5fe9ee4"
+    },
+    {
+      "file": "src/db.rs",
+      "name": "existing_database_version_is_checked",
+      "ignored": false,
+      "cfg": null,
+      "body": "433096ff8e62b1bf"
+    },
+    {
+      "file": "src/db.rs",
+      "name": "windows_ordinal_database_keys",
+      "ignored": false,
+      "cfg": null,
+      "body": "1a0ee5a70a0f7156"
     },
     {
       "file": "src/dedup_components.rs",
@@ -924,6 +1064,27 @@
       "ignored": false,
       "cfg": null,
       "body": "a37a37c8cc8bd929"
+    },
+    {
+      "file": "src/engine.rs",
+      "name": "ambiguous_volume_entries_count_once",
+      "ignored": false,
+      "cfg": null,
+      "body": "6bffbda15ff18484"
+    },
+    {
+      "file": "src/engine.rs",
+      "name": "ambiguous_volume_entries_enqueue_once",
+      "ignored": false,
+      "cfg": null,
+      "body": "4cc35e4a4b052dfb"
+    },
+    {
+      "file": "src/engine.rs",
+      "name": "cancelled_parallel_run_records_completed_deletions",
+      "ignored": false,
+      "cfg": null,
+      "body": "fdeeaf7892754be1"
     },
     {
       "file": "src/engine.rs",
@@ -987,6 +1148,20 @@
       "ignored": false,
       "cfg": null,
       "body": "65d6e76fbcb89c23"
+    },
+    {
+      "file": "src/engine.rs",
+      "name": "ordinal_volume_tail_count",
+      "ignored": false,
+      "cfg": null,
+      "body": "4e747eb503e53c20"
+    },
+    {
+      "file": "src/engine.rs",
+      "name": "ordinal_volume_tail_enqueue",
+      "ignored": false,
+      "cfg": null,
+      "body": "1af17fc4dbb754d1"
     },
     {
       "file": "src/engine.rs",
@@ -1074,6 +1249,13 @@
     },
     {
       "file": "src/engine_bundle.rs",
+      "name": "resolve_preserves_unowned_part_files",
+      "ignored": false,
+      "cfg": null,
+      "body": "6a84a7a2b215ce8e"
+    },
+    {
+      "file": "src/engine_bundle.rs",
       "name": "resolve_releases_to_fresh_location_when_existing_file_hash_mismatches",
       "ignored": false,
       "cfg": null,
@@ -1113,6 +1295,13 @@
       "ignored": false,
       "cfg": null,
       "body": "fee409eb93075a40"
+    },
+    {
+      "file": "src/engine_bundle.rs",
+      "name": "write_atomic_preserves_preexisting_part_file",
+      "ignored": false,
+      "cfg": null,
+      "body": "56eeb5bec6f96bc1"
     },
     {
       "file": "src/fsutil.rs",
@@ -1189,21 +1378,21 @@
       "name": "split_keeps_compound_stream_suffix",
       "ignored": false,
       "cfg": null,
-      "body": "24d03750555dc7ee"
+      "body": "421980c1319db597"
     },
     {
       "file": "src/fsutil.rs",
       "name": "split_keeps_part_rar_suffix_whole",
       "ignored": false,
       "cfg": null,
-      "body": "605fcfb3301a130a"
+      "body": "9e19fdd30da416eb"
     },
     {
       "file": "src/fsutil.rs",
       "name": "split_merges_whitelisted_components_behind_numbered_tail",
       "ignored": false,
       "cfg": null,
-      "body": "3469a0a63978e8f7"
+      "body": "771babf55770a180"
     },
     {
       "file": "src/fsutil.rs",
@@ -1211,6 +1400,13 @@
       "ignored": false,
       "cfg": null,
       "body": "3514d2f83a1337a6"
+    },
+    {
+      "file": "src/git_tools.rs",
+      "name": "network_fallback_does_not_restart_after_stop",
+      "ignored": false,
+      "cfg": null,
+      "body": "9c3d34d46d9775be"
     },
     {
       "file": "src/gui.rs",
@@ -1361,6 +1557,13 @@
     },
     {
       "file": "src/gui.rs",
+      "name": "directory_dialog_uses_own_field_start",
+      "ignored": false,
+      "cfg": null,
+      "body": "1415d3305208aafb"
+    },
+    {
+      "file": "src/gui.rs",
       "name": "directory_recheck_disarms_before_worker_finishes",
       "ignored": false,
       "cfg": null,
@@ -1473,10 +1676,24 @@
     },
     {
       "file": "src/gui.rs",
-      "name": "invalid_number_input_reports_error_and_reverts_value",
+      "name": "invalid_large_threshold_is_ignored_only_until_rule_reenabled",
       "ignored": false,
       "cfg": null,
-      "body": "f967f13ba6c75580"
+      "body": "28a3980c997cc516"
+    },
+    {
+      "file": "src/gui.rs",
+      "name": "invalid_number_draft_survives_navigation_and_empty_and_overflow_inputs",
+      "ignored": false,
+      "cfg": null,
+      "body": "76c505c4d4f31759"
+    },
+    {
+      "file": "src/gui.rs",
+      "name": "invalid_number_input_reports_error_preserves_value_and_blocks_start",
+      "ignored": false,
+      "cfg": null,
+      "body": "617940961371abdb"
     },
     {
       "file": "src/gui.rs",
@@ -1851,6 +2068,13 @@
     },
     {
       "file": "src/logging.rs",
+      "name": "failed_log_file_initialization_does_not_call_panic_hook",
+      "ignored": false,
+      "cfg": null,
+      "body": "6b17e5140d040469"
+    },
+    {
+      "file": "src/logging.rs",
       "name": "panic_payload_is_not_written_to_diagnostic_log",
       "ignored": false,
       "cfg": null,
@@ -2103,6 +2327,13 @@
     },
     {
       "file": "src/markdown_assets.rs",
+      "name": "initialize_cancelled_ready_runtime_reports_cancel",
+      "ignored": false,
+      "cfg": null,
+      "body": "e9e7b1fe9221c6b3"
+    },
+    {
+      "file": "src/markdown_assets.rs",
       "name": "initialize_cleans_stale_runtime_selection_residue_at_entry",
       "ignored": false,
       "cfg": null,
@@ -2271,6 +2502,13 @@
     },
     {
       "file": "src/markdown_document.rs",
+      "name": "escaped_image_markers_remain_literal",
+      "ignored": false,
+      "cfg": null,
+      "body": "624e5184e9614097"
+    },
+    {
+      "file": "src/markdown_document.rs",
       "name": "fenced_reference_is_literal_but_real_reference_is_rewritten",
       "ignored": false,
       "cfg": null,
@@ -2327,6 +2565,13 @@
     },
     {
       "file": "src/md_tools.rs",
+      "name": "merge_cancelled_on_final_completion_keeps_existing_output",
+      "ignored": false,
+      "cfg": null,
+      "body": "329b944fe1a318dd"
+    },
+    {
+      "file": "src/md_tools.rs",
       "name": "merge_converts_setext_after_emphasis_like_text",
       "ignored": false,
       "cfg": null,
@@ -2345,6 +2590,13 @@
       "ignored": false,
       "cfg": null,
       "body": "2328a01d5a8007d5"
+    },
+    {
+      "file": "src/md_tools.rs",
+      "name": "merge_keeps_indented_block_starts_untouched",
+      "ignored": false,
+      "cfg": null,
+      "body": "760f58719f1cebca"
     },
     {
       "file": "src/md_tools.rs",
@@ -2459,6 +2711,20 @@
       "body": "7217e94740810abe"
     },
     {
+      "file": "src/planner.rs",
+      "name": "signature_detection_cancellation_is_not_swallowed",
+      "ignored": false,
+      "cfg": null,
+      "body": "085a527e6cc653a7"
+    },
+    {
+      "file": "src/planner.rs",
+      "name": "signature_detection_unreliable_content_keeps_existing_extension",
+      "ignored": false,
+      "cfg": null,
+      "body": "64efe5c305f5b408"
+    },
+    {
       "file": "src/platform.rs",
       "name": "display_path_text_strips_extended_prefix",
       "ignored": false,
@@ -2561,7 +2827,7 @@
       "name": "run_with_timeout_marks_truncated_huge_output",
       "ignored": false,
       "cfg": "windows",
-      "body": "a1827f9db3294140"
+      "body": "ee5ed8fd6d6319df"
     },
     {
       "file": "src/process.rs",
@@ -2617,7 +2883,7 @@
       "name": "copy_marker_scan_survives_width_changing_lowercase",
       "ignored": false,
       "cfg": null,
-      "body": "4e910d94a9f9b794"
+      "body": "200410e58dd377e0"
     },
     {
       "file": "src/rules.rs",
@@ -2659,7 +2925,7 @@
       "name": "extension_fix_is_conservative",
       "ignored": false,
       "cfg": null,
-      "body": "ec7cf26bc1c718c2"
+      "body": "eee1c887fb3d4f6b"
     },
     {
       "file": "src/rules.rs",
@@ -2730,6 +2996,62 @@
       "ignored": false,
       "cfg": null,
       "body": "f92362e5fbbdc858"
+    },
+    {
+      "file": "src/rules.rs",
+      "name": "review_rule_category_boundaries",
+      "ignored": false,
+      "cfg": null,
+      "body": "b09b2b72e1bfaff3"
+    },
+    {
+      "file": "src/rules.rs",
+      "name": "review_rule_ordinal_copy_keys",
+      "ignored": false,
+      "cfg": null,
+      "body": "b705fe0828631687"
+    },
+    {
+      "file": "src/rules.rs",
+      "name": "review_rule_ordinal_globs",
+      "ignored": false,
+      "cfg": null,
+      "body": "b7ec9919c073024f"
+    },
+    {
+      "file": "src/rules.rs",
+      "name": "review_rule_ordinal_volume_groups",
+      "ignored": false,
+      "cfg": null,
+      "body": "656b0da5796f2aa9"
+    },
+    {
+      "file": "src/rules.rs",
+      "name": "review_rule_unbounded_part_number",
+      "ignored": false,
+      "cfg": null,
+      "body": "94b0ef9d24bf0c03"
+    },
+    {
+      "file": "src/rules.rs",
+      "name": "review_rule_unicode_globs",
+      "ignored": false,
+      "cfg": null,
+      "body": "04071baed902473f"
+    },
+    {
+      "file": "src/rules.rs",
+      "name": "review_rule_volume_boundary",
+      "ignored": false,
+      "cfg": null,
+      "body": "4dcbc9474945779e"
+    },
+    {
+      "file": "src/rules.rs",
+      "name": "review_rule_zero_part_is_ordinary_rar",
+      "ignored": false,
+      "cfg": null,
+      "body": "074a33f7f73ffc89"
     },
     {
       "file": "src/snap_ocr_assets.rs",
@@ -2838,6 +3160,13 @@
     },
     {
       "file": "src/snap_ocr_assets.rs",
+      "name": "worker_install_path_rejects_unverified_cached_worker",
+      "ignored": false,
+      "cfg": null,
+      "body": "3e410bea4ddfb795"
+    },
+    {
+      "file": "src/snap_ocr_assets.rs",
       "name": "worker_readiness_rejects_corrupted_bundled_worker",
       "ignored": false,
       "cfg": null,
@@ -2855,7 +3184,7 @@
       "name": "bypass_wildcards_match_windows_style_patterns",
       "ignored": false,
       "cfg": null,
-      "body": "49a6ca10c6d3b4a7"
+      "body": "ba93c3ceccf0f93e"
     },
     {
       "file": "src/system_proxy.rs",
@@ -2936,6 +3265,13 @@
     },
     {
       "file": "src/xberg_runtime.rs",
+      "name": "snapshot_requires_shared_paddleocr_license",
+      "ignored": false,
+      "cfg": null,
+      "body": "a84bf5b584ef60e6"
+    },
+    {
+      "file": "src/xberg_runtime.rs",
       "name": "unsupported_capabilities_response_is_explicitly_rejected",
       "ignored": false,
       "cfg": null,
@@ -3002,7 +3338,7 @@
       "name": "bzip2_wrapped_tar_extracts_through_the_named_intermediate_tar",
       "ignored": true,
       "cfg": null,
-      "body": "38c505e937b5d601"
+      "body": "db11369849c3da72"
     },
     {
       "file": "tests/archive.rs",
@@ -3104,10 +3440,10 @@
     },
     {
       "file": "tests/archive.rs",
-      "name": "member_targeting_existing_git_tree_is_skipped_and_tree_untouched",
+      "name": "member_targeting_existing_git_tree_is_renamed_and_tree_untouched",
       "ignored": true,
       "cfg": null,
-      "body": "a99c20e0a8ccc13c"
+      "body": "e52e63acb31332ff"
     },
     {
       "file": "tests/archive.rs",
@@ -3121,21 +3457,21 @@
       "name": "nested_archive_depth_limit_quarantines_unprocessed_package",
       "ignored": true,
       "cfg": null,
-      "body": "43ff32e3f812ea0c"
+      "body": "26968df1051b6454"
     },
     {
       "file": "tests/archive.rs",
       "name": "nested_archives_are_processed_exactly_once",
       "ignored": true,
       "cfg": null,
-      "body": "e1b007a1c35b4059"
+      "body": "75bff78074254f00"
     },
     {
       "file": "tests/archive.rs",
       "name": "nested_archives_are_processed_recursively",
       "ignored": true,
       "cfg": null,
-      "body": "aeb0f9642f1af4cb"
+      "body": "bd593bb8807db03c"
     },
     {
       "file": "tests/archive.rs",
@@ -3156,7 +3492,7 @@
       "name": "quarantine_component_member_in_subdir_archive_is_rejected_as_dangerous",
       "ignored": true,
       "cfg": null,
-      "body": "d544e507bd8a0ffe"
+      "body": "51d008a4dfeec8f0"
     },
     {
       "file": "tests/archive.rs",
@@ -3178,6 +3514,13 @@
       "ignored": true,
       "cfg": null,
       "body": "6394218c9702a482"
+    },
+    {
+      "file": "tests/archive.rs",
+      "name": "review_nested_volume_collision_keeps_families_independent",
+      "ignored": true,
+      "cfg": null,
+      "body": "ca8109c8617442ee"
     },
     {
       "file": "tests/archive.rs",
@@ -3212,14 +3555,14 @@
       "name": "successful_cleanup_preserves_unused_volume_tail_after_gap",
       "ignored": true,
       "cfg": null,
-      "body": "d40ed3c884b01d2b"
+      "body": "ddd4351a1068c9ca"
     },
     {
       "file": "tests/archive.rs",
       "name": "successful_cleanup_uses_rar_header_volume_naming",
       "ignored": true,
       "cfg": null,
-      "body": "4748c1ea55d80964"
+      "body": "3b2c7c45ff6c5988"
     },
     {
       "file": "tests/archive.rs",
@@ -3233,7 +3576,7 @@
       "name": "tgz_shorthand_restores_the_tar_suffix",
       "ignored": true,
       "cfg": null,
-      "body": "f675b99456451826"
+      "body": "294d7d67c374b0bf"
     },
     {
       "file": "tests/archive.rs",
@@ -3500,6 +3843,13 @@
       "ignored": false,
       "cfg": null,
       "body": "fc60f91414926e7b"
+    },
+    {
+      "file": "tests/contract_engine.rs",
+      "name": "review_extraction_preserves_foreign_staging",
+      "ignored": false,
+      "cfg": null,
+      "body": "84827f06c0cbe78c"
     },
     {
       "file": "tests/contract_engine.rs",
@@ -3849,21 +4199,42 @@
       "name": "fix_extension_corrects_promised_containers_but_not_volume_tails",
       "ignored": false,
       "cfg": null,
-      "body": "6b099985d7d4d249"
+      "body": "cca7c5f67d803cf1"
+    },
+    {
+      "file": "tests/core.rs",
+      "name": "fix_extension_corrects_valid_docx_mislabeled_as_docm",
+      "ignored": false,
+      "cfg": null,
+      "body": "6cbe9ef8f93a9d56"
+    },
+    {
+      "file": "tests/core.rs",
+      "name": "fix_extension_corrects_valid_png_with_unknown_or_missing_extension",
+      "ignored": false,
+      "cfg": null,
+      "body": "67fd8573ab3d6450"
     },
     {
       "file": "tests/core.rs",
       "name": "fix_extension_keeps_specialized_container_and_alias_extensions",
       "ignored": false,
       "cfg": null,
-      "body": "cf2040410495f538"
+      "body": "6226c90bfea53969"
     },
     {
       "file": "tests/core.rs",
       "name": "fix_extension_plans_rename_to_detected_type",
       "ignored": false,
       "cfg": null,
-      "body": "4c0759c2d8bee3e6"
+      "body": "c0b8ae9f11d0d4d3"
+    },
+    {
+      "file": "tests/core.rs",
+      "name": "fix_extension_rejects_short_magic_without_valid_structure",
+      "ignored": false,
+      "cfg": null,
+      "body": "b2b4ea559b39e42c"
     },
     {
       "file": "tests/core.rs",
@@ -4137,6 +4508,27 @@
       "ignored": false,
       "cfg": null,
       "body": "aca418776231a32a"
+    },
+    {
+      "file": "tests/core.rs",
+      "name": "review_signature_7z_invalid_property_rejects_complete_crc_header",
+      "ignored": false,
+      "cfg": null,
+      "body": "78618e7ca8dc0a20"
+    },
+    {
+      "file": "tests/core.rs",
+      "name": "review_signature_flac_invalid_subframe_rejects_complete_crc_frame",
+      "ignored": false,
+      "cfg": null,
+      "body": "d16c78bccf004de7"
+    },
+    {
+      "file": "tests/core.rs",
+      "name": "review_signature_rar5_invalid_extra_rejects_complete_crc_header",
+      "ignored": false,
+      "cfg": null,
+      "body": "0f2a0d4e2a5794e6"
     },
     {
       "file": "tests/core.rs",
@@ -4434,6 +4826,13 @@
     },
     {
       "file": "tests/git_tools.rs",
+      "name": "merge_options_ours_preserves_conflict",
+      "ignored": false,
+      "cfg": null,
+      "body": "2cf42a9eea11ac2d"
+    },
+    {
+      "file": "tests/git_tools.rs",
       "name": "mirror_remote_config_boolean_alias_refuses_to_start",
       "ignored": false,
       "cfg": null,
@@ -4578,6 +4977,20 @@
       "ignored": false,
       "cfg": null,
       "body": "c881991c6343d18f"
+    },
+    {
+      "file": "tests/git_tools.rs",
+      "name": "recursive_fetch_does_not_update_submodule_tracking_ref",
+      "ignored": false,
+      "cfg": null,
+      "body": "5fc6e26f07e648c8"
+    },
+    {
+      "file": "tests/git_tools.rs",
+      "name": "recursive_push_does_not_update_submodule_remote",
+      "ignored": false,
+      "cfg": null,
+      "body": "87841809008c445d"
     },
     {
       "file": "tests/git_tools.rs",
@@ -4728,6 +5141,13 @@
     },
     {
       "file": "tests/markdown_convert_gate.rs",
+      "name": "batch_uses_selected_engine_formats",
+      "ignored": false,
+      "cfg": null,
+      "body": "936a99a17e3a46f4"
+    },
+    {
+      "file": "tests/markdown_convert_gate.rs",
       "name": "media_commit_refuses_existing_image_without_deleting_it",
       "ignored": false,
       "cfg": null,
@@ -4759,7 +5179,7 @@
       "name": "real_component_trackless_media_reports_no_audio",
       "ignored": true,
       "cfg": null,
-      "body": "f7d87c10bdf85a97"
+      "body": "75322988c1de5120"
     },
     {
       "file": "tests/markdown_media_e2e.rs",
@@ -5025,21 +5445,21 @@
       "name": "organizer_dedup_probe",
       "ignored": true,
       "cfg": null,
-      "body": "f2552ab51257ce0a"
+      "body": "ae4bc856a315eee9"
     },
     {
       "file": "tests/perf_probe.rs",
       "name": "organizer_dedup_reuse_probe",
       "ignored": true,
       "cfg": null,
-      "body": "64c80e6a890a463a"
+      "body": "e418face35bc4cf6"
     },
     {
       "file": "tests/perf_probe.rs",
       "name": "organizer_empty_dirs_probe",
       "ignored": true,
       "cfg": null,
-      "body": "b7900d6adde8867b"
+      "body": "2d975da70cd0f586"
     },
     {
       "file": "tests/property.rs",
@@ -5067,7 +5487,7 @@
       "name": "validate_component_ok_implies_windows_safe",
       "ignored": false,
       "cfg": null,
-      "body": "9f2231efc91966ee"
+      "body": "f44d856b104660c3"
     },
     {
       "file": "tests/property.rs",
@@ -5270,7 +5690,7 @@
       "name": "scenario_rules_assign_every_fixed_manifest_member",
       "ignored": false,
       "cfg": null,
-      "body": "3c894772339086a8"
+      "body": "3ff6d7dcadec2f59"
     },
     {
       "file": "tests/xberg_assets.rs",
@@ -5292,6 +5712,13 @@
       "ignored": false,
       "cfg": null,
       "body": "c1e91bcb17998389"
+    },
+    {
+      "file": "tests/xberg_settings.rs",
+      "name": "downloaded_save_preserves_unloaded_legacy_text",
+      "ignored": false,
+      "cfg": null,
+      "body": "9f07df0680d2a64a"
     },
     {
       "file": "tests/xberg_settings.rs",
