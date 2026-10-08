@@ -1,5 +1,5 @@
 // 截图 OCR worker 的 Slint 编译（结果窗，O-21）。
-// 只编译 ui/result.slint；缺字体不影响编译（字体为运行期资产，O-05/O-09）。
+// 字体由 Rust include_bytes! 编入服务程序；缺少源码资产即编译失败（O-05/O-09）。
 fn main() {
     std::thread::Builder::new()
         .name("slint-compiler".into())

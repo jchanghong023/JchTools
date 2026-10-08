@@ -1,7 +1,7 @@
 {
  "schema_version": 1,
  "component": "snap-ocr-assets",
- "note": "截图 OCR（O 分区）可选资产清单。det/rec 模型、字典与推理运行库不再由本清单下载：识别改由固定版本 Xberg 推理组件（xberg.exe + models/snapshot-ocr + onnxruntime.dll，模型字节仍为 O-07 附录 A 的 PP-OCRv6 small FP32 ONNX）承接，随 Xberg 发布物交付并在组件树内自带许可材料；本清单保留结果窗专用字体（O-21）。全部摘要均已在本地对字节核验。worker 可执行文件在打包阶段补充条目。Xberg 推理组件包条目已接线（xberg_inference）：按固定发布 zip 的归档与成员摘要下载校验后安装。",
+ "note": "截图 OCR（O 分区）可选资产清单。det/rec 模型、字典与推理运行库不再由本清单下载：识别改由固定版本 Xberg 推理组件（xberg.exe + models/snapshot-ocr + onnxruntime.dll，模型字节仍为 O-07 附录 A 的 PP-OCRv6 small FP32 ONNX）承接，随 Xberg 发布物交付并在组件树内自带许可材料；本清单记录直接内置于随包 worker 的结果窗专用字体和许可证（O-05/O-21，运行时不下载）。全部摘要均已在本地对字节核验。worker 可执行文件在打包阶段补充条目。Xberg 推理组件包条目已接线（xberg_inference）：按固定发布 zip 的归档与成员摘要下载校验后安装。",
  "assets": [
   {
    "id": "noto-sans-mono-cjk-sc",

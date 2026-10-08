@@ -8,8 +8,7 @@ mod protocol;
 mod tray;
 
 use std::fmt::Write as _;
-use std::fs::{self, File};
-use std::io::Read;
+use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{mpsc, Arc};
@@ -351,37 +350,20 @@ const SNAP_FONT_MEMBER: &str = "fonts/NotoSansMonoCJKsc-Regular.otf";
 const SNAP_FONT_LICENSE: &str = "fonts/LICENSE-noto-ofl.txt";
 
 fn verify_manifest_file(
-    path: &Path,
+    bytes: &[u8],
     size: u64,
     expected_sha256: &str,
     label: &str,
 ) -> Result<(), LoadFailure> {
-    let metadata = match fs::metadata(path) {
-        Ok(metadata) => metadata,
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
-            return Err(LoadFailure::NotConfigured(format!("{label}未安装")))
-        }
-        Err(_) => return Err(LoadFailure::Failed(format!("{label}无法读取"))),
-    };
-    if !metadata.is_file() || metadata.len() != size {
+    if bytes.len() as u64 != size {
         return Err(LoadFailure::Failed(format!("{label}大小校验失败")));
     }
     if expected_sha256.len() != 64 || !expected_sha256.bytes().all(|byte| byte.is_ascii_hexdigit())
     {
         return Err(LoadFailure::Failed(format!("{label}清单摘要无效")));
     }
-    let mut file = File::open(path).map_err(|_| LoadFailure::Failed(format!("{label}无法读取")))?;
     let mut hasher = Sha256::new();
-    let mut buffer = vec![0u8; 64 * 1024];
-    loop {
-        let count = file
-            .read(&mut buffer)
-            .map_err(|_| LoadFailure::Failed(format!("{label}读取失败")))?;
-        if count == 0 {
-            break;
-        }
-        hasher.update(&buffer[..count]);
-    }
+    hasher.update(bytes);
     let actual = format!("{:x}", hasher.finalize());
     if !actual.eq_ignore_ascii_case(expected_sha256) {
         return Err(LoadFailure::Failed(format!("{label}摘要校验失败")));
@@ -389,7 +371,7 @@ fn verify_manifest_file(
     Ok(())
 }
 
-fn verify_font_assets(root: &Path) -> Result<(), LoadFailure> {
+fn verify_font_assets(_root: &Path) -> Result<(), LoadFailure> {
     let manifest: Value = serde_json::from_str(SNAP_ASSET_MANIFEST)
         .map_err(|_| LoadFailure::Failed("截图字体清单损坏".into()))?;
     let assets = manifest["assets"]
@@ -419,7 +401,12 @@ fn verify_font_assets(root: &Path) -> Result<(), LoadFailure> {
     let sha256 = member["sha256"]
         .as_str()
         .ok_or_else(|| LoadFailure::Failed("截图字体摘要清单无效".into()))?;
-    verify_manifest_file(&root.join(SNAP_FONT_MEMBER), size, sha256, "截图字体")?;
+    verify_manifest_file(
+        crate::result_window::EMBEDDED_FONT,
+        size,
+        sha256,
+        "截图字体",
+    )?;
 
     let license = assets
         .iter()
@@ -431,7 +418,7 @@ fn verify_font_assets(root: &Path) -> Result<(), LoadFailure> {
     {
         return Err(LoadFailure::Failed("截图字体许可条目无效".into()));
     }
-    let license_path = license["install_path"]
+    let _license_path = license["install_path"]
         .as_str()
         .filter(|path| *path == SNAP_FONT_LICENSE)
         .ok_or_else(|| LoadFailure::Failed("截图字体许可路径无效".into()))?;
@@ -442,7 +429,7 @@ fn verify_font_assets(root: &Path) -> Result<(), LoadFailure> {
         .as_str()
         .ok_or_else(|| LoadFailure::Failed("截图字体许可摘要清单无效".into()))?;
     verify_manifest_file(
-        &root.join(license_path),
+        include_bytes!("../../../resources/fonts/LICENSE-noto-ofl.txt"),
         license_size,
         license_sha256,
         "截图字体许可文件",
@@ -2284,24 +2271,40 @@ mod tests {
     }
 
     #[test]
-    fn font_readiness_rejects_missing_manifest_assets() -> Result<(), Box<dyn std::error::Error>> {
+    // 覆盖 O-05/O-21、XB-25：新安装没有字体缓存也能离线就绪。
+    fn font_readiness_works_without_external_cache() -> Result<(), Box<dyn std::error::Error>> {
         let temp = tempfile::tempdir()?;
-        assert!(matches!(
-            super::verify_font_assets(temp.path()),
-            Err(super::LoadFailure::NotConfigured(_))
-        ));
+        assert!(
+            super::verify_font_assets(temp.path()).is_ok(),
+            "内置字体不得要求先初始化缓存"
+        );
+        assert!(
+            temp.path().read_dir()?.next().is_none(),
+            "字体检查不得生成缓存文件"
+        );
         Ok(())
+    }
+
+    #[test]
+    fn font_readiness_rejects_corrupt_embedded_assets() {
+        assert!(matches!(
+            super::verify_manifest_file(b"bad", 4, &"00".repeat(32), "截图字体"),
+            Err(super::LoadFailure::Failed(message)) if message.contains("大小")
+        ));
+        assert!(matches!(
+            super::verify_manifest_file(b"bad", 3, &"00".repeat(32), "截图字体"),
+            Err(super::LoadFailure::Failed(message)) if message.contains("摘要")
+        ));
     }
 
     // 覆盖 O-09/O-13：共享模型已就绪不豁免本服务字体资产校验。
     #[test]
-    fn reuse_requires_verified_font_assets() -> Result<(), Box<dyn std::error::Error>> {
+    fn reuse_uses_verified_embedded_font_without_cache() -> Result<(), Box<dyn std::error::Error>> {
         let temp = tempfile::tempdir()?;
         let outcome = super::reuse_inference(temp.path(), temp.path());
         assert!(
-            matches!(&outcome, Err(super::LoadFailure::NotConfigured(message))
-                if message.contains("截图字体")),
-            "复用常驻模型时缺少字体仍必须拒绝就绪"
+            outcome.is_ok(),
+            "复用常驻模型应直接校验内置字体，无需外部缓存"
         );
         Ok(())
     }

@@ -55,6 +55,10 @@ impl std::error::Error for ResultWindowError {}
 /// 与注册。
 static FONT_REGISTERED: OnceLock<()> = OnceLock::new();
 
+/// O-05/O-21：字体编入服务程序，新安装和登录自启均不依赖字体缓存。
+pub(crate) const EMBEDDED_FONT: &[u8] =
+    include_bytes!("../../../resources/fonts/NotoSansMonoCJKsc-Regular.otf");
+
 /// 向 Slint 字体库注册 OCR 资产中的等宽字体；缺失或损坏均显式报错。进程级
 /// 只注册一次（见 `FONT_REGISTERED`），重复调用是幂等的。
 ///
@@ -62,13 +66,12 @@ static FONT_REGISTERED: OnceLock<()> = OnceLock::new();
 /// 字体文件缺失、损坏或 Slint 后端初始化失败。
 pub fn register_fonts(font_dir: &Path) -> Result<(), ResultWindowError> {
     let font = font_dir.join("NotoSansMonoCJKsc-Regular.otf");
-    ensure_font_registered(&FONT_REGISTERED, &font, read_font_file, register_font_blob)
-}
-
-/// 读取字体文件（独立步骤；幂等测试注入计数读取器验证只读一次）。
-fn read_font_file(font: &Path) -> Result<Vec<u8>, ResultWindowError> {
-    std::fs::read(font)
-        .map_err(|_| ResultWindowError::FontUnavailable("字体资产缺失或无法读取".into()))
+    ensure_font_registered(
+        &FONT_REGISTERED,
+        &font,
+        |_| Ok(EMBEDDED_FONT.to_vec()),
+        register_font_blob,
+    )
 }
 
 /// 注册字体 blob（共享字体库依赖已创建的平台上下文，spawn_local 初始化

@@ -19,6 +19,22 @@ if (-not $Offline) {& (Join-Path $PSScriptRoot 'fetch-7zip.ps1')}
 if (-not (Test-Path -LiteralPath $archiveEngine) -or -not (Test-Path -LiteralPath $archiveDll) -or -not (Test-Path -LiteralPath 'resources\7zip\manifest.json')) {throw 'The verified bundled engine is missing (need 7z.exe, 7z.dll and manifest.json). Run fetch-7zip.ps1 on a connected build machine first.'}
 $extra = @()
 if ($Offline) {$extra += '--offline'}
+# O-05/O-09: the result font is embedded in the shipped worker. Verify the exact
+# source font and its license before building either delivery form.
+$fontManifest = Get-Content -LiteralPath 'resources\snap-ocr-assets.json' -Raw -Encoding UTF8 | ConvertFrom-Json
+$fontMember = @($fontManifest.assets | Where-Object {$_.id -ceq 'noto-sans-mono-cjk-sc'})[0].members[0]
+$fontLicense = @($fontManifest.assets | Where-Object {$_.id -ceq 'noto-cjk-ofl-license'})[0]
+foreach ($entry in @(
+    @{name='NotoSansMonoCJKsc-Regular.otf';size=$fontMember.size_bytes;sha256=$fontMember.sha256},
+    @{name='LICENSE-noto-ofl.txt';size=$fontLicense.size_bytes;sha256=$fontLicense.sha256}
+)) {
+    $fontPath = Join-Path 'resources\fonts' $entry.name
+    if (-not (Test-Path -LiteralPath $fontPath -PathType Leaf) -or
+        (Get-Item -LiteralPath $fontPath).Length -ne $entry.size -or
+        (Get-FileHash -LiteralPath $fontPath -Algorithm SHA256).Hash.ToLowerInvariant() -cne $entry.sha256) {
+        throw "Embedded screenshot font/license differs from the fixed manifest: $($entry.name)"
+    }
+}
 if (-not (Test-Path -LiteralPath 'Cargo.lock')) {Invoke-Cargo (@('generate-lockfile') + $extra)}
 if (-not $SkipTests) {
     Invoke-Cargo (@('check','--locked','--all-targets','--features','test-hooks') + $extra)
@@ -109,6 +125,15 @@ Copy-Item -LiteralPath (Join-Path $releaseDir 'JchTools.exe') -Destination $fold
 $resources = Join-Path $folder 'resources'
 New-Item -ItemType Directory -Path $resources | Out-Null
 Copy-Item -LiteralPath $stagedManifest -Destination (Join-Path $resources 'snap-ocr-assets.json')
+$fontNotices = Join-Path $resources 'fonts'
+New-Item -ItemType Directory -Path $fontNotices | Out-Null
+Copy-Item -LiteralPath 'resources\fonts\LICENSE-noto-ofl.txt' -Destination $fontNotices
+# P-05/G-01: ship the complete portable Git runtime, including upstream notices,
+# credential helpers and SSH support; the user needs no separate Git installation.
+& (Join-Path $PSScriptRoot 'fetch-git.ps1') -Offline:$Offline
+$gitBundle = Get-Content -LiteralPath 'resources\git-bundle.json' -Raw | ConvertFrom-Json
+$gitRuntime = Join-Path $root ('.tmp\git-' + $gitBundle.version + '\runtime')
+Copy-Item -LiteralPath $gitRuntime -Destination (Join-Path $resources 'git') -Recurse
 $engineDir = Join-Path $resources '7zip'
 New-Item -ItemType Directory -Path $engineDir | Out-Null
 foreach ($item in @('manifest.json','NOTICE.txt','licenses')) {

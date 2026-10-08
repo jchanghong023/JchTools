@@ -101,10 +101,18 @@ pub struct RepoInfo {
     pub upstream_branch: String,
 }
 
-/// 解析 git 可执行文件绝对路径：优先常见安装位置，再遍历 PATH；
+/// 解析 git 可执行文件绝对路径：优先随包运行组件，再查系统安装和 PATH；
 /// 不依赖当前目录，避免仓库内同名程序劫持。
 pub fn find_git() -> Result<PathBuf> {
+    let executable = std::env::current_exe().ok();
+    find_git_from(executable.as_deref().and_then(Path::parent))
+}
+
+fn find_git_from(program_directory: Option<&Path>) -> Result<PathBuf> {
     let mut candidates: Vec<PathBuf> = Vec::new();
+    if let Some(directory) = program_directory {
+        candidates.push(directory.join("resources/git/cmd/git.exe"));
+    }
     if let Ok(program_files) = std::env::var("ProgramFiles") {
         candidates.push(
             Path::new(&program_files)
@@ -147,7 +155,7 @@ pub fn find_git() -> Result<PathBuf> {
             }
         }
     }
-    bail!("找不到 git.exe：请安装 Git for Windows 后重试")
+    bail!("找不到 git.exe：随包 Git 组件缺失，请重新安装或解包当前 JchTools 发布包")
 }
 
 /// 运行一条 git 命令并捕获输出（无 shell；禁终端提示防无 tty 挂死；
@@ -1695,6 +1703,17 @@ fn run_task(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // 覆盖 G-01/P-05：发行程序优先使用随包 Git，不要求系统安装。
+    #[test]
+    fn bundled_git_is_selected_before_system_git() -> Result<()> {
+        let root = tempfile::tempdir()?;
+        let bundled = root.path().join("resources/git/cmd/git.exe");
+        std::fs::create_dir_all(bundled.parent().context("Git 目录")?)?;
+        std::fs::write(&bundled, b"packaged-git")?;
+        assert_eq!(find_git_from(Some(root.path()))?, bundled);
+        Ok(())
+    }
 
     // 覆盖 G-15/P-03：代理命令结束后收到停止，不得启动直连回退命令。
     #[test]

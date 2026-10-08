@@ -1540,7 +1540,7 @@ export component AppWindow inherits Window {
                                 }
                             }
                             HorizontalLayout { spacing: 8px;
-                                AppButton { text: "初始化字体 / 修复组件"; enabled: !root.snap-initializing && root.confirm-kind == 0; clicked => { root.snap-initialize(); } }
+                                AppButton { text: "检查 / 修复组件"; enabled: !root.snap-initializing && root.confirm-kind == 0; clicked => { root.snap-initialize(); } }
                                 AppButton { text: "重试后台连接"; enabled: !root.snap-request-pending && root.confirm-kind == 0; clicked => { root.snap-connect(); } }
                                 AppButton { text: "重试模型加载"; enabled: root.snap-connected && !root.snap-request-pending && root.snap-task == "idle" && root.confirm-kind == 0; clicked => { root.snap-retry-load(); } }
                             }

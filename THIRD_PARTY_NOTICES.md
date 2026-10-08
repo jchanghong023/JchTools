@@ -12,7 +12,7 @@ Rust integration: https://docs.slint.dev/latest/docs/rust/slint/
 
 Palette and widget reference: https://docs.slint.dev/latest/docs/slint/reference/std-widgets/globals/palette/
 
-No font files are redistributed; Windows system fonts are referenced by family name.
+The main window uses Windows system fonts. The screenshot result font is embedded in the shipped worker; see its attribution below.
 
 ## 7-Zip 26.03
 
@@ -44,3 +44,11 @@ Administrative MSI extraction: https://learn.microsoft.com/en-us/windows/win32/m
 ## Inno Setup Chinese Simplified language file
 
 installer/ChineseSimplified.isl is vendored from the official Inno Setup repository (jrsoftware/issrc, main branch, Files/Languages/ChineseSimplified.isl; messages for Inno Setup 6.5.0+). It is redistributed here so the installer builds reproducibly on machines whose Inno Setup installation does not ship this file. The file remains subject to the Inno Setup license: https://jrsoftware.org/files/is/license.txt
+
+## 内置截图字体
+
+© 2014–2021 Adobe (http://www.adobe.com/). Noto Sans Mono CJK SC Regular（Noto CJK Sans 2.004），SIL Open Font License 1.1。字体内置于 snap-ocr-worker.exe，许可证全文随安装包及便携 ZIP 的 resources/fonts/LICENSE-noto-ofl.txt 提供。来源：https://github.com/notofonts/noto-cjk/releases/tag/Sans2.004 。固定字节大小及 SHA-256 见 resources/snap-ocr-assets.json。
+
+## Portable Git for Windows
+
+The installer and portable ZIP include the complete official Portable Git 2.56.0.windows.2 runtime under resources/git, including its upstream LICENSE.txt and component license material. The exact release URL, archive size, and official GitHub SHA-256 digest are recorded in resources/git/JCHTOOLS-BUNDLE.json. Upstream source: https://github.com/git-for-windows/git/tree/v2.56.0.windows.2 ; build and component sources: https://github.com/git-for-windows/build-extra . Original Git and component licenses remain in force.

@@ -577,10 +577,17 @@
     },
     {
       "file": "optional/snap-ocr-worker/src/service.rs",
-      "name": "font_readiness_rejects_missing_manifest_assets",
+      "name": "font_readiness_rejects_corrupt_embedded_assets",
       "ignored": false,
       "cfg": "windows",
-      "body": "7e40381bf94837a3"
+      "body": "fe42da1864d0ab8e"
+    },
+    {
+      "file": "optional/snap-ocr-worker/src/service.rs",
+      "name": "font_readiness_works_without_external_cache",
+      "ignored": false,
+      "cfg": "windows",
+      "body": "d5b50b8d51eb3425"
     },
     {
       "file": "optional/snap-ocr-worker/src/service.rs",
@@ -626,10 +633,10 @@
     },
     {
       "file": "optional/snap-ocr-worker/src/service.rs",
-      "name": "reuse_requires_verified_font_assets",
+      "name": "reuse_uses_verified_embedded_font_without_cache",
       "ignored": false,
       "cfg": "windows",
-      "body": "d5d25a29408c10a4"
+      "body": "51bebb32565364a8"
     },
     {
       "file": "optional/snap-ocr-worker/src/service.rs",
@@ -1400,6 +1407,13 @@
       "ignored": false,
       "cfg": null,
       "body": "3514d2f83a1337a6"
+    },
+    {
+      "file": "src/git_tools.rs",
+      "name": "bundled_git_is_selected_before_system_git",
+      "ignored": false,
+      "cfg": null,
+      "body": "e107098b46066b37"
     },
     {
       "file": "src/git_tools.rs",
@@ -3125,6 +3139,13 @@
     },
     {
       "file": "src/snap_ocr_assets.rs",
+      "name": "local_readiness_needs_no_external_font_cache",
+      "ignored": false,
+      "cfg": null,
+      "body": "750154d74f631a9c"
+    },
+    {
+      "file": "src/snap_ocr_assets.rs",
       "name": "missing_worker_reports_repair_without_downloading_another_version",
       "ignored": false,
       "cfg": null,
@@ -3149,7 +3170,7 @@
       "name": "readiness_reports_distinct_asset_failure_kinds",
       "ignored": false,
       "cfg": null,
-      "body": "49b708c8d67e2796"
+      "body": "1e333805e572aa59"
     },
     {
       "file": "src/snap_ocr_assets.rs",

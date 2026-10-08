@@ -142,7 +142,7 @@ def copy_font_root(source: Path, asset_root: Path) -> None:
 
 
 @contextlib.contextmanager
-def owned_test_directory(temp_root: Path) -> Generator[str, None, None]:
+def owned_test_directory(temp_root: Path) -> Generator[str]:
     """进程已退出后，等待 Windows 释放本轮文件占用；清理超时仍明确失败。."""
     temporary = tempfile.TemporaryDirectory(prefix="ocr-worker-root-", dir=temp_root)
     try:
@@ -160,7 +160,7 @@ def owned_test_directory(temp_root: Path) -> Generator[str, None, None]:
                 break
 
 
-def run_worker_root(source: Path, worker_version: str, engine_root: Path) -> None:
+def run_worker_root(source: Path, worker_version: str, engine_root: Path, *, without_font_cache: bool = False) -> None:
     """在隔离目录中启动并安全清理本次 worker 与 broker."""
     temp_root = Path(__file__).resolve().parents[2] / ".tmp"
     _ = temp_root.mkdir(exist_ok=True)
@@ -168,7 +168,8 @@ def run_worker_root(source: Path, worker_version: str, engine_root: Path) -> Non
         isolated = Path(directory)
         asset_root = isolated / "assets"
         _ = shutil.copytree(source, asset_root, ignore=shutil.ignore_patterns("fonts"))
-        copy_font_root(source, asset_root)
+        if not without_font_cache:
+            copy_font_root(source, asset_root)
         worker = asset_root / "worker" / worker_version / "snap-ocr-worker.exe"
         if not worker.is_file():
             message = f"worker 不存在：{worker}"
@@ -193,6 +194,10 @@ def run_worker_root(source: Path, worker_version: str, engine_root: Path) -> Non
             status, _pipe = wait_model(process, pipes)
             print(json.dumps({"model": status.get("model"), "ok": status.get("ok")}, ensure_ascii=False))
             assert status.get("model") == "ready", "worker 没有从自身安装目录加载模型"
+            if without_font_cache:
+                # 覆盖 O-05/O-21/XB-25：真实公开服务入口完成模型预热和 Slint
+                # 内置字体注册，不存在任何字体缓存，测试不能靠复制字体冒充通过。
+                assert not (asset_root / "fonts").exists(), "内置字体不得要求或生成外部字体缓存"
         finally:
             try:
                 stop_broker(state_root)
@@ -214,6 +219,7 @@ def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     _ = parser.add_argument("--asset-root", required=True, type=Path)
     _ = parser.add_argument("--worker-version", required=True)
+    _ = parser.add_argument("--without-font-cache", action="store_true", help="验证随包内置字体，无外部字体缓存")
     args = parser.parse_args()
     asset_argument = cast("Path", args.asset_root)
     worker_version = cast("str", args.worker_version)
@@ -226,7 +232,7 @@ def main() -> int:
     if not (engine_root / "xberg.exe").is_file():
         message = f"隔离 Xberg 测试目录缺少 xberg.exe：{engine_root}"
         raise FileNotFoundError(message)
-    run_worker_root(source, worker_version, engine_root)
+    run_worker_root(source, worker_version, engine_root, without_font_cache=bool(args.without_font_cache))
     return 0
 
 

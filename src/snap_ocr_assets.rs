@@ -68,6 +68,16 @@ struct SnapAsset {
     license: SnapLicense,
 }
 
+impl SnapAsset {
+    /// O-05/XB-25：字体和许可证编入随包 worker，不再依赖用户字体缓存。
+    fn is_embedded(&self) -> bool {
+        matches!(
+            self.id.as_str(),
+            "noto-sans-mono-cjk-sc" | "noto-cjk-ofl-license"
+        )
+    }
+}
+
 #[derive(Clone, Debug, Deserialize)]
 struct SnapMember {
     path: String,
@@ -257,13 +267,7 @@ fn worker_readiness(worker: &SnapWorker, root: &Path) -> Result<(), String> {
 pub fn readiness() -> Result<(), String> {
     let manifest = load_manifest()?;
     let root = asset_root();
-    for asset in &manifest.assets {
-        // S7-05：透传具体失败原因（缺失/大小/摘要），GUI 侧直接展示该文案；
-        // 压缩成统一「未安装或校验失败」会丢失失败种类（O-09/O-30）。
-        if let Err(error) = asset_ready(asset, &root) {
-            return Err(format!("资产 {}：{}", asset.id, error));
-        }
-    }
+    local_asset_readiness(&manifest.assets, &root)?;
     let worker = manifest
         .workers
         .first()
@@ -276,6 +280,20 @@ pub fn readiness() -> Result<(), String> {
     }
     worker_readiness(worker, &root)?;
     readiness_inference_pack(&manifest, &root)
+}
+
+fn local_asset_readiness(assets: &[SnapAsset], root: &Path) -> Result<(), String> {
+    for asset in assets {
+        if asset.is_embedded() {
+            continue;
+        }
+        // S7-05：透传具体失败原因（缺失/大小/摘要），GUI 侧直接展示该文案；
+        // 压缩成统一「未安装或校验失败」会丢失失败种类（O-09/O-30）。
+        if let Err(error) = asset_ready(asset, root) {
+            return Err(format!("资产 {}：{}", asset.id, error));
+        }
+    }
+    Ok(())
 }
 
 /// 就绪检查的推理组件段：在位校验 + 清单成员存在性检查。
@@ -432,6 +450,10 @@ fn initialize_staged(
     let total = manifest.assets.len();
     for (index, asset) in manifest.assets.iter().enumerate() {
         ensure_not_cancelled(cancel)?;
+        if asset.is_embedded() {
+            progress(format!("使用随包内置资产：{}", asset.id));
+            continue;
+        }
         // O-06 跨重试复用：最终位置已校验的资产不重下（保留已验证下载）。
         if asset_ready(asset, root).is_ok() {
             progress(format!("复用已校验资产：{}", asset.id));
@@ -1173,7 +1195,7 @@ fn checked_download_total(current: u64, chunk: u64, expected_size: u64) -> Resul
 fn write_notice(path: &Path, manifest: &SnapAssetManifest) -> Result<(), String> {
     let mut text = String::from("# JchTools 截图 OCR 可选组件许可证\n\n");
     text.push_str(
-        "模型、字体与推理运行库由用户主动初始化后按固定清单下载；主程序安装包不包含这些资产。\n\n",
+        "截图字体和许可证内置于随包后台程序；Xberg 引擎、模型与推理运行库使用设置页配置的共享目录。\n\n",
     );
     for asset in &manifest.assets {
         let _ = writeln!(
@@ -1566,13 +1588,16 @@ mod tests {
     #[test]
     fn readiness_reports_distinct_asset_failure_kinds() {
         let guard = redirect_component_env();
-        let manifest = super::load_manifest().expect("内置清单必须可解析");
+        let mut manifest = super::load_manifest().expect("内置清单必须可解析");
+        // 内置字体不再检查缓存；用非内置资产继续锁定失败原因透传。
+        manifest.assets[0].id = "external-test-asset".into();
         let font = &manifest.assets[0];
         let member = &font.members[0];
         let target = guard.root.path().join(&member.install_path);
 
         // 缺失：点名资产 id，且不得出现压缩文案或大小/摘要标记。
-        let missing = super::readiness().expect_err("字体缺失必须报未就绪");
+        let missing = super::local_asset_readiness(&manifest.assets, guard.root.path())
+            .expect_err("非内置资产缺失必须报未就绪");
         assert!(missing.contains(&font.id), "必须点名失败资产：{missing}");
         assert!(
             !missing.contains("未安装或校验失败"),
@@ -1586,7 +1611,8 @@ mod tests {
         // 大小不符：透传「大小 X，预期 Y」。
         fs::create_dir_all(target.parent().expect("成员路径有父目录")).expect("创建字体目录");
         fs::write(&target, b"too-short").expect("写入过短的字体成员");
-        let sized = super::readiness().expect_err("大小不符必须报未就绪");
+        let sized = super::local_asset_readiness(&manifest.assets, guard.root.path())
+            .expect_err("大小不符必须报未就绪");
         assert!(
             sized.contains("大小") && sized.contains(&member.size_bytes.to_string()),
             "必须透传大小原因：{sized}"
@@ -1601,7 +1627,8 @@ mod tests {
             file.write_all(&vec![0_u8; size])
                 .expect("写入内容错误的字体成员");
         }
-        let digest = super::readiness().expect_err("摘要不符必须报未就绪");
+        let digest = super::local_asset_readiness(&manifest.assets, guard.root.path())
+            .expect_err("摘要不符必须报未就绪");
         assert!(
             digest.contains("SHA256") && digest.contains(&member.sha256),
             "必须透传摘要原因：{digest}"
@@ -1609,6 +1636,20 @@ mod tests {
     }
 
     // ── C-3：下载中断重试 ──
+
+    // 覆盖 O-05/XB-25：主程序的新装检查不要求外部字体缓存。
+    #[test]
+    fn local_readiness_needs_no_external_font_cache() {
+        let root = tempfile::tempdir().expect("创建隔离缓存");
+        let manifest = super::load_manifest().expect("解析清单");
+        assert!(super::local_asset_readiness(&manifest.assets, root.path()).is_ok());
+        assert!(root
+            .path()
+            .read_dir()
+            .expect("读取隔离缓存")
+            .next()
+            .is_none());
+    }
 
     // 覆盖 C-3：拉取中断（网络错误）必须与校验失败一样进入最多 3 次重试，
     // 不得首次中断即整体失败（约 291MB 组件包弱网一次中断即作废、.part 报废）。
