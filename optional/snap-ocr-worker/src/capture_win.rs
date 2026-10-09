@@ -273,6 +273,9 @@ extern "system" {
     ) -> i32;
     fn CreateSolidBrush(color: u32) -> Handle;
     fn PatBlt(dc: Handle, x: i32, y: i32, width: i32, height: i32, operation: u32) -> i32;
+    fn SaveDC(dc: Handle) -> i32;
+    fn IntersectClipRect(dc: Handle, left: i32, top: i32, right: i32, bottom: i32) -> i32;
+    fn RestoreDC(dc: Handle, saved: i32) -> i32;
 }
 #[link(name = "msimg32")]
 extern "system" {
@@ -689,6 +692,113 @@ fn selection(a: Point, b: Point) -> Rect {
     }
 }
 
+// O-18：窗口与离屏像素回归共用同一 GDI 绘制路径，冻结帧不作改写。
+fn paint_overlay(dc: Handle, state: &Overlay, width: i32, height: i32, header_size: u32) {
+    let info = BitmapInfo {
+        header: BitmapInfoHeader {
+            size: header_size,
+            width,
+            height: -height,
+            planes: 1,
+            bit_count: 32,
+            compression: 0,
+            image_size: 0,
+            x_pixels_per_meter: 0,
+            y_pixels_per_meter: 0,
+            used: 0,
+            important: 0,
+        },
+        colors: [0],
+    };
+    // SAFETY: dc 刚获取且未释放；bgra 指向 OVERLAY 中存活的冻结
+    // 帧缓冲，info 是本栈上完整的位图描述，调用期间均不移动。
+    unsafe {
+        StretchDIBits(
+            dc,
+            0,
+            0,
+            width,
+            height,
+            0,
+            0,
+            width,
+            height,
+            state.frame.bgra.as_ptr().cast(),
+            &raw const info,
+            0,
+            SRCCOPY,
+        );
+    }
+    // 暗色蒙层叠加在冻结像素上，选区内部重绘原像素：
+    // 桌面后续变化不会透过遮罩进入捕获结果。
+    // SAFETY: dc 同上；shade_dc 是创建遮罩时准备的已涂黑 1×1
+    // 位图 DC，blend 参数为 AC_SRC_OVER 加常量 alpha 0x50。
+    unsafe {
+        AlphaBlend(
+            dc,
+            0,
+            0,
+            width,
+            height,
+            state.shade_dc,
+            0,
+            0,
+            1,
+            1,
+            0x0050_0000,
+        );
+    }
+    if let Some(start) = state.start {
+        let outline = selection(start, state.end);
+        if outline.right > outline.left && outline.bottom > outline.top {
+            // O-18：沿用整张冻结帧的绘制坐标，只把目标裁剪到选区。
+            // 直接用选区 top 作为 StretchDIBits 的子图源 y，在实际
+            // GDI 上会读到另一高度的像素，导致预览与最终截图不符。
+            // SAFETY: dc 是本次绘制的有效 DC；保存后仅临时改变裁剪区。
+            let saved = unsafe { SaveDC(dc) };
+            if saved != 0 {
+                // SAFETY: 同一有效 dc；GDI 自动与窗口已有裁剪区取交集，
+                // 拖动越出显示器边缘时也不会读取帧外像素。
+                unsafe {
+                    IntersectClipRect(dc, outline.left, outline.top, outline.right, outline.bottom);
+                }
+                // SAFETY: 缓冲与 info 完整描述同一冻结帧；源坐标为全图，
+                // 只有选区内的目标像素可绘制，不使用实时桌面内容。
+                unsafe {
+                    StretchDIBits(
+                        dc,
+                        0,
+                        0,
+                        width,
+                        height,
+                        0,
+                        0,
+                        width,
+                        height,
+                        state.frame.bgra.as_ptr().cast(),
+                        &raw const info,
+                        0,
+                        SRCCOPY,
+                    );
+                }
+                // SAFETY: saved 是同一 dc 刚成功保存的状态；恢复后
+                // 后续描边与下一次绘制不会继承选区裁剪。
+                unsafe { RestoreDC(dc, saved) };
+            }
+        }
+        // SAFETY: 按颜色常量创建纯 GDI 画刷，不涉及外部资源。
+        let brush = unsafe { CreateSolidBrush(0x0000_ffff) };
+        if !brush.is_null() {
+            // SAFETY: outline 是本栈上的矩形，brush 刚创建且非空，
+            // 仅用于本次描边。
+            unsafe { FrameRect(dc, &raw const outline, brush) };
+            // SAFETY: brush 由上一行创建且未选入任何 DC，删除即
+            // 释放。
+            unsafe { DeleteObject(brush) };
+        }
+    }
+}
+
 unsafe extern "system" fn overlay_proc(hwnd: Handle, msg: u32, w: usize, l: isize) -> isize {
     match msg {
         WM_ERASEBKGND => return 1,
@@ -714,94 +824,7 @@ unsafe extern "system" fn overlay_proc(hwnd: Handle, msg: u32, w: usize, l: isiz
                     // 返回的 DC 在本分支内成对 ReleaseDC。
                     let dc = unsafe { GetDC(hwnd) };
                     if !dc.is_null() {
-                        let info = BitmapInfo {
-                            header: BitmapInfoHeader {
-                                size: header_size,
-                                width,
-                                height: -height,
-                                planes: 1,
-                                bit_count: 32,
-                                compression: 0,
-                                image_size: 0,
-                                x_pixels_per_meter: 0,
-                                y_pixels_per_meter: 0,
-                                used: 0,
-                                important: 0,
-                            },
-                            colors: [0],
-                        };
-                        // SAFETY: dc 刚获取且未释放；bgra 指向 OVERLAY 中存活的冻结
-                        // 帧缓冲，info 是本栈上完整的位图描述，调用期间均不移动。
-                        unsafe {
-                            StretchDIBits(
-                                dc,
-                                0,
-                                0,
-                                width,
-                                height,
-                                0,
-                                0,
-                                width,
-                                height,
-                                state.frame.bgra.as_ptr().cast(),
-                                &raw const info,
-                                0,
-                                SRCCOPY,
-                            );
-                        }
-                        // 暗色蒙层叠加在冻结像素上，选区内部重绘原像素：
-                        // 桌面后续变化不会透过遮罩进入捕获结果。
-                        // SAFETY: dc 同上；shade_dc 是创建遮罩时准备的已涂黑 1×1
-                        // 位图 DC，blend 参数为 AC_SRC_OVER 加常量 alpha 0x50。
-                        unsafe {
-                            AlphaBlend(
-                                dc,
-                                0,
-                                0,
-                                width,
-                                height,
-                                state.shade_dc,
-                                0,
-                                0,
-                                1,
-                                1,
-                                0x0050_0000,
-                            );
-                        }
-                        if let Some(start) = state.start {
-                            let outline = selection(start, state.end);
-                            if outline.right > outline.left && outline.bottom > outline.top {
-                                // SAFETY: 同一有效 dc；源矩形限定在冻结帧缓冲和
-                                // info 描述的同一尺寸内。
-                                unsafe {
-                                    StretchDIBits(
-                                        dc,
-                                        outline.left,
-                                        outline.top,
-                                        outline.right - outline.left,
-                                        outline.bottom - outline.top,
-                                        outline.left,
-                                        outline.top,
-                                        outline.right - outline.left,
-                                        outline.bottom - outline.top,
-                                        state.frame.bgra.as_ptr().cast(),
-                                        &raw const info,
-                                        0,
-                                        SRCCOPY,
-                                    );
-                                }
-                            }
-                            // SAFETY: 按颜色常量创建纯 GDI 画刷，不涉及外部资源。
-                            let brush = unsafe { CreateSolidBrush(0x0000_ffff) };
-                            if !brush.is_null() {
-                                // SAFETY: outline 是本栈上的矩形，brush 刚创建且非空，
-                                // 仅用于本次描边。
-                                unsafe { FrameRect(dc, &raw const outline, brush) };
-                                // SAFETY: brush 由上一行创建且未选入任何 DC，删除即
-                                // 释放。
-                                unsafe { DeleteObject(brush) };
-                            }
-                        }
+                        paint_overlay(dc, state, width, height, header_size);
                         // SAFETY: dc 是本分支开头 GetDC 的返回值，配对释放恰一次。
                         unsafe { ReleaseDC(hwnd, dc) };
                     }
@@ -1040,6 +1063,10 @@ pub fn select(frame: CaptureFrame) -> Result<SelectedImage, String> {
         .map(|image| Some((image, state.frame.work)))
         .map_err(|_| error("裁剪图像无效"))
 }
+
+#[cfg(test)]
+#[path = "capture_win_preview_tests.rs"]
+mod preview_tests;
 
 #[cfg(test)]
 mod tests {
