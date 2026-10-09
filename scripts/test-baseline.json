@@ -457,6 +457,13 @@
       "body": "db93ab5beb5fe5dc"
     },
     {
+      "file": "optional/snap-ocr-worker/src/capture_win_preview_tests.rs",
+      "name": "selection_preview_matches_frozen_pixels_and_submitted_crop",
+      "ignored": false,
+      "cfg": null,
+      "body": "453b31a4876382a0"
+    },
+    {
       "file": "optional/snap-ocr-worker/src/result_window.rs",
       "name": "copy_failure_hint_uses_error_state",
       "ignored": false,
