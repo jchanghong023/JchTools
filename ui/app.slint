@@ -64,6 +64,9 @@ global Design {
     in property <color> disabled-bg: dark ? #2a2e35 : #eef0f3;
     in property <color> close-hover: #e81123;
     in property <color> kbd-bg: dark ? #262a31 : #f4f5f7;
+    // 分段控件（Pill）选中项的浮起底色：浅色用白卡，深色用比内凹底亮一档的中性色。
+    // 深色主题下若沿用卡片底色（比 inset 更暗），选中项看起来像被按下而不是浮起。
+    in property <color> pill-active: dark ? #343b47 : #ffffff;
 }
 
 component Label inherits Text { color: Design.text; font-size: 13px; }
@@ -235,9 +238,9 @@ component Pill inherits Rectangle {
             return reject;
         }
     }
-    border-width: fs.has-focus ? 1.5px : 0px;
-    border-color: Design.accent-ink;
-    background: !root.enabled ? transparent : root.active ? Design.card
+    border-width: fs.has-focus ? 1.5px : (root.active ? 1px : 0px);
+    border-color: fs.has-focus ? Design.accent-ink : Design.line-strong;
+    background: !root.enabled ? transparent : root.active ? Design.pill-active
         : (touch.pressed ? Design.press : touch.has-hover ? Design.hover : transparent);
     drop-shadow-color: root.active ? Design.shadow : transparent;
     drop-shadow-blur: 2px;
@@ -949,6 +952,10 @@ export component AppWindow inherits Window {
                         : "Windows 优先的本地工具箱 · 功能持续增加";
                         horizontal-stretch: 1; wrap: no-wrap; overflow: elide; vertical-alignment: center; }
                     if root.busy: Spinner { width: 18px; height: 18px; }
+                    // XB-19：转 Markdown 页内保留「前往设置」入口，固定在页头右上，
+                    // 不再为它单占一行（原先那行是状态条迁移后剩下的游离按钮）。
+                    if root.screen == 5: AppButton { text: "前往设置"; small: true;
+                        enabled: root.confirm-kind == 0; clicked => { root.navigation(7); } }
                 }
                 if root.error-text != "": Rectangle {
                     min-height: 40px; border-radius: 8px;
@@ -1012,7 +1019,9 @@ export component AppWindow inherits Window {
                                 }
                             }
                         }
+                        // 固定宽度：不给定宽度时布局会把按钮拉伸到与分区容器近等宽。
                         AppButton { text: root.show-advanced ? "隐藏高级选项" : "显示高级选项"; small: true; icon: 9;
+                            width: 132px;
                             enabled: !root.busy && root.confirm-kind == 0;
                             clicked => { root.toggle-advanced(!root.show-advanced); } }
                     }
@@ -1072,7 +1081,9 @@ export component AppWindow inherits Window {
                                         VerticalLayout { horizontal-stretch: 1; spacing: 3px;
                                             Label { text: item.kind + "  ·  " + item.state; font-weight: 600; color: Design.accent-ink; font-size: 13px; overflow: elide; }
                                             Label { text: item.source; overflow: elide; }
-                                            Muted { text: item.target == "" ? item.reason : "→ " + item.target + " · " + item.reason; overflow: elide; color: Design.muted-2; }
+                                            // 固定 78px 行高内单行省略：Muted 默认 word-wrap 会让长路径
+                                            // 折行，把这一行挤出行界被裁掉。
+                                            Muted { text: item.target == "" ? item.reason : "→ " + item.target + " · " + item.reason; wrap: no-wrap; overflow: elide; color: Design.muted-2; }
                                         }
                                     }
                                     Rectangle { y: parent.height - 1px; x: 16px; height: 1px; width: parent.width - 32px; background: Design.line-soft; }
@@ -1157,7 +1168,9 @@ export component AppWindow inherits Window {
                                 }
                             }
                         }
+                        // 固定宽度：不给定宽度时布局会把按钮拉伸到与分区容器近等宽。
                         AppButton { text: root.show-advanced ? "隐藏高级选项" : "显示高级选项"; small: true; icon: 9;
+                            width: 132px;
                             enabled: !root.busy && root.confirm-kind == 0;
                             clicked => { root.toggle-advanced(!root.show-advanced); } }
                     }
@@ -1232,8 +1245,9 @@ export component AppWindow inherits Window {
                                     ListView { vertical-stretch: 1; for item in root.fail-rows: Rectangle { height: 72px;
                                         VerticalLayout { padding-left: 12px; padding-right: 12px; padding-top: 6px; padding-bottom: 4px; spacing: 2px;
                                             Label { text: item.stage + "  ·  " + item.source; font-weight: 600; font-size: 13px; overflow: elide; }
-                                            Muted { text: "原因：" + item.reason; overflow: elide; color: Design.muted-2; }
-                                            Muted { text: item.target == "" ? "未记录隔离位置（隔离可能失败或尚未执行；整体原因见「进度与日志」）" : "隔离后位置：" + item.target; overflow: elide; color: Design.muted-2; }
+                                            // 固定 72px 行高内单行省略，理由同计划行（防长文本折行溢出裁切）。
+                                            Muted { text: "原因：" + item.reason; wrap: no-wrap; overflow: elide; color: Design.muted-2; }
+                                            Muted { text: item.target == "" ? "未记录隔离位置（隔离可能失败或尚未执行；整体原因见「进度与日志」）" : "隔离后位置：" + item.target; wrap: no-wrap; overflow: elide; color: Design.muted-2; }
                                         }
                                         Rectangle { y: parent.height - 1px; x: 12px; height: 1px; width: parent.width - 24px; background: Design.line-soft; }
                                     }}
@@ -1295,10 +1309,11 @@ export component AppWindow inherits Window {
                                     Text { width: 96px; text: "输入目录"; font-size: 12.5px; color: Design.text-muted; vertical-alignment: center; }
                                     Field { text <=> root.md-input-dir; placeholder-text: "选择或输入包含 Markdown 文件的目录，例如 D:\\Docs";
                                         icon: 0;
+                                        min-width: 0px;
                                         enabled: !root.busy && root.confirm-kind == 0; horizontal-stretch: 1; }
                                     Check { text: "递归子目录"; checked <=> root.md-recursive;
                                         enabled: !root.busy && root.confirm-kind == 0; }
-                                    AppButton { text: "选择目录…"; enabled: !root.busy && root.confirm-kind == 0; clicked => { root.md-choose-input(); } }
+                                    AppButton { text: "选择目录…"; width: 96px; enabled: !root.busy && root.confirm-kind == 0; clicked => { root.md-choose-input(); } }
                                 }
                             }
                             Rectangle {
@@ -1316,11 +1331,19 @@ export component AppWindow inherits Window {
                                     Text { width: 96px; text: "文件名"; font-size: 12.5px; color: Design.text-muted; vertical-alignment: center; }
                                     Field { text <=> root.md-output-name; width: 200px;
                                         enabled: !root.busy && root.confirm-kind == 0; }
-                                    Text { text: "输出目录"; font-size: 12.5px; color: Design.text-muted; vertical-alignment: center; }
+                                    Rectangle { horizontal-stretch: 1; }
+                                }
+                                Rectangle { y: parent.height - 1px; height: 1px; x: 16px; width: parent.width - 32px; background: Design.line-soft; }
+                            }
+                            // U-05：文件名与目录分行，最小窗口也保留完整目录按钮和足够的路径宽度。
+                            Rectangle {
+                                HorizontalLayout { padding-top: 12px; padding-bottom: 12px; padding-left: 16px; padding-right: 16px; spacing: 12px; cross-axis-alignment: center;
+                                    Text { width: 96px; text: "输出目录"; font-size: 12.5px; color: Design.text-muted; vertical-alignment: center; }
                                     Field { text <=> root.md-output-dir; placeholder-text: "合并结果保存位置";
                                         icon: 0;
+                                        min-width: 0px;
                                         enabled: !root.busy && root.confirm-kind == 0; horizontal-stretch: 1; }
-                                    AppButton { text: "选择目录…"; enabled: !root.busy && root.confirm-kind == 0; clicked => { root.md-choose-output(); } }
+                                    AppButton { text: "选择目录…"; width: 96px; enabled: !root.busy && root.confirm-kind == 0; clicked => { root.md-choose-output(); } }
                                 }
                             }
                             Rectangle {
@@ -1492,12 +1515,9 @@ export component AppWindow inherits Window {
                         }
                     }
                 }
-                if root.screen == 5: HorizontalLayout { spacing: 10px;
-                            Rectangle { horizontal-stretch: 1; }
-                    AppButton { text: "前往设置"; enabled: root.confirm-kind == 0; clicked => { root.navigation(7); } }
-                }
-                if root.screen == 7: ScrollView {
-                    VerticalLayout { spacing: 12px;
+                if root.screen == 7: settings-scroll := ScrollView {
+                    viewport-width: settings-scroll.visible-width;
+                    VerticalLayout { width: settings-scroll.visible-width; spacing: 12px;
                         Surface { VerticalLayout { padding: 18px; spacing: 12px;
                             Label { text: "共享 Xberg"; font-size: 16px; font-weight: 600; }
                             Muted { text: "文档、截图与媒体共用一个引擎。两种来源分别保存，重启自动恢复。"; }
@@ -1556,7 +1576,8 @@ export component AppWindow inherits Window {
                     }
                 }
                 // ============ 转 Markdown ============
-                if root.screen == 5: converter-scroll := ScrollView {
+                if root.screen == 5: VerticalLayout { spacing: 8px;
+                    converter-scroll := ScrollView {
                     vertical-stretch: 1;
                     viewport-width: converter-scroll.visible-width;
                     VerticalLayout { width: converter-scroll.visible-width;
@@ -1644,7 +1665,10 @@ export component AppWindow inherits Window {
                             Muted { text: "组件未随主程序打包；缺失项和故障原因可在详情中查看。"; color: Design.muted-2; }
                         }
                     }
-                    LogCard { vertical-stretch: 1; title: root.convert-progress-note == "" ? "转换日志" : root.convert-progress-note; body <=> root.convert-log-text; }
+                    // U-05：日志保留可读正文高度；内容可滚动，任务按钮固定在视口外。
+                    LogCard { min-height: 160px; vertical-stretch: 1; title: root.convert-progress-note == "" ? "转换日志" : root.convert-progress-note; body <=> root.convert-log-text; }
+                    }
+                    }
                     Surface { pop: true; radius: 10px; min-height: 58px;
                         VerticalLayout { padding-top: 8px; padding-bottom: 8px; padding-left: 16px; padding-right: 16px; spacing: 6px;
                             HorizontalLayout { spacing: 12px; cross-axis-alignment: center;
@@ -1669,10 +1693,13 @@ export component AppWindow inherits Window {
                             if root.busy: ProgressBar { progress: root.convert-progress; }
                         }
                     }
-                    }
                 }
                 // ============ 截图 OCR：仅快捷键及后台状态 ============
-                if root.screen == 6: VerticalLayout { spacing: 12px;
+                // U-05：展开诊断详情时滚动整页，避免最小窗口裁掉状态卡片底部。
+                if root.screen == 6: snap-page-scroll := ScrollView {
+                    vertical-stretch: 1;
+                    viewport-width: snap-page-scroll.visible-width;
+                    VerticalLayout { width: snap-page-scroll.visible-width; spacing: 12px;
                     Surface { VerticalLayout { padding: 18px; spacing: 12px;
                         Label { text: "截图快捷键"; font-size: 16px; font-weight: 600; }
                             HorizontalLayout { spacing: 10px; cross-axis-alignment: center;
@@ -1747,9 +1774,15 @@ export component AppWindow inherits Window {
                         }
                     } }
                     Rectangle { vertical-stretch: 1; }
+                    }
                 }
                 // ============ 关于 ============
-                if root.screen == 1: VerticalLayout { spacing: 14px;
+                // 内容总高在最小窗口（960×620）下会超出可视区，包进 ScrollView 滚动查看，
+                // 不再压缩裁切；视口宽度与设置页同口径钉住。
+                if root.screen == 1: about-scroll := ScrollView {
+                    vertical-stretch: 1;
+                    viewport-width: about-scroll.visible-width;
+                    VerticalLayout { width: about-scroll.visible-width; spacing: 14px;
                     Surface {
                         VerticalLayout { padding: 18px; spacing: 14px;
                             HorizontalLayout { spacing: 16px; cross-axis-alignment: center;
@@ -1786,7 +1819,7 @@ export component AppWindow inherits Window {
                     }
                     AboutSlint { }
                     Muted { text: "本项目原创代码：MIT。Slint 使用其桌面 Royalty-free 许可并保留本署名组件。\n7-Zip：LGPL / BSD / unRAR 限制；随发布包提供许可证及对应源码。"; }
-                    Rectangle { vertical-stretch: 1; background: transparent; }
+                    }
                 }
             }
         }

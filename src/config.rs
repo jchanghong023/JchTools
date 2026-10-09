@@ -111,7 +111,8 @@ impl Default for Config {
             fix_extension: false,
             global_delete: DeleteMode::Permanent,
             hash_workers: 6,
-            theme: "system".into(),
+            // P-04（2026-10-09 用户确认）：默认深色；「跟随系统」「浅色」仍可在关于页选择。
+            theme: "dark".into(),
         }
     }
 }

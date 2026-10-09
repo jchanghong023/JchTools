@@ -7279,7 +7279,7 @@ mod gui_tests {
         with_gui(|app| {
             let ui = &app.ui;
             assert!(!ui.get_ready(), "初始状态不得就绪");
-            assert_eq!(ui.get_theme(), 0, "默认跟随系统主题");
+            assert_eq!(ui.get_theme(), 2, "默认深色主题（P-04）");
             // O-01：截图 OCR 与原有工具并列，导航至独立工具页。
             let tools = ui.get_tools();
             let snap_visible = (0..tools.row_count())
