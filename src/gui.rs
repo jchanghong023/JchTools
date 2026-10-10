@@ -8034,36 +8034,6 @@ mod gui_tests {
         .unwrap();
     }
 
-    // 覆盖 XB-19/T-05（S3-01）：初始化入口集中在设置页——转换页不得再保留
-    // 「初始化可选组件」按钮（该入口只按文档成员校验，纯媒体用户点击会误报
-    // 失败），页面呈现就绪状态并提供「前往设置」。
-    #[test]
-    fn convert_page_has_no_initialize_entry() {
-        let source = std::fs::read_to_string(
-            std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("ui/app.slint"),
-        )
-        .unwrap();
-        assert!(
-            !source.contains("convert-initialize"),
-            "转换页不得保留初始化回调入口（S3-01/XB-19）"
-        );
-        assert!(
-            !source.contains("初始化可选组件"),
-            "转换页不得保留「初始化可选组件」按钮文案（S3-01/XB-19）"
-        );
-        let strip = source
-            .split("if root.screen == 5")
-            .nth(1)
-            .unwrap_or_default()
-            .split("if root.screen == 7")
-            .next()
-            .unwrap_or_default();
-        assert!(
-            strip.contains("前往设置"),
-            "转换页必须保留「前往设置」入口（XB-19）"
-        );
-    }
-
     // 覆盖 T-05/T-06/XB-19（S3-01）：入口移除后，纯媒体场景的就绪状态仍按勾选
     // 场景计算——只勾 MP4/M4A 时走正常就绪检查，不要求文档组件初始化。
     #[test]

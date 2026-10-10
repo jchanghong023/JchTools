@@ -8,8 +8,8 @@ use axum::{
 use serde_json::{Map, Value};
 
 use crate::acp_api::{
-    AcceptedRequest, ChatMessage, FinishReason, MessageRole, PromptInput, ServiceError,
-    ServiceErrorKind, SessionKey,
+    AcceptedRequest, ChatMessage, FinishReason, MessageRole, ModelDescriptor, PromptInput,
+    ServiceError, ServiceErrorKind, SessionKey,
 };
 
 // 499 是非标准取消状态；编译期校验，不在请求处理路径解析状态码。
@@ -397,6 +397,38 @@ pub(super) fn parse_chat(
         },
         stream,
     })
+}
+
+#[derive(serde::Serialize)]
+pub(super) struct ModelList {
+    object: &'static str,
+    data: Vec<Model>,
+}
+
+#[derive(serde::Serialize)]
+struct Model {
+    id: String,
+    object: &'static str,
+    created: u64,
+    name: String,
+    owned_by: &'static str,
+}
+
+pub(super) fn model_list(models: Vec<ModelDescriptor>) -> ModelList {
+    ModelList {
+        object: "list",
+        data: models
+            .into_iter()
+            .map(|model| Model {
+                id: model.id,
+                object: "model",
+                // ACP 不提供模型创建时间；0 表示未知，不能冒充当前时间。
+                created: 0,
+                name: model.name,
+                owned_by: "acp-agent",
+            })
+            .collect(),
+    }
 }
 
 pub(super) fn finish_reason(reason: FinishReason) -> &'static str {

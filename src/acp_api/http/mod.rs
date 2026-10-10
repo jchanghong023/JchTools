@@ -13,13 +13,13 @@ use axum::{
     routing::{get, post},
     Extension, Json, Router,
 };
-use serde_json::{json, Value};
+use serde_json::Value;
 use tokio_util::sync::CancellationToken;
 
 use crate::acp_api::{BackendHandle, RequestEvent, RequestHandle, SessionKey};
 
 use connection::{ConnectionClosed, ObservedListener};
-use dto::{completion, parse_chat, HttpError};
+use dto::{completion, model_list, parse_chat, HttpError};
 use stream::{cancelled, disconnected, CompletionStream};
 
 const SESSION_HEADER: &str = "x-jchtools-session-id";
@@ -75,12 +75,7 @@ async fn method_not_allowed() -> Response {
 
 async fn models(State(backend): State<BackendHandle>) -> Response {
     match backend.models().await {
-        Ok(models) => Json(
-            json!({"object":"list", "data":models.into_iter().map(|model|
-            json!({"id":model.id, "object":"model", "name":model.name, "owned_by":"acp-agent"}))
-            .collect::<Vec<_>>()}),
-        )
-        .into_response(),
+        Ok(models) => Json(model_list(models)).into_response(),
         Err(error) => HttpError::service(&error).into_response(),
     }
 }
@@ -249,6 +244,7 @@ async fn collect_completion(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use serde_json::json;
 
     // 覆盖 AH-04：续会话标识不能为空或歧义；不擅自设定或裁剪模型历史。
     #[test]

@@ -221,32 +221,97 @@ fn cancelled_round_permission_returns_cancelled_before_prompt_terminal() {
     assert_eq!(terminal, Some(RequestEvent::Cancelled));
 }
 
-fn extension_attempt() -> (Value, Option<(u16, Value)>, (u16, Value)) {
+type HttpOutcome = (u16, Value);
+
+// 无论测试正常完成或断言失败，先放行自有进程，再有界等待 HTTP 线程收尾。
+struct PendingHttp {
+    release: ReleaseMarker,
+    receive: mpsc::Receiver<HttpOutcome>,
+    job: Option<thread::JoinHandle<()>>,
+}
+impl PendingHttp {
+    fn start(
+        release: ReleaseMarker,
+        port: u16,
+        method: &'static str,
+        route: &'static str,
+        request: Option<Value>,
+    ) -> Self {
+        let (send, receive) = mpsc::channel();
+        let job = thread::spawn(move || {
+            let response = Http::open(port, method, route, request.as_ref(), None);
+            let _sent = send.send((response.status, response.json()));
+        });
+        Self {
+            release,
+            receive,
+            job: Some(job),
+        }
+    }
+    fn finish(&mut self, observed: Option<HttpOutcome>) -> HttpOutcome {
+        self.release.release();
+        let result = observed.unwrap_or_else(|| {
+            self.receive
+                .recv_timeout(Duration::from_secs(10))
+                .expect("放行后 HTTP 请求未在看门狗期限内收尾")
+        });
+        self.job.take().unwrap().join().unwrap();
+        result
+    }
+}
+impl Drop for PendingHttp {
+    fn drop(&mut self) {
+        if let Some(job) = self.job.take() {
+            self.release.release();
+            // 超时只用于防止 red 测试自身挂死，不强杀 Agent 或终端。
+            if !matches!(
+                self.receive.recv_timeout(Duration::from_secs(10)),
+                Err(mpsc::RecvTimeoutError::Timeout)
+            ) {
+                let _joined = job.join();
+            }
+        }
+    }
+}
+
+fn extension_attempt() -> (Value, Option<HttpOutcome>, HttpOutcome) {
     let server = server();
     let plan = Plan::new("extension-interaction");
-    let cleanup = ReleaseMarker::prompt(&server.root, &plan);
-    let request = body(&plan, false);
-    let port = server.port;
-    let (send, receive) = mpsc::channel();
-    let job = thread::spawn(move || {
-        let response = Http::open(port, "POST", "/v1/chat/completions", Some(&request), None);
-        let result = (response.status, response.json());
-        send.send(result.clone()).unwrap();
-        result
-    });
+    let mut pending = PendingHttp::start(
+        ReleaseMarker::prompt(&server.root, &plan),
+        server.port,
+        "POST",
+        "/v1/chat/completions",
+        Some(body(&plan, false)),
+    );
     let event = wait_event(&server.root, "extension-result", &plan.tag);
-    let before_release = receive.recv_timeout(Duration::from_millis(500)).ok();
-    // 旧 SDK 重试带 sessionId 的未知方法，fixture 有界超时后停在此 barrier。
-    // 即使观察失败，也先放行请求再 join，不让 red 测试自己永久挂起。
-    cleanup.release();
-    let eventual = job.join().unwrap();
+    let still_active = server.backend.status().executing;
+    let before_release = match pending.receive.try_recv() {
+        Ok(response) => Some(response),
+        Err(mpsc::TryRecvError::Empty) => None,
+        Err(mpsc::TryRecvError::Disconnected) => panic!("HTTP 请求线程未返回结果"),
+    };
+    assert!(!pending.release.0.exists(), "safe terminal 观察前不得放行");
+    assert!(
+        !audit(&server.root)
+            .iter()
+            .any(|entry| entry["event"] == "extension-terminal" && entry["tag"] == plan.tag),
+        "extension-result 必须先于 safe terminal"
+    );
+    let eventual = pending.finish(before_release.clone());
+    assert_eq!(still_active, 1, "扩展拒绝后仍须等待 Agent 安全终结");
+    let terminal = audit(&server.root)
+        .into_iter()
+        .find(|entry| entry["event"] == "extension-terminal" && entry["tag"] == plan.tag)
+        .expect("HTTP 返回失败前必须已观察到 Agent 安全终结");
+    assert_eq!(terminal["tag"], plan.tag);
     (event, before_release, eventual)
 }
 
 /// AH-02/AH-13：未知且携带 sessionId 的扩展交互也须明确返回协议拒绝。
 #[test]
 fn unknown_session_extension_interaction_is_explicitly_rejected() {
-    let (event, _, _) = extension_attempt();
+    let (event, before_release, eventual) = extension_attempt();
     assert!(
         event["outcome"].get("error").is_some(),
         "未明确拒绝：{event}"
@@ -259,22 +324,27 @@ fn unknown_session_extension_interaction_is_explicitly_rejected() {
         event["outcome"]["timed_out"], true,
         "不能将交互留在 SDK retry 队列"
     );
+    assert!(before_release.is_none(), "安全终结前 HTTP 仍须在途");
+    assert_eq!(eventual.0, 502, "{eventual:?}");
+    assert!(eventual.1.get("error").is_some());
+    assert!(eventual.1.get("choices").is_none());
 }
 
-/// AH-13：Agent 忽略扩展交互失败仍不能让 HTTP 成功；不等人为释放 barrier。
+/// AH-13：扩展交互拒绝后须等 Agent 安全终结，不能把随后 EndTurn 当成功。
 #[test]
-fn unknown_session_extension_http_fails_without_barrier_release() {
+fn unknown_session_extension_http_waits_for_safe_terminal_then_fails() {
     let (_, before_release, eventual) = extension_attempt();
-    let response = before_release.expect("未知交互导致 HTTP 挂起，必须立即明确失败");
+    assert!(
+        before_release.is_none(),
+        "Agent 尚未安全终结时 HTTP 请求必须仍在途：{before_release:?}"
+    );
     assert_eq!(
-        response.0, 502,
+        eventual.0, 502,
         "不能把失败交互后的 EndTurn 当成功：{eventual:?}"
     );
-    assert!(response.1.get("error").is_some());
-    assert!(response.1.get("choices").is_none());
+    assert!(eventual.1.get("error").is_some());
+    assert!(eventual.1.get("choices").is_none());
 }
-
-type HttpOutcome = (u16, Value);
 
 fn held_terminal_failure_attempt(models: bool) -> (Option<HttpOutcome>, HttpOutcome, Value, Value) {
     let server = server();
@@ -286,7 +356,7 @@ fn held_terminal_failure_attempt(models: bool) -> (Option<HttpOutcome>, HttpOutc
     assert!(!terminal_key.is_empty());
     let old = wait_event(&server.root, "started", &held.tag);
     let terminal_pid_path = server.workspace.join(format!("terminal-{}.pid", held.tag));
-    let deadline = Instant::now() + Duration::from_secs(5);
+    let deadline = Instant::now() + Duration::from_secs(10);
     while !terminal_pid_path.exists() {
         assert!(Instant::now() < deadline, "held terminal 未启动");
         thread::sleep(Duration::from_millis(10));
@@ -300,28 +370,44 @@ fn held_terminal_failure_attempt(models: bool) -> (Option<HttpOutcome>, HttpOutc
     assert_eq!(response.status, 502);
     assert!(response.json().get("error").is_some());
     let agent_pid = u32::try_from(old["pid"].as_u64().unwrap()).unwrap();
+    let deadline = Instant::now() + Duration::from_secs(10);
     while process_alive(agent_pid) {
         assert!(Instant::now() < deadline, "崩溃 Agent 未退出");
         thread::sleep(Duration::from_millis(10));
     }
     assert!(process_alive(terminal_pid), "旧终端须仍未释放");
     let next = Plan::new("text");
-    let request = body(&next, false);
-    let port = server.port;
-    let (send, receive) = mpsc::channel();
-    let job = thread::spawn(move || {
-        let response = if models {
-            Http::open(port, "GET", "/v1/models", None, None)
+    let mut pending = PendingHttp::start(
+        cleanup,
+        server.port,
+        if models { "GET" } else { "POST" },
+        if models {
+            "/v1/models"
         } else {
-            Http::open(port, "POST", "/v1/chat/completions", Some(&request), None)
-        };
-        let result = (response.status, response.json());
-        send.send(result.clone()).unwrap();
-        result
-    });
-    let before_release = receive.recv_timeout(Duration::from_secs(1)).ok();
-    cleanup.release();
-    let eventual = job.join().unwrap();
+            "/v1/chat/completions"
+        },
+        if models {
+            None
+        } else {
+            Some(body(&next, false))
+        },
+    );
+    // 等待响应只设防挂看门狗，不把调度速度当 SLA；放行前的存活和 marker
+    // 观察证明响应/恢复没有依赖旧 terminal 自然退出。
+    let before_release = match pending.receive.recv_timeout(Duration::from_secs(10)) {
+        Ok(response) => Some(response),
+        Err(mpsc::RecvTimeoutError::Timeout) => None,
+        Err(mpsc::RecvTimeoutError::Disconnected) => panic!("HTTP 请求线程未返回结果"),
+    };
+    assert!(
+        process_alive(terminal_pid),
+        "响应观察点旧 terminal 必须仍存活"
+    );
+    assert!(
+        !pending.release.0.exists(),
+        "响应观察点旧 terminal 不得提前放行"
+    );
+    let eventual = pending.finish(before_release.clone());
     let recovered = if models {
         let recovery = Plan::new("text");
         let response = server.post(&recovery);
@@ -333,7 +419,34 @@ fn held_terminal_failure_attempt(models: bool) -> (Option<HttpOutcome>, HttpOutc
         assert_eq!(completion(&eventual.1), next.text());
         wait_event(&server.root, "started", &next.tag)
     };
-    let deadline = Instant::now() + Duration::from_secs(5);
+    let followup = Plan::new("text");
+    let response = server.post(&followup);
+    assert_eq!(response.status, 200);
+    assert_eq!(completion(&response.json()), followup.text());
+    assert_eq!(
+        wait_event(&server.root, "started", &followup.tag)["pid"],
+        recovered["pid"],
+        "恢复后的后续请求必须复用同一个 Agent"
+    );
+    let events = audit(&server.root);
+    for pid in [&old["pid"], &recovered["pid"]] {
+        assert_eq!(
+            events
+                .iter()
+                .filter(|event| event["event"] == "spawn" && &event["pid"] == pid)
+                .count(),
+            1,
+            "每个生命周期只能 spawn 一次 Agent"
+        );
+    }
+    assert_eq!(
+        events
+            .iter()
+            .filter(|event| event["event"] == "spawn")
+            .count(),
+        2
+    );
+    let deadline = Instant::now() + Duration::from_secs(10);
     while process_alive(terminal_pid) {
         assert!(Instant::now() < deadline, "released terminal 未回收");
         thread::sleep(Duration::from_millis(10));
@@ -346,6 +459,7 @@ fn held_terminal_failure_attempt(models: bool) -> (Option<HttpOutcome>, HttpOutc
 fn unreleased_terminal_after_agent_exit_does_not_block_models_response() {
     let (before_release, eventual, old, recovered) = held_terminal_failure_attempt(true);
     let response = before_release.expect("旧 terminal 未释放时 /models 命令被阻塞");
+    assert_eq!(response.0, 502, "{eventual:?}");
     // 断裂 Agent 的原始错误须明确回传，不把它改成泛化的未就绪或成功列表。
     assert_eq!(
         response.1["error"]["code"], "agent_disconnected",
@@ -363,4 +477,107 @@ fn unreleased_terminal_after_agent_exit_does_not_block_new_request_recovery() {
     assert_eq!(response.0, 200, "{eventual:?}");
     assert_eq!(response.1["object"], "chat.completion");
     assert_ne!(old["pid"], recovered["pid"]);
+}
+
+/// AH-05：真实 SDK 工具通知只作为 Agent 内部事件，JSON/SSE 仍交付完整文本。
+#[test]
+fn server_tool_events_remain_text_only() {
+    let server = server();
+    let json_plan = Plan::new("tool-events");
+    let response = server.post(&json_plan);
+    assert_eq!(response.status, 200);
+    let value = response.json();
+    assert_eq!(completion(&value), json_plan.text());
+    for choice in value["choices"].as_array().unwrap() {
+        assert!(choice["message"].is_object(), "{value}");
+        assert!(choice["message"].get("tool_calls").is_none(), "{value}");
+        assert!(choice["delta"].get("tool_calls").is_none(), "{value}");
+        assert_eq!(choice["finish_reason"], "stop", "{value}");
+    }
+
+    let stream_plan = Plan::new("tool-events");
+    let mut response = Http::open(
+        server.port,
+        "POST",
+        "/v1/chat/completions",
+        Some(&body(&stream_plan, true)),
+        None,
+    );
+    assert_eq!(response.status, 200);
+    assert!(
+        response.headers["content-type"].starts_with("text/event-stream"),
+        "{:?}",
+        response.headers
+    );
+    let mut text = String::new();
+    let mut stopped = false;
+    loop {
+        let event = response.sse();
+        let data = event
+            .lines()
+            .find_map(|line| line.strip_prefix("data: "))
+            .expect("真实 SSE 事件缺少 data");
+        if data == "[DONE]" {
+            assert!(stopped, "文本 SSE 缺少 stop 终态");
+            break;
+        }
+        let value: Value = serde_json::from_str(data).unwrap();
+        assert!(value.get("error").is_none(), "{event}");
+        assert_eq!(value["object"], "chat.completion.chunk", "{event}");
+        let choices = value["choices"].as_array().unwrap();
+        assert!(!choices.is_empty(), "{event}");
+        for choice in choices {
+            assert!(choice["delta"].is_object(), "{event}");
+            assert!(choice["delta"].get("tool_calls").is_none(), "{event}");
+            assert!(choice["message"].get("tool_calls").is_none(), "{event}");
+            if let Some(role) = choice["delta"].get("role") {
+                assert_eq!(role, "assistant", "{event}");
+            }
+            if let Some(content) = choice["delta"].get("content") {
+                text.push_str(content.as_str().expect("SSE 内容必须是文本"));
+            }
+            let finish = &choice["finish_reason"];
+            assert!(
+                finish.is_null() || finish == "stop",
+                "不得把工具通知映射成 tool_calls finish_reason：{event}"
+            );
+            stopped |= finish == "stop";
+        }
+    }
+    assert_eq!(text, stream_plan.text(), "工具事件不得吞掉或混入文本");
+
+    let followup = Plan::new("text");
+    let response = server.post(&followup);
+    assert_eq!(response.status, 200);
+    assert_eq!(completion(&response.json()), followup.text());
+    let next = wait_event(&server.root, "started", &followup.tag);
+    let events = audit(&server.root);
+    for plan in [&json_plan, &stream_plan] {
+        let started = wait_event(&server.root, "started", &plan.tag);
+        assert_eq!(started["pid"], next["pid"], "工具事件后不得换 Agent");
+        let notifications = events
+            .iter()
+            .filter(|event| event["event"] == "tool-event" && event["tag"] == plan.tag)
+            .collect::<Vec<_>>();
+        assert_eq!(notifications.len(), 2, "两种官方 SDK 通知必须真实发出");
+        for kind in ["tool_call", "tool_call_update"] {
+            let notification = notifications
+                .iter()
+                .find(|event| event["kind"] == kind)
+                .expect("缺少对应 SDK 工具通知审计");
+            assert_eq!(notification["session"], started["session"]);
+        }
+        assert_eq!(
+            notifications[0]["tool_call_id"],
+            notifications[1]["tool_call_id"]
+        );
+    }
+    assert_eq!(
+        events
+            .iter()
+            .filter(|event| event["event"] == "spawn")
+            .count(),
+        1,
+        "JSON、SSE 与正常后续请求只能使用唯一 Agent"
+    );
 }

@@ -170,9 +170,15 @@ impl Drop for FlushOnDrop {
 
 /// 进程角色识别：与三个入口（main.rs / worker main.rs）的分支条件同口径。
 fn detect_role() -> &'static str {
-    match std::env::args().nth(1).as_deref() {
-        Some("--xberg-broker") => "xberg-broker",
-        Some(flag) if flag.starts_with("--service") => "snap-ocr-service",
+    match std::env::args_os().nth(1).as_deref() {
+        Some(flag) if flag == std::ffi::OsStr::new("--xberg-broker") => "xberg-broker",
+        Some(flag)
+            if flag
+                .to_str()
+                .is_some_and(|flag| flag.starts_with("--service")) =>
+        {
+            "snap-ocr-service"
+        }
         _ => "gui",
     }
 }

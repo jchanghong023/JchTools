@@ -98,9 +98,9 @@ powershell -NoProfile -File .\scripts\package-windows.ps1
 
 - 启动程序和参数分栏保存：程序栏填写可执行文件路径，不包引号；参数栏按 Windows 引号规则处理空格与中文。本次 OpenCode 验收启动命令为 `opencode acp`：程序栏填写真实 `opencode.exe` 路径，参数栏只填 `acp`，不添加未经其公开能力支持的模型、推理或 yolo 参数。配置保存在应用状态目录的 `config.sqlite3`，默认端口 8765。
 - 打开工具箱后按有效配置启动或连接独立后台；关闭或终止 GUI 不退出服务。修改并保存配置不会打断旧请求；「应用并重启」等待已接收请求完成后生效。退出模型服务使用独立确认，Stop 可抢占正在排空的 Apply；资源回收完成后，即使收尾报错也退出后台和控制管道。退出后迟到的 Apply 不会重新拉起服务，同一次 GUI 会话也不自动重启。
-- `GET http://127.0.0.1:<端口>/v1/models` 返回 Agent 协商出的真实可选模型 ID；探测会话在首次消费前收到配置更新时，同步公开目录。将返回的 ID 用于 `POST /v1/chat/completions`，实际选择仍按目标会话当前选项核验，不将 new 响应和随后通知当成原子事件。没有可选择模型能力时明确报错，不提供假别名。
+- `GET http://127.0.0.1:<端口>/v1/models` 返回 Agent 协商出的真实可选模型 ID；每个模型包含整数 `created: 0`，表示 ACP 未提供创建时间，不伪造实际时间。探测会话在首次消费前收到配置更新时，同步公开目录。将返回的 ID 用于 `POST /v1/chat/completions`，实际选择仍按目标会话当前选项核验，不将 new 响应和随后通知当成原子事件。没有可选择模型能力时明确报错，不提供假别名。
 - `messages` 支持 `system`、`developer`、`user`、`assistant` 文本及 text 内容块；`stream: true` 返回实时 SSE。调用方不执行工具；`tools`、`tool_choice`、媒体和未实现的能力明确拒绝。
-- 默认每次请求新建会话并提交完整历史；续会话将响应的 `X-JchTools-Session-ID` 放回请求头，并提交包含上一轮实际 assistant 输出的完整历史。前缀不一致时报错；同会话串行，不同会话并发。最多 4 个执行请求和 16 个等待请求，容量满返回 429。
+- 默认每次请求新建会话并提交完整历史；续会话将响应的 `X-JchTools-Session-ID` 放回请求头，并提交包含上一轮实际 assistant 输出的完整历史。前缀不一致时报错；同会话串行，不同会话并发。prompt 发布前取消且配置与回调安全收尾成功时保留会话和历史，已排队的后续轮次仍可执行；prompt 发布后取消仍使该会话失效，后续请求须新建会话。最多 4 个执行请求和 16 个等待请求，容量满返回 429。
 - HTTP 断连只取消本轮；Agent 异常不重放任务。Windows 连接通过每 100ms 的只读 `SIO_TCP_INFO` v0 内核 TCP 状态查询观察对端关闭（该 API 要求 Windows 10 1703 或更新版本），不消费、复制管线请求字节，不替换 Mio 的事件注册；查询失败不是断连证据，会记录告警，不能据此保证缓冲管线下的关闭观察。服务只监听 `127.0.0.1`，端口占用不会自动换端口。Agent 初始工作目录为应用状态目录的 `acp-workspace`，不是源仓库。
 - 同一 Windows 用户、同一登录会话中的 OMP 通过控制管道的只读 `Discover` 自动取得实际就绪地址，再读取真实模型列表；不猜端口、不启动服务、不读启动参数或凭据。OMP 模型选择器显示 `jchtools/<真实 ID>` 和“后端 Agent 执行”，支持文本流式任务、取消与明确错误，不运行前端工具或自动重放任务。服务端启动的 ACP Agent 子进程固定带 `OMP_JCHTOOLS_DISCOVERY=0`，防止后端 OMP 再发现本服务；普通 OMP 也可用该进程开关或 `disabledProviders` 禁用发现，不改写用户配置。这是 AH-16 既有产品保护，不因真实验收改用 OpenCode 而移除；OpenCode 验收不证明其实现 OMP 的发现或模型选择器入口，也不要求启动真实 OMP。
 
@@ -161,17 +161,29 @@ powershell -NoProfile -File .\scripts\acceptance.ps1 -WithEngine   # 单命令�
 
 所有门均不运行 CI、远程、发布、ComputerUse、全局鼠标或焦点抢占测试。`gui_flow` 全部用例、`acp_service_process` 两项 `real_gui` 用例、`gui_smoke.py` / `markdown_acceptance.py` 的真实桌面 driver，以及注册全局热键的 `check_worker_root.py` 服务探测保留原测试/断言和独立入口，门中报告 `NOT_RUN_SEPARATE_USER_INSTRUCTION_REQUIRED`，不因门外而判 FAIL，也不冒报 PASS；软件渲染不等于焦点隔离，须用户当次另行明确指令才执行。库内 Slint TestingBackend、OCR 隔离 desktop / window station 用例仍在门内。适用测试缺环境/工具时报告覆盖缺口，编译或门通过不等于未运行项验收通过。
 
-显式调用 `jch-fastcheck-fulltest-slowtest-gates` 已授权该次任务必要的全级运行与重跑；普通 fulltest / slowtest 仍逐次取得当次明确授权，不继承历史授权。`--authorized` 只声明该显式技能授权或当次明确指令，不创造授权（会话软约束）；不得静默重跑到绿。
+显式调用 `jch-fastcheck-fulltest-slowtest-gates` 已授权该次任务必要的全级运行与重跑；普通 fulltest / slowtest 仍逐次取得当次明确授权，不继承历史授权。`--authorized` 只声明该显式技能授权或当次明确指令，不创造授权（会话软约束）；不得静默重跑到绿。门授权不包含真实模型调用，也不继承此前某次真实 ACP 验收的授权；真实模型验收须另行取得当次明确指令。
 
 每级使用一个共享墙钟，setup / static / format / tests / download / packaging / cleanup 全计费；只有受控 Windows Job 内实际观测的 compiler 编译独占区间、且无非编译并行工作才扣除。不能把整条 Cargo/测试/打包命令或缓存预热都扣除；混合打包只在同步等待纯 `cargo build` 且符合观测条件时扣除，其他阶段全收费。所有终止路径均输出 `total` / `compile_excluded` / `budgeted` / `limit` / `status`，`budgeted = total - compile_excluded`，超出非编译预算即失败并回收所属进程树。
 
-Job PID 枚举按内核实际填写的列表长度读取，成员增长时按 `ERROR_MORE_DATA` 扩容，不把 assigned 计数补成未初始化的 PID；仍以持有句柄及 Job 成员身份确认清理边界。非编译工作重叠时直接计费，不为检查器反复枚举编译进程。必要的 fastcheck 在相关改动成批完成后执行，输入未变的通过结果复用。
+Job PID 枚举按内核实际填写的列表长度读取，成员增长时按 `ERROR_MORE_DATA` 扩容，不把 assigned 计数补成未初始化的 PID；阶段存续期间保留已观察到的所属进程对象句柄，避免已退出 PID 在并行用例间复用造成身份误判，结束时释放句柄及 Job。不保证捕获两次采样间完整出生并退出的短命后代。仍以持有句柄及 Job 成员身份确认清理边界；观察和关闭开销计入非编译预算。非编译工作重叠时直接计费，不为检查器反复枚举编译进程。必要的 fastcheck 在相关改动成批完成后执行，输入未变的通过结果复用。
 
-独立命令使用四槽位池，短阶段完成即补位，不因同批慢测试阻塞其他可运行阶段；共享 Cargo 写缓存的不同编译维度仍串行。源码快照使用 UTF-8，记录 HEAD、dirty 摘要及工具版本，不能把中止或不同快照的结果拼成通过。
+独立命令使用四槽位池，短阶段完成即补位，不因同批慢测试阻塞其他可运行阶段；共享 Cargo 写缓存的不同编译维度仍串行。共享同一互斥资源的阶段只有在前项所属 Job 清理完成后才能启动，等待项不阻挡其他独立阶段补位；清理未确认时停止启动后续项。源码快照使用 UTF-8，记录 HEAD、dirty 摘要及工具版本，不能把中止或不同快照的结果拼成通过。
 
 正常保留 `target/`、固定 features / flags / toolchain / target / profile 矩阵并复用增量缓存，不执行 `cargo clean` 或预算外预热，不通过缩减覆盖满足预算。release 打包属于 fulltest / slowtest；CI 与发布继续独立。既有检查定义、判据、测试断言与依赖质量配置保持不变。
 
-三级门先用 `make_tmp.py workspace` 创建当前门的 `process-temp/`，再将所属子进程的 `TEMP` / `TMP` 指向该仓库 `.tmp/` 目录；不改系统环境，不清空 `target/`。真实媒体测试未显式配置时，门在最新 Xberg 身份核验通过后生成固定公开语音与独立无音轨 MP4，使用校验 SHA-256 的便携 FFmpeg 缓存和 Windows SAPI 文件输出，不播放声音、不安装全局工具；固定期望正文先于转录确定，原测试断言不变。下载、合成和转录均计入非编译预算；显式配置不完整、工具或语音缺失均不能冒充通过。
+三级门先用 `make_tmp.py workspace` 创建当前门的 `.tmp/` 日志目录；运行期 tempfile 另放仓库外同盘的本门独占临时目录，避免 Git 整树保护拒绝合成数据处理，所属子进程的 `TEMP` / `TMP` 指向该目录，终局回收。不改系统环境，不清空 `target/`。真实媒体测试未显式配置时，门在最新 Xberg 身份核验通过后生成固定公开语音与独立无音轨 MP4，使用校验 SHA-256 的便携 FFmpeg 缓存和 Windows SAPI 文件输出，不播放声音、不安装全局工具；固定期望正文先于转录确定，原测试断言不变。下载、合成和转录均计入非编译预算；显式配置不完整、工具或语音缺失均不能冒充通过。
+
+完整门在最新 Xberg 前置通过后显式运行 `xberg_assets` 的真实目录存在性用例，核对 engine / snapshot / media / document 四个场景。普通 fulltest / slowtest 不探测或自动运行真实 OpenCode 模型验收，统一报告 `real-opencode: NOT_RUN_SEPARATE_USER_INSTRUCTION_REQUIRED`；其测试 artifact 仍编译并按普通非 ignored 入口运行，其他单元、文档、打包、7-Zip、Xberg 与媒体覆盖保持不变。该门外状态既不冒报模型验收 PASS，也不据此判门 FAIL。
+
+仅在用户当次另行明确授权真实模型验收后，独立运行以下入口（不是 fulltest / slowtest 的一部分）：
+
+```powershell
+cargo test --features test-hooks --test acp_opencode -- --ignored --exact real_opencode_models_json_and_incremental_sse_single_agent --nocapture --test-threads=1
+```
+
+独立 `acp_opencode` fixture 保留 `JCHTOOLS_TEST_OPENCODE_EXE` 可配置的原生 `opencode.exe` 绝对路径；设置该变量或安装 OpenCode 只提供程序路径，不构成授权，不使用 `.cmd` 启动器代替原生程序。唯一指定模型仍为 `opencode/mimo-v2.6-flash-free`，仅单 Agent、单并发 Models / JSON / 增量 SSE；认证、Free 可用性或能力不满足时如实报告，不回退其他或付费模型。历史授权与文档中的命令均不是下一次执行的授权。
+
+真实媒体用例使用本轮带 `test-hooks` 的 `JchTools.exe` 作为 `JCHTOOLS_TEST_BROKER_EXE`，不让测试二进制误充代理。语音与无音轨两个既有用例以 `--ignored --exact` 分别在独立 Job 中执行，互斥串行且逐项回收常驻后台，避免各自的隔离设置目录之间争用会话级唯一 Xberg；媒体测试与 7-Zip、打包阶段仍可独立并行。真实 7-Zip 测试使用捆绑目录时与打包互斥，避免测试运行 `7z.exe` 期间打包下载阶段覆盖同一引擎文件；指定其他独立引擎目录时不施加该互斥。测试正文、结构和无音轨断言保持不变。
 
 代码中的删除测试全部使用 tempfile 临时夹具，不会删除测试机的个人文件。真实引擎测试有 ignore 标记，只有显式运行时启用。
 

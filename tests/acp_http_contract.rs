@@ -47,6 +47,12 @@ fn negotiated_models_are_selected_and_json_is_a_completion() {
         .collect::<Vec<_>>();
     ids.sort_unstable();
     assert_eq!(ids, vec![MODEL_A, MODEL_B]);
+    for model in list["data"].as_array().unwrap() {
+        assert!(
+            model["created"].as_u64().is_some(),
+            "Models.created 必须是非负整数：{model}"
+        );
+    }
     for model in [MODEL_B, MODEL_A] {
         let plan = Plan::new("text");
         let mut request = body(&plan, false);
@@ -287,6 +293,215 @@ fn text_roles_are_preserved_and_unsupported_inputs_are_rejected() {
             .count(),
         before
     );
+}
+
+/// AH-04：音频块（独立或混合文本）和非空音频输出选项不能被静默忽略。
+#[test]
+fn audio_inputs_and_output_options_are_rejected_before_agent_start() {
+    let server = server("normal");
+    let first = Plan::new("text");
+    let response = server.post(&first);
+    assert_eq!(response.status, 200);
+    let session = response.headers["x-jchtools-session-id"].clone();
+    assert_eq!(completion(&response.json()), first.text());
+    let first_start = wait_event(&server.root, "started", &first.tag);
+    let before = audit(&server.root)
+        .iter()
+        .filter(|event| event["event"] == "started")
+        .count();
+    for case in ["input_audio", "mixed_input_audio", "audio", "modalities"] {
+        let rejected = Plan::new("text");
+        // 已成功的完整历史加新增 user；拒绝不能被空 messages 或坏历史伪装覆盖。
+        let mut request = continuation(&first, &rejected, MODEL_A);
+        let audio = json!({"type":"input_audio","input_audio":{"data":"UklGRg==","format":"wav"}});
+        let param = match case {
+            "input_audio" => {
+                request["messages"][2]["content"] = json!([audio]);
+                "messages[2].content[0].type"
+            }
+            "mixed_input_audio" => {
+                request["messages"][2]["content"] =
+                    json!([{"type":"text","text":rejected.prompt()}, audio]);
+                "messages[2].content[1].type"
+            }
+            "audio" => {
+                request["audio"] = json!({"voice":"alloy","format":"wav"});
+                "audio"
+            }
+            "modalities" => {
+                request["modalities"] = json!(["text", "audio"]);
+                "modalities"
+            }
+            _ => unreachable!(),
+        };
+        let response = Http::open(
+            server.port,
+            "POST",
+            "/v1/chat/completions",
+            Some(&request),
+            Some(&session),
+        );
+        assert_eq!(response.status, 400, "{case}: {request}");
+        let error = response.json();
+        assert_eq!(
+            error["error"]["type"], "invalid_request_error",
+            "{case}: {error}"
+        );
+        assert_eq!(error["error"]["code"], "invalid_request", "{case}: {error}");
+        assert_eq!(error["error"]["param"], param, "{case}: {error}");
+        assert!(!audit(&server.root)
+            .iter()
+            .any(|event| event["event"] == "started" && event["tag"] == rejected.tag));
+    }
+    assert_eq!(
+        audit(&server.root)
+            .iter()
+            .filter(|event| event["event"] == "started")
+            .count(),
+        before
+    );
+    let next = Plan::new("text");
+    let response = Http::open(
+        server.port,
+        "POST",
+        "/v1/chat/completions",
+        Some(&continuation(&first, &next, MODEL_A)),
+        Some(&session),
+    );
+    assert_eq!(response.status, 200);
+    assert_eq!(completion(&response.json()), next.text());
+    let next_start = wait_event(&server.root, "started", &next.tag);
+    assert_eq!(next_start["session"], first_start["session"]);
+    assert_eq!(next_start["pid"], first_start["pid"]);
+}
+
+// 先于 Server drop 释放挂起的模型设置；显式释放与 panic 收尾均只写一次 marker。
+struct ModelSetRelease(Option<std::path::PathBuf>);
+impl ModelSetRelease {
+    fn release(&mut self) {
+        std::fs::write(self.0.as_ref().unwrap(), b"release").unwrap();
+        self.0 = None;
+    }
+}
+impl Drop for ModelSetRelease {
+    fn drop(&mut self) {
+        if let Some(marker) = self.0.take() {
+            let _released = std::fs::write(marker, b"release");
+        }
+    }
+}
+
+/// AH-04/AH-12/AH-13：prompt 尚未发出时取消，只结束该请求并保留原历史与排队轮次。
+#[test]
+fn pre_prompt_cancel_preserves_session_and_waiter() {
+    use jchtools::acp_api::{ChatMessage, MessageRole, PromptInput, RequestEvent, SessionKey};
+    let server = server("model-set-held");
+    let mut cleanup = ModelSetRelease(Some(server.root.join("release-model-set")));
+    let first = Plan::new("text");
+    let response = server.post(&first);
+    assert_eq!(response.status, 200);
+    let session = response.headers["x-jchtools-session-id"].clone();
+    let first_output = completion(&response.json()).to_owned();
+    assert_eq!(first_output, first.text());
+    let first_start = wait_event(&server.root, "started", &first.tag);
+    std::fs::write(server.root.join("hold-model-set"), b"hold").unwrap();
+    let cancelled = Plan::new("text");
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .unwrap();
+    let mut request = runtime
+        .block_on(server.backend.submit(PromptInput {
+            model: MODEL_B.into(),
+            messages: vec![
+                ChatMessage {
+                    role: MessageRole::User,
+                    text: first.prompt(),
+                },
+                ChatMessage {
+                    role: MessageRole::Assistant,
+                    text: first_output.clone(),
+                },
+                ChatMessage {
+                    role: MessageRole::User,
+                    text: cancelled.prompt(),
+                },
+            ],
+            session: Some(SessionKey(session.clone())),
+        }))
+        .unwrap();
+    let deadline = Instant::now() + Duration::from_secs(10);
+    let held = loop {
+        let events = audit(&server.root);
+        if let Some(event) = events.into_iter().find(|event| {
+            event["event"] == "model-set-held" && event["session"] == first_start["session"]
+        }) {
+            break event;
+        }
+        assert!(Instant::now() < deadline, "模型设置未到达 barrier");
+        thread::sleep(Duration::from_millis(10));
+    };
+    assert_eq!(held["pid"], first_start["pid"]);
+    // 同步设置 token，第三轮的提交一定在取消之后、设置响应放行之前。
+    request.cancellation.cancel();
+    let third = Plan::new("text");
+    let third_body = json!({"model":MODEL_A,"messages":[
+        {"role":"user","content":first.prompt()},
+        {"role":"assistant","content":first_output},
+        {"role":"user","content":third.prompt()}
+    ]});
+    let port = server.port;
+    let third_session = session.clone();
+    let waiter = thread::spawn(move || {
+        let response = Http::open(
+            port,
+            "POST",
+            "/v1/chat/completions",
+            Some(&third_body),
+            Some(&third_session),
+        );
+        (response.status, response.headers.clone(), response.json())
+    });
+    let deadline = Instant::now() + Duration::from_secs(10);
+    loop {
+        let status = server.backend.status();
+        if status.executing == 1 && status.waiting == 1 {
+            break;
+        }
+        assert!(Instant::now() < deadline, "第三轮未排队：{status:?}");
+        thread::sleep(Duration::from_millis(10));
+    }
+    assert!(!audit(&server.root).iter().any(|event| {
+        event["event"] == "started" && (event["tag"] == cancelled.tag || event["tag"] == third.tag)
+    }));
+    cleanup.release();
+    let terminal = runtime
+        .block_on(async {
+            tokio::time::timeout(Duration::from_secs(10), request.events.recv()).await
+        })
+        .unwrap();
+    request.cancellation.disarm();
+    let (status, headers, value) = waiter.join().unwrap();
+    assert_eq!(terminal, Some(RequestEvent::Cancelled));
+    assert!(!audit(&server.root)
+        .iter()
+        .any(|event| event["event"] == "started" && event["tag"] == cancelled.tag));
+    assert_eq!(
+        status, 200,
+        "早取消不得使原会话或已排队的第三轮失效：{value}"
+    );
+    assert_eq!(headers["x-jchtools-session-id"], session);
+    assert_eq!(completion(&value), third.text());
+    let third_start = wait_event(&server.root, "started", &third.tag);
+    assert_eq!(third_start["session"], first_start["session"]);
+    assert_eq!(third_start["pid"], first_start["pid"]);
+    let unrelated = Plan::new("text");
+    let response = server.post(&unrelated);
+    assert_eq!(response.status, 200);
+    assert_eq!(completion(&response.json()), unrelated.text());
+    let unrelated_start = wait_event(&server.root, "started", &unrelated.tag);
+    assert_ne!(unrelated_start["session"], first_start["session"]);
+    assert_eq!(unrelated_start["pid"], first_start["pid"]);
 }
 
 /// 覆盖 AH-04：显式续会话完整前缀包含已生成assistant；只向ACP提交新增文本。
@@ -735,7 +950,7 @@ fn assert_new_response_config_burst(server: &Server, session: &str) {
             Instant::now() < deadline,
             "未观察到原样单次 pipe write 和 A/C audit: marker={bytes:?}, audit={events:?}"
         );
-        thread::yield_now();
+        thread::sleep(Duration::from_millis(10));
     };
     let response_index = events
         .iter()
@@ -792,12 +1007,12 @@ fn wait_updated_catalog(server: &Server) {
             Instant::now() < deadline,
             "目录必须反映 A/C 更新，旧 A/B 不得永久残留：{catalog}"
         );
-        thread::yield_now();
+        thread::sleep(Duration::from_millis(10));
     }
 }
 
 /// AH-02/AH-04：未消费探测会话的 A/C 更新必须替换公开目录，不能永久保留 A/B 快照。
-/// 不 sleep、不重跑：Agent 原样一次 pipe write 两条 SDK 帧；byte pipe 不保证读取边界。
+/// 只按观测谓词通过，不靠睡够时长：Agent 原样一次 pipe write 两条 SDK 帧。
 #[test]
 fn new_session_immediate_config_update_replaces_public_model_catalog() {
     let server = server("new-response-config-update");

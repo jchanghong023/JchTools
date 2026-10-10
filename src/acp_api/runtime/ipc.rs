@@ -503,6 +503,7 @@ mod platform {
             EqualSid, GetAce, GetSecurityDescriptorDacl, GetSecurityDescriptorOwner,
             ACCESS_ALLOWED_ACE,
         };
+        use windows_sys::Win32::System::Pipes::{GetNamedPipeInfo, PeekNamedPipe};
 
         struct IsolatedRoot {
             _lock: MutexGuard<'static, ()>,
@@ -720,6 +721,170 @@ mod platform {
                 self.shutdown.cancel();
                 self.task.abort();
             }
+        }
+
+        // 大 Status 跨越真实管道 quota；非读取者不能使监听取消后永久等待 worker。
+        #[test]
+        fn status_nonreading_client_does_not_block_listener_shutdown() {
+            let _isolation = IsolatedRoot::new();
+            let frame_limit = super::super::MAX_FRAME;
+            let mut config = crate::acp_api::ServiceConfig {
+                executable: "acp-test-agent.exe".to_owned(),
+                arguments: vec![String::new()],
+                ..crate::acp_api::ServiceConfig::default()
+            };
+            let overhead = serde_json::to_vec(&config).unwrap().len();
+            config.arguments[0] = "x".repeat(frame_limit / 4 - overhead);
+            crate::acp_api::settings::validate_config(&config).unwrap();
+            crate::acp_api::settings::save_config(&config).unwrap();
+            let original = ServiceStatus {
+                phase: crate::acp_api::ServicePhase::Ready,
+                saved_config: Some(config.clone()),
+                running_config: Some(config),
+                service_pid: Some(std::process::id()),
+                ..ServiceStatus::default()
+            };
+            let response_len = serde_json::to_vec(&Response {
+                protocol: PROTOCOL,
+                pid: std::process::id(),
+                result: Ok(original.clone()),
+            })
+            .unwrap()
+            .len();
+            assert!(
+                response_len <= frame_limit,
+                "合法配置的响应必须在 MAX_FRAME 内"
+            );
+            runtime().block_on(async {
+                let (_state, status) = watch::channel(original);
+                let (commands, _requests) = mpsc::unbounded_channel();
+                let shutdown = CancellationToken::new();
+                let (ready, started) = oneshot::channel();
+                let mut server = RunningServer {
+                    task: tokio::spawn(serve(
+                        status,
+                        uuid::Uuid::new_v4(),
+                        commands,
+                        shutdown.clone(),
+                        ready,
+                    )),
+                    shutdown,
+                };
+                let mut client = None;
+                let observed = tokio::time::timeout(Duration::from_secs(10), async {
+                    started
+                        .await
+                        .map_err(|e| e.to_string())?
+                        .map_err(|e| e.message)?;
+                    // 使用未注册到 Tokio 的真实客户端，避免驱动主动预读缓解背压。
+                    // 客户端全程不调用 Read；PeekNamedPipe 仅观察，不消费任何字节。
+                    client = Some(
+                        std::fs::OpenOptions::new()
+                            .read(true)
+                            .write(true)
+                            .open(pipe_name().map_err(|e| e.message)?)
+                            .map_err(|e| e.to_string())?,
+                    );
+                    let client = client.as_mut().unwrap();
+                    let mut output_quota = 0_u32;
+                    let mut input_quota = 0_u32;
+                    // SAFETY: 客户端持有有效管道句柄，查询输出指针在调用期间有效。
+                    if unsafe {
+                        GetNamedPipeInfo(
+                            client.as_raw_handle().cast(),
+                            std::ptr::null_mut(),
+                            &raw mut output_quota,
+                            &raw mut input_quota,
+                            std::ptr::null_mut(),
+                        )
+                    } == 0
+                    {
+                        return Err(std::io::Error::last_os_error().to_string());
+                    }
+                    if response_len + 4 <= output_quota as usize {
+                        return Err(format!(
+                            "Status 未跨越管道写缓冲：frame={}, quota={output_quota}",
+                            response_len + 4
+                        ));
+                    }
+                    let request = serde_json::to_vec(&Operation::Status)
+                        .map_err(|e| e.to_string())?;
+                    let mut frame = u32::try_from(request.len())
+                        .map_err(|e| e.to_string())?
+                        .to_le_bytes()
+                        .to_vec();
+                    frame.extend_from_slice(&request);
+                    if frame.len() > input_quota as usize {
+                        return Err("Status 请求必须完整放入输入缓冲，不能阻塞测试 executor".to_owned());
+                    }
+                    std::io::Write::write_all(client, &frame).map_err(|e| e.to_string())?;
+                    loop {
+                        let mut header = [0_u8; 4];
+                        let mut copied = 0_u32;
+                        let mut available = 0_u32;
+                        // SAFETY: 不消费数据；header 和所有输出指针在调用期间有效。
+                        if unsafe {
+                            PeekNamedPipe(
+                                client.as_raw_handle().cast(),
+                                header.as_mut_ptr().cast(),
+                                4,
+                                &raw mut copied,
+                                &raw mut available,
+                                std::ptr::null_mut(),
+                            )
+                        } == 0
+                        {
+                            return Err(std::io::Error::last_os_error().to_string());
+                        }
+                        if copied == 4 && available > 4 {
+                            let actual_len = u32::from_le_bytes(header) as usize;
+                            if actual_len != response_len {
+                                return Err(format!(
+                                    "Status 响应长度错误：actual={actual_len}, expected={response_len}"
+                                ));
+                            }
+                            // 真实响应头及 body 已出现，证明请求被处理、写入已发起。
+                            // 不把内核写 pending 等同于 worker pending：Mio 可排队整帧。
+                            return Ok((available, output_quota));
+                        }
+                        tokio::task::yield_now().await;
+                    }
+                })
+                .await;
+                server.shutdown.cancel();
+                let exit = tokio::time::timeout(Duration::from_secs(10), &mut server.task).await;
+                let exited_with_client_connected = exit.is_ok();
+                // 先断开非读取者，再等待/回收测试自有服务；断言不能跳过失败路径清理。
+                drop(client);
+                let cleanup = match exit {
+                    Ok(result) => result
+                        .map_err(|e| e.to_string())
+                        .and_then(|result| result.map_err(|e| e.message)),
+                    Err(_) => {
+                        if let Ok(result) =
+                            tokio::time::timeout(Duration::from_secs(10), &mut server.task).await
+                        {
+                            result
+                                .map_err(|e| e.to_string())
+                                .and_then(|result| result.map_err(|e| e.message))
+                        } else {
+                            server.task.abort();
+                            let _ = (&mut server.task).await;
+                            Err("断开客户端后测试自有服务仍未收尾，已 abort 并 await".to_owned())
+                        }
+                    }
+                };
+                assert!(cleanup.is_ok(), "测试自有服务清理失败：{cleanup:?}");
+                assert!(
+                    matches!(observed, Ok(Ok(_))),
+                    "必须观察真实 Status 响应，不能以未处理请求的 shutdown 冒充成功：{observed:?}"
+                );
+                assert!(
+                    exited_with_client_connected,
+                    "非读取 Status 客户端仍连接时，serve 必须在 10s 看门狗内正常退出；\
+                     已先断开客户端并完成清理；响应观测={observed:?}"
+                );
+            });
         }
 
         // 覆盖 AH-15/AH-A13/AH-A14：真实同用户管道 Discover 不读配置、不进入生命周期队列。

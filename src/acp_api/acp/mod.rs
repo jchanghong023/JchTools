@@ -537,8 +537,30 @@ async fn round(
             terminal: RequestEvent::Failed(failure),
         };
     }
+    let mut prompt_published = false;
+    let result = execute_round(
+        &cx,
+        &callbacks,
+        &mut state,
+        input,
+        events,
+        cancellation,
+        &mut prompt_published,
+    )
+    .await;
+    finalize_round(&callbacks, id, key, state, result, prompt_published).await
+}
+
+// 统一真实轮次的路由收尾与会话归属判定，便于直接观察引用生命周期。
+async fn finalize_round(
+    callbacks: &Callbacks,
+    id: RequestId,
+    key: SessionKey,
+    state: SessionState,
+    mut result: Result<FinishReason, ServiceError>,
+    prompt_published: bool,
+) -> RoundResult {
     let session = state.id.clone();
-    let mut result = execute_round(&cx, &callbacks, &mut state, input, events, cancellation).await;
     callbacks
         .routes
         .lock()
@@ -551,10 +573,22 @@ async fn round(
     let (terminal, state) = match result {
         Ok(reason) => (RequestEvent::Completed { reason }, Some(state)),
         Err(failure) if failure.kind == ServiceErrorKind::Cancelled => {
-            (RequestEvent::Cancelled, None)
+            // set 已确认且 prompt 尚未发布时，Agent 历史没有变化；等待回调收尾后才归还。
+            (
+                RequestEvent::Cancelled,
+                (!prompt_published).then_some(state),
+            )
         }
         Err(failure) => (RequestEvent::Failed(failure), None),
     };
+    if state.is_none() {
+        callbacks
+            .routes
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .models
+            .remove(&session);
+    }
     RoundResult {
         id,
         key,
@@ -569,10 +603,8 @@ async fn execute_round(
     input: PromptInput,
     events: mpsc::UnboundedSender<RequestEvent>,
     cancellation: CancellationToken,
+    prompt_published: &mut bool,
 ) -> Result<FinishReason, ServiceError> {
-    if cancellation.is_cancelled() {
-        return Err(error(ServiceErrorKind::Cancelled, "请求已取消"));
-    }
     let selector_id = {
         let model = state.model.lock().unwrap_or_else(PoisonError::into_inner);
         let selector = model.as_ref().map_err(Clone::clone)?;
@@ -665,6 +697,7 @@ async fn execute_round(
             Ok(())
         })
         .map_err(|e| sdk_error(cx, e))?;
+    *prompt_published = true;
     let (result, route) = tokio::select! {
         result = &mut response => result.map_err(|_| disconnected())?,
         () = cancellation.cancelled() => {
@@ -708,10 +741,31 @@ async fn execute_round(
     Ok(reason)
 }
 
+// 每次后台被正常命令/轮次唤醒时，仅收割已完成项；不等待活终端，不另分配完成列表。
+// retain_mut 保持退休顺序，首个收尾错误只缓存一份，交由最终 Stop 完整 drain 交付。
+fn reap_retired(
+    retired: &mut Vec<tokio::task::JoinHandle<Result<(), agent_client_protocol::Error>>>,
+    first_failure: &mut Option<ServiceError>,
+) {
+    retired.retain_mut(|task| {
+        if task.is_finished() {
+            if let Some(result) = task.now_or_never() {
+                if !matches!(result, Ok(Ok(()))) && first_failure.is_none() {
+                    *first_failure =
+                        Some(error(ServiceErrorKind::Io, "ACP 旧回调或终端资源收尾失败"));
+                }
+                return false;
+            }
+        }
+        true
+    });
+}
+
 async fn finish_retired(
     retired: &mut Vec<tokio::task::JoinHandle<Result<(), agent_client_protocol::Error>>>,
+    first_failure: &mut Option<ServiceError>,
 ) -> Result<(), ServiceError> {
-    let mut result = Ok(());
+    let mut result = first_failure.take().map_or(Ok(()), Err);
     for task in retired.drain(..) {
         if !matches!(task.await, Ok(Ok(()))) && result.is_ok() {
             result = Err(error(ServiceErrorKind::Io, "ACP 旧回调或终端资源收尾失败"));
@@ -757,11 +811,38 @@ async fn initialize(
     })
 }
 
+// 只观察真实后台的退役集合；生产编译没有 observer、额外命令或公开 test-hooks API。
+#[cfg(test)]
+type RetirementObserver = Box<
+    dyn FnMut(
+            &[tokio::task::JoinHandle<Result<(), agent_client_protocol::Error>>],
+            Option<&Callbacks>,
+        ) + Send,
+>;
+
 async fn run_backend(
     processes: AgentProcessHandle,
     workspace: PathBuf,
     status: watch::Sender<ServiceStatus>,
+    commands: mpsc::UnboundedReceiver<BackendCommand>,
+) {
+    run_backend_inner(
+        processes,
+        workspace,
+        status,
+        commands,
+        #[cfg(test)]
+        None,
+    )
+    .await;
+}
+
+async fn run_backend_inner(
+    processes: AgentProcessHandle,
+    workspace: PathBuf,
+    status: watch::Sender<ServiceStatus>,
     mut commands: mpsc::UnboundedReceiver<BackendCommand>,
+    #[cfg(test)] mut observer: Option<RetirementObserver>,
 ) {
     let mut actor = Actor {
         status,
@@ -780,7 +861,9 @@ async fn run_backend(
     let mut first = None;
     let mut commands_closed = false;
     let mut retired = Vec::new();
+    let mut retired_failure = None;
     loop {
+        reap_retired(&mut retired, &mut retired_failure);
         actor.phase(ServicePhase::Starting, None);
         actor.models = Arc::new(Mutex::new(Err(error(
             ServiceErrorKind::NotReady,
@@ -797,6 +880,7 @@ async fn run_backend(
                     let startup = tokio::time::timeout(std::time::Duration::from_secs(30), initialize(&cx, workspace.clone(), &callbacks));
                     tokio::pin!(startup);
                     let probe = loop {
+                        reap_retired(&mut retired, &mut retired_failure);
                         if actor.stopping {
                             return callbacks.shutdown().await;
                         }
@@ -834,6 +918,11 @@ async fn run_backend(
                     let mut rounds = FuturesUnordered::new();
                     loop {
                         actor.schedule(&cx, &workspace, &callbacks, &mut spare, &mut rounds);
+                        reap_retired(&mut retired, &mut retired_failure);
+                        #[cfg(test)]
+                        if let Some(observer) = observer.as_mut() {
+                            observer(&retired, None);
+                        }
                         if actor.sealed && actor.requests.is_empty() {
                             if actor.stopping {
                                 // SDK 连接仍处理已知 handle 的管理回调，直到自有终端安全回收。
@@ -882,6 +971,7 @@ async fn run_backend(
                             .lock()
                             .unwrap_or_else(PoisonError::into_inner);
                         routes.active.clear();
+                        routes.models.clear();
                         routes.known.clear();
                     }
                     actor.fail_all(failure);
@@ -889,6 +979,11 @@ async fn run_backend(
                 if finish.is_err() && !actor.stopping {
                     let cleanup = callbacks.clone();
                     retired.push(tokio::spawn(async move { cleanup.shutdown().await }));
+                    reap_retired(&mut retired, &mut retired_failure);
+                    #[cfg(test)]
+                    if let Some(observer) = observer.as_mut() {
+                        observer(&retired, Some(&callbacks));
+                    }
                 } else {
                     if callbacks.shutdown().await.is_err() && finish.is_ok() {
                         finish = Err(error(
@@ -896,7 +991,7 @@ async fn run_backend(
                             "ACP 自有回调或终端资源收尾失败",
                         ));
                     }
-                    if let Err(failure) = finish_retired(&mut retired).await {
+                    if let Err(failure) = finish_retired(&mut retired, &mut retired_failure).await {
                         if finish.is_ok() {
                             finish = Err(failure);
                         }
@@ -932,6 +1027,11 @@ async fn run_backend(
         actor.fail_all(&failure);
         // 不自动重放、不主动保活重建；仅下一新请求触发 D 单实例重建。
         loop {
+            reap_retired(&mut retired, &mut retired_failure);
+            #[cfg(test)]
+            if let Some(observer) = observer.as_mut() {
+                observer(&retired, None);
+            }
             match commands.recv().await {
                 Some(command @ BackendCommand::Submit { .. }) => {
                     let old = match &command {
@@ -963,14 +1063,14 @@ async fn run_backend(
                 }
                 Some(BackendCommand::Stop { reply }) => {
                     actor.phase(ServicePhase::Stopping, None);
-                    let result = finish_retired(&mut retired).await;
+                    let result = finish_retired(&mut retired, &mut retired_failure).await;
                     actor.phase(ServicePhase::Stopped, result.as_ref().err());
                     let _ = reply.send(result);
                     return;
                 }
                 Some(command) => actor.command(command),
                 None => {
-                    let _ = finish_retired(&mut retired).await;
+                    let _ = finish_retired(&mut retired, &mut retired_failure).await;
                     return;
                 }
             }
@@ -1095,5 +1195,500 @@ mod tests {
             .unwrap_err();
         assert_eq!(failure.kind, ServiceErrorKind::QueueFull);
         assert_eq!(actor.queue.len(), MAX_WAITING);
+    }
+
+    fn lifecycle_session(id: &str) -> SessionState {
+        SessionState {
+            id: SessionId::new(id),
+            model: Arc::new(Mutex::new(Ok(ModelSelector {
+                id: SessionConfigId::new("model"),
+                values: vec![ModelDescriptor {
+                    id: "可选模型".into(),
+                    name: "模型".into(),
+                }],
+                current: "可选模型".into(),
+            }))),
+            history: vec![
+                ChatMessage {
+                    role: MessageRole::User,
+                    text: "已提交".into(),
+                },
+                ChatMessage {
+                    role: MessageRole::Assistant,
+                    text: "已完成".into(),
+                },
+            ],
+        }
+    }
+
+    async fn assert_invalid_round_releases_selector(failure: ServiceError, terminal: RequestEvent) {
+        let workspace = tempfile::tempdir().unwrap();
+        let callbacks = Callbacks::new(workspace.path().to_path_buf());
+        let invalid = lifecycle_session("invalid");
+        let invalid_id = invalid.id.clone();
+        let invalid_model = Arc::downgrade(&invalid.model);
+        let valid = lifecycle_session("valid");
+        let valid_id = valid.id.clone();
+        let valid_model = Arc::downgrade(&valid.model);
+        let valid_history = valid.history.clone();
+        let key = SessionKey("invalid-key".into());
+        let valid_key = SessionKey("valid-key".into());
+        let id = RequestId::new();
+        let (events, mut receiver) = mpsc::unbounded_channel();
+        {
+            let mut routes = callbacks
+                .routes
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner);
+            for state in [&invalid, &valid] {
+                routes.known.insert(state.id.clone());
+                routes.models.insert(state.id.clone(), state.model.clone());
+                routes.active.insert(
+                    state.id.clone(),
+                    Route {
+                        events: events.clone(),
+                        cancellation: CancellationToken::new(),
+                        text: String::new(),
+                        failure: None,
+                    },
+                );
+            }
+        }
+        let (status, _) = watch::channel(ServiceStatus::default());
+        let mut actor = Actor {
+            status,
+            sessions: HashMap::from([
+                (
+                    key.clone(),
+                    SessionSlot {
+                        state: None,
+                        invalid: false,
+                    },
+                ),
+                (
+                    valid_key.clone(),
+                    SessionSlot {
+                        state: Some(valid),
+                        invalid: false,
+                    },
+                ),
+            ]),
+            requests: HashMap::from([(
+                id.clone(),
+                Pending {
+                    key: key.clone(),
+                    input: None,
+                    events,
+                    cancellation: CancellationToken::new(),
+                },
+            )]),
+            queue: VecDeque::new(),
+            active: HashSet::from([key.clone()]),
+            models: lifecycle_session("catalog").model,
+            sealed: false,
+            stopping: false,
+            acknowledgements: Vec::new(),
+        };
+        let result = finalize_round(&callbacks, id, key.clone(), invalid, Err(failure), true).await;
+        actor.finish(result);
+        assert_eq!(receiver.try_recv().unwrap(), terminal);
+        assert!(actor.sessions[&key].invalid);
+        assert!(actor.sessions[&key].state.is_none());
+        assert!(!actor.active.contains(&key));
+        let retained = actor.sessions[&valid_key].state.as_ref().unwrap();
+        assert!(!actor.sessions[&valid_key].invalid);
+        assert_eq!(retained.id, valid_id);
+        assert_eq!(retained.history, valid_history);
+        assert!(valid_model.upgrade().is_some());
+        {
+            let routes = callbacks
+                .routes
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner);
+            assert!(
+                routes.known.contains(&invalid_id),
+                "失效会话仍需拒绝 SDK id 复用"
+            );
+            assert!(routes.known.contains(&valid_id));
+            assert!(!routes.active.contains_key(&invalid_id));
+            assert!(routes.active.contains_key(&valid_id));
+            assert!(routes.models.contains_key(&valid_id));
+        }
+        assert!(
+            invalid_model.upgrade().is_none(),
+            "失效轮次只保留 known/invalid 墓碑，不得让 routes.models 持有完整 selector"
+        );
+    }
+
+    #[tokio::test]
+    async fn failed_round_releases_selector_and_preserves_session_tombstones() {
+        let failure = error(ServiceErrorKind::Internal, "合成轮次失败");
+        assert_invalid_round_releases_selector(failure.clone(), RequestEvent::Failed(failure))
+            .await;
+    }
+
+    #[tokio::test]
+    async fn cancelled_round_releases_selector_and_preserves_session_tombstones() {
+        assert_invalid_round_releases_selector(
+            error(ServiceErrorKind::Cancelled, "合成 prompt 取消"),
+            RequestEvent::Cancelled,
+        )
+        .await;
+    }
+
+    #[tokio::test]
+    async fn completed_round_preserves_selector_and_valid_history() {
+        let workspace = tempfile::tempdir().unwrap();
+        let callbacks = Callbacks::new(workspace.path().to_path_buf());
+        let state = lifecycle_session("completed");
+        let session = state.id.clone();
+        let history = state.history.clone();
+        let model = Arc::downgrade(&state.model);
+        {
+            let mut routes = callbacks
+                .routes
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner);
+            routes.known.insert(session.clone());
+            routes.models.insert(session.clone(), state.model.clone());
+        }
+        let result = finalize_round(
+            &callbacks,
+            RequestId::new(),
+            SessionKey("completed-key".into()),
+            state,
+            Ok(FinishReason::Stop),
+            true,
+        )
+        .await;
+        assert_eq!(
+            result.terminal,
+            RequestEvent::Completed {
+                reason: FinishReason::Stop
+            }
+        );
+        let retained = result.state.unwrap();
+        assert_eq!(retained.id, session);
+        assert_eq!(retained.history, history);
+        assert!(model.upgrade().is_some());
+        let routes = callbacks
+            .routes
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner);
+        assert!(routes.known.contains(&session));
+        assert!(Arc::ptr_eq(&routes.models[&session], &retained.model));
+    }
+
+    // Stop 是完整 drain：已完成的首错必须保留，但仍安全等待尚未结束的 cleanup。
+    #[tokio::test]
+    async fn stop_drain_preserves_first_cleanup_error_and_waits_for_live_cleanup() {
+        let first =
+            tokio::spawn(async { Err(callbacks::io_error("首个 retired cleanup 失败")) });
+        let (release, held) = oneshot::channel();
+        let (finished, mut observed_finished) = oneshot::channel();
+        let live = tokio::spawn(async move {
+            // sender panic/drop 同样自然放行，不 abort/kill live cleanup。
+            let _released = held.await;
+            let _observed = finished.send(());
+            Ok(())
+        });
+        let later = tokio::spawn(async { Ok(()) });
+        tokio::time::timeout(std::time::Duration::from_secs(10), async {
+            while !first.is_finished() || !later.is_finished() {
+                tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .unwrap();
+        let mut retired = vec![first, live, later];
+        let mut first_failure = None;
+        reap_retired(&mut retired, &mut first_failure);
+        assert_eq!(retired.len(), 1, "运行期只保留尚未结束的 cleanup");
+        assert!(first_failure.is_some(), "运行期回收不能吞掉已完成项的首错");
+        let failure = {
+            let draining = finish_retired(&mut retired, &mut first_failure);
+            tokio::pin!(draining);
+            assert!(futures::poll!(draining.as_mut()).is_pending());
+            assert!(matches!(
+                observed_finished.try_recv(),
+                Err(oneshot::error::TryRecvError::Empty)
+            ));
+            release.send(()).unwrap();
+            tokio::time::timeout(std::time::Duration::from_secs(10), draining)
+                .await
+                .unwrap()
+                .unwrap_err()
+        };
+        observed_finished.await.unwrap();
+        assert!(retired.is_empty());
+        assert_eq!(failure.kind, ServiceErrorKind::Io);
+        assert_eq!(failure.message, "ACP 旧回调或终端资源收尾失败");
+    }
+    #[tokio::test]
+    async fn pre_prompt_cancel_preserves_confirmed_selector_and_history() {
+        let workspace = tempfile::tempdir().unwrap();
+        let callbacks = Callbacks::new(workspace.path().to_path_buf());
+        let state = lifecycle_session("not-published");
+        let history = state.history.clone();
+        let model = Arc::downgrade(&state.model);
+        {
+            let mut routes = callbacks
+                .routes
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner);
+            routes.known.insert(state.id.clone());
+            routes.models.insert(state.id.clone(), state.model.clone());
+        }
+        let result = finalize_round(
+            &callbacks,
+            RequestId::new(),
+            SessionKey("not-published-key".into()),
+            state,
+            Err(error(
+                ServiceErrorKind::Cancelled,
+                "set 已确认；prompt 未发布",
+            )),
+            false,
+        )
+        .await;
+        assert_eq!(result.terminal, RequestEvent::Cancelled);
+        assert_eq!(result.state.unwrap().history, history);
+        assert!(model.upgrade().is_some());
+    }
+
+    // 真正启动现有 SDK fixture，贯穿 run_backend 异常/恢复/Stop；不是退役算法副本。
+    // 要求正常恢复期间回收已完成项，未完成项仍安全托管到自然退出及最终 Stop。
+    #[cfg(windows)]
+    #[tokio::test]
+    async fn backend_reclaims_completed_retirements_during_recovery_without_dropping_live_cleanup()
+    {
+        use crate::acp_api::{
+            agent_process_channel, AgentConnection, AgentExit, AgentProcessCommand,
+        };
+        use std::{process::Stdio, sync::Weak, time::Duration};
+        use tokio_util::compat::{TokioAsyncReadCompatExt, TokioAsyncWriteCompatExt};
+
+        #[derive(Clone)]
+        struct Observation {
+            retained: usize,
+            completed: usize,
+            live: usize,
+            routes: Vec<Weak<Mutex<callbacks::Routes>>>,
+        }
+        struct ReleaseOnDrop(PathBuf);
+        impl Drop for ReleaseOnDrop {
+            fn drop(&mut self) {
+                let _ = std::fs::write(&self.0, b"release");
+            }
+        }
+        fn alive(pid: u32) -> bool {
+            use windows_sys::Win32::{
+                Foundation::{CloseHandle, WAIT_FAILED, WAIT_TIMEOUT},
+                System::Threading::{OpenProcess, WaitForSingleObject, PROCESS_SYNCHRONIZE},
+            };
+            // SAFETY: 只查询测试自有进程，不修改/终止，随后关闭本次唯一拥有的句柄。
+            let handle = unsafe { OpenProcess(PROCESS_SYNCHRONIZE, 0, pid) };
+            if handle.is_null() {
+                return false;
+            }
+            // SAFETY: handle 是本函数刚取得的有效同步句柄，零超时只查询完成状态。
+            let waited = unsafe { WaitForSingleObject(handle, 0) };
+            // SAFETY: 本函数独占该有效句柄，查询后仅在这里关闭一次。
+            unsafe { CloseHandle(handle) };
+            assert_ne!(waited, WAIT_FAILED);
+            waited == WAIT_TIMEOUT
+        }
+        let executable = std::env::current_exe().unwrap();
+        let fixture = executable
+            .parent()
+            .unwrap()
+            .parent()
+            .unwrap()
+            .join("jchtools-acp-fixture.exe");
+        assert!(
+            fixture.is_file(),
+            "先构建真实 SDK fixture：{}",
+            fixture.display()
+        );
+        let root = tempfile::tempdir().unwrap();
+        let release = ReleaseOnDrop(root.path().join("terminal-release-retirement-held"));
+        let (processes, mut connections) = agent_process_channel();
+        let (controls, mut controllers) = mpsc::unbounded_channel();
+        let fixture_root = root.path().to_path_buf();
+        let provider = tokio::spawn(async move {
+            let mut children = Vec::new();
+            while let Some(AgentProcessCommand::Connect { reply }) = connections.recv().await {
+                let mut child = tokio::process::Command::new(&fixture)
+                    .args(["--agent", fixture_root.to_str().unwrap(), "normal"])
+                    .current_dir(&fixture_root)
+                    .stdin(Stdio::piped())
+                    .stdout(Stdio::piped())
+                    .stderr(Stdio::null())
+                    .kill_on_drop(true)
+                    .spawn()
+                    .unwrap();
+                let pid = child.id().unwrap();
+                let transport = agent_client_protocol::ByteStreams::new(
+                    child.stdin.take().unwrap().compat_write(),
+                    child.stdout.take().unwrap().compat(),
+                );
+                let (exit, exited) = watch::channel(None);
+                let (finished, done) = oneshot::channel();
+                let (kill, killed) = oneshot::channel();
+                controls.send((kill, done)).unwrap();
+                reply
+                    .send(Ok(AgentConnection {
+                        transport,
+                        pid,
+                        exit: exited,
+                        finished,
+                    }))
+                    .unwrap();
+                children.push(tokio::spawn(async move {
+                    let result = tokio::select! {
+                        result = child.wait() => result,
+                        _ = killed => {
+                            child.start_kill().unwrap();
+                            child.wait().await
+                        }
+                    };
+                    let _ = exit.send(Some(AgentExit {
+                        code: result
+                            .as_ref()
+                            .ok()
+                            .and_then(std::process::ExitStatus::code),
+                        error: result.err().map(|error| error.to_string()),
+                    }));
+                }));
+            }
+            for child in children {
+                child.await.unwrap();
+            }
+        });
+        let (status, _) = watch::channel(ServiceStatus::default());
+        let (backend, commands) = backend_channel(status.subscribe());
+        let mut phases = backend.subscribe_status();
+        let (observations, mut snapshots) = mpsc::unbounded_channel();
+        let mut routes = Vec::new();
+        let observer: RetirementObserver = Box::new(move |retired, callbacks| {
+            if let Some(callbacks) = callbacks {
+                routes.push(Arc::downgrade(&callbacks.routes));
+            }
+            let completed = retired.iter().filter(|task| task.is_finished()).count();
+            let _ = observations.send(Observation {
+                retained: retired.len(),
+                completed,
+                live: retired.len() - completed,
+                routes: routes.clone(),
+            });
+        });
+        let running = tokio::spawn(run_backend_inner(
+            processes,
+            root.path().to_path_buf(),
+            status,
+            commands,
+            Some(observer),
+        ));
+        tokio::time::timeout(Duration::from_secs(10), async {
+            // 首个 Submit 不负责启动握手：等待真实 initialize + 模型探测完成后的 Ready。
+            while phases.borrow_and_update().phase != ServicePhase::Ready {
+                phases.changed().await.unwrap();
+            }
+            assert_eq!(backend.models().await.unwrap().len(), 2);
+            for index in 0..3 {
+                let action = if index == 1 { "terminal-held" } else { "text" };
+                let tag = if index == 1 { "retirement-held".into() } else { format!("retirement-{index}") };
+                let plan = serde_json::json!({
+                    "tag": tag, "action": action, "barrier": false, "chunks": ["真实恢复输出"],
+                });
+                let mut request = backend.submit(PromptInput {
+                    model: "fixture-model-a".into(),
+                    messages: vec![ChatMessage {
+                        role: MessageRole::User, text: format!("AH_FIXTURE {plan}"),
+                    }],
+                    session: None,
+                }).await.unwrap();
+                loop {
+                    match request.events.recv().await.unwrap() {
+                        RequestEvent::Completed { .. } => { request.cancellation.disarm(); break; }
+                        RequestEvent::Failed(failure) => panic!("真实 fixture 轮次失败：{failure:?}"),
+                        RequestEvent::Cancelled => panic!("真实 fixture 不应被取消"),
+                        RequestEvent::TextDelta(_) => {}
+                    }
+                }
+                let (kill, done) = controllers.recv().await.unwrap();
+                kill.send(()).unwrap();
+                assert_eq!(done.await.unwrap().unwrap_err().kind, ServiceErrorKind::AgentDisconnected);
+            }
+            // 第四个真实 Agent 正常恢复并服务 Models；旧 held terminal 不得阻塞。
+            let plan = serde_json::json!({
+                "tag": "retirement-recovered", "action": "text", "barrier": false, "chunks": ["恢复成功"],
+            });
+            let mut request = backend.submit(PromptInput {
+                model: "fixture-model-a".into(), session: None,
+                messages: vec![ChatMessage {
+                    role: MessageRole::User, text: format!("AH_FIXTURE {plan}"),
+                }],
+            }).await.unwrap();
+            while let Some(event) = request.events.recv().await {
+                if matches!(event, RequestEvent::Completed { .. }) {
+                    request.cancellation.disarm();
+                    break;
+                }
+                assert!(!matches!(event, RequestEvent::Failed(_) | RequestEvent::Cancelled));
+            }
+            let (_keep_alive, mut finished) = controllers.recv().await.unwrap();
+            let held = loop {
+                assert_eq!(backend.models().await.unwrap().len(), 2);
+                let mut latest = None;
+                while let Ok(snapshot) = snapshots.try_recv() { latest = Some(snapshot); }
+                if let Some(snapshot) = latest {
+                    if snapshot.routes.len() == 3
+                        && snapshot.live == 1
+                        && snapshot.routes[0].upgrade().is_none()
+                        && snapshot.routes[1].upgrade().is_some()
+                        && snapshot.routes[2].upgrade().is_none()
+                    { break snapshot; }
+                }
+                tokio::task::yield_now().await;
+            };
+            let terminal_pid = loop {
+                if let Ok(value) = std::fs::read_to_string(root.path().join("terminal-retirement-held.pid")) {
+                    break value.parse::<u32>().unwrap();
+                }
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            };
+            assert!(alive(terminal_pid), "恢复不得终止旧自有终端");
+            assert_eq!(held.live, 1);
+            std::fs::write(&release.0, b"release").unwrap();
+            let reclaimed = loop {
+                backend.models().await.unwrap();
+                let mut latest = None;
+                while let Ok(snapshot) = snapshots.try_recv() { latest = Some(snapshot); }
+                if let Some(snapshot) = latest {
+                    // Weak 失效早于 Tokio 发布 JoinHandle 完成位；必须另观测全部任务已完成。
+                    // 只等 live==0，不等 retained==0：未回收的完成项仍会触发下面的零留存断言。
+                    if snapshot.routes.len() == 3
+                        && snapshot.live == 0
+                        && snapshot.routes.iter().all(|route| route.upgrade().is_none())
+                    {
+                        break snapshot;
+                    }
+                }
+                tokio::task::yield_now().await;
+            };
+            assert!(!alive(terminal_pid), "回收必须等待真实自有终端退出");
+            // Stop 和当前连接 finished 的真实 oneshot 均必须成功，不能在正常回收后丢失 ACK。
+            assert!(matches!(finished.try_recv(), Err(oneshot::error::TryRecvError::Empty)));
+            backend.stop().await.unwrap();
+            finished.await.unwrap().unwrap();
+            running.await.unwrap();
+            provider.await.unwrap();
+            // 清理已完成后才报告红，断言失败不留下 held terminal 或挂起 Stop。
+            assert_eq!(held.retained, 1,
+                "仅 live cleanup 可留存；观察到 completed={}、live={}", held.completed, held.live);
+            assert_eq!(reclaimed.retained, 0,
+                "正常服务/恢复期间应回收 completed={} 个真实 cleanup", reclaimed.completed);
+        }).await.expect("10s 仅为回归 watchdog，不修改产品退出等待");
     }
 }

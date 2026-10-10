@@ -5,12 +5,15 @@
 // model-options-update 的 set 回包仅 B、prompt 随后通知 A/B；exit-immediately
 // 在 owner handoff 前真实退出。Plan.action=permission-after-cancel 在收到
 // session/cancel 后请求权限并等待 release-<tag> 才回 prompt 终态；
-// extension-interaction 用 SDK 发送未知且带 sessionId 的交互，超时后等待
-// release-<tag>，使消费者能先释放 barrier 再断言，不留下永久挂起请求。
+// extension-interaction 用 SDK 发送未知且带 sessionId 的交互，明确拒绝/超时均等待
+// release-<tag> 后记录 extension-terminal 并返回 EndTurn，保持安全终结先于 HTTP 交付。
 // mode=barrier-held 保留正常行为，但 Plan.barrier 不自动超时，仅 cancel/release 放行。
 // mode=cancel-exit 只在真实 session/cancel 到达后以75异常退出，不回 prompt 终态。
 // mode=new-response-config-update：初始探测回 A/B 后通知 A/C，后续会话报告当前 A/C；
 // stdout writer 原样聚合 response/update 为一次 pipe write，consumer 保持真实 ChildStdout。
+// model-set-held 仅在 hold-model-set 存在时延迟 set 回包，release-model-set 一次放行后持续有效；
+// initialize-held 等待 release-initialize；两种屏障独立于 dispatch、持锁区间，有10秒看门狗。
+// Plan.action=tool-events 发送真正的 ToolCall/ToolCallUpdate 通知后输出正常文本。
 #![allow(dead_code, clippy::unwrap_used, clippy::expect_used)]
 
 use agent_client_protocol::schema::v1::{
@@ -21,8 +24,9 @@ use agent_client_protocol::schema::v1::{
     PromptResponse, ReadTextFileRequest, ReleaseTerminalRequest, RequestPermissionRequest,
     SessionConfigOption, SessionConfigOptionCategory, SessionConfigSelectOption, SessionId,
     SessionNotification, SessionUpdate, SetSessionConfigOptionRequest,
-    SetSessionConfigOptionResponse, StopReason, TerminalOutputRequest, ToolCallUpdate,
-    ToolCallUpdateFields, ToolKind, WaitForTerminalExitRequest, WriteTextFileRequest,
+    SetSessionConfigOptionResponse, StopReason, TerminalOutputRequest, ToolCall, ToolCallStatus,
+    ToolCallUpdate, ToolCallUpdateFields, ToolKind, WaitForTerminalExitRequest,
+    WriteTextFileRequest,
 };
 use agent_client_protocol::{Agent, Client, ConnectionTo, Responder, Stdio, UntypedMessage};
 use serde::{Deserialize, Serialize};
@@ -88,6 +92,27 @@ impl State {
             .unwrap();
         writeln!(file, "{event}").unwrap();
         file.flush().unwrap();
+    }
+}
+/// 仅释放 fixture 自有 marker；future 被取消/异常退出也给后续请求留下放行机会。
+struct FixtureRelease(PathBuf);
+impl FixtureRelease {
+    async fn wait(&self, timeout_message: &'static str) -> agent_client_protocol::Result<()> {
+        let deadline = std::time::Instant::now() + Duration::from_secs(10);
+        while !self.0.exists() {
+            if std::time::Instant::now() >= deadline {
+                return Err(Error::new(-32043, timeout_message));
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        Ok(())
+    }
+}
+impl Drop for FixtureRelease {
+    fn drop(&mut self) {
+        if !self.0.exists() {
+            let _released = std::fs::write(&self.0, b"cleanup");
+        }
     }
 }
 fn model_config_id(mode: &str) -> &'static str {
@@ -370,16 +395,11 @@ async fn turn(
             Err(_) => json!({"timed_out":true}),
         };
         locked(state).audit(&json!({"event":"extension-result","tag":plan.tag,"outcome":outcome}));
-        if outcome["timed_out"] == true {
-            let deadline = std::time::Instant::now() + Duration::from_secs(10);
-            while !root.join(format!("release-{}", plan.tag)).exists() {
-                if std::time::Instant::now() >= deadline {
-                    return responder
-                        .respond_with_error(Error::new(-32043, "extension release timeout"));
-                }
-                tokio::time::sleep(Duration::from_millis(10)).await;
-            }
+        let release = FixtureRelease(root.join(format!("release-{}", plan.tag)));
+        if let Err(error) = release.wait("extension release timeout").await {
+            return responder.respond_with_error(error);
         }
+        locked(state).audit(&json!({"event":"extension-terminal","tag":plan.tag,"session":request.session_id,"pid":std::process::id()}));
         // Agent 忽略交互失败仍返回 EndTurn：适配层必须保留回调失败，不能伪报 HTTP 成功。
         return responder.respond(PromptResponse::new(StopReason::EndTurn));
     }
@@ -392,6 +412,26 @@ async fn turn(
         locked(state).audit(
             &json!({"event":"config-update","tag":plan.tag,"config_options":config_options}),
         );
+    }
+    if plan.action == "tool-events" {
+        let tool_id = format!("fixture-tool-{}", plan.tag);
+        cx.send_notification(SessionNotification::new(
+            request.session_id.clone(),
+            SessionUpdate::ToolCall(
+                ToolCall::new(tool_id.clone(), "工具事件探针")
+                    .kind(ToolKind::Execute)
+                    .status(ToolCallStatus::InProgress),
+            ),
+        ))?;
+        locked(state).audit(&json!({"event":"tool-event","tag":plan.tag,"session":request.session_id,"kind":"tool_call","tool_call_id":tool_id}));
+        cx.send_notification(SessionNotification::new(
+            request.session_id.clone(),
+            SessionUpdate::ToolCallUpdate(ToolCallUpdate::new(
+                tool_id.clone(),
+                ToolCallUpdateFields::new().status(ToolCallStatus::Completed),
+            )),
+        ))?;
+        locked(state).audit(&json!({"event":"tool-event","tag":plan.tag,"session":request.session_id,"kind":"tool_call_update","tool_call_id":tool_id}));
     }
     // 首段在外部 barrier 释放前发送；消费者必须实际收到它才能释放 barrier。
     if plan.action == "text" {
@@ -418,8 +458,9 @@ async fn turn(
     let result = callbacks(&plan, &request.session_id, &cwd, cx).await;
     match result {
         Ok(text) => {
-            if plan.action == "text" {
-                for chunk in plan.chunks.iter().skip(1) {
+            if plan.action == "text" || plan.action == "tool-events" {
+                let first = usize::from(plan.action == "text");
+                for chunk in plan.chunks.iter().skip(first) {
                     delta(cx, &request.session_id, chunk.clone())?;
                 }
             } else {
@@ -647,19 +688,35 @@ async fn serve(root: PathBuf, mode: String) -> agent_client_protocol::Result<()>
         .on_receive_request(
             {
                 let state = state.clone();
-                async move |request: InitializeRequest, responder, _cx| {
-                    let state = locked(&state);
-                    state.audit(
-                        &json!({"event":"initialize","capabilities":request.client_capabilities}),
-                    );
-                    if state.mode.starts_with("handshake-error") {
-                        return responder
-                            .respond_with_error(Error::new(-32044, "fixture initialize failed"));
+                async move |request: InitializeRequest, responder, cx| {
+                    let release = {
+                        let state = locked(&state);
+                        state.audit(
+                            &json!({"event":"initialize","capabilities":request.client_capabilities}),
+                        );
+                        if state.mode.starts_with("handshake-error") {
+                            return responder
+                                .respond_with_error(Error::new(-32044, "fixture initialize failed"));
+                        }
+                        if state.mode == "initialize-held" {
+                            let release = FixtureRelease(state.root.join("release-initialize"));
+                            state.audit(&json!({"event":"initialize-held","pid":std::process::id()}));
+                            Some(release)
+                        } else {
+                            None
+                        }
+                    };
+                    let response = InitializeResponse::new(request.protocol_version)
+                        .agent_capabilities(AgentCapabilities::new());
+                    if let Some(release) = release {
+                        // 不阻塞 SDK dispatch；cancel/其他会话仍可到达。锁已在上方词法块释放。
+                        cx.spawn(async move {
+                            let result = release.wait("initialize release timeout").await;
+                            responder.respond_with_result(result.map(|()| response))
+                        })
+                    } else {
+                        responder.respond(response)
                     }
-                    responder.respond(
-                        InitializeResponse::new(request.protocol_version)
-                            .agent_capabilities(AgentCapabilities::new()),
-                    )
                 }
             },
             agent_client_protocol::on_receive_request!(),
@@ -724,50 +781,73 @@ async fn serve(root: PathBuf, mode: String) -> agent_client_protocol::Result<()>
         .on_receive_request(
             {
                 let state = state.clone();
-                async move |request: SetSessionConfigOptionRequest, responder, _cx| {
+                async move |request: SetSessionConfigOptionRequest, responder, cx| {
                     let value = serde_json::to_value(&request.value).unwrap();
                     let model = value
                         .as_str()
                         .or_else(|| value.get("value").and_then(Value::as_str))
                         .unwrap_or("");
-                    let mut state = locked(&state);
-                    let allowed = if state.mode == "model-options-expand" {
-                        vec![MODEL_A, MODEL_B, MODEL_C]
-                    } else if state.mode == "new-response-config-update" {
-                        vec![MODEL_A, MODEL_C]
-                    } else {
-                        vec![MODEL_A, MODEL_B]
+                    let (config_options, release) = {
+                        let mut state = locked(&state);
+                        let allowed = if state.mode == "model-options-expand" {
+                            vec![MODEL_A, MODEL_B, MODEL_C]
+                        } else if state.mode == "new-response-config-update" {
+                            vec![MODEL_A, MODEL_C]
+                        } else {
+                            vec![MODEL_A, MODEL_B]
+                        };
+                        if request.config_id.to_string() != model_config_id(&state.mode)
+                            || !allowed.contains(&model)
+                        {
+                            return responder
+                                .respond_with_error(Error::new(-32602, "unknown fixture model"));
+                        }
+                        state
+                            .sessions
+                            .get_mut(&request.session_id.to_string())
+                            .unwrap()
+                            .model = model.into();
+                        let mut config_options = options(model, &state.mode);
+                        match state.mode.as_str() {
+                            "model-category-missing" => config_options[0].category = None,
+                            "model-category-unknown" => {
+                                config_options[0].category = Some(
+                                    SessionConfigOptionCategory::Other("_vendor_unknown".into()),
+                                );
+                            }
+                            "model-options-expand" | "new-response-config-update" => {
+                                config_options = options_for(model, &state.mode, &[MODEL_A, MODEL_C]);
+                            }
+                            "model-options-update" if model == MODEL_B => {
+                                config_options = options_for(model, &state.mode, &[MODEL_B]);
+                            }
+                            _ => {}
+                        }
+                        state.audit(&json!({"event":"model","session":request.session_id,"model":model,
+                            "config_id":request.config_id,"config_options":config_options}));
+                        let release_path = state.root.join("release-model-set");
+                        let release = if state.mode == "model-set-held"
+                            && state.root.join("hold-model-set").exists()
+                            && !release_path.exists()
+                        {
+                            let release = FixtureRelease(release_path);
+                            state.audit(&json!({"event":"model-set-held","session":request.session_id,"pid":std::process::id()}));
+                            Some(release)
+                        } else {
+                            None
+                        };
+                        (config_options, release)
                     };
-                    if request.config_id.to_string() != model_config_id(&state.mode)
-                        || !allowed.contains(&model)
-                    {
-                        return responder
-                            .respond_with_error(Error::new(-32602, "unknown fixture model"));
+                    let response = SetSessionConfigOptionResponse::new(config_options);
+                    if let Some(release) = release {
+                        // 不持 MutexGuard 跨 await，也不把其它会话/cancel 卡在 SDK dispatch。
+                        cx.spawn(async move {
+                            let result = release.wait("model set release timeout").await;
+                            responder.respond_with_result(result.map(|()| response))
+                        })
+                    } else {
+                        responder.respond(response)
                     }
-                    state
-                        .sessions
-                        .get_mut(&request.session_id.to_string())
-                        .unwrap()
-                        .model = model.into();
-                    let mut config_options = options(model, &state.mode);
-                    match state.mode.as_str() {
-                        "model-category-missing" => config_options[0].category = None,
-                        "model-category-unknown" => {
-                            config_options[0].category = Some(
-                                SessionConfigOptionCategory::Other("_vendor_unknown".into()),
-                            );
-                        }
-                        "model-options-expand" | "new-response-config-update" => {
-                            config_options = options_for(model, &state.mode, &[MODEL_A, MODEL_C]);
-                        }
-                        "model-options-update" if model == MODEL_B => {
-                            config_options = options_for(model, &state.mode, &[MODEL_B]);
-                        }
-                        _ => {}
-                    }
-                    state.audit(&json!({"event":"model","session":request.session_id,"model":model,
-                        "config_id":request.config_id,"config_options":config_options}));
-                    responder.respond(SetSessionConfigOptionResponse::new(config_options))
                 }
             },
             agent_client_protocol::on_receive_request!(),
