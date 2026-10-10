@@ -497,7 +497,7 @@ def _collect_file_tests(path: Path) -> list[dict[str, object]]:
     # 全部属性跨度（供逐测试回溯/前瞻；#![ ] 内层属性只出现在文件头，不会被测试链到）
     attrs = _attr_spans(text)
     rows: list[dict[str, object]] = []
-    for match in re.finditer(r"#\[test\]", text):
+    for match in re.finditer(r"#\[(?:tokio::)?test(?:\([^]]*\))?\]", text):
         cfgs, ignored = _test_gates(text, attrs, match, file_cfgs, mod_spans)
         name_match = re.match(r"[^{};]*?fn\s+(\w+)\s*\(", text[match.end() :])
         if not name_match:
@@ -528,7 +528,7 @@ _RUST_TRIVIA = re.compile("|".join(_RUST_TRIVIA_ALTS), re.DOTALL)
 
 
 def _test_body_hash(text: str, signature_end: int) -> str:
-    """取 #[test] 函数体内容并哈希（sha256 前 16 位十六进制）.
+    """取普通或 Tokio 异步测试函数体内容并哈希（sha256 前 16 位十六进制）.
 
     签名（参数/返回值/where 子句）内不含花括号，函数体从其后第一个 "{" 起；
     在剔除注释与字面量后的等长文本上做朴素配对找闭合 "}"，对原文切片哈希。
@@ -553,7 +553,7 @@ def _test_body_hash(text: str, signature_end: int) -> str:
 
 
 def collect_tests() -> list[dict[str, object]]:
-    # 提取 src/ 与 tests/ 全部 #[test]。基线键包含生效门禁（cfg）：
+    # 提取 src/ 与 tests/ 全部 #[test] / #[tokio::test]。基线键包含生效门禁（cfg）：
     #   1) 文件级 #![cfg(...)]（仅扫文件头部内层属性区）；
     #   2) 包裹测试的 #[cfg(...)] mod 块（花括号配对取范围；cfg(test) 恒真不计）；
     #   3) 紧贴 #[test] 的属性块（前后均可，方括号配对，支持 not(windows) 等嵌套括号）。
