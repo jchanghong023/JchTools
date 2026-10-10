@@ -883,10 +883,16 @@ def scope_and_delivery() -> str:
 
 
 _REQUIREMENT_DOCS = [
+    "docs/requirements/README.md",
     "docs/requirements/CONTRACT.md",
+    "docs/requirements/RECURSIVE-EXTRACT.md",
+    "docs/requirements/DIRECTORY-ORGANIZER.md",
+    "docs/requirements/MD-TOOLS.md",
+    "docs/requirements/GIT-TOOLS.md",
     "docs/requirements/ALL2MARKDOWN.md",
     "docs/requirements/SNAP2TEXT.md",
     "docs/requirements/XBERG-INFERENCE.md",
+    "docs/requirements/ACP-MODEL-SERVICE.md",
 ]
 
 
@@ -896,7 +902,7 @@ _MIN_REQUIREMENT_DOC_LINES = 10
 def requirements_registry() -> str:
     """固定需求目录的权威清单执法：文档在场、非空壳且无未登记项.
 
-    四份需求文档必须在场且非空壳，目录内不得出现未登记的额外 .md
+    登记的需求文档及索引必须在场且非空壳，目录内不得出现未登记的额外 .md
     （新增需求文档须先更新 AGENTS.md 权威分工与本清单）。
     """
     for path in _REQUIREMENT_DOCS:
@@ -913,7 +919,7 @@ def requirements_registry() -> str:
     if extra:
         detail = f"docs/requirements/ 存在未登记的需求文档（先更新 AGENTS.md 权威分工与本检查清单）：{extra}"
         raise AssertionError(detail)
-    return f"固定需求目录四份权威文档在场，无未登记文档：{sorted(expected)}"
+    return f"固定需求目录 {len(expected)} 份权威文档及索引在场，无未登记文档：{sorted(expected)}"
 
 
 def snap_pipe_command_sync() -> str:
