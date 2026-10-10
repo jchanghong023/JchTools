@@ -1,17 +1,46 @@
 ﻿#requires -Version 5.1
 [CmdletBinding()]
-param([switch]$SkipTests, [switch]$Offline)
+param(
+    [switch]$SkipTests,
+    [switch]$Offline,
+    [string]$DestinationRoot,
+    [string]$GateTimingFile
+)
 $ErrorActionPreference = 'Stop'
 Set-StrictMode -Version Latest
-if ($env:OS -ne 'Windows_NT') {throw 'Use Windows 11 / Windows build CI for the Windows release.'}
 $root = [IO.Path]::GetFullPath((Join-Path $PSScriptRoot '..'))
 Set-Location -LiteralPath $root
+if ($DestinationRoot) {
+    if (-not [IO.Path]::IsPathRooted($DestinationRoot)) {$DestinationRoot = Join-Path $root $DestinationRoot}
+    $DestinationRoot = [IO.Path]::GetFullPath($DestinationRoot)
+} else {
+    $DestinationRoot = Join-Path $root 'dist'
+}
+function Set-GateCompiling([bool]$Compiling) {
+    if (-not $GateTimingFile) {return}
+    # A partial read is deliberately not evidence of a compile-only phase.
+    $json = if ($Compiling) {'{"compiling":true}'} else {'{"compiling":false}'}
+    [IO.File]::WriteAllText($GateTimingFile, $json, (New-Object Text.UTF8Encoding($false)))
+}
+if ($GateTimingFile) {
+    if (-not [IO.Path]::IsPathRooted($GateTimingFile)) {$GateTimingFile = Join-Path $root $GateTimingFile}
+    $GateTimingFile = [IO.Path]::GetFullPath($GateTimingFile)
+    New-Item -ItemType Directory -Path (Split-Path -Parent $GateTimingFile) -Force | Out-Null
+    Set-GateCompiling $false
+}
+if ($env:OS -ne 'Windows_NT') {throw 'Use Windows 11 / Windows build CI for the Windows release.'}
 if (-not (Get-Command cargo -ErrorAction SilentlyContinue)) {throw 'Developer prerequisite: Rust stable MSVC toolchain, Visual Studio C++ Build Tools, Windows SDK. End users do not need these.'}
 $hostInfo = & rustc -vV | Out-String
 if ($LASTEXITCODE -ne 0 -or $hostInfo -notmatch 'host: x86_64-pc-windows-msvc') {throw 'Select the x86_64-pc-windows-msvc Rust toolchain before packaging this x64 build.'}
 function Invoke-Cargo([string[]]$Arguments) {
-    & cargo @Arguments
-    if ($LASTEXITCODE -ne 0) {throw "cargo $($Arguments -join ' ') failed: $LASTEXITCODE"}
+    $buildPhase = $Arguments.Count -gt 0 -and $Arguments[0] -eq 'build'
+    try {
+        if ($buildPhase) {Set-GateCompiling $true}
+        & cargo @Arguments
+        if ($LASTEXITCODE -ne 0) {throw "cargo $($Arguments -join ' ') failed: $LASTEXITCODE"}
+    } finally {
+        if ($buildPhase) {Set-GateCompiling $false}
+    }
 }
 $archiveEngine = Join-Path $root 'resources\7zip\7z.exe'
 $archiveDll = Join-Path $root 'resources\7zip\7z.dll'
@@ -61,7 +90,7 @@ if (-not (Test-Path -LiteralPath $workerExe -PathType Leaf)) {throw "Optional OC
 $builtWorkerBytes = (Get-Item -LiteralPath $workerExe).Length
 if ($builtWorkerBytes -le 0) {throw 'Optional OCR worker executable is empty.'}
 $builtWorkerSha = (Get-FileHash -LiteralPath $workerExe -Algorithm SHA256).Hash.ToLowerInvariant()
-$optionalStage = Join-Path $root 'dist\optional-components-v0.1.2'
+$optionalStage = Join-Path $DestinationRoot 'optional-components-v0.1.2'
 New-Item -ItemType Directory -Path $optionalStage -Force | Out-Null
 $stagedWorker = Join-Path $optionalStage 'snap-ocr-worker.exe'
 Copy-Item -LiteralPath $workerExe -Destination $stagedWorker -Force
@@ -117,7 +146,7 @@ foreach ($file in $engineManifest.files) {
     $path = Join-Path 'resources\7zip' $file.name
     if ((Get-FileHash -LiteralPath $path -Algorithm SHA256).Hash.ToLowerInvariant() -cne $file.sha256) {throw "Bundled engine hash mismatch: $($file.name)"}
 }
-$folder = Join-Path $root "dist\JchTools-Windows-x64-$stamp"
+$folder = Join-Path $DestinationRoot "JchTools-Windows-x64-$stamp"
 New-Item -ItemType Directory -Path $folder | Out-Null
 Copy-Item -LiteralPath (Join-Path $releaseDir 'JchTools.exe') -Destination $folder
 # 引擎已内嵌进 EXE；发布目录只保留许可证、NOTICE 与上游源码（LGPL 要求），
@@ -166,6 +195,13 @@ $metadata = ($metadataRaw | Out-String) | ConvertFrom-Json
 $noticeRoot = Join-Path $folder 'third-party-rust'
 New-Item -ItemType Directory -Path $noticeRoot | Out-Null
 $licenseIndex = @()
+# AH-11：源码归属清单补齐发布 crate 归档中遗漏的上游许可证。
+$sourceManifest = Get-Content -LiteralPath 'vendor\SOURCES.json' -Raw -Encoding UTF8 | ConvertFrom-Json
+$sourceIndex = @{}
+foreach ($sourcePackage in $sourceManifest.packages) {
+    $sourceIndex["$($sourcePackage.name)@$($sourcePackage.version)"] = $sourcePackage
+}
+Copy-Item -LiteralPath 'vendor\SOURCES.json' -Destination (Join-Path $noticeRoot 'SOURCES.json')
 foreach ($package in $metadata.packages) {
     if ($package.name -eq 'jchtools') {continue}
     $packageRoot = Split-Path -Parent $package.manifest_path
@@ -177,7 +213,23 @@ foreach ($package in $metadata.packages) {
         if (Test-Path -LiteralPath $explicit) {$licenseFiles += Get-Item -LiteralPath $explicit}
     }
     foreach ($file in ($licenseFiles | Sort-Object FullName -Unique)) {Copy-Item -LiteralPath $file.FullName -Destination (Join-Path $dest $file.Name) -Force}
-    $licenseIndex += @{name=$package.name;version=$package.version;license=$package.license;repository=$package.repository;license_files=$licenseFiles.Count}
+    $sourcePackage = $sourceIndex["$($package.name)@$($package.version)"]
+    $supplements = @()
+    if ($sourcePackage) {
+        $supplements = @($sourcePackage.supplemental_materials)
+        $supplementNumber = 0
+        foreach ($relative in $supplements) {
+            $supplementNumber += 1
+            $source = Join-Path $root $relative
+            if (-not (Test-Path -LiteralPath $source -PathType Leaf)) {throw "Missing recorded upstream license: $relative"}
+            # 完整来源由 SOURCES.json 保留；随包短名按清单顺序编号，避免 MAX_PATH 与重名覆盖。
+            $shortName = "{0:D3}-{1}" -f $supplementNumber, (Split-Path -Path $relative -Leaf)
+            $destination = Join-Path (Join-Path $dest 'supplemental') $shortName
+            New-Item -ItemType Directory -Path (Split-Path -Parent $destination) -Force | Out-Null
+            Copy-Item -LiteralPath $source -Destination $destination
+        }
+    }
+    $licenseIndex += @{name=$package.name;version=$package.version;license=$package.license;repository=$package.repository;license_files=$licenseFiles.Count;supplemental_files=$supplements}
 }
 $utf8 = New-Object Text.UTF8Encoding($false)
 [IO.File]::WriteAllText((Join-Path $noticeRoot 'index.json'),($licenseIndex | ConvertTo-Json -Depth 5),$utf8)
@@ -214,11 +266,12 @@ if (-not $isccPath) {
 $info = @{created=(Get-Date).ToUniversalTime().ToString('o');rustc=(& rustc --version | Out-String).Trim();tests= $(if($SkipTests){'NOT RUN'}else{'cargo tests and real-engine archive tests passed on this build machine'});installer=$(if($isccPath){'NOT VERIFIED (this record was captured before the installer compiler completed)'}else{$setupSummary});windows_ui_manual='NOT VERIFIED BY THIS SCRIPT';multi_tb_benchmark='NOT VERIFIED BY THIS SCRIPT';source_validation='Use local Windows test evidence for functional acceptance; CI only compiles and packages.'}
 [IO.File]::WriteAllText((Join-Path $folder 'BUILD-INFO.json'),($info | ConvertTo-Json -Depth 5),$utf8)
 if ($isccPath) {
-    & $isccPath "/DSourceDir=$folder" "/DOutputDir=$(Join-Path $root 'dist')" "/DVersion=$version" (Join-Path $root 'installer\JchTools.iss')
+    & $isccPath "/DSourceDir=$folder" "/DOutputDir=$DestinationRoot" "/DVersion=$version" (Join-Path $root 'installer\JchTools.iss')
     if ($LASTEXITCODE -ne 0) { throw "Inno Setup compiler failed: $LASTEXITCODE" }
-    $setup = Join-Path $root 'dist\JchTools-Setup-x64.exe'
-    if (-not (Test-Path -LiteralPath $setup)) { throw 'Installer was not produced at dist\JchTools-Setup-x64.exe' }
-    $setupSummary = 'built dist\JchTools-Setup-x64.exe (per-user install, desktop shortcut, start menu, uninstall entry)'
+    $setup = Join-Path $DestinationRoot 'JchTools-Setup-x64.exe'
+    $setupLocation = if ($PSBoundParameters.ContainsKey('DestinationRoot')) {$setup} else {'dist\JchTools-Setup-x64.exe'}
+    if (-not (Test-Path -LiteralPath $setup)) { throw "Installer was not produced at $setupLocation" }
+    $setupSummary = "built $setupLocation (per-user install, desktop shortcut, start menu, uninstall entry)"
     Write-Host "Created: $setup"
 } else {
     Write-Warning "Inno Setup (ISCC.exe) not found: installer NOT RUN; portable ZIP is still produced."

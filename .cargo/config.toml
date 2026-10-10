@@ -1,3 +1,10 @@
 [target.x86_64-pc-windows-msvc]
 # Keep the portable Windows application independent of a separately installed MSVC runtime.
 rustflags = ["-C", "target-feature=+crt-static"]
+
+# AH-14：直接、传递、构建及测试依赖固定解析到仓库内源码。
+[source.crates-io]
+replace-with = "vendored-sources"
+
+[source.vendored-sources]
+directory = "vendor"

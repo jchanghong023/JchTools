@@ -13,6 +13,7 @@ mod generated_ui {
 pub use generated_ui::*;
 
 use crate::{
+    acp_api::{runtime as acp_runtime, settings as acp_settings, ServiceConfig, ServiceStatus},
     config::{Config, DeleteChoice},
     control::{Context, Control, Event, PlanSnapshot},
     db::Database,
@@ -53,7 +54,449 @@ enum SnapMessage {
     Service(Result<serde_json::Value, String>, bool),
 }
 
-/// 当前工具（P-02 六个注册工具）：决定规则分区集合、流程与状态文案。
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum AcpOperation {
+    Ensure,
+    Save,
+    Apply,
+    Stop,
+}
+
+impl AcpOperation {
+    fn text(self) -> &'static str {
+        match self {
+            Self::Ensure => "连接",
+            Self::Save => "保存",
+            Self::Apply => "应用并重启",
+            Self::Stop => "退出",
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct AcpRequest {
+    id: u64,
+    operation: AcpOperation,
+}
+
+impl AcpRequest {
+    const CONNECT: Self = Self {
+        id: 0,
+        operation: AcpOperation::Ensure,
+    };
+}
+
+enum AcpCommand {
+    Ensure,
+    Save {
+        executable: String,
+        arguments: String,
+        port: String,
+        stopped: bool,
+    },
+    Apply,
+    Stop,
+}
+
+impl AcpCommand {
+    fn operation(&self) -> AcpOperation {
+        match self {
+            Self::Ensure => AcpOperation::Ensure,
+            Self::Save { .. } => AcpOperation::Save,
+            Self::Apply => AcpOperation::Apply,
+            Self::Stop => AcpOperation::Stop,
+        }
+    }
+}
+
+enum AcpMessage {
+    Snapshot(u64, std::result::Result<ServiceStatus, String>),
+    Completed(AcpRequest, std::result::Result<ServiceStatus, String>),
+}
+
+/// AH-06/AH-07：IPC、SQLite、启动和安全收尾均不进入界面线程。
+/// 丢弃本句柄只停止观察，不取消后台操作或关闭 Agent。
+struct AcpObserver {
+    commands: mpsc::Sender<(AcpRequest, AcpCommand)>,
+    stops: mpsc::Sender<(AcpRequest, AcpCommand)>,
+    explicitly_stopped: Arc<std::sync::atomic::AtomicBool>,
+    closed: Arc<std::sync::atomic::AtomicBool>,
+}
+impl Drop for AcpObserver {
+    fn drop(&mut self) {
+        self.closed.store(true, Ordering::Release);
+    }
+}
+
+fn run_acp_commands(
+    receiver: &mpsc::Receiver<(AcpRequest, AcpCommand)>,
+    sender: &mpsc::Sender<AcpMessage>,
+    closed: &std::sync::atomic::AtomicBool,
+    explicitly_stopped: &std::sync::atomic::AtomicBool,
+) {
+    loop {
+        let (request, command) = match receiver.recv_timeout(Duration::from_millis(250)) {
+            Ok(command) => command,
+            Err(mpsc::RecvTimeoutError::Timeout) => {
+                if closed.load(Ordering::Acquire) {
+                    break;
+                }
+                continue;
+            }
+            Err(mpsc::RecvTimeoutError::Disconnected) => break,
+        };
+        if explicitly_stopped.load(Ordering::Acquire)
+            && matches!(command, AcpCommand::Ensure | AcpCommand::Apply)
+        {
+            // 确认退出后，尚未开始的自动连接/应用不得重开本 GUI 的服务。
+            continue;
+        }
+        let result = match command {
+            AcpCommand::Ensure => acp_runtime::ensure_started(),
+            AcpCommand::Save {
+                executable,
+                arguments,
+                port,
+                stopped,
+            } => (|| {
+                let config = ServiceConfig {
+                    executable,
+                    arguments: acp_settings::parse_arguments(&arguments)?,
+                    port: acp_settings::parse_port(&port)?,
+                };
+                acp_settings::validate_config(&config)?;
+                if stopped || explicitly_stopped.load(Ordering::Acquire) {
+                    // 当前 GUI 主动退出后只持久保存，不隐式重开服务（AH-10）。
+                    acp_settings::save_config(&config)?;
+                    acp_runtime::status()
+                } else {
+                    acp_runtime::save_config(&config)
+                }
+            })(),
+            AcpCommand::Apply => acp_runtime::apply_and_restart(),
+            AcpCommand::Stop => acp_runtime::stop(),
+        };
+        if sender
+            .send(AcpMessage::Completed(
+                request,
+                result.map_err(|error| error.to_string()),
+            ))
+            .is_err()
+        {
+            break;
+        }
+    }
+}
+
+fn start_acp_observer(state: &Rc<RefCell<State>>, ensure: bool) {
+    let mut state = state.borrow_mut();
+    if let Some(observer) = &state.acp_observer {
+        if ensure && !state.acp_explicit_stopped {
+            let _ = observer
+                .commands
+                .send((AcpRequest::CONNECT, AcpCommand::Ensure));
+        }
+        return;
+    }
+    let (commands, receiver) = mpsc::channel();
+    let (stops, stop_receiver) = mpsc::channel();
+    let closed = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let explicitly_stopped = Arc::new(std::sync::atomic::AtomicBool::new(
+        state.acp_explicit_stopped,
+    ));
+    // Stop 拥有独立控制线程和 IPC 连接，不排在等待排空的 Apply 后面。
+    for receiver in [receiver, stop_receiver] {
+        let worker_closed = closed.clone();
+        let worker_stopped = explicitly_stopped.clone();
+        let sender = state.acp_sender.clone();
+        std::thread::spawn(move || {
+            run_acp_commands(&receiver, &sender, &worker_closed, &worker_stopped);
+        });
+    }
+    let observation_generation = state.acp_observation_generation.clone();
+    let observer_closed = closed.clone();
+    let sender = state.acp_sender.clone();
+    std::thread::spawn(move || {
+        while !observer_closed.load(Ordering::Acquire) {
+            // 在读取开始时取代际；保存完成之后才送达的旧读取仍属于旧代际。
+            let generation = observation_generation.load(Ordering::Acquire);
+            let snapshot = acp_runtime::status().map_err(|error| error.to_string());
+            if sender
+                .send(AcpMessage::Snapshot(generation, snapshot))
+                .is_err()
+            {
+                break;
+            }
+            // 短等待使关闭观察及时生效；不阻塞 GUI，不触发 ensure/restart。
+            for _ in 0..5 {
+                if observer_closed.load(Ordering::Acquire) {
+                    return;
+                }
+                std::thread::sleep(Duration::from_millis(100));
+            }
+        }
+    });
+    if ensure && !state.acp_explicit_stopped {
+        let _ = commands.send((AcpRequest::CONNECT, AcpCommand::Ensure));
+    }
+    state.acp_observer = Some(AcpObserver {
+        commands,
+        stops,
+        explicitly_stopped,
+        closed,
+    });
+}
+
+fn request_acp_action(ui: &AppWindow, state: &Rc<RefCell<State>>, command: AcpCommand, text: &str) {
+    start_acp_observer(state, false);
+    let operation = command.operation();
+    let mut state = state.borrow_mut();
+    state.acp_request_id += 1;
+    let request = AcpRequest {
+        id: state.acp_request_id,
+        operation,
+    };
+    let sent = state.acp_observer.as_ref().is_some_and(|observer| {
+        if operation == AcpOperation::Stop {
+            observer.explicitly_stopped.store(true, Ordering::Release);
+            observer.stops.send((request, command)).is_ok()
+        } else {
+            observer.commands.send((request, command)).is_ok()
+        }
+    });
+    if sent {
+        state.acp_pending_request = Some(request);
+        // 抢占时即建立观察边界：Stop 前开始读取的快照不得回退退出状态。
+        state
+            .acp_observation_generation
+            .fetch_add(1, Ordering::AcqRel);
+        ui.set_acp_apply_inflight(operation == AcpOperation::Apply);
+        ui.set_acp_request_pending(true);
+        ui.set_acp_operation(text.into());
+        ui.set_acp_action_error("".into());
+    } else {
+        ui.set_acp_action_error("模型服务操作线程已退出，请重新打开工具箱".into());
+    }
+}
+
+fn can_request_acp_stop(ui: &AppWindow, state: &State) -> bool {
+    !state.acp_explicit_stopped
+        && ui.get_acp_status_known()
+        && !ui.get_acp_service_pid().is_empty()
+        && (!ui.get_acp_request_pending()
+            || state
+                .acp_pending_request
+                .is_some_and(|request| request.operation == AcpOperation::Apply))
+}
+
+fn acp_config_text(config: Option<&ServiceConfig>) -> String {
+    config.map_or_else(
+        || "无".into(),
+        |config| {
+            format!(
+                "程序：{}\n参数：{}\n地址：http://127.0.0.1:{}",
+                config.executable,
+                acp_settings::format_arguments(&config.arguments),
+                config.port
+            )
+        },
+    )
+}
+
+fn apply_acp_status(ui: &AppWindow, state: &Rc<RefCell<State>>, status: &ServiceStatus) {
+    use crate::acp_api::ServicePhase;
+    let (phase, text) = match status.phase {
+        ServicePhase::Unconfigured => ("unconfigured", "未配置有效的 Agent 启动程序"),
+        ServicePhase::Starting => ("starting", "正在启动模型服务并初始化 ACP"),
+        ServicePhase::Ready => ("ready", "模型服务已就绪"),
+        ServicePhase::Draining => ("draining", "停止接收新请求；等待所有已有请求完成后应用配置"),
+        ServicePhase::Stopping => ("stopping", "停止接收新请求；正在取消并等待在途任务安全收尾"),
+        ServicePhase::Stopped => ("stopped", "模型服务已停止"),
+        ServicePhase::Error => ("error", "模型服务未就绪，请查看错误详情"),
+    };
+    ui.set_acp_phase(phase.into());
+    ui.set_acp_status(text.into());
+    ui.set_acp_ready(status.phase == ServicePhase::Ready);
+    ui.set_acp_status_known(true);
+    ui.set_acp_pending_apply(status.pending_apply() && !state.borrow().acp_explicit_stopped);
+    ui.set_acp_service_pid(
+        status
+            .service_pid
+            .map_or_else(String::new, |pid| pid.to_string())
+            .into(),
+    );
+    ui.set_acp_agent_pid(
+        status
+            .agent_pid
+            .map_or_else(String::new, |pid| pid.to_string())
+            .into(),
+    );
+    ui.set_acp_executing(i32::try_from(status.executing).unwrap_or(i32::MAX));
+    ui.set_acp_waiting(i32::try_from(status.waiting).unwrap_or(i32::MAX));
+    {
+        let mut state = state.borrow_mut();
+        if let Some(error) = &status.error {
+            state.acp_service_error = Some(error.clone());
+        } else if status.phase == ServicePhase::Ready {
+            // 无后台的 Stopped 轮询不是恢复，不能抹去自动连接的具体失败原因。
+            state.acp_service_error = None;
+        }
+        ui.set_acp_service_error(
+            state
+                .acp_service_error
+                .as_deref()
+                .unwrap_or_default()
+                .into(),
+        );
+    }
+    ui.set_acp_saved_config(acp_config_text(status.saved_config.as_ref()).into());
+    ui.set_acp_running_config(acp_config_text(status.running_config.as_ref()).into());
+    if !state.borrow().acp_draft_edited {
+        if let Some(config) = &status.saved_config {
+            ui.set_acp_executable(config.executable.clone().into());
+            ui.set_acp_arguments(acp_settings::format_arguments(&config.arguments).into());
+            ui.set_acp_port(config.port.to_string().into());
+        }
+    }
+}
+
+fn apply_acp_messages(ui: &AppWindow, state: &Rc<RefCell<State>>) {
+    let messages: Vec<_> = state
+        .borrow()
+        .acp_receiver
+        .borrow_mut()
+        .try_iter()
+        .collect();
+    for message in messages {
+        let result = match message {
+            AcpMessage::Snapshot(generation, result) => {
+                if generation
+                    != state
+                        .borrow()
+                        .acp_observation_generation
+                        .load(Ordering::Acquire)
+                {
+                    continue;
+                }
+                result
+            }
+            AcpMessage::Completed(request, result) => {
+                let mut state = state.borrow_mut();
+                if request.operation == AcpOperation::Ensure {
+                    // 已退出的 GUI 不接受迟到自动连接的结果。
+                    if state.acp_explicit_stopped {
+                        continue;
+                    }
+                } else if state.acp_pending_request != Some(request) {
+                    // Apply 被 Stop 抢占后，迟到结果不消费 Stop 门禁或覆盖其终态。
+                    continue;
+                }
+                // 完成回包确立新的观察边界；此前已开始的读取，即使稍后送达也不得上屏。
+                state
+                    .acp_observation_generation
+                    .fetch_add(1, Ordering::AcqRel);
+                // 后台自动连接不消费正在保存/应用/退出的 UI 门禁。
+                if request.operation != AcpOperation::Ensure {
+                    state.acp_pending_request = None;
+                    ui.set_acp_apply_inflight(false);
+                    let action = request.operation.text();
+                    ui.set_acp_request_pending(false);
+                    ui.set_acp_operation(
+                        if result.is_ok() {
+                            format!("{action}已完成")
+                        } else {
+                            format!("{action}未成功")
+                        }
+                        .into(),
+                    );
+                    if request.operation == AcpOperation::Save && result.is_ok() {
+                        state.acp_draft_edited = false;
+                    }
+                    ui.set_acp_action_error(
+                        result.as_ref().err().cloned().unwrap_or_default().into(),
+                    );
+                }
+                drop(state);
+                result
+            }
+        };
+        match result {
+            Ok(status) => apply_acp_status(ui, state, &status),
+            Err(error) => {
+                state.borrow_mut().acp_service_error = Some(error.clone());
+                ui.set_acp_status_known(false);
+                ui.set_acp_ready(false);
+                ui.set_acp_status("无法读取或连接模型服务".into());
+                ui.set_acp_service_error(error.into());
+            }
+        }
+    }
+}
+
+fn wire_acp_http(ui: &AppWindow, state: &Rc<RefCell<State>>) {
+    let edited_state = state.clone();
+    ui.on_acp_config_edited(move || {
+        edited_state.borrow_mut().acp_draft_edited = true;
+    });
+    let weak = ui.as_weak();
+    let save_state = state.clone();
+    ui.on_acp_save_config(move || {
+        let Some(ui) = weak.upgrade() else {
+            return;
+        };
+        if ui.get_confirm_kind() != 0 || ui.get_acp_request_pending() {
+            return;
+        }
+        let stopped = save_state.borrow().acp_explicit_stopped;
+        save_state.borrow_mut().acp_draft_edited = true;
+        request_acp_action(
+            &ui,
+            &save_state,
+            AcpCommand::Save {
+                executable: ui.get_acp_executable().to_string(),
+                arguments: ui.get_acp_arguments().to_string(),
+                port: ui.get_acp_port().to_string(),
+                stopped,
+            },
+            "正在校验并保存配置…",
+        );
+    });
+    let weak = ui.as_weak();
+    let apply_state = state.clone();
+    ui.on_acp_apply_and_restart(move || {
+        let Some(ui) = weak.upgrade() else {
+            return;
+        };
+        if ui.get_confirm_kind() != 0
+            || ui.get_acp_request_pending()
+            || !ui.get_acp_status_known()
+            || !ui.get_acp_pending_apply()
+            || apply_state.borrow().acp_explicit_stopped
+        {
+            return;
+        }
+        request_acp_action(
+            &ui,
+            &apply_state,
+            AcpCommand::Apply,
+            "正在停止接新请求，等待全部已有请求完成后应用并重启…",
+        );
+    });
+    let weak = ui.as_weak();
+    let stop_state = state.clone();
+    ui.on_acp_request_stop(move || {
+        let Some(ui) = weak.upgrade() else { return; };
+        if ui.get_confirm_kind() != 0 || !can_request_acp_stop(&ui, &stop_state.borrow()) {
+            return;
+        }
+        ui.set_confirm_pending(false);
+        ui.set_acknowledge(false);
+        ui.set_confirm_text("确认退出独立模型服务？\n将停止接收新请求，取消在途模型请求并等待安全收尾，再释放本应用拥有的 Agent、终端及连接。不自动强杀。\n截图、Xberg 及其他工具不受影响。\n当前工具箱不会自动重启模型服务；重新打开工具箱后按已保存配置自动启动。".into());
+        ui.set_confirm_kind(5);
+    });
+}
+
+/// 当前注册工具：决定规则分区集合、流程与状态文案。
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum Tool {
     Extract,
@@ -63,6 +506,7 @@ enum Tool {
     MarkdownConverter,
     /// 截图 OCR（O-01）：第六个注册工具，独立后台服务 + 热键截图。
     SnapOcr,
+    AcpHttp,
 }
 impl Tool {
     fn sections(self) -> &'static [&'static str] {
@@ -70,7 +514,7 @@ impl Tool {
             Tool::Extract => &["解压", "安全与性能"],
             Tool::Organizer => &["去重", "归类", "清理", "安全与性能"],
             // R-01：MD 整理与 Git 工具不设规则面板，分区集合为空。
-            Tool::Md | Tool::Git | Tool::MarkdownConverter | Tool::SnapOcr => &[],
+            Tool::Md | Tool::Git | Tool::MarkdownConverter | Tool::SnapOcr | Tool::AcpHttp => &[],
         }
     }
     fn from_id(id: &str) -> Option<Self> {
@@ -81,6 +525,7 @@ impl Tool {
             "git-tools" => Some(Tool::Git),
             "markdown-converter" => Some(Tool::MarkdownConverter),
             "snap-ocr" => Some(Tool::SnapOcr),
+            "acp-http" => Some(Tool::AcpHttp),
             _ => None,
         }
     }
@@ -205,6 +650,18 @@ struct State {
     snap_foreground_busy: Arc<std::sync::atomic::AtomicBool>,
     snap_sender: mpsc::Sender<SnapMessage>,
     snap_receiver: RefCell<mpsc::Receiver<SnapMessage>>,
+    /// AH-07：只拥有 GUI 观察线程，不拥有后台服务生命周期。
+    acp_observer: Option<AcpObserver>,
+    acp_sender: mpsc::Sender<AcpMessage>,
+    acp_receiver: RefCell<mpsc::Receiver<AcpMessage>>,
+    /// AH-09：观察读取从开始到操作完成的跨线程代际，不按回包到达顺序判断新旧。
+    acp_observation_generation: Arc<AtomicU64>,
+    acp_request_id: u64,
+    acp_pending_request: Option<AcpRequest>,
+    /// AH-08：保留具体连接/后台失败直到真正就绪；无后台轮询不能清空。
+    acp_service_error: Option<String>,
+    acp_draft_edited: bool,
+    acp_explicit_stopped: bool,
     /// 测试注入：覆盖任务状态目录；生产路径为 None，仍走 engine::prepare/apply。
     engine_overrides: Option<EngineTestOverrides>,
     /// 解压确认清点的请求代际：迟到的低代际清点事件不得刷新文案或解除门禁（X-02）。
@@ -789,7 +1246,7 @@ fn visible_rows(state: &State) -> Result<Vec<RuleRow>> {
         Tool::Extract => "extract",
         Tool::Organizer => "organizer",
         // MD/Git 不设规则面板（R-01）：不会进入规则表过滤，占位即可。
-        Tool::Md | Tool::Git | Tool::MarkdownConverter | Tool::SnapOcr => "",
+        Tool::Md | Tool::Git | Tool::MarkdownConverter | Tool::SnapOcr | Tool::AcpHttp => "",
     };
     Ok(state
         .specs
@@ -862,6 +1319,10 @@ fn invalidate(ui: &AppWindow, tool: Tool) {
     if tool == Tool::SnapOcr {
         // O-01：截图 OCR 无目录输入与规则面板，状态栏用本工具中性文案。
         ui.set_status("截图 OCR 可在页面中初始化组件并管理后台服务".into());
+        return;
+    }
+    if tool == Tool::AcpHttp {
+        ui.set_status("模型服务在独立后台运行，关闭窗口不停止服务".into());
         return;
     }
     if ui.get_has_task() {
@@ -997,7 +1458,9 @@ fn changed(
                 Tool::Organizer => state.config.validate_organizer(),
                 Tool::Extract => state.config.validate_extract(),
                 // 主题设置不属于任一工具的规则面板。
-                Tool::Md | Tool::Git | Tool::MarkdownConverter | Tool::SnapOcr => Ok(()),
+                Tool::Md | Tool::Git | Tool::MarkdownConverter | Tool::SnapOcr | Tool::AcpHttp => {
+                    Ok(())
+                }
             };
             let validation = invalid_number_error(&state, tool)
                 .map_or(validation, |error| Err(anyhow::anyhow!(error)));
@@ -1285,7 +1748,9 @@ fn invalid_number_error(state: &State, tool: Tool) -> Option<String> {
     let owner = match tool {
         Tool::Extract => "extract",
         Tool::Organizer => "organizer",
-        Tool::Md | Tool::Git | Tool::MarkdownConverter | Tool::SnapOcr => return None,
+        Tool::Md | Tool::Git | Tool::MarkdownConverter | Tool::SnapOcr | Tool::AcpHttp => {
+            return None
+        }
     };
     state.specs.iter().find_map(|spec| {
         if !state.invalid_rule_inputs.contains_key(&spec.key)
@@ -1380,7 +1845,7 @@ fn start_task(ui: &AppWindow, state: &Rc<RefCell<State>>, out: &EventSender, app
     let validation = match tool {
         Tool::Organizer => configuration.validate_organizer(),
         Tool::Extract => configuration.validate_extract(),
-        Tool::Md | Tool::Git | Tool::MarkdownConverter | Tool::SnapOcr => Ok(()),
+        Tool::Md | Tool::Git | Tool::MarkdownConverter | Tool::SnapOcr | Tool::AcpHttp => Ok(()),
     };
     if let Err(error) = validation {
         ui.set_error_text(format!("{error:#}").into());
@@ -2301,6 +2766,7 @@ fn wire_sync(ui: &AppWindow, state: &Rc<RefCell<State>>, out: &EventSender) {
                         Tool::Git => 4,
                         Tool::MarkdownConverter => 5,
                         Tool::SnapOcr => 6,
+                        Tool::AcpHttp => 8,
                     };
                     ui.set_screen(screen);
                     ui.set_active_tool_id(id.clone());
@@ -2755,6 +3221,7 @@ impl UiPump {
         }
         self.apply_fail_messages(ui);
         self.apply_snap_messages(ui);
+        apply_acp_messages(ui, &self.state);
         self.refresh_fail_list(ui);
         self.refresh_runtime(ui);
     }
@@ -4291,6 +4758,7 @@ fn initial_state() -> Result<State> {
     let specs: Vec<RuleSpec> = serde_json::from_str(include_str!("../resources/rules.json"))?;
     let (fail_sender, fail_receiver) = mpsc::channel();
     let (snap_sender, snap_receiver) = mpsc::channel();
+    let (acp_sender, acp_receiver) = mpsc::channel();
     Ok(State {
         config: Config::default(),
         specs,
@@ -4342,6 +4810,15 @@ fn initial_state() -> Result<State> {
         snap_foreground_busy: Arc::new(std::sync::atomic::AtomicBool::new(false)),
         snap_sender,
         snap_receiver: RefCell::new(snap_receiver),
+        acp_observer: None,
+        acp_sender,
+        acp_receiver: RefCell::new(acp_receiver),
+        acp_observation_generation: Arc::new(AtomicU64::new(0)),
+        acp_request_id: 0,
+        acp_pending_request: None,
+        acp_service_error: None,
+        acp_draft_edited: false,
+        acp_explicit_stopped: false,
     })
 }
 
@@ -5547,6 +6024,7 @@ pub fn run_with_engine_overrides(
     wire_markdown_converter(&ui, &state, &out);
     wire_snap_ocr(&ui, &state, &out);
     wire_settings(&ui, &state, &out);
+    wire_acp_http(&ui, &state);
     // 启动落在注册表第一个工具（P-02 顺序：递归解压在前）。必须在 wire_sync 之后调用：
     // 回调接线前的 invoke 是空调用，窗口会停在目录整理页。
     if std::env::args_os().any(|arg| arg == "--snap-ocr-settings") {
@@ -5587,6 +6065,16 @@ pub fn run_with_engine_overrides(
     // First show the window. Rules stay in memory for this session only.
     ui.show()?;
     center_window(ui.window());
+    // AH-06：窗口可交互后才投递自动连接；每次 GUI 打开仅投递一次。
+    let acp_startup = state.clone();
+    let acp_startup_timer = slint::Timer::default();
+    acp_startup_timer.start(
+        slint::TimerMode::SingleShot,
+        Duration::from_millis(1),
+        move || {
+            start_acp_observer(&acp_startup, true);
+        },
+    );
     let startup = out.clone();
     std::thread::spawn(move || {
         // S1-01：启动快照用独立前缀，界面侧不把它当设置操作终态（不清标志、
@@ -5614,6 +6102,8 @@ pub fn run_with_engine_overrides(
     EVENT_LOOP_DRAIN.with(|slot| {
         let _ = slot.borrow_mut().take();
     });
+    // AH-07：关闭 GUI 仅停止自己的只读观察，后台服务与在途操作继续完成。
+    state.borrow_mut().acp_observer.take();
     // P-10：界面正常收场留痕（guard 在本函数结尾 drop 时刷盘）。
     tracing::info!(
         reason = loop_result
@@ -5654,6 +6144,20 @@ fn wire_task_lifecycle(ui: &AppWindow, state: &Rc<RefCell<State>>, out: &EventSe
         let out = out.clone();
         ui.on_confirmed(move |kind| {
             if let Some(ui) = weak.upgrade() {
+                if kind == 5 {
+                    if ui.get_confirm_kind() != 5 || !can_request_acp_stop(&ui, &state.borrow()) {
+                        return;
+                    }
+                    state.borrow_mut().acp_explicit_stopped = true;
+                    ui.set_acp_explicit_stopped(true);
+                    request_acp_action(
+                        &ui,
+                        &state,
+                        AcpCommand::Stop,
+                        "正在退出模型服务：停止接新请求，取消并等待在途任务安全收尾…",
+                    );
+                    return;
+                }
                 if kind == 3 {
                     state.borrow_mut().close_after = true;
                     // 各 GUI 操作可并行（例如旧工具任务与字体初始化），关闭必须请求全部可取消阶段停止。
@@ -5946,6 +6450,976 @@ mod gui_tests {
     //! 每个用例开始前重置为初始状态，互不干扰且与显示器/事件循环解耦。
     use super::*;
     use std::sync::{mpsc, Mutex, OnceLock};
+
+    // 覆盖 AH-08/AH-09/AH-12：GUI 消费真实类型快照，不将 saved 冒充 running。
+    #[test]
+    fn acp_status_preserves_running_config_and_edited_draft() {
+        with_gui(|app| {
+            let running = ServiceConfig {
+                executable: "agent.exe".into(),
+                arguments: vec!["含 空格".into()],
+                port: 8765,
+            };
+            let saved = ServiceConfig {
+                port: 8766,
+                ..running.clone()
+            };
+            let status = ServiceStatus {
+                phase: crate::acp_api::ServicePhase::Ready,
+                saved_config: Some(saved),
+                running_config: Some(running),
+                service_pid: Some(123),
+                agent_pid: Some(456),
+                executing: 2,
+                waiting: 3,
+                error: None,
+            };
+            apply_acp_status(&app.ui, &app.state, &status);
+            assert!(app.ui.get_acp_ready());
+            assert!(app.ui.get_acp_pending_apply());
+            assert_eq!(app.ui.get_acp_port().as_str(), "8766");
+            assert!(app.ui.get_acp_saved_config().contains("8766"));
+            assert!(app.ui.get_acp_running_config().contains("8765"));
+            assert_eq!(app.ui.get_acp_service_pid().as_str(), "123");
+            assert_eq!(app.ui.get_acp_agent_pid().as_str(), "456");
+            assert_eq!(app.ui.get_acp_executing(), 2);
+            assert_eq!(app.ui.get_acp_waiting(), 3);
+            app.ui.set_acp_port("invalid draft".into());
+            app.ui.invoke_acp_config_edited();
+            apply_acp_status(&app.ui, &app.state, &status);
+            assert_eq!(app.ui.get_acp_port().as_str(), "invalid draft");
+        })
+        .unwrap();
+    }
+
+    // 覆盖 AH-09：保存完成后的迟到旧快照不得回退已保存值，单字段编辑也不得混入旧配置。
+    #[test]
+    fn acp_late_snapshot_after_save_keeps_saved_config_and_unedited_fields() {
+        with_gui(|app| {
+            let old = ServiceConfig {
+                executable: "old-agent.exe".into(),
+                arguments: vec!["--old".into()],
+                port: 8765,
+            };
+            let saved = ServiceConfig {
+                executable: "new-agent.exe".into(),
+                arguments: vec!["--new".into(), "value with spaces".into()],
+                port: 8766,
+            };
+            let old_snapshot = ServiceStatus {
+                phase: crate::acp_api::ServicePhase::Ready,
+                saved_config: Some(old.clone()),
+                running_config: Some(old.clone()),
+                service_pid: Some(123),
+                ..ServiceStatus::default()
+            };
+            let saved_snapshot = ServiceStatus {
+                saved_config: Some(saved.clone()),
+                ..old_snapshot.clone()
+            };
+            let sender = app.state.borrow().acp_sender.clone();
+            let generation = app.state.borrow().acp_observation_generation.clone();
+            let old_generation = generation.load(Ordering::Acquire);
+            sender
+                .send(AcpMessage::Snapshot(
+                    old_generation,
+                    Ok(old_snapshot.clone()),
+                ))
+                .unwrap();
+            apply_acp_messages(&app.ui, &app.state);
+            app.ui.set_acp_executable(saved.executable.clone().into());
+            app.ui
+                .set_acp_arguments(acp_settings::format_arguments(&saved.arguments).into());
+            app.ui.set_acp_port(saved.port.to_string().into());
+            app.ui.invoke_acp_config_edited();
+            app.ui.set_acp_request_pending(true);
+            let request = AcpRequest {
+                id: 1,
+                operation: AcpOperation::Save,
+            };
+            app.state.borrow_mut().acp_pending_request = Some(request);
+            sender
+                .send(AcpMessage::Completed(request, Ok(saved_snapshot.clone())))
+                .unwrap();
+            apply_acp_messages(&app.ui, &app.state);
+            assert!(!app.ui.get_acp_request_pending());
+            assert_eq!(app.ui.get_acp_executable().as_str(), saved.executable);
+            assert_eq!(app.ui.get_acp_port().as_str(), "8766");
+
+            // 旧读取已在保存前取到 A，但直到保存 B 的完成消息落地之后才送达。
+            sender
+                .send(AcpMessage::Snapshot(old_generation, Ok(old_snapshot)))
+                .unwrap();
+            apply_acp_messages(&app.ui, &app.state);
+            let after_late_snapshot = (
+                app.ui.get_acp_executable().to_string(),
+                app.ui.get_acp_arguments().to_string(),
+                app.ui.get_acp_port().to_string(),
+                app.ui.get_acp_saved_config().to_string(),
+                app.ui.get_acp_pending_apply(),
+            );
+
+            // 用户此后只改端口；正确的 B 快照不得把其余两个输入永久锁在 A。
+            app.ui.set_acp_port("8767".into());
+            app.ui.invoke_acp_config_edited();
+            sender
+                .send(AcpMessage::Snapshot(
+                    generation.load(Ordering::Acquire),
+                    Ok(saved_snapshot),
+                ))
+                .unwrap();
+            apply_acp_messages(&app.ui, &app.state);
+            assert_eq!(app.ui.get_acp_port().as_str(), "8767");
+            assert_eq!(
+                app.ui.get_acp_executable().as_str(),
+                saved.executable,
+                "AH-09：只编辑端口时启动程序仍应是刚保存的 B"
+            );
+            assert_eq!(
+                app.ui.get_acp_arguments().as_str(),
+                acp_settings::format_arguments(&saved.arguments),
+                "AH-09：只编辑端口时启动参数仍应是刚保存的 B"
+            );
+            assert_eq!(after_late_snapshot.0, saved.executable);
+            assert_eq!(
+                after_late_snapshot.1,
+                acp_settings::format_arguments(&saved.arguments)
+            );
+            assert_eq!(after_late_snapshot.2, "8766");
+            assert!(
+                after_late_snapshot.3.contains("new-agent.exe")
+                    && after_late_snapshot.3.contains("8766"),
+                "AH-09：迟到 A 不能将已保存配置展示回退到 A"
+            );
+            assert!(
+                after_late_snapshot.4,
+                "AH-09：运行 A、已保存 B 的待应用入口不能被旧快照移除"
+            );
+            assert!(app.ui.get_acp_running_config().contains(&old.executable));
+            assert!(app.ui.get_acp_saved_config().contains(&saved.executable));
+            assert!(app.state.borrow().acp_observer.is_none());
+        })
+        .unwrap();
+    }
+
+    // 覆盖 AH-08/AH-09：自动连接错误不能被无错误的 stopped 快照擦除，也不能消费保存门禁。
+    #[test]
+    fn acp_connection_error_survives_stopped_snapshot_while_save_is_pending() {
+        with_gui(|app| {
+            let sender = app.state.borrow().acp_sender.clone();
+            let generation = app.state.borrow().acp_observation_generation.clone();
+            let error = "Agent 启动失败：找不到 configured-agent.exe";
+            app.ui.set_acp_request_pending(true);
+            app.ui.set_acp_operation("正在校验并保存配置…".into());
+            sender
+                .send(AcpMessage::Completed(
+                    AcpRequest::CONNECT,
+                    Err(error.into()),
+                ))
+                .unwrap();
+            apply_acp_messages(&app.ui, &app.state);
+            assert!(format!(
+                "{}{}",
+                app.ui.get_acp_action_error().as_str(),
+                app.ui.get_acp_service_error().as_str()
+            )
+            .contains(error));
+            assert!(app.ui.get_acp_request_pending());
+            sender
+                .send(AcpMessage::Snapshot(
+                    generation.load(Ordering::Acquire),
+                    Ok(ServiceStatus {
+                        phase: crate::acp_api::ServicePhase::Stopped,
+                        error: None,
+                        ..ServiceStatus::default()
+                    }),
+                ))
+                .unwrap();
+            apply_acp_messages(&app.ui, &app.state);
+            assert_eq!(app.ui.get_acp_phase().as_str(), "stopped");
+
+            // 走真实回调验证保存门禁，不能因连接完成或状态轮询又派发一次保存。
+            assert!(
+                app.ui.get_acp_request_pending(),
+                "AH-09：连接完成和状态快照不能解除正在保存的门禁"
+            );
+            app.ui.invoke_acp_save_config();
+            assert!(app.ui.get_acp_request_pending());
+            assert_eq!(app.ui.get_acp_operation().as_str(), "正在校验并保存配置…");
+            assert!(app.state.borrow().acp_observer.is_none());
+            assert!(!app.ui.get_acp_ready());
+            assert!(
+                format!(
+                    "{}{}",
+                    app.ui.get_acp_action_error().as_str(),
+                    app.ui.get_acp_service_error().as_str()
+                )
+                .contains(error),
+                "AH-08：连接失败详情须保留，不能被 stopped/error=None 轮询抹去"
+            );
+            // 真正就绪后才清空连接错误，观察回包仍不能消费正在保存的门禁。
+            sender
+                .send(AcpMessage::Snapshot(
+                    generation.load(Ordering::Acquire),
+                    Ok(ServiceStatus {
+                        phase: crate::acp_api::ServicePhase::Ready,
+                        service_pid: Some(123),
+                        ..ServiceStatus::default()
+                    }),
+                ))
+                .unwrap();
+            apply_acp_messages(&app.ui, &app.state);
+            assert!(app.ui.get_acp_ready());
+            assert!(app.ui.get_acp_service_error().is_empty());
+            assert!(app.ui.get_acp_request_pending());
+            assert_eq!(app.ui.get_acp_operation().as_str(), "正在校验并保存配置…");
+        })
+        .unwrap();
+    }
+
+    // 覆盖 AH-08/AH-09/AH-10：已保存有效配置的失败后台应提供恢复入口；主动退出保持禁用。
+    #[test]
+    fn acp_failed_background_without_running_config_offers_apply_but_respects_explicit_stop() {
+        with_gui(|app| {
+            let sender = app.state.borrow().acp_sender.clone();
+            let generation = app.state.borrow().acp_observation_generation.clone();
+            let failed = ServiceStatus {
+                phase: crate::acp_api::ServicePhase::Error,
+                saved_config: Some(ServiceConfig {
+                    executable: "configured-agent.exe".into(),
+                    arguments: vec!["--mode".into(), "acp".into()],
+                    port: 8765,
+                }),
+                running_config: None,
+                service_pid: Some(123),
+                error: Some("ACP 初始化失败".into()),
+                ..ServiceStatus::default()
+            };
+            sender
+                .send(AcpMessage::Snapshot(
+                    generation.load(Ordering::Acquire),
+                    Ok(failed.clone()),
+                ))
+                .unwrap();
+            apply_acp_messages(&app.ui, &app.state);
+            let recovery_visible = app.ui.get_acp_pending_apply();
+            assert!(app.ui.get_acp_status_known());
+            assert!(!app.ui.get_acp_request_pending());
+            assert!(!app.ui.get_acp_explicit_stopped());
+            assert_eq!(app.ui.get_confirm_kind(), 0);
+            assert_eq!(app.ui.get_acp_phase().as_str(), "error");
+            assert!(!app.ui.get_acp_ready());
+            assert_eq!(app.ui.get_acp_running_config().as_str(), "无");
+            assert_eq!(app.ui.get_acp_service_error().as_str(), "ACP 初始化失败");
+            assert!(app
+                .ui
+                .get_acp_saved_config()
+                .contains("configured-agent.exe"));
+
+            // 隔离地恢复「本 GUI 已主动退出」会话，不触发真实 Stop 或启动后台。
+            app.state.borrow_mut().acp_explicit_stopped = true;
+            app.ui.set_acp_explicit_stopped(true);
+            let request = AcpRequest {
+                id: 1,
+                operation: AcpOperation::Stop,
+            };
+            app.state.borrow_mut().acp_pending_request = Some(request);
+            sender
+                .send(AcpMessage::Completed(
+                    request,
+                    Ok(ServiceStatus {
+                        phase: crate::acp_api::ServicePhase::Stopped,
+                        service_pid: None,
+                        error: None,
+                        ..failed.clone()
+                    }),
+                ))
+                .unwrap();
+            apply_acp_messages(&app.ui, &app.state);
+            // 即使后来又看到失败后台，快照不得撤销用户退出意图并自动恢复。
+            sender
+                .send(AcpMessage::Snapshot(
+                    generation.load(Ordering::Acquire),
+                    Ok(failed),
+                ))
+                .unwrap();
+            apply_acp_messages(&app.ui, &app.state);
+            assert!(app.state.borrow().acp_explicit_stopped);
+            assert!(app.ui.get_acp_explicit_stopped());
+            assert!(!app.ui.get_acp_pending_apply());
+            app.ui.invoke_acp_apply_and_restart();
+            assert!(app.state.borrow().acp_explicit_stopped);
+            assert!(app.ui.get_acp_explicit_stopped());
+            assert!(!app.ui.get_acp_request_pending());
+            assert_eq!(app.ui.get_acp_operation().as_str(), "退出已完成");
+            assert!(app.state.borrow().acp_observer.is_none());
+            assert!(
+                recovery_visible,
+                "AH-09：后台存在但 running_config=None 时，有效已保存配置必须提供应用恢复入口"
+            );
+        })
+        .unwrap();
+    }
+
+    // 覆盖 AH-10：退出使用独立确认类型，未确认不能触发 stop 或改变会话标记。
+    #[test]
+    fn acp_stop_requires_its_own_confirmation_without_overriding_existing_modal() {
+        with_gui(|app| {
+            app.ui.set_acp_status_known(true);
+            app.ui.set_acp_service_pid("123".into());
+            app.ui.set_confirm_kind(3);
+            app.ui.invoke_acp_request_stop();
+            assert_eq!(app.ui.get_confirm_kind(), 3);
+            app.ui.set_confirm_kind(0);
+            app.ui.invoke_acp_request_stop();
+            assert_eq!(app.ui.get_confirm_kind(), 5);
+            assert!(app.state.borrow().acp_observer.is_none());
+            assert!(!app.state.borrow().acp_explicit_stopped);
+            app.ui.set_confirm_kind(0);
+            app.ui.invoke_confirmed(5);
+            assert!(!app.state.borrow().acp_explicit_stopped);
+            assert!(app.state.borrow().acp_observer.is_none());
+        })
+        .unwrap();
+    }
+
+    // AH-09/AH-10：抢占后的 UI 门禁属于具体 Stop 请求，旧操作和重复结果都不得消费。
+    #[test]
+    fn acp_superseded_completions_preserve_stop_pending_and_result() {
+        with_gui(|app| {
+            let sender = app.state.borrow().acp_sender.clone();
+            let apply_request = AcpRequest {
+                id: 1,
+                operation: AcpOperation::Apply,
+            };
+            let stop_request = AcpRequest {
+                id: 2,
+                operation: AcpOperation::Stop,
+            };
+            let obsolete_stop = AcpRequest {
+                id: 0,
+                operation: AcpOperation::Stop,
+            };
+            let ready = ServiceStatus {
+                phase: crate::acp_api::ServicePhase::Ready,
+                service_pid: Some(123),
+                ..ServiceStatus::default()
+            };
+            for stop_result in [
+                Ok(ServiceStatus {
+                    phase: crate::acp_api::ServicePhase::Stopped,
+                    ..ServiceStatus::default()
+                }),
+                Err("退出安全收尾失败".to_string()),
+            ] {
+                apply_acp_status(&app.ui, &app.state, &ready);
+                {
+                    let mut state = app.state.borrow_mut();
+                    state.acp_explicit_stopped = true;
+                    state.acp_pending_request = Some(stop_request);
+                }
+                app.ui.set_acp_explicit_stopped(true);
+                app.ui.set_acp_request_pending(true);
+                app.ui.set_acp_apply_inflight(false);
+                app.ui.set_acp_operation("正在退出…".into());
+                app.ui.set_acp_action_error("".into());
+                sender
+                    .send(AcpMessage::Completed(apply_request, Ok(ready.clone())))
+                    .unwrap();
+                sender
+                    .send(AcpMessage::Completed(
+                        obsolete_stop,
+                        Err("旧退出失败".into()),
+                    ))
+                    .unwrap();
+                sender
+                    .send(AcpMessage::Completed(
+                        AcpRequest::CONNECT,
+                        Err("迟到连接失败".into()),
+                    ))
+                    .unwrap();
+                apply_acp_messages(&app.ui, &app.state);
+                assert!(app.ui.get_acp_request_pending());
+                assert_eq!(app.state.borrow().acp_pending_request, Some(stop_request));
+                assert_eq!(app.ui.get_acp_operation().as_str(), "正在退出…");
+                assert!(app.ui.get_acp_action_error().is_empty());
+
+                let succeeded = stop_result.is_ok();
+                sender
+                    .send(AcpMessage::Completed(stop_request, stop_result))
+                    .unwrap();
+                apply_acp_messages(&app.ui, &app.state);
+                assert!(!app.ui.get_acp_request_pending());
+                assert!(app.state.borrow().acp_pending_request.is_none());
+                assert_eq!(
+                    app.ui.get_acp_operation().as_str(),
+                    if succeeded {
+                        "退出已完成"
+                    } else {
+                        "退出未成功"
+                    },
+                );
+                if succeeded {
+                    assert_eq!(app.ui.get_acp_phase().as_str(), "stopped");
+                    assert!(app.ui.get_acp_service_pid().is_empty());
+                } else {
+                    assert_eq!(app.ui.get_acp_action_error().as_str(), "退出安全收尾失败");
+                    assert_eq!(app.ui.get_acp_service_error().as_str(), "退出安全收尾失败");
+                    assert!(!app.ui.get_acp_status_known());
+                }
+                let terminal = (
+                    app.ui.get_acp_operation(),
+                    app.ui.get_acp_action_error(),
+                    app.ui.get_acp_service_error(),
+                    app.ui.get_acp_phase(),
+                    app.ui.get_acp_status_known(),
+                );
+                sender
+                    .send(AcpMessage::Completed(apply_request, Ok(ready.clone())))
+                    .unwrap();
+                sender
+                    .send(AcpMessage::Completed(stop_request, Ok(ready.clone())))
+                    .unwrap();
+                apply_acp_messages(&app.ui, &app.state);
+                assert_eq!(
+                    terminal,
+                    (
+                        app.ui.get_acp_operation(),
+                        app.ui.get_acp_action_error(),
+                        app.ui.get_acp_service_error(),
+                        app.ui.get_acp_phase(),
+                        app.ui.get_acp_status_known(),
+                    ),
+                );
+                app.ui.invoke_acp_request_stop();
+                app.ui.invoke_acp_apply_and_restart();
+                assert_eq!(app.ui.get_confirm_kind(), 0);
+                assert!(app.ui.get_acp_explicit_stopped());
+                assert!(!app.ui.get_acp_request_pending());
+                assert!(app.state.borrow().acp_observer.is_none());
+            }
+        })
+        .unwrap();
+    }
+
+    // AH-09/AH-10：真实 GUI 回调和真实 observer/IPC，控制端保持 Apply 未完成，
+    // 只有另一条 Stop 连接才能取消排空。不能用测试 sender 绕过串行控制线程。
+    #[cfg(windows)]
+    #[test]
+    fn acp_gui_confirmed_stop_preempts_pending_apply_over_independent_control_path() {
+        use acp_control_test::ControlStub;
+
+        with_gui(|app| {
+            let mut control = ControlStub::new(app);
+            apply_acp_status(&app.ui, &app.state, &control.status());
+            assert!(app.ui.get_acp_pending_apply());
+            app.ui.invoke_acp_apply_and_restart();
+            assert!(ControlStub::wait_for(app, || control.count("Apply") == 1));
+            assert!(ControlStub::wait_for(app, || app.ui.get_acp_phase() == "draining"));
+            assert!(app.ui.get_acp_request_pending());
+            assert_eq!(control.status().executing, 1);
+
+            // 无关确认不能被退出入口覆盖，也不能借 confirmed(5) 派发 Stop。
+            app.ui.set_confirm_kind(3);
+            app.ui.invoke_acp_request_stop();
+            let existing_modal_preserved = app.ui.get_confirm_kind() == 3;
+            app.ui.invoke_confirmed(5);
+            app.ui.set_confirm_kind(0);
+            app.ui.invoke_confirmed(5);
+            let no_unconfirmed_stop =
+                control.count("Stop") == 0 && !app.ui.get_acp_explicit_stopped();
+
+            app.ui.invoke_acp_request_stop();
+            let first_confirmation_opened = app.ui.get_confirm_kind() == 5;
+            let no_stop_before_confirmation = control.count("Stop") == 0;
+            // 取消后再确认旧 kind 不得停止；同一窗口应仍能重新请求退出。
+            app.ui.set_confirm_kind(0);
+            app.ui.invoke_confirmed(5);
+            let cancelled_confirmation_respected =
+                control.count("Stop") == 0 && !app.ui.get_acp_explicit_stopped();
+            app.ui.invoke_acp_request_stop();
+            let second_confirmation_opened = app.ui.get_confirm_kind() == 5;
+            app.ui.invoke_confirmed(5);
+            app.ui.invoke_confirmed(5);
+
+            // Apply 尚未收尾时必须已经被后台消费 Stop，而不是排到 Apply 后面。
+            let stop_consumed_before_apply_release =
+                ControlStub::wait_for(app, || control.count("Stop") == 1);
+            let resources_released_by_stop = control.status().phase
+                == crate::acp_api::ServicePhase::Stopped
+                && control.status().executing == 0
+                && control.status().running_config.is_none();
+            let explicit_stop_recorded = app.ui.get_acp_explicit_stopped();
+            let completion_delivered = if stop_consumed_before_apply_release {
+                ControlStub::wait_for(app, || {
+                    control.apply_finished() && !app.ui.get_acp_request_pending()
+                })
+            } else {
+                false
+            };
+            app.ui.set_confirm_kind(0);
+            app.ui.invoke_acp_apply_and_restart();
+            let restarted = ControlStub::wait_for(app, || control.count("Apply") != 1);
+            let no_restart_after_explicit_stop = !restarted && app.ui.get_acp_explicit_stopped();
+
+            // 先完整走过取消、重新确认和完成回调，再执行能失败的断言。
+            // 即使门禁导致 Stop 未发送，也释放 fixture 的 Apply 并有界收回 IPC worker。
+            let cleanup_finished = control.finish(app);
+            assert!(cleanup_finished, "隔离控制端和在途 Apply 必须有界收尾");
+            assert!(existing_modal_preserved);
+            assert!(no_unconfirmed_stop && no_stop_before_confirmation);
+            assert!(cancelled_confirmation_respected);
+            assert!(
+                first_confirmation_opened && second_confirmation_opened,
+                "AH-10：Apply 在途 Draining 时，真实退出回调必须仍打开独立退出确认"
+            );
+            assert!(
+                stop_consumed_before_apply_release,
+                "AH-10：确认退出必须经独立控制连接送达 Stop，不能等待 Apply 自然排空"
+            );
+            assert!(resources_released_by_stop && completion_delivered);
+            assert!(explicit_stop_recorded && no_restart_after_explicit_stop);
+        })
+        .unwrap();
+    }
+
+    // 保存门禁不能被「允许 Stop 抢占 Apply」的修复一并放开。
+    #[cfg(windows)]
+    #[test]
+    fn acp_gui_stop_respects_pending_save_then_callbacks_remain_usable() {
+        use acp_control_test::ControlStub;
+
+        with_gui(|app| {
+            let mut control = ControlStub::new(app);
+            apply_acp_status(&app.ui, &app.state, &control.status());
+            control.hold_status_queries();
+            app.ui.invoke_acp_save_config();
+            assert!(ControlStub::wait_for(app, || {
+                control.count("Status") > 0 && acp_settings::load_config().unwrap().is_some()
+            }));
+            assert!(app.ui.get_acp_request_pending());
+            app.ui.invoke_acp_request_stop();
+            let no_save_confirmation = app.ui.get_confirm_kind() == 0;
+            app.ui.invoke_confirmed(5);
+            let save_did_not_stop = control.count("Stop") == 0
+                && !app.ui.get_acp_explicit_stopped()
+                && app.ui.get_acp_request_pending();
+
+            control.release_status_queries();
+            let save_completed = ControlStub::wait_for(app, || !app.ui.get_acp_request_pending());
+            app.ui.invoke_acp_request_stop();
+            let later_confirmation_opened = app.ui.get_confirm_kind() == 5;
+            app.ui.invoke_confirmed(5);
+            let later_stop_consumed = ControlStub::wait_for(app, || control.count("Stop") == 1);
+            let stop_completed = ControlStub::wait_for(app, || !app.ui.get_acp_request_pending());
+            app.ui.set_confirm_kind(0);
+            app.ui.invoke_acp_apply_and_restart();
+            let restarted = ControlStub::wait_for(app, || control.count("Apply") != 0);
+            let stayed_stopped = app.ui.get_acp_explicit_stopped()
+                && !restarted
+                && control.status().phase == crate::acp_api::ServicePhase::Stopped;
+            let cleanup_finished = control.finish(app);
+            assert!(cleanup_finished);
+            assert!(
+                no_save_confirmation && save_did_not_stop,
+                "AH-09：保存中不得弹出退出确认或派发 Stop"
+            );
+            assert!(save_completed && later_confirmation_opened);
+            assert!(later_stop_consumed && stop_completed && stayed_stopped);
+        })
+        .unwrap();
+    }
+
+    #[cfg(windows)]
+    mod acp_control_test {
+        use super::*;
+        use sha2::{Digest, Sha256};
+        use std::ffi::OsString;
+        use std::fmt::Write;
+        use std::sync::atomic::AtomicBool;
+        use std::sync::MutexGuard;
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        use tokio::net::windows::named_pipe::{NamedPipeServer, ServerOptions};
+        use tokio::sync::Mutex;
+        use tokio_util::sync::CancellationToken;
+
+        // 不改变产品控制协议；测试监听同用户/会话、独立 state root 派生的私有管道。
+        fn pipe_name() -> String {
+            use windows_sys::Win32::Foundation::{CloseHandle, LocalFree};
+            use windows_sys::Win32::Security::Authorization::ConvertSidToStringSidW;
+            use windows_sys::Win32::Security::{
+                GetTokenInformation, TokenUser, TOKEN_QUERY, TOKEN_USER,
+            };
+            use windows_sys::Win32::System::Threading::{GetCurrentProcess, OpenProcessToken};
+            #[link(name = "kernel32")]
+            extern "system" {
+                fn ProcessIdToSessionId(pid: u32, session: *mut u32) -> i32;
+            }
+            let mut token = std::ptr::null_mut();
+            // SAFETY: 当前进程伪句柄无需输入或释放，在当前进程中有效。
+            let process = unsafe { GetCurrentProcess() };
+            // SAFETY: 当前进程伪句柄有效，token 为可写输出指针。
+            let opened = unsafe { OpenProcessToken(process, TOKEN_QUERY, &raw mut token) };
+            assert_ne!(opened, 0);
+            let mut size = 0;
+            // SAFETY: 零长查询只取得 TOKEN_USER 所需空间。
+            unsafe {
+                GetTokenInformation(token, TokenUser, std::ptr::null_mut(), 0, &raw mut size);
+            }
+            let word = std::mem::size_of::<usize>();
+            let mut storage = vec![0_usize; usize::try_from(size).unwrap().div_ceil(word)];
+            // SAFETY: storage 按 usize 对齐且至少 size 字节，token 为成功打开的句柄。
+            let received = unsafe {
+                GetTokenInformation(
+                    token,
+                    TokenUser,
+                    storage.as_mut_ptr().cast(),
+                    size,
+                    &raw mut size,
+                )
+            };
+            // SAFETY: 关闭本函数唯一拥有的真实 token 句柄。
+            unsafe { CloseHandle(token) };
+            assert_ne!(received, 0);
+            // SAFETY: 成功的 TOKEN_USER 查询返回正确对齐、仍存活的完整结构。
+            let user = unsafe { &*storage.as_ptr().cast::<TOKEN_USER>() };
+            let mut sid = std::ptr::null_mut();
+            // SAFETY: SID 属于仍存活的 storage；转换函数写入其分配的 UTF-16 字符串。
+            let converted = unsafe { ConvertSidToStringSidW(user.User.Sid, &raw mut sid) };
+            assert_ne!(converted, 0);
+            let mut length = 0;
+            loop {
+                // SAFETY: 转换成功后 sid 指向以零结尾的字符串，length 未越过终止符。
+                let character = unsafe { sid.add(length) };
+                // SAFETY: character 位于尚未释放的转换结果中，包含可读 UTF-16 码元。
+                if unsafe { *character } == 0 {
+                    break;
+                }
+                length += 1;
+            }
+            // SAFETY: 前述扫描确定了有效字符串长度，分配尚未释放。
+            let user = String::from_utf16_lossy(unsafe { std::slice::from_raw_parts(sid, length) });
+            // SAFETY: 转换函数的输出使用 LocalFree 释放一次。
+            unsafe { LocalFree(sid.cast()) };
+            let mut session = 0;
+            // SAFETY: 当前 PID 有效，session 为可写输出指针。
+            let queried = unsafe { ProcessIdToSessionId(std::process::id(), &raw mut session) };
+            assert_ne!(queried, 0);
+            let root = crate::xberg_settings::state_dir().unwrap();
+            let digest = Sha256::digest(root.as_os_str().to_string_lossy().as_bytes());
+            let mut suffix = String::with_capacity(digest.len() * 2);
+            for byte in digest {
+                write!(&mut suffix, "{byte:02x}").unwrap();
+            }
+            format!(r"\\.\pipe\jchtools-acp-http-{user}-{session}-{suffix}")
+        }
+
+        struct TestStateRoot {
+            previous: Option<OsString>,
+            _root: tempfile::TempDir,
+            _lock: MutexGuard<'static, ()>,
+        }
+        impl TestStateRoot {
+            fn new() -> Self {
+                let lock = crate::asset_util::test_env::env_lock()
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner);
+                let root = tempfile::tempdir().unwrap();
+                let previous = std::env::var_os("JCHTOOLS_TEST_STATE_DIR");
+                std::env::set_var("JCHTOOLS_TEST_STATE_DIR", root.path().join("state"));
+                Self {
+                    previous,
+                    _root: root,
+                    _lock: lock,
+                }
+            }
+        }
+        impl Drop for TestStateRoot {
+            fn drop(&mut self) {
+                match self.previous.take() {
+                    Some(root) => std::env::set_var("JCHTOOLS_TEST_STATE_DIR", root),
+                    None => std::env::remove_var("JCHTOOLS_TEST_STATE_DIR"),
+                }
+            }
+        }
+
+        #[derive(Clone)]
+        struct ControlServerState {
+            state: Arc<Mutex<ServiceStatus>>,
+            operations: Arc<Mutex<Vec<String>>>,
+            hold_queries: Arc<AtomicBool>,
+            release_queries: CancellationToken,
+            stopped: CancellationToken,
+            shutdown: CancellationToken,
+            apply_finished: Arc<AtomicBool>,
+        }
+
+        pub(super) struct ControlStub {
+            server: ControlServerState,
+            done: mpsc::Receiver<()>,
+            worker: Option<std::thread::JoinHandle<()>>,
+            ui_state: Rc<RefCell<State>>,
+            _environment: TestStateRoot,
+        }
+
+        impl ControlStub {
+            pub(super) fn new(app: &GuiTestApp) -> Self {
+                let environment = TestStateRoot::new();
+                let running = ServiceConfig {
+                    executable: std::env::current_exe()
+                        .unwrap()
+                        .to_string_lossy()
+                        .into_owned(),
+                    arguments: Vec::new(),
+                    port: 8765,
+                };
+                let state = Arc::new(Mutex::new(ServiceStatus {
+                    phase: crate::acp_api::ServicePhase::Ready,
+                    saved_config: Some(ServiceConfig {
+                        port: 8766,
+                        ..running.clone()
+                    }),
+                    running_config: Some(running),
+                    service_pid: Some(std::process::id()),
+                    executing: 1,
+                    ..ServiceStatus::default()
+                }));
+                let operations = Arc::new(Mutex::new(Vec::new()));
+                let hold_queries = Arc::new(AtomicBool::new(false));
+                let release_queries = CancellationToken::new();
+                let stopped = CancellationToken::new();
+                let shutdown = CancellationToken::new();
+                let apply_finished = Arc::new(AtomicBool::new(false));
+                let (ready_tx, ready_rx) = mpsc::channel();
+                let (done_tx, done) = mpsc::channel();
+                let name = pipe_name();
+                let server = ControlServerState {
+                    state,
+                    operations,
+                    hold_queries,
+                    release_queries,
+                    stopped,
+                    shutdown,
+                    apply_finished,
+                };
+                let worker = {
+                    let server = server.clone();
+                    std::thread::spawn(move || {
+                        let runtime = tokio::runtime::Builder::new_current_thread()
+                            .enable_all()
+                            .build()
+                            .unwrap();
+                        runtime.block_on(async move {
+                            let mut listener = ServerOptions::new()
+                                .first_pipe_instance(true)
+                                .reject_remote_clients(true)
+                                .create(&name)
+                                .unwrap();
+                            ready_tx.send(()).unwrap();
+                            let mut workers = tokio::task::JoinSet::new();
+                            loop {
+                                tokio::select! {
+                                    () = server.shutdown.cancelled() => break,
+                                    connected = listener.connect() => connected.unwrap(),
+                                }
+                                let pipe = listener;
+                                listener = ServerOptions::new()
+                                    .reject_remote_clients(true)
+                                    .create(&name)
+                                    .unwrap();
+                                let server = server.clone();
+                                workers.spawn(async move { consume(pipe, &server).await });
+                                while workers.try_join_next().is_some() {}
+                            }
+                            while workers.join_next().await.is_some() {}
+                        });
+                        let _ = done_tx.send(());
+                    })
+                };
+                let fixture = Self {
+                    server,
+                    done,
+                    worker: Some(worker),
+                    ui_state: app.state.clone(),
+                    _environment: environment,
+                };
+                ready_rx.recv_timeout(Duration::from_secs(3)).unwrap();
+                fixture
+            }
+
+            pub(super) fn status(&self) -> ServiceStatus {
+                self.server.state.blocking_lock().clone()
+            }
+            pub(super) fn count(&self, operation: &str) -> usize {
+                self.server
+                    .operations
+                    .blocking_lock()
+                    .iter()
+                    .filter(|seen| *seen == operation)
+                    .count()
+            }
+            pub(super) fn apply_finished(&self) -> bool {
+                self.server.apply_finished.load(Ordering::Acquire)
+            }
+            pub(super) fn hold_status_queries(&self) {
+                self.server.hold_queries.store(true, Ordering::Release);
+            }
+            pub(super) fn release_status_queries(&self) {
+                self.server.release_queries.cancel();
+            }
+            pub(super) fn wait_for(app: &GuiTestApp, done: impl Fn() -> bool) -> bool {
+                let deadline = Instant::now() + Duration::from_secs(3);
+                loop {
+                    apply_acp_messages(&app.ui, &app.state);
+                    if done() {
+                        return true;
+                    }
+                    if Instant::now() >= deadline {
+                        return false;
+                    }
+                    std::thread::sleep(Duration::from_millis(5));
+                }
+            }
+            pub(super) fn finish(&mut self, app: &GuiTestApp) -> bool {
+                // 不经产品 Stop 做兜底，否则会掩盖真实 GUI 没有派发 Stop 的回归。
+                app.state.borrow_mut().acp_observer.take();
+                self.server.stopped.cancel();
+                self.server.release_queries.cancel();
+                let queued_stop_consumed = self.wait_for_queued_stop();
+                let completed = Self::wait_for(app, || !app.ui.get_acp_request_pending());
+                self.server.shutdown.cancel();
+                let joined = self.join_worker();
+                queued_stop_consumed && completed && joined
+            }
+            fn wait_for_queued_stop(&self) -> bool {
+                if !self.ui_state.borrow().acp_explicit_stopped {
+                    return true;
+                }
+                // 门禁修复而控制线程尚未修复时，Stop 可能仍排在 Apply 后。
+                // 兜底取消释放 Apply 后，先让这条已有请求进入隔离端点，再恢复环境。
+                let deadline = Instant::now() + Duration::from_secs(3);
+                while self.count("Stop") == 0 {
+                    if Instant::now() >= deadline {
+                        return false;
+                    }
+                    std::thread::sleep(Duration::from_millis(5));
+                }
+                true
+            }
+            fn join_worker(&mut self) -> bool {
+                if self.worker.is_none() {
+                    return true;
+                }
+                if self.done.recv_timeout(Duration::from_secs(3)).is_err()
+                    && !self
+                        .worker
+                        .as_ref()
+                        .is_some_and(std::thread::JoinHandle::is_finished)
+                {
+                    return false;
+                }
+                self.worker
+                    .take()
+                    .is_some_and(|worker| worker.join().is_ok())
+            }
+        }
+
+        impl Drop for ControlStub {
+            fn drop(&mut self) {
+                self.ui_state.borrow_mut().acp_observer.take();
+                self.server.stopped.cancel();
+                self.server.release_queries.cancel();
+                let _ = self.wait_for_queued_stop();
+                self.server.shutdown.cancel();
+                let _ = self.join_worker();
+            }
+        }
+
+        async fn consume(
+            mut pipe: NamedPipeServer,
+            server: &ControlServerState,
+        ) -> std::io::Result<()> {
+            let ControlServerState {
+                state,
+                operations,
+                hold_queries,
+                release_queries,
+                stopped,
+                shutdown,
+                apply_finished,
+            } = server;
+            let operation = tokio::select! {
+                () = shutdown.cancelled() => return Ok(()),
+                operation = async {
+                    let length = pipe.read_u32_le().await?;
+                    if usize::try_from(length).unwrap() > acp_settings::CONTROL_FRAME_LIMIT {
+                        return Err(std::io::Error::new(std::io::ErrorKind::InvalidData, "超长控制帧"));
+                    }
+                    let mut bytes = vec![0; usize::try_from(length).unwrap()];
+                    pipe.read_exact(&mut bytes).await?;
+                    serde_json::from_slice::<String>(&bytes)
+                        .map_err(|error| std::io::Error::new(std::io::ErrorKind::InvalidData, error))
+                } => operation?,
+            };
+            let result: std::result::Result<ServiceStatus, crate::acp_api::ServiceError> =
+                match operation.as_str() {
+                    "Apply" => {
+                        state.lock().await.phase = crate::acp_api::ServicePhase::Draining;
+                        operations.lock().await.push(operation.clone());
+                        // 真实 IPC 回复保持悬挂：串行 observer 无法在这里偷跑下一条 Stop。
+                        tokio::select! {
+                            () = stopped.cancelled() => {},
+                            () = shutdown.cancelled() => {},
+                        }
+                        apply_finished.store(true, Ordering::Release);
+                        Err(crate::acp_api::ServiceError::new(
+                            crate::acp_api::ServiceErrorKind::Stopping,
+                            "隔离控制端：Stop 已取消在途 Apply",
+                        ))
+                    }
+                    "Stop" => {
+                        let status = {
+                            let mut status = state.lock().await;
+                            status.phase = crate::acp_api::ServicePhase::Stopped;
+                            status.running_config = None;
+                            status.service_pid = None;
+                            status.agent_pid = None;
+                            status.executing = 0;
+                            status.waiting = 0;
+                            status.clone()
+                        };
+                        stopped.cancel();
+                        operations.lock().await.push(operation.clone());
+                        Ok(status)
+                    }
+                    "Status" => {
+                        operations.lock().await.push(operation.clone());
+                        if hold_queries.load(Ordering::Acquire) {
+                            tokio::select! {
+                                () = release_queries.cancelled() => {},
+                                () = shutdown.cancelled() => {},
+                            }
+                        }
+                        Ok(state.lock().await.clone())
+                    }
+                    _ => {
+                        return Err(std::io::Error::new(
+                            std::io::ErrorKind::InvalidData,
+                            operation,
+                        ))
+                    }
+                };
+            let response = serde_json::to_vec(&serde_json::json!({
+                "protocol": 1,
+                "pid": std::process::id(),
+                "result": result,
+            }))?;
+            pipe.write_u32_le(u32::try_from(response.len()).unwrap())
+                .await?;
+            pipe.write_all(&response).await?;
+            pipe.flush().await
+        }
+    }
 
     // 覆盖 M-08（小数大小换算后为正整数字节即合法：0.5 MB = 524288 字节；
     // 0 与换算后非整数字节的输入仍必须拒绝）
@@ -6889,6 +8363,26 @@ mod gui_tests {
             self.ui.set_error_text("".into());
             self.ui.set_notice_text("".into());
             self.ui.set_theme(0);
+            self.ui.set_acp_executable("".into());
+            self.ui.set_acp_arguments("".into());
+            self.ui.set_acp_port("8765".into());
+            self.ui.set_acp_saved_config("正在读取…".into());
+            self.ui.set_acp_running_config("正在读取…".into());
+            self.ui.set_acp_phase("unconfigured".into());
+            self.ui
+                .set_acp_status("正在后台读取配置并连接模型服务…".into());
+            self.ui.set_acp_status_known(false);
+            self.ui.set_acp_ready(false);
+            self.ui.set_acp_pending_apply(false);
+            self.ui.set_acp_request_pending(false);
+            self.ui.set_acp_explicit_stopped(false);
+            self.ui.set_acp_service_pid("".into());
+            self.ui.set_acp_agent_pid("".into());
+            self.ui.set_acp_executing(0);
+            self.ui.set_acp_waiting(0);
+            self.ui.set_acp_operation("".into());
+            self.ui.set_acp_action_error("".into());
+            self.ui.set_acp_service_error("".into());
             self.ui.set_confirm_kind(0);
             self.ui.set_confirm_pending(false);
             self.ui.set_section(0);
@@ -7010,6 +8504,7 @@ mod gui_tests {
                         wire_snap_ocr(&ui, &state, &out);
                         wire_markdown_converter(&ui, &state, &out);
                         wire_settings(&ui, &state, &out);
+                        wire_acp_http(&ui, &state);
                         wire_task_lifecycle(&ui, &state, &out);
                         refresh(&ui, &state.borrow());
                         let pump = UiPump::new(event_rx, state.clone(), out);

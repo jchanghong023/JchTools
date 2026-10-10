@@ -1,10 +1,10 @@
 # JchTools
 
-Windows 优先的 Rust + Slint 本地工具箱。当前通过工具注册表接入「递归解压」「目录整理」「MD 整理」「转 Markdown」「Git 工具」「截图 OCR」六个工具。文件转换与已初始化的截图 OCR 完全离线；网络仅用于用户主动启动的 Git 任务及转 Markdown、截图 OCR 可选组件初始化，边界见需求合同 P-03、T-21 与 [截图 OCR 需求](docs/requirements/SNAP2TEXT.md)。
+Windows 优先的 Rust + Slint 本地工具箱。当前通过工具注册表接入「递归解压」「目录整理」「MD 整理」「转 Markdown」「Git 工具」「截图 OCR」「模型服务」七个工具。文件转换与已初始化的截图 OCR 完全离线；模型服务仅监听本机，用户配置的外部 ACP Agent 自行承接模型调用。联网边界见需求合同 P-03、T-21、AH 分区与 [截图 OCR 需求](docs/requirements/SNAP2TEXT.md)。
 
-> **验证以对应提交的结果为准**：本地 `fulltest` 覆盖 Python 质量门、Rust 格式与 Clippy、静态检查、单元与集成测试、真实 7-Zip 用例及 GUI S1–S4；功能验收以 Windows 本地结果为准；CI 仅编译、打包和发布，不重复运行完整测试。安装包、便携 ZIP 与发布记录见 [Releases](https://github.com/jchanghong023/JchTools/releases)。没有引擎时构建不内嵌，运行期解压会给出明确错误；运行 `scripts/fetch-7zip.ps1` 获取官方引擎后，构建会自动把它压缩内嵌进 EXE。发布包由 `scripts/package-windows.ps1` 生成，只附带许可证与上游源码，不含引擎可执行文件。
+> **验证以对应提交的结果为准**：本地 `fulltest` 覆盖静态与 Python 质量检查、Rust 格式与 Clippy、编译、所有适用的 Windows 本地单元/集成/doc/e2e 测试、真实 7-Zip 用例及本地发布打包；真实桌面 driver 保留独立并如实标注未运行，不以门通过代替其验收。功能验收以 Windows 本地结果为准；CI 仅编译、打包和发布，不重复运行完整测试。安装包、便携 ZIP 与发布记录见 [Releases](https://github.com/jchanghong023/JchTools/releases)。没有引擎时构建不内嵌，运行期解压会给出明确错误；运行 `scripts/fetch-7zip.ps1` 获取官方引擎后，构建会自动把它压缩内嵌进 EXE。发布包由 `scripts/package-windows.ps1` 生成，只附带许可证与上游源码，不含引擎可执行文件。
 
-`python scripts/test_gate.py slowtest --authorized` 在本地阶段允许继续后默认只触发远程 `check.yml`，不等待最终结果，状态仍为 `UNVERIFIED`；取得本次新 run 时报告其链接，尚未取得时明确标注并给出续查入口，不借用同提交的历史 run。仅当用户明确要求等待结果时使用 `python scripts/test_gate.py slowtest --authorized --wait`；只有对应新 run 最终通过后才能报告 CI 通过。此入口不触发 `release.yml`，真实发布仍须单独授权。
+三级门不触发 CI、远程流水线或发布：`python scripts/test_gate.py slowtest --authorized` 只执行本地适用覆盖，不能用来触发或等待 `check.yml` / `release.yml`。CI 仍独立编译、打包、发布；独立触发流水线须按当次指令执行，默认报告本次 run 链接及未完结 / 未验证状态，只有用户明确要求时等待最终结果，不借同提交历史 run 冒报成功。真实发布仍须单独授权。
 
 ## 7-Zip 引擎（内置）
 
@@ -29,7 +29,7 @@ powershell -NoProfile -File .\scripts\package-windows.ps1
 
 随后生成 Cargo.lock，执行 `cargo check`、核心测试和真实引擎解压测试；先以 `cargo build --locked --release --manifest-path optional/snap-ocr-worker/Cargo.toml --bin snap-ocr-worker` 构建**独立的截图 OCR 后台 worker**，把原始 EXE 放到 `dist/optional-components-v0.1.2/snap-ocr-worker.exe`，按该文件的实际字节数及 SHA-256 生成同目录 `snap-ocr-assets.json`。脚本只在主程序编译期间通过 `JCHTOOLS_SNAP_OCR_MANIFEST` 让 `build.rs` 将这份清单嵌入主 EXE，不改写仓库内的占位清单；发布目录 `resources/snap-ocr-assets.json` 也包含同一清单。接着编译 GUI，校验内嵌引擎与清单，复制许可证及 7-Zip 源码（发布包不含 7z.exe/dll），生成 `dist/JchTools-Windows-x64-时间戳.zip`；构建机装有 Inno Setup 6 时还会编译出安装包 `dist/JchTools-Setup-x64.exe`（安装到当前用户目录、免管理员权限，自动创建桌面快捷方式与开始菜单入口，控制面板可卸载；缺 ISCC 时该阶段如实标注 NOT RUN，CI 发布流程保证产出）。**ZIP 和安装包包含 `snap-ocr-worker.exe` 与资产清单；截图字体和许可证直接内置于 worker，无需额外初始化；Xberg、ONNX 模型和推理 DLL 仍使用独立 Xberg 组件目录。后台 worker 是主包交付内容，缺失时应重新解包或重新安装同一发布包，不能把未交付的独立下载地址当作恢复依据。**该构建目录的 `BUILD-INFO.json` 记录实际执行结果；脚本不会声称已完成手工 UI 或多 TB 性能验收。首次验证通过后的 Cargo.lock 应纳入仓库。
 
-`-Offline` 只供已经缓存全部 Rust 依赖和已校验引擎的构建机使用；`-SkipTests` 会在构建记录明确标为 NOT RUN，不应用于生产交付。脚本不修改执行策略，不自动安装编译器，不自动提升权限。
+`-Offline` 要求已备齐并校验 7-Zip、Git 等外部交付资产；Rust 依赖源码固定在仓库 `vendor/`，不需要本机 crates.io 源码缓存。`-SkipTests` 在构建记录明确标为 NOT RUN；CI 编译、打包和发布使用此开关，功能验收复用已通过且源码未变的 Windows 本地证据，不能以 CI 成功替代本地测试。脚本不修改系统执行策略，不自动安装编译器，不自动提升权限。
 安装包与便携 ZIP 均携带 `BUILD-INFO.json`：安装包内记录 ISCC 编译前的共同测试结果与未验证项，安装包编译阶段自身如实标为未完结；编译完成后，便携 ZIP 中的记录再更新为该阶段的实际结果。文件存在不表示真实桌面或完整发布验收已通过。
 
 
@@ -42,7 +42,7 @@ powershell -NoProfile -File .\scripts\package-windows.ps1
 
 ## 使用流程
 
-六个工具各自独立，导航切换：
+七个工具各自独立，导航切换：
 
 - **递归解压**：选目录 → 调整扫描范围与防护上限 → 点「开始解压」→ 一次确认 → 连续执行到结束。每个包就地解压，只有整包解码、校验及全部成员落盘成功后才永久删除原包及实际分卷；不去重、不删除已有文件或普通解压结果。目标重名时只给新文件的基础名加唯一编号，保留普通及复合扩展名。未能完全解开的包整组移入根目录的「解压失败」并记录原因；空间不足或取消则停止并保留当前源包，不作为坏包隔离。同一次任务不重复处理已经处理的包，新任务允许重新处理仍在范围内的包；固定整树跳过「解压失败」目录。
 - **目录整理**：选目录 → 调整规则 → 点「开始分析」（**只读**，不改任何文件）→ 查看真实文件产生的分页计划 → 确认后执行去重、归类与清理。文件动作可逐项勾选/取消，状态立即更新；空目录清理是无独立开关的固定收尾步骤，任务取消后停止后续删除，清理失败不报告整理完成。
@@ -50,8 +50,9 @@ powershell -NoProfile -File .\scripts\package-windows.ps1
 - **转 Markdown**：先在独立「设置」页下载最新发布版 Xberg 或保存已有运行目录，再在工具页选择输入、输出目录和转换类型。文档、图片 OCR、媒体与截图共用当前选中的 Xberg；文档及图片支持格式以该运行时的 `formats` 能力为准，PDF、DOCX、PPTX、XLSX 是必需类型，媒体仍固定 MP4/M4A。转换完全离线，缺少相应资产或必需能力时明确提示。下载完整性与运行时存在性、能力检查边界见 [共享 Xberg 需求](docs/requirements/XBERG-INFERENCE.md)。
 - **Git 工具**：逐文件提交并推送——一个文件单独 add → 单独 commit（只含当前文件，保护既有 staged 内容）→ 单独 push，push 成功后才处理下一个；提交信息固定「update: 相对路径」。push 被远端新提交拒绝时自动 fetch + merge（不 rebase），冲突即停并保留现场；可重试失败按 5→10→20→40→80→80… 秒无限退避，可随时停止；以 git 状态为唯一进度来源，重启不重复提交。
 - **截图 OCR**：页面仅设置快捷键并显示后台状态；通过快捷键或托盘截图。打开 GUI 后，已配置的 Xberg 与后台服务异步启动；GUI 关闭后服务、模型和托盘继续常驻，重新打开连接同一服务。需要完全退出时使用系统托盘「退出后台服务」，正在处理的任务先确认并安全停止。组件初始化和故障恢复统一位于「设置」页；开机启动默认关闭。
+- **模型服务**：保存 ACP Agent 启动程序、参数和端口 → 异步启动或连接独立后台 → HTTP 调用 Models / Chat Completions；关闭工具箱不停止服务，配置应用与主动退出使用页面上的独立入口，具体协议及限制见下方「ACP 模型服务」。
 
-导航只显示已注册工具（递归解压、目录整理、MD 整理、转 Markdown、Git 工具、截图 OCR）以及独立设置、关于；工具描述集中注册。「关于」包含 Slint 的 AboutSlint 署名组件。旧工具不提供独立任务记录页或设置页：规则仍只在主界面「处理规则」里会话内调整，不落盘、不导入导出；共享 Xberg 的下载目录、用户目录及当前来源由设置页写入 SQLite 并在重启恢复；截图快捷键与开机启动设置也持久保存。
+导航只显示已注册工具（递归解压、目录整理、MD 整理、转 Markdown、Git 工具、截图 OCR、模型服务）以及独立设置、关于；工具描述集中注册。「关于」包含 Slint 的 AboutSlint 署名组件。旧工具不提供独立任务记录页或设置页：规则仍只在主界面「处理规则」里会话内调整，不落盘、不导入导出；共享 Xberg 的下载目录、用户目录及当前来源由设置页写入 SQLite 并在重启恢复；截图快捷键与开机启动设置也持久保存。
 
 ## 窗口与外观
 
@@ -90,6 +91,21 @@ powershell -NoProfile -File .\scripts\package-windows.ps1
 | 操作 | 暂停、取消；真实进度与有限 GUI 日志；计划分页、单项取消；主界面会话内调整规则 |
 
 “最新”明确指文件修改时间，不表示内容语义上的最新版本；时间相同用路径长度、路径字典序稳定决胜。同名但内容不同的文件不提供版本取舍或自动淘汰——去重只删除完整哈希一致的内容。
+
+## ACP 模型服务
+
+侧栏「模型服务」将用户配置的 ACP Agent 接到本机 OpenAI 风格 HTTP 接口。HTTP 使用 Axum 0.8.9，ACP 使用官方 Rust SDK 3.2.0；它们编译进 JchTools，不需要另装 Node/Python HTTP 后端。Agent 由用户准备，模型认证与其自身工具由 Agent 承接，需求边界见 [合同附录 F](docs/requirements/CONTRACT.md)。
+
+- 启动程序和参数分栏保存：程序栏填写可执行文件路径，不包引号；参数栏按 Windows 引号规则处理空格与中文。本次 OpenCode 验收启动命令为 `opencode acp`：程序栏填写真实 `opencode.exe` 路径，参数栏只填 `acp`，不添加未经其公开能力支持的模型、推理或 yolo 参数。配置保存在应用状态目录的 `config.sqlite3`，默认端口 8765。
+- 打开工具箱后按有效配置启动或连接独立后台；关闭或终止 GUI 不退出服务。修改并保存配置不会打断旧请求；「应用并重启」等待已接收请求完成后生效。退出模型服务使用独立确认，Stop 可抢占正在排空的 Apply；资源回收完成后，即使收尾报错也退出后台和控制管道。退出后迟到的 Apply 不会重新拉起服务，同一次 GUI 会话也不自动重启。
+- `GET http://127.0.0.1:<端口>/v1/models` 返回 Agent 协商出的真实可选模型 ID；探测会话在首次消费前收到配置更新时，同步公开目录。将返回的 ID 用于 `POST /v1/chat/completions`，实际选择仍按目标会话当前选项核验，不将 new 响应和随后通知当成原子事件。没有可选择模型能力时明确报错，不提供假别名。
+- `messages` 支持 `system`、`developer`、`user`、`assistant` 文本及 text 内容块；`stream: true` 返回实时 SSE。调用方不执行工具；`tools`、`tool_choice`、媒体和未实现的能力明确拒绝。
+- 默认每次请求新建会话并提交完整历史；续会话将响应的 `X-JchTools-Session-ID` 放回请求头，并提交包含上一轮实际 assistant 输出的完整历史。前缀不一致时报错；同会话串行，不同会话并发。最多 4 个执行请求和 16 个等待请求，容量满返回 429。
+- HTTP 断连只取消本轮；Agent 异常不重放任务。Windows 连接通过每 100ms 的只读 `SIO_TCP_INFO` v0 内核 TCP 状态查询观察对端关闭（该 API 要求 Windows 10 1703 或更新版本），不消费、复制管线请求字节，不替换 Mio 的事件注册；查询失败不是断连证据，会记录告警，不能据此保证缓冲管线下的关闭观察。服务只监听 `127.0.0.1`，端口占用不会自动换端口。Agent 初始工作目录为应用状态目录的 `acp-workspace`，不是源仓库。
+- 同一 Windows 用户、同一登录会话中的 OMP 通过控制管道的只读 `Discover` 自动取得实际就绪地址，再读取真实模型列表；不猜端口、不启动服务、不读启动参数或凭据。OMP 模型选择器显示 `jchtools/<真实 ID>` 和“后端 Agent 执行”，支持文本流式任务、取消与明确错误，不运行前端工具或自动重放任务。服务端启动的 ACP Agent 子进程固定带 `OMP_JCHTOOLS_DISCOVERY=0`，防止后端 OMP 再发现本服务；普通 OMP 也可用该进程开关或 `disabledProviders` 禁用发现，不改写用户配置。这是 AH-16 既有产品保护，不因真实验收改用 OpenCode 而移除；OpenCode 验收不证明其实现 OMP 的发现或模型选择器入口，也不要求启动真实 OMP。
+
+Rust 局部验证入口：`cargo test --features test-hooks --test acp_settings --test acp_http_contract --test acp_callbacks --test acp_service_process --test acp_discovery --test acp_discovery_env`。官方 SDK 合成 Agent、真实 TCP、独立进程与无硬件鼠标窗口用例不代替 F.3 指定的真实 Agent 与模型验收。唯一真实验收目标为 `acp_opencode`：本次截图基准为 OpenCode v2.0.26、OpenCode Zen MiMo-V2.6-Flash Free（`opencode/mimo-v2.6-flash-free`），执行时记录实际版本及 ACP 协商、选择和返回结果；该版本不限制产品可配置的 Agent 版本。用户已授权本次基准及目标模型的真实 ACP 验收，第一阶段仅单 Agent、单并发 Models / Chat JSON / 增量 SSE；未执行的 GUI、工具、权限、并行及其他高级矩阵项仍为 `NOT RUN`，不以第一阶段替代完整验收。Free 未开放或认证、能力不满足时如实报告，不回退付费或其他模型、Agent；权限按公开启动能力与 AH-13 的 ACP 最大授权记录实际结果，不编造 CLI flag。这些说明仅定义验收口径，不构成任何通过记录，权威需求与完整 AH-A01～AH-A15 矩阵仍见 [合同 F.3](docs/requirements/CONTRACT.md#f3-验收方案)。模型联网由 Agent 按 P-03 承接，本次授权不包含 fulltest、slowtest 或发布。源码与许可来源见 `vendor/SOURCES.json`；全新 Cargo 源缓存可用 `--offline --locked` 验证。
+
 
 ## 多 TB 目录的处理方式与边界
 
@@ -131,22 +147,45 @@ python scripts/make_tmp.py testdata
 
 ```powershell
 cargo test --features test-hooks   # 单元与集成测试（真实引擎用例默认 #[ignore]）
-python scripts/test_gate.py fastcheck   # 快速门（AI 可自主，≤60s；fulltest/slowtest 见 AGENTS.md 3.4）
+python scripts/test_gate.py fastcheck   # 静态检查 + format + compile，无测试；非编译共享预算 60s
 powershell -NoProfile -File .\scripts\acceptance.ps1 -WithEngine   # 单命令验收
 ```
+
+三级门统一由 `scripts/test_gate.py` 编排，完整治理与授权规则见 [AGENTS.md §3.4–3.5](AGENTS.md#34-三级测试门与执行权限)：
+
+| 门 | 适用覆盖 | 非编译共享预算 |
+| --- | --- | --- |
+| `fastcheck` | 静态检查 + format + compile，不运行任何测试 | 60 秒 |
+| `fulltest` | fastcheck 同项 + 所有适用 Windows 本地 UT / integration / doc / e2e（含可选组件、无头 GUI 与真实引擎）+ 本地 release 打包 | 900 秒 |
+| `slowtest` | P-07 仅 Windows，与 fulltest 等覆盖完整执行一次；无跨平台/WSL 增量标记 `SKIPPED_NOT_APPLICABLE`，不重复跑 fulltest | 1500 秒 |
+
+所有门均不运行 CI、远程、发布、ComputerUse、全局鼠标或焦点抢占测试。`gui_flow` 全部用例、`acp_service_process` 两项 `real_gui` 用例、`gui_smoke.py` / `markdown_acceptance.py` 的真实桌面 driver，以及注册全局热键的 `check_worker_root.py` 服务探测保留原测试/断言和独立入口，门中报告 `NOT_RUN_SEPARATE_USER_INSTRUCTION_REQUIRED`，不因门外而判 FAIL，也不冒报 PASS；软件渲染不等于焦点隔离，须用户当次另行明确指令才执行。库内 Slint TestingBackend、OCR 隔离 desktop / window station 用例仍在门内。适用测试缺环境/工具时报告覆盖缺口，编译或门通过不等于未运行项验收通过。
+
+显式调用 `jch-fastcheck-fulltest-slowtest-gates` 已授权该次任务必要的全级运行与重跑；普通 fulltest / slowtest 仍逐次取得当次明确授权，不继承历史授权。`--authorized` 只声明该显式技能授权或当次明确指令，不创造授权（会话软约束）；不得静默重跑到绿。
+
+每级使用一个共享墙钟，setup / static / format / tests / download / packaging / cleanup 全计费；只有受控 Windows Job 内实际观测的 compiler 编译独占区间、且无非编译并行工作才扣除。不能把整条 Cargo/测试/打包命令或缓存预热都扣除；混合打包只在同步等待纯 `cargo build` 且符合观测条件时扣除，其他阶段全收费。所有终止路径均输出 `total` / `compile_excluded` / `budgeted` / `limit` / `status`，`budgeted = total - compile_excluded`，超出非编译预算即失败并回收所属进程树。
+
+Job PID 枚举按内核实际填写的列表长度读取，成员增长时按 `ERROR_MORE_DATA` 扩容，不把 assigned 计数补成未初始化的 PID；仍以持有句柄及 Job 成员身份确认清理边界。非编译工作重叠时直接计费，不为检查器反复枚举编译进程。必要的 fastcheck 在相关改动成批完成后执行，输入未变的通过结果复用。
+
+独立命令使用四槽位池，短阶段完成即补位，不因同批慢测试阻塞其他可运行阶段；共享 Cargo 写缓存的不同编译维度仍串行。源码快照使用 UTF-8，记录 HEAD、dirty 摘要及工具版本，不能把中止或不同快照的结果拼成通过。
+
+正常保留 `target/`、固定 features / flags / toolchain / target / profile 矩阵并复用增量缓存，不执行 `cargo clean` 或预算外预热，不通过缩减覆盖满足预算。release 打包属于 fulltest / slowtest；CI 与发布继续独立。既有检查定义、判据、测试断言与依赖质量配置保持不变。
+
+三级门先用 `make_tmp.py workspace` 创建当前门的 `process-temp/`，再将所属子进程的 `TEMP` / `TMP` 指向该仓库 `.tmp/` 目录；不改系统环境，不清空 `target/`。真实媒体测试未显式配置时，门在最新 Xberg 身份核验通过后生成固定公开语音与独立无音轨 MP4，使用校验 SHA-256 的便携 FFmpeg 缓存和 Windows SAPI 文件输出，不播放声音、不安装全局工具；固定期望正文先于转录确定，原测试断言不变。下载、合成和转录均计入非编译预算；显式配置不完整、工具或语音缺失均不能冒充通过。
 
 代码中的删除测试全部使用 tempfile 临时夹具，不会删除测试机的个人文件。真实引擎测试有 ignore 标记，只有显式运行时启用。
 
 `gui_smoke.py` 与 `markdown_acceptance.py` 仅对自己启动的验收实例使用 Windows Job Object；GUI 正常或异常退出后都会回收所属后台，避免上一阶段遗留的 Xberg 阻塞下一阶段，不影响用户已有实例。Markdown 验收同时识别未观察到忙态的瞬时失败收尾，保留真实失败统计与无产物结果，不将其误报为驱动超时。
 真实 GUI 验收推荐通过 `acceptance.ps1` 编排隔离目录。直接调用 `gui_smoke.py` 的非自隔离阶段（S1–S5、S10–S18）或启动真实转换驱动前，必须提供 `.tmp/` 下的绝对隔离 `JCHTOOLS_TEST_STATE_DIR` 和 `JCHTOOLS_SNAP_OCR_TEST_ASSET_ROOT`；S6–S9 自行生成隔离环境。`--allow-isolated-run` 不绕过公共启动路径的隔离要求，缺少隔离条件时拒绝启动，不能使用生产目录代替。
 转换驱动观察到「停止任务」后只等待本轮完成，不再次点击「开始转换」，避免将首轮成功产物误计为第二轮的「已有结果跳过」。本地 Git 验证可用 `RUST_TEST_THREADS=2` 限制并发资源占用；用例数、断言与时间阈值不变。
+需单独执行完整根包测试时，可用 `cargo test --all-targets --features test-hooks --no-fail-fast -- --nocapture --test-threads=1` 串行完成全部同维度用例并保留即时失败证据；用例内部的会话并发、停止竞态及真实进程断言不变。此命令不属于无测试的 fastcheck，单独通过也不等于 fulltest 通过。Windows 退出验证等待原进程句柄 signaled，不能将退出码已变化误当作进程对象已完成退出。
 独立断网测试已于 2026-10-05 按用户决定删除，完整门不再要求修改系统网络或提供断网证据；产品的离线运行能力与不上传约束保持不变。
 
-无头 GUI 测试对真实后台结果最多等待 30 秒；该上限只约束测试驱动，不改变产品超时或任务行为。Git 用例仍断言完成状态、文件计数、工作区及远端内容；Windows 进程启动开销不再因原 5 秒等待值被误报成功能失败。完整测试门的总超时仍由当次执行的硬上限约束。
+无头 GUI 测试对真实后台结果最多等待 30 秒；该上限只约束测试驱动，不改变产品超时或任务行为。Git 用例仍断言完成状态、文件计数、工作区及远端内容；Windows 进程启动开销不再因原 5 秒等待值被误报成功能失败。三级门统一受上述共享非编译预算约束，不以整个编译命令的墙钟作为可扣除编译时间。
 
-完整测试门向 `acceptance.ps1` 传入 Markdown 验收参数时使用 PowerShell 数组绑定；多个参数以及含空格、单引号的路径保持各自边界，不受 Windows PowerShell 5.1 的 `-File` 多值数组限制。
+另行获授权的独立 Markdown 验收向 `acceptance.ps1` 传入参数时使用 PowerShell 数组绑定；多个参数以及含空格、单引号的路径保持各自边界，不受 Windows PowerShell 5.1 的 `-File` 多值数组限制。这一历史驱动说明不代表三级门会调用真实桌面 driver。
 
-完整测试门保留调用方显式设置的 `JCHTOOLS_TEST_XBERG_DIR`，未设置时才使用本机固定测试引擎目录；真实引擎验收须采用当时最新发布版。无效的显式目录由验收报错，不静默换测其他二进制；运行目录须同时包含所选 `xberg.exe`、模型及 DLL。媒体夹具合成另需 PATH 中的 `ffmpeg.exe`；缺少安装版/便携版产物或独立 Windows 用户会话仍如实报告覆盖缺口，不能以目录改名或复制开发 EXE 代替；不要求独立断网测试。
+本地验收保留调用方显式设置的 `JCHTOOLS_TEST_XBERG_DIR`，未设置时才使用本机固定测试引擎目录；真实引擎验收须采用当时最新发布版。无效的显式目录由验收报错，不静默换测其他二进制；运行目录须同时包含所选 `xberg.exe`、模型及 DLL。媒体夹具合成另需 PATH 中的 `ffmpeg.exe`；独立桌面验收缺少安装版/便携版产物或独立 Windows 用户会话仍如实报告覆盖缺口，不能以目录改名或复制开发 EXE 代替；不要求独立断网测试。门外真实桌面项目继续按 `NOT_RUN_SEPARATE_USER_INSTRUCTION_REQUIRED` 报告，既不冒报 PASS，也不据此判三级门 FAIL。
 
 ## 工程入口
 

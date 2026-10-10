@@ -1,37 +1,21 @@
 #!/usr/bin/env python3
-"""JchTools 三级测试门：fastcheck / fulltest / slowtest.
+"""JchTools 本地三级验证门：fastcheck / fulltest / slowtest.
 
-层级语义（固定，不随项目需要改写；权限边界防止 AI 代理自行升级验证范围）：
+fastcheck：静态检查、格式、编译，无测试；非编译预算 60 秒。
+fulltest：相同检查与适用 Windows 本地测试、打包；预算 900 秒。
+slowtest：P-07 无 WSL 增量，与 fulltest 等覆盖一次；预算 1500 秒。
+总墙钟中只扣除观测到且没有非编译工作重叠的编译区间；复用正常 target 缓存。
+每条结束路径输出 total / compile_excluded / budgeted / limit 与状态。
+不触发 CI、发布、Computer Use、用户鼠标或抢焦点测试。
+fulltest / slowtest 的 --authorized 只代表当次明确指令或本技能调用授权。
 
-  fastcheck   AI 可自主执行的高频快速反馈；总墙钟硬上限 60 秒，超时即失败并终止
-              整个进程树，不得把超时报成成功。通过不代表完整验证。
-              步骤：static_check → rustfmt → clippy（默认特性）→ cargo test（含
-              binding loop 警告扫描）。
-  fulltest    当前平台（Windows）全部适用本地检查：本地 Python 质量门
-              + rustfmt + clippy + make_tmp 测试数据集 + acceptance.ps1
-              -WithEngine -WithGuiSmoke（复用可信基验收入口，内含 static_check、
-              全量测试、binding 扫描、真实引擎用例、GUI 冒烟 S1-S4）。不含发布
-              打包自检——它验证的是发布产物而非平台功能，只在 slowtest 执行。
-              不触发远程流水线；每次运行都需要人类明确授权（--authorized）。
-  slowtest    fulltest 全部阶段 + 发布打包自检（package-windows.ps1 全程）
-              + 远程编译打包（check.yml 不执行测试：默认仅触发并报告 UNVERIFIED；显式 --wait 才
-              轮询到最终状态，TRIGGERED 不等于 PASS）。平台范围仅 Windows。
-              同样需要人类本次明确授权。release.yml 是真实发布（自动打时间戳
-              tag 并发布产物），不属于 slowtest，只能单独显式授权手动触发。
-
-防递归：被触发的远程工作流各自运行固定步骤，不会回调本脚本，不存在
-slowtest → CI → slowtest 循环。本地阶段未全部 PASS（FAIL/TIMEOUT/UNVERIFIED）
-时不触发远程阶段，避免在本地未验证的状态下消耗流水线资源。
-
-fulltest / slowtest 打印本次运行的源码快照（HEAD、工作区是否干净、主要工具版本）
-与总墙钟耗时，结论据此绑定到具体提交；fastcheck 另有 60 秒预算判定。
 
 用法：
     python scripts/test_gate.py fastcheck
     python scripts/test_gate.py fastcheck --deadline-seconds 3   # 仅允许调低，用于验证超时路径
     python scripts/test_gate.py fulltest --authorized
     python scripts/test_gate.py slowtest --authorized
-    python scripts/test_gate.py slowtest --authorized --wait   # 本次明确要求等待最终状态
+    python scripts/test_gate.py slowtest --authorized --deadline-seconds 1200
 """
 
 from __future__ import annotations
@@ -40,17 +24,17 @@ import argparse
 import contextlib
 import ctypes
 import dataclasses
-import importlib.util
 import io
 import json
 import os
 import re
-import shlex
 import shutil
 import signal
+import struct
 import subprocess
 import sys
 import time
+from ctypes import wintypes
 from pathlib import Path
 from typing import TYPE_CHECKING, cast, final
 
@@ -64,16 +48,20 @@ if TYPE_CHECKING:
     from collections.abc import Callable
     from typing import IO, TypeIs
 
+
+if not __package__:
+    sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+from scripts.gate_runtime import GateRun, Result, Stage
+from scripts.local_gate_plan import gate_plan, run_full_coverage, static_plan
+
 ROOT = Path(__file__).resolve().parent.parent
 LOG_DIR = ROOT / ".tmp" / "test-gate"
-GUI_DATA_DIR = LOG_DIR / "gui-data"
 FIXED_XBERG_TEST_DIR = Path(r"C:\Users\jiang\Documents\xberg-test\xberg-cli-x86_64-pc-windows-msvc")
 
 FASTCHECK_DEADLINE_SECONDS = 60.0
+FULLTEST_DEADLINE_SECONDS = 900.0
+SLOWTEST_DEADLINE_SECONDS = 1500.0
 PROCESS_TREE_CLEANUP_SECONDS = 5.0
-STAGE_TIMEOUT_DEFAULT = 3600.0
-# 远程工作流等待上限：check.yml 约 30-40 分钟。
-REMOTE_CHECK_WATCH_SECONDS = 5400.0
 REMOTE_POLL_INTERVAL_SECONDS = 30.0
 # 源码快照里的工作区改动只列前 N 项，dirty 时避免刷屏。
 SNAPSHOT_DIRTY_SAMPLE = 10
@@ -86,11 +74,9 @@ STATUS_UNVERIFIED = "UNVERIFIED"
 STATUS_NOT_RUN = "NOT RUN"
 ERROR_NO_MORE_FILES = 18
 ERROR_INVALID_PARAMETER = 87
+ERROR_MORE_DATA = 234
 
-# 环境受限验收条目（AGENTS.md 3.4 例外）：C08/C09 要求在独立 Windows 用户会话中
-# 真实驱动正式包 GUI；无该会话的机器与 CI 一律 fail-closed NOT RUN，且 CI 自身同样
-# 无法执行（check.yml 把 markdown 验收退出码 2 视为不失败）。仅剩这些条目 NOT RUN
-# 不构成覆盖缺口，不阻塞 slowtest 的打包自检与远程 CI；条目本身保持如实 NOT RUN。
+# 独立旧桌面验收的覆盖判据保持原样；这些驱动不属于三个门的鼠标隔离范围。
 ENVIRONMENT_BLOCKED_ACCEPTANCE_ITEMS: frozenset[str] = frozenset({"C08", "C09"})
 # 从 acceptance 汇总行提取未执行条目号（acceptance.ps1 在汇总行携带条目号清单；
 # 逐项行与汇总行两种形态都按「字母+两位数字」在行内任意位置提取）。
@@ -127,7 +113,7 @@ class _Arguments(argparse.Namespace):
     gate: str = ""
     deadline_seconds: float = FASTCHECK_DEADLINE_SECONDS
     authorized: bool = False
-    wait: bool = False
+    # 参数只允许降低各级非编译预算；授权真实性仍是软约束。
 
 
 def _reconfigure_stdout() -> None:
@@ -207,6 +193,44 @@ def _resume_owned_process(pid: int) -> None:
         win32api.CloseHandle(snapshot)
 
 
+_query_job_information = cast(
+    "Callable[[int, int, object, int, object], int]",
+    ctypes.WINFUNCTYPE(
+        wintypes.BOOL,
+        wintypes.HANDLE,
+        ctypes.c_int,
+        ctypes.c_void_p,
+        wintypes.DWORD,
+        ctypes.POINTER(wintypes.DWORD),
+        use_last_error=True,
+    )(("QueryInformationJobObject", ctypes.WinDLL("kernel32", use_last_error=True))),
+)
+
+
+def _job_process_ids(job: int) -> tuple[int, ...]:
+    """按实际填写的 PID 数读取，不把 assigned 数当作返回列表长度."""
+    capacity = 16
+    pointer_size = ctypes.sizeof(ctypes.c_void_p)
+    while True:
+        size = 8 + capacity * pointer_size
+        buffer = ctypes.create_string_buffer(size)
+        written = wintypes.DWORD()
+        ok = _query_job_information(
+            int(job), win32job.JobObjectBasicProcessIdList, ctypes.byref(buffer), size, ctypes.byref(written)
+        )
+        assigned, listed = struct.unpack("<II", ctypes.string_at(buffer, 8))
+        if ok:
+            if listed > capacity:
+                message = "Windows Job 返回的 PID 数超出接收缓冲区"
+                raise OSError(message)
+            data = ctypes.string_at(ctypes.addressof(buffer) + 8, listed * pointer_size)
+            return cast("tuple[int, ...]", struct.unpack(f"{listed}P", data))
+        error = ctypes.get_last_error()
+        if error != ERROR_MORE_DATA:  # 子进程增长时按内核报告扩容。
+            raise ctypes.WinError(error)
+        capacity = max(capacity * 2, assigned + 16)
+
+
 @final
 class _CommandJob:
     """仅本次创建的 Windows 命令树，无桌面或 UI 运行依赖。."""
@@ -232,11 +256,10 @@ class _CommandJob:
             raise
 
     def process_handles(self) -> list[int]:
-        query_ids = cast("Callable[[int, int], tuple[int, ...]]", vars(win32job)["QueryInformationJobObject"])
         belongs = cast("Callable[[int, int], bool]", vars(win32job)["IsProcessInJob"])
         handles: list[int] = []
         try:
-            for pid in query_ids(self.job, win32job.JobObjectBasicProcessIdList):
+            for pid in _job_process_ids(self.job):
                 try:
                     handle = win32api.OpenProcess(win32con.SYNCHRONIZE | win32con.PROCESS_QUERY_INFORMATION, 0, pid)
                 except pywintypes.error as error:
@@ -347,14 +370,18 @@ def _tail(log: Path, limit: int = 12) -> str:
     return "\n".join(lines[-limit:])
 
 
-def run_logged(name: str, argv: list[str], *, timeout: float, env_extra: dict[str, str] | None = None) -> StageResult:
-    """运行单个命令阶段：完整输出落 .tmp/test-gate/<name>.log，凭退出码判定成败."""
+def run_logged(
+    name: str, argv: list[str], *, timeout: float | None, env_extra: dict[str, str] | None = None
+) -> StageResult:
+    """运行单个命令阶段：完整输出落 .tmp/test-gate/<name>.log；None 不限制命令等待时间."""
     started = _monotonic()
     log = LOG_DIR / f"{name}.log"
     LOG_DIR.mkdir(parents=True, exist_ok=True)
     env = os.environ | (env_extra or {})
-    cleanup_budget = min(PROCESS_TREE_CLEANUP_SECONDS, timeout * 0.25)
-    if timeout <= cleanup_budget:
+    cleanup_budget = (
+        PROCESS_TREE_CLEANUP_SECONDS if timeout is None else min(PROCESS_TREE_CLEANUP_SECONDS, timeout * 0.25)
+    )
+    if timeout is not None and timeout <= cleanup_budget:
         return StageResult(name, STATUS_TIMED_OUT, f"阶段预算 {timeout:.1f}s 不足以启动并清理进程树")
     with log.open("wb") as sink:
         proc = _start_owned_command(argv, stdout=sink, env=env)
@@ -364,10 +391,12 @@ def run_logged(name: str, argv: list[str], *, timeout: float, env_extra: dict[st
         # 否则固定等待叠加上述启动耗时会把总墙钟推过硬上限；同时保留原定 cleanup
         # 预算给进程树终止收尾，不得让等待吃满全部预算后挤压清理窗口。
         # 等待预算已被启动耗尽时 wait(timeout=0) 仍会轮询一次：只有已退出的命令才能通过。
-        wait_budget = max(0.0, started + timeout - cleanup_budget - _monotonic())
+        wait_budget = None if timeout is None else max(0.0, started + timeout - cleanup_budget - _monotonic())
         try:
             _ = proc.wait(timeout=wait_budget)
         except subprocess.TimeoutExpired:
+            if timeout is None:
+                raise
             timed_out = True
             cleanup_deadline = started + timeout
             kill_timeout = min(2.0, max(0.0, cleanup_deadline - _monotonic()))
@@ -381,9 +410,8 @@ def run_logged(name: str, argv: list[str], *, timeout: float, env_extra: dict[st
                 if proc.poll() is None:
                     proc.kill()
         finally:
-            tree_terminated = (
-                _close_owned_command(proc, timeout=max(0.0, started + timeout - _monotonic())) and tree_terminated
-            )
+            remaining = cleanup_budget if timeout is None else max(0.0, started + timeout - _monotonic())
+            tree_terminated = _close_owned_command(proc, timeout=remaining) and tree_terminated
     elapsed = _monotonic() - started
     if timed_out:
         cleanup = "进程树已终止" if tree_terminated else "未能确认进程树已终止"
@@ -438,22 +466,7 @@ def acceptance_coverage_gaps(text: str) -> list[str]:
     return gaps
 
 
-def _assess_acceptance_coverage(result: StageResult) -> StageResult:
-    if result.status != STATUS_OK or result.log is None:
-        return result
-    text = result.log.read_text(encoding="utf-8", errors="replace")
-    gaps = acceptance_coverage_gaps(text)
-    if not gaps:
-        return result
-    detail = "必要验收覆盖未形成完整 PASS：\n" + "\n".join(gaps)
-    return StageResult(result.name, STATUS_UNVERIFIED, detail, result.log)
-
-
-def _has_blocking(results: list[StageResult]) -> bool:
-    return any(result.status in (STATUS_FAILED, STATUS_TIMED_OUT) for result in results)
-
-
-def _print_summary(
+def print_summary(
     title: str,
     results: list[StageResult],
     notes: list[str],
@@ -487,94 +500,131 @@ def _print_summary(
     return code
 
 
-def cmd_fastcheck(deadline_seconds: float) -> int:
-    if sys.platform != "win32":
-        print("fastcheck 按合同 P-07 仅支持 Windows；拒绝在其他平台执行。")
-        return 2
-    started = _monotonic()
-    deadline = started + deadline_seconds
-    results: list[StageResult] = []
-    cargo = shutil.which("cargo")
-    if cargo is None:
-        results.append(StageResult("toolchain", STATUS_UNVERIFIED, "PATH 上找不到 cargo"))
-        return _print_summary("fastcheck", results, [])
-    plan: list[tuple[str, list[str]]] = [
-        ("static-check", [sys.executable, str(ROOT / "scripts" / "static_check.py")]),
-        ("rustfmt-check", [cargo, "fmt", "--all", "--", "--check"]),
-        ("clippy", [cargo, "clippy", "--all-targets", "--features", "test-hooks", "--", "-D", "warnings"]),
-        ("cargo-test", [cargo, "test", "--all-targets", "--features", "test-hooks"]),
-    ]
-    over_budget = False
-    for name, argv in plan:
-        if over_budget:
-            results.append(StageResult(name, STATUS_NOT_RUN, "时间预算已耗尽（前置阶段超时）"))
-            continue
-        remaining = deadline - _monotonic()
-        if remaining <= 0:
-            over_budget = True
-            budget = f"时间预算 {deadline_seconds:.0f}s 已耗尽，本阶段未能在预算内完成"
-            results.append(StageResult(name, STATUS_TIMED_OUT, budget))
-            continue
-        result = run_logged(name, argv, timeout=remaining)
-        if name == "cargo-test":
-            result = _scan_binding_loop(result)
-        results.append(result)
-        if result.status == STATUS_TIMED_OUT:
-            over_budget = True
-        elif result.status != STATUS_OK:
-            break
-    elapsed = _monotonic() - started
-    # 终局墙钟守卫：单阶段超时只能拦住「本阶段超时」，拦不住「各阶段都过但累计越界」
-    # （独立复核反例：最后阶段启动 6s + 等待 55s → 总墙钟 61s 仍报 PASS）。
-    # 越过硬上限时无条件判 TIMEOUT，亚秒级超限同样不得报成功。
-    if elapsed > deadline_seconds:
-        results.append(
-            StageResult(
-                "wall-clock-budget",
-                STATUS_TIMED_OUT,
-                f"总墙钟 {elapsed:.1f}s 超过 {deadline_seconds:.0f}s 硬上限；超时即失败",
+_query_process_image = cast(
+    "Callable[[int, int, object, object], int]",
+    ctypes.WINFUNCTYPE(
+        wintypes.BOOL,
+        wintypes.HANDLE,
+        wintypes.DWORD,
+        wintypes.LPWSTR,
+        ctypes.POINTER(wintypes.DWORD),
+    )(("QueryFullProcessImageNameW", ctypes.windll.kernel32)),
+)
+_get_process_id = cast(
+    "Callable[[int], int]",
+    ctypes.WINFUNCTYPE(wintypes.DWORD, wintypes.HANDLE)(("GetProcessId", ctypes.windll.kernel32)),
+)
+
+
+def _compiler_ids(proc: subprocess.Popen[bytes]) -> frozenset[int]:
+    """只观察本次 Job 内真实编译器，不将 cargo 或检查器整体豁免."""
+    owner = _COMMAND_JOBS.get(proc.pid)
+    if owner is None or owner.process is not proc:
+        return frozenset()
+    compilers = {"rustc.exe", "link.exe", "lld-link.exe", "rc.exe", "cl.exe", "c1xx.exe", "c2.exe"}
+    controllers = {"cargo.exe", "rustup.exe", "cmd.exe", "powershell.exe"}
+    identifiers: set[int] = set()
+    handles = owner.process_handles()
+    try:
+        for handle in handles:
+            if win32event.WaitForSingleObject(handle, 0) == win32event.WAIT_OBJECT_0:
+                continue
+            buffer = ctypes.create_unicode_buffer(32768)
+            size = ctypes.c_ulong(len(buffer))
+            if not _query_process_image(int(handle), 0, buffer, ctypes.byref(size)):
+                return frozenset()
+            image = Path(cast("str", buffer.value)).name.lower()
+            if image in compilers:
+                identifiers.add(_get_process_id(int(handle)))
+            elif image not in controllers:
+                # build script、下载器或其他子进程可能与编译重叠，不豁免其工作。
+                return frozenset()
+    finally:
+        for handle in handles:
+            win32api.CloseHandle(handle)
+    return frozenset(identifiers)
+
+
+def _gate_plan(level: str) -> list[Stage]:
+    return gate_plan(level, ROOT, LOG_DIR, _powershell_env())
+
+
+def _prepare_process_workspace(run: GateRun, results: list[Result]) -> None:
+    temporary = run.run(
+        [
+            Stage(
+                "temporary-workspace",
+                [
+                    sys.executable,
+                    str(ROOT / "scripts/make_tmp.py"),
+                    "workspace",
+                    "--destination",
+                    str(run.log_dir),
+                ],
             )
-        )
-    note = f"墙钟：{elapsed:.1f}s / 预算 {deadline_seconds:.0f}s（60 秒为硬上限，超时即失败）"
-    return _print_summary("fastcheck", results, [], wall_note=note)
+        ]
+    )
+    results.extend(temporary)
+    if len(temporary) != 1 or temporary[0].status != STATUS_OK:
+        message = "仓库隔离临时目录准备失败；未启动其他检查。"
+        raise RuntimeError(message)
+    run.prepare_temporary()
 
 
-def _python_quality_stages(results: list[StageResult]) -> None:
-    # 本地 Python 质量门；工具缺失只能 UNVERIFIED，不得静默跳过。
-    stages: list[tuple[str, str, list[str]]] = [
-        ("pyquality-ruff-format", "ruff", [sys.executable, "-m", "ruff", "format", "--check", "scripts", "typings"]),
-        ("pyquality-ruff-lint", "ruff", [sys.executable, "-m", "ruff", "check", "scripts", "typings"]),
-        ("pyquality-basedpyright", "basedpyright", [sys.executable, "-m", "basedpyright", "scripts", "typings"]),
-        (
-            "pyquality-vulture",
-            "vulture",
-            [sys.executable, "-m", "vulture", "scripts", "typings", "--min-confidence", "100"],
-        ),
-        ("pyquality-bandit", "bandit", [sys.executable, "-m", "bandit", "-r", "scripts", "-s", "B404,B603", "-q"]),
-        # pip-audit 的模块名是下划线形式 pip_audit（连字符只是 console script 名）。
-        ("pyquality-pip-audit", "pip_audit", [sys.executable, "-m", "pip_audit", "-r", "scripts/requirements-dev.txt"]),
-        (
-            "markdown-acceptance-unit",
-            "unittest",
-            [sys.executable, "-m", "unittest", "scripts.test_markdown_acceptance"],
-        ),
-        (
-            "gui-automation-unit",
-            "unittest",
-            [sys.executable, "-m", "unittest", "scripts.test_gui_smoke"],
-        ),
-        (
-            "test-gate-unit",
-            "unittest",
-            [sys.executable, "-m", "unittest", "scripts.test_test_gate"],
-        ),
-    ]
-    for name, module, argv in stages:
-        if importlib.util.find_spec(module) is None:
-            hint = f"工具模块 {module} 不可用；pip install -r scripts/requirements-quality.txt 后重跑"
-            results.append(StageResult(name, STATUS_UNVERIFIED, hint))
-            continue
-        results.append(run_logged(name, argv, timeout=600.0))
+def execute_gate(
+    level: str,
+    limit: float,
+    *,
+    stages_override: list[Stage] | None = None,
+    compiler_ids_override: Callable[[subprocess.Popen[bytes]], frozenset[int]] | None = None,
+    clock_override: Callable[[], float] | None = None,
+) -> int:
+    """单一入口；override 仅供隔离自检，不暴露为 CLI 绕过开关."""
+    run = GateRun(
+        level,
+        limit,
+        ROOT,
+        LOG_DIR / level,
+        start_command=_start_owned_command,
+        close_command=_close_owned_command,
+        kill_tree=_kill_tree,
+        compiler_ids=compiler_ids_override or _compiler_ids,
+        clock=clock_override or _monotonic,
+    )
+    results: list[Result] = []
+    snapshot: list[str] = []
+    notes: list[str] = []
+    try:
+        if stages_override is not None:
+            results.extend(run.run(stages_override))
+        elif sys.platform != "win32":
+            results.append(Result("platform", STATUS_UNVERIFIED, "合同 P-07 仅支持 Windows。"))
+        else:
+            _prepare_process_workspace(run, results)
+            plan = _gate_plan(level)
+            common_count = len(static_plan(ROOT)) + 1
+            results.extend(run.run(plan[:common_count]))
+            for stage in plan[common_count:]:
+                if stage.name in {"test-target-check", "clippy"}:
+                    results.extend(run.run([stage]))
+            if level != "fastcheck" and all(result.status == STATUS_OK for result in results):
+                run_full_coverage(run, plan, results, snapshot, ROOT)
+            notes.append("NOT_RUN_SEPARATE_USER_INSTRUCTION_REQUIRED：gui_smoke、Markdown 真实桌面验收、OCR 桌面探针。")
+            notes.append("CI / 远程流水线 / 发布 / Computer Use：在三个门之外。")
+        if level == "slowtest":
+            notes.append("SKIPPED_NOT_APPLICABLE WSL：P-07 仅 Windows；与 fulltest 等覆盖一次。")
+    except KeyboardInterrupt:
+        results.append(Result("interruption", STATUS_FAILED, "用户中断；不报告为通过。"))
+    except (OSError, ValueError, RuntimeError, subprocess.SubprocessError) as error:
+        results.append(Result("orchestration", STATUS_FAILED, f"门编排失败：{error}"))
+    for result in results:
+        checked = _scan_binding_loop(StageResult(result.name, result.status, result.detail, result.log))
+        result.status, result.detail = checked.status, checked.detail
+    return run.finish(results, snapshot=snapshot, notes=notes)
+
+
+def cmd_fastcheck(deadline_seconds: float) -> int:
+    return execute_gate("fastcheck", deadline_seconds)
 
 
 def _powershell_env() -> dict[str, str]:
@@ -638,153 +688,8 @@ def _ps51_module_path() -> str | None:
     return os.pathsep.join(keep) or None
 
 
-def _powershell_literal(value: str | Path) -> str:
-    """编码 PowerShell 单引号字面量，路径/参数中的单引号不成为可执行语法."""
-    return "'" + str(value).replace("'", "''") + "'"
-
-
-def _acceptance_argv(powershell: str, script: Path, gui_data: Path, markdown_args: list[str]) -> list[str]:
-    """通过真实数组表达式绑定 MarkdownArgs；Windows PowerShell 5.1 -File 不能传多值数组."""
-    command = (
-        f"& {_powershell_literal(script)} -WithEngine -WithGuiSmoke "
-        f"-GuiData {_powershell_literal(gui_data)} -WithMarkdownAcceptance"
-    )
-    if markdown_args:
-        values = ", ".join(_powershell_literal(value) for value in markdown_args)
-        command += f" -MarkdownArgs @({values})"
-    return [powershell, "-NoProfile", "-Command", command]
-
-
-def _prepare_fulltest_engine_and_inventory(results: list[StageResult]) -> bool:
-    # 实际模型/桌面测试只能使用当次官方最新引擎；已存在时核验并复用。
-    latest_result = run_logged(
-        "xberg-latest", [sys.executable, str(ROOT / "scripts" / "xberg_test_engine.py")], timeout=900.0
-    )
-    results.append(latest_result)
-    if latest_result.status != STATUS_OK:
-        return False
-    results.append(
-        run_logged(
-            "requirement-reference-inventory",
-            [sys.executable, str(ROOT / "scripts" / "requirement_coverage.py")],
-            timeout=60.0,
-        )
-    )
-    return not _has_blocking(results)
-
-
-def _fulltest_stages(results: list[StageResult]) -> None:
-    cargo = shutil.which("cargo")
-    powershell = shutil.which("powershell")
-    if cargo is None:
-        results.append(StageResult("toolchain", STATUS_UNVERIFIED, "PATH 上找不到 cargo"))
-        return
-    if powershell is None:
-        results.append(StageResult("powershell", STATUS_UNVERIFIED, "PATH 上找不到 powershell（acceptance.ps1 需要）"))
-        return
-    if not _prepare_fulltest_engine_and_inventory(results):
-        return
-    _python_quality_stages(results)
-    if _has_blocking(results):
-        return
-    results.append(run_logged("rustfmt-check", [cargo, "fmt", "--all", "--", "--check"], timeout=300.0))
-    results.append(
-        run_logged(
-            "clippy",
-            [cargo, "clippy", "--all-targets", "--features", "test-hooks", "--", "-D", "warnings"],
-            timeout=1800.0,
-        )
-    )
-    # perf-tracing 是文档化的性能打点构建配置（src/perf.rs、tests/perf_probe.rs），默认特性构建
-    # 覆盖不到它：曾因 `Summary.linked` 字段删除后遗漏调用点而整个配置编译失败。单独构建该特性，
-    # 防止只改字段/签名的变更再次打断这个配置。
-    results.append(
-        run_logged(
-            "clippy-perf-tracing",
-            [
-                cargo,
-                "clippy",
-                "--all-targets",
-                "--features",
-                "perf-tracing,test-hooks",
-                "--",
-                "-D",
-                "warnings",
-            ],
-            timeout=1800.0,
-        )
-    )
-    if _has_blocking(results):
-        return
-    # GUI 冒烟数据集：一次性生成在 .tmp/ 下，跑完删除（不整清 .tmp/，保留各阶段日志）。
-    argv = [
-        sys.executable,
-        str(ROOT / "scripts" / "make_tmp.py"),
-        "testdata",
-        "--destination",
-        str(GUI_DATA_DIR),
-        "--force",
-    ]
-    results.append(run_logged("gui-testdata", argv, timeout=600.0))
-    if _has_blocking(results):
-        return
-    # 单命令复用可信基验收入口：static_check + 全量测试 + binding 扫描 + 真实引擎用例
-    # + GUI 冒烟（内含 gui-build）。发布打包自检不在本级（只在 slowtest，见 _package_stage）。
-    markdown_args = shlex.split(os.environ.get("JCHTOOLS_MD_ACCEPTANCE_ARGS", "").strip())
-    acceptance_argv = _acceptance_argv(powershell, ROOT / "scripts" / "acceptance.ps1", GUI_DATA_DIR, markdown_args)
-    # F26：转 Markdown 验收承接（ALL2MARKDOWN 附录 A）默认进入 fulltest/slowtest。
-    # 无资产或被测物时 acceptance.ps1 记 NOT RUN，不把缺资产伪报为通过；
-    # JCHTOOLS_MD_ACCEPTANCE_ARGS 仅用于向默认入口透传被测物/双形态参数。
-    # 本机执行策略全作用域 Undefined（默认 Restricted）会拒绝执行 .ps1；
-    # PSExecutionPolicyPreference 以 Process 作用域覆盖之，随环境继承给
-    # acceptance.ps1 内部的 powershell 子进程，只影响本进程树。
-    acceptance_env = _powershell_env()
-    acceptance_result = run_logged(
-        "acceptance", acceptance_argv, timeout=STAGE_TIMEOUT_DEFAULT, env_extra=acceptance_env
-    )
-    results.append(_assess_acceptance_coverage(acceptance_result))
-    shutil.rmtree(GUI_DATA_DIR, ignore_errors=True)
-    results.append(StageResult("cleanup-gui-data", STATUS_OK, f"已删除一次性数据集 {GUI_DATA_DIR}"))
-
-
-def cmd_fulltest() -> int:
-    if sys.platform != "win32":
-        message = "fulltest 按 Windows 当前平台设计（acceptance.ps1 为 Windows 专用）；"
-        message += "平台范围按合同 P-07 仅支持 Windows（原 Linux 验证入口已移除）"
-        print(message)
-        return 2
-    started = time.monotonic()
-    snapshot = _snapshot_lines()
-    results: list[StageResult] = []
-    _fulltest_stages(results)
-    elapsed = time.monotonic() - started
-    return _print_summary(
-        "fulltest（当前平台 Windows）", results, [], snapshot=snapshot, wall_note=f"墙钟：{elapsed:.1f}s"
-    )
-
-
-def _package_stage(results: list[StageResult]) -> None:
-    """发布打包自检（package-windows.ps1 全程）：只属于 slowtest 层级（AGENTS.md 3.4）.
-
-    fulltest 不含本阶段：它验证的是发布产物（引擎内嵌、许可证合规、无引擎泄漏、
-    便携 ZIP 与安装包）而不是当前平台功能，且 release 构建 + 重复测试 + 压缩在本机
-    要两分钟以上；放进 slowtest 后它的耗时与结论在汇总里单独可见。
-    """
-    powershell = shutil.which("powershell")
-    if powershell is None:
-        results.append(
-            StageResult("package", STATUS_UNVERIFIED, "PATH 上找不到 powershell（package-windows.ps1 需要）")
-        )
-        return
-    env_extra = _powershell_env()
-    results.append(
-        run_logged(
-            "package",
-            [powershell, "-NoProfile", "-File", str(ROOT / "scripts" / "package-windows.ps1")],
-            timeout=STAGE_TIMEOUT_DEFAULT,
-            env_extra=env_extra,
-        )
-    )
+def cmd_fulltest(deadline_seconds: float = FULLTEST_DEADLINE_SECONDS) -> int:
+    return execute_gate("fulltest", deadline_seconds)
 
 
 def _str_field(entry: object, key: str) -> str | None:
@@ -811,7 +716,7 @@ def _version_line(name: str) -> str:
     return f"{name}: {lines[0] if lines else '版本未知'}"
 
 
-def _snapshot_lines() -> list[str]:
+def snapshot_lines() -> list[str]:
     """本次运行的源码快照：HEAD、工作区是否干净、关键构建配置与主要工具版本.
 
     fulltest / slowtest 的结论必须能绑回具体提交；工作区不干净时列出改动摘要，
@@ -933,7 +838,7 @@ def _find_completed_run(
     return StageResult(stage, STATUS_FAILED, f"流水线最终状态 {conclusion}；run：{url} @ {head[:12]}")
 
 
-def _stage_remote_workflow(git: str, gh: str, workflow: str, *, watch_seconds: float | None) -> StageResult:
+def stage_remote_workflow(git: str, gh: str, workflow: str, *, watch_seconds: float | None) -> StageResult:
     """触发远程验证；仅显式提供等待预算时轮询到最终状态。."""
     context = _trigger_workflow(git, gh, workflow)
     if isinstance(context, StageResult):
@@ -968,96 +873,52 @@ def _stage_remote_workflow(git: str, gh: str, workflow: str, *, watch_seconds: f
     return StageResult(stage, STATUS_UNVERIFIED, detail)
 
 
-def cmd_slowtest(*, wait: bool = False) -> int:
-    if sys.platform != "win32":
-        message = (
-            "slowtest 按 Windows 主机设计（Windows fulltest + 远程 CI）；请在 Windows 上运行（合同 P-07 仅 Windows）"
-        )
-        print(message)
-        return 2
-    started = time.monotonic()
-    snapshot = _snapshot_lines()
-    results: list[StageResult] = []
-    _fulltest_stages(results)
-    # 发布打包自检：只在本级执行（AGENTS.md 3.4）。本地阶段未全部 PASS 时按纪律不执行——
-    # 前提都没成立就花两分钟构建发布产物没有意义，且会掩盖「本地未验证」。
-    not_ok = [result.name for result in results if result.status != STATUS_OK]
-    if not_ok:
-        results.append(
-            StageResult(
-                "package",
-                STATUS_NOT_RUN,
-                f"本地阶段未全部 PASS（{', '.join(not_ok)}）；按纪律不执行打包自检",
-            )
-        )
-    else:
-        _package_stage(results)
-    # 前置本地验证未全部 PASS（FAIL / TIMEOUT / UNVERIFIED）时停止后续远程阶段：
-    # 本地平台验证都没能成立就去消耗流水线资源属于自欺，且会把「本地未验证」掩盖成「远程已验证」。
-    git = shutil.which("git")
-    gh = shutil.which("gh")
-    if all(result.status == STATUS_OK for result in results) and git is not None and gh is not None:
-        auth = subprocess.run([gh, "auth", "status"], capture_output=True, text=True, check=False)
-        if auth.returncode != 0:
-            results.append(StageResult("remote-ci", STATUS_UNVERIFIED, "gh 未登录（先 gh auth login）"))
-        else:
-            watch_seconds = REMOTE_CHECK_WATCH_SECONDS if wait else None
-            results.append(_stage_remote_workflow(git, gh, "check.yml", watch_seconds=watch_seconds))
-    elif git is None or gh is None:
-        state = f"git={'有' if git else '缺'} gh={'有' if gh else '缺'}；远程阶段无法验证"
-        results.append(StageResult("remote-ci", STATUS_UNVERIFIED, state))
-    else:
-        failed = ", ".join(f"{result.name}={result.status}" for result in results if result.status != STATUS_OK)
-        results.append(
-            StageResult("remote-ci", STATUS_NOT_RUN, f"本地阶段未全部 PASS（{failed}）；按纪律不触发远程流水线")
-        )
-    release_note = (
-        "release-workflow：真实发布（自动打时间戳 tag 并发布安装包与便携 ZIP），不属于 slowtest；"
-        "如需发布请单独确认目标后手动运行 gh workflow run release.yml"
-    )
-    elapsed = time.monotonic() - started
-    return _print_summary(
-        "slowtest（fulltest + 远程流水线）",
-        results,
-        [release_note],
-        snapshot=snapshot,
-        wall_note=f"墙钟：{elapsed:.1f}s",
-    )
+def cmd_slowtest(deadline_seconds: float = SLOWTEST_DEADLINE_SECONDS) -> int:
+    return execute_gate("slowtest", deadline_seconds)
 
 
 def main(argv: list[str] | None = None) -> int:
+    started_at: float | None = _monotonic()
+
+    def clock() -> float:
+        nonlocal started_at
+        if started_at is not None:
+            value, started_at = started_at, None
+            return value
+        return _monotonic()
+
     _reconfigure_stdout()
-    description = "JchTools 三级测试门：fastcheck（AI 自主，≤60s）/ fulltest / slowtest（后两级需 --authorized）"
+    description = "JchTools 本地三级门：非编译预算 60 / 900 / 1500 秒；无 CI、鼠标或发布"
     parser = argparse.ArgumentParser(description=description)
     sub = parser.add_subparsers(dest="gate", required=True)
-    fast = sub.add_parser("fastcheck", help="快速反馈：static_check + fmt + clippy + cargo test；总墙钟硬上限 60 秒")
-    _ = fast.add_argument(
-        "--deadline-seconds",
-        type=float,
-        default=FASTCHECK_DEADLINE_SECONDS,
-        help="仅允许 (0,60]（用于验证超时路径），不得调高绕过硬上限",
-    )
-    full = sub.add_parser("fulltest", help="当前平台（Windows）全部本地检查；不触发远程流水线")
-    _ = full.add_argument("--authorized", action="store_true", help="确认本次运行已由人类明确授权")
-    slow = sub.add_parser("slowtest", help="fulltest + 远程 CI（check.yml）")
-    _ = slow.add_argument("--authorized", action="store_true", help="确认本次运行已由人类明确授权")
-    _ = slow.add_argument("--wait", action="store_true", help="本次明确要求轮询远程 CI 到最终状态；默认仅触发")
+    for name, ceiling in (
+        ("fastcheck", FASTCHECK_DEADLINE_SECONDS),
+        ("fulltest", FULLTEST_DEADLINE_SECONDS),
+        ("slowtest", SLOWTEST_DEADLINE_SECONDS),
+    ):
+        command = sub.add_parser(name, help=f"非编译预算 ≤{ceiling:.0f}s；保留缓存，观测编译独占区间扣时")
+        _ = command.add_argument("--deadline-seconds", type=float, default=ceiling, help="只允许调低本级非编译预算")
+        if name != "fastcheck":
+            _ = command.add_argument(
+                "--authorized", action="store_true", help="代表当次明确指令或本技能调用授权；不可自主升级"
+            )
     arguments = parser.parse_args(argv, namespace=_Arguments())
-    if arguments.gate == "fastcheck":
-        deadline = arguments.deadline_seconds
-        if not 0 < deadline <= FASTCHECK_DEADLINE_SECONDS:
-            message = f"--deadline-seconds 仅允许 (0, 60]，收到 {deadline}"
-            print(message)
-            return 2
-        return cmd_fastcheck(deadline)
-    if not arguments.authorized:
-        message = f"{arguments.gate} 每次运行都需要人类明确授权：确认后加 --authorized 重新执行。"
-        message += "历史授权、CI 建议或脚本注释都不构成本次授权。"
-        print(message)
-        return 2
-    if arguments.gate == "fulltest":
-        return cmd_fulltest()
-    return cmd_slowtest(wait=arguments.wait)
+    if arguments.gate != "fastcheck" and not arguments.authorized:
+        run = GateRun(
+            arguments.gate,
+            arguments.deadline_seconds,
+            ROOT,
+            LOG_DIR,
+            start_command=_start_owned_command,
+            close_command=_close_owned_command,
+            kill_tree=_kill_tree,
+            compiler_ids=_compiler_ids,
+            clock=clock,
+        )
+        return run.finish(
+            [Result("authorization", STATUS_UNVERIFIED, "须当次明确指令或当前技能调用授权，并使用 --authorized。")]
+        )
+    return execute_gate(arguments.gate, arguments.deadline_seconds, clock_override=clock)
 
 
 if __name__ == "__main__":

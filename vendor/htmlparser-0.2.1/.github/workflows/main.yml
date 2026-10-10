@@ -1,0 +1,65 @@
+name: build
+
+on:
+  pull_request: {}
+  push:
+    branches:
+      - main
+
+concurrency:
+  group: $-$
+  cancel-in-progress: true
+
+jobs:
+  code-checking:
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        rust:
+          - 1.31.0
+          - stable
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: ${{ matrix.rust }}
+      - uses: taiki-e/install-action@cargo-hack
+      - name: run check on features
+        run: cargo hack check --feature-powerset --tests
+
+  clippy:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+      - run: cargo clippy --all-features --all-targets -- -D warnings
+
+  rustfmt:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt
+      - run: cargo fmt --check --all
+
+  testing:
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        rust:
+          - 1.31.0
+          - stable
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: ${{ matrix.rust }}
+
+      - run: cargo test --all-targets
+        if: matrix.rust == 'stable'
+
+      - run: cargo test --doc
+        if: matrix.rust == 'stable'

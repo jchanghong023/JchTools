@@ -20,10 +20,16 @@ gui = ["dep:slint", "dep:slint-build", "dep:rfd", "dep:open"]
 # 启用方式：cargo run --features perf-tracing（日志落状态目录下的 perf-logs/，见 src/perf.rs）。
 perf-tracing = []
 # 仅隔离测试使用：允许测试目录/代理入口覆盖。发布与普通启动不启用。
-test-hooks = []
+test-hooks = ["tokio/io-std"]
 
 [dependencies]
 anyhow = "1.0"
+# AH-02/AH-11：官方 SDK 与 HTTP 后端固定版本；源码由仓库 vendor 提供。
+agent-client-protocol = { version = "=3.2.0", default-features = false, features = ["process", "stdio"] }
+axum = { version = "=0.8.9", default-features = false, features = ["http1", "json", "tokio"] }
+futures = { version = "=0.3.32", default-features = false, features = ["std", "async-await"] }
+tokio = { version = "=1.52.3", default-features = false, features = ["rt-multi-thread", "macros", "net", "process", "sync", "time", "io-util"] }
+tokio-util = { version = "=0.7.18", default-features = false, features = ["compat", "rt"] }
 blake3 = "1.8"
 chrono = { version = "0.4", default-features = false, features = ["clock", "serde"] }
 directories-next = "2.0"
@@ -57,7 +63,7 @@ tracing-subscriber = { version = "0.3", features = ["fmt", "env-filter"] }
 tracing-appender = "0.2"
 
 [target.'cfg(windows)'.dependencies]
-windows-sys = { version = "0.59", features = ["Win32_Foundation", "Win32_System_Diagnostics_ToolHelp", "Win32_Globalization", "Win32_Security", "Win32_Security_Authorization", "Win32_Storage_FileSystem", "Win32_System_IO", "Win32_System_JobObjects", "Win32_System_Pipes", "Win32_System_Registry", "Win32_System_SystemInformation", "Win32_System_Threading", "Win32_UI_WindowsAndMessaging"] }
+windows-sys = { version = "0.59", features = ["Win32_Foundation", "Win32_System_Diagnostics_ToolHelp", "Win32_Globalization", "Win32_Networking_WinSock", "Win32_Security", "Win32_Security_Authorization", "Win32_Storage_FileSystem", "Win32_System_IO", "Win32_System_JobObjects", "Win32_System_Pipes", "Win32_System_Registry", "Win32_System_SystemInformation", "Win32_System_Threading", "Win32_UI_WindowsAndMessaging"] }
 
 [target.'cfg(unix)'.dependencies]
 libc = "0.2"
@@ -80,6 +86,53 @@ spin_on = "0.1"
 name = "JchTools"
 path = "src/main.rs"
 required-features = ["gui"]
+
+# AH：合成 ACP Agent 只在隔离测试特性下构建，不进入生产打包。
+[[bin]]
+name = "jchtools-acp-fixture"
+path = "tests/fixtures/acp_api/main.rs"
+required-features = ["test-hooks"]
+test = false
+
+[[test]]
+name = "acp_settings"
+path = "tests/acp_settings.rs"
+required-features = ["test-hooks"]
+
+[[test]]
+name = "acp_http_contract"
+path = "tests/acp_http_contract.rs"
+required-features = ["test-hooks"]
+
+[[test]]
+name = "acp_http_disconnect"
+path = "tests/acp_http_disconnect.rs"
+required-features = ["test-hooks"]
+
+[[test]]
+name = "acp_callbacks"
+path = "tests/acp_callbacks.rs"
+required-features = ["test-hooks"]
+
+[[test]]
+name = "acp_service_process"
+path = "tests/acp_service_process.rs"
+required-features = ["gui", "test-hooks"]
+
+[[test]]
+name = "acp_opencode"
+path = "tests/acp_opencode.rs"
+required-features = ["gui", "test-hooks"]
+
+[[test]]
+name = "acp_discovery"
+path = "tests/acp_discovery.rs"
+required-features = ["gui", "test-hooks"]
+
+[[test]]
+name = "acp_discovery_env"
+path = "tests/acp_discovery_env.rs"
+required-features = ["gui", "test-hooks"]
 
 # 此集成测试启动真实主程序的内部代理入口；该二进制本身要求 gui。
 [[test]]

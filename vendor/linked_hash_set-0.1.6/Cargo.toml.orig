@@ -1,0 +1,20 @@
+[package]
+name = "linked_hash_set"
+version = "0.1.6"
+authors = ["Alex Butler <alexheretic@gmail.com>"]
+edition = "2024"
+description = "HashSet with insertion ordering"
+repository = "https://github.com/alexheretic/linked-hash-set"
+keywords = ["data-structures"]
+license = "Apache-2.0"
+readme="README.md"
+
+[features]
+serde = ["dep:serde_core"]
+
+[dependencies]
+linked-hash-map = "0.5.6"
+serde_core = { version = "1.0.228", optional = true }
+
+[dev-dependencies]
+serde_test = "1"

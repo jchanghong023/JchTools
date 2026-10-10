@@ -1,0 +1,6 @@
+{
+  "git": {
+    "sha1": "b0fc6a7287a062fefb30133e6aecf0303f76357d"
+  },
+  "path_in_vcs": "helper_crates/const-field-offset"
+}

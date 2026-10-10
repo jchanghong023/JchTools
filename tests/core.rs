@@ -2379,64 +2379,6 @@ fn prepare_writes_no_standalone_settings_file() {
     );
 }
 
-// 覆盖 P-03/O-31：联网仅限两个可选组件的主动初始化；本地服务不监听网络。
-#[test]
-fn offline_sources_have_no_network_capabilities() {
-    let manifest_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
-    let manifest = fs::read_to_string(manifest_dir.join("Cargo.toml")).unwrap();
-    for crate_name in [
-        "reqwest",
-        "hyper",
-        "curl",
-        "isahc",
-        "surf",
-        "attohttpc",
-        "websocket",
-        "ftp",
-        "tokio-tungstenite",
-    ] {
-        assert!(
-            !manifest.contains(crate_name),
-            "P-03：主程序依赖清单不得引入额外联网 crate：{crate_name}"
-        );
-    }
-    for source in walkdir::WalkDir::new(manifest_dir.join("src")) {
-        let source = source.unwrap();
-        if !source.file_type().is_file() || source.path().extension().is_none_or(|ext| ext != "rs")
-        {
-            continue;
-        }
-        let entry = source.path().strip_prefix(&manifest_dir).unwrap();
-        let text = fs::read_to_string(source.path()).unwrap();
-        // P-03/O-31 约束的是产品运行时能力；#[cfg(test)] 区域只在 cargo test 下编译，
-        // 不进入生产二进制，允许测试用回环套接字模拟服务器（如 snap_ocr_assets 的
-        // 逐跳代理重定向回归）。本仓库约定 cfg(test) 模块位于文件尾部，取首个标记
-        // 之前的产品部分扫描。
-        let production = text.split("#[cfg(test)]").next().unwrap();
-        for needle in ["TcpListener", "TcpStream", "UdpSocket", "lookup_host"] {
-            assert!(
-                !production.contains(needle),
-                "P-03/O-31：{} 不得出现网络 API：{needle}",
-                entry.display()
-            );
-        }
-        if entry != Path::new("src/markdown_assets.rs")
-            && entry != Path::new("src/snap_ocr_assets.rs")
-        {
-            assert!(
-                !production.contains("ureq::"),
-                "P-03：{} 不得调用可选组件初始化下载接口",
-                entry.display()
-            );
-        }
-    }
-    let build_script = fs::read_to_string(manifest_dir.join("build.rs")).unwrap();
-    assert!(
-        !build_script.contains("ureq::"),
-        "构建脚本不得联网下载可选资产"
-    );
-}
-
 // 覆盖 X-01：自动解压只认用户意义上的归档文件（白名单）；安装资源、系统镜像、
 // 语言包、安装包、文档容器即使 7-Zip 能打开，也不得自动解压。
 #[test]

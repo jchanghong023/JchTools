@@ -30,7 +30,11 @@ Full x64 MSI: https://github.com/ip7z/7zip/releases/download/26.03/7z2603-x64.ms
 
 ## Rust dependencies
 
-`Cargo.toml` declares dependency constraints; the committed `Cargo.lock` pins the exact versions. The packaging script builds with `--locked`. It gathers LICENSE/LICENCE/COPYING/NOTICE/COPYRIGHT files from the exact Cargo metadata dependency graph into `third-party-rust`, with an index of package version, declared license and repository. This collection is an aid, not a substitute for reviewing platform-specific and transitive distribution obligations. An entry with zero collected license files requires attention before redistribution.
+`Cargo.toml` declares dependency constraints; the committed `Cargo.lock` pins the exact versions. `.cargo/config.toml` resolves registry sources from the repository's `vendor/`, including direct, transitive, build and Rust test dependencies. `vendor/SOURCES.json` records crate archive URLs and hashes, original authors, license declarations, upstream commits and retained notice files. Published archives are unmodified; omitted upstream license material is stored separately with its exact origin and digest. The packaging script gathers notices from the resolved graph into `third-party-rust` and copies recorded supplemental material and `SOURCES.json`. Entries with neither packaged nor supplemental license files retain their upstream absence notes and require attention before redistribution; no author grant is invented. This collection is not a substitute for reviewing distribution obligations.
+
+## ACP HTTP implementation
+
+Axum 0.8.9 is MIT-licensed: https://github.com/tokio-rs/axum/tree/axum-v0.8.9 . Official Agent Client Protocol Rust SDK 3.2.0 is Apache-2.0-licensed: https://github.com/agentclientprotocol/rust-sdk/tree/v3.2.0 . Their exact published source trees and all locked dependency sources are under `vendor/`; per-package notices and upstream supplements are identified by `SOURCES.json`. JchTools implements the Rust adapter between these components. No vLLM Router inference implementation or Python/Node HTTP backend is bundled.
 
 ## Microsoft APIs
 

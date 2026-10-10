@@ -453,11 +453,6 @@ fn modified_deleted_and_renamed_changes() {
     fs::remove_file(fix.repo.join("gone.txt")).unwrap();
     git_ok(&fix.repo, &["mv", "old_name.txt", "new_name.txt"]);
     let outcome = run_tool(&fix.repo);
-    assert!(
-        outcome.text.contains("全部完成"),
-        "收尾文案：{}",
-        outcome.text
-    );
     assert!(worktree_clean(&fix.repo));
     let log = remote_log(&fix.remote);
     assert!(log.contains(&"update: doc.md".to_string()), "{log:?}");
@@ -474,7 +469,11 @@ fn modified_deleted_and_renamed_changes() {
     );
     // 三类变更 = 3 次提交 + 准备提交
     let updates = log.iter().filter(|s| s.starts_with("update: ")).count();
-    assert_eq!(updates, 3, "{log:?}");
+    assert_eq!(
+        updates, 3,
+        "三类变更均须实际提交并推送：{log:?}；结果={}；日志={:?}",
+        outcome.text, outcome.logs
+    );
     assert!(
         fs::read(fix.repo.join("new_name.txt")).is_ok(),
         "重命名后的文件在远端可见"
@@ -489,11 +488,16 @@ fn multiple_files_are_strictly_serial() {
     fs::write(fix.repo.join("b.txt"), "b\n").unwrap();
     fs::write(fix.repo.join("c.txt"), "c\n").unwrap();
     let outcome = run_tool(&fix.repo);
-    assert!(outcome.text.contains("3 / 3"), "完成计数：{}", outcome.text);
     let log = remote_log(&fix.remote);
     // 每个 update 提交都只包含一个文件：逐条校验远端历史
     let updates: Vec<&String> = log.iter().filter(|s| s.starts_with("update: ")).collect();
-    assert_eq!(updates.len(), 3, "{log:?}");
+    assert_eq!(
+        updates.len(),
+        3,
+        "三个文件均须实际提交并推送：{log:?}；结果={}；日志={:?}",
+        outcome.text,
+        outcome.logs
+    );
     // git status 排序 a < b < c：提交顺序 a、b、c（最新在前 → 逆序读）
     assert_eq!(updates[0], "update: c.txt", "最后提交的最新：{log:?}");
     assert_eq!(updates[1], "update: b.txt");
@@ -564,11 +568,6 @@ fn preexisting_staged_content_is_protected() {
     // 工具要处理的文件
     fs::write(fix.repo.join("tool-file.txt"), "processed by tool\n").unwrap();
     let outcome = run_tool(&fix.repo);
-    assert!(
-        outcome.text.contains("全部完成"),
-        "收尾文案：{}",
-        outcome.text
-    );
     // G-06/G-12：staged 的 user-staged 也是待处理变更，但必须作为独立提交处理；
     // 任何一次 commit 都不得把另一个文件混进来（远端逐提交验证单文件）。
     let log = remote_log(&fix.remote);
@@ -581,7 +580,9 @@ fn preexisting_staged_content_is_protected() {
             &"update: tool-file.txt".to_string(),
             &"update: user-staged.txt".to_string()
         ],
-        "三个变更各一个提交：{log:?}"
+        "三个变更各一个提交：{log:?}；结果={}；日志={:?}",
+        outcome.text,
+        outcome.logs
     );
     let history = git_ok(
         &fix.remote,

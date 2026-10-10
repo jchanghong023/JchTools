@@ -98,7 +98,7 @@ component BrandBadge inherits Rectangle {
 // 线性图标：24×24 视图框内按设计稿路径绘制，实例用 width/height 控制成品尺寸。
 // kind：0 目录整理/通用目录，1 关于，2 递归解压，3 MD 整理，4 转 Markdown，
 //       5 Git 工具，6 截图 OCR，7 盾牌（本地处理/固定规则），8 搜索，9 展开箭头，
-//      10 播放（开始），11 下载（初始化），12 刷新（重连）
+//      10 播放（开始），11 下载（初始化），12 刷新（重连），13 模型服务
 component Ico inherits Rectangle {
     in property <int> kind: 0;
     in property <brush> tint: Design.text;
@@ -167,6 +167,11 @@ component Ico inherits Rectangle {
     if kind == 12: Path {
         width: parent.width; height: parent.height; viewbox-width: 24; viewbox-height: 24;
         commands: "M21 12a9 9 0 1 1-2.64-6.36 M21 3v6h-6";
+        stroke: root.tint; stroke-width: 1.4px;
+    }
+    if kind == 13: Path {
+        width: parent.width; height: parent.height; viewbox-width: 24; viewbox-height: 24;
+        commands: "M4 4h16v6H4V4Z M4 14h16v6H4v-6Z M7 7h1 M7 17h1 M12 10v4";
         stroke: root.tint; stroke-width: 1.4px;
     }
 }
@@ -767,6 +772,32 @@ export component AppWindow inherits Window {
     in-out property <bool> snap-autostart-draft: false;
     in-out property <string> snap-error;
     in-out property <bool> snap-request-pending: false;
+    // AH：草稿与已保存/正在运行的配置分别呈现，不以保存冒充应用成功。
+    in-out property <string> acp-executable;
+    in-out property <string> acp-arguments;
+    in-out property <string> acp-port: "8765";
+    in-out property <string> acp-saved-config: "正在读取…";
+    in-out property <string> acp-running-config: "正在读取…";
+    in-out property <string> acp-phase: "unconfigured";
+    in-out property <string> acp-status: "正在后台读取配置并连接模型服务…";
+    in-out property <bool> acp-status-known: false;
+    in-out property <bool> acp-ready: false;
+    in-out property <bool> acp-pending-apply: false;
+    in-out property <bool> acp-request-pending: false;
+    // 当前 GUI 的实际 Apply 请求在途；与配置尚待应用 acp-pending-apply 分开。
+    in-out property <bool> acp-apply-inflight: false;
+    in-out property <bool> acp-explicit-stopped: false;
+    in-out property <string> acp-service-pid;
+    in-out property <string> acp-agent-pid;
+    in-out property <int> acp-executing: 0;
+    in-out property <int> acp-waiting: 0;
+    in-out property <string> acp-operation;
+    in-out property <string> acp-action-error;
+    in-out property <string> acp-service-error;
+    callback acp-config-edited();
+    callback acp-save-config();
+    callback acp-apply-and-restart();
+    callback acp-request-stop();
     callback snap-initialize();
     callback snap-cancel-initialize();
     callback snap-connect();
@@ -845,7 +876,7 @@ export component AppWindow inherits Window {
     // 页面标题（标题栏文档位与页头共用同一映射）
     function screen-title() -> string {
         return root.screen == 0 ? "目录整理" : root.screen == 2 ? "递归解压"
-            : root.screen == 3 ? "MD 整理" : root.screen == 4 ? "Git 工具" : root.screen == 5 ? "转 Markdown" : root.screen == 6 ? "截图 OCR" : root.screen == 7 ? "设置" : "关于";
+            : root.screen == 3 ? "MD 整理" : root.screen == 4 ? "Git 工具" : root.screen == 5 ? "转 Markdown" : root.screen == 6 ? "截图 OCR" : root.screen == 7 ? "设置" : root.screen == 8 ? "模型服务" : "关于";
     }
     // 侧栏图标按工具 id 映射（registry 中注册的 id）
     function tool-icon(id: string) -> int {
@@ -855,6 +886,7 @@ export component AppWindow inherits Window {
         if (id == "markdown-converter") { return 4; }
         if (id == "git-tools") { return 5; }
         if (id == "snap-ocr") { return 6; }
+        if (id == "acp-http") { return 13; }
         return 0;
     }
 
@@ -949,6 +981,7 @@ export component AppWindow inherits Window {
                         : root.screen == 5 ? "把文档、图片和媒体转换为 Markdown；可保留输入层级或选择平铺输出。"
                         : root.screen == 6 ? "热键截图与识别在独立后台服务运行，关闭主窗口不影响托盘和热键。"
                         : root.screen == 7 ? "共享组件与后台服务 · 配置自动保存，重启自动恢复。"
+                        : root.screen == 8 ? "本机 HTTP → 官方 ACP 客户端 → 用户配置的 Agent；关闭窗口后服务继续运行。"
                         : "Windows 优先的本地工具箱 · 功能持续增加";
                         horizontal-stretch: 1; wrap: no-wrap; overflow: elide; vertical-alignment: center; }
                     if root.busy: Spinner { width: 18px; height: 18px; }
@@ -1776,6 +1809,78 @@ export component AppWindow inherits Window {
                     Rectangle { vertical-stretch: 1; }
                     }
                 }
+                // ============ 独立 ACP HTTP 模型服务 ============
+                if root.screen == 8: acp-scroll := ScrollView {
+                    vertical-stretch: 1; viewport-width: acp-scroll.visible-width;
+                    VerticalLayout { width: acp-scroll.visible-width; spacing: 12px;
+                        Surface { VerticalLayout { padding: 18px; spacing: 10px;
+                            Label { text: "ACP Agent 与本机接口"; font-size: 16px; font-weight: 600; }
+                            Muted { text: "使用已安装并完成所需认证的 Agent。模型与推理等级可填入启动参数，供应商登录由 Agent 自身管理。"; }
+                            HorizontalLayout { spacing: 12px;
+                                VerticalLayout { horizontal-stretch: 1; spacing: 6px;
+                                    Label { text: "启动程序"; }
+                                    Field { text <=> root.acp-executable; placeholder-text: "例如 omp（程序路径不含参数）";
+                                        enabled: !root.acp-request-pending && root.confirm-kind == 0;
+                                        edited(value) => { root.acp-config-edited(); } }
+                                }
+                                VerticalLayout { horizontal-stretch: 2; spacing: 6px;
+                                    Label { text: "启动参数"; }
+                                    Field { text <=> root.acp-arguments; placeholder-text: "Windows 引号规则；带空格参数请用双引号";
+                                        enabled: !root.acp-request-pending && root.confirm-kind == 0;
+                                        edited(value) => { root.acp-config-edited(); } }
+                                }
+                            }
+                            HorizontalLayout { spacing: 12px; cross-axis-alignment: center;
+                                Label { text: "HTTP 端口"; }
+                                Field { width: 112px; text <=> root.acp-port; placeholder-text: "1～65535";
+                                    enabled: !root.acp-request-pending && root.confirm-kind == 0;
+                                    edited(value) => { root.acp-config-edited(); } }
+                                Muted { text: "仅监听 127.0.0.1 · 默认 8765 · 不接受局域网连接"; horizontal-stretch: 1; }
+                            }
+                            Muted { text: "Agent 自身决策并执行工具；ACP 权限采用最大允许授权，不弹出逐次审批，不提权。请求内容可能由 Agent 发往其模型服务。"; }
+                            HorizontalLayout { spacing: 8px;
+                                AppButton { text: "保存配置"; primary: true;
+                                    enabled: !root.acp-request-pending && root.confirm-kind == 0;
+                                    clicked => { root.acp-save-config(); } }
+                                if root.acp-pending-apply: AppButton { text: "应用并重启";
+                                    enabled: root.acp-status-known && !root.acp-request-pending && !root.acp-explicit-stopped && root.confirm-kind == 0;
+                                    clicked => { root.acp-apply-and-restart(); } }
+                                Rectangle { horizontal-stretch: 1; }
+                            }
+                            Muted { text: root.acp-explicit-stopped ? "本次工具箱已主动退出模型服务；保存仅写入配置，重新打开工具箱才自动启动。" : root.acp-pending-apply ? "已保存配置尚未应用。主动应用时停止接新请求，等待所有已有请求结束，不取消任务。" : "保存立即持久化，不改动正在运行的配置；首次有效保存自动启动。"; }
+                        } }
+                        Surface { VerticalLayout { padding: 18px; spacing: 10px;
+                            Label { text: "服务与 Agent 状态"; font-size: 16px; font-weight: 600; }
+                            Label { text: root.acp-status; }
+                            if root.acp-operation != "": Muted { text: root.acp-operation; }
+                            if root.acp-request-pending: ProgressBar { progress: -1; }
+                            Muted { text: root.acp-status-known ? "服务 PID：" + (root.acp-service-pid == "" ? "无" : root.acp-service-pid) + " · Agent PID：" + (root.acp-agent-pid == "" ? "无" : root.acp-agent-pid) + " · 执行：" + root.acp-executing + "/4 · 等待：" + root.acp-waiting + "/16" : "当前后台状态未知，请查看错误详情；不将上次状态视为就绪。"; }
+                            HorizontalLayout { spacing: 12px;
+                                VerticalLayout { horizontal-stretch: 1; spacing: 6px;
+                                    Label { text: "已保存配置"; }
+                                    Text { text: root.acp-saved-config; color: Design.text-muted; wrap: word-wrap; }
+                                }
+                                VerticalLayout { horizontal-stretch: 1; spacing: 6px;
+                                    Label { text: "正在运行的配置"; }
+                                    Text { text: root.acp-running-config; color: Design.text-muted; wrap: word-wrap; }
+                                }
+                            }
+                            if root.acp-action-error != "" || root.acp-service-error != "": acp-error-scroll := ScrollView {
+                                height: 110px; viewport-width: acp-error-scroll.visible-width;
+                                Text { x: 0px; y: 0px; width: acp-error-scroll.visible-width;
+                                    height: self.preferred-height; vertical-alignment: top;
+                                    text: (root.acp-action-error == "" ? "" : "操作错误：" + root.acp-action-error + "\n") + root.acp-service-error;
+                                    color: Design.danger-ink; wrap: word-wrap; }
+                            }
+                            HorizontalLayout { spacing: 8px;
+                                Muted { text: "GET /v1/models · POST /v1/chat/completions\n关闭工具箱不停止服务；退出只作用于本模型服务。"; horizontal-stretch: 1; }
+                                AppButton { text: "退出模型服务";
+                                    enabled: root.acp-status-known && root.acp-service-pid != "" && (!root.acp-request-pending || root.acp-apply-inflight) && !root.acp-explicit-stopped && root.confirm-kind == 0;
+                                    clicked => { root.acp-request-stop(); } }
+                            }
+                        } }
+                    }
+                }
                 // ============ 关于 ============
                 // 内容总高在最小窗口（960×620）下会超出可视区，包进 ScrollView 滚动查看，
                 // 不再压缩裁切；视口宽度与设置页同口径钉住。
@@ -1840,7 +1945,7 @@ export component AppWindow inherits Window {
         Surface { width: 620px; height: 335px; x: (parent.width - self.width) / 2; y: (parent.height - self.height) / 2; pop: true;
             background: Design.card;
             VerticalLayout { padding: 24px; spacing: 14px;
-                Label { text: root.confirm-kind == 3 ? "停止任务并关闭" : root.confirm-kind == 4 ? "确认覆盖输出文件" : "确认文件处理范围"; font-size: 20px; font-weight: 700; }
+                Label { text: root.confirm-kind == 3 ? "停止任务并关闭" : root.confirm-kind == 4 ? "确认覆盖输出文件" : root.confirm-kind == 5 ? "退出模型服务" : "确认文件处理范围"; font-size: 20px; font-weight: 700; }
                 Rectangle { width: 48px; height: 3px; border-radius: 2px; background: Design.bar; }
                 TextEdit { text: root.confirm-text; read-only: true; vertical-stretch: 1; }
                 // 关闭确认不处理目录文件，不需要确认勾选；解压按 X-05 只删完整成功的原包及分卷，
@@ -1853,8 +1958,8 @@ export component AppWindow inherits Window {
                 HorizontalLayout { spacing: 10px;
                     Rectangle { horizontal-stretch: 1; background: transparent; }
                     AppButton { text: "返回检查"; clicked => { root.confirm-kind = 0; root.acknowledge = false; root.confirm-pending = false; } }
-                    AppButton { text: root.confirm-kind == 3 ? "停止并关闭" : "确认"; primary: true;
-                        enabled: root.confirm-kind == 3 || (root.acknowledge && !root.confirm-pending);
+                    AppButton { text: root.confirm-kind == 3 ? "停止并关闭" : root.confirm-kind == 5 ? "确认退出模型服务" : "确认"; primary: true;
+                        enabled: root.confirm-kind == 3 || root.confirm-kind == 5 || (root.acknowledge && !root.confirm-pending);
                         clicked => { root.confirmed(root.confirm-kind); root.confirm-kind = 0; root.acknowledge = false; root.confirm-pending = false; } }
                 }
             }

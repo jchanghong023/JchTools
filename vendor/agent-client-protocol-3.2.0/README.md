@@ -1,0 +1,184 @@
+<a href="https://agentclientprotocol.com/" >
+  <img alt="Agent Client Protocol" src="https://zed.dev/img/acp/banner-dark.webp">
+</a>
+
+# agent-client-protocol
+
+Core protocol types and traits for the [Agent Client Protocol (ACP)](https://agentclientprotocol.com/).
+
+ACP is a protocol for communication between AI agents and their clients (IDEs, CLIs, etc.),
+enabling features like tool use, permission requests, and streaming responses.
+
+## What can you build with this crate?
+
+- **Clients** that talk to ACP agents (like building your own Claude Code interface)
+- **Proxies** that add capabilities to existing agents (like adding custom tools via MCP)
+- **Agents** that respond to prompts with AI-powered responses
+
+## Quick Start: Connecting to an Agent
+
+The most common use case is connecting to an existing ACP agent as a client.
+This quick start uses stable protocol v1 and the opt-in `process` feature.
+For the upcoming 3.x release, use:
+
+```toml
+agent-client-protocol = { version = "3", features = ["process"] }
+```
+
+```rust,no_run
+use agent_client_protocol::{AcpAgent, Client, Result};
+use agent_client_protocol::schema::{ProtocolVersion, v1::InitializeRequest};
+
+# async fn connect() -> Result<()> {
+let agent = AcpAgent::from_args(["my-agent"])?;
+Client.builder()
+    .name("my-client")
+    .connect_with(agent, async |cx| {
+        // Initialize the connection
+        cx.send_request(InitializeRequest::new(ProtocolVersion::V1))
+            .block_task()
+            .await?;
+
+        Ok(())
+    })
+    .await
+# }
+```
+
+Draft protocol v2 is opt-in through `unstable_protocol_v2`. `Client.v2()`,
+`Agent.v2()`, and `Proxy.v2()` callbacks receive a version-typed
+`V2ConnectionTo` with
+high-level, command-only session helpers because prompt acceptance and inbound
+traffic are independent. Session updates and interactive requests use typed
+connection handlers. See [Protocol V2](https://agentclientprotocol.github.io/rust-sdk/protocol-v2.html#high-level-v2-sessions).
+`Proxy.builder()` remains the stable v1 entry point. Use
+`Proxy.protocol_router()` to expose separate strict v1 and v2 proxy
+implementations as one component; custom raw routing infrastructure can use
+`Proxy.builder().without_acp_version_guard()`.
+
+### Runnable draft-v2 pair
+
+The `simple_agent_v2` example implements the complete baseline session
+lifecycle, and `v2_one_shot_client` demonstrates the split prompt lifecycle:
+the prompt response acknowledges acceptance, while output and completion arrive
+through `session/update` notifications.
+
+```bash
+cargo build -p agent-client-protocol \
+  --features process,stdio,unstable_protocol_v2 \
+  --examples
+
+./target/debug/examples/v2_one_shot_client \
+  --command ./target/debug/examples/simple_agent_v2 \
+  "Hello from ACP v2"
+```
+
+See the [Runnable Protocol V2 Quickstart](https://agentclientprotocol.github.io/rust-sdk/protocol-v2-quickstart.html)
+for the lifecycle invariants to preserve when adapting these examples.
+
+## Choosing request publication
+
+`send_request(request)` sends immediately, with unchanged behavior.
+`prepare_request(request)` waits until a consuming method is called:
+
+```rust,ignore
+connection.prepare_request(request).on_receiving_result(async move |result| {
+    // Enqueue or apply bounded work before later inbound messages.
+    handle_result(result)?;
+    Ok(())
+})?;
+```
+
+Preparation installs callback ordering before publication, avoiding a race with
+fast responses. `block_task()` and `detach()` instead select unordered
+consumption and send during the method call; dropping an unconsumed prepared
+request sends nothing. Both raw and v2 connections also offer
+`prepare_request_to(peer, request)`.
+
+See [Sending Requests](https://agentclientprotocol.github.io/rust-sdk/sending-requests.html)
+for ordering limits, cancellation, errors, and migration guidance.
+
+## Cargo Features
+
+No features are enabled by default. The protocol engine, serialization,
+clients, agents, proxies, custom MCP servers, and generic `Channel`, `Lines`,
+and `ByteStreams` adapters do not require native I/O or JSON Schema generation.
+
+| Feature | Provides |
+| --- | --- |
+| `process` | Native subprocess support through `AcpAgent` and `AcpAgentConfig` |
+| `stdio` | The native `Stdio` adapter |
+| `schemars` | `JsonSchema` implementations and typed MCP tool helpers |
+| `wasm_js` | UUID randomness for JavaScript-hosted WebAssembly |
+
+`process` and `stdio` are independent. Native `LineDirection` is available
+with either. The `McpTool` trait, `McpToolRegistry` and its metadata types, and
+the `mcp_server::tool_fn` / `mcp_server::tool_fn_mut` functions require
+`schemars`. Unstable protocol features remain independent opt-ins.
+
+`agent-client-protocol-rmcp` explicitly enables `schemars` for its tool builders.
+See [Cargo Features](https://agentclientprotocol.github.io/rust-sdk/features.html)
+for configuration and migration examples. When upgrading from 2.x, enable the
+features your application uses explicitly; a lean dependency no longer needs
+`default-features = false`.
+
+## MCP Server Attachment
+
+The runtime-agnostic `mcp_server` module can build and directly serve standalone
+MCP servers without enabling an ACP schema extension. Attaching one to ACP with
+the `with_mcp_server` builder methods requires `unstable_mcp_over_acp`.
+Attached servers are advertised with native `McpServer::Acp` declarations and
+communicate through request-scoped `mcp/message` operations targeting MCP
+2026-07-28, without connect/disconnect or initialization handshakes. Use
+`agent-client-protocol-polyfill` immediately before an HTTP-capable agent.
+Stable protocol v1 supports per-session and global proxy attachment. Draft
+protocol v2 supports both scopes when both unstable features are enabled:
+`Proxy.v2().with_mcp_server(...)` injects a global server into supported setup
+requests, `V2SessionBuilder::with_mcp_server(...)` attaches one to a single
+`session/new`, and `V2ResumeSessionBuilder::with_mcp_server(...)` attaches one
+to a single `session/resume`. With `unstable_session_fork`,
+`V2ForkSessionBuilder::with_mcp_server(...)` attaches one to a single
+`session/fork`. In v1, `ActiveSession` owns per-session MCP registrations:
+dropping it removes them unless a proxy handoff detaches them
+(`proxy_remaining_messages` or successful `on_proxy_session_start`).
+Successful v2 setup detaches MCP handlers for the connection lifetime, so
+dropping the returned `V2Session` does not unregister them. Global proxy
+attachments are connection-scoped in both versions.
+A v2 proxy can forward any of these setup operations with the
+builder's `on_proxy_session_start`; updates and interactive requests remain
+independent connection traffic.
+
+## WebAssembly
+
+The runtime-neutral protocol engine and transport abstractions compile for
+`wasm32-wasip1` and `wasm32-wasip2` without additional features. For
+JavaScript-hosted `wasm32-unknown-unknown`, enable `wasm_js`; it selects Web
+Crypto through `wasm-bindgen` as the UUID randomness backend. The target does
+not imply a JavaScript host, so this feature is not enabled by default. Other
+OS-less WebAssembly hosts must arrange a compatible UUID randomness backend.
+
+The native `AcpAgent` and `Stdio` implementations are not available on
+WebAssembly targets. See the [transport architecture](https://agentclientprotocol.github.io/rust-sdk/transport-architecture.html)
+for the runtime-neutral embedding options.
+
+## Learning More
+
+See the [crate documentation](https://docs.rs/agent-client-protocol) for:
+
+- **[Cookbook](https://docs.rs/agent-client-protocol-cookbook)** — Patterns for building clients, proxies, and agents
+- **[Examples](https://github.com/agentclientprotocol/rust-sdk/tree/main/src/agent-client-protocol/examples)** — Runnable stable-v1 and draft-v2 clients and agents
+
+## Related Crates
+
+- **[agent-client-protocol-http](../agent-client-protocol-http/)** — HTTP/SSE and WebSocket transports
+- **[agent-client-protocol-rmcp](../agent-client-protocol-rmcp/)** — MCP tool builders and `rmcp` integration
+- **[agent-client-protocol-derive](../agent-client-protocol-derive/)** — Derive macros for JSON-RPC traits
+- **[agent-client-protocol-conductor](../agent-client-protocol-conductor/)** — Proxy-chain orchestration
+- **[agent-client-protocol-polyfill](../agent-client-protocol-polyfill/)** — Compatibility proxies, including adapting MCP-over-ACP to HTTP
+- **[agent-client-protocol-trace-viewer](../agent-client-protocol-trace-viewer/)** — Interactive trace visualization
+
+## Contribution Policy
+
+This project does not require a Contributor License Agreement (CLA). Instead, contributions are accepted under the following terms:
+
+> By contributing to this project, you agree that your contributions will be licensed under the [Apache License, Version 2.0](https://www.apache.org/licenses/LICENSE-2.0). You affirm that you have the legal right to submit your work, that you are not including code you do not have rights to, and that you understand contributions are made without requiring a Contributor License Agreement (CLA).

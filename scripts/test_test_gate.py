@@ -1,12 +1,11 @@
 """test_gate 预算会计回归单测（fastcheck 60 秒硬上限的确定性反证）.
 
-覆盖两个已确认的预算缺陷（独立复核反例：最后阶段启动 6s + 等待 55s →
-总墙钟 61s 超过 60s 预算，仍报 Overall PASS 退出码 0）：
+覆盖两个已确认的预算缺陷；当前三级门共用非编译预算，真正编译独占区间扣除：
 
-1. ``run_logged`` 的等待预算必须按绝对截止（started+timeout）计算，进程启动与
-   Job 绑定消耗的时间要从预算中扣除；
-2. ``cmd_fastcheck`` 必须有终局墙钟守卫：各阶段即使都未单独超时，总墙钟越界
-   也 ``MUST`` 判 FAIL，不得报退出码 0。
+1. ``run_logged`` 的有限等待预算必须按绝对截止（started+timeout）计算，进程
+   启动与 Job 绑定消耗的时间要从预算中扣除；
+2. ``execute_gate`` 的非编译工作与最终汇总共用时钟；即使阶段报告成功，
+   非编译墙钟越界也必须失败，不得报退出码 0。
 
 确定性：用注入假时钟替代 ``time.monotonic``，不真实睡眠 61 秒；唯一真实进程
 用 0.4s 睡眠命令，预算差额远大于进程启动抖动。日志及真实清理夹具仅写
@@ -24,12 +23,11 @@ import sys
 import tempfile
 import unittest
 from pathlib import Path
-from unittest.mock import patch
+from typing import cast
+from unittest.mock import MagicMock, patch
 
-from scripts import make_tmp, test_gate
-from scripts.test_gate import (
-    _stage_remote_workflow,  # pyright: ignore[reportPrivateUsage]  # 身份回归直接验证内部门接缝。
-)
+from scripts import gate_runtime, make_tmp, test_gate
+from scripts.test_gate import stage_remote_workflow
 
 
 class GitSnapshotEncodingTests(unittest.TestCase):
@@ -118,7 +116,7 @@ class RemoteWorkflowIdentityTests(unittest.TestCase):
             patch("scripts.test_gate.time.sleep"),
             patch("scripts.test_gate.time.monotonic", side_effect=[0.0, 0.0, 2.0]),
         ):
-            result = _stage_remote_workflow("git", "gh", "check.yml", watch_seconds=1.0)
+            result = stage_remote_workflow("git", "gh", "check.yml", watch_seconds=1.0)
         assert result.status == test_gate.STATUS_UNVERIFIED  # nosec B101: 本次 run 尚未出现，旧 success 不能冒充。
 
     def test_new_dispatch_success_is_observed_when_wait_requested(self) -> None:
@@ -142,7 +140,7 @@ class RemoteWorkflowIdentityTests(unittest.TestCase):
             patch("scripts.test_gate.time.sleep"),
             patch("scripts.test_gate.time.monotonic", side_effect=[0.0, 0.0]),
         ):
-            result = _stage_remote_workflow("git", "gh", "check.yml", watch_seconds=1.0)
+            result = stage_remote_workflow("git", "gh", "check.yml", watch_seconds=1.0)
         assert result.status == test_gate.STATUS_OK  # nosec B101: 身份隔离不得阻止本次真实新 run 的最终成功。
         assert "actions/runs/124" in result.detail  # nosec B101: 最终证据绑定新 run。
 
@@ -167,16 +165,15 @@ class SlowtestDispatchBoundaryTests(unittest.TestCase):
         current = subprocess.CompletedProcess(["gh"], 0, json.dumps(new_run), "")
         output = io.StringIO()
         with (
-            patch.object(test_gate, "_snapshot_lines", return_value=[]),
-            patch.object(test_gate, "_fulltest_stages"),
-            patch.object(test_gate, "_package_stage"),
+            patch.object(test_gate, "snapshot_lines", return_value=[]),
             patch("scripts.test_gate.shutil.which", return_value="tool"),
             patch.object(test_gate, "_git_output", side_effect=[head, "origin/main", "main"]),
-            patch("scripts.test_gate.subprocess.run", side_effect=[ok, previous, ok, current]),
+            patch("scripts.test_gate.subprocess.run", side_effect=[previous, ok, current]),
             patch("scripts.test_gate.time.sleep", side_effect=AssertionError("默认触发不得轮询等待")),
             contextlib.redirect_stdout(output),
         ):
-            code = test_gate.cmd_slowtest()
+            result = stage_remote_workflow("tool", "tool", "check.yml", watch_seconds=None)
+            code = test_gate.print_summary("legacy remote helper", [result], [])
         assert code != 0  # nosec B101: 新 run 未完成，整门不能宣称 PASS。
         assert "actions/runs/124" in output.getvalue()  # nosec B101: 交接必须提供本次触发的 run 链接。
         assert "UNVERIFIED" in output.getvalue()  # nosec B101: 触发不能冒充最终通过。
@@ -215,30 +212,37 @@ class RunLoggedSetupBudgetTests(unittest.TestCase):
 
 
 class FastcheckWallClockGuardTests(unittest.TestCase):
-    """cmd_fastcheck 终局守卫：总墙钟越界时整体必须失败（不得报退出码 0）。."""
+    """非编译工作的终局守卫；最终汇总同样计入共享预算。."""
 
     def _run_fastcheck(self, clock: _FakeMonotonic, last_stage_end: float) -> int:
-        def fake_runner(
-            name: str,
+        def fake_start(
             argv: list[str],
             *,
-            timeout: float,
-            env_extra: dict[str, str] | None = None,
-        ) -> test_gate.StageResult:
-            _ = argv, timeout, env_extra
-            if name == "cargo-test":
-                # 复现独立复核反例：最后阶段启动 6s + 等待 55s → 累计 61s 越过 60s 预算。
-                clock.advance(last_stage_end - clock())
-            else:
-                clock.advance(0.1)
-            return test_gate.StageResult(name, test_gate.STATUS_OK, "模拟阶段（未真实执行命令）")
+            stdout: object = subprocess.DEVNULL,
+            env: dict[str, str] | None = None,
+        ) -> subprocess.Popen[bytes]:
+            _ = argv, stdout, env
+            clock.advance(last_stage_end)
+            proc = MagicMock(spec=subprocess.Popen)
+            proc.pid = 1
+            proc.returncode = 0
+            proc.args = argv
+            cast("MagicMock", proc.poll).return_value = 0
+            cast("MagicMock", proc.wait).return_value = 0
+            return cast("subprocess.Popen[bytes]", proc)
 
         with (
-            patch.object(test_gate, "_monotonic", clock),
-            patch("shutil.which", return_value="cargo"),
-            patch.object(test_gate, "run_logged", fake_runner),
+            patch.object(test_gate, "_start_owned_command", fake_start),
+            patch.object(test_gate, "_close_owned_command", return_value=True),
+            patch.object(test_gate, "_kill_tree", return_value=True),
         ):
-            return test_gate.cmd_fastcheck(60.0)
+            return test_gate.execute_gate(
+                "fastcheck",
+                60.0,
+                stages_override=[gate_runtime.Stage("cached-build", ["isolated-clock-stub"])],
+                compiler_ids_override=lambda _proc: frozenset(),
+                clock_override=clock,
+            )
 
     def test_total_wall_clock_over_budget_fails_even_when_all_stages_ok(self) -> None:
         clock = _FakeMonotonic([0.0])
@@ -251,7 +255,7 @@ class FastcheckWallClockGuardTests(unittest.TestCase):
         assert exit_code != 0  # nosec B101: 60 秒是硬上限，不得给亚秒超限成功豁免。
 
     def test_total_wall_clock_within_budget_still_passes(self) -> None:
-        # 正向对照：终局守卫不得误伤预算内的正常 fastcheck。
+        # 正向对照：启动与最终汇总共享同一时钟，预算内的阶段仍通过。
         clock = _FakeMonotonic([0.0])
         exit_code = self._run_fastcheck(clock, last_stage_end=59.5)
         assert exit_code == 0  # nosec B101: 各阶段与总墙钟都在预算内时必须仍是 0。

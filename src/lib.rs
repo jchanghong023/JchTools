@@ -1,5 +1,6 @@
 //! 工具引擎独立于 GUI（P-02）；新增「转 Markdown」按 T 分区独立接入。
-//! 文件处理离线（P-03），仅 Git 任务与用户主动初始化可选转换组件按合同限定联网。
+//! 文件处理离线（P-03）；Git、组件初始化与独立 ACP 模型服务仅按各自合同限定联网。
+pub mod acp_api;
 pub mod archive;
 pub mod asset_util;
 pub mod config;

@@ -212,13 +212,13 @@ fn reap(child: &mut Child) {
 }
 
 /// 带宿主侧总超时地运行命令并捕获全部输出。
-/// 超时后 kill + wait，避免子进程卡死导致永久阻塞。
+/// 超时后回收进程；Windows 下所有后代也归入本次拥有的 kill-on-close Job。
 pub fn run_with_timeout(command: &mut Command, timeout: Duration) -> Result<CapturedOutput> {
     run_with_timeout_ext(command, None, timeout, None, MAX_CAPTURE_BYTES, false)
 }
 
-/// 同 [`run_with_timeout`]，另支持外部取消标志：等待期间标志置位即 kill + wait
-/// 并返回取消错误（转 Markdown 的格式探测等探测类调用使用）。
+/// 同 [`run_with_timeout`]，另支持外部取消标志；预取消不启动命令，
+/// 启动期间或等待期间取消则回收进程树并返回取消错误（转 Markdown 格式探测等使用）。
 pub fn run_with_timeout_cancel(
     command: &mut Command,
     timeout: Duration,
@@ -348,8 +348,11 @@ fn run_with_timeout_ext(
     timeout: Duration,
     cancel: Option<&CancelSource<'_>>,
     capture_limit: usize,
-    terminate_tree: bool,
+    reject_truncation: bool,
 ) -> Result<CapturedOutput> {
+    if cancel.is_some_and(CancelSource::is_cancelled) {
+        bail!("操作已取消，未启动子进程");
+    }
     if stdin_data.is_some() {
         command.stdin(Stdio::piped());
     } else {
@@ -360,13 +363,9 @@ fn run_with_timeout_ext(
     #[cfg(windows)]
     {
         use std::os::windows::process::CommandExt;
-        let flags = 0x0800_0000
-            | if terminate_tree {
-                windows_sys::Win32::System::Threading::CREATE_SUSPENDED
-            } else {
-                0
-            };
-        command.creation_flags(flags);
+        // 捕获策略不决定进程所有权：普通/Atomic 入口同样必须回收持管道的后代。
+        command
+            .creation_flags(0x0800_0000 | windows_sys::Win32::System::Threading::CREATE_SUSPENDED);
     }
     // 错误必须带上程序名与系统原因：调用方（nettest/proxy）用 `to_string()` 展示，
     // 只取最外层文本；一旦只写"无法启动子进程"，用户就无从判断是哪个程序、为何失败。
@@ -376,18 +375,25 @@ fn run_with_timeout_ext(
             command.get_program().to_string_lossy()
         )
     })?;
+    // spawn 是同步系统调用；若取消在创建期间到达，不再启动读写线程或恢复暂停进程。
+    if cancel.is_some_and(CancelSource::is_cancelled) {
+        reap(&mut child);
+        bail!("操作已取消，子进程已终止");
+    }
     #[cfg(windows)]
-    let job = if terminate_tree {
-        match ProcessTreeJob::attach_and_resume(&child) {
-            Ok(job) => Some(job),
-            Err(error) => {
-                reap(&mut child);
-                return Err(error);
-            }
+    let job = match ProcessTreeJob::attach_and_resume(&child) {
+        Ok(job) => job,
+        Err(error) => {
+            reap(&mut child);
+            return Err(error);
         }
-    } else {
-        None
     };
+    if cancel.is_some_and(CancelSource::is_cancelled) {
+        #[cfg(windows)]
+        drop(job);
+        reap(&mut child);
+        bail!("操作已取消，子进程已终止");
+    }
 
     // stdin 必须在独立线程写入：子进程可能在读完 stdin 前持续写 stdout。
     // 若在本线程同步 write_all，双方会分别卡在 stdin/stdout 管道满上形成互锁，
@@ -422,7 +428,7 @@ fn run_with_timeout_ext(
     // 截断/读错误必须让调用方感知：超限时继续 drain 到 EOF（避免子进程写满管道卡死），
     // 旧入口仍只保留 MAX_CAPTURE_BYTES；判型入口超限时通知等待循环回收进程树。
     let exceeded =
-        terminate_tree.then(|| std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)));
+        reject_truncation.then(|| std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)));
     let stdout_exceeded = exceeded.clone();
     let stdout_thread = thread::spawn(move || match stdout_exceeded.as_deref() {
         Some(exceeded) => read_all_capped_ext(stdout_pipe, capture_limit, Some(exceeded)),
@@ -447,7 +453,7 @@ fn run_with_timeout_ext(
             };
             let stdout = drain_abandoned(stdout_thread);
             let stderr = drain_abandoned(stderr_thread);
-            if terminate_tree && (stdout.truncated || stderr.truncated) {
+            if reject_truncation && (stdout.truncated || stderr.truncated) {
                 bail!("查询子进程输出超过捕获上限或管道未能排空，已拒绝解析");
             }
             // stdin 写入失败：子进程已成功退出时多半是提前关掉 stdin（EPIPE），不必判失败；
@@ -475,7 +481,7 @@ fn run_with_timeout_ext(
             })
         }
         Err(error) => {
-            // 超时/等待失败：先确保子进程回收，再限时收尾读线程（孙进程持写端时按放弃处理）。
+            // 超时/取消/等待失败：先关闭 Job 回收整树，再 wait 根进程并限时收尾读写线程。
             #[cfg(windows)]
             drop(job);
             reap(&mut child);
@@ -551,8 +557,6 @@ fn wait_child_with_deadline(
     loop {
         if let Some(source) = cancel {
             if source.is_cancelled() {
-                let _ = child.kill();
-                let _ = child.wait();
                 bail!("操作已取消，子进程已终止");
             }
         }
@@ -1004,24 +1008,123 @@ mod tests {
     #[test]
     fn run_with_timeout_cancel_stops_promptly() {
         use std::sync::atomic::{AtomicBool, Ordering};
+        // Atomic 入口也必须在 spawn 前检查；不存在的程序不能掩盖预取消错误。
+        let pre_cancelled = AtomicBool::new(true);
+        let error = run_with_timeout_cancel(
+            &mut Command::new("jchtools-must-not-spawn-pre-cancelled.exe"),
+            Duration::from_secs(60),
+            &pre_cancelled,
+        )
+        .unwrap_err();
+        assert!(error.to_string().contains("取消"), "{error}");
 
         let mut command = silent_hung_command();
         let cancel = Arc::new(AtomicBool::new(false));
         let setter = cancel.clone();
-        thread::spawn(move || {
+        let cancel_after = thread::spawn(move || {
             thread::sleep(Duration::from_millis(200));
+            let cancelled_at = Instant::now();
             setter.store(true, Ordering::Relaxed);
+            cancelled_at
         });
         let started = Instant::now();
         let result = run_with_timeout_cancel(&mut command, Duration::from_secs(60), &cancel);
+        let finished = Instant::now();
+        let cancelled_at = cancel_after.join().unwrap();
         assert!(result.is_err(), "取消后应返回错误");
         let message = format!("{:#}", result.unwrap_err());
         assert!(message.contains("取消"), "应是取消错误：{message}");
         assert!(
             started.elapsed() < Duration::from_secs(5),
-            "取消后应尽快返回，实际 {:?}",
-            started.elapsed()
+            "取消后应尽快返回，总耗时 {:?}，取消至返回 {:?}",
+            started.elapsed(),
+            finished.saturating_duration_since(cancelled_at)
         );
+
+        // 再从真实根/后代 PID 握手之后取消，单独测取消到整树释放；不替代上面的原 5s 断言。
+        // 修复前 Atomic 入口只杀根进程，-NoNewWindow 后代继续持有 stdout/stderr 写端。
+        #[cfg(windows)]
+        {
+            use std::os::windows::io::{AsRawHandle, FromRawHandle, OwnedHandle};
+            use windows_sys::Win32::{
+                Foundation::WAIT_OBJECT_0,
+                System::Threading::{OpenProcess, WaitForSingleObject, PROCESS_SYNCHRONIZE},
+            };
+
+            std::fs::create_dir_all(".tmp/parallel-review").unwrap();
+            let dir = tempfile::Builder::new()
+                .prefix("atomic-process-tree-")
+                .tempdir_in(".tmp/parallel-review")
+                .unwrap();
+            let pid_path = dir.path().join("ready.pid");
+            let path = pid_path.to_string_lossy().replace('\'', "''");
+            let script = format!(
+                "$child = Start-Process -FilePath \"$PSHOME\\powershell.exe\" \
+                 -ArgumentList '-NoProfile','-Command','Start-Sleep -Seconds 60' \
+                 -NoNewWindow -PassThru; \
+                 [IO.File]::WriteAllText('{path}', \"$PID $($child.Id)\"); \
+                 Start-Sleep -Seconds 60"
+            );
+            let mut command = Command::new("powershell");
+            command.args(["-NoProfile", "-Command", &script]);
+            let cancel = Arc::new(AtomicBool::new(false));
+            let setter = cancel.clone();
+            let cancel_thread = thread::spawn(move || {
+                let ready = (|| -> std::result::Result<[OwnedHandle; 2], String> {
+                    let deadline = Instant::now() + Duration::from_secs(5);
+                    loop {
+                        if let Ok(text) = std::fs::read_to_string(&pid_path) {
+                            let mut pids = text.split_whitespace();
+                            if let (Some(root), Some(descendant), None) =
+                                (pids.next(), pids.next(), pids.next())
+                            {
+                                if let (Ok(root), Ok(descendant)) =
+                                    (root.parse::<u32>(), descendant.parse::<u32>())
+                                {
+                                    let open = |pid| {
+                                        // SAFETY: 只打开本用例已握手进程的同步句柄，不继承或改状态。
+                                        let handle =
+                                            unsafe { OpenProcess(PROCESS_SYNCHRONIZE, 0, pid) };
+                                        if handle.is_null() {
+                                            return Err(format!(
+                                                "取消前无法打开合成进程 {pid}：{}",
+                                                std::io::Error::last_os_error()
+                                            ));
+                                        }
+                                        // SAFETY: 成功句柄的唯一所有权交给 OwnedHandle，防 PID 复用。
+                                        Ok(unsafe { OwnedHandle::from_raw_handle(handle.cast()) })
+                                    };
+                                    return Ok([open(root)?, open(descendant)?]);
+                                }
+                            }
+                        }
+                        if Instant::now() >= deadline {
+                            return Err("合成根进程及后代未完成真实 PID 握手".into());
+                        }
+                        thread::sleep(Duration::from_millis(20));
+                    }
+                })();
+                // 即使握手失败也先发取消并由宿主回收，避免失败断言留下挂死进程。
+                let cancelled_at = Instant::now();
+                setter.store(true, Ordering::Relaxed);
+                (cancelled_at, ready)
+            });
+            let result = run_with_timeout_cancel(&mut command, Duration::from_secs(60), &cancel);
+            let (cancelled_at, ready) = cancel_thread.join().unwrap();
+            let error = result.expect_err("取消真实进程树必须返回错误");
+            assert!(error.to_string().contains("取消"), "{error}");
+            for handle in ready.expect("取消前必须确认根进程和后代已经真实启动")
+            {
+                // SAFETY: 仅有界等待取消前持有的合成进程同步句柄。
+                let status = unsafe { WaitForSingleObject(handle.as_raw_handle().cast(), 2000) };
+                assert_eq!(status, WAIT_OBJECT_0, "取消后根进程或后代仍存活");
+            }
+            assert!(
+                cancelled_at.elapsed() < Duration::from_secs(5),
+                "取消到整树释放应保留 5s 上限，实际 {:?}",
+                cancelled_at.elapsed()
+            );
+        }
     }
 
     // 覆盖 F21：超过捕获上限的输出标记 truncated，不得静默当完整结果。

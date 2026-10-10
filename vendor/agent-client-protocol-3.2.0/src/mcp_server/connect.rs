@@ -1,0 +1,81 @@
+use std::sync::Arc;
+
+use crate::{
+    DynConnectTo,
+    mcp_server::McpConnectionTo,
+    role::{self, Role},
+};
+
+/// Trait for types that can create MCP server connections.
+///
+/// Implement this trait to create custom MCP servers. Each call to [`connect`](Self::connect)
+/// should return a new [`ConnectTo`](crate::ConnectTo) that serves MCP requests for a single
+/// connection.
+///
+/// # Example
+///
+/// ```rust,ignore
+/// use agent_client_protocol::mcp_server::{McpServerConnect, McpConnectionTo};
+/// use agent_client_protocol::{DynConnectTo, role::Role};
+///
+/// struct MyMcpServer {
+///     name: String,
+/// }
+///
+/// impl<R: Role> McpServerConnect<R> for MyMcpServer {
+///     fn name(&self) -> String {
+///         self.name.clone()
+///     }
+///
+///     fn connect(&self, cx: McpConnectionTo<R>) -> DynConnectTo<role::mcp::Client> {
+///         // Create and return a component that handles MCP requests
+///         DynConnectTo::new(MyMcpComponent::new(cx))
+///     }
+/// }
+/// ```
+pub trait McpServerConnect<Counterpart: Role>: Send + Sync + 'static {
+    /// The name of the MCP server, used in ACP declarations when attached.
+    fn name(&self) -> String;
+
+    /// Create a component to service a standalone connection or a native operation.
+    ///
+    /// Standalone serving invokes this factory once per connection. Native ACP
+    /// invokes it independently for each `mcp/message` operation. A native
+    /// component receives an MCP 2026-07-28 request directly; it must not wait
+    /// for `initialize` or share protocol state with a previous operation.
+    /// Prefer `McpService` for reusable native application services.
+    ///
+    /// Any communication primitives shared with the server's
+    /// [`RunWithConnectionTo`](crate::RunWithConnectionTo) task must be created
+    /// before the [`McpServer`](super::McpServer) is returned. The runner has no
+    /// separate readiness protocol and may continue asynchronous initialization
+    /// while connections and their messages are queued.
+    ///
+    /// [`McpConnectionTo`] distinguishes a direct MCP connection from an
+    /// ACP-attached operation and provides the corresponding host connection.
+    fn connect(&self, cx: McpConnectionTo<Counterpart>) -> DynConnectTo<role::mcp::Client>;
+}
+
+impl<Counterpart: Role, S: ?Sized + McpServerConnect<Counterpart>> McpServerConnect<Counterpart>
+    for Box<S>
+{
+    fn name(&self) -> String {
+        S::name(self)
+    }
+
+    fn connect(&self, cx: McpConnectionTo<Counterpart>) -> DynConnectTo<role::mcp::Client> {
+        S::connect(self, cx)
+    }
+}
+
+impl<Counterpart: Role, S: ?Sized + McpServerConnect<Counterpart>> McpServerConnect<Counterpart>
+    for Arc<S>
+{
+    fn name(&self) -> String {
+        S::name(self)
+    }
+
+    fn connect(&self, cx: McpConnectionTo<Counterpart>) -> DynConnectTo<role::mcp::Client> {
+        S::connect(self, cx)
+    }
+}
