@@ -1,4 +1,4 @@
-"""test_gate 预算会计回归单测（fastcheck 60 秒硬上限的确定性反证）.
+"""test_gate 预算会计与真实模型授权边界回归单测.
 
 覆盖两个已确认的预算缺陷；当前三级门共用非编译预算，真正编译独占区间扣除：
 
@@ -9,7 +9,10 @@
 
 确定性：用注入假时钟替代 ``time.monotonic``，不真实睡眠 61 秒；唯一真实进程
 用 0.4s 睡眠命令，预算差额远大于进程启动抖动。日志及真实清理夹具仅写
-.tmp/test-gate 与 .tmp/parallel-review；CI 触发身份和默认等待边界使用模拟响应。
+.tmp/test-gate、.tmp/parallel-review 与 .tmp/acp-review；CI 身份及默认等待使用模拟响应。
+
+完整门授权边界仅调用真实计划器；合成 Cargo artifact 日志交由生产解析器读取，
+fake GateRun 只记录排程，进程启动接缝全部禁止，不执行完整门、远程或模型调用。
 """
 
 from __future__ import annotations
@@ -17,6 +20,7 @@ from __future__ import annotations
 import contextlib
 import io
 import json
+import os
 import shutil
 import subprocess
 import sys
@@ -26,7 +30,7 @@ from pathlib import Path
 from typing import cast
 from unittest.mock import MagicMock, patch
 
-from scripts import gate_runtime, make_tmp, test_gate
+from scripts import gate_runtime, local_gate_plan, make_tmp, test_gate
 from scripts.test_gate import stage_remote_workflow
 
 
@@ -193,6 +197,158 @@ class TemporaryCleanupPathTests(unittest.TestCase):
             _ = (directory / "payload.txt").write_text("synthetic cleanup payload", encoding="utf-8")
             make_tmp.robust_rmtree(directory)
             assert not directory.exists()  # nosec B101: 真实 Windows 消费者删除必须完成，不仅检查字符串。
+
+
+class _PlanningGateRun:
+    """只接收真实计划器的阶段，不执行 argv，也不伪造模型响应。."""
+
+    def __init__(self, log_dir: Path, logs: dict[str, Path]) -> None:
+        self.log_dir: Path = log_dir
+        self.logs: dict[str, Path] = logs
+        self.stages: list[gate_runtime.Stage] = []
+
+    def run(self, stages: list[gate_runtime.Stage]) -> list[gate_runtime.Result]:
+        self.stages.extend(stages)
+        return [
+            gate_runtime.Result(
+                stage.name,
+                gate_runtime.STATUS_OK,
+                "planning-only synthetic prerequisite; command not executed",
+                log=self.logs.get(stage.name),
+            )
+            for stage in stages
+        ]
+
+
+class OpenCodeAuthorizationBoundaryTests(unittest.TestCase):
+    """安装或配置 Agent 不是普通 fulltest / slowtest 的真实模型调用授权。."""
+
+    def _assert_separate_model_authorization(self, installation: str) -> None:
+        workspace = test_gate.ROOT / ".tmp" / "acp-review" / "gate-authorization"
+        with (
+            patch.object(sys, "argv", ["make_tmp.py", "workspace", "--destination", str(workspace)]),
+            contextlib.redirect_stdout(io.StringIO()),
+        ):
+            code = make_tmp.main()
+            assert code == 0  # nosec B101: 测试夹具目录必须创建成功。
+        with tempfile.TemporaryDirectory(dir=workspace) as temporary:
+            root = Path(temporary)
+            log_dir = root / "logs"
+            log_dir.mkdir()
+            path_dir = root / "path"
+            path_dir.mkdir()
+            environment = {
+                "PATH": str(path_dir),
+                "PATHEXT": ".EXE",
+                "APPDATA": str(root / "appdata"),
+                "PROGRAMFILES": str(root / "program-files"),
+                "PROGRAMFILES(X86)": str(root / "program-files-x86"),
+            }
+            if installation != "absent":
+                executable = {
+                    "explicit": root / "explicit" / "opencode.exe",
+                    "path": path_dir / "opencode.exe",
+                    "npm": root / "appdata/npm/node_modules/@opencode/cli/bin/opencode.exe",
+                }[installation]
+                executable.parent.mkdir(parents=True, exist_ok=True)
+                _ = executable.write_bytes(b"inert discovery fixture; never execute")
+                executable.chmod(0o700)
+                if installation == "explicit":
+                    environment["JCHTOOLS_TEST_OPENCODE_EXE"] = str(executable)
+            # 本地真实资产用例仍适用；这些占位文件仅供排程的 is_file 前置判定。
+            for key, name in (
+                ("JCHTOOLS_TEST_7ZIP", "7z.exe"),
+                ("JCHTOOLS_TEST_BROKER_EXE", "JchTools.exe"),
+            ):
+                artifact = root / name
+                _ = artifact.write_bytes(b"inert local artifact; never execute")
+                environment[key] = str(artifact)
+            environment.update(
+                {
+                    "JCHTOOLS_MEDIA_E2E_COMPONENT_DIR": str(root / "media-component"),
+                    "JCHTOOLS_MEDIA_E2E_INPUT": str(root / "speech.wav"),
+                    "JCHTOOLS_MEDIA_E2E_TRACKLESS_INPUT": str(root / "trackless.mp4"),
+                    "JCHTOOLS_MEDIA_E2E_EXPECT_TEXT": "synthetic planning text",
+                }
+            )
+            root_targets = (
+                "acp_settings",
+                "acp_discovery",
+                "acp_discovery_env",
+                "acp_callbacks",
+                "acp_http_contract",
+                "acp_http_disconnect",
+                "acp_service_process",
+                "acp_opencode",
+                "archive",
+                "xberg_assets",
+                "markdown_media_e2e",
+                "gui_flow",
+            )
+            build_targets = {
+                "root-test-build": root_targets,
+                "snap-ocr-core-test-build": ("snap_ocr_core",),
+                "snap-ocr-worker-test-build": ("snap_ocr_worker",),
+            }
+            logs: dict[str, Path] = {}
+            for build, targets in build_targets.items():
+                log = log_dir / f"{build}.log"
+                _ = log.write_text(
+                    "\n".join(
+                        json.dumps(
+                            {
+                                "reason": "compiler-artifact",
+                                "profile": {"test": True},
+                                "target": {"name": target, "kind": ["test"]},
+                                "executable": str(root / "artifacts" / f"{target}.exe"),
+                            }
+                        )
+                        for target in targets
+                    ),
+                    encoding="utf-8",
+                )
+                logs[build] = log
+            snapshot_log = log_dir / "source-snapshot.log"
+            _ = snapshot_log.write_text("synthetic source snapshot\n", encoding="utf-8")
+            logs["source-snapshot"] = snapshot_log
+            with (
+                patch.dict(os.environ, environment, clear=True),
+                patch("subprocess.run", side_effect=AssertionError("计划回归不得执行进程")),
+                patch("subprocess.Popen", side_effect=AssertionError("计划回归不得启动进程")),
+            ):
+                for level in ("fulltest", "slowtest"):
+                    with self.subTest(installation=installation, level=level):
+                        run = _PlanningGateRun(log_dir, logs)
+                        plan = local_gate_plan.gate_plan(level, root, log_dir, {})
+                        results: list[gate_runtime.Result] = []
+                        snapshot: list[str] = []
+                        local_gate_plan.run_full_coverage(
+                            cast("gate_runtime.GateRun", cast("object", run)), plan, results, snapshot, root
+                        )
+                        model_binary = str(root / "artifacts" / "acp_opencode.exe")
+                        unauthorized = [
+                            stage.name
+                            for stage in run.stages
+                            if stage.argv[0] == model_binary and "--ignored" in stage.argv
+                        ]
+                        assert unauthorized == [], "普通完整门不能自行取得真实模型调用授权"  # nosec B101: 授权边界回归。
+                        model_results = [result for result in results if result.name == "real-opencode"]
+                        assert len(model_results) == 1  # nosec B101: 真实模型验收必须独立报告。
+                        assert (  # nosec B101: 不得把未授权模型调用冒报 PASS。
+                            model_results[0].status == "NOT_RUN_SEPARATE_USER_INSTRUCTION_REQUIRED"
+                        )
+
+    def test_explicit_opencode_exe_does_not_authorize_model_calls(self) -> None:
+        self._assert_separate_model_authorization("explicit")
+
+    def test_path_native_opencode_exe_does_not_authorize_model_calls(self) -> None:
+        self._assert_separate_model_authorization("path")
+
+    def test_npm_native_opencode_exe_does_not_authorize_model_calls(self) -> None:
+        self._assert_separate_model_authorization("npm")
+
+    def test_no_opencode_installation_still_reports_separate_authorization(self) -> None:
+        self._assert_separate_model_authorization("absent")
 
 
 class RunLoggedSetupBudgetTests(unittest.TestCase):

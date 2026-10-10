@@ -45,6 +45,7 @@ class _Callbacks(TypedDict):
     kill_tree: _StopCommand
     compiler_ids: Callable[[subprocess.Popen[bytes]], frozenset[int]]
     clock: NotRequired[Callable[[], float]]
+    observe_tree: NotRequired[Callable[[subprocess.Popen[bytes]], None]]
 
 
 @dataclasses.dataclass
@@ -54,6 +55,7 @@ class Stage:
     kind: str = "check"
     env: dict[str, str] | None = None
     phase_file: Path | None = None
+    exclusive_resource: str | None = None
 
 
 @dataclasses.dataclass
@@ -122,6 +124,7 @@ class GateRun:
         self._close_command = callbacks["close_command"]
         self._kill_tree = callbacks["kill_tree"]
         self._compiler_ids = callbacks["compiler_ids"]
+        self._observe_tree = callbacks.get("observe_tree")
         self._active: list[_Running] = []
         self._observed: dict[int, frozenset[int]] = {}
         self._results: list[Result] = []
@@ -177,7 +180,13 @@ class GateRun:
             message = f"观察所属编译器进程失败：{error}"
             raise RuntimeError(message) from error
 
+    def _retain_process_identities(self) -> None:
+        if self._observe_tree is not None:
+            for running in self._active:
+                self._observe_tree(running.process)
+
     def _sample(self) -> None:
+        self._retain_process_identities()
         observed: dict[int, frozenset[int]] = {}
         eligible = bool(self._active)
         for running in self._active:
@@ -185,7 +194,9 @@ class GateRun:
             phase = running.stage.phase_file
             if phase is not None and not phase.is_absolute():
                 phase = self.root / phase
-            candidate = running.stage.kind == "compile" or (running.stage.kind == "mixed" and _compiling(phase))
+            candidate = running.stage.kind in {"compile", "compiler-observed"} or (
+                running.stage.kind == "mixed" and _compiling(phase)
+            )
             if not candidate:
                 self._account({})
                 return
@@ -231,6 +242,10 @@ class GateRun:
             sink = log.open("wb")
         except OSError as error:
             return Result(stage.name, STATUS_FAILED, f"无法创建阶段日志：{error}")
+        self._charge()
+        if self._expired():
+            sink.close()
+            return Result(stage.name, STATUS_TIMED_OUT, "实际启动前共享非编译预算已耗尽", log)
         try:
             proc = self._start(stage, sink)
         except (OSError, ValueError, RuntimeError, subprocess.SubprocessError) as error:
@@ -298,6 +313,8 @@ class GateRun:
         self._charge()
         terminated, termination = self._terminate(running, deadline) if stopped else (True, "")
         closed, cleanup = self._close(running, deadline)
+        if not terminated or not closed:
+            self._interrupted = True  # 未确认旧进程树收尾时，不再启动可能共享资源的下一项。
         code = running.process.poll()
         status = STATUS_OK if code == 0 and terminated and closed else STATUS_FAILED
         if stopped:
@@ -328,14 +345,28 @@ class GateRun:
         self._charge()
         return results
 
+    def _next_stage(self, pending: deque[Stage]) -> Stage | None:
+        held = {running.stage.exclusive_resource for running in self._active}
+        for stage in pending:
+            if stage.exclusive_resource is None or stage.exclusive_resource not in held:
+                pending.remove(stage)
+                return stage
+        return None
+
     def _schedule(self, pending: deque[Stage], results: list[Result], *, parallel: bool) -> None:
         while pending or self._active:
             self._sample()
             if self._interrupted or self._expired():
                 break
             while pending and (not self._active or (parallel and len(self._active) < _PARALLEL_COMMANDS)):
-                stage = pending.popleft()
+                self._charge()
+                if self._expired():
+                    break
+                stage = self._next_stage(pending)
+                if stage is None:
+                    break
                 result = self._launch(stage)
+                self._charge()
                 if result is not None:
                     results.append(result)
                 if self._interrupted or self._expired():
@@ -385,6 +416,16 @@ class GateRun:
             return STATUS_UNVERIFIED
         return STATUS_OK
 
+    @staticmethod
+    def _print_result(result: Result) -> None:
+        print(f"{result.status} {result.name}: {result.detail}")
+        if result.log is not None:
+            print(f"  log={result.log}")
+            if result.status != STATUS_OK:
+                tail = _tail(result.log)
+                if tail:
+                    print(tail)
+
     def finish(
         self, results: list[Result], *, snapshot: list[str] | None = None, notes: list[str] | None = None
     ) -> int:
@@ -404,13 +445,7 @@ class GateRun:
         for line in snapshot or []:
             print(line)
         for result in results:
-            print(f"{result.status} {result.name}: {result.detail}")
-            if result.log is not None:
-                print(f"  log={result.log}")
-                if result.status != STATUS_OK:
-                    tail = _tail(result.log)
-                    if tail:
-                        print(tail)
+            self._print_result(result)
         for note in notes or []:
             print(f"NOTE {note}")
         self._charge()

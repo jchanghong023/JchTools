@@ -44,7 +44,11 @@ def gate_plan(level: str, root: Path, log_dir: Path, ps_env: dict[str, str]) -> 
         *static_plan(root),
         Stage("production-build", [cargo, "build", "--bin", "JchTools"], "compile"),
         Stage("test-target-check", [cargo, "check", "--all-targets", "--features", "test-hooks"], "compile"),
-        Stage("clippy", [cargo, "clippy", "--all-targets", "--features", "test-hooks", "--", "-D", "warnings"]),
+        Stage(
+            "clippy",
+            [cargo, "clippy", "--all-targets", "--features", "test-hooks", "--", "-D", "warnings"],
+            "compiler-observed",
+        ),
     ]
     if level == "fastcheck":
         return plan
@@ -59,13 +63,14 @@ def gate_plan(level: str, root: Path, log_dir: Path, ps_env: dict[str, str]) -> 
         Stage(
             "clippy-perf-tracing",
             [cargo, "clippy", "--all-targets", "--features", "perf-tracing,test-hooks", "--", "-D", "warnings"],
+            "compiler-observed",
         ),
         Stage(
             "root-test-build",
             [cargo, "test", "--all-targets", "--features", "test-hooks", "--no-run", "--message-format=json"],
             "compile",
         ),
-        Stage("root-doctests", [cargo, "test", "--doc", "--features", "test-hooks"]),
+        Stage("root-doctests", [cargo, "test", "--doc", "--features", "test-hooks"], "compiler-observed"),
     ]
     for component in ("snap-ocr-core", "snap-ocr-worker"):
         manifest = f"optional/{component}/Cargo.toml"
@@ -84,6 +89,7 @@ def gate_plan(level: str, root: Path, log_dir: Path, ps_env: dict[str, str]) -> 
                     "-D",
                     "warnings",
                 ],
+                "compiler-observed",
             ),
             Stage(
                 f"{component}-test-build",
@@ -103,6 +109,7 @@ def gate_plan(level: str, root: Path, log_dir: Path, ps_env: dict[str, str]) -> 
             Stage(
                 f"{component}-doctests",
                 [cargo, "test", "--manifest-path", manifest, "--doc", "--features", "test-hooks"],
+                "compiler-observed",
             ),
         ]
     phase = log_dir / "package-phase.json"
@@ -124,6 +131,7 @@ def gate_plan(level: str, root: Path, log_dir: Path, ps_env: dict[str, str]) -> 
             "mixed",
             ps_env,
             phase,
+            exclusive_resource="bundled-7zip",
         )
     )
     return plan
@@ -208,18 +216,58 @@ def _real_coverage(
     if Path(engine).is_file():
         stage = _real_test_stage(results, binaries, ("archive", "real-engine-tests"), {"JCHTOOLS_TEST_7ZIP": engine})
         if stage is not None:
+            if Path(engine).resolve() == (root / "resources/7zip/7z.exe").resolve():
+                stage.exclusive_resource = "bundled-7zip"
             stages.append(stage)
     else:
         results.append(Result("real-engine-tests", "UNVERIFIED", "缺少真实 7-Zip 引擎。"))
-    environment = _media_environment(run, results, root, ps_env)
-    if environment is not None:
-        stage = _real_test_stage(results, binaries, ("markdown_media_e2e", "real-media-e2e"), environment)
+    if any(result.name == "xberg-latest" and result.status == "PASS" for result in results):
+        stage = _real_test_stage(
+            results,
+            binaries,
+            ("xberg_assets", "real-xberg-presence"),
+            {"JCHTOOLS_REAL_XBERG_DIR": str(EXPECTED_TEST_ENGINE)},
+        )
         if stage is not None:
             stages.append(stage)
     else:
+        results.append(Result("real-xberg-presence", "UNVERIFIED", "最新真实 Xberg 前置未通过。"))
+    media = _real_media_stage(run, results, binaries, root, ps_env)
+    if media is not None:
+        # 两个用例各自保存隔离状态目录；逐个 Job 收尾后才能启动下一套共享代理。
+        stages.extend(
+            Stage(
+                f"{media.name}-{case}",
+                [*media.argv, "--exact", case],
+                env=media.env,
+                exclusive_resource="shared-xberg-media",
+            )
+            for case in (
+                "real_component_trackless_media_reports_no_audio",
+                "real_component_transcribe_returns_structured_markdown",
+            )
+        )
+    return stages
+
+
+def _real_media_stage(
+    run: GateRun, results: list[Result], binaries: list[Stage], root: Path, ps_env: dict[str, str] | None
+) -> Stage | None:
+    environment = _media_environment(run, results, root, ps_env)
+    if environment is None:
         detail = "真实媒体组件、语音/无音轨合成输入及期望文本前置未齐；用例保留。"
         results.append(Result("real-media-e2e", "UNVERIFIED", detail))
-    return stages
+        return None
+    broker = os.environ.get("JCHTOOLS_TEST_BROKER_EXE") or (ps_env or {}).get("JCHTOOLS_TEST_GUI_EXE")
+    if broker is None or not Path(broker).is_absolute() or not Path(broker).is_file():
+        results.append(Result("real-media-e2e", "UNVERIFIED", "真实媒体测试缺少本轮 JchTools 代理绝对 EXE。"))
+        return None
+    return _real_test_stage(
+        results,
+        binaries,
+        ("markdown_media_e2e", "real-media-e2e"),
+        environment | {"JCHTOOLS_TEST_BROKER_EXE": broker},
+    )
 
 
 def _media_environment(
@@ -280,13 +328,14 @@ def run_full_coverage(run: GateRun, plan: list[Stage], results: list[Result], sn
     names = {"pyquality-pip-audit", "ocr-asset-manifest", "requirement-reference-inventory", "xberg-latest"}
     results.extend(run.run([stage for stage in plan if stage.name in names]))
     binaries = _compile_test_artifacts(run, plan, results)
-    if shutil.which("opencode") is not None:
-        stage = _real_test_stage(results, binaries, ("acp_opencode", "real-opencode"))
-        if stage is not None:
-            results.extend(run.run([stage]))
-    else:
-        results.append(Result("real-opencode", "UNVERIFIED", "真实 OpenCode 未安装。"))
     pending = [*(stage for stage in plan if stage.name.endswith("-unit")), *binaries]
+    results.append(
+        Result(
+            "real-opencode",
+            "NOT_RUN_SEPARATE_USER_INSTRUCTION_REQUIRED",
+            "真实模型验收保留独立 acp_opencode 入口；门授权或 JCHTOOLS_TEST_OPENCODE_EXE 配置不授权模型调用。",
+        )
+    )
     results.extend(run.run(pending))
     results.append(
         Result(

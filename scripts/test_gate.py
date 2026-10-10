@@ -240,6 +240,7 @@ class _CommandJob:
         query = cast("Callable[[int, int], dict[str, object]]", vars(win32job)["QueryInformationJobObject"])
         configure = cast("Callable[[int, int, dict[str, object]], None]", vars(win32job)["SetInformationJobObject"])
         self.process = proc
+        self._retained_handles: dict[int, int] = {}
         self.job = create(None, "")
         try:
             information = query(self.job, win32job.JobObjectExtendedLimitInformation)
@@ -276,6 +277,20 @@ class _CommandJob:
             raise
         else:
             return handles
+
+    def retain_process_identities(self) -> None:
+        """保留所属进程对象到阶段结束，避免并行用例间复用已退出的 PID。."""
+        for handle in self.process_handles():
+            pid = _get_process_id(int(handle))
+            previous = self._retained_handles.setdefault(pid, handle)
+            if previous != handle:
+                win32api.CloseHandle(handle)
+
+    def close(self) -> None:
+        for handle in self._retained_handles.values():
+            win32api.CloseHandle(handle)
+        self._retained_handles.clear()
+        win32api.CloseHandle(self.job)
 
     def terminate(self, timeout: float) -> bool:
         terminate = cast("Callable[[int, int], None]", vars(win32job)["TerminateJobObject"])
@@ -332,7 +347,7 @@ def _start_owned_command(
         except (OSError, pywintypes.error):
             _ = _COMMAND_JOBS.pop(proc.pid, None)
             if owner is not None:
-                win32api.CloseHandle(owner.job)
+                owner.close()
             proc.kill()
             _ = proc.wait()
             raise
@@ -347,7 +362,17 @@ def _close_owned_command(proc: subprocess.Popen[bytes], *, timeout: float) -> bo
     try:
         return owner.terminate(timeout)
     finally:
-        win32api.CloseHandle(owner.job)
+        owner.close()
+
+
+def _observe_owned_command(proc: subprocess.Popen[bytes]) -> None:
+    owner = _COMMAND_JOBS.get(proc.pid)
+    if owner is not None and owner.process is proc:
+        try:
+            owner.retain_process_identities()
+        except pywintypes.error as error:
+            message = f"保留所属进程身份失败：{error}"
+            raise RuntimeError(message) from error
 
 
 def _kill_tree(proc: subprocess.Popen[bytes], *, timeout: float) -> bool:
@@ -522,7 +547,7 @@ def _compiler_ids(proc: subprocess.Popen[bytes]) -> frozenset[int]:
     if owner is None or owner.process is not proc:
         return frozenset()
     compilers = {"rustc.exe", "link.exe", "lld-link.exe", "rc.exe", "cl.exe", "c1xx.exe", "c2.exe"}
-    controllers = {"cargo.exe", "rustup.exe", "cmd.exe", "powershell.exe"}
+    controllers = {"cargo.exe", "cargo-clippy.exe", "rustup.exe", "cmd.exe", "powershell.exe"}
     identifiers: set[int] = set()
     handles = owner.process_handles()
     try:
@@ -590,6 +615,7 @@ def execute_gate(
         kill_tree=_kill_tree,
         compiler_ids=compiler_ids_override or _compiler_ids,
         clock=clock_override or _monotonic,
+        observe_tree=_observe_owned_command,
     )
     results: list[Result] = []
     snapshot: list[str] = []
@@ -613,13 +639,13 @@ def execute_gate(
             notes.append("CI / 远程流水线 / 发布 / Computer Use：在三个门之外。")
         if level == "slowtest":
             notes.append("SKIPPED_NOT_APPLICABLE WSL：P-07 仅 Windows；与 fulltest 等覆盖一次。")
+        for result in results:
+            checked = _scan_binding_loop(StageResult(result.name, result.status, result.detail, result.log))
+            result.status, result.detail = checked.status, checked.detail
     except KeyboardInterrupt:
         results.append(Result("interruption", STATUS_FAILED, "用户中断；不报告为通过。"))
     except (OSError, ValueError, RuntimeError, subprocess.SubprocessError) as error:
         results.append(Result("orchestration", STATUS_FAILED, f"门编排失败：{error}"))
-    for result in results:
-        checked = _scan_binding_loop(StageResult(result.name, result.status, result.detail, result.log))
-        result.status, result.detail = checked.status, checked.detail
     return run.finish(results, snapshot=snapshot, notes=notes)
 
 
