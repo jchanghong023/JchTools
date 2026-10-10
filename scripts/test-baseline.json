@@ -552,7 +552,7 @@
       "name": "cancelled_recognition_triggers_model_reload",
       "ignored": false,
       "cfg": "windows",
-      "body": "0ca5ab1d793a8f8e"
+      "body": "8b687d217aa1bef9"
     },
     {
       "file": "optional/snap-ocr-worker/src/service.rs",
@@ -608,14 +608,14 @@
       "name": "inference_failure_does_not_unload_ready_model",
       "ignored": false,
       "cfg": "windows",
-      "body": "3cb09081c7c627b0"
+      "body": "81b0059a61461992"
     },
     {
       "file": "optional/snap-ocr-worker/src/service.rs",
       "name": "load_failures_map_to_distinct_model_states",
       "ignored": false,
       "cfg": "windows",
-      "body": "11c96ce68cff0642"
+      "body": "4ebdc3cad9527f72"
     },
     {
       "file": "optional/snap-ocr-worker/src/service.rs",
@@ -692,7 +692,7 @@
       "name": "unfinished_client_does_not_block_next_control_request",
       "ignored": false,
       "cfg": null,
-      "body": "83ef38b4a92e7aa9"
+      "body": "761448605ab60b31"
     },
     {
       "file": "optional/snap-ocr-worker/src/service/tray.rs",
@@ -847,6 +847,13 @@
       "ignored": false,
       "cfg": null,
       "body": "7d29b84fbe06509d"
+    },
+    {
+      "file": "src/acp_api/http/mod.rs",
+      "name": "local_http_logs_json_sse_failures_and_private_body_boundaries",
+      "ignored": false,
+      "cfg": null,
+      "body": "bee3b308796ab485"
     },
     {
       "file": "src/acp_api/http/mod.rs",
@@ -1844,6 +1851,13 @@
     },
     {
       "file": "src/gui.rs",
+      "name": "expanded_log_panel_keeps_real_md_task_and_terminal_logs",
+      "ignored": false,
+      "cfg": null,
+      "body": "d7ab6e05d7927a14"
+    },
+    {
+      "file": "src/gui.rs",
       "name": "extract_confirm_text_discloses_deletion_rules",
       "ignored": false,
       "cfg": null,
@@ -2334,24 +2348,59 @@
     },
     {
       "file": "src/logging.rs",
+      "name": "both_log_directories_blocked_do_not_panic",
+      "ignored": false,
+      "cfg": null,
+      "body": "3b98c0f9f09d7aa4"
+    },
+    {
+      "file": "src/logging.rs",
+      "name": "conflicting_subscriber_is_not_reported_as_initialized",
+      "ignored": false,
+      "cfg": null,
+      "body": "b45fcb841a132ccf"
+    },
+    {
+      "file": "src/logging.rs",
+      "name": "disk_records_are_single_line_correlated_and_redacted",
+      "ignored": false,
+      "cfg": null,
+      "body": "f847fcc6d87407e2"
+    },
+    {
+      "file": "src/logging.rs",
       "name": "failed_log_file_initialization_does_not_call_panic_hook",
       "ignored": false,
       "cfg": null,
-      "body": "6b17e5140d040469"
+      "body": "ae0a58967fc49b33"
     },
     {
       "file": "src/logging.rs",
       "name": "panic_payload_is_not_written_to_diagnostic_log",
       "ignored": false,
       "cfg": null,
-      "body": "bc6176bd22b99bc8"
+      "body": "ed2dcce83d7334be"
+    },
+    {
+      "file": "src/logging.rs",
+      "name": "retention_preserves_non_logs_and_recent_records",
+      "ignored": false,
+      "cfg": null,
+      "body": "d5153cb0484f535d"
+    },
+    {
+      "file": "src/logging.rs",
+      "name": "safe_helpers_bound_diagnostic_data",
+      "ignored": false,
+      "cfg": null,
+      "body": "5e18480813df6f19"
     },
     {
       "file": "src/logging.rs",
       "name": "warns_and_errors_reach_disk_file",
       "ignored": false,
       "cfg": null,
-      "body": "7fafadd390aef3ef"
+      "body": "cab46f92c183bdfe"
     },
     {
       "file": "src/markdown.rs",
@@ -3097,6 +3146,20 @@
     },
     {
       "file": "src/process.rs",
+      "name": "subprocess_logs_preserve_results_and_thread_correlation_without_body_leaks",
+      "ignored": false,
+      "cfg": "windows",
+      "body": "9aad20333033f509"
+    },
+    {
+      "file": "src/process.rs",
+      "name": "subprocess_logs_spawn_failure_and_timeout_recovery",
+      "ignored": false,
+      "cfg": "windows",
+      "body": "10d9e88b56836852"
+    },
+    {
+      "file": "src/process.rs",
       "name": "summarize_failure_prefers_stderr_and_truncates",
       "ignored": false,
       "cfg": null,
@@ -3321,6 +3384,13 @@
     },
     {
       "file": "src/snap_ocr_assets.rs",
+      "name": "asset_http_failures_log_all_three_attempts_and_exhaustion_without_secrets",
+      "ignored": false,
+      "cfg": null,
+      "body": "9556850e2619afd7"
+    },
+    {
+      "file": "src/snap_ocr_assets.rs",
       "name": "checked_download_total_rejects_payload_over_manifest_size",
       "ignored": false,
       "cfg": null,
@@ -3398,6 +3468,27 @@
     },
     {
       "file": "src/snap_ocr_assets.rs",
+      "name": "metadata_http_failure_logs_status_without_url_credentials_or_remote_text",
+      "ignored": false,
+      "cfg": null,
+      "body": "1531cf4336c400f6"
+    },
+    {
+      "file": "src/snap_ocr_assets.rs",
+      "name": "metadata_json_failure_logs_parse_stage_without_response_body",
+      "ignored": false,
+      "cfg": null,
+      "body": "4e6631b0d4b029f5"
+    },
+    {
+      "file": "src/snap_ocr_assets.rs",
+      "name": "metadata_proxy_body_failure_logs_one_direct_fallback_and_parsed_result",
+      "ignored": false,
+      "cfg": null,
+      "body": "57788d651dd8dc00"
+    },
+    {
+      "file": "src/snap_ocr_assets.rs",
       "name": "missing_worker_reports_repair_without_downloading_another_version",
       "ignored": false,
       "cfg": null,
@@ -3429,7 +3520,7 @@
       "name": "redirect_rechecks_proxy_override_for_each_target",
       "ignored": false,
       "cfg": null,
-      "body": "5540f7b029c9581f"
+      "body": "e64a964399575118"
     },
     {
       "file": "src/snap_ocr_assets.rs",
@@ -3559,10 +3650,24 @@
     },
     {
       "file": "src/xberg_runtime_windows.rs",
+      "name": "broken_engine_delivers_terminal_with_thread_request_context",
+      "ignored": false,
+      "cfg": null,
+      "body": "7a306b1876d0f1c6"
+    },
+    {
+      "file": "src/xberg_runtime_windows.rs",
+      "name": "consumed_response_logs_safe_results_and_decode_failure_stage",
+      "ignored": false,
+      "cfg": null,
+      "body": "61e7129675b468c0"
+    },
+    {
+      "file": "src/xberg_runtime_windows.rs",
       "name": "duration_max_is_rejected_before_broker_start",
       "ignored": false,
       "cfg": null,
-      "body": "2433d2a9729e2d5e"
+      "body": "c5089a2736e5f719"
     },
     {
       "file": "src/xberg_runtime_windows.rs",
@@ -3591,6 +3696,13 @@
       "ignored": false,
       "cfg": null,
       "body": "170f133dc622d405"
+    },
+    {
+      "file": "src/xberg_runtime_windows.rs",
+      "name": "root_preflight_reuses_caller_diagnostic_id_without_logging_request_body",
+      "ignored": false,
+      "cfg": null,
+      "body": "8d87c2beb6ec6a03"
     },
     {
       "file": "src/xberg_settings.rs",
@@ -5936,6 +6048,13 @@
       "ignored": false,
       "cfg": "feature = \"gui\"",
       "body": "c0b209593327a80a"
+    },
+    {
+      "file": "tests/gui_log_panel.rs",
+      "name": "all_tool_logs_support_headless_expansion_and_modal_boundaries",
+      "ignored": false,
+      "cfg": "all(feature = \"gui\", feature = \"test-hooks\")",
+      "body": "ab938a76c10b938f"
     },
     {
       "file": "tests/markdown_convert_gate.rs",
