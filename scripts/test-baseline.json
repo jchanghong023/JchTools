@@ -902,14 +902,14 @@
       "name": "busy_discover_waits_for_next_listener_with_no_state_side_effects",
       "ignored": false,
       "cfg": "windows",
-      "body": "4bd7e31f405bec51"
+      "body": "24635ff09d59d537"
     },
     {
       "file": "src/acp_api/runtime/ipc.rs",
       "name": "discover_rejects_self_reported_pid_different_from_kernel_server_pid",
       "ignored": false,
       "cfg": "windows",
-      "body": "aedaed8a7d653ab9"
+      "body": "68c652f0f6fe1b02"
     },
     {
       "file": "src/acp_api/runtime/ipc.rs",
@@ -937,7 +937,7 @@
       "name": "status_nonreading_client_does_not_block_listener_shutdown",
       "ignored": false,
       "cfg": "windows",
-      "body": "f1a801773ec264fb"
+      "body": "82be2b31223007b0"
     },
     {
       "file": "src/acp_api/runtime/mod.rs",
