@@ -1074,6 +1074,48 @@
     },
     {
       "file": "src/archive.rs",
+      "name": "numbered_volume_growth_actual_paths_and_precheck_cross_999",
+      "ignored": false,
+      "cfg": null,
+      "body": "6c2e4031c183243b"
+    },
+    {
+      "file": "src/archive.rs",
+      "name": "numbered_volume_growth_composite_stream_and_nested_candidates",
+      "ignored": false,
+      "cfg": null,
+      "body": "07e641a3b5129808"
+    },
+    {
+      "file": "src/archive.rs",
+      "name": "numbered_volume_growth_exact_family_boundary",
+      "ignored": false,
+      "cfg": null,
+      "body": "f5dc2163652fa014"
+    },
+    {
+      "file": "src/archive.rs",
+      "name": "numbered_volume_growth_gap_and_missing_entry_quarantine_whole_family",
+      "ignored": false,
+      "cfg": null,
+      "body": "9c8afc4f8361da7f"
+    },
+    {
+      "file": "src/archive.rs",
+      "name": "numbered_volume_growth_nested_missing_entry_is_enqueued_once",
+      "ignored": false,
+      "cfg": null,
+      "body": "d12b5b52e61bc506"
+    },
+    {
+      "file": "src/archive.rs",
+      "name": "numbered_volume_growth_nested_rename_preserves_all_suffixes",
+      "ignored": false,
+      "cfg": null,
+      "body": "3bc5f65ecfdea252"
+    },
+    {
+      "file": "src/archive.rs",
       "name": "numbered_volume_zero_is_rejected_by_precheck",
       "ignored": false,
       "cfg": null,
@@ -1126,7 +1168,7 @@
       "name": "review_exact_volume_families_exclude_wide_numeric_suffixes",
       "ignored": false,
       "cfg": null,
-      "body": "f21a39f5bce413a0"
+      "body": "e29adea32a9fdf05"
     },
     {
       "file": "src/archive.rs",
@@ -1645,6 +1687,20 @@
       "ignored": false,
       "cfg": null,
       "body": "46777ae1095daca8"
+    },
+    {
+      "file": "src/fsutil.rs",
+      "name": "numbered_volume_growth_split_preserves_complete_canonical_suffix",
+      "ignored": false,
+      "cfg": null,
+      "body": "6b75f59bbc982bb9"
+    },
+    {
+      "file": "src/fsutil.rs",
+      "name": "numbered_volume_growth_unique_target_preserves_numbered_suffix",
+      "ignored": false,
+      "cfg": null,
+      "body": "1424810cf6e03cf4"
     },
     {
       "file": "src/fsutil.rs",
@@ -3471,7 +3527,28 @@
       "name": "numbered_volume_family_recognition_matches_x10",
       "ignored": false,
       "cfg": null,
-      "body": "e95af738cd90fc03"
+      "body": "5440ef29b3c9fd02"
+    },
+    {
+      "file": "src/rules.rs",
+      "name": "numbered_volume_growth_classifies_canonical_whitelisted_tails",
+      "ignored": false,
+      "cfg": null,
+      "body": "d3b479c4dd52ec15"
+    },
+    {
+      "file": "src/rules.rs",
+      "name": "numbered_volume_growth_groups_keep_windows_ordinal_keys",
+      "ignored": false,
+      "cfg": "windows",
+      "body": "81a25428bbca2763"
+    },
+    {
+      "file": "src/rules.rs",
+      "name": "numbered_volume_growth_missing_entry_groups_include_natural_width_tails",
+      "ignored": false,
+      "cfg": null,
+      "body": "97cb7fde887d801e"
     },
     {
       "file": "src/rules.rs",
@@ -4658,6 +4735,13 @@
     },
     {
       "file": "tests/archive.rs",
+      "name": "numbered_volume_growth_real_engine_success_and_failure",
+      "ignored": true,
+      "cfg": null,
+      "body": "5dfdfeaf47aa0983"
+    },
+    {
+      "file": "tests/archive.rs",
       "name": "old_link_prefix_members_are_extracted_without_touching_existing_files",
       "ignored": true,
       "cfg": null,
@@ -4731,7 +4815,7 @@
       "name": "successful_cleanup_preserves_unused_volume_tail_after_gap",
       "ignored": true,
       "cfg": null,
-      "body": "ddd4351a1068c9ca"
+      "body": "3599263a416bb7f8"
     },
     {
       "file": "tests/archive.rs",
@@ -6776,6 +6860,13 @@
       "ignored": false,
       "cfg": null,
       "body": "e64f0ff3ccf62b5d"
+    },
+    {
+      "file": "tests/split.rs",
+      "name": "numbered_volume_growth_tail_only_group_counts_once_and_preserves_bytes",
+      "ignored": false,
+      "cfg": null,
+      "body": "6935b36d6c4858ac"
     },
     {
       "file": "tests/split.rs",
