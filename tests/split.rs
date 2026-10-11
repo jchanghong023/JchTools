@@ -1127,6 +1127,48 @@ fn quarantined_numbered_group_renames_stem_as_a_whole() {
     assert!(root.join("解压失败").join("data (1).7z.001").is_file());
     assert!(root.join("解压失败").join("data (1).7z.002").is_file());
 }
+// 覆盖 X-02/X-06/X-09/X-10：只剩自然增长尾卷时仍清点一包，缺入口整组隔离。
+#[test]
+fn numbered_volume_growth_tail_only_group_counts_once_and_preserves_bytes() {
+    let tmp = fixture("numbered-growth-tail-only");
+    let root = tmp.path().join("data");
+    for (name, bytes) in [
+        ("资料.7z.1000", b"volume 1000".as_slice()),
+        ("资料.7z.1001", b"volume 1001".as_slice()),
+        ("资料.7z.01000", b"noncanonical".as_slice()),
+        ("资料.iso.1000", b"outside whitelist".as_slice()),
+        ("资料.7z.1000.bak", b"backup".as_slice()),
+    ] {
+        write_with_mtime(&root.join(name), bytes, 100);
+    }
+    let cfg = Config::default();
+    assert_eq!(engine::count_archives(&root, &cfg).unwrap(), 1);
+    let result = engine::extract_run_at(
+        &root,
+        cfg,
+        Context::default(),
+        &state_of(&tmp),
+        Some(&fake_engine(tmp.path())),
+    )
+    .unwrap();
+    assert_eq!(result.summary.archives_failed, 1);
+    assert_eq!(result.summary.archives_ok, 0);
+    assert_eq!(result.summary.deleted, 0);
+    for (name, bytes) in [("资料.7z.1000", b"volume 1000"), ("资料.7z.1001", b"volume 1001")] {
+        assert_eq!(fs::read(root.join("解压失败").join(name)).unwrap(), bytes);
+        assert!(!root.join(name).exists());
+    }
+    for (name, bytes) in [
+        ("资料.7z.01000", b"noncanonical".as_slice()),
+        ("资料.iso.1000", b"outside whitelist".as_slice()),
+        ("资料.7z.1000.bak", b"backup".as_slice()),
+    ] {
+        assert_eq!(fs::read(root.join(name)).unwrap(), bytes);
+    }
+    let db = jchtools::db::Database::open(&result.directory).unwrap();
+    assert!(event_lines(&db, 100).iter().any(|line| line.contains("缺起始卷")));
+}
+
 
 // 覆盖 X-06, X-10（回归：part rar 族隔离示例 data (1).part01.rar / data (1).part02.rar，
 // `.partN.rar` 整体作为不可拆分后缀，序号插在主干之后）

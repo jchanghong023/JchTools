@@ -186,14 +186,14 @@ fn successful_cleanup_preserves_unused_volume_named_siblings() {
     assert_eq!(result.summary.deleted, 1);
 }
 
-// 覆盖 X-05/X-09/X-10：非三位数字后缀旁观项不动；精确卷族断号整组失败。
+// 覆盖 X-05/X-09/X-10：非规范补零后缀旁观项不动；精确卷族断号整组失败。
 #[test]
 #[ignore = "Requires explicitly provided real 7-Zip engine"]
 fn successful_cleanup_preserves_unused_volume_tail_after_gap() {
     let f = ArchiveFixture::new();
     let count = f.split_set(&f.root.join("part.zip"));
-    fs::write(f.root.join("part.zip.1000"), b"unrelated tail").unwrap();
-    fs::create_dir(f.root.join("part.zip.1001")).unwrap();
+    fs::write(f.root.join("part.zip.01000"), b"unrelated tail").unwrap();
+    fs::create_dir(f.root.join("part.zip.01001")).unwrap();
     let result = f.run(config());
     assert_eq!(result.summary.archives_ok, 1);
     assert_eq!(result.summary.deleted, u64::try_from(count).unwrap());
@@ -201,10 +201,10 @@ fn successful_cleanup_preserves_unused_volume_tail_after_gap() {
         assert!(!f.root.join(format!("part.zip.{index:03}")).exists());
     }
     assert_eq!(
-        fs::read(f.root.join("part.zip.1000")).unwrap(),
+        fs::read(f.root.join("part.zip.01000")).unwrap(),
         b"unrelated tail"
     );
-    assert!(f.root.join("part.zip.1001").is_dir());
+    assert!(f.root.join("part.zip.01001").is_dir());
     for index in 0..6 {
         assert_eq!(
             fs::read(f.root.join(format!("f{index}.txt"))).unwrap(),
@@ -227,6 +227,73 @@ fn successful_cleanup_preserves_unused_volume_tail_after_gap() {
         assert!(!f.root.join(format!("gap.zip.{index:03}")).exists());
     }
 }
+// 覆盖 X-02/X-05/X-06/X-09/X-10/S-01：真实 7-Zip 的 .999 → .1000 边界，
+// 完整包验证成品并删全部源卷，损坏/断号包整组保留且隔离不覆盖。
+#[test]
+#[ignore = "Requires explicitly provided real 7-Zip engine"]
+fn numbered_volume_growth_real_engine_success_and_failure() {
+    for scenario in ["complete", "corrupt", "gap"] {
+        let f = ArchiveFixture::new();
+        let payload: Vec<u8> = (0..1_024_000)
+            .map(|index| u8::try_from(index % 251).unwrap())
+            .collect();
+        fs::write(f.input.join("payload.txt"), &payload).unwrap();
+        f.pack(&f.root.join("资料.7z"), &["-t7z", "-mx0", "-v1k"], &["payload.txt"]);
+        let count = fs::read_dir(&f.root).unwrap().count();
+        assert_eq!(count, 1001, "夹具必须跨过 .999/.1000，且有完整末卷");
+        if scenario == "corrupt" {
+            fs::write(f.root.join("资料.7z.1001"), b"corrupt final volume").unwrap();
+        } else if scenario == "gap" {
+            fs::remove_file(f.root.join("资料.7z.1000")).unwrap();
+        }
+        let source: Vec<_> = (1..=count)
+            .filter(|index| scenario != "gap" || *index != 1000)
+            .map(|index| {
+                let name = format!("资料.7z.{index:03}");
+                let bytes = fs::read(f.root.join(&name)).unwrap();
+                (name, bytes)
+            })
+            .collect();
+        fs::write(f.root.join("资料.7z.01000"), b"noncanonical padding").unwrap();
+        fs::write(f.root.join("资料.7z.1000.bak"), b"backup").unwrap();
+        if scenario != "complete" {
+            fs::create_dir(f.root.join("解压失败")).unwrap();
+            fs::write(f.root.join("解压失败/资料.7z.1001"), b"earlier failure").unwrap();
+        }
+        let result = f.run(config());
+        if scenario == "complete" {
+            assert_eq!(result.summary.archives_ok, 1);
+            assert_eq!(result.summary.archives_failed, 0);
+            assert_eq!(result.summary.errors, 0);
+            assert_eq!(result.summary.deleted, 1001);
+            assert_eq!(fs::read(f.root.join("payload.txt")).unwrap(), payload);
+            assert!(!f.root.join("解压失败").exists());
+        } else {
+            assert_eq!(result.summary.archives_ok, 0, "{scenario}");
+            assert_eq!(result.summary.archives_failed, 1, "{scenario}");
+            assert_eq!(result.summary.deleted, 0, "{scenario}");
+            assert!(!f.root.join("payload.txt").exists(), "失败不得合入成品");
+            assert_eq!(
+                fs::read(f.root.join("解压失败/资料.7z.1001")).unwrap(),
+                b"earlier failure"
+            );
+            for (name, bytes) in &source {
+                let target = name.replacen("资料.", "资料 (1).", 1);
+                assert_eq!(
+                    fs::read(f.root.join("解压失败").join(target)).unwrap(),
+                    *bytes,
+                    "失败卷须完整保留：{name}"
+                );
+            }
+        }
+        for (name, _) in &source {
+            assert!(!f.root.join(name).exists(), "源卷不得漏处理：{name}");
+        }
+        assert_eq!(fs::read(f.root.join("资料.7z.01000")).unwrap(), b"noncanonical padding");
+        assert_eq!(fs::read(f.root.join("资料.7z.1000.bak")).unwrap(), b"backup");
+    }
+}
+
 
 // 覆盖 X-01, X-09：白名单之外的容器即使能被引擎打开也完全不碰（真实引擎）。
 #[test]

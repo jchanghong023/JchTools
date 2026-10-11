@@ -539,22 +539,9 @@ pub fn category_for(name_lower: &str) -> &'static str {
     if COMPOUND.iter().any(|suffix| name_lower.ends_with(suffix)) {
         return "压缩包";
     }
-    // X-10 数字尾卷：白名单扩展名 + 恰好三位 .NNN。
-    if let Some(dot) = name_lower.rfind('.') {
-        if let Some(prev) = name_lower[..dot].rfind('.') {
-            let tail = &name_lower[dot + 1..];
-            let inner = &name_lower[prev + 1..dot];
-            let numbered = tail.len() == 3 && tail.bytes().all(|b| b.is_ascii_digit());
-            if numbered
-                && [
-                    "7z", "zip", "rar", "tar", "gz", "bz2", "xz", "zst", "lzma", "z", "tgz",
-                    "tbz2", "txz", "tzst",
-                ]
-                .contains(&inner)
-            {
-                return "压缩包";
-            }
-        }
+    // X-10 数字尾卷：白名单扩展名 + 规范编号（最少三位补零，`.999` 后自然增长）。
+    if numbered_volume_tail(name_lower).is_some() {
+        return "压缩包";
     }
     if name_lower.ends_with(".rar") {
         return "压缩包";
@@ -665,7 +652,7 @@ fn has_ext(name: &str, ext: &str) -> bool {
 /// `.iso`/`.wim`/`.esd` 是系统镜像，`.msi`/`.msix`/`.appx` 是安装包，`.jar`/`.apk`/
 /// `.whl`/`.nupkg` 是程序包，`.docx`/`.xlsx`/`.epub`/`.odt` 是文档容器，`.exe`/`.com`
 /// 可能是自解压包：它们即使能被 7-Zip 打开，也一律不自动解压（只看扩展名，不猜内容）。
-/// 分卷只认可独立解开的第一卷：数字尾卷族认白名单后缀 + 恰好三位 `.NNN` 的入口卷
+/// 分卷只认可独立解开的第一卷：数字尾卷族认白名单后缀 + 规范编号（最少三位）的入口卷
 /// （`.001`；`.000` 是可识别的非法起始编号，入队后整组失败隔离）、`.partN.rar` 认
 /// part1；其余卷（`.z01`/`.r00`/`.002`）由删除与隔离的卷集合逻辑成组处理，不单独入队。
 /// `.partN.rar` 分卷正则：[`archive_name`] 与 [`multipart_name`] 共用同一实例，
@@ -688,8 +675,9 @@ pub fn archive_name(name: &str) -> bool {
         }
         return true;
     }
-    // X-10 数字尾卷族入口：主包完整名具有白名单任一后缀（含复合扩展名），再带恰好
-    // 三位 `.NNN`。合法起始编号是 `.001`；末尾 `.000` 是该族的非法起始编号，同样按族
+    // X-10 数字尾卷族入口：主包完整名具有白名单任一后缀（含复合扩展名），再带规范
+    // 编号（最少三位补零，`.999` 后自然增长）。合法起始编号是 `.001`；末尾 `.000`
+    // 是该族的非法起始编号，同样按族
     // 识别入队——捆绑引擎打不开错误起始编号的分卷集，解压失败后按 X-06 把整组卷集
     // 移入「解压失败」，不作为普通独立包处理。`.002` 起的后续卷不是入口，由 archive.rs
     // 的卷集合逻辑成组删除/隔离，不单独入队（一组仅入队、计数、判定一次）。
@@ -730,13 +718,13 @@ const ARCHIVE_SUFFIXES: [&str; 14] = [
     ".zip", ".7z", ".rar", ".tar", ".gz", ".bz2", ".xz", ".zst", ".lzma", ".z", ".tgz", ".tbz2",
     ".txz", ".tzst",
 ];
-/// X-10 数字尾卷族：名称（小写）以恰好三位 ASCII 十进制数字 `.NNN` 结尾，且去掉
-/// `.NNN` 后的剩余部分以 X-01 白名单任一后缀结尾（`.tar.gz` 天然被 `.gz` 覆盖）时
-/// 返回 (剩余部分, 三位编号)，否则 None。`.iso.001`、`.docx.001`、`data.001` 这类
+/// X-10 数字尾卷族：名称（小写）以至少三位 ASCII 十进制数字结尾，超过三位无前导零，
+/// 且去掉数字尾卷后的剩余部分以 X-01 白名单任一后缀结尾（`.tar.gz` 天然被 `.gz` 覆盖）时
+/// 返回 (剩余部分, 完整编号)，否则 None。`.iso.001`、`.docx.001`、`data.001` 这类
 /// 白名单外或无格式的编号文件不构成该族（X-09 完全不碰）。
 fn numbered_volume_tail(name_lower: &str) -> Option<(&str, &str)> {
     let (rest, digits) = name_lower.rsplit_once('.')?;
-    if digits.len() != 3 || !digits.bytes().all(|b| b.is_ascii_digit()) {
+    if !fsutil::is_numbered_volume_digits(digits) {
         return None;
     }
     ARCHIVE_SUFFIXES
@@ -894,7 +882,7 @@ pub fn multipart_name(name: &str) -> bool {
     if re.is_match(&n) {
         return true;
     }
-    // 数字尾卷族入口与 archive_name 同口径（X-10）：恰好三位 .NNN + 白名单主干，
+    // 数字尾卷族入口与 archive_name 同口径（X-10）：规范编号（最少三位）+ 白名单主干，
     // .001 为合法入口、.000 为可识别的非法起始编号；.002 起的后续卷与白名单外
     // 编号（data.001 等）都不是组入口。
     matches!(numbered_volume_tail(&n), Some((_, "000" | "001")))
@@ -1725,7 +1713,7 @@ mod tests {
         }
     }
 
-    // 覆盖 X-10, X-01, X-09, H-04：数字尾卷族 = 白名单后缀（含复合）+ 恰好三位 .NNN；
+    // 覆盖 X-10, X-01, X-09, H-04：数字尾卷族 = 白名单后缀（含复合）+ 规范编号（最少三位）；
     // 族入口是 .001（.000 为可识别的非法起始编号）；白名单外与孤立编号一律不碰。
     #[test]
     fn numbered_volume_family_recognition_matches_x10() {
@@ -1762,7 +1750,7 @@ mod tests {
                 "{name} 不在白名单数字尾卷族内，不得识别"
             );
         }
-        // 编号位数不是恰好三位、或编号不是族入口（后续卷由卷集合成组处理）时不是入口。
+        // 编号不足三位、多余前导零，或编号不是族入口（后续卷成组处理）时不是入口。
         for name in ["x.7z.1", "x.7z.01", "x.7z.0001", "x.7z.002", "x.tar.gz.002"] {
             assert!(
                 !archive_name(name),
@@ -1863,6 +1851,107 @@ mod tests {
         // 入口自身与白名单外孤立编号不归组（X-09）。
         assert!(numbered_volume_missing_entry_groups(&names(&["c.zip.001"])).is_empty());
         assert!(numbered_volume_missing_entry_groups(&names(&["data.002"])).is_empty());
+    }
+
+    #[test]
+    fn numbered_volume_growth_missing_entry_groups_include_natural_width_tails() {
+        let names = |items: &[&str]| -> Vec<String> {
+            items.iter().map(std::string::ToString::to_string).collect()
+        };
+        assert_eq!(
+            numbered_volume_missing_entry_groups(&names(&["b.7z.1000", "b.7z.1001"])),
+            vec!["b.7z.1000".to_string()]
+        );
+        assert_eq!(
+            numbered_volume_missing_entry_groups(&names(&[
+                "b.7z.999",
+                "b.7z.1000",
+                "b.7z.1001",
+                "c.tar.gz.1000",
+                "c.tar.gz.1001",
+                "d.zip.18446744073709551616",
+            ])),
+            vec![
+                "b.7z.999".to_string(),
+                "c.tar.gz.1000".to_string(),
+                "d.zip.18446744073709551616".to_string(),
+            ]
+        );
+        for entry in ["b.7z.001", "b.7z.000"] {
+            assert!(numbered_volume_missing_entry_groups(&names(&[
+                "b.7z.1000",
+                entry,
+                "b.7z.1001",
+            ]))
+            .is_empty());
+        }
+        for name in [
+            "data.1000",
+            "x.iso.1000",
+            "x.docx.1000",
+            "x.7z.0001",
+            "x.7z.01000",
+            "x.7z.1",
+            "x.7z.01",
+            "x.7z.１０００",
+            "x.7z.١٠٠٠",
+            "x.7z.1000.bak",
+        ] {
+            assert!(
+                numbered_volume_missing_entry_groups(&names(&[name])).is_empty(),
+                "{name} 不属数字尾卷族，不得归组"
+            );
+        }
+    }
+
+    #[test]
+    fn numbered_volume_growth_classifies_canonical_whitelisted_tails() {
+        for name in [
+            "x.7z.999",
+            "x.7z.1000",
+            "x.zip.1001",
+            "x.tar.gz.1000",
+            "x.tar.bz2.1001",
+            "x.tzst.18446744073709551616",
+        ] {
+            assert_eq!(category_for(name), "压缩包", "{name}");
+            assert!(!archive_name(name), "{name} 不是独立入口");
+            assert!(!multipart_name(name), "{name} 不是分卷入口");
+            assert!(archive_entry_key(name).is_none(), "{name} 不得独立计包");
+        }
+        for name in [
+            "x.7z.0001",
+            "x.7z.01000",
+            "x.7z.1",
+            "x.7z.01",
+            "x.7z.１０００",
+            "x.7z.١٠٠٠",
+            "x.7z.1000.bak",
+            "x.iso.1000",
+            "data.1000",
+        ] {
+            assert_eq!(category_for(name), "其他", "{name}");
+        }
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn numbered_volume_growth_groups_keep_windows_ordinal_keys() {
+        assert_eq!(
+            numbered_volume_missing_entry_groups(&[
+                "\u{1f80}.7z.1000".into(),
+                "\u{1f88}.7z.1001".into(),
+            ]),
+            vec!["\u{1f80}.7z.1000".to_string()]
+        );
+        assert_eq!(
+            numbered_volume_missing_entry_groups(&[
+                "\u{0130}.7z.1000".into(),
+                "i\u{0307}.7z.1001".into(),
+            ])
+            .len(),
+            2
+        );
     }
 
     // 覆盖 C-20（长度受限摘要候选：≤40 退让、扩展名不截断、超限返回 None）

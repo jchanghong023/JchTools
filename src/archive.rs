@@ -151,7 +151,8 @@ fn volume_family_key(name: &str) -> Option<String> {
         return rules::archive_entry_key(&format!("{stem}.part1.rar"));
     }
     if numbered_entry(&lower) {
-        return rules::archive_entry_key(&format!("{}.001", &name[..name.len() - 4]));
+        let (stem, _) = name.rsplit_once('.')?;
+        return rules::archive_entry_key(&format!("{stem}.001"));
     }
     let tail = rules::old_style_tail(&lower)?;
     rules::archive_entry_key(&format!("{}.{}", tail.stem, tail.main_ext))
@@ -1496,11 +1497,7 @@ fn composite_stream(archive: &Path) -> bool {
         return false;
     };
     let name = match name.rsplit_once('.') {
-        Some((rest, digits))
-            if digits.len() == 3 && digits.bytes().all(|digit| digit.is_ascii_digit()) =>
-        {
-            rest
-        }
+        Some((rest, digits)) if fsutil::is_numbered_volume_digits(digits) => rest,
         _ => name,
     };
     [
@@ -1538,7 +1535,7 @@ fn potential_archive_member(name: &str) -> bool {
     if suffix.eq_ignore_ascii_case("rar") {
         return rar_part_stem(&name.to_ascii_lowercase()).is_some();
     }
-    if suffix.len() == 3 && suffix.bytes().all(|byte| byte.is_ascii_digit()) {
+    if fsutil::is_numbered_volume_digits(suffix) {
         return rules::archive_name(base);
     }
     if suffix.len() == 3
@@ -1582,8 +1579,9 @@ fn enqueue_nested_groups(
             if missing_numbered_entry(path).is_none() {
                 continue;
             }
-            let key = rules::archive_entry_key(&format!("{}.001", &name[..name.len() - 4]))
-                .context("缺入口族无法归组")?;
+            let (stem, _) = name.rsplit_once('.').context("缺入口候选形态无效")?;
+            let key =
+                rules::archive_entry_key(&format!("{stem}.001")).context("缺入口族无法归组")?;
             if seen.insert(key) {
                 enqueue(job, path, depth)?;
             }
@@ -1831,14 +1829,13 @@ impl VolumeScheme {
         );
         ensure!(
             match self {
-                Self::Numbered => count <= 999,
                 Self::OldRar => count <= 101,
                 Self::SplitZip => count <= 100,
                 _ => true,
             },
             "实际卷数超出 X-10 精确命名族，保留源包"
         );
-        let base = &name[..name.len() - 4];
+        let (base, _) = name.rsplit_once('.').context("无效分卷名称")?;
         let mut rar_number = if self == Self::RarParts {
             base.as_bytes()
                 .iter()
@@ -1883,7 +1880,7 @@ impl VolumeScheme {
                     }
                 }
                 Self::Numbered => format!("{base}.{:03}", index + 1),
-                Self::SplitZip => format!("{}.z{index:02}", &name[..name.len() - 4]),
+                Self::SplitZip => format!("{base}.z{index:02}"),
                 Self::Single => unreachable!(),
             };
             let path = archive.with_file_name(next);
@@ -1899,13 +1896,11 @@ impl VolumeScheme {
         Ok(paths)
     }
 }
-/// 名称是否以恰好三位 ASCII 数字 `.NNN` 结尾（X-10 数字尾卷族的入口形态）。
-/// 主干 = 去掉 `.NNN`；匹配不区分大小写由调用方的小写化保证，`.NNN` 本身是数字。
+/// 名称是否以规范 ASCII 数字分卷后缀结尾（最少三位补零，超过三位自然增长）。
+/// 主干按末点切分；`.000` 保留在族中，由预检整组拒绝非法起始卷。
 fn numbered_entry(name: &str) -> bool {
-    let bytes = name.as_bytes();
-    bytes.len() > 4
-        && bytes[bytes.len() - 4] == b'.'
-        && bytes[bytes.len() - 3..].iter().all(u8::is_ascii_digit)
+    name.rsplit_once('.')
+        .is_some_and(|(stem, digits)| !stem.is_empty() && fsutil::is_numbered_volume_digits(digits))
 }
 /// 候选组供可逆隔离使用；成功删除前必须转换成经引擎确认的实际卷集合。
 #[derive(Debug)]
@@ -1959,7 +1954,7 @@ fn x10_volume_precheck(archive_rel: &str, archive: &Path, named: &VolumeSet) -> 
             );
         }
     }
-    // X-10：数字尾卷族缺入口——.NNN（N≥2）且同目录没有 .001 入口。
+    // X-10：数字尾卷族缺入口——规范编号 ≥ 2 且同目录没有 .001 入口。
     // .000 已在上面作为非法起始卷单独拒绝，不得用它替代 .001。
     if let Some(stem) = missing_numbered_entry(archive) {
         anyhow::bail!("数字尾卷族缺起始卷：{archive_rel}（未找到 {stem}.001 入口卷）");
@@ -1973,7 +1968,16 @@ fn x10_volume_precheck(archive_rel: &str, archive: &Path, named: &VolumeSet) -> 
                 .context("分卷名称无法无损表示")?
                 .to_ascii_lowercase();
             let number = match named.scheme {
-                VolumeScheme::Numbered => name[name.len() - 3..].parse::<u64>()?,
+                VolumeScheme::Numbered => name
+                    .rsplit_once('.')
+                    .context("无效数字分卷名")?
+                    .1
+                    .parse::<u64>()
+                    .map_err(|_| {
+                        anyhow::anyhow!(
+                            "X-10 分卷不全：{archive_rel}（编号超出本组可能的连续范围）"
+                        )
+                    })?,
                 VolumeScheme::RarParts => part_digits(&name)
                     .context("无效 part 分卷名")?
                     .parse::<u64>()
@@ -2070,7 +2074,7 @@ fn sibling_part_number_one(archive: &Path, stem: &str) -> bool {
     }
     false
 }
-/// X-10：该文件是数字尾卷族的 `.NNN`（编号 ≥ 2）、且同目录没有 `.001` 入口
+/// X-10：该文件是数字尾卷族的规范编号（≥ 2）、且同目录没有 `.001` 入口
 ///（也没有作为可识别非法起始入队的 `.000`）。返回主干名供错误指认。
 fn missing_numbered_entry(archive: &Path) -> Option<String> {
     let name = archive.file_name().and_then(|s| s.to_str())?;
@@ -2078,12 +2082,9 @@ fn missing_numbered_entry(archive: &Path) -> Option<String> {
     if !numbered_entry(&lower) {
         return None;
     }
-    let stem = &lower[..lower.len() - 4];
-    let digits = &lower[lower.len() - 3..];
-    let Ok(number) = digits.parse::<u64>() else {
-        return None;
-    };
-    if number < 2 {
+    let (stem, digits) = lower.rsplit_once('.')?;
+    // 已确认规范语法；除 .000/.001 外均是后续卷，不受机器整数宽度限制。
+    if matches!(digits, "000" | "001") {
         return None;
     }
     if archive.with_file_name(format!("{stem}.001")).exists()
@@ -2112,10 +2113,10 @@ fn volume_set(archive: &Path) -> Result<VolumeSet> {
     let (stem, scheme) = if let Some(stem) = rar_part_stem(&name) {
         (stem.to_string(), VolumeScheme::RarParts)
     } else if numbered_entry(&name) {
-        // X-10：主包完整名带白名单扩展名（含复合扩展名）再带恰好三位 .NNN。
-        // 入口侧（rules）只放行 `<白名单后缀>.NNN`；这里按「.NNN 结尾」认族，
-        // 主干即去掉 `.NNN`（如 `x.tar.gz.001` 的主干是 `x.tar.gz`）。
-        (name[..name.len() - 4].to_string(), VolumeScheme::Numbered)
+        // X-10：主包完整名带白名单扩展名（含复合扩展名），再带最少三位数字后缀。
+        // 入口侧（rules）只放行白名单主包名；这里复用规范编号语法，按末点去掉编号。
+        let (stem, _) = name.rsplit_once('.').context("无效数字分卷名")?;
+        (stem.to_string(), VolumeScheme::Numbered)
     } else if let Some(tail) = rules::old_style_tail(&name) {
         // X-10：老式族尾卷按其族方案成组——主包缺位时（尾卷组已按缺主包入队），
         // 失败处置与隔离仍能按整组移动；主包在场时尾卷不会单独走到这里（不单独入队）。
@@ -2144,9 +2145,7 @@ fn volume_set(archive: &Path) -> Result<VolumeSet> {
                 rar_part_stem(candidate).is_some_and(|stem| fsutil::fold_rel(stem) == stem_key)
             }
             VolumeScheme::Numbered => candidate.rsplit_once('.').is_some_and(|(stem, digits)| {
-                digits.len() == 3
-                    && digits.bytes().all(|digit| digit.is_ascii_digit())
-                    && fsutil::fold_rel(stem) == stem_key
+                fsutil::is_numbered_volume_digits(digits) && fsutil::fold_rel(stem) == stem_key
             }),
             VolumeScheme::OldRar | VolumeScheme::SplitZip => rules::old_style_tail(candidate)
                 .is_some_and(|tail| {
@@ -3115,7 +3114,197 @@ mod tests {
         assert_eq!(job.summary.deleted, 0, "取消后不得虚计删除");
     }
 
-    // 覆盖 X-10（回归：数字尾卷族按「名称以恰好三位 .NNN 结尾」识别入口，
+    #[test]
+    fn numbered_volume_growth_actual_paths_and_precheck_cross_999() {
+        let temp = tempfile::tempdir().unwrap();
+        for number in 1..=1001 {
+            fs::write(
+                temp.path().join(format!("pack.tar.gz.{number:03}")),
+                b"volume",
+            )
+            .unwrap();
+        }
+        let archive = temp.path().join("pack.tar.gz.001");
+        let named = volume_set(&archive).unwrap();
+        assert_eq!(named.scheme, VolumeScheme::Numbered);
+        assert_eq!(named.paths.len(), 1001);
+        x10_volume_precheck("pack.tar.gz.001", &archive, &named).unwrap();
+        let info = ArchiveVolumes {
+            kind: "split".to_string(),
+            count: 1001,
+            new_rar_names: false,
+        };
+        let actual = named.scheme.actual_paths(&archive, &info).unwrap();
+        assert_eq!(actual.len(), 1001);
+        assert_eq!(actual[998], temp.path().join("pack.tar.gz.999"));
+        assert_eq!(actual[999], temp.path().join("pack.tar.gz.1000"));
+        assert_eq!(actual[1000], temp.path().join("pack.tar.gz.1001"));
+    }
+
+    #[test]
+    fn numbered_volume_growth_exact_family_boundary() {
+        let temp = tempfile::tempdir().unwrap();
+        let included = ["pack.7z.001", "pack.7z.999", "pack.7z.1000"];
+        let excluded = [
+            "pack.7z.0001",
+            "pack.7z.01000",
+            "pack.7z.99",
+            "pack.7z.１０００",
+            "pack.7z.1000.bak",
+            "pack.7z",
+        ];
+        for name in included.into_iter().chain(excluded) {
+            fs::write(temp.path().join(name), b"volume").unwrap();
+        }
+        for entry in included {
+            let named = volume_set(&temp.path().join(entry)).unwrap();
+            assert_eq!(named.scheme, VolumeScheme::Numbered);
+            assert_eq!(named.paths.len(), included.len());
+            for member in included {
+                assert!(named.paths.contains(&temp.path().join(member)));
+            }
+            for member in excluded {
+                assert!(!named.paths.contains(&temp.path().join(member)));
+            }
+        }
+        for name in excluded {
+            assert!(!numbered_entry(name), "非规范数字后缀不属于族：{name}");
+        }
+    }
+
+    #[test]
+    fn numbered_volume_growth_gap_and_missing_entry_quarantine_whole_family() {
+        for (entry, members, expected_reason) in [
+            (
+                "pack.tar.gz.001",
+                vec!["pack.tar.gz.001", "pack.tar.gz.999", "pack.tar.gz.1001"],
+                "分卷不全",
+            ),
+            (
+                "pack.tar.gz.1000",
+                vec!["pack.tar.gz.999", "pack.tar.gz.1000"],
+                "缺起始卷",
+            ),
+            (
+                "pack.tar.gz.1000",
+                vec!["pack.tar.gz.000", "pack.tar.gz.1000"],
+                "非法起始卷",
+            ),
+        ] {
+            let temp = tempfile::tempdir().unwrap();
+            let root = temp.path().join("data");
+            let container = root.join(QUARANTINE_DIR_NAME);
+            fs::create_dir_all(&container).unwrap();
+            for name in &members {
+                fs::write(root.join(name), name.as_bytes()).unwrap();
+            }
+            let spectator = root.join("pack.tar.gz.01000");
+            fs::write(&spectator, b"not a volume").unwrap();
+            let occupied = container.join(entry);
+            fs::write(&occupied, b"existing archive").unwrap();
+            let archive = root.join(entry);
+            let named = volume_set(&archive).unwrap();
+            assert_eq!(named.paths.len(), members.len());
+            let error = x10_volume_precheck(entry, &archive, &named).unwrap_err();
+            assert!(
+                format!("{error:#}").contains(expected_reason),
+                "应报告 {expected_reason}：{error:#}"
+            );
+            let mut job = review_job(&root, &temp.path().join("state"), 0);
+            quarantine(&mut job, entry, &error.to_string()).unwrap();
+            assert_eq!(job.summary.archives_quarantined, members.len() as u64);
+            for name in members {
+                let suffix = name.strip_prefix("pack").unwrap();
+                assert!(!root.join(name).exists());
+                assert_eq!(
+                    fs::read(container.join(format!("pack (1){suffix}"))).unwrap(),
+                    name.as_bytes()
+                );
+            }
+            assert_eq!(fs::read(occupied).unwrap(), b"existing archive");
+            assert_eq!(fs::read(spectator).unwrap(), b"not a volume");
+        }
+    }
+
+    #[test]
+    fn numbered_volume_growth_nested_rename_preserves_all_suffixes() {
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path().join("data");
+        let content = temp.path().join("content");
+        fs::create_dir(&root).unwrap();
+        fs::create_dir(&content).unwrap();
+        let members = ["pack.tar.gz.001", "pack.tar.gz.999", "pack.tar.gz.1000"];
+        for name in members {
+            fs::write(content.join(name), name.as_bytes()).unwrap();
+        }
+        fs::write(root.join("pack.tar.gz.1000"), b"old tail").unwrap();
+        let job = review_job(&root, &temp.path().join("state"), 0);
+        let targets = plan_volume_renames(
+            &job,
+            &content,
+            &root,
+            &HashMap::new(),
+            &HashMap::new(),
+            &rules::build_exclusions("").unwrap(),
+            &mut GitBoundaries::default(),
+        )
+        .unwrap();
+        assert_eq!(targets.len(), members.len());
+        for name in members {
+            let suffix = name.strip_prefix("pack").unwrap();
+            let target = targets.get(name).unwrap();
+            assert_eq!(*target, root.join(format!("pack (1){suffix}")));
+            merge_extracted(&root, &content.join(name), target).unwrap();
+            assert_eq!(fs::read(target).unwrap(), name.as_bytes());
+        }
+        assert_eq!(fs::read(root.join("pack.tar.gz.1000")).unwrap(), b"old tail");
+        assert!(!root.join("pack.tar.gz.001").exists());
+        assert!(!root.join("pack.tar.gz.999").exists());
+    }
+
+    #[test]
+    fn numbered_volume_growth_composite_stream_and_nested_candidates() {
+        for suffix in [".tgz", ".tar.gz", ".tar.bz2", ".tar.xz", ".tar.zst"] {
+            for digits in ["001", "999", "1000", "10000"] {
+                let name = format!("pack{suffix}.{digits}");
+                assert!(composite_stream(Path::new(&name)), "{name}");
+                assert!(potential_archive_member(&name), "{name}");
+            }
+            for digits in ["0001", "01000", "99", "１０００", "1000.bak"] {
+                let name = format!("pack{suffix}.{digits}");
+                assert!(!composite_stream(Path::new(&name)), "{name}");
+                assert!(!potential_archive_member(&name), "{name}");
+            }
+        }
+    }
+
+    #[test]
+    fn numbered_volume_growth_nested_missing_entry_is_enqueued_once() {
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path().join("data");
+        let nested = root.join("nested");
+        fs::create_dir_all(&nested).unwrap();
+        let mut members = BTreeMap::new();
+        for name in ["pack.tar.gz.1000", "pack.tar.gz.1001", "pack.tar.gz.01000"] {
+            let path = nested.join(name);
+            fs::write(&path, b"volume").unwrap();
+            members.insert(name.to_string(), path);
+        }
+        let job = review_job(&root, &temp.path().join("state"), 0);
+        enqueue_nested_groups(&job, BTreeMap::from([(nested, members)]), 3).unwrap();
+        let queued: (i64, String, u32) = job
+            .db
+            .conn
+            .query_row(
+                "SELECT COUNT(*),rel,depth FROM archives WHERE state='pending'",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+            )
+            .unwrap();
+        assert_eq!(queued, (1, "nested/pack.tar.gz.1000".to_string(), 3));
+    }
+
+    // 覆盖 X-10（回归：数字尾卷族按最少三位补零、超过三位自然增长的编号识别，
     // 复合扩展名（如 .tar.gz.001）的卷集同样成组，不再只认 .7z.001/.zip.001）
     #[test]
     fn volume_set_groups_compound_numbered_volumes() {
@@ -3275,7 +3464,7 @@ mod tests {
         for (entry, included, excluded) in [
             ("a.zip", "a.z01", "a.z001"),
             ("b.rar", "b.r00", "b.r000"),
-            ("c.7z.001", "c.7z.002", "c.7z.1000"),
+            ("c.7z.001", "c.7z.002", "c.7z.01000"),
         ] {
             for name in [entry, included, excluded] {
                 fs::write(temp.path().join(name), b"volume").unwrap();

@@ -768,7 +768,15 @@ fn truncate_utf16(text: &str, max_units: usize) -> String {
     }
     out
 }
-/// X-10：数字尾卷 `.NNN` 前只并入最后一个白名单扩展名；
+/// X-10 数字尾卷编号：至少三位 ASCII 数字；超过三位时不得有多余前导零。
+/// `.000` 保留为可识别的非法起始编号，合法起始与入口由调用方判定。
+pub(crate) fn is_numbered_volume_digits(digits: &str) -> bool {
+    digits.len() >= 3
+        && digits.bytes().all(|byte| byte.is_ascii_digit())
+        && (digits.len() == 3 || digits.as_bytes()[0] != b'0')
+}
+
+/// X-10：规范数字尾卷编号（最少三位补零，`.999` 后自然增长）前只并入最后一个白名单扩展名；
 /// `.tar.<流后缀>` 再按附录 B 整体并入一层。
 fn is_volume_suffix_component(component: &str) -> bool {
     [
@@ -804,7 +812,7 @@ fn is_part_rar_component(component: &str) -> bool {
 
 /// 分离文件名主体与完整扩展名；扩展名含前导点，直接借用原串。
 /// 不可拆分后缀（X-10 / 附录 B）：
-/// - 数字尾卷 `.NNN`（恰好三位 ASCII 数字）只并入前一白名单扩展名及允许的
+/// - 数字尾卷（最少三位 ASCII 数字，超过三位无前导零）只并入前一白名单扩展名及允许的
 ///   一层 `.tar.<流后缀>`：`x.tar.gz.001` → 主体 `x` + 扩展名 `.tar.gz.001`；
 ///   非白名单组件不并入（`foo.bar.001` 保持主体 `foo.bar`）。
 /// - part rar 的 `.partN.rar` 整体并入扩展名（`资料.part01.rar` → `资料`）。
@@ -814,9 +822,7 @@ pub fn split_compound_name(name: &str) -> (&str, &str) {
         return (name, "");
     };
     let (stem, extension) = name.split_at(split);
-    let numbered_tail =
-        extension.len() == 4 && extension.as_bytes()[1..].iter().all(u8::is_ascii_digit);
-    if numbered_tail {
+    if is_numbered_volume_digits(&extension[1..]) {
         if let Some(dot) = stem.rfind('.').filter(|&index| index > 0) {
             let component = &stem[dot + 1..];
             if is_volume_suffix_component(component) {
@@ -1000,6 +1006,52 @@ mod tests {
             target.file_name().and_then(|name| name.to_str()).unwrap(),
             "资料 (1).part01.rar"
         );
+    }
+
+    #[test]
+    fn numbered_volume_growth_split_preserves_complete_canonical_suffix() {
+        for (name, expected) in [
+            ("包.7z.999", ("包", ".7z.999")),
+            ("包.7z.1000", ("包", ".7z.1000")),
+            ("包.ZIP.1001", ("包", ".ZIP.1001")),
+            ("x.tar.gz.1000", ("x", ".tar.gz.1000")),
+            ("a.tar.tar.gz.1001", ("a.tar", ".tar.gz.1001")),
+            ("a.zip.7z.1000", ("a.zip", ".7z.1000")),
+            ("x.tbz2.18446744073709551616", ("x", ".tbz2.18446744073709551616")),
+        ] {
+            assert_eq!(split_compound_name(name), expected, "{name}");
+        }
+        for (name, expected) in [
+            ("包.7z.0001", ("包.7z", ".0001")),
+            ("包.7z.01000", ("包.7z", ".01000")),
+            ("包.7z.1", ("包.7z", ".1")),
+            ("包.7z.01", ("包.7z", ".01")),
+            ("包.7z.１０００", ("包.7z", ".１０００")),
+            ("包.7z.١٠٠٠", ("包.7z", ".١٠٠٠")),
+            ("包.7z.1000.bak", ("包.7z.1000", ".bak")),
+            ("foo.bar.1000", ("foo.bar", ".1000")),
+            ("x.iso.1000", ("x.iso", ".1000")),
+        ] {
+            assert_eq!(split_compound_name(name), expected, "{name}");
+        }
+    }
+
+    #[test]
+    fn numbered_volume_growth_unique_target_preserves_numbered_suffix() {
+        let temp = tempfile::tempdir().unwrap();
+        for (name, first, second) in [
+            ("资料.7z.1000", "资料 (1).7z.1000", "资料 (2).7z.1000"),
+            ("资料.tar.gz.1001", "资料 (1).tar.gz.1001", "资料 (2).tar.gz.1001"),
+            ("资料.7z.01000", "资料.7z (1).01000", "资料.7z (2).01000"),
+        ] {
+            let requested = temp.path().join(name);
+            fs::write(&requested, b"existing").unwrap();
+            let target = unique_target(temp.path(), &requested).unwrap();
+            assert_eq!(target.file_name().and_then(|name| name.to_str()).unwrap(), first);
+            fs::write(&target, b"collision").unwrap();
+            let target = unique_target(temp.path(), &requested).unwrap();
+            assert_eq!(target.file_name().and_then(|name| name.to_str()).unwrap(), second);
+        }
     }
 
     /// F28 夹具：写一个临时文件并返回路径。
