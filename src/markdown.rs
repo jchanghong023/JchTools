@@ -276,7 +276,7 @@ pub fn run(
             } else {
                 "extract_boundary"
             };
-            tracing::info!(
+            tracing::debug!(
                 event = "markdown_file_started",
                 media = item.is_media,
                 timeout_secs = options.timeout_secs,
@@ -337,7 +337,7 @@ pub fn run(
                     } else {
                         summary.success += 1;
                     }
-                    tracing::info!(
+                    tracing::debug!(
                         event = "markdown_file_completed",
                         partial,
                         elapsed_ms = crate::logging::elapsed_ms(file_started),
@@ -1206,7 +1206,7 @@ fn write_new_markdown_cancelable(
     let _entered = span.enter();
     let started = std::time::Instant::now();
     let mut stage = "output_directory";
-    tracing::info!(
+    tracing::debug!(
         event = "markdown_output_started",
         markdown_bytes = content.len(),
         media_count = media.len(),
@@ -1360,7 +1360,7 @@ fn write_new_markdown_cancelable(
         write_result
     })();
     if let Ok(()) = &result {
-        tracing::info!(
+        tracing::debug!(
             event = "markdown_output_completed",
             component = "markdown",
             markdown_bytes = content.len(),
@@ -1391,7 +1391,7 @@ fn convert_media(
     let _entered = span.enter();
     let started = std::time::Instant::now();
     let mut stage = "media_assets";
-    tracing::info!(event = "media_conversion_started", "媒体转换开始");
+    tracing::debug!(event = "media_conversion_started", "媒体转换开始");
     let result = (|| {
         crate::asset_util::ensure_not_cancelled(cancel)?;
         let component = markdown_assets::media_component_dir().map_err(|error| {
@@ -1417,7 +1417,7 @@ fn convert_media(
         Ok(markdown.to_owned())
     })();
     if let Ok(markdown) = &result {
-        tracing::info!(
+        tracing::debug!(
             event = "media_conversion_completed",
             markdown_bytes = markdown.len(),
             elapsed_ms = crate::logging::elapsed_ms(started),

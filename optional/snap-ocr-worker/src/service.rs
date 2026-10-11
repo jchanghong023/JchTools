@@ -219,7 +219,7 @@ impl Settings {
     }
     fn load(root: &Path) -> Self {
         let started = Instant::now();
-        tracing::info!(
+        tracing::debug!(
             component = "snap_ocr_service",
             event = "ocr_settings_load_started",
             "开始加载截图设置"
@@ -228,7 +228,7 @@ impl Settings {
         let raw = match fs::read(&path) {
             Ok(raw) => raw,
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
-                tracing::info!(
+                tracing::debug!(
                     component = "snap_ocr_service",
                     event = "ocr_settings_defaulted",
                     stage = "read",
@@ -289,7 +289,7 @@ impl Settings {
             );
             return Self::defaults(root, Some("保存的截图热键无效，原文件未覆盖"));
         }
-        tracing::info!(
+        tracing::debug!(
             component = "snap_ocr_service",
             event = "ocr_settings_load_completed",
             elapsed_ms = crate::logging::elapsed_ms(started),
@@ -577,7 +577,7 @@ fn warm_up_failure(kind: Option<&str>, message: &str) -> String {
 /// 状态进入 ready（O-13 预热行为；无文字图片是成功响应）。
 fn warm_up(client: &mut SharedXbergClient) -> Result<(), LoadFailure> {
     let started = Instant::now();
-    tracing::info!(event = "ocr_prewarm_started", "开始预热截图模型");
+    tracing::debug!(event = "ocr_prewarm_started", "开始预热截图模型");
     let outcome = warm_up_inner(client);
     if outcome.is_ok() {
         tracing::info!(
@@ -655,7 +655,7 @@ fn recognize(
     cancel: &AtomicBool,
 ) -> Result<Option<String>, OcrError> {
     let encode_started = Instant::now();
-    tracing::info!(event = "ocr_encode_started", "编码内存截图");
+    tracing::debug!(event = "ocr_encode_started", "编码内存截图");
     let png = image.png_bytes().map_err(|error| {
         tracing::warn!(
             event = "ocr_encode_failed",
@@ -665,7 +665,7 @@ fn recognize(
         );
         OcrError::Backend(error)
     })?;
-    tracing::info!(
+    tracing::debug!(
         event = "ocr_encode_completed",
         size_bytes = png.len(),
         elapsed_ms = crate::logging::elapsed_ms(encode_started),
@@ -772,7 +772,7 @@ fn worker(
                 let span = crate::logging::operation_span("snap_ocr", "load");
                 let _entered = span.enter();
                 let started = Instant::now();
-                tracing::info!(event = "ocr_load_started", "开始加载或复用截图模型");
+                tracing::debug!(event = "ocr_load_started", "开始加载或复用截图模型");
                 // 重试入口（O-13）与取消恢复共用。共享引擎为协作取消（XB-14）：
                 // 取消不再终止引擎、模型仍常驻，先探测 snapshot 状态；仍就绪则
                 // 免完整重预热直接复用（S8-02——旧实现无条件重载预热是直连子
@@ -784,7 +784,7 @@ fn worker(
                 });
                 match reload_plan(probe.as_ref()) {
                     ReloadPlan::Reuse => {
-                        tracing::info!(
+                        tracing::debug!(
                             event = "ocr_reload_selected",
                             result = "reuse",
                             "复用已就绪截图模型"
@@ -815,7 +815,7 @@ fn worker(
                         }
                     }
                     ReloadPlan::Full => {
-                        tracing::info!(
+                        tracing::debug!(
                             event = "ocr_reload_selected",
                             result = "full",
                             "完整加载并预热截图模型"
@@ -1311,7 +1311,7 @@ impl Service {
         let span = tracing::Span::current();
         std::thread::spawn(move || {
             let _entered = span.enter();
-            tracing::info!(
+            tracing::debug!(
                 event = "ocr_selection_cancel_retry_started",
                 "等待选区取消窗口就绪"
             );
@@ -1319,7 +1319,7 @@ impl Service {
                 std::thread::sleep(Duration::from_millis(10));
                 // 新任务会复位取消标志，旧取消重试不得关闭新任务的选区。
                 if !selection_cancel_is_current(&cancel, &generation_token, generation) {
-                    tracing::info!(
+                    tracing::debug!(
                         event = "ocr_selection_cancel_retry_completed",
                         result = "superseded",
                         "取消重试被新任务替代"
@@ -1327,7 +1327,7 @@ impl Service {
                     break;
                 }
                 if crate::capture_win::cancel_selection() {
-                    tracing::info!(
+                    tracing::debug!(
                         event = "ocr_selection_cancel_retry_completed",
                         result = "delivered",
                         "选区取消消息已投递"
@@ -1335,7 +1335,7 @@ impl Service {
                     break;
                 }
             }
-            tracing::info!(
+            tracing::debug!(
                 event = "ocr_selection_cancel_retry_stopped",
                 "选区取消等待线程结束"
             );
@@ -1416,7 +1416,7 @@ impl Service {
         let span = crate::logging::operation_span("ocr_service", "open_settings");
         let _entered = span.enter();
         let started = Instant::now();
-        tracing::info!(event = "ocr_settings_open_started", "请求打开截图设置");
+        tracing::debug!(event = "ocr_settings_open_started", "请求打开截图设置");
         if self.exit_pending.is_none()
             && self.settings.main_exe.as_ref().is_some_and(|p| p.is_file())
         {
@@ -1430,7 +1430,7 @@ impl Service {
             }
             crate::result_window::apply_settings_theme(window);
             if let Ok(()) = window.show() {
-                tracing::info!(
+                tracing::debug!(
                     event = "ocr_settings_open_completed",
                     reused = true,
                     elapsed_ms = crate::logging::elapsed_ms(started),
@@ -1511,7 +1511,7 @@ impl Service {
         self.refresh_settings();
         if let Some(window) = self.settings_window.as_ref() {
             if let Ok(()) = window.show() {
-                tracing::info!(
+                tracing::debug!(
                     event = "ocr_settings_open_completed",
                     reused = false,
                     elapsed_ms = crate::logging::elapsed_ms(started),
@@ -2025,7 +2025,7 @@ impl Service {
         let action = request.get("command").and_then(Value::as_str).unwrap_or("");
         let started = Instant::now();
         let command_kind = protocol::diagnostic_command(Some(action));
-        tracing::info!(
+        tracing::debug!(
             event = "ocr_control_handler_started",
             command = command_kind,
             "截图服务开始处理控制命令"
@@ -2079,7 +2079,7 @@ impl Service {
         self.refresh_settings();
         match outcome {
             Ok(()) => {
-                tracing::info!(
+                tracing::debug!(
                     event = "ocr_control_handler_completed",
                     command = command_kind,
                     model_state = self.model.as_str(),
@@ -2500,7 +2500,7 @@ impl Service {
                 }
             }
             Command::WorkerStopped => {
-                tracing::info!(event = "ocr_stop_received", "已收到截图推理线程停止回执");
+                tracing::debug!(event = "ocr_stop_received", "已收到截图推理线程停止回执");
                 self.complete_exit();
                 return;
             }
@@ -2589,7 +2589,7 @@ impl Drop for ClipboardOwner {
 }
 fn copy_text(text: &str) -> Result<(), String> {
     let started = Instant::now();
-    tracing::info!(
+    tracing::debug!(
         component = "snap_ocr",
         event = "ocr_copy_started",
         text_bytes = text.len(),
@@ -2675,7 +2675,7 @@ fn copy_text(text: &str) -> Result<(), String> {
         );
         return Err("复制到剪贴板失败".into());
     }
-    tracing::info!(
+    tracing::debug!(
         component = "snap_ocr",
         event = "ocr_copy_completed",
         result = "copied",
@@ -2761,7 +2761,7 @@ fn run_service_inner(autostart: bool) -> Result<(), String> {
         protocol::claim_instance().map_err(|error| service_failure(error, "claim_instance"))?
     else {
         use std::io::Write;
-        tracing::info!(event = "ocr_service_reused", "已有截图服务，转发设置请求");
+        tracing::debug!(event = "ocr_service_reused", "已有截图服务，转发设置请求");
         let deadline = Instant::now() + Duration::from_secs(2);
         loop {
             if let Ok(mut pipe) = std::fs::OpenOptions::new()

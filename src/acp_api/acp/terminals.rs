@@ -201,7 +201,7 @@ impl Terminals {
                         exit_failed = true;
                         state.send_modify(|s| s.error = true);
                     } else {
-                        tracing::info!(
+                        tracing::debug!(
                             event = "acp_terminal_cleanup_completed",
                             component = "acp_terminal",
                             ?peer_pid,
@@ -233,7 +233,7 @@ impl Terminals {
                     None => {
                         pipes_done = true;
                         let snapshot = state.borrow();
-                        tracing::info!(
+                        tracing::debug!(
                             event = "acp_terminal_output_pipes_completed",
                             component = "acp_terminal",
                             ?peer_pid,
@@ -279,7 +279,7 @@ impl Terminals {
                             );
                             let _ = reply.send(Err(io_error("终端释放失败")));
                         } else {
-                            tracing::info!(
+                            tracing::debug!(
                                 event = "acp_terminal_release_requested",
                                 component = "acp_terminal",
                                 ?peer_pid,
@@ -326,7 +326,7 @@ impl Terminals {
             if state.error {
                 return Err(io_error("终端输出或等待失败"));
             }
-            tracing::info!(
+            tracing::debug!(
                 event = "acp_terminal_output_completed",
                 component = "acp_terminal",
                 size_bytes = state.output.len(),

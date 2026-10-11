@@ -248,7 +248,7 @@ pub fn initialize(cancel: &AtomicBool, mut progress: impl FnMut(String)) -> Resu
         cleanup_stale_staging(&root);
         ensure_not_cancelled(cancel)?;
         if readiness().is_ok() {
-            tracing::info!(
+            tracing::debug!(
                 event = "markdown_assets_reused",
                 result = "already_ready",
                 "转 Markdown 组件已就绪"
@@ -369,7 +369,7 @@ fn initialize_staged(
         Ok(())
     })();
     match &result {
-        Ok(()) => tracing::info!(
+        Ok(()) => tracing::debug!(
             event = "markdown_assets_staged_completed",
             elapsed_ms = crate::logging::elapsed_ms(started),
             result = "validated_notice_installed",
@@ -674,7 +674,7 @@ fn download_runtime_task(
     cleanup_owned_download_staging(&base, progress);
     *stage = "reuse_validate";
     if let Some(installed) = reusable_runtime(&base, &manifest.xberg, cancel)? {
-        tracing::info!(
+        tracing::debug!(
             event = "runtime_install_reused",
             result = "verified_existing",
             "复用已校验 Xberg 运行时"
@@ -734,7 +734,7 @@ fn download_runtime_task(
         ensure_not_cancelled(cancel)?;
         *stage = "archive_verify";
         let verify_started = std::time::Instant::now();
-        tracing::info!(
+        tracing::debug!(
             event = "runtime_archive_verify_started",
             size_bytes = pack.archive_size_bytes,
             "Xberg 下载归档独立复核开始"
@@ -745,7 +745,7 @@ fn download_runtime_task(
             &pack.archive_sha256,
             cancel,
         )?;
-        tracing::info!(
+        tracing::debug!(
             event = "runtime_archive_verified",
             size_bytes = pack.archive_size_bytes,
             elapsed_ms = crate::logging::elapsed_ms(verify_started),
@@ -756,12 +756,12 @@ fn download_runtime_task(
         fs::create_dir(&extracted).map_err(|e| e.to_string())?;
         *stage = "extract_archive";
         let extract_started = std::time::Instant::now();
-        tracing::info!(
+        tracing::debug!(
             event = "runtime_extract_started",
             "Xberg 运行时归档解包开始"
         );
         crate::asset_util::extract_zip_safely(&archive, &extracted, cancel)?;
-        tracing::info!(
+        tracing::debug!(
             event = "runtime_extract_completed",
             elapsed_ms = crate::logging::elapsed_ms(extract_started),
             "Xberg 运行时归档解包完成"
@@ -771,7 +771,7 @@ fn download_runtime_task(
         for (member_index, member) in pack.members.iter().enumerate() {
             ensure_not_cancelled(cancel)?;
             let member_started = std::time::Instant::now();
-            tracing::info!(
+            tracing::debug!(
                 event = "runtime_member_verify_started",
                 member_index,
                 verification = if member.sha256.is_empty() {
@@ -795,14 +795,14 @@ fn download_runtime_task(
             } else {
                 verify_file_with_cancel(&path, member.size_bytes, &member.sha256, cancel)?;
             }
-            tracing::info!(
+            tracing::debug!(
                 event = "runtime_member_verify_completed",
                 member_index,
                 elapsed_ms = crate::logging::elapsed_ms(member_started),
                 "Xberg 发布成员校验通过"
             );
         }
-        tracing::info!(
+        tracing::debug!(
             event = "runtime_members_verified",
             member_count = pack.members.len(),
             "Xberg 发布成员校验通过"
@@ -848,7 +848,7 @@ fn download_runtime_task(
         ensure_not_cancelled(cancel)?;
         *stage = "install_rename";
         let install_started = std::time::Instant::now();
-        tracing::info!(
+        tracing::debug!(
             event = "runtime_directory_install_started",
             "Xberg 已校验目录原子落位开始"
         );
@@ -856,7 +856,7 @@ fn download_runtime_task(
             tracing::error!(event = "runtime_directory_install_failed", stage = "install_rename", error_kind = ?error.kind(), error_code = error.raw_os_error(), elapsed_ms = crate::logging::elapsed_ms(install_started), "Xberg 已校验目录原子落位失败");
             format!("安装 Xberg 失败：{error}")
         })?;
-        tracing::info!(
+        tracing::debug!(
             event = "runtime_directory_installed",
             elapsed_ms = crate::logging::elapsed_ms(install_started),
             result = "renamed",
@@ -890,7 +890,7 @@ fn download_runtime_task(
     drop(staging_lock);
     let cleanup = fs::remove_dir_all(&staging);
     match cleanup {
-        Ok(()) => tracing::info!(
+        Ok(()) => tracing::debug!(
             event = "runtime_staging_cleanup_completed",
             result = "removed",
             "Xberg 下载临时目录清理完成"

@@ -56,11 +56,11 @@ fn observe<T>(
     let _entered = span.enter();
     let started = std::time::Instant::now();
     let mut stage = "input";
-    tracing::info!(event = "file_task_started", operation, "文件任务开始");
+    tracing::debug!(event = "file_task_started", operation, "文件任务开始");
     let result = run(&mut stage);
     let elapsed_ms = crate::logging::elapsed_ms(started);
     match &result {
-        Ok(_) => tracing::info!(
+        Ok(_) => tracing::debug!(
             event = "file_task_completed",
             operation,
             stage,
@@ -124,7 +124,7 @@ impl Job {
                 target = %crate::logging::safe_error(target), size,
                 result, error_type = "task_item_boundary", "关键任务逐项失败");
         } else {
-            tracing::info!(event = "task_item_result", task_id = %task_id, phase,
+            tracing::debug!(event = "task_item_result", task_id = %task_id, phase,
                 source = %crate::logging::safe_error(source),
                 target = %crate::logging::safe_error(target), result, size, "任务逐项结果");
         }
@@ -568,7 +568,7 @@ pub fn count_archives(root: &Path, config: &Config) -> Result<u64> {
         *stage = "scan";
         let result = count_archives_with(root, config, protected.as_deref());
         if let Ok(count) = &result {
-            tracing::info!(event = "archive_count_result", count, "压缩包清点完成");
+            tracing::debug!(event = "archive_count_result", count, "压缩包清点完成");
         }
         result
     })
@@ -1875,7 +1875,7 @@ pub fn recompute_plan(directory: &Path) -> Result<usize> {
             Ok(cancelled)
         })();
         if let Ok(count) = &result {
-            tracing::info!(
+            tracing::debug!(
                 event = "plan_recomputed",
                 deselected = count,
                 "计划重算完成"
@@ -2223,7 +2223,7 @@ fn final_empty_cleanup(job: &mut Job, protected: Option<&Path>) -> Result<()> {
             );
             Ok(())
         })();
-        tracing::info!(
+        tracing::debug!(
             event = "empty_cleanup_summary",
             deleted = job.summary.deleted.saturating_sub(deleted_before),
             errors = job.summary.errors,

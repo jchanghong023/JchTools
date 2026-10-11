@@ -31,11 +31,11 @@ impl HashCache {
         let span = crate::logging::operation_span("hash_cache", "open");
         let _entered = span.enter();
         let started = std::time::Instant::now();
-        tracing::info!(event = "hash_cache_open_started", "哈希缓存打开开始");
+        tracing::debug!(event = "hash_cache_open_started", "哈希缓存打开开始");
         let result = Self::open_inner(state_dir);
         let elapsed_ms = crate::logging::elapsed_ms(started);
         match &result {
-            Ok(_) => tracing::info!(
+            Ok(_) => tracing::debug!(
                 event = "hash_cache_open_completed",
                 elapsed_ms,
                 "哈希缓存已打开"
@@ -100,7 +100,7 @@ impl HashCache {
         let span = crate::logging::operation_span("hash_cache", "store");
         let _entered = span.enter();
         let started = std::time::Instant::now();
-        tracing::info!(
+        tracing::debug!(
             event = "hash_cache_store_started",
             entries = entries.len(),
             "哈希缓存批量保存开始"
@@ -108,7 +108,7 @@ impl HashCache {
         let result = self.store_inner(entries);
         let elapsed_ms = crate::logging::elapsed_ms(started);
         match &result {
-            Ok(()) => tracing::info!(
+            Ok(()) => tracing::debug!(
                 event = "hash_cache_store_completed",
                 entries = entries.len(),
                 elapsed_ms,

@@ -343,7 +343,7 @@ mod platform {
                 Ok(Some(InstanceLock { handle }))
             }
             windows_sys::Win32::Foundation::WAIT_TIMEOUT => {
-                tracing::info!(
+                tracing::debug!(
                     event = "acp_control_lock_busy",
                     component = "acp_control",
                     lock_kind = kind,
@@ -424,7 +424,7 @@ mod platform {
             } else {
                 Some(15000_u64)
             };
-            tracing::info!(
+            tracing::debug!(
                 event = "acp_control_exchange_started",
                 component = "acp_control",
                 method = operation.name(),
@@ -468,7 +468,7 @@ mod platform {
                     error("模型服务控制查询超时")
                 })??
             else {
-                tracing::info!(
+                tracing::debug!(
                     event = "acp_control_peer_absent",
                     component = "acp_control",
                     method = operation.name(),
@@ -479,7 +479,7 @@ mod platform {
             };
             // 在写入任何控制操作前核验真实端点 TokenUser 和会话；不信任名字/自报 PID。
             let actual_pid = ensure_same_pipe_user(pipe.as_raw_handle().cast(), false)?;
-            tracing::info!(
+            tracing::debug!(
                 event = "acp_control_connected",
                 component = "acp_control",
                 peer_pid = actual_pid,
@@ -577,7 +577,7 @@ mod platform {
         let commands = commands.clone();
         let shutdown = shutdown.clone();
         workers.spawn(crate::acp_api::diagnostics::async_call("acp_control", "server_connection", async move {
-            tracing::info!(event = "acp_control_connection_received", component = "acp_control", peer_pid, "ACP 控制管道服务端已验证客户端");
+            tracing::debug!(event = "acp_control_connection_received", component = "acp_control", peer_pid, "ACP 控制管道服务端已验证客户端");
             // 只取消尚未提交操作的连接；已接收的 Apply/Stop 仍等待控制器和回执收尾。
             let request: IncomingRequest = tokio::select! {
                 biased;
@@ -601,7 +601,7 @@ mod platform {
             let diagnostic_text = diagnostic_id.to_string();
             let span = crate::logging::operation_span_with_id("acp_control", "server_request", &diagnostic_text);
             crate::acp_api::diagnostics::async_call("acp_control", "server_request", async move {
-            tracing::info!(event = "acp_control_request_received", component = "acp_control", %diagnostic_id, diagnostic_id_from_peer = injected_id.is_some(), request_protocol, peer_pid, method = operation.name(), "ACP 控制管道收到操作");
+            tracing::debug!(event = "acp_control_request_received", component = "acp_control", %diagnostic_id, diagnostic_id_from_peer = injected_id.is_some(), request_protocol, peer_pid, method = operation.name(), "ACP 控制管道收到操作");
             // 收尾失败仍要退役后台；回执写入失败也不能留下已封口的控制器。
             // guard 在控制器实际完成和回执发送之后释放，不提前取消资源收尾。
             let _stop_reply_guard =

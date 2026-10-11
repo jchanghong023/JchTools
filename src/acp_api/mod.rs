@@ -64,7 +64,7 @@ mod diagnostics {
 
     impl Boundary {
         fn new(component: &'static str, operation: &'static str) -> Self {
-            tracing::info!(
+            tracing::debug!(
                 component,
                 operation,
                 event = "acp_call_started",
@@ -83,7 +83,7 @@ mod diagnostics {
             self.finished = true;
             let elapsed_ms = crate::logging::elapsed_ms(self.started);
             match result {
-                Ok(_) => tracing::info!(
+                Ok(_) => tracing::debug!(
                     component = self.component,
                     operation = self.operation,
                     event = "acp_call_completed",

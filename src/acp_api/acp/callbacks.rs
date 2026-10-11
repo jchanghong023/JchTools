@@ -247,7 +247,7 @@ impl Callbacks {
                         .cloned()
                         .unwrap_or_else(tracing::Span::none);
                     span.in_scope(|| {
-                        tracing::info!(
+                        tracing::debug!(
                             event = "acp_model_update_validated",
                             component = "acp_callback",
                             stage = "config_notification",
@@ -321,7 +321,7 @@ impl Callbacks {
             })
             .await
             .map_err(|_| io_error("文件读取任务失败"))??;
-            tracing::info!(
+            tracing::debug!(
                 event = "acp_file_read_completed",
                 component = "acp_callback",
                 size_bytes = content.len(),
@@ -341,7 +341,7 @@ impl Callbacks {
                 return Err(invalid("文件路径须为绝对路径"));
             }
             let span = tracing::Span::current();
-            tracing::info!(
+            tracing::debug!(
                 event = "acp_file_write_started",
                 component = "acp_callback",
                 size_bytes = request.content.len(),
@@ -394,7 +394,7 @@ impl Callbacks {
                         .find(|o| o.kind == PermissionOptionKind::AllowOnce)
                 });
             if let Some(option) = option {
-                tracing::info!(event = "acp_permission_completed", component = "acp_callback", outcome = "selected_allow", permission_kind = ?option.kind, option_count = request.options.len(), "ACP 权限回调已选择允许选项");
+                tracing::debug!(event = "acp_permission_completed", component = "acp_callback", outcome = "selected_allow", permission_kind = ?option.kind, option_count = request.options.len(), "ACP 权限回调已选择允许选项");
                 Ok(RequestPermissionResponse::new(
                     RequestPermissionOutcome::Selected(SelectedPermissionOutcome::new(
                         option.option_id.clone(),

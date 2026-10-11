@@ -23,7 +23,7 @@ fn observe<T>(operation: &'static str, body: impl FnOnce() -> Result<T>) -> Resu
     let span = crate::logging::operation_span("task_database", operation);
     let _entered = span.enter();
     let started = std::time::Instant::now();
-    tracing::info!(
+    tracing::debug!(
         component = "task_database",
         event = "database_operation_started",
         "任务数据库操作开始"
@@ -31,7 +31,7 @@ fn observe<T>(operation: &'static str, body: impl FnOnce() -> Result<T>) -> Resu
     let result = body();
     let elapsed_ms = crate::logging::elapsed_ms(started);
     match &result {
-        Ok(_) => tracing::info!(
+        Ok(_) => tracing::debug!(
             component = "task_database",
             event = "database_operation_completed",
             elapsed_ms,

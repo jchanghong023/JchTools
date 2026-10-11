@@ -53,7 +53,7 @@ pub(super) struct CompletionStream {
 impl CompletionStream {
     pub(super) fn new(request: RequestHandle, first: RequestEvent, created: u64) -> Self {
         let id = format!("chatcmpl-{}", request.accepted.request_id.0);
-        tracing::info!(event = "acp_sse_started", component = "acp_http", request_id = %request.accepted.request_id.0, "ACP SSE 响应开始");
+        tracing::debug!(event = "acp_sse_started", component = "acp_http", request_id = %request.accepted.request_id.0, "ACP SSE 响应开始");
         Self {
             request,
             id,

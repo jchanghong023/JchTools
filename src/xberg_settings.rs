@@ -13,11 +13,11 @@ fn observe<T>(
     let span = crate::logging::operation_span("xberg_settings", operation);
     let _entered = span.enter();
     let started = std::time::Instant::now();
-    tracing::info!(event = "settings_operation_started", "配置操作开始");
+    tracing::debug!(event = "settings_operation_started", "配置操作开始");
     let result = body();
     let elapsed_ms = crate::logging::elapsed_ms(started);
     if result.is_ok() {
-        tracing::info!(
+        tracing::debug!(
             event = "settings_operation_completed",
             elapsed_ms,
             "配置操作完成"
@@ -132,7 +132,7 @@ pub fn load() -> Result<Option<PathBuf>, String> {
     observe("load", || {
         let result = load_inner();
         if let Ok(value) = &result {
-            tracing::info!(
+            tracing::debug!(
                 event = "settings_loaded",
                 configured = value.is_some(),
                 "共享运行目录配置已读取"
@@ -222,7 +222,7 @@ pub fn settings() -> Result<Settings, String> {
     observe("read_sources", || {
         let result = settings_inner();
         if let Ok(value) = &result {
-            tracing::info!(
+            tracing::debug!(
                 event = "settings_sources_loaded",
                 source = value.source.value(),
                 custom_present = value.custom.is_some(),

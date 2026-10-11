@@ -280,7 +280,7 @@ fn reap(child: &mut Child) {
         "开始终止并回收子进程"
     );
     match child.kill() {
-        Ok(()) => tracing::info!(
+        Ok(()) => tracing::debug!(
             event = "subprocess_kill_completed",
             peer_pid = child.id(),
             "子进程终止请求已执行"
@@ -290,7 +290,7 @@ fn reap(child: &mut Child) {
         }
     }
     match child.wait() {
-        Ok(status) => tracing::info!(
+        Ok(status) => tracing::debug!(
             event = "subprocess_reap_completed",
             peer_pid = child.id(),
             success = status.success(),
@@ -469,7 +469,7 @@ fn run_with_timeout_ext(
     );
     let _entered = span.enter();
     let started = Instant::now();
-    tracing::info!(
+    tracing::debug!(
         event = "spawn_started",
         timeout_ms = u64::try_from(timeout.as_millis()).unwrap_or(u64::MAX),
         capture_limit,
@@ -485,7 +485,7 @@ fn run_with_timeout_ext(
         reject_truncation,
     );
     match &result {
-        Ok(output) => tracing::info!(
+        Ok(output) => tracing::debug!(
             event = "subprocess_completed",
             success = output.status.success(),
             exit_code = output.status.code(),
@@ -554,7 +554,7 @@ fn run_with_timeout_inner(
         )
     })?;
     tracing::Span::current().record("peer_pid", child.id());
-    tracing::info!(
+    tracing::debug!(
         event = "spawn_completed",
         peer_pid = child.id(),
         "子进程已创建"
@@ -708,7 +708,7 @@ fn run_with_timeout_inner(
     });
     match wait_child_with_deadline(&mut child, timeout, cancel, exceeded.as_deref()) {
         Ok(status) => {
-            tracing::info!(
+            tracing::debug!(
                 event = "subprocess_exited",
                 peer_pid = child.id(),
                 success = status.success(),
@@ -718,7 +718,7 @@ fn run_with_timeout_inner(
             // 初始进程已退出仍可能有持管道的后代；先关闭 Job 再排空输出。
             #[cfg(windows)]
             {
-                tracing::info!(
+                tracing::debug!(
                     event = "subprocess_tree_release",
                     reason = "root_exited",
                     "根进程已退出，关闭进程组以回收持管道后代"
@@ -957,14 +957,14 @@ pub fn run_with_idle_timeout(
     );
     let _entered = span.enter();
     let started = Instant::now();
-    tracing::info!(
+    tracing::debug!(
         event = "spawn_started",
         idle_timeout_ms = u64::try_from(idle_timeout.as_millis()).unwrap_or(u64::MAX),
         "开始启动流式子进程"
     );
     let result = run_with_idle_timeout_inner(command, control, idle_timeout, line, tick);
     match &result {
-        Ok(()) => tracing::info!(
+        Ok(()) => tracing::debug!(
             event = "subprocess_completed",
             state = "success",
             elapsed_ms = crate::logging::elapsed_ms(started),
@@ -1019,7 +1019,7 @@ fn run_with_idle_timeout_inner(
         )
     })?;
     tracing::Span::current().record("peer_pid", child.id());
-    tracing::info!(
+    tracing::debug!(
         event = "spawn_completed",
         peer_pid = child.id(),
         "子进程已创建"
@@ -1144,7 +1144,7 @@ fn run_with_idle_timeout_inner(
             Some(&CancelSource::Control(control)),
             None,
         )?;
-        tracing::info!(
+        tracing::debug!(
             event = "subprocess_exited",
             peer_pid = child.id(),
             success = status.success(),

@@ -25,7 +25,7 @@ fn log_md_item_result(
 ) {
     let elapsed_ms = crate::logging::elapsed_ms(started);
     match result {
-        Ok(()) => tracing::info!(
+        Ok(()) => tracing::debug!(
             event = "md_item_completed",
             operation,
             elapsed_ms,
@@ -199,7 +199,7 @@ pub fn scan_markdown(
     let span = crate::logging::operation_span("md_tools", "scan");
     let _entered = span.enter();
     let started = std::time::Instant::now();
-    tracing::info!(event = "md_scan_started", recursive, "MD扫描开始");
+    tracing::debug!(event = "md_scan_started", recursive, "MD扫描开始");
     let result: Result<Vec<MergeEntry>> = (|| {
         // M-02/S-04：根自身与全部祖先都不经过链接边界，否则拒绝整个任务
         ensure_root_is_real_directory(root)?;
@@ -255,7 +255,7 @@ pub fn scan_markdown(
         Ok(entries)
     })();
     match &result {
-        Ok(entries) => tracing::info!(
+        Ok(entries) => tracing::debug!(
             event = "md_scan_completed",
             files = entries.len(),
             elapsed_ms = crate::logging::elapsed_ms(started),
@@ -813,7 +813,7 @@ fn write_merge_entries(
         let _item_entered = item_span.enter();
         let item_started = std::time::Instant::now();
         let mut item_stage = "callback";
-        tracing::info!(event = "md_merge_item_started", "MD合并输入项开始");
+        tracing::debug!(event = "md_merge_item_started", "MD合并输入项开始");
         let item_result: Result<()> = (|| {
             control.checkpoint()?;
             on_event(MdProgress::FileStarted(index + 1, entries.len()))?;
@@ -900,7 +900,7 @@ pub fn plan_splits(input: &Path, limit: u64) -> Result<SplitPlan> {
     let span = crate::logging::operation_span("md_tools", "split_plan");
     let _entered = span.enter();
     let started = std::time::Instant::now();
-    tracing::info!(event = "md_split_plan_started", limit, "MD拆分规划开始");
+    tracing::debug!(event = "md_split_plan_started", limit, "MD拆分规划开始");
     let result: Result<SplitPlan> = (|| {
         let len = std::fs::metadata(input)
             .with_context(|| format!("读取输入文件属性失败：{}", input.display()))?
@@ -952,7 +952,7 @@ pub fn plan_splits(input: &Path, limit: u64) -> Result<SplitPlan> {
         Ok(SplitPlan { bounds, limit })
     })();
     match &result {
-        Ok(plan) => tracing::info!(
+        Ok(plan) => tracing::debug!(
             event = "md_split_plan_completed",
             parts = plan.bounds.len(),
             elapsed_ms = crate::logging::elapsed_ms(started),
@@ -1122,7 +1122,7 @@ fn split_task(
         let _item_entered = item_span.enter();
         let item_started = std::time::Instant::now();
         let mut item_stage = "callback";
-        tracing::info!(
+        tracing::debug!(
             event = "md_split_item_started",
             bytes = end.saturating_sub(start),
             "MD分片开始"

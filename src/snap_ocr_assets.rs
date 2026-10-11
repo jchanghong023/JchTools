@@ -422,7 +422,7 @@ fn initialize_task(cancel: &AtomicBool, progress: &mut dyn FnMut(String)) -> Res
         // 失败或进程崩溃都会残留 .staging-<uuid>，download.zip 残留可达约 291MB）。
         cleanup_stale_staging(&root);
         if readiness().is_ok() {
-            tracing::info!(
+            tracing::debug!(
                 event = "asset_initialize_reused",
                 result = "already_ready",
                 "截图 OCR 资产已就绪，无需初始化"
@@ -535,7 +535,7 @@ fn initialize_staged(
         for (index, asset) in manifest.assets.iter().enumerate() {
             ensure_not_cancelled(cancel)?;
             if asset.is_embedded() {
-                tracing::info!(
+                tracing::debug!(
                     event = "asset_reused",
                     asset_index = index,
                     result = "embedded",
@@ -546,7 +546,7 @@ fn initialize_staged(
             }
             // O-06 跨重试复用：最终位置已校验的资产不重下（保留已验证下载）。
             if asset_ready(asset, root).is_ok() {
-                tracing::info!(
+                tracing::debug!(
                     event = "asset_reused",
                     asset_index = index,
                     result = "verified_existing",
@@ -600,7 +600,7 @@ fn initialize_staged(
         Ok(())
     })();
     match &result {
-        Ok(()) => tracing::info!(
+        Ok(()) => tracing::debug!(
             event = "asset_initialize_staged_completed",
             asset_count = manifest.assets.len(),
             elapsed_ms = crate::logging::elapsed_ms(started),
@@ -642,7 +642,7 @@ fn install_asset(
     let span = crate::logging::operation_span("snap_ocr_assets", "install_asset");
     let _entered = span.enter();
     let started = std::time::Instant::now();
-    tracing::info!(
+    tracing::debug!(
         event = "asset_install_started",
         expected_size = asset.size_bytes,
         member_count = asset.members.len(),
@@ -666,14 +666,14 @@ fn install_asset(
         // 下载器校验之外独立复核暂存内容，防伪造的“下载成功”。
         stage = "archive_verify";
         let verify_started = std::time::Instant::now();
-        tracing::info!(
+        tracing::debug!(
             event = "asset_archive_verify_started",
             size_bytes = asset.size_bytes,
             "资产暂存内容独立复核开始"
         );
         verify_file_with_cancel(&archive, asset.size_bytes, &asset.sha256, cancel)
             .map_err(|error| format!("资产 {} 下载内容校验失败：{error}", asset.id))?;
-        tracing::info!(
+        tracing::debug!(
             event = "asset_archive_verify_completed",
             elapsed_ms = crate::logging::elapsed_ms(verify_started),
             result = "verified",
@@ -694,13 +694,13 @@ fn install_asset(
                     ensure_not_cancelled(cancel)?;
                     stage = "file_install";
                     let install_started = std::time::Instant::now();
-                    tracing::info!(
+                    tracing::debug!(
                         event = "asset_file_install_started",
                         stage,
                         "资产文件原子落位开始"
                     );
                     atomic_replace_file(&archive, &target)?;
-                    tracing::info!(
+                    tracing::debug!(
                         event = "asset_file_install_completed",
                         stage,
                         elapsed_ms = crate::logging::elapsed_ms(install_started),
@@ -716,13 +716,13 @@ fn install_asset(
                     .map_err(|error| format!("创建解包目录失败：{error}"))?;
                 stage = "extract_archive";
                 let extract_started = std::time::Instant::now();
-                tracing::info!(
+                tracing::debug!(
                     event = "asset_extract_started",
                     member_count = asset.members.len(),
                     "资产归档解包开始"
                 );
                 extract_zip_safely(&archive, &extracted, cancel)?;
-                tracing::info!(
+                tracing::debug!(
                     event = "asset_extract_completed",
                     elapsed_ms = crate::logging::elapsed_ms(extract_started),
                     "资产归档解包完成"
@@ -735,7 +735,7 @@ fn install_asset(
                     let source = extracted.join(&member.path);
                     stage = "member_verify";
                     let member_started = std::time::Instant::now();
-                    tracing::info!(
+                    tracing::debug!(
                         event = "asset_member_verify_started",
                         member_index,
                         size_bytes = member.size_bytes,
@@ -745,7 +745,7 @@ fn install_asset(
                         .map_err(|error| {
                             format!("资产 {} 成员 {} 校验失败：{error}", asset.id, member.path)
                         })?;
-                    tracing::info!(
+                    tracing::debug!(
                         event = "asset_member_verify_completed",
                         member_index,
                         elapsed_ms = crate::logging::elapsed_ms(member_started),
@@ -759,14 +759,14 @@ fn install_asset(
                         ensure_not_cancelled(cancel)?;
                         stage = "member_install";
                         let install_started = std::time::Instant::now();
-                        tracing::info!(
+                        tracing::debug!(
                             event = "asset_file_install_started",
                             stage,
                             member_index,
                             "资产成员原子落位开始"
                         );
                         atomic_replace_file(&source, &target)?;
-                        tracing::info!(
+                        tracing::debug!(
                             event = "asset_file_install_completed",
                             stage,
                             member_index,
@@ -785,7 +785,7 @@ fn install_asset(
     })();
     let elapsed_ms = crate::logging::elapsed_ms(started);
     match &result {
-        Ok(()) => tracing::info!(
+        Ok(()) => tracing::debug!(
             event = "asset_install_completed",
             elapsed_ms,
             result = "verified_installed",

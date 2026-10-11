@@ -374,7 +374,7 @@ fn verify_file_inner(
     let span = crate::logging::operation_span("asset_validation", "verify_file");
     let _entered = span.enter();
     let started = std::time::Instant::now();
-    tracing::info!(
+    tracing::debug!(
         event = "asset_verify_started",
         expected_size,
         "资产大小与摘要校验开始"
@@ -424,7 +424,7 @@ fn verify_file_inner(
         );
         return Err(format!("SHA256 {actual}，预期 {expected_sha256}"));
     }
-    tracing::info!(
+    tracing::debug!(
         event = "asset_verify_completed",
         verified_bytes = metadata.len(),
         elapsed_ms = crate::logging::elapsed_ms(started),

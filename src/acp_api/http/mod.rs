@@ -54,7 +54,7 @@ async fn observe_request(
     };
     async move {
         let started = Instant::now();
-        tracing::info!(
+        tracing::debug!(
             event = "acp_http_request_started",
             component = "acp_http",
             route,
@@ -63,7 +63,7 @@ async fn observe_request(
         );
         let response = next.run(request).await;
         let status = response.status().as_u16();
-        tracing::info!(
+        tracing::debug!(
             event = "acp_http_response_ready",
             component = "acp_http",
             route,
@@ -123,7 +123,7 @@ async fn method_not_allowed() -> Response {
 async fn models(State(backend): State<BackendHandle>) -> Response {
     match backend.models().await {
         Ok(models) => {
-            tracing::info!(
+            tracing::debug!(
                 event = "acp_http_models_completed",
                 component = "acp_http",
                 model_count = models.len(),
@@ -248,7 +248,7 @@ async fn chat(
             Err(error) => return HttpError::service(&error).into_response(),
         },
     };
-    tracing::info!(event = "acp_http_request_admitted", component = "acp_http", request_id = %request.accepted.request_id.0, streaming = input.stream, "ACP HTTP 请求已准入");
+    tracing::debug!(event = "acp_http_request_admitted", component = "acp_http", request_id = %request.accepted.request_id.0, streaming = input.stream, "ACP HTTP 请求已准入");
     let Ok(session_header) = HeaderValue::from_str(&request.accepted.session.0) else {
         tracing::error!(
             event = "acp_http_request_failed",
@@ -271,7 +271,7 @@ async fn chat(
         .map_or(0, |duration| duration.as_secs());
     if input.stream {
         let first_started = Instant::now();
-        tracing::info!(event = "acp_http_first_event_started", component = "acp_http", request_id = %request.accepted.request_id.0, "ACP HTTP 流式响应等待首事件");
+        tracing::debug!(event = "acp_http_first_event_started", component = "acp_http", request_id = %request.accepted.request_id.0, "ACP HTTP 流式响应等待首事件");
         // 首事件之前保持响应头未提交：后端在此处失败必须返回真实非 2xx JSON。
         let first = tokio::select! {
             biased;
@@ -304,7 +304,7 @@ async fn chat(
             }
             Some(event) => event,
         };
-        tracing::info!(event = "acp_http_first_event_completed", component = "acp_http", request_id = %request.accepted.request_id.0, elapsed_ms = crate::logging::elapsed_ms(first_started), "ACP HTTP 首事件已收到，可提交 SSE 响应头");
+        tracing::debug!(event = "acp_http_first_event_completed", component = "acp_http", request_id = %request.accepted.request_id.0, elapsed_ms = crate::logging::elapsed_ms(first_started), "ACP HTTP 首事件已收到，可提交 SSE 响应头");
         if matches!(first, RequestEvent::Completed { .. }) {
             request.cancellation.disarm();
         }
@@ -329,7 +329,7 @@ async fn collect_completion(
 ) -> Response {
     let started = Instant::now();
     let request_id = request.accepted.request_id.0.clone();
-    tracing::info!(event = "acp_http_completion_started", component = "acp_http", %request_id, "ACP HTTP 非流式响应等待开始");
+    tracing::debug!(event = "acp_http_completion_started", component = "acp_http", %request_id, "ACP HTTP 非流式响应等待开始");
     let mut text = String::new();
     loop {
         let event = tokio::select! {

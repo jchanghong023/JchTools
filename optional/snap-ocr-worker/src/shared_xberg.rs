@@ -167,7 +167,7 @@ impl SharedXbergClient {
         let _entered = span.enter();
         value["diagnostic_id"] = json!(diagnostic_id);
         let started = std::time::Instant::now();
-        tracing::info!(
+        tracing::debug!(
             event = "ocr_request_started",
             command,
             timeout_ms = 600_000,
@@ -194,7 +194,7 @@ impl SharedXbergClient {
             Ok(result)
         })();
         match &outcome {
-            Ok(response) => tracing::info!(
+            Ok(response) => tracing::debug!(
                 event = "ocr_request_completed",
                 elapsed_ms = crate::logging::elapsed_ms(started),
                 peer_pid = response["jchtools_xberg_pid"].as_u64(),
@@ -227,7 +227,7 @@ impl SharedXbergClient {
     ) -> Result<Option<String>, ClientError> {
         let response = self.request(json!({"command":"ocr_snapshot","image_base64":base64::engine::general_purpose::STANDARD.encode(png)}), cancel)?;
         if response["error_kind"] == "no_text" {
-            tracing::info!(
+            tracing::debug!(
                 event = "ocr_text_result",
                 result = "empty",
                 text_bytes = 0,
@@ -244,7 +244,7 @@ impl SharedXbergClient {
             );
             ClientError::Io("截图响应缺少 text 字段".into())
         })?;
-        tracing::info!(
+        tracing::debug!(
             event = "ocr_text_result",
             result = if text.trim().is_empty() {
                 "empty"
@@ -270,7 +270,7 @@ impl SharedXbergClient {
                     .into(),
             ),
         };
-        tracing::info!(
+        tracing::debug!(
             event = "ocr_snapshot_state",
             result = state.as_str(),
             "共享截图模型状态已返回"

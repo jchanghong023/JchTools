@@ -1853,7 +1853,7 @@ fn spawn_event_worker(
         let span = crate::logging::operation_span("gui_worker", "engine_task");
         let _entered = span.enter();
         let started = Instant::now();
-        tracing::info!(event = "gui_worker_started", "后台任务开始");
+        tracing::debug!(event = "gui_worker_started", "后台任务开始");
         let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(body));
         let event = match result {
             Ok(Ok(event)) => event,
@@ -1869,7 +1869,7 @@ fn spawn_event_worker(
                 "后台任务失败"
             );
         } else {
-            tracing::info!(
+            tracing::debug!(
                 event = "gui_worker_completed",
                 elapsed_ms = crate::logging::elapsed_ms(started),
                 "后台任务结果已生成"
@@ -2380,7 +2380,7 @@ fn spawn_md_worker(
         let span = crate::logging::operation_span("gui_worker", "md_task");
         let _entered = span.enter();
         let started = Instant::now();
-        tracing::info!(
+        tracing::debug!(
             component = "gui_worker",
             event = "gui_md_worker_started",
             "MD 后台任务开始"
@@ -2404,14 +2404,14 @@ fn spawn_md_worker(
                 elapsed_ms = crate::logging::elapsed_ms(started),
                 "MD 后台任务失败"
             ),
-            Event::MdNeedsConfirm(_) => tracing::info!(
+            Event::MdNeedsConfirm(_) => tracing::debug!(
                 component = "gui_worker",
                 event = "gui_md_worker_completed",
                 outcome = "confirmation_required",
                 elapsed_ms = crate::logging::elapsed_ms(started),
                 "MD 后台任务等待覆盖确认"
             ),
-            _ => tracing::info!(
+            _ => tracing::debug!(
                 component = "gui_worker",
                 event = "gui_md_worker_completed",
                 outcome = "completed",
@@ -5792,7 +5792,7 @@ fn snap_pipe_request_on(
             "截图控制查询开始"
         );
     } else {
-        tracing::info!(
+        tracing::debug!(
             event = "snap_control_request_started",
             command,
             connect_timeout_ms = 2000,
@@ -5896,7 +5896,7 @@ fn snap_pipe_request_on(
             ok = response["ok"].as_bool(),
             "截图控制查询完成"
         ),
-        Ok(response) => tracing::info!(
+        Ok(response) => tracing::debug!(
             event = "snap_control_request_completed",
             command,
             peer_pid,

@@ -325,7 +325,7 @@ fn schedule_activation(
     slint::Timer::single_shot(std::time::Duration::from_millis(delay), move || {
         if let Some(window) = window.upgrade() {
             if activate_result_window(&window, position, size) {
-                tracing::info!(
+                tracing::debug!(
                     component = "ocr_result_window",
                     event = "ocr_result_activation_completed",
                     attempt = u32::from(attempt) + 1,

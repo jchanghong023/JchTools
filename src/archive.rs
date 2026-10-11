@@ -860,7 +860,7 @@ impl SevenZip {
                 })
             })();
             if let Ok(listing) = &result {
-                tracing::info!(
+                tracing::debug!(
                     event = "archive_listing_result",
                     declared_bytes = listing.total,
                     sizes_complete = listing.sizes_complete,
@@ -943,7 +943,7 @@ impl SevenZip {
                 })
             })();
             if let Ok(info) = &result {
-                tracing::info!(
+                tracing::debug!(
                     event = "archive_volume_result",
                     count = info.count,
                     "归档实际分卷数量"
@@ -1433,7 +1433,7 @@ impl SevenZip {
             }
             // 「解压成功」包数由调用方按 complete 口径累加：未完全解开的包要计入失败
             // 并移入「解压失败」（X-06），不得在解压层无条件先记一次成功。
-            tracing::info!(
+            tracing::debug!(
                 event = "archive_extract_result",
                 complete,
                 volume_count = volumes.len(),
@@ -2537,7 +2537,7 @@ pub fn extract_queued(job: &mut Job, resolve_engine: impl Fn() -> Result<SevenZi
         source = %crate::logging::safe_error(&relative));
             let _item_entered = item_span.enter();
             let item_started = std::time::Instant::now();
-            tracing::info!(event = "archive_item_started", "压缩包处理开始");
+            tracing::debug!(event = "archive_item_started", "压缩包处理开始");
             // 指纹复核：排队期间该路径可能已被删除或替换（X-04 之后成员一律改名落盘，
             // 不会再顶替既有路径，所以这里只剩外部改动这一种可能）。与 enqueue 同公式
             // 重算指纹，不一致即「原包已不在原位」，清掉残留 pending 行并如实记一条跳过：
@@ -2612,7 +2612,7 @@ pub fn extract_queued(job: &mut Job, resolve_engine: impl Fn() -> Result<SevenZi
                 active.extract_one(job, &relative, depth)
             };
             match &result {
-                Ok(complete) => tracing::info!(
+                Ok(complete) => tracing::debug!(
                     event = "archive_item_decoded",
                     complete,
                     elapsed_ms = crate::logging::elapsed_ms(item_started),
@@ -2718,7 +2718,7 @@ pub fn extract_queued(job: &mut Job, resolve_engine: impl Fn() -> Result<SevenZi
                     job.context.control.check_cancelled()?;
                 }
             }
-            tracing::info!(
+            tracing::debug!(
                 event = "archive_item_completed",
                 elapsed_ms = crate::logging::elapsed_ms(item_started),
                 total_ok = job.summary.archives_ok,

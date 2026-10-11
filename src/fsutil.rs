@@ -13,7 +13,7 @@ fn log_filesystem_result<T>(
 ) {
     let elapsed_ms = crate::logging::elapsed_ms(started);
     match result {
-        Ok(_) => tracing::info!(
+        Ok(_) => tracing::debug!(
             event = "filesystem_operation_completed",
             operation,
             elapsed_ms,
@@ -389,7 +389,7 @@ pub fn rename_noreplace(source: &Path, target: &Path) -> Result<()> {
     let span = crate::logging::operation_span("fsutil", "rename_noreplace");
     let _entered = span.enter();
     let started = std::time::Instant::now();
-    tracing::info!(event = "filesystem_rename_started", "不覆盖改名开始");
+    tracing::debug!(event = "filesystem_rename_started", "不覆盖改名开始");
     let result: Result<()> = (|| {
         #[cfg(windows)]
         {
@@ -529,7 +529,7 @@ pub fn move_file_preserving_times(source: &Path, target: &Path) -> Result<()> {
     let span = crate::logging::operation_span("fsutil", "move_file");
     let _entered = span.enter();
     let started = std::time::Instant::now();
-    tracing::info!(event = "filesystem_move_started", "保留时间移动开始");
+    tracing::debug!(event = "filesystem_move_started", "保留时间移动开始");
     let result: Result<()> = (|| {
         match rename_noreplace(source, target) {
             Ok(()) => Ok(()),
@@ -554,7 +554,7 @@ pub fn move_file_preserving_times(source: &Path, target: &Path) -> Result<()> {
                         .and_then(std::io::Error::raw_os_error),
                     "跨卷改名不可用，按既有策略复制并保留时间"
                 );
-                tracing::info!(
+                tracing::debug!(
                     event = "filesystem_move_stage_started",
                     stage = "source_metadata",
                     "跨卷移动读取源文件时间信息开始"
@@ -578,7 +578,7 @@ pub fn move_file_preserving_times(source: &Path, target: &Path) -> Result<()> {
                 // 打开目标，目标已存在时会被静默截断。只清理本次新建的未完成副本：
                 // `create_new` 以 AlreadyExists 失败时没有写入字节，目标属于既有文件，
                 // 绝不能删；其余写盘或关闭失败才删除本次新建的部分副本。
-                tracing::info!(
+                tracing::debug!(
                     event = "filesystem_move_stage_started",
                     stage = "copy",
                     "跨卷副本写入开始"
@@ -602,7 +602,7 @@ pub fn move_file_preserving_times(source: &Path, target: &Path) -> Result<()> {
                     };
                     return Err(anyhow::Error::new(error).context(context));
                 }
-                tracing::info!(
+                tracing::debug!(
                     event = "filesystem_move_stage_started",
                     stage = "restore_times",
                     "跨卷副本时间恢复开始"
@@ -619,7 +619,7 @@ pub fn move_file_preserving_times(source: &Path, target: &Path) -> Result<()> {
                     }
                     return Err(error.context("跨卷副本时间设置失败，已保留源文件与副本状态"));
                 }
-                tracing::info!(
+                tracing::debug!(
                     event = "filesystem_move_stage_started",
                     stage = "source_delete",
                     "跨卷源文件删除开始"
@@ -882,7 +882,7 @@ impl RootGuard {
         let span = crate::logging::operation_span("fsutil", "task_lock");
         let _entered = span.enter();
         let started = std::time::Instant::now();
-        tracing::info!(event = "filesystem_lock_started", "任务锁获取开始");
+        tracing::debug!(event = "filesystem_lock_started", "任务锁获取开始");
         let result: Result<Self> = (|| {
             fs::create_dir_all(state)?;
             let file = OpenOptions::new()

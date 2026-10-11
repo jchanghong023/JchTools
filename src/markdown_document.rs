@@ -91,7 +91,7 @@ pub fn convert_cancelable(
     let _entered = span.enter();
     let started = std::time::Instant::now();
     let mut stage = "input";
-    tracing::info!(
+    tracing::debug!(
         event = "document_conversion_started",
         timeout_ms = u64::try_from(deadline.remaining().as_millis()).unwrap_or(u64::MAX),
         "文档转换开始"
@@ -125,7 +125,7 @@ pub fn convert_cancelable(
     })();
     let elapsed_ms = crate::logging::elapsed_ms(started);
     if let Ok(document) = &result {
-        tracing::info!(
+        tracing::debug!(
             event = "document_conversion_completed",
             elapsed_ms,
             markdown_bytes = document.markdown.len(),

@@ -377,7 +377,7 @@ fn serve_named(
         // SAFETY: raw 是已连接的独占管道句柄，pid 出参指向本栈 DWORD。
         let peer_pid =
             (unsafe { GetNamedPipeClientProcessId(raw, &raw mut pid) } != 0).then_some(pid);
-        tracing::info!(
+        tracing::debug!(
             event = "ocr_control_connection_started",
             peer_pid,
             "收到截图控制管道连接"
@@ -459,13 +459,13 @@ fn serve_named(
                     &diagnostic_id,
                 );
                 let _entered = span.enter();
-                tracing::info!(
+                tracing::debug!(
                     event = "ocr_control_request_started",
                     command = command_kind,
                     peer_pid,
                     "开始处理截图控制请求"
                 );
-                tracing::info!(
+                tracing::debug!(
                     event = "ocr_control_request_received",
                     command = command_kind,
                     peer_pid,
@@ -541,7 +541,7 @@ fn serve_named(
             Err(_) => failure_stage = Some("encode"),
         }
         if delivered && response["ok"] == true && failure_stage.is_none() {
-            tracing::info!(
+            tracing::debug!(
                 event = "ocr_control_request_completed",
                 command = command_kind,
                 peer_pid,

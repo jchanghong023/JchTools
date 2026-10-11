@@ -215,7 +215,7 @@ impl Running {
         crate::acp_api::diagnostics::async_call("acp_runtime", "start", async { settings::validate_config(&config)?;
     let workspace = settings::workspace_dir()?;
     // 先绑定精确端口，失败不启动 Agent，不隐式寻找空闲端口。
-    tracing::info!(event = "acp_http_bind_started", component = "acp_runtime", port = config.port, host = "127.0.0.1", "ACP HTTP 本机端口监听开始");
+    tracing::debug!(event = "acp_http_bind_started", component = "acp_runtime", port = config.port, host = "127.0.0.1", "ACP HTTP 本机端口监听开始");
     let listener = tokio::net::TcpListener::bind((std::net::Ipv4Addr::LOCALHOST, config.port))
         .await
         .map_err(|e| {
@@ -429,7 +429,7 @@ async fn control_loop(
                                         command.span.in_scope(|| tracing::warn!(event = "acp_control_operation_cancelled", component = "acp_runtime", stage = "admission", reason = "stopping", "ACP 服务停止中，拒绝应用配置"));
                                         let _ = command.reply.send(Err(stopping()));
                                     } else {
-                                        command.span.in_scope(|| tracing::info!(event = "acp_control_operation_queued", component = "acp_runtime", "ACP 应用配置操作进入生命周期队列"));
+                                        command.span.in_scope(|| tracing::debug!(event = "acp_control_operation_queued", component = "acp_runtime", "ACP 应用配置操作进入生命周期队列"));
                                         queued.push_back(command);
                                     }
                                 },

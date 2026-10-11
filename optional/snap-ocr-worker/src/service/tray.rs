@@ -255,13 +255,13 @@ fn capture_selected(state: &mpsc::Sender<Command>) {
     // 完整截图发生在遮罩出现前；旧结果由 Slint 线程先隐藏，服务不主动写图片。
     let mut capture_phase = "capture";
     let outcome = capture_win::capture().and_then(|frame| {
-        tracing::info!(
+        tracing::debug!(
             event = "ocr_screen_capture_completed",
             elapsed_ms = crate::logging::elapsed_ms(started),
             "屏幕截图已取得，仅保留内存"
         );
         capture_phase = "selection";
-        tracing::info!(event = "ocr_selection_started", "开始截图框选");
+        tracing::debug!(event = "ocr_selection_started", "开始截图框选");
         capture_win::select(frame)
     });
     match outcome {

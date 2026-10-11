@@ -56,7 +56,7 @@ pub fn load_config() -> Result<Option<ServiceConfig>, ServiceError> {
             )
             .optional()
             .map_err(|e| io(format!("读取模型服务配置失败：{e}")))?;
-        tracing::info!(
+        tracing::debug!(
             component = "acp_settings",
             event = "acp_config_record_read",
             present = value.is_some(),

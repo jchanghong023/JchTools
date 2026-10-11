@@ -123,7 +123,7 @@ pub fn find_git() -> Result<PathBuf> {
     let span = crate::logging::operation_span("git", "resolve_executable");
     let _entered = span.enter();
     let started = std::time::Instant::now();
-    tracing::info!(event = "git_resolve_started", "开始查找 Git 可执行程序");
+    tracing::debug!(event = "git_resolve_started", "开始查找 Git 可执行程序");
     let executable = std::env::current_exe()
         .inspect_err(|error| {
             tracing::warn!(event = "git_executable_location_unavailable", stage = "bundled_lookup", error_type = ?error.kind(), error_code = error.raw_os_error(), "无法定位宿主程序，转为系统 Git 查找");
@@ -131,7 +131,7 @@ pub fn find_git() -> Result<PathBuf> {
         .ok();
     let result = find_git_from(executable.as_deref().and_then(Path::parent));
     if result.is_ok() {
-        tracing::info!(
+        tracing::debug!(
             event = "git_resolve_completed",
             elapsed_ms = crate::logging::elapsed_ms(started),
             "已找到 Git 可执行程序"
@@ -239,7 +239,7 @@ fn run_git_with(
     let _entered = operation.enter();
     let stage = command_stage(args);
     let started = std::time::Instant::now();
-    tracing::info!(
+    tracing::debug!(
         event = "git_command_started",
         stage,
         timeout_ms = u64::try_from(GIT_TIMEOUT.as_millis()).unwrap_or(u64::MAX),
@@ -263,7 +263,7 @@ fn run_git_with(
     }
     let result = process::run_with_timeout(&mut command, GIT_TIMEOUT);
     match &result {
-        Ok(out) if out.status.success() => tracing::info!(
+        Ok(out) if out.status.success() => tracing::debug!(
             event = "git_command_completed",
             stage,
             exit_code = out.status.code(),
@@ -324,10 +324,10 @@ fn run_git_network_with_proxy(
     let _entered = operation.enter();
     let stage = command_stage(args);
     let started = std::time::Instant::now();
-    tracing::info!(event = "git_network_started", stage, target = %crate::logging::safe_url(target_url), timeout_ms = u64::try_from(GIT_TIMEOUT.as_millis()).unwrap_or(u64::MAX), "开始 Git 网络操作");
+    tracing::debug!(event = "git_network_started", stage, target = %crate::logging::safe_url(target_url), timeout_ms = u64::try_from(GIT_TIMEOUT.as_millis()).unwrap_or(u64::MAX), "开始 Git 网络操作");
     let result = run_git_network_inner(git, cwd, args, target_url, log, control, proxy);
     match &result {
-        Ok(out) if out.status.success() => tracing::info!(
+        Ok(out) if out.status.success() => tracing::debug!(
             event = "git_network_completed",
             stage,
             exit_code = out.status.code(),
@@ -380,7 +380,7 @@ fn run_git_network_inner(
             network_attempt = 1
         )
         .entered();
-        tracing::info!(
+        tracing::debug!(
             event = "git_proxy_route_selected",
             route = "inherited",
             "系统代理关闭，保持既有环境"
@@ -391,7 +391,7 @@ fn run_git_network_inner(
         let _route =
             tracing::info_span!("git_network_route", route = "bypass", network_attempt = 1)
                 .entered();
-        tracing::info!(
+        tracing::debug!(
             event = "git_proxy_route_selected",
             route = "bypass",
             "目标命中系统代理例外表"
@@ -415,7 +415,7 @@ fn run_git_network_inner(
             network_attempt = 1
         )
         .entered();
-        tracing::info!(
+        tracing::debug!(
             event = "git_proxy_route_selected",
             route = "system_proxy",
             "通过系统代理尝试 Git 网络操作"
@@ -436,7 +436,7 @@ fn run_git_network_inner(
         }
     };
     if !needs_direct_retry || control.is_cancelled() {
-        tracing::info!(
+        tracing::debug!(
             event = "git_proxy_attempt_finished",
             fallback_needed = needs_direct_retry,
             cancelled = control.is_cancelled(),
@@ -996,7 +996,7 @@ fn try_push(
         log(&format!("git push 输出：\n{entry}"));
     }
     if out.status.success() && !stdout.lines().any(|line| line.starts_with('!')) {
-        tracing::info!(
+        tracing::debug!(
             event = "git_push_classified",
             result = "success",
             "Git 推送结果为成功"
@@ -1092,7 +1092,7 @@ fn fetch_and_merge(
     let stdout = output_text(&out.stdout);
     let stderr = output_text(&out.stderr);
     if out.status.success() {
-        tracing::info!(
+        tracing::debug!(
             event = "git_merge_classified",
             result = "merged",
             "Git 自动合并成功"
@@ -1189,7 +1189,7 @@ fn verify_single_path_commit(git: &Path, root: &Path, paths: &[String]) -> Resul
     seen.sort();
     expected.sort();
     if seen == expected {
-        tracing::info!(
+        tracing::debug!(
             event = "git_commit_verification_completed",
             stage = "commit_verify",
             path_count = seen.len(),
@@ -1256,7 +1256,7 @@ impl Ctx<'_> {
         if ok {
             self.shared.set_stage("重试中");
         }
-        tracing::info!(
+        tracing::debug!(
             event = "git_retry_wait_completed",
             failed_attempt = attempt,
             result = if ok { "retry" } else { "cancelled" },
@@ -1345,10 +1345,10 @@ fn process_change(
     let operation = crate::logging::operation_span("git", "file_change");
     let _entered = operation.enter();
     let started = std::time::Instant::now();
-    tracing::info!(event = "git_file_started", "开始处理一个 Git 文件变更");
+    tracing::debug!(event = "git_file_started", "开始处理一个 Git 文件变更");
     let result = process_change_inner(git, root, change, remote, upstream_branch, ctx);
     match &result {
-        StepOutcome::Done => tracing::info!(
+        StepOutcome::Done => tracing::debug!(
             event = "git_file_completed",
             state = "success",
             elapsed_ms = crate::logging::elapsed_ms(started),
@@ -1458,7 +1458,7 @@ fn process_change_inner(
                         && deletion_fully_staged(git, root, &commit_paths)
                     {
                         (ctx.log)("该删除已由用户预先暂存（索引已无条目），跳过 add 直接提交");
-                        tracing::info!(
+                        tracing::debug!(
                             event = "git_add_skipped",
                             reason = "deletion_already_staged",
                             "删除已完全暂存，跳过 add"
@@ -1569,7 +1569,7 @@ fn process_change_inner(
                 return StepOutcome::Cancelled;
             }
             // G-05：验证本次 commit 只包含当前文件变更
-            tracing::info!(
+            tracing::debug!(
                 event = "git_stage_started",
                 stage = "commit_verify",
                 "开始验证 Git 单文件提交范围"
@@ -1710,7 +1710,7 @@ fn finish_without_changes(git: &Path, info: &RepoInfo, ctx: &Ctx<'_>) -> String 
             return text;
         }
     };
-    tracing::info!(
+    tracing::debug!(
         component = "git",
         event = "git_sync_status_completed",
         stage = "ahead_behind",
@@ -1873,7 +1873,7 @@ fn run_task(
     ));
     // F10/P-03/G-08：任务启动预检——在任何写命令之前核实裸 git push 的实际推送
     // 目标确实是 upstream 远端，且没有会改变推送对象/范围的用户配置（只读检查）。
-    tracing::info!(
+    tracing::debug!(
         event = "git_stage_started",
         stage = "push_target_preflight",
         "开始验证 Git 推送目标策略"
@@ -1890,7 +1890,7 @@ fn run_task(
         shared.set_state("失败");
         return format!("无法开始：{text}");
     }
-    tracing::info!(
+    tracing::debug!(
         event = "git_stage_completed",
         stage = "push_target_preflight",
         result = "allowed",
@@ -1919,7 +1919,7 @@ fn run_task(
         |text| text.trim().to_owned(),
     );
     // 中间态处理（G-06/G-11）
-    tracing::info!(
+    tracing::debug!(
         event = "git_stage_started",
         stage = "middle_state",
         "开始检查 Git 仓库中间态"
@@ -2107,7 +2107,7 @@ fn run_task(
             return text;
         }
     }
-    tracing::info!(
+    tracing::debug!(
         event = "git_stage_completed",
         stage = "middle_state",
         result = "ready",
@@ -2136,7 +2136,7 @@ fn run_task(
         }
     };
     let total = changes.len() as u64;
-    tracing::info!(
+    tracing::debug!(
         event = "git_scan_completed",
         change_count = total,
         "Git 未提交变更扫描完成"

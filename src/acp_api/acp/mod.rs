@@ -360,7 +360,7 @@ impl Actor {
                 },
             );
             self.queue.push_back(id);
-            tracing::info!(event = "acp_request_queued", component = "acp_agent", request_id = %accepted.request_id.0, executing = self.active.len(), waiting = self.queue.len(), "ACP 请求进入调度队列");
+            tracing::debug!(event = "acp_request_queued", component = "acp_agent", request_id = %accepted.request_id.0, executing = self.active.len(), waiting = self.queue.len(), "ACP 请求进入调度队列");
             Ok(accepted)
         })
     }
@@ -478,7 +478,7 @@ impl Actor {
             };
             self.active.insert(key.clone());
             let span = crate::logging::operation_span_with_id("acp_agent", "round", &id.0);
-            tracing::info!(event = "acp_request_execution_started", component = "acp_agent", request_id = %id.0, reused_session = state.is_some(), queue_elapsed_ms = crate::logging::elapsed_ms(request.started), "ACP 排队请求开始执行");
+            tracing::debug!(event = "acp_request_execution_started", component = "acp_agent", request_id = %id.0, reused_session = state.is_some(), queue_elapsed_ms = crate::logging::elapsed_ms(request.started), "ACP 排队请求开始执行");
             rounds.push(
                 round(
                     cx.clone(),
@@ -549,7 +549,7 @@ async fn create_session(
                                 .insert(response.session_id.clone(), selector.id.clone());
                         }
                         if let Ok(selector) = &selector {
-                            tracing::info!(
+                            tracing::debug!(
                                 event = "acp_session_models_received",
                                 component = "acp_agent",
                                 model_count = selector.values.len(),
@@ -701,7 +701,7 @@ let diagnostic_span = tracing::Span::current();
 callbacks.routes.lock().unwrap_or_else(PoisonError::into_inner)
     .spans.insert(state.id.clone(), diagnostic_span.clone());
 let model_started = std::time::Instant::now();
-tracing::info!(event = "acp_model_selection_started", component = "acp_agent", "ACP 会话模型选择开始");
+tracing::debug!(event = "acp_model_selection_started", component = "acp_agent", "ACP 会话模型选择开始");
 cx.prepare_request(SetSessionConfigOptionRequest::new(
     state.id.clone(),
     selector_id.clone(),
@@ -740,7 +740,7 @@ cx.prepare_request(SetSessionConfigOptionRequest::new(
 response.await.map_err(|_| disconnected())
     .and_then(|result| result)
     .inspect_err(|failure| tracing::error!(event = "acp_model_selection_failed", component = "acp_agent", stage = "model_confirmation", error_type = ?failure.kind, elapsed_ms = crate::logging::elapsed_ms(model_started), "ACP 模型选择确认失败"))?;
-tracing::info!(event = "acp_model_selection_completed", component = "acp_agent", status = "confirmed", elapsed_ms = crate::logging::elapsed_ms(model_started), "ACP 会话模型选择已确认");
+tracing::debug!(event = "acp_model_selection_completed", component = "acp_agent", status = "confirmed", elapsed_ms = crate::logging::elapsed_ms(model_started), "ACP 会话模型选择已确认");
 if cancellation.is_cancelled() {
     return Err(error(ServiceErrorKind::Cancelled, "请求已取消"));
 }
@@ -773,7 +773,7 @@ let (reply, mut response) = oneshot::channel();
 let routes = callbacks.routes.clone();
 let session = state.id.clone();
 let prompt_started = std::time::Instant::now();
-tracing::info!(event = "acp_prompt_started", component = "acp_agent", message_count = input.messages.len() - state.history.len(), "ACP 会话提示请求开始");
+tracing::debug!(event = "acp_prompt_started", component = "acp_agent", message_count = input.messages.len() - state.history.len(), "ACP 会话提示请求开始");
 cx.prepare_request(PromptRequest::new(session.clone(), content))
     .on_receiving_result(move |result| async move {
         let route = routes

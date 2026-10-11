@@ -88,7 +88,7 @@ pub(super) fn resume_background() -> Result<(), String> {
         }
     })();
     if let Ok(()) = &result {
-        tracing::info!(
+        tracing::debug!(
             event = "xberg_background_resume_completed",
             elapsed_ms = logging::elapsed_ms(started),
             "后台自动启动状态已恢复"
@@ -576,7 +576,7 @@ fn connect(start: bool, deadline: Instant, quiet: bool) -> Result<File, String> 
             "开始连接共享代理"
         );
     } else {
-        tracing::info!(
+        tracing::debug!(
             event = "xberg_broker_connect_started",
             allow_start = start,
             "开始连接共享代理"
@@ -660,7 +660,7 @@ fn connect(start: bool, deadline: Instant, quiet: bool) -> Result<File, String> 
             elapsed_ms = logging::elapsed_ms(started),
             "共享代理连接完成"
         ),
-        Ok(_) => tracing::info!(
+        Ok(_) => tracing::debug!(
             event = "xberg_broker_connect_completed",
             attempt,
             elapsed_ms = logging::elapsed_ms(started),
@@ -728,7 +728,7 @@ fn read_broker_terminal(
         }
         acknowledged = true;
         state.store(true, Ordering::Release);
-        tracing::info!(
+        tracing::debug!(
             event = "xberg_request_submission_confirmed",
             engine_pid = response["jchtools_xberg_pid"].as_u64(),
             "原请求已登记并排队，可以发送请求级取消"
@@ -762,7 +762,7 @@ fn exchange_with_submission(
                 "共享代理请求消息已发送"
             );
         } else {
-            tracing::info!(
+            tracing::debug!(
                 event = "xberg_request_sent",
                 peer_pid,
                 "共享代理请求消息已发送"
@@ -783,7 +783,7 @@ fn exchange_with_submission(
                 "共享代理响应已接收并验证"
             );
         } else {
-            tracing::info!(
+            tracing::debug!(
                 event = "xberg_response_received",
                 peer_pid,
                 broker_pid = response["jchtools_broker_pid"].as_u64(),
@@ -845,7 +845,7 @@ fn log_response(
             "共享引擎保活完成"
         );
     } else {
-        tracing::info!(
+        tracing::debug!(
             event = "xberg_response_completed",
             side,
             command,
@@ -887,7 +887,7 @@ pub(super) fn request(
             "客户端提交共享引擎请求"
         );
     } else {
-        tracing::info!(
+        tracing::debug!(
             event = "xberg_client_request_started",
             parent_operation_id,
             request_id = id,
@@ -1273,7 +1273,7 @@ impl Engine {
                 for (request, request_span) in incoming {
                     let _request_entered = request_span.enter();
                     let started = Instant::now();
-                    tracing::info!(
+                    tracing::debug!(
                         event = "xberg_engine_write_started",
                         engine_pid,
                         command = super::diagnostic_command(request["command"].as_str()),
@@ -1292,7 +1292,7 @@ impl Engine {
                         fail_pending(&writer_pending, &writer_broken);
                         break;
                     }
-                    tracing::info!(
+                    tracing::debug!(
                         event = "xberg_engine_write_completed",
                         engine_pid,
                         elapsed_ms = logging::elapsed_ms(started),
@@ -1437,7 +1437,7 @@ impl Engine {
     }
     fn submit(&self, request: Value) -> Result<mpsc::Receiver<Value>, String> {
         let started = Instant::now();
-        tracing::info!(
+        tracing::debug!(
             event = "xberg_engine_submit_started",
             engine_pid = self.child.id(),
             command = super::diagnostic_command(request["command"].as_str()),
@@ -1517,7 +1517,7 @@ impl Engine {
             );
             return Err("共享 Xberg 请求队列不可用".into());
         }
-        tracing::info!(
+        tracing::debug!(
             event = "xberg_engine_submit_completed",
             engine_pid = self.child.id(),
             pending = pending.len(),
@@ -1889,7 +1889,7 @@ fn handle(pipe: File, engine: &Mutex<Option<Engine>>, stopping: &AtomicBool) -> 
             "共享代理接收到客户端请求"
         );
     } else {
-        tracing::info!(
+        tracing::debug!(
             event = "xberg_broker_request_started",
             parent_operation_id,
             caller_pid,
@@ -2048,7 +2048,7 @@ fn handle(pipe: File, engine: &Mutex<Option<Engine>>, stopping: &AtomicBool) -> 
                 stage = "submission_acknowledgement";
                 let _guard = IoDeadline::new(QUERY_TIMEOUT)?;
                 write_json(reader.get_mut(), &submission_acknowledgement(&request, pid))?;
-                tracing::info!(
+                tracing::debug!(
                     event = "xberg_broker_submission_acknowledged",
                     engine_pid = pid,
                     "原请求已登记排队，向原连接交付确认"
@@ -2096,7 +2096,7 @@ fn handle(pipe: File, engine: &Mutex<Option<Engine>>, stopping: &AtomicBool) -> 
             elapsed_ms = logging::elapsed_ms(started),
             "共享代理已完成保活响应发送"
         ),
-        Ok(()) => tracing::info!(
+        Ok(()) => tracing::debug!(
             event = "xberg_broker_request_completed",
             caller_pid,
             elapsed_ms = logging::elapsed_ms(started),
@@ -2165,7 +2165,7 @@ pub(super) fn serve() -> Result<(), String> {
         match lock.try_lock_exclusive() {
             Ok(()) => {}
             Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {
-                tracing::info!(
+                tracing::debug!(
                     event = "xberg_broker_already_running",
                     "共享代理已在运行，本进程不重复启动"
                 );
