@@ -19,11 +19,11 @@
 
 ## 入口与命令
 
-本包在 workspace `members` 内但不在 `default-members`，仓库根的 `cargo build` / `cargo test` **不构建、不测试本包**；一切命令走 `--manifest-path`（与 `check.yml`、`acceptance.ps1` 同口径）：
+以下命令从仓库根目录执行，需要根文档所列 Windows Rust 构建条件。本包是 workspace 非默认成员，默认根构建/测试不覆盖；本地 `acceptance.ps1` 显式执行这两类检查，CI 不运行功能测试。列出命令不表示本次已验证：
 
 ```powershell
-cargo test --manifest-path optional/snap-ocr-worker/Cargo.toml --all-targets
-cargo clippy --manifest-path optional/snap-ocr-worker/Cargo.toml --all-targets -- -D warnings
+cargo test --manifest-path optional/snap-ocr-worker/Cargo.toml --all-targets --features test-hooks
+cargo clippy --manifest-path optional/snap-ocr-worker/Cargo.toml --all-targets --features test-hooks -- -D warnings
 ```
 
 - `src/main.rs` 只接受 `--capabilities`（版本握手，打印协议版本 JSON）、`--xberg-broker`（经主程序代理的内部入口）、`--service` / `--service--autostart`（后台服务）；无参启动退出码 2 并提示从主界面启动。bin 目标仅 `snap-ocr-worker`（产品）。
@@ -39,9 +39,9 @@ cargo clippy --manifest-path optional/snap-ocr-worker/Cargo.toml --all-targets -
 ## 本地约定与陷阱
 
 - 仅 Windows（`cfg(windows)` 贯穿服务、截图与托盘）；Slint 锁 `=1.17.1`，与主程序同版本。
-- 界面与错误文案中文；错误按 O-30 分类并去敏，不含截图内容或用户路径。截图字节只在内存经 base64 传子进程（O-29）；Xberg 子进程 stderr 直接丢弃，不进日志。
+- 界面与错误文案中文；错误按 O-30 分类并去敏。截图的隐私边界唯一见 O-29；实现使用内存图像经 base64 传共享引擎，Xberg 子进程 stderr 丢弃，不进日志。
 - 识别经共享 Xberg 运行时代理（XB-14 唯一共享进程，不再直连子进程）；取消、超时与进程退出的语义边界见根仓 `src/xberg_runtime.rs` 与 XB 分区需求，服务侧按 `ClientError` 分类处置并触发重载，不自动重试（XB-08）。
 - 测试专用环境变量与常量：管道前缀 `jchtools-snap-ocr-test-`（测试绝不触碰真实管道与 launcher.json）、`JCHTOOLS_SNAP_OCR_TEST_ASSET_ROOT`（测试资产根覆盖）；`USERNAME` / `USERPROFILE` 用作管道身份哈希回退。
-- 日志经主包 `logging.rs` 落状态目录 `logs/`（按天轮转、保留 14 天，P-10），初始化失败安静退化。
+- 日志编译复用主包 `logging.rs`，记录与保留边界唯一见合同 P-10；修改共享模块时须同时核对主包和服务调用。
 - lint 硬门禁在本 crate `[lints]` 独立声明：`warnings`、clippy pedantic 及 `unwrap_used` / `expect_used` / `dbg_macro` / `todo` / `unimplemented` 全 deny，编辑须维持零告警；本 crate 不设 `perf-tracing` 特性，但保留共享 `logging.rs` 引用 cfg 所需的 `unexpected_cfgs` check-cfg 声明。
 - 源码注释中的任务编号（O-xx / XB-xx / P-xx）是事实规格来源，改动前先查对应需求文档。
