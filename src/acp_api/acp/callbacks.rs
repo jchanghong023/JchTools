@@ -22,6 +22,7 @@ use std::{
 };
 use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
+use tracing::Instrument;
 
 pub(super) fn invalid(message: &str) -> agent_client_protocol::Error {
     agent_client_protocol::Error::invalid_params().data(message.to_owned())
@@ -42,6 +43,7 @@ pub(super) struct Routes {
     pub model_id: Option<SessionConfigId>,
     pub models: HashMap<SessionId, SessionModel>,
     pub active: HashMap<SessionId, Route>,
+    pub spans: HashMap<SessionId, tracing::Span>,
 }
 #[derive(Clone, Copy)]
 enum CallbackLifetime {
@@ -66,15 +68,29 @@ impl Callbacks {
             tasks: Arc::new(Mutex::new(HashMap::new())),
         }
     }
+    fn span(&self, session: &SessionId) -> tracing::Span {
+        self.routes
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .spans
+            .get(session)
+            .cloned()
+            .unwrap_or_else(|| crate::logging::operation_span("acp_callback", "unrouted_callback"))
+    }
     fn spawn(
         &self,
         session: SessionId,
         lifetime: CallbackLifetime,
         future: impl Future<Output = Result<(), agent_client_protocol::Error>> + Send + 'static,
     ) {
-        let handle = tokio::spawn(async move {
-            let _ = future.await;
-        });
+        let span = self.span(&session);
+        let handle = tokio::spawn(
+            async move {
+                let _ = crate::acp_api::diagnostics::async_call("acp_callback", "respond", future)
+                    .await;
+            }
+            .instrument(span),
+        );
         self.tasks
             .lock()
             .unwrap_or_else(PoisonError::into_inner)
@@ -87,45 +103,51 @@ impl Callbacks {
         &self,
         session: &SessionId,
     ) -> Result<(), agent_client_protocol::Error> {
-        let mut result = Ok(());
-        let tasks = {
-            let mut sessions = self.tasks.lock().unwrap_or_else(PoisonError::into_inner);
-            let tasks = sessions.entry(session.clone()).or_default();
-            let mut finished = Vec::new();
-            let mut index = 0;
-            while index < tasks.len() {
-                if matches!(tasks[index].lifetime, CallbackLifetime::Round)
-                    || tasks[index].handle.is_finished()
-                {
-                    finished.push(tasks.swap_remove(index).handle);
-                } else {
-                    index += 1;
+        crate::acp_api::diagnostics::async_call("acp_callback", "complete_round", async {
+            let mut result = Ok(());
+            let tasks = {
+                let mut sessions = self.tasks.lock().unwrap_or_else(PoisonError::into_inner);
+                let tasks = sessions.entry(session.clone()).or_default();
+                let mut finished = Vec::new();
+                let mut index = 0;
+                while index < tasks.len() {
+                    if matches!(tasks[index].lifetime, CallbackLifetime::Round)
+                        || tasks[index].handle.is_finished()
+                    {
+                        finished.push(tasks.swap_remove(index).handle);
+                    } else {
+                        index += 1;
+                    }
+                }
+                finished
+            };
+            for task in tasks {
+                if task.await.is_err() && result.is_ok() {
+                    result = Err(io_error("ACP 回调收尾失败"));
                 }
             }
-            finished
-        };
-        for task in tasks {
-            if task.await.is_err() && result.is_ok() {
-                result = Err(io_error("ACP 回调收尾失败"));
-            }
-        }
-        result
+            result
+        })
+        .await
     }
     pub(super) async fn shutdown(&self) -> Result<(), agent_client_protocol::Error> {
-        let mut result = self.terminals.shutdown().await;
-        let tasks = self
-            .tasks
-            .lock()
-            .unwrap_or_else(PoisonError::into_inner)
-            .drain()
-            .flat_map(|(_, tasks)| tasks)
-            .collect::<Vec<_>>();
-        for task in tasks {
-            if task.handle.await.is_err() && result.is_ok() {
-                result = Err(io_error("ACP 回调收尾失败"));
+        crate::acp_api::diagnostics::async_call("acp_callback", "shutdown", async {
+            let mut result = self.terminals.shutdown().await;
+            let tasks = self
+                .tasks
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner)
+                .drain()
+                .flat_map(|(_, tasks)| tasks)
+                .collect::<Vec<_>>();
+            for task in tasks {
+                if task.handle.await.is_err() && result.is_ok() {
+                    result = Err(io_error("ACP 回调收尾失败"));
+                }
             }
-        }
-        result
+            result
+        })
+        .await
     }
     pub(super) fn check(&self, session: &SessionId) -> Result<(), agent_client_protocol::Error> {
         if self
@@ -138,10 +160,26 @@ impl Callbacks {
         {
             Ok(())
         } else {
+            tracing::error!(
+                event = "acp_callback_route_failed",
+                component = "acp_callback",
+                stage = "session_route",
+                error_type = "inactive_round",
+                "ACP 回调没有有效的在途轮次"
+            );
             Err(invalid("ACP 会话没有有效的在途轮次"))
         }
     }
     pub(super) fn fail(&self, session: &SessionId, message: &str) {
+        let span = self.span(session);
+        let _entered = span.enter();
+        tracing::error!(
+            event = "acp_callback_failed",
+            component = "acp_callback",
+            stage = "callback_protocol",
+            error_type = "unsupported_or_invalid_callback",
+            "ACP 回调无法完成，取消在途请求"
+        );
         if let Some(route) = self
             .routes
             .lock()
@@ -174,6 +212,22 @@ impl Callbacks {
                         )
                     })
                     .and_then(model_selector_from_option);
+                if updated.is_err() {
+                    let span = routes
+                        .spans
+                        .get(&notification.session_id)
+                        .cloned()
+                        .unwrap_or_else(tracing::Span::none);
+                    span.in_scope(|| {
+                        tracing::error!(
+                            event = "acp_model_update_failed",
+                            component = "acp_callback",
+                            stage = "config_notification",
+                            error_type = "models_unavailable",
+                            "ACP 会话模型通知无效"
+                        )
+                    });
+                }
                 *model.lock().unwrap_or_else(PoisonError::into_inner) = updated;
             }
             return;
@@ -200,6 +254,13 @@ impl Callbacks {
                         "Agent 返回了不支持的非文本内容",
                     ));
                     route.cancellation.cancel();
+                    tracing::error!(
+                        event = "acp_notification_failed",
+                        component = "acp_callback",
+                        stage = "content_type",
+                        error_type = "unsupported_content",
+                        "ACP Agent 返回不支持的内容类型"
+                    );
                 }
             }
         }
@@ -208,73 +269,107 @@ impl Callbacks {
         &self,
         request: ReadTextFileRequest,
     ) -> Result<ReadTextFileResponse, agent_client_protocol::Error> {
-        self.check(&request.session_id)?;
-        if !request.path.is_absolute() || request.line == Some(0) {
-            return Err(invalid("文件路径须为绝对路径，起始行须大于零"));
-        }
-        let path = request.path;
-        let line = request.line;
-        let limit = request.limit;
-        let content = tokio::task::spawn_blocking(move || {
-            let file = std::fs::File::open(path).map_err(|_| io_error("文件读取失败"))?;
-            read_range(BufReader::new(file), line, limit)
+        crate::acp_api::diagnostics::async_call("acp_callback", "read", async {
+            self.check(&request.session_id)?;
+            if !request.path.is_absolute() || request.line == Some(0) {
+                return Err(invalid("文件路径须为绝对路径，起始行须大于零"));
+            }
+            let path = request.path;
+            let line = request.line;
+            let limit = request.limit;
+            let span = tracing::Span::current();
+            let content = tokio::task::spawn_blocking(move || {
+                span.in_scope(|| {
+                    let file = std::fs::File::open(path).map_err(|_| io_error("文件读取失败"))?;
+                    read_range(BufReader::new(file), line, limit)
+                })
+            })
+            .await
+            .map_err(|_| io_error("文件读取任务失败"))??;
+            tracing::info!(
+                event = "acp_file_read_completed",
+                component = "acp_callback",
+                size_bytes = content.len(),
+                "ACP 文件读取完成"
+            );
+            Ok(ReadTextFileResponse::new(content))
         })
         .await
-        .map_err(|_| io_error("文件读取任务失败"))??;
-        Ok(ReadTextFileResponse::new(content))
     }
     async fn write(
         &self,
         request: WriteTextFileRequest,
     ) -> Result<WriteTextFileResponse, agent_client_protocol::Error> {
-        self.check(&request.session_id)?;
-        if !request.path.is_absolute() {
-            return Err(invalid("文件路径须为绝对路径"));
-        }
-        tokio::task::spawn_blocking(move || {
-            std::fs::write(request.path, request.content).map_err(|_| io_error("文件写入失败"))
+        crate::acp_api::diagnostics::async_call("acp_callback", "write", async {
+            self.check(&request.session_id)?;
+            if !request.path.is_absolute() {
+                return Err(invalid("文件路径须为绝对路径"));
+            }
+            let span = tracing::Span::current();
+            tracing::info!(
+                event = "acp_file_write_started",
+                component = "acp_callback",
+                size_bytes = request.content.len(),
+                "ACP 文件写入开始"
+            );
+            tokio::task::spawn_blocking(move || {
+                span.in_scope(|| {
+                    std::fs::write(request.path, request.content)
+                        .map_err(|_| io_error("文件写入失败"))
+                })
+            })
+            .await
+            .map_err(|_| io_error("文件写入任务失败"))??;
+            Ok(WriteTextFileResponse::new())
         })
         .await
-        .map_err(|_| io_error("文件写入任务失败"))??;
-        Ok(WriteTextFileResponse::new())
     }
     fn permission(
         &self,
         request: &RequestPermissionRequest,
     ) -> Result<RequestPermissionResponse, agent_client_protocol::Error> {
-        {
-            let routes = self.routes.lock().unwrap_or_else(PoisonError::into_inner);
-            if routes
-                .active
-                .get(&request.session_id)
-                .is_some_and(|route| route.cancellation.is_cancelled())
+        crate::acp_api::diagnostics::call("acp_callback", "permission", || {
             {
-                return Ok(RequestPermissionResponse::new(
-                    RequestPermissionOutcome::Cancelled,
-                ));
+                let routes = self.routes.lock().unwrap_or_else(PoisonError::into_inner);
+                if routes
+                    .active
+                    .get(&request.session_id)
+                    .is_some_and(|route| route.cancellation.is_cancelled())
+                {
+                    tracing::info!(
+                        event = "acp_permission_completed",
+                        component = "acp_callback",
+                        outcome = "cancelled",
+                        "ACP 权限回调已取消"
+                    );
+                    return Ok(RequestPermissionResponse::new(
+                        RequestPermissionOutcome::Cancelled,
+                    ));
+                }
             }
-        }
-        self.check(&request.session_id)?;
-        let option = request
-            .options
-            .iter()
-            .find(|o| o.kind == PermissionOptionKind::AllowAlways)
-            .or_else(|| {
-                request
-                    .options
-                    .iter()
-                    .find(|o| o.kind == PermissionOptionKind::AllowOnce)
-            });
-        if let Some(option) = option {
-            Ok(RequestPermissionResponse::new(
-                RequestPermissionOutcome::Selected(SelectedPermissionOutcome::new(
-                    option.option_id.clone(),
-                )),
-            ))
-        } else {
-            self.fail(&request.session_id, "Agent 权限请求没有允许选项");
-            Err(invalid("Agent 权限请求没有允许选项"))
-        }
+            self.check(&request.session_id)?;
+            let option = request
+                .options
+                .iter()
+                .find(|o| o.kind == PermissionOptionKind::AllowAlways)
+                .or_else(|| {
+                    request
+                        .options
+                        .iter()
+                        .find(|o| o.kind == PermissionOptionKind::AllowOnce)
+                });
+            if let Some(option) = option {
+                tracing::info!(event = "acp_permission_completed", component = "acp_callback", outcome = "selected_allow", permission_kind = ?option.kind, option_count = request.options.len(), "ACP 权限回调已选择允许选项");
+                Ok(RequestPermissionResponse::new(
+                    RequestPermissionOutcome::Selected(SelectedPermissionOutcome::new(
+                        option.option_id.clone(),
+                    )),
+                ))
+            } else {
+                self.fail(&request.session_id, "Agent 权限请求没有允许选项");
+                Err(invalid("Agent 权限请求没有允许选项"))
+            }
+        })
     }
 }
 fn read_range(
@@ -333,14 +428,16 @@ pub(super) async fn connect<R>(
         .builder()
         .on_receive_notification(
             async move |notification: SessionNotification, _cx| {
-                notifications.notification(notification);
+                let span = notifications.span(&notification.session_id);
+                span.in_scope(|| notifications.notification(notification));
                 Ok(())
             },
             agent_client_protocol::on_receive_notification!(),
         )
         .on_receive_request(
             async move |request: RequestPermissionRequest, responder, _cx| {
-                responder.respond_with_result(permissions.permission(&request))
+                let span = permissions.span(&request.session_id);
+                span.in_scope(|| responder.respond_with_result(permissions.permission(&request)))
             },
             agent_client_protocol::on_receive_request!(),
         )
@@ -388,7 +485,8 @@ pub(super) async fn connect<R>(
         )
         .on_receive_request(
             async move |request: TerminalOutputRequest, responder, _cx| {
-                responder.respond_with_result(outputs.terminals.output(&request))
+                let span = outputs.span(&request.session_id);
+                span.in_scope(|| responder.respond_with_result(outputs.terminals.output(&request)))
             },
             agent_client_protocol::on_receive_request!(),
         )

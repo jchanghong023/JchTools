@@ -46,6 +46,59 @@ const HASH_BATCH: usize = 256;
 /// 64 是实测折中：256 批次只再快 6%，但崩溃/取消时未提交记录的窗口放大 4 倍；
 /// 64 与界面计划页（101 行）同量级，用户看到的进度滞后不超过一页。
 const APPLY_BATCH: usize = 64;
+/// 只观察任务边界；错误正文可能来自文件或子进程，因此仅输出类型与系统码。
+fn observe<T>(
+    operation: &'static str,
+    control: Option<&Control>,
+    run: impl FnOnce(&mut &'static str) -> Result<T>,
+) -> Result<T> {
+    let span = crate::logging::operation_span("engine", operation);
+    let _entered = span.enter();
+    let started = std::time::Instant::now();
+    let mut stage = "input";
+    tracing::info!(event = "file_task_started", operation, "文件任务开始");
+    let result = run(&mut stage);
+    let elapsed_ms = crate::logging::elapsed_ms(started);
+    match &result {
+        Ok(_) => tracing::info!(
+            event = "file_task_completed",
+            operation,
+            stage,
+            elapsed_ms,
+            "文件任务完成"
+        ),
+        Err(_) if control.is_some_and(Control::is_cancelled) => {
+            tracing::info!(
+                event = "file_task_cancelled",
+                operation,
+                stage,
+                elapsed_ms,
+                "文件任务已取消"
+            );
+        }
+        Err(error) => {
+            let io = error
+                .chain()
+                .find_map(|cause| cause.downcast_ref::<std::io::Error>());
+            tracing::error!(
+                event = "file_task_failed",
+                operation,
+                stage,
+                elapsed_ms,
+                error_type = if io.is_some() {
+                    "io"
+                } else if error.chain().any(|cause| cause.is::<rusqlite::Error>()) {
+                    "database"
+                } else {
+                    "task_boundary"
+                },
+                error_code = io.and_then(std::io::Error::raw_os_error),
+                "文件任务失败"
+            );
+        }
+    }
+    result
+}
 impl Job {
     pub fn log(
         &self,
@@ -56,10 +109,21 @@ impl Job {
         reason: &str,
         size: u64,
     ) -> Result<()> {
-        if result == "失败" {
-            // P-10：逐文件失败原因落盘——整理执行/清理与解压的失败都汇聚到
-            // 本口径，Agent 只凭日志即可指认失败的文件与原因。
-            tracing::warn!(phase, source, target, reason, "关键任务逐项失败");
+        let task_id = self
+            .db
+            .directory
+            .file_name()
+            .unwrap_or_default()
+            .to_string_lossy();
+        if result == "失败" || result.contains("失败") {
+            tracing::warn!(event = "task_item_failed", task_id = %task_id, phase,
+                source = %crate::logging::safe_error(source),
+                target = %crate::logging::safe_error(target), size,
+                result, error_type = "task_item_boundary", "关键任务逐项失败");
+        } else {
+            tracing::info!(event = "task_item_result", task_id = %task_id, phase,
+                source = %crate::logging::safe_error(source),
+                target = %crate::logging::safe_error(target), result, size, "任务逐项结果");
         }
         self.db.log(phase, source, target, result, reason, size)?;
         self.context.emit(Event::Log(format!(
@@ -80,44 +144,50 @@ impl Job {
         reason: &str,
         physical_free: bool,
     ) -> Result<DeleteResult> {
-        let relative = fsutil::relative_string(&self.root, path)?;
-        fsutil::safe_join(&self.root, &relative)?;
-        let size = expected.map_or(0, |s| s.size);
-        // Record intent before a mutation. This is an audit trail, not a recovery journal.
-        self.log("删除", &relative, "", "准备", reason, size)?;
-        let result = platform::remove(path, mode, &self.context.control)?;
-        match result {
-            DeleteResult::Kept => {
-                self.summary.skipped += 1;
-            }
-            // 多硬链接源的内容仍由其他链接持有：逻辑大小与 candidate_bytes 同口径，
-            // physical_free=false（硬链接替换）时不计入 permanent_bytes，
-            // 避免「已永久删除字节」虚高（S-06）。
-            DeleteResult::Permanent => {
-                self.summary.deleted += 1;
-                if physical_free && expected.is_none_or(|s| s.links <= 1) {
-                    self.summary.permanent_bytes =
-                        self.summary.permanent_bytes.saturating_add(size);
+        let control = self.context.control.clone();
+        observe("delete_path", Some(&control), |stage| {
+            *stage = "delete_validation_or_audit";
+            let relative = fsutil::relative_string(&self.root, path)?;
+            fsutil::safe_join(&self.root, &relative)?;
+            let size = expected.map_or(0, |s| s.size);
+            // Record intent before a mutation. This is an audit trail, not a recovery journal.
+            self.log("删除", &relative, "", "准备", reason, size)?;
+            *stage = "filesystem_delete";
+            let result = platform::remove(path, mode, &self.context.control)?;
+            match result {
+                DeleteResult::Kept => {
+                    self.summary.skipped += 1;
+                }
+                // 多硬链接源的内容仍由其他链接持有：逻辑大小与 candidate_bytes 同口径，
+                // physical_free=false（硬链接替换）时不计入 permanent_bytes，
+                // 避免「已永久删除字节」虚高（S-06）。
+                DeleteResult::Permanent => {
+                    self.summary.deleted += 1;
+                    if physical_free && expected.is_none_or(|s| s.links <= 1) {
+                        self.summary.permanent_bytes =
+                            self.summary.permanent_bytes.saturating_add(size);
+                    }
                 }
             }
-        }
-        self.log(
-            "删除",
-            &relative,
-            "",
-            match result {
-                DeleteResult::Kept => "保留",
-                DeleteResult::Permanent => "已永久删除",
-            },
-            reason,
-            size,
-        )?;
-        // 已经不在磁盘上的文件不能再参与后续按名/按大小的查找：否则同名成员合入时会去读取
-        // 一个刚被删除的路径，把整包解压误判为失败。
-        if result != DeleteResult::Kept {
-            self.db.deactivate_file_rel(&relative)?;
-        }
-        Ok(result)
+            self.log(
+                "删除",
+                &relative,
+                "",
+                match result {
+                    DeleteResult::Kept => "保留",
+                    DeleteResult::Permanent => "已永久删除",
+                },
+                reason,
+                size,
+            )?;
+            // 已经不在磁盘上的文件不能再参与后续按名/按大小的查找：否则同名成员合入时会去读取
+            // 一个刚被删除的路径，把整包解压误判为失败。
+            *stage = "delete_database_finalize";
+            if result != DeleteResult::Kept {
+                self.db.deactivate_file_rel(&relative)?;
+            }
+            Ok(result)
+        })
     }
 }
 #[derive(Debug, Clone)]
@@ -252,28 +322,57 @@ fn create_task_db(
 /// 必须能区分「已取消」和「失败」，否则事后检查会误判；三个容错写库失败均不掩盖原错误。
 fn record_task_failure(job: &mut Job, error: &anyhow::Error) {
     let cancelled = job.context.control.is_cancelled();
-    // P-10：任务级失败终态落盘（取消是用户意图，不记失败）。
-    if !cancelled {
-        tracing::error!(reason = %format!("{error:#}"), "关键任务以失败收场");
-    }
-    let _ = job.db.set("summary", &job.summary);
-    let _ = job
-        .db
-        .set("status", &if cancelled { "cancelled" } else { "failed" });
-    let _ = job.db.log(
-        "任务",
-        "",
-        "",
-        if cancelled { "已取消" } else { "失败" },
-        &format!("{error:#}"),
-        0,
+    tracing::info!(
+        event = "task_state_changed",
+        state = if cancelled { "cancelled" } else { "failed" },
+        errors = job.summary.errors,
+        "记录任务终态"
     );
+    if job.db.set("summary", &job.summary).is_err() {
+        tracing::warn!(
+            event = "task_failure_record_failed",
+            stage = "summary",
+            error_type = "database",
+            "任务失败汇总写入失败"
+        );
+    }
+    if job
+        .db
+        .set("status", &if cancelled { "cancelled" } else { "failed" })
+        .is_err()
+    {
+        tracing::warn!(
+            event = "task_failure_record_failed",
+            stage = "status",
+            error_type = "database",
+            "任务失败状态写入失败"
+        );
+    }
+    if job
+        .db
+        .log(
+            "任务",
+            "",
+            "",
+            if cancelled { "已取消" } else { "失败" },
+            &format!("{error:#}"),
+            0,
+        )
+        .is_err()
+    {
+        tracing::warn!(
+            event = "task_failure_record_failed",
+            stage = "audit",
+            error_type = "database",
+            "任务失败审计写入失败"
+        );
+    }
 }
 /// 独立状态目录使核心可在无 GUI 下测试。目录整理不解压（C-01），不再接受引擎注入；
 /// 真实引擎用例走 extract_run_at（E-02：引擎只能按固定顺序获得，不向用户提供路径参数）。
 #[cfg_attr(
     feature = "perf-tracing",
-    tracing::instrument(target = "perf", name = "organize_analyze", skip_all, err)
+    tracing::instrument(target = "perf", name = "organize_analyze", skip_all)
 )]
 pub fn prepare_at(
     root: &Path,
@@ -281,8 +380,12 @@ pub fn prepare_at(
     context: TaskContext,
     state: &Path,
 ) -> Result<TaskResult> {
-    let protected = resolve_protection()?;
-    prepare_at_with(root, config, context, state, protected.as_deref())
+    let control = context.control.clone();
+    observe("organize_preflight", Some(&control), |stage| {
+        *stage = "protection";
+        let protected = resolve_protection()?;
+        prepare_at_with(root, config, context, state, protected.as_deref())
+    })
 }
 /// S-05 受保护目录参数化变体（测试注入合成受保护目录），其余行为与 [`prepare_at`] 一致。
 fn prepare_at_with(
@@ -292,58 +395,81 @@ fn prepare_at_with(
     state: &Path,
     protected: Option<&Path>,
 ) -> Result<TaskResult> {
-    let (root, protected) = preflight_root(root, &config, protected, false)?;
-    let (_guard, mut job) = create_task_db(state, &root, config, context, "analyzing")?;
-    let directory = job.db.directory.clone();
-    let result = (|| {
-        // C-01：分析阶段只读，不做任何清扫（含本工具崩溃残留的硬链接临时文件——
-        // 它们被扫描永久剪枝，不影响计划正确性；清扫统一在 apply_with 执行前进行）。
-        // C-01：目录整理的分析阶段只读——不解压（解压职责整体移交「递归解压」工具，X-01），
-        // 扫描即终态；树里既有压缩包按普通文件参与后续去重/归类。
-        scan(&mut job, false, state, protected.as_deref())?;
-        hash_candidates(&mut job)?;
-        job.context
-            .status("生成去重、冲突、归类和清理计划（尚未执行这些操作）");
-        job.db.conn.execute_batch("BEGIN IMMEDIATE")?;
-        match planner::build(&mut job) {
-            Ok(()) => job.db.conn.execute_batch("COMMIT")?,
-            Err(error) => {
-                let _ = job.db.conn.execute_batch("ROLLBACK");
-                return Err(error);
-            }
-        }
-        job.context.control.checkpoint()?;
-        job.db.set("summary", &job.summary)?;
-        job.db.set("status", &"ready")?;
-        job.log(
-            "计划",
-            "",
-            "",
-            "待确认",
-            "分析完成（只读，未改动任何文件）；去重、移动和清理等待确认",
-            0,
-        )?;
-        #[cfg(feature = "perf-tracing")]
-        crate::perf::analyze_done(
-            job.summary.scanned,
-            job.summary.scanned_bytes,
-            job.summary.errors,
-        );
+    let control = context.control.clone();
+    observe("organize_analyze", Some(&control), |stage| {
+        let (root, protected) = preflight_root(root, &config, protected, false)?;
+        *stage = "task_database";
+        let (_guard, mut job) = create_task_db(state, &root, config, context, "analyzing")?;
+        let directory = job.db.directory.clone();
+        let task_span = tracing::info_span!("file_task", task_id = %directory.file_name().unwrap_or_default().to_string_lossy());
+        let _task_entered = task_span.enter();
         tracing::info!(
-            scanned = job.summary.scanned,
-            bytes = job.summary.scanned_bytes,
-            errors = job.summary.errors,
-            "目录整理分析完成"
+            event = "task_created",
+            state = "analyzing",
+            "分析任务已建立"
         );
-        Ok(TaskResult {
-            directory: directory.clone(),
-            summary: job.summary.clone(),
-        })
-    })();
-    if let Err(error) = &result {
-        record_task_failure(&mut job, error);
-    }
-    result
+        let result = (|| {
+            // C-01：分析阶段只读，不做任何清扫（含本工具崩溃残留的硬链接临时文件——
+            // 它们被扫描永久剪枝，不影响计划正确性；清扫统一在 apply_with 执行前进行）。
+            // C-01：目录整理的分析阶段只读——不解压（解压职责整体移交「递归解压」工具，X-01），
+            // 扫描即终态；树里既有压缩包按普通文件参与后续去重/归类。
+            *stage = "scan";
+            scan(&mut job, false, state, protected.as_deref())?;
+            *stage = "hash";
+            hash_candidates(&mut job)?;
+            job.context
+                .status("生成去重、冲突、归类和清理计划（尚未执行这些操作）");
+            *stage = "plan";
+            job.db.conn.execute_batch("BEGIN IMMEDIATE")?;
+            match planner::build(&mut job) {
+                Ok(()) => job.db.conn.execute_batch("COMMIT")?,
+                Err(error) => {
+                    if job.db.conn.execute_batch("ROLLBACK").is_err() {
+                        tracing::warn!(
+                            event = "task_transaction_cleanup_failed",
+                            stage = "plan_rollback",
+                            error_type = "database",
+                            "计划失败后的事务回滚失败"
+                        );
+                    }
+                    return Err(error);
+                }
+            }
+            job.context.control.checkpoint()?;
+            *stage = "finalize_database";
+            job.db.set("summary", &job.summary)?;
+            job.db.set("status", &"ready")?;
+            job.log(
+                "计划",
+                "",
+                "",
+                "待确认",
+                "分析完成（只读，未改动任何文件）；去重、移动和清理等待确认",
+                0,
+            )?;
+            #[cfg(feature = "perf-tracing")]
+            crate::perf::analyze_done(
+                job.summary.scanned,
+                job.summary.scanned_bytes,
+                job.summary.errors,
+            );
+            tracing::info!(
+                event = "organize_analyze_summary",
+                scanned = job.summary.scanned,
+                bytes = job.summary.scanned_bytes,
+                errors = job.summary.errors,
+                "目录整理分析完成"
+            );
+            Ok(TaskResult {
+                directory: directory.clone(),
+                summary: job.summary.clone(),
+            })
+        })();
+        if let Err(error) = &result {
+            record_task_failure(&mut job, error);
+        }
+        result
+    })
 }
 /// 「递归解压」工具的一段式执行（X-02）：确认后连续运行到结束——扫描登记压缩包、
 /// 就地解压（X-03）、成功原包按处置策略处理（X-05 默认永久删除）、失败原包移入
@@ -359,19 +485,23 @@ pub fn extract_run_at(
     state: &Path,
     engine_path: Option<&Path>,
 ) -> Result<TaskResult> {
-    let protected = resolve_protection()?;
-    extract_run_with(
-        root,
-        config,
-        context,
-        state,
-        engine_path,
-        protected.as_deref(),
-    )
+    let control = context.control.clone();
+    observe("extract_preflight", Some(&control), |stage| {
+        *stage = "protection";
+        let protected = resolve_protection()?;
+        extract_run_with(
+            root,
+            config,
+            context,
+            state,
+            engine_path,
+            protected.as_deref(),
+        )
+    })
 }
 #[cfg_attr(
     feature = "perf-tracing",
-    tracing::instrument(target = "perf", name = "archive_extract", skip_all, err)
+    tracing::instrument(target = "perf", name = "archive_extract", skip_all)
 )]
 fn extract_run_with(
     root: &Path,
@@ -381,68 +511,83 @@ fn extract_run_with(
     engine_path: Option<&Path>,
     protected: Option<&Path>,
 ) -> Result<TaskResult> {
-    let (root, protected) = preflight_root(root, &config, protected, true)?;
-    let (_guard, mut job) = create_task_db(state, &root, config, context, "executing")?;
-    let directory = job.db.directory.clone();
-    let result = (|| {
-        scan(&mut job, true, state, protected.as_deref())?;
-        let count: i64 = job.db.conn.query_row(
-            "SELECT COUNT(*) FROM archives WHERE state='pending'",
-            [],
-            |r| r.get(0),
-        )?;
-        if count > 0 {
-            archive::extract_queued(&mut job, || match engine_path {
-                Some(path) => SevenZip::with_executable(path),
-                None => SevenZip::from_bundle(),
-            })?;
-        } else {
-            job.log(
-                "解压",
-                "",
-                "",
-                "提示",
-                "所选目录（按当前扫描范围）没有发现压缩包；未做任何改动",
-                0,
+    let control = context.control.clone();
+    observe("archive_extract", Some(&control), |stage| {
+        let (root, protected) = preflight_root(root, &config, protected, true)?;
+        *stage = "task_database";
+        let (_guard, mut job) = create_task_db(state, &root, config, context, "executing")?;
+        let directory = job.db.directory.clone();
+        let task_span = tracing::info_span!("file_task", task_id = %directory.file_name().unwrap_or_default().to_string_lossy());
+        let _task_entered = task_span.enter();
+        tracing::info!(
+            event = "task_created",
+            state = "executing",
+            "解压任务已建立"
+        );
+        let result = (|| {
+            *stage = "scan";
+            scan(&mut job, true, state, protected.as_deref())?;
+            let count: i64 = job.db.conn.query_row(
+                "SELECT COUNT(*) FROM archives WHERE state='pending'",
+                [],
+                |r| r.get(0),
             )?;
-        }
-        job.db.set("summary", &job.summary)?;
-        job.log(
-            "任务",
-            "",
-            "",
-            "完成",
-            &format!(
+            if count > 0 {
+                *stage = "extract_queue";
+                archive::extract_queued(&mut job, || match engine_path {
+                    Some(path) => SevenZip::with_executable(path),
+                    None => SevenZip::from_bundle(),
+                })?;
+            } else {
+                job.log(
+                    "解压",
+                    "",
+                    "",
+                    "提示",
+                    "所选目录（按当前扫描范围）没有发现压缩包；未做任何改动",
+                    0,
+                )?;
+            }
+            *stage = "finalize_database";
+            job.db.set("summary", &job.summary)?;
+            job.log(
+                "任务",
+                "",
+                "",
+                "完成",
+                &format!(
                 "解压结束：成功 {} 包（成功原包及分卷已永久删除）；未完全解开并移入「{}」 {} 包",
                 job.summary.archives_ok,
                 archive::QUARANTINE_DIR_NAME,
                 job.summary.archives_failed
             ),
-            0,
-        )?;
-        #[cfg(feature = "perf-tracing")]
-        crate::perf::extract_done(
-            job.summary.scanned,
-            job.summary.archives_ok,
-            job.summary.archives_failed,
-        );
-        tracing::info!(
-            scanned = job.summary.scanned,
-            ok = job.summary.archives_ok,
-            failed = job.summary.archives_failed,
-            "递归解压结束"
-        );
-        Ok(TaskResult {
-            directory: directory.clone(),
-            summary: job.summary.clone(),
-        })
-    })();
-    if let Err(error) = &result {
-        record_task_failure(&mut job, error);
-    } else {
-        job.db.set("status", &"finished")?;
-    }
-    result
+                0,
+            )?;
+            #[cfg(feature = "perf-tracing")]
+            crate::perf::extract_done(
+                job.summary.scanned,
+                job.summary.archives_ok,
+                job.summary.archives_failed,
+            );
+            tracing::info!(
+                event = "archive_extract_summary",
+                scanned = job.summary.scanned,
+                ok = job.summary.archives_ok,
+                failed = job.summary.archives_failed,
+                "递归解压结束"
+            );
+            Ok(TaskResult {
+                directory: directory.clone(),
+                summary: job.summary.clone(),
+            })
+        })();
+        if let Err(error) = &result {
+            record_task_failure(&mut job, error);
+        } else {
+            job.db.set("status", &"finished")?;
+        }
+        result
+    })
 }
 /// 确认框用的压缩包计数（X-02）：只读快速清点，与正式扫描同一套过滤口径
 /// （递归/隐藏/系统/排除规则/跳过「解压失败」/Git 整树排除/状态与程序目录剪枝，X-07）。
@@ -452,8 +597,16 @@ fn extract_run_with(
     tracing::instrument(target = "perf", name = "count_archives", skip_all)
 )]
 pub fn count_archives(root: &Path, config: &Config) -> Result<u64> {
-    let protected = resolve_protection()?;
-    count_archives_with(root, config, protected.as_deref())
+    observe("count_archives", None, |stage| {
+        *stage = "protection";
+        let protected = resolve_protection()?;
+        *stage = "scan";
+        let result = count_archives_with(root, config, protected.as_deref());
+        if let Ok(count) = &result {
+            tracing::info!(event = "archive_count_result", count, "压缩包清点完成");
+        }
+        result
+    })
 }
 /// S-05 受保护目录参数化变体（测试注入合成受保护目录），其余行为与 [`count_archives`] 一致。
 fn count_archives_with(root: &Path, config: &Config, protected: Option<&Path>) -> Result<u64> {
@@ -752,6 +905,10 @@ fn walk_dir<'a>(
         return;
     }
     if let Err(error) = git_boundary {
+        tracing::error!(event = "scan_item_failed", stage = "git_boundary",
+            source = %crate::logging::safe_error(&rel), error_type = "filesystem_boundary",
+            error_code = error.chain().find_map(|cause| cause.downcast_ref::<std::io::Error>()).and_then(std::io::Error::raw_os_error),
+            "扫描无法判定Git边界，整树跳过并停止任务");
         // 边界无法判定：不得继续遍历该目录（内容未知），如实记录并整树跳过。
         let mut sink = lock_sink(ctx.sink);
         sink.notes.push(ScanNote {
@@ -766,6 +923,9 @@ fn walk_dir<'a>(
     let read = match fs::read_dir(dir) {
         Ok(read) => read,
         Err(error) => {
+            tracing::warn!(event = "scan_item_failed", stage = "directory_read",
+                source = %crate::logging::safe_error(&rel), error_type = "io", error_code = error.raw_os_error(),
+                "扫描目录无法读取，保留该目录");
             let mut sink = lock_sink(ctx.sink);
             sink.notes.push(ScanNote {
                 path: dir.display().to_string(),
@@ -786,6 +946,9 @@ fn walk_dir<'a>(
         let entry = match entry {
             Ok(entry) => entry,
             Err(error) => {
+                tracing::warn!(event = "scan_item_failed", stage = "directory_entry",
+                    source = %crate::logging::safe_error(&rel), error_type = "io", error_code = error.raw_os_error(),
+                    "扫描目录项无法读取，保留父目录");
                 let mut sink = lock_sink(ctx.sink);
                 sink.notes.push(ScanNote {
                     path: dir.display().to_string(),
@@ -796,6 +959,9 @@ fn walk_dir<'a>(
             }
         };
         let Ok(name) = entry.file_name().into_string() else {
+            tracing::warn!(event = "scan_item_failed", stage = "file_name",
+                source = %crate::logging::safe_error(&entry.path().to_string_lossy()), error_type = "invalid_utf8",
+                "扫描文件名不能无损表示，跳过该项");
             let mut sink = lock_sink(ctx.sink);
             sink.notes.push(ScanNote {
                 path: entry.path().display().to_string(),
@@ -807,6 +973,9 @@ fn walk_dir<'a>(
         let metadata = match entry.metadata() {
             Ok(metadata) => metadata,
             Err(error) => {
+                tracing::warn!(event = "scan_item_failed", stage = "metadata",
+                    source = %crate::logging::safe_error(&entry.path().to_string_lossy()), error_type = "io", error_code = error.raw_os_error(),
+                    "扫描文件属性读取失败，跳过该项");
                 let mut sink = lock_sink(ctx.sink);
                 sink.notes.push(ScanNote {
                     path: entry.path().display().to_string(),
@@ -847,6 +1016,10 @@ fn walk_dir<'a>(
                     continue;
                 }
                 if let Err(error) = git_boundary {
+                    tracing::error!(event = "scan_item_failed", stage = "git_boundary",
+                        source = %crate::logging::safe_error(&child_rel), error_type = "filesystem_boundary",
+                        error_code = error.chain().find_map(|cause| cause.downcast_ref::<std::io::Error>()).and_then(std::io::Error::raw_os_error),
+                        "扫描无法判定子目录Git边界，整树跳过并停止任务");
                     let mut sink = lock_sink(ctx.sink);
                     sink.notes.push(ScanNote {
                         path: entry.path().display().to_string(),
@@ -880,6 +1053,10 @@ fn walk_dir<'a>(
                     ctx.control.scanned.fetch_add(1, Ordering::Relaxed);
                 }
                 Err(error) => {
+                    tracing::warn!(event = "scan_item_failed", stage = "snapshot",
+                        source = %crate::logging::safe_error(&child_rel), error_type = "filesystem_boundary",
+                        error_code = error.chain().find_map(|cause| cause.downcast_ref::<std::io::Error>()).and_then(std::io::Error::raw_os_error),
+                        "扫描文件快照读取失败，跳过该项");
                     let mut sink = lock_sink(ctx.sink);
                     sink.notes.push(ScanNote {
                         path: entry.path().display().to_string(),
@@ -911,12 +1088,18 @@ fn walk_dir<'a>(
     if let Some((first_path, first_rel)) = iter.next() {
         for (path, child_rel) in iter {
             let ctx_ref = ctx;
-            scope.spawn(move |scope| walk_dir(scope, ctx_ref, &path, child_rel, 0));
+            let span = tracing::Span::current();
+            scope.spawn(move |scope| {
+                span.in_scope(|| walk_dir(scope, ctx_ref, &path, child_rel, 0))
+            });
         }
         if inline < 32 {
             walk_dir(scope, ctx, &first_path, first_rel, inline + 1);
         } else {
-            scope.spawn(move |scope| walk_dir(scope, ctx, &first_path, first_rel, 0));
+            let span = tracing::Span::current();
+            scope.spawn(move |scope| {
+                span.in_scope(|| walk_dir(scope, ctx, &first_path, first_rel, 0))
+            });
         }
     }
 }
@@ -1091,432 +1274,498 @@ fn preview3(items: &[String]) -> String {
     format!("{shown}{more}")
 }
 fn scan(job: &mut Job, enqueue: bool, state: &Path, protected: Option<&Path>) -> Result<()> {
-    job.context.status(if enqueue {
-        "扫描所选目录，登记待解压的压缩包"
-    } else {
-        "扫描所选目录（只读分析）"
-    });
-    job.db
-        .conn
-        .execute_batch("DELETE FROM files; DELETE FROM directories;")?;
-    job.summary.scanned = 0;
-    job.summary.scanned_bytes = 0;
-    job.context.control.scanned.store(0, Ordering::Relaxed);
-    let root = job.root.clone();
-    let config = job.config.clone();
-    // S-05：根包含 Windows 系统目录时整树剪枝该子树（相对前缀与状态/程序目录同口径）。
-    let protected_prefix = protected.and_then(|dir| fsutil::relative_string(&root, dir).ok());
-    let excluded = rules::build_exclusions(&config.exclusions)?;
-    let state = fs::canonicalize(state)?;
-    let executable_dir = std::env::current_exe()
-        .ok()
-        .and_then(|p| p.parent().and_then(|d| fs::canonicalize(d).ok()));
-    if let (Some(directory), Ok(target)) = (&executable_dir, fs::canonicalize(&root)) {
-        if target.starts_with(directory) {
-            job.log("扫描","","","提示",&format!("所选目录位于程序自身目录（{}）内；为避免误处理程序文件，扫描会跳过这个目录里的条目",directory.display()),0)?;
-        }
-    }
-    // X-07 / C-09：「解压失败」是「递归解压」的失败暂存区，两个工具默认都不碰它；
-    // 目录存在时明确提示（C-09），没有则不打扰。
-    let quarantine = job.root.join(archive::QUARANTINE_DIR_NAME);
-    if quarantine.is_dir() {
-        job.log(
-            "扫描",
-            "",
-            "",
-            "提示",
-            &format!(
-                "已跳过「{}」子目录：失败暂存区不参与本次处理（补救后把包移出即可重新处理）",
-                archive::QUARANTINE_DIR_NAME
-            ),
-            0,
-        )?;
-    }
-    // S-04：任何缩小处理范围的选择都必须在日志里明确提示，避免静默漏处理。
-    let mut reduced: Vec<String> = Vec::new();
-    if !config.recursive {
-        reduced.push("递归已关闭（只处理所选目录的第一层）".into());
-    }
-    if !config.include_hidden {
-        reduced.push("未包含隐藏属性资料".into());
-    }
-    if !config.include_system {
-        reduced.push("未包含系统属性资料".into());
-    }
-    if protected_prefix.is_some() {
-        // S-05 第二句：选择包含系统目录的更高层根时整树排除该系统目录并提示。
-        reduced.push(
-            "已排除 Windows 系统目录（系统目录及其全部内容不参与本次处理，也不会被改动）".into(),
-        );
-    }
-    // 规则的完整文本可能很长（默认列表就跨多行），这里只报条数，规则本身在界面上可查。
-    let exclusion_rules = config
-        .exclusions
-        .split(';')
-        .filter(|part| !part.trim().is_empty())
-        .count();
-    if exclusion_rules > 0 {
-        reduced.push(format!("排除规则生效（{exclusion_rules} 条）"));
-    }
-    if !reduced.is_empty() {
-        job.log(
-            "扫描",
-            "",
-            "",
-            "提示",
-            &format!(
-                "范围提示：{}；这些资料不参与本次处理，也不会被改动",
-                reduced.join("；")
-            ),
-            0,
-        )?;
-    }
-    // 状态目录/程序目录的剪枝口径与 count_archives、收尾实空清理共用；选定根位于
-    // 它们内部（含重合）时，整棵树按旧口径全部剪枝。
-    let (state_prefix, exe_prefix, root_under_special) =
-        special_prefixes(&root, Some(&state), executable_dir.as_deref());
-    let scope_filter = ScopeFilter {
-        excluded: &excluded,
-        include_hidden: config.include_hidden,
-        include_system: config.include_system,
-        quarantine: Some(archive::QUARANTINE_DIR_NAME),
-        state_prefix,
-        exe_prefix,
-        protected_prefix,
-        root_under_special,
-    };
-    let sink = Mutex::new(ScanSink::default());
-    let ctx = WalkCtx {
-        control: job.context.control.clone(),
-        scope: &scope_filter,
-        recursive: config.recursive,
-        sink: &sink,
-    };
-    let pool = io_pool()?;
-    pool.install(|| {
-        rayon::scope(|scope| {
-            scope.spawn(|scope| walk_dir(scope, &ctx, &root, String::new(), 0));
-        });
-    });
-    // 用户取消：不做入库与后续阶段（旧实现同样以取消错误中止扫描）。
-    job.context.control.checkpoint()?;
-    let mut sink = sink
-        .into_inner()
-        .unwrap_or_else(std::sync::PoisonError::into_inner);
-    for note in &sink.notes {
-        job.summary.errors += 1;
-        job.log("扫描", &note.path, "", "跳过", &note.message, 0)?;
-    }
-    let mut git_roots = std::mem::take(&mut sink.git_skips);
-    ensure_git_boundary_checked(sink.git_boundary_error.as_deref())?;
-    if !git_roots.is_empty() {
-        // H-06：Git 整树保护必须明确提示处置结果（界面蓝条 + 日志），不静默跳过。
-        // 解压流程里 Git 项目整树排除；目录整理流程里按 C-14 固定行为整体移入「Git项目集合」，
-        // 两者都不读取内容、不进入树内处理，但「处置结果」必须各自说清，不能都说成「跳过」。
-        git_roots.sort();
-        git_roots.dedup();
-        let shown = preview3(&git_roots);
-        let (log_message, notice) = if enqueue {
-            (
-                format!(
-                    "已跳过 {} 个 Git 目录及其全部内容（含 .git 的目录整树排除：不读取、不归类、不改名、不删除，不受隐藏/递归/清理开关影响）：{shown}",
-                    git_roots.len()
-                ),
-                format!(
-                    "已跳过 {} 个 Git 目录树（含全部后代，未读取内容）",
-                    git_roots.len()
-                ),
-            )
+    let control = job.context.control.clone();
+    observe("scan", Some(&control), |stage| {
+        *stage = "directory_scan";
+        job.context.status(if enqueue {
+            "扫描所选目录，登记待解压的压缩包"
         } else {
-            (
-                format!(
-                    "已识别 {} 个 Git 项目（含 .git 的目录整树保护：不读取内容、不进入树内改名/去重/清理；整树移入本次所选根下的「Git项目集合」，已在集合内的不再移动）：{shown}",
-                    git_roots.len()
-                ),
-                format!(
-                    "已识别 {} 个 Git 项目（整树移入「Git项目集合」，未读取内容）",
-                    git_roots.len()
-                ),
-            )
-        };
-        job.log("扫描", "", "", "提示", &log_message, 0)?;
-        job.context.emit(Event::Notice(notice));
-    }
-    // S-01/F02：范围内疑似崩溃残留（.jchtools-link-*，见 walk_dir 登记）随任务库
-    // 记录，供执行开始时按既有谓词清理；分析日志必须明示，不得静默处置。
-    // 残留清理只属于目录整理的执行段（apply），解压流程不清理、不登记。
-    if !enqueue {
-        let mut residues = std::mem::take(&mut sink.link_residues);
-        residues.sort();
-        residues.dedup();
-        if !residues.is_empty() {
-            job.db.set("link_residues", &residues)?;
-            let shown = preview3(&residues);
+            "扫描所选目录（只读分析）"
+        });
+        job.db
+            .conn
+            .execute_batch("DELETE FROM files; DELETE FROM directories;")?;
+        job.summary.scanned = 0;
+        job.summary.scanned_bytes = 0;
+        job.context.control.scanned.store(0, Ordering::Relaxed);
+        let root = job.root.clone();
+        let config = job.config.clone();
+        // S-05：根包含 Windows 系统目录时整树剪枝该子树（相对前缀与状态/程序目录同口径）。
+        let protected_prefix = protected.and_then(|dir| fsutil::relative_string(&root, dir).ok());
+        let excluded = rules::build_exclusions(&config.exclusions)?;
+        let state = fs::canonicalize(state)?;
+        let executable_dir = std::env::current_exe()
+            .ok()
+            .and_then(|p| p.parent().and_then(|d| fs::canonicalize(d).ok()));
+        if let (Some(directory), Ok(target)) = (&executable_dir, fs::canonicalize(&root)) {
+            if target.starts_with(directory) {
+                job.log("扫描","","","提示",&format!("所选目录位于程序自身目录（{}）内；为避免误处理程序文件，扫描会跳过这个目录里的条目",directory.display()),0)?;
+            }
+        }
+        // X-07 / C-09：「解压失败」是「递归解压」的失败暂存区，两个工具默认都不碰它；
+        // 目录存在时明确提示（C-09），没有则不打扰。
+        let quarantine = job.root.join(archive::QUARANTINE_DIR_NAME);
+        if quarantine.is_dir() {
             job.log(
                 "扫描",
                 "",
                 "",
                 "提示",
                 &format!(
-                    "发现 {} 个疑似上次执行崩溃残留的硬链接临时文件（.jchtools-link-*，均在本次处理范围内）：{shown}；执行开始时将清理其中「修改超过 24 小时且仍是硬链接（链接数 ≥ 2，内容另有保留文件持有）」的项",
-                    residues.len()
+                    "已跳过「{}」子目录：失败暂存区不参与本次处理（补救后把包移出即可重新处理）",
+                    archive::QUARANTINE_DIR_NAME
                 ),
                 0,
             )?;
-            job.context.emit(Event::Notice(format!(
-                "发现 {} 个疑似崩溃残留的硬链接临时文件，执行开始时将清理",
+        }
+        // S-04：任何缩小处理范围的选择都必须在日志里明确提示，避免静默漏处理。
+        let mut reduced: Vec<String> = Vec::new();
+        if !config.recursive {
+            reduced.push("递归已关闭（只处理所选目录的第一层）".into());
+        }
+        if !config.include_hidden {
+            reduced.push("未包含隐藏属性资料".into());
+        }
+        if !config.include_system {
+            reduced.push("未包含系统属性资料".into());
+        }
+        if protected_prefix.is_some() {
+            // S-05 第二句：选择包含系统目录的更高层根时整树排除该系统目录并提示。
+            reduced.push(
+                "已排除 Windows 系统目录（系统目录及其全部内容不参与本次处理，也不会被改动）"
+                    .into(),
+            );
+        }
+        // 规则的完整文本可能很长（默认列表就跨多行），这里只报条数，规则本身在界面上可查。
+        let exclusion_rules = config
+            .exclusions
+            .split(';')
+            .filter(|part| !part.trim().is_empty())
+            .count();
+        if exclusion_rules > 0 {
+            reduced.push(format!("排除规则生效（{exclusion_rules} 条）"));
+        }
+        if !reduced.is_empty() {
+            job.log(
+                "扫描",
+                "",
+                "",
+                "提示",
+                &format!(
+                    "范围提示：{}；这些资料不参与本次处理，也不会被改动",
+                    reduced.join("；")
+                ),
+                0,
+            )?;
+        }
+        // 状态目录/程序目录的剪枝口径与 count_archives、收尾实空清理共用；选定根位于
+        // 它们内部（含重合）时，整棵树按旧口径全部剪枝。
+        let (state_prefix, exe_prefix, root_under_special) =
+            special_prefixes(&root, Some(&state), executable_dir.as_deref());
+        let scope_filter = ScopeFilter {
+            excluded: &excluded,
+            include_hidden: config.include_hidden,
+            include_system: config.include_system,
+            quarantine: Some(archive::QUARANTINE_DIR_NAME),
+            state_prefix,
+            exe_prefix,
+            protected_prefix,
+            root_under_special,
+        };
+        let sink = Mutex::new(ScanSink::default());
+        let ctx = WalkCtx {
+            control: job.context.control.clone(),
+            scope: &scope_filter,
+            recursive: config.recursive,
+            sink: &sink,
+        };
+        let pool = io_pool()?;
+        let scan_span = tracing::Span::current();
+        pool.install(|| {
+            rayon::scope(|scope| {
+                scope.spawn(|scope| {
+                    scan_span.in_scope(|| walk_dir(scope, &ctx, &root, String::new(), 0))
+                });
+            });
+        });
+        // 用户取消：不做入库与后续阶段（旧实现同样以取消错误中止扫描）。
+        job.context.control.checkpoint()?;
+        let mut sink = sink
+            .into_inner()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        for note in &sink.notes {
+            job.summary.errors += 1;
+            job.log("扫描", &note.path, "", "跳过", &note.message, 0)?;
+        }
+        let mut git_roots = std::mem::take(&mut sink.git_skips);
+        ensure_git_boundary_checked(sink.git_boundary_error.as_deref())?;
+        if !git_roots.is_empty() {
+            // H-06：Git 整树保护必须明确提示处置结果（界面蓝条 + 日志），不静默跳过。
+            // 解压流程里 Git 项目整树排除；目录整理流程里按 C-14 固定行为整体移入「Git项目集合」，
+            // 两者都不读取内容、不进入树内处理，但「处置结果」必须各自说清，不能都说成「跳过」。
+            git_roots.sort();
+            git_roots.dedup();
+            let shown = preview3(&git_roots);
+            let (log_message, notice) = if enqueue {
+                (
+            format!(
+                "已跳过 {} 个 Git 目录及其全部内容（含 .git 的目录整树排除：不读取、不归类、不改名、不删除，不受隐藏/递归/清理开关影响）：{shown}",
+                git_roots.len()
+            ),
+            format!(
+                "已跳过 {} 个 Git 目录树（含全部后代，未读取内容）",
+                git_roots.len()
+            ),
+        )
+            } else {
+                (
+            format!(
+                "已识别 {} 个 Git 项目（含 .git 的目录整树保护：不读取内容、不进入树内改名/去重/清理；整树移入本次所选根下的「Git项目集合」，已在集合内的不再移动）：{shown}",
+                git_roots.len()
+            ),
+            format!(
+                "已识别 {} 个 Git 项目（整树移入「Git项目集合」，未读取内容）",
+                git_roots.len()
+            ),
+        )
+            };
+            job.log("扫描", "", "", "提示", &log_message, 0)?;
+            job.context.emit(Event::Notice(notice));
+        }
+        // S-01/F02：范围内疑似崩溃残留（.jchtools-link-*，见 walk_dir 登记）随任务库
+        // 记录，供执行开始时按既有谓词清理；分析日志必须明示，不得静默处置。
+        // 残留清理只属于目录整理的执行段（apply），解压流程不清理、不登记。
+        if !enqueue {
+            let mut residues = std::mem::take(&mut sink.link_residues);
+            residues.sort();
+            residues.dedup();
+            if !residues.is_empty() {
+                job.db.set("link_residues", &residues)?;
+                let shown = preview3(&residues);
+                job.log(
+            "扫描",
+            "",
+            "",
+            "提示",
+            &format!(
+                "发现 {} 个疑似上次执行崩溃残留的硬链接临时文件（.jchtools-link-*，均在本次处理范围内）：{shown}；执行开始时将清理其中「修改超过 24 小时且仍是硬链接（链接数 ≥ 2，内容另有保留文件持有）」的项",
                 residues.len()
-            )));
-        }
-    }
-    // 汇总入库：按父目录分组还原深度先序；污点表供 planner 的空目录规划排除，
-    // git_roots 供 planner 拒绝把内容归入 Git 工作树（H-06：不归类）。
-    let mut by_parent: HashMap<String, Vec<ScanChild>> = HashMap::new();
-    for child in sink.children {
-        by_parent
-            .entry(child.parent.clone())
-            .or_default()
-            .push(child);
-    }
-    let mut taint: Vec<String> = sink.taint.into_iter().collect();
-    taint.sort();
-    job.db.conn.execute_batch("BEGIN IMMEDIATE")?;
-    let result = (|| {
-        job.db.conn.execute_batch(
-            "DROP TABLE IF EXISTS scan_taint; CREATE TEMP TABLE scan_taint(rel TEXT PRIMARY KEY);
-             DROP TABLE IF EXISTS git_roots; CREATE TEMP TABLE git_roots(rel TEXT PRIMARY KEY)",
+            ),
+            0,
         )?;
-        for rel in &taint {
-            job.db.remember_taint(rel)?;
-        }
-        {
-            let mut statement = job
-                .db
-                .conn
-                .prepare_cached("INSERT OR IGNORE INTO git_roots(rel) VALUES(?1)")?;
-            for rel in &git_roots {
-                statement.execute(params![rel])?;
+                job.context.emit(Event::Notice(format!(
+                    "发现 {} 个疑似崩溃残留的硬链接临时文件，执行开始时将清理",
+                    residues.len()
+                )));
             }
         }
-        if !enqueue {
-            // 盘点用 git_roots 是连接内临时表；重算计划需在重新打开任务库后
-            // 知道哪些 C-14 Move 未完成，故同时持久化这份边界清单。
-            job.db.set("git_roots", &git_roots)?;
+        // 汇总入库：按父目录分组还原深度先序；污点表供 planner 的空目录规划排除，
+        // git_roots 供 planner 拒绝把内容归入 Git 工作树（H-06：不归类）。
+        let mut by_parent: HashMap<String, Vec<ScanChild>> = HashMap::new();
+        for child in sink.children {
+            by_parent
+                .entry(child.parent.clone())
+                .or_default()
+                .push(child);
         }
-        let mut count = 0u64;
-        scan_emit(job, &by_parent, enqueue, "", 1, &mut count)?;
-        Ok::<_, anyhow::Error>(())
-    })();
-    match result {
-        Ok(()) => job.db.conn.execute_batch("COMMIT")?,
-        Err(error) => {
-            let _ = job.db.conn.execute_batch("ROLLBACK");
-            return Err(error);
+        let mut taint: Vec<String> = sink.taint.into_iter().collect();
+        taint.sort();
+        job.db.conn.execute_batch("BEGIN IMMEDIATE")?;
+        let result = (|| {
+            job.db.conn.execute_batch(
+        "DROP TABLE IF EXISTS scan_taint; CREATE TEMP TABLE scan_taint(rel TEXT PRIMARY KEY);
+         DROP TABLE IF EXISTS git_roots; CREATE TEMP TABLE git_roots(rel TEXT PRIMARY KEY)",
+    )?;
+            for rel in &taint {
+                job.db.remember_taint(rel)?;
+            }
+            {
+                let mut statement = job
+                    .db
+                    .conn
+                    .prepare_cached("INSERT OR IGNORE INTO git_roots(rel) VALUES(?1)")?;
+                for rel in &git_roots {
+                    statement.execute(params![rel])?;
+                }
+            }
+            if !enqueue {
+                // 盘点用 git_roots 是连接内临时表；重算计划需在重新打开任务库后
+                // 知道哪些 C-14 Move 未完成，故同时持久化这份边界清单。
+                job.db.set("git_roots", &git_roots)?;
+            }
+            let mut count = 0u64;
+            scan_emit(job, &by_parent, enqueue, "", 1, &mut count)?;
+            Ok::<_, anyhow::Error>(())
+        })();
+        match result {
+            Ok(()) => job.db.conn.execute_batch("COMMIT")?,
+            Err(error) => {
+                if job.db.conn.execute_batch("ROLLBACK").is_err() {
+                    tracing::warn!(
+                        event = "task_transaction_cleanup_failed",
+                        stage = "scan_rollback",
+                        error_type = "database",
+                        "扫描失败后的事务回滚失败"
+                    );
+                }
+                return Err(error);
+            }
         }
-    }
-    Ok(())
+        Ok(())
+    })
 }
 #[cfg_attr(
     feature = "perf-tracing",
     tracing::instrument(target = "perf", name = "hash", skip_all)
 )]
 fn hash_candidates(job: &mut Job) -> Result<()> {
-    if !job.config.dedup_same_name && !job.config.dedup_copy_names && !job.config.dedup_other_names
-    {
-        return Ok(());
-    }
-    let pool = rayon::ThreadPoolBuilder::new()
-        .num_threads(job.config.hash_workers)
-        .thread_name(|i| format!("organizer-hash-{i}"))
-        .build()?;
-    job.context.status("计算候选文件的完整 Hash");
-    job.db.conn.execute_batch("DROP TABLE IF EXISTS hash_candidates; CREATE TEMP TABLE hash_candidates(id INTEGER PRIMARY KEY);")?;
-    // C-12：候选范围只依据扫描期已获得的信息（大小与启用的名称关系），完整哈希在一次
-    // 遍历内完成，不设预哈希/完整哈希两阶段。同尺寸是安全下界；仅在不同名去重开启时
-    // 扩到全部同尺寸项。副本名关系按 normal 分组，需保留同名节点作连通组桥接项。
-    if job.config.dedup_other_names {
-        // 整条 SQL 保持单个字符串字面量（不含花括号）：static_check 的 sql_syntax
-        // 逐字面量抽取校验，跨字面量拼接会让尾段单独受检而误报。
-        const SQL: &str = "INSERT OR IGNORE INTO hash_candidates SELECT id FROM files WHERE active=1 AND size IN (SELECT size FROM files WHERE active=1 GROUP BY size HAVING COUNT(*)>1)";
-        job.db.conn.execute(SQL, [])?;
-    } else {
-        const SAME_NAME: &str = "INSERT OR IGNORE INTO hash_candidates SELECT id FROM files WHERE active=1 AND (size,name) IN (SELECT size,name FROM files WHERE active=1 GROUP BY size,name HAVING COUNT(*)>1)";
-        const COPY_NAME: &str = "INSERT OR IGNORE INTO hash_candidates SELECT id FROM files WHERE active=1 AND (size,normal) IN (SELECT size,normal FROM files WHERE active=1 GROUP BY size,normal HAVING COUNT(*)>1)";
-        if job.config.dedup_same_name {
-            job.db.conn.execute(SAME_NAME, [])?;
+    let control = job.context.control.clone();
+    observe("hash_candidates", Some(&control), |stage| {
+        *stage = "hash_analysis";
+        if !job.config.dedup_same_name
+            && !job.config.dedup_copy_names
+            && !job.config.dedup_other_names
+        {
+            return Ok(());
         }
-        if job.config.dedup_copy_names {
-            job.db.conn.execute(COPY_NAME, [])?;
+        let pool = rayon::ThreadPoolBuilder::new()
+            .num_threads(job.config.hash_workers)
+            .thread_name(|i| format!("organizer-hash-{i}"))
+            .build()?;
+        job.context.status("计算候选文件的完整 Hash");
+        job.db.conn.execute_batch("DROP TABLE IF EXISTS hash_candidates; CREATE TEMP TABLE hash_candidates(id INTEGER PRIMARY KEY);")?;
+        // C-12：候选范围只依据扫描期已获得的信息（大小与启用的名称关系），完整哈希在一次
+        // 遍历内完成，不设预哈希/完整哈希两阶段。同尺寸是安全下界；仅在不同名去重开启时
+        // 扩到全部同尺寸项。副本名关系按 normal 分组，需保留同名节点作连通组桥接项。
+        if job.config.dedup_other_names {
+            // 整条 SQL 保持单个字符串字面量（不含花括号）：static_check 的 sql_syntax
+            // 逐字面量抽取校验，跨字面量拼接会让尾段单独受检而误报。
+            const SQL: &str = "INSERT OR IGNORE INTO hash_candidates SELECT id FROM files WHERE active=1 AND size IN (SELECT size FROM files WHERE active=1 GROUP BY size HAVING COUNT(*)>1)";
+            job.db.conn.execute(SQL, [])?;
+        } else {
+            const SAME_NAME: &str = "INSERT OR IGNORE INTO hash_candidates SELECT id FROM files WHERE active=1 AND (size,name) IN (SELECT size,name FROM files WHERE active=1 GROUP BY size,name HAVING COUNT(*)>1)";
+            const COPY_NAME: &str = "INSERT OR IGNORE INTO hash_candidates SELECT id FROM files WHERE active=1 AND (size,normal) IN (SELECT size,normal FROM files WHERE active=1 GROUP BY size,normal HAVING COUNT(*)>1)";
+            if job.config.dedup_same_name {
+                job.db.conn.execute(SAME_NAME, [])?;
+            }
+            if job.config.dedup_copy_names {
+                job.db.conn.execute(COPY_NAME, [])?;
+            }
         }
-    }
-    // C-13：跨运行哈希缓存放在状态目录根（每次 prepare 都新建任务库，缓存必须
-    // 跨任务存活）。打开失败只降级为「无缓存、全部重算」，不得阻断分析。
-    let mut cache = match job.db.get::<String>("state_dir") {
-        Ok(dir) => match crate::hash_cache::HashCache::open(Path::new(&dir)) {
-            Ok(cache) => Some(cache),
-            Err(error) => {
-                job.log(
-                    "Hash",
-                    "",
-                    "",
-                    "提示",
-                    &format!("哈希缓存不可用，本次全部重新计算（{error:#}）"),
-                    0,
-                )?;
-                None
-            }
-        },
-        Err(_) => None,
-    };
-    let mut reused_total: u64 = 0;
-    let mut cursor = 0;
-    // 分页 SQL 整个哈希阶段逐字不变：循环外构造一次，配合 db::files 的 prepare_cached
-    // 让每页都命中语句缓存（不再逐页 format! 与解析）。
-    let sql = format!(
-        "SELECT {} FROM hash_candidates AS c CROSS JOIN files AS f ON f.id=c.id \
-         WHERE c.id>?1 AND f.active=1 ORDER BY c.id LIMIT ?2",
-        crate::db::file_columns_qualified("f")
-    );
-    loop {
-        job.context.control.checkpoint()?;
-        // 候选表按主键游标推进，并用 CROSS JOIN 固定 hash_candidates 为外层扫描表：
-        // 旧的 `id IN (SELECT id FROM hash_candidates)` 会让每次分页都重扫整个候选集合
-        // （实测每次调用成本随游标位置线性增长，累计平方级）。取数批量与哈希线程数解耦，
-        // 避免「调线程数」同时改变两个量。
-        let batch = job.db.files(
-            &sql,
-            params![cursor, crate::convert::usize_as_i64(HASH_BATCH)],
-        )?;
-        let Some(last) = batch.last() else {
-            break;
-        };
-        cursor = last.id;
-        let root = &job.root;
-        let control = &job.context.control;
-        // C-13：先查跨运行缓存，命中的候选不再读取文件内容。缓存故障一次性
-        // 降级为「其后全部重算」——缓存只是加速，正确性不依赖它。
-        // resume 是首个未消化的候选下标：缓存不可用/读取失败时从它起全部转入重算。
-        let mut reused: Vec<(i64, String)> = Vec::new();
-        let mut compute: Vec<&_> = Vec::new();
-        let mut resume = batch.len();
-        for (index, file) in batch.iter().enumerate() {
-            let Some(cache_conn) = cache.as_ref() else {
-                resume = index;
-                break;
-            };
-            let Ok(size) = i64::try_from(file.snapshot.size) else {
-                compute.push(file);
-                continue;
-            };
-            if crate::hash_cache::identity_is_degenerate(&file.snapshot.identity) {
-                compute.push(file);
-                continue;
-            }
-            match cache_conn.lookup(&file.snapshot.identity, size, file.snapshot.modified_ns) {
-                Ok(Some(hash)) => reused.push((file.id, hash)),
-                Ok(None) => compute.push(file),
+        // C-13：跨运行哈希缓存放在状态目录根（每次 prepare 都新建任务库，缓存必须
+        // 跨任务存活）。打开失败只降级为「无缓存、全部重算」，不得阻断分析。
+        let mut cache = match job.db.get::<String>("state_dir") {
+            Ok(dir) => match crate::hash_cache::HashCache::open(Path::new(&dir)) {
+                Ok(cache) => Some(cache),
                 Err(error) => {
-                    cache = None;
+                    tracing::warn!(
+                        event = "hash_cache_fallback",
+                        stage = "open",
+                        fallback = "recompute_all",
+                        error_type = "cache_database",
+                        "哈希缓存不可用，全部重新计算"
+                    );
                     job.log(
                         "Hash",
                         "",
                         "",
                         "提示",
-                        &format!("哈希缓存读取失败，其后全部重新计算（{error:#}）"),
+                        &format!("哈希缓存不可用，本次全部重新计算（{error:#}）"),
                         0,
                     )?;
+                    None
+                }
+            },
+            Err(_) => {
+                tracing::warn!(
+                    event = "hash_cache_fallback",
+                    stage = "state_directory",
+                    fallback = "recompute_all",
+                    error_type = "task_database",
+                    "缓存目录信息不可用，全部重新计算"
+                );
+                None
+            }
+        };
+        let mut reused_total: u64 = 0;
+        let mut cursor = 0;
+        // 分页 SQL 整个哈希阶段逐字不变：循环外构造一次，配合 db::files 的 prepare_cached
+        // 让每页都命中语句缓存（不再逐页 format! 与解析）。
+        let sql = format!(
+            "SELECT {} FROM hash_candidates AS c CROSS JOIN files AS f ON f.id=c.id \
+     WHERE c.id>?1 AND f.active=1 ORDER BY c.id LIMIT ?2",
+            crate::db::file_columns_qualified("f")
+        );
+        loop {
+            job.context.control.checkpoint()?;
+            // 候选表按主键游标推进，并用 CROSS JOIN 固定 hash_candidates 为外层扫描表：
+            // 旧的 `id IN (SELECT id FROM hash_candidates)` 会让每次分页都重扫整个候选集合
+            // （实测每次调用成本随游标位置线性增长，累计平方级）。取数批量与哈希线程数解耦，
+            // 避免「调线程数」同时改变两个量。
+            let batch = job.db.files(
+                &sql,
+                params![cursor, crate::convert::usize_as_i64(HASH_BATCH)],
+            )?;
+            let Some(last) = batch.last() else {
+                break;
+            };
+            cursor = last.id;
+            let root = &job.root;
+            let control = &job.context.control;
+            // C-13：先查跨运行缓存，命中的候选不再读取文件内容。缓存故障一次性
+            // 降级为「其后全部重算」——缓存只是加速，正确性不依赖它。
+            // resume 是首个未消化的候选下标：缓存不可用/读取失败时从它起全部转入重算。
+            let mut reused: Vec<(i64, String)> = Vec::new();
+            let mut compute: Vec<&_> = Vec::new();
+            let mut resume = batch.len();
+            for (index, file) in batch.iter().enumerate() {
+                let Some(cache_conn) = cache.as_ref() else {
                     resume = index;
                     break;
+                };
+                let Ok(size) = i64::try_from(file.snapshot.size) else {
+                    compute.push(file);
+                    continue;
+                };
+                if crate::hash_cache::identity_is_degenerate(&file.snapshot.identity) {
+                    compute.push(file);
+                    continue;
                 }
-            }
-        }
-        compute.extend(batch[resume..].iter());
-        reused_total = reused_total.saturating_add(u64::try_from(reused.len()).unwrap_or(0));
-        let results: Vec<_> = pool.install(|| {
-            compute
-                .par_iter()
-                .map(|file| {
-                    let result = (|| {
-                        let path = fsutil::safe_join(root, &file.rel)?;
-                        hashing::full_hash(&path, control)
-                    })();
-                    (file.id, file.rel.clone(), result)
-                })
-                .collect()
-        });
-        job.db.conn.execute_batch("BEGIN IMMEDIATE")?;
-        let update = (|| {
-            // 用户取消时并行哈希的每个成员都会返回取消错误；先在这里拦截，
-            // 否则每个候选都被计成 error 并逐条写日志，取消任务的错误数虚高。
-            job.context.control.checkpoint()?;
-            // C-13：缓存命中的哈希与刚算出的走完全相同的落库路径，planner 无感知。
-            for (id, hash) in &reused {
-                job.db.set_file_hash(*id, hash)?;
-            }
-            for (id, rel, result) in &results {
-                match result {
-                    Ok(hash) => {
-                        job.db.set_file_hash(*id, hash)?;
-                    }
+                match cache_conn.lookup(&file.snapshot.identity, size, file.snapshot.modified_ns) {
+                    Ok(Some(hash)) => reused.push((file.id, hash)),
+                    Ok(None) => compute.push(file),
                     Err(error) => {
-                        job.summary.errors += 1;
-                        job.db.deactivate_file_id(*id)?;
-                        job.log("Hash", rel, "", "跳过", &format!("{error:#}"), 0)?;
+                        cache = None;
+                        tracing::warn!(
+                            event = "hash_cache_fallback",
+                            stage = "lookup",
+                            fallback = "recompute_remaining",
+                            error_type = "cache_database",
+                            "哈希缓存读取失败，剩余候选重新计算"
+                        );
+                        job.log(
+                            "Hash",
+                            "",
+                            "",
+                            "提示",
+                            &format!("哈希缓存读取失败，其后全部重新计算（{error:#}）"),
+                            0,
+                        )?;
+                        resume = index;
+                        break;
                     }
                 }
             }
-            Ok::<_, anyhow::Error>(())
-        })();
-        match update {
-            Ok(()) => job.db.conn.execute_batch("COMMIT")?,
-            Err(error) => {
-                let _ = job.db.conn.execute_batch("ROLLBACK");
-                return Err(error);
+            compute.extend(batch[resume..].iter());
+            reused_total = reused_total.saturating_add(u64::try_from(reused.len()).unwrap_or(0));
+            let hash_span = tracing::Span::current();
+            let results: Vec<_> = pool.install(|| {
+                compute
+                    .par_iter()
+                    .map(|file| {
+                        let _entered = hash_span.enter();
+                        let item_span = tracing::info_span!("hash_item", file_id = file.id);
+                        let _item_entered = item_span.enter();
+                        let result = (|| {
+                            let path = fsutil::safe_join(root, &file.rel)?;
+                            hashing::full_hash(&path, control)
+                        })();
+                        (file.id, file.rel.clone(), result)
+                    })
+                    .collect()
+            });
+            job.db.conn.execute_batch("BEGIN IMMEDIATE")?;
+            let update = (|| {
+                // 用户取消时并行哈希的每个成员都会返回取消错误；先在这里拦截，
+                // 否则每个候选都被计成 error 并逐条写日志，取消任务的错误数虚高。
+                job.context.control.checkpoint()?;
+                // C-13：缓存命中的哈希与刚算出的走完全相同的落库路径，planner 无感知。
+                for (id, hash) in &reused {
+                    job.db.set_file_hash(*id, hash)?;
+                }
+                for (id, rel, result) in &results {
+                    match result {
+                        Ok(hash) => {
+                            job.db.set_file_hash(*id, hash)?;
+                        }
+                        Err(error) => {
+                            tracing::warn!(event = "hash_item_failed", file_id = id,
+                        source = %crate::logging::safe_error(rel), stage = "full_hash", error_type = "hash_io_boundary",
+                        error_code = error.chain().find_map(|cause| cause.downcast_ref::<std::io::Error>()).and_then(std::io::Error::raw_os_error),
+                        "文件哈希计算失败，取消该候选");
+                            job.summary.errors += 1;
+                            job.db.deactivate_file_id(*id)?;
+                            job.log("Hash", rel, "", "跳过", &format!("{error:#}"), 0)?;
+                        }
+                    }
+                }
+                Ok::<_, anyhow::Error>(())
+            })();
+            match update {
+                Ok(()) => job.db.conn.execute_batch("COMMIT")?,
+                Err(error) => {
+                    if job.db.conn.execute_batch("ROLLBACK").is_err() {
+                        tracing::warn!(
+                            event = "task_transaction_cleanup_failed",
+                            stage = "hash_rollback",
+                            error_type = "database",
+                            "哈希失败后的事务回滚失败"
+                        );
+                    }
+                    return Err(error);
+                }
+            }
+            // C-13：把本次新算出的哈希写入跨运行缓存；写失败同样只降级、不失败。
+            if let Some(cache_conn) = cache.as_ref() {
+                let by_id: HashMap<i64, &_> = batch.iter().map(|file| (file.id, file)).collect();
+                let entries: Vec<(String, i64, i64, String)> = results
+                    .iter()
+                    .filter_map(|(id, _, result)| {
+                        let hash = result.as_ref().ok()?;
+                        let file = by_id.get(id)?;
+                        let size = i64::try_from(file.snapshot.size).ok()?;
+                        Some((
+                            file.snapshot.identity.clone(),
+                            size,
+                            file.snapshot.modified_ns,
+                            hash.clone(),
+                        ))
+                    })
+                    .collect();
+                if let Err(error) = cache_conn.store(&entries) {
+                    cache = None;
+                    tracing::warn!(
+                        event = "hash_cache_fallback",
+                        stage = "store",
+                        fallback = "disable_reuse",
+                        error_type = "cache_database",
+                        "哈希缓存写入失败，禁用后续复用"
+                    );
+                    job.log(
+                        "Hash",
+                        "",
+                        "",
+                        "提示",
+                        &format!("哈希缓存写入失败，其后不再复用（{error:#}）"),
+                        0,
+                    )?;
+                }
             }
         }
-        // C-13：把本次新算出的哈希写入跨运行缓存；写失败同样只降级、不失败。
-        if let Some(cache_conn) = cache.as_ref() {
-            let by_id: HashMap<i64, &_> = batch.iter().map(|file| (file.id, file)).collect();
-            let entries: Vec<(String, i64, i64, String)> = results
-                .iter()
-                .filter_map(|(id, _, result)| {
-                    let hash = result.as_ref().ok()?;
-                    let file = by_id.get(id)?;
-                    let size = i64::try_from(file.snapshot.size).ok()?;
-                    Some((
-                        file.snapshot.identity.clone(),
-                        size,
-                        file.snapshot.modified_ns,
-                        hash.clone(),
-                    ))
-                })
-                .collect();
-            if let Err(error) = cache_conn.store(&entries) {
-                cache = None;
-                job.log(
-                    "Hash",
-                    "",
-                    "",
-                    "提示",
-                    &format!("哈希缓存写入失败，其后不再复用（{error:#}）"),
-                    0,
-                )?;
-            }
+        if reused_total > 0 {
+            job.log(
+                "Hash",
+                "",
+                "",
+                "提示",
+                &format!(
+            "复用上次运行的哈希 {reused_total} 个（文件标识/大小/修改时间未变，未重读内容）"
+        ),
+                0,
+            )?;
         }
-    }
-    if reused_total > 0 {
-        job.log(
-            "Hash",
-            "",
-            "",
-            "提示",
-            &format!(
-                "复用上次运行的哈希 {reused_total} 个（文件标识/大小/修改时间未变，未重读内容）"
-            ),
-            0,
-        )?;
-    }
-    Ok(())
+        Ok(())
+    })
 }
 /// apply 的锁目录决策：优先 prepare 记录的全局锁目录；记录缺失或失效时，仅当任务
 /// 目录仍处于「…/tasks/<任务>」布局才退回上一级推导（搬到别的机器后放回新机器的
@@ -1592,161 +1841,196 @@ fn task_git_roots(db: &Database) -> Result<Vec<String>> {
 /// 返回本次重算取消的行数；执行期的实空复查与最终空目录清理仍独立兜底。
 /// H-06：保留原位的 Git 根及其后代/祖先不作为可写目标或空目录清理项。
 pub fn recompute_plan(directory: &Path) -> Result<usize> {
-    // open_existing：任务库文件消失时不静默创建空库（apply 同口径）。
-    let db = Database::open_existing(directory)?;
-    let status: String = db.get("status")?;
-    anyhow::ensure!(
-        status == "ready",
-        "任务不是待确认状态（{status}），不重算受影响计划"
-    );
-    let move_kind = serde_json::to_string(&ActionKind::Move)?;
-    let delete_kind = serde_json::to_string(&ActionKind::Delete)?;
-    let empty_kind = serde_json::to_string(&ActionKind::EmptyDirectory)?;
-    // 占位项 = 取消且未执行的 Move/Delete 源 + 取消且未执行的空目录行自身。
-    // 消费方只做等值与前缀匹配、与行序无关，三种 kind 合并为一条查询。
-    let mut occupied: Vec<String> = {
-        let mut statement = db.conn.prepare(
-            "SELECT source FROM actions WHERE kind IN (?1, ?2, ?3) AND selected=0 AND state='pending'",
-        )?;
-        let rows = statement.query_map(params![move_kind, delete_kind, empty_kind], |row| {
-            row.get::<_, String>(0)
-        })?;
-        rows.collect::<rusqlite::Result<Vec<_>>>()?
-    };
-    // 取消一个 Move 后，其源仍留在盘上，可能阻挡另一条原本选中的 Move 目标。
-    // 以固定点逐轮取消，保证用户取消一条链中的任意一项都不会留下必然撞名的
-    // 执行计划；不新增勾选，也不读取文件内容。
-    let mut cancelled = 0usize;
-    let mut pending_moves: Vec<(i64, String, String)> = {
-        let mut statement = db.conn.prepare(
-            "SELECT id, source, target FROM actions WHERE kind=?1 AND selected=1 AND state='pending' AND target IS NOT NULL",
-        )?;
-        let rows = statement.query_map(params![move_kind], |row| {
-            Ok((
-                row.get(0)?,
-                row.get(1)?,
-                row.get::<_, Option<String>>(2)?.unwrap_or_default(),
-            ))
-        })?;
-        rows.collect::<rusqlite::Result<Vec<_>>>()?
-    };
-    let git_roots = task_git_roots(&db)?;
-    // 计划中的项目 Move 尚未执行时可释放原路径；取消其 Move 后即转为 staying，
-    // 其根目录及后代目标不得再被其他 Move/空目录清理项触碰。
-    let mut pending_git_moves: HashSet<String> = pending_moves
-        .iter()
-        .map(|(_, source, _)| fsutil::fold_rel(source))
-        .filter(|source| git_roots.binary_search(source).is_ok())
-        .collect();
-    let mut staying_git_roots: Vec<String> = git_roots
-        .iter()
-        .filter(|root| !pending_git_moves.contains(root.as_str()))
-        .cloned()
-        .collect();
-    while let Some(index) = pending_moves.iter().position(|(_, _, target)| {
-        let target = fsutil::fold_rel(target);
-        occupied
-            .iter()
-            .any(|source| fsutil::fold_rel(source) == target)
-            || staying_git_roots
+    observe("recompute_plan", None, |stage| {
+        *stage = "plan_database";
+        let result: Result<usize> = (|| {
+            // open_existing：任务库文件消失时不静默创建空库（apply 同口径）。
+            let db = Database::open_existing(directory)?;
+            let status: String = db.get("status")?;
+            anyhow::ensure!(
+                status == "ready",
+                "任务不是待确认状态（{status}），不重算受影响计划"
+            );
+            let move_kind = serde_json::to_string(&ActionKind::Move)?;
+            let delete_kind = serde_json::to_string(&ActionKind::Delete)?;
+            let empty_kind = serde_json::to_string(&ActionKind::EmptyDirectory)?;
+            // 占位项 = 取消且未执行的 Move/Delete 源 + 取消且未执行的空目录行自身。
+            // 消费方只做等值与前缀匹配、与行序无关，三种 kind 合并为一条查询。
+            let mut occupied: Vec<String> = {
+                let mut statement = db.conn.prepare(
+        "SELECT source FROM actions WHERE kind IN (?1, ?2, ?3) AND selected=0 AND state='pending'",
+    )?;
+                let rows = statement
+                    .query_map(params![move_kind, delete_kind, empty_kind], |row| {
+                        row.get::<_, String>(0)
+                    })?;
+                rows.collect::<rusqlite::Result<Vec<_>>>()?
+            };
+            // 取消一个 Move 后，其源仍留在盘上，可能阻挡另一条原本选中的 Move 目标。
+            // 以固定点逐轮取消，保证用户取消一条链中的任意一项都不会留下必然撞名的
+            // 执行计划；不新增勾选，也不读取文件内容。
+            let mut cancelled = 0usize;
+            let mut pending_moves: Vec<(i64, String, String)> = {
+                let mut statement = db.conn.prepare(
+        "SELECT id, source, target FROM actions WHERE kind=?1 AND selected=1 AND state='pending' AND target IS NOT NULL",
+    )?;
+                let rows = statement.query_map(params![move_kind], |row| {
+                    Ok((
+                        row.get(0)?,
+                        row.get(1)?,
+                        row.get::<_, Option<String>>(2)?.unwrap_or_default(),
+                    ))
+                })?;
+                rows.collect::<rusqlite::Result<Vec<_>>>()?
+            };
+            let git_roots = task_git_roots(&db)?;
+            // 计划中的项目 Move 尚未执行时可释放原路径；取消其 Move 后即转为 staying，
+            // 其根目录及后代目标不得再被其他 Move/空目录清理项触碰。
+            let mut pending_git_moves: HashSet<String> = pending_moves
                 .iter()
-                .any(|root| path_is_at_or_below(&target, root))
-    }) {
-        let (id, source, _) = pending_moves.remove(index);
-        db.set_selected(id, false)?;
-        let folded_source = fsutil::fold_rel(&source);
-        if pending_git_moves.remove(&folded_source) {
-            staying_git_roots.push(folded_source);
+                .map(|(_, source, _)| fsutil::fold_rel(source))
+                .filter(|source| git_roots.binary_search(source).is_ok())
+                .collect();
+            let mut staying_git_roots: Vec<String> = git_roots
+                .iter()
+                .filter(|root| !pending_git_moves.contains(root.as_str()))
+                .cloned()
+                .collect();
+            while let Some(index) = pending_moves.iter().position(|(_, _, target)| {
+                let target = fsutil::fold_rel(target);
+                occupied
+                    .iter()
+                    .any(|source| fsutil::fold_rel(source) == target)
+                    || staying_git_roots
+                        .iter()
+                        .any(|root| path_is_at_or_below(&target, root))
+            }) {
+                let (id, source, _) = pending_moves.remove(index);
+                db.set_selected(id, false)?;
+                let folded_source = fsutil::fold_rel(&source);
+                if pending_git_moves.remove(&folded_source) {
+                    staying_git_roots.push(folded_source);
+                }
+                occupied.push(source);
+                cancelled += 1;
+            }
+            // 与 planner 的前缀区间判定同口径：Windows 折叠大小写后排序去重，二分定位。
+            occupied = occupied
+                .into_iter()
+                .map(|rel| fsutil::fold_rel(&rel))
+                .collect();
+            occupied.sort_unstable();
+            occupied.dedup();
+            let rows: Vec<(i64, String)> = {
+                let mut statement = db.conn.prepare(
+        "SELECT id, source FROM actions WHERE kind=?1 AND selected=1 AND state='pending'",
+    )?;
+                let rows = statement.query_map(params![empty_kind], |row| {
+                    Ok((row.get::<_, i64>(0)?, row.get::<_, String>(1)?))
+                })?;
+                rows.collect::<rusqlite::Result<Vec<_>>>()?
+            };
+            for (id, rel) in rows {
+                let folded = fsutil::fold_rel(&rel);
+                let probe = format!("{folded}/");
+                let index = occupied.partition_point(|item| item.as_str() < probe.as_str());
+                let blocked_by_occupied = occupied
+                    .get(index)
+                    .is_some_and(|item| item.starts_with(probe.as_str()));
+                let blocked_by_git = staying_git_roots.iter().any(|root| {
+                    path_is_at_or_below(&folded, root) || path_is_at_or_below(root, &folded)
+                });
+                let blocked = blocked_by_occupied || blocked_by_git;
+                if blocked {
+                    db.set_selected(id, false)?;
+                    cancelled += 1;
+                }
+            }
+            Ok(cancelled)
+        })();
+        if let Ok(count) = &result {
+            tracing::info!(
+                event = "plan_recomputed",
+                deselected = count,
+                "计划重算完成"
+            );
         }
-        occupied.push(source);
-        cancelled += 1;
-    }
-    // 与 planner 的前缀区间判定同口径：Windows 折叠大小写后排序去重，二分定位。
-    occupied = occupied
-        .into_iter()
-        .map(|rel| fsutil::fold_rel(&rel))
-        .collect();
-    occupied.sort_unstable();
-    occupied.dedup();
-    let rows: Vec<(i64, String)> = {
-        let mut statement = db.conn.prepare(
-            "SELECT id, source FROM actions WHERE kind=?1 AND selected=1 AND state='pending'",
-        )?;
-        let rows = statement.query_map(params![empty_kind], |row| {
-            Ok((row.get::<_, i64>(0)?, row.get::<_, String>(1)?))
-        })?;
-        rows.collect::<rusqlite::Result<Vec<_>>>()?
-    };
-    for (id, rel) in rows {
-        let folded = fsutil::fold_rel(&rel);
-        let probe = format!("{folded}/");
-        let index = occupied.partition_point(|item| item.as_str() < probe.as_str());
-        let blocked_by_occupied = occupied
-            .get(index)
-            .is_some_and(|item| item.starts_with(probe.as_str()));
-        let blocked_by_git = staying_git_roots
-            .iter()
-            .any(|root| path_is_at_or_below(&folded, root) || path_is_at_or_below(root, &folded));
-        let blocked = blocked_by_occupied || blocked_by_git;
-        if blocked {
-            db.set_selected(id, false)?;
-            cancelled += 1;
-        }
-    }
-    Ok(cancelled)
+        result
+    })
 }
 #[cfg_attr(
     feature = "perf-tracing",
-    tracing::instrument(target = "perf", name = "organize_apply", skip_all, err)
+    tracing::instrument(target = "perf", name = "organize_apply", skip_all)
 )]
 pub fn apply(directory: &Path, context: TaskContext) -> Result<TaskResult> {
-    // Database::open 会在文件缺失时创建一个空库；先确认这是扫描生成的任务目录，
-    // 避免把任意目录（甚至写错路径）悄悄变成一个必然失败的空任务。
-    // 该检查必须先于 RootGuard：否则写错路径会先在错误位置创建目录并落下锁文件。
-    anyhow::ensure!(
-        directory.join("task.sqlite3").is_file(),
-        "目录里没有 task.sqlite3；请选择「开始解压与分析」生成的任务目录"
-    );
-    let db = Database::open(directory)?;
-    // 锁位置：prepare 已把当时的全局锁目录记进任务库（决策规则见 lock_dir_for）。
-    let recorded: Option<PathBuf> = db.get::<String>("state_dir").ok().map(PathBuf::from);
-    let _guard = fsutil::RootGuard::acquire(&lock_dir_for(directory, recorded.as_deref())?)?;
-    let status: String = db.get("status")?;
-    if status != "ready" {
-        bail!("任务不是待确认状态（{status}）；请重新扫描，不会盲目重放旧计划");
-    }
-    let root_text: String = db.get("root")?;
-    let protection = resolve_protection()?;
-    let (root, protected) =
-        fsutil::normalize_root_with(Path::new(&root_text), protection.as_deref())?;
-    // prepare 记录的是当时的规范化路径；apply 重新解析 canonicalize（会解析 junction）。
-    // 两者不一致说明目录被移动或被替换成指向别处的链接，继续执行会把整理动作落到另一棵树上。
-    anyhow::ensure!(
-        fsutil::path_string(&root)? == root_text,
-        "目录位置已改变或被链接替换（{root_text}）；请重新扫描生成新计划后再执行"
-    );
-    let config = db.config()?;
-    config.validate_organizer()?;
-    let summary = db.summary()?;
-    // 执行阶段新增错误的判定基线：分析阶段已确认的错误（扫描跳过、派生名失败等）
-    // 不把「执行全部成功」的任务改判失败，但执行/清理阶段新增任一错误不得标
-    let errors_before_apply = summary.errors;
-    let mut job = Job {
-        root,
-        config,
-        context,
-        db,
-        summary,
-    };
-    job.db.set("status", &"executing")?;
-    let outcome = (|| {
-        // S-01/F02：执行开始时清理上次执行崩溃残留的硬链接临时文件。名单来自分析
-        // 阶段登记的「本次范围内疑似残留」（不越出本次范围设置），执行时逐项复核
-        // 既有谓词；已请求停止时不清理——用户尚未授权本次执行的任何删除。
-        job.context.control.checkpoint()?;
-        let removed_link_temps = clean_orphan_link_temps(&mut job)?;
-        if removed_link_temps > 0 {
-            job.log(
+    let control = context.control.clone();
+    observe("organize_apply", Some(&control), |stage| {
+        let task_span = tracing::info_span!("file_task", task_id = %crate::logging::safe_error(&directory.file_name().unwrap_or_default().to_string_lossy()));
+        let _task_entered = task_span.enter();
+        // Database::open 会在文件缺失时创建一个空库；先确认这是扫描生成的任务目录，
+        // 避免把任意目录（甚至写错路径）悄悄变成一个必然失败的空任务。
+        // 该检查必须先于 RootGuard：否则写错路径会先在错误位置创建目录并落下锁文件。
+        anyhow::ensure!(
+            directory.join("task.sqlite3").is_file(),
+            "目录里没有 task.sqlite3；请选择「开始解压与分析」生成的任务目录"
+        );
+        *stage = "task_database";
+        let db = Database::open(directory)?;
+        // 锁位置：prepare 已把当时的全局锁目录记进任务库（决策规则见 lock_dir_for）。
+        let recorded: Option<PathBuf> = match db.get::<String>("state_dir") {
+            Ok(path) => Some(PathBuf::from(path)),
+            Err(_) => {
+                tracing::warn!(
+                    event = "task_lock_fallback",
+                    stage = "recorded_directory",
+                    fallback = "task_layout",
+                    error_type = "task_database",
+                    "任务锁目录记录不可用，按既有任务布局推导"
+                );
+                None
+            }
+        };
+        *stage = "task_lock";
+        let _guard = fsutil::RootGuard::acquire(&lock_dir_for(directory, recorded.as_deref())?)?;
+        let status: String = db.get("status")?;
+        if status != "ready" {
+            bail!("任务不是待确认状态（{status}）；请重新扫描，不会盲目重放旧计划");
+        }
+        *stage = "input_validation";
+        let root_text: String = db.get("root")?;
+        let protection = resolve_protection()?;
+        let (root, protected) =
+            fsutil::normalize_root_with(Path::new(&root_text), protection.as_deref())?;
+        // prepare 记录的是当时的规范化路径；apply 重新解析 canonicalize（会解析 junction）。
+        // 两者不一致说明目录被移动或被替换成指向别处的链接，继续执行会把整理动作落到另一棵树上。
+        anyhow::ensure!(
+            fsutil::path_string(&root)? == root_text,
+            "目录位置已改变或被链接替换（{root_text}）；请重新扫描生成新计划后再执行"
+        );
+        let config = db.config()?;
+        config.validate_organizer()?;
+        let summary = db.summary()?;
+        // 执行阶段新增错误的判定基线：分析阶段已确认的错误（扫描跳过、派生名失败等）
+        // 不把「执行全部成功」的任务改判失败，但执行/清理阶段新增任一错误不得标
+        let errors_before_apply = summary.errors;
+        let mut job = Job {
+            root,
+            config,
+            context,
+            db,
+            summary,
+        };
+        *stage = "executing_status";
+        job.db.set("status", &"executing")?;
+        let outcome = (|| {
+            *stage = "orphan_cleanup";
+            // S-01/F02：执行开始时清理上次执行崩溃残留的硬链接临时文件。名单来自分析
+            // 阶段登记的「本次范围内疑似残留」（不越出本次范围设置），执行时逐项复核
+            // 既有谓词；已请求停止时不清理——用户尚未授权本次执行的任何删除。
+            job.context.control.checkpoint()?;
+            let removed_link_temps = clean_orphan_link_temps(&mut job)?;
+            if removed_link_temps > 0 {
+                job.log(
                 "任务",
                 "",
                 "",
@@ -1756,108 +2040,159 @@ pub fn apply(directory: &Path, context: TaskContext) -> Result<TaskResult> {
                 ),
                 0,
             )?;
-        }
-        // 性能打点（perf-tracing，默认不编译）：计划动作的实际执行区间；与前面的
-        // 崩溃残留清理、后面的收尾写库分开计时。
-        crate::perf::perf_span!("execute_actions");
-        let pool = io_pool()?;
-        let mut moves_executed = false;
-        let mut cursor = 0;
-        loop {
-            let actions = job.db.actions_page(cursor, APPLY_BATCH)?;
-            if actions.is_empty() {
-                break;
             }
-            // 一批一个事务（见 APPLY_BATCH）。事务里写库只影响「任务库记录的可见时机」，
-            // 文件改动本身不受事务保护，因此：
-            // - 出错/取消时提交已完成的部分（文件已经删了/移了，丢掉记录只会让计划行
-            //   状态与磁盘不一致，C-11）；SQLite 语句级失败不会中断事务，提交是安全的；
-            // - 崩溃/强杀时最多丢失当前一批（<64 项）的状态与审计行，此时任务不可能从
-            //   「执行中」恢复（C-10 无断点恢复），不存在重复删除的可能。
-            job.db.conn.execute_batch("BEGIN IMMEDIATE")?;
-            let batch = (|| -> Result<()> {
-                // 分段执行：文件删除彼此独立、空目录删除按深度分层（计划按深度降序生成，
-                // 同层目录不互为父子，更深层已在此前的段/页删除）——这两类连续动作在
-                // IO 池上并行；移动/硬链接/未勾选保持逐项串行，语义与旧实现一致。
-                let mut index = 0;
-                while index < actions.len() {
-                    // 移动动作不能只按计划行号执行：当一个目标正是另一个移动的
-                    // 源时，必须先释放源；交换环则由 execute_planned_moves 临时
-                    // 暂存一个源后完成。该预处理只执行一次，之后本页及后续页的
-                    // Move 行已经标记 done/failed，跳过即可。
-                    if actions[index].kind == ActionKind::Move {
-                        if !moves_executed {
-                            execute_planned_moves(&mut job)?;
-                            moves_executed = true;
+            // 性能打点（perf-tracing，默认不编译）：计划动作的实际执行区间；与前面的
+            // 崩溃残留清理、后面的收尾写库分开计时。
+            crate::perf::perf_span!("execute_actions");
+            let pool = io_pool()?;
+            *stage = "execute_actions";
+            let mut moves_executed = false;
+            let mut cursor = 0;
+            loop {
+                let actions = job.db.actions_page(cursor, APPLY_BATCH)?;
+                if actions.is_empty() {
+                    break;
+                }
+                // 一批一个事务（见 APPLY_BATCH）。事务里写库只影响「任务库记录的可见时机」，
+                // 文件改动本身不受事务保护，因此：
+                // - 出错/取消时提交已完成的部分（文件已经删了/移了，丢掉记录只会让计划行
+                //   状态与磁盘不一致，C-11）；SQLite 语句级失败不会中断事务，提交是安全的；
+                // - 崩溃/强杀时最多丢失当前一批（<64 项）的状态与审计行，此时任务不可能从
+                //   「执行中」恢复（C-10 无断点恢复），不存在重复删除的可能。
+                job.db.conn.execute_batch("BEGIN IMMEDIATE")?;
+                let batch = (|| -> Result<()> {
+                    // 分段执行：文件删除彼此独立、空目录删除按深度分层（计划按深度降序生成，
+                    // 同层目录不互为父子，更深层已在此前的段/页删除）——这两类连续动作在
+                    // IO 池上并行；移动/硬链接/未勾选保持逐项串行，语义与旧实现一致。
+                    let mut index = 0;
+                    while index < actions.len() {
+                        // 移动动作不能只按计划行号执行：当一个目标正是另一个移动的
+                        // 源时，必须先释放源；交换环则由 execute_planned_moves 临时
+                        // 暂存一个源后完成。该预处理只执行一次，之后本页及后续页的
+                        // Move 行已经标记 done/failed，跳过即可。
+                        if actions[index].kind == ActionKind::Move {
+                            if !moves_executed {
+                                execute_planned_moves(&mut job)?;
+                                moves_executed = true;
+                            }
+                            index += 1;
+                            continue;
                         }
-                        index += 1;
-                        continue;
+                        if actions[index].state != "pending" {
+                            index += 1;
+                            continue;
+                        }
+                        let Some(kind) = parallel_run_kind(&actions[index]) else {
+                            execute_sequential(&mut job, &actions[index])?;
+                            index += 1;
+                            continue;
+                        };
+                        let mut end = index + 1;
+                        while end < actions.len() && parallel_run_kind(&actions[end]) == Some(kind)
+                        {
+                            end += 1;
+                        }
+                        execute_run(&mut job, &pool, &actions[index..end], kind)?;
+                        index = end;
                     }
-                    if actions[index].state != "pending" {
-                        index += 1;
-                        continue;
+                    Ok(())
+                })();
+                match batch {
+                    Ok(()) => job.db.conn.execute_batch("COMMIT")?,
+                    Err(error) => {
+                        // 尽力提交：SQLite 已因致命错误自行回滚时 COMMIT 会失败，此时无需处理。
+                        if job.db.conn.execute_batch("COMMIT").is_err() {
+                            tracing::warn!(
+                                event = "task_transaction_cleanup_failed",
+                                stage = "partial_apply_commit",
+                                error_type = "database",
+                                "执行失败后保存已完成事务的尝试失败"
+                            );
+                        }
+                        return Err(error);
                     }
-                    let Some(kind) = parallel_run_kind(&actions[index]) else {
-                        execute_sequential(&mut job, &actions[index])?;
-                        index += 1;
-                        continue;
-                    };
-                    let mut end = index + 1;
-                    while end < actions.len() && parallel_run_kind(&actions[end]) == Some(kind) {
-                        end += 1;
-                    }
-                    execute_run(&mut job, &pool, &actions[index..end], kind)?;
-                    index = end;
                 }
-                Ok(())
-            })();
-            match batch {
-                Ok(()) => job.db.conn.execute_batch("COMMIT")?,
-                Err(error) => {
-                    // 尽力提交：SQLite 已因致命错误自行回滚时 COMMIT 会失败，此时无需处理。
-                    let _ = job.db.conn.execute_batch("COMMIT");
-                    return Err(error);
-                }
+                cursor = actions[actions.len() - 1].id;
             }
-            cursor = actions[actions.len() - 1].id;
+            // H-05/C-07：计划动作执行完总是做最终实空清理（不可关闭、不受文件清理/删除
+            // 方式选择影响）：既覆盖本次新产生的空目录与空目录链，也覆盖从未入库的目录
+            // （例如实际为空的「解压失败」暂存区、归类新建但没落文件的目录）。
+            *stage = "empty_cleanup";
+            final_empty_cleanup(&mut job, protected.as_deref())?;
+            Ok::<_, anyhow::Error>(())
+        })();
+        if outcome.is_err() {
+            if job.context.control.is_cancelled() {
+                tracing::info!(
+                    event = "apply_execution_cancelled",
+                    stage = *stage,
+                    errors = job.summary.errors,
+                    "整理执行已取消，开始保存已有结果"
+                );
+            } else {
+                tracing::error!(
+                    event = "apply_execution_failed",
+                    stage = *stage,
+                    errors = job.summary.errors,
+                    "整理执行未完成，开始保存已有结果"
+                );
+            }
         }
-        // H-05/C-07：计划动作执行完总是做最终实空清理（不可关闭、不受文件清理/删除
-        // 方式选择影响）：既覆盖本次新产生的空目录与空目录链，也覆盖从未入库的目录
-        // （例如实际为空的「解压失败」暂存区、归类新建但没落文件的目录）。
-        final_empty_cleanup(&mut job, protected.as_deref())?;
-        Ok::<_, anyhow::Error>(())
-    })();
-    job.db.set("summary", &job.summary)?;
-    job.db.set(
-        "status",
-        // C-11/C-01：执行阶段有计划行失败（errors 新增）的任务不得标「finished」；
-        // 用户取消优先于失败口径（C-10 取消不算失败）。
-        &if outcome.is_ok() && job.summary.errors == errors_before_apply {
-            "finished"
-        } else if job.context.control.is_cancelled() {
-            "cancelled"
-        } else {
-            "failed"
-        },
-    )?;
-    outcome?;
-    #[cfg(feature = "perf-tracing")]
-    crate::perf::apply_done(
-        job.summary.deleted,
-        job.summary.moved,
-        job.summary.skipped,
-        job.summary.errors,
-    );
-    tracing::info!(
-        deleted = job.summary.deleted,
-        moved = job.summary.moved,
-        skipped = job.summary.skipped,
-        errors = job.summary.errors,
-        "目录整理执行完成"
-    );
-    Ok(TaskResult {
-        directory: directory.to_path_buf(),
-        summary: job.summary,
+        *stage = "finalize_database";
+        job.db.set("summary", &job.summary)?;
+        job.db.set(
+            "status",
+            // C-11/C-01：执行阶段有计划行失败（errors 新增）的任务不得标「finished」；
+            // 用户取消优先于失败口径（C-10 取消不算失败）。
+            &if outcome.is_ok() && job.summary.errors == errors_before_apply {
+                "finished"
+            } else if job.context.control.is_cancelled() {
+                "cancelled"
+            } else {
+                "failed"
+            },
+        )?;
+        tracing::info!(
+            event = "task_state_changed",
+            state = if outcome.is_ok() && job.summary.errors == errors_before_apply {
+                "finished"
+            } else if job.context.control.is_cancelled() {
+                "cancelled"
+            } else {
+                "failed"
+            },
+            deleted = job.summary.deleted,
+            moved = job.summary.moved,
+            skipped = job.summary.skipped,
+            errors = job.summary.errors,
+            "整理执行终态已记录"
+        );
+        *stage = "execution_outcome";
+        outcome?;
+        #[cfg(feature = "perf-tracing")]
+        crate::perf::apply_done(
+            job.summary.deleted,
+            job.summary.moved,
+            job.summary.skipped,
+            job.summary.errors,
+        );
+        tracing::info!(
+            event = "organize_apply_summary",
+            outcome = if job.summary.errors == errors_before_apply {
+                "success"
+            } else {
+                "with_failures"
+            },
+            deleted = job.summary.deleted,
+            moved = job.summary.moved,
+            skipped = job.summary.skipped,
+            errors = job.summary.errors,
+            "目录整理执行完成"
+        );
+        Ok(TaskResult {
+            directory: directory.to_path_buf(),
+            summary: job.summary,
+        })
     })
 }
 /// 整理收尾的实空清理（H-05/C-07）：自底向上删除实际为空的目录及空目录链。
@@ -1868,92 +2203,108 @@ pub fn apply(directory: &Path, context: TaskContext) -> Result<TaskResult> {
 /// 与扫描共用同一套范围口径（[`ScopeFilter`]），所以「解压失败」暂存区内实际为空的
 /// 目录也按 H-05 清理（C-09），但其内容一律不碰——判定只看目录项是否为空。
 fn final_empty_cleanup(job: &mut Job, protected: Option<&Path>) -> Result<()> {
-    job.context.control.checkpoint()?;
-    let errors_before_cleanup = job.summary.errors;
-    let excluded = rules::build_exclusions(&job.config.exclusions)?;
-    let executable_dir = std::env::current_exe()
-        .ok()
-        .and_then(|p| p.parent().and_then(|d| fs::canonicalize(d).ok()));
-    let state = job
-        .db
-        .get::<String>("state_dir")
-        .ok()
-        .map(PathBuf::from)
-        .and_then(|directory| fs::canonicalize(directory).ok());
-    let (state_prefix, exe_prefix, root_under_special) =
-        special_prefixes(&job.root, state.as_deref(), executable_dir.as_deref());
-    if root_under_special {
-        // 选定根位于状态目录/程序目录内：扫描整树剪枝，这里同样不处理任何条目。
-        return Ok(());
-    }
-    // S-05：根包含 Windows 系统目录时该子树整树剪枝，清理与扫描同一口径。
-    let protected_prefix = protected.and_then(|dir| fsutil::relative_string(&job.root, dir).ok());
-    let scope_filter = ScopeFilter {
-        excluded: &excluded,
-        include_hidden: job.config.include_hidden,
-        include_system: job.config.include_system,
-        // C-09：暂存区内容不参与处理，但实际为空的目录仍按 H-05 清理。
-        quarantine: None,
-        state_prefix,
-        exe_prefix,
-        protected_prefix,
-        root_under_special,
-    };
-    let recursive = job.config.recursive;
-    let mut stack: Vec<SweepFrame> = Vec::new();
-    // 选定根目录本身绝不删除（H-05）：它的条目决定深度 1 的候选。
-    let (children, keep, notes) = sweep_entries(&scope_filter, true, &job.root, "");
-    for note in notes {
-        job.summary.errors += 1;
-        job.log("清理", "", "", "跳过", &note, 0)?;
-    }
-    stack.push(SweepFrame {
-        path: job.root.clone(),
-        rel: String::new(),
-        children,
-        next: 0,
-        keep,
-    });
-    while !stack.is_empty() {
-        // 后序遍历：先把全部子目录处理完，再决定当前目录是否实际为空。
-        let index = stack.len() - 1;
-        if stack[index].next < stack[index].children.len() {
-            let (path, rel) = stack[index].children[stack[index].next].clone();
-            stack[index].next += 1;
-            let (children, keep, notes) = sweep_entries(&scope_filter, recursive, &path, &rel);
+    let control = job.context.control.clone();
+    observe("final_empty_cleanup", Some(&control), |stage| {
+        *stage = "empty_directory_sweep";
+        let deleted_before = job.summary.deleted;
+        let result: Result<()> = (|| {
+            job.context.control.checkpoint()?;
+            let errors_before_cleanup = job.summary.errors;
+            let excluded = rules::build_exclusions(&job.config.exclusions)?;
+            let executable_dir = std::env::current_exe()
+                .ok()
+                .and_then(|p| p.parent().and_then(|d| fs::canonicalize(d).ok()));
+            let state = job
+                .db
+                .get::<String>("state_dir")
+                .ok()
+                .map(PathBuf::from)
+                .and_then(|directory| fs::canonicalize(directory).ok());
+            let (state_prefix, exe_prefix, root_under_special) =
+                special_prefixes(&job.root, state.as_deref(), executable_dir.as_deref());
+            if root_under_special {
+                // 选定根位于状态目录/程序目录内：扫描整树剪枝，这里同样不处理任何条目。
+                return Ok(());
+            }
+            // S-05：根包含 Windows 系统目录时该子树整树剪枝，清理与扫描同一口径。
+            let protected_prefix =
+                protected.and_then(|dir| fsutil::relative_string(&job.root, dir).ok());
+            let scope_filter = ScopeFilter {
+                excluded: &excluded,
+                include_hidden: job.config.include_hidden,
+                include_system: job.config.include_system,
+                // C-09：暂存区内容不参与处理，但实际为空的目录仍按 H-05 清理。
+                quarantine: None,
+                state_prefix,
+                exe_prefix,
+                protected_prefix,
+                root_under_special,
+            };
+            let recursive = job.config.recursive;
+            let mut stack: Vec<SweepFrame> = Vec::new();
+            // 选定根目录本身绝不删除（H-05）：它的条目决定深度 1 的候选。
+            let (children, keep, notes) = sweep_entries(&scope_filter, true, &job.root, "");
             for note in notes {
                 job.summary.errors += 1;
-                job.log("清理", &rel, "", "跳过", &note, 0)?;
+                job.log("清理", "", "", "跳过", &note, 0)?;
             }
             stack.push(SweepFrame {
-                path,
-                rel,
+                path: job.root.clone(),
+                rel: String::new(),
                 children,
                 next: 0,
                 keep,
             });
-            continue;
-        }
-        let Some(frame) = stack.pop() else {
-            break;
-        };
-        if frame.rel.is_empty() {
-            // 选定根目录本身绝不删除（H-05）。
-            continue;
-        }
-        job.context.control.checkpoint()?;
-        if !sweep_remove(job, &frame)? {
-            // 目录没能删除（非空/失败/超出范围）：父目录因此不算实际为空。
-            if let Some(parent) = stack.last_mut() {
-                parent.keep = true;
+            while !stack.is_empty() {
+                // 后序遍历：先把全部子目录处理完，再决定当前目录是否实际为空。
+                let index = stack.len() - 1;
+                if stack[index].next < stack[index].children.len() {
+                    let (path, rel) = stack[index].children[stack[index].next].clone();
+                    stack[index].next += 1;
+                    let (children, keep, notes) =
+                        sweep_entries(&scope_filter, recursive, &path, &rel);
+                    for note in notes {
+                        job.summary.errors += 1;
+                        job.log("清理", &rel, "", "跳过", &note, 0)?;
+                    }
+                    stack.push(SweepFrame {
+                        path,
+                        rel,
+                        children,
+                        next: 0,
+                        keep,
+                    });
+                    continue;
+                }
+                let Some(frame) = stack.pop() else {
+                    break;
+                };
+                if frame.rel.is_empty() {
+                    // 选定根目录本身绝不删除（H-05）。
+                    continue;
+                }
+                job.context.control.checkpoint()?;
+                if !sweep_remove(job, &frame)? {
+                    // 目录没能删除（非空/失败/超出范围）：父目录因此不算实际为空。
+                    if let Some(parent) = stack.last_mut() {
+                        parent.keep = true;
+                    }
+                }
             }
-        }
-    }
-    anyhow::ensure!(
-        job.summary.errors == errors_before_cleanup,
-        "空目录清理未完成：有目录无法读取或删除，详情见进度与日志"
-    );
-    Ok(())
+            anyhow::ensure!(
+                job.summary.errors == errors_before_cleanup,
+                "空目录清理未完成：有目录无法读取或删除，详情见进度与日志"
+            );
+            Ok(())
+        })();
+        tracing::info!(
+            event = "empty_cleanup_summary",
+            deleted = job.summary.deleted.saturating_sub(deleted_before),
+            errors = job.summary.errors,
+            "整理收尾空目录清理统计"
+        );
+        result
+    })
 }
 /// 删除一个收尾清理候选目录，返回是否真的删掉了（没删掉时父目录不算实际为空）。
 /// 一律永久删除（S-02）；这里不看用户勾选状态——H-05 的清理是强制步骤。
@@ -1985,6 +2336,10 @@ fn sweep_remove(job: &mut Job, frame: &SweepFrame) -> Result<bool> {
             if job.context.control.is_cancelled() {
                 job.context.control.check_cancelled()?;
             }
+            tracing::warn!(event = "empty_cleanup_item_failed", stage = "directory_remove",
+                source = %crate::logging::safe_error(&frame.rel), error_type = "filesystem_boundary",
+                error_code = error.chain().find_map(|cause| cause.downcast_ref::<std::io::Error>()).and_then(std::io::Error::raw_os_error),
+                "整理收尾空目录删除失败，保留该目录");
             job.summary.errors += 1;
             job.log("清理", &frame.rel, "", "失败", &format!("{error:#}"), 0)?;
             Ok(false)
@@ -2094,6 +2449,10 @@ fn record_action_failure(job: &mut Job, action: &Action, error: &anyhow::Error) 
     if job.context.control.is_cancelled() {
         job.context.control.check_cancelled()?;
     }
+    tracing::error!(event = "action_failed", action_id = action.id, action_kind = ?action.kind,
+        stage = "execute", error_type = "action_boundary",
+        error_code = error.chain().find_map(|cause| cause.downcast_ref::<std::io::Error>()).and_then(std::io::Error::raw_os_error),
+        "计划动作执行失败");
     job.summary.errors += 1;
     job.db.mark_action(action.id, "failed")?;
     // 失败日志统一 phase「执行」、带目标，便于按口径筛选。
@@ -2109,31 +2468,38 @@ fn record_action_failure(job: &mut Job, action: &Action, error: &anyhow::Error) 
     Ok(())
 }
 fn execute_sequential(job: &mut Job, action: &Action) -> Result<()> {
-    job.context.control.checkpoint()?;
-    if !action.selected {
-        job.summary.skipped += 1;
-        job.db.mark_action(action.id, "unselected")?;
-        // 未勾选不计入 completed：GUI 分母 count_selected_pending 只含 selected+pending，
-        // 分子若含 unselected 会出现 done>planned、提前 100% 的口径分裂。
-        return Ok(());
-    }
-    job.context
-        .status(format!("执行 {:?}：{}", action.kind, action.source));
-    match execute_action(job, action) {
-        Ok(true) => {
-            job.db.mark_action(action.id, "done")?;
-        }
-        Ok(false) => {
+    let span =
+        tracing::info_span!("task_action", action_id = action.id, action_kind = ?action.kind);
+    let _entered = span.enter();
+    let control = job.context.control.clone();
+    observe("execute_action", Some(&control), |stage| {
+        *stage = "action_execution_and_record";
+        job.context.control.checkpoint()?;
+        if !action.selected {
             job.summary.skipped += 1;
-            job.db.mark_action(action.id, "skipped")?;
+            job.db.mark_action(action.id, "unselected")?;
+            // 未勾选不计入 completed：GUI 分母 count_selected_pending 只含 selected+pending，
+            // 分子若含 unselected 会出现 done>planned、提前 100% 的口径分裂。
+            return Ok(());
         }
-        Err(error) => record_action_failure(job, action, &error)?,
-    }
-    job.context
-        .control
-        .completed
-        .fetch_add(1, Ordering::Relaxed);
-    Ok(())
+        job.context
+            .status(format!("执行 {:?}：{}", action.kind, action.source));
+        match execute_action(job, action) {
+            Ok(true) => {
+                job.db.mark_action(action.id, "done")?;
+            }
+            Ok(false) => {
+                job.summary.skipped += 1;
+                job.db.mark_action(action.id, "skipped")?;
+            }
+            Err(error) => record_action_failure(job, action, &error)?,
+        }
+        job.context
+            .control
+            .completed
+            .fetch_add(1, Ordering::Relaxed);
+        Ok(())
+    })
 }
 /// 并行执行一段相互独立的删除类动作：先整段记审计（意图先于任何变更落账），
 /// 再在 IO 池上并行做文件系统变更，最后按段内顺序串行结算（日志、计数、任务库状态）。
@@ -2158,6 +2524,9 @@ fn execute_run(
     });
     let size = |action: &Action| action.expected.as_ref().map_or(0, |snapshot| snapshot.size);
     for action in run {
+        let action_span =
+            tracing::info_span!("task_action", action_id = action.id, action_kind = ?action.kind);
+        let _action_entered = action_span.enter();
         job.log(
             "删除",
             &action.source,
@@ -2170,21 +2539,30 @@ fn execute_run(
     let mut targets = Vec::with_capacity(run.len());
     for action in run {
         let path = job.root.join(fsutil::safe_relative(&action.source)?);
-        targets.push((path, action.mode));
+        targets.push((path, action.mode, action.id));
     }
     let control = job.context.control.clone();
+    let parent_span = tracing::Span::current();
     let results: Vec<_> = pool.install(|| {
         targets
             .par_iter()
-            .map(|(path, mode)| match kind {
-                ParallelKind::Delete => platform::remove(path, *mode, &control).map(Some),
-                ParallelKind::EmptyDir(_) => {
-                    // 执行期实空复查（同旧 EmptyDirectory 分支）；同段目录互不嵌套，可并行。
-                    if !dir_recheck_empty(path)? {
-                        return Ok(None);
+            .map(|(path, mode, action_id)| {
+                let _entered = parent_span.enter();
+                let action_span = tracing::info_span!("task_action", action_id = action_id);
+                let _action_entered = action_span.enter();
+                observe("parallel_action", Some(&control), |stage| {
+                    *stage = "delete_or_empty_recheck";
+                    match kind {
+                        ParallelKind::Delete => platform::remove(path, *mode, &control).map(Some),
+                        ParallelKind::EmptyDir(_) => {
+                            // 执行期实空复查（同旧 EmptyDirectory 分支）；同段目录互不嵌套，可并行。
+                            if !dir_recheck_empty(path)? {
+                                return Ok(None);
+                            }
+                            platform::remove(path, *mode, &control).map(Some)
+                        }
                     }
-                    platform::remove(path, *mode, &control).map(Some)
-                }
+                })
             })
             .collect()
     });
@@ -2199,6 +2577,9 @@ fn settle_parallel_results(
     let size = |action: &Action| action.expected.as_ref().map_or(0, |snapshot| snapshot.size);
     let mut cancellation = None;
     for (action, result) in run.iter().zip(results) {
+        let action_span =
+            tracing::info_span!("task_action", action_id = action.id, action_kind = ?action.kind);
+        let _action_entered = action_span.enter();
         match result {
             Err(error) if job.context.control.is_cancelled() => {
                 // 并行文件操作已全部返回；先登记同批成功项，再按取消收尾。
@@ -2418,91 +2799,102 @@ fn execute_move_sequential(
     restore_on_error: bool,
     protected_git_roots: &HashSet<String>,
 ) -> Result<bool> {
-    if checkpoint {
-        job.context.control.checkpoint()?;
-    }
-    job.context
-        .status(format!("执行 {:?}：{}", action.kind, action.source));
-    let protected_root = action.target.as_deref().and_then(|target| {
-        let target = fsutil::fold_rel(target);
-        protected_git_roots
-            .iter()
-            .find(|root| path_is_at_or_below(&target, root))
-    });
-    let result = match protected_root {
-        Some(root) => Err(anyhow::anyhow!(
-            "移动目标位于仍受保护的 Git 项目「{root}」内，按 H-06 保留源项"
-        )),
-        None => execute_move_at(job, action, source),
-    };
-    let moved = match result {
-        Ok(true) => {
-            job.db.mark_action(action.id, "done")?;
-            true
+    let span =
+        tracing::info_span!("task_action", action_id = action.id, action_kind = ?action.kind);
+    let _entered = span.enter();
+    let control = job.context.control.clone();
+    observe("execute_move", Some(&control), |stage| {
+        *stage = "move_execution_and_record";
+        if checkpoint {
+            job.context.control.checkpoint()?;
         }
-        Ok(false) => {
-            job.summary.skipped += 1;
-            job.db.mark_action(action.id, "skipped")?;
-            false
-        }
-        Err(error) => {
-            if restore_on_error {
-                let original = fsutil::safe_join(&job.root, &action.source)?;
-                if !original.exists() && source.exists() {
-                    if let Err(restore_error) =
-                        fsutil::move_file_preserving_times(source, &original)
-                    {
+        job.context
+            .status(format!("执行 {:?}：{}", action.kind, action.source));
+        let protected_root = action.target.as_deref().and_then(|target| {
+            let target = fsutil::fold_rel(target);
+            protected_git_roots
+                .iter()
+                .find(|root| path_is_at_or_below(&target, root))
+        });
+        let result = match protected_root {
+            Some(root) => Err(anyhow::anyhow!(
+                "移动目标位于仍受保护的 Git 项目「{root}」内，按 H-06 保留源项"
+            )),
+            None => execute_move_at(job, action, source),
+        };
+        let moved = match result {
+            Ok(true) => {
+                job.db.mark_action(action.id, "done")?;
+                true
+            }
+            Ok(false) => {
+                job.summary.skipped += 1;
+                job.db.mark_action(action.id, "skipped")?;
+                false
+            }
+            Err(error) => {
+                if restore_on_error {
+                    let original = fsutil::safe_join(&job.root, &action.source)?;
+                    if !original.exists() && source.exists() {
+                        if let Err(restore_error) =
+                            fsutil::move_file_preserving_times(source, &original)
+                        {
+                            job.log(
+                        "移动",
+                        &action.source,
+                        "",
+                        "恢复失败",
+                        &format!(
+                            "移动目标失败后，临时暂存无法恢复到原位置：{restore_error:#}；暂存路径：{}",
+                            source.display()
+                        ),
+                        0,
+                    )?;
+                        }
+                    } else if original.exists() && source.exists() {
                         job.log(
                             "移动",
                             &action.source,
                             "",
                             "恢复失败",
                             &format!(
-                                "移动目标失败后，临时暂存无法恢复到原位置：{restore_error:#}；暂存路径：{}",
+                                "原位置已被占用，无法放回暂存中的文件；请从暂存路径恢复：{}",
+                                source.display()
+                            ),
+                            0,
+                        )?;
+                    } else if !original.exists() {
+                        job.log(
+                            "移动",
+                            &action.source,
+                            "",
+                            "恢复失败",
+                            &format!(
+                                "移动目标失败后原位置与临时暂存均不存在；暂存路径：{}",
                                 source.display()
                             ),
                             0,
                         )?;
                     }
-                } else if original.exists() && source.exists() {
-                    job.log(
-                        "移动",
-                        &action.source,
-                        "",
-                        "恢复失败",
-                        &format!(
-                            "原位置已被占用，无法放回暂存中的文件；请从暂存路径恢复：{}",
-                            source.display()
-                        ),
-                        0,
-                    )?;
-                } else if !original.exists() {
-                    job.log(
-                        "移动",
-                        &action.source,
-                        "",
-                        "恢复失败",
-                        &format!(
-                            "移动目标失败后原位置与临时暂存均不存在；暂存路径：{}",
-                            source.display()
-                        ),
-                        0,
-                    )?;
                 }
+                record_move_failure(job, action, &error)?;
+                job.context.control.check_cancelled()?;
+                false
             }
-            record_move_failure(job, action, &error)?;
-            job.context.control.check_cancelled()?;
-            false
-        }
-    };
-    job.context
-        .control
-        .completed
-        .fetch_add(1, Ordering::Relaxed);
-    Ok(moved)
+        };
+        job.context
+            .control
+            .completed
+            .fetch_add(1, Ordering::Relaxed);
+        Ok(moved)
+    })
 }
 
 fn record_move_failure(job: &mut Job, action: &Action, error: &anyhow::Error) -> Result<()> {
+    tracing::error!(event = "action_failed", action_id = action.id, action_kind = ?action.kind,
+        stage = "move", error_type = "action_boundary",
+        error_code = error.chain().find_map(|cause| cause.downcast_ref::<std::io::Error>()).and_then(std::io::Error::raw_os_error),
+        "计划移动执行失败");
     job.summary.errors += 1;
     job.db.mark_action(action.id, "failed")?;
     job.log(

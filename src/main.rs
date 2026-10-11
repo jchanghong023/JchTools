@@ -12,6 +12,16 @@ fn main() {
         }
         let _flush_on_unwind = jchtools::logging::FlushOnDrop;
         let served = jchtools::acp_api::runtime::serve();
+        if let Err(error) = &served {
+            tracing::error!(
+                event = "application_failed",
+                component = "acp_http_service",
+                stage = "serve",
+                error_type = ?error.kind,
+                exit_code = 1,
+                "模型服务后台异常退出"
+            );
+        }
         jchtools::logging::flush_before_exit();
         if served.is_err() {
             std::process::exit(1);
@@ -34,6 +44,16 @@ fn main() {
         // 显式覆盖，两者经同一互斥量幂等）。
         let _flush_on_unwind = jchtools::logging::FlushOnDrop;
         let served = jchtools::xberg_runtime::serve();
+        if served.is_err() {
+            tracing::error!(
+                event = "application_failed",
+                component = "xberg_broker",
+                stage = "serve",
+                error_type = "broker_failure",
+                exit_code = 1,
+                "共享代理异常退出"
+            );
+        }
         jchtools::logging::flush_before_exit();
         if served.is_err() {
             std::process::exit(1);

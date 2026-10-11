@@ -236,7 +236,7 @@ pub(crate) fn parse_hotkey(raw: &str) -> Result<(u32, u32), String> {
 }
 
 enum Control {
-    Trigger,
+    Trigger(tracing::Span),
     Replace(String, mpsc::SyncSender<Result<(), String>>),
     Notice(String),
     Stop(mpsc::SyncSender<()>),
@@ -250,16 +250,49 @@ struct TrayState {
 thread_local! { static STATE:RefCell<Option<TrayState>>=const { RefCell::new(None) }; }
 
 fn capture_selected(state: &mpsc::Sender<Command>) {
+    let started = std::time::Instant::now();
+    tracing::info!(event = "ocr_capture_started", "开始截图与选区");
     // 完整截图发生在遮罩出现前；旧结果由 Slint 线程先隐藏，服务不主动写图片。
-    let outcome = capture_win::capture().and_then(capture_win::select);
+    let mut stage = "capture";
+    let outcome = capture_win::capture().and_then(|frame| {
+        tracing::info!(
+            event = "ocr_screen_capture_completed",
+            elapsed_ms = crate::logging::elapsed_ms(started),
+            "屏幕截图已取得，仅保留内存"
+        );
+        stage = "selection";
+        tracing::info!(event = "ocr_selection_started", "开始截图框选");
+        capture_win::select(frame)
+    });
     match outcome {
         Ok(Some((image, work))) => {
+            tracing::info!(
+                event = "ocr_capture_completed",
+                result = "selected",
+                width = image.width(),
+                height = image.height(),
+                elapsed_ms = crate::logging::elapsed_ms(started),
+                "截图选区完成"
+            );
             let _ = state.send(Command::Image(image, work));
         }
         Ok(None) => {
+            tracing::info!(
+                event = "ocr_capture_completed",
+                result = "cancelled",
+                elapsed_ms = crate::logging::elapsed_ms(started),
+                "截图选区已取消"
+            );
             let _ = state.send(Command::CancelledSelection);
         }
         Err(reason) => {
+            tracing::warn!(
+                event = "ocr_capture_failed",
+                stage,
+                error_type = "capture",
+                elapsed_ms = crate::logging::elapsed_ms(started),
+                "截图选区失败"
+            );
             let _ = state.send(Command::CaptureFailed(reason));
         }
     }
@@ -282,6 +315,7 @@ unsafe extern "system" fn wnd_proc(hwnd: Handle, msg: u32, w: usize, l: isize) -
                     .and_then(|s| (usize::try_from(s.active) == Ok(w)).then(|| s.commands.clone()))
             });
             if let Some(commands) = commands {
+                tracing::info!(event = "ocr_hotkey_received", "收到截图热键");
                 let _ = commands.send(Command::CaptureRequested);
             }
             return 0;
@@ -346,7 +380,8 @@ unsafe extern "system" fn wnd_proc(hwnd: Handle, msg: u32, w: usize, l: isize) -
                         break;
                     };
                     match control {
-                        Control::Trigger => {
+                        Control::Trigger(span) => {
+                            let _entered = span.enter();
                             let sender = STATE
                                 .with(|slot| slot.borrow().as_ref().map(|s| s.commands.clone()));
                             if let Some(sender) = sender {
@@ -354,6 +389,11 @@ unsafe extern "system" fn wnd_proc(hwnd: Handle, msg: u32, w: usize, l: isize) -
                             }
                         }
                         Control::Replace(name, response) => {
+                            let started = std::time::Instant::now();
+                            tracing::info!(
+                                event = "ocr_hotkey_replace_started",
+                                "开始替换截图热键"
+                            );
                             let result = parse_hotkey(&name).and_then(|(mods, key)| {
                                 STATE.with(|slot| {
                                     let mut slot = slot.borrow_mut();
@@ -386,6 +426,19 @@ unsafe extern "system" fn wnd_proc(hwnd: Handle, msg: u32, w: usize, l: isize) -
                                     Ok(())
                                 })
                             });
+                            match &result {
+                                Ok(()) => tracing::info!(
+                                    event = "ocr_hotkey_replace_completed",
+                                    elapsed_ms = crate::logging::elapsed_ms(started),
+                                    "截图热键替换完成"
+                                ),
+                                Err(_) => tracing::warn!(
+                                    event = "ocr_hotkey_replace_failed",
+                                    error_type = "registration",
+                                    elapsed_ms = crate::logging::elapsed_ms(started),
+                                    "截图热键替换失败，保留原状态"
+                                ),
+                            }
                             let _ = response.send(result);
                         }
                         Control::Notice(message) => {
@@ -454,8 +507,8 @@ impl TrayHandle {
             PostMessageW(self.hwnd as Handle, WM_APP_CONTROL, 0, 0);
         }
     }
-    pub(crate) fn trigger(&self) {
-        self.send(Control::Trigger);
+    pub(crate) fn trigger(&self, span: tracing::Span) {
+        self.send(Control::Trigger(span));
     }
     /// 请求当前冻结框选结束；服务取消/退出路径可在不阻塞托盘线程的情况下调用。
     pub(crate) fn cancel_selection() -> bool {
@@ -503,7 +556,11 @@ pub(crate) fn start(
     autostart: bool,
 ) -> Result<TrayHandle, String> {
     let (ready_tx, ready_rx) = mpsc::sync_channel(1);
+    let span = tracing::Span::current();
     std::thread::spawn(move || {
+        let _entered = span.enter();
+        let started = std::time::Instant::now();
+        tracing::info!(event = "ocr_tray_started", "开始初始化截图托盘");
         let class_name = wide("JchToolsSnapOcrTray");
         // SAFETY: 模块名传 null 表示取当前进程可执行文件的句柄，不解引用任何指针。
         let instance = unsafe { GetModuleHandleW(null()) };
@@ -521,6 +578,13 @@ pub(crate) fn start(
         };
         // SAFETY: wnd 为栈上已填好的 WNDCLASSW，其 class 字段指向仍存活的 class_name（NUL 结尾宽字符串）。
         if unsafe { RegisterClassW(&raw const wnd) } == 0 {
+            tracing::error!(
+                event = "ocr_tray_failed",
+                stage = "register_class",
+                error_type = "win32",
+                elapsed_ms = crate::logging::elapsed_ms(started),
+                "托盘窗口类型注册失败"
+            );
             let _ = ready_tx.send(Err("托盘窗口类型注册失败".into()));
             return;
         }
@@ -543,12 +607,26 @@ pub(crate) fn start(
             )
         };
         if hwnd.is_null() {
+            tracing::error!(
+                event = "ocr_tray_failed",
+                stage = "create_window",
+                error_type = "win32",
+                elapsed_ms = crate::logging::elapsed_ms(started),
+                "托盘窗口创建失败"
+            );
             let _ = ready_tx.send(Err("托盘消息窗口创建失败".into()));
             return;
         }
         let (modifiers, key) = match parse_hotkey(&hotkey) {
             Ok(keys) => keys,
             Err(reason) => {
+                tracing::error!(
+                    event = "ocr_tray_failed",
+                    stage = "parse_hotkey",
+                    error_type = "invalid_hotkey",
+                    elapsed_ms = crate::logging::elapsed_ms(started),
+                    "托盘热键配置无效"
+                );
                 let _ = ready_tx.send(Err(reason));
                 // SAFETY: 仅按值传递本线程刚创建的窗口句柄，销毁失败仅返回非零。
                 unsafe { DestroyWindow(hwnd) };
@@ -558,6 +636,12 @@ pub(crate) fn start(
         // SAFETY: 参数均为句柄、热键 ID 与键值按值传递，hwnd 属于本线程。
         let hotkey_registered = unsafe { RegisterHotKey(hwnd, ID_ACTIVE, modifiers, key) } != 0;
         if !hotkey_registered {
+            tracing::warn!(
+                event = "ocr_hotkey_unavailable",
+                stage = "initial_registration",
+                error_type = "registration",
+                "截图热键不可用，后台仍运行"
+            );
             let _ = sender.send(Command::HotkeyUnavailable(
                 "快捷键被占用，请在截图 OCR 页设置其他组合；后台服务仍在运行".into(),
             ));
@@ -572,6 +656,13 @@ pub(crate) fn start(
             });
         });
         if !notify(hwnd, None, &hotkey, 0) {
+            tracing::error!(
+                event = "ocr_tray_failed",
+                stage = "notify_icon",
+                error_type = "win32",
+                elapsed_ms = crate::logging::elapsed_ms(started),
+                "托盘图标创建失败"
+            );
             let _ = ready_tx.send(Err("通知区图标创建失败；截图服务未启动".into()));
             // SAFETY: 仅按值传递本线程刚创建的窗口句柄，销毁失败仅返回非零。
             unsafe { DestroyWindow(hwnd) };
@@ -580,6 +671,12 @@ pub(crate) fn start(
         if !autostart && hotkey_registered {
             let _ = notify(hwnd, Some(&format!("已启动，按 {hotkey} 截图")), &hotkey, 1);
         }
+        tracing::info!(
+            event = "ocr_tray_ready",
+            hotkey_registered,
+            elapsed_ms = crate::logging::elapsed_ms(started),
+            "截图托盘就绪"
+        );
         let _ = ready_tx.send(Ok(TrayHandle {
             hwnd: hwnd as usize,
             queue,
@@ -591,6 +688,12 @@ pub(crate) fn start(
             let code = unsafe { GetMessageW(&raw mut msg, null_mut(), 0, 0) };
             if message_loop_requires_cleanup(code) {
                 if code < 0 {
+                    tracing::error!(
+                        event = "ocr_tray_failed",
+                        stage = "message_loop",
+                        error_type = "win32",
+                        "托盘消息循环失败"
+                    );
                     cleanup_tray_state(hwnd, Some("托盘消息循环失败；快捷键与托盘已清理"));
                 } else {
                     cleanup_tray_state(hwnd, None);
@@ -602,6 +705,7 @@ pub(crate) fn start(
             // SAFETY: msg 为同一有效消息结构，只读指针在调用期间有效。
             unsafe { DispatchMessageW(&raw const msg) };
         }
+        tracing::info!(event = "ocr_tray_stopped", "截图托盘线程已停止");
     });
     ready_rx
         .recv_timeout(std::time::Duration::from_secs(5))

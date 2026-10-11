@@ -19,6 +19,40 @@ pub(super) enum Operation {
     Stop,
     Discover,
 }
+
+#[cfg(windows)]
+#[derive(Serialize, Deserialize)]
+struct Request {
+    operation: Operation,
+    // Typed UUIDs cannot carry arbitrary user or credential text into a span.
+    diagnostic_id: uuid::Uuid,
+}
+
+// AH-15 public discovery is a distinct external boundary, not a private control frame.
+#[cfg(windows)]
+#[derive(Deserialize)]
+enum PublicDiscovery {
+    Discover,
+}
+
+#[cfg(windows)]
+#[derive(Deserialize)]
+#[serde(untagged)]
+enum IncomingRequest {
+    PrivateControl(Request),
+    PublicDiscovery(PublicDiscovery),
+}
+
+impl Operation {
+    fn name(self) -> &'static str {
+        match self {
+            Self::Status => "status",
+            Self::Apply => "apply",
+            Self::Stop => "stop",
+            Self::Discover => "discover",
+        }
+    }
+}
 pub(super) enum ControlOperation {
     Apply,
     Stop,
@@ -26,6 +60,7 @@ pub(super) enum ControlOperation {
 pub(super) struct Control {
     pub(super) operation: ControlOperation,
     pub(super) reply: oneshot::Sender<Result<ServiceStatus, ServiceError>>,
+    pub(super) span: tracing::Span,
 }
 #[cfg(windows)]
 #[derive(Serialize, Deserialize)]
@@ -42,51 +77,61 @@ async fn send<T: Serialize>(
     stream: &mut (impl AsyncWrite + Unpin),
     value: &T,
 ) -> Result<(), ServiceError> {
-    let data = serde_json::to_vec(value).map_err(|e| error(e.to_string()))?;
-    if data.len() > MAX_FRAME {
-        return Err(error("模型服务控制消息过大"));
-    }
-    let length = u32::try_from(data.len()).map_err(|e| error(e.to_string()))?;
-    stream
-        .write_u32_le(length)
-        .await
-        .map_err(|e| error(format!("写入模型服务控制管道失败：{e}")))?;
-    stream
-        .write_all(&data)
-        .await
-        .map_err(|e| error(format!("写入模型服务控制管道失败：{e}")))?;
-    stream.flush().await.map_err(|e| error(e.to_string()))
+    crate::acp_api::diagnostics::async_call("acp_control", "frame_send", async { let data = serde_json::to_vec(value).map_err(|e| error(e.to_string()))?;
+if data.len() > MAX_FRAME {
+    tracing::error!(event = "acp_control_frame_failed", component = "acp_control", stage = "frame_size", direction = "send", size_bytes = data.len(), error_type = "frame_too_large", "ACP 控制消息发送大小超限");
+    return Err(error("模型服务控制消息过大"));
+}
+let length = u32::try_from(data.len()).map_err(|e| error(e.to_string()))?;
+stream
+    .write_u32_le(length)
+    .await
+    .inspect_err(|e| tracing::error!(event = "acp_control_frame_failed", component = "acp_control", stage = "write_header", error_type = ?e.kind(), error_code = ?e.raw_os_error(), "ACP 控制帧头写入失败"))
+    .map_err(|e| error(format!("写入模型服务控制管道失败：{e}")))?;
+stream
+    .write_all(&data)
+    .await
+    .inspect_err(|e| tracing::error!(event = "acp_control_frame_failed", component = "acp_control", stage = "write_body", error_type = ?e.kind(), error_code = ?e.raw_os_error(), "ACP 控制帧写入失败"))
+    .map_err(|e| error(format!("写入模型服务控制管道失败：{e}")))?;
+stream.flush().await.map_err(|e| error(e.to_string())) }).await
 }
 #[cfg(windows)]
 async fn receive<T: serde::de::DeserializeOwned>(
     stream: &mut (impl AsyncRead + Unpin),
 ) -> Result<T, ServiceError> {
-    let length = stream
-        .read_u32_le()
-        .await
-        .map_err(|e| error(format!("读取模型服务控制管道失败：{e}")))? as usize;
-    if length > MAX_FRAME {
-        return Err(error("模型服务控制消息过大"));
-    }
-    let mut data = vec![0; length];
-    stream
-        .read_exact(&mut data)
-        .await
-        .map_err(|e| error(e.to_string()))?;
-    serde_json::from_slice(&data).map_err(|e| error(format!("模型服务控制消息无效：{e}")))
+    crate::acp_api::diagnostics::async_call("acp_control", "frame_receive", async { let length = stream
+    .read_u32_le()
+    .await
+    .inspect_err(|e| tracing::error!(event = "acp_control_frame_failed", component = "acp_control", stage = "read_header", error_type = ?e.kind(), error_code = ?e.raw_os_error(), "ACP 控制帧头读取失败"))
+    .map_err(|e| error(format!("读取模型服务控制管道失败：{e}")))? as usize;
+if length > MAX_FRAME {
+    tracing::error!(event = "acp_control_frame_failed", component = "acp_control", stage = "frame_size", direction = "receive", size_bytes = length, error_type = "frame_too_large", "ACP 控制消息接收大小超限");
+    return Err(error("模型服务控制消息过大"));
+}
+let mut data = vec![0; length];
+stream
+    .read_exact(&mut data)
+    .await
+    .inspect_err(|e| tracing::error!(event = "acp_control_frame_failed", component = "acp_control", stage = "read_body", error_type = ?e.kind(), error_code = ?e.raw_os_error(), "ACP 控制帧读取失败"))
+    .map_err(|e| error(e.to_string()))?;
+serde_json::from_slice(&data)
+    .inspect_err(|e| tracing::error!(event = "acp_control_frame_failed", component = "acp_control", stage = "json_decode", error_type = ?e.classify(), "ACP 控制消息 JSON 解析失败"))
+    .map_err(|e| error(format!("模型服务控制消息无效：{e}"))) }).await
 }
 
 #[cfg(windows)]
 mod platform {
     use super::{
         error, mpsc, oneshot, receive, send, watch, CancellationToken, Control, ControlOperation,
-        Operation, Response, ServiceDiscovery, ServiceError, ServiceStatus, PROTOCOL,
+        IncomingRequest, Operation, PublicDiscovery, Request, Response, ServiceDiscovery,
+        ServiceError, ServiceStatus, PROTOCOL,
     };
     use sha2::{Digest, Sha256};
     const HEX: &[u8; 16] = b"0123456789abcdef";
     use std::os::windows::io::AsRawHandle;
     use std::time::Duration;
     use tokio::net::windows::named_pipe::{ClientOptions, NamedPipeServer, ServerOptions};
+    use tracing::Instrument;
     use windows_sys::Win32::Foundation::{
         CloseHandle, LocalFree, ERROR_PIPE_BUSY, HANDLE, WAIT_ABANDONED, WAIT_OBJECT_0,
     };
@@ -340,45 +385,98 @@ mod platform {
     pub(in crate::acp_api::runtime) async fn exchange<T: serde::de::DeserializeOwned>(
         operation: Operation,
     ) -> Result<Option<T>, ServiceError> {
-        // 查询从首次连接到响应共用一个 budget；生命周期收尾仍不设置强制超时。
-        let deadline = tokio::time::Instant::now() + Duration::from_secs(15);
-        let name = pipe_name()?;
-        let connected = async {
-            loop {
-                match ClientOptions::new().open(&name) {
-                    Ok(pipe) => return Ok(Some(pipe)),
-                    Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
-                    Err(e) if e.raw_os_error() == Some(ERROR_PIPE_BUSY.cast_signed()) => {
-                        // 不阻塞 executor，不启动后台；等服务发布下一监听实例。
-                        tokio::time::sleep(Duration::from_millis(10)).await;
+        let diagnostic_id = uuid::Uuid::new_v4();
+        let diagnostic_text = diagnostic_id.to_string();
+        let span =
+            crate::logging::operation_span_with_id("acp_control", "exchange", &diagnostic_text);
+        crate::acp_api::diagnostics::async_call("acp_control", "exchange", async {
+            // 查询从首次连接到响应共用一个 budget；生命周期收尾仍不设置强制超时。
+            let response_timeout_ms = if matches!(operation, Operation::Stop | Operation::Apply) {
+                None
+            } else {
+                Some(15000_u64)
+            };
+            tracing::info!(
+                event = "acp_control_exchange_started",
+                component = "acp_control",
+                method = operation.name(),
+                %diagnostic_id,
+                connect_timeout_ms = 15000,
+                ?response_timeout_ms,
+                "ACP 控制管道客户端交换开始"
+            );
+            let deadline = tokio::time::Instant::now() + Duration::from_secs(15);
+            let name = pipe_name()?;
+            let connected = async {
+                let mut attempt = 0_u64;
+                loop {
+                    attempt += 1;
+                    match ClientOptions::new().open(&name) {
+                        Ok(pipe) => return Ok(Some(pipe)),
+                        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+                        Err(e) if e.raw_os_error() == Some(ERROR_PIPE_BUSY.cast_signed()) => {
+                            tracing::warn!(
+                                event = "acp_control_connect_retry",
+                                component = "acp_control",
+                                method = operation.name(),
+                                attempt,
+                                reason = "pipe_busy",
+                                "ACP 控制管道繁忙，等待下一监听实例"
+                            );
+                            // 不阻塞 executor，不启动后台；等服务发布下一监听实例。
+                            tokio::time::sleep(Duration::from_millis(10)).await;
+                        }
+                        Err(e) => return Err(error(format!("连接模型服务控制管道失败：{e}"))),
                     }
-                    Err(e) => return Err(error(format!("连接模型服务控制管道失败：{e}"))),
                 }
-            }
-        };
-        let Some(mut pipe) = tokio::time::timeout_at(deadline, connected)
-            .await
-            .map_err(|_| error("模型服务控制查询超时"))??
-        else {
-            return Ok(None);
-        };
-        // 在写入任何控制操作前核验真实端点 TokenUser 和会话；不信任名字/自报 PID。
-        let actual_pid = ensure_same_pipe_user(pipe.as_raw_handle().cast(), false)?;
-        let work = async {
-            send(&mut pipe, &operation).await?;
-            let response: Response<T> = receive(&mut pipe).await?;
-            if response.protocol != PROTOCOL || response.pid != actual_pid {
-                return Err(error("模型服务控制协议或进程归属不匹配"));
-            }
-            response.result.map(Some)
-        };
-        if matches!(operation, Operation::Stop | Operation::Apply) {
-            work.await
-        } else {
-            tokio::time::timeout_at(deadline, work)
+            };
+            let Some(mut pipe) = tokio::time::timeout_at(deadline, connected)
                 .await
-                .map_err(|_| error("模型服务控制查询超时"))?
-        }
+                .map_err(|_| error("模型服务控制查询超时"))??
+            else {
+                tracing::info!(
+                    event = "acp_control_peer_absent",
+                    component = "acp_control",
+                    method = operation.name(),
+                    status = "not_running",
+                    "ACP 控制管道后台缺席"
+                );
+                return Ok(None);
+            };
+            // 在写入任何控制操作前核验真实端点 TokenUser 和会话；不信任名字/自报 PID。
+            let actual_pid = ensure_same_pipe_user(pipe.as_raw_handle().cast(), false)?;
+            tracing::info!(
+                event = "acp_control_connected",
+                component = "acp_control",
+                peer_pid = actual_pid,
+                method = operation.name(),
+                "ACP 控制管道客户端已验证服务端"
+            );
+            let work = async {
+                send(
+                    &mut pipe,
+                    &Request {
+                        operation,
+                        diagnostic_id,
+                    },
+                )
+                .await?;
+                let response: Response<T> = receive(&mut pipe).await?;
+                if response.protocol != PROTOCOL || response.pid != actual_pid {
+                    return Err(error("模型服务控制协议或进程归属不匹配"));
+                }
+                response.result.map(Some)
+            };
+            if matches!(operation, Operation::Stop | Operation::Apply) {
+                work.await
+            } else {
+                tokio::time::timeout_at(deadline, work)
+                    .await
+                    .map_err(|_| error("模型服务控制查询超时"))?
+            }
+        })
+        .instrument(span)
+        .await
     }
     fn create_pipe(first: bool) -> Result<NamedPipeServer, ServiceError> {
         let security = Security::new()?;
@@ -400,94 +498,121 @@ mod platform {
         shutdown: CancellationToken,
         ready: oneshot::Sender<Result<(), ServiceError>>,
     ) -> Result<(), ServiceError> {
-        let mut pipe = match create_pipe(true) {
-            Ok(pipe) => {
-                let _ = ready.send(Ok(()));
-                pipe
-            }
+        crate::acp_api::diagnostics::async_call("acp_control", "serve", async { let mut pipe = match create_pipe(true) {
+        Ok(pipe) => {
+            let _ = ready.send(Ok(()));
+            pipe
+        }
+        Err(error) => {
+            let _ = ready.send(Err(error.clone()));
+            return Err(error);
+        }
+    };
+    let mut workers = tokio::task::JoinSet::new();
+    loop {
+        tokio::select! {
+            () = shutdown.cancelled() => break,
+            result = pipe.connect() => result.map_err(|e| error(format!("接受模型服务控制连接失败：{e}")))?,
+        }
+        let mut connected = pipe;
+        pipe = create_pipe(false)?;
+        let peer_pid = match ensure_same_pipe_user(connected.as_raw_handle().cast(), true) {
+            Ok(peer_pid) => peer_pid,
             Err(error) => {
-                let _ = ready.send(Err(error.clone()));
-                return Err(error);
-            }
-        };
-        let mut workers = tokio::task::JoinSet::new();
-        loop {
-            tokio::select! {
-                () = shutdown.cancelled() => break,
-                result = pipe.connect() => result.map_err(|e| error(format!("接受模型服务控制连接失败：{e}")))?,
-            }
-            let mut connected = pipe;
-            pipe = create_pipe(false)?;
-            if let Err(error) = ensure_same_pipe_user(connected.as_raw_handle().cast(), true) {
-                tracing::warn!(kind = ?error.kind, "拒绝非同一用户或登录会话的模型服务控制连接");
-                // 尚未解析任何操作；拒绝不能触发状态发现、磁盘读取或生命周期变更。
+                tracing::warn!(event = "acp_control_peer_rejected", component = "acp_control", stage = "peer_identity", error_type = ?error.kind, "拒绝非同一用户或登录会话的模型服务控制连接");
+                // 未解析任何操作，拒绝不触发状态发现或生命周期变更。
                 let _ = connected.disconnect();
                 continue;
             }
-            let status = status.clone();
-            let commands = commands.clone();
-            let shutdown = shutdown.clone();
-            workers.spawn(async move {
-                let operation: Operation =
-                    tokio::time::timeout(Duration::from_secs(15), receive(&mut connected))
-                        .await
-                        .map_err(|_| error("模型服务控制请求超时"))??;
-                // 收尾失败仍要退役后台；回执写入失败也不能留下已封口的控制器。
-                // guard 在控制器实际完成和回执发送之后释放，不提前取消资源收尾。
-                let _stop_reply_guard =
-                    matches!(operation, Operation::Stop).then(|| shutdown.clone().drop_guard());
-                let result = if matches!(operation, Operation::Discover) {
-                    // Discover 不进入生命周期队列，也不读取磁盘 saved_config。
-                    let discovery = ServiceDiscovery::from_status(instance_id, &status.borrow());
-                    return send(
-                        &mut connected,
-                        &Response {
-                            protocol: PROTOCOL,
-                            pid: std::process::id(),
-                            result: Ok(discovery),
-                        },
-                    )
-                    .await;
-                } else if matches!(operation, Operation::Status) {
-                    // 配置写入不需排在 drain/stop 后；实时返回磁盘 saved 与当前 running。
-                    let saved = tokio::task::spawn_blocking(crate::acp_api::settings::load_config)
-                        .await
-                        .map_err(|e| error(format!("读取配置任务失败：{e}")))?;
-                    let mut current = status.borrow().clone();
-                    match saved {
-                        Ok(saved) => current.saved_config = saved,
-                        Err(error) => {
-                            current.phase = crate::acp_api::ServicePhase::Error;
-                            current.error = Some(error.message);
-                        }
+        };
+        let status = status.clone();
+        let commands = commands.clone();
+        let shutdown = shutdown.clone();
+        workers.spawn(crate::acp_api::diagnostics::async_call("acp_control", "server_connection", async move {
+            tracing::info!(event = "acp_control_connection_received", component = "acp_control", peer_pid, "ACP 控制管道服务端已验证客户端");
+            let request: IncomingRequest =
+                tokio::time::timeout(Duration::from_secs(15), receive(&mut connected))
+                    .await
+                    .map_err(|_| error("模型服务控制请求超时"))??;
+            let (operation, injected_id, request_protocol) = match request {
+                IncomingRequest::PrivateControl(request) =>
+                    (request.operation, Some(request.diagnostic_id), "private_control"),
+                IncomingRequest::PublicDiscovery(PublicDiscovery::Discover) =>
+                    (Operation::Discover, None, "public_discovery"),
+            };
+            let diagnostic_id = injected_id.unwrap_or_else(uuid::Uuid::new_v4);
+            let diagnostic_text = diagnostic_id.to_string();
+            let span = crate::logging::operation_span_with_id("acp_control", "server_request", &diagnostic_text);
+            crate::acp_api::diagnostics::async_call("acp_control", "server_request", async move {
+            tracing::info!(event = "acp_control_request_received", component = "acp_control", %diagnostic_id, diagnostic_id_from_peer = injected_id.is_some(), request_protocol, peer_pid, method = operation.name(), "ACP 控制管道收到操作");
+            // 收尾失败仍要退役后台；回执写入失败也不能留下已封口的控制器。
+            // guard 在控制器实际完成和回执发送之后释放，不提前取消资源收尾。
+            let _stop_reply_guard =
+                matches!(operation, Operation::Stop).then(|| shutdown.clone().drop_guard());
+            let result = if matches!(operation, Operation::Discover) {
+                // Discover 不进入生命周期队列，也不读取磁盘 saved_config。
+                let discovery = ServiceDiscovery::from_status(instance_id, &status.borrow());
+                return send(
+                    &mut connected,
+                    &Response {
+                        protocol: PROTOCOL,
+                        pid: std::process::id(),
+                        result: Ok(discovery),
+                    },
+                )
+                .await;
+            } else if matches!(operation, Operation::Status) {
+                // 配置写入不需排在 drain/stop 后；实时返回磁盘 saved 与当前 running。
+                let saved = tokio::task::spawn_blocking(crate::acp_api::settings::load_config)
+                    .await
+                    .map_err(|e| error(format!("读取配置任务失败：{e}")))?;
+                let mut current = status.borrow().clone();
+                match saved {
+                    Ok(saved) => current.saved_config = saved,
+                    Err(error) => {
+                        current.phase = crate::acp_api::ServicePhase::Error;
+                        current.error = Some(error.message);
                     }
-                    Ok(current)
-                } else {
-                    let operation = match operation {
-                        Operation::Apply => ControlOperation::Apply,
-                        Operation::Stop => ControlOperation::Stop,
-                        Operation::Status | Operation::Discover => {
-                            return Err(error("查询不能进入生命周期控制器"));
-                        }
-                    };
-                    let (reply, answer) = oneshot::channel();
-                    commands
-                        .send(Control { operation, reply })
-                        .map_err(|_| error("模型服务控制器已停止"))?;
-                    answer.await.map_err(|_| error("模型服务控制器异常退出"))?
+                }
+                Ok(current)
+            } else {
+                let operation = match operation {
+                    Operation::Apply => ControlOperation::Apply,
+                    Operation::Stop => ControlOperation::Stop,
+                    Operation::Status | Operation::Discover => {
+                        return Err(error("查询不能进入生命周期控制器"));
+                    }
                 };
-                let response = Response {
-                    protocol: PROTOCOL,
-                    pid: std::process::id(),
-                    result,
-                };
-                send(&mut connected, &response).await
-            });
-            // 回收已完成控制连接，不累积历史响应。
-            while workers.try_join_next().is_some() {}
+                let (reply, answer) = oneshot::channel();
+                commands
+                    .send(Control { operation, reply, span: tracing::Span::current() })
+                    .map_err(|_| error("模型服务控制器已停止"))?;
+                answer.await.map_err(|_| error("模型服务控制器异常退出"))?
+            };
+            if let Err(error) = &result {
+                tracing::error!(event = "acp_control_operation_failed", component = "acp_control", method = operation.name(), error_type = ?error.kind, stage = "controller_result", "ACP 控制操作返回失败");
+            }
+            let response = Response {
+                protocol: PROTOCOL,
+                pid: std::process::id(),
+                result,
+            };
+            send(&mut connected, &response).await
+            }).instrument(span).await
+        }).instrument(crate::logging::operation_span("acp_control", "server_connection")));
+        // 回收已完成控制连接，不累积历史响应。
+        while let Some(result) = workers.try_join_next() {
+            if let Err(error) = result {
+                tracing::error!(event = "acp_control_worker_failed", component = "acp_control", stage = "worker_join", cancelled = error.is_cancelled(), panicked = error.is_panic(), "ACP 控制管道连接任务异常结束");
+            }
         }
-        while workers.join_next().await.is_some() {}
-        Ok(())
+    }
+    while let Some(result) = workers.join_next().await {
+        if let Err(error) = result {
+            tracing::error!(event = "acp_control_worker_failed", component = "acp_control", stage = "shutdown_join", cancelled = error.is_cancelled(), panicked = error.is_panic(), "ACP 控制管道连接任务收尾异常");
+        }
+    }
+    Ok(()) }).await
     }
 
     #[cfg(test)]
@@ -689,7 +814,7 @@ mod platform {
                 let reply = expected.clone();
                 let responder = async {
                     next.connect().await.unwrap();
-                    assert!(matches!(receive::<Operation>(&mut next).await.unwrap(), Operation::Discover));
+                    assert!(matches!(receive::<Request>(&mut next).await.unwrap().operation, Operation::Discover));
                     send(
                         &mut next,
                         &Response {
@@ -807,8 +932,10 @@ mod platform {
                             response_len + 4
                         ));
                     }
-                    let request = serde_json::to_vec(&Operation::Status)
-                        .map_err(|e| e.to_string())?;
+                    let request = serde_json::to_vec(&Request {
+                        operation: Operation::Status,
+                        diagnostic_id: uuid::Uuid::new_v4(),
+                    }).map_err(|e| e.to_string())?;
                     let mut frame = u32::try_from(request.len())
                         .map_err(|e| e.to_string())?
                         .to_le_bytes()
@@ -960,7 +1087,7 @@ mod platform {
                     );
                     assert_eq!(kernel_pid, std::process::id());
                     assert!(matches!(
-                        receive::<Operation>(&mut server).await.unwrap(),
+                        receive::<Request>(&mut server).await.unwrap().operation,
                         Operation::Discover
                     ));
                     let descriptor = ServiceDiscovery::from_status(

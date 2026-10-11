@@ -11,6 +11,7 @@ use std::process::Stdio;
 use std::time::{Duration, Instant};
 use tokio::sync::{mpsc, oneshot, watch};
 use tokio_util::sync::CancellationToken;
+use tracing::Instrument;
 
 fn runtime() -> Result<tokio::runtime::Runtime, ServiceError> {
     tokio::runtime::Builder::new_multi_thread()
@@ -33,89 +34,130 @@ fn inactive() -> Result<ServiceStatus, ServiceError> {
 }
 /// 查询只使用私有管道，绝不自动拉起服务或探测 HTTP 端口。
 pub fn status() -> Result<ServiceStatus, ServiceError> {
-    runtime()?
-        .block_on(ipc::exchange(Operation::Status))?
-        .map_or_else(inactive, Ok)
+    crate::acp_api::diagnostics::call("acp_runtime", "status", || {
+        runtime()?
+            .block_on(ipc::exchange(Operation::Status))?
+            .map_or_else(inactive, Ok)
+    })
 }
 /// AH-15：只查询已有后台；缺席时不读取配置，也不启动后台或 Agent。
 pub fn discover() -> Result<Option<ServiceDiscovery>, ServiceError> {
-    runtime()?.block_on(ipc::exchange(Operation::Discover))
+    crate::acp_api::diagnostics::call("acp_runtime", "discover", || {
+        runtime()?.block_on(ipc::exchange(Operation::Discover))
+    })
 }
 pub fn ensure_started() -> Result<ServiceStatus, ServiceError> {
-    let rt = runtime()?;
-    if let Some(state) = rt.block_on(ipc::exchange(Operation::Status))? {
-        return Ok(state);
-    }
-    let config = settings::load_config()?;
-    if config.is_none() {
-        return inactive();
-    }
-    // 同一用户/会话所有 GUI 使用独立启动锁；服务另持 lifetime lock。
-    let _startup =
-        ipc::lock("startup", true)?.ok_or_else(|| ipc::error("等待模型服务启动锁超时"))?;
-    if let Some(state) = rt.block_on(ipc::exchange(Operation::Status))? {
-        return Ok(state);
-    }
-    let mut executable =
-        std::env::current_exe().map_err(|e| ipc::error(format!("定位 JchTools 程序失败：{e}")))?;
-    if cfg!(any(test, feature = "test-hooks")) {
-        if let Some(path) = std::env::var_os("JCHTOOLS_TEST_ACP_SERVICE_EXE") {
-            executable = std::path::PathBuf::from(path);
-            if !executable.is_absolute() || !executable.is_file() {
-                return Err(ipc::error("测试服务程序必须为存在的绝对路径"));
-            }
-        }
-    }
-    let mut command = std::process::Command::new(executable);
-    command
-        .arg("--acp-http-service")
-        .stdin(Stdio::null())
-        .stdout(Stdio::null())
-        .stderr(Stdio::null());
-    #[cfg(windows)]
-    {
-        use std::os::windows::process::CommandExt;
-        command.creation_flags(0x0800_0000);
-    }
-    let mut service = command
-        .spawn()
-        .map_err(|e| ipc::error(format!("启动模型服务后台失败：{e}")))?;
-    let deadline = Instant::now() + Duration::from_secs(15);
-    loop {
+    crate::acp_api::diagnostics::call("acp_runtime", "ensure_started", || {
+        let rt = runtime()?;
         if let Some(state) = rt.block_on(ipc::exchange(Operation::Status))? {
             return Ok(state);
         }
-        if let Some(exit) = service.try_wait().map_err(|e| ipc::error(e.to_string()))? {
-            return Err(ipc::error(format!("模型服务后台启动时退出：{exit}")));
+        let config = settings::load_config()?;
+        if config.is_none() {
+            return inactive();
         }
-        if Instant::now() >= deadline {
-            return Err(ipc::error("模型服务后台未及时建立控制管道"));
+        // 同一用户/会话所有 GUI 使用独立启动锁；服务另持 lifetime lock。
+        let _startup =
+            ipc::lock("startup", true)?.ok_or_else(|| ipc::error("等待模型服务启动锁超时"))?;
+        if let Some(state) = rt.block_on(ipc::exchange(Operation::Status))? {
+            return Ok(state);
         }
-        std::thread::sleep(Duration::from_millis(30));
-    }
+        let mut executable = std::env::current_exe()
+            .map_err(|e| ipc::error(format!("定位 JchTools 程序失败：{e}")))?;
+        if cfg!(any(test, feature = "test-hooks")) {
+            if let Some(path) = std::env::var_os("JCHTOOLS_TEST_ACP_SERVICE_EXE") {
+                executable = std::path::PathBuf::from(path);
+                if !executable.is_absolute() || !executable.is_file() {
+                    return Err(ipc::error("测试服务程序必须为存在的绝对路径"));
+                }
+            }
+        }
+        let mut command = std::process::Command::new(executable);
+        command
+            .arg("--acp-http-service")
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null());
+        #[cfg(windows)]
+        {
+            use std::os::windows::process::CommandExt;
+            command.creation_flags(0x0800_0000);
+        }
+        let started = Instant::now();
+        tracing::info!(
+            event = "acp_service_spawn_started",
+            component = "acp_runtime",
+            executable_role = "jchtools_service",
+            timeout_ms = 15000,
+            "ACP 模型服务后台启动开始"
+        );
+        let mut service = command
+    .spawn()
+    .map_err(|e| {
+        tracing::error!(event = "acp_service_spawn_failed", component = "acp_runtime", stage = "spawn", error_type = ?e.kind(), error_code = ?e.raw_os_error(), elapsed_ms = crate::logging::elapsed_ms(started), "ACP 模型服务后台启动失败");
+        ipc::error(format!("启动模型服务后台失败：{e}"))
+    })?;
+        tracing::info!(
+            event = "acp_service_spawn_completed",
+            component = "acp_runtime",
+            peer_pid = service.id(),
+            elapsed_ms = crate::logging::elapsed_ms(started),
+            "ACP 模型服务后台子进程已启动"
+        );
+        let deadline = Instant::now() + Duration::from_secs(15);
+        loop {
+            if let Some(state) = rt.block_on(ipc::exchange::<ServiceStatus>(Operation::Status))? {
+                tracing::info!(event = "acp_service_control_ready", component = "acp_runtime", peer_pid = service.id(), phase = ?state.phase, elapsed_ms = crate::logging::elapsed_ms(started), "ACP 模型服务后台控制管道已就绪");
+                return Ok(state);
+            }
+            if let Some(exit) = service.try_wait().map_err(|e| ipc::error(e.to_string()))? {
+                tracing::error!(event = "acp_service_start_failed", component = "acp_runtime", peer_pid = service.id(), stage = "child_exit", exit_code = ?exit.code(), elapsed_ms = crate::logging::elapsed_ms(started), "ACP 模型服务后台启动期间退出");
+                return Err(ipc::error(format!("模型服务后台启动时退出：{exit}")));
+            }
+            if Instant::now() >= deadline {
+                tracing::error!(
+                    event = "acp_service_start_failed",
+                    component = "acp_runtime",
+                    peer_pid = service.id(),
+                    stage = "control_ready_timeout",
+                    timeout_ms = 15000,
+                    elapsed_ms = crate::logging::elapsed_ms(started),
+                    "ACP 模型服务后台控制管道就绪超时"
+                );
+                return Err(ipc::error("模型服务后台未及时建立控制管道"));
+            }
+            std::thread::sleep(Duration::from_millis(30));
+        }
+    })
 }
 pub fn save_config(config: &ServiceConfig) -> Result<ServiceStatus, ServiceError> {
-    settings::save_config(config)?;
-    if let Some(state) = runtime()?.block_on(ipc::exchange(Operation::Status))? {
-        return Ok(state);
-    }
-    ensure_started()
+    crate::acp_api::diagnostics::call("acp_runtime", "save_config", || {
+        settings::save_config(config)?;
+        if let Some(state) = runtime()?.block_on(ipc::exchange(Operation::Status))? {
+            return Ok(state);
+        }
+        ensure_started()
+    })
 }
 pub fn apply_and_restart() -> Result<ServiceStatus, ServiceError> {
-    // Apply 只作用已存在的后台；退出后的迟到请求不能反向创建新实例。
-    runtime()?
-        .block_on(ipc::exchange(Operation::Apply))?
-        .ok_or_else(|| {
-            ServiceError::new(
-                ServiceErrorKind::NotReady,
-                "模型服务后台已退出，无法应用配置",
-            )
-        })
+    crate::acp_api::diagnostics::call("acp_runtime", "apply_and_restart", || {
+        // Apply 只作用已存在的后台；退出后的迟到请求不能反向创建新实例。
+        runtime()?
+            .block_on(ipc::exchange(Operation::Apply))?
+            .ok_or_else(|| {
+                ServiceError::new(
+                    ServiceErrorKind::NotReady,
+                    "模型服务后台已退出，无法应用配置",
+                )
+            })
+    })
 }
 pub fn stop() -> Result<ServiceStatus, ServiceError> {
-    runtime()?
-        .block_on(ipc::exchange(Operation::Stop))?
-        .map_or_else(inactive, Ok)
+    crate::acp_api::diagnostics::call("acp_runtime", "stop", || {
+        runtime()?
+            .block_on(ipc::exchange(Operation::Stop))?
+            .map_or_else(inactive, Ok)
+    })
 }
 
 struct Running {
@@ -130,79 +172,86 @@ impl Running {
         state: watch::Sender<ServiceStatus>,
         cancellation: &CancellationToken,
     ) -> Result<Self, ServiceError> {
-        settings::validate_config(&config)?;
-        let workspace = settings::workspace_dir()?;
-        // 先绑定精确端口，失败不启动 Agent，不隐式寻找空闲端口。
-        let listener = tokio::net::TcpListener::bind((std::net::Ipv4Addr::LOCALHOST, config.port))
-            .await
-            .map_err(|e| {
-                ipc::error(format!(
-                    "端口 {}：无法监听 127.0.0.1（端口占用或无权限）：{e}",
-                    config.port
-                ))
-            })?;
-        if cancellation.is_cancelled() {
-            return Err(stopping());
+        crate::acp_api::diagnostics::async_call("acp_runtime", "start", async { settings::validate_config(&config)?;
+    let workspace = settings::workspace_dir()?;
+    // 先绑定精确端口，失败不启动 Agent，不隐式寻找空闲端口。
+    tracing::info!(event = "acp_http_bind_started", component = "acp_runtime", port = config.port, host = "127.0.0.1", "ACP HTTP 本机端口监听开始");
+    let listener = tokio::net::TcpListener::bind((std::net::Ipv4Addr::LOCALHOST, config.port))
+        .await
+        .map_err(|e| {
+            tracing::error!(event = "acp_http_bind_failed", component = "acp_runtime", stage = "bind", port = config.port, error_type = ?e.kind(), error_code = ?e.raw_os_error(), "ACP HTTP 本机端口监听失败");
+            ipc::error(format!(
+                "端口 {}：无法监听 127.0.0.1（端口占用或无权限）：{e}",
+                config.port
+            ))
+        })?;
+    tracing::info!(event = "acp_http_bind_completed", component = "acp_runtime", port = config.port, "ACP HTTP 本机端口监听完成");
+    if cancellation.is_cancelled() {
+        return Err(stopping());
+    }
+    state.send_modify(|state| {
+        state.phase = ServicePhase::Starting;
+        state.running_config = Some(config.clone());
+        state.error = None;
+    });
+    let process = process::ProcessOwner::start(config, workspace.clone(), state.clone());
+    let backend =
+        crate::acp_api::acp::start_backend(process.handle.clone(), workspace, state.clone());
+    let router = crate::acp_api::http::router(backend.clone());
+    let http_shutdown = CancellationToken::new();
+    let shutdown = http_shutdown.clone();
+    let http = tokio::spawn(async move {
+        let result = crate::acp_api::http::serve(listener, router, shutdown).await;
+        if let Err(error) = &result {
+            state.send_modify(|state| {
+                state.phase = ServicePhase::Error;
+                state.error = Some(error.message.clone());
+            });
         }
-        state.send_modify(|state| {
-            state.phase = ServicePhase::Starting;
-            state.running_config = Some(config.clone());
-            state.error = None;
-        });
-        let process = process::ProcessOwner::start(config, workspace.clone(), state.clone());
-        let backend =
-            crate::acp_api::acp::start_backend(process.handle.clone(), workspace, state.clone());
-        let router = crate::acp_api::http::router(backend.clone());
-        let http_shutdown = CancellationToken::new();
-        let shutdown = http_shutdown.clone();
-        let http = tokio::spawn(async move {
-            let result = crate::acp_api::http::serve(listener, router, shutdown).await;
-            if let Err(error) = &result {
-                state.send_modify(|state| {
-                    state.phase = ServicePhase::Error;
-                    state.error = Some(error.message.clone());
-                });
-            }
-            result
-        });
-        Ok(Self {
-            backend,
-            process,
-            http_shutdown,
-            http,
-        })
+        result
+    }.instrument(tracing::Span::current()));
+    Ok(Self {
+        backend,
+        process,
+        http_shutdown,
+        http,
+    }) }).await
     }
     async fn finish(self, cancellation: &CancellationToken) -> Result<(), ServiceError> {
-        // 排空和取消共用同一所有者；Stop 可抢占等待，但不能丢弃安全收尾。
-        let drain = async {
-            tokio::select! {
+        crate::acp_api::diagnostics::async_call("acp_runtime", "finish", async {
+            // 排空和取消共用同一所有者；Stop 可抢占等待，但不能丢弃安全收尾。
+            let drain = async {
+                tokio::select! {
+                    biased;
+                    () = cancellation.cancelled() => self.backend.stop().await,
+                    result = self.backend.graceful_drain() => {
+                        let stop = self.backend.stop().await;
+                        result.and(stop)
+                    },
+                }
+            };
+            tokio::pin!(drain);
+            // 先 poll 后端控制封闭 admission，再关闭 HTTP 新连接，不等 drain ACK。
+            let drain = tokio::select! {
                 biased;
-                () = cancellation.cancelled() => self.backend.stop().await,
-                result = self.backend.graceful_drain() => {
-                    let stop = self.backend.stop().await;
-                    result.and(stop)
-                },
-            }
-        };
-        tokio::pin!(drain);
-        // 先 poll 后端控制封闭 admission，再关闭 HTTP 新连接，不等 drain ACK。
-        let drain = tokio::select! {
-            biased;
-            result = &mut drain => { self.http_shutdown.cancel(); result },
-            () = async { self.http_shutdown.cancel(); } => drain.await,
-        };
-        // 即使后端回报断裂，仍等待自身进程及全部已接 HTTP 资源实际释放。
-        let process = self.process.shutdown().await;
-        let http = self.http.await.map_err(|e| {
-            ServiceError::new(
-                ServiceErrorKind::Internal,
-                format!("HTTP 后台任务失败：{e}"),
-            )
-        })?;
-        drain.and(process).and(http)
+                result = &mut drain => { self.http_shutdown.cancel(); result },
+                () = async { self.http_shutdown.cancel(); } => drain.await,
+            };
+            // 即使后端回报断裂，仍等待自身进程及全部已接 HTTP 资源实际释放。
+            let process = self.process.shutdown().await;
+            let http = self.http.await.map_err(|e| {
+                ServiceError::new(
+                    ServiceErrorKind::Internal,
+                    format!("HTTP 后台任务失败：{e}"),
+                )
+            })?;
+            drain.and(process).and(http)
+        })
+        .await
     }
 }
 fn failed(state: &watch::Sender<ServiceStatus>, error: &ServiceError) {
+    tracing::error!(event = "acp_service_failed", component = "acp_runtime", stage = "lifecycle", error_type = ?error.kind, "ACP 模型服务生命周期失败");
     state.send_modify(|state| {
         state.phase = ServicePhase::Error;
         state.error = Some(error.message.clone());
@@ -218,67 +267,67 @@ async fn transition(
     state: &watch::Sender<ServiceStatus>,
     cancellation: &CancellationToken,
 ) -> Result<ServiceStatus, ServiceError> {
-    if matches!(operation, ControlOperation::Apply) && !cancellation.is_cancelled() {
-        let config = settings::load_config()?.ok_or_else(|| {
-            ServiceError::new(ServiceErrorKind::InvalidConfig, "尚未配置 ACP Agent")
-        })?;
-        state.send_modify(|state| {
-            state.saved_config = Some(config.clone());
-            state.phase = ServicePhase::Draining;
-        });
-        if let Some(old) = running.take() {
-            if let Err(error) = old.finish(cancellation).await {
-                failed(state, &error);
-                return Err(error);
-            }
-        }
-        if !cancellation.is_cancelled() {
-            state.send_modify(|state| {
-                state.running_config = None;
-                state.agent_pid = None;
-                state.executing = 0;
-                state.waiting = 0;
-            });
-            match Running::start(config, state.clone(), cancellation).await {
-                Ok(new) => {
-                    *running = Some(new);
-                    // AH-09：保留初始化和 HTTP 失败状态；Stop 同样可抢占初始化等待。
-                    let mut initialized = state.subscribe();
-                    tokio::select! {
-                        biased;
-                        () = cancellation.cancelled() => {},
-                        result = initialized.wait_for(|state| state.phase != ServicePhase::Starting) => {
-                            return result
-                                .map(|state| state.clone())
-                                .map_err(|_| ipc::error("应用后模型服务初始化状态已关闭"));
-                        },
-                    }
-                }
-                Err(error) if error.kind == ServiceErrorKind::Stopping => {}
-                Err(error) => {
-                    failed(state, &error);
-                    return Err(error);
-                }
-            }
-        }
-    }
-    state.send_modify(|state| state.phase = ServicePhase::Stopping);
+    crate::acp_api::diagnostics::async_call("acp_runtime", "transition", async { if matches!(operation, ControlOperation::Apply) && !cancellation.is_cancelled() {
+    let config = settings::load_config()?.ok_or_else(|| {
+        ServiceError::new(ServiceErrorKind::InvalidConfig, "尚未配置 ACP Agent")
+    })?;
+    state.send_modify(|state| {
+        state.saved_config = Some(config.clone());
+        state.phase = ServicePhase::Draining;
+    });
     if let Some(old) = running.take() {
         if let Err(error) = old.finish(cancellation).await {
             failed(state, &error);
             return Err(error);
         }
     }
-    state.send_modify(|state| {
-        state.phase = ServicePhase::Stopped;
-        state.running_config = None;
-        state.service_pid = None;
-        state.agent_pid = None;
-        state.executing = 0;
-        state.waiting = 0;
-        state.error = None;
-    });
-    Ok(state.borrow().clone())
+    if !cancellation.is_cancelled() {
+        state.send_modify(|state| {
+            state.running_config = None;
+            state.agent_pid = None;
+            state.executing = 0;
+            state.waiting = 0;
+        });
+        match Running::start(config, state.clone(), cancellation).await {
+            Ok(new) => {
+                *running = Some(new);
+                // AH-09：保留初始化和 HTTP 失败状态；Stop 同样可抢占初始化等待。
+                let mut initialized = state.subscribe();
+                tokio::select! {
+                    biased;
+                    () = cancellation.cancelled() => {},
+                    result = initialized.wait_for(|state| state.phase != ServicePhase::Starting) => {
+                        return result
+                            .map(|state| state.clone())
+                            .map_err(|_| ipc::error("应用后模型服务初始化状态已关闭"));
+                    },
+                }
+            }
+            Err(error) if error.kind == ServiceErrorKind::Stopping => {}
+            Err(error) => {
+                failed(state, &error);
+                return Err(error);
+            }
+        }
+    }
+}
+state.send_modify(|state| state.phase = ServicePhase::Stopping);
+if let Some(old) = running.take() {
+    if let Err(error) = old.finish(cancellation).await {
+        failed(state, &error);
+        return Err(error);
+    }
+}
+state.send_modify(|state| {
+    state.phase = ServicePhase::Stopped;
+    state.running_config = None;
+    state.service_pid = None;
+    state.agent_pid = None;
+    state.executing = 0;
+    state.waiting = 0;
+    state.error = None;
+});
+Ok(state.borrow().clone()) }).await
 }
 
 async fn controller(
@@ -321,7 +370,8 @@ async fn control_loop(
         let mut stop_replies = Vec::new();
         let result = {
             // 只在控制器内 poll：生命周期未来持有旧/新实例，退出必须等它完整收尾。
-            let transition = transition(control.operation, &mut running, &state, &cancellation);
+            let transition = transition(control.operation, &mut running, &state, &cancellation)
+                .instrument(control.span.clone());
             tokio::pin!(transition);
             loop {
                 tokio::select! {
@@ -336,8 +386,10 @@ async fn control_loop(
                                 },
                                 ControlOperation::Apply => {
                                     if cancellation.is_cancelled() {
+                                        command.span.in_scope(|| tracing::warn!(event = "acp_control_operation_cancelled", component = "acp_runtime", stage = "admission", reason = "stopping", "ACP 服务停止中，拒绝应用配置"));
                                         let _ = command.reply.send(Err(stopping()));
                                     } else {
+                                        command.span.in_scope(|| tracing::info!(event = "acp_control_operation_queued", component = "acp_runtime", "ACP 应用配置操作进入生命周期队列"));
                                         queued.push_back(command);
                                     }
                                 },
@@ -385,48 +437,51 @@ async fn control_loop(
 }
 /// 主程序内部 --acp-http-service 入口；整个后台生命周期独立于 GUI。
 pub fn serve() -> Result<(), ServiceError> {
-    let Some(_instance) = ipc::lock("service", false)? else {
-        return Ok(());
+    crate::acp_api::diagnostics::call("acp_runtime", "serve", || {
+        let Some(_instance) = ipc::lock("service", false)? else {
+            return Ok(());
+        };
+        runtime()?.block_on(async {
+    let loaded = settings::load_config();
+    let mut initial = ServiceStatus {
+        service_pid: Some(std::process::id()),
+        ..ServiceStatus::default()
     };
-    runtime()?.block_on(async {
-        let loaded = settings::load_config();
-        let mut initial = ServiceStatus {
-            service_pid: Some(std::process::id()),
-            ..ServiceStatus::default()
-        };
-        let config = match loaded {
-            Ok(config) => {
-                initial.saved_config.clone_from(&config);
-                initial.phase = if config.is_some() {
-                    ServicePhase::Starting
-                } else {
-                    ServicePhase::Unconfigured
-                };
-                config
-            }
-            Err(error) => {
-                initial.phase = ServicePhase::Error;
-                initial.error = Some(error.message);
-                None
-            }
-        };
-        let (state, receiver) = watch::channel(initial);
-        let (commands, requests) = mpsc::unbounded_channel();
-        let shutdown = CancellationToken::new();
-        let (ready, started) = oneshot::channel();
-        let instance_id = uuid::Uuid::new_v4();
-        let ipc_task = tokio::spawn(ipc::serve(receiver, instance_id, commands, shutdown, ready));
-        started
-            .await
-            .map_err(|_| ipc::error("模型服务控制管道启动失败"))??;
-        let controller = tokio::spawn(controller(config, state, requests));
-        let ipc_result = ipc_task
-            .await
-            .map_err(|e| ipc::error(format!("模型服务控制任务失败：{e}")))?;
-        controller
-            .await
-            .map_err(|e| ipc::error(format!("模型服务生命周期任务失败：{e}")))?;
-        ipc_result
+    let config = match loaded {
+        Ok(config) => {
+            initial.saved_config.clone_from(&config);
+            initial.phase = if config.is_some() {
+                ServicePhase::Starting
+            } else {
+                ServicePhase::Unconfigured
+            };
+            config
+        }
+        Err(error) => {
+            initial.phase = ServicePhase::Error;
+            initial.error = Some(error.message);
+            None
+        }
+    };
+    tracing::info!(event = "acp_service_initialized", component = "acp_runtime", phase = ?initial.phase, configured = initial.saved_config.is_some(), "ACP 模型服务后台初始状态已建立");
+    let (state, receiver) = watch::channel(initial);
+    let (commands, requests) = mpsc::unbounded_channel();
+    let shutdown = CancellationToken::new();
+    let (ready, started) = oneshot::channel();
+    let instance_id = uuid::Uuid::new_v4();
+    let ipc_task = tokio::spawn(ipc::serve(receiver, instance_id, commands, shutdown, ready).instrument(tracing::Span::current()));
+    started
+        .await
+        .map_err(|_| ipc::error("模型服务控制管道启动失败"))??;
+    let controller = tokio::spawn(controller(config, state, requests).instrument(tracing::Span::current()));
+    let ipc_result = ipc_task
+        .await
+        .map_err(|e| ipc::error(format!("模型服务控制任务失败：{e}")))?;
+    controller
+        .await
+        .map_err(|e| ipc::error(format!("模型服务生命周期任务失败：{e}")))?;
+    ipc_result
+})
     })
 }
 

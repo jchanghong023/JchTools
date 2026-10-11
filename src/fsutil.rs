@@ -6,6 +6,38 @@ use std::{
     time::UNIX_EPOCH,
 };
 
+fn log_filesystem_result<T>(
+    operation: &'static str,
+    started: std::time::Instant,
+    result: &Result<T>,
+) {
+    let elapsed_ms = crate::logging::elapsed_ms(started);
+    match result {
+        Ok(_) => tracing::info!(
+            event = "filesystem_operation_completed",
+            operation,
+            elapsed_ms,
+            "文件系统操作完成"
+        ),
+        Err(error) => {
+            let io = error
+                .chain()
+                .find_map(|cause| cause.downcast_ref::<std::io::Error>());
+            tracing::error!(
+                event = "filesystem_operation_failed",
+                operation,
+                elapsed_ms,
+                error_type = if io.is_some() {
+                    "io"
+                } else {
+                    "filesystem_boundary"
+                },
+                error_code = io.and_then(std::io::Error::raw_os_error),
+                "文件系统操作失败"
+            );
+        }
+    }
+}
 pub fn validate_component(name: &str) -> Result<()> {
     // Windows 拒绝尾随空格/点；其他 Unicode 空白（如全角空格、NBSP）同样会被部分
     // 文件系统与工具视为尾随空白，一并保守拒绝。
@@ -366,61 +398,70 @@ pub fn snapshot_with(path: &Path, metadata: &fs::Metadata) -> Result<Snapshot> {
 }
 /// User-file moves are strictly no-replace and never copy data across volumes.
 pub fn rename_noreplace(source: &Path, target: &Path) -> Result<()> {
-    #[cfg(windows)]
-    {
-        use std::os::windows::ffi::OsStrExt;
-        use windows_sys::Win32::Storage::FileSystem::{MoveFileExW, MOVEFILE_WRITE_THROUGH};
-        let s: Vec<u16> = source.as_os_str().encode_wide().chain(Some(0)).collect();
-        let t: Vec<u16> = target.as_os_str().encode_wide().chain(Some(0)).collect();
-        // SAFETY: s/t 都是以 NUL 结尾的 UTF-16 缓冲区；MoveFileExW 只在调用期间读取这两个指针。
-        if unsafe { MoveFileExW(s.as_ptr(), t.as_ptr(), MOVEFILE_WRITE_THROUGH) } == 0 {
-            return Err(std::io::Error::last_os_error()).context("移动失败（不会覆盖或跨卷复制）");
+    let span = crate::logging::operation_span("fsutil", "rename_noreplace");
+    let _entered = span.enter();
+    let started = std::time::Instant::now();
+    tracing::info!(event = "filesystem_rename_started", "不覆盖改名开始");
+    let result: Result<()> = (|| {
+        #[cfg(windows)]
+        {
+            use std::os::windows::ffi::OsStrExt;
+            use windows_sys::Win32::Storage::FileSystem::{MoveFileExW, MOVEFILE_WRITE_THROUGH};
+            let s: Vec<u16> = source.as_os_str().encode_wide().chain(Some(0)).collect();
+            let t: Vec<u16> = target.as_os_str().encode_wide().chain(Some(0)).collect();
+            // SAFETY: s/t 都是以 NUL 结尾的 UTF-16 缓冲区；MoveFileExW 只在调用期间读取这两个指针。
+            if unsafe { MoveFileExW(s.as_ptr(), t.as_ptr(), MOVEFILE_WRITE_THROUGH) } == 0 {
+                return Err(std::io::Error::last_os_error())
+                    .context("移动失败（不会覆盖或跨卷复制）");
+            }
+            Ok(())
         }
-        Ok(())
-    }
-    #[cfg(target_os = "linux")]
-    {
-        use std::{ffi::CString, os::unix::ffi::OsStrExt};
-        let s = CString::new(source.as_os_str().as_bytes())?;
-        let t = CString::new(target.as_os_str().as_bytes())?;
-        // SAFETY: s/t 是合法 CString（路径不含 NUL，构造失败会提前返回）；
-        // renameat2 按 libc 约定传 AT_FDCWD + RENAME_NOREPLACE，内核侧不保留指针。
-        let rc = unsafe {
-            libc::syscall(
-                libc::SYS_renameat2,
-                libc::AT_FDCWD,
-                s.as_ptr(),
-                libc::AT_FDCWD,
-                t.as_ptr(),
-                libc::RENAME_NOREPLACE,
-            )
-        };
-        if rc == 0 {
-            return Ok(());
+        #[cfg(target_os = "linux")]
+        {
+            use std::{ffi::CString, os::unix::ffi::OsStrExt};
+            let s = CString::new(source.as_os_str().as_bytes())?;
+            let t = CString::new(target.as_os_str().as_bytes())?;
+            // SAFETY: s/t 是合法 CString（路径不含 NUL，构造失败会提前返回）；
+            // renameat2 按 libc 约定传 AT_FDCWD + RENAME_NOREPLACE，内核侧不保留指针。
+            let rc = unsafe {
+                libc::syscall(
+                    libc::SYS_renameat2,
+                    libc::AT_FDCWD,
+                    s.as_ptr(),
+                    libc::AT_FDCWD,
+                    t.as_ptr(),
+                    libc::RENAME_NOREPLACE,
+                )
+            };
+            if rc == 0 {
+                return Ok(());
+            }
+            let err = std::io::Error::last_os_error();
+            // 老内核/受限 seccomp 可能没有 renameat2：回退到与其它 Unix 相同的硬链接路径，
+            // 目标已存在时 hard_link 失败，仍保持不覆盖语义。
+            if err.raw_os_error() != Some(libc::ENOSYS) {
+                return Err(err).context("不覆盖移动失败");
+            }
+            fs::hard_link(source, target)?;
+            if let Err(e) = fs::remove_file(source) {
+                let _ = fs::remove_file(target);
+                return Err(e.into());
+            }
+            Ok(())
         }
-        let err = std::io::Error::last_os_error();
-        // 老内核/受限 seccomp 可能没有 renameat2：回退到与其它 Unix 相同的硬链接路径，
-        // 目标已存在时 hard_link 失败，仍保持不覆盖语义。
-        if err.raw_os_error() != Some(libc::ENOSYS) {
-            return Err(err).context("不覆盖移动失败");
+        #[cfg(all(unix, not(target_os = "linux")))]
+        {
+            // Safe file-only fallback. No existing target can be overwritten.
+            fs::hard_link(source, target)?;
+            if let Err(e) = fs::remove_file(source) {
+                let _ = fs::remove_file(target);
+                return Err(e.into());
+            }
+            Ok(())
         }
-        fs::hard_link(source, target)?;
-        if let Err(e) = fs::remove_file(source) {
-            let _ = fs::remove_file(target);
-            return Err(e.into());
-        }
-        Ok(())
-    }
-    #[cfg(all(unix, not(target_os = "linux")))]
-    {
-        // Safe file-only fallback. No existing target can be overwritten.
-        fs::hard_link(source, target)?;
-        if let Err(e) = fs::remove_file(source) {
-            let _ = fs::remove_file(target);
-            return Err(e.into());
-        }
-        Ok(())
-    }
+    })();
+    log_filesystem_result("rename", started, &result);
+    result
 }
 /// S-01：不覆盖复制（跨卷移动的落盘核心）。目标已存在时按 `AlreadyExists`
 /// 失败，绝不截断既有文件；失败时调用方只清理本次新建的未完成副本。
@@ -497,58 +538,107 @@ fn systemtime_to_filetime(
 /// 满足 S-01 忠实移动要求）；确因跨文件系统失败时按「不覆盖完整复制 → 设置创建/修改
 /// 时间 → 删除源项」执行，复制、写时间或删除任一失败都保留源项并如实报错。
 pub fn move_file_preserving_times(source: &Path, target: &Path) -> Result<()> {
-    match rename_noreplace(source, target) {
-        Ok(()) => Ok(()),
-        Err(error) => {
-            let cross_volume = error
-                .root_cause()
-                .downcast_ref::<std::io::Error>()
-                .and_then(std::io::Error::raw_os_error)
-                .is_some_and(|code| {
-                    // 17 = Windows ERROR_NOT_SAME_DEVICE；18 = POSIX EXDEV。
-                    code == 17 || code == 18
-                });
-            if !cross_volume {
-                return Err(error);
-            }
-            let metadata = fs::symlink_metadata(source).context("无法读取跨卷移动源文件属性")?;
-            #[cfg(windows)]
-            let created = Some(
-                metadata
-                    .created()
-                    .context("跨卷移动无法读取源文件创建时间")?,
-            );
-            #[cfg(not(windows))]
-            let created = metadata.created().ok();
-            let modified = Some(
-                metadata
-                    .modified()
-                    .context("跨卷移动无法读取源文件修改时间")?,
-            );
-            // S-01：跨卷复制必须以不覆盖方式落盘——`fs::copy` 以 create+truncate
-            // 打开目标，目标已存在时会被静默截断。只清理本次新建的未完成副本：
-            // `create_new` 以 AlreadyExists 失败时没有写入字节，目标属于既有文件，
-            // 绝不能删；其余写盘或关闭失败才删除本次新建的部分副本。
-            if let Err(error) = copy_noreplace(source, target) {
-                if error.kind() != std::io::ErrorKind::AlreadyExists {
-                    let _ = fs::remove_file(target);
+    let span = crate::logging::operation_span("fsutil", "move_file");
+    let _entered = span.enter();
+    let started = std::time::Instant::now();
+    tracing::info!(event = "filesystem_move_started", "保留时间移动开始");
+    let result: Result<()> = (|| {
+        match rename_noreplace(source, target) {
+            Ok(()) => Ok(()),
+            Err(error) => {
+                let cross_volume = error
+                    .root_cause()
+                    .downcast_ref::<std::io::Error>()
+                    .and_then(std::io::Error::raw_os_error)
+                    .is_some_and(|code| {
+                        // 17 = Windows ERROR_NOT_SAME_DEVICE；18 = POSIX EXDEV。
+                        code == 17 || code == 18
+                    });
+                if !cross_volume {
+                    return Err(error);
                 }
-                let context = if error.kind() == std::io::ErrorKind::AlreadyExists {
-                    format!("跨卷移动目标已存在，不覆盖既有文件（{}）", target.display())
-                } else {
-                    "跨卷复制失败，源文件已保留".to_string()
-                };
-                return Err(anyhow::Error::new(error).context(context));
+                tracing::warn!(
+                    event = "filesystem_move_fallback",
+                    stage = "cross_volume_copy",
+                    error_code = error
+                        .chain()
+                        .find_map(|cause| cause.downcast_ref::<std::io::Error>())
+                        .and_then(std::io::Error::raw_os_error),
+                    "跨卷改名不可用，按既有策略复制并保留时间"
+                );
+                let metadata =
+                    fs::symlink_metadata(source).context("无法读取跨卷移动源文件属性")?;
+                #[cfg(windows)]
+                let created = Some(
+                    metadata
+                        .created()
+                        .context("跨卷移动无法读取源文件创建时间")?,
+                );
+                #[cfg(not(windows))]
+                let created = metadata.created().ok();
+                let modified = Some(
+                    metadata
+                        .modified()
+                        .context("跨卷移动无法读取源文件修改时间")?,
+                );
+                // S-01：跨卷复制必须以不覆盖方式落盘——`fs::copy` 以 create+truncate
+                // 打开目标，目标已存在时会被静默截断。只清理本次新建的未完成副本：
+                // `create_new` 以 AlreadyExists 失败时没有写入字节，目标属于既有文件，
+                // 绝不能删；其余写盘或关闭失败才删除本次新建的部分副本。
+                tracing::info!(
+                    event = "filesystem_move_stage_started",
+                    stage = "copy",
+                    "跨卷副本写入开始"
+                );
+                if let Err(error) = copy_noreplace(source, target) {
+                    if error.kind() != std::io::ErrorKind::AlreadyExists {
+                        if let Err(cleanup) = fs::remove_file(target) {
+                            tracing::warn!(
+                                event = "filesystem_move_cleanup_failed",
+                                stage = "copy_rollback",
+                                error_code = cleanup.raw_os_error(),
+                                error_type = "io",
+                                "跨卷失败副本清理失败"
+                            );
+                        }
+                    }
+                    let context = if error.kind() == std::io::ErrorKind::AlreadyExists {
+                        format!("跨卷移动目标已存在，不覆盖既有文件（{}）", target.display())
+                    } else {
+                        "跨卷复制失败，源文件已保留".to_string()
+                    };
+                    return Err(anyhow::Error::new(error).context(context));
+                }
+                tracing::info!(
+                    event = "filesystem_move_stage_started",
+                    stage = "restore_times",
+                    "跨卷副本时间恢复开始"
+                );
+                if let Err(error) = set_created_and_modified(target, created, modified) {
+                    if let Err(cleanup) = fs::remove_file(target) {
+                        tracing::warn!(
+                            event = "filesystem_move_cleanup_failed",
+                            stage = "times_rollback",
+                            error_code = cleanup.raw_os_error(),
+                            error_type = "io",
+                            "跨卷失败副本清理失败"
+                        );
+                    }
+                    return Err(error.context("跨卷副本时间设置失败，已保留源文件与副本状态"));
+                }
+                tracing::info!(
+                    event = "filesystem_move_stage_started",
+                    stage = "source_delete",
+                    "跨卷源文件删除开始"
+                );
+                fs::remove_file(source)
+                    .with_context(|| format!("源删除失败；两份均保留：{}", source.display()))?;
+                Ok(())
             }
-            if let Err(error) = set_created_and_modified(target, created, modified) {
-                let _ = fs::remove_file(target);
-                return Err(error.context("跨卷副本时间设置失败，已保留源文件与副本状态"));
-            }
-            fs::remove_file(source)
-                .with_context(|| format!("源删除失败；两份均保留：{}", source.display()))?;
-            Ok(())
         }
-    }
+    })();
+    log_filesystem_result("move", started, &result);
+    result
 }
 /// 把创建/修改时间写回文件（S-01 跨卷复制后必须恢复创建时间，保证 C-21 幂等）。
 fn set_created_and_modified(
@@ -778,21 +868,36 @@ pub fn unique_target(root: &Path, requested: &Path) -> Result<PathBuf> {
 pub struct RootGuard(File);
 impl RootGuard {
     pub fn acquire(state: &Path) -> Result<Self> {
-        fs::create_dir_all(state)?;
-        let file = OpenOptions::new()
-            .read(true)
-            .write(true)
-            .create(true)
-            .truncate(false)
-            .open(state.join("organizer.lock"))?;
-        fs2::FileExt::try_lock_exclusive(&file)
-            .context("另一个目录整理任务正在运行，请先结束它")?;
-        Ok(Self(file))
+        let span = crate::logging::operation_span("fsutil", "task_lock");
+        let _entered = span.enter();
+        let started = std::time::Instant::now();
+        tracing::info!(event = "filesystem_lock_started", "任务锁获取开始");
+        let result: Result<Self> = (|| {
+            fs::create_dir_all(state)?;
+            let file = OpenOptions::new()
+                .read(true)
+                .write(true)
+                .create(true)
+                .truncate(false)
+                .open(state.join("organizer.lock"))?;
+            fs2::FileExt::try_lock_exclusive(&file)
+                .context("另一个目录整理任务正在运行，请先结束它")?;
+            Ok(Self(file))
+        })();
+        log_filesystem_result("lock", started, &result);
+        result
     }
 }
 impl Drop for RootGuard {
     fn drop(&mut self) {
-        let _ = fs2::FileExt::unlock(&self.0);
+        if let Err(error) = fs2::FileExt::unlock(&self.0) {
+            tracing::warn!(
+                event = "filesystem_unlock_failed",
+                error_type = "io",
+                error_code = error.raw_os_error(),
+                "任务锁显式释放失败，仍关闭文件句柄"
+            );
+        }
     }
 }
 

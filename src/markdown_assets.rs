@@ -3,6 +3,9 @@
 //! 校验完整后保存为共享下载来源；下载安装、保存共享目录与切换到已下载
 //! 来源都会经 [`ensure_document_notice`] 原子补写许可证 notice
 //!（完成即满足文档场景 readiness，不再要求补一次初始化）。
+//! P-10：主动查询最新发布与下载校验落位分别创建关联 operation span；日志
+//! 保留元数据验证、缓存复用、暂存、校验、原子落位、回滚及来源保存的阶段与结果，
+//! 不记录发布 JSON、运行目录内容、完整路径或任意外部异常正文。
 
 use crate::asset_util::{
     atomic_replace_dir, cleanup_stale_staging_dirs, ensure_not_cancelled, finalize_staging,
@@ -230,21 +233,63 @@ fn readiness_inference_pack(manifest: &AssetManifest, _root: &Path) -> Result<()
 /// 组件缺失时返回明确错误并指引
 /// （不冒称就绪）。取消会删除本轮 staging 目录。
 pub fn initialize(cancel: &AtomicBool, mut progress: impl FnMut(String)) -> Result<(), String> {
-    let root = asset_root();
-    // B-2：先兜底清理历史残留的 staging（readiness 提前返回、取消后清理
-    // 失败或进程崩溃都会残留 .staging-<uuid>，单个可超 1GB）。
-    cleanup_stale_staging(&root);
-    ensure_not_cancelled(cancel)?;
-    if readiness().is_ok() {
-        progress("转 Markdown 组件已就绪".to_string());
-        return Ok(());
+    let span = crate::logging::operation_span("markdown_assets", "initialize");
+    let _entered = span.enter();
+    let started = std::time::Instant::now();
+    tracing::info!(
+        event = "markdown_assets_initialize_started",
+        "转 Markdown 组件初始化开始"
+    );
+    let mut stage = "prepare";
+    let result = (|| {
+        let root = asset_root();
+        // B-2：先兜底清理历史残留的 staging（readiness 提前返回、取消后清理
+        // 失败或进程崩溃都会残留 .staging-<uuid>，单个可超 1GB）。
+        cleanup_stale_staging(&root);
+        ensure_not_cancelled(cancel)?;
+        if readiness().is_ok() {
+            tracing::info!(
+                event = "markdown_assets_reused",
+                result = "already_ready",
+                "转 Markdown 组件已就绪"
+            );
+            progress("转 Markdown 组件已就绪".to_string());
+            return Ok(());
+        }
+        stage = "manifest";
+        let manifest = load_manifest()?;
+        stage = "create_root";
+        fs::create_dir_all(&root).map_err(|error| format!("创建资产目录失败：{error}"))?;
+        let staging = root.join(format!(".staging-{}", Uuid::new_v4().simple()));
+        stage = "create_staging";
+        fs::create_dir_all(&staging).map_err(|error| format!("创建初始化临时目录失败：{error}"))?;
+        stage = "runtime_validate_notice_install";
+        let result = initialize_staged(&manifest, cancel, &mut progress, &staging, &root);
+        stage = "finalize_staging";
+        finalize_staging(result, &staging, &mut progress)
+    })();
+    let elapsed_ms = crate::logging::elapsed_ms(started);
+    match &result {
+        Ok(()) => tracing::info!(
+            event = "markdown_assets_initialize_completed",
+            elapsed_ms,
+            result = "ready",
+            "转 Markdown 组件初始化完成"
+        ),
+        Err(_) if cancel.load(std::sync::atomic::Ordering::Acquire) => tracing::info!(
+            event = "markdown_assets_initialize_cancelled",
+            stage,
+            elapsed_ms,
+            "转 Markdown 组件初始化已取消"
+        ),
+        Err(_) => tracing::error!(
+            event = "markdown_assets_initialize_failed",
+            stage,
+            elapsed_ms,
+            "转 Markdown 组件初始化失败"
+        ),
     }
-    let manifest = load_manifest()?;
-    fs::create_dir_all(&root).map_err(|error| format!("创建资产目录失败：{error}"))?;
-    let staging = root.join(format!(".staging-{}", Uuid::new_v4().simple()));
-    fs::create_dir_all(&staging).map_err(|error| format!("创建初始化临时目录失败：{error}"))?;
-    let result = initialize_staged(&manifest, cancel, &mut progress, &staging, &root);
-    finalize_staging(result, &staging, &mut progress)
+    result
 }
 
 /// 兜底清理资产根下历史残留的 `.staging-*` 目录与 `.xberg-runtime-path.txt.*`
@@ -263,17 +308,32 @@ fn cleanup_stale_staging(root: &Path) {
     // 或原子就位失败/进程崩溃时残留（文件非目录），与 .staging-* 同属入口兜底
     // 清扫。
     let selection_temp_prefix = format!(".{RUNTIME_SELECTION_FILE}.");
-    let Ok(entries) = fs::read_dir(root) else {
-        return;
+    let entries = match fs::read_dir(root) {
+        Ok(entries) => entries,
+        Err(error) => {
+            if error.kind() != std::io::ErrorKind::NotFound {
+                tracing::warn!(event = "runtime_selection_cleanup_failed", stage = "read_directory", error_kind = ?error.kind(), error_code = error.raw_os_error(), "读取运行目录选择临时文件目录失败");
+            }
+            return;
+        }
     };
-    for entry in entries.flatten() {
+    for entry in entries {
+        let entry = match entry {
+            Ok(entry) => entry,
+            Err(error) => {
+                tracing::warn!(event = "runtime_selection_cleanup_failed", stage = "read_entry", error_kind = ?error.kind(), error_code = error.raw_os_error(), "读取运行目录选择临时文件条目失败，跳过此项");
+                continue;
+            }
+        };
         let path = entry.path();
         let Some(name) = path.file_name().and_then(|name| name.to_str()) else {
             continue;
         };
         if name.starts_with(&selection_temp_prefix) && path.is_file() {
             // 尽力而为：同 .staging-*，单项失败跳过。
-            let _ = fs::remove_file(&path);
+            if let Err(error) = fs::remove_file(&path) {
+                tracing::warn!(event = "runtime_selection_cleanup_failed", stage = "remove_selection_temp", error_kind = ?error.kind(), error_code = error.raw_os_error(), "删除运行目录选择临时文件失败，留待下次重试");
+            }
         }
     }
 }
@@ -285,18 +345,42 @@ fn initialize_staged(
     staging: &Path,
     root: &Path,
 ) -> Result<(), String> {
-    ensure_not_cancelled(cancel)?;
-    // 运行目录校验失败时如实报告：初始化不替用户修复用户指定的 Xberg 目录。
-    let runtime = runtime_dir()?;
-    validate_runtime_dir(&runtime)?;
-    let notice_stage = staging.join("licenses");
-    fs::create_dir_all(&notice_stage).map_err(|error| format!("创建许可证目录失败：{error}"))?;
-    write_notice(&notice_stage.join("THIRD_PARTY_NOTICES.md"), manifest)?;
-    atomic_replace_dir(&notice_stage, &root.join("licenses"))?;
-    // XB-10：用户提供 Xberg 运行目录，初始化不再下载任何引擎或组件包
-    //（下载器仅媒体运行库的 download_runtime 路径仍在使用）。
-    progress("转 Markdown 组件初始化完成".to_string());
-    Ok(())
+    let started = std::time::Instant::now();
+    let mut stage = "runtime_directory";
+    let result = (|| {
+        ensure_not_cancelled(cancel)?;
+        // 运行目录校验失败时如实报告：初始化不替用户修复用户指定的 Xberg 目录。
+        let runtime = runtime_dir()?;
+        stage = "runtime_validate";
+        validate_runtime_dir(&runtime)?;
+        let notice_stage = staging.join("licenses");
+        stage = "notice_create";
+        fs::create_dir_all(&notice_stage)
+            .map_err(|error| format!("创建许可证目录失败：{error}"))?;
+        stage = "notice_write";
+        write_notice(&notice_stage.join("THIRD_PARTY_NOTICES.md"), manifest)?;
+        stage = "notice_install";
+        atomic_replace_dir(&notice_stage, &root.join("licenses"))?;
+        // XB-10：用户提供 Xberg 运行目录，初始化不再下载任何引擎或组件包
+        //（下载器仅媒体运行库的 download_runtime 路径仍在使用）。
+        progress("转 Markdown 组件初始化完成".to_string());
+        Ok(())
+    })();
+    match &result {
+        Ok(()) => tracing::info!(
+            event = "markdown_assets_staged_completed",
+            elapsed_ms = crate::logging::elapsed_ms(started),
+            result = "validated_notice_installed",
+            "转 Markdown 运行目录校验与许可证落位完成"
+        ),
+        Err(_) => tracing::error!(
+            event = "markdown_assets_staged_failed",
+            stage,
+            elapsed_ms = crate::logging::elapsed_ms(started),
+            "转 Markdown 运行目录校验或许可证落位失败"
+        ),
+    }
+    result
 }
 
 /// 生产下载器：只访问清单固定地址（T-21），HTTP 原语复用截图 OCR 侧的
@@ -330,17 +414,53 @@ pub fn download_runtime(
     cancel: &AtomicBool,
     mut progress: impl FnMut(String),
 ) -> Result<PathBuf, String> {
-    ensure_not_cancelled(cancel)?;
-    progress("正在查询 Xberg 最新发布版本…".into());
-    let release = crate::snap_ocr_assets::fetch_release_json(
-        XBERG_LATEST_RELEASE_URL,
-        cancel,
-        &mut progress,
-    )?;
-    let mut manifest = load_manifest()?;
-    apply_latest_release(&mut manifest.xberg, &release)?;
-    progress(format!("最新发布版本：{}", manifest.xberg.tag));
-    download_runtime_with(&manifest, cancel, &mut progress, &mut NetworkDownloader)
+    let span = crate::logging::operation_span("markdown_assets", "download_runtime");
+    let _entered = span.enter();
+    let started = std::time::Instant::now();
+    tracing::info!(
+        event = "runtime_download_started",
+        "Xberg 最新运行时下载开始"
+    );
+    let mut stage = "cancel_check";
+    let result = (|| {
+        ensure_not_cancelled(cancel)?;
+        progress("正在查询 Xberg 最新发布版本…".into());
+        stage = "release_metadata";
+        let release = crate::snap_ocr_assets::fetch_release_json(
+            XBERG_LATEST_RELEASE_URL,
+            cancel,
+            &mut progress,
+        )?;
+        stage = "manifest";
+        let mut manifest = load_manifest()?;
+        stage = "release_validate";
+        apply_latest_release(&mut manifest.xberg, &release)?;
+        progress(format!("最新发布版本：{}", manifest.xberg.tag));
+        stage = "download_install";
+        download_runtime_with(&manifest, cancel, &mut progress, &mut NetworkDownloader)
+    })();
+    let elapsed_ms = crate::logging::elapsed_ms(started);
+    match &result {
+        Ok(_) => tracing::info!(
+            event = "runtime_download_completed",
+            elapsed_ms,
+            result = "validated_saved",
+            "Xberg 最新运行时下载完成"
+        ),
+        Err(_) if cancel.load(std::sync::atomic::Ordering::Acquire) => tracing::info!(
+            event = "runtime_download_cancelled",
+            stage,
+            elapsed_ms,
+            "Xberg 最新运行时下载已取消"
+        ),
+        Err(_) => tracing::error!(
+            event = "runtime_download_failed",
+            stage,
+            elapsed_ms,
+            "Xberg 最新运行时下载失败"
+        ),
+    }
+    result
 }
 
 /// XB-10：只接受固定官方源的 Windows 发布包与上游 SHA-256，不回退钉死版本。
@@ -426,11 +546,19 @@ fn reusable_runtime(
         }
         let path = entry.path();
         let receipt = path.join(XBERG_RELEASE_RECEIPT);
-        let Ok(bytes) = fs::read(&receipt) else {
-            continue;
+        let bytes = match fs::read(&receipt) {
+            Ok(bytes) => bytes,
+            Err(error) => {
+                tracing::warn!(event = "runtime_reuse_rejected", stage = "receipt_read", error_kind = ?error.kind(), error_code = error.raw_os_error(), "已下载版本记录不可读，继续寻找可复用版本");
+                continue;
+            }
         };
-        let Ok(value) = serde_json::from_slice::<serde_json::Value>(&bytes) else {
-            continue;
+        let value = match serde_json::from_slice::<serde_json::Value>(&bytes) {
+            Ok(value) => value,
+            Err(error) => {
+                tracing::warn!(event = "runtime_reuse_rejected", stage = "receipt_parse", error_category = ?error.classify(), "已下载版本记录无效，继续寻找可复用版本");
+                continue;
+            }
         };
         if value["owner"] == "JchTools-xberg-download-v1"
             && value["tag"] == pack.tag
@@ -445,6 +573,11 @@ fn reusable_runtime(
             // 仅用户主动获取最新版时核验自有缓存身份；正常运行和用户自供
             // 目录仍按 XB-09 做存在性检查，不在启动/转换/截图中计算摘要。
             let Some(expected) = value["engine_sha256"].as_str() else {
+                tracing::warn!(
+                    event = "runtime_reuse_rejected",
+                    stage = "engine_digest_missing",
+                    "已下载版本缺少引擎摘要，继续寻找可复用版本"
+                );
                 continue;
             };
             ensure_not_cancelled(cancel)?;
@@ -452,10 +585,21 @@ fn reusable_runtime(
                 crate::asset_util::sha256_file_inner(&path.join("xberg.exe"), Some(cancel))
             else {
                 ensure_not_cancelled(cancel)?;
+                tracing::warn!(
+                    event = "runtime_reuse_rejected",
+                    stage = "engine_digest_read",
+                    "已下载引擎摘要不可读，继续寻找可复用版本"
+                );
                 continue;
             };
             if actual == expected {
                 candidates.push(path);
+            } else {
+                tracing::warn!(
+                    event = "runtime_reuse_rejected",
+                    stage = "engine_digest_mismatch",
+                    "已下载引擎摘要不匹配，不复用此版本"
+                );
             }
         }
     }
@@ -469,29 +613,38 @@ fn download_runtime_with(
     progress: &mut impl FnMut(String),
     downloader: &mut dyn AssetDownloader,
 ) -> Result<PathBuf, String> {
-    // P-10：可选组件下载是关键功能任务，开始/结束统计必须落盘（单次下载
-    // 内部的重试与代理回退日志由下载原语记录）。
+    let span = crate::logging::operation_span("markdown_assets", "install_runtime");
+    let _entered = span.enter();
     tracing::info!(
-        tag = %manifest.xberg.tag,
+        event = "runtime_install_started",
         size_bytes = manifest.xberg.archive_size_bytes,
-        "Xberg 运行时下载任务开始"
+        member_count = manifest.xberg.members.len(),
+        "Xberg 运行时校验安装任务开始"
     );
     let started = std::time::Instant::now();
-    let result = download_runtime_task(manifest, cancel, progress, downloader);
-    let elapsed_ms = u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX);
+    let mut stage = "cancel_check";
+    let result = download_runtime_task(manifest, cancel, progress, downloader, &mut stage);
+    let elapsed_ms = crate::logging::elapsed_ms(started);
     match &result {
-        Ok(installed) => tracing::info!(
+        Ok(_) => tracing::info!(
+            event = "runtime_install_completed",
             elapsed_ms,
-            installed = %installed.display(),
-            "Xberg 运行时下载任务完成"
+            result = "verified_installed_saved",
+            "Xberg 运行时校验安装任务完成"
         ),
         Err(reason) if reason.contains("取消") => {
-            tracing::info!(elapsed_ms, reason = %reason, "Xberg 运行时下载任务已取消");
+            tracing::info!(
+                event = "runtime_install_cancelled",
+                stage,
+                elapsed_ms,
+                "Xberg 运行时校验安装任务已取消"
+            );
         }
-        Err(reason) => tracing::error!(
+        Err(_) => tracing::error!(
+            event = "runtime_install_failed",
+            stage,
             elapsed_ms,
-            reason = %reason,
-            "Xberg 运行时下载任务失败"
+            "Xberg 运行时校验安装任务失败"
         ),
     }
     result
@@ -502,15 +655,26 @@ fn download_runtime_task(
     cancel: &AtomicBool,
     progress: &mut impl FnMut(String),
     downloader: &mut dyn AssetDownloader,
+    stage: &mut &'static str,
 ) -> Result<PathBuf, String> {
     ensure_not_cancelled(cancel)?;
+    *stage = "state_directory";
     let base = crate::xberg_settings::state_dir()?.join("xberg-downloads");
+    *stage = "create_download_root";
     fs::create_dir_all(&base).map_err(|e| e.to_string())?;
     cleanup_owned_download_staging(&base, progress);
+    *stage = "reuse_validate";
     if let Some(installed) = reusable_runtime(&base, &manifest.xberg, cancel)? {
+        tracing::info!(
+            event = "runtime_install_reused",
+            result = "verified_existing",
+            "复用已校验 Xberg 运行时"
+        );
         ensure_not_cancelled(cancel)?;
+        *stage = "reuse_notice";
         ensure_document_notice()?;
         ensure_not_cancelled(cancel)?;
+        *stage = "reuse_save_source";
         crate::xberg_settings::save_source(crate::xberg_settings::Source::Downloaded, &installed)?;
         progress(format!(
             "已存在 {}，复用已校验安装，不重复下载",
@@ -519,27 +683,37 @@ fn download_runtime_task(
         return Ok(installed);
     }
     let staging = base.join(format!(".staging-{}", Uuid::new_v4()));
-    fs::create_dir(&staging).map_err(|e| e.to_string())?;
+    *stage = "create_staging";
+    fs::create_dir(&staging).map_err(|error| {
+        tracing::error!(event = "runtime_staging_create_failed", stage = "create_staging", error_kind = ?error.kind(), error_code = error.raw_os_error(), "创建 Xberg 下载临时目录失败");
+        error.to_string()
+    })?;
+    *stage = "staging_lock";
     let mut staging_lock = match open_download_staging_lock(&staging) {
         Ok(file) => file,
         Err(error) => {
-            let _ = fs::remove_dir_all(&staging);
+            rollback_runtime_directory(&staging, "staging_lock");
             return Err(error);
         }
     };
+    *stage = "staging_marker_write";
     if let Err(error) = staging_lock.write_all(b"JchTools Xberg download staging\n") {
+        tracing::error!(event = "runtime_staging_marker_failed", stage = "staging_marker_write", error_kind = ?error.kind(), error_code = error.raw_os_error(), "写入 Xberg 下载临时目录所有权标记失败");
         drop(staging_lock);
-        let _ = fs::remove_dir_all(&staging);
+        rollback_runtime_directory(&staging, "staging_marker_write");
         return Err(format!("创建下载临时目录所有权标记失败：{error}"));
     }
+    *stage = "staging_marker_sync";
     if let Err(error) = staging_lock.sync_all() {
+        tracing::error!(event = "runtime_staging_marker_failed", stage = "staging_marker_sync", error_kind = ?error.kind(), error_code = error.raw_os_error(), "同步 Xberg 下载临时目录所有权标记失败");
         drop(staging_lock);
-        let _ = fs::remove_dir_all(&staging);
+        rollback_runtime_directory(&staging, "staging_marker_sync");
         return Err(format!("同步下载临时目录所有权标记失败：{error}"));
     }
     let result = (|| {
         let archive = staging.join("runtime.zip");
         let pack = &manifest.xberg;
+        *stage = "download_archive";
         downloader.download(
             &pack.archive_url,
             &archive,
@@ -549,27 +723,82 @@ fn download_runtime_task(
             progress,
         )?;
         ensure_not_cancelled(cancel)?;
+        *stage = "archive_verify";
+        let verify_started = std::time::Instant::now();
+        tracing::info!(
+            event = "runtime_archive_verify_started",
+            size_bytes = pack.archive_size_bytes,
+            "Xberg 下载归档独立复核开始"
+        );
         verify_file_with_cancel(
             &archive,
             pack.archive_size_bytes,
             &pack.archive_sha256,
             cancel,
         )?;
+        tracing::info!(
+            event = "runtime_archive_verified",
+            size_bytes = pack.archive_size_bytes,
+            elapsed_ms = crate::logging::elapsed_ms(verify_started),
+            "Xberg 下载归档校验通过"
+        );
+        *stage = "extract_directory";
         let extracted = staging.join("unpacked");
         fs::create_dir(&extracted).map_err(|e| e.to_string())?;
+        *stage = "extract_archive";
+        let extract_started = std::time::Instant::now();
+        tracing::info!(
+            event = "runtime_extract_started",
+            "Xberg 运行时归档解包开始"
+        );
         crate::asset_util::extract_zip_safely(&archive, &extracted, cancel)?;
+        tracing::info!(
+            event = "runtime_extract_completed",
+            elapsed_ms = crate::logging::elapsed_ms(extract_started),
+            "Xberg 运行时归档解包完成"
+        );
         let component = extracted.join("xberg-cli-x86_64-pc-windows-msvc");
-        for member in &pack.members {
+        *stage = "member_verify";
+        for (member_index, member) in pack.members.iter().enumerate() {
             ensure_not_cancelled(cancel)?;
+            let member_started = std::time::Instant::now();
+            tracing::info!(
+                event = "runtime_member_verify_started",
+                member_index,
+                verification = if member.sha256.is_empty() {
+                    "presence"
+                } else {
+                    "sha256"
+                },
+                "Xberg 发布成员校验开始"
+            );
             let path = component.join(&member.path);
             if member.sha256.is_empty() {
                 if !path.is_file() {
+                    tracing::error!(
+                        event = "runtime_member_verify_failed",
+                        stage = "member_missing",
+                        member_index,
+                        "最新 Xberg 发布缺少所需成员"
+                    );
                     return Err(format!("最新 Xberg 发布缺少所需成员：{}", member.path));
                 }
             } else {
                 verify_file_with_cancel(&path, member.size_bytes, &member.sha256, cancel)?;
             }
+            tracing::info!(
+                event = "runtime_member_verify_completed",
+                member_index,
+                elapsed_ms = crate::logging::elapsed_ms(member_started),
+                "Xberg 发布成员校验通过"
+            );
         }
+        tracing::info!(
+            event = "runtime_members_verified",
+            member_count = pack.members.len(),
+            "Xberg 发布成员校验通过"
+        );
+        *stage = "engine_digest";
         let engine_sha256 = if let Some(member) = pack
             .members
             .iter()
@@ -581,6 +810,7 @@ fn download_runtime_task(
             crate::asset_util::sha256_file_inner(&component.join("xberg.exe"), Some(cancel))
                 .map_err(|error| error.to_string())?
         };
+        *stage = "release_receipt";
         let receipt = serde_json::json!({
             "owner":"JchTools-xberg-download-v1",
             "tag":pack.tag,
@@ -606,12 +836,28 @@ fn download_runtime_task(
         // 一次，把「检查通过后用户才取消」的窗口收窄到提交动作本身；取消被
         // 观测到时不进入提交（T-05：可重试，staging 随后整体清理）。
         ensure_not_cancelled(cancel)?;
-        fs::rename(&component, &installed).map_err(|e| format!("安装 Xberg 失败：{e}"))?;
+        *stage = "install_rename";
+        let install_started = std::time::Instant::now();
+        tracing::info!(
+            event = "runtime_directory_install_started",
+            "Xberg 已校验目录原子落位开始"
+        );
+        fs::rename(&component, &installed).map_err(|error| {
+            tracing::error!(event = "runtime_directory_install_failed", stage = "install_rename", error_kind = ?error.kind(), error_code = error.raw_os_error(), elapsed_ms = crate::logging::elapsed_ms(install_started), "Xberg 已校验目录原子落位失败");
+            format!("安装 Xberg 失败：{error}")
+        })?;
+        tracing::info!(
+            event = "runtime_directory_installed",
+            elapsed_ms = crate::logging::elapsed_ms(install_started),
+            result = "renamed",
+            "Xberg 已校验目录原子落位完成"
+        );
+        *stage = "notice_install";
         // 下载安装成功即确保许可证 notice（T-06，S3-01 集成后与保存共用
         // [`ensure_document_notice`] 原子闭环）：失败按未完成安装处理——
         // 撤销目录且不写 SQLite（与 save_source 失败同一回滚口径）。
         if let Err(error) = ensure_document_notice() {
-            let _ = fs::remove_dir_all(&installed);
+            rollback_runtime_directory(&installed, "notice_install");
             return Err(error);
         }
         // save_source 前最后一次取消检查（XB-20：下载取消不覆盖有效配置）——
@@ -619,12 +865,13 @@ fn download_runtime_task(
         // T-05「保留已校验资产」保留，不做删除回滚（残留目录不阻塞任何功能，
         // 下次下载安装到新目录）。
         ensure_not_cancelled(cancel)?;
+        *stage = "save_source";
         if let Err(error) = crate::xberg_settings::save_source(
             crate::xberg_settings::Source::Downloaded,
             &installed,
         ) {
             // 仅撤销本次创建且尚未成为有效配置的目录。
-            let _ = fs::remove_dir_all(&installed);
+            rollback_runtime_directory(&installed, "save_source");
             return Err(error);
         }
         Ok(installed)
@@ -632,10 +879,40 @@ fn download_runtime_task(
     // 校验与安装已经结束；先释放禁止删除共享的 Windows marker 句柄。
     drop(staging_lock);
     let cleanup = fs::remove_dir_all(&staging);
-    if let Err(error) = cleanup {
-        progress(format!("下载临时目录清理失败：{error}"));
+    match cleanup {
+        Ok(()) => tracing::info!(
+            event = "runtime_staging_cleanup_completed",
+            result = "removed",
+            "Xberg 下载临时目录清理完成"
+        ),
+        Err(error) => {
+            tracing::warn!(event = "runtime_staging_cleanup_failed", stage = "staging_remove", error_kind = ?error.kind(), error_code = error.raw_os_error(), "Xberg 下载临时目录清理失败");
+            progress(format!("下载临时目录清理失败：{error}"));
+        }
     }
     result
+}
+
+fn rollback_runtime_directory(directory: &Path, stage: &'static str) {
+    let started = std::time::Instant::now();
+    tracing::warn!(
+        event = "runtime_install_rollback_started",
+        stage,
+        action = "remove_new_directory",
+        "Xberg 安装阶段失败，开始撤销本次目录"
+    );
+    match fs::remove_dir_all(directory) {
+        Ok(()) => tracing::info!(
+            event = "runtime_install_rollback_completed",
+            stage,
+            elapsed_ms = crate::logging::elapsed_ms(started),
+            result = "removed",
+            "Xberg 本次目录已撤销"
+        ),
+        Err(error) => {
+            tracing::warn!(event = "runtime_install_rollback_failed", stage, error_kind = ?error.kind(), error_code = error.raw_os_error(), error = %crate::logging::safe_error(&error.to_string()), elapsed_ms = crate::logging::elapsed_ms(started), "Xberg 本次目录撤销失败，保留既有错误处理策略")
+        }
+    }
 }
 
 fn open_download_staging_lock(staging: &Path) -> Result<File, String> {
@@ -685,6 +962,7 @@ fn cleanup_owned_download_staging(root: &Path, progress: &mut impl FnMut(String)
             .is_ok_and(|value| value == "JchTools Xberg download staging\n");
         if owned {
             if let Err(error) = fs::remove_dir_all(&path) {
+                tracing::warn!(event = "runtime_stale_staging_cleanup_failed", stage = "staging_remove", error_kind = ?error.kind(), error_code = error.raw_os_error(), "清理旧 Xberg 下载临时目录失败");
                 progress(format!("警告：清理旧 Xberg 下载临时目录失败：{error}"));
             }
         }

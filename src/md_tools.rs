@@ -16,6 +16,47 @@ use std::{
 use walkdir::WalkDir;
 
 use crate::control::Control;
+fn log_md_item_result(
+    operation: &'static str,
+    stage: &'static str,
+    started: std::time::Instant,
+    result: &Result<()>,
+    control: &Control,
+) {
+    let elapsed_ms = crate::logging::elapsed_ms(started);
+    match result {
+        Ok(()) => tracing::info!(
+            event = "md_item_completed",
+            operation,
+            elapsed_ms,
+            "MD处理项完成"
+        ),
+        Err(_) if control.is_cancelled() => tracing::info!(
+            event = "md_item_cancelled",
+            operation,
+            elapsed_ms,
+            "MD处理项已取消"
+        ),
+        Err(error) => {
+            let io = error
+                .chain()
+                .find_map(|cause| cause.downcast_ref::<std::io::Error>());
+            tracing::error!(
+                event = "md_item_failed",
+                operation,
+                stage,
+                elapsed_ms,
+                error_type = if io.is_some() {
+                    "io"
+                } else {
+                    "md_item_boundary"
+                },
+                error_code = io.and_then(std::io::Error::raw_os_error),
+                "MD处理项失败"
+            );
+        }
+    }
+}
 
 /// 合并扫描出的一个输入文件（M-02/M-03）。
 #[derive(Debug, Clone)]
@@ -75,6 +116,13 @@ fn ensure_root_is_real_directory(root: &Path) -> Result<()> {
         match std::fs::symlink_metadata(&current) {
             Ok(meta) => {
                 if crate::fsutil::is_link(&meta) {
+                    tracing::error!(
+                        event = "md_input_rejected",
+                        stage = "root_boundary",
+                        error_type = "link_boundary",
+                        error_code = "root_link",
+                        "MD输入访问路径经过链接边界，拒绝读取"
+                    );
                     bail!(
                         "所选目录或其上级经过符号链接 / junction（{}）：与目录整理同口径，\
                          MD 整理不读取链接目标，请直接选择真实目录",
@@ -83,6 +131,13 @@ fn ensure_root_is_real_directory(root: &Path) -> Result<()> {
                 }
             }
             Err(error) if error.kind() == ErrorKind::NotFound => {
+                tracing::error!(
+                    event = "md_input_rejected",
+                    stage = "root_boundary",
+                    error_type = "io",
+                    error_code = error.raw_os_error(),
+                    "MD输入目录不存在，拒绝读取"
+                );
                 bail!("输入目录不存在或无法访问：{}", root.display());
             }
             Err(error) => {
@@ -107,6 +162,8 @@ fn reject_output_aliasing_input(output: &Path, entries: &[MergeEntry]) -> Result
             continue; // 单个输入取不到标识不阻断：合并打开该文件时自会给出明确错误
         };
         if snapshot.identity == output_snapshot.identity {
+            tracing::error!(event = "md_output_rejected", stage = "output_alias", error_type = "same_file",
+                error_code = "output_input_alias", file = %crate::logging::safe_error(&entry.rel), "MD输出与原始输入是同一实体，拒绝写入");
             bail!(
                 "输出文件与输入是同一个文件（{} ↔ {}，硬链接或同一实体的不同写法）：\
                  合并会破坏原始输入；请更换输出文件名或输出目录",
@@ -139,58 +196,76 @@ pub fn scan_markdown(
     recursive: bool,
     exclude: Option<&Path>,
 ) -> Result<Vec<MergeEntry>> {
-    // M-02/S-04：根自身与全部祖先都不经过链接边界，否则拒绝整个任务
-    ensure_root_is_real_directory(root)?;
-    let mut rows: Vec<(SystemTime, MergeEntry)> = Vec::new();
-    let max_depth = if recursive { usize::MAX } else { 1 };
-    for item in WalkDir::new(root)
-        .follow_links(false)
-        // walkdir 2.5 起根链接默认被跟随（与 follow_links 无关），必须显式关闭（M-02）
-        .follow_root_links(false)
-        .min_depth(1)
-        .max_depth(max_depth)
-    {
-        let entry = item.with_context(|| format!("扫描目录失败：{}", root.display()))?;
-        if !entry.file_type().is_file() {
-            continue;
+    let span = crate::logging::operation_span("md_tools", "scan");
+    let _entered = span.enter();
+    let started = std::time::Instant::now();
+    tracing::info!(event = "md_scan_started", recursive, "MD扫描开始");
+    let result: Result<Vec<MergeEntry>> = (|| {
+        // M-02/S-04：根自身与全部祖先都不经过链接边界，否则拒绝整个任务
+        ensure_root_is_real_directory(root)?;
+        let mut rows: Vec<(SystemTime, MergeEntry)> = Vec::new();
+        let max_depth = if recursive { usize::MAX } else { 1 };
+        for item in WalkDir::new(root)
+            .follow_links(false)
+            // walkdir 2.5 起根链接默认被跟随（与 follow_links 无关），必须显式关闭（M-02）
+            .follow_root_links(false)
+            .min_depth(1)
+            .max_depth(max_depth)
+        {
+            let entry = item.with_context(|| format!("扫描目录失败：{}", root.display()))?;
+            if !entry.file_type().is_file() {
+                continue;
+            }
+            let path = entry.path();
+            if !is_markdown(path) {
+                continue;
+            }
+            // Windows 路径不区分大小写、两种分隔符等价：输入框与输出框对同一目录的
+            // 大小写拼写不同时，按字节比较会漏排除，把本次输出误当输入合并（M-07，
+            // 回归见 tests/md_tools.rs merge_excludes_output_regardless_of_path_casing）。
+            if exclude.is_some_and(|out| same_file_path(path, out)) {
+                continue;
+            }
+            let rel = path
+                .strip_prefix(root)
+                .map(|rel| rel.to_string_lossy().replace('\\', "/"))
+                .unwrap_or_default();
+            let file_name = path
+                .file_name()
+                .map(|name| name.to_string_lossy().into_owned())
+                .unwrap_or_default();
+            let meta = std::fs::metadata(path)
+                .with_context(|| format!("读取文件属性失败：{}", path.display()))?;
+            rows.push((
+                effective_created(&meta),
+                MergeEntry {
+                    path: path.to_path_buf(),
+                    rel,
+                    file_name,
+                },
+            ));
         }
-        let path = entry.path();
-        if !is_markdown(path) {
-            continue;
+        sort_rows(&mut rows);
+        let entries: Vec<MergeEntry> = rows.into_iter().map(|(_, entry)| entry).collect();
+        // M-07：输出与输入是同一实体（硬链接/别名写法）时在扫描期即拒绝，
+        // 界面不得进入覆盖确认——确认后写入会截断另一名字下的原始输入。
+        if let Some(exclude) = exclude {
+            reject_output_aliasing_input(exclude, &entries)?;
         }
-        // Windows 路径不区分大小写、两种分隔符等价：输入框与输出框对同一目录的
-        // 大小写拼写不同时，按字节比较会漏排除，把本次输出误当输入合并（M-07，
-        // 回归见 tests/md_tools.rs merge_excludes_output_regardless_of_path_casing）。
-        if exclude.is_some_and(|out| same_file_path(path, out)) {
-            continue;
+        Ok(entries)
+    })();
+    match &result {
+        Ok(entries) => tracing::info!(
+            event = "md_scan_completed",
+            files = entries.len(),
+            elapsed_ms = crate::logging::elapsed_ms(started),
+            "MD扫描完成"
+        ),
+        Err(error) => {
+            tracing::error!(event = "md_scan_failed", stage = "input_scan", error_type = "filesystem", elapsed_ms = crate::logging::elapsed_ms(started), error = %crate::logging::safe_error(&format!("{error:#}")), "MD扫描失败")
         }
-        let rel = path
-            .strip_prefix(root)
-            .map(|rel| rel.to_string_lossy().replace('\\', "/"))
-            .unwrap_or_default();
-        let file_name = path
-            .file_name()
-            .map(|name| name.to_string_lossy().into_owned())
-            .unwrap_or_default();
-        let meta = std::fs::metadata(path)
-            .with_context(|| format!("读取文件属性失败：{}", path.display()))?;
-        rows.push((
-            effective_created(&meta),
-            MergeEntry {
-                path: path.to_path_buf(),
-                rel,
-                file_name,
-            },
-        ));
     }
-    sort_rows(&mut rows);
-    let entries: Vec<MergeEntry> = rows.into_iter().map(|(_, entry)| entry).collect();
-    // M-07：输出与输入是同一实体（硬链接/别名写法）时在扫描期即拒绝，
-    // 界面不得进入覆盖确认——确认后写入会截断另一名字下的原始输入。
-    if let Some(exclude) = exclude {
-        reject_output_aliasing_input(exclude, &entries)?;
-    }
-    Ok(entries)
+    result
 }
 
 /// M-03 排序落地：创建时间早→晚，同一创建时间按相对路径自然排序决胜；
@@ -600,20 +675,42 @@ pub fn merge_markdown_with_events(
     control: &Control,
     on_event: &dyn Fn(MdProgress) -> Result<()>,
 ) -> Result<MergeStats> {
+    let span = crate::logging::operation_span("md_tools", "merge");
+    let _entered = span.enter();
     // P-10：MD 合并是关键功能任务，开始/结束统计必须落盘；取消按用户意图
     // 记 INFO，不与失败混级。
-    tracing::info!(files = entries.len(), output = %output.display(), "MD 合并任务开始");
+    tracing::info!(
+        event = "md_merge_started",
+        files = entries.len(),
+        "MD 合并任务开始"
+    );
     let started = std::time::Instant::now();
-    let result = merge_task(entries, output, overwrite, control, on_event);
-    let elapsed_ms = u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX);
+    let mut stage = "output_validation";
+    let result = merge_task(entries, output, overwrite, control, on_event, &mut stage);
+    let elapsed_ms = crate::logging::elapsed_ms(started);
     match &result {
-        Ok(stats) => tracing::info!(elapsed_ms, files = stats.files, "MD 合并任务完成"),
-        Err(error) if control.is_cancelled() => {
-            tracing::info!(elapsed_ms, reason = %format!("{error:#}"), "MD 合并任务已取消");
+        Ok(stats) => tracing::info!(
+            event = "md_merge_completed",
+            elapsed_ms,
+            files = stats.files,
+            "MD 合并任务完成"
+        ),
+        Err(_) if control.is_cancelled() => {
+            tracing::info!(
+                event = "md_merge_cancelled",
+                elapsed_ms,
+                "MD 合并任务已取消"
+            );
         }
         Err(error) => tracing::error!(
+            event = "md_merge_failed",
             elapsed_ms,
-            reason = %format!("{error:#}"),
+            stage,
+            error_type = "md_merge_boundary",
+            error_code = error
+                .chain()
+                .find_map(|cause| cause.downcast_ref::<std::io::Error>())
+                .and_then(std::io::Error::raw_os_error),
             "MD 合并任务失败"
         ),
     }
@@ -626,6 +723,7 @@ fn merge_task(
     overwrite: bool,
     control: &Control,
     on_event: &dyn Fn(MdProgress) -> Result<()>,
+    stage: &mut &'static str,
 ) -> Result<MergeStats> {
     // 同实体拒绝先于覆盖确认：硬链接/别名输出无论如何确认都不允许写
     reject_output_aliasing_input(output, entries)?;
@@ -639,28 +737,50 @@ fn merge_task(
         .parent()
         .filter(|parent| !parent.as_os_str().is_empty())
         .unwrap_or_else(|| Path::new("."));
+    *stage = "output_directory";
     std::fs::create_dir_all(parent)
         .with_context(|| format!("创建输出目录失败：{}", parent.display()))?;
+    *stage = "output_create";
     let (temp_path, target) = create_md_temp_output(parent)?;
+    *stage = "merge_entries";
     match write_merge_entries(entries, target, control, on_event) {
-        Ok(()) => match std::fs::rename(&temp_path, output) {
-            Ok(()) => Ok(MergeStats {
-                files: entries.len(),
-            }),
-            Err(error) => {
-                let _ = std::fs::remove_file(&temp_path);
-                Err(error).with_context(|| {
-                    format!(
-                        "输出文件落盘失败（{} → {}）：目标可能被占用或权限不足，已清理临时文件",
-                        temp_path.display(),
-                        output.display()
-                    )
-                })
+        Ok(()) => {
+            *stage = "output_commit";
+            match std::fs::rename(&temp_path, output) {
+                Ok(()) => Ok(MergeStats {
+                    files: entries.len(),
+                }),
+                Err(error) => {
+                    if let Err(cleanup) = std::fs::remove_file(&temp_path) {
+                        tracing::warn!(
+                            event = "md_cleanup_failed",
+                            stage = "merge_commit_rollback",
+                            error_type = "io",
+                            error_code = cleanup.raw_os_error(),
+                            "MD合并失败临时文件清理失败"
+                        );
+                    }
+                    Err(error).with_context(|| {
+                        format!(
+                            "输出文件落盘失败（{} → {}）：目标可能被占用或权限不足，已清理临时文件",
+                            temp_path.display(),
+                            output.display()
+                        )
+                    })
+                }
             }
-        },
+        }
         Err(error) => {
             // 取消/失败：删除本次任务拥有的临时文件，不触碰任何已有输出
-            let _ = std::fs::remove_file(&temp_path);
+            if let Err(cleanup) = std::fs::remove_file(&temp_path) {
+                tracing::warn!(
+                    event = "md_cleanup_failed",
+                    stage = "merge_rollback",
+                    error_type = "io",
+                    error_code = cleanup.raw_os_error(),
+                    "MD合并未完成临时文件清理失败"
+                );
+            }
             Err(error)
         }
     }
@@ -676,60 +796,76 @@ fn write_merge_entries(
     let mut out = BufWriter::with_capacity(512 * 1024, target);
     let mut prev_empty = true;
     for (index, entry) in entries.iter().enumerate() {
-        control.checkpoint()?;
-        on_event(MdProgress::FileStarted(index + 1, entries.len()))?;
-        // M-04：文件之间保证合理空行，防止上一文件最后一行与下一文件标题粘连
-        if index > 0 && !prev_empty {
-            out.write_all(b"\n")
-                .with_context(|| "写合并输出失败（文件分隔）".to_string())?;
-        }
-        let header = format!("# {}\n\n", entry.file_name);
-        out.write_all(header.as_bytes())
-            .with_context(|| "写合并输出失败（文件标题）".to_string())?;
-        let source = File::open(&entry.path)
-            .with_context(|| format!("打开输入文件失败：{}", entry.path.display()))?;
-        let mut reader = BufReader::with_capacity(256 * 1024, source);
-        let mut shifter = HeadingShift::default();
-        let mut first_line = true;
-        let mut lines_since_checkpoint = 0usize;
-        loop {
-            let mut line: Vec<u8> = Vec::with_capacity(1024);
-            let read = reader
-                .read_until(b'\n', &mut line)
-                .with_context(|| format!("读取输入文件失败：{}", entry.path.display()))?;
-            if read == 0 {
-                break;
+        let item_span = tracing::info_span!("md_merge_item", item_index = index + 1, file = %crate::logging::safe_error(&entry.rel));
+        let _item_entered = item_span.enter();
+        let item_started = std::time::Instant::now();
+        let mut item_stage = "callback";
+        tracing::info!(event = "md_merge_item_started", "MD合并输入项开始");
+        let item_result: Result<()> = (|| {
+            control.checkpoint()?;
+            on_event(MdProgress::FileStarted(index + 1, entries.len()))?;
+            item_stage = "output_header";
+            // M-04：文件之间保证合理空行，防止上一文件最后一行与下一文件标题粘连
+            if index > 0 && !prev_empty {
+                out.write_all(b"\n")
+                    .with_context(|| "写合并输出失败（文件分隔）".to_string())?;
             }
-            // U-12：文件内按行粒度响应取消/暂停，超大单文件也能及时停下
-            lines_since_checkpoint += 1;
-            if lines_since_checkpoint >= MERGE_CHECKPOINT_LINES {
-                control.checkpoint()?;
-                lines_since_checkpoint = 0;
-            }
-            if first_line {
-                first_line = false;
-                // 某些编辑器（Windows 旧版记事本、PowerShell 重定向等）会写出带 UTF-8 BOM 的
-                // 文件；BOM 字节会让首行不再被识别为标题，破坏 M-04/M-05 的下移（CommonMark
-                // 口径：文档开头的 BOM 被忽略）。只在每个文件开头剥除恰好一次，文件中间出现
-                // 的相同字节是普通文本、原样保留；拆分路径（M-09/M-10）是字节级无损操作，不剥。
-                const UTF8_BOM: [u8; 3] = [0xEF, 0xBB, 0xBF];
-                if line.starts_with(&UTF8_BOM) {
-                    line.drain(..UTF8_BOM.len());
-                    if line.is_empty() {
-                        continue; // 整个文件只有一个 BOM：按空文件处理
+            let header = format!("# {}\n\n", entry.file_name);
+            out.write_all(header.as_bytes())
+                .with_context(|| "写合并输出失败（文件标题）".to_string())?;
+            item_stage = "input_open";
+            let source = File::open(&entry.path)
+                .with_context(|| format!("打开输入文件失败：{}", entry.path.display()))?;
+            let mut reader = BufReader::with_capacity(256 * 1024, source);
+            let mut shifter = HeadingShift::default();
+            let mut first_line = true;
+            let mut lines_since_checkpoint = 0usize;
+            loop {
+                let mut line: Vec<u8> = Vec::with_capacity(1024);
+                item_stage = "input_read";
+                let read = reader
+                    .read_until(b'\n', &mut line)
+                    .with_context(|| format!("读取输入文件失败：{}", entry.path.display()))?;
+                if read == 0 {
+                    break;
+                }
+                // U-12：文件内按行粒度响应取消/暂停，超大单文件也能及时停下
+                lines_since_checkpoint += 1;
+                if lines_since_checkpoint >= MERGE_CHECKPOINT_LINES {
+                    control.checkpoint()?;
+                    lines_since_checkpoint = 0;
+                }
+                if first_line {
+                    first_line = false;
+                    // 某些编辑器（Windows 旧版记事本、PowerShell 重定向等）会写出带 UTF-8 BOM 的
+                    // 文件；BOM 字节会让首行不再被识别为标题，破坏 M-04/M-05 的下移（CommonMark
+                    // 口径：文档开头的 BOM 被忽略）。只在每个文件开头剥除恰好一次，文件中间出现
+                    // 的相同字节是普通文本、原样保留；拆分路径（M-09/M-10）是字节级无损操作，不剥。
+                    const UTF8_BOM: [u8; 3] = [0xEF, 0xBB, 0xBF];
+                    if line.starts_with(&UTF8_BOM) {
+                        line.drain(..UTF8_BOM.len());
+                        if line.is_empty() {
+                            continue; // 整个文件只有一个 BOM：按空文件处理
+                        }
                     }
                 }
+                item_stage = "output_write";
+                shifter.feed(&line, &mut out)?;
             }
-            shifter.feed(&line, &mut out)?;
-        }
-        shifter.finish(&mut out)?;
-        // 内容不以换行结束时补一个，保证下一文件标题不粘连（M-04）
-        if shifter.wrote_any && !shifter.ended_newline {
-            out.write_all(b"\n")
-                .with_context(|| "写合并输出失败（末行换行）".to_string())?;
-        }
-        prev_empty = shifter.consumed == 0;
-        on_event(MdProgress::FileCompleted(index + 1, entries.len()))?;
+            item_stage = "output_write";
+            shifter.finish(&mut out)?;
+            // 内容不以换行结束时补一个，保证下一文件标题不粘连（M-04）
+            if shifter.wrote_any && !shifter.ended_newline {
+                out.write_all(b"\n")
+                    .with_context(|| "写合并输出失败（末行换行）".to_string())?;
+            }
+            prev_empty = shifter.consumed == 0;
+            item_stage = "callback";
+            on_event(MdProgress::FileCompleted(index + 1, entries.len()))?;
+            Ok(())
+        })();
+        log_md_item_result("merge", item_stage, item_started, &item_result, control);
+        item_result?;
     }
     out.flush().context("写输出文件失败（磁盘可能已满）")?;
     // 最后一个完成事件之后仍可能收到停止请求；正式落盘前保持取消安全边界。
@@ -748,39 +884,72 @@ pub struct SplitPlan {
 /// 规划分片边界：每片 ≤ limit 且不切断多字节字符（M-09/M-10）。
 /// 限制小到无法同时满足两个要求时报错（此时不产生任何输出，由两遍法保证）。
 pub fn plan_splits(input: &Path, limit: u64) -> Result<SplitPlan> {
-    let len = std::fs::metadata(input)
-        .with_context(|| format!("读取输入文件属性失败：{}", input.display()))?
-        .len();
-    if limit == 0 {
-        bail!("拆分大小必须大于 0 字节");
-    }
-    if len == 0 {
-        return Ok(SplitPlan {
-            bounds: Vec::new(),
-            limit,
-        });
-    }
-    let mut file =
-        File::open(input).with_context(|| format!("打开输入文件失败：{}", input.display()))?;
-    let mut bounds = Vec::new();
-    let mut start = 0u64;
-    while start < len {
-        let target = start.saturating_add(limit).min(len);
-        if target == len {
-            bounds.push(len);
-            break;
-        }
-        let cut = prev_boundary(&mut file, target, start)
-            .with_context(|| format!("规划拆分边界失败：{}", input.display()))?;
-        if cut <= start {
-            bail!(
-                "拆分限制（{limit} 字节）过小：无法在不切断多字节字符的前提下分片（M-10）；请增大限制"
+    let span = crate::logging::operation_span("md_tools", "split_plan");
+    let _entered = span.enter();
+    let started = std::time::Instant::now();
+    tracing::info!(event = "md_split_plan_started", limit, "MD拆分规划开始");
+    let result: Result<SplitPlan> = (|| {
+        let len = std::fs::metadata(input)
+            .with_context(|| format!("读取输入文件属性失败：{}", input.display()))?
+            .len();
+        if limit == 0 {
+            tracing::error!(
+                event = "md_input_rejected",
+                stage = "split_limit",
+                error_type = "invalid_limit",
+                error_code = "zero_limit",
+                "MD拆分大小必须大于零"
             );
+            bail!("拆分大小必须大于 0 字节");
         }
-        bounds.push(cut);
-        start = cut;
+        if len == 0 {
+            return Ok(SplitPlan {
+                bounds: Vec::new(),
+                limit,
+            });
+        }
+        let mut file =
+            File::open(input).with_context(|| format!("打开输入文件失败：{}", input.display()))?;
+        let mut bounds = Vec::new();
+        let mut start = 0u64;
+        while start < len {
+            let target = start.saturating_add(limit).min(len);
+            if target == len {
+                bounds.push(len);
+                break;
+            }
+            let cut = prev_boundary(&mut file, target, start)
+                .with_context(|| format!("规划拆分边界失败：{}", input.display()))?;
+            if cut <= start {
+                tracing::error!(
+                    event = "md_input_rejected",
+                    stage = "split_boundary",
+                    error_type = "invalid_limit",
+                    error_code = "limit_smaller_than_character",
+                    limit,
+                    "MD拆分大小不足以容纳完整字符"
+                );
+                bail!(
+            "拆分限制（{limit} 字节）过小：无法在不切断多字节字符的前提下分片（M-10）；请增大限制"
+        );
+            }
+            bounds.push(cut);
+            start = cut;
+        }
+        Ok(SplitPlan { bounds, limit })
+    })();
+    match &result {
+        Ok(plan) => tracing::info!(
+            event = "md_split_plan_completed",
+            parts = plan.bounds.len(),
+            elapsed_ms = crate::logging::elapsed_ms(started),
+            "MD拆分规划完成"
+        ),
+        Err(error) => {
+            tracing::error!(event = "md_split_plan_failed", stage = "input_boundary_plan", error_type = "markdown_input", elapsed_ms = crate::logging::elapsed_ms(started), error = %crate::logging::safe_error(&format!("{error:#}")), "MD拆分规划失败")
+        }
     }
-    Ok(SplitPlan { bounds, limit })
+    result
 }
 
 /// 取 ≤target 的最大 UTF-8 安全边界：位置 p 是边界 ⟺ 该处字节不是 UTF-8 连续字节
@@ -843,25 +1012,44 @@ pub fn run_split_with_events(
     control: &Control,
     on_event: &dyn Fn(MdProgress) -> Result<()>,
 ) -> Result<u64> {
+    let span = crate::logging::operation_span("md_tools", "split");
+    let _entered = span.enter();
     // P-10：MD 拆分是关键功能任务，开始/结束统计必须落盘；取消按用户意图
     // 记 INFO，不与失败混级。
     tracing::info!(
-        input = %input.display(),
+        event = "md_split_started",
         parts = plan.bounds.len(),
-        out_dir = %out_dir.display(),
         "MD 拆分任务开始"
     );
     let started = std::time::Instant::now();
-    let result = split_task(input, plan, out_dir, overwrite, control, on_event);
-    let elapsed_ms = u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX);
+    let mut stage = "output_validation";
+    let result = split_task(
+        input, plan, out_dir, overwrite, control, on_event, &mut stage,
+    );
+    let elapsed_ms = crate::logging::elapsed_ms(started);
     match &result {
-        Ok(bytes) => tracing::info!(elapsed_ms, bytes_written = bytes, "MD 拆分任务完成"),
-        Err(error) if control.is_cancelled() => {
-            tracing::info!(elapsed_ms, reason = %format!("{error:#}"), "MD 拆分任务已取消");
+        Ok(bytes) => tracing::info!(
+            event = "md_split_completed",
+            elapsed_ms,
+            bytes_written = bytes,
+            "MD 拆分任务完成"
+        ),
+        Err(_) if control.is_cancelled() => {
+            tracing::info!(
+                event = "md_split_cancelled",
+                elapsed_ms,
+                "MD 拆分任务已取消"
+            );
         }
         Err(error) => tracing::error!(
+            event = "md_split_failed",
             elapsed_ms,
-            reason = %format!("{error:#}"),
+            stage,
+            error_type = "md_split_boundary",
+            error_code = error
+                .chain()
+                .find_map(|cause| cause.downcast_ref::<std::io::Error>())
+                .and_then(std::io::Error::raw_os_error),
             "MD 拆分任务失败"
         ),
     }
@@ -875,6 +1063,7 @@ fn split_task(
     overwrite: bool,
     control: &Control,
     on_event: &dyn Fn(MdProgress) -> Result<()>,
+    stage: &mut &'static str,
 ) -> Result<u64> {
     let file_name = input
         .file_name()
@@ -892,62 +1081,94 @@ fn split_task(
             );
         }
     }
+    *stage = "output_directory";
     std::fs::create_dir_all(out_dir)
         .with_context(|| format!("创建输出目录失败：{}", out_dir.display()))?;
+    *stage = "input_open";
     let mut reader =
         File::open(input).with_context(|| format!("打开输入文件失败：{}", input.display()))?;
     let mut buffer = vec![0u8; 256 * 1024];
     let mut written = 0u64;
     let mut start = 0u64;
+    *stage = "split_parts";
     for (index, end) in plan.bounds.iter().enumerate() {
-        control.checkpoint()?;
-        on_event(MdProgress::FileStarted(index + 1, plan.bounds.len()))?;
-        let path = out_dir.join(&names[index]);
-        // M-08/M-11：分片先写本任务独有的临时文件，成功后 rename 到目标。
-        // rename 只替换目录项：确认覆盖的分片若与输入是同一实体的硬链接，
-        // 输入名仍指向原字节（File::create 直接截断会破坏共享 inode 的另一
-        // 个名字，即输入本身）；失败或取消时清理临时文件，不留半成品。
-        let (temp_path, target_file) = create_md_temp_output(out_dir)?;
-        let write_result = (|| -> Result<()> {
-            let mut out = BufWriter::with_capacity(256 * 1024, target_file);
-            reader
-                .seek(SeekFrom::Start(start))
-                .with_context(|| format!("定位输入失败：{}", input.display()))?;
-            let mut remain = end.saturating_sub(start);
-            while remain > 0 {
-                // U-12：分片复制循环内逐块响应取消/暂停，超大单片也能及时停下
-                control.checkpoint()?;
-                let want = usize::try_from(remain)
-                    .unwrap_or(buffer.len())
-                    .min(buffer.len());
-                let got = reader
-                    .read(&mut buffer[..want])
-                    .with_context(|| format!("读取输入文件失败：{}", input.display()))?;
-                if got == 0 {
-                    bail!("读取输入意外结束：{}", input.display());
+        let item_span = tracing::info_span!("md_split_item", item_index = index + 1);
+        let _item_entered = item_span.enter();
+        let item_started = std::time::Instant::now();
+        let mut item_stage = "callback";
+        tracing::info!(
+            event = "md_split_item_started",
+            bytes = end.saturating_sub(start),
+            "MD分片开始"
+        );
+        let item_result: Result<()> = (|| {
+            control.checkpoint()?;
+            on_event(MdProgress::FileStarted(index + 1, plan.bounds.len()))?;
+            let path = out_dir.join(&names[index]);
+            // M-08/M-11：分片先写本任务独有的临时文件，成功后 rename 到目标。
+            // rename 只替换目录项：确认覆盖的分片若与输入是同一实体的硬链接，
+            // 输入名仍指向原字节（File::create 直接截断会破坏共享 inode 的另一
+            // 个名字，即输入本身）；失败或取消时清理临时文件，不留半成品。
+            item_stage = "output_create";
+            let (temp_path, target_file) = create_md_temp_output(out_dir)?;
+            let write_result = (|| -> Result<()> {
+                let mut out = BufWriter::with_capacity(256 * 1024, target_file);
+                item_stage = "input_seek";
+                reader
+                    .seek(SeekFrom::Start(start))
+                    .with_context(|| format!("定位输入失败：{}", input.display()))?;
+                let mut remain = end.saturating_sub(start);
+                while remain > 0 {
+                    // U-12：分片复制循环内逐块响应取消/暂停，超大单片也能及时停下
+                    control.checkpoint()?;
+                    let want = usize::try_from(remain)
+                        .unwrap_or(buffer.len())
+                        .min(buffer.len());
+                    item_stage = "input_read";
+                    let got = reader
+                        .read(&mut buffer[..want])
+                        .with_context(|| format!("读取输入文件失败：{}", input.display()))?;
+                    if got == 0 {
+                        bail!("读取输入意外结束：{}", input.display());
+                    }
+                    item_stage = "output_write";
+                    out.write_all(&buffer[..got])
+                        .with_context(|| format!("写分片失败：{}", path.display()))?;
+                    written += u64::try_from(got).unwrap_or(0);
+                    remain -= u64::try_from(got).unwrap_or(0);
                 }
-                out.write_all(&buffer[..got])
-                    .with_context(|| format!("写分片失败：{}", path.display()))?;
-                written += u64::try_from(got).unwrap_or(0);
-                remain -= u64::try_from(got).unwrap_or(0);
+                item_stage = "output_flush";
+                out.flush()
+                    .with_context(|| format!("写分片失败（磁盘可能已满）：{}", path.display()))?;
+                drop(out);
+                item_stage = "output_commit";
+                std::fs::rename(&temp_path, &path).with_context(|| {
+                    format!(
+                        "分片落盘失败（{} → {}）：目标可能被占用或权限不足，已清理临时文件",
+                        temp_path.display(),
+                        path.display()
+                    )
+                })
+            })();
+            if let Err(error) = write_result {
+                if let Err(cleanup) = std::fs::remove_file(&temp_path) {
+                    tracing::warn!(
+                        event = "md_cleanup_failed",
+                        stage = "split_rollback",
+                        error_type = "io",
+                        error_code = cleanup.raw_os_error(),
+                        "MD拆分未完成临时文件清理失败"
+                    );
+                }
+                return Err(error);
             }
-            out.flush()
-                .with_context(|| format!("写分片失败（磁盘可能已满）：{}", path.display()))?;
-            drop(out);
-            std::fs::rename(&temp_path, &path).with_context(|| {
-                format!(
-                    "分片落盘失败（{} → {}）：目标可能被占用或权限不足，已清理临时文件",
-                    temp_path.display(),
-                    path.display()
-                )
-            })
+            start = *end;
+            item_stage = "callback";
+            on_event(MdProgress::FileCompleted(index + 1, plan.bounds.len()))?;
+            Ok(())
         })();
-        if let Err(error) = write_result {
-            let _ = std::fs::remove_file(&temp_path);
-            return Err(error);
-        }
-        start = *end;
-        on_event(MdProgress::FileCompleted(index + 1, plan.bounds.len()))?;
+        log_md_item_result("split", item_stage, item_started, &item_result, control);
+        item_result?;
     }
     Ok(written)
 }

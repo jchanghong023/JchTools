@@ -87,26 +87,64 @@ pub fn convert_cancelable(
     deadline: &Deadline,
     cancel: &std::sync::atomic::AtomicBool,
 ) -> Result<DocumentOutput, String> {
-    crate::asset_util::ensure_not_cancelled(cancel)?;
-    if !path.is_file() {
-        return Err(format!("输入文件不存在或不可读：{}", path.display()));
+    let span = crate::logging::operation_span("markdown_document", "convert");
+    let _entered = span.enter();
+    let started = std::time::Instant::now();
+    let mut stage = "input";
+    tracing::info!(
+        event = "document_conversion_started",
+        timeout_ms = deadline.remaining().as_millis() as u64,
+        "文档转换开始"
+    );
+    let result = (|| {
+        crate::asset_util::ensure_not_cancelled(cancel)?;
+        if !path.is_file() {
+            return Err(format!("输入文件不存在或不可读：{}", path.display()));
+        }
+        stage = "runtime_assets";
+        if !runtime_dir.is_dir() {
+            return Err(format!("Xberg 运行目录不存在：{}", runtime_dir.display()));
+        }
+        let executable = runtime_dir.join(if cfg!(windows) { "xberg.exe" } else { "xberg" });
+        if !executable.is_file() {
+            return Err(format!("Xberg 可执行文件不存在：{}", executable.display()));
+        }
+        stage = "extract_request_boundary";
+        let response = crate::xberg_runtime::request(
+            runtime_dir,
+            serde_json::json!({"command": "extract", "path": path}),
+            deadline.remaining(),
+            cancel,
+        )
+        .and_then(crate::xberg_runtime::checked)?;
+        stage = "response_protocol";
+        crate::asset_util::ensure_not_cancelled(cancel)?;
+        parse_document_response(&response, media_dir)
+    })();
+    let elapsed_ms = crate::logging::elapsed_ms(started);
+    match &result {
+        Ok(document) => tracing::info!(
+            event = "document_conversion_completed",
+            elapsed_ms,
+            markdown_bytes = document.markdown.len(),
+            media_count = document.media.len(),
+            warning_count = document.warnings.len(),
+            "文档转换完成"
+        ),
+        Err(_) => tracing::error!(
+            event = "document_conversion_failed",
+            stage,
+            elapsed_ms,
+            cancel_requested = cancel.load(std::sync::atomic::Ordering::Acquire),
+            error_type = if stage == "response_protocol" {
+                "protocol"
+            } else {
+                "document_boundary"
+            },
+            "文档转换失败，详情由上游结构化事件诊断"
+        ),
     }
-    if !runtime_dir.is_dir() {
-        return Err(format!("Xberg 运行目录不存在：{}", runtime_dir.display()));
-    }
-    let executable = runtime_dir.join(if cfg!(windows) { "xberg.exe" } else { "xberg" });
-    if !executable.is_file() {
-        return Err(format!("Xberg 可执行文件不存在：{}", executable.display()));
-    }
-    let response = crate::xberg_runtime::request(
-        runtime_dir,
-        serde_json::json!({"command": "extract", "path": path}),
-        deadline.remaining(),
-        cancel,
-    )
-    .and_then(crate::xberg_runtime::checked)?;
-    crate::asset_util::ensure_not_cancelled(cancel)?;
-    parse_document_response(&response, media_dir)
+    result
 }
 
 /// 解析 `extract` 成功响应（WORKER.md 2026-10-04 口径）：`document` 与
@@ -117,15 +155,37 @@ pub fn convert_cancelable(
 /// [`collect_media`] 的媒体目录前缀。
 fn parse_document_response(response: &Value, media_dir: &str) -> Result<DocumentOutput, String> {
     let Some(document) = response.get("document") else {
+        tracing::error!(
+            event = "document_protocol_failed",
+            stage = "document_field",
+            error_type = "protocol",
+            error_code = "missing_document",
+            "文档转换成功响应缺少document字段"
+        );
         return Err("Xberg 输出协议异常：成功响应缺少 document 字段".to_string());
     };
     if !document.is_object() {
+        tracing::error!(
+            event = "document_protocol_failed",
+            stage = "document_field",
+            error_type = "protocol",
+            error_code = "invalid_document_type",
+            actual_type = value_type_name(document),
+            "文档转换响应document字段类型无效"
+        );
         return Err(format!(
             "Xberg 输出协议异常：document 必须是对象，实际为 {}",
             value_type_name(document)
         ));
     }
     let Some(content) = document.get("content").and_then(Value::as_str) else {
+        tracing::error!(
+            event = "document_protocol_failed",
+            stage = "content_field",
+            error_type = "protocol",
+            error_code = "missing_or_invalid_content",
+            "文档转换响应content字段缺失或类型无效"
+        );
         return Err("Xberg 输出协议异常：document.content 必须是字符串".to_string());
     };
     let mut markdown = content.to_owned();
@@ -155,21 +215,47 @@ fn collect_media(
         return Vec::new();
     };
     let Some(images) = images.as_array() else {
+        tracing::warn!(
+            event = "document_media_invalid",
+            stage = "images_protocol",
+            error_type = "invalid_array",
+            "图片资源类型无效，保留占位引用"
+        );
         warnings.push("图片资源字段类型无效，已保留占位引用".to_string());
         return Vec::new();
     };
     let mut files = Vec::new();
     for image in images {
         let Some(index) = image.get("image_index").and_then(Value::as_u64) else {
+            tracing::warn!(
+                event = "document_media_invalid",
+                stage = "image_index",
+                error_type = "missing_index",
+                "图片资源缺少索引，保留占位引用"
+            );
             warnings.push("图片资源缺少 image_index，已保留占位引用".to_string());
             continue;
         };
         let Some(format) = image.get("format").and_then(Value::as_str) else {
+            tracing::warn!(
+                event = "document_media_invalid",
+                stage = "image_format",
+                image_index = index,
+                error_type = "missing_format",
+                "图片资源缺少格式，保留占位引用"
+            );
             warnings.push(format!("图片 image_{index} 缺少格式，已保留占位引用"));
             continue;
         };
         // 扩展名只接受字母数字：它既进文件名也进引用，异常值宁可保占位不改写。
         if format.is_empty() || !format.bytes().all(|byte| byte.is_ascii_alphanumeric()) {
+            tracing::warn!(
+                event = "document_media_invalid",
+                stage = "image_format",
+                image_index = index,
+                error_type = "invalid_format",
+                "图片资源格式无效，保留占位引用"
+            );
             warnings.push(format!("图片 image_{index} 的格式无效，已保留占位引用"));
             continue;
         }
@@ -186,7 +272,16 @@ fn collect_media(
                 *content = rewritten;
                 files.push(MediaFile { relative, bytes });
             }
-            _ => warnings.push(format!("图片 {source} 缺少有效数据，已保留占位引用")),
+            _ => {
+                tracing::warn!(
+                    event = "document_media_invalid",
+                    stage = "image_data",
+                    image_index = index,
+                    error_type = "missing_or_invalid_data",
+                    "图片资源数据无效，保留占位引用"
+                );
+                warnings.push(format!("图片 {source} 缺少有效数据，已保留占位引用"));
+            }
         }
     }
     files

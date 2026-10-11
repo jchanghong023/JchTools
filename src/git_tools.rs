@@ -60,9 +60,11 @@ impl GitShared {
     }
     fn set_stage(&self, stage: &str) {
         Self::set_text(&self.stage, stage);
+        tracing::info!(event = "git_stage_changed", stage, "Git 任务进入阶段");
     }
     fn set_state(&self, state: &str) {
         Self::set_text(&self.state, state);
+        tracing::info!(event = "git_state_changed", state, "Git 任务状态已更新");
     }
     fn set_current(&self, current: &str) {
         Self::set_text(&self.current, current);
@@ -72,12 +74,26 @@ impl GitShared {
         self.state
             .lock()
             .map(|guard| guard.clone())
-            .unwrap_or_default()
+            .unwrap_or_else(|_| {
+                tracing::error!(
+                    event = "git_shared_read_failed",
+                    stage = "terminal_state",
+                    error_type = "lock_poisoned",
+                    "Git 终态共享锁中毒，保持空状态回退"
+                );
+                String::new()
+            })
     }
     fn set_text(slot: &Mutex<String>, value: &str) {
         if let Ok(mut guard) = slot.lock() {
             guard.clear();
             guard.push_str(value);
+        } else {
+            tracing::error!(
+                event = "git_shared_update_failed",
+                error_type = "lock_poisoned",
+                "Git 共享状态锁中毒，未能更新界面状态"
+            );
         }
     }
 }
@@ -104,8 +120,29 @@ pub struct RepoInfo {
 /// 解析 git 可执行文件绝对路径：优先随包运行组件，再查系统安装和 PATH；
 /// 不依赖当前目录，避免仓库内同名程序劫持。
 pub fn find_git() -> Result<PathBuf> {
-    let executable = std::env::current_exe().ok();
-    find_git_from(executable.as_deref().and_then(Path::parent))
+    let span = crate::logging::operation_span("git", "resolve_executable");
+    let _entered = span.enter();
+    let started = std::time::Instant::now();
+    tracing::info!(event = "git_resolve_started", "开始查找 Git 可执行程序");
+    let executable = std::env::current_exe().map_err(|error| {
+        tracing::warn!(event = "git_executable_location_unavailable", stage = "bundled_lookup", error_type = ?error.kind(), error_code = error.raw_os_error(), "无法定位宿主程序，转为系统 Git 查找");
+        error
+    }).ok();
+    let result = find_git_from(executable.as_deref().and_then(Path::parent));
+    match &result {
+        Ok(_) => tracing::info!(
+            event = "git_resolve_completed",
+            elapsed_ms = crate::logging::elapsed_ms(started),
+            "已找到 Git 可执行程序"
+        ),
+        Err(_) => tracing::error!(
+            event = "git_resolve_failed",
+            error_type = "executable_missing",
+            elapsed_ms = crate::logging::elapsed_ms(started),
+            "未找到 Git 可执行程序"
+        ),
+    }
+    result
 }
 
 fn find_git_from(program_directory: Option<&Path>) -> Result<PathBuf> {
@@ -158,6 +195,29 @@ fn find_git_from(program_directory: Option<&Path>) -> Result<PathBuf> {
     bail!("找不到 git.exe：随包 Git 组件缺失，请重新安装或解包当前 JchTools 发布包")
 }
 
+fn command_stage(args: &[&str]) -> &'static str {
+    let command = if args.first() == Some(&"-c") {
+        args.get(2).copied()
+    } else {
+        args.first().copied()
+    };
+    match command {
+        Some("rev-parse") => "rev_parse",
+        Some("symbolic-ref") => "symbolic_ref",
+        Some("config") => "config",
+        Some("status") => "status",
+        Some("diff") => "diff",
+        Some("diff-tree") => "diff_tree",
+        Some("rev-list") => "rev_list",
+        Some("remote") => "remote",
+        Some("add") => "add",
+        Some("commit") => "commit",
+        Some("push") => "push",
+        Some("fetch") => "fetch",
+        Some("merge") => "merge",
+        _ => "other",
+    }
+}
 /// 运行一条 git 命令并捕获输出（无 shell；禁终端提示防无 tty 挂死；
 /// 认证经 credential manager 等 GUI 途径正常交互）。
 fn run_git(git: &Path, cwd: &Path, args: &[&str]) -> Result<CapturedOutput> {
@@ -173,6 +233,16 @@ fn run_git_with(
     extra_env: &[(&str, &str)],
     remove_env: &[&str],
 ) -> Result<CapturedOutput> {
+    let operation = crate::logging::operation_span("git", "command");
+    let _entered = operation.enter();
+    let stage = command_stage(args);
+    let started = std::time::Instant::now();
+    tracing::info!(
+        event = "git_command_started",
+        stage,
+        timeout_ms = u64::try_from(GIT_TIMEOUT.as_millis()).unwrap_or(u64::MAX),
+        "开始执行 Git 子命令"
+    );
     let mut command = Command::new(git);
     command
         .args(args)
@@ -189,7 +259,36 @@ fn run_git_with(
     for key in remove_env {
         command.env_remove(key);
     }
-    process::run_with_timeout(&mut command, GIT_TIMEOUT)
+    let result = process::run_with_timeout(&mut command, GIT_TIMEOUT);
+    match &result {
+        Ok(out) if out.status.success() => tracing::info!(
+            event = "git_command_completed",
+            stage,
+            exit_code = out.status.code(),
+            stdout_bytes = out.stdout.len(),
+            stderr_bytes = out.stderr.len(),
+            elapsed_ms = crate::logging::elapsed_ms(started),
+            "Git 子命令成功"
+        ),
+        Ok(out) => tracing::warn!(
+            event = "git_command_failed",
+            stage,
+            error_type = "nonzero_exit",
+            exit_code = out.status.code(),
+            stdout_bytes = out.stdout.len(),
+            stderr_bytes = out.stderr.len(),
+            elapsed_ms = crate::logging::elapsed_ms(started),
+            "Git 子命令返回失败状态"
+        ),
+        Err(_) => tracing::warn!(
+            event = "git_command_failed",
+            stage,
+            error_type = "subprocess_error",
+            elapsed_ms = crate::logging::elapsed_ms(started),
+            "Git 子命令执行失败，详见子进程阶段"
+        ),
+    }
+    result
 }
 
 /// P-09：网络类 git 命令（fetch / push）的统一入口。系统代理开启时注入
@@ -219,11 +318,83 @@ fn run_git_network_with_proxy(
     control: &Control,
     proxy: &crate::system_proxy::SystemProxy,
 ) -> Result<CapturedOutput> {
-    control.check_cancelled()?;
+    let operation = crate::logging::operation_span("git", "network");
+    let _entered = operation.enter();
+    let stage = command_stage(args);
+    let started = std::time::Instant::now();
+    tracing::info!(event = "git_network_started", stage, target = %crate::logging::safe_url(target_url), timeout_ms = u64::try_from(GIT_TIMEOUT.as_millis()).unwrap_or(u64::MAX), "开始 Git 网络操作");
+    let result = run_git_network_inner(git, cwd, args, target_url, log, control, proxy);
+    match &result {
+        Ok(out) if out.status.success() => tracing::info!(
+            event = "git_network_completed",
+            stage,
+            exit_code = out.status.code(),
+            elapsed_ms = crate::logging::elapsed_ms(started),
+            "Git 网络操作成功"
+        ),
+        Ok(out) => tracing::warn!(
+            event = "git_network_failed",
+            stage,
+            error_type = "nonzero_exit",
+            exit_code = out.status.code(),
+            elapsed_ms = crate::logging::elapsed_ms(started),
+            "Git 网络操作失败"
+        ),
+        Err(_) => tracing::warn!(
+            event = "git_network_failed",
+            stage,
+            error_type = if control.is_cancelled() {
+                "cancelled"
+            } else {
+                "subprocess_error"
+            },
+            elapsed_ms = crate::logging::elapsed_ms(started),
+            "Git 网络操作未完成"
+        ),
+    }
+    result
+}
+
+fn run_git_network_inner(
+    git: &Path,
+    cwd: &Path,
+    args: &[&str],
+    target_url: &str,
+    log: &dyn Fn(&str),
+    control: &Control,
+    proxy: &crate::system_proxy::SystemProxy,
+) -> Result<CapturedOutput> {
+    control.check_cancelled().map_err(|error| {
+        tracing::warn!(
+            event = "git_network_cancelled",
+            stage = "before_command",
+            "Git 网络操作启动前已停止"
+        );
+        error
+    })?;
     if !proxy.is_enabled() {
+        let _route = tracing::info_span!(
+            "git_network_route",
+            route = "inherited",
+            network_attempt = 1
+        )
+        .entered();
+        tracing::info!(
+            event = "git_proxy_route_selected",
+            route = "inherited",
+            "系统代理关闭，保持既有环境"
+        );
         return run_git(git, cwd, args);
     }
     if !target_url.is_empty() && proxy.bypassed(target_url) {
+        let _route =
+            tracing::info_span!("git_network_route", route = "bypass", network_attempt = 1)
+                .entered();
+        tracing::info!(
+            event = "git_proxy_route_selected",
+            route = "bypass",
+            "目标命中系统代理例外表"
+        );
         // 口径：命中例外表 = 该目标不经**系统代理**；用户在自身环境里显式设置的
         // http_proxy 等变量保持现状、不清除（与 P-09「系统代理关闭时不注入也不
         // 清除」同口径），只有注入/回退路径的直连重试才移除全部代理变量。
@@ -236,7 +407,20 @@ fn run_git_network_with_proxy(
         .iter()
         .map(|(key, value)| (key.as_str(), value.as_str()))
         .collect();
-    let attempt = run_git_with(git, cwd, args, &injected, &[]);
+    let attempt = {
+        let _route = tracing::info_span!(
+            "git_network_route",
+            route = "system_proxy",
+            network_attempt = 1
+        )
+        .entered();
+        tracing::info!(
+            event = "git_proxy_route_selected",
+            route = "system_proxy",
+            "通过系统代理尝试 Git 网络操作"
+        );
+        run_git_with(git, cwd, args, &injected, &[])
+    };
     let needs_direct_retry = match &attempt {
         // 启动失败或超时：超时多因代理黑洞，直连重试值得一次；启动失败
         // 重试代价仅毫秒级，同样无害。
@@ -251,20 +435,65 @@ fn run_git_network_with_proxy(
         }
     };
     if !needs_direct_retry || control.is_cancelled() {
+        tracing::info!(
+            event = "git_proxy_attempt_finished",
+            fallback_needed = needs_direct_retry,
+            cancelled = control.is_cancelled(),
+            "系统代理尝试结束，不再直连回退"
+        );
         return attempt;
     }
     log("经系统代理连接失败，自动回退直连重试");
     // G-15：首个命令自然结束后，停止请求同样禁止启动代理回退。
     if control.is_cancelled() {
+        tracing::warn!(
+            event = "git_proxy_fallback_cancelled",
+            stage = "before_direct",
+            "已收到停止请求，不再启动直连回退"
+        );
         return attempt;
     }
-    run_git_with(
+    let _route = tracing::info_span!(
+        "git_network_route",
+        route = "direct_fallback",
+        network_attempt = 2
+    )
+    .entered();
+    tracing::warn!(
+        event = "git_proxy_fallback_started",
+        stage = command_stage(args),
+        "系统代理连接失败，开始直连回退"
+    );
+    let started = std::time::Instant::now();
+    let result = run_git_with(
         git,
         cwd,
         args,
         &[],
         &crate::system_proxy::GIT_PROXY_ENV_KEYS,
-    )
+    );
+    match &result {
+        Ok(out) if out.status.success() => tracing::info!(
+            event = "git_proxy_fallback_completed",
+            exit_code = out.status.code(),
+            elapsed_ms = crate::logging::elapsed_ms(started),
+            "Git 直连回退成功"
+        ),
+        Ok(out) => tracing::warn!(
+            event = "git_proxy_fallback_failed",
+            error_type = "nonzero_exit",
+            exit_code = out.status.code(),
+            elapsed_ms = crate::logging::elapsed_ms(started),
+            "Git 直连回退返回失败状态"
+        ),
+        Err(_) => tracing::warn!(
+            event = "git_proxy_fallback_failed",
+            error_type = "subprocess_error",
+            elapsed_ms = crate::logging::elapsed_ms(started),
+            "Git 直连回退执行失败"
+        ),
+    }
+    result
 }
 
 fn output_text(bytes: &[u8]) -> String {
@@ -761,6 +990,11 @@ fn try_push(
     let stdout = output_text(&out.stdout);
     let stderr = output_text(&out.stderr);
     if out.status.success() && !stdout.lines().any(|line| line.starts_with('!')) {
+        tracing::info!(
+            event = "git_push_classified",
+            result = "success",
+            "Git 推送结果为成功"
+        );
         // F14/G-14：成功也采集真实输出（push 返回内容），不能只在失败时可见。
         if let Some(entry) = output_log_entry(&stdout, &stderr) {
             log(&format!("git push 输出：\n{entry}"));
@@ -772,8 +1006,18 @@ fn try_push(
         || text.contains("non-fast-forward")
         || text.contains("stale info")
     {
+        tracing::warn!(
+            event = "git_push_classified",
+            result = "need_merge",
+            "Git 推送被远端新提交拒绝，转入自动合并"
+        );
         return PushOutcome::NeedMerge;
     }
+    tracing::warn!(
+        event = "git_push_classified",
+        result = "retryable",
+        "Git 推送失败，允许退避重试"
+    );
     PushOutcome::Retryable(summarize(&stderr, &stdout))
 }
 
@@ -846,6 +1090,11 @@ fn fetch_and_merge(
     let stdout = output_text(&out.stdout);
     let stderr = output_text(&out.stderr);
     if out.status.success() {
+        tracing::info!(
+            event = "git_merge_classified",
+            result = "merged",
+            "Git 自动合并成功"
+        );
         // F14/G-14：merge 成功的真实输出（合并统计）也进日志，且作为独立阶段呈现
         if let Some(entry) = output_log_entry(&stdout, &stderr) {
             (ctx.log)(&format!("git merge 输出：\n{entry}"));
@@ -854,6 +1103,11 @@ fn fetch_and_merge(
     }
     let text = format!("{stderr}{stdout}");
     if text.contains("CONFLICT") {
+        tracing::warn!(
+            event = "git_merge_classified",
+            result = "conflict",
+            "Git 自动合并出现冲突，保留现场"
+        );
         // G-14：冲突时必须把 git merge 的输出写进日志（含 CONFLICT 与冲突文件名），
         // 用户要靠它判断卡在哪一步；不能只挑一边流——CONFLICT 行可能落在 stdout，
         // 也不能只给「失败」级别的信息。多行日志条目与 run() 的仓库信息同款。
@@ -866,12 +1120,30 @@ fn fetch_and_merge(
                     .map(str::to_owned)
                     .collect::<Vec<_>>()
             })
-            .unwrap_or_default();
+            .unwrap_or_else(|_| {
+                tracing::warn!(
+                    event = "git_conflict_paths_unavailable",
+                    stage = "conflict_scan",
+                    error_type = "git_query_failed",
+                    "无法列出冲突路径，按既有行为保留冲突状态"
+                );
+                Vec::new()
+            });
         return MergeOutcome::Conflict(unresolved);
     }
     if text.contains("local changes") || text.contains("would be overwritten by merge") {
+        tracing::error!(
+            event = "git_merge_classified",
+            result = "blocked_dirty",
+            "Git 自动合并被本地变更阻挡"
+        );
         return MergeOutcome::BlockedByDirty(summarize(&stderr, &stdout));
     }
+    tracing::warn!(
+        event = "git_merge_classified",
+        result = "retryable",
+        "Git 自动合并失败，允许退避重试"
+    );
     MergeOutcome::Retryable(summarize(&stderr, &stdout))
 }
 
@@ -913,8 +1185,22 @@ fn verify_single_path_commit(git: &Path, root: &Path, paths: &[String]) -> Resul
     seen.sort();
     expected.sort();
     if seen == expected {
+        tracing::info!(
+            event = "git_commit_verification_completed",
+            stage = "commit_verify",
+            path_count = seen.len(),
+            "Git 单文件提交范围验证成功"
+        );
         return Ok(true);
     }
+    tracing::error!(
+        event = "git_commit_verification_failed",
+        stage = "commit_verify",
+        actual_paths = seen.len(),
+        expected_paths = expected.len(),
+        error_type = "path_scope_mismatch",
+        "Git 提交包含的路径不符合单文件范围"
+    );
     bail!(
         "提交验证失败（G-05）：本次 commit 实际包含 {} 个路径（{:?}），预期只包含 {:?}",
         seen.len(),
@@ -950,6 +1236,14 @@ impl Ctx<'_> {
         self.shared.set_stage("等待重试");
         let wait = backoff_duration(*attempt, self.unit);
         let attempt = *attempt;
+        tracing::warn!(
+            event = "git_retry_wait_started",
+            failed_attempt = attempt,
+            next_attempt = attempt.saturating_add(1),
+            wait_ms = u64::try_from(wait.as_millis()).unwrap_or(u64::MAX),
+            "Git 失败后进入退避等待"
+        );
+        let started = std::time::Instant::now();
         let secs = wait.as_secs_f64();
         (self.log)(&format!(
             "第 {attempt} 次失败：等待 {secs:.1} 秒后重试（G-09 无限重试，可随时停止）"
@@ -958,6 +1252,13 @@ impl Ctx<'_> {
         if ok {
             self.shared.set_stage("重试中");
         }
+        tracing::info!(
+            event = "git_retry_wait_completed",
+            failed_attempt = attempt,
+            result = if ok { "retry" } else { "cancelled" },
+            elapsed_ms = crate::logging::elapsed_ms(started),
+            "Git 退避等待结束"
+        );
         ok
     }
 }
@@ -1037,6 +1338,49 @@ fn process_change(
     upstream_branch: &str,
     ctx: &Ctx<'_>,
 ) -> StepOutcome {
+    let operation = crate::logging::operation_span("git", "file_change");
+    let _entered = operation.enter();
+    let started = std::time::Instant::now();
+    tracing::info!(event = "git_file_started", "开始处理一个 Git 文件变更");
+    let result = process_change_inner(git, root, change, remote, upstream_branch, ctx);
+    match &result {
+        StepOutcome::Done => tracing::info!(
+            event = "git_file_completed",
+            state = "success",
+            elapsed_ms = crate::logging::elapsed_ms(started),
+            "Git 文件变更已提交并推送"
+        ),
+        StepOutcome::Cancelled => tracing::info!(
+            event = "git_file_cancelled",
+            state = "cancelled",
+            elapsed_ms = crate::logging::elapsed_ms(started),
+            "Git 文件变更处理已停止"
+        ),
+        StepOutcome::Conflict(files) => tracing::error!(
+            event = "git_file_failed",
+            state = "conflict",
+            conflict_count = files.len(),
+            elapsed_ms = crate::logging::elapsed_ms(started),
+            "Git 文件变更处理因冲突停止"
+        ),
+        StepOutcome::Fatal(_) => tracing::error!(
+            event = "git_file_failed",
+            state = "failed",
+            elapsed_ms = crate::logging::elapsed_ms(started),
+            "Git 文件变更处理失败，详见关联阶段"
+        ),
+    }
+    result
+}
+
+fn process_change_inner(
+    git: &Path,
+    root: &Path,
+    change: &FileChange,
+    remote: &str,
+    upstream_branch: &str,
+    ctx: &Ctx<'_>,
+) -> StepOutcome {
     let stage_paths = change.stage_paths();
     let commit_paths = change.commit_paths();
     let display = change.display_path();
@@ -1047,6 +1391,12 @@ fn process_change(
     match partial_stage_divergence(git, root, &stage_paths) {
         Ok(false) => {}
         Ok(true) => {
+            tracing::error!(
+                event = "git_file_preflight_failed",
+                stage = "partial_stage",
+                error_type = "staged_divergence",
+                "文件存在部分暂存分叉，停止以保护用户暂存内容"
+            );
             let text = format!(
                 "{display} 处于部分暂存状态受保护：暂存区与工作区对该文件各有一份不同的改动，\
                  继续处理会覆盖用户已暂存的版本（G-06）；该文件计为失败，未执行 add/commit，\
@@ -1056,6 +1406,12 @@ fn process_change(
             return StepOutcome::Fatal(text);
         }
         Err(error) => {
+            tracing::error!(
+                event = "git_file_preflight_failed",
+                stage = "partial_stage",
+                error_type = "git_query_failed",
+                "文件部分暂存检查失败"
+            );
             let text = format!("{error:#}（当前文件：{display}，阶段：add 前预检）");
             (ctx.log)(&text);
             return StepOutcome::Fatal(text);
@@ -1064,6 +1420,8 @@ fn process_change(
     let mut added = false;
     let mut attempt = 0u64;
     loop {
+        let _attempt =
+            tracing::info_span!("git_file_attempt", attempt = attempt.saturating_add(1)).entered();
         if ctx.control.is_cancelled() {
             return StepOutcome::Cancelled;
         }
@@ -1096,6 +1454,11 @@ fn process_change(
                         && deletion_fully_staged(git, root, &commit_paths)
                     {
                         (ctx.log)("该删除已由用户预先暂存（索引已无条目），跳过 add 直接提交");
+                        tracing::info!(
+                            event = "git_add_skipped",
+                            reason = "deletion_already_staged",
+                            "删除已完全暂存，跳过 add"
+                        );
                         added = true;
                         continue;
                     }
@@ -1147,6 +1510,12 @@ fn process_change(
                         || text.contains("Committer identity unknown")
                         || text.contains("Please tell me who you are")
                     {
+                        tracing::error!(
+                            event = "git_commit_rejected",
+                            stage = "commit",
+                            error_type = "identity_missing",
+                            "Git 提交身份未配置，停止任务"
+                        );
                         return StepOutcome::Fatal(
                             "git 未配置提交身份（user.name / user.email），无法提交；请先在仓库或全局配置 git 身份后重新开始任务"
                                 .into(),
@@ -1196,6 +1565,11 @@ fn process_change(
                 return StepOutcome::Cancelled;
             }
             // G-05：验证本次 commit 只包含当前文件变更
+            tracing::info!(
+                event = "git_stage_started",
+                stage = "commit_verify",
+                "开始验证 Git 单文件提交范围"
+            );
             match verify_single_path_commit(git, root, &commit_paths) {
                 Ok(true) => {}
                 Ok(false) => return StepOutcome::Fatal("提交验证未通过".into()),
@@ -1226,6 +1600,8 @@ fn push_with_retry(
     attempt: &mut u64,
 ) -> StepOutcome {
     loop {
+        let _attempt =
+            tracing::info_span!("git_push_attempt", attempt = attempt.saturating_add(1)).entered();
         if ctx.control.is_cancelled() {
             return StepOutcome::Cancelled;
         }
@@ -1245,8 +1621,10 @@ fn push_with_retry(
                     }
                     MergeOutcome::Retryable(reason) => {
                         tracing::warn!(
+                            event = "git_retryable_failure",
                             stage = "fetch_merge",
-                            reason = %reason,
+                            error_type = "fetch_merge_failed",
+                            failed_attempt = *attempt + 1,
                             "Git fetch/merge 失败，进入退避重试"
                         );
                         (ctx.log)(&format!("fetch/merge 失败：{reason}"));
@@ -1258,8 +1636,10 @@ fn push_with_retry(
             }
             PushOutcome::Retryable(reason) => {
                 tracing::warn!(
+                    event = "git_retryable_failure",
                     stage = "push",
-                    reason = %reason,
+                    error_type = "push_failed",
+                    failed_attempt = *attempt + 1,
                     "Git push 失败，进入退避重试"
                 );
                 (ctx.log)(&format!("push 失败：{reason}"));
@@ -1382,17 +1762,54 @@ pub fn run(
     status: &dyn Fn(&str),
     unit: Duration,
 ) -> String {
-    // P-10：Git 工具是关键功能任务，开始/结束统计（含终态与耗时）必须落盘；
-    // 逐次 git 子进程的失败语义由下方重试日志与返回文本承载。
-    tracing::info!(repo = %repo.display(), "Git 任务开始");
+    let operation = crate::logging::operation_span("git", "task");
+    let _entered = operation.enter();
+    tracing::info!(event = "git_task_started", "Git 任务开始");
     let started = std::time::Instant::now();
     let result = run_task(git, repo, control, shared, log, status, unit);
-    tracing::info!(
-        repo = %repo.display(),
-        state = %shared.state(),
-        elapsed_ms = u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX),
-        "Git 任务结束"
-    );
+    let state = shared.state();
+    let total = shared.total.load(Ordering::Relaxed);
+    let done = shared.done.load(Ordering::Relaxed);
+    let last_retry_attempt = shared.retry.load(Ordering::Relaxed);
+    let elapsed_ms = crate::logging::elapsed_ms(started);
+    match state.as_str() {
+        "完成" => tracing::info!(
+            event = "git_task_completed",
+            state = "success",
+            total,
+            done,
+            last_retry_attempt,
+            elapsed_ms,
+            "Git 任务完成"
+        ),
+        "已停止" => tracing::info!(
+            event = "git_task_cancelled",
+            state = "cancelled",
+            total,
+            done,
+            last_retry_attempt,
+            elapsed_ms,
+            "Git 任务已停止"
+        ),
+        "冲突" => tracing::error!(
+            event = "git_task_failed",
+            state = "conflict",
+            total,
+            done,
+            last_retry_attempt,
+            elapsed_ms,
+            "Git 任务因合并冲突停止"
+        ),
+        _ => tracing::error!(
+            event = "git_task_failed",
+            state = "failed",
+            total,
+            done,
+            last_retry_attempt,
+            elapsed_ms,
+            "Git 任务失败，详见关联阶段"
+        ),
+    }
     result
 }
 
@@ -1411,6 +1828,12 @@ fn run_task(
     let info = match inspect(git, repo) {
         Ok(info) => info,
         Err(error) => {
+            tracing::error!(
+                event = "git_preflight_failed",
+                stage = "inspect",
+                error_type = "repository_invalid",
+                "Git 仓库检查失败"
+            );
             let text = format!("{error:#}");
             log(&text);
             shared.set_state("失败");
@@ -1428,12 +1851,29 @@ fn run_task(
     ));
     // F10/P-03/G-08：任务启动预检——在任何写命令之前核实裸 git push 的实际推送
     // 目标确实是 upstream 远端，且没有会改变推送对象/范围的用户配置（只读检查）。
+    tracing::info!(
+        event = "git_stage_started",
+        stage = "push_target_preflight",
+        "开始验证 Git 推送目标策略"
+    );
     if let Err(error) = push_target_preflight(git, repo, &info) {
+        tracing::error!(
+            event = "git_preflight_failed",
+            stage = "push_target",
+            error_type = "target_policy",
+            "Git 推送目标预检失败"
+        );
         let text = format!("{error:#}");
         log(&text);
         shared.set_state("失败");
         return format!("无法开始：{text}");
     }
+    tracing::info!(
+        event = "git_stage_completed",
+        stage = "push_target_preflight",
+        result = "allowed",
+        "Git 推送目标策略验证通过"
+    );
     // P-09：upstream 远端的实际 URL（fetch/push 的代理例外判断）。读取失败或
     // 本地 upstream（remote 为 "."）时留空——此时只走注入/回退路径，不做例外
     // 前置判断（scp 风格等无 scheme 的 URL 解析不出 host，同样保守走代理）。
@@ -1445,8 +1885,21 @@ fn run_task(
         &["remote", "get-url", &info.upstream_remote],
     )
     .map(|text| text.trim().to_owned())
-    .unwrap_or_default();
+    .unwrap_or_else(|_| {
+        tracing::warn!(
+            event = "git_remote_url_unavailable",
+            stage = "remote_url",
+            result = "unknown_target",
+            "无法读取远端地址，保持未知目标代理策略"
+        );
+        String::new()
+    });
     // 中间态处理（G-06/G-11）
+    tracing::info!(
+        event = "git_stage_started",
+        stage = "middle_state",
+        "开始检查 Git 仓库中间态"
+    );
     match middle_state(git, repo) {
         Ok(MiddleState::Clean) => {}
         Ok(MiddleState::Merge { unresolved }) => {
@@ -1505,6 +1958,13 @@ fn run_task(
                     .filter(|line| !line.is_empty() && !in_scope.contains(line))
                     .collect();
                 if !extras.is_empty() {
+                    tracing::error!(
+                        event = "git_merge_scope_rejected",
+                        stage = "merge_scope",
+                        error_type = "unrelated_staged_paths",
+                        extra_path_count = extras.len(),
+                        "合并暂存区存在范围外文件，停止以保护用户内容"
+                    );
                     let text = format!(
                         "仓库存在合并范围之外的已暂存文件（{}）：完成合并提交会把它们一并带入（G-06）。\
                          请先在仓库中取消暂存或另行处理这些文件后重新开始任务",
@@ -1596,6 +2056,13 @@ fn run_task(
             }
         }
         Ok(MiddleState::Other(kind)) => {
+            tracing::error!(
+                event = "git_preflight_failed",
+                stage = "middle_state",
+                error_type = "unfinished_operation",
+                operation_kind = kind,
+                "仓库处于未完成操作，不能安全逐文件提交"
+            );
             let text = format!(
                 "仓库处于未完成的 {kind}，无法安全保证单文件提交；请先手动完成或中止（G-06）"
             );
@@ -1604,12 +2071,24 @@ fn run_task(
             return text;
         }
         Err(error) => {
+            tracing::error!(
+                event = "git_preflight_failed",
+                stage = "middle_state",
+                error_type = "git_query_failed",
+                "Git 仓库中间态检查失败"
+            );
             let text = format!("检查仓库状态失败：{error:#}");
             log(&text);
             shared.set_state("失败");
             return text;
         }
     }
+    tracing::info!(
+        event = "git_stage_completed",
+        stage = "middle_state",
+        result = "ready",
+        "Git 仓库中间态检查及必要续接完成"
+    );
     if control.is_cancelled() {
         shared.set_state("已停止");
         return "任务已停止：尚未开始处理文件".into();
@@ -1620,6 +2099,12 @@ fn run_task(
     let changes = match status_changes(git, &info.root) {
         Ok(changes) => changes,
         Err(error) => {
+            tracing::error!(
+                event = "git_scan_failed",
+                stage = "status_scan",
+                error_type = "status_query_or_parse",
+                "Git 未提交变更扫描失败"
+            );
             let text = format!("{error:#}");
             log(&text);
             shared.set_state("失败");
@@ -1627,6 +2112,11 @@ fn run_task(
         }
     };
     let total = changes.len() as u64;
+    tracing::info!(
+        event = "git_scan_completed",
+        change_count = total,
+        "Git 未提交变更扫描完成"
+    );
     shared.total.store(total, Ordering::Relaxed);
     shared.done.store(0, Ordering::Relaxed);
     log(&format!("待处理变更：{total} 个逻辑文件变更"));

@@ -311,28 +311,73 @@ fn verify_file_inner(
     expected_sha256: &str,
     cancel: Option<&AtomicBool>,
 ) -> Result<(), String> {
-    let metadata = fs::metadata(path).map_err(|error| error.to_string())?;
+    let span = crate::logging::operation_span("asset_validation", "verify_file");
+    let _entered = span.enter();
+    let started = std::time::Instant::now();
+    tracing::info!(
+        event = "asset_verify_started",
+        expected_size,
+        "资产大小与摘要校验开始"
+    );
+    let metadata = fs::metadata(path).map_err(|error| {
+        tracing::info!(event = "asset_verify_failed", stage = "metadata", error_type = ?error.kind(), error_code = ?error.raw_os_error(), elapsed_ms = crate::logging::elapsed_ms(started), "资产文件元数据不可用");
+        error.to_string()
+    })?;
     if !metadata.is_file() {
+        tracing::warn!(
+            event = "asset_verify_failed",
+            stage = "file_type",
+            error_type = "not_regular_file",
+            elapsed_ms = crate::logging::elapsed_ms(started),
+            "资产不是普通文件"
+        );
         return Err("不是普通文件".to_string());
     }
     if metadata.len() != expected_size {
+        tracing::warn!(
+            event = "asset_verify_failed",
+            stage = "size",
+            error_type = "size_mismatch",
+            actual_size = metadata.len(),
+            expected_size,
+            elapsed_ms = crate::logging::elapsed_ms(started),
+            "资产长度不符合清单"
+        );
         return Err(format!("大小 {}，预期 {expected_size}", metadata.len()));
     }
     let actual = sha256_file_inner(path, cancel).map_err(|error| {
         if error.kind() == io::ErrorKind::Interrupted {
+            tracing::info!(event = "asset_verify_cancelled", stage = "hash", elapsed_ms = crate::logging::elapsed_ms(started), "资产摘要校验已取消");
             "用户已取消初始化".to_string()
         } else {
+            tracing::warn!(event = "asset_verify_failed", stage = "hash", error_type = ?error.kind(), error_code = ?error.raw_os_error(), elapsed_ms = crate::logging::elapsed_ms(started), "资产摘要读取失败");
             error.to_string()
         }
     })?;
     if !actual.eq_ignore_ascii_case(expected_sha256) {
+        tracing::warn!(
+            event = "asset_verify_failed",
+            stage = "hash_compare",
+            error_type = "hash_mismatch",
+            elapsed_ms = crate::logging::elapsed_ms(started),
+            "资产摘要不符合清单"
+        );
         return Err(format!("SHA256 {actual}，预期 {expected_sha256}"));
     }
+    tracing::info!(
+        event = "asset_verify_completed",
+        verified_bytes = metadata.len(),
+        elapsed_ms = crate::logging::elapsed_ms(started),
+        "资产大小与摘要校验通过"
+    );
     Ok(())
 }
 
 pub(crate) fn sha256_file_inner(path: &Path, cancel: Option<&AtomicBool>) -> io::Result<String> {
-    let mut file = File::open(path)?;
+    let mut file = File::open(path).map_err(|error| {
+        tracing::warn!(event = "asset_hash_io_failed", stage = "file_open", error_type = ?error.kind(), error_code = ?error.raw_os_error(), "资产哈希文件打开失败");
+        error
+    })?;
     let mut digest = Sha256::new();
     let mut buffer = vec![0_u8; 1024 * 1024];
     loop {
@@ -342,7 +387,10 @@ pub(crate) fn sha256_file_inner(path: &Path, cancel: Option<&AtomicBool>) -> io:
                 "用户已取消初始化",
             ));
         }
-        let read = file.read(&mut buffer)?;
+        let read = file.read(&mut buffer).map_err(|error| {
+            tracing::warn!(event = "asset_hash_io_failed", stage = "file_read", error_type = ?error.kind(), error_code = ?error.raw_os_error(), "资产哈希文件读取失败");
+            error
+        })?;
         if read == 0 {
             break;
         }

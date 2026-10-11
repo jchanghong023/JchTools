@@ -271,6 +271,7 @@ pub struct CancellationHandle {
 impl CancellationHandle {
     pub fn cancel(&self) {
         if self.armed && !self.token.is_cancelled() {
+            tracing::info!(event = "acp_request_cancellation_started", component = "acp_backend", request_id = %self.request_id.0, "ACP 请求所有者发起取消");
             self.token.cancel();
             // 通道已关闭意味着后台已结束；请求 token 仍记录取消，不伪造完成。
             let _result = self.commands.send(BackendCommand::Cancel {
@@ -341,62 +342,80 @@ impl BackendHandle {
     }
 
     pub async fn models(&self) -> Result<Vec<ModelDescriptor>, ServiceError> {
-        let (reply, response) = oneshot::channel();
-        self.commands
-            .send(BackendCommand::Models { reply })
-            .map_err(|_| backend_closed())?;
-        response.await.map_err(|_| backend_closed())?
+        crate::acp_api::diagnostics::async_call("acp_backend", "models", async {
+            let (reply, response) = oneshot::channel();
+            self.commands
+                .send(BackendCommand::Models { reply })
+                .map_err(|_| backend_closed())?;
+            response.await.map_err(|_| backend_closed())?
+        })
+        .await
     }
 
     pub async fn submit(&self, input: PromptInput) -> Result<RequestHandle, ServiceError> {
         let request_id = RequestId::new();
-        let (events, receiver) = mpsc::unbounded_channel();
-        let token = CancellationToken::new();
-        // 在 admission 等待之前安装 guard，HTTP 在首个响应之前断连也可取消。
-        let cancellation = CancellationHandle {
-            request_id: request_id.clone(),
-            commands: self.commands.clone(),
-            token: token.clone(),
-            armed: true,
-        };
-        let (reply, response) = oneshot::channel();
-        self.commands
-            .send(BackendCommand::Submit {
-                request_id,
-                input,
-                events,
-                cancellation: token,
-                reply,
+        use tracing::Instrument;
+        let span = crate::logging::operation_span_with_id("acp_backend", "submit", &request_id.0);
+        tracing::info!(event = "acp_request_submitted", component = "acp_backend", request_id = %request_id.0, message_count = input.messages.len(), "ACP 请求提交后台");
+        crate::acp_api::diagnostics::async_call("acp_backend", "submit", async {
+            let (events, receiver) = mpsc::unbounded_channel();
+            let token = CancellationToken::new();
+            // 在 admission 等待之前安装 guard，HTTP 在首个响应之前断连也可取消。
+            let cancellation = CancellationHandle {
+                request_id: request_id.clone(),
+                commands: self.commands.clone(),
+                token: token.clone(),
+                armed: true,
+            };
+            let (reply, response) = oneshot::channel();
+            self.commands
+                .send(BackendCommand::Submit {
+                    request_id,
+                    input,
+                    events,
+                    cancellation: token,
+                    reply,
+                })
+                .map_err(|_| backend_closed())?;
+            let accepted = response.await.map_err(|_| backend_closed())??;
+            Ok(RequestHandle {
+                accepted,
+                events: receiver,
+                cancellation,
             })
-            .map_err(|_| backend_closed())?;
-        let accepted = response.await.map_err(|_| backend_closed())??;
-        Ok(RequestHandle {
-            accepted,
-            events: receiver,
-            cancellation,
         })
+        .instrument(span)
+        .await
     }
 
     pub fn cancel(&self, request_id: RequestId) -> Result<(), ServiceError> {
-        self.commands
-            .send(BackendCommand::Cancel { request_id })
-            .map_err(|_| backend_closed())
+        crate::acp_api::diagnostics::call("acp_backend", "cancel", || {
+            self.commands
+                .send(BackendCommand::Cancel { request_id })
+                .map_err(|_| backend_closed())
+        })
     }
 
     pub async fn graceful_drain(&self) -> Result<(), ServiceError> {
-        let (reply, response) = oneshot::channel();
-        self.commands
-            .send(BackendCommand::GracefulDrain { reply })
-            .map_err(|_| backend_closed())?;
-        response.await.map_err(|_| backend_closed())?
+        crate::acp_api::diagnostics::async_call("acp_backend", "graceful_drain", async {
+            let (reply, response) = oneshot::channel();
+            self.commands
+                .send(BackendCommand::GracefulDrain { reply })
+                .map_err(|_| backend_closed())?;
+            response.await.map_err(|_| backend_closed())?
+        })
+        .await
     }
 
     pub async fn stop(&self) -> Result<(), ServiceError> {
-        let (reply, response) = oneshot::channel();
-        self.commands
-            .send(BackendCommand::Stop { reply })
-            .map_err(|_| backend_closed())?;
-        response.await.map_err(|_| backend_closed())?
+        crate::acp_api::diagnostics::async_call("acp_backend", "stop", async {
+            let (reply, response) = oneshot::channel();
+            self.commands
+                .send(BackendCommand::Stop { reply })
+                .map_err(|_| backend_closed())?;
+            response.await.map_err(|_| backend_closed())?
+        })
+        .await
     }
 }
 
@@ -442,10 +461,13 @@ pub fn agent_process_channel() -> (
 
 impl AgentProcessHandle {
     pub async fn connect(&self) -> Result<AgentConnection, ServiceError> {
-        let (reply, response) = oneshot::channel();
-        self.commands
-            .send(AgentProcessCommand::Connect { reply })
-            .map_err(|_| backend_closed())?;
-        response.await.map_err(|_| backend_closed())?
+        crate::acp_api::diagnostics::async_call("acp_backend", "connect", async {
+            let (reply, response) = oneshot::channel();
+            self.commands
+                .send(AgentProcessCommand::Connect { reply })
+                .map_err(|_| backend_closed())?;
+            response.await.map_err(|_| backend_closed())?
+        })
+        .await
     }
 }

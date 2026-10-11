@@ -12,6 +12,65 @@ use std::{
 /// 「解压失败」子目录名（X-06）：建在所选目录根下，收纳未能完全解开的原包。
 /// 扫描（两工具）与重跑计数默认排除它（X-07 / C-09）。
 pub const QUARANTINE_DIR_NAME: &str = "解压失败";
+fn observe_archive<T>(
+    operation: &'static str,
+    control: &crate::control::Control,
+    run: impl FnOnce(&mut &'static str) -> Result<T>,
+) -> Result<T> {
+    let span = crate::logging::operation_span("archive", operation);
+    let _entered = span.enter();
+    let started = std::time::Instant::now();
+    let mut stage = "archive_boundary";
+    tracing::info!(
+        event = "archive_operation_started",
+        operation,
+        "归档操作开始"
+    );
+    let result = run(&mut stage);
+    let elapsed_ms = crate::logging::elapsed_ms(started);
+    match &result {
+        Ok(_) => tracing::info!(
+            event = "archive_operation_completed",
+            operation,
+            stage,
+            elapsed_ms,
+            "归档操作完成"
+        ),
+        Err(_) if control.is_cancelled() => tracing::info!(
+            event = "archive_operation_cancelled",
+            operation,
+            stage,
+            elapsed_ms,
+            "归档操作已取消"
+        ),
+        Err(error) => {
+            let io = error
+                .chain()
+                .find_map(|cause| cause.downcast_ref::<std::io::Error>());
+            tracing::error!(
+                event = "archive_operation_failed",
+                operation,
+                stage,
+                elapsed_ms,
+                error_type = if io.is_some() {
+                    "io"
+                } else if stops_extraction(error) {
+                    "extraction_stop"
+                } else {
+                    "archive_boundary"
+                },
+                error_code = io.and_then(std::io::Error::raw_os_error),
+                "归档操作失败"
+            );
+        }
+    }
+    result
+}
+fn member_rejected(code: &'static str, member: &str) {
+    tracing::error!(event = "archive_member_rejected", stage = "member_validation",
+        error_type = "archive_validation", error_code = code,
+        member = %crate::logging::safe_error(member), "归档成员安全校验拒绝");
+}
 
 /// X-04：目录落盘名规划（[`Staging`] 内容里的目录 → 实际落盘相对名的映射）。
 /// 默认落盘名被普通文件、链接或 junction 占用时，为新目录选最小未占用序号
@@ -494,640 +553,723 @@ impl SevenZip {
     /// 否则 total=0 会在合入阶段误报「实际解压量超过压缩包声明」。
     /// 展开比例与空间预检由调用方执行（分母是实际卷集合合计，见 extract_one）。
     fn list(&self, archive: &Path, job: &mut Job) -> Result<Listing> {
-        let mut command = self.command();
-        command
-            .args(["l", "-slt", "-ba", "-sccUTF-8", "-p-", "--"])
-            .arg(archive);
-        let mut fields = BTreeMap::<String, String>::new();
-        let mut total = 0u64;
-        let mut count = 0u64;
-        let mut sizes_complete = true;
-        let mut git_subtrees = HashSet::new();
-        let cfg = job.config.clone();
-        let mut flush = |fields: &mut BTreeMap<String, String>| -> Result<()> {
-            let raw = if let Some(raw) = fields.remove("Path") {
-                raw
-            } else {
-                // 流式格式（bzip2/xz）可能没有 Path；若块内仍有成员元数据则用包名合成。
-                if fields.is_empty() {
-                    return Ok(());
-                }
-                let has_meta = fields.contains_key("Size")
-                    || fields.contains_key("Packed Size")
-                    || fields.contains_key("Folder")
-                    || fields.contains_key("Encrypted")
-                    || fields.contains_key("Attributes");
-                if !has_meta {
+        let control = job.context.control.clone();
+        observe_archive("list_members", &control, |boundary_stage| {
+            *boundary_stage = "member_listing_protocol";
+            let result: Result<Listing> = (|| {
+                let mut command = self.command();
+                command
+                    .args(["l", "-slt", "-ba", "-sccUTF-8", "-p-", "--"])
+                    .arg(archive);
+                let mut fields = BTreeMap::<String, String>::new();
+                let mut total = 0u64;
+                let mut count = 0u64;
+                let mut sizes_complete = true;
+                let mut git_subtrees = HashSet::new();
+                let cfg = job.config.clone();
+                let mut flush = |fields: &mut BTreeMap<String, String>| -> Result<()> {
+                    let raw = if let Some(raw) = fields.remove("Path") {
+                        raw
+                    } else {
+                        // 流式格式（bzip2/xz）可能没有 Path；若块内仍有成员元数据则用包名合成。
+                        if fields.is_empty() {
+                            return Ok(());
+                        }
+                        let has_meta = fields.contains_key("Size")
+                            || fields.contains_key("Packed Size")
+                            || fields.contains_key("Folder")
+                            || fields.contains_key("Encrypted")
+                            || fields.contains_key("Attributes");
+                        if !has_meta {
+                            fields.clear();
+                            return Ok(());
+                        }
+                        stream_member_name(archive)
+                    };
+                    if raw == "." || raw == "./" {
+                        fields.clear();
+                        return Ok(());
+                    }
+                    let relative = fsutil::safe_relative(&raw).map_err(|error| {
+                        member_rejected("invalid_member_path", &raw);
+                        error
+                    })?;
+                    let raw = fsutil::path_string(&relative)?.replace('\\', "/");
+                    if raw.split('/').any(|s| {
+                        s.eq_ignore_ascii_case(".jchtools-work")
+                            || s.eq_ignore_ascii_case("$RECYCLE.BIN")
+                            || s.eq_ignore_ascii_case("System Volume Information")
+                    }) {
+                        member_rejected("protected_member_path", &raw);
+                        bail!("拒绝压缩包中的程序工作区/系统目录条目：{raw}");
+                    }
+                    // X-07：「解压失败」同名普通成员正常落盘，但不继续递归处理其子树；
+                    // 内部链接标记不是用户命名空间，仍在完整预检阶段拒绝。
+                    if raw.split('/').any(|s| s.starts_with(".jchtools-link-")) {
+                        member_rejected("internal_link_marker", &raw);
+                        bail!("拒绝压缩包中的内部链接标记条目：{raw}");
+                    }
+                    // H-06：成员路径里出现 .git 组件时，登记「直接含该 .git 的目录」为整树
+                    // 排除边界。边界必须在合入前从完整条目清单确定：该目录及全部后代整树
+                    // 排除，包括 .git 的兄弟条目——只看落盘结果会把兄弟条目先写进用户目录，
+                    // 而一旦 .git 落盘，该目录在后续扫描里就是永久排除区。
+                    if let Some(prefix) = git_boundary_prefix(&raw) {
+                        git_subtrees.insert(prefix);
+                    }
+                    if fields.get("Encrypted").is_some_and(|s| s == "+") {
+                        member_rejected("encrypted_archive", &raw);
+                        bail!("加密压缩包需要人工处理；没有把密码写入进程命令行");
+                    }
+                    for field in ["Symbolic Link", "Hard Link", "Reparse", "Alternate Stream"] {
+                        if fields.get(field).is_some_and(|s| !s.is_empty() && s != "-") {
+                            member_rejected("link_or_alternate_stream", &raw);
+                            bail!("拒绝带链接、reparse 或备用数据流的压缩包：{raw}");
+                        }
+                    }
+                    let attr = fields.get("Attributes").cloned().unwrap_or_default();
+                    if attr.split_whitespace().any(|s| s.starts_with('l')) {
+                        member_rejected("unix_symlink", &raw);
+                        bail!("拒绝 Unix 符号链接条目：{raw}");
+                    }
+                    let directory = fields.get("Folder").is_some_and(|s| s == "+")
+                        || attr.starts_with('D')
+                        || attr.starts_with('d');
+                    let size = match fields.get("Size") {
+                        // 目录条目一律按 0 计入总量：部分引擎会给目录填非 0 Size，导致合入后 expanded!=total 必败。
+                        _ if directory => 0,
+                        Some(s) if !s.is_empty() => {
+                            s.parse::<u64>().context("压缩包条目大小无效")?
+                        }
+                        _ => {
+                            // 流式单文件包可能不声明展开大小：记为不完整，合入阶段跳过精确大小校验。
+                            sizes_complete = false;
+                            0
+                        }
+                    };
+                    count = count.checked_add(1).context("条目计数溢出")?;
+                    total = total.checked_add(size).context("解压总大小溢出")?;
+                    if count > cfg.max_entries {
+                        member_rejected("entry_limit", &raw);
+                        bail!("压缩包条目数量超过用户设置的上限");
+                    }
+                    // X-08：单包与单文件展开体积不另设固定上限（允许 TB 级资料），
+                    // 仍受条目数、展开比例、空间和文件系统能力约束。
+                    // 条目信息只在此处做限额/危险校验，不再整包入库：archive_members 表此前
+                    // 只写不读（上限百万条目的纯写放大），已随表一起删除。
                     fields.clear();
-                    return Ok(());
-                }
-                stream_member_name(archive)
-            };
-            if raw == "." || raw == "./" {
-                fields.clear();
-                return Ok(());
+                    Ok(())
+                };
+                let ctl = job.context.control.clone();
+                // 条目校验只读不落库（archive_members 已删除），无需事务壳。
+                let listed = process::run(
+                    &mut command,
+                    &ctl,
+                    |err, line| {
+                        if err {
+                            return Ok(());
+                        }
+                        if line.trim().is_empty() {
+                            return flush(&mut fields);
+                        }
+                        if let Some((key, value)) = line.split_once(" = ") {
+                            if fields.len() >= 100 {
+                                tracing::error!(
+                                    event = "archive_protocol_failed",
+                                    stage = "member_metadata",
+                                    error_type = "protocol",
+                                    error_code = "metadata_field_limit",
+                                    "归档成员元数据字段过多"
+                                );
+                                bail!("压缩包元数据异常");
+                            }
+                            if fields.insert(key.to_string(), value.to_string()).is_some() {
+                                tracing::error!(
+                                    event = "archive_protocol_failed",
+                                    stage = "member_metadata",
+                                    error_type = "protocol",
+                                    error_code = "duplicate_metadata_field",
+                                    "归档成员元数据存在重复字段"
+                                );
+                                bail!("压缩包元数据有重复字段，无法安全解析");
+                            }
+                        }
+                        Ok(())
+                    },
+                    || Ok(()),
+                )
+                .and_then(|()| flush(&mut fields));
+                listed?;
+                Ok(Listing {
+                    total,
+                    sizes_complete,
+                    git_subtrees,
+                })
+            })();
+            if let Ok(listing) = &result {
+                tracing::info!(
+                    event = "archive_listing_result",
+                    declared_bytes = listing.total,
+                    sizes_complete = listing.sizes_complete,
+                    git_subtrees = listing.git_subtrees.len(),
+                    "归档成员清单结果"
+                );
             }
-            let relative = fsutil::safe_relative(&raw)?;
-            let raw = fsutil::path_string(&relative)?.replace('\\', "/");
-            if raw.split('/').any(|s| {
-                s.eq_ignore_ascii_case(".jchtools-work")
-                    || s.eq_ignore_ascii_case("$RECYCLE.BIN")
-                    || s.eq_ignore_ascii_case("System Volume Information")
-            }) {
-                bail!("拒绝压缩包中的程序工作区/系统目录条目：{raw}");
-            }
-            // X-07：「解压失败」同名普通成员正常落盘，但不继续递归处理其子树；
-            // 内部链接标记不是用户命名空间，仍在完整预检阶段拒绝。
-            if raw.split('/').any(|s| s.starts_with(".jchtools-link-")) {
-                bail!("拒绝压缩包中的内部链接标记条目：{raw}");
-            }
-            // H-06：成员路径里出现 .git 组件时，登记「直接含该 .git 的目录」为整树
-            // 排除边界。边界必须在合入前从完整条目清单确定：该目录及全部后代整树
-            // 排除，包括 .git 的兄弟条目——只看落盘结果会把兄弟条目先写进用户目录，
-            // 而一旦 .git 落盘，该目录在后续扫描里就是永久排除区。
-            if let Some(prefix) = git_boundary_prefix(&raw) {
-                git_subtrees.insert(prefix);
-            }
-            if fields.get("Encrypted").is_some_and(|s| s == "+") {
-                bail!("加密压缩包需要人工处理；没有把密码写入进程命令行");
-            }
-            for field in ["Symbolic Link", "Hard Link", "Reparse", "Alternate Stream"] {
-                if fields.get(field).is_some_and(|s| !s.is_empty() && s != "-") {
-                    bail!("拒绝带链接、reparse 或备用数据流的压缩包：{raw}");
-                }
-            }
-            let attr = fields.get("Attributes").cloned().unwrap_or_default();
-            if attr.split_whitespace().any(|s| s.starts_with('l')) {
-                bail!("拒绝 Unix 符号链接条目：{raw}");
-            }
-            let directory = fields.get("Folder").is_some_and(|s| s == "+")
-                || attr.starts_with('D')
-                || attr.starts_with('d');
-            let size = match fields.get("Size") {
-                // 目录条目一律按 0 计入总量：部分引擎会给目录填非 0 Size，导致合入后 expanded!=total 必败。
-                _ if directory => 0,
-                Some(s) if !s.is_empty() => s.parse::<u64>().context("压缩包条目大小无效")?,
-                _ => {
-                    // 流式单文件包可能不声明展开大小：记为不完整，合入阶段跳过精确大小校验。
-                    sizes_complete = false;
-                    0
-                }
-            };
-            count = count.checked_add(1).context("条目计数溢出")?;
-            total = total.checked_add(size).context("解压总大小溢出")?;
-            if count > cfg.max_entries {
-                bail!("压缩包条目数量超过用户设置的上限");
-            }
-            // X-08：单包与单文件展开体积不另设固定上限（允许 TB 级资料），
-            // 仍受条目数、展开比例、空间和文件系统能力约束。
-            // 条目信息只在此处做限额/危险校验，不再整包入库：archive_members 表此前
-            // 只写不读（上限百万条目的纯写放大），已随表一起删除。
-            fields.clear();
-            Ok(())
-        };
-        let ctl = job.context.control.clone();
-        // 条目校验只读不落库（archive_members 已删除），无需事务壳。
-        let listed = process::run(
-            &mut command,
-            &ctl,
-            |err, line| {
-                if err {
-                    return Ok(());
-                }
-                if line.trim().is_empty() {
-                    return flush(&mut fields);
-                }
-                if let Some((key, value)) = line.split_once(" = ") {
-                    if fields.len() >= 100 {
-                        bail!("压缩包元数据异常");
-                    }
-                    if fields.insert(key.to_string(), value.to_string()).is_some() {
-                        bail!("压缩包元数据有重复字段，无法安全解析");
-                    }
-                }
-                Ok(())
-            },
-            || Ok(()),
-        )
-        .and_then(|()| flush(&mut fields));
-        listed?;
-        Ok(Listing {
-            total,
-            sizes_complete,
-            git_subtrees,
+            result
         })
     }
     /// 只读取最外层档案头中的格式与实际卷数。注释和后续内层档案头不具有删除授权。
     fn archive_volume_count(&self, archive: &Path, job: &mut Job) -> Result<ArchiveVolumes> {
-        let mut command = self.command();
-        command
-            .args(["l", "-slt", "-sccUTF-8", "-p-", "--"])
-            .arg(archive);
-        let mut in_header = false;
-        let mut header_seen = false;
-        let mut kind = String::new();
-        let mut count = None;
-        let mut multipart = false;
-        let mut new_rar_names = false;
-        let ctl = job.context.control.clone();
-        process::run(
-            &mut command,
-            &ctl,
-            |err, line| {
-                if err {
-                    return Ok(());
-                }
-                let line = line.trim_end();
-                if line == "--" && !header_seen {
-                    header_seen = true;
-                    in_header = true;
-                    return Ok(());
-                }
-                // Comment 是不可信的原样文本；此后绝不重新进入头块，哪怕注释伪造 } / --。
-                if line.starts_with("----") || line.starts_with("Comment =") || line == "{" {
-                    in_header = false;
-                }
-                if !in_header {
-                    return Ok(());
-                }
-                if let Some((key, value)) = line.split_once(" = ") {
-                    match key {
-                        "Type" => value.clone_into(&mut kind),
-                        "Volumes" => {
-                            let value = value.parse::<usize>().context("引擎分卷数量无效")?;
-                            ensure!(value > 0, "引擎分卷数量不能为零");
-                            count = Some(value);
+        let control = job.context.control.clone();
+        observe_archive("volume_count", &control, |boundary_stage| {
+            *boundary_stage = "volume_header_protocol";
+            let result: Result<ArchiveVolumes> = (|| {
+                let mut command = self.command();
+                command
+                    .args(["l", "-slt", "-sccUTF-8", "-p-", "--"])
+                    .arg(archive);
+                let mut in_header = false;
+                let mut header_seen = false;
+                let mut kind = String::new();
+                let mut count = None;
+                let mut multipart = false;
+                let mut new_rar_names = false;
+                let ctl = job.context.control.clone();
+                process::run(
+                    &mut command,
+                    &ctl,
+                    |err, line| {
+                        if err {
+                            return Ok(());
                         }
-                        "Characteristics" => {
-                            new_rar_names =
-                                value.split_whitespace().any(|flag| flag == "NewVolName");
+                        let line = line.trim_end();
+                        if line == "--" && !header_seen {
+                            header_seen = true;
+                            in_header = true;
+                            return Ok(());
                         }
-                        "Volume Index" => multipart = true,
-                        "Multivolume" => multipart |= value == "+",
-                        _ => {}
-                    }
-                }
-                Ok(())
-            },
-            || Ok(()),
-        )
-        .with_context(|| "无法确认压缩包实际分卷")?;
-        ensure!(
-            !multipart || count.is_some(),
-            "引擎未提供可信的实际分卷数量，保留源包"
-        );
-        Ok(ArchiveVolumes {
-            kind,
-            count: count.unwrap_or(1),
-            new_rar_names,
+                        // Comment 是不可信的原样文本；此后绝不重新进入头块，哪怕注释伪造 } / --。
+                        if line.starts_with("----") || line.starts_with("Comment =") || line == "{"
+                        {
+                            in_header = false;
+                        }
+                        if !in_header {
+                            return Ok(());
+                        }
+                        if let Some((key, value)) = line.split_once(" = ") {
+                            match key {
+                                "Type" => value.clone_into(&mut kind),
+                                "Volumes" => {
+                                    let value =
+                                        value.parse::<usize>().context("引擎分卷数量无效")?;
+                                    ensure!(value > 0, "引擎分卷数量不能为零");
+                                    count = Some(value);
+                                }
+                                "Characteristics" => {
+                                    new_rar_names =
+                                        value.split_whitespace().any(|flag| flag == "NewVolName");
+                                }
+                                "Volume Index" => multipart = true,
+                                "Multivolume" => multipart |= value == "+",
+                                _ => {}
+                            }
+                        }
+                        Ok(())
+                    },
+                    || Ok(()),
+                )
+                .with_context(|| "无法确认压缩包实际分卷")?;
+                ensure!(
+                    !multipart || count.is_some(),
+                    "引擎未提供可信的实际分卷数量，保留源包"
+                );
+                Ok(ArchiveVolumes {
+                    kind,
+                    count: count.unwrap_or(1),
+                    new_rar_names,
+                })
+            })();
+            if let Ok(info) = &result {
+                tracing::info!(
+                    event = "archive_volume_result",
+                    count = info.count,
+                    "归档实际分卷数量"
+                );
+            }
+            result
         })
     }
     fn decode_into(&self, job: &Job, archive: &Path, output: &Path, label: &str) -> Result<()> {
-        let mut command = self.command();
-        command
-            .args([
-                "x",
-                "-aou",
-                "-y",
-                "-bb0",
-                "-bsp1",
-                "-bso1",
-                "-bse2",
-                "-sccUTF-8",
-                "-p-",
-                "-mmt=2",
-            ])
-            .arg(format!("-o{}", fsutil::path_string(output)?))
-            .arg("--")
-            .arg(archive);
-        process::run(
-            &mut command,
-            &job.context.control,
-            |err, line| {
-                if !err && line.contains('%') {
-                    job.context
-                        .status(format!("正在解压 {label} · {}", line.trim()));
-                }
-                Ok(())
-            },
-            || {
-                if fs2::available_space(&job.root)
-                    .map_err(|error| StopExtraction(format!("无法查询磁盘可用空间：{error}")))?
-                    < job.config.reserve_bytes
-                {
-                    return Err(StopExtraction(format!(
-                        "磁盘剩余空间低于预留阈值 {}，已停止解压并保留原包",
-                        bytes(job.config.reserve_bytes)
-                    ))
-                    .into());
-                }
-                Ok(())
-            },
-        )
-        .with_context(|| "解压失败（可能已损坏、加密或格式不受支持）")
+        let control = job.context.control.clone();
+        observe_archive("decode", &control, |boundary_stage| {
+            *boundary_stage = "decoder_process_and_space";
+            let mut command = self.command();
+            command
+                .args([
+                    "x",
+                    "-aou",
+                    "-y",
+                    "-bb0",
+                    "-bsp1",
+                    "-bso1",
+                    "-bse2",
+                    "-sccUTF-8",
+                    "-p-",
+                    "-mmt=2",
+                ])
+                .arg(format!("-o{}", fsutil::path_string(output)?))
+                .arg("--")
+                .arg(archive);
+            process::run(
+                &mut command,
+                &job.context.control,
+                |err, line| {
+                    if !err && line.contains('%') {
+                        job.context
+                            .status(format!("正在解压 {label} · {}", line.trim()));
+                    }
+                    Ok(())
+                },
+                || {
+                    if fs2::available_space(&job.root)
+                        .map_err(|error| StopExtraction(format!("无法查询磁盘可用空间：{error}")))?
+                        < job.config.reserve_bytes
+                    {
+                        return Err(StopExtraction(format!(
+                            "磁盘剩余空间低于预留阈值 {}，已停止解压并保留原包",
+                            bytes(job.config.reserve_bytes)
+                        ))
+                        .into());
+                    }
+                    Ok(())
+                },
+            )
+            .with_context(|| "解压失败（可能已损坏、加密或格式不受支持）")
+        })
     }
 
     fn extract_one(&self, job: &mut Job, archive_rel: &str, depth: u32) -> Result<bool> {
-        let archive = fsutil::safe_join(&job.root, archive_rel)?;
-        job.context.status(format!("检查压缩包：{archive_rel}"));
-        // 文件名仅用于发现候选；删除与展开比例只能使用引擎实际打开的连续分卷。
-        // 隔离仍使用独立的可逆宽匹配，不能把该集合复用为永久删除授权。
-        let named = volume_set(&archive)?;
-        x10_volume_precheck(archive_rel, &archive, &named)?;
-        let volumes = if named.paths.len() > 1
-            || matches!(named.scheme, VolumeScheme::RarParts | VolumeScheme::OldRar)
-        {
-            let info = self.archive_volume_count(&archive, job)?;
-            named.scheme.actual_paths(&archive, &info)?
-        } else {
-            named.paths
-        };
-        // X-08：展开比例的分母是实际卷集合合计，不是主体单卷大小。
-        let packed = volume_bytes(&volumes)?;
-        let Listing {
-            total,
-            sizes_complete,
-            mut git_subtrees,
-        } = self.list(&archive, job)?;
-        let composite = composite_stream(&archive);
-        if !composite && skip_git_root(job, archive_rel, &git_subtrees)? {
-            return Ok(false);
-        }
-        check_expansion_space(job, sizes_complete.then_some(total), packed, 0)?;
-        let mut stage = Staging::new(&job.root)?;
-        self.decode_into(job, &archive, &stage.content, archive_rel)?;
-        // -ba 列项可能透过复合流直接列出 tar 成员，首步解码却只生成中间 tar。
-        // 中间物只在本次所有权暂存树内存在，不按最终清单总量校验、不正式落盘入队。
-        let mut decoded = validate_staging(
-            job,
-            &stage.content,
-            (!composite && sizes_complete).then_some(total),
-            packed,
-            0,
-        )?;
-        if composite {
-            let numbered = matches!(named.scheme, VolumeScheme::Numbered);
-            let mut opened_tar = false;
-            // 数字卷可能先重组压缩流；允许这一额外内部步骤，复合包仍只计一层。
-            for layer in 0..=u8::from(numbered) {
-                let mut member = None;
-                for entry in walkdir::WalkDir::new(&stage.content)
-                    .follow_links(false)
-                    .min_depth(1)
-                {
-                    job.context.control.checkpoint()?;
-                    let entry = entry?;
-                    if entry.file_type().is_file() {
-                        ensure!(member.is_none(), "复合压缩流解码结果不是单一内部容器");
-                        member = Some(entry.into_path());
+        let control = job.context.control.clone();
+        observe_archive("extract_one", &control, |boundary_stage| {
+            *boundary_stage = "input_volumes";
+            let archive = fsutil::safe_join(&job.root, archive_rel)?;
+            job.context.status(format!("检查压缩包：{archive_rel}"));
+            // 文件名仅用于发现候选；删除与展开比例只能使用引擎实际打开的连续分卷。
+            // 隔离仍使用独立的可逆宽匹配，不能把该集合复用为永久删除授权。
+            let named = volume_set(&archive)?;
+            x10_volume_precheck(archive_rel, &archive, &named)?;
+            let volumes = if named.paths.len() > 1
+                || matches!(named.scheme, VolumeScheme::RarParts | VolumeScheme::OldRar)
+            {
+                let info = self.archive_volume_count(&archive, job)?;
+                named.scheme.actual_paths(&archive, &info)?
+            } else {
+                named.paths
+            };
+            // X-08：展开比例的分母是实际卷集合合计，不是主体单卷大小。
+            let packed = volume_bytes(&volumes)?;
+            *boundary_stage = "member_listing";
+            let Listing {
+                total,
+                sizes_complete,
+                mut git_subtrees,
+            } = self.list(&archive, job)?;
+            let composite = composite_stream(&archive);
+            if !composite && skip_git_root(job, archive_rel, &git_subtrees)? {
+                return Ok(false);
+            }
+            *boundary_stage = "expansion_space";
+            check_expansion_space(job, sizes_complete.then_some(total), packed, 0)?;
+            *boundary_stage = "staging_create";
+            let mut stage = Staging::new(&job.root)?;
+            *boundary_stage = "decode";
+            self.decode_into(job, &archive, &stage.content, archive_rel)?;
+            // -ba 列项可能透过复合流直接列出 tar 成员，首步解码却只生成中间 tar。
+            // 中间物只在本次所有权暂存树内存在，不按最终清单总量校验、不正式落盘入队。
+            *boundary_stage = "staging_validation";
+            let mut decoded = validate_staging(
+                job,
+                &stage.content,
+                (!composite && sizes_complete).then_some(total),
+                packed,
+                0,
+            )?;
+            if composite {
+                *boundary_stage = "composite_container";
+                let numbered = matches!(named.scheme, VolumeScheme::Numbered);
+                let mut opened_tar = false;
+                // 数字卷可能先重组压缩流；允许这一额外内部步骤，复合包仍只计一层。
+                for layer in 0..=u8::from(numbered) {
+                    let mut member = None;
+                    for entry in walkdir::WalkDir::new(&stage.content)
+                        .follow_links(false)
+                        .min_depth(1)
+                    {
+                        job.context.control.checkpoint()?;
+                        let entry = entry?;
+                        if entry.file_type().is_file() {
+                            ensure!(member.is_none(), "复合压缩流解码结果不是单一内部容器");
+                            member = Some(entry.into_path());
+                        }
+                    }
+                    let member = member.context("复合压缩流缺少内部 tar 容器")?;
+                    let format = self.archive_volume_count(&member, job)?.kind;
+                    let tar = format.eq_ignore_ascii_case("tar");
+                    ensure!(
+                        tar || (numbered && layer == 0 && compressed_stream_kind(&format)),
+                        "复合压缩流未生成合法 tar 容器"
+                    );
+                    let listing = self.list(&member, job)?;
+                    if tar && skip_git_root(job, archive_rel, &listing.git_subtrees)? {
+                        return Ok(false);
+                    }
+                    check_expansion_space(
+                        job,
+                        listing.sizes_complete.then_some(listing.total),
+                        packed,
+                        decoded,
+                    )?;
+                    let next = Staging::new(&job.root)?;
+                    self.decode_into(job, &member, &next.content, archive_rel)?;
+                    decoded = validate_staging(
+                        job,
+                        &next.content,
+                        (tar && listing.sizes_complete).then_some(listing.total),
+                        packed,
+                        decoded,
+                    )?;
+                    stage = next;
+                    if tar {
+                        git_subtrees = listing.git_subtrees;
+                        opened_tar = true;
+                        break;
                     }
                 }
-                let member = member.context("复合压缩流缺少内部 tar 容器")?;
-                let format = self.archive_volume_count(&member, job)?.kind;
-                let tar = format.eq_ignore_ascii_case("tar");
-                ensure!(
-                    tar || (numbered && layer == 0 && compressed_stream_kind(&format)),
-                    "复合压缩流未生成合法 tar 容器"
-                );
-                let listing = self.list(&member, job)?;
-                if tar && skip_git_root(job, archive_rel, &listing.git_subtrees)? {
-                    return Ok(false);
-                }
-                check_expansion_space(
-                    job,
-                    listing.sizes_complete.then_some(listing.total),
-                    packed,
-                    decoded,
-                )?;
-                let next = Staging::new(&job.root)?;
-                self.decode_into(job, &member, &next.content, archive_rel)?;
-                decoded = validate_staging(
-                    job,
-                    &next.content,
-                    (tar && listing.sizes_complete).then_some(listing.total),
-                    packed,
-                    decoded,
-                )?;
-                stage = next;
-                if tar {
-                    git_subtrees = listing.git_subtrees;
-                    opened_tar = true;
-                    break;
-                }
+                ensure!(opened_tar, "复合压缩流缺少完整 tar 解码结果");
             }
-            ensure!(opened_tar, "复合压缩流缺少完整 tar 解码结果");
-        }
-        let mut complete = true;
-        let exclusions = rules::build_exclusions(&job.config.exclusions)?;
-        let mut git = GitBoundaries::default();
-        let base = archive.parent().context("压缩包缺少父目录")?;
-        // X-04：目录落盘名规划。压缩包目录的默认落盘名被普通文件、链接或 junction
-        // 占用时，为新目录选最小未占用序号（`目录 (1)`、`目录 (2)`），该目录及全部
-        // 后代成员整体映射到新目录；既有文件一律不动，与既有普通目录同名则合入。
-        // 规划必须在成员合入前完成：文件成员的父链与空目录条目共用这一映射。
-        let dir_renames = plan_directory_renames(&job.context.control, &stage.content, base)?;
-        let volume_renames = plan_volume_renames(
-            job,
-            &stage.content,
-            base,
-            &dir_renames,
-            &exclusions,
-            &mut git,
-        )?;
-        // One archive is decoded once, including solid archives. Final placement is rename, never copy.
-        let mut nested_members: BTreeMap<PathBuf, BTreeMap<String, PathBuf>> = BTreeMap::new();
-        for entry in walkdir::WalkDir::new(&stage.content)
-            .follow_links(false)
-            .min_depth(1)
-        {
-            job.context.control.checkpoint()?;
-            let entry = entry?;
-            let meta = fs::symlink_metadata(entry.path())?;
-            if fsutil::is_link(&meta) {
-                bail!("解压结果出现链接，已停止合入");
-            }
-            if meta.is_dir() {
-                continue;
-            }
-            if !meta.is_file() {
-                bail!("解压结果含非普通文件");
-            }
-            let relative = fsutil::relative_string(&stage.content, entry.path())?;
-            let mut destination = base.join(fsutil::safe_relative(&relative)?);
-            // X-04：祖先目录因被既有文件占用而整体改名时，成员落盘路径跟随映射。
-            if let Some(mapped) = mapped_entry_rel(&dir_renames, &relative) {
-                destination = base.join(fsutil::safe_relative(&mapped)?);
-            }
-            if let Some(target) = volume_renames.get(&relative) {
-                destination.clone_from(target);
-            }
-            // 压缩包里含有与压缩包同名的成员（gzip 头会记录原始文件名，base.tgz 里就可能是 base.tgz）：
-            // 绝不能覆盖仍在使用的源包。流式包的解压结果其实就是去掉一层压缩后的内容，
-            // 用真实名字（base.tar）落盘并按正常冲突策略处理；其他格式改名放置。
-            // 路径相等判断仅在 Windows 上忽略大小写（NTFS 不区分）；其他平台区分大小写。
-            // 与 Windows 文件系统相同的序数键比较，Unicode lowercase 会错误展开主体。
-            let collides_with_source = if cfg!(windows) {
-                fsutil::fold_rel(&fsutil::path_string(&destination)?)
-                    == fsutil::fold_rel(&fsutil::path_string(&archive)?)
-            } else {
-                destination == archive
-            };
-            if collides_with_source {
-                match stream_stem(&archive).map(|stem| base.join(stem)) {
-                    Some(candidate) => destination = candidate,
-                    None => destination = fsutil::unique_target(&job.root, &destination)?,
-                }
-            }
-            let destination_rel = fsutil::relative_string(&job.root, &destination)?;
-            // 父链仍做整链校验；最终名可能是既有链接 / junction / OneDrive 在线占位，
-            // 那是成员级场景（merge_extracted 改用唯一名落盘），整链校验会让含这类
-            // 成员的整包解压失败。
-            if let Some(split) = destination_rel.rfind('/') {
-                fsutil::safe_join(&job.root, &destination_rel[..split])?;
-            }
-            if inside_git_subtree(&git_subtrees, &relative) {
-                // H-06：该成员所属目录直接含 .git——整树排除（含 .git 的兄弟条目与
-                // 全部后代），不解出；原包按未完全解开处理（X-06），内容仍在原包里。
-                complete = false;
-                job.summary.skipped += 1;
-                job.log(
-                    "解压",
-                    archive_rel,
-                    &destination_rel,
-                    "跳过",
-                    "成员位于含 .git 的目录树内：H-06 整树排除，不解压；原包保留",
-                    meta.len(),
-                )?;
-                continue;
-            }
-            if member_excluded(&exclusions, &destination_rel)
-                || excluded_destination(&job.root, &destination, &job.config, &mut git)?
+            *boundary_stage = "destination_plan";
+            let mut complete = true;
+            let exclusions = rules::build_exclusions(&job.config.exclusions)?;
+            let mut git = GitBoundaries::default();
+            let base = archive.parent().context("压缩包缺少父目录")?;
+            // X-04：目录落盘名规划。压缩包目录的默认落盘名被普通文件、链接或 junction
+            // 占用时，为新目录选最小未占用序号（`目录 (1)`、`目录 (2)`），该目录及全部
+            // 后代成员整体映射到新目录；既有文件一律不动，与既有普通目录同名则合入。
+            // 规划必须在成员合入前完成：文件成员的父链与空目录条目共用这一映射。
+            let dir_renames = plan_directory_renames(&job.context.control, &stage.content, base)?;
+            let volume_renames = plan_volume_renames(
+                job,
+                &stage.content,
+                base,
+                &dir_renames,
+                &exclusions,
+                &mut git,
+            )?;
+            // One archive is decoded once, including solid archives. Final placement is rename, never copy.
+            *boundary_stage = "member_output";
+            let mut nested_members: BTreeMap<PathBuf, BTreeMap<String, PathBuf>> = BTreeMap::new();
+            for entry in walkdir::WalkDir::new(&stage.content)
+                .follow_links(false)
+                .min_depth(1)
             {
-                complete = false;
-                job.summary.skipped += 1;
-                job.log(
-                    "解压",
-                    archive_rel,
-                    &destination_rel,
-                    "跳过",
-                    "目标命中排除/隐藏/系统文件或 Git 目录树设置；原包保留",
-                    meta.len(),
-                )?;
-                continue;
-            }
-            // 非 Windows 上点开头路径组件等价隐藏目录/文件：未开启 include_hidden 时不落盘，
-            // 否则会成为扫描不可见的影子内容（engine 扫描按组件剪枝，去重/归类/清理都看不到）。
-            #[cfg(not(windows))]
-            if !job.config.include_hidden && has_hidden_component(&destination_rel) {
-                complete = false;
-                job.summary.skipped += 1;
-                job.log(
-                    "解压",
-                    archive_rel,
-                    &destination_rel,
-                    "跳过",
-                    "路径含点开头（隐藏）组件，未开启包含隐藏文件；原包保留",
-                    meta.len(),
-                )?;
-                continue;
-            }
-            let (final_path, renamed) =
-                match merge_extracted(&job.root, entry.path(), &destination)? {
-                    MergeOutcome::Placed(path) => (path, false),
-                    MergeOutcome::Renamed(path) => (path, true),
+                job.context.control.checkpoint()?;
+                let entry = entry?;
+                let meta = fs::symlink_metadata(entry.path())?;
+                if fsutil::is_link(&meta) {
+                    bail!("解压结果出现链接，已停止合入");
+                }
+                if meta.is_dir() {
+                    continue;
+                }
+                if !meta.is_file() {
+                    bail!("解压结果含非普通文件");
+                }
+                let relative = fsutil::relative_string(&stage.content, entry.path())?;
+                let mut destination = base.join(fsutil::safe_relative(&relative)?);
+                // X-04：祖先目录因被既有文件占用而整体改名时，成员落盘路径跟随映射。
+                if let Some(mapped) = mapped_entry_rel(&dir_renames, &relative) {
+                    destination = base.join(fsutil::safe_relative(&mapped)?);
+                }
+                if let Some(target) = volume_renames.get(&relative) {
+                    destination.clone_from(target);
+                }
+                // 压缩包里含有与压缩包同名的成员（gzip 头会记录原始文件名，base.tgz 里就可能是 base.tgz）：
+                // 绝不能覆盖仍在使用的源包。流式包的解压结果其实就是去掉一层压缩后的内容，
+                // 用真实名字（base.tar）落盘并按正常冲突策略处理；其他格式改名放置。
+                // 路径相等判断仅在 Windows 上忽略大小写（NTFS 不区分）；其他平台区分大小写。
+                // 与 Windows 文件系统相同的序数键比较，Unicode lowercase 会错误展开主体。
+                let collides_with_source = if cfg!(windows) {
+                    fsutil::fold_rel(&fsutil::path_string(&destination)?)
+                        == fsutil::fold_rel(&fsutil::path_string(&archive)?)
+                } else {
+                    destination == archive
                 };
-            job.summary.extracted += 1;
-            let final_rel = fsutil::relative_string(&job.root, &final_path)?;
-            if !normalize_new_member_attributes(&final_path, &job.config) {
-                // 剥离失败 = 成员带隐藏/系统属性落盘 = 扫描不可见的影子内容。
-                // 与其它影子内容同口径：原包强制保留并留日志（不把用户内容留成盲区）。
-                complete = false;
-                job.log(
-                    "解压",
-                    archive_rel,
-                    &final_rel,
-                    "保留",
-                    "成员已解压，但隐藏/系统属性剥离失败（将成扫描不可见的影子文件）；原包强制保留",
-                    meta.len(),
-                )?;
-            } else if renamed {
-                job.log(
-                    "解压",
-                    archive_rel,
-                    &final_rel,
-                    "成功",
-                    "目标已存在：既有文件保持不动，新成员按 H-07 改名落盘（保留扩展名）",
-                    meta.len(),
-                )?;
-            } else {
-                job.log(
-                    "解压",
-                    archive_rel,
-                    &final_rel,
-                    "成功",
-                    "解压并同卷移动",
-                    meta.len(),
-                )?;
-            }
-            // X-08：继续处理本次解出的嵌套压缩包（层数上限沿用 max_depth）；
-            // H-06：落点若位于 Git 目录树内则不处理该包（该树整树排除，不解压）。
-            if potential_archive_member(
-                final_path
-                    .file_name()
-                    .and_then(|name| name.to_str())
-                    .context("成员文件名无效")?,
-            ) && !git.blocked(&job.root, final_path.parent().context("成员缺少父目录")?)?
-            {
-                let excluded_tree = relative
-                    .split('/')
-                    .chain(final_rel.split('/'))
-                    .any(|component| component.eq_ignore_ascii_case(QUARANTINE_DIR_NAME));
-                let below_root = final_path.parent().is_some_and(|parent| parent != job.root);
-                if excluded_tree || (!job.config.recursive && below_root) {
+                if collides_with_source {
+                    match stream_stem(&archive).map(|stem| base.join(stem)) {
+                        Some(candidate) => destination = candidate,
+                        None => destination = fsutil::unique_target(&job.root, &destination)?,
+                    }
+                }
+                let destination_rel = fsutil::relative_string(&job.root, &destination)?;
+                // 父链仍做整链校验；最终名可能是既有链接 / junction / OneDrive 在线占位，
+                // 那是成员级场景（merge_extracted 改用唯一名落盘），整链校验会让含这类
+                // 成员的整包解压失败。
+                if let Some(split) = destination_rel.rfind('/') {
+                    fsutil::safe_join(&job.root, &destination_rel[..split])?;
+                }
+                if inside_git_subtree(&git_subtrees, &relative) {
+                    // H-06：该成员所属目录直接含 .git——整树排除（含 .git 的兄弟条目与
+                    // 全部后代），不解出；原包按未完全解开处理（X-06），内容仍在原包里。
+                    complete = false;
                     job.summary.skipped += 1;
+                    job.log(
+                        "解压",
+                        archive_rel,
+                        &destination_rel,
+                        "跳过",
+                        "成员位于含 .git 的目录树内：H-06 整树排除，不解压；原包保留",
+                        meta.len(),
+                    )?;
+                    continue;
+                }
+                if member_excluded(&exclusions, &destination_rel)
+                    || excluded_destination(&job.root, &destination, &job.config, &mut git)?
+                {
+                    complete = false;
+                    job.summary.skipped += 1;
+                    job.log(
+                        "解压",
+                        archive_rel,
+                        &destination_rel,
+                        "跳过",
+                        "目标命中排除/隐藏/系统文件或 Git 目录树设置；原包保留",
+                        meta.len(),
+                    )?;
+                    continue;
+                }
+                // 非 Windows 上点开头路径组件等价隐藏目录/文件：未开启 include_hidden 时不落盘，
+                // 否则会成为扫描不可见的影子内容（engine 扫描按组件剪枝，去重/归类/清理都看不到）。
+                #[cfg(not(windows))]
+                if !job.config.include_hidden && has_hidden_component(&destination_rel) {
+                    complete = false;
+                    job.summary.skipped += 1;
+                    job.log(
+                        "解压",
+                        archive_rel,
+                        &destination_rel,
+                        "跳过",
+                        "路径含点开头（隐藏）组件，未开启包含隐藏文件；原包保留",
+                        meta.len(),
+                    )?;
+                    continue;
+                }
+                let (final_path, renamed) =
+                    match merge_extracted(&job.root, entry.path(), &destination)? {
+                        MergeOutcome::Placed(path) => (path, false),
+                        MergeOutcome::Renamed(path) => (path, true),
+                    };
+                job.summary.extracted += 1;
+                let final_rel = fsutil::relative_string(&job.root, &final_path)?;
+                if !normalize_new_member_attributes(&final_path, &job.config) {
+                    // 剥离失败 = 成员带隐藏/系统属性落盘 = 扫描不可见的影子内容。
+                    // 与其它影子内容同口径：原包强制保留并留日志（不把用户内容留成盲区）。
+                    complete = false;
+                    job.log(
+                "解压",
+                archive_rel,
+                &final_rel,
+                "保留",
+                "成员已解压，但隐藏/系统属性剥离失败（将成扫描不可见的影子文件）；原包强制保留",
+                meta.len(),
+            )?;
+                } else if renamed {
                     job.log(
                         "解压",
                         archive_rel,
                         &final_rel,
-                        "跳过",
-                        if excluded_tree {
-                            "新成员已落盘；隔离容器同名目录不继续递归解压"
-                        } else {
-                            "新成员已落盘；未开启递归，不继续处理子目录嵌套包"
-                        },
+                        "成功",
+                        "目标已存在：既有文件保持不动，新成员按 H-07 改名落盘（保留扩展名）",
                         meta.len(),
                     )?;
                 } else {
-                    let parent = final_path.parent().context("成员缺少父目录")?.to_path_buf();
-                    let name = final_path
+                    job.log(
+                        "解压",
+                        archive_rel,
+                        &final_rel,
+                        "成功",
+                        "解压并同卷移动",
+                        meta.len(),
+                    )?;
+                }
+                // X-08：继续处理本次解出的嵌套压缩包（层数上限沿用 max_depth）；
+                // H-06：落点若位于 Git 目录树内则不处理该包（该树整树排除，不解压）。
+                if potential_archive_member(
+                    final_path
                         .file_name()
                         .and_then(|name| name.to_str())
-                        .context("成员文件名无效")?
-                        .to_ascii_lowercase();
-                    nested_members
-                        .entry(parent)
-                        .or_default()
-                        .insert(name, final_path);
-                }
-            }
-        }
-        // Preserve empty archive directories too. Do not merge them before checking for file/dir collisions.
-        for entry in walkdir::WalkDir::new(&stage.content)
-            .follow_links(false)
-            .min_depth(1)
-        {
-            // 取消在目录操作的安全边界生效：已落盘的成员保留，后续空目录不再创建。
-            job.context.control.checkpoint()?;
-            let entry = entry?;
-            if entry.file_type().is_dir() {
-                let rel = fsutil::relative_string(&stage.content, entry.path())?;
-                if inside_git_subtree(&git_subtrees, &rel) {
-                    // H-06：该目录所属子树直接含 .git——整树排除，空目录也不创建。
-                    complete = false;
-                    job.summary.skipped += 1;
-                    job.log(
-                        "解压",
-                        archive_rel,
-                        "",
-                        "跳过",
-                        &format!("空目录位于含 .git 的目录树内（{rel}）：H-06 整树排除，不创建；原包保留"),
-                        0,
-                    )?;
-                    continue;
-                }
-                // X-04：目录自身或祖先被改名时，空目录条目落在新名字下（规划阶段已选好）。
-                let dest_rel = mapped_entry_rel(&dir_renames, &rel).unwrap_or_else(|| rel.clone());
-                let dest = base.join(fsutil::safe_relative(&dest_rel)?);
-                let root_rel = fsutil::relative_string(&job.root, &dest)?;
-                // 父链仍整链校验；最终名可能是链接/junction（如 OneDrive 占位目录）：
-                // 已存在的目录直接合入；链接到目录不会创建也不会被写入（空目录无成员；
-                // 含成员时成员路径的父链校验仍会拒绝），不再让整包解压失败。
-                let dir_parent_rel = match root_rel.rfind('/') {
-                    Some(i) => &root_rel[..i],
-                    None => "",
-                };
-                if !dir_parent_rel.is_empty() {
-                    fsutil::safe_join(&job.root, dir_parent_rel)?;
-                }
-                // 与文件合入/扫描同一过滤口径：X/** 不匹配 bare X，需补 X/ 变体；
-                // 祖先目录命中排除同样跳过（扫描对 X 整树剪枝，子目录不得落盘）。
-                if member_excluded(&exclusions, &root_rel)
-                    || excluded_destination(&job.root, &dest, &job.config, &mut git)?
+                        .context("成员文件名无效")?,
+                ) && !git.blocked(&job.root, final_path.parent().context("成员缺少父目录")?)?
                 {
-                    complete = false;
-                    job.summary.skipped += 1;
-                    job.log(
-                        "解压",
-                        archive_rel,
-                        &root_rel,
-                        "跳过",
-                        "目标命中排除/隐藏/系统文件或 Git 目录树设置；原包保留",
-                        0,
-                    )?;
-                    continue;
-                }
-                // 非 Windows 上点开头目录组件等价隐藏目录：不创建，否则目录连同其中的
-                // 成员都会成为扫描不可见的影子内容（excluded_destination 对尚不存在的
-                // 目标判不出"隐藏"，必须按名称判定）。
-                #[cfg(not(windows))]
-                if !job.config.include_hidden && has_hidden_component(&root_rel) {
-                    complete = false;
-                    job.summary.skipped += 1;
-                    job.log(
-                        "解压",
-                        archive_rel,
-                        &root_rel,
-                        "跳过",
-                        "路径含点开头（隐藏）组件，未开启包含隐藏文件；原包保留",
-                        0,
-                    )?;
-                    continue;
-                }
-                if !dest.try_exists()? {
-                    if let Err(error) = fs::create_dir_all(&dest) {
-                        // 最终名被悬空链接等占用（try_exists 跟随链接判为不存在，但名字已被占）：
-                        // 与文件成员的应急改名同口径降级为跳过，不让整包解压失败。
-                        if fs::symlink_metadata(&dest).is_ok() {
-                            complete = false;
-                            job.summary.skipped += 1;
-                            job.log(
-                                "解压",
-                                archive_rel,
-                                &root_rel,
-                                "跳过",
-                                &format!(
-                                    "空目录名被既有文件/链接占用且无法创建：{error}；原包保留"
-                                ),
-                                0,
-                            )?;
-                            continue;
-                        }
-                        return Err(error)
-                            .with_context(|| format!("无法创建目录 {}", dest.display()));
+                    let excluded_tree = relative
+                        .split('/')
+                        .chain(final_rel.split('/'))
+                        .any(|component| component.eq_ignore_ascii_case(QUARANTINE_DIR_NAME));
+                    let below_root = final_path.parent().is_some_and(|parent| parent != job.root);
+                    if excluded_tree || (!job.config.recursive && below_root) {
+                        job.summary.skipped += 1;
+                        job.log(
+                            "解压",
+                            archive_rel,
+                            &final_rel,
+                            "跳过",
+                            if excluded_tree {
+                                "新成员已落盘；隔离容器同名目录不继续递归解压"
+                            } else {
+                                "新成员已落盘；未开启递归，不继续处理子目录嵌套包"
+                            },
+                            meta.len(),
+                        )?;
+                    } else {
+                        let parent = final_path.parent().context("成员缺少父目录")?.to_path_buf();
+                        let name = final_path
+                            .file_name()
+                            .and_then(|name| name.to_str())
+                            .context("成员文件名无效")?
+                            .to_ascii_lowercase();
+                        nested_members
+                            .entry(parent)
+                            .or_default()
+                            .insert(name, final_path);
                     }
-                } else if !dest.is_dir() {
-                    complete = false;
-                    job.summary.skipped += 1;
-                    job.log(
-                        "解压",
-                        archive_rel,
-                        &root_rel,
-                        "跳过",
-                        "空目录名与目标处已有文件冲突；原包保留",
-                        0,
-                    )?;
                 }
             }
-        }
-        enqueue_nested_groups(job, nested_members, depth + 1)?;
-        // X-05：只有整包解码与校验成功、全部成员（含空目录）完整落盘后，才永久删除
-        // 原包及其实际分卷；失败、部分解开或取消都不启动删除，也不删除仅同主干的文件。
-        if complete {
-            delete_successful_source(job, archive_rel, &volumes)?;
-        }
-        // 「解压成功」包数由调用方按 complete 口径累加：未完全解开的包要计入失败
-        // 并移入「解压失败」（X-06），不得在解压层无条件先记一次成功。
-        Ok(complete)
+            // Preserve empty archive directories too. Do not merge them before checking for file/dir collisions.
+            for entry in walkdir::WalkDir::new(&stage.content)
+                .follow_links(false)
+                .min_depth(1)
+            {
+                // 取消在目录操作的安全边界生效：已落盘的成员保留，后续空目录不再创建。
+                job.context.control.checkpoint()?;
+                let entry = entry?;
+                if entry.file_type().is_dir() {
+                    let rel = fsutil::relative_string(&stage.content, entry.path())?;
+                    if inside_git_subtree(&git_subtrees, &rel) {
+                        // H-06：该目录所属子树直接含 .git——整树排除，空目录也不创建。
+                        complete = false;
+                        job.summary.skipped += 1;
+                        job.log(
+                    "解压",
+                    archive_rel,
+                    "",
+                    "跳过",
+                    &format!("空目录位于含 .git 的目录树内（{rel}）：H-06 整树排除，不创建；原包保留"),
+                    0,
+                )?;
+                        continue;
+                    }
+                    // X-04：目录自身或祖先被改名时，空目录条目落在新名字下（规划阶段已选好）。
+                    let dest_rel =
+                        mapped_entry_rel(&dir_renames, &rel).unwrap_or_else(|| rel.clone());
+                    let dest = base.join(fsutil::safe_relative(&dest_rel)?);
+                    let root_rel = fsutil::relative_string(&job.root, &dest)?;
+                    // 父链仍整链校验；最终名可能是链接/junction（如 OneDrive 占位目录）：
+                    // 已存在的目录直接合入；链接到目录不会创建也不会被写入（空目录无成员；
+                    // 含成员时成员路径的父链校验仍会拒绝），不再让整包解压失败。
+                    let dir_parent_rel = match root_rel.rfind('/') {
+                        Some(i) => &root_rel[..i],
+                        None => "",
+                    };
+                    if !dir_parent_rel.is_empty() {
+                        fsutil::safe_join(&job.root, dir_parent_rel)?;
+                    }
+                    // 与文件合入/扫描同一过滤口径：X/** 不匹配 bare X，需补 X/ 变体；
+                    // 祖先目录命中排除同样跳过（扫描对 X 整树剪枝，子目录不得落盘）。
+                    if member_excluded(&exclusions, &root_rel)
+                        || excluded_destination(&job.root, &dest, &job.config, &mut git)?
+                    {
+                        complete = false;
+                        job.summary.skipped += 1;
+                        job.log(
+                            "解压",
+                            archive_rel,
+                            &root_rel,
+                            "跳过",
+                            "目标命中排除/隐藏/系统文件或 Git 目录树设置；原包保留",
+                            0,
+                        )?;
+                        continue;
+                    }
+                    // 非 Windows 上点开头目录组件等价隐藏目录：不创建，否则目录连同其中的
+                    // 成员都会成为扫描不可见的影子内容（excluded_destination 对尚不存在的
+                    // 目标判不出"隐藏"，必须按名称判定）。
+                    #[cfg(not(windows))]
+                    if !job.config.include_hidden && has_hidden_component(&root_rel) {
+                        complete = false;
+                        job.summary.skipped += 1;
+                        job.log(
+                            "解压",
+                            archive_rel,
+                            &root_rel,
+                            "跳过",
+                            "路径含点开头（隐藏）组件，未开启包含隐藏文件；原包保留",
+                            0,
+                        )?;
+                        continue;
+                    }
+                    if !dest.try_exists()? {
+                        if let Err(error) = fs::create_dir_all(&dest) {
+                            // 最终名被悬空链接等占用（try_exists 跟随链接判为不存在，但名字已被占）：
+                            // 与文件成员的应急改名同口径降级为跳过，不让整包解压失败。
+                            if fs::symlink_metadata(&dest).is_ok() {
+                                complete = false;
+                                job.summary.skipped += 1;
+                                job.log(
+                                    "解压",
+                                    archive_rel,
+                                    &root_rel,
+                                    "跳过",
+                                    &format!(
+                                        "空目录名被既有文件/链接占用且无法创建：{error}；原包保留"
+                                    ),
+                                    0,
+                                )?;
+                                continue;
+                            }
+                            return Err(error)
+                                .with_context(|| format!("无法创建目录 {}", dest.display()));
+                        }
+                    } else if !dest.is_dir() {
+                        complete = false;
+                        job.summary.skipped += 1;
+                        job.log(
+                            "解压",
+                            archive_rel,
+                            &root_rel,
+                            "跳过",
+                            "空目录名与目标处已有文件冲突；原包保留",
+                            0,
+                        )?;
+                    }
+                }
+            }
+            *boundary_stage = "nested_queue";
+            enqueue_nested_groups(job, nested_members, depth + 1)?;
+            // X-05：只有整包解码与校验成功、全部成员（含空目录）完整落盘后，才永久删除
+            // 原包及其实际分卷；失败、部分解开或取消都不启动删除，也不删除仅同主干的文件。
+            if complete {
+                *boundary_stage = "source_delete";
+                delete_successful_source(job, archive_rel, &volumes)?;
+            }
+            // 「解压成功」包数由调用方按 complete 口径累加：未完全解开的包要计入失败
+            // 并移入「解压失败」（X-06），不得在解压层无条件先记一次成功。
+            tracing::info!(
+                event = "archive_extract_result",
+                complete,
+                volume_count = volumes.len(),
+                decoded_bytes = decoded,
+                "归档解压结果"
+            );
+            Ok(complete)
+        })
     }
 }
 /// X-05：完整解开的原包与其实际分卷按永久删除处置（`volumes` 已在解压前按命名口径
@@ -2044,84 +2186,89 @@ fn quarantine_targets(dir: &Path, names: &[(String, String)]) -> Result<Option<V
 /// 失败原因是界面可查的日志字段。移动不走删除接口——隔离不是删除，原包保持可用
 /// 等待人工处理。
 fn quarantine(job: &mut Job, archive_rel: &str, reason: &str) -> Result<()> {
-    let archive = fsutil::safe_join(&job.root, archive_rel)?;
-    // 隔离使用 X-10 精确命名族的在场卷；失败包未必能由引擎确认卷数，
-    // 因此不把成功删源所需的档案头佐证作为可逆隔离的前置条件。
-    let sources = volume_set(&archive)?.paths;
-    let dir = job.root.join(QUARANTINE_DIR_NAME);
-    if !dir.try_exists()? {
-        fs::create_dir_all(&dir)?;
-    }
-    // S-04：容器位置是 junction/符号链接时不得穿透——否则失败包会被移出所选根、
-    // 落到链接目标，且界面上声称的位置与实际不符。链接与普通文件占用都按
-    // 「容器被占用」走隔离失败原地保留路径，但文案区分占用类型（X-06/U-10）。
-    // H-06：容器自身是 Git 项目（.git 目录或文件）时整树保护优先——不得把失败包
-    // 移入 Git 树，也不得在树内腾挪或覆盖；同样按「隔离失败」原地保留。
-    let container_blocked = match fs::symlink_metadata(&dir) {
-        Ok(meta) if fsutil::is_link(&meta) => {
-            Some("目标位置被链接占用，不穿透链接隔离（S-04）".to_string())
+    let control = job.context.control.clone();
+    observe_archive("quarantine", &control, |boundary_stage| {
+        *boundary_stage = "quarantine_move";
+        let archive = fsutil::safe_join(&job.root, archive_rel)?;
+        // 隔离使用 X-10 精确命名族的在场卷；失败包未必能由引擎确认卷数，
+        // 因此不把成功删源所需的档案头佐证作为可逆隔离的前置条件。
+        let sources = volume_set(&archive)?.paths;
+        let dir = job.root.join(QUARANTINE_DIR_NAME);
+        if !dir.try_exists()? {
+            fs::create_dir_all(&dir)?;
         }
-        Ok(meta) if meta.is_dir() => match fsutil::is_git_root(&dir) {
-            Ok(true) => Some(
-                "目标目录是 Git 项目（含 .git），按 H-06 整树保护不把失败包移入其中".to_string(),
-            ),
-            Ok(false) => None,
-            Err(error) => {
-                anyhow::bail!("无法检查「{QUARANTINE_DIR_NAME}」的 Git 边界（{error:#}）")
+        // S-04：容器位置是 junction/符号链接时不得穿透——否则失败包会被移出所选根、
+        // 落到链接目标，且界面上声称的位置与实际不符。链接与普通文件占用都按
+        // 「容器被占用」走隔离失败原地保留路径，但文案区分占用类型（X-06/U-10）。
+        // H-06：容器自身是 Git 项目（.git 目录或文件）时整树保护优先——不得把失败包
+        // 移入 Git 树，也不得在树内腾挪或覆盖；同样按「隔离失败」原地保留。
+        let container_blocked = match fs::symlink_metadata(&dir) {
+            Ok(meta) if fsutil::is_link(&meta) => {
+                Some("目标位置被链接占用，不穿透链接隔离（S-04）".to_string())
             }
-        },
-        _ => Some("目标位置被同名文件占用".to_string()),
-    };
-    if let Some(reason) = container_blocked {
-        anyhow::bail!(
-            "无法建立「{QUARANTINE_DIR_NAME}」子目录：{}（{reason}）",
-            dir.display()
-        );
-    }
-    // 只规划实际仍存在的源项（缺失卷不阻止整组隔离，与既有语义一致）。
-    let mut present: Vec<PathBuf> = Vec::new();
-    let mut names: Vec<(String, String)> = Vec::new();
-    for source in &sources {
-        if !source.try_exists()? {
-            continue;
+            Ok(meta) if meta.is_dir() => match fsutil::is_git_root(&dir) {
+                Ok(true) => Some(
+                    "目标目录是 Git 项目（含 .git），按 H-06 整树保护不把失败包移入其中"
+                        .to_string(),
+                ),
+                Ok(false) => None,
+                Err(error) => {
+                    anyhow::bail!("无法检查「{QUARANTINE_DIR_NAME}」的 Git 边界（{error:#}）")
+                }
+            },
+            _ => Some("目标位置被同名文件占用".to_string()),
+        };
+        if let Some(reason) = container_blocked {
+            anyhow::bail!(
+                "无法建立「{QUARANTINE_DIR_NAME}」子目录：{}（{reason}）",
+                dir.display()
+            );
         }
-        let name = source
-            .file_name()
-            .and_then(|name| name.to_str())
-            .context("无效压缩包名称")?
-            .to_string();
-        let (stem, ext) = fsutil::split_compound_name(&name);
-        names.push((stem.to_string(), ext.to_string()));
-        present.push(source.clone());
-    }
-    let Some(targets) = quarantine_targets(&dir, &names)? else {
-        bail!(
-            "无法为隔离卷集分配整组不冲突的目标名：{}",
-            archive.display()
-        );
-    };
-    for (source, target) in present.into_iter().zip(targets) {
-        // 移动仍逐卷进行：某卷移动失败时保留未移动源项并如实上抛（X-06），
-        // 不宣称整包隔离成功。
-        let source_rel = fsutil::relative_string(&job.root, &source)?;
-        let size = fsutil::snapshot(&source).map_or(0, |s| s.size);
-        fsutil::rename_noreplace(&source, &target)?;
-        let target_rel = fsutil::relative_string(&job.root, &target)?;
-        job.summary.archives_quarantined += 1;
-        // 移走后该路径的扫描记录不再代表磁盘现状，标为 inactive（任务库记录与磁盘保持一致）。
-        job.db
-            .conn
-            .execute("UPDATE files SET active=0 WHERE rel=?1", [&source_rel])?;
-        job.log(
-            "解压",
-            &source_rel,
-            &target_rel,
-            "移入解压失败",
-            reason,
-            size,
-        )?;
-    }
-    Ok(())
+        // 只规划实际仍存在的源项（缺失卷不阻止整组隔离，与既有语义一致）。
+        let mut present: Vec<PathBuf> = Vec::new();
+        let mut names: Vec<(String, String)> = Vec::new();
+        for source in &sources {
+            if !source.try_exists()? {
+                continue;
+            }
+            let name = source
+                .file_name()
+                .and_then(|name| name.to_str())
+                .context("无效压缩包名称")?
+                .to_string();
+            let (stem, ext) = fsutil::split_compound_name(&name);
+            names.push((stem.to_string(), ext.to_string()));
+            present.push(source.clone());
+        }
+        let Some(targets) = quarantine_targets(&dir, &names)? else {
+            bail!(
+                "无法为隔离卷集分配整组不冲突的目标名：{}",
+                archive.display()
+            );
+        };
+        for (source, target) in present.into_iter().zip(targets) {
+            // 移动仍逐卷进行：某卷移动失败时保留未移动源项并如实上抛（X-06），
+            // 不宣称整包隔离成功。
+            let source_rel = fsutil::relative_string(&job.root, &source)?;
+            let size = fsutil::snapshot(&source).map_or(0, |s| s.size);
+            fsutil::rename_noreplace(&source, &target)?;
+            let target_rel = fsutil::relative_string(&job.root, &target)?;
+            job.summary.archives_quarantined += 1;
+            // 移走后该路径的扫描记录不再代表磁盘现状，标为 inactive（任务库记录与磁盘保持一致）。
+            job.db
+                .conn
+                .execute("UPDATE files SET active=0 WHERE rel=?1", [&source_rel])?;
+            job.log(
+                "解压",
+                &source_rel,
+                &target_rel,
+                "移入解压失败",
+                reason,
+                size,
+            )?;
+        }
+        Ok(())
+    })
 }
 /// 单个条目合入结果：冲突（目标已存在）不淘汰、不询问，只给新成员改名。
 enum MergeOutcome {
@@ -2193,175 +2340,231 @@ pub fn enqueue(job: &Job, archive: &Path, depth: u32) -> Result<()> {
     tracing::instrument(target = "perf", name = "extract_batch", skip_all)
 )]
 pub fn extract_queued(job: &mut Job, resolve_engine: impl Fn() -> Result<SevenZip>) -> Result<()> {
-    // 引擎懒解析（E-05/X-06 边界）：缺首卷/缺入口/歧义组/缺主包的整组隔离是
-    // 纯文件系统判定，不需要 7-Zip 引擎，先于引擎解析执行——无引擎宿主上这些
-    // 组仍按 X-06 隔离（回归 CI run 37131023474：引擎解析前置曾把缺首卷组整体
-    // 报错）。首个通过预检的真实解压包出现时才解析引擎；解析失败按 E-05 明确
-    // 报错并终止任务，不得把这些包静默跳过或全部隔离。
-    let mut engine: Option<SevenZip> = None;
-    loop {
-        job.context.control.checkpoint()?;
-        let next: Option<(i64, String, u32, String)> = job
-            .db
-            .conn
-            .query_row(
-                "SELECT id,rel,depth,fingerprint FROM archives WHERE state='pending' ORDER BY depth,id LIMIT 1",
-                [],
-                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)),
-            )
-            .optional()?;
-        let Some((id, relative, depth, stored_fingerprint)) = next else {
-            break;
-        };
-        // 指纹复核：排队期间该路径可能已被删除或替换（X-04 之后成员一律改名落盘，
-        // 不会再顶替既有路径，所以这里只剩外部改动这一种可能）。与 enqueue 同公式
-        // 重算指纹，不一致即「原包已不在原位」，清掉残留 pending 行并如实记一条跳过：
-        // 不得把已改动的路径当原包解压，也不得虚报失败计数或隔离它。
-        let Ok(path) = fsutil::safe_join(&job.root, &relative) else {
-            job.db
-                .conn
-                .execute("DELETE FROM archives WHERE id=?1", [id])?;
-            continue;
-        };
-        // 路径已不存在或此刻无法读取：残留行一并清除。
-        let superseded = if let Ok(snapshot) = fsutil::snapshot(&path) {
-            let fingerprint = format!(
-                "{}:{}:{}:{}",
-                relative, snapshot.size, snapshot.modified_ns, snapshot.identity
-            );
-            fingerprint != stored_fingerprint
-        } else {
-            true
-        };
-        if superseded {
-            job.db
-                .conn
-                .execute("DELETE FROM archives WHERE id=?1", [id])?;
-            job.summary.skipped += 1;
-            job.log(
-                "解压",
-                &relative,
-                "",
-                "跳过",
-                "扫描入队后无法确认原包仍在原位（已被删除、改写或此刻不可读），本次不再处理",
-                0,
-            )?;
-            continue;
-        }
-        job.db
-            .conn
-            .execute("UPDATE archives SET state='running' WHERE id=?1", [id])?;
-        let result = if depth >= job.config.max_depth {
-            Err(anyhow::anyhow!("达到最大嵌套层数（X-08 防护上限）"))
-        } else if let Err(reason) =
-            volume_set(&path).and_then(|named| x10_volume_precheck(&relative, &path, &named))
-        {
-            Err(reason)
-        } else {
-            if engine.is_none() {
-                engine = Some(resolve_engine()?);
-            }
-            // 上一分支保证引擎已解析；此处拿不到引用只能说明内部状态被破坏，
-            // 按 E-05 口径报错而不是 panic。
-            let Some(active) = engine.as_ref() else {
-                anyhow::bail!("共享 7-Zip 引擎未就绪（E-05：无引擎时解压必须明确报错并停止）");
+    let control = job.context.control.clone();
+    observe_archive("extract_queue", &control, |boundary_stage| {
+        *boundary_stage = "queue_database"; // 引擎懒解析（E-05/X-06 边界）：缺首卷/缺入口/歧义组/缺主包的整组隔离是
+                                            // 纯文件系统判定，不需要 7-Zip 引擎，先于引擎解析执行——无引擎宿主上这些
+                                            // 组仍按 X-06 隔离（回归 CI run 37131023474：引擎解析前置曾把缺首卷组整体
+                                            // 报错）。首个通过预检的真实解压包出现时才解析引擎；解析失败按 E-05 明确
+                                            // 报错并终止任务，不得把这些包静默跳过或全部隔离。
+        let mut engine: Option<SevenZip> = None;
+        loop {
+            *boundary_stage = "queue_database";
+            job.context.control.checkpoint()?;
+            let next: Option<(i64, String, u32, String)> = job
+        .db
+        .conn
+        .query_row(
+            "SELECT id,rel,depth,fingerprint FROM archives WHERE state='pending' ORDER BY depth,id LIMIT 1",
+            [],
+            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)),
+        )
+        .optional()?;
+            let Some((id, relative, depth, stored_fingerprint)) = next else {
+                break;
             };
-            active.extract_one(job, &relative, depth)
-        };
-        match result {
-            Ok(true) => {
+            let item_span = tracing::info_span!("archive_item", archive_id = id, depth,
+        source = %crate::logging::safe_error(&relative));
+            let _item_entered = item_span.enter();
+            let item_started = std::time::Instant::now();
+            tracing::info!(event = "archive_item_started", "压缩包处理开始");
+            // 指纹复核：排队期间该路径可能已被删除或替换（X-04 之后成员一律改名落盘，
+            // 不会再顶替既有路径，所以这里只剩外部改动这一种可能）。与 enqueue 同公式
+            // 重算指纹，不一致即「原包已不在原位」，清掉残留 pending 行并如实记一条跳过：
+            // 不得把已改动的路径当原包解压，也不得虚报失败计数或隔离它。
+            let Ok(path) = fsutil::safe_join(&job.root, &relative) else {
+                tracing::warn!(
+                    event = "archive_item_skipped",
+                    stage = "input_path",
+                    elapsed_ms = crate::logging::elapsed_ms(item_started),
+                    "原包路径不可安全访问，清除队列行"
+                );
                 job.db
                     .conn
-                    .execute("UPDATE archives SET state='done' WHERE id=?1", [id])?;
-                // X-05/X-07：完全解开的包（含全部分卷）已在 extract_one 尾部永久删除，
-                // 删除失败会以任务级中止上抛、走不到这里；同次任务里该包已标 done，
-                // 不会再入队（X-07/H-04）。
-                job.summary.archives_ok += 1;
+                    .execute("DELETE FROM archives WHERE id=?1", [id])?;
+                continue;
+            };
+            // 路径已不存在或此刻无法读取：残留行一并清除。
+            let superseded = if let Ok(snapshot) = fsutil::snapshot(&path) {
+                let fingerprint = format!(
+                    "{}:{}:{}:{}",
+                    relative, snapshot.size, snapshot.modified_ns, snapshot.identity
+                );
+                fingerprint != stored_fingerprint
+            } else {
+                true
+            };
+            if superseded {
+                job.db
+                    .conn
+                    .execute("DELETE FROM archives WHERE id=?1", [id])?;
+                job.summary.skipped += 1;
                 job.log(
                     "解压",
                     &relative,
                     "",
-                    "成功",
-                    "已完全解开；原包与分卷按 X-05 永久删除",
+                    "跳过",
+                    "扫描入队后无法确认原包仍在原位（已被删除、改写或此刻不可读），本次不再处理",
                     0,
                 )?;
+                tracing::warn!(
+                    event = "archive_item_skipped",
+                    stage = "input_fingerprint",
+                    elapsed_ms = crate::logging::elapsed_ms(item_started),
+                    "无法确认原包仍在原位，跳过处理"
+                );
+                continue;
             }
-            Ok(false) => {
-                job.db
-                    .conn
-                    .execute("UPDATE archives SET state='done' WHERE id=?1", [id])?;
-                job.summary.archives_failed += 1;
-                job.log(
-                    "解压",
-                    &relative,
-                    "",
-                    "未完全解开",
-                    "有成员被跳过或未落盘（排除规则/Git 目录树/目标冲突无法落位）；原包保留",
-                    0,
-                )?;
-                // X-06：隔离自身失败（容器被占用、无法分配目标名或某卷移动失败）时，
-                // 该失败包原地保留并记录隔离失败原因与未移动源项位置，其余包可继续。
-                if let Err(error) = quarantine(
-                    job,
-                    &relative,
-                    "未能完全解开：有成员被跳过、被排除规则命中或位于 Git 目录树内",
-                ) {
-                    job.summary.errors += 1;
+            job.db
+                .conn
+                .execute("UPDATE archives SET state='running' WHERE id=?1", [id])?;
+            *boundary_stage = "volume_precheck";
+            let result = if depth >= job.config.max_depth {
+                Err(anyhow::anyhow!("达到最大嵌套层数（X-08 防护上限）"))
+            } else if let Err(reason) =
+                volume_set(&path).and_then(|named| x10_volume_precheck(&relative, &path, &named))
+            {
+                Err(reason)
+            } else {
+                if engine.is_none() {
+                    *boundary_stage = "engine_resolution";
+                    engine = Some(observe_archive("engine_resolution", &control, |stage| {
+                        *stage = "engine_assets";
+                        resolve_engine()
+                    })?);
+                }
+                // 上一分支保证引擎已解析；此处拿不到引用只能说明内部状态被破坏，
+                // 按 E-05 口径报错而不是 panic。
+                let Some(active) = engine.as_ref() else {
+                    anyhow::bail!("共享 7-Zip 引擎未就绪（E-05：无引擎时解压必须明确报错并停止）");
+                };
+                *boundary_stage = "extract_one";
+                active.extract_one(job, &relative, depth)
+            };
+            match &result {
+                Ok(complete) => tracing::info!(
+                    event = "archive_item_decoded",
+                    complete,
+                    elapsed_ms = crate::logging::elapsed_ms(item_started),
+                    "压缩包解压阶段结束"
+                ),
+                Err(_) if job.context.control.is_cancelled() => tracing::info!(
+                    event = "archive_item_cancelled",
+                    elapsed_ms = crate::logging::elapsed_ms(item_started),
+                    "压缩包处理已取消"
+                ),
+                Err(_) => tracing::error!(
+                    event = "archive_item_failed",
+                    stage = *boundary_stage,
+                    error_type = "archive_boundary",
+                    elapsed_ms = crate::logging::elapsed_ms(item_started),
+                    "压缩包处理失败"
+                ),
+            }
+            *boundary_stage = "settle_or_quarantine";
+            match result {
+                Ok(true) => {
+                    job.db
+                        .conn
+                        .execute("UPDATE archives SET state='done' WHERE id=?1", [id])?;
+                    // X-05/X-07：完全解开的包（含全部分卷）已在 extract_one 尾部永久删除，
+                    // 删除失败会以任务级中止上抛、走不到这里；同次任务里该包已标 done，
+                    // 不会再入队（X-07/H-04）。
+                    job.summary.archives_ok += 1;
                     job.log(
                         "解压",
                         &relative,
                         "",
-                        "隔离失败",
-                        &format!("原包原地保留，未移动的源项仍在原位置：{error:#}"),
+                        "成功",
+                        "已完全解开；原包与分卷按 X-05 永久删除",
                         0,
                     )?;
-                    job.context.control.check_cancelled()?;
                 }
-            }
-            Err(error) => {
-                // 归档行先标 failed，避免永久停在 running。
-                job.db
-                    .conn
-                    .execute("UPDATE archives SET state='failed' WHERE id=?1", [id])?;
-                // 用户主动取消：上抛取消错误，不隔离、不累加失败计数、不写失败日志
-                // （与 apply_with 的取消口径一致）。单出口，避免双写 failed/误计失败。
-                if job.context.control.is_cancelled() {
-                    job.context.control.check_cancelled()?;
-                }
-                // X-06/X-08：空间不足不是包损坏——保留源包并停止整个解压任务，
-                // 不隔离本包，也不继续批量隔离后续正常包。
-                if stops_extraction(&error) {
-                    job.summary.errors += 1;
-                    return Err(error);
-                }
-                job.summary.archives_failed += 1;
-                job.summary.errors += 1;
-                job.log("解压", &relative, "", "失败", &format!("{error:#}"), 0)?;
-                // X-06：解压出错（损坏/加密/不支持/触上限）的原包移入「解压失败」。
-                // 隔离自身失败时记录隔离失败原因与原包位置，不中止其余包的处理。
-                if let Err(quarantine_error) =
-                    quarantine(job, &relative, &format!("解压失败：{error:#}"))
-                {
+                Ok(false) => {
+                    job.db
+                        .conn
+                        .execute("UPDATE archives SET state='done' WHERE id=?1", [id])?;
+                    job.summary.archives_failed += 1;
                     job.log(
                         "解压",
                         &relative,
                         "",
-                        "隔离失败",
-                        &format!("原包原地保留，未移动的源项仍在原位置：{quarantine_error:#}"),
+                        "未完全解开",
+                        "有成员被跳过或未落盘（排除规则/Git 目录树/目标冲突无法落位）；原包保留",
                         0,
                     )?;
+                    // X-06：隔离自身失败（容器被占用、无法分配目标名或某卷移动失败）时，
+                    // 该失败包原地保留并记录隔离失败原因与未移动源项位置，其余包可继续。
+                    if let Err(error) = quarantine(
+                        job,
+                        &relative,
+                        "未能完全解开：有成员被跳过、被排除规则命中或位于 Git 目录树内",
+                    ) {
+                        job.summary.errors += 1;
+                        job.log(
+                            "解压",
+                            &relative,
+                            "",
+                            "隔离失败",
+                            &format!("原包原地保留，未移动的源项仍在原位置：{error:#}"),
+                            0,
+                        )?;
+                        job.context.control.check_cancelled()?;
+                    }
                 }
-                job.context.control.check_cancelled()?;
+                Err(error) => {
+                    // 归档行先标 failed，避免永久停在 running。
+                    job.db
+                        .conn
+                        .execute("UPDATE archives SET state='failed' WHERE id=?1", [id])?;
+                    // 用户主动取消：上抛取消错误，不隔离、不累加失败计数、不写失败日志
+                    // （与 apply_with 的取消口径一致）。单出口，避免双写 failed/误计失败。
+                    if job.context.control.is_cancelled() {
+                        job.context.control.check_cancelled()?;
+                    }
+                    // X-06/X-08：空间不足不是包损坏——保留源包并停止整个解压任务，
+                    // 不隔离本包，也不继续批量隔离后续正常包。
+                    if stops_extraction(&error) {
+                        job.summary.errors += 1;
+                        return Err(error);
+                    }
+                    job.summary.archives_failed += 1;
+                    job.summary.errors += 1;
+                    job.log("解压", &relative, "", "失败", &format!("{error:#}"), 0)?;
+                    // X-06：解压出错（损坏/加密/不支持/触上限）的原包移入「解压失败」。
+                    // 隔离自身失败时记录隔离失败原因与原包位置，不中止其余包的处理。
+                    if let Err(quarantine_error) =
+                        quarantine(job, &relative, &format!("解压失败：{error:#}"))
+                    {
+                        job.log(
+                            "解压",
+                            &relative,
+                            "",
+                            "隔离失败",
+                            &format!("原包原地保留，未移动的源项仍在原位置：{quarantine_error:#}"),
+                            0,
+                        )?;
+                    }
+                    job.context.control.check_cancelled()?;
+                }
             }
+            tracing::info!(
+                event = "archive_item_completed",
+                elapsed_ms = crate::logging::elapsed_ms(item_started),
+                total_ok = job.summary.archives_ok,
+                total_failed = job.summary.archives_failed,
+                errors = job.summary.errors,
+                "压缩包处理及处置结束"
+            );
+            // U-03：解压页的实时计数按「已处理的包」统计（成败都算处理过）；与目录整理的
+            // 计划项计数互不影响（两工具各自持有独立 Control）。
+            job.context
+                .control
+                .completed
+                .fetch_add(1, Ordering::Relaxed);
         }
-        // U-03：解压页的实时计数按「已处理的包」统计（成败都算处理过）；与目录整理的
-        // 计划项计数互不影响（两工具各自持有独立 Control）。
-        job.context
-            .control
-            .completed
-            .fetch_add(1, Ordering::Relaxed);
-    }
-    Ok(())
+        Ok(())
+    })
 }
 struct Staging {
     directory: PathBuf,
@@ -2393,9 +2596,29 @@ impl Drop for Staging {
             == Some(self.owner.as_str())
         {
             // Only this freshly generated staging tree, never a user's original directory.
-            let _ = fs::remove_dir_all(&self.directory);
+            if let Err(error) = fs::remove_dir_all(&self.directory) {
+                tracing::warn!(
+                    event = "archive_staging_cleanup_failed",
+                    stage = "owned_directory",
+                    error_type = "io",
+                    error_code = error.raw_os_error(),
+                    "本次归档暂存目录清理失败"
+                );
+            }
             if let Some(parent) = self.directory.parent() {
-                let _ = fs::remove_dir(parent);
+                if let Err(error) = fs::remove_dir(parent) {
+                    if error.kind() != std::io::ErrorKind::DirectoryNotEmpty
+                        && error.kind() != std::io::ErrorKind::NotFound
+                    {
+                        tracing::warn!(
+                            event = "archive_staging_cleanup_failed",
+                            stage = "work_directory",
+                            error_type = "io",
+                            error_code = error.raw_os_error(),
+                            "归档工作空目录清理失败"
+                        );
+                    }
+                }
             }
         }
     }

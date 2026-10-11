@@ -31,6 +31,7 @@ use std::{
 };
 use tokio::sync::{mpsc, oneshot, watch};
 use tokio_util::sync::CancellationToken;
+use tracing::Instrument;
 
 fn error(kind: ServiceErrorKind, message: &str) -> ServiceError {
     ServiceError::new(kind, message)
@@ -41,8 +42,18 @@ fn disconnected() -> ServiceError {
         "Agent 连接已断开，本轮未重放",
     )
 }
-fn sdk_error(cx: &ConnectionTo<Agent>, _: agent_client_protocol::Error) -> ServiceError {
-    if cx.is_incoming_closed() {
+fn sdk_error(cx: &ConnectionTo<Agent>, failure: agent_client_protocol::Error) -> ServiceError {
+    let connection_closed = cx.is_incoming_closed();
+    tracing::error!(
+        event = "acp_protocol_failed",
+        component = "acp_agent",
+        stage = "sdk_result",
+        error_type = "acp_protocol_error",
+        error_code = i32::from(failure.code),
+        connection_closed,
+        "ACP 协议调用失败"
+    );
+    if connection_closed {
         disconnected()
     } else {
         error(ServiceErrorKind::Internal, "Agent ACP 请求失败")
@@ -55,7 +66,10 @@ pub fn start_backend(
     status: watch::Sender<ServiceStatus>,
 ) -> BackendHandle {
     let (handle, commands) = backend_channel(status.subscribe());
-    tokio::spawn(run_backend(processes, workspace, status, commands));
+    tokio::spawn(
+        run_backend(processes, workspace, status, commands)
+            .instrument(crate::logging::operation_span("acp_agent", "backend")),
+    );
     handle
 }
 #[derive(Clone)]
@@ -143,6 +157,7 @@ struct Pending {
     key: SessionKey,
     input: Option<PromptInput>,
     events: mpsc::UnboundedSender<RequestEvent>,
+    started: std::time::Instant,
     cancellation: CancellationToken,
 }
 struct RoundContext {
@@ -179,6 +194,7 @@ impl Actor {
         });
     }
     fn phase(&self, phase: ServicePhase, failure: Option<&ServiceError>) {
+        tracing::info!(event = "acp_backend_phase_changed", component = "acp_agent", previous = ?self.status.borrow().phase, current = ?phase, error_type = ?failure.map(|error| error.kind), "ACP 后台阶段变更");
         self.status.send_modify(|s| {
             s.phase = phase;
             s.error = failure.map(|e| e.message.clone());
@@ -205,10 +221,14 @@ impl Actor {
                 cancellation,
                 reply,
             } => {
+                let span =
+                    crate::logging::operation_span_with_id("acp_agent", "admission", &request_id.0);
+                let _entered = span.enter();
                 let result = self.admit(request_id.clone(), input, events, cancellation);
                 let _ = reply.send(result);
             }
             BackendCommand::Cancel { request_id } => {
+                tracing::info!(event = "acp_request_cancel_received", component = "acp_agent", request_id = %request_id.0, known = self.requests.contains_key(&request_id), "ACP 后台收到请求取消");
                 if let Some(request) = self.requests.get(&request_id) {
                     request.cancellation.cancel();
                 }
@@ -238,96 +258,101 @@ impl Actor {
         events: mpsc::UnboundedSender<RequestEvent>,
         cancellation: CancellationToken,
     ) -> Result<AcceptedRequest, ServiceError> {
-        if self.sealed {
-            return Err(error(ServiceErrorKind::Stopping, "服务已停止接收请求"));
-        }
-        if cancellation.is_cancelled() {
-            return Err(error(ServiceErrorKind::Cancelled, "请求已取消"));
-        }
-        if input.messages.is_empty() {
-            return Err(error(ServiceErrorKind::InvalidRequest, "messages 不得为空"));
-        }
-        let key = input
-            .session
-            .clone()
-            .unwrap_or_else(|| SessionKey(uuid::Uuid::new_v4().to_string()));
-        if let Some(slot) = self.sessions.get(&key) {
-            if slot.invalid {
-                return Err(error(
-                    ServiceErrorKind::SessionUnavailable,
-                    "此会话已失效，须使用新会话",
-                ));
+        crate::acp_api::diagnostics::call("acp_agent", "admit", || {
+            if self.sealed {
+                return Err(error(ServiceErrorKind::Stopping, "服务已停止接收请求"));
             }
-            if !self.active.contains(&key) {
-                if let Some(state) = &slot.state {
-                    validate_history(&state.history, &input.messages)?;
+            if cancellation.is_cancelled() {
+                return Err(error(ServiceErrorKind::Cancelled, "请求已取消"));
+            }
+            if input.messages.is_empty() {
+                return Err(error(ServiceErrorKind::InvalidRequest, "messages 不得为空"));
+            }
+            let key = input
+                .session
+                .clone()
+                .unwrap_or_else(|| SessionKey(uuid::Uuid::new_v4().to_string()));
+            if let Some(slot) = self.sessions.get(&key) {
+                if slot.invalid {
+                    return Err(error(
+                        ServiceErrorKind::SessionUnavailable,
+                        "此会话已失效，须使用新会话",
+                    ));
+                }
+                if !self.active.contains(&key) {
+                    if let Some(state) = &slot.state {
+                        validate_history(&state.history, &input.messages)?;
+                    }
                 }
             }
-        }
-        // 续会话以它当前的选择列表准入；在途会话的状态由上一轮完成后再检查。
-        let available = if let Some(slot) = self.sessions.get(&key) {
-            slot.state.as_ref().map(|state| {
-                state
-                    .model
-                    .lock()
-                    .unwrap_or_else(PoisonError::into_inner)
-                    .as_ref()
-                    .map(|selector| selector.values.iter().any(|model| model.id == input.model))
-                    .map_err(Clone::clone)
-            })
-        } else {
-            Some(
-                self.models
-                    .lock()
-                    .unwrap_or_else(PoisonError::into_inner)
-                    .as_ref()
-                    .map(|selector| selector.values.iter().any(|model| model.id == input.model))
-                    .map_err(Clone::clone),
-            )
-        };
-        if let Some(available) = available {
-            if !available? {
+            // 续会话以它当前的选择列表准入；在途会话的状态由上一轮完成后再检查。
+            let available = if let Some(slot) = self.sessions.get(&key) {
+                slot.state.as_ref().map(|state| {
+                    state
+                        .model
+                        .lock()
+                        .unwrap_or_else(PoisonError::into_inner)
+                        .as_ref()
+                        .map(|selector| selector.values.iter().any(|model| model.id == input.model))
+                        .map_err(Clone::clone)
+                })
+            } else {
+                Some(
+                    self.models
+                        .lock()
+                        .unwrap_or_else(PoisonError::into_inner)
+                        .as_ref()
+                        .map(|selector| selector.values.iter().any(|model| model.id == input.model))
+                        .map_err(Clone::clone),
+                )
+            };
+            if let Some(available) = available {
+                if !available? {
+                    return Err(error(
+                        ServiceErrorKind::ModelUnavailable,
+                        "请求 model 不在 Agent 可选择列表中",
+                    ));
+                }
+            }
+            let immediately_running = self.active.len() < MAX_EXECUTING
+                && !self.active.contains(&key)
+                && !self
+                    .queue
+                    .iter()
+                    .any(|queued| self.requests.get(queued).is_some_and(|r| r.key == key));
+            if !immediately_running && self.queue.len() >= MAX_WAITING {
                 return Err(error(
-                    ServiceErrorKind::ModelUnavailable,
-                    "请求 model 不在 Agent 可选择列表中",
+                    ServiceErrorKind::QueueFull,
+                    "请求等待队列已满（最多 16 个）",
                 ));
             }
-        }
-        let immediately_running = self.active.len() < MAX_EXECUTING
-            && !self.active.contains(&key)
-            && !self
-                .queue
-                .iter()
-                .any(|queued| self.requests.get(queued).is_some_and(|r| r.key == key));
-        if !immediately_running && self.queue.len() >= MAX_WAITING {
-            return Err(error(
-                ServiceErrorKind::QueueFull,
-                "请求等待队列已满（最多 16 个）",
-            ));
-        }
-        let accepted = AcceptedRequest {
-            request_id: id.clone(),
-            session: key.clone(),
-            model: input.model.clone(),
-        };
-        self.sessions.entry(key.clone()).or_insert(SessionSlot {
-            state: None,
-            invalid: false,
-        });
-        self.requests.insert(
-            id.clone(),
-            Pending {
-                key,
-                input: Some(input),
-                events,
-                cancellation,
-            },
-        );
-        self.queue.push_back(id);
-        Ok(accepted)
+            let accepted = AcceptedRequest {
+                request_id: id.clone(),
+                session: key.clone(),
+                model: input.model.clone(),
+            };
+            self.sessions.entry(key.clone()).or_insert(SessionSlot {
+                state: None,
+                invalid: false,
+            });
+            self.requests.insert(
+                id.clone(),
+                Pending {
+                    key,
+                    input: Some(input),
+                    events,
+                    cancellation,
+                    started: std::time::Instant::now(),
+                },
+            );
+            self.queue.push_back(id);
+            tracing::info!(event = "acp_request_queued", component = "acp_agent", request_id = %accepted.request_id.0, executing = self.active.len(), waiting = self.queue.len(), "ACP 请求进入调度队列");
+            Ok(accepted)
+        })
     }
     fn fail_all(&mut self, failure: &ServiceError) {
-        for (_, request) in self.requests.drain() {
+        for (id, request) in self.requests.drain() {
+            tracing::error!(event = "acp_request_failed", component = "acp_agent", request_id = %id.0, stage = "connection", error_type = ?failure.kind, elapsed_ms = crate::logging::elapsed_ms(request.started), "ACP 连接故障交付请求失败");
             let _ = request.events.send(RequestEvent::Failed(failure.clone()));
         }
         self.queue.clear();
@@ -343,6 +368,18 @@ impl Actor {
     fn finish(&mut self, round: RoundResult) {
         self.active.remove(&round.key);
         if let Some(request) = self.requests.remove(&round.id) {
+            match &round.terminal {
+                RequestEvent::Completed { reason } => {
+                    tracing::info!(event = "acp_request_completed", component = "acp_agent", request_id = %round.id.0, result = ?reason, elapsed_ms = crate::logging::elapsed_ms(request.started), "ACP 请求轮次完成")
+                }
+                RequestEvent::Failed(error) => {
+                    tracing::error!(event = "acp_request_failed", component = "acp_agent", request_id = %round.id.0, stage = "round", error_type = ?error.kind, elapsed_ms = crate::logging::elapsed_ms(request.started), "ACP 请求轮次失败")
+                }
+                RequestEvent::Cancelled => {
+                    tracing::warn!(event = "acp_request_cancelled", component = "acp_agent", request_id = %round.id.0, stage = "round", elapsed_ms = crate::logging::elapsed_ms(request.started), "ACP 请求轮次取消")
+                }
+                RequestEvent::TextDelta(_) => {}
+            }
             let _ = request.events.send(round.terminal);
         }
         if let Some(slot) = self.sessions.get_mut(&round.key) {
@@ -371,6 +408,7 @@ impl Actor {
             if request.cancellation.is_cancelled() || request.events.is_closed() {
                 self.queue.remove(index);
                 if let Some(request) = self.requests.remove(&id) {
+                    tracing::warn!(event = "acp_request_cancelled", component = "acp_agent", request_id = %id.0, stage = "queued", elapsed_ms = crate::logging::elapsed_ms(request.started), "ACP 排队请求已取消");
                     let _ = request.events.send(RequestEvent::Cancelled);
                 }
                 continue;
@@ -383,6 +421,7 @@ impl Actor {
             if self.sessions.get(&key).is_some_and(|slot| slot.invalid) {
                 self.queue.remove(index);
                 if let Some(request) = self.requests.remove(&id) {
+                    tracing::error!(event = "acp_request_failed", component = "acp_agent", request_id = %id.0, stage = "queued_session", error_type = "session_unavailable", "ACP 排队请求会话已失效");
                     let _ = request.events.send(RequestEvent::Failed(error(
                         ServiceErrorKind::SessionUnavailable,
                         "此会话已失效，未重放等待请求",
@@ -414,6 +453,8 @@ impl Actor {
                 }
             }
             self.active.insert(key.clone());
+            let span = crate::logging::operation_span_with_id("acp_agent", "round", &id.0);
+            tracing::info!(event = "acp_request_execution_started", component = "acp_agent", request_id = %id.0, reused_session = state.is_some(), queue_elapsed_ms = crate::logging::elapsed_ms(request.started), "ACP 排队请求开始执行");
             rounds.push(
                 round(
                     cx.clone(),
@@ -428,6 +469,7 @@ impl Actor {
                         cancellation: request.cancellation.clone(),
                     },
                 )
+                .instrument(span)
                 .boxed(),
             );
         }
@@ -449,56 +491,74 @@ async fn create_session(
     workspace: PathBuf,
     callbacks: &Callbacks,
 ) -> Result<SessionState, ServiceError> {
-    let (reply, response) = oneshot::channel();
-    let routes = callbacks.routes.clone();
-    let connection = cx.clone();
-    cx.prepare_request(NewSessionRequest::new(workspace))
-        .on_receiving_result(move |result| async move {
-            // 发布前注册有序回调，在原始派发内登记，先于紧随响应的配置通知。
-            let result = (|| {
-                let response = result.map_err(|failure| sdk_error(&connection, failure))?;
-                // SDK id 保留到本连接结束，拒绝复用取消会话 id，防止迟到更新串轮。
-                let mut routes = routes.lock().unwrap_or_else(PoisonError::into_inner);
-                if !routes.known.insert(response.session_id.clone()) {
-                    return Err(error(
-                        ServiceErrorKind::SessionUnavailable,
-                        "Agent 重复返回了已使用的 ACP 会话标识",
-                    ));
-                }
-                let options = response.config_options.as_deref().unwrap_or_default();
-                let selector = match &routes.model_id {
-                    Some(id) => options
-                        .iter()
-                        .find(|option| &option.id == id)
-                        .ok_or_else(|| {
-                            error(
-                                ServiceErrorKind::ModelsUnavailable,
-                                "Agent 未保留已协商模型配置",
-                            )
+    crate::acp_api::diagnostics::async_call("acp_agent", "create_session", async {
+        let (reply, response) = oneshot::channel();
+        let routes = callbacks.routes.clone();
+        let connection = cx.clone();
+        let diagnostic_span = tracing::Span::current();
+        cx.prepare_request(NewSessionRequest::new(workspace))
+            .on_receiving_result(move |result| {
+                async move {
+                    // 发布前注册有序回调，在原始派发内登记，先于紧随响应的配置通知。
+                    let result = (|| {
+                        let response = result.map_err(|failure| sdk_error(&connection, failure))?;
+                        // SDK id 保留到本连接结束，拒绝复用取消会话 id，防止迟到更新串轮。
+                        let mut routes = routes.lock().unwrap_or_else(PoisonError::into_inner);
+                        if !routes.known.insert(response.session_id.clone()) {
+                            return Err(error(
+                                ServiceErrorKind::SessionUnavailable,
+                                "Agent 重复返回了已使用的 ACP 会话标识",
+                            ));
+                        }
+                        routes
+                            .spans
+                            .insert(response.session_id.clone(), tracing::Span::current());
+                        let options = response.config_options.as_deref().unwrap_or_default();
+                        let selector = match &routes.model_id {
+                            Some(id) => options
+                                .iter()
+                                .find(|option| &option.id == id)
+                                .ok_or_else(|| {
+                                    error(
+                                        ServiceErrorKind::ModelsUnavailable,
+                                        "Agent 未保留已协商模型配置",
+                                    )
+                                })
+                                .and_then(model_selector_from_option),
+                            None => model_selector(options),
+                        };
+                        if routes.model_id.is_none() {
+                            if let Ok(selector) = &selector {
+                                routes.model_id = Some(selector.id.clone());
+                            }
+                        }
+                        if let Ok(selector) = &selector {
+                            tracing::info!(
+                                event = "acp_session_models_received",
+                                component = "acp_agent",
+                                model_count = selector.values.len(),
+                                "ACP 会话模型选择能力已收到"
+                            );
+                        }
+                        let model = Arc::new(Mutex::new(selector));
+                        routes
+                            .models
+                            .insert(response.session_id.clone(), model.clone());
+                        Ok(SessionState {
+                            id: response.session_id,
+                            model,
+                            history: Vec::new(),
                         })
-                        .and_then(model_selector_from_option),
-                    None => model_selector(options),
-                };
-                if routes.model_id.is_none() {
-                    if let Ok(selector) = &selector {
-                        routes.model_id = Some(selector.id.clone());
-                    }
+                    })();
+                    let _ = reply.send(result);
+                    Ok(())
                 }
-                let model = Arc::new(Mutex::new(selector));
-                routes
-                    .models
-                    .insert(response.session_id.clone(), model.clone());
-                Ok(SessionState {
-                    id: response.session_id,
-                    model,
-                    history: Vec::new(),
-                })
-            })();
-            let _ = reply.send(result);
-            Ok(())
-        })
-        .map_err(|failure| sdk_error(cx, failure))?;
-    response.await.map_err(|_| disconnected())?
+                .instrument(diagnostic_span)
+            })
+            .map_err(|failure| sdk_error(cx, failure))?;
+        response.await.map_err(|_| disconnected())?
+    })
+    .await
 }
 async fn round(
     cx: ConnectionTo<Agent>,
@@ -605,140 +665,155 @@ async fn execute_round(
     cancellation: CancellationToken,
     prompt_published: &mut bool,
 ) -> Result<FinishReason, ServiceError> {
-    let selector_id = {
-        let model = state.model.lock().unwrap_or_else(PoisonError::into_inner);
-        let selector = model.as_ref().map_err(Clone::clone)?;
-        if !selector.values.iter().any(|model| model.id == input.model) {
-            return Err(error(
-                ServiceErrorKind::ModelUnavailable,
-                "此会话无法选择请求模型",
-            ));
-        }
-        selector.id.clone()
-    };
-    let (reply, response) = oneshot::channel();
-    let model = state.model.clone();
-    let requested_model = input.model.clone();
-    let connection = cx.clone();
-    cx.prepare_request(SetSessionConfigOptionRequest::new(
-        state.id.clone(),
-        selector_id.clone(),
-        SessionConfigValueId::new(input.model.clone()),
-    ))
-    .on_receiving_result(move |result| async move {
-        // 发布前注册有序回调，后到的 ConfigOptionUpdate 不会被旧回包覆盖。
-        let result = (|| {
-            let response = result.map_err(|failure| sdk_error(&connection, failure))?;
-            // category 仅用于首次识别；后续完整响应按已协商 id 确认。
-            let selected = response
-                .config_options
-                .iter()
-                .find(|option| option.id == selector_id)
-                .and_then(|option| model_selector_from_option(option).ok())
-                .ok_or_else(|| {
-                    error(
-                        ServiceErrorKind::ModelUnavailable,
-                        "Agent 模型设置响应未保留已协商的有效 Select 配置",
-                    )
-                })?;
-            if selected.current != requested_model {
-                return Err(error(
-                    ServiceErrorKind::ModelUnavailable,
-                    "Agent 未确认请求模型已生效",
-                ));
-            }
-            *model.lock().unwrap_or_else(PoisonError::into_inner) = Ok(selected);
-            Ok(())
-        })();
-        let _ = reply.send(result);
-        Ok(())
-    })
-    .map_err(|failure| sdk_error(cx, failure))?;
-    response.await.map_err(|_| disconnected())??;
-    if cancellation.is_cancelled() {
-        return Err(error(ServiceErrorKind::Cancelled, "请求已取消"));
-    }
-    let content = input.messages[state.history.len()..]
-        .iter()
-        .map(|message| {
-            ContentBlock::Text(TextContent::new(format!(
-                "[{}]\n{}",
-                message.role.as_str(),
-                message.text
-            )))
-        })
-        .collect();
-    callbacks
-        .routes
-        .lock()
-        .unwrap_or_else(PoisonError::into_inner)
-        .active
-        .insert(
-            state.id.clone(),
-            Route {
-                events,
-                cancellation: cancellation.clone(),
-                text: String::new(),
-                failure: None,
-            },
-        );
-    // 发布前注册有序终态回调，摘除路由后迟到通知不能进入新轮次。
-    let (reply, mut response) = oneshot::channel();
-    let routes = callbacks.routes.clone();
-    let session = state.id.clone();
-    cx.prepare_request(PromptRequest::new(session.clone(), content))
-        .on_receiving_result(move |result| async move {
-            let route = routes
-                .lock()
-                .unwrap_or_else(PoisonError::into_inner)
-                .active
-                .remove(&session);
-            let _ = reply.send((result, route));
-            Ok(())
-        })
-        .map_err(|e| sdk_error(cx, e))?;
-    *prompt_published = true;
-    let (result, route) = tokio::select! {
-        result = &mut response => result.map_err(|_| disconnected())?,
-        () = cancellation.cancelled() => {
-            // ACP v1 session/cancel，与 SDK 通用 request cancellation 不混淆。
-            cx.send_notification(CancelNotification::new(state.id.clone())).map_err(|e| sdk_error(cx, e))?;
-            response.await.map_err(|_| disconnected())?
-        }
-    };
-    let route = route.ok_or_else(disconnected)?;
-    if let Some(failure) = route.failure {
-        return Err(failure);
-    }
-    let response = result.map_err(|e| sdk_error(cx, e))?;
-    if cancellation.is_cancelled() || response.stop_reason == StopReason::Cancelled {
+    crate::acp_api::diagnostics::async_call("acp_agent", "execute_round", async { let selector_id = {
+    let model = state.model.lock().unwrap_or_else(PoisonError::into_inner);
+    let selector = model.as_ref().map_err(Clone::clone)?;
+    if !selector.values.iter().any(|model| model.id == input.model) {
         return Err(error(
-            ServiceErrorKind::Cancelled,
-            "请求已取消并收到 Agent 终态",
+            ServiceErrorKind::ModelUnavailable,
+            "此会话无法选择请求模型",
         ));
     }
-    let reason = match response.stop_reason {
-        StopReason::MaxTokens | StopReason::MaxTurnRequests => FinishReason::Length,
-        StopReason::EndTurn => FinishReason::Stop,
-        StopReason::Refusal => {
+    selector.id.clone()
+};
+let (reply, response) = oneshot::channel();
+let model = state.model.clone();
+let requested_model = input.model.clone();
+let connection = cx.clone();
+let diagnostic_span = tracing::Span::current();
+callbacks.routes.lock().unwrap_or_else(PoisonError::into_inner)
+    .spans.insert(state.id.clone(), diagnostic_span.clone());
+let model_started = std::time::Instant::now();
+tracing::info!(event = "acp_model_selection_started", component = "acp_agent", "ACP 会话模型选择开始");
+cx.prepare_request(SetSessionConfigOptionRequest::new(
+    state.id.clone(),
+    selector_id.clone(),
+    SessionConfigValueId::new(input.model.clone()),
+))
+.on_receiving_result(move |result| async move {
+    // 发布前注册有序回调，后到的 ConfigOptionUpdate 不会被旧回包覆盖。
+    let result = (|| {
+        let response = result.map_err(|failure| sdk_error(&connection, failure))?;
+        // category 仅用于首次识别；后续完整响应按已协商 id 确认。
+        let selected = response
+            .config_options
+            .iter()
+            .find(|option| option.id == selector_id)
+            .and_then(|option| model_selector_from_option(option).ok())
+            .ok_or_else(|| {
+                error(
+                    ServiceErrorKind::ModelUnavailable,
+                    "Agent 模型设置响应未保留已协商的有效 Select 配置",
+                )
+            })?;
+        if selected.current != requested_model {
             return Err(error(
-                ServiceErrorKind::InvalidRequest,
-                "Agent 拒绝此轮请求，会话已失效",
-            ))
+                ServiceErrorKind::ModelUnavailable,
+                "Agent 未确认请求模型已生效",
+            ));
         }
-        _ => {
-            return Err(error(
-                ServiceErrorKind::Internal,
-                "Agent 返回了不支持的结束原因",
-            ))
-        }
-    };
-    state.history = input.messages;
-    state.history.push(ChatMessage {
-        role: MessageRole::Assistant,
-        text: route.text,
-    });
-    Ok(reason)
+        *model.lock().unwrap_or_else(PoisonError::into_inner) = Ok(selected);
+        Ok(())
+    })();
+    let _ = reply.send(result);
+    Ok(())
+}.instrument(diagnostic_span))
+.inspect_err(|_| tracing::error!(event = "acp_model_selection_failed", component = "acp_agent", stage = "model_publish", error_type = "acp_protocol_error", elapsed_ms = crate::logging::elapsed_ms(model_started), "ACP 模型选择请求发布失败"))
+.map_err(|failure| sdk_error(cx, failure))?;
+response.await.map_err(|_| disconnected())
+    .and_then(|result| result)
+    .inspect_err(|failure| tracing::error!(event = "acp_model_selection_failed", component = "acp_agent", stage = "model_confirmation", error_type = ?failure.kind, elapsed_ms = crate::logging::elapsed_ms(model_started), "ACP 模型选择确认失败"))?;
+tracing::info!(event = "acp_model_selection_completed", component = "acp_agent", status = "confirmed", elapsed_ms = crate::logging::elapsed_ms(model_started), "ACP 会话模型选择已确认");
+if cancellation.is_cancelled() {
+    return Err(error(ServiceErrorKind::Cancelled, "请求已取消"));
+}
+let content = input.messages[state.history.len()..]
+    .iter()
+    .map(|message| {
+        ContentBlock::Text(TextContent::new(format!(
+            "[{}]\n{}",
+            message.role.as_str(),
+            message.text
+        )))
+    })
+    .collect();
+callbacks
+    .routes
+    .lock()
+    .unwrap_or_else(PoisonError::into_inner)
+    .active
+    .insert(
+        state.id.clone(),
+        Route {
+            events,
+            cancellation: cancellation.clone(),
+            text: String::new(),
+            failure: None,
+        },
+    );
+// 发布前注册有序终态回调，摘除路由后迟到通知不能进入新轮次。
+let (reply, mut response) = oneshot::channel();
+let routes = callbacks.routes.clone();
+let session = state.id.clone();
+let prompt_started = std::time::Instant::now();
+tracing::info!(event = "acp_prompt_started", component = "acp_agent", message_count = input.messages.len() - state.history.len(), "ACP 会话提示请求开始");
+cx.prepare_request(PromptRequest::new(session.clone(), content))
+    .on_receiving_result(move |result| async move {
+        let route = routes
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .active
+            .remove(&session);
+        let _ = reply.send((result, route));
+        Ok(())
+    })
+    .inspect_err(|_| tracing::error!(event = "acp_prompt_failed", component = "acp_agent", stage = "prompt_publish", error_type = "acp_protocol_error", elapsed_ms = crate::logging::elapsed_ms(prompt_started), "ACP 提示请求发布失败"))
+    .map_err(|e| sdk_error(cx, e))?;
+*prompt_published = true;
+let (result, route) = tokio::select! {
+    result = &mut response => result.map_err(|_| disconnected())?,
+    () = cancellation.cancelled() => {
+        // ACP v1 session/cancel，与 SDK 通用 request cancellation 不混淆。
+        tracing::warn!(event = "acp_prompt_cancel_started", component = "acp_agent", "ACP 会话取消通知开始");
+        cx.send_notification(CancelNotification::new(state.id.clone())).map_err(|e| sdk_error(cx, e))?;
+        response.await.map_err(|_| disconnected())?
+    }
+};
+let route = route.ok_or_else(disconnected)?;
+if let Some(failure) = route.failure {
+    return Err(failure);
+}
+let response = result.map_err(|e| sdk_error(cx, e))
+    .inspect_err(|failure| tracing::error!(event = "acp_prompt_failed", component = "acp_agent", stage = "prompt_terminal", error_type = ?failure.kind, elapsed_ms = crate::logging::elapsed_ms(prompt_started), "ACP 提示请求收到失败终态"))?;
+tracing::info!(event = "acp_prompt_terminal_received", component = "acp_agent", result = ?response.stop_reason, output_bytes = route.text.len(), elapsed_ms = crate::logging::elapsed_ms(prompt_started), "ACP 提示请求收到 Agent 终态");
+if cancellation.is_cancelled() || response.stop_reason == StopReason::Cancelled {
+    return Err(error(
+        ServiceErrorKind::Cancelled,
+        "请求已取消并收到 Agent 终态",
+    ));
+}
+let reason = match response.stop_reason {
+    StopReason::MaxTokens | StopReason::MaxTurnRequests => FinishReason::Length,
+    StopReason::EndTurn => FinishReason::Stop,
+    StopReason::Refusal => {
+        return Err(error(
+            ServiceErrorKind::InvalidRequest,
+            "Agent 拒绝此轮请求，会话已失效",
+        ))
+    }
+    _ => {
+        return Err(error(
+            ServiceErrorKind::Internal,
+            "Agent 返回了不支持的结束原因",
+        ))
+    }
+};
+state.history = input.messages;
+state.history.push(ChatMessage {
+    role: MessageRole::Assistant,
+    text: route.text,
+});
+Ok(reason) }).await
 }
 
 // 每次后台被正常命令/轮次唤醒时，仅收割已完成项；不等待活终端，不另分配完成列表。
@@ -765,13 +840,16 @@ async fn finish_retired(
     retired: &mut Vec<tokio::task::JoinHandle<Result<(), agent_client_protocol::Error>>>,
     first_failure: &mut Option<ServiceError>,
 ) -> Result<(), ServiceError> {
-    let mut result = first_failure.take().map_or(Ok(()), Err);
-    for task in retired.drain(..) {
-        if !matches!(task.await, Ok(Ok(()))) && result.is_ok() {
-            result = Err(error(ServiceErrorKind::Io, "ACP 旧回调或终端资源收尾失败"));
+    crate::acp_api::diagnostics::async_call("acp_agent", "finish_retired", async {
+        let mut result = first_failure.take().map_or(Ok(()), Err);
+        for task in retired.drain(..) {
+            if !matches!(task.await, Ok(Ok(()))) && result.is_ok() {
+                result = Err(error(ServiceErrorKind::Io, "ACP 旧回调或终端资源收尾失败"));
+            }
         }
-    }
-    result
+        result
+    })
+    .await
 }
 
 async fn initialize(
@@ -779,36 +857,47 @@ async fn initialize(
     workspace: PathBuf,
     callbacks: &Callbacks,
 ) -> Result<SessionState, ServiceError> {
-    let init = cx
-        .send_request(
-            InitializeRequest::new(ProtocolVersion::V1).client_capabilities(
-                ClientCapabilities::new()
-                    .fs(FileSystemCapabilities::new()
-                        .read_text_file(true)
-                        .write_text_file(true))
-                    .terminal(true),
-            ),
-        )
-        .block_task()
-        .await
-        .map_err(|_| {
+    crate::acp_api::diagnostics::async_call("acp_agent", "initialize", async {
+        let init = cx
+            .send_request(
+                InitializeRequest::new(ProtocolVersion::V1).client_capabilities(
+                    ClientCapabilities::new()
+                        .fs(FileSystemCapabilities::new()
+                            .read_text_file(true)
+                            .write_text_file(true))
+                        .terminal(true),
+                ),
+            )
+            .block_task()
+            .await
+            .map_err(|failure| {
+                tracing::error!(
+                    event = "acp_protocol_failed",
+                    component = "acp_agent",
+                    stage = "initialize_response",
+                    error_type = "acp_protocol_error",
+                    error_code = i32::from(failure.code),
+                    "ACP 初始化协议请求失败"
+                );
+                error(
+                    ServiceErrorKind::InvalidConfig,
+                    "Agent ACP 协议初始化请求失败",
+                )
+            })?;
+        if init.protocol_version != ProtocolVersion::V1 {
+            return Err(error(
+                ServiceErrorKind::InvalidConfig,
+                "Agent 协商的 ACP 协议版本不受支持",
+            ));
+        }
+        create_session(cx, workspace, callbacks).await.map_err(|_| {
             error(
                 ServiceErrorKind::InvalidConfig,
-                "Agent ACP 协议初始化请求失败",
+                "Agent 模型探测会话创建失败",
             )
-        })?;
-    if init.protocol_version != ProtocolVersion::V1 {
-        return Err(error(
-            ServiceErrorKind::InvalidConfig,
-            "Agent 协商的 ACP 协议版本不受支持",
-        ));
-    }
-    create_session(cx, workspace, callbacks).await.map_err(|_| {
-        error(
-            ServiceErrorKind::InvalidConfig,
-            "Agent 模型探测会话创建失败",
-        )
+        })
     })
+    .await
 }
 
 // 只观察真实后台的退役集合；生产编译没有 observer、额外命令或公开 test-hooks API。
@@ -891,8 +980,14 @@ async fn run_backend_inner(
                         tokio::select! {
                             result = &mut startup => match result {
                                 Ok(Ok(probe)) => break probe,
-                                Ok(Err(failure)) => { startup_failure = Some(failure); return Err(callbacks::io_error("Agent ACP 初始化失败")); }
-                                Err(_) => { startup_failure = Some(error(ServiceErrorKind::InvalidConfig, "Agent ACP 初始化及模型探测超时（30 秒）")); return Err(callbacks::io_error("Agent ACP 初始化超时")); }
+                                Ok(Err(failure)) => {
+                                    tracing::error!(event = "acp_agent_initialize_failed", component = "acp_agent", stage = "initialize_or_probe", error_type = ?failure.kind, peer_pid = connection.pid, "ACP Agent 初始化或模型探测失败");
+                                    startup_failure = Some(failure); return Err(callbacks::io_error("Agent ACP 初始化失败"));
+                                }
+                                Err(_) => {
+                                    tracing::error!(event = "acp_agent_initialize_failed", component = "acp_agent", stage = "initialize_timeout", error_type = "timeout", timeout_ms = 30000, peer_pid = connection.pid, "ACP Agent 初始化及模型探测超时");
+                                    startup_failure = Some(error(ServiceErrorKind::InvalidConfig, "Agent ACP 初始化及模型探测超时（30 秒）")); return Err(callbacks::io_error("Agent ACP 初始化超时"));
+                                }
                             },
                             () = cx.incoming_closed() => return Err(callbacks::io_error("Agent 初始化输出流已关闭")),
                             changed = exit.changed() => { if changed.is_err() || exit.borrow().is_some() { return Err(callbacks::io_error("Agent 初始化期间退出")); } },
@@ -973,12 +1068,16 @@ async fn run_backend_inner(
                         routes.active.clear();
                         routes.models.clear();
                         routes.known.clear();
+                        routes.spans.clear();
                     }
                     actor.fail_all(failure);
                 }
                 if finish.is_err() && !actor.stopping {
                     let cleanup = callbacks.clone();
-                    retired.push(tokio::spawn(async move { cleanup.shutdown().await }));
+                    retired.push(tokio::spawn(
+                        async move { cleanup.shutdown().await }
+                            .instrument(tracing::Span::current()),
+                    ));
                     reap_retired(&mut retired, &mut retired_failure);
                     #[cfg(test)]
                     if let Some(observer) = observer.as_mut() {
@@ -1280,6 +1379,7 @@ mod tests {
                     input: None,
                     events,
                     cancellation: CancellationToken::new(),
+                    started: std::time::Instant::now(),
                 },
             )]),
             queue: VecDeque::new(),

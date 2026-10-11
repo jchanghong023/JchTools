@@ -4,7 +4,7 @@ mod connection;
 mod dto;
 mod stream;
 
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::time::{Instant, SystemTime, UNIX_EPOCH};
 
 use axum::{
     extract::{connect_info::ConnectInfo, rejection::JsonRejection, State},
@@ -17,6 +17,7 @@ use serde_json::Value;
 use tokio_util::sync::CancellationToken;
 
 use crate::acp_api::{BackendHandle, RequestEvent, RequestHandle, SessionKey};
+use tracing::Instrument;
 
 use connection::{ConnectionClosed, ObservedListener};
 use dto::{completion, model_list, parse_chat, HttpError};
@@ -31,7 +32,50 @@ pub fn router(backend: BackendHandle) -> Router {
         .route("/v1/chat/completions", post(chat))
         .fallback(not_found)
         .method_not_allowed_fallback(method_not_allowed)
+        .layer(axum::middleware::from_fn(observe_request))
         .with_state(backend)
+}
+
+async fn observe_request(
+    request: axum::extract::Request,
+    next: axum::middleware::Next,
+) -> Response {
+    let route = match request.uri().path() {
+        "/v1/models" => "models",
+        "/v1/chat/completions" => "chat_completions",
+        _ => "unknown",
+    };
+    let method = if request.method() == axum::http::Method::GET {
+        "GET"
+    } else if request.method() == axum::http::Method::POST {
+        "POST"
+    } else {
+        "other"
+    };
+    async move {
+        let started = Instant::now();
+        tracing::info!(
+            event = "acp_http_request_started",
+            component = "acp_http",
+            route,
+            method,
+            "ACP HTTP 请求开始"
+        );
+        let response = next.run(request).await;
+        let status = response.status().as_u16();
+        tracing::info!(
+            event = "acp_http_response_ready",
+            component = "acp_http",
+            route,
+            method,
+            status,
+            elapsed_ms = crate::logging::elapsed_ms(started),
+            "ACP HTTP 响应头就绪"
+        );
+        response
+    }
+    .instrument(crate::logging::operation_span("acp_http", "http_request"))
+    .await
 }
 
 /// AH-13：复用 Axum HTTP 服务，并把每条真实连接的读端关闭传给该连接的请求。
@@ -41,18 +85,21 @@ pub async fn serve(
     router: Router,
     shutdown: CancellationToken,
 ) -> Result<(), crate::acp_api::ServiceError> {
-    axum::serve(
-        ObservedListener(listener),
-        router.into_make_service_with_connect_info::<ConnectionClosed>(),
-    )
-    .with_graceful_shutdown(shutdown.cancelled_owned())
-    .await
-    .map_err(|error| {
-        crate::acp_api::ServiceError::new(
-            crate::acp_api::ServiceErrorKind::Io,
-            format!("模型服务 HTTP 监听失败：{error}"),
+    crate::acp_api::diagnostics::async_call("acp_http", "serve", async {
+        axum::serve(
+            ObservedListener(listener),
+            router.into_make_service_with_connect_info::<ConnectionClosed>(),
         )
+        .with_graceful_shutdown(shutdown.cancelled_owned())
+        .await
+        .map_err(|error| {
+            crate::acp_api::ServiceError::new(
+                crate::acp_api::ServiceErrorKind::Io,
+                format!("模型服务 HTTP 监听失败：{error}"),
+            )
+        })
     })
+    .await
 }
 
 async fn not_found() -> Response {
@@ -75,7 +122,16 @@ async fn method_not_allowed() -> Response {
 
 async fn models(State(backend): State<BackendHandle>) -> Response {
     match backend.models().await {
-        Ok(models) => Json(model_list(models)).into_response(),
+        Ok(models) => {
+            tracing::info!(
+                event = "acp_http_models_completed",
+                component = "acp_http",
+                model_count = models.len(),
+                status = 200,
+                "ACP HTTP 模型列表读取完成"
+            );
+            Json(model_list(models)).into_response()
+        }
         Err(error) => HttpError::service(&error).into_response(),
     }
 }
@@ -129,6 +185,14 @@ async fn chat(
                     "invalid_request",
                 )
             };
+            tracing::error!(
+                event = "acp_http_input_failed",
+                component = "acp_http",
+                stage = "json_decode",
+                status = status.as_u16(),
+                error_code = code,
+                "ACP HTTP JSON 输入解析失败"
+            );
             return HttpError::route(status, message, code).into_response();
         }
     };
@@ -153,6 +217,7 @@ async fn chat(
             Err(error) => return HttpError::service(&error).into_response(),
         },
     };
+    tracing::info!(event = "acp_http_request_admitted", component = "acp_http", request_id = %request.accepted.request_id.0, streaming = input.stream, "ACP HTTP 请求已准入");
     let Ok(session_header) = HeaderValue::from_str(&request.accepted.session.0) else {
         return HttpError::route(
             StatusCode::BAD_GATEWAY,
@@ -165,34 +230,41 @@ async fn chat(
         .duration_since(UNIX_EPOCH)
         .map_or(0, |duration| duration.as_secs());
     if input.stream {
+        let first_started = Instant::now();
+        tracing::info!(event = "acp_http_first_event_started", component = "acp_http", request_id = %request.accepted.request_id.0, "ACP HTTP 流式响应等待首事件");
         // 首事件之前保持响应头未提交：后端在此处失败必须返回真实非 2xx JSON。
         let first = tokio::select! {
             biased;
-            () = closed.cancelled() => return with_session(
-                HttpError::service(&cancelled()).into_response(), session_header,
-            ),
+            () = closed.cancelled() => {
+                tracing::warn!(event = "acp_http_first_event_cancelled", component = "acp_http", request_id = %request.accepted.request_id.0, stage = "connection_closed", elapsed_ms = crate::logging::elapsed_ms(first_started), "ACP HTTP 首事件前客户端断连");
+                return with_session(HttpError::service(&cancelled()).into_response(), session_header);
+            },
             event = request.events.recv() => event,
         };
         let first = match first {
             Some(RequestEvent::Failed(error)) => {
                 request.cancellation.disarm();
+                tracing::error!(event = "acp_http_first_event_failed", component = "acp_http", request_id = %request.accepted.request_id.0, stage = "backend_terminal", error_type = ?error.kind, elapsed_ms = crate::logging::elapsed_ms(first_started), "ACP HTTP 流式响应首事件为失败终态");
                 return with_session(HttpError::service(&error).into_response(), session_header);
             }
             Some(RequestEvent::Cancelled) => {
                 request.cancellation.disarm();
+                tracing::warn!(event = "acp_http_first_event_cancelled", component = "acp_http", request_id = %request.accepted.request_id.0, stage = "backend_terminal", elapsed_ms = crate::logging::elapsed_ms(first_started), "ACP HTTP 流式响应首事件为取消终态");
                 return with_session(
                     HttpError::service(&cancelled()).into_response(),
                     session_header,
                 );
             }
             None => {
+                tracing::error!(event = "acp_http_first_event_failed", component = "acp_http", request_id = %request.accepted.request_id.0, stage = "event_eof", error_type = "agent_disconnected", elapsed_ms = crate::logging::elapsed_ms(first_started), "ACP HTTP 流式响应首事件前事件流关闭");
                 return with_session(
                     HttpError::service(&disconnected()).into_response(),
                     session_header,
-                )
+                );
             }
             Some(event) => event,
         };
+        tracing::info!(event = "acp_http_first_event_completed", component = "acp_http", request_id = %request.accepted.request_id.0, elapsed_ms = crate::logging::elapsed_ms(first_started), "ACP HTTP 首事件已收到，可提交 SSE 响应头");
         if matches!(first, RequestEvent::Completed { .. }) {
             request.cancellation.disarm();
         }
@@ -215,28 +287,40 @@ async fn collect_completion(
     created: u64,
     closed: CancellationToken,
 ) -> Response {
+    let started = Instant::now();
+    let request_id = request.accepted.request_id.0.clone();
+    tracing::info!(event = "acp_http_completion_started", component = "acp_http", %request_id, "ACP HTTP 非流式响应等待开始");
     let mut text = String::new();
     loop {
         let event = tokio::select! {
             biased;
-            () = closed.cancelled() => return HttpError::service(&cancelled()).into_response(),
+            () = closed.cancelled() => {
+                tracing::warn!(event = "acp_http_completion_cancelled", component = "acp_http", %request_id, stage = "connection_closed", elapsed_ms = crate::logging::elapsed_ms(started), "ACP HTTP 非流式客户端断连");
+                return HttpError::service(&cancelled()).into_response();
+            },
             event = request.events.recv() => event,
         };
         match event {
             Some(RequestEvent::TextDelta(delta)) => text.push_str(&delta),
             Some(RequestEvent::Completed { reason }) => {
                 request.cancellation.disarm();
+                tracing::info!(event = "acp_http_completion_completed", component = "acp_http", %request_id, result = ?reason, output_bytes = text.len(), elapsed_ms = crate::logging::elapsed_ms(started), "ACP HTTP 非流式响应完成");
                 return Json(completion(&request.accepted, created, text, reason)).into_response();
             }
             Some(RequestEvent::Failed(error)) => {
                 request.cancellation.disarm();
+                tracing::error!(event = "acp_http_completion_failed", component = "acp_http", %request_id, stage = "backend_terminal", error_type = ?error.kind, elapsed_ms = crate::logging::elapsed_ms(started), "ACP HTTP 非流式响应失败");
                 return HttpError::service(&error).into_response();
             }
             Some(RequestEvent::Cancelled) => {
                 request.cancellation.disarm();
+                tracing::warn!(event = "acp_http_completion_cancelled", component = "acp_http", %request_id, stage = "backend_terminal", elapsed_ms = crate::logging::elapsed_ms(started), "ACP HTTP 非流式响应已取消");
                 return HttpError::service(&cancelled()).into_response();
             }
-            None => return HttpError::service(&disconnected()).into_response(),
+            None => {
+                tracing::error!(event = "acp_http_completion_failed", component = "acp_http", %request_id, stage = "event_eof", error_type = "agent_disconnected", elapsed_ms = crate::logging::elapsed_ms(started), "ACP HTTP 非流式事件流提前关闭");
+                return HttpError::service(&disconnected()).into_response();
+            }
         }
     }
 }
@@ -299,5 +383,204 @@ mod tests {
             commands.recv().await,
             Some(BackendCommand::Cancel { .. })
         ));
+    }
+
+    #[derive(Clone)]
+    struct LogCapture(std::sync::mpsc::Sender<Vec<u8>>);
+
+    impl std::io::Write for LogCapture {
+        fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+            self.0.send(bytes.to_vec()).map_err(|_| {
+                std::io::Error::new(std::io::ErrorKind::BrokenPipe, "日志测试接收器已关闭")
+            })?;
+            Ok(bytes.len())
+        }
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+
+    async fn local_request(port: u16, body: &str) -> String {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        let mut socket = tokio::net::TcpStream::connect(("127.0.0.1", port))
+            .await
+            .unwrap();
+        let headers = format!(
+            "POST /v1/chat/completions HTTP/1.1\r\nHost: localhost\r\nContent-Type: application/json\r\nConnection: close\r\nContent-Length: {}\r\n\r\n",
+            body.len(),
+        );
+        socket.write_all(headers.as_bytes()).await.unwrap();
+        socket.write_all(body.as_bytes()).await.unwrap();
+        let mut response = Vec::new();
+        tokio::time::timeout(
+            std::time::Duration::from_secs(5),
+            socket.read_to_end(&mut response),
+        )
+        .await
+        .unwrap()
+        .unwrap();
+        String::from_utf8(response).unwrap()
+    }
+
+    /// Real TCP exercises response-body polling, not just handler wiring.
+    #[tokio::test(flavor = "current_thread")]
+    async fn local_http_logs_json_sse_failures_and_private_body_boundaries() {
+        use crate::acp_api::{
+            backend_channel, AcceptedRequest, BackendCommand, FinishReason, ServiceError,
+            ServiceErrorKind, ServiceStatus,
+        };
+        let (records, recorded) = std::sync::mpsc::channel();
+        let capture = LogCapture(records);
+        let writer = capture.clone();
+        let subscriber = tracing_subscriber::fmt()
+            .with_ansi(false)
+            .with_writer(move || writer.clone())
+            .finish();
+        let _dispatch = tracing::subscriber::set_default(subscriber);
+        let (_status, receiver) = tokio::sync::watch::channel(ServiceStatus::default());
+        let (backend, mut commands) = backend_channel(receiver);
+        let fixture = tokio::spawn(async move {
+            let mut ids = Vec::new();
+            while let Some(command) = commands.recv().await {
+                if let BackendCommand::Submit {
+                    request_id,
+                    input,
+                    events,
+                    reply,
+                    ..
+                } = command
+                {
+                    ids.push(request_id.0.clone());
+                    reply
+                        .send(Ok(AcceptedRequest {
+                            request_id,
+                            session: SessionKey("private-session-marker".into()),
+                            model: input.model,
+                        }))
+                        .unwrap();
+                    match ids.len() {
+                        1 | 2 => {
+                            events
+                                .send(RequestEvent::TextDelta("private-output-marker".into()))
+                                .unwrap();
+                            events
+                                .send(RequestEvent::Completed {
+                                    reason: FinishReason::Stop,
+                                })
+                                .unwrap();
+                        }
+                        3 => {
+                            events
+                                .send(RequestEvent::TextDelta("private-output-marker".into()))
+                                .unwrap();
+                            events
+                                .send(RequestEvent::Failed(ServiceError::new(
+                                    ServiceErrorKind::Internal,
+                                    "private-agent-error-marker",
+                                )))
+                                .unwrap();
+                        }
+                        4 => {
+                            events
+                                .send(RequestEvent::TextDelta("private-output-marker".into()))
+                                .unwrap();
+                            // EOF without a terminal must be diagnosed as failure.
+                        }
+                        5 => {
+                            events
+                                .send(RequestEvent::Failed(ServiceError::new(
+                                    ServiceErrorKind::Internal,
+                                    "private-agent-error-marker",
+                                )))
+                                .unwrap();
+                        }
+                        _ => panic!("unexpected fixture request"),
+                    }
+                    if ids.len() == 5 {
+                        return ids;
+                    }
+                }
+            }
+            panic!("fixture ended before all requests");
+        });
+        let listener = tokio::net::TcpListener::bind(("127.0.0.1", 0))
+            .await
+            .unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let shutdown = CancellationToken::new();
+        let serving = tokio::spawn(serve(listener, router(backend), shutdown.clone()));
+        let invalid = local_request(port, "{\"private-json-marker\":").await;
+        assert!(invalid.starts_with("HTTP/1.1 400"));
+        for (index, stream) in [false, true, true, true, false].into_iter().enumerate() {
+            let body = json!({
+                "model": "fixture",
+                "messages": [{"role": "user", "content": "private-prompt-marker"}],
+                "stream": stream,
+            })
+            .to_string();
+            let response = local_request(port, &body).await;
+            let expected_status = if index == 4 {
+                "HTTP/1.1 502"
+            } else {
+                "HTTP/1.1 200"
+            };
+            assert!(response.starts_with(expected_status), "{response}");
+            if stream {
+                assert_eq!(response.contains("[DONE]"), index == 1);
+            } else if index == 0 {
+                assert!(response.contains("private-output-marker"));
+            }
+        }
+        let ids = fixture.await.unwrap();
+        shutdown.cancel();
+        serving.await.unwrap().unwrap();
+        let logs = String::from_utf8(recorded.try_iter().flatten().collect()).unwrap();
+        for event in [
+            "acp_http_request_started",
+            "acp_http_input_failed",
+            "acp_request_submitted",
+            "acp_http_request_admitted",
+            "acp_http_completion_completed",
+            "acp_http_completion_failed",
+            "acp_sse_completed",
+            "acp_sse_failed",
+        ] {
+            assert!(logs.contains(event), "missing {event}: {logs}");
+        }
+        for (index, id) in ids.iter().enumerate() {
+            let terminal = if index == 0 {
+                "acp_http_completion_completed"
+            } else if index == 1 {
+                "acp_sse_completed"
+            } else if index == 4 {
+                "acp_http_completion_failed"
+            } else {
+                "acp_sse_failed"
+            };
+            assert!(
+                logs.lines()
+                    .any(|line| line.contains(terminal) && line.contains(id)),
+                "{logs}"
+            );
+            assert!(
+                logs.lines()
+                    .any(|line| line.contains("acp_request_submitted") && line.contains(id)),
+                "{logs}"
+            );
+        }
+        assert!(logs.contains("event_eof"));
+        assert!(logs.contains("elapsed_ms"));
+        for private in [
+            "private-json-marker",
+            "private-prompt-marker",
+            "private-output-marker",
+            "private-session-marker",
+            "private-agent-error-marker",
+        ] {
+            assert!(
+                !logs.contains(private),
+                "private data reached diagnostic log: {private}"
+            );
+        }
     }
 }

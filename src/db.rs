@@ -17,8 +17,38 @@ pub struct Database {
     pub conn: Connection,
     pub directory: PathBuf,
 }
+
+/// P-10：任务库边界记录结果及 SQLite/I/O 类别，不记录 SQL 参数和正文。
+fn observe<T>(operation: &'static str, body: impl FnOnce() -> Result<T>) -> Result<T> {
+    let span = crate::logging::operation_span("task_database", operation);
+    let _entered = span.enter();
+    let started = std::time::Instant::now();
+    tracing::info!(event = "database_operation_started", "任务数据库操作开始");
+    let result = body();
+    let elapsed_ms = crate::logging::elapsed_ms(started);
+    match &result {
+        Ok(_) => tracing::info!(
+            event = "database_operation_completed",
+            elapsed_ms,
+            "任务数据库操作完成"
+        ),
+        Err(error) => {
+            let sqlite = error
+                .downcast_ref::<rusqlite::Error>()
+                .and_then(rusqlite::Error::sqlite_error_code);
+            let io = error.downcast_ref::<std::io::Error>();
+            tracing::error!(event = "database_operation_failed", stage = operation, sqlite_code = ?sqlite, io_kind = ?io.map(std::io::Error::kind), error_code = ?io.and_then(std::io::Error::raw_os_error), elapsed_ms, "任务数据库操作失败");
+        }
+    }
+    result
+}
+
 impl Database {
     pub fn create(directory: &Path) -> Result<Self> {
+        observe("create", || Self::create_inner(directory))
+    }
+
+    fn create_inner(directory: &Path) -> Result<Self> {
         std::fs::create_dir_all(directory)?;
         let mut value = Self::open(directory)?;
         // 建表与索引只提交一次，避免新任务为每条 DDL 单独提交。
@@ -36,6 +66,10 @@ impl Database {
         Self::open_impl(directory, true)
     }
     fn open_impl(directory: &Path, existing_only: bool) -> Result<Self> {
+        observe("open", || Self::open_unlogged(directory, existing_only))
+    }
+
+    fn open_unlogged(directory: &Path, existing_only: bool) -> Result<Self> {
         let path = directory.join("task.sqlite3");
         let existed = path.is_file();
         if existing_only {

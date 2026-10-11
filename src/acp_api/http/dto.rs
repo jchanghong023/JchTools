@@ -178,6 +178,14 @@ impl HttpError {
 
 impl IntoResponse for HttpError {
     fn into_response(self) -> Response {
+        tracing::error!(
+            event = "acp_http_error_response",
+            component = "acp_http",
+            status = self.status.as_u16(),
+            error_type = self.kind,
+            error_code = self.code,
+            "ACP HTTP 返回错误响应"
+        );
         (self.status, Json(self.json())).into_response()
     }
 }

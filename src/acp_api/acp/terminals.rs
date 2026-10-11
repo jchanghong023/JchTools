@@ -16,6 +16,7 @@ use tokio::{
     process::Command,
     sync::{mpsc, oneshot, watch},
 };
+use tracing::Instrument;
 
 use super::callbacks::{invalid, io_error};
 
@@ -61,144 +62,165 @@ impl Terminals {
         &self,
         request: CreateTerminalRequest,
     ) -> Result<CreateTerminalResponse, agent_client_protocol::Error> {
-        // 创建和登记同属一个同步临界区，shutdown 不会漏掉已启动的进程。
-        let mut table = self.inner.lock().unwrap_or_else(PoisonError::into_inner);
-        if table.sealed {
-            return Err(invalid("终端服务已停止"));
-        }
-        let cwd = request.cwd.unwrap_or_else(|| self.workspace.clone());
-        if !cwd.is_absolute() || request.command.is_empty() {
-            return Err(invalid("终端程序或绝对工作目录无效"));
-        }
-        let mut command = Command::new(request.command);
-        command
-            .args(request.args)
-            .current_dir(cwd)
-            .stdin(Stdio::null())
-            .stdout(Stdio::piped())
-            .stderr(Stdio::piped());
-        for variable in request.env {
-            command.env(variable.name, variable.value);
-        }
-        #[cfg(windows)]
-        command.creation_flags(0x0800_0000 | 0x0000_0004);
-        let mut child = command.spawn().map_err(|_| io_error("终端进程启动失败"))?;
-        let tree = match TerminalTree::attach_and_resume(&child) {
-            Ok(tree) => Some(tree),
-            Err(error) => {
-                let _ = child.start_kill();
-                return Err(error);
+        crate::acp_api::diagnostics::call("acp_terminal", "create", || {
+            // 创建和登记同属一个同步临界区，shutdown 不会漏掉已启动的进程。
+            let mut table = self.inner.lock().unwrap_or_else(PoisonError::into_inner);
+            if table.sealed {
+                return Err(invalid("终端服务已停止"));
             }
-        };
-        let (Some(stdout), Some(stderr)) = (child.stdout.take(), child.stderr.take()) else {
-            terminate_owned_tree(tree.as_ref(), &mut child, false)?;
-            // 失败的创建没有交付 handle；只回收这次创建的自有子树。
-            return Err(io_error("终端输出管道不可用"));
-        };
-        let id = TerminalId::new(uuid::Uuid::new_v4().to_string());
-        let (control, mut commands) = mpsc::unbounded_channel();
-        let (state, receiver) = watch::channel(Snapshot::default());
-        table.entries.insert(
-            id.clone(),
-            Entry {
-                session: request.session_id,
-                control,
-                state: receiver,
-            },
-        );
-        drop(table);
-        let limit = request.output_byte_limit;
-        tokio::spawn(async move {
-            let (chunks, mut output) = mpsc::channel(16);
-            let out_reader = tokio::spawn(read_pipe(stdout, chunks.clone()));
-            let err_reader = tokio::spawn(read_pipe(stderr, chunks.clone()));
-            drop(chunks);
-            let mut exited = false;
-            let mut pipes_done = false;
-            let mut exit_failed = false;
-            let mut closing: Vec<oneshot::Sender<Result<(), agent_client_protocol::Error>>> =
-                Vec::new();
-            let mut kills: Vec<oneshot::Sender<Result<(), agent_client_protocol::Error>>> =
-                Vec::new();
-            let mut controls_closed = false;
-            let mut drained: Vec<oneshot::Sender<Result<(), agent_client_protocol::Error>>> =
-                Vec::new();
-            let mut tree_done = false;
-            loop {
-                if exited && pipes_done && tree_done {
-                    state.send_modify(|s| s.reaped = !exit_failed);
-                    for reply in drained.drain(..) {
+            let cwd = request.cwd.unwrap_or_else(|| self.workspace.clone());
+            if !cwd.is_absolute() || request.command.is_empty() {
+                return Err(invalid("终端程序或绝对工作目录无效"));
+            }
+            let mut command = Command::new(request.command);
+            command
+                .args(request.args)
+                .current_dir(cwd)
+                .stdin(Stdio::null())
+                .stdout(Stdio::piped())
+                .stderr(Stdio::piped());
+            for variable in request.env {
+                command.env(variable.name, variable.value);
+            }
+            #[cfg(windows)]
+            command.creation_flags(0x0800_0000 | 0x0000_0004);
+            let mut child = command.spawn().map_err(|error| {
+        tracing::error!(event = "acp_terminal_spawn_failed", component = "acp_terminal", stage = "spawn", error_type = ?error.kind(), error_code = ?error.raw_os_error(), "ACP 终端子进程启动失败");
+        io_error("终端进程启动失败")
+    })?;
+            let peer_pid = child.id();
+            let started = std::time::Instant::now();
+            tracing::info!(
+                event = "acp_terminal_spawn_completed",
+                component = "acp_terminal",
+                ?peer_pid,
+                "ACP 终端子进程已启动"
+            );
+            let tree = match TerminalTree::attach_and_resume(&child) {
+                Ok(tree) => Some(tree),
+                Err(error) => {
+                    let _ = child.start_kill();
+                    return Err(error);
+                }
+            };
+            let (Some(stdout), Some(stderr)) = (child.stdout.take(), child.stderr.take()) else {
+                terminate_owned_tree(tree.as_ref(), &mut child, false)?;
+                // 失败的创建没有交付 handle；只回收这次创建的自有子树。
+                return Err(io_error("终端输出管道不可用"));
+            };
+            let id = TerminalId::new(uuid::Uuid::new_v4().to_string());
+            let (control, mut commands) = mpsc::unbounded_channel();
+            let (state, receiver) = watch::channel(Snapshot::default());
+            table.entries.insert(
+                id.clone(),
+                Entry {
+                    session: request.session_id,
+                    control,
+                    state: receiver,
+                },
+            );
+            drop(table);
+            let limit = request.output_byte_limit;
+            tokio::spawn(async move {
+        let (chunks, mut output) = mpsc::channel(16);
+        let out_reader = tokio::spawn(read_pipe(stdout, chunks.clone()).instrument(tracing::Span::current()));
+        let err_reader = tokio::spawn(read_pipe(stderr, chunks.clone()).instrument(tracing::Span::current()));
+        drop(chunks);
+        let mut exited = false;
+        let mut pipes_done = false;
+        let mut exit_failed = false;
+        let mut closing: Vec<oneshot::Sender<Result<(), agent_client_protocol::Error>>> =
+            Vec::new();
+        let mut kills: Vec<oneshot::Sender<Result<(), agent_client_protocol::Error>>> =
+            Vec::new();
+        let mut controls_closed = false;
+        let mut drained: Vec<oneshot::Sender<Result<(), agent_client_protocol::Error>>> =
+            Vec::new();
+        let mut tree_done = false;
+        loop {
+            if exited && pipes_done && tree_done {
+                state.send_modify(|s| s.reaped = !exit_failed);
+                for reply in drained.drain(..) {
+                    let _ = reply.send(if exit_failed {
+                        Err(io_error("终端退出回收失败"))
+                    } else {
+                        Ok(())
+                    });
+                }
+                for reply in kills.drain(..) {
+                    let _ = reply.send(if exit_failed {
+                        Err(io_error("终端退出回收失败"))
+                    } else {
+                        Ok(())
+                    });
+                }
+                if !closing.is_empty() {
+                    for reply in closing.drain(..) {
                         let _ = reply.send(if exit_failed {
                             Err(io_error("终端退出回收失败"))
                         } else {
                             Ok(())
                         });
                     }
-                    for reply in kills.drain(..) {
-                        let _ = reply.send(if exit_failed {
-                            Err(io_error("终端退出回收失败"))
-                        } else {
-                            Ok(())
-                        });
-                    }
-                    if !closing.is_empty() {
-                        for reply in closing.drain(..) {
-                            let _ = reply.send(if exit_failed {
-                                Err(io_error("终端退出回收失败"))
-                            } else {
-                                Ok(())
-                            });
-                        }
-                        break;
-                    }
-                    if controls_closed {
-                        break;
+                    break;
+                }
+                if controls_closed {
+                    break;
+                }
+            }
+            tokio::select! {
+                result = wait_owned_tree(tree.as_ref()), if exited && !tree_done => {
+                    tree_done = true;
+                    if result.is_err() {
+                        tracing::error!(event = "acp_terminal_cleanup_failed", component = "acp_terminal", ?peer_pid, stage = "wait_tree", elapsed_ms = crate::logging::elapsed_ms(started), "ACP 终端子树回收失败");
+                        exit_failed = true;
+                        state.send_modify(|s| s.error = true);
                     }
                 }
-                tokio::select! {
-                    result = wait_owned_tree(tree.as_ref()), if exited && !tree_done => {
-                        tree_done = true;
-                        if result.is_err() {
-                            exit_failed = true;
-                            state.send_modify(|s| s.error = true);
-                        }
+                result = child.wait(), if !exited => {
+                    exited = true;
+                    exit_failed = result.is_err();
+                    match &result {
+                        Ok(status) => tracing::info!(event = "acp_terminal_exited", component = "acp_terminal", ?peer_pid, exit_code = ?status.code(), success = status.success(), elapsed_ms = crate::logging::elapsed_ms(started), "ACP 终端子进程已退出"),
+                        Err(error) => tracing::error!(event = "acp_terminal_exit_failed", component = "acp_terminal", ?peer_pid, stage = "wait_exit", error_type = ?error.kind(), error_code = ?error.raw_os_error(), elapsed_ms = crate::logging::elapsed_ms(started), "ACP 终端进程退出等待失败"),
                     }
-                    result = child.wait(), if !exited => {
-                        exited = true;
-                        exit_failed = result.is_err();
-                        state.send_modify(|s| match result {
-                            // Windows returns a DWORD through i32; retain its exact bit pattern.
-                            Ok(status) => s.exit = Some(TerminalExitStatus::new().exit_code(status.code().map(i32::cast_unsigned))),
-                            Err(_) => s.error = true,
-                        });
-                    }
-                    chunk = output.recv(), if !pipes_done => match chunk {
-                        Some(Ok(text)) => state.send_modify(|s| append_output(s, &text, limit)),
-                        Some(Err(())) => state.send_modify(|s| s.error = true),
-                        None => {
-                            pipes_done = true;
-                            state.send_modify(|s| s.output_complete = true);
-                        },
+                    state.send_modify(|s| match result {
+                        // Windows returns a DWORD through i32; retain its exact bit pattern.
+                        Ok(status) => s.exit = Some(TerminalExitStatus::new().exit_code(status.code().map(i32::cast_unsigned))),
+                        Err(_) => s.error = true,
+                    });
+                }
+                chunk = output.recv(), if !pipes_done => match chunk {
+                    Some(Ok(text)) => state.send_modify(|s| append_output(s, &text, limit)),
+                    Some(Err(())) => {
+                        tracing::error!(event = "acp_terminal_output_failed", component = "acp_terminal", ?peer_pid, stage = "read_pipe", error_type = "io", "ACP 终端输出管道读取失败");
+                        state.send_modify(|s| s.error = true);
                     },
-                    command = commands.recv(), if !controls_closed => match command {
-                        Some(Control::Kill(reply)) => {
-                            if terminate_owned_tree(tree.as_ref(), &mut child, exited).is_err() { let _ = reply.send(Err(io_error("终端终止失败"))); }
-                            else { kills.push(reply); }
-                        }
-                        Some(Control::Release(reply)) => {
-                            if terminate_owned_tree(tree.as_ref(), &mut child, exited).is_err() { let _ = reply.send(Err(io_error("终端释放失败"))); }
-                            else { closing.push(reply); }
-                        }
-                        Some(Control::Drain(reply)) => drained.push(reply),
-                        // 服务退出/控制端丢失不是 Agent 的 terminal/kill。
-                        None => controls_closed = true,
+                    None => {
+                        pipes_done = true;
+                        state.send_modify(|s| s.output_complete = true);
+                    },
+                },
+                command = commands.recv(), if !controls_closed => match command {
+                    Some(Control::Kill(reply)) => {
+                        if terminate_owned_tree(tree.as_ref(), &mut child, exited).is_err() { let _ = reply.send(Err(io_error("终端终止失败"))); }
+                        else { kills.push(reply); }
                     }
+                    Some(Control::Release(reply)) => {
+                        if terminate_owned_tree(tree.as_ref(), &mut child, exited).is_err() { let _ = reply.send(Err(io_error("终端释放失败"))); }
+                        else { closing.push(reply); }
+                    }
+                    Some(Control::Drain(reply)) => drained.push(reply),
+                    // 服务退出/控制端丢失不是 Agent 的 terminal/kill。
+                    None => controls_closed = true,
                 }
             }
-            let _ = out_reader.await;
-            let _ = err_reader.await;
-        });
-        Ok(CreateTerminalResponse::new(id))
+        }
+        let _ = out_reader.await;
+        let _ = err_reader.await;
+    }.instrument(tracing::Span::current()));
+            Ok(CreateTerminalResponse::new(id))
+        })
     }
     fn entry(
         &self,
@@ -218,67 +240,86 @@ impl Terminals {
         &self,
         request: &TerminalOutputRequest,
     ) -> Result<TerminalOutputResponse, agent_client_protocol::Error> {
-        let entry = self.entry(&request.session_id, &request.terminal_id)?;
-        let state = entry.state.borrow();
-        if state.error {
-            return Err(io_error("终端输出或等待失败"));
-        }
-        Ok(
-            TerminalOutputResponse::new(state.output.clone(), state.truncated)
-                .exit_status(state.exit.clone()),
-        )
+        crate::acp_api::diagnostics::call("acp_terminal", "output", || {
+            let entry = self.entry(&request.session_id, &request.terminal_id)?;
+            let state = entry.state.borrow();
+            if state.error {
+                return Err(io_error("终端输出或等待失败"));
+            }
+            tracing::info!(
+                event = "acp_terminal_output_completed",
+                component = "acp_terminal",
+                size_bytes = state.output.len(),
+                truncated = state.truncated,
+                exited = state.exit.is_some(),
+                "ACP 终端输出快照读取完成"
+            );
+            Ok(
+                TerminalOutputResponse::new(state.output.clone(), state.truncated)
+                    .exit_status(state.exit.clone()),
+            )
+        })
     }
     pub(super) async fn wait(
         &self,
         request: WaitForTerminalExitRequest,
     ) -> Result<WaitForTerminalExitResponse, agent_client_protocol::Error> {
-        let mut state = self.entry(&request.session_id, &request.terminal_id)?.state;
-        loop {
-            {
-                let snapshot = state.borrow();
-                if snapshot.error {
-                    return Err(io_error("终端等待失败"));
-                }
-                // 进程退出通知可以早于最后一批 stdout/stderr；wait 后输出必须完整可读。
-                if snapshot.output_complete {
-                    if let Some(exit) = &snapshot.exit {
-                        return Ok(WaitForTerminalExitResponse::new(exit.clone()));
+        crate::acp_api::diagnostics::async_call("acp_terminal", "wait", async {
+            let mut state = self.entry(&request.session_id, &request.terminal_id)?.state;
+            loop {
+                {
+                    let snapshot = state.borrow();
+                    if snapshot.error {
+                        return Err(io_error("终端等待失败"));
+                    }
+                    // 进程退出通知可以早于最后一批 stdout/stderr；wait 后输出必须完整可读。
+                    if snapshot.output_complete {
+                        if let Some(exit) = &snapshot.exit {
+                            return Ok(WaitForTerminalExitResponse::new(exit.clone()));
+                        }
                     }
                 }
+                state
+                    .changed()
+                    .await
+                    .map_err(|_| io_error("终端状态通道已关闭"))?;
             }
-            state
-                .changed()
-                .await
-                .map_err(|_| io_error("终端状态通道已关闭"))?;
-        }
+        })
+        .await
     }
     pub(super) async fn kill(
         &self,
         request: KillTerminalRequest,
     ) -> Result<KillTerminalResponse, agent_client_protocol::Error> {
-        let entry = self.entry(&request.session_id, &request.terminal_id)?;
-        let (reply, response) = oneshot::channel();
-        entry
-            .control
-            .send(Control::Kill(reply))
-            .map_err(|_| io_error("终端控制通道已关闭"))?;
-        response
-            .await
-            .map_err(|_| io_error("终端控制通道已关闭"))??;
-        Ok(KillTerminalResponse::new())
+        crate::acp_api::diagnostics::async_call("acp_terminal", "kill", async {
+            let entry = self.entry(&request.session_id, &request.terminal_id)?;
+            let (reply, response) = oneshot::channel();
+            entry
+                .control
+                .send(Control::Kill(reply))
+                .map_err(|_| io_error("终端控制通道已关闭"))?;
+            response
+                .await
+                .map_err(|_| io_error("终端控制通道已关闭"))??;
+            Ok(KillTerminalResponse::new())
+        })
+        .await
     }
     pub(super) async fn release(
         &self,
         request: ReleaseTerminalRequest,
     ) -> Result<ReleaseTerminalResponse, agent_client_protocol::Error> {
-        let entry = self.entry(&request.session_id, &request.terminal_id)?;
-        Self::control(entry, false).await?;
-        self.inner
-            .lock()
-            .unwrap_or_else(PoisonError::into_inner)
-            .entries
-            .remove(&request.terminal_id);
-        Ok(ReleaseTerminalResponse::new())
+        crate::acp_api::diagnostics::async_call("acp_terminal", "release", async {
+            let entry = self.entry(&request.session_id, &request.terminal_id)?;
+            Self::control(entry, false).await?;
+            self.inner
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner)
+                .entries
+                .remove(&request.terminal_id);
+            Ok(ReleaseTerminalResponse::new())
+        })
+        .await
     }
     async fn control(entry: Entry, drain: bool) -> Result<(), agent_client_protocol::Error> {
         let (reply, response) = oneshot::channel();
@@ -302,30 +343,33 @@ impl Terminals {
     }
     // 只封创建；保留表中的 session/handle，使 Agent 在等待期间仍能管理终端。
     pub(super) async fn shutdown(&self) -> Result<(), agent_client_protocol::Error> {
-        let entries = {
-            let mut table = self.inner.lock().unwrap_or_else(PoisonError::into_inner);
-            table.sealed = true;
-            table
-                .entries
-                .iter()
-                .map(|(id, entry)| (id.clone(), entry.clone()))
-                .collect::<Vec<_>>()
-        };
-        let mut result = Ok(());
-        for (id, entry) in entries {
-            match Self::control(entry, true).await {
-                Ok(()) => {
-                    self.inner
-                        .lock()
-                        .unwrap_or_else(PoisonError::into_inner)
-                        .entries
-                        .remove(&id);
+        crate::acp_api::diagnostics::async_call("acp_terminal", "shutdown", async {
+            let entries = {
+                let mut table = self.inner.lock().unwrap_or_else(PoisonError::into_inner);
+                table.sealed = true;
+                table
+                    .entries
+                    .iter()
+                    .map(|(id, entry)| (id.clone(), entry.clone()))
+                    .collect::<Vec<_>>()
+            };
+            let mut result = Ok(());
+            for (id, entry) in entries {
+                match Self::control(entry, true).await {
+                    Ok(()) => {
+                        self.inner
+                            .lock()
+                            .unwrap_or_else(PoisonError::into_inner)
+                            .entries
+                            .remove(&id);
+                    }
+                    Err(error) if result.is_ok() => result = Err(error),
+                    Err(_) => {}
                 }
-                Err(error) if result.is_ok() => result = Err(error),
-                Err(_) => {}
             }
-        }
-        result
+            result
+        })
+        .await
     }
 }
 fn append_output(snapshot: &mut Snapshot, text: &str, limit: Option<u64>) {

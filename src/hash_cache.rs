@@ -28,6 +28,26 @@ pub fn identity_is_degenerate(identity: &str) -> bool {
 impl HashCache {
     /// 打开（必要时创建）状态目录下的 hash-cache.sqlite3。失败由调用方降级。
     pub fn open(state_dir: &Path) -> Result<Self> {
+        let span = crate::logging::operation_span("hash_cache", "open");
+        let _entered = span.enter();
+        let started = std::time::Instant::now();
+        tracing::info!(event = "hash_cache_open_started", "哈希缓存打开开始");
+        let result = Self::open_inner(state_dir);
+        let elapsed_ms = crate::logging::elapsed_ms(started);
+        match &result {
+            Ok(_) => tracing::info!(
+                event = "hash_cache_open_completed",
+                elapsed_ms,
+                "哈希缓存已打开"
+            ),
+            Err(error) => {
+                tracing::warn!(event = "hash_cache_open_failed", stage = "open_or_schema", sqlite_code = ?error.downcast_ref::<rusqlite::Error>().and_then(rusqlite::Error::sqlite_error_code), elapsed_ms, fallback = "recompute", "哈希缓存不可用，交由调用者退化")
+            }
+        }
+        result
+    }
+
+    fn open_inner(state_dir: &Path) -> Result<Self> {
         let conn =
             Connection::open(state_dir.join("hash-cache.sqlite3")).context("打开哈希缓存库失败")?;
         conn.busy_timeout(std::time::Duration::from_secs(5))?;
@@ -43,6 +63,21 @@ impl HashCache {
 
     /// 查缓存哈希；键与 C-13 一致（文件标识、大小、修改时间三者必须全等）。
     pub fn lookup(&self, identity: &str, size: i64, mtime: i64) -> Result<Option<String>> {
+        let result = self.lookup_inner(identity, size, mtime);
+        match &result {
+            Ok(value) => tracing::debug!(
+                event = "hash_cache_lookup_completed",
+                hit = value.is_some(),
+                "哈希缓存查询完成"
+            ),
+            Err(error) => {
+                tracing::warn!(event = "hash_cache_lookup_failed", stage = "lookup", sqlite_code = ?error.downcast_ref::<rusqlite::Error>().and_then(rusqlite::Error::sqlite_error_code), fallback = "recompute", "哈希缓存查询失败")
+            }
+        }
+        result
+    }
+
+    fn lookup_inner(&self, identity: &str, size: i64, mtime: i64) -> Result<Option<String>> {
         let mut stmt = self.conn.prepare_cached(
             "SELECT hash FROM hash_cache WHERE identity=?1 AND size=?2 AND mtime=?3",
         )?;
@@ -53,6 +88,31 @@ impl HashCache {
 
     /// 批量写入本次新算出的哈希；单事务保证短锁，updated 供后续清理策略使用。
     pub fn store(&self, entries: &[(String, i64, i64, String)]) -> Result<()> {
+        let span = crate::logging::operation_span("hash_cache", "store");
+        let _entered = span.enter();
+        let started = std::time::Instant::now();
+        tracing::info!(
+            event = "hash_cache_store_started",
+            entries = entries.len(),
+            "哈希缓存批量保存开始"
+        );
+        let result = self.store_inner(entries);
+        let elapsed_ms = crate::logging::elapsed_ms(started);
+        match &result {
+            Ok(()) => tracing::info!(
+                event = "hash_cache_store_completed",
+                entries = entries.len(),
+                elapsed_ms,
+                "哈希缓存批量保存完成"
+            ),
+            Err(error) => {
+                tracing::warn!(event = "hash_cache_store_failed", stage = "transaction", sqlite_code = ?error.downcast_ref::<rusqlite::Error>().and_then(rusqlite::Error::sqlite_error_code), elapsed_ms, "哈希缓存批量保存失败")
+            }
+        }
+        result
+    }
+
+    fn store_inner(&self, entries: &[(String, i64, i64, String)]) -> Result<()> {
         let updated = chrono::Utc::now().timestamp();
         self.conn.execute_batch("BEGIN IMMEDIATE")?;
         let result = (|| {

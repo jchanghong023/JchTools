@@ -9,6 +9,29 @@ use std::{
     time::{Duration, Instant},
 };
 
+// 只记录已知程序类别；自定义程序名也可能含用户数据，不落盘原路径或参数。
+fn executable_kind(command: &Command) -> &'static str {
+    let name = std::path::Path::new(command.get_program())
+        .file_name()
+        .and_then(|name| name.to_str())
+        .unwrap_or("");
+    match name {
+        name if name.eq_ignore_ascii_case("git.exe") || name.eq_ignore_ascii_case("git") => "git",
+        name if name.eq_ignore_ascii_case("7z.exe") || name.eq_ignore_ascii_case("7z") => "7zip",
+        name if name.eq_ignore_ascii_case("powershell.exe") => "powershell",
+        name if name.eq_ignore_ascii_case("pandoc.exe") => "pandoc",
+        name if name.eq_ignore_ascii_case("cmd.exe") => "cmd",
+        _ => "other",
+    }
+}
+
+#[cfg(windows)]
+fn job_os_error(stage: &'static str) -> std::io::Error {
+    let error = std::io::Error::last_os_error();
+    tracing::error!(event = "subprocess_job_failed", stage, error_type = ?error.kind(), error_code = error.raw_os_error(), "子进程组系统调用失败");
+    error
+}
+
 #[derive(Debug)]
 enum PipeMessage {
     Line(bool, String),
@@ -83,7 +106,11 @@ fn pump<R: Read + Send + 'static>(
     err: bool,
     sender: mpsc::SyncSender<PipeMessage>,
 ) -> thread::JoinHandle<()> {
+    let span = tracing::Span::current();
+    let dispatcher = tracing::dispatcher::get_default(Clone::clone);
     thread::spawn(move || {
+        let _dispatcher = tracing::dispatcher::set_default(&dispatcher);
+        let _entered = span.enter();
         let mut input = BufReader::with_capacity(65536, reader);
         let mut line = Vec::with_capacity(1024);
         // Windows 上 7-Zip 用 CRLF 输出；'\r' 和 '\n' 会各触发一次扫描，必须吃掉紧跟其后的 '\n'，
@@ -94,6 +121,7 @@ fn pump<R: Read + Send + 'static>(
                 let bytes = match input.fill_buf() {
                     Ok(bytes) => bytes,
                     Err(e) => {
+                        tracing::error!(event = "pipe_read_failed", stream = if err { "stderr" } else { "stdout" }, error_type = ?e.kind(), error_code = e.raw_os_error(), "子进程管道读取失败");
                         let _ = sender.send(PipeMessage::Error(e.to_string()));
                         break;
                     }
@@ -102,7 +130,15 @@ fn pump<R: Read + Send + 'static>(
                     if !line.is_empty() {
                         let message = match String::from_utf8(std::mem::take(&mut line)) {
                             Ok(text) => PipeMessage::Line(err, text),
-                            Err(_) => PipeMessage::Error("7-Zip 输出不是 UTF-8".into()),
+                            Err(_) => {
+                                tracing::error!(
+                                    event = "pipe_decode_failed",
+                                    stream = if err { "stderr" } else { "stdout" },
+                                    error_type = "invalid_utf8",
+                                    "子进程管道解码失败"
+                                );
+                                PipeMessage::Error("7-Zip 输出不是 UTF-8".into())
+                            }
                         };
                         let _ = sender.send(message);
                     }
@@ -121,6 +157,12 @@ fn pump<R: Read + Send + 'static>(
             skip_lf = terminated == Some(true);
             input.consume(consume);
             if line.len() > 64 * 1024 {
+                tracing::error!(
+                    event = "pipe_line_limit_exceeded",
+                    stream = if err { "stderr" } else { "stdout" },
+                    limit_bytes = 64 * 1024,
+                    "子进程输出行超过解析上限"
+                );
                 let _ = sender.send(PipeMessage::Error(
                     "7-Zip 输出行超过 64 KiB，已拒绝解析".into(),
                 ));
@@ -128,6 +170,12 @@ fn pump<R: Read + Send + 'static>(
             }
             if terminated.is_some() {
                 let Ok(text) = String::from_utf8(std::mem::take(&mut line)) else {
+                    tracing::error!(
+                        event = "pipe_decode_failed",
+                        stream = if err { "stderr" } else { "stdout" },
+                        error_type = "invalid_utf8",
+                        "子进程管道解码失败"
+                    );
                     let _ = sender.send(PipeMessage::Error(
                         "7-Zip 未返回有效 UTF-8，无法安全解析文件路径".into(),
                     ));
@@ -182,11 +230,30 @@ pub(crate) fn join_with_deadline<T>(handle: thread::JoinHandle<T>, limit: Durati
     let deadline = Instant::now() + limit;
     while !handle.is_finished() {
         if Instant::now() >= deadline {
+            tracing::warn!(
+                component = "process",
+                event = "thread_drain_abandoned",
+                stage = "join",
+                timeout_ms = u64::try_from(limit.as_millis()).unwrap_or(u64::MAX),
+                "子进程收尾线程超时，保留原有分离策略"
+            );
             return None;
         }
         thread::sleep(Duration::from_millis(10));
     }
-    handle.join().ok()
+    match handle.join() {
+        Ok(value) => Some(value),
+        Err(_) => {
+            tracing::error!(
+                component = "process",
+                event = "thread_join_failed",
+                stage = "join",
+                error_type = "thread_panic",
+                "子进程收尾线程异常退出"
+            );
+            None
+        }
+    }
 }
 
 /// 等待子进程时的取消来源：既支持旧工具链路的 [`Control`]，
@@ -207,8 +274,35 @@ impl CancelSource<'_> {
 
 /// 回收子进程：kill 之后必须 wait（成对不变量，拆开执行会残留进程或句柄）。
 fn reap(child: &mut Child) {
-    let _ = child.kill();
-    let _ = child.wait();
+    let started = Instant::now();
+    tracing::warn!(
+        event = "subprocess_kill_started",
+        peer_pid = child.id(),
+        "开始终止并回收子进程"
+    );
+    match child.kill() {
+        Ok(()) => tracing::info!(
+            event = "subprocess_kill_completed",
+            peer_pid = child.id(),
+            "子进程终止请求已执行"
+        ),
+        Err(error) => {
+            tracing::warn!(event = "subprocess_kill_failed", peer_pid = child.id(), error_type = ?error.kind(), error_code = error.raw_os_error(), "子进程终止请求失败，继续回收")
+        }
+    }
+    match child.wait() {
+        Ok(status) => tracing::info!(
+            event = "subprocess_reap_completed",
+            peer_pid = child.id(),
+            success = status.success(),
+            exit_code = status.code(),
+            elapsed_ms = crate::logging::elapsed_ms(started),
+            "子进程已回收"
+        ),
+        Err(error) => {
+            tracing::error!(event = "subprocess_reap_failed", peer_pid = child.id(), error_type = ?error.kind(), error_code = error.raw_os_error(), elapsed_ms = crate::logging::elapsed_ms(started), "子进程回收失败")
+        }
+    }
 }
 
 /// 带宿主侧总超时地运行命令并捕获全部输出。
@@ -243,7 +337,18 @@ pub fn run_with_timeout_control_limit(
     control: &Control,
     capture_limit: usize,
 ) -> Result<CapturedOutput> {
-    control.check_cancelled()?;
+    if let Err(error) = control.check_cancelled() {
+        let span = crate::logging::operation_span("process", "capture");
+        let _entered = span.enter();
+        tracing::info!(
+            event = "subprocess_cancelled",
+            stage = "pre_cancelled",
+            state = "cancelled",
+            elapsed_ms = 0,
+            "操作已取消，未启动子进程"
+        );
+        return Err(error);
+    }
     run_with_timeout_ext(
         command,
         None,
@@ -280,7 +385,7 @@ impl ProcessTreeJob {
         // SAFETY: 无继承的未命名 Job；成功后将唯一句柄交给 OwnedHandle 关闭。
         let handle = unsafe { CreateJobObjectW(std::ptr::null(), std::ptr::null()) };
         if handle.is_null() {
-            return Err(std::io::Error::last_os_error()).context("无法创建查询进程组");
+            return Err(job_os_error("job_create")).context("无法创建查询进程组");
         }
         // SAFETY: 句柄有效且尚未转移所有权。
         let job = Self(unsafe { OwnedHandle::from_raw_handle(handle.cast()) });
@@ -299,18 +404,18 @@ impl ProcessTreeJob {
             )
         } == 0
         {
-            return Err(std::io::Error::last_os_error()).context("无法配置查询进程组");
+            return Err(job_os_error("job_configure")).context("无法配置查询进程组");
         }
         // SAFETY: 子进程仍处于 CREATE_SUSPENDED，尚不能创建未受 Job 管理的后代。
         if unsafe { AssignProcessToJobObject(handle, child.as_raw_handle().cast()) } == 0 {
-            return Err(std::io::Error::last_os_error()).context("无法加入查询进程组");
+            return Err(job_os_error("job_assign")).context("无法加入查询进程组");
         }
         // Rust 的主线程句柄接口尚不稳定；暂停创建的子进程只有一个初始线程，
         // 用系统线程快照取得它，加入 Job 后才恢复执行。
         // SAFETY: 只读系统线程快照，失败的 INVALID_HANDLE_VALUE 不交给 OwnedHandle。
         let snapshot = unsafe { CreateToolhelp32Snapshot(TH32CS_SNAPTHREAD, 0) };
         if snapshot == INVALID_HANDLE_VALUE {
-            return Err(std::io::Error::last_os_error()).context("无法查询暂停进程的线程");
+            return Err(job_os_error("thread_snapshot")).context("无法查询暂停进程的线程");
         }
         // SAFETY: 成功的快照句柄有效且尚未转移所有权。
         let snapshot = unsafe { OwnedHandle::from_raw_handle(snapshot.cast()) };
@@ -324,13 +429,13 @@ impl ProcessTreeJob {
                 // SAFETY: 快照中的线程属于暂停子进程，仅请求恢复权限且不继承句柄。
                 let thread = unsafe { OpenThread(THREAD_SUSPEND_RESUME, 0, entry.th32ThreadID) };
                 if thread.is_null() {
-                    return Err(std::io::Error::last_os_error()).context("无法打开暂停进程的线程");
+                    return Err(job_os_error("thread_open")).context("无法打开暂停进程的线程");
                 }
                 // SAFETY: 成功的线程句柄有效且尚未转移所有权。
                 let thread = unsafe { OwnedHandle::from_raw_handle(thread.cast()) };
                 // SAFETY: 有效初始线程句柄，子进程已加入拥有的 Job。
                 if unsafe { ResumeThread(thread.as_raw_handle().cast()) } == u32::MAX {
-                    return Err(std::io::Error::last_os_error()).context("无法恢复查询进程");
+                    return Err(job_os_error("thread_resume")).context("无法恢复查询进程");
                 }
                 return Ok(job);
             }
@@ -338,6 +443,12 @@ impl ProcessTreeJob {
             // SAFETY: 有效快照句柄及配套线程信息缓冲区。
             present = unsafe { Thread32Next(snapshot.as_raw_handle().cast(), &raw mut entry) };
         }
+        tracing::error!(
+            event = "subprocess_job_failed",
+            stage = "thread_lookup",
+            error_type = "initial_thread_missing",
+            "找不到暂停子进程的初始线程"
+        );
         bail!("找不到暂停查询进程的初始线程");
     }
 }
@@ -350,7 +461,74 @@ fn run_with_timeout_ext(
     capture_limit: usize,
     reject_truncation: bool,
 ) -> Result<CapturedOutput> {
+    let operation = crate::logging::operation_span("process", "capture");
+    let _operation = operation.enter();
+    let span = tracing::info_span!(
+        "subprocess",
+        executable = executable_kind(command),
+        peer_pid = tracing::field::Empty
+    );
+    let _entered = span.enter();
+    let started = Instant::now();
+    tracing::info!(
+        event = "spawn_started",
+        timeout_ms = u64::try_from(timeout.as_millis()).unwrap_or(u64::MAX),
+        capture_limit,
+        stdin_present = stdin_data.is_some(),
+        "开始启动捕获子进程"
+    );
+    let result = run_with_timeout_inner(
+        command,
+        stdin_data,
+        timeout,
+        cancel,
+        capture_limit,
+        reject_truncation,
+    );
+    match &result {
+        Ok(output) => tracing::info!(
+            event = "subprocess_completed",
+            success = output.status.success(),
+            exit_code = output.status.code(),
+            stdout_bytes = output.stdout.len(),
+            stderr_bytes = output.stderr.len(),
+            stdout_truncated = output.stdout_truncated,
+            stderr_truncated = output.stderr_truncated,
+            elapsed_ms = crate::logging::elapsed_ms(started),
+            "捕获子进程执行结束"
+        ),
+        Err(_) if cancel.is_some_and(CancelSource::is_cancelled) => tracing::info!(
+            event = "subprocess_cancelled",
+            stage = "terminal",
+            state = "cancelled",
+            elapsed_ms = crate::logging::elapsed_ms(started),
+            "捕获子进程操作已取消"
+        ),
+        Err(_) => tracing::error!(
+            event = "subprocess_failed",
+            state = "failed",
+            error_type = "subprocess_error",
+            elapsed_ms = crate::logging::elapsed_ms(started),
+            "捕获子进程执行失败，详见关联阶段事件"
+        ),
+    }
+    result
+}
+
+fn run_with_timeout_inner(
+    command: &mut Command,
+    stdin_data: Option<&[u8]>,
+    timeout: Duration,
+    cancel: Option<&CancelSource<'_>>,
+    capture_limit: usize,
+    reject_truncation: bool,
+) -> Result<CapturedOutput> {
     if cancel.is_some_and(CancelSource::is_cancelled) {
+        tracing::warn!(
+            event = "subprocess_cancelled",
+            stage = "before_spawn",
+            "操作已取消，未启动子进程"
+        );
         bail!("操作已取消，未启动子进程");
     }
     if stdin_data.is_some() {
@@ -370,13 +548,25 @@ fn run_with_timeout_ext(
     // 错误必须带上程序名与系统原因：调用方（nettest/proxy）用 `to_string()` 展示，
     // 只取最外层文本；一旦只写"无法启动子进程"，用户就无从判断是哪个程序、为何失败。
     let mut child = command.spawn().map_err(|error| {
+        tracing::error!(event = "spawn_failed", stage = "spawn", error_type = ?error.kind(), error_code = error.raw_os_error(), "子进程启动失败");
         anyhow::anyhow!(
             "无法启动 {}：{error}",
             command.get_program().to_string_lossy()
         )
     })?;
+    tracing::Span::current().record("peer_pid", child.id());
+    tracing::info!(
+        event = "spawn_completed",
+        peer_pid = child.id(),
+        "子进程已创建"
+    );
     // spawn 是同步系统调用；若取消在创建期间到达，不再启动读写线程或恢复暂停进程。
     if cancel.is_some_and(CancelSource::is_cancelled) {
+        tracing::warn!(
+            event = "subprocess_cancelled",
+            stage = "after_spawn",
+            "创建期间收到取消，回收子进程"
+        );
         reap(&mut child);
         bail!("操作已取消，子进程已终止");
     }
@@ -384,13 +574,33 @@ fn run_with_timeout_ext(
     let job = match ProcessTreeJob::attach_and_resume(&child) {
         Ok(job) => job,
         Err(error) => {
+            tracing::error!(
+                event = "subprocess_job_failed",
+                stage = "job_attach_resume",
+                error_code = error
+                    .downcast_ref::<std::io::Error>()
+                    .and_then(std::io::Error::raw_os_error),
+                "子进程组加入或恢复失败"
+            );
             reap(&mut child);
             return Err(error);
         }
     };
     if cancel.is_some_and(CancelSource::is_cancelled) {
+        tracing::warn!(
+            event = "subprocess_cancelled",
+            stage = "after_resume",
+            "恢复期间收到取消，回收子进程树"
+        );
         #[cfg(windows)]
-        drop(job);
+        {
+            tracing::warn!(
+                event = "subprocess_tree_release",
+                reason = "cancelled",
+                "关闭进程组，按既有策略回收子进程树"
+            );
+            drop(job);
+        }
         reap(&mut child);
         bail!("操作已取消，子进程已终止");
     }
@@ -400,28 +610,72 @@ fn run_with_timeout_ext(
     // 永远进不了 wait_child_with_deadline，timeout 形同虚设，可无限期挂死。
     // 复制一份数据以满足线程的 'static 要求；写完后 drop stdin 发送 EOF。
     let stdin_owned = stdin_data.map(<[u8]>::to_vec);
+    let stdin_span = tracing::Span::current();
+    let stdin_dispatcher = tracing::dispatcher::get_default(Clone::clone);
     let stdin_thread = match (stdin_owned, child.stdin.take()) {
         (Some(data), Some(mut stdin)) => Some(thread::spawn(move || {
+            let _dispatcher = tracing::dispatcher::set_default(&stdin_dispatcher);
+            let _entered = stdin_span.enter();
             let result = stdin.write_all(&data).and_then(|()| stdin.flush());
+            if let Err(error) = &result {
+                tracing::warn!(event = "pipe_write_failed", stream = "stdin", error_type = ?error.kind(), error_code = error.raw_os_error(), "子进程输入管道写入失败，按退出状态判断结果");
+            }
             drop(stdin);
             result
         })),
+        (Some(_), None) => {
+            tracing::error!(
+                event = "pipe_missing",
+                stream = "stdin",
+                stage = "capture_setup",
+                "子进程缺少输入管道，保持既有无写入行为"
+            );
+            None
+        }
         _ => None,
     };
 
     // take 失败时必须 kill+wait 回收子进程，并等 stdin 线程结束，避免残留与悬挂。
     let Some(stdout_pipe) = child.stdout.take() else {
+        tracing::error!(
+            event = "pipe_missing",
+            stream = "stdout",
+            stage = "capture_setup",
+            "子进程缺少输出管道"
+        );
         reap(&mut child);
         if let Some(handle) = stdin_thread {
-            let _ = handle.join();
+            if handle.join().is_err() {
+                tracing::error!(
+                    event = "thread_join_failed",
+                    stream = "stdin",
+                    stage = "capture_setup_cleanup",
+                    error_type = "thread_panic",
+                    "输入管道清理线程异常退出"
+                );
+            }
         }
         bail!("缺少 stdout");
     };
     let Some(stderr_pipe) = child.stderr.take() else {
+        tracing::error!(
+            event = "pipe_missing",
+            stream = "stderr",
+            stage = "capture_setup",
+            "子进程缺少错误管道"
+        );
         reap(&mut child);
         drop(stdout_pipe);
         if let Some(handle) = stdin_thread {
-            let _ = handle.join();
+            if handle.join().is_err() {
+                tracing::error!(
+                    event = "thread_join_failed",
+                    stream = "stdin",
+                    stage = "capture_setup_cleanup",
+                    error_type = "thread_panic",
+                    "输入管道清理线程异常退出"
+                );
+            }
         }
         bail!("缺少 stderr");
     };
@@ -430,46 +684,103 @@ fn run_with_timeout_ext(
     let exceeded =
         reject_truncation.then(|| std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)));
     let stdout_exceeded = exceeded.clone();
-    let stdout_thread = thread::spawn(move || match stdout_exceeded.as_deref() {
-        Some(exceeded) => read_all_capped_ext(stdout_pipe, capture_limit, Some(exceeded)),
-        None => read_all_capped(stdout_pipe, capture_limit),
+    let stdout_span = tracing::Span::current();
+    let stdout_dispatcher = tracing::dispatcher::get_default(Clone::clone);
+    let stdout_thread = thread::spawn(move || {
+        let _dispatcher = tracing::dispatcher::set_default(&stdout_dispatcher);
+        let _entered = stdout_span.enter();
+        let _stream = tracing::info_span!("pipe_capture", stream = "stdout").entered();
+        match stdout_exceeded.as_deref() {
+            Some(exceeded) => read_all_capped_ext(stdout_pipe, capture_limit, Some(exceeded)),
+            None => read_all_capped(stdout_pipe, capture_limit),
+        }
     });
     let stderr_exceeded = exceeded.clone();
-    let stderr_thread = thread::spawn(move || match stderr_exceeded.as_deref() {
-        Some(exceeded) => read_all_capped_ext(stderr_pipe, capture_limit, Some(exceeded)),
-        None => read_all_capped(stderr_pipe, capture_limit),
+    let stderr_span = tracing::Span::current();
+    let stderr_dispatcher = tracing::dispatcher::get_default(Clone::clone);
+    let stderr_thread = thread::spawn(move || {
+        let _dispatcher = tracing::dispatcher::set_default(&stderr_dispatcher);
+        let _entered = stderr_span.enter();
+        let _stream = tracing::info_span!("pipe_capture", stream = "stderr").entered();
+        match stderr_exceeded.as_deref() {
+            Some(exceeded) => read_all_capped_ext(stderr_pipe, capture_limit, Some(exceeded)),
+            None => read_all_capped(stderr_pipe, capture_limit),
+        }
     });
     match wait_child_with_deadline(&mut child, timeout, cancel, exceeded.as_deref()) {
         Ok(status) => {
+            tracing::info!(
+                event = "subprocess_exited",
+                peer_pid = child.id(),
+                success = status.success(),
+                exit_code = status.code(),
+                "子进程已退出，开始收尾管道"
+            );
             // 初始进程已退出仍可能有持管道的后代；先关闭 Job 再排空输出。
             #[cfg(windows)]
-            drop(job);
+            {
+                tracing::info!(
+                    event = "subprocess_tree_release",
+                    reason = "root_exited",
+                    "根进程已退出，关闭进程组以回收持管道后代"
+                );
+                drop(job);
+            }
             // 读线程被放弃时输出不完整：如实标记截断，不得把半截输出当成完整结果。
-            let drain_abandoned = |handle: thread::JoinHandle<ReadCapture>| {
+            let drain_abandoned = |handle: thread::JoinHandle<ReadCapture>,
+                                   stream: &'static str| {
+                let _stream = tracing::info_span!("pipe_drain", stream).entered();
                 join_with_deadline(handle, PIPE_DRAIN_GRACE).unwrap_or_else(|| ReadCapture {
                     truncated: true,
                     ..Default::default()
                 })
             };
-            let stdout = drain_abandoned(stdout_thread);
-            let stderr = drain_abandoned(stderr_thread);
+            let stdout = drain_abandoned(stdout_thread, "stdout");
+            let stderr = drain_abandoned(stderr_thread, "stderr");
             if reject_truncation && (stdout.truncated || stderr.truncated) {
+                tracing::error!(
+                    event = "capture_rejected",
+                    stage = "pipe_drain",
+                    stdout_truncated = stdout.truncated,
+                    stderr_truncated = stderr.truncated,
+                    "子进程输出不完整，拒绝解析"
+                );
                 bail!("查询子进程输出超过捕获上限或管道未能排空，已拒绝解析");
             }
             // stdin 写入失败：子进程已成功退出时多半是提前关掉 stdin（EPIPE），不必判失败；
             // 子进程未成功时上报写入错误，便于定位管道问题。
             if let Some(handle) = stdin_thread {
+                let _stream = tracing::info_span!("pipe_drain", stream = "stdin").entered();
                 if let Some(Err(error)) = join_with_deadline(handle, PIPE_DRAIN_GRACE) {
                     if !status.success() {
+                        tracing::error!(event = "subprocess_pipe_failed", stage = "stdin_write", error_type = ?error.kind(), error_code = error.raw_os_error(), "子进程失败且输入管道写入失败");
                         bail!("向子进程写入 stdin 失败：{error}");
                     }
+                    tracing::warn!(
+                        event = "pipe_write_failure_ignored",
+                        stream = "stdin",
+                        result = "child_success",
+                        "子进程成功，保持提前关闭输入管道的既有容错"
+                    );
                 }
             }
             // 管道读失败必须上抛：静默吞掉会让调用方把半截输出当成完整结果。
             if let Some(error) = stdout.error {
+                tracing::error!(
+                    event = "subprocess_pipe_failed",
+                    stage = "stdout_read",
+                    error_type = "io_error",
+                    "输出管道读取失败，拒绝不完整结果"
+                );
                 bail!("读取子进程 stdout 失败：{error}");
             }
             if let Some(error) = stderr.error {
+                tracing::error!(
+                    event = "subprocess_pipe_failed",
+                    stage = "stderr_read",
+                    error_type = "io_error",
+                    "错误管道读取失败，拒绝不完整结果"
+                );
                 bail!("读取子进程 stderr 失败：{error}");
             }
             Ok(CapturedOutput {
@@ -483,7 +794,14 @@ fn run_with_timeout_ext(
         Err(error) => {
             // 超时/取消/等待失败：先关闭 Job 回收整树，再 wait 根进程并限时收尾读写线程。
             #[cfg(windows)]
-            drop(job);
+            {
+                tracing::warn!(
+                    event = "subprocess_tree_release",
+                    reason = "wait_failed",
+                    "等待失败，关闭进程组以回收子进程树"
+                );
+                drop(job);
+            }
             reap(&mut child);
             let _ = join_with_deadline(stdout_thread, PIPE_DRAIN_GRACE);
             let _ = join_with_deadline(stderr_thread, PIPE_DRAIN_GRACE);
@@ -532,6 +850,11 @@ fn read_all_capped_ext<R: Read>(
                     capture.data.extend_from_slice(&chunk[..n]);
                 } else {
                     capture.data.extend_from_slice(&chunk[..room]);
+                    tracing::warn!(
+                        event = "pipe_capture_truncated",
+                        limit_bytes = limit,
+                        "子进程输出超过捕获上限，继续排空管道"
+                    );
                     capture.truncated = true;
                     if let Some(exceeded) = exceeded {
                         exceeded.store(true, std::sync::atomic::Ordering::Release);
@@ -539,6 +862,7 @@ fn read_all_capped_ext<R: Read>(
                 }
             }
             Err(error) => {
+                tracing::error!(event = "pipe_read_failed", error_type = ?error.kind(), error_code = error.raw_os_error(), "子进程管道读取失败");
                 capture.error = Some(error.to_string());
                 break;
             }
@@ -557,16 +881,36 @@ fn wait_child_with_deadline(
     loop {
         if let Some(source) = cancel {
             if source.is_cancelled() {
+                tracing::warn!(
+                    event = "subprocess_cancelled",
+                    peer_pid = child.id(),
+                    stage = "wait",
+                    "等待期间收到取消"
+                );
                 bail!("操作已取消，子进程已终止");
             }
         }
         if exceeded.is_some_and(|flag| flag.load(std::sync::atomic::Ordering::Acquire)) {
+            tracing::error!(
+                event = "capture_rejected",
+                peer_pid = child.id(),
+                stage = "wait",
+                error_type = "capture_limit",
+                "子进程输出超过捕获上限"
+            );
             bail!("查询子进程输出超过捕获上限，已拒绝解析");
         }
         match child.try_wait() {
             Ok(Some(status)) => return Ok(status),
             Ok(None) => {
                 if Instant::now() >= deadline {
+                    tracing::warn!(
+                        event = "subprocess_timeout",
+                        peer_pid = child.id(),
+                        stage = "wait",
+                        timeout_ms = u64::try_from(timeout.as_millis()).unwrap_or(u64::MAX),
+                        "等待子进程超过总超时"
+                    );
                     bail!(
                         "子进程超过 {} 毫秒未结束，已按超时处理",
                         timeout.as_millis()
@@ -574,7 +918,10 @@ fn wait_child_with_deadline(
                 }
                 thread::sleep(Duration::from_millis(20));
             }
-            Err(error) => bail!("等待子进程状态失败：{error}"),
+            Err(error) => {
+                tracing::error!(event = "subprocess_wait_failed", peer_pid = child.id(), stage = "wait", error_type = ?error.kind(), error_code = error.raw_os_error(), "查询子进程退出状态失败");
+                bail!("等待子进程状态失败：{error}");
+            }
         }
     }
 }
@@ -599,10 +946,64 @@ pub fn run_with_idle_timeout(
     command: &mut Command,
     control: &Control,
     idle_timeout: Duration,
+    line: impl FnMut(bool, &str) -> Result<()>,
+    tick: impl FnMut() -> Result<()>,
+) -> Result<()> {
+    let operation = crate::logging::operation_span("process", "stream");
+    let _operation = operation.enter();
+    let span = tracing::info_span!(
+        "subprocess",
+        executable = executable_kind(command),
+        peer_pid = tracing::field::Empty
+    );
+    let _entered = span.enter();
+    let started = Instant::now();
+    tracing::info!(
+        event = "spawn_started",
+        idle_timeout_ms = u64::try_from(idle_timeout.as_millis()).unwrap_or(u64::MAX),
+        "开始启动流式子进程"
+    );
+    let result = run_with_idle_timeout_inner(command, control, idle_timeout, line, tick);
+    match &result {
+        Ok(()) => tracing::info!(
+            event = "subprocess_completed",
+            state = "success",
+            elapsed_ms = crate::logging::elapsed_ms(started),
+            "流式子进程执行完成"
+        ),
+        Err(_) if control.is_cancelled() => tracing::info!(
+            event = "subprocess_cancelled",
+            stage = "terminal",
+            state = "cancelled",
+            elapsed_ms = crate::logging::elapsed_ms(started),
+            "流式子进程操作已取消"
+        ),
+        Err(_) => tracing::error!(
+            event = "subprocess_failed",
+            state = "failed",
+            error_type = "subprocess_error",
+            elapsed_ms = crate::logging::elapsed_ms(started),
+            "流式子进程执行失败，详见关联阶段事件"
+        ),
+    }
+    result
+}
+
+fn run_with_idle_timeout_inner(
+    command: &mut Command,
+    control: &Control,
+    idle_timeout: Duration,
     mut line: impl FnMut(bool, &str) -> Result<()>,
     mut tick: impl FnMut() -> Result<()>,
 ) -> Result<()> {
-    control.checkpoint()?;
+    control.checkpoint().map_err(|error| {
+        tracing::warn!(
+            event = "subprocess_cancelled",
+            stage = "checkpoint",
+            "子进程启动前控制检查未通过"
+        );
+        error
+    })?;
     command
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
@@ -613,23 +1014,50 @@ pub fn run_with_idle_timeout(
         command.creation_flags(0x0800_0000);
     }
     let mut child = command.spawn().map_err(|error| {
+        tracing::error!(event = "spawn_failed", stage = "spawn", error_type = ?error.kind(), error_code = error.raw_os_error(), "子进程启动失败");
         anyhow::anyhow!(
             "无法启动 {}：{error}",
             command.get_program().to_string_lossy()
         )
     })?;
+    tracing::Span::current().record("peer_pid", child.id());
+    tracing::info!(
+        event = "spawn_completed",
+        peer_pid = child.id(),
+        "子进程已创建"
+    );
     let (send, recv) = mpsc::sync_channel(64);
     // spawn 成功后若 take 失败，必须 kill+wait 回收子进程，避免残留。
     let Some(stdout_pipe) = child.stdout.take() else {
+        tracing::error!(
+            event = "pipe_missing",
+            stream = "stdout",
+            stage = "stream_setup",
+            "子进程缺少输出管道"
+        );
         reap(&mut child);
         bail!("缺少 stdout");
     };
     let stdout = pump(stdout_pipe, false, send.clone());
     let Some(stderr_pipe) = child.stderr.take() else {
+        tracing::error!(
+            event = "pipe_missing",
+            stream = "stderr",
+            stage = "stream_setup",
+            "子进程缺少错误管道"
+        );
         reap(&mut child);
         drop(send);
         drop(recv);
-        let _ = stdout.join();
+        if stdout.join().is_err() {
+            tracing::error!(
+                event = "thread_join_failed",
+                stream = "stdout",
+                stage = "stream_setup_cleanup",
+                error_type = "thread_panic",
+                "输出管道清理线程异常退出"
+            );
+        }
         bail!("缺少 stderr");
     };
     let stderr = pump(stderr_pipe, true, send);
@@ -642,9 +1070,24 @@ pub fn run_with_idle_timeout(
         let mut last_output = Instant::now();
         loop {
             // Pause is deliberately deferred until this whole archive finishes. We must drain pipes.
-            control.check_cancelled()?;
+            control.check_cancelled().map_err(|error| {
+                tracing::warn!(
+                    event = "subprocess_cancelled",
+                    stage = "stream",
+                    "流式处理期间收到取消"
+                );
+                error
+            })?;
             if last_tick.elapsed() > Duration::from_millis(500) {
-                tick()?;
+                tick().map_err(|error| {
+                    tracing::error!(
+                        event = "subprocess_callback_failed",
+                        stage = "tick",
+                        error_type = "callback_error",
+                        "子进程进度回调失败"
+                    );
+                    error
+                })?;
                 last_tick = std::time::Instant::now();
             }
             match recv.recv_timeout(Duration::from_millis(50)) {
@@ -661,11 +1104,35 @@ pub fn run_with_idle_timeout(
                         }
                         sink.push_back(text.clone());
                     }
-                    line(err, &text)?;
+                    line(err, &text).map_err(|error| {
+                        tracing::error!(
+                            event = "subprocess_callback_failed",
+                            stage = "line",
+                            stream = if err { "stderr" } else { "stdout" },
+                            error_type = "callback_error",
+                            "子进程输出处理回调失败"
+                        );
+                        error
+                    })?;
                 }
-                Ok(PipeMessage::Error(error)) => bail!("{error}"),
+                Ok(PipeMessage::Error(error)) => {
+                    tracing::error!(
+                        event = "subprocess_pipe_failed",
+                        stage = "stream",
+                        error_type = "pipe_error",
+                        "子进程输出管道处理失败"
+                    );
+                    bail!("{error}");
+                }
                 Err(mpsc::RecvTimeoutError::Timeout) => {
                     if last_output.elapsed() >= idle_timeout {
+                        tracing::warn!(
+                            event = "subprocess_timeout",
+                            stage = "idle",
+                            timeout_ms =
+                                u64::try_from(idle_timeout.as_millis()).unwrap_or(u64::MAX),
+                            "子进程连续无输出超过空闲上限"
+                        );
                         bail!(
                             "7-Zip 连续 {} 秒无输出，疑似挂死，已强制终止",
                             idle_timeout.as_secs()
@@ -682,7 +1149,21 @@ pub fn run_with_idle_timeout(
             Some(&CancelSource::Control(control)),
             None,
         )?;
+        tracing::info!(
+            event = "subprocess_exited",
+            peer_pid = child.id(),
+            success = status.success(),
+            exit_code = status.code(),
+            "流式子进程已退出"
+        );
         if !status.success() {
+            tracing::error!(
+                event = "subprocess_exit_failed",
+                stage = "exit",
+                exit_code = status.code(),
+                error_type = "nonzero_exit",
+                "子进程退出状态不成功"
+            );
             let code = status
                 .code()
                 .map_or_else(|| "未知".into(), |code| code.to_string());
@@ -710,6 +1191,131 @@ mod tests {
     use proptest::{collection, prelude::*};
     use std::collections::VecDeque;
     use std::sync::Arc;
+
+    #[cfg(windows)]
+    #[derive(Clone)]
+    struct DiagnosticBuffer(mpsc::Sender<Vec<u8>>);
+
+    #[cfg(windows)]
+    impl Write for DiagnosticBuffer {
+        fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+            self.0
+                .send(bytes.to_vec())
+                .map_err(|_| std::io::Error::other("测试日志接收器已关闭"))?;
+            Ok(bytes.len())
+        }
+
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+
+    // 消费真实子进程事件：截断读线程继承请求上下文，参数/env/两条管道正文不落日志。
+    #[cfg(windows)]
+    #[test]
+    fn subprocess_logs_preserve_results_and_thread_correlation_without_body_leaks() {
+        let (sender, receiver) = mpsc::channel();
+        let writer = DiagnosticBuffer(sender);
+        let subscriber = tracing_subscriber::fmt()
+            .with_ansi(false)
+            .without_time()
+            .with_writer(move || writer.clone())
+            .finish();
+        let root_id = crate::logging::new_operation_id();
+        tracing::subscriber::with_default(subscriber, || {
+            let root = crate::logging::operation_span_with_id("test", "capture_chain", &root_id);
+            let _entered = root.enter();
+            let mut command = Command::new("cmd.exe");
+            command
+                .args([
+                    "/D",
+                    "/C",
+                    "echo private-terminal-secret& echo private-error-secret 1>&2& exit /b 7",
+                ])
+                .env("DIAGNOSTIC_TEST_SECRET", "private-environment-secret");
+            let out =
+                run_with_timeout_ext(&mut command, None, Duration::from_secs(5), None, 8, false)
+                    .unwrap();
+            assert_eq!(out.status.code(), Some(7));
+            assert_eq!(out.stdout, b"private-");
+            assert_eq!(out.stderr, b"private-");
+            assert!(out.stdout_truncated && out.stderr_truncated);
+        });
+        let text = String::from_utf8(receiver.try_iter().flatten().collect()).unwrap();
+        for event in [
+            "spawn_started",
+            "spawn_completed",
+            "subprocess_exited",
+            "subprocess_completed",
+            "pipe_capture_truncated",
+        ] {
+            let lines: Vec<_> = text.lines().filter(|line| line.contains(event)).collect();
+            assert!(!lines.is_empty(), "缺少事件 {event}：{text}");
+            assert!(
+                lines.iter().all(|line| line.contains(&root_id)),
+                "事件失去父操作关联：{text}"
+            );
+        }
+        assert!(
+            text.contains("peer_pid=")
+                && text.contains("exit_code=7")
+                && text.contains("elapsed_ms="),
+            "{text}"
+        );
+        for private in [
+            "private-terminal-secret",
+            "private-error-secret",
+            "private-environment-secret",
+            "DIAGNOSTIC_TEST_SECRET",
+        ] {
+            assert!(
+                !text.contains(private),
+                "日志泄漏参数、环境或管道正文：{text}"
+            );
+        }
+    }
+
+    // 消费失败链而非源码：启动失败与超时回收有明确终态，原有返回错误不被日志吞掉。
+    #[cfg(windows)]
+    #[test]
+    fn subprocess_logs_spawn_failure_and_timeout_recovery() {
+        let (sender, receiver) = mpsc::channel();
+        let writer = DiagnosticBuffer(sender);
+        let subscriber = tracing_subscriber::fmt()
+            .with_ansi(false)
+            .without_time()
+            .with_writer(move || writer.clone())
+            .finish();
+        let root_id = crate::logging::new_operation_id();
+        tracing::subscriber::with_default(subscriber, || {
+            let root = crate::logging::operation_span_with_id("test", "failure_chain", &root_id);
+            let _entered = root.enter();
+            let mut missing = Command::new("missing-private-executable-secret.exe");
+            assert!(run_with_timeout(&mut missing, Duration::from_secs(1)).is_err());
+            let mut hung = silent_hung_command();
+            let error = run_with_timeout(&mut hung, Duration::from_millis(100)).unwrap_err();
+            assert!(error.to_string().contains("超时"), "{error:#}");
+        });
+        let text = String::from_utf8(receiver.try_iter().flatten().collect()).unwrap();
+        for event in [
+            "spawn_failed",
+            "subprocess_timeout",
+            "subprocess_kill_started",
+            "subprocess_reap_completed",
+            "subprocess_failed",
+        ] {
+            let lines: Vec<_> = text.lines().filter(|line| line.contains(event)).collect();
+            assert!(!lines.is_empty(), "缺少失败链事件 {event}：{text}");
+            assert!(
+                lines.iter().all(|line| line.contains(&root_id)),
+                "失败链失去父操作关联：{text}"
+            );
+        }
+        assert!(
+            !text.contains("missing-private-executable-secret"),
+            "{text}"
+        );
+    }
 
     /// 关闭失败持久化：默认会在源码旁写 proptest-regressions 文件，违反仓库的 .tmp/ 规则；
     /// 失败用例由 panic 消息里的 minimal failing input 直接给出，无需落盘重放。

@@ -49,6 +49,24 @@ impl std::fmt::Display for ClientError {
 
 impl std::error::Error for ClientError {}
 
+impl ClientError {
+    pub(crate) fn diagnostic_kind(&self) -> &'static str {
+        match self {
+            Self::Cancelled => "cancelled",
+            Self::Timeout => "timeout",
+            Self::ProcessExited(_) => "process_exited",
+            Self::Io(_) => "communication",
+            Self::Backend { kind, .. } => match kind.as_deref() {
+                Some("asset_invalid") => "asset_invalid",
+                Some("input_invalid") => "input_invalid",
+                Some("internal") => "internal",
+                Some("shared_runtime") => "shared_runtime",
+                _ => "backend",
+            },
+        }
+    }
+}
+
 /// `snapshot_state` 报告的截图通道状态（Xberg 侧 SNAP-17）。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum SnapshotState {
@@ -139,25 +157,63 @@ impl SharedXbergClient {
             root: root.to_path_buf(),
         }
     }
-    fn request(&self, value: Value, cancel: &AtomicBool) -> Result<Value, ClientError> {
+    fn request(&self, mut value: Value, cancel: &AtomicBool) -> Result<Value, ClientError> {
+        let command = match value["command"].as_str() {
+            Some("ocr_snapshot") => "ocr_snapshot",
+            Some("snapshot_state") => "snapshot_state",
+            _ => "unknown",
+        };
+        let diagnostic_id = crate::logging::new_operation_id();
+        let span =
+            crate::logging::operation_span_with_id("snap_ocr_client", command, &diagnostic_id);
+        let _entered = span.enter();
+        value["diagnostic_id"] = json!(diagnostic_id);
+        let started = std::time::Instant::now();
+        tracing::info!(
+            event = "ocr_request_started",
+            command,
+            timeout_ms = 600_000,
+            "请求共享截图推理"
+        );
         // S8-03：出错路径先查取消标志——取消叠加传输错误/超时类失败响应时
         // 一律按取消处置，不再先分类后查标志（旧序会把「请求入口即取消」
         // 归为 Io、「取消叠加超时」归为超时，偏离取消语义）。
-        let result =
-            crate::xberg_runtime::request(&self.root, value, Duration::from_secs(600), cancel)
-                .map_err(|message| {
-                    prioritize_cancel(
-                        classify_runtime_error(message),
-                        cancel.load(Ordering::Acquire),
-                    )
-                })?;
-        if let Some(error) = classify_backend_response(&result) {
-            return Err(prioritize_cancel(error, cancel.load(Ordering::Acquire)));
+        let outcome = (|| {
+            let result =
+                crate::xberg_runtime::request(&self.root, value, Duration::from_secs(600), cancel)
+                    .map_err(|message| {
+                        prioritize_cancel(
+                            classify_runtime_error(message),
+                            cancel.load(Ordering::Acquire),
+                        )
+                    })?;
+            if let Some(error) = classify_backend_response(&result) {
+                return Err(prioritize_cancel(error, cancel.load(Ordering::Acquire)));
+            }
+            if cancel.load(Ordering::Acquire) {
+                return Err(ClientError::Cancelled);
+            }
+            Ok(result)
+        })();
+        match &outcome {
+            Ok(response) => tracing::info!(
+                event = "ocr_request_completed",
+                elapsed_ms = crate::logging::elapsed_ms(started),
+                peer_pid = response["jchtools_xberg_pid"].as_u64(),
+                "共享截图推理请求完成"
+            ),
+            Err(error) => tracing::warn!(
+                event = "ocr_request_failed",
+                error_type = error.diagnostic_kind(),
+                exit_code = match error {
+                    ClientError::ProcessExited(code) => *code,
+                    _ => None,
+                },
+                elapsed_ms = crate::logging::elapsed_ms(started),
+                "共享截图推理请求未成功"
+            ),
         }
-        if cancel.load(Ordering::Acquire) {
-            return Err(ClientError::Cancelled);
-        }
-        Ok(result)
+        outcome
     }
     pub(crate) fn recognize(
         &mut self,
@@ -166,17 +222,39 @@ impl SharedXbergClient {
     ) -> Result<Option<String>, ClientError> {
         let response = self.request(json!({"command":"ocr_snapshot","image_base64":base64::engine::general_purpose::STANDARD.encode(png)}), cancel)?;
         if response["error_kind"] == "no_text" {
+            tracing::info!(
+                event = "ocr_text_result",
+                result = "empty",
+                text_bytes = 0,
+                "截图推理返回无文字"
+            );
             return Ok(None);
         }
-        let text = response["text"]
-            .as_str()
-            .ok_or_else(|| ClientError::Io("截图响应缺少 text 字段".into()))?;
+        let text = response["text"].as_str().ok_or_else(|| {
+            tracing::warn!(
+                event = "ocr_response_invalid",
+                stage = "decode_text",
+                error_type = "missing_text",
+                "截图响应缺少文本字段"
+            );
+            ClientError::Io("截图响应缺少 text 字段".into())
+        })?;
+        tracing::info!(
+            event = "ocr_text_result",
+            result = if text.trim().is_empty() {
+                "empty"
+            } else {
+                "success"
+            },
+            text_bytes = text.len(),
+            "截图推理文本已在内存解析"
+        );
         Ok((!text.trim().is_empty()).then(|| text.to_owned()))
     }
     pub(crate) fn snapshot_state(&mut self) -> Result<SnapshotState, ClientError> {
         let response =
             self.request(json!({"command":"snapshot_state"}), &AtomicBool::new(false))?;
-        Ok(match response["state"].as_str() {
+        let state = match response["state"].as_str() {
             Some("ready") => SnapshotState::Ready,
             Some("loading") => SnapshotState::Loading,
             Some("uninitialized") => SnapshotState::Uninitialized,
@@ -186,7 +264,13 @@ impl SharedXbergClient {
                     .unwrap_or("未知截图模型状态")
                     .into(),
             ),
-        })
+        };
+        tracing::info!(
+            event = "ocr_snapshot_state",
+            result = state.as_str(),
+            "共享截图模型状态已返回"
+        );
+        Ok(state)
     }
 }
 

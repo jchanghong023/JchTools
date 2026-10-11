@@ -15,6 +15,24 @@ use std::{
 use std::process::Command;
 
 use crate::{fsutil, markdown_assets, markdown_document};
+fn log_output_io(error: &std::io::Error, stage: &'static str) {
+    tracing::error!(event = "markdown_output_io_failed", stage, error_type = "io",
+        error_code = error.raw_os_error(), error_kind = ?error.kind(), "Markdown输出文件系统调用失败");
+}
+
+fn log_output_cleanup(result: std::io::Result<()>, stage: &'static str) {
+    if let Err(error) = result {
+        if error.kind() != std::io::ErrorKind::NotFound {
+            tracing::warn!(
+                event = "markdown_output_cleanup_failed",
+                stage,
+                error_type = "io",
+                error_code = error.raw_os_error(),
+                "Markdown未提交输出清理失败"
+            );
+        }
+    }
+}
 
 const PDF: &[&str] = &["pdf"];
 const OFFICE: &[&str] = &[
@@ -151,184 +169,256 @@ pub fn run(
     cancel: &AtomicBool,
     mut events: impl FnMut(Event),
 ) -> Result<Summary, String> {
-    if options.timeout_secs == 0 {
-        return Err("单文件超时必须为正整秒".to_string());
-    }
-    if options.groups.is_empty() {
-        return Err("至少选择一组文件类型".to_string());
-    }
-    readiness_for_groups(&options.groups)?;
-    let runtime_dir = markdown_assets::runtime_dir()?;
-    if cancel.load(AtomicOrdering::Acquire) {
-        events(Event::Started { total: 0 });
-        return Ok(Summary {
-            stopped: true,
-            ..Summary::default()
-        });
-    }
-    let supported = match supported_formats(&runtime_dir, &options.groups, cancel) {
-        Ok(supported) => supported,
-        Err(message)
-            if cancel.load(AtomicOrdering::Acquire) && confirmed_cancellation(&message) =>
-        {
-            events(Event::Started { total: 0 });
-            events(Event::Log("已停止：格式查询期间未开始转换".to_string()));
-            return Ok(Summary {
-                stopped: true,
-                ..Summary::default()
-            });
-        }
-        Err(error) => return Err(error),
-    };
-    let plan = match scan_cancelable(options, &supported, cancel) {
-        Ok(plan) => plan,
-        Err(_) if cancel.load(AtomicOrdering::Acquire) => {
-            events(Event::Started { total: 0 });
-            events(Event::Log("已停止：扫描期间未开始转换".to_string()));
-            return Ok(Summary {
-                stopped: true,
-                ..Summary::default()
-            });
-        }
-        Err(error) => return Err(error),
-    };
-    let total = plan.items.len()
-        + plan.summary.skipped_existing
-        + plan.summary.skipped_duplicate
-        + plan.scan_failures.len();
+    let span = crate::logging::operation_span("markdown", "convert_batch");
+    let _entered = span.enter();
+    let started = std::time::Instant::now();
+    let mut stage = "options";
     tracing::info!(
-        input = %options.input_dir.display(),
-        output = %options.output_dir.display(),
-        files = plan.items.len(),
-        skipped_existing = plan.summary.skipped_existing,
-        skipped_duplicate = plan.summary.skipped_duplicate,
-        "转 Markdown 批次开始"
+        event = "markdown_batch_started",
+        group_count = options.groups.len(),
+        timeout_secs = options.timeout_secs,
+        "转Markdown任务开始"
     );
-    events(Event::Started { total });
-    // S4-03/T-24：扫描期已定的单文件失败先逐条呈现（文件 + 阶段 + 原因，
-    // 与转换失败同一事件格式），统计随 plan.summary 带入；不中止批次。
-    for (relative, message) in &plan.scan_failures {
-        tracing::warn!(
-            file = %relative.display(),
-            kind = "scan_media_dir",
-            "转换单文件失败"
-        );
-        events(Event::FileFinished {
-            relative: relative.clone(),
-            success: false,
-            partial: false,
-            message: message.clone(),
-        });
-    }
-    let mut summary = plan.summary;
-    let output_root = plan.output_root;
-    // 文档和媒体逐文件提交到会话共享引擎；批次不拥有引擎生命周期。
-    for (index, item) in plan.items.iter().enumerate() {
-        if cancel.load(AtomicOrdering::Relaxed) {
-            events(Event::Log("已停止：当前文件之外不再开始转换".to_string()));
-            break;
+    let result = (|| {
+        if options.timeout_secs == 0 {
+            return Err("单文件超时必须为正整秒".to_string());
         }
-        events(Event::FileStarted {
-            relative: item.relative.clone(),
-            index: index + 1,
-            total,
-        });
-        // F21/T-29：单文件预算从进入该文件起算。
-        let deadline = markdown_document::Deadline::new(Duration::from_secs(options.timeout_secs));
-        let media_dir = &item.media_dir;
-        let outcome = if item.is_media {
-            convert_media(&item.source, &deadline, cancel).map(|markdown| {
-                markdown_document::DocumentOutput {
-                    markdown,
-                    warnings: Vec::new(),
-                    media: Vec::new(),
-                }
-            })
-        } else {
-            // 零配置（2026-10-04 跨仓接口改造）：不探测页数、不传 mode；页数
-            // 自动分流内化引擎，auto_mode 降级等引擎警告经 warnings 转达，
-            // 由下方 partial 语义如实呈现（T-18 界面披露义务随之满足）。
-            markdown_document::convert_cancelable(
-                &item.source,
-                &runtime_dir,
-                media_dir,
-                &deadline,
-                cancel,
-            )
-        };
-        let outcome = outcome.and_then(|document| {
-            write_new_markdown_cancelable(
-                &output_root,
-                &item.target,
-                &document.markdown,
-                &document.media,
-                &deadline,
-                cancel,
-            )?;
-            Ok(document.warnings)
-        });
-        match outcome {
-            Ok(warnings) => {
-                let partial = !warnings.is_empty();
-                if partial {
-                    tracing::warn!(
-                        file = %item.relative.display(),
-                        warning_count = warnings.len(),
-                        "转换部分内容未提取"
-                    );
-                    summary.partial += 1;
-                } else {
-                    summary.success += 1;
-                }
-                events(Event::FileFinished {
-                    relative: item.relative.clone(),
-                    success: !partial,
-                    partial,
-                    message: if partial {
-                        format!("部分内容未提取：{}", warnings.join("；"))
-                    } else {
-                        "转换成功".to_string()
-                    },
+        if options.groups.is_empty() {
+            return Err("至少选择一组文件类型".to_string());
+        }
+        stage = "runtime_assets";
+        readiness_for_groups(&options.groups)?;
+        let runtime_dir = markdown_assets::runtime_dir()?;
+        if cancel.load(AtomicOrdering::Acquire) {
+            events(Event::Started { total: 0 });
+            return Ok(Summary {
+                stopped: true,
+                ..Summary::default()
+            });
+        }
+        stage = "formats_request_boundary";
+        let supported = match supported_formats(&runtime_dir, &options.groups, cancel) {
+            Ok(supported) => supported,
+            Err(message)
+                if cancel.load(AtomicOrdering::Acquire) && confirmed_cancellation(&message) =>
+            {
+                events(Event::Started { total: 0 });
+                events(Event::Log("已停止：格式查询期间未开始转换".to_string()));
+                return Ok(Summary {
+                    stopped: true,
+                    ..Summary::default()
                 });
             }
-            Err(ref message)
-                if cancel.load(AtomicOrdering::Acquire) && confirmed_cancellation(message) =>
-            {
-                tracing::info!(file = %item.relative.display(), "当前转换文件已取消");
-                events(Event::FileCancelled {
-                    relative: item.relative.clone(),
+            Err(error) => return Err(error),
+        };
+        stage = "input_scan";
+        let plan = match scan_cancelable(options, &supported, cancel) {
+            Ok(plan) => plan,
+            Err(_) if cancel.load(AtomicOrdering::Acquire) => {
+                events(Event::Started { total: 0 });
+                events(Event::Log("已停止：扫描期间未开始转换".to_string()));
+                return Ok(Summary {
+                    stopped: true,
+                    ..Summary::default()
                 });
+            }
+            Err(error) => return Err(error),
+        };
+        let total = plan.items.len()
+            + plan.summary.skipped_existing
+            + plan.summary.skipped_duplicate
+            + plan.scan_failures.len();
+        tracing::info!(
+            event = "markdown_batch_planned",
+            skipped_existing = plan.summary.skipped_existing,
+            skipped_duplicate = plan.summary.skipped_duplicate,
+            "转 Markdown 批次开始"
+        );
+        events(Event::Started { total });
+        // S4-03/T-24：扫描期已定的单文件失败先逐条呈现（文件 + 阶段 + 原因，
+        // 与转换失败同一事件格式），统计随 plan.summary 带入；不中止批次。
+        for (relative, message) in &plan.scan_failures {
+            tracing::warn!(
+                event = "markdown_file_failed", file = %crate::logging::safe_error(&relative.to_string_lossy()),
+                stage = "scan_media_dir", error_type = "output_plan", elapsed_ms = 0u64,
+                "转换单文件失败"
+            );
+            events(Event::FileFinished {
+                relative: relative.clone(),
+                success: false,
+                partial: false,
+                message: message.clone(),
+            });
+        }
+        let mut summary = plan.summary;
+        let output_root = plan.output_root;
+        // 文档和媒体逐文件提交到会话共享引擎；批次不拥有引擎生命周期。
+        stage = "convert_files";
+        for (index, item) in plan.items.iter().enumerate() {
+            if cancel.load(AtomicOrdering::Relaxed) {
+                events(Event::Log("已停止：当前文件之外不再开始转换".to_string()));
                 break;
             }
-            Err(message) => {
-                summary.failed += 1;
-                tracing::error!(
-                    file = %item.relative.display(),
-                    // 引擎错误可包含文档片段，只记录失败位置；详情仅供任务界面呈现。
-                    kind = if message.contains("超时") { "timeout" } else { "conversion_or_output" },
-                    "转换单文件失败"
-                );
-                events(Event::FileFinished {
-                    relative: item.relative.clone(),
-                    success: false,
-                    partial: false,
-                    message,
-                });
+            let file_span = tracing::info_span!("markdown_file", file_index = index + 1,
+            file = %crate::logging::safe_error(&item.relative.to_string_lossy()));
+            let _file_entered = file_span.enter();
+            let file_started = std::time::Instant::now();
+            let mut file_stage = if item.is_media {
+                "transcribe_boundary"
+            } else {
+                "extract_boundary"
+            };
+            tracing::info!(
+                event = "markdown_file_started",
+                media = item.is_media,
+                timeout_secs = options.timeout_secs,
+                "转换单文件开始"
+            );
+            events(Event::FileStarted {
+                relative: item.relative.clone(),
+                index: index + 1,
+                total,
+            });
+            // F21/T-29：单文件预算从进入该文件起算。
+            let deadline =
+                markdown_document::Deadline::new(Duration::from_secs(options.timeout_secs));
+            let media_dir = &item.media_dir;
+            let outcome = if item.is_media {
+                convert_media(&item.source, &deadline, cancel).map(|markdown| {
+                    markdown_document::DocumentOutput {
+                        markdown,
+                        warnings: Vec::new(),
+                        media: Vec::new(),
+                    }
+                })
+            } else {
+                // 零配置（2026-10-04 跨仓接口改造）：不探测页数、不传 mode；页数
+                // 自动分流内化引擎，auto_mode 降级等引擎警告经 warnings 转达，
+                // 由下方 partial 语义如实呈现（T-18 界面披露义务随之满足）。
+                markdown_document::convert_cancelable(
+                    &item.source,
+                    &runtime_dir,
+                    media_dir,
+                    &deadline,
+                    cancel,
+                )
+            };
+            let outcome = outcome.and_then(|document| {
+                file_stage = "output_write";
+                write_new_markdown_cancelable(
+                    &output_root,
+                    &item.target,
+                    &document.markdown,
+                    &document.media,
+                    &deadline,
+                    cancel,
+                )?;
+                Ok(document.warnings)
+            });
+            match outcome {
+                Ok(warnings) => {
+                    let partial = !warnings.is_empty();
+                    if partial {
+                        tracing::warn!(
+                            event = "markdown_file_partial",
+                            file = %crate::logging::safe_error(&item.relative.to_string_lossy()),
+                            warning_count = warnings.len(),
+                            "转换部分内容未提取"
+                        );
+                        summary.partial += 1;
+                    } else {
+                        summary.success += 1;
+                    }
+                    tracing::info!(
+                        event = "markdown_file_completed",
+                        partial,
+                        elapsed_ms = crate::logging::elapsed_ms(file_started),
+                        warning_count = warnings.len(),
+                        "转换单文件完成"
+                    );
+                    events(Event::FileFinished {
+                        relative: item.relative.clone(),
+                        success: !partial,
+                        partial,
+                        message: if partial {
+                            format!("部分内容未提取：{}", warnings.join("；"))
+                        } else {
+                            "转换成功".to_string()
+                        },
+                    });
+                }
+                Err(ref message)
+                    if cancel.load(AtomicOrdering::Acquire) && confirmed_cancellation(message) =>
+                {
+                    tracing::info!(
+                        event = "markdown_file_cancelled",
+                        stage = file_stage,
+                        elapsed_ms = crate::logging::elapsed_ms(file_started),
+                        "当前转换文件已取消"
+                    );
+                    events(Event::FileCancelled {
+                        relative: item.relative.clone(),
+                    });
+                    break;
+                }
+                Err(message) => {
+                    summary.failed += 1;
+                    tracing::error!(
+                        event = "markdown_file_failed",
+                        stage = file_stage,
+                        error_type = "conversion_boundary",
+                        elapsed_ms = crate::logging::elapsed_ms(file_started),
+                        "转换单文件失败"
+                    );
+                    events(Event::FileFinished {
+                        relative: item.relative.clone(),
+                        success: false,
+                        partial: false,
+                        message,
+                    });
+                }
             }
         }
+        // T-22/T-23：批结束或用户停止后不再发送请求，保留共享引擎及已加载模型。
+        summary.stopped = cancel.load(AtomicOrdering::Relaxed);
+        tracing::info!(
+            event = "markdown_batch_summary",
+            success = summary.success,
+            partial = summary.partial,
+            failed = summary.failed,
+            skipped_existing = summary.skipped_existing,
+            skipped_duplicate = summary.skipped_duplicate,
+            stopped = summary.stopped,
+            "转 Markdown 批次结束"
+        );
+        Ok(summary)
+    })();
+    match &result {
+        Ok(summary) => tracing::info!(
+            event = "markdown_batch_completed",
+            outcome = if summary.stopped {
+                "cancelled"
+            } else if summary.failed > 0 {
+                "with_failures"
+            } else {
+                "success"
+            },
+            elapsed_ms = crate::logging::elapsed_ms(started),
+            success = summary.success,
+            partial = summary.partial,
+            failed = summary.failed,
+            "转Markdown任务结束"
+        ),
+        Err(_) => tracing::error!(
+            event = "markdown_batch_failed",
+            stage,
+            elapsed_ms = crate::logging::elapsed_ms(started),
+            error_type = "conversion_batch_boundary",
+            cancel_requested = cancel.load(AtomicOrdering::Acquire),
+            "转Markdown任务失败"
+        ),
     }
-    // T-22/T-23：批结束或用户停止后不再发送请求，保留共享引擎及已加载模型。
-    summary.stopped = cancel.load(AtomicOrdering::Relaxed);
-    tracing::info!(
-        success = summary.success,
-        partial = summary.partial,
-        failed = summary.failed,
-        skipped_existing = summary.skipped_existing,
-        skipped_duplicate = summary.skipped_duplicate,
-        stopped = summary.stopped,
-        "转 Markdown 批次结束"
-    );
-    Ok(summary)
+    result
 }
 
 /// T-23/T-24：停止原子量不证明引擎已结束；只把明确确认的取消作为普通取消，
@@ -1009,115 +1099,179 @@ fn write_new_markdown_cancelable(
     deadline: &markdown_document::Deadline,
     cancel: &AtomicBool,
 ) -> Result<(), String> {
-    crate::asset_util::ensure_not_cancelled(cancel)?;
-    let parent = target.parent().ok_or_else(|| "结果目录无效".to_string())?;
-    // T-12 保险丝：扫描已跳过既有结果，这里目标再出现属并发/外部改动——
-    // 在动任何 media 文件之前直接拒绝，避免「md 旧、图新」的错位组合。
-    if fs::symlink_metadata(target).is_ok() {
-        return Err("无法提交新结果（已有结果不会覆盖）：目标已存在".to_string());
-    }
-    let relative_parent = parent
-        .strip_prefix(output_root)
-        .map_err(|e| format!("结果不在输出目录内：{e}"))?;
-    let mut current = output_root.to_path_buf();
-    for component in relative_parent.components() {
+    let span = crate::logging::operation_span("markdown", "write_output");
+    let _entered = span.enter();
+    let started = std::time::Instant::now();
+    let mut stage = "output_directory";
+    tracing::info!(
+        event = "markdown_output_started",
+        markdown_bytes = content.len(),
+        media_count = media.len(),
+        "Markdown结果落盘开始"
+    );
+    let result = (|| {
         crate::asset_util::ensure_not_cancelled(cancel)?;
-        if !matches!(component, Component::Normal(_)) {
-            return Err("输出路径含非法目录段".to_string());
+        let parent = target.parent().ok_or_else(|| "结果目录无效".to_string())?;
+        // T-12 保险丝：扫描已跳过既有结果，这里目标再出现属并发/外部改动——
+        // 在动任何 media 文件之前直接拒绝，避免「md 旧、图新」的错位组合。
+        if fs::symlink_metadata(target).is_ok() {
+            return Err("无法提交新结果（已有结果不会覆盖）：目标已存在".to_string());
         }
-        current.push(component.as_os_str());
-        match fs::create_dir(&current) {
-            Ok(()) => (),
-            Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => (),
-            Err(error) => return Err(format!("无法创建输出目录 {}：{error}", current.display())),
-        }
-        let metadata = fs::symlink_metadata(&current)
-            .map_err(|error| format!("无法检查输出目录 {}：{error}", current.display()))?;
-        if fsutil::is_link(&metadata) || !metadata.is_dir() {
-            return Err(format!("输出路径不是普通目录：{}", current.display()));
-        }
-    }
-    // T-14：先落图片（本次任务的未提交材料），md 最后以不覆盖改名提交——
-    // md 在场即代表 media 已完整（T-25：不留半成品）；中途失败回滚本次已写
-    // 图片并删除空媒体目录，不触碰既有文件。
-    let mut created: Vec<std::path::PathBuf> = Vec::new();
-    let mut created_dirs: Vec<std::path::PathBuf> = Vec::new();
-    let media_result = (|| -> Result<(), String> {
-        for file in media {
+        let relative_parent = parent
+            .strip_prefix(output_root)
+            .map_err(|e| format!("结果不在输出目录内：{e}"))?;
+        let mut current = output_root.to_path_buf();
+        for component in relative_parent.components() {
             crate::asset_util::ensure_not_cancelled(cancel)?;
-            // T-29（S4-02）：预算耗尽后不再开始写下一张图（每张图写入前检查，
-            // 等价于上一张图后的边界）；失败走既有回滚，不留半成品。
-            if deadline_exhausted(deadline) {
-                return Err("单文件处理超时：写入图片前预算已耗尽，本次结果未提交".to_string());
+            if !matches!(component, Component::Normal(_)) {
+                return Err("输出路径含非法目录段".to_string());
             }
-            let destination = prepare_media_destination(parent, &file.relative, &mut created_dirs)?;
-            let mut output = OpenOptions::new()
+            current.push(component.as_os_str());
+            match fs::create_dir(&current) {
+                Ok(()) => (),
+                Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => (),
+                Err(error) => {
+                    return Err(format!("无法创建输出目录 {}：{error}", current.display()))
+                }
+            }
+            let metadata = fs::symlink_metadata(&current)
+                .map_err(|error| format!("无法检查输出目录 {}：{error}", current.display()))?;
+            if fsutil::is_link(&metadata) || !metadata.is_dir() {
+                return Err(format!("输出路径不是普通目录：{}", current.display()));
+            }
+        }
+        // T-14：先落图片（本次任务的未提交材料），md 最后以不覆盖改名提交——
+        // md 在场即代表 media 已完整（T-25：不留半成品）；中途失败回滚本次已写
+        // 图片并删除空媒体目录，不触碰既有文件。
+        let mut created: Vec<std::path::PathBuf> = Vec::new();
+        let mut created_dirs: Vec<std::path::PathBuf> = Vec::new();
+        stage = "media_write";
+        let media_result = (|| -> Result<(), String> {
+            for file in media {
+                crate::asset_util::ensure_not_cancelled(cancel)?;
+                // T-29（S4-02）：预算耗尽后不再开始写下一张图（每张图写入前检查，
+                // 等价于上一张图后的边界）；失败走既有回滚，不留半成品。
+                if deadline_exhausted(deadline) {
+                    tracing::error!(
+                        event = "markdown_output_timeout",
+                        stage = "media_write",
+                        error_type = "timeout",
+                        "图片写入前预算耗尽"
+                    );
+                    return Err("单文件处理超时：写入图片前预算已耗尽，本次结果未提交".to_string());
+                }
+                let destination =
+                    prepare_media_destination(parent, &file.relative, &mut created_dirs)?;
+                let mut output = OpenOptions::new()
+                    .write(true)
+                    .create_new(true)
+                    .open(&destination)
+                    .map_err(|e| {
+                        log_output_io(&e, "media_create");
+                        format!("无法创建图片 {}：{e}", destination.display())
+                    })?;
+                created.push(destination.clone());
+                output.write_all(&file.bytes).map_err(|e| {
+                    log_output_io(&e, "media_write");
+                    format!("无法写入图片 {}：{e}", destination.display())
+                })?;
+                output.sync_all().map_err(|e| {
+                    log_output_io(&e, "media_sync");
+                    format!("同步图片失败 {}：{e}", destination.display())
+                })?;
+            }
+            Ok(())
+        })();
+        if let Err(error) = media_result {
+            for path in created.iter().rev() {
+                log_output_cleanup(fs::remove_file(path), "media_rollback");
+            }
+            for path in created_dirs.iter().rev() {
+                log_output_cleanup(fs::remove_dir(path), "media_directory_rollback");
+            }
+            return Err(error);
+        }
+        let temp = parent.join(format!(".jch-markdown-{}.tmp", uuid::Uuid::new_v4()));
+        stage = "markdown_write";
+        let write_result = (|| -> Result<(), String> {
+            crate::asset_util::ensure_not_cancelled(cancel)?;
+            // T-29（S4-02）：最终提交前同样受预算约束；检查点在 temp 写入与改名
+            // 之前，超时走失败与回滚，不把慢盘上的半成品计成功。
+            if deadline_exhausted(deadline) {
+                tracing::error!(
+                    event = "markdown_output_timeout",
+                    stage = "markdown_write",
+                    error_type = "timeout",
+                    "正文写入前预算耗尽"
+                );
+                return Err("单文件处理超时：提交结果前预算已耗尽，本次结果未提交".to_string());
+            }
+            let mut file = OpenOptions::new()
                 .write(true)
                 .create_new(true)
-                .open(&destination)
-                .map_err(|e| format!("无法创建图片 {}：{e}", destination.display()))?;
-            created.push(destination.clone());
-            output
-                .write_all(&file.bytes)
-                .map_err(|e| format!("无法写入图片 {}：{e}", destination.display()))?;
-            output
-                .sync_all()
-                .map_err(|e| format!("同步图片失败 {}：{e}", destination.display()))?;
+                .open(&temp)
+                .map_err(|e| {
+                    log_output_io(&e, "markdown_create");
+                    format!("无法创建临时结果：{e}")
+                })?;
+            file.write_all(content.as_bytes()).map_err(|e| {
+                log_output_io(&e, "markdown_write");
+                format!("写入 Markdown 失败：{e}")
+            })?;
+            file.sync_all().map_err(|e| {
+                log_output_io(&e, "markdown_sync");
+                format!("同步 Markdown 失败：{e}")
+            })?;
+            drop(file);
+            crate::asset_util::ensure_not_cancelled(cancel)?;
+            // T-29（S4-02）：检查点紧贴改名提交——慢盘写正文+sync 耗尽预算时不得
+            // 把结果改名为可见产物（检查点放在 rename 之后无法回滚对外可见状态）。
+            if deadline_exhausted(deadline) {
+                tracing::error!(
+                    event = "markdown_output_timeout",
+                    stage = "output_commit",
+                    error_type = "timeout",
+                    "结果提交前预算耗尽"
+                );
+                return Err("单文件处理超时：提交前预算已耗尽，本次结果未提交".to_string());
+            }
+            // T-25/T-12：完整成功后以不覆盖改名提交（temp 与目标同目录同卷）。
+            // 不用 fs::rename——Windows 上它会替换已存在目标；不用硬链接——
+            // exFAT/FAT 等文件系统不支持，会把输出在这些卷上的结果全部判失败。
+            stage = "output_commit";
+            fsutil::rename_noreplace(&temp, target)
+                .map_err(|e| format!("无法提交新结果（已有结果不会覆盖）：{e:#}"))?;
+            Ok(())
+        })();
+        log_output_cleanup(fs::remove_file(&temp), "temporary_output");
+        if write_result.is_err() {
+            // 提交失败（含目标被外部占用的保险丝）：回滚本次已写图片并删除空
+            // 媒体目录，不把无主媒体留给旧结果（T-25）。
+            for path in created.iter().rev() {
+                log_output_cleanup(fs::remove_file(path), "media_rollback");
+            }
+            for path in created_dirs.iter().rev() {
+                log_output_cleanup(fs::remove_dir(path), "media_directory_rollback");
+            }
         }
-        Ok(())
+        write_result
     })();
-    if let Err(error) = media_result {
-        for path in created.iter().rev() {
-            let _ = fs::remove_file(path);
-        }
-        for path in created_dirs.iter().rev() {
-            let _ = fs::remove_dir(path);
-        }
-        return Err(error);
+    match &result {
+        Ok(()) => tracing::info!(
+            event = "markdown_output_completed",
+            elapsed_ms = crate::logging::elapsed_ms(started),
+            "Markdown结果落盘完成"
+        ),
+        Err(_) => tracing::error!(
+            event = "markdown_output_failed",
+            stage,
+            error_type = "output_boundary",
+            elapsed_ms = crate::logging::elapsed_ms(started),
+            cancel_requested = cancel.load(AtomicOrdering::Acquire),
+            "Markdown结果落盘失败"
+        ),
     }
-    let temp = parent.join(format!(".jch-markdown-{}.tmp", uuid::Uuid::new_v4()));
-    let write_result = (|| -> Result<(), String> {
-        crate::asset_util::ensure_not_cancelled(cancel)?;
-        // T-29（S4-02）：最终提交前同样受预算约束；检查点在 temp 写入与改名
-        // 之前，超时走失败与回滚，不把慢盘上的半成品计成功。
-        if deadline_exhausted(deadline) {
-            return Err("单文件处理超时：提交结果前预算已耗尽，本次结果未提交".to_string());
-        }
-        let mut file = OpenOptions::new()
-            .write(true)
-            .create_new(true)
-            .open(&temp)
-            .map_err(|e| format!("无法创建临时结果：{e}"))?;
-        file.write_all(content.as_bytes())
-            .map_err(|e| format!("写入 Markdown 失败：{e}"))?;
-        file.sync_all()
-            .map_err(|e| format!("同步 Markdown 失败：{e}"))?;
-        drop(file);
-        crate::asset_util::ensure_not_cancelled(cancel)?;
-        // T-29（S4-02）：检查点紧贴改名提交——慢盘写正文+sync 耗尽预算时不得
-        // 把结果改名为可见产物（检查点放在 rename 之后无法回滚对外可见状态）。
-        if deadline_exhausted(deadline) {
-            return Err("单文件处理超时：提交前预算已耗尽，本次结果未提交".to_string());
-        }
-        // T-25/T-12：完整成功后以不覆盖改名提交（temp 与目标同目录同卷）。
-        // 不用 fs::rename——Windows 上它会替换已存在目标；不用硬链接——
-        // exFAT/FAT 等文件系统不支持，会把输出在这些卷上的结果全部判失败。
-        fsutil::rename_noreplace(&temp, target)
-            .map_err(|e| format!("无法提交新结果（已有结果不会覆盖）：{e:#}"))?;
-        Ok(())
-    })();
-    let _ = fs::remove_file(&temp);
-    if write_result.is_err() {
-        // 提交失败（含目标被外部占用的保险丝）：回滚本次已写图片并删除空
-        // 媒体目录，不把无主媒体留给旧结果（T-25）。
-        for path in created.iter().rev() {
-            let _ = fs::remove_file(path);
-        }
-        for path in created_dirs.iter().rev() {
-            let _ = fs::remove_dir(path);
-        }
-    }
-    write_result
+    result
 }
 
 /// 转换一个媒体文件：验证媒体资产后，经会话共享进程请求 transcribe。
@@ -1126,26 +1280,56 @@ fn convert_media(
     deadline: &markdown_document::Deadline,
     cancel: &AtomicBool,
 ) -> Result<String, String> {
-    crate::asset_util::ensure_not_cancelled(cancel)?;
-    let component = markdown_assets::media_component_dir().map_err(|error| {
-        format!("共享 Xberg 的媒体组件未就绪，请检查已保存目录的模型和运行库：{error}")
-    })?;
-    markdown_assets::validate_media()?;
-    let response = crate::xberg_runtime::request(
-        &component,
-        serde_json::json!({"command":"transcribe","path":path}),
-        deadline.remaining(),
-        cancel,
-    )?;
-    let response = crate::xberg_runtime::checked(response)?;
-    crate::asset_util::ensure_not_cancelled(cancel)?;
-    let markdown = response["markdown"]
-        .as_str()
-        .ok_or_else(|| "Xberg 转录响应缺少 markdown".to_string())?;
-    if markdown.trim().is_empty() {
-        return Err("Xberg 转录响应的 markdown 为空，未生成有效媒体结果".to_string());
+    let span = crate::logging::operation_span("markdown", "transcribe");
+    let _entered = span.enter();
+    let started = std::time::Instant::now();
+    let mut stage = "media_assets";
+    tracing::info!(event = "media_conversion_started", "媒体转换开始");
+    let result = (|| {
+        crate::asset_util::ensure_not_cancelled(cancel)?;
+        let component = markdown_assets::media_component_dir().map_err(|error| {
+            format!("共享 Xberg 的媒体组件未就绪，请检查已保存目录的模型和运行库：{error}")
+        })?;
+        markdown_assets::validate_media()?;
+        stage = "transcribe_request_boundary";
+        let response = crate::xberg_runtime::request(
+            &component,
+            serde_json::json!({"command":"transcribe","path":path}),
+            deadline.remaining(),
+            cancel,
+        )?;
+        let response = crate::xberg_runtime::checked(response)?;
+        stage = "response_protocol";
+        crate::asset_util::ensure_not_cancelled(cancel)?;
+        let markdown = response["markdown"]
+            .as_str()
+            .ok_or_else(|| "Xberg 转录响应缺少 markdown".to_string())?;
+        if markdown.trim().is_empty() {
+            return Err("Xberg 转录响应的 markdown 为空，未生成有效媒体结果".to_string());
+        }
+        Ok(markdown.to_owned())
+    })();
+    match &result {
+        Ok(markdown) => tracing::info!(
+            event = "media_conversion_completed",
+            markdown_bytes = markdown.len(),
+            elapsed_ms = crate::logging::elapsed_ms(started),
+            "媒体转换完成"
+        ),
+        Err(_) => tracing::error!(
+            event = "media_conversion_failed",
+            stage,
+            error_type = if stage == "response_protocol" {
+                "protocol"
+            } else {
+                "media_boundary"
+            },
+            elapsed_ms = crate::logging::elapsed_ms(started),
+            cancel_requested = cancel.load(AtomicOrdering::Acquire),
+            "媒体转换失败，详情由上游结构化事件诊断"
+        ),
     }
-    Ok(markdown.to_owned())
+    result
 }
 
 /// E2E 专用接缝（#[doc(hidden)]）：单个媒体文件的真实转录路径（组件解析 →

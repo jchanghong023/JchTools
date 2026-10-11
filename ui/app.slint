@@ -583,16 +583,31 @@ component Kbd inherits Rectangle {
 component LogCard inherits Surface {
     in property <string> title: "运行日志";
     in-out property <string> body: "";
+    in property <bool> expanded: false;
+    in property <bool> expansion-enabled: true;
+    callback toggle-expanded();
+    forward-focus: editor;
+    init => { if root.expanded { editor.focus(); } }
+    FocusScope {
+        width: 100%; height: 100%;
+        key-pressed(event) => {
+            if root.expanded && root.expansion-enabled && event.text == Key.Escape {
+                root.toggle-expanded();
+                return accept;
+            }
+            return reject;
+        }
     VerticalLayout { spacing: 0px;
         Rectangle {
             height: 40px;
             background: Design.card;
-            HorizontalLayout { padding-left: 16px; padding-right: 16px; cross-axis-alignment: center;
+            HorizontalLayout { padding-left: 16px; padding-right: 16px; spacing: 8px; cross-axis-alignment: center;
                 Text { text: root.title; font-size: 12px; color: Design.text-muted; font-weight: 500;
                     vertical-alignment: center; overflow: elide; horizontal-stretch: 0; }
-                Rectangle { horizontal-stretch: 1; background: transparent; }
                 Text { text: "最新的消息显示在最上面 · 界面只保留最近 300 条"; font-size: 11.5px;
-                    color: Design.muted-2; vertical-alignment: center; overflow: elide; horizontal-stretch: 0; }
+                    color: Design.muted-2; vertical-alignment: center; overflow: elide; horizontal-stretch: 1; }
+                AppButton { text: root.expanded ? "还原" : "放大"; small: true; enabled: root.expansion-enabled;
+                    clicked => { root.toggle-expanded(); } }
             }
             Rectangle { y: parent.height - 1px; height: 1px; width: 100%; background: Design.line-soft; }
         }
@@ -600,9 +615,10 @@ component LogCard inherits Surface {
             background: Design.soft;
             vertical-stretch: 1;
             VerticalLayout { padding-top: 10px; padding-bottom: 10px; padding-left: 14px; padding-right: 14px;
-                TextEdit { text <=> root.body; read-only: true; font-family: "Consolas"; vertical-stretch: 1; }
+                editor := TextEdit { text <=> root.body; read-only: true; font-family: "Consolas"; vertical-stretch: 1; }
             }
         }
+    }
     }
 }
 
@@ -672,6 +688,9 @@ export component AppWindow inherits Window {
     in-out property <string> metrics: "尚未扫描";
     in-out property <string> summary;
     in-out property <string> log-text;
+    // U-10：只切换日志呈现面积，不复制日志或更改任务状态。
+    in-out property <bool> log-expanded: false;
+    out property <string> expanded-log-text: root.screen == 5 ? root.convert-log-text : root.log-text;
     in-out property <string> error-text;
     in-out property <string> notice-text;
     in-out property <string> plan-page-label: "未生成计划";
@@ -872,6 +891,8 @@ export component AppWindow inherits Window {
     init => { root.apply-theme(); }
     changed theme => { root.apply-theme(); }
     changed system-dark => { root.apply-theme(); }
+    changed screen => { root.log-expanded = false; }
+    changed panel => { root.log-expanded = false; }
 
     // 页面标题（标题栏文档位与页头共用同一映射）
     function screen-title() -> string {
@@ -1129,7 +1150,8 @@ export component AppWindow inherits Window {
                             AppButton { text: "下一页"; small: true; enabled: !root.busy && root.plan-next-enabled && root.confirm-kind == 0; clicked => { root.plan-page(1); } }
                         }
                     }
-                    if root.panel == 2: LogCard { vertical-stretch: 1; body <=> root.log-text; }
+                    if root.panel == 2: LogCard { vertical-stretch: 1; body <=> root.log-text;
+                        expansion-enabled: root.confirm-kind == 0; toggle-expanded => { root.log-expanded = true; } }
                     // 底部状态与主操作
                     Surface { pop: true; radius: 10px; min-height: 58px;
                         VerticalLayout { padding-top: 8px; padding-bottom: 8px; padding-left: 16px; padding-right: 16px; spacing: 6px;
@@ -1256,7 +1278,8 @@ export component AppWindow inherits Window {
                                     color: Design.text; wrap: word-wrap; horizontal-stretch: 1; vertical-alignment: center; font-size: 12px; }
                             }
                         }
-                        LogCard { vertical-stretch: 1; body <=> root.log-text; }
+                        LogCard { vertical-stretch: 1; body <=> root.log-text;
+                            expansion-enabled: root.confirm-kind == 0; toggle-expanded => { root.log-expanded = true; } }
                     }
                     // U-10：本次解压失败项分页列表。每个失败包或卷集对应一项，显示原路径、
                     // 失败原因与隔离后位置；总数与翻页按钮只在对应页真实存在时启用。
@@ -1428,7 +1451,8 @@ export component AppWindow inherits Window {
                             }
                         }
                     }
-                    LogCard { vertical-stretch: 1; body <=> root.log-text; }
+                    LogCard { vertical-stretch: 1; body <=> root.log-text;
+                        expansion-enabled: root.confirm-kind == 0; toggle-expanded => { root.log-expanded = true; } }
                     // 底部状态与主操作（U-12：后台执行，界面保持响应、可取消）
                     Surface { pop: true; radius: 10px; min-height: 58px;
                         VerticalLayout { padding-top: 8px; padding-bottom: 8px; padding-left: 16px; padding-right: 16px; spacing: 6px;
@@ -1527,7 +1551,8 @@ export component AppWindow inherits Window {
                         }
                     }
                     // 实时日志（G-14：阶段、stdout/stderr、错误原因、push/merge 返回、retry 信息）
-                    LogCard { vertical-stretch: 1; body <=> root.log-text; }
+                    LogCard { vertical-stretch: 1; body <=> root.log-text;
+                        expansion-enabled: root.confirm-kind == 0; toggle-expanded => { root.log-expanded = true; } }
                     Surface { pop: true; radius: 10px; min-height: 52px;
                         VerticalLayout { padding-top: 8px; padding-bottom: 8px; padding-left: 16px; padding-right: 16px; spacing: 6px;
                             HorizontalLayout { spacing: 12px; cross-axis-alignment: center;
@@ -1699,7 +1724,8 @@ export component AppWindow inherits Window {
                         }
                     }
                     // U-05：日志保留可读正文高度；内容可滚动，任务按钮固定在视口外。
-                    LogCard { min-height: 160px; vertical-stretch: 1; title: root.convert-progress-note == "" ? "转换日志" : root.convert-progress-note; body <=> root.convert-log-text; }
+                    LogCard { min-height: 160px; vertical-stretch: 1; title: root.convert-progress-note == "" ? "转换日志" : root.convert-progress-note; body <=> root.convert-log-text;
+                        expansion-enabled: root.confirm-kind == 0; toggle-expanded => { root.log-expanded = true; } }
                     }
                     }
                     Surface { pop: true; radius: 10px; min-height: 58px;
@@ -1926,6 +1952,21 @@ export component AppWindow inherits Window {
                     Muted { text: "本项目原创代码：MIT。Slint 使用其桌面 Royalty-free 许可并保留本署名组件。\n7-Zip：LGPL / BSD / unRAR 限制；随发布包提供许可证及对应源码。"; }
                     }
                 }
+            }
+        }
+    }
+    // U-10：窗口内展开覆盖内容区；标题栏保留，关闭任务的确认层仍在最上方。
+    if root.log-expanded: Rectangle {
+        y: 46px; width: 100%; height: parent.height - 46px;
+        background: Design.canvas;
+        TouchArea { }
+        VerticalLayout { padding: 16px;
+            LogCard {
+                title: root.screen-title() + " · 运行日志";
+                body: root.expanded-log-text;
+                expanded: true;
+                expansion-enabled: root.confirm-kind == 0;
+                toggle-expanded => { root.log-expanded = false; }
             }
         }
     }

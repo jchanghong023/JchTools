@@ -4,6 +4,7 @@ use std::{
     future::Future,
     pin::Pin,
     task::{Context, Poll},
+    time::Instant,
 };
 
 use axum::response::sse::Event;
@@ -44,11 +45,15 @@ pub(super) struct CompletionStream {
     created: u64,
     stage: Stage,
     connection_closed: Option<BoxFuture<'static, ()>>,
+    started: Instant,
+    output_bytes: usize,
+    terminal_logged: bool,
 }
 
 impl CompletionStream {
     pub(super) fn new(request: RequestHandle, first: RequestEvent, created: u64) -> Self {
         let id = format!("chatcmpl-{}", request.accepted.request_id.0);
+        tracing::info!(event = "acp_sse_started", component = "acp_http", request_id = %request.accepted.request_id.0, "ACP SSE 响应开始");
         Self {
             request,
             id,
@@ -56,6 +61,9 @@ impl CompletionStream {
             created,
             stage: Stage::Role,
             connection_closed: None,
+            started: Instant::now(),
+            output_bytes: 0,
+            terminal_logged: false,
         }
     }
 
@@ -78,6 +86,8 @@ impl Stream for CompletionStream {
                 .is_some_and(|closed| Future::poll(closed.as_mut(), cx).is_ready())
         {
             this.request.cancellation.cancel();
+            this.terminal_logged = true;
+            tracing::warn!(event = "acp_sse_cancelled", component = "acp_http", request_id = %this.request.accepted.request_id.0, stage = "connection_closed", elapsed_ms = crate::logging::elapsed_ms(this.started), "ACP SSE 客户端断连");
             this.stage = Stage::End;
             return Poll::Ready(None);
         }
@@ -107,15 +117,20 @@ impl Stream for CompletionStream {
             },
         };
         let event = match event {
-            Some(RequestEvent::TextDelta(text)) => json_event(chunk(
-                &this.id,
-                &this.request.accepted,
-                this.created,
-                Delta::Text { content: &text },
-                None,
-            )),
+            Some(RequestEvent::TextDelta(text)) => {
+                this.output_bytes += text.len();
+                json_event(chunk(
+                    &this.id,
+                    &this.request.accepted,
+                    this.created,
+                    Delta::Text { content: &text },
+                    None,
+                ))
+            }
             Some(RequestEvent::Completed { reason }) => {
                 this.request.cancellation.disarm();
+                this.terminal_logged = true;
+                tracing::info!(event = "acp_sse_completed", component = "acp_http", request_id = %this.request.accepted.request_id.0, result = ?reason, output_bytes = this.output_bytes, elapsed_ms = crate::logging::elapsed_ms(this.started), "ACP SSE 已收到完成终态");
                 this.stage = Stage::Done;
                 json_event(chunk(
                     &this.id,
@@ -127,22 +142,36 @@ impl Stream for CompletionStream {
             }
             Some(RequestEvent::Failed(error)) => {
                 this.request.cancellation.disarm();
+                this.terminal_logged = true;
+                tracing::error!(event = "acp_sse_failed", component = "acp_http", request_id = %this.request.accepted.request_id.0, stage = "backend_terminal", error_type = ?error.kind, elapsed_ms = crate::logging::elapsed_ms(this.started), "ACP SSE 后台返回失败终态");
                 this.stage = Stage::End;
                 Ok(Event::default().data(HttpError::service(&error).json().to_string()))
             }
             Some(RequestEvent::Cancelled) => {
                 this.request.cancellation.disarm();
+                this.terminal_logged = true;
+                tracing::warn!(event = "acp_sse_cancelled", component = "acp_http", request_id = %this.request.accepted.request_id.0, stage = "backend_terminal", elapsed_ms = crate::logging::elapsed_ms(this.started), "ACP SSE 后台返回取消终态");
                 this.stage = Stage::End;
                 Ok(Event::default().data(HttpError::service(&cancelled()).json().to_string()))
             }
             None => {
                 // EOF 不是终态：立即取消遗留轮次，不能冒充 stop 或输出 [DONE]。
                 this.request.cancellation.cancel();
+                this.terminal_logged = true;
+                tracing::error!(event = "acp_sse_failed", component = "acp_http", request_id = %this.request.accepted.request_id.0, stage = "event_eof", error_type = "agent_disconnected", elapsed_ms = crate::logging::elapsed_ms(this.started), "ACP SSE 未收到终态即关闭");
                 this.stage = Stage::End;
                 Ok(Event::default().data(HttpError::service(&disconnected()).json().to_string()))
             }
         };
         Poll::Ready(Some(event))
+    }
+}
+
+impl Drop for CompletionStream {
+    fn drop(&mut self) {
+        if !self.terminal_logged {
+            tracing::warn!(event = "acp_sse_cancelled", component = "acp_http", request_id = %self.request.accepted.request_id.0, stage = "response_body_dropped", elapsed_ms = crate::logging::elapsed_ms(self.started), "ACP SSE 响应体提前释放");
+        }
     }
 }
 

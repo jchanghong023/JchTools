@@ -75,57 +75,171 @@ pub fn request(
     timeout: Duration,
     cancel: &AtomicBool,
 ) -> Result<Value, String> {
-    if cancel.load(Ordering::Acquire) {
-        return Err("请求已取消".into());
+    let operation_id = diagnostic_id(request["diagnostic_id"].as_str())
+        .map_or_else(crate::logging::new_operation_id, str::to_owned);
+    // 仅在 JchTools 内部消费诊断元数据；外部 Xberg worker 协议保持不变。
+    if let Some(fields) = request.as_object_mut() {
+        fields.remove("diagnostic_id");
     }
-    if timeout.is_zero() {
-        return Err("Xberg 请求已超时".into());
-    }
+    let span = crate::logging::operation_span_with_id("xberg_runtime", "request", &operation_id);
+    let _entered = span.enter();
     let started = std::time::Instant::now();
-    if matches!(
-        request["command"].as_str(),
-        Some("extract" | "ocr_snapshot" | "transcribe")
-    ) {
-        let capabilities = self::request(
-            root,
-            json!({"command":"capabilities"}),
-            timeout.min(Duration::from_secs(15)),
-            cancel,
-        )
-        .and_then(checked)
-        .map_err(|error| {
-            format!("Xberg 共享接口不可用：能力握手失败（不会启动备用引擎）：{error}")
-        })?;
-        validate_capabilities(
-            &capabilities,
-            request["command"].as_str().unwrap_or_default(),
-        )?;
+    let command = diagnostic_command(request["command"].as_str());
+    if command == "keepalive" {
+        tracing::debug!(
+            event = "xberg_request_started",
+            command,
+            timeout_ms = u64::try_from(timeout.as_millis()).unwrap_or(u64::MAX),
+            "共享引擎请求开始"
+        );
+    } else {
+        tracing::info!(
+            event = "xberg_request_started",
+            command,
+            timeout_ms = u64::try_from(timeout.as_millis()).unwrap_or(u64::MAX),
+            "共享引擎请求开始"
+        );
     }
-    let timeout = timeout.saturating_sub(started.elapsed());
-    if timeout.is_zero() {
-        return Err("Xberg 请求已超时（能力查询占用预算）".into());
+    let mut stage = "preflight";
+    let result = (|| {
+        if cancel.load(Ordering::Acquire) {
+            stage = "preflight_cancelled";
+            return Err("请求已取消".into());
+        }
+        if timeout.is_zero() {
+            stage = "preflight_timeout";
+            return Err("Xberg 请求已超时".into());
+        }
+        let budget_started = std::time::Instant::now();
+        if matches!(
+            request["command"].as_str(),
+            Some("extract" | "ocr_snapshot" | "transcribe")
+        ) {
+            stage = "capabilities_handshake";
+            let capabilities = self::request(
+                root,
+                json!({"command":"capabilities"}),
+                timeout.min(Duration::from_secs(15)),
+                cancel,
+            )
+            .and_then(checked)
+            .map_err(|error| {
+                format!("Xberg 共享接口不可用：能力握手失败（不会启动备用引擎）：{error}")
+            })?;
+            stage = "capabilities_validate";
+            validate_capabilities(
+                &capabilities,
+                request["command"].as_str().unwrap_or_default(),
+            )?;
+        }
+        stage = "request_budget";
+        let timeout = timeout.saturating_sub(budget_started.elapsed());
+        if timeout.is_zero() {
+            return Err("Xberg 请求已超时（能力查询占用预算）".into());
+        }
+        stage = "request_id";
+        let id = format!(
+            "{}-{}-{}",
+            std::process::id(),
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .map_err(|e| e.to_string())?
+                .as_nanos(),
+            NEXT.fetch_add(1, Ordering::Relaxed)
+        );
+        request["id"] = json!(id);
+        request["timeout_ms"] = json!(u64::try_from(timeout.as_millis())
+            .unwrap_or(u64::MAX)
+            .max(1));
+        stage = "broker_request";
+        #[cfg(windows)]
+        {
+            platform::request(root, &request, timeout, cancel, &operation_id)
+        }
+        #[cfg(not(windows))]
+        {
+            let _ = (root, request);
+            Err("共享 Xberg 仅支持 Windows".into())
+        }
+    })();
+    let elapsed_ms = crate::logging::elapsed_ms(started);
+    match &result {
+        Ok(response) if response["ok"] == true => {
+            if command == "keepalive" {
+                tracing::debug!(
+                    event = "xberg_request_completed",
+                    command,
+                    elapsed_ms,
+                    result = "ok",
+                    "共享引擎请求完成"
+                );
+            } else {
+                tracing::info!(
+                    event = "xberg_request_completed",
+                    command,
+                    elapsed_ms,
+                    result = "ok",
+                    "共享引擎请求完成"
+                );
+            }
+        }
+        Ok(response) => tracing::warn!(
+            event = "xberg_request_failed",
+            command,
+            elapsed_ms,
+            stage = "remote",
+            error_kind = diagnostic_error_kind(response),
+            "共享引擎返回失败终态"
+        ),
+        Err(_) => tracing::warn!(
+            event = "xberg_request_failed",
+            command,
+            elapsed_ms,
+            stage,
+            "共享引擎请求失败"
+        ),
     }
-    let id = format!(
-        "{}-{}-{}",
-        std::process::id(),
-        SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .map_err(|e| e.to_string())?
-            .as_nanos(),
-        NEXT.fetch_add(1, Ordering::Relaxed)
-    );
-    request["id"] = json!(id);
-    request["timeout_ms"] = json!(u64::try_from(timeout.as_millis())
-        .unwrap_or(u64::MAX)
-        .max(1));
-    #[cfg(windows)]
-    {
-        platform::request(root, &request, timeout, cancel)
+    result
+}
+
+pub(super) fn diagnostic_id(value: Option<&str>) -> Option<&str> {
+    value.filter(|value| {
+        !value.is_empty()
+            && value.len() <= 128
+            && value
+                .bytes()
+                .all(|byte| byte.is_ascii_alphanumeric() || byte == b'-')
+    })
+}
+
+// 只允许协议已知的枚举；引擎字段不能作为任意正文进入诊断日志。
+pub(super) fn diagnostic_command(command: Option<&str>) -> &'static str {
+    match command {
+        Some("extract") => "extract",
+        Some("transcribe") => "transcribe",
+        Some("ocr_snapshot") => "ocr_snapshot",
+        Some("capabilities") => "capabilities",
+        Some("formats") => "formats",
+        Some("keepalive") => "keepalive",
+        Some("snapshot_state") => "snapshot_state",
+        Some("cancel") => "cancel",
+        Some("broker-state") => "broker_state",
+        Some("broker-stop") => "broker_stop",
+        Some("broker-force-stop") => "broker_force_stop",
+        _ => "unknown",
     }
-    #[cfg(not(windows))]
-    {
-        let _ = (root, request);
-        Err("共享 Xberg 仅支持 Windows".into())
+}
+
+pub(super) fn diagnostic_error_kind(response: &Value) -> &'static str {
+    match response["error_kind"].as_str() {
+        Some("cancelled" | "canceled") => "cancelled",
+        Some("timeout" | "timed_out") => "timeout",
+        Some("process_exited") => "process_exited",
+        Some("response_too_large") => "response_too_large",
+        Some("shared_runtime") => "shared_runtime",
+        Some("unsupported") => "unsupported",
+        Some("invalid_request") => "invalid_request",
+        _ => "remote_error",
     }
 }
 

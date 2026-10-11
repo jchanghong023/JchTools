@@ -5,6 +5,41 @@ use std::time::Duration;
 
 use rusqlite::{Connection, OptionalExtension};
 
+/// P-10：配置操作只记阶段和结果，不记录数据库值或用户配置正文。
+fn observe<T>(
+    operation: &'static str,
+    body: impl FnOnce() -> Result<T, String>,
+) -> Result<T, String> {
+    let span = crate::logging::operation_span("xberg_settings", operation);
+    let _entered = span.enter();
+    let started = std::time::Instant::now();
+    tracing::info!(event = "settings_operation_started", "配置操作开始");
+    let result = body();
+    let elapsed_ms = crate::logging::elapsed_ms(started);
+    match &result {
+        Ok(_) => tracing::info!(
+            event = "settings_operation_completed",
+            elapsed_ms,
+            "配置操作完成"
+        ),
+        Err(_) => tracing::error!(
+            event = "settings_operation_failed",
+            stage = operation,
+            error_type = "configuration",
+            elapsed_ms,
+            "配置操作失败"
+        ),
+    }
+    result
+}
+
+fn sqlite_failure(stage: &'static str, error: &rusqlite::Error) {
+    tracing::error!(event = "settings_storage_failed", stage,
+        error_type = ?error.sqlite_error_code(),
+        error_code = error.sqlite_error().map(|code| code.extended_code),
+        "配置数据库调用失败");
+}
+
 pub fn state_dir() -> Result<PathBuf, String> {
     if let Some(path) = test_directory_override(cfg!(any(test, feature = "test-hooks")), |key| {
         std::env::var_os(key)
@@ -43,13 +78,23 @@ fn test_directory_override(
 }
 
 fn open(root: &Path) -> Result<Connection, String> {
-    std::fs::create_dir_all(root).map_err(|e| format!("创建应用配置目录失败：{e}"))?;
-    let db = Connection::open(root.join("config.sqlite3"))
-        .map_err(|e| format!("打开应用配置 SQLite 失败：{e}"))?;
-    db.busy_timeout(Duration::from_secs(5))
-        .map_err(|e| e.to_string())?;
+    std::fs::create_dir_all(root).map_err(|e| {
+        tracing::error!(event = "settings_storage_failed", stage = "create_directory", error_type = ?e.kind(), error_code = ?e.raw_os_error(), "创建配置目录失败");
+        format!("创建应用配置目录失败：{e}")
+    })?;
+    let db = Connection::open(root.join("config.sqlite3")).map_err(|e| {
+        tracing::error!(event = "settings_storage_failed", stage = "sqlite_open", error_type = ?e.sqlite_error_code(), "打开配置数据库失败");
+        format!("打开应用配置 SQLite 失败：{e}")
+    })?;
+    db.busy_timeout(Duration::from_secs(5)).map_err(|e| {
+        sqlite_failure("busy_timeout", &e);
+        e.to_string()
+    })?;
     db.execute_batch(include_str!("app_settings.sql"))
-        .map_err(|e| format!("初始化应用配置 SQLite 失败：{e}"))?;
+        .map_err(|e| {
+            sqlite_failure("initialize_schema", &e);
+            format!("初始化应用配置 SQLite 失败：{e}")
+        })?;
     Ok(db)
 }
 
@@ -63,7 +108,10 @@ fn read_legacy(root: &Path) -> Result<Option<String>, String> {
     match std::fs::read_to_string(legacy_root.join("xberg-runtime-path.txt")) {
         Ok(value) => Ok(Some(value)),
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),
-        Err(e) => Err(format!("读取旧 Xberg 配置失败：{e}")),
+        Err(e) => {
+            tracing::error!(event = "settings_storage_failed", stage = "read_legacy", error_type = ?e.kind(), error_code = ?e.raw_os_error(), "读取旧配置失败");
+            Err(format!("读取旧 Xberg 配置失败：{e}"))
+        }
     }
 }
 
@@ -80,6 +128,20 @@ fn legacy_directory_value(value: &str) -> Result<&str, String> {
 
 /// 仅首次迁移旧文本。SQLite 有值时不读取旧文本，迁移失败不删除原件。
 pub fn load() -> Result<Option<PathBuf>, String> {
+    observe("load", || {
+        let result = load_inner();
+        if let Ok(value) = &result {
+            tracing::info!(
+                event = "settings_loaded",
+                configured = value.is_some(),
+                "共享运行目录配置已读取"
+            );
+        }
+        result
+    })
+}
+
+fn load_inner() -> Result<Option<PathBuf>, String> {
     let root = state_dir()?;
     let db = open(&root)?;
     let read = || {
@@ -90,7 +152,10 @@ pub fn load() -> Result<Option<PathBuf>, String> {
         )
         .optional()
     };
-    if let Some(value) = read().map_err(|e| format!("读取 Xberg 配置失败：{e}"))? {
+    if let Some(value) = read().map_err(|e| {
+        sqlite_failure("read_directory", &e);
+        format!("读取 Xberg 配置失败：{e}")
+    })? {
         if value.trim().is_empty() {
             return Err("已保存的 Xberg 配置为空".into());
         }
@@ -108,10 +173,14 @@ pub fn load() -> Result<Option<PathBuf>, String> {
         "INSERT OR IGNORE INTO app_settings(key,value) VALUES('xberg_directory',?1)",
         [value],
     )
-    .map_err(|e| format!("迁移 Xberg 配置到 SQLite 失败：{e}"))?;
-    read()
-        .map(|value| value.map(PathBuf::from))
-        .map_err(|e| format!("读取迁移后的配置失败：{e}"))
+    .map_err(|e| {
+        sqlite_failure("migrate_directory", &e);
+        format!("迁移 Xberg 配置到 SQLite 失败：{e}")
+    })?;
+    read().map(|value| value.map(PathBuf::from)).map_err(|e| {
+        sqlite_failure("read_migrated_directory", &e);
+        format!("读取迁移后的配置失败：{e}")
+    })
 }
 
 /// XB-20/XB-21：两种来源各自保存，所有功能只读取一个当前来源。
@@ -144,6 +213,22 @@ pub struct Settings {
 
 /// 兼容旧 SQLite 与文本配置；失效路径仍保留供用户修复。
 pub fn settings() -> Result<Settings, String> {
+    observe("read_sources", || {
+        let result = settings_inner();
+        if let Ok(value) = &result {
+            tracing::info!(
+                event = "settings_sources_loaded",
+                source = value.source.value(),
+                custom_present = value.custom.is_some(),
+                downloaded_present = value.downloaded.is_some(),
+                "共享运行目录来源已读取"
+            );
+        }
+        result
+    })
+}
+
+fn settings_inner() -> Result<Settings, String> {
     let legacy = load()?;
     let db = open(&state_dir()?)?;
     let read = |key: &str| -> Result<Option<String>, String> {
@@ -153,7 +238,10 @@ pub fn settings() -> Result<Settings, String> {
             |row| row.get(0),
         )
         .optional()
-        .map_err(|e| format!("读取 Xberg 配置失败：{e}"))
+        .map_err(|e| {
+            sqlite_failure("read_sources", &e);
+            format!("读取 Xberg 配置失败：{e}")
+        })
     };
     let source = match read("xberg_source")?.as_deref() {
         None | Some("custom") => Source::Custom,
@@ -181,17 +269,42 @@ pub fn select(source: Source) -> Result<(), String> {
 
 /// 目录与来源在同一 SQLite 事务内落盘，失败不改写有效配置。
 pub fn save_source(source: Source, path: &Path) -> Result<(), String> {
+    observe("save_source", || {
+        let result = save_source_inner(source, path);
+        if result.is_ok() {
+            tracing::info!(
+                event = "settings_source_saved",
+                source = source.value(),
+                "共享运行目录来源已保存"
+            );
+        }
+        result
+    })
+}
+
+fn save_source_inner(source: Source, path: &Path) -> Result<(), String> {
+    tracing::debug!(
+        event = "settings_save_stage",
+        stage = "validate_directory",
+        "校验保存的目录"
+    );
     if !path.is_absolute() || !path.is_dir() || !path.join("xberg.exe").is_file() {
         return Err("请选择包含 xberg.exe 的有效绝对目录".into());
     }
-    let path = std::fs::canonicalize(path).map_err(|e| format!("解析 Xberg 目录失败：{e}"))?;
+    let path = std::fs::canonicalize(path).map_err(|e| {
+        tracing::error!(event = "settings_storage_failed", stage = "canonicalize_directory", error_type = ?e.kind(), error_code = ?e.raw_os_error(), "解析共享运行目录失败");
+        format!("解析 Xberg 目录失败：{e}")
+    })?;
     let text = path.to_str().ok_or("Xberg 路径无法编码为 Unicode")?;
     let root = state_dir()?;
     let mut db = open(&root)?;
-    let tx = db.transaction().map_err(|e| e.to_string())?;
+    let tx = db.transaction().map_err(|e| {
+        tracing::error!(event = "settings_storage_failed", stage = "begin_transaction", error_type = ?e.sqlite_error_code(), "开始配置保存事务失败");
+        e.to_string()
+    })?;
     // 切到下载来源前，把旧版唯一目录保留为用户目录。
     tx.execute("INSERT OR IGNORE INTO app_settings(key,value) SELECT 'xberg_custom_directory',value FROM app_settings WHERE key='xberg_directory' AND NOT EXISTS(SELECT 1 FROM app_settings WHERE key='xberg_source')", [])
-        .map_err(|e| e.to_string())?;
+        .map_err(|e| { sqlite_failure("migrate_legacy_source", &e); e.to_string() })?;
     if source == Source::Downloaded {
         let migrate_text: bool = tx
             .query_row(
@@ -199,7 +312,7 @@ pub fn save_source(source: Source, path: &Path) -> Result<(), String> {
                 [],
                 |row| row.get(0),
             )
-            .map_err(|e| format!("读取旧 Xberg 来源配置失败：{e}"))?;
+            .map_err(|e| { sqlite_failure("read_legacy_source", &e); format!("读取旧 Xberg 来源配置失败：{e}") })?;
         if migrate_text {
             if let Some(value) = read_legacy(&root)? {
                 let value = legacy_directory_value(&value)?;
@@ -207,7 +320,10 @@ pub fn save_source(source: Source, path: &Path) -> Result<(), String> {
                     "INSERT INTO app_settings(key,value) VALUES('xberg_custom_directory',?1)",
                     [value],
                 )
-                .map_err(|e| format!("迁移旧 Xberg 用户目录失败：{e}"))?;
+                .map_err(|e| {
+                    sqlite_failure("migrate_custom_directory", &e);
+                    format!("迁移旧 Xberg 用户目录失败：{e}")
+                })?;
             }
         }
     }
@@ -217,9 +333,15 @@ pub fn save_source(source: Source, path: &Path) -> Result<(), String> {
         ("xberg_directory", text),
     ] {
         tx.execute("INSERT INTO app_settings(key,value) VALUES(?1,?2) ON CONFLICT(key) DO UPDATE SET value=excluded.value", [key, value])
-            .map_err(|e| format!("保存 Xberg 配置失败：{e}"))?;
+            .map_err(|e| {
+                tracing::error!(event = "settings_storage_failed", stage = "write_settings", error_type = ?e.sqlite_error_code(), "写入配置失败");
+                format!("保存 Xberg 配置失败：{e}")
+            })?;
     }
-    tx.commit().map_err(|e| format!("提交 Xberg 配置失败：{e}"))
+    tx.commit().map_err(|e| {
+        tracing::error!(event = "settings_storage_failed", stage = "commit_transaction", error_type = ?e.sqlite_error_code(), "提交配置事务失败");
+        format!("提交 Xberg 配置失败：{e}")
+    })
 }
 
 pub fn save(path: &Path) -> Result<(), String> {

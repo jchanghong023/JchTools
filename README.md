@@ -94,7 +94,7 @@ powershell -NoProfile -File .\scripts\package-windows.ps1
 
 ## ACP 模型服务
 
-侧栏「模型服务」将用户配置的 ACP Agent 接到本机 OpenAI 风格 HTTP 接口。HTTP 使用 Axum 0.8.9，ACP 使用官方 Rust SDK 3.2.0；它们编译进 JchTools，不需要另装 Node/Python HTTP 后端。Agent 由用户准备，模型认证与其自身工具由 Agent 承接，需求边界见 [合同附录 F](docs/requirements/CONTRACT.md)。
+侧栏「模型服务」将用户配置的 ACP Agent 接到本机 OpenAI 风格 HTTP 接口。HTTP 使用 Axum 0.8.9，ACP 使用官方 Rust SDK 3.2.0；它们编译进 JchTools，不需要另装 Node/Python HTTP 后端。Agent 由用户准备，模型认证与其自身工具由 Agent 承接，需求边界见 [ACP 模型服务需求](docs/requirements/ACP-MODEL-SERVICE.md)。
 
 - 启动程序和参数分栏保存：程序栏填写可执行文件路径，不包引号；参数栏按 Windows 引号规则处理空格与中文。本次 OpenCode 验收启动命令为 `opencode acp`：程序栏填写真实 `opencode.exe` 路径，参数栏只填 `acp`，不添加未经其公开能力支持的模型、推理或 yolo 参数。配置保存在应用状态目录的 `config.sqlite3`，默认端口 8765。
 - 打开工具箱后按有效配置启动或连接独立后台；关闭或终止 GUI 不退出服务。修改并保存配置不会打断旧请求；「应用并重启」等待已接收请求完成后生效。退出模型服务使用独立确认，Stop 可抢占正在排空的 Apply；资源回收完成后，即使收尾报错也退出后台和控制管道。退出后迟到的 Apply 不会重新拉起服务，同一次 GUI 会话也不自动重启。
@@ -104,7 +104,7 @@ powershell -NoProfile -File .\scripts\package-windows.ps1
 - HTTP 断连只取消本轮；Agent 异常不重放任务。Windows 连接通过每 100ms 的只读 `SIO_TCP_INFO` v0 内核 TCP 状态查询观察对端关闭（该 API 要求 Windows 10 1703 或更新版本），不消费、复制管线请求字节，不替换 Mio 的事件注册；查询失败不是断连证据，会记录告警，不能据此保证缓冲管线下的关闭观察。服务只监听 `127.0.0.1`，端口占用不会自动换端口。Agent 初始工作目录为应用状态目录的 `acp-workspace`，不是源仓库。
 - 同一 Windows 用户、同一登录会话中的 OMP 通过控制管道的只读 `Discover` 自动取得实际就绪地址，再读取真实模型列表；不猜端口、不启动服务、不读启动参数或凭据。OMP 模型选择器显示 `jchtools/<真实 ID>` 和“后端 Agent 执行”，支持文本流式任务、取消与明确错误，不运行前端工具或自动重放任务。服务端启动的 ACP Agent 子进程固定带 `OMP_JCHTOOLS_DISCOVERY=0`，防止后端 OMP 再发现本服务；普通 OMP 也可用该进程开关或 `disabledProviders` 禁用发现，不改写用户配置。这是 AH-16 既有产品保护，不因真实验收改用 OpenCode 而移除；OpenCode 验收不证明其实现 OMP 的发现或模型选择器入口，也不要求启动真实 OMP。
 
-Rust 局部验证入口：`cargo test --features test-hooks --test acp_settings --test acp_http_contract --test acp_callbacks --test acp_service_process --test acp_discovery --test acp_discovery_env`。官方 SDK 合成 Agent、真实 TCP、独立进程与无硬件鼠标窗口用例不代替 F.3 指定的真实 Agent 与模型验收。唯一真实验收目标为 `acp_opencode`：本次截图基准为 OpenCode v2.0.26、OpenCode Zen MiMo-V2.6-Flash Free（`opencode/mimo-v2.6-flash-free`），执行时记录实际版本及 ACP 协商、选择和返回结果；该版本不限制产品可配置的 Agent 版本。用户已授权本次基准及目标模型的真实 ACP 验收，第一阶段仅单 Agent、单并发 Models / Chat JSON / 增量 SSE；未执行的 GUI、工具、权限、并行及其他高级矩阵项仍为 `NOT RUN`，不以第一阶段替代完整验收。Free 未开放或认证、能力不满足时如实报告，不回退付费或其他模型、Agent；权限按公开启动能力与 AH-13 的 ACP 最大授权记录实际结果，不编造 CLI flag。这些说明仅定义验收口径，不构成任何通过记录，权威需求与完整 AH-A01～AH-A15 矩阵仍见 [合同 F.3](docs/requirements/CONTRACT.md#f3-验收方案)。模型联网由 Agent 按 P-03 承接，本次授权不包含 fulltest、slowtest 或发布。源码与许可来源见 `vendor/SOURCES.json`；全新 Cargo 源缓存可用 `--offline --locked` 验证。
+Rust 局部验证入口：`cargo test --features test-hooks --test acp_settings --test acp_http_contract --test acp_callbacks --test acp_service_process --test acp_discovery --test acp_discovery_env`。官方 SDK 合成 Agent、真实 TCP、独立进程与无硬件鼠标窗口用例不代替 [模型服务第 3 节](docs/requirements/ACP-MODEL-SERVICE.md#3-验收方案) 的真实 Agent 与模型验收。唯一真实验收目标为 `acp_opencode`，目标模型、第一阶段范围、完整 AH-A01～AH-A15 矩阵及失败边界均在该节唯一维护；本文不复制验收需求或将历史授权视为本次执行权限。真实模型调用须取得当次明确指令，不包含 fulltest、slowtest 或发布；未执行项仍为 `NOT RUN`，局部验证不等于完整验收。源码与许可来源见 `vendor/SOURCES.json`；全新 Cargo 源缓存可用 `--offline --locked` 验证。
 
 
 ## 多 TB 目录的处理方式与边界
@@ -161,7 +161,7 @@ powershell -NoProfile -File .\scripts\acceptance.ps1 -WithEngine   # 单命令�
 
 所有门均不运行 CI、远程、发布、ComputerUse、全局鼠标或焦点抢占测试。`gui_flow` 全部用例、`acp_service_process` 两项 `real_gui` 用例、`gui_smoke.py` / `markdown_acceptance.py` 的真实桌面 driver，以及注册全局热键的 `check_worker_root.py` 服务探测保留原测试/断言和独立入口，门中报告 `NOT_RUN_SEPARATE_USER_INSTRUCTION_REQUIRED`，不因门外而判 FAIL，也不冒报 PASS；软件渲染不等于焦点隔离，须用户当次另行明确指令才执行。库内 Slint TestingBackend、OCR 隔离 desktop / window station 用例仍在门内。适用测试缺环境/工具时报告覆盖缺口，编译或门通过不等于未运行项验收通过。
 
-显式调用 `jch-fastcheck-fulltest-slowtest-gates` 已授权该次任务必要的全级运行与重跑；普通 fulltest / slowtest 仍逐次取得当次明确授权，不继承历史授权。`--authorized` 只声明该显式技能授权或当次明确指令，不创造授权（会话软约束）；不得静默重跑到绿。门授权不包含真实模型调用，也不继承此前某次真实 ACP 验收的授权；真实模型验收须另行取得当次明确指令。
+fulltest / slowtest 须取得当次明确授权；用户明确授权本次任务所需运行及必要重跑时，仅在本任务范围内有效，不继承历史授权。`--authorized` 只是当次明确指令的入口声明，不创造授权（会话软约束）；不得静默重跑到绿。门授权不包含真实模型调用，也不继承此前真实 ACP 验收的授权；真实模型验收须另行取得当次明确指令。
 
 每级使用一个共享墙钟，setup / static / format / tests / download / packaging / cleanup 全计费；只有受控 Windows Job 内实际观测的 compiler 编译独占区间、且无非编译并行工作才扣除。不能把整条 Cargo/测试/打包命令或缓存预热都扣除；混合打包只在同步等待纯 `cargo build` 且符合观测条件时扣除，其他阶段全收费。所有终止路径均输出 `total` / `compile_excluded` / `budgeted` / `limit` / `status`，`budgeted = total - compile_excluded`，超出非编译预算即失败并回收所属进程树。
 
@@ -203,4 +203,4 @@ cargo test --features test-hooks --test acp_opencode -- --ignored --exact real_o
 
 `src/main.rs`/`ui/app.slint`：界面；`resources/rules.json`：界面规则清单；`src/config.rs`：配置及校验；`src/registry.rs`：真实工具注册；`src/engine.rs`：阶段控制；`archive.rs`：7-Zip；`planner.rs`：计划；`platform.rs`：删除（一律永久删除，S-02）；`db.rs`/`schema.sql`：磁盘索引、计划及审计；`tests/`：测试；`scripts/`：检查/打包；`.github/workflows/check.yml`：Windows CI。
 
-技术依据和许可见 [第三方说明](THIRD_PARTY_NOTICES.md)；需求语义见 [需求合同](docs/requirements/CONTRACT.md)。
+技术依据和许可见 [第三方说明](THIRD_PARTY_NOTICES.md)；全部需求域及其唯一权威文档见 [需求目录索引](docs/requirements/README.md)，适用全局约束见 [CONTRACT.md](docs/requirements/CONTRACT.md)。

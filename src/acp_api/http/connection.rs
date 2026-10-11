@@ -22,6 +22,7 @@ use tokio::{
     task::JoinHandle,
 };
 use tokio_util::sync::CancellationToken;
+use tracing::Instrument;
 
 #[derive(Clone, Debug)]
 pub(super) struct ConnectionClosed(pub(super) CancellationToken);
@@ -44,7 +45,11 @@ impl Listener for ObservedListener {
         let (read, write) = socket.into_split();
         let read = Arc::new(read);
         let closed = CancellationToken::new();
-        let observer = tokio::spawn(observe_read_closed(read.clone(), closed.clone()));
+        let observer = tokio::spawn(
+            observe_read_closed(read.clone(), closed.clone()).instrument(
+                crate::logging::operation_span("acp_http", "connection_observer"),
+            ),
+        );
         (
             ObservedIo {
                 read,
@@ -180,7 +185,7 @@ async fn observe_read_closed(read: Arc<OwnedReadHalf>, closed: CancellationToken
                 // 查询失败不证明断连，不能把不支持的 IOCTL 等错误变成请求取消。
                 // 每连接只记录一次；正常 Hyper I/O 的 EOF/错误仍由 ObservedIo 处理。
                 if !reported_error {
-                    tracing::warn!(%error, "模型服务 HTTP TCP 关闭状态查询失败");
+                    tracing::warn!(event = "acp_http_connection_observation_failed", component = "acp_http", stage = "tcp_state", error_type = ?error.kind(), error_code = ?error.raw_os_error(), "模型服务 HTTP TCP 关闭状态查询失败");
                     reported_error = true;
                 }
             }

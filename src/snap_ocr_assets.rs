@@ -8,6 +8,9 @@
 //! 已经校验通过的完整资产；重试时已验证资产直接复用，不重复下载。
 //! 下载/校验/原子落位与推理组件包安装核心与转 Markdown 共用
 //! [`crate::asset_util`]，两侧行为同源。
+//! P-10：初始化、资产下载和发布元数据共用 operation span；每次 GET 的 request_id
+//! 关联逐跳代理选择、重定向和直连回退。日志只记录安全 URL、分类码与计数，
+//! 不记录响应正文、完整错误文本、路径内容或认证信息；UI 错误文案保持原样。
 
 use crate::asset_util::{
     atomic_replace_dir, atomic_replace_file, cleanup_stale_staging_dirs, ensure_not_cancelled,
@@ -361,46 +364,93 @@ fn xberg_layout_ready(component: &Path) -> Result<(), String> {
 /// 共用 `crate::asset_util::AssetDownloader` / `crate::asset_util::NetworkDownloader`，
 /// 测试可注入本地供给验证「补缺下载」与「失败后重试不重下」。
 pub fn initialize(cancel: &AtomicBool, mut progress: impl FnMut(String)) -> Result<(), String> {
-    // P-10：初始化是关键功能任务，开始/结束统计必须落盘（下载内部另有
-    // 逐次重试与回退日志）。
-    tracing::info!("截图 OCR 组件初始化开始");
+    let span = crate::logging::operation_span("snap_ocr_assets", "initialize");
+    let _entered = span.enter();
     let started = std::time::Instant::now();
+    tracing::info!(
+        event = "asset_initialize_started",
+        "截图 OCR 组件初始化开始"
+    );
     let result = initialize_task(cancel, &mut progress);
-    let elapsed_ms = u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX);
+    let elapsed_ms = crate::logging::elapsed_ms(started);
     match &result {
-        Ok(()) => tracing::info!(elapsed_ms, "截图 OCR 组件初始化完成"),
+        Ok(()) => tracing::info!(
+            event = "asset_initialize_completed",
+            elapsed_ms,
+            result = "ready",
+            "截图 OCR 组件初始化完成"
+        ),
         Err(reason) if reason.contains("取消") => {
-            tracing::info!(elapsed_ms, reason = %reason, "截图 OCR 组件初始化已取消");
+            tracing::info!(
+                event = "asset_initialize_cancelled",
+                elapsed_ms,
+                result = "cancelled",
+                "截图 OCR 组件初始化已取消"
+            );
         }
-        Err(reason) => tracing::error!(elapsed_ms, reason = %reason, "截图 OCR 组件初始化失败"),
+        Err(_) => tracing::error!(
+            event = "asset_initialize_failed",
+            elapsed_ms,
+            result = "failed",
+            "截图 OCR 组件初始化失败"
+        ),
     }
     result
 }
 
 fn initialize_task(cancel: &AtomicBool, progress: &mut dyn FnMut(String)) -> Result<(), String> {
-    let root = asset_root();
-    // B-2：先兜底清理历史残留的 staging（readiness 提前返回、取消后清理
-    // 失败或进程崩溃都会残留 .staging-<uuid>，download.zip 残留可达约 291MB）。
-    cleanup_stale_staging(&root);
-    if readiness().is_ok() {
-        progress("截图 OCR 组件已就绪".to_string());
-        return Ok(());
+    let mut stage = "prepare";
+    let result = (|| {
+        let root = asset_root();
+        // B-2：先兜底清理历史残留的 staging（readiness 提前返回、取消后清理
+        // 失败或进程崩溃都会残留 .staging-<uuid>，download.zip 残留可达约 291MB）。
+        cleanup_stale_staging(&root);
+        if readiness().is_ok() {
+            tracing::info!(
+                event = "asset_initialize_reused",
+                result = "already_ready",
+                "截图 OCR 资产已就绪，无需初始化"
+            );
+            progress("截图 OCR 组件已就绪".to_string());
+            return Ok(());
+        }
+        ensure_not_cancelled(cancel)?;
+        stage = "manifest";
+        let manifest = load_manifest()?;
+        stage = "create_root";
+        fs::create_dir_all(&root).map_err(|error| format!("创建资产目录失败：{error}"))?;
+        let staging = root.join(format!(".staging-{}", Uuid::new_v4().simple()));
+        stage = "create_staging";
+        fs::create_dir_all(&staging).map_err(|error| format!("创建临时目录失败：{error}"))?;
+        let mut downloader = NetworkDownloader;
+        stage = "initialize_staged";
+        let result = initialize_staged(
+            &manifest,
+            cancel,
+            progress,
+            &staging,
+            &root,
+            &mut downloader,
+        );
+        stage = "finalize_staging";
+        finalize_staging(result, &staging, progress)
+    })();
+    if result.is_err() {
+        if cancel.load(std::sync::atomic::Ordering::Acquire) {
+            tracing::info!(
+                event = "asset_initialize_stage_cancelled",
+                stage,
+                "截图 OCR 初始化阶段已取消"
+            );
+        } else {
+            tracing::error!(
+                event = "asset_initialize_stage_failed",
+                stage,
+                "截图 OCR 初始化阶段未完成"
+            );
+        }
     }
-    ensure_not_cancelled(cancel)?;
-    let manifest = load_manifest()?;
-    fs::create_dir_all(&root).map_err(|error| format!("创建资产目录失败：{error}"))?;
-    let staging = root.join(format!(".staging-{}", Uuid::new_v4().simple()));
-    fs::create_dir_all(&staging).map_err(|error| format!("创建临时目录失败：{error}"))?;
-    let mut downloader = NetworkDownloader;
-    let result = initialize_staged(
-        &manifest,
-        cancel,
-        progress,
-        &staging,
-        &root,
-        &mut downloader,
-    );
-    finalize_staging(result, &staging, progress)
+    result
 }
 
 /// 兜底清理资产根下历史残留的 `.staging-*` 目录（B-2，`.staging-*` 清扫与
@@ -423,10 +473,23 @@ fn cleanup_stale_staging(root: &Path) {
 /// 清扫 `xberg-inference/` 下顶层的 `.expected-tag-*` 残留临时文件（文件非
 /// 目录，按类型删除）；目录不存在（组件从未安装）时无需清理，单项失败跳过。
 fn cleanup_expected_tag_residue(base: &Path) {
-    let Ok(entries) = fs::read_dir(base) else {
-        return;
+    let entries = match fs::read_dir(base) {
+        Ok(entries) => entries,
+        Err(error) => {
+            if error.kind() != std::io::ErrorKind::NotFound {
+                tracing::warn!(event = "asset_residue_cleanup_failed", stage = "read_directory", error_kind = ?error.kind(), error_code = error.raw_os_error(), "读取推理组件临时标记目录失败");
+            }
+            return;
+        }
     };
-    for entry in entries.flatten() {
+    for entry in entries {
+        let entry = match entry {
+            Ok(entry) => entry,
+            Err(error) => {
+                tracing::warn!(event = "asset_residue_cleanup_failed", stage = "read_entry", error_kind = ?error.kind(), error_code = error.raw_os_error(), "读取推理组件临时标记条目失败，跳过此项");
+                continue;
+            }
+        };
         let path = entry.path();
         let is_temp = path
             .file_name()
@@ -434,7 +497,9 @@ fn cleanup_expected_tag_residue(base: &Path) {
             .is_some_and(|name| name.starts_with(".expected-tag-"));
         if is_temp && path.is_file() {
             // 尽力而为：残留被防护软件短暂锁定时跳过，下次初始化再试。
-            let _ = fs::remove_file(&path);
+            if let Err(error) = fs::remove_file(&path) {
+                tracing::warn!(event = "asset_residue_cleanup_failed", stage = "remove_expected_tag", error_kind = ?error.kind(), error_code = error.raw_os_error(), "删除推理组件临时标记失败，留待下次重试");
+            }
         }
     }
 }
@@ -447,51 +512,96 @@ fn initialize_staged(
     root: &Path,
     downloader: &mut dyn AssetDownloader,
 ) -> Result<(), String> {
-    let total = manifest.assets.len();
-    for (index, asset) in manifest.assets.iter().enumerate() {
-        ensure_not_cancelled(cancel)?;
-        if asset.is_embedded() {
-            progress(format!("使用随包内置资产：{}", asset.id));
-            continue;
+    let started = std::time::Instant::now();
+    let mut stage = "assets";
+    let result = (|| {
+        let total = manifest.assets.len();
+        for (index, asset) in manifest.assets.iter().enumerate() {
+            ensure_not_cancelled(cancel)?;
+            if asset.is_embedded() {
+                tracing::info!(
+                    event = "asset_reused",
+                    asset_index = index,
+                    result = "embedded",
+                    "使用随包内置资产"
+                );
+                progress(format!("使用随包内置资产：{}", asset.id));
+                continue;
+            }
+            // O-06 跨重试复用：最终位置已校验的资产不重下（保留已验证下载）。
+            if asset_ready(asset, root).is_ok() {
+                tracing::info!(
+                    event = "asset_reused",
+                    asset_index = index,
+                    result = "verified_existing",
+                    "复用已校验资产"
+                );
+                progress(format!("复用已校验资产：{}", asset.id));
+                continue;
+            }
+            progress(format!("下载资产 {}/{}：{}", index + 1, total, asset.id));
+            install_asset(asset, staging, root, cancel, downloader, progress)?;
         }
-        // O-06 跨重试复用：最终位置已校验的资产不重下（保留已验证下载）。
-        if asset_ready(asset, root).is_ok() {
-            progress(format!("复用已校验资产：{}", asset.id));
-            continue;
-        }
-        progress(format!("下载资产 {}/{}：{}", index + 1, total, asset.id));
-        install_asset(asset, staging, root, cancel, downloader, progress)?;
-    }
-    // XB-10：只校验共享目录，不下载、复制或改写用户的 Xberg。
-    readiness_inference_pack(manifest, root)?;
-    let worker = manifest
-        .workers
-        .first()
-        .ok_or_else(|| "截图 OCR 工作进程清单缺失".to_string())?;
-    if worker.is_pending() {
-        // 诚实收尾：模型等真实资产已按清单安装，但整体不得标就绪（O-06 半成品
-        // 不标就绪）；重试在打包回填后直接补 worker，其余资产全部复用。
-        return Err(format!(
+        // XB-10：只校验共享目录，不下载、复制或改写用户的 Xberg。
+        stage = "inference_readiness";
+        readiness_inference_pack(manifest, root)?;
+        stage = "worker_manifest";
+        let worker = manifest
+            .workers
+            .first()
+            .ok_or_else(|| "截图 OCR 工作进程清单缺失".to_string())?;
+        if worker.is_pending() {
+            // 诚实收尾：模型等真实资产已按清单安装，但整体不得标就绪（O-06 半成品
+            // 不标就绪）；重试在打包回填后直接补 worker，其余资产全部复用。
+            return Err(format!(
             "截图 OCR 工作进程尚未发布（清单条目 {} 为构建期占位）；模型、字体等资产已安装并复用，打包阶段回填后重试即可",
             worker.id
         ));
+        }
+        ensure_not_cancelled(cancel)?;
+        stage = "worker_readiness";
+        let bundled_present = bundled_worker().is_some();
+        let bundled_ready = bundled_present && worker_install_path().is_ok();
+        let cached_ready = !bundled_present && worker_ready(worker, root).is_ok();
+        if bundled_ready || cached_ready {
+            progress("复用已校验的工作进程".to_string());
+        } else {
+            return Err(worker_repair_message(worker));
+        }
+        let notice_stage = staging.join("licenses");
+        stage = "notice_create";
+        fs::create_dir_all(&notice_stage)
+            .map_err(|error| format!("创建许可证目录失败：{error}"))?;
+        stage = "notice_write";
+        write_notice(&notice_stage.join("THIRD_PARTY_NOTICES.md"), manifest)?;
+        stage = "notice_install";
+        atomic_replace_dir(&notice_stage, &root.join("licenses"))?;
+        stage = "final_readiness";
+        readiness()?;
+        progress("截图 OCR 组件初始化完成".to_string());
+        Ok(())
+    })();
+    match &result {
+        Ok(()) => tracing::info!(
+            event = "asset_initialize_staged_completed",
+            asset_count = manifest.assets.len(),
+            elapsed_ms = crate::logging::elapsed_ms(started),
+            "截图 OCR 暂存资产初始化完成"
+        ),
+        Err(_) if cancel.load(std::sync::atomic::Ordering::Acquire) => tracing::info!(
+            event = "asset_initialize_staged_cancelled",
+            stage,
+            elapsed_ms = crate::logging::elapsed_ms(started),
+            "截图 OCR 暂存资产初始化已取消"
+        ),
+        Err(_) => tracing::error!(
+            event = "asset_initialize_staged_failed",
+            stage,
+            elapsed_ms = crate::logging::elapsed_ms(started),
+            "截图 OCR 暂存资产初始化未完成"
+        ),
     }
-    ensure_not_cancelled(cancel)?;
-    let bundled_present = bundled_worker().is_some();
-    let bundled_ready = bundled_present && worker_install_path().is_ok();
-    let cached_ready = !bundled_present && worker_ready(worker, root).is_ok();
-    if bundled_ready || cached_ready {
-        progress("复用已校验的工作进程".to_string());
-    } else {
-        return Err(worker_repair_message(worker));
-    }
-    let notice_stage = staging.join("licenses");
-    fs::create_dir_all(&notice_stage).map_err(|error| format!("创建许可证目录失败：{error}"))?;
-    write_notice(&notice_stage.join("THIRD_PARTY_NOTICES.md"), manifest)?;
-    atomic_replace_dir(&notice_stage, &root.join("licenses"))?;
-    readiness()?;
-    progress("截图 OCR 组件初始化完成".to_string());
-    Ok(())
+    result
 }
 
 fn worker_repair_message(worker: &SnapWorker) -> String {
@@ -511,59 +621,172 @@ fn install_asset(
     downloader: &mut dyn AssetDownloader,
     progress: &mut dyn FnMut(String),
 ) -> Result<(), String> {
-    let stage_dir = staging.join(&asset.id);
-    fs::create_dir_all(&stage_dir).map_err(|error| format!("创建资产临时目录失败：{error}"))?;
-    let archive = stage_dir.join("download.bin");
-    downloader.download(
-        &asset.url,
-        &archive,
-        asset.size_bytes,
-        &asset.sha256,
-        cancel,
-        progress,
-    )?;
-    ensure_not_cancelled(cancel)?;
-    // 下载器校验之外独立复核暂存内容，防伪造的“下载成功”。
-    verify_file_with_cancel(&archive, asset.size_bytes, &asset.sha256, cancel)
-        .map_err(|error| format!("资产 {} 下载内容校验失败：{error}", asset.id))?;
-    match asset.archive_type.as_str() {
-        "file" => {
-            let install_path = asset
-                .install_path
-                .as_ref()
-                .ok_or_else(|| format!("文件资产 {} 缺少安装路径", asset.id))?;
-            let target = root.join(install_path);
-            if verify_file_with_cancel(&target, asset.size_bytes, &asset.sha256, cancel).is_err() {
-                ensure_not_cancelled(cancel)?;
-                atomic_replace_file(&archive, &target)?;
-            }
-            Ok(())
-        }
-        "zip" => {
-            let extracted = stage_dir.join("extracted");
-            fs::create_dir_all(&extracted).map_err(|error| format!("创建解包目录失败：{error}"))?;
-            extract_zip_safely(&archive, &extracted, cancel)?;
-            if asset.members.is_empty() {
-                return Err(format!("归档资产 {} 没有成员清单", asset.id));
-            }
-            for member in &asset.members {
-                let source = extracted.join(&member.path);
-                verify_file_with_cancel(&source, member.size_bytes, &member.sha256, cancel)
-                    .map_err(|error| {
-                        format!("资产 {} 成员 {} 校验失败：{error}", asset.id, member.path)
-                    })?;
-                let target = root.join(&member.install_path);
-                if verify_file_with_cancel(&target, member.size_bytes, &member.sha256, cancel)
+    let span = crate::logging::operation_span("snap_ocr_assets", "install_asset");
+    let _entered = span.enter();
+    let started = std::time::Instant::now();
+    tracing::info!(
+        event = "asset_install_started",
+        expected_size = asset.size_bytes,
+        member_count = asset.members.len(),
+        "资产校验安装开始"
+    );
+    let mut stage = "create_staging";
+    let result = (|| {
+        let stage_dir = staging.join(&asset.id);
+        fs::create_dir_all(&stage_dir).map_err(|error| format!("创建资产临时目录失败：{error}"))?;
+        let archive = stage_dir.join("download.bin");
+        stage = "download";
+        downloader.download(
+            &asset.url,
+            &archive,
+            asset.size_bytes,
+            &asset.sha256,
+            cancel,
+            progress,
+        )?;
+        ensure_not_cancelled(cancel)?;
+        // 下载器校验之外独立复核暂存内容，防伪造的“下载成功”。
+        stage = "archive_verify";
+        let verify_started = std::time::Instant::now();
+        tracing::info!(
+            event = "asset_archive_verify_started",
+            size_bytes = asset.size_bytes,
+            "资产暂存内容独立复核开始"
+        );
+        verify_file_with_cancel(&archive, asset.size_bytes, &asset.sha256, cancel)
+            .map_err(|error| format!("资产 {} 下载内容校验失败：{error}", asset.id))?;
+        tracing::info!(
+            event = "asset_archive_verify_completed",
+            elapsed_ms = crate::logging::elapsed_ms(verify_started),
+            result = "verified",
+            "资产暂存内容独立复核通过"
+        );
+        match asset.archive_type.as_str() {
+            "file" => {
+                stage = "file_install_path";
+                let install_path = asset
+                    .install_path
+                    .as_ref()
+                    .ok_or_else(|| format!("文件资产 {} 缺少安装路径", asset.id))?;
+                let target = root.join(install_path);
+                stage = "target_verify";
+                if verify_file_with_cancel(&target, asset.size_bytes, &asset.sha256, cancel)
                     .is_err()
                 {
                     ensure_not_cancelled(cancel)?;
-                    atomic_replace_file(&source, &target)?;
+                    stage = "file_install";
+                    let install_started = std::time::Instant::now();
+                    tracing::info!(
+                        event = "asset_file_install_started",
+                        stage,
+                        "资产文件原子落位开始"
+                    );
+                    atomic_replace_file(&archive, &target)?;
+                    tracing::info!(
+                        event = "asset_file_install_completed",
+                        stage,
+                        elapsed_ms = crate::logging::elapsed_ms(install_started),
+                        "资产文件原子落位完成"
+                    );
                 }
+                Ok(())
             }
-            Ok(())
+            "zip" => {
+                let extracted = stage_dir.join("extracted");
+                stage = "extract_directory";
+                fs::create_dir_all(&extracted)
+                    .map_err(|error| format!("创建解包目录失败：{error}"))?;
+                stage = "extract_archive";
+                let extract_started = std::time::Instant::now();
+                tracing::info!(
+                    event = "asset_extract_started",
+                    member_count = asset.members.len(),
+                    "资产归档解包开始"
+                );
+                extract_zip_safely(&archive, &extracted, cancel)?;
+                tracing::info!(
+                    event = "asset_extract_completed",
+                    elapsed_ms = crate::logging::elapsed_ms(extract_started),
+                    "资产归档解包完成"
+                );
+                stage = "member_manifest";
+                if asset.members.is_empty() {
+                    return Err(format!("归档资产 {} 没有成员清单", asset.id));
+                }
+                for (member_index, member) in asset.members.iter().enumerate() {
+                    let source = extracted.join(&member.path);
+                    stage = "member_verify";
+                    let member_started = std::time::Instant::now();
+                    tracing::info!(
+                        event = "asset_member_verify_started",
+                        member_index,
+                        size_bytes = member.size_bytes,
+                        "资产成员校验开始"
+                    );
+                    verify_file_with_cancel(&source, member.size_bytes, &member.sha256, cancel)
+                        .map_err(|error| {
+                            format!("资产 {} 成员 {} 校验失败：{error}", asset.id, member.path)
+                        })?;
+                    tracing::info!(
+                        event = "asset_member_verify_completed",
+                        member_index,
+                        elapsed_ms = crate::logging::elapsed_ms(member_started),
+                        "资产成员校验通过"
+                    );
+                    let target = root.join(&member.install_path);
+                    stage = "target_verify";
+                    if verify_file_with_cancel(&target, member.size_bytes, &member.sha256, cancel)
+                        .is_err()
+                    {
+                        ensure_not_cancelled(cancel)?;
+                        stage = "member_install";
+                        let install_started = std::time::Instant::now();
+                        tracing::info!(
+                            event = "asset_file_install_started",
+                            stage,
+                            member_index,
+                            "资产成员原子落位开始"
+                        );
+                        atomic_replace_file(&source, &target)?;
+                        tracing::info!(
+                            event = "asset_file_install_completed",
+                            stage,
+                            member_index,
+                            elapsed_ms = crate::logging::elapsed_ms(install_started),
+                            "资产成员原子落位完成"
+                        );
+                    }
+                }
+                Ok(())
+            }
+            other => {
+                stage = "archive_type";
+                Err(format!("不支持的资产归档格式：{other}"))
+            }
         }
-        other => Err(format!("不支持的资产归档格式：{other}")),
+    })();
+    let elapsed_ms = crate::logging::elapsed_ms(started);
+    match &result {
+        Ok(()) => tracing::info!(
+            event = "asset_install_completed",
+            elapsed_ms,
+            result = "verified_installed",
+            "资产校验安装完成"
+        ),
+        Err(_) if cancel.load(std::sync::atomic::Ordering::Acquire) => tracing::info!(
+            event = "asset_install_cancelled",
+            stage,
+            elapsed_ms,
+            "资产校验安装已取消"
+        ),
+        Err(_) => tracing::error!(
+            event = "asset_install_failed",
+            stage,
+            elapsed_ms,
+            "资产校验安装失败"
+        ),
     }
+    result
 }
 
 /// snap 组件包条目 → 共享安装路径的推理组件清单（XB-10）。
@@ -780,26 +1003,65 @@ pub(crate) fn download_asset(
     cancel: &AtomicBool,
     progress: &mut dyn FnMut(String),
 ) -> Result<(), String> {
-    // P-10：网络出口调用先记开始——请求若永久阻塞或进程崩溃，只有完成日志
-    // 无法指认卡在哪一步。
-    tracing::info!(url, size_bytes = expected_size, "资产下载开始");
-    if let Some(parent) = destination.parent() {
-        fs::create_dir_all(parent).map_err(|error| format!("创建下载目录失败：{error}"))?;
+    let span = crate::logging::operation_span("snap_ocr_assets", "download_asset");
+    let _entered = span.enter();
+    let started = std::time::Instant::now();
+    tracing::info!(event = "asset_download_started", url = %crate::logging::safe_url(url), size_bytes = expected_size, "资产下载开始");
+    let mut stage = "prepare_directory";
+    let result = (|| {
+        if let Some(parent) = destination.parent() {
+            fs::create_dir_all(parent).map_err(|error| {
+                tracing::error!(event = "asset_download_prepare_failed", stage = "prepare_directory", error_kind = ?error.kind(), error_code = error.raw_os_error(), "创建下载目录失败");
+                format!("创建下载目录失败：{error}")
+            })?;
+        }
+        let partial = destination.with_extension("part");
+        cleanup_download_partial(&partial, "prepare_partial");
+        stage = "download_verify_install";
+        let mut fetch = |partial: &Path, progress: &mut dyn FnMut(String)| {
+            download_stream(url, partial, expected_size, cancel, progress)
+        };
+        download_asset_with(
+            destination,
+            &partial,
+            expected_size,
+            expected_sha256,
+            cancel,
+            progress,
+            &mut fetch,
+        )
+    })();
+    let elapsed_ms = crate::logging::elapsed_ms(started);
+    match &result {
+        Ok(()) => tracing::info!(
+            event = "asset_download_completed",
+            elapsed_ms,
+            bytes = expected_size,
+            result = "verified_installed",
+            "资产下载完成"
+        ),
+        Err(_) if cancel.load(std::sync::atomic::Ordering::Acquire) => tracing::info!(
+            event = "asset_download_cancelled",
+            stage,
+            elapsed_ms,
+            "资产下载已取消"
+        ),
+        Err(_) => tracing::error!(
+            event = "asset_download_failed",
+            stage,
+            elapsed_ms,
+            "资产下载失败"
+        ),
     }
-    let partial = destination.with_extension("part");
-    let _ = fs::remove_file(&partial);
-    let mut fetch = |partial: &Path, progress: &mut dyn FnMut(String)| {
-        download_stream(url, partial, expected_size, cancel, progress)
-    };
-    download_asset_with(
-        destination,
-        &partial,
-        expected_size,
-        expected_sha256,
-        cancel,
-        progress,
-        &mut fetch,
-    )
+    result
+}
+
+fn cleanup_download_partial(partial: &Path, stage: &'static str) {
+    if let Err(error) = fs::remove_file(partial) {
+        if error.kind() != std::io::ErrorKind::NotFound {
+            tracing::warn!(event = "asset_partial_cleanup_failed", stage, error_kind = ?error.kind(), error_code = error.raw_os_error(), error = %crate::logging::safe_error(&error.to_string()), "下载临时文件清理失败，保留既有错误处理策略");
+        }
+    }
 }
 
 /// 下载 + 校验重试核心：单次流式拉取经 `fetch` 注入（生产为 HTTP 流式下载
@@ -820,55 +1082,94 @@ where
 {
     let started = std::time::Instant::now();
     for attempt in 1..=3 {
+        let attempt_span = tracing::info_span!("asset_download_attempt", attempt, max_attempts = 3);
+        let _attempt_entered = attempt_span.enter();
+        let attempt_started = std::time::Instant::now();
+        tracing::info!(event = "asset_attempt_started", attempt, "资产下载尝试开始");
         ensure_not_cancelled(cancel)?;
         if let Err(error) = fetch(partial, progress) {
             // 取消优先于重试语义：用户取消时不发重试提示，直接收场。
             ensure_not_cancelled(cancel)?;
             if attempt < 3 {
-                tracing::warn!(attempt, reason = %error, "资产下载中断，准备重试");
+                tracing::warn!(
+                    event = "asset_attempt_retrying",
+                    attempt,
+                    next_attempt = attempt + 1,
+                    stage = "fetch",
+                    elapsed_ms = crate::logging::elapsed_ms(attempt_started),
+                    "资产下载中断，准备重试"
+                );
                 progress(format!("下载中断，准备重试（{attempt}/3）：{error}"));
-                let _ = fs::remove_file(partial);
+                cleanup_download_partial(partial, "fetch_retry");
                 continue;
             }
             tracing::error!(
-                reason = %error,
-                elapsed_ms = u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX),
+                event = "asset_attempt_exhausted",
+                attempt,
+                stage = "fetch",
+                elapsed_ms = crate::logging::elapsed_ms(started),
                 "资产下载失败（重试耗尽）"
             );
-            let _ = fs::remove_file(partial);
+            cleanup_download_partial(partial, "fetch_exhausted");
             return Err(format!("下载资产失败：{error}"));
         }
         match verify_file_with_cancel(partial, expected_size, expected_sha256, cancel) {
             Ok(()) => {
                 if let Err(error) = ensure_not_cancelled(cancel) {
-                    let _ = fs::remove_file(partial);
+                    tracing::info!(
+                        event = "asset_attempt_cancelled",
+                        stage = "before_install",
+                        elapsed_ms = crate::logging::elapsed_ms(attempt_started),
+                        "资产下载尝试已取消"
+                    );
+                    cleanup_download_partial(partial, "cancel_before_install");
                     return Err(error);
                 }
-                fs::rename(partial, destination)
-                    .map_err(|error| format!("写入下载资产失败：{error}"))?;
+                fs::rename(partial, destination).map_err(|error| {
+                    tracing::error!(event = "asset_install_failed", stage = "rename", error_kind = ?error.kind(), error_code = error.raw_os_error(), elapsed_ms = crate::logging::elapsed_ms(attempt_started), "下载资产落位失败");
+                    format!("写入下载资产失败：{error}")
+                })?;
                 tracing::info!(
-                    elapsed_ms = u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX),
+                    event = "asset_attempt_completed",
+                    attempt,
+                    elapsed_ms = crate::logging::elapsed_ms(attempt_started),
                     bytes = expected_size,
-                    "资产下载完成"
+                    result = "verified_installed",
+                    "资产下载校验落位完成"
                 );
                 return Ok(());
             }
             Err(_) if cancel.load(std::sync::atomic::Ordering::Acquire) => {
-                let _ = fs::remove_file(partial);
+                tracing::info!(
+                    event = "asset_attempt_cancelled",
+                    stage = "verify",
+                    elapsed_ms = crate::logging::elapsed_ms(attempt_started),
+                    "资产校验尝试已取消"
+                );
+                cleanup_download_partial(partial, "cancel_verify");
                 return Err("用户已取消初始化".to_string());
             }
             Err(error) if attempt < 3 => {
-                tracing::warn!(attempt, reason = %error, "资产校验失败，准备重试");
+                tracing::warn!(
+                    event = "asset_attempt_retrying",
+                    attempt,
+                    next_attempt = attempt + 1,
+                    stage = "verify",
+                    elapsed_ms = crate::logging::elapsed_ms(attempt_started),
+                    "资产校验失败，准备重试"
+                );
                 progress(format!("资产校验失败，准备重试（{attempt}/3）：{error}"));
-                let _ = fs::remove_file(partial);
+                cleanup_download_partial(partial, "verify_retry");
             }
             Err(error) => {
                 tracing::error!(
-                    reason = %error,
-                    elapsed_ms = u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX),
+                    event = "asset_attempt_exhausted",
+                    attempt,
+                    stage = "verify",
+                    elapsed_ms = crate::logging::elapsed_ms(started),
                     "资产校验失败（重试耗尽）"
                 );
-                let _ = fs::remove_file(partial);
+                cleanup_download_partial(partial, "verify_exhausted");
                 return Err(format!("下载资产校验失败：{error}"));
             }
         }
@@ -886,12 +1187,8 @@ fn download_stream(
     // P-09 的 ProxyOverride 按每个实际请求目标匹配，不能沿用初始 URL 的代理
     // 策略处理重定向；每跳失败时仅对该目标执行一次代理→直连回退。
     let proxy = crate::system_proxy::read();
-    download_attempt(url, partial, expected_size, cancel, progress, &proxy).map_err(
-        |(message, _)| {
-            tracing::error!(url, reason = message, "资产下载失败");
-            message
-        },
-    )
+    download_attempt(url, partial, expected_size, cancel, progress, &proxy)
+        .map_err(|(message, _)| message)
 }
 
 /// 单次下载尝试：逐跳重新选择系统代理；仅代理传输失败时对当前目标直连重试一次。
@@ -910,7 +1207,12 @@ fn download_attempt(
     let mut proxy_failure = None;
     loop {
         if cancel.load(std::sync::atomic::Ordering::Acquire) {
-            let _ = fs::remove_file(partial);
+            tracing::info!(
+                event = "asset_attempt_cancelled",
+                stage = "before_request",
+                "资产请求尝试已取消"
+            );
+            cleanup_download_partial(partial, "cancel_before_request");
             return Err(("用户已取消初始化".to_string(), false));
         }
         let endpoint = if retry_direct {
@@ -918,32 +1220,61 @@ fn download_attempt(
         } else {
             proxy.endpoint_for_url(&current_url)
         };
-        let response = match download_request(&current_url, endpoint.as_deref(), progress) {
-            Ok(response) => response,
-            Err((proxy_message, true)) if endpoint.is_some() => {
-                tracing::warn!(
-                    proxy = proxy_message,
-                    url = current_url,
-                    "系统代理连接失败，按 P-09 自动回退直连重试"
-                );
-                progress("系统代理连接失败，自动回退直连重试".to_string());
-                proxy_failure = Some(proxy_message);
-                retry_direct = true;
-                continue;
-            }
-            Err((direct_message, _)) => {
-                return Err(download_attempt_error(
-                    &current_url,
-                    &mut proxy_failure,
-                    direct_message,
-                ));
-            }
-        };
+        let request_id = crate::logging::new_operation_id();
+        let hop_span = tracing::info_span!("asset_http_hop", request_id = %request_id, redirect_hop = redirects_followed, route = if endpoint.is_some() { "proxy" } else if retry_direct { "direct_fallback" } else { "direct" });
+        let _hop_entered = hop_span.enter();
+        let hop_started = std::time::Instant::now();
+        if retry_direct {
+            tracing::info!(
+                event = "asset_direct_fallback_started",
+                stage = "request",
+                "资产请求开始直连回退"
+            );
+        }
+        let response =
+            match download_request(&current_url, endpoint.as_deref(), progress, &request_id) {
+                Ok(response) => response,
+                Err((proxy_message, true)) if endpoint.is_some() => {
+                    tracing::warn!(
+                        event = "asset_direct_fallback_retrying",
+                        stage = "request",
+                        elapsed_ms = crate::logging::elapsed_ms(hop_started),
+                        url = %crate::logging::safe_url(&current_url),
+                        "系统代理连接失败，按 P-09 自动回退直连重试"
+                    );
+                    progress("系统代理连接失败，自动回退直连重试".to_string());
+                    proxy_failure = Some(proxy_message);
+                    retry_direct = true;
+                    continue;
+                }
+                Err((direct_message, _)) => {
+                    if retry_direct {
+                        tracing::error!(
+                            event = "asset_direct_fallback_failed",
+                            stage = "request",
+                            elapsed_ms = crate::logging::elapsed_ms(hop_started),
+                            "资产直连回退请求失败"
+                        );
+                    }
+                    return Err(download_attempt_error(
+                        &current_url,
+                        &mut proxy_failure,
+                        direct_message,
+                    ));
+                }
+            };
 
         let status = response.status();
         // ureq checks the redirect limit before looking up Location, including
         // a third 3xx response without a Location header.
         if (300..400).contains(&status) && redirects_followed + 1 >= 3 {
+            tracing::error!(
+                event = "asset_redirect_failed",
+                stage = "redirect_limit",
+                status,
+                redirect_hop = redirects_followed,
+                "资产请求达到重定向上限"
+            );
             return Err(download_attempt_error(
                 &current_url,
                 &mut proxy_failure,
@@ -959,6 +1290,11 @@ fn download_attempt(
             let request_url = match ureq::get(&current_url).request_url() {
                 Ok(url) => url,
                 Err(error) => {
+                    tracing::error!(
+                        event = "asset_redirect_failed",
+                        stage = "redirect_source_url",
+                        "资产重定向源地址无效"
+                    );
                     return Err(download_attempt_error(
                         &current_url,
                         &mut proxy_failure,
@@ -969,6 +1305,11 @@ fn download_attempt(
             let next_url = match request_url.as_url().join(&location) {
                 Ok(url) => url,
                 Err(error) => {
+                    tracing::error!(
+                        event = "asset_redirect_failed",
+                        stage = "redirect_target_url",
+                        "资产重定向目标地址无效"
+                    );
                     return Err(download_attempt_error(
                         &current_url,
                         &mut proxy_failure,
@@ -976,6 +1317,15 @@ fn download_attempt(
                     ));
                 }
             };
+            tracing::info!(event = "asset_redirect_followed", status, next_url = %crate::logging::safe_url(next_url.as_str()), next_hop = redirects_followed + 1, "资产请求跟随重定向");
+            if retry_direct {
+                tracing::info!(
+                    event = "asset_direct_fallback_completed",
+                    elapsed_ms = crate::logging::elapsed_ms(hop_started),
+                    result = "redirect",
+                    "资产直连回退收到重定向"
+                );
+            }
             drop(response);
             current_url = next_url.to_string();
             redirects_followed += 1;
@@ -984,6 +1334,12 @@ fn download_attempt(
             continue;
         }
         if !(200..300).contains(&status) {
+            tracing::error!(
+                event = "asset_http_status_failed",
+                stage = "http_status",
+                status,
+                "资产请求返回非成功状态"
+            );
             return Err(download_attempt_error(
                 &current_url,
                 &mut proxy_failure,
@@ -992,19 +1348,39 @@ fn download_attempt(
         }
 
         match download_response_body(response, partial, expected_size, cancel, progress) {
-            Ok(()) => return Ok(()),
+            Ok(()) => {
+                if retry_direct {
+                    tracing::info!(
+                        event = "asset_direct_fallback_completed",
+                        elapsed_ms = crate::logging::elapsed_ms(hop_started),
+                        result = "body_received",
+                        "资产直连回退下载完成"
+                    );
+                }
+                return Ok(());
+            }
             Err((proxy_message, true)) if endpoint.is_some() => {
                 tracing::warn!(
-                    proxy = proxy_message,
-                    url = current_url,
-                    "系统代理连接失败，按 P-09 自动回退直连重试"
+                    event = "asset_direct_fallback_retrying",
+                    stage = "body_read",
+                    elapsed_ms = crate::logging::elapsed_ms(hop_started),
+                    url = %crate::logging::safe_url(&current_url),
+                    "系统代理读取失败，按 P-09 自动回退直连重试"
                 );
                 progress("系统代理连接失败，自动回退直连重试".to_string());
-                let _ = fs::remove_file(partial);
+                cleanup_download_partial(partial, "proxy_body_fallback");
                 proxy_failure = Some(proxy_message);
                 retry_direct = true;
             }
             Err((direct_message, _)) => {
+                if retry_direct {
+                    tracing::error!(
+                        event = "asset_direct_fallback_failed",
+                        stage = "body_read",
+                        elapsed_ms = crate::logging::elapsed_ms(hop_started),
+                        "资产直连回退数据读取失败"
+                    );
+                }
                 return Err(download_attempt_error(
                     &current_url,
                     &mut proxy_failure,
@@ -1029,9 +1405,9 @@ fn download_attempt_error(
 
 fn proxy_direct_failure(url: &str, proxy_message: &str, direct_message: &str) -> (String, bool) {
     tracing::error!(
-        proxy = proxy_message,
-        direct = direct_message,
-        url,
+        event = "asset_proxy_and_direct_failed",
+        url = %crate::logging::safe_url(url),
+        result = "proxy_and_direct_failed",
         "系统代理与直连均失败"
     );
     (
@@ -1047,20 +1423,39 @@ fn download_response_body(
     cancel: &AtomicBool,
     progress: &mut dyn FnMut(String),
 ) -> Result<(), (String, bool)> {
+    let started = std::time::Instant::now();
+    tracing::info!(
+        event = "asset_body_started",
+        expected_size,
+        read_timeout_ms = 60_000,
+        "资产响应数据读取开始"
+    );
     let mut reader = response.into_reader();
-    let mut output =
-        File::create(partial).map_err(|error| (format!("创建下载文件失败：{error}"), false))?;
+    let mut output = File::create(partial).map_err(|error| {
+        tracing::error!(event = "asset_body_failed", stage = "file_create", error_kind = ?error.kind(), error_code = error.raw_os_error(), elapsed_ms = crate::logging::elapsed_ms(started), "创建下载文件失败");
+        (format!("创建下载文件失败：{error}"), false)
+    })?;
     let mut buffer = vec![0_u8; 1024 * 1024];
     let mut current = 0_u64;
     loop {
         if cancel.load(std::sync::atomic::Ordering::Acquire) {
+            tracing::info!(
+                event = "asset_body_cancelled",
+                stage = "body_read",
+                bytes = current,
+                elapsed_ms = crate::logging::elapsed_ms(started),
+                "资产数据读取已取消"
+            );
             drop(output);
-            let _ = fs::remove_file(partial);
+            cleanup_download_partial(partial, "cancel_body_read");
             return Err(("用户已取消初始化".to_string(), false));
         }
         let read = reader
             .read(&mut buffer)
-            .map_err(|error| (format!("读取下载数据失败：{error}"), true))?;
+            .map_err(|error| {
+                tracing::warn!(event = "asset_body_failed", stage = "body_read", error_kind = ?error.kind(), error_code = error.raw_os_error(), timed_out = matches!(error.kind(), std::io::ErrorKind::TimedOut | std::io::ErrorKind::WouldBlock), bytes = current, elapsed_ms = crate::logging::elapsed_ms(started), "读取下载数据失败");
+                (format!("读取下载数据失败：{error}"), true)
+            })?;
         if read == 0 {
             break;
         }
@@ -1071,14 +1466,25 @@ fn download_response_body(
         ) {
             Ok(next) => next,
             Err(error) => {
+                tracing::error!(
+                    event = "asset_body_failed",
+                    stage = "size_limit",
+                    expected_size,
+                    bytes = current,
+                    elapsed_ms = crate::logging::elapsed_ms(started),
+                    "资产下载数据超过清单大小"
+                );
                 drop(output);
-                let _ = fs::remove_file(partial);
+                cleanup_download_partial(partial, "body_size_limit");
                 return Err((error, false));
             }
         };
         output
             .write_all(&buffer[..read])
-            .map_err(|error| (format!("写入下载数据失败：{error}"), false))?;
+            .map_err(|error| {
+                tracing::error!(event = "asset_body_failed", stage = "file_write", error_kind = ?error.kind(), error_code = error.raw_os_error(), bytes = current, elapsed_ms = crate::logging::elapsed_ms(started), "写入下载数据失败");
+                (format!("写入下载数据失败：{error}"), false)
+            })?;
         current = next;
         if expected_size > 0 {
             let percent = current
@@ -1093,7 +1499,17 @@ fn download_response_body(
     }
     output
         .sync_all()
-        .map_err(|error| (format!("同步下载文件失败：{error}"), false))?;
+        .map_err(|error| {
+            tracing::error!(event = "asset_body_failed", stage = "file_sync", error_kind = ?error.kind(), error_code = error.raw_os_error(), elapsed_ms = crate::logging::elapsed_ms(started), "同步下载文件失败");
+            (format!("同步下载文件失败：{error}"), false)
+        })?;
+    tracing::info!(
+        event = "asset_body_completed",
+        bytes = current,
+        elapsed_ms = crate::logging::elapsed_ms(started),
+        result = "synced",
+        "资产响应数据读取完成"
+    );
     Ok(())
 }
 
@@ -1104,45 +1520,143 @@ pub(crate) fn fetch_release_json(
     cancel: &AtomicBool,
     progress: &mut dyn FnMut(String),
 ) -> Result<serde_json::Value, String> {
-    const MAX_METADATA_BYTES: usize = 2 * 1024 * 1024;
     let proxy = crate::system_proxy::read();
+    fetch_release_json_with_proxy(url, cancel, progress, &proxy)
+}
+
+// 测试注入代理策略，仍消费真实 GET 响应、读取边界与 JSON 解析路径。
+fn fetch_release_json_with_proxy(
+    url: &str,
+    cancel: &AtomicBool,
+    progress: &mut dyn FnMut(String),
+    proxy: &crate::system_proxy::SystemProxy,
+) -> Result<serde_json::Value, String> {
+    const MAX_METADATA_BYTES: usize = 2 * 1024 * 1024;
+    let span = crate::logging::operation_span("snap_ocr_assets", "fetch_release_json");
+    let _entered = span.enter();
+    let started = std::time::Instant::now();
+    tracing::info!(event = "release_metadata_started", url = %crate::logging::safe_url(url), max_bytes = MAX_METADATA_BYTES, "发布元数据查询开始");
     let endpoint = proxy.endpoint_for_url(url);
     let mut direct = false;
     loop {
+        let attempt_number = if direct { 2 } else { 1 };
+        let request_id = crate::logging::new_operation_id();
+        let attempt_span = tracing::info_span!("release_metadata_attempt", attempt = attempt_number, request_id = %request_id, route = if direct { "direct_fallback" } else if endpoint.is_some() { "proxy" } else { "direct" });
+        let _attempt_entered = attempt_span.enter();
+        let attempt_started = std::time::Instant::now();
+        let mut stage = "cancel_check";
+        let mut byte_count = 0;
+        tracing::info!(
+            event = "release_metadata_attempt_started",
+            attempt = attempt_number,
+            "发布元数据查询尝试开始"
+        );
+        if direct {
+            tracing::info!(
+                event = "release_metadata_direct_started",
+                "发布元数据开始直连回退"
+            );
+        }
         let attempt = (|| -> Result<serde_json::Value, (String, bool)> {
             ensure_not_cancelled(cancel).map_err(|error| (error, false))?;
+            stage = "request";
             let response = download_request(
                 url,
                 if direct { None } else { endpoint.as_deref() },
                 progress,
+                &request_id,
             )?;
+            if (300..400).contains(&response.status()) {
+                tracing::warn!(
+                    event = "release_metadata_redirect_not_followed",
+                    stage = "response_status",
+                    status = response.status(),
+                    policy = "no_redirects",
+                    "发布元数据响应为重定向，按既有策略不跟随并继续解析响应"
+                );
+            }
             let mut reader = response.into_reader();
             let mut bytes = Vec::new();
             let mut buffer = [0_u8; 8192];
+            stage = "body_read";
+            tracing::info!(
+                event = "release_metadata_body_started",
+                read_timeout_ms = 60_000,
+                "发布元数据读取开始"
+            );
             loop {
                 ensure_not_cancelled(cancel).map_err(|error| (error, false))?;
-                let read = reader
-                    .read(&mut buffer)
-                    .map_err(|error| (format!("读取发布元数据失败：{error}"), true))?;
+                let read = reader.read(&mut buffer).map_err(|error| {
+                    tracing::warn!(event = "release_metadata_read_failed", stage, error_kind = ?error.kind(), error_code = error.raw_os_error(), timed_out = matches!(error.kind(), std::io::ErrorKind::TimedOut | std::io::ErrorKind::WouldBlock), elapsed_ms = crate::logging::elapsed_ms(attempt_started), "读取发布元数据失败");
+                    (format!("读取发布元数据失败：{error}"), true)
+                })?;
                 if read == 0 {
                     break;
                 }
                 if bytes.len().saturating_add(read) > MAX_METADATA_BYTES {
+                    stage = "size_limit";
                     return Err(("发布元数据超过大小上限".into(), false));
                 }
                 bytes.extend_from_slice(&buffer[..read]);
+                byte_count = bytes.len();
             }
             ensure_not_cancelled(cancel).map_err(|error| (error, false))?;
-            serde_json::from_slice(&bytes)
-                .map_err(|error| (format!("发布元数据不是有效 JSON：{error}"), false))
+            stage = "json_parse";
+            tracing::info!(
+                event = "release_metadata_body_completed",
+                bytes = byte_count,
+                elapsed_ms = crate::logging::elapsed_ms(attempt_started),
+                "发布元数据读取完成"
+            );
+            serde_json::from_slice(&bytes).map_err(|error| {
+                tracing::error!(event = "release_metadata_parse_failed", stage, error_type = "Json", error_category = ?error.classify(), line = error.line(), column = error.column(), "发布元数据 JSON 解析失败");
+                (format!("发布元数据不是有效 JSON：{error}"), false)
+            })
         })();
         match attempt {
-            Ok(value) => return Ok(value),
+            Ok(value) => {
+                tracing::info!(
+                    event = "release_metadata_completed",
+                    result = "parsed",
+                    bytes = byte_count,
+                    direct_fallback = direct,
+                    elapsed_ms = crate::logging::elapsed_ms(started),
+                    "发布元数据查询完成"
+                );
+                return Ok(value);
+            }
             Err((message, true)) if endpoint.is_some() && !direct => {
+                tracing::warn!(
+                    event = "release_metadata_direct_retrying",
+                    stage,
+                    next_attempt = 2,
+                    elapsed_ms = crate::logging::elapsed_ms(attempt_started),
+                    "系统代理查询失败，直连重试一次"
+                );
                 progress(format!("系统代理查询失败，直连重试一次：{message}"));
                 direct = true;
             }
-            Err((message, _)) => return Err(message),
+            Err((message, _)) => {
+                if cancel.load(std::sync::atomic::Ordering::Acquire) {
+                    tracing::info!(
+                        event = "release_metadata_cancelled",
+                        stage,
+                        elapsed_ms = crate::logging::elapsed_ms(started),
+                        "发布元数据查询已取消"
+                    );
+                } else {
+                    tracing::error!(
+                        event = "release_metadata_failed",
+                        stage,
+                        attempts = attempt_number,
+                        direct_fallback = direct,
+                        exhausted = direct,
+                        elapsed_ms = crate::logging::elapsed_ms(started),
+                        "发布元数据查询失败"
+                    );
+                }
+                return Err(message);
+            }
         }
     }
 }
@@ -1152,7 +1666,12 @@ fn download_request(
     url: &str,
     proxy: Option<&str>,
     progress: &mut dyn FnMut(String),
+    request_id: &str,
 ) -> Result<ureq::Response, (String, bool)> {
+    let span = tracing::info_span!("asset_http_request", request_id);
+    let _entered = span.enter();
+    let started = std::time::Instant::now();
+    let mut route = if proxy.is_some() { "proxy" } else { "direct" };
     let mut builder = ureq::builder()
         .redirects(0)
         // 连接超时 + 单次读超时，整体时长由用户取消控制。
@@ -1164,11 +1683,80 @@ fn download_request(
             Ok(parsed) => builder = builder.proxy(parsed),
             // 端点字符串由本仓库解析生成，正常不可能非法；异常时按直连
             // 继续，不让代理问题阻塞下载（P-09 可用性优先）。
-            Err(error) => progress(format!("系统代理地址无法解析（{error}），本次直连")),
+            Err(error) => {
+                tracing::warn!(
+                    event = "asset_proxy_invalid",
+                    stage = "proxy_parse",
+                    fallback = "direct",
+                    "系统代理地址无效，本次直连"
+                );
+                route = "direct_invalid_proxy";
+                progress(format!("系统代理地址无法解析（{error}），本次直连"));
+            }
         }
     }
     let agent = builder.build();
-    agent.get(url).call().map_err(|error| match error {
+    tracing::info!(event = "asset_http_request_started", method = "GET", url = %crate::logging::safe_url(url), route, connect_timeout_ms = 30_000, read_timeout_ms = 60_000, automatic_redirects = 0, "资产 GET 请求开始");
+    let result = agent.get(url).call();
+    let elapsed_ms = crate::logging::elapsed_ms(started);
+    match &result {
+        Ok(response) => tracing::info!(
+            event = "asset_http_request_completed",
+            status = response.status(),
+            elapsed_ms,
+            result = "headers_received",
+            "资产 GET 请求收到响应"
+        ),
+        Err(ureq::Error::Status(status, _)) => tracing::error!(
+            event = "asset_http_request_failed",
+            stage = "http_status",
+            error_type = "HttpStatus",
+            status,
+            elapsed_ms,
+            timed_out = false,
+            "资产 GET 请求返回错误状态"
+        ),
+        Err(ureq::Error::Transport(error)) => {
+            let mut source = std::error::Error::source(error);
+            let mut io_error = None;
+            while let Some(current) = source {
+                if let Some(error) = current.downcast_ref::<std::io::Error>() {
+                    io_error = Some(error);
+                    break;
+                }
+                source = current.source();
+            }
+            let timed_out = io_error.is_some_and(|error| {
+                matches!(
+                    error.kind(),
+                    std::io::ErrorKind::TimedOut | std::io::ErrorKind::WouldBlock
+                )
+            });
+            let stage = if timed_out {
+                "timeout"
+            } else {
+                match error.kind() {
+                    ureq::ErrorKind::Dns => "dns",
+                    ureq::ErrorKind::ConnectionFailed => "connect",
+                    ureq::ErrorKind::ProxyConnect | ureq::ErrorKind::ProxyUnauthorized => {
+                        "proxy_connect"
+                    }
+                    ureq::ErrorKind::InvalidUrl | ureq::ErrorKind::UnknownScheme => "request_url",
+                    ureq::ErrorKind::BadStatus | ureq::ErrorKind::BadHeader => "response_headers",
+                    _ => "transport",
+                }
+            };
+            let retryable = matches!(
+                error.kind(),
+                ureq::ErrorKind::Dns
+                    | ureq::ErrorKind::ConnectionFailed
+                    | ureq::ErrorKind::ProxyConnect
+                    | ureq::ErrorKind::Io
+            );
+            tracing::error!(event = "asset_http_request_failed", stage, error_type = "Transport", error_kind = ?error.kind(), error_code = io_error.and_then(std::io::Error::raw_os_error), elapsed_ms, timed_out, retryable, "资产 GET 请求传输失败");
+        }
+    }
+    result.map_err(|error| match error {
         error @ ureq::Error::Transport(_) => {
             let retryable = matches!(
                 error.kind(),
@@ -1243,8 +1831,342 @@ fn write_notice(path: &Path, manifest: &SnapAssetManifest) -> Result<(), String>
 #[cfg(test)]
 mod tests {
     use std::fs;
+    use std::io::{Read, Write};
     use std::path::Path;
     use std::sync::atomic::AtomicBool;
+
+    #[derive(Clone)]
+    struct DiagnosticCapture(std::sync::Arc<std::sync::Mutex<Vec<u8>>>);
+
+    impl std::io::Write for DiagnosticCapture {
+        fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+            self.0
+                .lock()
+                .expect("锁定日志捕获器")
+                .extend_from_slice(bytes);
+            Ok(bytes.len())
+        }
+
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+
+    fn capture_diagnostics<T>(run: impl FnOnce() -> T) -> (T, String) {
+        let bytes = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let writer = DiagnosticCapture(bytes.clone());
+        let subscriber = tracing_subscriber::fmt()
+            .with_ansi(false)
+            .with_max_level(tracing::Level::INFO)
+            .with_writer(move || writer.clone())
+            .finish();
+        let result = tracing::subscriber::with_default(subscriber, run);
+        let logs = String::from_utf8(bytes.lock().expect("读取日志捕获器").clone())
+            .expect("日志必须为 UTF-8");
+        (result, logs)
+    }
+
+    struct DiagnosticWorkspace(std::path::PathBuf);
+
+    impl DiagnosticWorkspace {
+        fn new() -> Self {
+            let repo = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+            let root = repo.join(".tmp").join(format!(
+                "asset-diagnostics-{}",
+                uuid::Uuid::new_v4().simple(),
+            ));
+            let output = std::process::Command::new("python")
+                .arg(repo.join("scripts/make_tmp.py"))
+                .args(["workspace", "--destination"])
+                .arg(&root)
+                .current_dir(&repo)
+                .output()
+                .expect("通过工作目录工厂创建资产诊断测试目录");
+            assert!(
+                output.status.success(),
+                "工作目录工厂失败：{}",
+                String::from_utf8_lossy(&output.stderr)
+            );
+            Self(root)
+        }
+
+        fn path(&self) -> &Path {
+            &self.0
+        }
+    }
+
+    impl Drop for DiagnosticWorkspace {
+        fn drop(&mut self) {
+            let _ = fs::remove_dir_all(&self.0);
+        }
+    }
+
+    fn diagnostic_http_server(
+        response: Vec<u8>,
+    ) -> (std::net::SocketAddr, std::thread::JoinHandle<()>) {
+        diagnostic_http_responses(vec![response])
+    }
+
+    fn diagnostic_http_responses(
+        responses: Vec<Vec<u8>>,
+    ) -> (std::net::SocketAddr, std::thread::JoinHandle<()>) {
+        let listener = std::net::TcpListener::bind(("127.0.0.1", 0)).expect("监听本地 HTTP");
+        let address = listener.local_addr().expect("获取本地 HTTP 地址");
+        listener.set_nonblocking(true).expect("设置监听器非阻塞");
+        let thread = std::thread::spawn(move || {
+            for response in responses {
+                let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+                let mut stream = loop {
+                    match listener.accept() {
+                        Ok((stream, _)) => break stream,
+                        Err(error)
+                            if error.kind() == std::io::ErrorKind::WouldBlock
+                                && std::time::Instant::now() < deadline =>
+                        {
+                            std::thread::sleep(std::time::Duration::from_millis(10));
+                        }
+                        Err(error) => panic!("等待诊断 HTTP 请求失败：{error}"),
+                    }
+                };
+                stream.set_nonblocking(false).expect("设置连接阻塞");
+                stream
+                    .set_read_timeout(Some(std::time::Duration::from_secs(5)))
+                    .expect("设置读取超时");
+                stream
+                    .set_write_timeout(Some(std::time::Duration::from_secs(5)))
+                    .expect("设置写入超时");
+                let mut request = Vec::new();
+                let mut buffer = [0_u8; 512];
+                while !request.windows(4).any(|bytes| bytes == b"\r\n\r\n") {
+                    let read = stream.read(&mut buffer).expect("消费真实 GET 请求");
+                    assert!(read > 0, "GET 请求不得在请求头完成前断开");
+                    request.extend_from_slice(&buffer[..read]);
+                    assert!(request.len() < 16 * 1024, "本地 GET 请求头必须有界");
+                }
+                stream.write_all(&response).expect("发送真实 HTTP 响应");
+            }
+        });
+        (address, thread)
+    }
+
+    #[test]
+    fn metadata_http_failure_logs_status_without_url_credentials_or_remote_text() {
+        let response = b"HTTP/1.1 503 REMOTE_PRIVATE_DETAIL\r\nContent-Length: 19\r\nConnection: close\r\n\r\nREMOTE_PRIVATE_BODY".to_vec();
+        let (address, server) = diagnostic_http_server(response);
+        let url = format!("http://DIAG_PRIVATE_USER:DIAG_PRIVATE_PASSWORD@{address}/release?token=DIAG_PRIVATE_TOKEN#DIAG_PRIVATE_FRAGMENT");
+        let cancel = AtomicBool::new(false);
+        let (result, logs) = capture_diagnostics(|| {
+            super::fetch_release_json_with_proxy(
+                &url,
+                &cancel,
+                &mut |_| {},
+                &crate::system_proxy::SystemProxy::default(),
+            )
+        });
+        server.join().expect("HTTP 状态失败供给线程结束");
+        assert!(result
+            .expect_err("HTTP 503 必须仍失败")
+            .contains("下载请求失败"));
+        assert!(logs.contains("asset_http_request_started"), "{logs}");
+        assert!(logs.contains("asset_http_request_failed"), "{logs}");
+        assert!(
+            logs.contains("http_status") && logs.contains("503"),
+            "{logs}"
+        );
+        assert!(logs.contains("release_metadata_failed"), "{logs}");
+        assert!(
+            logs.contains("operation_id")
+                && logs.contains("request_id")
+                && logs.contains("elapsed_ms")
+                && logs.contains("connect_timeout_ms")
+                && logs.contains("read_timeout_ms"),
+            "{logs}"
+        );
+        for secret in [
+            "DIAG_PRIVATE_USER",
+            "DIAG_PRIVATE_PASSWORD",
+            "DIAG_PRIVATE_TOKEN",
+            "DIAG_PRIVATE_FRAGMENT",
+            "REMOTE_PRIVATE_DETAIL",
+            "REMOTE_PRIVATE_BODY",
+        ] {
+            assert!(
+                !logs.contains(secret),
+                "敏感数据不得出现在日志：{secret}\n{logs}"
+            );
+        }
+    }
+
+    #[test]
+    fn metadata_json_failure_logs_parse_stage_without_response_body() {
+        let body = r#"{"password":"JSON_PRIVATE_BODY","broken":}"#;
+        let response = format!(
+            "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+            body.len()
+        )
+        .into_bytes();
+        let (address, server) = diagnostic_http_server(response);
+        let cancel = AtomicBool::new(false);
+        let (result, logs) = capture_diagnostics(|| {
+            super::fetch_release_json_with_proxy(
+                &format!("http://{address}/release"),
+                &cancel,
+                &mut |_| {},
+                &crate::system_proxy::SystemProxy::default(),
+            )
+        });
+        server.join().expect("JSON 失败供给线程结束");
+        assert!(result
+            .expect_err("非法 JSON 必须仍失败")
+            .contains("不是有效 JSON"));
+        assert!(logs.contains("release_metadata_body_completed"), "{logs}");
+        assert!(
+            logs.contains("release_metadata_parse_failed") && logs.contains("json_parse"),
+            "{logs}"
+        );
+        assert!(
+            logs.contains("release_metadata_failed") && logs.contains("error_category"),
+            "{logs}"
+        );
+        assert!(!logs.contains("JSON_PRIVATE_BODY"), "{logs}");
+    }
+
+    #[test]
+    fn metadata_proxy_body_failure_logs_one_direct_fallback_and_parsed_result() {
+        let (proxy_address, proxy_server) = diagnostic_http_server(
+            b"HTTP/1.1 200 OK\r\nContent-Length: 1024\r\nConnection: close\r\n\r\nPROXY_PRIVATE_TRUNCATED_BODY".to_vec(),
+        );
+        let body = r#"{"private":"DIRECT_PRIVATE_RESPONSE"}"#;
+        let (direct_address, direct_server) = diagnostic_http_server(
+            format!(
+                "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                body.len()
+            )
+            .into_bytes(),
+        );
+        let proxy = crate::system_proxy::SystemProxy::from_registry_values(
+            1,
+            Some(&proxy_address.to_string()),
+            None,
+        );
+        let cancel = AtomicBool::new(false);
+        let (result, logs) = capture_diagnostics(|| {
+            super::fetch_release_json_with_proxy(
+                &format!("http://{direct_address}/release"),
+                &cancel,
+                &mut |_| {},
+                &proxy,
+            )
+        });
+        proxy_server.join().expect("代理截断供给线程结束");
+        direct_server.join().expect("直连供给线程结束");
+        assert_eq!(
+            result.expect("直连必须恢复成功")["private"],
+            "DIRECT_PRIVATE_RESPONSE"
+        );
+        assert_eq!(
+            logs.matches("asset_http_request_started").count(),
+            2,
+            "{logs}"
+        );
+        let failed = logs
+            .find("release_metadata_read_failed")
+            .expect("记录代理读取失败");
+        let retrying = logs
+            .find("release_metadata_direct_retrying")
+            .expect("记录直连回退原因");
+        let direct = logs
+            .find("release_metadata_direct_started")
+            .expect("记录直连开始");
+        let completed = logs
+            .find("release_metadata_completed")
+            .expect("记录解析成功");
+        assert!(
+            failed < retrying && retrying < direct && direct < completed,
+            "{logs}"
+        );
+        assert!(
+            logs.contains("body_read") && logs.contains("attempt=2") && logs.contains("bytes="),
+            "{logs}"
+        );
+        assert!(
+            !logs.contains("PROXY_PRIVATE_TRUNCATED_BODY")
+                && !logs.contains("DIRECT_PRIVATE_RESPONSE"),
+            "{logs}"
+        );
+    }
+
+    #[test]
+    fn asset_http_failures_log_all_three_attempts_and_exhaustion_without_secrets() {
+        let workspace = DiagnosticWorkspace::new();
+        let response =
+            b"HTTP/1.1 503 ASSET_PRIVATE_REASON\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"
+                .to_vec();
+        let (address, server) =
+            diagnostic_http_responses(vec![response.clone(), response.clone(), response]);
+        let url =
+            format!("http://{address}/asset?token=ASSET_PRIVATE_TOKEN#ASSET_PRIVATE_FRAGMENT");
+        let destination = workspace.path().join("asset.bin");
+        let partial = workspace.path().join("asset.part");
+        let cancel = AtomicBool::new(false);
+        let mut progress = |_message: String| {};
+        let proxy = crate::system_proxy::SystemProxy::default();
+        let (result, logs) = capture_diagnostics(|| {
+            let span = crate::logging::operation_span("snap_ocr_assets", "download_asset");
+            let _entered = span.enter();
+            let mut fetch = |partial: &Path, progress: &mut dyn FnMut(String)| {
+                super::download_attempt(&url, partial, 1, &cancel, progress, &proxy)
+                    .map_err(|(message, _)| message)
+            };
+            super::download_asset_with(
+                &destination,
+                &partial,
+                1,
+                &"00".repeat(32),
+                &cancel,
+                &mut progress,
+                &mut fetch,
+            )
+        });
+        server.join().expect("三次真实 HTTP 失败供给线程结束");
+        assert!(result
+            .expect_err("三次失败必须耗尽")
+            .contains("下载资产失败"));
+        assert_eq!(
+            logs.matches("asset_http_request_started").count(),
+            3,
+            "{logs}"
+        );
+        assert_eq!(
+            logs.matches("asset_http_request_failed").count(),
+            3,
+            "{logs}"
+        );
+        assert_eq!(logs.matches("asset_attempt_retrying").count(), 2, "{logs}");
+        assert_eq!(logs.matches("asset_attempt_exhausted").count(), 1, "{logs}");
+        for attempt in ["attempt=1", "attempt=2", "attempt=3"] {
+            assert!(logs.contains(attempt), "{logs}");
+        }
+        assert!(
+            logs.contains("http_status")
+                && logs.contains("503")
+                && logs.contains("operation_id")
+                && logs.contains("request_id")
+                && logs.contains("elapsed_ms"),
+            "{logs}"
+        );
+        for secret in [
+            "ASSET_PRIVATE_REASON",
+            "ASSET_PRIVATE_TOKEN",
+            "ASSET_PRIVATE_FRAGMENT",
+        ] {
+            assert!(!logs.contains(secret), "{logs}");
+        }
+        assert!(
+            !destination.exists() && !partial.exists(),
+            "失败不落位且删除残留"
+        );
+    }
 
     #[test]
     fn checked_download_total_rejects_payload_over_manifest_size() {
@@ -2016,18 +2938,22 @@ mod tests {
         assert!(system_proxy.endpoint_for_url(source_url).is_some());
         assert_eq!(system_proxy.endpoint_for_url(&target_url), None);
 
-        let temp = tempfile::tempdir().expect("创建临时下载目录");
+        let temp = DiagnosticWorkspace::new();
         let partial = temp.path().join("redirect.part");
         let cancel = AtomicBool::new(false);
         let mut progress = |_message: String| {};
-        let result = super::download_attempt(
-            source_url,
-            &partial,
-            u64::try_from(body.len()).expect("测试资产大小可转换"),
-            &cancel,
-            &mut progress,
-            &system_proxy,
-        );
+        let (result, logs) = capture_diagnostics(|| {
+            let span = crate::logging::operation_span("snap_ocr_assets", "download_asset");
+            let _entered = span.enter();
+            super::download_attempt(
+                source_url,
+                &partial,
+                u64::try_from(body.len()).expect("测试资产大小可转换"),
+                &cancel,
+                &mut progress,
+                &system_proxy,
+            )
+        });
 
         let proxy_request = proxy.join().expect("代理线程完成");
         let target_request = target.join().expect("目标线程完成");
@@ -2041,5 +2967,23 @@ mod tests {
         );
         result.expect("逐跳按 ProxyOverride 路由后下载成功");
         assert_eq!(fs::read(partial).expect("读取下载结果"), body);
+        assert_eq!(
+            logs.matches("asset_http_request_started").count(),
+            2,
+            "{logs}"
+        );
+        assert!(
+            logs.contains("asset_redirect_followed")
+                && logs.contains("redirect_hop=0")
+                && logs.contains("redirect_hop=1")
+                && logs.contains("asset_body_completed")
+                && logs.contains("operation_id")
+                && logs.contains("request_id"),
+            "{logs}"
+        );
+        assert!(
+            !logs.contains("redirected-asset"),
+            "资产正文不得进入日志：{logs}"
+        );
     }
 }

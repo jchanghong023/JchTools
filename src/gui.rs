@@ -1812,14 +1812,41 @@ fn spawn_event_worker(
     body: impl FnOnce() -> anyhow::Result<Event> + Send + 'static,
 ) {
     let out = out.clone();
+    let parent = tracing::Span::current();
     std::thread::spawn(move || {
+        let _parent = parent.enter();
+        let span = crate::logging::operation_span("gui_worker", "engine_task");
+        let _entered = span.enter();
+        let started = Instant::now();
+        tracing::info!(event = "gui_worker_started", "后台任务开始");
         let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(body));
         let event = match result {
             Ok(Ok(event)) => event,
             Ok(Err(error)) => Event::Failed(format!("{error:#}")),
             Err(_) => Event::Failed(panic_text.to_string()),
         };
-        let _ = out.send(event);
+        match &event {
+            Event::Failed(_) => tracing::error!(
+                event = "gui_worker_failed",
+                stage = "task",
+                error_type = "worker_result",
+                elapsed_ms = crate::logging::elapsed_ms(started),
+                "后台任务失败"
+            ),
+            _ => tracing::info!(
+                event = "gui_worker_completed",
+                elapsed_ms = crate::logging::elapsed_ms(started),
+                "后台任务结果已生成"
+            ),
+        }
+        if out.send(event).is_err() {
+            tracing::warn!(
+                event = "gui_worker_delivery_failed",
+                stage = "event_send",
+                error_type = "gui_closed",
+                "后台结果无法投递到已关闭界面"
+            );
+        }
     });
 }
 fn start_task(ui: &AppWindow, state: &Rc<RefCell<State>>, out: &EventSender, apply: bool) {
@@ -2311,7 +2338,13 @@ fn spawn_md_worker(
     out: EventSender,
     body: impl FnOnce() -> Result<String, String> + Send + 'static,
 ) {
+    let parent = tracing::Span::current();
     std::thread::spawn(move || {
+        let _parent = parent.enter();
+        let span = crate::logging::operation_span("gui_worker", "md_task");
+        let _entered = span.enter();
+        let started = Instant::now();
+        tracing::info!(event = "gui_md_worker_started", "MD 后台任务开始");
         let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(body))
             .unwrap_or_else(|_| Err("MD 整理后台操作意外退出；未完成的输出请手动检查".to_string()));
         let event = match result {
@@ -2321,6 +2354,17 @@ fn spawn_md_worker(
             }
             Err(text) => Event::Failed(text),
         };
+        let outcome = match &event {
+            Event::Failed(_) => "failed_event",
+            Event::MdNeedsConfirm(_) => "confirmation_required",
+            _ => "completed",
+        };
+        tracing::info!(
+            event = "gui_md_worker_completed",
+            outcome,
+            elapsed_ms = crate::logging::elapsed_ms(started),
+            "MD 后台任务结果已生成"
+        );
         let _ = out.send(event);
     });
 }
@@ -2531,10 +2575,20 @@ fn start_git(ui: &AppWindow, state: &Rc<RefCell<State>>, out: &EventSender) {
     ui.set_git_done(0);
     ui.set_status("正在验证仓库（分支、upstream 与仓库状态）…".into());
     let worker_out = out.clone();
+    let parent = tracing::Span::current();
     std::thread::spawn(move || {
+        let _parent = parent.enter();
+        let span = crate::logging::operation_span("gui_worker", "git_task");
+        let _entered = span.enter();
         let git = match git_tools::find_git() {
             Ok(git) => git,
             Err(error) => {
+                tracing::error!(
+                    event = "git_task_start_failed",
+                    stage = "find_git",
+                    error_type = "git_unavailable",
+                    "Git 程序不可用"
+                );
                 let text = format!("{error:#}");
                 if let Ok(mut state) = shared.state.lock() {
                     state.clear();
@@ -3081,7 +3135,9 @@ fn wire_sync(ui: &AppWindow, state: &Rc<RefCell<State>>, out: &EventSender) {
                     s.extract_generation += 1;
                     s.extract_generation
                 };
+                let parent = tracing::Span::current();
                 std::thread::spawn(move || {
+                    let _parent = parent.enter();
                     let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
                         engine::count_archives(&directory, &config)
                     }));
@@ -5434,7 +5490,9 @@ fn launch_markdown_conversion(
     ui.set_convert_progress_note("正在扫描".into());
     ui.set_convert_status("正在转换…".into());
     let out = out.clone();
+    let parent = tracing::Span::current();
     std::thread::spawn(move || {
+        let _parent = parent.enter();
         let result = markdown::run(&options, &cancel, |event| {
             let text = match event {
                 markdown::Event::Started { total } => format!("CONVERTER_STARTED|{total}"),
@@ -5564,59 +5622,150 @@ fn snap_pipe_request_on(
     request: &serde_json::Value,
     read_timeout: Duration,
 ) -> Result<serde_json::Value, String> {
-    let deadline = Instant::now() + Duration::from_secs(2);
-    let mut stream = loop {
-        match std::fs::OpenOptions::new()
-            .read(true)
-            .write(true)
-            .open(pipe)
-        {
-            Ok(stream) => break stream,
-            // 服务只有一个管道实例。前一条响应写出后，它还需断开客户端并
-            // 重新等待连接；立即发送下一条请求时应等待这个正常交接窗口。
-            Err(error) if error.raw_os_error() == Some(231) && Instant::now() < deadline => {
-                std::thread::sleep(Duration::from_millis(10));
-            }
-            Err(error) => return Err(format!("无法连接截图服务：{error}")),
-        }
+    let operation_id = crate::logging::new_operation_id();
+    let span =
+        crate::logging::operation_span_with_id("snap_control_client", "request", &operation_id);
+    let _entered = span.enter();
+    let started = Instant::now();
+    let command = match request["command"].as_str() {
+        Some(
+            command @ ("ping" | "get-state" | "capture" | "retry-load" | "attach-main-exe"
+            | "set-hotkey" | "set-autostart" | "exit"),
+        ) => command,
+        _ => "other",
     };
-    let mut payload =
-        serde_json::to_vec(request).map_err(|error| format!("请求编码失败：{error}"))?;
-    payload.push(b'\n');
-    stream
-        .write_all(&payload)
-        .map_err(|error| format!("发送服务请求失败：{error}"))?;
-    stream
-        .flush()
-        .map_err(|error| format!("刷新服务请求失败：{error}"))?;
-    // 读响应放入独立线程、主线程限时 join（crate::process::join_with_deadline）：
-    // 超时后取消原句柄上的未决读，让读线程以错误返回并退出（防线程泄漏）。
-    let mut read_stream = stream
-        .try_clone()
-        .map_err(|error| format!("复制服务连接失败：{error}"))?;
-    let reader = std::thread::Builder::new()
-        .name("snap-pipe-read".into())
-        .spawn(move || {
-            let mut response = String::new();
-            BufReader::new(&mut read_stream)
-                .read_line(&mut response)
-                .map(|_| response)
-        })
-        .map_err(|error| format!("启动响应读取线程失败：{error}"))?;
-    let response = match crate::process::join_with_deadline(reader, read_timeout) {
-        Some(Ok(response)) => response,
-        Some(Err(error)) => return Err(format!("读取服务响应失败：{error}")),
-        None => {
-            cancel_pipe_io(&stream);
-            return Err(format!(
-                "截图服务响应超时（{read_timeout:.1?} 未返回）；请在设置页重试后台连接"
-            ));
-        }
-    };
-    if response.is_empty() {
-        return Err("截图服务未返回响应".into());
+    let polling = command == "get-state";
+    if polling {
+        tracing::debug!(
+            event = "snap_control_request_started",
+            command,
+            "截图控制查询开始"
+        );
+    } else {
+        tracing::info!(
+            event = "snap_control_request_started",
+            command,
+            connect_timeout_ms = 2000,
+            read_timeout_ms = u64::try_from(read_timeout.as_millis()).unwrap_or(u64::MAX),
+            "截图控制请求开始"
+        );
     }
-    serde_json::from_str(&response).map_err(|error| format!("截图服务响应格式错误：{error}"))
+    let mut stage = "connect";
+    let mut peer_pid = 0_u32;
+    let result = (|| {
+        let deadline = Instant::now() + Duration::from_secs(2);
+        let mut stream = loop {
+            match std::fs::OpenOptions::new()
+                .read(true)
+                .write(true)
+                .open(pipe)
+            {
+                Ok(stream) => break stream,
+                // 服务只有一个管道实例。前一条响应写出后，它还需断开客户端并
+                // 重新等待连接；立即发送下一条请求时应等待这个正常交接窗口。
+                Err(error) if error.raw_os_error() == Some(231) && Instant::now() < deadline => {
+                    std::thread::sleep(Duration::from_millis(10));
+                }
+                Err(error) => return Err(format!("无法连接截图服务：{error}")),
+            }
+        };
+        use std::os::windows::io::AsRawHandle;
+        // SAFETY: stream 是有效连接句柄，peer_pid 指针在同步查询期间有效。
+        let _ = unsafe {
+            windows_sys::Win32::System::Pipes::GetNamedPipeServerProcessId(
+                stream.as_raw_handle().cast(),
+                &raw mut peer_pid,
+            )
+        };
+        stage = "encode";
+        let mut payload =
+            serde_json::to_vec(request).map_err(|error| format!("请求编码失败：{error}"))?;
+        // 复用既有编码缓冲区附加低敏ID，不复制控制请求对象或修改业务字段。
+        if request.is_object() {
+            payload.pop();
+            if payload.len() > 1 {
+                payload.push(b',');
+            }
+            payload.extend_from_slice(b"\"diagnostic_id\":\"");
+            payload.extend_from_slice(operation_id.as_bytes());
+            payload.extend_from_slice(b"\"}");
+        }
+        payload.push(b'\n');
+        stage = "send";
+        stream
+            .write_all(&payload)
+            .map_err(|error| format!("发送服务请求失败：{error}"))?;
+        stage = "flush";
+        stream
+            .flush()
+            .map_err(|error| format!("刷新服务请求失败：{error}"))?;
+        stage = "clone_connection";
+        // 读响应放入独立线程、主线程限时 join（crate::process::join_with_deadline）：
+        // 超时后取消原句柄上的未决读，让读线程以错误返回并退出（防线程泄漏）。
+        let mut read_stream = stream
+            .try_clone()
+            .map_err(|error| format!("复制服务连接失败：{error}"))?;
+        stage = "spawn_reader";
+        let reader_span = tracing::Span::current();
+        let reader = std::thread::Builder::new()
+            .name("snap-pipe-read".into())
+            .spawn(move || {
+                let _entered = reader_span.enter();
+                let mut response = String::new();
+                BufReader::new(&mut read_stream)
+                    .read_line(&mut response)
+                    .map(|_| response)
+            })
+            .map_err(|error| format!("启动响应读取线程失败：{error}"))?;
+        stage = "receive";
+        let response = match crate::process::join_with_deadline(reader, read_timeout) {
+            Some(Ok(response)) => response,
+            Some(Err(error)) => return Err(format!("读取服务响应失败：{error}")),
+            None => {
+                stage = "receive_timeout";
+                cancel_pipe_io(&stream);
+                return Err(format!(
+                    "截图服务响应超时（{read_timeout:.1?} 未返回）；请在设置页重试后台连接"
+                ));
+            }
+        };
+        if response.is_empty() {
+            return Err("截图服务未返回响应".into());
+        }
+        stage = "decode";
+        serde_json::from_str::<serde_json::Value>(&response)
+            .map_err(|error| format!("截图服务响应格式错误：{error}"))
+    })();
+    let elapsed_ms = crate::logging::elapsed_ms(started);
+    match &result {
+        Ok(response) if polling => tracing::debug!(
+            event = "snap_control_request_completed",
+            command,
+            peer_pid,
+            elapsed_ms,
+            ok = response["ok"].as_bool(),
+            "截图控制查询完成"
+        ),
+        Ok(response) => tracing::info!(
+            event = "snap_control_request_completed",
+            command,
+            peer_pid,
+            elapsed_ms,
+            ok = response["ok"].as_bool(),
+            diagnostic_id_received = response["diagnostic_id"] == operation_id,
+            "截图控制请求完成"
+        ),
+        Err(_) => tracing::warn!(
+            event = "snap_control_request_failed",
+            command,
+            stage,
+            peer_pid,
+            elapsed_ms,
+            error_type = "control_ipc",
+            "截图控制请求失败"
+        ),
+    }
+    result
 }
 
 /// 取消句柄上的未决同步 I/O（C-1）：读线程阻塞在复制句柄的 read_line 上，
@@ -5966,20 +6115,42 @@ pub fn run_with_engine_overrides(
     hook: impl FnOnce(&AppWindow) + 'static,
     overrides: Option<EngineTestOverrides>,
 ) -> Result<()> {
+    // P-10：窗口创建、设置加载失败也必须留在诊断日志中。
+    let directory = overrides.as_ref().map_or_else(
+        || crate::config::state_dir().ok(),
+        |overrides| Some(overrides.state_dir.clone()),
+    );
+    let _diagnostic_log_guard = directory.as_deref().and_then(crate::logging::init);
+    let span = crate::logging::operation_span("gui", "run");
+    let _entered = span.enter();
+    let started = Instant::now();
+    tracing::info!(event = "gui_started", "主界面启动");
+    let result = run_gui(hook, overrides);
+    match &result {
+        Ok(()) => tracing::info!(
+            event = "gui_completed",
+            elapsed_ms = crate::logging::elapsed_ms(started),
+            "主界面已关闭"
+        ),
+        Err(_) => tracing::error!(
+            event = "gui_failed",
+            stage = "startup_or_event_loop",
+            error_type = "gui_runtime",
+            elapsed_ms = crate::logging::elapsed_ms(started),
+            "主界面启动或事件循环失败"
+        ),
+    }
+    result
+}
+
+fn run_gui(
+    hook: impl FnOnce(&AppWindow) + 'static,
+    overrides: Option<EngineTestOverrides>,
+) -> Result<()> {
     let ui = AppWindow::new()?;
     ui.set_system_dark(system_dark());
     let state = Rc::new(RefCell::new(initial_state()?));
     state.borrow_mut().engine_overrides = overrides;
-    // 性能耗时打点（`perf-tracing` 特性，默认关闭）：日志写在状态目录的独立子目录里，
-    // 测试注入状态目录时同样隔离在注入目录内。句柄绑到本函数作用域，退出前刷盘。
-    // P-10：诊断日志常开；perf-tracing 启用时性能层由 logging::init 一并合并。
-    let _diagnostic_log_guard = {
-        let directory = state.borrow().engine_overrides.as_ref().map_or_else(
-            || crate::config::state_dir().ok(),
-            |o| Some(o.state_dir.clone()),
-        );
-        directory.as_deref().and_then(crate::logging::init)
-    };
     let (channel, receiver) = mpsc::sync_channel::<Event>(256);
     let out = EventSender::new(channel);
     let tools = registry::tools()
@@ -7357,8 +7528,10 @@ mod gui_tests {
                     }
                     let mut bytes = vec![0; usize::try_from(length).unwrap()];
                     pipe.read_exact(&mut bytes).await?;
-                    serde_json::from_slice::<String>(&bytes)
-                        .map_err(|error| std::io::Error::new(std::io::ErrorKind::InvalidData, error))
+                    let request: serde_json::Value = serde_json::from_slice(&bytes)
+                        .map_err(|error| std::io::Error::new(std::io::ErrorKind::InvalidData, error))?;
+                    request["operation"].as_str().map(str::to_owned)
+                        .ok_or_else(|| std::io::Error::new(std::io::ErrorKind::InvalidData, "缺少控制操作"))
                 } => operation?,
             };
             let result: std::result::Result<ServiceStatus, crate::acp_api::ServiceError> =
@@ -9991,6 +10164,45 @@ mod gui_tests {
         let out_dir = dir.join("out");
         std::fs::create_dir_all(&out_dir).unwrap();
         (docs, out_dir, dir)
+    }
+    // 覆盖 U-10/U-12、M-02/M-04：展开日志期间真实合并继续完成，事件泵仍交付日志。
+    #[test]
+    fn expanded_log_panel_keeps_real_md_task_and_terminal_logs() {
+        let (docs, out_dir, dir) = make_md_fixture("md-expanded-log", 1);
+        let source = std::fs::read_to_string(docs.join("doc000.md")).unwrap();
+        let expected = format!("# doc000.md\n\n{}", source.replace("# 标题", "## 标题"));
+        let merged = out_dir.join("merged.md");
+        let input_text = docs.display().to_string();
+        let output_text = out_dir.display().to_string();
+        with_gui(move |app| {
+            let ui = &app.ui;
+            ui.invoke_select_tool("md-organizer".into());
+            ui.set_md_input_dir(input_text.into());
+            ui.set_md_output_dir(output_text.into());
+            ui.set_md_output_name("merged.md".into());
+            // 点击与 Esc 的真实窗口内事件由 gui_log_panel 单独覆盖；此处验证任务边界。
+            i_slint_backend_testing::mock_elapsed_time(Duration::ZERO);
+            ui.invoke_md_merge_start();
+            assert!(ui.get_busy());
+            ui.set_log_expanded(true);
+            assert!(
+                pump_until(app, || !ui.get_busy()
+                    && ui.get_status().contains("合并完成")),
+                "展开期间任务应完成：{}",
+                ui.get_status()
+            );
+            assert!(ui.get_log_expanded(), "任务收尾不能擅自关闭展开日志");
+            assert!(ui.get_log_text().contains("合并完成：1 个文件"));
+            ui.set_log_expanded(false);
+            assert!(ui.get_log_text().contains("合并完成：1 个文件"));
+        })
+        .unwrap();
+        assert_eq!(std::fs::read_to_string(&merged).unwrap(), expected);
+        assert_eq!(
+            std::fs::read_to_string(docs.join("doc000.md")).unwrap(),
+            source
+        );
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     // 覆盖 U-03：真实完成事件使用本次任务时钟，合并/拆分都不能继承旧 started。
