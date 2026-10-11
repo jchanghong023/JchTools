@@ -48,7 +48,7 @@
 
 ## 仍受阻或未验证；给验收Agent的下一步
 
-1. **基线审批受阻**：`scripts/test-baseline.json`未改。项目§10要求先给新旧基线并排做是/否确认；用户禁止本轮提问，不能把笼统权限授权冒充该特定比较确认。验收Agent取得该确认后再独立更新基线与提交记录；不删除回归、不放宽断言让static_check变绿。
+1. **基线承接**：用户已删除项目原§10的人工新旧基线审批要求，基线再生成不再因额外是/否确认受阻；按当前 `AGENTS.md` §3.2记录覆盖点、测试变更理由与反证，不删除回归、不放宽断言让static_check变绿。
 2. **根构建/完整Cargo未验证**：初始 `cargo test --features test-hooks`、后续根lib构建/单测编译均达到60秒或驱动55秒树终止预算，未把超时报成功。已用当前原样source closure做必要烟测，但不能替代默认/gui/test-hooks的完整Cargo契约。最终GUI重新构建、`tests/gui_flow.rs`及对应真实桌面链路仍须验收。
 3. **真实边界未验证**：A18/A25真实SQLite/Windows会话/PID/命名管道链路；真实Xberg模型、媒体/OCR质量；热键/托盘/服务生命周期与多DPI；真实认证网络；发布ISCC、ZIP、无引擎泄漏和两种交付形态。C08/C09无独立Windows用户会话仍须如实NOT RUN，不能推定通过。
 4. **完整门与CI待授权承接**：本轮没运行fastcheck/fulltest/slowtest或最终验收Agent，也没触发远程CI。按项目当次授权规则执行；slowtest默认只触发并给run链接，用户明确要求等待时才等待。CI转绿前不得宣称整体完成。
@@ -86,3 +86,14 @@
 用户明确指示停止完整远程测试：“本地测试就够了，ci只用来编译，发布版本包”，随后要求“发布版本直到成功”。此指示覆盖以上历史 CI 权威及重复完整测试规则。功能验收采用已执行的 Windows 本地证据；CI 仅生产编译、打包和发布，两个工作流使用 `package-windows.ps1 -SkipTests`。跳过模式不再编译测试钩子或测试目标，发布记录仍如实标记该构建机测试为 NOT RUN，不把编译等同功能验收。原有本地测试与 832 项基线均保留。
 
 最新已执行本地阶段：acceptance PASS（605.6 秒），完整 package PASS（465.6 秒）；常用格式矩阵 37 PASS / 0 FAIL / 5 OPTIONAL / C08、C09 NOT RUN。产品源码自上述本地验证后未改，本次仅调整 CI/打包入口与职责文档，复用该本地证据。发布结果以实际 release run 和版本资产为准。
+
+## 2026-10-11 slowtest 失败修复
+
+- 用户当次授权 `python scripts/test_gate.py slowtest --authorized` 及定位根因后的必要重跑，要求三个层级失败即停、沿用门内超时，不增加外部终止阈值。
+- 首轮退出 1：`test_baseline` 报五项新增、两项改名及十二项测试体指纹变化；没有新增 ignore。四个独立只读复核覆盖全部差异：ACP 会话协商身份与输入拒绝、解压重复成员与卷族不覆盖、整理/Git 安全和合并、GUI 取消及后台日志隔离。两项改名分别消除固定分类容器迁走 Git 树的错误预期、将可能因权限直接跳过的符号链接夹具换为必验的其他真实 reparse 类别；后者不声明覆盖符号链接权限路径。基线按原静态检查入口重建为 1003 项，不改变发现范围和忽略状态。
+- `cargo test --features test-hooks --test git_tools real_output_captured_for_success_and_failure_paths -- --exact --nocapture` 首次编译退出 101：`src/archive.rs:433` 的迭代器捕获 `Control` 引用却未声明 `'a`。修正参数生命周期，移除仅复制引用的 `clone`；再次执行已编译通过，真实 Git 回归退出 101，报「push 失败必须采集……：[]」。
+- 上述 Git 回归原来读取 `spawn_run` 明确置空的 `RunOutcome.logs`；线程实际输出位于独立共享缓冲区。等待线程完成后接管该缓冲区，保留两条输出流、Git 原始错误与停止状态断言。修正后同命令退出 0：`1 passed; 0 failed`，真实本地 bare 远端及失败路径均执行。
+- 第二轮 slowtest 退出 1：前置静态、生产构建与测试目标编译均通过，严格 Clippy 在解码临时名二分查找中拒绝手写 `(left + right) / 2`。改为 `u32::midpoint(left, right)`，不加 lint 豁免。`cargo clippy --lib --bin JchTools --features test-hooks -- -D warnings` 退出 0；随后 `cargo test --features test-hooks --lib decoded_duplicate_volume_families_preserve_partial_existing_set -- --nocapture` 退出 0、`1 passed; 0 failed`，既有半套卷族与两组新增重复卷族字节及共同主体断言均保留。
+- 第三轮 slowtest 在 `root-test-build` 退出 1：真正的编译错误为 `failed to mmap ...libjchtools...rlib` / Windows `os error 1455`，不是元数据格式损坏。宿主有 32 逻辑核，约 48 GiB 物理内存及 48 GiB 分页文件；默认 Cargo 全目标并发耗尽提交内存。`.cargo/config.toml` 仅固定 `build.jobs = 2`，不清缓存、不改 profile/特性/目标/链接器/RUSTFLAGS、不调整系统分页设置。相同 `cargo test --all-targets --features test-hooks --no-run --message-format=json` 退出 0、`build-finished success:true`。
+- 第四轮 slowtest 首次嵌套失败为 `cancelling_git_move_cancels_cleanup_of_retained_git_tree_ancestors`：`tests/core.rs` 将取消行数写死为 1，实际正确取消了项目原根及祖先两条清理行。移除这一规划内部数量断言，不改为写死 2；增加对该夹具全部空目录清理行均取消的行为断言，保留不重新勾选 Git 移动、独立图片归类、重复重算幂等、Git 字节原样与未创建集合目录的检查。`cargo test --features test-hooks --test core cancelling_git_move_cancels_cleanup_of_retained_git_tree_ancestors -- --exact --nocapture` 退出 0、`1 passed; 0 failed`；基线仍 1003 项，未添加忽略或减少发现范围。
+- 完整 slowtest 与三级失败即停结果以随后实际运行证据为准；本段不把局部回归、基线同步或源码复核冒称为完整门通过。产品代码与可信基不得混合提交；本次不提交、不推送、不触发 CI 或发布。

@@ -748,16 +748,14 @@ def slint_modal_gating() -> str:
     ui = read_text(ROOT / "ui" / "app.slint")
     start = ui.index("export component AppWindow inherits Window")
     overlay = ui.index("if root.confirm-kind != 0:", start)
-    start_line = ui.count("\n", 0, start) + 1
+    background = ui[start:overlay]
     bad: list[tuple[int, str]] = []
-    for offset, line in enumerate(ui[start:overlay].split("\n")):
-        # 唯一的确认模态打开时，背景控件不可交互；运行中的暂停/取消仍应可用。
-        enabled_match = re.search(r"(?<![\w-])enabled\s*:(.*)", line)
-        if not enabled_match:
-            continue
+    # enabled 绑定到分号才结束；换行不能截断后续的确认门禁。
+    for enabled_match in re.finditer(r"(?<![\w-])enabled\s*:([^;]*);", background):
         expr = enabled_match.group(1)
         if "confirm-kind" not in expr:
-            bad.append((start_line + offset, line.strip()))
+            line_number = ui.count("\n", 0, start + enabled_match.start()) + 1
+            bad.append((line_number, "enabled: " + " ".join(expr.split())))
     if bad:
         detail = f"AppWindow 内存在未按 confirm-kind 门禁的 enabled 绑定（行, 表达式）：{bad}"
         raise AssertionError(detail)
@@ -971,6 +969,9 @@ for fn in [
     scope_and_delivery,
 ]:
     check(fn.__name__, fn)
+    # 仅调度失败即停；检查定义、判据与独立报告保持不变（2026-10-11 用户批准）。
+    if checks[-1]["status"] == "FAIL":
+        break
 
 report = {
     "kind": "lightweight static source checks only",

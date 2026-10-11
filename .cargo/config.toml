@@ -1,3 +1,8 @@
+[build]
+# 全目标并行编译在 32 逻辑核宿主触发 Windows 提交内存耗尽（os error 1455）。
+# 限制 Cargo 并发，不改特性、目标、profile、链接器或受检覆盖。
+jobs = 2
+
 [target.x86_64-pc-windows-msvc]
 # Keep the portable Windows application independent of a separately installed MSVC runtime.
 rustflags = ["-C", "target-feature=+crt-static"]

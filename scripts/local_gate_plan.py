@@ -9,7 +9,8 @@ import sys
 from pathlib import Path
 from typing import TYPE_CHECKING
 
-from scripts.gate_runtime import GateRun, Result, Stage
+from scripts.gate_runtime import GateRun, GateStoppedError, Result, Stage
+from scripts.quality_scope import production_python
 from scripts.xberg_test_engine import EXPECTED_TEST_ENGINE
 
 if TYPE_CHECKING:
@@ -24,16 +25,17 @@ def _mapping(value: object) -> TypeIs[dict[str, object]]:
 
 
 def static_plan(root: Path) -> list[Stage]:
-    """原有 Python / Rust 静态判据，不执行 unittest."""
-    cargo = shutil.which("cargo") or "cargo"
+    """严格静态检查仅覆盖生产；语法检查仍覆盖全部 Python，不执行 unittest."""
+    python_files = production_python(root)
     return [
         Stage("static-check", [sys.executable, str(root / "scripts/static_check.py")]),
-        Stage("rustfmt-check", [cargo, "fmt", "--all", "--", "--check"]),
+        Stage("rustfmt-check", [sys.executable, "-m", "scripts.quality_scope", "rustfmt"]),
+        Stage("pyquality-syntax", [sys.executable, "-m", "scripts.quality_scope", "syntax"]),
         Stage("pyquality-ruff-format", [sys.executable, "-m", "ruff", "format", "--check", "scripts", "typings"]),
         Stage("pyquality-ruff-lint", [sys.executable, "-m", "ruff", "check", "scripts", "typings"]),
-        Stage("pyquality-basedpyright", [sys.executable, "-m", "basedpyright", "scripts", "typings"]),
-        Stage("pyquality-vulture", [sys.executable, "-m", "vulture", "scripts", "typings", "--min-confidence", "100"]),
-        Stage("pyquality-bandit", [sys.executable, "-m", "bandit", "-r", "scripts", "-s", "B404,B603", "-q"]),
+        Stage("pyquality-basedpyright", [sys.executable, "-m", "basedpyright"]),
+        Stage("pyquality-vulture", [sys.executable, "-m", "vulture", *python_files, "--min-confidence", "100"]),
+        Stage("pyquality-bandit", [sys.executable, "-m", "bandit", *python_files, "-s", "B404,B603", "-q"]),
     ]
 
 
@@ -46,7 +48,7 @@ def gate_plan(level: str, root: Path, log_dir: Path, ps_env: dict[str, str]) -> 
         Stage("test-target-check", [cargo, "check", "--all-targets", "--features", "test-hooks"], "compile"),
         Stage(
             "clippy",
-            [cargo, "clippy", "--all-targets", "--features", "test-hooks", "--", "-D", "warnings"],
+            [cargo, "clippy", "--lib", "--bin", "JchTools", "--features", "test-hooks", "--", "-D", "warnings"],
             "compiler-observed",
         ),
     ]
@@ -54,23 +56,46 @@ def gate_plan(level: str, root: Path, log_dir: Path, ps_env: dict[str, str]) -> 
         return plan
     plan += [
         Stage("pyquality-pip-audit", [sys.executable, "-m", "pip_audit", "-r", "scripts/requirements-dev.txt"]),
-        Stage("markdown-acceptance-unit", [sys.executable, "-m", "unittest", "scripts.test_markdown_acceptance"]),
-        Stage("gui-automation-unit", [sys.executable, "-m", "unittest", "scripts.test_gui_smoke"]),
-        Stage("test-gate-unit", [sys.executable, "-m", "unittest", "scripts.test_test_gate"]),
+        Stage("markdown-acceptance-unit", [sys.executable, "-m", "unittest", "-f", "scripts.test_markdown_acceptance"]),
+        Stage("gui-automation-unit", [sys.executable, "-m", "unittest", "-f", "scripts.test_gui_smoke"]),
+        Stage("test-gate-unit", [sys.executable, "-m", "unittest", "-f", "scripts.test_test_gate"]),
         Stage("ocr-asset-manifest", [sys.executable, "tests/ocr_fixtures/check_asset_manifest.py"]),
         Stage("requirement-reference-inventory", [sys.executable, "scripts/requirement_coverage.py"]),
         Stage("xberg-latest", [sys.executable, "scripts/xberg_test_engine.py"]),
         Stage(
             "clippy-perf-tracing",
-            [cargo, "clippy", "--all-targets", "--features", "perf-tracing,test-hooks", "--", "-D", "warnings"],
+            [
+                cargo,
+                "clippy",
+                "--lib",
+                "--bin",
+                "JchTools",
+                "--features",
+                "perf-tracing,test-hooks",
+                "--",
+                "-D",
+                "warnings",
+            ],
             "compiler-observed",
+        ),
+        # cargo test --all-targets --no-run 只保证测试 artifact；公开后台入口
+        # 必须另行构建 test-hooks 程序，不能沿用前面的生产 EXE。
+        Stage(
+            "test-program-build",
+            [cargo, "build", "--bins", "--features", "test-hooks"],
+            "compile",
         ),
         Stage(
             "root-test-build",
             [cargo, "test", "--all-targets", "--features", "test-hooks", "--no-run", "--message-format=json"],
             "compile",
         ),
-        Stage("root-doctests", [cargo, "test", "--doc", "--features", "test-hooks"], "compiler-observed"),
+        Stage(
+            "root-doctests",
+            [cargo, "test", "--doc", "--features", "test-hooks", "--"],
+            "compiler-observed",
+            watch_test_failures=True,
+        ),
     ]
     for component in ("snap-ocr-core", "snap-ocr-worker"):
         manifest = f"optional/{component}/Cargo.toml"
@@ -82,7 +107,8 @@ def gate_plan(level: str, root: Path, log_dir: Path, ps_env: dict[str, str]) -> 
                     "clippy",
                     "--manifest-path",
                     manifest,
-                    "--all-targets",
+                    "--lib",
+                    *(["--bin", "snap-ocr-worker"] if component == "snap-ocr-worker" else []),
                     "--features",
                     "test-hooks",
                     "--",
@@ -108,8 +134,9 @@ def gate_plan(level: str, root: Path, log_dir: Path, ps_env: dict[str, str]) -> 
             ),
             Stage(
                 f"{component}-doctests",
-                [cargo, "test", "--manifest-path", manifest, "--doc", "--features", "test-hooks"],
+                [cargo, "test", "--manifest-path", manifest, "--doc", "--features", "test-hooks", "--"],
                 "compiler-observed",
+                watch_test_failures=True,
             ),
         ]
     phase = log_dir / "package-phase.json"
@@ -168,28 +195,26 @@ def _test_binary_stages(build: Result) -> list[Stage]:
                     "real_gui_pending_configuration_applies_only_after_inflight_completion",
                 ):
                     argv += ["--skip", test]
-            stages.append(Stage(f"{build.name}-{name}", argv))
+            stages.append(Stage(f"{build.name}-{name}", argv, watch_test_failures=True))
     return stages
 
 
 def _real_test_stage(
-    results: list[Result],
     binaries: list[Stage],
     target: tuple[str, str],
     env: dict[str, str] | None = None,
-) -> Stage | None:
+) -> Stage:
     identifier, name = target
     binary = next((stage for stage in binaries if stage.name == f"root-test-build-{identifier}"), None)
     if binary is None:
-        results.append(Result(name, "UNVERIFIED", "本轮编译未发布所需测试 artifact。"))
-        return None
+        raise GateStoppedError([Result(name, "UNVERIFIED", "本轮编译未发布所需测试 artifact。")])
     argv = [binary.argv[0], "--ignored", "--nocapture", "--test-threads=1"]
-    return Stage(name, argv, env=env)
+    return Stage(name, argv, env=env, watch_test_failures=True)
 
 
 def _compile_test_artifacts(run: GateRun, plan: list[Stage], results: list[Result]) -> list[Stage]:
     for stage in plan:
-        if stage.name == "clippy-perf-tracing" or stage.name.endswith("-clippy"):
+        if stage.name in {"test-program-build", "clippy-perf-tracing"} or stage.name.endswith("-clippy"):
             results.extend(run.run([stage]))
     binaries: list[Stage] = []
     for stage in plan:
@@ -198,12 +223,10 @@ def _compile_test_artifacts(run: GateRun, plan: list[Stage], results: list[Resul
         built = run.run([stage])
         results.extend(built)
         for result in built:
-            if result.status != "PASS":
-                continue
             found = _test_binary_stages(result)
             if not found:
                 detail = "Cargo 未发布任何本轮测试 artifact，不能冒充已测试。"
-                results.append(Result(f"{stage.name}-artifacts", "FAIL", detail))
+                raise GateStoppedError([Result(f"{stage.name}-artifacts", "FAIL", detail)])
             binaries.extend(found)
     return binaries
 
@@ -214,56 +237,50 @@ def _real_coverage(
     stages: list[Stage] = []
     engine = os.environ.get("JCHTOOLS_TEST_7ZIP") or str(root / "resources/7zip/7z.exe")
     if Path(engine).is_file():
-        stage = _real_test_stage(results, binaries, ("archive", "real-engine-tests"), {"JCHTOOLS_TEST_7ZIP": engine})
-        if stage is not None:
-            if Path(engine).resolve() == (root / "resources/7zip/7z.exe").resolve():
-                stage.exclusive_resource = "bundled-7zip"
-            stages.append(stage)
+        stage = _real_test_stage(binaries, ("archive", "real-engine-tests"), {"JCHTOOLS_TEST_7ZIP": engine})
+        if Path(engine).resolve() == (root / "resources/7zip/7z.exe").resolve():
+            stage.exclusive_resource = "bundled-7zip"
+        stages.append(stage)
     else:
-        results.append(Result("real-engine-tests", "UNVERIFIED", "缺少真实 7-Zip 引擎。"))
+        raise GateStoppedError([Result("real-engine-tests", "UNVERIFIED", "缺少真实 7-Zip 引擎。")])
     if any(result.name == "xberg-latest" and result.status == "PASS" for result in results):
         stage = _real_test_stage(
-            results,
             binaries,
             ("xberg_assets", "real-xberg-presence"),
             {"JCHTOOLS_REAL_XBERG_DIR": str(EXPECTED_TEST_ENGINE)},
         )
-        if stage is not None:
-            stages.append(stage)
+        stages.append(stage)
     else:
-        results.append(Result("real-xberg-presence", "UNVERIFIED", "最新真实 Xberg 前置未通过。"))
+        raise GateStoppedError([Result("real-xberg-presence", "UNVERIFIED", "最新真实 Xberg 前置未通过。")])
     media = _real_media_stage(run, results, binaries, root, ps_env)
-    if media is not None:
-        # 两个用例各自保存隔离状态目录；逐个 Job 收尾后才能启动下一套共享代理。
-        stages.extend(
-            Stage(
-                f"{media.name}-{case}",
-                [*media.argv, "--exact", case],
-                env=media.env,
-                exclusive_resource="shared-xberg-media",
-            )
-            for case in (
-                "real_component_trackless_media_reports_no_audio",
-                "real_component_transcribe_returns_structured_markdown",
-            )
+    # 两个用例各自保存隔离状态目录；逐个 Job 收尾后才能启动下一套共享代理。
+    stages.extend(
+        Stage(
+            f"{media.name}-{case}",
+            [*media.argv, "--exact", case],
+            env=media.env,
+            exclusive_resource="shared-xberg-media",
+            watch_test_failures=True,
         )
+        for case in (
+            "real_component_trackless_media_reports_no_audio",
+            "real_component_transcribe_returns_structured_markdown",
+        )
+    )
     return stages
 
 
 def _real_media_stage(
     run: GateRun, results: list[Result], binaries: list[Stage], root: Path, ps_env: dict[str, str] | None
-) -> Stage | None:
+) -> Stage:
     environment = _media_environment(run, results, root, ps_env)
     if environment is None:
         detail = "真实媒体组件、语音/无音轨合成输入及期望文本前置未齐；用例保留。"
-        results.append(Result("real-media-e2e", "UNVERIFIED", detail))
-        return None
+        raise GateStoppedError([Result("real-media-e2e", "UNVERIFIED", detail)])
     broker = os.environ.get("JCHTOOLS_TEST_BROKER_EXE") or (ps_env or {}).get("JCHTOOLS_TEST_GUI_EXE")
     if broker is None or not Path(broker).is_absolute() or not Path(broker).is_file():
-        results.append(Result("real-media-e2e", "UNVERIFIED", "真实媒体测试缺少本轮 JchTools 代理绝对 EXE。"))
-        return None
+        raise GateStoppedError([Result("real-media-e2e", "UNVERIFIED", "真实媒体测试缺少本轮 JchTools 代理绝对 EXE。")])
     return _real_test_stage(
-        results,
         binaries,
         ("markdown_media_e2e", "real-media-e2e"),
         environment | {"JCHTOOLS_TEST_BROKER_EXE": broker},
@@ -355,4 +372,6 @@ def run_full_coverage(run: GateRun, plan: list[Stage], results: list[Result], sn
         (Path(os.environ.get(key, "")) / "Inno Setup 6/ISCC.exe").is_file()
         for key in ("PROGRAMFILES", "PROGRAMFILES(X86)")
     ):
-        results.append(Result("installer-environment", "UNVERIFIED", "ISCC 不可用；便携 ZIP 不能代替安装包验证。"))
+        raise GateStoppedError(
+            [Result("installer-environment", "UNVERIFIED", "ISCC 不可用；便携 ZIP 不能代替安装包验证。")]
+        )

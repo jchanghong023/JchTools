@@ -46,6 +46,7 @@ class _Callbacks(TypedDict):
     compiler_ids: Callable[[subprocess.Popen[bytes]], frozenset[int]]
     clock: NotRequired[Callable[[], float]]
     observe_tree: NotRequired[Callable[[subprocess.Popen[bytes]], None]]
+    validate_result: NotRequired[Callable[[Result], Result]]
 
 
 @dataclasses.dataclass
@@ -56,6 +57,7 @@ class Stage:
     env: dict[str, str] | None = None
     phase_file: Path | None = None
     exclusive_resource: str | None = None
+    watch_test_failures: bool = False
 
 
 @dataclasses.dataclass
@@ -68,6 +70,14 @@ class Result:
     returncode: int | None = None
 
 
+class GateStoppedError(RuntimeError):
+    """阶段报错后的控制流出口；携带原始结果供统一清理与汇总。."""
+
+    def __init__(self, results: list[Result]) -> None:
+        super().__init__("阶段报错，已停止测试门")
+        self.results: list[Result] = results
+
+
 @dataclasses.dataclass
 class _Running:
     stage: Stage
@@ -75,6 +85,8 @@ class _Running:
     sink: IO[bytes]
     log: Path
     started: float
+    output_offset: int = 0
+    test_failure: str | None = None
 
 
 def _is_mapping(value: object) -> TypeIs[dict[str, object]]:
@@ -125,11 +137,13 @@ class GateRun:
         self._kill_tree = callbacks["kill_tree"]
         self._compiler_ids = callbacks["compiler_ids"]
         self._observe_tree = callbacks.get("observe_tree")
+        self._validate_result = callbacks.get("validate_result")
         self._active: list[_Running] = []
         self._observed: dict[int, frozenset[int]] = {}
         self._results: list[Result] = []
         self._timed_out = False
         self._interrupted = False
+        self._failure: str | None = None
         self._finished: int | None = None
         self._temporary: tempfile.TemporaryDirectory[str] | None = None
         self._sequence = 0
@@ -239,6 +253,8 @@ class GateRun:
         started = self._clock()
         try:
             self.log_dir.mkdir(parents=True, exist_ok=True)
+            if stage.watch_test_failures:
+                log.with_suffix(".test-results").unlink(missing_ok=True)
             sink = log.open("wb")
         except OSError as error:
             return Result(stage.name, STATUS_FAILED, f"无法创建阶段日志：{error}")
@@ -247,7 +263,12 @@ class GateRun:
             sink.close()
             return Result(stage.name, STATUS_TIMED_OUT, "实际启动前共享非编译预算已耗尽", log)
         try:
-            proc = self._start(stage, sink)
+            command = stage
+            if stage.watch_test_failures:
+                command = dataclasses.replace(
+                    stage, argv=[*stage.argv, "--logfile", str(log.with_suffix(".test-results"))]
+                )
+            proc = self._start(command, sink)
         except (OSError, ValueError, RuntimeError, subprocess.SubprocessError) as error:
             _ = sink.write(f"命令启动失败：{error}\n".encode("utf-8", errors="replace"))
             sink.close()
@@ -321,18 +342,63 @@ class GateRun:
             status = STATUS_TIMED_OUT if self._timed_out else STATUS_FAILED
         detail = "; ".join(part for part in (f"exit={code}", termination, cleanup) if part)
         if stopped:
-            reason = "共享非编译预算耗尽" if self._timed_out else "测试门被中断或终止"
+            reason = (
+                "共享非编译预算耗尽"
+                if self._timed_out
+                else (f"{self._failure} 报错，终止并行命令" if self._failure else "测试门被中断或终止")
+            )
             detail = f"{reason}; {detail}"
-        print(f"DONE {running.stage.name} status={status} {detail}", flush=True)
-        return Result(running.stage.name, status, detail, running.log, self._clock() - running.started, code)
+        if running.test_failure is not None:
+            detail = f"嵌套测试首次失败：{running.test_failure}; {detail}"
+        result = Result(running.stage.name, status, detail, running.log, self._clock() - running.started, code)
+        if self._validate_result is not None:
+            result = self._validate_result(result)
+        self._halt_on_error(result)
+        print(f"DONE {running.stage.name} status={result.status} {result.detail}", flush=True)
+        return result
+
+    def _halt_on_error(self, result: Result) -> None:
+        if result.status not in {STATUS_OK, "NOT_RUN_SEPARATE_USER_INSTRUCTION_REQUIRED"}:
+            if self._failure is None:
+                self._failure = result.name
+                print(f"STOP {result.name} status={result.status}：停止后续阶段并清理所属进程树", flush=True)
+            self._interrupted = True
+
+    def _observe_test_failure(self, running: _Running) -> None:
+        if not running.stage.watch_test_failures:
+            return
+        # stable libtest 的 fail-fast 开关仍需 nightly；只观察原生结果文件，不解析测试输出。
+        # failed <name> 与 nocapture、测试线程数、panic/预期失败夹具文案无关。
+        result_file = running.log.with_suffix(".test-results")
+        if not result_file.exists():
+            return
+        with result_file.open("rb") as source:
+            _ = source.seek(running.output_offset)
+            while line := source.readline():
+                if not line.endswith(b"\n") and running.process.poll() is None:
+                    break
+                running.output_offset = source.tell()
+                if line.startswith(b"failed "):
+                    name = line.removeprefix(b"failed ").decode("utf-8", errors="replace").strip()
+                    running.test_failure = f"test {name} ... FAILED"
+                    self._halt_on_error(Result(running.stage.name, STATUS_FAILED, running.test_failure, running.log))
+                    break
+                self._charge()
+                if self._expired():
+                    break
 
     def _collect_completed(self) -> list[Result]:
         results: list[Result] = []
         for running in tuple(self._active):
+            self._observe_test_failure(running)
+            if self._interrupted or self._timed_out:
+                break
             if running.process.poll() is not None:
                 deadline = self._clock() + min(self._reserve, max(0.0, self.limit - self.budgeted))
                 results.append(self._complete(running, stopped=False, deadline=deadline))
                 self._active.remove(running)
+                if self._interrupted:
+                    break
         return results
 
     def _stop_all(self) -> list[Result]:
@@ -356,11 +422,13 @@ class GateRun:
     def _schedule(self, pending: deque[Stage], results: list[Result], *, parallel: bool) -> None:
         while pending or self._active:
             self._sample()
+            results.extend(self._collect_completed())
             if self._interrupted or self._expired():
                 break
             while pending and (not self._active or (parallel and len(self._active) < _PARALLEL_COMMANDS)):
+                results.extend(self._collect_completed())
                 self._charge()
-                if self._expired():
+                if self._interrupted or self._expired():
                     break
                 stage = self._next_stage(pending)
                 if stage is None:
@@ -369,6 +437,7 @@ class GateRun:
                 self._charge()
                 if result is not None:
                     results.append(result)
+                    self._halt_on_error(result)
                 if self._interrupted or self._expired():
                     break
             results.extend(self._collect_completed())
@@ -379,7 +448,11 @@ class GateRun:
 
     def _unstarted(self, pending: deque[Stage]) -> list[Result]:
         status = STATUS_TIMED_OUT if self._timed_out else STATUS_UNVERIFIED
-        reason = "命令启动前共享预算已耗尽" if self._timed_out else "命令未执行"
+        reason = (
+            "命令启动前共享预算已耗尽"
+            if self._timed_out
+            else (f"前置阶段 {self._failure} 报错，命令未执行" if self._failure else "命令未执行")
+        )
         return [Result(stage.name, status, reason) for stage in pending]
 
     def run(self, stages: list[Stage], *, parallel: bool = True) -> list[Result]:
@@ -402,6 +475,8 @@ class GateRun:
             results.extend(self._stop_all())
             results.extend(self._unstarted(pending))
             self._results.extend(results)
+        if self._interrupted or self._timed_out:
+            raise GateStoppedError(results)
         return results
 
     def _status(self, results: list[Result]) -> str:

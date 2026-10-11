@@ -342,7 +342,7 @@
       "name": "tiles_map_to_global_and_seam_fragments_are_consolidated",
       "ignored": false,
       "cfg": null,
-      "body": "89b501a06ca311c0"
+      "body": "8da7bd33ff8bb269"
     },
     {
       "file": "optional/snap-ocr-core/src/pipeline.rs",
@@ -434,6 +434,13 @@
       "ignored": false,
       "cfg": "windows",
       "body": "65ed2d391031ac37"
+    },
+    {
+      "file": "optional/snap-ocr-worker/src/capture_win.rs",
+      "name": "cancellation_discards_an_already_recorded_selection",
+      "ignored": false,
+      "cfg": "windows",
+      "body": "256ef8a872e70a43"
     },
     {
       "file": "optional/snap-ocr-worker/src/capture_win.rs",
@@ -556,6 +563,13 @@
     },
     {
       "file": "optional/snap-ocr-worker/src/service.rs",
+      "name": "closed_result_is_released_but_hidden_old_result_is_retained",
+      "ignored": false,
+      "cfg": "windows",
+      "body": "92ccbfb56543053e"
+    },
+    {
+      "file": "optional/snap-ocr-worker/src/service.rs",
       "name": "communication_failure_downgrades_ready_model_and_reenables_retry",
       "ignored": false,
       "cfg": "windows",
@@ -580,7 +594,14 @@
       "name": "delayed_hotkey_failure_reports_and_keeps_old",
       "ignored": false,
       "cfg": "windows",
-      "body": "fa4921faeec47ac6"
+      "body": "a66c7eb336373ec6"
+    },
+    {
+      "file": "optional/snap-ocr-worker/src/service.rs",
+      "name": "explicit_disabled_save_repairs_corrupt_autostart",
+      "ignored": false,
+      "cfg": "windows",
+      "body": "f3ff270e89598f89"
     },
     {
       "file": "optional/snap-ocr-worker/src/service.rs",
@@ -601,7 +622,7 @@
       "name": "hotkey_receipt_final_timeout_self_heals_to_old",
       "ignored": false,
       "cfg": "windows",
-      "body": "4a6eeef9826a1efc"
+      "body": "c97fb31df8127a4d"
     },
     {
       "file": "optional/snap-ocr-worker/src/service.rs",
@@ -637,6 +658,13 @@
       "ignored": false,
       "cfg": "windows",
       "body": "6ff582bbb147a956"
+    },
+    {
+      "file": "optional/snap-ocr-worker/src/service.rs",
+      "name": "restore_timeout_keeps_receipt_context_until_terminal_result",
+      "ignored": false,
+      "cfg": "windows",
+      "body": "9bdda3a15747436b"
     },
     {
       "file": "optional/snap-ocr-worker/src/service.rs",
@@ -682,6 +710,13 @@
     },
     {
       "file": "optional/snap-ocr-worker/src/service/protocol.rs",
+      "name": "client_closed_before_accept_does_not_block_next_request",
+      "ignored": false,
+      "cfg": null,
+      "body": "181420e3115e4852"
+    },
+    {
+      "file": "optional/snap-ocr-worker/src/service/protocol.rs",
       "name": "isolated_background_pipe_matches_gui_endpoint",
       "ignored": false,
       "cfg": null,
@@ -692,7 +727,7 @@
       "name": "unfinished_client_does_not_block_next_control_request",
       "ignored": false,
       "cfg": null,
-      "body": "761448605ab60b31"
+      "body": "137b5130e482bf84"
     },
     {
       "file": "optional/snap-ocr-worker/src/service/tray.rs",
@@ -714,6 +749,13 @@
       "ignored": false,
       "cfg": null,
       "body": "9f38198f17c308af"
+    },
+    {
+      "file": "optional/snap-ocr-worker/src/shared_xberg.rs",
+      "name": "classifies_runtime_deadline_expiry_as_timeout",
+      "ignored": false,
+      "cfg": null,
+      "body": "8c32a6ac0752cb24"
     },
     {
       "file": "optional/snap-ocr-worker/src/shared_xberg.rs",
@@ -742,6 +784,13 @@
       "ignored": false,
       "cfg": null,
       "body": "3c689931a6286f11"
+    },
+    {
+      "file": "optional/snap-ocr-worker/src/shared_xberg.rs",
+      "name": "response_thread_exit_is_not_engine_process_exit",
+      "ignored": false,
+      "cfg": null,
+      "body": "71f5158835b9d895"
     },
     {
       "file": "src/acp_api/acp/callbacks.rs",
@@ -776,7 +825,7 @@
       "name": "completed_round_preserves_selector_and_valid_history",
       "ignored": false,
       "cfg": null,
-      "body": "910080164719753a"
+      "body": "8f36b7473e8ea838"
     },
     {
       "file": "src/acp_api/acp/mod.rs",
@@ -797,14 +846,21 @@
       "name": "model_discovery_uses_flat_and_grouped_select_values",
       "ignored": false,
       "cfg": null,
-      "body": "506541c6855b2bdc"
+      "body": "0b1f475acb8f8503"
+    },
+    {
+      "file": "src/acp_api/acp/mod.rs",
+      "name": "new_session_model_discovery_retains_negotiated_identity",
+      "ignored": false,
+      "cfg": null,
+      "body": "d20c4a882b7be896"
     },
     {
       "file": "src/acp_api/acp/mod.rs",
       "name": "pre_prompt_cancel_preserves_confirmed_selector_and_history",
       "ignored": false,
       "cfg": null,
-      "body": "533f31d688f7b447"
+      "body": "86a0ef4a7a1bb38b"
     },
     {
       "file": "src/acp_api/acp/mod.rs",
@@ -839,7 +895,7 @@
       "name": "unsupported_fields_roles_and_media_are_rejected",
       "ignored": false,
       "cfg": null,
-      "body": "95e7b26af5dd0f63"
+      "body": "4b1ed491e8f0c7dd"
     },
     {
       "file": "src/acp_api/http/mod.rs",
@@ -853,7 +909,7 @@
       "name": "local_http_logs_json_sse_failures_and_private_body_boundaries",
       "ignored": false,
       "cfg": null,
-      "body": "bee3b308796ab485"
+      "body": "1874edad7998f937"
     },
     {
       "file": "src/acp_api/http/mod.rs",
@@ -945,6 +1001,13 @@
       "ignored": false,
       "cfg": "all(test, windows)",
       "body": "b8a38fb96ebc6e49"
+    },
+    {
+      "file": "src/archive.rs",
+      "name": "decoded_duplicate_volume_families_preserve_partial_existing_set",
+      "ignored": false,
+      "cfg": null,
+      "body": "6e836311dd48bc2d"
     },
     {
       "file": "src/archive.rs",
@@ -1091,7 +1154,7 @@
       "name": "review_placement_common_long_family_stem",
       "ignored": false,
       "cfg": null,
-      "body": "047315e4cff58de6"
+      "body": "fc58eb8eed423c85"
     },
     {
       "file": "src/archive.rs",
@@ -1686,7 +1749,7 @@
       "name": "acp_superseded_completions_preserve_stop_pending_and_result",
       "ignored": false,
       "cfg": null,
-      "body": "ed86837c54fd5ec9"
+      "body": "d7c375a02a0d42c8"
     },
     {
       "file": "src/gui.rs",
@@ -1774,6 +1837,13 @@
     },
     {
       "file": "src/gui.rs",
+      "name": "convert_timeout_edits_validate_without_starting_task",
+      "ignored": false,
+      "cfg": null,
+      "body": "3afd89e74f34d5b9"
+    },
+    {
+      "file": "src/gui.rs",
       "name": "convert_timeout_overflow_rejected_before_busy",
       "ignored": false,
       "cfg": null,
@@ -1799,6 +1869,20 @@
       "ignored": false,
       "cfg": null,
       "body": "5cddbf740cd6075c"
+    },
+    {
+      "file": "src/gui.rs",
+      "name": "converter_progress_counts_skips_and_finished_files",
+      "ignored": false,
+      "cfg": null,
+      "body": "9679cb4cc7af06f4"
+    },
+    {
+      "file": "src/gui.rs",
+      "name": "converter_progress_includes_scan_failures_and_partial_results",
+      "ignored": false,
+      "cfg": null,
+      "body": "b1dd636c6ea0f052"
     },
     {
       "file": "src/gui.rs",
@@ -1848,6 +1932,13 @@
       "ignored": false,
       "cfg": null,
       "body": "936083772f7a21a4"
+    },
+    {
+      "file": "src/gui.rs",
+      "name": "empty_conversion_selection_invalidates_pending_readiness",
+      "ignored": false,
+      "cfg": null,
+      "body": "1abbf4d3c5e8b71e"
     },
     {
       "file": "src/gui.rs",
@@ -2225,7 +2316,7 @@
       "name": "snap_buttons_immediate_feedback_and_initialize_reentry_gating",
       "ignored": false,
       "cfg": null,
-      "body": "3c500709055e638b"
+      "body": "2ab3fabaf8708c3c"
     },
     {
       "file": "src/gui.rs",
@@ -2233,6 +2324,13 @@
       "ignored": false,
       "cfg": null,
       "body": "9fd2b3f1adc69686"
+    },
+    {
+      "file": "src/gui.rs",
+      "name": "snap_check_revalidates_already_ready_components",
+      "ignored": false,
+      "cfg": null,
+      "body": "36b991a22d38fa28"
     },
     {
       "file": "src/gui.rs",
@@ -2257,6 +2355,13 @@
     },
     {
       "file": "src/gui.rs",
+      "name": "snap_settings_save_only_commits_current_page_draft",
+      "ignored": false,
+      "cfg": null,
+      "body": "c9ae8d89df80fb43"
+    },
+    {
+      "file": "src/gui.rs",
       "name": "snap_shift_symbol_map_covers_every_pair",
       "ignored": false,
       "cfg": null,
@@ -2278,10 +2383,17 @@
     },
     {
       "file": "src/gui.rs",
+      "name": "startup_settings_results_do_not_replace_newer_selection",
+      "ignored": false,
+      "cfg": null,
+      "body": "504d6482981dccd7"
+    },
+    {
+      "file": "src/gui.rs",
       "name": "startup_settings_snapshot_keeps_running_initialization_state",
       "ignored": false,
       "cfg": null,
-      "body": "b32f489942f0ab51"
+      "body": "2f426978d4bbf284"
     },
     {
       "file": "src/gui.rs",
@@ -2355,6 +2467,13 @@
     },
     {
       "file": "src/logging.rs",
+      "name": "bounded_sink_rotates_before_overflow_and_limits_owned_history",
+      "ignored": false,
+      "cfg": null,
+      "body": "358062e771c7afd5"
+    },
+    {
+      "file": "src/logging.rs",
       "name": "conflicting_subscriber_is_not_reported_as_initialized",
       "ignored": false,
       "cfg": null,
@@ -2365,7 +2484,7 @@
       "name": "disk_records_are_single_line_correlated_and_redacted",
       "ignored": false,
       "cfg": null,
-      "body": "f847fcc6d87407e2"
+      "body": "5aaa773411a5234c"
     },
     {
       "file": "src/logging.rs",
@@ -2373,6 +2492,27 @@
       "ignored": false,
       "cfg": null,
       "body": "ae0a58967fc49b33"
+    },
+    {
+      "file": "src/logging.rs",
+      "name": "log_level_selection_accepts_supported_values_and_defaults",
+      "ignored": false,
+      "cfg": null,
+      "body": "ba401d2ef3a41148"
+    },
+    {
+      "file": "src/logging.rs",
+      "name": "oversized_existing_history_blocks_without_destructive_migration",
+      "ignored": false,
+      "cfg": null,
+      "body": "f8c0f904c128e7d4"
+    },
+    {
+      "file": "src/logging.rs",
+      "name": "oversized_record_preserves_identity_and_error_metadata",
+      "ignored": false,
+      "cfg": null,
+      "body": "8008f74c13e3c518"
     },
     {
       "file": "src/logging.rs",
@@ -2386,7 +2526,7 @@
       "name": "retention_preserves_non_logs_and_recent_records",
       "ignored": false,
       "cfg": null,
-      "body": "d5153cb0484f535d"
+      "body": "0aeed6e3395702f6"
     },
     {
       "file": "src/logging.rs",
@@ -2544,6 +2684,13 @@
     },
     {
       "file": "src/markdown.rs",
+      "name": "output_parent_link_fails_file_before_existing_result_check",
+      "ignored": false,
+      "cfg": null,
+      "body": "3e8abf6c6f33ff97"
+    },
+    {
+      "file": "src/markdown.rs",
       "name": "parse_formats_filters_rows_by_group",
       "ignored": false,
       "cfg": null,
@@ -2673,7 +2820,7 @@
       "name": "installed_runtime_is_verified_before_selection",
       "ignored": false,
       "cfg": null,
-      "body": "25a615de1e2cfe6e"
+      "body": "37f54028b9a37414"
     },
     {
       "file": "src/markdown_assets.rs",
@@ -2824,6 +2971,13 @@
     },
     {
       "file": "src/markdown_document.rs",
+      "name": "fence_and_code_delimiter_boundaries_preserve_literals",
+      "ignored": false,
+      "cfg": null,
+      "body": "03ed82b12c891272"
+    },
+    {
+      "file": "src/markdown_document.rs",
       "name": "fenced_reference_is_literal_but_real_reference_is_rewritten",
       "ignored": false,
       "cfg": null,
@@ -2831,10 +2985,24 @@
     },
     {
       "file": "src/markdown_document.rs",
+      "name": "image_byte_encoding_boundaries_are_explicit",
+      "ignored": false,
+      "cfg": null,
+      "body": "709ce4394a26abc0"
+    },
+    {
+      "file": "src/markdown_document.rs",
       "name": "invalid_images_field_warns",
       "ignored": false,
       "cfg": null,
       "body": "6ba06269a238dfac"
+    },
+    {
+      "file": "src/markdown_document.rs",
+      "name": "media_directory_ampersands_are_encoded",
+      "ignored": false,
+      "cfg": null,
+      "body": "af2e24afdec2700d"
     },
     {
       "file": "src/markdown_document.rs",
@@ -2856,6 +3024,13 @@
       "ignored": false,
       "cfg": null,
       "body": "96e07bbd4829fe5c"
+    },
+    {
+      "file": "src/markdown_document.rs",
+      "name": "unmatched_backticks_and_code_in_alt_do_not_hide_real_images",
+      "ignored": false,
+      "cfg": null,
+      "body": "a0ddaa6d71be695f"
     },
     {
       "file": "src/markdown_document.rs",
@@ -3440,6 +3615,13 @@
     },
     {
       "file": "src/snap_ocr_assets.rs",
+      "name": "initialize_cancellation_before_notice_install_preserves_existing_notice",
+      "ignored": false,
+      "cfg": null,
+      "body": "2ceb3fab30d9841e"
+    },
+    {
+      "file": "src/snap_ocr_assets.rs",
       "name": "initialize_cleans_stale_expected_tag_residue_at_entry",
       "ignored": false,
       "cfg": null,
@@ -3503,6 +3685,13 @@
     },
     {
       "file": "src/snap_ocr_assets.rs",
+      "name": "proxy_authentication_failure_allows_direct_fallback",
+      "ignored": false,
+      "cfg": null,
+      "body": "27b9579d3f64ba06"
+    },
+    {
+      "file": "src/snap_ocr_assets.rs",
       "name": "readiness_inference_pack_honors_configured_component_dir",
       "ignored": false,
       "cfg": null,
@@ -3527,14 +3716,14 @@
       "name": "worker_install_path_rejects_unverified_cached_worker",
       "ignored": false,
       "cfg": null,
-      "body": "3e410bea4ddfb795"
+      "body": "5d26d289775f1cb5"
     },
     {
       "file": "src/snap_ocr_assets.rs",
       "name": "worker_readiness_rejects_corrupted_bundled_worker",
       "ignored": false,
       "cfg": null,
-      "body": "70d204165f5c3aca"
+      "body": "48d6e94c861f0588"
     },
     {
       "file": "src/snap_ocr_assets.rs",
@@ -3629,6 +3818,13 @@
     },
     {
       "file": "src/xberg_runtime.rs",
+      "name": "scene_capabilities_require_compiled_backends",
+      "ignored": false,
+      "cfg": null,
+      "body": "8a74a8b4bf81fec1"
+    },
+    {
+      "file": "src/xberg_runtime.rs",
       "name": "snapshot_requires_shared_paddleocr_license",
       "ignored": false,
       "cfg": null,
@@ -3643,10 +3839,24 @@
     },
     {
       "file": "src/xberg_runtime_windows.rs",
+      "name": "acknowledged_request_preserves_completion_and_engine_failure",
+      "ignored": false,
+      "cfg": null,
+      "body": "18b342a3ff804885"
+    },
+    {
+      "file": "src/xberg_runtime_windows.rs",
       "name": "background_stop_marker_is_not_written_for_rejected_response",
       "ignored": false,
       "cfg": null,
       "body": "bed5e360ea2d9550"
+    },
+    {
+      "file": "src/xberg_runtime_windows.rs",
+      "name": "background_stop_waits_for_client_to_consume_confirmation",
+      "ignored": false,
+      "cfg": null,
+      "body": "f5529a53083e747c"
     },
     {
       "file": "src/xberg_runtime_windows.rs",
@@ -3657,10 +3867,17 @@
     },
     {
       "file": "src/xberg_runtime_windows.rs",
+      "name": "cancellation_waits_for_original_submission_before_terminal",
+      "ignored": false,
+      "cfg": null,
+      "body": "b7b02a097f02939a"
+    },
+    {
+      "file": "src/xberg_runtime_windows.rs",
       "name": "consumed_response_logs_safe_results_and_decode_failure_stage",
       "ignored": false,
       "cfg": null,
-      "body": "61e7129675b468c0"
+      "body": "3a5d3ce47070abf3"
     },
     {
       "file": "src/xberg_runtime_windows.rs",
@@ -3668,6 +3885,13 @@
       "ignored": false,
       "cfg": null,
       "body": "c5089a2736e5f719"
+    },
+    {
+      "file": "src/xberg_runtime_windows.rs",
+      "name": "failed_or_unowned_submission_never_enables_cancellation",
+      "ignored": false,
+      "cfg": null,
+      "body": "88d0089cca881810"
     },
     {
       "file": "src/xberg_runtime_windows.rs",
@@ -3682,6 +3906,13 @@
       "ignored": false,
       "cfg": null,
       "body": "aba81bd1ebee7875"
+    },
+    {
+      "file": "src/xberg_runtime_windows.rs",
+      "name": "query_and_control_exchanges_do_not_require_submission_acknowledgement",
+      "ignored": false,
+      "cfg": null,
+      "body": "bddfd691ad65cfdf"
     },
     {
       "file": "src/xberg_runtime_windows.rs",
@@ -3703,6 +3934,20 @@
       "ignored": false,
       "cfg": null,
       "body": "8d87c2beb6ec6a03"
+    },
+    {
+      "file": "src/xberg_runtime_windows.rs",
+      "name": "submission_confirmation_requires_one_matching_terminal",
+      "ignored": false,
+      "cfg": null,
+      "body": "7610de03b758d8b6"
+    },
+    {
+      "file": "src/xberg_runtime_windows.rs",
+      "name": "timeout_cancel_terminal_retains_actual_reason",
+      "ignored": false,
+      "cfg": null,
+      "body": "69a7fa6c4c724dbb"
     },
     {
       "file": "src/xberg_settings.rs",
@@ -3765,7 +4010,7 @@
       "name": "terminal_kill_reaps_child_without_terminating_agent",
       "ignored": false,
       "cfg": null,
-      "body": "54e931f2a69bd1c6"
+      "body": "81e8cef2ad552eda"
     },
     {
       "file": "tests/acp_callbacks.rs",
@@ -3835,7 +4080,7 @@
       "name": "owned_agent_disables_discovery_without_mutating_parent_or_config",
       "ignored": false,
       "cfg": "all(windows, feature = \"gui\", feature = \"test-hooks\")",
-      "body": "f12a5650e50d787a"
+      "body": "a941a1bc4f698aec"
     },
     {
       "file": "tests/acp_http_contract.rs",
@@ -3877,7 +4122,7 @@
       "name": "explicit_history_reuses_session_and_rejects_changed_prefix",
       "ignored": false,
       "cfg": null,
-      "body": "cb9ee36dccfa47c0"
+      "body": "6160f05ec9d5a8c4"
     },
     {
       "file": "tests/acp_http_contract.rs",
@@ -3961,7 +4206,7 @@
       "name": "same_session_turns_wait_in_fifo_order_without_implicit_cancel",
       "ignored": false,
       "cfg": null,
-      "body": "e365d80ead5c54bd"
+      "body": "ae127c7a0956316e"
     },
     {
       "file": "tests/acp_http_contract.rs",
@@ -3989,7 +4234,7 @@
       "name": "text_roles_are_preserved_and_unsupported_inputs_are_rejected",
       "ignored": false,
       "cfg": null,
-      "body": "9fb740cd10d970c3"
+      "body": "af929312097df4c8"
     },
     {
       "file": "tests/acp_http_contract.rs",
@@ -4003,7 +4248,7 @@
       "name": "live_pipeline_preserves_every_request_without_cancelling",
       "ignored": false,
       "cfg": null,
-      "body": "fc5d896a2e7d17bc"
+      "body": "263d4d88a61abdf9"
     },
     {
       "file": "tests/acp_http_disconnect.rs",
@@ -4059,7 +4304,7 @@
       "name": "initialize_failure_reclaims_agent_that_does_not_exit_on_eof",
       "ignored": false,
       "cfg": null,
-      "body": "0237dcdc8ead9657"
+      "body": "868fe70c4bb20856"
     },
     {
       "file": "tests/acp_service_process.rs",
@@ -4101,14 +4346,14 @@
       "name": "real_gui_pending_configuration_applies_only_after_inflight_completion",
       "ignored": false,
       "cfg": null,
-      "body": "7d460b7330f449fa"
+      "body": "de61aad613d2dcc9"
     },
     {
       "file": "tests/acp_service_process.rs",
       "name": "real_gui_save_close_kill_reopen_and_confirmed_service_exit",
       "ignored": false,
       "cfg": null,
-      "body": "a46d28f62b051ac7"
+      "body": "b86364deb37cdd7e"
     },
     {
       "file": "tests/acp_service_process.rs",
@@ -4241,7 +4486,7 @@
       "name": "windows_arguments_round_trip_without_space_splitting",
       "ignored": false,
       "cfg": null,
-      "body": "d3323284344ca192"
+      "body": "c18cd29251d2db32"
     },
     {
       "file": "tests/acp_settings.rs",
@@ -4270,6 +4515,13 @@
       "ignored": true,
       "cfg": null,
       "body": "ac4f431678bdb76c"
+    },
+    {
+      "file": "tests/archive.rs",
+      "name": "duplicate_members_preserve_literal_engine_style_names_and_existing_files",
+      "ignored": true,
+      "cfg": null,
+      "body": "75ab047d6b14f7fc"
     },
     {
       "file": "tests/archive.rs",
@@ -4304,7 +4556,7 @@
       "name": "equal_content_archives_extract_both_and_classify_is_stable",
       "ignored": true,
       "cfg": null,
-      "body": "82c23f253384391d"
+      "body": "2e0cb5094f16a0d9"
     },
     {
       "file": "tests/archive.rs",
@@ -4318,14 +4570,14 @@
       "name": "gbk_filename_zip_extracts_without_data_loss",
       "ignored": true,
       "cfg": null,
-      "body": "7de61c26715d4473"
+      "body": "a14f0005418aea69"
     },
     {
       "file": "tests/archive.rs",
       "name": "git_subtree_members_are_skipped_as_a_whole",
       "ignored": true,
       "cfg": null,
-      "body": "c2040b153c241d39"
+      "body": "93d71ad4f8e67fdb"
     },
     {
       "file": "tests/archive.rs",
@@ -4402,7 +4654,14 @@
       "name": "non_whitelisted_containers_stay_untouched_beside_a_real_archive",
       "ignored": true,
       "cfg": null,
-      "body": "ec51a2e3d419eda8"
+      "body": "46bc5d0488891f94"
+    },
+    {
+      "file": "tests/archive.rs",
+      "name": "old_link_prefix_members_are_extracted_without_touching_existing_files",
+      "ignored": true,
+      "cfg": null,
+      "body": "d2a6acc81908743b"
     },
     {
       "file": "tests/archive.rs",
@@ -4423,7 +4682,7 @@
       "name": "real_engine_standalone_zip_deletes_source_and_keeps_stale_z_sibling",
       "ignored": true,
       "cfg": null,
-      "body": "064c91cf612b7bbb"
+      "body": "90ed8ff6acd3f17e"
     },
     {
       "file": "tests/archive.rs",
@@ -4465,7 +4724,7 @@
       "name": "successful_cleanup_preserves_unused_volume_named_siblings",
       "ignored": true,
       "cfg": null,
-      "body": "b6a44b9b67670263"
+      "body": "9799d6bfca1ae5aa"
     },
     {
       "file": "tests/archive.rs",
@@ -4479,7 +4738,7 @@
       "name": "successful_cleanup_uses_rar_header_volume_naming",
       "ignored": true,
       "cfg": null,
-      "body": "3b2c7c45ff6c5988"
+      "body": "354a951016795e20"
     },
     {
       "file": "tests/archive.rs",
@@ -4507,7 +4766,7 @@
       "name": "zip_with_duplicate_entries_extracts_both_via_auto_rename",
       "ignored": true,
       "cfg": null,
-      "body": "a4f96c95140a5ce8"
+      "body": "1d308ffe92862477"
     },
     {
       "file": "tests/archive.rs",
@@ -4528,7 +4787,7 @@
       "name": "broker_survives_client_exit_and_obeys_explicit_stop",
       "ignored": false,
       "cfg": null,
-      "body": "42b4836311f811d1"
+      "body": "0934765c2bbb9d3a"
     },
     {
       "file": "tests/classify_shape.rs",
@@ -4542,7 +4801,7 @@
       "name": "git_collection_blocked_by_file_keeps_projects",
       "ignored": false,
       "cfg": null,
-      "body": "9009cf1d187e7b11"
+      "body": "76a0a0d7ae38054e"
     },
     {
       "file": "tests/classify_shape.rs",
@@ -4591,7 +4850,7 @@
       "name": "occupied_category_container_keeps_source_items",
       "ignored": false,
       "cfg": null,
-      "body": "da9ab902490987d6"
+      "body": "c66b2784591e5664"
     },
     {
       "file": "tests/classify_shape.rs",
@@ -4619,7 +4878,7 @@
       "name": "reorganized_files_stay_in_place_without_moves",
       "ignored": false,
       "cfg": null,
-      "body": "48fa21b0c073f0e8"
+      "body": "c36b8e17d0a90838"
     },
     {
       "file": "tests/classify_shape.rs",
@@ -4640,7 +4899,7 @@
       "name": "broken_hash_cache_degrades_without_failing",
       "ignored": false,
       "cfg": null,
-      "body": "aa7322589cb18f7c"
+      "body": "479c86e316b1198c"
     },
     {
       "file": "tests/contract_engine.rs",
@@ -4654,21 +4913,14 @@
       "name": "child_git_tree_excluded_and_ancestors_untouched",
       "ignored": false,
       "cfg": null,
-      "body": "3b5ef97303a57dd1"
-    },
-    {
-      "file": "tests/contract_engine.rs",
-      "name": "classify_into_freed_category_name_after_git_collection_move",
-      "ignored": false,
-      "cfg": null,
-      "body": "e40c032903071d05"
+      "body": "27fe18efb1d95b9a"
     },
     {
       "file": "tests/contract_engine.rs",
       "name": "classify_refuses_target_dir_occupied_by_git_project",
       "ignored": false,
       "cfg": null,
-      "body": "3728877885e396a4"
+      "body": "a6acb261aa624083"
     },
     {
       "file": "tests/contract_engine.rs",
@@ -4703,7 +4955,7 @@
       "name": "extract_quarantines_missing_first_part_rar_group",
       "ignored": false,
       "cfg": null,
-      "body": "9337c765022d743b"
+      "body": "e98b36b2af659b83"
     },
     {
       "file": "tests/contract_engine.rs",
@@ -4725,6 +4977,13 @@
       "ignored": false,
       "cfg": null,
       "body": "c09190e36c70a75b"
+    },
+    {
+      "file": "tests/contract_engine.rs",
+      "name": "fixed_category_git_occupant_is_preserved_while_other_projects_are_collected",
+      "ignored": false,
+      "cfg": null,
+      "body": "cf18fd0679ef3e91"
     },
     {
       "file": "tests/contract_engine.rs",
@@ -4829,7 +5088,7 @@
       "name": "analysis_phase_keeps_stale_link_temps_until_execution",
       "ignored": false,
       "cfg": null,
-      "body": "d921dd4744995588"
+      "body": "b1f65a113d388999"
     },
     {
       "file": "tests/core.rs",
@@ -4885,7 +5144,7 @@
       "name": "cancel_while_paused_makes_checkpoint_fail",
       "ignored": false,
       "cfg": null,
-      "body": "b2c1e48051745027"
+      "body": "2c48816b60c42bb0"
     },
     {
       "file": "tests/core.rs",
@@ -4896,10 +5155,10 @@
     },
     {
       "file": "tests/core.rs",
-      "name": "cancelling_git_move_cancels_moves_into_retained_git_tree",
+      "name": "cancelling_git_move_cancels_cleanup_of_retained_git_tree_ancestors",
       "ignored": false,
       "cfg": null,
-      "body": "e90b8585ad0e7013"
+      "body": "73062b7b1fb235d0"
     },
     {
       "file": "tests/core.rs",
@@ -4920,7 +5179,7 @@
       "name": "classification_target_never_enters_git_tree",
       "ignored": false,
       "cfg": null,
-      "body": "2031040b5de6fcfb"
+      "body": "57cb9476920e4d57"
     },
     {
       "file": "tests/core.rs",
@@ -4952,6 +5211,13 @@
     },
     {
       "file": "tests/core.rs",
+      "name": "component_validation_preserves_legal_unicode_whitespace",
+      "ignored": false,
+      "cfg": null,
+      "body": "acbe99344e29dd54"
+    },
+    {
+      "file": "tests/core.rs",
       "name": "config_has_no_version_elimination_switches",
       "ignored": false,
       "cfg": null,
@@ -4962,7 +5228,7 @@
       "name": "copy_name_cleanup_never_plans_self_move",
       "ignored": false,
       "cfg": null,
-      "body": "caaf896a9f43ec95"
+      "body": "d13117e8bb63d3e3"
     },
     {
       "file": "tests/core.rs",
@@ -4976,7 +5242,7 @@
       "name": "copy_names_can_be_disabled_independently",
       "ignored": false,
       "cfg": null,
-      "body": "468f17c2b9c26507"
+      "body": "10a563077f185763"
     },
     {
       "file": "tests/core.rs",
@@ -5081,14 +5347,14 @@
       "name": "excluded_tree_is_not_cleaned_as_empty",
       "ignored": false,
       "cfg": null,
-      "body": "740bac4a31e31d71"
+      "body": "2285cdea4640b5fa"
     },
     {
       "file": "tests/core.rs",
       "name": "excluded_tree_not_touched",
       "ignored": false,
       "cfg": null,
-      "body": "9f85aef3bdb8f8c2"
+      "body": "722cc64a75b34416"
     },
     {
       "file": "tests/core.rs",
@@ -5158,7 +5424,7 @@
       "name": "git_tree_ancestors_survive_empty_directory_cleanup",
       "ignored": false,
       "cfg": null,
-      "body": "60b0ece5ca75d9c9"
+      "body": "ff7f5ab0c7efbbcc"
     },
     {
       "file": "tests/core.rs",
@@ -5263,7 +5529,7 @@
       "name": "multi_hit_cleanup_any_permanent_rule_deletes",
       "ignored": false,
       "cfg": null,
-      "body": "2475ab47e89f1821"
+      "body": "20883e09c8a30e9d"
     },
     {
       "file": "tests/core.rs",
@@ -5302,6 +5568,13 @@
     },
     {
       "file": "tests/core.rs",
+      "name": "nonrecursive_cleanup_keeps_old_directories_and_removes_only_created_targets",
+      "ignored": false,
+      "cfg": "windows",
+      "body": "b217210e1c8cf10c"
+    },
+    {
+      "file": "tests/core.rs",
       "name": "normalize_names_collapses_whitespace_and_applies_nfc",
       "ignored": false,
       "cfg": null,
@@ -5312,7 +5585,7 @@
       "name": "normalize_root_rejects_protected_locations",
       "ignored": false,
       "cfg": "windows",
-      "body": "bdabad494bc809db"
+      "body": "5b1ffc4883fbd1bc"
     },
     {
       "file": "tests/core.rs",
@@ -5333,7 +5606,7 @@
       "name": "pause_defers_checkpoint_until_resume",
       "ignored": false,
       "cfg": null,
-      "body": "2e86d34b51ca8be3"
+      "body": "83f0129571d47ad6"
     },
     {
       "file": "tests/core.rs",
@@ -5368,7 +5641,7 @@
       "name": "prepare_writes_no_standalone_settings_file",
       "ignored": false,
       "cfg": null,
-      "body": "e55046791837f587"
+      "body": "eccb7f857ae200e1"
     },
     {
       "file": "tests/core.rs",
@@ -5382,7 +5655,7 @@
       "name": "recursion_disabled_never_plans_empty_subdirectories",
       "ignored": false,
       "cfg": null,
-      "body": "1ded4ffcf01d8a0b"
+      "body": "f8072edb5ae20dbb"
     },
     {
       "file": "tests/core.rs",
@@ -5452,7 +5725,7 @@
       "name": "same_names_different_directories_can_be_disabled",
       "ignored": false,
       "cfg": null,
-      "body": "f37ad129c90e1ba0"
+      "body": "5f4509025e482921"
     },
     {
       "file": "tests/core.rs",
@@ -5466,7 +5739,7 @@
       "name": "set_selected_fails_once_apply_started",
       "ignored": false,
       "cfg": null,
-      "body": "433d3cc4b48ee03b"
+      "body": "42359a0beacefc79"
     },
     {
       "file": "tests/core.rs",
@@ -5480,7 +5753,7 @@
       "name": "stale_hardlink_temps_are_swept",
       "ignored": false,
       "cfg": null,
-      "body": "2323895608ac9fbd"
+      "body": "cef32b50e18045e5"
     },
     {
       "file": "tests/core.rs",
@@ -5502,13 +5775,6 @@
       "ignored": false,
       "cfg": null,
       "body": "66eeb5bea6ff6aed"
-    },
-    {
-      "file": "tests/core.rs",
-      "name": "trailing_unicode_whitespace_rejected",
-      "ignored": false,
-      "cfg": null,
-      "body": "04402617fddd01e0"
     },
     {
       "file": "tests/core.rs",
@@ -5543,7 +5809,7 @@
       "name": "unselecting_action_preserves_file",
       "ignored": false,
       "cfg": null,
-      "body": "ebde7d9e01cc5e75"
+      "body": "09b39ae31d50fc25"
     },
     {
       "file": "tests/core.rs",
@@ -5571,7 +5837,7 @@
       "name": "user_file_with_link_temp_prefix_is_never_swept",
       "ignored": false,
       "cfg": null,
-      "body": "31cb1daa8a977c8b"
+      "body": "eda9fbfde0f76c30"
     },
     {
       "file": "tests/core.rs",
@@ -5599,14 +5865,14 @@
       "name": "copy_name_bridge_forms_one_candidate_component",
       "ignored": false,
       "cfg": null,
-      "body": "b45347eddfcfac22"
+      "body": "cc532a10bd24e1bf"
     },
     {
       "file": "tests/dedup_graph.rs",
       "name": "shortest_name_uses_original_utf16_length_after_case_fold",
       "ignored": false,
       "cfg": null,
-      "body": "c02685cdeb58c535"
+      "body": "03598b1c66ead783"
     },
     {
       "file": "tests/engine_cleanup_filter.rs",
@@ -5627,14 +5893,14 @@
       "name": "cleanup_keeps_user_owned_xberg_image_alive",
       "ignored": false,
       "cfg": null,
-      "body": "99bd6e31cfaa6664"
+      "body": "db703dc8ef319243"
     },
     {
       "file": "tests/engine_cleanup_filter.rs",
       "name": "cleanup_still_kills_test_owned_xberg_image",
       "ignored": false,
       "cfg": null,
-      "body": "2f245ef6c8d74560"
+      "body": "916c8c076dd14590"
     },
     {
       "file": "tests/engine_cleanup_filter.rs",
@@ -5683,21 +5949,21 @@
       "name": "conflict_resolved_resume_pushes_and_does_not_recommit",
       "ignored": false,
       "cfg": null,
-      "body": "dcc65ab7ee665ceb"
+      "body": "837c166b299050d8"
     },
     {
       "file": "tests/git_tools.rs",
       "name": "conflict_resume_accepts_rewritten_rename_resolution",
       "ignored": false,
       "cfg": null,
-      "body": "ca6b05a7f295226c"
+      "body": "3feff72827708e35"
     },
     {
       "file": "tests/git_tools.rs",
       "name": "conflict_resume_refuses_extra_staged_files",
       "ignored": false,
       "cfg": null,
-      "body": "9947e0fae30568ff"
+      "body": "5c3b0d0070f505b5"
     },
     {
       "file": "tests/git_tools.rs",
@@ -5718,7 +5984,7 @@
       "name": "local_upstream_dot_remote_fetches_merges_and_pushes",
       "ignored": false,
       "cfg": null,
-      "body": "368ef612c3e811cb"
+      "body": "65d11225000859f4"
     },
     {
       "file": "tests/git_tools.rs",
@@ -5760,7 +6026,7 @@
       "name": "modified_deleted_and_renamed_changes",
       "ignored": false,
       "cfg": null,
-      "body": "145e38af6cd132bb"
+      "body": "a48f32c7208ec8f2"
     },
     {
       "file": "tests/git_tools.rs",
@@ -5781,7 +6047,7 @@
       "name": "non_origin_upstream_fetches_from_configured_remote",
       "ignored": false,
       "cfg": null,
-      "body": "a34e3853d1074018"
+      "body": "69a3f730e36860fe"
     },
     {
       "file": "tests/git_tools.rs",
@@ -5816,7 +6082,7 @@
       "name": "preexisting_staged_content_is_protected",
       "ignored": false,
       "cfg": null,
-      "body": "99786e6d15f6032f"
+      "body": "4b827b65e84c3ce5"
     },
     {
       "file": "tests/git_tools.rs",
@@ -5830,7 +6096,7 @@
       "name": "push_default_current_with_matching_upstream_name_proceeds",
       "ignored": false,
       "cfg": null,
-      "body": "d08d61ea01dafabb"
+      "body": "a573f7fbef59eca9"
     },
     {
       "file": "tests/git_tools.rs",
@@ -5865,7 +6131,7 @@
       "name": "push_instead_of_rewrite_refuses_to_start",
       "ignored": false,
       "cfg": null,
-      "body": "6db34fd384246416"
+      "body": "c0ca39f6f3eb9828"
     },
     {
       "file": "tests/git_tools.rs",
@@ -5886,7 +6152,7 @@
       "name": "real_output_captured_for_success_and_failure_paths",
       "ignored": false,
       "cfg": null,
-      "body": "c881991c6343d18f"
+      "body": "581aed7bb4f9f178"
     },
     {
       "file": "tests/git_tools.rs",
@@ -5907,7 +6173,7 @@
       "name": "remote_ahead_triggers_fetch_merge_then_push",
       "ignored": false,
       "cfg": null,
-      "body": "aa62b917e98bcf75"
+      "body": "4770b32a7f34f9c0"
     },
     {
       "file": "tests/git_tools.rs",
@@ -5949,7 +6215,7 @@
       "name": "slashed_branch_upstream_fetches_merges_and_pushes",
       "ignored": false,
       "cfg": null,
-      "body": "d0d952e14bcfd1a7"
+      "body": "1fcc410da55287e4"
     },
     {
       "file": "tests/git_tools.rs",
@@ -5970,7 +6236,7 @@
       "name": "stop_after_merge_does_not_push_again_and_stage_is_merge",
       "ignored": false,
       "cfg": null,
-      "body": "f5fbe8c4fc75049f"
+      "body": "89fa33fee2b042e3"
     },
     {
       "file": "tests/git_tools.rs",
@@ -6019,14 +6285,14 @@
       "name": "git_subtree_skip_is_visible_after_run_and_tree_untouched",
       "ignored": false,
       "cfg": "feature = \"gui\"",
-      "body": "f6692779316d03f4"
+      "body": "e7011117f924b44b"
     },
     {
       "file": "tests/gui_flow.rs",
       "name": "plan_execution_confirmation_flow_runs_end_to_end",
       "ignored": false,
       "cfg": "feature = \"gui\"",
-      "body": "48bf76c996620d82"
+      "body": "97791d171621df42"
     },
     {
       "file": "tests/gui_flow.rs",
@@ -6061,49 +6327,63 @@
       "name": "batch_uses_selected_engine_formats",
       "ignored": false,
       "cfg": null,
-      "body": "936a99a17e3a46f4"
+      "body": "c79dd85ea148c19e"
     },
     {
       "file": "tests/markdown_convert_gate.rs",
       "name": "media_commit_refuses_existing_image_without_deleting_it",
       "ignored": false,
       "cfg": null,
-      "body": "49ce21ffde853121"
+      "body": "1792a56c8c78d1fe"
     },
     {
       "file": "tests/markdown_convert_gate.rs",
       "name": "media_directories_are_unique_after_name_sanitization",
       "ignored": false,
       "cfg": null,
-      "body": "62d7379deb7d9de9"
+      "body": "0be3e28097b7dba2"
     },
     {
       "file": "tests/markdown_convert_gate.rs",
       "name": "media_directory_occupancy_uses_target_parent",
       "ignored": false,
       "cfg": null,
-      "body": "8e735b74db7e972a"
+      "body": "5d973cf93b8b6d0e"
     },
     {
       "file": "tests/markdown_convert_gate.rs",
       "name": "scan_honors_cancellation_before_traversal",
       "ignored": false,
       "cfg": null,
-      "body": "6ad4d7363124c588"
+      "body": "fbf0a1878f82d6ed"
+    },
+    {
+      "file": "tests/markdown_media_e2e.rs",
+      "name": "media_speech_predicate_rejects_metadata_and_invalid_segments",
+      "ignored": false,
+      "cfg": null,
+      "body": "027966ecb1f31764"
+    },
+    {
+      "file": "tests/markdown_media_e2e.rs",
+      "name": "media_trackless_predicate_distinguishes_silence",
+      "ignored": false,
+      "cfg": null,
+      "body": "cf0c31420bfc85c2"
     },
     {
       "file": "tests/markdown_media_e2e.rs",
       "name": "real_component_trackless_media_reports_no_audio",
       "ignored": true,
       "cfg": null,
-      "body": "75322988c1de5120"
+      "body": "1cc0531e3d9b6c8e"
     },
     {
       "file": "tests/markdown_media_e2e.rs",
       "name": "real_component_transcribe_returns_structured_markdown",
       "ignored": true,
       "cfg": null,
-      "body": "b61bdb59225e0c29"
+      "body": "be6f1750c1908474"
     },
     {
       "file": "tests/md_tools.rs",
@@ -6152,14 +6432,14 @@
       "name": "merge_handles_large_file_streaming",
       "ignored": false,
       "cfg": null,
-      "body": "80ed5ee4a4e021e8"
+      "body": "8ffc4842bcbffac7"
     },
     {
       "file": "tests/md_tools.rs",
       "name": "merge_keeps_sources_untouched_and_separates_files",
       "ignored": false,
       "cfg": null,
-      "body": "1c1f9b6d9d318e4e"
+      "body": "48a9d1036615c6fd"
     },
     {
       "file": "tests/md_tools.rs",
@@ -6229,21 +6509,21 @@
       "name": "split_detects_conflicts_and_refuses_without_confirmation",
       "ignored": false,
       "cfg": null,
-      "body": "c612658d53128c06"
+      "body": "6159f37448a77b2a"
     },
     {
       "file": "tests/md_tools.rs",
       "name": "split_keeps_source_untouched",
       "ignored": false,
       "cfg": null,
-      "body": "14071cfc4639e5b8"
+      "body": "f6a0b04b4eaf6ddd"
     },
     {
       "file": "tests/md_tools.rs",
       "name": "split_many_parts_on_disk_sorted_correctly",
       "ignored": false,
       "cfg": null,
-      "body": "bebe75176fa1cbcc"
+      "body": "6c1d41cb3f6bb0b1"
     },
     {
       "file": "tests/md_tools.rs",
@@ -6257,35 +6537,35 @@
       "name": "split_never_breaks_multibyte_and_rejoins_losslessly",
       "ignored": false,
       "cfg": null,
-      "body": "c338e637de14565a"
+      "body": "2263bd383b422f8c"
     },
     {
       "file": "tests/md_tools.rs",
       "name": "split_respects_kb_and_mb_limits",
       "ignored": false,
       "cfg": null,
-      "body": "825eb9fd229c22ff"
+      "body": "1e72b75f602a994a"
     },
     {
       "file": "tests/md_tools.rs",
       "name": "split_tiny_limit_ascii_ok_and_too_small_errors",
       "ignored": false,
       "cfg": null,
-      "body": "217e6a6a82d2775f"
+      "body": "5c4c5c383cc91284"
     },
     {
       "file": "tests/organizer_fs_boundaries.rs",
       "name": "f01_count_archives_rejects_root_junction",
       "ignored": false,
       "cfg": null,
-      "body": "23cee5de5493b888"
+      "body": "a8a65ed4dbac0c0d"
     },
     {
       "file": "tests/organizer_fs_boundaries.rs",
       "name": "f01_extract_run_rejects_root_junction",
       "ignored": false,
       "cfg": null,
-      "body": "f88fc50ccdeadf97"
+      "body": "2064158adebef863"
     },
     {
       "file": "tests/organizer_fs_boundaries.rs",
@@ -6299,28 +6579,28 @@
       "name": "f01_prepare_rejects_ancestor_junction",
       "ignored": false,
       "cfg": null,
-      "body": "fcd0adf22ba44a0d"
+      "body": "be81008fd75cc0a2"
+    },
+    {
+      "file": "tests/organizer_fs_boundaries.rs",
+      "name": "f01_prepare_rejects_other_reparse_root",
+      "ignored": false,
+      "cfg": null,
+      "body": "f28954326cdb01ac"
     },
     {
       "file": "tests/organizer_fs_boundaries.rs",
       "name": "f01_prepare_rejects_root_junction",
       "ignored": false,
       "cfg": null,
-      "body": "311cd64c4b16081b"
-    },
-    {
-      "file": "tests/organizer_fs_boundaries.rs",
-      "name": "f01_prepare_rejects_root_symlink",
-      "ignored": false,
-      "cfg": null,
-      "body": "356f36eb61f2ba39"
+      "body": "704f806a24e58e8f"
     },
     {
       "file": "tests/organizer_fs_boundaries.rs",
       "name": "f02_analysis_logs_residue_notice_before_confirmation",
       "ignored": false,
       "cfg": null,
-      "body": "02803a02f15d37cb"
+      "body": "aa3177b7659c4409"
     },
     {
       "file": "tests/organizer_fs_boundaries.rs",
@@ -6355,28 +6635,28 @@
       "name": "f02_removes_registered_stale_residue_within_scope",
       "ignored": false,
       "cfg": null,
-      "body": "7108901dfb57d735"
+      "body": "f94d12fa20a2cd6d"
     },
     {
       "file": "tests/perf_probe.rs",
       "name": "organizer_dedup_probe",
       "ignored": true,
       "cfg": null,
-      "body": "ae4bc856a315eee9"
+      "body": "fa4872022fe96a86"
     },
     {
       "file": "tests/perf_probe.rs",
       "name": "organizer_dedup_reuse_probe",
       "ignored": true,
       "cfg": null,
-      "body": "e418face35bc4cf6"
+      "body": "f4bfac464502acac"
     },
     {
       "file": "tests/perf_probe.rs",
       "name": "organizer_empty_dirs_probe",
       "ignored": true,
       "cfg": null,
-      "body": "2d975da70cd0f586"
+      "body": "fa9bbd7e92a2fec9"
     },
     {
       "file": "tests/property.rs",
@@ -6404,14 +6684,14 @@
       "name": "validate_component_ok_implies_windows_safe",
       "ignored": false,
       "cfg": null,
-      "body": "f44d856b104660c3"
+      "body": "a1ee77ce4aa868fe"
     },
     {
       "file": "tests/property.rs",
       "name": "validate_component_rejects_trailing_and_injected_chars",
       "ignored": false,
       "cfg": null,
-      "body": "81863e1403dccffe"
+      "body": "a00644508de97e85"
     },
     {
       "file": "tests/slint_gate.rs",
@@ -6460,21 +6740,21 @@
       "name": "forged_comment_corroboration_is_ignored",
       "ignored": false,
       "cfg": null,
-      "body": "ccb6db61dbf969e0"
+      "body": "02a751bdabaa5faf"
     },
     {
       "file": "tests/split.rs",
       "name": "forged_comment_with_brace_line_cannot_enable_sweep",
       "ignored": false,
       "cfg": null,
-      "body": "0ea6fb437c1bf5fd"
+      "body": "deda0d0982abc15c"
     },
     {
       "file": "tests/split.rs",
       "name": "hash_cache_recomputes_when_size_changes",
       "ignored": false,
       "cfg": null,
-      "body": "c6a2ee2c89f099fb"
+      "body": "cfc9263ca9461e1f"
     },
     {
       "file": "tests/split.rs",
@@ -6509,7 +6789,7 @@
       "name": "organizer_analysis_is_read_only_and_never_extracts",
       "ignored": false,
       "cfg": null,
-      "body": "28aab9f67bbe0fb0"
+      "body": "59526e743a3840e5"
     },
     {
       "file": "tests/split.rs",
@@ -6586,14 +6866,14 @@
       "name": "stale_r_sibling_is_not_disposed_with_standalone_rar",
       "ignored": false,
       "cfg": null,
-      "body": "d1f6f66f3d74d0ae"
+      "body": "dd455a001ec4e730"
     },
     {
       "file": "tests/split.rs",
       "name": "stale_z_sibling_is_not_disposed_with_standalone_zip",
       "ignored": false,
       "cfg": null,
-      "body": "5e0f0e73cb3339b0"
+      "body": "cbca070245575e3f"
     },
     {
       "file": "tests/xberg_assets.rs",
@@ -6691,21 +6971,21 @@
       "name": "broker_does_not_hold_client_capture_pipes",
       "ignored": false,
       "cfg": null,
-      "body": "13f5fd647ee6ec91"
+      "body": "d204b2b607cf0cc3"
     },
     {
       "file": "tests/xberg_shared_process.rs",
       "name": "cancel_ack_without_terminal_keeps_document_lane_and_snapshot_alive",
       "ignored": false,
       "cfg": null,
-      "body": "d52d0fdd4134142a"
+      "body": "f6d922a90a71478d"
     },
     {
       "file": "tests/xberg_shared_process.rs",
       "name": "documents_reuse_process_and_snapshot_finishes_during_document",
       "ignored": false,
       "cfg": null,
-      "body": "fec296820be7231f"
+      "body": "54a6e884612878b8"
     },
     {
       "file": "tests/xberg_shared_process.rs",
@@ -6733,14 +7013,14 @@
       "name": "watchdog_exit_flushes_diagnostic_log_before_process_exit",
       "ignored": false,
       "cfg": null,
-      "body": "73afd3e59d1db5cd"
+      "body": "34d672217ab2eaef"
     },
     {
       "file": "tests/xberg_unknown_response.rs",
       "name": "unknown_id_response_fails_waiter_and_releases_lane",
       "ignored": false,
       "cfg": null,
-      "body": "6c895bc3bb653f78"
+      "body": "57caf7eb7bbebad5"
     }
   ]
 }

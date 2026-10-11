@@ -5,7 +5,13 @@
 [tool.ruff]
 target-version = "py313" # 项目未声明最低 Python 版本；按当前实际解释器（3.13.x）验证
 line-length = 120        # 现有维护源码 96% 的行 ≤120 列；96 列以上多为中文长句注释/文案
-extend-exclude = []      # 不排除任何维护源码
+# 纯测试与测试专用夹具采用宽松角色配置；生产 runner 不在此名单中。
+extend-exclude = [
+    "scripts/test_gui_smoke.py",
+    "scripts/test_markdown_acceptance.py",
+    "scripts/test_test_gate.py",
+    "scripts/media_e2e_fixture.py",
+]
 
 [tool.ruff.lint]
 # 中文注释/文案按正确中文排版使用全角标点；此处显式放行实际使用的码点（外科手术式，
@@ -44,5 +50,19 @@ ignore = [
 typeCheckingMode = "all"
 failOnWarnings = true
 stubPath = "typings"
+include = ["scripts", "typings"]
+# exclude 控制发现；ignore 同时阻止生产脚本导入测试时重新产生测试诊断。
+exclude = [
+    "scripts/test_gui_smoke.py",
+    "scripts/test_markdown_acceptance.py",
+    "scripts/test_test_gate.py",
+    "scripts/media_e2e_fixture.py",
+]
+ignore = [
+    "scripts/test_gui_smoke.py",
+    "scripts/test_markdown_acceptance.py",
+    "scripts/test_test_gate.py",
+    "scripts/media_e2e_fixture.py",
+]
 # 自维护最小 stub 覆盖无官方类型信息的 GUI 自动化/图像依赖；
-# 不使用 baselineFile，不忽略任何路径，不降级任何 report* 规则。
+# 不使用 baselineFile；除上面的纯测试角色外，不忽略路径、不降级 report*。

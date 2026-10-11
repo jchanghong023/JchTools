@@ -7,9 +7,9 @@
 2. ``execute_gate`` 的非编译工作与最终汇总共用时钟；即使阶段报告成功，
    非编译墙钟越界也必须失败，不得报退出码 0。
 
-确定性：用注入假时钟替代 ``time.monotonic``，不真实睡眠 61 秒；唯一真实进程
-用 0.4s 睡眠命令，预算差额远大于进程启动抖动。日志及真实清理夹具仅写
-.tmp/test-gate、.tmp/parallel-review 与 .tmp/acp-review；CI 身份及默认等待使用模拟响应。
+确定性：用注入假时钟替代 ``time.monotonic``，不真实睡眠 61 秒；真实预算进程
+无限等待直至被终止，并直接核对传入真实 wait 的剩余预算，避免宿主调度改变结论。
+日志及真实清理夹具仅写 .tmp/test-gate、.tmp/parallel-review 与 .tmp/acp-review；CI 身份及默认等待使用模拟响应。
 
 完整门授权边界仅调用真实计划器；合成 Cargo artifact 日志交由生产解析器读取，
 fake GateRun 只记录排程，进程启动接缝全部禁止，不执行完整门、远程或模型调用。
@@ -44,7 +44,13 @@ class GitSnapshotEncodingTests(unittest.TestCase):
         with patch.object(sys, "argv", ["make_tmp.py", "workspace", "--destination", str(workspace)]):
             code = make_tmp.main()
             assert code == 0  # nosec B101: 必须真实创建隔离测试目录。
-        with tempfile.TemporaryDirectory(dir=workspace) as temporary:
+        # 覆盖 P-13：用户 Git 配置或 GIT_* 覆盖不能隐藏合成文件、重定向隔离仓库。
+        git_environment = {key: value for key, value in os.environ.items() if not key.upper().startswith("GIT_")}
+        git_environment.update({"GIT_CONFIG_NOSYSTEM": "1", "GIT_CONFIG_GLOBAL": os.devnull})
+        with (
+            tempfile.TemporaryDirectory(dir=workspace) as temporary,
+            patch.dict(os.environ, git_environment, clear=True),
+        ):
             root = Path(temporary)
             _ = subprocess.run([git, "init", "-q", str(root)], check=True, capture_output=True)
             _ = (root / "路径中文.txt").write_text("公开合成数据", encoding="utf-8")
@@ -244,6 +250,8 @@ class OpenCodeAuthorizationBoundaryTests(unittest.TestCase):
                 "PROGRAMFILES": str(root / "program-files"),
                 "PROGRAMFILES(X86)": str(root / "program-files-x86"),
             }
+            # 授权边界用例需要完整有效的本地计划，不把缺少安装编译器当作测试前置。
+            _ = (path_dir / "ISCC.exe").write_bytes(b"inert installer compiler; never execute")
             if installation != "absent":
                 executable = {
                     "explicit": root / "explicit" / "opencode.exe",
@@ -352,19 +360,221 @@ class OpenCodeAuthorizationBoundaryTests(unittest.TestCase):
 
 
 class RunLoggedSetupBudgetTests(unittest.TestCase):
-    """run_logged 必须把进程启动/Job 绑定耗时计入阶段预算（绝对截止）。."""
+    """覆盖 P-13 / AGENTS.md 3.4：启动与 Job 绑定耗时计入绝对截止预算。."""
 
     def test_setup_time_is_charged_against_stage_timeout(self) -> None:
-        # 假时钟：started=100.0；等待预算计算点已到 101.85（启动消耗 1.85s），
-        # 清理读数点 101.95。阶段预算 2.0s → 修复后等待预算只剩 0.15s。
-        clock = _FakeMonotonic([100.0, 101.85, 101.95])
-        # 真实命令睡眠 0.4s（加解释器启动 ≈0.5s）：远大于修复后的 0.15s 等待预算
-        # （必须 TIMEOUT），又远小于修复前固定的 1.5s 等待预算（修复前会 PASS）。
-        argv = [sys.executable, "-c", "import time; time.sleep(0.4)"]
-        with patch.object(test_gate, "_monotonic", clock):
-            result = test_gate.run_logged("budget-setup-regression", argv, timeout=2.0)
-        assert result.status == test_gate.STATUS_TIMED_OUT  # nosec B101: 回归断言，不用于产品输入校验。
-        assert "总预算" in result.detail  # nosec B101: 回归断言，不用于产品输入校验。
+        # 假时钟：started=100.0；启动消耗 1.35s，清理读数点 101.95。
+        # 阶段预算 2.0s 中保留 0.5s 给进程树清理，实际等待只剩 0.15s。
+        clock = _FakeMonotonic([100.0, 101.35, 101.95])
+        # 子进程无限等待，必须由真实超时清理链路终止；不能依赖 0.4s 睡眠
+        # 与父进程调度的先后关系。直接核对真实 wait 的预算，使旧固定 1.5s 仍失败。
+        argv = [sys.executable, "-c", "import threading; threading.Event().wait()"]
+        wait_timeouts: list[float | None] = []
+        waited_processes: list[subprocess.Popen[bytes]] = []
+        real_wait = subprocess.Popen.wait
+
+        def recording_wait(proc: subprocess.Popen[bytes], timeout: float | None = None) -> int:
+            if not waited_processes:
+                waited_processes.append(proc)
+            wait_timeouts.append(timeout)
+            return real_wait(proc, timeout=timeout)
+
+        try:
+            with (
+                patch.object(test_gate, "_monotonic", clock),
+                patch.object(subprocess.Popen, "wait", recording_wait),
+            ):
+                result = test_gate.run_logged("budget-setup-regression", argv, timeout=2.0)
+            assert wait_timeouts  # nosec B101: 必须经过真实进程等待，不能仅伪造超时结果。
+            first_wait = wait_timeouts[0]
+            assert first_wait is not None and 0.0 < first_wait <= 0.15 + 1e-9  # nosec B101: 仅容许浮点舍入误差。
+            assert result.status == test_gate.STATUS_TIMED_OUT  # nosec B101: 回归断言，不用于产品输入校验。
+            assert "总预算" in result.detail  # nosec B101: 回归断言，不用于产品输入校验。
+            assert waited_processes[0].poll() is not None  # nosec B101: 被测超时清理必须真实终止子进程。
+        finally:
+            # 即使回归断言或被测清理失败，也不遗留无限等待的合成进程。
+            if waited_processes and waited_processes[0].poll() is None:
+                waited_processes[0].kill()
+                _ = real_wait(waited_processes[0], timeout=5.0)
+
+
+class GateFailFastTests(unittest.TestCase):
+    """覆盖 P-13：阶段失败立即停止整个门，保留原始证据且不遗留并行进程。"""
+
+    def setUp(self) -> None:
+        self.workspace = test_gate.ROOT / ".tmp" / "test-gate" / "fail-fast-regression"
+        with patch.object(sys, "argv", ["make_tmp.py", "workspace", "--destination", str(self.workspace)]):
+            self.assertEqual(make_tmp.main(), 0)
+        temporary = tempfile.TemporaryDirectory(dir=self.workspace)
+        self.addCleanup(temporary.cleanup)
+        self.workspace = Path(temporary.name)
+
+    def test_failure_stops_pending_and_running_commands_at_every_level(self) -> None:
+        for level in ("fastcheck", "fulltest", "slowtest"):
+            with self.subTest(level=level), tempfile.TemporaryDirectory(dir=self.workspace) as temporary:
+                root = Path(temporary)
+                ready, release, later = (root / name for name in ("ready", "release", "later"))
+                peer_code = (
+                    "import pathlib,sys,time; "
+                    "ready,release=map(pathlib.Path,sys.argv[1:]); ready.touch(); "
+                    "\nwhile not release.exists(): time.sleep(0.01)"
+                )
+                failure_code = (
+                    "import pathlib,sys,time; ready=pathlib.Path(sys.argv[1]); "
+                    "\nwhile not ready.exists(): time.sleep(0.01)"
+                    "\nprint('synthetic failure',flush=True); sys.exit(7)"
+                )
+                later_code = "import pathlib,sys; [pathlib.Path(p).touch() for p in sys.argv[1:]]"
+                stages = [
+                    gate_runtime.Stage("active-peer", [sys.executable, "-c", peer_code, str(ready), str(release)]),
+                    gate_runtime.Stage(
+                        "first-error", [sys.executable, "-c", failure_code, str(ready)],
+                        exclusive_resource="failure-chain",
+                    ),
+                    gate_runtime.Stage(
+                        "must-not-run", [sys.executable, "-c", later_code, str(later), str(release)],
+                        exclusive_resource="failure-chain",
+                    ),
+                ]
+                processes: list[subprocess.Popen[bytes]] = []
+                start = test_gate._start_owned_command
+
+                def record_start(argv, **kwargs):
+                    proc = start(argv, **kwargs)
+                    processes.append(proc)
+                    return proc
+
+                output = io.StringIO()
+                with (
+                    patch.object(test_gate, "LOG_DIR", root / "logs"),
+                    patch.object(test_gate, "_start_owned_command", record_start),
+                    contextlib.redirect_stdout(output),
+                ):
+                    code = test_gate.execute_gate(level, 60.0, stages_override=stages)
+                self.assertEqual(code, 1)
+                self.assertFalse(later.exists(), "阶段失败后仍启动了后续命令")
+                self.assertTrue(all(proc.poll() is not None for proc in processes))
+                peer = next(proc for proc in processes if peer_code in proc.args)
+                self.assertNotEqual(peer.returncode, 0, "并行命令未被终止，而是继续等到自然完成")
+                self.assertIn("exit=7", output.getvalue())
+                self.assertIn("synthetic failure", output.getvalue())
+
+    def test_launch_error_skips_remaining_commands(self) -> None:
+        later = self.workspace / "launch-error-later"
+        stages = [
+            gate_runtime.Stage("missing-executable", [str(self.workspace / "missing.exe")]),
+            gate_runtime.Stage(
+                "must-not-run", [sys.executable, "-c", "import pathlib,sys; pathlib.Path(sys.argv[1]).touch()", str(later)]
+            ),
+        ]
+        with contextlib.redirect_stdout(io.StringIO()):
+            code = test_gate.execute_gate("fastcheck", 60.0, stages_override=stages)
+        self.assertNotEqual(code, 0)
+        self.assertFalse(later.exists(), "命令启动报错后仍执行了后续项")
+
+    def test_precheck_failure_skips_later_compile_phases(self) -> None:
+        later = self.workspace / "compile-later"
+        marker = [sys.executable, "-c", "import pathlib,sys; pathlib.Path(sys.argv[1]).touch()", str(later)]
+        plan = [
+            gate_runtime.Stage("production-build", [sys.executable, "-c", "import sys; sys.exit(9)"]),
+            gate_runtime.Stage("test-target-check", marker),
+            gate_runtime.Stage("clippy", marker),
+        ]
+        with (
+            patch.object(test_gate, "static_plan", return_value=[]),
+            patch.object(test_gate, "_gate_plan", return_value=plan),
+            contextlib.redirect_stdout(io.StringIO()),
+        ):
+            code = test_gate.execute_gate("fastcheck", 60.0)
+        self.assertEqual(code, 1)
+        self.assertFalse(later.exists(), "前置报错后仍执行了测试编译或 Clippy")
+
+    def test_binding_loop_error_stops_before_next_phase(self) -> None:
+        later = self.workspace / "warning-later"
+        marker = [sys.executable, "-c", "import pathlib,sys; pathlib.Path(sys.argv[1]).touch()", str(later)]
+        plan = [
+            gate_runtime.Stage("production-build", [sys.executable, "-c", "print('warning: binding loop')"]),
+            gate_runtime.Stage("test-target-check", marker),
+        ]
+        output = io.StringIO()
+        with (
+            patch.object(test_gate, "static_plan", return_value=[]),
+            patch.object(test_gate, "_gate_plan", return_value=plan),
+            contextlib.redirect_stdout(output),
+        ):
+            code = test_gate.execute_gate("fastcheck", 60.0)
+        self.assertEqual(code, 1)
+        self.assertFalse(later.exists())
+        self.assertIn("binding loop", output.getvalue())
+
+    def test_artifact_error_skips_other_builds_and_packaging(self) -> None:
+        later = self.workspace / "artifact-later"
+        marker = [sys.executable, "-c", "import pathlib,sys; pathlib.Path(sys.argv[1]).touch()", str(later)]
+        plan = [
+            gate_runtime.Stage("production-build", [sys.executable, "-c", "pass"]),
+            gate_runtime.Stage("root-test-build", [sys.executable, "-c", "print('no test artifact')"]),
+            gate_runtime.Stage("snap-ocr-core-test-build", marker),
+            gate_runtime.Stage("package", marker),
+        ]
+        output = io.StringIO()
+        with (
+            patch.object(test_gate, "static_plan", return_value=[]),
+            patch.object(test_gate, "_gate_plan", return_value=plan),
+            contextlib.redirect_stdout(output),
+        ):
+            code = test_gate.execute_gate("fulltest", 60.0)
+        self.assertEqual(code, 1)
+        self.assertFalse(later.exists())
+        self.assertIn("root-test-build-artifacts", output.getvalue())
+
+    def test_static_checker_stops_at_first_failed_check(self) -> None:
+        scripts = self.workspace / "scripts"
+        scripts.mkdir()
+        checker = scripts / "static_check.py"
+        shutil.copyfile(test_gate.ROOT / "scripts/static_check.py", checker)
+        result = subprocess.run([sys.executable, str(checker)], capture_output=True, text=True, check=False)
+        self.assertNotEqual(result.returncode, 0)
+        report = json.loads((self.workspace / ".tmp/static-check.json").read_text(encoding="utf-8"))
+        self.assertEqual([row["name"] for row in report["checks"]], ["manifests"])
+        self.assertIn("FAIL manifests", result.stdout)
+
+    def test_nested_test_failure_does_not_wait_for_runner_or_budget(self) -> None:
+        artifact = self.workspace / "artifact.json"
+        artifact.write_text(json.dumps({
+            "reason": "compiler-artifact",
+            "profile": {"test": True},
+            "target": {"name": "synthetic", "kind": ["test"]},
+            "executable": sys.executable,
+        }), encoding="utf-8")
+        for level in ("fulltest", "slowtest"):
+            with self.subTest(level=level):
+                nested = local_gate_plan._test_binary_stages(
+                    gate_runtime.Result("root-test-build", "PASS", "synthetic artifact", log=artifact)
+                )[0]
+                nested.argv = [
+                    sys.executable, "-c",
+                    "import pathlib,sys,threading; print('test first_failure ... FAILED',flush=True); "
+                    "pathlib.Path(sys.argv[-1]).write_text('failed first_failure\\n'); threading.Event().wait()",
+                ]
+                output = io.StringIO()
+                with contextlib.redirect_stdout(output):
+                    code = test_gate.execute_gate(level, 1.0, stages_override=[nested])
+                self.assertEqual(code, 1)
+                self.assertIn(f"{level} FAIL total=", output.getvalue())
+                self.assertNotIn("TIMEOUT", output.getvalue())
+                self.assertIn("test first_failure ... FAILED", output.getvalue())
+
+    def test_expected_failure_text_does_not_stop_successful_runner(self) -> None:
+        stage = gate_runtime.Stage(
+            "expected-panic-fixture",
+            [sys.executable, "-c",
+             "import pathlib,sys; print('test expected_panic ... FAILED'); "
+             "pathlib.Path(sys.argv[-1]).write_text('ok expected_panic\\n')"],
+            watch_test_failures=True,
+        )
+        with contextlib.redirect_stdout(io.StringIO()):
+            code = test_gate.execute_gate("fulltest", 60.0, stages_override=[stage])
+        self.assertEqual(code, 0, "测试自行输出的失败文字被误当成 harness 失败")
 
 
 class FastcheckWallClockGuardTests(unittest.TestCase):

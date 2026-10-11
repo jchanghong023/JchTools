@@ -101,11 +101,41 @@ class CommonFormatAcceptanceTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as temporary:
             output = Path(temporary)
             result = output / "video-to-notes-intro-zh_mp4.md"
-            header = "# video-to-notes-intro-zh\n- 音频时长: 00:01:19.125\n## 转录\n"
+            header = "# video-to-notes-intro-zh\n- 音频时长: 00:01:19.125\n- 语音片段: 1\n## 转录\n"
             _ = result.write_text(header, encoding="utf-8")
             assert verifier(output, ("mp4",)) is not None  # nosec B101: 验收判据回归断言。
             _ = result.write_text(header + "[00:00:00.108 --> 00:00:02.508] 长视频想快速获取要点。\n", encoding="utf-8")
             assert verifier(output, ("mp4",)) is None  # nosec B101: 验收判据回归断言。
+
+    def test_all_media_segments_and_unique_metadata_are_checked(self) -> None:
+        checker = getattr(markdown_acceptance, "_" + "media_markdown_problem")
+        healthy = (
+            "# 合成媒体\n- 音频时长: 00:00:03.000\n- 语音片段: 2\n## 转录\n"
+            "[00:00:00.100 --> 00:00:01.000] 第一段\n"
+            "[00:00:01.500 --> 00:00:02.500] 第二段\n"
+        )
+        assert checker(healthy, require_chinese=True) is None
+        broken = (
+            healthy.replace("00:00:03.000", "00:00:00.000"),
+            healthy.replace("00:00:03.000", "00:60:03.000"),
+            healthy.replace("- 语音片段: 2", "- 语音片段: 1"),
+            healthy.replace("- 语音片段: 2", "- 语音片段: 2\n- 语音片段: 2"),
+            healthy.replace("## 转录\n", "- 音频时长: 00:00:03.000\n## 转录\n"),
+            healthy.replace("00:00:02.500", "00:00:04.000"),
+            healthy.replace("00:00:02.500", "00:00:01.500"),
+            healthy.replace("00:00:01.500", "00:00:00.050"),
+            healthy.replace("第二段", " "),
+            healthy.replace("第一段", "English").replace("第二段", "English"),
+            healthy + "## 转录\n",
+            healthy.replace("[00:00:01.500 --> 00:00:02.500] 第二段", "无时间戳的伪正文"),
+        )
+        for text in broken:
+            with self.subTest(text=text):
+                assert checker(text, require_chinese=True) is not None
+        trackless = "# empty\n- 音频时长: 无音频轨道\n- 语音片段: 0\n## 转录\n（无音频轨道）\n"
+        assert checker(trackless, empty_scene="无音频轨道") is None
+        assert checker(trackless.replace("0\n", "1\n"), empty_scene="无音频轨道") is not None
+        assert checker(trackless.replace("（无音频轨道）", "（未检测到语音）"), empty_scene="无音频轨道") is not None
 
     def test_old_office_outputs_cannot_exchange_document_markers(self) -> None:
         item = next(item for item in markdown_acceptance.profile_items("common") if item.item_id == "A25")
@@ -404,11 +434,11 @@ class MediaPostconditionTests(unittest.TestCase):
         )
         with tempfile.TemporaryDirectory(prefix="jchtools-owned-tree-") as temporary:
             proc: subprocess.Popen[bytes] = subprocess.Popen([sys.executable, "-c", parent_source, temporary])
-            unrelated: subprocess.Popen[bytes] = subprocess.Popen(
-                [sys.executable, "-c", "import time; time.sleep(900)"]
-            )
+            unrelated: subprocess.Popen[bytes] | None = None
             owner = None
             try:
+                # 从首个进程启动起覆盖清场；第二次启动失败也不能遗留等待信号的父进程。
+                unrelated = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(900)"])
                 owner = gui_smoke.own_process_tree(proc)
                 _ = (Path(temporary) / "start").write_text("go", encoding="ascii")
                 assert proc.wait(timeout=10) == 0  # nosec B101: 验证父进程自然成功退出。
@@ -420,17 +450,26 @@ class MediaPostconditionTests(unittest.TestCase):
                     assert status == win32event.WAIT_OBJECT_0, "GUI 已退出但所属后台仍存活"  # nosec B101: 实际子进程必须退出。
                     assert unrelated.poll() is None, "不得结束无关实例"  # nosec B101: 所有权边界。
                 finally:
-                    if win32event.WaitForSingleObject(child, 0) == win32event.WAIT_TIMEOUT:
-                        win32api.TerminateProcess(child, 0)
-                    win32api.CloseHandle(child)
+                    try:
+                        if win32event.WaitForSingleObject(child, 0) == win32event.WAIT_TIMEOUT:
+                            win32api.TerminateProcess(child, 0)
+                    finally:
+                        win32api.CloseHandle(child)
             finally:
-                if owner is not None:
-                    owner.close()
-                if proc.poll() is None:
-                    proc.kill()
-                _ = proc.wait(timeout=10)
-                unrelated.terminate()
-                _ = unrelated.wait(timeout=10)
+                # 每个资源独立清场；所有权回收失败也不能跳过父进程和无关见证进程。
+                try:
+                    if owner is not None:
+                        owner.close()
+                finally:
+                    try:
+                        if proc.poll() is None:
+                            proc.kill()
+                        _ = proc.wait(timeout=10)
+                    finally:
+                        if unrelated is not None:
+                            if unrelated.poll() is None:
+                                unrelated.terminate()
+                            _ = unrelated.wait(timeout=10)
 
     def test_fast_failed_conversion_finishes_without_outputs(self) -> None:
         # 覆盖 T-24：未观察到忙态且全部瞬间失败时，应收集失败诊断而不是空等到转换超时。
@@ -468,7 +507,11 @@ class MediaPostconditionTests(unittest.TestCase):
             patch("scripts.markdown_acceptance.time.sleep"),
         ):
             root = Path(temporary)
-            run = markdown_acceptance.drive_conversion(root / "gui.exe", root, root)
+            source, output = root / "input", root / "output"
+            source.mkdir()
+            output.mkdir()
+            # T-09 要求输入输出不同；本例只模拟瞬时失败，不混入非法目录前置。
+            run = markdown_acceptance.drive_conversion(root / "gui.exe", source, output)
         assert run.error is None, "收尾状态不能误判为驱动超时"  # nosec B101: 瞬间失败的状态转换回归。
         assert run.outputs == [], "失败批次不得伪造产物"  # nosec B101: 失败产物边界。
         assert "失败 1" in run.texts  # nosec B101: 必须保留真实失败诊断。
@@ -480,17 +523,17 @@ class MediaPostconditionTests(unittest.TestCase):
             output = root / "output"
             _ = source.mkdir()
             _ = output.mkdir()
-            original = source / "sample.docx"
+            original = source / "文档.docx"
             _ = original.write_bytes(b"source")
             media = output / "文档_docx_media" / "图片 0.png"
             _ = media.parent.mkdir()
             _ = media.write_bytes(b"png-bytes")
-            _ = (output / "sample_docx.md").write_text("![图片](<文档_docx_media/图片 0.png>)\n", encoding="utf-8")
+            _ = (output / "文档_docx.md").write_text("![图片](<文档_docx_media/图片 0.png>)\n", encoding="utf-8")
 
             problems = verify_common_postconditions(
                 source,
                 output,
-                {Path("sample.docx"): _digest(original)},
+                {Path("文档.docx"): _digest(original)},
             )
 
             assert problems == []  # nosec B101: 回归测试断言，不用于产品权限或输入校验。
@@ -713,7 +756,16 @@ class FormatSweepCoverageTests(unittest.TestCase):
             for extension in (*uncovered, "pdf", "docx", "pptx", "xlsx", "pbm")
         ]
         context = markdown_acceptance.Context(None, None, None, Path(), markdown_acceptance.probe_assets())
-        with patch.object(markdown_acceptance, "_shared_format_rows", return_value=(rows, None)):
+        covered_matrix = (
+            markdown_acceptance.Item(
+                "A01", "A", "受控格式覆盖", "合成入口",
+                fixtures=("input.pdf", "input.docx", "input.pptx", "input.xlsx", "input.pbm"),
+            ),
+        )
+        with (
+            patch.object(markdown_acceptance, "ITEMS", covered_matrix),
+            patch.object(markdown_acceptance, "_shared_format_rows", return_value=(rows, None)),
+        ):
             extensions, error = markdown_acceptance.xberg_format_extensions(context)
         assert error is None  # nosec B101: 格式清单解析回归断言。
         assert extensions == sorted(uncovered)  # nosec B101: 漏覆盖格式不能被硬编码名单排除。
@@ -784,16 +836,14 @@ class PerInputRuleTests(unittest.TestCase):
         # S10-02 复审：引擎声明的格式必须有产物（防引擎回归假 PASS）；未声明
         # 格式保留宽松兜底；动态规则缺席时回落静态默认（全宽松）。
         rules = _a25_rules()
-        old_rules = dict(rules)
-        try:
+        # 缺席规则的前置由本例建立，不能把恢复的调用方规则误当成空表。
+        with patch.dict(rules, clear=True):
             rules["sample_odt.odt"] = markdown_acceptance.InputRule(must_produce=True)
             rules["sample_legacy.wpd"] = markdown_acceptance.InputRule(must_produce=False)
             assert _input_rule("A25", "sample_odt.odt").must_produce  # nosec B101: 回归测试断言。
             assert not _input_rule("A25", "sample_legacy.wpd").must_produce  # nosec B101: 回归测试断言。
-        finally:
             rules.clear()
-            rules.update(old_rules)
-        assert not _input_rule("A25", "sample_odt.odt").must_produce  # nosec B101: 回归测试断言。
+            assert not _input_rule("A25", "sample_odt.odt").must_produce  # nosec B101: 回归测试断言。
 
     def test_healthy_family_all_failing_is_reported(self) -> None:
         # A21：即使 DOCM/DOTX/DOTM 全失败（只产出一份 docx），也必须报问题。
@@ -886,6 +936,178 @@ class ContentAssertStrengthTests(unittest.TestCase):
         assert _content_problems(good, "", "A14") == []  # nosec B101
         bad = "XLSX-FIRST-REL-TOKEN\nXLSX-FIRST-DRAW-TOKEN\n"
         assert _content_problems(bad, "", "A14")  # nosec B101: 显示顺序错配必须可检出。
+
+
+class DocumentSemanticPredicateTests(unittest.TestCase):
+    """覆盖附录 A11/A12/A13/A19 与 T-14～T-16；真值来自源图，不来自引擎输出。"""
+
+    def check(self, item_id: str, source: Path, output: Path, texts: str = "") -> list[str]:
+        checker = getattr(markdown_acceptance, "_" + "document_semantic_problems")
+        return checker(item_id, source, output, texts)
+
+    def test_a01_and_a14_detect_swapped_bytes_with_unchanged_text(self) -> None:
+        cases = (
+            ("A01", "pptx_two_png_order.pptx", "ppt/media/", "BETA-TWO", "ALPHA-ONE"),
+            ("A14", "xlsx_drawing_order.xlsx", "xl/media/", "XLSX-FIRST-DRAW-TOKEN", "XLSX-FIRST-REL-TOKEN"),
+        )
+        token_png = getattr(markdown_acceptance, "_" + "token_png")
+        for item_id, filename, member_root, first, second in cases:
+            with self.subTest(item=item_id), tempfile.TemporaryDirectory() as temporary:
+                root = Path(temporary)
+                source, output = root / "input", root / "output"
+                source.mkdir()
+                media = output / "sample_media"
+                media.mkdir(parents=True)
+                first_bytes, second_bytes = token_png(first), token_png(second)
+                with zipfile.ZipFile(source / filename, "w") as archive:
+                    archive.writestr(member_root + "image1.png", second_bytes)
+                    archive.writestr(member_root + "image2.png", first_bytes)
+                (media / "first.png").write_bytes(first_bytes)
+                (media / "second.png").write_bytes(second_bytes)
+                (output / "sample.md").write_text(
+                    f"![](sample_media/first.png)\n{first}\n![](sample_media/second.png)\n{second}\n",
+                    encoding="utf-8",
+                )
+                assert self.check(item_id, source, output) == []
+                with markdown_acceptance.Image.open(io.BytesIO(first_bytes)) as image:
+                    image.save(media / "first.png", "JPEG", quality=95)
+                assert self.check(item_id, source, output) == [], "轻微有损重编码不应按字节差异判错"
+                # 无损 BMP 重编码允许，不要求 PNG 字节完全一致。
+                with markdown_acceptance.Image.open(io.BytesIO(first_bytes)) as image:
+                    image.save(media / "first.png", "BMP")
+                assert self.check(item_id, source, output) == []
+                (media / "first.png").write_bytes(second_bytes)
+                (media / "second.png").write_bytes(first_bytes)
+                assert self.check(item_id, source, output), "正文未变、只互换图片字节也必须失败"
+                (media / "first.png").write_bytes(b"truncated")
+                assert self.check(item_id, source, output), "损坏落盘图片不得通过"
+
+    def test_a11_requires_reachable_ole_and_distinct_body_diagnosis(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            source, output = root / "input", root / "output"
+            source.mkdir()
+            output.mkdir()
+            fixture = markdown_acceptance.FIXTURES_DEFAULT / "matrix/pptx_ole_broken_preview.pptx"
+            (source / fixture.name).write_bytes(fixture.read_bytes())
+            synth = markdown_acceptance.SYNTHESIZERS["document_a11"]
+            _ = synth(source, markdown_acceptance.FIXTURES_DEFAULT)
+            with zipfile.ZipFile(source / fixture.name) as archive:
+                slide = ElementTree.fromstring(archive.read("ppt/slides/slide1.xml"))
+                assert any(node.tag.endswith("}oleObj") for node in slide.iter())
+                preview = archive.read("ppt/media/preview_ok.png")
+            media = output / "sample_media"
+            media.mkdir()
+            (media / "preview.png").write_bytes(preview)
+            (output / "pptx_ole_broken_preview_pptx.md").write_text(
+                "![](sample_media/preview.png)\nOLE-PREVIEW-OK\n", encoding="utf-8"
+            )
+            diagnostic = (
+                "部分提取：pptx_ole_broken_preview.pptx · 部分内容未提取："
+                "ole_body_broken.xlsx embedded_extract_failed: invalid ZIP"
+            )
+            assert self.check("A11", source, output, diagnostic) == []
+            assert self.check("A11", source, output, diagnostic.replace("embedded_extract_failed", "OCR 无文字"))
+            assert self.check("A11", source, output, "")
+
+    def test_a12_all_five_sources_need_distinct_images_and_ocr(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            source, output = root / "input", root / "output"
+            source.mkdir()
+            output.mkdir()
+            fixture = markdown_acceptance.FIXTURES_DEFAULT / "matrix/docx_all_sources.docx"
+            (source / fixture.name).write_bytes(fixture.read_bytes())
+            _ = markdown_acceptance.SYNTHESIZERS["document_a12"](source, markdown_acceptance.FIXTURES_DEFAULT)
+            media = output / "sample_media"
+            media.mkdir()
+            segments = []
+            with zipfile.ZipFile(source / fixture.name) as archive:
+                assert "word/footnotes.xml" in archive.namelist()
+                assert "word/endnotes.xml" in archive.namelist()
+                w = "{http://schemas.openxmlformats.org/wordprocessingml/2006/main}"
+                document = ElementTree.fromstring(archive.read("word/document.xml"))
+                for note in ("footnote", "endnote"):
+                    assert any(node.tag == f"{w}{note}Reference" and node.get(f"{w}id") == "2"
+                               for node in document.iter())
+                for part in ("document", "header1", "footer1", "footnotes", "endnotes"):
+                    rels = ElementTree.fromstring(archive.read(f"word/_rels/{part}.xml.rels"))
+                    semantic = [rel for rel in rels if rel.get("Id") == "rIdSemantic"]
+                    assert len(semantic) == 1
+                    assert "word/" + semantic[0].attrib["Target"] in archive.namelist()
+                for name in ("BODY", "HEADER", "FOOTER", "FOOTNOTE", "ENDNOTE"):
+                    (media / f"{name}.png").write_bytes(archive.read(f"word/media/{name.lower()}.png"))
+                    segments.append(f"![](sample_media/{name}.png)\n{name}-IMAGE-TOKEN\n")
+            result = output / "docx_all_sources_docx.md"
+            result.write_text("\n".join(segments), encoding="utf-8")
+            assert self.check("A12", source, output) == []
+            result.write_text("\n".join(segments[:-1]), encoding="utf-8")
+            assert self.check("A12", source, output), "漏尾注不得通过"
+            result.write_text("\n".join(segments).replace("FOOTNOTE-IMAGE-TOKEN", ""), encoding="utf-8")
+            assert self.check("A12", source, output), "只有图片或 alt 不能冒充 OCR"
+
+    def test_a13_requires_healthy_content_and_specific_broken_image_stage(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            source, output = root / "input", root / "output"
+            source.mkdir()
+            output.mkdir()
+            fixture = markdown_acceptance.FIXTURES_DEFAULT / "matrix/docx_emf_wmf_raster.docx"
+            (source / fixture.name).write_bytes(fixture.read_bytes())
+            _ = markdown_acceptance.SYNTHESIZERS["document_a13"](source, markdown_acceptance.FIXTURES_DEFAULT)
+            media = output / "sample_media"
+            media.mkdir()
+            with zipfile.ZipFile(source / fixture.name) as archive:
+                (media / "healthy.png").write_bytes(archive.read("word/media/healthy.png"))
+                (media / "healthy.wmf").write_bytes(archive.read("word/media/healthy.wmf"))
+            result = output / "docx_emf_wmf_raster_docx.md"
+            healthy = "MIXED-MEDIA\n![](sample_media/healthy.png)\nRASTER-HEALTHY\n![](sample_media/healthy.wmf)\n"
+            result.write_text(healthy, encoding="utf-8")
+            diagnosed = (
+                "部分提取：docx_emf_wmf_raster.docx · 部分内容未提取："
+                "broken.emf rasterize_failed: invalid EMF"
+            )
+            assert self.check("A13", source, output, diagnosed) == []
+            assert self.check("A13", source, output, diagnosed.replace("rasterize_failed", "OCR 无文字"))
+            assert self.check("A13", source, output, "")
+            indexed = diagnosed.replace("broken.emf rasterize_failed", "Image 0 OCR failed: metafile rasterization failed")
+            assert self.check("A13", source, output, indexed) == []
+            assert self.check("A13", source, output, indexed.replace("Image 0", "Image 1"))
+            crossed = indexed.replace("metafile rasterization failed", "no text")
+            crossed += "；Image 1 OCR failed: metafile rasterization failed at rasterize_decode"
+            assert self.check("A13", source, output, crossed), "别的成员失败阶段不能归给当前图片"
+            result.write_text(healthy.replace("![](sample_media/healthy.wmf)\n", ""), encoding="utf-8")
+            assert self.check("A13", source, output, diagnosed), "WMF 丢失无诊断不能算部分成功"
+            assert self.check("A13", source, output, diagnosed +
+                              "；healthy.wmf OCR execution failed: unavailable backend") == []
+            result.write_text("MIXED-MEDIA", encoding="utf-8")
+            assert self.check("A13", source, output, diagnosed), "任意单图失败不能掩盖健康图片丢失"
+
+    def test_a19_each_extension_requires_its_own_ocr_not_native_pdf_text(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            source, output = root / "input", root / "output"
+            source.mkdir()
+            output.mkdir()
+            fixture = markdown_acceptance.FIXTURES_DEFAULT / "matrix/jbig2_standalone.jb2"
+            (source / fixture.name).write_bytes(fixture.read_bytes())
+            _ = markdown_acceptance.SYNTHESIZERS["document_a19"](source, markdown_acceptance.FIXTURES_DEFAULT)
+            media = output / "sample_media"
+            media.mkdir()
+            picture = markdown_acceptance.Image.new("1", (320, 96), 1)
+            markdown_acceptance.ImageDraw.Draw(picture).text(
+                (12, 24), "JBIG2 SYNTH CHECK", fill=0,
+                font=markdown_acceptance.ImageFont.load_default(size=24),
+            )
+            picture.save(media / "jbig2.png", "PNG")
+            for name in ("jbig2_standalone_jb2.md", "jbig2_standalone_jbig2.md", "pdf_jbig2_pdf.md"):
+                (output / name).write_text("![](sample_media/jbig2.png)\nJBIG2 SYNTH CHECK", encoding="utf-8")
+            assert self.check("A19", source, output) == []
+            (media / "jbig2.png").write_bytes(getattr(markdown_acceptance, "_" + "token_png")("OTHER"))
+            assert self.check("A19", source, output), "正确 token 不能掩盖落盘 JBIG2 内容被换掉"
+            picture.save(media / "jbig2.png", "PNG")
+            (output / "pdf_jbig2_pdf.md").write_text("JBIG2 native text only", encoding="utf-8")
+            assert self.check("A19", source, output), "另一输入的正确 OCR 不可覆盖 PDF 失败"
 
 
 class A18UnsupportedBoundaryTests(unittest.TestCase):
@@ -1161,12 +1383,16 @@ class A24SceneNoteTests(unittest.TestCase):
         _ = outputs.mkdir(parents=True)
         for suffix in ("mp4", "m4a"):
             _ = (outputs / f"video-to-notes-intro-zh_{suffix}.md").write_text(
-                "# video-to-notes-intro-zh\n- 音频时长: 00:00:02.000\n## 转录\n[00:00:00.000 -> 00:00:01.000] 中文\n",
+                "# video-to-notes-intro-zh\n- 音频时长: 00:00:02.000\n- 语音片段: 1\n## 转录\n"
+                "[00:00:00.000 --> 00:00:01.000] 中文\n",
                 encoding="utf-8",
             )
-        _ = (outputs / "tone_m4a.md").write_text("# tone\n- 音频时长: 00:00:02.000\n## 转录\n片段\n", encoding="utf-8")
+        _ = (outputs / "tone_m4a.md").write_text(
+            "# tone\n- 音频时长: 00:00:02.000\n- 语音片段: 1\n## 转录\n"
+            "[00:00:00.000 --> 00:00:01.000] 合成片段\n", encoding="utf-8"
+        )
         _ = (outputs / "silence_m4a.md").write_text(
-            "# silence\n- 音频时长: 00:00:02.000\n（未检测到语音）\n", encoding="utf-8"
+            "# silence\n- 音频时长: 00:00:02.000\n- 语音片段: 0\n## 转录\n（未检测到语音）\n", encoding="utf-8"
         )
         _ = (outputs / "noaudio_mp4.md").write_text(noaudio_body, encoding="utf-8")
 
@@ -1177,7 +1403,9 @@ class A24SceneNoteTests(unittest.TestCase):
 
     def test_scene_notes_are_asserted(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
-            self._write_scene_outputs(Path(temporary), noaudio_body="# noaudio\n- 音频时长: 无音频轨道\n")
+            self._write_scene_outputs(
+                Path(temporary), noaudio_body="# noaudio\n- 音频时长: 无音频轨道\n- 语音片段: 0\n## 转录\n（无音频轨道）\n"
+            )
             with patch.object(markdown_acceptance, "SCRATCH_ROOT", Path(temporary)):
                 assert self._verify_a24_outputs() is None  # nosec B101: 三场景说明齐全。
         with tempfile.TemporaryDirectory() as temporary:
@@ -1381,7 +1609,10 @@ class UnconfiguredStateBoundaryTests(unittest.TestCase):
                 "config.sqlite3-wal",
                 "hash-cache.sqlite3",
                 "organizer.lock",
-                "logs/jchtools.log.2026-10-07",
+                "logs/jchtools.2026-10-07.123.0.log",
+                "logs.retention.lock",
+                "logs-fallback.retention.lock",
+                "logs-fallback/jchtools.2026-10-07.123.log",
                 "tasks/20261007T120000-12345678-1234-1234-1234-123456789abc/task.sqlite3",
             )
         )
@@ -1399,6 +1630,11 @@ class UnconfiguredStateBoundaryTests(unittest.TestCase):
     def test_asset_root_write_is_still_rejected(self) -> None:
         outcome = self._run_with_artifacts(("config.sqlite3",), asset_file="xberg.exe")
         assert outcome.status == "FAIL"  # nosec B101: 未配置资产根须保持为空。
+
+    def test_unrecognized_log_name_cannot_hide_a_download(self) -> None:
+        outcome = self._run_with_artifacts(("logs/jchtools.2026-10-07.not-a-pid.log",))
+        assert outcome.status == "FAIL"
+        assert "not-a-pid.log" in outcome.reason
 
 
 class AcceptanceBoundaryTests(unittest.TestCase):
@@ -1471,8 +1707,10 @@ class AcceptanceBoundaryTests(unittest.TestCase):
             _ = database.write_bytes(b"seeded database")
             logs = state / "logs"
             _ = logs.mkdir()
-            log = logs / "jchtools.log.2026-10-08"
-            good = '诊断日志已初始化（P-10） role="gui" pid=123 log_dir="isolated"\n'
+            log = logs / "jchtools.2026-10-08.123.0.log"
+            good = ('timestamp=2026-10-08T00:00:00.000Z level=INFO pid=123 thread_id=ThreadId(1) '
+                    'component=logging event=application_started role="gui" '
+                    'log_file="isolated" message="应用诊断日志已启动"\n')
             _ = log.write_text(good, encoding="utf-8")
             offsets = {log: log.stat().st_size}
             with patch.object(markdown_acceptance, "TMP_ROOT", state):
@@ -1481,6 +1719,9 @@ class AcceptanceBoundaryTests(unittest.TestCase):
                     _ = stream.write(good.replace("pid=123", "pid=1234"))
                 assert not checker(state, 123, "gui", offsets)  # nosec B101: PID 必须精确匹配。
                 with log.open("a", encoding="utf-8") as stream:
+                    _ = stream.write(good.replace("event=application_started", "event=another_event"))
+                assert not checker(state, 123, "gui", offsets), "同 PID 的其他事件不能证明启动隔离"
+                with log.open("a", encoding="utf-8") as stream:
                     _ = stream.write(good.replace('role="gui"', 'role="xberg-broker"'))
                 assert not checker(state, 123, "gui", offsets)  # nosec B101: 代理进程不证明 GUI 的状态隔离。
                 with log.open("a", encoding="utf-8") as stream:
@@ -1488,6 +1729,24 @@ class AcceptanceBoundaryTests(unittest.TestCase):
                 assert checker(state, 123, "gui", offsets)  # nosec B101: 本轮同 PID 的 GUI 启动记录有效。
                 database.unlink()
                 assert not checker(state, 123, "gui", offsets)  # nosec B101: 日志不能替代隔离 SQLite。
+
+    def test_conversion_isolation_uses_fallback_startup_not_payload_fields(self) -> None:
+        checker = getattr(markdown_acceptance, "_" + "process_isolation_ready")
+        with tempfile.TemporaryDirectory() as temporary:
+            state = Path(temporary).resolve()
+            (state / "config.sqlite3").write_bytes(b"seeded database")
+            logs = state / "logs-fallback"
+            logs.mkdir()
+            log = logs / "jchtools.2026-10-08.123.log"
+            wrong_role = ('timestamp=2026-10-08T00:00:00.000Z level=INFO pid=123 thread_id=ThreadId(1) '
+                          'component=logging event=application_started role="xberg-broker" '
+                          'message="payload role=\\"gui\\" pid=123"\n')
+            log.write_text(wrong_role, encoding="utf-8")
+            with patch.object(markdown_acceptance, "TMP_ROOT", state):
+                assert not checker(state, 123, "gui", {}), "消息正文不能伪造本轮 GUI 启动字段"
+                with log.open("a", encoding="utf-8") as stream:
+                    stream.write(wrong_role.replace('role="xberg-broker"', 'role="gui"'))
+                assert checker(state, 123, "gui", {}), "受控备用目录也须承接真实 GUI 启动证明"
 
     def test_conversion_isolation_fixture_handles_windows_short_temp_root(self) -> None:
         # CI 的 RUNNER~1 临时目录会解析到完整用户名；夹具须遵守产品隔离根的规范路径口径。
@@ -1599,7 +1858,8 @@ class SyntheticFixtureTests(unittest.TestCase):
         lines = [line for line in text.splitlines() if line.strip()]
         assert lines  # nosec B101: 回归测试断言。
         for line in lines:
-            _ = cast("dict[str, object]", json.loads(line))  # 每行必须是合法 JSON 对象。
+            value = json.loads(line)
+            assert isinstance(value, dict)  # nosec B101: cast 不校验类型；每行必须确为 JSON 对象。
 
     def test_fixture_readme_has_no_source_provenance(self) -> None:
         text = (markdown_acceptance.FIXTURES_DEFAULT / "README.md").read_text(encoding="utf-8")

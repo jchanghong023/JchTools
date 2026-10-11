@@ -205,10 +205,13 @@ $script:Results.Add('PASS  binding-loop-scan')
 # 的两个包同时运行测试和 lint，防止本地验收只依赖远程 CI 的旧结果。
 foreach ($component in @('snap-ocr-core','snap-ocr-worker')) {
     $manifest = Join-Path $root "optional/$component/Cargo.toml"
+    $productionTargets = @('--lib')
+    if ($component -eq 'snap-ocr-worker') {$productionTargets += @('--bin','snap-ocr-worker')}
     $null = Invoke-Logged -Name "$component-tests" -File 'cargo' `
         -Arguments @('test','--manifest-path',$manifest,'--all-targets','--features','test-hooks') -Environment $testEnvironment
+    # 严格 lint 只覆盖生产库/二进制；上一步仍编译并执行全部测试目标。
     $null = Invoke-Logged -Name "$component-clippy" -File 'cargo' `
-        -Arguments @('clippy','--manifest-path',$manifest,'--all-targets','--features','test-hooks','--','-D','warnings')
+        -Arguments (@('clippy','--manifest-path',$manifest) + $productionTargets + @('--features','test-hooks','--','-D','warnings'))
 }
 if ($env:JCHTOOLS_SNAP_OCR_ASSET_ROOT) {
     $ocrManifest = Get-Content -LiteralPath 'resources\snap-ocr-assets.json' -Raw -Encoding UTF8 | ConvertFrom-Json

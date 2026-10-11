@@ -7,7 +7,7 @@ slowtest：P-07 无 WSL 增量，与 fulltest 等覆盖一次；预算 1500 秒�
 总墙钟中只扣除观测到且没有非编译工作重叠的编译区间；复用正常 target 缓存。
 每条结束路径输出 total / compile_excluded / budgeted / limit 与状态。
 不触发 CI、发布、Computer Use、用户鼠标或抢焦点测试。
-fulltest / slowtest 的 --authorized 只代表当次明确指令或本技能调用授权。
+fulltest / slowtest 的 --authorized 只代表当次明确授权，不创造授权。
 
 
 用法：
@@ -51,7 +51,7 @@ if TYPE_CHECKING:
 
 if not __package__:
     sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
-from scripts.gate_runtime import GateRun, Result, Stage
+from scripts.gate_runtime import GateRun, GateStoppedError, Result, Stage
 from scripts.local_gate_plan import gate_plan, run_full_coverage, static_plan
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -462,6 +462,12 @@ def _scan_binding_loop(result: StageResult) -> StageResult:
     return StageResult(result.name, STATUS_FAILED, detail, result.log)
 
 
+def _validate_gate_result(result: Result) -> Result:
+    checked = _scan_binding_loop(StageResult(result.name, result.status, result.detail, result.log))
+    result.status, result.detail = checked.status, checked.detail
+    return result
+
+
 def acceptance_coverage_gaps(text: str) -> list[str]:
     """提取 acceptance 汇总中的必要覆盖缺口；package 的 NOT RUN 不在本级范围.
 
@@ -616,6 +622,7 @@ def execute_gate(
         compiler_ids=compiler_ids_override or _compiler_ids,
         clock=clock_override or _monotonic,
         observe_tree=_observe_owned_command,
+        validate_result=_validate_gate_result,
     )
     results: list[Result] = []
     snapshot: list[str] = []
@@ -639,9 +646,8 @@ def execute_gate(
             notes.append("CI / 远程流水线 / 发布 / Computer Use：在三个门之外。")
         if level == "slowtest":
             notes.append("SKIPPED_NOT_APPLICABLE WSL：P-07 仅 Windows；与 fulltest 等覆盖一次。")
-        for result in results:
-            checked = _scan_binding_loop(StageResult(result.name, result.status, result.detail, result.log))
-            result.status, result.detail = checked.status, checked.detail
+    except GateStoppedError as error:
+        results.extend(error.results)
     except KeyboardInterrupt:
         results.append(Result("interruption", STATUS_FAILED, "用户中断；不报告为通过。"))
     except (OSError, ValueError, RuntimeError, subprocess.SubprocessError) as error:
@@ -925,9 +931,7 @@ def main(argv: list[str] | None = None) -> int:
         command = sub.add_parser(name, help=f"非编译预算 ≤{ceiling:.0f}s；保留缓存，观测编译独占区间扣时")
         _ = command.add_argument("--deadline-seconds", type=float, default=ceiling, help="只允许调低本级非编译预算")
         if name != "fastcheck":
-            _ = command.add_argument(
-                "--authorized", action="store_true", help="代表当次明确指令或本技能调用授权；不可自主升级"
-            )
+            _ = command.add_argument("--authorized", action="store_true", help="代表当次明确授权；不可自主升级")
     arguments = parser.parse_args(argv, namespace=_Arguments())
     if arguments.gate != "fastcheck" and not arguments.authorized:
         run = GateRun(
@@ -941,9 +945,7 @@ def main(argv: list[str] | None = None) -> int:
             compiler_ids=_compiler_ids,
             clock=clock,
         )
-        return run.finish(
-            [Result("authorization", STATUS_UNVERIFIED, "须当次明确指令或当前技能调用授权，并使用 --authorized。")]
-        )
+        return run.finish([Result("authorization", STATUS_UNVERIFIED, "须当次明确授权，并使用 --authorized。")])
     return execute_gate(arguments.gate, arguments.deadline_seconds, clock_override=clock)
 
 
