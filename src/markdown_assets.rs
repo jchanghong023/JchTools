@@ -359,6 +359,8 @@ fn initialize_staged(
             .map_err(|error| format!("创建许可证目录失败：{error}"))?;
         stage = "notice_write";
         write_notice(&notice_stage.join("THIRD_PARTY_NOTICES.md"), manifest)?;
+        // T-05：校验或 notice 写入期间的取消必须在最终落位前生效。
+        ensure_not_cancelled(cancel)?;
         stage = "notice_install";
         atomic_replace_dir(&notice_stage, &root.join("licenses"))?;
         // XB-10：用户提供 Xberg 运行目录，初始化不再下载任何引擎或组件包
@@ -372,6 +374,13 @@ fn initialize_staged(
             elapsed_ms = crate::logging::elapsed_ms(started),
             result = "validated_notice_installed",
             "转 Markdown 运行目录校验与许可证落位完成"
+        ),
+        Err(_) if cancel.load(std::sync::atomic::Ordering::Acquire) => tracing::info!(
+            component = "markdown_assets",
+            event = "markdown_assets_staged_cancelled",
+            stage,
+            elapsed_ms = crate::logging::elapsed_ms(started),
+            "转 Markdown 运行目录校验与许可证落位已取消"
         ),
         Err(_) => tracing::error!(
             event = "markdown_assets_staged_failed",
@@ -814,6 +823,7 @@ fn download_runtime_task(
         let receipt = serde_json::json!({
             "owner":"JchTools-xberg-download-v1",
             "tag":pack.tag,
+            "archive_url":pack.archive_url,
             "archive_sha256":pack.archive_sha256,
             "archive_size_bytes":pack.archive_size_bytes,
             "members_recipe":runtime_recipe(pack)?,
@@ -910,7 +920,7 @@ fn rollback_runtime_directory(directory: &Path, stage: &'static str) {
             "Xberg 本次目录已撤销"
         ),
         Err(error) => {
-            tracing::warn!(event = "runtime_install_rollback_failed", stage, error_kind = ?error.kind(), error_code = error.raw_os_error(), error = %crate::logging::safe_error(&error.to_string()), elapsed_ms = crate::logging::elapsed_ms(started), "Xberg 本次目录撤销失败，保留既有错误处理策略")
+            tracing::warn!(event = "runtime_install_rollback_failed", stage, error_kind = ?error.kind(), error_code = error.raw_os_error(), error = %crate::logging::safe_error(&error.to_string()), elapsed_ms = crate::logging::elapsed_ms(started), "Xberg 本次目录撤销失败，保留既有错误处理策略");
         }
     }
 }
@@ -1054,6 +1064,18 @@ fn write_notice(path: &Path, manifest: &AssetManifest) -> Result<(), String> {
     fs::write(path, text).map_err(|error| format!("写入许可证 notice 失败：{error}"))
 }
 
+#[rustfmt::skip]
+#[warn(
+    warnings,
+    unused_must_use,
+    unreachable_patterns,
+    unreachable_pub,
+    unused_variables,
+    rust_2018_idioms,
+    explicit_outlives_requirements,
+    elided_lifetimes_in_paths,
+    single_use_lifetimes
+)]
 #[cfg(test)]
 mod tests {
     use super::{load_manifest, media_component_dir, write_notice};
@@ -1457,6 +1479,16 @@ mod tests {
         let cancel = AtomicBool::new(false);
         let installed =
             super::download_runtime_with(&manifest, &cancel, &mut |_| {}, &mut downloader).unwrap();
+        // 覆盖 T-06/XB-10：已校验下载须持久记录精确来源，而非仅凭 tag 推断。
+        let receipt: serde_json::Value = serde_json::from_slice(
+            &fs::read(installed.join(super::XBERG_RELEASE_RECEIPT)).unwrap(),
+        )
+        .unwrap();
+        assert_eq!(
+            receipt["archive_url"].as_str(),
+            Some(manifest.xberg.archive_url.as_str()),
+            "发布记录必须保留本次实际采用的下载来源"
+        );
         assert_eq!(
             fs::read(installed.join("models/snapshot-ocr/det.onnx")).unwrap(),
             b"model"

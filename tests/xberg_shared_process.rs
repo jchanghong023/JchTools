@@ -1,3 +1,16 @@
+#![warn(
+    warnings,
+    unused_must_use,
+    unreachable_patterns,
+    unreachable_pub,
+    unused_variables,
+    future_incompatible,
+    rust_2018_idioms,
+    explicit_outlives_requirements,
+    elided_lifetimes_in_paths,
+    single_use_lifetimes
+)]
+
 #![allow(clippy::unwrap_used)]
 //! 覆盖 XB-14/XB-15/XB-17：真实代理进程及管道，模拟引擎（不代表真实模型验收）。
 
@@ -401,11 +414,11 @@ fn broker_does_not_hold_client_capture_pipes() {
         let (send, receive) = mpsc::channel();
         thread::spawn(move || {
             let mut buffer = String::new();
-            let _ = output.read_to_string(&mut buffer);
-            let _ = send.send(());
+            let result = output.read_to_string(&mut buffer);
+            let _ = send.send(result);
         });
-        let eof_in_time = receive.recv_timeout(Duration::from_secs(8)).is_ok();
-        let _ = mid.wait();
+        let captured = receive.recv_timeout(Duration::from_secs(8));
+        let mid_status = mid.wait().unwrap();
         let broker_pid = std::fs::read_to_string(&pidfile)
             .ok()
             .and_then(|text| text.trim().parse::<u64>().ok())
@@ -414,7 +427,9 @@ fn broker_does_not_hold_client_capture_pipes() {
             let _ = Command::new("taskkill")
                 .args(["/PID", &broker_pid.to_string(), "/F"])
                 .output();
-            if eof_in_time {
+            if let Ok(result) = captured {
+                result.expect("读取捕获管道失败不能视为 EOF");
+                assert!(mid_status.success(), "中间层未正常退出：{mid_status}");
                 // EOF 到达且代理仍常驻：句柄链已断开，缺陷修复成立。
                 return;
             }
@@ -472,6 +487,22 @@ fn documents_reuse_process_and_snapshot_finishes_during_document() {
     // 引擎获取等待：每登录会话只允许一个 Xberg（进程扫描执法）。会话锁已保证
     // 与其他测试二进制互斥；若仍遇到「已有 Xberg」（残留孤儿），对拒绝做有界
     // 重试。忙碌应答携带的是占用者 pid，守卫只从成功应答构造。
+    // XB-14：两个客户端在首次连接前同步起跑；先完成 state 再 spawn 只覆盖复用，
+    // 无法检出首次启动竞争造成的第二个引擎。
+    let startup = Arc::new(std::sync::Barrier::new(2));
+    let concurrent_startup = startup.clone();
+    let directory = root.to_path_buf();
+    let concurrent = std::thread::spawn(move || {
+        concurrent_startup.wait();
+        xberg_runtime::request(
+            &directory,
+            json!({"command":"snapshot_state"}),
+            Duration::from_secs(15),
+            &AtomicBool::new(false),
+        )
+        .unwrap()
+    });
+    startup.wait();
     let session_deadline = Instant::now() + Duration::from_secs(60);
     let state = loop {
         let response = xberg_runtime::request(
@@ -494,26 +525,15 @@ fn documents_reuse_process_and_snapshot_finishes_during_document() {
         );
         std::thread::sleep(Duration::from_millis(500));
     };
-    // 同时抢占初始连接：代理可能启动竞争，但只有一个代理可创建引擎。
-    let directory = root.to_path_buf();
-    let concurrent = std::thread::spawn(move || {
-        xberg_runtime::request(
-            &directory,
-            json!({"command":"snapshot_state"}),
-            Duration::from_secs(15),
-            &AtomicBool::new(false),
-        )
-        .unwrap()
-    });
+    assert_eq!(state["ok"], true, "代理启动失败：{state}");
     let _shared = SharedProcess {
         broker_pid: state["jchtools_broker_pid"].as_u64().unwrap(),
         engine_pid: state["jchtools_xberg_pid"].as_u64(),
     };
-    assert_eq!(state["ok"], true, "代理启动失败：{state}");
-    assert_eq!(
-        concurrent.join().unwrap()["jchtools_xberg_pid"],
-        state["jchtools_xberg_pid"]
-    );
+    let concurrent = concurrent.join().unwrap();
+    assert_eq!(concurrent["ok"], true, "并发初始连接失败：{concurrent}");
+    assert_eq!(concurrent["jchtools_broker_pid"], state["jchtools_broker_pid"]);
+    assert_eq!(concurrent["jchtools_xberg_pid"], state["jchtools_xberg_pid"]);
     for _ in 0..2 {
         let result = markdown_document::convert(
             &root.join("short.txt"),
@@ -722,7 +742,7 @@ fn cancel_ack_without_terminal_keeps_document_lane_and_snapshot_alive() {
     let unresponsive = std::thread::spawn(move || {
         xberg_runtime::request(
             &directory,
-            json!({"command":"extract","path":directory.join("unresponsive.txt"),"mode":"normal"}),
+            json!({"command":"extract","path":directory.join("unresponsive.txt")}),
             Duration::from_millis(300),
             &AtomicBool::new(false),
         )
@@ -738,7 +758,7 @@ fn cancel_ack_without_terminal_keeps_document_lane_and_snapshot_alive() {
 
     let rejected = xberg_runtime::request(
         root,
-        json!({"command":"extract","path":root.join("short.txt"),"mode":"normal"}),
+        json!({"command":"extract","path":root.join("short.txt")}),
         Duration::from_secs(3),
         &AtomicBool::new(false),
     )
@@ -944,6 +964,10 @@ fn watchdog_exit_flushes_diagnostic_log_before_process_exit() {
     assert_eq!(state["ok"], true, "代理启动失败：{state}");
     let broker_pid = state["jchtools_broker_pid"].as_u64().unwrap();
     let engine_pid = state["jchtools_xberg_pid"].as_u64();
+    let _shared = SharedProcess {
+        broker_pid,
+        engine_pid,
+    };
     // 触发托盘统一退出（XB-23）：无在途任务时看门狗应终结引擎并退出代理。
     // 停止确认与 background_settings 的 stop() 同口径：看门狗最快 100ms 后
     // 退出，响应先于退出写回；管道竞态时有界重试（代理消失后按未运行应答）。
@@ -970,30 +994,55 @@ fn watchdog_exit_flushes_diagnostic_log_before_process_exit() {
     for entry in std::fs::read_dir(&log_dir).unwrap().flatten() {
         logs.push_str(&std::fs::read_to_string(entry.path()).unwrap_or_default());
     }
+    let broker_pid_field = format!("pid={broker_pid}");
+    let broker_record = |event: &str| {
+        logs.lines().find(|line| {
+            line.split_ascii_whitespace()
+                .any(|field| field == broker_pid_field)
+                && line
+                    .split_ascii_whitespace()
+                    .any(|field| field.strip_prefix("event=") == Some(event))
+        })
+    };
     assert!(
-        logs.contains("共享代理开始监听"),
-        "日志应含启动记录（证明初始化本身生效）：目录 {log_dir:?}"
+        broker_record("xberg_broker_listening").is_some(),
+        "日志应含代理启动记录（证明初始化本身生效）：目录 {log_dir:?}；{logs}"
     );
+    let engine_pid = engine_pid.expect("此退出场景必须启动真实引擎");
+    let engine_pid_field = format!("engine_pid={engine_pid}");
+    let engine_exit = broker_record("xberg_engine_exited")
+        .unwrap_or_else(|| panic!("退出前的引擎终态必须落盘（P-10）：{logs}"));
     assert!(
-        logs.contains("停止看门狗已终结共享引擎"),
-        "退出前的引擎终结记录必须落盘（P-10）：{logs}"
+        engine_exit
+            .split_ascii_whitespace()
+            .any(|field| field == engine_pid_field)
+            && engine_exit
+                .split_ascii_whitespace()
+                .any(|field| field == "reason=\"stop_watchdog\"")
+            && engine_exit
+                .split_ascii_whitespace()
+                .any(|field| field.starts_with("exit_code=")),
+        "引擎终态须归属本次看门狗回收的真实进程并包含退出码：{logs}"
     );
+    let stopped = broker_record("xberg_broker_stopped")
+        .unwrap_or_else(|| panic!("代理退出事件自身必须落盘（P-10）：{logs}"));
     assert!(
-        logs.contains("共享代理退出前刷盘诊断日志"),
-        "退出事件自身的记录必须落盘（P-10）：{logs}"
+        stopped
+            .split_ascii_whitespace()
+            .any(|field| field == "exit_code=0")
+            && broker_record("application_stopped").is_some(),
+        "代理实际退出前必须完成日志生命周期并记录退出结果：{logs}"
     );
-    // 收尾：引擎应随代理的 Job 句柄关闭被回收；仍存活则有界强清，避免占会话。
-    if let Some(pid) = engine_pid {
-        let deadline = Instant::now() + Duration::from_secs(8);
-        while process_alive(pid) && Instant::now() < deadline {
-            std::thread::sleep(Duration::from_millis(200));
-        }
-        if process_alive(pid) {
-            let _ = Command::new("taskkill")
-                .args(["/PID", &pid.to_string(), "/F"])
-                .output();
-        }
+    // XB-23：退出须实际回收本应用拥有的引擎；守卫只负责失败清场，不能把泄漏
+    // 强杀后计为成功。
+    let deadline = Instant::now() + Duration::from_secs(8);
+    while process_alive(engine_pid) && Instant::now() < deadline {
+        std::thread::sleep(Duration::from_millis(200));
     }
+    assert!(
+        !process_alive(engine_pid),
+        "后台退出后共享引擎仍存活：pid={engine_pid}"
+    );
 }
 
 /// 覆盖（孤儿回收回归；缺陷 2026-10-03 两次复现：broker 无自退条件、测试清场

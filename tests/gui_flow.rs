@@ -1,3 +1,16 @@
+#![warn(
+    warnings,
+    unused_must_use,
+    unreachable_patterns,
+    unreachable_pub,
+    unused_variables,
+    future_incompatible,
+    rust_2018_idioms,
+    explicit_outlives_requirements,
+    elided_lifetimes_in_paths,
+    single_use_lifetimes
+)]
+
 //! 计划执行确认流的无头 GUI 测试：用真实回调 + 真实引擎线程走完整
 //! 「分析（只读）→ 检查计划 → 确认执行 → 整理结束」流程，以及
 //! 「递归解压」的一段确认流程。驱动器定时器在事件循环内逐步推进状态机，超时自动失败。
@@ -59,6 +72,8 @@ fn run_gui_job(job: impl FnOnce() + Send + 'static) {
         .unwrap_or_else(std::sync::PoisonError::into_inner)
         .send(Box::new(move || {
             let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(job));
+            // 每个任务结束（包括 panic）都停止其重复驱动器，避免它在后续用例的事件循环中继续触发。
+            DRIVER.with(|slot| drop(slot.borrow_mut().take()));
             let message = match outcome {
                 Ok(()) => Ok(()),
                 Err(payload) => Err(if let Some(text) = payload.downcast_ref::<&str>() {
@@ -120,8 +135,8 @@ fn make_fixture() -> tempfile::TempDir {
         fs::write(&p, bytes).unwrap();
         filetime::set_file_mtime(&p, filetime::FileTime::from_unix_time(mtime, 0)).unwrap();
     };
-    write("a.txt", b"same content", 100); // 旧 → 去重时被删除
-    write("b.txt", b"same content", 200); // 新 → 保留
+    write("a.txt", b"same content", 100); // 默认不同名去重关闭，旧文件仍须保留
+    write("b.txt", b"same content", 200); // 默认不同名去重关闭，新文件同样保留
     write("temp.tmp", b"junk", 300); // 默认 clean_temp=false → 会按归类移到「其他」大类
     dir
 }
@@ -274,15 +289,18 @@ fn plan_execution_confirmation_flow_runs_end_to_end() {
         tasks_root.is_dir(),
         "任务库应写入注入的 state 目录：{tasks_root:?}"
     );
-    let task_count = fs::read_dir(&tasks_root).map_or(0, std::iter::Iterator::count);
+    let task_count = fs::read_dir(&tasks_root)
+        .unwrap()
+        .try_fold(0usize, |count, entry| entry.map(|_| count + 1))
+        .expect("读取注入状态目录中的任务条目");
     assert!(task_count >= 1, "注入 state 下应有任务目录");
 
-    // 2) 去重副本已移除，保留项与未开启清理的文件归类后仍存在
+    // 2) 默认不同名去重关闭：保留项与未开启清理的文件归类后仍存在，内容必须不变。
     //（GUI 默认规则不同名去重关闭：a.txt/b.txt 同内容不同名，各自随归类保留）。
     let remaining: Vec<String> = fs::read_dir(&data)
         .unwrap()
-        .filter_map(std::result::Result::ok)
-        .map(|e| {
+        .map(|entry| {
+            let e = entry.expect("读取整理结果条目");
             format!(
                 "{}{}",
                 e.file_name().to_string_lossy(),
@@ -302,6 +320,21 @@ fn plan_execution_confirmation_flow_runs_end_to_end() {
         classified("文档", "a.txt").exists() && classified("文档", "b.txt").exists(),
         "GUI 默认不同名去重关闭：a.txt/b.txt 同内容不同名，各自随归类保留到 文档/ 大类：{remaining:?}"
     );
+    for (category, name, expected) in [
+        ("文档", "a.txt", b"same content".as_slice()),
+        ("文档", "b.txt", b"same content".as_slice()),
+        ("其他", "temp.tmp", b"junk".as_slice()),
+    ] {
+        assert_eq!(
+            fs::read(classified(category, name)).unwrap(),
+            expected,
+            "C-05/S-01：归类后必须保留 {name} 的完整内容"
+        );
+        assert!(
+            !data.join(name).exists(),
+            "C-05：归类必须移动 {name}，不得复制后遗留原文件"
+        );
+    }
 }
 
 // 覆盖 H-06, S-04（Git 目录整树排除在界面明确可见：结束后提示条仍保留跳过说明，
@@ -346,20 +379,33 @@ fn git_subtree_skip_is_visible_after_run_and_tree_untouched() {
         moved.join("tracked.txt").is_file(),
         "H-06：Git 目录整树（含全部内容）不参与归类，随项目整体移动"
     );
+    assert_eq!(
+        fs::read(moved.join(".git").join("config")).unwrap(),
+        b"git",
+        "H-06/C-14：项目内 .git/config 必须原字节保留"
+    );
+    assert_eq!(
+        fs::read(moved.join("tracked.txt")).unwrap(),
+        b"tracked",
+        "H-06/C-14：项目内普通文件必须原字节保留"
+    );
+    assert!(
+        !data.join("keepgit").exists(),
+        "C-14：项目必须整体移动，不得保留原项目目录"
+    );
     assert!(
         !moved.join("其他").exists(),
         "H-06：Git 目录树内不得生成分类目录"
     );
     // 固定归类（C-05，恒开启）：docs/note.txt → 文档/note.txt（排除树之外照常处理）。
-    let handled = [
-        "文档/note.txt".to_string(),
-        "文档/docs/note.txt".to_string(),
-        "docs/note.txt".to_string(),
-        "文档/note.txt".to_string(),
-    ];
+    assert_eq!(
+        fs::read(data.join("文档").join("note.txt")).unwrap(),
+        b"note",
+        "C-05：排除树之外的文件必须移入一级大类且内容不变"
+    );
     assert!(
-        handled.iter().any(|rel| data.join(rel).is_file()),
-        "排除树之外的文件仍按计划处理（归类后仍存在）"
+        !data.join("docs").exists() && !data.join("文档").join("docs").exists(),
+        "H-05/C-05：不得保留搬空来源目录或新增第二级分类目录"
     );
 }
 

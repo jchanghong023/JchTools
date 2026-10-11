@@ -1,8 +1,8 @@
 //! 常开诊断日志（P-10）：与 perf 共用 tracing registry，不读取外部 RUST_LOG。
 //!
-//! 主落点为状态目录 `logs/jchtools.<UTC日期>.<pid>.log`，按天轮转并清理
-//! 超过 14 天的本产品日志（兼容旧 `jchtools.log.<日期>`）。主目录不可写时
-//! 使用当前用户 LocalAppData 下的 `JchTools/Logs`；测试构建只使用隔离状态目录
+//! 主落点为状态目录 `logs/jchtools.<UTC日期>.<pid>[.<分段>].log`；每天新建，
+//! 单文件不超过 1 MiB，自有文件最多 10 个，最长保留 14 天（兼容旧 `jchtools.log.<日期>`）。
+//! 主目录不可写时使用当前用户 LocalAppData 下的 `JchTools/Logs`；测试构建只使用隔离状态目录
 //! 下的 `logs-fallback`。两处失败仅向 stderr 报告错误类型/码，不影响业务。
 //!
 //! 每个事件为 UTC 微秒时间戳的单行 key=value，包含级别、PID、线程、组件、
@@ -26,7 +26,19 @@ pub const LOG_DIR: &str = "logs";
 const LOG_FILE_PREFIX: &str = "jchtools";
 const RETENTION_DAYS: u64 = 14;
 const TEXT_LIMIT: usize = 2048;
-const FILTER: &str = "jchtools=info,snap_ocr_worker=info";
+const FILE_LIMIT: u64 = 1_048_576;
+const FILE_COUNT_LIMIT: usize = 10;
+const RECORD_LIMIT: usize = 65_536;
+
+fn selected_level(value: Option<&str>) -> tracing::level_filters::LevelFilter {
+    use tracing::level_filters::LevelFilter;
+    match value.map(str::trim) {
+        Some(value) if value.eq_ignore_ascii_case("debug") => LevelFilter::DEBUG,
+        Some(value) if value.eq_ignore_ascii_case("warning") => LevelFilter::WARN,
+        Some(value) if value.eq_ignore_ascii_case("error") => LevelFilter::ERROR,
+        _ => LevelFilter::INFO,
+    }
+}
 static OPERATION_SEQUENCE: AtomicU64 = AtomicU64::new(1);
 
 fn report_stderr(message: fmt::Arguments<'_>) {
@@ -44,6 +56,7 @@ pub fn new_operation_id() -> String {
 }
 
 /// 建立独立操作 span；tracing 保留当前父 span，格式器输出完整上下文链。
+#[must_use]
 pub fn operation_span(component: &'static str, operation: &'static str) -> tracing::Span {
     operation_span_with_id(component, operation, &new_operation_id())
 }
@@ -57,6 +70,7 @@ pub fn operation_span_with_id(
     tracing::info_span!("operation", component, operation, operation_id)
 }
 
+#[must_use]
 pub fn elapsed_ms(started: Instant) -> u64 {
     u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX)
 }
@@ -249,7 +263,7 @@ fn quoted(writer: &mut Writer<'_>, value: &str) -> fmt::Result {
             '\r' => writer.write_str("\\r")?,
             '\t' => writer.write_str("\\t")?,
             character if character.is_control() => {
-                write!(writer, "\\u{{{:x}}}", u32::from(character))?
+                write!(writer, "\\u{{{:x}}}", u32::from(character))?;
             }
             character => writer.write_char(character)?,
         }
@@ -381,7 +395,7 @@ struct DiagnosticEvent {
 
 fn header(
     writer: &mut Writer<'_>,
-    level: &tracing::Level,
+    level: tracing::Level,
     component: &str,
     event: &str,
 ) -> fmt::Result {
@@ -417,7 +431,7 @@ where
             ));
             header(
                 &mut writer,
-                &tracing::Level::WARN,
+                tracing::Level::WARN,
                 "logging",
                 "diagnostic_queue_dropped",
             )?;
@@ -430,7 +444,7 @@ where
         event.record(&mut fields);
         header(
             &mut writer,
-            event.metadata().level(),
+            *event.metadata().level(),
             fields
                 .component
                 .as_deref()
@@ -457,10 +471,10 @@ where
     }
 }
 
-// Observe the existing appender's Write failures without recursively logging to it.
-// Rotation and the writer thread remain owned by tracing-appender.
+// tracing-appender 保留文件写入与非阻塞队列；容量、分段和保留期由同一个扩展管理。
+// native max_log_files 不启用，避免它按另一个顺序清理历史。
 struct ObservedWriter {
-    appender: tracing_appender::rolling::RollingFileAppender,
+    appender: io::BufWriter<BoundedAppender>,
     failure_reported: Arc<AtomicBool>,
 }
 
@@ -534,14 +548,36 @@ fn fallback_directory(state_dir: &Path) -> Option<PathBuf> {
     }
 }
 
-fn open_appender(
-    directory: &Path,
-) -> Result<tracing_appender::rolling::RollingFileAppender, io::Error> {
+fn open_appender(directory: &Path) -> io::Result<BoundedAppender> {
     std::fs::create_dir_all(directory)?;
+    let lock = std::fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .create(true)
+        .truncate(false)
+        .open(directory.with_extension("retention.lock"))?;
+    let mut appender = BoundedAppender {
+        directory: directory.to_owned(),
+        lock,
+        writer: None,
+        path: PathBuf::new(),
+        day: u64::MAX,
+        segment: 0,
+    };
+    appender.lock.lock()?;
+    let result = appender.prepare(RECORD_LIMIT);
+    let unlock = appender.lock.unlock();
+    result.and(unlock)?;
+    Ok(appender)
+}
+
+fn native_appender(
+    directory: &Path,
+    name: &str,
+) -> io::Result<tracing_appender::rolling::RollingFileAppender> {
     tracing_appender::rolling::RollingFileAppender::builder()
-        .rotation(tracing_appender::rolling::Rotation::DAILY)
-        .filename_prefix(LOG_FILE_PREFIX)
-        .filename_suffix(format!("{}.log", std::process::id()))
+        .rotation(tracing_appender::rolling::Rotation::NEVER)
+        .filename_prefix(name)
         .build(directory)
         .map_err(|error| {
             // InitError preserves its io::Error as source. Never persist its Display (path).
@@ -559,6 +595,187 @@ fn open_appender(
                 },
             )
         })
+}
+
+struct BoundedAppender {
+    directory: PathBuf,
+    lock: std::fs::File,
+    writer: Option<tracing_appender::rolling::RollingFileAppender>,
+    path: PathBuf,
+    day: u64,
+    segment: u64,
+}
+
+impl BoundedAppender {
+    fn prepare(&mut self, incoming: usize) -> io::Result<()> {
+        let day = SystemTime::now()
+            .duration_since(SystemTime::UNIX_EPOCH)
+            .map_err(io::Error::other)?
+            .as_secs()
+            / 86_400;
+        if day != self.day {
+            self.writer = None;
+            self.day = day;
+            self.segment = 0;
+            self.path = self.segment_path();
+        }
+        loop {
+            let metadata = match std::fs::symlink_metadata(&self.path) {
+                Ok(metadata) if metadata.is_file() => Some(metadata),
+                Ok(_) => return Err(io::Error::other("日志路径不是普通文件")),
+                Err(error) if error.kind() == io::ErrorKind::NotFound => None,
+                Err(error) => return Err(error),
+            };
+            let size = metadata.as_ref().map_or(0, std::fs::Metadata::len);
+            if size > FILE_LIMIT {
+                return Err(io::Error::other("已有诊断日志超出容量，需要另行批准迁移"));
+            }
+            if size.saturating_add(u64::try_from(incoming).unwrap_or(u64::MAX)) <= FILE_LIMIT {
+                // 所有进程共享同一把锁。其他进程可能已按策略淘汰本进程的旧分段；
+                // 文件不存在时丢弃旧句柄，重新打开，避免向已删除的文件写入。
+                if metadata.is_none() {
+                    self.writer = None;
+                }
+                if self.writer.is_none() {
+                    retain_owned(
+                        &self.directory,
+                        Some(&self.path),
+                        usize::from(metadata.is_none()),
+                    )?;
+                    let name = self
+                        .path
+                        .file_name()
+                        .and_then(|name| name.to_str())
+                        .ok_or_else(|| io::Error::other("日志文件名无效"))?;
+                    self.writer = Some(native_appender(&self.directory, name)?);
+                }
+                return Ok(());
+            }
+            self.writer = None;
+            self.segment = self
+                .segment
+                .checked_add(1)
+                .ok_or_else(|| io::Error::other("日志分段编号耗尽"))?;
+            self.path = self.segment_path();
+        }
+    }
+
+    fn segment_path(&self) -> PathBuf {
+        let mut timestamp = String::new();
+        let _ =
+            tracing_subscriber::fmt::time::SystemTime.format_time(&mut Writer::new(&mut timestamp));
+        let date = timestamp.get(..10).unwrap_or("unknown-date");
+        let pid = std::process::id();
+        let name = if self.segment == 0 {
+            format!("{LOG_FILE_PREFIX}.{date}.{pid}.log")
+        } else {
+            format!("{LOG_FILE_PREFIX}.{date}.{pid}.{}.log", self.segment)
+        };
+        self.directory.join(name)
+    }
+
+    fn write_locked(&mut self, bytes: &[u8]) -> io::Result<usize> {
+        // 非阻塞 worker 按完整事件提交；缓冲批次也只在事件边界刷盘。
+        // 一批最多 RECORD_LIMIT 字节时一次加锁/容量检查，不逐条访问文件系统。
+        if bytes.len() <= RECORD_LIMIT {
+            self.prepare(bytes.len())?;
+            self.writer
+                .as_mut()
+                .ok_or_else(|| io::Error::other("日志写入器不可用"))?
+                .write_all(bytes)?;
+            return Ok(bytes.len());
+        }
+        for line in bytes.split_inclusive(|byte| *byte == b'\n') {
+            let summary;
+            let record = if line.len() > RECORD_LIMIT {
+                summary = summarize_record(line)?;
+                summary.as_bytes()
+            } else {
+                line
+            };
+            self.prepare(record.len())?;
+            self.writer
+                .as_mut()
+                .ok_or_else(|| io::Error::other("日志写入器不可用"))?
+                .write_all(record)?;
+        }
+        Ok(bytes.len())
+    }
+}
+
+impl io::Write for BoundedAppender {
+    fn write(&mut self, bytes: &[u8]) -> io::Result<usize> {
+        self.lock.lock()?;
+        let result = self.write_locked(bytes);
+        let unlock = self.lock.unlock();
+        result.and_then(|count| unlock.map(|()| count))
+    }
+
+    fn flush(&mut self) -> io::Result<()> {
+        self.writer.as_mut().map_or(Ok(()), io::Write::flush)
+    }
+}
+
+// 只在整条记录超限时分配摘要；不截断 UTF-8 或带引号的字段。
+// 保留事件身份、错误元数据及首个可用关联 ID，不复制 span/正文大块内容。
+fn summarize_record(bytes: &[u8]) -> io::Result<String> {
+    const KEYS: [&str; 12] = [
+        "timestamp",
+        "level",
+        "pid",
+        "thread_id",
+        "component",
+        "event",
+        "stage",
+        "error_type",
+        "error_code",
+        "elapsed_ms",
+        "operation_id",
+        "request_id",
+    ];
+    let text = std::str::from_utf8(bytes).map_err(io::Error::other)?;
+    let mut fields: [Option<&str>; 12] = [None; 12];
+    let mut start = 0;
+    let mut quoted = false;
+    let mut escaped = false;
+    for (index, character) in text
+        .char_indices()
+        .chain(std::iter::once((text.len(), ' ')))
+    {
+        if escaped {
+            escaped = false;
+        } else if quoted && character == '\\' {
+            escaped = true;
+        } else if character == '"' {
+            quoted = !quoted;
+        } else if !quoted && character.is_whitespace() {
+            let field = &text[start..index];
+            let key = field.split_once('=').map_or("", |(key, _)| key);
+            if let Some(slot) = KEYS.iter().position(|candidate| *candidate == key) {
+                // 头部身份和首个关联 ID 保持；事件字段位于 span 链之后，
+                // 因而阶段/错误/耗时必须取最后一个，不能被外层 span 同名字段遮蔽。
+                if fields[slot].is_none() || (6..10).contains(&slot) {
+                    fields[slot] = Some(field);
+                }
+            }
+            start = index + character.len_utf8();
+        }
+    }
+    let capacity = fields
+        .iter()
+        .flatten()
+        .map(|field| field.len() + 1)
+        .sum::<usize>()
+        + 80;
+    let mut summary = String::with_capacity(capacity.min(RECORD_LIMIT));
+    for field in fields.into_iter().flatten() {
+        if summary.len() + field.len() + 80 < RECORD_LIMIT {
+            summary.push_str(field);
+            summary.push(' ');
+        }
+    }
+    let _ = writeln!(summary, "truncated=true original_bytes={}", bytes.len());
+    Ok(summary)
 }
 
 /// 最早入口初始化；只有全局 subscriber 安装成功才返回 Some 并接管 panic。
@@ -585,19 +802,19 @@ pub fn init(state_dir: &Path) -> Option<Guard> {
             }
         }
     };
+    let file_path = appender.path.clone();
     let (writer, worker) = tracing_appender::non_blocking(ObservedWriter {
-        appender,
+        appender: io::BufWriter::with_capacity(RECORD_LIMIT, appender),
         failure_reported: Arc::new(AtomicBool::new(false)),
     });
     let dropped = writer.error_counter();
-    let filter = match EnvFilter::try_new(FILTER) {
-        Ok(filter) => filter,
-        Err(_) => {
-            report_stderr(format_args!(
-                "event=diagnostic_init_failed stage=filter error_type=InvalidFilter"
-            ));
-            return None;
-        }
+    let level_value = std::env::var("JCH_LOG_LEVEL").ok();
+    let level = selected_level(level_value.as_deref());
+    let Ok(filter) = EnvFilter::try_new(format!("jchtools={level},snap_ocr_worker={level}")) else {
+        report_stderr(format_args!(
+            "event=diagnostic_init_failed stage=filter error_type=InvalidFilter"
+        ));
+        return None;
     };
     let layer = tracing_subscriber::fmt::layer()
         .fmt_fields(DiagnosticFields)
@@ -663,14 +880,7 @@ pub fn init(state_dir: &Path) -> Option<Guard> {
         return None;
     };
     install_panic_hook();
-    let mut timestamp = String::new();
-    let _ = tracing_subscriber::fmt::time::SystemTime.format_time(&mut Writer::new(&mut timestamp));
-    let date = timestamp.get(..10).unwrap_or("unknown-date");
-    let file_path = directory.join(format!(
-        "{LOG_FILE_PREFIX}.{date}.{}.log",
-        std::process::id()
-    ));
-    tracing::info!(component = "logging", event = "application_started", application = "JchTools", role = detect_role(), version = env!("CARGO_PKG_VERSION"), log_file = %file_path.display(), level = "info", mode = detect_role(), debug_assertions = cfg!(debug_assertions), elapsed_ms = elapsed_ms(started), "应用诊断日志已启动");
+    tracing::info!(component = "logging", event = "application_started", application = "JchTools", role = detect_role(), version = env!("CARGO_PKG_VERSION"), log_file = %file_path.display(), %level, mode = detect_role(), debug_assertions = cfg!(debug_assertions), elapsed_ms = elapsed_ms(started), "应用诊断日志已启动");
     if let Some(error) = fallback_error {
         tracing::warn!(component = "logging", event = "diagnostic_directory_fallback", stage = "primary", error_type = ?error.kind(), error_code = error.raw_os_error(), "主日志目录不可写，已使用用户级备用目录");
     }
@@ -788,69 +998,92 @@ fn product_log_name(name: &str) -> bool {
     else {
         return false;
     };
-    let Some((date, pid)) = rest.split_once('.') else {
+    let mut parts = rest.split('.');
+    let Some(date) = parts.next() else {
         return false;
     };
-    log_date(date) && !pid.is_empty() && pid.bytes().all(|byte| byte.is_ascii_digit())
+    let Some(pid) = parts.next() else {
+        return false;
+    };
+    let numeric =
+        |value: &str| !value.is_empty() && value.bytes().all(|byte| byte.is_ascii_digit());
+    log_date(date) && numeric(pid) && parts.next().is_none_or(numeric) && parts.next().is_none()
 }
 
 fn retention_failure(stage: &'static str, error: &io::Error) {
     tracing::warn!(component = "logging", event = "diagnostic_retention_io_failed", stage, error_type = ?error.kind(), error_code = error.raw_os_error(), "诊断日志保留期清理发生文件错误");
 }
 
-/// 不遍历链接，不按模糊前缀删除用户业务文件。
-fn prune_expired(directory: &Path) -> (u64, u64) {
-    let entries = match std::fs::read_dir(directory) {
-        Ok(entries) => entries,
-        Err(error) => {
-            retention_failure("read_directory", &error);
-            return (0, 1);
-        }
-    };
-    let cutoff = SystemTime::now() - Duration::from_secs(RETENTION_DAYS * 24 * 3600);
-    let mut removed = 0;
-    let mut failed = 0;
-    for entry in entries {
-        let entry = match entry {
-            Ok(entry) => entry,
-            Err(error) => {
-                retention_failure("read_entry", &error);
-                failed += 1;
-                continue;
-            }
-        };
+/// 唯一保留机制：先校验归属和容量，再按修改时间、文件名排序；不遍历链接。
+/// protected 是本次写入的文件；reserve 为即将创建的活动文件预留名额。
+fn retain_owned(directory: &Path, protected: Option<&Path>, reserve: usize) -> io::Result<u64> {
+    let mut owned = Vec::new();
+    for entry in std::fs::read_dir(directory)? {
+        let entry = entry?;
         if !product_log_name(&entry.file_name().to_string_lossy()) {
             continue;
         }
-        let metadata = match std::fs::symlink_metadata(entry.path()) {
-            Ok(metadata) => metadata,
-            Err(error) => {
-                retention_failure("metadata", &error);
-                failed += 1;
-                continue;
-            }
-        };
+        let metadata = std::fs::symlink_metadata(entry.path())?;
         if !metadata.is_file() {
             continue;
         }
-        match metadata.modified() {
-            Ok(modified) if modified < cutoff => match std::fs::remove_file(entry.path()) {
-                Ok(()) => removed += 1,
-                Err(error) => {
-                    retention_failure("remove_file", &error);
-                    failed += 1;
-                }
-            },
-            Ok(_) => {}
-            Err(error) => {
-                retention_failure("modified_time", &error);
-                failed += 1;
-            }
+        if metadata.len() > FILE_LIMIT {
+            return Err(io::Error::other("已有诊断日志超出容量，需要另行批准迁移"));
+        }
+        owned.push((metadata.modified()?, entry.path()));
+    }
+    owned.sort_unstable();
+    let cutoff = SystemTime::now() - Duration::from_secs(RETENTION_DAYS * 24 * 3600);
+    let mut remaining = owned.len();
+    let mut removed = 0;
+    for (modified, path) in owned {
+        if protected == Some(path.as_path()) {
+            continue;
+        }
+        if modified < cutoff || remaining + reserve > FILE_COUNT_LIMIT {
+            std::fs::remove_file(path)?;
+            remaining -= 1;
+            removed += 1;
         }
     }
-    (removed, failed)
+    Ok(removed)
 }
 
+fn prune_expired(directory: &Path) -> (u64, u64) {
+    // 与写入器使用相同锁和相同排序/删除策略，不启动第二套清理器。
+    let result = (|| {
+        let lock = std::fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .create(true)
+            .truncate(false)
+            .open(directory.with_extension("retention.lock"))?;
+        lock.lock()?;
+        let retained = retain_owned(directory, None, 0);
+        let unlock = lock.unlock();
+        retained.and_then(|removed| unlock.map(|()| removed))
+    })();
+    match result {
+        Ok(removed) => (removed, 0),
+        Err(error) => {
+            retention_failure("retention", &error);
+            (0, 1)
+        }
+    }
+}
+
+#[rustfmt::skip]
+#[warn(
+    warnings,
+    unused_must_use,
+    unreachable_patterns,
+    unreachable_pub,
+    unused_variables,
+    rust_2018_idioms,
+    explicit_outlives_requirements,
+    elided_lifetimes_in_paths,
+    single_use_lifetimes
+)]
 #[cfg(test)]
 mod tests {
     #![allow(clippy::unwrap_used)]
@@ -1017,7 +1250,7 @@ mod tests {
                     token = 987_654_321_u64,
                     "关联线程已完成"
                 );
-            })
+            });
         })
         .join()
         .unwrap();
@@ -1087,7 +1320,7 @@ mod tests {
         let temp = workspace();
         let directory = temp.path().join(LOG_DIR);
         std::fs::create_dir_all(&directory).unwrap();
-        let old = SystemTime::now() - Duration::from_secs(16 * 24 * 3600);
+        let old = SystemTime::now() - Duration::from_hours(16 * 24);
         for name in [
             "jchtools.log.2026-01-01",
             "jchtools.2026-01-01.123.log",
@@ -1154,5 +1387,101 @@ mod tests {
         assert_eq!(safe_url(&long_userinfo), "https://example.invalid/a");
         assert!(!safe_error(&long_userinfo).contains("private-credential"));
         assert_ne!(new_operation_id(), new_operation_id());
+    }
+
+    /// 覆盖 P-10：配置阈值接受大小写和首尾空白，非法值回到 INFO。
+    #[test]
+    fn log_level_selection_accepts_supported_values_and_defaults() {
+        use tracing::level_filters::LevelFilter;
+        for (input, expected) in [
+            (None, LevelFilter::INFO),
+            (Some(""), LevelFilter::INFO),
+            (Some(" trace "), LevelFilter::INFO),
+            (Some(" DeBuG \t"), LevelFilter::DEBUG),
+            (Some("INFO"), LevelFilter::INFO),
+            (Some(" Warning "), LevelFilter::WARN),
+            (Some("error"), LevelFilter::ERROR),
+        ] {
+            assert_eq!(selected_level(input), expected);
+        }
+    }
+
+    /// 覆盖 P-10：UTF-8 和 LF 均计入容量；淘汰按同一顺序且保留未知文件。
+    #[test]
+    fn bounded_sink_rotates_before_overflow_and_limits_owned_history() {
+        let temp = workspace();
+        let directory = temp.path().join(LOG_DIR);
+        let mut appender = open_appender(&directory).unwrap();
+        let unowned = directory.join("jchtools.2026-01-01.123.log.gz");
+        std::fs::write(&unowned, b"unowned compressed history").unwrap();
+        let record = format!("{}aaa\n", "诊".repeat((RECORD_LIMIT - 4) / 3));
+        assert_eq!(record.len(), RECORD_LIMIT);
+        for _ in 0..(FILE_COUNT_LIMIT + 2) * 16 {
+            appender.write_all(record.as_bytes()).unwrap();
+        }
+        appender.write_all(b"final-observable-record\n").unwrap();
+        appender.flush().unwrap();
+        let owned: Vec<_> = std::fs::read_dir(&directory)
+            .unwrap()
+            .flatten()
+            .filter(|entry| product_log_name(&entry.file_name().to_string_lossy()))
+            .collect();
+        assert_eq!(owned.len(), FILE_COUNT_LIMIT);
+        assert!(owned
+            .iter()
+            .all(|entry| entry.metadata().unwrap().len() <= FILE_LIMIT));
+        assert!(owned
+            .iter()
+            .any(|entry| entry.metadata().unwrap().len() == FILE_LIMIT));
+        assert!(contents(&directory).contains("final-observable-record"));
+        assert_eq!(
+            std::fs::read(&unowned).unwrap(),
+            b"unowned compressed history"
+        );
+    }
+
+    /// 覆盖 P-10：超大单条事件保留身份、去敏诊断字段及截断标记，不拆成多行。
+    #[test]
+    fn oversized_record_preserves_identity_and_error_metadata() {
+        let temp = workspace();
+        let directory = temp.path().join(LOG_DIR);
+        let mut appender = open_appender(&directory).unwrap();
+        let record = format!(
+            "timestamp=2026-10-11T00:00:00.000Z level=ERROR pid=1 thread_id=ThreadId(1) component=\"安全组件\" event=oversized_failure span_id=1 span=\"outer\" stage=\"外层阶段\" error_type=OuterContext error_code=1 elapsed_ms=999 detail=\"{}\" stage=\"连接失败\" error_type=ConnectionRefused error_code=10061 elapsed_ms=7 request_id=probe-id\n",
+            "诊断\\\"".repeat(RECORD_LIMIT)
+        );
+        appender.write_all(record.as_bytes()).unwrap();
+        appender.flush().unwrap();
+        let captured = contents(&directory);
+        assert_eq!(captured.lines().count(), 1);
+        assert!(captured.len() <= RECORD_LIMIT);
+        for field in [
+            "event=oversized_failure",
+            "component=\"安全组件\"",
+            "stage=\"连接失败\"",
+            "error_type=ConnectionRefused",
+            "error_code=10061",
+            "elapsed_ms=7",
+            "request_id=probe-id",
+            "truncated=true",
+        ] {
+            assert!(captured.contains(field), "缺少诊断字段：{field}");
+        }
+        assert!(!captured.contains("detail="));
+    }
+
+    /// 覆盖 P-10：已有超大日志不截断、不删除，也不借数量清理迁移。
+    #[test]
+    fn oversized_existing_history_blocks_without_destructive_migration() {
+        let temp = workspace();
+        let directory = temp.path().join(LOG_DIR);
+        std::fs::create_dir_all(&directory).unwrap();
+        let existing = directory.join("jchtools.2026-01-01.123.log");
+        std::fs::File::create(&existing)
+            .unwrap()
+            .set_len(FILE_LIMIT + 1)
+            .unwrap();
+        assert!(open_appender(&directory).is_err());
+        assert_eq!(std::fs::metadata(existing).unwrap().len(), FILE_LIMIT + 1);
     }
 }

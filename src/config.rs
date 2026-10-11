@@ -257,6 +257,18 @@ pub fn state_dir() -> Result<PathBuf> {
     // 任务库、哈希缓存与应用配置共用状态定位，测试时不能写入真实用户目录。
     crate::xberg_settings::state_dir().map_err(anyhow::Error::msg)
 }
+#[rustfmt::skip]
+#[warn(
+    warnings,
+    unused_must_use,
+    unreachable_patterns,
+    unreachable_pub,
+    unused_variables,
+    rust_2018_idioms,
+    explicit_outlives_requirements,
+    elided_lifetimes_in_paths,
+    single_use_lifetimes
+)]
 #[cfg(test)]
 mod tests {
     use super::Config;

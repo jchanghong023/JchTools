@@ -1,3 +1,16 @@
+#![warn(
+    warnings,
+    unused_must_use,
+    unreachable_patterns,
+    unreachable_pub,
+    unused_variables,
+    future_incompatible,
+    rust_2018_idioms,
+    explicit_outlives_requirements,
+    elided_lifetimes_in_paths,
+    single_use_lifetimes
+)]
+
 //! 两工具拆分（CONTRACT X/C 分区，2026-09-18 重建）的引擎级回归：
 //! - C-01 目录整理分析阶段只读：不解压、不改目录（解压职责已移交「递归解压」工具）；
 //! - C-09 / X-07 扫描默认排除所选目录根下的「解压失败」子目录；
@@ -79,6 +92,13 @@ fn organizer_analysis_is_read_only_and_never_extracts() {
     assert!(root.join("a.zip").exists(), "分析阶段不得动压缩包（只读）");
     // 压缩包作为普通文件参与计划（这里是唯一文件，无重复对，但必须被扫描到）
     assert_eq!(result.summary.scanned, 2, "压缩包与散文件都应被扫描");
+    assert_eq!(fs::read(root.join("a.zip")).unwrap(), b"pretend archive bytes");
+    assert_eq!(fs::read(root.join("b.txt")).unwrap(), b"loose file");
+    assert_eq!(
+        fs::read_dir(&root).unwrap().count(),
+        2,
+        "只读分析不得新建、移动或删除待整理目录中的条目（C-01）"
+    );
 }
 
 // 覆盖 C-13：三要素（文件标识/大小/修改时间）未变时跨运行复用哈希
@@ -118,7 +138,11 @@ fn hash_cache_recomputes_when_size_changes() {
     let state = state_of(&tmp);
     let first = engine::prepare_at(&root, Config::default(), Context::default(), &state).unwrap();
     assert_eq!(first.summary.planned_delete, 1);
-    fs::write(root.join("sub").join("a.txt"), b"same-bytes!").unwrap();
+    let copy = root.join("sub").join("a.txt");
+    let stamp = filetime::FileTime::from_last_modification_time(&fs::metadata(&copy).unwrap());
+    fs::write(&copy, b"same-bytes!").unwrap();
+    // C-13：保留修改时间，使缓存失效只能由大小变化触发。
+    filetime::set_file_mtime(&copy, stamp).unwrap();
     let second = engine::prepare_at(&root, Config::default(), Context::default(), &state).unwrap();
     assert_eq!(
         second.summary.planned_delete, 0,
@@ -767,13 +791,14 @@ fn comment_forging_engine(dir: &Path) -> PathBuf {
     path
 }
 
-// 覆盖 X-05 / S-01：即使档案注释伪造多卷信息，也只有主体自身被删除，旁路文件不得被处置。
+// 覆盖 X-05 / S-01：注释伪造多卷信息时，X-10 精确命名族之外的旁路文件不得被处置。
 #[test]
 fn forged_comment_corroboration_is_ignored() {
     let tmp = fixture("forged-comment");
     let root = tmp.path().join("data");
     write_with_mtime(&root.join("report.rar"), b"standalone rar", 100);
-    write_with_mtime(&root.join("report.r00"), b"innocent bystander", 200);
+    // X-10 的旧式 rar 尾卷是 .r00～.r99；.r000 不是该命名族的实际卷。
+    write_with_mtime(&root.join("report.r000"), b"innocent bystander", 200);
     let result = engine::extract_run_at(
         &root,
         Config::default(),
@@ -784,8 +809,8 @@ fn forged_comment_corroboration_is_ignored() {
     .unwrap();
     assert_eq!(result.summary.archives_ok, 1);
     assert!(
-        root.join("report.r00").exists(),
-        "档案注释里伪造的多卷键不得成为处置佐证：无辜 .r00 必须留在原地"
+        root.join("report.r000").exists(),
+        "档案注释里伪造的多卷键不得把命名族之外的 .r000 纳入处置集合"
     );
     assert!(
         !root.join("report.rar").exists(),
@@ -867,7 +892,8 @@ fn forged_comment_with_brace_line_cannot_enable_sweep() {
     let tmp = fixture("forged-comment-brace");
     let root = tmp.path().join("data");
     write_with_mtime(&root.join("report.rar"), b"standalone rar", 100);
-    write_with_mtime(&root.join("report.r00"), b"innocent bystander", 200);
+    // .r00 按 X-10 已是实际卷；用不属于精确命名族的 .r000 作为无关文件。
+    write_with_mtime(&root.join("report.r000"), b"innocent bystander", 200);
     let result = engine::extract_run_at(
         &root,
         Config::default(),
@@ -878,8 +904,8 @@ fn forged_comment_with_brace_line_cannot_enable_sweep() {
     .unwrap();
     assert_eq!(result.summary.archives_ok, 1);
     assert!(
-        root.join("report.r00").exists(),
-        "注释内 }} 行后的伪造键不得成为处置佐证：无辜 .r00 必须留在原地"
+        root.join("report.r000").exists(),
+        "注释内 }} 行后的伪造键不得把命名族之外的 .r000 纳入处置集合"
     );
     assert!(
         !root.join("report.rar").exists(),
@@ -891,14 +917,14 @@ fn forged_comment_with_brace_line_cannot_enable_sweep() {
     );
 }
 
-// 覆盖 X-05, S-01：单卷 ZIP 完整解开后主体删除，同主干的旧分卷文件必须原样留在原地。
+// 覆盖 X-05 / X-10：ZIP 完整解开后主体删除，精确尾卷族以外的近似后缀文件原样保留。
 #[test]
 fn stale_z_sibling_is_not_disposed_with_standalone_zip() {
     let tmp = fixture("stale-z");
     let root = tmp.path().join("data");
     write_with_mtime(&root.join("report.zip"), b"standalone complete zip", 100);
     write_with_mtime(
-        &root.join("report.z01"),
+        &root.join("report.z001"),
         b"stale fragment of an old set",
         200,
     );
@@ -916,29 +942,28 @@ fn stale_z_sibling_is_not_disposed_with_standalone_zip() {
         "成功原包按 X-05 永久删除"
     );
     assert!(
-        root.join("report.z01").exists(),
-        "无分卷佐证的同主干 .z01 是无辜文件，不得随包处置"
+        root.join("report.z001").exists(),
+        "X-10 旧式 zip 尾卷只有 .z01～.z99，近似后缀 .z001 不得随包处置"
     );
     assert_eq!(
         result.summary.deleted, 1,
         "删除集合只含主体自身（X-05：不得误删仅同主干的文件）"
     );
     assert_eq!(
-        fs::read(root.join("report.z01")).unwrap(),
+        fs::read(root.join("report.z001")).unwrap(),
         b"stale fragment of an old set"
     );
 }
 
-// 覆盖 X-05, S-01（回归 2026-09-19：宽命名兄弟卷误处置——旧式 RAR 变体）。
-// 同上，但走 oldrar 分支：完整单卷 report.rar 旁边的同主干 .r00 不因命名巧合
-// 被认定为其分卷成员，主体成功删除，旁观文件原样保留。
+// 覆盖 X-05 / X-10：旧式 RAR 精确尾卷族以外的近似后缀文件不得被处置。
+// .r00～.r99 按需求属于实际卷；使用 .r000 区分仅名称近似的无关文件。
 #[test]
 fn stale_r_sibling_is_not_disposed_with_standalone_rar() {
     let tmp = fixture("stale-r");
     let root = tmp.path().join("data");
     write_with_mtime(&root.join("report.rar"), b"standalone complete rar", 100);
     write_with_mtime(
-        &root.join("report.r00"),
+        &root.join("report.r000"),
         b"stale fragment of an old set",
         200,
     );
@@ -956,15 +981,15 @@ fn stale_r_sibling_is_not_disposed_with_standalone_rar() {
         "成功原包按 X-05 永久删除"
     );
     assert!(
-        root.join("report.r00").exists(),
-        "无分卷佐证的同主干 .r00 是无辜文件，不得随包处置"
+        root.join("report.r000").exists(),
+        "X-10 旧式 rar 尾卷只有 .r00～.r99，近似后缀 .r000 不得随包处置"
     );
     assert_eq!(
         result.summary.deleted, 1,
         "删除集合只含主体自身（X-05：不得误删仅同主干的文件）"
     );
     assert_eq!(
-        fs::read(root.join("report.r00")).unwrap(),
+        fs::read(root.join("report.r000")).unwrap(),
         b"stale fragment of an old set"
     );
 }
@@ -1139,13 +1164,12 @@ fn quarantined_part_rar_group_renames_stem_as_a_whole() {
 /// 任务以错误结束（没有 TaskResult）时，打开本次运行的任务库：摘要与行状态都在里面。
 #[cfg(windows)]
 fn task_db(state: &Path) -> jchtools::db::Database {
-    let task_dir = fs::read_dir(state.join("tasks"))
+    let task_dirs: Vec<PathBuf> = fs::read_dir(state.join("tasks"))
         .unwrap()
-        .filter_map(std::result::Result::ok)
-        .map(|entry| entry.path())
-        .next()
-        .expect("任务库目录应已创建");
-    jchtools::db::Database::open(&task_dir).unwrap()
+        .map(|entry| entry.unwrap().path())
+        .collect();
+    assert_eq!(task_dirs.len(), 1, "隔离夹具应仅创建本次运行的一个任务库");
+    jchtools::db::Database::open(&task_dirs[0]).unwrap()
 }
 
 /// 任务库里停留在 running 的包行数（任务结束时必须为 0）。

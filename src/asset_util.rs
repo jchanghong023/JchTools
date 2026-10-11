@@ -61,6 +61,18 @@ pub(crate) trait AssetDownloader {
 /// - 无 tag（清单未接入）：唯一子目录即组件目录；
 /// - 有 tag：目录名必须与清单一致，不一致明确报错并指引更新；
 /// - 零个或多个候选都视为无法确定，不静默选择。
+#[rustfmt::skip]
+#[warn(
+    warnings,
+    unused_must_use,
+    unreachable_patterns,
+    unreachable_pub,
+    unused_variables,
+    rust_2018_idioms,
+    explicit_outlives_requirements,
+    elided_lifetimes_in_paths,
+    single_use_lifetimes
+)]
 #[cfg(test)]
 pub(crate) fn resolve_component_with_tag(
     base: &Path,
@@ -111,6 +123,18 @@ pub(crate) fn resolve_component_with_tag(
 /// 完成并二次校验（归档摘要 + 每成员摘要），全部通过后整目录原子落位到
 /// `xberg-inference/<tag>/`，随后移除其他版本目录（不混用版本）。取消或
 /// 失败不会触碰已验证的安装。
+#[rustfmt::skip]
+#[warn(
+    warnings,
+    unused_must_use,
+    unreachable_patterns,
+    unreachable_pub,
+    unused_variables,
+    rust_2018_idioms,
+    explicit_outlives_requirements,
+    elided_lifetimes_in_paths,
+    single_use_lifetimes
+)]
 #[cfg(test)]
 pub(crate) fn install_inference_pack(
     inference: &InferenceManifest,
@@ -227,6 +251,18 @@ pub(crate) fn valid_component_tag(tag: &str) -> bool {
 }
 
 /// 清单接入后推理组件的成员级摘要校验（XB-09）。
+#[rustfmt::skip]
+#[warn(
+    warnings,
+    unused_must_use,
+    unreachable_patterns,
+    unreachable_pub,
+    unused_variables,
+    rust_2018_idioms,
+    explicit_outlives_requirements,
+    elided_lifetimes_in_paths,
+    single_use_lifetimes
+)]
 #[cfg(test)]
 pub(crate) fn inference_ready(inference: &InferenceManifest, root: &Path) -> Result<(), String> {
     inference_layout_ready(
@@ -238,6 +274,18 @@ pub(crate) fn inference_ready(inference: &InferenceManifest, root: &Path) -> Res
 /// 落位前对 staging 组件树做成员级复核（存在 + 摘要），确保原子替换进来的
 /// 目录就是清单声明的完整安装。就绪检查（C-2）对解析出的组件目录复用
 /// 同一口径。
+#[rustfmt::skip]
+#[warn(
+    warnings,
+    unused_must_use,
+    unreachable_patterns,
+    unreachable_pub,
+    unused_variables,
+    rust_2018_idioms,
+    explicit_outlives_requirements,
+    elided_lifetimes_in_paths,
+    single_use_lifetimes
+)]
 #[cfg(test)]
 pub(crate) fn inference_layout_ready(
     component: &Path,
@@ -255,6 +303,18 @@ pub(crate) fn inference_layout_ready(
 }
 
 /// 成功安装清单 tag 后移除其他版本目录：同一安装只保留一个版本（XB-09）。
+#[rustfmt::skip]
+#[warn(
+    warnings,
+    unused_must_use,
+    unreachable_patterns,
+    unreachable_pub,
+    unused_variables,
+    rust_2018_idioms,
+    explicit_outlives_requirements,
+    elided_lifetimes_in_paths,
+    single_use_lifetimes
+)]
 #[cfg(test)]
 pub(crate) fn prune_old_inference_tags(root: &Path, keep: &str) -> Result<(), String> {
     let base = root.join("xberg-inference");
@@ -374,9 +434,8 @@ fn verify_file_inner(
 }
 
 pub(crate) fn sha256_file_inner(path: &Path, cancel: Option<&AtomicBool>) -> io::Result<String> {
-    let mut file = File::open(path).map_err(|error| {
+    let mut file = File::open(path).inspect_err(|error| {
         tracing::warn!(event = "asset_hash_io_failed", stage = "file_open", error_type = ?error.kind(), error_code = ?error.raw_os_error(), "资产哈希文件打开失败");
-        error
     })?;
     let mut digest = Sha256::new();
     let mut buffer = vec![0_u8; 1024 * 1024];
@@ -387,9 +446,8 @@ pub(crate) fn sha256_file_inner(path: &Path, cancel: Option<&AtomicBool>) -> io:
                 "用户已取消初始化",
             ));
         }
-        let read = file.read(&mut buffer).map_err(|error| {
+        let read = file.read(&mut buffer).inspect_err(|error| {
             tracing::warn!(event = "asset_hash_io_failed", stage = "file_read", error_type = ?error.kind(), error_code = ?error.raw_os_error(), "资产哈希文件读取失败");
-            error
         })?;
         if read == 0 {
             break;
@@ -472,6 +530,18 @@ pub(crate) fn restore_backup(backup: &Path, destination: &Path, kind: &str) -> R
 /// 测试支持：跨模块共享的进程环境变量锁。markdown_assets 与 snap_ocr_assets
 /// 的测试都会改写各自资产根覆盖变量，而 cargo test 的并行线程共享进程环境，
 /// 必须经同一把锁串行，避免相互覆盖。
+#[rustfmt::skip]
+#[warn(
+    warnings,
+    unused_must_use,
+    unreachable_patterns,
+    unreachable_pub,
+    unused_variables,
+    rust_2018_idioms,
+    explicit_outlives_requirements,
+    elided_lifetimes_in_paths,
+    single_use_lifetimes
+)]
 #[cfg(test)]
 pub(crate) mod test_env {
     use std::sync::{Mutex, OnceLock};
@@ -539,6 +609,14 @@ pub(crate) fn finalize_staging(
 ) -> Result<(), String> {
     if let Err(error) = fs::remove_dir_all(staging) {
         if result.is_ok() {
+            tracing::warn!(
+                component = "asset_util",
+                event = "asset_staging_cleanup_failed",
+                stage = "finalize_staging",
+                error_type = ?error.kind(),
+                error_code = ?error.raw_os_error(),
+                "初始化完成后清理临时目录失败"
+            );
             progress(format!("警告：清理初始化临时目录失败：{error}"));
         }
     }
@@ -635,6 +713,18 @@ pub(crate) fn extract_zip_safely(
     Ok(())
 }
 
+#[rustfmt::skip]
+#[warn(
+    warnings,
+    unused_must_use,
+    unreachable_patterns,
+    unreachable_pub,
+    unused_variables,
+    rust_2018_idioms,
+    explicit_outlives_requirements,
+    elided_lifetimes_in_paths,
+    single_use_lifetimes
+)]
 #[cfg(test)]
 mod tests {
     use super::{atomic_replace_dir, atomic_replace_file, verify_file_with_cancel};

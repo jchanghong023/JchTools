@@ -1,3 +1,16 @@
+#![warn(
+    warnings,
+    unused_must_use,
+    unreachable_patterns,
+    unreachable_pub,
+    unused_variables,
+    future_incompatible,
+    rust_2018_idioms,
+    explicit_outlives_requirements,
+    elided_lifetimes_in_paths,
+    single_use_lifetimes
+)]
+
 //! 覆盖 XB-20～XB-23：真实 SQLite 跨进程恢复与共享代理生命周期；引擎为合成程序。
 #![allow(clippy::unwrap_used, clippy::expect_used)]
 
@@ -126,10 +139,11 @@ fn request_waiting_for_session(root: &Path) -> serde_json::Value {
     }
 }
 
-fn stop() {
+fn wait_for_background_exit() {
     let until = Instant::now() + Duration::from_secs(10);
     loop {
-        if let Ok(state) = xberg_runtime::background_control(true) {
+        // 等待只查询状态；重复发退出命令会掩盖第一次命令未真正触发退出的缺陷。
+        if let Ok(state) = xberg_runtime::background_control(false) {
             if state["running"] == false {
                 break;
             }
@@ -139,26 +153,43 @@ fn stop() {
     }
 }
 
-/// 确认旧引擎确已退出：fixture 引擎可能因句柄继承看不到代理死亡引发的
-/// stdin EOF（P1 自退依赖 EOF 可达），后台代理退出后仍有残留——有界等待
-/// 后按守卫口径强制结束，避免 resume 阶段被「已有 Xberg」挡死。
+fn stop() {
+    assert_eq!(xberg_runtime::background_control(true).unwrap()["ok"], true);
+    wait_for_background_exit();
+}
+
+/// XB-23：后台退出必须自行结束引擎；测试不能强杀残留后继续当作成功。
+/// 失败路径由外层测试进程的回收 Job 清场，不在验收断言前修饰现场。
 fn ensure_engine_exit(pid: u64) {
     let deadline = Instant::now() + Duration::from_secs(8);
-    while Instant::now() < deadline {
-        let alive = Command::new("tasklist")
-            .args(["/FI", &format!("PID eq {pid}"), "/NH"])
+    let pid = pid.to_string();
+    loop {
+        let output = Command::new("tasklist")
+            .args(["/FI", &format!("PID eq {pid}"), "/FO", "CSV", "/NH"])
             .output()
-            .map_or(true, |output| {
-                String::from_utf8_lossy(&output.stdout).contains(&pid.to_string())
+            .expect("必须能查询引擎是否已退出");
+        assert!(
+            output.status.success(),
+            "引擎退出查询失败：{}",
+            output.status
+        );
+        // 精确匹配 CSV 的 PID 字段，不能让内存占用或其他列中的数字命中。
+        let alive = String::from_utf8_lossy(&output.stdout)
+            .lines()
+            .any(|line| {
+                line.split(',')
+                    .nth(1)
+                    .is_some_and(|value| value.trim_matches('"') == pid)
             });
         if !alive {
             return;
         }
+        assert!(
+            Instant::now() < deadline,
+            "退出后台后引擎 {pid} 仍存活，不得由测试强杀后冒称退出成功"
+        );
         std::thread::sleep(Duration::from_millis(200));
     }
-    let _ = Command::new("taskkill")
-        .args(["/PID", &pid.to_string(), "/F"])
-        .output();
 }
 
 #[test]
@@ -211,8 +242,8 @@ fn broker_survives_client_exit_and_obeys_explicit_stop() {
             std::fs::write(root.join("release-document"), "1").unwrap();
             assert!(document.join().unwrap().is_ok());
             assert_eq!(xberg_runtime::force_background_exit().unwrap()["ok"], true);
-            stop();
-            // 后台已停：确认旧引擎随之退场（fixture 的 EOF 依赖句柄可达，兜底强清）。
+            wait_for_background_exit();
+            // 后台已停：必须观察到旧引擎自行退场，不能用测试清场代替生命周期断言。
             let old_engine: u64 = std::fs::read_to_string(root.join("pid"))
                 .unwrap()
                 .trim()

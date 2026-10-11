@@ -1,3 +1,16 @@
+#![warn(
+    warnings,
+    unused_must_use,
+    unreachable_patterns,
+    unreachable_pub,
+    unused_variables,
+    future_incompatible,
+    rust_2018_idioms,
+    explicit_outlives_requirements,
+    elided_lifetimes_in_paths,
+    single_use_lifetimes
+)]
+
 //! engine.rs 合同回归：Git 整树排除（H-06/S-04）、整理收尾实空清理（H-05/C-07/C-09）、
 //! 确认框清点与扫描同口径（X-02）、缓存降级（C-13）与状态口径（C-10/C-11）。
 // 测试代码允许 unwrap/expect（与 tests/core.rs 的集成测试惯例一致）：断言失败即测试失败。
@@ -253,39 +266,31 @@ fn child_git_tree_excluded_and_ancestors_untouched() {
     );
     engine::apply(&task.directory, Context::default()).unwrap();
     // 同名项目按 C-17/C-18 加最近来源目录前缀消解，整树内容原样随移动。
-    assert!(f.root.join("Git项目集合/only_dir_proj/note.txt").exists());
-    assert!(f.root.join("Git项目集合/only_dir_proj/.git/HEAD").exists());
-    assert!(
-        f.root.join("Git项目集合/only_file_proj/note.txt").exists(),
+    assert_eq!(
+        fs::read(f.root.join("Git项目集合/only_dir_proj/note.txt")).unwrap(),
+        b"same-content",
+        "Git 项目内部内容必须原样随整树移动（H-06/C-14）"
+    );
+    assert_eq!(
+        fs::read(f.root.join("Git项目集合/only_dir_proj/.git/HEAD")).unwrap(),
+        b"ref: refs/heads/main\n"
+    );
+    assert_eq!(
+        fs::read(f.root.join("Git项目集合/only_file_proj/note.txt")).unwrap(),
+        b"payload",
         ".git 为文件（worktree 形态）的项目同样整树移动"
     );
-    assert!(f.root.join("Git项目集合/only_file_proj/.git").is_file());
-    assert!(
-        exists_somewhere(&f.root, "keep.txt"),
-        "Git 之外的普通文件照常归类保留"
+    assert_eq!(
+        fs::read(f.root.join("Git项目集合/only_file_proj/.git")).unwrap(),
+        b"gitdir: ../.git/modules/x\n"
+    );
+    assert_eq!(
+        fs::read(f.root.join("文档/keep.txt")).unwrap(),
+        b"same-content",
+        "Git 之外的普通文件照常归类保留，不能靠同名 Git 内文件冒充结果"
     );
 }
 
-/// 在根下按文件名递归查找（C-05 归类恒移动文件，断言“内容仍在”需按名找）。
-fn exists_somewhere(root: &std::path::Path, name: &str) -> bool {
-    fn walk(dir: &std::path::Path, name: &str) -> bool {
-        let Ok(entries) = fs::read_dir(dir) else {
-            return false;
-        };
-        for entry in entries.flatten() {
-            let path = entry.path();
-            if path.is_dir() {
-                if walk(&path, name) {
-                    return true;
-                }
-            } else if entry.file_name().to_string_lossy() == name {
-                return true;
-            }
-        }
-        false
-    }
-    walk(root, name)
-}
 
 // 覆盖 H-05/C-07/C-09（成功整理后收尾清理新产生的空目录链与空的「解压失败」目录）
 #[test]
@@ -455,10 +460,17 @@ fn broken_hash_cache_degrades_without_failing() {
     );
     engine::apply(&task.directory, Context::default()).unwrap();
     // 保留者随 C-05 固定归类移动；按内容判断恰好保留一个副本。
-    let remaining = fs::read(f.root.join("文档").join("a.txt"))
-        .ok()
-        .or_else(|| fs::read(f.root.join("文档").join("b.txt")).ok());
-    assert_eq!(remaining, Some(b"same".to_vec()), "恰好保留一个副本");
+    let remaining: Vec<_> = fs::read_dir(f.root.join("文档"))
+        .unwrap()
+        .collect::<Result<_, _>>()
+        .unwrap();
+    assert_eq!(remaining.len(), 1, "缓存故障后必须恰好保留一个副本");
+    let survivor = &remaining[0];
+    assert!(
+        survivor.file_name() == "a.txt" || survivor.file_name() == "b.txt",
+        "保留者必须来自原重复组"
+    );
+    assert_eq!(fs::read(survivor.path()).unwrap(), b"same");
 }
 
 // 覆盖 H-06（Git 树内的崩溃残留不得被清扫）
@@ -558,49 +570,59 @@ fn classify_refuses_target_dir_occupied_by_git_project() {
     assert!(f.root.join("图片/.git/HEAD").is_file());
     let entries: Vec<_> = fs::read_dir(f.root.join("图片"))
         .unwrap()
-        .filter_map(std::result::Result::ok)
-        .collect();
+        .collect::<Result<_, _>>()
+        .unwrap();
     assert_eq!(entries.len(), 1, "Git 树内不得新增任何条目");
 }
 
-// 覆盖 C-14（正控：Git 项目「图片」成功计划移入集合后腾出的大类目录名可正常
-// 归类使用——文件移入的是项目移走后新建的普通目录，不是 Git 树）
+// 覆盖 S-01 / C-05 / C-14：固定大类被 Git 项目占用时保留；
+// 不占固定容器的其他项目仍正常整体归类，不能因保护一棵树取消全部归类。
 #[test]
-fn classify_into_freed_category_name_after_git_collection_move() {
+fn fixed_category_git_occupant_is_preserved_while_other_projects_are_collected() {
     let f = Fixture::new();
     f.git_marker_dir("图片");
+    f.git_marker_dir("ordinary-project");
     f.write("照片/logo.png", b"png");
     let task = f.plan(base());
     let db = Database::open_existing(&task.directory).unwrap();
-    let project_moved: i64 = db
+    let protected_actions: i64 = db
         .conn
         .query_row(
-            "SELECT COUNT(*) FROM actions WHERE source='图片' AND target='Git项目集合/图片'",
+            "SELECT COUNT(*) FROM actions WHERE source='图片' OR target LIKE '图片/%'",
             [],
             |row| row.get(0),
         )
         .unwrap();
-    let file_classified: i64 = db
+    let ordinary_project_moved: i64 = db
         .conn
         .query_row(
-            "SELECT COUNT(*) FROM actions WHERE source='照片/logo.png' AND target='图片/logo.png'",
+            "SELECT COUNT(*) FROM actions WHERE source='ordinary-project' AND target='Git项目集合/ordinary-project'",
             [],
             |row| row.get(0),
         )
         .unwrap();
     drop(db);
     assert_eq!(
-        project_moved,
-        1,
-        "Git 项目应整体移入集合：{}",
+        protected_actions,
+        0,
+        "不得通过腾空固定容器挪动占用 Git 树：{}",
         events(&task.directory)
     );
+    assert_eq!(ordinary_project_moved, 1, "其他项目仍须按 C-14 整体归类");
+    let result = engine::apply(&task.directory, Context::default()).unwrap();
+    assert!(result.summary.errors > 0, "固定容器占用必须明确报告");
+    assert_eq!(fs::read(f.root.join("照片/logo.png")).unwrap(), b"png");
     assert_eq!(
-        file_classified,
-        1,
-        "腾空后的目录名应可正常归类：{}",
-        events(&task.directory)
+        fs::read(f.root.join("图片/.git/HEAD")).unwrap(),
+        b"ref: refs/heads/main\n"
     );
+    assert!(!f.root.join("Git项目集合/图片").exists());
+    assert!(!f.root.join("图片/logo.png").exists());
+    assert_eq!(
+        fs::read(f.root.join("Git项目集合/ordinary-project/.git/HEAD")).unwrap(),
+        b"ref: refs/heads/main\n"
+    );
+    assert!(!f.root.join("ordinary-project").exists(), "普通项目须完成整体移动");
 }
 
 // 覆盖 C-14/C-21（回归：名为「Git项目集合」的 Git 项目不得生成移入自身的
@@ -717,15 +739,20 @@ fn extract_quarantines_missing_first_part_rar_group() {
     f.write("a.part02.rar", b"part2");
     f.write("a.part03.rar", b"part3");
     let task = engine::extract_run_at(&f.root, base(), Context::default(), &f.state, None).unwrap();
-    assert!(
-        f.root.join("解压失败/a.part02.rar").is_file(),
-        "余卷必须整组隔离，不得留在原位"
+    assert_eq!(task.summary.archives_ok, 0);
+    assert_eq!(task.summary.archives_failed, 1, "缺首卷卷集只判失败一次");
+    assert_eq!(
+        fs::read(f.root.join("解压失败/a.part02.rar")).unwrap(),
+        b"part2",
+        "余卷必须原样整组隔离，不得留在原位"
     );
-    assert!(
-        f.root.join("解压失败/a.part03.rar").is_file(),
-        "整组隔离不丢卷"
+    assert_eq!(
+        fs::read(f.root.join("解压失败/a.part03.rar")).unwrap(),
+        b"part3",
+        "整组隔离不丢卷、不改内容"
     );
     assert!(!f.root.join("a.part02.rar").exists(), "原位不得残留余卷");
+    assert!(!f.root.join("a.part03.rar").exists(), "原位不得残留余卷");
     let log = events(&task.directory);
     assert!(
         log.contains("缺首卷"),

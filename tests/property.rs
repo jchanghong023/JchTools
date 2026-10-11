@@ -1,3 +1,16 @@
+#![warn(
+    warnings,
+    unused_must_use,
+    unreachable_patterns,
+    unreachable_pub,
+    unused_variables,
+    future_incompatible,
+    rust_2018_idioms,
+    explicit_outlives_requirements,
+    elided_lifetimes_in_paths,
+    single_use_lifetimes
+)]
+
 //! 属性测试：安全边界不靠枚举用例，而靠随机输入上的不变式。
 //! 不变式描述的是需求——不得逃逸根目录、不得产生 Windows 非法名——与具体实现无关。
 //! 实现调整导致不变式失败时，说明实现破坏了需求，而不是测试太严。
@@ -39,7 +52,7 @@ proptest! {
     #![proptest_config(config())]
     /// 通过校验的相对路径绝不逃逸根目录：相对、无 `..`/`.`/盘符/根组件，
     /// 且每个输出段自身仍能通过组件校验（safe_relative 应逐段校验过）。
-    // 覆盖 S-05
+    // 覆盖 S-01 / 附录 B
     #[test]
     fn safe_relative_output_never_escapes_root(raw in any_path_like()) {
         if let Ok(path) = fsutil::safe_relative(&raw) {
@@ -56,7 +69,7 @@ proptest! {
     }
 
     /// 绝对路径（任一斜杠开头）与显式 `..` 段必须被拒绝，无论正反斜杠。
-    // 覆盖 S-05
+    // 覆盖 S-01 / 附录 B
     #[test]
     fn safe_relative_rejects_absolute_and_parent_segments(segments in collection::vec(any_string(), 0..4), backslash in any::<bool>()) {
         let separator = if backslash {'\\'} else {'/'};
@@ -68,13 +81,13 @@ proptest! {
     }
 
     /// 通过校验的组件必然满足 Windows 兼容不变式（拒绝方向由后续定向属性覆盖）。
-    // 覆盖 S-05
+    // 覆盖 S-01 / 附录 B
     #[test]
     fn validate_component_ok_implies_windows_safe(s in any_string()) {
         if fsutil::validate_component(&s).is_ok() {
             prop_assert!(!s.is_empty() && s != "." && s != "..", "{:?}", s);
             let last = s.chars().last().unwrap();
-            prop_assert!(last != '.' && !last.is_whitespace(), "尾随点/空白必须已被拒绝：{:?}", s);
+            prop_assert!(last != '.' && last != ' ', "尾随 ASCII 点/空格必须已被拒绝：{:?}", s);
             prop_assert!(!s.chars().any(|c| c <= '\u{1f}' || "<>:\"/\\|?*".contains(c)), "{:?}", s);
             let stem = s.split('.').next().unwrap().to_uppercase();
             prop_assert!(!["CON", "PRN", "AUX", "NUL", "CLOCK$"].contains(&stem.as_str()), "{:?}", s);
@@ -85,12 +98,13 @@ proptest! {
         }
     }
 
-    /// 尾随点 / 各类 Unicode 空白、Windows 非法字符、C0 控制字符注入后必须被拒绝。
-    // 覆盖 S-05
+    /// 尾随 ASCII 点/空格、Windows 非法字符、C0 控制字符必须拒绝；
+    /// 非 ASCII 的合法 Unicode 空白不属于路径禁字符，NFC/空白清理由独立规则控制。
+    // 覆盖 S-01 / 附录 B
     #[test]
     fn validate_component_rejects_trailing_and_injected_chars(
         s in any_string(),
-        trailer in proptest::sample::select(vec!['.', ' ', '\t', '\u{a0}', '\u{3000}']),
+        trailer in proptest::sample::select(vec!['.', ' ', '\t']),
         bad in proptest::sample::select(vec!['<', '>', ':', '"', '/', '\\', '|', '?', '*', '\u{0}', '\u{7}']),
         position in any::<usize>(),
     ) {
@@ -102,6 +116,12 @@ proptest! {
         let byte_index = s.char_indices().nth(position % (s.chars().count() + 1)).map_or(s.len(), |(b, _)| b);
         injected.insert(byte_index, bad);
         prop_assert!(fsutil::validate_component(&injected).is_err(), "注入 {:?}", bad);
+        // 附录 B 仅禁止派生主体尾随 ASCII 点/空格；不能将 Unicode White_Space
+        // 规范化规则误当作无条件文件名校验。保持合法字符与拒绝非法字符同时断言。
+        for character in ['\u{a0}', '\u{3000}'] {
+            let name = format!("a{character}");
+            prop_assert!(fsutil::validate_component(&name).is_ok(), "合法尾随 Unicode 空白 {:?}", character);
+        }
         // 附录 B：DEL/C1 不在 Windows 禁用的 U+0000..U+001F 范围内；
         // 放在主体中间，避免与尾随空白的独立规则混淆。
         for character in ['\u{7f}', '\u{80}', '\u{85}', '\u{9f}'] {
@@ -117,7 +137,7 @@ proptest! {
     }
 
     /// 官方保留设备名的拒绝边界：COM0/LPT0 不是保留名；COM1-9 / LPT1-9（含上标 ¹²³ 变体）是。
-    // 覆盖 S-05
+    // 覆盖 S-01 / 附录 B
     #[test]
     fn reserved_device_name_boundary(digit in 0u8..10, base_is_com in any::<bool>()) {
         let name = format!("{}{digit}", if base_is_com {"com"} else {"lpt"});

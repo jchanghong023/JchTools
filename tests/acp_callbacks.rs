@@ -1,3 +1,16 @@
+#![warn(
+    warnings,
+    unused_must_use,
+    unreachable_patterns,
+    unreachable_pub,
+    unused_variables,
+    future_incompatible,
+    rust_2018_idioms,
+    explicit_outlives_requirements,
+    elided_lifetimes_in_paths,
+    single_use_lifetimes
+)]
+
 //! AH-02/AH-05/AH-13/AH-A10/AH-A11：经HTTP和官方SDK触发真实文件及终端回调。
 //! SDK夹具补充验证客户端能力，不等同OpenCode实际工具路径或真实模型验收。
 #![allow(clippy::unwrap_used, clippy::expect_used)]
@@ -113,6 +126,8 @@ fn terminal_callbacks_capture_wait_and_release_the_same_child() {
 fn terminal_kill_reaps_child_without_terminating_agent() {
     let server = server();
     let plan = Plan::new("terminal-kill");
+    // kill 回调或断言失败时也放行合成子进程，避免其永久等待影响 Server 清场。
+    let _cleanup = ReleaseMarker::terminal(&server.workspace, &plan);
     let response = server.post(&plan);
     assert_eq!(response.status, 200);
     let value = response.json();
@@ -140,12 +155,19 @@ fn terminal_kill_reaps_child_without_terminating_agent() {
 
 fn process_alive(pid: u32) -> bool {
     use windows_sys::Win32::{
-        Foundation::{CloseHandle, WAIT_FAILED, WAIT_TIMEOUT},
+        Foundation::{CloseHandle, ERROR_INVALID_PARAMETER, WAIT_FAILED, WAIT_TIMEOUT},
         System::Threading::{OpenProcess, WaitForSingleObject, PROCESS_SYNCHRONIZE},
     };
     // SAFETY: 只以同步权限打开测试自己记录的子进程 PID；不修改或终止进程。
     let handle = unsafe { OpenProcess(PROCESS_SYNCHRONIZE, 0, pid) };
     if handle.is_null() {
+        // 不存在的 PID 可视为已退出；权限或其他查询失败不能冒充成功回收。
+        let error = std::io::Error::last_os_error();
+        assert_eq!(
+            error.raw_os_error(),
+            Some(ERROR_INVALID_PARAMETER as i32),
+            "无法打开自有进程以观察退出: {error}"
+        );
         return false;
     }
     // SAFETY: 有效进程句柄，零时等待只查询进程对象是否已完成退出。

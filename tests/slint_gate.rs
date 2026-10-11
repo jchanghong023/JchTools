@@ -1,3 +1,16 @@
+#![warn(
+    warnings,
+    unused_must_use,
+    unreachable_patterns,
+    unreachable_pub,
+    unused_variables,
+    future_incompatible,
+    rust_2018_idioms,
+    explicit_outlives_requirements,
+    elided_lifetimes_in_paths,
+    single_use_lifetimes
+)]
+
 //! Slint 源文件静态检查门禁（用户确认 2026-09-18）。
 //! 现有拦截：构建期编译错误（slint-build）+ static_check 的 5 项结构检查
 //! + acceptance 的运行期绑定环扫描；本门禁补上「编译警告只打印不拦截」的缺口。

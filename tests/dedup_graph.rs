@@ -1,3 +1,16 @@
+#![warn(
+    warnings,
+    unused_must_use,
+    unreachable_patterns,
+    unreachable_pub,
+    unused_variables,
+    future_incompatible,
+    rust_2018_idioms,
+    explicit_outlives_requirements,
+    elided_lifetimes_in_paths,
+    single_use_lifetimes
+)]
+
 //! C-02 回归：启用副本名、关闭同名时，候选关系必须按连通组处理。
 #![allow(clippy::unwrap_used, clippy::expect_used)]
 
@@ -59,6 +72,14 @@ fn copy_name_bridge_forms_one_candidate_component() {
         .filter(|action| matches!(action.kind, jchtools::model::ActionKind::Delete))
         .collect();
     assert_eq!(deletions.len(), 2);
+    assert_eq!(
+        deletions
+            .iter()
+            .map(|action| action.source.as_str())
+            .collect::<std::collections::BTreeSet<_>>(),
+        std::collections::BTreeSet::from(["B/report.txt", "C/report (1).txt"]),
+        "C-03：只能删除保留者以外的两个副本"
+    );
     assert!(
         deletions.iter().all(|action| {
             action.keeper.as_ref().map(|(rel, _)| rel.as_str()) == Some("A/report.txt")
@@ -91,12 +112,15 @@ fn shortest_name_uses_original_utf16_length_after_case_fold() {
     config.clean_copy_name = false;
     let task = engine::prepare_at(&root, config, Context::default(), &state).unwrap();
     let db = jchtools::db::Database::open(&task.directory).unwrap();
-    let deletion = db
+    let deletions: Vec<_> = db
         .actions_page(0, 100)
         .unwrap()
         .into_iter()
-        .find(|action| matches!(action.kind, jchtools::model::ActionKind::Delete))
-        .expect("同内容不同名文件应生成去重删除");
+        .filter(|action| matches!(action.kind, jchtools::model::ActionKind::Delete))
+        .collect();
+    assert_eq!(deletions.len(), 1, "同内容二项必须仅删除一份：{deletions:?}");
+    assert_eq!(task.summary.planned_delete, 1);
+    let deletion = &deletions[0];
     assert_eq!(deletion.source, "B/aa.txt", "原始名称 İ.txt 更短");
     assert_eq!(
         deletion.keeper.as_ref().map(|(rel, _)| rel.as_str()),

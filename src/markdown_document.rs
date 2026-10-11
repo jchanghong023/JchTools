@@ -5,8 +5,8 @@
 //! （`auto_fast_pages`，阈值内置于引擎）、嵌入文档合入与 Markdown 规范化全部
 //! 由引擎完成。适配器只负责解析 `document.content`（引擎最终 Markdown）、
 //! 执行 Xberg 仓 FORK.md 公布的唯一调用方落盘步骤（给正文图片引用加媒体目录
-//! 前缀并登记待落盘字节）以及如实转达 `warnings`；不重复实现引擎已承接的
-//! 任何转换效果。
+//! 前缀并登记待落盘字节）以及如实转达 `warnings`；媒体引用改写保留代码及
+//! alt 字面文本，目录中的 Markdown 字符引用按 URL 编码。不重复实现引擎效果。
 
 use std::path::Path;
 use std::time::{Duration, Instant};
@@ -93,19 +93,21 @@ pub fn convert_cancelable(
     let mut stage = "input";
     tracing::info!(
         event = "document_conversion_started",
-        timeout_ms = deadline.remaining().as_millis() as u64,
+        timeout_ms = u64::try_from(deadline.remaining().as_millis()).unwrap_or(u64::MAX),
         "文档转换开始"
     );
     let result = (|| {
         crate::asset_util::ensure_not_cancelled(cancel)?;
+        stage = "input_file";
         if !path.is_file() {
             return Err(format!("输入文件不存在或不可读：{}", path.display()));
         }
-        stage = "runtime_assets";
+        stage = "runtime_directory";
         if !runtime_dir.is_dir() {
             return Err(format!("Xberg 运行目录不存在：{}", runtime_dir.display()));
         }
         let executable = runtime_dir.join(if cfg!(windows) { "xberg.exe" } else { "xberg" });
+        stage = "runtime_executable";
         if !executable.is_file() {
             return Err(format!("Xberg 可执行文件不存在：{}", executable.display()));
         }
@@ -122,16 +124,17 @@ pub fn convert_cancelable(
         parse_document_response(&response, media_dir)
     })();
     let elapsed_ms = crate::logging::elapsed_ms(started);
-    match &result {
-        Ok(document) => tracing::info!(
+    if let Ok(document) = &result {
+        tracing::info!(
             event = "document_conversion_completed",
             elapsed_ms,
             markdown_bytes = document.markdown.len(),
             media_count = document.media.len(),
             warning_count = document.warnings.len(),
             "文档转换完成"
-        ),
-        Err(_) => tracing::error!(
+        );
+    } else {
+        tracing::error!(
             event = "document_conversion_failed",
             stage,
             elapsed_ms,
@@ -142,7 +145,7 @@ pub fn convert_cancelable(
                 "document_boundary"
             },
             "文档转换失败，详情由上游结构化事件诊断"
-        ),
+        );
     }
     result
 }
@@ -350,7 +353,10 @@ fn rewrite_image_links(text: &str, from: &str, to: &str) -> (String, bool) {
     let mut fence: Option<(char, usize)> = None;
     let mut inline_code: Option<usize> = None;
     let mut changed = false;
+    let mut offset = 0;
     for line in text.split_inclusive('\n') {
+        let remaining = &text[offset..];
+        offset += line.len();
         let (body, newline) = match line.strip_suffix('\n') {
             Some(body) => (body, "\n"),
             None => (line, ""),
@@ -377,7 +383,7 @@ fn rewrite_image_links(text: &str, from: &str, to: &str) -> (String, bool) {
             continue;
         }
         let (rewritten, line_changed) =
-            rewrite_image_links_in_line(body, from, to, &mut inline_code);
+            rewrite_image_links_in_line(body, remaining, from, to, &mut inline_code);
         changed |= line_changed;
         result.push_str(&rewritten);
         result.push_str(carriage);
@@ -400,6 +406,7 @@ fn encode_markdown_dir(name: &str) -> String {
             '%' => Some("%25"),
             '#' => Some("%23"),
             '?' => Some("%3F"),
+            '&' => Some("%26"),
             _ if character.is_control() => continue,
             _ => None,
         };
@@ -414,6 +421,7 @@ fn encode_markdown_dir(name: &str) -> String {
 
 fn rewrite_image_links_in_line(
     line: &str,
+    remaining: &str,
     from: &str,
     to: &str,
     inline_code: &mut Option<usize>,
@@ -440,19 +448,26 @@ fn rewrite_image_links_in_line(
                     *inline_code = None;
                 }
             } else {
-                *inline_code = Some(run);
+                // 没有同长度关闭串时，反引号只是正文；不能吞掉真实图片。
+                if closing_backticks(&remaining[i + run..], run).is_some() {
+                    *inline_code = Some(run);
+                }
             }
             out.push_str(&line[i..i + run]);
             i += run;
             continue;
         }
         if inline_code.is_none() && line[i..].starts_with("![") {
-            let Some(close_alt) = line[i + 2..].find("](") else {
+            let Some(close_alt) = image_label_end(line, i + 2) else {
                 out.push('!');
                 i += 1;
                 continue;
             };
-            let close_alt = i + 2 + close_alt;
+            if bytes.get(close_alt + 1) != Some(&b'(') {
+                out.push('!');
+                i += 1;
+                continue;
+            }
             let destination_start = close_alt + 2;
             let Some(close_link_rel) = line[destination_start..].find(')') else {
                 out.push('!');
@@ -476,6 +491,10 @@ fn rewrite_image_links_in_line(
                 changed = true;
                 continue;
             }
+            // alt/title 的字面文本不参与引用改写或行内代码状态。
+            out.push_str(&line[i..=close_link]);
+            i = close_link + 1;
+            continue;
         }
         let Some(ch) = line[i..].chars().next() else {
             break;
@@ -484,6 +503,63 @@ fn rewrite_image_links_in_line(
         i += ch.len_utf8();
     }
     (out, changed)
+}
+
+/// 查找同长度的关闭反引号串；空段落或新围栏是代码跨度的块边界。
+fn closing_backticks(text: &str, run: usize) -> Option<usize> {
+    let mut offset = 0;
+    for (line_index, line) in text.split_inclusive('\n').enumerate() {
+        if line_index != 0 && (line.trim().is_empty() || opening_fence(line).is_some()) {
+            return None;
+        }
+        let bytes = line.as_bytes();
+        let mut i = 0;
+        while i < bytes.len() {
+            if bytes[i] != b'`' {
+                i += 1;
+                continue;
+            }
+            let length = bytes[i..].iter().take_while(|&&byte| byte == b'`').count();
+            if length == run {
+                return Some(offset + i);
+            }
+            i += length;
+        }
+        offset += line.len();
+    }
+    None
+}
+
+/// 图片 label 可含嵌套方括号、转义及代码，不能把 alt 内的 `](` 当作目标开头。
+fn image_label_end(line: &str, start: usize) -> Option<usize> {
+    let bytes = line.as_bytes();
+    let mut depth = 1usize;
+    let mut i = start;
+    while i < bytes.len() {
+        match bytes[i] {
+            b'\\' if bytes.get(i + 1).is_some_and(u8::is_ascii_punctuation) => i += 2,
+            b'`' => {
+                let run = bytes[i..].iter().take_while(|&&byte| byte == b'`').count();
+                i += run;
+                if let Some(close) = closing_backticks(&line[i..], run) {
+                    i += close + run;
+                }
+            }
+            b'[' => {
+                depth += 1;
+                i += 1;
+            }
+            b']' => {
+                depth -= 1;
+                if depth == 0 {
+                    return Some(i);
+                }
+                i += 1;
+            }
+            _ => i += 1,
+        }
+    }
+    None
 }
 
 /// 标准 base64（RFC 4648 字母表）解码，自足实现——不为单图解码引入新依赖。
@@ -550,7 +626,7 @@ fn decode_base64(input: &str) -> Option<Vec<u8>> {
 }
 
 /// 识别围栏开启行：缩进 ≤3 个空格、行首连续 ≥3 个反引号或波浪线。
-/// 开启行之后的其余内容按语言标签处理，不参与关闭判定。
+/// 开启行之后的其余内容按语言标签处理；反引号围栏的标签不能含反引号。
 fn opening_fence(line: &str) -> Option<(char, usize, usize)> {
     let indent = leading_spaces(line);
     if indent > 3 {
@@ -565,7 +641,7 @@ fn opening_fence(line: &str) -> Option<(char, usize, usize)> {
         .chars()
         .take_while(|&candidate| candidate == ch)
         .count();
-    (run >= 3).then_some((ch, run, indent))
+    (run >= 3 && (ch != '`' || !body[run..].contains('`'))).then_some((ch, run, indent))
 }
 
 /// 判定关闭行：同字符、连续长度不小于开启行、其后只剩空白（语言标签不算关闭）。
@@ -587,6 +663,18 @@ fn leading_spaces(line: &str) -> usize {
     line.len() - line.trim_start_matches(' ').len()
 }
 
+#[rustfmt::skip]
+#[warn(
+    warnings,
+    unused_must_use,
+    unreachable_patterns,
+    unreachable_pub,
+    unused_variables,
+    rust_2018_idioms,
+    explicit_outlives_requirements,
+    elided_lifetimes_in_paths,
+    single_use_lifetimes
+)]
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -757,5 +845,89 @@ mod tests {
             output.warnings,
             vec!["图片资源字段类型无效，已保留占位引用"]
         );
+    }
+
+    // 覆盖 T-14/T-17：未闭合反引号是正文，不吞掉后面的真实图片；
+    // 行内代码不能跨越空段落，alt 中的代码图片字面量也必须原样保留。
+    #[test]
+    fn unmatched_backticks_and_code_in_alt_do_not_hide_real_images() {
+        for (content, expected) in [
+            ("中文 `未闭合 ![图](image_0.png)",
+             "中文 `未闭合 ![图](m/image_0.png)"),
+            ("`未闭合\n\n![图](image_0.png)\n`",
+             "`未闭合\n\n![图](m/image_0.png)\n`"),
+            ("![说明 `![代码](image_0.png)`](image_1.png)",
+             "![说明 `![代码](image_0.png)`](m/image_1.png)"),
+        ] {
+            let envelope = response(&json!({
+                "content": content,
+                "images": [
+                    {"image_index": 0, "format": "png", "data_base64": "aGVsbG8="},
+                    {"image_index": 1, "format": "png", "data_base64": "aGVsbG8="}
+                ]
+            }));
+            let output = parse_document_response(&envelope, "m").unwrap();
+            assert_eq!(output.markdown, expected);
+            assert_eq!(output.media.len(), 1);
+            assert!(output.warnings.is_empty());
+        }
+    }
+
+    // 覆盖 T-14：合法 Windows 名称中的 &entity; 不能被阅读器当作字符引用，
+    // Unicode 名称及多处引用保留，实际文件路径仍使用未经 URL 编码的名称。
+    #[test]
+    fn media_directory_ampersands_are_encoded() {
+        let envelope = response(&json!({
+            "content": "![甲](image_0.png) ![乙](image_0.png)",
+            "images": [{"image_index": 0, "format": "png", "data_base64": "aGVsbG8="}]
+        }));
+        let output = parse_document_response(&envelope, "中文&copy;_media").unwrap();
+        assert_eq!(output.markdown,
+            "![甲](中文%26copy;_media/image_0.png) ![乙](中文%26copy;_media/image_0.png)");
+        assert_eq!(output.media[0].relative, "中文&copy;_media/image_0.png");
+        assert_eq!(output.media.len(), 1);
+    }
+
+    // 覆盖 T-14/T-16：严格标准 base64 的尾部位与 padding 边界，损坏时
+    // data 数组回退仍保留；越界和非整数数组元素不能变成截断图片。
+    #[test]
+    fn image_byte_encoding_boundaries_are_explicit() {
+        for (encoded, expected) in [
+            ("AA==", vec![0]), ("AAA=", vec![0, 0]), ("AAAA", vec![0, 0, 0]),
+            (" aG Vs\nbG8=\r", b"hello".to_vec()),
+        ] {
+            assert_eq!(decode_base64(encoded), Some(expected));
+        }
+        for encoded in ["", "A", "AA", "AAA", "AB==", "AAB=", "AA=A",
+                        "=AAA", "AA==AAAA", "AAAA====", "中文", "AA-_"] {
+            assert_eq!(decode_base64(encoded), None, "{encoded}");
+        }
+        assert_eq!(image_bytes(&json!({"data_base64": "AB==", "data": [0, 255]})),
+                   Some(vec![0, 255]));
+        for data in [json!([256]), json!([-1]), json!([1.5]), json!(["1"])] {
+            assert_eq!(image_bytes(&json!({"data": data})), None);
+        }
+    }
+
+    // 覆盖 T-14/T-17：反引号 info string 含反引号时不是围栏，
+    // 真正围栏及其 Unicode info string、CRLF 和多反引号代码仍零改写。
+    #[test]
+    fn fence_and_code_delimiter_boundaries_preserve_literals() {
+        for (content, expected) in [
+            ("```语言`标签\n![图](image_0.png)",
+             "```语言`标签\n![图](m/image_0.png)"),
+            ("```中文\r\n![代码](image_0.png)\r\n```\r\n![图](image_0.png)",
+             "```中文\r\n![代码](image_0.png)\r\n```\r\n![图](m/image_0.png)"),
+            ("``说明 ` ![代码](image_0.png)`` ![图](image_0.png)",
+             "``说明 ` ![代码](image_0.png)`` ![图](m/image_0.png)"),
+        ] {
+            let envelope = response(&json!({
+                "content": content,
+                "images": [{"image_index": 0, "format": "png", "data_base64": "aGVsbG8="}]
+            }));
+            let output = parse_document_response(&envelope, "m").unwrap();
+            assert_eq!(output.markdown, expected);
+            assert_eq!(output.media.len(), 1);
+        }
     }
 }

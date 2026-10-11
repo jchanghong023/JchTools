@@ -1,3 +1,16 @@
+#![warn(
+    warnings,
+    unused_must_use,
+    unreachable_patterns,
+    unreachable_pub,
+    unused_variables,
+    future_incompatible,
+    rust_2018_idioms,
+    explicit_outlives_requirements,
+    elided_lifetimes_in_paths,
+    single_use_lifetimes
+)]
+
 //! 性能基准（默认 `#[ignore]`，仅手动运行）：
 //! `cargo test --release --test perf_probe -- --ignored --nocapture`
 //! 规模经环境变量调整：`JT_PERF_GROUPS` / `JT_PERF_COPIES` / `JT_PERF_EMPTY_DIRS`。
@@ -14,10 +27,13 @@ use std::{fs, time::Instant};
 use tempfile::TempDir;
 
 fn env_or(name: &str, default: usize) -> usize {
-    std::env::var(name)
-        .ok()
-        .and_then(|v| v.parse().ok())
-        .unwrap_or(default)
+    match std::env::var(name) {
+        Ok(value) => value
+            .parse()
+            .unwrap_or_else(|error| panic!("{name} 必须是非负整数：{error}")),
+        Err(std::env::VarError::NotPresent) => default,
+        Err(error) => panic!("无法读取探针规模参数 {name}：{error}"),
+    }
 }
 
 /// 每个探针独占一个测试进程，避免全局 tracing subscriber 指向前一探针的临时目录。
@@ -68,7 +84,8 @@ fn perf_dump(state: &std::path::Path, expected_spans: &[(&str, usize)]) {
         let dir = state.join(jchtools::perf::LOG_DIR);
         let entries = fs::read_dir(&dir).expect("性能日志目录必须存在");
         let mut spans = Vec::new();
-        for entry in entries.flatten() {
+        for entry in entries {
+            let entry = entry.expect("性能日志目录项必须可读取");
             let text = fs::read_to_string(entry.path()).expect("性能日志必须可读取");
             for line in text.lines() {
                 if line.contains("time.busy") {
@@ -100,6 +117,7 @@ fn organizer_dedup_probe() {
     }
     let groups = env_or("JT_PERF_GROUPS", 5000);
     let copies = env_or("JT_PERF_COPIES", 8);
+    assert!(groups > 0 && copies > 0, "去重探针要求组数与副本数均大于 0");
     let temp = TempDir::new().unwrap();
     let root = temp.path().join("data");
     let state = temp.path().join("state");
@@ -148,6 +166,24 @@ fn organizer_dedup_probe() {
         done.summary.deleted,
         done.summary.description()
     );
+    // C-02/C-05/H-05：删除计数包含目录，不能替代存活文件与整理结果的断言。
+    let survivors: Vec<_> = fs::read_dir(root.join("其他"))
+        .unwrap()
+        .collect::<Result<_, _>>()
+        .unwrap();
+    assert_eq!(survivors.len(), groups, "每个不同内容组必须恰好保留一份");
+    assert!(
+        survivors
+            .iter()
+            .all(|entry| entry.file_type().unwrap().is_file()),
+        "一级大类下只允许存活普通文件，不得残留来源层级"
+    );
+    let root_entries: Vec<_> = fs::read_dir(&root)
+        .unwrap()
+        .collect::<Result<_, _>>()
+        .unwrap();
+    assert_eq!(root_entries.len(), 1, "所有已搬空的来源目录必须清理");
+    assert_eq!(root_entries[0].file_name(), "其他");
     println!(
         "[dedup] deleted={} moved={}",
         done.summary.deleted, done.summary.moved
@@ -170,6 +206,7 @@ fn organizer_dedup_reuse_probe() {
     let groups = env_or("JT_PERF_GROUPS", 5000);
     let copies = env_or("JT_PERF_COPIES", 8);
     let fixed_kib = env_or("JT_PERF_FILE_KIB", 0);
+    assert!(groups > 0 && copies > 0, "去重探针要求组数与副本数均大于 0");
     let temp = TempDir::new().unwrap();
     let root = temp.path().join("data");
     let state = temp.path().join("state");
@@ -246,6 +283,7 @@ fn organizer_empty_dirs_probe() {
         return;
     }
     let total = env_or("JT_PERF_EMPTY_DIRS", 12000);
+    assert!(total > 0, "空目录探针要求目录数量大于 0");
     let temp = TempDir::new().unwrap();
     let root = temp.path().join("data");
     let state = temp.path().join("state");
@@ -290,6 +328,11 @@ fn organizer_empty_dirs_probe() {
         "空目录删除计数 {} 应不少于 {total}；summary：{}",
         done.summary.deleted,
         done.summary.description()
+    );
+    assert!(root.is_dir(), "空目录清理必须保留所选根目录（H-05）");
+    assert!(
+        fs::read_dir(&root).unwrap().next().is_none(),
+        "删除计数不能替代实际清空范围内全部空目录的断言（H-05/C-07）"
     );
     println!(
         "[empty] deleted={} moved={}",

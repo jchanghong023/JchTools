@@ -1,11 +1,17 @@
 # 转 Markdown 回归样例
 
-本目录是转 Markdown 验收（`scripts/markdown_acceptance.py`）与 GUI 冒烟的公开
-合成夹具目录。全部样本按需求合同 T-26 从零构造、无业务含义，不包含内部源文件
-名、正文、OCR 结果、可识别元数据或可反查源文档的哈希。样本不随 JchTools
-安装包或便携包发布。
+本目录供转 Markdown 验收（`scripts/markdown_acceptance.py`）与 GUI 冒烟使用，
+同时保留从零构造的合成夹具和既有公开／结构样本，不能统称为「全部合成」。
+样本仅用于开发验收，不随 JchTools 安装包或便携包发布。
 
-## 合成来源与残留说明（T-26）
+T-26 要求公开测试使用从零构造、无业务含义的合成夹具，禁止把内部文档裁剪、
+匿名化或重打包后公开。`ALL2MARKDOWN.md` 附录 A 的默认范围说明及第 24 项
+明确保留既有公开 MP4，用于真实中文转录、时间戳及停止验收；这项具体例外
+不把其余历史残留自动视为符合 T-26，也不把公开文件认定为内部私密资料。
+以下按生成方式与既有保留说明区分来源；保留说明不等于已完成逐文件来源、
+许可、元数据或等价再合成能力的审计。
+
+## 合成范围与既有残留说明（T-26 / 附录 A）
 
 - 本目录的 `generate_synthetic.py` 从零重建以下受管夹具（`--check` 只做结构
   校验，不重写文件）：`test_hello_world.png`、`large_210_pages.pdf`（常规模式
@@ -37,10 +43,12 @@
     原件 SHA-256 为 `73a47ed24329cca8a26936ba95501580ee127cdf9f63becf87d9057ec0738194`。
     仅替换格式输入，不改变 A25 判定或将失败重新分类。
 - `matrix/` 内的 Office/PDF 构造文件（如 `docx_all_sources.docx`、
-  `docx_emf_wmf_raster.docx`、`pdf_repeat_softmask.pdf`）为接线期就地合成的
-  无来源样本；`matrix/format_sweep/` 其余样本为 A25 格式清点布置的无敏感内容
-  样本。
-- 尚无法等价再合成、按现状保留的残留样本及原因：
+  `docx_emf_wmf_raster.docx`、`pdf_repeat_softmask.pdf`）及
+  `matrix/format_sweep/` 的格式清点样本，不全在上述生成器的受管清单中。
+  验收脚本的 `_synth_office` 会保留既有 OOXML 部件并改写内容类型；
+  `_build_pptx` 也以 `merged_table.pptx` 为骨架构造变体。因此「构造／合成
+  变体」不证明其整个容器从零生成，不能由此推断全目录满足 T-26。
+- 既有残留样本及原保留原因（未在本次重新验证生成能力）：
   - `1706.03762.pdf`、`single_paper.pdf`：公开论文 PDF（原生文字版式），
     requirements-dev 未提供文本型 PDF 生成库（Pillow 只能生成图像页）；
   - `mixed_native_scanned.pdf`：需要原生文字页与扫描页混排，同样受文本型
@@ -55,10 +63,21 @@
     对象、合并表格/单元格与合成容器骨架的 OOXML 结构夹具，验收的容器改写
     （`_synth_office`/`_build_pptx`）依赖其原始部件集，机械替换会改变矩阵
     期望；
-  - `video-to-notes-intro-zh.mp4`：真实中文语音样本，A24 的真实转录链路
-    必需，无离线 TTS 等价替代；
+  - `video-to-notes-intro-zh.mp4`：既有公开中文语音样本，A24 的真实转录、
+    时间戳及停止链路使用它；这是附录 A 明确保留的 MP4 例外，不是合成
+    语音，也不是内部私密输入。默认验收不要求安装 FFmpeg 或合成 M4A、
+    无音轨等扩展场景，不能因无离线 TTS 而删除唯一样例；
   - `matrix/jpeg2000/`：JPEG 2000 家族公开样本，requirements-dev 无对应
     编码库。
+
+## 当前入口与证据边界
+
+`scripts/markdown_acceptance.py` 默认 `--profile common` 验收新老 Office、
+PDF、MP4；`--profile full` 保留扩展矩阵，`--list` 仅列条目。脚本经 GUI
+驱动核对转换结果，安装版／便携版条目为 C08／C09；夹具存在、生成器结构
+检查或历史通过记录均不能证明当前真实 Xberg、GUI 或两种交付形态通过。
+缺资产或未执行的必验条目（含 `--only` 排除项）为 `NOT RUN`，保留的
+`OPTIONAL` 不计为通过。本次仅修订说明，未运行生成、结构检查或任何验收。
 
 ## 历史接线记录（非当前验收结论）
 

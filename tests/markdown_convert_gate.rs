@@ -1,3 +1,16 @@
+#![warn(
+    warnings,
+    unused_must_use,
+    unreachable_patterns,
+    unreachable_pub,
+    unused_variables,
+    future_incompatible,
+    rust_2018_idioms,
+    explicit_outlives_requirements,
+    elided_lifetimes_in_paths,
+    single_use_lifetimes
+)]
+
 //! 转 Markdown 批处理公开入口回归（媒体目录分配与扫描取消）。
 //! T-18 页数探测与自动分流已于 2026-10-04 内化 Xberg 引擎（`auto_fast_pages`
 //! 阈值探测，降级经 `processing_warnings` 的 auto_mode 来源披露），本项目不再
@@ -13,11 +26,46 @@ use jchtools::markdown::{
 use jchtools::markdown_document::MediaFile;
 use std::sync::atomic::AtomicBool;
 
+fn test_dir() -> tempfile::TempDir {
+    let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join(".tmp");
+    std::fs::create_dir_all(&root).unwrap();
+    tempfile::tempdir_in(root).unwrap()
+}
+
+struct EnvironmentGuard {
+    state_dir: Option<std::ffi::OsString>,
+    broker_exe: Option<std::ffi::OsString>,
+}
+
+impl EnvironmentGuard {
+    fn capture() -> Self {
+        Self {
+            state_dir: std::env::var_os("JCHTOOLS_TEST_STATE_DIR"),
+            broker_exe: std::env::var_os("JCHTOOLS_TEST_BROKER_EXE"),
+        }
+    }
+}
+
+impl Drop for EnvironmentGuard {
+    fn drop(&mut self) {
+        for (name, value) in [
+            ("JCHTOOLS_TEST_STATE_DIR", &self.state_dir),
+            ("JCHTOOLS_TEST_BROKER_EXE", &self.broker_exe),
+        ] {
+            if let Some(value) = value {
+                std::env::set_var(name, value);
+            } else {
+                std::env::remove_var(name);
+            }
+        }
+    }
+}
+
 // 覆盖 T-10/T-14/T-25：空白折叠不能让不同结果共享媒体目录；层级输出按实际目标父目录
 // 分配并在同一批次内保留唯一目录。
 #[test]
 fn media_directories_are_unique_after_name_sanitization() {
-    let temp = tempfile::tempdir().unwrap();
+    let temp = test_dir();
     let input = temp.path().join("input");
     let output = temp.path().join("output");
     std::fs::create_dir_all(&input).unwrap();
@@ -39,7 +87,7 @@ fn media_directories_are_unique_after_name_sanitization() {
 // 覆盖 T-14/T-25/S-01：已有媒体图片不得被覆盖，也不得在失败回滚时删除。
 #[test]
 fn media_commit_refuses_existing_image_without_deleting_it() {
-    let temp = tempfile::tempdir().unwrap();
+    let temp = test_dir();
     let target = temp.path().join("a_docx.md");
     let media_dir = temp.path().join("a_docx_media");
     std::fs::create_dir_all(&media_dir).unwrap();
@@ -58,7 +106,7 @@ fn media_commit_refuses_existing_image_without_deleting_it() {
 // 覆盖 T-14：媒体目录占用检查必须作用于目标所在层级，而不是只检查输出根。
 #[test]
 fn media_directory_occupancy_uses_target_parent() {
-    let temp = tempfile::tempdir().unwrap();
+    let temp = test_dir();
     let docs = temp.path().join("docs");
     std::fs::create_dir_all(&docs).unwrap();
     std::fs::write(docs.join("a_docx_media"), b"occupied").unwrap();
@@ -72,7 +120,7 @@ fn media_directory_occupancy_uses_target_parent() {
 // 覆盖 T-22/T-23：扫描入口在开始前收到停止请求时必须立即取消。
 #[test]
 fn scan_honors_cancellation_before_traversal() {
-    let temp = tempfile::tempdir().unwrap();
+    let temp = test_dir();
     let input = temp.path().join("input");
     let output = temp.path().join("output");
     std::fs::create_dir_all(&input).unwrap();
@@ -96,9 +144,11 @@ fn batch_uses_selected_engine_formats() {
     common::ensure_child_reaper();
     let _session = common::session_lock();
     common::cleanup_stray_engines();
-    let temp = tempfile::tempdir().unwrap();
+    let temp = test_dir();
     let root = temp.path();
     common::mock_engine_copy("tests/fixtures/shared_xberg.rs", &root.join("xberg.exe"));
+    // 在持有会话锁期间恢复进程级测试配置，包括断言 panic 的路径。
+    let _environment = EnvironmentGuard::capture();
     std::env::set_var("JCHTOOLS_TEST_STATE_DIR", root.join("state"));
     std::env::set_var("JCHTOOLS_TEST_BROKER_EXE", env!("CARGO_BIN_EXE_JchTools"));
     let manifest: serde_json::Value =
@@ -154,6 +204,7 @@ fn batch_uses_selected_engine_formats() {
     assert_eq!(started, vec![std::path::PathBuf::from("a.txt")]);
     assert_eq!(std::fs::read(output.join("a_txt.md")).unwrap(), b"document");
     assert!(!output.join("b_rtf.md").exists());
+    assert_eq!(std::fs::read(input.join("a.txt")).unwrap(), b"synthetic text");
     assert_eq!(
         std::fs::read(input.join("b.rtf")).unwrap(),
         b"synthetic unsupported input"

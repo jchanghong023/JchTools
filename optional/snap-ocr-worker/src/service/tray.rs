@@ -253,14 +253,14 @@ fn capture_selected(state: &mpsc::Sender<Command>) {
     let started = std::time::Instant::now();
     tracing::info!(event = "ocr_capture_started", "开始截图与选区");
     // 完整截图发生在遮罩出现前；旧结果由 Slint 线程先隐藏，服务不主动写图片。
-    let mut stage = "capture";
+    let mut capture_phase = "capture";
     let outcome = capture_win::capture().and_then(|frame| {
         tracing::info!(
             event = "ocr_screen_capture_completed",
             elapsed_ms = crate::logging::elapsed_ms(started),
             "屏幕截图已取得，仅保留内存"
         );
-        stage = "selection";
+        capture_phase = "selection";
         tracing::info!(event = "ocr_selection_started", "开始截图框选");
         capture_win::select(frame)
     });
@@ -288,7 +288,7 @@ fn capture_selected(state: &mpsc::Sender<Command>) {
         Err(reason) => {
             tracing::warn!(
                 event = "ocr_capture_failed",
-                stage,
+                stage = capture_phase,
                 error_type = "capture",
                 elapsed_ms = crate::logging::elapsed_ms(started),
                 "截图选区失败"
@@ -345,6 +345,10 @@ unsafe extern "system" fn wnd_proc(hwnd: Handle, msg: u32, w: usize, l: isize) -
                 unsafe { SetForegroundWindow(hwnd) };
                 // SAFETY: menu 已判空，rect 允许传 null，其余参数按值传递。
                 unsafe { TrackPopupMenu(menu, 0, point.x, point.y, 0, hwnd, null()) };
+                // 通知区菜单关闭后投递 WM_NULL，按 Win32 要求完成任务切换；
+                // 否则第二次打开菜单会立即消失，主界面/设置/退出入口不可用。
+                // SAFETY: hwnd 为本线程创建的窗口，WM_NULL 不携带指针或资源。
+                unsafe { PostMessageW(hwnd, 0, 0, 0) };
                 // SAFETY: menu 为本次打开的有效菜单句柄，按值传递，销毁失败仅返回 0。
                 unsafe { DestroyMenu(menu) };
             }
@@ -426,18 +430,19 @@ unsafe extern "system" fn wnd_proc(hwnd: Handle, msg: u32, w: usize, l: isize) -
                                     Ok(())
                                 })
                             });
-                            match &result {
-                                Ok(()) => tracing::info!(
+                            if result.is_ok() {
+                                tracing::info!(
                                     event = "ocr_hotkey_replace_completed",
                                     elapsed_ms = crate::logging::elapsed_ms(started),
                                     "截图热键替换完成"
-                                ),
-                                Err(_) => tracing::warn!(
+                                );
+                            } else {
+                                tracing::warn!(
                                     event = "ocr_hotkey_replace_failed",
                                     error_type = "registration",
                                     elapsed_ms = crate::logging::elapsed_ms(started),
                                     "截图热键替换失败，保留原状态"
-                                ),
+                                );
                             }
                             let _ = response.send(result);
                         }
@@ -542,6 +547,18 @@ impl TrayHandle {
 
 #[cfg(test)]
 impl TrayHandle {
+    #[rustfmt::skip]
+    #[warn(
+        warnings,
+        unused_must_use,
+        unreachable_patterns,
+        unreachable_pub,
+        unused_variables,
+        rust_2018_idioms,
+        explicit_outlives_requirements,
+        elided_lifetimes_in_paths,
+        single_use_lifetimes
+    )]
     pub(super) fn for_test() -> Self {
         Self {
             hwnd: 0,
@@ -712,6 +729,18 @@ pub(crate) fn start(
         .map_err(|_| "托盘初始化超时".to_string())?
 }
 
+#[rustfmt::skip]
+#[warn(
+    warnings,
+    unused_must_use,
+    unreachable_patterns,
+    unreachable_pub,
+    unused_variables,
+    rust_2018_idioms,
+    explicit_outlives_requirements,
+    elided_lifetimes_in_paths,
+    single_use_lifetimes
+)]
 #[cfg(test)]
 mod tests {
     use super::{message_loop_requires_cleanup, parse_hotkey};

@@ -424,6 +424,18 @@ pub fn consolidate_candidates(candidates: &[DetectionCandidate]) -> Vec<Detectio
     deduplicate_candidates(&merge_seam_fragments(candidates))
 }
 
+#[rustfmt::skip]
+#[warn(
+    warnings,
+    unused_must_use,
+    unreachable_patterns,
+    unreachable_pub,
+    unused_variables,
+    rust_2018_idioms,
+    explicit_outlives_requirements,
+    elided_lifetimes_in_paths,
+    single_use_lifetimes
+)]
 #[cfg(test)]
 mod tests {
     // 覆盖 O-25：12 个构造坐标用例逐字翻译自冻结仓库

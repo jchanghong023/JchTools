@@ -1,5 +1,18 @@
+#![warn(
+    warnings,
+    unused_must_use,
+    unreachable_patterns,
+    unreachable_pub,
+    unused_variables,
+    future_incompatible,
+    rust_2018_idioms,
+    explicit_outlives_requirements,
+    elided_lifetimes_in_paths,
+    single_use_lifetimes
+)]
+
 //! MD 整理核心逻辑测试（合同 M 分区）：合并（M-02~M-07）与拆分（M-08~M-11）。
-//! 全部用临时目录；原文件不改动的断言前后对比内容哈希。
+//! 全部用临时目录；原文件不改动的断言前后逐字节对比。
 // 测试代码允许 unwrap/expect：断言失败即测试失败，属合理用法
 // （与 clippy.toml 的 allow-*-in-tests 策略一致，集成测试 crate 不在其覆盖范围内）。
 #![allow(clippy::unwrap_used, clippy::expect_used)]
@@ -25,8 +38,8 @@ fn set_created(path: &Path, seconds: u64) {
         .unwrap_or_else(|error| panic!("设置创建时间失败：{}：{error}", path.display()));
 }
 
-fn hashes_under(root: &Path) -> Vec<(String, u64)> {
-    let mut rows: Vec<(String, u64)> = Vec::new();
+fn source_bytes_under(root: &Path) -> Vec<(String, Vec<u8>)> {
+    let mut rows: Vec<(String, Vec<u8>)> = Vec::new();
     for entry in fs::read_dir(root).unwrap() {
         let entry = entry.unwrap();
         let path = entry.path();
@@ -34,25 +47,12 @@ fn hashes_under(root: &Path) -> Vec<(String, u64)> {
             continue;
         }
         let bytes = fs::read(&path).unwrap();
-        let digest = blake3_smallest(&bytes);
-        rows.push((path.display().to_string(), digest));
+        rows.push((path.display().to_string(), bytes));
     }
     rows.sort();
     rows
 }
 
-/// 测试用最小哈希：字节数 + 首尾字节（避免引入额外依赖；blake3 已在依赖图中，
-/// 但 tests 直接用 std 更简单——这里用内容长度加首尾字节足够检测改动）。
-fn blake3_smallest(bytes: &[u8]) -> u64 {
-    let mut hash: u64 = bytes.len() as u64;
-    if let Some(first) = bytes.first() {
-        hash = hash.wrapping_mul(31).wrapping_add(u64::from(*first));
-    }
-    if let Some(last) = bytes.last() {
-        hash = hash.wrapping_mul(31).wrapping_add(u64::from(*last));
-    }
-    hash
-}
 
 fn merge_to(root: &Path, recursive: bool, output: &Path) -> md_tools::MergeStats {
     let entries = md_tools::scan_markdown(root, recursive, Some(output)).unwrap();
@@ -355,11 +355,14 @@ fn merge_keeps_sources_untouched_and_separates_files() {
     let root = dir.path();
     write(&root.join("a.md"), "# 甲\n\n内容甲没有结尾换行");
     write(&root.join("b.md"), "# 乙\n\n内容乙\n");
+    // M-03 按创建时间排序；显式设置顺序，不依赖文件系统时间戳精度。
+    set_created(&root.join("a.md"), 100);
+    set_created(&root.join("b.md"), 200);
     let output = root.join("merged.md");
-    let before = hashes_under(root);
+    let before = source_bytes_under(root);
     merge_to(root, true, &output);
     // 只对比输入文件：输出本身就在扫描目录内，合并后自然新增。
-    let after: Vec<(String, u64)> = hashes_under(root)
+    let after: Vec<(String, Vec<u8>)> = source_bytes_under(root)
         .into_iter()
         .filter(|(name, _)| !name.ends_with("merged.md"))
         .collect();
@@ -444,20 +447,9 @@ fn merge_handles_large_file_streaming() {
     let stats = merge_to(root, true, &output);
     assert_eq!(stats.files, 1);
     let text = fs::read_to_string(&output).unwrap();
-    assert!(
-        text.starts_with("# big.md\n\n## 大文件\n\n"),
-        "标题正确下移：{}",
-        &text[..40]
-    );
-    assert!(text.ends_with(paragraph), "大文件内容完整写入末尾");
-    let source_len = fs::metadata(root.join("big.md")).unwrap().len();
-    let output_len = fs::metadata(&output).unwrap().len();
-    // 输出 = 标题行 + 空行 + 内容（# → ## 多一个 #，无结尾换行的补一个换行）
-    let diff = output_len.saturating_sub(source_len);
-    assert!(
-        (4..=11).contains(&diff),
-        "输出长度应约等于输入加标题与换行差：{diff}"
-    );
+    // M-04/M-05/M-07：逐字节核对全部正文，避免只看首尾和近似长度漏掉中间改动。
+    let expected = format!("# big.md\n\n#{big}");
+    assert_eq!(text, expected, "大文件标题下移且全部正文完整保留");
 }
 
 // 覆盖 M-08/M-09（KB/MB 换算与硬限制：每片 ≤ 限制）
@@ -497,11 +489,21 @@ fn split_respects_kb_and_mb_limits() {
         );
         prev = *bound;
     }
-    verify_split_output(&root.join("doc.md"), &out_dir, plan.bounds.len());
+    verify_split_output(&root.join("doc.md"), &out_dir, plan.bounds.len(), 1024);
     // MB：1 MB 限制下 3.5KB 只有一片
     let plan_mb = md_tools::plan_splits(&root.join("doc.md"), 1024 * 1024).unwrap();
     assert_eq!(plan_mb.bounds.len(), 1, "3.5KB 文件在 1MB 限制下应为 1 片");
-    let _ = &plan;
+    let out_mb = root.join("parts-mb");
+    md_tools::run_split(
+        &root.join("doc.md"),
+        &plan_mb,
+        &out_mb,
+        false,
+        &Control::default(),
+        &|_, _| Ok(()),
+    )
+    .unwrap();
+    verify_split_output(&root.join("doc.md"), &out_mb, 1, 1024 * 1024);
 }
 
 // 覆盖 M-10（中文与 Emoji 不被切坏；分片顺序拼接无损还原）
@@ -551,7 +553,7 @@ fn split_never_breaks_multibyte_and_rejoins_losslessly() {
                 index + 1
             );
         }
-        verify_split_output(&root.join("emoji.md"), &out_dir, plan.bounds.len());
+        verify_split_output(&root.join("emoji.md"), &out_dir, plan.bounds.len(), limit);
     }
 }
 
@@ -573,16 +575,23 @@ fn split_tiny_limit_ascii_ok_and_too_small_errors() {
         &|_, _| Ok(()),
     )
     .unwrap();
-    verify_split_output(&root.join("ascii.md"), &out_dir, 10);
+    verify_split_output(&root.join("ascii.md"), &out_dir, 10, 1);
     // 中文（3 字节/字符）在 1 字节限制下无法不切坏 → 报错且不产出
     write(&root.join("cn.md"), "中文内容");
+    let before = source_bytes_under(root);
+    let entry_count = fs::read_dir(root).unwrap().map(|entry| entry.unwrap()).count();
     let error =
         md_tools::plan_splits(&root.join("cn.md"), 1).expect_err("限制小于单字符字节数必须报错");
     assert!(
         format!("{error:#}").contains("无法在字符边界分片"),
         "{error:#}"
     );
-    assert!(!root.join("cn-parts").exists(), "失败时不得产生任何输出");
+    assert_eq!(source_bytes_under(root), before, "计划失败不得修改源文件");
+    assert_eq!(
+        fs::read_dir(root).unwrap().map(|entry| entry.unwrap()).count(),
+        entry_count,
+        "计划失败不得在实际输入目录新增输出条目（M-10）"
+    );
 }
 
 // 覆盖 M-11（三位编号起步；超过 999 自动扩宽且排序正确、不重名）
@@ -642,7 +651,7 @@ fn split_many_parts_on_disk_sorted_correctly() {
     names.sort();
     let expected: Vec<String> = md_tools::split_names("document.md", plan.bounds.len());
     assert_eq!(names, expected, "磁盘文件名与预期一致（四位宽度统一）");
-    verify_split_output(&root.join("document.md"), &out_dir, plan.bounds.len());
+    verify_split_output(&root.join("document.md"), &out_dir, plan.bounds.len(), 10);
 }
 
 // 覆盖 M-11（已存在同名分片：写入前检测；未确认覆盖时拒绝写入）
@@ -692,7 +701,7 @@ fn split_detects_conflicts_and_refuses_without_confirmation() {
         "01234",
         "确认后正常覆盖"
     );
-    verify_split_output(&root.join("doc.md"), &out_dir, 2);
+    verify_split_output(&root.join("doc.md"), &out_dir, 2, 5);
 }
 
 // 覆盖 M-10（原文件不修改、不删除）
@@ -718,10 +727,11 @@ fn split_keeps_source_untouched() {
         before,
         "拆分不得改动原文件"
     );
+    verify_split_output(&root.join("doc.md"), &out_dir, plan.bounds.len(), 8);
 }
 
 // 覆盖 M-10（分片按编号顺序二进制拼接还原原文件）
-fn verify_split_output(source: &Path, out_dir: &Path, count: usize) {
+fn verify_split_output(source: &Path, out_dir: &Path, count: usize, limit: u64) {
     let names = md_tools::split_names(
         &source
             .file_name()
@@ -731,7 +741,17 @@ fn verify_split_output(source: &Path, out_dir: &Path, count: usize) {
     );
     let mut joined: Vec<u8> = Vec::new();
     for name in &names {
-        joined.extend_from_slice(&fs::read(out_dir.join(name)).unwrap());
+        let chunk = fs::read(out_dir.join(name)).unwrap();
+        assert!(
+            u64::try_from(chunk.len()).unwrap() <= limit,
+            "实际分片 {name} 为 {} 字节，超过 {limit} 字节硬限制（M-09）",
+            chunk.len()
+        );
+        assert!(
+            std::str::from_utf8(&chunk).is_ok(),
+            "实际分片 {name} 切坏了 UTF-8 字符（M-10）"
+        );
+        joined.extend_from_slice(&chunk);
     }
     let original = fs::read(source).unwrap();
     assert_eq!(

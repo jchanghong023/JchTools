@@ -1,3 +1,16 @@
+#![warn(
+    warnings,
+    unused_must_use,
+    unreachable_patterns,
+    unreachable_pub,
+    unused_variables,
+    future_incompatible,
+    rust_2018_idioms,
+    explicit_outlives_requirements,
+    elided_lifetimes_in_paths,
+    single_use_lifetimes
+)]
+
 //! These tests mutate only tempfile fixtures. 删除一律为永久删除（S-02），不再有回收站注入点。
 // 测试代码允许 unwrap/expect 与短名（f/p/q 夹具惯例）：断言失败即测试失败，属合理用法
 // （与 clippy.toml 的 allow-*-in-tests 策略一致，集成测试 crate 不在其覆盖范围内）。
@@ -70,6 +83,35 @@ impl Fixture {
         engine::apply(&task.directory, Context::default()).unwrap()
     }
 }
+
+/// 断言失败也解除暂停、取消并等待线程，避免夹具析构时后台仍在访问文件。
+struct PausedWorker<T> {
+    control: std::sync::Arc<Control>,
+    handle: Option<std::thread::JoinHandle<T>>,
+}
+
+impl<T> PausedWorker<T> {
+    fn new(control: std::sync::Arc<Control>, handle: std::thread::JoinHandle<T>) -> Self {
+        Self {
+            control,
+            handle: Some(handle),
+        }
+    }
+
+    fn join(mut self) -> std::thread::Result<T> {
+        self.handle.take().unwrap().join()
+    }
+}
+
+impl<T> Drop for PausedWorker<T> {
+    fn drop(&mut self) {
+        if let Some(handle) = self.handle.take() {
+            self.control.cancel();
+            self.control.pause(false);
+            let _ = handle.join();
+        }
+    }
+}
 fn base() -> Config {
     Config {
         global_delete: DeleteMode::Permanent,
@@ -85,16 +127,17 @@ fn base() -> Config {
 /// 在根下按文件名递归查找（C-05 归类恒移动文件，断言“内容仍在”需按名找）。
 fn exists_somewhere(root: &Path, name: &str) -> bool {
     fn walk(dir: &Path, name: &str) -> bool {
-        let Ok(entries) = fs::read_dir(dir) else {
-            return false;
-        };
-        for entry in entries.flatten() {
+        let entries = fs::read_dir(dir)
+            .unwrap_or_else(|error| panic!("无法检查夹具目录 {}：{error}", dir.display()));
+        for entry in entries {
+            let entry = entry.expect("无法读取夹具目录项");
             let path = entry.path();
-            if path.is_dir() {
+            let file_type = entry.file_type().expect("无法检查夹具目录项类型");
+            if file_type.is_dir() {
                 if walk(&path, name) {
                     return true;
                 }
-            } else if entry.file_name().to_string_lossy() == name {
+            } else if file_type.is_file() && entry.file_name().to_string_lossy() == name {
                 return true;
             }
         }
@@ -218,12 +261,21 @@ fn windows_reserved_names_rejected() {
     assert!(fsutil::validate_component("COM10.txt").is_ok());
     assert!(fsutil::validate_component("COM0.txt").is_ok());
 }
-// 覆盖 S-05
+// 覆盖 S-01 / 附录 B：合法 Unicode 空白不等于 Windows 禁用的尾随 ASCII 空格。
 #[test]
-fn trailing_unicode_whitespace_rejected() {
-    assert!(fsutil::validate_component("a\u{3000}").is_err());
-    assert!(fsutil::validate_component("a\u{a0}").is_err());
-    assert!(fsutil::validate_component("a b").is_ok());
+fn component_validation_preserves_legal_unicode_whitespace() {
+    for name in ["a\u{3000}", "a\u{a0}", "a b"] {
+        assert!(fsutil::validate_component(name).is_ok(), "{name:?}");
+        let relative = format!("parent/{name}");
+        assert_eq!(
+            fsutil::safe_relative(&relative).unwrap(),
+            PathBuf::from(relative),
+            "路径校验不得暗中规范化合法原名"
+        );
+    }
+    for name in ["a.", "a ", "a\t"] {
+        assert!(fsutil::validate_component(name).is_err(), "{name:?}");
+    }
 }
 // 覆盖 S-01
 #[test]
@@ -408,6 +460,8 @@ fn same_names_different_directories_can_be_disabled() {
     f.write("b/test.txt", b"same", 20);
     let mut cfg = base();
     cfg.dedup_same_name = false;
+    // 关闭不同名关系，避免 base() 的全尺寸候选覆盖被测同名开关（C-02）。
+    cfg.dedup_other_names = false;
     assert_eq!(f.plan(cfg).summary.planned_delete, 0);
 }
 // 覆盖 R-02
@@ -418,6 +472,8 @@ fn copy_names_can_be_disabled_independently() {
     f.write("a (1).txt", b"same", 20);
     let mut cfg = base();
     cfg.dedup_copy_names = false;
+    // 关闭不同名关系，避免 base() 的全尺寸候选覆盖被测副本名开关（C-02）。
+    cfg.dedup_other_names = false;
     assert_eq!(f.plan(cfg).summary.planned_delete, 0);
 }
 // 覆盖 H-01, C-02, C-12（只哈希启用的名称关系候选，避免读取关闭规则的文件）
@@ -487,7 +543,12 @@ fn unselecting_action_preserves_file() {
     f.write("b", b"same", 20);
     let task = f.plan(base());
     let db = Database::open(&task.directory).unwrap();
-    let action = db.actions_page(0, 10).unwrap().remove(0);
+    let action = db
+        .actions_page(0, 10)
+        .unwrap()
+        .into_iter()
+        .find(|action| matches!(action.kind, ActionKind::Delete))
+        .expect("存在待取消的去重删除行");
     db.set_selected(action.id, false).unwrap();
     drop(db);
     Fixture::apply(&task);
@@ -693,6 +754,7 @@ fn multi_hit_cleanup_any_permanent_rule_deletes() {
     cfg.set_json("junk_delete", serde_json::json!("keep"))
         .unwrap();
     let task = f.plan(cfg);
+    assert_eq!(task.summary.planned_delete, 1, "多规则命中只形成一次删除");
     let actions = Database::open(&task.directory)
         .unwrap()
         .actions_page(0, 100)
@@ -712,7 +774,8 @@ fn multi_hit_cleanup_any_permanent_rule_deletes() {
         "选择了保留的规则不得列入删除原因：{}",
         deletion.reason
     );
-    Fixture::apply(&task);
+    let result = Fixture::apply(&task);
+    assert_eq!(result.summary.deleted, 1, "实际删除也只记一次");
     assert!(
         !exists_somewhere(&f.root, "._x.tmp"),
         "任一 Permanent 类请求删除即删除且只删除一次"
@@ -808,12 +871,11 @@ fn cleanup_keep_files_still_join_dedup() {
         "较旧的清理保留副本已删除"
     );
 }
-// 覆盖 C-04（硬链接执行的崩溃残留自愈，删除前校验 links>=2）
+// 覆盖 C-04, S-04（旧内部前缀不是用户硬链接的删除授权）
 #[test]
 fn stale_hardlink_temps_are_swept() {
-    // 崩溃残留的硬链接临时文件被扫描永久剪枝且无其它回收路径：
-    // 清扫只发生在执行确认之后（apply_with 执行前；C-01 分析阶段只读）。残留必是硬链接（内容仍由保留文件持有），
-    // 清扫前校验链接数 >= 2，普通同名文件绝不能被当作残留删除。
+    // 保留历史用例名；C-04 已取消硬链接替换模式。仅名称和 links >= 2
+    // 不能证明本次所有权，两个既有目录项均应扫描、归类并保留。
     let f = Fixture::new();
     f.write("a.txt", b"payload", 10);
     let stale = f.root.join(".jchtools-link-deadbeef");
@@ -822,25 +884,24 @@ fn stale_hardlink_temps_are_swept() {
             "hard_link failed: {error}; keeper={:?}",
             f.root.join("a.txt")
         );
-        panic!("无法创建硬链接，无法验证残留清扫；请在支持硬链接的文件系统上运行测试");
+        panic!("无法创建硬链接，无法验证既有链接保护；请在支持硬链接的文件系统上运行测试");
     }
     filetime::set_file_mtime(&stale, filetime::FileTime::from_unix_time(0, 0)).unwrap();
     let task = f.plan(base());
-    assert!(stale.exists(), "C-01：分析阶段不得删除残留（只读）");
+    assert!(stale.exists(), "C-01：分析阶段不得删除用户目录项（只读）");
     Fixture::apply(&task);
-    assert!(!stale.exists(), "执行阶段必须清扫过期残留");
-    assert!(
-        exists_somewhere(&f.root, "a.txt"),
-        "清扫残留不得影响 keeper 本体"
+    assert_eq!(task.summary.scanned, 2, "两个用户目录项均属于默认扫描范围");
+    assert_eq!(task.summary.planned_delete, 0, "同物理文件不作副本删除");
+    assert_eq!(
+        fs::read(f.root.join("其他/.jchtools-link-deadbeef")).unwrap(),
+        b"payload"
     );
-    assert_eq!(task.summary.scanned, 1, "清扫不得影响正常文件的扫描");
+    assert_eq!(fs::read(f.root.join("文档/a.txt")).unwrap(), b"payload");
 }
 // 覆盖 C-04（残留清扫不得误删用户文件）
 #[test]
 fn user_file_with_link_temp_prefix_is_never_swept() {
-    // 回归：.jchtools-link- 前缀清扫此前不校验归属，同名用户文件（或从压缩包解出的
-    // 同名成员）会被静默永久删除。崩溃残留必是硬链接（链接数 >= 2，内容仍有其他
-    // 链接持有）；普通同名文件不属于本工具命名空间，必须原样保留。
+    // 旧内部前缀不是删除授权；普通同名用户文件默认照常扫描及归类（S-04/C-05）。
     let f = Fixture::new();
     f.write("a.txt", b"payload", 10);
     let user = f.root.join(".jchtools-link-mydata");
@@ -848,13 +909,13 @@ fn user_file_with_link_temp_prefix_is_never_swept() {
     filetime::set_file_mtime(&user, filetime::FileTime::from_unix_time(0, 0)).unwrap();
     let task = f.plan(base());
     assert!(user.exists(), "C-01：分析（只读）阶段不得删除用户文件");
-    // 必须真正走到执行阶段：清扫只发生在 apply 内（执行前清理），只分析就断言
-    // 「文件还在」在本项目「分析只读」的保证下恒为真，检验不了 links >= 2 归属
-    // 校验。时序与相邻的 stale_hardlink_temps_are_swept 一致。
+    assert_eq!(task.summary.scanned, 2);
+    assert_eq!(task.summary.planned_delete, 0);
     Fixture::apply(&task);
-    assert!(
-        user.exists(),
-        "同名用户文件不是崩溃残留（links < 2），执行阶段清扫也绝不能动它"
+    assert_eq!(
+        fs::read(f.root.join("其他/.jchtools-link-mydata")).unwrap(),
+        b"precious",
+        "用户文件归类后内容必须完整保留，不得按旧内部前缀清扫"
     );
 }
 // 覆盖 R-02（删除方式可按类覆盖）
@@ -1010,7 +1071,7 @@ fn excluded_tree_not_touched() {
     f.write("a.txt", b"same", 10);
     f.write("protected/a.txt", b"same", 20);
     let mut cfg = base();
-    cfg.exclusions = "protected/**".into();
+    cfg.exclusions = "protected".into();
     assert_eq!(f.plan(cfg).summary.scanned, 1);
 }
 #[cfg(windows)]
@@ -1125,7 +1186,7 @@ fn copy_name_cleanup_never_plans_self_move() {
     );
     Fixture::apply(&task);
     let dir = f.root.join("文档");
-    // C-16：报告 (1).pdf / 报告 (2).pdf 的输出名都是 报告_1.pdf；保留者按消解结果落位。
+    // C-16：(1)/(2) 各自输出为 _1/_2；mtime 最新的 (1) 是本组保留者。
     assert_eq!(
         fs::read(dir.join("报告_1.pdf")).unwrap(),
         b"A",
@@ -1402,6 +1463,7 @@ fn set_selected_fails_once_apply_started() {
         let context = context.clone();
         std::thread::spawn(move || engine::apply(&dir, context))
     };
+    let apply_handle = PausedWorker::new(context.control.clone(), apply_handle);
     // 轮询等待 apply 写入 status=executing（固定 sleep 在高负载/CI 抢占下可能误失败）
     let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
     let db = Database::open(&task.directory).unwrap();
@@ -1605,15 +1667,17 @@ fn pause_defers_checkpoint_until_resume() {
             let _ = done_tx.send(());
         })
     };
+    let worker = PausedWorker::new(ctl.clone(), worker);
     started_rx
         .recv_timeout(std::time::Duration::from_secs(2))
         .expect("worker 应已进入 checkpoint 前置");
     // 暂停期间 checkpoint 不应完成
     assert!(
-        done_rx
-            .recv_timeout(std::time::Duration::from_millis(150))
-            .is_err(),
-        "暂停期间 checkpoint 不应返回"
+        matches!(
+            done_rx.recv_timeout(std::time::Duration::from_millis(150)),
+            Err(std::sync::mpsc::RecvTimeoutError::Timeout)
+        ),
+        "暂停期间 checkpoint 不应返回；worker 崩溃或通道断开也不能算成功"
     );
     ctl.pause(false);
     done_rx
@@ -1637,11 +1701,18 @@ fn cancel_while_paused_makes_checkpoint_fail() {
             let _ = done_tx.send(failed);
         })
     };
+    let worker = PausedWorker::new(ctl.clone(), worker);
     started_rx
         .recv_timeout(std::time::Duration::from_secs(2))
         .expect("worker 应已进入 checkpoint 前置");
-    // started 只表示即将调用 checkpoint；短暂等待让 worker 进入暂停等待环后再取消
-    std::thread::sleep(std::time::Duration::from_millis(20));
+    // started 不证明线程已阻塞；Timeout 必须与提前完成及线程退出区分。
+    assert!(
+        matches!(
+            done_rx.recv_timeout(std::time::Duration::from_millis(150)),
+            Err(std::sync::mpsc::RecvTimeoutError::Timeout)
+        ),
+        "取消前 checkpoint 应仍被暂停，不能已失败或提前完成"
+    );
     ctl.cancel();
     assert!(
         done_rx
@@ -2315,10 +2386,7 @@ fn apply_refuses_when_root_directory_moved_after_plan() {
     );
 }
 
-// 平台门禁原因：normalize_root 对 Windows 安装目录/盘根的拒绝分支依赖 Windows 环境变量
-// 与盘符路径语义；Unix 侧只验证「根目录不可整理」。
-// 覆盖 S-05（始终拒绝整理 Windows 安装目录与磁盘根目录，无开关可放开；
-// Program Files、用户目录不被自动扩大进拒绝范围）
+// 覆盖 S-05（拒绝 Windows 安装目录；拒绝范围不扩大到 Program Files 或盘根）
 #[cfg(windows)]
 #[test]
 fn normalize_root_rejects_protected_locations() {
@@ -2333,9 +2401,10 @@ fn normalize_root_rejects_protected_locations() {
         fsutil::normalize_root(Path::new(&program_files)).is_ok(),
         "Program Files 不属于 S-05 授权的扩大拒绝范围"
     );
+    let volume_root = Path::new(&system_root).ancestors().last().unwrap();
     assert!(
-        fsutil::normalize_root(Path::new(r"C:\")).is_err(),
-        "不得整理磁盘根目录"
+        fsutil::normalize_root(volume_root).is_ok(),
+        "S-05：盘根不属于自动扩大拒绝范围；扫描时另行排除系统目录"
     );
 }
 // 覆盖 S-05
@@ -2368,7 +2437,7 @@ fn prepare_writes_no_standalone_settings_file() {
     let _ = f.plan(base());
     let entries: Vec<String> = fs::read_dir(&f.state)
         .unwrap()
-        .filter_map(std::result::Result::ok)
+        .map(|entry| entry.expect("无法读取状态目录项"))
         .map(|e| e.file_name().to_string_lossy().into_owned())
         .collect();
     assert!(
@@ -2553,29 +2622,29 @@ fn removed_extraction_and_cleanup_switches_are_gone() {
     }
 }
 
-// 覆盖 C-01（分析阶段 MUST NOT 改动任何文件：清扫只能发生在执行确认之后）
+// 覆盖 C-01, C-04, S-04（分析只读；旧内部前缀不授予后续执行删除权限）
 #[test]
 fn analysis_phase_keeps_stale_link_temps_until_execution() {
     let f = Fixture::new();
     f.write("a.txt", b"payload", 10);
     let stale = f.root.join(".jchtools-link-deadbeef");
     if let Err(error) = fs::hard_link(f.root.join("a.txt"), &stale) {
-        panic!("无法创建硬链接，无法验证残留清扫时序；请在支持硬链接的文件系统上运行测试：{error}");
+        panic!("无法创建硬链接，无法验证分析只读与既有链接保护；请在支持硬链接的文件系统上运行测试：{error}");
     }
     filetime::set_file_mtime(&stale, filetime::FileTime::from_unix_time(0, 0)).unwrap();
     let task = f.plan(base());
     assert!(
         stale.exists(),
-        "C-01：分析（只读）阶段不得删除任何文件——即使是本工具的崩溃残留"
+        "C-01：分析（只读）阶段不得删除任何文件"
     );
-    assert_eq!(task.summary.scanned, 1, "残留被扫描剪枝，不影响计数");
-    // 执行确认后（apply）才允许清扫；apply 的执行前清理承担该职责。
+    assert_eq!(task.summary.scanned, 2, "不能凭名称剪枝既有用户目录项");
+    assert_eq!(task.summary.planned_delete, 0, "同物理文件不作副本删除");
     Fixture::apply(&task);
-    assert!(!stale.exists(), "执行阶段应清扫过期残留");
-    assert!(
-        exists_somewhere(&f.root, "a.txt"),
-        "清扫不得影响 keeper 本体"
+    assert_eq!(
+        fs::read(f.root.join("其他/.jchtools-link-deadbeef")).unwrap(),
+        b"payload"
     );
+    assert_eq!(fs::read(f.root.join("文档/a.txt")).unwrap(), b"payload");
 }
 
 // 覆盖 S-06（永久删除字节与 candidate_bytes 同口径：多硬链接的源不重复计入逻辑大小）
@@ -2706,8 +2775,7 @@ fn empty_cleanup_ignores_file_delete_modes() {
     assert!(exists_somewhere(&f.root, "keep.txt"));
 }
 
-// 覆盖 C-07, R-03（递归关闭：未下钻的子目录内容未知，不得把猜测写成计划行；
-// 实际为空的目录仍按 H-05 在收尾清理，有内容的子目录一律不碰）
+// 覆盖 C-07, R-03, H-05（递归关闭：未纳入的子目录不参与空目录清理）
 #[test]
 fn recursion_disabled_never_plans_empty_subdirectories() {
     let f = Fixture::new();
@@ -2723,13 +2791,51 @@ fn recursion_disabled_never_plans_empty_subdirectories() {
     );
     Fixture::apply(&task);
     assert!(
-        !f.root.join("empty").exists(),
-        "执行期复查后确认实际为空的目录照常清理（H-05）"
+        f.root.join("empty").is_dir(),
+        "H-05：关闭递归后未纳入的后代不参与空目录清理"
     );
     assert!(
         f.root.join("full/x.txt").exists() && f.root.join("full").exists(),
         "有内容的子目录及其内容不得被触碰"
     );
+}
+
+// 覆盖 H-05 / S-01 / R-03：移动失败后只回收本次实际新建的空目标目录。
+// Windows 共享模式拒绝 DELETE，确定性模拟移动失败；不改变扫描后的数据。
+#[cfg(windows)]
+#[test]
+fn nonrecursive_cleanup_keeps_old_directories_and_removes_only_created_targets() {
+    use std::os::windows::fs::OpenOptionsExt;
+
+    for existing_target in [false, true] {
+        let f = Fixture::new();
+        let source = f.write("locked.txt", b"original bytes", 10);
+        fs::create_dir(f.root.join("old-empty")).unwrap();
+        if existing_target {
+            fs::create_dir(f.root.join("文档")).unwrap();
+        }
+        let mut cfg = base();
+        cfg.recursive = false;
+        let task = f.plan(cfg);
+        let held = fs::OpenOptions::new()
+            .read(true)
+            .share_mode(1)
+            .open(&source)
+            .unwrap();
+        let result = engine::apply(&task.directory, Context::default()).unwrap();
+        drop(held);
+        assert!(
+            result.summary.errors > 0,
+            "被占用的源无法移动，不能假报执行成功"
+        );
+        assert_eq!(fs::read(&source).unwrap(), b"original bytes");
+        assert!(f.root.join("old-empty").is_dir(), "未纳入旧目录不参与收尾");
+        assert_eq!(
+            f.root.join("文档").is_dir(),
+            existing_target,
+            "仅 fs::create_dir 成功的本轮目标容器参与非递归收尾"
+        );
+    }
 }
 
 // 覆盖 C-07, S-04（排除树不参与空目录清理）
@@ -2739,7 +2845,7 @@ fn excluded_tree_is_not_cleaned_as_empty() {
     fs::create_dir_all(f.root.join("protected/nested")).unwrap();
     f.write("keep.txt", b"payload", 10);
     let mut cfg = base();
-    cfg.exclusions = "protected/**".into();
+    cfg.exclusions = "protected".into();
     let task = f.plan(cfg);
     assert_eq!(task.summary.scanned, 1);
     assert_eq!(task.summary.planned_empty, 0, "排除树不得进入空目录计划");
@@ -2753,110 +2859,146 @@ fn excluded_tree_is_not_cleaned_as_empty() {
 // 同名冲突的复合扩展名保留由 rules::digest_candidate 与 classify_shape.rs 锚定，
 // “来源目录名与大类同名不再套层”由 C-18 的来源链剔除规则覆盖。
 
-// 覆盖 H-06, C-14（Git 工作树整体移入集合；归类不写进移动后的 Git 树内部）
+// 覆盖 H-06, S-01, C-14（固定容器占用项目原位保留，普通项目整体移动；
+// 普通文件既不进入保留的 Git 树，也不进入集合内的项目）
 #[test]
 fn classification_target_never_enters_git_tree() {
     let f = Fixture::new();
-    // 与大类同名的 Git 工作树：C-14 先把项目整体移入「Git项目集合」，
-    // 归类目录随后复用腾出的「图片」名字——但绝不写入移动后的 Git 树内部。
-    f.write(
-        "图片/.git/config",
-        b"[core]\nrepositoryformatversion = 0\n",
-        10,
-    );
+    let marker = b"[core]\nrepositoryformatversion = 0\n";
+    f.write("图片/.git/config", marker, 10);
+    f.write("图片/keep.png", b"protected image", 11);
+    f.write("projects/camera/.git/config", marker, 12);
+    f.write("projects/camera/src/main.rs", b"fn main() {}", 13);
     f.write("photo.png", b"photo", 20);
     f.write("doc/a.pdf", b"pdf", 30);
     let cfg = base();
     let task = f.plan(cfg);
     let db = Database::open(&task.directory).unwrap();
     let moves = db.actions_page_filtered(0, 100, Some("move")).unwrap();
-    let git_moves = db
-        .actions_page_filtered(0, 100, Some("move"))
-        .unwrap()
-        .into_iter()
-        .filter(|a| a.source == "图片")
+    let git_moves = moves
+        .iter()
+        .filter(|action| action.source == "projects/camera")
         .collect::<Vec<_>>();
-    let events = event_lines(&db, 50);
     drop(db);
     assert_eq!(
         task.summary.scanned, 2,
         "Git 整树排除：只应扫描 photo.png 与 doc/a.pdf"
     );
-    assert_eq!(task.summary.planned_git, 1, "Git 项目整体移入集合（C-14）");
+    assert_eq!(task.summary.planned_git, 1, "普通项目整体移入集合（C-14）");
     assert_eq!(git_moves.len(), 1);
     assert_eq!(
         git_moves[0].target.as_deref(),
-        Some("Git项目集合/图片"),
+        Some("Git项目集合/camera"),
         "项目目录名不变，整树移入集合"
     );
-    // 归类目标不进入「Git项目集合」内部（H-06：不写入项目树）。
     assert!(
-        moves.iter().filter(|a| a.source != "图片").all(|a| a
-            .target
-            .as_deref()
-            .is_none_or(|t| !t.starts_with("Git项目集合/"))),
-        "归类目标不得写进 Git 集合内部：{moves:?}"
+        moves
+            .iter()
+            .filter(|action| action.source != "projects/camera")
+            .all(|action| action.target.as_deref().is_none_or(|target| {
+                !target.starts_with("图片/") && !target.starts_with("Git项目集合/")
+            })),
+        "归类目标不得进入保留或移动后的 Git 项目：{moves:?}"
     );
     assert!(
-        events.iter().any(|event| event.contains("Git")),
-        "Git 整树排除必须留日志：{events:?}"
+        moves.iter().all(|action| action.source != "图片"
+            && !action.source.starts_with("图片/")
+            && !action.source.starts_with("projects/camera/")),
+        "固定容器占用项目不挪走，两棵 Git 树内部均不规划操作"
     );
-    Fixture::apply(&task);
+    let result = Fixture::apply(&task);
     assert!(
-        f.root.join("图片/photo.png").exists(),
-        "归类目录复用项目腾出的名字（C-14）"
+        result.summary.errors > 0,
+        "图片容器受保护时须如实报告相关归类失败"
     );
-    assert!(
-        f.root.join("Git项目集合/图片/.git/config").exists(),
-        "Git 树随项目整体移动，内容不得被归类写入或改动"
+    assert_eq!(fs::read(f.root.join("图片/.git/config")).unwrap(), marker);
+    assert_eq!(
+        fs::read(f.root.join("图片/keep.png")).unwrap(),
+        b"protected image"
     );
+    assert_eq!(fs::read(f.root.join("photo.png")).unwrap(), b"photo");
+    assert!(!f.root.join("图片/photo.png").exists());
+    assert_eq!(fs::read(f.root.join("文档/a.pdf")).unwrap(), b"pdf");
+    assert_eq!(
+        fs::read(f.root.join("Git项目集合/camera/.git/config")).unwrap(),
+        marker
+    );
+    assert_eq!(
+        fs::read(f.root.join("Git项目集合/camera/src/main.rs")).unwrap(),
+        b"fn main() {}"
+    );
+    assert!(!f.root.join("projects").exists());
 }
 
-// 覆盖 H-06, C-01（取消 Git 项目整体移动后，不得把普通文件移入仍受保护的原树）
+// 覆盖 H-06, C-01, C-07（取消普通 Git 项目整体移动后，依赖其腾空的
+// 祖先清理自动取消；独立归类保留勾选并正常执行，不删除保留项目）
 #[test]
-fn cancelling_git_move_cancels_moves_into_retained_git_tree() {
+fn cancelling_git_move_cancels_cleanup_of_retained_git_tree_ancestors() {
     let f = Fixture::new();
-    f.write(
-        "图片/.git/config",
-        b"[core]\nrepositoryformatversion = 0\n",
-        10,
-    );
-    let photo = f.write("photo.png", b"photo", 20);
+    let marker = b"[core]\nrepositoryformatversion = 0\n";
+    f.write("old/proj/.git/config", marker, 10);
+    f.write("old/proj/keep.png", b"protected image", 11);
+    f.write("photo.png", b"photo", 20);
     let task = f.plan(base());
     let db = Database::open(&task.directory).unwrap();
     let actions = db.actions_page(0, 100).unwrap();
     let git_move = actions
         .iter()
         .find(|action| {
-            action.source == "图片" && action.target.as_deref() == Some("Git项目集合/图片")
+            action.kind == ActionKind::Move
+                && action.source == "old/proj"
+                && action.target.as_deref() == Some("Git项目集合/proj")
         })
-        .expect("C-14 Git 项目整体移动");
+        .expect("普通 Git 项目整体移动（C-14）");
+    let ancestor_cleanup = actions
+        .iter()
+        .find(|action| action.kind == ActionKind::EmptyDirectory && action.source == "old")
+        .expect("项目移走后原祖先应清理（C-07）");
     let photo_move = actions
         .iter()
         .find(|action| {
-            action.source == "photo.png" && action.target.as_deref() == Some("图片/photo.png")
+            action.kind == ActionKind::Move
+                && action.source == "photo.png"
+                && action.target.as_deref() == Some("图片/photo.png")
         })
-        .expect("普通文件分类目标原本位于 Git 项目目录");
+        .expect("独立的普通文件归类");
+    assert!(git_move.selected && ancestor_cleanup.selected && photo_move.selected);
     db.set_selected(git_move.id, false).unwrap();
+    let git_move_id = git_move.id;
+    let cleanup_id = ancestor_cleanup.id;
     let photo_move_id = photo_move.id;
     drop(db);
 
-    assert_eq!(engine::recompute_plan(&task.directory).unwrap(), 1);
+    engine::recompute_plan(&task.directory).unwrap();
     let db = Database::open(&task.directory).unwrap();
-    let actions = db.actions_page(0, 100).unwrap();
+    assert!(!db.action(git_move_id).unwrap().selected, "不得新增用户勾选");
     assert!(
-        !actions
-            .iter()
-            .find(|action| action.id == photo_move_id)
-            .unwrap()
-            .selected,
-        "Git 根仍占位时，目标落入其树内的 Move 必须自动取消"
+        !db.action(cleanup_id).unwrap().selected,
+        "保留项目使原祖先不再腾空，必须取消依赖的清理"
     );
+    for action in db.actions_page(0, 100).unwrap() {
+        if action.kind == ActionKind::EmptyDirectory {
+            assert!(
+                !action.selected,
+                "保留项目相关的根目录和祖先清理均不得执行：{}",
+                action.source
+            );
+        }
+    }
+    assert!(db.action(photo_move_id).unwrap().selected, "独立归类不得取消");
     drop(db);
-    Fixture::apply(&task);
-    assert!(f.root.join("图片/.git/config").exists());
-    assert!(photo.exists());
-    assert!(!f.root.join("图片/photo.png").exists());
+    assert_eq!(engine::recompute_plan(&task.directory).unwrap(), 0);
+    let result = Fixture::apply(&task);
+    assert_eq!(result.summary.errors, 0);
+    assert_eq!(fs::read(f.root.join("old/proj/.git/config")).unwrap(), marker);
+    assert_eq!(
+        fs::read(f.root.join("old/proj/keep.png")).unwrap(),
+        b"protected image"
+    );
+    assert!(f.root.join("old").is_dir());
+    assert!(!f.root.join("Git项目集合").exists());
+    assert_eq!(fs::read(f.root.join("图片/photo.png")).unwrap(), b"photo");
+    assert!(!f.root.join("photo.png").exists());
 }
 
 // 覆盖 H-06, C-07（Git 树整树随项目移动且内容原样；移走后腾空的祖先按 C-07 消失）
@@ -2887,10 +3029,19 @@ fn git_tree_ancestors_survive_empty_directory_cleanup() {
         "Git 树内部不得被规划任何动作：{actions:?}"
     );
     Fixture::apply(&task);
+    assert_eq!(
+        fs::read(f.root.join("Git项目集合/proj/.git/HEAD")).unwrap(),
+        b"ref: refs/heads/main\n",
+        "Git 标记内容不得改写"
+    );
+    assert_eq!(
+        fs::read(f.root.join("Git项目集合/proj/src/main.rs")).unwrap(),
+        b"fn main() {}",
+        "Git 项目内部文件必须原样移动"
+    );
     assert!(
-        f.root.join("Git项目集合/proj/.git/HEAD").exists()
-            && f.root.join("Git项目集合/proj/src/main.rs").exists(),
-        "Git 树必须随项目原样移动"
+        !f.root.join("only").exists(),
+        "项目移走后腾空的原始祖先必须清理（C-07/H-05）"
     );
     assert!(
         !f.root.join("Git项目集合/proj").join("文档").exists(),

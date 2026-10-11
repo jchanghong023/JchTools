@@ -23,11 +23,16 @@ fn observe<T>(operation: &'static str, body: impl FnOnce() -> Result<T>) -> Resu
     let span = crate::logging::operation_span("task_database", operation);
     let _entered = span.enter();
     let started = std::time::Instant::now();
-    tracing::info!(event = "database_operation_started", "任务数据库操作开始");
+    tracing::info!(
+        component = "task_database",
+        event = "database_operation_started",
+        "任务数据库操作开始"
+    );
     let result = body();
     let elapsed_ms = crate::logging::elapsed_ms(started);
     match &result {
         Ok(_) => tracing::info!(
+            component = "task_database",
             event = "database_operation_completed",
             elapsed_ms,
             "任务数据库操作完成"
@@ -37,7 +42,14 @@ fn observe<T>(operation: &'static str, body: impl FnOnce() -> Result<T>) -> Resu
                 .downcast_ref::<rusqlite::Error>()
                 .and_then(rusqlite::Error::sqlite_error_code);
             let io = error.downcast_ref::<std::io::Error>();
-            tracing::error!(event = "database_operation_failed", stage = operation, sqlite_code = ?sqlite, io_kind = ?io.map(std::io::Error::kind), error_code = ?io.and_then(std::io::Error::raw_os_error), elapsed_ms, "任务数据库操作失败");
+            let error_type = if error.downcast_ref::<rusqlite::Error>().is_some() {
+                "sqlite"
+            } else if io.is_some() {
+                "io"
+            } else {
+                "other"
+            };
+            tracing::error!(component = "task_database", event = "database_operation_failed", stage = operation, error_type, sqlite_code = ?sqlite, io_kind = ?io.map(std::io::Error::kind), error_code = ?io.and_then(std::io::Error::raw_os_error), elapsed_ms, "任务数据库操作失败");
         }
     }
     result
@@ -364,6 +376,18 @@ fn action_row(row: &Row<'_>) -> rusqlite::Result<Action> {
     Ok(action)
 }
 
+#[rustfmt::skip]
+#[warn(
+    warnings,
+    unused_must_use,
+    unreachable_patterns,
+    unreachable_pub,
+    unused_variables,
+    rust_2018_idioms,
+    explicit_outlives_requirements,
+    elided_lifetimes_in_paths,
+    single_use_lifetimes
+)]
 #[cfg(test)]
 mod tests {
     use super::{Database, SCHEMA_VERSION};

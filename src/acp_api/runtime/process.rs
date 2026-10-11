@@ -1,7 +1,7 @@
-//! AH-12：唯一 Agent 子进程所有者；协议断裂后不重放请求。
+//! AH-10 / AH-12 / AH-13：唯一 Agent 所有者；失败保持 PID 等自然退役，不强杀或重放。
 use crate::acp_api::{
     agent_process_channel, AgentConnection, AgentExit, AgentProcessCommand, AgentProcessHandle,
-    ServiceConfig, ServiceError, ServiceErrorKind, ServiceStatus,
+    ServiceConfig, ServiceError, ServiceErrorKind, ServicePhase, ServiceStatus,
 };
 use std::path::PathBuf;
 use std::process::Stdio;
@@ -101,23 +101,12 @@ impl ProcessOwner {
                     finished,
                 };
                 let _ = reply.send(Ok(connection));
-                // 仅未承接任务的初始化失败可终止；正常 Stop 不自动强杀。
+                // SDK 连接关闭不代表 Agent 已安全退出；初始化失败也只退役等待自然结束。
                 let (result, stopped) = tokio::select! {
                     result = child.wait() => (result, false),
                     completion = &mut connection_finished => {
                         match completion {
                             Ok(Ok(())) => (child.wait().await, false),
-                            Ok(Err(failure)) if failure.kind == ServiceErrorKind::InvalidConfig => {
-                                tracing::warn!(event = "acp_agent_termination_started", component = "acp_process", peer_pid = pid, reason = "initialization_failed", "ACP 初始化失败，退役自有 Agent");
-                                match child.start_kill() {
-                                    Ok(()) => (child.wait().await, false),
-                                    Err(error) => {
-                                        let failure = ServiceError::new(ServiceErrorKind::Io,
-                                            format!("无法退役初始化失败的自有 Agent：{error}"));
-                                        wait_retiring(&mut child, &mut commands, &mut stopping, &status, pid, failure, &mut deferred).await
-                                    },
-                                }
-                            },
                             Ok(Err(failure)) => {
                                 wait_retiring(&mut child, &mut commands, &mut stopping, &status, pid, failure, &mut deferred).await
                             },
@@ -169,7 +158,7 @@ impl ProcessOwner {
         .await
     }
 }
-/// 无法证明断裂 Agent 的内部工具可安全终止时保留唯一所有权；
+/// 初始化失败或连接断裂均不能证明 Agent 的内部工具可安全终止，必须保留唯一所有权；
 /// 新 Connect 明确失败，不挂起 admission，也不冒险启动第二进程。
 async fn wait_retiring(
     child: &mut tokio::process::Child,
@@ -189,7 +178,10 @@ async fn wait_retiring(
         ),
     );
     status.send_modify(|state| {
-        state.phase = crate::acp_api::ServicePhase::Error;
+        // 退役通知可与 Stop 同时到达，不能把外层已封闭的生命周期写回 Error。
+        if !matches!(state.phase, ServicePhase::Draining | ServicePhase::Stopping) {
+            state.phase = ServicePhase::Error;
+        }
         state.error = Some(failure.message.clone());
     });
     let mut stopped = false;

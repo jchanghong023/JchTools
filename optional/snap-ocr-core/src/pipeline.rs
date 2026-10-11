@@ -58,9 +58,9 @@ pub const CODE_STRETCH_SCORE_TOLERANCE: f64 = 0.02;
 ///   [`PipelineError::PredictorOutput`]）。
 /// - [`OcrBackend::detect`]：返回的四边形与分数列表长度必须一致；每个四边形
 ///   为**当前瓦片局部坐标**的四个顶点（顶点数由 `Quad` 类型保证），坐标必须
-///   有限，分数必须有限且处于 [0, 1]；违规时实现应返回 `Err`。管线对同一
-///   图像按 [`generate_tiles`] 的生成顺序每瓦片调用一次（batch=1），第 k 次
-///   调用对应第 k 个瓦片；真实推理适配层负责按调用次序提供对应瓦片视图。
+///   有限，分数必须有限且处于 [0, 1]；违规时实现应返回 `Err`。管线按
+///   [`generate_tiles`] 的生成顺序先调用 [`OcrBackend::tile`]，再将其返回的
+///   瓦片裁剪图交给检测（batch=1）；后端不得以调用次数隐含瓦片。
 /// - 所有 `Err` 携带的消息不得包含截图内容、识别正文或用户路径（O-29/O-30）。
 pub trait OcrBackend {
     /// 后端持有的图像句柄（检测输入、裁剪与变体的统一类型）。
@@ -101,6 +101,8 @@ pub trait OcrBackend {
 /// 识别期尺寸（参与方向判据，对应 Python `record.width`/`record.height`）
 /// 由管线按增强规则推导：源高 < [`SMALL_TEXT_CROP_HEIGHT`] 时宽高各乘
 /// [`SMALL_TEXT_SCALE_FACTOR`]，否则保持不变（`ocr.py:530-538`）。
+/// 调用方须从原始选区按合并、去重后的全局四边形做透视重裁，不能传入
+/// 瓦片片段或拼接文字。本模块只消费已裁剪的图像句柄，不执行或验证重裁。
 pub struct CropRecord<I> {
     /// 该裁剪来源的检测候选（span 组装时提供全局四边形与检测分）。
     pub candidate: DetectionCandidate,
@@ -639,6 +641,18 @@ pub fn assemble_spans<I>(
     Ok(spans)
 }
 
+#[rustfmt::skip]
+#[warn(
+    warnings,
+    unused_must_use,
+    unreachable_patterns,
+    unreachable_pub,
+    unused_variables,
+    rust_2018_idioms,
+    explicit_outlives_requirements,
+    elided_lifetimes_in_paths,
+    single_use_lifetimes
+)]
 #[cfg(test)]
 mod tests {
     #![allow(clippy::unwrap_used, clippy::expect_used, clippy::float_cmp)]
@@ -888,8 +902,8 @@ mod tests {
         spans.iter().map(|span| span.text().to_string()).collect()
     }
 
-    // 覆盖 O-24（test_tiles_map_to_global_and_seam_fragments_are_recropped）：
-    // 瓦片局部四边形 → 全局映射 → 接缝合并，且检测按瓦片顺序逐个调用。
+    // 覆盖 O-24 / O-25：瓦片局部四边形 → 全局映射 → 接缝合并，
+    // 且检测按瓦片顺序逐个调用；假图像不能验证原图重裁或透视重采样。
     #[test]
     fn tiles_map_to_global_and_seam_fragments_are_consolidated() {
         let first_tile_quad = quad(1000.0, 100.0, 1216.0, 120.0);
@@ -908,7 +922,7 @@ mod tests {
         assert_eq!(*candidates[0].quad(), quad(1000.0, 100.0, 1350.0, 121.0));
         assert_eq!(candidates[0].detection_score(), 0.9);
 
-        // 继续识别链路：合并后的框从原始选区重裁（350×21，源高 ≥ 20 不增强）。
+        // 注入与合并框尺寸对应的假裁剪（350×21，源高 ≥ 20 不增强）。
         let mut records = vec![crop_record(*candidates[0].quad(), 0.9, 350, 21)];
         recognize_records(&backend, &mut records, None).expect("识别应成功");
         let spans = assemble_spans(&records, None).expect("组装应成功");

@@ -1,6 +1,6 @@
 // 共享进程集成测试专用，无模型；不打包。模拟 run49.1 旧发布物的 worker 协议：
-// 引擎不认识 capabilities 命令（其余命令与 shared_xberg.rs 相同），用于锁定
-// 「旧协议引擎直接放行实际请求」的回退行为。
+// 引擎不认识 capabilities 命令（其余命令与 shared_xberg.rs 相同），用于验证
+// XB-09：未知协议必须明确拒绝推理，不得回退放行。
 use std::{collections::HashMap, sync::atomic::{AtomicBool, Ordering}, time::Instant, fs::OpenOptions, io::{self, BufRead, Write}, sync::{Arc, Mutex}, time::Duration};
 fn field(line: &str, key: &str) -> String {
     line.split(&format!("\"{key}\":\"")).nth(1).unwrap_or("").split('"').next().unwrap_or("").to_owned()
@@ -26,6 +26,7 @@ fn main() {
             let mut out = output.lock().unwrap();
             writeln!(out, "{{\"id\":\"{id}\",\"ok\":false,\"error\":\"unsupported command 'capabilities'\"}}").unwrap();
             out.flush().unwrap();
+            pending.lock().unwrap().remove(&id);
             continue;
         }
         let pending = pending.clone();

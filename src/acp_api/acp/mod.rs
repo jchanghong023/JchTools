@@ -1,5 +1,6 @@
 //! AH-02 / AH-04 / AH-12 / AH-13：单连接、请求级路由、4+16 调度与安全收尾。
 //! 模型 catalog 与未消费的探测会话共享状态；首轮接管 spare 时冻结，避免会话配置污染新会话能力。
+//! 模型配置按会话协商；后台排空/停止阶段保持到外层释放 Agent 与 HTTP 资源。
 mod callbacks;
 mod terminals;
 
@@ -42,7 +43,7 @@ fn disconnected() -> ServiceError {
         "Agent 连接已断开，本轮未重放",
     )
 }
-fn sdk_error(cx: &ConnectionTo<Agent>, failure: agent_client_protocol::Error) -> ServiceError {
+fn sdk_error(cx: &ConnectionTo<Agent>, failure: &agent_client_protocol::Error) -> ServiceError {
     let connection_closed = cx.is_incoming_closed();
     tracing::error!(
         event = "acp_protocol_failed",
@@ -79,13 +80,19 @@ struct ModelSelector {
     current: String,
 }
 type SessionModel = Arc<Mutex<Result<ModelSelector, ServiceError>>>;
-fn model_selector(options: &[SessionConfigOption]) -> Result<ModelSelector, ServiceError> {
+fn model_selector(
+    options: &[SessionConfigOption],
+    negotiated_id: Option<&SessionConfigId>,
+) -> Result<ModelSelector, ServiceError> {
     let option = options
         .iter()
         .find(|option| {
             option.category == Some(SessionConfigOptionCategory::Model)
                 && matches!(option.kind, SessionConfigKind::Select(_))
         })
+        // category 是 UX 元数据；新会话仍可使用此连接已协商的 selector 身份。
+        // 显式 Model 配置优先，允许不同会话协商不同 ID；不猜任意 Select 的用途。
+        .or_else(|| negotiated_id.and_then(|id| options.iter().find(|option| &option.id == id)))
         .ok_or_else(|| {
             error(
                 ServiceErrorKind::ModelsUnavailable,
@@ -165,6 +172,7 @@ struct RoundContext {
     key: SessionKey,
     input: PromptInput,
     state: Option<SessionState>,
+    negotiated_model_id: Option<SessionConfigId>,
     events: mpsc::UnboundedSender<RequestEvent>,
     cancellation: CancellationToken,
 }
@@ -194,8 +202,14 @@ impl Actor {
         });
     }
     fn phase(&self, phase: ServicePhase, failure: Option<&ServiceError>) {
-        tracing::info!(event = "acp_backend_phase_changed", component = "acp_agent", previous = ?self.status.borrow().phase, current = ?phase, error_type = ?failure.map(|error| error.kind), "ACP 后台阶段变更");
         self.status.send_modify(|s| {
+            // 外层生命周期还要等待 Agent 和 HTTP 资源；Actor 不能降级排空/停止阶段。
+            let phase = match s.phase {
+                ServicePhase::Stopping => ServicePhase::Stopping,
+                ServicePhase::Draining if phase != ServicePhase::Stopping => ServicePhase::Draining,
+                _ => phase,
+            };
+            tracing::info!(event = "acp_backend_phase_changed", component = "acp_agent", previous = ?s.phase, current = ?phase, error_type = ?failure.map(|error| error.kind), "ACP 后台阶段变更");
             s.phase = phase;
             s.error = failure.map(|e| e.message.clone());
         });
@@ -370,13 +384,13 @@ impl Actor {
         if let Some(request) = self.requests.remove(&round.id) {
             match &round.terminal {
                 RequestEvent::Completed { reason } => {
-                    tracing::info!(event = "acp_request_completed", component = "acp_agent", request_id = %round.id.0, result = ?reason, elapsed_ms = crate::logging::elapsed_ms(request.started), "ACP 请求轮次完成")
+                    tracing::info!(event = "acp_request_completed", component = "acp_agent", request_id = %round.id.0, result = ?reason, elapsed_ms = crate::logging::elapsed_ms(request.started), "ACP 请求轮次完成");
                 }
                 RequestEvent::Failed(error) => {
-                    tracing::error!(event = "acp_request_failed", component = "acp_agent", request_id = %round.id.0, stage = "round", error_type = ?error.kind, elapsed_ms = crate::logging::elapsed_ms(request.started), "ACP 请求轮次失败")
+                    tracing::error!(event = "acp_request_failed", component = "acp_agent", request_id = %round.id.0, stage = "round", error_type = ?error.kind, elapsed_ms = crate::logging::elapsed_ms(request.started), "ACP 请求轮次失败");
                 }
                 RequestEvent::Cancelled => {
-                    tracing::warn!(event = "acp_request_cancelled", component = "acp_agent", request_id = %round.id.0, stage = "round", elapsed_ms = crate::logging::elapsed_ms(request.started), "ACP 请求轮次取消")
+                    tracing::warn!(event = "acp_request_cancelled", component = "acp_agent", request_id = %round.id.0, stage = "round", elapsed_ms = crate::logging::elapsed_ms(request.started), "ACP 请求轮次取消");
                 }
                 RequestEvent::TextDelta(_) => {}
             }
@@ -421,7 +435,7 @@ impl Actor {
             if self.sessions.get(&key).is_some_and(|slot| slot.invalid) {
                 self.queue.remove(index);
                 if let Some(request) = self.requests.remove(&id) {
-                    tracing::error!(event = "acp_request_failed", component = "acp_agent", request_id = %id.0, stage = "queued_session", error_type = "session_unavailable", "ACP 排队请求会话已失效");
+                    tracing::error!(event = "acp_request_failed", component = "acp_agent", request_id = %id.0, stage = "queued_session", error_type = "session_unavailable", elapsed_ms = crate::logging::elapsed_ms(request.started), "ACP 排队请求会话已失效");
                     let _ = request.events.send(RequestEvent::Failed(error(
                         ServiceErrorKind::SessionUnavailable,
                         "此会话已失效，未重放等待请求",
@@ -452,6 +466,16 @@ impl Actor {
                     state = Some(probe);
                 }
             }
+            let negotiated_model_id = if state.is_none() {
+                self.models
+                    .lock()
+                    .unwrap_or_else(PoisonError::into_inner)
+                    .as_ref()
+                    .ok()
+                    .map(|selector| selector.id.clone())
+            } else {
+                None
+            };
             self.active.insert(key.clone());
             let span = crate::logging::operation_span_with_id("acp_agent", "round", &id.0);
             tracing::info!(event = "acp_request_execution_started", component = "acp_agent", request_id = %id.0, reused_session = state.is_some(), queue_elapsed_ms = crate::logging::elapsed_ms(request.started), "ACP 排队请求开始执行");
@@ -465,6 +489,7 @@ impl Actor {
                         key,
                         input,
                         state,
+                        negotiated_model_id,
                         events: request.events.clone(),
                         cancellation: request.cancellation.clone(),
                     },
@@ -490,6 +515,7 @@ async fn create_session(
     cx: &ConnectionTo<Agent>,
     workspace: PathBuf,
     callbacks: &Callbacks,
+    negotiated_model_id: Option<SessionConfigId>,
 ) -> Result<SessionState, ServiceError> {
     crate::acp_api::diagnostics::async_call("acp_agent", "create_session", async {
         let (reply, response) = oneshot::channel();
@@ -501,7 +527,8 @@ async fn create_session(
                 async move {
                     // 发布前注册有序回调，在原始派发内登记，先于紧随响应的配置通知。
                     let result = (|| {
-                        let response = result.map_err(|failure| sdk_error(&connection, failure))?;
+                        let response =
+                            result.map_err(|failure| sdk_error(&connection, &failure))?;
                         // SDK id 保留到本连接结束，拒绝复用取消会话 id，防止迟到更新串轮。
                         let mut routes = routes.lock().unwrap_or_else(PoisonError::into_inner);
                         if !routes.known.insert(response.session_id.clone()) {
@@ -514,23 +541,12 @@ async fn create_session(
                             .spans
                             .insert(response.session_id.clone(), tracing::Span::current());
                         let options = response.config_options.as_deref().unwrap_or_default();
-                        let selector = match &routes.model_id {
-                            Some(id) => options
-                                .iter()
-                                .find(|option| &option.id == id)
-                                .ok_or_else(|| {
-                                    error(
-                                        ServiceErrorKind::ModelsUnavailable,
-                                        "Agent 未保留已协商模型配置",
-                                    )
-                                })
-                                .and_then(model_selector_from_option),
-                            None => model_selector(options),
-                        };
-                        if routes.model_id.is_none() {
-                            if let Ok(selector) = &selector {
-                                routes.model_id = Some(selector.id.clone());
-                            }
+                        // ID 可由当前会话重新协商；缺少 UX category 时保留连接已知身份。
+                        let selector = model_selector(options, negotiated_model_id.as_ref());
+                        if let Ok(selector) = &selector {
+                            routes
+                                .model_ids
+                                .insert(response.session_id.clone(), selector.id.clone());
                         }
                         if let Ok(selector) = &selector {
                             tracing::info!(
@@ -555,7 +571,7 @@ async fn create_session(
                 }
                 .instrument(diagnostic_span)
             })
-            .map_err(|failure| sdk_error(cx, failure))?;
+            .map_err(|failure| sdk_error(cx, &failure))?;
         response.await.map_err(|_| disconnected())?
     })
     .await
@@ -571,12 +587,13 @@ async fn round(
         key,
         input,
         state,
+        negotiated_model_id,
         events,
         cancellation,
     } = context;
     let mut state = match state {
         Some(state) => state,
-        None => match create_session(&cx, workspace, &callbacks).await {
+        None => match create_session(&cx, workspace, &callbacks, negotiated_model_id).await {
             Ok(state) => state,
             Err(failure) => {
                 return RoundResult {
@@ -642,12 +659,12 @@ async fn finalize_round(
         Err(failure) => (RequestEvent::Failed(failure), None),
     };
     if state.is_none() {
-        callbacks
+        let mut routes = callbacks
             .routes
             .lock()
-            .unwrap_or_else(PoisonError::into_inner)
-            .models
-            .remove(&session);
+            .unwrap_or_else(PoisonError::into_inner);
+        routes.models.remove(&session);
+        routes.model_ids.remove(&session);
     }
     RoundResult {
         id,
@@ -693,7 +710,7 @@ cx.prepare_request(SetSessionConfigOptionRequest::new(
 .on_receiving_result(move |result| async move {
     // 发布前注册有序回调，后到的 ConfigOptionUpdate 不会被旧回包覆盖。
     let result = (|| {
-        let response = result.map_err(|failure| sdk_error(&connection, failure))?;
+        let response = result.map_err(|failure| sdk_error(&connection, &failure))?;
         // category 仅用于首次识别；后续完整响应按已协商 id 确认。
         let selected = response
             .config_options
@@ -719,7 +736,7 @@ cx.prepare_request(SetSessionConfigOptionRequest::new(
     Ok(())
 }.instrument(diagnostic_span))
 .inspect_err(|_| tracing::error!(event = "acp_model_selection_failed", component = "acp_agent", stage = "model_publish", error_type = "acp_protocol_error", elapsed_ms = crate::logging::elapsed_ms(model_started), "ACP 模型选择请求发布失败"))
-.map_err(|failure| sdk_error(cx, failure))?;
+    .map_err(|failure| sdk_error(cx, &failure))?;
 response.await.map_err(|_| disconnected())
     .and_then(|result| result)
     .inspect_err(|failure| tracing::error!(event = "acp_model_selection_failed", component = "acp_agent", stage = "model_confirmation", error_type = ?failure.kind, elapsed_ms = crate::logging::elapsed_ms(model_started), "ACP 模型选择确认失败"))?;
@@ -768,14 +785,14 @@ cx.prepare_request(PromptRequest::new(session.clone(), content))
         Ok(())
     })
     .inspect_err(|_| tracing::error!(event = "acp_prompt_failed", component = "acp_agent", stage = "prompt_publish", error_type = "acp_protocol_error", elapsed_ms = crate::logging::elapsed_ms(prompt_started), "ACP 提示请求发布失败"))
-    .map_err(|e| sdk_error(cx, e))?;
+    .map_err(|e| sdk_error(cx, &e))?;
 *prompt_published = true;
 let (result, route) = tokio::select! {
     result = &mut response => result.map_err(|_| disconnected())?,
     () = cancellation.cancelled() => {
         // ACP v1 session/cancel，与 SDK 通用 request cancellation 不混淆。
         tracing::warn!(event = "acp_prompt_cancel_started", component = "acp_agent", "ACP 会话取消通知开始");
-        cx.send_notification(CancelNotification::new(state.id.clone())).map_err(|e| sdk_error(cx, e))?;
+        cx.send_notification(CancelNotification::new(state.id.clone())).map_err(|e| sdk_error(cx, &e))?;
         response.await.map_err(|_| disconnected())?
     }
 };
@@ -783,7 +800,7 @@ let route = route.ok_or_else(disconnected)?;
 if let Some(failure) = route.failure {
     return Err(failure);
 }
-let response = result.map_err(|e| sdk_error(cx, e))
+let response = result.map_err(|e| sdk_error(cx, &e))
     .inspect_err(|failure| tracing::error!(event = "acp_prompt_failed", component = "acp_agent", stage = "prompt_terminal", error_type = ?failure.kind, elapsed_ms = crate::logging::elapsed_ms(prompt_started), "ACP 提示请求收到失败终态"))?;
 tracing::info!(event = "acp_prompt_terminal_received", component = "acp_agent", result = ?response.stop_reason, output_bytes = route.text.len(), elapsed_ms = crate::logging::elapsed_ms(prompt_started), "ACP 提示请求收到 Agent 终态");
 if cancellation.is_cancelled() || response.stop_reason == StopReason::Cancelled {
@@ -890,17 +907,31 @@ async fn initialize(
                 "Agent 协商的 ACP 协议版本不受支持",
             ));
         }
-        create_session(cx, workspace, callbacks).await.map_err(|_| {
-            error(
-                ServiceErrorKind::InvalidConfig,
-                "Agent 模型探测会话创建失败",
-            )
-        })
+        create_session(cx, workspace, callbacks, None)
+            .await
+            .map_err(|_| {
+                error(
+                    ServiceErrorKind::InvalidConfig,
+                    "Agent 模型探测会话创建失败",
+                )
+            })
     })
     .await
 }
 
 // 只观察真实后台的退役集合；生产编译没有 observer、额外命令或公开 test-hooks API。
+#[rustfmt::skip]
+#[warn(
+    warnings,
+    unused_must_use,
+    unreachable_patterns,
+    unreachable_pub,
+    unused_variables,
+    rust_2018_idioms,
+    explicit_outlives_requirements,
+    elided_lifetimes_in_paths,
+    single_use_lifetimes
+)]
 #[cfg(test)]
 type RetirementObserver = Box<
     dyn FnMut(
@@ -1067,6 +1098,7 @@ async fn run_backend_inner(
                             .unwrap_or_else(PoisonError::into_inner);
                         routes.active.clear();
                         routes.models.clear();
+                        routes.model_ids.clear();
                         routes.known.clear();
                         routes.spans.clear();
                     }
@@ -1106,7 +1138,8 @@ async fn run_backend_inner(
                         s.executing = 0;
                         s.waiting = 0;
                     });
-                    actor.phase(ServicePhase::Stopped, finish.as_ref().err());
+                    // Stop ACK 只代表 ACP 收尾；Stopped 由外层实际释放进程/HTTP 后发布。
+                    actor.phase(ServicePhase::Stopping, finish.as_ref().err());
                     for reply in actor.acknowledgements.drain(..) {
                         let _ = reply.send(finish.clone());
                     }
@@ -1163,7 +1196,7 @@ async fn run_backend_inner(
                 Some(BackendCommand::Stop { reply }) => {
                     actor.phase(ServicePhase::Stopping, None);
                     let result = finish_retired(&mut retired, &mut retired_failure).await;
-                    actor.phase(ServicePhase::Stopped, result.as_ref().err());
+                    actor.phase(ServicePhase::Stopping, result.as_ref().err());
                     let _ = reply.send(result);
                     return;
                 }
@@ -1177,6 +1210,18 @@ async fn run_backend_inner(
     }
 }
 
+#[rustfmt::skip]
+#[warn(
+    warnings,
+    unused_must_use,
+    unreachable_patterns,
+    unreachable_pub,
+    unused_variables,
+    rust_2018_idioms,
+    explicit_outlives_requirements,
+    elided_lifetimes_in_paths,
+    single_use_lifetimes
+)]
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1204,13 +1249,16 @@ mod tests {
         valid[1].text = "不同".into();
         assert!(validate_history(&previous, &valid).is_err());
     }
-    // 覆盖 AH-04：只有 Model 分类的 Select，平铺和分组的真实 value id。
+    // 覆盖 AH-04：首次通过 Model 分类发现 Select，平铺和分组的真实 value id。
     #[test]
     fn model_discovery_uses_flat_and_grouped_select_values() {
         let choice = SessionConfigSelectOption::new("真实-model", "模型");
         let flat = SessionConfigOption::select("model", "模型", "真实-model", vec![choice.clone()])
             .category(SessionConfigOptionCategory::Model);
-        assert_eq!(model_selector(&[flat]).unwrap().values[0].id, "真实-model");
+        assert_eq!(
+            model_selector(&[flat], None).unwrap().values[0].id,
+            "真实-model"
+        );
         let grouped = SessionConfigOption::select(
             "model",
             "模型",
@@ -1219,13 +1267,64 @@ mod tests {
         )
         .category(SessionConfigOptionCategory::Model);
         assert_eq!(
-            model_selector(&[grouped]).unwrap().values[0].id,
+            model_selector(&[grouped], None).unwrap().values[0].id,
             "真实-model"
         );
         assert_eq!(
-            model_selector(&[]).err().unwrap().kind,
+            model_selector(&[], None).err().unwrap().kind,
             ServiceErrorKind::ModelsUnavailable
         );
+    }
+
+    // 覆盖 AH-02/AH-04：可选 category 不改变已知 ID；仍验证每个新会话的真实选项。
+    #[test]
+    fn new_session_model_discovery_retains_negotiated_identity() {
+        let negotiated_id = SessionConfigId::new("negotiated-selector");
+        let option = SessionConfigOption::select(
+            negotiated_id.clone(),
+            "模型",
+            "session-model",
+            vec![SessionConfigSelectOption::new("session-model", "会话模型")],
+        );
+        for category in [
+            None,
+            Some(SessionConfigOptionCategory::Other("_vendor_unknown".into())),
+        ] {
+            let mut current = option.clone();
+            current.category = category;
+            assert!(model_selector(&[current.clone()], None).is_err());
+            let selector = model_selector(&[current], Some(&negotiated_id)).unwrap();
+            assert_eq!(selector.id, negotiated_id);
+            assert_eq!(selector.current, "session-model");
+            assert_eq!(selector.values[0].id, "session-model");
+        }
+        let different = SessionConfigOption::select(
+            "session-specific-selector",
+            "模型",
+            "different-model",
+            vec![SessionConfigSelectOption::new("different-model", "不同模型")],
+        );
+        assert!(model_selector(&[different.clone()], Some(&negotiated_id)).is_err());
+        let selector = model_selector(
+            &[
+                option,
+                different.category(SessionConfigOptionCategory::Model),
+            ],
+            Some(&negotiated_id),
+        )
+        .unwrap();
+        assert_eq!(selector.id.to_string(), "session-specific-selector");
+        assert_eq!(selector.values[0].id, "different-model");
+        assert!(model_selector(&[], Some(&negotiated_id)).is_err());
+        let invalid = SessionConfigOption::select(
+            negotiated_id.clone(),
+            "模型",
+            "unlisted-model",
+            vec![SessionConfigSelectOption::new("session-model", "会话模型")],
+        );
+        assert!(model_selector(&[invalid], Some(&negotiated_id)).is_err());
+        let non_select = SessionConfigOption::boolean(negotiated_id.clone(), "不是模型选择", true);
+        assert!(model_selector(&[non_select], Some(&negotiated_id)).is_err());
     }
 
     // 覆盖 AH-12 / AH-A08：4 个执行 lane 饱和后，同会话等待也计入 16 个容量。
@@ -1342,6 +1441,9 @@ mod tests {
             for state in [&invalid, &valid] {
                 routes.known.insert(state.id.clone());
                 routes.models.insert(state.id.clone(), state.model.clone());
+                routes
+                    .model_ids
+                    .insert(state.id.clone(), SessionConfigId::new("model"));
                 routes.active.insert(
                     state.id.clone(),
                     Route {
@@ -1413,6 +1515,8 @@ mod tests {
             assert!(!routes.active.contains_key(&invalid_id));
             assert!(routes.active.contains_key(&valid_id));
             assert!(routes.models.contains_key(&valid_id));
+            assert!(!routes.model_ids.contains_key(&invalid_id));
+            assert!(routes.model_ids.contains_key(&valid_id));
         }
         assert!(
             invalid_model.upgrade().is_none(),
@@ -1451,6 +1555,9 @@ mod tests {
                 .unwrap_or_else(PoisonError::into_inner);
             routes.known.insert(session.clone());
             routes.models.insert(session.clone(), state.model.clone());
+            routes
+                .model_ids
+                .insert(session.clone(), SessionConfigId::new("model"));
         }
         let result = finalize_round(
             &callbacks,
@@ -1477,6 +1584,7 @@ mod tests {
             .unwrap_or_else(PoisonError::into_inner);
         assert!(routes.known.contains(&session));
         assert!(Arc::ptr_eq(&routes.models[&session], &retained.model));
+        assert_eq!(routes.model_ids[&session], SessionConfigId::new("model"));
     }
 
     // Stop 是完整 drain：已完成的首错必须保留，但仍安全等待尚未结束的 cleanup。
@@ -1538,6 +1646,9 @@ mod tests {
                 .unwrap_or_else(PoisonError::into_inner);
             routes.known.insert(state.id.clone());
             routes.models.insert(state.id.clone(), state.model.clone());
+            routes
+                .model_ids
+                .insert(state.id.clone(), SessionConfigId::new("model"));
         }
         let result = finalize_round(
             &callbacks,

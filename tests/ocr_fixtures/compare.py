@@ -4,7 +4,9 @@
       --python <旧版报告.json> [--python ...] --rust <新版报告.json>
       [--rust ...] --out .tmp/ocr-assets/comparison.json
       [--max-cer 0.02] [--max-anchor-delta 1]
-报告由旧仓库 scripts/evaluate_ocr_fixture.py 和本仓库 ocr_compare example 产生。
+本工具比较已取得的两端报告；冻结 Python 与历史独立 Rust worker 的报告
+曾分别由 evaluate_ocr_fixture.py 和现已退役的 ocr_compare example 产生。
+历史报告、性能数据及本比较工具不证明当前共享 Xberg 链路已通过验收。
 
 退出码约定：0 = Rust 指标在阈值内通过；1 = CER 或布局锚点偏差超阈（JSON 的
 failures 逐条标注原因）；命令行缺参为 argparse 的退出码 2；未捕获异常统一为
@@ -12,7 +14,7 @@ failures 逐条标注原因）；命令行缺参为 argparse 的退出码 2；�
 与锚点行列偏差；Python 是冻结参照，数值只记录不设门。紧凑 CER 即 2026-09-27
 基线与附录 C「正文字符错误率 ≤ 2%」的度量口径——含空白的 exact CER 只记录
 不设门（冻结 Python 基线自身约 2.2%，以其设门会把与基线逐字符一致的健康结果
-误判为失败；空白回归由锚点偏差与 texts_identical 报告承接）。布局列按 East
+误判为失败；空白回归由锚点偏差与逐字符 text_differences 报告承接）。布局列按 East
 Asian Width 半角单元计（W/F 计 2、组合字符计 0，与 SNAP2TEXT 附录 B 的 Rust
 侧口径一致）。--out 只接受仓库根 .tmp/ 之下的路径（AGENTS.md §2），拒绝仓库
 外同名 .tmp。
@@ -23,9 +25,11 @@ from __future__ import annotations
 import argparse
 import hashlib
 import json
+import math
 import statistics
 import tempfile
 import unicodedata
+from difflib import SequenceMatcher
 from pathlib import Path
 from typing import Any
 from unittest.mock import patch
@@ -58,6 +62,9 @@ def halfwidth_units(text: str) -> int:
 
 def anchors(text: str, names: list[str]) -> dict[str, dict[str, int] | None]:
     """定位锚点所在行及半角网格列（列按 halfwidth_units 口径，行按行号计）."""
+    if not isinstance(names, list) or any(not isinstance(name, str) for name in names):
+        message = "布局锚点必须是字符串列表"
+        raise ValueError(message)
     result: dict[str, dict[str, int] | None] = {}
     for name in names:
         hits: list[tuple[int, int]] = []
@@ -86,6 +93,23 @@ def metrics(reference: str, actual: str, names: list[str]) -> dict[str, Any]:
     }
 
 
+def text_differences(reference: str, actual: str) -> list[dict[str, Any]]:
+    """逐项记录原始字符差异，保留缩进、内部空格、空行与结尾换行（O 附录 C）."""
+    return [
+        {
+            "operation": operation,
+            "python_range": [before_start, before_end],
+            "rust_range": [after_start, after_end],
+            "python": reference[before_start:before_end],
+            "rust": actual[after_start:after_end],
+        }
+        for operation, before_start, before_end, after_start, after_end in SequenceMatcher(
+            None, reference, actual, autojunk=False
+        ).get_opcodes()
+        if operation != "equal"
+    ]
+
+
 def load_reports(paths: list[Path]) -> tuple[str, list[float], list[float]]:
     texts: list[str] = []
     initialization: list[float] = []
@@ -95,7 +119,11 @@ def load_reports(paths: list[Path]) -> tuple[str, list[float], list[float]]:
         if report["status"] != "success":
             message = f"{path}: OCR 未成功"
             raise ValueError(message)
-        texts.append(str(report["actual_text"]))
+        text = report["actual_text"]
+        if not isinstance(text, str):
+            message = f"{path}: actual_text 必须是字符串，不能把非文本结果转成成功正文"
+            raise ValueError(message)
+        texts.append(text)
         initialization.append(float(report["initialization_seconds"]))
         value = report["recognition_seconds"]
         recognition.extend(float(item) for item in (value if isinstance(value, list) else [value]))
@@ -125,6 +153,13 @@ def evaluate_thresholds(
     max_anchor_delta: int,
 ) -> list[str]:
     """按附录 C 口径评估 Rust 指标，返回逐条失败原因（空列表 = 通过）."""
+    # 无效阈值或缺少可度量的参考锚点是夹具错误，不能算作指标通过（P-13）。
+    if not math.isfinite(max_cer) or max_cer < 0 or max_anchor_delta < 0:
+        message = "CER 阈值必须是有限非负数，锚点偏差阈值必须非负"
+        raise ValueError(message)
+    if not names or len(set(names)) != len(names) or any(not name for name in names):
+        message = "布局比较必须提供非空且不重复的锚点"
+        raise ValueError(message)
     failures: list[str] = []
     compact_cer = rust_metrics["compact_cer"]
     rust_anchors = rust_metrics["anchors"]
@@ -134,7 +169,8 @@ def evaluate_thresholds(
         reference = reference_anchors[name]
         actual = rust_anchors[name]
         if reference is None:
-            continue
+            message = f"参考文本中的锚点 {name} 缺失或不唯一，无法完成布局验收"
+            raise ValueError(message)
         if actual is None:
             failures.append(f"锚点 {name} 未在 Rust 输出中出现或出现多次")
             continue
@@ -162,6 +198,18 @@ def self_test() -> None:
     # 同行重复及重叠出现也不具有唯一布局位置。
     assert anchors("A A", ["A"]) == {"A": None}
     assert anchors("AAA", ["AA"]) == {"AA": None}
+    # manifest 的字符串/对象不能当作锚点列表迭代，否则 "AB" 会退化为 ["A", "B"]。
+    # AB → A B 的紧凑 CER 为零，拆成字符后偏差仅 1，但完整锚点实际上已丢失。
+    assert evaluate_thresholds(
+        ["AB"], anchors("AB", ["AB"]), metrics("AB", "A B", ["AB"]), 0.02, 1
+    ) == ["锚点 AB 未在 Rust 输出中出现或出现多次"]
+    for invalid_names in ("AB", {"A": None, "B": None}, [1], ["A", None]):
+        try:
+            anchors("AB", invalid_names)
+        except ValueError:
+            continue
+        message = "锚点必须是字符串列表，不能按字符或对象键缩小布局验收范围"
+        raise AssertionError(message)
     # 阈值评估：紧凑 CER 超限、锚点缺失、行列超差逐条给出原因。
     failures = evaluate_thresholds(
         ["A", "B", "C"],
@@ -179,6 +227,30 @@ def self_test() -> None:
         "锚点 B 未在 Rust 输出中出现或出现多次",
         "锚点 C 行偏差 2 超过阈值 1",
     ], failures
+    # NaN/Infinity 会使普通大小比较失效，不能绕过 CER 门；参考锚点错误也不能跳过。
+    for threshold, reference in (
+        (float("nan"), {"A": {"row": 0, "column": 0}}),
+        (float("inf"), {"A": {"row": 0, "column": 0}}),
+        (0.02, {"A": None}),
+    ):
+        try:
+            evaluate_thresholds(
+                ["A"], reference, {"compact_cer": 0.0, "anchors": {"A": None}}, threshold, 1
+            )
+        except ValueError:
+            continue
+        message = "无效阈值或参考锚点必须拒绝，不能被计为通过"
+        raise AssertionError(message)
+    # 紧凑 CER 相同的缩进变化仍须给出原始字符级证据，而非只有相似率/布尔值。
+    assert text_differences("  A", " A") == [
+        {
+            "operation": "delete",
+            "python_range": [0, 1],
+            "rust_range": [0, 0],
+            "python": " ",
+            "rust": "",
+        }
+    ]
     # 输出守卫：仓库根 .tmp/ 之下允许（含尚未存在的路径）。
     ensure_repo_tmp_output(REPO_ROOT / ".tmp" / "ocr-assets" / "comparison.json")
     # 仓库外系统临时目录同名 .tmp、仓库内非 .tmp、仓库旁 .tmp 均必须拒绝。
@@ -299,6 +371,7 @@ def main() -> int:
         "median_load_seconds": {"python": statistics.median(python_load), "rust": statistics.median(rust_load)},
         "median_ocr_seconds": {"python": statistics.median(python_ocr), "rust": statistics.median(rust_ocr)},
         "texts_identical": python_text == rust_text,
+        "text_differences": text_differences(python_text, rust_text),
         "thresholds": {
             "max_cer": args.max_cer,
             "max_anchor_delta": args.max_anchor_delta,

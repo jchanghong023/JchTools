@@ -1,3 +1,16 @@
+#![warn(
+    warnings,
+    unused_must_use,
+    unreachable_patterns,
+    unreachable_pub,
+    unused_variables,
+    future_incompatible,
+    rust_2018_idioms,
+    explicit_outlives_requirements,
+    elided_lifetimes_in_paths,
+    single_use_lifetimes
+)]
+
 //! 覆盖 XB-19：场景化固定清单校验（场景规则、清单同步、替换兼容与缺失路径）
 //! 与 XB-16：共享引擎启动配置按场景声明模型目录、媒体可用性按文件在位判定。
 //! 纯库口径，不启动代理或引擎进程。

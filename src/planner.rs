@@ -199,6 +199,12 @@ fn is_category_label(name: &str) -> bool {
         "视频" | "音频" | "图片" | "文档" | "压缩包" | "程序" | "其他" | "大文件"
     )
 }
+/// S-01：固定容器占用保护与来源链识别复用同一套大类名及既有容器常量。
+pub(crate) fn is_fixed_container_name(name: &str) -> bool {
+    is_category_label(name)
+        || name.eq_ignore_ascii_case(GIT_COLLECTION_DIR)
+        || name.eq_ignore_ascii_case(crate::archive::QUARANTINE_DIR_NAME)
+}
 /// C-18 来源段：parent 各目录段（最近一级在前），剔除紧邻的标准分类段
 ///（附录 A 大类或大文件的单个目录段；旧版功能目录、年月目录等其他名称不剔除，
 /// 作为普通来源目录参与消解）、以及项目来源的直接集合容器「Git项目集合」。
@@ -643,9 +649,17 @@ fn git_collection(job: &mut Job) -> Result<Vec<String>> {
         let Some(name) = Path::new(rel).file_name().and_then(|s| s.to_str()) else {
             continue;
         };
-        // 根本身就叫「Git项目集合」时，目标路径会落入项目自身，必须原位保留。
-        // 嵌套目录下同名的项目目标是根集合下的子项，并非自嵌套，仍须整体移动。
-        if same_component(rel, GIT_COLLECTION_DIR) {
+        // S-01：根层固定容器被 Git 项目占用时同样不能挪走项目腾位。
+        // 嵌套目录下的同名项目并非本次根的容器占用，仍按 C-14 整体归类。
+        if parent_of(rel).is_empty() && is_fixed_container_name(name) {
+            job.log(
+                "Git归类",
+                rel,
+                "",
+                "保留",
+                "固定容器被 Git 项目占用：不挪走占用项目，相关归类保留源项（S-01）",
+                0,
+            )?;
             continue;
         }
         let parent = parent_of(rel).to_string();
@@ -1124,6 +1138,18 @@ pub fn build(job: &mut Job) -> Result<()> {
     Ok(())
 }
 
+#[rustfmt::skip]
+#[warn(
+    warnings,
+    unused_must_use,
+    unreachable_patterns,
+    unreachable_pub,
+    unused_variables,
+    rust_2018_idioms,
+    explicit_outlives_requirements,
+    elided_lifetimes_in_paths,
+    single_use_lifetimes
+)]
 #[cfg(test)]
 mod signature_control_tests {
     use super::*;

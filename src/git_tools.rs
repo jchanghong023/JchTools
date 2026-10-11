@@ -71,10 +71,8 @@ impl GitShared {
     }
     /// 当前任务终态（供收尾日志读取；锁中毒时返回空串，不影响业务）。
     fn state(&self) -> String {
-        self.state
-            .lock()
-            .map(|guard| guard.clone())
-            .unwrap_or_else(|_| {
+        self.state.lock().map_or_else(
+            |_| {
                 tracing::error!(
                     event = "git_shared_read_failed",
                     stage = "terminal_state",
@@ -82,7 +80,9 @@ impl GitShared {
                     "Git 终态共享锁中毒，保持空状态回退"
                 );
                 String::new()
-            })
+            },
+            |guard| guard.clone(),
+        )
     }
     fn set_text(slot: &Mutex<String>, value: &str) {
         if let Ok(mut guard) = slot.lock() {
@@ -124,23 +124,25 @@ pub fn find_git() -> Result<PathBuf> {
     let _entered = span.enter();
     let started = std::time::Instant::now();
     tracing::info!(event = "git_resolve_started", "开始查找 Git 可执行程序");
-    let executable = std::env::current_exe().map_err(|error| {
-        tracing::warn!(event = "git_executable_location_unavailable", stage = "bundled_lookup", error_type = ?error.kind(), error_code = error.raw_os_error(), "无法定位宿主程序，转为系统 Git 查找");
-        error
-    }).ok();
+    let executable = std::env::current_exe()
+        .inspect_err(|error| {
+            tracing::warn!(event = "git_executable_location_unavailable", stage = "bundled_lookup", error_type = ?error.kind(), error_code = error.raw_os_error(), "无法定位宿主程序，转为系统 Git 查找");
+        })
+        .ok();
     let result = find_git_from(executable.as_deref().and_then(Path::parent));
-    match &result {
-        Ok(_) => tracing::info!(
+    if result.is_ok() {
+        tracing::info!(
             event = "git_resolve_completed",
             elapsed_ms = crate::logging::elapsed_ms(started),
             "已找到 Git 可执行程序"
-        ),
-        Err(_) => tracing::error!(
+        );
+    } else {
+        tracing::error!(
             event = "git_resolve_failed",
             error_type = "executable_missing",
             elapsed_ms = crate::logging::elapsed_ms(started),
             "未找到 Git 可执行程序"
-        ),
+        );
     }
     result
 }
@@ -364,13 +366,12 @@ fn run_git_network_inner(
     control: &Control,
     proxy: &crate::system_proxy::SystemProxy,
 ) -> Result<CapturedOutput> {
-    control.check_cancelled().map_err(|error| {
+    control.check_cancelled().inspect_err(|_| {
         tracing::warn!(
             event = "git_network_cancelled",
             stage = "before_command",
             "Git 网络操作启动前已停止"
         );
-        error
     })?;
     if !proxy.is_enabled() {
         let _route = tracing::info_span!(
@@ -989,16 +990,17 @@ fn try_push(
     };
     let stdout = output_text(&out.stdout);
     let stderr = output_text(&out.stderr);
+    // G-14：每次尝试都展示两条真实输出流，包括失败与转入合并的拒绝结果；
+    // 后续错误摘要只用于说明原因，不能代替完整的阶段输出。
+    if let Some(entry) = output_log_entry(&stdout, &stderr) {
+        log(&format!("git push 输出：\n{entry}"));
+    }
     if out.status.success() && !stdout.lines().any(|line| line.starts_with('!')) {
         tracing::info!(
             event = "git_push_classified",
             result = "success",
             "Git 推送结果为成功"
         );
-        // F14/G-14：成功也采集真实输出（push 返回内容），不能只在失败时可见。
-        if let Some(entry) = output_log_entry(&stdout, &stderr) {
-            log(&format!("git push 输出：\n{entry}"));
-        }
         return PushOutcome::Ok;
     }
     let text = format!("{stderr}{stdout}");
@@ -1113,22 +1115,24 @@ fn fetch_and_merge(
         // 也不能只给「失败」级别的信息。多行日志条目与 run() 的仓库信息同款。
         (ctx.log)(&format!("git merge 冲突输出：\n{}", bounded_text(&text)));
         let unresolved = run_git_ok(git, root, &["diff", "--name-only", "--diff-filter=U"])
-            .map(|text| {
-                text.lines()
-                    .map(str::trim)
-                    .filter(|line| !line.is_empty())
-                    .map(str::to_owned)
-                    .collect::<Vec<_>>()
-            })
-            .unwrap_or_else(|_| {
-                tracing::warn!(
-                    event = "git_conflict_paths_unavailable",
-                    stage = "conflict_scan",
-                    error_type = "git_query_failed",
-                    "无法列出冲突路径，按既有行为保留冲突状态"
-                );
-                Vec::new()
-            });
+            .map_or_else(
+                |_| {
+                    tracing::warn!(
+                        event = "git_conflict_paths_unavailable",
+                        stage = "conflict_scan",
+                        error_type = "git_query_failed",
+                        "无法列出冲突路径，按既有行为保留冲突状态"
+                    );
+                    Vec::new()
+                },
+                |text| {
+                    text.lines()
+                        .map(str::trim)
+                        .filter(|line| !line.is_empty())
+                        .map(str::to_owned)
+                        .collect::<Vec<_>>()
+                },
+            );
         return MergeOutcome::Conflict(unresolved);
     }
     if text.contains("local changes") || text.contains("would be overwritten by merge") {
@@ -1688,15 +1692,33 @@ fn ahead_behind(git: &Path, root: &Path) -> Result<(u64, u64)> {
 /// 时如实报告「本地有 N 个提交未推送」，绝不报「工作区与远端一致」。
 fn finish_without_changes(git: &Path, info: &RepoInfo, ctx: &Ctx<'_>) -> String {
     let shared = ctx.shared;
+    let started = std::time::Instant::now();
     let (behind, ahead) = match ahead_behind(git, &info.root) {
         Ok(pair) => pair,
         Err(error) => {
+            tracing::error!(
+                component = "git",
+                event = "git_sync_status_failed",
+                stage = "ahead_behind",
+                error_type = "query_or_parse_failed",
+                elapsed_ms = crate::logging::elapsed_ms(started),
+                "Git 本地与 upstream 同步状态核实失败"
+            );
             let text = format!("没有需要提交的变更，但无法核实与远端的同步状态：{error:#}");
             (ctx.log)(&text);
             shared.set_state("失败");
             return text;
         }
     };
+    tracing::info!(
+        component = "git",
+        event = "git_sync_status_completed",
+        stage = "ahead_behind",
+        behind,
+        ahead,
+        elapsed_ms = crate::logging::elapsed_ms(started),
+        "Git 本地与 upstream 提交差异已统计"
+    );
     if ahead == 0 {
         shared.set_state("完成");
         shared.set_stage("完成");
@@ -1884,16 +1906,18 @@ fn run_task(
         &info.root,
         &["remote", "get-url", &info.upstream_remote],
     )
-    .map(|text| text.trim().to_owned())
-    .unwrap_or_else(|_| {
-        tracing::warn!(
-            event = "git_remote_url_unavailable",
-            stage = "remote_url",
-            result = "unknown_target",
-            "无法读取远端地址，保持未知目标代理策略"
-        );
-        String::new()
-    });
+    .map_or_else(
+        |_| {
+            tracing::warn!(
+                event = "git_remote_url_unavailable",
+                stage = "remote_url",
+                result = "unknown_target",
+                "无法读取远端地址，保持未知目标代理策略"
+            );
+            String::new()
+        },
+        |text| text.trim().to_owned(),
+    );
     // 中间态处理（G-06/G-11）
     tracing::info!(
         event = "git_stage_started",
@@ -2190,6 +2214,18 @@ fn run_task(
     text
 }
 
+#[rustfmt::skip]
+#[warn(
+    warnings,
+    unused_must_use,
+    unreachable_patterns,
+    unreachable_pub,
+    unused_variables,
+    rust_2018_idioms,
+    explicit_outlives_requirements,
+    elided_lifetimes_in_paths,
+    single_use_lifetimes
+)]
 #[cfg(test)]
 mod tests {
     use super::*;

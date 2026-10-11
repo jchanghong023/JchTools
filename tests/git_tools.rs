@@ -1,3 +1,16 @@
+#![warn(
+    warnings,
+    unused_must_use,
+    unreachable_patterns,
+    unreachable_pub,
+    unused_variables,
+    future_incompatible,
+    rust_2018_idioms,
+    explicit_outlives_requirements,
+    elided_lifetimes_in_paths,
+    single_use_lifetimes
+)]
+
 //! Git 工具核心逻辑测试（合同 G 分区）：逐文件提交并推送。
 //! 用本地 bare 仓库模拟 upstream 远端（不经网络，P-03 例外范围内的真实 git 行为）；
 //! 退避基准注入毫秒级，验证重试不拖慢测试。
@@ -12,7 +25,7 @@ use std::{
     fs,
     path::{Path, PathBuf},
     process::Command,
-    sync::{Arc, Mutex, OnceLock},
+    sync::{mpsc, Arc, Mutex, OnceLock},
     thread::JoinHandle,
     time::{Duration, Instant},
 };
@@ -163,6 +176,41 @@ struct RunOutcome {
     logs: Vec<String>,
 }
 
+/// 看门狗只服务当前运行；正常结束或 panic 时唤醒并回收线程，避免每次运行
+/// 留下休眠三分钟的线程、以及在结束后对复用的 Control 发出迟到的取消。
+struct RunWatchdog {
+    stop: mpsc::Sender<()>,
+    handle: Option<JoinHandle<()>>,
+}
+
+impl RunWatchdog {
+    fn new(control: &Arc<Control>) -> Self {
+        let (stop, receiver) = mpsc::channel();
+        let control = Arc::clone(control);
+        let handle = std::thread::spawn(move || {
+            if matches!(
+                receiver.recv_timeout(Duration::from_secs(180)),
+                Err(mpsc::RecvTimeoutError::Timeout)
+            ) {
+                control.cancel();
+            }
+        });
+        Self {
+            stop,
+            handle: Some(handle),
+        }
+    }
+}
+
+impl Drop for RunWatchdog {
+    fn drop(&mut self) {
+        let _ = self.stop.send(());
+        if let Some(handle) = self.handle.take() {
+            let _ = handle.join();
+        }
+    }
+}
+
 fn run_tool(repo: &Path) -> RunOutcome {
     let control = Arc::new(Control::default());
     run_tool_with_control(repo, &control)
@@ -175,13 +223,8 @@ fn run_tool_with_control(repo: &Path, control: &Arc<Control>) -> RunOutcome {
 fn run_tool_with_control_and_git(git: &Path, repo: &Path, control: &Arc<Control>) -> RunOutcome {
     let shared = Arc::new(GitShared::new());
     let logs = Arc::new(Mutex::new(Vec::<String>::new()));
-    // 看门狗：环境异常导致工具进入无限重试（G-09 真实故障下不会自行结束）时，
-    // 3 分钟后取消任务让本用例带着「已停止」文案失败退出，而不是挂死整个测试进程。
-    let trip = Arc::clone(control);
-    std::thread::spawn(move || {
-        std::thread::sleep(Duration::from_secs(180));
-        trip.cancel();
-    });
+    // G-09 的真实故障可能无限重试；超时只用于让断言失败，不作为成功路径。
+    let _watchdog = RunWatchdog::new(control);
     let text = {
         // sink 的克隆在本块结束时销毁，之后的 try_unwrap 才能拿回 Vec
         let sink = Arc::clone(&logs);
@@ -202,13 +245,48 @@ fn run_tool_with_control_and_git(git: &Path, repo: &Path, control: &Arc<Control>
         )
     };
     let logs = Arc::try_unwrap(logs)
-        .map(|guard| guard.into_inner().unwrap())
-        .unwrap_or_default();
+        .expect("运行结束后日志 sink 必须已释放")
+        .into_inner()
+        .unwrap();
     RunOutcome { text, shared, logs }
 }
 
+/// 同步断言失败也必须停止并回收后台运行；裸 JoinHandle 在 Drop 时只会脱离，
+/// 可能让 Git 继续操作即将被 TempDir 清理的仓库（G-15 / P-13）。
+struct RunHandle {
+    handle: Option<JoinHandle<RunOutcome>>,
+    control: Arc<Control>,
+    hold_dir: Option<PathBuf>,
+}
+
+impl RunHandle {
+    fn join(mut self) -> std::thread::Result<RunOutcome> {
+        self.handle.take().unwrap().join()
+    }
+}
+
+impl Drop for RunHandle {
+    fn drop(&mut self) {
+        if let Some(handle) = self.handle.take() {
+            self.control.cancel();
+            // 仅移除本用例包装器自有的暂停标记；自然结束当前命令后再回收。
+            if let Some(dir) = &self.hold_dir {
+                for sub in ["add", "fetch", "merge", "commit"] {
+                    let flag = dir.join(format!("hold-{sub}.flag"));
+                    if let Err(error) = fs::remove_file(&flag) {
+                        if error.kind() != std::io::ErrorKind::NotFound {
+                            eprintln!("释放测试暂停标记 {} 失败：{error}", flag.display());
+                        }
+                    }
+                }
+            }
+            let _ = handle.join();
+        }
+    }
+}
+
 /// 后台启动一次工具运行（F13/F14 回归用）：返回日志与共享状态的并发句柄和
-/// 等待最终文案的 JoinHandle；主线程可在运行期间请求停止或轮询日志。
+/// 可 join、且在断言失败时自动清场的 RunHandle。
 fn spawn_run(
     git: &Path,
     repo: &Path,
@@ -216,21 +294,23 @@ fn spawn_run(
 ) -> (
     Arc<Mutex<Vec<String>>>,
     Arc<GitShared>,
-    JoinHandle<RunOutcome>,
+    RunHandle,
 ) {
     let shared = Arc::new(GitShared::new());
     let logs = Arc::new(Mutex::new(Vec::<String>::new()));
-    let trip = Arc::clone(control);
-    std::thread::spawn(move || {
-        std::thread::sleep(Duration::from_secs(180));
-        trip.cancel();
-    });
+    // 看门狗在运行线程内保活，随该次运行退出回收。
     let sink = Arc::clone(&logs);
     let repo = repo.to_path_buf();
+    let hold_dir = if git.file_name() == Some(std::ffi::OsStr::new("gitp.cmd")) {
+        git.parent().map(Path::to_path_buf)
+    } else {
+        None
+    };
     let git = git.to_path_buf();
     let control_for_run = Arc::clone(control);
     let shared_for_run = Arc::clone(&shared);
     let handle = std::thread::spawn(move || {
+        let _watchdog = RunWatchdog::new(&control_for_run);
         let text = git_tools::run(
             &git,
             &repo,
@@ -252,10 +332,18 @@ fn spawn_run(
             logs: Vec::new(),
         }
     });
-    (logs, shared, handle)
+    (
+        logs,
+        shared,
+        RunHandle {
+            handle: Some(handle),
+            control: Arc::clone(control),
+            hold_dir,
+        },
+    )
 }
 
-/// 轮询等待日志中出现包含 needle 的条目（最多 30 秒；超时 panic 带全部日志）。
+/// 轮询等待日志中出现包含 needle 的条目（最多 120 秒；超时 panic 带全部日志）。
 fn wait_log_contains(logs: &Arc<Mutex<Vec<String>>>, needle: &str) {
     // 与 wait_trace 同口径：真实 git 链路在本机时延风暴下需要更大的同步预算。
     let deadline = Instant::now() + Duration::from_secs(120);
@@ -474,9 +562,10 @@ fn modified_deleted_and_renamed_changes() {
         "三类变更均须实际提交并推送：{log:?}；结果={}；日志={:?}",
         outcome.text, outcome.logs
     );
-    assert!(
-        fs::read(fix.repo.join("new_name.txt")).is_ok(),
-        "重命名后的文件在远端可见"
+    assert_eq!(
+        git_ok(&fix.remote, &["show", "master:new_name.txt"]),
+        "renamed\n",
+        "重命名后的文件内容必须在远端可见"
     );
 }
 
@@ -616,9 +705,10 @@ fn preexisting_staged_content_is_protected() {
     verify(&current_subject, &current_files);
     // 全部处理完毕后工作区与暂存区干净
     assert!(worktree_clean(&fix.repo));
-    assert!(
-        fs::read(fix.repo.join("user-staged.txt")).is_ok(),
-        "用户文件不得被删除"
+    assert_eq!(
+        fs::read_to_string(fix.repo.join("user-staged.txt")).unwrap(),
+        "user kept this staged\n",
+        "用户文件内容不得被删除或覆盖"
     );
 }
 
@@ -688,13 +778,9 @@ fn remote_ahead_triggers_fetch_merge_then_push() {
         log.contains(&"update: local.txt".to_string()),
         "本地提交最终推送成功：{log:?}"
     );
-    // G-10「不 rebase、不改写历史」：init 是早已推送的公共祖先，任何 rebase 都不会
-    // 使它从远端历史消失，该断言对 merge 与 rebase 恒真；能区分两种实现的是合并
-    // 提交本身——rebase 不产生合并提交（判定方式与 conflict_resumed 的用例一致）。
-    assert!(
-        log.iter().any(|s| s.starts_with("Merge branch")),
-        "fetch+merge 必须按 merge 语义合并（远端历史应含合并提交，rebase 不产生）：{log:?}"
-    );
+    // G-10 的 merge 语义以提交拓扑为证：合并提交的标题可受 Git 版本、
+    // 本地配置和语言影响，不能用 "Merge branch" 文案替代两个父提交。
+    assert_merge_tip(&fix.remote, "master");
     assert!(
         fs::read(fix.repo.join("remote-side.txt")).is_ok(),
         "合并后远端内容在工作区可见"
@@ -866,16 +952,12 @@ fn conflict_resolved_resume_pushes_and_does_not_recommit() {
     let log = remote_log(&fix.remote);
     let updates = log.iter().filter(|s| **s == "update: conflict.txt").count();
     assert_eq!(updates, 1, "已 push 的文件不得重复提交：{log:?}");
-    assert!(
-        log.iter()
-            .any(|s| s == "Merge made by the 'ort' strategy." || s.starts_with("Merge branch")),
-        "远端应包含合并提交：{log:?}"
-    );
+    assert_merge_tip(&fix.remote, "master");
     // 远端最终内容是解决后的版本
     let remote_content = git_ok(&fix.remote, &["show", "master:conflict.txt"]);
-    assert!(
-        remote_content.contains("resolved version"),
-        "合并结果推送成功: {remote_content}"
+    assert_eq!(
+        remote_content, "resolved version\n",
+        "合并结果必须完整推送"
     );
 }
 
@@ -944,8 +1026,17 @@ fn push_default_current_with_matching_upstream_name_proceeds() {
         "同名 upstream 不应被预检拒绝：{}",
         outcome.text
     );
-    let heads = git_ok(&fix.repo, &["ls-remote", "--heads", "origin"]);
-    assert!(heads.contains("topic"), "应推送到 upstream：{heads}");
+    // topic 在前置准备中已存在，仅检查分支名会让未推送更新的实现也通过。
+    assert_eq!(
+        git_ok(&fix.remote, &["show", "topic:a.txt"]),
+        "x\n",
+        "必须把本次文件内容推送到 upstream"
+    );
+    assert_eq!(
+        git_ok(&fix.remote, &["log", "-1", "--format=%s", "topic"]).trim(),
+        "update: a.txt",
+        "upstream 必须收到当前文件的提交"
+    );
 }
 // 覆盖 G-08/G-09：push.default=simple 在本地与 upstream 分支异名时必然拒绝裸 push；
 // 应在提交前识别该确定性失败，而不是无限重试 push。
@@ -1043,6 +1134,9 @@ fn conflict_resume_refuses_extra_staged_files() {
     git_ok(&fix.repo, &["add", "conflict.txt"]);
     fs::write(fix.repo.join("unrelated.txt"), "unrelated\n").unwrap();
     git_ok(&fix.repo, &["add", "unrelated.txt"]);
+    let protected_tree = git_ok(&fix.repo, &["write-tree"]).trim().to_owned();
+    let protected_head = git_ok(&fix.repo, &["rev-parse", "HEAD"]).trim().to_owned();
+    let protected_remote = git_ok(&fix.remote, &["rev-parse", "master"]).trim().to_owned();
 
     // 重启任务：必须检测到合并范围之外的暂存文件并停止，不得完成合并提交
     let second = run_tool(&fix.repo);
@@ -1060,6 +1154,31 @@ fn conflict_resume_refuses_extra_staged_files() {
         fix.repo.join(".git").join("MERGE_HEAD").is_file(),
         "合并现场必须保留（MERGE_HEAD 仍在），等待用户处理暂存区"
     );
+    assert_eq!(
+        git_ok(&fix.repo, &["write-tree"]).trim(),
+        protected_tree,
+        "拒绝续接必须完整保留用户已解决和无关的 staged 内容"
+    );
+    assert_eq!(
+        git_ok(&fix.repo, &["rev-parse", "HEAD"]).trim(),
+        protected_head,
+        "拒绝续接不得产生提交"
+    );
+    assert_eq!(
+        git_ok(&fix.remote, &["rev-parse", "master"]).trim(),
+        protected_remote,
+        "拒绝续接不得推送"
+    );
+    assert_eq!(
+        fs::read_to_string(fix.repo.join("conflict.txt")).unwrap(),
+        "resolved version\n",
+        "拒绝续接不得覆盖已解决的工作区内容"
+    );
+    assert_eq!(
+        fs::read_to_string(fix.repo.join("unrelated.txt")).unwrap(),
+        "unrelated\n",
+        "拒绝续接不得改写无关工作区文件"
+    );
 
     // 用户取消暂存无关文件后重启：自动完成合并提交并推送，提交不得包含 unrelated.txt
     git_ok(&fix.repo, &["restore", "--staged", "unrelated.txt"]);
@@ -1076,17 +1195,13 @@ fn conflict_resume_refuses_extra_staged_files() {
         .trim()
         .to_owned();
     assert!(!merge_commit.is_empty(), "续接后应存在合并提交");
+    let first_parent = format!("{merge_commit}^1");
     let merge_files = git_ok(
         &fix.repo,
         &[
-            // -m --first-parent：merge 提交不带它时 diff-tree 输出恒为空（断言
-            // 变恒真）；按第一父展开才得到合并实际带入的路径集合。
-            "diff-tree",
-            "--no-commit-id",
+            "diff",
             "--name-only",
-            "-r",
-            "-m",
-            "--first-parent",
+            &first_parent,
             &merge_commit,
         ],
     );
@@ -1281,6 +1396,16 @@ fn remote_branch_log(remote: &Path, branch: &str) -> Vec<String> {
         .collect()
 }
 
+/// 合并是否发生由真实提交的父关系判断，不依赖可变的提交标题（G-10/G-11）。
+fn assert_merge_tip(repo: &Path, branch: &str) {
+    let parents = git_ok(repo, &["rev-list", "--parents", "-n", "1", branch]);
+    assert_eq!(
+        parents.split_whitespace().count(),
+        3,
+        "{branch} 顶端必须是具有两个父提交的合并提交：{parents}"
+    );
+}
+
 /// 为 fixture 增加第二个 bare 远端 `<name>`（不含任何提交），返回其路径。
 fn add_second_remote(fix: &Fixture, name: &str) -> PathBuf {
     let other = fix.repo.parent().unwrap().join(format!("{name}.git"));
@@ -1367,6 +1492,8 @@ fn git_wrapper(dir: &Path) -> PathBuf {
     )
     .unwrap();
     fs::write(dir.join("gitp.cmd"), GIT_WRAPPER_CMD).unwrap();
+    // 预建自有轨迹文件，使后续读取失败不能伪装成「没有启动后续命令」。
+    fs::write(dir.join("trace.txt"), b"").unwrap();
     dir.join("gitp.cmd")
 }
 
@@ -1383,7 +1510,7 @@ fn release(dir: &Path, sub: &str) {
 /// 读取 wrapper 的命令轨迹（trace.txt，每行一次调用，按时间追加）。
 fn trace_lines(dir: &Path) -> Vec<String> {
     fs::read_to_string(dir.join("trace.txt"))
-        .unwrap_or_default()
+        .expect("必须读到包装器命令轨迹，读取失败不等于没有后续命令")
         .lines()
         .map(str::to_owned)
         .collect()
@@ -1429,10 +1556,7 @@ fn slashed_branch_upstream_fetches_merges_and_pushes() {
             log.contains(&"update: local.txt".to_string()),
             "分支 {branch} 的远端应收到本地提交：{log:?}"
         );
-        assert!(
-            log.iter().any(|s| s.starts_with("Merge")),
-            "分支 {branch} 必须按 merge 语义合并（远端历史含合并提交）：{log:?}"
-        );
+        assert_merge_tip(&fix.remote, branch);
         assert!(
             fs::read(fix.repo.join("remote-side.txt")).is_ok(),
             "合并后远端内容在工作区可见"
@@ -1476,10 +1600,7 @@ fn non_origin_upstream_fetches_from_configured_remote() {
         other_log.contains(&"update: local.txt".to_string()),
         "other 应收到本地提交：{other_log:?}"
     );
-    assert!(
-        other_log.iter().any(|s| s.starts_with("Merge")),
-        "other 应包含合并提交：{other_log:?}"
-    );
+    assert_merge_tip(&other, "master");
     // origin 完全未被触碰（fetch/merge/push 都走 other）
     assert_eq!(
         remote_log(&fix.remote),
@@ -1536,10 +1657,7 @@ fn local_upstream_dot_remote_fetches_merges_and_pushes() {
         master_log.contains(&"update: local.txt".to_string()),
         "master（upstream）应收到本地提交：{master_log:?}"
     );
-    assert!(
-        master_log.iter().any(|s| s.starts_with("Merge")),
-        "master 应包含合并提交：{master_log:?}"
-    );
+    assert_merge_tip(&repo, "master");
     assert_eq!(
         git_ok(&repo, &["symbolic-ref", "--short", "HEAD"]).trim(),
         "topic",
@@ -1752,9 +1870,16 @@ fn push_instead_of_rewrite_refuses_to_start() {
         &[
             "config",
             "--add",
-            &format!("url.\"{other_url}\".pushInsteadOf"),
+            &format!("url.{other_url}.pushInsteadOf"),
             upstream_url,
         ],
+    );
+    // git config 的 argv 键名不使用配置文件的引号语法；多余引号会成为
+    // URL 子节名的一部分。先确认 Git 实际展开到隔离的本地远端，再运行工具。
+    assert_eq!(
+        git_ok(&fix.repo, &["remote", "get-url", "--push", "origin"]).trim(),
+        other_url,
+        "前置条件：pushInsteadOf 必须真实改变推送 URL"
     );
     fs::write(fix.repo.join("a.txt"), "x\n").unwrap();
 
@@ -1852,13 +1977,12 @@ fn conflict_resume_accepts_rewritten_rename_resolution() {
     );
     // 用户解决：新路径写与 HEAD 旧内容相似度低于 rename 检测阈值的全重写内容，
     // 删除旧路径，一并暂存（此时 --cached 侧 diff 不再折叠出 rename）。
-    fs::write(
-        fix.repo.join("renamed.txt"),
-        "completely different resolved content with no shared lines at all\n".repeat(20),
-    )
-    .unwrap();
+    let resolved_content =
+        "completely different resolved content with no shared lines at all\n".repeat(20);
+    fs::write(fix.repo.join("renamed.txt"), &resolved_content).unwrap();
     let _ = fs::remove_file(fix.repo.join("file.txt"));
     git_ok(&fix.repo, &["add", "-A"]);
+    let resolved_tree = git_ok(&fix.repo, &["write-tree"]).trim().to_owned();
     let second = run_tool(&fix.repo);
     assert!(
         second.text.contains("全部完成") || second.text.contains("没有需要提交的变更"),
@@ -1869,22 +1993,59 @@ fn conflict_resume_accepts_rewritten_rename_resolution() {
         .trim()
         .to_owned();
     assert!(!merge_commit.is_empty(), "续接后应存在合并提交");
-    // 合并提交确实处理了旧路径删除与新路径内容（--no-renames 语义下的两个路径）。
+    // 显式比较两个树：diff-tree -m 会逐父输出，同一路径可能出现多次，
+    // 不能用原始输出行的数量判断是否存在额外修改。
+    let first_parent = format!("{merge_commit}^1");
     let merge_files = git_ok(
         &fix.repo,
         &[
-            "diff-tree",
-            "--no-commit-id",
+            "diff",
             "--name-only",
-            "-r",
-            "-m",
-            "--first-parent",
+            "--no-renames",
+            &first_parent,
             &merge_commit,
         ],
     );
+    let mut paths: Vec<&str> = merge_files.lines().collect();
+    paths.sort_unstable();
+    assert_eq!(
+        paths,
+        vec!["file.txt", "renamed.txt"],
+        "合并相对本地父提交必须只删除旧路径并写入新路径：{merge_files}"
+    );
+    assert_eq!(
+        git_ok(&fix.repo, &["rev-parse", "HEAD^{tree}"]).trim(),
+        resolved_tree,
+        "续接不得改变用户解决并暂存的树"
+    );
+    assert_eq!(
+        git_ok(&fix.repo, &["ls-tree", "-r", "--name-only", "HEAD"]).trim(),
+        "README.md\nrenamed.txt",
+        "旧路径必须删除，既有文件保留且不得带入额外文件"
+    );
+    assert_eq!(
+        git_ok(&fix.repo, &["show", "HEAD:renamed.txt"]),
+        resolved_content,
+        "合并提交必须保留用户重写的解决内容"
+    );
+    assert_eq!(
+        fs::read_to_string(fix.repo.join("renamed.txt")).unwrap(),
+        resolved_content,
+        "续接不得覆盖已解决的工作区内容"
+    );
+    assert_merge_tip(&fix.repo, "HEAD");
+    assert_eq!(
+        git_ok(&fix.remote, &["rev-parse", "master"]).trim(),
+        merge_commit,
+        "本地真实合并提交必须成功推送到 bare upstream"
+    );
     assert!(
-        merge_files.contains("file.txt") && merge_files.contains("renamed.txt"),
-        "合并提交应同时覆盖旧路径删除与新路径内容：{merge_files}"
+        git_ok(&fix.repo, &["status", "--porcelain"]).trim().is_empty(),
+        "续接后工作区和暂存区必须干净"
+    );
+    assert!(
+        !fix.repo.join(".git").join("MERGE_HEAD").exists(),
+        "成功续接必须结束合并中间态"
     );
 }
 
@@ -2305,12 +2466,7 @@ fn stop_after_merge_does_not_push_again_and_stage_is_merge() {
         );
     }
     // 本地已形成合并提交（自然结束不回滚），但远端没收到任何东西
-    assert!(
-        git_ok(&fix.repo, &["log", "-1", "--format=%s"])
-            .trim()
-            .starts_with("Merge"),
-        "merge 自然结束后保留本地合并提交"
-    );
+    assert_merge_tip(&fix.repo, "HEAD");
     assert!(
         !remote_log(&fix.remote)
             .iter()
@@ -2363,10 +2519,39 @@ fn real_output_captured_for_success_and_failure_paths() {
         "git commit 成功必须采集真实输出：{:#?}",
         outcome.logs
     );
+    let push_outputs: Vec<&String> = outcome
+        .logs
+        .iter()
+        .filter(|line| line.contains("git push 输出"))
+        .collect();
+    let push_attempts = trace_lines(wdir.path())
+        .iter()
+        .filter(|line| line.starts_with("push"))
+        .count();
     assert!(
-        entry(&["git push"], "PUSH-OUT-MARK", "PUSH-ERR-MARK").is_some(),
-        "git push 成功必须采集真实输出：{:#?}",
+        push_attempts >= 2,
+        "前置：远端领先必须先拒绝，再在合并后成功推送"
+    );
+    assert_eq!(
+        push_outputs.len(),
+        push_attempts,
+        "每次真实 push（拒绝与成功）都必须采集输出：{:#?}",
         outcome.logs
+    );
+    assert!(
+        push_outputs.iter().all(|line| {
+            line.contains("stdout：")
+                && line.contains("PUSH-OUT-MARK")
+                && line.contains("stderr：")
+                && line.contains("PUSH-ERR-MARK")
+        }),
+        "每次 push 都必须保留子进程实际发出的两条输出流：{:#?}",
+        outcome.logs
+    );
+    assert_eq!(
+        git_ok(&fix.remote, &["rev-parse", "master"]).trim(),
+        git_ok(&fix.repo, &["rev-parse", "HEAD"]).trim(),
+        "成功路径必须实际推送合并后的本地提交"
     );
     assert!(
         entry(&["git fetch"], "FETCH-OUT-MARK", "FETCH-ERR-MARK").is_some(),
@@ -2379,7 +2564,7 @@ fn real_output_captured_for_success_and_failure_paths() {
         outcome.logs
     );
 
-    // 失败路径：push 失败的真实 stderr 也要进日志
+    // 失败路径：真实 stdout/stderr 与失败原因必须都可见，不能用错误摘要替代输出。
     let fix2 = fixture();
     fs::write(fix2.repo.join("a.txt"), "x\n").unwrap();
     let bogus = fix2.repo.parent().unwrap().join("bogus.git");
@@ -2392,21 +2577,28 @@ fn real_output_captured_for_success_and_failure_paths() {
     let control = Arc::new(Control::default());
     let (logs, _shared, handle) = spawn_run(&wrapper2, &fix2.repo, &control);
     wait_log_contains(&logs, "push 失败");
-    let failed: Vec<String> = logs
-        .lock()
-        .unwrap()
-        .iter()
-        .filter(|line| line.contains("push 失败"))
-        .cloned()
-        .collect();
-    assert!(
-        failed
-            .iter()
-            .any(|line| line.contains("PUSH-ERR-MARK") || line.contains("PUSH-OUT-MARK")),
-        "push 失败必须携带真实 stderr/stdout：{failed:#?}"
-    );
     control.cancel();
     let failed_outcome = handle.join().unwrap();
+    let failed_logs = Arc::try_unwrap(logs).unwrap().into_inner().unwrap();
+    assert!(
+        failed_logs.iter().any(|line| {
+            line.contains("git push")
+                && line.contains("stdout：")
+                && line.contains("PUSH-OUT-MARK")
+                && line.contains("stderr：")
+                && line.contains("PUSH-ERR-MARK")
+                && line.contains("Could not read from remote repository.")
+        }),
+        "push 失败必须采集子进程真实的两条流和 Git 错误：{:#?}",
+        failed_logs
+    );
+    assert!(
+        failed_logs.iter().any(|line| {
+            line.contains("push 失败") && line.contains("Could not read from remote repository.")
+        }),
+        "真实 push 失败必须报告可定位的原因：{:#?}",
+        failed_logs
+    );
     assert!(
         failed_outcome.text.contains("任务已停止"),
         "失败路径收尾：{}",

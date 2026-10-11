@@ -198,11 +198,33 @@ async fn chat(
     };
     let session = match session_from_headers(&headers) {
         Ok(session) => session,
-        Err(error) => return error.into_response(),
+        Err(error) => {
+            tracing::error!(
+                event = "acp_http_input_failed",
+                component = "acp_http",
+                stage = "session_header",
+                status = error.status.as_u16(),
+                error_type = error.kind,
+                error_code = error.code,
+                "ACP HTTP 会话标识校验失败"
+            );
+            return error.into_response();
+        }
     };
     let input = match parse_chat(payload, session) {
         Ok(input) => input,
-        Err(error) => return error.into_response(),
+        Err(error) => {
+            tracing::error!(
+                event = "acp_http_input_failed",
+                component = "acp_http",
+                stage = "chat_validation",
+                status = error.status.as_u16(),
+                error_type = error.kind,
+                error_code = error.code,
+                "ACP HTTP Chat 请求校验失败"
+            );
+            return error.into_response();
+        }
     };
     // Hyper 可能因未处理的管线 read-ahead 而不再读取 EOF，不能依赖 handler drop。
     // 真实 serve 注入连接级关闭信号；直接调用 router 的测试仍保留请求 dropguard。
@@ -211,7 +233,16 @@ async fn chat(
     });
     let mut request = tokio::select! {
         biased;
-        () = closed.cancelled() => return HttpError::service(&cancelled()).into_response(),
+        () = closed.cancelled() => {
+            tracing::warn!(
+                event = "acp_http_request_cancelled",
+                component = "acp_http",
+                stage = "connection_closed",
+                status = 499,
+                "ACP HTTP 请求准入前客户端断连"
+            );
+            return HttpError::service(&cancelled()).into_response();
+        },
         submitted = backend.submit(input.prompt) => match submitted {
             Ok(request) => request,
             Err(error) => return HttpError::service(&error).into_response(),
@@ -219,6 +250,15 @@ async fn chat(
     };
     tracing::info!(event = "acp_http_request_admitted", component = "acp_http", request_id = %request.accepted.request_id.0, streaming = input.stream, "ACP HTTP 请求已准入");
     let Ok(session_header) = HeaderValue::from_str(&request.accepted.session.0) else {
+        tracing::error!(
+            event = "acp_http_request_failed",
+            component = "acp_http",
+            request_id = %request.accepted.request_id.0,
+            stage = "session_header",
+            status = StatusCode::BAD_GATEWAY.as_u16(),
+            error_code = "invalid_backend_session",
+            "ACP HTTP 后台会话标识无法用于响应头"
+        );
         return HttpError::route(
             StatusCode::BAD_GATEWAY,
             "ACP 后台返回了无法用于 HTTP 的会话标识",
@@ -325,6 +365,18 @@ async fn collect_completion(
     }
 }
 
+#[rustfmt::skip]
+#[warn(
+    warnings,
+    unused_must_use,
+    unreachable_patterns,
+    unreachable_pub,
+    unused_variables,
+    rust_2018_idioms,
+    explicit_outlives_requirements,
+    elided_lifetimes_in_paths,
+    single_use_lifetimes
+)]
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -425,6 +477,24 @@ mod tests {
     /// Real TCP exercises response-body polling, not just handler wiring.
     #[tokio::test(flavor = "current_thread")]
     async fn local_http_logs_json_sse_failures_and_private_body_boundaries() {
+        // tracing callsite interest 是进程级缓存；并行的无 subscriber 请求可能
+        // 先登记后台事件为 never。沿用日志/控制管道测试的独立进程隔离，
+        // 保留真实 TCP、逐请求终态关联和全部隐私断言。
+        const CHILD: &str = "JCHTOOLS_ACP_HTTP_LOG_TEST_CHILD";
+        if std::env::var_os(CHILD).is_none() {
+            let status = std::process::Command::new(std::env::current_exe().unwrap())
+                .args([
+                    "--exact",
+                    "acp_api::http::tests::local_http_logs_json_sse_failures_and_private_body_boundaries",
+                    "--nocapture",
+                ])
+                .env(CHILD, "1")
+                .status()
+                .unwrap();
+            assert!(status.success(), "隔离进程中的真实 HTTP 与日志隐私断言必须通过");
+            return;
+        }
+
         use crate::acp_api::{
             backend_channel, AcceptedRequest, BackendCommand, FinishReason, ServiceError,
             ServiceErrorKind, ServiceStatus,

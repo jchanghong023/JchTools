@@ -652,11 +652,12 @@ impl Drop for Overlay {
         // SAFETY: shade_dc 是创建遮罩时得到的兼容 DC，此刻仍未销毁；shade_old 是
         // 当时摘下的 DC 原有默认位图，选回以解除对 shade_bitmap 的引用。
         unsafe { SelectObject(self.shade_dc, self.shade_old) };
-        // SAFETY: shade_bitmap 已被上一行摘出 DC，删除后不再有任何引用。
-        unsafe { DeleteObject(self.shade_bitmap) };
-        // SAFETY: shade_dc 是本 Overlay 独占的兼容内存 DC，且已无位图选入，销毁
-        // 恰一次。
+        // 先销毁 DC，确保即使选回旧位图失败也解除对遮罩位图的引用；
+        // 仍选入 DC 的位图不能由 DeleteObject 释放。
+        // SAFETY: shade_dc 为本 Overlay 独占且尚未销毁，销毁恰一次。
         unsafe { DeleteDC(self.shade_dc) };
+        // SAFETY: shade_bitmap 不再被本 Overlay 的 DC 引用，删除恰一次。
+        unsafe { DeleteObject(self.shade_bitmap) };
     }
 }
 thread_local! { static OVERLAY: RefCell<Option<Overlay>> = const { RefCell::new(None) }; }
@@ -689,6 +690,15 @@ fn selection(a: Point, b: Point) -> Rect {
         top: a.y.min(b.y),
         right: a.x.max(b.x),
         bottom: a.y.max(b.y),
+    }
+}
+
+/// 完成消息明确区分提交与取消，不能把取消前已写入的选区当成提交。
+fn completed_selection(selected: Option<Rect>, submitted: bool) -> Option<Rect> {
+    if submitted {
+        selected
+    } else {
+        None
     }
 }
 
@@ -868,8 +878,9 @@ unsafe extern "system" fn overlay_proc(hwnd: Handle, msg: u32, w: usize, l: isiz
                     }
                 }
             });
-            // SAFETY: hwnd 有效；私有消息 WM_DONE 只投递给本窗口，参数为零。
-            unsafe { PostMessageW(hwnd, WM_DONE, 0, 0) };
+            // SAFETY: hwnd 有效；私有完成消息以 wParam=1 表示左键提交，
+            // 取消路径保持 wParam=0，避免取消消息误提交已有矩形。
+            unsafe { PostMessageW(hwnd, WM_DONE, 1, 0) };
             return 0;
         }
         WM_KEYDOWN if w == 0x1b => {
@@ -1000,6 +1011,7 @@ pub fn select(frame: CaptureFrame) -> Result<SelectedImage, String> {
     // SAFETY: 同一有效窗口；请求一次立即重绘。
     unsafe { UpdateWindow(hwnd) };
     let mut message_error = None;
+    let mut submitted = false;
     loop {
         // SAFETY: Msg 是仅含句柄与整数的 C POD 结构，全零是合法初始状态。
         let mut msg = unsafe { std::mem::zeroed::<Msg>() };
@@ -1015,6 +1027,7 @@ pub fn select(frame: CaptureFrame) -> Result<SelectedImage, String> {
             }
         }
         if msg.hwnd == hwnd && msg.message == WM_DONE {
+            submitted = msg.wparam == 1;
             break;
         }
         // SAFETY: msg 是 GetMessageW 刚填充的合法消息结构，此处只读翻译。
@@ -1034,7 +1047,7 @@ pub fn select(frame: CaptureFrame) -> Result<SelectedImage, String> {
     if let Some(reason) = message_error {
         return Err(reason);
     }
-    let Some(rect) = state.selected else {
+    let Some(rect) = completed_selection(state.selected, submitted) else {
         return Ok(None);
     };
     // Dimensions were checked before the selection overlay was created.
@@ -1064,10 +1077,34 @@ pub fn select(frame: CaptureFrame) -> Result<SelectedImage, String> {
         .map_err(|_| error("裁剪图像无效"))
 }
 
+#[rustfmt::skip]
+#[warn(
+    warnings,
+    unused_must_use,
+    unreachable_patterns,
+    unreachable_pub,
+    unused_variables,
+    rust_2018_idioms,
+    explicit_outlives_requirements,
+    elided_lifetimes_in_paths,
+    single_use_lifetimes
+)]
 #[cfg(test)]
 #[path = "capture_win_preview_tests.rs"]
 mod preview_tests;
 
+#[rustfmt::skip]
+#[warn(
+    warnings,
+    unused_must_use,
+    unreachable_patterns,
+    unreachable_pub,
+    unused_variables,
+    rust_2018_idioms,
+    explicit_outlives_requirements,
+    elided_lifetimes_in_paths,
+    single_use_lifetimes
+)]
 #[cfg(test)]
 mod tests {
     use super::{
@@ -1129,5 +1166,15 @@ mod tests {
             r"C:\Windows\System32\cmd.exe",
             Some(main)
         ));
+    }
+
+    // 覆盖 O-18/O-29：左键松开已写入矩形，但更早投递的取消完成消息
+    // 随后被取出时，必须丢弃选区，不得交给 OCR。
+    #[test]
+    fn cancellation_discards_an_already_recorded_selection() {
+        let rect = super::Rect { left: 10, top: 20, right: 30, bottom: 40 };
+        assert!(super::completed_selection(Some(rect), false).is_none());
+        assert!(super::completed_selection(Some(rect), true).is_some());
+        assert!(super::completed_selection(None, true).is_none());
     }
 }

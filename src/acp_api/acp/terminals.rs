@@ -41,7 +41,6 @@ struct Snapshot {
     output: String,
     truncated: bool,
     exit: Option<TerminalExitStatus>,
-    output_complete: bool,
     error: bool,
     reaped: bool,
 }
@@ -99,11 +98,28 @@ impl Terminals {
             let tree = match TerminalTree::attach_and_resume(&child) {
                 Ok(tree) => Some(tree),
                 Err(error) => {
+                    tracing::error!(
+                        event = "acp_terminal_tree_attach_failed",
+                        component = "acp_terminal",
+                        ?peer_pid,
+                        stage = "attach_tree",
+                        error_type = "acp_protocol_error",
+                        error_code = i32::from(error.code),
+                        "ACP 终端进程树接入失败"
+                    );
                     let _ = child.start_kill();
                     return Err(error);
                 }
             };
             let (Some(stdout), Some(stderr)) = (child.stdout.take(), child.stderr.take()) else {
+                tracing::error!(
+                    event = "acp_terminal_output_pipe_unavailable",
+                    component = "acp_terminal",
+                    ?peer_pid,
+                    stage = "take_pipes",
+                    error_type = "io",
+                    "ACP 终端输出管道不可用"
+                );
                 terminate_owned_tree(tree.as_ref(), &mut child, false)?;
                 // 失败的创建没有交付 handle；只回收这次创建的自有子树。
                 return Err(io_error("终端输出管道不可用"));
@@ -172,9 +188,27 @@ impl Terminals {
                 result = wait_owned_tree(tree.as_ref()), if exited && !tree_done => {
                     tree_done = true;
                     if result.is_err() {
-                        tracing::error!(event = "acp_terminal_cleanup_failed", component = "acp_terminal", ?peer_pid, stage = "wait_tree", elapsed_ms = crate::logging::elapsed_ms(started), "ACP 终端子树回收失败");
+                        tracing::error!(
+                            event = "acp_terminal_cleanup_failed",
+                            component = "acp_terminal",
+                            ?peer_pid,
+                            stage = "wait_tree",
+                            error_type = "acp_protocol_error",
+                            error_code = ?result.as_ref().err().map(|error| i32::from(error.code)),
+                            elapsed_ms = crate::logging::elapsed_ms(started),
+                            "ACP 终端子树回收失败"
+                        );
                         exit_failed = true;
                         state.send_modify(|s| s.error = true);
+                    } else {
+                        tracing::info!(
+                            event = "acp_terminal_cleanup_completed",
+                            component = "acp_terminal",
+                            ?peer_pid,
+                            stage = "wait_tree",
+                            elapsed_ms = crate::logging::elapsed_ms(started),
+                            "ACP 终端子树回收完成"
+                        );
                     }
                 }
                 result = child.wait(), if !exited => {
@@ -198,17 +232,63 @@ impl Terminals {
                     },
                     None => {
                         pipes_done = true;
-                        state.send_modify(|s| s.output_complete = true);
+                        let snapshot = state.borrow();
+                        tracing::info!(
+                            event = "acp_terminal_output_pipes_completed",
+                            component = "acp_terminal",
+                            ?peer_pid,
+                            size_bytes = snapshot.output.len(),
+                            truncated = snapshot.truncated,
+                            "ACP 终端输出管道读取完成"
+                        );
                     },
                 },
                 command = commands.recv(), if !controls_closed => match command {
                     Some(Control::Kill(reply)) => {
-                        if terminate_owned_tree(tree.as_ref(), &mut child, exited).is_err() { let _ = reply.send(Err(io_error("终端终止失败"))); }
-                        else { kills.push(reply); }
+                        if terminate_owned_tree(tree.as_ref(), &mut child, exited).is_err() {
+                            tracing::error!(
+                                event = "acp_terminal_cleanup_failed",
+                                component = "acp_terminal",
+                                ?peer_pid,
+                                stage = "kill",
+                                error_type = "acp_internal_error",
+                                "ACP 终端终止失败"
+                            );
+                            let _ = reply.send(Err(io_error("终端终止失败")));
+                        } else {
+                            tracing::info!(
+                                event = "acp_terminal_kill_requested",
+                                component = "acp_terminal",
+                                ?peer_pid,
+                                stage = "kill",
+                                child_exited = exited,
+                                "ACP 终端终止请求已接受"
+                            );
+                            kills.push(reply);
+                        }
                     }
                     Some(Control::Release(reply)) => {
-                        if terminate_owned_tree(tree.as_ref(), &mut child, exited).is_err() { let _ = reply.send(Err(io_error("终端释放失败"))); }
-                        else { closing.push(reply); }
+                        if terminate_owned_tree(tree.as_ref(), &mut child, exited).is_err() {
+                            tracing::error!(
+                                event = "acp_terminal_cleanup_failed",
+                                component = "acp_terminal",
+                                ?peer_pid,
+                                stage = "release",
+                                error_type = "acp_internal_error",
+                                "ACP 终端释放时终止失败"
+                            );
+                            let _ = reply.send(Err(io_error("终端释放失败")));
+                        } else {
+                            tracing::info!(
+                                event = "acp_terminal_release_requested",
+                                component = "acp_terminal",
+                                ?peer_pid,
+                                stage = "release",
+                                child_exited = exited,
+                                "ACP 终端释放请求已接受"
+                            );
+                            closing.push(reply);
+                        }
                     }
                     Some(Control::Drain(reply)) => drained.push(reply),
                     // 服务退出/控制端丢失不是 Agent 的 terminal/kill。
@@ -272,11 +352,10 @@ impl Terminals {
                     if snapshot.error {
                         return Err(io_error("终端等待失败"));
                     }
-                    // 进程退出通知可以早于最后一批 stdout/stderr；wait 后输出必须完整可读。
-                    if snapshot.output_complete {
-                        if let Some(exit) = &snapshot.exit {
-                            return Ok(WaitForTerminalExitResponse::new(exit.clone()));
-                        }
+                    // wait 只等待命令退出；后台后代可能继续持有输出管道。
+                    // 管道 EOF 和自有进程树回收由 kill/release/shutdown 等待。
+                    if let Some(exit) = &snapshot.exit {
+                        return Ok(WaitForTerminalExitResponse::new(exit.clone()));
                     }
                 }
                 state
@@ -606,6 +685,18 @@ async fn wait_owned_tree(tree: Option<&TerminalTree>) -> Result<(), agent_client
     Ok(())
 }
 
+#[rustfmt::skip]
+#[warn(
+    warnings,
+    unused_must_use,
+    unreachable_patterns,
+    unreachable_pub,
+    unused_variables,
+    rust_2018_idioms,
+    explicit_outlives_requirements,
+    elided_lifetimes_in_paths,
+    single_use_lifetimes
+)]
 #[cfg(test)]
 mod tests {
     use super::{append_output, Snapshot};

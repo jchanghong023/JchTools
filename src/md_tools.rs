@@ -262,7 +262,10 @@ pub fn scan_markdown(
             "MD扫描完成"
         ),
         Err(error) => {
-            tracing::error!(event = "md_scan_failed", stage = "input_scan", error_type = "filesystem", elapsed_ms = crate::logging::elapsed_ms(started), error = %crate::logging::safe_error(&format!("{error:#}")), "MD扫描失败")
+            let io = error
+                .chain()
+                .find_map(|cause| cause.downcast_ref::<std::io::Error>());
+            tracing::error!(event = "md_scan_failed", stage = "input_scan", error_type = "filesystem", error_code = io.and_then(std::io::Error::raw_os_error), elapsed_ms = crate::logging::elapsed_ms(started), error = %crate::logging::safe_error(&format!("{error:#}")), "MD扫描失败");
         }
     }
     result
@@ -728,6 +731,16 @@ fn merge_task(
     // 同实体拒绝先于覆盖确认：硬链接/别名输出无论如何确认都不允许写
     reject_output_aliasing_input(output, entries)?;
     if output.exists() && !overwrite {
+        tracing::error!(
+            event = "md_output_rejected",
+            component = "md_tools",
+            operation = "merge",
+            stage = "output_conflict",
+            error_type = "output_conflict",
+            error_code = "overwrite_not_confirmed",
+            conflicts = 1_u64,
+            "MD合并输出已存在，未确认覆盖，拒绝写入"
+        );
         bail!(
             "输出文件已存在：{}（未确认覆盖，拒绝写入）",
             output.display()
@@ -946,7 +959,10 @@ pub fn plan_splits(input: &Path, limit: u64) -> Result<SplitPlan> {
             "MD拆分规划完成"
         ),
         Err(error) => {
-            tracing::error!(event = "md_split_plan_failed", stage = "input_boundary_plan", error_type = "markdown_input", elapsed_ms = crate::logging::elapsed_ms(started), error = %crate::logging::safe_error(&format!("{error:#}")), "MD拆分规划失败")
+            let io = error
+                .chain()
+                .find_map(|cause| cause.downcast_ref::<std::io::Error>());
+            tracing::error!(event = "md_split_plan_failed", stage = "input_boundary_plan", error_type = if io.is_some() { "io" } else { "markdown_input" }, error_code = io.and_then(std::io::Error::raw_os_error), elapsed_ms = crate::logging::elapsed_ms(started), error = %crate::logging::safe_error(&format!("{error:#}")), "MD拆分规划失败");
         }
     }
     result
@@ -1073,6 +1089,16 @@ fn split_task(
     if !overwrite {
         let hits = conflicting_outputs(out_dir, &names);
         if !hits.is_empty() {
+            tracing::error!(
+                event = "md_output_rejected",
+                component = "md_tools",
+                operation = "split",
+                stage = "output_conflict",
+                error_type = "output_conflict",
+                error_code = "overwrite_not_confirmed",
+                conflicts = hits.len(),
+                "MD拆分目标已存在，未确认覆盖，拒绝写入"
+            );
             bail!(
                 "目标目录已存在同名分片（{} 个，如 {}）；未确认覆盖，拒绝写入",
                 hits.len(),
@@ -1197,6 +1223,18 @@ pub fn run_split(
     )
 }
 
+#[rustfmt::skip]
+#[warn(
+    warnings,
+    unused_must_use,
+    unreachable_patterns,
+    unreachable_pub,
+    unused_variables,
+    rust_2018_idioms,
+    explicit_outlives_requirements,
+    elided_lifetimes_in_paths,
+    single_use_lifetimes
+)]
 #[cfg(test)]
 mod tests {
     use super::*;

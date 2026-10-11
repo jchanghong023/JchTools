@@ -2,11 +2,12 @@
 //!
 //! 生产语义是每登录会话至多一个 Xberg（xberg_runtime_windows 的进程扫描执法）。
 //! cargo test 会并行运行多个测试二进制，各自派生真实代理与引擎时天然互斥——
-//! 用 `.tmp/` 下的锁文件把「需要会话引擎」的测试串行化，互斥由文件系统保证，
-//! 不依赖时序运气。锁文件陈旧（超过 3 分钟无人续期）时视为持有者已死，直接抢占。
+//! 用 `.tmp/` 下的锁文件把「需要会话引擎」的测试串行化，互斥由 Windows
+//! 独占文件句柄保证。句柄关闭时由系统删除锁文件，存活持有者不会因测试耗时被抢占。
 
 use std::collections::HashMap;
-use std::fs::OpenOptions;
+use std::fs::{File, OpenOptions};
+use std::os::windows::fs::OpenOptionsExt;
 use std::path::{Path, PathBuf};
 use std::sync::{Mutex, OnceLock};
 use std::time::{Duration, Instant};
@@ -14,48 +15,44 @@ use std::time::{Duration, Instant};
 /// 仓库根（编译期定位 rustc 夹具源与 .tmp）。
 const ROOT: &str = env!("CARGO_MANIFEST_DIR");
 
-/// 会话锁守卫：Drop 时删除锁文件。
+/// 会话锁守卫：持有不共享且关闭即删除的文件句柄；异常进程退出也由系统释放。
 pub(super) struct SessionLock {
-    path: PathBuf,
+    _file: File,
 }
 
-impl Drop for SessionLock {
-    fn drop(&mut self) {
-        let _ = std::fs::remove_file(&self.path);
-    }
-}
-
-/// 取会话锁：最多等 180 秒；锁文件存在且超过 3 分钟视为陈旧，直接覆盖抢占。
+/// 取会话锁：最多等 180 秒，但绝不按锁文件时龄抢占仍存活的持有者。
 ///
 /// # Panics
-/// 等满 180 秒仍拿不到锁（前一个持有测试可能卡死）， panic 并提示清理
-/// `.tmp/engine-session.lock`。
+/// 创建锁目录或打开锁文件失败，或等满 180 秒仍拿不到锁时 panic。
 pub(super) fn session_lock() -> SessionLock {
     let path = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join(".tmp/engine-session.lock");
-    let _ = std::fs::create_dir_all(path.parent().unwrap());
+    std::fs::create_dir_all(path.parent().unwrap())
+        .unwrap_or_else(|error| panic!("创建引擎会话锁目录失败：{error}"));
     let deadline = Instant::now() + Duration::from_secs(180);
+    // Win32 FILE_FLAG_DELETE_ON_CLOSE：保留句柄期间拒绝共享打开/删除；最后一个
+    // 句柄关闭时删除。create(true) 也可安全接管旧版遗留、已无人持有的文件，
+    // 不需先检查时龄再删除（该检查会误抢耗时测试，旧守卫还会删掉新持有者的锁）。
+    const DELETE_ON_CLOSE: u32 = 0x0400_0000;
+    const GENERIC_WRITE: u32 = 0x4000_0000;
+    const DELETE_ACCESS: u32 = 0x0001_0000;
     loop {
-        match OpenOptions::new().write(true).create_new(true).open(&path) {
-            Ok(_) => return SessionLock { path },
-            Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {
-                let stale = std::fs::metadata(&path).is_ok_and(|metadata| {
-                    metadata.modified().is_ok_and(|modified| {
-                        modified
-                            .elapsed()
-                            .is_ok_and(|age| age > Duration::from_secs(180))
-                    })
-                });
-                if stale {
-                    // 陈旧锁：持有者已死（崩溃/被杀），抢占。
-                    let _ = std::fs::remove_file(&path);
-                    continue;
-                }
-            }
-            Err(_) => {}
+        match OpenOptions::new()
+            .write(true)
+            .create(true)
+            .truncate(false)
+            .access_mode(GENERIC_WRITE | DELETE_ACCESS)
+            .share_mode(0)
+            .custom_flags(DELETE_ON_CLOSE)
+            .open(&path)
+        {
+            Ok(file) => return SessionLock { _file: file },
+            // 共享冲突表示已有持有者；关闭删除的短暂窗口可能返回访问被拒绝。
+            Err(error) if matches!(error.raw_os_error(), Some(5 | 32 | 33)) => {}
+            Err(error) => panic!("打开引擎会话锁失败（{}）：{error}", path.display()),
         }
         assert!(
             Instant::now() < deadline,
-            "引擎会话锁等待超时：请人工清理 .tmp/engine-session.lock 后重跑"
+            "引擎会话锁等待超时：仍有测试持有锁或锁目录不可写；不得删除活跃锁"
         );
         std::thread::sleep(Duration::from_millis(300));
     }

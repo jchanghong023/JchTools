@@ -71,6 +71,7 @@ pub enum Event {
     },
     FileStarted {
         relative: PathBuf,
+        /// 全批次位置（从 1 起）：包括扫描阶段已跳过或失败的文件及当前文件。
         index: usize,
         total: usize,
     },
@@ -230,17 +231,24 @@ pub fn run(
             + plan.scan_failures.len();
         tracing::info!(
             event = "markdown_batch_planned",
+            component = "markdown",
+            planned_files = plan.items.len(),
+            scan_failure_count = plan.scan_failures.len(),
+            total,
             skipped_existing = plan.summary.skipped_existing,
             skipped_duplicate = plan.summary.skipped_duplicate,
             "转 Markdown 批次开始"
         );
+        // T-22/U-03：已有结果、重名跳过及扫描失败均已终态，后续文件位置必须
+        // 与包含这些项的 total 同口径，不能重新从待转换列表的第 1 项计数。
+        let initially_finished = total - plan.items.len();
         events(Event::Started { total });
         // S4-03/T-24：扫描期已定的单文件失败先逐条呈现（文件 + 阶段 + 原因，
         // 与转换失败同一事件格式），统计随 plan.summary 带入；不中止批次。
         for (relative, message) in &plan.scan_failures {
             tracing::warn!(
                 event = "markdown_file_failed", file = %crate::logging::safe_error(&relative.to_string_lossy()),
-                stage = "scan_media_dir", error_type = "output_plan", elapsed_ms = 0u64,
+                stage = "scan_output_plan", error_type = "output_plan", elapsed_ms = 0u64,
                 "转换单文件失败"
             );
             events(Event::FileFinished {
@@ -276,7 +284,7 @@ pub fn run(
             );
             events(Event::FileStarted {
                 relative: item.relative.clone(),
-                index: index + 1,
+                index: initially_finished + index + 1,
                 total,
             });
             // F21/T-29：单文件预算从进入该文件起算。
@@ -393,8 +401,8 @@ pub fn run(
         );
         Ok(summary)
     })();
-    match &result {
-        Ok(summary) => tracing::info!(
+    if let Ok(summary) = &result {
+        tracing::info!(
             event = "markdown_batch_completed",
             outcome = if summary.stopped {
                 "cancelled"
@@ -403,20 +411,26 @@ pub fn run(
             } else {
                 "success"
             },
+            component = "markdown",
+            stage,
+            skipped_existing = summary.skipped_existing,
+            skipped_duplicate = summary.skipped_duplicate,
+            stopped = summary.stopped,
             elapsed_ms = crate::logging::elapsed_ms(started),
             success = summary.success,
             partial = summary.partial,
             failed = summary.failed,
             "转Markdown任务结束"
-        ),
-        Err(_) => tracing::error!(
+        );
+    } else {
+        tracing::error!(
             event = "markdown_batch_failed",
             stage,
             elapsed_ms = crate::logging::elapsed_ms(started),
             error_type = "conversion_batch_boundary",
             cancel_requested = cancel.load(AtomicOrdering::Acquire),
             "转Markdown任务失败"
-        ),
+        );
     }
     result
 }
@@ -583,6 +597,18 @@ fn occupancy_key(flat: bool, relative_parent: &Path, file_name: &OsStr) -> OsStr
     }
 }
 
+#[rustfmt::skip]
+#[warn(
+    warnings,
+    unused_must_use,
+    unreachable_patterns,
+    unreachable_pub,
+    unused_variables,
+    rust_2018_idioms,
+    explicit_outlives_requirements,
+    elided_lifetimes_in_paths,
+    single_use_lifetimes
+)]
 #[cfg(test)]
 fn scan(options: &Options, supported: &BTreeSet<String>) -> Result<Plan, String> {
     let cancel = AtomicBool::new(false);
@@ -646,6 +672,7 @@ fn scan_cancelable(
     });
     let mut occupied = OccupiedIndex::default();
     let mut media_occupied: BTreeMap<PathBuf, OccupiedIndex> = BTreeMap::new();
+    let mut checked_output_parents = BTreeSet::from([output.clone()]);
     let mut plan = Plan {
         output_root: output.clone(),
         ..Plan::default()
@@ -675,9 +702,32 @@ fn scan_cancelable(
                 .join(relative.parent().unwrap_or_else(|| Path::new("")))
                 .join(file_name)
         };
-        if target.exists() {
-            plan.summary.skipped_existing += 1;
-            continue;
+        let parent = target.parent().unwrap_or(&output);
+        // T-09/S-04：先逐段检查已有输出父目录，之后才可查询结果或媒体占用。
+        // 缓存本批已检查的父目录；P-08 不要求应对处理期间的外部替换。
+        if !checked_output_parents.contains(parent) {
+            if let Err(message) = check_output_parent(&output, parent) {
+                plan.summary.failed += 1;
+                plan.scan_failures
+                    .push((relative.clone(), format!("检查输出目录失败：{message}")));
+                continue;
+            }
+            checked_output_parents.insert(parent.to_path_buf());
+        }
+        match fs::symlink_metadata(&target) {
+            Ok(_) => {
+                plan.summary.skipped_existing += 1;
+                continue;
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) => {
+                plan.summary.failed += 1;
+                plan.scan_failures.push((
+                    relative.clone(),
+                    format!("检查已有结果失败 {}：{error}", target.display()),
+                ));
+                continue;
+            }
         }
         let is_media = source
             .extension()
@@ -686,7 +736,6 @@ fn scan_cancelable(
         let media_dir = if is_media {
             String::new()
         } else {
-            let parent = target.parent().unwrap_or(&output);
             let occupied_media = media_occupied.entry(parent.to_path_buf()).or_default();
             // S4-03/T-24：媒体目录分配失败是单文件问题（该文件的输出位置被
             // 链接占用或无法检查）——计入失败统计并继续其余文件；目录级全局
@@ -755,6 +804,18 @@ fn supported_formats(
 
 /// 有界且可取消地运行格式清单探测（F21）：超时或取消后 kill + 限时收尾，
 /// 输出被截断时如实报错，不得把半截清单当完整结果。
+#[rustfmt::skip]
+#[warn(
+    warnings,
+    unused_must_use,
+    unreachable_patterns,
+    unreachable_pub,
+    unused_variables,
+    rust_2018_idioms,
+    explicit_outlives_requirements,
+    elided_lifetimes_in_paths,
+    single_use_lifetimes
+)]
 #[cfg(test)]
 fn run_formats_probe(
     command: &mut Command,
@@ -785,6 +846,18 @@ fn run_formats_probe(
 }
 
 /// 解析 Xberg formats JSON 并按分组筛入支持集（纯函数，便于回归）。
+#[rustfmt::skip]
+#[warn(
+    warnings,
+    unused_must_use,
+    unreachable_patterns,
+    unreachable_pub,
+    unused_variables,
+    rust_2018_idioms,
+    explicit_outlives_requirements,
+    elided_lifetimes_in_paths,
+    single_use_lifetimes
+)]
 #[cfg(test)]
 fn parse_formats(stdout: &[u8], groups: &[FormatGroup]) -> Result<BTreeSet<String>, String> {
     let rows: Vec<serde_json::Value> =
@@ -866,6 +939,36 @@ fn checked_directory(path: &Path) -> Result<PathBuf, String> {
         return Err(format!("不是目录：{}", path.display()));
     }
     Ok(canonical)
+}
+
+/// 检查输出根以内已有的父目录，不穿过链接查询其后代，也不为扫描创建目录。
+fn check_output_parent(output_root: &Path, parent: &Path) -> Result<(), String> {
+    let relative = parent
+        .strip_prefix(output_root)
+        .map_err(|error| format!("结果不在输出目录内：{error}"))?;
+    let mut current = output_root.to_path_buf();
+    for component in relative.components() {
+        if !matches!(component, Component::Normal(_)) {
+            return Err("输出路径含非法目录段".to_string());
+        }
+        current.push(component.as_os_str());
+        match fs::symlink_metadata(&current) {
+            Ok(metadata) if fsutil::is_link(&metadata) => {
+                return Err(format!(
+                    "输出目录路径含符号链接或 junction：{}",
+                    current.display()
+                ));
+            }
+            Ok(metadata) if metadata.is_dir() => {}
+            Ok(_) => return Err(format!("输出路径不是普通目录：{}", current.display())),
+            // 后续目录尚不存在；本批只会自行创建普通目录（P-08）。
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => break,
+            Err(error) => {
+                return Err(format!("无法检查输出目录 {}：{error}", current.display()));
+            }
+        }
+    }
+    Ok(())
 }
 
 fn markdown_name(source: &Path) -> Result<OsString, String> {
@@ -1256,20 +1359,24 @@ fn write_new_markdown_cancelable(
         }
         write_result
     })();
-    match &result {
-        Ok(()) => tracing::info!(
+    if let Ok(()) = &result {
+        tracing::info!(
             event = "markdown_output_completed",
+            component = "markdown",
+            markdown_bytes = content.len(),
+            media_count = media.len(),
             elapsed_ms = crate::logging::elapsed_ms(started),
             "Markdown结果落盘完成"
-        ),
-        Err(_) => tracing::error!(
+        );
+    } else {
+        tracing::error!(
             event = "markdown_output_failed",
             stage,
             error_type = "output_boundary",
             elapsed_ms = crate::logging::elapsed_ms(started),
             cancel_requested = cancel.load(AtomicOrdering::Acquire),
             "Markdown结果落盘失败"
-        ),
+        );
     }
     result
 }
@@ -1309,14 +1416,15 @@ fn convert_media(
         }
         Ok(markdown.to_owned())
     })();
-    match &result {
-        Ok(markdown) => tracing::info!(
+    if let Ok(markdown) = &result {
+        tracing::info!(
             event = "media_conversion_completed",
             markdown_bytes = markdown.len(),
             elapsed_ms = crate::logging::elapsed_ms(started),
             "媒体转换完成"
-        ),
-        Err(_) => tracing::error!(
+        );
+    } else {
+        tracing::error!(
             event = "media_conversion_failed",
             stage,
             error_type = if stage == "response_protocol" {
@@ -1327,7 +1435,7 @@ fn convert_media(
             elapsed_ms = crate::logging::elapsed_ms(started),
             cancel_requested = cancel.load(AtomicOrdering::Acquire),
             "媒体转换失败，详情由上游结构化事件诊断"
-        ),
+        );
     }
     result
 }
@@ -1394,6 +1502,18 @@ pub fn test_scan_count_with_cancel(
     Ok(scan_cancelable(options, &supported, cancel)?.items.len())
 }
 
+#[rustfmt::skip]
+#[warn(
+    warnings,
+    unused_must_use,
+    unreachable_patterns,
+    unreachable_pub,
+    unused_variables,
+    rust_2018_idioms,
+    explicit_outlives_requirements,
+    elided_lifetimes_in_paths,
+    single_use_lifetimes
+)]
 #[cfg(test)]
 mod tests {
     use super::{
@@ -1840,6 +1960,33 @@ mod tests {
     #[cfg(not(windows))]
     fn make_dir_link(link: &Path, target: &Path) -> std::io::Result<()> {
         std::os::unix::fs::symlink(target, link)
+    }
+
+    // 覆盖 T-09/T-12/T-24、S-04：已有层级输出目录为 junction 时，必须先拒绝
+    // 该文件，不能穿过链接读取旧结果并把它当作正常的已有结果跳过。
+    #[test]
+    fn output_parent_link_fails_file_before_existing_result_check() {
+        let temp = tempfile::tempdir().unwrap();
+        let input = temp.path().join("input");
+        let output = temp.path().join("output");
+        let outside = temp.path().join("outside");
+        fs::create_dir_all(input.join("chapter")).unwrap();
+        fs::create_dir_all(&output).unwrap();
+        fs::create_dir_all(&outside).unwrap();
+        fs::write(input.join("chapter/a.pdf"), b"input").unwrap();
+        fs::write(input.join("b.pdf"), b"other input").unwrap();
+        fs::write(outside.join("a_pdf.md"), b"old result").unwrap();
+        make_dir_link(&output.join("chapter"), &outside).expect("创建目录链接");
+
+        let plan = scan(&options(input, output, false), &supported()).unwrap();
+        assert_eq!(plan.items.len(), 1);
+        assert_eq!(plan.items[0].relative, PathBuf::from("b.pdf"));
+        assert_eq!(plan.summary.failed, 1);
+        assert_eq!(plan.summary.skipped_existing, 0);
+        assert_eq!(plan.scan_failures.len(), 1);
+        assert_eq!(plan.scan_failures[0].0, PathBuf::from("chapter/a.pdf"));
+        assert!(plan.scan_failures[0].1.contains("junction"));
+        assert_eq!(fs::read(outside.join("a_pdf.md")).unwrap(), b"old result");
     }
 
     // 覆盖 T-24（S4-03 回归）：单个文件的媒体目录名被链接占用时只失败该文件

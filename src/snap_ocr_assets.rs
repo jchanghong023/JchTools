@@ -248,7 +248,8 @@ fn verify_bundled_worker(path: &Path, worker: &SnapWorker) -> Result<(), String>
     let dev_output =
         cfg!(debug_assertions) && path.parent().is_some_and(|p| p.ends_with("target/debug"));
     if !dev_output {
-        verify_file(path, worker.size_bytes, &worker.sha256)?;
+        verify_file(path, worker.size_bytes, &worker.sha256)
+            .map_err(|error| format!("{error}；{}", worker_repair_message(worker)))?;
     }
     Ok(())
 }
@@ -261,8 +262,15 @@ fn worker_readiness(worker: &SnapWorker, root: &Path) -> Result<(), String> {
         return verify_bundled_worker(&path, worker)
             .map_err(|error| format!("截图 OCR 工作进程校验失败：{error}"));
     }
-    if worker_ready(worker, root).is_err() {
-        return Err("截图 OCR 工作进程未安装或校验失败".to_string());
+    if let Err(error) = worker_ready(worker, root) {
+        tracing::error!(
+            component = "snap_ocr_assets",
+            event = "asset_worker_readiness_failed",
+            stage = "cached_worker_verify",
+            result = "not_ready",
+            "截图 OCR 工作进程就绪检查失败"
+        );
+        return Err(format!("截图 OCR 工作进程校验失败：{error}"));
     }
     Ok(())
 }
@@ -293,6 +301,14 @@ fn local_asset_readiness(assets: &[SnapAsset], root: &Path) -> Result<(), String
         // S7-05：透传具体失败原因（缺失/大小/摘要），GUI 侧直接展示该文案；
         // 压缩成统一「未安装或校验失败」会丢失失败种类（O-09/O-30）。
         if let Err(error) = asset_ready(asset, root) {
+            tracing::error!(
+                component = "snap_ocr_assets",
+                event = "asset_readiness_failed",
+                stage = "local_asset_verify",
+                asset_id = %asset.id,
+                result = "not_ready",
+                "截图 OCR 资产就绪检查失败"
+            );
             return Err(format!("资产 {}：{}", asset.id, error));
         }
     }
@@ -574,6 +590,8 @@ fn initialize_staged(
             .map_err(|error| format!("创建许可证目录失败：{error}"))?;
         stage = "notice_write";
         write_notice(&notice_stage.join("THIRD_PARTY_NOTICES.md"), manifest)?;
+        // O-06：许可证写入期间仍可取消；只在原子提交前检查，提交后不假报取消。
+        ensure_not_cancelled(cancel)?;
         stage = "notice_install";
         atomic_replace_dir(&notice_stage, &root.join("licenses"))?;
         stage = "final_readiness";
@@ -960,6 +978,7 @@ fn worker_ready(worker: &SnapWorker, root: &Path) -> Result<(), String> {
         worker.size_bytes,
         &worker.sha256,
     )
+    .map_err(|error| format!("{error}；{}", worker_repair_message(worker)))
 }
 
 /// 下载接缝共用 [`crate::asset_util::AssetDownloader`]；本文件持有唯一的
@@ -1752,6 +1771,7 @@ fn download_request(
                     | ureq::ErrorKind::ConnectionFailed
                     | ureq::ErrorKind::ProxyConnect
                     | ureq::ErrorKind::Io
+                    | ureq::ErrorKind::ProxyUnauthorized
             );
             tracing::error!(event = "asset_http_request_failed", stage, error_type = "Transport", error_kind = ?error.kind(), error_code = io_error.and_then(std::io::Error::raw_os_error), elapsed_ms, timed_out, retryable, "资产 GET 请求传输失败");
         }
@@ -1763,6 +1783,7 @@ fn download_request(
                 ureq::ErrorKind::Dns
                     | ureq::ErrorKind::ConnectionFailed
                     | ureq::ErrorKind::ProxyConnect
+                    | ureq::ErrorKind::ProxyUnauthorized
                     | ureq::ErrorKind::Io
             );
             (format!("下载请求失败：{error}"), retryable)
@@ -1828,6 +1849,18 @@ fn write_notice(path: &Path, manifest: &SnapAssetManifest) -> Result<(), String>
     fs::write(path, text).map_err(|error| format!("写入许可证 notice 失败：{error}"))
 }
 
+#[rustfmt::skip]
+#[warn(
+    warnings,
+    unused_must_use,
+    unreachable_patterns,
+    unreachable_pub,
+    unused_variables,
+    rust_2018_idioms,
+    explicit_outlives_requirements,
+    elided_lifetimes_in_paths,
+    single_use_lifetimes
+)]
 #[cfg(test)]
 mod tests {
     use std::fs;
@@ -2094,6 +2127,27 @@ mod tests {
                 && !logs.contains("DIRECT_PRIVATE_RESPONSE"),
             "{logs}"
         );
+    }
+
+    // 覆盖 P-09/O-10：HTTPS 代理拒绝 CONNECT 认证仍是代理连接失败，
+    // 必须允许调用方直连回退；修复前 ProxyUnauthorized 被误分为不可回退。
+    #[test]
+    fn proxy_authentication_failure_allows_direct_fallback() {
+        let (proxy_address, proxy_server) = diagnostic_http_server(
+            b"HTTP/1.1 407 Proxy Authentication Required\r\nContent-Length: 0\r\nConnection: close\r\n\r\n".to_vec(),
+        );
+        let (result, logs) = capture_diagnostics(|| {
+            super::download_request(
+                "https://example.invalid/asset",
+                Some(&format!("http://{proxy_address}")),
+                &mut |_| {},
+                "proxy-auth-regression",
+            )
+        });
+        proxy_server.join().expect("代理认证拒绝供给线程结束");
+        let (_, retryable) = result.expect_err("代理 CONNECT 认证拒绝必须报错");
+        assert!(retryable, "代理认证失败必须允许一次直连回退");
+        assert!(logs.contains("proxy_connect") && logs.contains("retryable=true"), "{logs}");
     }
 
     #[test]
@@ -2444,6 +2498,11 @@ mod tests {
             corrupted.contains("校验失败"),
             "必须说明缓存 worker 校验失败：{corrupted}"
         );
+        assert!(
+            missing.contains("重新安装当前 JchTools 包")
+                && corrupted.contains("重新安装当前 JchTools 包"),
+            "缺失或损坏 worker 的启动提示必须指引修复：{missing}；{corrupted}"
+        );
     }
 
     // 覆盖 O-09（S7-02）：bundled worker 文件在场但损坏（与清单大小/摘要不符）时，
@@ -2487,6 +2546,10 @@ mod tests {
         assert!(
             error.contains("大小") || error.contains("SHA256"),
             "提示必须携带具体失败原因（大小或摘要）：{error}"
+        );
+        assert!(
+            error.contains("重新安装当前 JchTools 包"),
+            "离线检查必须指引用户修复随包 worker：{error}"
         );
 
         // 大小正确、摘要不符：错误改为点名摘要差异（两种失败可区分）。
@@ -2571,6 +2634,61 @@ mod tests {
             .expect("读取隔离缓存")
             .next()
             .is_none());
+    }
+
+    // 覆盖 O-06：worker 校验后的取消不得提交许可证目录或替换已有 notice。
+    #[test]
+    fn initialize_cancellation_before_notice_install_preserves_existing_notice() {
+        let guard = redirect_component_env();
+        std::env::remove_var("JCHTOOLS_TEST_BUNDLED_WORKER");
+        let root = guard.root.path();
+        let mut manifest = super::load_manifest().expect("解析内置清单");
+        let worker = &mut manifest.workers[0];
+        let bytes = b"test-worker";
+        worker.status = "ok".into();
+        worker.size_bytes = bytes.len() as u64;
+        worker.sha256 = sha256_bytes(bytes);
+        let worker_path = root.join(&worker.install_path);
+        fs::create_dir_all(worker_path.parent().expect("worker 有父目录"))
+            .expect("创建缓存 worker 目录");
+        fs::write(worker_path, bytes).expect("预置可校验的 worker");
+
+        let component = root.join("component");
+        let inference = super::inference_manifest_from_pack(
+            manifest.xberg_inference.as_ref().expect("推理组件清单"),
+        )
+        .expect("转换组件清单");
+        for member in &inference.members {
+            if crate::xberg_runtime::asset_for_scenario(&member.install_path, "snapshot") {
+                let target = component.join(&member.install_path);
+                fs::create_dir_all(target.parent().expect("组件成员有父目录"))
+                    .expect("创建组件目录");
+                fs::write(target, b"local-component").expect("预置本地组件成员");
+            }
+        }
+        crate::xberg_settings::save(&component).expect("保存组件目录");
+        let licenses = root.join("licenses");
+        fs::create_dir_all(&licenses).expect("创建原有许可证目录");
+        let notice = licenses.join("THIRD_PARTY_NOTICES.md");
+        fs::write(&notice, b"existing-notice").expect("预置原有 notice");
+        let staging = root.join(".staging-cancel-notice");
+        fs::create_dir_all(&staging).expect("创建本轮暂存目录");
+        let cancel = AtomicBool::new(false);
+        let result = super::initialize_staged(
+            &manifest,
+            &cancel,
+            &mut |message| {
+                if message == "复用已校验的工作进程" {
+                    cancel.store(true, std::sync::atomic::Ordering::Release);
+                }
+            },
+            &staging,
+            root,
+            &mut super::NetworkDownloader,
+        );
+        let error = result.expect_err("提交 notice 前取消必须返回取消");
+        assert!(error.contains("取消"), "{error}");
+        assert_eq!(fs::read(notice).expect("读取原有 notice"), b"existing-notice");
     }
 
     // 覆盖 C-3：拉取中断（网络错误）必须与校验失败一样进入最多 3 次重试，

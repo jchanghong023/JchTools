@@ -1,3 +1,16 @@
+#![warn(
+    warnings,
+    unused_must_use,
+    unreachable_patterns,
+    unreachable_pub,
+    unused_variables,
+    future_incompatible,
+    rust_2018_idioms,
+    explicit_outlives_requirements,
+    elided_lifetimes_in_paths,
+    single_use_lifetimes
+)]
+
 #![allow(clippy::unwrap_used)]
 //! 覆盖 XB-09/XB-14/XB-15：旧 worker 未声明取消、超时和跨场景并发能力时，
 //! 明确拒绝推理，不能以不存在的成员摘要验证把未知协议当成兼容。

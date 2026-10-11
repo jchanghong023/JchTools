@@ -325,11 +325,32 @@ fn schedule_activation(
     slint::Timer::single_shot(std::time::Duration::from_millis(delay), move || {
         if let Some(window) = window.upgrade() {
             if activate_result_window(&window, position, size) {
+                tracing::info!(
+                    component = "ocr_result_window",
+                    event = "ocr_result_activation_completed",
+                    attempt = u32::from(attempt) + 1,
+                    "截图结果窗已切换到前台"
+                );
                 return;
             }
             if attempt < 2 {
+                tracing::warn!(
+                    component = "ocr_result_window",
+                    event = "ocr_result_activation_retried",
+                    stage = "foreground",
+                    attempt = u32::from(attempt) + 1,
+                    "截图结果窗尚未切换到前台，继续既有重试"
+                );
                 schedule_activation(window.as_weak(), position, size, attempt + 1);
             } else {
+                tracing::warn!(
+                    component = "ocr_result_window",
+                    event = "ocr_result_activation_fallback",
+                    stage = "foreground",
+                    attempt = u32::from(attempt) + 1,
+                    fallback = "taskbar",
+                    "截图结果窗前台切换重试结束，提示从任务栏切换"
+                );
                 // 信息性提示保持 accent 蓝色（U-06：信息蓝、错误红）。
                 window.set_hint_error(false);
                 window.set_hint("结果窗已显示，请从任务栏切换到截图 OCR 结果".into());
@@ -460,6 +481,18 @@ impl ResultWindowHandle {
     }
 }
 
+#[rustfmt::skip]
+#[warn(
+    warnings,
+    unused_must_use,
+    unreachable_patterns,
+    unreachable_pub,
+    unused_variables,
+    rust_2018_idioms,
+    explicit_outlives_requirements,
+    elided_lifetimes_in_paths,
+    single_use_lifetimes
+)]
 #[cfg(test)]
 mod tests {
     use super::{

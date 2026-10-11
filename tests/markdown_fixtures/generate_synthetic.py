@@ -30,7 +30,11 @@ DIRECTORY = Path(__file__).resolve().parent
 # 作常规模式回归；501 页超过阈值，用于断言 auto_mode 降级披露。
 NORMAL_PAGE_COUNT = 210
 AUTO_MODE_PAGE_COUNT = 501
-EXPECTED_PAGES_BY_NAME = {"large_210_pages.pdf": NORMAL_PAGE_COUNT, "large_501_pages.pdf": AUTO_MODE_PAGE_COUNT}
+EXPECTED_PAGES_BY_NAME = {
+    "large_210_pages.pdf": NORMAL_PAGE_COUNT,
+    "large_501_pages.pdf": AUTO_MODE_PAGE_COUNT,
+    "scanned_hello.pdf": 1,
+}
 
 # 合成 JSONL 样本（matrix/format_sweep/sample.jsonl）：无外部语料路径、
 # 无真实数值语义，仅保留「每行一个合法 JSON 对象」的格式特征。
@@ -68,19 +72,17 @@ def _write_multipage_pdf(target: Path, pages: int) -> None:
     frames[0].save(target, "PDF", save_all=True, append_images=frames[1:])
 
 
-# Pillow 写 PDF 会把当前挂钟写进 /CreationDate 与 /ModDate（复审 R7-2）：
-# 重跑即改变字节，使 SHA256SUMS.txt 的钉扎失效。生成后把两个日期字段改写为
-# 定长固定串（格式 D:YYYYMMDDHHmmSS 共 17 字节，长度不变、xref 偏移不受
-# 影响），保证重建可字节复现；重建受管夹具后仍须按 AGENTS §3.3 重建
-# SHA256SUMS.txt。
-_FIXED_PDF_DATE = b"D:20260101000000Z"
+# Pillow 写 PDF 会把当前挂钟写进 /CreationDate 与 /ModDate。只替换日期
+# 中固定宽度的 14 位数字，保留原有时区和分隔符；不能改变字符串长度，
+# 否则已写出的 xref 与 startxref 偏移失效。此处不重建或更新夹具基线。
+_FIXED_PDF_DATE = b"D:20260101000000"
 
 
 def _pin_pdf_timestamp(target: Path) -> None:
     data = target.read_bytes()
     patched, count = re.subn(
-        rb"/(CreationDate|ModDate) \([^)]*\)",
-        rb"/\1 (" + _FIXED_PDF_DATE + b")",
+        rb"/(CreationDate|ModDate) \(D:\d{14}",
+        rb"/\1 (" + _FIXED_PDF_DATE,
         data,
     )
     if count:
@@ -334,11 +336,11 @@ def _regenerate_one(target: Path) -> None:
     """按文件名分发重建单个受管夹具."""
     if target.name == "test_hello_world.png":
         _render_text("hello world", (200, 60)).save(target, "PNG")
-    elif target.name in EXPECTED_PAGES_BY_NAME:
-        _write_multipage_pdf(target, EXPECTED_PAGES_BY_NAME[target.name])
-        _pin_pdf_timestamp(target)
     elif target.name == "scanned_hello.pdf":
         _render_text("SCANNED-SYNTH-TOKEN", (400, 120)).save(target, "PDF")
+        _pin_pdf_timestamp(target)
+    elif target.name in EXPECTED_PAGES_BY_NAME:
+        _write_multipage_pdf(target, EXPECTED_PAGES_BY_NAME[target.name])
         _pin_pdf_timestamp(target)
     elif target.name == "sample.jsonl":
         _write_jsonl(target)
@@ -359,7 +361,7 @@ def regenerate() -> list[str]:
 
 
 def _check_pdf(target: Path) -> str | None:
-    """单册 PDF 的页数结构断言；None 即通过（无页数期望的单页 PDF 跳过）."""
+    """单册 PDF 的页数结构断言，扫描页同样必须恰好一页；None 即通过."""
     expected = EXPECTED_PAGES_BY_NAME.get(target.name)
     if expected is None:
         return None
@@ -380,9 +382,9 @@ def _check_plain(target: Path) -> str | None:
         text = target.read_text(encoding="utf-8")
         if "docs/" in text or ".pdf" in text:
             return f"{target.name} 含外部语料路径，不是纯合成内容"
-        for line in text.splitlines():
-            if line.strip() and not isinstance(json.loads(line), dict):
-                return f"{target.name} 存在非 JSON 对象行"
+        rows = [json.loads(line) for line in text.splitlines() if line.strip()]
+        if rows != list(SYNTHETIC_JSONL_ROWS):
+            return f"{target.name} 行数或内容不符合从零构造的合成 JSONL 样本（T-26）"
     if target.suffix in {".jb2", ".hwp"}:
         checker = _check_jbig2 if target.suffix == ".jb2" else _check_hwp
         return checker(target)
@@ -400,6 +402,23 @@ def _check_jbig2(target: Path) -> str | None:
         return f"{target.name} 页面尺寸不符"
     if data[-11:] != struct.pack(">IBBBI", 3, 51, 0, 0, 0):
         return f"{target.name} 缺少 EndOfFile 段"
+    if data[24:43] != struct.pack(">IIIIBH", 320, 96, 72, 72, 0, 0):
+        return f"{target.name} PageInformation 载荷不完整或不符"
+    # 固定前缀与 EOF 都在场仍可能中间被截断；按段声明长度检查连续边界，
+    # 不执行解码器，也不把「尚能识别文件头」当作完整合成夹具。
+    if len(data) < 54:
+        return f"{target.name} 缺少 generic region 段头"
+    number, kind, references, page, length = struct.unpack(">IBBBI", data[43:54])
+    if (number, kind, references, page) != (1, 38, 0, 1):
+        return f"{target.name} generic region 段头不符"
+    region = data[54 : 54 + length]
+    if length <= 18 or len(region) != length:
+        return f"{target.name} generic region 的 MMR 载荷为空或截断"
+    if region[:18] != struct.pack(">IIIIBB", 320, 96, 0, 0, 0, 1):
+        return f"{target.name} generic region 尺寸或 MMR 标记不符"
+    expected_tail = struct.pack(">IBBBI", 2, 49, 0, 1, 0) + struct.pack(">IBBBI", 3, 51, 0, 0, 0)
+    if data[54 + length :] != expected_tail:
+        return f"{target.name} 段长度、EndOfPage 或 EndOfFile 收尾不符"
     return None
 
 

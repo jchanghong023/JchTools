@@ -345,9 +345,10 @@ fn serve_named(
     loop {
         // SAFETY: raw 是本服务创建的管道实例句柄，在循环存续期间有效；同步等待客户端连接。
         let connect_result = unsafe { ConnectNamedPipe(raw, std::ptr::null_mut()) };
-        // SAFETY: 535（ERROR_NO_DATA）表示客户端已连接后断开，视为已连接；仅在
-        // ConnectNamedPipe 返回 0 时读取，错误码属于本次连接调用。
+        // SAFETY: 535（ERROR_PIPE_CONNECTED）表示客户端先于监听调用连接，仍是有效连接；
+        // 仅在 ConnectNamedPipe 返回 0 时读取，错误码属于本次连接调用。
         let connect_error = if connect_result == 0 {
+            // SAFETY: 读取当前线程刚刚失败的 Win32 调用错误码，无指针或句柄参数。
             unsafe { GetLastError() }
         } else {
             0
@@ -360,6 +361,13 @@ fn serve_named(
                 error_code = connect_error,
                 "截图控制管道连接失败"
             );
+            if connect_error == 232 {
+                // SAFETY: ERROR_NO_DATA 表示客户端已关闭、但本管道实例尚未断开。
+                // 必须先 Disconnect 才能再次监听；raw 仍由 pipe 独占持有，不关闭句柄。
+                unsafe {
+                    DisconnectNamedPipe(raw);
+                }
+            }
             continue;
         }
         let connection_span = crate::logging::operation_span("snap_ocr_control", "connection");
@@ -434,55 +442,52 @@ fn serve_named(
         let mut command_kind = "invalid";
         let mut failure_stage = None;
         let response = if terminated {
-            match serde_json::from_slice::<Value>(&request) {
-                Ok(value) => {
-                    if let Some(id) = value["diagnostic_id"].as_str().filter(|id| {
-                        !id.is_empty()
-                            && id.len() <= 96
-                            && id.bytes().all(|byte| {
-                                byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_' | b'.')
-                            })
-                    }) {
-                        diagnostic_id = id.to_owned();
-                    }
-                    command_kind = diagnostic_command(value["command"].as_str());
-                    let span = crate::logging::operation_span_with_id(
-                        "snap_ocr_control",
-                        "request",
-                        &diagnostic_id,
-                    );
-                    let _entered = span.enter();
-                    tracing::info!(
-                        event = "ocr_control_request_started",
-                        command = command_kind,
-                        peer_pid,
-                        "开始处理截图控制请求"
-                    );
-                    tracing::info!(
-                        event = "ocr_control_request_received",
-                        command = command_kind,
-                        peer_pid,
-                        "截图控制请求已解码"
-                    );
-                    let (tx, rx) = mpsc::sync_channel(1);
-                    if commands
-                        .send(Command::Pipe(value, tx, span.clone()))
-                        .is_ok()
-                    {
-                        rx.recv_timeout(std::time::Duration::from_secs(10))
-                            .unwrap_or_else(|_| {
-                                failure_stage = Some("service_response_timeout");
-                                json!({"ok":false,"error":"截图服务响应超时"})
-                            })
-                    } else {
-                        failure_stage = Some("service_dispatch");
-                        json!({"ok":false,"error":"截图服务已关闭"})
-                    }
+            if let Ok(value) = serde_json::from_slice::<Value>(&request) {
+                if let Some(id) = value["diagnostic_id"].as_str().filter(|id| {
+                    !id.is_empty()
+                        && id.len() <= 96
+                        && id.bytes().all(|byte| {
+                            byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_' | b'.')
+                        })
+                }) {
+                    id.clone_into(&mut diagnostic_id);
                 }
-                Err(_) => {
-                    failure_stage = Some("decode");
-                    json!({"ok":false,"error":"无效的控制消息"})
+                command_kind = diagnostic_command(value["command"].as_str());
+                let span = crate::logging::operation_span_with_id(
+                    "snap_ocr_control",
+                    "request",
+                    &diagnostic_id,
+                );
+                let _entered = span.enter();
+                tracing::info!(
+                    event = "ocr_control_request_started",
+                    command = command_kind,
+                    peer_pid,
+                    "开始处理截图控制请求"
+                );
+                tracing::info!(
+                    event = "ocr_control_request_received",
+                    command = command_kind,
+                    peer_pid,
+                    "截图控制请求已解码"
+                );
+                let (tx, rx) = mpsc::sync_channel(1);
+                if commands
+                    .send(Command::Pipe(value, tx, span.clone()))
+                    .is_ok()
+                {
+                    rx.recv_timeout(std::time::Duration::from_secs(10))
+                        .unwrap_or_else(|_| {
+                            failure_stage = Some("service_response_timeout");
+                            json!({"ok":false,"error":"截图服务响应超时"})
+                        })
+                } else {
+                    failure_stage = Some("service_dispatch");
+                    json!({"ok":false,"error":"截图服务已关闭"})
                 }
+            } else {
+                failure_stage = Some("decode");
+                json!({"ok":false,"error":"无效的控制消息"})
             }
         } else {
             failure_stage = Some("framing");
@@ -578,6 +583,18 @@ pub(super) fn diagnostic_command(command: Option<&str>) -> &'static str {
     }
 }
 
+#[rustfmt::skip]
+#[warn(
+    warnings,
+    unused_must_use,
+    unreachable_patterns,
+    unreachable_pub,
+    unused_variables,
+    rust_2018_idioms,
+    explicit_outlives_requirements,
+    elided_lifetimes_in_paths,
+    single_use_lifetimes
+)]
 #[cfg(test)]
 mod tests {
     use std::io::{BufRead, BufReader, Write};
@@ -607,10 +624,94 @@ mod tests {
         }
     }
 
+    // 覆盖 O-14 / XB-22：监听调用前已关闭的客户端不能耗尽唯一控制管道实例。
+    #[test]
+    fn client_closed_before_accept_does_not_block_next_request(
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        let name = format!(
+            r"\\.\pipe\jchtools-snap-ocr-test-{}-{}",
+            std::process::id(),
+            NEXT_PIPE.fetch_add(1, Ordering::Relaxed)
+        );
+        let (commands_tx, commands_rx) = std::sync::mpsc::channel();
+        // 零容量握手把服务线程停在 CreateNamedPipeW 与 ConnectNamedPipe 之间。
+        let (ready_tx, ready_rx) = std::sync::mpsc::sync_channel(0);
+        let server_name = name.clone();
+        std::thread::spawn(move || {
+            serve_named(
+                &server_name,
+                &commands_tx,
+                &ready_tx,
+                Duration::from_secs(2),
+            );
+        });
+        let deadline = Instant::now() + Duration::from_secs(2);
+        let early_client = loop {
+            match std::fs::OpenOptions::new()
+                .read(true)
+                .write(true)
+                .open(&name)
+            {
+                Ok(pipe) => break pipe,
+                Err(_) if Instant::now() < deadline => {
+                    std::thread::sleep(Duration::from_millis(10));
+                }
+                Err(error) => return Err(error.into()),
+            }
+        };
+        drop(early_client);
+        ready_rx.recv_timeout(Duration::from_secs(2))??;
+        std::thread::spawn(move || {
+            if let Ok(Command::Pipe(_, response, _)) = commands_rx.recv() {
+                let _ = response.send(json!({"ok":true}));
+            }
+        });
+        let deadline = Instant::now() + Duration::from_secs(2);
+        let mut next = loop {
+            match std::fs::OpenOptions::new()
+                .read(true)
+                .write(true)
+                .open(&name)
+            {
+                Ok(pipe) => break pipe,
+                Err(_) if Instant::now() < deadline => {
+                    std::thread::sleep(Duration::from_millis(10));
+                }
+                Err(error) => return Err(error.into()),
+            }
+        };
+        next.write_all(b"{\"command\":\"ping\"}\n")?;
+        let mut response = String::new();
+        BufReader::new(&mut next).read_line(&mut response)?;
+        assert_eq!(
+            serde_json::from_str::<serde_json::Value>(&response)?["ok"],
+            true
+        );
+        Ok(())
+    }
+
     // 覆盖 O-11：单个无响应客户端不能让常驻服务的控制入口永久失效。
     #[test]
     fn unfinished_client_does_not_block_next_control_request(
     ) -> Result<(), Box<dyn std::error::Error>> {
+        // tracing 的 callsite interest 是进程级缓存。唯一局部 subscriber 存在时，
+        // 并行测试的无 subscriber 线程首次登记同一控制事件或 operation span，
+        // 可把 interest 缓存为 never，使本线程的事件或关联 ID 不可见。
+        // 与日志测试同样隔离整个真实管道场景，不改变服务期限或放宽终态断言。
+        const CHILD: &str = "JCHTOOLS_OCR_CONTROL_TEST_CHILD";
+        if std::env::var_os(CHILD).is_none() {
+            let status = std::process::Command::new(std::env::current_exe()?)
+                .args([
+                    "--exact",
+                    "service::protocol::tests::unfinished_client_does_not_block_next_control_request",
+                    "--nocapture",
+                ])
+                .env(CHILD, "1")
+                .status()?;
+            assert!(status.success(), "隔离进程中的真实控制管道与诊断断言必须通过");
+            return Ok(());
+        }
+
         let logs = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
         let capture = LogCapture(logs.clone());
         let subscriber = tracing_subscriber::fmt()
@@ -664,6 +765,8 @@ mod tests {
                 Err(error) => return Err(error.into()),
             }
         };
+        // 读完响应后仍保持客户端开启，等服务端刷新并记录终态再关闭，
+        // 避免关闭管道与 FlushFileBuffers 竞态把已读取的响应判为交付失败。
         next.write_all(b"{\"command\":\"ping\",\"diagnostic_id\":\"test-control-123\",\"private\":\"DO_NOT_LOG_OCR_BODY\"}\n")?;
         let mut response = String::new();
         BufReader::new(&mut next).read_line(&mut response)?;
@@ -675,6 +778,28 @@ mod tests {
             serde_json::from_str::<serde_json::Value>(&response)?["diagnostic_id"],
             "test-control-123"
         );
+        let observing = Instant::now();
+        let deadline = observing + Duration::from_secs(2);
+        let captured = loop {
+            let captured = String::from_utf8(
+                logs.lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner)
+                    .clone(),
+            )?;
+            if captured.lines().any(|line| {
+                line.contains("ocr_control_request_completed") && line.contains("test-control-123")
+            }) {
+                break captured;
+            }
+            if Instant::now() >= deadline {
+                return Err(format!(
+                    "截图控制日志终态未到达：observation_elapsed_ms={} request_timeout_ms=300 response={response:?}\n{captured}",
+                    observing.elapsed().as_millis()
+                )
+                .into());
+            }
+            std::thread::sleep(Duration::from_millis(10));
+        };
         drop(next);
         drop(unfinished);
 
@@ -716,23 +841,6 @@ mod tests {
             serde_json::from_str::<serde_json::Value>(&response)?["ok"],
             true
         );
-        let deadline = Instant::now() + Duration::from_secs(2);
-        let captured = loop {
-            let captured = String::from_utf8(
-                logs.lock()
-                    .unwrap_or_else(std::sync::PoisonError::into_inner)
-                    .clone(),
-            )?;
-            if captured.contains("ocr_control_request_completed")
-                && captured.contains("test-control-123")
-            {
-                break captured;
-            }
-            if Instant::now() >= deadline {
-                return Err("截图控制日志终态未到达".into());
-            }
-            std::thread::sleep(Duration::from_millis(10));
-        };
         for event in [
             "ocr_control_request_started",
             "ocr_control_request_received",
@@ -750,6 +858,18 @@ mod tests {
     }
 }
 
+#[rustfmt::skip]
+#[warn(
+    warnings,
+    unused_must_use,
+    unreachable_patterns,
+    unreachable_pub,
+    unused_variables,
+    rust_2018_idioms,
+    explicit_outlives_requirements,
+    elided_lifetimes_in_paths,
+    single_use_lifetimes
+)]
 #[cfg(test)]
 mod background_isolation_tests {
     use super::*;

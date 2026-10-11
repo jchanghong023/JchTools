@@ -441,6 +441,18 @@ fn items_left_origin(lines: &[TextLine]) -> f64 {
     lines.iter().map(min_left).fold(f64::INFINITY, f64::min)
 }
 
+#[rustfmt::skip]
+#[warn(
+    warnings,
+    unused_must_use,
+    unreachable_patterns,
+    unreachable_pub,
+    unused_variables,
+    rust_2018_idioms,
+    explicit_outlives_requirements,
+    elided_lifetimes_in_paths,
+    single_use_lifetimes
+)]
 #[cfg(test)]
 mod tests {
     // 覆盖 O-27/O-28：冻结仓库 tests/test_layout.py 全部 12 例逐字翻译。

@@ -13,7 +13,10 @@ use std::{
     time::{Duration, Instant},
 };
 use windows_sys::Win32::{
-    Foundation::{CloseHandle, HANDLE, INVALID_HANDLE_VALUE, WAIT_OBJECT_0, WAIT_TIMEOUT},
+    Foundation::{
+        CloseHandle, GetLastError, ERROR_NO_MORE_FILES, HANDLE, INVALID_HANDLE_VALUE, WAIT_OBJECT_0,
+        WAIT_TIMEOUT,
+    },
     System::{
         Diagnostics::ToolHelp::{
             CreateToolhelp32Snapshot, Process32FirstW, Process32NextW, PROCESSENTRY32W,
@@ -134,6 +137,7 @@ fn http_request(action: &str) -> Result<Value, String> {
     let mut first_delta_ms = None;
     let mut first_delta_status = Value::Null;
     let mut finish_reason = Value::Null;
+    let mut completion_id: Option<String> = None;
     loop {
         line.clear();
         if reader
@@ -182,6 +186,24 @@ fn http_request(action: &str) -> Result<Value, String> {
         }
         if event["object"] != "chat.completion.chunk" || event["model"] != MODEL {
             return Err(format!("真实 SSE 类型/模型不匹配：{event}"));
+        }
+        // AH-A04：只拼接同一个完成对象的第零个选择，不能将串用的请求/选择当成真实增量。
+        let id = event["id"]
+            .as_str()
+            .filter(|id| !id.is_empty())
+            .ok_or_else(|| format!("真实 SSE 缺少完成对象标识：{event}"))?;
+        if let Some(expected) = completion_id.as_deref() {
+            if id != expected {
+                return Err(format!("真实 SSE 串入其他完成对象：{event}"));
+            }
+        } else {
+            completion_id = Some(id.to_owned());
+        }
+        let choices = event["choices"]
+            .as_array()
+            .ok_or_else(|| format!("真实 SSE 缺少选择数组：{event}"))?;
+        if choices.len() != 1 || choices[0]["index"].as_u64() != Some(0) {
+            return Err(format!("真实 SSE 选择数量/索引不匹配：{event}"));
         }
         if let Some(delta) = event["choices"][0]["delta"]["content"]
             .as_str()
@@ -574,7 +596,14 @@ fn direct_agents(service_pid: u32, filename: &str) -> Vec<u32> {
     let mut pids = Vec::new();
     // SAFETY: 有效快照和已初始化大小的可写结构。
     let mut found = unsafe { Process32FirstW(snapshot.handle, &raw mut entry) };
-    while found != 0 {
+    loop {
+        if found == 0 {
+            // AH-A08 的唯一进程证据必须来自完整快照；枚举失败不能冒充正常结束。
+            // SAFETY: 紧接失败的枚举调用读取线程本地错误码，不夹入其他 Win32 调用。
+            let error = unsafe { GetLastError() };
+            assert_eq!(error, ERROR_NO_MORE_FILES, "进程快照枚举失败：{error}");
+            break;
+        }
         let len = entry
             .szExeFile
             .iter()

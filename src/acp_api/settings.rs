@@ -56,6 +56,12 @@ pub fn load_config() -> Result<Option<ServiceConfig>, ServiceError> {
             )
             .optional()
             .map_err(|e| io(format!("读取模型服务配置失败：{e}")))?;
+        tracing::info!(
+            component = "acp_settings",
+            event = "acp_config_record_read",
+            present = value.is_some(),
+            "ACP 配置记录读取状态"
+        );
         value
             .map(|text| {
                 let config: ServiceConfig = serde_json::from_str(&text)
@@ -150,7 +156,8 @@ pub fn validate_config(config: &ServiceConfig) -> Result<(), ServiceError> {
         .map_err(|e| invalid(e.to_string()))
     })
 }
-/// Windows CRT 引号规则：反斜杠仅在双引号之前具有转义含义。
+/// Windows CRT 引号规则：仅空格和制表符分隔参数，反斜杠仅在双引号之前转义。
+/// 未闭合的双引号按 CRT 规则将剩余字符收纳为最后一个参数。
 pub fn parse_arguments(text: &str) -> Result<Vec<String>, ServiceError> {
     crate::acp_api::diagnostics::call("acp_settings", "parse_arguments", || {
         if text.contains('\0') {
@@ -159,10 +166,7 @@ pub fn parse_arguments(text: &str) -> Result<Vec<String>, ServiceError> {
         let mut chars = text.chars().peekable();
         let mut result = Vec::new();
         while chars.peek().is_some() {
-            while chars
-                .peek()
-                .is_some_and(|c| matches!(c, ' ' | '\t' | '\r' | '\n'))
-            {
+            while chars.peek().is_some_and(|c| matches!(c, ' ' | '\t')) {
                 chars.next();
             }
             if chars.peek().is_none() {
@@ -171,7 +175,7 @@ pub fn parse_arguments(text: &str) -> Result<Vec<String>, ServiceError> {
             let mut quoted = false;
             let mut argument = String::new();
             while let Some(&ch) = chars.peek() {
-                if !quoted && matches!(ch, ' ' | '\t' | '\r' | '\n') {
+                if !quoted && matches!(ch, ' ' | '\t') {
                     break;
                 }
                 let mut slashes = 0;
@@ -192,20 +196,13 @@ pub fn parse_arguments(text: &str) -> Result<Vec<String>, ServiceError> {
                     }
                 } else {
                     argument.extend(std::iter::repeat_n('\\', slashes));
-                    if !quoted
-                        && chars
-                            .peek()
-                            .is_some_and(|c| matches!(c, ' ' | '\t' | '\r' | '\n'))
-                    {
+                    if !quoted && chars.peek().is_some_and(|c| matches!(c, ' ' | '\t')) {
                         break;
                     }
                     if let Some(ch) = chars.next() {
                         argument.push(ch);
                     }
                 }
-            }
-            if quoted {
-                return Err(invalid("参数：双引号未闭合"));
             }
             result.push(argument);
         }

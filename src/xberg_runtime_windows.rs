@@ -43,7 +43,7 @@ struct PendingRequest {
     command: &'static str,
 }
 type Pending = Arc<Mutex<HashMap<String, PendingRequest>>>;
-const BROKER_PROTOCOL: u64 = 2;
+const BROKER_PROTOCOL: u64 = 3;
 
 fn identity() -> Result<String, String> {
     let mut session = 0;
@@ -87,17 +87,18 @@ pub(super) fn resume_background() -> Result<(), String> {
             Err(format!("恢复后台启动状态失败：{e}"))
         }
     })();
-    match &result {
-        Ok(()) => tracing::info!(
+    if let Ok(()) = &result {
+        tracing::info!(
             event = "xberg_background_resume_completed",
             elapsed_ms = logging::elapsed_ms(started),
             "后台自动启动状态已恢复"
-        ),
-        Err(_) => tracing::warn!(
+        );
+    } else {
+        tracing::warn!(
             event = "xberg_background_resume_failed",
             elapsed_ms = logging::elapsed_ms(started),
             "后台自动启动状态恢复失败"
-        ),
+        );
     }
     result
 }
@@ -162,20 +163,21 @@ fn background_command(command: &str) -> Result<Value, String> {
         }
         Ok(response)
     })();
-    match &result {
-        Ok(response) => log_response(
+    if let Ok(response) = &result {
+        log_response(
             "background_control",
             super::diagnostic_command(Some(command)),
             response,
             started,
             None,
-        ),
-        Err(_) => tracing::warn!(
+        );
+    } else {
+        tracing::warn!(
             event = "xberg_background_control_failed",
             stage,
             elapsed_ms = logging::elapsed_ms(started),
             "后台控制请求失败"
-        ),
+        );
     }
     result
 }
@@ -490,13 +492,12 @@ fn read_bounded_line(reader: &mut impl BufRead, limit: u64) -> Result<BoundedLin
 }
 
 fn read_json(reader: &mut impl BufRead) -> Result<Value, String> {
-    let line = read_bounded_line(reader, MAX_MESSAGE).map_err(|error| {
+    let line = read_bounded_line(reader, MAX_MESSAGE).inspect_err(|_| {
         tracing::warn!(
             event = "xberg_message_read_failed",
             stage = "read",
             "共享管道消息读取失败"
         );
-        error
     })?;
     match line {
         BoundedLine::Complete(bytes) => serde_json::from_slice(&bytes).map_err(|_| {
@@ -690,7 +691,61 @@ fn pipe_server_pid(pipe: &File) -> Option<u32> {
     (ok != 0).then_some(pid)
 }
 
-fn exchange(mut pipe: File, envelope: &Value, timeout: Duration) -> Result<Value, String> {
+/// XB-08/T-23：登记确认只属于原请求；它不代替终态，也不改变引擎的一行响应协议。
+fn submission_acknowledgement(request: &Value, engine_pid: u32) -> Value {
+    json!({
+        "id": request["id"],
+        "ok": true,
+        "jchtools_request_submitted": true,
+        "jchtools_xberg_pid": engine_pid,
+        "jchtools_broker_pid": std::process::id(),
+        "jchtools_broker_protocol": BROKER_PROTOCOL
+    })
+}
+
+fn read_broker_terminal(
+    reader: &mut impl BufRead,
+    request_id: &Value,
+    submitted: Option<&AtomicBool>,
+) -> Result<Value, String> {
+    let mut acknowledged = false;
+    loop {
+        let response = read_json(reader)?;
+        if response["jchtools_broker_protocol"] != BROKER_PROTOCOL {
+            return Err(
+                "常驻 Xberg 代理协议不兼容，请结束旧版本会话后重试；未启动第二个引擎".into(),
+            );
+        }
+        if &response["id"] != request_id {
+            return Err("共享 Xberg 响应 ID 不匹配".into());
+        }
+        if response["jchtools_request_submitted"] != true {
+            return Ok(response);
+        }
+        let state = submitted.ok_or("共享 Xberg 返回了未请求的登记确认")?;
+        if acknowledged || response["ok"] != true {
+            return Err("共享 Xberg 请求登记确认异常".into());
+        }
+        acknowledged = true;
+        state.store(true, Ordering::Release);
+        tracing::info!(
+            event = "xberg_request_submission_confirmed",
+            engine_pid = response["jchtools_xberg_pid"].as_u64(),
+            "原请求已登记并排队，可以发送请求级取消"
+        );
+    }
+}
+
+fn exchange(pipe: File, envelope: &Value, timeout: Duration) -> Result<Value, String> {
+    exchange_with_submission(pipe, envelope, timeout, None)
+}
+
+fn exchange_with_submission(
+    mut pipe: File,
+    envelope: &Value,
+    timeout: Duration,
+    submitted: Option<&AtomicBool>,
+) -> Result<Value, String> {
     let started = Instant::now();
     let mut stage = "io_deadline";
     let quiet = envelope["request"]["command"] == "keepalive";
@@ -713,17 +768,12 @@ fn exchange(mut pipe: File, envelope: &Value, timeout: Duration) -> Result<Value
                 "共享代理请求消息已发送"
             );
         }
-        stage = "read";
-        let response = read_json(&mut BufReader::new(pipe))?;
-        stage = "protocol";
-        if response["jchtools_broker_protocol"] != BROKER_PROTOCOL {
-            return Err(
-                "常驻 Xberg 代理协议不兼容，请结束旧版本会话后重试；未启动第二个引擎".into(),
-            );
-        }
-        if response["id"] != envelope["request"]["id"] {
-            return Err("共享 Xberg 响应 ID 不匹配".into());
-        }
+        stage = "read_and_protocol";
+        let response = read_broker_terminal(
+            &mut BufReader::new(pipe),
+            &envelope["request"]["id"],
+            submitted,
+        )?;
         if quiet {
             tracing::debug!(
                 event = "xberg_response_received",
@@ -847,15 +897,16 @@ pub(super) fn request(
         );
     }
     let result = request_via_broker(root, value, timeout, cancel, parent_operation_id);
-    match &result {
-        Ok(response) => log_response("client", command, response, started, None),
-        Err(_) => tracing::warn!(
+    if let Ok(response) = &result {
+        log_response("client", command, response, started, None);
+    } else {
+        tracing::warn!(
             event = "xberg_client_request_failed",
             stage = "transport_or_cancel",
             command,
             elapsed_ms = logging::elapsed_ms(started),
             "共享引擎客户端请求失败"
-        ),
+        );
     }
     result
 }
@@ -915,14 +966,26 @@ fn request_via_broker(
     let exchange_timeout = remaining
         .checked_add(QUERY_TIMEOUT)
         .ok_or("Xberg 请求期限过大，未提交推理")?;
-    let envelope = json!({"runtime_dir":root, "request":value, "diagnostic":{"parent_operation_id":parent_operation_id,"caller_pid":std::process::id()}});
+    let acknowledge_submission = matches!(
+        value["command"].as_str(),
+        Some("extract" | "transcribe" | "ocr_snapshot")
+    );
+    let envelope = json!({"runtime_dir":root, "request":value, "acknowledge_submission":acknowledge_submission, "diagnostic":{"parent_operation_id":parent_operation_id,"caller_pid":std::process::id()}});
     let cloned = envelope.clone();
     let (send, receive) = mpsc::channel();
     let span = tracing::Span::current();
+    // 状态只由本次原连接持有，线程结束便释放；不保留请求墓碑。
+    let submitted = Arc::new(AtomicBool::new(!acknowledge_submission));
+    let reader_submitted = Arc::clone(&submitted);
     let reader = std::thread::spawn(move || {
         let _entered = span.enter();
         if send
-            .send(exchange(pipe, &cloned, exchange_timeout))
+            .send(exchange_with_submission(
+                pipe,
+                &cloned,
+                exchange_timeout,
+                acknowledge_submission.then_some(reader_submitted.as_ref()),
+            ))
             .is_err()
         {
             tracing::warn!(
@@ -972,7 +1035,7 @@ fn request_via_broker(
                 }
                 return match (result, cancellation_error) {
                     (Err(error), Some(cancel_error)) => Err(format!("取消接口失败：{cancel_error}；{error}；代理仍保留未结束任务，阻止同场景重入")),
-                    (result, _) => result,
+                    (result, _) => result.map(|response| restore_timeout_kind(response, timed_out)),
                 };
             }
             Err(mpsc::RecvTimeoutError::Disconnected) => {
@@ -1016,7 +1079,12 @@ fn request_via_broker(
             );
             return Err(format!("{reason}；代理仍保留未结束任务，阻止同场景重入"));
         }
-        if !cancellation_sent && (cancel.load(Ordering::Acquire) || Instant::now() >= end) {
+        // 耗时任务的取消意图可以先到，但独立取消连接不能越过原连接的登记确认。
+        // submit 在持有 pending 锁时排入唯一 FIFO，确认后取消必定排在原请求后。
+        if !cancellation_sent
+            && submitted.load(Ordering::Acquire)
+            && (cancel.load(Ordering::Acquire) || Instant::now() >= end)
+        {
             cancellation_sent = true;
             timed_out = Instant::now() >= end && !cancel.load(Ordering::Acquire);
             let target_id = value["id"].as_str().unwrap_or_default();
@@ -1075,6 +1143,20 @@ fn request_via_broker(
     }
 }
 
+/// 引擎把主动超时的 cancel 也报 cancelled；原请求终态到达后恢复真正的结束原因。
+fn restore_timeout_kind(mut response: Value, timed_out: bool) -> Value {
+    if timed_out
+        && matches!(
+            response["error_kind"].as_str(),
+            Some("cancelled" | "canceled")
+        )
+    {
+        response["error_kind"] = json!("timeout");
+        response["error"] = json!("Xberg 请求已超时");
+    }
+    response
+}
+
 struct Engine {
     child: Child,
     root: PathBuf,
@@ -1119,6 +1201,8 @@ impl Engine {
                 command.env(name, "1");
             }
             command
+                // 只使用当前保存目录随引擎发布的截图模型，不继承开发机覆盖路径。
+                .env_remove("XBERG_SNAPSHOT_MODEL_DIR")
                 .env("ORT_DYLIB_PATH", root.join("onnxruntime.dll"))
                 .env("HF_HOME", root)
                 .env("HF_HUB_CACHE", root.join("models"))
@@ -1161,7 +1245,7 @@ impl Engine {
                     }
                     match child.wait() {
                         Ok(status) => {
-                            tracing::info!(event = "xberg_engine_exited", stage = "job_attach_cleanup", engine_pid = child.id(), exit_code = status.code(), exit_status = %status, elapsed_ms = logging::elapsed_ms(started), "作业绑定失败后的引擎已退出")
+                            tracing::info!(event = "xberg_engine_exited", stage = "job_attach_cleanup", engine_pid = child.id(), exit_code = status.code(), exit_status = %status, elapsed_ms = logging::elapsed_ms(started), "作业绑定失败后的引擎已退出");
                         }
                         Err(error) => tracing::warn!(
                             event = "xberg_engine_wait_failed",
@@ -1334,19 +1418,20 @@ impl Engine {
                 started,
             })
         })();
-        match &result {
-            Ok(engine) => tracing::info!(
+        if let Ok(engine) = &result {
+            tracing::info!(
                 event = "xberg_engine_spawn_completed",
                 engine_pid = engine.child.id(),
                 elapsed_ms = logging::elapsed_ms(started),
                 "唯一共享引擎创建完成"
-            ),
-            Err(_) => tracing::warn!(
+            );
+        } else {
+            tracing::warn!(
                 event = "xberg_engine_spawn_failed",
                 stage,
                 elapsed_ms = logging::elapsed_ms(started),
                 "唯一共享引擎创建失败"
-            ),
+            );
         }
         result
     }
@@ -1712,7 +1797,7 @@ fn wait_engine(
 ) -> std::io::Result<std::process::ExitStatus> {
     let result = engine.child.wait();
     match &result {
-        Ok(status) => log_engine_exit(engine, status, reason),
+        Ok(status) => log_engine_exit(engine, *status, reason),
         Err(error) => {
             let _entered = engine.lifecycle_span.enter();
             tracing::warn!(
@@ -1728,13 +1813,47 @@ fn wait_engine(
     result
 }
 
-fn log_engine_exit(engine: &Engine, status: &std::process::ExitStatus, reason: &'static str) {
+fn log_engine_exit(engine: &Engine, status: std::process::ExitStatus, reason: &'static str) {
     let _entered = engine.lifecycle_span.enter();
     if reason == "observed_exit" && !status.success() {
         tracing::warn!(event = "xberg_engine_exited", engine_pid = engine.child.id(), reason, exit_code = status.code(), exit_status = %status, elapsed_ms = logging::elapsed_ms(engine.started), "共享引擎进程异常退出");
     } else {
         tracing::info!(event = "xberg_engine_exited", engine_pid = engine.child.id(), reason, exit_code = status.code(), exit_status = %status, success = status.success(), elapsed_ms = logging::elapsed_ms(engine.started), "共享引擎进程已退出");
     }
+}
+
+/// 命名管道响应须等客户端读走后才关闭；控制确认也不能绕过这一收尾。
+fn write_pipe_response(
+    pipe: &mut File,
+    response: &Value,
+    caller_pid: Option<u64>,
+    started: Instant,
+) -> Result<(), String> {
+    let _guard = IoDeadline::new(QUERY_TIMEOUT)?;
+    write_json(pipe, response)?;
+    tracing::debug!(
+        event = "xberg_broker_response_sent",
+        caller_pid,
+        elapsed_ms = logging::elapsed_ms(started),
+        "共享代理响应已发送"
+    );
+    // SAFETY: 有效管道，等待客户端取走响应后断开；受上方 I/O 期限保护。
+    let flushed = unsafe {
+        windows_sys::Win32::Storage::FileSystem::FlushFileBuffers(pipe.as_raw_handle().cast())
+    };
+    if flushed == 0 {
+        // SAFETY: 本线程紧邻失败的 FlushFileBuffers 查询错误码。
+        let code = unsafe { GetLastError() };
+        tracing::warn!(
+            event = "xberg_broker_response_flush_failed",
+            stage = "response_flush",
+            caller_pid,
+            code,
+            elapsed_ms = logging::elapsed_ms(started),
+            "共享代理响应已写出，但未确认客户端取走；保持原有返回语义"
+        );
+    }
+    Ok(())
 }
 
 fn handle(pipe: File, engine: &Mutex<Option<Engine>>, stopping: &AtomicBool) -> Result<(), String> {
@@ -1786,10 +1905,11 @@ fn handle(pipe: File, engine: &Mutex<Option<Engine>>, stopping: &AtomicBool) -> 
             request["command"].as_str(),
             Some("broker-state" | "broker-stop" | "broker-force-stop")
         ) {
+            // 先持有状态锁，再发布停止；看门狗必须等客户端取走确认后才能退出。
+            let mut slot = engine.lock().map_err(|_| "后台状态异常")?;
             if request["command"] == "broker-stop" {
                 stopping.store(true, Ordering::Release);
             }
-            let mut slot = engine.lock().map_err(|_| "后台状态异常")?;
             if request["command"] == "broker-force-stop" {
                 let task_active = slot.as_ref().is_some_and(|e| {
                     e.pending
@@ -1803,9 +1923,11 @@ fn handle(pipe: File, engine: &Mutex<Option<Engine>>, stopping: &AtomicBool) -> 
                         command,
                         "共享代理拒绝强制停止：仍有其他场景任务"
                     );
-                    return write_json(
+                    return write_pipe_response(
                         reader.get_mut(),
                         &json!({"id":request["id"],"ok":false,"error":"文档、媒体或截图任务尚未结束，不能强制退出","jchtools_broker_protocol":BROKER_PROTOCOL}),
+                        caller_pid,
+                        started,
                     );
                 }
                 stopping.store(true, Ordering::Release);
@@ -1827,7 +1949,7 @@ fn handle(pipe: File, engine: &Mutex<Option<Engine>>, stopping: &AtomicBool) -> 
             let response = json!({"id":request["id"],"ok":true,"running":true,"active":active,"stopping":stopping.load(Ordering::Acquire),"jchtools_broker_protocol":BROKER_PROTOCOL});
             log_response("broker", command, &response, started, None);
             stage = "response_write";
-            return write_json(reader.get_mut(), &response);
+            return write_pipe_response(reader.get_mut(), &response, caller_pid, started);
         }
         stage = "runtime_dir";
         let root = PathBuf::from(envelope["runtime_dir"].as_str().ok_or("缺少 Xberg 目录")?);
@@ -1841,7 +1963,7 @@ fn handle(pipe: File, engine: &Mutex<Option<Engine>>, stopping: &AtomicBool) -> 
             stage = "engine_exit_probe";
             if let Some(current) = slot.as_mut() {
                 if let Some(status) = current.child.try_wait().map_err(|e| e.to_string())? {
-                    log_engine_exit(current, &status, "observed_exit");
+                    log_engine_exit(current, status, "observed_exit");
                     slot.take();
                 }
             }
@@ -1922,6 +2044,16 @@ fn handle(pipe: File, engine: &Mutex<Option<Engine>>, stopping: &AtomicBool) -> 
                 + QUERY_TIMEOUT;
             let pid = current.child.id();
             drop(slot); // 等待响应时不持有引擎锁；截图、取消和查询可立即提交。
+            if envelope["acknowledge_submission"] == true {
+                stage = "submission_acknowledgement";
+                let _guard = IoDeadline::new(QUERY_TIMEOUT)?;
+                write_json(reader.get_mut(), &submission_acknowledgement(&request, pid))?;
+                tracing::info!(
+                    event = "xberg_broker_submission_acknowledged",
+                    engine_pid = pid,
+                    "原请求已登记排队，向原连接交付确认"
+                );
+            }
             stage = "engine_terminal_wait";
             let result = receive.recv_timeout(timeout).map_err(|error| {
                 tracing::warn!(
@@ -1955,34 +2087,7 @@ fn handle(pipe: File, engine: &Mutex<Option<Engine>>, stopping: &AtomicBool) -> 
         response["jchtools_broker_pid"] = json!(std::process::id());
         log_response("broker", command, &response, started, None);
         stage = "response_write";
-        let _guard = IoDeadline::new(QUERY_TIMEOUT)?;
-        write_json(reader.get_mut(), &response)?;
-        tracing::debug!(
-            event = "xberg_broker_response_sent",
-            caller_pid,
-            elapsed_ms = logging::elapsed_ms(started),
-            "共享代理响应已发送"
-        );
-        stage = "response_flush";
-        // SAFETY: 有效管道，等待客户端取走响应后断开；受上方 I/O 期限保护。
-        let flushed = unsafe {
-            windows_sys::Win32::Storage::FileSystem::FlushFileBuffers(
-                reader.get_ref().as_raw_handle().cast(),
-            )
-        };
-        if flushed == 0 {
-            // SAFETY: 本线程紧邻失败的 FlushFileBuffers 查询错误码。
-            let code = unsafe { GetLastError() };
-            tracing::warn!(
-                event = "xberg_broker_response_flush_failed",
-                stage = "response_flush",
-                caller_pid,
-                code,
-                elapsed_ms = logging::elapsed_ms(started),
-                "共享代理响应已写出，但未确认客户端取走；保持原有返回语义"
-            );
-        }
-        Ok(())
+        write_pipe_response(reader.get_mut(), &response, caller_pid, started)
     })();
     match &result {
         Ok(()) if command == "keepalive" => tracing::debug!(
@@ -2238,6 +2343,18 @@ pub(super) fn serve() -> Result<(), String> {
     result
 }
 
+#[rustfmt::skip]
+#[warn(
+    warnings,
+    unused_must_use,
+    unreachable_patterns,
+    unreachable_pub,
+    unused_variables,
+    rust_2018_idioms,
+    explicit_outlives_requirements,
+    elided_lifetimes_in_paths,
+    single_use_lifetimes
+)]
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -2351,6 +2468,234 @@ mod tests {
         ));
     }
 
+    /// 覆盖 XB-08/XB-17：超时取消终态不冒充用户取消，进程异常仍保留原分类。
+    #[test]
+    fn timeout_cancel_terminal_retains_actual_reason() {
+        let cancelled = json!({"id":"request-1","ok":false,"error_kind":"cancelled","error":"cancelled"});
+        let timed_out = restore_timeout_kind(cancelled.clone(), true);
+        assert_eq!(timed_out["id"], "request-1");
+        assert_eq!(timed_out["ok"], false);
+        assert_eq!(timed_out["error_kind"], "timeout");
+        assert_eq!(timed_out["error"], "Xberg 请求已超时");
+        assert_eq!(restore_timeout_kind(cancelled.clone(), false), cancelled);
+        let exited = json!({"ok":false,"error_kind":"process_exited","error":"通信中断"});
+        assert_eq!(restore_timeout_kind(exited.clone(), true), exited);
+    }
+
+    struct SubmissionProbe<'a> {
+        cursor: std::io::Cursor<Vec<u8>>,
+        submitted: &'a AtomicBool,
+        acknowledgement_bytes: usize,
+    }
+
+    impl std::io::Read for SubmissionProbe<'_> {
+        fn read(&mut self, bytes: &mut [u8]) -> std::io::Result<usize> {
+            std::io::Read::read(&mut self.cursor, bytes)
+        }
+    }
+
+    impl BufRead for SubmissionProbe<'_> {
+        fn fill_buf(&mut self) -> std::io::Result<&[u8]> {
+            // 强制检查读终态之前已发布确认，而非读完终态后才置位。
+            assert_eq!(
+                self.submitted.load(Ordering::Acquire),
+                self.cursor.position() >= self.acknowledgement_bytes as u64,
+            );
+            self.cursor.fill_buf()
+        }
+
+        fn consume(&mut self, bytes: usize) {
+            self.cursor.consume(bytes);
+        }
+    }
+
+    /// 覆盖 XB-08/T-23：取消先发生时必须等待原请求登记确认；
+    /// 确认与终态连在同一读取缓冲区也不能漏掉确认或串错 ID。
+    #[test]
+    fn cancellation_waits_for_original_submission_before_terminal() {
+        let submitted = AtomicBool::new(false);
+        assert!(!submitted.load(Ordering::Acquire));
+        let acknowledgement = submission_acknowledgement(&json!({"id":"original"}), 7);
+        let terminal = json!({"id":"original","ok":false,"error_kind":"cancelled","jchtools_broker_protocol":BROKER_PROTOCOL});
+        let bytes = format!("{acknowledgement}\n{terminal}\n");
+        let mut reader = SubmissionProbe {
+            cursor: std::io::Cursor::new(bytes.into_bytes()),
+            submitted: &submitted,
+            acknowledgement_bytes: acknowledgement.to_string().len() + 1,
+        };
+        let received = read_broker_terminal(
+            &mut reader,
+            &json!("original"),
+            Some(&submitted),
+        ).unwrap();
+        assert!(submitted.load(Ordering::Acquire));
+        assert_eq!(received, terminal);
+        assert_eq!(received["error_kind"], "cancelled");
+    }
+
+    /// 覆盖 XB-08/XB-17：拒绝登记、引擎异常及其他请求的确认不产生取消资格。
+    #[test]
+    fn failed_or_unowned_submission_never_enables_cancellation() {
+        for kind in ["shared_runtime", "process_exited"] {
+            let submitted = AtomicBool::new(false);
+            let terminal = json!({"id":"original","ok":false,"error_kind":kind,"jchtools_broker_protocol":BROKER_PROTOCOL});
+            let received = read_broker_terminal(
+                &mut std::io::Cursor::new(format!("{terminal}\n").into_bytes()),
+                &json!("original"),
+                Some(&submitted),
+            ).unwrap();
+            assert_eq!(received, terminal);
+            assert!(!submitted.load(Ordering::Acquire));
+        }
+        let submitted = AtomicBool::new(false);
+        let unrelated = submission_acknowledgement(&json!({"id":"snapshot"}), 7);
+        assert!(read_broker_terminal(
+            &mut std::io::Cursor::new(format!("{unrelated}\n").into_bytes()),
+            &json!("original"),
+            Some(&submitted),
+        ).is_err());
+        assert!(!submitted.load(Ordering::Acquire));
+    }
+
+    /// 覆盖 XB-05/XB-08：登记确认不是终态，异常响应不能替代原请求终态。
+    #[test]
+    fn submission_confirmation_requires_one_matching_terminal() {
+        let acknowledgement = submission_acknowledgement(&json!({"id":"original"}), 7);
+        for next in [
+            acknowledgement.clone(),
+            json!({"id":"snapshot","ok":true,"jchtools_broker_protocol":BROKER_PROTOCOL}),
+        ] {
+            let submitted = AtomicBool::new(false);
+            let bytes = format!("{acknowledgement}\n{next}\n");
+            assert!(read_broker_terminal(
+                &mut std::io::Cursor::new(bytes.into_bytes()),
+                &json!("original"),
+                Some(&submitted),
+            ).is_err());
+            assert!(submitted.load(Ordering::Acquire));
+        }
+        let submitted = AtomicBool::new(false);
+        let old = json!({"id":"original","ok":true,"jchtools_broker_protocol":2});
+        assert!(read_broker_terminal(
+            &mut std::io::Cursor::new(format!("{old}\n").into_bytes()),
+            &json!("original"),
+            Some(&submitted),
+        ).is_err());
+        assert!(!submitted.load(Ordering::Acquire));
+    }
+
+    /// 覆盖 XB-08/XB-17：已结束或引擎异常的原请求仍交付真实终态；
+    /// 只有确认而没有终态的连接必须失败，不能以确认伪报完成。
+    #[test]
+    fn acknowledged_request_preserves_completion_and_engine_failure() {
+        let acknowledgement = submission_acknowledgement(&json!({"id":"original"}), 7);
+        for terminal in [
+            json!({"id":"original","ok":true,"markdown":"已完成","jchtools_broker_protocol":BROKER_PROTOCOL}),
+            json!({"id":"original","ok":false,"error_kind":"process_exited","jchtools_broker_protocol":BROKER_PROTOCOL}),
+        ] {
+            let submitted = AtomicBool::new(false);
+            let bytes = format!("{acknowledgement}\n{terminal}\n");
+            let received = read_broker_terminal(
+                &mut std::io::Cursor::new(bytes.into_bytes()),
+                &json!("original"),
+                Some(&submitted),
+            ).unwrap();
+            assert!(submitted.load(Ordering::Acquire));
+            assert_eq!(received, terminal);
+        }
+        let submitted = AtomicBool::new(false);
+        assert!(read_broker_terminal(
+            &mut std::io::Cursor::new(format!("{acknowledgement}\n").into_bytes()),
+            &json!("original"),
+            Some(&submitted),
+        ).is_err());
+        assert!(submitted.load(Ordering::Acquire));
+    }
+
+    /// 覆盖 XB-05/XB-08/XB-23：取消、控制、保活及能力查询仍只读取终态，
+    /// 不请求登记确认，也不能误吞本来的响应。
+    #[test]
+    fn query_and_control_exchanges_do_not_require_submission_acknowledgement() {
+        for id in ["cancel", "broker-state", "broker-stop", "broker-force-stop", "keepalive", "capabilities"] {
+            let terminal = json!({"id":id,"ok":true,"accepted":false,"commands":["cancel"],"jchtools_broker_protocol":BROKER_PROTOCOL});
+            let received = read_broker_terminal(
+                &mut std::io::Cursor::new(format!("{terminal}\n").into_bytes()),
+                &json!(id),
+                None,
+            ).unwrap();
+            assert_eq!(received, terminal);
+        }
+        let acknowledgement = submission_acknowledgement(&json!({"id":"query"}), 7);
+        assert!(read_broker_terminal(
+            &mut std::io::Cursor::new(format!("{acknowledgement}\n").into_bytes()),
+            &json!("query"),
+            None,
+        ).is_err());
+    }
+
+    /// 覆盖 XB-23：停止确认必须交到客户端，不能写完缓冲便释放状态锁并退出。
+    #[test]
+    fn background_stop_waits_for_client_to_consume_confirmation() -> Result<(), String> {
+        let name = format!(
+            r"\\.\pipe\jchtools-xberg-control-test-{}-{}",
+            std::process::id(),
+            logging::new_operation_id()
+        );
+        let pipe = create_pipe(&name)?;
+        let (written_send, written_receive) = mpsc::channel();
+        let (read_send, read_receive) = mpsc::channel();
+        let client = std::thread::spawn(move || -> Result<Value, String> {
+            let mut pipe = OpenOptions::new()
+                .read(true)
+                .write(true)
+                .open(name)
+                .map_err(|e| e.to_string())?;
+            write_json(&mut pipe, &json!({"request":{"id":"stop-test","command":"broker-stop"}}))?;
+            written_send.send(()).map_err(|e| e.to_string())?;
+            read_receive.recv().map_err(|e| e.to_string())?;
+            read_json(&mut BufReader::new(pipe))
+        });
+        // SAFETY: 测试独占的同步管道句柄有效，客户端提前连接也算连接成功。
+        let connected = unsafe {
+            windows_sys::Win32::System::Pipes::ConnectNamedPipe(
+                pipe.as_raw_handle().cast(),
+                std::ptr::null_mut(),
+            )
+        };
+        // SAFETY: 紧邻失败的连接调用读取错误码。
+        if connected == 0 && unsafe { GetLastError() } != ERROR_PIPE_CONNECTED {
+            let _ = read_send.send(());
+            let _ = client.join();
+            return Err("测试控制管道连接失败".into());
+        }
+        let (handled_send, handled_receive) = mpsc::channel();
+        let server = std::thread::spawn(move || {
+            let engine = Mutex::new(None);
+            let stopping = AtomicBool::new(false);
+            let result = handle(pipe, &engine, &stopping);
+            let _ = handled_send.send(result);
+        });
+        let written = written_receive.recv_timeout(QUERY_TIMEOUT);
+        let before_read = handled_receive.recv_timeout(Duration::from_millis(50));
+        // 先释放、回收全部线程，再断言，失败反证不得留下等待读取的线程。
+        let _ = read_send.send(());
+        let response = client.join().map_err(|_| "测试客户端线程退出")??;
+        let handled = if let Ok(result) = &before_read {
+            result.clone()
+        } else {
+            handled_receive
+                .recv_timeout(QUERY_TIMEOUT)
+                .map_err(|e| e.to_string())?
+        };
+        server.join().map_err(|_| "测试服务线程退出")?;
+        written.map_err(|e| e.to_string())?;
+        handled?;
+        assert!(matches!(before_read, Err(mpsc::RecvTimeoutError::Timeout)));
+        assert_eq!(response["id"], "stop-test");
+        assert_eq!(response["stopping"], true);
+        Ok(())
+    }
+
     #[test]
     fn duration_max_is_rejected_before_broker_start() {
         let error = request_via_broker(
@@ -2400,15 +2745,15 @@ mod tests {
                 logging::operation_span_with_id("xberg_runtime", "consume", "consume-response");
             let _entered = span.enter();
             let response = json!({"ok":false,"error_kind":"private-kind-sentinel","error":"private-error-sentinel","document":{"content":"private-document-sentinel"},"jchtools_xberg_pid":123});
-            let encoded = serde_json::to_vec(&response).unwrap();
+            let mut encoded = serde_json::to_vec(&response).unwrap();
+            encoded.push(b'\n');
             let consumed = read_json(&mut std::io::Cursor::new(encoded)).unwrap();
             assert_eq!(consumed, response, "日志不得改变引擎失败响应");
             log_response("client", "extract", &consumed, Instant::now(), None);
             let success = json!({"ok":true,"markdown":markdown});
-            let consumed = read_json(&mut std::io::Cursor::new(
-                serde_json::to_vec(&success).unwrap(),
-            ))
-            .unwrap();
+            let mut encoded = serde_json::to_vec(&success).unwrap();
+            encoded.push(b'\n');
+            let consumed = read_json(&mut std::io::Cursor::new(encoded)).unwrap();
             assert_eq!(consumed, success, "诊断不得改变成功响应");
             log_response("client", "transcribe", &consumed, Instant::now(), None);
             let invalid = b"{private-invalid-json-sentinel}\n";

@@ -97,6 +97,18 @@ pub fn select_best(attempts: &[RecognitionAttempt]) -> &RecognitionAttempt {
     &attempts[best]
 }
 
+#[rustfmt::skip]
+#[warn(
+    warnings,
+    unused_must_use,
+    unreachable_patterns,
+    unreachable_pub,
+    unused_variables,
+    rust_2018_idioms,
+    explicit_outlives_requirements,
+    elided_lifetimes_in_paths,
+    single_use_lifetimes
+)]
 #[cfg(test)]
 mod tests {
     // 覆盖 O-26：方向重试策略与平局决胜。

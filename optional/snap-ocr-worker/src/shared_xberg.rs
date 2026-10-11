@@ -123,15 +123,13 @@ fn classify_runtime_error(message: String) -> ClientError {
     if message.contains("请求已取消") {
         ClientError::Cancelled
     } else if message.contains("超时")
+        || message.contains("期限已到")
         || message.contains("未返回请求终态")
         || lower.contains("timeout")
         || lower.contains("timed out")
     {
         ClientError::Timeout
-    } else if message.contains("进程已退出")
-        || message.contains("响应线程退出")
-        || lower.contains("process exited")
-    {
+    } else if message.contains("进程已退出") || lower.contains("process exited") {
         ClientError::ProcessExited(None)
     } else {
         ClientError::Io(message)
@@ -202,15 +200,22 @@ impl SharedXbergClient {
                 peer_pid = response["jchtools_xberg_pid"].as_u64(),
                 "共享截图推理请求完成"
             ),
-            Err(error) => tracing::warn!(
+            Err(ClientError::Cancelled) => tracing::info!(
+                component = "snap_ocr_client",
+                event = "ocr_request_cancelled",
+                elapsed_ms = crate::logging::elapsed_ms(started),
+                "共享截图推理请求已取消"
+            ),
+            Err(error) => tracing::error!(
                 event = "ocr_request_failed",
+                stage = "request",
                 error_type = error.diagnostic_kind(),
                 exit_code = match error {
                     ClientError::ProcessExited(code) => *code,
                     _ => None,
                 },
                 elapsed_ms = crate::logging::elapsed_ms(started),
-                "共享截图推理请求未成功"
+                "共享截图推理请求失败"
             ),
         }
         outcome
@@ -231,7 +236,7 @@ impl SharedXbergClient {
             return Ok(None);
         }
         let text = response["text"].as_str().ok_or_else(|| {
-            tracing::warn!(
+            tracing::error!(
                 event = "ocr_response_invalid",
                 stage = "decode_text",
                 error_type = "missing_text",
@@ -274,6 +279,18 @@ impl SharedXbergClient {
     }
 }
 
+#[rustfmt::skip]
+#[warn(
+    warnings,
+    unused_must_use,
+    unreachable_patterns,
+    unreachable_pub,
+    unused_variables,
+    rust_2018_idioms,
+    explicit_outlives_requirements,
+    elided_lifetimes_in_paths,
+    single_use_lifetimes
+)]
 #[cfg(test)]
 mod tests {
     use super::{classify_backend_response, classify_runtime_error, ClientError};
@@ -316,6 +333,30 @@ mod tests {
         assert!(matches!(
             classify_runtime_error("共享 Xberg 进程已退出".into()),
             ClientError::ProcessExited(None)
+        ));
+    }
+
+    // 覆盖 XB-07：运行时连接和提交前的期限耗尽同样是超时，不是通信失败。
+    #[test]
+    fn classifies_runtime_deadline_expiry_as_timeout() {
+        for message in [
+            "共享 Xberg 代理连接期限已到",
+            "共享 Xberg 请求期限已到",
+            "Xberg 请求期限已到，未提交推理",
+        ] {
+            assert!(
+                matches!(classify_runtime_error(message.into()), ClientError::Timeout),
+                "期限耗尽必须归入超时：{message}"
+            );
+        }
+    }
+
+    // 覆盖 XB-07 / XB-17：本地响应线程退出只证明通信失败，不证明引擎死亡。
+    #[test]
+    fn response_thread_exit_is_not_engine_process_exit() {
+        assert!(matches!(
+            classify_runtime_error("共享 Xberg 响应线程退出".into()),
+            ClientError::Io(_)
         ));
     }
 

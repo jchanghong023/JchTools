@@ -16,19 +16,20 @@ fn observe<T>(
     tracing::info!(event = "settings_operation_started", "配置操作开始");
     let result = body();
     let elapsed_ms = crate::logging::elapsed_ms(started);
-    match &result {
-        Ok(_) => tracing::info!(
+    if result.is_ok() {
+        tracing::info!(
             event = "settings_operation_completed",
             elapsed_ms,
             "配置操作完成"
-        ),
-        Err(_) => tracing::error!(
+        );
+    } else {
+        tracing::error!(
             event = "settings_operation_failed",
             stage = operation,
             error_type = "configuration",
             elapsed_ms,
             "配置操作失败"
-        ),
+        );
     }
     result
 }
@@ -177,6 +178,11 @@ fn load_inner() -> Result<Option<PathBuf>, String> {
         sqlite_failure("migrate_directory", &e);
         format!("迁移 Xberg 配置到 SQLite 失败：{e}")
     })?;
+    tracing::info!(
+        component = "xberg_settings",
+        event = "settings_legacy_migration_written",
+        "旧版共享运行目录迁移写入完成"
+    );
     read().map(|value| value.map(PathBuf::from)).map_err(|e| {
         sqlite_failure("read_migrated_directory", &e);
         format!("读取迁移后的配置失败：{e}")
@@ -352,6 +358,18 @@ pub fn required() -> Result<PathBuf, String> {
     load()?.ok_or_else(|| "尚未配置 Xberg：请在设置页下载 Xberg 或保存已有目录".into())
 }
 
+#[rustfmt::skip]
+#[warn(
+    warnings,
+    unused_must_use,
+    unreachable_patterns,
+    unreachable_pub,
+    unused_variables,
+    rust_2018_idioms,
+    explicit_outlives_requirements,
+    elided_lifetimes_in_paths,
+    single_use_lifetimes
+)]
 #[cfg(test)]
 mod tests {
     use super::test_directory_override;

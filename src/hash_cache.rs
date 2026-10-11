@@ -41,7 +41,7 @@ impl HashCache {
                 "哈希缓存已打开"
             ),
             Err(error) => {
-                tracing::warn!(event = "hash_cache_open_failed", stage = "open_or_schema", sqlite_code = ?error.downcast_ref::<rusqlite::Error>().and_then(rusqlite::Error::sqlite_error_code), elapsed_ms, fallback = "recompute", "哈希缓存不可用，交由调用者退化")
+                tracing::warn!(event = "hash_cache_open_failed", stage = "open_or_schema", sqlite_code = ?error.downcast_ref::<rusqlite::Error>().and_then(rusqlite::Error::sqlite_error_code), elapsed_ms, fallback = "recompute", "哈希缓存不可用，交由调用者退化");
             }
         }
         result
@@ -63,15 +63,24 @@ impl HashCache {
 
     /// 查缓存哈希；键与 C-13 一致（文件标识、大小、修改时间三者必须全等）。
     pub fn lookup(&self, identity: &str, size: i64, mtime: i64) -> Result<Option<String>> {
+        let started = std::time::Instant::now();
+        tracing::debug!(
+            component = "hash_cache",
+            event = "hash_cache_lookup_started",
+            "哈希缓存查询开始"
+        );
         let result = self.lookup_inner(identity, size, mtime);
+        let elapsed_ms = crate::logging::elapsed_ms(started);
         match &result {
             Ok(value) => tracing::debug!(
+                component = "hash_cache",
                 event = "hash_cache_lookup_completed",
                 hit = value.is_some(),
+                elapsed_ms,
                 "哈希缓存查询完成"
             ),
             Err(error) => {
-                tracing::warn!(event = "hash_cache_lookup_failed", stage = "lookup", sqlite_code = ?error.downcast_ref::<rusqlite::Error>().and_then(rusqlite::Error::sqlite_error_code), fallback = "recompute", "哈希缓存查询失败")
+                tracing::warn!(component = "hash_cache", event = "hash_cache_lookup_failed", stage = "lookup", sqlite_code = ?error.downcast_ref::<rusqlite::Error>().and_then(rusqlite::Error::sqlite_error_code), fallback = "recompute", elapsed_ms, "哈希缓存查询失败");
             }
         }
         result
@@ -106,7 +115,7 @@ impl HashCache {
                 "哈希缓存批量保存完成"
             ),
             Err(error) => {
-                tracing::warn!(event = "hash_cache_store_failed", stage = "transaction", sqlite_code = ?error.downcast_ref::<rusqlite::Error>().and_then(rusqlite::Error::sqlite_error_code), elapsed_ms, "哈希缓存批量保存失败")
+                tracing::warn!(event = "hash_cache_store_failed", stage = "transaction", sqlite_code = ?error.downcast_ref::<rusqlite::Error>().and_then(rusqlite::Error::sqlite_error_code), elapsed_ms, "哈希缓存批量保存失败");
             }
         }
         result
@@ -139,6 +148,18 @@ impl HashCache {
     }
 }
 
+#[rustfmt::skip]
+#[warn(
+    warnings,
+    unused_must_use,
+    unreachable_patterns,
+    unreachable_pub,
+    unused_variables,
+    rust_2018_idioms,
+    explicit_outlives_requirements,
+    elided_lifetimes_in_paths,
+    single_use_lifetimes
+)]
 #[cfg(test)]
 mod tests {
     use super::{identity_is_degenerate, HashCache};

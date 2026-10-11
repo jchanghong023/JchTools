@@ -1,3 +1,16 @@
+#![warn(
+    warnings,
+    unused_must_use,
+    unreachable_patterns,
+    unreachable_pub,
+    unused_variables,
+    future_incompatible,
+    rust_2018_idioms,
+    explicit_outlives_requirements,
+    elided_lifetimes_in_paths,
+    single_use_lifetimes
+)]
+
 //! AH-08/AH-09/AH-A01：Windows参数、端口及独立进程SQLite恢复；不启动真实模型。
 #![allow(clippy::unwrap_used, clippy::expect_used)]
 use jchtools::acp_api::{
@@ -17,6 +30,7 @@ fn windows_arguments_round_trip_without_space_splitting() {
             r#"slashes\\"quoted"#,
         ],
         vec!["simple", "two words", "three\twords", "尾巴\\"],
+        vec!["one\rtwo", "three\nfour", "five\r\nsix"],
     ];
     for case in cases {
         let argv = case.into_iter().map(str::to_owned).collect::<Vec<_>>();
@@ -32,6 +46,14 @@ fn windows_arguments_round_trip_without_space_splitting() {
     assert_eq!(
         settings::parse_arguments("a\tb  c").unwrap(),
         vec!["a", "b", "c"]
+    );
+    assert_eq!(
+        settings::parse_arguments("one\rtwo three\nfour five\r\nsix").unwrap(),
+        vec!["one\rtwo", "three\nfour", "five\r\nsix"]
+    );
+    assert_eq!(
+        settings::parse_arguments(r#"a"b"" c d"#).unwrap(),
+        vec![r#"ab" c d"#]
     );
     assert!(settings::parse_arguments("").unwrap().is_empty());
 }

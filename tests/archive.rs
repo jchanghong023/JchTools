@@ -1,3 +1,16 @@
+#![warn(
+    warnings,
+    unused_must_use,
+    unreachable_patterns,
+    unreachable_pub,
+    unused_variables,
+    future_incompatible,
+    rust_2018_idioms,
+    explicit_outlives_requirements,
+    elided_lifetimes_in_paths,
+    single_use_lifetimes
+)]
+
 //! Real-engine tests; intentionally ignored without an explicit JCHTOOLS_TEST_7ZIP path.
 //! package-windows.ps1 runs these after downloading and verifying the bundled engine.
 //! 2026-09-18 两工具拆分后：解压用例走 engine::extract_run_at（X 分区），
@@ -81,7 +94,7 @@ impl ArchiveFixture {
         let prefix = format!("{}.", archive.file_name().unwrap().to_string_lossy());
         fs::read_dir(archive.parent().unwrap())
             .unwrap()
-            .filter_map(std::result::Result::ok)
+            .map(|entry| entry.expect("读取分卷夹具目录项失败"))
             .filter(|e| e.file_name().to_string_lossy().starts_with(&prefix))
             .count()
     }
@@ -116,7 +129,7 @@ fn organizer() -> Config {
         ..Config::default()
     }
 }
-// 覆盖 X-05/X-10/H-07：档案头确认精确 part 族卷数，不吸入旧式相似兄弟卷。
+// 覆盖 X-05/X-10/H-07：精确 part 族卷集完整删源，非精确旧式后缀旁观文件保留。
 #[test]
 #[ignore = "Requires explicitly provided real 7-Zip engine"]
 fn successful_cleanup_uses_rar_header_volume_naming() {
@@ -133,13 +146,13 @@ fn successful_cleanup_uses_rar_header_volume_naming() {
     fs::write(f.root.join("report.part1.rar"), first).unwrap();
     fs::write(f.root.join("report.part2.rar"), last).unwrap();
     fs::write(
-        f.root.join("report.part1.r00"),
+        f.root.join("report.part1.r000"),
         b"unrelated old-style sibling",
     )
     .unwrap();
     let result = f.run(config());
     assert_eq!(
-        fs::read(f.root.join("report.part1.r00")).unwrap(),
+        fs::read(f.root.join("report.part1.r000")).unwrap(),
         b"unrelated old-style sibling"
     );
     assert!(!f.root.join("report.part1.rar").exists());
@@ -149,20 +162,20 @@ fn successful_cleanup_uses_rar_header_volume_naming() {
     assert_eq!(result.summary.errors, 0);
 }
 
-// 覆盖 X-05, H-07：看似分卷的名字不等于引擎实际读取过的分卷。
+// 覆盖 X-05/X-09/X-10：备份后缀和同名目录不是实际 part 族文件，不得纳入删源集合。
 #[test]
 #[ignore = "Requires explicitly provided real 7-Zip engine"]
 fn successful_cleanup_preserves_unused_volume_named_siblings() {
     let f = ArchiveFixture::new();
     fs::write(f.input.join("payload.txt"), b"complete payload").unwrap();
     f.archive(&f.root.join("report.part1.rar"), "-tzip");
-    fs::write(f.root.join("report.part2.rar"), b"unrelated user file").unwrap();
+    fs::write(f.root.join("report.part2.rar.bak"), b"unrelated user file").unwrap();
     fs::create_dir(f.root.join("report.part3.rar")).unwrap();
     let result = f.run(config());
     assert_eq!(result.summary.archives_ok, 1);
     assert!(!f.root.join("report.part1.rar").exists());
     assert_eq!(
-        fs::read(f.root.join("report.part2.rar")).unwrap(),
+        fs::read(f.root.join("report.part2.rar.bak")).unwrap(),
         b"unrelated user file"
     );
     assert!(f.root.join("report.part3.rar").is_dir());
@@ -227,18 +240,14 @@ fn non_whitelisted_containers_stay_untouched_beside_a_real_archive() {
         .join("System32")
         .join("makecab.exe");
     let cab = f.root.join("visproww.cab");
-    if makecab.is_file() {
-        let status = Command::new(&makecab)
-            .current_dir(&f.input)
-            .args(["/D", "CompressionType=LZX", "payload.txt"])
-            .arg(&cab)
-            .status()
-            .unwrap();
-        assert!(status.success(), "makecab 应能生成 CAB");
-    } else {
-        // 无 makecab（非 Windows 环境）时退化为 ZIP 字节改名，仍然是「引擎可打开」的容器。
-        fs::copy(f.root.join("keep.zip"), &cab).unwrap();
-    }
+    // 缺少 makecab 属于夹具准备失败，不能用改后缀的 ZIP 冒充真实 CAB 验收。
+    let status = Command::new(&makecab)
+        .current_dir(&f.input)
+        .args(["/D", "CompressionType=LZX", "payload.txt"])
+        .arg(&cab)
+        .status()
+        .unwrap();
+    assert!(status.success(), "makecab 应能生成 CAB");
     let cab_bytes = fs::read(&cab).unwrap();
     // 测试前提：引擎确实能打开这个 CAB——白名单判定不依赖内容类型探测。
     let listed = Command::new(&f.engine)
@@ -565,11 +574,23 @@ fn equal_content_archives_extract_both_and_classify_is_stable() {
         b"beta member\n",
         "两个包解出同名成员：第二个按 H-07 改名落盘，内容相同也不跳过"
     );
+    // 归档会恢复成员的 mtime；后解出不代表时间更新。显式建立 C-03 的严格顺序，
+    // 不依赖包处理顺序、时钟精度或引擎是否保留时间。
+    filetime::set_file_mtime(
+        f.root.join("beta.txt"),
+        filetime::FileTime::from_unix_time(100, 0),
+    )
+    .unwrap();
+    filetime::set_file_mtime(
+        f.root.join("beta (1).txt"),
+        filetime::FileTime::from_unix_time(200, 0),
+    )
+    .unwrap();
     // 整理：C-05 固定归类「大类」一级恒开启。
     let org = organizer();
     let task = engine::prepare_at(&f.root, org.clone(), Context::default(), &f.state).unwrap();
     ArchiveFixture::apply(&task);
-    // C-03：保留者是修改时间最新的成员——后解出的 beta (1).txt 更新，保留它并按
+    // C-03：上方显式设置 beta (1).txt 的修改时间较新，保留它并按
     // C-08 清理副本标记，最终名 beta_1.txt；beta.txt 作为重复副本被永久删除。
     let classified = "文档/beta_1.txt".to_string();
     assert!(
@@ -702,8 +723,8 @@ fn stored_zip(entries: &[(&[u8], &[u8])]) -> Vec<u8> {
 #[test]
 #[ignore = "Requires explicitly provided real 7-Zip engine"]
 fn zip_with_duplicate_entries_extracts_both_via_auto_rename() {
-    // 同名两条目（内容与大小都不同）：7z 以 -aou 解压时会把第二个同名条目自动改名落盘，
-    // 两个内容都保留；若引擎改为覆盖，总量校验（13+18 ≠ 13）会失败并隔离原包。
+    // 同名两条目（内容与大小都不同）都必须落盘，正式目标冲突按 H-07/X-04
+    // 只给新文件主体加最小未占用序号，不把引擎临时区的改名格式当作产品契约。
     let f = ArchiveFixture::new();
     fs::write(
         f.root.join("dup.zip"),
@@ -718,14 +739,44 @@ fn zip_with_duplicate_entries_extracts_both_via_auto_rename() {
     assert_eq!(result.summary.archives_ok, 1);
     assert_eq!(
         result.summary.extracted, 2,
-        "两个同名条目都应落盘（-aou 自动改名）"
+        "两个同名条目都应完整落盘（X-04）"
     );
-    // dup_1.txt 的改名格式依赖 7-Zip -aou 的实现；引擎版本由 fetch-7zip.ps1 固定，行为稳定。
+    // 正式落点遵守 H-07 的 `主体 (N).后缀`，与 7-Zip 临时区内部名称无关。
     assert_eq!(fs::read(f.root.join("dup.txt")).unwrap(), b"first-10bytes");
     assert_eq!(
-        fs::read(f.root.join("dup_1.txt")).unwrap(),
+        fs::read(f.root.join("dup (1).txt")).unwrap(),
         b"second-payload-16B"
     );
+}
+
+// 覆盖 H-07/X-04：相同大小的重复成员不丢失，真实 `_1` 文件名不被当作引擎改名。
+#[test]
+#[ignore = "Requires explicitly provided real 7-Zip engine"]
+fn duplicate_members_preserve_literal_engine_style_names_and_existing_files() {
+    let f = ArchiveFixture::new();
+    fs::write(f.root.join("same.txt"), b"old-original").unwrap();
+    fs::write(f.root.join("same (1).txt"), b"old-numbered").unwrap();
+    fs::write(f.root.join("same_1.txt"), b"old-literal").unwrap();
+    fs::write(
+        f.root.join("duplicate.zip"),
+        stored_zip(&[
+            (b"same.txt", b"AAA"),
+            (b"same.txt", b"BBB"),
+            (b"same_1.txt", b"LLL"),
+        ]),
+    )
+    .unwrap();
+    let result = f.run(config());
+    assert_eq!(result.summary.archives_failed, 0);
+    assert_eq!(result.summary.archives_ok, 1);
+    assert_eq!(result.summary.extracted, 3);
+    assert_eq!(fs::read(f.root.join("same.txt")).unwrap(), b"old-original");
+    assert_eq!(fs::read(f.root.join("same (1).txt")).unwrap(), b"old-numbered");
+    assert_eq!(fs::read(f.root.join("same_1.txt")).unwrap(), b"old-literal");
+    assert_eq!(fs::read(f.root.join("same (2).txt")).unwrap(), b"AAA");
+    assert_eq!(fs::read(f.root.join("same (3).txt")).unwrap(), b"BBB");
+    assert_eq!(fs::read(f.root.join("same_1 (1).txt")).unwrap(), b"LLL");
+    assert!(!f.root.join("duplicate.zip").exists());
 }
 // 覆盖 X-08
 #[test]
@@ -743,7 +794,7 @@ fn gbk_filename_zip_extracts_without_data_loss() {
     assert_eq!(result.summary.extracted, 1);
     let extracted: Vec<_> = fs::read_dir(&f.root)
         .unwrap()
-        .filter_map(std::result::Result::ok)
+        .map(|entry| entry.expect("读取解压结果目录项失败"))
         .map(|e| e.path())
         .filter(|p| p.is_file() && p.extension().is_some_and(|x| x.eq_ignore_ascii_case("txt")))
         .collect();
@@ -874,10 +925,8 @@ fn long_path_hidden_member_is_stripped_and_archive_completes() {
     );
 }
 
-// 覆盖 X-05, S-01（回归 2026-09-19 返工：zip 的条目级 Volume Index 无条件输出，
-// 单卷包也全为 0，不能作分卷佐证；佐证必须取档案级属性块）。真实引擎下完整独立的
-// report.zip 旁边残留的同主干 report.z01 是无辜文件：成功路径只能删除主体自身，
-// 不得移动、改名或删除这一旁观文件。
+// 覆盖 X-05/X-09/X-10：精确旧式 zip 尾卷为 .z01～.z99，.z001 不属于该卷族。
+// 引擎能够完整打开 report.zip 不改变命名识别边界；非精确相似后缀必须原样保留。
 #[test]
 #[ignore = "Requires explicitly provided real 7-Zip engine"]
 fn real_engine_standalone_zip_deletes_source_and_keeps_stale_z_sibling() {
@@ -886,7 +935,7 @@ fn real_engine_standalone_zip_deletes_source_and_keeps_stale_z_sibling() {
     fs::write(f.input.join("two.txt"), b"second member").unwrap();
     f.archive(&f.root.join("report.zip"), "-tzip");
     fs::write(
-        f.root.join("report.z01"),
+        f.root.join("report.z001"),
         b"stale fragment of a replaced split set",
     )
     .unwrap();
@@ -903,21 +952,22 @@ fn real_engine_standalone_zip_deletes_source_and_keeps_stale_z_sibling() {
         "成功原包按 X-05 永久删除"
     );
     assert!(
-        f.root.join("report.z01").exists(),
-        "真实引擎下无档案级多卷佐证的同主干 .z01 是无辜文件，不得被移动或删除"
+        f.root.join("report.z001").exists(),
+        "非精确 .z001 后缀不是旧式 zip 尾卷，不得被移动或删除（X-09/X-10）"
     );
     assert_eq!(
         result.summary.deleted, 1,
-        "删除集合只含主体自身：无辜 .z01 不得计入"
+        "删除集合只含主体自身：非精确 .z001 不得计入"
+    );
+    assert_eq!(
+        fs::read(f.root.join("report.z001")).unwrap(),
+        b"stale fragment of a replaced split set"
     );
 }
 
-// 覆盖 X-08, S-01（回归 2026-09-19：注释内 } 行绕过注释跳过——真实引擎变体）。
-// 7-Zip 把档案注释以 {...} 原样输出，注释内容可含 } 行；若 } 只结束注释模式
-// 不结束档案头块，其后的伪造键会被当作头块键解析。真实输出中 Comment 是头块
-// 最后一个字段，} 结束注释时一并结束头块是 fail-closed 的。
-// 这里的可观察后果是展开比例的分母：伪造键若能证实「多卷」，旁置的大号同主干
-// 兄弟卷就会被算进分母，比例上限随之放宽，恶意档案可借此绕过 X-08 的展开防护。
+// 覆盖 X-08/X-10/S-01：归档注释内的伪造卷数不能扩张 X-10 的实际输入卷集合。
+// .z001～.z008 不匹配两位旧式 zip 尾卷，不能因为注释声称多卷而吸入比例分母，
+// 也不能被删源或隔离；本例分母只有 report.zip 自身。
 #[test]
 #[ignore = "Requires explicitly provided real 7-Zip engine"]
 fn real_engine_brace_in_comment_cannot_inflate_ratio_denominator() {
@@ -953,14 +1003,11 @@ Volume Index = 0
 Volumes = 9
 ",
     );
-    // 旁置的大号同主干兄弟卷 z01～z08 全部真实存在：这样「伪造键被采纳」的回归态
-    // 才有可断言的差异——分母被放大 → 比例检查通过 → 包被解开并删源；正确态
-    // （} 连同注释一并结束头块，伪造键被忽略）分母只计主体，比例必然超限。
-    // 若只旁置 z01，回归态会在 actual_paths 因缺失卷报错整包失败，与本测试断言的
-    // 「失败并隔离」相同，用例就检不出它声称守护的回归。
+    // 三位 z 后缀是白名单之外的旁观文件；若改用 .z01～.z08，
+    // 按 X-10 就会真实归组，分母理应包含它们，不能继续断言只计主体。
     for index in 1..=8 {
         fs::write(
-            f.root.join(format!("report.z{index:02}")),
+            f.root.join(format!("report.z{index:03}")),
             vec![0u8; 100_000],
         )
         .unwrap();
@@ -975,12 +1022,21 @@ Volumes = 9
     assert_eq!(
         result.summary.archives_failed, 1,
         "分母只应计主体（{packed} 字节）：12 KiB 声明量必然超过比例上限；\
-         若伪造的 Volumes=9 被采纳，真实存在的 z01～z08 会把分母放大到比例检查通过"
+         注释伪造的 Volumes=9 不得把非精确后缀文件计入分母"
     );
     assert!(
         f.root.join("解压失败/report.zip").is_file(),
         "判超限的包移入「解压失败」（X-06）"
     );
+    assert_eq!(result.summary.archives_ok, 0);
+    assert_eq!(result.summary.deleted, 0, "超限包及旁观文件均不得删除");
+    for index in 1..=8 {
+        assert_eq!(
+            fs::read(f.root.join(format!("report.z{index:03}"))).unwrap(),
+            vec![0u8; 100_000],
+            "非精确卷后缀旁观文件须原样留在原处（X-09/X-10）"
+        );
+    }
 }
 
 // ===== 2026-09-22 合同整改：解压语义回归（H-07 / X-01 / X-04 / X-05 / X-06 / X-07 / X-08 / H-06）=====
@@ -1120,13 +1176,47 @@ fn member_targeting_existing_git_tree_is_renamed_and_tree_untouched() {
     assert!(!f.root.join("解压失败/one.zip").exists());
 }
 
-// 覆盖 H-06（回归：压缩包内某目录含 .git 时，该子树连同 .git 的兄弟条目整树不解出）
+// 覆盖 S-04 / H-07 / X-04 / X-05：旧链接前缀不是保留命名空间或删除授权。
+#[test]
+#[ignore = "Requires explicitly provided real 7-Zip engine"]
+fn old_link_prefix_members_are_extracted_without_touching_existing_files() {
+    let f = ArchiveFixture::new();
+    let filename = ".jchtools-link-user.txt";
+    fs::write(f.root.join(filename), b"existing user bytes").unwrap();
+    fs::write(f.input.join(filename), b"incoming member bytes").unwrap();
+    fs::create_dir(f.input.join(".jchtools-link-folder")).unwrap();
+    fs::write(
+        f.input.join(".jchtools-link-folder/notes.txt"),
+        b"ordinary nested member",
+    )
+    .unwrap();
+    f.pack(
+        &f.root.join("one.zip"),
+        &["-tzip"],
+        &[filename, ".jchtools-link-folder"],
+    );
+    let result = f.run(config());
+    assert_eq!(fs::read(f.root.join(filename)).unwrap(), b"existing user bytes");
+    assert_eq!(
+        fs::read(f.root.join(".jchtools-link-user (1).txt")).unwrap(),
+        b"incoming member bytes"
+    );
+    assert_eq!(
+        fs::read(f.root.join(".jchtools-link-folder/notes.txt")).unwrap(),
+        b"ordinary nested member"
+    );
+    assert_eq!(result.summary.archives_ok, 1);
+    assert_eq!(result.summary.archives_failed, 0);
+    assert_eq!(result.summary.deleted, 1);
+    assert!(!f.root.join("one.zip").exists(), "完整落盘后才允许删源");
+}
+
+// 覆盖 H-06 / X-05 / X-06：入包 Git 子树固定整树排除，未全部落盘不得删源。
 #[test]
 #[ignore = "Requires explicitly provided real 7-Zip engine"]
 fn git_subtree_members_are_skipped_as_a_whole() {
     let f = ArchiveFixture::new();
-    // project/ 直接含 .git：project 整树（含 .git 的兄弟文件）都不得解出；
-    // normal.txt 不属于该子树，照常解压。
+    // 完整清单中的 .git 建立固定边界：兄弟成员、后代及嵌套包同样不合入。
     fs::create_dir_all(f.input.join("project/.git")).unwrap();
     fs::create_dir_all(f.input.join("project/src")).unwrap();
     fs::write(
@@ -1140,14 +1230,15 @@ fn git_subtree_members_are_skipped_as_a_whole() {
         b"descendant of the git tree",
     )
     .unwrap();
+    fs::write(f.input.join("project/inner.zip"), b"must not be decoded").unwrap();
     fs::write(f.input.join("normal.txt"), b"normal member").unwrap();
     f.pack(
         &f.root.join("one.zip"),
         &["-tzip"],
         &["project", "normal.txt"],
     );
-    // 显式清空排除规则：H-06 的 Git 排除不是「默认排除串碰巧命中」，不得依赖用户
-    // 可改的 glob 规则（.git/** 在默认串里，但用户可自行删除）。
+    let original_archive = fs::read(f.root.join("one.zip")).unwrap();
+    // H-06 的 Git 整树保护不依赖用户 glob。
     let cfg = Config {
         exclusions: String::new(),
         ..config()
@@ -1155,15 +1246,7 @@ fn git_subtree_members_are_skipped_as_a_whole() {
     let result = f.run(cfg);
     assert!(
         !f.root.join("project").exists(),
-        "含 .git 的目录及全部后代必须整树排除（H-06：不解压）"
-    );
-    assert!(
-        !f.root.join("project/README.md").exists(),
-        ".git 的兄弟条目同样属于被排除的子树（H-06：该目录及全部后代）"
-    );
-    assert!(
-        !f.root.join("project/src/notes.txt").exists(),
-        ".git 子树的后代不得解出（H-06）"
+        "Git 子树整体不合入，不能只跳过标记而把兄弟或后代写出"
     );
     assert_eq!(
         fs::read(f.root.join("normal.txt")).unwrap(),
@@ -1172,11 +1255,16 @@ fn git_subtree_members_are_skipped_as_a_whole() {
     );
     assert_eq!(
         result.summary.archives_ok, 0,
-        "有成员被跳过时不得宣称已全部解压（X-06/H-04）"
+        "Git 成员未落盘，不能把安全子集冒报整包成功"
     );
-    assert!(
-        f.root.join("解压失败/one.zip").is_file(),
-        "未完全解开的原包移入「解压失败」且不删除（X-06）"
+    assert_eq!(result.summary.archives_failed, 1);
+    assert_eq!(result.summary.archives_quarantined, 1);
+    assert_eq!(result.summary.deleted, 0, "不满足 X-05 时不得删源");
+    assert!(!f.root.join("one.zip").exists(), "失败原包按 X-06 隔离");
+    assert_eq!(
+        fs::read(f.root.join("解压失败/one.zip")).unwrap(),
+        original_archive,
+        "所有受保护成员仍在完整原包中，不能被丢弃"
     );
 }
 

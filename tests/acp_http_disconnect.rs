@@ -1,3 +1,16 @@
+#![warn(
+    warnings,
+    unused_must_use,
+    unreachable_patterns,
+    unreachable_pub,
+    unused_variables,
+    future_incompatible,
+    rust_2018_idioms,
+    explicit_outlives_requirements,
+    elided_lifetimes_in_paths,
+    single_use_lifetimes
+)]
+
 //! AH-04/AH-12：HTTP/1.1 预读管线字节不得遮蔽首事件/完成前的断连取消。
 //! 真实 TCP → Axum 产品入口 → 官方 SDK 合成 Agent；不是实际模型验收。
 #![allow(clippy::unwrap_used, clippy::expect_used)]
@@ -6,12 +19,12 @@ mod fixture;
 
 use fixture::{
     consumer::{audit, body, completion, release, wait_event, Http, Server},
-    Plan,
+    Plan, MODEL_A, MODEL_B,
 };
 use serde_json::Value;
 use std::{
     fmt::Write as _,
-    io::{Read, Write},
+    io::{BufRead, BufReader, Read, Write},
     net::{Shutdown, TcpStream},
     path::PathBuf,
     thread,
@@ -183,24 +196,93 @@ fn pipelined_disconnect_before_json_completion_consumes_acp_cancel() {
     assert_buffered_disconnect_cancels_only_its_turn(false);
 }
 
+// 逐条按 HTTP 消息边界解析，不能仅数状态行/JSON 片段就将截断或串用的响应当成功。
+fn read_pipeline_json(reader: &mut BufReader<TcpStream>) -> Value {
+    let mut line = String::new();
+    assert!(reader.read_line(&mut line).unwrap() > 0, "缺少管线响应");
+    assert_eq!(line, "HTTP/1.1 200 OK\r\n");
+    let mut length = None;
+    let mut chunked = false;
+    loop {
+        line.clear();
+        assert!(reader.read_line(&mut line).unwrap() > 0, "HTTP 标头被截断");
+        if line == "\r\n" {
+            break;
+        }
+        let (name, value) = line.split_once(':').unwrap();
+        if name.eq_ignore_ascii_case("content-length") {
+            assert!(length.is_none(), "重复 Content-Length");
+            length = Some(value.trim().parse::<usize>().unwrap());
+        } else if name.eq_ignore_ascii_case("transfer-encoding") {
+            assert!(!chunked, "重复 Transfer-Encoding");
+            assert!(value.trim().eq_ignore_ascii_case("chunked"));
+            chunked = true;
+        }
+    }
+    assert!(!chunked || length.is_none(), "响应具有冲突的消息边界");
+    let mut body = Vec::new();
+    if chunked {
+        loop {
+            line.clear();
+            assert!(reader.read_line(&mut line).unwrap() > 0, "缺少 HTTP chunk");
+            let size =
+                usize::from_str_radix(line.trim().split(';').next().unwrap(), 16).unwrap();
+            if size == 0 {
+                loop {
+                    line.clear();
+                    assert!(reader.read_line(&mut line).unwrap() > 0, "chunk 尾部被截断");
+                    if line == "\r\n" {
+                        break;
+                    }
+                    assert!(line.contains(':'), "无效的 HTTP trailer");
+                }
+                break;
+            }
+            let offset = body.len();
+            body.resize(offset + size, 0);
+            reader.read_exact(&mut body[offset..]).unwrap();
+            let mut crlf = [0; 2];
+            reader.read_exact(&mut crlf).unwrap();
+            assert_eq!(&crlf, b"\r\n");
+        }
+    } else {
+        body.resize(length.expect("管线 JSON 响应缺少消息边界"), 0);
+        reader.read_exact(&mut body).unwrap();
+    }
+    serde_json::from_slice(&body).unwrap()
+}
+
 /// AH-04/AH-13：正常可读不能误判断连；观察器不得消费下一条真实管线请求。
 #[test]
 fn live_pipeline_preserves_every_request_without_cancelling() {
     let server = Server::start(env!("CARGO_BIN_EXE_jchtools-acp-fixture"), "normal");
     let plan = Plan::new("text");
-    let mut socket = pipeline_chat(server.port, &plan, false, 32);
+    let socket = pipeline_chat(server.port, &plan, false, 32);
     socket
         .set_read_timeout(Some(Duration::from_secs(15)))
         .unwrap();
-    let mut responses = String::new();
-    socket.read_to_string(&mut responses).unwrap();
+    let mut reader = BufReader::new(socket);
+    let response = read_pipeline_json(&mut reader);
+    assert_eq!(response["model"], MODEL_A);
+    assert_eq!(completion(&response), plan.text());
+    for _ in 0..32 {
+        let models = read_pipeline_json(&mut reader);
+        assert_eq!(models["object"], "list");
+        let mut ids = models["data"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|model| model["id"].as_str().unwrap())
+            .collect::<Vec<_>>();
+        ids.sort_unstable();
+        assert_eq!(ids, vec![MODEL_A, MODEL_B]);
+    }
+    let mut extra = [0; 1];
+    assert_eq!(reader.read(&mut extra).unwrap(), 0, "出现额外管线响应");
     let started = wait_event(&server.root, "started", &plan.tag);
     wait_event(&server.root, "completed", &plan.tag);
     let events = audit(&server.root);
     server.shutdown();
-    assert_eq!(responses.matches("HTTP/1.1 200 OK\r\n").count(), 33);
-    assert_eq!(responses.matches("\"object\":\"list\"").count(), 32);
-    assert!(responses.contains(&plan.text()));
     assert_eq!(
         events
             .iter()

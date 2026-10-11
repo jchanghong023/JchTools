@@ -280,8 +280,8 @@ fn request_acp_action(ui: &AppWindow, state: &Rc<RefCell<State>>, command: AcpCo
 }
 
 fn can_request_acp_stop(ui: &AppWindow, state: &State) -> bool {
-    !state.acp_explicit_stopped
-        && ui.get_acp_status_known()
+    // 退出意图只禁止自动重启；IPC 失败后确认后台仍在运行时，允许用户重试退出。
+    ui.get_acp_status_known()
         && !ui.get_acp_service_pid().is_empty()
         && (!ui.get_acp_request_pending()
             || state
@@ -582,6 +582,37 @@ struct RuleSpec {
     #[serde(default)]
     unit: Option<String>,
 }
+#[derive(Default)]
+struct ConvertCounts {
+    total: Option<usize>,
+    completed: usize,
+    success: usize,
+    partial: usize,
+    failed: usize,
+    skipped: usize,
+}
+impl ConvertCounts {
+    fn progress(&self) -> f32 {
+        let Some(total) = self.total else {
+            return -1.0;
+        };
+        if total == 0 {
+            return 1.0;
+        }
+        // 显示用途按完整计数求比例，避免大批次经窄整数饱和后失真。
+        #[allow(clippy::cast_possible_truncation, clippy::cast_precision_loss)]
+        let progress = (self.completed as f64 / total as f64).clamp(0.0, 1.0) as f32;
+        progress
+    }
+
+    fn note(&self) -> String {
+        self.total.map_or_else(
+            || "正在扫描".to_string(),
+            |total| format!("{} / {total}", self.completed),
+        )
+    }
+}
+
 struct State {
     config: Config,
     specs: Vec<RuleSpec>,
@@ -634,11 +665,15 @@ struct State {
     convert_preparing: bool,
     /// 预检通过后交给真正转换 worker 的参数。
     convert_pending_options: Option<markdown::Options>,
+    /// 由转换事件推进的实际完成计数，不从显示文案反向解析。
+    convert_counts: ConvertCounts,
     /// 转 Markdown 组件检查代际；旧检查结果不得覆盖新初始化/检查状态。
     convert_readiness_generation: u64,
     /// S1-05：当前代的就绪结果在任务运行中被丢弃（busy 时无法上屏）——任务终态
     /// （CONVERTER_DONE/FAIL 收尾）须补查一次，页面不得长期停留过期就绪状态。
     convert_readiness_missed: bool,
+    /// 设置操作代际：启动时的旧配置读取不得覆盖之后保存的配置或错误。
+    settings_generation: u64,
     /// 转 Markdown 启动前场景预检代际。
     convert_preflight_generation: u64,
     /// 截图 OCR（O 分区）：可选组件初始化的取消信号（O-06 取消/重试语义）。
@@ -1825,19 +1860,20 @@ fn spawn_event_worker(
             Ok(Err(error)) => Event::Failed(format!("{error:#}")),
             Err(_) => Event::Failed(panic_text.to_string()),
         };
-        match &event {
-            Event::Failed(_) => tracing::error!(
+        if matches!(&event, Event::Failed(_)) {
+            tracing::error!(
                 event = "gui_worker_failed",
                 stage = "task",
                 error_type = "worker_result",
                 elapsed_ms = crate::logging::elapsed_ms(started),
                 "后台任务失败"
-            ),
-            _ => tracing::info!(
+            );
+        } else {
+            tracing::info!(
                 event = "gui_worker_completed",
                 elapsed_ms = crate::logging::elapsed_ms(started),
                 "后台任务结果已生成"
-            ),
+            );
         }
         if out.send(event).is_err() {
             tracing::warn!(
@@ -2344,7 +2380,11 @@ fn spawn_md_worker(
         let span = crate::logging::operation_span("gui_worker", "md_task");
         let _entered = span.enter();
         let started = Instant::now();
-        tracing::info!(event = "gui_md_worker_started", "MD 后台任务开始");
+        tracing::info!(
+            component = "gui_worker",
+            event = "gui_md_worker_started",
+            "MD 后台任务开始"
+        );
         let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(body))
             .unwrap_or_else(|_| Err("MD 整理后台操作意外退出；未完成的输出请手动检查".to_string()));
         let event = match result {
@@ -2354,18 +2394,42 @@ fn spawn_md_worker(
             }
             Err(text) => Event::Failed(text),
         };
-        let outcome = match &event {
-            Event::Failed(_) => "failed_event",
-            Event::MdNeedsConfirm(_) => "confirmation_required",
-            _ => "completed",
-        };
-        tracing::info!(
-            event = "gui_md_worker_completed",
-            outcome,
-            elapsed_ms = crate::logging::elapsed_ms(started),
-            "MD 后台任务结果已生成"
-        );
-        let _ = out.send(event);
+        match &event {
+            Event::Failed(_) => tracing::error!(
+                component = "gui_worker",
+                event = "gui_worker_failed",
+                operation = "md_task",
+                stage = "task",
+                error_type = "worker_result",
+                elapsed_ms = crate::logging::elapsed_ms(started),
+                "MD 后台任务失败"
+            ),
+            Event::MdNeedsConfirm(_) => tracing::info!(
+                component = "gui_worker",
+                event = "gui_md_worker_completed",
+                outcome = "confirmation_required",
+                elapsed_ms = crate::logging::elapsed_ms(started),
+                "MD 后台任务等待覆盖确认"
+            ),
+            _ => tracing::info!(
+                component = "gui_worker",
+                event = "gui_md_worker_completed",
+                outcome = "completed",
+                elapsed_ms = crate::logging::elapsed_ms(started),
+                "MD 后台任务结果已生成"
+            ),
+        }
+        if out.send(event).is_err() {
+            tracing::warn!(
+                component = "gui_worker",
+                event = "gui_worker_delivery_failed",
+                operation = "md_task",
+                stage = "event_send",
+                error_type = "gui_closed",
+                elapsed_ms = crate::logging::elapsed_ms(started),
+                "MD 后台结果无法投递到已关闭界面"
+            );
+        }
     });
 }
 
@@ -3644,30 +3708,33 @@ impl UiPump {
         } else if let Some(progress) = text.strip_prefix("CONVERTER_INIT|") {
             ui.set_convert_status(progress.into());
         } else if let Some(rest) = text.strip_prefix("CONVERTER_STARTED|") {
-            ui.set_convert_progress(-1.0);
-            ui.set_convert_progress_note("正在转换".into());
-            ui.set_convert_metrics(format!("待处理 {rest} 个文件").into());
+            if let Ok(total) = rest.parse::<usize>() {
+                let mut s = self.state.borrow_mut();
+                s.convert_counts = ConvertCounts {
+                    total: Some(total),
+                    ..ConvertCounts::default()
+                };
+                ui.set_convert_progress(s.convert_counts.progress());
+                ui.set_convert_progress_note(s.convert_counts.note().into());
+                ui.set_convert_metrics(format!("待处理 {total} 个文件").into());
+            }
         } else if let Some(rest) = text.strip_prefix("CONVERTER_FILE_STARTED|") {
             let mut fields = rest.splitn(4, '|');
             let index = fields.next().and_then(|v| v.parse::<usize>().ok());
             let total = fields.next().and_then(|v| v.parse::<usize>().ok());
             let relative = fields.next().unwrap_or_default();
             if let (Some(index), Some(total)) = (index, total) {
-                // 先按 f64 求比例再写进度属性（保持 0.0-1.0 钳制）：
-                // 分子分母各自 u16 饱和后再相除，会让 >65535 文件的
-                // 大批次进度失真为 1.0（仅显示口径，不影响统计）。
-                // [quality-baseline approved 2026-10-03] 显示用途转换，经用户裁定保留
-                #[allow(clippy::cast_possible_truncation, clippy::cast_precision_loss)]
-                let progress = if total == 0 {
-                    -1.0
-                } else {
-                    (index.saturating_sub(1)) as f64 / total as f64
-                }
-                .clamp(0.0, 1.0) as f32;
-                ui.set_convert_progress(progress);
-                ui.set_convert_progress_note(format!("{index} / {total}").into());
-                // T-22：记录当前文件，供 100ms 周期刷新拼出「正在处理 X · 耗时 Ns」。
-                relative.clone_into(&mut self.state.borrow_mut().convert_current);
+                let mut s = self.state.borrow_mut();
+                let counts = &mut s.convert_counts;
+                counts.total = Some(total);
+                counts.completed = index.saturating_sub(1);
+                // index 已包含扫描期终态（已有结果、重名跳过和扫描失败）。
+                counts.skipped = counts
+                    .completed
+                    .saturating_sub(counts.success + counts.partial + counts.failed);
+                ui.set_convert_progress(counts.progress());
+                ui.set_convert_progress_note(counts.note().into());
+                relative.clone_into(&mut s.convert_current);
                 ui.set_convert_metrics(format!("正在处理 {relative}").into());
             }
         } else if let Some(relative) = text.strip_prefix("CONVERTER_FILE_CANCELLED|") {
@@ -3700,7 +3767,21 @@ impl UiPump {
                 }
             );
             // 该文件已结束：周期刷新不再把它当作「正在处理」，改报运行耗时。
-            self.state.borrow_mut().convert_current.clear();
+            {
+                let mut s = self.state.borrow_mut();
+                s.convert_current.clear();
+                let counts = &mut s.convert_counts;
+                counts.completed += 1;
+                if partial {
+                    counts.partial += 1;
+                } else if success {
+                    counts.success += 1;
+                } else {
+                    counts.failed += 1;
+                }
+                ui.set_convert_progress(counts.progress());
+                ui.set_convert_progress_note(counts.note().into());
+            }
             ui.set_convert_metrics(detail.clone().into());
             if !success || partial {
                 let mut state = self.state.borrow_mut();
@@ -4097,10 +4178,16 @@ impl UiPump {
                     apply_plan_readiness(ui, &s, snapshot.as_ref());
                 }
                 Event::Notice(text) => {
-                    if let Some(payload) = text.strip_prefix("SETTINGS_LOADED|") {
-                        // S1-01：启动线程的设置快照不是任何设置操作的终态——只刷新
-                        // 界面字段，不清进行中的保存/初始化标志、不消费 close_after，
-                        // 关闭留给真正在跑的任务或初始化自己的终态事件（U-09）。
+                    if let Some(rest) = text.strip_prefix("SETTINGS_LOADED|") {
+                        let Some((generation, payload)) = rest.split_once('|') else {
+                            continue;
+                        };
+                        if generation.parse::<u64>().ok()
+                            != Some(self.state.borrow().settings_generation)
+                        {
+                            continue;
+                        }
+                        // 启动快照不是设置操作的终态，不清运行标志或消费关闭请求。
                         self.apply_settings_snapshot(ui, payload, false);
                         continue;
                     }
@@ -4164,10 +4251,15 @@ impl UiPump {
                 // Error 更新错误文案。
                 // 计划筛选曾乐观置「加载中…」：失败必须恢复分页控件，避免永久中间态。
                 Event::Error(text) => {
-                    if let Some(error) = text.strip_prefix("SETTINGS_LOAD_ERR|") {
-                        // S1-01：启动线程装载设置失败只落到设置页状态行——它不是
-                        // 设置操作的终态，不动运行中标志、不消费 close_after。
-                        ui.set_settings_status(error.into());
+                    if let Some(rest) = text.strip_prefix("SETTINGS_LOAD_ERR|") {
+                        let Some((generation, error)) = rest.split_once('|') else {
+                            continue;
+                        };
+                        if generation.parse::<u64>().ok()
+                            == Some(self.state.borrow().settings_generation)
+                        {
+                            ui.set_settings_status(error.into());
+                        }
                         continue;
                     }
 
@@ -4664,12 +4756,17 @@ impl UiPump {
                 // T-22：运行期间实时显示当前文件与耗时（busy 门禁保证空闲不刷）；
                 // 尚未进入单文件处理（扫描/文件间隙）时只报运行时长。
                 let elapsed = s.started.elapsed().as_secs_f64().max(0.001);
+                let activity = if s.convert_current.is_empty() {
+                    format!("已运行 {elapsed:.1}s")
+                } else {
+                    format!("正在处理 {} · 耗时 {elapsed:.1}s", s.convert_current)
+                };
+                let counts = &s.convert_counts;
                 ui.set_convert_metrics(
-                    if s.convert_current.is_empty() {
-                        format!("已运行 {elapsed:.1}s")
-                    } else {
-                        format!("正在处理 {} · 耗时 {elapsed:.1}s", s.convert_current)
-                    }
+                    format!(
+                        "{activity} · 成功 {} · 部分提取 {} · 失败 {} · 跳过 {}",
+                        counts.success, counts.partial, counts.failed, counts.skipped
+                    )
                     .into(),
                 );
             } else {
@@ -4847,9 +4944,11 @@ fn initial_state() -> Result<State> {
         convert_init_cancel: None,
         convert_preparing: false,
         convert_pending_options: None,
+        convert_counts: ConvertCounts::default(),
         convert_readiness_generation: 0,
         convert_readiness_missed: false,
         convert_preflight_generation: 0,
+        settings_generation: 0,
         engine_overrides: None,
         plan_load: Arc::new(PlanLoadSync::default()),
         readiness_status_pending: Cell::new(false),
@@ -5092,6 +5191,12 @@ fn wire_settings(ui: &AppWindow, state: &Rc<RefCell<State>>, out: &EventSender) 
             );
             return;
         }
+        {
+            let mut s = state.borrow_mut();
+            s.settings_generation = s.settings_generation.wrapping_add(1);
+            // 保存期间到达的旧场景检查不再属于当前设置。
+            s.convert_readiness_generation = s.convert_readiness_generation.wrapping_add(1);
+        }
         let action = action.to_string();
         let custom = PathBuf::from(ui.get_settings_custom_dir().as_str());
         let cancel =
@@ -5134,6 +5239,19 @@ fn wire_settings(ui: &AppWindow, state: &Rc<RefCell<State>>, out: &EventSender) 
 }
 
 fn wire_markdown_converter(ui: &AppWindow, state: &Rc<RefCell<State>>, out: &EventSender) {
+    {
+        let weak = ui.as_weak();
+        ui.on_convert_timeout_edited(move || {
+            if let Some(ui) = weak.upgrade() {
+                ui.set_convert_timeout_error(
+                    parse_validate_timeout_secs(ui.get_convert_timeout_secs().as_str())
+                        .err()
+                        .unwrap_or_default()
+                        .into(),
+                );
+            }
+        });
+    }
     {
         let weak = ui.as_weak();
         let state = state.clone();
@@ -5326,6 +5444,12 @@ fn start_markdown_readiness(ui: &AppWindow, state: &Rc<RefCell<State>>, out: &Ev
     {
         return;
     }
+    // 即使新选择无需后台检查（例如全部不选），也必须使旧结果失效。
+    let generation = {
+        let mut s = state.borrow_mut();
+        s.convert_readiness_generation = s.convert_readiness_generation.wrapping_add(1);
+        s.convert_readiness_generation
+    };
     if ui.get_convert_runtime_dir().trim().is_empty() {
         ui.set_convert_runtime_confirmed(false);
         ui.set_convert_ready(false);
@@ -5343,11 +5467,6 @@ fn start_markdown_readiness(ui: &AppWindow, state: &Rc<RefCell<State>>, out: &Ev
         ui.set_convert_status("至少选择一种转换类型".into());
         return;
     }
-    let generation = {
-        let mut s = state.borrow_mut();
-        s.convert_readiness_generation = s.convert_readiness_generation.wrapping_add(1);
-        s.convert_readiness_generation
-    };
     ui.set_convert_ready(false);
     ui.set_convert_status("正在检查已安装组件…".into());
     let out = out.clone();
@@ -5370,6 +5489,22 @@ fn start_markdown_readiness(ui: &AppWindow, state: &Rc<RefCell<State>>, out: &Ev
 // start_markdown_initialize 及其回调接线随之删除；组件状态统一由按场景的
 // start_markdown_readiness 呈现，修复入口经页内「前往设置」进入设置页。
 
+fn parse_validate_timeout_secs(value: &str) -> Result<u64, String> {
+    let timeout_secs = value
+        .parse::<u64>()
+        .map_err(|_| "单文件超时必须是正整数秒数".to_string())?;
+    if timeout_secs == 0 {
+        return Err("单文件超时必须大于 0".into());
+    }
+    if Instant::now()
+        .checked_add(Duration::from_secs(timeout_secs))
+        .is_none()
+    {
+        return Err("单文件超时超出系统可表示范围".into());
+    }
+    Ok(timeout_secs)
+}
+
 fn start_markdown_conversion(ui: &AppWindow, state: &Rc<RefCell<State>>, out: &EventSender) {
     if ui.get_busy()
         || ui.get_convert_preparing()
@@ -5381,21 +5516,17 @@ fn start_markdown_conversion(ui: &AppWindow, state: &Rc<RefCell<State>>, out: &E
     }
     let input_dir = PathBuf::from(ui.get_convert_input_dir().as_str());
     let output_dir = PathBuf::from(ui.get_convert_output_dir().as_str());
-    let Ok(timeout_secs) = ui.get_convert_timeout_secs().parse::<u64>() else {
-        ui.set_error_text("单文件超时必须是正整数秒数".into());
-        return;
+    let timeout_secs = match parse_validate_timeout_secs(ui.get_convert_timeout_secs().as_str()) {
+        Ok(timeout_secs) => {
+            ui.set_convert_timeout_error("".into());
+            timeout_secs
+        }
+        Err(error) => {
+            ui.set_convert_timeout_error(error.clone().into());
+            ui.set_error_text(error.into());
+            return;
+        }
     };
-    if timeout_secs == 0 {
-        ui.set_error_text("单文件超时必须大于 0".into());
-        return;
-    }
-    if Instant::now()
-        .checked_add(Duration::from_secs(timeout_secs))
-        .is_none()
-    {
-        ui.set_error_text("单文件超时超出系统可表示范围".into());
-        return;
-    }
     let groups = selected_conversion_groups(ui);
     if groups.is_empty() {
         ui.set_error_text("至少选择一种转换类型".into());
@@ -5476,6 +5607,7 @@ fn launch_markdown_conversion(
         s.runtime = RuntimeMode::MarkdownConverter;
         s.started = Instant::now();
         s.convert_current.clear();
+        s.convert_counts = ConvertCounts::default();
     }
     ui.set_convert_preparing(false);
     ui.set_convert_detail_text("".into());
@@ -5538,7 +5670,16 @@ fn launch_markdown_conversion(
             ),
             Err(error) => format!("CONVERTER_FAIL|{error}"),
         };
-        let _ = out.send(Event::MdDone(text));
+        if out.send(Event::MdDone(text)).is_err() {
+            tracing::warn!(
+                component = "gui_worker",
+                event = "gui_worker_delivery_failed",
+                operation = "markdown_conversion",
+                stage = "event_send",
+                error_type = "gui_closed",
+                "转 Markdown 后台结果无法投递到已关闭界面"
+            );
+        }
     });
 }
 
@@ -5627,13 +5768,22 @@ fn snap_pipe_request_on(
         crate::logging::operation_span_with_id("snap_control_client", "request", &operation_id);
     let _entered = span.enter();
     let started = Instant::now();
-    let command = match request["command"].as_str() {
-        Some(
-            command @ ("ping" | "get-state" | "capture" | "retry-load" | "attach-main-exe"
-            | "set-hotkey" | "set-autostart" | "exit"),
-        ) => command,
-        _ => "other",
-    };
+    let command = request["command"]
+        .as_str()
+        .filter(|command| {
+            matches!(
+                *command,
+                "ping"
+                    | "get-state"
+                    | "capture"
+                    | "retry-load"
+                    | "attach-main-exe"
+                    | "set-hotkey"
+                    | "set-autostart"
+                    | "exit"
+            )
+        })
+        .unwrap_or("other");
     let polling = command == "get-state";
     if polling {
         tracing::debug!(
@@ -5914,7 +6064,17 @@ fn snap_supervisor_ensure() -> Result<serde_json::Value, String> {
         .arg(main_exe)
         .stderr(std::process::Stdio::piped())
         .spawn()
-        .map_err(|error| format!("无法启动截图服务：{error}"))?;
+        .map_err(|error| {
+            tracing::error!(
+                component = "snap_supervisor",
+                event = "snap_service_spawn_failed",
+                stage = "spawn",
+                error_type = ?error.kind(),
+                error_code = ?error.raw_os_error(),
+                "截图服务进程启动失败"
+            );
+            format!("无法启动截图服务：{error}")
+        })?;
     for _ in 0..30 {
         std::thread::sleep(Duration::from_millis(150));
         if let Ok(response) = snap_pipe_request(&ping) {
@@ -6000,9 +6160,14 @@ fn snap_send_command(state: &Rc<RefCell<State>>, command: SnapCommand) {
 fn wire_snap_ocr(ui: &AppWindow, state: &Rc<RefCell<State>>, out: &EventSender) {
     let weak = ui.as_weak();
     let state_init = state.clone();
+    let out_init = out.clone();
     ui.on_snap_initialize(move || {
         if let Some(ui) = weak.upgrade() {
-            start_snap_initialize(&ui, &state_init);
+            if ui.get_snap_ready() {
+                start_snap_readiness(&ui, &state_init, &out_init);
+            } else {
+                start_snap_initialize(&ui, &state_init);
+            }
         }
     });
     let weak = ui.as_weak();
@@ -6075,8 +6240,8 @@ fn wire_snap_ocr(ui: &AppWindow, state: &Rc<RefCell<State>>, out: &EventSender) 
                 &state_save,
                 SnapCommand::Request(serde_json::json!({
                     "command": "save-settings",
-                    "hotkey": ui.get_snap_hotkey_draft().as_str(),
-                    "autostart": ui.get_snap_autostart_draft(),
+                    "hotkey": if ui.get_screen() == 7 { ui.get_snap_hotkey() } else { ui.get_snap_hotkey_draft() }.as_str(),
+                    "autostart": if ui.get_screen() == 6 { ui.get_snap_autostart() } else { ui.get_snap_autostart_draft() },
                 })),
             );
         }
@@ -6126,19 +6291,20 @@ pub fn run_with_engine_overrides(
     let started = Instant::now();
     tracing::info!(event = "gui_started", "主界面启动");
     let result = run_gui(hook, overrides);
-    match &result {
-        Ok(()) => tracing::info!(
+    if result.is_ok() {
+        tracing::info!(
             event = "gui_completed",
             elapsed_ms = crate::logging::elapsed_ms(started),
             "主界面已关闭"
-        ),
-        Err(_) => tracing::error!(
+        );
+    } else {
+        tracing::error!(
             event = "gui_failed",
             stage = "startup_or_event_loop",
             error_type = "gui_runtime",
             elapsed_ms = crate::logging::elapsed_ms(started),
             "主界面启动或事件循环失败"
-        ),
+        );
     }
     result
 }
@@ -6247,14 +6413,18 @@ fn run_gui(
         },
     );
     let startup = out.clone();
+    let settings_generation = state.borrow().settings_generation;
     std::thread::spawn(move || {
         // S1-01：启动快照用独立前缀，界面侧不把它当设置操作终态（不清标志、
         // 不消费 close_after），避免迟到快照在任务运行中提前退出或抹掉初始化状态。
-        let event =
-            match crate::xberg_runtime::resume_background().and_then(|()| settings_payload()) {
-                Ok(payload) => Event::Notice(format!("SETTINGS_LOADED|{payload}")),
-                Err(error) => Event::Error(format!("SETTINGS_LOAD_ERR|{error}")),
-            };
+        let event = match crate::xberg_runtime::resume_background()
+            .and_then(|()| settings_payload())
+        {
+            Ok(payload) => {
+                Event::Notice(format!("SETTINGS_LOADED|{settings_generation}|{payload}"))
+            }
+            Err(error) => Event::Error(format!("SETTINGS_LOAD_ERR|{settings_generation}|{error}")),
+        };
         let _ = startup.send(event);
     });
     // 窗口刚映射时系统还会套用默认位置，稍后再居中一次，保证首屏就是居中的
@@ -6615,6 +6785,18 @@ pub fn run() -> Result<()> {
     run_with_pre_loop_hook(|_| ())
 }
 
+#[rustfmt::skip]
+#[warn(
+    warnings,
+    unused_must_use,
+    unreachable_patterns,
+    unreachable_pub,
+    unused_variables,
+    rust_2018_idioms,
+    explicit_outlives_requirements,
+    elided_lifetimes_in_paths,
+    single_use_lifetimes
+)]
 #[cfg(test)]
 mod gui_tests {
     //! 无头 GUI 测试：Slint 平台绑定初始化线程，因此所有用例经专用工作线程串行执行，
@@ -7068,6 +7250,27 @@ mod gui_tests {
                 assert!(app.ui.get_acp_explicit_stopped());
                 assert!(!app.ui.get_acp_request_pending());
                 assert!(app.state.borrow().acp_observer.is_none());
+                if !succeeded {
+                    // Stop 可在写入 IPC 前失败；后续 Ready 观察必须恢复退出入口，
+                    // 但不能撤销本 GUI 的禁止自动重启意图。
+                    let generation = app
+                        .state
+                        .borrow()
+                        .acp_observation_generation
+                        .load(Ordering::Acquire);
+                    sender
+                        .send(AcpMessage::Snapshot(generation, Ok(ready.clone())))
+                        .unwrap();
+                    apply_acp_messages(&app.ui, &app.state);
+                    app.ui.invoke_acp_apply_and_restart();
+                    assert!(app.state.borrow().acp_explicit_stopped);
+                    assert!(app.ui.get_acp_explicit_stopped());
+                    assert!(!app.ui.get_acp_pending_apply());
+                    assert!(!app.ui.get_acp_request_pending());
+                    app.ui.invoke_acp_request_stop();
+                    assert_eq!(app.ui.get_confirm_kind(), 5);
+                    assert!(app.state.borrow().acp_observer.is_none());
+                }
             }
         })
         .unwrap();
@@ -8111,7 +8314,7 @@ mod gui_tests {
             app.pump
                 .out
                 .send(Event::Notice(
-                    "SETTINGS_LOADED|{\"custom\":null,\"downloaded\":null,\"downloaded_active\":false,\"active\":\"\"}"
+                    "SETTINGS_LOADED|0|{\"custom\":null,\"downloaded\":null,\"downloaded_active\":false,\"active\":\"\"}"
                         .into(),
                 ))
                 .unwrap();
@@ -8130,6 +8333,147 @@ mod gui_tests {
             );
         })
         .unwrap();
+    }
+
+    // 覆盖 T-22/U-03：已跳过 99 个文件时第 100 个开始为 99%，结束即推进到 100%。
+    #[test]
+    fn converter_progress_counts_skips_and_finished_files() {
+        with_gui(|app| {
+            let ui = &app.ui;
+            app.pump.apply_converter_status(ui, "CONVERTER_STARTED|100");
+            assert_eq!(ui.get_convert_progress(), 0.0, "总数已知不显示未知进度");
+            app.pump.apply_converter_status(ui, "CONVERTER_FILE_STARTED|100|100|last.pdf");
+            assert!((ui.get_convert_progress() - 0.99).abs() < 0.001);
+            app.pump.apply_converter_status(ui, "CONVERTER_FILE_FINISHED|0|1|last.pdf|");
+            assert_eq!(ui.get_convert_progress(), 1.0);
+            assert_eq!(ui.get_convert_progress_note().as_str(), "100 / 100");
+            assert_eq!(app.state.borrow().convert_counts.success, 1);
+            assert_eq!(app.state.borrow().convert_counts.skipped, 99);
+        }).unwrap();
+    }
+
+    // 覆盖 T-22/T-24：扫描期失败与文件处理结果分别计入实际完成及运行统计。
+    #[test]
+    fn converter_progress_includes_scan_failures_and_partial_results() {
+        with_gui(|app| {
+            let ui = &app.ui;
+            app.pump.apply_converter_status(ui, "CONVERTER_STARTED|3");
+            app.pump.apply_converter_status(ui, "CONVERTER_FILE_FINISHED|0|0|failed.pdf|扫描失败");
+            assert!((ui.get_convert_progress() - 1.0 / 3.0).abs() < 0.001);
+            app.pump.apply_converter_status(ui, "CONVERTER_FILE_STARTED|3|3|partial.pdf");
+            app.pump.apply_converter_status(ui, "CONVERTER_FILE_FINISHED|1|0|partial.pdf|部分内容");
+            let state = app.state.borrow();
+            assert_eq!(state.convert_counts.failed, 1);
+            assert_eq!(state.convert_counts.partial, 1);
+            assert_eq!(state.convert_counts.skipped, 1);
+            assert_eq!(ui.get_convert_progress(), 1.0);
+        }).unwrap();
+    }
+
+    // 覆盖 XB-18/XB-21：保存完成后迟到的启动读取不得恢复旧目录或旧错误。
+    #[test]
+    fn startup_settings_results_do_not_replace_newer_selection() {
+        with_gui(|app| {
+            let ui = &app.ui;
+            app.state.borrow_mut().settings_generation = 1;
+            ui.set_settings_custom_dir("D:\\new-xberg".into());
+            ui.set_settings_status("新配置已保存".into());
+            app.pump.out.send(Event::Notice(
+                "SETTINGS_LOADED|0|{\"custom\":\"D:\\\\old-xberg\",\"active\":\"\"}".into()
+            )).unwrap();
+            app.pump.out.send(Event::Error("SETTINGS_LOAD_ERR|0|旧读取失败".into())).unwrap();
+            app.pump.run(ui);
+            assert_eq!(ui.get_settings_custom_dir().as_str(), "D:\\new-xberg");
+            assert_eq!(ui.get_settings_status().as_str(), "新配置已保存");
+        }).unwrap();
+    }
+
+    // 覆盖 T-07：全部取消勾选后，旧场景的成功检查不得重新点亮开始。
+    #[test]
+    fn empty_conversion_selection_invalidates_pending_readiness() {
+        with_gui(|app| {
+            let ui = &app.ui;
+            ui.set_convert_runtime_dir("C:\\xberg".into());
+            ui.set_convert_runtime_confirmed(true);
+            let generation = app.state.borrow().convert_readiness_generation;
+            ui.set_convert_pdf(false);
+            ui.set_convert_office(false);
+            ui.set_convert_images(false);
+            ui.set_convert_media(false);
+            ui.set_convert_other(false);
+            ui.invoke_convert_selection_changed();
+            app.pump.out.send(Event::Status(format!(
+                "CONVERTER_READINESS|{generation}|1|已就绪"
+            ))).unwrap();
+            app.pump.run(ui);
+            assert!(!ui.get_convert_ready());
+            assert_eq!(ui.get_convert_status().as_str(), "至少选择一种转换类型");
+        }).unwrap();
+    }
+
+    // 覆盖 O-06/XB-24：已就绪时主动检查仍须重新执行离线校验；
+    // 隔离资产缺失时回到未就绪，而不是重新初始化或保留陈旧的就绪状态。
+    #[test]
+    fn snap_check_revalidates_already_ready_components() {
+        with_gui(|app| {
+            let ui = &app.ui;
+            let _lock = crate::asset_util::test_env::env_lock()
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            ui.set_snap_ready(true);
+            ui.invoke_snap_initialize();
+            assert!(!ui.get_snap_ready());
+            assert!(!ui.get_snap_initializing(), "只读检查不重新初始化");
+            assert!(app.state.borrow().snap_init_cancel.is_none());
+            assert!(
+                pump_until(app, || !ui.get_snap_asset_detail().is_empty()),
+                "隔离资产缺失的离线检查必须返回未就绪原因"
+            );
+            assert!(!ui.get_snap_ready(), "缺失资产不得继续显示已就绪");
+            assert!(!ui.get_snap_initializing());
+            assert!(app.state.borrow().snap_init_cancel.is_none());
+        }).unwrap();
+    }
+
+    // 覆盖 O-14/O-15/XB-24：保存一页设置不提交另一页未保存草稿。
+    #[test]
+    fn snap_settings_save_only_commits_current_page_draft() {
+        with_gui(|app| {
+            let ui = &app.ui;
+            let (sender, receiver) = mpsc::channel();
+            app.state.borrow_mut().snap_commands = Some(sender);
+            ui.set_snap_hotkey("Ctrl+Alt+O".into());
+            ui.set_snap_hotkey_draft("Ctrl+Alt+P".into());
+            ui.set_snap_autostart(false);
+            ui.set_snap_autostart_draft(true);
+            ui.set_screen(7);
+            ui.invoke_snap_save_settings();
+            let SnapCommand::Request(request) = receiver.try_recv().unwrap() else { panic!("应提交设置"); };
+            assert_eq!(request["hotkey"], "Ctrl+Alt+O");
+            assert_eq!(request["autostart"], true);
+            ui.set_screen(6);
+            ui.invoke_snap_save_settings();
+            let SnapCommand::Request(request) = receiver.try_recv().unwrap() else { panic!("应提交设置"); };
+            assert_eq!(request["hotkey"], "Ctrl+Alt+P");
+            assert_eq!(request["autostart"], false);
+        }).unwrap();
+    }
+
+    // 覆盖 T-29：编辑时显示字段错误，修正后清除；启动仍使用同一校验。
+    #[test]
+    fn convert_timeout_edits_validate_without_starting_task() {
+        with_gui(|app| {
+            let ui = &app.ui;
+            for value in ["0", "abc", "18446744073709551615"] {
+                ui.set_convert_timeout_secs(value.into());
+                ui.invoke_convert_timeout_edited();
+                assert!(!ui.get_convert_timeout_error().is_empty());
+                assert!(!ui.get_busy() && !ui.get_convert_preparing());
+            }
+            ui.set_convert_timeout_secs("21600".into());
+            ui.invoke_convert_timeout_edited();
+            assert!(ui.get_convert_timeout_error().is_empty());
+        }).unwrap();
     }
 
     // 覆盖 U-10/S-07（S1-03）：CONVERTER_LOG 只置脏、由轮询尾部按面板可见性统一
@@ -8549,6 +8893,7 @@ mod gui_tests {
             self.ui.set_convert_media(true);
             self.ui.set_convert_other(true);
             self.ui.set_convert_timeout_secs("21600".into());
+            self.ui.set_convert_timeout_error("".into());
             self.ui.set_convert_ready(false);
             self.ui.set_convert_runtime_confirmed(false);
             self.ui.set_convert_initializing(false);
@@ -11697,37 +12042,49 @@ mod gui_tests {
         .unwrap();
     }
 
-    // 覆盖 O-06（初始化不重入、取消状态如实提示）与管道按钮的即时反馈：
-    // 命令按钮点击即置「请求在途」，服务未连接时命令侧安全无操作（挂起兜底另有专测）
+    // 覆盖 O-06/U-06（在途初始化不重入、取消信号与收尾状态）及命令按钮即时反馈。
+    // 已就绪时的设置页离线检查由 snap_check_revalidates_already_ready_components 覆盖。
     #[test]
     fn snap_buttons_immediate_feedback_and_initialize_reentry_gating() {
         with_gui(|app| {
             let ui = &app.ui;
-            // 已就绪：初始化按钮不得重新进入初始化
-            ui.set_snap_ready(true);
-            ui.invoke_snap_initialize();
-            assert!(!ui.get_snap_initializing());
-            assert_eq!(
-                app.state.borrow().snap_generation,
-                0,
-                "已就绪时不得发起新初始化"
-            );
-            // 初始化在途：同样不重入
+            // 控制在途任务的完成时机：重复点击必须保留当前进度和取消目标。
+            let cancel = Arc::new(std::sync::atomic::AtomicBool::new(false));
+            app.state.borrow_mut().snap_init_cancel = Some(cancel.clone());
             ui.set_snap_ready(false);
             ui.set_snap_initializing(true);
+            ui.set_snap_progress("当前组件进度".into());
+            ui.set_snap_asset_status("当前组件初始化在途".into());
+            let progress = ui.get_snap_progress();
+            let status = ui.get_snap_asset_status();
             ui.invoke_snap_initialize();
-            assert_eq!(
-                app.state.borrow().snap_generation,
-                0,
-                "初始化在途时不得重入"
-            );
-            // 取消按钮：状态行如实提示（O-06 取消语义）
+            assert!(ui.get_snap_initializing());
+            assert!(!ui.get_snap_ready());
+            assert_eq!(ui.get_snap_progress(), progress, "重复初始化不得重置当前进度");
+            assert_eq!(ui.get_snap_asset_status(), status, "重复初始化不得替换当前状态");
+            assert!(!cancel.load(Ordering::Acquire), "重复初始化不得取消原任务");
+
             ui.invoke_snap_cancel_initialize();
-            assert!(ui.get_snap_asset_status().contains("正在取消初始化"));
-            // 管道按钮：点击即置请求在途标志并给出状态反馈
+            assert!(cancel.load(Ordering::Acquire), "取消必须作用于原在途初始化");
+            assert!(ui.get_snap_initializing(), "取消请求不能冒充任务已结束");
+            assert_ne!(ui.get_snap_asset_status(), status);
+            let generation = app.state.borrow().snap_generation;
+            app.state.borrow().snap_sender.send(SnapMessage::Initialized(
+                generation,
+                Err("用户取消初始化".into()),
+            )).unwrap();
+            app.pump.apply_snap_messages(ui);
+            assert!(!ui.get_snap_initializing());
+            assert!(!ui.get_snap_ready());
+            assert!(app.state.borrow().snap_init_cancel.is_none());
+            assert!(ui.get_snap_error().is_empty(), "用户取消不得显示为组件故障");
+            assert!(ui.get_snap_asset_detail().is_empty());
+
+            // 管道按钮：点击即置请求在途标志并给出新的状态反馈。
+            let service_status = ui.get_snap_service_status();
             ui.invoke_snap_connect();
             assert!(ui.get_snap_request_pending());
-            assert!(ui.get_snap_service_status().contains("正在连接"));
+            assert_ne!(ui.get_snap_service_status(), service_status);
             ui.set_snap_request_pending(false);
             ui.invoke_snap_capture();
             assert!(ui.get_snap_request_pending());

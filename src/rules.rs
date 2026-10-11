@@ -279,6 +279,18 @@ pub fn legalize_derived(stem: &str) -> String {
     out
 }
 /// 名称关系参考实现：计划器以候选连通组实现 C-02；此函数供规则测试对照。
+#[rustfmt::skip]
+#[warn(
+    warnings,
+    unused_must_use,
+    unreachable_patterns,
+    unreachable_pub,
+    unused_variables,
+    rust_2018_idioms,
+    explicit_outlives_requirements,
+    elided_lifetimes_in_paths,
+    single_use_lifetimes
+)]
 #[cfg(test)]
 pub fn duplicate_allowed(a: &FileRecord, b: &FileRecord, cfg: &Config) -> bool {
     if a.name == b.name {
@@ -988,6 +1000,18 @@ pub fn suffixed_candidate(stem: &str, ext: &str, index: u64) -> String {
     fsutil::suffixed_candidate(stem, ext, index)
 }
 
+#[rustfmt::skip]
+#[warn(
+    warnings,
+    unused_must_use,
+    unreachable_patterns,
+    unreachable_pub,
+    unused_variables,
+    rust_2018_idioms,
+    explicit_outlives_requirements,
+    elided_lifetimes_in_paths,
+    single_use_lifetimes
+)]
 #[cfg(test)]
 mod tests {
     use super::*;

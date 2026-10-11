@@ -1,3 +1,16 @@
+#![warn(
+    warnings,
+    unused_must_use,
+    unreachable_patterns,
+    unreachable_pub,
+    unused_variables,
+    future_incompatible,
+    rust_2018_idioms,
+    explicit_outlives_requirements,
+    elided_lifetimes_in_paths,
+    single_use_lifetimes
+)]
+
 //! AH-06～AH-10/AH-13：真实JchTools后台进程、SQLite、单实例及SDK Agent生命周期。
 //! 此处合成 Agent 不是实际模型；真实基准为 OpenCode v2.0.26 / OpenCode Zen MiMo-V2.6-Flash Free。
 #![allow(clippy::unwrap_used, clippy::expect_used)]
@@ -129,7 +142,7 @@ impl Harness {
             );
         }
     }
-    fn launch(&self, test: &str, action: &str, config: Option<&ServiceConfig>) -> (Child, PathBuf) {
+    fn launch(&self, test: &str, action: &str, config: Option<&ServiceConfig>) -> (ConsumerChild, PathBuf) {
         let result = self
             .temp
             .path()
@@ -157,7 +170,7 @@ impl Harness {
                 serde_json::to_string(config).unwrap(),
             );
         }
-        (command.spawn().unwrap(), result)
+        (ConsumerChild(command.spawn().unwrap()), result)
     }
     fn call(&self, test: &str, action: &str, config: Option<&ServiceConfig>) -> Value {
         let (child, result) = self.launch(test, action, config);
@@ -216,6 +229,30 @@ impl Drop for Harness {
         }
     }
 }
+
+// Child 的析构不会结束进程；所有直接启动的测试消费者都必须在断言失败时回收。
+// 这里只拥有测试/GUI 消费者，不拥有产品后台、Agent 或终端。
+struct ConsumerChild(Child);
+impl std::ops::Deref for ConsumerChild {
+    type Target = Child;
+
+    fn deref(&self) -> &Self::Target {
+        &self.0
+    }
+}
+impl std::ops::DerefMut for ConsumerChild {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        &mut self.0
+    }
+}
+impl Drop for ConsumerChild {
+    fn drop(&mut self) {
+        if !matches!(self.0.try_wait(), Ok(Some(_))) {
+            let _killed = self.0.kill();
+            let _exit = wait_consumer(&mut self.0, Duration::from_secs(5));
+        }
+    }
+}
 fn wait_consumer(child: &mut Child, timeout: Duration) -> Option<std::process::ExitStatus> {
     let deadline = Instant::now() + timeout;
     loop {
@@ -230,7 +267,7 @@ fn wait_consumer(child: &mut Child, timeout: Duration) -> Option<std::process::E
         thread::sleep(Duration::from_millis(10));
     }
 }
-fn finish_child(mut child: Child, path: &Path) -> Value {
+fn finish_child(mut child: ConsumerChild, path: &Path) -> Value {
     let status = wait_consumer(&mut child, Duration::from_secs(30));
     if let Some(status) = status {
         assert!(status.success(), "child {status}");
@@ -246,7 +283,7 @@ fn finish_child(mut child: Child, path: &Path) -> Value {
 // 必须先放行并回收晚到的控制消费者，再由 Harness 的有界 Stop 清理自有服务。
 struct ReleaseMarker {
     path: PathBuf,
-    consumer: Option<Child>,
+    consumer: Option<ConsumerChild>,
 }
 impl ReleaseMarker {
     fn finish(mut self, result: &Path) -> Value {
@@ -285,6 +322,13 @@ impl ObservedProcess {
             )
         };
         if handle.is_null() {
+            let error = std::io::Error::last_os_error();
+            // 仅无效 PID 表示进程不存在；拒绝访问等查询失败不能冒充退出成功。
+            assert_eq!(
+                error.raw_os_error(),
+                Some(windows_sys::Win32::Foundation::ERROR_INVALID_PARAMETER as i32),
+                "无法观察自有进程 {pid}：{error}"
+            );
             None
         } else {
             Some(Self {
@@ -1693,7 +1737,7 @@ fn real_gui_save_close_kill_reopen_and_confirmed_service_exit() {
             .stderr(Stdio::inherit())
             .spawn()
             .unwrap();
-        (child, result)
+        (ConsumerChild(child), result)
     };
     let (gui, result) = launch_gui("save");
     let ready = wait_file(&harness.root.join("gui-ready.json"));
@@ -2008,14 +2052,36 @@ fn stopping_service_releases_owned_terminal_process() {
 
 fn assert_admission_closed(port: u16) {
     use std::io::{BufRead, BufReader, Write};
-    let Ok(mut socket) = std::net::TcpStream::connect(("127.0.0.1", port)) else {
-        return;
+    let mut socket = match std::net::TcpStream::connect(("127.0.0.1", port)) {
+        Ok(socket) => socket,
+        Err(error)
+            if matches!(
+                error.kind(),
+                std::io::ErrorKind::ConnectionRefused
+                    | std::io::ErrorKind::ConnectionReset
+                    | std::io::ErrorKind::ConnectionAborted
+            ) => return,
+        Err(error) => panic!("无法验证drain后停止接收请求: {error}"),
     };
     socket
         .set_read_timeout(Some(Duration::from_secs(5)))
         .unwrap();
+    socket
+        .set_write_timeout(Some(Duration::from_secs(5)))
+        .unwrap();
     let request = body(&Plan::new("text"), false).to_string();
-    if write!(socket,"POST /v1/chat/completions HTTP/1.1\r\nHost: 127.0.0.1\r\nConnection: close\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\r\n{request}",request.len()).is_err(){return;}
+    if let Err(error) = write!(socket,"POST /v1/chat/completions HTTP/1.1\r\nHost: 127.0.0.1\r\nConnection: close\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\r\n{request}",request.len()) {
+        assert!(
+            matches!(
+                error.kind(),
+                std::io::ErrorKind::BrokenPipe
+                    | std::io::ErrorKind::ConnectionReset
+                    | std::io::ErrorKind::ConnectionAborted
+            ),
+            "drain后请求写入失败不可作为停止接收的证据: {error}"
+        );
+        return;
+    }
     let mut line = String::new();
     match BufReader::new(socket).read_line(&mut line) {
         Ok(0) => {}
@@ -2033,7 +2099,7 @@ fn assert_admission_closed(port: u16) {
     }
 }
 
-/// 覆盖 AH-08/AH-13：初始化失败而子进程不自行退出时，必须回收自有失败Agent。
+/// 覆盖 AH-08/AH-10/AH-13：初始化失败且子进程不因EOF退出时，安全等待其自然结束并回收。
 #[test]
 fn initialize_failure_reclaims_agent_that_does_not_exit_on_eof() {
     if child_operation() {
@@ -2050,7 +2116,8 @@ fn initialize_failure_reclaims_agent_that_does_not_exit_on_eof() {
         .find(|event| event["event"] == "spawn")
         .unwrap();
     let pid = u32::try_from(spawned["pid"].as_u64().unwrap()).unwrap();
-    wait_gone(pid);
+    let agent = ObservedProcess::open(pid);
+    assert!(agent.is_alive(), "夹具必须在初始化失败后仍存活");
     assert_eq!(
         events
             .iter()
@@ -2058,7 +2125,15 @@ fn initialize_failure_reclaims_agent_that_does_not_exit_on_eof() {
             .count(),
         1
     );
-    let stopped = harness.call(test, "stop", None);
+    // handshake-error-held 只有 release-exit 才自然退出；不能要求产品强杀自有Agent。
+    let (stop, result) = harness.launch(test, "stop", None);
+    let stopping = harness.phase(test, "stopping");
+    assert_eq!(stopping["agent_pid"], pid);
+    assert!(agent.is_alive(), "Stop不得强杀尚未自然退出的Agent");
+    assert!(!result.exists(), "失败Agent仍存活时Stop必须等待");
+    std::fs::write(harness.audit.join("release-exit"), b"natural-exit").unwrap();
+    agent.wait_gone();
+    let stopped = finish_child(stop, &result);
     assert_eq!(stopped["ok"]["phase"], "stopped");
 }
 
@@ -2170,7 +2245,7 @@ fn real_gui_pending_configuration_applies_only_after_inflight_completion() {
         .is_none());
     let status = harness.ready(test);
     let result = harness.temp.path().join("gui-apply-result.json");
-    let gui = Command::new(std::env::current_exe().unwrap())
+    let gui = ConsumerChild(Command::new(std::env::current_exe().unwrap())
         .args(["--exact", test, "--nocapture"])
         .env(CHILD_ROOT, &harness.root)
         .env("JCHTOOLS_ACP_PROCESS_ACTION", "gui")
@@ -2188,7 +2263,7 @@ fn real_gui_pending_configuration_applies_only_after_inflight_completion() {
         .stdout(Stdio::null())
         .stderr(Stdio::inherit())
         .spawn()
-        .unwrap();
+        .unwrap());
     let ready = wait_file(&harness.root.join("gui-ready.json"));
     assert_eq!(ready["agent_pid"], status.agent_pid.unwrap().to_string());
     let mut plan = Plan::new("text");

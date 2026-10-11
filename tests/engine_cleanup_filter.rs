@@ -1,3 +1,16 @@
+#![warn(
+    warnings,
+    unused_must_use,
+    unreachable_patterns,
+    unreachable_pub,
+    unused_variables,
+    future_incompatible,
+    rust_2018_idioms,
+    explicit_outlives_requirements,
+    elided_lifetimes_in_paths,
+    single_use_lifetimes
+)]
+
 #![allow(clippy::unwrap_used)]
 //! S5-01 回归：引擎会话清场只结束本仓测试派生的 xberg.exe（可执行路径在
 //! 仓库 `.tmp\` 或系统临时目录的 tempfile 目录内），不按映像名全杀——后者会
@@ -64,62 +77,83 @@ impl WorkerMode {
     }
 }
 
-fn assert_worker_cleanup(mode: WorkerMode, test_owned: bool, expected_alive: bool) {
-    let _session = common::session_lock();
-    let owner = if test_owned { "test" } else { "user" };
+// 目录必须由本次夹具独占：PID 命名会复用失败运行留下的 starts.txt，
+// 既可能误判新进程已启动，也可能递归清掉不属于本次运行的旧目录。
+fn fixture_directory(test_owned: bool, label: &str) -> tempfile::TempDir {
     let parent = if test_owned {
         std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join(".tmp")
     } else {
         std::env::temp_dir()
     };
-    let dir = parent.join(format!(
-        "jchtools-s501-{owner}-{}-{}",
-        mode.label(),
-        std::process::id()
-    ));
-    std::fs::create_dir_all(&dir).unwrap();
-    let executable = dir.join("snap-ocr-worker.exe");
+    std::fs::create_dir_all(&parent).unwrap();
+    tempfile::Builder::new()
+        .prefix(&format!("jchtools-s501-{label}-"))
+        .tempdir_in(parent)
+        .unwrap()
+}
+
+// Child 本身的 Drop 不结束进程。守卫在断言、启动等待或清场发生 panic 时
+// 也先结束并回收本次子进程，再由后创建前销毁顺序释放其临时目录。
+struct TestChild(std::process::Child);
+
+impl Drop for TestChild {
+    fn drop(&mut self) {
+        let _ = self.0.kill();
+        let _ = self.0.wait();
+    }
+}
+
+fn wait_for_fixture_start(child: &mut TestChild, directory: &std::path::Path) {
+    let marker = directory.join("starts.txt");
+    let expected_pid = child.0.id().to_string();
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+    loop {
+        let started = match std::fs::read_to_string(&marker) {
+            Ok(pids) => pids.lines().any(|pid| pid == expected_pid),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => false,
+            Err(error) => panic!("读取模拟进程启动标记失败：{error}"),
+        };
+        assert!(
+            child.0.try_wait().unwrap().is_none(),
+            "模拟进程必须在清场前保持运行"
+        );
+        if started {
+            return;
+        }
+        assert!(
+            std::time::Instant::now() < deadline,
+            "模拟进程未写入本次 PID 启动标记"
+        );
+        std::thread::sleep(std::time::Duration::from_millis(20));
+    }
+}
+
+fn assert_worker_cleanup(mode: WorkerMode, test_owned: bool, expected_alive: bool) {
+    let _session = common::session_lock();
+    let owner = if test_owned { "test" } else { "user" };
+    let dir = fixture_directory(test_owned, &format!("{owner}-{}", mode.label()));
+    let executable = dir.path().join("snap-ocr-worker.exe");
     common::mock_engine_copy("tests/fixtures/shared_xberg.rs", &executable);
-    let mut child = std::process::Command::new(&executable)
+    let mut child = TestChild(std::process::Command::new(&executable)
         .arg(mode.argument())
-        .current_dir(&dir)
+        .current_dir(dir.path())
         .stdin(std::process::Stdio::piped())
         .stdout(std::process::Stdio::null())
         .stderr(std::process::Stdio::null())
         .spawn()
-        .unwrap();
-
-    let marker = dir.join("starts.txt");
-    let start_deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
-    let started = loop {
-        if marker.is_file() {
-            break true;
-        }
-        if child.try_wait().unwrap().is_some() || std::time::Instant::now() >= start_deadline {
-            break false;
-        }
-        std::thread::sleep(std::time::Duration::from_millis(20));
-    };
-    if !started {
-        let _ = child.kill();
-        let _ = child.wait();
-        let _ = std::fs::remove_dir_all(&dir);
-        panic!("模拟 {owner} {mode:?} worker 未进入稳定运行状态");
-    }
+        .unwrap());
+    wait_for_fixture_start(&mut child, dir.path());
 
     common::cleanup_stray_engines();
     let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
     let alive = loop {
-        match child.try_wait().unwrap() {
+        match child.0.try_wait().unwrap() {
             Some(_) => break false,
             None if expected_alive => break true,
             None if std::time::Instant::now() >= deadline => break true,
             None => std::thread::sleep(std::time::Duration::from_millis(100)),
         }
     };
-    let _ = child.kill();
-    let _ = child.wait();
-    let _ = std::fs::remove_dir_all(&dir);
     assert_eq!(
         alive, expected_alive,
         "清场对 {owner} {mode:?} worker 的存活结果不符合所有权边界"
@@ -152,24 +186,20 @@ fn cleanup_keeps_user_owned_xberg_image_alive() {
     // 会话锁：与其他引擎测试二进制互斥，避免清场与真实引擎测试相互干扰。
     let _session = common::session_lock();
     // 诱饵目录：系统临时目录下、但不在 `.tmp*` 前缀内 → 按用户自有路径对待。
-    let decoy_dir =
-        std::env::temp_dir().join(format!("jchtools-s501-decoy-{}", std::process::id()));
-    std::fs::create_dir_all(&decoy_dir).unwrap();
-    let decoy_exe = decoy_dir.join("xberg.exe");
-    std::fs::copy("C:\\Windows\\System32\\ping.exe", &decoy_exe).unwrap();
-    let mut child = std::process::Command::new(&decoy_exe)
-        .args(["-n", "60", "127.0.0.1"])
-        .stdin(std::process::Stdio::null())
+    let decoy_dir = fixture_directory(false, "decoy");
+    let decoy_exe = decoy_dir.path().join("xberg.exe");
+    common::mock_engine_copy("tests/fixtures/shared_xberg.rs", &decoy_exe);
+    let mut child = TestChild(std::process::Command::new(&decoy_exe)
+        .current_dir(decoy_dir.path())
+        .stdin(std::process::Stdio::piped())
         .stdout(std::process::Stdio::null())
         .stderr(std::process::Stdio::null())
         .spawn()
-        .unwrap();
+        .unwrap());
+    wait_for_fixture_start(&mut child, decoy_dir.path());
     // 清场（锁内调用，与各引擎测试同口径）。
     common::cleanup_stray_engines();
-    let alive = child.try_wait().unwrap().is_none();
-    let _ = child.kill();
-    let _ = child.wait();
-    let _ = std::fs::remove_dir_all(&decoy_dir);
+    let alive = child.0.try_wait().unwrap().is_none();
     assert!(alive, "清场不得按映像名误杀用户路径的 xberg.exe（S5-01）");
 }
 
@@ -178,22 +208,25 @@ fn cleanup_keeps_user_owned_xberg_image_alive() {
 #[test]
 fn cleanup_still_kills_test_owned_xberg_image() {
     let _session = common::session_lock();
-    let owned_dir = std::env::temp_dir().join(format!(".tmpjchs501-owned-{}", std::process::id()));
-    std::fs::create_dir_all(&owned_dir).unwrap();
-    let owned_exe = owned_dir.join("xberg.exe");
-    std::fs::copy("C:\\Windows\\System32\\ping.exe", &owned_exe).unwrap();
-    let mut child = std::process::Command::new(&owned_exe)
-        .args(["-n", "60", "127.0.0.1"])
-        .stdin(std::process::Stdio::null())
+    let owned_dir = tempfile::Builder::new()
+        .prefix(".tmpjchs501-owned-")
+        .tempdir()
+        .unwrap();
+    let owned_exe = owned_dir.path().join("xberg.exe");
+    common::mock_engine_copy("tests/fixtures/shared_xberg.rs", &owned_exe);
+    let mut child = TestChild(std::process::Command::new(&owned_exe)
+        .current_dir(owned_dir.path())
+        .stdin(std::process::Stdio::piped())
         .stdout(std::process::Stdio::null())
         .stderr(std::process::Stdio::null())
         .spawn()
-        .unwrap();
+        .unwrap());
+    wait_for_fixture_start(&mut child, owned_dir.path());
     common::cleanup_stray_engines();
     // Stop-Process 发起后允许短暂的终止传播：有界等待进程退出。
     let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
     let exited = loop {
-        if child.try_wait().unwrap().is_some() {
+        if child.0.try_wait().unwrap().is_some() {
             break true;
         }
         if std::time::Instant::now() > deadline {
@@ -201,11 +234,6 @@ fn cleanup_still_kills_test_owned_xberg_image() {
         }
         std::thread::sleep(std::time::Duration::from_millis(100));
     };
-    if !exited {
-        let _ = child.kill();
-        let _ = child.wait();
-    }
-    let _ = std::fs::remove_dir_all(&owned_dir);
     assert!(
         exited,
         "测试派生路径的 xberg.exe 仍必须被清场结束（S5-01 反向）"

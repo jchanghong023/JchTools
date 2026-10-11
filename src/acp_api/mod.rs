@@ -22,7 +22,11 @@ mod diagnostics {
 
     impl Failure for super::ServiceError {
         fn kind(&self) -> &'static str {
-            use super::ServiceErrorKind::*;
+            use super::ServiceErrorKind::{
+                AgentDisconnected, Cancelled, HistoryMismatch, Internal, InvalidConfig,
+                InvalidRequest, Io, ModelUnavailable, ModelsUnavailable, NotReady, QueueFull,
+                SessionUnavailable, Stopping,
+            };
             match self.kind {
                 InvalidRequest => "invalid_request",
                 InvalidConfig => "invalid_config",
@@ -98,7 +102,7 @@ mod diagnostics {
                     "ACP 边界调用已取消或停止"
                 ),
                 Err(error) => {
-                    tracing::error!(component = self.component, operation = self.operation, event = "acp_call_failed", stage = self.operation, error_type = error.kind(), error_code = ?error.code(), status = "failed", elapsed_ms, "ACP 边界调用失败")
+                    tracing::error!(component = self.component, operation = self.operation, event = "acp_call_failed", stage = self.operation, error_type = error.kind(), error_code = ?error.code(), status = "failed", elapsed_ms, "ACP 边界调用失败");
                 }
             }
         }
@@ -116,7 +120,7 @@ mod diagnostics {
                         status = "interrupted",
                         elapsed_ms = crate::logging::elapsed_ms(self.started),
                         "ACP 边界调用被取消或异常中断"
-                    )
+                    );
                 });
             }
         }

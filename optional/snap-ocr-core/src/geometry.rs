@@ -286,6 +286,18 @@ pub fn bounding_quad_of_quads(quads: &[Quad]) -> Result<Quad, GeometryError> {
     Ok([(left, top), (right, top), (right, bottom), (left, bottom)])
 }
 
+#[rustfmt::skip]
+#[warn(
+    warnings,
+    unused_must_use,
+    unreachable_patterns,
+    unreachable_pub,
+    unused_variables,
+    rust_2018_idioms,
+    explicit_outlives_requirements,
+    elided_lifetimes_in_paths,
+    single_use_lifetimes
+)]
 #[cfg(test)]
 mod tests {
     #![allow(clippy::unwrap_used, clippy::expect_used, clippy::float_cmp)]

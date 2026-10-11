@@ -94,6 +94,16 @@ impl AsyncRead for ObservedIo {
             match socket.poll_read_ready(cx) {
                 Poll::Pending => return Poll::Pending,
                 Poll::Ready(Err(error)) => {
+                    if !self.closed.is_cancelled() {
+                        tracing::warn!(
+                            component = "acp_http",
+                            event = "acp_http_connection_read_failed",
+                            stage = "readiness",
+                            error_type = ?error.kind(),
+                            error_code = ?error.raw_os_error(),
+                            "模型服务 HTTP 连接读取就绪状态失败"
+                        );
+                    }
                     self.closed.cancel();
                     return Poll::Ready(Err(error));
                 }
@@ -109,6 +119,16 @@ impl AsyncRead for ObservedIo {
                 }
                 Err(error) if error.kind() == io::ErrorKind::WouldBlock => {}
                 Err(error) => {
+                    if !self.closed.is_cancelled() {
+                        tracing::warn!(
+                            component = "acp_http",
+                            event = "acp_http_connection_read_failed",
+                            stage = "read",
+                            error_type = ?error.kind(),
+                            error_code = ?error.raw_os_error(),
+                            "模型服务 HTTP 连接读取失败"
+                        );
+                    }
                     self.closed.cancel();
                     return Poll::Ready(Err(error));
                 }

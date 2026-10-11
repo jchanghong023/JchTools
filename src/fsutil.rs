@@ -39,16 +39,8 @@ fn log_filesystem_result<T>(
     }
 }
 pub fn validate_component(name: &str) -> Result<()> {
-    // Windows 拒绝尾随空格/点；其他 Unicode 空白（如全角空格、NBSP）同样会被部分
-    // 文件系统与工具视为尾随空白，一并保守拒绝。
-    if name.is_empty()
-        || name == "."
-        || name == ".."
-        || name
-            .chars()
-            .last()
-            .is_some_and(|c| c == '.' || c.is_whitespace())
-    {
+    // Windows 禁止尾随 ASCII 空格/点；合法 Unicode 空白由可选名称规范化规则处理。
+    if name.is_empty() || name == "." || name == ".." || name.ends_with(['.', ' ']) {
         bail!("不安全或不兼容 Windows 的名称：{name:?}");
     }
     if name
@@ -299,17 +291,13 @@ pub fn normalize_root_with(
     protected: Option<&Path>,
 ) -> Result<(PathBuf, Option<PathBuf>)> {
     let root = fs::canonicalize(path).context("无法访问目标目录")?;
-    if !root.is_dir() || root.parent().is_none() {
-        bail!("请选择普通目录，不允许直接整理整个磁盘根目录");
+    if !root.is_dir() {
+        bail!("请选择普通目录");
     }
-    #[cfg(windows)]
-    {
-        // 组件数 <= 2 同时覆盖盘根与 UNC 共享根：UNC 形态的 server\share 被吸收进
-        // Prefix（\\server\share 为 2 组件，canonicalize 后的 \\?\UNC\server\share 甚至
-        // 只有 1 个组件），因此共享根（含 \\srv\d$ 管理共享）与整盘根同样被拒绝。
-        if root.components().count() <= 2 {
-            bail!("不允许整理磁盘根目录");
-        }
+    #[cfg(not(windows))]
+    if root.parent().is_none() {
+        // 非产品平台维持原有根目录边界；Windows 盘根按 S-05 排除系统子树。
+        bail!("不允许直接整理根目录");
     }
     // S-05 只授权拒绝 Windows 安装目录及其后代；Program Files、用户目录、
     // 盘根不自动扩大进拒绝清单，仍受其余范围与权限规则约束。
@@ -566,6 +554,11 @@ pub fn move_file_preserving_times(source: &Path, target: &Path) -> Result<()> {
                         .and_then(std::io::Error::raw_os_error),
                     "跨卷改名不可用，按既有策略复制并保留时间"
                 );
+                tracing::info!(
+                    event = "filesystem_move_stage_started",
+                    stage = "source_metadata",
+                    "跨卷移动读取源文件时间信息开始"
+                );
                 let metadata =
                     fs::symlink_metadata(source).context("无法读取跨卷移动源文件属性")?;
                 #[cfg(windows)]
@@ -709,13 +702,25 @@ fn set_created_and_modified(
 pub fn set_created_time(path: &Path, created: std::time::SystemTime) -> Result<()> {
     set_created_and_modified(path, Some(created), None)
 }
-pub fn ensure_parent(root: &Path, target: &Path) -> Result<()> {
+/// 返回目标直接父目录是否由本次调用实际创建；既有目录不授予收尾删除所有权。
+pub fn ensure_parent(root: &Path, target: &Path) -> Result<bool> {
     let rel = relative_string(root, target)?;
     safe_join(root, &rel)?;
     let parent = target.parent().context("目标没有父目录")?;
-    fs::create_dir_all(parent)?;
+    let creation = match fs::create_dir(parent) {
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            fs::create_dir_all(parent.parent().context("目标父目录没有上层目录")?)?;
+            fs::create_dir(parent)
+        }
+        result => result,
+    };
+    let created = match creation {
+        Ok(()) => true,
+        Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => false,
+        Err(error) => return Err(error.into()),
+    };
     safe_join(root, &rel)?;
-    Ok(())
+    Ok(created)
 }
 /// 创建目录链本身（`directory` 就是要创建的目录，不再上溯一层）。
 /// `ensure_parent` 只创建传入路径的父级，拿目录调用它只会创建到祖父目录：
@@ -901,6 +906,18 @@ impl Drop for RootGuard {
     }
 }
 
+#[rustfmt::skip]
+#[warn(
+    warnings,
+    unused_must_use,
+    unreachable_patterns,
+    unreachable_pub,
+    unused_variables,
+    rust_2018_idioms,
+    explicit_outlives_requirements,
+    elided_lifetimes_in_paths,
+    single_use_lifetimes
+)]
 #[cfg(test)]
 mod tests {
     use super::*;

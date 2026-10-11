@@ -1,10 +1,23 @@
+#![warn(
+    warnings,
+    unused_must_use,
+    unreachable_patterns,
+    unreachable_pub,
+    unused_variables,
+    future_incompatible,
+    rust_2018_idioms,
+    explicit_outlives_requirements,
+    elided_lifetimes_in_paths,
+    single_use_lifetimes
+)]
+
 #![allow(clippy::unwrap_used)]
 //! 覆盖 XB-05/XB-07（缺陷 S6-04）：引擎返回未知请求 id 的响应（幽灵/重复
 //! 响应）属协议异常，代理不得静默丢弃——等待者必须立即收到失败终态且场景
 //! lane 随之释放，与「超限响应且无法定位请求」的断裂口径一致；否则等待者
 //! 只能靠超时报错，而在途项不随超时删除，场景 lane 被永久占用，直到引擎
 //! 死亡才恢复。与 tests/xberg_shared_process.rs 分文件：各自使用不同的模拟
-//! 引擎 fixture（common 的编译缓存按二进制内首个 fixture 生效）。
+//! 引擎 fixture 和进程级环境变量，避免共享会话状态互相干扰。
 
 mod common;
 use jchtools::xberg_runtime;
@@ -103,15 +116,14 @@ fn unknown_id_response_fails_waiter_and_releases_lane() {
         &AtomicBool::new(false),
     )
     .unwrap_or_else(|error| panic!("lane 未释放，同场景请求被连坐拒绝：{error}"));
+    // XB-17：恢复后的本测试引擎也在断言前登记所有权，断言失败仍须回收。
+    let _recovered = (second["ok"] == true).then(|| SharedProcess {
+        broker_pid: second["jchtools_broker_pid"].as_u64().unwrap(),
+        engine_pid: second["jchtools_xberg_pid"].as_u64(),
+    });
     assert_eq!(
         second["ok"], true,
         "lane 释放后同场景请求应重建引擎并成功：{second}"
     );
     assert_eq!(second["text"], "截图结果");
-    // 重建后的新引擎也要清场：守卫只登记了初代引擎 pid。
-    if let Some(pid) = second["jchtools_xberg_pid"].as_u64() {
-        let _ = Command::new("taskkill")
-            .args(["/PID", &pid.to_string(), "/F"])
-            .output();
-    }
 }

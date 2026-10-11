@@ -87,7 +87,10 @@ fn observe<T>(
                 elapsed_ms,
                 error_type = if io.is_some() {
                     "io"
-                } else if error.chain().any(|cause| cause.is::<rusqlite::Error>()) {
+                } else if error
+                    .chain()
+                    .any(<dyn std::error::Error + 'static>::is::<rusqlite::Error>)
+                {
                     "database"
                 } else {
                     "task_boundary"
@@ -195,50 +198,6 @@ pub struct TaskResult {
     pub directory: PathBuf,
     pub summary: Summary,
 }
-/// 清理硬链接执行的崩溃残留（.jchtools-link-{uuid}）：崩溃发生在「源已删、改名回
-/// 原路径前」时残留无法自愈，扫描对其永久剪枝且无其它回收路径。残留是指向 keeper
-/// 内容的硬链接，删除后内容仍由保留文件持有。24 小时阈值用于避免误删并发任务
-/// 的临时文件。
-/// S-01/F02：清理名单只来自分析阶段登记的「本次处理范围内疑似残留」（见 scan 的
-/// link_residues：扫描时未命中任何范围剪枝规则——glob 排除、非递归深层、隐藏/系统
-/// 范围外、隔离容器、Git 整树排除等都不得越出），执行时逐项复核既有谓词：名称前缀、
-/// 仍是硬链接（链接数 ≥ 2，内容另有链接持有）、修改超过 24 小时；任一不满足即保留。
-/// 普通同名文件可能是用户文件或从压缩包解出的同名成员，静默删除即数据丢失。
-/// 残留是本工具自有临时文件：不经计划行、不按用户删除方式处置，一律永久删除；
-/// 分析日志已在确认前明示数量与清理条件（S-01：不得范围外静默删除）。
-fn clean_orphan_link_temps(job: &mut Job) -> Result<usize> {
-    let rels: Vec<String> = job.db.get("link_residues").unwrap_or_default();
-    if rels.is_empty() {
-        return Ok(0);
-    }
-    let now = std::time::SystemTime::now();
-    let mut removed = 0;
-    for rel in &rels {
-        job.context.control.checkpoint()?;
-        let Ok(path) = fsutil::safe_join(&job.root, rel) else {
-            continue;
-        };
-        let Some(name) = path.file_name().and_then(|n| n.to_str()) else {
-            continue;
-        };
-        if !name.starts_with(".jchtools-link-") {
-            continue;
-        }
-        let stale = fs::symlink_metadata(&path)
-            .and_then(|m| m.modified())
-            .ok()
-            .and_then(|m| now.duration_since(m).ok())
-            .is_some_and(|age| age.as_secs() > 24 * 3600);
-        if !stale {
-            continue;
-        }
-        let residue = fsutil::snapshot(&path).is_ok_and(|s| s.links >= 2);
-        if residue && fs::remove_file(&path).is_ok() {
-            removed += 1;
-        }
-    }
-    Ok(removed)
-}
 /// 解析 S-05 的受保护目录：Windows 读取 SystemRoot 并规范化（缺失或不可访问时
 /// 报错拒绝开始，不得静默失去系统目录保护）；非 Windows 无此概念，返回 None。
 #[cfg(windows)]
@@ -325,6 +284,14 @@ fn record_task_failure(job: &mut Job, error: &anyhow::Error) {
     tracing::info!(
         event = "task_state_changed",
         state = if cancelled { "cancelled" } else { "failed" },
+        scanned = job.summary.scanned,
+        bytes = job.summary.scanned_bytes,
+        deleted = job.summary.deleted,
+        moved = job.summary.moved,
+        skipped = job.summary.skipped,
+        permanent_bytes = job.summary.permanent_bytes,
+        archives_ok = job.summary.archives_ok,
+        archives_failed = job.summary.archives_failed,
         errors = job.summary.errors,
         "记录任务终态"
     );
@@ -409,8 +376,6 @@ fn prepare_at_with(
             "分析任务已建立"
         );
         let result = (|| {
-            // C-01：分析阶段只读，不做任何清扫（含本工具崩溃残留的硬链接临时文件——
-            // 它们被扫描永久剪枝，不影响计划正确性；清扫统一在 apply_with 执行前进行）。
             // C-01：目录整理的分析阶段只读——不解压（解压职责整体移交「递归解压」工具，X-01），
             // 扫描即终态；树里既有压缩包按普通文件参与后续去重/归类。
             *stage = "scan";
@@ -776,10 +741,6 @@ struct ScanSink {
     git_skips: Vec<String>,
     /// 必要 Git 边界检查失败时拒绝继续扫描/处理，不能把未知目录当作已排除。
     git_boundary_error: Option<String>,
-    /// S-01/F02：位于本次处理范围内、因保留名剪枝的 .jchtools-link-* 普通文件
-    /// （疑似上次执行崩溃残留的硬链接临时文件）。只供目录整理流程登记进任务库、
-    /// 执行开始时按既有谓词清理；扫描本身仍然只读。
-    link_residues: Vec<String>,
 }
 fn ensure_git_boundary_checked(error: Option<&str>) -> Result<()> {
     if let Some(error) = error {
@@ -810,21 +771,10 @@ struct ScopeFilter<'a> {
     root_under_special: bool,
 }
 impl ScopeFilter<'_> {
-    fn prunes(&self, child_rel: &str, name: &str, metadata: &fs::Metadata) -> bool {
-        // .jchtools-link-* 是本工具崩溃残留的保留名：一律剪枝（不入盘点）；
-        // 「是否同时还在本次处理范围内」由 walk_dir 结合 prunes_other 判定后登记。
-        if name.starts_with(".jchtools-link-") {
-            return true;
-        }
-        self.prunes_other(child_rel, name, metadata)
-    }
-    /// 除 .jchtools-link-* 名称规则外的全部剪枝判定。
-    /// 供 walk_dir 判断一个 .jchtools-link-* 条目是否「仅在保留名口径下被剪枝」
-    /// （= 位于本次处理范围内，可登记为疑似残留供执行前清理）。
     /// `name` 仅非 Windows 的点开头隐藏判定使用（P-07：产品仅在 Windows 构建）。
     // [quality-baseline approved 2026-10-03] 平台口径参数，经用户裁定保留
     #[cfg_attr(windows, allow(unused_variables))]
-    fn prunes_other(&self, child_rel: &str, name: &str, metadata: &fs::Metadata) -> bool {
+    fn prunes(&self, child_rel: &str, name: &str, metadata: &fs::Metadata) -> bool {
         if self.root_under_special
             || fsutil::is_link(metadata)
             || child_rel == ".jchtools-work"
@@ -991,15 +941,6 @@ fn walk_dir<'a>(
             format!("{rel}/{name}")
         };
         if ctx.scope.prunes(&child_rel, &name, &metadata) {
-            // S-01/F02：.jchtools-link-* 命名剪枝、且未命中任何其他范围规则的普通文件
-            // 是「位于本次处理范围内」的疑似崩溃残留：登记供执行前清理与界面明示，
-            // 删除范围不再由执行期的独立全盘扫描决定。
-            if metadata.is_file()
-                && name.starts_with(".jchtools-link-")
-                && !ctx.scope.prunes_other(&child_rel, &name, &metadata)
-            {
-                lock_sink(ctx.sink).link_residues.push(child_rel);
-            }
             // 被剪枝的条目盘上仍存在：其父目录不得按空目录处理。
             parent_tainted = true;
             continue;
@@ -1090,7 +1031,7 @@ fn walk_dir<'a>(
             let ctx_ref = ctx;
             let span = tracing::Span::current();
             scope.spawn(move |scope| {
-                span.in_scope(|| walk_dir(scope, ctx_ref, &path, child_rel, 0))
+                span.in_scope(|| walk_dir(scope, ctx_ref, &path, child_rel, 0));
             });
         }
         if inline < 32 {
@@ -1098,7 +1039,7 @@ fn walk_dir<'a>(
         } else {
             let span = tracing::Span::current();
             scope.spawn(move |scope| {
-                span.in_scope(|| walk_dir(scope, ctx, &first_path, first_rel, 0))
+                span.in_scope(|| walk_dir(scope, ctx, &first_path, first_rel, 0));
             });
         }
     }
@@ -1137,6 +1078,19 @@ fn scan_emit(
                 job.db.insert_file(&rel, &child.name, normal, snapshot)?;
                 job.summary.scanned += 1;
                 job.summary.scanned_bytes = job.summary.scanned_bytes.saturating_add(snapshot.size);
+                // S-01：根层固定容器被普通文件占用时原位保留；在哈希、清理与
+                // 去重前退出活动集合，不能通过其他规则间接删除或挪走占用项。
+                if !enqueue && parent.is_empty() && planner::is_fixed_container_name(&child.name) {
+                    job.db.deactivate_file_rel(&rel)?;
+                    job.log(
+                        "扫描",
+                        &rel,
+                        "",
+                        "保留",
+                        "固定容器被普通文件占用：不删除、不挪走占用项（S-01）",
+                        snapshot.size,
+                    )?;
+                }
                 if let Some(entry_groups) = archive_entries.as_mut() {
                     if rules::archive_entry_key(&child.name)
                         .is_some_and(|key| entry_groups.insert(key))
@@ -1384,7 +1338,7 @@ fn scan(job: &mut Job, enqueue: bool, state: &Path, protected: Option<&Path>) ->
         pool.install(|| {
             rayon::scope(|scope| {
                 scope.spawn(|scope| {
-                    scan_span.in_scope(|| walk_dir(scope, &ctx, &root, String::new(), 0))
+                    scan_span.in_scope(|| walk_dir(scope, &ctx, &root, String::new(), 0));
                 });
             });
         });
@@ -1420,44 +1374,17 @@ fn scan(job: &mut Job, enqueue: bool, state: &Path, protected: Option<&Path>) ->
             } else {
                 (
             format!(
-                "已识别 {} 个 Git 项目（含 .git 的目录整树保护：不读取内容、不进入树内改名/去重/清理；整树移入本次所选根下的「Git项目集合」，已在集合内的不再移动）：{shown}",
+                "已识别 {} 个 Git 项目（含 .git 的目录整树保护：不读取内容、不进入树内改名/去重/清理；可归类项目整树移入本次所选根下的「Git项目集合」，已就位或占用根层固定容器的项目原位保留）：{shown}",
                 git_roots.len()
             ),
             format!(
-                "已识别 {} 个 Git 项目（整树移入「Git项目集合」，未读取内容）",
+                "已识别 {} 个 Git 项目（未读取内容；已就位或占用固定容器的项目保留）",
                 git_roots.len()
             ),
         )
             };
             job.log("扫描", "", "", "提示", &log_message, 0)?;
             job.context.emit(Event::Notice(notice));
-        }
-        // S-01/F02：范围内疑似崩溃残留（.jchtools-link-*，见 walk_dir 登记）随任务库
-        // 记录，供执行开始时按既有谓词清理；分析日志必须明示，不得静默处置。
-        // 残留清理只属于目录整理的执行段（apply），解压流程不清理、不登记。
-        if !enqueue {
-            let mut residues = std::mem::take(&mut sink.link_residues);
-            residues.sort();
-            residues.dedup();
-            if !residues.is_empty() {
-                job.db.set("link_residues", &residues)?;
-                let shown = preview3(&residues);
-                job.log(
-            "扫描",
-            "",
-            "",
-            "提示",
-            &format!(
-                "发现 {} 个疑似上次执行崩溃残留的硬链接临时文件（.jchtools-link-*，均在本次处理范围内）：{shown}；执行开始时将清理其中「修改超过 24 小时且仍是硬链接（链接数 ≥ 2，内容另有保留文件持有）」的项",
-                residues.len()
-            ),
-            0,
-        )?;
-                job.context.emit(Event::Notice(format!(
-                    "发现 {} 个疑似崩溃残留的硬链接临时文件，执行开始时将清理",
-                    residues.len()
-                )));
-            }
         }
         // 汇总入库：按父目录分组还原深度先序；污点表供 planner 的空目录规划排除，
         // git_roots 供 planner 拒绝把内容归入 Git 工作树（H-06：不归类）。
@@ -1554,8 +1481,8 @@ fn hash_candidates(job: &mut Job) -> Result<()> {
         }
         // C-13：跨运行哈希缓存放在状态目录根（每次 prepare 都新建任务库，缓存必须
         // 跨任务存活）。打开失败只降级为「无缓存、全部重算」，不得阻断分析。
-        let mut cache = match job.db.get::<String>("state_dir") {
-            Ok(dir) => match crate::hash_cache::HashCache::open(Path::new(&dir)) {
+        let mut cache = if let Ok(dir) = job.db.get::<String>("state_dir") {
+            match crate::hash_cache::HashCache::open(Path::new(&dir)) {
                 Ok(cache) => Some(cache),
                 Err(error) => {
                     tracing::warn!(
@@ -1575,17 +1502,16 @@ fn hash_candidates(job: &mut Job) -> Result<()> {
                     )?;
                     None
                 }
-            },
-            Err(_) => {
-                tracing::warn!(
-                    event = "hash_cache_fallback",
-                    stage = "state_directory",
-                    fallback = "recompute_all",
-                    error_type = "task_database",
-                    "缓存目录信息不可用，全部重新计算"
-                );
-                None
             }
+        } else {
+            tracing::warn!(
+                event = "hash_cache_fallback",
+                stage = "state_directory",
+                fallback = "recompute_all",
+                error_type = "task_database",
+                "缓存目录信息不可用，全部重新计算"
+            );
+            None
         };
         let mut reused_total: u64 = 0;
         let mut cursor = 0;
@@ -1977,18 +1903,17 @@ pub fn apply(directory: &Path, context: TaskContext) -> Result<TaskResult> {
         *stage = "task_database";
         let db = Database::open(directory)?;
         // 锁位置：prepare 已把当时的全局锁目录记进任务库（决策规则见 lock_dir_for）。
-        let recorded: Option<PathBuf> = match db.get::<String>("state_dir") {
-            Ok(path) => Some(PathBuf::from(path)),
-            Err(_) => {
-                tracing::warn!(
-                    event = "task_lock_fallback",
-                    stage = "recorded_directory",
-                    fallback = "task_layout",
-                    error_type = "task_database",
-                    "任务锁目录记录不可用，按既有任务布局推导"
-                );
-                None
-            }
+        let recorded: Option<PathBuf> = if let Ok(path) = db.get::<String>("state_dir") {
+            Some(PathBuf::from(path))
+        } else {
+            tracing::warn!(
+                event = "task_lock_fallback",
+                stage = "recorded_directory",
+                fallback = "task_layout",
+                error_type = "task_database",
+                "任务锁目录记录不可用，按既有任务布局推导"
+            );
+            None
         };
         *stage = "task_lock";
         let _guard = fsutil::RootGuard::acquire(&lock_dir_for(directory, recorded.as_deref())?)?;
@@ -2023,26 +1948,16 @@ pub fn apply(directory: &Path, context: TaskContext) -> Result<TaskResult> {
         *stage = "executing_status";
         job.db.set("status", &"executing")?;
         let outcome = (|| {
-            *stage = "orphan_cleanup";
-            // S-01/F02：执行开始时清理上次执行崩溃残留的硬链接临时文件。名单来自分析
-            // 阶段登记的「本次范围内疑似残留」（不越出本次范围设置），执行时逐项复核
-            // 既有谓词；已请求停止时不清理——用户尚未授权本次执行的任何删除。
             job.context.control.checkpoint()?;
-            let removed_link_temps = clean_orphan_link_temps(&mut job)?;
-            if removed_link_temps > 0 {
-                job.log(
-                "任务",
-                "",
-                "",
-                "提示",
-                &format!(
-                    "已清理 {removed_link_temps} 个上次执行崩溃残留的硬链接临时文件（.jchtools-link-*，均为分析阶段在本次范围内登记并经复核的项）"
-                ),
-                0,
-            )?;
+            if !job.config.recursive {
+                // 仅本次连接记录归类实际新建的目标目录，不借固定名称或历史任务
+                // 推断所有权；原有后代始终在非递归收尾范围之外（H-05/R-03）。
+                job.db.conn.execute_batch(
+                    "CREATE TEMP TABLE organizer_created_dirs(rel TEXT PRIMARY KEY);",
+                )?;
             }
-            // 性能打点（perf-tracing，默认不编译）：计划动作的实际执行区间；与前面的
-            // 崩溃残留清理、后面的收尾写库分开计时。
+            // 性能打点（perf-tracing，默认不编译）：计划动作的实际执行区间，
+            // 与后面的收尾写库分开计时。
             crate::perf::perf_span!("execute_actions");
             let pool = io_pool()?;
             *stage = "execute_actions";
@@ -2241,9 +2156,20 @@ fn final_empty_cleanup(job: &mut Job, protected: Option<&Path>) -> Result<()> {
                 root_under_special,
             };
             let recursive = job.config.recursive;
+            let created_dirs: HashSet<String> = if recursive {
+                HashSet::new()
+            } else {
+                let mut statement = job
+                    .db
+                    .conn
+                    .prepare("SELECT rel FROM organizer_created_dirs")?;
+                let rows = statement.query_map([], |row| row.get::<_, String>(0))?;
+                rows.collect::<rusqlite::Result<_>>()?
+            };
             let mut stack: Vec<SweepFrame> = Vec::new();
             // 选定根目录本身绝不删除（H-05）：它的条目决定深度 1 的候选。
-            let (children, keep, notes) = sweep_entries(&scope_filter, true, &job.root, "");
+            let (children, keep, notes) =
+                sweep_entries(&scope_filter, recursive, &created_dirs, &job.root, "");
             for note in notes {
                 job.summary.errors += 1;
                 job.log("清理", "", "", "跳过", &note, 0)?;
@@ -2262,7 +2188,7 @@ fn final_empty_cleanup(job: &mut Job, protected: Option<&Path>) -> Result<()> {
                     let (path, rel) = stack[index].children[stack[index].next].clone();
                     stack[index].next += 1;
                     let (children, keep, notes) =
-                        sweep_entries(&scope_filter, recursive, &path, &rel);
+                        sweep_entries(&scope_filter, recursive, &created_dirs, &path, &rel);
                     for note in notes {
                         job.summary.errors += 1;
                         job.log("清理", &rel, "", "跳过", &note, 0)?;
@@ -2358,17 +2284,29 @@ struct SweepFrame {
     keep: bool,
 }
 /// 读取收尾清理候选目录的条目：返回（需下钻的子目录、是否确定不会为空、记录的跳过原因）。
-/// `collect` 为假（递归已关闭，且不是选定根目录的第一层）时不下钻更深层，也不清理它们；
-/// 深层条目仍会使本目录不算空。
+/// `collect` 为假时只接纳本轮实际新建的目标目录；原有后代不下钻、不清理，
+/// 其条目仍会使父目录不算空（H-05/R-03）。
 fn sweep_entries(
     scope_filter: &ScopeFilter<'_>,
     collect: bool,
+    created_dirs: &HashSet<String>,
     dir: &Path,
     rel: &str,
 ) -> (Vec<(PathBuf, String)>, bool, Vec<String>) {
     let read = match fs::read_dir(dir) {
         Ok(read) => read,
-        Err(error) => return (Vec::new(), true, vec![format!("{error:#}")]),
+        Err(error) => {
+            tracing::warn!(
+                component = "engine",
+                event = "empty_cleanup_item_failed",
+                stage = "directory_read",
+                source = %crate::logging::safe_error(rel),
+                error_type = "io",
+                error_code = error.raw_os_error(),
+                "整理收尾目录读取失败，按保留处理"
+            );
+            return (Vec::new(), true, vec![format!("{error:#}")]);
+        }
     };
     let mut children = Vec::new();
     let mut keep = false;
@@ -2378,12 +2316,29 @@ fn sweep_entries(
             Ok(entry) => entry,
             Err(error) => {
                 // 枚举中断：该目录未必为空，按保留处理。
+                tracing::warn!(
+                    component = "engine",
+                    event = "empty_cleanup_item_failed",
+                    stage = "directory_entry",
+                    source = %crate::logging::safe_error(rel),
+                    error_type = "io",
+                    error_code = error.raw_os_error(),
+                    "整理收尾目录项读取失败，按保留处理"
+                );
                 keep = true;
                 notes.push(format!("{error:#}"));
                 continue;
             }
         };
         let Ok(name) = entry.file_name().into_string() else {
+            tracing::warn!(
+                component = "engine",
+                event = "empty_cleanup_item_failed",
+                stage = "file_name",
+                source = %crate::logging::safe_error(&entry.path().to_string_lossy()),
+                error_type = "invalid_utf8",
+                "整理收尾目录项名称不能无损表示，按保留处理"
+            );
             keep = true;
             continue;
         };
@@ -2393,6 +2348,14 @@ fn sweep_entries(
             format!("{rel}/{name}")
         };
         let Ok(metadata) = entry.metadata() else {
+            tracing::warn!(
+                component = "engine",
+                event = "empty_cleanup_item_failed",
+                stage = "metadata",
+                source = %crate::logging::safe_error(&entry.path().to_string_lossy()),
+                error_type = "metadata_unavailable",
+                "整理收尾目录项元数据不可用，按保留处理"
+            );
             keep = true;
             continue;
         };
@@ -2405,8 +2368,8 @@ fn sweep_entries(
             keep = true;
             continue;
         }
-        if !collect {
-            // 递归范围之外：不清理也不下钻（清理范围与本次扫描一致）。
+        if !collect && !created_dirs.contains(&child_rel) {
+            // 未纳入的既有后代保留；分类本轮新建目标目录仍须收尾（H-05）。
             keep = true;
             continue;
         }
@@ -2415,6 +2378,15 @@ fn sweep_entries(
             Ok(true) => keep = true,
             Ok(false) => children.push((entry.path(), child_rel)),
             Err(error) => {
+                tracing::warn!(
+                    component = "engine",
+                    event = "empty_cleanup_item_failed",
+                    stage = "git_boundary",
+                    source = %crate::logging::safe_error(&child_rel),
+                    error_type = "filesystem_boundary",
+                    error_code = error.chain().find_map(|cause| cause.downcast_ref::<std::io::Error>()).and_then(std::io::Error::raw_os_error),
+                    "整理收尾无法判定Git边界，按保留处理"
+                );
                 keep = true;
                 notes.push(format!("{}：{error:#}", entry.path().display()));
             }
@@ -2913,7 +2885,15 @@ fn execute_move_at(job: &mut Job, action: &Action, source: &Path) -> Result<bool
         &job.root,
         action.target.as_deref().context("移动操作缺少目标")?,
     )?;
-    fsutil::ensure_parent(&job.root, &target)?;
+    let parent_created = fsutil::ensure_parent(&job.root, &target)?;
+    if parent_created && !job.config.recursive {
+        let parent = target.parent().context("移动目标没有父目录")?;
+        let rel = fsutil::relative_string(&job.root, parent)?;
+        job.db.conn.execute(
+            "INSERT OR IGNORE INTO organizer_created_dirs(rel) VALUES(?1)",
+            [&rel],
+        )?;
+    }
     job.log(
         "移动",
         &action.source,
@@ -2961,6 +2941,18 @@ fn execute_action(job: &mut Job, action: &Action) -> Result<bool> {
     }
 }
 
+#[rustfmt::skip]
+#[warn(
+    warnings,
+    unused_must_use,
+    unreachable_patterns,
+    unreachable_pub,
+    unused_variables,
+    rust_2018_idioms,
+    explicit_outlives_requirements,
+    elided_lifetimes_in_paths,
+    single_use_lifetimes
+)]
 #[cfg(test)]
 mod lock_tests {
     use super::*;
@@ -3302,7 +3294,19 @@ mod lock_tests {
 }
 
 /// 扫描日志预览格式的特征测试：锁定 preview3 的「前 3 项、顿号连接、超出追加
-/// 『 等』」口径（Git 整树提示与硬链接残留提示共用同一格式）。
+/// 『 等』」口径（Git 整树提示使用同一格式）。
+#[rustfmt::skip]
+#[warn(
+    warnings,
+    unused_must_use,
+    unreachable_patterns,
+    unreachable_pub,
+    unused_variables,
+    rust_2018_idioms,
+    explicit_outlives_requirements,
+    elided_lifetimes_in_paths,
+    single_use_lifetimes
+)]
 #[cfg(test)]
 mod preview_format_tests {
     use super::preview3;
@@ -3319,6 +3323,18 @@ mod preview_format_tests {
     }
 }
 
+#[rustfmt::skip]
+#[warn(
+    warnings,
+    unused_must_use,
+    unreachable_patterns,
+    unreachable_pub,
+    unused_variables,
+    rust_2018_idioms,
+    explicit_outlives_requirements,
+    elided_lifetimes_in_paths,
+    single_use_lifetimes
+)]
 #[cfg(test)]
 mod s05_scope_tests {
     use super::*;

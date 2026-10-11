@@ -46,9 +46,9 @@ fn main() {
                         pending.lock().unwrap().remove(&id);
                         return;
                     }
-                    // 2026-10-04 协议：document.content 为引擎最终 Markdown，
-                    // warnings 恒在；images 可缺席（空数组为超集情形）。
-                    "\"document\":{\"content\":\"document\",\"images\":[]},\"warnings\":[]".to_owned()
+                    // XB-05：document.content 为引擎最终 Markdown；顶层 warnings
+                    // 是 document.processing_warnings 的副本。
+                    "\"document\":{\"content\":\"document\",\"images\":[],\"processing_warnings\":[]},\"warnings\":[]".to_owned()
                 }
                 "ocr_snapshot" => "\"text\":\"截图结果\",\"records\":1".into(),
                 "transcribe" => "\"markdown\":\"media\"".into(),

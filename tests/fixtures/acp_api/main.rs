@@ -1,3 +1,17 @@
+// future_incompatible 只支持 crate 级；作为测试模块导入时继承测试 crate 的配置。
+#![cfg_attr(not(test), warn(future_incompatible))]
+#![warn(
+    warnings,
+    unused_must_use,
+    unreachable_patterns,
+    unreachable_pub,
+    unused_variables,
+    rust_2018_idioms,
+    explicit_outlives_requirements,
+    elided_lifetimes_in_paths,
+    single_use_lifetimes
+)]
+
 //! AH-02/AH-04/AH-12/AH-13：官方 SDK Agent 探针；不是 OpenCode 或真实模型验收。
 // 此文件同时供消费者测试导入 Plan；各目标使用不同辅助函数。
 // Agent 参数 --agent <audit-root> <mode>：new-category-{missing,unknown} 仅第二个
@@ -14,6 +28,8 @@
 // model-set-held 仅在 hold-model-set 存在时延迟 set 回包，release-model-set 一次放行后持续有效；
 // initialize-held 等待 release-initialize；两种屏障独立于 dispatch、持锁区间，有10秒看门狗。
 // Plan.action=tool-events 发送真正的 ToolCall/ToolCallUpdate 通知后输出正常文本。
+// terminal 在 wait 主命令退出后，另以合成 stdout/stderr 的完整行等待输出快照；
+// 不把 wait 当作管道 EOF，terminal-kill 不等待可能尚未写出的标记。
 #![allow(dead_code, clippy::unwrap_used, clippy::expect_used)]
 
 use agent_client_protocol::schema::v1::{
@@ -277,10 +293,30 @@ async fn callbacks(
                 ))
                 .block_task()
                 .await?;
-            let first = cx
-                .send_request(TerminalOutputRequest::new(id.clone(), terminal.clone()))
-                .block_task()
-                .await?;
+            let first = if plan.action == "terminal" {
+                let stdout = format!("stdout:{}\n", plan.tag);
+                let stderr = format!("stderr:{}\n", plan.tag);
+                // 合成命令只写这两行；两条管道均已观察到完整行才查询第二次累计输出。
+                // 以实际产物作为完成协议，不依赖 EOF、管道读取调度或固定 sleep。
+                tokio::time::timeout(Duration::from_secs(10), async {
+                    loop {
+                        let output = cx
+                            .send_request(TerminalOutputRequest::new(id.clone(), terminal.clone()))
+                            .block_task()
+                            .await?;
+                        if output.output.contains(&stdout) && output.output.contains(&stderr) {
+                            return Ok::<_, Error>(output);
+                        }
+                        tokio::task::yield_now().await;
+                    }
+                })
+                .await
+                .map_err(|_| Error::new(-32043, "终端完整输出等待超时"))??
+            } else {
+                cx.send_request(TerminalOutputRequest::new(id.clone(), terminal.clone()))
+                    .block_task()
+                    .await?
+            };
             let second = cx
                 .send_request(TerminalOutputRequest::new(id.clone(), terminal.clone()))
                 .block_task()
@@ -922,11 +958,12 @@ fn main() {
     if args.first().map(String::as_str) == Some("--terminal") {
         let root = PathBuf::from(&args[1]);
         let tag = &args[2];
-        std::fs::write(
-            root.join(format!("terminal-{tag}.pid")),
-            std::process::id().to_string(),
-        )
-        .unwrap();
+        // 先完整写入再原子发布 PID marker；存在即表示 PID 可解析，kill 不会
+        // 在文件创建与内容落盘之间抢先结束子进程。
+        let pid_path = root.join(format!("terminal-{tag}.pid"));
+        let pending_pid = root.join(format!("terminal-{tag}.pid.tmp"));
+        std::fs::write(&pending_pid, std::process::id().to_string()).unwrap();
+        std::fs::rename(&pending_pid, &pid_path).unwrap();
         // 每个 marker 一次写入，避免格式化宏多段写让两条管道的 prefix/tag 交错。
         // 断言仍校验完整 stdout/stderr 字节与实际退出/释放，不依赖两条管道先后顺序。
         std::io::stdout()
@@ -993,10 +1030,17 @@ pub(crate) mod consumer {
     use tokio_util::compat::{TokioAsyncReadCompatExt, TokioAsyncWriteCompatExt};
 
     pub(crate) fn audit(root: &Path) -> Vec<Value> {
-        std::fs::read_to_string(root.join("audit.jsonl"))
-            .unwrap_or_default()
-            .lines()
-            .filter_map(|line| serde_json::from_str(line).ok())
+        let bytes = match std::fs::read(root.join("audit.jsonl")) {
+            Ok(bytes) => bytes,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Vec::new(),
+            Err(error) => panic!("无法读取探针审计: {error}"),
+        };
+        // 写入和轮询可交错：只暂缓末尾未提交的半行，已换行记录的读取/
+        // JSON 错误必须失败，不能漏计 spawn 或把损坏审计当成没有事件。
+        bytes
+            .split_inclusive(|byte| *byte == b'\n')
+            .filter(|line| line.last() == Some(&b'\n'))
+            .map(|line| serde_json::from_slice(line).expect("探针审计完整行必须是有效 JSON"))
             .collect()
     }
     pub(crate) fn wait_event(root: &Path, event: &str, tag: &str) -> Value {
@@ -1052,7 +1096,8 @@ pub(crate) mod consumer {
         pub headers: BTreeMap<String, String>,
         reader: BufReader<TcpStream>,
         chunked: bool,
-        left: usize,
+        // None 是连接关闭定界；Some 必须读足长度或完整结束 chunk，不能把 EOF 当成功。
+        left: Option<usize>,
         ended: bool,
     }
     impl Http {
@@ -1096,13 +1141,13 @@ pub(crate) mod consumer {
                 .is_some_and(|value| value.eq_ignore_ascii_case("chunked"));
             let left = headers
                 .get("content-length")
-                .map_or(usize::MAX, |value| value.parse().unwrap());
+                .map(|value| value.parse().unwrap());
             Self {
                 status,
                 headers,
                 reader,
                 chunked,
-                left: if chunked { 0 } else { left },
+                left: if chunked { Some(0) } else { left },
                 ended: false,
             }
         }
@@ -1110,36 +1155,56 @@ pub(crate) mod consumer {
             if self.ended {
                 return None;
             }
-            if self.chunked && self.left == 0 {
+            if self.chunked && self.left == Some(0) {
                 let mut line = String::new();
                 assert!(
                     self.reader.read_line(&mut line).unwrap() > 0,
                     "HTTP chunk被截断"
                 );
-                self.left =
-                    usize::from_str_radix(line.trim().split(';').next().unwrap(), 16).unwrap();
-                if self.left == 0 {
+                assert!(line.ends_with("\r\n"), "HTTP chunk标头被截断");
+                self.left = Some(
+                    usize::from_str_radix(line.trim().split(';').next().unwrap(), 16).unwrap(),
+                );
+                if self.left == Some(0) {
+                    // 零长度 chunk 之后仍须收到 trailer 区的终止空行，才是完整消息。
+                    loop {
+                        line.clear();
+                        assert!(
+                            self.reader.read_line(&mut line).unwrap() > 0
+                                && line.ends_with("\r\n"),
+                            "HTTP chunk结束帧被截断"
+                        );
+                        if line == "\r\n" {
+                            break;
+                        }
+                    }
                     self.ended = true;
                     return None;
                 }
             }
-            if self.left == 0 {
+            if self.left == Some(0) {
                 self.ended = true;
                 return None;
             }
             let mut byte = [0_u8; 1];
             match self.reader.read(&mut byte).unwrap() {
                 0 => {
+                    assert!(
+                        !self.chunked && self.left.is_none(),
+                        "HTTP响应帧被截断：尚有 {:?} 字节未读取，chunked={}",
+                        self.left,
+                        self.chunked
+                    );
                     self.ended = true;
                     return None;
                 }
                 1 => {}
                 _ => unreachable!(),
             }
-            if self.left != usize::MAX {
-                self.left -= 1;
+            if let Some(left) = &mut self.left {
+                *left -= 1;
             }
-            if self.chunked && self.left == 0 {
+            if self.chunked && self.left == Some(0) {
                 let mut crlf = [0_u8; 2];
                 self.reader.read_exact(&mut crlf).unwrap();
                 assert_eq!(&crlf, b"\r\n");
@@ -1186,6 +1251,8 @@ pub(crate) mod consumer {
                 if let Some(data) = event.lines().find_map(|line| line.strip_prefix("data: ")) {
                     if data == "[DONE]" {
                         assert!(stop, "缺少finish_reason");
+                        // SSE 终态不替代 HTTP 帧完成；继续读取以暴露长度/chunk 截断。
+                        while self.byte().is_some() {}
                         return text;
                     }
                     let value: Value = serde_json::from_str(data).unwrap();

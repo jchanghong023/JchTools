@@ -15,6 +15,8 @@ import yaml
 EXPECTED_SHA256 = "b5f2bfe2bdd9448429e3e82b51c789775d9b42f2403d082b00662eb77e401c5d"
 EXPECTED_CHARACTERS = 18708
 EXPECTED_BYTES = 74947
+SOURCE_BYTES = 150579
+SOURCE_SHA256 = "ab078671bb49f06228eadccd34f1bb501e157f7a047095ffb943ba81512c77d1"
 REPO_ROOT = Path(__file__).resolve().parents[2]
 
 
@@ -36,7 +38,12 @@ def main() -> int:
     parser.add_argument("output", type=Path)
     args = parser.parse_args()
     output = ensure_repo_tmp_output(args.output)
-    source = yaml.safe_load(args.source.read_text(encoding="utf-8"))
+    # O-07 / 附录 A：只接受冻结的原识别配置，不把其他配置的同名字典当作原资产。
+    source_bytes = args.source.read_bytes()
+    if len(source_bytes) != SOURCE_BYTES or hashlib.sha256(source_bytes).hexdigest() != SOURCE_SHA256:
+        message = "原识别配置大小或 SHA-256 与 O-07 附录 A 不符"
+        raise ValueError(message)
+    source = yaml.safe_load(source_bytes.decode("utf-8"))
     chars = source["PostProcess"]["character_dict"]
     if len(chars) != EXPECTED_CHARACTERS or not all(isinstance(char, str) and len(char) == 1 for char in chars):
         message = "字典条数或字符格式错误"

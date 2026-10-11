@@ -93,7 +93,13 @@ stream
     .await
     .inspect_err(|e| tracing::error!(event = "acp_control_frame_failed", component = "acp_control", stage = "write_body", error_type = ?e.kind(), error_code = ?e.raw_os_error(), "ACP 控制帧写入失败"))
     .map_err(|e| error(format!("写入模型服务控制管道失败：{e}")))?;
-stream.flush().await.map_err(|e| error(e.to_string())) }).await
+stream
+    .flush()
+    .await
+    .map_err(|e| {
+        tracing::error!(event = "acp_control_frame_failed", component = "acp_control", stage = "flush", direction = "send", error_type = ?e.kind(), error_code = ?e.raw_os_error(), "ACP 控制帧刷新失败");
+        error(e.to_string())
+    }) }).await
 }
 #[cfg(windows)]
 async fn receive<T: serde::de::DeserializeOwned>(
@@ -318,17 +324,39 @@ mod platform {
         // SAFETY: 名字及 ACL 在调用中有效，不继承 handle。
         let raw = unsafe { CreateMutexW(&raw const attributes, 0, name.as_ptr()) };
         if raw.is_null() {
-            return Err(error(format!(
-                "创建模型服务单实例锁失败：{}",
-                std::io::Error::last_os_error()
-            )));
+            let cause = std::io::Error::last_os_error();
+            tracing::error!(event = "acp_control_lock_failed", component = "acp_control", stage = "create", lock_kind = kind, error_type = ?cause.kind(), error_code = cause.raw_os_error(), "ACP 控制单实例锁创建失败");
+            return Err(error(format!("创建模型服务单实例锁失败：{cause}")));
         }
         let handle = Handle(raw);
         // SAFETY: handle 是 mutex；同步 facade/service 均在本线程持有和释放。
         match unsafe { WaitForSingleObject(raw, if wait { 30_000 } else { 0 }) } {
-            WAIT_OBJECT_0 | WAIT_ABANDONED => Ok(Some(InstanceLock { handle })),
-            windows_sys::Win32::Foundation::WAIT_TIMEOUT => Ok(None),
-            _ => Err(error("等待模型服务单实例锁失败")),
+            WAIT_OBJECT_0 => Ok(Some(InstanceLock { handle })),
+            WAIT_ABANDONED => {
+                tracing::warn!(
+                    event = "acp_control_lock_recovered",
+                    component = "acp_control",
+                    lock_kind = kind,
+                    status = "abandoned_owner_recovered",
+                    "ACP 控制单实例锁此前的持有者异常退出，当前进程已接管"
+                );
+                Ok(Some(InstanceLock { handle }))
+            }
+            windows_sys::Win32::Foundation::WAIT_TIMEOUT => {
+                tracing::info!(
+                    event = "acp_control_lock_busy",
+                    component = "acp_control",
+                    lock_kind = kind,
+                    waiting = wait,
+                    "ACP 控制单实例锁仍由其他操作持有"
+                );
+                Ok(None)
+            }
+            _ => {
+                let cause = std::io::Error::last_os_error();
+                tracing::error!(event = "acp_control_lock_failed", component = "acp_control", stage = "wait", lock_kind = kind, error_type = ?cause.kind(), error_code = cause.raw_os_error(), "等待 ACP 控制单实例锁失败");
+                Err(error("等待模型服务单实例锁失败"))
+            }
         }
     }
     fn ensure_same_pipe_session(pipe: HANDLE) -> Result<(), ServiceError> {
@@ -426,13 +454,19 @@ mod platform {
                             // 不阻塞 executor，不启动后台；等服务发布下一监听实例。
                             tokio::time::sleep(Duration::from_millis(10)).await;
                         }
-                        Err(e) => return Err(error(format!("连接模型服务控制管道失败：{e}"))),
+                        Err(e) => {
+                            tracing::error!(event = "acp_control_connect_failed", component = "acp_control", stage = "open", method = operation.name(), error_type = ?e.kind(), error_code = ?e.raw_os_error(), "ACP 控制管道客户端连接失败");
+                            return Err(error(format!("连接模型服务控制管道失败：{e}")))
+                        }
                     }
                 }
             };
             let Some(mut pipe) = tokio::time::timeout_at(deadline, connected)
                 .await
-                .map_err(|_| error("模型服务控制查询超时"))??
+                .map_err(|_| {
+                    tracing::error!(event = "acp_control_exchange_timeout", component = "acp_control", stage = "connect", method = operation.name(), timeout_ms = 15000, error_type = "timeout", "ACP 控制管道连接超时");
+                    error("模型服务控制查询超时")
+                })??
             else {
                 tracing::info!(
                     event = "acp_control_peer_absent",
@@ -463,6 +497,7 @@ mod platform {
                 .await?;
                 let response: Response<T> = receive(&mut pipe).await?;
                 if response.protocol != PROTOCOL || response.pid != actual_pid {
+                    tracing::error!(event = "acp_control_exchange_failed", component = "acp_control", stage = "response_validation", method = operation.name(), peer_pid = actual_pid, expected_protocol = PROTOCOL, received_protocol = response.protocol, error_type = "protocol_or_peer_mismatch", "ACP 控制响应协议或对端身份不匹配");
                     return Err(error("模型服务控制协议或进程归属不匹配"));
                 }
                 response.result.map(Some)
@@ -472,7 +507,10 @@ mod platform {
             } else {
                 tokio::time::timeout_at(deadline, work)
                     .await
-                    .map_err(|_| error("模型服务控制查询超时"))?
+                    .map_err(|_| {
+                        tracing::error!(event = "acp_control_exchange_timeout", component = "acp_control", stage = "response", method = operation.name(), peer_pid = actual_pid, timeout_ms = 15000, error_type = "timeout", "ACP 控制操作响应超时");
+                        error("模型服务控制查询超时")
+                    })?
             }
         })
         .instrument(span)
@@ -489,7 +527,10 @@ mod platform {
         unsafe {
             options.create_with_security_attributes_raw(pipe_name()?, (&raw mut attributes).cast())
         }
-        .map_err(|e| error(format!("创建模型服务控制管道失败：{e}")))
+        .map_err(|e| {
+            tracing::error!(event = "acp_control_listener_failed", component = "acp_control", stage = "create", error_type = ?e.kind(), error_code = ?e.raw_os_error(), "ACP 控制管道监听创建失败");
+            error(format!("创建模型服务控制管道失败：{e}"))
+        })
     }
     pub(in crate::acp_api::runtime) async fn serve(
         status: watch::Receiver<ServiceStatus>,
@@ -500,6 +541,7 @@ mod platform {
     ) -> Result<(), ServiceError> {
         crate::acp_api::diagnostics::async_call("acp_control", "serve", async { let mut pipe = match create_pipe(true) {
         Ok(pipe) => {
+            tracing::info!(event = "acp_control_listener_ready", component = "acp_control", protocol = PROTOCOL, "ACP 控制管道监听已就绪");
             let _ = ready.send(Ok(()));
             pipe
         }
@@ -511,8 +553,14 @@ mod platform {
     let mut workers = tokio::task::JoinSet::new();
     loop {
         tokio::select! {
-            () = shutdown.cancelled() => break,
-            result = pipe.connect() => result.map_err(|e| error(format!("接受模型服务控制连接失败：{e}")))?,
+            () = shutdown.cancelled() => {
+                tracing::info!(event = "acp_control_listener_stopping", component = "acp_control", reason = "shutdown_requested", "ACP 控制管道监听收到停止请求");
+                break;
+            },
+            result = pipe.connect() => result.map_err(|e| {
+                tracing::error!(event = "acp_control_listener_failed", component = "acp_control", stage = "accept", error_type = ?e.kind(), error_code = ?e.raw_os_error(), "ACP 控制管道接受连接失败");
+                error(format!("接受模型服务控制连接失败：{e}"))
+            })?,
         }
         let mut connected = pipe;
         pipe = create_pipe(false)?;
@@ -530,10 +578,19 @@ mod platform {
         let shutdown = shutdown.clone();
         workers.spawn(crate::acp_api::diagnostics::async_call("acp_control", "server_connection", async move {
             tracing::info!(event = "acp_control_connection_received", component = "acp_control", peer_pid, "ACP 控制管道服务端已验证客户端");
-            let request: IncomingRequest =
-                tokio::time::timeout(Duration::from_secs(15), receive(&mut connected))
-                    .await
-                    .map_err(|_| error("模型服务控制请求超时"))??;
+            // 只取消尚未提交操作的连接；已接收的 Apply/Stop 仍等待控制器和回执收尾。
+            let request: IncomingRequest = tokio::select! {
+                biased;
+                () = shutdown.cancelled() => {
+                    tracing::info!(event = "acp_control_connection_cancelled", component = "acp_control", stage = "receive", peer_pid, reason = "listener_shutdown", "ACP 控制管道停止时关闭尚未提交操作的连接");
+                    return Ok(());
+                },
+                result = tokio::time::timeout(Duration::from_secs(15), receive(&mut connected)) =>
+                    result.map_err(|_| {
+                        tracing::error!(event = "acp_control_request_timeout", component = "acp_control", stage = "receive", peer_pid, timeout_ms = 15000, error_type = "timeout", "ACP 控制请求接收超时");
+                        error("模型服务控制请求超时")
+                    })??,
+            };
             let (operation, injected_id, request_protocol) = match request {
                 IncomingRequest::PrivateControl(request) =>
                     (request.operation, Some(request.diagnostic_id), "private_control"),
@@ -615,6 +672,18 @@ mod platform {
     Ok(()) }).await
     }
 
+    #[rustfmt::skip]
+    #[warn(
+        warnings,
+        unused_must_use,
+        unreachable_patterns,
+        unreachable_pub,
+        unused_variables,
+        rust_2018_idioms,
+        explicit_outlives_requirements,
+        elided_lifetimes_in_paths,
+        single_use_lifetimes
+    )]
     #[cfg(test)]
     mod tests {
         #![allow(clippy::unwrap_used, clippy::expect_used)]

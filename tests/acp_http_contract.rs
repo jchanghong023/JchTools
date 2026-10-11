@@ -1,3 +1,16 @@
+#![warn(
+    warnings,
+    unused_must_use,
+    unreachable_patterns,
+    unreachable_pub,
+    unused_variables,
+    future_incompatible,
+    rust_2018_idioms,
+    explicit_outlives_requirements,
+    elided_lifetimes_in_paths,
+    single_use_lifetimes
+)]
+
 //! AH-03/AH-04/AH-05/AH-12/AH-13：真实 TCP → Axum → 产品适配 → 官方 SDK Agent。
 //! 这些是合成协议测试，不声称 AH-A03～AH-A09 的真实 OpenCode 验收通过。
 #![allow(clippy::unwrap_used, clippy::expect_used)]
@@ -269,13 +282,17 @@ fn text_roles_are_preserved_and_unsupported_inputs_are_rejected() {
         .iter()
         .filter(|event| event["event"] == "started")
         .count();
-    for invalid in [
-        json!({"model":MODEL_A,"messages":[{"role":"user","content":[{"type":"image_url","image_url":{"url":"data:image/png;base64,AA=="}}]}]}),
-        json!({"model":MODEL_A,"messages":[{"role":"tool","content":"tool-result"}]}),
-        json!({"model":MODEL_A,"messages":[],"tools":[]}),
-        json!({"model":MODEL_A,"messages":[],"tool_choice":"none"}),
-        json!({"model":MODEL_A,"messages":[],"permission":"allow"}),
+    // 各例只破坏一个输入维度；空 messages 不能替代不支持字段的拒绝证据。
+    for (field, value) in [
+        ("messages", json!([{"role":"user","content":[{"type":"image_url","image_url":{"url":"data:image/png;base64,AA=="}}]}])),
+        ("messages", json!([{"role":"tool","content":"tool-result"}])),
+        ("tools", json!([])),
+        ("tool_choice", json!("none")),
+        ("permission", json!("allow")),
+        ("stream_options", json!({"include_usage":true})),
     ] {
+        let mut invalid = body(&Plan::new("text"), false);
+        invalid[field] = value;
         let response = Http::open(
             server.port,
             "POST",
@@ -513,7 +530,8 @@ fn explicit_history_reuses_session_and_rejects_changed_prefix() {
     assert_eq!(response.status, 200);
     let session = response.headers["x-jchtools-session-id"].clone();
     let output = completion(&response.json()).to_owned();
-    let second = Plan::new("text");
+    let mut second = Plan::new("text");
+    second.chunks = vec!["续会话专属回答".into()];
     let request = json!({"model":MODEL_A,"messages":[{"role":"user","content":first.prompt()},{"role":"assistant","content":output},{"role":"user","content":second.prompt()}]});
     let response = Http::open(
         server.port,
@@ -534,7 +552,18 @@ fn explicit_history_reuses_session_and_rejects_changed_prefix() {
         "不得重发既有历史"
     );
     assert!(!event["prompt"].as_str().unwrap().contains(&output));
-    let mut changed = request;
+    // 已完成第二轮后，坏前缀用例仍须带完整第二轮和新的 user 输入。
+    // 否则即使不校验首轮前缀，也可能仅因历史缺失/没有新增轮次而返回 400。
+    let third = Plan::new("text");
+    let mut next = request;
+    next["messages"]
+        .as_array_mut()
+        .unwrap()
+        .extend([
+            json!({"role":"assistant","content":second.text()}),
+            json!({"role":"user","content":third.prompt()}),
+        ]);
+    let mut changed = next.clone();
     changed["messages"][0]["content"] = json!("changed-prefix");
     let response = Http::open(
         server.port,
@@ -551,6 +580,24 @@ fn explicit_history_reuses_session_and_rejects_changed_prefix() {
             .filter(|event| event["event"] == "started")
             .count(),
         2
+    );
+    let response = Http::open(
+        server.port,
+        "POST",
+        "/v1/chat/completions",
+        Some(&next),
+        Some(&session),
+    );
+    assert_eq!(response.status, 200);
+    assert_eq!(completion(&response.json()), third.text());
+    let third_start = wait_event(&server.root, "started", &third.tag);
+    assert_eq!(third_start["session"], event["session"]);
+    assert_eq!(
+        audit(&server.root)
+            .iter()
+            .filter(|event| event["event"] == "started")
+            .count(),
+        3
     );
 }
 
@@ -625,7 +672,8 @@ fn same_session_turns_wait_in_fifo_order_without_implicit_cancel() {
         Some("fifo-session"),
     );
     assert_eq!(stream.delta(), first.chunks[0]);
-    let second = Plan::new("text");
+    let mut second = Plan::new("text");
+    second.chunks = vec!["second-only".into()];
     let mut third = Plan::new("text");
     third.chunks = vec!["third-only".into()];
     let history = vec![
@@ -906,18 +954,56 @@ fn second_default_session_accepts_unknown_model_category() {
 fn assert_second_default_session(mode: &str) {
     let server = server(mode);
     let first = Plan::new("text");
-    assert_eq!(completion(&server.post(&first).json()), first.text());
+    let first_response = server.post(&first);
+    assert_eq!(first_response.status, 200);
+    let first_session = first_response.headers["x-jchtools-session-id"].clone();
+    assert_eq!(completion(&first_response.json()), first.text());
     let second = Plan::new("text");
-    let response = server.post(&second);
+    let mut request = body(&second, false);
+    request["model"] = json!(MODEL_B);
+    let response = Http::open(
+        server.port,
+        "POST",
+        "/v1/chat/completions",
+        Some(&request),
+        None,
+    );
     assert_eq!(
         response.status, 200,
         "已协商 selector 在第二默认会话失效：{mode}"
     );
-    assert_eq!(completion(&response.json()), second.text());
+    assert_ne!(response.headers["x-jchtools-session-id"], first_session);
+    let value = response.json();
+    assert_eq!(value["model"], MODEL_B);
+    assert_eq!(completion(&value), second.text());
     let first_start = wait_event(&server.root, "started", &first.tag);
     let second_start = wait_event(&server.root, "started", &second.tag);
+    assert_eq!(first_start["model"], MODEL_A);
+    assert_eq!(second_start["model"], MODEL_B);
     assert_ne!(first_start["session"], second_start["session"]);
     assert_eq!(first_start["pid"], second_start["pid"]);
+    // 两个新会话都必须先以该会话协商的 ID 确认所请求模型，再提交 prompt。
+    let events = audit(&server.root);
+    for (start, requested) in [(&first_start, MODEL_A), (&second_start, MODEL_B)] {
+        let selection_index = events
+            .iter()
+            .position(|event| {
+                event["event"] == "model"
+                    && event["session"] == start["session"]
+                    && event["model"] == requested
+            })
+            .unwrap();
+        let negotiated = events
+            .iter()
+            .find(|event| event["event"] == "session" && event["session"] == start["session"])
+            .unwrap();
+        assert_eq!(events[selection_index]["config_id"], negotiated["config_id"]);
+        let start_index = events
+            .iter()
+            .position(|event| event["event"] == "started" && event["tag"] == start["tag"])
+            .unwrap();
+        assert!(selection_index < start_index);
+    }
 }
 
 fn continuation(first: &Plan, second: &Plan, model: &str) -> Value {

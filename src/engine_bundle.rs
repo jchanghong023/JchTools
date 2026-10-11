@@ -86,6 +86,7 @@ fn vet_candidate(
 /// 通过「存在 + sha256 一致」校验后才可使用；不可用的候选只记录原因并继续下一顺位，
 /// 绝不执行、绝不删除或改写其中的文件（E-02：不自动覆盖现有文件）。
 fn resolve_among(bundled: Option<&Path>, embedded_base: Option<&Path>) -> Result<PathBuf> {
+    let started = std::time::Instant::now();
     let mut failures: Vec<String> = Vec::new();
 
     // 候选 1：EXE 同目录的随包引擎目录。
@@ -109,6 +110,14 @@ fn resolve_among(bundled: Option<&Path>, embedded_base: Option<&Path>) -> Result
 
     // 候选 2/3 都依赖内嵌引擎；构建未内嵌时到此为止（E-05）。
     if !embedded_available() {
+        tracing::error!(
+            component = "engine_bundle",
+            event = "engine_resolution_failed",
+            stage = "embedded_unavailable",
+            error_type = "embedded_engine_unavailable",
+            elapsed_ms = crate::logging::elapsed_ms(started),
+            "没有可用的 7-Zip 引擎"
+        );
         let mut message = String::from(
             "未找到可用的 7-Zip 引擎：随包候选不存在或未通过清单校验，本构建也没有内嵌引擎。请运行 scripts/fetch-7zip.ps1 获取官方完整引擎后重新构建。",
         );
@@ -148,7 +157,16 @@ fn resolve_among(bundled: Option<&Path>, embedded_base: Option<&Path>) -> Result
 
     // 候选 3a：固定位置只缺文件时从 EXE 补齐释放（已存在文件一律不覆盖），补齐后复检。
     if problems.iter().any(|problem| problem.missing) {
+        let release_started = std::time::Instant::now();
         if let Err(error) = release(base) {
+            tracing::warn!(
+                component = "engine_bundle",
+                event = "engine_embedded_release_failed",
+                stage = "fixed_location",
+                error_type = "release_error",
+                elapsed_ms = crate::logging::elapsed_ms(release_started),
+                "固定目录释放失败，将尝试独立目录回退"
+            );
             failures.push(format!("向固定位置释放内嵌引擎失败：{error:#}"));
         }
         problems = candidate_problems(base);
@@ -160,6 +178,14 @@ fn resolve_among(bundled: Option<&Path>, embedded_base: Option<&Path>) -> Result
     }
 
     // 候选 3b：固定位置被无效文件占用时，释放到新的独立自有位置（不删占用文件），仍校验后使用。
+    tracing::info!(
+        component = "engine_bundle",
+        event = "engine_embedded_release_fallback_started",
+        stage = "independent_location",
+        reason = "fixed_location_unusable",
+        "固定释放位置不可用，开始独立目录回退"
+    );
+    let independent_release_started = std::time::Instant::now();
     match fresh_release_dir(base).and_then(|directory| release(&directory).map(|()| directory)) {
         Ok(directory) => {
             let problems = candidate_problems(&directory);
@@ -173,9 +199,28 @@ fn resolve_among(bundled: Option<&Path>, embedded_base: Option<&Path>) -> Result
                 return Ok(path);
             }
         }
-        Err(error) => failures.push(format!("新位置释放内嵌引擎失败：{error:#}")),
+        Err(error) => {
+            tracing::error!(
+                component = "engine_bundle",
+                event = "engine_embedded_release_failed",
+                stage = "independent_location",
+                error_type = "release_or_directory_error",
+                elapsed_ms = crate::logging::elapsed_ms(independent_release_started),
+                "独立位置创建或释放失败，无法解析 7-Zip 引擎"
+            );
+            failures.push(format!("新位置释放内嵌引擎失败：{error:#}"));
+        }
     }
 
+    tracing::error!(
+        component = "engine_bundle",
+        event = "engine_resolution_failed",
+        stage = "candidate_resolution",
+        error_type = "no_usable_candidate",
+        failure_count = failures.len(),
+        elapsed_ms = crate::logging::elapsed_ms(started),
+        "全部 7-Zip 候选均不可用"
+    );
     bail!(
         "没有可用的 7-Zip 引擎（所有候选均未通过校验，按 E-05 停止）：\n- {}",
         failures.join("\n- ")
@@ -200,6 +245,15 @@ fn join_problems(problems: &[Problem]) -> String {
 /// 候选因校验问题被拒绝时记录原因（stderr + engine-warnings.log）。
 /// 拒绝只表示「不使用该候选」：其中的文件一律不删除、不改写。
 fn reject_candidate(context: &str, directory: &Path, problems: &[Problem]) {
+    tracing::warn!(
+        component = "engine_bundle",
+        event = "engine_candidate_rejected",
+        candidate = context,
+        stage = "candidate_validation",
+        error_type = "candidate_validation_failed",
+        problem_count = problems.len(),
+        "7-Zip 候选未通过清单校验"
+    );
     persist_engine_warning(&format!(
         "已拒绝使用{context}（{}）：{}；按候选顺序尝试下一顺位",
         directory.display(),
@@ -580,6 +634,18 @@ fn write_atomic(target: &Path, bytes: &[u8]) -> Result<()> {
     result
 }
 
+#[rustfmt::skip]
+#[warn(
+    warnings,
+    unused_must_use,
+    unreachable_patterns,
+    unreachable_pub,
+    unused_variables,
+    rust_2018_idioms,
+    explicit_outlives_requirements,
+    elided_lifetimes_in_paths,
+    single_use_lifetimes
+)]
 #[cfg(test)]
 mod tests {
     use super::*;

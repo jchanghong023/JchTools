@@ -22,8 +22,8 @@ fn main() {
         let id = field(&line, "id");
         let command = field(&line, "command");
         let respond = |out: &mut io::StdoutLock, id: &str, payload: &str| {
-            let _ = writeln!(out, "{{\"id\":\"{id}\",\"ok\":true,{payload}}}");
-            let _ = out.flush();
+            writeln!(out, "{{\"id\":\"{id}\",\"ok\":true,{payload}}}").unwrap();
+            out.flush().unwrap();
         };
         match command.as_str() {
             "capabilities" => respond(
@@ -35,11 +35,12 @@ fn main() {
             "ocr_snapshot" if field(&line, "image_base64") == "phantom" => {
                 // 缺陷注入：先回一条无人认领（未知 id）的幽灵响应，再对触发
                 // 请求保持沉默，等待者在代理侧不再有任何可达终态。
-                let _ = writeln!(
+                writeln!(
                     out,
                     "{{\"id\":\"ghost-unclaimed\",\"ok\":true,\"text\":\"phantom\"}}"
-                );
-                let _ = out.flush();
+                )
+                .unwrap();
+                out.flush().unwrap();
             }
             "ocr_snapshot" => respond(&mut out, &id, "\"text\":\"截图结果\",\"records\":1"),
             // 取消目标（触发请求）永不结束：修复前取消接口只能超时，突出

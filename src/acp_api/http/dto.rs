@@ -262,11 +262,13 @@ pub(super) fn parse_chat(
             "logprobs",
             "top_logprobs",
             "reasoning_effort",
+            "verbosity",
             "prediction",
             "audio",
             "modalities",
             "parallel_tool_calls",
             "service_tier",
+            "web_search_options",
         ],
         "",
         false,
@@ -534,6 +536,18 @@ pub(super) fn chunk<'a>(
     }
 }
 
+#[rustfmt::skip]
+#[warn(
+    warnings,
+    unused_must_use,
+    unreachable_patterns,
+    unreachable_pub,
+    unused_variables,
+    rust_2018_idioms,
+    explicit_outlives_requirements,
+    elided_lifetimes_in_paths,
+    single_use_lifetimes
+)]
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -569,13 +583,30 @@ mod tests {
             ("tools", json!([])),
             ("tool_choice", json!("none")),
             ("temperature", json!(0)),
+            ("verbosity", json!("low")),
+            ("web_search_options", json!({"search_context_size":"low"})),
             ("n", json!(2)),
             ("stream_options", json!({"include_usage":true})),
         ] {
             let mut request = base.clone();
             request[name] = value;
-            assert!(parse_chat(request, None).is_err(), "{name}");
+            let error = match parse_chat(request, None) {
+                Ok(_) => panic!("{name} 应明确拒绝"),
+                Err(error) => error,
+            };
+            assert_eq!(error.status, StatusCode::BAD_REQUEST, "{name}");
+            // param 可定位顶层字段或具体子字段；错误路径措辞不是能力边界。
+            assert_eq!(error.kind, "invalid_request_error", "{name}");
+            assert_eq!(error.code, "invalid_request", "{name}");
+            assert!(
+                error.param.as_deref().is_some_and(|param| !param.is_empty()),
+                "{name}"
+            );
         }
+        let mut supported = base.clone();
+        supported["stream"] = json!(true);
+        supported["stream_options"] = json!({"include_usage":false});
+        assert!(parse_chat(supported, None).unwrap().stream);
         for content in [
             json!(null),
             json!([{"type":"image_url", "image_url": {"url":"x"}}]),

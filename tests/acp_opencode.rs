@@ -1,3 +1,16 @@
+#![warn(
+    warnings,
+    unused_must_use,
+    unreachable_patterns,
+    unreachable_pub,
+    unused_variables,
+    future_incompatible,
+    rust_2018_idioms,
+    explicit_outlives_requirements,
+    elided_lifetimes_in_paths,
+    single_use_lifetimes
+)]
+
 //! AH-02～AH-04/AH-06～AH-10/AH-12：真实公开 HTTP → 独立 JchTools 后台 → 官方 SDK → OpenCode。
 //! 本阶段只验 Models、基本文本 JSON/SSE 和单 Agent 单并发；不代表 GUI、工具或并行验收通过。
 //! OpenCode 版本按实际运行记录；截图 v2.0.26 仅为本次基准，不限定产品版本。

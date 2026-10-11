@@ -1,3 +1,16 @@
+#![warn(
+    warnings,
+    unused_must_use,
+    unreachable_patterns,
+    unreachable_pub,
+    unused_variables,
+    future_incompatible,
+    rust_2018_idioms,
+    explicit_outlives_requirements,
+    elided_lifetimes_in_paths,
+    single_use_lifetimes
+)]
+
 //! 覆盖 H-07 / X-04：冲突只改文件名主体，保留原扩展名和复合扩展名。
 #![allow(clippy::unwrap_used, clippy::expect_used)]
 use jchtools::fsutil;

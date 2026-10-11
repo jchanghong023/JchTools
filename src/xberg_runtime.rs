@@ -258,6 +258,19 @@ fn validate_capabilities(capabilities: &Value, command: &str) -> Result<(), Stri
     {
         return Err("Xberg 共享接口阻塞：需要协议 v2、跨场景并发、请求级取消和超时；当前引擎不满足，未提交推理".into());
     }
+    // 命令表也包含未编译场景的错误应答入口；显式否定不能被命令名掩盖。
+    // v2 的增量能力字段可选，缺字段沿用旧握手语义，不强制用户升级。
+    if command == "extract" && capabilities["paddle_ocr"] == false {
+        return Err(
+            "Xberg 文档能力不匹配：需要已编译的 paddle-ocr 后端；当前引擎不满足，未提交推理".into(),
+        );
+    }
+    if command == "transcribe" && capabilities["transcription"] == false {
+        return Err(
+            "Xberg 媒体能力不匹配：需要已编译的 SenseVoice 转录链路；当前引擎不满足，未提交推理"
+                .into(),
+        );
+    }
     Ok(())
 }
 
@@ -329,6 +342,18 @@ pub fn validate_assets(root: &Path, scenario: &str) -> Result<(), String> {
     Ok(())
 }
 
+#[rustfmt::skip]
+#[warn(
+    warnings,
+    unused_must_use,
+    unreachable_patterns,
+    unreachable_pub,
+    unused_variables,
+    rust_2018_idioms,
+    explicit_outlives_requirements,
+    elided_lifetimes_in_paths,
+    single_use_lifetimes
+)]
 #[cfg(any(test, feature = "test-hooks"))]
 #[cfg(test)]
 mod tests {
@@ -373,6 +398,43 @@ mod tests {
         assert_eq!(config["ocr"]["language"][0], "ch");
         assert_eq!(config["images"]["include_data_base64"], true);
         assert!(config.get("snapshot_ocr").is_none());
+    }
+
+    /// 覆盖 XB-06/XB-09：命令名称存在不代表对应场景的推理后端已编译。
+    /// Xberg 在 feature 关闭时仍列出 extract/transcribe，必须读取能力布尔值。
+    #[test]
+    fn scene_capabilities_require_compiled_backends() {
+        let mut capabilities = json!({
+            "ok": true,
+            "commands": ["extract", "ocr_snapshot", "transcribe", "cancel"],
+            "protocol_version": 2,
+            "cancellation": "cooperative",
+            "timeout_ms": true,
+            "document_snapshot_concurrent": true,
+            "paddle_ocr": false,
+            "transcription": false
+        });
+        let document_error = validate_capabilities(&capabilities, "extract")
+            .expect_err("文档不得退回无 PaddleOCR 的后端");
+        assert!(document_error.contains("paddle-ocr"));
+        let media_error = validate_capabilities(&capabilities, "transcribe")
+            .expect_err("媒体不得提交到未编译的转录命令");
+        assert!(media_error.contains("SenseVoice"));
+        validate_capabilities(&capabilities, "ocr_snapshot")
+            .expect("截图不依赖文档和媒体的编译能力");
+
+        capabilities["paddle_ocr"] = json!(true);
+        validate_capabilities(&capabilities, "extract").expect("文档后端已编译");
+        assert!(validate_capabilities(&capabilities, "transcribe").is_err());
+        capabilities["transcription"] = json!(true);
+        validate_capabilities(&capabilities, "transcribe").expect("媒体后端已编译");
+
+        capabilities.as_object_mut().unwrap().remove("paddle_ocr");
+        capabilities.as_object_mut().unwrap().remove("transcription");
+        validate_capabilities(&capabilities, "extract").expect("旧 v2 缺字段沿用既有语义");
+        validate_capabilities(&capabilities, "transcribe").expect("旧 v2 缺字段沿用既有语义");
+        validate_capabilities(&capabilities, "ocr_snapshot")
+            .expect("缺少其他场景能力字段不阻止独立截图");
     }
 
     #[test]

@@ -18,7 +18,17 @@ fn runtime() -> Result<tokio::runtime::Runtime, ServiceError> {
         .worker_threads(2)
         .enable_all()
         .build()
-        .map_err(|e| ipc::error(format!("创建模型服务运行时失败：{e}")))
+        .map_err(|e| {
+            tracing::error!(
+                event = "acp_runtime_build_failed",
+                component = "acp_runtime",
+                stage = "build",
+                error_type = ?e.kind(),
+                error_code = ?e.raw_os_error(),
+                "创建 ACP 模型服务运行时失败"
+            );
+            ipc::error(format!("创建模型服务运行时失败：{e}"))
+        })
 }
 fn inactive() -> Result<ServiceStatus, ServiceError> {
     let saved_config = settings::load_config()?;
@@ -57,13 +67,31 @@ pub fn ensure_started() -> Result<ServiceStatus, ServiceError> {
             return inactive();
         }
         // 同一用户/会话所有 GUI 使用独立启动锁；服务另持 lifetime lock。
-        let _startup =
-            ipc::lock("startup", true)?.ok_or_else(|| ipc::error("等待模型服务启动锁超时"))?;
+        let _startup = ipc::lock("startup", true)?.ok_or_else(|| {
+            tracing::error!(
+                event = "acp_service_start_failed",
+                component = "acp_runtime",
+                stage = "startup_lock_timeout",
+                error_type = "timeout",
+                timeout_ms = 30_000,
+                "等待 ACP 模型服务启动锁超时"
+            );
+            ipc::error("等待模型服务启动锁超时")
+        })?;
         if let Some(state) = rt.block_on(ipc::exchange(Operation::Status))? {
             return Ok(state);
         }
-        let mut executable = std::env::current_exe()
-            .map_err(|e| ipc::error(format!("定位 JchTools 程序失败：{e}")))?;
+        let mut executable = std::env::current_exe().map_err(|e| {
+            tracing::error!(
+                event = "acp_service_start_failed",
+                component = "acp_runtime",
+                stage = "locate_executable",
+                error_type = ?e.kind(),
+                error_code = ?e.raw_os_error(),
+                "定位 ACP 模型服务程序失败"
+            );
+            ipc::error(format!("定位 JchTools 程序失败：{e}"))
+        })?;
         if cfg!(any(test, feature = "test-hooks")) {
             if let Some(path) = std::env::var_os("JCHTOOLS_TEST_ACP_SERVICE_EXE") {
                 executable = std::path::PathBuf::from(path);
@@ -110,7 +138,19 @@ pub fn ensure_started() -> Result<ServiceStatus, ServiceError> {
                 tracing::info!(event = "acp_service_control_ready", component = "acp_runtime", peer_pid = service.id(), phase = ?state.phase, elapsed_ms = crate::logging::elapsed_ms(started), "ACP 模型服务后台控制管道已就绪");
                 return Ok(state);
             }
-            if let Some(exit) = service.try_wait().map_err(|e| ipc::error(e.to_string()))? {
+            if let Some(exit) = service.try_wait().map_err(|e| {
+                tracing::error!(
+                    event = "acp_service_start_failed",
+                    component = "acp_runtime",
+                    peer_pid = service.id(),
+                    stage = "poll_child_exit",
+                    error_type = ?e.kind(),
+                    error_code = ?e.raw_os_error(),
+                    elapsed_ms = crate::logging::elapsed_ms(started),
+                    "检查 ACP 模型服务后台进程失败"
+                );
+                ipc::error(e.to_string())
+            })? {
                 tracing::error!(event = "acp_service_start_failed", component = "acp_runtime", peer_pid = service.id(), stage = "child_exit", exit_code = ?exit.code(), elapsed_ms = crate::logging::elapsed_ms(started), "ACP 模型服务后台启动期间退出");
                 return Err(ipc::error(format!("模型服务后台启动时退出：{exit}")));
             }
@@ -485,6 +525,18 @@ pub fn serve() -> Result<(), ServiceError> {
     })
 }
 
+#[rustfmt::skip]
+#[warn(
+    warnings,
+    unused_must_use,
+    unreachable_patterns,
+    unreachable_pub,
+    unused_variables,
+    rust_2018_idioms,
+    explicit_outlives_requirements,
+    elided_lifetimes_in_paths,
+    single_use_lifetimes
+)]
 #[cfg(all(test, windows))]
 mod tests {
     #![allow(clippy::unwrap_used, clippy::expect_used)]

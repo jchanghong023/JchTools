@@ -128,17 +128,17 @@ fn pump<R: Read + Send + 'static>(
                 };
                 if bytes.is_empty() {
                     if !line.is_empty() {
-                        let message = match String::from_utf8(std::mem::take(&mut line)) {
-                            Ok(text) => PipeMessage::Line(err, text),
-                            Err(_) => {
-                                tracing::error!(
-                                    event = "pipe_decode_failed",
-                                    stream = if err { "stderr" } else { "stdout" },
-                                    error_type = "invalid_utf8",
-                                    "子进程管道解码失败"
-                                );
-                                PipeMessage::Error("7-Zip 输出不是 UTF-8".into())
-                            }
+                        let message = if let Ok(text) = String::from_utf8(std::mem::take(&mut line))
+                        {
+                            PipeMessage::Line(err, text)
+                        } else {
+                            tracing::error!(
+                                event = "pipe_decode_failed",
+                                stream = if err { "stderr" } else { "stdout" },
+                                error_type = "invalid_utf8",
+                                "子进程管道解码失败"
+                            );
+                            PipeMessage::Error("7-Zip 输出不是 UTF-8".into())
                         };
                         let _ = sender.send(message);
                     }
@@ -241,18 +241,17 @@ pub(crate) fn join_with_deadline<T>(handle: thread::JoinHandle<T>, limit: Durati
         }
         thread::sleep(Duration::from_millis(10));
     }
-    match handle.join() {
-        Ok(value) => Some(value),
-        Err(_) => {
-            tracing::error!(
-                component = "process",
-                event = "thread_join_failed",
-                stage = "join",
-                error_type = "thread_panic",
-                "子进程收尾线程异常退出"
-            );
-            None
-        }
+    if let Ok(value) = handle.join() {
+        Some(value)
+    } else {
+        tracing::error!(
+            component = "process",
+            event = "thread_join_failed",
+            stage = "join",
+            error_type = "thread_panic",
+            "子进程收尾线程异常退出"
+        );
+        None
     }
 }
 
@@ -287,7 +286,7 @@ fn reap(child: &mut Child) {
             "子进程终止请求已执行"
         ),
         Err(error) => {
-            tracing::warn!(event = "subprocess_kill_failed", peer_pid = child.id(), error_type = ?error.kind(), error_code = error.raw_os_error(), "子进程终止请求失败，继续回收")
+            tracing::warn!(event = "subprocess_kill_failed", peer_pid = child.id(), error_type = ?error.kind(), error_code = error.raw_os_error(), "子进程终止请求失败，继续回收");
         }
     }
     match child.wait() {
@@ -300,7 +299,7 @@ fn reap(child: &mut Child) {
             "子进程已回收"
         ),
         Err(error) => {
-            tracing::error!(event = "subprocess_reap_failed", peer_pid = child.id(), error_type = ?error.kind(), error_code = error.raw_os_error(), elapsed_ms = crate::logging::elapsed_ms(started), "子进程回收失败")
+            tracing::error!(event = "subprocess_reap_failed", peer_pid = child.id(), error_type = ?error.kind(), error_code = error.raw_os_error(), elapsed_ms = crate::logging::elapsed_ms(started), "子进程回收失败");
         }
     }
 }
@@ -996,13 +995,12 @@ fn run_with_idle_timeout_inner(
     mut line: impl FnMut(bool, &str) -> Result<()>,
     mut tick: impl FnMut() -> Result<()>,
 ) -> Result<()> {
-    control.checkpoint().map_err(|error| {
+    control.checkpoint().inspect_err(|_| {
         tracing::warn!(
             event = "subprocess_cancelled",
             stage = "checkpoint",
             "子进程启动前控制检查未通过"
         );
-        error
     })?;
     command
         .stdin(Stdio::null())
@@ -1070,23 +1068,21 @@ fn run_with_idle_timeout_inner(
         let mut last_output = Instant::now();
         loop {
             // Pause is deliberately deferred until this whole archive finishes. We must drain pipes.
-            control.check_cancelled().map_err(|error| {
+            control.check_cancelled().inspect_err(|_| {
                 tracing::warn!(
                     event = "subprocess_cancelled",
                     stage = "stream",
                     "流式处理期间收到取消"
                 );
-                error
             })?;
             if last_tick.elapsed() > Duration::from_millis(500) {
-                tick().map_err(|error| {
+                tick().inspect_err(|_| {
                     tracing::error!(
                         event = "subprocess_callback_failed",
                         stage = "tick",
                         error_type = "callback_error",
                         "子进程进度回调失败"
                     );
-                    error
                 })?;
                 last_tick = std::time::Instant::now();
             }
@@ -1104,7 +1100,7 @@ fn run_with_idle_timeout_inner(
                         }
                         sink.push_back(text.clone());
                     }
-                    line(err, &text).map_err(|error| {
+                    line(err, &text).inspect_err(|_| {
                         tracing::error!(
                             event = "subprocess_callback_failed",
                             stage = "line",
@@ -1112,7 +1108,6 @@ fn run_with_idle_timeout_inner(
                             error_type = "callback_error",
                             "子进程输出处理回调失败"
                         );
-                        error
                     })?;
                 }
                 Ok(PipeMessage::Error(error)) => {
@@ -1185,6 +1180,18 @@ fn run_with_idle_timeout_inner(
     result
 }
 
+#[rustfmt::skip]
+#[warn(
+    warnings,
+    unused_must_use,
+    unreachable_patterns,
+    unreachable_pub,
+    unused_variables,
+    rust_2018_idioms,
+    explicit_outlives_requirements,
+    elided_lifetimes_in_paths,
+    single_use_lifetimes
+)]
 #[cfg(test)]
 mod tests {
     use super::*;

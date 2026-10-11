@@ -1,3 +1,16 @@
+#![warn(
+    warnings,
+    unused_must_use,
+    unreachable_patterns,
+    unreachable_pub,
+    unused_variables,
+    future_incompatible,
+    rust_2018_idioms,
+    explicit_outlives_requirements,
+    elided_lifetimes_in_paths,
+    single_use_lifetimes
+)]
+
 //! 覆盖 C-05 / C-14 / C-15 / C-16～C-21：固定归类「大类」一级结构 +「Git项目集合」
 //! 的标准形态、来源前缀与短哈希消解、超长名截短与幂等。用例直接复刻合同
 //! C-15 的附录示例（子目录分趟整理后整理父目录），期望值来自合同，不由实现反推。
@@ -10,7 +23,8 @@
     clippy::cast_possible_truncation
 )]
 
-use jchtools::{config::Config, control::Context, engine, rules};
+use jchtools::{config::Config, control::Context, engine};
+use sha2::{Digest, Sha256};
 use std::{collections::BTreeSet, fs, path::PathBuf};
 use tempfile::TempDir;
 
@@ -60,7 +74,7 @@ impl Fixture {
     fn subdirs(&self, dir: &str) -> BTreeSet<String> {
         fs::read_dir(self.root.join(dir))
             .unwrap()
-            .flatten()
+            .map(|entry| entry.expect("读取目录项失败不能当作目录不存在"))
             .filter(|entry| entry.path().is_dir())
             .map(|entry| entry.file_name().to_string_lossy().into_owned())
             .collect()
@@ -68,7 +82,8 @@ impl Fixture {
 }
 
 fn digest8(rel: &str) -> String {
-    rules::path_digest(rel, 8)
+    // C-19：测试独立计算 UTF-8 路径的 SHA-256，避免期望值重复调用待测命名逻辑。
+    format!("{:X}", Sha256::digest(rel.as_bytes()))[..8].to_owned()
 }
 
 /// 合同 C-15 (1) 的原始目录树（内容互不相同，不做去重删除）。
@@ -458,22 +473,24 @@ fn occupied_category_container_keeps_source_items() {
     // 「文档」被普通文件占用：依赖「文档」容器的归类全部失败并保留源项。
     fs::write(f.root.join("文档"), b"not a directory").unwrap();
     let task = f.plan();
-    // 名为「文档」的普通文件本身照常归类（它是范围内普通文件，无扩展名入「其他」）。
-    assert_eq!(task.summary.planned_move, 1);
+    // S-01 / 附录 E：固定容器占用项必须原位保留，不能借普通归类将其挪走。
+    assert_eq!(task.summary.planned_move, 0);
     // 必须真正执行：磁盘态断言在只读的分析阶段恒为真，检验不了执行器的
     // 「不删除占用项、失败保留源项」行为（S-01/附录 E）。
     Fixture::apply(&task);
-    assert!(
-        f.root.join("其他").join("文档").is_file(),
-        "名为「文档」的普通文件本身照常归类移动"
+    assert_eq!(
+        fs::read(f.root.join("文档")).unwrap(),
+        b"not a directory",
+        "固定容器占用文件必须原位、原内容保留"
     );
     assert!(
         f.exists("报告.pdf"),
         "依赖被占用容器的项执行后必须保留在原位置（S-01）"
     );
+    assert_eq!(fs::read(f.root.join("报告.pdf")).unwrap(), b"pdf");
     assert!(
-        !f.root.join("文档").exists(),
-        "占用项不因容器身份被删除或另存——它只按普通文件归类移动"
+        !f.root.join("其他/文档").exists(),
+        "不得通过普通归类挪走固定容器占用项"
     );
 }
 
@@ -520,16 +537,21 @@ fn git_collection_blocked_by_file_keeps_projects() {
     fs::write(f.root.join("Git项目集合"), b"occupied").unwrap();
     let task = f.plan();
     assert_eq!(task.summary.planned_git, 0);
-    // 必须执行后再断言：占用项文件本身按普通文件归类（无扩展名入「其他」，与
-    // 「文档」占用项用例同一语义——S-01 禁止的是为腾位删除/挪走占用项，不是
-    // 豁免它自己的归类）；执行必须跟随计划，不得因占用项让位就新建集合并挪入项目。
+    assert_eq!(task.summary.planned_move, 0, "占用集合容器的文件也不得挪走");
+    // S-01：执行后既保留占用文件，也保留无法归类的整个项目。
     Fixture::apply(&task);
-    assert!(
-        f.root.join("其他").join("Git项目集合").is_file(),
-        "占用项不因容器身份被删除——它按普通文件归类移动"
+    assert_eq!(
+        fs::read(f.root.join("Git项目集合")).unwrap(),
+        b"occupied",
+        "固定集合容器的占用文件必须原位、原内容保留"
     );
     assert!(f.root.join("proj/.git").is_dir(), "原项目保留在原位置");
     assert!(f.root.join("proj/src/a.rs").is_file(), "项目内容原样保留");
+    assert_eq!(fs::read(f.root.join("proj/src/a.rs")).unwrap(), b"a");
+    assert!(
+        !f.root.join("其他/Git项目集合").exists(),
+        "不得通过普通归类挪走集合容器占用项"
+    );
     assert!(
         !f.root.join("Git项目集合").is_dir(),
         "计划为 0：执行不得新建集合并挪入项目"
@@ -540,10 +562,17 @@ fn git_collection_blocked_by_file_keeps_projects() {
 #[test]
 fn reorganized_files_stay_in_place_without_moves() {
     let f = Fixture::new();
-    f.write("old/资料.pdf", b"x");
+    let source = f.write("old/资料.pdf", b"x");
+    let before = fs::metadata(&source).unwrap();
+    let created = before.created().unwrap();
+    let modified = before.modified().unwrap();
     let task = f.plan();
     Fixture::apply(&task);
     assert!(f.exists("文档/资料.pdf"));
+    let after = fs::metadata(f.root.join("文档/资料.pdf")).unwrap();
+    assert_eq!(after.created().unwrap(), created, "C-21：保留创建时间");
+    assert_eq!(after.modified().unwrap(), modified, "C-21：保留修改时间");
+    assert_eq!(fs::read(f.root.join("文档/资料.pdf")).unwrap(), b"x");
     let again = f.plan();
     assert_eq!(again.summary.planned_move, 0, "无变化 → 仍判已就位");
 }

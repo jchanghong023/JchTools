@@ -112,7 +112,7 @@ pub(crate) enum Command {
     ExitDecision(bool),
     /// 托盘热键替换的迟到回执（S8-01）：保存流程进入待确认后由等待线程派发。
     HotkeyReplaced(Result<(), String>),
-    /// 等待线程的有界时限耗尽仍未收到托盘回执（S8-01 自愈路径）。
+    /// 等待托盘回执超过提示时限；恢复操作仍须保留通道等待明确终态。
     HotkeyReceiptTimedOut,
 }
 
@@ -124,7 +124,7 @@ enum PendingHotkey {
     Saving {
         hotkey: String,
         old_hotkey: String,
-        old_autostart: bool,
+        old_autostart: AutostartValue,
         autostart: bool,
     },
     /// 回滚路径在等「恢复旧热键」的回执：Ok 即完成；Err 把内存值纠正回
@@ -218,23 +218,33 @@ impl Settings {
         }
     }
     fn load(root: &Path) -> Self {
+        let started = Instant::now();
+        tracing::info!(
+            component = "snap_ocr_service",
+            event = "ocr_settings_load_started",
+            "开始加载截图设置"
+        );
         let path = root.join("settings.json");
         let raw = match fs::read(&path) {
             Ok(raw) => raw,
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
                 tracing::info!(
+                    component = "snap_ocr_service",
                     event = "ocr_settings_defaulted",
                     stage = "read",
                     result = "not_found",
+                    elapsed_ms = crate::logging::elapsed_ms(started),
                     "截图设置未保存，使用默认设置"
                 );
                 return Self::defaults(root, None);
             }
             Err(_) => {
                 tracing::warn!(
+                    component = "snap_ocr_service",
                     event = "ocr_settings_defaulted",
                     stage = "read",
                     error_type = "io",
+                    elapsed_ms = crate::logging::elapsed_ms(started),
                     "截图设置无法读取，使用内存默认设置"
                 );
                 return Self::defaults(
@@ -245,9 +255,11 @@ impl Settings {
         };
         let Ok(value) = serde_json::from_slice::<Value>(&raw) else {
             tracing::warn!(
+                component = "snap_ocr_service",
                 event = "ocr_settings_defaulted",
                 stage = "decode",
                 error_type = "invalid_json",
+                elapsed_ms = crate::logging::elapsed_ms(started),
                 "截图设置损坏，使用内存默认设置"
             );
             return Self::defaults(
@@ -257,22 +269,33 @@ impl Settings {
         };
         let Some(hotkey) = value.get("hotkey").and_then(Value::as_str) else {
             tracing::warn!(
+                component = "snap_ocr_service",
                 event = "ocr_settings_defaulted",
                 stage = "schema",
                 error_type = "missing_hotkey",
+                elapsed_ms = crate::logging::elapsed_ms(started),
                 "截图设置格式无效，使用内存默认设置"
             );
             return Self::defaults(root, Some("截图设置格式无效，原文件未覆盖"));
         };
         if tray::parse_hotkey(hotkey).is_err() {
             tracing::warn!(
+                component = "snap_ocr_service",
                 event = "ocr_settings_defaulted",
                 stage = "hotkey",
                 error_type = "invalid_hotkey",
+                elapsed_ms = crate::logging::elapsed_ms(started),
                 "截图热键配置无效，使用内存默认设置"
             );
             return Self::defaults(root, Some("保存的截图热键无效，原文件未覆盖"));
         }
+        tracing::info!(
+            component = "snap_ocr_service",
+            event = "ocr_settings_load_completed",
+            elapsed_ms = crate::logging::elapsed_ms(started),
+            result = "loaded",
+            "截图设置已加载"
+        );
         Self {
             hotkey: hotkey.to_string(),
             main_exe: read_launcher(root),
@@ -556,19 +579,20 @@ fn warm_up(client: &mut SharedXbergClient) -> Result<(), LoadFailure> {
     let started = Instant::now();
     tracing::info!(event = "ocr_prewarm_started", "开始预热截图模型");
     let outcome = warm_up_inner(client);
-    match &outcome {
-        Ok(()) => tracing::info!(
+    if outcome.is_ok() {
+        tracing::info!(
             event = "ocr_prewarm_completed",
             elapsed_ms = crate::logging::elapsed_ms(started),
             result = "ready",
             "截图模型预热完成"
-        ),
-        Err(_) => tracing::warn!(
+        );
+    } else {
+        tracing::warn!(
             event = "ocr_prewarm_failed",
             elapsed_ms = crate::logging::elapsed_ms(started),
             error_type = "prewarm",
             "截图模型预热失败"
-        ),
+        );
     }
     outcome
 }
@@ -1079,6 +1103,12 @@ enum AutostartValue {
     Corrupt,
 }
 
+/// 显式保存必须落实开关；损坏的本功能启动项不能仅因「显示关闭」而跳过删除。
+fn autostart_update_required(previous: AutostartValue, enabled: bool) -> bool {
+    previous == AutostartValue::Corrupt
+        || matches!(previous, AutostartValue::Current | AutostartValue::Stale) != enabled
+}
+
 /// 解析 Run 值命令行里的 EXE 路径：形状必须是 `"绝对路径" --service--autostart`。
 fn parse_autostart_command(raw: &str, exe_basename: &str) -> Option<PathBuf> {
     let rest = raw.strip_prefix('"')?;
@@ -1220,6 +1250,17 @@ impl Service {
                 }
             }
             self.old_result_visible = false;
+        }
+    }
+    /// O-22/O-29：关闭组件也释放惰性属性缓存；O-20 暂存的隐藏旧结果除外。
+    fn release_closed_result(&mut self) {
+        if !self.old_result_visible
+            && self
+                .result
+                .as_ref()
+                .is_some_and(|result| !result.is_visible())
+        {
+            drop(self.result.take());
         }
     }
     fn show_progress(&mut self, stage: &str) -> Result<(), String> {
@@ -1388,20 +1429,21 @@ impl Service {
                 window.set_autostart_draft(window.get_autostart_enabled());
             }
             crate::result_window::apply_settings_theme(window);
-            match window.show() {
-                Ok(()) => tracing::info!(
+            if let Ok(()) = window.show() {
+                tracing::info!(
                     event = "ocr_settings_open_completed",
                     reused = true,
                     elapsed_ms = crate::logging::elapsed_ms(started),
                     "截图设置窗口已显示"
-                ),
-                Err(_) => tracing::error!(
+                );
+            } else {
+                tracing::error!(
                     event = "ocr_settings_open_failed",
                     stage = "show_existing_window",
                     error_type = "slint_platform",
                     elapsed_ms = crate::logging::elapsed_ms(started),
                     "截图设置窗口显示失败"
-                ),
+                );
             }
             return;
         }
@@ -1468,20 +1510,21 @@ impl Service {
         self.settings_window = Some(window);
         self.refresh_settings();
         if let Some(window) = self.settings_window.as_ref() {
-            match window.show() {
-                Ok(()) => tracing::info!(
+            if let Ok(()) = window.show() {
+                tracing::info!(
                     event = "ocr_settings_open_completed",
                     reused = false,
                     elapsed_ms = crate::logging::elapsed_ms(started),
                     "截图设置窗口已显示"
-                ),
-                Err(_) => tracing::error!(
+                );
+            } else {
+                tracing::error!(
                     event = "ocr_settings_open_failed",
                     stage = "show_new_window",
                     error_type = "slint_platform",
                     elapsed_ms = crate::logging::elapsed_ms(started),
                     "截图设置窗口显示失败"
-                ),
+                );
             }
         }
     }
@@ -1617,7 +1660,7 @@ impl Service {
                     self.pending_hotkey = Some(PendingHotkey::Restoring {
                         new_hotkey: new_hotkey.to_owned(),
                     });
-                    self.await_hotkey_receipt(receiver);
+                    self.await_hotkey_receipt(receiver, true);
                     detail.push_str("；原热键恢复仍在等待托盘确认");
                 }
             }
@@ -1628,19 +1671,32 @@ impl Service {
         self.refresh_settings();
         detail
     }
-    /// 托起一条迟到回执的等待线程：30 秒上限内到达则派发 [`Command::HotkeyReplaced`]，
-    /// 超时派发 [`Command::HotkeyReceiptTimedOut`] 触发自愈（S8-01）。
-    fn await_hotkey_receipt(&self, receiver: mpsc::Receiver<Result<(), String>>) {
+    /// 首次等待超过 30 秒时通知界面；恢复旧键不能把超时裁成注册失败，
+    /// 必须继续持有回执直到托盘明确返回，否则迟到成功会使内存与实际热键错位。
+    fn await_hotkey_receipt(&self, receiver: mpsc::Receiver<Result<(), String>>, restoring: bool) {
         let commands = self.commands.clone();
         let span = tracing::Span::current();
         std::thread::spawn(move || {
             let _entered = span.enter();
-            let outcome = receiver.recv_timeout(Duration::from_secs(30));
-            let command = match outcome {
-                Ok(result) => Command::HotkeyReplaced(result),
-                Err(_) => Command::HotkeyReceiptTimedOut,
-            };
-            let _ = commands.send(command);
+            match receiver.recv_timeout(Duration::from_secs(30)) {
+                Ok(result) => {
+                    let _ = commands.send(Command::HotkeyReplaced(result));
+                }
+                Err(mpsc::RecvTimeoutError::Timeout) => {
+                    let _ = commands.send(Command::HotkeyReceiptTimedOut);
+                    if restoring {
+                        let result = receiver
+                            .recv()
+                            .unwrap_or_else(|_| Err("托盘热键恢复回执通道已关闭".into()));
+                        let _ = commands.send(Command::HotkeyReplaced(result));
+                    }
+                }
+                Err(mpsc::RecvTimeoutError::Disconnected) => {
+                    let _ = commands.send(Command::HotkeyReplaced(Err(
+                        "托盘热键回执通道已关闭".into()
+                    )));
+                }
+            }
         });
     }
     fn save_settings(&mut self, hotkey: &str, enabled: bool) -> Result<(), String> {
@@ -1652,10 +1708,7 @@ impl Service {
         }
         tray::parse_hotkey(hotkey)?;
         let old_hotkey = self.settings.hotkey.clone();
-        let old_autostart = matches!(
-            autostart_value()?,
-            AutostartValue::Current | AutostartValue::Stale
-        );
+        let old_autostart = autostart_value()?;
         let hotkey_changed = old_hotkey != hotkey;
         if hotkey_changed {
             match self.tray.replace(hotkey.to_owned()) {
@@ -1664,7 +1717,16 @@ impl Service {
                 }
                 // 托盘在时限内明确回执失败：Replace 的失败路径不改托盘状态，
                 // 原样把原因交回保存入口。
-                tray::HotkeyReceipt::Done(Err(reason)) => return Err(reason),
+                tray::HotkeyReceipt::Done(Err(reason)) => {
+                    tracing::warn!(
+                        component = "snap_ocr_service",
+                        event = "ocr_hotkey_update_failed",
+                        stage = "hotkey_replace",
+                        error_type = "rejected",
+                        "截图热键更新被拒绝"
+                    );
+                    return Err(reason);
+                }
                 // S8-01：超时不是失败终态——排队替换仍会在托盘线程恢复后执行。
                 // 进入待确认状态，保存收尾顺延到迟到回执；期间不写设置文件，
                 // 内存热键保持旧值，保证「回执失败/超时」时重启仍是旧键。
@@ -1675,7 +1737,13 @@ impl Service {
                         old_autostart,
                         autostart: enabled,
                     });
-                    self.await_hotkey_receipt(receiver);
+                    self.await_hotkey_receipt(receiver, false);
+                    tracing::info!(
+                        component = "snap_ocr_service",
+                        event = "ocr_hotkey_update_pending",
+                        result = "awaiting_receipt",
+                        "截图热键替换等待托盘确认"
+                    );
                     self.refresh_settings();
                     return Ok(());
                 }
@@ -1690,31 +1758,64 @@ impl Service {
         hotkey: &str,
         old_hotkey: &str,
         hotkey_changed: bool,
-        old_autostart: bool,
+        old_autostart: AutostartValue,
         enabled: bool,
     ) -> Result<(), String> {
-        let autostart_changed = old_autostart != enabled;
+        let started = Instant::now();
+        tracing::info!(
+            component = "snap_ocr_service",
+            event = "ocr_settings_save_started",
+            "保存截图设置"
+        );
+        let autostart_changed = autostart_update_required(old_autostart, enabled);
+        let old_enabled = matches!(
+            old_autostart,
+            AutostartValue::Current | AutostartValue::Stale
+        );
         if autostart_changed {
             if let Err(reason) = set_autostart(enabled) {
+                tracing::error!(
+                    component = "snap_ocr_service",
+                    event = "ocr_settings_save_failed",
+                    stage = "autostart",
+                    error_type = "update_failed",
+                    elapsed_ms = crate::logging::elapsed_ms(started),
+                    "截图开机启动设置更新失败"
+                );
                 return Err(self.rollback_settings(
                     old_hotkey,
                     hotkey,
                     hotkey_changed,
-                    Some(old_autostart),
+                    Some(old_enabled),
                     reason,
                 ));
             }
         }
         if let Err(reason) = self.settings.save(&self.root) {
+            tracing::error!(
+                component = "snap_ocr_service",
+                event = "ocr_settings_save_failed",
+                stage = "settings_file",
+                error_type = "save_failed",
+                elapsed_ms = crate::logging::elapsed_ms(started),
+                "截图设置文件保存失败"
+            );
             return Err(self.rollback_settings(
                 old_hotkey,
                 hotkey,
                 hotkey_changed,
-                autostart_changed.then_some(old_autostart),
+                autostart_changed.then_some(old_enabled),
                 reason,
             ));
         }
         self.refresh_settings();
+        tracing::info!(
+            component = "snap_ocr_service",
+            event = "ocr_settings_save_completed",
+            elapsed_ms = crate::logging::elapsed_ms(started),
+            result = "saved",
+            "截图设置保存完成"
+        );
         Ok(())
     }
     /// 迟到回执的裁决（S8-01）：按在途上下文 reconcile 到真实终态；
@@ -1739,30 +1840,54 @@ impl Service {
                 Some(Err(reason)) => {
                     // 托盘明确回执失败：Replace 失败路径不改托盘状态、旧键仍
                     // 生效；内存值与设置文件本就未动，无需回滚，直接上报。
+                    tracing::warn!(
+                        component = "snap_ocr_service",
+                        event = "ocr_hotkey_update_failed",
+                        stage = "hotkey_replace",
+                        error_type = "receipt_failed",
+                        "截图热键更新回执失败"
+                    );
                     self.settings.warning = Some(reason.clone());
                     self.refresh_settings();
                     self.tray.notice(reason);
                 }
                 None => {
-                    // 回执超时：排队中的新键替换仍可能执行，不能当成功也不能
-                    // 当失败——自愈：把旧键再排队（FIFO 排在新键之后，托盘恢复
-                    // 泵消息后最终回到旧键），内存与文件保持旧键一致。
-                    self.tray.replace_detached(old_hotkey.clone());
-                    let detail =
-                        format!("快捷键确认超时，已自动排队恢复 {old_hotkey}；请稍后重试保存");
-                    self.settings.warning = Some(detail.clone());
-                    self.refresh_settings();
+                    // 新键替换仍可能执行；把旧键排在其后恢复，并同样等待明确
+                    // 回执。恢复也可能因旧键被占用而失败，不能无回执假称已恢复。
+                    let detail = format!("快捷键确认超时，正在恢复 {old_hotkey}；请稍后重试保存");
+                    let detail = self.rollback_settings(&old_hotkey, &hotkey, true, None, detail);
                     self.tray.notice(detail);
                 }
             },
             Some(PendingHotkey::Restoring { new_hotkey, .. }) => {
+                if outcome.is_none() {
+                    self.pending_hotkey = Some(PendingHotkey::Restoring { new_hotkey });
+                    self.settings.warning =
+                        Some("原快捷键恢复仍在等待托盘确认，请稍后再保存".into());
+                    self.refresh_settings();
+                    return;
+                }
                 if matches!(outcome, Some(Ok(()))) {
+                    tracing::info!(
+                        component = "snap_ocr_service",
+                        event = "ocr_hotkey_restore_completed",
+                        result = "restored",
+                        "原截图热键已恢复"
+                    );
                     // 恢复成功：清除等待期提示（Late 分支写入的「仍在等待托盘
                     // 确认」不能残留误导），内存旧键即为终态。
                     self.settings.warning = Some("原快捷键已恢复".to_string());
                     self.refresh_settings();
                 } else {
-                    // 恢复失败或未确认：托盘实际仍持新键，内存值纠正为新键。
+                    // 托盘明确拒绝恢复：实际仍持新键，内存值纠正为新键。
+                    tracing::warn!(
+                        component = "snap_ocr_service",
+                        event = "ocr_hotkey_restore_failed",
+                        stage = "hotkey_restore",
+                        error_type = "confirmation_unavailable",
+                        result = "new_hotkey_retained",
+                        "原截图热键恢复未确认，保留当前热键"
+                    );
                     new_hotkey.clone_into(&mut self.settings.hotkey);
                     let detail =
                         format!("原快捷键恢复未完成，当前仍使用 {new_hotkey}；请重新保存设置");
@@ -2232,15 +2357,38 @@ impl Service {
             Command::OpenMain => self.open_main(false),
             Command::OpenSettings => self.open_settings(),
             Command::InitializeAssets => {
+                let started = Instant::now();
+                tracing::info!(
+                    component = "snap_ocr_service",
+                    event = "ocr_main_spawn_started",
+                    settings = true,
+                    "请求打开工具箱主界面以初始化组件"
+                );
                 if let Some(exe) = self.settings.main_exe.as_ref().filter(|p| p.is_file()) {
                     if std::process::Command::new(exe)
                         .arg("--settings")
                         .spawn()
                         .is_err()
                     {
+                        tracing::error!(
+                            component = "snap_ocr_service",
+                            event = "ocr_main_spawn_failed",
+                            stage = "spawn",
+                            error_type = "spawn",
+                            elapsed_ms = crate::logging::elapsed_ms(started),
+                            "无法启动工具箱主界面以初始化组件"
+                        );
                         self.tray.notice("无法打开 JchTools 以初始化组件");
                     }
                 } else {
+                    tracing::error!(
+                        component = "snap_ocr_service",
+                        event = "ocr_main_spawn_failed",
+                        stage = "resolve_executable",
+                        error_type = "main_executable_unavailable",
+                        elapsed_ms = crate::logging::elapsed_ms(started),
+                        "工具箱主程序位置不可用"
+                    );
                     self.tray
                         .notice("主程序位置已改变；请先打开 JchTools 再初始化组件");
                 }
@@ -2278,18 +2426,19 @@ impl Service {
                             let result = crate::xberg_runtime::force_background_exit()
                                 .and_then(crate::xberg_runtime::checked)
                                 .map(|_| ());
-                            match &result {
-                                Ok(()) => tracing::info!(
+                            if result.is_ok() {
+                                tracing::info!(
                                     event = "ocr_force_stop_completed",
                                     elapsed_ms = crate::logging::elapsed_ms(started),
                                     "共享后台强制停止完成"
-                                ),
-                                Err(_) => tracing::error!(
+                                );
+                            } else {
+                                tracing::error!(
                                     event = "ocr_force_stop_failed",
                                     error_type = "runtime",
                                     elapsed_ms = crate::logging::elapsed_ms(started),
                                     "共享后台强制停止失败"
-                                ),
+                                );
                             }
                             let _ = commands.send(Command::ForceExitFinished(result));
                         });
@@ -2302,14 +2451,43 @@ impl Service {
                 }
             }
             Command::ToggleAutostart => {
+                let started = Instant::now();
+                tracing::info!(
+                    component = "snap_ocr_service",
+                    event = "ocr_autostart_toggle_started",
+                    "请求切换截图服务开机启动"
+                );
                 // S8-01 复审：pending 回执收尾（commit_settings）会按保存时的
                 // 旧意图回写自启开关；pending 期间拒绝切换，避免迟到回执把
                 // 用户刚做的开关覆盖回去。
                 if self.pending_hotkey.is_some() {
+                    tracing::info!(
+                        component = "snap_ocr_service",
+                        event = "ocr_autostart_toggle_skipped",
+                        result = "settings_pending",
+                        elapsed_ms = crate::logging::elapsed_ms(started),
+                        "热键设置待确认，暂不切换开机启动"
+                    );
                     self.tray
                         .notice("快捷键设置等待确认期间暂不能切换开机启动，请稍后再试");
                 } else if let Err(reason) = set_autostart(!autostart_enabled()) {
+                    tracing::error!(
+                        component = "snap_ocr_service",
+                        event = "ocr_autostart_toggle_failed",
+                        stage = "autostart_update",
+                        error_type = "update_failed",
+                        elapsed_ms = crate::logging::elapsed_ms(started),
+                        "截图开机启动设置更新失败"
+                    );
                     self.tray.notice(reason);
+                } else {
+                    tracing::info!(
+                        component = "snap_ocr_service",
+                        event = "ocr_autostart_toggle_completed",
+                        result = "updated",
+                        elapsed_ms = crate::logging::elapsed_ms(started),
+                        "截图开机启动设置已更新"
+                    );
                 }
             }
             Command::HotkeyReplaced(outcome) => self.finish_hotkey_receipt(Some(outcome)),
@@ -2361,7 +2539,62 @@ extern "system" {
     fn GlobalUnlock(handle: *mut std::ffi::c_void) -> i32;
     fn GlobalFree(handle: *mut std::ffi::c_void) -> *mut std::ffi::c_void;
 }
+
+/// 剪贴板写入需要非空、由本线程拥有的 HWND；窗口不可见且不持有 OCR 正文。
+struct ClipboardOwner(*mut std::ffi::c_void);
+
+impl ClipboardOwner {
+    fn new() -> Result<Self, String> {
+        const CLASS: [u16; 7] = [83, 84, 65, 84, 73, 67, 0]; // STATIC
+        let started = Instant::now();
+        // SAFETY: 系统类名带 NUL；message-only 窗口无正文、不抢焦点，由 owner 释放。
+        let owner = Self(unsafe {
+            windows_sys::Win32::UI::WindowsAndMessaging::CreateWindowExW(
+                0,
+                CLASS.as_ptr(),
+                std::ptr::null(),
+                0,
+                0,
+                0,
+                0,
+                0,
+                windows_sys::Win32::UI::WindowsAndMessaging::HWND_MESSAGE,
+                std::ptr::null_mut(),
+                std::ptr::null_mut(),
+                std::ptr::null(),
+            )
+        });
+        if owner.0.is_null() {
+            tracing::error!(
+                component = "snap_ocr",
+                event = "ocr_copy_failed",
+                stage = "create_clipboard_owner",
+                error_type = "window_creation",
+                elapsed_ms = crate::logging::elapsed_ms(started),
+                "剪贴板所有者窗口创建失败"
+            );
+            return Err("剪贴板窗口创建失败".into());
+        }
+        Ok(owner)
+    }
+}
+
+impl Drop for ClipboardOwner {
+    fn drop(&mut self) {
+        if !self.0.is_null() {
+            // SAFETY: 此 message-only 窗口由 copy_text 在本线程创建，独占销毁一次。
+            unsafe { windows_sys::Win32::UI::WindowsAndMessaging::DestroyWindow(self.0) };
+        }
+    }
+}
 fn copy_text(text: &str) -> Result<(), String> {
+    let started = Instant::now();
+    tracing::info!(
+        component = "snap_ocr",
+        event = "ocr_copy_started",
+        text_bytes = text.len(),
+        "开始复制 OCR 结果到剪贴板"
+    );
     let wide = protocol::wide(text);
     let size = wide
         .len()
@@ -2370,6 +2603,14 @@ fn copy_text(text: &str) -> Result<(), String> {
     // SAFETY: GMEM_MOVEABLE(2) 按字节长度分配；失败返回 null，由本函数检查。
     let handle = unsafe { GlobalAlloc(2, size) };
     if handle.is_null() {
+        tracing::error!(
+            component = "snap_ocr",
+            event = "ocr_copy_failed",
+            stage = "allocate",
+            error_type = "global_alloc",
+            elapsed_ms = crate::logging::elapsed_ms(started),
+            "OCR 结果剪贴板内存分配失败"
+        );
         return Err("剪贴板内存分配失败".into());
     }
     // SAFETY: handle 为刚分配的可移动内存句柄；锁定失败返回 null。
@@ -2377,16 +2618,42 @@ fn copy_text(text: &str) -> Result<(), String> {
     if data.is_null() {
         // SAFETY: 分配成功但锁定失败，所有权仍在手，由本函数释放。
         unsafe { GlobalFree(handle) };
+        tracing::error!(
+            component = "snap_ocr",
+            event = "ocr_copy_failed",
+            stage = "lock",
+            error_type = "global_lock",
+            elapsed_ms = crate::logging::elapsed_ms(started),
+            "OCR 结果剪贴板内存访问失败"
+        );
         return Err("剪贴板内存访问失败".into());
     }
     // SAFETY: 源为存活宽字符串切片，目标为锁定内存且按 u16 计数不越界。
     unsafe { std::ptr::copy_nonoverlapping(wide.as_ptr(), data.cast::<u16>(), wide.len()) };
     // SAFETY: 解锁刚锁定的句柄；解锁后 data 指针不再使用。
     unsafe { GlobalUnlock(handle) };
-    // SAFETY: 以 null 关联当前线程；失败即被占用，句柄仍由本函数释放。
-    if unsafe { OpenClipboard(std::ptr::null_mut()) } == 0 {
+    // OpenClipboard(NULL) 后 EmptyClipboard 会把 owner 设为 NULL，导致
+    // SetClipboardData 失败。使用本线程的不可见 message-only 窗口，不抢焦点。
+    let owner = match ClipboardOwner::new() {
+        Ok(owner) => owner,
+        Err(error) => {
+            // SAFETY: 尚未移交剪贴板，释放本函数分配的内存。
+            unsafe { GlobalFree(handle) };
+            return Err(error);
+        }
+    };
+    // SAFETY: owner 为本线程创建的有效窗口；失败时内存仍由本函数释放。
+    if unsafe { OpenClipboard(owner.0) } == 0 {
         // SAFETY: 尚未交给剪贴板的所有权重归本函数。
         unsafe { GlobalFree(handle) };
+        tracing::error!(
+            component = "snap_ocr",
+            event = "ocr_copy_failed",
+            stage = "open_clipboard",
+            error_type = "unavailable",
+            elapsed_ms = crate::logging::elapsed_ms(started),
+            "无法打开剪贴板"
+        );
         return Err("剪贴板被其他程序占用".into());
     }
     // SAFETY: 清空剪贴板为设置数据的前置步骤。
@@ -2398,8 +2665,24 @@ fn copy_text(text: &str) -> Result<(), String> {
     if !copied {
         // SAFETY: 设置失败时系统未接管句柄，由本函数释放。
         unsafe { GlobalFree(handle) };
+        tracing::error!(
+            component = "snap_ocr",
+            event = "ocr_copy_failed",
+            stage = "write",
+            error_type = "clipboard_write",
+            elapsed_ms = crate::logging::elapsed_ms(started),
+            "OCR 结果写入剪贴板失败"
+        );
         return Err("复制到剪贴板失败".into());
     }
+    tracing::info!(
+        component = "snap_ocr",
+        event = "ocr_copy_completed",
+        result = "copied",
+        text_bytes = text.len(),
+        elapsed_ms = crate::logging::elapsed_ms(started),
+        "OCR 结果已复制到剪贴板"
+    );
     Ok(())
 }
 
@@ -2446,18 +2729,19 @@ pub fn run_service(autostart: bool) -> Result<(), String> {
     let started = Instant::now();
     tracing::info!(event = "ocr_service_started", autostart, "截图后台服务启动");
     let outcome = run_service_inner(autostart);
-    match &outcome {
-        Ok(()) => tracing::info!(
+    if outcome.is_ok() {
+        tracing::info!(
             event = "ocr_service_stopped",
             elapsed_ms = crate::logging::elapsed_ms(started),
             "截图后台服务已结束"
-        ),
-        Err(_) => tracing::error!(
+        );
+    } else {
+        tracing::error!(
             event = "ocr_service_failed",
             error_type = "service",
             elapsed_ms = crate::logging::elapsed_ms(started),
             "截图后台服务未正常完成"
-        ),
+        );
     }
     outcome
 }
@@ -2476,8 +2760,8 @@ fn run_service_inner(autostart: bool) -> Result<(), String> {
     let Some(_instance) =
         protocol::claim_instance().map_err(|error| service_failure(error, "claim_instance"))?
     else {
-        tracing::info!(event = "ocr_service_reused", "已有截图服务，转发设置请求");
         use std::io::Write;
+        tracing::info!(event = "ocr_service_reused", "已有截图服务，转发设置请求");
         let deadline = Instant::now() + Duration::from_secs(2);
         loop {
             if let Ok(mut pipe) = std::fs::OpenOptions::new()
@@ -2614,6 +2898,7 @@ fn run_service_inner(autostart: bool) -> Result<(), String> {
                     {
                         current.stop_worker();
                     }
+                    current.release_closed_result();
                     current.refresh_theme_if_due();
                 }
                 let current = service.borrow();
@@ -2633,9 +2918,22 @@ fn run_service_inner(autostart: bool) -> Result<(), String> {
         .map_err(|_| service_failure("截图服务窗口事件循环失败".to_string(), "event_loop"))
 }
 
+#[rustfmt::skip]
+#[warn(
+    warnings,
+    unused_must_use,
+    unreachable_patterns,
+    unreachable_pub,
+    unused_variables,
+    rust_2018_idioms,
+    explicit_outlives_requirements,
+    elided_lifetimes_in_paths,
+    single_use_lifetimes
+)]
 #[cfg(test)]
 mod tests {
     use super::{tray, Command, ModelState, OcrError, PendingHotkey, Service, Settings, Work};
+    use slint::ComponentHandle;
     use std::fs;
     use std::path::Path;
     use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
@@ -2678,6 +2976,53 @@ mod tests {
             gui_tasks: std::collections::HashMap::new(),
         };
         (service, work_rx)
+    }
+
+    // 覆盖 O-20/O-22/O-29：关闭结果释放组件引用，隐藏暂存则保留以便失败恢复。
+    #[test]
+    fn closed_result_is_released_but_hidden_old_result_is_retained(
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        slint::platform::set_platform(Box::new(
+            i_slint_backend_testing::TestingBackend::new(
+                i_slint_backend_testing::TestingBackendOptions {
+                    renderer_name: Some("software".into()),
+                    ..Default::default()
+                },
+            ),
+        ))?;
+        let temp = tempfile::tempdir()?;
+        let (mut service, _work_rx) = ready_busy_service(temp.path());
+        service.busy = false;
+        let result = crate::result_window::ResultWindowHandle::show_for_monitor(
+            "旧结果", (10, 20, 1920, 1080), |_| Ok(()),
+        )?;
+        let weak = result.as_weak();
+        service.result = Some(result);
+        service.hide_old();
+        service.release_closed_result();
+        assert!(service.result.is_some(), "O-20 暂存不能当作关闭释放");
+        service.restore_old();
+        {
+            let window = weak.upgrade().ok_or("结果组件意外释放")?;
+            assert!(window.window().is_visible(), "失败恢复旧结果");
+            window.invoke_close_requested();
+        }
+        service.release_closed_result();
+        assert!(service.result.is_none());
+        assert!(weak.upgrade().is_none(), "O-22/O-29 关闭后释放组件及其惰性文本缓存");
+        Ok(())
+    }
+
+    // 覆盖 O-15：显式保存关闭必须删除本功能的损坏启动项，而非仅显示关闭。
+    #[test]
+    fn explicit_disabled_save_repairs_corrupt_autostart() {
+        use super::{autostart_update_required, AutostartValue};
+        assert!(autostart_update_required(AutostartValue::Corrupt, false));
+        assert!(autostart_update_required(AutostartValue::Corrupt, true));
+        assert!(!autostart_update_required(AutostartValue::Absent, false));
+        assert!(!autostart_update_required(AutostartValue::Current, true));
+        assert!(autostart_update_required(AutostartValue::Current, false));
+        assert!(autostart_update_required(AutostartValue::Absent, true));
     }
 
     // 覆盖 XB-08/O-19（E-3 回归）：取消走「终止进程」路径后，推理连接已死亡，
@@ -3085,7 +3430,7 @@ mod tests {
         service.pending_hotkey = Some(PendingHotkey::Saving {
             hotkey: "Ctrl+Shift+PageDown".into(),
             old_hotkey: "Ctrl+Alt+O".into(),
-            old_autostart: false,
+            old_autostart: super::AutostartValue::Absent,
             autostart: false,
         });
         service.handle(Command::HotkeyReplaced(Err(
@@ -3119,7 +3464,7 @@ mod tests {
         service.pending_hotkey = Some(PendingHotkey::Saving {
             hotkey: "Ctrl+Shift+PageDown".into(),
             old_hotkey: "Ctrl+Alt+O".into(),
-            old_autostart: false,
+            old_autostart: super::AutostartValue::Absent,
             autostart: false,
         });
         service.handle(Command::HotkeyReceiptTimedOut);
@@ -3135,6 +3480,32 @@ mod tests {
                 .is_some_and(|warning| warning.contains("快捷键确认超时")),
             "自愈路径上报确认超时与已排队恢复"
         );
+        assert!(
+            matches!(service.pending_hotkey, Some(PendingHotkey::Restoring { .. })),
+            "恢复操作也必须等待回执，不能假定旧键已恢复"
+        );
+        service.handle(Command::HotkeyReplaced(Err("原热键已被其他应用占用".into())));
+        assert_eq!(service.settings.hotkey, "Ctrl+Shift+PageDown");
+        assert!(service.pending_hotkey.is_none());
+        Ok(())
+    }
+
+    // 覆盖 O-14：恢复旧键的 30 秒等待超时不是注册失败，迟到成功仍须收尾。
+    #[test]
+    fn restore_timeout_keeps_receipt_context_until_terminal_result(
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        let temp = tempfile::tempdir()?;
+        let (mut service, _work_rx) = ready_busy_service(temp.path());
+        service.busy = false;
+        service.pending_hotkey = Some(PendingHotkey::Restoring {
+            new_hotkey: "Ctrl+Shift+PageDown".into(),
+        });
+        service.handle(Command::HotkeyReceiptTimedOut);
+        assert_eq!(service.settings.hotkey, "Ctrl+Alt+O");
+        assert!(matches!(service.pending_hotkey, Some(PendingHotkey::Restoring { .. })));
+        assert!(service.save_settings("Ctrl+Alt+O", false).is_err());
+        service.handle(Command::HotkeyReplaced(Ok(())));
+        assert_eq!(service.settings.hotkey, "Ctrl+Alt+O");
         assert!(service.pending_hotkey.is_none());
         Ok(())
     }

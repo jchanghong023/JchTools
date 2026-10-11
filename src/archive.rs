@@ -163,10 +163,11 @@ fn plan_volume_renames(
     content: &Path,
     base: &Path,
     directories: &HashMap<String, String>,
+    decoded_names: &HashMap<String, DecodedFileName>,
     exclusions: &rules::Exclusions,
     git: &mut GitBoundaries,
 ) -> Result<HashMap<String, PathBuf>> {
-    let mut families: BTreeMap<(PathBuf, String), Vec<(String, PathBuf)>> = BTreeMap::new();
+    let mut families: BTreeMap<(PathBuf, String, usize), Vec<(String, PathBuf)>> = BTreeMap::new();
     let mut reserved = HashSet::new();
     for entry in walkdir::WalkDir::new(content)
         .follow_links(false)
@@ -175,15 +176,20 @@ fn plan_volume_renames(
         job.context.control.checkpoint()?;
         let entry = entry?;
         let relative = fsutil::relative_string(content, entry.path())?;
-        let mapped = mapped_entry_rel(directories, &relative);
+        let decoded_name = decoded_names.get(&fsutil::fold_rel(&relative));
+        let original = decoded_name.map_or(relative.as_str(), |name| name.original.as_str());
+        let mapped = mapped_entry_rel(directories, original);
         let destination = base.join(fsutil::safe_relative(
-            mapped.as_deref().unwrap_or(&relative),
+            mapped.as_deref().unwrap_or(original),
         )?);
         reserved.insert(fsutil::fold_rel(&fsutil::path_string(&destination)?));
         if !entry.file_type().is_file() {
             continue;
         }
-        let name = entry.file_name().to_str().context("分卷成员名无效")?;
+        let name = destination
+            .file_name()
+            .and_then(|name| name.to_str())
+            .context("分卷成员名无效")?;
         let Some(key) = volume_family_key(name) else {
             continue;
         };
@@ -195,13 +201,17 @@ fn plan_volume_renames(
             continue;
         }
         families
-            .entry((parent.to_path_buf(), key))
+            .entry((
+                parent.to_path_buf(),
+                key,
+                decoded_name.map_or(0, |name| name.occurrence),
+            ))
             .or_default()
             .push((relative, destination));
     }
     let mut existing: HashMap<PathBuf, HashSet<String>> = HashMap::new();
     let mut renames = HashMap::new();
-    for ((parent, key), members) in families {
+    for ((parent, key, _), members) in families {
         // 普通单文件包仍走 H-07；zip/rar 主包也必须避开既有老式尾卷族。
         if members.len() == 1 && key.starts_with("single:") {
             let name = members[0]
@@ -238,6 +248,11 @@ fn plan_volume_renames(
             .get(&parent)
             .is_some_and(|keys| keys.contains(&key))
         {
+            // 同一归档中的重复卷族也不能拼接：先占住本组的原始主体。
+            existing
+                .get_mut(&parent)
+                .context("缺少卷族占位")?
+                .insert(key);
             continue;
         }
         let mut selected = None;
@@ -286,6 +301,16 @@ fn plan_volume_renames(
             }
         }
         let targets = selected.context("无法为完整新分卷族分配统一合法主体")?;
+        let target_family = targets
+            .first()
+            .and_then(|target| target.file_name())
+            .and_then(|name| name.to_str())
+            .and_then(volume_family_key)
+            .context("分卷新主体无效")?;
+        existing
+            .get_mut(&parent)
+            .context("缺少卷族占位")?
+            .insert(target_family);
         for ((relative, _), target) in members.into_iter().zip(targets) {
             reserved.insert(fsutil::fold_rel(&fsutil::path_string(&target)?));
             renames.insert(relative, target);
@@ -302,6 +327,141 @@ struct Listing {
     total: u64,
     sizes_complete: bool,
     git_subtrees: HashSet<String>,
+}
+
+/// 只保存引擎暂存名与归档原名的差异，不把 `_N` 泄漏成正式落盘契约。
+struct DecodedFileName {
+    original: String,
+    occurrence: usize,
+    order: usize,
+}
+
+#[derive(Default)]
+struct DecoderNames {
+    occupied: HashMap<String, usize>,
+    renamed: HashMap<String, DecodedFileName>,
+    next_order: usize,
+}
+
+impl DecoderNames {
+    fn record(&mut self, raw: &str) -> Result<()> {
+        // 7-Zip 对分段写入在成员名后附加位置；这些段共用输出，不自动改名。
+        let (raw, split) = raw
+            .rsplit_once(" <")
+            .filter(|(_, position)| {
+                position.strip_suffix('>').is_some_and(|digits| {
+                    !digits.is_empty() && digits.bytes().all(|b| b.is_ascii_digit())
+                })
+            })
+            .map_or((raw, false), |(name, _)| (name, true));
+        let directory = raw.ends_with(['/', '\\']);
+        let raw = raw.trim_end_matches(['/', '\\']);
+        if raw == "." || raw.is_empty() {
+            return Ok(());
+        }
+        let relative = fsutil::safe_relative(raw)?;
+        let mut original = String::with_capacity(raw.len());
+        for component in relative.components() {
+            if !original.is_empty() {
+                original.push('/');
+            }
+            original.push_str(component.as_os_str().to_str().context("解码成员名无效")?);
+        }
+        let key = fsutil::fold_rel(&original);
+        for (index, _) in key.match_indices('/') {
+            if !self.occupied.contains_key(&key[..index]) {
+                self.occupied.insert(key[..index].to_string(), 0);
+            }
+        }
+        if directory || split {
+            self.occupied.entry(key).or_insert(usize::from(split));
+            return Ok(());
+        }
+        let order = self.next_order;
+        self.next_order += 1;
+        let Some(count) = self.occupied.get_mut(&key) else {
+            self.occupied.insert(key, 1);
+            return Ok(());
+        };
+        let occurrence = *count;
+        *count += 1;
+        // 匹配随包引擎 FilePathAutoRename.cpp 的临时路径选择；正式目标仍走 H-07。
+        let name_start = original.rfind('/').map_or(0, |index| index + 1);
+        let dot = original.rfind('.').filter(|index| *index > name_start);
+        let (stem, suffix) = dot.map_or((original.as_str(), ""), |index| original.split_at(index));
+        let mut left = 1u32;
+        let mut right = 1u32 << 30;
+        while left != right {
+            let mid = u32::midpoint(left, right);
+            let candidate = format!("{stem}_{mid}{suffix}");
+            if self.occupied.contains_key(&fsutil::fold_rel(&candidate)) {
+                left = mid + 1;
+            } else {
+                right = mid;
+            }
+        }
+        let staged = fsutil::fold_rel(&format!("{stem}_{right}{suffix}"));
+        ensure!(!self.occupied.contains_key(&staged), "解码成员临时名已占用");
+        self.occupied.insert(staged.clone(), 0);
+        self.renamed.insert(
+            staged,
+            DecodedFileName {
+                original,
+                occurrence,
+                order,
+            },
+        );
+        Ok(())
+    }
+}
+
+/// 原名成员先合入；引擎改名成员按实际解码顺序随后合入，不重复扫描暂存树。
+fn staged_files<'a>(
+    content: &'a Path,
+    names: &'a HashMap<String, DecodedFileName>,
+    control: &'a crate::control::Control,
+) -> impl Iterator<Item = Result<(walkdir::DirEntry, String)>> + 'a {
+    let mut walk = Some(
+        walkdir::WalkDir::new(content)
+            .follow_links(false)
+            .min_depth(1)
+            .into_iter(),
+    );
+    let mut pending = Vec::new();
+    let mut deferred: Option<std::vec::IntoIter<_>> = None;
+    std::iter::from_fn(move || loop {
+        if let Some(walk) = &mut walk {
+            if let Some(entry) = walk.next() {
+                if let Err(error) = control.checkpoint() {
+                    return Some(Err(error));
+                }
+                let entry = match entry {
+                    Ok(entry) => entry,
+                    Err(error) => return Some(Err(error.into())),
+                };
+                if entry.file_type().is_dir() {
+                    continue;
+                }
+                let relative = match fsutil::relative_string(content, entry.path()) {
+                    Ok(relative) => relative,
+                    Err(error) => return Some(Err(error)),
+                };
+                if !names.is_empty() {
+                    if let Some(name) = names.get(&fsutil::fold_rel(&relative)) {
+                        pending.push((name.order, entry, relative));
+                        continue;
+                    }
+                }
+                return Some(Ok((entry, relative)));
+            }
+        } else {
+            let (_, entry, relative) = deferred.as_mut()?.next()?;
+            return Some(control.checkpoint().map(|()| (entry, relative)));
+        }
+        walk = None;
+        pending.sort_unstable_by_key(|(order, _, _)| *order);
+        deferred = Some(std::mem::take(&mut pending).into_iter());
+    })
 }
 
 /// 成员路径里出现 `.git` 组件时，返回「直接含该 .git 的那个目录」的序数折叠相对路径
@@ -590,9 +750,8 @@ impl SevenZip {
                         fields.clear();
                         return Ok(());
                     }
-                    let relative = fsutil::safe_relative(&raw).map_err(|error| {
+                    let relative = fsutil::safe_relative(&raw).inspect_err(|_| {
                         member_rejected("invalid_member_path", &raw);
-                        error
                     })?;
                     let raw = fsutil::path_string(&relative)?.replace('\\', "/");
                     if raw.split('/').any(|s| {
@@ -602,12 +761,6 @@ impl SevenZip {
                     }) {
                         member_rejected("protected_member_path", &raw);
                         bail!("拒绝压缩包中的程序工作区/系统目录条目：{raw}");
-                    }
-                    // X-07：「解压失败」同名普通成员正常落盘，但不继续递归处理其子树；
-                    // 内部链接标记不是用户命名空间，仍在完整预检阶段拒绝。
-                    if raw.split('/').any(|s| s.starts_with(".jchtools-link-")) {
-                        member_rejected("internal_link_marker", &raw);
-                        bail!("拒绝压缩包中的内部链接标记条目：{raw}");
                     }
                     // H-06：成员路径里出现 .git 组件时，登记「直接含该 .git 的目录」为整树
                     // 排除边界。边界必须在合入前从完整条目清单确定：该目录及全部后代整树
@@ -798,18 +951,25 @@ impl SevenZip {
             result
         })
     }
-    fn decode_into(&self, job: &Job, archive: &Path, output: &Path, label: &str) -> Result<()> {
+    fn decode_into(
+        &self,
+        job: &Job,
+        archive: &Path,
+        output: &Path,
+        label: &str,
+    ) -> Result<HashMap<String, DecodedFileName>> {
         let control = job.context.control.clone();
         observe_archive("decode", &control, |boundary_stage| {
             *boundary_stage = "decoder_process_and_space";
+            let mut names = DecoderNames::default();
             let mut command = self.command();
             command
                 .args([
                     "x",
                     "-aou",
                     "-y",
-                    "-bb0",
-                    "-bsp1",
+                    "-bb1",
+                    "-bsp2",
                     "-bso1",
                     "-bse2",
                     "-sccUTF-8",
@@ -823,7 +983,12 @@ impl SevenZip {
                 &mut command,
                 &job.context.control,
                 |err, line| {
-                    if !err && line.contains('%') {
+                    if !err {
+                        if let Some(member) = line.strip_prefix("- ") {
+                            return names.record(member);
+                        }
+                    }
+                    if line.contains('%') {
                         job.context
                             .status(format!("正在解压 {label} · {}", line.trim()));
                     }
@@ -843,7 +1008,17 @@ impl SevenZip {
                     Ok(())
                 },
             )
-            .with_context(|| "解压失败（可能已损坏、加密或格式不受支持）")
+            .with_context(|| "解压失败（可能已损坏、加密或格式不受支持）")?;
+            for staged in names.renamed.keys() {
+                job.context.control.checkpoint()?;
+                let path = output.join(fsutil::safe_relative(staged)?);
+                ensure!(
+                    fs::symlink_metadata(path)
+                        .is_ok_and(|metadata| metadata.is_file() && !fsutil::is_link(&metadata)),
+                    "解码成员改名与引擎输出不一致，未合入任何成员"
+                );
+            }
+            Ok(names.renamed)
         })
     }
 
@@ -882,7 +1057,7 @@ impl SevenZip {
             *boundary_stage = "staging_create";
             let mut stage = Staging::new(&job.root)?;
             *boundary_stage = "decode";
-            self.decode_into(job, &archive, &stage.content, archive_rel)?;
+            let mut decoded_names = self.decode_into(job, &archive, &stage.content, archive_rel)?;
             // -ba 列项可能透过复合流直接列出 tar 成员，首步解码却只生成中间 tar。
             // 中间物只在本次所有权暂存树内存在，不按最终清单总量校验、不正式落盘入队。
             *boundary_stage = "staging_validation";
@@ -929,7 +1104,7 @@ impl SevenZip {
                         decoded,
                     )?;
                     let next = Staging::new(&job.root)?;
-                    self.decode_into(job, &member, &next.content, archive_rel)?;
+                    decoded_names = self.decode_into(job, &member, &next.content, archive_rel)?;
                     decoded = validate_staging(
                         job,
                         &next.content,
@@ -961,32 +1136,28 @@ impl SevenZip {
                 &stage.content,
                 base,
                 &dir_renames,
+                &decoded_names,
                 &exclusions,
                 &mut git,
             )?;
             // One archive is decoded once, including solid archives. Final placement is rename, never copy.
             *boundary_stage = "member_output";
             let mut nested_members: BTreeMap<PathBuf, BTreeMap<String, PathBuf>> = BTreeMap::new();
-            for entry in walkdir::WalkDir::new(&stage.content)
-                .follow_links(false)
-                .min_depth(1)
-            {
-                job.context.control.checkpoint()?;
-                let entry = entry?;
+            for entry in staged_files(&stage.content, &decoded_names, &job.context.control) {
+                let (entry, relative) = entry?;
                 let meta = fs::symlink_metadata(entry.path())?;
                 if fsutil::is_link(&meta) {
                     bail!("解压结果出现链接，已停止合入");
                 }
-                if meta.is_dir() {
-                    continue;
-                }
                 if !meta.is_file() {
                     bail!("解压结果含非普通文件");
                 }
-                let relative = fsutil::relative_string(&stage.content, entry.path())?;
-                let mut destination = base.join(fsutil::safe_relative(&relative)?);
+                let decoded_name = decoded_names.get(&fsutil::fold_rel(&relative));
+                let original =
+                    decoded_name.map_or(relative.as_str(), |name| name.original.as_str());
+                let mut destination = base.join(fsutil::safe_relative(original)?);
                 // X-04：祖先目录因被既有文件占用而整体改名时，成员落盘路径跟随映射。
-                if let Some(mapped) = mapped_entry_rel(&dir_renames, &relative) {
+                if let Some(mapped) = mapped_entry_rel(&dir_renames, original) {
                     destination = base.join(fsutil::safe_relative(&mapped)?);
                 }
                 if let Some(target) = volume_renames.get(&relative) {
@@ -1016,7 +1187,7 @@ impl SevenZip {
                 if let Some(split) = destination_rel.rfind('/') {
                     fsutil::safe_join(&job.root, &destination_rel[..split])?;
                 }
-                if inside_git_subtree(&git_subtrees, &relative) {
+                if inside_git_subtree(&git_subtrees, original) {
                     // H-06：该成员所属目录直接含 .git——整树排除（含 .git 的兄弟条目与
                     // 全部后代），不解出；原包按未完全解开处理（X-06），内容仍在原包里。
                     complete = false;
@@ -1109,7 +1280,7 @@ impl SevenZip {
                         .context("成员文件名无效")?,
                 ) && !git.blocked(&job.root, final_path.parent().context("成员缺少父目录")?)?
                 {
-                    let excluded_tree = relative
+                    let excluded_tree = original
                         .split('/')
                         .chain(final_rel.split('/'))
                         .any(|component| component.eq_ignore_ascii_case(QUARANTINE_DIR_NAME));
@@ -2624,6 +2795,18 @@ impl Drop for Staging {
     }
 }
 
+#[rustfmt::skip]
+#[warn(
+    warnings,
+    unused_must_use,
+    unreachable_patterns,
+    unreachable_pub,
+    unused_variables,
+    rust_2018_idioms,
+    explicit_outlives_requirements,
+    elided_lifetimes_in_paths,
+    single_use_lifetimes
+)]
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -2679,6 +2862,59 @@ mod tests {
         );
         assert_eq!(fs::read(&target).unwrap(), b"member payload");
         assert!(!source.exists(), "合入后暂存文件应已改名离开");
+    }
+
+    // 覆盖 X-04/X-10/H-07：重复卷族各自完整改主体，不把新尾卷拼入旧的残缺族。
+    #[test]
+    fn decoded_duplicate_volume_families_preserve_partial_existing_set() {
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path().join("data");
+        let content = temp.path().join("content");
+        fs::create_dir(&root).unwrap();
+        fs::create_dir(&content).unwrap();
+        fs::write(root.join("bundle.zip.001"), b"old").unwrap();
+        for (name, payload) in [
+            ("bundle.zip.001", b"oneA"),
+            ("bundle.zip.002", b"twoA"),
+            ("bundle.zip_1.001", b"oneB"),
+            ("bundle.zip_1.002", b"twoB"),
+        ] {
+            fs::write(content.join(name), payload).unwrap();
+        }
+        let mut names = DecoderNames::default();
+        for name in [
+            "bundle.zip.001",
+            "bundle.zip.002",
+            "bundle.zip.001",
+            "bundle.zip.002",
+        ] {
+            names.record(name).unwrap();
+        }
+        let job = review_job(&root, &temp.path().join("task.sqlite3"), 0);
+        let targets = plan_volume_renames(
+            &job,
+            &content,
+            &root,
+            &HashMap::new(),
+            &names.renamed,
+            &rules::build_exclusions("").unwrap(),
+            &mut GitBoundaries::default(),
+        )
+        .unwrap();
+        for entry in staged_files(&content, &names.renamed, &job.context.control) {
+            let (entry, relative) = entry.unwrap();
+            merge_extracted(&root, entry.path(), targets.get(&relative).unwrap()).unwrap();
+        }
+        assert_eq!(fs::read(root.join("bundle.zip.001")).unwrap(), b"old");
+        assert!(!root.join("bundle.zip.002").exists());
+        for (name, payload) in [
+            ("bundle (1).zip.001", b"oneA"),
+            ("bundle (1).zip.002", b"twoA"),
+            ("bundle (2).zip.001", b"oneB"),
+            ("bundle (2).zip.002", b"twoB"),
+        ] {
+            assert_eq!(fs::read(root.join(name)).unwrap(), payload);
+        }
     }
 
     // 覆盖 X-04, H-07（回归：目标已有同内容文件时仍必须落盘改名副本，不得以内容相同跳过）
@@ -3312,6 +3548,7 @@ mod tests {
             &job,
             &content,
             &root,
+            &HashMap::new(),
             &HashMap::new(),
             &rules::build_exclusions("").unwrap(),
             &mut GitBoundaries::default(),

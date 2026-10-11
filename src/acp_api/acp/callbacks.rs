@@ -40,7 +40,8 @@ pub(super) struct Route {
 #[derive(Default)]
 pub(super) struct Routes {
     pub known: HashSet<SessionId>,
-    pub model_id: Option<SessionConfigId>,
+    // 配置 ID 属于会话；即使更新暂时无效，也保留已登记 ID 供后续通知恢复。
+    pub model_ids: HashMap<SessionId, SessionConfigId>,
     pub models: HashMap<SessionId, SessionModel>,
     pub active: HashMap<SessionId, Route>,
     pub spans: HashMap<SessionId, tracing::Span>,
@@ -51,7 +52,7 @@ enum CallbackLifetime {
     Session,
 }
 struct CallbackTask {
-    handle: tokio::task::JoinHandle<()>,
+    handle: tokio::task::JoinHandle<Result<(), agent_client_protocol::Error>>,
     lifetime: CallbackLifetime,
 }
 #[derive(Clone)]
@@ -86,8 +87,8 @@ impl Callbacks {
         let span = self.span(&session);
         let handle = tokio::spawn(
             async move {
-                let _ = crate::acp_api::diagnostics::async_call("acp_callback", "respond", future)
-                    .await;
+                // SDK 响应发送失败也属于回调失败，由轮次/会话收尾向调用方传递。
+                crate::acp_api::diagnostics::async_call("acp_callback", "respond", future).await
             }
             .instrument(span),
         );
@@ -107,7 +108,9 @@ impl Callbacks {
             let mut result = Ok(());
             let tasks = {
                 let mut sessions = self.tasks.lock().unwrap_or_else(PoisonError::into_inner);
-                let tasks = sessions.entry(session.clone()).or_default();
+                let Some(tasks) = sessions.get_mut(session) else {
+                    return result;
+                };
                 let mut finished = Vec::new();
                 let mut index = 0;
                 while index < tasks.len() {
@@ -119,11 +122,17 @@ impl Callbacks {
                         index += 1;
                     }
                 }
+                if tasks.is_empty() {
+                    sessions.remove(session);
+                }
                 finished
             };
             for task in tasks {
-                if task.await.is_err() && result.is_ok() {
-                    result = Err(io_error("ACP 回调收尾失败"));
+                let outcome = task
+                    .await
+                    .unwrap_or_else(|_| Err(io_error("ACP 回调收尾失败")));
+                if result.is_ok() {
+                    result = outcome;
                 }
             }
             result
@@ -141,8 +150,12 @@ impl Callbacks {
                 .flat_map(|(_, tasks)| tasks)
                 .collect::<Vec<_>>();
             for task in tasks {
-                if task.handle.await.is_err() && result.is_ok() {
-                    result = Err(io_error("ACP 回调收尾失败"));
+                let outcome = task
+                    .handle
+                    .await
+                    .unwrap_or_else(|_| Err(io_error("ACP 回调收尾失败")));
+                if result.is_ok() {
+                    result = outcome;
                 }
             }
             result
@@ -199,7 +212,7 @@ impl Callbacks {
             let routes = self.routes.lock().unwrap_or_else(PoisonError::into_inner);
             if let (Some(model), Some(id)) = (
                 routes.models.get(&notification.session_id),
-                routes.model_id.as_ref(),
+                routes.model_ids.get(&notification.session_id),
             ) {
                 let updated = update
                     .config_options
@@ -225,7 +238,22 @@ impl Callbacks {
                             stage = "config_notification",
                             error_type = "models_unavailable",
                             "ACP 会话模型通知无效"
-                        )
+                        );
+                    });
+                } else {
+                    let span = routes
+                        .spans
+                        .get(&notification.session_id)
+                        .cloned()
+                        .unwrap_or_else(tracing::Span::none);
+                    span.in_scope(|| {
+                        tracing::info!(
+                            event = "acp_model_update_validated",
+                            component = "acp_callback",
+                            stage = "config_notification",
+                            outcome = "validated",
+                            "ACP 会话模型通知校验通过"
+                        );
                     });
                 }
                 *model.lock().unwrap_or_else(PoisonError::into_inner) = updated;
@@ -246,11 +274,18 @@ impl Callbacks {
                         .send(RequestEvent::TextDelta(text.text))
                         .is_err()
                     {
+                        tracing::warn!(
+                            event = "acp_notification_delivery_cancelled",
+                            component = "acp_callback",
+                            stage = "request_event_delivery",
+                            outcome = "receiver_closed",
+                            "ACP 文本事件接收方已关闭，取消在途轮次"
+                        );
                         route.cancellation.cancel();
                     }
                 } else {
                     route.failure = Some(ServiceError::new(
-                        ServiceErrorKind::InvalidRequest,
+                        ServiceErrorKind::Internal,
                         "Agent 返回了不支持的非文本内容",
                     ));
                     route.cancellation.cancel();
@@ -536,6 +571,14 @@ pub(super) async fn connect<R>(
             async move |request: CreateElicitationRequest, responder, _cx| {
                 if let ElicitationScope::Session(scope) = request.scope() {
                     elicitations.fail(&scope.session_id, "不支持非权限交互请求");
+                } else {
+                    tracing::error!(
+                        event = "acp_callback_failed",
+                        component = "acp_callback",
+                        stage = "elicitation_scope",
+                        error_type = "unsupported_scope",
+                        "ACP 非权限交互请求因不支持的范围被拒绝"
+                    );
                 }
                 responder.respond_with_error(invalid("不支持非权限交互请求"))
             },
@@ -553,6 +596,14 @@ pub(super) async fn connect<R>(
                         &SessionId::new(session.to_owned()),
                         "不支持未知的非权限交互请求",
                     );
+                } else {
+                    tracing::error!(
+                        event = "acp_callback_failed",
+                        component = "acp_callback",
+                        stage = "unknown_request",
+                        error_type = "session_id_unavailable",
+                        "ACP 未知请求因缺少有效会话关联而被拒绝"
+                    );
                 }
                 responder.respond_with_error(agent_client_protocol::Error::method_not_found())
             },
@@ -562,6 +613,18 @@ pub(super) async fn connect<R>(
         .await
 }
 
+#[rustfmt::skip]
+#[warn(
+    warnings,
+    unused_must_use,
+    unreachable_patterns,
+    unreachable_pub,
+    unused_variables,
+    rust_2018_idioms,
+    explicit_outlives_requirements,
+    elided_lifetimes_in_paths,
+    single_use_lifetimes
+)]
 #[cfg(test)]
 mod tests {
     use super::read_range;

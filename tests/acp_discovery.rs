@@ -1,3 +1,16 @@
+#![warn(
+    warnings,
+    unused_must_use,
+    unreachable_patterns,
+    unreachable_pub,
+    unused_variables,
+    future_incompatible,
+    rust_2018_idioms,
+    explicit_outlives_requirements,
+    elided_lifetimes_in_paths,
+    single_use_lifetimes
+)]
+
 //! AH-A13/AH-A14：真实 JchTools 控制管道与 HTTP 模型发现；不调用模型。
 //! ACP Agent 是隔离合成 fixture，不代表真实 OpenCode/供应商端到端验收。
 #![allow(clippy::unwrap_used, clippy::expect_used)]
@@ -7,9 +20,9 @@ use jchtools::acp_api::{
 };
 use serde_json::{json, Value};
 use std::{
-    io::{Read, Write},
+    io::{self, Read, Write},
     path::{Path, PathBuf},
-    process::{Child, Command, Stdio},
+    process::{Child, Command, ExitStatus, Stdio},
     thread,
     time::{Duration, Instant},
 };
@@ -87,11 +100,15 @@ impl Harness {
     }
 
     fn call(&self, action: &str, config: Option<&ServiceConfig>) -> Value {
+        self.try_call(action, config).unwrap()
+    }
+
+    fn try_call(&self, action: &str, config: Option<&ServiceConfig>) -> io::Result<Value> {
         let path = self
             .temp
             .path()
             .join(format!("result-{}.json", uuid::Uuid::new_v4()));
-        let mut command = self.isolated_command(std::env::current_exe().unwrap());
+        let mut command = self.isolated_command(std::env::current_exe()?);
         command
             .args(["--exact", CHILD_TEST, "--nocapture"])
             .env("JCHTOOLS_DISCOVERY_TEST_ACTION", action)
@@ -99,12 +116,28 @@ impl Harness {
         if let Some(config) = config {
             command.env(
                 "JCHTOOLS_DISCOVERY_TEST_CONFIG",
-                serde_json::to_string(config).unwrap(),
+                serde_json::to_string(config).map_err(io::Error::other)?,
             );
         }
-        let mut child = command.spawn().unwrap();
-        wait_exit(&mut child);
-        serde_json::from_slice(&std::fs::read(path).unwrap()).unwrap()
+        let mut child = command.spawn()?;
+        let exit = match try_wait_exit(&mut child) {
+            Ok(exit) => exit,
+            Err(error) => {
+                // 仅回收本测试直接创建的消费者，不强杀后台或 Agent。
+                let cleanup = child.kill().and_then(|()| child.wait());
+                return Err(match cleanup {
+                    Ok(_) => error,
+                    Err(cleanup) => io::Error::new(
+                        error.kind(),
+                        format!("{error}; 隔离消费者回收失败: {cleanup}"),
+                    ),
+                });
+            }
+        };
+        if !exit.success() {
+            return Err(io::Error::other(format!("隔离进程退出失败: {exit}")));
+        }
+        serde_json::from_slice(&std::fs::read(path)?).map_err(io::Error::other)
     }
 
     fn config(&self, port: u16) -> ServiceConfig {
@@ -157,20 +190,46 @@ impl Harness {
 impl Drop for Harness {
     fn drop(&mut self) {
         if let Some(mut service) = self.service.take() {
-            let _result = self.call("stop", None);
-            wait_exit(&mut service);
+            // 显式 stop 保留断言；析构只尝试安全收尾，不能遮蔽原测试失败。
+            match self.try_call("stop", None) {
+                Ok(result) if result.get("error").is_none() => {}
+                result => {
+                    let _reported = writeln!(
+                        io::stderr().lock(),
+                        "ACP 发现测试隔离 Stop 清理失败: {result:?}"
+                    );
+                }
+            }
+            match try_wait_exit(&mut service) {
+                Ok(exit) if exit.success() => {}
+                result => {
+                    let _reported = writeln!(
+                        io::stderr().lock(),
+                        "ACP 发现测试后台未成功收尾: {result:?}"
+                    );
+                }
+            }
         }
     }
 }
 
 fn wait_exit(child: &mut Child) {
+    let exit = try_wait_exit(child).unwrap();
+    assert!(exit.success(), "隔离进程退出失败: {exit}");
+}
+
+fn try_wait_exit(child: &mut Child) -> io::Result<ExitStatus> {
     let deadline = Instant::now() + Duration::from_secs(30);
     loop {
-        if let Some(exit) = child.try_wait().unwrap() {
-            assert!(exit.success(), "隔离进程退出失败: {exit}");
-            return;
+        if let Some(exit) = child.try_wait()? {
+            return Ok(exit);
         }
-        assert!(Instant::now() < deadline, "隔离进程未收尾: {}", child.id());
+        if Instant::now() >= deadline {
+            return Err(io::Error::new(
+                io::ErrorKind::TimedOut,
+                format!("隔离进程未收尾: {}", child.id()),
+            ));
+        }
         thread::sleep(Duration::from_millis(10));
     }
 }

@@ -1,3 +1,16 @@
+#![warn(
+    warnings,
+    unused_must_use,
+    unreachable_patterns,
+    unreachable_pub,
+    unused_variables,
+    future_incompatible,
+    rust_2018_idioms,
+    explicit_outlives_requirements,
+    elided_lifetimes_in_paths,
+    single_use_lifetimes
+)]
+
 //! AH-16/AH-A15：真实后台及官方 SDK Agent 的子进程环境保护；不调用真实模型。
 // 真实 ACP 后台只支持 Windows，内部主程序入口及隔离钩子分别需要 gui、test-hooks。
 #![cfg(all(windows, feature = "gui", feature = "test-hooks"))]
@@ -39,8 +52,8 @@ impl Harness {
             cleaned: false,
         }
     }
-    fn launch(&self, action: &str) -> Child {
-        let mut command = Command::new(std::env::current_exe().unwrap());
+    fn launch(&self, action: &str) -> std::io::Result<Child> {
+        let mut command = Command::new(std::env::current_exe()?);
         command
             .args(["--exact", TEST_NAME, "--nocapture"])
             .env(CHILD_ROOT, &self.root)
@@ -61,10 +74,10 @@ impl Harness {
         } else {
             command.env(GUARD, action);
         }
-        command.spawn().unwrap()
+        command.spawn()
     }
     fn cleanup(&mut self) {
-        let exit = finish_child(self.launch("cleanup")).unwrap();
+        let exit = finish_child(self.launch("cleanup").unwrap()).unwrap();
         assert!(exit.success(), "隔离后台清理失败：{exit}");
         self.cleaned = true;
     }
@@ -73,7 +86,8 @@ impl Drop for Harness {
     fn drop(&mut self) {
         if !self.cleaned {
             // 断言失败时也仅请求本测试隔离实例安全 Stop；不杀 Agent、不触碰用户实例。
-            let result = finish_child(self.launch("cleanup"));
+            // 析构路径不能因消费者创建失败再次 panic，遮蔽原始断言并中止清理。
+            let result = self.launch("cleanup").and_then(finish_child);
             if !matches!(result, Ok(exit) if exit.success()) {
                 eprintln!("ACP 环境测试隔离清理失败：{result:?}");
             }
@@ -100,12 +114,19 @@ fn finish_child(mut child: Child) -> std::io::Result<ExitStatus> {
 }
 fn process_alive(pid: u32) -> bool {
     use windows_sys::Win32::{
-        Foundation::{CloseHandle, WAIT_FAILED, WAIT_TIMEOUT},
+        Foundation::{CloseHandle, GetLastError, ERROR_INVALID_PARAMETER, WAIT_FAILED, WAIT_TIMEOUT},
         System::Threading::{OpenProcess, WaitForSingleObject, PROCESS_SYNCHRONIZE},
     };
     // SAFETY: 只以同步权限查询本隔离测试记录的自有 PID，不修改或终止进程。
     let handle = unsafe { OpenProcess(PROCESS_SYNCHRONIZE, 0, pid) };
     if handle.is_null() {
+        // SAFETY: 紧接失败的 OpenProcess 读取其线程局部错误，不插入其他系统调用。
+        let error = unsafe { GetLastError() };
+        // PID 已不存在时可以认定退出；拒绝访问等观察失败不能冒充安全收尾。
+        assert_eq!(
+            error, ERROR_INVALID_PARAMETER,
+            "无法观察自有进程 {pid} 是否退出，Windows 错误 {error}"
+        );
         return false;
     }
     // SAFETY: 有效进程句柄，零时等待只查询进程对象是否已完成退出。
@@ -225,7 +246,7 @@ fn owned_agent_disables_discovery_without_mutating_parent_or_config() {
     let parent_environment = std::env::var_os(GUARD);
     for action in ["unset", "1", "0"] {
         let mut harness = Harness::new();
-        let exit = finish_child(harness.launch(action)).unwrap();
+        let exit = finish_child(harness.launch(action).unwrap()).unwrap();
         if exit.success() {
             // 消费者成功返回前已证明 Stop、双 PID 退出及端口关闭；仅失败路径兜底清理。
             harness.cleaned = true;
