@@ -43,6 +43,7 @@ pub(super) struct Routes {
     // 配置 ID 属于会话；即使更新暂时无效，也保留已登记 ID 供后续通知恢复。
     pub model_ids: HashMap<SessionId, SessionConfigId>,
     pub models: HashMap<SessionId, SessionModel>,
+    pub workspaces: HashMap<SessionId, PathBuf>,
     pub active: HashMap<SessionId, Route>,
     pub spans: HashMap<SessionId, tracing::Span>,
 }
@@ -62,10 +63,10 @@ pub(super) struct Callbacks {
     tasks: Arc<Mutex<HashMap<SessionId, Vec<CallbackTask>>>>,
 }
 impl Callbacks {
-    pub(super) fn new(workspace: PathBuf) -> Self {
+    pub(super) fn new() -> Self {
         Self {
             routes: Arc::new(Mutex::new(Routes::default())),
-            terminals: Terminals::new(workspace),
+            terminals: Terminals::new(),
             tasks: Arc::new(Mutex::new(HashMap::new())),
         }
     }
@@ -508,7 +509,17 @@ pub(super) async fn connect<R>(
                     CallbackLifetime::Round,
                     async move {
                         let result = match callbacks.check(&request.session_id) {
-                            Ok(()) => callbacks.terminals.create(request),
+                            Ok(()) => {
+                                let cwd = callbacks
+                                    .routes
+                                    .lock()
+                                    .unwrap_or_else(PoisonError::into_inner)
+                                    .workspaces
+                                    .get(&request.session_id)
+                                    .cloned()
+                                    .ok_or_else(|| invalid("ACP 会话工作目录不可用"));
+                                cwd.and_then(|cwd| callbacks.terminals.create(request, cwd))
+                            }
                             Err(error) => Err(error),
                         };
                         responder.respond_with_result(result)

@@ -17,7 +17,7 @@
 #[path = "fixtures/acp_api/main.rs"]
 mod fixture;
 use fixture::{
-    consumer::{audit, body, completion, wait_event, Http, Server},
+    consumer::{audit, body, completion, release, wait_event, Http, Server},
     Plan, MODEL_A,
 };
 use serde_json::Value;
@@ -73,6 +73,138 @@ fn file_callbacks_write_actual_bytes_and_read_only_requested_line() {
     assert_eq!(missing.status, 502);
     assert!(missing.json().get("error").is_some());
 }
+
+/// AH-04/AH-06/AH-12：并发业务会话各自使用请求cwd，session/new及ACP文件回调均隔离到调用方目录。
+#[test]
+fn concurrent_sessions_write_files_inside_their_caller_directories() {
+    let server = server();
+    let first_dir = server.temp.path().join("caller-first");
+    let second_dir = server.temp.path().join("caller-second");
+    std::fs::create_dir(&first_dir).unwrap();
+    std::fs::create_dir(&second_dir).unwrap();
+    let mut first = Plan::new("files");
+    first.barrier = true;
+    let mut second = Plan::new("files");
+    second.barrier = true;
+    let port = server.port;
+    let first_body = body(&first, false, &first_dir);
+    let second_body = body(&second, false, &second_dir);
+    let first_request = thread::spawn(move || {
+        Http::open(
+            port,
+            "POST",
+            "/v1/chat/completions",
+            Some(&first_body),
+            None,
+        )
+    });
+    let second_request = thread::spawn(move || {
+        Http::open(
+            port,
+            "POST",
+            "/v1/chat/completions",
+            Some(&second_body),
+            None,
+        )
+    });
+    let first_start = wait_event(&server.root, "started", &first.tag);
+    let second_start = wait_event(&server.root, "started", &second.tag);
+    assert_ne!(first_start["session"], second_start["session"]);
+    let pid = first_start["pid"].as_u64().expect("Agent 必须报告实际 PID");
+    assert_eq!(second_start["pid"].as_u64(), Some(pid));
+    release(&server.root, &first);
+    release(&server.root, &second);
+    let first_response = first_request.join().unwrap();
+    let second_response = second_request.join().unwrap();
+    assert_eq!(first_response.status, 200);
+    assert_eq!(second_response.status, 200);
+    assert_eq!(completion(&first_response.json()).trim_end_matches('\n'), first.tag);
+    assert_eq!(completion(&second_response.json()).trim_end_matches('\n'), second.tag);
+    assert_eq!(
+        std::fs::read_to_string(first_dir.join(format!("{}.txt", first.tag))).unwrap(),
+        format!("first\n{}\nlast\n", first.tag)
+    );
+    assert_eq!(
+        std::fs::read_to_string(second_dir.join(format!("{}.txt", second.tag))).unwrap(),
+        format!("first\n{}\nlast\n", second.tag)
+    );
+    assert!(!first_dir.join(format!("{}.txt", second.tag)).exists());
+    assert!(!second_dir.join(format!("{}.txt", first.tag)).exists());
+    let events = audit(&server.root);
+    let spawns = events
+        .iter()
+        .filter(|event| event["event"] == "spawn")
+        .collect::<Vec<_>>();
+    assert_eq!(spawns.len(), 1, "并发会话必须复用唯一 Agent 进程");
+    assert_eq!(spawns[0]["pid"].as_u64(), Some(pid));
+
+    let expected = [first_dir.canonicalize().unwrap(), second_dir.canonicalize().unwrap()];
+    let mut actual = events
+        .iter()
+        .filter(|event| event["event"] == "session")
+        .filter_map(|event| {
+            let cwd = PathBuf::from(event["cwd"].as_str()?);
+            let canonical = cwd.canonicalize().ok()?;
+            if !expected.contains(&canonical) {
+                return None;
+            }
+            #[cfg(windows)]
+            assert!(
+                !cwd.to_string_lossy().starts_with(r"\\?\"),
+                "session/new cwd must use an ordinary Windows path"
+            );
+            Some(canonical)
+        })
+        .collect::<Vec<_>>();
+    actual.sort();
+    let mut expected = expected.to_vec();
+    expected.sort();
+    assert_eq!(actual, expected, "session/new must receive each caller cwd");
+}
+
+/// AH-04/AH-06/AH-13：终端省略cwd继承会话目录，显式cwd覆盖会话目录。
+#[test]
+fn terminal_current_directory_matches_session_with_and_without_explicit_cwd() {
+    let server = server();
+    for (action, dirname) in [
+        ("terminal-pwd", "终端-默认调用方"),
+        ("terminal-pwd-explicit", "终端-显式调用方"),
+    ] {
+        let caller_dir = server.temp.path().join(dirname);
+        std::fs::create_dir(&caller_dir).unwrap();
+        let plan = Plan::new(action);
+        let terminal_dir = if action == "terminal-pwd-explicit" {
+            caller_dir.with_file_name("终端-显式指定目录")
+        } else {
+            caller_dir.clone()
+        };
+        if terminal_dir != caller_dir {
+            std::fs::create_dir(&terminal_dir).unwrap();
+        }
+        let request = body(&plan, false, &caller_dir);
+        let response = Http::open(
+            server.port,
+            "POST",
+            "/v1/chat/completions",
+            Some(&request),
+            None,
+        );
+        assert_eq!(response.status, 200);
+        let actual = std::fs::read_to_string(
+            terminal_dir.join(format!("terminal-{}.cwd", plan.tag)),
+        )
+        .unwrap();
+        assert_eq!(
+            PathBuf::from(actual).canonicalize().unwrap(),
+            terminal_dir.canonicalize().unwrap(),
+            "action={action}"
+        );
+        if terminal_dir != caller_dir {
+            assert!(!caller_dir.join(format!("terminal-{}.cwd", plan.tag)).exists());
+        }
+    }
+}
+
 
 /// 覆盖 AH-13：非权限交互不得伪造答案、无限等待或被转换成HTTP工具循环。
 #[test]
@@ -210,7 +342,8 @@ fn cancelled_round_permission_returns_cancelled_before_prompt_terminal() {
         .unwrap();
     let mut request = runtime
         .block_on(server.backend.submit(PromptInput {
-            model: MODEL_A.into(),
+            model: MODEL_A.to_owned(),
+            cwd: server.workspace.clone(),
             messages: vec![ChatMessage {
                 role: MessageRole::User,
                 text: plan.prompt(),
@@ -304,7 +437,7 @@ fn extension_attempt() -> (Value, Option<HttpOutcome>, HttpOutcome) {
         server.port,
         "POST",
         "/v1/chat/completions",
-        Some(body(&plan, false)),
+        Some(body(&plan, false, &server.workspace)),
     );
     let event = wait_event(&server.root, "extension-result", &plan.tag);
     let still_active = server.backend.status().executing;
@@ -411,7 +544,7 @@ fn held_terminal_failure_attempt(models: bool) -> (Option<HttpOutcome>, HttpOutc
         if models {
             None
         } else {
-            Some(body(&next, false))
+            Some(body(&next, false, &server.workspace))
         },
     );
     // 等待响应只设防挂看门狗，不把调度速度当 SLA；放行前的存活和 marker
@@ -522,7 +655,7 @@ fn server_tool_events_remain_text_only() {
         server.port,
         "POST",
         "/v1/chat/completions",
-        Some(&body(&stream_plan, true)),
+        Some(&body(&stream_plan, true, &server.workspace)),
         None,
     );
     assert_eq!(response.status, 200);

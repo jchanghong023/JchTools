@@ -116,13 +116,14 @@ powershell -NoProfile -File .\scripts\package-windows.ps1
 - 启动程序和参数分栏保存：程序栏填写可执行文件路径，不包引号；参数栏按 Windows CRT 引号规则处理空格与中文，仅空格和制表符分隔参数，换行保留为参数内容，末尾未闭合引号收纳剩余字符。本次 OpenCode 验收启动命令为 `opencode acp`：程序栏填写真实 `opencode.exe` 路径，参数栏只填 `acp`，不添加未经其公开能力支持的模型、推理或 yolo 参数。配置保存在应用状态目录的 `config.sqlite3`，默认端口 8765。
 - 打开工具箱后按有效配置启动或连接独立后台；关闭或终止 GUI 不退出服务。修改并保存配置不会打断旧请求；「应用并重启」等待已接收请求完成后生效。退出模型服务使用独立确认，Stop 可抢占正在排空的 Apply；退出请求失败且后台仍存活时，可再次确认退出，禁止自动重启的意图仍保留。资源回收完成后，即使收尾报错也退出后台和控制管道。退出后迟到的 Apply 不会重新拉起服务，同一次 GUI 会话也不自动重启。
 - `GET http://127.0.0.1:<端口>/v1/models` 返回 Agent 协商出的真实可选模型 ID；每个模型包含整数 `created: 0`，表示 ACP 未提供创建时间，不伪造实际时间。探测会话在首次消费前收到配置更新时，同步公开目录。将返回的 ID 用于 `POST /v1/chat/completions`，实际选择仍按目标会话当前选项核验；各会话的 Model 配置 ID 独立登记，不假定全连接相同，不将 new 响应和随后通知当成原子事件。没有可选择模型能力时明确报错，不提供假别名。
-- `messages` 支持 `system`、`developer`、`user`、`assistant` 文本及 text 内容块；`stream: true` 返回实时 SSE。调用方不执行工具；`tools`、`tool_choice`、媒体和未实现的能力明确拒绝。未映射的非 null `verbosity`、`web_search_options` 等选项返回 400，不静默丢弃调用方设置。
-- 默认每次请求新建会话并提交完整历史；续会话将响应的 `X-JchTools-Session-ID` 放回请求头，并提交包含上一轮实际 assistant 输出的完整历史。前缀不一致时报错；同会话串行，不同会话并发。prompt 发布前取消且配置与回调安全收尾成功时保留会话和历史，已排队的后续轮次仍可执行；prompt 发布后取消仍使该会话失效，后续请求须新建会话。最多 4 个执行请求和 16 个等待请求，容量满返回 429。
-- HTTP 断连只取消本轮；Agent 异常不重放任务。Windows 连接通过每 100ms 的只读 `SIO_TCP_INFO` v0 内核 TCP 状态查询观察对端关闭（该 API 要求 Windows 10 1703 或更新版本），不消费、复制管线请求字节，不替换 Mio 的事件注册；查询失败不是断连证据，会记录告警，不能据此保证缓冲管线下的关闭观察。服务只监听 `127.0.0.1`，端口占用不会自动换端口。Agent 初始工作目录为应用状态目录的 `acp-workspace`，不是源仓库。
-- 同一 Windows 用户、同一登录会话中的 OMP 通过控制管道的只读 `Discover` 自动取得实际就绪地址，再读取真实模型列表；不猜端口、不启动服务、不读启动参数或凭据。OMP 模型选择器显示 `jchtools/<真实 ID>` 和“后端 Agent 执行”，支持文本流式任务、取消与明确错误，不运行前端工具或自动重放任务。服务端启动的 ACP Agent 子进程固定带 `OMP_JCHTOOLS_DISCOVERY=0`，防止后端 OMP 再发现本服务；普通 OMP 也可用该进程开关或 `disabledProviders` 禁用发现，不改写用户配置。这是 AH-16 既有产品保护，不因真实验收改用 OpenCode 而移除；OpenCode 验收不证明其实现 OMP 的发现或模型选择器入口，也不要求启动真实 OMP。
-- Agent 文件/终端回调按请求归属回传操作与通信失败。终端 `wait_for_exit` 只保证主命令退出，不等待仍持有输出管道的后代；输出查询返回当前累计内容，释放与服务退出负责自有终端资源收尾。
+- `messages` 支持 `system`、`developer`、`user`、`assistant` 文本及 text 内容块；`stream: true` 返回实时 SSE。每个 `POST /v1/chat/completions` 须在顶层提供 `cwd`，其值必须是非空、绝对且已存在的目录；缺失或非法时返回 400。服务将目录规范化后用于业务会话，并向 ACP 传递普通 Windows 盘符/UNC 路径（不泄漏 `\\?\` 前缀）。调用方不执行工具；`tools`、`tool_choice`、媒体和未实现的能力明确拒绝。未映射的非 null `verbosity`、`web_search_options` 等选项返回 400，不静默丢弃调用方设置。
+- 默认每次请求新建会话并提交完整历史；续会话将响应的 `X-JchTools-Session-ID` 放回请求头，并提交包含上一轮实际 assistant 输出的完整历史。前缀不一致或同一会话更换 `cwd` 时拒绝请求；会话绑定其规范化后的 `cwd`。同会话串行，不同会话并发。prompt 发布前取消且配置与回调安全收尾成功时保留会话和历史，已排队的后续轮次仍可执行；prompt 发布后取消仍使该会话失效，后续请求须新建会话。最多 4 个执行请求和 16 个等待请求，容量满返回 429。
+- HTTP 断连只取消本轮；Agent 异常不重放任务。Windows 连接通过每 100ms 的只读 `SIO_TCP_INFO` v0 内核 TCP 状态查询观察对端关闭（该 API 要求 Windows 10 1703 或更新版本），不消费、复制管线请求字节，不替换 Mio 的事件注册；查询失败不是断连证据，会记录告警，不能据此保证缓冲管线下的关闭观察。服务只监听 `127.0.0.1`，端口占用不会自动换端口。Agent 进程初始工作目录及模型探测会话仍使用应用状态目录的 `acp-workspace`；业务 ACP `newSession` 使用调用方请求中的规范化 `cwd`。
+- 同一 Windows 用户、同一登录会话中的 OMP 通过控制管道的只读 `Discover` 自动取得实际就绪地址，再读取真实模型列表；不猜端口、不启动服务、不读启动参数或凭据。OMP 模型选择器显示 `jchtools/<真实 ID>` 和“后端 Agent 执行”，支持文本流式任务、取消与明确错误，不运行前端工具或自动重放任务；发起请求时自动从当前 `SessionManager` 读取并发送任务目录 `cwd`。服务端启动的 ACP Agent 子进程固定带 `OMP_JCHTOOLS_DISCOVERY=0`，防止后端 OMP 再发现本服务；普通 OMP 也可用该进程开关或 `disabledProviders` 禁用发现，不改写用户配置。这是 AH-16 既有产品保护，不因真实验收改用 OpenCode 而移除；OpenCode 验收不证明其实现 OMP 的发现或模型选择器入口，也不要求启动真实 OMP。
+- Agent 文件/终端回调按请求归属回传操作与通信失败。终端请求未显式指定 `cwd` 时默认使用所属会话的 `cwd`，显式指定时使用其指定目录；`wait_for_exit` 只保证主命令退出，不等待仍持有输出管道的后代；输出查询返回当前累计内容，释放与服务退出负责自有终端资源收尾。
+- 每次实际 `session/prompt` 提交记录去敏摘要：请求 ID、实际 ACP 状态复用情况、本轮新增消息数、各角色数量及原文本 UTF-8 字节数；不记录正文或工作目录。日志要求归属全局合同 P-10。
 
-Rust 局部验证入口：`cargo test --features test-hooks --test acp_settings --test acp_http_contract --test acp_callbacks --test acp_service_process --test acp_discovery --test acp_discovery_env`。官方 SDK 合成 Agent、真实 TCP、独立进程与无硬件鼠标窗口用例不代替 [模型服务第 3 节](docs/requirements/ACP-MODEL-SERVICE.md#3-验收方案) 的真实 Agent 与模型验收。唯一真实验收目标为 `acp_opencode`，目标模型、第一阶段范围、完整 AH-A01～AH-A15 矩阵及失败边界均在该节唯一维护；本文不复制验收需求或将历史授权视为本次执行权限。真实模型调用须取得当次明确指令，不包含 fulltest、slowtest 或发布；未执行项仍为 `NOT RUN`，局部验证不等于完整验收。源码与许可来源见 `vendor/SOURCES.json`；全新 Cargo 源缓存可用 `--offline --locked` 验证。
+Rust 局部验证入口：`cargo test --features test-hooks --test acp_settings --test acp_http_contract --test acp_callbacks --test acp_service_process --test acp_discovery --test acp_discovery_env --test acp_prompt_summary`。官方 SDK 合成 Agent、真实 TCP、独立进程与无硬件鼠标窗口用例不代替 [模型服务第 3 节](docs/requirements/ACP-MODEL-SERVICE.md#3-验收方案) 的真实 Agent 与模型验收。唯一真实验收目标为 `acp_opencode`，目标模型、第一阶段范围、完整 AH-A01～AH-A15 矩阵及失败边界均在该节唯一维护；本文不复制验收需求或将历史授权视为本次执行权限。真实模型调用须取得当次明确指令，不包含 fulltest、slowtest 或发布；未执行项仍为 `NOT RUN`，局部验证不等于完整验收。源码与许可来源见 `vendor/SOURCES.json`；全新 Cargo 源缓存可用 `--offline --locked` 验证。
 
 
 ## 多 TB 目录的处理方式与边界
@@ -210,6 +211,10 @@ cargo test --features test-hooks --test acp_opencode -- --ignored --exact real_o
 真实媒体用例使用本轮带 `test-hooks` 的 `JchTools.exe` 作为 `JCHTOOLS_TEST_BROKER_EXE`，不让测试二进制误充代理。语音与无音轨两个既有用例以 `--ignored --exact` 分别在独立 Job 中执行，互斥串行且逐项回收常驻后台，避免各自的隔离设置目录之间争用会话级唯一 Xberg；媒体测试与 7-Zip、打包阶段仍可独立并行。真实 7-Zip 测试使用捆绑目录时与打包互斥，避免测试运行 `7z.exe` 期间打包下载阶段覆盖同一引擎文件；指定其他独立引擎目录时不施加该互斥。测试正文、结构和无音轨断言保持不变。
 
 完整门在运行进程测试前显式执行 `cargo build --bins --features test-hooks`，构建隔离后台入口及 ACP 夹具；`cargo test --all-targets --no-run` 的测试 artifact 不能证明 `target/debug/JchTools.exe` 已带隔离钩子。生产构建维度仍单独验证，测试阶段不沿用生产 EXE，正常复用同一 `target/` 缓存。
+
+OMP `server_agent` 开发边界：来源过滤及聊天到 `X-JchTools-Session-ID` 的内存关联由 OMP 的 `jchtools-agent` 适配器维护；JchTools 继续接受文本完整历史，校验已提交前缀并仅将新增消息交给 ACP，不为该前端统一删除 `system`/`developer`。新建/分支聊天或目录改变由 OMP 发起新会话，明确失效时只显示错误、不自动重放；不增加仅新增消息的 HTTP 接口、跨后台重启恢复、MCP 或子代理桥接。
+
+`src/acp_api/acp/mod.rs` 在实际 `session/prompt` 提交边界输出 INFO 事件 `acp_prompt_summary`：请求关联 `request_id`、是否显式复用 `reused_session`、本轮实际新增 `message_count`、四种角色数量及原始文本 UTF-8 总字节数 `text_bytes`。首轮统计全部提交消息，续轮只统计扣除已确认历史后的新增消息；不计角色包装文本，不记录正文、完整请求、目录、工具参数或凭据，也不增加导出接口。隔离官方 SDK 夹具验证入口为 `cargo test --features test-hooks --test acp_prompt_summary --test acp_http_contract`；该证据不代替另行授权的真实 OpenCode 多轮验收。
 
 代码中的删除测试全部使用 tempfile 临时夹具，不会删除测试机的个人文件。真实引擎测试有 ignore 标记，只有显式运行时启用。
 

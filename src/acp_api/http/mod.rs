@@ -16,7 +16,9 @@ use axum::{
 use serde_json::Value;
 use tokio_util::sync::CancellationToken;
 
-use crate::acp_api::{BackendHandle, RequestEvent, RequestHandle, SessionKey};
+use crate::acp_api::{
+    BackendHandle, RequestEvent, RequestHandle, ServiceError, ServiceErrorKind, SessionKey,
+};
 use tracing::Instrument;
 
 use connection::{ConnectionClosed, ObservedListener};
@@ -211,21 +213,30 @@ async fn chat(
             return error.into_response();
         }
     };
-    let input = match parse_chat(payload, session) {
-        Ok(input) => input,
-        Err(error) => {
-            tracing::error!(
-                event = "acp_http_input_failed",
-                component = "acp_http",
-                stage = "chat_validation",
-                status = error.status.as_u16(),
-                error_type = error.kind,
-                error_code = error.code,
-                "ACP HTTP Chat 请求校验失败"
-            );
-            return error.into_response();
-        }
-    };
+    let span = tracing::Span::current();
+    let input =
+        match tokio::task::spawn_blocking(move || span.in_scope(|| parse_chat(payload, session)))
+            .await
+            .unwrap_or_else(|_| {
+                Err(HttpError::service(&ServiceError::new(
+                    ServiceErrorKind::Internal,
+                    "HTTP 请求校验任务失败",
+                )))
+            }) {
+            Ok(input) => input,
+            Err(error) => {
+                tracing::error!(
+                    event = "acp_http_input_failed",
+                    component = "acp_http",
+                    stage = "chat_validation",
+                    status = error.status.as_u16(),
+                    error_type = error.kind,
+                    error_code = error.code,
+                    "ACP HTTP Chat 请求校验失败"
+                );
+                return error.into_response();
+            }
+        };
     // Hyper 可能因未处理的管线 read-ahead 而不再读取 EOF，不能依赖 handler drop。
     // 真实 serve 注入连接级关闭信号；直接调用 router 的测试仍保留请求 dropguard。
     let closed = connection.map_or_else(CancellationToken::new, |Extension(ConnectInfo(info))| {
@@ -412,6 +423,7 @@ mod tests {
             HeaderMap::new(),
             Some(Extension(ConnectInfo(connection))),
             Ok(Json(json!({
+                "cwd": std::env::temp_dir(),
                 "model": "m",
                 "messages": [{"role": "user", "content": "test"}],
                 "stream": false
@@ -474,7 +486,7 @@ mod tests {
         String::from_utf8(response).unwrap()
     }
 
-    /// Real TCP exercises response-body polling, not just handler wiring.
+    /// 覆盖 P-10 / AH-04：真实 TCP 验证 JSON/SSE 成败、关联诊断与隐私边界。
     #[tokio::test(flavor = "current_thread")]
     async fn local_http_logs_json_sse_failures_and_private_body_boundaries() {
         // tracing callsite interest 是进程级缓存；并行的无 subscriber 请求可能
@@ -504,6 +516,7 @@ mod tests {
         let writer = capture.clone();
         let subscriber = tracing_subscriber::fmt()
             .with_ansi(false)
+            .with_max_level(tracing::Level::DEBUG)
             .with_writer(move || writer.clone())
             .finish();
         let _dispatch = tracing::subscriber::set_default(subscriber);
@@ -583,11 +596,12 @@ mod tests {
         assert!(invalid.starts_with("HTTP/1.1 400"));
         for (index, stream) in [false, true, true, true, false].into_iter().enumerate() {
             let body = json!({
+                "cwd": std::env::temp_dir(),
                 "model": "fixture",
                 "messages": [{"role": "user", "content": "private-prompt-marker"}],
                 "stream": stream,
             })
-            .to_string();
+                .to_string();
             let response = local_request(port, &body).await;
             let expected_status = if index == 4 {
                 "HTTP/1.1 502"
@@ -597,6 +611,9 @@ mod tests {
             assert!(response.starts_with(expected_status), "{response}");
             if stream {
                 assert_eq!(response.contains("[DONE]"), index == 1);
+                if index == 1 {
+                    assert!(response.contains("private-output-marker"));
+                }
             } else if index == 0 {
                 assert!(response.contains("private-output-marker"));
             }
@@ -605,41 +622,49 @@ mod tests {
         shutdown.cancel();
         serving.await.unwrap().unwrap();
         let logs = String::from_utf8(recorded.try_iter().flatten().collect()).unwrap();
-        for event in [
-            "acp_http_request_started",
-            "acp_http_input_failed",
-            "acp_request_submitted",
-            "acp_http_request_admitted",
-            "acp_http_completion_completed",
-            "acp_http_completion_failed",
-            "acp_sse_completed",
-            "acp_sse_failed",
+        // 检查真实成功结果及失败分类，不固定事件名清单或响应体 poll 的内部步骤。
+        for (index, streaming) in [(0, false), (1, true)] {
+            let id = &ids[index];
+            let admitted = logs.lines().find(|line| {
+                line.contains(&format!("request_id={id}"))
+                    && line.contains(&format!("streaming={streaming}"))
+            }).expect("成功请求必须有后端 request_id 与 HTTP 操作的关联");
+            let operation_id = admitted.split_whitespace()
+                .find_map(|field| field.strip_prefix("operation_id="))
+                .map(|value| value.trim_end_matches(['}', ':']))
+                .expect("成功请求必须关联 HTTP 操作 ID");
+            assert!(!operation_id.is_empty());
+            assert!(logs.lines().any(|line| {
+                line.contains(&format!("operation_id={operation_id}"))
+                    && line.contains("route=\"chat_completions\"")
+                    && line.contains("method=\"POST\"")
+            }), "成功请求缺少关联的 HTTP 开始诊断：{logs}");
+            assert!(logs.lines().any(|line| {
+                line.contains(&format!("request_id={id}"))
+                    && line.split_whitespace().any(|field| field == "INFO")
+                    && line.contains("result=Stop")
+                    && line.contains(&format!("output_bytes={}", "private-output-marker".len()))
+                    && line.contains("elapsed_ms=")
+            }), "成功请求缺少实际终态、输出统计或耗时：{logs}");
+        }
+        for (index, stage, error_type) in [
+            (2, "backend_terminal", "Internal"),
+            (3, "event_eof", "\"agent_disconnected\""),
+            (4, "backend_terminal", "Internal"),
         ] {
-            assert!(logs.contains(event), "missing {event}: {logs}");
-        }
-        for (index, id) in ids.iter().enumerate() {
-            let terminal = if index == 0 {
-                "acp_http_completion_completed"
-            } else if index == 1 {
-                "acp_sse_completed"
-            } else if index == 4 {
-                "acp_http_completion_failed"
-            } else {
-                "acp_sse_failed"
-            };
+            let id = &ids[index];
+            assert!(!id.is_empty(), "backend request_id must be present");
             assert!(
-                logs.lines()
-                    .any(|line| line.contains(terminal) && line.contains(id)),
-                "{logs}"
-            );
-            assert!(
-                logs.lines()
-                    .any(|line| line.contains("acp_request_submitted") && line.contains(id)),
-                "{logs}"
+                logs.lines().any(|line| {
+                    line.split_whitespace().any(|field| field == "ERROR")
+                        && line.contains(&format!("request_id={id}"))
+                        && line.contains(&format!("stage=\"{stage}\""))
+                        && line.contains(&format!("error_type={error_type}"))
+                        && line.contains("elapsed_ms=")
+                }),
+                "missing request-correlated failure stage/type/elapsed for {id}: {logs}"
             );
         }
-        assert!(logs.contains("event_eof"));
-        assert!(logs.contains("elapsed_ms"));
         for private in [
             "private-json-marker",
             "private-prompt-marker",

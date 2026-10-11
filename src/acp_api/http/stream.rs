@@ -211,6 +211,7 @@ mod tests {
                     model: "m".into(),
                     messages: Vec::new(),
                     session: None,
+                    cwd: std::env::temp_dir(),
                 })
                 .await
         });

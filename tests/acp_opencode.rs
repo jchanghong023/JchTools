@@ -63,7 +63,7 @@ fn real_opencode_models_json_and_incremental_sse_single_agent() {
         "真实 ACP 协商列表没有指定免费模型 {MODEL}；不能改选其他/付费模型：{models}"
     );
     let json_marker = format!("JCH_JSON_{}", uuid::Uuid::new_v4().simple());
-    let request = json!({"model": MODEL, "stream": false, "messages": [{"role":"user", "content": format!("This is a basic text-only connectivity check. Do not use tools, inspect files, or run commands. Reply with exactly this short text: {json_marker}")}]});
+    let request = json!({"model": MODEL, "stream": false, "cwd": harness.root, "messages": [{"role":"user", "content": format!("This is a basic text-only connectivity check. Do not use tools, inspect files, or run commands. Reply with exactly this short text: {json_marker}")}]});
     let completion = harness.request("json", Some(&request), service_pid, agent_pid);
     assert_eq!(completion["body"]["object"], "chat.completion");
     assert_eq!(completion["body"]["model"], MODEL);
@@ -83,7 +83,7 @@ fn real_opencode_models_json_and_incremental_sse_single_agent() {
     harness.observe(service_pid, agent_pid);
 
     let sse_marker = format!("JCH_SSE_{}", uuid::Uuid::new_v4().simple());
-    let request = json!({"model": MODEL, "stream": true, "messages": [{"role":"user", "content": format!("This is a basic text-only streaming check. Do not use tools, inspect files, or run commands. Write exactly 24 short numbered lines, numbered 1 through 24. Each line must contain this marker verbatim: {sse_marker}. Do not add an introduction or a conclusion.")}]});
+    let request = json!({"model": MODEL, "stream": true, "cwd": harness.root, "messages": [{"role":"user", "content": format!("This is a basic text-only streaming check. Do not use tools, inspect files, or run commands. Write exactly 24 short numbered lines, numbered 1 through 24. Each line must contain this marker verbatim: {sse_marker}. Do not add an introduction or a conclusion.")}]});
     let streamed = harness.request("sse", Some(&request), service_pid, agent_pid);
     let text = streamed["text"].as_str().expect("SSE 缺少实际拼接文本");
     assert!(

@@ -45,12 +45,18 @@ impl Drop for ReleaseBarriers {
     }
 }
 
-fn pipeline_chat(port: u16, plan: &Plan, stream: bool, following_requests: usize) -> TcpStream {
+fn pipeline_chat(
+    port: u16,
+    plan: &Plan,
+    stream: bool,
+    following_requests: usize,
+    cwd: &std::path::Path,
+) -> TcpStream {
     let mut socket = TcpStream::connect(("127.0.0.1", port)).unwrap();
     socket
         .set_write_timeout(Some(Duration::from_secs(15)))
         .unwrap();
-    let body = body(plan, stream).to_string();
+    let body = body(plan, stream, cwd).to_string();
     // 同一次写入携带下一条真实 GET：不能用 Connection: close 或空 readbuf 的
     // 单请求断连替代本回归。预读的 GET 字节在第一条响应尚未生成时留在连接内。
     // 额外合法标头使管线尾部明显超过第一条 POST，不依赖一字节写入时序。
@@ -111,7 +117,7 @@ fn assert_buffered_disconnect_cancels_only_its_turn(stream: bool) {
     };
 
     // 尾部超过 Hyper 单次预读容量，同时覆盖其 read-ahead 和内核中未消费的字节。
-    let socket = pipeline_chat(server.port, &victim, stream, 32);
+    let socket = pipeline_chat(server.port, &victim, stream, 32, &server.workspace);
     let started = wait_event(&server.root, "started", &victim.tag);
     // silent 在 barrier 前没有文本/完成；不能先收到 SSE 再断连来绕过未提交响应头路径。
     assert!(!audit(&server.root)
@@ -121,7 +127,7 @@ fn assert_buffered_disconnect_cancels_only_its_turn(stream: bool) {
         server.port,
         "POST",
         "/v1/chat/completions",
-        Some(&body(&survivor, true)),
+        Some(&body(&survivor, true, &server.workspace)),
         None,
     );
     assert_eq!(other.status, 200);
@@ -225,8 +231,7 @@ fn read_pipeline_json(reader: &mut BufReader<TcpStream>) -> Value {
         loop {
             line.clear();
             assert!(reader.read_line(&mut line).unwrap() > 0, "缺少 HTTP chunk");
-            let size =
-                usize::from_str_radix(line.trim().split(';').next().unwrap(), 16).unwrap();
+            let size = usize::from_str_radix(line.trim().split(';').next().unwrap(), 16).unwrap();
             if size == 0 {
                 loop {
                     line.clear();
@@ -257,7 +262,7 @@ fn read_pipeline_json(reader: &mut BufReader<TcpStream>) -> Value {
 fn live_pipeline_preserves_every_request_without_cancelling() {
     let server = Server::start(env!("CARGO_BIN_EXE_jchtools-acp-fixture"), "normal");
     let plan = Plan::new("text");
-    let socket = pipeline_chat(server.port, &plan, false, 32);
+    let socket = pipeline_chat(server.port, &plan, false, 32, &server.workspace);
     socket
         .set_read_timeout(Some(Duration::from_secs(15)))
         .unwrap();

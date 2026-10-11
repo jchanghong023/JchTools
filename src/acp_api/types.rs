@@ -223,6 +223,7 @@ pub struct PromptInput {
     pub model: String,
     pub messages: Vec<ChatMessage>,
     pub session: Option<SessionKey>,
+    pub cwd: std::path::PathBuf,
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]

@@ -114,7 +114,9 @@ fn finish_child(mut child: Child) -> std::io::Result<ExitStatus> {
 }
 fn process_alive(pid: u32) -> bool {
     use windows_sys::Win32::{
-        Foundation::{CloseHandle, GetLastError, ERROR_INVALID_PARAMETER, WAIT_FAILED, WAIT_TIMEOUT},
+        Foundation::{
+            CloseHandle, GetLastError, ERROR_INVALID_PARAMETER, WAIT_FAILED, WAIT_TIMEOUT,
+        },
         System::Threading::{OpenProcess, WaitForSingleObject, PROCESS_SYNCHRONIZE},
     };
     // SAFETY: 只以同步权限查询本隔离测试记录的自有 PID，不修改或终止进程。
@@ -207,7 +209,7 @@ fn exercise_parent_environment(root: &Path, action: &str) {
         saved.port,
         "POST",
         "/v1/chat/completions",
-        Some(&body(&plan, false)),
+        Some(&body(&plan, false, &root.join("acp-workspace"))),
         None,
     );
     assert_eq!(response.status, 200);

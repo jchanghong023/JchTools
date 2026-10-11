@@ -2,8 +2,35 @@
 use super::{ServiceConfig, ServiceError, ServiceErrorKind};
 use rusqlite::{Connection, OptionalExtension};
 use std::io::Write;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::time::Duration;
+pub(crate) fn canonicalize_directory(path: &Path) -> std::io::Result<PathBuf> {
+    let canonical = std::fs::canonicalize(path)?;
+    #[cfg(windows)]
+    {
+        use std::path::{Component, Prefix};
+        // 原生 Agent 将 cwd 用于会话目录名；Rust 的 namespace 前缀不应跨协议泄漏。
+        // 仅转换有等价普通 Windows 表示的盘符/UNC 路径，其他设备路径保持原样。
+        let replacement = match canonical.components().next() {
+            Some(Component::Prefix(prefix)) => match prefix.kind() {
+                Prefix::VerbatimDisk(_) => Some((4, "")),
+                Prefix::VerbatimUNC(_, _) => Some((8, r"\\")),
+                _ => None,
+            },
+            _ => None,
+        };
+        if let Some((end, prefix)) = replacement {
+            return match canonical.into_os_string().into_string() {
+                Ok(mut text) => {
+                    text.replace_range(..end, prefix);
+                    Ok(text.into())
+                }
+                Err(path) => Ok(path.into()),
+            };
+        }
+    }
+    Ok(canonical)
+}
 
 pub(crate) const CONTROL_FRAME_LIMIT: usize = 1024 * 1024;
 // 状态同时包含 saved/running 配置，还需为控制响应封装及错误信息保留余量。
@@ -92,32 +119,7 @@ pub fn workspace_dir() -> Result<PathBuf, ServiceError> {
             .map_err(io)?
             .join("acp-workspace");
         std::fs::create_dir_all(&path).map_err(|e| io(format!("创建 ACP 工作目录失败：{e}")))?;
-        let canonical =
-            std::fs::canonicalize(path).map_err(|e| io(format!("解析 ACP 工作目录失败：{e}")))?;
-        #[cfg(windows)]
-        {
-            use std::path::{Component, Prefix};
-            // 原生 Agent 将 cwd 用于会话目录名；Rust 的 namespace 前缀不应跨协议泄漏。
-            // 仅转换有等价普通 Windows 表示的盘符/UNC 路径，其他设备路径保持原样。
-            let replacement = match canonical.components().next() {
-                Some(Component::Prefix(prefix)) => match prefix.kind() {
-                    Prefix::VerbatimDisk(_) => Some((4, "")),
-                    Prefix::VerbatimUNC(_, _) => Some((8, r"\\")),
-                    _ => None,
-                },
-                _ => None,
-            };
-            if let Some((end, prefix)) = replacement {
-                return match canonical.into_os_string().into_string() {
-                    Ok(mut text) => {
-                        text.replace_range(..end, prefix);
-                        Ok(text.into())
-                    }
-                    Err(path) => Ok(path.into()),
-                };
-            }
-        }
-        Ok(canonical)
+        canonicalize_directory(&path).map_err(|e| io(format!("解析 ACP 工作目录失败：{e}")))
     })
 }
 pub fn parse_port(text: &str) -> Result<u16, ServiceError> {

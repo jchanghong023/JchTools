@@ -142,7 +142,12 @@ impl Harness {
             );
         }
     }
-    fn launch(&self, test: &str, action: &str, config: Option<&ServiceConfig>) -> (ConsumerChild, PathBuf) {
+    fn launch(
+        &self,
+        test: &str,
+        action: &str,
+        config: Option<&ServiceConfig>,
+    ) -> (ConsumerChild, PathBuf) {
         let result = self
             .temp
             .path()
@@ -446,7 +451,7 @@ fn independent_service_survives_facade_clients_and_reuses_one_agent() {
         harness.port,
         "POST",
         "/v1/chat/completions",
-        Some(&body(&plan, true)),
+        Some(&body(&plan, true, &harness.root.join("acp-workspace"))),
         None,
     );
     assert_eq!(response.delta(), plan.chunks[0]);
@@ -467,7 +472,7 @@ fn independent_service_survives_facade_clients_and_reuses_one_agent() {
         harness.port,
         "POST",
         "/v1/chat/completions",
-        Some(&body(&next, false)),
+        Some(&body(&next, false, &harness.root.join("acp-workspace"))),
         None,
     );
     assert_eq!(response.status, 200);
@@ -543,14 +548,14 @@ fn saving_is_non_disruptive_and_apply_drains_before_switching() {
         harness.port,
         "POST",
         "/v1/chat/completions",
-        Some(&body(&plan, true)),
+        Some(&body(&plan, true, &harness.root.join("acp-workspace"))),
         None,
     );
     assert_eq!(stream.delta(), plan.chunks[0]);
     let queued = Plan::new("text");
     let session = stream.headers["x-jchtools-session-id"].clone();
     let port = harness.port;
-    let queued_body = json!({"model":fixture::MODEL_A,"messages":[{"role":"user","content":plan.prompt()},{"role":"assistant","content":plan.text()},{"role":"user","content":queued.prompt()}]});
+    let queued_body = json!({"model":fixture::MODEL_A,"messages":[{"role":"user","content":plan.prompt()},{"role":"assistant","content":plan.text()},{"role":"user","content":queued.prompt()}],"cwd":harness.root.join("acp-workspace")});
     let queued_job = thread::spawn(move || {
         let response = Http::open(
             port,
@@ -593,7 +598,7 @@ fn saving_is_non_disruptive_and_apply_drains_before_switching() {
     let (apply, result) = harness.launch(test, "apply", None);
     harness.phase(test, "draining");
     assert!(process_alive(running.agent_pid.unwrap()));
-    assert_admission_closed(harness.port);
+    assert_admission_closed(harness.port, &harness.root.join("acp-workspace"));
     assert!(!result.exists(), "已有请求结束前不得应用完成");
     assert!(audit(&new_audit).is_empty(), "drain前不得增开Agent");
     release(&harness.audit, &plan);
@@ -613,7 +618,7 @@ fn saving_is_non_disruptive_and_apply_drains_before_switching() {
         changed.port,
         "POST",
         "/v1/chat/completions",
-        Some(&body(&next, false)),
+        Some(&body(&next, false, &harness.root.join("acp-workspace"))),
         None,
     );
     assert_eq!(response.status, 200);
@@ -647,7 +652,7 @@ fn stop_during_apply_cancels_barrier_without_starting_replacement_agent() {
         harness.port,
         "POST",
         "/v1/chat/completions",
-        Some(&body(&plan, true)),
+        Some(&body(&plan, true, &harness.root.join("acp-workspace"))),
         None,
     );
     assert_eq!(stream.delta(), plan.chunks[0]);
@@ -753,7 +758,7 @@ fn occupied_initial_port_preserves_service_and_apply_recovers_without_stop() {
         changed.port,
         "POST",
         "/v1/chat/completions",
-        Some(&body(&next, false)),
+        Some(&body(&next, false, &harness.root.join("acp-workspace"))),
         None,
     );
     assert_eq!(response.status, 200);
@@ -881,7 +886,7 @@ fn explicit_stop_cancels_inflight_requests_then_releases_owned_processes() {
         harness.port,
         "POST",
         "/v1/chat/completions",
-        Some(&body(&plan, true)),
+        Some(&body(&plan, true, &harness.root.join("acp-workspace"))),
         None,
     );
     assert_eq!(stream.delta(), plan.chunks[0]);
@@ -1135,7 +1140,7 @@ fn real_service_http_disconnect_cancels_only_corresponding_round() {
                 harness.port,
                 "POST",
                 "/v1/chat/completions",
-                Some(&body(&victim, stream)),
+                Some(&body(&victim, stream, &harness.root.join("acp-workspace"))),
                 None,
             );
             assert_eq!(response.status, 200);
@@ -1147,7 +1152,7 @@ fn real_service_http_disconnect_cancels_only_corresponding_round() {
             socket
                 .set_write_timeout(Some(Duration::from_secs(10)))
                 .unwrap();
-            let request = body(&victim, stream).to_string();
+            let request = body(&victim, stream, &harness.root.join("acp-workspace")).to_string();
             write!(
                 socket,
                 "POST /v1/chat/completions HTTP/1.1\r\nHost: 127.0.0.1\r\nConnection: close\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\r\n{request}",
@@ -1163,7 +1168,7 @@ fn real_service_http_disconnect_cancels_only_corresponding_round() {
             harness.port,
             "POST",
             "/v1/chat/completions",
-            Some(&body(&survivor, true)),
+            Some(&body(&survivor, true, &harness.root.join("acp-workspace"))),
             None,
         );
         assert_eq!(other.status, 200);
@@ -1228,7 +1233,7 @@ fn real_service_http_disconnect_cancels_only_corresponding_round() {
             harness.port,
             "POST",
             "/v1/chat/completions",
-            Some(&body(&next, false)),
+            Some(&body(&next, false, &harness.root.join("acp-workspace"))),
             None,
         );
         assert_eq!(response.status, 200);
@@ -1318,7 +1323,7 @@ fn real_service_discover_during_draining_is_minimal_stable_and_read_only() {
         harness.port,
         "POST",
         "/v1/chat/completions",
-        Some(&body(&plan, true)),
+        Some(&body(&plan, true, &harness.root.join("acp-workspace"))),
         None,
     );
     let prefix = stream.delta();
@@ -1352,7 +1357,7 @@ fn real_service_discover_during_draining_is_minimal_stable_and_read_only() {
             .count(),
         1
     );
-    assert_admission_closed(harness.port);
+    assert_admission_closed(harness.port, &harness.root.join("acp-workspace"));
     release(&harness.audit, &plan);
     assert_eq!(prefix + &stream.finish_stream(), plan.text());
     let applied = finish_child(apply, &result);
@@ -1369,7 +1374,7 @@ fn real_service_discover_during_draining_is_minimal_stable_and_read_only() {
         changed.port,
         "POST",
         "/v1/chat/completions",
-        Some(&body(&next, false)),
+        Some(&body(&next, false, &harness.root.join("acp-workspace"))),
         None,
     );
     assert_eq!(response.status, 200);
@@ -1399,7 +1404,7 @@ fn real_service_discover_during_stopping_is_minimal_stable_and_read_only() {
         harness.port,
         "POST",
         "/v1/chat/completions",
-        Some(&body(&plan, false)),
+        Some(&body(&plan, false, &harness.root.join("acp-workspace"))),
         None,
     );
     assert_eq!(response.status, 200);
@@ -1473,7 +1478,7 @@ fn stop_cancellation_agent_exit_releases_daemon_and_allows_restart() {
         harness.port,
         "POST",
         "/v1/chat/completions",
-        Some(&body(&plan, true)),
+        Some(&body(&plan, true, &harness.root.join("acp-workspace"))),
         None,
     );
     assert_eq!(stream.delta(), plan.chunks[0]);
@@ -1757,7 +1762,11 @@ fn real_gui_save_close_kill_reopen_and_confirmed_service_exit() {
         harness.port,
         "POST",
         "/v1/chat/completions",
-        Some(&body(&permission, false)),
+        Some(&body(
+            &permission,
+            false,
+            &harness.root.join("acp-workspace"),
+        )),
         None,
     )
     .json();
@@ -1770,7 +1779,7 @@ fn real_gui_save_close_kill_reopen_and_confirmed_service_exit() {
         harness.port,
         "POST",
         "/v1/chat/completions",
-        Some(&body(&first, true)),
+        Some(&body(&first, true, &harness.root.join("acp-workspace"))),
         None,
     );
     assert_eq!(response.delta(), first.chunks[0]);
@@ -1785,7 +1794,11 @@ fn real_gui_save_close_kill_reopen_and_confirmed_service_exit() {
                 harness.port,
                 "POST",
                 "/v1/chat/completions",
-                Some(&body(&after_close, false)),
+                Some(&body(
+                    &after_close,
+                    false,
+                    &harness.root.join("acp-workspace")
+                )),
                 None
             )
             .json()
@@ -1797,7 +1810,11 @@ fn real_gui_save_close_kill_reopen_and_confirmed_service_exit() {
         harness.port,
         "POST",
         "/v1/chat/completions",
-        Some(&body(&permission, false)),
+        Some(&body(
+            &permission,
+            false,
+            &harness.root.join("acp-workspace"),
+        )),
         None,
     )
     .json();
@@ -1811,7 +1828,7 @@ fn real_gui_save_close_kill_reopen_and_confirmed_service_exit() {
         harness.port,
         "POST",
         "/v1/chat/completions",
-        Some(&body(&file, false)),
+        Some(&body(&file, false, &harness.root.join("acp-workspace"))),
         None,
     )
     .json();
@@ -1837,7 +1854,7 @@ fn real_gui_save_close_kill_reopen_and_confirmed_service_exit() {
         harness.port,
         "POST",
         "/v1/chat/completions",
-        Some(&body(&active, true)),
+        Some(&body(&active, true, &harness.root.join("acp-workspace"))),
         None,
     );
     assert_eq!(response.delta(), active.chunks[0]);
@@ -1853,7 +1870,7 @@ fn real_gui_save_close_kill_reopen_and_confirmed_service_exit() {
                 harness.port,
                 "POST",
                 "/v1/chat/completions",
-                Some(&body(&new, false)),
+                Some(&body(&new, false, &harness.root.join("acp-workspace"))),
                 None
             )
             .json()
@@ -1898,7 +1915,7 @@ fn real_gui_save_close_kill_reopen_and_confirmed_service_exit() {
                 harness.port,
                 "POST",
                 "/v1/chat/completions",
-                Some(&body(&next, false)),
+                Some(&body(&next, false, &harness.root.join("acp-workspace"))),
                 None
             )
             .json()
@@ -1931,7 +1948,7 @@ fn real_service_recovers_agent_exit_without_replaying_failed_requests() {
         harness.port,
         "POST",
         "/v1/chat/completions",
-        Some(&body(&victim, true)),
+        Some(&body(&victim, true, &harness.root.join("acp-workspace"))),
         None,
     );
     assert_eq!(stream.delta(), victim.chunks[0]);
@@ -1940,7 +1957,7 @@ fn real_service_recovers_agent_exit_without_replaying_failed_requests() {
         harness.port,
         "POST",
         "/v1/chat/completions",
-        Some(&body(&crash, false)),
+        Some(&body(&crash, false, &harness.root.join("acp-workspace"))),
         None,
     );
     assert_eq!(response.status, 502);
@@ -1955,7 +1972,7 @@ fn real_service_recovers_agent_exit_without_replaying_failed_requests() {
         harness.port,
         "POST",
         "/v1/chat/completions",
-        Some(&body(&next, false)),
+        Some(&body(&next, false, &harness.root.join("acp-workspace"))),
         None,
     );
     let response_status = response.status;
@@ -2003,7 +2020,7 @@ fn stopping_service_releases_owned_terminal_process() {
         harness.port,
         "POST",
         "/v1/chat/completions",
-        Some(&body(&plan, false)),
+        Some(&body(&plan, false, &harness.root.join("acp-workspace"))),
         None,
     );
     assert_eq!(response.status, 200);
@@ -2050,7 +2067,7 @@ fn stopping_service_releases_owned_terminal_process() {
     wait_gone(status.service_pid.unwrap());
 }
 
-fn assert_admission_closed(port: u16) {
+fn assert_admission_closed(port: u16, cwd: &Path) {
     use std::io::{BufRead, BufReader, Write};
     let mut socket = match std::net::TcpStream::connect(("127.0.0.1", port)) {
         Ok(socket) => socket,
@@ -2060,7 +2077,10 @@ fn assert_admission_closed(port: u16) {
                 std::io::ErrorKind::ConnectionRefused
                     | std::io::ErrorKind::ConnectionReset
                     | std::io::ErrorKind::ConnectionAborted
-            ) => return,
+            ) =>
+        {
+            return
+        }
         Err(error) => panic!("无法验证drain后停止接收请求: {error}"),
     };
     socket
@@ -2069,7 +2089,7 @@ fn assert_admission_closed(port: u16) {
     socket
         .set_write_timeout(Some(Duration::from_secs(5)))
         .unwrap();
-    let request = body(&Plan::new("text"), false).to_string();
+    let request = body(&Plan::new("text"), false, cwd).to_string();
     if let Err(error) = write!(socket,"POST /v1/chat/completions HTTP/1.1\r\nHost: 127.0.0.1\r\nConnection: close\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\r\n{request}",request.len()) {
         assert!(
             matches!(
@@ -2157,7 +2177,7 @@ fn live_retiring_agent_blocks_reconnect_with_specific_error_not_a_hang() {
         harness.port,
         "POST",
         "/v1/chat/completions",
-        Some(&body(&failed, false)),
+        Some(&body(&failed, false, &harness.root.join("acp-workspace"))),
         None,
     );
     assert_eq!(response.status, 502);
@@ -2168,7 +2188,7 @@ fn live_retiring_agent_blocks_reconnect_with_specific_error_not_a_hang() {
         harness.port,
         "POST",
         "/v1/chat/completions",
-        Some(&body(&retry, false)),
+        Some(&body(&retry, false, &harness.root.join("acp-workspace"))),
         None,
     );
     assert_eq!(response.status, 502);
@@ -2194,7 +2214,7 @@ fn live_retiring_agent_blocks_reconnect_with_specific_error_not_a_hang() {
         harness.port,
         "POST",
         "/v1/chat/completions",
-        Some(&body(&next, false)),
+        Some(&body(&next, false, &harness.root.join("acp-workspace"))),
         None,
     );
     let status = response.status;
@@ -2245,25 +2265,27 @@ fn real_gui_pending_configuration_applies_only_after_inflight_completion() {
         .is_none());
     let status = harness.ready(test);
     let result = harness.temp.path().join("gui-apply-result.json");
-    let gui = ConsumerChild(Command::new(std::env::current_exe().unwrap())
-        .args(["--exact", test, "--nocapture"])
-        .env(CHILD_ROOT, &harness.root)
-        .env("JCHTOOLS_ACP_PROCESS_ACTION", "gui")
-        .env("JCHTOOLS_ACP_GUI_MODE", "reopen")
-        .env(
-            "JCHTOOLS_ACP_PROCESS_CONFIG",
-            serde_json::to_string(&config).unwrap(),
-        )
-        .env("JCHTOOLS_ACP_PROCESS_RESULT", &result)
-        .env("JCHTOOLS_TEST_STATE_DIR", &harness.root)
-        .env(
-            "JCHTOOLS_TEST_ACP_SERVICE_EXE",
-            env!("CARGO_BIN_EXE_JchTools"),
-        )
-        .stdout(Stdio::null())
-        .stderr(Stdio::inherit())
-        .spawn()
-        .unwrap());
+    let gui = ConsumerChild(
+        Command::new(std::env::current_exe().unwrap())
+            .args(["--exact", test, "--nocapture"])
+            .env(CHILD_ROOT, &harness.root)
+            .env("JCHTOOLS_ACP_PROCESS_ACTION", "gui")
+            .env("JCHTOOLS_ACP_GUI_MODE", "reopen")
+            .env(
+                "JCHTOOLS_ACP_PROCESS_CONFIG",
+                serde_json::to_string(&config).unwrap(),
+            )
+            .env("JCHTOOLS_ACP_PROCESS_RESULT", &result)
+            .env("JCHTOOLS_TEST_STATE_DIR", &harness.root)
+            .env(
+                "JCHTOOLS_TEST_ACP_SERVICE_EXE",
+                env!("CARGO_BIN_EXE_JchTools"),
+            )
+            .stdout(Stdio::null())
+            .stderr(Stdio::inherit())
+            .spawn()
+            .unwrap(),
+    );
     let ready = wait_file(&harness.root.join("gui-ready.json"));
     assert_eq!(ready["agent_pid"], status.agent_pid.unwrap().to_string());
     let mut plan = Plan::new("text");
@@ -2273,7 +2295,7 @@ fn real_gui_pending_configuration_applies_only_after_inflight_completion() {
         harness.port,
         "POST",
         "/v1/chat/completions",
-        Some(&body(&plan, true)),
+        Some(&body(&plan, true, &harness.root.join("acp-workspace"))),
         None,
     );
     assert_eq!(stream.delta(), plan.chunks[0]);
@@ -2307,7 +2329,7 @@ fn real_gui_pending_configuration_applies_only_after_inflight_completion() {
     assert_eq!(draining["agent_pid"], ready["agent_pid"]);
     assert!(!harness.root.join("gui-applied.json").exists());
     assert!(audit(&next_audit).is_empty());
-    assert_admission_closed(harness.port);
+    assert_admission_closed(harness.port, &harness.root.join("acp-workspace"));
     release(&harness.audit, &plan);
     assert_eq!(stream.finish_stream(), plan.chunks[1]);
     let applied = wait_file(&harness.root.join("gui-applied.json"));
@@ -2318,7 +2340,7 @@ fn real_gui_pending_configuration_applies_only_after_inflight_completion() {
         changed.port,
         "POST",
         "/v1/chat/completions",
-        Some(&body(&next, false)),
+        Some(&body(&next, false, &harness.root.join("acp-workspace"))),
         None,
     );
     assert_eq!(response.status, 200);

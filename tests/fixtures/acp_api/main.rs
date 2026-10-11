@@ -29,7 +29,7 @@
 // initialize-held 等待 release-initialize；两种屏障独立于 dispatch、持锁区间，有10秒看门狗。
 // Plan.action=tool-events 发送真正的 ToolCall/ToolCallUpdate 通知后输出正常文本。
 // terminal 在 wait 主命令退出后，另以合成 stdout/stderr 的完整行等待输出快照；
-// 不把 wait 当作管道 EOF，terminal-kill 不等待可能尚未写出的标记。
+// terminal-pwd 用真实子进程 current_dir 写入 cwd marker，验证省略 cwd 的回调默认目录。
 #![allow(dead_code, clippy::unwrap_used, clippy::expect_used)]
 
 use agent_client_protocol::schema::v1::{
@@ -249,27 +249,36 @@ async fn callbacks(
                 .await?;
             Ok(serde_json::to_string(&response).unwrap())
         }
-        "terminal" | "terminal-kill" | "terminal-held" => {
-            let child = cx
-                .send_request(
-                    CreateTerminalRequest::new(
-                        id.clone(),
-                        std::env::current_exe()
-                            .unwrap()
-                            .to_string_lossy()
-                            .into_owned(),
-                    )
-                    .args(vec![
-                        "--terminal".into(),
-                        cwd.to_string_lossy().into_owned(),
-                        plan.tag.clone(),
-                        plan.action.clone(),
-                    ])
-                    .cwd(cwd.to_path_buf())
-                    .output_byte_limit(4096),
-                )
-                .block_task()
-                .await?;
+        "terminal"
+        | "terminal-kill"
+        | "terminal-held"
+        | "terminal-pwd"
+        | "terminal-pwd-explicit" => {
+            let terminal_cwd = if plan.action == "terminal-pwd-explicit" {
+                cwd.with_file_name("终端-显式指定目录")
+            } else {
+                cwd.to_path_buf()
+            };
+            let create = CreateTerminalRequest::new(
+                id.clone(),
+                std::env::current_exe()
+                    .unwrap()
+                    .to_string_lossy()
+                    .into_owned(),
+            )
+            .args(vec![
+                "--terminal".into(),
+                terminal_cwd.to_string_lossy().into_owned(),
+                plan.tag.clone(),
+                plan.action.clone(),
+            ])
+            .output_byte_limit(4096);
+            let create = if plan.action == "terminal-pwd" {
+                create
+            } else {
+                create.cwd(terminal_cwd)
+            };
+            let child = cx.send_request(create).block_task().await?;
             let terminal = child.terminal_id;
             if plan.action == "terminal-held" {
                 return Ok(serde_json::to_string(&terminal).unwrap());
@@ -958,14 +967,23 @@ fn main() {
     if args.first().map(String::as_str) == Some("--terminal") {
         let root = PathBuf::from(&args[1]);
         let tag = &args[2];
-        // 先完整写入再原子发布 PID marker；存在即表示 PID 可解析，kill 不会
-        // 在文件创建与内容落盘之间抢先结束子进程。
+        // 先完整写入再原子发布 PID marker；存在即表示 PID 可解析。
         let pid_path = root.join(format!("terminal-{tag}.pid"));
         let pending_pid = root.join(format!("terminal-{tag}.pid.tmp"));
         std::fs::write(&pending_pid, std::process::id().to_string()).unwrap();
         std::fs::rename(&pending_pid, &pid_path).unwrap();
-        // 每个 marker 一次写入，避免格式化宏多段写让两条管道的 prefix/tag 交错。
-        // 断言仍校验完整 stdout/stderr 字节与实际退出/释放，不依赖两条管道先后顺序。
+        if args[3] == "terminal-pwd" || args[3] == "terminal-pwd-explicit" {
+            let current_dir = std::env::current_dir()
+                .unwrap()
+                .into_os_string()
+                .into_string()
+                .expect("terminal current directory must be valid UTF-8");
+            std::fs::write(
+                root.join(format!("terminal-{tag}.cwd")),
+                current_dir.as_bytes(),
+            )
+            .unwrap();
+        }
         std::io::stdout()
             .write_all(format!("stdout:{tag}\n").as_bytes())
             .unwrap();
@@ -974,7 +992,7 @@ fn main() {
             .unwrap();
         std::io::stdout().flush().unwrap();
         std::io::stderr().flush().unwrap();
-        if args[3] != "terminal" {
+        if args[3] != "terminal" && !args[3].starts_with("terminal-pwd") {
             while !root.join(format!("terminal-release-{tag}")).exists() {
                 std::thread::sleep(Duration::from_millis(10));
             }
@@ -1081,8 +1099,8 @@ pub(crate) mod consumer {
             port,
         }
     }
-    pub(crate) fn body(plan: &Plan, stream: bool) -> Value {
-        json!({"model":MODEL_A,"messages":[{"role":"user","content":plan.prompt()}],"stream":stream})
+    pub(crate) fn body(plan: &Plan, stream: bool, cwd: &Path) -> Value {
+        json!({"model":MODEL_A,"messages":[{"role":"user","content":plan.prompt()}],"stream":stream,"cwd":cwd})
     }
     pub(crate) fn completion(value: &Value) -> &str {
         assert_eq!(value["object"], "chat.completion");
@@ -1170,8 +1188,7 @@ pub(crate) mod consumer {
                     loop {
                         line.clear();
                         assert!(
-                            self.reader.read_line(&mut line).unwrap() > 0
-                                && line.ends_with("\r\n"),
+                            self.reader.read_line(&mut line).unwrap() > 0 && line.ends_with("\r\n"),
                             "HTTP chunk结束帧被截断"
                         );
                         if line == "\r\n" {
@@ -1355,7 +1372,7 @@ pub(crate) mod consumer {
                 self.port,
                 "POST",
                 "/v1/chat/completions",
-                Some(&body(plan, false)),
+                Some(&body(plan, false, &self.workspace)),
                 None,
             )
         }

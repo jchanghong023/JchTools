@@ -6,6 +6,7 @@ use axum::{
     Json,
 };
 use serde_json::{Map, Value};
+use std::path::PathBuf;
 
 use crate::acp_api::{
     AcceptedRequest, ChatMessage, FinishReason, MessageRole, ModelDescriptor, PromptInput,
@@ -227,6 +228,7 @@ fn reject_fields(
     Ok(())
 }
 
+// 包含 cwd 的同步文件系统校验；异步 HTTP 入口必须在阻塞线程执行。
 pub(super) fn parse_chat(
     value: Value,
     session: Option<SessionKey>,
@@ -324,6 +326,21 @@ pub(super) fn parse_chat(
             }
         }
     }
+    let cwd = match body.remove("cwd") {
+        Some(Value::String(cwd)) if !cwd.trim().is_empty() => {
+            let path = PathBuf::from(cwd);
+            if !path.is_absolute() {
+                return Err(HttpError::invalid("cwd", "cwd 必须是绝对目录路径"));
+            }
+            let canonical = crate::acp_api::settings::canonicalize_directory(&path)
+                .map_err(|_| HttpError::invalid("cwd", "cwd 必须是已存在的目录"))?;
+            if !canonical.is_dir() {
+                return Err(HttpError::invalid("cwd", "cwd 必须是已存在的目录"));
+            }
+            canonical
+        }
+        _ => return Err(HttpError::invalid("cwd", "cwd 必须是非空字符串")),
+    };
     let model = match body.remove("model") {
         Some(Value::String(model)) if !model.trim().is_empty() => model,
         _ => {
@@ -404,6 +421,7 @@ pub(super) fn parse_chat(
             model,
             messages: normalized,
             session,
+            cwd,
         },
         stream,
     })
@@ -556,8 +574,9 @@ mod tests {
     // 覆盖 AH-04：完整角色历史保留，不人为插入内容块分隔符。
     #[test]
     fn text_roles_and_parts_keep_full_history() {
+        let cwd = std::env::temp_dir();
         let input = parse_chat(
-            json!({"model":"actual/model", "messages":[
+            json!({"cwd":cwd, "model":"actual/model", "messages":[
             {"role":"system", "content":"规则"},
             {"role":"developer", "content":[{"type":"text", "text":"甲"},
                 {"type":"text", "text":"乙"}]},
@@ -578,7 +597,7 @@ mod tests {
     // 覆盖 AH-04 / AH-05：已知不支持的能力不得被静默接受。
     #[test]
     fn unsupported_fields_roles_and_media_are_rejected() {
-        let base = json!({"model":"m", "messages":[{"role":"user", "content":"x"}]});
+        let base = json!({"cwd":std::env::temp_dir(), "model":"m", "messages":[{"role":"user", "content":"x"}]});
         for (name, value) in [
             ("tools", json!([])),
             ("tool_choice", json!("none")),
@@ -619,6 +638,29 @@ mod tests {
         let mut request = base;
         request["messages"][0]["role"] = json!("tool");
         assert!(parse_chat(request, None).is_err());
+    }
+
+    #[test]
+    fn cwd_must_be_an_existing_absolute_directory() {
+        let base = json!({"model":"m", "messages":[{"role":"user", "content":"x"}]});
+        let file = std::env::current_exe().unwrap();
+        for cwd in [
+            None,
+            Some(json!(null)),
+            Some(json!(7)),
+            Some(json!("")),
+            Some(json!("relative")),
+            Some(json!(file)),
+            Some(json!(std::env::temp_dir().join("jchtools-missing-cwd-2111"))),
+        ] {
+            let mut request = base.clone();
+            if let Some(cwd) = cwd {
+                request["cwd"] = cwd;
+            }
+            let error = parse_chat(request, None).err().expect("无效 cwd 必须明确拒绝");
+            assert_eq!(error.status, StatusCode::BAD_REQUEST);
+            assert_eq!(error.param.as_deref(), Some("cwd"));
+        }
     }
 
     // 覆盖 AH-12 / AH-13：错误分类固定，不回显 Agent 原文。

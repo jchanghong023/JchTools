@@ -23,7 +23,6 @@ use super::callbacks::{invalid, io_error};
 #[derive(Clone)]
 pub(super) struct Terminals {
     inner: Arc<Mutex<Table>>,
-    workspace: PathBuf,
 }
 #[derive(Default)]
 struct Table {
@@ -51,15 +50,15 @@ enum Control {
 }
 
 impl Terminals {
-    pub(super) fn new(workspace: PathBuf) -> Self {
+    pub(super) fn new() -> Self {
         Self {
             inner: Arc::new(Mutex::new(Table::default())),
-            workspace,
         }
     }
     pub(super) fn create(
         &self,
         request: CreateTerminalRequest,
+        session_cwd: PathBuf,
     ) -> Result<CreateTerminalResponse, agent_client_protocol::Error> {
         crate::acp_api::diagnostics::call("acp_terminal", "create", || {
             // 创建和登记同属一个同步临界区，shutdown 不会漏掉已启动的进程。
@@ -67,7 +66,7 @@ impl Terminals {
             if table.sealed {
                 return Err(invalid("终端服务已停止"));
             }
-            let cwd = request.cwd.unwrap_or_else(|| self.workspace.clone());
+            let cwd = request.cwd.unwrap_or(session_cwd);
             if !cwd.is_absolute() || request.command.is_empty() {
                 return Err(invalid("终端程序或绝对工作目录无效"));
             }

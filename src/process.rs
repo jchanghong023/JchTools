@@ -1217,58 +1217,93 @@ mod tests {
         }
     }
 
-    // 消费真实子进程事件：截断读线程继承请求上下文，参数/env/两条管道正文不落日志。
+    // 覆盖 P-10：真实成功/非零退出结果、安全摘要、读线程关联及日志隐私。
     #[cfg(windows)]
     #[test]
     fn subprocess_logs_preserve_results_and_thread_correlation_without_body_leaks() {
+        // 与 HTTP 日志测试一致：隔离 tracing 进程级 callsite 缓存，
+        // 避免其他测试的 INFO subscriber 屏蔽本测试所需的 DEBUG 结果诊断。
+        const CHILD: &str = "JCHTOOLS_PROCESS_RESULT_LOG_TEST_CHILD";
+        if std::env::var_os(CHILD).is_none() {
+            let status = Command::new(std::env::current_exe().unwrap())
+                .args([
+                    "--exact",
+                    "process::tests::subprocess_logs_preserve_results_and_thread_correlation_without_body_leaks",
+                    "--nocapture",
+                ])
+                .env(CHILD, "1")
+                .status()
+                .unwrap();
+            assert!(status.success(), "隔离子进程结果诊断验证失败");
+            return;
+        }
         let (sender, receiver) = mpsc::channel();
         let writer = DiagnosticBuffer(sender);
         let subscriber = tracing_subscriber::fmt()
             .with_ansi(false)
             .without_time()
+            .with_max_level(tracing::Level::DEBUG)
             .with_writer(move || writer.clone())
             .finish();
-        let root_id = crate::logging::new_operation_id();
-        tracing::subscriber::with_default(subscriber, || {
-            let root = crate::logging::operation_span_with_id("test", "capture_chain", &root_id);
-            let _entered = root.enter();
-            let mut command = Command::new("cmd.exe");
-            command
-                .args([
-                    "/D",
-                    "/C",
-                    "echo private-terminal-secret& echo private-error-secret 1>&2& exit /b 7",
-                ])
-                .env("DIAGNOSTIC_TEST_SECRET", "private-environment-secret");
-            let out =
-                run_with_timeout_ext(&mut command, None, Duration::from_secs(5), None, 8, false)
-                    .unwrap();
-            assert_eq!(out.status.code(), Some(7));
-            assert_eq!(out.stdout, b"private-");
-            assert_eq!(out.stderr, b"private-");
-            assert!(out.stdout_truncated && out.stderr_truncated);
+        let outcomes = tracing::subscriber::with_default(subscriber, || {
+            [7, 0].map(|exit_code| {
+                let root_id = crate::logging::new_operation_id();
+                let root = crate::logging::operation_span_with_id("test", "capture_chain", &root_id);
+                let _entered = root.enter();
+                let mut command = Command::new("cmd.exe");
+                command
+                    .args([
+                        "/D",
+                        "/C",
+                        &format!(
+                            "echo private-terminal-secret& echo private-error-secret 1>&2& exit /b {exit_code}"
+                        ),
+                    ])
+                    .env("DIAGNOSTIC_TEST_SECRET", "private-environment-secret");
+                let out =
+                    run_with_timeout_ext(&mut command, None, Duration::from_secs(5), None, 8, false)
+                        .unwrap();
+                assert_eq!(out.status.code(), Some(exit_code));
+                assert_eq!(out.stdout, b"private-");
+                assert_eq!(out.stderr, b"private-");
+                assert!(out.stdout_truncated && out.stderr_truncated);
+                (root_id, out)
+            })
         });
         let text = String::from_utf8(receiver.try_iter().flatten().collect()).unwrap();
-        for event in [
-            "spawn_started",
-            "spawn_completed",
-            "subprocess_exited",
-            "subprocess_completed",
-            "pipe_capture_truncated",
-        ] {
-            let lines: Vec<_> = text.lines().filter(|line| line.contains(event)).collect();
-            assert!(!lines.is_empty(), "缺少事件 {event}：{text}");
+        for (root_id, out) in outcomes {
+            let correlated: Vec<_> = text.lines().filter(|line| line.contains(&root_id)).collect();
             assert!(
-                lines.iter().all(|line| line.contains(&root_id)),
-                "事件失去父操作关联：{text}"
+                correlated.iter().any(|line| line.contains("timeout_ms=5000")
+                    && line.contains("capture_limit=8")
+                    && line.contains("stdin_present=false")),
+                "子进程缺少关联的开始诊断：{text}"
             );
+            let terminal = correlated.iter().find(|line| {
+                line.contains(&format!("success={}", out.status.success()))
+                    && line.contains(&format!("exit_code={}", out.status.code().unwrap()))
+                    && line.contains(&format!("stdout_bytes={}", out.stdout.len()))
+                    && line.contains(&format!("stderr_bytes={}", out.stderr.len()))
+                    && line.contains("stdout_truncated=true")
+                    && line.contains("stderr_truncated=true")
+                    && line.contains("elapsed_ms=")
+            }).unwrap_or_else(|| panic!("子进程最终诊断必须匹配真实退出、输出统计、截断和耗时：{text}"));
+            let peer_pid = terminal.split_whitespace()
+                .find_map(|field| field.strip_prefix("peer_pid="))
+                .map(|value| value.trim_end_matches(['}', ':']))
+                .expect("最终诊断必须保留真实子进程 PID");
+            assert!(peer_pid.parse::<u32>().is_ok_and(|pid| pid > 0));
+            for stream in ["stdout", "stderr"] {
+                assert!(
+                    correlated.iter().any(|line| {
+                        line.contains(&format!("peer_pid={peer_pid}"))
+                            && line.contains(&format!("stream=\"{stream}\""))
+                            && line.contains("limit_bytes=8")
+                    }),
+                    "真实截断读线程缺少父操作及子进程关联（{stream}）：{text}"
+                );
+            }
         }
-        assert!(
-            text.contains("peer_pid=")
-                && text.contains("exit_code=7")
-                && text.contains("elapsed_ms="),
-            "{text}"
-        );
         for private in [
             "private-terminal-secret",
             "private-error-secret",
@@ -1282,45 +1317,79 @@ mod tests {
         }
     }
 
-    // 消费失败链而非源码：启动失败与超时回收有明确终态，原有返回错误不被日志吞掉。
+    // 覆盖 P-10：两个独立失败均有开始、阶段原因和最终失败耗时；不靠日志证明回收。
     #[cfg(windows)]
     #[test]
     fn subprocess_logs_spawn_failure_and_timeout_recovery() {
+        const CHILD: &str = "JCHTOOLS_PROCESS_FAILURE_LOG_TEST_CHILD";
+        if std::env::var_os(CHILD).is_none() {
+            let status = Command::new(std::env::current_exe().unwrap())
+                .args([
+                    "--exact",
+                    "process::tests::subprocess_logs_spawn_failure_and_timeout_recovery",
+                    "--nocapture",
+                ])
+                .env(CHILD, "1")
+                .status()
+                .unwrap();
+            assert!(status.success(), "隔离子进程失败诊断验证失败");
+            return;
+        }
         let (sender, receiver) = mpsc::channel();
         let writer = DiagnosticBuffer(sender);
         let subscriber = tracing_subscriber::fmt()
             .with_ansi(false)
             .without_time()
+            .with_max_level(tracing::Level::DEBUG)
             .with_writer(move || writer.clone())
             .finish();
-        let root_id = crate::logging::new_operation_id();
+        let spawn_id = crate::logging::new_operation_id();
+        let timeout_id = crate::logging::new_operation_id();
         tracing::subscriber::with_default(subscriber, || {
-            let root = crate::logging::operation_span_with_id("test", "failure_chain", &root_id);
-            let _entered = root.enter();
-            let mut missing = Command::new("missing-private-executable-secret.exe");
-            assert!(run_with_timeout(&mut missing, Duration::from_secs(1)).is_err());
-            let mut hung = silent_hung_command();
-            let error = run_with_timeout(&mut hung, Duration::from_millis(100)).unwrap_err();
-            assert!(error.to_string().contains("超时"), "{error:#}");
+            {
+                let root = crate::logging::operation_span_with_id("test", "failure_chain", &spawn_id);
+                let _entered = root.enter();
+                let mut missing = Command::new("missing-private-executable-secret.exe");
+                let _spawn_error =
+                    run_with_timeout(&mut missing, Duration::from_secs(1)).unwrap_err();
+            }
+            {
+                let root = crate::logging::operation_span_with_id("test", "failure_chain", &timeout_id);
+                let _entered = root.enter();
+                let mut hung = silent_hung_command();
+                let error = run_with_timeout(&mut hung, Duration::from_millis(100)).unwrap_err();
+                assert!(error.to_string().contains("超时"), "{error:#}");
+            }
         });
         let text = String::from_utf8(receiver.try_iter().flatten().collect()).unwrap();
-        for event in [
-            "spawn_failed",
-            "subprocess_timeout",
-            "subprocess_kill_started",
-            "subprocess_reap_completed",
-            "subprocess_failed",
-        ] {
-            let lines: Vec<_> = text.lines().filter(|line| line.contains(event)).collect();
-            assert!(!lines.is_empty(), "缺少失败链事件 {event}：{text}");
-            assert!(
-                lines.iter().all(|line| line.contains(&root_id)),
-                "失败链失去父操作关联：{text}"
-            );
+        for (id, timeout_ms) in [(&spawn_id, 1000), (&timeout_id, 100)] {
+            assert!(text.lines().any(|line| line.contains(id)
+                && line.contains(&format!("timeout_ms={timeout_ms}"))
+                && line.contains("stdin_present=false")), "失败操作缺少开始诊断：{text}");
+            assert!(text.lines().any(|line| line.contains(id)
+                && line.split_whitespace().any(|field| field == "ERROR")
+                && line.contains("state=\"failed\"")
+                && line.contains("elapsed_ms=")), "失败操作缺少关联的最终错误及耗时：{text}");
         }
+        assert!(text.lines().any(|line| line.contains(&spawn_id)
+            && line.contains("stage=\"spawn\"")
+            && line.contains("error_type=NotFound")), "启动失败缺少系统失败分类：{text}");
+        let timeout = text.lines().find(|line| line.contains(&timeout_id)
+            && line.contains("stage=\"wait\"")
+            && line.contains("timeout_ms=100")
+            && line.contains("peer_pid=")).expect("超时必须记录等待阶段、超时值及子进程关联");
+        let peer_pid = timeout.split_whitespace()
+            .find_map(|field| field.strip_prefix("peer_pid="))
+            .map(|value| value.trim_end_matches(['}', ':']))
+            .expect("超时诊断必须携带子进程 PID");
+        assert!(peer_pid.parse::<u32>().is_ok_and(|pid| pid > 0));
+        assert!(text.lines().any(|line| line.contains(&timeout_id)
+            && line.contains(&format!("peer_pid={peer_pid}"))
+            && line.contains("state=\"failed\"")
+            && line.contains("elapsed_ms=")), "超时最终结果丢失子进程关联：{text}");
         assert!(
             !text.contains("missing-private-executable-secret"),
-            "{text}"
+            "日志泄漏敏感执行路径：{text}"
         );
     }
 

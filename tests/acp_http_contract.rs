@@ -68,7 +68,7 @@ fn negotiated_models_are_selected_and_json_is_a_completion() {
     }
     for model in [MODEL_B, MODEL_A] {
         let plan = Plan::new("text");
-        let mut request = body(&plan, false);
+        let mut request = body(&plan, false, &server.workspace);
         request["model"] = json!(model);
         let response = Http::open(
             server.port,
@@ -91,7 +91,7 @@ fn negotiated_models_are_selected_and_json_is_a_completion() {
         .filter(|event| event["event"] == "started")
         .collect::<Vec<_>>();
     assert_ne!(starts[0]["session"], starts[1]["session"]);
-    let mut request = body(&Plan::new("text"), false);
+    let mut request = body(&Plan::new("text"), false, &server.workspace);
     request["model"] = json!("invented-alias");
     assert_eq!(
         Http::open(
@@ -136,7 +136,7 @@ fn assert_negotiated_model_category_change(mode: &str, category: &Value) {
     assert_eq!(ids, vec![MODEL_A, MODEL_B]);
 
     let first = Plan::new("text");
-    let mut request = body(&first, false);
+    let mut request = body(&first, false, &server.workspace);
     request["model"] = json!(MODEL_B);
     let response = Http::open(
         server.port,
@@ -159,7 +159,7 @@ fn assert_negotiated_model_category_change(mode: &str, category: &Value) {
 
     // 回包完整配置替换本地状态后，下一轮仍须保留此前协商的 selector 身份。
     let second = Plan::new("text");
-    let continuation = json!({"model":MODEL_A,"messages":[
+    let continuation = json!({"model":MODEL_A,"cwd":server.workspace.clone(),"messages":[
         {"role":"user","content":first.prompt()},
         {"role":"assistant","content":completion(&first_value)},
         {"role":"user","content":second.prompt()}
@@ -257,7 +257,7 @@ fn text_roles_are_preserved_and_unsupported_inputs_are_rejected() {
         .map(|(role, text)| json!({"role":role,"content":[{"type":"text","text":text}]}))
         .collect::<Vec<_>>();
     messages.push(json!({"role":"user","content":plan.prompt()}));
-    let request = json!({"model":MODEL_A,"messages":messages});
+    let request = json!({"model":MODEL_A,"messages":messages,"cwd":server.workspace.clone()});
     let response = Http::open(
         server.port,
         "POST",
@@ -284,14 +284,17 @@ fn text_roles_are_preserved_and_unsupported_inputs_are_rejected() {
         .count();
     // 各例只破坏一个输入维度；空 messages 不能替代不支持字段的拒绝证据。
     for (field, value) in [
-        ("messages", json!([{"role":"user","content":[{"type":"image_url","image_url":{"url":"data:image/png;base64,AA=="}}]}])),
+        (
+            "messages",
+            json!([{"role":"user","content":[{"type":"image_url","image_url":{"url":"data:image/png;base64,AA=="}}]}]),
+        ),
         ("messages", json!([{"role":"tool","content":"tool-result"}])),
         ("tools", json!([])),
         ("tool_choice", json!("none")),
         ("permission", json!("allow")),
         ("stream_options", json!({"include_usage":true})),
     ] {
-        let mut invalid = body(&Plan::new("text"), false);
+        let mut invalid = body(&Plan::new("text"), false, &server.workspace);
         invalid[field] = value;
         let response = Http::open(
             server.port,
@@ -329,7 +332,7 @@ fn audio_inputs_and_output_options_are_rejected_before_agent_start() {
     for case in ["input_audio", "mixed_input_audio", "audio", "modalities"] {
         let rejected = Plan::new("text");
         // 已成功的完整历史加新增 user；拒绝不能被空 messages 或坏历史伪装覆盖。
-        let mut request = continuation(&first, &rejected, MODEL_A);
+        let mut request = continuation(&first, &rejected, MODEL_A, &server.workspace);
         let audio = json!({"type":"input_audio","input_audio":{"data":"UklGRg==","format":"wav"}});
         let param = match case {
             "input_audio" => {
@@ -382,7 +385,7 @@ fn audio_inputs_and_output_options_are_rejected_before_agent_start() {
         server.port,
         "POST",
         "/v1/chat/completions",
-        Some(&continuation(&first, &next, MODEL_A)),
+        Some(&continuation(&first, &next, MODEL_A, &server.workspace)),
         Some(&session),
     );
     assert_eq!(response.status, 200);
@@ -408,6 +411,180 @@ impl Drop for ModelSetRelease {
     }
 }
 
+/// AH-04/AH-06/AH-12/AH-13：cwd 必须是明确、非空、绝对且已存在的目录，拒绝发生在业务 session/new 前。
+#[test]
+fn caller_cwd_is_required_and_invalid_paths_do_not_create_sessions() {
+    let server = server("normal");
+    let file = server.temp.path().join("not-a-directory");
+    std::fs::write(&file, b"file").unwrap();
+    let initial_sessions = audit(&server.root)
+        .iter()
+        .filter(|event| event["event"] == "session")
+        .count();
+    let initial_starts = audit(&server.root)
+        .iter()
+        .filter(|event| event["event"] == "started")
+        .count();
+    let invalid = [
+        ("missing", None),
+        ("null", Some(Value::Null)),
+        ("empty", Some(json!(""))),
+        ("relative", Some(json!("relative-cwd"))),
+        (
+            "nonexistent",
+            Some(json!(server.temp.path().join("absent-cwd"))),
+        ),
+        ("file", Some(json!(file))),
+    ];
+    for (case, cwd) in invalid {
+        let plan = Plan::new("text");
+        let mut request = json!({
+            "model":MODEL_A,
+            "messages":[{"role":"user","content":plan.prompt()}]
+        });
+        if let Some(cwd) = cwd {
+            request["cwd"] = cwd;
+        }
+        let response = Http::open(
+            server.port,
+            "POST",
+            "/v1/chat/completions",
+            Some(&request),
+            None,
+        );
+        let status = response.status;
+        let has_session_id = response.headers.contains_key("x-jchtools-session-id");
+        let value = response.json();
+        assert_eq!(status, 400, "{case}: {value}");
+        assert!(
+            !has_session_id,
+            "{case} must be rejected before allocating a business session"
+        );
+    }
+    let events = audit(&server.root);
+    assert_eq!(
+        events
+            .iter()
+            .filter(|event| event["event"] == "session")
+            .count(),
+        initial_sessions,
+        "invalid cwd requests must not create business sessions"
+    );
+    assert_eq!(
+        events
+            .iter()
+            .filter(|event| event["event"] == "started")
+            .count(),
+        initial_starts,
+        "invalid cwd requests must not start a business turn"
+    );
+}
+
+/// AH-04/AH-06/AH-12：session ID 绑定首次规范化 cwd；拒绝跨目录请求后原目录续会话仍可用。
+#[test]
+fn session_cwd_is_bound_and_rejected_request_preserves_original_session() {
+    let server = server("normal");
+    let first_dir = server.temp.path().join("session-first");
+    let other_dir = server.temp.path().join("session-other");
+    std::fs::create_dir(&first_dir).unwrap();
+    std::fs::create_dir(&other_dir).unwrap();
+    let first = Plan::new("text");
+    let response = Http::open(
+        server.port,
+        "POST",
+        "/v1/chat/completions",
+        Some(&body(&first, false, &first_dir)),
+        Some("bound-cwd-session"),
+    );
+    assert_eq!(response.status, 200);
+    let session = response.headers["x-jchtools-session-id"].clone();
+    let first_output = completion(&response.json()).to_owned();
+
+    let changed = Plan::new("text");
+    let changed_body = json!({"model":MODEL_A,"cwd":other_dir,"messages":[
+        {"role":"user","content":first.prompt()},
+        {"role":"assistant","content":first_output},
+        {"role":"user","content":changed.prompt()}
+    ]});
+    let rejected = Http::open(
+        server.port,
+        "POST",
+        "/v1/chat/completions",
+        Some(&changed_body),
+        Some(&session),
+    );
+    assert_eq!(rejected.status, 400);
+    assert_eq!(rejected.json()["error"]["code"], "session_unavailable");
+    assert!(!audit(&server.root)
+        .iter()
+        .any(|event| event["event"] == "started" && event["tag"] == changed.tag));
+
+    let next = Plan::new("text");
+    let accepted = Http::open(
+        server.port,
+        "POST",
+        "/v1/chat/completions",
+        Some(&continuation(&first, &next, MODEL_A, &first_dir)),
+        Some(&session),
+    );
+    assert_eq!(accepted.status, 200);
+    assert_eq!(accepted.headers["x-jchtools-session-id"], session);
+    assert_eq!(completion(&accepted.json()), next.text());
+    assert_eq!(
+        wait_event(&server.root, "started", &next.tag)["session"],
+        wait_event(&server.root, "started", &first.tag)["session"]
+    );
+}
+
+/// AH-04/AH-06/AH-12：即使首轮仍在途且后续请求会排队，也必须先拒绝相同session ID的跨cwd续用。
+#[test]
+fn queued_session_cwd_change_is_rejected_before_waiting() {
+    let server = server("normal");
+    let first_dir = server.temp.path().join("queued-first");
+    let other_dir = server.temp.path().join("queued-other");
+    std::fs::create_dir(&first_dir).unwrap();
+    std::fs::create_dir(&other_dir).unwrap();
+    let mut first = Plan::new("text");
+    first.barrier = true;
+    let mut stream = Http::open(
+        server.port,
+        "POST",
+        "/v1/chat/completions",
+        Some(&body(&first, true, &first_dir)),
+        Some("queued-bound-cwd-session"),
+    );
+    assert_eq!(stream.delta(), first.chunks[0]);
+    wait_counts(&server, 1, 0);
+
+    let changed = Plan::new("text");
+    let changed_body = json!({"model":MODEL_A,"cwd":other_dir,"messages":[
+        {"role":"user","content":first.prompt()},
+        {"role":"assistant","content":first.text()},
+        {"role":"user","content":changed.prompt()}
+    ]});
+    let (send, receive) = std::sync::mpsc::channel();
+    let port = server.port;
+    let request = thread::spawn(move || {
+        let response = Http::open(
+            port,
+            "POST",
+            "/v1/chat/completions",
+            Some(&changed_body),
+            Some("queued-bound-cwd-session"),
+        );
+        let _sent = send.send((response.status, response.json()));
+    });
+    let outcome = receive.recv_timeout(Duration::from_secs(5));
+    release(&server.root, &first);
+    assert_eq!(stream.finish_stream(), first.chunks[1]);
+    let outcome = outcome.expect("跨目录续会话必须在首轮释放前拒绝，不能先排队");
+    request.join().unwrap();
+    assert_eq!(outcome.0, 400, "{:?}", outcome.1);
+    assert_eq!(outcome.1["error"]["code"], "session_unavailable");
+    assert!(!audit(&server.root)
+        .iter()
+        .any(|event| event["event"] == "started" && event["tag"] == changed.tag));
+}
 /// AH-04/AH-12/AH-13：prompt 尚未发出时取消，只结束该请求并保留原历史与排队轮次。
 #[test]
 fn pre_prompt_cancel_preserves_session_and_waiter() {
@@ -429,7 +606,8 @@ fn pre_prompt_cancel_preserves_session_and_waiter() {
         .unwrap();
     let mut request = runtime
         .block_on(server.backend.submit(PromptInput {
-            model: MODEL_B.into(),
+            model: MODEL_B.to_owned(),
+            cwd: server.workspace.clone(),
             messages: vec![
                 ChatMessage {
                     role: MessageRole::User,
@@ -459,10 +637,15 @@ fn pre_prompt_cancel_preserves_session_and_waiter() {
         thread::sleep(Duration::from_millis(10));
     };
     assert_eq!(held["pid"], first_start["pid"]);
+    assert!(audit(&server.root).iter().any(|event| {
+        event["event"] == "model"
+            && event["session"] == first_start["session"]
+            && event["model"] == MODEL_B
+    }));
     // 同步设置 token，第三轮的提交一定在取消之后、设置响应放行之前。
     request.cancellation.cancel();
     let third = Plan::new("text");
-    let third_body = json!({"model":MODEL_A,"messages":[
+    let third_body = json!({"model":MODEL_A,"cwd":server.workspace.clone(),"messages":[
         {"role":"user","content":first.prompt()},
         {"role":"assistant","content":first_output},
         {"role":"user","content":third.prompt()}
@@ -512,6 +695,7 @@ fn pre_prompt_cancel_preserves_session_and_waiter() {
     let third_start = wait_event(&server.root, "started", &third.tag);
     assert_eq!(third_start["session"], first_start["session"]);
     assert_eq!(third_start["pid"], first_start["pid"]);
+    assert_eq!(third_start["model"], MODEL_A);
     let unrelated = Plan::new("text");
     let response = server.post(&unrelated);
     assert_eq!(response.status, 200);
@@ -532,7 +716,7 @@ fn explicit_history_reuses_session_and_rejects_changed_prefix() {
     let output = completion(&response.json()).to_owned();
     let mut second = Plan::new("text");
     second.chunks = vec!["续会话专属回答".into()];
-    let request = json!({"model":MODEL_A,"messages":[{"role":"user","content":first.prompt()},{"role":"assistant","content":output},{"role":"user","content":second.prompt()}]});
+    let request = json!({"model":MODEL_A,"cwd":server.workspace.clone(),"messages":[{"role":"user","content":first.prompt()},{"role":"assistant","content":output},{"role":"user","content":second.prompt()}]});
     let response = Http::open(
         server.port,
         "POST",
@@ -556,13 +740,10 @@ fn explicit_history_reuses_session_and_rejects_changed_prefix() {
     // 否则即使不校验首轮前缀，也可能仅因历史缺失/没有新增轮次而返回 400。
     let third = Plan::new("text");
     let mut next = request;
-    next["messages"]
-        .as_array_mut()
-        .unwrap()
-        .extend([
-            json!({"role":"assistant","content":second.text()}),
-            json!({"role":"user","content":third.prompt()}),
-        ]);
+    next["messages"].as_array_mut().unwrap().extend([
+        json!({"role":"assistant","content":second.text()}),
+        json!({"role":"user","content":third.prompt()}),
+    ]);
     let mut changed = next.clone();
     changed["messages"][0]["content"] = json!("changed-prefix");
     let response = Http::open(
@@ -614,7 +795,7 @@ fn two_sessions_overlap_stream_incrementally_and_disconnect_only_cancels_one() {
         server.port,
         "POST",
         "/v1/chat/completions",
-        Some(&body(&first, true)),
+        Some(&body(&first, true, &server.workspace)),
         None,
     );
     assert_eq!(a.status, 200);
@@ -624,7 +805,7 @@ fn two_sessions_overlap_stream_incrementally_and_disconnect_only_cancels_one() {
         server.port,
         "POST",
         "/v1/chat/completions",
-        Some(&body(&second, true)),
+        Some(&body(&second, true, &server.workspace)),
         None,
     );
     assert_eq!(b.status, 200);
@@ -668,7 +849,7 @@ fn same_session_turns_wait_in_fifo_order_without_implicit_cancel() {
         server.port,
         "POST",
         "/v1/chat/completions",
-        Some(&body(&first, true)),
+        Some(&body(&first, true, &server.workspace)),
         Some("fifo-session"),
     );
     assert_eq!(stream.delta(), first.chunks[0]);
@@ -683,7 +864,8 @@ fn same_session_turns_wait_in_fifo_order_without_implicit_cancel() {
     let mut second_history = history.clone();
     second_history.push(json!({"role":"user","content":second.prompt()}));
     let port = server.port;
-    let second_body = json!({"model":MODEL_A,"messages":second_history});
+    let second_body =
+        json!({"model":MODEL_A,"cwd":server.workspace.clone(),"messages":second_history});
     let second_thread = thread::spawn(move || {
         let response = Http::open(
             port,
@@ -700,7 +882,8 @@ fn same_session_turns_wait_in_fifo_order_without_implicit_cancel() {
     third_history.push(json!({"role":"user","content":second.prompt()}));
     third_history.push(json!({"role":"assistant","content":second.text()}));
     third_history.push(json!({"role":"user","content":third.prompt()}));
-    let third_body = json!({"model":MODEL_A,"messages":third_history});
+    let third_body =
+        json!({"model":MODEL_A,"cwd":server.workspace.clone(),"messages":third_history});
     let third_thread = thread::spawn(move || {
         let response = Http::open(
             port,
@@ -755,7 +938,7 @@ fn four_active_plus_sixteen_waiting_rejects_twenty_first_request() {
             server.port,
             "POST",
             "/v1/chat/completions",
-            Some(&body(&plan, true)),
+            Some(&body(&plan, true, &server.workspace)),
             None,
         );
         assert_eq!(response.delta(), plan.chunks[0]);
@@ -765,7 +948,7 @@ fn four_active_plus_sixteen_waiting_rejects_twenty_first_request() {
     let mut queued = Vec::new();
     for index in 0..16 {
         let plan = Plan::new("text");
-        let request = body(&plan, false);
+        let request = body(&plan, false, &server.workspace);
         let port = server.port;
         queued.push((
             plan,
@@ -808,7 +991,7 @@ fn agent_failure_is_not_success_and_next_request_rebuilds_without_replay() {
         server.port,
         "POST",
         "/v1/chat/completions",
-        Some(&body(&victim, true)),
+        Some(&body(&victim, true, &server.workspace)),
         None,
     );
     assert_eq!(stream.delta(), victim.chunks[0]);
@@ -874,7 +1057,7 @@ fn disconnect_before_first_event_and_during_json_wait_cancels_prompt() {
     for stream in [true, false] {
         let mut plan = Plan::new("silent");
         plan.barrier = true;
-        let socket = send_without_reading(server.port, &body(&plan, stream));
+        let socket = send_without_reading(server.port, &body(&plan, stream, &server.workspace));
         let started = wait_event(&server.root, "started", &plan.tag);
         if let Some(pid) = &pid {
             assert_eq!(&started["pid"], pid);
@@ -911,14 +1094,14 @@ fn queued_http_disconnect_releases_capacity_without_starting_agent_turn() {
             server.port,
             "POST",
             "/v1/chat/completions",
-            Some(&body(&plan, true)),
+            Some(&body(&plan, true, &server.workspace)),
             None,
         );
         assert_eq!(response.delta(), plan.chunks[0]);
         active.push((plan, response));
     }
     let queued = Plan::new("silent");
-    let socket = send_without_reading(server.port, &body(&queued, true));
+    let socket = send_without_reading(server.port, &body(&queued, true, &server.workspace));
     wait_counts(&server, 4, 1);
     drop(socket);
     wait_counts(&server, 4, 0);
@@ -959,7 +1142,7 @@ fn assert_second_default_session(mode: &str) {
     let first_session = first_response.headers["x-jchtools-session-id"].clone();
     assert_eq!(completion(&first_response.json()), first.text());
     let second = Plan::new("text");
-    let mut request = body(&second, false);
+    let mut request = body(&second, false, &server.workspace);
     request["model"] = json!(MODEL_B);
     let response = Http::open(
         server.port,
@@ -997,7 +1180,10 @@ fn assert_second_default_session(mode: &str) {
             .iter()
             .find(|event| event["event"] == "session" && event["session"] == start["session"])
             .unwrap();
-        assert_eq!(events[selection_index]["config_id"], negotiated["config_id"]);
+        assert_eq!(
+            events[selection_index]["config_id"],
+            negotiated["config_id"]
+        );
         let start_index = events
             .iter()
             .position(|event| event["event"] == "started" && event["tag"] == start["tag"])
@@ -1006,8 +1192,8 @@ fn assert_second_default_session(mode: &str) {
     }
 }
 
-fn continuation(first: &Plan, second: &Plan, model: &str) -> Value {
-    json!({"model":model,"messages":[
+fn continuation(first: &Plan, second: &Plan, model: &str, cwd: &std::path::Path) -> Value {
+    json!({"model":model,"cwd":cwd,"messages":[
         {"role":"user","content":first.prompt()},
         {"role":"assistant","content":first.text()},
         {"role":"user","content":second.prompt()}
@@ -1112,7 +1298,7 @@ fn new_session_immediate_config_update_replaces_public_model_catalog() {
     assert_new_response_config_burst(&server, session);
     wait_updated_catalog(&server);
     let rejected = Plan::new("text");
-    let mut request = body(&rejected, false);
+    let mut request = body(&rejected, false, &server.workspace);
     request["model"] = json!(MODEL_B);
     let response = Http::open(
         server.port,
@@ -1141,7 +1327,7 @@ fn new_session_immediate_config_update_admits_and_selects_latest_model() {
     let mut completed = Vec::new();
     for _ in 0..2 {
         let plan = Plan::new("text");
-        let mut request = body(&plan, false);
+        let mut request = body(&plan, false, &server.workspace);
         request["model"] = json!(MODEL_C);
         let response = Http::open(
             server.port,
@@ -1178,7 +1364,12 @@ fn new_session_immediate_config_update_admits_and_selects_latest_model() {
         server.port,
         "POST",
         "/v1/chat/completions",
-        Some(&continuation(&completed[1].0, &rejected, MODEL_B)),
+        Some(&continuation(
+            &completed[1].0,
+            &rejected,
+            MODEL_B,
+            &server.workspace,
+        )),
         Some(&completed[1].1),
     );
     assert_eq!(response.status, 400, "最新会话配置不得保留已经移除的 B");
@@ -1214,7 +1405,7 @@ fn set_response_new_model_is_usable_in_existing_session() {
             .collect::<Vec<_>>(),
         vec![MODEL_A, MODEL_B],
     );
-    let mut unrelated = body(&Plan::new("text"), false);
+    let mut unrelated = body(&Plan::new("text"), false, &server.workspace);
     unrelated["model"] = json!(MODEL_C);
     let unavailable = Http::open(
         server.port,
@@ -1230,7 +1421,7 @@ fn set_response_new_model_is_usable_in_existing_session() {
         server.port,
         "POST",
         "/v1/chat/completions",
-        Some(&continuation(&first, &second, MODEL_C)),
+        Some(&continuation(&first, &second, MODEL_C, &server.workspace)),
         Some(&session),
     );
     assert_eq!(
@@ -1255,7 +1446,7 @@ fn set_response_new_model_is_usable_in_existing_session() {
 fn config_option_update_restores_model_for_next_turn() {
     let server = server("model-options-update");
     let first = Plan::new("text");
-    let mut request = body(&first, false);
+    let mut request = body(&first, false, &server.workspace);
     request["model"] = json!(MODEL_B);
     let response = Http::open(
         server.port,
@@ -1273,7 +1464,7 @@ fn config_option_update_restores_model_for_next_turn() {
         server.port,
         "POST",
         "/v1/chat/completions",
-        Some(&continuation(&first, &second, MODEL_A)),
+        Some(&continuation(&first, &second, MODEL_A, &server.workspace)),
         Some(&session),
     );
     assert_eq!(
@@ -1301,12 +1492,12 @@ fn queued_history_mismatch_does_not_invalidate_existing_session() {
         server.port,
         "POST",
         "/v1/chat/completions",
-        Some(&body(&first, true)),
+        Some(&body(&first, true, &server.workspace)),
         Some("history-recovery"),
     );
     assert_eq!(stream.delta(), first.chunks[0]);
     let bad = Plan::new("text");
-    let bad_request = body(&bad, false);
+    let bad_request = body(&bad, false, &server.workspace);
     let port = server.port;
     let queued = thread::spawn(move || {
         let response = Http::open(
@@ -1329,7 +1520,7 @@ fn queued_history_mismatch_does_not_invalidate_existing_session() {
         server.port,
         "POST",
         "/v1/chat/completions",
-        Some(&continuation(&first, &second, MODEL_A)),
+        Some(&continuation(&first, &second, MODEL_A, &server.workspace)),
         Some("history-recovery"),
     );
     assert_eq!(response.status, 200, "坏历史输入不能使原会话失效");

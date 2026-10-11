@@ -27,7 +27,7 @@ use callbacks::{Callbacks, Route};
 use futures::{future::BoxFuture, stream::FuturesUnordered, FutureExt, StreamExt};
 use std::{
     collections::{HashMap, HashSet, VecDeque},
-    path::{Path, PathBuf},
+    path::PathBuf,
     sync::{Arc, Mutex, PoisonError},
 };
 use tokio::sync::{mpsc, oneshot, watch};
@@ -153,10 +153,12 @@ fn model_selector_from_option(option: &SessionConfigOption) -> Result<ModelSelec
 }
 struct SessionState {
     id: SessionId,
+    cwd: PathBuf,
     model: SessionModel,
     history: Vec<ChatMessage>,
 }
 struct SessionSlot {
+    cwd: PathBuf,
     state: Option<SessionState>,
     invalid: bool,
 }
@@ -287,6 +289,12 @@ impl Actor {
                 .clone()
                 .unwrap_or_else(|| SessionKey(uuid::Uuid::new_v4().to_string()));
             if let Some(slot) = self.sessions.get(&key) {
+                if slot.cwd != input.cwd {
+                    return Err(error(
+                        ServiceErrorKind::SessionUnavailable,
+                        "此会话已绑定其他工作目录",
+                    ));
+                }
                 if slot.invalid {
                     return Err(error(
                         ServiceErrorKind::SessionUnavailable,
@@ -346,6 +354,7 @@ impl Actor {
                 model: input.model.clone(),
             };
             self.sessions.entry(key.clone()).or_insert(SessionSlot {
+                cwd: input.cwd.clone(),
                 state: None,
                 invalid: false,
             });
@@ -405,7 +414,6 @@ impl Actor {
     fn schedule(
         &mut self,
         cx: &ConnectionTo<Agent>,
-        workspace: &Path,
         callbacks: &Callbacks,
         spare: &mut Option<SessionState>,
         rounds: &mut FuturesUnordered<BoxFuture<'static, RoundResult>>,
@@ -454,9 +462,9 @@ impl Actor {
                 .sessions
                 .get_mut(&key)
                 .and_then(|slot| slot.state.take());
-            if state.is_none() {
+            if state.is_none() && spare.as_ref().is_some_and(|probe| probe.cwd == input.cwd) {
                 if let Some(probe) = spare.take() {
-                    // 后续 set 回包/会话通知只更新已消费的会话，不污染新会话准入能力。
+                    // 仅同工作目录的首轮可接管探测会话；其余会话从 catalog 重新协商。
                     let catalog = probe
                         .model
                         .lock()
@@ -482,7 +490,6 @@ impl Actor {
             rounds.push(
                 round(
                     cx.clone(),
-                    workspace.to_path_buf(),
                     callbacks.clone(),
                     RoundContext {
                         id,
@@ -513,7 +520,7 @@ fn validate_history(history: &[ChatMessage], messages: &[ChatMessage]) -> Result
 }
 async fn create_session(
     cx: &ConnectionTo<Agent>,
-    workspace: PathBuf,
+    cwd: PathBuf,
     callbacks: &Callbacks,
     negotiated_model_id: Option<SessionConfigId>,
 ) -> Result<SessionState, ServiceError> {
@@ -522,7 +529,8 @@ async fn create_session(
         let routes = callbacks.routes.clone();
         let connection = cx.clone();
         let diagnostic_span = tracing::Span::current();
-        cx.prepare_request(NewSessionRequest::new(workspace))
+        let session_cwd = cwd.clone();
+        cx.prepare_request(NewSessionRequest::new(cwd))
             .on_receiving_result(move |result| {
                 async move {
                     // 发布前注册有序回调，在原始派发内登记，先于紧随响应的配置通知。
@@ -537,6 +545,9 @@ async fn create_session(
                                 "Agent 重复返回了已使用的 ACP 会话标识",
                             ));
                         }
+                        routes
+                            .workspaces
+                            .insert(response.session_id.clone(), session_cwd.clone());
                         routes
                             .spans
                             .insert(response.session_id.clone(), tracing::Span::current());
@@ -562,6 +573,7 @@ async fn create_session(
                             .insert(response.session_id.clone(), model.clone());
                         Ok(SessionState {
                             id: response.session_id,
+                            cwd: session_cwd,
                             model,
                             history: Vec::new(),
                         })
@@ -578,7 +590,6 @@ async fn create_session(
 }
 async fn round(
     cx: ConnectionTo<Agent>,
-    workspace: PathBuf,
     callbacks: Callbacks,
     context: RoundContext,
 ) -> RoundResult {
@@ -591,9 +602,12 @@ async fn round(
         events,
         cancellation,
     } = context;
+    // 与调度事件相同：已有 ACP 状态（包括同目录探测状态）才算复用。
+    let reused_session = state.is_some();
     let mut state = match state {
         Some(state) => state,
-        None => match create_session(&cx, workspace, &callbacks, negotiated_model_id).await {
+        None => match create_session(&cx, input.cwd.clone(), &callbacks, negotiated_model_id).await
+        {
             Ok(state) => state,
             Err(failure) => {
                 return RoundResult {
@@ -619,7 +633,7 @@ async fn round(
         &cx,
         &callbacks,
         &mut state,
-        input,
+        (&id, input, reused_session),
         events,
         cancellation,
         &mut prompt_published,
@@ -665,6 +679,8 @@ async fn finalize_round(
             .unwrap_or_else(PoisonError::into_inner);
         routes.models.remove(&session);
         routes.model_ids.remove(&session);
+        routes.workspaces.remove(&session);
+        routes.spans.remove(&session);
     }
     RoundResult {
         id,
@@ -677,11 +693,12 @@ async fn execute_round(
     cx: &ConnectionTo<Agent>,
     callbacks: &Callbacks,
     state: &mut SessionState,
-    input: PromptInput,
+    request: (&RequestId, PromptInput, bool),
     events: mpsc::UnboundedSender<RequestEvent>,
     cancellation: CancellationToken,
     prompt_published: &mut bool,
 ) -> Result<FinishReason, ServiceError> {
+    let (request_id, input, reused_session) = request;
     crate::acp_api::diagnostics::async_call("acp_agent", "execute_round", async { let selector_id = {
     let model = state.model.lock().unwrap_or_else(PoisonError::into_inner);
     let selector = model.as_ref().map_err(Clone::clone)?;
@@ -744,9 +761,19 @@ tracing::debug!(event = "acp_model_selection_completed", component = "acp_agent"
 if cancellation.is_cancelled() {
     return Err(error(ServiceErrorKind::Cancelled, "请求已取消"));
 }
-let content = input.messages[state.history.len()..]
+let submitted = &input.messages[state.history.len()..];
+let mut role_counts = [0_usize; 4];
+let mut text_bytes = 0_usize;
+let content = submitted
     .iter()
     .map(|message| {
+        role_counts[match message.role {
+            MessageRole::System => 0,
+            MessageRole::Developer => 1,
+            MessageRole::User => 2,
+            MessageRole::Assistant => 3,
+        }] += 1;
+        text_bytes += message.text.len();
         ContentBlock::Text(TextContent::new(format!(
             "[{}]\n{}",
             message.role.as_str(),
@@ -774,6 +801,19 @@ let routes = callbacks.routes.clone();
 let session = state.id.clone();
 let prompt_started = std::time::Instant::now();
 tracing::debug!(event = "acp_prompt_started", component = "acp_agent", message_count = input.messages.len() - state.history.len(), "ACP 会话提示请求开始");
+tracing::info!(
+    event = "acp_prompt_summary",
+    component = "acp_agent",
+    request_id = %request_id.0,
+    reused_session,
+    message_count = submitted.len(),
+    system_count = role_counts[0],
+    developer_count = role_counts[1],
+    user_count = role_counts[2],
+    assistant_count = role_counts[3],
+    text_bytes,
+    "ACP 实际提交新增消息摘要"
+);
 cx.prepare_request(PromptRequest::new(session.clone(), content))
     .on_receiving_result(move |result| async move {
         let route = routes
@@ -992,7 +1032,7 @@ async fn run_backend_inner(
         let failure = match processes.connect().await {
             Err(failure) => failure,
             Ok(connection) => {
-                let callbacks = Callbacks::new(workspace.clone());
+                let callbacks = Callbacks::new();
                 let mut exit = connection.exit;
                 let mut initialized = false;
                 let mut startup_failure = None;
@@ -1043,7 +1083,7 @@ async fn run_backend_inner(
                     }
                     let mut rounds = FuturesUnordered::new();
                     loop {
-                        actor.schedule(&cx, &workspace, &callbacks, &mut spare, &mut rounds);
+                        actor.schedule(&cx, &callbacks, &mut spare, &mut rounds);
                         reap_retired(&mut retired, &mut retired_failure);
                         #[cfg(test)]
                         if let Some(observer) = observer.as_mut() {
@@ -1099,6 +1139,7 @@ async fn run_backend_inner(
                         routes.active.clear();
                         routes.models.clear();
                         routes.model_ids.clear();
+                        routes.workspaces.clear();
                         routes.known.clear();
                         routes.spans.clear();
                     }
@@ -1361,6 +1402,7 @@ mod tests {
                 .admit(
                     id.clone(),
                     PromptInput {
+                        cwd: std::env::temp_dir(),
                         model: "可选模型".into(),
                         messages: vec![ChatMessage {
                             role: MessageRole::User,
@@ -1380,6 +1422,7 @@ mod tests {
             .admit(
                 RequestId::new(),
                 PromptInput {
+                    cwd: std::env::temp_dir(),
                     model: "可选模型".into(),
                     messages: vec![ChatMessage {
                         role: MessageRole::User,
@@ -1398,6 +1441,7 @@ mod tests {
     fn lifecycle_session(id: &str) -> SessionState {
         SessionState {
             id: SessionId::new(id),
+            cwd: std::env::temp_dir(),
             model: Arc::new(Mutex::new(Ok(ModelSelector {
                 id: SessionConfigId::new("model"),
                 values: vec![ModelDescriptor {
@@ -1420,8 +1464,7 @@ mod tests {
     }
 
     async fn assert_invalid_round_releases_selector(failure: ServiceError, terminal: RequestEvent) {
-        let workspace = tempfile::tempdir().unwrap();
-        let callbacks = Callbacks::new(workspace.path().to_path_buf());
+        let callbacks = Callbacks::new();
         let invalid = lifecycle_session("invalid");
         let invalid_id = invalid.id.clone();
         let invalid_model = Arc::downgrade(&invalid.model);
@@ -1462,6 +1505,7 @@ mod tests {
                 (
                     key.clone(),
                     SessionSlot {
+                        cwd: std::env::temp_dir(),
                         state: None,
                         invalid: false,
                     },
@@ -1469,6 +1513,7 @@ mod tests {
                 (
                     valid_key.clone(),
                     SessionSlot {
+                        cwd: std::env::temp_dir(),
                         state: Some(valid),
                         invalid: false,
                     },
@@ -1542,8 +1587,7 @@ mod tests {
 
     #[tokio::test]
     async fn completed_round_preserves_selector_and_valid_history() {
-        let workspace = tempfile::tempdir().unwrap();
-        let callbacks = Callbacks::new(workspace.path().to_path_buf());
+        let callbacks = Callbacks::new();
         let state = lifecycle_session("completed");
         let session = state.id.clone();
         let history = state.history.clone();
@@ -1634,8 +1678,7 @@ mod tests {
     }
     #[tokio::test]
     async fn pre_prompt_cancel_preserves_confirmed_selector_and_history() {
-        let workspace = tempfile::tempdir().unwrap();
-        let callbacks = Callbacks::new(workspace.path().to_path_buf());
+        let callbacks = Callbacks::new();
         let state = lifecycle_session("not-published");
         let history = state.history.clone();
         let model = Arc::downgrade(&state.model);
@@ -1686,10 +1729,20 @@ mod tests {
             live: usize,
             routes: Vec<Weak<Mutex<callbacks::Routes>>>,
         }
-        struct ReleaseOnDrop(PathBuf);
+        struct ReleaseOnDrop {
+            release: PathBuf,
+            pid_marker: PathBuf,
+        }
         impl Drop for ReleaseOnDrop {
             fn drop(&mut self) {
-                let _ = std::fs::write(&self.0, b"release");
+                let _ = std::fs::write(&self.release, b"release");
+                if let Ok(value) = std::fs::read_to_string(&self.pid_marker) {
+                    if let Ok(pid) = value.parse::<u32>() {
+                        while alive(pid) {
+                            std::thread::sleep(Duration::from_millis(10));
+                        }
+                    }
+                }
             }
         }
         fn alive(pid: u32) -> bool {
@@ -1722,7 +1775,10 @@ mod tests {
             fixture.display()
         );
         let root = tempfile::tempdir().unwrap();
-        let release = ReleaseOnDrop(root.path().join("terminal-release-retirement-held"));
+        let release = ReleaseOnDrop {
+            release: root.path().join("terminal-release-retirement-held"),
+            pid_marker: root.path().join("terminal-retirement-held.pid"),
+        };
         let (processes, mut connections) = agent_process_channel();
         let (controls, mut controllers) = mpsc::unbounded_channel();
         let fixture_root = root.path().to_path_buf();
@@ -1813,6 +1869,7 @@ mod tests {
                     "tag": tag, "action": action, "barrier": false, "chunks": ["真实恢复输出"],
                 });
                 let mut request = backend.submit(PromptInput {
+                    cwd: root.path().to_path_buf(),
                     model: "fixture-model-a".into(),
                     messages: vec![ChatMessage {
                         role: MessageRole::User, text: format!("AH_FIXTURE {plan}"),
@@ -1836,6 +1893,7 @@ mod tests {
                 "tag": "retirement-recovered", "action": "text", "barrier": false, "chunks": ["恢复成功"],
             });
             let mut request = backend.submit(PromptInput {
+                cwd: root.path().to_path_buf(),
                 model: "fixture-model-a".into(), session: None,
                 messages: vec![ChatMessage {
                     role: MessageRole::User, text: format!("AH_FIXTURE {plan}"),
@@ -1871,7 +1929,7 @@ mod tests {
             };
             assert!(alive(terminal_pid), "恢复不得终止旧自有终端");
             assert_eq!(held.live, 1);
-            std::fs::write(&release.0, b"release").unwrap();
+            std::fs::write(&release.release, b"release").unwrap();
             let reclaimed = loop {
                 backend.models().await.unwrap();
                 let mut latest = None;

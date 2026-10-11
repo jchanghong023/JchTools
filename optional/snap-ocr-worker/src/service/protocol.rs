@@ -716,6 +716,7 @@ mod tests {
         let capture = LogCapture(logs.clone());
         let subscriber = tracing_subscriber::fmt()
             .with_ansi(false)
+            .with_max_level(tracing::Level::DEBUG)
             .with_writer(move || capture.clone())
             .finish();
         let name = format!(
@@ -841,18 +842,16 @@ mod tests {
             serde_json::from_str::<serde_json::Value>(&response)?["ok"],
             true
         );
-        for event in [
-            "ocr_control_request_started",
-            "ocr_control_request_received",
-            "ocr_control_request_completed",
-        ] {
-            assert!(captured
-                .lines()
-                .any(|line| line.contains(event) && line.contains("test-control-123")));
-        }
-        assert!(captured.contains("ocr_control_deadline_expired"));
-        assert!(captured.contains("elapsed_ms"));
-        assert!(captured.contains("peer_pid"));
+        // P-10：成功终态须携带本请求关联、真实客户端 PID 与耗时；
+        // 不锁定内部解码步骤的事件清单。控制入口的恢复仍由上述真实响应证明。
+        assert!(captured.lines().any(|line| {
+            line.contains("test-control-123")
+                && line.contains(&format!("peer_pid={}", std::process::id()))
+                && line.contains("elapsed_ms=")
+        }));
+        assert!(captured.lines().any(|line| {
+            line.contains("stage=\"read_deadline\"") && line.contains("error_type=\"timeout\"")
+        }));
         assert!(!captured.contains("DO_NOT_LOG_OCR_BODY"));
         Ok(())
     }
