@@ -727,7 +727,7 @@
       "name": "unfinished_client_does_not_block_next_control_request",
       "ignored": false,
       "cfg": null,
-      "body": "137b5130e482bf84"
+      "body": "98f3024ad5135e1d"
     },
     {
       "file": "optional/snap-ocr-worker/src/service/tray.rs",
@@ -804,14 +804,14 @@
       "name": "admission_counts_same_session_waiters_and_preserves_fifo",
       "ignored": false,
       "cfg": null,
-      "body": "6ceb54dfe4b5118b"
+      "body": "9c5796d08b0b287f"
     },
     {
       "file": "src/acp_api/acp/mod.rs",
       "name": "backend_reclaims_completed_retirements_during_recovery_without_dropping_live_cleanup",
       "ignored": false,
       "cfg": "windows",
-      "body": "fddf7e0b4f359448"
+      "body": "34c5c4d0de17bf92"
     },
     {
       "file": "src/acp_api/acp/mod.rs",
@@ -825,7 +825,7 @@
       "name": "completed_round_preserves_selector_and_valid_history",
       "ignored": false,
       "cfg": null,
-      "body": "8f36b7473e8ea838"
+      "body": "712f4a714610a1de"
     },
     {
       "file": "src/acp_api/acp/mod.rs",
@@ -860,7 +860,7 @@
       "name": "pre_prompt_cancel_preserves_confirmed_selector_and_history",
       "ignored": false,
       "cfg": null,
-      "body": "86a0ef4a7a1bb38b"
+      "body": "af860c51c3423174"
     },
     {
       "file": "src/acp_api/acp/mod.rs",
@@ -878,6 +878,13 @@
     },
     {
       "file": "src/acp_api/http/dto.rs",
+      "name": "cwd_must_be_an_existing_absolute_directory",
+      "ignored": false,
+      "cfg": null,
+      "body": "52b8cc9113007bc3"
+    },
+    {
+      "file": "src/acp_api/http/dto.rs",
       "name": "service_errors_map_status_and_hide_untrusted_body",
       "ignored": false,
       "cfg": null,
@@ -888,28 +895,28 @@
       "name": "text_roles_and_parts_keep_full_history",
       "ignored": false,
       "cfg": null,
-      "body": "301a18eb8eafc100"
+      "body": "6245983f015d4d2a"
     },
     {
       "file": "src/acp_api/http/dto.rs",
       "name": "unsupported_fields_roles_and_media_are_rejected",
       "ignored": false,
       "cfg": null,
-      "body": "4b1ed491e8f0c7dd"
+      "body": "8d06a384de99fa5f"
     },
     {
       "file": "src/acp_api/http/mod.rs",
       "name": "connection_close_cancels_pending_admission",
       "ignored": false,
       "cfg": null,
-      "body": "7d29b84fbe06509d"
+      "body": "5282ad27df9a1cbe"
     },
     {
       "file": "src/acp_api/http/mod.rs",
       "name": "local_http_logs_json_sse_failures_and_private_body_boundaries",
       "ignored": false,
       "cfg": null,
-      "body": "1874edad7998f937"
+      "body": "aadf337ef8b9e1d2"
     },
     {
       "file": "src/acp_api/http/mod.rs",
@@ -3380,14 +3387,14 @@
       "name": "subprocess_logs_preserve_results_and_thread_correlation_without_body_leaks",
       "ignored": false,
       "cfg": "windows",
-      "body": "9aad20333033f509"
+      "body": "4dac90ba8a84d9cc"
     },
     {
       "file": "src/process.rs",
       "name": "subprocess_logs_spawn_failure_and_timeout_recovery",
       "ignored": false,
       "cfg": "windows",
-      "body": "10d9e88b56836852"
+      "body": "3743f71bf150fe16"
     },
     {
       "file": "src/process.rs",
@@ -4045,7 +4052,14 @@
       "name": "cancelled_round_permission_returns_cancelled_before_prompt_terminal",
       "ignored": false,
       "cfg": null,
-      "body": "5a3ebd981f2323cd"
+      "body": "f01ccc26bce8f305"
+    },
+    {
+      "file": "tests/acp_callbacks.rs",
+      "name": "concurrent_sessions_write_files_inside_their_caller_directories",
+      "ignored": false,
+      "cfg": null,
+      "body": "f13e1c2f8e9f9d29"
     },
     {
       "file": "tests/acp_callbacks.rs",
@@ -4073,7 +4087,7 @@
       "name": "server_tool_events_remain_text_only",
       "ignored": false,
       "cfg": null,
-      "body": "d759ebe0e4d3bed8"
+      "body": "78db347432c51fef"
     },
     {
       "file": "tests/acp_callbacks.rs",
@@ -4081,6 +4095,13 @@
       "ignored": false,
       "cfg": null,
       "body": "2526924d13fe3b19"
+    },
+    {
+      "file": "tests/acp_callbacks.rs",
+      "name": "terminal_current_directory_matches_session_with_and_without_explicit_cwd",
+      "ignored": false,
+      "cfg": null,
+      "body": "c342ee806c134804"
     },
     {
       "file": "tests/acp_callbacks.rs",
@@ -4171,42 +4192,49 @@
       "name": "agent_failure_is_not_success_and_next_request_rebuilds_without_replay",
       "ignored": false,
       "cfg": null,
-      "body": "6fcae887f7a5e973"
+      "body": "c1a2722b991b92ab"
     },
     {
       "file": "tests/acp_http_contract.rs",
       "name": "audio_inputs_and_output_options_are_rejected_before_agent_start",
       "ignored": false,
       "cfg": null,
-      "body": "5059195e141ec784"
+      "body": "23b083ed13f1ba67"
+    },
+    {
+      "file": "tests/acp_http_contract.rs",
+      "name": "caller_cwd_is_required_and_invalid_paths_do_not_create_sessions",
+      "ignored": false,
+      "cfg": null,
+      "body": "3026a802fd379076"
     },
     {
       "file": "tests/acp_http_contract.rs",
       "name": "config_option_update_restores_model_for_next_turn",
       "ignored": false,
       "cfg": null,
-      "body": "d39d30e0d49d4466"
+      "body": "338c61f315784324"
     },
     {
       "file": "tests/acp_http_contract.rs",
       "name": "disconnect_before_first_event_and_during_json_wait_cancels_prompt",
       "ignored": false,
       "cfg": null,
-      "body": "849f6a7f9c560084"
+      "body": "c202c228bbeaa5c5"
     },
     {
       "file": "tests/acp_http_contract.rs",
       "name": "explicit_history_reuses_session_and_rejects_changed_prefix",
       "ignored": false,
       "cfg": null,
-      "body": "6160f05ec9d5a8c4"
+      "body": "a3c6a669acf9650c"
     },
     {
       "file": "tests/acp_http_contract.rs",
       "name": "four_active_plus_sixteen_waiting_rejects_twenty_first_request",
       "ignored": false,
       "cfg": null,
-      "body": "2b7097cc0574d320"
+      "body": "514650d7b345556c"
     },
     {
       "file": "tests/acp_http_contract.rs",
@@ -4241,49 +4269,56 @@
       "name": "negotiated_models_are_selected_and_json_is_a_completion",
       "ignored": false,
       "cfg": null,
-      "body": "08ff27982f63f7b4"
+      "body": "8771e19b46c53916"
     },
     {
       "file": "tests/acp_http_contract.rs",
       "name": "new_session_immediate_config_update_admits_and_selects_latest_model",
       "ignored": false,
       "cfg": null,
-      "body": "a2ac6973e3a96f82"
+      "body": "d4667c0fdefc8f50"
     },
     {
       "file": "tests/acp_http_contract.rs",
       "name": "new_session_immediate_config_update_replaces_public_model_catalog",
       "ignored": false,
       "cfg": null,
-      "body": "2c562b3536ad7237"
+      "body": "9260cdc38a2f7148"
     },
     {
       "file": "tests/acp_http_contract.rs",
       "name": "pre_prompt_cancel_preserves_session_and_waiter",
       "ignored": false,
       "cfg": null,
-      "body": "760910f4d54ff233"
+      "body": "8085a1b0215f657d"
     },
     {
       "file": "tests/acp_http_contract.rs",
       "name": "queued_history_mismatch_does_not_invalidate_existing_session",
       "ignored": false,
       "cfg": null,
-      "body": "332b360a47dacc9a"
+      "body": "0be99f02b9a08a99"
     },
     {
       "file": "tests/acp_http_contract.rs",
       "name": "queued_http_disconnect_releases_capacity_without_starting_agent_turn",
       "ignored": false,
       "cfg": null,
-      "body": "d9e4b0c821d2d65f"
+      "body": "37879f49b2c5fcfd"
+    },
+    {
+      "file": "tests/acp_http_contract.rs",
+      "name": "queued_session_cwd_change_is_rejected_before_waiting",
+      "ignored": false,
+      "cfg": null,
+      "body": "7f4eed6f2d990437"
     },
     {
       "file": "tests/acp_http_contract.rs",
       "name": "same_session_turns_wait_in_fifo_order_without_implicit_cancel",
       "ignored": false,
       "cfg": null,
-      "body": "ae127c7a0956316e"
+      "body": "ae34bcb6d1b4b754"
     },
     {
       "file": "tests/acp_http_contract.rs",
@@ -4301,31 +4336,38 @@
     },
     {
       "file": "tests/acp_http_contract.rs",
+      "name": "session_cwd_is_bound_and_rejected_request_preserves_original_session",
+      "ignored": false,
+      "cfg": null,
+      "body": "69f8f0ae069ef9d7"
+    },
+    {
+      "file": "tests/acp_http_contract.rs",
       "name": "set_response_new_model_is_usable_in_existing_session",
       "ignored": false,
       "cfg": null,
-      "body": "82b9d40d59b99866"
+      "body": "ab886224ad481b7d"
     },
     {
       "file": "tests/acp_http_contract.rs",
       "name": "text_roles_are_preserved_and_unsupported_inputs_are_rejected",
       "ignored": false,
       "cfg": null,
-      "body": "af929312097df4c8"
+      "body": "71f6b6251d400ef8"
     },
     {
       "file": "tests/acp_http_contract.rs",
       "name": "two_sessions_overlap_stream_incrementally_and_disconnect_only_cancels_one",
       "ignored": false,
       "cfg": null,
-      "body": "399ab5be548d33e8"
+      "body": "2d2e77510f44ba2e"
     },
     {
       "file": "tests/acp_http_disconnect.rs",
       "name": "live_pipeline_preserves_every_request_without_cancelling",
       "ignored": false,
       "cfg": null,
-      "body": "263d4d88a61abdf9"
+      "body": "e0299b78bc943c3f"
     },
     {
       "file": "tests/acp_http_disconnect.rs",
@@ -4346,7 +4388,14 @@
       "name": "real_opencode_models_json_and_incremental_sse_single_agent",
       "ignored": true,
       "cfg": null,
-      "body": "6b3f59cfefcf7c2c"
+      "body": "30cf67a1f369727b"
+    },
+    {
+      "file": "tests/acp_prompt_summary.rs",
+      "name": "prompt_summary_counts_only_submitted_messages_and_never_logs_content",
+      "ignored": false,
+      "cfg": null,
+      "body": "ae4cce4207c2e2b6"
     },
     {
       "file": "tests/acp_service_process.rs",
@@ -4360,7 +4409,7 @@
       "name": "explicit_stop_cancels_inflight_requests_then_releases_owned_processes",
       "ignored": false,
       "cfg": null,
-      "body": "3bb3c38f5d447206"
+      "body": "2e9bc07b1470f67e"
     },
     {
       "file": "tests/acp_service_process.rs",
@@ -4374,7 +4423,7 @@
       "name": "independent_service_survives_facade_clients_and_reuses_one_agent",
       "ignored": false,
       "cfg": null,
-      "body": "26d127e925f73221"
+      "body": "0bf3d000644d6be3"
     },
     {
       "file": "tests/acp_service_process.rs",
@@ -4388,7 +4437,7 @@
       "name": "live_retiring_agent_blocks_reconnect_with_specific_error_not_a_hang",
       "ignored": false,
       "cfg": null,
-      "body": "94ba6062303df607"
+      "body": "29a84426450038f1"
     },
     {
       "file": "tests/acp_service_process.rs",
@@ -4402,7 +4451,7 @@
       "name": "occupied_initial_port_preserves_service_and_apply_recovers_without_stop",
       "ignored": false,
       "cfg": null,
-      "body": "0335af5c29419863"
+      "body": "0dadc059949b1e75"
     },
     {
       "file": "tests/acp_service_process.rs",
@@ -4423,21 +4472,21 @@
       "name": "real_gui_pending_configuration_applies_only_after_inflight_completion",
       "ignored": false,
       "cfg": null,
-      "body": "de61aad613d2dcc9"
+      "body": "aa0437e71e866b63"
     },
     {
       "file": "tests/acp_service_process.rs",
       "name": "real_gui_save_close_kill_reopen_and_confirmed_service_exit",
       "ignored": false,
       "cfg": null,
-      "body": "b86364deb37cdd7e"
+      "body": "31f1c6e16786400b"
     },
     {
       "file": "tests/acp_service_process.rs",
       "name": "real_service_discover_during_draining_is_minimal_stable_and_read_only",
       "ignored": false,
       "cfg": null,
-      "body": "032b3833eeb0e39a"
+      "body": "e9b63822d4ce3eba"
     },
     {
       "file": "tests/acp_service_process.rs",
@@ -4451,49 +4500,49 @@
       "name": "real_service_discover_during_stopping_is_minimal_stable_and_read_only",
       "ignored": false,
       "cfg": null,
-      "body": "72431e84c8948fd5"
+      "body": "a07b50b0c785349c"
     },
     {
       "file": "tests/acp_service_process.rs",
       "name": "real_service_http_disconnect_cancels_only_corresponding_round",
       "ignored": false,
       "cfg": null,
-      "body": "e0b9206400b13c81"
+      "body": "b1fad7d16853f131"
     },
     {
       "file": "tests/acp_service_process.rs",
       "name": "real_service_recovers_agent_exit_without_replaying_failed_requests",
       "ignored": false,
       "cfg": null,
-      "body": "35d04628b65d3cb6"
+      "body": "de542d29ac678094"
     },
     {
       "file": "tests/acp_service_process.rs",
       "name": "saving_is_non_disruptive_and_apply_drains_before_switching",
       "ignored": false,
       "cfg": null,
-      "body": "cbcb5062a4c2689e"
+      "body": "b873841266cab6d0"
     },
     {
       "file": "tests/acp_service_process.rs",
       "name": "stop_cancellation_agent_exit_releases_daemon_and_allows_restart",
       "ignored": false,
       "cfg": null,
-      "body": "0b5d1de946e99d22"
+      "body": "00b842a1c32d777f"
     },
     {
       "file": "tests/acp_service_process.rs",
       "name": "stop_during_apply_cancels_barrier_without_starting_replacement_agent",
       "ignored": false,
       "cfg": null,
-      "body": "b6b04cd13ba32670"
+      "body": "0821cb4b3303e7b2"
     },
     {
       "file": "tests/acp_service_process.rs",
       "name": "stopping_service_releases_owned_terminal_process",
       "ignored": false,
       "cfg": null,
-      "body": "61613d1f4768d98e"
+      "body": "79e10de98e4aa999"
     },
     {
       "file": "tests/acp_settings.rs",
