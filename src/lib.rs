@@ -3,6 +3,8 @@
 pub mod acp_api;
 pub mod archive;
 pub mod asset_util;
+#[cfg(windows)]
+pub mod codeagent;
 pub mod config;
 pub mod control;
 pub mod convert;

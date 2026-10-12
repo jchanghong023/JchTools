@@ -53,6 +53,12 @@ pub fn tools() -> &'static [ToolDescriptor] {
             category: "开发",
             summary: "ACP Agent · 本机 HTTP 模型接口 · 独立后台常驻",
         },
+        ToolDescriptor {
+            id: "codeagent",
+            name: "CodeAgent",
+            category: "开发",
+            summary: "本地 Token 自动维护 · CurrentUser DPAPI · 独立后台",
+        },
     ]
 }
 

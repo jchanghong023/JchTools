@@ -78,7 +78,7 @@ fn test_directory_override(
     Ok(None)
 }
 
-fn open(root: &Path) -> Result<Connection, String> {
+pub(crate) fn open(root: &Path) -> Result<Connection, String> {
     std::fs::create_dir_all(root).map_err(|e| {
         tracing::error!(event = "settings_storage_failed", stage = "create_directory", error_type = ?e.kind(), error_code = ?e.raw_os_error(), "创建配置目录失败");
         format!("创建应用配置目录失败：{e}")

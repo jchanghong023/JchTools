@@ -818,6 +818,18 @@ export component AppWindow inherits Window {
     callback acp-save-config();
     callback acp-apply-and-restart();
     callback acp-request-stop();
+    // CA-01～CA-07：只呈现去敏状态，不接收或显示凭据。
+    in-out property <string> codeagent-interval: "60";
+    in-out property <bool> codeagent-draft-edited: false;
+    in-out property <bool> codeagent-pending: false;
+    in-out property <bool> codeagent-running: false;
+    in-out property <bool> codeagent-check-failed: false;
+    in-out property <string> codeagent-status: "打开页面后连接独立后台";
+    in-out property <string> codeagent-last-check: "尚未检查";
+    in-out property <string> codeagent-result: "等待首次检查";
+    in-out property <string> codeagent-effective-interval: "默认检查间隔：60 秒";
+    in-out property <string> codeagent-error;
+    callback codeagent-save-interval();
     callback snap-initialize();
     callback snap-cancel-initialize();
     callback snap-connect();
@@ -899,7 +911,7 @@ export component AppWindow inherits Window {
     // 页面标题（标题栏文档位与页头共用同一映射）
     function screen-title() -> string {
         return root.screen == 0 ? "目录整理" : root.screen == 2 ? "递归解压"
-            : root.screen == 3 ? "MD 整理" : root.screen == 4 ? "Git 工具" : root.screen == 5 ? "转 Markdown" : root.screen == 6 ? "截图 OCR" : root.screen == 7 ? "设置" : root.screen == 8 ? "模型服务" : "关于";
+            : root.screen == 3 ? "MD 整理" : root.screen == 4 ? "Git 工具" : root.screen == 5 ? "转 Markdown" : root.screen == 6 ? "截图 OCR" : root.screen == 7 ? "设置" : root.screen == 8 ? "模型服务" : root.screen == 9 ? "CodeAgent" : "关于";
     }
     // 侧栏图标按工具 id 映射（registry 中注册的 id）
     function tool-icon(id: string) -> int {
@@ -910,6 +922,7 @@ export component AppWindow inherits Window {
         if (id == "git-tools") { return 5; }
         if (id == "snap-ocr") { return 6; }
         if (id == "acp-http") { return 13; }
+        if (id == "codeagent") { return 7; }
         return 0;
     }
 
@@ -1918,6 +1931,43 @@ export component AppWindow inherits Window {
                         } }
                     }
                 }
+                // ============ CodeAgent 本地 Token 维护 ============
+                if root.screen == 9: codeagent-scroll := ScrollView {
+                    vertical-stretch: 1; viewport-width: codeagent-scroll.visible-width;
+                    VerticalLayout { width: codeagent-scroll.visible-width; spacing: 12px;
+                        Surface { VerticalLayout { padding: 18px; spacing: 12px;
+                            Label { text: "CodeAgent Token 自动维护"; font-size: 18px; font-weight: 600; }
+                            Muted { text: "读取当前用户 .cac 凭据，使用 Windows CurrentUser DPAPI 解密；仅在变化时更新当前用户注册表，不联网、不调用 PowerShell。"; }
+                            HorizontalLayout { spacing: 12px; cross-axis-alignment: center;
+                                Label { text: "检查间隔（秒）"; }
+                                Field { width: 144px; text <=> root.codeagent-interval; placeholder-text: "正整数，默认 60";
+                                    enabled: !root.codeagent-pending && root.confirm-kind == 0;
+                                    edited(value) => { root.codeagent-draft-edited = true; } }
+                                AppButton { text: "保存间隔"; primary: true;
+                                    enabled: !root.codeagent-pending && root.confirm-kind == 0;
+                                    clicked => { root.codeagent-save-interval(); } }
+                                Rectangle { horizontal-stretch: 1; }
+                            }
+                            Muted { text: "保存后后台自动采用新间隔，重新打开工具箱后保留。"; }
+                            if root.codeagent-pending: ProgressBar { progress: -1; }
+                            if root.codeagent-error != "": HorizontalLayout { spacing: 8px;
+                                Text { text: root.codeagent-error; color: Design.danger-ink; wrap: word-wrap; horizontal-stretch: 1; }
+                                AppButton { text: "关闭提示"; clicked => { root.codeagent-error = ""; } }
+                            }
+                        } }
+                        Surface { VerticalLayout { padding: 18px; spacing: 12px;
+                            Label { text: "独立后台状态"; font-size: 16px; font-weight: 600; }
+                            Text { text: root.codeagent-status; color: root.codeagent-running ? Design.text : Design.text-muted; wrap: word-wrap; }
+                            Muted { text: root.codeagent-effective-interval; }
+                            Rectangle { height: 1px; background: Design.line-soft; }
+                            Label { text: "最近检查时间"; }
+                            Muted { text: root.codeagent-last-check; }
+                            Label { text: "最近检查结果"; }
+                            Text { text: root.codeagent-result; color: root.codeagent-check-failed ? Design.danger-ink : Design.text; wrap: word-wrap; }
+                            Muted { text: "关闭窗口后后台继续检查；读取或解密失败时保留原有注册表 Token，并在下一周期继续检查。页面、日志和状态记录均不显示 Token。"; }
+                        } }
+                    }
+                }
                 // ============ 关于 ============
                 // 内容总高在最小窗口（960×620）下会超出可视区，包进 ScrollView 滚动查看，
                 // 不再压缩裁切；视口宽度与设置页同口径钉住。
@@ -1935,7 +1985,7 @@ export component AppWindow inherits Window {
                                 }
                             }
                             Rectangle { height: 1px; background: Design.line-soft; }
-                            Muted { text: "Rust + Slint · 独立整理引擎 · SQLite 磁盘索引 · 随包携带完整 7-Zip\n已注册工具：递归解压、目录整理、MD 整理、Git 工具、转 Markdown、截图 OCR、模型服务。\n本地文件处理不上传文件；Git upstream 推送与用户主动初始化可选组件会联网，模型服务的模型联网由用户配置的 ACP Agent 承接（见需求合同 P-03 / 附录 F）。应用自身联网出口按 P-09 优先走 Windows 系统手动代理。\n启动低于一秒是目标，不是未经实测的承诺。"; }
+                            Muted { text: "Rust + Slint · 独立整理引擎 · SQLite 磁盘索引 · 随包携带完整 7-Zip\n已注册工具：递归解压、目录整理、MD 整理、Git 工具、转 Markdown、截图 OCR、模型服务、CodeAgent。\n本地文件处理不上传文件；Git upstream 推送与用户主动初始化可选组件会联网，模型服务的模型联网由用户配置的 ACP Agent 承接（见需求合同 P-03 / 附录 F）。应用自身联网出口按 P-09 优先走 Windows 系统代理，失败时仅回退直连一次。"; }
                         }
                     }
                     // 主题是应用级设置，放在关于页而不是目录整理的规则分区。

@@ -496,6 +496,110 @@ fn wire_acp_http(ui: &AppWindow, state: &Rc<RefCell<State>>) {
     });
 }
 
+enum CodeAgentCommand {
+    Ensure,
+    Save(String),
+}
+struct CodeAgentMessage {
+    saved: Option<std::result::Result<(), String>>,
+    status: std::result::Result<(crate::codeagent::Status, u64), String>,
+}
+struct CodeAgentObserver {
+    commands: mpsc::Sender<CodeAgentCommand>,
+    messages: mpsc::Receiver<CodeAgentMessage>,
+}
+
+fn request_codeagent(state: &Rc<RefCell<State>>, command: CodeAgentCommand) -> bool {
+    let mut state = state.borrow_mut();
+    let observer = state.codeagent_observer.get_or_insert_with(|| {
+        let (commands, receiver) = mpsc::channel();
+        let (sender, messages) = mpsc::channel();
+        std::thread::spawn(move || loop {
+            let command = match receiver.recv_timeout(Duration::from_millis(500)) {
+                Ok(command) => Some(command),
+                Err(mpsc::RecvTimeoutError::Timeout) => None,
+                Err(mpsc::RecvTimeoutError::Disconnected) => return,
+            };
+            let mut saved = None;
+            let action = match command {
+                Some(CodeAgentCommand::Ensure) => crate::codeagent::ensure_started().map(|_| ()),
+                Some(CodeAgentCommand::Save(value)) => {
+                    let result = crate::codeagent::save_interval(&value);
+                    saved = Some(result);
+                    // 保存校验失败不影响后台存活；错误经 saved 单独呈现，状态仍独立刷新。
+                    Ok(())
+                },
+                None => Ok(()),
+            };
+            let status = action.and_then(|()| Ok((
+                crate::codeagent::status()?, crate::codeagent::load_interval()?,
+            )));
+            if sender.send(CodeAgentMessage { saved, status }).is_err() {
+                return;
+            }
+        });
+        CodeAgentObserver { commands, messages }
+    });
+    observer.commands.send(command).is_ok()
+}
+
+fn apply_codeagent_status(ui: &AppWindow, status: &crate::codeagent::Status) {
+    ui.set_codeagent_running(status.running);
+    ui.set_codeagent_status(if status.running {
+        format!("独立后台运行中 · PID {}", status.pid.map_or_else(|| "正在启动".into(), |pid| pid.to_string()))
+    } else {
+        "独立后台未运行；重新打开页面可启动".into()
+    }.into());
+    ui.set_codeagent_last_check(status.last_check.as_deref().unwrap_or("尚未检查").into());
+    ui.set_codeagent_result(status.result.text().into());
+    ui.set_codeagent_check_failed(status.result.failed());
+    ui.set_codeagent_effective_interval(format!("后台当前检查间隔：{} 秒", status.interval_seconds).into());
+}
+
+fn apply_codeagent_messages(ui: &AppWindow, state: &Rc<RefCell<State>>) {
+    let messages = state.borrow().codeagent_observer.as_ref()
+        .map(|observer| observer.messages.try_iter().collect::<Vec<_>>()).unwrap_or_default();
+    for message in messages {
+        if let Some(saved) = message.saved {
+            ui.set_codeagent_pending(false);
+            ui.set_codeagent_error(saved.as_ref().err().cloned().unwrap_or_default().into());
+            if saved.is_ok() {
+                ui.set_codeagent_draft_edited(false);
+            }
+        }
+        match message.status {
+            Ok((status, interval)) => {
+                apply_codeagent_status(ui, &status);
+                if !ui.get_codeagent_draft_edited() {
+                    ui.set_codeagent_interval(interval.to_string().into());
+                }
+            },
+            Err(error) => {
+                ui.set_codeagent_running(false);
+                ui.set_codeagent_status("后台状态未知".into());
+                ui.set_codeagent_error(error.into());
+            },
+        }
+    }
+}
+
+fn wire_codeagent(ui: &AppWindow, state: &Rc<RefCell<State>>) {
+    let weak = ui.as_weak();
+    let state = state.clone();
+    ui.on_codeagent_save_interval(move || {
+        if let Some(ui) = weak.upgrade() {
+            if !ui.get_codeagent_pending() {
+                ui.set_codeagent_pending(true);
+                ui.set_codeagent_error("".into());
+                if !request_codeagent(&state, CodeAgentCommand::Save(ui.get_codeagent_interval().to_string())) {
+                    ui.set_codeagent_pending(false);
+                    ui.set_codeagent_error("CodeAgent 操作线程不可用".into());
+                }
+            }
+        }
+    });
+}
+
 /// 当前注册工具：决定规则分区集合、流程与状态文案。
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum Tool {
@@ -507,6 +611,7 @@ enum Tool {
     /// 截图 OCR（O-01）：第六个注册工具，独立后台服务 + 热键截图。
     SnapOcr,
     AcpHttp,
+    CodeAgent,
 }
 impl Tool {
     fn sections(self) -> &'static [&'static str] {
@@ -514,7 +619,7 @@ impl Tool {
             Tool::Extract => &["解压", "安全与性能"],
             Tool::Organizer => &["去重", "归类", "清理", "安全与性能"],
             // R-01：MD 整理与 Git 工具不设规则面板，分区集合为空。
-            Tool::Md | Tool::Git | Tool::MarkdownConverter | Tool::SnapOcr | Tool::AcpHttp => &[],
+            Tool::Md | Tool::Git | Tool::MarkdownConverter | Tool::SnapOcr | Tool::AcpHttp | Tool::CodeAgent => &[],
         }
     }
     fn from_id(id: &str) -> Option<Self> {
@@ -526,6 +631,7 @@ impl Tool {
             "markdown-converter" => Some(Tool::MarkdownConverter),
             "snap-ocr" => Some(Tool::SnapOcr),
             "acp-http" => Some(Tool::AcpHttp),
+            "codeagent" => Some(Tool::CodeAgent),
             _ => None,
         }
     }
@@ -697,6 +803,7 @@ struct State {
     acp_service_error: Option<String>,
     acp_draft_edited: bool,
     acp_explicit_stopped: bool,
+    codeagent_observer: Option<CodeAgentObserver>,
     /// 测试注入：覆盖任务状态目录；生产路径为 None，仍走 engine::prepare/apply。
     engine_overrides: Option<EngineTestOverrides>,
     /// 解压确认清点的请求代际：迟到的低代际清点事件不得刷新文案或解除门禁（X-02）。
@@ -1281,7 +1388,7 @@ fn visible_rows(state: &State) -> Result<Vec<RuleRow>> {
         Tool::Extract => "extract",
         Tool::Organizer => "organizer",
         // MD/Git 不设规则面板（R-01）：不会进入规则表过滤，占位即可。
-        Tool::Md | Tool::Git | Tool::MarkdownConverter | Tool::SnapOcr | Tool::AcpHttp => "",
+        Tool::Md | Tool::Git | Tool::MarkdownConverter | Tool::SnapOcr | Tool::AcpHttp | Tool::CodeAgent => "",
     };
     Ok(state
         .specs
@@ -1358,6 +1465,10 @@ fn invalidate(ui: &AppWindow, tool: Tool) {
     }
     if tool == Tool::AcpHttp {
         ui.set_status("模型服务在独立后台运行，关闭窗口不停止服务".into());
+        return;
+    }
+    if tool == Tool::CodeAgent {
+        ui.set_status("CodeAgent 在独立后台维护本地 Token，关闭窗口不停止检查".into());
         return;
     }
     if ui.get_has_task() {
@@ -1493,7 +1604,7 @@ fn changed(
                 Tool::Organizer => state.config.validate_organizer(),
                 Tool::Extract => state.config.validate_extract(),
                 // 主题设置不属于任一工具的规则面板。
-                Tool::Md | Tool::Git | Tool::MarkdownConverter | Tool::SnapOcr | Tool::AcpHttp => {
+                Tool::Md | Tool::Git | Tool::MarkdownConverter | Tool::SnapOcr | Tool::AcpHttp | Tool::CodeAgent => {
                     Ok(())
                 }
             };
@@ -1783,7 +1894,7 @@ fn invalid_number_error(state: &State, tool: Tool) -> Option<String> {
     let owner = match tool {
         Tool::Extract => "extract",
         Tool::Organizer => "organizer",
-        Tool::Md | Tool::Git | Tool::MarkdownConverter | Tool::SnapOcr | Tool::AcpHttp => {
+        Tool::Md | Tool::Git | Tool::MarkdownConverter | Tool::SnapOcr | Tool::AcpHttp | Tool::CodeAgent => {
             return None
         }
     };
@@ -1908,7 +2019,7 @@ fn start_task(ui: &AppWindow, state: &Rc<RefCell<State>>, out: &EventSender, app
     let validation = match tool {
         Tool::Organizer => configuration.validate_organizer(),
         Tool::Extract => configuration.validate_extract(),
-        Tool::Md | Tool::Git | Tool::MarkdownConverter | Tool::SnapOcr | Tool::AcpHttp => Ok(()),
+        Tool::Md | Tool::Git | Tool::MarkdownConverter | Tool::SnapOcr | Tool::AcpHttp | Tool::CodeAgent => Ok(()),
     };
     if let Err(error) = validation {
         ui.set_error_text(format!("{error:#}").into());
@@ -2885,6 +2996,7 @@ fn wire_sync(ui: &AppWindow, state: &Rc<RefCell<State>>, out: &EventSender) {
                         Tool::MarkdownConverter => 5,
                         Tool::SnapOcr => 6,
                         Tool::AcpHttp => 8,
+                        Tool::CodeAgent => 9,
                     };
                     ui.set_screen(screen);
                     ui.set_active_tool_id(id.clone());
@@ -2933,6 +3045,11 @@ fn wire_sync(ui: &AppWindow, state: &Rc<RefCell<State>>, out: &EventSender) {
                         if state.borrow().snap_commands.is_none() {
                             ensure_snap_supervisor(&state, &out);
                         }
+                    }
+                    if tool == Tool::CodeAgent {
+                        ui.set_codeagent_status("正在连接独立后台…".into());
+                        ui.set_codeagent_error("".into());
+                        request_codeagent(&state, CodeAgentCommand::Ensure);
                     }
                     refresh(&ui, &state.borrow());
                     // 切工具不是规则或目录改动（C-10/R-04）：就绪计划按「任务+配置+目录」
@@ -3342,6 +3459,7 @@ impl UiPump {
         self.apply_fail_messages(ui);
         self.apply_snap_messages(ui);
         apply_acp_messages(ui, &self.state);
+        apply_codeagent_messages(ui, &self.state);
         self.refresh_fail_list(ui);
         self.refresh_runtime(ui);
     }
@@ -4974,6 +5092,7 @@ fn initial_state() -> Result<State> {
         acp_service_error: None,
         acp_draft_edited: false,
         acp_explicit_stopped: false,
+        codeagent_observer: None,
     })
 }
 
@@ -6362,6 +6481,7 @@ fn run_gui(
     wire_snap_ocr(&ui, &state, &out);
     wire_settings(&ui, &state, &out);
     wire_acp_http(&ui, &state);
+    wire_codeagent(&ui, &state);
     // 启动落在注册表第一个工具（P-02 顺序：递归解压在前）。必须在 wire_sync 之后调用：
     // 回调接线前的 invoke 是空调用，窗口会停在目录整理页。
     if std::env::args_os().any(|arg| arg == "--snap-ocr-settings") {
@@ -8993,6 +9113,7 @@ mod gui_tests {
                         wire_markdown_converter(&ui, &state, &out);
                         wire_settings(&ui, &state, &out);
                         wire_acp_http(&ui, &state);
+                        wire_codeagent(&ui, &state);
                         wire_task_lifecycle(&ui, &state, &out);
                         refresh(&ui, &state.borrow());
                         let pump = UiPump::new(event_rx, state.clone(), out);
@@ -9983,6 +10104,50 @@ mod gui_tests {
         })
         .unwrap();
     }
+    // 覆盖 CA-01 / CA-04 / CA-06：TestingBackend 上的真实导航、保存回调及去敏状态呈现；
+    // 后台真实 DPAPI / SQLite / 单实例生命周期由 tests/codeagent.rs 承接。
+    #[test]
+    fn codeagent_page_uses_real_callbacks_and_safe_status() {
+        with_gui(|app| {
+            let (commands, receiver) = mpsc::channel();
+            let (sender, messages) = mpsc::channel();
+            app.state.borrow_mut().codeagent_observer = Some(CodeAgentObserver { commands, messages });
+            app.ui.invoke_select_tool("codeagent".into());
+            assert_eq!(app.ui.get_screen(), 9);
+            assert_eq!(app.ui.get_active_tool_id().as_str(), "codeagent");
+            assert_eq!(app.ui.get_panel(), 0);
+            assert!(matches!(receiver.try_recv().unwrap(), CodeAgentCommand::Ensure));
+            let status = crate::codeagent::Status {
+                running: true, pid: Some(12345), interval_seconds: 60,
+                last_check: Some("2026-10-12T12:34:56+08:00".into()),
+                result: crate::codeagent::CheckResult::Unchanged,
+            };
+            sender.send(CodeAgentMessage { saved: None, status: Ok((status, 60)) }).unwrap();
+            app.pump.run(&app.ui);
+            assert!(app.ui.get_codeagent_running());
+            assert_eq!(app.ui.get_codeagent_last_check().as_str(), "2026-10-12T12:34:56+08:00");
+            assert_eq!(app.ui.get_codeagent_result().as_str(), "Token 未变化，无需写入");
+            app.ui.set_codeagent_interval("2".into());
+            app.ui.set_codeagent_draft_edited(true);
+            app.ui.invoke_codeagent_save_interval();
+            assert!(app.ui.get_codeagent_pending());
+            assert!(matches!(receiver.try_recv().unwrap(), CodeAgentCommand::Save(value) if value == "2"));
+            let status = crate::codeagent::Status {
+                running: true, pid: Some(12345), interval_seconds: 2,
+                last_check: Some("2026-10-12T12:34:58+08:00".into()),
+                result: crate::codeagent::CheckResult::DecryptFailed,
+            };
+            sender.send(CodeAgentMessage { saved: Some(Ok(())), status: Ok((status, 2)) }).unwrap();
+            app.pump.run(&app.ui);
+            assert!(!app.ui.get_codeagent_pending());
+            assert!(!app.ui.get_codeagent_draft_edited());
+            assert!(app.ui.get_codeagent_check_failed());
+            assert_eq!(app.ui.get_codeagent_interval().as_str(), "2");
+            assert_eq!(app.ui.get_codeagent_result().as_str(), "CurrentUser DPAPI 解密失败；保留已有 Token");
+            assert!(app.ui.get_codeagent_effective_interval().contains("2 秒"));
+        }).unwrap();
+    }
+
     // 覆盖 P-02
     #[test]
     fn navigation_switches_screen() {
