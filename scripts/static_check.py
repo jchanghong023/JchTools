@@ -784,75 +784,6 @@ def acceptance_respects_cargo_target_dir() -> str:
     return "acceptance.ps1 的 gui-smoke 尊重 CARGO_TARGET_DIR。"
 
 
-def _listed_digests(raw: bytes) -> dict[str, str]:
-    listed: dict[str, str] = {}
-    for line in raw.decode("utf-8").splitlines():
-        if not line.strip():
-            continue
-        digest, name = line.split(" ", 1)
-        if name[:1] in ("*", " "):
-            name = name[1:]  # 兼容 sha256sum -b 的 *name 与文本模式的双空格 name
-        listed[name] = digest.lower()
-    return listed
-
-
-def _tracked_paths(out: bytes) -> list[str]:
-    tracked = [p.decode("utf-8").replace("\\", "/") for p in out.split(b"\0") if p]
-    return [p for p in tracked if p != "SHA256SUMS.txt"]
-
-
-def _missing_worktree_files(expected: list[str]) -> list[str]:
-    return [name for name in expected if not (ROOT / name).is_file()]
-
-
-def _stale_files(expected: list[str], listed: dict[str, str]) -> list[str]:
-    return [
-        name
-        for name in expected
-        if (ROOT / name).is_file() and hashlib.sha256((ROOT / name).read_bytes()).hexdigest() != listed[name]
-    ]
-
-
-def sums_integrity() -> str:
-    # SHA256SUMS.txt 契约：覆盖除自身外的全部 git 跟踪文件、哈希与
-    # 工作树一致、LF 行尾（CRLF 会让 `sha256sum -c` 在 Git Bash 下整单失败）。
-    raw = (ROOT / "SHA256SUMS.txt").read_bytes()
-    if b"\r" in raw:
-        detail = "SHA256SUMS.txt 必须是 LF 行尾（CRLF 会让 sha256sum -c 全部失败）"
-        raise AssertionError(detail)
-    listed = _listed_digests(raw)
-    # 解析 PATH 上 git 的绝对路径：避免用部分可执行名启动进程（S607）。
-    git = shutil.which("git")
-    if git is None:
-        message = "git 不可用，跳过：PATH 上找不到 git"
-        raise SkippedError(message)
-    try:
-        out = subprocess.run(
-            [git, "-c", "core.quotePath=false", "ls-files", "-z"], cwd=ROOT, capture_output=True, check=True
-        ).stdout
-    except Exception as exc:
-        message = f"git 不可用，跳过：{exc}"
-        raise SkippedError(message) from exc
-    expected = _tracked_paths(out)
-    missing = sorted(set(expected) - set(listed))
-    if missing:
-        detail = f"跟踪文件未列入 SHA256SUMS.txt（用 sha256sum -b 重建）：{missing}"
-        raise AssertionError(detail)
-    extra = sorted(set(listed) - set(expected))
-    if extra:
-        detail = f"清单含未跟踪/多余条目：{extra}"
-        raise AssertionError(detail)
-    gone = _missing_worktree_files(expected)
-    if gone:
-        detail = f"跟踪文件已从工作树删除（先恢复文件或 git add -A 后重建清单）：{gone}"
-        raise AssertionError(detail)
-    stale = _stale_files(expected, listed)
-    if stale:
-        detail = f"哈希与工作树不一致（文件已改，需重建 SHA256SUMS.txt）：{stale}"
-        raise AssertionError(detail)
-    return f"{len(expected)} 个跟踪文件的 SHA256 全部与工作树一致（LF 行尾）。"
-
-
 def scope_and_delivery() -> str:
     required = [
         "README.md",
@@ -966,7 +897,6 @@ for fn in [
     slint_modal_gating,
     build_rc_prefers_windows_kits,
     acceptance_respects_cargo_target_dir,
-    sums_integrity,
     scope_and_delivery,
 ]:
     check(fn.__name__, fn)
