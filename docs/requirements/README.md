@@ -13,7 +13,6 @@
 | [SNAP2TEXT.md](SNAP2TEXT.md) | 截图 OCR（O）：截图交互、模型与确定性布局规格、结果窗、复制、隐私及功能验收矩阵 |
 | [XBERG-INFERENCE.md](XBERG-INFERENCE.md) | 共享推理（XB）：唯一 Xberg、场景隔离、获取与版本、统一设置、持久配置及截图/Xberg 后台生命周期 |
 | [ACP-MODEL-SERVICE.md](ACP-MODEL-SERVICE.md) | 模型服务（AH）：本机 HTTP、官方 ACP 客户端、外部 Agent、独立配置与后台、发现及真实 Agent 验收矩阵 |
-| [CODEAGENT.md](CODEAGENT.md) | CodeAgent（CA）：独立后台、当前用户凭据解密、OMP provider 无损同步、模型设置与验收边界 |
 
 各功能域同时遵守 CONTRACT.md 中适用的全局条目；优先级仍按该文档，不因拆分而改变。共享 Xberg 不等于工具互相自动调用，ACP 模型服务不是截图/Xberg 的后台。跨域关系仅引用相应权威条目，不复制另一域的需求。
 
