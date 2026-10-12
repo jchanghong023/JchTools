@@ -254,14 +254,14 @@ fn decode_base64(value: &str) -> std::result::Result<Vec<u8>, CheckResult> {
     let encoded = wide(value);
     let count = u32::try_from(encoded.len() - 1).map_err(|_| CheckResult::DecodeFailed)?;
     let mut size = 0;
-    // SAFETY：输入及长度对应有效 UTF-16 缓冲区；第一次只查询所需大小。
+    // SAFETY: 输入及长度对应有效 UTF-16 缓冲区；第一次只查询所需大小。
     if unsafe {
         CryptStringToBinaryW(
             encoded.as_ptr(),
             count,
             CRYPT_STRING_BASE64,
             std::ptr::null_mut(),
-            &mut size,
+            &raw mut size,
             std::ptr::null_mut(),
             std::ptr::null_mut(),
         )
@@ -271,14 +271,14 @@ fn decode_base64(value: &str) -> std::result::Result<Vec<u8>, CheckResult> {
         return Err(CheckResult::DecodeFailed);
     }
     let mut decoded = vec![0; size as usize];
-    // SAFETY：输出缓冲区按 API 查询结果分配，size 提供真实容量。
+    // SAFETY: 输出缓冲区按 API 查询结果分配，size 提供真实容量。
     if unsafe {
         CryptStringToBinaryW(
             encoded.as_ptr(),
             count,
             CRYPT_STRING_BASE64,
             decoded.as_mut_ptr(),
-            &mut size,
+            &raw mut size,
             std::ptr::null_mut(),
             std::ptr::null_mut(),
         )
@@ -300,16 +300,16 @@ pub fn decrypt_token(ciphertext: &[u8]) -> std::result::Result<String, CheckResu
         cbData: 0,
         pbData: std::ptr::null_mut(),
     };
-    // SAFETY：输入在调用期间有效；DPAPI 分配输出，稍后由 LocalFree 释放。
+    // SAFETY: 输入在调用期间有效；DPAPI 分配输出，稍后由 LocalFree 释放。
     if unsafe {
         CryptUnprotectData(
-            &input,
+            &raw const input,
             std::ptr::null_mut(),
             std::ptr::null(),
             std::ptr::null(),
             std::ptr::null(),
             CRYPTPROTECT_UI_FORBIDDEN,
-            &mut output,
+            &raw mut output,
         )
     } == 0
     {
@@ -318,14 +318,16 @@ pub fn decrypt_token(ciphertext: &[u8]) -> std::result::Result<String, CheckResu
     if output.pbData.is_null() {
         return Err(CheckResult::DecryptFailed);
     }
-    // SAFETY：DPAPI 输出是 cbData 字节的有效分配；释放前清除本机明文缓冲区。
+    // SAFETY: DPAPI 输出是 cbData 字节的有效分配；释放前清除本机明文缓冲区。
     let bytes = unsafe { std::slice::from_raw_parts_mut(output.pbData, output.cbData as usize) };
     let token = std::str::from_utf8(bytes)
         .map(str::to_owned)
         .map_err(|_| CheckResult::InvalidUtf8);
     for byte in bytes {
+        // SAFETY: byte 是上述有效输出缓冲区中独占借用的可写字节。
         unsafe { std::ptr::write_volatile(byte, 0) };
     }
+    // SAFETY: 该指针由 DPAPI 分配，已停止访问且只释放一次。
     unsafe { LocalFree(output.pbData.cast()) };
     token
 }
@@ -333,7 +335,7 @@ pub fn decrypt_token(ciphertext: &[u8]) -> std::result::Result<String, CheckResu
 struct RegistryKey(HKEY);
 impl Drop for RegistryKey {
     fn drop(&mut self) {
-        // SAFETY：句柄由 RegOpenKeyExW 成功创建且只关闭一次。
+        // SAFETY: 句柄由 RegOpenKeyExW 成功创建且只关闭一次。
         unsafe { RegCloseKey(self.0) };
     }
 }
@@ -346,14 +348,14 @@ fn update_registry(subkey: &str, token: &str) -> std::result::Result<CheckResult
     let name = wide(VALUE_NAME);
     let value = wide(token);
     let mut raw = std::ptr::null_mut();
-    // SAFETY：仅打开当前用户指定子键；生产路径固定为 Environment，不创建其他键。
+    // SAFETY: 仅打开当前用户指定子键；生产路径固定为 Environment，不创建其他键。
     if unsafe {
         RegOpenKeyExW(
             HKEY_CURRENT_USER,
             subkey.as_ptr(),
             0,
             KEY_QUERY_VALUE | KEY_SET_VALUE,
-            &mut raw,
+            &raw mut raw,
         )
     } != ERROR_SUCCESS
     {
@@ -362,14 +364,15 @@ fn update_registry(subkey: &str, token: &str) -> std::result::Result<CheckResult
     let key = RegistryKey(raw);
     let mut kind = 0;
     let mut size = 0;
+    // SAFETY: 句柄有效，名称以 NUL 结尾；本次只写入类型与所需字节数。
     let queried = unsafe {
         RegQueryValueExW(
             key.0,
             name.as_ptr(),
             std::ptr::null(),
-            &mut kind,
+            &raw mut kind,
             std::ptr::null_mut(),
-            &mut size,
+            &raw mut size,
         )
     };
     if queried != ERROR_SUCCESS && queried != ERROR_FILE_NOT_FOUND {
@@ -377,14 +380,15 @@ fn update_registry(subkey: &str, token: &str) -> std::result::Result<CheckResult
     }
     if queried == ERROR_SUCCESS && kind == REG_SZ && size as usize == value.len() * 2 {
         let mut current = vec![0u16; value.len()];
+        // SAFETY: 缓冲区按查询所得字节数分配，名称和句柄在调用期间有效。
         if unsafe {
             RegQueryValueExW(
                 key.0,
                 name.as_ptr(),
                 std::ptr::null(),
-                &mut kind,
+                &raw mut kind,
                 current.as_mut_ptr().cast(),
-                &mut size,
+                &raw mut size,
             )
         } != ERROR_SUCCESS
         {
@@ -395,7 +399,7 @@ fn update_registry(subkey: &str, token: &str) -> std::result::Result<CheckResult
         }
     }
     let size = u32::try_from(value.len() * 2).map_err(|_| CheckResult::RegistryFailed)?;
-    // SAFETY：UTF-16 REG_SZ 包含终止 NUL，size 为真实字节数。
+    // SAFETY: UTF-16 REG_SZ 包含终止 NUL，size 为真实字节数。
     if unsafe { RegSetValueExW(key.0, name.as_ptr(), 0, REG_SZ, value.as_ptr().cast(), size) }
         != ERROR_SUCCESS
     {

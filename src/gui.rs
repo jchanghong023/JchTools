@@ -528,12 +528,15 @@ fn request_codeagent(state: &Rc<RefCell<State>>, command: CodeAgentCommand) -> b
                     saved = Some(result);
                     // 保存校验失败不影响后台存活；错误经 saved 单独呈现，状态仍独立刷新。
                     Ok(())
-                },
+                }
                 None => Ok(()),
             };
-            let status = action.and_then(|()| Ok((
-                crate::codeagent::status()?, crate::codeagent::load_interval()?,
-            )));
+            let status = action.and_then(|()| {
+                Ok((
+                    crate::codeagent::status()?,
+                    crate::codeagent::load_interval()?,
+                ))
+            });
             if sender.send(CodeAgentMessage { saved, status }).is_err() {
                 return;
             }
@@ -545,20 +548,34 @@ fn request_codeagent(state: &Rc<RefCell<State>>, command: CodeAgentCommand) -> b
 
 fn apply_codeagent_status(ui: &AppWindow, status: &crate::codeagent::Status) {
     ui.set_codeagent_running(status.running);
-    ui.set_codeagent_status(if status.running {
-        format!("独立后台运行中 · PID {}", status.pid.map_or_else(|| "正在启动".into(), |pid| pid.to_string()))
-    } else {
-        "独立后台未运行；重新打开页面可启动".into()
-    }.into());
+    ui.set_codeagent_status(
+        if status.running {
+            format!(
+                "独立后台运行中 · PID {}",
+                status
+                    .pid
+                    .map_or_else(|| "正在启动".into(), |pid| pid.to_string())
+            )
+        } else {
+            "独立后台未运行；重新打开页面可启动".into()
+        }
+        .into(),
+    );
     ui.set_codeagent_last_check(status.last_check.as_deref().unwrap_or("尚未检查").into());
     ui.set_codeagent_result(status.result.text().into());
     ui.set_codeagent_check_failed(status.result.failed());
-    ui.set_codeagent_effective_interval(format!("后台当前检查间隔：{} 秒", status.interval_seconds).into());
+    ui.set_codeagent_effective_interval(
+        format!("后台当前检查间隔：{} 秒", status.interval_seconds).into(),
+    );
 }
 
 fn apply_codeagent_messages(ui: &AppWindow, state: &Rc<RefCell<State>>) {
-    let messages = state.borrow().codeagent_observer.as_ref()
-        .map(|observer| observer.messages.try_iter().collect::<Vec<_>>()).unwrap_or_default();
+    let messages = state
+        .borrow()
+        .codeagent_observer
+        .as_ref()
+        .map(|observer| observer.messages.try_iter().collect::<Vec<_>>())
+        .unwrap_or_default();
     for message in messages {
         if let Some(saved) = message.saved {
             ui.set_codeagent_pending(false);
@@ -573,12 +590,12 @@ fn apply_codeagent_messages(ui: &AppWindow, state: &Rc<RefCell<State>>) {
                 if !ui.get_codeagent_draft_edited() {
                     ui.set_codeagent_interval(interval.to_string().into());
                 }
-            },
+            }
             Err(error) => {
                 ui.set_codeagent_running(false);
                 ui.set_codeagent_status("后台状态未知".into());
                 ui.set_codeagent_error(error.into());
-            },
+            }
         }
     }
 }
@@ -591,7 +608,10 @@ fn wire_codeagent(ui: &AppWindow, state: &Rc<RefCell<State>>) {
             if !ui.get_codeagent_pending() {
                 ui.set_codeagent_pending(true);
                 ui.set_codeagent_error("".into());
-                if !request_codeagent(&state, CodeAgentCommand::Save(ui.get_codeagent_interval().to_string())) {
+                if !request_codeagent(
+                    &state,
+                    CodeAgentCommand::Save(ui.get_codeagent_interval().to_string()),
+                ) {
                     ui.set_codeagent_pending(false);
                     ui.set_codeagent_error("CodeAgent 操作线程不可用".into());
                 }
@@ -619,7 +639,12 @@ impl Tool {
             Tool::Extract => &["解压", "安全与性能"],
             Tool::Organizer => &["去重", "归类", "清理", "安全与性能"],
             // R-01：MD 整理与 Git 工具不设规则面板，分区集合为空。
-            Tool::Md | Tool::Git | Tool::MarkdownConverter | Tool::SnapOcr | Tool::AcpHttp | Tool::CodeAgent => &[],
+            Tool::Md
+            | Tool::Git
+            | Tool::MarkdownConverter
+            | Tool::SnapOcr
+            | Tool::AcpHttp
+            | Tool::CodeAgent => &[],
         }
     }
     fn from_id(id: &str) -> Option<Self> {
@@ -1388,7 +1413,12 @@ fn visible_rows(state: &State) -> Result<Vec<RuleRow>> {
         Tool::Extract => "extract",
         Tool::Organizer => "organizer",
         // MD/Git 不设规则面板（R-01）：不会进入规则表过滤，占位即可。
-        Tool::Md | Tool::Git | Tool::MarkdownConverter | Tool::SnapOcr | Tool::AcpHttp | Tool::CodeAgent => "",
+        Tool::Md
+        | Tool::Git
+        | Tool::MarkdownConverter
+        | Tool::SnapOcr
+        | Tool::AcpHttp
+        | Tool::CodeAgent => "",
     };
     Ok(state
         .specs
@@ -1604,9 +1634,12 @@ fn changed(
                 Tool::Organizer => state.config.validate_organizer(),
                 Tool::Extract => state.config.validate_extract(),
                 // 主题设置不属于任一工具的规则面板。
-                Tool::Md | Tool::Git | Tool::MarkdownConverter | Tool::SnapOcr | Tool::AcpHttp | Tool::CodeAgent => {
-                    Ok(())
-                }
+                Tool::Md
+                | Tool::Git
+                | Tool::MarkdownConverter
+                | Tool::SnapOcr
+                | Tool::AcpHttp
+                | Tool::CodeAgent => Ok(()),
             };
             let validation = invalid_number_error(&state, tool)
                 .map_or(validation, |error| Err(anyhow::anyhow!(error)));
@@ -1894,9 +1927,12 @@ fn invalid_number_error(state: &State, tool: Tool) -> Option<String> {
     let owner = match tool {
         Tool::Extract => "extract",
         Tool::Organizer => "organizer",
-        Tool::Md | Tool::Git | Tool::MarkdownConverter | Tool::SnapOcr | Tool::AcpHttp | Tool::CodeAgent => {
-            return None
-        }
+        Tool::Md
+        | Tool::Git
+        | Tool::MarkdownConverter
+        | Tool::SnapOcr
+        | Tool::AcpHttp
+        | Tool::CodeAgent => return None,
     };
     state.specs.iter().find_map(|spec| {
         if !state.invalid_rule_inputs.contains_key(&spec.key)
@@ -2019,7 +2055,12 @@ fn start_task(ui: &AppWindow, state: &Rc<RefCell<State>>, out: &EventSender, app
     let validation = match tool {
         Tool::Organizer => configuration.validate_organizer(),
         Tool::Extract => configuration.validate_extract(),
-        Tool::Md | Tool::Git | Tool::MarkdownConverter | Tool::SnapOcr | Tool::AcpHttp | Tool::CodeAgent => Ok(()),
+        Tool::Md
+        | Tool::Git
+        | Tool::MarkdownConverter
+        | Tool::SnapOcr
+        | Tool::AcpHttp
+        | Tool::CodeAgent => Ok(()),
     };
     if let Err(error) = validation {
         ui.set_error_text(format!("{error:#}").into());
