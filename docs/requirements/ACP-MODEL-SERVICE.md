@@ -8,11 +8,11 @@
 
 - **AH-02** ACP 客户端采用 [agentclientprotocol/rust-sdk](https://github.com/agentclientprotocol/rust-sdk) 的官方 Rust SDK `agent-client-protocol` 客户端能力。本项目通过其公开接口完成初始化、会话、提示请求、事件接收及必要回调处理，不另写一套 JSON-RPC / ACP 客户端。支持范围以实际协商的协议版本及 Agent 能力为准，不凭 Agent 名称承诺兼容所有能力；SDK 包版本不是通信协议版本。文件和终端等客户端能力按 AH-13 接入，不能只宣告支持却缺少可执行的回调处理。
 
-- **AH-03** 请求链路固定为“HTTP 调用方 → HTTP 服务后端 → 本项目适配层 → 官方 Rust ACP 客户端 → 用户配置的 ACP Agent”；响应沿相反方向返回。Agent 是 ACP 服务端；验收所用 `opencode acp` 处于该上游角色，不是向本工具 HTTP 接口发请求的客户端。本项目不接管 Agent 内部模型推理、模型供应商接口或账号认证。
+- **AH-03** 请求链路固定为“HTTP 调用方 → HTTP 服务后端 → 本项目适配层 → 官方 Rust ACP 客户端 → 用户配置的 ACP Agent”；响应沿相反方向返回。Agent 是 ACP 服务端；验收所用 `opencode acp` 处于该上游角色，不是向本工具 HTTP 接口发请求的客户端。本项目不接管 Agent 内部模型推理、模型供应商接口或账号认证。ACP v1 的 `PromptRequest.prompt` 是用户消息 `ContentBlock[]`，没有替换 Agent 系统提示、工具或 skills 的接口；HTTP 角色映射仅按 AH-04 转成用户消息中的文本背景，不赋予原生 system/developer 权威。OMP 接入仅作为文本/SSE 客户端，不注入自己的 system、工具 schema／指令、技能正文或内部自动通知；该调用方边界不构成删除其他调用方合法背景的规则。
 
-- **AH-04** 第一版 HTTP 对外接口为 `POST /v1/chat/completions` 和 `GET /v1/models`，不包含 Responses、Embeddings 或其他推理接口。Chat Completions 提供普通 JSON 响应和 `stream: true` 的真正增量 SSE 文本响应。输入接受 `system` / `developer` / `user` / `assistant` 角色的文本字符串或纯 `text` 内容块，图片、音频及客户端工具消息明确拒绝；每次 Chat Completions 请求必须通过顶层 `cwd` 字符串提供调用方当前任务的绝对、已存在工作目录，缺失、空值、相对路径、文件路径或不可用目录返回 HTTP 400，不从提示正文推断、不静默回退。默认每请求新建 ACP 会话，完整消息历史按角色标记传入。调用方可通过 `X-JchTools-Session-ID` 显式延续会话，校验已有历史，仅提交新增部分，历史不一致明确报错；同会话按接收顺序串行，并绑定首次请求的规范化工作目录，包括在途和排队轮次；切换目录必须新建会话，跨目录续用返回 HTTP 400。Models 只公布 Agent 协商确认且可实际选择的模型标识，将 HTTP `model` 映射到 ACP 模型选择；缺少相关能力时明确不可用，不编造模型列表、不回退为固定服务别名，也不把 Agent 内部全部模型自动声明为可用。
+- **AH-04** 第一版 HTTP 对外接口为 `POST /v1/chat/completions` 和 `GET /v1/models`，不包含 Responses、Embeddings 或其他推理接口。Chat Completions 提供普通 JSON 响应和 `stream: true` 的真正增量 SSE 文本响应。输入接受 `system` / `developer` / `user` / `assistant` 角色的文本字符串或纯 `text` 内容块，图片、音频及客户端工具消息明确拒绝；调用方显式提供的 system/developer 文本保留为带角色标签的背景，不全局删除、不作为替换 Agent 系统提示或原生高优先级指令。每次 Chat Completions 请求必须通过顶层 `cwd` 字符串提供调用方当前任务的绝对、已存在工作目录，缺失、空值、相对路径、文件路径或不可用目录返回 HTTP 400，不从提示正文推断、不静默回退。默认每请求新建 ACP 会话；多角色或多消息历史初始化按角色标记传入，保留文本原文；本次仅向 ACP 提交一条新增 user 消息时，直接发送其原始文本内容块，不加人为 role prefix、包装或前导通知，使标准 ACP slash 命令（如 `/web ...`）保留命令前缀，由 Agent 识别处理，规则见[官方 slash 文档](https://agentclientprotocol.com/protocol/v1/slash-commands.md)。调用方可通过 `X-JchTools-Session-ID` 显式延续会话，校验已有历史，仅提交新增部分，历史不一致明确报错；同会话按接收顺序串行，并绑定首次请求的规范化工作目录，包括在途和排队轮次；切换目录必须新建会话，跨目录续用返回 HTTP 400。Models 只公布 Agent 协商确认且可实际选择的模型标识，将 HTTP `model` 映射到 ACP 模型选择；缺少相关能力时明确不可用，不编造模型列表、不回退为固定服务别名，也不把 Agent 内部全部模型自动声明为可用。
 
-- **AH-05** 第一版由 ACP Agent 负责工具调用决策及执行流程，HTTP 返回其文本结果；需要由客户端承接的文件或终端操作，通过 AH-13 的 Rust 回调适配完成，不交给 HTTP 调用方执行。Agent 的工具执行事件不转换为要求 HTTP 调用方执行的 OpenAI `tool_calls`。不承诺 HTTP 调用方提供 `tools` / `tool_choice`、执行工具并回传结果的循环；对此类不支持的输入应明确拒绝，不能静默忽略或伪称支持。权限固定按 AH-13 最大授权处理，不向 API 暴露审批流程。
+- **AH-05** 第一版由 ACP Agent 负责自身系统提示、工具与 skills，以及工具调用决策及执行流程；ACP 客户端不能通过提示请求替换这些原生能力，HTTP 返回 Agent 的文本结果。需要由客户端承接的文件或终端操作，通过 AH-13 的 Rust 回调适配完成，不交给 HTTP 调用方执行。Agent 的工具执行事件不转换为要求 HTTP 调用方执行的 OpenAI `tool_calls`。不承诺 HTTP 调用方提供 `tools` / `tool_choice`、执行工具并回传结果的循环；对此类不支持的输入应明确拒绝，不能静默忽略或伪称支持。权限固定按 AH-13 最大授权处理，不向 API 暴露审批流程。
 
 ## 2 常驻、启动与配置
 
@@ -58,7 +58,7 @@ OpenCode 是本文件唯一指定的真实 Agent 验收基准，真实 Rust 验�
 |---|---|---|---|
 | AH-A01 | UT / 集成：命令参数、端口、配置保存与读取 | 参数不丢失；合法端口接受、非法值拒绝；由新进程恢复同一配置，不能用内存缓存代替持久化验证 | AH-08、AH-09 |
 | AH-A02 | 真实 GUI → 后台 → 官方 ACP 客户端 → OpenCode：保存上述命令和可用端口，启动工具箱 | GUI 保持响应；服务按配置监听 `127.0.0.1`；完成 ACP 初始化；实际选择模型为 `opencode/mimo-v2.6-flash-free`；记录实际版本及权限能力，不能只凭配置文本宣称模型已生效 | AH-01～AH-03、AH-06、AH-08 |
-| AH-A03 | HTTP 请求 `GET /v1/models`，确认目标标识后发送非流式 Chat Completions 合成提示 | 返回可解析的真实模型列表且包含 `opencode/mimo-v2.6-flash-free`；该标识经 ACP 选择后实际可请求；响应为约定的 Chat Completions JSON 且包含 OpenCode 实际返回的文本，不使用固定桩冒充真实响应 | AH-03、AH-04 |
+| AH-A03 | HTTP 请求 `GET /v1/models`，确认目标标识后发送非流式 Chat Completions 合成提示；另用官方 SDK 可控 Agent 验证单条 user、slash、多角色历史初始化及续会话新增输入 | 返回可解析的真实模型列表且包含 `opencode/mimo-v2.6-flash-free`；该标识经 ACP 选择后实际可请求；响应为约定的 Chat Completions JSON 且包含 OpenCode 实际返回的文本，不使用固定桩冒充真实响应；实际 ACP 输入中仅一条新增 user 时为无 role prefix／包装的原文本块，slash 以原命令前缀到达并由 Agent 识别；多角色／多消息历史初始化保留角色标签和原文，显式 system/developer 为背景而非原生权威，不全局丢弃；不注入 OMP system／tools／skills 或内部自动通知，不替换 Agent 原生能力。SDK 夹具证据与真实 OpenCode 结果分别记录 | AH-03～AH-05 |
 | AH-A04 | 同一路径使用唯一目标模型发送 `stream: true`，让 OpenCode 生成分段文本 | 收到符合约定的 SSE 文本增量及结束标记；完整拼接结果正确归属本请求；确认增量在 Agent 完成前可观察，不能先等待整段结果再伪装流式 | AH-03、AH-04 |
 | AH-A05 | 在合成工作区放置含随机标记的文件，仅通过 HTTP 提示要求 OpenCode 使用自身工具读取 | Agent 的真实工具执行可观测；最终文本包含文件中的标记；HTTP 调用方无需执行工具；另以 `tools` / `tool_choice` 输入确认明确拒绝不支持的客户端工具循环 | AH-03、AH-05 |
 | AH-A06 | 发起真实 HTTP 请求后关闭 GUI；另一次终止 GUI 进程；每次再发送新请求并重开 GUI | 原请求及 GUI 关闭后的新请求均能完成；服务和 Agent PID 保持；重开连接原实例，没有额外监听或 Agent 进程；不能只检查进程仍在就宣称服务可用 | AH-06、AH-07 |

@@ -4252,6 +4252,27 @@
     },
     {
       "file": "tests/acp_http_contract.rs",
+      "name": "native_single_user_text_preserves_literal_context_keywords",
+      "ignored": false,
+      "cfg": null,
+      "body": "83e5df4e21f7d37c"
+    },
+    {
+      "file": "tests/acp_http_contract.rs",
+      "name": "native_slash_command_executes_after_role_annotated_history",
+      "ignored": false,
+      "cfg": null,
+      "body": "cb76829fdfee4ba2"
+    },
+    {
+      "file": "tests/acp_http_contract.rs",
+      "name": "native_slash_command_executes_on_first_user_turn",
+      "ignored": false,
+      "cfg": null,
+      "body": "d298fb5e00a70782"
+    },
+    {
+      "file": "tests/acp_http_contract.rs",
       "name": "negotiated_model_identity_survives_missing_response_category",
       "ignored": false,
       "cfg": null,
@@ -4395,7 +4416,7 @@
       "name": "prompt_summary_counts_only_submitted_messages_and_never_logs_content",
       "ignored": false,
       "cfg": null,
-      "body": "ae4cce4207c2e2b6"
+      "body": "bff63fb24bcd0578"
     },
     {
       "file": "tests/acp_service_process.rs",
