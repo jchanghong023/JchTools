@@ -260,6 +260,13 @@ fn codeagent_native_registry_and_detached_service() {
             .write(true)
             .open(isolated.root.path().join("codeagent-service.lock"))
             .unwrap();
+        // CA-05：只读观察者不代表服务存活；状态探测不能争抢后台的独占锁。
+        FileExt::try_lock_shared(&lock).unwrap();
+        assert!(
+            !codeagent::status().unwrap().running,
+            "共享只读观察者不能被误判为独占后台"
+        );
+        FileExt::unlock(&lock).unwrap();
         lock.try_lock_exclusive().unwrap();
         let state = codeagent::status().unwrap();
         assert!(state.running && state.pid.is_none());

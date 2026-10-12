@@ -1,5 +1,6 @@
 //! CA-02～CA-07：独立本地凭据维护；SQLite 仅保存间隔和去敏状态。
 use std::fs::{File, OpenOptions};
+use std::io::Read;
 use std::path::PathBuf;
 use std::process::{Command, Stdio};
 use std::time::{Duration, Instant};
@@ -122,9 +123,10 @@ fn is_lock_contended(error: &std::io::Error) -> bool {
 }
 
 fn is_running() -> Result<bool> {
-    let lock = lock_file()?;
-    match lock.try_lock_exclusive() {
-        Ok(()) => Ok(false), // 关闭句柄释放锁；不以 PID 或旧快照猜测存活。
+    let mut lock = lock_file()?;
+    // Windows ReadFile 遇到后台独占锁会失败（空文件亦如此），但读取本身不持锁。
+    match lock.read(&mut [0]) {
+        Ok(_) => Ok(false),
         Err(error) if is_lock_contended(&error) => Ok(true),
         Err(_) => Err("读取 CodeAgent 后台运行状态失败".into()),
     }
