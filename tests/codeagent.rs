@@ -2,6 +2,7 @@
 #![cfg(windows)] // P-07：产品仅支持 Windows，使用真实 CurrentUser DPAPI。
 use fs2::FileExt;
 use jchtools::codeagent::{self, CheckResult};
+use std::io::Read;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::time::{Duration, Instant};
@@ -18,7 +19,8 @@ use windows_sys::Win32::System::Registry::{
 fn wide(value: &str) -> Vec<u16> {
     value.encode_utf16().chain(Some(0)).collect()
 }
-fn protect(value: &str) -> Vec<u8> {
+fn protect(value: impl AsRef<[u8]>) -> Vec<u8> {
+    let value = value.as_ref();
     let input = CRYPT_INTEGER_BLOB {
         cbData: value.len() as u32,
         pbData: value.as_ptr().cast_mut(),
@@ -240,16 +242,27 @@ fn codeagent_native_registry_and_detached_service() {
     assert_eq!(codeagent::check_once(), CheckResult::DecryptFailed);
     let before = registry_value(&isolated.registry);
     assert!(before.0 == REG_SZ && before.1 == initial);
+    // CA-02 / CA-07：严格 UTF-8、读取及 JSON 失败都保留现有值，不传播正文。
+    credentials(&source, &protect([0xff]));
+    assert_eq!(codeagent::check_once(), CheckResult::InvalidUtf8);
+    assert!(registry_value(&isolated.registry) == before);
+    std::fs::write(&source, b"{invalid json").unwrap();
+    assert_eq!(codeagent::check_once(), CheckResult::DecodeFailed);
+    assert!(registry_value(&isolated.registry) == before);
+    std::fs::remove_file(&source).unwrap();
+    assert_eq!(codeagent::check_once(), CheckResult::ReadFailed);
+    assert!(registry_value(&isolated.registry) == before);
     credentials(&source, &cipher);
     assert_eq!(codeagent::check_once(), CheckResult::Updated);
     let updated = registry_value(&isolated.registry);
     assert!(updated.0 == REG_SZ && updated.1 == wide(token));
     assert_eq!(codeagent::check_once(), CheckResult::Unchanged);
-    assert!(registry_value(&isolated.registry) == updated);
     assert_eq!(codeagent::load_interval().unwrap(), 60);
     for invalid in ["0", "-1", "1.5", "", "18446744073709551616"] {
         assert!(codeagent::save_interval(invalid).is_err());
     }
+    codeagent::save_interval(&u64::MAX.to_string()).unwrap();
+    assert_eq!(codeagent::load_interval().unwrap(), u64::MAX);
     codeagent::save_interval("1").unwrap();
     // CA-05：Windows 原生锁冲突必须同时被状态探测和重复服务入口识别。
     {
@@ -298,6 +311,26 @@ fn codeagent_native_registry_and_detached_service() {
     assert!(state.running && state.pid.is_some());
     let first = state.last_check.clone();
     let pid = state.pid;
+    // CA-05：SQLite 争用跨过 5 秒 busy_timeout 与轮询边界，后台仍持锁。
+    // 直接 ReadFile 观察独占锁，不通过同样被 SQLite 阻塞的状态查询判断存活。
+    let mut service_lock = std::fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .open(isolated.root.path().join("codeagent-service.lock"))
+        .unwrap();
+    let storage = rusqlite::Connection::open(isolated.root.path().join("config.sqlite3")).unwrap();
+    storage.execute_batch("BEGIN EXCLUSIVE").unwrap();
+    std::thread::sleep(Duration::from_secs(12));
+    let lock_observation = service_lock.read(&mut [0]);
+    storage.execute_batch("ROLLBACK").unwrap();
+    drop(storage);
+    assert!(
+        lock_observation.is_err_and(|error| {
+            error.raw_os_error() == fs2::lock_contended_error().raw_os_error()
+        }),
+        "CodeAgent 后台在 SQLite 争用期间释放了独占锁"
+    );
+    wait_for(|| codeagent::status().is_ok_and(|state| state.running && state.pid == pid));
     // 宿主已经退出，但后台仍完成下一个真实检查周期。
     wait_for(|| codeagent::status().is_ok_and(|state| state.running && state.last_check != first));
     let mut duplicate = Command::new(env!("CARGO_BIN_EXE_JchTools"))

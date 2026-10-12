@@ -454,7 +454,14 @@ pub fn serve() -> Result<()> {
         interval_seconds: load_interval()?,
         ..Status::default()
     };
-    publish(&state)?;
+    let mut publish_pending = publish(&state).is_err();
+    if publish_pending {
+        tracing::warn!(
+            component = "codeagent",
+            event = "codeagent_status_publish_failed",
+            "发布初始 CodeAgent 状态失败，后台继续检查"
+        );
+    }
     tracing::info!(
         component = "codeagent",
         event = "codeagent_service_started",
@@ -478,16 +485,38 @@ pub fn serve() -> Result<()> {
             );
             return Ok(());
         }
-        let interval = load_interval()?;
-        let interval_changed = state.interval_seconds != interval;
-        state.interval_seconds = interval;
+        match load_interval() {
+            Ok(interval) => {
+                publish_pending |= state.interval_seconds != interval;
+                state.interval_seconds = interval;
+            }
+            Err(_) => {
+                // 共享 SQLite 暂时不可用不能终止独立后台，保持上次有效间隔。
+                tracing::warn!(
+                    component = "codeagent",
+                    event = "codeagent_interval_read_failed",
+                    "读取 CodeAgent 间隔失败，继续使用上次有效间隔"
+                );
+            }
+        }
+        let interval = state.interval_seconds;
         if last_check.is_none_or(|last: Instant| last.elapsed().as_secs() >= interval) {
             state.result = check_once();
             state.last_check = Some(chrono::Local::now().to_rfc3339());
             last_check = Some(Instant::now());
-            publish(&state)?;
-        } else if interval_changed {
-            publish(&state)?;
+            publish_pending = true;
+        }
+        // 状态写入失败不取消凭据维护；正常轮询恢复后发布最新安全状态。
+        if publish_pending {
+            if publish(&state).is_ok() {
+                publish_pending = false;
+            } else {
+                tracing::warn!(
+                    component = "codeagent",
+                    event = "codeagent_status_publish_failed",
+                    "发布 CodeAgent 状态失败，后台继续检查"
+                );
+            }
         }
         // 每秒读取间隔即可热应用；不重复读取或解密凭据。
         std::thread::sleep(Duration::from_secs(1));
