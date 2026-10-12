@@ -1837,6 +1837,13 @@
     },
     {
       "file": "src/gui.rs",
+      "name": "codeagent_page_uses_real_callbacks_and_safe_status",
+      "ignored": false,
+      "cfg": null,
+      "body": "bc78c319b5916ae1"
+    },
+    {
+      "file": "src/gui.rs",
       "name": "convert_directory_validation_runs_in_background_preflight",
       "ignored": false,
       "cfg": null,
@@ -5047,6 +5054,20 @@
       "ignored": false,
       "cfg": null,
       "body": "199db1211d0c6d1c"
+    },
+    {
+      "file": "tests/codeagent.rs",
+      "name": "codeagent_native_registry_and_detached_service",
+      "ignored": false,
+      "cfg": "windows",
+      "body": "195ca0b064a712ab"
+    },
+    {
+      "file": "tests/codeagent.rs",
+      "name": "codeagent_spawning_host",
+      "ignored": false,
+      "cfg": "windows",
+      "body": "86ec6ced9940332f"
     },
     {
       "file": "tests/contract_engine.rs",
