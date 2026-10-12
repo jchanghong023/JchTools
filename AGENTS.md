@@ -9,7 +9,7 @@
 3. 动工前记录现有验证基线；可复用输入未变的既有结果。新增运行按 3.4 授权边界选择，不机械执行测试；未运行的基线如实标注，不能用编译通过替代测试通过。
 4. 编码遵守第 4 节实现约定与合同相应分区；测试数据一律经 `python scripts/make_tmp.py` 生成。
 5. 完成后按 3.3 验收矩阵执行 Windows 本地验证并报告命令/退出码/关键输出；CI 仅编译、打包、发布，发布成功须附 release run 与发布链接。已完成且源代码未变的本地验证可复用，不因发布操作重复完整测试。
-6. 收尾：`python scripts/make_tmp.py clean` 清空 `.tmp/`，按第 8 节与 3.2 提交纪律写提交信息。
+6. 收尾：删除本会话在 `.tmp/` 下自建的子目录（有并行会话使用 `.tmp/` 时 `MUST NOT` 全量 `clean`），按第 8 节与 3.2 提交纪律写提交信息。
 
 ## 1. 项目背景
 
@@ -27,7 +27,7 @@
   - `XBERG-INFERENCE.md`：共享 Xberg、设置与后台（XB）。
   - `ACP-MODEL-SERVICE.md`：独立模型服务（AH 及真实 Agent 验收）。
   - `CODEAGENT.md`：CodeAgent（CA；独立后台与 OMP provider 无损同步）。
-  - 按功能域定位唯一需求来源，待确认草案不覆盖已确认条目。旧 `docs/CONTRACT.md` 仅保留迁移链接，不维护副本；其他文档只作辅助。新增需求文档须同步索引、此清单与 `scripts/static_check.py` 的 `_REQUIREMENT_DOCS` 登记（由 `requirements_registry` 检查）；登记在场不代表用户确认、实现完成或完整静态检查通过。
+  - 按功能域定位唯一需求来源。旧 `docs/CONTRACT.md` 仅保留迁移链接，不维护副本；其他文档只作辅助。新增需求文档须同步索引、此清单与 `scripts/static_check.py` 的 `_REQUIREMENT_DOCS` 登记（由 `requirements_registry` 检查）；登记在场不代表用户确认、实现完成或完整静态检查通过。
 - **代码入口**：`src/main.rs` → `src/gui.rs`（GUI 启动、回调与后台任务）、`ui/app.slint`（界面）、`src/registry.rs`（工具注册表）；`src/archive.rs`（递归解压）、`src/engine.rs`（整理分析与执行）、`src/md_tools.rs`（MD 合并与拆分）、`src/git_tools.rs`（Git 操作）、`resources/rules.json`（界面规则清单）。转 Markdown 由 `src/markdown.rs`、`src/markdown_document.rs`、`src/markdown_assets.rs` 承接，媒体转录经 Xberg 推理组件（`xberg.exe worker` stdio 协议，XB 分区）承接；截图 OCR 由 `src/snap_ocr_assets.rs`、`optional/snap-ocr-core/`（O-23～O-28 的规格参照物：workspace 内无 crate 依赖它，识别已按 XB-01/XB-02 迁至 Xberg，删除前须确认规格约束另有执法点承接）与 `optional/snap-ocr-worker/`（截图、托盘、服务和结果窗，识别经 Xberg 推理组件）承接，主界面回调仍在 `src/gui.rs`。两资产模块共用的下载/校验/原子落位/推理组件包安装核心在 `src/asset_util.rs`。
 - **共享推理与配置入口**：`src/xberg_runtime.rs` / `src/xberg_runtime_windows.rs` 承接共享引擎请求及 Windows 命名管道代理；主程序的 `--xberg-broker` 是内部代理入口。截图服务经 `optional/snap-ocr-worker/src/shared_xberg.rs` 接入，并编译复用主包的 runtime 与 settings 模块。`src/xberg_settings.rs` / `src/app_settings.sql` 在应用状态目录的 `config.sqlite3` 保存 Xberg 目录并承接旧文本配置迁移；功能与生命周期要求以 XB-14～XB-19 为准。
 - **ACP 模型服务入口**：`src/acp_api/acp/` 为官方 SDK 会话及回调适配，`http/` 为 Axum OpenAI/SSE 接口，`runtime/` 为 Windows 独立后台与控制管道，`settings.rs` 复用应用 SQLite；主程序内部入口为 `--acp-http-service`。源码与许可归属在 `vendor/SOURCES.json`，`.cargo/config.toml` 解析仓库内依赖。局部入口为 `cargo test --features test-hooks --test acp_settings --test acp_http_contract --test acp_callbacks --test acp_service_process --test acp_prompt_summary`；其中窗口场景使用 winit-software 与窗口内事件，不移动硬件鼠标。合成 Agent 源码在 `tests/fixtures/acp_api/main.rs`，仅 test-hooks 构建，不进入生产包。
@@ -42,7 +42,7 @@
 - 测试临时数据 `MUST NOT` 写在仓库其它位置（仓库根、`src/`、`resources/`、`docs/`、`tests/` 都不行）。
 - 需要长期保留的样例数据放 `tests/`，或直接用测试内置的临时目录（`tempfile` / `std::env::temp_dir()`）。
 - 校验、清理或重建 `.tmp/` 的脚本 `MAY` 直接删除该目录内容，不会影响仓库文件。
-- 项目所需的一切临时目录与测试数据统一由 `python scripts/make_tmp.py` 生成（种类可扩展，现有 `testdata`），默认落在 `.tmp/` 下；测试完成后用 `python scripts/make_tmp.py clean` 清空 `.tmp/` 释放磁盘，`MUST NOT` 让 `.tmp/` 无限增长。
+- 项目所需的一切临时目录与测试数据统一由 `python scripts/make_tmp.py` 生成（种类可扩展，现有 `testdata`），默认落在 `.tmp/` 下；测试完成后清理本会话自建子目录，仅在确认无并行会话使用 `.tmp/` 时才用 `python scripts/make_tmp.py clean` 全量清空释放磁盘，`MUST NOT` 清空其他会话仍在使用的内容，`MUST NOT` 让 `.tmp/` 无限增长。
 
 ## 3. 构建与测试
 
@@ -92,7 +92,7 @@ powershell -NoProfile -File .\scripts\package-windows.ps1   # 生成含 7-Zip �
 |---|---|---|
 | 任意变更（每次提交） | `cargo test --features test-hooks` + `python scripts/static_check.py` | 合同全部条目对应测试 |
 | 引擎 / 解压 / 删除 / 路径安全 | 上行 + `powershell -NoProfile -File .\scripts\acceptance.ps1 -WithEngine` + `tests/gui_flow.rs` | 合同 S / E 分区、C-01 |
-| UI（`ui/app.slint` / GUI 装配） | 任意变更行 + `tests/gui_flow.rs` + `scripts/gui_smoke.py` S1–S4 + 两档窗口尺寸目视检查 | 合同 C / U 分区 |
+| UI（`ui/app.slint` / GUI 装配） | 任意变更行 + `tests/gui_flow.rs` + `scripts/gui_smoke.py` S1–S4 + S18（两档窗口尺寸布局判定） | 合同 C / U 分区 |
 | 递归解压端到端 | `python scripts/make_tmp.py testdata` → GUI 完整走开始、确认、完成链路 → 按 `RECURSIVE-EXTRACT.md`、全局 H / S 与共用附录逐项断言 → `python scripts/make_tmp.py clean` | X 与适用全局条目 |
 | 目录整理端到端 | `python scripts/make_tmp.py testdata` → GUI 完整走分析、计划、确认、执行链路 → 按 `DIRECTORY-ORGANIZER.md`、全局 H / S 与共用附录逐项断言 → `python scripts/make_tmp.py clean` | C 与适用全局条目 |
 | 打包 / 发布 / 引擎捆绑 | `scripts/package-windows.ps1` 全程 + 干净目录解包运行 | 合同 E 分区 |
