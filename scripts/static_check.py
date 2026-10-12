@@ -822,6 +822,7 @@ _REQUIREMENT_DOCS = [
     "docs/requirements/SNAP2TEXT.md",
     "docs/requirements/XBERG-INFERENCE.md",
     "docs/requirements/ACP-MODEL-SERVICE.md",
+    "docs/requirements/CODEAGENT.md",
 ]
 
 
