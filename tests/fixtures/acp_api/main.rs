@@ -30,6 +30,8 @@
 // Plan.action=tool-events 发送真正的 ToolCall/ToolCallUpdate 通知后输出正常文本。
 // terminal 在 wait 主命令退出后，另以合成 stdout/stderr 的完整行等待输出快照；
 // terminal-pwd 用真实子进程 current_dir 写入 cwd marker，验证省略 cwd 的回调默认目录。
+// Plan.action=native-command 仅在 prompt 首行以 /fixture-add 开头时执行两整数求和；
+// 否则作为普通文本返回 Plan.text，不能靠查找正文中的命令或回显证明 slash 识别。
 #![allow(dead_code, clippy::unwrap_used, clippy::expect_used)]
 
 use agent_client_protocol::schema::v1::{
@@ -376,7 +378,7 @@ async fn turn(
         session.cancelled = false;
         let cwd = session.cwd.clone();
         let model = session.model.clone();
-        state.audit(&json!({"event":"started","tag":plan.tag,"session":request.session_id,"pid":std::process::id(),"model":model,"prompt":input}));
+        state.audit(&json!({"event":"started","tag":plan.tag,"session":request.session_id,"pid":std::process::id(),"model":model,"prompt":input,"prompt_blocks":request.prompt}));
         (state.root.clone(), cwd, model)
     };
     if plan.action == "crash" {
@@ -500,7 +502,26 @@ async fn turn(
             tokio::time::sleep(Duration::from_millis(10)).await;
         }
     }
-    let result = callbacks(&plan, &request.session_id, &cwd, cx).await;
+    let result = if plan.action == "native-command" {
+        if let Some(arguments) = input
+            .lines()
+            .next()
+            .and_then(|line| line.strip_prefix("/fixture-add "))
+        {
+            // 真正消费命令参数并计算结果；角色标签使首行不匹配，走普通文本分支。
+            arguments
+                .split_once(' ')
+                .and_then(|(left, right)| {
+                    left.parse::<i64>().ok()?.checked_add(right.parse::<i64>().ok()?)
+                })
+                .map(|sum| json!({"command":"fixture-add","sum":sum}).to_string())
+                .ok_or_else(|| Error::new(-32602, "求和命令需要两个有效整数"))
+        } else {
+            Ok(plan.text())
+        }
+    } else {
+        callbacks(&plan, &request.session_id, &cwd, cx).await
+    };
     match result {
         Ok(text) => {
             if plan.action == "text" || plan.action == "tool-events" {

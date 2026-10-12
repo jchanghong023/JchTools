@@ -38,7 +38,7 @@ fn prompt_summary_counts_only_submitted_messages_and_never_logs_content() {
     let session = response.headers["x-jchtools-session-id"].clone();
     let reply = completion(&response.json()).to_owned();
     let first_event = wait_event(&server.root,"started",&first.tag);
-    assert!(first_event["prompt"].as_str().unwrap().contains(secret));
+    assert_eq!(first_event["prompt"],texts.iter().map(|(role,text)|format!("[{role}]\n{text}")).collect::<Vec<_>>().join("\n"));
     let second = Plan::new("text");
     let new_text = format!("新增中文 {secret}\n{}",second.prompt());
     messages.extend([json!({"role":"assistant","content":reply}),json!({"role":"user","content":new_text})]);
@@ -48,7 +48,8 @@ fn prompt_summary_counts_only_submitted_messages_and_never_logs_content() {
     assert_eq!(completion(&response.json()),second.text());
     let second_event = wait_event(&server.root,"started",&second.tag);
     assert_eq!(first_event["session"],second_event["session"]);
-    assert_eq!(second_event["prompt"],format!("[user]\n{new_text}"));
+    assert_eq!(first_event["pid"],second_event["pid"]);
+    assert_eq!(second_event["prompt"],new_text);
     // 未见过的显式标识没有 ACP 状态，不能把“提供请求头”记作复用。
     let third = Plan::new("text");
     let third_body = json!({"model":MODEL_A,"cwd":server.root,"messages":[{"role":"user","content":third.prompt()}]});
@@ -57,6 +58,7 @@ fn prompt_summary_counts_only_submitted_messages_and_never_logs_content() {
     assert_eq!(completion(&response.json()),third.text());
     let third_event = wait_event(&server.root,"started",&third.tag);
     assert_ne!(first_event["session"],third_event["session"]);
+    assert_eq!(third_event["prompt"],third.prompt());
     // 同目录的探测状态可被无请求头的首轮接管；实际 ACP 会话未新建。
     let before_probe = audit(&server.root);
     let probe = before_probe.iter().find(|event|event["event"]=="session").unwrap()["session"].clone();
@@ -68,6 +70,7 @@ fn prompt_summary_counts_only_submitted_messages_and_never_logs_content() {
     assert_eq!(completion(&response.json()),fourth.text());
     let fourth_event = wait_event(&server.root,"started",&fourth.tag);
     assert_eq!(fourth_event["session"],probe);
+    assert_eq!(fourth_event["prompt"],fourth.prompt());
     assert_eq!(audit(&server.root).iter().filter(|event|event["event"]=="session").count(),sessions_before_probe);
     server.shutdown();
     drop(guard); // 非阻塞 worker 退役并刷盘后再读取。

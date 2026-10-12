@@ -762,6 +762,7 @@ if cancellation.is_cancelled() {
     return Err(error(ServiceErrorKind::Cancelled, "请求已取消"));
 }
 let submitted = &input.messages[state.history.len()..];
+let raw_user = matches!(submitted, [message] if matches!(message.role, MessageRole::User));
 let mut role_counts = [0_usize; 4];
 let mut text_bytes = 0_usize;
 let content = submitted
@@ -774,11 +775,11 @@ let content = submitted
             MessageRole::Assistant => 3,
         }] += 1;
         text_bytes += message.text.len();
-        ContentBlock::Text(TextContent::new(format!(
-            "[{}]\n{}",
-            message.role.as_str(),
-            message.text
-        )))
+        ContentBlock::Text(TextContent::new(if raw_user {
+            message.text.clone()
+        } else {
+            format!("[{}]\n{}", message.role.as_str(), message.text)
+        }))
     })
     .collect();
 callbacks
