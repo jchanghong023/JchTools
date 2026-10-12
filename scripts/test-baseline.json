@@ -5060,7 +5060,7 @@
       "name": "codeagent_native_registry_and_detached_service",
       "ignored": false,
       "cfg": "windows",
-      "body": "b3c2b46fc477616b"
+      "body": "066b98804977592a"
     },
     {
       "file": "tests/codeagent.rs",
