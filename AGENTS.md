@@ -14,7 +14,7 @@
 ## 1. 项目背景
 
 - **项目类型与技术栈**：自有项目 JchTools，用户个人使用的 Windows 本地工具箱，由 AI Agent 实现和维护。Rust 2021 + Slint 1.17、SQLite（rusqlite bundled）、7-Zip 引擎；产品定位与交付要求见合同 P / E 分区，打包入口为 `scripts/package-windows.ps1` 与 `installer/JchTools.iss`。
-- **工具入口**：当前工作树的注册表与 GUI 已接入递归解压、目录整理、MD 整理、转 Markdown、Git 工具、截图 OCR 和模型服务七个入口，需求来源见下方权威分工。入口与实现存在不代表完整验收；截图与模型服务须分别按 O / AH 验收矩阵核对，官方 SDK 夹具不代替真实 Agent 与模型。新工具 `MUST` 经 `src/registry.rs` 注册 + 真实页面接入；侧栏与导航 `SHOULD NOT` 写死只服务单个工具的文案或流程。
+- **工具入口**：当前工作树的注册表与 GUI 已接入递归解压、目录整理、MD 整理、转 Markdown、Git 工具、截图 OCR 和模型服务七个入口，需求来源见下方权威分工。CodeAgent 独立需求已获用户确认，产品接入与验收尚待实施，不将其计为已接入入口。入口与实现存在不代表完整验收；截图与模型服务须分别按 O / AH 验收矩阵核对，官方 SDK 夹具不代替真实 Agent 与模型。新工具 `MUST` 经 `src/registry.rs` 注册 + 真实页面接入；侧栏与导航 `SHOULD NOT` 写死只服务单个工具的文案或流程。
 - **生产方式**：本项目全部产出（代码、测试、文档、CI）由 AI 代理完成；质量不能依赖用户手工阅读代码或人工回归。用户只在封闭选择、看图判断与真实使用中给出意图和反馈（第 7 节），不编写代码或文字。本文件的纪律用于对抗代理自证偏差。
 - **权威分工**：`AGENTS.md` 维护开发、测试和验收纪律；固定目录 `docs/requirements/` 保存全部产品需求，域边界与完整清单在该目录的 `README.md`，不复制子需求：
   - `CONTRACT.md`：全局与共用约束（H / P / S / R / U / E 及共用附录 B～E）。
@@ -26,7 +26,8 @@
   - `SNAP2TEXT.md`：截图 OCR（O）。
   - `XBERG-INFERENCE.md`：共享 Xberg、设置与后台（XB）。
   - `ACP-MODEL-SERVICE.md`：独立模型服务（AH 及真实 Agent 验收）。
-  - 按功能域定位唯一需求来源，待确认草案不覆盖已确认条目。旧 `docs/CONTRACT.md` 仅保留迁移链接，不维护副本；其他文档只作辅助。新增需求文档须同步索引、此清单与 `scripts/static_check.py` 的 `requirements_registry` 登记；本次文档拆分尚未同步该脚本的四文件硬编码清单，完成独立可信基同步前该项检查不通过，不得冒报完整静态检查通过。
+  - `CODEAGENT.md`：CodeAgent（CA；独立后台与 OMP provider 无损同步）。
+  - 按功能域定位唯一需求来源，待确认草案不覆盖已确认条目。旧 `docs/CONTRACT.md` 仅保留迁移链接，不维护副本；其他文档只作辅助。新增需求文档须同步索引、此清单与 `scripts/static_check.py` 的 `_REQUIREMENT_DOCS` 登记（由 `requirements_registry` 检查）；登记在场不代表用户确认、实现完成或完整静态检查通过。
 - **代码入口**：`src/main.rs` → `src/gui.rs`（GUI 启动、回调与后台任务）、`ui/app.slint`（界面）、`src/registry.rs`（工具注册表）；`src/archive.rs`（递归解压）、`src/engine.rs`（整理分析与执行）、`src/md_tools.rs`（MD 合并与拆分）、`src/git_tools.rs`（Git 操作）、`resources/rules.json`（界面规则清单）。转 Markdown 由 `src/markdown.rs`、`src/markdown_document.rs`、`src/markdown_assets.rs` 承接，媒体转录经 Xberg 推理组件（`xberg.exe worker` stdio 协议，XB 分区）承接；截图 OCR 由 `src/snap_ocr_assets.rs`、`optional/snap-ocr-core/`（O-23～O-28 的规格参照物：workspace 内无 crate 依赖它，识别已按 XB-01/XB-02 迁至 Xberg，删除前须确认规格约束另有执法点承接）与 `optional/snap-ocr-worker/`（截图、托盘、服务和结果窗，识别经 Xberg 推理组件）承接，主界面回调仍在 `src/gui.rs`。两资产模块共用的下载/校验/原子落位/推理组件包安装核心在 `src/asset_util.rs`。
 - **共享推理与配置入口**：`src/xberg_runtime.rs` / `src/xberg_runtime_windows.rs` 承接共享引擎请求及 Windows 命名管道代理；主程序的 `--xberg-broker` 是内部代理入口。截图服务经 `optional/snap-ocr-worker/src/shared_xberg.rs` 接入，并编译复用主包的 runtime 与 settings 模块。`src/xberg_settings.rs` / `src/app_settings.sql` 在应用状态目录的 `config.sqlite3` 保存 Xberg 目录并承接旧文本配置迁移；功能与生命周期要求以 XB-14～XB-19 为准。
 - **ACP 模型服务入口**：`src/acp_api/acp/` 为官方 SDK 会话及回调适配，`http/` 为 Axum OpenAI/SSE 接口，`runtime/` 为 Windows 独立后台与控制管道，`settings.rs` 复用应用 SQLite；主程序内部入口为 `--acp-http-service`。源码与许可归属在 `vendor/SOURCES.json`，`.cargo/config.toml` 解析仓库内依赖。局部入口为 `cargo test --features test-hooks --test acp_settings --test acp_http_contract --test acp_callbacks --test acp_service_process --test acp_prompt_summary`；其中窗口场景使用 winit-software 与窗口内事件，不移动硬件鼠标。合成 Agent 源码在 `tests/fixtures/acp_api/main.rs`，仅 test-hooks 构建，不进入生产包。
