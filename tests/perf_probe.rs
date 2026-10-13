@@ -22,7 +22,9 @@
     clippy::expect_used,
     clippy::cast_possible_truncation
 )]
-use jchtools::{config::Config, control::Context, engine};
+use jchtools_file_core::config::Config;
+use jchtools_file_core::control::Context;
+use jchtools_directory_organizer::engine;
 use std::{fs, time::Instant};
 use tempfile::TempDir;
 
@@ -61,8 +63,8 @@ fn isolate_probe(name: &str) -> bool {
 /// 启用 perf-tracing 特性时初始化性能日志（落在 state/perf-logs/），结束时打印 span 行。
 /// 未启用特性时是空操作；这也让基准顺带充当 perf-tracing 端到端的冒烟验证。
 #[cfg(feature = "perf-tracing")]
-fn perf_init(state: &std::path::Path) -> jchtools::perf::Guard {
-    jchtools::perf::init(state).expect("独立探针进程必须成功初始化性能日志")
+fn perf_init(state: &std::path::Path) -> jchtools_foundation::perf::Guard {
+    jchtools_foundation::perf::init(state).expect("独立探针进程必须成功初始化性能日志")
 }
 #[cfg(not(feature = "perf-tracing"))]
 fn perf_init(state: &std::path::Path) -> Option<()> {
@@ -71,7 +73,7 @@ fn perf_init(state: &std::path::Path) -> Option<()> {
 }
 /// 读取日志前等待当前探针的非阻塞写入退出刷盘。
 #[cfg(feature = "perf-tracing")]
-fn perf_flush(guard: jchtools::perf::Guard) {
+fn perf_flush(guard: jchtools_foundation::perf::Guard) {
     drop(guard);
 }
 #[cfg(not(feature = "perf-tracing"))]
@@ -81,7 +83,7 @@ fn perf_flush(guard: Option<()>) {
 fn perf_dump(state: &std::path::Path, expected_spans: &[(&str, usize)]) {
     #[cfg(feature = "perf-tracing")]
     {
-        let dir = state.join(jchtools::perf::LOG_DIR);
+        let dir = state.join(jchtools_foundation::perf::LOG_DIR);
         let entries = fs::read_dir(&dir).expect("性能日志目录必须存在");
         let mut spans = Vec::new();
         for entry in entries {

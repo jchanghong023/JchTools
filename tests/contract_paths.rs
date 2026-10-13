@@ -13,7 +13,7 @@
 
 //! 覆盖 H-07 / X-04：冲突只改文件名主体，保留原扩展名和复合扩展名。
 #![allow(clippy::unwrap_used, clippy::expect_used)]
-use jchtools::fsutil;
+use jchtools_file_core::fsutil;
 use std::fs;
 
 #[test]

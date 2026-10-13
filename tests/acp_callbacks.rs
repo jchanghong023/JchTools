@@ -332,7 +332,7 @@ impl Drop for ReleaseMarker {
 /// AH-13/AH-A10：token 已取消而 prompt 尚未终结，权限回调返回 Cancelled 不是 RPC error。
 #[test]
 fn cancelled_round_permission_returns_cancelled_before_prompt_terminal() {
-    use jchtools::acp_api::{ChatMessage, MessageRole, PromptInput, RequestEvent};
+    use jchtools_acp_api::acp_api::{ChatMessage, MessageRole, PromptInput, RequestEvent};
     let server = server();
     let plan = Plan::new("permission-after-cancel");
     let cleanup = ReleaseMarker::prompt(&server.root, &plan);

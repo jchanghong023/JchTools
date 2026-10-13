@@ -23,7 +23,7 @@ use fixture::{
     consumer::{audit, body, completion, config, unused_port, wait_event, Http},
     Plan,
 };
-use jchtools::acp_api::{runtime, settings, ServicePhase};
+use jchtools_acp_api::acp_api::{runtime, settings, ServicePhase};
 use std::{
     path::{Path, PathBuf},
     process::{Child, Command, ExitStatus, Stdio},

@@ -1,7 +1,7 @@
 //! 覆盖 CA-02～CA-07：真实 Windows DPAPI、隔离 HKCU 与独立内部后台，不显示桌面。
 #![cfg(windows)] // P-07：产品仅支持 Windows，使用真实 CurrentUser DPAPI。
 use fs2::FileExt;
-use jchtools::codeagent::{self, CheckResult};
+use jchtools_codeagent::codeagent::{self, CheckResult};
 use std::io::Read;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};

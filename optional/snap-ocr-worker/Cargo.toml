@@ -8,7 +8,7 @@ license = "MIT"
 [features]
 default = []
 # 仅隔离测试显式启用；发布的后台程序不能读取测试路径覆盖。
-test-hooks = []
+test-hooks = ["jchtools-foundation/test-hooks", "jchtools-xberg/test-hooks"]
 
 [lib]
 name = "snap_ocr_worker"
@@ -18,9 +18,8 @@ name = "snap-ocr-worker"
 path = "src/main.rs"
 
 [dependencies]
-directories-next = "2.0"
-rusqlite = { version = "0.32", features = ["bundled"] }
-fs2 = "0.4"
+jchtools-foundation = { workspace = true }
+jchtools-xberg = { workspace = true }
 image = { version = "0.25", default-features = false, features = ["png"] }
 # 结果窗（O-21）：与主程序同版本 Slint；worker 是可选资产，不进主 EXE。
 slint = { version = "=1.17.1", default-features = false, features = ["std", "compat-1-2", "backend-winit", "renderer-femtovg", "renderer-software", "unstable-fontique-010", "raw-window-handle-06"] }
@@ -30,12 +29,12 @@ sha2 = "0.10"
 raw-window-handle = "0.6"
 # 截图字节经内存 PNG 编码后以 base64 传给本地 xberg 子进程（O-29：不落盘）。
 base64 = "0.22"
-# P-10：代理分支复用主包诊断日志；共享 runtime 模块内含 tracing 埋点。
-tracing = "0.1"
-tracing-subscriber = { version = "0.3", features = ["fmt", "env-filter"] }
-tracing-appender = "0.2"
+# P-10：服务自己的 tracing 埋点共用 foundation 诊断日志；runtime 由真实依赖提供。
+tracing = { workspace = true }
 
 [dev-dependencies]
+jchtools-foundation = { workspace = true, features = ["test-hooks"] }
+tracing-subscriber = { workspace = true }
 tempfile = "3.19"
 i-slint-backend-testing = { version = "=1.17.1", features = ["renderer-software"] }
 
@@ -44,9 +43,6 @@ slint-build = "=1.17.1"
 
 [target.'cfg(windows)'.dependencies]
 # 服务/托盘/热键/管道/截图/自启动所需（模块头注有各 feature 归属；集成期裁剪）。
-# System_IO 供共享运行时 Windows 代理（#[path] 编入的 src/xberg_runtime_windows.rs）
-# 的 CancelSynchronousIo 与带 OVERLAPPED 的 ConnectNamedPipe；JobObjects 供代理
-# 进程的 kill-on-close 兜底。
 windows-sys = { version = "0.59", features = [
     "Win32_Foundation", "Win32_System_Diagnostics_ToolHelp",
     "Win32_Graphics_Gdi",
@@ -54,7 +50,6 @@ windows-sys = { version = "0.59", features = [
     "Win32_Storage_FileSystem",
     "Win32_System_Console",
     "Win32_System_IO",
-    "Win32_System_JobObjects",
     "Win32_System_Pipes",
     "Win32_System_Registry",
     "Win32_System_SystemInformation",
@@ -78,9 +73,6 @@ rust_2018_idioms = { level = "deny", priority = -1 }
 explicit_outlives_requirements = "deny"
 elided_lifetimes_in_paths = "deny"
 single_use_lifetimes = "deny"
-# 共享模块 logging.rs 按 perf-tracing 特性合并性能层；本 crate 不设该特性，
-# 只声明其取值合法，避免 unexpected_cfgs 报错（层在该 crate 恒为 absent）。
-unexpected_cfgs = { level = "allow", check-cfg = ['cfg(feature, values("perf-tracing"))'] }
 
 [lints.clippy]
 pedantic = { level = "deny", priority = -1 }

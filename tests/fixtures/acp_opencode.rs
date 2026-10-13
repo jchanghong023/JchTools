@@ -1,6 +1,6 @@
 //! 真实 ACP 验收支持：只调用产品 facade 和既有 ureq；不实现 HTTP/ACP 协议栈。
 //! 所有消费者是本测试的独立子进程；不会修改测试宿主或用户的全局环境/认证/配置。
-use jchtools::acp_api::{runtime, ServiceConfig, ServicePhase, ServiceStatus};
+use jchtools_acp_api::acp_api::{runtime, ServiceConfig, ServicePhase, ServiceStatus};
 use serde_json::{json, Value};
 use std::{
     cell::RefCell,

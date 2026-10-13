@@ -8,6 +8,16 @@ param(
 )
 $ErrorActionPreference = 'Stop'
 Set-StrictMode -Version Latest
+$script:packageTiming = $null
+$script:packageTotalWatch = [Diagnostics.Stopwatch]::StartNew()
+trap {
+    $packageFailure = $_
+    if ($script:packageTiming) {
+        try {Complete-PackageTiming -Failure $packageFailure.Exception.Message}
+        catch {Write-Warning "Unable to finalize package timing: $($_.Exception.Message)"}
+    }
+    throw $packageFailure
+}
 $root = [IO.Path]::GetFullPath((Join-Path $PSScriptRoot '..'))
 Set-Location -LiteralPath $root
 if ($DestinationRoot) {
@@ -16,6 +26,83 @@ if ($DestinationRoot) {
 } else {
     $DestinationRoot = Join-Path $root 'dist'
 }
+function Initialize-PackageTiming([string]$RepositoryRoot) {
+    $workspace = Join-Path $RepositoryRoot ('.tmp\package-windows-' + [guid]::NewGuid().ToString('N'))
+    & python (Join-Path $RepositoryRoot 'scripts\make_tmp.py') workspace --destination $workspace
+    if ($LASTEXITCODE -ne 0) {throw "Unable to create package timing workspace: $LASTEXITCODE"}
+    $steps = @('setup','assets','font-and-engine-validation','lockfile','tests','worker-build','manifest','main-build','staging','licenses','package-validation','installer','zip')
+    $script:packageTiming = @{
+        path = (Join-Path $workspace 'timings.jsonl')
+        writer = $null
+        active = $null
+        watch = $null
+        records = @($steps | ForEach-Object {
+            [pscustomobject]@{step=$_;status='NOT_RUN';elapsed_seconds=0.0;started_utc=$null;finished_utc=$null;detail=$null}
+        })
+        total = [pscustomobject]@{step='total';status='RUNNING';elapsed_seconds=0.0;detail=$null}
+    }
+    # Keep one append-only handle: Windows readers/scanners cannot race file replacement.
+    $stream = [IO.File]::Open($script:packageTiming.path, [IO.FileMode]::CreateNew, [IO.FileAccess]::Write, [IO.FileShare]::Read)
+    try {$script:packageTiming.writer = New-Object IO.StreamWriter($stream, (New-Object Text.UTF8Encoding($false)))}
+    catch {$stream.Dispose(); throw}
+    $script:packageTiming.writer.AutoFlush = $true
+    Write-Host "Package wall-clock timing record: $($script:packageTiming.path)"
+    Start-PackageStep 'setup'
+    # Setup includes timing workspace creation and all preceding script initialization.
+    $script:packageTiming.watch = $script:packageTotalWatch
+    $script:packageTiming.active.started_utc = [datetime]::UtcNow.AddSeconds(-$script:packageTotalWatch.Elapsed.TotalSeconds).ToString('o')
+    Save-PackageTiming
+}
+function Save-PackageTiming {
+    $script:packageTiming.total.elapsed_seconds = $script:packageTotalWatch.Elapsed.TotalSeconds
+    $record = @{
+        clock = 'wall-clock; includes Cargo command overhead, not compile-only budget accounting'
+        steps = $script:packageTiming.records
+        total = $script:packageTiming.total
+    }
+    # Each flushed line is a complete snapshot; earlier lines survive any later write failure.
+    $script:packageTiming.writer.WriteLine(($record | ConvertTo-Json -Depth 6 -Compress))
+}
+function Stop-PackageStep([string]$Status = 'PASS', [string]$Detail) {
+    if ($script:packageTiming.active) {
+        $entry = $script:packageTiming.active
+        $entry.elapsed_seconds = $script:packageTiming.watch.Elapsed.TotalSeconds
+        $entry.finished_utc = [datetime]::UtcNow.ToString('o')
+        $entry.status = $Status
+        $entry.detail = $Detail
+        Write-Host ("Package step {0}: {1} ({2:F3}s)" -f $entry.step, $Status, $entry.elapsed_seconds)
+        $script:packageTiming.active = $null
+        $script:packageTiming.watch = $null
+    }
+    Save-PackageTiming
+}
+function Start-PackageStep([string]$Name) {
+    Stop-PackageStep
+    $entries = @($script:packageTiming.records | Where-Object {$_.step -ceq $Name})
+    if ($entries.Count -ne 1 -or $entries[0].status -cne 'NOT_RUN') {throw "Invalid package step transition: $Name"}
+    $script:packageTiming.active = $entries[0]
+    $script:packageTiming.active.status = 'RUNNING'
+    $script:packageTiming.active.started_utc = [datetime]::UtcNow.ToString('o')
+    $script:packageTiming.watch = [Diagnostics.Stopwatch]::StartNew()
+    Save-PackageTiming
+}
+function Complete-PackageTiming([string]$Failure) {
+    try {
+        if ($Failure) {
+            Stop-PackageStep -Status 'FAIL' -Detail $Failure
+            $script:packageTiming.total.status = 'FAIL'
+            $script:packageTiming.total.detail = $Failure
+        } else {
+            Stop-PackageStep
+            $script:packageTiming.total.status = 'PASS'
+        }
+        Save-PackageTiming
+        Write-Host ("Package total: {0} ({1:F3}s); record: {2}" -f $script:packageTiming.total.status, $script:packageTiming.total.elapsed_seconds, $script:packageTiming.path)
+    } finally {
+        if ($script:packageTiming.writer) {$script:packageTiming.writer.Dispose()}
+    }
+}
+Initialize-PackageTiming -RepositoryRoot $root
 function Set-GateCompiling([bool]$Compiling) {
     if (-not $GateTimingFile) {return}
     # A partial read is deliberately not evidence of a compile-only phase.
@@ -44,7 +131,7 @@ function Invoke-Cargo([string[]]$Arguments, [switch]$CaptureBuildMetadata) {
                 if ($_.TrimStart().StartsWith('{')) {
                     $message = $_ | ConvertFrom-Json
                     if ($message.reason -eq 'build-script-executed' -or
-                        ($message.reason -eq 'compiler-artifact' -and $message.executable)) {
+                        $message.reason -eq 'compiler-artifact') {
                         $message
                     }
                 } else {
@@ -80,6 +167,23 @@ function Get-CargoArtifact([object[]]$Messages, [string]$BinaryName, [string]$Ma
     if ($artifacts.Count -ne 1) {throw "无法唯一确定本次 Cargo 构建的 $BinaryName 可执行文件（找到 $($artifacts.Count) 项）。"}
     return $artifacts[0]
 }
+function Get-CargoLibraryArtifact([object[]]$Messages, [string]$LibraryName, [string]$ManifestPath) {
+    $manifest = [IO.Path]::GetFullPath($ManifestPath)
+    $artifacts = @($Messages | ForEach-Object { $_ } | Where-Object {
+        $reason = $_.PSObject.Properties['reason']
+        $target = $_.PSObject.Properties['target']
+        $packageManifest = $_.PSObject.Properties['manifest_path']
+        if (-not $reason -or $reason.Value -ne 'compiler-artifact' -or
+            -not $target -or -not $target.Value -or -not $packageManifest -or -not $packageManifest.Value) {return $false}
+        $name = $target.Value.PSObject.Properties['name']
+        $kind = $target.Value.PSObject.Properties['kind']
+        if (-not $name -or -not $kind) {return $false}
+        $name.Value -ceq $LibraryName -and $kind.Value -contains 'lib' -and
+        [IO.Path]::GetFullPath($packageManifest.Value).Equals($manifest, [StringComparison]::OrdinalIgnoreCase)
+    })
+    if ($artifacts.Count -ne 1) {throw "无法唯一确定本次 Cargo 构建的 $LibraryName 库产物（找到 $($artifacts.Count) 项）。"}
+    return $artifacts[0]
+}
 function Assert-EmbeddedEngine([object[]]$Messages, [object]$Artifact) {
     # 缓存命中的构建也由 Cargo 返回当前 OUT_DIR；不能按历史缓存时间猜测。
     $buildScripts = @($Messages | ForEach-Object { $_ } | Where-Object {
@@ -89,11 +193,11 @@ function Assert-EmbeddedEngine([object[]]$Messages, [object]$Artifact) {
         $outDir = $_.PSObject.Properties['out_dir']
         $packageId -and $outDir -and $outDir.Value -and $packageId.Value -ceq $Artifact.package_id
     })
-    if ($buildScripts.Count -ne 1) {throw '无法唯一确定本次主程序构建的 OUT_DIR，拒绝打包。'}
+    if ($buildScripts.Count -ne 1) {throw '无法唯一确定本次 file-core 库构建的 OUT_DIR，拒绝打包。'}
     $statusPath = Join-Path $buildScripts[0].out_dir 'engine_embed_status.txt'
-    if (-not (Test-Path -LiteralPath $statusPath -PathType Leaf)) {throw '本次主程序构建缺少 engine_embed_status.txt，拒绝打包。'}
+    if (-not (Test-Path -LiteralPath $statusPath -PathType Leaf)) {throw '本次 file-core 库构建缺少 engine_embed_status.txt，拒绝打包。'}
     $status = (Get-Content -LiteralPath $statusPath -Raw -Encoding UTF8).Trim()
-    if ($status -cne 'ok') {throw "本次主程序的引擎内嵌状态为 '$status'（应为 'ok'），拒绝打包未完整内嵌 7-Zip 的产物。"}
+    if ($status -cne 'ok') {throw "本次 file-core 库的引擎内嵌状态为 '$status'（应为 'ok'），拒绝打包未完整内嵌 7-Zip 的产物。"}
 }
 function Copy-PackageLicenseMaterials([object]$Package, [object]$SourcePackage, [string]$Destination) {
     $packageRoot = Split-Path -Parent $Package.manifest_path
@@ -114,12 +218,14 @@ function Copy-PackageLicenseMaterials([object]$Package, [object]$SourcePackage, 
     }
     return $materials.Count
 }
+Start-PackageStep 'assets'
 $archiveEngine = Join-Path $root 'resources\7zip\7z.exe'
 $archiveDll = Join-Path $root 'resources\7zip\7z.dll'
 if (-not $Offline) {& (Join-Path $PSScriptRoot 'fetch-7zip.ps1')}
 if (-not (Test-Path -LiteralPath $archiveEngine) -or -not (Test-Path -LiteralPath $archiveDll) -or -not (Test-Path -LiteralPath 'resources\7zip\manifest.json')) {throw 'The verified bundled engine is missing (need 7z.exe, 7z.dll and manifest.json). Run fetch-7zip.ps1 on a connected build machine first.'}
 $extra = @()
 if ($Offline) {$extra += '--offline'}
+Start-PackageStep 'font-and-engine-validation'
 # O-05/O-09: the result font is embedded in the shipped worker. Verify the exact
 # source font and its license before building either delivery form.
 $fontManifest = Get-Content -LiteralPath 'resources\snap-ocr-assets.json' -Raw -Encoding UTF8 | ConvertFrom-Json
@@ -136,8 +242,15 @@ foreach ($entry in @(
         throw "Embedded screenshot font/license differs from the fixed manifest: $($entry.name)"
     }
 }
+$engineManifest = Get-Content -LiteralPath 'resources\7zip\manifest.json' -Raw | ConvertFrom-Json
+foreach ($file in $engineManifest.files) {
+    $path = Join-Path 'resources\7zip' $file.name
+    if ((Get-FileHash -LiteralPath $path -Algorithm SHA256).Hash.ToLowerInvariant() -cne $file.sha256) {throw "Bundled engine hash mismatch: $($file.name)"}
+}
+Start-PackageStep 'lockfile'
 if (-not (Test-Path -LiteralPath 'Cargo.lock')) {Invoke-Cargo (@('generate-lockfile') + $extra)}
 if (-not $SkipTests) {
+    Start-PackageStep 'tests'
     Invoke-Cargo (@('check','--locked','--all-targets','--features','test-hooks') + $extra)
     Invoke-Cargo (@('test','--locked','--all-targets','--features','test-hooks') + $extra)
     $previous = $env:JCHTOOLS_TEST_7ZIP
@@ -150,6 +263,7 @@ if (-not $SkipTests) {
 # in both delivery forms (XB-25); the optional-components directory below is only a
 # staging area for the build-time manifest backfill. Both Cargo invocations use the
 # workspace lock.
+Start-PackageStep 'worker-build'
 $workerBuildMessages = @(Invoke-Cargo -Arguments (@('build','--locked','--release','--target','x86_64-pc-windows-msvc','--manifest-path','optional/snap-ocr-worker/Cargo.toml','--bin','snap-ocr-worker') + $extra) -CaptureBuildMetadata)
 $workerArtifact = Get-CargoArtifact -Messages $workerBuildMessages -BinaryName 'snap-ocr-worker' -ManifestPath (Join-Path $root 'optional\snap-ocr-worker\Cargo.toml')
 $workerExe = $workerArtifact.executable
@@ -157,13 +271,14 @@ if (-not (Test-Path -LiteralPath $workerExe -PathType Leaf)) {throw "Optional OC
 $builtWorkerBytes = (Get-Item -LiteralPath $workerExe).Length
 if ($builtWorkerBytes -le 0) {throw 'Optional OCR worker executable is empty.'}
 $builtWorkerSha = (Get-FileHash -LiteralPath $workerExe -Algorithm SHA256).Hash.ToLowerInvariant()
+Start-PackageStep 'manifest'
 $optionalStage = Join-Path $DestinationRoot 'optional-components-v0.1.2'
 New-Item -ItemType Directory -Path $optionalStage -Force | Out-Null
 $stagedWorker = Join-Path $optionalStage 'snap-ocr-worker.exe'
 Copy-Item -LiteralPath $workerExe -Destination $stagedWorker -Force
-# 构建期占位回填（设计见 src/snap_ocr_assets.rs 的 pending-build 状态）：仓库清单的
+# 构建期占位回填（设计见 crates/assets/src/snap_ocr_assets.rs 的 pending-build 状态）：仓库清单的
 # worker 条目保持 pending-build 占位，打包阶段用本次构建的真实字节生成 staged 清单
-# ——build.rs 把它嵌入 JchTools.exe，发布目录的 resources/ 也用同一份。嵌入清单与
+# ——assets/build.rs 把它嵌入 JchTools.exe，发布目录的 resources/ 也用同一份。嵌入清单与
 # 随包交付的 worker 因此逐字节一致（XB-25：worker 随主包交付，运行期安装按清单
 # 校验大小与 SHA-256）；不再要求本地构建与某个已发布 release 字节相同（Rust/COFF
 # 工具链版本不同会失配，旧口径在源码演进后离线打包必失败、在线打包则嵌入旧清单
@@ -183,38 +298,50 @@ if ($workers[0].status -cne 'pending-build') {
 $workers[0].status = 'ok'
 $workers[0].size_bytes = [long]$builtWorkerBytes
 $workers[0].sha256 = $builtWorkerSha
-$stagedManifest = Join-Path $optionalStage 'snap-ocr-assets.json'
 $utf8NoBom = New-Object Text.UTF8Encoding($false)
-[IO.File]::WriteAllText($stagedManifest, ($manifest | ConvertTo-Json -Depth 20), $utf8NoBom)
+$manifestBytes = $utf8NoBom.GetBytes(($manifest | ConvertTo-Json -Depth 20))
+$sha = [Security.Cryptography.SHA256]::Create()
+try {$manifestSha = ([BitConverter]::ToString($sha.ComputeHash($manifestBytes))).Replace('-', '').ToLowerInvariant()}
+finally {$sha.Dispose()}
+# Content-addressed input lives beside the actual worker artifact, never under DestinationRoot.
+$buildManifest = Join-Path (Split-Path -Parent $workerExe) "snap-ocr-assets-$manifestSha.json"
+if (-not (Test-Path -LiteralPath $buildManifest -PathType Leaf) -or
+    (Get-Item -LiteralPath $buildManifest).Length -ne $manifestBytes.Length -or
+    (Get-FileHash -LiteralPath $buildManifest -Algorithm SHA256).Hash.ToLowerInvariant() -cne $manifestSha) {
+    [IO.File]::WriteAllBytes($buildManifest, $manifestBytes)
+}
+if ((Get-Item -LiteralPath $buildManifest).Length -ne $manifestBytes.Length -or
+    (Get-FileHash -LiteralPath $buildManifest -Algorithm SHA256).Hash.ToLowerInvariant() -cne $manifestSha) {
+    throw 'Build-time screenshot manifest does not match its content-addressed input.'
+}
+$stagedManifest = Join-Path $optionalStage 'snap-ocr-assets.json'
+Copy-Item -LiteralPath $buildManifest -Destination $stagedManifest -Force
 if ((Get-Item -LiteralPath $stagedWorker).Length -ne $builtWorkerBytes -or
     (Get-FileHash -LiteralPath $stagedWorker -Algorithm SHA256).Hash.ToLowerInvariant() -cne $builtWorkerSha) {
     throw 'Optional OCR worker staging changed the built executable bytes.'
 }
 $utf8 = New-Object Text.UTF8Encoding($false)
-# build.rs embeds the exact staged manifest into JchTools.exe; restore the caller's
-# environment even if compilation fails.
+# assets/build.rs embeds the exact stable manifest; restore the caller's environment
+# even if compilation fails.
+Start-PackageStep 'main-build'
 $previousManifest = $env:JCHTOOLS_SNAP_OCR_MANIFEST
 try {
-    $env:JCHTOOLS_SNAP_OCR_MANIFEST = $stagedManifest
-    $mainBuildMessages = @(Invoke-Cargo -Arguments (@('build','--locked','--release','--target','x86_64-pc-windows-msvc','--bins') + $extra) -CaptureBuildMetadata)
+    $env:JCHTOOLS_SNAP_OCR_MANIFEST = $buildManifest
+    $mainBuildMessages = @(Invoke-Cargo -Arguments (@('build','--locked','--release','--target','x86_64-pc-windows-msvc','-p','jchtools','-p','jchocr','--bins') + $extra) -CaptureBuildMetadata)
 } finally {
     $env:JCHTOOLS_SNAP_OCR_MANIFEST = $previousManifest
 }
 # fail-closed：本次可执行文件和内嵌状态都绑定 Cargo 的实际产物，不使用无关缓存。
 $mainArtifact = Get-CargoArtifact -Messages $mainBuildMessages -BinaryName 'JchTools' -ManifestPath (Join-Path $root 'Cargo.toml')
-Assert-EmbeddedEngine -Messages $mainBuildMessages -Artifact $mainArtifact
-$cliArtifact = Get-CargoArtifact -Messages $mainBuildMessages -BinaryName 'jchocr' -ManifestPath (Join-Path $root 'Cargo.toml')
+$engineArtifact = Get-CargoLibraryArtifact -Messages $mainBuildMessages -LibraryName 'jchtools_file_core' -ManifestPath (Join-Path $root 'crates\file-core\Cargo.toml')
+Assert-EmbeddedEngine -Messages $mainBuildMessages -Artifact $engineArtifact
+$cliArtifact = Get-CargoArtifact -Messages $mainBuildMessages -BinaryName 'jchocr' -ManifestPath (Join-Path $root 'crates\jchocr\Cargo.toml')
 foreach ($artifact in @($mainArtifact, $cliArtifact)) {
     if (-not (Test-Path -LiteralPath $artifact.executable -PathType Leaf)) {throw "本次构建未生成必需的可执行文件：$($artifact.executable)"}
     if ((Get-Item -LiteralPath $artifact.executable).Length -le 0) {throw "必需的可执行文件为空：$($artifact.executable)"}
 }
+Start-PackageStep 'staging'
 $stamp = Get-Date -Format 'yyyyMMdd-HHmmss'
-# 内嵌前先校验引擎与清单一致：EXE 里编进去的就是这份经过校验的数据。
-$engineManifest = Get-Content -LiteralPath 'resources\7zip\manifest.json' -Raw | ConvertFrom-Json
-foreach ($file in $engineManifest.files) {
-    $path = Join-Path 'resources\7zip' $file.name
-    if ((Get-FileHash -LiteralPath $path -Algorithm SHA256).Hash.ToLowerInvariant() -cne $file.sha256) {throw "Bundled engine hash mismatch: $($file.name)"}
-}
 $folder = Join-Path $DestinationRoot "JchTools-Windows-x64-$stamp"
 New-Item -ItemType Directory -Path $folder | Out-Null
 Copy-Item -LiteralPath $mainArtifact.executable -Destination $folder
@@ -249,6 +376,7 @@ Copy-Item -LiteralPath $sourceArchive -Destination $engineDir
 Copy-Item -LiteralPath 'README.md','LICENSE','THIRD_PARTY_NOTICES.md','Cargo.lock' -Destination $folder
 Copy-Item -LiteralPath 'docs' -Destination $folder -Recurse
 Copy-Item -LiteralPath 'scripts\launch-software.cmd' -Destination $folder
+Start-PackageStep 'licenses'
 # Collect license texts from the exact resolved dependency graph, not a guessed static list.
 # cargo 的 stdout 是 UTF-8；中文 Windows 默认用 ANSI 代码页解码会破坏
 # 非 ASCII 的 crate 描述，进而让 ConvertFrom-Json 在半截字符上失败。
@@ -267,7 +395,7 @@ foreach ($sourcePackage in $sourceManifest.packages) {
 }
 Copy-Item -LiteralPath 'vendor\SOURCES.json' -Destination (Join-Path $noticeRoot 'SOURCES.json')
 foreach ($package in $metadata.packages) {
-    if ($package.name -eq 'jchtools') {continue}
+    if ($metadata.workspace_members -contains $package.id) {continue}
     $dest = Join-Path $noticeRoot "$($package.name)-$($package.version)"
     $sourcePackage = $sourceIndex["$($package.name)@$($package.version)"]
     $licenseFileCount = Copy-PackageLicenseMaterials -Package $package -SourcePackage $sourcePackage -Destination $dest
@@ -290,6 +418,7 @@ foreach ($package in $metadata.packages) {
 }
 $utf8 = New-Object Text.UTF8Encoding($false)
 [IO.File]::WriteAllText((Join-Path $noticeRoot 'index.json'),($licenseIndex | ConvertTo-Json -Depth 5),$utf8)
+Start-PackageStep 'package-validation'
 # 发布目录不应出现引擎可执行文件：它们必须在 EXE 内部。
 foreach ($name in @('7z.exe','7z.dll')) {
     if (Test-Path -LiteralPath (Join-Path $folder "resources\7zip\$name")) {throw "Engine executable leaked into the package: $name"}
@@ -310,6 +439,7 @@ foreach ($name in @('onnxruntime.dll','*.onnx','dict.txt','NotoSansMonoCJKsc-Reg
 # ISCC 编译前先写共同构建记录，使安装包也包含测试 NOT RUN 与未验证项。
 # 安装包内的 installer 状态只能记录编译前事实，不能预报成功；
 # 编译结束后更新便携目录中的真实结果，再生成 ZIP。
+Start-PackageStep 'installer'
 $version = (Select-String -LiteralPath 'Cargo.toml' -Pattern '^version\s*=\s*"([^"]+)"' | Select-Object -First 1).Matches[0].Groups[1].Value
 $setupSummary = 'NOT RUN (ISCC not found on this machine; CI release job builds the installer)'
 # Get-Command 找不到 ISCC 时返回 $null；Set-StrictMode Latest 下直接取 .Source 会抛
@@ -337,6 +467,8 @@ if ($isccPath) {
 }
 $info.installer = $setupSummary
 [IO.File]::WriteAllText((Join-Path $folder 'BUILD-INFO.json'),($info | ConvertTo-Json -Depth 5),$utf8)
+if (-not $isccPath) {Stop-PackageStep -Status 'NOT_RUN' -Detail 'ISCC.exe not found; portable ZIP still produced'}
+Start-PackageStep 'zip'
 $zip = "$folder.zip"
 # Compress-Archive 逐条目写入 LastWriteTime；早于 1980-01-01（ZIP DOS 纪元）的时间无法
 # 转换会直接失败。cargo registry 抽取的 crate 许可证常保留 tarball 的古董 mtime（实测
@@ -349,3 +481,4 @@ Compress-Archive -LiteralPath $folder -DestinationPath $zip -CompressionLevel Op
 Write-Host "Created: $zip"
 Write-Host "Staged optional OCR worker and pinned manifest locally: $optionalStage (NOT UPLOADED; asset release requires separate authorization)"
 Write-Host '解压此 ZIP 后可运行 JchTools.exe 或 jchocr.exe；安装包将 jchocr.exe 复制到用户已有 PATH 的 WindowsApps 目录，不修改 PATH，无需重启终端。'
+Complete-PackageTiming

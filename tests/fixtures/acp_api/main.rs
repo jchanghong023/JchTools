@@ -1053,7 +1053,7 @@ fn main() {
 #[cfg(test)]
 pub(crate) mod consumer {
     use super::{Plan, MODEL_A};
-    use jchtools::acp_api::{
+    use jchtools_acp_api::acp_api::{
         self, agent_process_channel, AgentConnection, AgentExit, AgentProcessCommand,
         BackendHandle, ServiceConfig, ServicePhase, ServiceStatus,
     };

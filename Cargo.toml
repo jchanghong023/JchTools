@@ -15,83 +15,113 @@ build = "build.rs"
 
 [features]
 default = ["gui"]
-gui = ["dep:slint", "dep:slint-build", "dep:rfd", "dep:open"]
-# 性能耗时打点（默认关闭，长期保留）：诊断日志（P-10，src/logging.rs）使 tracing
-# 依赖常开，本特性只控制性能打点代码与 perf-logs 层是否参与编译。
-# 启用方式：cargo run --features perf-tracing（日志落状态目录下的 perf-logs/，见 src/perf.rs）。
-perf-tracing = []
-# 仅隔离测试使用：允许测试目录/代理入口覆盖。发布与普通启动不启用。
-test-hooks = ["tokio/io-std"]
+gui = [
+    "dep:jchtools-gui",
+    "jchtools-gui/gui",
+    "dep:jchtools-ui",
+    "jchtools-ui/gui",
+    "dep:slint",
+    "dep:rfd",
+]
+# 性能耗时打点默认关闭；日志层与各真实功能的埋点必须一并启用。
+perf-tracing = [
+    "jchtools-foundation/perf-tracing",
+    "jchtools-file-core/perf-tracing",
+    "jchtools-recursive-extract/perf-tracing",
+    "jchtools-directory-organizer/perf-tracing",
+    "jchtools-md-tools/perf-tracing",
+    "jchtools-git-tools/perf-tracing",
+    "jchtools-assets/perf-tracing",
+    "jchtools-markdown/perf-tracing",
+    "jchtools-gui?/perf-tracing",
+]
+# 仅隔离测试使用：三个进程入口与实际读取覆盖的依赖使用同一显式特性。
+test-hooks = [
+    "tokio/io-std",
+    "jchtools-foundation/test-hooks",
+    "jchtools-file-core/test-hooks",
+    "jchtools-recursive-extract/test-hooks",
+    "jchtools-directory-organizer/test-hooks",
+    "jchtools-md-tools/test-hooks",
+    "jchtools-git-tools/test-hooks",
+    "jchtools-xberg/test-hooks",
+    "jchtools-assets/test-hooks",
+    "jchtools-markdown/test-hooks",
+    "jchtools-acp-api/test-hooks",
+    "jchtools-codeagent/test-hooks",
+    "jchtools-gui?/test-hooks",
+]
 
 [dependencies]
-anyhow = "1.0"
-# AH-02/AH-11：官方 SDK 与 HTTP 后端固定版本；源码由仓库 vendor 提供。
-agent-client-protocol = { version = "=3.2.0", default-features = false, features = ["process", "stdio"] }
-axum = { version = "=0.8.9", default-features = false, features = ["http1", "json", "tokio"] }
-futures = { version = "=0.3.32", default-features = false, features = ["std", "async-await"] }
-tokio = { version = "=1.52.3", default-features = false, features = ["rt-multi-thread", "macros", "net", "process", "sync", "time", "io-util"] }
-tokio-util = { version = "=0.7.18", default-features = false, features = ["compat", "rt"] }
-base64 = "=0.22.1"
-blake3 = "1.8"
-chrono = { version = "0.4", default-features = false, features = ["clock", "serde"] }
-directories-next = "2.0"
-fs2 = "0.4"
-hex = "0.4"
-flate2 = "1.1"
-# C-08：仅显式开启内容签名修正时验证图像结构，复用 workspace 已锁定解码器。
-image = { version = "=0.25.10", default-features = false, features = ["png", "jpeg", "gif", "bmp", "tiff", "webp"] }
-lopdf = { version = "=0.45.0", default-features = false }
-rayon = "1.10"
-regex = "1.11"
-# C-08：解析 OOXML 内容类型声明，不能以 XML 文本片段冒充有效文档结构。
-roxmltree = "=0.21.1"
-rusqlite = { version = "0.32", features = ["bundled"] }
-serde = { version = "1.0", features = ["derive"] }
-serde_json = "1.0"
-sha2 = "0.10"
-# socks-proxy：Windows 系统代理的 socks= 条目（P-09）需要 ureq 的 SOCKS 支持。
-ureq = { version = "=2.12.1", default-features = false, features = ["tls", "socks-proxy"] }
-# 供 C-08 文件名 NFC 规范化使用。
-unicode-normalization = "0.1"
-uuid = { version = "1.16", features = ["v4", "serde"] }
-walkdir = "2.5"
-zip = { version = "=2.4.2", default-features = false, features = ["deflate"] }
-slint = { version = "=1.17.1", optional = true, default-features = false, features = ["std", "compat-1-2", "backend-winit", "renderer-femtovg", "renderer-software", "accessibility"] }
-rfd = { version = "0.15", optional = true }
-open = { version = "5.3", optional = true }
-# 诊断日志（P-10）与性能打点共用 tracing 基建；性能打点代码仍由 perf-tracing 特性门控。
-tracing = "0.1"
-tracing-subscriber = { version = "0.3", features = ["fmt", "env-filter"] }
-tracing-appender = "0.2"
+jchtools-foundation = { workspace = true }
+jchtools-xberg = { workspace = true }
+jchtools-acp-api = { workspace = true }
+jchtools-gui = { workspace = true, optional = true }
+jchtools-ui = { workspace = true, optional = true }
+slint = { workspace = true, optional = true }
+rfd = { workspace = true, optional = true }
+tracing = { workspace = true }
+# AH：合成 ACP fixture bin 仍由根 test-hooks 显式构建。
+agent-client-protocol = { workspace = true }
+futures = { workspace = true }
+tokio = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+uuid = { workspace = true }
 
 [target.'cfg(windows)'.dependencies]
-windows-sys = { version = "0.59", features = ["Win32_Foundation", "Win32_System_Diagnostics_ToolHelp", "Win32_Globalization", "Win32_Networking_WinSock", "Win32_Security", "Win32_Security_Authorization", "Win32_Security_Cryptography", "Win32_Storage_FileSystem", "Win32_System_IO", "Win32_System_JobObjects", "Win32_System_Pipes", "Win32_System_Registry", "Win32_System_SystemInformation", "Win32_System_Threading", "Win32_UI_WindowsAndMessaging"] }
-
-[target.'cfg(unix)'.dependencies]
-libc = "0.2"
-
-[build-dependencies]
-slint-build = { version = "=1.17.1", optional = true }
-flate2 = "1.1"
-serde_json = "1.0"
+jchtools-codeagent = { workspace = true }
+windows-sys = { workspace = true }
 
 [dev-dependencies]
-tempfile = "3.19"
-filetime = "0.2"
-i-slint-backend-testing = "=1.17.1"
-proptest = "1.11.0"
-# 仅测试用：编译 ui/app.slint 做零诊断门禁（不进产品二进制）
-slint-interpreter = "=1.17.1"
-spin_on = "0.1"
+i-slint-backend-testing = { workspace = true }
+jchtools-file-core = { workspace = true }
+jchtools-recursive-extract = { workspace = true }
+jchtools-directory-organizer = { workspace = true }
+jchtools-md-tools = { workspace = true }
+jchtools-git-tools = { workspace = true }
+jchtools-assets = { workspace = true }
+jchtools-markdown = { workspace = true }
+anyhow = { workspace = true }
+axum = { workspace = true }
+tokio-util = { workspace = true }
+base64 = { workspace = true }
+blake3 = { workspace = true }
+chrono = { workspace = true }
+directories-next = { workspace = true }
+fs2 = { workspace = true }
+hex = { workspace = true }
+flate2 = { workspace = true }
+image = { workspace = true }
+lopdf = { workspace = true }
+rayon = { workspace = true }
+regex = { workspace = true }
+roxmltree = { workspace = true }
+rusqlite = { workspace = true }
+sha2 = { workspace = true }
+ureq = { workspace = true }
+unicode-normalization = { workspace = true }
+walkdir = { workspace = true }
+zip = { workspace = true }
+tracing-subscriber = { workspace = true }
+tracing-appender = { workspace = true }
+tempfile = { workspace = true }
+filetime = { workspace = true }
+proptest = { workspace = true }
+# 仅测试用：编译 ui/app.slint 做零诊断门禁（不进产品二进制）。
+slint-interpreter = { workspace = true }
+spin_on = { workspace = true }
+
+[target.'cfg(windows)'.dev-dependencies]
+windows-sys = { workspace = true }
+
+[target.'cfg(unix)'.dev-dependencies]
+libc = { workspace = true }
 
 [[bin]]
 name = "JchTools"
 path = "src/main.rs"
 required-features = ["gui"]
-
-[[bin]]
-name = "jchocr"
-path = "src/bin/jchocr.rs"
 
 # AH：合成 ACP Agent 只在隔离测试特性下构建，不进入生产打包。
 [[bin]]
@@ -99,11 +129,6 @@ name = "jchtools-acp-fixture"
 path = "tests/fixtures/acp_api/main.rs"
 required-features = ["test-hooks"]
 test = false
-
-[[test]]
-name = "jchocr"
-path = "tests/jchocr.rs"
-required-features = ["test-hooks"]
 
 [[test]]
 name = "codeagent"
@@ -190,12 +215,26 @@ path = "tests/markdown_media_e2e.rs"
 required-features = ["test-hooks"]
 
 [workspace]
-# F23/XB-12：可选组件纳入 workspace——统一锁文件，使根 cargo audit/deny 覆盖其依赖。
-# 旧 markdown-media-worker 已随媒体转录迁移到 Xberg 推理组件退役（XB-12）。
-# default-members 保持仅主包：日常 cargo build/test 与打包脚本行为不变；
-# 可选组件的测试与 clippy 由 CI（check.yml）与 acceptance.ps1 以 --manifest-path 显式覆盖
-#（可选分发不等于可选验证）。
-members = ["optional/snap-ocr-core", "optional/snap-ocr-worker"]
+# 所有生产 crate 纳入默认测试范围，保留拆分前的内联测试覆盖。
+# 可选组件仍由既有 --manifest-path 入口显式验收，不加入 default-members。
+members = [
+    "crates/foundation",
+    "crates/file-core",
+    "crates/recursive-extract",
+    "crates/directory-organizer",
+    "crates/md-tools",
+    "crates/git-tools",
+    "crates/xberg",
+    "crates/assets",
+    "crates/markdown",
+    "crates/acp-api",
+    "crates/codeagent",
+    "crates/jchocr",
+    "crates/ui",
+    "crates/gui",
+    "optional/snap-ocr-core",
+    "optional/snap-ocr-worker",
+]
 # 本地修复 crate 作为普通 path 依赖追踪源码变化，不加入 workspace 的测试/构建目标矩阵。
 exclude = [
     "vendor/ureq-2.12.1",
@@ -211,8 +250,99 @@ exclude = [
     "vendor/error-code-3.4.0",
     "vendor/nu-ansi-term-0.50.3",
 ]
-default-members = ["."]
+default-members = [
+    ".",
+    "crates/foundation",
+    "crates/file-core",
+    "crates/recursive-extract",
+    "crates/directory-organizer",
+    "crates/md-tools",
+    "crates/git-tools",
+    "crates/xberg",
+    "crates/assets",
+    "crates/markdown",
+    "crates/acp-api",
+    "crates/codeagent",
+    "crates/jchocr",
+    "crates/ui",
+    "crates/gui",
+]
 resolver = "2"
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.98.1"
+license = "MIT"
+repository = "https://github.com/jchanghong023/JchTools"
+readme = "README.md"
+keywords = ["toolbox", "windows", "file-manager", "organizer"]
+categories = ["command-line-utilities", "gui", "filesystem"]
+
+[workspace.dependencies]
+jchtools-foundation = { path = "crates/foundation" }
+jchtools-file-core = { path = "crates/file-core" }
+jchtools-recursive-extract = { path = "crates/recursive-extract" }
+jchtools-directory-organizer = { path = "crates/directory-organizer" }
+jchtools-md-tools = { path = "crates/md-tools" }
+jchtools-git-tools = { path = "crates/git-tools" }
+jchtools-xberg = { path = "crates/xberg" }
+jchtools-assets = { path = "crates/assets" }
+jchtools-markdown = { path = "crates/markdown" }
+jchtools-acp-api = { path = "crates/acp-api" }
+jchtools-codeagent = { path = "crates/codeagent" }
+jchocr = { path = "crates/jchocr" }
+# 禁用依赖默认特性，非 GUI workspace 维度不得隐式构建 Slint。
+jchtools-ui = { path = "crates/ui", default-features = false }
+jchtools-gui = { path = "crates/gui", default-features = false }
+anyhow = "1.0"
+# AH-02/AH-11：官方 SDK 与 HTTP 后端固定版本；源码由仓库 vendor 提供。
+agent-client-protocol = { version = "=3.2.0", default-features = false, features = ["process", "stdio"] }
+axum = { version = "=0.8.9", default-features = false, features = ["http1", "json", "tokio"] }
+futures = { version = "=0.3.32", default-features = false, features = ["std", "async-await"] }
+tokio = { version = "=1.52.3", default-features = false, features = ["rt-multi-thread", "macros", "net", "process", "sync", "time", "io-util"] }
+tokio-util = { version = "=0.7.18", default-features = false, features = ["compat", "rt"] }
+base64 = "=0.22.1"
+blake3 = "1.8"
+chrono = { version = "0.4", default-features = false, features = ["clock", "serde"] }
+directories-next = "2.0"
+fs2 = "0.4"
+hex = "0.4"
+flate2 = "1.1"
+# C-08：显式内容签名修正复用锁定的解码器与 OOXML 解析器。
+image = { version = "=0.25.10", default-features = false, features = ["png", "jpeg", "gif", "bmp", "tiff", "webp"] }
+lopdf = { version = "=0.45.0", default-features = false }
+rayon = "1.10"
+regex = "1.11"
+roxmltree = "=0.21.1"
+rusqlite = { version = "0.32", features = ["bundled"] }
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+sha2 = "0.10"
+# P-09：Windows 系统代理的 socks= 条目需要 ureq 的 SOCKS 支持。
+ureq = { version = "=2.12.1", default-features = false, features = ["tls", "socks-proxy"] }
+unicode-normalization = "0.1"
+uuid = { version = "1.16", features = ["v4", "serde"] }
+walkdir = "2.5"
+zip = { version = "=2.4.2", default-features = false, features = ["deflate"] }
+slint = { version = "=1.17.1", default-features = false, features = ["std", "compat-1-2", "backend-winit", "renderer-femtovg", "renderer-software", "accessibility"] }
+rfd = "0.15"
+open = "5.3"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["fmt", "env-filter"] }
+tracing-appender = "0.2"
+windows-sys = { version = "0.59", features = ["Win32_Foundation", "Win32_System_Diagnostics_ToolHelp", "Win32_Globalization", "Win32_Networking_WinSock", "Win32_Security", "Win32_Security_Authorization", "Win32_Security_Cryptography", "Win32_Storage_FileSystem", "Win32_System_IO", "Win32_System_JobObjects", "Win32_System_Pipes", "Win32_System_Registry", "Win32_System_SystemInformation", "Win32_System_Threading", "Win32_UI_WindowsAndMessaging"] }
+libc = "0.2"
+slint-build = "=1.17.1"
+tempfile = "3.19"
+filetime = "0.2"
+i-slint-backend-testing = "=1.17.1"
+proptest = "1.11.0"
+slint-interpreter = "=1.17.1"
+spin_on = "0.1"
+
+[lints]
+workspace = true
 
 # DirectorySource 把同版本上游包视为不变；本地补丁必须使用 path source，
 # 否则只更新 vendor 文件摘要可能继续复用修复前的 rlib。版本及依赖特性保持不变。
@@ -246,7 +376,7 @@ debug = 1
 # ── lint 硬门禁（2026-09-18 起零告警，预算棘轮已删除）────────────────────────
 # 告警存量清零后全部升为硬错误：新增告警本地编译即失败；
 # CI 另以 cargo clippy --all-targets -- -D warnings 双侧兜底（默认特性 + --no-default-features）。
-[lints.rust]
+[workspace.lints.rust]
 warnings = "deny"                  # 兜底：任何未归类告警本地编译即失败（CI 另以 -D warnings 双侧兜底）
 unsafe_op_in_unsafe_fn = "deny"    # unsafe fn 体内操作必须显式 unsafe 块（edition 2024 默认规则提前转正）
 unused_must_use = "deny"
@@ -259,7 +389,7 @@ explicit_outlives_requirements = "deny"
 elided_lifetimes_in_paths = "deny"
 single_use_lifetimes = "deny"
 
-[lints.clippy]
+[workspace.lints.clippy]
 # 组级最大化发现面（clippy 默认组 correctness/suspicious/style/complexity/perf 天然开启）：
 pedantic = { level = "deny", priority = -1 }
 cargo = { level = "deny", priority = -1 }

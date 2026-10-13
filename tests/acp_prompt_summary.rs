@@ -21,7 +21,7 @@ fn prompt_summary_counts_only_submitted_messages_and_never_logs_content() {
     assert!(std::process::Command::new("python").arg(repo.join("scripts/make_tmp.py"))
         .args(["workspace", "--destination"]).arg(&directory).status().unwrap().success());
     let logs = tempfile::tempdir_in(directory).unwrap();
-    let guard = jchtools::logging::init(logs.path()).expect("测试日志初始化");
+    let guard = jchtools_foundation::logging::init(logs.path()).expect("测试日志初始化");
     let server = Server::start(env!("CARGO_BIN_EXE_jchtools-acp-fixture"), "normal");
     let first = Plan::new("text");
     let secret = "SYNTHETIC_SECRET_凭据_正文";

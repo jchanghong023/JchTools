@@ -19,7 +19,7 @@
 #[path = "fixtures/acp_opencode.rs"]
 mod support;
 
-use jchtools::acp_api::ServicePhase;
+use jchtools_acp_api::acp_api::ServicePhase;
 use serde_json::json;
 use support::{Harness, OwnedProcess, MODEL};
 

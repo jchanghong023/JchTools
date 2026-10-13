@@ -1,0 +1,34 @@
+[package]
+name = "jchtools-directory-organizer"
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.98.1"
+license = "MIT"
+description = "Directory analysis, deduplication and organization for JchTools"
+repository.workspace = true
+readme.workspace = true
+keywords.workspace = true
+categories.workspace = true
+
+[features]
+default = []
+perf-tracing = ["jchtools-foundation/perf-tracing", "jchtools-file-core/perf-tracing"]
+test-hooks = ["jchtools-foundation/test-hooks", "jchtools-file-core/test-hooks"]
+
+[dependencies]
+jchtools-foundation = { workspace = true }
+jchtools-file-core = { workspace = true }
+anyhow = { workspace = true }
+rayon = { workspace = true }
+rusqlite = { workspace = true }
+serde_json = { workspace = true }
+tracing = { workspace = true }
+uuid = { workspace = true }
+
+[dev-dependencies]
+tempfile = { workspace = true }
+jchtools-foundation = { workspace = true, features = ["test-hooks"] }
+jchtools-file-core = { workspace = true, features = ["test-hooks"] }
+
+[lints]
+workspace = true

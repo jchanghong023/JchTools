@@ -1,0 +1,33 @@
+[package]
+name = "jchtools-foundation"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+description = "Shared application settings, diagnostics, performance tracing and system proxy support"
+repository.workspace = true
+readme.workspace = true
+keywords = ["toolbox", "windows", "settings", "logging"]
+categories = ["config", "development-tools::debugging"]
+
+[features]
+default = []
+perf-tracing = []
+# 仅隔离测试使用；普通启动与生产打包不启用环境覆盖。
+test-hooks = []
+
+[dependencies]
+directories-next = { workspace = true }
+rusqlite = { workspace = true }
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }
+tracing-appender = { workspace = true }
+
+[target.'cfg(windows)'.dependencies]
+windows-sys = { workspace = true }
+
+[dev-dependencies]
+tempfile = { workspace = true }
+
+[lints]
+workspace = true

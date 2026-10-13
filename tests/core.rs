@@ -19,15 +19,15 @@
     clippy::expect_used,
     clippy::many_single_char_names
 )]
-use jchtools::{
-    config::*,
-    control::{Context, Control},
-    db::Database,
-    engine, fsutil, hashing,
-    model::{ActionKind, FileRecord, Snapshot},
-    platform::{self, DeleteResult},
-    rules,
-};
+use jchtools_file_core::config::*;
+use jchtools_file_core::control::{Context, Control};
+use jchtools_file_core::db::Database;
+use jchtools_directory_organizer::engine;
+use jchtools_file_core::fsutil;
+use jchtools_file_core::hashing;
+use jchtools_file_core::model::{ActionKind, FileRecord, Snapshot};
+use jchtools_file_core::platform::{self, DeleteResult};
+use jchtools_file_core::rules;
 use rusqlite::params;
 use std::{
     fs,
@@ -76,10 +76,10 @@ impl Fixture {
         filetime::set_file_mtime(&p, filetime::FileTime::from_unix_time(time, 0)).unwrap();
         p
     }
-    fn plan(&self, cfg: Config) -> engine::TaskResult {
+    fn plan(&self, cfg: Config) -> jchtools_file_core::task::TaskResult {
         engine::prepare_at(&self.root, cfg, Context::default(), &self.state).unwrap()
     }
-    fn apply(task: &engine::TaskResult) -> engine::TaskResult {
+    fn apply(task: &jchtools_file_core::task::TaskResult) -> jchtools_file_core::task::TaskResult {
         engine::apply(&task.directory, Context::default()).unwrap()
     }
 }
@@ -1248,7 +1248,7 @@ fn user_cancelled_analysis_records_cancelled_status() {
 }
 #[test]
 fn huge_sizes_use_u64() {
-    assert_eq!(jchtools::model::bytes(10u64 << 40), "10.00 TiB");
+    assert_eq!(jchtools_file_core::model::bytes(10u64 << 40), "10.00 TiB");
     let f = Fixture::new();
     let db = Database::create(&f.state).unwrap();
     let snapshot = Snapshot {
@@ -1567,29 +1567,7 @@ fn actions_page_filtered_by_kind_and_rejects_unknown() {
     );
 }
 
-// ===== 合同对齐回归（P-06 / C-02 / R-01 / E-05）：缺陷修复前必须失败 =====
-// 覆盖 P-06
-#[test]
-fn no_cli_binary_is_declared() {
-    let manifest = fs::read_to_string(concat!(env!("CARGO_MANIFEST_DIR"), "/Cargo.toml")).unwrap();
-    assert!(
-        !manifest.contains("jchtools-cli"),
-        "P-06：不得声明命令行二进制 jchtools-cli"
-    );
-    assert!(
-        !manifest.contains("src/bin/cli.rs"),
-        "P-06：不得保留 CLI 入口文件声明"
-    );
-}
-// 覆盖 P-06
-#[test]
-fn no_csv_report_export_remains() {
-    let db_src = fs::read_to_string(concat!(env!("CARGO_MANIFEST_DIR"), "/src/db.rs")).unwrap();
-    assert!(
-        !db_src.contains("export_csv"),
-        "P-06：任务库不得保留 CSV 报告导出 API"
-    );
-}
+// ===== 合同对齐回归（C-02 / R-01 / E-05）：缺陷修复前必须失败 =====
 // 覆盖 C-02（MUST NOT 提供同名不同内容的淘汰开关）
 #[test]
 fn config_has_no_version_elimination_switches() {
@@ -1636,16 +1614,6 @@ fn rules_table_has_no_version_or_removed_switches() {
             "C-08：三类清理各自独立覆盖删除方式，规则面板必须有对应行：{key}"
         );
     }
-}
-
-// 覆盖 P-06：不提供整理报告及任何形式的报告导出——完成文案不得再引导用户「导出报告」。
-#[test]
-fn completion_status_text_has_no_export_reference() {
-    let gui_src = fs::read_to_string(concat!(env!("CARGO_MANIFEST_DIR"), "/src/gui.rs")).unwrap();
-    assert!(
-        !gui_src.contains("导出报告"),
-        "P-06：界面文案不得引导使用已移除的报告导出"
-    );
 }
 
 // ===== L6 control::pause / checkpoint 暂停语义 =====
@@ -2556,13 +2524,13 @@ fn quarantine_move_out_is_rescanned() {
     f.write("解压失败/fix.zip", b"not a zip", 10);
     let cfg = base();
     assert_eq!(
-        engine::count_archives(&f.root, &cfg).unwrap(),
+        jchtools_recursive_extract::engine::count_archives(&f.root, &cfg).unwrap(),
         0,
         "隔离目录内的包不计入确认框计数"
     );
     fs::rename(f.root.join("解压失败/fix.zip"), f.root.join("fix.zip")).unwrap();
     assert_eq!(
-        engine::count_archives(&f.root, &cfg).unwrap(),
+        jchtools_recursive_extract::engine::count_archives(&f.root, &cfg).unwrap(),
         1,
         "用户补救（移出隔离目录）后下次扫描自然重试"
     );

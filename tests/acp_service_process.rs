@@ -20,7 +20,7 @@ use fixture::{
     consumer::{audit, body, completion, config, release, unused_port, wait_event, Http},
     Plan,
 };
-use jchtools::acp_api::{runtime, settings, ServiceConfig, ServiceStatus};
+use jchtools_acp_api::acp_api::{runtime, settings, ServiceConfig, ServiceStatus};
 use serde_json::{json, Value};
 use std::{
     cell::RefCell,
@@ -1585,7 +1585,7 @@ fn gui_child_operation() -> bool {
     if std::env::var("JCHTOOLS_ACP_PROCESS_ACTION").as_deref() != Ok("gui") {
         return false;
     }
-    use jchtools::gui::{self, EngineTestOverrides};
+    use jchtools_gui::gui::{self, EngineTestOverrides};
     use slint::ComponentHandle;
     use std::{
         cell::{Cell, RefCell},

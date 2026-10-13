@@ -15,10 +15,8 @@
 #![allow(clippy::unwrap_used, clippy::expect_used)]
 
 mod common;
-use jchtools::{
-    xberg_runtime,
-    xberg_settings::{self, Source},
-};
+use jchtools_xberg::xberg_runtime;
+use jchtools_foundation::xberg_settings::{self, Source};
 use serde_json::json;
 use std::{
     path::Path,
@@ -85,7 +83,7 @@ fn both_sources_survive_process_restart_and_failed_save() {
                     downloaded.canonicalize().unwrap()
                 );
                 let cancelled = AtomicBool::new(true);
-                assert!(jchtools::markdown_assets::download_runtime(&cancelled, |_| {}).is_err());
+                assert!(jchtools_markdown::markdown_assets::download_runtime(&cancelled, |_| {}).is_err());
                 assert_eq!(
                     xberg_settings::required().unwrap(),
                     custom.canonicalize().unwrap()
@@ -225,11 +223,11 @@ fn broker_survives_client_exit_and_obeys_explicit_stop() {
             std::fs::write(root.join("long.txt"), "document").unwrap();
             let document_root = root.clone();
             let document = std::thread::spawn(move || {
-                jchtools::markdown_document::convert(
+                jchtools_markdown::markdown_document::convert(
                     &document_root.join("long.txt"),
                     &document_root,
                     "x_media",
-                    &jchtools::markdown_document::Deadline::new(Duration::from_secs(30)),
+                    &jchtools_markdown::markdown_document::Deadline::new(Duration::from_secs(30)),
                 )
             });
             let until = Instant::now() + Duration::from_secs(10);

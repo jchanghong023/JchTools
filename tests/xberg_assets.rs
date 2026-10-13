@@ -15,7 +15,7 @@
 //! 与 XB-16：共享引擎启动配置按场景声明模型目录、媒体可用性按文件在位判定。
 //! 纯库口径，不启动代理或引擎进程。
 #![allow(clippy::unwrap_used)]
-use jchtools::xberg_runtime::{asset_for_scenario, startup_config, validate_assets};
+use jchtools_xberg::xberg_runtime::{asset_for_scenario, startup_config, validate_assets};
 use serde_json::Value;
 
 /// 与 `validate_assets` 内置的同一份固定清单（resources/markdown-assets.json）。

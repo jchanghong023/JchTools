@@ -38,6 +38,24 @@ function Get-VerifiedAsset([string]$Name) {
     }
     [PSCustomObject]@{Path=$path; Name=$Name; Sha256=$expected; Url=$asset.browser_download_url}
 }
+function Copy-FileIfDifferent([string]$SourcePath, [string]$DestinationPath) {
+    # Always hash this run's verified extraction/archive, never trust a destination manifest.
+    $sourceHash = (Get-FileHash -LiteralPath $SourcePath -Algorithm SHA256).Hash.ToLowerInvariant()
+    if (-not (Test-Path -LiteralPath $DestinationPath -PathType Leaf) -or
+        (Get-FileHash -LiteralPath $DestinationPath -Algorithm SHA256).Hash.ToLowerInvariant() -cne $sourceHash) {
+        Copy-Item -LiteralPath $SourcePath -Destination $DestinationPath -Force
+    }
+    return $sourceHash
+}
+function Write-Utf8TextIfDifferent([string]$Path, [string]$Content) {
+    # Keep Cargo-watched metadata timestamps stable when the generated text is unchanged.
+    $utf8 = New-Object Text.UTF8Encoding($false)
+    if ((Test-Path -LiteralPath $Path -PathType Leaf) -and
+        [string]::Equals([IO.File]::ReadAllText($Path, $utf8), $Content, [StringComparison]::Ordinal)) {
+        return
+    }
+    [IO.File]::WriteAllText($Path, $Content, $utf8)
+}
 $digits = $Version.Replace('.','')
 $msi = Get-VerifiedAsset "7z$digits-x64.msi"
 $source = Get-VerifiedAsset "7z$digits-src.tar.xz"
@@ -55,8 +73,8 @@ try {
     foreach ($name in @('7z.exe','7z.dll')) {
         $items = @(Get-ChildItem -LiteralPath $staging -Recurse -File | Where-Object { $_.Name -ieq $name })
         if ($items.Count -ne 1) { throw "Expected one $name in the full 7-Zip image." }
-        Copy-Item -LiteralPath $items[0].FullName -Destination (Join-Path $Destination $name) -Force
-        $manifestFiles += @{name=$name;sha256=(Get-FileHash -LiteralPath (Join-Path $Destination $name) -Algorithm SHA256).Hash.ToLowerInvariant()}
+        $sourceHash = Copy-FileIfDifferent $items[0].FullName (Join-Path $Destination $name)
+        $manifestFiles += [ordered]@{name=$name;sha256=$sourceHash}
     }
     $engine = Join-Path $Destination '7z.exe'
     # PS 5.1 下「原生命令 stderr 被 2>&1 重定向」会生成 ErrorRecord，在 EAP=Stop 时直接
@@ -70,12 +88,13 @@ try {
     if ($licenseFiles.Count -eq 0) { throw 'Official 7-Zip license files were not found.' }
     $licenses = Join-Path $Destination 'licenses'
     New-Item -ItemType Directory -Force -Path $licenses | Out-Null
-    foreach ($file in $licenseFiles) {Copy-Item -LiteralPath $file.FullName -Destination (Join-Path $licenses $file.Name) -Force}
-    Copy-Item -LiteralPath $source.Path -Destination (Join-Path $Destination $source.Name) -Force
-    $manifest = @{version=$Version;upstream='https://www.7-zip.org/';files=$manifestFiles;installer=@{name=$msi.Name;sha256=$msi.Sha256;url=$msi.Url};source=@{name=$source.Name;sha256=$source.Sha256;url=$source.Url}}
-    $utf8 = New-Object Text.UTF8Encoding($false)
-    [IO.File]::WriteAllText((Join-Path $Destination 'manifest.json'),($manifest | ConvertTo-Json -Depth 6),$utf8)
-    [IO.File]::WriteAllText((Join-Path $Destination 'NOTICE.txt'),"7-Zip $Version by Igor Pavlov.`r`nBundled unmodified full console executable and DLL.`r`nLicense: LGPL-2.1-or-later, BSD portions, and unRAR restriction; see licenses.`r`nCorresponding upstream source archive is included alongside this notice.`r`nSource: $($source.Url)`r`n",$utf8)
+    foreach ($file in $licenseFiles) {
+        Copy-FileIfDifferent $file.FullName (Join-Path $licenses $file.Name) | Out-Null
+    }
+    Copy-FileIfDifferent $source.Path (Join-Path $Destination $source.Name) | Out-Null
+    $manifest = [ordered]@{version=$Version;upstream='https://www.7-zip.org/';files=$manifestFiles;installer=[ordered]@{name=$msi.Name;sha256=$msi.Sha256;url=$msi.Url};source=[ordered]@{name=$source.Name;sha256=$source.Sha256;url=$source.Url}}
+    Write-Utf8TextIfDifferent (Join-Path $Destination 'manifest.json') ($manifest | ConvertTo-Json -Depth 6)
+    Write-Utf8TextIfDifferent (Join-Path $Destination 'NOTICE.txt') "7-Zip $Version by Igor Pavlov.`r`nBundled unmodified full console executable and DLL.`r`nLicense: LGPL-2.1-or-later, BSD portions, and unRAR restriction; see licenses.`r`nCorresponding upstream source archive is included alongside this notice.`r`nSource: $($source.Url)`r`n"
     Write-Host "Verified full 7-Zip engine is ready in $Destination"
 } finally {
     # Delete only the fresh GUID administrative extraction directory created above.

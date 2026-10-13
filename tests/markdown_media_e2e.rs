@@ -13,7 +13,7 @@
 
 //! 媒体转录真实链路 E2E（XB-02/T-19/T-20）。
 //!
-//! 本测试驱动真实公开接缝 `jchtools::markdown::e2e_convert_media`（组件解析 →
+//! 本测试驱动真实公开接缝 `jchtools_markdown::markdown::e2e_convert_media`（组件解析 →
 //! 常驻 `xberg.exe worker` → `transcribe` 请求 → SV-06 Markdown），对合成媒体
 //! 断言转录正文与结构，不以「模型加载成功/程序未崩溃」代替结果断言。
 //!
@@ -97,7 +97,7 @@ fn configure_component_via_settings() -> ComponentSettings {
         previous_state_dir,
     };
     std::env::set_var("JCHTOOLS_TEST_STATE_DIR", state.path());
-    jchtools::xberg_settings::save(&component)
+    jchtools_foundation::xberg_settings::save(&component)
         .unwrap_or_else(|error| panic!("经设置链保存组件目录失败：{error}"));
     settings
 }
@@ -263,7 +263,7 @@ fn real_component_transcribe_returns_structured_markdown() {
         .collect();
     assert!(!expected.is_empty(), "期望文本片段不得为空");
 
-    let markdown = jchtools::markdown::e2e_convert_media(&input, 600)
+    let markdown = jchtools_markdown::markdown::e2e_convert_media(&input, 600)
         .unwrap_or_else(|error| panic!("真实组件转录必须成功：{error}"));
     assert_eq!(
         std::fs::read(&input).expect("读取转换后媒体夹具失败"),
@@ -321,7 +321,7 @@ fn real_component_trackless_media_reports_no_audio() {
     let input = PathBuf::from(trackless);
     assert!(input.is_file(), "输入媒体不存在：{}", input.display());
     let original = std::fs::read(&input).expect("读取转换前媒体夹具失败");
-    let markdown = jchtools::markdown::e2e_convert_media(&input, 600)
+    let markdown = jchtools_markdown::markdown::e2e_convert_media(&input, 600)
         .unwrap_or_else(|error| panic!("真实组件转录无音轨媒体必须成功返回说明：{error}"));
     assert_eq!(
         std::fs::read(&input).expect("读取转换后媒体夹具失败"),

@@ -20,7 +20,7 @@
 //! 引擎 fixture 和进程级环境变量，避免共享会话状态互相干扰。
 
 mod common;
-use jchtools::xberg_runtime;
+use jchtools_xberg::xberg_runtime;
 use serde_json::json;
 use std::{
     path::Path,
@@ -60,7 +60,7 @@ fn unknown_id_response_fails_waiter_and_releases_lane() {
     );
     std::env::set_var("JCHTOOLS_TEST_STATE_DIR", root.join("state"));
     std::env::set_var("JCHTOOLS_TEST_BROKER_EXE", env!("CARGO_BIN_EXE_JchTools"));
-    jchtools::xberg_settings::save(root).unwrap();
+    jchtools_foundation::xberg_settings::save(root).unwrap();
     // 引擎获取等待：会话锁已与其他引擎测试二进制互斥；若仍遇到「已有 Xberg」
     // （残留孤儿），对拒绝做有界重试，成功应答才继续。
     let session_deadline = Instant::now() + Duration::from_secs(60);

@@ -24,7 +24,7 @@ fulltest / slowtest 覆盖适用的 Windows 本地质量门、真实引擎与发
 正式交付的安装包、便携 ZIP 和校验和见仓库 Releases 页。
 
 注意：7z.exe / 7z.dll 不进 git（已被 .gitignore 忽略）。运行 scripts/fetch-7zip.ps1 下载并校验
-官方引擎后，build.rs 会把引擎压缩内嵌进 EXE；没有内嵌引擎的构建在解压时会给出明确错误，
+官方引擎后，crates/file-core/build.rs 会把引擎压缩内嵌进库并链接到主 EXE；没有内嵌引擎的构建在解压时会给出明确错误，
 需要按下面方式生成内嵌引擎的构建或发布包。
 
 生成可交付的 Windows 包（需要联网，会下载并校验官方完整 7-Zip）：
@@ -34,6 +34,22 @@ fulltest / slowtest 覆盖适用的 Windows 本地质量门、真实引擎与发
 JchTools-Setup-x64.exe（安装到当前用户目录、免 UAC，含桌面快捷方式/开始菜单/卸载项）。
 完整 7-Zip 引擎在构建时已内嵌进 EXE，ZIP 只附带 licenses/、NOTICE.txt 与上游源码压缩包
 （不含 7z.exe/7z.dll）。最终用户使用安装包或 ZIP 时，不需要安装 Rust、Slint 或 7-Zip。
+
+Rust 功能位于 crates/ 下的独立 crate，根只保留 GUI 主二进制与既有夹具入口；
+GUI 装配在 crates/gui，Slint 生成代码在 crates/ui，资源仍在根 ui/ 与 resources/。
+jchocr 的 lib/bin/test 位于 crates/jchocr，独立开发入口为 cargo run -p jchocr -- --help；
+打包主构建为 cargo build --locked --release --target x86_64-pc-windows-msvc -p jchtools -p jchocr --bins。
+截图 worker 仍按 optional/snap-ocr-worker/Cargo.toml 构建；最终清单以完整 SHA256 命名，
+放在 Cargo 返回的 worker EXE 所在 release 目录，相同内容不重写，不因交付目录改变而换构建输入。
+
+每次打包通过 scripts/make_tmp.py workspace 创建独占 .tmp/package-windows-随机ID/timings.jsonl，
+命令输出显示绝对路径。日志是无 BOM UTF-8 JSONL，单次打开、仅追加并自动 Flush；
+每一完整行保存各阶段与 total 的墙钟秒数及 RUNNING/PASS/FAIL/NOT_RUN 状态。
+读取最后一条完整 JSON 行取得实际最终快照，不完整末行不作结果；未执行不记通过。
+异常追加失败记录；存储故障保留先前完整快照并传播原打包异常，不冒记成功。
+时间日志不进安装包或 ZIP，
+不改变 GateTimingFile 或质量门预算；Cargo 阶段不是纯编译时间。
+独立 crate 缓存命中与安装包提速需要真实构建证据，首次拆分必要重编不当作实测提速。
 
 jchocr.exe 随安装包和便携 ZIP 提供，供程序或 AI Agent 直接调用，不打开 GUI、不增加 MCP。
 通过共享代理调用与截图相同的 ocr_snapshot 接口，复用截图模型和布局。

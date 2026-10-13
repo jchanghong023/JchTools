@@ -35,12 +35,16 @@ powershell -NoProfile -File .\scripts\package-windows.ps1
 
 脚本从官方 `ip7z/7zip` 的固定 `26.03` 发布获取完整 x64 MSI 和对应源码，要求 GitHub 发布元数据提供 SHA-256 摘要；缺少摘要、校验失败或资产缺失时停止，不换非官方镜像。MSI 只在构建机生成 administrative image，提取完整 `7z.exe + 7z.dll`，不把安装步骤交给最终用户。
 
-随后生成 Cargo.lock，执行 `cargo check`、核心测试和真实引擎解压测试；先以 `cargo build --locked --release --target x86_64-pc-windows-msvc --manifest-path optional/snap-ocr-worker/Cargo.toml --bin snap-ocr-worker` 构建**独立的截图 OCR 后台 worker**，把原始 EXE 放到 `dist/optional-components-v0.1.2/snap-ocr-worker.exe`，按该文件的实际字节数及 SHA-256 生成同目录 `snap-ocr-assets.json`。脚本只在主程序编译期间通过 `JCHTOOLS_SNAP_OCR_MANIFEST` 让 `build.rs` 将这份清单嵌入主 EXE，不改写仓库内的占位清单；发布目录 `resources/snap-ocr-assets.json` 也包含同一清单。接着按相同的显式 x64 目标编译 GUI，校验内嵌引擎与清单，复制许可证及 7-Zip 源码（发布包不含 7z.exe/dll），生成 `dist/JchTools-Windows-x64-时间戳.zip`；构建机装有 Inno Setup 6 时还会编译出安装包 `dist/JchTools-Setup-x64.exe`（安装到当前用户目录、免管理员权限，自动创建桌面快捷方式与开始菜单入口，控制面板可卸载；缺 ISCC 时该阶段如实标注 NOT RUN，CI 发布流程保证产出）。**ZIP 和安装包包含 `snap-ocr-worker.exe` 与资产清单；截图字体和许可证直接内置于 worker，无需额外初始化；Xberg、ONNX 模型和推理 DLL 仍使用独立 Xberg 组件目录。后台 worker 是主包交付内容，缺失时应重新解包或重新安装同一发布包，不能把未交付的独立下载地址当作恢复依据。**该构建目录的 `BUILD-INFO.json` 记录实际执行结果；脚本不会声称已完成手工 UI 或多 TB 性能验收。首次验证通过后的 Cargo.lock 应纳入仓库。
+随后在缺少时生成 Cargo.lock，执行 `cargo check`、workspace 测试和真实引擎解压测试；先以 `cargo build --locked --release --target x86_64-pc-windows-msvc --manifest-path optional/snap-ocr-worker/Cargo.toml --bin snap-ocr-worker` 构建**独立的截图 OCR 后台 worker**，把原始 EXE 放到 `dist/optional-components-v0.1.2/snap-ocr-worker.exe`，按实际字节数及 SHA-256 回填清单。在 Cargo 返回的 worker EXE 所在 release 目录中，以最终清单完整 SHA-256 命名 `snap-ocr-assets-<SHA256>.json`；相同字节不重写，变更输出目录不改变这个构建输入。脚本只在主包构建期间通过 `JCHTOOLS_SNAP_OCR_MANIFEST` 让 `crates/assets/build.rs` 内嵌这份稳定清单，结束或异常时恢复调用者环境，不改仓库内的占位清单；optional 暂存目录和发布目录 `resources/snap-ocr-assets.json` 交付相同字节。
 
-打包只使用本次 Cargo JSON `compiler-artifact` 中按 manifest 与 bin 唯一匹配的实际可执行文件，并从同一包对应的 `build-script-executed` 的 `OUT_DIR` 读取内嵌引擎状态；不按缓存时间戳挑选其他构建的状态，缺失、歧义或未完整内嵌时拒绝打包。第三方许可收集按 [vendor/SOURCES.json](vendor/SOURCES.json) 的 `license_and_notice_materials` 保留包内相对路径（含嵌套目录）与实际字节，登记材料缺失时停止。仓库内依赖的本地源修补及理由以该清单的 `project_source_modifications` 为准；上游归档摘要标识原发布归档，不代表修补后的本地树与上游逐字节相同。
+主程序与独立 CLI 使用 `cargo build --locked --release --target x86_64-pc-windows-msvc -p jchtools -p jchocr --bins`；保留已有构建缓存、profile、flags、features 与目标配置，不执行 `cargo clean`。随后校验引擎及清单，复制许可证和 7-Zip 源码（发布包不含 7z.exe/dll），生成 `dist/JchTools-Windows-x64-时间戳.zip`；构建机装有 Inno Setup 6 时还会生成 `dist/JchTools-Setup-x64.exe`（当前用户安装、免 UAC、桌面及开始菜单入口、控制面板卸载；缺 ISCC 时安装包阶段如实标为 NOT_RUN，仍生成 ZIP）。**ZIP 和安装包均包含 `jchocr.exe`、`snap-ocr-worker.exe` 与资产清单；截图字体和许可证直接内置于 worker，无需额外初始化；Xberg、ONNX 模型和推理 DLL 仍使用独立 Xberg 组件目录。后台 worker 缺失时应重新解包或安装同一发布包，不能把未交付的独立下载地址当作恢复依据。** `BUILD-INFO.json` 只记录实际执行范围，不声称手工 UI、多 TB 性能或当前源码实测提速已通过。
+
+打包只使用本次 Cargo JSON `compiler-artifact` 中按 manifest 与 bin 唯一匹配的实际可执行文件：GUI 属于根 `Cargo.toml`，CLI 属于 `crates/jchocr/Cargo.toml`。内嵌引擎状态绑定 `crates/file-core/Cargo.toml` 的真实 `jchtools_file_core` 库 artifact 的 `package_id`，从对应 `build-script-executed` 的 `OUT_DIR` 读取；不把 GUI 的 OUT_DIR 当引擎来源，不按时间戳挑缓存，缺失、歧义或未完整内嵌时拒绝打包。第三方许可收集仅按 `metadata.workspace_members` 的 package ID 排除本工程自有 crate，非 workspace 的 vendor path 补丁仍收集；根 `LICENSE` 继续交付。按 [vendor/SOURCES.json](vendor/SOURCES.json) 的 `license_and_notice_materials` 保留相对路径（含嵌套目录）和实际字节，登记材料缺失时停止。本地源修补及理由以该清单的 `project_source_modifications` 为准；上游摘要标识原发布归档，不代表修补后的本地树与上游逐字节相同。
 
 `-Offline` 要求已备齐并校验 7-Zip 等外部交付资产；Git 不作为打包依赖或随包资产。Rust 依赖源码固定在仓库 `vendor/`，不需要本机 crates.io 源码缓存。`-SkipTests` 在构建记录明确标为 NOT RUN；CI 编译、打包和发布使用此开关，功能验收复用已通过且源码未变的 Windows 本地证据，不能以 CI 成功替代本地测试。脚本不修改系统执行策略，不自动安装编译器，不自动提升权限。
 安装包与便携 ZIP 均携带 `BUILD-INFO.json`：安装包内记录 ISCC 编译前的共同测试结果与未验证项，安装包编译阶段自身如实标为未完结；编译完成后，便携 ZIP 中的记录再更新为该阶段的实际结果。文件存在不表示真实桌面或完整发布验收已通过。
+
+脚本通过 `python scripts/make_tmp.py workspace` 创建独占 `.tmp/package-windows-<随机ID>/timings.jsonl`，启动及终局输出记录的绝对路径。日志以无 BOM UTF-8 JSONL 格式单次打开、仅追加写入，并自动 Flush；每一完整行是一份包含全部阶段与 total 的快照，不反复替换同一文件。读取时逐行解析，以最后一条完整 JSON 行取得各 step 最终状态/墙钟秒数；进程或存储异常留下的不完整末行不能当作结果。记录 setup、assets、font-and-engine-validation、lockfile、tests、worker-build、manifest、main-build、staging、licenses、package-validation、installer、zip 和 total；阶段转换追加，正常异常路径追加失败状态，未执行项为 NOT_RUN（不冒记 PASS）。存储故障时先前完整快照保留可读，报告日志写入故障并继续传播原打包异常，不把旧 RUNNING 快照冒称终局成功。该文件仅供开发观测，不进安装包/ZIP；Cargo 阶段是整条命令墙钟，并非纯编译时间，不改变 `GateTimingFile` 或质量门共享预算会计。首次 crate 拆分会产生必要重编；缓存命中、提速与实际耗时须由对应源码的真实 Cargo 和完整打包记录证明。
 
 
 最终用户解压构建出的 ZIP，运行 `JchTools.exe`；**不用另装 7-Zip，7-Zip 引擎也不依赖 PATH**；Git 工具使用系统已安装且可经 PATH 解析的 Git for Windows。图形驱动异常时可运行同目录的 `launch-software.cmd` 请求软件渲染；软件渲染及中文效果同样需要真实 Windows 验证。
@@ -227,7 +231,7 @@ cargo test --features test-hooks --test acp_opencode -- --ignored --exact real_o
 
 OMP `server_agent` 开发边界：来源过滤及聊天到 `X-JchTools-Session-ID` 的内存关联由 OMP 的 `jchtools-agent` 适配器维护；JchTools 继续接受文本完整历史，校验已提交前缀并仅将新增消息交给 ACP，不为该前端统一删除 `system`/`developer`。新建/分支聊天或目录改变由 OMP 发起新会话，明确失效时只显示错误、不自动重放；不增加仅新增消息的 HTTP 接口、跨后台重启恢复、MCP 或子代理桥接。
 
-`src/acp_api/acp/mod.rs` 在实际 `session/prompt` 提交边界输出 INFO 事件 `acp_prompt_summary`：请求关联 `request_id`、是否显式复用 `reused_session`、本轮实际新增 `message_count`、四种角色数量及原始文本 UTF-8 总字节数 `text_bytes`。首轮统计全部提交消息，续轮只统计扣除已确认历史后的新增消息；不计角色包装文本，不记录正文、完整请求、目录、工具参数或凭据，也不增加导出接口。隔离官方 SDK 夹具验证入口为 `cargo test --features test-hooks --test acp_prompt_summary --test acp_http_contract`；该证据不代替另行授权的真实 OpenCode 多轮验收。
+`crates/acp-api/src/acp_api/acp/mod.rs` 在实际 `session/prompt` 提交边界输出 INFO 事件 `acp_prompt_summary`：请求关联 `request_id`、是否显式复用 `reused_session`、本轮实际新增 `message_count`、四种角色数量及原始文本 UTF-8 总字节数 `text_bytes`。首轮统计全部提交消息，续轮只统计扣除已确认历史后的新增消息；不计角色包装文本，不记录正文、完整请求、目录、工具参数或凭据，也不增加导出接口。隔离官方 SDK 夹具验证入口为 `cargo test --features test-hooks --test acp_prompt_summary --test acp_http_contract`；该证据不代替另行授权的真实 OpenCode 多轮验收。
 
 代码中的删除测试全部使用 tempfile 临时夹具，不会删除测试机的个人文件。真实引擎测试有 ignore 标记，只有显式运行时启用。
 
@@ -245,6 +249,6 @@ OMP `server_agent` 开发边界：来源过滤及聊天到 `X-JchTools-Session-I
 
 ## 工程入口
 
-`src/main.rs`/`ui/app.slint`：界面；`resources/rules.json`：界面规则清单；`src/config.rs`：配置及校验；`src/registry.rs`：真实工具注册；`src/engine.rs`：阶段控制；`archive.rs`：7-Zip；`planner.rs`：计划；`platform.rs`：删除（一律永久删除，S-02）；`db.rs`/`schema.sql`：磁盘索引、计划及审计；`tests/`：测试；`scripts/`：检查/打包；`.github/workflows/check.yml`：Windows CI。
+根 `src/main.rs` 只装配 GUI 和既有后台入口，不提供旧根库 façade；`crates/gui` 承接 GUI 业务装配，`crates/ui` 仅编译根 `ui/app.slint`。`crates/file-core` 承接配置、模型、磁盘索引/审计、共享任务/扫描、文件与引擎基础；`crates/recursive-extract` 和 `crates/directory-organizer` 分别承接递归解压与目录整理。MD、Git、Markdown、assets、Xberg、ACP、CodeAgent 与 foundation 均在各自 `crates/` 中；`crates/jchocr` 有自己的 lib/bin/test，可用 `cargo run -p jchocr -- --help`，无需构建 GUI。截图 worker 入口仍为 `optional/snap-ocr-worker/Cargo.toml`，复用真实 foundation/Xberg crate。根 `resources/`、`ui/`、`tests/`、`docs/` 仍是唯一资源/测试位置（CLI 测试归 `crates/jchocr/tests/`）；`scripts/` 是检查/打包入口；`.github/workflows/check.yml` 是 Windows CI。
 
 技术依据和许可见 [第三方说明](THIRD_PARTY_NOTICES.md)；全部需求域及其唯一权威文档见 [需求目录索引](docs/requirements/README.md)，适用全局约束见 [CONTRACT.md](docs/requirements/CONTRACT.md)。

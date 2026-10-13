@@ -1,17 +1,17 @@
 #![cfg_attr(target_os = "windows", windows_subsystem = "windows")]
-//! JchTools 图形界面入口：全部界面组装在 `jchtools::gui`（保持 bin 为薄壳，便于测试）。
+//! JchTools 图形界面入口：全部界面组装在 `jchtools_gui::gui`（保持 bin 为薄壳，便于测试）。
 fn main() {
     let mode = std::env::args_os().nth(1);
     if mode.as_deref() == Some(std::ffi::OsStr::new("--codeagent-service")) {
-        if let Some(guard) = jchtools::xberg_settings::state_dir()
+        if let Some(guard) = jchtools_foundation::xberg_settings::state_dir()
             .ok()
             .as_deref()
-            .and_then(jchtools::logging::init)
+            .and_then(jchtools_foundation::logging::init)
         {
-            jchtools::logging::hold_for_process(guard);
+            jchtools_foundation::logging::hold_for_process(guard);
         }
-        let _flush_on_unwind = jchtools::logging::FlushOnDrop;
-        let served = jchtools::codeagent::serve();
+        let _flush_on_unwind = jchtools_foundation::logging::FlushOnDrop;
+        let served = jchtools_codeagent::codeagent::serve();
         if served.is_err() {
             tracing::error!(
                 event = "application_failed",
@@ -22,22 +22,22 @@ fn main() {
                 "CodeAgent 后台异常退出"
             );
         }
-        jchtools::logging::flush_before_exit();
+        jchtools_foundation::logging::flush_before_exit();
         if served.is_err() {
             std::process::exit(1);
         }
         return;
     }
     if mode.as_deref() == Some(std::ffi::OsStr::new("--acp-http-service")) {
-        if let Some(guard) = jchtools::xberg_settings::state_dir()
+        if let Some(guard) = jchtools_foundation::xberg_settings::state_dir()
             .ok()
             .as_deref()
-            .and_then(jchtools::logging::init)
+            .and_then(jchtools_foundation::logging::init)
         {
-            jchtools::logging::hold_for_process(guard);
+            jchtools_foundation::logging::hold_for_process(guard);
         }
-        let _flush_on_unwind = jchtools::logging::FlushOnDrop;
-        let served = jchtools::acp_api::runtime::serve();
+        let _flush_on_unwind = jchtools_foundation::logging::FlushOnDrop;
+        let served = jchtools_acp_api::acp_api::runtime::serve();
         if let Err(error) = &served {
             tracing::error!(
                 event = "application_failed",
@@ -48,7 +48,7 @@ fn main() {
                 "模型服务后台异常退出"
             );
         }
-        jchtools::logging::flush_before_exit();
+        jchtools_foundation::logging::flush_before_exit();
         if served.is_err() {
             std::process::exit(1);
         }
@@ -58,18 +58,18 @@ fn main() {
         // P-10：代理进程同样落盘诊断日志（IPC 与引擎生命周期的关键证据）。
         // 句柄登记为进程全局：停止看门狗 exit(0) 前能显式刷盘，serve 返回路径
         // 也统一经 flush_before_exit 落盘（静态量不随进程退出自动析构）。
-        if let Some(guard) = jchtools::xberg_settings::state_dir()
+        if let Some(guard) = jchtools_foundation::xberg_settings::state_dir()
             .ok()
             .as_deref()
-            .and_then(jchtools::logging::init)
+            .and_then(jchtools_foundation::logging::init)
         {
-            jchtools::logging::hold_for_process(guard);
+            jchtools_foundation::logging::hold_for_process(guard);
         }
         // P-10：guard 存于静态量后不随 panic 展开析构；用本地 RAII 兜住
         // serve() 的 unwind 路径（正常/错误退出路径由下方 flush_before_exit
         // 显式覆盖，两者经同一互斥量幂等）。
-        let _flush_on_unwind = jchtools::logging::FlushOnDrop;
-        let served = jchtools::xberg_runtime::serve();
+        let _flush_on_unwind = jchtools_foundation::logging::FlushOnDrop;
+        let served = jchtools_xberg::xberg_runtime::serve();
         if served.is_err() {
             tracing::error!(
                 event = "application_failed",
@@ -80,13 +80,13 @@ fn main() {
                 "共享代理异常退出"
             );
         }
-        jchtools::logging::flush_before_exit();
+        jchtools_foundation::logging::flush_before_exit();
         if served.is_err() {
             std::process::exit(1);
         }
         return;
     }
-    if let Err(error) = jchtools::gui::run() {
+    if let Err(error) = jchtools_gui::gui::run() {
         let _ = rfd::MessageDialog::new()
             .set_title("JchTools 启动失败")
             .set_description(format!(

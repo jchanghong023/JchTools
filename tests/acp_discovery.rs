@@ -15,7 +15,7 @@
 //! ACP Agent 是隔离合成 fixture，不代表真实 OpenCode/供应商端到端验收。
 #![allow(clippy::unwrap_used, clippy::expect_used)]
 
-use jchtools::acp_api::{
+use jchtools_acp_api::acp_api::{
     runtime, settings, ServiceConfig, ServiceDiscovery, ServicePhase, ServiceStatus,
 };
 use serde_json::{json, Value};

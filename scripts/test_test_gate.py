@@ -652,7 +652,106 @@ class CargoArtifactEncodingTests(unittest.TestCase):
                         gate_runtime.Result("root-test-build", "PASS", "合成 Cargo 日志", log=log)
                     )
                     self.assertEqual(len(discovered), 1, "唯一 artifact 因 UTF-8 BOM 被丢失")
-                    self.assertEqual(discovered[0].name, "root-test-build-中文测试")
+                    self.assertEqual(discovered[0].argv[0], artifact["executable"])
+                    self.assertTrue(discovered[0].watch_test_failures)
+
+    def test_same_name_lib_bin_and_integration_artifacts_all_reach_reports(self) -> None:
+        workspace = test_gate.ROOT / ".tmp" / "test-gate" / "crate-artifacts"
+        with patch.object(sys, "argv", ["make_tmp.py", "workspace", "--destination", str(workspace)]):
+            self.assertEqual(make_tmp.main(), 0)
+        with tempfile.TemporaryDirectory(dir=workspace) as temporary:
+            root = Path(temporary)
+            executables = {kind: str(root / f"{kind}.exe") for kind in ("lib", "bin", "test")}
+            log = root / "cargo.json"
+            log.write_text(
+                "\n".join(
+                    json.dumps({
+                        "reason": "compiler-artifact",
+                        "profile": {"test": True},
+                        "target": {"name": "jchocr", "kind": [kind]},
+                        "executable": executable,
+                    })
+                    for kind, executable in executables.items()
+                ),
+                encoding="utf-8",
+            )
+            stages = local_gate_plan._test_binary_stages(
+                gate_runtime.Result("root-test-build", "PASS", "合成 Cargo 日志", log=log)
+            )
+            self.assertCountEqual([stage.argv[0] for stage in stages], executables.values())
+            self.assertEqual(len({stage.name for stage in stages}), len(executables))
+            # 真实调度与汇总消费者执行隔离 Python 子进程；不把合成日志冒称 Cargo 验证。
+            for stage in stages:
+                stage.argv = [sys.executable, "-c", "import sys; print(sys.argv[1])", stage.argv[0]]
+            output = io.StringIO()
+            with patch.object(test_gate, "LOG_DIR", root / "logs"), contextlib.redirect_stdout(output):
+                code = test_gate.execute_gate("fastcheck", 60.0, stages_override=stages)
+            self.assertEqual(code, 0)
+            reports = output.getvalue().splitlines()
+            report_positions = []
+            logs = []
+            for stage in stages:
+                matching = [i for i, line in enumerate(reports) if line.startswith(f"PASS {stage.name}:")]
+                self.assertEqual(len(matching), 1, "每个实际执行的 artifact 必须独立报告")
+                report_positions.append(matching[0])
+                # 门按级别创建日志子目录；消费者应读取报告公开的路径，不猜内部布局或文件名。
+                self.assertLess(matching[0] + 1, len(reports))
+                log_line = reports[matching[0] + 1]
+                self.assertTrue(log_line.startswith("  log="), "每个 artifact 必须报告实际日志路径")
+                artifact_log = Path(log_line.removeprefix("  log="))
+                logs.append(artifact_log)
+                self.assertEqual(
+                    artifact_log.read_text(encoding="utf-8").splitlines(),
+                    [stage.argv[-1]],
+                    "每个 artifact 的独立日志必须包含自身子进程输出，不能混入其它 artifact",
+                )
+            self.assertEqual(len(set(report_positions)), len(executables))
+            self.assertEqual(len(logs), len(executables))
+            self.assertEqual(len(set(logs)), len(executables), "不同 artifact 不能共享日志路径")
+            recorded = "\n".join(path.read_text(encoding="utf-8") for path in logs)
+            for executable in executables.values():
+                self.assertIn(executable, recorded)
+
+    def test_artifact_desktop_exclusions_preserve_other_test_cases(self) -> None:
+        workspace = test_gate.ROOT / ".tmp" / "test-gate" / "artifact-desktop-boundary"
+        with patch.object(sys, "argv", ["make_tmp.py", "workspace", "--destination", str(workspace)]):
+            self.assertEqual(make_tmp.main(), 0)
+        with tempfile.TemporaryDirectory(dir=workspace) as temporary:
+            root = Path(temporary)
+            names = ("gui_flow", "acp_service_process", "jchtools_gui", "jchtools_file_core")
+            log = root / "cargo.json"
+            log.write_text(
+                "\n".join(
+                    json.dumps({
+                        "reason": "compiler-artifact",
+                        "profile": {"test": True},
+                        "target": {"name": name, "kind": ["test"] if index < 2 else ["lib"]},
+                        "executable": str(root / f"{name}.exe"),
+                    })
+                    for index, name in enumerate(names)
+                ),
+                encoding="utf-8",
+            )
+            stages = local_gate_plan._test_binary_stages(
+                gate_runtime.Result("root-test-build", "PASS", "合成 Cargo 日志", log=log)
+            )
+            self.assertCountEqual(
+                [stage.argv[0] for stage in stages],
+                [str(root / f"{name}.exe") for name in names[1:]],
+            )
+            for stage in stages:
+                skipped = [
+                    stage.argv[index + 1]
+                    for index, argument in enumerate(stage.argv[:-1])
+                    if argument == "--skip"
+                ]
+                expected = [
+                    "real_gui_save_close_kill_reopen_and_confirmed_service_exit",
+                    "real_gui_pending_configuration_applies_only_after_inflight_completion",
+                ] if stage.argv[0] == str(root / "acp_service_process.exe") else []
+                self.assertEqual(skipped, expected)
+                self.assertNotIn("--ignored", stage.argv)
+                self.assertTrue(stage.watch_test_failures)
 
 
 class GateCleanupCancellationTests(unittest.TestCase):

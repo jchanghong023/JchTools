@@ -18,7 +18,7 @@
 //! 分开成独立测试进程避免竞争。
 
 mod common;
-use jchtools::xberg_runtime;
+use jchtools_xberg::xberg_runtime;
 use serde_json::json;
 use std::{path::Path, process::Command, sync::atomic::AtomicBool, time::Duration};
 
@@ -55,7 +55,7 @@ fn legacy_worker_without_capabilities_rejects_inference() {
     );
     std::env::set_var("JCHTOOLS_TEST_STATE_DIR", root.join("state"));
     std::env::set_var("JCHTOOLS_TEST_BROKER_EXE", env!("CARGO_BIN_EXE_JchTools"));
-    jchtools::xberg_settings::save(root).unwrap();
+    jchtools_foundation::xberg_settings::save(root).unwrap();
     // 生产语义：每登录会话只允许一个 Xberg（进程扫描执法）。会话锁已保证
     // 与其他测试互斥；若仍遇到「已有 Xberg」（残留孤儿），对拒绝做有界重试。
     // 注意：忙碌应答里携带的是占用者的 pid，守卫只能从成功应答构造。

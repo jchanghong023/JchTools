@@ -19,11 +19,11 @@
 // （与 clippy.toml 的 allow-*-in-tests 策略一致，集成测试 crate 不在其覆盖范围内）。
 #![allow(clippy::unwrap_used, clippy::expect_used)]
 mod common;
-use jchtools::markdown::{
+use jchtools_markdown::markdown::{
     test_media_dir_name, test_scan_count_with_cancel, test_scan_media_dirs,
     test_write_new_markdown, FormatGroup, Options,
 };
-use jchtools::markdown_document::MediaFile;
+use jchtools_markdown::markdown_document::MediaFile;
 use std::sync::atomic::AtomicBool;
 
 fn test_dir() -> tempfile::TempDir {
@@ -161,20 +161,20 @@ fn batch_uses_selected_engine_formats() {
             std::fs::write(target, b"synthetic asset").unwrap();
         }
     }
-    jchtools::markdown_assets::save_runtime_dir(root).unwrap();
+    jchtools_markdown::markdown_assets::save_runtime_dir(root).unwrap();
     let input = root.join("input");
     let output = root.join("output");
     std::fs::create_dir(&input).unwrap();
     std::fs::create_dir(&output).unwrap();
     std::fs::write(input.join("a.txt"), b"synthetic text").unwrap();
     std::fs::write(input.join("b.rtf"), b"synthetic unsupported input").unwrap();
-    let state = jchtools::xberg_runtime::request(
+    let state = jchtools_xberg::xberg_runtime::request(
         root,
         serde_json::json!({"command":"snapshot_state"}),
         std::time::Duration::from_secs(15),
         &AtomicBool::new(false),
     )
-    .and_then(jchtools::xberg_runtime::checked)
+    .and_then(jchtools_xberg::xberg_runtime::checked)
     .unwrap();
     struct BrokerGuard(u64);
     impl Drop for BrokerGuard {
@@ -193,8 +193,8 @@ fn batch_uses_selected_engine_formats() {
         timeout_secs: 15,
     };
     let mut started = Vec::new();
-    let summary = jchtools::markdown::run(&options, &AtomicBool::new(false), |event| {
-        if let jchtools::markdown::Event::FileStarted { relative, .. } = event {
+    let summary = jchtools_markdown::markdown::run(&options, &AtomicBool::new(false), |event| {
+        if let jchtools_markdown::markdown::Event::FileStarted { relative, .. } = event {
             started.push(relative);
         }
     })
@@ -250,13 +250,13 @@ fn batch_preserves_image_titles_and_commits_angle_bracket_media() {
             std::fs::write(target, b"synthetic asset").unwrap();
         }
     }
-    jchtools::markdown_assets::save_runtime_dir(root).unwrap();
-    let state = jchtools::xberg_runtime::request(
+    jchtools_markdown::markdown_assets::save_runtime_dir(root).unwrap();
+    let state = jchtools_xberg::xberg_runtime::request(
         root,
         serde_json::json!({"command":"snapshot_state"}),
         std::time::Duration::from_secs(15),
         &AtomicBool::new(false),
-    ).and_then(jchtools::xberg_runtime::checked).unwrap();
+    ).and_then(jchtools_xberg::xberg_runtime::checked).unwrap();
     struct BrokerGuard(u64);
     impl Drop for BrokerGuard {
         fn drop(&mut self) {
@@ -278,7 +278,7 @@ fn batch_preserves_image_titles_and_commits_angle_bracket_media() {
         groups: vec![FormatGroup::Other],
         timeout_secs: 15,
     };
-    let summary = jchtools::markdown::run(&options, &AtomicBool::new(false), |_| {}).unwrap();
+    let summary = jchtools_markdown::markdown::run(&options, &AtomicBool::new(false), |_| {}).unwrap();
     assert_eq!(summary.success, 1);
     assert_eq!(summary.partial, 0);
     assert_eq!(summary.failed, 0);

@@ -15,11 +15,9 @@
 #![allow(clippy::unwrap_used, clippy::expect_used)]
 
 use filetime::{set_file_mtime, FileTime};
-use jchtools::{
-    config::{Config, DeleteMode, KeepPolicy},
-    control::Context,
-    engine,
-};
+use jchtools_file_core::config::{Config, DeleteMode, KeepPolicy};
+use jchtools_file_core::control::Context;
+use jchtools_directory_organizer::engine;
 use std::fs;
 use tempfile::TempDir;
 
@@ -64,12 +62,12 @@ fn copy_name_bridge_forms_one_candidate_component() {
         task.summary.planned_delete, 2,
         "C-02 候选连通组应保留一份并删除其余两份"
     );
-    let db = jchtools::db::Database::open(&task.directory).unwrap();
+    let db = jchtools_file_core::db::Database::open(&task.directory).unwrap();
     let deletions: Vec<_> = db
         .actions_page(0, 100)
         .unwrap()
         .into_iter()
-        .filter(|action| matches!(action.kind, jchtools::model::ActionKind::Delete))
+        .filter(|action| matches!(action.kind, jchtools_file_core::model::ActionKind::Delete))
         .collect();
     assert_eq!(deletions.len(), 2);
     assert_eq!(
@@ -111,12 +109,12 @@ fn shortest_name_uses_original_utf16_length_after_case_fold() {
     config.clean_zero = false;
     config.clean_copy_name = false;
     let task = engine::prepare_at(&root, config, Context::default(), &state).unwrap();
-    let db = jchtools::db::Database::open(&task.directory).unwrap();
+    let db = jchtools_file_core::db::Database::open(&task.directory).unwrap();
     let deletions: Vec<_> = db
         .actions_page(0, 100)
         .unwrap()
         .into_iter()
-        .filter(|action| matches!(action.kind, jchtools::model::ActionKind::Delete))
+        .filter(|action| matches!(action.kind, jchtools_file_core::model::ActionKind::Delete))
         .collect();
     assert_eq!(deletions.len(), 1, "同内容二项必须仅删除一份：{deletions:?}");
     assert_eq!(task.summary.planned_delete, 1);
@@ -154,12 +152,12 @@ fn connected_component_keeps_existing_hardlink_and_deletes_independent_copy() {
     config.clean_zero = false;
     config.clean_copy_name = false;
     let task = engine::prepare_at(&root, config, Context::default(), &state).unwrap();
-    let db = jchtools::db::Database::open(&task.directory).unwrap();
+    let db = jchtools_file_core::db::Database::open(&task.directory).unwrap();
     let deletions: Vec<_> = db
         .actions_page(0, 100)
         .unwrap()
         .into_iter()
-        .filter(|action| matches!(action.kind, jchtools::model::ActionKind::Delete))
+        .filter(|action| matches!(action.kind, jchtools_file_core::model::ActionKind::Delete))
         .collect();
     assert_eq!(deletions.len(), 1, "硬链接不另计删除计划：{deletions:?}");
     assert_eq!(deletions[0].source, "C/report (1).txt");
@@ -194,7 +192,7 @@ fn other_names_enabled_deduplicates_same_and_copy_names() {
             ..Config::default()
         };
         let task = engine::prepare_at(&root, config, Context::default(), &state).unwrap();
-        let db = jchtools::db::Database::open(&task.directory).unwrap();
+        let db = jchtools_file_core::db::Database::open(&task.directory).unwrap();
         let deletions = db.actions_page_filtered(0, 100, Some("delete")).unwrap();
         assert_eq!(task.summary.planned_delete, 1, "同尺寸同内容必须去重：{names:?}");
         assert_eq!(deletions.len(), 1);

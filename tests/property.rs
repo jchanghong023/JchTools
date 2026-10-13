@@ -14,7 +14,7 @@
 //! 属性测试：安全边界不靠枚举用例，而靠随机输入上的不变式。
 //! 不变式描述的是需求——不得逃逸根目录、不得产生 Windows 非法名——与具体实现无关。
 //! 实现调整导致不变式失败时，说明实现破坏了需求，而不是测试太严。
-use jchtools::fsutil;
+use jchtools_file_core::fsutil;
 use proptest::{collection, prelude::*};
 use std::path::Component;
 
@@ -127,12 +127,12 @@ proptest! {
         for character in ['\u{7f}', '\u{80}', '\u{85}', '\u{9f}'] {
             let name = format!("a{character}b");
             prop_assert!(fsutil::validate_component(&name).is_ok(), "合法字符 {:?}", character);
-            prop_assert_eq!(jchtools::rules::legalize_derived(&name), name);
+            prop_assert_eq!(jchtools_file_core::rules::legalize_derived(&name), name);
         }
         for codepoint in 0u8..=31 {
             let name = format!("a{}b", char::from(codepoint));
             prop_assert!(fsutil::validate_component(&name).is_err(), "禁止 C0 {:?}", codepoint);
-            prop_assert_eq!(jchtools::rules::legalize_derived(&name), "a_b");
+            prop_assert_eq!(jchtools_file_core::rules::legalize_derived(&name), "a_b");
         }
     }
 

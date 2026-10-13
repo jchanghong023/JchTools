@@ -16,7 +16,8 @@
 // 测试代码允许 unwrap/expect：断言失败即测试失败，属合理用法
 // （与 clippy.toml 的 allow-*-in-tests 策略一致，集成测试 crate 不在其覆盖范围内）。
 #![allow(clippy::unwrap_used, clippy::expect_used)]
-use jchtools::{control::Control, md_tools};
+use jchtools_file_core::control::Control;
+use jchtools_md_tools::md_tools;
 use std::{
     fs,
     path::Path,
@@ -34,7 +35,7 @@ fn set_created(path: &Path, seconds: u64) {
     let time = SystemTime::UNIX_EPOCH + Duration::from_secs(seconds);
     // 平台不支持创建时间时此处失败（M-03 的替代口径按修改时间）；
     // 本套用例在 Windows（P-07 唯一支持平台）上必须成功。
-    jchtools::fsutil::set_created_time(path, time)
+    jchtools_file_core::fsutil::set_created_time(path, time)
         .unwrap_or_else(|error| panic!("设置创建时间失败：{}：{error}", path.display()));
 }
 

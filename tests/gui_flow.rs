@@ -19,7 +19,7 @@
 // （与 clippy.toml 的 allow-*-in-tests 策略一致，集成测试 crate 不在其覆盖范围内）。
 #![cfg(feature = "gui")]
 #![allow(clippy::unwrap_used, clippy::expect_used)]
-use jchtools::gui::{self, EngineTestOverrides};
+use jchtools_gui::gui::{self, EngineTestOverrides};
 use slint::{ComponentHandle, Model};
 use std::{
     cell::{Cell, RefCell},
@@ -120,17 +120,17 @@ fn run_isolated_test(name: &str) -> bool {
     if let Some(root) = std::env::var_os(CHILD_ROOT) {
         let root = PathBuf::from(root);
         assert_eq!(
-            jchtools::xberg_settings::state_dir().unwrap(),
+            jchtools_foundation::xberg_settings::state_dir().unwrap(),
             root.join("state")
         );
-        assert_eq!(jchtools::snap_ocr_assets::asset_root(), root.join("snap"));
+        assert_eq!(jchtools_assets::snap_ocr_assets::asset_root(), root.join("snap"));
         assert!(
-            jchtools::snap_ocr_assets::pipe_name().starts_with(r"\\.\pipe\jchtools-snap-ocr-test-")
+            jchtools_assets::snap_ocr_assets::pipe_name().starts_with(r"\\.\pipe\jchtools-snap-ocr-test-")
         );
-        assert!(jchtools::acp_api::settings::load_config()
+        assert!(jchtools_acp_api::acp_api::settings::load_config()
             .unwrap()
             .is_none());
-        assert!(jchtools::xberg_settings::load().unwrap().is_none());
+        assert!(jchtools_foundation::xberg_settings::load().unwrap().is_none());
         return false;
     }
     let root = tempfile::tempdir().unwrap();
@@ -168,7 +168,7 @@ fn run_isolated_test(name: &str) -> bool {
     }
 }
 
-fn dispatch_click(ui: &gui::AppWindow, x: f32, y: f32) {
+fn dispatch_click(ui: &jchtools_ui::AppWindow, x: f32, y: f32) {
     let position = slint::LogicalPosition::new(x, y);
     for event in [
         slint::platform::WindowEvent::PointerMoved { position },
@@ -208,7 +208,7 @@ struct OrganizerRun {
 }
 
 // 覆盖 C-11：真实回调必须即时更新勾选状态，而不是等待任务库回传或重新加载。
-fn toggle_first_file_action(ui: &gui::AppWindow, selected: bool, failures: &Failures) -> bool {
+fn toggle_first_file_action(ui: &jchtools_ui::AppWindow, selected: bool, failures: &Failures) -> bool {
     let plans = ui.get_plans();
     let Some((index, row)) = plans
         .iter()
@@ -756,7 +756,7 @@ fn settings_markdown_and_snap_pages_gate_and_status_end_to_end() {
     run_gui_job(move || {
         // C'-1 同款隔离（S3-05）：截图资产根指到仓库 .tmp 下的专用目录，管道名随
         // 之派生为测试专用名，监督线程绝不触碰真实用户会话的截图服务（一经设置
-        // 不恢复，与 src/gui.rs 测试装配同口径）；设置 SQLite 指到注入目录，保证
+        // 不恢复，与 GUI crate 内联测试装配同口径）；设置 SQLite 指到注入目录，保证
         // 「未配置」呈现确定（用后恢复）。
         fs::create_dir_all(&snap_root).unwrap();
         std::env::set_var("JCHTOOLS_SNAP_OCR_TEST_ASSET_ROOT", &snap_root);

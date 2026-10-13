@@ -1,0 +1,40 @@
+[package]
+name = "jchocr"
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.98.1"
+license = "MIT"
+description = "Console image OCR client for the shared Xberg snapshot runtime"
+repository.workspace = true
+readme.workspace = true
+keywords.workspace = true
+categories.workspace = true
+default-run = "jchocr"
+
+[features]
+test-hooks = ["jchtools-foundation/test-hooks", "jchtools-xberg/test-hooks"]
+
+[dependencies]
+jchtools-foundation = { workspace = true }
+jchtools-xberg = { workspace = true }
+base64 = { workspace = true }
+serde_json = { workspace = true }
+tracing = { workspace = true }
+ureq = { workspace = true }
+
+[dev-dependencies]
+image = { workspace = true }
+serde = { workspace = true }
+tempfile = { workspace = true }
+
+[[bin]]
+name = "jchocr"
+path = "src/bin/jchocr.rs"
+
+[[test]]
+name = "jchocr"
+path = "tests/jchocr.rs"
+required-features = ["test-hooks"]
+
+[lints]
+workspace = true

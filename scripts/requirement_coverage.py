@@ -52,6 +52,8 @@ def reference_rows(root: Path) -> dict[str, list[dict[str, str | int]]]:
     sources = [
         *root.glob("tests/**/*.rs"),
         *root.glob("src/**/*.rs"),
+        *root.glob("crates/*/src/**/*.rs"),
+        *root.glob("crates/*/tests/**/*.rs"),
         *root.glob("optional/*/src/**/*.rs"),
         *root.glob("scripts/*.py"),
     ]

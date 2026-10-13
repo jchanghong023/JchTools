@@ -733,7 +733,7 @@ fn worker(
                 match alive {
                     Ok(value) => {
                         // S8-04：保活只比较 jchtools_xberg_pid——broker 的 keepalive
-                        // 响应（主包 src/xberg_runtime_windows.rs）仅含 jchtools_xberg_pid
+                        // 响应（crates/xberg/src/xberg_runtime_windows.rs）仅含 jchtools_xberg_pid
                         // 与 broker 协议字段，没有引擎启动时间或代次编号；Windows 的
                         // PID 复用因此可能掩盖引擎代次变化、漏一次重建预热（后果
                         // 有限：下一次识别因模型未热而变慢）。补齐需要 Xberg/broker

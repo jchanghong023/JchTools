@@ -24,7 +24,10 @@
     clippy::expect_used,
     clippy::many_single_char_names
 )]
-use jchtools::{config::Config, control::Context, control::Control, engine};
+use jchtools_file_core::config::Config;
+use jchtools_file_core::control::Context;
+use jchtools_file_core::control::Control;
+use jchtools_directory_organizer::engine;
 use std::{
     fs,
     path::{Path, PathBuf},
@@ -229,7 +232,7 @@ fn f01_count_archives_rejects_root_junction() {
     let link = f.temp.path().join("入口");
     make_junction(&link, &target).unwrap();
 
-    let error = engine::count_archives(&link, &Config::default())
+    let error = jchtools_recursive_extract::engine::count_archives(&link, &Config::default())
         .err()
         .map(|e| format!("{e:#}"));
     let error = error.expect("junction 根的清点必须被拒绝（S-04）");
@@ -256,7 +259,7 @@ fn f01_extract_run_rejects_root_junction() {
     make_junction(&link, &target).unwrap();
 
     let error =
-        engine::extract_run_at(&link, Config::default(), Context::default(), &f.state, None)
+        jchtools_recursive_extract::engine::extract_run_at(&link, Config::default(), Context::default(), &f.state, None)
             .err()
             .map(|e| format!("{e:#}"));
     let error = error.expect("junction 根的解压必须被拒绝开始（S-04）");
@@ -296,10 +299,10 @@ fn f01_prepare_rejects_other_reparse_root() {
         engine::prepare_at(&selected, Config::default(), Context::default(), &f.state)
             .err()
             .expect("其他 reparse 根必须在创建任务库前拒绝（S-04）"),
-        engine::count_archives(&selected, &Config::default())
+        jchtools_recursive_extract::engine::count_archives(&selected, &Config::default())
             .err()
             .expect("其他 reparse 根的清点必须拒绝（S-04）"),
-        engine::extract_run_at(&selected, Config::default(), Context::default(), &f.state, None)
+        jchtools_recursive_extract::engine::extract_run_at(&selected, Config::default(), Context::default(), &f.state, None)
             .err()
             .expect("其他 reparse 根的解压必须在创建任务库前拒绝（S-04）"),
     ];

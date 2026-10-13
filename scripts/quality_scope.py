@@ -17,6 +17,7 @@ PYTHON_TEST_FILES = frozenset(
         "scripts/test_test_gate.py",
         "scripts/test_review_trusted.py",
         "scripts/test_package_windows.py",
+        "scripts/test_fetch_7zip.py",
         "tests/ocr_fixtures/test_worker_root_isolation.py",
         "scripts/media_e2e_fixture.py",
     }
@@ -57,13 +58,20 @@ def rust_format(root: Path) -> int:
     if rustfmt is None:
         message = "缺少 rustfmt；不能执行生产 Rust 格式检查。"
         raise FileNotFoundError(message)
+    source_directories = [
+        root / "src",
+        *root.glob("crates/*/src"),
+        root / "optional/snap-ocr-core/src",
+        root / "optional/snap-ocr-worker/src",
+    ]
     files = sorted(
         path.relative_to(root).as_posix()
-        for directory in ("src", "optional/snap-ocr-core/src", "optional/snap-ocr-worker/src")
-        for path in (root / directory).rglob("*.rs")
+        for directory in source_directories
+        for path in directory.rglob("*.rs")
         if path.relative_to(root).as_posix() not in RUST_TEST_FILES
     )
     files.extend(["build.rs", "optional/snap-ocr-worker/build.rs"])
+    files.extend(sorted(path.relative_to(root).as_posix() for path in root.glob("crates/*/build.rs")))
     result = subprocess.run(
         [rustfmt, "--check", "--edition", "2021", "--config", "skip_children=true", *files],
         cwd=root,

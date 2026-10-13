@@ -40,7 +40,7 @@ def static_plan(root: Path) -> list[Stage]:
 
 
 def gate_plan(level: str, root: Path, log_dir: Path, ps_env: dict[str, str]) -> list[Stage]:
-    """声明包含关系；运行时处理共享 Cargo 缓存和测试 artifact 的依赖."""
+    """Cargo 默认成员覆盖全部生产 crate；optional 仍走独立入口与原桌面边界."""
     cargo = shutil.which("cargo") or "cargo"
     plan = [
         *static_plan(root),
@@ -50,7 +50,20 @@ def gate_plan(level: str, root: Path, log_dir: Path, ps_env: dict[str, str]) -> 
         Stage("release-target-build", [cargo, "build", "--all-targets", "--release"], "compile"),
         Stage(
             "clippy",
-            [cargo, "clippy", "--lib", "--bin", "JchTools", "--features", "test-hooks", "--", "-D", "warnings"],
+            [
+                cargo,
+                "clippy",
+                "--lib",
+                "--bin",
+                "JchTools",
+                "--bin",
+                "jchocr",
+                "--features",
+                "test-hooks",
+                "--",
+                "-D",
+                "warnings",
+            ],
             "compiler-observed",
         ),
     ]
@@ -88,6 +101,8 @@ def gate_plan(level: str, root: Path, log_dir: Path, ps_env: dict[str, str]) -> 
                 "--lib",
                 "--bin",
                 "JchTools",
+                "--bin",
+                "jchocr",
                 "--features",
                 "perf-tracing,test-hooks",
                 "--",
@@ -213,7 +228,10 @@ def _test_binary_stages(build: Result) -> list[Stage]:
                     "real_gui_pending_configuration_applies_only_after_inflight_completion",
                 ):
                     argv += ["--skip", test]
-            stages.append(Stage(f"{build.name}-{name}", argv, watch_test_failures=True))
+            # 新 package 的同名 lib/bin/integration（jchocr）不能覆盖彼此的执行记录。
+            kind = target.get("kind")
+            suffix = "-lib" if kind == ["lib"] else "-bin" if kind == ["bin"] else ""
+            stages.append(Stage(f"{build.name}-{name}{suffix}", argv, watch_test_failures=True))
     return stages
 
 

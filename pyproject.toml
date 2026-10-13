@@ -12,6 +12,7 @@ extend-exclude = [
     "scripts/test_test_gate.py",
     "scripts/test_review_trusted.py",
     "scripts/test_package_windows.py",
+    "scripts/test_fetch_7zip.py",
     "scripts/media_e2e_fixture.py",
 ]
 
@@ -60,6 +61,7 @@ exclude = [
     "scripts/test_test_gate.py",
     "scripts/test_review_trusted.py",
     "scripts/test_package_windows.py",
+    "scripts/test_fetch_7zip.py",
     "scripts/media_e2e_fixture.py",
 ]
 ignore = [
@@ -68,6 +70,7 @@ ignore = [
     "scripts/test_test_gate.py",
     "scripts/test_review_trusted.py",
     "scripts/test_package_windows.py",
+    "scripts/test_fetch_7zip.py",
     "scripts/media_e2e_fixture.py",
 ]
 # 自维护最小 stub 覆盖无官方类型信息的 GUI 自动化/图像依赖；

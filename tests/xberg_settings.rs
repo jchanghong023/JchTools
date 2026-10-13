@@ -17,7 +17,7 @@ use std::process::Command;
 /// 覆盖 XB-03/XB-16/XB-19：不同场景不要求对方模型，也不改写对方配置。
 #[test]
 fn scenario_assets_and_configuration_are_independent() {
-    use jchtools::xberg_runtime::{asset_for_scenario, startup_config};
+    use jchtools_xberg::xberg_runtime::{asset_for_scenario, startup_config};
     let root = tempfile::tempdir().unwrap();
     let config = startup_config(root.path()).unwrap();
     assert!(
@@ -61,7 +61,7 @@ fn persisted_directory_survives_process_restart() {
     if let Some(root) = std::env::var_os("JCHTOOLS_SETTINGS_TEST_CHILD") {
         let expected = std::path::PathBuf::from(root).join("用户 Xberg");
         assert_eq!(
-            jchtools::markdown_assets::load_saved_runtime_dir().unwrap(),
+            jchtools_markdown::markdown_assets::load_saved_runtime_dir().unwrap(),
             Some(expected)
         );
         return;
@@ -101,11 +101,11 @@ fn saved_directory_is_restored_and_invalid_save_preserves_it() {
         let root = std::path::PathBuf::from(root);
         let directory = root.join("中文 Xberg");
         if std::env::var("JCHTOOLS_SAVE_TEST_ACTION").unwrap() == "save" {
-            jchtools::xberg_settings::save(&directory).unwrap();
-            assert!(jchtools::xberg_settings::save(&root.join("不存在")).is_err());
+            jchtools_foundation::xberg_settings::save(&directory).unwrap();
+            assert!(jchtools_foundation::xberg_settings::save(&root.join("不存在")).is_err());
         } else {
             assert_eq!(
-                jchtools::markdown_assets::load_saved_runtime_dir().unwrap(),
+                jchtools_markdown::markdown_assets::load_saved_runtime_dir().unwrap(),
                 Some(directory.canonicalize().unwrap())
             );
         }
@@ -140,7 +140,7 @@ fn saved_directory_is_restored_and_invalid_save_preserves_it() {
 /// 覆盖 XB-18/XB-21：首次保存下载来源也迁移未读取的旧文本，并跨进程保留双来源。
 #[test]
 fn downloaded_save_preserves_unloaded_legacy_text() {
-    use jchtools::xberg_settings::{self, Source};
+    use jchtools_foundation::xberg_settings::{self, Source};
     if let Some(root) = std::env::var_os("JCHTOOLS_MIGRATION_TEST_CHILD") {
         let root = std::path::PathBuf::from(root);
         let custom = root.join("旧用户目录");

@@ -1,8 +1,8 @@
 //! 截图 OCR worker 库面：截图、结果窗、独立服务与共享 Xberg 推理客户端。
 //!
 //! 识别（瓦片/检测/识别/布局，O-23～O-28）由固定版本 Xberg 发布物承接：
-//! 服务经 `shared_xberg` 作为客户端使用主程序的共享 Xberg 运行时
-//! （XB-14 唯一共享进程），行为合同（O-07 模型字节、XB-02）不变。
+//! 服务经 `shared_xberg` 作为客户端使用 `jchtools-xberg` 共享运行时；
+//! 主程序与 worker 复用真实 crate 编译产物，XB-14 唯一共享进程及 O-07/XB-02 合同不变。
 //!
 //! - `shared_xberg`：共享 Xberg 引擎客户端（内存 PNG 识别、模型状态、
 //!   取消/超时语义；错误与状态类型也定义在此）。
@@ -14,13 +14,12 @@
 //!
 //! bin 目标只接收服务内部启动参数，不提供用户命令行产品。
 
+use jchtools_foundation::logging;
+#[cfg(windows)]
+use jchtools_foundation::xberg_settings;
+use jchtools_xberg::xberg_runtime;
+
 pub mod capture_win;
-#[path = "../../../src/logging.rs"]
-pub mod logging;
 pub mod result_window;
 pub mod service;
 mod shared_xberg;
-#[path = "../../../src/xberg_runtime.rs"]
-pub mod xberg_runtime;
-#[path = "../../../src/xberg_settings.rs"]
-pub mod xberg_settings;

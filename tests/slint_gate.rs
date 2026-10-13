@@ -20,7 +20,7 @@ use slint_interpreter::Compiler;
 #[test]
 fn app_slint_compiles_with_zero_diagnostics() {
     let mut compiler = Compiler::default();
-    // 与 build.rs 保持同一风格配置，诊断口径一致
+    // 与 UI crate 的构建脚本保持同一风格配置，诊断口径一致
     compiler.set_style("fluent".into());
     let result = spin_on::spin_on(compiler.build_from_path("ui/app.slint"));
     let offenders: Vec<String> = result.diagnostics().map(|d| format!("{d:?}")).collect();

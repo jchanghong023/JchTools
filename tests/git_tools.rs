@@ -17,10 +17,8 @@
 // 测试代码允许 unwrap/expect：断言失败即测试失败，属合理用法
 // （与 clippy.toml 的 allow-*-in-tests 策略一致，集成测试 crate 不在其覆盖范围内）。
 #![allow(clippy::unwrap_used, clippy::expect_used)]
-use jchtools::{
-    control::Control,
-    git_tools::{self, GitShared},
-};
+use jchtools_file_core::control::Control;
+use jchtools_git_tools::git_tools::{self, GitShared};
 use std::{
     fs,
     path::{Path, PathBuf},

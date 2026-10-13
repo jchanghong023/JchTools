@@ -23,7 +23,9 @@
     clippy::cast_possible_truncation
 )]
 
-use jchtools::{config::Config, control::Context, engine};
+use jchtools_file_core::config::Config;
+use jchtools_file_core::control::Context;
+use jchtools_directory_organizer::engine;
 use sha2::{Digest, Sha256};
 use std::{collections::BTreeSet, fs, path::PathBuf};
 use tempfile::TempDir;
@@ -56,7 +58,7 @@ impl Fixture {
         fs::create_dir_all(&p).unwrap();
         p
     }
-    fn plan(&self) -> engine::TaskResult {
+    fn plan(&self) -> jchtools_file_core::task::TaskResult {
         engine::prepare_at(
             &self.root,
             Config::default(),
@@ -65,7 +67,7 @@ impl Fixture {
         )
         .unwrap()
     }
-    fn apply(task: &engine::TaskResult) {
+    fn apply(task: &jchtools_file_core::task::TaskResult) {
         engine::apply(&task.directory, Context::default()).unwrap();
     }
     fn exists(&self, name: &str) -> bool {

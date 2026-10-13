@@ -13,12 +13,14 @@
 
 //! Real-engine tests; intentionally ignored without an explicit JCHTOOLS_TEST_7ZIP path.
 //! package-windows.ps1 runs these after downloading and verifying the bundled engine.
-//! 2026-09-18 两工具拆分后：解压用例走 engine::extract_run_at（X 分区），
+//! 两工具独立 crate 后：解压用例走 recursive_extract::engine::extract_run_at（X 分区），
 //! 涉及整理计划的用例先解压再 prepare/apply（C 分区）。
 // 测试代码允许 unwrap/expect：断言失败即测试失败，属合理用法
 // （与 clippy.toml 的 allow-*-in-tests 策略一致，集成测试 crate 不在其覆盖范围内）。
 #![allow(clippy::unwrap_used, clippy::expect_used)]
-use jchtools::{config::*, control::Context, engine};
+use jchtools_file_core::config::*;
+use jchtools_file_core::control::Context;
+use jchtools_directory_organizer::engine;
 use std::{
     fs,
     path::{Path, PathBuf},
@@ -99,8 +101,8 @@ impl ArchiveFixture {
             .count()
     }
     /// 「递归解压」一段式运行（X-02）：解压 + 未完全解开的包隔离全部完成。
-    fn run(&self, cfg: Config) -> engine::TaskResult {
-        engine::extract_run_at(
+    fn run(&self, cfg: Config) -> jchtools_file_core::task::TaskResult {
+        jchtools_recursive_extract::engine::extract_run_at(
             &self.root,
             cfg,
             Context::default(),
@@ -109,7 +111,7 @@ impl ArchiveFixture {
         )
         .unwrap()
     }
-    fn apply(task: &engine::TaskResult) -> engine::TaskResult {
+    fn apply(task: &jchtools_file_core::task::TaskResult) -> jchtools_file_core::task::TaskResult {
         engine::apply(&task.directory, Context::default()).unwrap()
     }
 }
@@ -1391,7 +1393,7 @@ fn insufficient_space_stops_the_task_without_quarantine() {
         ..config()
     };
     let result =
-        engine::extract_run_at(&f.root, cfg, Context::default(), &f.state, Some(&f.engine));
+        jchtools_recursive_extract::engine::extract_run_at(&f.root, cfg, Context::default(), &f.state, Some(&f.engine));
     let error = result.expect_err("空间不足必须停止整个任务（X-08）");
     assert!(
         format!("{error:#}").contains("空间"),

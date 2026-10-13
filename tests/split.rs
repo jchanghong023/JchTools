@@ -20,7 +20,9 @@
 // 测试代码允许 unwrap/expect：断言失败即测试失败，属合理用法
 // （与 clippy.toml 的 allow-*-in-tests 策略一致，集成测试 crate 不在其覆盖范围内）。
 #![allow(clippy::unwrap_used, clippy::expect_used)]
-use jchtools::{config::*, control::Context, engine};
+use jchtools_file_core::config::*;
+use jchtools_file_core::control::Context;
+use jchtools_directory_organizer::engine;
 use std::{
     fs,
     path::{Path, PathBuf},
@@ -28,7 +30,7 @@ use std::{
 
 /// events 表的测试观察入口：生产只写不读（读取 API 已随死代码清理移除），
 /// 行格式与写入列序一致：`time | phase | result | source | target | reason`。
-fn event_lines(db: &jchtools::db::Database, limit: usize) -> Vec<String> {
+fn event_lines(db: &jchtools_file_core::db::Database, limit: usize) -> Vec<String> {
     let mut statement = db
         .conn
         .prepare(
@@ -199,7 +201,7 @@ fn quarantine_refuses_junction_container() {
         .status()
         .unwrap();
     assert!(status.success(), "无法创建 junction，用例前置条件不成立");
-    let result = engine::extract_run_at(
+    let result = jchtools_recursive_extract::engine::extract_run_at(
         &root,
         Config::default(),
         Context::default(),
@@ -222,13 +224,13 @@ fn quarantine_refuses_junction_container() {
 // 不猜测归属、不解码删源，整组按失败包隔离保留）
 #[test]
 fn ambiguous_part_rar_group_is_quarantined_without_decoding() {
-    use jchtools::db::Database;
+    use jchtools_file_core::db::Database;
     let tmp = fixture("part-ambiguity");
     let root = tmp.path().join("data");
     write_with_mtime(&root.join("a.part1.rar"), b"width-1 volume", 100);
     write_with_mtime(&root.join("a.part01.rar"), b"width-2 one!", 200);
     write_with_mtime(&root.join("a.part02.rar"), b"width-2 two!", 300);
-    let result = engine::extract_run_at(
+    let result = jchtools_recursive_extract::engine::extract_run_at(
         &root,
         Config::default(),
         Context::default(),
@@ -254,7 +256,7 @@ fn ambiguous_part_rar_group_is_quarantined_without_decoding() {
 // 隔离失败，其余包可继续处理——隔离失败不得中止整次任务）
 #[test]
 fn quarantine_failure_keeps_other_archives_processing() {
-    use jchtools::db::Database;
+    use jchtools_file_core::db::Database;
     let tmp = fixture("quarantine-occupied");
     let root = tmp.path().join("data");
     write_with_mtime(&root.join("broken.zip"), b"definitely not a zip", 100);
@@ -265,7 +267,7 @@ fn quarantine_failure_keeps_other_archives_processing() {
     );
     // 容器位置被普通文件占用：quarantine 无法建立「解压失败」子目录。
     write_with_mtime(&root.join("解压失败"), b"occupied by a plain file", 50);
-    let result = engine::extract_run_at(
+    let result = jchtools_recursive_extract::engine::extract_run_at(
         &root,
         Config::default(),
         Context::default(),
@@ -317,7 +319,7 @@ fn failed_archive_is_moved_to_quarantine_directory() {
         200,
     );
     let cfg = Config::default();
-    let result = engine::extract_run_at(
+    let result = jchtools_recursive_extract::engine::extract_run_at(
         &root,
         cfg,
         Context::default(),
@@ -355,14 +357,14 @@ fn rerun_skips_quarantined_archives_and_reports_count() {
     );
     write_with_mtime(&root.join("fresh.zip"), b"also not a zip", 200);
     // 只数包（确认框内容），不解压：fresh.zip 计 1，隔离目录里的 broken.zip 不计。
-    let count = engine::count_archives(&root, &Config::default()).unwrap();
+    let count = jchtools_recursive_extract::engine::count_archives(&root, &Config::default()).unwrap();
     assert_eq!(count, 1, "重跑计数必须排除「解压失败」目录（X-07）");
     // 全量跑一遍：只有 fresh.zip 被尝试（并失败移入隔离目录），broken.zip 原地不动。
     let before = fs::metadata(root.join("解压失败").join("broken.zip"))
         .unwrap()
         .modified()
         .unwrap();
-    let result = engine::extract_run_at(
+    let result = jchtools_recursive_extract::engine::extract_run_at(
         &root,
         Config::default(),
         Context::default(),
@@ -394,7 +396,7 @@ fn multipart_siblings_move_to_quarantine_together() {
     let root = tmp.path().join("data");
     write_with_mtime(&root.join("report.part1.rar"), b"vol1-not-real", 100);
     write_with_mtime(&root.join("report.part2.rar"), b"vol2-not-real", 200);
-    let result = engine::extract_run_at(
+    let result = jchtools_recursive_extract::engine::extract_run_at(
         &root,
         Config::default(),
         Context::default(),
@@ -422,14 +424,14 @@ fn multipart_siblings_move_to_quarantine_together() {
 fn extract_run_without_engine_fails_loudly() {
     // 本机存在可用引擎（resources/7zip 或已释放副本）时无法构造「缺引擎」环境：
     // CI（无引擎）上才真正执行断言；有引擎的机器跳过，不伪造红灯。
-    if jchtools::archive::SevenZip::from_bundle().is_ok() {
+    if jchtools_recursive_extract::archive::SevenZip::from_bundle().is_ok() {
         eprintln!("skip：本机存在可用解压引擎，无法验证缺引擎路径（CI 覆盖）");
         return;
     }
     let tmp = fixture("noengine");
     let root = tmp.path().join("data");
     write_with_mtime(&root.join("pack.zip"), b"pretend archive bytes", 100);
-    let result = engine::extract_run_at(
+    let result = jchtools_recursive_extract::engine::extract_run_at(
         &root,
         Config::default(),
         Context::default(),
@@ -447,11 +449,11 @@ fn extract_run_without_engine_fails_loudly() {
 // 覆盖 X-06（隔离必须记录每个包的失败原因，日志字段可查）
 #[test]
 fn quarantined_archive_reason_is_recorded_in_log() {
-    use jchtools::db::Database;
+    use jchtools_file_core::db::Database;
     let tmp = fixture("reason");
     let root = tmp.path().join("data");
     write_with_mtime(&root.join("broken.zip"), b"definitely not a zip", 100);
-    let result = engine::extract_run_at(
+    let result = jchtools_recursive_extract::engine::extract_run_at(
         &root,
         Config::default(),
         Context::default(),
@@ -571,7 +573,7 @@ fn non_whitelisted_containers_are_never_opened() {
     }
     write_with_mtime(&root.join("keep.zip"), b"the only whitelisted archive", 400);
     let engine = logging_engine(tmp.path());
-    let result = engine::extract_run_at(
+    let result = jchtools_recursive_extract::engine::extract_run_at(
         &root,
         Config::default(),
         Context::default(),
@@ -613,7 +615,7 @@ fn non_whitelisted_containers_are_never_opened() {
 // X-02（残缺但可归组的卷集计一包）、X-06（整组移入「解压失败」并记录原因）
 #[test]
 fn old_style_tails_without_main_pack_are_grouped_and_quarantined() {
-    use jchtools::db::Database;
+    use jchtools_file_core::db::Database;
     let tmp = fixture("oldstyle");
     let root = tmp.path().join("data");
     // 老式 zip 族：report.z01 + report.z02，无 report.zip；老式 rar 族：orphan.r00，
@@ -629,11 +631,11 @@ fn old_style_tails_without_main_pack_are_grouped_and_quarantined() {
     );
     // X-02：确认数量按「残缺但可归组的卷集计一包」——zip 组 + rar 组 = 2。
     assert_eq!(
-        engine::count_archives(&root, &Config::default()).unwrap(),
+        jchtools_recursive_extract::engine::count_archives(&root, &Config::default()).unwrap(),
         2,
         "缺主包的老式族尾卷组应各计一包（X-02/X-10）"
     );
-    let result = engine::extract_run_at(
+    let result = jchtools_recursive_extract::engine::extract_run_at(
         &root,
         Config::default(),
         Context::default(),
@@ -799,7 +801,7 @@ fn forged_comment_corroboration_is_ignored() {
     write_with_mtime(&root.join("report.rar"), b"standalone rar", 100);
     // X-10 的旧式 rar 尾卷是 .r00～.r99；.r000 不是该命名族的实际卷。
     write_with_mtime(&root.join("report.r000"), b"innocent bystander", 200);
-    let result = engine::extract_run_at(
+    let result = jchtools_recursive_extract::engine::extract_run_at(
         &root,
         Config::default(),
         Context::default(),
@@ -894,7 +896,7 @@ fn forged_comment_with_brace_line_cannot_enable_sweep() {
     write_with_mtime(&root.join("report.rar"), b"standalone rar", 100);
     // .r00 按 X-10 已是实际卷；用不属于精确命名族的 .r000 作为无关文件。
     write_with_mtime(&root.join("report.r000"), b"innocent bystander", 200);
-    let result = engine::extract_run_at(
+    let result = jchtools_recursive_extract::engine::extract_run_at(
         &root,
         Config::default(),
         Context::default(),
@@ -928,7 +930,7 @@ fn stale_z_sibling_is_not_disposed_with_standalone_zip() {
         b"stale fragment of an old set",
         200,
     );
-    let result = engine::extract_run_at(
+    let result = jchtools_recursive_extract::engine::extract_run_at(
         &root,
         Config::default(),
         Context::default(),
@@ -967,7 +969,7 @@ fn stale_r_sibling_is_not_disposed_with_standalone_rar() {
         b"stale fragment of an old set",
         200,
     );
-    let result = engine::extract_run_at(
+    let result = jchtools_recursive_extract::engine::extract_run_at(
         &root,
         Config::default(),
         Context::default(),
@@ -1002,7 +1004,7 @@ fn corroborated_volume_siblings_are_deleted_together() {
     write_with_mtime(&root.join("report.rar"), b"multi-volume main", 100);
     write_with_mtime(&root.join("report.r00"), b"volume 0", 200);
     write_with_mtime(&root.join("report.r01"), b"volume 1", 300);
-    let result = engine::extract_run_at(
+    let result = jchtools_recursive_extract::engine::extract_run_at(
         &root,
         Config::default(),
         Context::default(),
@@ -1030,7 +1032,7 @@ fn failed_archive_still_quarantines_wide_named_siblings() {
     let root = tmp.path().join("data");
     write_with_mtime(&root.join("combo.zip"), b"corrupt standalone zip", 100);
     write_with_mtime(&root.join("combo.z01"), b"possibly related fragment", 200);
-    let result = engine::extract_run_at(
+    let result = jchtools_recursive_extract::engine::extract_run_at(
         &root,
         Config::default(),
         Context::default(),
@@ -1064,7 +1066,7 @@ fn quarantined_split_zip_group_renames_stem_as_a_whole() {
         b"earlier failure",
         300,
     );
-    let result = engine::extract_run_at(
+    let result = jchtools_recursive_extract::engine::extract_run_at(
         &root,
         Config::default(),
         Context::default(),
@@ -1106,7 +1108,7 @@ fn quarantined_numbered_group_renames_stem_as_a_whole() {
         b"earlier failure",
         300,
     );
-    let result = engine::extract_run_at(
+    let result = jchtools_recursive_extract::engine::extract_run_at(
         &root,
         Config::default(),
         Context::default(),
@@ -1142,8 +1144,8 @@ fn numbered_volume_growth_tail_only_group_counts_once_and_preserves_bytes() {
         write_with_mtime(&root.join(name), bytes, 100);
     }
     let cfg = Config::default();
-    assert_eq!(engine::count_archives(&root, &cfg).unwrap(), 1);
-    let result = engine::extract_run_at(
+    assert_eq!(jchtools_recursive_extract::engine::count_archives(&root, &cfg).unwrap(), 1);
+    let result = jchtools_recursive_extract::engine::extract_run_at(
         &root,
         cfg,
         Context::default(),
@@ -1165,7 +1167,7 @@ fn numbered_volume_growth_tail_only_group_counts_once_and_preserves_bytes() {
     ] {
         assert_eq!(fs::read(root.join(name)).unwrap(), bytes);
     }
-    let db = jchtools::db::Database::open(&result.directory).unwrap();
+    let db = jchtools_file_core::db::Database::open(&result.directory).unwrap();
     assert!(event_lines(&db, 100).iter().any(|line| line.contains("缺起始卷")));
 }
 
@@ -1183,7 +1185,7 @@ fn quarantined_part_rar_group_renames_stem_as_a_whole() {
         b"earlier failure",
         300,
     );
-    let result = engine::extract_run_at(
+    let result = jchtools_recursive_extract::engine::extract_run_at(
         &root,
         Config::default(),
         Context::default(),
@@ -1205,18 +1207,18 @@ fn quarantined_part_rar_group_renames_stem_as_a_whole() {
 
 /// 任务以错误结束（没有 TaskResult）时，打开本次运行的任务库：摘要与行状态都在里面。
 #[cfg(windows)]
-fn task_db(state: &Path) -> jchtools::db::Database {
+fn task_db(state: &Path) -> jchtools_file_core::db::Database {
     let task_dirs: Vec<PathBuf> = fs::read_dir(state.join("tasks"))
         .unwrap()
         .map(|entry| entry.unwrap().path())
         .collect();
     assert_eq!(task_dirs.len(), 1, "隔离夹具应仅创建本次运行的一个任务库");
-    jchtools::db::Database::open(&task_dirs[0]).unwrap()
+    jchtools_file_core::db::Database::open(&task_dirs[0]).unwrap()
 }
 
 /// 任务库里停留在 running 的包行数（任务结束时必须为 0）。
 #[cfg(windows)]
-fn running_rows(db: &jchtools::db::Database) -> i64 {
+fn running_rows(db: &jchtools_file_core::db::Database) -> i64 {
     db.conn
         .query_row(
             "SELECT COUNT(*) FROM archives WHERE state='running'",
@@ -1250,7 +1252,7 @@ fn read_locked_archives_surface_cleanup_failure_and_are_preserved() {
         })
         .collect();
     let state = state_of(&tmp);
-    let _error = engine::extract_run_at(
+    let _error = jchtools_recursive_extract::engine::extract_run_at(
         &root,
         Config::default(),
         Context::default(),
@@ -1291,7 +1293,7 @@ fn partially_deleted_volume_group_reports_failure_without_quarantine() {
         opts.open(root.join("report.r00")).unwrap()
     };
     let state = state_of(&tmp);
-    let _error = engine::extract_run_at(
+    let _error = jchtools_recursive_extract::engine::extract_run_at(
         &root,
         Config::default(),
         Context::default(),

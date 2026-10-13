@@ -13,7 +13,7 @@
 
 //! AH-08/AH-09/AH-A01：Windows参数、端口及独立进程SQLite恢复；不启动真实模型。
 #![allow(clippy::unwrap_used, clippy::expect_used)]
-use jchtools::acp_api::{
+use jchtools_acp_api::acp_api::{
     settings, ServiceConfig, ServiceErrorKind, ServicePhase, ServiceStatus, DEFAULT_PORT,
 };
 use std::process::Command;

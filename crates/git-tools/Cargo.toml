@@ -1,0 +1,24 @@
+[package]
+name = "jchtools-git-tools"
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.98.1"
+license = "MIT"
+description = "Sequential per-file Git commit and push tools for JchTools"
+repository.workspace = true
+readme.workspace = true
+keywords.workspace = true
+categories.workspace = true
+
+[features]
+test-hooks = ["jchtools-file-core/test-hooks", "jchtools-foundation/test-hooks"]
+perf-tracing = ["jchtools-file-core/perf-tracing", "jchtools-foundation/perf-tracing"]
+
+[dependencies]
+anyhow = { workspace = true }
+jchtools-file-core = { workspace = true }
+jchtools-foundation = { workspace = true }
+tracing = { workspace = true }
+
+[lints]
+workspace = true

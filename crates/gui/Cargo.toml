@@ -1,0 +1,76 @@
+[package]
+name = "jchtools-gui"
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.98.1"
+license = "MIT"
+description = "JchTools GUI assembly and tool callbacks"
+repository.workspace = true
+readme.workspace = true
+keywords.workspace = true
+categories.workspace = true
+
+[features]
+default = ["gui"]
+gui = ["dep:slint", "dep:rfd", "dep:open", "jchtools-ui/gui"]
+perf-tracing = [
+    "jchtools-foundation/perf-tracing",
+    "jchtools-file-core/perf-tracing",
+    "jchtools-directory-organizer/perf-tracing",
+    "jchtools-recursive-extract/perf-tracing",
+    "jchtools-md-tools/perf-tracing",
+    "jchtools-git-tools/perf-tracing",
+    "jchtools-assets/perf-tracing",
+    "jchtools-markdown/perf-tracing",
+]
+test-hooks = [
+    "jchtools-foundation/test-hooks",
+    "jchtools-file-core/test-hooks",
+    "jchtools-assets/test-hooks",
+    "jchtools-xberg/test-hooks",
+    "jchtools-acp-api/test-hooks",
+    "jchtools-codeagent/test-hooks",
+    "jchtools-markdown/test-hooks",
+]
+
+[dependencies]
+anyhow = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+rusqlite = { workspace = true }
+tracing = { workspace = true }
+slint = { workspace = true, optional = true }
+rfd = { workspace = true, optional = true }
+open = { workspace = true, optional = true }
+jchtools-ui = { workspace = true }
+jchtools-foundation = { workspace = true }
+jchtools-file-core = { workspace = true }
+jchtools-assets = { workspace = true }
+jchtools-xberg = { workspace = true }
+jchtools-acp-api = { workspace = true }
+jchtools-codeagent = { workspace = true }
+jchtools-directory-organizer = { workspace = true }
+jchtools-recursive-extract = { workspace = true }
+jchtools-markdown = { workspace = true }
+jchtools-md-tools = { workspace = true }
+jchtools-git-tools = { workspace = true }
+
+[target.'cfg(windows)'.dependencies]
+windows-sys = { workspace = true }
+
+[dev-dependencies]
+i-slint-backend-testing = { workspace = true }
+jchtools-foundation = { workspace = true, features = ["test-hooks"] }
+jchtools-file-core = { workspace = true, features = ["test-hooks"] }
+jchtools-assets = { workspace = true, features = ["test-hooks"] }
+jchtools-xberg = { workspace = true, features = ["test-hooks"] }
+jchtools-acp-api = { workspace = true, features = ["test-hooks"] }
+jchtools-codeagent = { workspace = true, features = ["test-hooks"] }
+jchtools-markdown = { workspace = true, features = ["test-hooks"] }
+tempfile = { workspace = true }
+sha2 = { workspace = true }
+tokio = { workspace = true }
+tokio-util = { workspace = true }
+
+[lints]
+workspace = true

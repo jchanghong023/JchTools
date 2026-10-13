@@ -19,13 +19,11 @@
     clippy::expect_used,
     clippy::many_single_char_names
 )]
-use jchtools::{
-    archive::QUARANTINE_DIR_NAME,
-    config::{Config, DeleteMode},
-    control::Context,
-    db::Database,
-    engine,
-};
+use jchtools_file_core::task::QUARANTINE_DIR_NAME;
+use jchtools_file_core::config::{Config, DeleteMode};
+use jchtools_file_core::control::Context;
+use jchtools_file_core::db::Database;
+use jchtools_directory_organizer::engine;
 use std::{
     fs,
     path::{Path, PathBuf},
@@ -74,7 +72,7 @@ impl Fixture {
         fs::write(proj.join(".git"), b"gitdir: ../.git/modules/x\n").unwrap();
         proj
     }
-    fn plan(&self, config: Config) -> engine::TaskResult {
+    fn plan(&self, config: Config) -> jchtools_file_core::task::TaskResult {
         engine::prepare_at(&self.root, config, Context::default(), &self.state).unwrap()
     }
 }
@@ -157,12 +155,12 @@ fn root_git_directory_blocks_prepare_count_and_extract() {
     );
     let error = format!(
         "{:#}",
-        engine::count_archives(&f.root, &base()).unwrap_err()
+        jchtools_recursive_extract::engine::count_archives(&f.root, &base()).unwrap_err()
     );
     assert!(error.contains(".git"), "确认框清点同样必须拒绝：{error}");
     let error = format!(
         "{:#}",
-        engine::extract_run_at(&f.root, base(), Context::default(), &f.state, None).unwrap_err()
+        jchtools_recursive_extract::engine::extract_run_at(&f.root, base(), Context::default(), &f.state, None).unwrap_err()
     );
     assert!(error.contains(".git"), "递归解压同样必须拒绝：{error}");
     let tasks = f.state.join("tasks");
@@ -179,7 +177,7 @@ fn root_git_file_blocks_processing() {
     f.git_marker_file("");
     f.write("keep.txt", b"payload");
     assert!(engine::prepare_at(&f.root, base(), Context::default(), &f.state).is_err());
-    assert!(engine::count_archives(&f.root, &base()).is_err());
+    assert!(jchtools_recursive_extract::engine::count_archives(&f.root, &base()).is_err());
 }
 
 // 覆盖 X-07（所选根本身名为「解压失败」时不开始解压：清点与解压都拒绝并明确提示）
@@ -190,7 +188,7 @@ fn root_named_quarantine_blocks_count_and_extract() {
     let quarantine_root = f.root.join(QUARANTINE_DIR_NAME);
     let error = format!(
         "{:#}",
-        engine::count_archives(&quarantine_root, &base()).unwrap_err()
+        jchtools_recursive_extract::engine::count_archives(&quarantine_root, &base()).unwrap_err()
     );
     assert!(
         error.contains("解压失败") && error.contains("移出"),
@@ -198,7 +196,7 @@ fn root_named_quarantine_blocks_count_and_extract() {
     );
     let error = format!(
         "{:#}",
-        engine::extract_run_at(&quarantine_root, base(), Context::default(), &f.state, None)
+        jchtools_recursive_extract::engine::extract_run_at(&quarantine_root, base(), Context::default(), &f.state, None)
             .unwrap_err()
     );
     assert!(
@@ -253,7 +251,7 @@ fn child_git_tree_excluded_and_ancestors_untouched() {
     let git_moves = actions
         .iter()
         .filter(|a| {
-            a.kind == jchtools::model::ActionKind::Move
+            a.kind == jchtools_file_core::model::ActionKind::Move
                 && (a.source == "only_dir/proj" || a.source == "only_file/proj")
         })
         .count();
@@ -327,7 +325,7 @@ fn nested_quarantine_container_is_pruned_at_any_depth() {
     f.write("子/解压失败/坏包.7z", b"broken package");
     f.write("keep.txt", b"payload");
     assert_eq!(
-        engine::count_archives(&f.root, &base()).unwrap(),
+        jchtools_recursive_extract::engine::count_archives(&f.root, &base()).unwrap(),
         0,
         "嵌套隔离容器内的包不得计入确认框清点（X-02/X-07）"
     );
@@ -378,7 +376,7 @@ fn extraction_never_cleans_empty_directories() {
     let f = Fixture::new();
     f.write("keep.txt", b"payload");
     f.dir("empty_after_pack");
-    let task = engine::extract_run_at(&f.root, base(), Context::default(), &f.state, None).unwrap();
+    let task = jchtools_recursive_extract::engine::extract_run_at(&f.root, base(), Context::default(), &f.state, None).unwrap();
     assert_eq!(
         task.summary.archives_ok + task.summary.archives_failed,
         0,
@@ -399,7 +397,7 @@ fn count_archives_matches_scan_filtering() {
     f.write("proj/pack.zip", b"not-a-zip");
     f.git_marker_dir("proj");
     assert_eq!(
-        engine::count_archives(&f.root, &base()).unwrap(),
+        jchtools_recursive_extract::engine::count_archives(&f.root, &base()).unwrap(),
         1,
         "Git 子树内的包不得计入确认框"
     );
@@ -725,7 +723,7 @@ fn count_archives_counts_missing_entry_volume_groups() {
     f.write("b.7z.003", b"3");
     f.write("c.zip", b"zip");
     assert_eq!(
-        engine::count_archives(&f.root, &base()).unwrap(),
+        jchtools_recursive_extract::engine::count_archives(&f.root, &base()).unwrap(),
         3,
         "缺首卷 part rar 一组 + 缺入口数字尾卷一组 + 普通 zip 一包"
     );
@@ -738,7 +736,7 @@ fn extract_quarantines_missing_first_part_rar_group() {
     let f = Fixture::new();
     f.write("a.part02.rar", b"part2");
     f.write("a.part03.rar", b"part3");
-    let task = engine::extract_run_at(&f.root, base(), Context::default(), &f.state, None).unwrap();
+    let task = jchtools_recursive_extract::engine::extract_run_at(&f.root, base(), Context::default(), &f.state, None).unwrap();
     assert_eq!(task.summary.archives_ok, 0);
     assert_eq!(task.summary.archives_failed, 1, "缺首卷卷集只判失败一次");
     assert_eq!(
@@ -770,7 +768,7 @@ fn review_extraction_preserves_foreign_staging() {
     fs::create_dir(work.join("content")).unwrap();
     fs::write(work.join("content/keep.txt"), b"foreign task payload").unwrap();
     filetime::set_file_mtime(&work, filetime::FileTime::from_unix_time(0, 0)).unwrap();
-    let task = engine::extract_run_at(&f.root, base(), Context::default(), &f.state, None).unwrap();
+    let task = jchtools_recursive_extract::engine::extract_run_at(&f.root, base(), Context::default(), &f.state, None).unwrap();
     assert_eq!(task.summary.archives_ok + task.summary.archives_failed, 0);
     assert_eq!(
         fs::read(work.join("content/keep.txt")).unwrap(),
@@ -781,7 +779,7 @@ fn review_extraction_preserves_foreign_staging() {
     // 空扫描不会启动解压；再用纯文件系统缺首卷路径触发真实 extract_queued。
     f.write("trigger.part02.rar", b"missing first volume");
     let active =
-        engine::extract_run_at(&f.root, base(), Context::default(), &f.state, None).unwrap();
+        jchtools_recursive_extract::engine::extract_run_at(&f.root, base(), Context::default(), &f.state, None).unwrap();
     assert_eq!(active.summary.archives_ok, 0);
     assert_eq!(active.summary.archives_failed, 1);
     assert_eq!(

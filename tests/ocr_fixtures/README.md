@@ -21,8 +21,8 @@ Xberg 链路的验收结论（XB-02），冻结 TextSnap 及旧独立推理 runt
 ## 当前源码链路与现有验收入口（未运行）
 
 - worker 的 `src/service.rs` 经 `SharedXbergClient` 识别；`src/shared_xberg.rs`
-  将内存 PNG 的 base64 作为 `ocr_snapshot` 请求交给复用的主包
-  `src/xberg_runtime.rs`／Windows 命名管道代理，不在 worker 内直连 det/rec
+  将内存 PNG 的 base64 作为 `ocr_snapshot` 请求交给复用的 Xberg crate
+  `crates/xberg/src/xberg_runtime.rs`／Windows 命名管道代理，不在 worker 内直连 det/rec
   runtime。启动预热使用 1×1 白图，随后要求 `snapshot_state` 为 `ready`。
   这是源码接线与就绪判据，不是当前真实模型推理或常驻的实测证据。
 - `tests/xberg_shared_process.rs` 使用真实 JchTools 代理及命名管道，但

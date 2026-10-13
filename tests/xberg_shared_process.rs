@@ -15,10 +15,8 @@
 //! 覆盖 XB-14/XB-15/XB-17：真实代理进程及管道，模拟引擎（不代表真实模型验收）。
 
 mod common;
-use jchtools::{
-    markdown_document::{self, Deadline},
-    xberg_runtime,
-};
+use jchtools_markdown::markdown_document::{self, Deadline};
+use jchtools_xberg::xberg_runtime;
 use serde_json::json;
 use std::{
     os::windows::process::CommandExt,
@@ -35,7 +33,7 @@ fn prepare(root: &Path) {
     common::mock_engine_copy("tests/fixtures/shared_xberg.rs", &root.join("xberg.exe"));
     std::env::set_var("JCHTOOLS_TEST_STATE_DIR", root.join("state"));
     std::env::set_var("JCHTOOLS_TEST_BROKER_EXE", env!("CARGO_BIN_EXE_JchTools"));
-    jchtools::xberg_settings::save(root).unwrap();
+    jchtools_foundation::xberg_settings::save(root).unwrap();
     std::fs::write(root.join("short.txt"), "document").unwrap();
 }
 
@@ -59,7 +57,7 @@ fn assert_batch_stop_cancels_current_file(media: bool) {
             std::fs::write(target, b"synthetic asset").unwrap();
         }
     }
-    jchtools::markdown_assets::save_runtime_dir(root).unwrap();
+    jchtools_markdown::markdown_assets::save_runtime_dir(root).unwrap();
     let input = root.join("input");
     let output = root.join("output");
     std::fs::create_dir(&input).unwrap();
@@ -84,14 +82,14 @@ fn assert_batch_stop_cancels_current_file(media: bool) {
         broker_pid: state["jchtools_broker_pid"].as_u64().unwrap(),
         engine_pid: state["jchtools_xberg_pid"].as_u64(),
     };
-    let options = jchtools::markdown::Options {
+    let options = jchtools_markdown::markdown::Options {
         input_dir: input,
         output_dir: output.clone(),
         flat: false,
         groups: vec![if media {
-            jchtools::markdown::FormatGroup::Media
+            jchtools_markdown::markdown::FormatGroup::Media
         } else {
-            jchtools::markdown::FormatGroup::Other
+            jchtools_markdown::markdown::FormatGroup::Other
         }],
         timeout_secs: 15,
     };
@@ -101,8 +99,8 @@ fn assert_batch_stop_cancels_current_file(media: bool) {
     let observed = started.clone();
     let (send, receive) = std::sync::mpsc::channel();
     let batch = std::thread::spawn(move || {
-        let result = jchtools::markdown::run(&options, &token, |event| {
-            if let jchtools::markdown::Event::FileStarted { relative, .. } = event {
+        let result = jchtools_markdown::markdown::run(&options, &token, |event| {
+            if let jchtools_markdown::markdown::Event::FileStarted { relative, .. } = event {
                 observed.lock().unwrap().push(relative);
             }
         });
@@ -189,7 +187,7 @@ fn assert_batch_stop_cancels_current_file(media: bool) {
 /// 被跳过的行为（T-23/T-25 批处理停止）在受支持平台（Windows 11 主机）由
 /// fulltest/slowtest 的同一测试保持覆盖。
 fn skip_when_platform_unsupported() -> bool {
-    match jchtools::markdown::page_readiness() {
+    match jchtools_markdown::markdown::page_readiness() {
         Err(message) if message.contains("Windows 11 x64") => {
             eprintln!("skip：{message}（CI runner 不在 T-03 支持平台内；覆盖见 Windows 11 主机的本地测试门）");
             true
@@ -239,7 +237,7 @@ fn batch_stop_preserves_unfinished_request_diagnostic_and_snapshot_alive() {
             std::fs::write(target, b"synthetic asset").unwrap();
         }
     }
-    jchtools::markdown_assets::save_runtime_dir(root).unwrap();
+    jchtools_markdown::markdown_assets::save_runtime_dir(root).unwrap();
     let input = root.join("input");
     let output = root.join("output");
     std::fs::create_dir(&input).unwrap();
@@ -259,11 +257,11 @@ fn batch_stop_preserves_unfinished_request_diagnostic_and_snapshot_alive() {
         broker_pid: state["jchtools_broker_pid"].as_u64().unwrap(),
         engine_pid: state["jchtools_xberg_pid"].as_u64(),
     };
-    let options = jchtools::markdown::Options {
+    let options = jchtools_markdown::markdown::Options {
         input_dir: input,
         output_dir: output.clone(),
         flat: false,
-        groups: vec![jchtools::markdown::FormatGroup::Other],
+        groups: vec![jchtools_markdown::markdown::FormatGroup::Other],
         timeout_secs: 15,
     };
     let cancel = Arc::new(AtomicBool::new(false));
@@ -271,7 +269,7 @@ fn batch_stop_preserves_unfinished_request_diagnostic_and_snapshot_alive() {
     let (send, receive) = std::sync::mpsc::channel();
     let batch = std::thread::spawn(move || {
         let mut events = Vec::new();
-        let result = jchtools::markdown::run(&options, &token, |event| events.push(event));
+        let result = jchtools_markdown::markdown::run(&options, &token, |event| events.push(event));
         send.send((result, events)).unwrap();
     });
     // 同批处理标记等待口径：提前结束立即报告批处理结果，慢负载由 60s 窗口吸收。
@@ -307,7 +305,7 @@ fn batch_stop_preserves_unfinished_request_diagnostic_and_snapshot_alive() {
     assert!(
         events.iter().any(|event| matches!(
             event,
-            jchtools::markdown::Event::FileFinished { success: false, message, .. }
+            jchtools_markdown::markdown::Event::FileFinished { success: false, message, .. }
                 if message.contains("未在 1 秒内结束") && message.contains("保留未结束任务")
         )),
         "必须向界面保留原请求未结束的具体诊断：{events:?}"
@@ -315,13 +313,13 @@ fn batch_stop_preserves_unfinished_request_diagnostic_and_snapshot_alive() {
     assert!(
         !events
             .iter()
-            .any(|event| matches!(event, jchtools::markdown::Event::FileCancelled { .. })),
+            .any(|event| matches!(event, jchtools_markdown::markdown::Event::FileCancelled { .. })),
         "取消失败不得冒充普通取消"
     );
     assert_eq!(
         events
             .iter()
-            .filter(|event| matches!(event, jchtools::markdown::Event::FileStarted { .. }))
+            .filter(|event| matches!(event, jchtools_markdown::markdown::Event::FileStarted { .. }))
             .count(),
         1,
         "停止后不得继续下一文件"

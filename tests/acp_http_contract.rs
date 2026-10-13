@@ -754,7 +754,7 @@ fn queued_session_cwd_change_is_rejected_before_waiting() {
 /// AH-04/AH-12/AH-13：prompt 尚未发出时取消，只结束该请求并保留原历史与排队轮次。
 #[test]
 fn pre_prompt_cancel_preserves_session_and_waiter() {
-    use jchtools::acp_api::{ChatMessage, MessageRole, PromptInput, RequestEvent, SessionKey};
+    use jchtools_acp_api::acp_api::{ChatMessage, MessageRole, PromptInput, RequestEvent, SessionKey};
     let server = server("model-set-held");
     let mut cleanup = ModelSetRelease(Some(server.root.join("release-model-set")));
     let first = Plan::new("text");
@@ -1708,6 +1708,6 @@ fn immediately_exited_agent_never_republishes_dead_pid() {
     let exited = std::fs::read_to_string(server.root.join("owner-exited")).unwrap();
     assert!(exited.parse::<u32>().unwrap() > 0);
     let status = server.backend.status();
-    assert_eq!(status.phase, jchtools::acp_api::ServicePhase::Error);
+    assert_eq!(status.phase, jchtools_acp_api::acp_api::ServicePhase::Error);
     assert_eq!(status.agent_pid, None, "已退出 PID {exited} 被后端重复发布");
 }
