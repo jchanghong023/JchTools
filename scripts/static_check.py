@@ -97,27 +97,127 @@ def check(name: str, fn: Callable[[], object]) -> None:
         checks.append({"name": name, "status": "FAIL", "details": str(exc)})
 
 
+_PRODUCTION_CRATES = (
+    "foundation",
+    "file-core",
+    "recursive-extract",
+    "directory-organizer",
+    "md-tools",
+    "git-tools",
+    "xberg",
+    "assets",
+    "markdown",
+    "acp-api",
+    "codeagent",
+    "jchocr",
+    "ui",
+    "gui",
+)
+_OPTIONAL_CRATES = ("snap-ocr-core", "snap-ocr-worker")
+
+
+def project_manifests() -> list[Path]:
+    """仅扫描本项目，不扫描 vendor 或 Cargo 输出；已登记 package 缺失即失败."""
+    required = {
+        ROOT / "Cargo.toml",
+        *(ROOT / "crates" / name / "Cargo.toml" for name in _PRODUCTION_CRATES),
+        *(ROOT / "optional" / name / "Cargo.toml" for name in _OPTIONAL_CRATES),
+    }
+    missing = sorted(path.relative_to(ROOT).as_posix() for path in required if not path.is_file())
+    if missing:
+        detail = f"本项目 Cargo 清单缺失：{missing}"
+        raise AssertionError(detail)
+    required_sources = {
+        *(ROOT / "crates" / name / "src/lib.rs" for name in _PRODUCTION_CRATES),
+        *(ROOT / "optional" / name / "src/lib.rs" for name in _OPTIONAL_CRATES),
+        ROOT / "build.rs",
+        ROOT / "crates/file-core/build.rs",
+        ROOT / "crates/assets/build.rs",
+        ROOT / "crates/ui/build.rs",
+        ROOT / "optional/snap-ocr-worker/build.rs",
+    }
+    missing_sources = sorted(path.relative_to(ROOT).as_posix() for path in required_sources if not path.is_file())
+    if missing_sources:
+        detail = f"本项目库入口或真实 build producer 缺失：{missing_sources}"
+        raise AssertionError(detail)
+    return sorted(required | set(ROOT.glob("crates/*/Cargo.toml")) | set(ROOT.glob("optional/*/Cargo.toml")))
+
+
+def rust_sources() -> list[Path]:
+    """统一手写 Rust 范围：各 package 的 build/src/tests/examples/benches 及根夹具."""
+    paths: set[Path] = set()
+    for manifest in project_manifests():
+        package_root = manifest.parent
+        if not (package_root / "src").is_dir():
+            detail = f"本项目源码目录缺失：{package_root.relative_to(ROOT) / 'src'}"
+            raise AssertionError(detail)
+        build_script = package_root / "build.rs"
+        if build_script.is_file():
+            paths.add(build_script)
+        for directory in ("src", "tests", "examples", "benches"):
+            paths.update((package_root / directory).glob("**/*.rs"))
+    return sorted(paths)
+
+
+def _manifest_source(manifest: Path, kind: str, target: object) -> None:
+    if not _is_str_obj_map(target):
+        detail = f"{manifest.relative_to(ROOT)} 的 {kind} 项必须是表"
+        raise AssertionError(detail)
+    target_path = target.get("path")
+    if target_path is None and kind == "lib":
+        target_path = "src/lib.rs"
+    if not _is_str(target_path) or not (manifest.parent / target_path).is_file():
+        detail = f"{manifest.relative_to(ROOT)} 的 {kind} 源码路径无效：{target_path}"
+        raise AssertionError(detail)
+
+
+def _manifest_targets(manifest: Path, cargo: dict[str, object]) -> None:
+    for kind in ("lib", "bin", "test", "example", "bench"):
+        value = cargo.get(kind)
+        if value is None:
+            continue
+        targets: list[object] = [value] if kind == "lib" else value if _is_obj_list(value) else []
+        if not targets:
+            detail = f"{manifest.relative_to(ROOT)} 的 {kind} 必须是非空目标表/数组"
+            raise AssertionError(detail)
+        for target in targets:
+            _manifest_source(manifest, kind, target)
+    package = cargo.get("package")
+    if not _is_str_obj_map(package):
+        detail = f"{manifest.relative_to(ROOT)} 的 package 必须是表"
+        raise AssertionError(detail)
+    build = package.get("build")
+    if build is not None and build is not False:
+        build_path = "build.rs" if build is True else build
+        if not _is_str(build_path) or not (manifest.parent / build_path).is_file():
+            detail = f"{manifest.relative_to(ROOT)} 的 build 源码路径无效：{build_path}"
+            raise AssertionError(detail)
+
+
 def manifests() -> str:
-    cargo_value: object = _parse_toml(read_text(ROOT / "Cargo.toml"))
-    if not _is_str_obj_map(cargo_value):
-        detail = "Cargo.toml 顶层必须是表"
-        raise AssertionError(detail)
-    bin_value: object = cargo_value["bin"]
-    if not _is_obj_list(bin_value):
-        detail = "Cargo.toml 的 bin 必须是数组"
-        raise AssertionError(detail)
-    for binary in bin_value:
-        if not _is_str_obj_map(binary):
-            detail = "Cargo.toml 的 bin 项必须是表"
+    paths = project_manifests()
+    for path in paths:
+        cargo_value: object = _parse_toml(read_text(path))
+        if not _is_str_obj_map(cargo_value):
+            detail = f"{path.relative_to(ROOT)} 顶层必须是表"
             raise AssertionError(detail)
-        bin_path = binary["path"]
-        if not _is_str(bin_path):
-            detail = "Cargo.toml 的 bin 项 path 必须是字符串"
-            raise AssertionError(detail)
-        if not (ROOT / bin_path).is_file():
-            raise AssertionError
+        if path == ROOT / "Cargo.toml":
+            if not _is_obj_list(cargo_value.get("bin")):
+                detail = "Cargo.toml 的 bin 必须是数组"
+                raise AssertionError(detail)
+            workspace = cargo_value.get("workspace")
+            if not _is_str_obj_map(workspace):
+                detail = "Cargo.toml 的 workspace 必须是表"
+                raise AssertionError(detail)
+            default_members = workspace.get("default-members")
+            expected = {".", *(f"crates/{name}" for name in _PRODUCTION_CRATES)}
+            if not _is_obj_list(default_members) or set(default_members) != expected:
+                detail = f"default-members 必须完整覆盖根与生产 crates，不包含 optional：{default_members}"
+                raise AssertionError(detail)
+        _manifest_targets(path, cargo_value)
     _ = defusedxml.ElementTree.parse(ROOT / "resources/windows.manifest")
-    return "Cargo TOML, declared binary paths, Windows XML parsed."
+    summary = f"{len(paths)} project Cargo TOML files, declared target/build paths,"
+    return f"{summary} default members and Windows XML parsed."
 
 
 def _rules_rows() -> list[dict[str, object]]:
@@ -189,10 +289,10 @@ def _check_rule_row(row: dict[str, object], fields: dict[str, str], config: str)
 
 
 def config_schema() -> str:
-    config = read_text(ROOT / "src/config.rs")
+    config = read_text(ROOT / "crates/file-core/src/config.rs")
     match = re.search(r"pub struct Config\s*\{(.*?)\n\}", config, re.DOTALL)
     if match is None:
-        detail = "src/config.rs 中找不到 pub struct Config 定义"
+        detail = "crates/file-core/src/config.rs 中找不到 pub struct Config 定义"
         raise AssertionError(detail)
     fields = dict(re.findall(r"pub\s+(\w+)\s*:\s*([\w:]+)", match.group(1)))
     rows = _rules_rows()
@@ -212,8 +312,8 @@ def config_schema() -> str:
 
 def ui_callbacks() -> str:
     ui = read_text(ROOT / "ui/app.slint")
-    # GUI 组装层在 src/gui.rs（bin main.rs 只是薄壳入口），两者都可能有 ui.on_* 接线。
-    rs = chr(10).join(read_text(ROOT / p) for p in sorted(ROOT.glob("src/*.rs")))
+    # GUI 组装层在真实 gui crate；bin main.rs 只是薄壳入口。
+    rs = chr(10).join(read_text(path) for path in [ROOT / "src/main.rs", *sorted(ROOT.glob("crates/gui/src/**/*.rs"))])
     # 只有导出组件（窗口）上的回调是应用级 API；组件内部的回调在 .slint 内部接线。
     text = ui[ui.index("export component AppWindow inherits Window") :]
     depth = 0
@@ -250,7 +350,7 @@ def rust_lexical() -> str:
         detail = "pygments 的 RustLexer 不可调用"
         raise TypeError(detail)
     count = 0
-    for path in [ROOT / "build.rs", *ROOT.glob("src/**/*.rs"), *ROOT.glob("tests/**/*.rs")]:
+    for path in rust_sources():
         stack: list[str] = []
         lexer: object = lexer_factory()
         if not isinstance(lexer, lexer_base):
@@ -279,9 +379,9 @@ def _check_delimiters(path: Path, text: str, stack: list[str]) -> None:
 
 def sql_syntax() -> str:
     conn = sqlite3.connect(":memory:")
-    _ = conn.executescript(read_text(ROOT / "src/schema.sql"))
+    _ = conn.executescript(read_text(ROOT / "crates/file-core/src/schema.sql"))
     # XB-18：直接读取产品使用的应用配置 schema，避免检查器另造一份表定义。
-    _ = conn.executescript(read_text(ROOT / "src/app_settings.sql"))
+    _ = conn.executescript(read_text(ROOT / "crates/foundation/src/app_settings.sql"))
     _ = conn.executescript("""CREATE TEMP TABLE duplicate_order(seq INTEGER,id INTEGER);
         CREATE TEMP TABLE empty_order(seq INTEGER,rel TEXT);
         CREATE TEMP TABLE empty_will(rel TEXT PRIMARY KEY);
@@ -295,7 +395,9 @@ def sql_syntax() -> str:
             hash TEXT NOT NULL, updated INTEGER NOT NULL, PRIMARY KEY(identity,size,mtime));""")
     file_columns = "id,rel,name,normal,size,mtime,identity,links,hash,cleanable"
     statements: set[str] = set()
-    for path in ROOT.glob("src/**/*.rs"):
+    # SQL 判据保持原生产实现范围；独立 crate 的真实实现取代原 src/，
+    # 不把 optional 热键字面量 "INSERT"/"DELETE" 或测试输入误当成产品 SQL。
+    for path in sorted([*ROOT.glob("src/**/*.rs"), *ROOT.glob("crates/*/src/**/*.rs")]):
         for match in re.finditer(r'"((?:[^"\\]|\\.)*)"', read_text(path)):
             raw = match.group(1)
             if not re.match(r"^(SELECT|UPDATE|INSERT|DELETE)\b", raw):
@@ -585,20 +687,16 @@ def _test_body_hash(text: str, signature_end: int) -> str:
 
 
 def collect_tests() -> list[dict[str, object]]:
-    # 提取 src/ 与 tests/ 全部 #[test] / #[tokio::test]。基线键包含生效门禁（cfg）：
+    # 提取本项目所有 package 的手写 Rust #[test] / #[tokio::test]。基线键包含生效门禁（cfg）：
     #   1) 文件级 #![cfg(...)]（仅扫文件头部内层属性区）；
     #   2) 包裹测试的 #[cfg(...)] mod 块（花括号配对取范围；cfg(test) 恒真不计）；
     #   3) 紧贴 #[test] 的属性块（前后均可，方括号配对，支持 not(windows) 等嵌套括号）。
-    # 已知残留盲区：定义在其它文件里的门禁（如 lib.rs 的 #[cfg(feature = "gui")] pub mod gui;）
+    # 已知残留盲区：定义在其它文件里的门禁（如 lib.rs 对模块声明的 cfg）
     # 不在本文件扫描范围内——本检查是执法下界，不是完整 cfg 求值器。
     rows: list[dict[str, object]] = []
-    # optional/ 下的可选组件 crate（如 snap-ocr-worker）与 src/tests 同口径纳入基线，
-    # 防止其游离于测试清单门禁之外（是否被 cargo 实际执行由 workspace 成员关系决定）。
-    for path in [
-        *ROOT.glob("src/**/*.rs"),
-        *ROOT.glob("tests/**/*.rs"),
-        *ROOT.glob("optional/*/src/**/*.rs"),
-    ]:
+    # 与词法/SQL/实现检查共用范围，包含搬迁的 crate 内联测试与 jchocr 集成测试，
+    # 也包含 optional 的 src/tests/examples/benches；实际执行仍受默认成员/显式入口控制。
+    for path in rust_sources():
         rows.extend(_collect_file_tests(path))
     keys = [(row["file"], row["name"], row["cfg"]) for row in rows]
     if len(keys) != len(set(keys)):
@@ -755,18 +853,24 @@ def slint_colors() -> str:
 def product_naming() -> str:
     # AGENTS.md 第 1/5 节的产品名同步下界：标题与状态目录必须是 JchTools，且无旧名残留。
     ui = read_text(ROOT / "ui" / "app.slint")
-    config = read_text(ROOT / "src" / "config.rs")
+    config = read_text(ROOT / "crates/file-core/src/config.rs")
     if not re.search(r'title:\s*"JchTools"', ui):
         detail = "窗口标题必须是产品名 JchTools"
         raise AssertionError(detail)
     # 状态定位可由 config 委托给应用共享设置；检查实际定位方，不能要求
     # 调用方为满足字符串检查重复维护产品目录名。
-    shared_settings = read_text(ROOT / "src" / "xberg_settings.rs")
-    locator = shared_settings if "crate::xberg_settings::state_dir()" in config else config
+    shared_settings = read_text(ROOT / "crates/foundation/src/xberg_settings.rs")
+    locator = shared_settings if "jchtools_foundation::xberg_settings::state_dir()" in config else config
     if not re.search(r'ProjectDirs::from\(\s*""\s*,\s*""\s*,\s*"JchTools"\s*\)', locator):
         detail = '实际状态定位方的用户数据目录名必须是 "JchTools"'
         raise AssertionError(detail)
-    for rel in ["ui/app.slint", "src/config.rs", "src/xberg_settings.rs", "src/registry.rs", "Cargo.toml"]:
+    for rel in [
+        "ui/app.slint",
+        "crates/file-core/src/config.rs",
+        "crates/foundation/src/xberg_settings.rs",
+        "crates/gui/src/registry.rs",
+        *(path.relative_to(ROOT).as_posix() for path in project_manifests()),
+    ]:
         if "MyTools" in read_text(ROOT / rel):
             detail = f"{rel} 残留旧产品名 MyTools"
             raise AssertionError(detail)
@@ -832,11 +936,13 @@ def scope_and_delivery() -> str:
     ]
     if not all((ROOT / p).is_file() for p in required):
         raise AssertionError
-    for path in ROOT.glob("src/**/*.rs"):
+    for path in sorted(
+        [*ROOT.glob("src/**/*.rs"), *ROOT.glob("crates/*/src/**/*.rs"), *ROOT.glob("optional/*/src/**/*.rs")]
+    ):
         text = read_text(path)
         if "todo!(" in text or "unimplemented!(" in text:
             raise AssertionError(str(path))
-    tests = sum(len(re.findall(r"#\[test\]", read_text(p))) for p in ROOT.glob("tests/**/*.rs"))
+    tests = len(collect_tests())
     return (
         f"{tests} Rust test functions supplied, NOT executed; no todo!/unimplemented! in Rust implementation; "
         "no prebuilt executable asserted."
@@ -887,15 +993,15 @@ def requirements_registry() -> str:
 def snap_pipe_command_sync() -> str:
     """截图服务命名管道协议双端同步执法：gui 发出的命令服务端必须可处理.
 
-    src/gui.rs 构造的每个 "command" 字面量都必须在 worker 服务分发表
+    crates/gui/src/gui.rs 构造的每个 "command" 字面量都必须在 worker 服务分发表
     （optional/snap-ocr-worker/src/service.rs）中有对应处理；两端无共享类型，
     本检查防协议各自演进造成静默失配。
     """
-    gui = read_text(ROOT / "src" / "gui.rs")
+    gui = read_text(ROOT / "crates/gui/src/gui.rs")
     service = read_text(ROOT / "optional" / "snap-ocr-worker" / "src" / "service.rs")
     sent: list[str] = sorted(set(re.findall(r'"command"\s*:\s*"([a-z-]+)"', gui)))
     if not sent:
-        detail = "src/gui.rs 中未发现任何管道命令字面量（检查本身失效）"
+        detail = "crates/gui/src/gui.rs 中未发现任何管道命令字面量（检查本身失效）"
         raise AssertionError(detail)
     unhandled = [cmd for cmd in sent if f'"{cmd}"' not in service]
     if unhandled:

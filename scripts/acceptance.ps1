@@ -4,9 +4,9 @@
   JchTools 单命令验收入口：把 AGENTS.md 3.2 完成条件矩阵串成一个退出码。
 
 .DESCRIPTION
-  默认执行（无需参数）：static_check.py（含测试基线与界面规则检查）、cargo test、
+  默认执行（无需参数）：static_check.py（含测试基线与界面规则检查）、默认成员 cargo test、
   Snap OCR core/worker 的 all-targets 测试与 clippy、构建输出 binding loop 警告扫描；
-  根包默认复用 local_gate_plan 的非桌面 artifact 分类。可选阶段：
+  根与全部生产 crate 默认复用 local_gate_plan 的非桌面 artifact 分类。可选阶段：
     -WithDesktopTests 仅在本次用户明确授权后使用：追加真实 GUI 用例和有资产时的热键服务探测；
                   -WithGuiSmoke / -WithMarkdownAcceptance 同样要求此声明，参数本身不创造授权。
     -WithEngine   追加真实引擎用例（JCHTOOLS_TEST_7ZIP 或 resources\7zip\7z.exe，
@@ -198,7 +198,8 @@ $null = Invoke-Logged -Name 'static-check' -File $python -Arguments @('scripts/s
 $null = Invoke-Logged -Name 'ocr-asset-manifest' -File $python `
     -Arguments @('tests/ocr_fixtures/check_asset_manifest.py')
 
-# 2) 根包全量编译；默认按现有测试门分类执行非桌面 artifact，不能暗中抢占用户焦点。
+# 2) 根与全部生产 crate（workspace default-members）全量编译；
+#    保留原内联测试的覆盖，默认按现有测试门分类执行非桌面 artifact，不抢占用户焦点。
 $testLogs = @()
 if ($WithDesktopTests) {
     $testLog = Invoke-Logged -Name 'cargo-test' -File 'cargo' `
@@ -220,7 +221,7 @@ print(json.dumps([{'name': stage.name, 'argv': stage.argv} for stage in stages])
 '@
     $planLog = Invoke-Logged -Name 'root-test-plan' -File $python -Arguments @('-c',$planCode,$testLog)
     $testStages = @(Get-Content -LiteralPath $planLog -Raw -Encoding UTF8 | ConvertFrom-Json)
-    if ($testStages.Count -eq 0) {throw '未取得根包测试 artifact，拒绝把零测试执行报告为通过。'}
+    if ($testStages.Count -eq 0) {throw '未取得默认成员测试 artifact，拒绝把零测试执行报告为通过。'}
     foreach ($stage in $testStages) {
         $testLogs += Invoke-Logged -Name $stage.name -File $stage.argv[0] `
             -Arguments @($stage.argv | Select-Object -Skip 1) -Environment $testEnvironment
@@ -237,8 +238,8 @@ if ($hits.Count -gt 0) {
 }
 $script:Results.Add('PASS  binding-loop-scan')
 
-# 截图 OCR 是独立 workspace 成员；根 cargo test/clippy 不覆盖它们。对当前 HEAD
-# 的两个包同时运行测试和 lint，防止本地验收只依赖远程 CI 的旧结果。
+# 截图 OCR 是额外的 workspace 成员，不在 default-members 中。对当前 HEAD
+# 的两个包仍显式运行测试和 lint，不扩大桌面授权或依赖远程 CI 的旧结果。
 foreach ($component in @('snap-ocr-core','snap-ocr-worker')) {
     $manifest = Join-Path $root "optional/$component/Cargo.toml"
     $productionTargets = @('--lib')
@@ -265,7 +266,7 @@ if ($WithEngine) {
     }
     if (-not $engine) {throw '-WithEngine 需要真实引擎：设置 JCHTOOLS_TEST_7ZIP，或先运行 scripts/fetch-7zip.ps1'}
     $null = Invoke-Logged -Name 'engine-tests' -File 'cargo' `
-        -Arguments @('test','--features','test-hooks','--test','archive','--','--ignored','--test-threads=1') `
+        -Arguments @('test','-p','jchtools','--features','test-hooks','--test','archive','--','--ignored','--test-threads=1') `
         -Environment @{JCHTOOLS_TEST_7ZIP = $engine}
 } else {$script:Results.Add('NOT RUN  engine-tests（加 -WithEngine）')}
 
@@ -285,8 +286,8 @@ if ($WithGuiSmoke) {
     # 验证结论与当前源码脱节（AGENTS.md 3.2 对抗自证偏差）。
     # 保留普通生产构建维度；真实桌面测试启用显式隔离，不能启动用户常驻后台，
     # 否则后面的隔离 Markdown broker 会按 XB-14 拒绝第二个引擎。
-    $null = Invoke-Logged -Name 'gui-production-build' -File 'cargo' -Arguments @('build')
-    $null = Invoke-Logged -Name 'gui-build' -File 'cargo' -Arguments @('build','--features','test-hooks')
+    $null = Invoke-Logged -Name 'gui-production-build' -File 'cargo' -Arguments @('build','-p','jchtools','--bin','JchTools')
+    $null = Invoke-Logged -Name 'gui-build' -File 'cargo' -Arguments @('build','-p','jchtools','--bin','JchTools','--features','test-hooks')
     $guiState = Join-Path $script:LogDir 'gui-state'
     $guiEnvironment = @{
         JCHTOOLS_TEST_STATE_DIR = $guiState

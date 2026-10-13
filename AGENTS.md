@@ -14,7 +14,7 @@
 ## 1. 项目背景
 
 - **项目类型与技术栈**：自有项目 JchTools，用户个人使用的 Windows 本地工具箱，由 AI Agent 实现和维护。Rust 2021 + Slint 1.17、SQLite（rusqlite bundled）、7-Zip 引擎；产品定位与交付要求见合同 P / E 分区，打包入口为 `scripts/package-windows.ps1` 与 `installer/JchTools.iss`。
-- **工具入口**：当前工作树的注册表与 GUI 已接入递归解压、目录整理、MD 整理、转 Markdown、Git 工具、截图 OCR 和模型服务；本次新增 CodeAgent 的功能与验收按 CA 分区维护。入口与实现存在不代表完整验收；截图与模型服务须分别按 O / AH 验收矩阵核对，官方 SDK 夹具不代替真实 Agent 与模型。新工具 `MUST` 经 `src/registry.rs` 注册 + 真实页面接入；侧栏与导航 `SHOULD NOT` 写死只服务单个工具的文案或流程。
+- **工具入口**：当前工作树的注册表与 GUI 已接入递归解压、目录整理、MD 整理、转 Markdown、Git 工具、截图 OCR 和模型服务；本次新增 CodeAgent 的功能与验收按 CA 分区维护。入口与实现存在不代表完整验收；截图与模型服务须分别按 O / AH 验收矩阵核对，官方 SDK 夹具不代替真实 Agent 与模型。新工具 `MUST` 经 `crates/gui/src/registry.rs` 注册 + 真实页面接入；侧栏与导航 `SHOULD NOT` 写死只服务单个工具的文案或流程。
 - **生产方式**：本项目全部产出（代码、测试、文档、CI）由 AI 代理完成；质量不能依赖用户手工阅读代码或人工回归。用户只在封闭选择、看图判断与真实使用中给出意图和反馈（第 7 节），不编写代码或文字。本文件的纪律用于对抗代理自证偏差。
 - **权威分工**：`AGENTS.md` 维护开发、测试和验收纪律；固定目录 `docs/requirements/` 保存全部产品需求，域边界与完整清单在该目录的 `README.md`，不复制子需求：
   - `CONTRACT.md`：全局与共用约束（H / P / S / R / U / E 及共用附录 B～E）。
@@ -26,12 +26,12 @@
   - `SNAP2TEXT.md`：截图 OCR（O）。
   - `XBERG-INFERENCE.md`：共享 Xberg、设置与后台（XB）。
   - `ACP-MODEL-SERVICE.md`：独立模型服务（AH 及真实 Agent 验收）。
-  - `CODEAGENT.md`：CodeAgent Token 自动维护（CA）；入口为 `src/codeagent.rs` 与独立 GUI 页面，后台内部入口为 `--codeagent-service`。
+  - `CODEAGENT.md`：CodeAgent Token 自动维护（CA）；入口为 `crates/codeagent/src/codeagent.rs` 与独立 GUI 页面，后台内部入口为 `--codeagent-service`。
   - 按功能域定位唯一需求来源。旧 `docs/CONTRACT.md` 仅保留迁移链接，不维护副本；其他文档只作辅助。新增需求文档须同步索引、此清单与 `scripts/static_check.py` 的 `requirements_registry` 登记；该检查现已登记本目录索引及全部十份权威需求文档，登记同步本身不代表静态检查或功能验收通过。
-- **代码入口**：`src/main.rs` → `src/gui.rs`（GUI 启动、回调与后台任务）、`ui/app.slint`（界面）、`src/registry.rs`（工具注册表）；`src/archive.rs`（递归解压）、`src/engine.rs`（整理分析与执行）、`src/md_tools.rs`（MD 合并与拆分）、`src/git_tools.rs`（Git 操作）、`resources/rules.json`（界面规则清单）。转 Markdown 由 `src/markdown.rs`、`src/markdown_document.rs`、`src/markdown_assets.rs` 承接，媒体转录经 Xberg 推理组件（`xberg.exe worker` stdio 协议，XB 分区）承接；截图 OCR 由 `src/snap_ocr_assets.rs`、`optional/snap-ocr-core/`（O-23～O-28 的规格参照物：workspace 内无 crate 依赖它，识别已按 XB-01/XB-02 迁至 Xberg，删除前须确认规格约束另有执法点承接）与 `optional/snap-ocr-worker/`（截图、托盘、服务和结果窗，识别经 Xberg 推理组件）承接，主界面回调仍在 `src/gui.rs`。两资产模块共用的下载/校验/原子落位/推理组件包安装核心在 `src/asset_util.rs`。
-- **共享推理与配置入口**：`src/xberg_runtime.rs` / `src/xberg_runtime_windows.rs` 承接共享引擎请求及 Windows 命名管道代理；主程序的 `--xberg-broker` 是内部代理入口。截图服务经 `optional/snap-ocr-worker/src/shared_xberg.rs` 接入，并编译复用主包的 runtime 与 settings 模块。`src/xberg_settings.rs` / `src/app_settings.sql` 在应用状态目录的 `config.sqlite3` 保存 Xberg 目录并承接旧文本配置迁移；功能与生命周期要求以 XB-14～XB-19 为准。
-- **jchocr 入口**：`src/bin/jchocr.rs` → `src/jchocr.rs`，需求唯一见 O-33～O-37；复用应用 SQLite 和共享 Xberg 代理，不是新增 GUI 工具，不适用第 1 节的新增页面注册要求。安装包将命令复制到当前用户已有 PATH 的 WindowsApps 目录，不修改 PATH；便携包只随附程序。局部验证入口为 `cargo test --features test-hooks --test jchocr`；无需为该独立 CLI 改动运行真实桌面驱动或完整测试门。
-- **ACP 模型服务入口**：`src/acp_api/acp/` 为官方 SDK 会话及回调适配，`http/` 为 Axum OpenAI/SSE 接口，`runtime/` 为 Windows 独立后台与控制管道，`settings.rs` 复用应用 SQLite；主程序内部入口为 `--acp-http-service`。源码与许可归属在 `vendor/SOURCES.json`，`.cargo/config.toml` 解析仓库内依赖。局部入口为 `cargo test --features test-hooks --test acp_settings --test acp_http_contract --test acp_callbacks --test acp_service_process --test acp_prompt_summary`；其中窗口场景使用 winit-software 与窗口内事件，不移动硬件鼠标。合成 Agent 源码在 `tests/fixtures/acp_api/main.rs`，仅 test-hooks 构建，不进入生产包。
+- **代码入口**：根 `src/main.rs` → `crates/gui/src/gui.rs`（GUI 启动、回调与后台任务），`crates/gui/src/registry.rs` 为工具注册表，`ui/app.slint` 仍在根目录、由 `crates/ui/build.rs` 生成独立 UI crate。递归解压在 `crates/recursive-extract/src/{archive,engine}.rs`，目录整理在 `crates/directory-organizer/src/{engine,planner,dedup_components}.rs`，两者共用 `crates/file-core/src/{task,scan}.rs` 的任务与扫描合同；MD 整理、Git 操作分别在 `crates/md-tools/src/md_tools.rs`、`crates/git-tools/src/git_tools.rs`，规则清单仍为 `resources/rules.json`。转 Markdown 由 `crates/markdown/src/{markdown,markdown_document,markdown_assets}.rs` 承接，媒体转录经 Xberg 推理组件（`xberg.exe worker` stdio 协议，XB 分区）承接；截图资产在 `crates/assets/src/snap_ocr_assets.rs`，资产共用的下载/校验/原子落位/推理组件包安装核心在同 crate 的 `asset_util.rs`。`optional/snap-ocr-core/` 仍是 O-23～O-28 的规格参照物：workspace 内无 crate 依赖它，识别已按 XB-01/XB-02 迁至 Xberg，删除前须确认规格约束另有执法点承接；`optional/snap-ocr-worker/` 承接截图、托盘、服务和结果窗，识别经 Xberg 推理组件，主界面回调仍在 GUI crate。
+- **共享推理与配置入口**：`crates/xberg/src/{xberg_runtime,xberg_runtime_windows}.rs` 承接共享引擎请求及 Windows 命名管道代理；主程序的 `--xberg-broker` 是内部代理入口。截图服务经 `optional/snap-ocr-worker/src/shared_xberg.rs` 接入，通过真实 crate 依赖共享 Xberg runtime 与 foundation 的日志/设置，不再把主包源文件重复编入。`crates/foundation/src/{xberg_settings.rs,app_settings.sql}` 在应用状态目录的 `config.sqlite3` 保存 Xberg 目录并承接旧文本配置迁移；功能与生命周期要求以 XB-14～XB-19 为准。
+- **jchocr 入口**：独立 package `jchocr` 的 `crates/jchocr/src/bin/jchocr.rs` → `crates/jchocr/src/jchocr.rs`，集成测试在 `crates/jchocr/tests/jchocr.rs`，需求唯一见 O-33～O-37；复用应用 SQLite 和共享 Xberg 代理，不是新增 GUI 工具，不适用第 1 节的新增页面注册要求。安装包将命令复制到当前用户已有 PATH 的 WindowsApps 目录，不修改 PATH；便携包只随附程序。局部验证入口为 `cargo test -p jchocr --features test-hooks --test jchocr`；无需为该独立 CLI 改动运行真实桌面驱动或完整测试门。
+- **ACP 模型服务入口**：`crates/acp-api/src/acp_api/acp/` 为官方 SDK 会话及回调适配，同层 `http/` 为 Axum OpenAI/SSE 接口，`runtime/` 为 Windows 独立后台与控制管道，`settings.rs` 复用 foundation 持有的同一份应用 SQLite schema；主程序内部入口为 `--acp-http-service`。源码与许可归属在 `vendor/SOURCES.json`，`.cargo/config.toml` 解析仓库内依赖。局部入口为 `cargo test -p jchtools --features test-hooks --test acp_settings --test acp_http_contract --test acp_callbacks --test acp_service_process --test acp_prompt_summary`；其中窗口场景使用 winit-software 与窗口内事件，不移动硬件鼠标。合成 Agent 源码在 `tests/fixtures/acp_api/main.rs`，仅 test-hooks 构建，不进入生产包。
 - **子模块文档登记表**：仓库子级 `AGENTS.md` 只承载该子树专属的职责、入口、命令、约定与陷阱；全局规则与全局命令唯一权威在本文件，子文档不重复维护。当前登记两份（全仓库含本文件上限 8 份）：
   - `optional/snap-ocr-worker/AGENTS.md`——截图 OCR 后台进程 crate：托盘/热键/GDI 截图/结果窗/管道服务与 Xberg 客户端的本地命令、与主包的双端同步点及陷阱。
   - `optional/snap-ocr-core/AGENTS.md`——O-23～O-28 冻结规格的纯逻辑参照物 crate：无人依赖的现状、测试命令与删除/改动前置约束。
@@ -40,7 +40,7 @@
 
 - 一切测试、验证、截图、日志、下载与中间产物 `MUST` 放在仓库根目录的 **`.tmp/`** 下，例如 `.tmp/ui-test/`、`.tmp/screenshots/run1.png`、`.tmp/bench/`。
 - `.tmp/` 已被 `.gitignore` 忽略：`MUST NOT` 提交、`MUST NOT` 打进发布包、`MUST NOT` 用 `git add -f` 强加。
-- 测试临时数据 `MUST NOT` 写在仓库其它位置（仓库根、`src/`、`resources/`、`docs/`、`tests/` 都不行）。
+- 测试临时数据 `MUST NOT` 写在仓库其它位置（仓库根、`src/`、`crates/`、`resources/`、`docs/`、`tests/` 都不行）。
 - 需要长期保留的样例数据放 `tests/`，或直接用测试内置的临时目录（`tempfile` / `std::env::temp_dir()`）。
 - 校验、清理或重建 `.tmp/` 的脚本 `MAY` 直接删除该目录内容，不会影响仓库文件。
 - 项目所需的一切临时目录与测试数据统一由 `python scripts/make_tmp.py` 生成（种类可扩展，现有 `testdata`），默认落在 `.tmp/` 下；测试完成后清理本会话自建子目录，仅在确认无并行会话使用 `.tmp/` 时才用 `python scripts/make_tmp.py clean` 全量清空释放磁盘，`MUST NOT` 清空其他会话仍在使用的内容（无执法点 · 软法），`MUST NOT` 让 `.tmp/` 无限增长。
@@ -53,11 +53,11 @@
 cargo run --bin JchTools   # 启动 GUI（默认 gui 特性）
 cargo build                # 开发构建（GUI）
 cargo build --release      # 发布构建
-cargo test --features test-hooks                 # 单元与集成测试（真实引擎用例默认 #[ignore]）
+cargo test --features test-hooks                 # 根与全部生产 crate 的单元/集成测试（真实引擎用例默认 #[ignore]）
 python scripts/static_check.py      # 结构/配置/回调/SQL/测试基线/界面规则静态检查
 python scripts/test_gate.py fastcheck   # 静态检查 + format + compile，不运行测试；非编译共享预算 60s（见 3.4）
 powershell -NoProfile -File .\scripts\acceptance.ps1 -WithEngine   # 单命令验收（见 3.2）
-powershell -NoProfile -File .\scripts\package-windows.ps1   # 生成含 7-Zip 的发布 ZIP
+powershell -NoProfile -File .\scripts\package-windows.ps1   # 生成完整安装包与便携 ZIP、逐步骤墙钟计时
 ```
 
 手工测试集：`python scripts/make_tmp.py testdata`（默认自动生成到 `.tmp/testdata/`，会先清空该目录；也可 `--destination` 另指专门测试目录，仓库内 `.tmp` 之外的位置会被拒绝）。普通处理验收不使用 `--git`：根目录含 `.git` 时按 H-06 拒绝整次处理；`--git` 仅可用于验证该拒绝行为。需要还原普通数据集时重新运行生成命令；测试完成后用 `python scripts/make_tmp.py clean` 清理。
@@ -69,9 +69,11 @@ powershell -NoProfile -File .\scripts\package-windows.ps1   # 生成含 7-Zip �
 
 > 隔离测试显式启用 `test-hooks`；该特性不在默认特性中，生产与打包构建不启用。它允许测试目录和测试代理覆盖；`debug-assertions` 本身不再授予这些覆盖。测试门同时保持生产构建维度。临时验证工作目录可用 `python scripts/make_tmp.py workspace --destination .tmp/validation` 创建。
 
+生产功能按 `crates/` 下 14 个真实 package 隔离，根 package 只保留主 EXE 与合成 ACP fixture，没有旧库 façade。默认构建/测试覆盖根与这些生产成员；可选截图包仍使用 3.3 的额外显式入口。Cargo 缓存复用以真实 fresh/dirty 输出为证据，保持现有 profile、target、features、RUSTFLAGS 与 `.cargo/config.toml` 的 jobs=2，不用清缓存或改变构建维度伪造提速。Windows 打包的主构建显式选择 `-p jchtools -p jchocr --bins`；引擎生成由 file-core、截图内嵌清单由 assets、Slint 生成由 ui 各自的 build script 负责，根 `build.rs` 仅承接 Windows 资源与 manifest。`package-windows.ps1` 在 `.tmp/package-windows-<独占标识>/timings.json` 记录各实际阶段和 total 的墙钟时间与状态，失败也保留已发生记录，输出打印该路径；这些记录不是纯编译时间、不替代 `GateTimingFile` 预算控制，也不进入发布包。
+
 ## 3.1 7-Zip 引擎
 
-引擎相关需求（官方来源、校验、运行期解析顺序、发布包合规）以 `docs/requirements/CONTRACT.md` 的 E 分区为准，本节只写工程事实：`scripts/fetch-7zip.ps1` 负责获取官方引擎（产物落在 `resources/7zip/`，已被 `.gitignore` 忽略，`MUST NOT` 提交）；构建时 `build.rs` 把引擎压缩编进 EXE（`src/engine_bundle.rs` 负责释放与校验），缺失引擎时构建不失败、仅不内嵌。
+引擎相关需求（官方来源、校验、运行期解析顺序、发布包合规）以 `docs/requirements/CONTRACT.md` 的 E 分区为准，本节只写工程事实：`scripts/fetch-7zip.ps1` 负责获取官方引擎（产物落在 `resources/7zip/`，已被 `.gitignore` 忽略，`MUST NOT` 提交）；构建时 `crates/file-core/build.rs` 把同一份引擎压缩编入 file-core 并最终链接进 EXE（`crates/file-core/src/engine_bundle.rs` 负责释放与校验），缺失引擎时构建不失败、仅不内嵌。打包校验读取当前 Cargo artifact 绑定的 file-core build-script OUT_DIR 状态，不按时间猜缓存；同字节引擎输入与内容寻址截图清单不会因打包输出目录不同而改写构建输入。
 
 ## 3.2 测试验收纪律（代码与测试均由 AI 代理产出，以下用于对抗自证偏差）
 
@@ -107,10 +109,10 @@ powershell -NoProfile -File .\scripts\package-windows.ps1   # 生成含 7-Zip �
 - 验证报告 `MUST` 区分已实现、验证通过、验证失败和未验证；环境、依赖或权限不足不得报告验收通过。（无执法点 · 软法）
 - UT / 集成入口为 `cargo test --features test-hooks`，可按目标运行 `cargo test --features test-hooks --test md_tools`、`cargo test --features test-hooks --test git_tools` 等。`tests/git_tools.rs` 使用真实 git 与本地 bare 远端，不覆盖真实网络及认证。
 - Xberg 集成入口为 `cargo test --features test-hooks --test xberg_settings --test xberg_shared_process`（默认 `gui` 特性）。前者覆盖 SQLite 保存、旧配置迁移、独立进程恢复及场景资产选择；后者启动真实 JchTools 代理和命名管道，但使用由 `rustc` 编译的模拟引擎，验证进程复用、转换期间截图响应及请求隔离。它们不覆盖 Windows 重启、真实模型常驻或热键/托盘到结果的桌面 E2E；完整验收仍按 XB 第 5.2 / 6 节执行。
-- GUI 链路入口为 `cargo test --features test-hooks --test gui_flow`；该 target 使用真实 winit 窗口，显示时会激活用户焦点，属于门外独立桌面验收。`src/gui.rs` 内另有 MD 真实回调测试，使用 Slint TestingBackend，不等同于真实桌面窗口验证。`scripts/gui_smoke.py` 默认运行 S1–S4（启动、整理与解压）、S15（MD 合并/拆分产物与原文件保护）、S16（Git 逐文件提交到本地 bare 远端）及 S18（两档窗口尺寸下逐页主要按钮边界与重叠判定）；S16 不覆盖真实网络与认证。S6–S9 的配置隔离需要 `cargo build --features test-hooks` 产物，脚本在操作前检查隔离 SQLite 已建立；普通构建不识别测试环境变量。其他扩展阶段通过 `--stages` 选择，不能以底层测试冒充 GUI E2E。`scripts.test_gui_smoke` 的结果判据、布局反例与隔离守卫单测进入本地 fulltest Python 质量门；S5/S14 按最新 T-23 检查取消当前媒体、先前成品不变及无未完成产物。
+- GUI 链路入口为 `cargo test -p jchtools --features test-hooks --test gui_flow`；该 target 使用真实 winit 窗口，显示时会激活用户焦点，属于门外独立桌面验收。`crates/gui/src/gui.rs` 内另有 MD 真实回调测试，使用 Slint TestingBackend，不等同于真实桌面窗口验证。`scripts/gui_smoke.py` 默认运行 S1–S4（启动、整理与解压）、S15（MD 合并/拆分产物与原文件保护）、S16（Git 逐文件提交到本地 bare 远端）及 S18（两档窗口尺寸下逐页主要按钮边界与重叠判定）；S16 不覆盖真实网络与认证。S6–S9 的配置隔离需要 `cargo build -p jchtools --bin JchTools --features test-hooks` 产物，脚本在操作前检查隔离 SQLite 已建立；普通构建不识别测试环境变量。其他扩展阶段通过 `--stages` 选择，不能以底层测试冒充 GUI E2E。`scripts.test_gui_smoke` 的结果判据、布局反例与隔离守卫单测进入本地 fulltest Python 质量门；S5/S14 按最新 T-23 检查取消当前媒体、先前成品不变及无未完成产物。
 - 转 Markdown 的依据是 `docs/requirements/ALL2MARKDOWN.md`；按该文档附录 A 验证主包不包含转换专用依赖/模型、未配置时旧工具正常可用、GUI 保存并校验用户指定的 Xberg 运行目录、按需初始化其余组件，以及离线真实 Xberg / OCR / 媒体转换、GUI 入口及两种交付形态；旧 all2markdown 的源码、测试或历史 CI 不能作为集成后的通过证据。实现范围按 T-30 限于迁入，不借迁移改变旧功能，也不擅自搬入旧 Python 架构。
 - 纯文档等非功能性修改按实际影响检查内容、引用和需求保留情况，不机械新增功能测试；本仓库已有基线、提交检查与 CI 完成条件仍按 0 / 3.2 / 3.3 执行，未执行项如实标注。
-- 可选组件的 UT / 集成测试从仓库根目录分别运行 `cargo test --features test-hooks --manifest-path optional/snap-ocr-core/Cargo.toml --all-targets` 和 `cargo test --features test-hooks --manifest-path optional/snap-ocr-worker/Cargo.toml --all-targets`。根 workspace 的 `default-members = ["."]`，默认 `cargo test --features test-hooks` 不覆盖这些包；本地 `acceptance.ps1` 有二者的显式测试步骤；CI 不执行这些测试，不能把本地默认门通过当作截图组件已验证。旧 `optional/markdown-media-worker` 已按 XB-12 退役（媒体转录迁移到 Xberg 推理组件），其测试与打包步骤一并移除。
+- 可选组件的 UT / 集成测试从仓库根目录分别运行 `cargo test --features test-hooks --manifest-path optional/snap-ocr-core/Cargo.toml --all-targets` 和 `cargo test --features test-hooks --manifest-path optional/snap-ocr-worker/Cargo.toml --all-targets`。根 workspace 的 `default-members` 包含根及全部 14 个生产 crate，默认 `cargo test --features test-hooks` 覆盖搬迁后的内联测试和 jchocr 集成测试，但不覆盖这两个 optional 包；本地 `acceptance.ps1` 仍有二者的显式测试步骤；CI 不执行这些测试，不能把本地默认门通过当作截图组件已验证。静态测试发现统一覆盖所有本项目 package 的 `build.rs`、`src/`、`tests/`、`examples/`、`benches/`，保留 ignore、cfg 与测试体哈希判据，不扫描 vendor 或 Cargo 生成源码。旧 `optional/markdown-media-worker` 已按 XB-12 退役（媒体转录迁移到 Xberg 推理组件），其测试与打包步骤一并移除。
 - 转 Markdown 的验收承接入口为 `scripts/markdown_acceptance.py`（`--list` 查看条目；默认 `--profile common` 必验新老 Office / PDF / MP4，`--profile full` 保留扩展矩阵，OPTIONAL 不计为通过也不阻塞常用验收），本次另获真实桌面验收授权时也可经 `acceptance.ps1 -WithDesktopTests -WithMarkdownAcceptance` 接入；运行依赖见 `scripts/requirements-dev.txt`，真实 GUI、Xberg、媒体组件与两种发布目录按脚本参数提供。提供 `JCHTOOLS_TEST_XBERG_DIR` 时，验收先写隔离 SQLite，再用 S17 真实 GUI 初始化本地 notice；不读取生产资产来冒充隔离就绪。缺资产条目为 `NOT RUN`；脚本退出码 0 仅表示全部必验条目 PASS；保留的扩展 OPTIONAL 不计为通过；任一必验条目未执行（含 --only 排除的条目）返回 2，应逐项检查。`scripts/gui_smoke.py --stages S5` 另有转换开始/停止链路，需已配置可用组件，不在默认序列内，不能替代转换产物断言。
 - 截图 OCR 的验收覆盖目标见 `docs/requirements/SNAP2TEXT.md` 附录 C。迁至 Xberg 后，worker 已无 `det_paddlex_oracle` / `pipeline_backend_oracle` 测试目标；旧直连引擎路径已退役，服务仅经 `SharedXbergClient` 使用共享引擎。已有 Slint 测试后端结果窗用例不等于热键/托盘、服务生命周期或多 DPI 的真实桌面 E2E，这些链路的自动化覆盖尚未确认。`tests/ocr_fixtures/README.md` 中的旧 `ocr_compare` 命令对应的 example 已不存在，历史结果不能作为当前通过证据。补齐当前共享引擎的同图对照与真实入口自动化，是后续功能验收的必要工作；执行权限及独立桌面边界按 3.4。
 - 本地 `acceptance.ps1` 默认测试 Snap OCR core / worker 并检查资产清单；本次另获真实桌面验收授权并加 `-WithDesktopTests`，同时设置 `JCHTOOLS_SNAP_OCR_ASSET_ROOT` 为完整的已校验资产缓存时，追加真实 worker 从安装位置加载模型的热键服务测试。未同时满足时该项报告 `NOT RUN`，不能据此声称桌面验收通过。
@@ -143,8 +145,8 @@ powershell -NoProfile -File .\scripts\package-windows.ps1   # 生成含 7-Zip �
 - **配置维度稳定**：单轮质量门内 toolchain、`RUSTFLAGS`/`CARGO_ENCODED_RUSTFLAGS`、`.cargo/config*`、`CARGO_TARGET_DIR` 保持不变；固定既有 feature 模式 / target triple / profile 矩阵，同一条门命令在修复循环、必要重跑与最终完整验证之间保持同一变体，门覆盖的维度集合不得缩小。不得为满足预算临时减少 features、改变 flags、切换 target 或关闭既有质量检查；既有 dev / release 等矩阵维度按原定义复用正常缓存。
 - **磁盘清理顺序**：废弃 triple/profile 的整目录 → 旧 toolchain 产物 → 自建临时工具产物（如 `target/miri`）；当前有效增量缓存 MUST NOT 删除；feature 差异在 `target/` 内无独立目录，禁止按目录名/时间戳/体积猜测「旧 feature 缓存」，无法证明废弃的一律保留。
 - **timings 诊断**：构建耗时占主导时用 `cargo build --timings` 定位串行瓶颈（大 crate、build.rs、proc-macro、链接阶段），Top 阻塞单元与建议写入质量门报告；宿主机实时防护（如 Windows Defender 覆盖 `target/`）仅作为环境建议披露——不改系统设置、不据此跳过任何检查。
-- **性能打点与基准**：运行期耗时打点在 `src/perf.rs`，由默认关闭的 `perf-tracing` 特性控制（`cargo run --features perf-tracing` 启用；诊断日志（P-10）使 tracing 依赖常开，本特性只门控性能打点代码与 `perf-logs` 层）；性能日志落状态目录 `perf-logs/`、按天轮转，与界面运行日志（S-07）及诊断日志互不影响；span 名称与字段名是跨版本可比较口径，只增不改名、不改语义（清单见该文件头注释）。
-- **诊断日志入口**：`src/logging.rs` 常开初始化，GUI 与 `--xberg-broker` 的初始化在 `src/main.rs`，截图 worker 编译复用该模块。记录范围、保留策略和失败退化由合同 P-10 唯一维护。`tests/perf_probe.rs` 是默认 `#[ignore]` 的性能基准（`cargo test --features test-hooks --release --test perf_probe -- --ignored --nocapture`，规模经 `JT_PERF_GROUPS` / `JT_PERF_COPIES` / `JT_PERF_EMPTY_DIRS` 调整）：只测耗时与计数，不断言具体秒数，不进入默认验收门。
+- **性能打点与基准**：运行期耗时打点在 `crates/foundation/src/perf.rs`，由默认关闭的 `perf-tracing` 特性控制（`cargo run --features perf-tracing` 启用；诊断日志（P-10）使 tracing 依赖常开，本特性只门控性能打点代码与 `perf-logs` 层）；性能日志落状态目录 `perf-logs/`、按天轮转，与界面运行日志（S-07）及诊断日志互不影响；span 名称与字段名是跨版本可比较口径，只增不改名、不改语义（清单见该文件头注释）。
+- **诊断日志入口**：`crates/foundation/src/logging.rs` 常开初始化，GUI 与 `--xberg-broker` 的初始化在根 `src/main.rs`，截图 worker 通过 foundation crate 依赖共用日志实现。记录范围、保留策略和失败退化由合同 P-10 唯一维护。`tests/perf_probe.rs` 是默认 `#[ignore]` 的性能基准（`cargo test -p jchtools --features test-hooks --release --test perf_probe -- --ignored --nocapture`，规模经 `JT_PERF_GROUPS` / `JT_PERF_COPIES` / `JT_PERF_EMPTY_DIRS` 调整）：只测耗时与计数，不断言具体秒数，不进入默认验收门。
 
 ## 4. 代码与界面实现约定
 
@@ -160,7 +162,7 @@ powershell -NoProfile -File .\scripts\package-windows.ps1   # 生成含 7-Zip �
 
 产品名、二进制名、图标、状态目录等一旦调整，`MUST` 同步以下位置：
 
-`Cargo.toml`（package/bin 名）· `build.rs`（链接参数与图标资源）· `ui/app.slint`（标题、品牌、关于页）· `src/config.rs`（状态目录）· `src/registry.rs`（工具名）· `scripts/*`（打包、启动、检查脚本）· `.github/workflows/check.yml` · `.github/workflows/release.yml` · `resources/windows.manifest` · `README.md` / `先读我.txt` · `AGENTS.md` §1 与 `docs/requirements/CONTRACT.md`（P 分区命名与定位）。
+根及 `crates/*/Cargo.toml`（package/bin 名）· 根 `build.rs`（链接参数与图标资源）· `ui/app.slint`（标题、品牌、关于页）· `crates/file-core/src/config.rs` / `crates/foundation/src/xberg_settings.rs`（共享状态目录）· `crates/gui/src/registry.rs`（工具名）· `scripts/*`（打包、启动、检查脚本）· `.github/workflows/check.yml` · `.github/workflows/release.yml` · `resources/windows.manifest` · `README.md` / `先读我.txt` · `AGENTS.md` §1 与 `docs/requirements/CONTRACT.md`（P 分区命名与定位）。
 
 ## 6. 安全底线
 
@@ -187,6 +189,6 @@ powershell -NoProfile -File .\scripts\package-windows.ps1   # 生成含 7-Zip �
 
 ## 9. 可信基与防共谋
 
-- 可信基文件：`AGENTS.md`、`scripts/static_check.py`、`scripts/test-baseline.json`、`scripts/acceptance.ps1`、`scripts/gui_smoke.py`、`scripts/make_tmp.py`、`docs/requirements/` 内全部需求文档及旧路径链接文件 `docs/CONTRACT.md`。（`resources/rules.json` 与 `src/config.rs` 结构上由 static_check 的 config_schema 检查互锁，且加规则时二者本就合法同变，不列入可信基。）
-- 任何变更 `MUST NOT` 同时修改产品代码（`src/`、`ui/`、`resources/`）与可信基文件；可信基变更 `MUST` 独立提交、提交信息注明理由。（执法：CI 按 diff 文件清单检测混合提交 · 待落地）
+- 可信基文件：`AGENTS.md`、`scripts/static_check.py`、`scripts/test-baseline.json`、`scripts/acceptance.ps1`、`scripts/gui_smoke.py`、`scripts/make_tmp.py`、`docs/requirements/` 内全部需求文档及旧路径链接文件 `docs/CONTRACT.md`。（`resources/rules.json` 与 `crates/file-core/src/config.rs` 结构上由 static_check 的 config_schema 检查互锁，且加规则时二者本就合法同变，不列入可信基。）
+- 任何变更 `MUST NOT` 同时修改产品代码（`src/`、`crates/`、`optional/` 下的产品实现、`ui/`、`resources/`）与可信基文件；可信基变更 `MUST` 独立提交、提交信息注明理由。（执法：CI 按 diff 文件清单检测混合提交 · 待落地）
 - 向本文件新增 `MUST` 级条款时，同一变更 `MUST` 落地对应执法脚本检查，否则该条 `MUST` 显式标注「无执法点 · 软法」；`SHOULD` 每月审计一次无执法点的条款，补齐执法或降级措辞。
