@@ -4066,7 +4066,7 @@
       "name": "bypass_wildcards_match_windows_style_patterns",
       "ignored": false,
       "cfg": null,
-      "body": "87f72f728d2d629f"
+      "body": "29d76be3986a3132"
     },
     {
       "file": "src/system_proxy.rs",
@@ -4077,10 +4077,24 @@
     },
     {
       "file": "src/system_proxy.rs",
+      "name": "exact_bypass_does_not_expand_colon_entries_to_other_hosts",
+      "ignored": false,
+      "cfg": null,
+      "body": "64dc044df2d3bcde"
+    },
+    {
+      "file": "src/system_proxy.rs",
       "name": "ipv6_bracket_bypass_entries_match_bare_url_host",
       "ignored": false,
       "cfg": null,
       "body": "6f3e200001b680f2"
+    },
+    {
+      "file": "src/system_proxy.rs",
+      "name": "local_bypass_does_not_match_ipv6_addresses",
+      "ignored": false,
+      "cfg": null,
+      "body": "473dc61533de6913"
     },
     {
       "file": "src/system_proxy.rs",
@@ -6422,10 +6436,24 @@
     },
     {
       "file": "tests/git_tools.rs",
+      "name": "conflict_resume_refuses_whitespace_distinct_staged_path",
+      "ignored": false,
+      "cfg": null,
+      "body": "054d43efc60169b6"
+    },
+    {
+      "file": "tests/git_tools.rs",
       "name": "diverged_history_conflict_reports_unpushed_honestly",
       "ignored": false,
       "cfg": null,
       "body": "3d40aa51db5ece12"
+    },
+    {
+      "file": "tests/git_tools.rs",
+      "name": "fetch_failure_retries_fetch_without_repeating_push",
+      "ignored": false,
+      "cfg": null,
+      "body": "6c8456e31eff09c5"
     },
     {
       "file": "tests/git_tools.rs",
@@ -6454,6 +6482,13 @@
       "ignored": false,
       "cfg": null,
       "body": "d39f74993376d4b7"
+    },
+    {
+      "file": "tests/git_tools.rs",
+      "name": "merge_failure_retries_merge_without_repeating_fetch_or_push",
+      "ignored": false,
+      "cfg": null,
+      "body": "8f18101129e60280"
     },
     {
       "file": "tests/git_tools.rs",
@@ -6688,10 +6723,24 @@
     },
     {
       "file": "tests/git_tools.rs",
+      "name": "stop_at_write_command_log_does_not_start_that_command",
+      "ignored": false,
+      "cfg": null,
+      "body": "f727f67fbbaa1a35"
+    },
+    {
+      "file": "tests/git_tools.rs",
       "name": "stop_before_any_file_keeps_repo_untouched",
       "ignored": false,
       "cfg": null,
       "body": "e7cc6a5f677308b3"
+    },
+    {
+      "file": "tests/git_tools.rs",
+      "name": "stop_before_resolved_merge_commit_preserves_index_and_head",
+      "ignored": false,
+      "cfg": null,
+      "body": "11a0c8ade0673d07"
     },
     {
       "file": "tests/git_tools.rs",
