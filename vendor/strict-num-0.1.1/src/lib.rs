@@ -162,7 +162,9 @@ impl PartialOrd for FiniteF32 {
 impl core::hash::Hash for FiniteF32 {
     #[inline]
     fn hash<H: core::hash::Hasher>(&self, state: &mut H) {
-        self.0.to_bits().hash(state);
+        // 数值相等的正负零必须使用同一哈希；保留存储的 IEEE 符号位。
+        let bits = if self.0 == 0.0 { 0 } else { self.0.to_bits() };
+        bits.hash(state);
     }
 }
 
@@ -245,7 +247,9 @@ impl PartialOrd for FiniteF64 {
 impl core::hash::Hash for FiniteF64 {
     #[inline]
     fn hash<H: core::hash::Hasher>(&self, state: &mut H) {
-        self.0.to_bits().hash(state);
+        // 数值相等的正负零必须使用同一哈希；保留存储的 IEEE 符号位。
+        let bits = if self.0 == 0.0 { 0 } else { self.0.to_bits() };
+        bits.hash(state);
     }
 }
 

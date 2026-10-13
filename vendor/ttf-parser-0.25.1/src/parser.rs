@@ -764,13 +764,14 @@ impl<'a> Stream<'a> {
     /// Reads N bytes from the stream.
     #[inline]
     pub fn read_bytes(&mut self, len: usize) -> Option<&'a [u8]> {
-        // An integer overflow here on 32bit systems is almost guarantee to be caused
-        // by an incorrect parsing logic from the caller side.
-        // Simply using `checked_add` here would silently swallow errors, which is not what we want.
-        debug_assert!(self.offset as u64 + len as u64 <= u32::MAX as u64);
+        // TTC 的字体数量来自输入；超过字体地址范围时按畸形数据处理，不能触发断言。
+        let end = self.offset.checked_add(len)?;
+        if end > u32::MAX as usize {
+            return None;
+        }
 
-        let v = self.data.get(self.offset..self.offset + len)?;
-        self.advance(len);
+        let v = self.data.get(self.offset..end)?;
+        self.offset = end;
         Some(v)
     }
 

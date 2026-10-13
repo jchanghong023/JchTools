@@ -132,11 +132,10 @@ fn font_collection_num_fonts_overflow_1() {
         UInt32(u32::MAX),               // numFonts
     ]);
 
-    assert_eq!(fonts_in_collection(&data), Some(u32::MAX));
+    assert_eq!(fonts_in_collection(&data), None);
 }
 
 #[test]
-#[should_panic]
 fn font_collection_num_fonts_overflow_2() {
     use Unit::*;
     let data = convert(&[
@@ -150,6 +149,34 @@ fn font_collection_num_fonts_overflow_2() {
         Face::parse(&data, 0).unwrap_err(),
         FaceParsingError::MalformedFont
     );
+}
+
+#[test]
+fn oversized_collection_offsets_return_malformed_font() {
+    // P-05 / O-05：畸形字体必须返回解析错误，不能越过消费者的错误处理而 panic。
+    let data = [0x74, 0x74, 0x63, 0x66, 0, 1, 0, 0, 0x40, 0, 0, 0];
+    assert_eq!(fonts_in_collection(&data), None);
+    assert_eq!(
+        ttf_parser::RawFace::parse(&data, 0).unwrap_err(),
+        FaceParsingError::MalformedFont
+    );
+    assert_eq!(
+        Face::parse(&data, 0).unwrap_err(),
+        FaceParsingError::MalformedFont
+    );
+}
+
+#[test]
+fn collection_count_requires_complete_offset_array() {
+    // P-05 / O-05：不能将不完整 offset 数组的数量交给消费者分配或循环。
+    let mut data = vec![0x74, 0x74, 0x63, 0x66, 0, 1, 0, 0, 0, 0, 0, 2];
+    assert_eq!(fonts_in_collection(&data), None);
+    data.extend_from_slice(&20u32.to_be_bytes());
+    assert_eq!(fonts_in_collection(&data), None);
+    data.extend_from_slice(&32u32.to_be_bytes());
+    assert_eq!(fonts_in_collection(&data), Some(2));
+    data.pop();
+    assert_eq!(fonts_in_collection(&data), None);
 }
 
 #[test]

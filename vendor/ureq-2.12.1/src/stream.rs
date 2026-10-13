@@ -496,6 +496,20 @@ fn socks_local_nslookup(
 }
 
 #[cfg(feature = "socks-proxy")]
+fn wait_for_socks_connect<'a>(
+    cvar: &std::sync::Condvar,
+    done: std::sync::MutexGuard<'a, bool>,
+    timeout: Duration,
+) -> (
+    std::sync::MutexGuard<'a, bool>,
+    std::sync::WaitTimeoutResult,
+) {
+    // 完成标志是等待谓词：处理先完成后等待及未完成时的假通知。
+    cvar.wait_timeout_while(done, timeout, |done| !*done)
+        .unwrap()
+}
+
+#[cfg(feature = "socks-proxy")]
 fn connect_socks(
     unit: &Unit,
     proxy: Proxy,
@@ -564,7 +578,7 @@ fn connect_socks(
         let done = lock.lock().unwrap();
 
         let timeout_connect = time_until_deadline(deadline)?;
-        let done_result = cvar.wait_timeout(done, timeout_connect).unwrap();
+        let done_result = wait_for_socks_connect(cvar, done, timeout_connect);
         let done = done_result.0;
         if *done {
             rx.recv().unwrap()?
@@ -660,6 +674,45 @@ mod tests {
         io::Read,
         sync::{Arc, Mutex},
     };
+
+    // 覆盖 P-09：握手已完成时通知可能先于等待，不能继续消耗连接超时。
+    #[cfg(feature = "socks-proxy")]
+    #[test]
+    fn socks_connect_completed_before_wait_does_not_timeout() {
+        let signal = Mutex::new(true);
+        let cvar = std::sync::Condvar::new();
+        cvar.notify_one();
+        // 使用 std 锁以匹配待验证的 std::Condvar，不更换上游同步原语。
+        let Ok(done) = signal.lock() else {
+            panic!("测试完成标志锁已损坏");
+        };
+        let (done, timeout) = wait_for_socks_connect(&cvar, done, Duration::from_millis(20));
+        assert!(*done);
+        assert!(!timeout.timed_out());
+    }
+
+    // 覆盖 P-09：只收到通知但握手未完成时，仍须等待真实连接超时。
+    #[cfg(feature = "socks-proxy")]
+    #[test]
+    fn socks_connect_notification_without_completion_keeps_waiting() {
+        let signal = Mutex::new(false);
+        let cvar = std::sync::Condvar::new();
+        std::thread::scope(|scope| {
+            let Ok(done) = signal.lock() else {
+                panic!("测试完成标志锁已损坏");
+            };
+            scope.spawn(|| {
+                // 等待线程释放同一把锁以后才通知，不使用 sleep 制造竞争。
+                let Ok(_done) = signal.lock() else {
+                    panic!("测试完成标志锁已损坏");
+                };
+                cvar.notify_one();
+            });
+            let (done, timeout) = wait_for_socks_connect(&cvar, done, Duration::from_millis(100));
+            assert!(!*done);
+            assert!(timeout.timed_out());
+        });
+    }
 
     // Returns all zeroes to `.read()` and logs how many times it's called
     struct ReadRecorder {

@@ -185,8 +185,39 @@ required-features = ["test-hooks"]
 # 可选组件的测试与 clippy 由 CI（check.yml）与 acceptance.ps1 以 --manifest-path 显式覆盖
 #（可选分发不等于可选验证）。
 members = ["optional/snap-ocr-core", "optional/snap-ocr-worker"]
+# 本地修复 crate 作为普通 path 依赖追踪源码变化，不加入 workspace 的测试/构建目标矩阵。
+exclude = [
+    "vendor/ureq-2.12.1",
+    "vendor/image-webp-0.2.4",
+    "vendor/fax-0.2.7",
+    "vendor/ident_case-1.0.1",
+    "vendor/strict-num-0.1.1",
+    "vendor/zerovec-0.11.8",
+    "vendor/ttf-parser-0.25.1",
+    "vendor/blocking-1.7.0",
+    "vendor/rspolib-0.1.2",
+    "vendor/pxfm-0.1.30",
+    "vendor/error-code-3.4.0",
+    "vendor/nu-ansi-term-0.50.3",
+]
 default-members = ["."]
 resolver = "2"
+
+# DirectorySource 把同版本上游包视为不变；本地补丁必须使用 path source，
+# 否则只更新 vendor 文件摘要可能继续复用修复前的 rlib。版本及依赖特性保持不变。
+[patch.crates-io]
+ureq = { version = "=2.12.1", path = "vendor/ureq-2.12.1" }
+image-webp = { version = "=0.2.4", path = "vendor/image-webp-0.2.4" }
+fax = { version = "=0.2.7", path = "vendor/fax-0.2.7" }
+ident_case = { version = "=1.0.1", path = "vendor/ident_case-1.0.1" }
+strict-num = { version = "=0.1.1", path = "vendor/strict-num-0.1.1" }
+zerovec = { version = "=0.11.8", path = "vendor/zerovec-0.11.8" }
+ttf-parser = { version = "=0.25.1", path = "vendor/ttf-parser-0.25.1" }
+blocking = { version = "=1.7.0", path = "vendor/blocking-1.7.0" }
+rspolib = { version = "=0.1.2", path = "vendor/rspolib-0.1.2" }
+pxfm = { version = "=0.1.30", path = "vendor/pxfm-0.1.30" }
+error-code = { version = "=3.4.0", path = "vendor/error-code-3.4.0" }
+nu-ansi-term = { version = "=0.50.3", path = "vendor/nu-ansi-term-0.50.3" }
 
 [profile.release]
 lto = "thin"

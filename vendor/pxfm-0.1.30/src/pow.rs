@@ -121,6 +121,11 @@ fn f_powi_hard(x: f64, y: f64) -> f64 {
 ///
 /// max found ULP 0.5
 pub fn f_pow(x: f64, y: f64) -> f64 {
+    // pow 的恒等式也适用于 NaN 底数或指数，必须先于 NaN 传播。
+    if y == 0.0 || x == 1.0 {
+        return 1.0;
+    }
+
     let mut y = y;
     let x_sign = x.is_sign_negative();
     let y_sign = y.is_sign_negative();
@@ -156,10 +161,6 @@ pub fn f_pow(x: f64, y: f64) -> f64 {
         || x_u < f64::MIN.to_bits()
     {
         // Exceptional exponents.
-        if y == 0.0 {
-            return 1.0;
-        }
-
         match y_a {
             0x3fe0_0000_0000_0000 => {
                 if x == 0.0 || x_u == f64::NEG_INFINITY.to_bits() {
@@ -488,6 +489,30 @@ pub const fn pow(d: f64, n: f64) -> f64 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn f_pow_nan_identity_and_special_value_controls() {
+        for (x, y) in [
+            (f64::NAN, 0.0),
+            (f64::NAN, -0.0),
+            (1.0, f64::NAN),
+            (1.0, f64::INFINITY),
+            (1.0, f64::NEG_INFINITY),
+            (f64::INFINITY, 0.0),
+            (f64::NEG_INFINITY, -0.0),
+        ] {
+            assert_eq!(f_pow(x, y), x.powf(y));
+            assert_eq!(f_pow(x, y), 1.0);
+        }
+        for (x, y) in [(f64::NAN, 2.0), (2.0, f64::NAN), (-1.0, f64::NAN)] {
+            assert!(f_pow(x, y).is_nan());
+            assert!(x.powf(y).is_nan());
+        }
+        assert_eq!(f_pow(2.0, f64::INFINITY), f64::INFINITY);
+        assert_eq!(f_pow(2.0, f64::NEG_INFINITY), 0.0);
+        assert_eq!(f_pow(f64::INFINITY, -2.0), 0.0);
+        assert_eq!(f_pow(-2.0, 3.0), -8.0);
+    }
 
     #[test]
     fn powf_test() {

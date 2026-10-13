@@ -301,7 +301,7 @@ impl Executor {
             // If there are too many threads active in the pool, stop this thread.
             if (Some(inner.thread_count) > inner.thread_limit.map(NonZeroUsize::get))
                 // If there are no tasks after a while, stop this thread.
-                && (res.timed_out() && inner.queue.is_empty())
+                || (res.timed_out() && inner.queue.is_empty())
             {
                 inner.idle_count -= 1;
                 inner.thread_count -= 1;
@@ -1036,6 +1036,60 @@ impl<T: Seek + Send + 'static> AsyncSeek for Unblock<T> {
 #[cfg(all(test, not(target_family = "wasm")))]
 mod tests {
     use super::*;
+
+    #[test]
+    fn idle_workers_exit_after_unblock_completes() {
+        const CHILD: &str = "BLOCKING_IDLE_WORKER_REGRESSION_CHILD";
+        if env::var_os(CHILD).is_none() {
+            let status = std::process::Command::new(env::current_exe().unwrap())
+                .args([
+                    "--exact",
+                    "tests::idle_workers_exit_after_unblock_completes",
+                    "--nocapture",
+                ])
+                .env(CHILD, "1")
+                .env_remove(MAX_THREADS_ENV)
+                .status()
+                .unwrap();
+            assert!(status.success(), "真实 unblock 子进程回归失败：{status}");
+            return;
+        }
+
+        // 用独立进程隔离全局真实 executor；不是替身，也不改变最大线程配置。
+        let worker_count = future::block_on(unblock(|| {
+            let inner = Executor::get()
+                .inner
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner);
+            assert_eq!(inner.idle_count, 0);
+            inner.thread_count
+        }));
+        assert_eq!(worker_count, 1, "公开 unblock 入口必须实际启动 worker");
+
+        // 截止时间只避免缺陷挂起；判据是实际线程/空闲计数归零，不是耗时阈值。
+        let executor = Executor::get();
+        let deadline = std::time::Instant::now() + Duration::from_secs(5);
+        let mut inner = executor
+            .inner
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner);
+        while inner.thread_count != 0 {
+            let remaining = deadline.saturating_duration_since(std::time::Instant::now());
+            assert!(
+                !remaining.is_zero(),
+                "空闲 worker 没有退出：thread_count={}, idle_count={}",
+                inner.thread_count,
+                inner.idle_count
+            );
+            inner = executor
+                .cvar
+                .wait_timeout(inner, remaining.min(Duration::from_millis(50)))
+                .unwrap_or_else(PoisonError::into_inner)
+                .0;
+        }
+        assert_eq!(inner.idle_count, 0);
+        assert!(inner.queue.is_empty());
+    }
 
     #[test]
     fn test_max_threads() {

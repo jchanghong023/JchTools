@@ -3,6 +3,7 @@
 - Bump MSRV to v1.68.
 - Avoid Option<> indirection via VecDeque. (#74)
 - Support setting the number of threads without an env var. (#75)
+- 本地修补：空闲超时且队列为空时回收 worker，或在降低最大线程数后退出超额 worker；恢复线程池动态启停，不引入最小常驻线程数。新增真实 `unblock` 入口的隔离进程回归，断言 worker 和 idle 计数归零。
 
 # Version 1.6.2
 

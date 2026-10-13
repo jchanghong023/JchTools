@@ -99,10 +99,17 @@ where
     /// The default implementation executes [`Self::validate_bytes()`] followed by
     /// [`Self::slice_from_bytes_unchecked`].
     ///
-    /// Note: The following equality should hold: `bytes.len() % size_of::<Self>() == 0`. This
-    /// means that the returned slice can span the entire byte slice.
+    /// For non-zero-sized types, `bytes.len() % size_of::<Self>() == 0` must hold.
+    /// Zero-sized types accept only empty bytes and yield an empty typed slice.
     fn parse_bytes_to_slice(bytes: &[u8]) -> Result<&[Self], UleError> {
         Self::validate_bytes(bytes)?;
+        if size_of::<Self>() == 0 {
+            return if bytes.is_empty() {
+                Ok(&[])
+            } else {
+                Err(UleError::length::<Self>(bytes.len()))
+            };
+        }
         debug_assert_eq!(bytes.len() % size_of::<Self>(), 0);
         Ok(unsafe { Self::slice_from_bytes_unchecked(bytes) })
     }
@@ -133,6 +140,10 @@ where
     /// 2. This method *must* return a slice to the same region of memory as the argument.
     #[inline]
     unsafe fn slice_from_bytes_unchecked(bytes: &[u8]) -> &[Self] {
+        if size_of::<Self>() == 0 {
+            assert!(bytes.is_empty(), "零尺寸 ULE 的字节输入必须为空");
+            return &[];
+        }
         let data = bytes.as_ptr();
         let len = bytes.len() / size_of::<Self>();
         debug_assert_eq!(bytes.len() % size_of::<Self>(), 0);

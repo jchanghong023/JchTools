@@ -8,6 +8,8 @@ jobs = 2
 rustflags = ["-C", "target-feature=+crt-static"]
 
 # AH-14：直接、传递、构建及测试依赖固定解析到仓库内源码。
+# 未修改的上游包使用 immutable DirectorySource；本地修复包由根 Cargo.toml
+# 的 [patch.crates-io] 精确 path 覆盖，使 Cargo 正常追踪源码并区分旧 registry 缓存。
 [source.crates-io]
 replace-with = "vendored-sources"
 

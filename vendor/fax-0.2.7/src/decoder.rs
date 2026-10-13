@@ -274,7 +274,7 @@ impl<E, R: Iterator<Item = Result<u8, E>>> Group4Decoder<R> {
                         .unwrap_or(self.width);
                     let a1_i32 = b1 as i32 + delta as i32;
                     if a1_i32 < 0 || a1_i32 > self.width as i32 {
-                        break;
+                        return Err(DecodeError::Invalid);
                     }
                     let a1 = a1_i32 as u16;
                     //debug!("transition to {:?} at {}", !color, a1);
@@ -357,6 +357,54 @@ impl<'a> Line<'a> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // C-08 / 附录 B：损坏的 TIFF 不能通过完整图像解码获得改后缀授权。
+    #[test]
+    fn g4_rejects_out_of_bounds_vertical_transitions() {
+        for data in [[0x04, 0x00], [0x60, 0x00]] {
+            // 首行参考转折位于 width=1；分别编码 Vertical(-3) 与 Vertical(1)。
+            let reader = data.iter().copied().map(Ok::<u8, Infallible>);
+            let mut decoder = Group4Decoder::new(reader, 1).unwrap();
+            assert!(
+                matches!(decoder.advance(), Err(DecodeError::Invalid)),
+                "越界转折必须报错，不能补成成功白行：{data:02x?}"
+            );
+        }
+    }
+
+    #[test]
+    fn g4_vertical_transition_at_width_is_valid() {
+        let data = [0x80, 0x00]; // Vertical(0)，恰好达到 width。
+        let reader = data.iter().copied().map(Ok::<u8, Infallible>);
+        let mut decoder = Group4Decoder::new(reader, 1).unwrap();
+        assert_eq!(decoder.advance().unwrap(), DecodeStatus::Incomplete);
+        assert!(decoder.transition().is_empty());
+        assert_eq!(
+            pels(decoder.transition(), 1).collect::<Vec<_>>(),
+            [Color::White]
+        );
+    }
+
+    #[test]
+    fn g4_end_of_block_is_not_a_decoded_row() {
+        let data = [0x00, 0x10, 0x01]; // 两个连续 EOL，组成 EOFB。
+        let reader = data.iter().copied().map(Ok::<u8, Infallible>);
+        let mut decoder = Group4Decoder::new(reader, 1).unwrap();
+        assert_eq!(decoder.advance().unwrap(), DecodeStatus::End);
+        assert!(decoder.transition().is_empty());
+    }
+
+    #[test]
+    fn g4_tiff_rejects_out_of_bounds_vertical_transitions() {
+        for data in [[0x04, 0x00], [0x60, 0x00]] {
+            let image = crate::tiff::wrap(&data, 1, 1);
+            let mut decoder = tiff::decoder::Decoder::new(std::io::Cursor::new(image)).unwrap();
+            assert!(
+                decoder.read_image().is_err(),
+                "TIFF 消费端必须拒绝损坏的 Group4 行：{data:02x?}"
+            );
+        }
+    }
 
     /// Fuzz artifact: 5 bytes that triggered checked_add overflow in G4
     /// horizontal mode before the fix. The overflow is now caught by

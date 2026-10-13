@@ -67,6 +67,10 @@ where
     ///
     /// `bytes` need to be an output from [`ZeroSlice::as_bytes()`].
     pub const unsafe fn from_bytes_unchecked(bytes: &[u8]) -> &Self {
+        if size_of::<T::ULE>() == 0 {
+            assert!(bytes.is_empty(), "零尺寸 ZeroSlice 的字节输入必须为空");
+            return Self::from_ule_slice(&[]);
+        }
         // &[u8] and &[T::ULE] are the same slice with different length metadata.
         Self::from_ule_slice(core::slice::from_raw_parts(
             bytes.as_ptr() as *const T::ULE,

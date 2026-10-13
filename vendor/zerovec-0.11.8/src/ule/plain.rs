@@ -133,8 +133,13 @@ macro_rules! impl_const_constructors {
                 let len = bytes.len();
                 const STRIDE: usize = size_of::<$base>();
                 #[allow(clippy::modulo_one)]
-                if (if STRIDE <= 1 { len } else { len % STRIDE }) == 0 {
-                    Ok(unsafe { Self::from_bytes_unchecked(bytes) })
+                if (if STRIDE == 0 { len } else { len % STRIDE }) == 0 {
+                    if STRIDE == 0 {
+                        Ok(Self::from_ule_slice(&[]))
+                    } else {
+                        // SAFETY: these numeric types accept all bit patterns, and length is checked.
+                        Ok(unsafe { Self::from_bytes_unchecked(bytes) })
+                    }
                 } else {
                     Err(UleError::InvalidLength {
                         ty: concat!("<const construct: ", stringify!($base), ">"),
@@ -337,7 +342,20 @@ impl AsULE for bool {
 // EqULE is true because bool is its own ULE.
 unsafe impl EqULE for bool {}
 
-impl_const_constructors!(bool);
+impl ZeroSlice<bool> {
+    /// 在 const 上下文中检查每个字节为 0 或 1，再构造布尔切片。
+    pub const fn try_from_bytes(bytes: &[u8]) -> Result<&Self, UleError> {
+        let mut index = 0;
+        while index < bytes.len() {
+            if bytes[index] > 1 {
+                return Err(UleError::ParseError { ty: "bool" });
+            }
+            index += 1;
+        }
+        // SAFETY: bool 的大小与对齐均为 1，且每个字节已验证为有效位模式。
+        Ok(unsafe { Self::from_bytes_unchecked(bytes) })
+    }
+}
 
 // Safety (based on the safety checklist on the ULE trait):
 //  1. () does not include any uninitialized or padding bytes (it has no bytes)
@@ -373,3 +391,7 @@ impl AsULE for () {
 unsafe impl EqULE for () {}
 
 impl_const_constructors!(());
+
+#[cfg(test)]
+#[path = "const_constructor_tests.rs"]
+mod const_constructor_tests;

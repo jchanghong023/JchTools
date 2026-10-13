@@ -5,6 +5,9 @@ The format is based on [Keep a Changelog](http://keepachangelog.com/)
 and this project adheres to [Semantic Versioning](http://semver.org/).
 
 ## [Unreleased]
+### Fixed
+- JchTools 本地补丁：有限浮点及其允许零的包装类型对正负零使用一致哈希，保持 `Eq` / `Hash` 和映射查找约定，不改变数值或存储的 IEEE 符号位。
+
 
 ## [0.1.1]
 ### Added

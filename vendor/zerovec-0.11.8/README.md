@@ -192,6 +192,8 @@ is appended for baseline comparisons, e.g. `zeromap/lookup/small/hashmap`.
 
 <!-- cargo-rdme end -->
 
+本地修正：`ZeroSlice::try_from_bytes` 的 const 构造器接受任意 `u8` 字节；`bool` 构造器逐字节检查，仅接受 0 和 1；`()` 构造器仅接受空字节切片，并返回空切片而不计算零步长除法。ULE、ZeroSlice 与 ZeroVec 的零尺寸解析链同样只接受空字节；unchecked 入口仍要求有效输入，对零尺寸非空输入断言失败而不伪造空结果。多字节类型仍要求输入长度为元素大小的整数倍。`src/ule/const_constructor_tests.rs` 专测 const 求值；`tests/const_constructors_smoke.rs` 独立覆盖动态公开构造/解析 API，可通过 `rustc --test` 链接实际 `zerovec` rlib 运行，不包含替身实现或重复 include。
+
 ## More Information
 
 For more information on development, authorship, contributing etc. please visit [`ICU4X home page`](https://github.com/unicode-org/icu4x).

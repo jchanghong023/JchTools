@@ -6,6 +6,10 @@ and this project adheres to [Semantic Versioning](http://semver.org/).
 
 ## [Unreleased]
 
+### Fixed (JchTools local patch)
+- 畸形 TTC 声明超出字体地址范围的 offset 数组时返回解析错误，避免断言导致消费者退出；公开接口与零分配读取不变。
+- `fonts_in_collection` 在返回数量前检查完整 offset 数组，畸形 TTC 返回 `None`，避免 fontdb/femtovg 消费者按未校验数量分配或循环；不改变合法集合计数或验证各字体内容。
+
 ## [0.25.1] - 2024-11-29
 ### Changed
 - Fix some typos and documentation related lints

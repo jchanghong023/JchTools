@@ -54,7 +54,12 @@ impl RenameRule {
         match *self {
             None | PascalCase => variant.to_owned(),
             LowerCase => variant.to_ascii_lowercase(),
-            CamelCase => variant[..1].to_ascii_lowercase() + &variant[1..],
+            CamelCase => {
+                let mut camel = variant.to_owned();
+                let first_end = variant.chars().next().map_or(0, char::len_utf8);
+                camel[..first_end].make_ascii_lowercase();
+                camel
+            }
             SnakeCase => {
                 let mut snake = String::new();
                 for (i, ch) in variant.char_indices() {
@@ -92,8 +97,10 @@ impl RenameRule {
                 pascal
             }
             CamelCase => {
-                let pascal = PascalCase.apply_to_field(field);
-                pascal[..1].to_ascii_lowercase() + &pascal[1..]
+                let mut pascal = PascalCase.apply_to_field(field);
+                let first_end = pascal.chars().next().map_or(0, char::len_utf8);
+                pascal[..first_end].make_ascii_lowercase();
+                pascal
             }
             ScreamingSnakeCase => field.to_ascii_uppercase(),
             KebabCase => field.replace('_', "-"),
@@ -126,6 +133,22 @@ impl Default for RenameRule {
 #[cfg(test)]
 mod tests {
     use super::RenameRule::*;
+
+    #[test]
+    fn camel_case_preserves_non_ascii_initial_character() {
+        // 首字符保持既有 ASCII 大小写语义，不在 UTF-8 字符内部切片。
+        assert_eq!(CamelCase.apply_to_variant("Éclair"), "Éclair");
+        assert_eq!(CamelCase.apply_to_variant("中文Variant"), "中文Variant");
+        assert_eq!(CamelCase.apply_to_field("éclair_value"), "éclairValue");
+        assert_eq!(CamelCase.apply_to_field("中文_value"), "中文Value");
+    }
+
+    #[test]
+    fn camel_case_accepts_empty_rename_result() {
+        assert_eq!(CamelCase.apply_to_variant(""), "");
+        assert_eq!(CamelCase.apply_to_field(""), "");
+        assert_eq!(CamelCase.apply_to_field("_"), "");
+    }
 
     #[test]
     fn rename_variants() {

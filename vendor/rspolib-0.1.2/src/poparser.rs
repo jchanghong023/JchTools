@@ -65,12 +65,14 @@ pub type Transitions = HashMap<(Symbol, CurrentSt), (Action, NextSt)>;
 
 struct LinesHandler<'a> {
     lines: Lines<BufReader<&'a mut dyn Read>>,
+    error: Option<std::io::Error>,
 }
 
 impl LinesHandler<'_> {
     fn new(handler: &mut dyn Read) -> LinesHandler<'_> {
         LinesHandler {
             lines: BufReader::new(handler).lines(),
+            error: None,
         }
     }
 }
@@ -79,9 +81,15 @@ impl Iterator for LinesHandler<'_> {
     type Item = String;
 
     fn next(&mut self) -> Option<Self::Item> {
+        if self.error.is_some() {
+            return None;
+        }
         match self.lines.next() {
             Some(Ok(line)) => Some(line),
-            Some(Err(_)) => None,
+            Some(Err(error)) => {
+                self.error = Some(error);
+                None
+            }
             None => None,
         }
     }
@@ -239,7 +247,15 @@ impl POFileParser {
 
     fn parse_file(&mut self) -> Result<(), SyntaxError> {
         let mut buf = BufReader::new(
-            File::open(&self.file.options.path_or_content).unwrap(),
+            File::open(&self.file.options.path_or_content).map_err(|error| {
+                SyntaxError::BasicCustom {
+                    maybe_filename: MaybeFilename::new(
+                        &self.file.options.path_or_content,
+                        self.content_is_path,
+                    ),
+                    message: format!("打开 PO 文件失败：{error}"),
+                }
+            })?,
         );
         let mut handler = LinesHandler::new(&mut buf);
         self.parse_with_handler(&mut handler)?;
@@ -258,11 +274,24 @@ impl POFileParser {
         &mut self,
         handler: &mut LinesHandler,
     ) -> Result<(), SyntaxError> {
-        let first_line = handler.next().unwrap_or("".to_string());
+        let first_line = handler.next();
+        let had_first_line = first_line.is_some();
+        let first_line = first_line.unwrap_or_default();
         self.parse_line(maybe_lstrip_utf8_bom(&first_line))?;
 
         for line in handler.by_ref() {
             self.parse_line(&line)?;
+        }
+        if let Some(error) = handler.error.take() {
+            return Err(SyntaxError::Custom {
+                maybe_filename: MaybeFilename::new(
+                    &self.file.options.path_or_content,
+                    self.content_is_path,
+                ),
+                line: if had_first_line { self.current_line + 1 } else { 1 },
+                index: 0,
+                message: format!("读取 PO 内容失败：{error}"),
+            });
         }
 
         if !self.entry_started() {
@@ -865,6 +894,93 @@ fn maybe_raise_unescaped_double_quote_found_error(
 mod tests {
     use super::*;
     use std::fs;
+
+    #[test]
+    fn invalid_utf8_reader_is_not_successful_eof() {
+        for bytes in [
+            b"\xff\n".as_slice(),
+            b"msgid \"a\"\nmsgstr \"b\"\n\xff\n".as_slice(),
+        ] {
+            let mut reader = std::io::Cursor::new(bytes);
+            let mut handler = LinesHandler::new(&mut reader);
+            let mut parser = POFileParser::new("".into());
+            assert!(matches!(
+                parser.parse_with_handler(&mut handler),
+                Err(SyntaxError::Custom { .. })
+            ));
+        }
+    }
+
+    #[test]
+    fn reader_io_error_is_not_successful_eof() {
+        struct FailedReader;
+        impl Read for FailedReader {
+            fn read(&mut self, _: &mut [u8]) -> std::io::Result<usize> {
+                Err(std::io::Error::new(
+                    std::io::ErrorKind::Other,
+                    "测试读取失败",
+                ))
+            }
+        }
+        let mut reader = FailedReader;
+        let mut handler = LinesHandler::new(&mut reader);
+        let mut parser = POFileParser::new("".into());
+        assert!(matches!(
+            parser.parse_with_handler(&mut handler),
+            Err(SyntaxError::Custom { .. })
+        ));
+    }
+
+    #[test]
+    fn file_open_error_is_reported_without_panic() {
+        let mut parser = POFileParser::new("\0".into());
+        assert!(matches!(
+            parser.parse_file(),
+            Err(SyntaxError::BasicCustom { .. })
+        ));
+    }
+
+    #[test]
+    fn public_pofile_preserves_complete_unicode_catalog() {
+        let file = crate::pofile("msgid \"你好\"\nmsgstr \"世界\"\n").unwrap();
+        assert_eq!(file.entries.len(), 1);
+        assert_eq!(file.entries[0].msgid, "你好");
+        assert_eq!(file.entries[0].msgstr.as_deref(), Some("世界"));
+    }
+
+    #[test]
+    fn public_pofile_rejects_invalid_utf8_file() {
+        struct RemoveOnDrop(std::path::PathBuf);
+        impl Drop for RemoveOnDrop {
+            fn drop(&mut self) {
+                let _ = fs::remove_file(&self.0);
+            }
+        }
+        let nonce = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let path = std::env::temp_dir().join(format!(
+            "rspolib-invalid-utf8-{}-{nonce}.po",
+            std::process::id()
+        ));
+        let mut output = fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&path)
+            .unwrap();
+        let _cleanup = RemoveOnDrop(path.clone());
+        std::io::Write::write_all(
+            &mut output,
+            b"msgid \"a\"\nmsgstr \"b\"\n\xff\n",
+        )
+        .unwrap();
+        drop(output);
+        assert!(matches!(
+            crate::pofile(path.as_path()),
+            Err(SyntaxError::Custom { .. })
+        ));
+    }
 
     #[test]
     fn constructor() {

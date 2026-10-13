@@ -418,8 +418,8 @@ impl<R: BufRead + Seek> WebPDecoder<R> {
                     return Err(DecodingError::VersionNumberInvalid(version as u8));
                 }
 
-                self.width = (1 + header) & 0x3FFF;
-                self.height = (1 + (header >> 14)) & 0x3FFF;
+                self.width = (header & 0x3FFF) + 1;
+                self.height = ((header >> 14) & 0x3FFF) + 1;
                 self.chunks
                     .insert(WebPRiffChunk::VP8L, start..start + chunk_size);
                 self.kind = ImageKind::Lossless;
@@ -963,6 +963,25 @@ pub(crate) fn read_chunk_header<R: BufRead>(
 mod tests {
     use super::*;
     const RGB_BPP: usize = 3;
+
+    #[test]
+    fn lossless_maximum_dimensions_roundtrip() {
+        // 覆盖 C-08：合法的 WebP 最大尺寸不能被错误判为损坏图像。
+        for (width, height) in [(16383, 1), (16384, 1), (1, 16383), (1, 16384)] {
+            let pixels = [7, 11, 13].repeat((width * height) as usize);
+            let mut encoded = Vec::new();
+            crate::WebPEncoder::new(&mut encoded)
+                .encode(&pixels, width, height, crate::ColorType::Rgb8)
+                .unwrap();
+
+            let mut decoder = WebPDecoder::new(std::io::Cursor::new(encoded)).unwrap();
+            assert_eq!(decoder.dimensions(), (width, height));
+            assert_eq!(decoder.output_buffer_size(), Some(pixels.len()));
+            let mut decoded = vec![0; pixels.len()];
+            decoder.read_image(&mut decoded).unwrap();
+            assert_eq!(decoded, pixels);
+        }
+    }
 
     #[test]
     fn add_with_overflow_size() {

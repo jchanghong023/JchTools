@@ -2403,7 +2403,8 @@ impl core::fmt::Debug for Face<'_> {
 
 /// Returns the number of fonts stored in a TrueType font collection.
 ///
-/// Returns `None` if a provided data is not a TrueType font collection.
+/// Returns `None` if the data is not a TrueType font collection or its declared
+/// face-offset array is incomplete. Individual font faces are not validated.
 #[inline]
 pub fn fonts_in_collection(data: &[u8]) -> Option<u32> {
     let mut s = Stream::new(data);
@@ -2412,5 +2413,8 @@ pub fn fonts_in_collection(data: &[u8]) -> Option<u32> {
     }
 
     s.skip::<u32>(); // version
-    s.read::<u32>()
+    let count = s.read::<u32>()?;
+    let offset_bytes = usize::num_from(count).checked_mul(Offset32::SIZE)?;
+    s.read_bytes(offset_bytes)?;
+    Some(count)
 }

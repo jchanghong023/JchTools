@@ -117,7 +117,7 @@ impl MOFileParser<'_> {
             number_of_strings,
             msgids_index,
             msgstrs_index,
-        );
+        )?;
         Ok(())
     }
 
@@ -208,7 +208,11 @@ impl MOFileParser<'_> {
         table_offset: u32,
         context: &str,
     ) -> Result<Vec<(u32, u32)>, IOError> {
-        self.fhandle.seek(SeekFrom::Start(table_offset as u64)).ok();
+        self.fhandle
+            .seek(SeekFrom::Start(table_offset as u64))
+            .map_err(|_| IOError::CorruptedMOData {
+                context: format!("定位 {context} 表"),
+            })?;
         let mut indexes: Vec<(u32, u32)> = vec![];
         for i in 0..number_of_strings {
             let msgid_length = match self.parse_4_bytes() {
@@ -262,7 +266,7 @@ impl MOFileParser<'_> {
         number_of_strings: u32,
         msgids_index: Vec<(u32, u32)>,
         msgstrs_index: Vec<(u32, u32)>,
-    ) {
+    ) -> Result<(), IOError> {
         for i in 0..number_of_strings {
             let (msgid_length, msgid_offset) =
                 msgids_index[i as usize];
@@ -271,16 +275,28 @@ impl MOFileParser<'_> {
 
             self.fhandle
                 .seek(SeekFrom::Start(msgid_offset as u64))
-                .ok();
+                .map_err(|_| IOError::CorruptedMOData {
+                    context: format!("定位第 {i} 项 msgid"),
+                })?;
             let mut msgid_buffer = vec![0; msgid_length as usize];
-            self.fhandle.read_exact(&mut msgid_buffer).ok();
+            self.fhandle.read_exact(&mut msgid_buffer).map_err(|_| {
+                IOError::CorruptedMOData {
+                    context: format!("读取第 {i} 项 msgid"),
+                }
+            })?;
             let msgid = String::from_utf8_lossy(&msgid_buffer);
 
             self.fhandle
                 .seek(SeekFrom::Start(msgstr_offset as u64))
-                .ok();
+                .map_err(|_| IOError::CorruptedMOData {
+                    context: format!("定位第 {i} 项 msgstr"),
+                })?;
             let mut msgstr_buffer = vec![0; msgstr_length as usize];
-            self.fhandle.read_exact(&mut msgstr_buffer).ok();
+            self.fhandle.read_exact(&mut msgstr_buffer).map_err(|_| {
+                IOError::CorruptedMOData {
+                    context: format!("读取第 {i} 项 msgstr"),
+                }
+            })?;
             let msgstr = String::from_utf8_lossy(&msgstr_buffer);
 
             if i == 0 && msgid.is_empty() {
@@ -321,6 +337,7 @@ impl MOFileParser<'_> {
             );
             self.file.entries.push(entry);
         }
+        Ok(())
     }
 }
 
@@ -331,6 +348,38 @@ mod tests {
         create_binary_content, create_corrupted_binary_content,
     };
     use std::fs;
+
+    fn single_message_fixture() -> Vec<u8> {
+        [MAGIC, 0, 1, 28, 36, 0, 0, 1, 44, 1, 46]
+            .into_iter()
+            .flat_map(u32::to_le_bytes)
+            .collect()
+    }
+
+    #[test]
+    fn mofile_rejects_truncated_message_data() {
+        let mut bytes = single_message_fixture();
+        assert_eq!(bytes.len(), 44);
+        assert!(matches!(
+            crate::mofile(bytes.clone()),
+            Err(IOError::CorruptedMOData { .. })
+        ));
+        bytes.push(b'a');
+        assert!(matches!(
+            crate::mofile(bytes),
+            Err(IOError::CorruptedMOData { .. })
+        ));
+    }
+
+    #[test]
+    fn mofile_reads_complete_message_data() {
+        let mut bytes = single_message_fixture();
+        bytes.extend_from_slice(b"a\0b\0");
+        let file = crate::mofile(bytes).unwrap();
+        assert_eq!(file.entries.len(), 1);
+        assert_eq!(file.entries[0].msgid, "a");
+        assert_eq!(file.entries[0].msgstr.as_deref(), Some("b"));
+    }
 
     fn all_features_test(parser: &MOFileParser) {
         let po_path = "tests-data/all.po";

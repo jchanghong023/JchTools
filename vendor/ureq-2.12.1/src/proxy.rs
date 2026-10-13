@@ -52,7 +52,30 @@ impl Proxy {
     fn parse_address<S: AsRef<str>>(host: &Option<S>) -> Result<(String, Option<u32>), Error> {
         match host {
             Some(host) => {
-                let mut parts = host.as_ref().split(':').collect::<Vec<&str>>().into_iter();
+                let host = host.as_ref();
+                if host.starts_with('[') {
+                    // 保留 IPv6 方括号供 resolver 拼接 host:port，拒绝畸形 authority。
+                    let end = host
+                        .find(']')
+                        .ok_or_else(|| ErrorKind::InvalidProxyUrl.new())?;
+                    host[1..end]
+                        .parse::<std::net::Ipv6Addr>()
+                        .map_err(|_| ErrorKind::InvalidProxyUrl.new())?;
+                    let suffix = &host[end + 1..];
+                    let port = if suffix.is_empty() {
+                        None
+                    } else {
+                        Some(
+                            suffix
+                                .strip_prefix(':')
+                                .ok_or_else(|| ErrorKind::InvalidProxyUrl.new())?
+                                .parse::<u32>()
+                                .map_err(|_| ErrorKind::InvalidProxyUrl.new())?,
+                        )
+                    };
+                    return Ok((String::from(&host[..=end]), port));
+                }
+                let mut parts = host.split(':').collect::<Vec<&str>>().into_iter();
                 let host = parts
                     .next()
                     .ok_or_else(|| ErrorKind::InvalidProxyUrl.new())?;
@@ -205,6 +228,66 @@ Proxy-Connection: Keep-Alive\r\n\
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // 覆盖 P-09：Windows 系统代理保留 IPv6 方括号及显式端口、认证信息。
+    #[test]
+    fn parse_proxy_ipv6_bracket_explicit_ports() {
+        for (input, server, port, proto) in [
+            (
+                "http://user:p@ss@[2001:db8::1]:7890",
+                "[2001:db8::1]",
+                7890,
+                Proto::HTTP,
+            ),
+            (
+                "socks5://user:p@ss@[::1]:1081",
+                "[::1]",
+                1081,
+                Proto::SOCKS5,
+            ),
+        ] {
+            let proxy = Proxy::new(input).unwrap();
+            assert_eq!(proxy.server, server);
+            assert_eq!(proxy.port, port);
+            assert_eq!(proxy.proto, proto);
+            assert_eq!(proxy.user.as_deref(), Some("user"));
+            assert_eq!(proxy.password.as_deref(), Some("p@ss"));
+        }
+    }
+
+    // 覆盖 P-09：未指定端口时仍使用原协议的默认端口。
+    #[test]
+    fn parse_proxy_ipv6_bracket_default_ports() {
+        for (input, port, proto) in [
+            ("http://[::1]", 80, Proto::HTTP),
+            ("socks5://[::1]", 1080, Proto::SOCKS5),
+        ] {
+            let proxy = Proxy::new(input).unwrap();
+            assert_eq!(proxy.server, "[::1]");
+            assert_eq!(proxy.port, port);
+            assert_eq!(proxy.proto, proto);
+            assert_eq!(proxy.user, None);
+            assert_eq!(proxy.password, None);
+        }
+    }
+
+    // 覆盖 P-09：畸形 IPv6 代理不能截断成其他主机或静默改用默认端口。
+    #[test]
+    fn parse_proxy_ipv6_bracket_invalid_authority() {
+        for authority in [
+            "[::1",
+            "[]:8080",
+            "[not-an-ip]:8080",
+            "[::1]trailing",
+            "[::1]:",
+            "[::1]:invalid",
+            "[::1]:8080:9090",
+        ] {
+            for protocol in ["http", "socks5"] {
+                assert!(Proxy::new(format!("{protocol}://{authority}")).is_err());
+            }
+        }
+    }
 
     #[test]
     fn parse_proxy_fakeproto() {
