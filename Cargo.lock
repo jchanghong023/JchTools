@@ -3181,6 +3181,7 @@ dependencies = [
  "agent-client-protocol",
  "anyhow",
  "axum",
+ "base64 0.22.1",
  "blake3",
  "chrono",
  "directories-next",

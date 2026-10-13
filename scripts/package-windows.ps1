@@ -203,6 +203,11 @@ try {
 # fail-closed：本次可执行文件和内嵌状态都绑定 Cargo 的实际产物，不使用无关缓存。
 $mainArtifact = Get-CargoArtifact -Messages $mainBuildMessages -BinaryName 'JchTools' -ManifestPath (Join-Path $root 'Cargo.toml')
 Assert-EmbeddedEngine -Messages $mainBuildMessages -Artifact $mainArtifact
+$cliArtifact = Get-CargoArtifact -Messages $mainBuildMessages -BinaryName 'jchocr' -ManifestPath (Join-Path $root 'Cargo.toml')
+foreach ($artifact in @($mainArtifact, $cliArtifact)) {
+    if (-not (Test-Path -LiteralPath $artifact.executable -PathType Leaf)) {throw "本次构建未生成必需的可执行文件：$($artifact.executable)"}
+    if ((Get-Item -LiteralPath $artifact.executable).Length -le 0) {throw "必需的可执行文件为空：$($artifact.executable)"}
+}
 $stamp = Get-Date -Format 'yyyyMMdd-HHmmss'
 # 内嵌前先校验引擎与清单一致：EXE 里编进去的就是这份经过校验的数据。
 $engineManifest = Get-Content -LiteralPath 'resources\7zip\manifest.json' -Raw | ConvertFrom-Json
@@ -213,6 +218,7 @@ foreach ($file in $engineManifest.files) {
 $folder = Join-Path $DestinationRoot "JchTools-Windows-x64-$stamp"
 New-Item -ItemType Directory -Path $folder | Out-Null
 Copy-Item -LiteralPath $mainArtifact.executable -Destination $folder
+Copy-Item -LiteralPath $cliArtifact.executable -Destination (Join-Path $folder 'jchocr.exe')
 # 引擎已内嵌进 EXE；发布目录只保留许可证、NOTICE 与上游源码（LGPL 要求），
 # 因此最终用户拿到的是单文件程序，缺引擎时运行期从 EXE 释放并校验 sha256。
 $resources = Join-Path $folder 'resources'
@@ -324,7 +330,7 @@ if ($isccPath) {
     $setup = Join-Path $DestinationRoot 'JchTools-Setup-x64.exe'
     $setupLocation = if ($PSBoundParameters.ContainsKey('DestinationRoot')) {$setup} else {'dist\JchTools-Setup-x64.exe'}
     if (-not (Test-Path -LiteralPath $setup)) { throw "Installer was not produced at $setupLocation" }
-    $setupSummary = "built $setupLocation (per-user install, desktop shortcut, start menu, uninstall entry)"
+    $setupSummary = "built $setupLocation (per-user install and CLI PATH, desktop shortcut, start menu, uninstall entry)"
     Write-Host "Created: $setup"
 } else {
     Write-Warning "Inno Setup (ISCC.exe) not found: installer NOT RUN; portable ZIP is still produced."
@@ -342,4 +348,4 @@ foreach ($item in (Get-ChildItem -LiteralPath $folder -Recurse -Force)) {
 Compress-Archive -LiteralPath $folder -DestinationPath $zip -CompressionLevel Optimal
 Write-Host "Created: $zip"
 Write-Host "Staged optional OCR worker and pinned manifest locally: $optionalStage (NOT UPLOADED; asset release requires separate authorization)"
-Write-Host 'End users extract this ZIP and run JchTools.exe; no separate 7-Zip installation.'
+Write-Host '解压此 ZIP 后可运行 JchTools.exe 或 jchocr.exe；安装包还会自动注册当前用户的命令行 PATH。'
