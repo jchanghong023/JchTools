@@ -37,15 +37,15 @@ powershell -NoProfile -File .\scripts\package-windows.ps1
 
 随后生成 Cargo.lock，执行 `cargo check`、核心测试和真实引擎解压测试；先以 `cargo build --locked --release --manifest-path optional/snap-ocr-worker/Cargo.toml --bin snap-ocr-worker` 构建**独立的截图 OCR 后台 worker**，把原始 EXE 放到 `dist/optional-components-v0.1.2/snap-ocr-worker.exe`，按该文件的实际字节数及 SHA-256 生成同目录 `snap-ocr-assets.json`。脚本只在主程序编译期间通过 `JCHTOOLS_SNAP_OCR_MANIFEST` 让 `build.rs` 将这份清单嵌入主 EXE，不改写仓库内的占位清单；发布目录 `resources/snap-ocr-assets.json` 也包含同一清单。接着编译 GUI，校验内嵌引擎与清单，复制许可证及 7-Zip 源码（发布包不含 7z.exe/dll），生成 `dist/JchTools-Windows-x64-时间戳.zip`；构建机装有 Inno Setup 6 时还会编译出安装包 `dist/JchTools-Setup-x64.exe`（安装到当前用户目录、免管理员权限，自动创建桌面快捷方式与开始菜单入口，控制面板可卸载；缺 ISCC 时该阶段如实标注 NOT RUN，CI 发布流程保证产出）。**ZIP 和安装包包含 `snap-ocr-worker.exe` 与资产清单；截图字体和许可证直接内置于 worker，无需额外初始化；Xberg、ONNX 模型和推理 DLL 仍使用独立 Xberg 组件目录。后台 worker 是主包交付内容，缺失时应重新解包或重新安装同一发布包，不能把未交付的独立下载地址当作恢复依据。**该构建目录的 `BUILD-INFO.json` 记录实际执行结果；脚本不会声称已完成手工 UI 或多 TB 性能验收。首次验证通过后的 Cargo.lock 应纳入仓库。
 
-`-Offline` 要求已备齐并校验 7-Zip、Git 等外部交付资产；Rust 依赖源码固定在仓库 `vendor/`，不需要本机 crates.io 源码缓存。`-SkipTests` 在构建记录明确标为 NOT RUN；CI 编译、打包和发布使用此开关，功能验收复用已通过且源码未变的 Windows 本地证据，不能以 CI 成功替代本地测试。脚本不修改系统执行策略，不自动安装编译器，不自动提升权限。
+`-Offline` 要求已备齐并校验 7-Zip 等外部交付资产；Git 不作为打包依赖或随包资产。Rust 依赖源码固定在仓库 `vendor/`，不需要本机 crates.io 源码缓存。`-SkipTests` 在构建记录明确标为 NOT RUN；CI 编译、打包和发布使用此开关，功能验收复用已通过且源码未变的 Windows 本地证据，不能以 CI 成功替代本地测试。脚本不修改系统执行策略，不自动安装编译器，不自动提升权限。
 安装包与便携 ZIP 均携带 `BUILD-INFO.json`：安装包内记录 ISCC 编译前的共同测试结果与未验证项，安装包编译阶段自身如实标为未完结；编译完成后，便携 ZIP 中的记录再更新为该阶段的实际结果。文件存在不表示真实桌面或完整发布验收已通过。
 
 
-最终用户解压构建出的 ZIP，运行 `JchTools.exe`；**不用另装 7-Zip，也不依赖 PATH**。图形驱动异常时可运行同目录的 `launch-software.cmd` 请求软件渲染；软件渲染及中文效果同样需要真实 Windows 验证。
+最终用户解压构建出的 ZIP，运行 `JchTools.exe`；**不用另装 7-Zip，7-Zip 引擎也不依赖 PATH**；Git 工具使用系统已安装且可经 PATH 解析的 Git for Windows。图形驱动异常时可运行同目录的 `launch-software.cmd` 请求软件渲染；软件渲染及中文效果同样需要真实 Windows 验证。
 
 正式发布走 GitHub Actions 的 **Release** 工作流（`.github/workflows/release.yml`）：**仅手动触发**（Actions 页 Run workflow），在 `windows-2022` 上执行同一套 `package-windows.ps1`，以 UTC 时间到分钟的 tag（`yyyyMMdd-HHmm`）创建 Release，并把便携 ZIP、安装包 `JchTools-Setup-x64.exe` 与 SHA256SUMS 校验和挂到该 Release。最终用户直接从仓库 **Releases** 页下载即可。
 
-后台及截图服务程序随主安装包和便携 ZIP 交付，由打包时的清单校验。「设置」页统一选择主动下载最新发布版 Xberg，或提供已有运行目录；两种目录与当前来源分别持久保存。下载时锁定本次版本并校验归档，运行时只检查场景成员存在及协议能力，不比对用户目录成员摘要。结果窗字体和许可证直接内置于随包截图服务程序，新安装无需额外初始化字体。除 Xberg 组件目录外的运行依赖均随安装包和便携包提供，包括完整 Portable Git（无需系统安装 Git）、内嵌 7-Zip 及截图后台和字体。普通启动、打开功能页或模型加载不会自动下载；缺少或损坏的组件明确显示未就绪。发布物与真实模型的验收以对应提交的验证结果为准。
+后台及截图服务程序随主安装包和便携 ZIP 交付，由打包时的清单校验。「设置」页统一选择主动下载最新发布版 Xberg，或提供已有运行目录；两种目录与当前来源分别持久保存。下载时锁定本次版本并校验归档，运行时只检查场景成员存在及协议能力，不比对用户目录成员摘要。结果窗字体和许可证直接内置于随包截图服务程序，新安装无需额外初始化字体。内嵌 7-Zip、截图后台和字体均随安装包和便携包提供；Git 不随包分发，仅调用 Windows 系统已安装且可经 PATH 解析的 Git for Windows，沿用其现有配置、身份、认证、代理、hooks、签名、合并策略及继承环境。没有可用 Git 时仅 Git 工具提示，不影响其他功能。普通启动、打开功能页或模型加载不会自动下载；缺少或损坏的组件明确显示未就绪。发布物与真实模型的验收以对应提交的验证结果为准。
 旧文本 Xberg 路径升级时保留为 SQLite 的用户提供来源，即使首次操作是保存下载来源也不丢失旧路径；已有 SQLite 值不被迁移覆盖。失效的旧绝对路径与原文本仍保留，不静默换源；迁移、双来源保存和当前来源写入同一事务，失败不冒称保存成功。
 
 ## 使用流程

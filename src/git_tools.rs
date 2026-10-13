@@ -117,19 +117,27 @@ pub struct RepoInfo {
     pub upstream_branch: String,
 }
 
-/// 解析 git 可执行文件绝对路径：优先随包运行组件，再查系统安装和 PATH；
-/// 不依赖当前目录，避免仓库内同名程序劫持。
+/// 按系统 PATH 顺序解析 git.exe 的绝对路径；
+/// 跳过空目录和相对目录，避免当前仓库内同名程序劫持。
 pub fn find_git() -> Result<PathBuf> {
     let span = crate::logging::operation_span("git", "resolve_executable");
     let _entered = span.enter();
     let started = std::time::Instant::now();
     tracing::debug!(event = "git_resolve_started", "开始查找 Git 可执行程序");
-    let executable = std::env::current_exe()
-        .inspect_err(|error| {
-            tracing::warn!(event = "git_executable_location_unavailable", stage = "bundled_lookup", error_type = ?error.kind(), error_code = error.raw_os_error(), "无法定位宿主程序，转为系统 Git 查找");
-        })
-        .ok();
-    let result = find_git_from(executable.as_deref().and_then(Path::parent));
+    let result = (|| {
+        if let Some(paths) = std::env::var_os("PATH") {
+            for directory in std::env::split_paths(&paths) {
+                if !directory.is_absolute() {
+                    continue;
+                }
+                let candidate = directory.join("git.exe");
+                if candidate.is_file() {
+                    return Ok(candidate);
+                }
+            }
+        }
+        bail!("找不到 git.exe：请安装 Git for Windows 并将其加入系统 PATH")
+    })();
     if result.is_ok() {
         tracing::debug!(
             event = "git_resolve_completed",
@@ -147,63 +155,8 @@ pub fn find_git() -> Result<PathBuf> {
     result
 }
 
-fn find_git_from(program_directory: Option<&Path>) -> Result<PathBuf> {
-    let mut candidates: Vec<PathBuf> = Vec::new();
-    if let Some(directory) = program_directory {
-        candidates.push(directory.join("resources/git/cmd/git.exe"));
-    }
-    if let Ok(program_files) = std::env::var("ProgramFiles") {
-        candidates.push(
-            Path::new(&program_files)
-                .join("Git")
-                .join("cmd")
-                .join("git.exe"),
-        );
-    }
-    if let Ok(program_files_x86) = std::env::var("ProgramFiles(x86)") {
-        candidates.push(
-            Path::new(&program_files_x86)
-                .join("Git")
-                .join("cmd")
-                .join("git.exe"),
-        );
-    }
-    if let Ok(local_appdata) = std::env::var("LOCALAPPDATA") {
-        candidates.push(
-            Path::new(&local_appdata)
-                .join("Programs")
-                .join("Git")
-                .join("cmd")
-                .join("git.exe"),
-        );
-    }
-    for candidate in &candidates {
-        if candidate.is_file() {
-            return Ok(candidate.clone());
-        }
-    }
-    if let Ok(paths) = std::env::var("PATH") {
-        for dir in paths.split(';') {
-            let dir = dir.trim();
-            if dir.is_empty() {
-                continue;
-            }
-            let candidate = Path::new(dir).join("git.exe");
-            if candidate.is_file() {
-                return Ok(candidate);
-            }
-        }
-    }
-    bail!("找不到 git.exe：随包 Git 组件缺失，请重新安装或解包当前 JchTools 发布包")
-}
-
 fn command_stage(args: &[&str]) -> &'static str {
-    let command = if args.first() == Some(&"-c") {
-        args.get(2).copied()
-    } else {
-        args.first().copied()
-    };
-    match command {
+    match args.first().copied() {
         Some("rev-parse") => "rev_parse",
         Some("symbolic-ref") => "symbolic_ref",
         Some("config") => "config",
@@ -220,21 +173,8 @@ fn command_stage(args: &[&str]) -> &'static str {
         _ => "other",
     }
 }
-/// 运行一条 git 命令并捕获输出（无 shell；禁终端提示防无 tty 挂死；
-/// 认证经 credential manager 等 GUI 途径正常交互）。
+/// 运行一条 git 命令并捕获输出（无 shell，继承用户配置与环境）。
 fn run_git(git: &Path, cwd: &Path, args: &[&str]) -> Result<CapturedOutput> {
-    run_git_with(git, cwd, args, &[], &[])
-}
-
-/// [`run_git`] 的底层形态：可附加环境变量与移除环境变量（P-09 的代理注入
-/// 与直连回退使用），其余行为一致。
-fn run_git_with(
-    git: &Path,
-    cwd: &Path,
-    args: &[&str],
-    extra_env: &[(&str, &str)],
-    remove_env: &[&str],
-) -> Result<CapturedOutput> {
     let operation = crate::logging::operation_span("git", "command");
     let _entered = operation.enter();
     let stage = command_stage(args);
@@ -246,21 +186,12 @@ fn run_git_with(
         "开始执行 Git 子命令"
     );
     let mut command = Command::new(git);
+    // G-04/G-05：porcelain 输出的文件名按字面匹配，避免 pathspec 通配语义
+    // 导致错误暂存兄弟文件；使用 Git 参数，不改用户环境或配置。
     command
+        .arg("--literal-pathspecs")
         .args(args)
-        .current_dir(cwd)
-        .env("GIT_PAGER", "cat")
-        .env("GIT_TERMINAL_PROMPT", "0")
-        // G-04/G-05：传入的路径是 porcelain 输出的字面文件名，必须按字面匹配；
-        // 否则含 `[...]` 等字符的合法 Windows 文件名会被 pathspec 的通配语义
-        // 解释成字符类，导致 pathspec 不匹配而无限重试、或错误暂存兄弟文件。
-        .env("GIT_LITERAL_PATHSPECS", "1");
-    for (key, value) in extra_env {
-        command.env(key, value);
-    }
-    for key in remove_env {
-        command.env_remove(key);
-    }
+        .current_dir(cwd);
     let result = process::run_with_timeout(&mut command, GIT_TIMEOUT);
     match &result {
         Ok(out) if out.status.success() => tracing::debug!(
@@ -293,39 +224,31 @@ fn run_git_with(
     result
 }
 
-/// P-09：网络类 git 命令（fetch / push）的统一入口。系统代理开启时注入
-/// 代理环境变量；目标 URL 命中系统代理例外表（`<local>`、`192.168.*` 等
-/// `no_proxy` 表达不了的条目）时不注入、按现状直连；命令失败且输出符合连接类
-/// 失败特征（或整体超时）时，自动回退直连重试一次——移除全部代理变量（含继承
-/// 自用户环境的），直连仍失败按原口径返回失败。系统代理关闭时不注入也不清除，
-/// 行为与现状一致。`target_url` 为空（未知目标）时只走注入/回退路径。
+/// 网络类 git 命令（fetch / push）：检查取消并记录日志，继承用户环境与配置。
 fn run_git_network(
     git: &Path,
     cwd: &Path,
     args: &[&str],
-    target_url: &str,
-    log: &dyn Fn(&str),
     control: &Control,
-) -> Result<CapturedOutput> {
-    let proxy = crate::system_proxy::read();
-    run_git_network_with_proxy(git, cwd, args, target_url, log, control, &proxy)
-}
-
-fn run_git_network_with_proxy(
-    git: &Path,
-    cwd: &Path,
-    args: &[&str],
-    target_url: &str,
-    log: &dyn Fn(&str),
-    control: &Control,
-    proxy: &crate::system_proxy::SystemProxy,
 ) -> Result<CapturedOutput> {
     let operation = crate::logging::operation_span("git", "network");
     let _entered = operation.enter();
     let stage = command_stage(args);
     let started = std::time::Instant::now();
-    tracing::debug!(event = "git_network_started", stage, target = %crate::logging::safe_url(target_url), timeout_ms = u64::try_from(GIT_TIMEOUT.as_millis()).unwrap_or(u64::MAX), "开始 Git 网络操作");
-    let result = run_git_network_inner(git, cwd, args, target_url, log, control, proxy);
+    control.check_cancelled().inspect_err(|_| {
+        tracing::warn!(
+            event = "git_network_cancelled",
+            stage = "before_command",
+            "Git 网络操作启动前已停止"
+        );
+    })?;
+    tracing::debug!(
+        event = "git_network_started",
+        stage,
+        timeout_ms = u64::try_from(GIT_TIMEOUT.as_millis()).unwrap_or(u64::MAX),
+        "开始 Git 网络操作"
+    );
+    let result = run_git(git, cwd, args);
     match &result {
         Ok(out) if out.status.success() => tracing::debug!(
             event = "git_network_completed",
@@ -352,146 +275,6 @@ fn run_git_network_with_proxy(
             },
             elapsed_ms = crate::logging::elapsed_ms(started),
             "Git 网络操作未完成"
-        ),
-    }
-    result
-}
-
-fn run_git_network_inner(
-    git: &Path,
-    cwd: &Path,
-    args: &[&str],
-    target_url: &str,
-    log: &dyn Fn(&str),
-    control: &Control,
-    proxy: &crate::system_proxy::SystemProxy,
-) -> Result<CapturedOutput> {
-    control.check_cancelled().inspect_err(|_| {
-        tracing::warn!(
-            event = "git_network_cancelled",
-            stage = "before_command",
-            "Git 网络操作启动前已停止"
-        );
-    })?;
-    if !proxy.is_enabled() {
-        let _route = tracing::info_span!(
-            "git_network_route",
-            route = "inherited",
-            network_attempt = 1
-        )
-        .entered();
-        tracing::debug!(
-            event = "git_proxy_route_selected",
-            route = "inherited",
-            "系统代理关闭，保持既有环境"
-        );
-        return run_git(git, cwd, args);
-    }
-    if !target_url.is_empty() && proxy.bypassed(target_url) {
-        let _route =
-            tracing::info_span!("git_network_route", route = "bypass", network_attempt = 1)
-                .entered();
-        tracing::debug!(
-            event = "git_proxy_route_selected",
-            route = "bypass",
-            "目标命中系统代理例外表"
-        );
-        // 口径：命中例外表 = 该目标不经**系统代理**；用户在自身环境里显式设置的
-        // http_proxy 等变量保持现状、不清除（与 P-09「系统代理关闭时不注入也不
-        // 清除」同口径），只有注入/回退路径的直连重试才移除全部代理变量。
-        log("目标命中 Windows 系统代理例外表：不经系统代理，直连");
-        control.check_cancelled()?;
-        return run_git(git, cwd, args);
-    }
-    let proxy_env = proxy.git_env();
-    let injected: Vec<(&str, &str)> = proxy_env
-        .iter()
-        .map(|(key, value)| (key.as_str(), value.as_str()))
-        .collect();
-    let attempt = {
-        let _route = tracing::info_span!(
-            "git_network_route",
-            route = "system_proxy",
-            network_attempt = 1
-        )
-        .entered();
-        tracing::debug!(
-            event = "git_proxy_route_selected",
-            route = "system_proxy",
-            "通过系统代理尝试 Git 网络操作"
-        );
-        run_git_with(git, cwd, args, &injected, &[])
-    };
-    let needs_direct_retry = match &attempt {
-        // 启动失败或超时：超时多因代理黑洞，直连重试值得一次；启动失败
-        // 重试代价仅毫秒级，同样无害。
-        Err(_) => true,
-        Ok(out) => {
-            if out.status.success() {
-                false
-            } else {
-                let text = format!("{}{}", output_text(&out.stderr), output_text(&out.stdout));
-                crate::system_proxy::network_failure_signature(&text)
-            }
-        }
-    };
-    if !needs_direct_retry || control.is_cancelled() {
-        tracing::debug!(
-            event = "git_proxy_attempt_finished",
-            fallback_needed = needs_direct_retry,
-            cancelled = control.is_cancelled(),
-            "系统代理尝试结束，不再直连回退"
-        );
-        return attempt;
-    }
-    log("经系统代理连接失败，自动回退直连重试");
-    // G-15：首个命令自然结束后，停止请求同样禁止启动代理回退。
-    if control.is_cancelled() {
-        tracing::warn!(
-            event = "git_proxy_fallback_cancelled",
-            stage = "before_direct",
-            "已收到停止请求，不再启动直连回退"
-        );
-        return attempt;
-    }
-    let _route = tracing::info_span!(
-        "git_network_route",
-        route = "direct_fallback",
-        network_attempt = 2
-    )
-    .entered();
-    tracing::warn!(
-        event = "git_proxy_fallback_started",
-        stage = command_stage(args),
-        "系统代理连接失败，开始直连回退"
-    );
-    let started = std::time::Instant::now();
-    let result = run_git_with(
-        git,
-        cwd,
-        args,
-        &[],
-        &crate::system_proxy::GIT_PROXY_ENV_KEYS,
-    );
-    match &result {
-        Ok(out) if out.status.success() => tracing::info!(
-            event = "git_proxy_fallback_completed",
-            exit_code = out.status.code(),
-            elapsed_ms = crate::logging::elapsed_ms(started),
-            "Git 直连回退成功"
-        ),
-        Ok(out) => tracing::warn!(
-            event = "git_proxy_fallback_failed",
-            error_type = "nonzero_exit",
-            exit_code = out.status.code(),
-            elapsed_ms = crate::logging::elapsed_ms(started),
-            "Git 直连回退返回失败状态"
-        ),
-        Err(_) => tracing::warn!(
-            event = "git_proxy_fallback_failed",
-            error_type = "subprocess_error",
-            elapsed_ms = crate::logging::elapsed_ms(started),
-            "Git 直连回退执行失败"
         ),
     }
     result
@@ -587,7 +370,7 @@ fn config_get_bool(git: &Path, root: &Path, key: &str) -> Option<bool> {
 /// F10/P-03/G-08：任务启动前只读预检裸 `git push` 的目标。除 remote 及 refspec
 /// 选择外，还核实最终 push URL 与 upstream fetch URL 一致：`remote.<r>.url` /
 /// `pushurl` 可重复，`insteadOf` / `pushInsteadOf` 会改写实际地址，必须按 Git
-/// 展开的全部 URL 判断，避免访问 upstream 之外的地址或系统代理按错目标判例外。
+/// 展开的全部 URL 判断，避免访问 upstream 之外的地址。
 fn push_target_preflight(git: &Path, root: &Path, info: &RepoInfo) -> Result<()> {
     let branch = &info.branch;
     let upstream_remote = info.upstream_remote.trim();
@@ -968,21 +751,13 @@ enum PushOutcome {
 }
 
 /// 一次 push 尝试（G-08：不带额外远程/分支参数，用已配置 upstream）。
-fn try_push(
-    git: &Path,
-    root: &Path,
-    remote_url: &str,
-    log: &dyn Fn(&str),
-    control: &Control,
-) -> PushOutcome {
+fn try_push(git: &Path, root: &Path, log: &dyn Fn(&str), control: &Control) -> PushOutcome {
     // P-03：子模块有各自的远端，不能借递归推送突破当前upstream边界。
     log("git push --porcelain --no-recurse-submodules");
     let out = match run_git_network(
         git,
         root,
         &["push", "--porcelain", "--no-recurse-submodules"],
-        remote_url,
-        log,
         control,
     ) {
         Ok(out) => out,
@@ -1058,8 +833,6 @@ fn fetch_and_merge(
         git,
         root,
         &["fetch", "--no-recurse-submodules", remote, upstream_branch],
-        &ctx.remote_url,
-        ctx.log,
         ctx.control,
     ) {
         Ok(out) => out,
@@ -1081,11 +854,9 @@ fn fetch_and_merge(
         return MergeOutcome::Cancelled;
     }
     ctx.shared.set_stage("merge");
-    // G-10/G-11：只限本次自动合并，清除分支默认策略，避免-Xours/-Xtheirs吞掉冲突。
-    // 不修改用户配置，也不覆盖其他继承的Git配置。
-    let merge_options = format!("branch.{}.mergeOptions=", ctx.branch);
-    (ctx.log)(&format!("git -c {merge_options} merge FETCH_HEAD"));
-    let out = match run_git(git, root, &["-c", &merge_options, "merge", "FETCH_HEAD"]) {
+    // G-10/G-11：合并策略由用户 Git 配置控制，Git 报告冲突时保留现场。
+    (ctx.log)("git merge FETCH_HEAD");
+    let out = match run_git(git, root, &["merge", "FETCH_HEAD"]) {
         Ok(out) => out,
         Err(error) => return MergeOutcome::Retryable(format!("{error:#}")),
     };
@@ -1221,15 +992,12 @@ enum StepOutcome {
     Fatal(String),
 }
 
-/// 逐文件处理的公共上下文：任务控制、界面共享状态、日志回调、退避基准与
-/// upstream 远端的实际 URL（P-09 例外表判断用；解析失败/本地 upstream 为空串）。
+/// 逐文件处理的公共上下文：任务控制、界面共享状态、日志回调与退避基准。
 struct Ctx<'a> {
     control: &'a Control,
     shared: &'a GitShared,
     log: &'a dyn Fn(&str),
     unit: Duration,
-    remote_url: String,
-    branch: &'a str,
 }
 
 impl Ctx<'_> {
@@ -1610,7 +1378,7 @@ fn push_with_retry(
             return StepOutcome::Cancelled;
         }
         ctx.shared.set_stage("push");
-        match try_push(git, root, &ctx.remote_url, ctx.log, ctx.control) {
+        match try_push(git, root, ctx.log, ctx.control) {
             PushOutcome::Ok => return StepOutcome::Done,
             PushOutcome::NeedMerge => {
                 match fetch_and_merge(git, root, remote, upstream_branch, ctx) {
@@ -1896,28 +1664,6 @@ fn run_task(
         result = "allowed",
         "Git 推送目标策略验证通过"
     );
-    // P-09：upstream 远端的实际 URL（fetch/push 的代理例外判断）。读取失败或
-    // 本地 upstream（remote 为 "."）时留空——此时只走注入/回退路径，不做例外
-    // 前置判断（scp 风格等无 scheme 的 URL 解析不出 host，同样保守走代理）。
-    // get-url 取 fetch URL：pushurl 与 fetch URL 不同已在预检拒绝，二者一致时
-    // 单一 URL 即同时代表 fetch 与 push 的目标。
-    let remote_url = run_git_ok(
-        git,
-        &info.root,
-        &["remote", "get-url", &info.upstream_remote],
-    )
-    .map_or_else(
-        |_| {
-            tracing::warn!(
-                event = "git_remote_url_unavailable",
-                stage = "remote_url",
-                result = "unknown_target",
-                "无法读取远端地址，保持未知目标代理策略"
-            );
-            String::new()
-        },
-        |text| text.trim().to_owned(),
-    );
     // 中间态处理（G-06/G-11）
     tracing::debug!(
         event = "git_stage_started",
@@ -2030,8 +1776,6 @@ fn run_task(
                     shared,
                     log,
                     unit,
-                    remote_url: remote_url.clone(),
-                    branch: &info.branch,
                 };
                 let mut attempt = 0u64;
                 match push_with_retry(
@@ -2149,8 +1893,6 @@ fn run_task(
         shared,
         log,
         unit,
-        remote_url,
-        branch: &info.branch,
     };
     if changes.is_empty() {
         return finish_without_changes(git, &info, &ctx);
@@ -2212,76 +1954,4 @@ fn run_task(
     let text = format!("全部完成：{done} / {total} 个文件已逐个 commit 并 push 成功");
     log(&text);
     text
-}
-
-#[rustfmt::skip]
-#[warn(
-    warnings,
-    unused_must_use,
-    unreachable_patterns,
-    unreachable_pub,
-    unused_variables,
-    rust_2018_idioms,
-    explicit_outlives_requirements,
-    elided_lifetimes_in_paths,
-    single_use_lifetimes
-)]
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    // 覆盖 G-01/P-05：发行程序优先使用随包 Git，不要求系统安装。
-    #[test]
-    fn bundled_git_is_selected_before_system_git() -> Result<()> {
-        let root = tempfile::tempdir()?;
-        let bundled = root.path().join("resources/git/cmd/git.exe");
-        std::fs::create_dir_all(bundled.parent().context("Git 目录")?)?;
-        std::fs::write(&bundled, b"packaged-git")?;
-        assert_eq!(find_git_from(Some(root.path()))?, bundled);
-        Ok(())
-    }
-
-    // 覆盖 G-15/P-03：代理命令结束后收到停止，不得启动直连回退命令。
-    #[test]
-    fn network_fallback_does_not_restart_after_stop() -> Result<()> {
-        let dir = tempfile::tempdir()?;
-        let wrapper = dir.path().join("git-network.cmd");
-        let trace = dir.path().join("trace.txt");
-        let real_git = find_git()?;
-        std::fs::write(
-            &wrapper,
-            format!(
-                "@echo off\r\n>>\"{}\" echo invoked\r\n\"{}\" %*\r\nexit /b %ERRORLEVEL%\r\n",
-                trace.display(),
-                real_git.display()
-            ),
-        )?;
-        let proxy =
-            crate::system_proxy::SystemProxy::from_registry_values(1, Some("127.0.0.1:1"), None);
-        let control = Control::default();
-        let result = run_git_network_with_proxy(
-            &wrapper,
-            dir.path(),
-            &["ls-remote", "http://127.0.0.1:1/repo.git"],
-            "http://127.0.0.1:1/repo.git",
-            &|line| {
-                if line.contains("回退直连") {
-                    control.cancel();
-                }
-            },
-            &control,
-            &proxy,
-        );
-        assert!(control.is_cancelled(), "前置：必须走到代理失败的回退边界");
-        assert!(
-            result.is_err() || result.as_ref().is_ok_and(|out| !out.status.success()),
-            "关闭的本地端口不能被当成成功"
-        );
-        assert_eq!(
-            std::fs::read_to_string(trace)?.lines().count(),
-            1,
-            "停止后不得启动第二条Git联网命令"
-        );
-        Ok(())
-    }
 }
