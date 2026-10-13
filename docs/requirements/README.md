@@ -10,7 +10,7 @@
 | [MD-TOOLS.md](MD-TOOLS.md) | MD 整理（M）：Markdown 合并和无损硬限制拆分；不负责其他格式转换 |
 | [GIT-TOOLS.md](GIT-TOOLS.md) | Git 工具（G）：逐文件提交推送、staged 保护、合并、重试、停止及可观察状态 |
 | [ALL2MARKDOWN.md](ALL2MARKDOWN.md) | 转 Markdown（T）：文档与图片转换、媒体转录、输入保护、输出及功能验收矩阵 |
-| [SNAP2TEXT.md](SNAP2TEXT.md) | 截图 OCR（O）：截图交互、模型与确定性布局规格、结果窗、复制、隐私及功能验收矩阵 |
+| [SNAP2TEXT.md](SNAP2TEXT.md) | 截图 OCR（O）：截图交互、模型与确定性布局规格、结果窗、复制、隐私、jchocr 图片 OCR 命令及功能验收矩阵 |
 | [XBERG-INFERENCE.md](XBERG-INFERENCE.md) | 共享推理（XB）：唯一 Xberg、场景隔离、获取与版本、统一设置、持久配置及截图/Xberg 后台生命周期 |
 | [ACP-MODEL-SERVICE.md](ACP-MODEL-SERVICE.md) | 模型服务（AH）：本机 HTTP、官方 ACP 客户端、外部 Agent、独立配置与后台、发现及真实 Agent 验收矩阵 |
 | [CODEAGENT.md](CODEAGENT.md) | CodeAgent（CA）：CurrentUser DPAPI 解密、本地注册表 Token 自动维护、持久间隔与独立后台状态 |
