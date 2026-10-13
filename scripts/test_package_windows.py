@@ -299,19 +299,17 @@ class PackageWindowsArtifactTests(unittest.TestCase):
 
     def test_resolved_patched_packages_use_local_path_sources(self) -> None:
         # 真实 Cargo resolver 查询：仅读取元数据，不编译、不执行任何 crate。
-        patched = {
-            "ureq": "2.12.1",
-            "image-webp": "0.2.4",
-            "fax": "0.2.7",
-            "ident_case": "1.0.1",
-            "strict-num": "0.1.1",
-            "zerovec": "0.11.8",
-            "ttf-parser": "0.25.1",
-            "blocking": "1.7.0",
-            "rspolib": "0.1.2",
-            "pxfm": "0.1.30",
-            "error-code": "3.4.0",
-        }
+        sources = json.loads((ROOT / "vendor" / "SOURCES.json").read_text(encoding="utf-8"))
+        patched = [
+            entry for entry in sources["packages"]
+            if entry["effective_source"]["type"] == "path"
+        ]
+        self.assertTrue(patched, "来源清单必须登记实际本地补丁，不能空跑")
+        expected_identities = {(entry["name"], entry["version"]) for entry in patched}
+        self.assertEqual(len(patched), len(expected_identities), "来源清单不能重复登记同一包")
+        for entry in sources["packages"]:
+            if entry["project_source_modifications"]:
+                self.assertEqual(entry["effective_source"]["type"], "path", entry["name"])
         result = subprocess.run(
             ["cargo", "metadata", "--locked", "--offline", "--format-version", "1"],
             cwd=ROOT,
@@ -329,6 +327,12 @@ class PackageWindowsArtifactTests(unittest.TestCase):
             {packages[member]["name"] for member in metadata["workspace_members"]},
             {"jchtools", "snap-ocr-core", "snap-ocr-worker"},
         )
+        workspace_members = set(metadata["workspace_members"])
+        resolved_local_identities = {
+            (package["name"], package["version"]) for package in packages.values()
+            if package["source"] is None and package["id"] not in workspace_members
+        }
+        self.assertEqual(resolved_local_identities, expected_identities)
         nodes = {node["id"]: node for node in metadata["resolve"]["nodes"]}
         pending = list(metadata["workspace_members"])
         reachable = set()
@@ -338,7 +342,8 @@ class PackageWindowsArtifactTests(unittest.TestCase):
                 continue
             reachable.add(identity)
             pending.extend(dependency["pkg"] for dependency in nodes[identity]["deps"])
-        for name, version in patched.items():
+        for entry in patched:
+            name, version = entry["name"], entry["version"]
             matches = [
                 package for package in packages.values()
                 if package["name"] == name and package["version"] == version
@@ -348,7 +353,7 @@ class PackageWindowsArtifactTests(unittest.TestCase):
             self.assertIsNone(package["source"], (name, package["source"]))
             self.assertEqual(
                 Path(package["manifest_path"]).resolve(),
-                (ROOT / "vendor" / f"{name}-{version}" / "Cargo.toml").resolve(),
+                (ROOT / entry["effective_source"]["path"] / "Cargo.toml").resolve(),
             )
             self.assertIn(package["id"], reachable, name)
 
