@@ -6842,6 +6842,13 @@
     },
     {
       "file": "tests/jchocr.rs",
+      "name": "help_is_concise_and_available_without_xberg",
+      "ignored": false,
+      "cfg": "all(windows, feature = \"test-hooks\")",
+      "body": "2edbbbe80413eb63"
+    },
+    {
+      "file": "tests/jchocr.rs",
       "name": "invalid_arguments_are_rejected_before_network_or_engine_use",
       "ignored": false,
       "cfg": "all(windows, feature = \"test-hooks\")",
