@@ -1028,7 +1028,7 @@
       "name": "configuration_operations_are_recorded_at_default_info_without_secrets",
       "ignored": false,
       "cfg": null,
-      "body": "0269bbb34a601e92"
+      "body": "98e7a52a1cf889b5"
     },
     {
       "file": "src/archive.rs",
@@ -7097,7 +7097,7 @@
       "name": "scan_skips_non_symlink_reparse_entries",
       "ignored": false,
       "cfg": null,
-      "body": "1ea669c7224c2de3"
+      "body": "f2dff78fe7dc1de0"
     },
     {
       "file": "tests/md_tools.rs",
