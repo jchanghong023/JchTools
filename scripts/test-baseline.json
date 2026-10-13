@@ -1850,34 +1850,6 @@
       "body": "3514d2f83a1337a6"
     },
     {
-      "file": "src/git_tools.rs",
-      "name": "bundled_git_is_selected_before_system_git",
-      "ignored": false,
-      "cfg": null,
-      "body": "e107098b46066b37"
-    },
-    {
-      "file": "src/git_tools.rs",
-      "name": "direct_fallback_overrides_configured_git_proxy",
-      "ignored": false,
-      "cfg": null,
-      "body": "fccaa201841a3721"
-    },
-    {
-      "file": "src/git_tools.rs",
-      "name": "network_fallback_does_not_restart_after_stop",
-      "ignored": false,
-      "cfg": null,
-      "body": "3cf02b694011e5a1"
-    },
-    {
-      "file": "src/git_tools.rs",
-      "name": "system_proxy_overrides_git_remote_proxy_without_changing_config",
-      "ignored": false,
-      "cfg": null,
-      "body": "80ff40cb87d9eb11"
-    },
-    {
       "file": "src/gui.rs",
       "name": "acp_connection_error_survives_stopped_snapshot_while_save_is_pending",
       "ignored": false,
@@ -4094,70 +4066,21 @@
       "name": "bypass_wildcards_match_windows_style_patterns",
       "ignored": false,
       "cfg": null,
-      "body": "ba93c3ceccf0f93e"
-    },
-    {
-      "file": "src/system_proxy.rs",
-      "name": "bypassed_matches_untranslatable_override_rules",
-      "ignored": false,
-      "cfg": null,
-      "body": "8299d3130aa2b112"
+      "body": "87f72f728d2d629f"
     },
     {
       "file": "src/system_proxy.rs",
       "name": "disabled_or_unparseable_registry_falls_back_to_direct",
       "ignored": false,
       "cfg": null,
-      "body": "daf3b77bef4d7ebc"
-    },
-    {
-      "file": "src/system_proxy.rs",
-      "name": "exact_bypass_does_not_expand_colon_entries_to_other_hosts",
-      "ignored": false,
-      "cfg": null,
-      "body": "66286590685817b8"
-    },
-    {
-      "file": "src/system_proxy.rs",
-      "name": "git_env_maps_registry_to_curl_variables",
-      "ignored": false,
-      "cfg": null,
-      "body": "ad5b44a92ab0d6ee"
-    },
-    {
-      "file": "src/system_proxy.rs",
-      "name": "git_env_uses_the_same_protocol_fallback_as_downloads",
-      "ignored": false,
-      "cfg": null,
-      "body": "8f1a3c15ace27d88"
+      "body": "6701cae2738f31a5"
     },
     {
       "file": "src/system_proxy.rs",
       "name": "ipv6_bracket_bypass_entries_match_bare_url_host",
       "ignored": false,
       "cfg": null,
-      "body": "cd3c80d83e5eed3b"
-    },
-    {
-      "file": "src/system_proxy.rs",
-      "name": "local_bypass_does_not_match_ipv6_addresses",
-      "ignored": false,
-      "cfg": null,
-      "body": "7a70ace22e29e4bc"
-    },
-    {
-      "file": "src/system_proxy.rs",
-      "name": "network_signature_matches_connect_failures_only",
-      "ignored": false,
-      "cfg": null,
-      "body": "3656806a9d2b0d72"
-    },
-    {
-      "file": "src/system_proxy.rs",
-      "name": "no_proxy_translation_drops_exact_rules",
-      "ignored": false,
-      "cfg": null,
-      "body": "9fa0cd9e725b33cd"
+      "body": "6f3e200001b680f2"
     },
     {
       "file": "src/system_proxy.rs",
@@ -6499,24 +6422,10 @@
     },
     {
       "file": "tests/git_tools.rs",
-      "name": "conflict_resume_refuses_whitespace_distinct_staged_path",
-      "ignored": false,
-      "cfg": null,
-      "body": "054d43efc60169b6"
-    },
-    {
-      "file": "tests/git_tools.rs",
       "name": "diverged_history_conflict_reports_unpushed_honestly",
       "ignored": false,
       "cfg": null,
       "body": "3d40aa51db5ece12"
-    },
-    {
-      "file": "tests/git_tools.rs",
-      "name": "fetch_failure_retries_fetch_without_repeating_push",
-      "ignored": false,
-      "cfg": null,
-      "body": "6c8456e31eff09c5"
     },
     {
       "file": "tests/git_tools.rs",
@@ -6545,20 +6454,6 @@
       "ignored": false,
       "cfg": null,
       "body": "d39f74993376d4b7"
-    },
-    {
-      "file": "tests/git_tools.rs",
-      "name": "merge_failure_retries_merge_without_repeating_fetch_or_push",
-      "ignored": false,
-      "cfg": null,
-      "body": "8f18101129e60280"
-    },
-    {
-      "file": "tests/git_tools.rs",
-      "name": "merge_options_ours_preserves_conflict",
-      "ignored": false,
-      "cfg": null,
-      "body": "2cf42a9eea11ac2d"
     },
     {
       "file": "tests/git_tools.rs",
@@ -6793,24 +6688,10 @@
     },
     {
       "file": "tests/git_tools.rs",
-      "name": "stop_at_write_command_log_does_not_start_that_command",
-      "ignored": false,
-      "cfg": null,
-      "body": "835852b957962e8b"
-    },
-    {
-      "file": "tests/git_tools.rs",
       "name": "stop_before_any_file_keeps_repo_untouched",
       "ignored": false,
       "cfg": null,
       "body": "e7cc6a5f677308b3"
-    },
-    {
-      "file": "tests/git_tools.rs",
-      "name": "stop_before_resolved_merge_commit_preserves_index_and_head",
-      "ignored": false,
-      "cfg": null,
-      "body": "11a0c8ade0673d07"
     },
     {
       "file": "tests/git_tools.rs",
