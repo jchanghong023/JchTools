@@ -42,9 +42,9 @@ URL 仅接受 HTTP 或 HTTPS，只下载指定图片及其 HTTP(S) 重定向。
   jchocr 自动读取相同的已保存选择，共用现有代理和截图模型；不打开 GUI、
   不下载引擎、不回退到文档 OCR，也无需设置 Xberg、模型或 ONNX Runtime
   环境变量。调用方不必维护 worker、请求 ID 或引擎进程生命周期。
-  安装包自动将安装目录加入当前用户 PATH，无需管理员权限。
-  已运行的终端或 Agent 可能保留旧 PATH，请重新启动或使用程序完整路径。
-  便携 ZIP 不修改 PATH。
+  安装包将 jchocr.exe 复制到当前用户的 WindowsApps（Windows 默认 PATH 目录）。
+  不修改 PATH，无需管理员权限或重启终端；安装完成即可直接执行 jchocr。
+  便携 ZIP 只随附程序，不自动复制到 PATH 目录。
 
 PowerShell 示例：
   jchocr 'C:\images\screen shot.png'

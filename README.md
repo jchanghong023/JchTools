@@ -78,8 +78,8 @@ powershell -NoProfile -File .\scripts\package-windows.ps1
 安装包和便携 ZIP 均提供 `jchocr.exe`，供程序或 AI Agent 直接调用，不打开 GUI、不增加 MCP。
 命令经共享代理调用与截图相同的 `ocr_snapshot` 接口，复用截图模型和布局。
 先在 JchTools「设置」页下载或配置并选中可用的共享 Xberg；无需手工设置模型或 ONNX Runtime 环境变量。
-安装包免 UAC，自动加入当前用户 PATH；新启动并取得更新环境的终端或 Agent 可直接运行 `jchocr`，已运行程序可能仍持有旧 PATH。
-便携 ZIP 不修改 PATH，可直接调用解压目录中的 `.\jchocr.exe`。
+安装包免 UAC，将 `jchocr.exe` 复制到当前用户已有 PATH 的 `%LOCALAPPDATA%\Microsoft\WindowsApps` 目录，不修改用户或系统 PATH；安装完成即可直接运行 `jchocr`，无需重启终端。
+便携 ZIP 只随附程序，不自动复制到 PATH 目录。
 完整输入方式、可复制示例、JSON 输出与错误约定以 `jchocr --help`（或 `jchocr help`）为准；帮助不依赖 Xberg。
 
 ## 窗口与外观

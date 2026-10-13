@@ -348,4 +348,4 @@ foreach ($item in (Get-ChildItem -LiteralPath $folder -Recurse -Force)) {
 Compress-Archive -LiteralPath $folder -DestinationPath $zip -CompressionLevel Optimal
 Write-Host "Created: $zip"
 Write-Host "Staged optional OCR worker and pinned manifest locally: $optionalStage (NOT UPLOADED; asset release requires separate authorization)"
-Write-Host '解压此 ZIP 后可运行 JchTools.exe 或 jchocr.exe；安装包还会自动注册当前用户的命令行 PATH。'
+Write-Host '解压此 ZIP 后可运行 JchTools.exe 或 jchocr.exe；安装包将 jchocr.exe 复制到用户已有 PATH 的 WindowsApps 目录，不修改 PATH，无需重启终端。'
