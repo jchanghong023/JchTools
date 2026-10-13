@@ -488,18 +488,21 @@ def _test_gates(
 
 def _collect_file_tests(path: Path) -> list[dict[str, object]]:
     text = read_text(path)
+    structural = _mask_rust_comments(text)
     rel = path.relative_to(ROOT).as_posix()
     # 文件头内层属性：#![cfg(...)]（遇到第一个顶层项即停，避免误读宏内的 #![ ]）
-    head = re.split(r"\n(?=(?:pub\s+)?(?:use|mod|fn|struct|enum|impl|trait|const|static|type|macro_rules)\b)", text)[0]
+    head = re.split(
+        r"\n(?=(?:pub\s+)?(?:use|mod|fn|struct|enum|impl|trait|const|static|type|macro_rules)\b)", structural
+    )[0]
     file_cfgs = _file_level_cfgs(head)
     # 模块级门禁：#[cfg(...)] mod X { ... }
-    mod_spans = _mod_gates(text)
+    mod_spans = _mod_gates(structural)
     # 全部属性跨度（供逐测试回溯/前瞻；#![ ] 内层属性只出现在文件头，不会被测试链到）
-    attrs = _attr_spans(text)
+    attrs = _attr_spans(structural)
     rows: list[dict[str, object]] = []
-    for match in re.finditer(r"#\[(?:tokio::)?test(?:\([^]]*\))?\]", text):
-        cfgs, ignored = _test_gates(text, attrs, match, file_cfgs, mod_spans)
-        name_match = re.match(r"[^{};]*?fn\s+(\w+)\s*\(", text[match.end() :])
+    for match in re.finditer(r"#\[(?:tokio::)?test(?:\([^]]*\))?\]", structural):
+        cfgs, ignored = _test_gates(structural, attrs, match, file_cfgs, mod_spans)
+        name_match = re.match(r"[^{};]*?fn\s+(\w+)\s*\(", structural[match.end() :])
         if not name_match:
             continue
         rows.append(
@@ -525,6 +528,35 @@ _RUST_TRIVIA_ALTS = (
     r"b?'(?:\\.|[^'\\\n])'",
 )
 _RUST_TRIVIA = re.compile("|".join(_RUST_TRIVIA_ALTS), re.DOTALL)
+
+
+def _mask_rust_comments(text: str) -> str:
+    """等长抹除 Rust 注释（含嵌套块），保留字面量及换行，供属性与门禁定位."""
+    parts: list[str] = []
+    cursor = search_at = 0
+    while match := _RUST_TRIVIA.search(text, search_at):
+        start, end = match.span()
+        if not match.group().startswith(("//", "/*")):
+            search_at = end
+            continue
+        if text.startswith("/*", start):
+            depth, end = 1, start + 2
+            while depth:
+                opening, closing = text.find("/*", end), text.find("*/", end)
+                if closing == -1:
+                    end = len(text)
+                    break
+                if opening != -1 and opening < closing:
+                    depth += 1
+                    end = opening + 2
+                else:
+                    depth -= 1
+                    end = closing + 2
+        parts.append(text[cursor:start])
+        parts.append(re.sub(r"[^\n]", " ", text[start:end]))
+        cursor = search_at = end
+    parts.append(text[cursor:])
+    return "".join(parts)
 
 
 def _test_body_hash(text: str, signature_end: int) -> str:

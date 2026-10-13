@@ -5,7 +5,10 @@
 
 .DESCRIPTION
   默认执行（无需参数）：static_check.py（含测试基线与界面规则检查）、cargo test、
-  Snap OCR core/worker 的 all-targets 测试与 clippy、构建输出 binding loop 警告扫描。可选阶段：
+  Snap OCR core/worker 的 all-targets 测试与 clippy、构建输出 binding loop 警告扫描；
+  根包默认复用 local_gate_plan 的非桌面 artifact 分类。可选阶段：
+    -WithDesktopTests 仅在本次用户明确授权后使用：追加真实 GUI 用例和有资产时的热键服务探测；
+                  -WithGuiSmoke / -WithMarkdownAcceptance 同样要求此声明，参数本身不创造授权。
     -WithEngine   追加真实引擎用例（JCHTOOLS_TEST_7ZIP 或 resources\7zip\7z.exe，
                   缺失时直接失败并提示先运行 fetch-7zip.ps1）
     -WithGuiSmoke 追加 OS 级 UIA 冒烟（默认 S1-S4/S15/S16/S18；资产就绪时自动扩展：
@@ -22,11 +25,14 @@
 
 .EXAMPLE
   powershell -NoProfile -File .\scripts\acceptance.ps1 -WithEngine
+  # 本次另获真实桌面验收授权时：
+  powershell -NoProfile -File .\scripts\acceptance.ps1 -WithDesktopTests -WithGuiSmoke -GuiData <目录>
 #>
 [CmdletBinding()]
 param(
     [switch]$WithEngine,
     [switch]$WithGuiSmoke,
+    [switch]$WithDesktopTests,
     [switch]$WithPackage,
     [string]$GuiData,
     [switch]$WithMarkdownAcceptance,
@@ -35,6 +41,9 @@ param(
 $ErrorActionPreference = 'Stop'
 Set-StrictMode -Version Latest
 if ($env:OS -ne 'Windows_NT') {throw 'Windows 专用验收脚本；本项目按合同 P-07 仅支持 Windows 平台。'}
+if (($WithGuiSmoke -or $WithMarkdownAcceptance) -and -not $WithDesktopTests) {
+    throw '-WithGuiSmoke / -WithMarkdownAcceptance 涉及真实桌面；须本次用户明确授权并传入 -WithDesktopTests。'
+}
 $root = [IO.Path]::GetFullPath((Join-Path $PSScriptRoot '..'))
 Set-Location -LiteralPath $root
 $script:LogDir = Join-Path $root '.tmp\acceptance'
@@ -189,12 +198,39 @@ $null = Invoke-Logged -Name 'static-check' -File $python -Arguments @('scripts/s
 $null = Invoke-Logged -Name 'ocr-asset-manifest' -File $python `
     -Arguments @('tests/ocr_fixtures/check_asset_manifest.py')
 
-# 2) 全量测试（默认特性，含 GUI 与属性测试）。
-$testLog = Invoke-Logged -Name 'cargo-test' -File 'cargo' -Arguments @('test','--all-targets','--features','test-hooks') -Environment $testEnvironment
+# 2) 根包全量编译；默认按现有测试门分类执行非桌面 artifact，不能暗中抢占用户焦点。
+$testLogs = @()
+if ($WithDesktopTests) {
+    $testLog = Invoke-Logged -Name 'cargo-test' -File 'cargo' `
+        -Arguments @('test','--all-targets','--features','test-hooks') -Environment $testEnvironment
+    $testLogs += $testLog
+} else {
+    $testLog = Invoke-Logged -Name 'cargo-test-build' -File 'cargo' `
+        -Arguments @('test','--all-targets','--features','test-hooks','--no-run','--message-format=json') -Environment $testEnvironment
+    $testLogs += $testLog
+    # 唯一分类名单仍由 local_gate_plan 维护，不在 PowerShell 另造桌面测试名清单。
+    $planCode = @'
+import json
+import sys
+from pathlib import Path
+from scripts.gate_runtime import Result
+from scripts.local_gate_plan import _test_binary_stages
+stages = _test_binary_stages(Result('acceptance', 'OK', '', Path(sys.argv[1])))
+print(json.dumps([{'name': stage.name, 'argv': stage.argv} for stage in stages]))
+'@
+    $planLog = Invoke-Logged -Name 'root-test-plan' -File $python -Arguments @('-c',$planCode,$testLog)
+    $testStages = @(Get-Content -LiteralPath $planLog -Raw -Encoding UTF8 | ConvertFrom-Json)
+    if ($testStages.Count -eq 0) {throw '未取得根包测试 artifact，拒绝把零测试执行报告为通过。'}
+    foreach ($stage in $testStages) {
+        $testLogs += Invoke-Logged -Name $stage.name -File $stage.argv[0] `
+            -Arguments @($stage.argv | Select-Object -Skip 1) -Environment $testEnvironment
+    }
+    $script:Results.Add('NOT RUN  desktop-tests（真实 GUI 用例及热键探测须本次明确授权并加 -WithDesktopTests）')
+}
 
 # 3) binding loop 警告扫描：AGENTS.md 第 4 节禁止布局绑定环。
 #    注意增量构建可能不再重放旧警告；全量告警以干净构建（CI / package 步骤）为准。
-$hits = @(Select-String -LiteralPath $testLog -Pattern 'binding loop' -SimpleMatch)
+$hits = @(Select-String -LiteralPath $testLogs -Pattern 'binding loop' -SimpleMatch)
 if ($hits.Count -gt 0) {
     $hits | ForEach-Object {"$($_.LineNumber): $($_.Line)"} | Write-Host
     throw "构建输出出现 binding loop 警告（AGENTS.md 第 4 节禁止）；详见 $testLog"
@@ -213,12 +249,12 @@ foreach ($component in @('snap-ocr-core','snap-ocr-worker')) {
     $null = Invoke-Logged -Name "$component-clippy" -File 'cargo' `
         -Arguments (@('clippy','--manifest-path',$manifest) + $productionTargets + @('--features','test-hooks','--','-D','warnings'))
 }
-if ($env:JCHTOOLS_SNAP_OCR_ASSET_ROOT) {
+if ($WithDesktopTests -and $env:JCHTOOLS_SNAP_OCR_ASSET_ROOT) {
     $ocrManifest = Get-Content -LiteralPath 'resources\snap-ocr-assets.json' -Raw -Encoding UTF8 | ConvertFrom-Json
     $workerVersion = Split-Path -Leaf (Split-Path -Parent $ocrManifest.workers[0].install_path)
     $null = Invoke-Logged -Name 'snap-ocr-worker-root' -File $python `
         -Arguments @('tests/ocr_fixtures/check_worker_root.py','--asset-root',$env:JCHTOOLS_SNAP_OCR_ASSET_ROOT,'--worker-version',$workerVersion)
-} else {$script:Results.Add('NOT RUN  snap-ocr-worker-root（设置 JCHTOOLS_SNAP_OCR_ASSET_ROOT 为完整的已校验资产缓存）')}
+} else {$script:Results.Add('NOT RUN  snap-ocr-worker-root（须本次明确授权加 -WithDesktopTests，并设置 JCHTOOLS_SNAP_OCR_ASSET_ROOT 为完整的已校验资产缓存）')}
 
 # 4) 真实引擎用例（可选）。
 if ($WithEngine) {

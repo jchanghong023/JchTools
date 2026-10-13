@@ -206,6 +206,13 @@
     },
     {
       "file": "optional/snap-ocr-core/src/layout.rs",
+      "name": "signed_zero_coordinates_follow_numeric_tie_breakers",
+      "ignored": false,
+      "cfg": null,
+      "body": "d9c55b683a43d99e"
+    },
+    {
+      "file": "optional/snap-ocr-core/src/layout.rs",
       "name": "trailing_spaces_and_final_newline_are_not_added",
       "ignored": false,
       "cfg": null,
@@ -633,6 +640,13 @@
     },
     {
       "file": "optional/snap-ocr-worker/src/service.rs",
+      "name": "isolated_service_autostart_preserves_existing_sentinel",
+      "ignored": false,
+      "cfg": "windows",
+      "body": "06d4adb04507af3a"
+    },
+    {
+      "file": "optional/snap-ocr-worker/src/service.rs",
       "name": "load_failures_map_to_distinct_model_states",
       "ignored": false,
       "cfg": "windows",
@@ -916,7 +930,7 @@
       "name": "local_http_logs_json_sse_failures_and_private_body_boundaries",
       "ignored": false,
       "cfg": null,
-      "body": "aadf337ef8b9e1d2"
+      "body": "e84e0bf33f945908"
     },
     {
       "file": "src/acp_api/http/mod.rs",
@@ -1010,6 +1024,13 @@
       "body": "b8a38fb96ebc6e49"
     },
     {
+      "file": "src/acp_api/settings.rs",
+      "name": "configuration_operations_are_recorded_at_default_info_without_secrets",
+      "ignored": false,
+      "cfg": null,
+      "body": "0269bbb34a601e92"
+    },
+    {
       "file": "src/archive.rs",
       "name": "decoded_duplicate_volume_families_preserve_partial_existing_set",
       "ignored": false,
@@ -1022,6 +1043,13 @@
       "ignored": false,
       "cfg": null,
       "body": "319d9c3c916f76f5"
+    },
+    {
+      "file": "src/archive.rs",
+      "name": "directory_rename_preserves_incoming_sibling_names",
+      "ignored": false,
+      "cfg": null,
+      "body": "25f56900c3d192f4"
     },
     {
       "file": "src/archive.rs",
@@ -1155,6 +1183,13 @@
       "ignored": false,
       "cfg": null,
       "body": "7030fda3586048a0"
+    },
+    {
+      "file": "src/archive.rs",
+      "name": "quarantine_stops_before_moving_when_cancelled",
+      "ignored": false,
+      "cfg": null,
+      "body": "cf3c9bf8f4318f87"
     },
     {
       "file": "src/archive.rs",
@@ -1364,28 +1399,28 @@
       "name": "different_name_graph_matches_bruteforce_on_random_small_inputs",
       "ignored": false,
       "cfg": null,
-      "body": "bf294a1b02bc021c"
+      "body": "53b13c46732ce10b"
     },
     {
       "file": "src/dedup_components.rs",
       "name": "different_name_graph_preserves_cross_pair_topology",
       "ignored": false,
       "cfg": null,
-      "body": "178b992bdaf284e2"
+      "body": "9a98f4b92662f2a3"
     },
     {
       "file": "src/dedup_components.rs",
       "name": "different_name_rule_does_not_match_copy_name_only",
       "ignored": false,
       "cfg": null,
-      "body": "721ab83afae29c2c"
+      "body": "9218b6b0e1eb3689"
     },
     {
       "file": "src/dedup_components.rs",
       "name": "different_name_rule_does_not_match_same_name_only",
       "ignored": false,
       "cfg": null,
-      "body": "5e9a6fcbb5730c54"
+      "body": "7ab7d904c773efed"
     },
     {
       "file": "src/dedup_components.rs",
@@ -1426,7 +1461,7 @@
       "file": "src/engine.rs",
       "name": "count_skips_boundary_check_for_scope_pruned_dirs",
       "ignored": false,
-      "cfg": null,
+      "cfg": "windows",
       "body": "97a5129d819406ca"
     },
     {
@@ -1508,6 +1543,55 @@
     },
     {
       "file": "src/engine.rs",
+      "name": "r01_cleanup_precedes_candidate_hashing",
+      "ignored": false,
+      "cfg": null,
+      "body": "1bb3e539c4040c16"
+    },
+    {
+      "file": "src/engine.rs",
+      "name": "r01_conflict_yield_keeps_source_free_digest",
+      "ignored": false,
+      "cfg": null,
+      "body": "96df2448ef8cc8a4"
+    },
+    {
+      "file": "src/engine.rs",
+      "name": "r01_exclusions_use_actual_relative_paths",
+      "ignored": false,
+      "cfg": null,
+      "body": "591a03c50e72e2ab"
+    },
+    {
+      "file": "src/engine.rs",
+      "name": "r01_extraction_summary_reports_failed_isolation",
+      "ignored": false,
+      "cfg": null,
+      "body": "51ab9b9e5864b726"
+    },
+    {
+      "file": "src/engine.rs",
+      "name": "r01_failed_item_reason_is_written_to_isolated_disk_log",
+      "ignored": false,
+      "cfg": null,
+      "body": "40eeb1153064bd19"
+    },
+    {
+      "file": "src/engine.rs",
+      "name": "r01_nested_quarantine_skip_reports_path",
+      "ignored": false,
+      "cfg": null,
+      "body": "3537996c6e358c67"
+    },
+    {
+      "file": "src/engine.rs",
+      "name": "r01_selected_quarantine_root_keeps_payloads",
+      "ignored": false,
+      "cfg": null,
+      "body": "7ad4e14a5e61214a"
+    },
+    {
+      "file": "src/engine.rs",
       "name": "recorded_state_dir_takes_priority",
       "ignored": false,
       "cfg": null,
@@ -1540,6 +1624,13 @@
       "ignored": false,
       "cfg": null,
       "body": "4847111cf9896589"
+    },
+    {
+      "file": "src/engine_bundle.rs",
+      "name": "independent_release_preserves_fixed_directory_occupier",
+      "ignored": false,
+      "cfg": null,
+      "body": "5b81435609d6bceb"
     },
     {
       "file": "src/engine_bundle.rs",
@@ -1596,6 +1687,13 @@
       "ignored": false,
       "cfg": null,
       "body": "41aee31bb16fc34b"
+    },
+    {
+      "file": "src/engine_bundle.rs",
+      "name": "resolve_uses_sibling_release_when_fixed_directory_is_a_file",
+      "ignored": false,
+      "cfg": null,
+      "body": "6e572cac47a1e46f"
     },
     {
       "file": "src/engine_bundle.rs",
@@ -1739,6 +1837,13 @@
     },
     {
       "file": "src/fsutil.rs",
+      "name": "suffix_keeps_legal_unicode_extension",
+      "ignored": false,
+      "cfg": null,
+      "body": "ffb5e7b5e95009cc"
+    },
+    {
+      "file": "src/fsutil.rs",
       "name": "unique_target_inserts_index_before_volume_suffix",
       "ignored": false,
       "cfg": null,
@@ -1753,10 +1858,24 @@
     },
     {
       "file": "src/git_tools.rs",
+      "name": "direct_fallback_overrides_configured_git_proxy",
+      "ignored": false,
+      "cfg": null,
+      "body": "fccaa201841a3721"
+    },
+    {
+      "file": "src/git_tools.rs",
       "name": "network_fallback_does_not_restart_after_stop",
       "ignored": false,
       "cfg": null,
-      "body": "9c3d34d46d9775be"
+      "body": "3cf02b694011e5a1"
+    },
+    {
+      "file": "src/git_tools.rs",
+      "name": "system_proxy_overrides_git_remote_proxy_without_changing_config",
+      "ignored": false,
+      "cfg": null,
+      "body": "80ff40cb87d9eb11"
     },
     {
       "file": "src/gui.rs",
@@ -2033,6 +2152,13 @@
     },
     {
       "file": "src/gui.rs",
+      "name": "extract_done_associates_failure_list_without_watcher",
+      "ignored": false,
+      "cfg": null,
+      "body": "1633cd441bf7ab67"
+    },
+    {
+      "file": "src/gui.rs",
       "name": "extract_start_rejects_protected_directory_immediately",
       "ignored": false,
       "cfg": "windows",
@@ -2177,6 +2303,13 @@
       "ignored": false,
       "cfg": null,
       "body": "9cb9f061d4ae4026"
+    },
+    {
+      "file": "src/gui.rs",
+      "name": "md_split_exact_byte_limit_runs_via_callback",
+      "ignored": false,
+      "cfg": null,
+      "body": "4ef0bdccb23d2221"
     },
     {
       "file": "src/gui.rs",
@@ -2362,6 +2495,13 @@
     },
     {
       "file": "src/gui.rs",
+      "name": "settings_payload_active_matches_same_source_snapshot",
+      "ignored": false,
+      "cfg": null,
+      "body": "c963b355cbea7b15"
+    },
+    {
+      "file": "src/gui.rs",
       "name": "settings_result_while_task_running_keeps_close_after",
       "ignored": false,
       "cfg": null,
@@ -2436,6 +2576,13 @@
       "ignored": false,
       "cfg": null,
       "body": "465b07a5831ae337"
+    },
+    {
+      "file": "src/gui.rs",
+      "name": "split_size_accepts_exact_byte_fractions",
+      "ignored": false,
+      "cfg": null,
+      "body": "df28d63d582b59eb"
     },
     {
       "file": "src/gui.rs",
@@ -2523,6 +2670,13 @@
     },
     {
       "file": "src/hash_cache.rs",
+      "name": "failed_commit_rolls_back_and_releases_cache_writer",
+      "ignored": false,
+      "cfg": null,
+      "body": "6304a9c72fc63ba8"
+    },
+    {
+      "file": "src/hash_cache.rs",
       "name": "store_omits_degenerate_identities",
       "ignored": false,
       "cfg": null,
@@ -2551,6 +2705,13 @@
     },
     {
       "file": "src/logging.rs",
+      "name": "debug_quoted_credentials_are_redacted_on_disk",
+      "ignored": false,
+      "cfg": null,
+      "body": "b3b00cfc7197eebe"
+    },
+    {
+      "file": "src/logging.rs",
       "name": "disk_records_are_single_line_correlated_and_redacted",
       "ignored": false,
       "cfg": null,
@@ -2562,6 +2723,13 @@
       "ignored": false,
       "cfg": null,
       "body": "ae0a58967fc49b33"
+    },
+    {
+      "file": "src/logging.rs",
+      "name": "internal_process_roles_are_identified",
+      "ignored": false,
+      "cfg": null,
+      "body": "665eac885da14d2c"
     },
     {
       "file": "src/logging.rs",
@@ -2604,6 +2772,20 @@
       "ignored": false,
       "cfg": null,
       "body": "5e18480813df6f19"
+    },
+    {
+      "file": "src/logging.rs",
+      "name": "startup_record_identifies_build_mode",
+      "ignored": false,
+      "cfg": null,
+      "body": "d47294ca4edd6b72"
+    },
+    {
+      "file": "src/logging.rs",
+      "name": "warning_threshold_preserves_operation_correlation",
+      "ignored": false,
+      "cfg": null,
+      "body": "0784b8df157b9332"
     },
     {
       "file": "src/logging.rs",
@@ -3020,6 +3202,13 @@
     },
     {
       "file": "src/markdown_document.rs",
+      "name": "angle_bracket_image_destinations_are_materialized",
+      "ignored": false,
+      "cfg": null,
+      "body": "472f9c42e9e18026"
+    },
+    {
+      "file": "src/markdown_document.rs",
       "name": "content_is_final_and_children_are_ignored",
       "ignored": false,
       "cfg": null,
@@ -3059,6 +3248,13 @@
       "ignored": false,
       "cfg": null,
       "body": "709ce4394a26abc0"
+    },
+    {
+      "file": "src/markdown_document.rs",
+      "name": "image_titles_with_parentheses_preserve_literal_references",
+      "ignored": false,
+      "cfg": null,
+      "body": "a890e31df7be95fe"
     },
     {
       "file": "src/markdown_document.rs",
@@ -3192,6 +3388,13 @@
       "ignored": false,
       "cfg": null,
       "body": "27f16174a456cdf8"
+    },
+    {
+      "file": "src/md_tools.rs",
+      "name": "merge_stop_is_timely_inside_single_long_line",
+      "ignored": false,
+      "cfg": null,
+      "body": "d172458af02652a7"
     },
     {
       "file": "src/md_tools.rs",
@@ -3391,6 +3594,13 @@
     },
     {
       "file": "src/process.rs",
+      "name": "streaming_terminal_paths_reap_owned_descendants",
+      "ignored": false,
+      "cfg": "windows",
+      "body": "f7adc10aa6f3f63a"
+    },
+    {
+      "file": "src/process.rs",
       "name": "subprocess_logs_preserve_results_and_thread_correlation_without_body_leaks",
       "ignored": false,
       "cfg": "windows",
@@ -3461,17 +3671,38 @@
     },
     {
       "file": "src/rules.rs",
+      "name": "digest_candidate_drops_source_before_truncating_stem",
+      "ignored": false,
+      "cfg": null,
+      "body": "e06b0de08124906d"
+    },
+    {
+      "file": "src/rules.rs",
+      "name": "digest_candidate_forced_truncation_keeps_c20_cap",
+      "ignored": false,
+      "cfg": null,
+      "body": "b701af6e84b65b18"
+    },
+    {
+      "file": "src/rules.rs",
       "name": "digest_candidate_keeps_one_character_when_budget_exhausted",
       "ignored": false,
       "cfg": null,
-      "body": "df580e9a097c4214"
+      "body": "e36474cb9f845fb6"
+    },
+    {
+      "file": "src/rules.rs",
+      "name": "digest_candidate_preserves_full_stem_below_yield_threshold",
+      "ignored": false,
+      "cfg": null,
+      "body": "f57b6956ed3b31c9"
     },
     {
       "file": "src/rules.rs",
       "name": "digest_candidate_respects_unit_budget",
       "ignored": false,
       "cfg": null,
-      "body": "544d91ac8da12217"
+      "body": "ec1fe710f68c18b6"
     },
     {
       "file": "src/rules.rs",
@@ -3500,6 +3731,13 @@
       "ignored": false,
       "cfg": null,
       "body": "eee1c887fb3d4f6b"
+    },
+    {
+      "file": "src/rules.rs",
+      "name": "extensionless_dotfiles_do_not_form_archive_families",
+      "ignored": false,
+      "cfg": null,
+      "body": "9c68175617b464d0"
     },
     {
       "file": "src/rules.rs",
@@ -3649,6 +3887,20 @@
       "body": "074a33f7f73ffc89"
     },
     {
+      "file": "src/rules.rs",
+      "name": "temp_cleanup_preserves_extensionless_dotfiles",
+      "ignored": false,
+      "cfg": null,
+      "body": "c7d845f774aa374c"
+    },
+    {
+      "file": "src/rules/signature.rs",
+      "name": "webp_maximum_lossless_dimensions_are_detected",
+      "ignored": false,
+      "cfg": null,
+      "body": "9a51261aeb4ba634"
+    },
+    {
       "file": "src/snap_ocr_assets.rs",
       "name": "asset_http_failures_log_all_three_attempts_and_exhaustion_without_secrets",
       "ignored": false,
@@ -3664,10 +3916,24 @@
     },
     {
       "file": "src/snap_ocr_assets.rs",
+      "name": "download_asset_cancellation_during_fetch_error_cleans_partial",
+      "ignored": false,
+      "cfg": null,
+      "body": "d0b4ea2126627614"
+    },
+    {
+      "file": "src/snap_ocr_assets.rs",
       "name": "download_asset_fails_after_three_interruptions",
       "ignored": false,
       "cfg": null,
       "body": "e622f24f7b748f31"
+    },
+    {
+      "file": "src/snap_ocr_assets.rs",
+      "name": "download_asset_install_failure_cleans_partial_and_preserves_destination",
+      "ignored": false,
+      "cfg": null,
+      "body": "0f04c48141dc2fa8"
     },
     {
       "file": "src/snap_ocr_assets.rs",
@@ -3846,6 +4112,13 @@
     },
     {
       "file": "src/system_proxy.rs",
+      "name": "exact_bypass_does_not_expand_colon_entries_to_other_hosts",
+      "ignored": false,
+      "cfg": null,
+      "body": "66286590685817b8"
+    },
+    {
+      "file": "src/system_proxy.rs",
       "name": "git_env_maps_registry_to_curl_variables",
       "ignored": false,
       "cfg": null,
@@ -3853,10 +4126,24 @@
     },
     {
       "file": "src/system_proxy.rs",
+      "name": "git_env_uses_the_same_protocol_fallback_as_downloads",
+      "ignored": false,
+      "cfg": null,
+      "body": "8f1a3c15ace27d88"
+    },
+    {
+      "file": "src/system_proxy.rs",
       "name": "ipv6_bracket_bypass_entries_match_bare_url_host",
       "ignored": false,
       "cfg": null,
       "body": "cd3c80d83e5eed3b"
+    },
+    {
+      "file": "src/system_proxy.rs",
+      "name": "local_bypass_does_not_match_ipv6_addresses",
+      "ignored": false,
+      "cfg": null,
+      "body": "7a70ace22e29e4bc"
     },
     {
       "file": "src/system_proxy.rs",
@@ -4053,6 +4340,13 @@
       "ignored": false,
       "cfg": null,
       "body": "b11cad6f8bdd3826"
+    },
+    {
+      "file": "src/xberg_settings.rs",
+      "name": "source_paths_are_read_from_one_committed_snapshot",
+      "ignored": false,
+      "cfg": null,
+      "body": "a878172c2d373ad2"
     },
     {
       "file": "tests/acp_callbacks.rs",
@@ -4665,6 +4959,13 @@
     },
     {
       "file": "tests/archive.rs",
+      "name": "directory_collision_preserves_incoming_sibling_directories",
+      "ignored": true,
+      "cfg": null,
+      "body": "7c3a6355989de9a2"
+    },
+    {
+      "file": "tests/archive.rs",
       "name": "directory_name_taken_by_file_maps_members_to_a_new_directory",
       "ignored": true,
       "cfg": null,
@@ -4711,6 +5012,13 @@
       "ignored": true,
       "cfg": null,
       "body": "2e0cb5094f16a0d9"
+    },
+    {
+      "file": "tests/archive.rs",
+      "name": "extensionless_archive_dotfiles_stay_untouched_by_public_extraction",
+      "ignored": true,
+      "cfg": null,
+      "body": "e67ae56ea5b728c0"
     },
     {
       "file": "tests/archive.rs",
@@ -4966,6 +5274,13 @@
     },
     {
       "file": "tests/classify_shape.rs",
+      "name": "in_place_digest_below_threshold_preserves_full_stem",
+      "ignored": false,
+      "cfg": null,
+      "body": "db824010cee5cb44"
+    },
+    {
+      "file": "tests/classify_shape.rs",
       "name": "in_place_normalized_collision_resolves_once_and_stays",
       "ignored": false,
       "cfg": null,
@@ -5029,6 +5344,13 @@
     },
     {
       "file": "tests/classify_shape.rs",
+      "name": "oversized_source_candidate_keeps_forced_digest_truncation",
+      "ignored": false,
+      "cfg": null,
+      "body": "1e69f6c4399c5bfc"
+    },
+    {
+      "file": "tests/classify_shape.rs",
       "name": "quarantine_tree_is_left_alone",
       "ignored": false,
       "cfg": null,
@@ -5050,17 +5372,31 @@
     },
     {
       "file": "tests/classify_shape.rs",
+      "name": "same_source_digest_over_threshold_drops_source_prefix",
+      "ignored": false,
+      "cfg": null,
+      "body": "d1db5fbf15f2a2d5"
+    },
+    {
+      "file": "tests/classify_shape.rs",
       "name": "simple_files_land_directly_in_category",
       "ignored": false,
       "cfg": null,
       "body": "199db1211d0c6d1c"
     },
     {
+      "file": "tests/classify_shape.rs",
+      "name": "temp_cleanup_keeps_extensionless_dotfiles_through_execution",
+      "ignored": false,
+      "cfg": null,
+      "body": "c67273c1f2a6fa6a"
+    },
+    {
       "file": "tests/codeagent.rs",
       "name": "codeagent_native_registry_and_detached_service",
       "ignored": false,
       "cfg": "windows",
-      "body": "066b98804977592a"
+      "body": "a44169d9857f5c47"
     },
     {
       "file": "tests/codeagent.rs",
@@ -5236,6 +5572,13 @@
       "ignored": false,
       "cfg": null,
       "body": "3c7ecf2309bb62c8"
+    },
+    {
+      "file": "tests/contract_paths.rs",
+      "name": "archive_collision_preserves_unicode_whitespace_in_extension",
+      "ignored": false,
+      "cfg": null,
+      "body": "9cc1265e7c10cffc"
     },
     {
       "file": "tests/contract_paths.rs",
@@ -6044,6 +6387,20 @@
     },
     {
       "file": "tests/dedup_graph.rs",
+      "name": "other_names_enabled_deduplicates_same_and_copy_names",
+      "ignored": false,
+      "cfg": null,
+      "body": "c8bb04c462721c02"
+    },
+    {
+      "file": "tests/dedup_graph.rs",
+      "name": "other_names_enabled_keeps_same_size_different_content",
+      "ignored": false,
+      "cfg": null,
+      "body": "f82a4986193f63ea"
+    },
+    {
+      "file": "tests/dedup_graph.rs",
       "name": "shortest_name_uses_original_utf16_length_after_case_fold",
       "ignored": false,
       "cfg": null,
@@ -6142,10 +6499,24 @@
     },
     {
       "file": "tests/git_tools.rs",
+      "name": "conflict_resume_refuses_whitespace_distinct_staged_path",
+      "ignored": false,
+      "cfg": null,
+      "body": "054d43efc60169b6"
+    },
+    {
+      "file": "tests/git_tools.rs",
       "name": "diverged_history_conflict_reports_unpushed_honestly",
       "ignored": false,
       "cfg": null,
       "body": "3d40aa51db5ece12"
+    },
+    {
+      "file": "tests/git_tools.rs",
+      "name": "fetch_failure_retries_fetch_without_repeating_push",
+      "ignored": false,
+      "cfg": null,
+      "body": "6c8456e31eff09c5"
     },
     {
       "file": "tests/git_tools.rs",
@@ -6174,6 +6545,13 @@
       "ignored": false,
       "cfg": null,
       "body": "d39f74993376d4b7"
+    },
+    {
+      "file": "tests/git_tools.rs",
+      "name": "merge_failure_retries_merge_without_repeating_fetch_or_push",
+      "ignored": false,
+      "cfg": null,
+      "body": "8f18101129e60280"
     },
     {
       "file": "tests/git_tools.rs",
@@ -6415,10 +6793,24 @@
     },
     {
       "file": "tests/git_tools.rs",
+      "name": "stop_at_write_command_log_does_not_start_that_command",
+      "ignored": false,
+      "cfg": null,
+      "body": "835852b957962e8b"
+    },
+    {
+      "file": "tests/git_tools.rs",
       "name": "stop_before_any_file_keeps_repo_untouched",
       "ignored": false,
       "cfg": null,
       "body": "e7cc6a5f677308b3"
+    },
+    {
+      "file": "tests/git_tools.rs",
+      "name": "stop_before_resolved_merge_commit_preserves_index_and_head",
+      "ignored": false,
+      "cfg": null,
+      "body": "11a0c8ade0673d07"
     },
     {
       "file": "tests/git_tools.rs",
@@ -6446,49 +6838,49 @@
       "name": "confirmation_blocks_background_controls_and_return_remains_available",
       "ignored": false,
       "cfg": "feature = \"gui\"",
-      "body": "f6a7c5b907282d0e"
+      "body": "0dd582b9cec93613"
     },
     {
       "file": "tests/gui_flow.rs",
       "name": "extract_confirmation_discloses_source_deletion_and_leaves_files_untouched",
       "ignored": false,
       "cfg": "feature = \"gui\"",
-      "body": "28374453c85ccc7b"
+      "body": "941438caa4dfaea2"
     },
     {
       "file": "tests/gui_flow.rs",
       "name": "git_subtree_skip_is_visible_after_run_and_tree_untouched",
       "ignored": false,
       "cfg": "feature = \"gui\"",
-      "body": "e7011117f924b44b"
+      "body": "78d1f4fdc6072561"
     },
     {
       "file": "tests/gui_flow.rs",
       "name": "plan_execution_confirmation_flow_runs_end_to_end",
       "ignored": false,
       "cfg": "feature = \"gui\"",
-      "body": "97791d171621df42"
+      "body": "2578f0ec315a8de5"
     },
     {
       "file": "tests/gui_flow.rs",
       "name": "settings_markdown_and_snap_pages_gate_and_status_end_to_end",
       "ignored": false,
       "cfg": "feature = \"gui\"",
-      "body": "2d5eccc04128f45a"
+      "body": "ca7db89a63a5a593"
     },
     {
       "file": "tests/gui_flow.rs",
       "name": "stop_and_close_during_md_merge_quits_when_merge_finishes",
       "ignored": false,
       "cfg": "feature = \"gui\"",
-      "body": "3fbce19110342a67"
+      "body": "79af278050ee0270"
     },
     {
       "file": "tests/gui_flow.rs",
       "name": "stop_and_close_skips_override_confirm_and_quits",
       "ignored": false,
       "cfg": "feature = \"gui\"",
-      "body": "c0b209593327a80a"
+      "body": "f8260f90e4d68dbe"
     },
     {
       "file": "tests/gui_log_panel.rs",
@@ -6496,6 +6888,13 @@
       "ignored": false,
       "cfg": "all(feature = \"gui\", feature = \"test-hooks\")",
       "body": "ab938a76c10b938f"
+    },
+    {
+      "file": "tests/markdown_convert_gate.rs",
+      "name": "batch_preserves_image_titles_and_commits_angle_bracket_media",
+      "ignored": false,
+      "cfg": null,
+      "body": "d57b74bf6bbd93b3"
     },
     {
       "file": "tests/markdown_convert_gate.rs",
@@ -6625,6 +7024,13 @@
     },
     {
       "file": "tests/md_tools.rs",
+      "name": "merge_orders_by_complete_nondigit_segments",
+      "ignored": false,
+      "cfg": null,
+      "body": "8a7fe9f976552743"
+    },
+    {
+      "file": "tests/md_tools.rs",
       "name": "merge_orders_by_creation_time_then_natural_path",
       "ignored": false,
       "cfg": null,
@@ -6660,6 +7066,13 @@
     },
     {
       "file": "tests/md_tools.rs",
+      "name": "natural_sort_compares_complete_nondigit_segments",
+      "ignored": false,
+      "cfg": null,
+      "body": "db778d70b300ce54"
+    },
+    {
+      "file": "tests/md_tools.rs",
       "name": "natural_sort_compares_digits_numerically",
       "ignored": false,
       "cfg": null,
@@ -6678,6 +7091,13 @@
       "ignored": false,
       "cfg": null,
       "body": "1d6cd509221cf0b9"
+    },
+    {
+      "file": "tests/md_tools.rs",
+      "name": "scan_skips_non_symlink_reparse_entries",
+      "ignored": false,
+      "cfg": null,
+      "body": "1ea669c7224c2de3"
     },
     {
       "file": "tests/md_tools.rs",

@@ -1078,6 +1078,8 @@ def main() -> int:
     # guard 内部用 resolve() 检查，但构建全程用的是原始路径；相对路径在脚本切换
     # 工作目录后会指向不存在的位置（已清空目标却构建失败），这里统一转成绝对路径。
     root = root.expanduser().resolve()
+    if not root.is_relative_to(repo_root / ".tmp"):
+        fail("测试数据目录必须在仓库 .tmp/ 内")
     seven = seven_zip()
 
     _clear_existing_target(root, force=force)

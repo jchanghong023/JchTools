@@ -12,9 +12,10 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
 REPORT = ROOT / ".tmp" / "test-gate" / "requirements-map.json"
-IDENTIFIER = re.compile(r"\b(?:XB|H|P|X|C|M|G|S|R|U|E|T|O)-\d{2}\b")
-ASSERTION = re.compile(r"^- \*\*((?:XB|H|P|X|C|M|G|S|R|U|E|T|O)-\d{2})\*\*\s+(.+)$")
-RANGE = re.compile(r"\b((?:XB|H|P|X|C|M|G|S|R|U|E|T|O))-(\d{2})\s*[\uff5e\u2013\u2014~]\s*(?:\1-)?(\d{2})\b")
+_PREFIX = r"(?:AH|CA|XB|H|P|X|C|M|G|S|R|U|E|T|O)"
+IDENTIFIER = re.compile(r"\b" + _PREFIX + r"-\d{2}\b")
+ASSERTION = re.compile(r"^- \*\*(" + _PREFIX + r"-\d{2})\*\*\s+(.+)$")
+RANGE = re.compile(r"\b(" + _PREFIX + r")-(\d{2})\s*[\uff5e\u2013\u2014~]\s*(?:\1-)?(\d{2})\b")
 
 
 def referenced_ids(line: str) -> set[str]:

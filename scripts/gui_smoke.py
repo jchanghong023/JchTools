@@ -837,7 +837,13 @@ def verify_original_disposition(root: Path, originals: dict[Path, str], quaranti
     }
     for relative, digest in originals.items():
         current = root / relative
-        is_archive = relative.suffix.lower() in ARCHIVE_SUFFIXES or relative.suffix[1:].isdigit()
+        # X-09/X-10：数字尾卷必须属于白名单主包，编号为三位或自然扩展，
+        # data.001、非白名单容器及多余前导零均是普通文件，不得要求删除或隔离。
+        numeric_volume = (
+            re.fullmatch(r"\.(?:[0-9]{3}|[1-9][0-9]{3,})", relative.suffix) is not None
+            and relative.with_suffix("").suffix.lower() in ARCHIVE_SUFFIXES
+        )
+        is_archive = relative.suffix.lower() in ARCHIVE_SUFFIXES or numeric_volume
         if is_archive and relative.parts[0] in successful_sections:
             if current.exists():
                 msg = f"完整成功后仍保留原包或分卷：{relative}"
@@ -1455,9 +1461,9 @@ def completion_confirms_new_run(
     """S11-06 新一轮批次完成判据（纯函数；单测见 scripts/test_gui_smoke.py）.
 
     含完成标记且统计行文本不同于上一轮 → 新完成；文本与上一轮逐字相同时，若
-    调用方提供了输出快照且快照已变化（新产出/更新了产物文件）也判为新一轮完成。
-    空快照按「无锚」处理（与 None 同路）：真实转换必然产出至少一个文件，空快照
-    只可能是目录不可读（部分快照已被 produced_snapshot 归零），不得当「已变化」。
+    调用方提供了前后两份非空输出快照且快照已变化，也判为新一轮完成。
+    任一侧空快照均按「无锚」处理（与 None 同路）：它可能表示尚无产物或目录
+    不可读（部分快照已被 produced_snapshot 归零），不得当「已变化」。
     纯跳过批次若统计行也逐字相同则不存在任何可观察锚点（现有各阶段的成功/跳过
     计数必然变化，不命中该死角）。
     """
@@ -1465,9 +1471,9 @@ def completion_confirms_new_run(
         return False
     if value != previous_done:
         return True
-    if not produced_now:
+    if not produced_before or not produced_now:
         return False
-    return produced_before is not None and produced_now != produced_before
+    return produced_now != produced_before
 
 
 def _confirm_new_completion(

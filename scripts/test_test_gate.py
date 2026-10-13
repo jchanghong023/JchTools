@@ -627,5 +627,33 @@ class FastcheckWallClockGuardTests(unittest.TestCase):
         assert exit_code == 0  # nosec B101: 各阶段与总墙钟都在预算内时必须仍是 0。
 
 
+class CargoArtifactEncodingTests(unittest.TestCase):
+    """实际读取 PowerShell 5.1 UTF-8 BOM 日志，不能丢掉首个唯一 Cargo artifact。"""
+
+    def test_single_artifact_with_or_without_bom_is_discovered(self) -> None:
+        workspace = test_gate.ROOT / ".tmp" / "test-gate" / "cargo-bom-regression"
+        with patch.object(sys, "argv", ["make_tmp.py", "workspace", "--destination", str(workspace)]):
+            self.assertEqual(make_tmp.main(), 0)
+        with tempfile.TemporaryDirectory(dir=workspace) as temporary:
+            root = Path(temporary)
+            artifact = {
+                "reason": "compiler-artifact",
+                "profile": {"test": True},
+                "target": {"name": "中文测试", "kind": ["test"]},
+                "executable": str(root / "测试.exe"),
+            }
+            for encoding in ("utf-8-sig", "utf-8"):
+                with self.subTest(encoding=encoding):
+                    log = root / f"{encoding}.log"
+                    log.write_text(json.dumps(artifact, ensure_ascii=False) + "\n", encoding=encoding)
+                    if encoding == "utf-8-sig":
+                        self.assertTrue(log.read_bytes().startswith(b"\xef\xbb\xbf"))
+                    discovered = local_gate_plan._test_binary_stages(
+                        gate_runtime.Result("root-test-build", "PASS", "合成 Cargo 日志", log=log)
+                    )
+                    self.assertEqual(len(discovered), 1, "唯一 artifact 因 UTF-8 BOM 被丢失")
+                    self.assertEqual(discovered[0].name, "root-test-build-中文测试")
+
+
 if __name__ == "__main__":
     _ = unittest.main()

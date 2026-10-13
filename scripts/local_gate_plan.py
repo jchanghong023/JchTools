@@ -59,6 +59,22 @@ def gate_plan(level: str, root: Path, log_dir: Path, ps_env: dict[str, str]) -> 
         Stage("markdown-acceptance-unit", [sys.executable, "-m", "unittest", "-f", "scripts.test_markdown_acceptance"]),
         Stage("gui-automation-unit", [sys.executable, "-m", "unittest", "-f", "scripts.test_gui_smoke"]),
         Stage("test-gate-unit", [sys.executable, "-m", "unittest", "-f", "scripts.test_test_gate"]),
+        Stage("trusted-review-unit", [sys.executable, "-m", "unittest", "-f", "scripts.test_review_trusted"]),
+        Stage("package-windows-unit", [sys.executable, "-m", "unittest", "-f", "scripts.test_package_windows"]),
+        Stage(
+            "worker-root-isolation-unit",
+            [
+                sys.executable,
+                "-m",
+                "unittest",
+                "discover",
+                "-f",
+                "-s",
+                "tests/ocr_fixtures",
+                "-p",
+                "test_worker_root_isolation.py",
+            ],
+        ),
         Stage("ocr-asset-manifest", [sys.executable, "tests/ocr_fixtures/check_asset_manifest.py"]),
         Stage("requirement-reference-inventory", [sys.executable, "scripts/requirement_coverage.py"]),
         Stage("xberg-latest", [sys.executable, "scripts/xberg_test_engine.py"]),
@@ -169,7 +185,7 @@ def _test_binary_stages(build: Result) -> list[Stage]:
     if build.log is None:
         return []
     stages: list[Stage] = []
-    for line in build.log.read_text(encoding="utf-8", errors="replace").splitlines():
+    for line in build.log.read_text(encoding="utf-8-sig", errors="replace").splitlines():
         try:
             message = _parse_json(line)
         except ValueError:

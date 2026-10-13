@@ -15,6 +15,9 @@ PYTHON_TEST_FILES = frozenset(
         "scripts/test_gui_smoke.py",
         "scripts/test_markdown_acceptance.py",
         "scripts/test_test_gate.py",
+        "scripts/test_review_trusted.py",
+        "scripts/test_package_windows.py",
+        "tests/ocr_fixtures/test_worker_root_isolation.py",
         "scripts/media_e2e_fixture.py",
     }
 )

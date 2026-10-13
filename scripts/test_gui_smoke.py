@@ -12,6 +12,7 @@ import subprocess
 import tempfile
 import unittest
 import zipfile
+from collections import Counter
 from pathlib import Path
 from typing import TYPE_CHECKING, cast
 from unittest.mock import patch
@@ -305,6 +306,14 @@ class CompletionConfirmsNewRunTests(unittest.TestCase):
     def test_different_line_confirms_without_snapshot(self) -> None:
         assert gui_smoke.completion_confirms_new_run(DIFFERENT_LINE, DONE_LINE, None, None)  # nosec B101: 回归测试断言。
 
+    def test_identical_line_with_unavailable_before_snapshot_cannot_confirm(self) -> None:
+        """覆盖 P-11/P-13：前置快照读取失败后恢复可读，不能把旧产物当成新完成。."""
+        existing = frozenset({("old_txt.md", 1, 4)})
+        self.assertFalse(
+            gui_smoke.completion_confirms_new_run(DONE_LINE, DONE_LINE, frozenset(), existing),
+            "空前置快照表示无可用代次锚，旧统计与恢复可读的旧产物不得确认新一轮完成",
+        )
+
     def test_line_without_done_marker_never_confirms(self) -> None:
         running = "正在处理 one.txt"
         assert not gui_smoke.completion_confirms_new_run(running, DONE_LINE, None, frozenset({("a", 1, 1)}))  # nosec B101: 回归测试断言。
@@ -496,3 +505,28 @@ class OrganizeResultTests(unittest.TestCase):
             os.utime(damaged, ns=(original_stamp, original_stamp))
             (project / "empty").rmdir()
             require_organize_failure(root, expected, git_before)
+
+
+class OriginalDispositionTests(unittest.TestCase):
+    """覆盖 X-09/X-10/P-12：数字尾缀不等于白名单分卷，原样保留才是正确结果。."""
+
+    def test_non_archive_numeric_suffixes_are_preserved_in_every_dataset_section(self) -> None:
+        names = ("data.001", "windows.iso.001", "report.docx.001", "archive.zip.0001", "archive.zip.01")
+        sections = ("07-压缩包-各格式", "17-容器不自动解压")
+        with tempfile.TemporaryDirectory(prefix="jchtools-numeric-original-unit-") as temporary:
+            root = Path(temporary)
+            for section in sections:
+                (root / section).mkdir()
+                for name in names:
+                    with self.subTest(section=section, name=name):
+                        relative = Path(section) / name
+                        original = root / relative
+                        _ = original.write_bytes(b"ordinary numeric-suffix input")
+                        originals = {relative: gui_smoke.file_digest(original)}
+                        gui_smoke.verify_original_disposition(root, originals, Counter())
+                        _ = original.write_bytes(b"changed ordinary input")
+                        with self.assertRaises(RuntimeError):
+                            gui_smoke.verify_original_disposition(root, originals, Counter())
+                        original.unlink()
+                        with self.assertRaises(RuntimeError):
+                            gui_smoke.verify_original_disposition(root, originals, Counter())

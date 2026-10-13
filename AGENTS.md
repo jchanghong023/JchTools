@@ -27,7 +27,7 @@
   - `XBERG-INFERENCE.md`：共享 Xberg、设置与后台（XB）。
   - `ACP-MODEL-SERVICE.md`：独立模型服务（AH 及真实 Agent 验收）。
   - `CODEAGENT.md`：CodeAgent Token 自动维护（CA）；入口为 `src/codeagent.rs` 与独立 GUI 页面，后台内部入口为 `--codeagent-service`。
-  - 按功能域定位唯一需求来源。旧 `docs/CONTRACT.md` 仅保留迁移链接，不维护副本；其他文档只作辅助。新增需求文档须同步索引、此清单与 `scripts/static_check.py` 的 `requirements_registry` 登记；本次文档拆分尚未同步该脚本的四文件硬编码清单，完成独立可信基同步前该项检查不通过，不得冒报完整静态检查通过。
+  - 按功能域定位唯一需求来源。旧 `docs/CONTRACT.md` 仅保留迁移链接，不维护副本；其他文档只作辅助。新增需求文档须同步索引、此清单与 `scripts/static_check.py` 的 `requirements_registry` 登记；该检查现已登记本目录索引及全部十份权威需求文档，登记同步本身不代表静态检查或功能验收通过。
 - **代码入口**：`src/main.rs` → `src/gui.rs`（GUI 启动、回调与后台任务）、`ui/app.slint`（界面）、`src/registry.rs`（工具注册表）；`src/archive.rs`（递归解压）、`src/engine.rs`（整理分析与执行）、`src/md_tools.rs`（MD 合并与拆分）、`src/git_tools.rs`（Git 操作）、`resources/rules.json`（界面规则清单）。转 Markdown 由 `src/markdown.rs`、`src/markdown_document.rs`、`src/markdown_assets.rs` 承接，媒体转录经 Xberg 推理组件（`xberg.exe worker` stdio 协议，XB 分区）承接；截图 OCR 由 `src/snap_ocr_assets.rs`、`optional/snap-ocr-core/`（O-23～O-28 的规格参照物：workspace 内无 crate 依赖它，识别已按 XB-01/XB-02 迁至 Xberg，删除前须确认规格约束另有执法点承接）与 `optional/snap-ocr-worker/`（截图、托盘、服务和结果窗，识别经 Xberg 推理组件）承接，主界面回调仍在 `src/gui.rs`。两资产模块共用的下载/校验/原子落位/推理组件包安装核心在 `src/asset_util.rs`。
 - **共享推理与配置入口**：`src/xberg_runtime.rs` / `src/xberg_runtime_windows.rs` 承接共享引擎请求及 Windows 命名管道代理；主程序的 `--xberg-broker` 是内部代理入口。截图服务经 `optional/snap-ocr-worker/src/shared_xberg.rs` 接入，并编译复用主包的 runtime 与 settings 模块。`src/xberg_settings.rs` / `src/app_settings.sql` 在应用状态目录的 `config.sqlite3` 保存 Xberg 目录并承接旧文本配置迁移；功能与生命周期要求以 XB-14～XB-19 为准。
 - **ACP 模型服务入口**：`src/acp_api/acp/` 为官方 SDK 会话及回调适配，`http/` 为 Axum OpenAI/SSE 接口，`runtime/` 为 Windows 独立后台与控制管道，`settings.rs` 复用应用 SQLite；主程序内部入口为 `--acp-http-service`。源码与许可归属在 `vendor/SOURCES.json`，`.cargo/config.toml` 解析仓库内依赖。局部入口为 `cargo test --features test-hooks --test acp_settings --test acp_http_contract --test acp_callbacks --test acp_service_process --test acp_prompt_summary`；其中窗口场景使用 winit-software 与窗口内事件，不移动硬件鼠标。合成 Agent 源码在 `tests/fixtures/acp_api/main.rs`，仅 test-hooks 构建，不进入生产包。
@@ -97,8 +97,8 @@ powershell -NoProfile -File .\scripts\package-windows.ps1   # 生成含 7-Zip �
 | 目录整理端到端 | `python scripts/make_tmp.py testdata` → GUI 完整走分析、计划、确认、执行链路 → 按 `DIRECTORY-ORGANIZER.md`、全局 H / S 与共用附录逐项断言 → `python scripts/make_tmp.py clean` | C 与适用全局条目 |
 | 打包 / 发布 / 引擎捆绑 | `scripts/package-windows.ps1` 全程 + 干净目录解包运行 | 合同 E 分区 |
 
-- 单命令入口：`powershell -NoProfile -File .\scripts\acceptance.ps1`（可选 `-WithEngine` / `-WithGuiSmoke -GuiData <目录>` / `-WithPackage`）。
-- **需求 ↔ 测试映射**：验证合同条目的测试 `MUST` 在其文档注释中标明合同编号（如 `// 覆盖 C-12`）；每个合同条目至少被一个测试引用。（现状：已有部分编号注释，但全条目覆盖尚未逐项核验，映射执法待落地。`scripts/requirement_coverage.py` 逐文件扫描需求并在 fulltest 输出 `.tmp/test-gate/requirements-map.json`，但当前编号正则遗漏 AH 分区，不能称为全部有效编号的审计。候选引用不是断言或执行证明；补齐缺失分区及逐项复核真实链路前保持 UNVERIFIED。）
+- 单命令入口：`powershell -NoProfile -File .\scripts\acceptance.ps1`（可选 `-WithEngine` / `-WithPackage`；本次另获真实桌面验收授权时加 `-WithDesktopTests`，`-WithGuiSmoke -GuiData <目录>` 与 `-WithMarkdownAcceptance` 均要求该声明，参数本身不创造授权）。
+- **需求 ↔ 测试映射**：验证合同条目的测试 `MUST` 在其文档注释中标明合同编号（如 `// 覆盖 C-12`）；每个合同条目至少被一个测试引用。（现状：已有部分编号注释，但全条目覆盖尚未逐项核验，映射执法待落地。`scripts/requirement_coverage.py` 逐文件扫描需求并在 fulltest 输出 `.tmp/test-gate/requirements-map.json`，编号解析现已纳入 AH / CA 分区。候选引用不是断言或执行证明；逐项复核真实链路前保持 UNVERIFIED。）
 ### 自动化验证要求与当前边界
 
 - 功能开发和功能性修改 `MUST` 同时具备 UT 局部逻辑验证与从真实公开入口到可观察结果的 E2E 验证；跨模块交互按需要增加集成测试，已有有效覆盖可以复用。不得依赖用户手工读代码或人工回归保证质量。（无执法点 · 软法）
@@ -110,9 +110,9 @@ powershell -NoProfile -File .\scripts\package-windows.ps1   # 生成含 7-Zip �
 - 转 Markdown 的依据是 `docs/requirements/ALL2MARKDOWN.md`；按该文档附录 A 验证主包不包含转换专用依赖/模型、未配置时旧工具正常可用、GUI 保存并校验用户指定的 Xberg 运行目录、按需初始化其余组件，以及离线真实 Xberg / OCR / 媒体转换、GUI 入口及两种交付形态；旧 all2markdown 的源码、测试或历史 CI 不能作为集成后的通过证据。实现范围按 T-30 限于迁入，不借迁移改变旧功能，也不擅自搬入旧 Python 架构。
 - 纯文档等非功能性修改按实际影响检查内容、引用和需求保留情况，不机械新增功能测试；本仓库已有基线、提交检查与 CI 完成条件仍按 0 / 3.2 / 3.3 执行，未执行项如实标注。
 - 可选组件的 UT / 集成测试从仓库根目录分别运行 `cargo test --features test-hooks --manifest-path optional/snap-ocr-core/Cargo.toml --all-targets` 和 `cargo test --features test-hooks --manifest-path optional/snap-ocr-worker/Cargo.toml --all-targets`。根 workspace 的 `default-members = ["."]`，默认 `cargo test --features test-hooks` 不覆盖这些包；本地 `acceptance.ps1` 有二者的显式测试步骤；CI 不执行这些测试，不能把本地默认门通过当作截图组件已验证。旧 `optional/markdown-media-worker` 已按 XB-12 退役（媒体转录迁移到 Xberg 推理组件），其测试与打包步骤一并移除。
-- 转 Markdown 的验收承接入口为 `scripts/markdown_acceptance.py`（`--list` 查看条目；默认 `--profile common` 必验新老 Office / PDF / MP4，`--profile full` 保留扩展矩阵，OPTIONAL 不计为通过也不阻塞常用验收），也可经 `acceptance.ps1 -WithMarkdownAcceptance` 接入；运行依赖见 `scripts/requirements-dev.txt`，真实 GUI、Xberg、媒体组件与两种发布目录按脚本参数提供。提供 `JCHTOOLS_TEST_XBERG_DIR` 时，验收先写隔离 SQLite，再用 S17 真实 GUI 初始化本地 notice；不读取生产资产来冒充隔离就绪。缺资产条目为 `NOT RUN`；脚本退出码 0 仅表示全部必验条目 PASS；保留的扩展 OPTIONAL 不计为通过；任一必验条目未执行（含 --only 排除的条目）返回 2，应逐项检查。`scripts/gui_smoke.py --stages S5` 另有转换开始/停止链路，需已配置可用组件，不在默认序列内，不能替代转换产物断言。
+- 转 Markdown 的验收承接入口为 `scripts/markdown_acceptance.py`（`--list` 查看条目；默认 `--profile common` 必验新老 Office / PDF / MP4，`--profile full` 保留扩展矩阵，OPTIONAL 不计为通过也不阻塞常用验收），本次另获真实桌面验收授权时也可经 `acceptance.ps1 -WithDesktopTests -WithMarkdownAcceptance` 接入；运行依赖见 `scripts/requirements-dev.txt`，真实 GUI、Xberg、媒体组件与两种发布目录按脚本参数提供。提供 `JCHTOOLS_TEST_XBERG_DIR` 时，验收先写隔离 SQLite，再用 S17 真实 GUI 初始化本地 notice；不读取生产资产来冒充隔离就绪。缺资产条目为 `NOT RUN`；脚本退出码 0 仅表示全部必验条目 PASS；保留的扩展 OPTIONAL 不计为通过；任一必验条目未执行（含 --only 排除的条目）返回 2，应逐项检查。`scripts/gui_smoke.py --stages S5` 另有转换开始/停止链路，需已配置可用组件，不在默认序列内，不能替代转换产物断言。
 - 截图 OCR 的验收覆盖目标见 `docs/requirements/SNAP2TEXT.md` 附录 C。迁至 Xberg 后，worker 已无 `det_paddlex_oracle` / `pipeline_backend_oracle` 测试目标；旧直连引擎路径已退役，服务仅经 `SharedXbergClient` 使用共享引擎。已有 Slint 测试后端结果窗用例不等于热键/托盘、服务生命周期或多 DPI 的真实桌面 E2E，这些链路的自动化覆盖尚未确认。`tests/ocr_fixtures/README.md` 中的旧 `ocr_compare` 命令对应的 example 已不存在，历史结果不能作为当前通过证据。补齐当前共享引擎的同图对照与真实入口自动化，是后续功能验收的必要工作；执行权限及独立桌面边界按 3.4。
-- 本地 `acceptance.ps1` 默认测试 Snap OCR core / worker 并检查资产清单；设置 `JCHTOOLS_SNAP_OCR_ASSET_ROOT` 为完整的已校验资产缓存时，追加真实 worker 从安装位置加载模型的服务测试。未设置时该资产依赖项报告 `NOT RUN`，不能据此声称桌面验收通过。
+- 本地 `acceptance.ps1` 默认测试 Snap OCR core / worker 并检查资产清单；本次另获真实桌面验收授权并加 `-WithDesktopTests`，同时设置 `JCHTOOLS_SNAP_OCR_ASSET_ROOT` 为完整的已校验资产缓存时，追加真实 worker 从安装位置加载模型的热键服务测试。未同时满足时该项报告 `NOT RUN`，不能据此声称桌面验收通过。
 
 ## 3.4 三级测试门与执行权限
 
