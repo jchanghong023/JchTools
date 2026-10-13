@@ -150,7 +150,7 @@ if (-not $SkipTests) {
 # in both delivery forms (XB-25); the optional-components directory below is only a
 # staging area for the build-time manifest backfill. Both Cargo invocations use the
 # workspace lock.
-$workerBuildMessages = @(Invoke-Cargo -Arguments (@('build','--locked','--release','--manifest-path','optional/snap-ocr-worker/Cargo.toml','--bin','snap-ocr-worker') + $extra) -CaptureBuildMetadata)
+$workerBuildMessages = @(Invoke-Cargo -Arguments (@('build','--locked','--release','--target','x86_64-pc-windows-msvc','--manifest-path','optional/snap-ocr-worker/Cargo.toml','--bin','snap-ocr-worker') + $extra) -CaptureBuildMetadata)
 $workerArtifact = Get-CargoArtifact -Messages $workerBuildMessages -BinaryName 'snap-ocr-worker' -ManifestPath (Join-Path $root 'optional\snap-ocr-worker\Cargo.toml')
 $workerExe = $workerArtifact.executable
 if (-not (Test-Path -LiteralPath $workerExe -PathType Leaf)) {throw "Optional OCR worker build did not produce $workerExe"}
@@ -196,7 +196,7 @@ $utf8 = New-Object Text.UTF8Encoding($false)
 $previousManifest = $env:JCHTOOLS_SNAP_OCR_MANIFEST
 try {
     $env:JCHTOOLS_SNAP_OCR_MANIFEST = $stagedManifest
-    $mainBuildMessages = @(Invoke-Cargo -Arguments (@('build','--locked','--release','--bins') + $extra) -CaptureBuildMetadata)
+    $mainBuildMessages = @(Invoke-Cargo -Arguments (@('build','--locked','--release','--target','x86_64-pc-windows-msvc','--bins') + $extra) -CaptureBuildMetadata)
 } finally {
     $env:JCHTOOLS_SNAP_OCR_MANIFEST = $previousManifest
 }
