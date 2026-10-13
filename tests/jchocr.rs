@@ -108,6 +108,31 @@ fn valid_image_without_selected_xberg_is_an_explained_asset_error() {
 }
 
 #[test]
+fn help_is_concise_and_available_without_xberg() {
+    let harness = Harness::new();
+    for argument in ["--help", "help"] {
+        let output = harness.run(&[argument], None);
+        assert_eq!(output.status.code(), Some(0), "{output:?}");
+        assert!(output.stderr.is_empty(), "{output:?}");
+        let help = String::from_utf8(output.stdout).unwrap();
+        for required in [
+            "jchocr <图片绝对路径或HTTP(S) URL>",
+            "jchocr --stdin",
+            "jchocr --base64",
+            "PNG、JPEG、BMP、GIF、TIFF、WebP",
+            "--json stdout",
+            "error_kind",
+            "退出码：0 成功",
+        ] {
+            assert!(help.contains(required), "{argument}: missing {required}");
+        }
+        for unrelated in ["配置前提：", "程序调用示例", "PowerShell 示例", "WindowsApps"] {
+            assert!(!help.contains(unrelated), "{argument}: contains {unrelated}");
+        }
+    }
+}
+
+#[test]
 fn missing_members_in_a_selected_directory_are_an_asset_error() {
     let harness = Harness::new();
     let directory = harness.root.path().join("incomplete-xberg");

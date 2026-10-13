@@ -7,60 +7,30 @@ use std::path::PathBuf;
 use std::sync::atomic::AtomicBool;
 use std::time::Duration;
 
-const HELP: &str = r#"jchocr - 使用 JchTools 共享 Xberg 截图模型进行本地图片 OCR
+const HELP: &str = r#"jchocr - 图片 OCR
 
 用法：
   jchocr <图片绝对路径或HTTP(S) URL> [--json]
   jchocr --stdin [--json]
-  jchocr --base64 <Base64值> [--json]
-  jchocr --base64 - [--json]
+  jchocr --base64 <Base64值或-> [--json]
   jchocr --help | help
   jchocr --version
 
-每次必须且只能选择一种图片输入。含空格的路径须加引号，不接受相对路径。
---stdin 从标准输入读取原始图片字节直到 EOF；--base64 接受标准 Base64，
-不接受 data: URL；值为 '-' 时从标准输入读取 Base64，忽略其中的空白字符。
-常见图片格式为 PNG、JPEG、BMP、GIF、TIFF 和 WebP，实际支持范围由当前
-选定的 Xberg 截图引擎决定；损坏或不支持的图片属于输入错误。
-URL 仅接受 HTTP 或 HTTPS，只下载指定图片及其 HTTP(S) 重定向。
-图片与下载内容仅驻内存，不写临时图片或内容缓存，本地文件只读。
-下载使用 Windows 手动系统代理，代理连接失败时直连重试一次，
-不支持 PAC/WPAD。
+每次只选一种输入；不接受相对路径。
+--stdin 读取原始图片字节；--base64 - 从 stdin 读取 Base64，忽略空白。
+URL 仅限 HTTP(S)；Base64 不接受 data: URL。
+常见格式：PNG、JPEG、BMP、GIF、TIFF、WebP，实际支持由引擎决定。
 
 输出：
-  默认：stdout 仅返回 UTF-8 OCR 原文，保留空格与换行。
-  --json：stdout 返回 {"ok":true,"text":"..."}。
-  无文字也是成功，正文为空。错误只到 stderr；--json 错误为：
-          {"ok":false,"error_kind":"...","error":"..."}
-  错误类别：usage（参数）、input（输入）、xberg（配置或缺失资产）、
-            network（下载）、inference（推理）、runtime（运行）。
-  退出码：0 成功（含无文字）；2 参数或输入错误；
-          3 Xberg 未配置或所需资产缺失；1 下载、推理或运行错误。
+  默认 stdout：UTF-8 OCR 原文，保留空格和换行。
+  --json stdout：{"ok":true,"text":"..."}
+  无文字：成功，text 为空。
+  失败只写 stderr；--json：{"ok":false,"error_kind":"...","error":"..."}
+  error_kind：usage、input、xberg、network、inference、runtime。
 
-配置前提：
-  在 JchTools 设置页下载 Xberg，或保存已有完整目录并选中该来源。
-  jchocr 自动读取相同的已保存选择，共用现有代理和截图模型；不打开 GUI、
-  不下载引擎、不回退到文档 OCR，也无需设置 Xberg、模型或 ONNX Runtime
-  环境变量。调用方不必维护 worker、请求 ID 或引擎进程生命周期。
-  安装包将 jchocr.exe 复制到当前用户的 WindowsApps（Windows 默认 PATH 目录）。
-  不修改 PATH，无需管理员权限或重启终端；安装完成即可直接执行 jchocr。
-  便携 ZIP 只随附程序，不自动复制到 PATH 目录。
-
-PowerShell 示例：
-  jchocr 'C:\images\screen shot.png'
-  jchocr 'https://example.com/image.png' --json
-  jchocr --base64 ([Convert]::ToBase64String([IO.File]::ReadAllBytes('C:\images\screen.png')))
-  [Convert]::ToBase64String([IO.File]::ReadAllBytes('C:\images\screen.png')) | jchocr --base64 - --json
-  # PowerShell 文本管道使用 --base64 -；--stdin 需要原始字节而非文本。
-
-程序调用示例（Python；原始字节 stdin、UTF-8 stdout）：
-  import pathlib, subprocess
-  result = subprocess.run(['jchocr', '--stdin', '--json'],
-      input=pathlib.Path(r'C:\images\screen.png').read_bytes(), capture_output=True)
-  print(result.stdout.decode('utf-8') if result.returncode == 0
-      else result.stderr.decode('utf-8'))
+退出码：0 成功；2 参数或输入错误；3 Xberg 或所需资产不可用；
+        1 下载、推理或运行错误。
 "#;
-
 #[derive(Debug)]
 enum Input {
     File(PathBuf),

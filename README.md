@@ -80,7 +80,7 @@ powershell -NoProfile -File .\scripts\package-windows.ps1
 先在 JchTools「设置」页下载或配置并选中可用的共享 Xberg；无需手工设置模型或 ONNX Runtime 环境变量。
 安装包免 UAC，将 `jchocr.exe` 复制到当前用户已有 PATH 的 `%LOCALAPPDATA%\Microsoft\WindowsApps` 目录，不修改用户或系统 PATH；安装完成即可直接运行 `jchocr`，无需重启终端。
 便携 ZIP 只随附程序，不自动复制到 PATH 目录。
-完整输入方式、可复制示例、JSON 输出与错误约定以 `jchocr --help`（或 `jchocr help`）为准；帮助不依赖 Xberg。
+输入方式、输出格式和错误约定以 `jchocr --help`（或 `jchocr help`）为准；帮助不依赖 Xberg。
 
 ## 窗口与外观
 
