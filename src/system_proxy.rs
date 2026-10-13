@@ -1,7 +1,7 @@
 //! P-09 系统代理：读取 Windows 当前用户的手动代理设置（Internet 设置的
 //! `ProxyEnable` / `ProxyServer` / `ProxyOverride`），为应用自身下载
-//! （`snap_ocr_assets` 的 ureq 原语）与 Git 工具的网络命令（fetch / push）提供
-//! 统一代理出口；经代理连接失败后的直连回退由调用方执行。
+//! （`snap_ocr_assets` 的 ureq 原语）提供代理出口；经代理连接失败后的直连回退
+//! 由调用方执行。
 //!
 //! 只支持手动代理：PAC / WPAD 自动配置不在范围内（下载并执行代理脚本会扩大
 //! P-03 联网边界）。注册表读取失败一律视为「未启用」，回落直连，不阻塞功能。
@@ -106,83 +106,6 @@ impl SystemProxy {
         }
     }
 
-    /// P-09：目标 URL 是否命中例外表（系统代理未启用时恒为 false）。git 网络
-    /// 命中的目标直接按现状直连。libcurl `no_proxy` 无法表达 `<local>`、任意位置
-    /// 通配或精确主机（普通主机条目还会匹配子域），必须先按 Windows 规则判断；
-    /// 只依赖环境变量会漏掉例外，或意外扩大例外范围。
-    pub fn bypassed(&self, url: &str) -> bool {
-        self.is_enabled()
-            && split_scheme_host(url)
-                .is_some_and(|(_, host)| self.bypass.iter().any(|rule| rule_matches(rule, &host)))
-    }
-
-    /// git 网络命令的环境变量注入（P-09）：仅在系统代理开启时非空，键固定为
-    /// 小写（libcurl 优先识别小写）。`no_proxy` 仅近似表达可保持匹配范围的规则
-    /// （`*.foo.com` → `foo.com`、`*` → `*`）；无法表达的条目丢弃。
-    /// 两协议分别沿用 [`Self::endpoint_for_url`] 的端点优先级，不能因缺少专配
-    /// 条目而让 Git 与应用下载使用不同出口；目标绕过仍由调用方先行判断。
-    pub fn git_env(&self) -> Vec<(String, String)> {
-        if !self.is_enabled() {
-            return Vec::new();
-        }
-        let mut env = Vec::new();
-        if let Some(http) = self
-            .http
-            .as_ref()
-            .or(self.socks.as_ref())
-            .or(self.https.as_ref())
-        {
-            env.push(("http_proxy".to_string(), http.clone()));
-        }
-        if let Some(https) = self
-            .https
-            .as_ref()
-            .or(self.socks.as_ref())
-            .or(self.http.as_ref())
-        {
-            env.push(("https_proxy".to_string(), https.clone()));
-        }
-        if let Some(socks) = &self.socks {
-            env.push(("all_proxy".to_string(), socks.clone()));
-        }
-        let no_proxy: Vec<String> = self.bypass.iter().filter_map(translate_no_proxy).collect();
-        if !no_proxy.is_empty() {
-            env.push(("no_proxy".to_string(), no_proxy.join(",")));
-        }
-        env
-    }
-}
-
-/// 直连回退时需要从子进程环境移除的变量名（P-09）：小写与历史大写形态都清掉，
-/// 保证重试确实不经任何代理。
-pub const GIT_PROXY_ENV_KEYS: [&str; 6] = [
-    "http_proxy",
-    "https_proxy",
-    "all_proxy",
-    "HTTP_PROXY",
-    "HTTPS_PROXY",
-    "ALL_PROXY",
-];
-
-/// 判断 git 输出是否像「经代理连接失败」的网络错误（P-09 直连回退的触发
-/// 条件）。只匹配 libcurl / git 的连接类错误文案；认证失败、冲突、合并等
-/// 非连接失败不触发，避免无意义的直连重试。
-pub fn network_failure_signature(text: &str) -> bool {
-    let lower = text.to_ascii_lowercase();
-    [
-        "could not resolve proxy",
-        "could not resolve host",
-        "failed to connect",
-        "couldn't connect",
-        "connection refused",
-        "connection reset",
-        "connection aborted",
-        "connection was closed",
-        "timed out",
-        "timeout was reached",
-    ]
-    .iter()
-    .any(|signature| lower.contains(signature))
 }
 
 /// 读取当前用户的 Internet 设置并构造快照；非 Windows 平台恒为未启用
@@ -335,25 +258,6 @@ fn wildcard_match(pattern: &str, text: &str) -> bool {
     p == pattern.len()
 }
 
-/// 例外条目到 libcurl `no_proxy` 条目的近似翻译；无法表达的返回 `None`。
-/// libcurl 的普通主机名条目还匹配该主机的子域，因此精确规则不能安全翻译；
-/// 调用方先用 [`SystemProxy::bypassed`] 按 Windows 规则精确预判。
-fn translate_no_proxy(rule: &BypassRule) -> Option<String> {
-    match rule {
-        BypassRule::Local | BypassRule::Exact(_) => None,
-        BypassRule::Pattern(pattern) => {
-            if pattern == "*" {
-                Some((*pattern).clone())
-            } else {
-                pattern
-                    .strip_prefix("*.")
-                    .filter(|suffix| !suffix.contains('*'))
-                    .map(str::to_string)
-            }
-        }
-    }
-}
-
 #[cfg(windows)]
 fn read_registry_dword(name: &str) -> Option<u32> {
     use windows_sys::Win32::System::Registry::{RegGetValueW, HKEY_CURRENT_USER, RRF_RT_REG_DWORD};
@@ -504,7 +408,6 @@ mod tests {
                 "应视为未启用：enable={enable} server={server:?}"
             );
             assert_eq!(proxy.endpoint_for_url("https://github.com/a"), None);
-            assert!(proxy.git_env().is_empty());
         }
     }
 
@@ -540,7 +443,7 @@ mod tests {
             Some("http://127.0.0.1:7890".to_string())
         );
 
-        // P-09：多星号例外不能误走字面后缀快径，也不能导出为 curl 后缀条目。
+        // P-09：多星号例外不能误走字面后缀快径。
         let multiple_wildcards =
             SystemProxy::from_registry_values(1, Some("127.0.0.1:7890"), Some("*.corp.*"));
         assert_eq!(
@@ -548,146 +451,17 @@ mod tests {
             None,
             "多星号例外应按通配匹配，目标直连"
         );
-        assert!(multiple_wildcards.bypassed("https://git.corp.example/repo.git"));
         assert_eq!(
             multiple_wildcards.endpoint_for_url("https://xcorp.example/repo.git"),
             Some("http://127.0.0.1:7890".to_string()),
             "多星号例外仍须保留字面点边界"
         );
-        assert!(
-            multiple_wildcards
-                .git_env()
-                .iter()
-                .all(|(key, _)| key != "no_proxy"),
-            "curl 无法表达多星号例外，不应导出 no_proxy"
-        );
-    }
 
-    // 覆盖 P-09（回归：`<local>`、`192.168.*` 这类 no_proxy 表达不了的例外
-    // 规则经 bypassed() 前置判断命中——git 网络命令因此直连而不被注入代理；
-    // 修复前这些条目在 git_env 的 no_proxy 近似翻译中被丢弃，内网目标仍被推入代理）
-    #[test]
-    fn bypassed_matches_untranslatable_override_rules() {
-        let proxy = SystemProxy::from_registry_values(
-            1,
-            Some("127.0.0.1:7890"),
-            Some("<local>;192.168.*;*.corp.example;github.com"),
-        );
-        assert!(
-            proxy.bypassed("http://intranet/wiki"),
-            "<local>：无点主机命中"
-        );
-        assert!(
-            proxy.bypassed("http://192.168.1.23/git"),
-            "192.168.* 前缀通配命中"
-        );
-        assert!(
-            proxy.bypassed("https://git.corp.example/repo.git"),
-            "*.suffix 命中"
-        );
-        assert!(proxy.bypassed("https://github.com/a"), "精确条目命中");
-        assert!(!proxy.bypassed("https://example.com/a"), "例外之外不命中");
-        // 未启用时恒不例外（调用方据此走注入/回退路径）。
-        let disabled =
-            SystemProxy::from_registry_values(0, Some("127.0.0.1:7890"), Some("<local>"));
-        assert!(!disabled.bypassed("http://intranet/wiki"));
-        assert!(
-            !proxy.bypassed("not-a-url"),
-            "解析不出 host 的目标保守处理为不例外"
-        );
-    }
-
-    // 覆盖 P-09：注册表代理到 libcurl 环境变量的映射与 no_proxy 近似翻译。
-    #[test]
-    fn git_env_maps_registry_to_curl_variables() {
-        let proxy = SystemProxy::from_registry_values(
-            1,
-            Some("http=10.0.0.1:80;https=10.0.0.2:443;socks=127.0.0.1:1080"),
-            Some("*.corp.example;<local>;192.168.*"),
-        );
-        let env = proxy.git_env();
-        assert!(env.contains(&("http_proxy".to_string(), "http://10.0.0.1:80".to_string())));
-        assert!(env.contains(&("https_proxy".to_string(), "http://10.0.0.2:443".to_string())));
-        assert!(env.contains(&(
-            "all_proxy".to_string(),
-            "socks5://127.0.0.1:1080".to_string()
-        )));
-        // <local> 与任意位置通配（192.168.*）无法表达，被丢弃；*.corp.example 翻译为后缀条目。
-        let no_proxy = env
-            .iter()
-            .find(|(key, _)| key == "no_proxy")
-            .map(|(_, value)| value.clone())
-            .unwrap_or_default();
-        assert_eq!(no_proxy, "corp.example");
-    }
-
-    // 覆盖 P-09：Git 与下载使用相同的按协议回退，不能因只配置一种协议
-    // 而让另一种协议的 Git 请求绕过系统代理。
-    #[test]
-    fn git_env_uses_the_same_protocol_fallback_as_downloads() {
-        for server in [
-            "http=p:1",
-            "https=p:2",
-            "socks=p:3",
-            "http=p:1;socks=p:3",
-            "https=p:2;socks=p:3",
-            "http=p:1;https=p:2",
-            "http=p:1;https=p:2;socks=p:3",
-        ] {
-            let proxy = SystemProxy::from_registry_values(
-                1,
-                Some(server),
-                Some("bypass.example;<local>;192.168.*"),
-            );
-            let env = proxy.git_env();
-            for (key, url) in [
-                ("http_proxy", "http://outside.example/asset"),
-                ("https_proxy", "https://outside.example/asset"),
-            ] {
-                assert_eq!(
-                    env.iter().find(|(name, _)| name == key).map(|(_, value)| value),
-                    proxy.endpoint_for_url(url).as_ref(),
-                    "Git 与下载的代理出口必须相同：{server}，{key}"
-                );
-            }
-            for url in [
-                "https://bypass.example/asset",
-                "http://intranet/asset",
-                "http://192.168.1.2/asset",
-            ] {
-                assert!(proxy.bypassed(url), "Git 必须先按目标判断绕过：{url}");
-                assert_eq!(proxy.endpoint_for_url(url), None);
-            }
-        }
-    }
-
-    // 覆盖 P-09：git 直连回退只由连接类失败触发，认证与推送冲突不得触发。
-    #[test]
-    fn network_signature_matches_connect_failures_only() {
-        assert!(super::network_failure_signature(
-            "fatal: unable to access 'https://github.com/a/b/': Failed to connect to github.com port 443: Timed out"
-        ));
-        assert!(super::network_failure_signature(
-            "error: Couldn't connect to proxy"
-        ));
-        assert!(super::network_failure_signature(
-            "fatal: unable to access 'https://github.com/': Could not resolve host: github.com"
-        ));
-        assert!(super::network_failure_signature(
-            "fatal: unable to access 'https://github.com/a/b/': Could not resolve proxy: proxy.example"
-        ));
-        assert!(!super::network_failure_signature(
-            "remote: HTTP Basic: Access denied\nfatal: Authentication failed for 'https://github.com/a/b/'"
-        ));
-        assert!(!super::network_failure_signature(
-            " ! [rejected]        main -> main (non-fast-forward)"
-        ));
-        assert!(!super::network_failure_signature(""));
     }
 
     // 覆盖 P-09（回归：例外表带方括号的 IPv6 条目与 URL 侧解析出的裸 IPv6
     // 主机统一口径——修复前 `[::1]` / `[::1]:8080` 条目经 `split(':')` 被切成
-    // `[`，永不命中，`::1` 目标仍被推入代理；no_proxy 翻译同样产出损坏条目）。
+    // `[`，永不命中，`::1` 目标仍被推入代理）。
     #[test]
     fn ipv6_bracket_bypass_entries_match_bare_url_host() {
         // 例外表只写方括号形态（WinInet 的 IPv6 常见写法）；裸写 `::1` 本就
@@ -704,11 +478,10 @@ mod tests {
             proxy.endpoint_for_url("https://[::2]/a"),
             Some("http://127.0.0.1:7890".to_string())
         );
-        assert!(proxy.bypassed("http://[::1]/wiki"));
     }
 
     // 覆盖 P-09：精确 IPv6 或畸形端口条目不能按首个冒号截成另一主机，
-    // 否则未命中 ProxyOverride 的下载与 Git 请求会意外绕过系统代理。
+    // 否则未命中 ProxyOverride 的下载请求会意外绕过系统代理。
     #[test]
     fn exact_bypass_does_not_expand_colon_entries_to_other_hosts() {
         for (rule, unrelated, matched) in [
@@ -725,10 +498,8 @@ mod tests {
                 Some("http://p:1".to_string()),
                 "精确规则不能扩大到其他主机：{rule}"
             );
-            assert!(!proxy.bypassed(unrelated));
             if let Some(url) = matched {
                 assert_eq!(proxy.endpoint_for_url(url), None);
-                assert!(proxy.bypassed(url));
             }
         }
     }
@@ -744,26 +515,7 @@ mod tests {
                 Some("http://p:1".to_string()),
                 "<local> 不能替代显式 IP 例外：{url}"
             );
-            assert!(!proxy.bypassed(url));
         }
-    }
-
-    // 覆盖 P-09：no_proxy 仅翻译能保持匹配范围的规则；libcurl 会让普通主机条目
-    // 同时匹配所有子域，精确例外由调用方的 Windows 规则预判处理。
-    #[test]
-    fn no_proxy_translation_drops_exact_rules() {
-        let proxy = SystemProxy::from_registry_values(
-            1,
-            Some("127.0.0.1:7890"),
-            Some("[::1]:8080;github.com;proxyhost:443;*.corp.example"),
-        );
-        let env = proxy.git_env();
-        let no_proxy = env
-            .iter()
-            .find(|(key, _)| key == "no_proxy")
-            .map(|(_, value)| value.clone())
-            .unwrap_or_default();
-        assert_eq!(no_proxy, "corp.example");
     }
 
     // 覆盖 P-09：URL 主机解析覆盖 userinfo、端口、IPv6 与尾点 FQDN 形态。

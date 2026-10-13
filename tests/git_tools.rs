@@ -787,55 +787,6 @@ fn remote_ahead_triggers_fetch_merge_then_push() {
     );
 }
 
-// 覆盖 G-10/G-11：分支默认合并选项不得自动选择冲突的一方，必须保留冲突现场。
-#[test]
-fn merge_options_ours_preserves_conflict() {
-    let fix = fixture();
-    fs::write(fix.repo.join("conflict.txt"), "local version\n").unwrap();
-    let other = fix.repo.parent().unwrap().join("other");
-    git_ok(
-        fix.repo.parent().unwrap(),
-        &["clone", "-q", &fix.remote.display().to_string(), "other"],
-    );
-    fs::write(other.join("conflict.txt"), "remote version\n").unwrap();
-    git_ok(&other, &["add", "conflict.txt"]);
-    git_ok(&other, &["commit", "-q", "-m", "remote conflict"]);
-    git_ok(&other, &["push", "-q"]);
-    git_ok(
-        &fix.repo,
-        &["config", "branch.master.mergeOptions", "-Xours"],
-    );
-    let before = remote_log(&fix.remote);
-
-    let outcome = run_tool(&fix.repo);
-    assert!(
-        outcome.text.contains("冲突"),
-        "默认策略不得自动选择冲突一方：{}",
-        outcome.text
-    );
-    assert_eq!(remote_log(&fix.remote), before, "不得改变远端历史");
-    assert_eq!(
-        git_ok(&fix.repo, &["log", "-1", "--format=%s"]).trim(),
-        "update: conflict.txt",
-        "已完成的单文件提交保留"
-    );
-    assert!(fix.repo.join(".git").join("MERGE_HEAD").is_file());
-    let content = fs::read_to_string(fix.repo.join("conflict.txt")).unwrap();
-    assert!(
-        content.contains("local version") && content.contains("remote version"),
-        "双方内容必须保留在冲突现场：{content}"
-    );
-    assert_eq!(
-        git_ok(
-            &fix.repo,
-            &["config", "--get", "branch.master.mergeOptions"]
-        )
-        .trim(),
-        "-Xours",
-        "不得改写用户持久配置"
-    );
-}
-
 // 覆盖 G-10 尾段（合并被本地未提交变更阻挡：停止并显示原因）
 #[test]
 fn merge_blocked_by_dirty_worktree_stops_with_reason() {
@@ -1449,8 +1400,8 @@ const GIT_WRAPPER_CMD: &str = concat!(
     "set \"WDIR=%~dp0\"\r\n",
     "set /p REALGIT=<\"%WDIR%real-git.txt\"\r\n",
     "set \"SUB=%~1\"\r\n",
-    "if /I \"%SUB%\"==\"-c\" set \"SUB=%~3\"\r\n",
-    "if /I \"%~1\"==\"-c\" (\r\n",
+    "if /I \"%SUB%\"==\"--literal-pathspecs\" set \"SUB=%~2\"\r\n",
+    "if /I \"%~1\"==\"--literal-pathspecs\" (\r\n",
     "  >>\"%WDIR%trace.txt\" echo %SUB% %*\r\n",
     ") else (\r\n",
     "  >>\"%WDIR%trace.txt\" echo %*\r\n",
@@ -2876,7 +2827,7 @@ fn stop_at_write_command_log_does_not_start_that_command() {
                 let stop = match stage {
                     "add" => line.starts_with("git add --"),
                     "commit" => line.starts_with("git commit --only -m"),
-                    "merge" => line.starts_with("git -c") && line.contains(" merge FETCH_HEAD"),
+                    "merge" => line == "git merge FETCH_HEAD",
                     _ => unreachable!(),
                 };
                 if stop {

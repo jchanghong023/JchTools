@@ -56,7 +56,3 @@ installer/ChineseSimplified.isl is vendored from the official Inno Setup reposit
 ## 内置截图字体
 
 © 2014–2021 Adobe (http://www.adobe.com/). Noto Sans Mono CJK SC Regular（Noto CJK Sans 2.004），SIL Open Font License 1.1。字体内置于 snap-ocr-worker.exe，许可证全文随安装包及便携 ZIP 的 resources/fonts/LICENSE-noto-ofl.txt 提供。来源：https://github.com/notofonts/noto-cjk/releases/tag/Sans2.004 。固定字节大小及 SHA-256 见 resources/snap-ocr-assets.json。
-
-## Portable Git for Windows
-
-The installer and portable ZIP include the complete official Portable Git 2.56.0.windows.2 runtime under resources/git, including its upstream LICENSE.txt and component license material. The exact release URL, archive size, and official GitHub SHA-256 digest are recorded in resources/git/JCHTOOLS-BUNDLE.json. Upstream source: https://github.com/git-for-windows/git/tree/v2.56.0.windows.2 ; build and component sources: https://github.com/git-for-windows/build-extra . Original Git and component licenses remain in force.

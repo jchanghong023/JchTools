@@ -221,12 +221,6 @@ Copy-Item -LiteralPath $stagedManifest -Destination (Join-Path $resources 'snap-
 $fontNotices = Join-Path $resources 'fonts'
 New-Item -ItemType Directory -Path $fontNotices | Out-Null
 Copy-Item -LiteralPath 'resources\fonts\LICENSE-noto-ofl.txt' -Destination $fontNotices
-# P-05/G-01: ship the complete portable Git runtime, including upstream notices,
-# credential helpers and SSH support; the user needs no separate Git installation.
-& (Join-Path $PSScriptRoot 'fetch-git.ps1') -Offline:$Offline
-$gitBundle = Get-Content -LiteralPath 'resources\git-bundle.json' -Raw | ConvertFrom-Json
-$gitRuntime = Join-Path $root ('.tmp\git-' + $gitBundle.version + '\runtime')
-Copy-Item -LiteralPath $gitRuntime -Destination (Join-Path $resources 'git') -Recurse
 $engineDir = Join-Path $resources '7zip'
 New-Item -ItemType Directory -Path $engineDir | Out-Null
 foreach ($item in @('manifest.json','NOTICE.txt','licenses')) {
