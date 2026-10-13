@@ -46,6 +46,8 @@ def gate_plan(level: str, root: Path, log_dir: Path, ps_env: dict[str, str]) -> 
         *static_plan(root),
         Stage("production-build", [cargo, "build", "--bin", "JchTools"], "compile"),
         Stage("test-target-check", [cargo, "check", "--all-targets", "--features", "test-hooks"], "compile"),
+        # AGENTS.md 3.5：release 与发布共用 profile，仍须单独编译全部目标，不执行测试。
+        Stage("release-target-build", [cargo, "build", "--all-targets", "--release"], "compile"),
         Stage(
             "clippy",
             [cargo, "clippy", "--lib", "--bin", "JchTools", "--features", "test-hooks", "--", "-D", "warnings"],

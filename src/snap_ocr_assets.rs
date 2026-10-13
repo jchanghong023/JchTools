@@ -1086,7 +1086,7 @@ fn cleanup_download_partial(partial: &Path, stage: &'static str) {
 /// 下载 + 校验重试核心：单次流式拉取经 `fetch` 注入（生产为 HTTP 流式下载
 /// [`download_stream`]，测试注入中断脚本），`.part` 命名与目录准备由调用方
 /// 承担。重试语义（C-3）：拉取中断与校验失败均最多重试 3 次；第 3 次仍失败
-/// 时返回含最后一次错误信息的 Err，`.part` 不残留。
+/// 时返回含最后一次错误信息的 Err；取消或最终落位失败也清理 `.part`，保留既有目标。
 fn download_asset_with<F>(
     destination: &Path,
     partial: &Path,
@@ -1108,7 +1108,10 @@ where
         ensure_not_cancelled(cancel)?;
         if let Err(error) = fetch(partial, progress) {
             // 取消优先于重试语义：用户取消时不发重试提示，直接收场。
-            ensure_not_cancelled(cancel)?;
+            if let Err(cancelled) = ensure_not_cancelled(cancel) {
+                cleanup_download_partial(partial, "cancel_fetch_error");
+                return Err(cancelled);
+            }
             if attempt < 3 {
                 tracing::warn!(
                     event = "asset_attempt_retrying",
@@ -1144,10 +1147,11 @@ where
                     cleanup_download_partial(partial, "cancel_before_install");
                     return Err(error);
                 }
-                fs::rename(partial, destination).map_err(|error| {
+                if let Err(error) = fs::rename(partial, destination) {
                     tracing::error!(event = "asset_install_failed", stage = "rename", error_kind = ?error.kind(), error_code = error.raw_os_error(), elapsed_ms = crate::logging::elapsed_ms(attempt_started), "下载资产落位失败");
-                    format!("写入下载资产失败：{error}")
-                })?;
+                    cleanup_download_partial(partial, "install_failed");
+                    return Err(format!("写入下载资产失败：{error}"));
+                }
                 tracing::info!(
                     event = "asset_attempt_completed",
                     attempt,
@@ -1886,6 +1890,15 @@ mod tests {
     }
 
     fn capture_diagnostics<T>(run: impl FnOnce() -> T) -> (T, String) {
+        // tracing-core 的单 dispatcher 快路径用首次触达 callsite 的线程默认值
+        // 缓存兴趣；并行的无捕获测试会把本线程尚未触达的 ERROR callsite 缓存为
+        // never。保留一个仅注册、不安装的 dispatcher，使捕获期间始终按所有
+        // 存活 subscriber 合并兴趣；不刷缓存、不改变生产过滤或线程默认值。
+        static REGISTRY_ANCHOR: std::sync::LazyLock<tracing::Dispatch> =
+            std::sync::LazyLock::new(|| {
+                tracing::Dispatch::new(tracing::subscriber::NoSubscriber::new())
+            });
+        std::sync::LazyLock::force(&REGISTRY_ANCHOR);
         let bytes = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
         let writer = DiagnosticCapture(bytes.clone());
         let subscriber = tracing_subscriber::fmt()
@@ -2769,6 +2782,69 @@ mod tests {
             !destination.with_extension("part").exists(),
             "失败后 .part 必须清理"
         );
+    }
+
+    // 覆盖 O-06/T-05：拉取已写入部分数据后同时遇到网络错误与用户取消，
+    // 不重试、不覆盖既有资产，并在返回取消前移除 .part。
+    #[test]
+    fn download_asset_cancellation_during_fetch_error_cleans_partial() {
+        let root = tempfile::tempdir().expect("创建测试目录");
+        let destination = root.path().join("asset.bin");
+        let partial = destination.with_extension("part");
+        fs::write(&destination, b"existing").expect("预置既有资产");
+        let cancel = AtomicBool::new(false);
+        let mut calls = 0;
+        let mut messages = Vec::new();
+        let error = super::download_asset_with(
+            &destination,
+            &partial,
+            8,
+            &"ab".repeat(32),
+            &cancel,
+            &mut |message| messages.push(message),
+            &mut |path, _| {
+                calls += 1;
+                fs::write(path, b"partial").expect("模拟部分下载");
+                cancel.store(true, std::sync::atomic::Ordering::Release);
+                Err("模拟网络中断".into())
+            },
+        )
+        .expect_err("取消必须优先于网络重试");
+        assert!(error.contains("取消"), "{error}");
+        assert_eq!(calls, 1, "取消后不得重试");
+        assert!(messages.is_empty(), "取消后不得发重试提示");
+        assert!(!partial.exists(), "取消后不得残留部分下载");
+        assert_eq!(fs::read(destination).unwrap(), b"existing");
+    }
+
+    // 覆盖 O-06/T-05：最终路径不能落位时保留占用项、清理已校验的 .part，
+    // 不把写入失败误报为下载成功或继续重试网络。
+    #[test]
+    fn download_asset_install_failure_cleans_partial_and_preserves_destination() {
+        let root = tempfile::tempdir().expect("创建测试目录");
+        let destination = root.path().join("asset.bin");
+        let partial = destination.with_extension("part");
+        fs::create_dir(&destination).expect("用目录阻止文件落位");
+        fs::write(destination.join("keep.txt"), b"keep").expect("预置占用项");
+        let body = b"download";
+        let mut calls = 0;
+        let error = super::download_asset_with(
+            &destination,
+            &partial,
+            body.len() as u64,
+            &sha256_bytes(body),
+            &AtomicBool::new(false),
+            &mut |_| {},
+            &mut |path, _| {
+                calls += 1;
+                fs::write(path, body).map_err(|error| error.to_string())
+            },
+        )
+        .expect_err("目录占用必须阻止文件落位");
+        assert!(error.contains("写入下载资产失败"), "{error}");
+        assert_eq!(calls, 1, "落位失败不得重新下载");
+        assert!(!partial.exists(), "落位失败必须清理 .part");
+        assert_eq!(fs::read(destination.join("keep.txt")).unwrap(), b"keep");
     }
 
     // ── B-1/B-2：staging 清理降级与残留兜底清理（与 markdown 侧同口径）──

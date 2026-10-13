@@ -6,6 +6,10 @@
 //! oracle 同源）。本模块内联了 `src/textsnap/geometry.py` 中 layout 所需的
 //! 三个几何辅助（`quad_bounds` / `quad_dimensions` / `quad_baseline`），
 //! 语义与源码逐行一致，避免跨模块耦合。
+//! 坐标排序使用浮点数值比较：正负零视为平局，再按次键及稳定输入序决胜，
+//! 避免在原点附近改变同一行的文字顺序。
+
+use std::cmp::Ordering;
 
 use crate::types::{Quad, RecognizedSpan};
 use crate::ucd_tables::{has_combining_class, is_wide_or_fullwidth};
@@ -224,11 +228,17 @@ fn line_overlap(item: &LayoutItem, line: &TextLine) -> f64 {
 /// ≤ 正文字高 × [`BASELINE_HEIGHT_FACTOR`]；先取重叠更大者、再取基线差
 /// 更小者。行按（中心 y、最左 x）排序，行内按（左边、右边）排序。
 fn cluster_lines(mut items: Vec<LayoutItem>, body_height: f64) -> Vec<TextLine> {
+    // 坐标已校验有限；用数值比较保持 Python 的 +0.0 == -0.0 平局语义。
     items.sort_by(|a, b| {
         a.top
-            .total_cmp(&b.top)
-            .then(a.baseline.total_cmp(&b.baseline))
-            .then(a.left.total_cmp(&b.left))
+            .partial_cmp(&b.top)
+            .unwrap_or(Ordering::Equal)
+            .then_with(|| {
+                a.baseline
+                    .partial_cmp(&b.baseline)
+                    .unwrap_or(Ordering::Equal)
+            })
+            .then_with(|| a.left.partial_cmp(&b.left).unwrap_or(Ordering::Equal))
     });
     let mut lines: Vec<TextLine> = Vec::new();
     for item in items {
@@ -244,7 +254,11 @@ fn cluster_lines(mut items: Vec<LayoutItem>, body_height: f64) -> Vec<TextLine> 
         }
         // Python `sort(key=(重叠, -基线差), reverse=True)`：重叠更大优先，
         // 其次基线差更小；稳定排序保持平局时的既有顺序。
-        matches.sort_by(|a, b| b.0.total_cmp(&a.0).then(b.1.total_cmp(&a.1)));
+        matches.sort_by(|a, b| {
+            b.0.partial_cmp(&a.0)
+                .unwrap_or(Ordering::Equal)
+                .then_with(|| b.1.partial_cmp(&a.1).unwrap_or(Ordering::Equal))
+        });
         if let Some(&(_, _, best)) = matches.first() {
             lines[best].items.push(item);
         } else {
@@ -253,12 +267,21 @@ fn cluster_lines(mut items: Vec<LayoutItem>, body_height: f64) -> Vec<TextLine> 
     }
     lines.sort_by(|a, b| {
         a.center_y()
-            .total_cmp(&b.center_y())
-            .then(min_left(a).total_cmp(&min_left(b)))
+            .partial_cmp(&b.center_y())
+            .unwrap_or(Ordering::Equal)
+            .then_with(|| {
+                min_left(a)
+                    .partial_cmp(&min_left(b))
+                    .unwrap_or(Ordering::Equal)
+            })
     });
     for line in &mut lines {
-        line.items
-            .sort_by(|a, b| a.left.total_cmp(&b.left).then(a.right.total_cmp(&b.right)));
+        line.items.sort_by(|a, b| {
+            a.left
+                .partial_cmp(&b.left)
+                .unwrap_or(Ordering::Equal)
+                .then_with(|| a.right.partial_cmp(&b.right).unwrap_or(Ordering::Equal))
+        });
     }
     lines
 }
@@ -481,6 +504,22 @@ mod tests {
             span("Hello", 0.0, 0.0, 50.0, 20.0),
         ];
         assert_eq!(build_layout(&spans).text, "Hello  World\nsecond");
+    }
+
+    // 覆盖 O-27/O-28 附录 B：正负零数值相同，不得抢先于右边次键或稳定输入序。
+    #[test]
+    fn signed_zero_coordinates_follow_numeric_tie_breakers() {
+        let different_widths = [
+            span("A", 0.0, 0.0, 10.0, 10.0),
+            span("B", -0.0, 0.0, 20.0, 10.0),
+        ];
+        assert_eq!(build_layout(&different_widths).text, "AB");
+
+        let tied_coordinates = [
+            span("A", 0.0, 0.0, 10.0, 10.0),
+            span("B", 0.0, -0.0, 10.0, 10.0),
+        ];
+        assert_eq!(build_layout(&tied_coordinates).text, "AB");
     }
 
     // 覆盖 O-28

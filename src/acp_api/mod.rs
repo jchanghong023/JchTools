@@ -1,4 +1,5 @@
 //! ACP HTTP 模型服务：独立后台、官方客户端及本机 HTTP 适配。
+//! 关键配置存储边界默认记录 INFO 开始/结果，参数解析等高频辅助边界仅记录 DEBUG。
 
 pub mod acp;
 pub mod http;
@@ -59,22 +60,35 @@ mod diagnostics {
         operation: &'static str,
         started: Instant,
         finished: bool,
+        configuration_storage: bool,
         span: tracing::Span,
     }
 
     impl Boundary {
         fn new(component: &'static str, operation: &'static str) -> Self {
-            tracing::debug!(
-                component,
-                operation,
-                event = "acp_call_started",
-                "ACP 边界调用开始"
-            );
+            let configuration_storage = component == "acp_settings"
+                && matches!(operation, "load_config" | "save_config" | "workspace_dir");
+            if configuration_storage {
+                tracing::info!(
+                    component,
+                    operation,
+                    event = "acp_call_started",
+                    "ACP 配置存储调用开始"
+                );
+            } else {
+                tracing::debug!(
+                    component,
+                    operation,
+                    event = "acp_call_started",
+                    "ACP 边界调用开始"
+                );
+            }
             Self {
                 component,
                 operation,
                 started: Instant::now(),
                 finished: false,
+                configuration_storage,
                 span: tracing::Span::current(),
             }
         }
@@ -83,6 +97,14 @@ mod diagnostics {
             self.finished = true;
             let elapsed_ms = crate::logging::elapsed_ms(self.started);
             match result {
+                Ok(_) if self.configuration_storage => tracing::info!(
+                    component = self.component,
+                    operation = self.operation,
+                    event = "acp_call_completed",
+                    status = "success",
+                    elapsed_ms,
+                    "ACP 配置存储调用完成"
+                ),
                 Ok(_) => tracing::debug!(
                     component = self.component,
                     operation = self.operation,

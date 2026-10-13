@@ -83,6 +83,7 @@ fn plan_directory_renames(
     base: &Path,
 ) -> Result<HashMap<String, String>> {
     let mut dir_renames: HashMap<String, String> = HashMap::new();
+    let mut reserved = HashSet::new();
     for entry in walkdir::WalkDir::new(stage_content)
         .follow_links(false)
         .min_depth(1)
@@ -127,7 +128,14 @@ fn plan_directory_renames(
             } else {
                 format!("{parent_dest}/{candidate}")
             };
-            if matches!(classify_occupancy(&join(&candidate)?)?, Occupancy::Free) {
+            // 正式位置尚未合入：同包原名与已规划的新名也占位，不能把不同目录混为一棵树。
+            if !reserved.contains(&fsutil::fold_rel(&candidate_rel))
+                && matches!(
+                    classify_occupancy(&entry.path().with_file_name(&candidate))?,
+                    Occupancy::Free
+                )
+                && matches!(classify_occupancy(&join(&candidate)?)?, Occupancy::Free)
+            {
                 new_rel = Some(candidate_rel);
                 break;
             }
@@ -137,6 +145,7 @@ fn plan_directory_renames(
                 "无法为目录 {rel} 分配不冲突的落盘名（X-04：无法生成合法目标时该包不算完整成功）"
             );
         };
+        reserved.insert(fsutil::fold_rel(&new_rel));
         dir_renames.insert(rel, new_rel);
     }
     Ok(dir_renames)
@@ -2359,6 +2368,7 @@ fn quarantine(job: &mut Job, archive_rel: &str, reason: &str) -> Result<()> {
     let control = job.context.control.clone();
     observe_archive("quarantine", &control, |boundary_stage| {
         *boundary_stage = "quarantine_move";
+        job.context.control.checkpoint()?;
         let archive = fsutil::safe_join(&job.root, archive_rel)?;
         // 隔离使用 X-10 精确命名族的在场卷；失败包未必能由引擎确认卷数，
         // 因此不把成功删源所需的档案头佐证作为可逆隔离的前置条件。
@@ -2419,6 +2429,7 @@ fn quarantine(job: &mut Job, archive_rel: &str, reason: &str) -> Result<()> {
         for (source, target) in present.into_iter().zip(targets) {
             // 移动仍逐卷进行：某卷移动失败时保留未移动源项并如实上抛（X-06），
             // 不宣称整包隔离成功。
+            job.context.control.checkpoint()?;
             let source_rel = fsutil::relative_string(&job.root, &source)?;
             let size = fsutil::snapshot(&source).map_or(0, |s| s.size);
             fsutil::rename_noreplace(&source, &target)?;
@@ -2809,6 +2820,46 @@ impl Drop for Staging {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // 覆盖 X-04/X-10：改名目录不能占用同包另一个目录的原名，避免嵌套卷族混合。
+    #[test]
+    fn directory_rename_preserves_incoming_sibling_names() {
+        let root = tempfile::tempdir().unwrap();
+        let stage = tempfile::tempdir().unwrap();
+        fs::write(root.path().join("sub"), b"existing file").unwrap();
+        fs::create_dir_all(stage.path().join("sub/child")).unwrap();
+        fs::create_dir_all(stage.path().join("sub (1)/child")).unwrap();
+        fs::write(stage.path().join("sub (2)"), b"incoming file").unwrap();
+        let renames =
+            plan_directory_renames(&Control::default(), stage.path(), root.path()).unwrap();
+        assert_eq!(
+            mapped_entry_rel(&renames, "sub/child/payload.txt"),
+            Some("sub (3)/child/payload.txt".to_string()),
+            "新目录须避开同包已占用的目录名及文件名"
+        );
+        assert_eq!(mapped_entry_rel(&renames, "sub (1)/child/payload.txt"), None);
+        assert_eq!(fs::read(root.path().join("sub")).unwrap(), b"existing file");
+    }
+
+    // 覆盖 X-06/X-08：取消后不得开始隔离移动，源包及每个分卷留在原位。
+    #[test]
+    fn quarantine_stops_before_moving_when_cancelled() {
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path().join("data");
+        fs::create_dir(&root).unwrap();
+        for name in ["pack.7z.001", "pack.7z.002"] {
+            fs::write(root.join(name), name.as_bytes()).unwrap();
+        }
+        let mut job = review_job(&root, &temp.path().join("state"), 0);
+        job.context.control.cancel();
+        let error = quarantine(&mut job, "pack.7z.001", "测试：损坏分卷").unwrap_err();
+        assert!(error.to_string().contains("取消"));
+        assert_eq!(job.summary.archives_quarantined, 0);
+        assert!(!root.join(QUARANTINE_DIR_NAME).exists());
+        for name in ["pack.7z.001", "pack.7z.002"] {
+            assert_eq!(fs::read(root.join(name)).unwrap(), name.as_bytes());
+        }
+    }
 
     // 覆盖 H-06：已知祖先不在 Git 树内，不代表后代也没有独立 Git 边界。
     #[test]

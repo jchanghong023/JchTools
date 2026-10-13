@@ -56,7 +56,7 @@ async fn observe_request(
     };
     async move {
         let started = Instant::now();
-        tracing::debug!(
+        tracing::info!(
             event = "acp_http_request_started",
             component = "acp_http",
             route,
@@ -65,7 +65,7 @@ async fn observe_request(
         );
         let response = next.run(request).await;
         let status = response.status().as_u16();
-        tracing::debug!(
+        tracing::info!(
             event = "acp_http_response_ready",
             component = "acp_http",
             route,
@@ -125,7 +125,7 @@ async fn method_not_allowed() -> Response {
 async fn models(State(backend): State<BackendHandle>) -> Response {
     match backend.models().await {
         Ok(models) => {
-            tracing::debug!(
+            tracing::info!(
                 event = "acp_http_models_completed",
                 component = "acp_http",
                 model_count = models.len(),
@@ -259,7 +259,7 @@ async fn chat(
             Err(error) => return HttpError::service(&error).into_response(),
         },
     };
-    tracing::debug!(event = "acp_http_request_admitted", component = "acp_http", request_id = %request.accepted.request_id.0, streaming = input.stream, "ACP HTTP 请求已准入");
+    tracing::info!(event = "acp_http_request_admitted", component = "acp_http", request_id = %request.accepted.request_id.0, streaming = input.stream, "ACP HTTP 请求已准入");
     let Ok(session_header) = HeaderValue::from_str(&request.accepted.session.0) else {
         tracing::error!(
             event = "acp_http_request_failed",
@@ -516,7 +516,7 @@ mod tests {
         let writer = capture.clone();
         let subscriber = tracing_subscriber::fmt()
             .with_ansi(false)
-            .with_max_level(tracing::Level::DEBUG)
+            .with_max_level(tracing::Level::INFO)
             .with_writer(move || writer.clone())
             .finish();
         let _dispatch = tracing::subscriber::set_default(subscriber);
@@ -643,6 +643,7 @@ mod tests {
                 line.contains(&format!("request_id={id}"))
                     && line.split_whitespace().any(|field| field == "INFO")
                     && line.contains("result=Stop")
+                    && line.contains(&format!("operation_id={operation_id}"))
                     && line.contains(&format!("output_bytes={}", "private-output-marker".len()))
                     && line.contains("elapsed_ms=")
             }), "成功请求缺少实际终态、输出统计或耗时：{logs}");

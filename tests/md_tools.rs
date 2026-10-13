@@ -53,7 +53,6 @@ fn source_bytes_under(root: &Path) -> Vec<(String, Vec<u8>)> {
     rows
 }
 
-
 fn merge_to(root: &Path, recursive: bool, output: &Path) -> md_tools::MergeStats {
     let entries = md_tools::scan_markdown(root, recursive, Some(output)).unwrap();
     md_tools::merge_markdown_with_events(&entries, output, false, &Control::default(), &|_| Ok(()))
@@ -139,6 +138,110 @@ fn natural_sort_compares_digits_numerically() {
     assert_eq!(
         md_tools::natural_cmp("v2/ch1.md", "v10/ch1.md"),
         Ordering::Less
+    );
+}
+
+// 覆盖 M-03：非数字段必须先按完整段比较，不能把后续数字与另一段的标点混比。
+#[test]
+fn natural_sort_compares_complete_nondigit_segments() {
+    use std::cmp::Ordering;
+    for (first, second) in [("a2.md", "a!.md"), ("目录2.md", "目录!.md")] {
+        assert_eq!(md_tools::natural_cmp(first, second), Ordering::Less);
+        assert_eq!(md_tools::natural_cmp(second, first), Ordering::Greater);
+    }
+}
+
+// 覆盖 M-03/M-04：同创建时间时，按完整非数字段决胜的顺序须落入实际合并正文。
+#[test]
+fn merge_orders_by_complete_nondigit_segments() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path();
+    for name in ["a!.md", "a2.md"] {
+        write(&root.join(name), name);
+        set_created(&root.join(name), 100);
+    }
+    let output = root.join("merged.md");
+    merge_to(root, true, &output);
+    assert_eq!(
+        fs::read_to_string(&output).unwrap(),
+        "# a2.md\n\na2.md\n\n# a!.md\n\na!.md\n",
+        "先比较非数字段 a 与 a!，不能直接把后续 2 与 ! 比较"
+    );
+}
+
+// 与 organizer_fs_boundaries 的真实 GUID reparse 夹具同口径，不依赖符号链接特权。
+fn mark_other_reparse(path: &Path) {
+    use std::os::windows::{fs::OpenOptionsExt, io::AsRawHandle};
+    use windows_sys::Win32::{
+        Storage::FileSystem::{FILE_FLAG_BACKUP_SEMANTICS, FILE_FLAG_OPEN_REPARSE_POINT},
+        System::IO::DeviceIoControl,
+    };
+    let handle = fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .custom_flags(FILE_FLAG_BACKUP_SEMANTICS | FILE_FLAG_OPEN_REPARSE_POINT)
+        .open(path)
+        .unwrap();
+    let mut data = [0u8; 24];
+    data[..4].copy_from_slice(&0x0000_0042u32.to_le_bytes());
+    data[8..].copy_from_slice(&[
+        0x18, 0x3e, 0xca, 0x84, 0x9b, 0xe8, 0x46, 0x42, 0x90, 0x34, 0xf2, 0x17, 0x27, 0x26, 0x68,
+        0x1c,
+    ]);
+    let mut returned = 0;
+    // SAFETY: 句柄在同步调用期间有效；输入是完整 GUID reparse 头，输出指针不保留。
+    let success = unsafe {
+        DeviceIoControl(
+            handle.as_raw_handle(),
+            0x0009_00a4,
+            data.as_ptr().cast(),
+            24,
+            std::ptr::null_mut(),
+            0,
+            &raw mut returned,
+            std::ptr::null_mut(),
+        )
+    };
+    assert_ne!(
+        success,
+        0,
+        "设置真实 reparse 夹具失败：{}",
+        std::io::Error::last_os_error()
+    );
+}
+
+// 覆盖 M-02/S-04：FILE_ATTRIBUTE_REPARSE_POINT 不限于 symlink/junction，
+// 文件与目录均须跳过；不能读取受保护目录的后代或把受保护 .md 纳入合并。
+#[test]
+fn scan_skips_non_symlink_reparse_entries() {
+    use std::os::windows::fs::MetadataExt;
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path();
+    write(&root.join("plain.md"), "普通正文\n");
+    write(&root.join("protected.md"), "受保护正文\n");
+    fs::create_dir(root.join("protected-tree")).unwrap();
+    for path in [root.join("protected.md"), root.join("protected-tree")] {
+        mark_other_reparse(&path);
+        let meta = fs::symlink_metadata(&path).unwrap();
+        assert_ne!(meta.file_attributes() & 0x400, 0);
+        assert!(!meta.file_type().is_symlink(), "必须覆盖非符号链接属性分支");
+    }
+    let output = root.join("merged.md");
+    for recursive in [false, true] {
+        let entries = md_tools::scan_markdown(root, recursive, Some(&output)).unwrap();
+        assert_eq!(
+            entries
+                .iter()
+                .map(|entry| entry.rel.as_str())
+                .collect::<Vec<_>>(),
+            ["plain.md"],
+            "普通文件正常纳入，其他 reparse 文件与目录整树排除"
+        );
+    }
+    merge_to(root, true, &output);
+    assert_eq!(
+        fs::read_to_string(output).unwrap(),
+        "# plain.md\n\n普通正文\n"
     );
 }
 

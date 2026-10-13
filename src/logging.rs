@@ -8,6 +8,8 @@
 //! 每个事件为 UTC 微秒时间戳的单行 key=value，包含级别、PID、线程、组件、
 //! 稳定 event 与当前 span 链。文本有界，控制字符转义，已知凭据与 URL 去敏；
 //! 调用方仍不得提交文件/OCR/模型/终端/协议正文。panic 只记录元数据。
+//! 日志阈值只过滤事件，INFO 关联 span 始终保留；启动模式描述实际 debug assertions
+//! 配置（release 配置也可启用），不将其误当成 Cargo profile 或进程角色。
 
 use std::fmt::{self, Write as _};
 use std::io::{self, Write as _};
@@ -141,7 +143,8 @@ pub fn safe_error(value: &str) -> String {
             .unwrap_or(remaining.len());
         if word_end > 0 {
             let word = &remaining[..word_end];
-            let tail = remaining[word_end..].trim_start_matches([' ', '\t', '"', '\'']);
+            // Debug 字符串会将 JSON 键引号写成反斜杠转义；同样识别其赋值分隔符。
+            let tail = remaining[word_end..].trim_start_matches([' ', '\t', '"', '\'', '\\']);
             if (sensitive_name(word)
                 && (tail.starts_with(['=', ':'])
                     || ["bearer", "authorization", "cookie", "set-cookie"]
@@ -780,7 +783,9 @@ fn summarize_record(bytes: &[u8]) -> io::Result<String> {
 
 /// 最早入口初始化；只有全局 subscriber 安装成功才返回 Some 并接管 panic。
 pub fn init(state_dir: &Path) -> Option<Guard> {
-    use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt, EnvFilter, Layer};
+    use tracing_subscriber::{
+        filter::filter_fn, layer::SubscriberExt, util::SubscriberInitExt, Layer,
+    };
     let started = Instant::now();
     let primary = state_dir.join(LOG_DIR);
     let (directory, appender, fallback_error) = match open_appender(&primary) {
@@ -810,12 +815,14 @@ pub fn init(state_dir: &Path) -> Option<Guard> {
     let dropped = writer.error_counter();
     let level_value = std::env::var("JCH_LOG_LEVEL").ok();
     let level = selected_level(level_value.as_deref());
-    let Ok(filter) = EnvFilter::try_new(format!("jchtools={level},snap_ocr_worker={level}")) else {
-        report_stderr(format_args!(
-            "event=diagnostic_init_failed stage=filter error_type=InvalidFilter"
-        ));
-        return None;
-    };
+    // 阈值不能禁用 INFO 操作 span：WARN/ERROR 仍需关联 ID。
+    // 不放宽 DEBUG/TRACE 细节阈值，不读取 RUST_LOG 或启用第三方正文。
+    let filter = filter_fn(move |metadata| {
+        (metadata.target().starts_with("jchtools")
+            || metadata.target().starts_with("snap_ocr_worker"))
+            && (*metadata.level() <= level
+                || (metadata.is_span() && *metadata.level() <= tracing::Level::INFO))
+    });
     let layer = tracing_subscriber::fmt::layer()
         .fmt_fields(DiagnosticFields)
         .event_format(DiagnosticEvent {
@@ -880,7 +887,12 @@ pub fn init(state_dir: &Path) -> Option<Guard> {
         return None;
     };
     install_panic_hook();
-    tracing::info!(component = "logging", event = "application_started", application = "JchTools", role = detect_role(), version = env!("CARGO_PKG_VERSION"), log_file = %file_path.display(), %level, mode = detect_role(), debug_assertions = cfg!(debug_assertions), elapsed_ms = elapsed_ms(started), "应用诊断日志已启动");
+    let mode = if cfg!(debug_assertions) {
+        "debug-assertions-enabled"
+    } else {
+        "debug-assertions-disabled"
+    };
+    tracing::info!(component = "logging", event = "application_started", application = "JchTools", role = detect_role(), version = env!("CARGO_PKG_VERSION"), log_file = %file_path.display(), %level, mode, debug_assertions = cfg!(debug_assertions), elapsed_ms = elapsed_ms(started), "应用诊断日志已启动");
     if let Some(error) = fallback_error {
         tracing::warn!(component = "logging", event = "diagnostic_directory_fallback", stage = "primary", error_type = ?error.kind(), error_code = error.raw_os_error(), "主日志目录不可写，已使用用户级备用目录");
     }
@@ -937,7 +949,12 @@ impl Drop for FlushOnDrop {
 }
 
 fn detect_role() -> &'static str {
-    match std::env::args_os().nth(1).as_deref() {
+    role_for_mode(std::env::args_os().nth(1).as_deref())
+}
+
+fn role_for_mode(mode: Option<&std::ffi::OsStr>) -> &'static str {
+    match mode {
+        Some(flag) if flag == std::ffi::OsStr::new("--codeagent-service") => "codeagent-service",
         Some(flag) if flag == std::ffi::OsStr::new("--acp-http-service") => "acp-http-service",
         Some(flag) if flag == std::ffi::OsStr::new("--xberg-broker") => "xberg-broker",
         Some(flag)
@@ -1358,6 +1375,92 @@ mod tests {
         assert!(init(temp.path()).is_none());
         assert!(!contents(&temp.path().join(LOG_DIR)).contains("event=application_started"));
     }
+    /// 覆盖 P-10：Debug 字符串的转义引号不能绕过凭据去敏。
+    #[test]
+    fn debug_quoted_credentials_are_redacted_on_disk() {
+        if !in_child("logging::tests::debug_quoted_credentials_are_redacted_on_disk") {
+            return;
+        }
+        let temp = workspace();
+        let guard = init(temp.path()).unwrap();
+        let detail = r#"{"api_key":"synthetic-private-key","password":"synthetic-private-password"}"#;
+        tracing::error!(event = "debug_credential_probe", ?detail, "去敏探针");
+        drop(guard);
+        let captured = contents(&temp.path().join(LOG_DIR));
+        assert!(captured.contains("event=debug_credential_probe"));
+        assert!(captured.contains("[redacted]"));
+        assert!(!captured.contains("synthetic-private-key"));
+        assert!(!captured.contains("synthetic-private-password"));
+    }
+
+    /// 覆盖 P-10：WARNING 阈值仍保留操作上下文，但不输出 INFO 事件。
+    #[test]
+    fn warning_threshold_preserves_operation_correlation() {
+        const CHILD: &str = "JCHTOOLS_WARNING_LEVEL_TEST_CHILD";
+        if std::env::var_os(CHILD).is_none() {
+            let status = std::process::Command::new(std::env::current_exe().unwrap())
+                .args(["--exact", "logging::tests::warning_threshold_preserves_operation_correlation", "--nocapture"])
+                .env(CHILD, "1")
+                .env("JCH_LOG_LEVEL", "warning")
+                .status()
+                .unwrap();
+            assert!(status.success(), "WARNING 阈值日志必须保留关联 ID");
+            return;
+        }
+        let temp = workspace();
+        let guard = init(temp.path()).unwrap();
+        let span = operation_span_with_id("probe", "warning_threshold", "warning-probe-id");
+        span.in_scope(|| {
+            tracing::info!(event = "filtered_info_probe", "此事件必须被过滤");
+            tracing::warn!(event = "correlated_warning_probe", "此异常必须保留操作上下文");
+        });
+        drop(guard);
+        let captured = contents(&temp.path().join(LOG_DIR));
+        let warning = captured.lines()
+            .find(|line| line.contains("event=correlated_warning_probe"))
+            .unwrap();
+        assert!(warning.contains("warning-probe-id"));
+        assert!(warning.contains("operation=\"warning_threshold\""));
+        assert!(!captured.contains("event=filtered_info_probe"));
+    }
+
+    /// 覆盖 P-10 / CA-05：每种实际内部入口都具有明确的进程角色。
+    #[test]
+    fn internal_process_roles_are_identified() {
+        use std::ffi::OsStr;
+        for (flag, expected) in [
+            ("--codeagent-service", "codeagent-service"),
+            ("--acp-http-service", "acp-http-service"),
+            ("--xberg-broker", "xberg-broker"),
+            ("--service", "snap-ocr-service"),
+            ("--service--autostart", "snap-ocr-service"),
+        ] {
+            assert_eq!(role_for_mode(Some(OsStr::new(flag))), expected);
+        }
+        assert_eq!(role_for_mode(None), "gui");
+    }
+
+    /// 覆盖 P-10：启动记录的构建模式不能误用进程角色。
+    #[test]
+    fn startup_record_identifies_build_mode() {
+        if !in_child("logging::tests::startup_record_identifies_build_mode") {
+            return;
+        }
+        let temp = workspace();
+        let guard = init(temp.path()).unwrap();
+        drop(guard);
+        let captured = contents(&temp.path().join(LOG_DIR));
+        let started = captured.lines()
+            .find(|line| line.contains("event=application_started"))
+            .unwrap();
+        let expected = if cfg!(debug_assertions) {
+            "debug-assertions-enabled"
+        } else {
+            "debug-assertions-disabled"
+        };
+        assert!(started.contains(&format!("mode=\"{expected}\"")));
+    }
+
 
     #[test]
     fn safe_helpers_bound_diagnostic_data() {

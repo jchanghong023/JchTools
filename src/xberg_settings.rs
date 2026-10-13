@@ -145,6 +145,10 @@ pub fn load() -> Result<Option<PathBuf>, String> {
 fn load_inner() -> Result<Option<PathBuf>, String> {
     let root = state_dir()?;
     let db = open(&root)?;
+    load_from_db(&root, &db)
+}
+
+fn load_from_db(root: &Path, db: &Connection) -> Result<Option<PathBuf>, String> {
     let read = || {
         db.query_row(
             "SELECT value FROM app_settings WHERE key='xberg_directory'",
@@ -166,7 +170,7 @@ fn load_inner() -> Result<Option<PathBuf>, String> {
         }
         return Ok(Some(path));
     }
-    let Some(value) = read_legacy(&root)? else {
+    let Some(value) = read_legacy(root)? else {
         return Ok(None);
     };
     let value = legacy_directory_value(&value)?;
@@ -235,10 +239,21 @@ pub fn settings() -> Result<Settings, String> {
 }
 
 fn settings_inner() -> Result<Settings, String> {
-    let legacy = load()?;
-    let db = open(&state_dir()?)?;
+    let root = state_dir()?;
+    let db = open(&root)?;
+    settings_from_db(&root, &db)
+}
+
+fn settings_from_db(root: &Path, db: &Connection) -> Result<Settings, String> {
+    let legacy = load_from_db(root, db)?;
+    // 旧文本迁移仍在读事务外完成，避免首次迁移时升级读锁改变旧行为。
+    // 来源与两条路径则必须来自同一提交，不能混入另一进程刚保存的字段。
+    let tx = db.unchecked_transaction().map_err(|e| {
+        sqlite_failure("begin_read_sources", &e);
+        format!("开始读取 Xberg 来源配置失败：{e}")
+    })?;
     let read = |key: &str| -> Result<Option<String>, String> {
-        db.query_row(
+        tx.query_row(
             "SELECT value FROM app_settings WHERE key=?1",
             [key],
             |row| row.get(0),
@@ -254,13 +269,18 @@ fn settings_inner() -> Result<Settings, String> {
         Some("downloaded") => Source::Downloaded,
         Some(_) => return Err("保存的 Xberg 来源无效，请重新选择".into()),
     };
-    Ok(Settings {
+    let saved = Settings {
         source,
         custom: read(Source::Custom.key())?
             .map(PathBuf::from)
             .or_else(|| (source == Source::Custom).then_some(legacy).flatten()),
         downloaded: read(Source::Downloaded.key())?.map(PathBuf::from),
-    })
+    };
+    tx.commit().map_err(|e| {
+        sqlite_failure("finish_read_sources", &e);
+        format!("完成读取 Xberg 来源配置失败：{e}")
+    })?;
+    Ok(saved)
 }
 
 pub fn select(source: Source) -> Result<(), String> {
@@ -398,5 +418,97 @@ mod tests {
             (key == "JCHTOOLS_TEST_STATE_DIR").then(|| OsString::from("relative-state"))
         })
         .is_err());
+    }
+
+    // 覆盖 XB-18/XB-21：另一进程在来源与路径读取之间提交时，只能返回同一提交快照。
+    #[test]
+    fn source_paths_are_read_from_one_committed_snapshot() {
+        use rusqlite::{ffi, Connection};
+        use std::os::raw::{c_char, c_int, c_void};
+
+        struct Switch<'a> {
+            writer: &'a Connection,
+            selects: usize,
+            error: Option<rusqlite::Error>,
+        }
+        unsafe extern "C" fn switch_before_custom_read(
+            context: *mut c_void,
+            action: c_int,
+            _: *const c_char,
+            _: *const c_char,
+            _: *const c_char,
+            _: *const c_char,
+        ) -> c_int {
+            // 安全：回调仅在本线程 prepare 内同步调用，context 存活至显式注销。
+            let switch = unsafe { &mut *context.cast::<Switch<'_>>() };
+            if action == ffi::SQLITE_SELECT {
+                switch.selects += 1;
+                if switch.selects == 3 {
+                    switch.error = switch
+                        .writer
+                        .execute_batch(
+                            "BEGIN IMMEDIATE;
+                             UPDATE app_settings SET value='downloaded' WHERE key='xberg_source';
+                             UPDATE app_settings SET value='C:/new-downloaded'
+                                 WHERE key IN ('xberg_directory','xberg_downloaded_directory');
+                             COMMIT;",
+                        )
+                        .err();
+                    if switch.error.is_some() {
+                        return ffi::SQLITE_DENY;
+                    }
+                }
+            }
+            ffi::SQLITE_OK
+        }
+
+        let root = tempfile::tempdir().unwrap();
+        let reader = super::open(root.path()).unwrap();
+        reader
+            .execute_batch(
+                "PRAGMA journal_mode=WAL;
+                 INSERT INTO app_settings(key,value) VALUES
+                     ('xberg_source','custom'),
+                     ('xberg_directory','C:/old-custom'),
+                     ('xberg_custom_directory','C:/old-custom'),
+                     ('xberg_downloaded_directory','C:/old-downloaded');",
+            )
+            .unwrap();
+        let writer = super::open(root.path()).unwrap();
+        let mut switch = Switch {
+            writer: &writer,
+            selects: 0,
+            error: None,
+        };
+        // 使用原生 authorizer 仅控制提交点，不额外开启生产 rusqlite 特性。
+        let installed = unsafe {
+            ffi::sqlite3_set_authorizer(
+                reader.handle(),
+                Some(switch_before_custom_read),
+                (&mut switch as *mut Switch<'_>).cast(),
+            )
+        };
+        assert_eq!(installed, ffi::SQLITE_OK);
+        let saved = super::settings_from_db(root.path(), &reader);
+        let removed = unsafe {
+            ffi::sqlite3_set_authorizer(reader.handle(), None, std::ptr::null_mut())
+        };
+        assert_eq!(removed, ffi::SQLITE_OK);
+        assert!(switch.selects >= 3, "必须经过指定的跨提交读取边界");
+        assert!(switch.error.is_none(), "第二连接必须成功提交来源切换");
+        let saved = saved.unwrap();
+        assert_eq!(saved.source, super::Source::Custom);
+        assert_eq!(saved.custom, Some(PathBuf::from("C:/old-custom")));
+        assert_eq!(
+            saved.downloaded,
+            Some(PathBuf::from("C:/old-downloaded")),
+            "不能混入来源切换后才提交的下载路径"
+        );
+        let latest = super::settings_from_db(root.path(), &reader).unwrap();
+        assert_eq!(latest.source, super::Source::Downloaded);
+        assert_eq!(
+            latest.downloaded,
+            Some(PathBuf::from("C:/new-downloaded"))
+        );
     }
 }

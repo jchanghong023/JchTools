@@ -205,14 +205,26 @@ pub fn scan_markdown(
         ensure_root_is_real_directory(root)?;
         let mut rows: Vec<(SystemTime, MergeEntry)> = Vec::new();
         let max_depth = if recursive { usize::MAX } else { 1 };
-        for item in WalkDir::new(root)
+        let mut walker = WalkDir::new(root)
             .follow_links(false)
             // walkdir 2.5 起根链接默认被跟随（与 follow_links 无关），必须显式关闭（M-02）
             .follow_root_links(false)
             .min_depth(1)
             .max_depth(max_depth)
-        {
+            .into_iter();
+        while let Some(item) = walker.next() {
             let entry = item.with_context(|| format!("扫描目录失败：{}", root.display()))?;
+            // M-02：is_symlink 只涵盖部分 reparse tag；其他重解析文件/目录同样排除。
+            // Windows 下目录项已缓存不跟随链接的属性，复用它避免额外属性读取。
+            let meta = entry
+                .metadata()
+                .with_context(|| format!("读取文件属性失败：{}", entry.path().display()))?;
+            if crate::fsutil::is_link(&meta) {
+                if entry.file_type().is_dir() {
+                    walker.skip_current_dir();
+                }
+                continue;
+            }
             if !entry.file_type().is_file() {
                 continue;
             }
@@ -234,8 +246,6 @@ pub fn scan_markdown(
                 .file_name()
                 .map(|name| name.to_string_lossy().into_owned())
                 .unwrap_or_default();
-            let meta = std::fs::metadata(path)
-                .with_context(|| format!("读取文件属性失败：{}", path.display()))?;
             rows.push((
                 effective_created(&meta),
                 MergeEntry {
@@ -329,10 +339,14 @@ pub fn natural_cmp(a: &str, b: &str) -> std::cmp::Ordering {
                 } else if y.is_ascii_digit() {
                     return x.cmp(&y).then(Ordering::Greater);
                 } else {
-                    match x.cmp(&y) {
+                    // M-03 按「段序列」比较：非数字段 a 是 a! 的前缀时，
+                    // 必须先以短段决胜，不能拿下一数字段的 2 与 ! 混比。
+                    let aend = ai.iter().position(u8::is_ascii_digit).unwrap_or(ai.len());
+                    let bend = bi.iter().position(u8::is_ascii_digit).unwrap_or(bi.len());
+                    match ai[..aend].cmp(&bi[..bend]) {
                         Ordering::Equal => {
-                            ai = &ai[1..];
-                            bi = &bi[1..];
+                            ai = &ai[aend..];
+                            bi = &bi[bend..];
                         }
                         other => return other,
                     }
@@ -799,6 +813,23 @@ fn merge_task(
     }
 }
 
+/// U-12：无换行的超长行也按 256 KiB 读取块响应暂停/取消，仍只交付完整原始行。
+fn read_merge_line(
+    reader: &mut impl BufRead,
+    line: &mut Vec<u8>,
+    control: &Control,
+) -> Result<usize> {
+    let mut read = 0;
+    loop {
+        let got = (&mut *reader).take(256 * 1024).read_until(b'\n', line)?;
+        read += got;
+        if got == 0 || line.last() == Some(&b'\n') {
+            return Ok(read);
+        }
+        control.checkpoint()?;
+    }
+}
+
 /// 逐文件逐行把 `entries` 写入已打开的 `target`（M-04~M-06 转换规则与文件边界逻辑）。
 fn write_merge_entries(
     entries: &[MergeEntry],
@@ -833,11 +864,11 @@ fn write_merge_entries(
             let mut shifter = HeadingShift::default();
             let mut first_line = true;
             let mut lines_since_checkpoint = 0usize;
+            let mut line: Vec<u8> = Vec::with_capacity(1024);
             loop {
-                let mut line: Vec<u8> = Vec::with_capacity(1024);
+                line.clear();
                 item_stage = "input_read";
-                let read = reader
-                    .read_until(b'\n', &mut line)
+                let read = read_merge_line(&mut reader, &mut line, control)
                     .with_context(|| format!("读取输入文件失败：{}", entry.path.display()))?;
                 if read == 0 {
                     break;
@@ -2034,5 +2065,56 @@ mod tests {
             .expect("取消后任务必须及时收尾");
         let error = result.expect_err("取消中的拆分必须失败收尾");
         assert!(error.contains("取消"), "取消必须以明确错误收尾：{error}");
+    }
+
+    // 覆盖 M-07/U-12：超大无换行正文仍须在文件内响应暂停/取消，
+    // 不能等整行读取、转换完并发出 FileCompleted 后才停止。
+    #[test]
+    fn merge_stop_is_timely_inside_single_long_line() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        write(&root.join("long.md"), &"x".repeat(2 * 1024 * 1024));
+        let output = root.join("merged.md");
+        let entries = scan_markdown(root, true, Some(&output)).unwrap();
+        let control = Arc::new(Control::default());
+        let worker_control = Arc::clone(&control);
+        let worker_output = output.clone();
+        let (started_tx, started_rx) = mpsc::channel();
+        let (completed_tx, completed_rx) = mpsc::channel();
+        let (result_tx, result_rx) = mpsc::channel();
+        let worker = std::thread::spawn(move || {
+            let result = merge_markdown_with_events(
+                &entries,
+                &worker_output,
+                false,
+                &worker_control,
+                &|event| {
+                    match event {
+                        MdProgress::FileStarted(..) => {
+                            worker_control.pause(true);
+                            started_tx.send(()).unwrap();
+                        }
+                        MdProgress::FileCompleted(..) => {
+                            completed_tx.send(()).unwrap();
+                        }
+                    }
+                    Ok(())
+                },
+            );
+            result_tx.send(result.map_err(|error| format!("{error:#}"))).unwrap();
+        });
+        started_rx.recv_timeout(Duration::from_secs(10)).unwrap();
+        let premature_completion = completed_rx.recv_timeout(Duration::from_millis(400));
+        control.cancel();
+        let result = result_rx.recv_timeout(Duration::from_secs(10)).unwrap();
+        worker.join().unwrap();
+        assert!(
+            premature_completion.is_err(),
+            "暂停期间不能把无换行的大文件处理完成"
+        );
+        assert!(result.unwrap_err().contains("取消"));
+        assert!(!output.exists(), "取消不得落盘输出");
+        assert_eq!(fs::read(root.join("long.md")).unwrap(), vec![b'x'; 2 * 1024 * 1024]);
+        assert_eq!(fs::read_dir(root).unwrap().count(), 1, "取消须清理自有临时文件");
     }
 }

@@ -164,3 +164,73 @@ fn connected_component_keeps_existing_hardlink_and_deletes_independent_copy() {
     assert_eq!(deletions.len(), 1, "硬链接不另计删除计划：{deletions:?}");
     assert_eq!(deletions[0].source, "C/report (1).txt");
 }
+
+/// 覆盖 C-02/C-03：不同名开启后，同尺寸候选不再受同名、副本名开关限制。
+#[test]
+fn other_names_enabled_deduplicates_same_and_copy_names() {
+    for names in [
+        ["A/report.txt", "B/report.txt"],
+        ["A/report.txt", "B/report (1).txt"],
+    ] {
+        let temp = TempDir::new().unwrap();
+        let root = temp.path().join("data");
+        let state = temp.path().join("state");
+        for (index, name) in names.iter().enumerate() {
+            let source = root.join(name);
+            fs::create_dir_all(source.parent().unwrap()).unwrap();
+            fs::write(&source, b"same-content").unwrap();
+            set_file_mtime(
+                &source,
+                FileTime::from_unix_time(10 + i64::try_from(index).unwrap(), 0),
+            )
+            .unwrap();
+        }
+        let config = Config {
+            dedup_same_name: false,
+            dedup_copy_names: false,
+            dedup_other_names: true,
+            clean_junk: false,
+            clean_copy_name: false,
+            ..Config::default()
+        };
+        let task = engine::prepare_at(&root, config, Context::default(), &state).unwrap();
+        let db = jchtools::db::Database::open(&task.directory).unwrap();
+        let deletions = db.actions_page_filtered(0, 100, Some("delete")).unwrap();
+        assert_eq!(task.summary.planned_delete, 1, "同尺寸同内容必须去重：{names:?}");
+        assert_eq!(deletions.len(), 1);
+        assert_eq!(deletions[0].source, names[0]);
+        assert_eq!(deletions[0].keeper.as_ref().unwrap().0, names[1]);
+        drop(db);
+        let applied = engine::apply(&task.directory, Context::default()).unwrap();
+        assert_eq!(applied.summary.errors, 0);
+        assert!(!root.join(names[0]).exists(), "只删除较旧副本");
+        let kept_name = std::path::Path::new(names[1]).file_name().unwrap();
+        assert_eq!(fs::read(root.join("文档").join(kept_name)).unwrap(), b"same-content");
+    }
+}
+
+/// 覆盖 C-02/S-03：放开名称范围不能把等尺寸、不同内容文件判成副本。
+#[test]
+fn other_names_enabled_keeps_same_size_different_content() {
+    let temp = TempDir::new().unwrap();
+    let root = temp.path().join("data");
+    let state = temp.path().join("state");
+    fs::create_dir_all(root.join("A")).unwrap();
+    fs::create_dir_all(root.join("B")).unwrap();
+    fs::write(root.join("A/report.txt"), b"first").unwrap();
+    fs::write(root.join("B/report (1).txt"), b"other").unwrap();
+    let config = Config {
+        dedup_same_name: false,
+        dedup_copy_names: false,
+        dedup_other_names: true,
+        clean_junk: false,
+        clean_copy_name: false,
+        ..Config::default()
+    };
+    let task = engine::prepare_at(&root, config, Context::default(), &state).unwrap();
+    assert_eq!(task.summary.planned_delete, 0);
+    let applied = engine::apply(&task.directory, Context::default()).unwrap();
+    assert_eq!(applied.summary.errors, 0);
+    assert_eq!(fs::read(root.join("文档/report.txt")).unwrap(), b"first");
+    assert_eq!(fs::read(root.join("文档/report (1).txt")).unwrap(), b"other");
+}

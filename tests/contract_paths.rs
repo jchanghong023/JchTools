@@ -34,3 +34,22 @@ fn git_marker_name_is_case_insensitive() {
     fs::write(root.path().join(".GIT"), b"gitdir: elsewhere").unwrap();
     assert!(fsutil::is_git_root(root.path()).unwrap());
 }
+
+// 覆盖 H-07 / X-04：合法 Unicode 空白属于原扩展名，冲突改名不得隐式修剪。
+#[test]
+fn archive_collision_preserves_unicode_whitespace_in_extension() {
+    let root = tempfile::tempdir().unwrap();
+    for whitespace in ['\u{00a0}', '\u{2003}', '\u{3000}'] {
+        let name = format!("资料.txt{whitespace}");
+        fsutil::validate_component(&name).unwrap();
+        let original = root.path().join(&name);
+        fs::write(&original, b"existing").unwrap();
+        let target = fsutil::unique_target(root.path(), &original).unwrap();
+        assert_eq!(
+            target.file_name().unwrap().to_str().unwrap(),
+            format!("资料 (1).txt{whitespace}"),
+            "只允许修改主体，扩展名必须逐字符保留"
+        );
+        assert_eq!(fs::read(&original).unwrap(), b"existing");
+    }
+}

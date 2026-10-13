@@ -5,7 +5,10 @@
 fn main() {
     match std::env::args().nth(1).as_deref() {
         Some("--capabilities") => {
-            println!("{{\"shared_xberg_protocol\":2,\"background_service_protocol\":1}}");
+            println!(
+                "{{\"shared_xberg_protocol\":2,\"background_service_protocol\":1,\"test_hooks\":{}}}",
+                cfg!(feature = "test-hooks")
+            );
         }
         Some("--xberg-broker") => {
             // P-10：代理进程落盘诊断日志（IPC 与引擎生命周期的关键证据）。

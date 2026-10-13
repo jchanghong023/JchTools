@@ -239,3 +239,116 @@ pub fn format_arguments(arguments: &[String]) -> String {
         .collect::<Vec<_>>()
         .join(" ")
 }
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::expect_used)]
+mod tests {
+    use crate::acp_api::{settings, ServiceConfig, ServiceErrorKind};
+    use std::process::Command;
+
+    // 沿用日志摘要器的引号/转义边界：头部使用 atom，span/事件文本使用 quoted。
+    // 只比较无转义的稳定标识符，不能把正文中的 key=value 当成独立字段。
+    fn log_field<'a>(line: &'a str, name: &str) -> Option<&'a str> {
+        let mut result = None;
+        let mut start = 0;
+        let mut quoted = false;
+        let mut escaped = false;
+        for (index, character) in line
+            .char_indices()
+            .chain(std::iter::once((line.len(), ' ')))
+        {
+            if escaped {
+                escaped = false;
+            } else if quoted && character == '\\' {
+                escaped = true;
+            } else if character == '"' {
+                quoted = !quoted;
+            } else if !quoted && character.is_whitespace() {
+                if let Some((key, value)) = line[start..index].split_once('=') {
+                    if key == name {
+                        // 事件字段在 span 链之后，同名字段以事件自身的值为准。
+                        result = Some(
+                            value
+                                .strip_prefix('"')
+                                .and_then(|value| value.strip_suffix('"'))
+                                .unwrap_or(value),
+                        );
+                    }
+                }
+                start = index + character.len_utf8();
+            }
+        }
+        result
+    }
+
+    /// 覆盖 P-10/AH-09：默认 INFO 的真实隔离日志包含配置开始/最终结果，不记录启动参数。
+    #[test]
+    fn configuration_operations_are_recorded_at_default_info_without_secrets() {
+        const CHILD: &str = "JCHTOOLS_ACP_SETTINGS_LOG_CHILD";
+        const TEST: &str =
+            "acp_api::settings::tests::configuration_operations_are_recorded_at_default_info_without_secrets";
+        if let Some(root) = std::env::var_os(CHILD) {
+            let root = std::path::PathBuf::from(root);
+            let guard = crate::logging::init(&root).expect("隔离诊断日志必须成功初始化");
+            let config = ServiceConfig {
+                executable: "private-agent-executable".into(),
+                arguments: vec!["private-agent-argument".into()],
+                port: 19326,
+            };
+            settings::save_config(&config).unwrap();
+            assert_eq!(settings::load_config().unwrap(), Some(config.clone()));
+            assert!(settings::workspace_dir().unwrap().is_dir());
+            let mut invalid = config.clone();
+            invalid.port = 0;
+            assert_eq!(
+                settings::save_config(&invalid).unwrap_err().kind,
+                ServiceErrorKind::InvalidConfig
+            );
+            assert_eq!(settings::load_config().unwrap(), Some(config));
+            drop(guard);
+            return;
+        }
+        let temp = tempfile::tempdir().unwrap();
+        let output = Command::new(std::env::current_exe().unwrap())
+            .args(["--exact", TEST, "--nocapture"])
+            .env(CHILD, temp.path())
+            .env("JCHTOOLS_TEST_STATE_DIR", temp.path())
+            .env_remove("JCH_LOG_LEVEL")
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "{}\n{}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+        let mut logs = String::new();
+        for entry in std::fs::read_dir(temp.path().join(crate::logging::LOG_DIR)).unwrap() {
+            let path = entry.unwrap().path();
+            if path.extension().is_some_and(|extension| extension == "log") {
+                logs.push_str(&std::fs::read_to_string(path).unwrap());
+            }
+        }
+        for operation in ["save_config", "load_config", "workspace_dir"] {
+            for event in ["acp_call_started", "acp_call_completed"] {
+                assert!(
+                    logs.lines().any(|line| {
+                        log_field(line, "level") == Some("INFO")
+                            && log_field(line, "component") == Some("acp_settings")
+                            && log_field(line, "operation") == Some(operation)
+                            && log_field(line, "event") == Some(event)
+                    }),
+                    "默认 INFO 必须记录 {operation} 的 {event}"
+                );
+            }
+        }
+        assert!(logs.lines().any(|line| {
+            log_field(line, "level") == Some("ERROR")
+                && log_field(line, "component") == Some("acp_settings")
+                && log_field(line, "operation") == Some("save_config")
+                && log_field(line, "event") == Some("acp_call_failed")
+        }));
+        assert!(!logs.contains("private-agent-executable"));
+        assert!(!logs.contains("private-agent-argument"));
+    }
+}

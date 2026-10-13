@@ -4,6 +4,7 @@
 //! 1. `<exe 目录>/resources/7zip/`：发布包与开发环境的显式引擎；
 //! 2. 已释放的内嵌副本：`<用户数据目录>/JchTools/engine/<版本-哈希>/` 及其下的
 //!    `release-*` 独立释放目录；
+//!    固定目录本身被文件占用时，独立副本保存在同级 `<版本-哈希>-releases/` 下。
 //! 3. 从 EXE 内嵌的压缩数据释放：固定位置只缺文件时补齐；固定位置被无效文件占用时，
 //!    释放到新的独立自有位置（`release-*` 子目录），不删占用文件。
 //!
@@ -417,8 +418,26 @@ fn candidate_problems(directory: &Path) -> Vec<Problem> {
     problems
 }
 
+/// 固定目录本身被非目录项占用时，不可能在其下创建独立副本；改用同级稳定容器。
+/// 后续解析与新释放复用同一位置，既有占用项始终保留（E-02）。
+fn independent_release_base(base: &Path) -> Result<PathBuf> {
+    match std::fs::symlink_metadata(base) {
+        Ok(metadata) if !metadata.is_dir() => {
+            let mut name = base.file_name().context("引擎目录缺少名称")?.to_os_string();
+            name.push("-releases");
+            Ok(base.with_file_name(name))
+        }
+        Ok(_) => Ok(base.to_path_buf()),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(base.to_path_buf()),
+        Err(error) => Err(error).context("无法检查固定引擎释放目录"),
+    }
+}
+
 /// base 下已有的独立释放目录（release-* 前缀），按目录名排序保证顺序确定。
 fn existing_release_dirs(base: &Path) -> Vec<PathBuf> {
+    let Ok(base) = independent_release_base(base) else {
+        return Vec::new();
+    };
     let Ok(entries) = std::fs::read_dir(base) else {
         return Vec::new();
     };
@@ -440,7 +459,8 @@ fn existing_release_dirs(base: &Path) -> Vec<PathBuf> {
 /// 在 base 下用独占创建语义新建一个独立释放目录 `release-<纳秒>-<进程号>-<序号>`，
 /// 并发进程不会挤进同一个目录。
 fn fresh_release_dir(base: &Path) -> Result<PathBuf> {
-    std::fs::create_dir_all(base)
+    let base = independent_release_base(base)?;
+    std::fs::create_dir_all(&base)
         .with_context(|| format!("创建引擎目录失败：{}", base.display()))?;
     let nanos = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
@@ -649,6 +669,46 @@ fn write_atomic(target: &Path, bytes: &[u8]) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // 覆盖 E-02：固定释放目录本身被文件占用时，使用同级独立目录，不删除占用文件。
+    #[test]
+    fn resolve_uses_sibling_release_when_fixed_directory_is_a_file() {
+        if !embedded_available() {
+            eprintln!("warning: 未内嵌 7-Zip，固定目录被文件占用的回归未执行");
+            return;
+        }
+        let root = tempfile::tempdir().unwrap();
+        let base = root.path().join("fixed-engine");
+        std::fs::write(&base, b"user owned file").unwrap();
+        let executable = resolve_among(None, Some(&base)).unwrap();
+        assert_valid_executable(&executable);
+        assert_eq!(
+            executable.parent().unwrap().parent().unwrap(),
+            root.path().join("fixed-engine-releases")
+        );
+        assert_eq!(std::fs::read(&base).unwrap(), b"user owned file");
+        assert_eq!(
+            resolve_among(None, Some(&base)).unwrap(),
+            executable,
+            "后续启动须复用已校验的同级独立副本"
+        );
+    }
+
+    // 覆盖 E-02：无内嵌构建也能验证固定目录占用时的独立释放路径规划与复用发现。
+    #[test]
+    fn independent_release_preserves_fixed_directory_occupier() {
+        let root = tempfile::tempdir().unwrap();
+        let base = root.path().join("fixed-engine");
+        std::fs::write(&base, b"user owned file").unwrap();
+        let first = fresh_release_dir(&base).unwrap();
+        let second = fresh_release_dir(&base).unwrap();
+        assert_ne!(first, second);
+        assert_eq!(first.parent().unwrap(), root.path().join("fixed-engine-releases"));
+        let mut expected = vec![first, second];
+        expected.sort();
+        assert_eq!(existing_release_dirs(&base), expected);
+        assert_eq!(std::fs::read(base).unwrap(), b"user owned file");
+    }
 
     /// 释放临时文件不得覆盖碰巧使用旧命名格式的既有文件。
     // 覆盖 E-02

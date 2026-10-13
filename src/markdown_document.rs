@@ -469,12 +469,11 @@ fn rewrite_image_links_in_line(
                 continue;
             }
             let destination_start = close_alt + 2;
-            let Some(close_link_rel) = line[destination_start..].find(')') else {
+            let Some(close_link) = image_link_end(line, destination_start) else {
                 out.push('!');
                 i += 1;
                 continue;
             };
-            let close_link = destination_start + close_link_rel;
             let destination = line[destination_start..close_link].trim_start();
             let leading = line[destination_start..close_link].len() - destination.len();
             let token_end = destination
@@ -482,10 +481,16 @@ fn rewrite_image_links_in_line(
                 .find(|(_, character)| character.is_whitespace())
                 .map_or(destination.len(), |(index, _)| index);
             let token = &destination[..token_end];
+            let (token, bracketed) = match token.strip_prefix('<').and_then(|s| s.strip_suffix('>'))
+            {
+                Some(token) => (token, true),
+                None => (token, false),
+            };
             if token == from {
-                out.push_str(&line[i..destination_start + leading]);
+                let token_start = destination_start + leading + usize::from(bracketed);
+                out.push_str(&line[i..token_start]);
                 out.push_str(to);
-                out.push_str(&line[destination_start + leading + token.len()..close_link]);
+                out.push_str(&line[token_start + token.len()..close_link]);
                 out.push(')');
                 i = close_link + 1;
                 changed = true;
@@ -503,6 +508,49 @@ fn rewrite_image_links_in_line(
         i += ch.len_utf8();
     }
     (out, changed)
+}
+
+/// 图片目标可含平衡括号，title 可含字面括号；不能在 title 内提前结束链接，
+/// 否则其余 title 文本会被当作正文图片改写。反斜杠转义与尖括号目标保持原样。
+fn image_link_end(line: &str, start: usize) -> Option<usize> {
+    let bytes = line.as_bytes();
+    let mut depth = 1usize;
+    let mut quote = None;
+    let mut angle = false;
+    let mut i = start;
+    while i < bytes.len() {
+        let byte = bytes[i];
+        if byte == b'\\' && bytes.get(i + 1).is_some_and(u8::is_ascii_punctuation) {
+            i += 2;
+            continue;
+        }
+        if let Some(delimiter) = quote {
+            if byte == delimiter {
+                quote = None;
+            }
+        } else if angle {
+            if byte == b'>' {
+                angle = false;
+            }
+        } else {
+            match byte {
+                b'<' if line[start..i].trim().is_empty() => angle = true,
+                b'"' | b'\'' if depth == 1 && i > start && bytes[i - 1].is_ascii_whitespace() => {
+                    quote = Some(byte);
+                }
+                b'(' => depth += 1,
+                b')' => {
+                    depth -= 1;
+                    if depth == 0 {
+                        return Some(i);
+                    }
+                }
+                _ => {}
+            }
+        }
+        i += 1;
+    }
+    None
 }
 
 /// 查找同长度的关闭反引号串；空段落或新围栏是代码跨度的块边界。
@@ -929,5 +977,42 @@ mod tests {
             assert_eq!(output.markdown, expected);
             assert_eq!(output.media.len(), 1);
         }
+    }
+
+    // 覆盖 T-14/T-17：外部图片的 title 中含括号和图片字面量时，
+    // 只改写其后的真实引用，不能截断 title 后把字面量当成图片。
+    #[test]
+    fn image_titles_with_parentheses_preserve_literal_references() {
+        for content in [
+            "![外图](external.png \"说明 ) ![字面](image_0.png)\") ![图](image_0.png)",
+            "![外图](external_(1).png '说明 ) ![字面](image_0.png)') ![图](image_0.png)",
+            "![外图](external.png (说明 ![字面](image_0.png))) ![图](image_0.png)",
+        ] {
+            let envelope = response(&json!({
+                "content": content,
+                "images": [{"image_index": 0, "format": "png", "data_base64": "aGVsbG8="}]
+            }));
+            let output = parse_document_response(&envelope, "m").unwrap();
+            let (literal, _) = content.rsplit_once(" ![图]").unwrap();
+            assert_eq!(output.markdown, format!("{literal} ![图](m/image_0.png)"));
+            assert_eq!(output.media.len(), 1);
+            assert!(output.warnings.is_empty());
+        }
+    }
+
+    // 覆盖 T-14：CommonMark 尖括号目标同样是正文图片引用；
+    // 目录前缀只进入目标，尖括号、title 和其余正文保持原样。
+    #[test]
+    fn angle_bracket_image_destinations_are_materialized() {
+        let envelope = response(&json!({
+            "content": "![图](<image_0.png> \"说明 )\")",
+            "images": [{"image_index": 0, "format": "png", "data_base64": "aGVsbG8="}]
+        }));
+        let output = parse_document_response(&envelope, "m").unwrap();
+        assert_eq!(output.markdown, "![图](<m/image_0.png> \"说明 )\")");
+        assert_eq!(output.media.len(), 1);
+        assert_eq!(output.media[0].relative, "m/image_0.png");
+        assert_eq!(output.media[0].bytes, b"hello");
+        assert!(output.warnings.is_empty());
     }
 }

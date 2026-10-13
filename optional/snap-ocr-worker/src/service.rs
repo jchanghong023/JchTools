@@ -956,9 +956,35 @@ extern "system" {
 const HKEY_CURRENT_USER: usize = (-2_147_483_647_isize).cast_unsigned();
 const RUN_KEY: &str = "Software\\Microsoft\\Windows\\CurrentVersion\\Run";
 const VALUE: &str = "JchToolsSnapOcr";
+
+// 测试自启只写非 Run 子键，避免资产探测和单测更改用户登录启动项。
+fn autostart_registry_path() -> Result<String, String> {
+    if cfg!(any(test, feature = "test-hooks")) {
+        if let Some(root) = std::env::var_os("JCHTOOLS_SNAP_OCR_TEST_ASSET_ROOT") {
+            let root = PathBuf::from(root);
+            if !root.is_absolute() {
+                return Err("测试截图资产目录必须为绝对路径".into());
+            }
+            let digest = Sha256::digest(root.as_os_str().as_encoded_bytes());
+            return Ok(format!(r"Software\JchTools\Tests\SnapOcr\{digest:x}"));
+        }
+        if cfg!(test) {
+            return Ok(format!(
+                r"Software\JchTools\Tests\SnapOcr\unit-{}",
+                std::process::id()
+            ));
+        }
+    }
+    Ok(RUN_KEY.to_owned())
+}
+
 fn run_value() -> Result<Option<String>, String> {
+    read_autostart_value(&autostart_registry_path()?)
+}
+
+fn read_autostart_value(registry_path: &str) -> Result<Option<String>, String> {
     let mut key = 0usize;
-    let path = protocol::wide(RUN_KEY);
+    let path = protocol::wide(registry_path);
     let name = protocol::wide(VALUE);
     // SAFETY: 预定义键 HKCU 与 NUL 结尾宽字符串路径；key 出参指向本栈变量，由本函数关闭。
     let opened =
@@ -1019,6 +1045,10 @@ fn run_value() -> Result<Option<String>, String> {
     Ok(Some(String::from_utf16_lossy(&units)))
 }
 fn set_autostart(enabled: bool) -> Result<(), String> {
+    set_autostart_value(&autostart_registry_path()?, enabled)
+}
+
+fn set_autostart_value(registry_path: &str, enabled: bool) -> Result<(), String> {
     let command = if enabled {
         let exe = std::env::current_exe().map_err(|_| "无法定位截图服务程序".to_string())?;
         format!("\"{}\" --service--autostart", exe.display())
@@ -1040,7 +1070,7 @@ fn set_autostart(enabled: bool) -> Result<(), String> {
         None
     };
     let mut key = 0usize;
-    let path = protocol::wide(RUN_KEY);
+    let path = protocol::wide(registry_path);
     let name = protocol::wide(VALUE);
     // Windows Run 项仅修改本功能的值，不动其他应用。
     // SAFETY: HKCU 预定义键与 NUL 结尾宽字符串；key 出参指向本栈变量，由本函数关闭。
@@ -3010,6 +3040,68 @@ mod tests {
         service.release_closed_result();
         assert!(service.result.is_none());
         assert!(weak.upgrade().is_none(), "O-22/O-29 关闭后释放组件及其惰性文本缓存");
+        Ok(())
+    }
+
+    // 覆盖 O-15/O-29：测试服务的自启读写只能作用于本轮测试值，
+    // 与代表原有用户设置的隔离 sentinel 无关；绝不读取或更改真实产品 Run 值。
+    #[test]
+    fn isolated_service_autostart_preserves_existing_sentinel(
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        const CHILD: &str = "JCHTOOLS_AUTOSTART_ISOLATION_TEST_CHILD";
+        if std::env::var_os(CHILD).is_none() {
+            let status = std::process::Command::new(std::env::current_exe()?)
+                .args([
+                    "--exact",
+                    "service::tests::isolated_service_autostart_preserves_existing_sentinel",
+                    "--test-threads=1",
+                ])
+                .env(CHILD, "1")
+                .env_remove("JCHTOOLS_SNAP_OCR_TEST_ASSET_ROOT")
+                .status()?;
+            assert!(status.success(), "隔离自启服务回归必须通过");
+            return Ok(());
+        }
+        struct Values(Vec<String>);
+        impl Drop for Values {
+            fn drop(&mut self) {
+                for path in &self.0 {
+                    assert!(path.starts_with(r"Software\JchTools\Tests\SnapOcr\"));
+                    super::set_autostart_value(path, false)
+                        .expect("必须清理本轮创建的测试自启值");
+                    let wide = super::protocol::wide(path);
+                    // SAFETY: 只删除本测试独占子键，生产 Run 路径不参与。
+                    let status = unsafe {
+                        windows_sys::Win32::System::Registry::RegDeleteKeyW(
+                            windows_sys::Win32::System::Registry::HKEY_CURRENT_USER,
+                            wide.as_ptr(),
+                        )
+                    };
+                    assert_eq!(status, 0, "必须清理本轮注册表子键");
+                }
+            }
+        }
+        let temp = tempfile::tempdir()?;
+        let sentinel = format!(r"Software\JchTools\Tests\SnapOcr\unit-{}", std::process::id());
+        let mut cleanup = Values(vec![sentinel.clone()]);
+        super::set_autostart_value(&sentinel, true).map_err(std::io::Error::other)?;
+        let saved = super::read_autostart_value(&sentinel).map_err(std::io::Error::other)?;
+        assert!(saved.is_some());
+        std::env::set_var("JCHTOOLS_SNAP_OCR_TEST_ASSET_ROOT", temp.path());
+        let isolated = super::autostart_registry_path().map_err(std::io::Error::other)?;
+        assert_ne!(isolated, sentinel);
+        cleanup.0.push(isolated);
+        super::set_autostart(true).map_err(std::io::Error::other)?;
+        assert!(super::autostart_enabled());
+        let (mut service, _work_rx) = ready_busy_service(temp.path());
+        service.busy = false;
+        service.save_settings("Ctrl+Alt+O", false).map_err(std::io::Error::other)?;
+        assert!(!super::autostart_enabled(), "服务保存应关闭本轮测试自启");
+        assert_eq!(
+            super::read_autostart_value(&sentinel).map_err(std::io::Error::other)?,
+            saved,
+            "原有 sentinel 设置必须逐字保留"
+        );
         Ok(())
     }
 

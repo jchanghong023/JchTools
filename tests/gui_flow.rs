@@ -109,6 +109,65 @@ fn take_failures(failures: &Failures) -> Vec<String> {
     )
 }
 
+/// 所有真实窗口用例先在独立子进程配置隔离环境，避免共享进程改环境与后台观察线程竞争。
+/// 子进程执行原测试及全部断言；空配置保证公开 GUI 启动不触碰用户后台服务。
+fn run_isolated_test(name: &str) -> bool {
+    const CHILD_ROOT: &str = "JCHTOOLS_GUI_FLOW_CHILD_ROOT";
+    assert!(
+        cfg!(feature = "test-hooks"),
+        "GUI 流程测试必须启用 test-hooks 才能隔离配置"
+    );
+    if let Some(root) = std::env::var_os(CHILD_ROOT) {
+        let root = PathBuf::from(root);
+        assert_eq!(
+            jchtools::xberg_settings::state_dir().unwrap(),
+            root.join("state")
+        );
+        assert_eq!(jchtools::snap_ocr_assets::asset_root(), root.join("snap"));
+        assert!(
+            jchtools::snap_ocr_assets::pipe_name().starts_with(r"\\.\pipe\jchtools-snap-ocr-test-")
+        );
+        assert!(jchtools::acp_api::settings::load_config()
+            .unwrap()
+            .is_none());
+        assert!(jchtools::xberg_settings::load().unwrap().is_none());
+        return false;
+    }
+    let root = tempfile::tempdir().unwrap();
+    let mut child = std::process::Command::new(std::env::current_exe().unwrap())
+        .args(["--exact", name, "--nocapture"])
+        .env(CHILD_ROOT, root.path())
+        .env("JCHTOOLS_TEST_STATE_DIR", root.path().join("state"))
+        .env(
+            "JCHTOOLS_SNAP_OCR_TEST_ASSET_ROOT",
+            root.path().join("snap"),
+        )
+        .env(
+            "JCHTOOLS_MARKDOWN_TEST_ASSET_ROOT",
+            root.path().join("markdown"),
+        )
+        .env_remove("JCHTOOLS_TEST_ACP_SERVICE_EXE")
+        .spawn()
+        .expect("启动隔离 GUI 流程子进程");
+    let deadline = std::time::Instant::now() + Duration::from_secs(90);
+    loop {
+        if let Some(status) = child.try_wait().expect("读取 GUI 流程子进程状态") {
+            assert!(
+                status.success(),
+                "隔离 GUI 流程测试失败：{name}（{status}）"
+            );
+            return true;
+        }
+        if std::time::Instant::now() >= deadline {
+            // 只终止本测试启动的测试消费者，不强杀任何产品后台。
+            let _ = child.kill();
+            let _ = child.wait();
+            panic!("隔离 GUI 流程测试超时：{name}");
+        }
+        std::thread::sleep(Duration::from_millis(20));
+    }
+}
+
 fn dispatch_click(ui: &gui::AppWindow, x: f32, y: f32) {
     let position = slint::LogicalPosition::new(x, y);
     for event in [
@@ -266,6 +325,9 @@ fn drive_organizer(data: String, state_dir: PathBuf) -> OrganizerRun {
 // 覆盖 C-01, C-05, S-02（两段式确认执行全流程）
 #[test]
 fn plan_execution_confirmation_flow_runs_end_to_end() {
+    if run_isolated_test("plan_execution_confirmation_flow_runs_end_to_end") {
+        return;
+    }
     let fixture = make_fixture();
     let data = fixture.path().join("data");
     let state_dir: PathBuf = fixture.path().join("state");
@@ -341,6 +403,9 @@ fn plan_execution_confirmation_flow_runs_end_to_end() {
 // 排除树内的文件既不被归类也不被删除，目录结构原样保留）
 #[test]
 fn git_subtree_skip_is_visible_after_run_and_tree_untouched() {
+    if run_isolated_test("git_subtree_skip_is_visible_after_run_and_tree_untouched") {
+        return;
+    }
     let fixture = tempfile::tempdir().unwrap();
     let data = fixture.path().join("data");
     fs::create_dir_all(data.join("keepgit").join(".git")).unwrap();
@@ -415,6 +480,11 @@ fn git_subtree_skip_is_visible_after_run_and_tree_untouched() {
 // extract_confirm_text_discloses_deletion_rules 单元测试覆盖（零包流程按 X-02 不再进入确认执行）。
 #[test]
 fn extract_confirmation_discloses_source_deletion_and_leaves_files_untouched() {
+    if run_isolated_test(
+        "extract_confirmation_discloses_source_deletion_and_leaves_files_untouched",
+    ) {
+        return;
+    }
     let fixture = tempfile::tempdir().unwrap();
     let data = fixture.path().join("data");
     fs::create_dir_all(&data).unwrap();
@@ -527,6 +597,9 @@ fn extract_confirmation_discloses_source_deletion_and_leaves_files_untouched() {
 // 完成（MdDone），从而确定性地驱动该分支。
 #[test]
 fn stop_and_close_during_md_merge_quits_when_merge_finishes() {
+    if run_isolated_test("stop_and_close_during_md_merge_quits_when_merge_finishes") {
+        return;
+    }
     let fixture = tempfile::tempdir().unwrap();
     let docs = fixture.path().join("docs");
     fs::create_dir_all(&docs).unwrap(); // 空目录：合并立即以「没有 .md 文件」结束
@@ -586,6 +659,9 @@ fn stop_and_close_during_md_merge_quits_when_merge_finishes() {
 // 覆盖确认框把用户留在界面里。
 #[test]
 fn stop_and_close_skips_override_confirm_and_quits() {
+    if run_isolated_test("stop_and_close_skips_override_confirm_and_quits") {
+        return;
+    }
     let fixture = tempfile::tempdir().unwrap();
     let docs = fixture.path().join("docs");
     fs::create_dir_all(&docs).unwrap();
@@ -665,6 +741,9 @@ fn stop_and_close_skips_override_confirm_and_quits() {
 // 本体的可见性属 Slint 内部元素，无头断言只覆盖到该回调层。
 #[test]
 fn settings_markdown_and_snap_pages_gate_and_status_end_to_end() {
+    if run_isolated_test("settings_markdown_and_snap_pages_gate_and_status_end_to_end") {
+        return;
+    }
     let fixture = tempfile::tempdir().unwrap();
     let state_dir: PathBuf = fixture.path().join("state");
     fs::create_dir_all(&state_dir).unwrap();
@@ -799,6 +878,9 @@ fn settings_markdown_and_snap_pages_gate_and_status_end_to_end() {
 // 「返回检查」可关闭确认层，随后背景按钮重新可用。
 #[test]
 fn confirmation_blocks_background_controls_and_return_remains_available() {
+    if run_isolated_test("confirmation_blocks_background_controls_and_return_remains_available") {
+        return;
+    }
     let fixture = tempfile::tempdir().unwrap();
     let state_dir = fixture.path().join("state");
     fs::create_dir_all(&state_dir).unwrap();

@@ -122,6 +122,7 @@ def _run_checked(argv: list[str], timeout: float) -> subprocess.CompletedProcess
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE,
         text=True,
+        encoding="utf-8",
         errors="replace",
         start_new_session=sys.platform != "win32",
     ) as proc:
@@ -229,7 +230,7 @@ def time_suites(suites: list[Suite]) -> None:
 
 
 def time_individual_tests(suites: list[Suite], budget: float) -> list[PerTestRow]:
-    """用例级计时：慢套件逐用例 --exact 单跑，累计预算截停."""
+    """用例级计时：慢套件逐用例 --exact 单跑，等待与清理均受剩余总预算约束。."""
     print(f"[4/4] 用例级计时（套件阈值 {SLOW_SUITE_SECONDS}s，总预算 {budget:.0f}s）...")
     rows: list[PerTestRow] = []
     remaining = budget
@@ -240,7 +241,7 @@ def time_individual_tests(suites: list[Suite], budget: float) -> list[PerTestRow
     )
     for suite in slow:
         for name in suite.test_names:
-            if remaining <= 0.0:
+            if remaining <= PROCESS_TREE_CLEANUP_SECONDS:
                 rows.append(PerTestRow(suite.desc, name, None, "预算截停未测"))
                 continue
             started = time.perf_counter()
@@ -248,7 +249,7 @@ def time_individual_tests(suites: list[Suite], budget: float) -> list[PerTestRow
             try:
                 done = _run_checked(
                     [str(suite.exe), name, "--exact", "--format", "terse"],
-                    timeout=SINGLE_TEST_TIMEOUT,
+                    timeout=min(SINGLE_TEST_TIMEOUT, remaining),
                 )
                 if done.returncode != 0:
                     note = "失败"

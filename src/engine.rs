@@ -122,6 +122,7 @@ impl Job {
             tracing::warn!(event = "task_item_failed", task_id = %task_id, phase,
                 source = %crate::logging::safe_error(source),
                 target = %crate::logging::safe_error(target), size,
+                reason = %crate::logging::safe_error(reason),
                 result, error_type = "task_item_boundary", "关键任务逐项失败");
         } else {
             tracing::debug!(event = "task_item_result", task_id = %task_id, phase,
@@ -380,13 +381,30 @@ fn prepare_at_with(
             // 扫描即终态；树里既有压缩包按普通文件参与后续去重/归类。
             *stage = "scan";
             scan(&mut job, false, state, protected.as_deref())?;
+            // C-01：先确定永久清理项并退出活动候选，再计算存活项的完整哈希。
+            *stage = "cleanup_plan";
+            job.db.conn.execute_batch("BEGIN IMMEDIATE")?;
+            match planner::cleanup_candidates(&mut job) {
+                Ok(()) => job.db.conn.execute_batch("COMMIT")?,
+                Err(error) => {
+                    if job.db.conn.execute_batch("ROLLBACK").is_err() {
+                        tracing::warn!(
+                            event = "task_transaction_cleanup_failed",
+                            stage = "cleanup_plan_rollback",
+                            error_type = "database",
+                            "清理计划失败后的事务回滚失败"
+                        );
+                    }
+                    return Err(error);
+                }
+            }
             *stage = "hash";
             hash_candidates(&mut job)?;
             job.context
                 .status("生成去重、冲突、归类和清理计划（尚未执行这些操作）");
             *stage = "plan";
             job.db.conn.execute_batch("BEGIN IMMEDIATE")?;
-            match planner::build(&mut job) {
+            match planner::build_after_cleanup(&mut job) {
                 Ok(()) => job.db.conn.execute_batch("COMMIT")?,
                 Err(error) => {
                     if job.db.conn.execute_batch("ROLLBACK").is_err() {
@@ -521,10 +539,11 @@ fn extract_run_with(
                 "",
                 "完成",
                 &format!(
-                "解压结束：成功 {} 包（成功原包及分卷已永久删除）；未完全解开并移入「{}」 {} 包",
-                job.summary.archives_ok,
-                archive::QUARANTINE_DIR_NAME,
-                job.summary.archives_failed
+                    "解压结束：成功 {} 包（成功原包及分卷已永久删除）；未完全解开 {} 包；已移入「{}」 {} 个原包或分卷文件；未隔离或部分隔离的源项原地保留，详情见失败列表与日志",
+                    job.summary.archives_ok,
+                    job.summary.archives_failed,
+                    archive::QUARANTINE_DIR_NAME,
+                    job.summary.archives_quarantined
             ),
                 0,
             )?;
@@ -739,6 +758,8 @@ struct ScanSink {
     taint: HashSet<String>,
     /// 整树排除的 Git 目录（目录直接含 .git 的 rel）：只用于界面提示与 git_roots 表。
     git_skips: Vec<String>,
+    /// 扫描实际发现的隔离目录：只记录路径，不遍历内容。
+    quarantine_skips: Vec<String>,
     /// 必要 Git 边界检查失败时拒绝继续扫描/处理，不能把未知目录当作已排除。
     git_boundary_error: Option<String>,
 }
@@ -803,7 +824,8 @@ impl ScopeFilter<'_> {
                 return true;
             }
         }
-        if self.excluded.is_match(child_rel) || self.excluded.is_match(format!("{child_rel}/")) {
+        // 附录 C：匹配对象没有末尾分隔符，不虚构目录形态扩大排除范围。
+        if self.excluded.is_match(child_rel) {
             return true;
         }
         #[cfg(windows)]
@@ -841,6 +863,11 @@ fn walk_dir<'a>(
 ) {
     if ctx.control.checkpoint().is_err() {
         // 取消：主线程在汇合后统一以取消错误收尾，这里不再记账。
+        return;
+    }
+    // C-09：所选根本身是隔离容器时，同样不能扫描其文件内容。
+    if rel.is_empty() && ctx.scope.quarantine.is_some() && root_is_quarantine(dir) {
+        lock_sink(ctx.sink).quarantine_skips.push(rel);
         return;
     }
     // H-06：目录直接含 .git（目录或文件）即整树排除——在枚举子项之前判定，
@@ -941,6 +968,14 @@ fn walk_dir<'a>(
             format!("{rel}/{name}")
         };
         if ctx.scope.prunes(&child_rel, &name, &metadata) {
+            if metadata.is_dir()
+                && ctx
+                    .scope
+                    .quarantine
+                    .is_some_and(|quarantine| name.eq_ignore_ascii_case(quarantine))
+            {
+                lock_sink(ctx.sink).quarantine_skips.push(child_rel);
+            }
             // 被剪枝的条目盘上仍存在：其父目录不得按空目录处理。
             parent_tainted = true;
             continue;
@@ -1217,16 +1252,16 @@ fn special_prefixes(
             || executable_dir.is_some_and(|dir| root.starts_with(dir)),
     )
 }
-#[cfg_attr(
-    feature = "perf-tracing",
-    tracing::instrument(target = "perf", name = "scan", skip_all)
-)]
 /// 预览格式化：取前 3 项以「、」连接，超出 3 项时追加「 等」（扫描日志共用）。
 fn preview3(items: &[String]) -> String {
     let shown = items.iter().take(3).cloned().collect::<Vec<_>>().join("、");
     let more = if items.len() > 3 { " 等" } else { "" };
     format!("{shown}{more}")
 }
+#[cfg_attr(
+    feature = "perf-tracing",
+    tracing::instrument(target = "perf", name = "scan", skip_all)
+)]
 fn scan(job: &mut Job, enqueue: bool, state: &Path, protected: Option<&Path>) -> Result<()> {
     let control = job.context.control.clone();
     observe("scan", Some(&control), |stage| {
@@ -1255,22 +1290,6 @@ fn scan(job: &mut Job, enqueue: bool, state: &Path, protected: Option<&Path>) ->
             if target.starts_with(directory) {
                 job.log("扫描","","","提示",&format!("所选目录位于程序自身目录（{}）内；为避免误处理程序文件，扫描会跳过这个目录里的条目",directory.display()),0)?;
             }
-        }
-        // X-07 / C-09：「解压失败」是「递归解压」的失败暂存区，两个工具默认都不碰它；
-        // 目录存在时明确提示（C-09），没有则不打扰。
-        let quarantine = job.root.join(archive::QUARANTINE_DIR_NAME);
-        if quarantine.is_dir() {
-            job.log(
-                "扫描",
-                "",
-                "",
-                "提示",
-                &format!(
-                    "已跳过「{}」子目录：失败暂存区不参与本次处理（补救后把包移出即可重新处理）",
-                    archive::QUARANTINE_DIR_NAME
-                ),
-                0,
-            )?;
         }
         // S-04：任何缩小处理范围的选择都必须在日志里明确提示，避免静默漏处理。
         let mut reduced: Vec<String> = Vec::new();
@@ -1353,6 +1372,23 @@ fn scan(job: &mut Job, enqueue: bool, state: &Path, protected: Option<&Path>) ->
         }
         let mut git_roots = std::mem::take(&mut sink.git_skips);
         ensure_git_boundary_checked(sink.git_boundary_error.as_deref())?;
+        sink.quarantine_skips.sort();
+        sink.quarantine_skips.dedup();
+        for rel in &sink.quarantine_skips {
+            let shown = if rel.is_empty() {
+                job.root.display().to_string()
+            } else {
+                rel.clone()
+            };
+            job.log(
+                "扫描",
+                rel,
+                "",
+                "提示",
+                &format!("已跳过隔离目录「{shown}」：内容不参与本次处理；需要重试时请先移出"),
+                0,
+            )?;
+        }
         if !git_roots.is_empty() {
             // H-06：Git 整树保护必须明确提示处置结果（界面蓝条 + 日志），不静默跳过。
             // 解压流程里 Git 项目整树排除；目录整理流程里按 C-14 固定行为整体移入「Git项目集合」，
@@ -3290,6 +3326,179 @@ mod lock_tests {
             lock_dir_for(&dir, None).is_err(),
             "非 tasks 布局且无记录必须拒绝"
         );
+    }
+
+    fn r01_fixture() -> (tempfile::TempDir, PathBuf, PathBuf) {
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path().join("data");
+        fs::create_dir(&root).unwrap();
+        let state = temp.path().join("state");
+        (temp, root, state)
+    }
+
+    // 覆盖 S-04/H-05/附录 C：真实公开入口验证不附加虚构末尾分隔符。
+    #[test]
+    fn r01_exclusions_use_actual_relative_paths() {
+        let (_temp, root, state) = r01_fixture();
+        fs::create_dir(root.join("cache")).unwrap();
+        fs::write(root.join("keep.txt"), b"retained").unwrap();
+        let task = prepare_at(&root, Config {
+            exclusions: "cache/*;keep.txt/".into(),
+            ..Config::default()
+        }, TaskContext::default(), &state).unwrap();
+        assert_eq!(task.summary.scanned, 1);
+        assert_eq!(task.summary.planned_empty, 1);
+        apply(&task.directory, TaskContext::default()).unwrap();
+        assert!(!root.join("cache").exists());
+        assert_eq!(fs::read(root.join("文档/keep.txt")).unwrap(), b"retained");
+    }
+
+    // 覆盖 C-09：选择隔离容器本身也不能纳入其普通文件。
+    #[test]
+    fn r01_selected_quarantine_root_keeps_payloads() {
+        let (_temp, root, state) = r01_fixture();
+        let selected = root.join("解压失败");
+        fs::create_dir(&selected).unwrap();
+        fs::write(selected.join("Thumbs.db"), b"original").unwrap();
+        fs::write(selected.join("report.txt"), b"original").unwrap();
+        let context = TaskContext::default();
+        let control = context.control.clone();
+        let task = prepare_at(&selected, Config {
+            dedup_other_names: true,
+            ..Config::default()
+        }, context, &state).unwrap();
+        assert_eq!(task.summary.scanned, 0);
+        assert_eq!(task.summary.planned_delete, 0);
+        assert_eq!(task.summary.planned_move, 0);
+        assert_eq!(control.read_bytes.load(Ordering::Relaxed), 0);
+        apply(&task.directory, TaskContext::default()).unwrap();
+        assert_eq!(fs::read(selected.join("Thumbs.db")).unwrap(), b"original");
+        assert_eq!(fs::read(selected.join("report.txt")).unwrap(), b"original");
+    }
+
+    // 覆盖 C-09：真实扫描产生的跳过提示包含深层隔离目录路径。
+    #[test]
+    fn r01_nested_quarantine_skip_reports_path() {
+        let (_temp, root, state) = r01_fixture();
+        fs::create_dir_all(root.join("outer/解压失败")).unwrap();
+        fs::write(root.join("outer/解压失败/Thumbs.db"), b"original").unwrap();
+        let task = prepare_at(&root, Config::default(), TaskContext::default(), &state).unwrap();
+        assert_eq!(task.summary.scanned, 0);
+        let db = Database::open_existing(&task.directory).unwrap();
+        let notices: i64 = db.conn.query_row(
+            "SELECT count(*) FROM events WHERE source=?1 AND reason LIKE '%跳过%'",
+            ["outer/解压失败"], |row| row.get(0),
+        ).unwrap();
+        assert!(notices > 0, "必须明确提示发现的隔离路径");
+        drop(db);
+        apply(&task.directory, TaskContext::default()).unwrap();
+        assert_eq!(fs::read(root.join("outer/解压失败/Thumbs.db")).unwrap(), b"original");
+    }
+
+    // 覆盖 C-19/C-20：长度退让后的真实计划只扩展摘要、不恢复来源。
+    #[test]
+    fn r01_conflict_yield_keeps_source_free_digest() {
+        let (_temp, root, state) = r01_fixture();
+        let first = format!("{}/x/report.txt", "a".repeat(35));
+        let second = format!("{}/x/report.txt", "b".repeat(35));
+        for (name, bytes) in [(&first, b"first".as_slice()), (&second, b"second".as_slice())] {
+            fs::create_dir_all(root.join(name).parent().unwrap()).unwrap();
+            fs::write(root.join(name), bytes).unwrap();
+        }
+        fs::create_dir(root.join("文档")).unwrap();
+        let fixed = format!("文档/report_{}.txt", rules::path_digest(&first, 8));
+        fs::write(root.join(&fixed), b"occupied").unwrap();
+        let task = prepare_at(&root, Config {
+            global_delete: DeleteMode::Keep,
+            dedup_same_name: false,
+            dedup_copy_names: false,
+            dedup_other_names: false,
+            ..Config::default()
+        }, TaskContext::default(), &state).unwrap();
+        let db = Database::open_existing(&task.directory).unwrap();
+        let expected = format!("文档/report_{}.txt", rules::path_digest(&first, 10));
+        let moves = db.actions_page_filtered(0, 100, Some("move")).unwrap();
+        assert_eq!(moves.iter().find(|action| action.source == first).unwrap().target.as_deref(), Some(expected.as_str()));
+        drop(db);
+        apply(&task.directory, TaskContext::default()).unwrap();
+        assert_eq!(fs::read(root.join(expected)).unwrap(), b"first");
+        assert_eq!(fs::read(root.join(fixed)).unwrap(), b"occupied");
+    }
+
+    // 覆盖 C-01/C-12：清理判断先于哈希，单一存活者无需读取内容。
+    #[test]
+    fn r01_cleanup_precedes_candidate_hashing() {
+        let (_temp, root, state) = r01_fixture();
+        fs::write(root.join("keep.txt"), b"identical").unwrap();
+        fs::write(root.join("temporary.tmp"), b"identical").unwrap();
+        let context = TaskContext::default();
+        let control = context.control.clone();
+        let task = prepare_at(&root, Config {
+            clean_temp: true,
+            dedup_other_names: true,
+            ..Config::default()
+        }, context, &state).unwrap();
+        assert_eq!(control.read_bytes.load(Ordering::Relaxed), 0);
+        assert_eq!(task.summary.planned_delete, 1);
+        apply(&task.directory, TaskContext::default()).unwrap();
+        assert_eq!(fs::read(root.join("文档/keep.txt")).unwrap(), b"identical");
+        assert!(!root.join("temporary.tmp").exists());
+    }
+
+    // 覆盖 X-06/U-10：缺首卷预检不启动引擎；容器占用时摘要不虚报隔离。
+    #[test]
+    fn r01_extraction_summary_reports_failed_isolation() {
+        let (_temp, root, state) = r01_fixture();
+        fs::write(root.join("bad.part02.rar"), b"missing-first-volume").unwrap();
+        fs::write(root.join("解压失败"), b"container occupied").unwrap();
+        let task = extract_run_at(&root, Config::default(), TaskContext::default(), &state, None).unwrap();
+        assert_eq!(task.summary.archives_failed, 1);
+        assert_eq!(task.summary.archives_quarantined, 0);
+        let db = Database::open_existing(&task.directory).unwrap();
+        let completion: String = db.conn.query_row(
+            "SELECT reason FROM events WHERE phase='任务' AND result='完成' ORDER BY id DESC LIMIT 1",
+            [], |row| row.get(0),
+        ).unwrap();
+        assert!(!completion.contains("未完全解开并移入"), "{completion}");
+        assert!(completion.contains("已移入") && completion.contains("0 个"), "{completion}");
+        assert!(completion.contains("未隔离") && completion.contains("日志"), "{completion}");
+        assert_eq!(fs::read(root.join("bad.part02.rar")).unwrap(), b"missing-first-volume");
+        assert_eq!(fs::read(root.join("解压失败")).unwrap(), b"container occupied");
+    }
+
+    // 覆盖 P-10/S-01：独立进程安装真实磁盘logger，目标容器被文件占用仍保留源项。
+    #[test]
+    fn r01_failed_item_reason_is_written_to_isolated_disk_log() {
+        const CHILD_ENV: &str = "JCH_R01_DIAGNOSTIC_CHILD";
+        if std::env::var_os(CHILD_ENV).is_none() {
+            let output = std::process::Command::new(std::env::current_exe().unwrap())
+                .args(["--exact", "engine::lock_tests::r01_failed_item_reason_is_written_to_isolated_disk_log", "--nocapture"])
+                .env(CHILD_ENV, "1")
+                .output().unwrap();
+            assert!(output.status.success(), "隔离子进程失败：{}{}", String::from_utf8_lossy(&output.stdout), String::from_utf8_lossy(&output.stderr));
+            return;
+        }
+        let (_temp, root, state) = r01_fixture();
+        let guard = crate::logging::init(&state).expect("独立测试进程必须初始化隔离磁盘日志");
+        fs::write(root.join("文档"), b"container occupied").unwrap();
+        fs::write(root.join("blocked.txt"), b"source preserved").unwrap();
+        let planned = prepare_at(&root, Config::default(), TaskContext::default(), &state).unwrap();
+        assert!(planned.summary.errors > 0);
+        assert_eq!(planned.summary.planned_move, 0);
+        let applied = apply(&planned.directory, TaskContext::default()).unwrap();
+        assert!(applied.summary.errors > 0);
+        assert_eq!(fs::read(root.join("blocked.txt")).unwrap(), b"source preserved");
+        assert_eq!(fs::read(root.join("文档")).unwrap(), b"container occupied");
+        drop(guard);
+        let found = fs::read_dir(state.join(crate::logging::LOG_DIR)).unwrap()
+            .map(|entry| entry.unwrap())
+            .filter(|entry| entry.path().extension().and_then(|ext| ext.to_str()) == Some("log"))
+            .any(|entry| fs::read_to_string(entry.path()).unwrap().lines().any(|line| {
+                line.contains("task_item_failed") && line.contains("blocked.txt")
+                    && line.contains("reason") && line.contains("同名文件占用")
+                    && line.contains("已保留源项")
+            }));
+        assert!(found, "实际磁盘逐文件失败日志必须包含去敏原因，不能只给source/result");
     }
 }
 

@@ -293,29 +293,49 @@ fn run_git_with(
     result
 }
 
+/// P-09：仅当前命令覆盖远端代理（Git 的 remote.proxy 优先于 http.proxy 与环境）。
+/// 不修改配置；没有 HTTP(S) 系统代理覆盖时不额外分配或改变命令。
+fn run_git_proxy_override(
+    git: &Path,
+    cwd: &Path,
+    args: &[&str],
+    setting: Option<&str>,
+    extra_env: &[(&str, &str)],
+    remove_env: &[&str],
+) -> Result<CapturedOutput> {
+    if let Some(setting) = setting {
+        let mut overridden = Vec::with_capacity(args.len() + 2);
+        overridden.extend(["-c", setting]);
+        overridden.extend_from_slice(args);
+        run_git_with(git, cwd, &overridden, extra_env, remove_env)
+    } else {
+        run_git_with(git, cwd, args, extra_env, remove_env)
+    }
+}
+
 /// P-09：网络类 git 命令（fetch / push）的统一入口。系统代理开启时注入
 /// 代理环境变量；目标 URL 命中系统代理例外表（`<local>`、`192.168.*` 等
 /// `no_proxy` 表达不了的条目）时不注入、按现状直连；命令失败且输出符合连接类
-/// 失败特征（或整体超时）时，自动回退直连重试一次——移除全部代理变量（含继承
-/// 自用户环境的），直连仍失败按原口径返回失败。系统代理关闭时不注入也不清除，
-/// 行为与现状一致。`target_url` 为空（未知目标）时只走注入/回退路径。
+/// 失败特征（或整体超时）时，自动回退直连重试一次——移除全部代理变量并临时
+/// 清空选定 HTTP(S) upstream 的配置代理，直连仍失败按原口径返回失败。
+/// 系统代理关闭或命中例外时保留既有环境及配置。`target` 为实际 URL 与 upstream 远端名。
 fn run_git_network(
     git: &Path,
     cwd: &Path,
     args: &[&str],
-    target_url: &str,
+    target: (&str, &str),
     log: &dyn Fn(&str),
     control: &Control,
 ) -> Result<CapturedOutput> {
     let proxy = crate::system_proxy::read();
-    run_git_network_with_proxy(git, cwd, args, target_url, log, control, &proxy)
+    run_git_network_with_proxy(git, cwd, args, target, log, control, &proxy)
 }
 
 fn run_git_network_with_proxy(
     git: &Path,
     cwd: &Path,
     args: &[&str],
-    target_url: &str,
+    target: (&str, &str),
     log: &dyn Fn(&str),
     control: &Control,
     proxy: &crate::system_proxy::SystemProxy,
@@ -323,9 +343,10 @@ fn run_git_network_with_proxy(
     let operation = crate::logging::operation_span("git", "network");
     let _entered = operation.enter();
     let stage = command_stage(args);
+    let target_url = target.0;
     let started = std::time::Instant::now();
     tracing::debug!(event = "git_network_started", stage, target = %crate::logging::safe_url(target_url), timeout_ms = u64::try_from(GIT_TIMEOUT.as_millis()).unwrap_or(u64::MAX), "开始 Git 网络操作");
-    let result = run_git_network_inner(git, cwd, args, target_url, log, control, proxy);
+    let result = run_git_network_inner(git, cwd, args, target, log, control, proxy);
     match &result {
         Ok(out) if out.status.success() => tracing::debug!(
             event = "git_network_completed",
@@ -361,11 +382,12 @@ fn run_git_network_inner(
     git: &Path,
     cwd: &Path,
     args: &[&str],
-    target_url: &str,
+    target: (&str, &str),
     log: &dyn Fn(&str),
     control: &Control,
     proxy: &crate::system_proxy::SystemProxy,
 ) -> Result<CapturedOutput> {
+    let (target_url, remote) = target;
     control.check_cancelled().inspect_err(|_| {
         tracing::warn!(
             event = "git_network_cancelled",
@@ -404,10 +426,25 @@ fn run_git_network_inner(
         return run_git(git, cwd, args);
     }
     let proxy_env = proxy.git_env();
-    let injected: Vec<(&str, &str)> = proxy_env
-        .iter()
-        .map(|(key, value)| (key.as_str(), value.as_str()))
-        .collect();
+    let mut injected: Vec<(&str, &str)> = Vec::with_capacity(proxy_env.len() + 2);
+    injected.extend(
+        proxy_env
+            .iter()
+            .map(|(key, value)| (key.as_str(), value.as_str())),
+    );
+    // Windows 精确例外已在上面核实，不允许继承或近似 no_proxy 扩大绕过范围。
+    injected.retain(|(key, _)| *key != "no_proxy");
+    injected.extend([("no_proxy", ""), ("NO_PROXY", "")]);
+    let http_target = target_url.split_once("://").is_some_and(|(scheme, _)| {
+        scheme.eq_ignore_ascii_case("http") || scheme.eq_ignore_ascii_case("https")
+    });
+    let proxy_setting = if http_target && !remote.is_empty() {
+        proxy
+            .endpoint_for_url(target_url)
+            .map(|endpoint| format!("remote.{remote}.proxy={endpoint}"))
+    } else {
+        None
+    };
     let attempt = {
         let _route = tracing::info_span!(
             "git_network_route",
@@ -420,7 +457,7 @@ fn run_git_network_inner(
             route = "system_proxy",
             "通过系统代理尝试 Git 网络操作"
         );
-        run_git_with(git, cwd, args, &injected, &[])
+        run_git_proxy_override(git, cwd, args, proxy_setting.as_deref(), &injected, &[])
     };
     let needs_direct_retry = match &attempt {
         // 启动失败或超时：超时多因代理黑洞，直连重试值得一次；启动失败
@@ -466,10 +503,14 @@ fn run_git_network_inner(
         "系统代理连接失败，开始直连回退"
     );
     let started = std::time::Instant::now();
-    let result = run_git_with(
+    let direct_setting = proxy_setting
+        .as_ref()
+        .map(|_| format!("remote.{remote}.proxy="));
+    let result = run_git_proxy_override(
         git,
         cwd,
         args,
+        direct_setting.as_deref(),
         &[],
         &crate::system_proxy::GIT_PROXY_ENV_KEYS,
     );
@@ -971,7 +1012,7 @@ enum PushOutcome {
 fn try_push(
     git: &Path,
     root: &Path,
-    remote_url: &str,
+    target: (&str, &str),
     log: &dyn Fn(&str),
     control: &Control,
 ) -> PushOutcome {
@@ -981,7 +1022,7 @@ fn try_push(
         git,
         root,
         &["push", "--porcelain", "--no-recurse-submodules"],
-        remote_url,
+        target,
         log,
         control,
     ) {
@@ -1046,35 +1087,40 @@ fn fetch_and_merge(
     remote: &str,
     upstream_branch: &str,
     ctx: &Ctx<'_>,
+    fetched: &mut bool,
 ) -> MergeOutcome {
     if ctx.control.is_cancelled() {
         return MergeOutcome::Cancelled;
     }
-    ctx.shared.set_stage("pull/fetch");
-    (ctx.log)(&format!(
-        "git fetch --no-recurse-submodules {remote} {upstream_branch}"
-    ));
-    let fetch = match run_git_network(
-        git,
-        root,
-        &["fetch", "--no-recurse-submodules", remote, upstream_branch],
-        &ctx.remote_url,
-        ctx.log,
-        ctx.control,
-    ) {
-        Ok(out) => out,
-        Err(error) => return MergeOutcome::Retryable(format!("{error:#}")),
-    };
-    let fetch_stdout = output_text(&fetch.stdout);
-    let fetch_stderr = output_text(&fetch.stderr);
-    if !fetch.status.success() {
-        let reason = summarize(&fetch_stderr, &fetch_stdout);
-        (ctx.log)(&format!("git fetch 失败：{reason}"));
-        return MergeOutcome::Retryable(reason);
-    }
-    // F14/G-14：成功也采集真实输出
-    if let Some(entry) = output_log_entry(&fetch_stdout, &fetch_stderr) {
-        (ctx.log)(&format!("git fetch 输出：\n{entry}"));
+    if !*fetched {
+        ctx.shared.set_stage("pull/fetch");
+        (ctx.log)(&format!(
+            "git fetch --no-recurse-submodules {remote} {upstream_branch}"
+        ));
+        let fetch = match run_git_network(
+            git,
+            root,
+            &["fetch", "--no-recurse-submodules", remote, upstream_branch],
+            (&ctx.remote_url, remote),
+            ctx.log,
+            ctx.control,
+        ) {
+            Ok(out) => out,
+            Err(error) => return MergeOutcome::Retryable(format!("{error:#}")),
+        };
+        let fetch_stdout = output_text(&fetch.stdout);
+        let fetch_stderr = output_text(&fetch.stderr);
+        // G-14：失败也保留实际的两条输出流，错误摘要不能替代阶段输出。
+        if let Some(entry) = output_log_entry(&fetch_stdout, &fetch_stderr) {
+            (ctx.log)(&format!("git fetch 输出：\n{entry}"));
+        }
+        if !fetch.status.success() {
+            let reason = summarize(&fetch_stderr, &fetch_stdout);
+            (ctx.log)(&format!("git fetch 失败：{reason}"));
+            return MergeOutcome::Retryable(reason);
+        }
+        // G-09：merge 可重试失败时不得重新执行已经成功的 fetch。
+        *fetched = true;
     }
     // F13/G-15：fetch 自然结束后检查停止标志，不再启动 merge
     if ctx.control.is_cancelled() {
@@ -1085,6 +1131,9 @@ fn fetch_and_merge(
     // 不修改用户配置，也不覆盖其他继承的Git配置。
     let merge_options = format!("branch.{}.mergeOptions=", ctx.branch);
     (ctx.log)(&format!("git -c {merge_options} merge FETCH_HEAD"));
+    if ctx.control.is_cancelled() {
+        return MergeOutcome::Cancelled;
+    }
     let out = match run_git(git, root, &["-c", &merge_options, "merge", "FETCH_HEAD"]) {
         Ok(out) => out,
         Err(error) => return MergeOutcome::Retryable(format!("{error:#}")),
@@ -1102,6 +1151,9 @@ fn fetch_and_merge(
             (ctx.log)(&format!("git merge 输出：\n{entry}"));
         }
         return MergeOutcome::Merged;
+    }
+    if let Some(entry) = output_log_entry(&stdout, &stderr) {
+        (ctx.log)(&format!("git merge 输出：\n{entry}"));
     }
     let text = format!("{stderr}{stdout}");
     if text.contains("CONFLICT") {
@@ -1436,6 +1488,9 @@ fn process_change_inner(
                 args.push(path.as_str());
             }
             (ctx.log)(&format!("git add -- {}", stage_paths.join(" ")));
+            if ctx.control.is_cancelled() {
+                return StepOutcome::Cancelled;
+            }
             match run_git(git, root, &args) {
                 Ok(out) if out.status.success() => {
                     // F14/G-14：成功也采集真实输出（add 通常无输出，空输出不记条目）
@@ -1495,6 +1550,9 @@ fn process_change_inner(
                 "git commit --only -m \"{message}\" -- {}",
                 commit_paths.join(" ")
             ));
+            if ctx.control.is_cancelled() {
+                return StepOutcome::Cancelled;
+            }
             match run_git(git, root, &args) {
                 Ok(out) if out.status.success() => {
                     // F14/G-14：成功也采集真实输出（分支、提交号与文件统计）
@@ -1610,30 +1668,33 @@ fn push_with_retry(
             return StepOutcome::Cancelled;
         }
         ctx.shared.set_stage("push");
-        match try_push(git, root, &ctx.remote_url, ctx.log, ctx.control) {
+        match try_push(git, root, (&ctx.remote_url, remote), ctx.log, ctx.control) {
             PushOutcome::Ok => return StepOutcome::Done,
             PushOutcome::NeedMerge => {
-                match fetch_and_merge(git, root, remote, upstream_branch, ctx) {
-                    // 合并成功：回到循环重试 push（不消耗重试计数，G-10）
-                    MergeOutcome::Merged => {}
-                    MergeOutcome::Cancelled => return StepOutcome::Cancelled,
-                    MergeOutcome::Conflict(files) => return StepOutcome::Conflict(files),
-                    MergeOutcome::BlockedByDirty(reason) => {
-                        return StepOutcome::Fatal(format!(
-                            "合并被本地未提交变更阻挡：{reason}（阶段：merge）"
-                        ));
-                    }
-                    MergeOutcome::Retryable(reason) => {
-                        tracing::warn!(
-                            event = "git_retryable_failure",
-                            stage = "fetch_merge",
-                            error_type = "fetch_merge_failed",
-                            failed_attempt = *attempt + 1,
-                            "Git fetch/merge 失败，进入退避重试"
-                        );
-                        (ctx.log)(&format!("fetch/merge 失败：{reason}"));
-                        if !ctx.wait_retry(attempt) {
-                            return StepOutcome::Cancelled;
+                let mut fetched = false;
+                loop {
+                    match fetch_and_merge(git, root, remote, upstream_branch, ctx, &mut fetched) {
+                        // G-09/G-10：fetch/merge 当前阶段成功后才回到 push。
+                        MergeOutcome::Merged => break,
+                        MergeOutcome::Cancelled => return StepOutcome::Cancelled,
+                        MergeOutcome::Conflict(files) => return StepOutcome::Conflict(files),
+                        MergeOutcome::BlockedByDirty(reason) => {
+                            return StepOutcome::Fatal(format!(
+                                "合并被本地未提交变更阻挡：{reason}（阶段：merge）"
+                            ));
+                        }
+                        MergeOutcome::Retryable(reason) => {
+                            tracing::warn!(
+                                event = "git_retryable_failure",
+                                stage = if fetched { "merge" } else { "fetch" },
+                                error_type = "fetch_merge_failed",
+                                failed_attempt = *attempt + 1,
+                                "Git fetch/merge 失败，进入退避重试"
+                            );
+                            (ctx.log)(&format!("fetch/merge 失败：{reason}"));
+                            if !ctx.wait_retry(attempt) {
+                                return StepOutcome::Cancelled;
+                            }
                         }
                     }
                 }
@@ -1948,7 +2009,7 @@ fn run_task(
                 let staged = match run_git_ok(
                     git,
                     repo,
-                    &["diff", "--cached", "--name-only", "--no-renames"],
+                    &["diff", "--cached", "--name-only", "--no-renames", "-z"],
                 ) {
                     Ok(text) => text,
                     Err(error) => {
@@ -1961,7 +2022,14 @@ fn run_task(
                 let merge_scope = match run_git_ok(
                     git,
                     repo,
-                    &["diff", "--name-only", "--no-renames", "HEAD", "MERGE_HEAD"],
+                    &[
+                        "diff",
+                        "--name-only",
+                        "--no-renames",
+                        "-z",
+                        "HEAD",
+                        "MERGE_HEAD",
+                    ],
                 ) {
                     Ok(text) => text,
                     Err(error) => {
@@ -1972,13 +2040,11 @@ fn run_task(
                     }
                 };
                 let in_scope: std::collections::HashSet<&str> = merge_scope
-                    .lines()
-                    .map(str::trim)
+                    .split('\0')
                     .filter(|line| !line.is_empty())
                     .collect();
                 let extras: Vec<&str> = staged
-                    .lines()
-                    .map(str::trim)
+                    .split('\0')
                     .filter(|line| !line.is_empty() && !in_scope.contains(line))
                     .collect();
                 if !extras.is_empty() {
@@ -2000,6 +2066,11 @@ fn run_task(
                 }
                 shared.set_stage("merge");
                 log("检测到已解决的合并：完成合并提交（git commit --no-edit）");
+                // G-15：范围查询和日志回调期间同样可能收到停止，写命令前再次检查。
+                if control.is_cancelled() {
+                    shared.set_state("已停止");
+                    return "任务已停止：合并已解决但尚未完成合并提交（可重新开始任务继续）".into();
+                }
                 match run_git(git, repo, &["commit", "--no-edit"]) {
                     Ok(out) if out.status.success() => {
                         // F14/G-14：合并提交的真实输出也进日志
@@ -2263,7 +2334,7 @@ mod tests {
             &wrapper,
             dir.path(),
             &["ls-remote", "http://127.0.0.1:1/repo.git"],
-            "http://127.0.0.1:1/repo.git",
+            ("http://127.0.0.1:1/repo.git", "http://127.0.0.1:1/repo.git"),
             &|line| {
                 if line.contains("回退直连") {
                     control.cancel();
@@ -2281,6 +2352,96 @@ mod tests {
             std::fs::read_to_string(trace)?.lines().count(),
             1,
             "停止后不得启动第二条Git联网命令"
+        );
+        Ok(())
+    }
+
+    // 覆盖 P-09：真实 Git 配置解析必须使用临时系统代理，不能被仓库代理覆盖；
+    // 系统代理关闭或目标命中例外表时仍保留用户既有配置。
+    #[test]
+    fn system_proxy_overrides_git_remote_proxy_without_changing_config() -> Result<()> {
+        let dir = tempfile::tempdir()?;
+        let git = find_git()?;
+        run_git_ok(&git, dir.path(), &["init", "-q"])?;
+        let configured = "http://127.0.0.1:19001";
+        run_git_ok(&git, dir.path(), &["config", "remote.origin.proxy", configured])?;
+        run_git_ok(&git, dir.path(), &["config", "http.proxy", configured])?;
+        run_git_ok(
+            &git, dir.path(),
+            &["config", "http.https://upstream.invalid/repo.git.proxy", configured],
+        )?;
+        let enabled = crate::system_proxy::SystemProxy::from_registry_values(
+            1, Some("http=127.0.0.1:19002"), Some("*.unrelated.invalid"),
+        );
+        let control = Control::default();
+        let args = ["config", "--get", "remote.origin.proxy"];
+        let wrapper = dir.path().join("git-proxy-env.cmd");
+        std::fs::write(&wrapper, format!(
+            "@echo off\r\n\
+             if defined no_proxy echo UNEXPECTED-BYPASS-ENV\r\n\
+             if defined NO_PROXY echo UNEXPECTED-BYPASS-ENV\r\n\
+             \"{}\" %*\r\nexit /b %ERRORLEVEL%\r\n", git.display(),
+        ))?;
+        let out = run_git_network_with_proxy(
+            &wrapper, dir.path(), &args, ("https://upstream.invalid/repo.git", "origin"),
+            &|_| {}, &control, &enabled,
+        )?;
+        assert!(out.status.success());
+        assert_eq!(output_text(&out.stdout).trim(), "http://127.0.0.1:19002",
+            "必须由真实 Git 配置解析确认系统代理覆盖，而不是仅核对参数");
+        assert_eq!(
+            run_git_ok(&git, dir.path(), &args)?.trim(), configured,
+            "命令结束后用户代理配置不得改变",
+        );
+        for proxy in [
+            crate::system_proxy::SystemProxy::default(),
+            crate::system_proxy::SystemProxy::from_registry_values(
+                1, Some("127.0.0.1:19002"), Some("upstream.invalid"),
+            ),
+        ] {
+            let out = run_git_network_with_proxy(
+                &git, dir.path(), &args, ("https://upstream.invalid/repo.git", "origin"),
+                &|_| {}, &control, &proxy,
+            )?;
+            assert!(out.status.success());
+            assert_eq!(output_text(&out.stdout).trim(), configured,
+                "关闭或例外目标保留既有 Git 配置优先级");
+        }
+        Ok(())
+    }
+
+    // 覆盖 P-09：代理连接失败的已有直连回退必须压过配置代理，且不修改配置。
+    // 包装器模拟连接失败；每次实际读取代理值仍由真实 Git 配置解析完成。
+    #[test]
+    fn direct_fallback_overrides_configured_git_proxy() -> Result<()> {
+        let dir = tempfile::tempdir()?;
+        let git = find_git()?;
+        run_git_ok(&git, dir.path(), &["init", "-q"])?;
+        let configured = "http://127.0.0.1:19001";
+        run_git_ok(&git, dir.path(), &["config", "remote.origin.proxy", configured])?;
+        let wrapper = dir.path().join("git-proxy-query.cmd");
+        let trace = dir.path().join("attempts.txt");
+        std::fs::write(&wrapper, format!(
+            "@echo off\r\nsetlocal\r\n\
+             >>\"{}\" echo attempt\r\n\
+             \"{}\" %*\r\n\
+             if \"%~2\"==\"remote.origin.proxy=\" exit /b 0\r\n\
+             echo Failed to connect to configured proxy 1>&2\r\n\
+             exit /b 1\r\n", trace.display(), git.display(),
+        ))?;
+        let proxy = crate::system_proxy::SystemProxy::from_registry_values(
+            1, Some("127.0.0.1:19002"), None,
+        );
+        let out = run_git_network_with_proxy(
+            &wrapper, dir.path(), &["config", "--get", "remote.origin.proxy"],
+            ("https://upstream.invalid/repo.git", "origin"), &|_| {}, &Control::default(), &proxy,
+        )?;
+        assert!(out.status.success(), "直连回退必须由真实 Git 解析为空代理");
+        assert!(output_text(&out.stdout).trim().is_empty(), "直连不能保留配置代理");
+        assert_eq!(std::fs::read_to_string(trace)?.lines().count(), 2, "只做已有的一次回退");
+        assert_eq!(
+            run_git_ok(&git, dir.path(), &["config", "--get", "remote.origin.proxy"])?.trim(),
+            configured, "直连回退不得修改用户配置",
         );
         Ok(())
     }

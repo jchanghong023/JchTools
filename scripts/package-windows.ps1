@@ -32,15 +32,87 @@ if ($env:OS -ne 'Windows_NT') {throw 'Use Windows 11 / Windows build CI for the 
 if (-not (Get-Command cargo -ErrorAction SilentlyContinue)) {throw 'Developer prerequisite: Rust stable MSVC toolchain, Visual Studio C++ Build Tools, Windows SDK. End users do not need these.'}
 $hostInfo = & rustc -vV | Out-String
 if ($LASTEXITCODE -ne 0 -or $hostInfo -notmatch 'host: x86_64-pc-windows-msvc') {throw 'Select the x86_64-pc-windows-msvc Rust toolchain before packaging this x64 build.'}
-function Invoke-Cargo([string[]]$Arguments) {
+function Invoke-Cargo([string[]]$Arguments, [switch]$CaptureBuildMetadata) {
     $buildPhase = $Arguments.Count -gt 0 -and $Arguments[0] -eq 'build'
+    $previousOutputEncoding = [Console]::OutputEncoding
     try {
         if ($buildPhase) {Set-GateCompiling $true}
-        & cargo @Arguments
+        if ($CaptureBuildMetadata) {
+            # 原生命令 stdout 按 UTF-8 解码，保留含中文的实际 Cargo 产物路径。
+            [Console]::OutputEncoding = [Text.Encoding]::UTF8
+            & cargo @Arguments '--message-format=json,json-render-diagnostics' | ForEach-Object {
+                if ($_.TrimStart().StartsWith('{')) {
+                    $message = $_ | ConvertFrom-Json
+                    if ($message.reason -eq 'build-script-executed' -or
+                        ($message.reason -eq 'compiler-artifact' -and $message.executable)) {
+                        $message
+                    }
+                } else {
+                    Write-Host $_
+                }
+            }
+        } else {
+            & cargo @Arguments
+        }
         if ($LASTEXITCODE -ne 0) {throw "cargo $($Arguments -join ' ') failed: $LASTEXITCODE"}
     } finally {
         if ($buildPhase) {Set-GateCompiling $false}
+        if ($CaptureBuildMetadata) {[Console]::OutputEncoding = $previousOutputEncoding}
     }
+}
+function Get-CargoArtifact([object[]]$Messages, [string]$BinaryName, [string]$ManifestPath) {
+    $manifest = [IO.Path]::GetFullPath($ManifestPath)
+    # PS 5.1 的 ConvertFrom-Json 可能把 JSON 数组作为一个管道对象返回；展开后逐条判定。
+    $artifacts = @($Messages | ForEach-Object { $_ } | Where-Object {
+        $reason = $_.PSObject.Properties['reason']
+        if (-not $reason -or $reason.Value -ne 'compiler-artifact') {return $false}
+        $target = $_.PSObject.Properties['target']
+        $executable = $_.PSObject.Properties['executable']
+        $packageManifest = $_.PSObject.Properties['manifest_path']
+        if (-not $target -or -not $target.Value -or -not $executable -or
+            -not $executable.Value -or -not $packageManifest -or -not $packageManifest.Value) {return $false}
+        $name = $target.Value.PSObject.Properties['name']
+        $kind = $target.Value.PSObject.Properties['kind']
+        if (-not $name -or -not $kind) {return $false}
+        $name.Value -ceq $BinaryName -and $kind.Value -contains 'bin' -and
+        [IO.Path]::GetFullPath($packageManifest.Value).Equals($manifest, [StringComparison]::OrdinalIgnoreCase)
+    })
+    if ($artifacts.Count -ne 1) {throw "无法唯一确定本次 Cargo 构建的 $BinaryName 可执行文件（找到 $($artifacts.Count) 项）。"}
+    return $artifacts[0]
+}
+function Assert-EmbeddedEngine([object[]]$Messages, [object]$Artifact) {
+    # 缓存命中的构建也由 Cargo 返回当前 OUT_DIR；不能按历史缓存时间猜测。
+    $buildScripts = @($Messages | ForEach-Object { $_ } | Where-Object {
+        $reason = $_.PSObject.Properties['reason']
+        if (-not $reason -or $reason.Value -ne 'build-script-executed') {return $false}
+        $packageId = $_.PSObject.Properties['package_id']
+        $outDir = $_.PSObject.Properties['out_dir']
+        $packageId -and $outDir -and $outDir.Value -and $packageId.Value -ceq $Artifact.package_id
+    })
+    if ($buildScripts.Count -ne 1) {throw '无法唯一确定本次主程序构建的 OUT_DIR，拒绝打包。'}
+    $statusPath = Join-Path $buildScripts[0].out_dir 'engine_embed_status.txt'
+    if (-not (Test-Path -LiteralPath $statusPath -PathType Leaf)) {throw '本次主程序构建缺少 engine_embed_status.txt，拒绝打包。'}
+    $status = (Get-Content -LiteralPath $statusPath -Raw -Encoding UTF8).Trim()
+    if ($status -cne 'ok') {throw "本次主程序的引擎内嵌状态为 '$status'（应为 'ok'），拒绝打包未完整内嵌 7-Zip 的产物。"}
+}
+function Copy-PackageLicenseMaterials([object]$Package, [object]$SourcePackage, [string]$Destination) {
+    $packageRoot = Split-Path -Parent $Package.manifest_path
+    $materials = @(Get-ChildItem -LiteralPath $packageRoot -File |
+        Where-Object {$_.Name -match '^(LICENSE|LICENCE|COPYING|NOTICE|COPYRIGHT)'} |
+        ForEach-Object {$_.Name})
+    if ($Package.license_file) {$materials += [string]$Package.license_file}
+    if ($SourcePackage) {$materials += @($SourcePackage.license_and_notice_materials)}
+    $materials = @($materials | Sort-Object -Unique)
+    New-Item -ItemType Directory -Path $Destination -Force | Out-Null
+    foreach ($relative in $materials) {
+        $source = Join-Path $packageRoot $relative
+        if (-not (Test-Path -LiteralPath $source -PathType Leaf)) {throw "来源清单登记的许可证材料缺失：$source"}
+        # 保留包内相对路径：不同子目录下的同名许可证不得覆盖或被漏掉。
+        $destinationPath = Join-Path $Destination $relative
+        New-Item -ItemType Directory -Path (Split-Path -Parent $destinationPath) -Force | Out-Null
+        Copy-Item -LiteralPath $source -Destination $destinationPath -Force
+    }
+    return $materials.Count
 }
 $archiveEngine = Join-Path $root 'resources\7zip\7z.exe'
 $archiveDll = Join-Path $root 'resources\7zip\7z.dll'
@@ -78,14 +150,9 @@ if (-not $SkipTests) {
 # in both delivery forms (XB-25); the optional-components directory below is only a
 # staging area for the build-time manifest backfill. Both Cargo invocations use the
 # workspace lock.
-if ($env:CARGO_TARGET_DIR) {
-    $targetDir = [IO.Path]::GetFullPath($env:CARGO_TARGET_DIR)
-} else {
-    $targetDir = Join-Path $root 'target'
-}
-$releaseDir = Join-Path $targetDir 'release'
-Invoke-Cargo (@('build','--locked','--release','--manifest-path','optional/snap-ocr-worker/Cargo.toml','--bin','snap-ocr-worker') + $extra)
-$workerExe = Join-Path $releaseDir 'snap-ocr-worker.exe'
+$workerBuildMessages = @(Invoke-Cargo -Arguments (@('build','--locked','--release','--manifest-path','optional/snap-ocr-worker/Cargo.toml','--bin','snap-ocr-worker') + $extra) -CaptureBuildMetadata)
+$workerArtifact = Get-CargoArtifact -Messages $workerBuildMessages -BinaryName 'snap-ocr-worker' -ManifestPath (Join-Path $root 'optional\snap-ocr-worker\Cargo.toml')
+$workerExe = $workerArtifact.executable
 if (-not (Test-Path -LiteralPath $workerExe -PathType Leaf)) {throw "Optional OCR worker build did not produce $workerExe"}
 $builtWorkerBytes = (Get-Item -LiteralPath $workerExe).Length
 if ($builtWorkerBytes -le 0) {throw 'Optional OCR worker executable is empty.'}
@@ -129,16 +196,13 @@ $utf8 = New-Object Text.UTF8Encoding($false)
 $previousManifest = $env:JCHTOOLS_SNAP_OCR_MANIFEST
 try {
     $env:JCHTOOLS_SNAP_OCR_MANIFEST = $stagedManifest
-    Invoke-Cargo (@('build','--locked','--release','--bins') + $extra)
+    $mainBuildMessages = @(Invoke-Cargo -Arguments (@('build','--locked','--release','--bins') + $extra) -CaptureBuildMetadata)
 } finally {
     $env:JCHTOOLS_SNAP_OCR_MANIFEST = $previousManifest
 }
-# fail-closed：要求 build.rs 已把引擎真正编进 EXE。build.rs 部分失败只 warning，
-# 这里读 OUT_DIR/engine_embed_status.txt，不是 "ok" 就中止，避免打包出未内嵌引擎的发布包。
-$engineStatusFile = Get-ChildItem -LiteralPath $releaseDir -Recurse -Filter 'engine_embed_status.txt' -ErrorAction SilentlyContinue | Sort-Object LastWriteTime -Descending | Select-Object -First 1
-if ($null -eq $engineStatusFile) {throw 'engine_embed_status.txt not found after build; the engine was not embedded into the EXE.'}
-$engineStatus = (Get-Content -LiteralPath $engineStatusFile.FullName -Raw).Trim()
-if ($engineStatus -ne 'ok') {throw "Engine embed status is '$engineStatus' (expected 'ok'); refuse to package a build without a fully embedded 7-Zip engine."}
+# fail-closed：本次可执行文件和内嵌状态都绑定 Cargo 的实际产物，不使用无关缓存。
+$mainArtifact = Get-CargoArtifact -Messages $mainBuildMessages -BinaryName 'JchTools' -ManifestPath (Join-Path $root 'Cargo.toml')
+Assert-EmbeddedEngine -Messages $mainBuildMessages -Artifact $mainArtifact
 $stamp = Get-Date -Format 'yyyyMMdd-HHmmss'
 # 内嵌前先校验引擎与清单一致：EXE 里编进去的就是这份经过校验的数据。
 $engineManifest = Get-Content -LiteralPath 'resources\7zip\manifest.json' -Raw | ConvertFrom-Json
@@ -148,7 +212,7 @@ foreach ($file in $engineManifest.files) {
 }
 $folder = Join-Path $DestinationRoot "JchTools-Windows-x64-$stamp"
 New-Item -ItemType Directory -Path $folder | Out-Null
-Copy-Item -LiteralPath (Join-Path $releaseDir 'JchTools.exe') -Destination $folder
+Copy-Item -LiteralPath $mainArtifact.executable -Destination $folder
 # 引擎已内嵌进 EXE；发布目录只保留许可证、NOTICE 与上游源码（LGPL 要求），
 # 因此最终用户拿到的是单文件程序，缺引擎时运行期从 EXE 释放并校验 sha256。
 $resources = Join-Path $folder 'resources'
@@ -204,16 +268,9 @@ foreach ($sourcePackage in $sourceManifest.packages) {
 Copy-Item -LiteralPath 'vendor\SOURCES.json' -Destination (Join-Path $noticeRoot 'SOURCES.json')
 foreach ($package in $metadata.packages) {
     if ($package.name -eq 'jchtools') {continue}
-    $packageRoot = Split-Path -Parent $package.manifest_path
     $dest = Join-Path $noticeRoot "$($package.name)-$($package.version)"
-    New-Item -ItemType Directory -Path $dest | Out-Null
-    $licenseFiles = @(Get-ChildItem -LiteralPath $packageRoot -File | Where-Object {$_.Name -match '^(LICENSE|LICENCE|COPYING|NOTICE|COPYRIGHT)'})
-    if ($package.license_file) {
-        $explicit = Join-Path $packageRoot $package.license_file
-        if (Test-Path -LiteralPath $explicit) {$licenseFiles += Get-Item -LiteralPath $explicit}
-    }
-    foreach ($file in ($licenseFiles | Sort-Object FullName -Unique)) {Copy-Item -LiteralPath $file.FullName -Destination (Join-Path $dest $file.Name) -Force}
     $sourcePackage = $sourceIndex["$($package.name)@$($package.version)"]
+    $licenseFileCount = Copy-PackageLicenseMaterials -Package $package -SourcePackage $sourcePackage -Destination $dest
     $supplements = @()
     if ($sourcePackage) {
         $supplements = @($sourcePackage.supplemental_materials)
@@ -229,7 +286,7 @@ foreach ($package in $metadata.packages) {
             Copy-Item -LiteralPath $source -Destination $destination
         }
     }
-    $licenseIndex += @{name=$package.name;version=$package.version;license=$package.license;repository=$package.repository;license_files=$licenseFiles.Count;supplemental_files=$supplements}
+    $licenseIndex += @{name=$package.name;version=$package.version;license=$package.license;repository=$package.repository;license_files=$licenseFileCount;supplemental_files=$supplements}
 }
 $utf8 = New-Object Text.UTF8Encoding($false)
 [IO.File]::WriteAllText((Join-Path $noticeRoot 'index.json'),($licenseIndex | ConvertTo-Json -Depth 5),$utf8)

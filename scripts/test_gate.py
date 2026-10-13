@@ -638,7 +638,7 @@ def execute_gate(
             common_count = len(static_plan(ROOT)) + 1
             results.extend(run.run(plan[:common_count]))
             for stage in plan[common_count:]:
-                if stage.name in {"test-target-check", "clippy"}:
+                if stage.name in {"test-target-check", "release-target-build", "clippy"}:
                     results.extend(run.run([stage]))
             if level != "fastcheck" and all(result.status == STATUS_OK for result in results):
                 run_full_coverage(run, plan, results, snapshot, ROOT)

@@ -1,6 +1,6 @@
 # JchTools
 
-Windows 优先的 Rust + Slint 本地工具箱。当前通过工具注册表接入「递归解压」「目录整理」「MD 整理」「转 Markdown」「Git 工具」「截图 OCR」「模型服务」七个工具。文件转换与已初始化的截图 OCR 完全离线；模型服务仅监听本机，用户配置的外部 ACP Agent 自行承接模型调用。联网边界见需求合同 P-03、T-21、AH 分区与 [截图 OCR 需求](docs/requirements/SNAP2TEXT.md)。
+仅支持 Windows 的 Rust + Slint 本地工具箱。当前通过工具注册表接入「递归解压」「目录整理」「MD 整理」「转 Markdown」「Git 工具」「截图 OCR」「模型服务」「CodeAgent」八个工具。文件转换与已初始化的截图 OCR 完全离线；模型服务仅监听本机，用户配置的外部 ACP Agent 自行承接模型调用；[CodeAgent](docs/requirements/CODEAGENT.md) 仅维护当前用户本地 Token，不联网。联网边界见需求合同 P-03、T-21、AH 分区与 [截图 OCR 需求](docs/requirements/SNAP2TEXT.md)。
 
 > **验证以对应提交的结果为准**：本地 `fulltest` 覆盖静态与 Python 质量检查、Rust 格式与 Clippy、编译、所有适用的 Windows 本地单元/集成/doc/e2e 测试、真实 7-Zip 用例及本地发布打包；真实桌面 driver 保留独立并如实标注未运行，不以门通过代替其验收。功能验收以 Windows 本地结果为准；CI 仅编译、打包和发布，不重复运行完整测试。安装包、便携 ZIP 与发布记录见 [Releases](https://github.com/jchanghong023/JchTools/releases)。没有引擎时构建不内嵌，运行期解压会给出明确错误；运行 `scripts/fetch-7zip.ps1` 获取官方引擎后，构建会自动把它压缩内嵌进 EXE。发布包由 `scripts/package-windows.ps1` 生成，只附带许可证与上游源码，不含引擎可执行文件。
 
@@ -37,6 +37,8 @@ powershell -NoProfile -File .\scripts\package-windows.ps1
 
 随后生成 Cargo.lock，执行 `cargo check`、核心测试和真实引擎解压测试；先以 `cargo build --locked --release --manifest-path optional/snap-ocr-worker/Cargo.toml --bin snap-ocr-worker` 构建**独立的截图 OCR 后台 worker**，把原始 EXE 放到 `dist/optional-components-v0.1.2/snap-ocr-worker.exe`，按该文件的实际字节数及 SHA-256 生成同目录 `snap-ocr-assets.json`。脚本只在主程序编译期间通过 `JCHTOOLS_SNAP_OCR_MANIFEST` 让 `build.rs` 将这份清单嵌入主 EXE，不改写仓库内的占位清单；发布目录 `resources/snap-ocr-assets.json` 也包含同一清单。接着编译 GUI，校验内嵌引擎与清单，复制许可证及 7-Zip 源码（发布包不含 7z.exe/dll），生成 `dist/JchTools-Windows-x64-时间戳.zip`；构建机装有 Inno Setup 6 时还会编译出安装包 `dist/JchTools-Setup-x64.exe`（安装到当前用户目录、免管理员权限，自动创建桌面快捷方式与开始菜单入口，控制面板可卸载；缺 ISCC 时该阶段如实标注 NOT RUN，CI 发布流程保证产出）。**ZIP 和安装包包含 `snap-ocr-worker.exe` 与资产清单；截图字体和许可证直接内置于 worker，无需额外初始化；Xberg、ONNX 模型和推理 DLL 仍使用独立 Xberg 组件目录。后台 worker 是主包交付内容，缺失时应重新解包或重新安装同一发布包，不能把未交付的独立下载地址当作恢复依据。**该构建目录的 `BUILD-INFO.json` 记录实际执行结果；脚本不会声称已完成手工 UI 或多 TB 性能验收。首次验证通过后的 Cargo.lock 应纳入仓库。
 
+打包只使用本次 Cargo JSON `compiler-artifact` 中按 manifest 与 bin 唯一匹配的实际可执行文件，并从同一包对应的 `build-script-executed` 的 `OUT_DIR` 读取内嵌引擎状态；不按缓存时间戳挑选其他构建的状态，缺失、歧义或未完整内嵌时拒绝打包。第三方许可收集按 [vendor/SOURCES.json](vendor/SOURCES.json) 的 `license_and_notice_materials` 保留包内相对路径（含嵌套目录）与实际字节，登记材料缺失时停止。仓库内依赖的本地源修补及理由以该清单的 `project_source_modifications` 为准；上游归档摘要标识原发布归档，不代表修补后的本地树与上游逐字节相同。
+
 `-Offline` 要求已备齐并校验 7-Zip、Git 等外部交付资产；Rust 依赖源码固定在仓库 `vendor/`，不需要本机 crates.io 源码缓存。`-SkipTests` 在构建记录明确标为 NOT RUN；CI 编译、打包和发布使用此开关，功能验收复用已通过且源码未变的 Windows 本地证据，不能以 CI 成功替代本地测试。脚本不修改系统执行策略，不自动安装编译器，不自动提升权限。
 安装包与便携 ZIP 均携带 `BUILD-INFO.json`：安装包内记录 ISCC 编译前的共同测试结果与未验证项，安装包编译阶段自身如实标为未完结；编译完成后，便携 ZIP 中的记录再更新为该阶段的实际结果。文件存在不表示真实桌面或完整发布验收已通过。
 
@@ -50,7 +52,7 @@ powershell -NoProfile -File .\scripts\package-windows.ps1
 
 ## 使用流程
 
-七个工具各自独立，导航切换：
+八个工具各自独立，导航切换：
 
 - **递归解压**：选目录 → 调整扫描范围与防护上限 → 点「开始解压」→ 一次确认 → 连续执行到结束。每个包就地解压，只有整包解码、校验及全部成员落盘成功后才永久删除原包及实际分卷；不去重、不删除已有文件或普通解压结果。目标重名时只给新文件的基础名加唯一编号，保留普通及复合扩展名。未能完全解开的包整组移入根目录的「解压失败」并记录原因；空间不足或取消则停止并保留当前源包，不作为坏包隔离。同一次任务不重复处理已经处理的包，新任务允许重新处理仍在范围内的包；固定整树跳过「解压失败」目录。
 - **目录整理**：选目录 → 调整规则 → 点「开始分析」（**只读**，不改任何文件）→ 查看真实文件产生的分页计划 → 确认后执行去重、归类与清理。文件动作可逐项勾选/取消，状态立即更新；空目录清理是无独立开关的固定收尾步骤，任务取消后停止后续删除，清理失败不报告整理完成。
@@ -59,8 +61,9 @@ powershell -NoProfile -File .\scripts\package-windows.ps1
 - **Git 工具**：逐文件提交并推送——一个文件单独 add → 单独 commit（只含当前文件，保护既有 staged 内容）→ 单独 push，push 成功后才处理下一个；提交信息固定「update: 相对路径」。push 被远端新提交拒绝时自动 fetch + merge（不 rebase），冲突即停并保留现场；可重试失败按 5→10→20→40→80→80… 秒无限退避，可随时停止；以 git 状态为唯一进度来源，重启不重复提交。
 - **截图 OCR**：页面仅设置快捷键并显示后台状态；通过快捷键或托盘截图。打开 GUI 后，已配置的 Xberg 与后台服务异步启动；GUI 关闭后服务、模型和托盘继续常驻，重新打开连接同一服务。需要完全退出时使用系统托盘「退出后台服务」，正在处理的任务先确认并安全停止。组件初始化和故障恢复统一位于「设置」页；开机启动默认关闭。
 - **模型服务**：保存 ACP Agent 启动程序、参数和端口 → 异步启动或连接独立后台 → HTTP 调用 Models / Chat Completions；关闭工具箱不停止服务，配置应用与主动退出使用页面上的独立入口，具体协议及限制见下方「ACP 模型服务」。
+- **CodeAgent**：打开页面启动或连接独立后台，默认每 60 秒读取当前用户 `.cac` 凭据并用 CurrentUser DPAPI 解密，仅在 Token 变化时更新当前用户注册表。页面可保存正整数秒检查间隔，显示后台状态、最近检查时间与去敏结果，不显示 Token；读取或解密失败保留已有 Token。关闭 GUI 后后台继续运行，不属于截图/Xberg 托盘或模型服务页的退出范围，具体行为见 [CodeAgent 需求](docs/requirements/CODEAGENT.md)。
 
-导航只显示已注册工具（递归解压、目录整理、MD 整理、转 Markdown、Git 工具、截图 OCR、模型服务）以及独立设置、关于；工具描述集中注册。「关于」包含 Slint 的 AboutSlint 署名组件。旧工具不提供独立任务记录页或设置页：规则仍只在主界面「处理规则」里会话内调整，不落盘、不导入导出；共享 Xberg 的下载目录、用户目录及当前来源由设置页写入 SQLite 并在重启恢复；截图快捷键与开机启动设置也持久保存。
+导航只显示已注册工具（递归解压、目录整理、MD 整理、转 Markdown、Git 工具、截图 OCR、模型服务、CodeAgent）以及独立设置、关于；工具描述集中注册。「关于」包含 Slint 的 AboutSlint 署名组件。旧工具不提供独立任务记录页或设置页：规则仍只在主界面「处理规则」里会话内调整，不落盘、不导入导出；共享 Xberg 的下载目录、用户目录及当前来源由设置页写入 SQLite 并在重启恢复；截图快捷键与开机启动设置、CodeAgent 检查间隔也持久保存。
 
 转 Markdown 的单文件超时只接受正整数秒数；非法值在字段旁提示并禁用开始，不自动钳制。用户取消与处理超时分别呈现，停止只取消本次请求，不终止共享 Xberg 或影响另一场景。Xberg 下载的本地发布记录保留实际归档来源、版本、大小与摘要；初始化取消在最终落位前检查，不覆盖已有有效资产。
 
@@ -75,7 +78,7 @@ powershell -NoProfile -File .\scripts\package-windows.ps1
 - 自绘标题栏：不使用系统标题栏（`no-frame`），顶部 32px 条带可拖动窗口，右上角是最小化 / 最大化-还原 / 关闭三个自绘按钮；双击条带切换最大化。边缘仍可拖拽缩放，最大化、还原、任务栏与快捷键行为都不变。
 - 启动居中：按整块屏幕计算对称留白（上下相等、左右相等），再夹进工作区，避免压住任务栏。
 - 默认尺寸 1120x720（最小 960x620），偏小不占满屏幕。
-- 配色：主色与 Fluent 标准控件统一（浅色 `#005fb8`、深色 `#60cdff`），采用中性页面底色、圆角卡片与克制阴影，移除全页渐变和大面积柔光；主题默认跟随系统深浅色，自绘配色与控件一起切换。
+- 配色：自绘控件使用 `ui/app.slint` 的 `Design` 统一设计令牌（浅色主色 `#2563EB`、深色主色 `#4C8DFF`），标准控件沿用 Fluent；采用中性页面底色、圆角卡片与克制阴影。主题默认深色，可在「关于」页切换浅色或跟随系统，自绘配色与控件一起切换。
 - 密度：默认窗口 1120x720 下“处理规则”可同屏显示 9 行规则（行高 44px，标题 + 单行说明 + 右侧控件）；小窗口通过滚动浏览，悬停说明可查看完整文字，不撑高规则行。窗口顶部仍是【目录栏 + 面板页签】两行紧凑工具条。
 - 侧栏导航带小图标（文件夹 / 信息圈），用几何图形绘制，不依赖字体或图片资源；选中项以弱强调底色和左侧色条标识，悬停与按压使用短过渡；侧栏中段留空，预留给后续工具。
 - 两组切换用两种样式：面板切换（处理规则 / 整理计划 / 进度与日志）是下划线页签，规则分区（解压 / 去重 / 归类 / 清理 / 安全与性能）是实心胶囊，不会混淆。解压不提供冲突策略开关或交互询问；主题在「关于」页。
@@ -93,7 +96,7 @@ powershell -NoProfile -File .\scripts\package-windows.ps1
 
 | 范围 | 行为 |
 |---|---|
-| 扫描 | 默认递归并包含隐藏/系统属性文件，排除模式默认留空；缩小范围时明确提示；不跟随符号链接、junction、reparse point；直接含 `.git` 文件或目录的目录整树排除，所选根目录直接含 `.git` 时拒绝任务 |
+| 扫描 | 默认递归并包含隐藏/系统属性文件，排除模式默认留空；缩小范围时明确提示；不跟随符号链接、junction、reparse point；直接含 `.git` 文件或目录（不区分大小写）的目录整树保护，所选根或任一祖先直接含 `.git` 时拒绝任务；目录整理仅按 C-14 整体归类范围内的子级 Git 项目，不进入树内处理 |
 | 解压 | 仅处理 X-01 白名单：ZIP、7Z、RAR、TAR、GZ、BZ2、XZ、ZST、LZMA、Z、TGZ、TBZ2、TXZ、TZST 及约定的 TAR 复合压缩流；CAB、ISO、WIM 等白名单外容器完全不碰；继续处理范围内新解出的嵌套包 |
 | 解压冲突 | 固定保留已有文件，新文件基础名追加唯一编号；不比较内容、不覆盖、不提供策略切换 |
 | 原压缩包 | 整包完整成功后永久删除原包及实际分卷；未能完全解开的包整组无覆盖移入「解压失败」；卷集按 X-10 精确命名族识别，缺号或缺入口仍作为一组失败包；展开比例按实际输入卷集总大小计算 |
@@ -154,7 +157,7 @@ python scripts/make_tmp.py testdata
 
 脚本默认把测试集生成到仓库内 `.tmp\testdata\`（自包含，不依赖仓库外目录；也可 `--destination` 另指专门测试目录），会**先清空目标目录**再重建一份可重复的手工测试集（规模以脚本实际输出为准，当前约 60 个文件 / 66 MiB）。
 
-普通流程测试不加 `--git`，需要还原时重新生成测试集。`--git` 会额外建立 Git 基线并附 `恢复.ps1`，此时所选根目录直接含 `.git`，两个工具都必须拒绝处理；该模式只用于验证 Git 根目录拒绝行为，不能用于正常解压或整理验收。测试完成后用 `python scripts/make_tmp.py clean` 清空整个 `.tmp\` 释放磁盘。
+普通流程测试不加 `--git`，需要还原时重新生成测试集。`--git` 会额外建立 Git 基线并附 `恢复.ps1`，此时所选根目录直接含 `.git`，两个工具都必须拒绝处理；该模式只用于验证 Git 根目录拒绝行为，不能用于正常解压或整理验收。测试完成后仅清理本会话自建的 `.tmp\` 子目录；只有确认没有并行会话使用 `.tmp\` 时，才可用 `python scripts/make_tmp.py clean` 清空整个目录。
 
 测试集含 16 组用例：基础文件与中文名、三类重复内容、同名版本冲突、垃圾/临时/零字节、空目录与单层链、扩展名与真实格式不符、11 种压缩格式、解压目标冲突、5 层嵌套包、18 层超深嵌套、截断损坏包、带密码包、1 MiB 分卷包、两个 32 MiB 大文件与 64 MiB 全零包、隐藏与系统属性文件、含 `../` / 绝对路径 / 符号链接的恶意包。目标目录非空时会先列出将删除的文件数量与体积，要求输入 `yes` 确认（非交互环境用 `--force`）；盘符根、用户主目录及其上/下级、系统目录与仓库内非 `.tmp` 位置会被直接拒绝。目录里的 `_测试说明.md` 由脚本生成，逐条列出每个用例的预期行为。
 
@@ -169,6 +172,7 @@ cargo test --features test-hooks   # 单元与集成测试（真实引擎用例�
 python scripts/test_gate.py fastcheck   # 静态检查 + format + compile，无测试；非编译共享预算 60s
 powershell -NoProfile -File .\scripts\acceptance.ps1 -WithEngine   # 单命令验收
 ```
+`acceptance.ps1` 默认不运行真实桌面测试。仅在当次另获真实桌面验收授权时加 `-WithDesktopTests`；该声明也适用于 `-WithGuiSmoke`、`-WithMarkdownAcceptance` 及资产就绪后的热键服务探测，开关或资产环境变量本身不创造执行授权。未执行的桌面项目保持 `NOT_RUN_SEPARATE_USER_INSTRUCTION_REQUIRED` / `NOT RUN`，不能当作通过。
 
 三级门统一由 `scripts/test_gate.py` 编排，完整治理与授权规则见 [AGENTS.md §3.4–3.5](AGENTS.md#34-三级测试门与执行权限)：
 
@@ -219,14 +223,14 @@ OMP `server_agent` 开发边界：来源过滤及聊天到 `X-JchTools-Session-I
 代码中的删除测试全部使用 tempfile 临时夹具，不会删除测试机的个人文件。真实引擎测试有 ignore 标记，只有显式运行时启用。
 
 `gui_smoke.py` 与 `markdown_acceptance.py` 仅对自己启动的验收实例使用 Windows Job Object；GUI 正常或异常退出后都会回收所属后台，避免上一阶段遗留的 Xberg 阻塞下一阶段，不影响用户已有实例。Markdown 验收同时识别未观察到忙态的瞬时失败收尾，保留真实失败统计与无产物结果，不将其误报为驱动超时。
-真实 GUI 验收推荐通过 `acceptance.ps1` 编排隔离目录。直接调用 `gui_smoke.py` 的非自隔离阶段（S1–S5、S10–S18）或启动真实转换驱动前，必须提供 `.tmp/` 下的绝对隔离 `JCHTOOLS_TEST_STATE_DIR` 和 `JCHTOOLS_SNAP_OCR_TEST_ASSET_ROOT`；S6–S9 自行生成隔离环境。`--allow-isolated-run` 不绕过公共启动路径的隔离要求，缺少隔离条件时拒绝启动，不能使用生产目录代替。
+真实 GUI 验收仅在当次另获授权后，通过 `acceptance.ps1 -WithDesktopTests` 编排隔离目录；GUI 冒烟和转换验收还分别指定 `-WithGuiSmoke` 或 `-WithMarkdownAcceptance`。直接调用 `gui_smoke.py` 的非自隔离阶段（S1–S5、S10–S18）或启动真实转换驱动前，必须提供 `.tmp/` 下的绝对隔离 `JCHTOOLS_TEST_STATE_DIR` 和 `JCHTOOLS_SNAP_OCR_TEST_ASSET_ROOT`；S6–S9 自行生成隔离环境。`--allow-isolated-run` 不绕过公共启动路径的隔离要求，缺少隔离条件时拒绝启动，不能使用生产目录代替。
 转换驱动观察到「停止任务」后只等待本轮完成，不再次点击「开始转换」，避免将首轮成功产物误计为第二轮的「已有结果跳过」。本地 Git 验证可用 `RUST_TEST_THREADS=2` 限制并发资源占用；用例数、断言与时间阈值不变。
-需单独执行完整根包测试时，可用 `cargo test --all-targets --features test-hooks --no-fail-fast -- --nocapture --test-threads=1` 串行完成全部同维度用例并保留即时失败证据；用例内部的会话并发、停止竞态及真实进程断言不变。此命令不属于无测试的 fastcheck，单独通过也不等于 fulltest 通过。Windows 退出验证等待原进程句柄 signaled，不能将退出码已变化误当作进程对象已完成退出。
+仅在当次另获真实桌面测试授权且完整根包测试范围明确时，可用 `cargo test --all-targets --features test-hooks --no-fail-fast -- --nocapture --test-threads=1` 串行完成全部同维度用例并保留即时失败证据；直接 Cargo 入口不经过默认排除真实桌面测试的验收脚本门禁，不应当作常规无桌面验证命令。用例内部的会话并发、停止竞态及真实进程断言不变。此命令不属于无测试的 fastcheck，单独通过也不等于 fulltest 通过。Windows 退出验证等待原进程句柄 signaled，不能将退出码已变化误当作进程对象已完成退出。
 独立断网测试已于 2026-10-05 按用户决定删除，完整门不再要求修改系统网络或提供断网证据；产品的离线运行能力与不上传约束保持不变。
 
 无头 GUI 测试对真实后台结果最多等待 30 秒；该上限只约束测试驱动，不改变产品超时或任务行为。Git 用例仍断言完成状态、文件计数、工作区及远端内容；Windows 进程启动开销不再因原 5 秒等待值被误报成功能失败。三级门统一受上述共享非编译预算约束，不以整个编译命令的墙钟作为可扣除编译时间。
 
-另行获授权的独立 Markdown 验收向 `acceptance.ps1` 传入参数时使用 PowerShell 数组绑定；多个参数以及含空格、单引号的路径保持各自边界，不受 Windows PowerShell 5.1 的 `-File` 多值数组限制。这一历史驱动说明不代表三级门会调用真实桌面 driver。
+另行获授权的独立 Markdown 验收经 `acceptance.ps1 -WithDesktopTests -WithMarkdownAcceptance` 接入，传参时使用 PowerShell 数组绑定；多个参数以及含空格、单引号的路径保持各自边界，不受 Windows PowerShell 5.1 的 `-File` 多值数组限制。这一驱动说明和开关均不代表三级门会调用真实桌面 driver，也不创造执行授权。
 
 本地验收保留调用方显式设置的 `JCHTOOLS_TEST_XBERG_DIR`，未设置时才使用本机固定测试引擎目录；真实引擎验收须采用当时最新发布版。无效的显式目录由验收报错，不静默换测其他二进制；运行目录须同时包含所选 `xberg.exe`、模型及 DLL。媒体夹具合成另需 PATH 中的 `ffmpeg.exe`；独立桌面验收缺少安装版/便携版产物或独立 Windows 用户会话仍如实报告覆盖缺口，不能以目录改名或复制开发 EXE 代替；不要求独立断网测试。门外真实桌面项目继续按 `NOT_RUN_SEPARATE_USER_INSTRUCTION_REQUIRED` 报告，既不冒报 PASS，也不据此判三级门 FAIL。
 

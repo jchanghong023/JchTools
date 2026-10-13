@@ -51,6 +51,7 @@ import uuid
 import zipfile
 from pathlib import Path
 from typing import TYPE_CHECKING, cast, override
+from urllib.parse import unquote
 
 import comtypes
 import pywintypes
@@ -470,7 +471,7 @@ def _write_pnm_ascii(target: Path) -> None:
 def _write_pnm_binary(target: Path) -> None:
     pixels = [[0, 1, 0], [1, 0, 1], [0, 1, 0]]
     _ = target.joinpath("p4_bin.pbm").write_bytes(
-        b"P4\n3 3\n" + bytes((row[0] << 6) | (row[1] << 5) | (row[2] << 4) for row in pixels)
+        b"P4\n3 3\n" + bytes((row[0] << 7) | (row[1] << 6) | (row[2] << 5) for row in pixels)
     )
     _ = target.joinpath("p5_bin.pgm").write_bytes(
         b"P5\n3 3\n255\n" + bytes(255 - v * 127 for row in pixels for v in row)
@@ -750,7 +751,7 @@ def _synth_pptx_multi_images(target: Path, _fixtures_dir: Path) -> SynthResult:
     try:
         indexes = range(1, A02_IMAGE_COUNT + 1)
         media = {f"image{index}.png": _token_png(A02_IMAGE_TOKENS[index - 1]) for index in indexes}
-        pics = "".join(_pic_xml(index, f"rId{index}", index - 1) for index in indexes)
+        pics = "".join(_pic_xml(index + 1, f"rId{index}", index - 1) for index in indexes)
         rels = [(f"rId{index}", f"image{index}.png") for index in indexes]
         _build_pptx(target / "pptx_multi_images.pptx", _slide_xml(pics), rels, media)
     except (OSError, ValueError, zipfile.BadZipFile) as exc:
@@ -827,9 +828,10 @@ def _synth_pptx_runs_fields(target: Path, _fixtures_dir: Path) -> SynthResult:
         '<p:sp><p:nvSpPr><p:cNvPr id="9" name="TextBox"/><p:cNvSpPr/><p:nvPr/></p:nvSpPr>'
         '<p:spPr><a:xfrm><a:off x="500000" y="5600000"/><a:ext cx="8000000" cy="500000"/></a:xfrm>'
         '<a:prstGeom prst="rect"><a:avLst/></a:prstGeom></p:spPr><p:txBody><a:bodyPr/>'
-        '<a:lstStyle/><p:p><a:r><a:rPr lang="zh-CN" sz="1800"/><a:t>RUN-AND-FIELD</a:t></a:r>'
-        '<a:fld id="{6E1B}" type="slidenum"><a:rPr lang="zh-CN" sz="1800"/><a:t>7</a:t></a:fld>'
-        '<a:r><a:rPr lang="zh-CN" sz="1800"/><a:t>-FIELD-END</a:t></a:r></p:p></p:txBody></p:sp>'
+        '<a:lstStyle/><a:p><a:r><a:rPr lang="zh-CN" sz="1800"/><a:t>RUN-AND-FIELD</a:t></a:r>'
+        '<a:fld id="{00000000-0000-0000-0000-000000006E1B}" type="slidenum">'
+        '<a:rPr lang="zh-CN" sz="1800"/><a:t>7</a:t></a:fld>'
+        '<a:r><a:rPr lang="zh-CN" sz="1800"/><a:t>-FIELD-END</a:t></a:r></a:p></p:txBody></p:sp>'
     )
     try:
         media = {"image1.png": _token_png("A08-NEIGHBOR")}
@@ -2175,10 +2177,11 @@ def _collect_media_references(markdown: Path, output_dir: Path) -> tuple[list[st
             # T-14 最新零改写协议保留引擎最终正文中的原有外链（如源 HTML）。
             # 外链不是本地落盘媒体，不据此要求转换联网补图；本地资源仍逐项核对。
             continue
-        if raw.startswith("//") and ntpath.isabs(raw.replace("/", "\\")):
+        local_reference = unquote(raw)
+        if ntpath.isabs(local_reference.replace("/", "\\")):
             problems.append(f"图片引用逃出输出目录：{markdown.relative_to(output_dir)} -> {raw}")
             continue
-        target = (markdown.parent / Path(raw.replace("/", "\\"))).resolve()
+        target = (markdown.parent / Path(local_reference.replace("/", "\\"))).resolve()
         try:
             _ = target.relative_to(output_dir.resolve())
         except ValueError:
@@ -2741,25 +2744,24 @@ def _assess_conversion(  # noqa: PLR0911  # 前置失败类别各自独立呈现
         f"{item.item_id} 预期产物 {len(expected)} 项，实得 {len(produced)} 项：{produced}",
         *run.texts.splitlines()[-6:],
     ]
+    if problems:
+        return Outcome(STATUS_FAILED, "；".join(problems[:5]), details)
+    if len(produced) != len(set(produced)):
+        return Outcome(STATUS_FAILED, "同一顶层输入存在重复 Markdown 产物（T-10 每个输入最多一份）", details)
+    empty = [path.name for path in run.outputs if not path.read_text(encoding="utf-8", errors="replace").strip()]
+    if empty:
+        return Outcome(STATUS_FAILED, f"产物正文为空：{empty}", details)
     if stop_mode:
         # 停止语义（T-23）只断言已完成结果保留与源不变；「后续文件未处理」由
         # 调用方按条目补充（如 A24 的 _verify_a24_stop）。
         details.insert(0, "停止路径：已完成结果保留、源文件不变即符合 T-23；完整统计断言待资产环境调校")
-        if problems:
-            return Outcome(STATUS_FAILED, "；".join(problems[:5]), details)
         return Outcome(STATUS_OK, details=details)
-    if problems:
-        return Outcome(STATUS_FAILED, "；".join(problems[:5]), details)
-    if item.item_id == "A26":
-        if len(produced) != len(expected) or set(produced) != set(expected):
-            return Outcome(
-                STATUS_FAILED,
-                f"A26 顶层输入与 Markdown 产物未一一对应：预期 {expected}，实得 {produced}",
-                details,
-            )
-        empty = [path.name for path in run.outputs if not path.read_text(encoding="utf-8", errors="replace").strip()]
-        if empty:
-            return Outcome(STATUS_FAILED, f"A26 产物正文为空：{empty}", details)
+    if item.item_id == "A26" and (len(produced) != len(expected) or set(produced) != set(expected)):
+        return Outcome(
+            STATUS_FAILED,
+            f"A26 顶层输入与 Markdown 产物未一一对应：预期 {expected}，实得 {produced}",
+            details,
+        )
     # 反假 PASS（S10-02）：健康输入逐个必须有对应产物（此前「子集 + 至少一份」
     # 允许任一家族全失败仍 PASS）；损坏/预期失败输入按 T-25 不得留半成品且须有
     # 失败诊断；命名规则外的产物仍视为规划缺陷。
@@ -2809,7 +2811,7 @@ _CONTENT_ASSERTS: dict[str, ContentSpec] = {
     # A08 字段值（幻灯片编号一位字符）必须存活在两段 run 之间，不能只查首尾。
     "A08": ContentSpec(
         require=("RUN-AND", "FIELD-END"),
-        require_patterns=(r"RUN-AND-FIELD\s{0,3}\S\s{0,3}-FIELD-END",),
+        require_patterns=(r"RUN-AND-FIELD\s{0,3}7\s{0,3}-FIELD-END",),
     ),
     # A09 的 descr 允许出现在图片 alt 位置（本就是 description 的标准去处），
     # 围栏内与围栏外正文都不得冒充 OCR 正文。
@@ -2964,7 +2966,11 @@ def _image_binding_problems(markdown: Path, bindings: tuple[tuple[str, bytes], .
             continue
         raw = before[-1].group("target").strip()
         raw = raw[1:-1] if raw.startswith("<") and raw.endswith(">") else raw.split(maxsplit=1)[0]
-        actual = (markdown.parent / raw.replace("\\", "/")).resolve()
+        local_reference = unquote(raw)
+        if ntpath.isabs(local_reference.replace("/", "\\")):
+            problems.append(f"{markdown.name} OCR token {token} 对应的本地媒体不可达：{raw}")
+            continue
+        actual = (markdown.parent / local_reference.replace("\\", "/")).resolve()
         if not actual.is_relative_to(markdown.parent.resolve()) or not actual.is_file():
             problems.append(f"{markdown.name} OCR token {token} 对应的本地媒体不可达：{raw}")
             continue

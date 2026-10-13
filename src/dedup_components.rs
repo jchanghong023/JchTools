@@ -90,7 +90,7 @@ pub fn find_duplicate_groups(
     for indices in components.into_values() {
         let mut dsu = DisjointSet::new(indices.len());
 
-        if ruleset.same_name {
+        if ruleset.same_name && !ruleset.other_names {
             let mut by_name: HashMap<String, usize> = HashMap::new();
             for (local, &index) in indices.iter().enumerate() {
                 let key = records[index].name.clone();
@@ -102,7 +102,7 @@ pub fn find_duplicate_groups(
             }
         }
 
-        if ruleset.copy_names {
+        if ruleset.copy_names && !ruleset.other_names {
             let mut by_normal: HashMap<String, Vec<usize>> = HashMap::new();
             for (local, &index) in indices.iter().enumerate() {
                 by_normal
@@ -126,7 +126,10 @@ pub fn find_duplicate_groups(
         }
 
         if ruleset.other_names {
-            union_other_name_components(&indices, records, &mut dsu);
+            // C-02：不同名开启时全部同尺寸项都是候选，不再受名称关系限制。
+            for local in 1..indices.len() {
+                dsu.union(0, local);
+            }
         }
 
         let mut candidate_components: HashMap<usize, Vec<usize>> = HashMap::new();
@@ -165,107 +168,6 @@ pub fn find_duplicate_groups(
             .then_with(|| left.duplicates.len().cmp(&right.duplicates.len()))
     });
     output
-}
-
-/// 为“原名不同且副本名键不同”的图加入一组足以连通各组件的边。
-///
-/// 该关系是两个属性相等关系的补图。选定一个枢轴后，所有同时不同于枢轴
-/// 两个属性的记录都与枢轴相连；其余记录只能落在枢轴的同名行或同键列中。
-/// 同名行与同键列之间是完全二分连接，因而只需保留一对代表边即可，避免
-/// 对大型同尺寸文件集执行 O(n²) 的全量两两比较。
-fn union_other_name_components(indices: &[usize], records: &[FileRecord], dsu: &mut DisjointSet) {
-    if indices.len() < 2 {
-        return;
-    }
-    let pivot = 0;
-    let pivot_record = &records[indices[pivot]];
-    let pivot_name = pivot_record.name.as_str();
-    let pivot_normal = pivot_record.normalized.as_str();
-    let mut direct_neighbors = Vec::new();
-    let mut root_by_name = HashMap::new();
-    let mut root_by_normal = HashMap::new();
-    for local in 1..indices.len() {
-        let record = &records[indices[local]];
-        if record.name != pivot_name && record.normalized != pivot_normal {
-            dsu.union(pivot, local);
-            direct_neighbors.push(local);
-            root_by_name.entry(record.name.as_str()).or_insert(local);
-            root_by_normal
-                .entry(record.normalized.as_str())
-                .or_insert(local);
-        }
-    }
-
-    let mut same_name_leftovers = Vec::new();
-    let mut same_normal_leftovers = Vec::new();
-    let mut added_name = vec![false; indices.len()];
-    let mut added_normal = vec![false; indices.len()];
-    loop {
-        let mut changed = false;
-        for local in 1..indices.len() {
-            let record = &records[indices[local]];
-            if record.name == pivot_name && record.normalized != pivot_normal {
-                if added_name[local] {
-                    continue;
-                }
-                if let Some(neighbor) = root_by_normal
-                    .iter()
-                    .find(|(normal, _)| **normal != record.normalized)
-                    .map(|(_, &index)| index)
-                {
-                    dsu.union(pivot, local);
-                    dsu.union(pivot, neighbor);
-                    added_name[local] = true;
-                    root_by_name.entry(pivot_name).or_insert(local);
-                    changed = true;
-                }
-            } else if record.normalized == pivot_normal && record.name != pivot_name {
-                if added_normal[local] {
-                    continue;
-                }
-                if let Some(neighbor) = root_by_name
-                    .iter()
-                    .find(|(name, _)| **name != record.name)
-                    .map(|(_, &index)| index)
-                {
-                    dsu.union(pivot, local);
-                    dsu.union(pivot, neighbor);
-                    added_normal[local] = true;
-                    root_by_normal.entry(pivot_normal).or_insert(local);
-                    changed = true;
-                }
-            }
-        }
-        if !changed {
-            break;
-        }
-    }
-
-    for local in 1..indices.len() {
-        let record = &records[indices[local]];
-        if record.name == pivot_name && record.normalized == pivot_normal {
-            if !direct_neighbors.is_empty() {
-                dsu.union(pivot, local);
-            }
-        } else if record.name == pivot_name && !added_name[local] {
-            same_name_leftovers.push(local);
-        } else if record.normalized == pivot_normal && !added_normal[local] {
-            same_normal_leftovers.push(local);
-        }
-    }
-
-    // 剩余同名行与同键列之间是完全二分连接，只需保留代表边。
-    if let (Some(&left), Some(&right)) =
-        (same_name_leftovers.first(), same_normal_leftovers.first())
-    {
-        dsu.union(left, right);
-        for &local in same_name_leftovers.iter().skip(1) {
-            dsu.union(local, right);
-        }
-        for &local in same_normal_leftovers.iter().skip(1) {
-            dsu.union(left, local);
-        }
-    }
 }
 
 #[rustfmt::skip]
@@ -359,16 +261,22 @@ mod tests {
             record(1, "a/report.txt", "report.txt", "report.txt", Some("same")),
             record(2, "b/report.txt", "report.txt", "report.txt", Some("same")),
         ];
-        assert!(find_duplicate_groups(
-            &records,
-            DedupRules {
-                same_name: false,
-                copy_names: false,
-                other_names: true,
-            },
-            KeepPolicy::Newest,
-        )
-        .is_empty());
+        // 保留历史测试名称；C-02 的不同名开关将候选扩到全部同尺寸项。
+        assert_eq!(
+            find_duplicate_groups(
+                &records,
+                DedupRules {
+                    same_name: false,
+                    copy_names: false,
+                    other_names: true,
+                },
+                KeepPolicy::Newest,
+            ),
+            vec![DuplicateGroup {
+                keeper: 1,
+                duplicates: vec![0],
+            }]
+        );
     }
 
     #[test]
@@ -383,16 +291,22 @@ mod tests {
                 Some("same"),
             ),
         ];
-        assert!(find_duplicate_groups(
-            &records,
-            DedupRules {
-                same_name: false,
-                copy_names: false,
-                other_names: true,
-            },
-            KeepPolicy::Newest,
-        )
-        .is_empty());
+        // 副本名开关关闭不能缩小已启用的全尺寸候选范围（C-02）。
+        assert_eq!(
+            find_duplicate_groups(
+                &records,
+                DedupRules {
+                    same_name: false,
+                    copy_names: false,
+                    other_names: true,
+                },
+                KeepPolicy::Newest,
+            ),
+            vec![DuplicateGroup {
+                keeper: 1,
+                duplicates: vec![0],
+            }]
+        );
     }
 
     #[test]
@@ -437,8 +351,8 @@ mod tests {
         assert_eq!(
             groups,
             vec![DuplicateGroup {
-                keeper: 1,
-                duplicates: vec![0]
+                keeper: 2,
+                duplicates: vec![1, 0]
             }]
         );
     }
@@ -449,9 +363,7 @@ mod tests {
             let mut dsu = DisjointSet::new(records.len());
             for left in 0..records.len() {
                 for right in (left + 1)..records.len() {
-                    if records[left].name != records[right].name
-                        && records[left].normalized != records[right].normalized
-                    {
+                    if records[left].snapshot.size == records[right].snapshot.size {
                         dsu.union(left, right);
                     }
                 }

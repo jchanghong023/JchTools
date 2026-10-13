@@ -210,3 +210,81 @@ fn batch_uses_selected_engine_formats() {
         b"synthetic unsupported input"
     );
 }
+
+// 覆盖 T-14/T-17/T-25：公开批处理入口接收含复杂 title 与尖括号目标的
+// 引擎正文后，字面 title 不改写，真实引用加媒体目录前缀，图片与正文一起落盘。
+#[test]
+fn batch_preserves_image_titles_and_commits_angle_bracket_media() {
+    common::ensure_child_reaper();
+    let _session = common::session_lock();
+    common::cleanup_stray_engines();
+    let temp = test_dir();
+    let root = temp.path();
+    let content = "![外图](external_(1).png \"说明 ) ![字面](image_0.png)\")\n![图](<image_0.png> \"说明 )\")";
+    let payload = serde_json::json!({
+        "document": {
+            "content": content,
+            "images": [{"image_index": 0, "format": "png", "data_base64": "aGVsbG8="}],
+            "processing_warnings": []
+        },
+        "warnings": []
+    }).to_string();
+    // 复用已有 worker 协议夹具，只替换 extract 的合成返回内容；源文件只读。
+    let fixture = include_str!("fixtures/shared_xberg.rs");
+    let original = r#""\"document\":{\"content\":\"document\",\"images\":[],\"processing_warnings\":[]},\"warnings\":[]".to_owned()"#;
+    assert_eq!(fixture.matches(original).count(), 1, "夹具响应替换必须唯一");
+    let fields = payload.strip_prefix('{').unwrap().strip_suffix('}').unwrap();
+    let engine_source = root.join("markdown_media_links.rs");
+    std::fs::write(&engine_source, fixture.replace(original, &format!("{fields:?}.to_owned()"))).unwrap();
+    common::mock_engine_copy(engine_source.to_str().unwrap(), &root.join("xberg.exe"));
+    let _environment = EnvironmentGuard::capture();
+    std::env::set_var("JCHTOOLS_TEST_STATE_DIR", root.join("state"));
+    std::env::set_var("JCHTOOLS_TEST_BROKER_EXE", env!("CARGO_BIN_EXE_JchTools"));
+    let manifest: serde_json::Value =
+        serde_json::from_str(include_str!("../resources/markdown-assets.json")).unwrap();
+    for member in manifest["xberg"]["members"].as_array().unwrap() {
+        let relative = member["path"].as_str().unwrap();
+        if relative != "xberg.exe" {
+            let target = root.join(relative);
+            std::fs::create_dir_all(target.parent().unwrap()).unwrap();
+            std::fs::write(target, b"synthetic asset").unwrap();
+        }
+    }
+    jchtools::markdown_assets::save_runtime_dir(root).unwrap();
+    let state = jchtools::xberg_runtime::request(
+        root,
+        serde_json::json!({"command":"snapshot_state"}),
+        std::time::Duration::from_secs(15),
+        &AtomicBool::new(false),
+    ).and_then(jchtools::xberg_runtime::checked).unwrap();
+    struct BrokerGuard(u64);
+    impl Drop for BrokerGuard {
+        fn drop(&mut self) {
+            let _ = std::process::Command::new("taskkill")
+                .args(["/PID", &self.0.to_string(), "/T", "/F"])
+                .output();
+        }
+    }
+    let _broker = BrokerGuard(state["jchtools_broker_pid"].as_u64().unwrap());
+    let input = root.join("input");
+    let output = root.join("output");
+    std::fs::create_dir(&input).unwrap();
+    std::fs::create_dir(&output).unwrap();
+    std::fs::write(input.join("a.txt"), b"synthetic source").unwrap();
+    let options = Options {
+        input_dir: input.clone(),
+        output_dir: output.clone(),
+        flat: false,
+        groups: vec![FormatGroup::Other],
+        timeout_secs: 15,
+    };
+    let summary = jchtools::markdown::run(&options, &AtomicBool::new(false), |_| {}).unwrap();
+    assert_eq!(summary.success, 1);
+    assert_eq!(summary.partial, 0);
+    assert_eq!(summary.failed, 0);
+    assert_eq!(std::fs::read_to_string(output.join("a_txt.md")).unwrap(),
+        "![外图](external_(1).png \"说明 ) ![字面](image_0.png)\")\n![图](<a_txt_media/image_0.png> \"说明 )\")");
+    assert_eq!(std::fs::read(output.join("a_txt_media/image_0.png")).unwrap(), b"hello");
+    assert_eq!(std::fs::read(input.join("a.txt")).unwrap(), b"synthetic source");
+    assert_eq!(std::fs::read_dir(&output).unwrap().count(), 2, "无未完成临时结果");
+}

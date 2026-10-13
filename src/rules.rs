@@ -638,10 +638,10 @@ pub fn cleanup_delete(cfg: &Config, kind: CleanupKind) -> DeleteChoice {
         CleanupKind::Zero => cfg.zero_delete,
     }
 }
-/// 扩展名等值判断：按最后一个点切分比较尾段，等价于 `ends_with(".ext")`
-/// （输入已预先 lowercase，无大小写歧义）。rsplit_once 按字符边界切分，不会 panic。
+/// 扩展名等值判断：按最后一个点切分，首位点且无其他点的名称没有扩展名（附录 B）。
+/// 输入已预先 lowercase；按字符边界切分，不会 panic。
 fn has_ext(name: &str, ext: &str) -> bool {
-    matches!(name.rsplit_once('.'), Some((_, tail)) if tail == ext)
+    matches!(name.rsplit_once('.'), Some((stem, tail)) if !stem.is_empty() && tail == ext)
 }
 // ---------------------------------------------------------------------------
 // X-01 / X-10：解压白名单与分卷
@@ -666,6 +666,10 @@ fn part_rar_regex() -> &'static regex::Regex {
     })
 }
 pub fn archive_name(name: &str) -> bool {
+    // 附录 B：只有首位点的名称整体为主体，不凭主体字样授权解压、删源。
+    if name.starts_with('.') && !name[1..].contains('.') {
+        return false;
+    }
     let name = name.to_lowercase();
     if has_ext(&name, "rar") {
         // 只有 `.partN.rar` 的 part1 算分卷主体；`report.partial.rar` 这类普通包不受影响。
@@ -729,7 +733,7 @@ fn numbered_volume_tail(name_lower: &str) -> Option<(&str, &str)> {
     }
     ARCHIVE_SUFFIXES
         .iter()
-        .any(|suffix| rest.ends_with(suffix))
+        .any(|suffix| rest.len() > suffix.len() && rest.ends_with(suffix))
         .then_some((rest, digits))
 }
 /// X-10 老式分卷族的尾卷形态：`主干.z01`～`主干.z99`（zip 族，编号从 01 起）与
@@ -906,12 +910,14 @@ pub const SEGMENT_LIMIT_UNITS: usize = 255;
 /// 候选）超过 40 单元时，按 C-20 去掉来源段，改用「主体前段(≤25，继续截短至放得下)
 /// _摘要.扩展名」。扩展名与摘要位数永不截断；仍放不下时允许超过 40 但不得超过 255，
 /// 连一个合法主体字符都容不下时返回 None（该项安全失败）。
+/// force_truncate 仅表示已进入 C-20 强制降级；普通无来源项仍先尝试完整主体。
 pub fn digest_candidate(
     nearest_level: Option<&str>,
     stem: &str,
     digest: &str,
     extension: &str,
     index: Option<u32>,
+    force_truncate: bool,
 ) -> Option<String> {
     let separator = 1usize;
     let digest_units = digest.encode_utf16().count();
@@ -924,7 +930,7 @@ pub fn digest_candidate(
         // 分隔符之外连一个主体字符都放不下。
         return None;
     }
-    let build = |stem_part: &str, with_level: bool| -> Option<String> {
+    let build = |stem_part: &str, with_level: bool, limit: usize| -> Option<String> {
         if stem_part.is_empty() {
             return None;
         }
@@ -938,7 +944,7 @@ pub fn digest_candidate(
         } else {
             stem_part.encode_utf16().count() + fixed_no_source
         };
-        if total > SEGMENT_LIMIT_UNITS {
+        if total > limit {
             return None;
         }
         let index_text = index.map_or(String::new(), |n| format!("_{n}"));
@@ -949,13 +955,10 @@ pub fn digest_candidate(
             format!("{stem_part}_{digest}{index_text}{extension}")
         })
     };
-    // 先试带来源的 C-19 形式（主体截到 25）；放得下且 ≤40 即返回。
-    if nearest_level.is_some() {
-        let capped = truncate_utf16_units(stem, 25);
-        if let Some(candidate) = build(&capped, true) {
-            if candidate.encode_utf16().count() <= CONFLICT_YIELD_UNITS {
-                return Some(candidate);
-            }
+    // C-19：先比较完整候选与 40 单元阈值，不提前截短；超限候选不分配输出字符串。
+    if !force_truncate {
+        if let Some(candidate) = build(stem, nearest_level.is_some(), CONFLICT_YIELD_UNITS) {
+            return Some(candidate);
         }
     }
     // 超过 40：去掉来源段，主体截短到放得下（不拆代理对）；预算连第一个字符的
@@ -966,7 +969,7 @@ pub fn digest_candidate(
     let budget = CONFLICT_YIELD_UNITS.saturating_sub(fixed_no_source);
     let floor = capped.chars().next().map_or(0, char::len_utf16);
     let stem_part = truncate_utf16_units(&capped, budget.max(floor));
-    build(&stem_part, false)
+    build(&stem_part, false, SEGMENT_LIMIT_UNITS)
 }
 /// 按 UTF-16 单元上限截断字符串：逐字符累计 len_utf16，不切开代理对。
 pub fn truncate_utf16_units(text: &str, max_units: usize) -> String {
@@ -1004,6 +1007,32 @@ pub fn suffixed_candidate(stem: &str, ext: &str, index: u64) -> String {
 mod tests {
     use super::*;
     use crate::model::Snapshot;
+
+    // 覆盖 X-01 / X-10 / 附录 A / 附录 B：首位点文件没有归档扩展名，
+    // 也不能凭该主体生成数字尾卷族；真正带扩展名的隐藏名称仍正常识别。
+    #[test]
+    fn extensionless_dotfiles_do_not_form_archive_families() {
+        for name in [
+            ".zip", ".7z", ".rar", ".tar", ".gz", ".bz2", ".xz", ".zst",
+            ".lzma", ".z", ".tgz", ".tbz2", ".txz", ".tzst",
+            ".zip.000", ".zip.001", ".7z.001", ".rar.002",
+        ] {
+            assert!(!archive_name(name), "{name} 没有白名单归档扩展名");
+            assert!(archive_entry_key(name).is_none(), "{name} 不得计为归档入口");
+            assert!(!multipart_name(name), "{name} 不属于归档分卷");
+            assert_eq!(category_for(name), "其他", "{name}");
+            assert!(numbered_volume_missing_entry_groups(&[name.to_string()]).is_empty(), "{name}");
+        }
+        for name in [".hidden.zip", ".hidden.7z.001", ".tar.gz", ".tar.gz.001"] {
+            assert!(archive_name(name), "{name} 具有真正的白名单扩展名");
+            assert!(archive_entry_key(name).is_some(), "{name}");
+            assert_eq!(category_for(name), "压缩包", "{name}");
+        }
+        assert_eq!(
+            numbered_volume_missing_entry_groups(&[".hidden.7z.002".to_string()]),
+            vec![".hidden.7z.002".to_string()]
+        );
+    }
 
     // 覆盖附录 A/B/C、X-10：完整后缀、无扩展名和 Unicode 排除边界。
     #[test]
@@ -1136,6 +1165,25 @@ mod tests {
             assert!(
                 !identity_proves_same_file(&a, &b),
                 "退化标识不得证明同一物理文件"
+            );
+        }
+    }
+
+    // 覆盖 C-08 / 附录 B：只有首位点的文件没有扩展名，不授权临时文件删除。
+    #[test]
+    fn temp_cleanup_preserves_extensionless_dotfiles() {
+        let cfg = Config {
+            clean_temp: true,
+            ..Config::default()
+        };
+        for name in [".tmp", ".TEMP", "a/.bak"] {
+            assert!(cleanup_hits(name, 1, &cfg).is_empty(), "{name}");
+        }
+        for name in ["file.tmp", "a/.profile.temp", "backup.bak"] {
+            assert_eq!(
+                cleanup_hits(name, 1, &cfg).first().map(|(kind, _)| *kind),
+                Some(CleanupKind::Temp),
+                "{name}"
             );
         }
     }
@@ -1954,27 +2002,60 @@ mod tests {
         );
     }
 
+    // 覆盖 C-19 / C-20：完整摘要候选未超过 40 时不提前截短主体。
+    #[test]
+    fn digest_candidate_preserves_full_stem_below_yield_threshold() {
+        for stem in ["abcdefghijklmnopqrstuvwxyz", "abcdefghijklmnopqrstuvwxyz0"] {
+            assert_eq!(
+                digest_candidate(None, stem, "A83F21C7", ".pdf", None, false),
+                Some(format!("{stem}_A83F21C7.pdf"))
+            );
+        }
+        assert_eq!(
+            digest_candidate(None, "abcdefghijklmnopqrstuvwxyz01", "A83F21C7", ".pdf", None, false),
+            Some("abcdefghijklmnopqrstuvwxy_A83F21C7.pdf".to_string())
+        );
+    }
+
+    // 覆盖 C-20：带来源的完整候选超 40 后必须去掉来源，再按 25 单元截短。
+    #[test]
+    fn digest_candidate_drops_source_before_truncating_stem() {
+        assert_eq!(
+            digest_candidate(Some("a"), "abcdefghijklmnopqrstuvwxyz", "A83F21C7", ".pdf", None, false),
+            Some("abcdefghijklmnopqrstuvwxy_A83F21C7.pdf".to_string())
+        );
+    }
+
+    // 覆盖 C-18 / C-20：已进入长度降级时，无来源候选即使能放下也须截到 25。
+    #[test]
+    fn digest_candidate_forced_truncation_keeps_c20_cap() {
+        assert_eq!(
+            digest_candidate(None, "abcdefghijklmnopqrstuvwxyz", "A83F21C7", ".pdf", None, true),
+            Some("abcdefghijklmnopqrstuvwxy_A83F21C7.pdf".to_string())
+        );
+    }
+
     // 覆盖 C-20（长度受限摘要候选：≤40 退让、扩展名不截断、超限返回 None）
     #[test]
     fn digest_candidate_respects_unit_budget() {
         let long_stem = "二".repeat(60);
         // C-20：带来源形式超 40 时去掉来源段，只保留主体前段+摘要+扩展名。
         let candidate =
-            digest_candidate(Some("年报"), &long_stem, "A83F21C7", ".pdf", None).unwrap();
+            digest_candidate(Some("年报"), &long_stem, "A83F21C7", ".pdf", None, false).unwrap();
         assert!(candidate.encode_utf16().count() <= CONFLICT_YIELD_UNITS);
         assert!(candidate.starts_with("二"));
         assert!(candidate.ends_with("_A83F21C7.pdf"));
         assert!(!candidate.contains('年'));
         // 短主体带来源：保留 C-19 完整形式。
         let with_source =
-            digest_candidate(Some("年报"), "产品说明_1", "A13F72C4", ".pdf", None).unwrap();
+            digest_candidate(Some("年报"), "产品说明_1", "A13F72C4", ".pdf", None, false).unwrap();
         assert_eq!(with_source, "年报_产品说明_1_A13F72C4.pdf");
         // 无来源段时省略来源。
-        let none_source = digest_candidate(None, "资料", "A83F21C7", ".pdf", None).unwrap();
+        let none_source = digest_candidate(None, "资料", "A83F21C7", ".pdf", None, false).unwrap();
         assert_eq!(none_source, "资料_A83F21C7.pdf");
         // 扩展名与摘要自身挤爆预算：允许超过 40 但不得超过 255；再放不下则 None。
         let huge_ext = format!(".{}", "e".repeat(300));
-        assert!(digest_candidate(None, "x", "A83F21C7", &huge_ext, None).is_none());
+        assert!(digest_candidate(None, "x", "A83F21C7", &huge_ext, None, false).is_none());
     }
 
     // 特征测试（C-20 带内路径）：预算被摘要/扩展名挤到 40 以下时，主体保留一个
@@ -1982,15 +2063,15 @@ mod tests {
     #[test]
     fn digest_candidate_keeps_one_character_when_budget_exhausted() {
         // fixed = 1(分隔符) + 35(摘要) + 4(扩展名) = 40：预算 0，仍保留单字符主体。
-        let candidate = digest_candidate(None, "abc", &"d".repeat(35), ".txt", None).unwrap();
+        let candidate = digest_candidate(None, "abc", &"d".repeat(35), ".txt", None, false).unwrap();
         assert_eq!(candidate, format!("a_{}.txt", "d".repeat(35)));
         assert!(candidate.encode_utf16().count() > CONFLICT_YIELD_UNITS);
         assert!(candidate.encode_utf16().count() <= SEGMENT_LIMIT_UNITS);
         // 首字符是代理对（2 单元）时同样保留完整字符，不拆成空。
         let surrogate_stem = "\u{20BB7}xx";
-        let paired = digest_candidate(None, surrogate_stem, &"d".repeat(35), ".txt", None).unwrap();
+        let paired = digest_candidate(None, surrogate_stem, &"d".repeat(35), ".txt", None, false).unwrap();
         assert!(paired.starts_with('\u{20BB7}'));
         // 主体为空（或连第一个字符都构不成）时安全失败。
-        assert!(digest_candidate(None, "", &"d".repeat(35), ".txt", None).is_none());
+        assert!(digest_candidate(None, "", &"d".repeat(35), ".txt", None, false).is_none());
     }
 }

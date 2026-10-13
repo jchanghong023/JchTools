@@ -9,6 +9,7 @@
 用法：python scripts/media_e2e_fixture.py --component-dir <Xberg 目录>
       --output <.tmp 内绝对 JSON 路径>
 输出包含描述字段和原测试的四个环境变量。
+环境 JSON 不得覆盖工作目录中的媒体、来源收据、下载归档或已校验工具。
 fixture-receipt.json 保存预定语音、身份、摘要与 ffprobe 旁证；
 保留工作目录以复用已校验产物，只清理 .tmp/media-e2e-fixture 与显式输出 JSON。
 """
@@ -339,6 +340,19 @@ def prepare(component: Path, output: Path) -> None:
         raise ValueError(message)
     _ = temporary_path(WORKSPACE)
     output = temporary_path(output)
+    reserved = (
+        WORKSPACE / "spoken.wav",
+        WORKSPACE / "speech.mp4",
+        WORKSPACE / "trackless.mp4",
+        WORKSPACE / "fixture-receipt.json",
+        WORKSPACE / ARCHIVE_NAME,
+        (WORKSPACE / ARCHIVE_NAME).with_suffix(".zip.download"),
+        WORKSPACE / "tools" / "ffmpeg.exe",
+        WORKSPACE / "tools" / "ffprobe.exe",
+    )
+    if any(output == path.resolve() for path in reserved):
+        message = f"--output 不得覆盖夹具准备器拥有的产物：{output}"
+        raise ValueError(message)
     environment = {**os.environ, "TEMP": str(WORKSPACE), "TMP": str(WORKSPACE), "PYTHONDONTWRITEBYTECODE": "1"}
     workspace(WORKSPACE, environment)
     workspace(output.parent, environment)

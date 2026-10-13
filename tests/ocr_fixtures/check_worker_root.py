@@ -42,15 +42,6 @@ def pipe_name(asset_root: Path) -> str:
     return rf"\\.\pipe\jchtools-snap-ocr-test-{digest}"
 
 
-def legacy_pipe_name(username: str) -> str:
-    """兼容未启用 test-hooks 的已构建 worker；仍使用本测试隔离用户名."""
-    session = ctypes.c_ulong()
-    ok = process_id_to_session_id()(os.getpid(), ctypes.byref(session))
-    if not ok:
-        message = "无法读取 Windows 会话 ID"
-        raise OSError(message)
-    digest = hashlib.sha256(f"{username}:{session.value}".encode()).hexdigest()[:16]
-    return rf"\\.\pipe\jchtools-snap-ocr-{digest}"
 
 
 def request(pipe: str, command: str) -> dict[str, object]:
@@ -160,6 +151,19 @@ def owned_test_directory(temp_root: Path) -> Generator[str]:
                 break
 
 
+def require_isolated_worker(worker: Path) -> None:
+    """握手只执行无副作用能力入口，禁止生产构建进入真实服务探测."""
+    probe = subprocess.run([str(worker), "--capabilities"], capture_output=True, timeout=10, check=False)
+    try:
+        capabilities = json.loads(probe.stdout)
+    except (ValueError, UnicodeDecodeError) as error:
+        message = "资产探测要求可声明隔离能力的 test-hooks worker"
+        raise RuntimeError(message) from error
+    if probe.returncode != 0 or not isinstance(capabilities, dict) or capabilities.get("test_hooks") is not True:
+        message = "资产探测仅允许 test-hooks 构建；拒绝启动可能访问用户配置的生产服务"
+        raise RuntimeError(message)
+
+
 def run_worker_root(source: Path, worker_version: str, engine_root: Path, *, without_font_cache: bool = False) -> None:
     """在隔离目录中启动并安全清理本次 worker 与 broker."""
     temp_root = Path(__file__).resolve().parents[2] / ".tmp"
@@ -174,19 +178,18 @@ def run_worker_root(source: Path, worker_version: str, engine_root: Path, *, wit
         if not worker.is_file():
             message = f"worker 不存在：{worker}"
             raise FileNotFoundError(message)
+        require_isolated_worker(worker)
         settings = json.dumps({"hotkey": "Ctrl+Shift+F12"})
         local_appdata = isolated / "local"
         state_root = local_appdata / "JchTools" / "data"
         write_isolated_settings(state_root, engine_root)
         _ = (asset_root / "settings.json").write_text(settings, encoding="utf-8")
-        username = f"ocr_root_test_{os.getpid()}"
         env = os.environ | {
             "LOCALAPPDATA": str(local_appdata),
-            "USERNAME": username,
             "JCHTOOLS_TEST_STATE_DIR": str(state_root),
             "JCHTOOLS_SNAP_OCR_TEST_ASSET_ROOT": str(asset_root),
         }
-        pipes = (pipe_name(asset_root), legacy_pipe_name(username))
+        pipes = (pipe_name(asset_root),)
         process = subprocess.Popen([str(worker), "--service"], env=env, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
         owner = None
         try:

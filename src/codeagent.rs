@@ -170,11 +170,15 @@ pub fn ensure_started() -> Result<Status> {
 }
 
 fn ensure_started_with(executable: PathBuf) -> Result<Status> {
-    let current = status()?;
-    if current.running && current.pid.is_some() {
-        return Ok(current);
+    // 状态存储不可用不能阻止首次启动；先只观察独占锁，再读取安全状态。
+    let running = is_running()?;
+    if running {
+        let current = status()?;
+        if current.pid.is_some() {
+            return Ok(current);
+        }
     }
-    if !current.running {
+    if !running {
         use std::os::windows::process::CommandExt;
         Command::new(executable)
             .arg("--codeagent-service")
@@ -217,10 +221,12 @@ fn wide(value: &str) -> Vec<u16> {
 #[cfg(feature = "test-hooks")]
 fn test_isolation() -> Result<Option<(PathBuf, String)>> {
     let source = std::env::var_os("JCHTOOLS_TEST_CODEAGENT_CREDENTIALS");
-    let registry = std::env::var("JCHTOOLS_TEST_CODEAGENT_REGISTRY").ok();
+    let registry = std::env::var_os("JCHTOOLS_TEST_CODEAGENT_REGISTRY");
     if source.is_none() && registry.is_none() {
         return Ok(None);
     }
+    // 非 Unicode 值也属于已配置隔离；转换失败必须拒绝，不能当作变量未设置。
+    let registry = registry.and_then(|value| value.into_string().ok());
     let source = source.map(PathBuf::from).filter(|path| path.is_absolute());
     let root = std::env::var_os("JCHTOOLS_TEST_STATE_DIR")
         .map(PathBuf::from)
@@ -455,7 +461,15 @@ pub fn serve() -> Result<()> {
     let mut state = Status {
         running: true,
         pid: Some(std::process::id()),
-        interval_seconds: load_interval()?,
+        interval_seconds: load_interval().unwrap_or_else(|_| {
+            // 首次读取也可能遇到 SQLite 暂时不可用；持锁按默认间隔开始，恢复后热应用。
+            tracing::warn!(
+                component = "codeagent",
+                event = "codeagent_interval_read_failed",
+                "读取初始 CodeAgent 间隔失败，暂时使用默认间隔"
+            );
+            60
+        }),
         ..Status::default()
     };
     let mut publish_pending = publish(&state).is_err();

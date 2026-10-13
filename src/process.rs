@@ -1009,7 +1009,8 @@ fn run_with_idle_timeout_inner(
     #[cfg(windows)]
     {
         use std::os::windows::process::CommandExt;
-        command.creation_flags(0x0800_0000);
+        command
+            .creation_flags(0x0800_0000 | windows_sys::Win32::System::Threading::CREATE_SUSPENDED);
     }
     let mut child = command.spawn().map_err(|error| {
         tracing::error!(event = "spawn_failed", stage = "spawn", error_type = ?error.kind(), error_code = error.raw_os_error(), "子进程启动失败");
@@ -1024,6 +1025,19 @@ fn run_with_idle_timeout_inner(
         peer_pid = child.id(),
         "子进程已创建"
     );
+    if let Err(error) = control.check_cancelled() {
+        reap(&mut child);
+        return Err(error);
+    }
+    // 与捕获入口相同：恢复执行前加入本次拥有的 Job，失败/取消时回收整棵进程树。
+    #[cfg(windows)]
+    let mut job = match ProcessTreeJob::attach_and_resume(&child) {
+        Ok(job) => Some(job),
+        Err(error) => {
+            reap(&mut child);
+            return Err(error);
+        }
+    };
     let (send, recv) = mpsc::sync_channel(64);
     // spawn 成功后若 take 失败，必须 kill+wait 回收子进程，避免残留。
     let Some(stdout_pipe) = child.stdout.take() else {
@@ -1033,6 +1047,8 @@ fn run_with_idle_timeout_inner(
             stage = "stream_setup",
             "子进程缺少输出管道"
         );
+        #[cfg(windows)]
+        drop(job.take());
         reap(&mut child);
         bail!("缺少 stdout");
     };
@@ -1044,18 +1060,12 @@ fn run_with_idle_timeout_inner(
             stage = "stream_setup",
             "子进程缺少错误管道"
         );
+        #[cfg(windows)]
+        drop(job.take());
         reap(&mut child);
         drop(send);
         drop(recv);
-        if stdout.join().is_err() {
-            tracing::error!(
-                event = "thread_join_failed",
-                stream = "stdout",
-                stage = "stream_setup_cleanup",
-                error_type = "thread_panic",
-                "输出管道清理线程异常退出"
-            );
-        }
+        let _ = join_with_deadline(stdout, PIPE_DRAIN_GRACE);
         bail!("缺少 stderr");
     };
     let stderr = pump(stderr_pipe, true, send);
@@ -1076,6 +1086,11 @@ fn run_with_idle_timeout_inner(
                 );
             })?;
             if last_tick.elapsed() > Duration::from_millis(500) {
+                // 即使后代持续输出也检查根退出；释放本次 Job 后再排空剩余管道。
+                #[cfg(windows)]
+                if job.is_some() && child.try_wait()?.is_some() {
+                    drop(job.take());
+                }
                 tick().inspect_err(|_| {
                     tracing::error!(
                         event = "subprocess_callback_failed",
@@ -1170,6 +1185,8 @@ fn run_with_idle_timeout_inner(
         }
         Ok(())
     })();
+    #[cfg(windows)]
+    drop(job.take());
     if result.is_err() {
         reap(&mut child);
     }
@@ -1618,6 +1635,83 @@ mod tests {
         let mut c = Command::new("sleep");
         c.arg("60");
         c
+    }
+    // 覆盖 X-08 / H-02：流式入口取消、失败和根退出必须回收本次派生的后代。
+    // Windows Job 与进程句柄是验证对象，非 Windows 无对应产品行为。
+    #[cfg(windows)]
+    #[test]
+    fn streaming_terminal_paths_reap_owned_descendants() {
+        use std::os::windows::io::{AsRawHandle, FromRawHandle, OwnedHandle};
+        use windows_sys::Win32::{
+            Foundation::WAIT_OBJECT_0,
+            System::Threading::{
+                OpenProcess, TerminateProcess, WaitForSingleObject, PROCESS_SYNCHRONIZE,
+                PROCESS_TERMINATE,
+            },
+        };
+
+        for mode in ["取消", "回调失败", "空闲超时", "根退出"] {
+            let ending = if mode == "根退出" {
+                "Start-Sleep -Seconds 1; exit 0"
+            } else {
+                "Start-Sleep -Seconds 60"
+            };
+            let script = format!(
+                "$child = Start-Process -FilePath \"$PSHOME\\powershell.exe\" \
+                 -ArgumentList '-NoProfile','-Command','Start-Sleep -Seconds 60' \
+                 -NoNewWindow -PassThru; [Console]::Out.WriteLine($child.Id); {ending}"
+            );
+            let mut command = Command::new("powershell");
+            command.args(["-NoProfile", "-Command", &script]);
+            let control = Control::default();
+            let mut descendant = None;
+            let result = run_with_idle_timeout(
+                &mut command,
+                &control,
+                Duration::from_secs(5),
+                |err, line| {
+                    if !err && descendant.is_none() {
+                        let pid = line.trim().parse::<u32>()?;
+                        // SAFETY: PID 来自本次合成进程握手，仅打开同步和失败收尾所需权限。
+                        let handle = unsafe {
+                            OpenProcess(PROCESS_SYNCHRONIZE | PROCESS_TERMINATE, 0, pid)
+                        };
+                        if handle.is_null() {
+                            return Err(std::io::Error::last_os_error().into());
+                        }
+                        // SAFETY: 成功句柄的唯一所有权交给 OwnedHandle，防 PID 复用。
+                        descendant = Some(unsafe { OwnedHandle::from_raw_handle(handle.cast()) });
+                        match mode {
+                            "取消" => control.cancel(),
+                            "回调失败" => bail!("合成回调失败"),
+                            _ => {}
+                        }
+                    }
+                    Ok(())
+                },
+                || Ok(()),
+            );
+            let handle = descendant.expect("后代必须真实启动并完成 PID 握手");
+            // SAFETY: 有界等待本用例持有的后代句柄。
+            let status = unsafe { WaitForSingleObject(handle.as_raw_handle().cast(), 1000) };
+            if status != WAIT_OBJECT_0 {
+                // SAFETY: 只清理本用例已握手的后代，修复前失败也不留下孤儿。
+                unsafe {
+                    TerminateProcess(handle.as_raw_handle().cast(), 1);
+                    WaitForSingleObject(handle.as_raw_handle().cast(), 2000);
+                }
+            }
+            if mode == "根退出" {
+                result.expect("根成功退出时不能因后代持管道误报空闲超时");
+            } else {
+                let error = result.expect_err("取消或失败必须返回错误");
+                assert!(
+                    error.to_string().contains(if mode == "空闲超时" { "无输出" } else { mode }),
+                    "{mode}: {error}"
+                );
+            }
+            assert_eq!(status, WAIT_OBJECT_0, "{mode}返回后本次后代仍存活");
+        }
     }
 
     /// run_with_idle_timeout：连续无输出超过 idle 上限时应 kill 并返回错误，不得无限阻塞。

@@ -123,9 +123,12 @@ impl HashCache {
 
     fn store_inner(&self, entries: &[(String, i64, i64, String)]) -> Result<()> {
         let updated = chrono::Utc::now().timestamp();
-        self.conn.execute_batch("BEGIN IMMEDIATE")?;
-        let result = (|| {
-            let mut stmt = self.conn.prepare_cached(
+        let tx = rusqlite::Transaction::new_unchecked(
+            &self.conn,
+            rusqlite::TransactionBehavior::Immediate,
+        )?;
+        {
+            let mut stmt = tx.prepare_cached(
                 "INSERT INTO hash_cache(identity,size,mtime,hash,updated) VALUES(?1,?2,?3,?4,?5) \
                  ON CONFLICT(identity,size,mtime) DO UPDATE SET hash=excluded.hash,updated=excluded.updated",
             )?;
@@ -135,15 +138,9 @@ impl HashCache {
                 }
                 stmt.execute(params![identity, size, mtime, hash, updated])?;
             }
-            Ok::<_, anyhow::Error>(())
-        })();
-        match result {
-            Ok(()) => self.conn.execute_batch("COMMIT")?,
-            Err(error) => {
-                let _ = self.conn.execute_batch("ROLLBACK");
-                return Err(error);
-            }
         }
+        // 包括 COMMIT 失败在内的所有错误都由事务析构回滚，释放共享缓存写锁。
+        tx.commit()?;
         Ok(())
     }
 }
@@ -191,6 +188,39 @@ mod tests {
             cache.lookup("123:4:567", 1, 2)?.as_deref(),
             Some("reliable")
         );
+        Ok(())
+    }
+
+    // 覆盖 C-13：提交失败必须释放写事务，不能让缓存持续持锁或阻断后续保存。
+    #[test]
+    fn failed_commit_rolls_back_and_releases_cache_writer() -> anyhow::Result<()> {
+        let directory = tempfile::tempdir()?;
+        let cache = HashCache::open(directory.path())?;
+        cache.conn.execute_batch(
+            "PRAGMA foreign_keys=ON;
+             CREATE TABLE cache_parent(id INTEGER PRIMARY KEY);
+             CREATE TABLE cache_child(parent INTEGER REFERENCES cache_parent(id)
+                 DEFERRABLE INITIALLY DEFERRED);
+             CREATE TRIGGER fail_cache_commit AFTER INSERT ON hash_cache
+                 BEGIN INSERT INTO cache_child(parent) VALUES(1); END;",
+        )?;
+        assert!(cache.store(&[("123:4:567".into(), 1, 2, "failed".into())]).is_err());
+        assert!(
+            cache.conn.is_autocommit(),
+            "提交失败后必须回滚，不能保留缓存写锁"
+        );
+        assert_eq!(cache.lookup("123:4:567", 1, 2)?, None);
+
+        // 用另一连接证明失败事务未持续占有跨进程共用库的写锁。
+        let writer = HashCache::open(directory.path())?;
+        writer.conn.execute_batch("DROP TRIGGER fail_cache_commit")?;
+        writer.store(&[("123:4:567".into(), 1, 2, "recovered".into())])?;
+        assert_eq!(
+            cache.lookup("123:4:567", 1, 2)?.as_deref(),
+            Some("recovered")
+        );
+        cache.store(&[("123:4:568".into(), 1, 2, "next".into())])?;
+        assert_eq!(writer.lookup("123:4:568", 1, 2)?.as_deref(), Some("next"));
         Ok(())
     }
 }

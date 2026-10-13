@@ -810,3 +810,36 @@ const fn flac_crc_table() -> [u16; 256] {
     }
     table
 }
+
+#[cfg(test)]
+mod tests {
+    // 覆盖 C-08 / 附录 B：真实无损 WebP 编码的最大宽/高都须经公开签名入口识别。
+    #[test]
+    fn webp_maximum_lossless_dimensions_are_detected() {
+        let directory = tempfile::tempdir().expect("创建签名测试目录");
+        let pixels = vec![73u8; 16_384 * 3];
+        for (width, height) in [(16_384, 1), (1, 16_384)] {
+            let mut encoded = Vec::new();
+            image::codecs::webp::WebPEncoder::new_lossless(&mut encoded)
+                .encode(&pixels, width, height, image::ExtendedColorType::Rgb8)
+                .expect("合法的 16384 单元无损 WebP 应能编码");
+            let path = directory.path().join(format!("{width}x{height}.bin"));
+            std::fs::write(&path, &encoded).expect("写入真实 WebP 夹具");
+            let detected =
+                crate::rules::detect_extension(&path, &crate::control::Control::default())
+                    .expect("公开签名识别成功");
+            assert_eq!(detected, Some("webp"), "{width}x{height}");
+            let extension = detected.expect("必须确认 WebP 类型");
+            assert!(crate::rules::extension_needs_fix("bin", extension));
+            assert_eq!(
+                crate::rules::category_for(&format!("photo.{extension}")),
+                "图片"
+            );
+            assert_eq!(
+                std::fs::read(&path).expect("重读夹具"),
+                encoded,
+                "签名识别只读"
+            );
+        }
+    }
+}

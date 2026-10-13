@@ -122,11 +122,21 @@ def load_reports(paths: list[Path]) -> tuple[str, list[float], list[float]]:
         text = report["actual_text"]
         if not isinstance(text, str):
             message = f"{path}: actual_text 必须是字符串，不能把非文本结果转成成功正文"
-            raise ValueError(message)
+            raise TypeError(message)
         texts.append(text)
-        initialization.append(float(report["initialization_seconds"]))
+        load_seconds = float(report["initialization_seconds"])
         value = report["recognition_seconds"]
-        recognition.extend(float(item) for item in (value if isinstance(value, list) else [value]))
+        ocr_seconds = [float(item) for item in (value if isinstance(value, list) else [value])]
+        if (
+            not math.isfinite(load_seconds)
+            or load_seconds < 0
+            or not ocr_seconds
+            or any(not math.isfinite(seconds) or seconds < 0 for seconds in ocr_seconds)
+        ):
+            message = f"{path}: 加载和识别耗时必须是有限非负数，且至少包含一次识别"
+            raise ValueError(message)
+        initialization.append(load_seconds)
+        recognition.extend(ocr_seconds)
     if len(set(texts)) != 1:
         message = "同一实现的重复识别文本不一致"
         raise ValueError(message)
@@ -183,7 +193,7 @@ def evaluate_thresholds(
     return failures
 
 
-def self_test() -> None:
+def self_test() -> None:  # noqa: C901, PLR0912, PLR0915  # 纯测试声明按 AGENTS.md §3.4 仅检查语法与执行，生产函数仍严格检查。
     """内嵌自测（--self-test）：锚点列宽度与输出路径守卫，仅在仓库 .tmp/ 下创建临时项."""
     # 全宽（F）与中文（W）各计 2：ａｂ中文 = 8 个半角单元，x 的网格列 = 8。
     assert anchors("\uff41\uff42中文x", ["x"]) == {"x": {"row": 0, "column": 8}}
@@ -251,6 +261,39 @@ def self_test() -> None:
             "rust": "",
         }
     ]
+    # 覆盖 O-32/P-13：无效性能值不能被输出为通过，或生成含 NaN/Infinity 的 JSON。
+    for field, invalid in (
+        ("initialization_seconds", float("nan")),
+        ("initialization_seconds", -1),
+        ("recognition_seconds", float("inf")),
+        ("recognition_seconds", [-1]),
+        ("recognition_seconds", []),
+    ):
+        report = {
+            "status": "success",
+            "actual_text": "A",
+            "initialization_seconds": 0.1,
+            "recognition_seconds": [0.2],
+            field: invalid,
+        }
+        with patch.object(Path, "read_text", return_value=json.dumps(report)):
+            try:
+                load_reports([Path("synthetic-report.json")])
+            except ValueError:
+                continue
+        message = f"无效性能字段必须拒绝：{field}={invalid!r}"
+        raise AssertionError(message)
+    # 无效正文类型属于 TypeError；CLI 仍统一归入执行异常退出码 3。
+    report = {"status": "success", "actual_text": None}
+    with patch.object(Path, "read_text", return_value=json.dumps(report)):
+        try:
+            load_reports([Path("synthetic-report.json")])
+        except TypeError:
+            pass
+        else:
+            message = "非文本正文必须拒绝为类型错误，不能转成成功正文"
+            raise AssertionError(message)
+
     # 输出守卫：仓库根 .tmp/ 之下允许（含尚未存在的路径）。
     ensure_repo_tmp_output(REPO_ROOT / ".tmp" / "ocr-assets" / "comparison.json")
     # 仓库外系统临时目录同名 .tmp、仓库内非 .tmp、仓库旁 .tmp 均必须拒绝。

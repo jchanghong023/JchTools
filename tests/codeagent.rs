@@ -202,6 +202,22 @@ fn codeagent_native_registry_and_detached_service() {
     std::env::set_var("JCHTOOLS_TEST_CODEAGENT_CREDENTIALS", &source);
     std::env::set_var("JCHTOOLS_TEST_CODEAGENT_REGISTRY", &registry);
     let isolated = Isolation { root, registry };
+    // CA-07：非 Unicode 的隔离注册表变量仍表示尝试隔离，不能回退真实凭据。
+    {
+        use std::os::windows::ffi::OsStringExt;
+        std::env::remove_var("JCHTOOLS_TEST_CODEAGENT_CREDENTIALS");
+        std::env::set_var(
+            "JCHTOOLS_TEST_CODEAGENT_REGISTRY",
+            std::ffi::OsString::from_wide(&[0xd800]),
+        );
+        let result =
+            codeagent::ensure_started_for_test(PathBuf::from(env!("CARGO_BIN_EXE_JchTools")));
+        assert!(
+            matches!(result, Err(error) if error == "CodeAgent 测试隔离配置不完整，拒绝访问真实凭据或注册表")
+        );
+        std::env::set_var("JCHTOOLS_TEST_CODEAGENT_CREDENTIALS", &source);
+        std::env::set_var("JCHTOOLS_TEST_CODEAGENT_REGISTRY", &isolated.registry);
+    }
     let mut key = std::ptr::null_mut();
     assert_eq!(
         unsafe {
@@ -286,6 +302,35 @@ fn codeagent_native_registry_and_detached_service() {
         assert!(codeagent::serve().is_ok());
     }
     assert!(!codeagent::status().unwrap().running);
+    // CA-05：首次启动时 SQLite 不可用，仍启动独立后台并维护隔离凭据；
+    // 存储恢复后补写状态和已保存的间隔，不要求重新打开页面。
+    let database = isolated.root.path().join("config.sqlite3");
+    let saved_database = isolated.root.path().join("config.sqlite3.saved");
+    std::fs::rename(&database, &saved_database).unwrap();
+    std::fs::create_dir(&database).unwrap();
+    let outage_token = "synthetic-startup-outage";
+    credentials(&source, &protect(outage_token));
+    assert!(
+        codeagent::ensure_started_for_test(PathBuf::from(env!("CARGO_BIN_EXE_JchTools"))).is_err(),
+        "存储不可用时不能声称安全状态已读取"
+    );
+    wait_for(|| registry_value(&isolated.registry).1 == wide(outage_token));
+    std::fs::remove_dir(&database).unwrap();
+    std::fs::rename(&saved_database, &database).unwrap();
+    wait_for(|| {
+        codeagent::status().is_ok_and(|state| {
+            state.running
+                && state.pid.is_some()
+                && state.last_check.is_some()
+                && state.interval_seconds == 1
+        })
+    });
+    std::fs::write(isolated.root.path().join("codeagent-test-stop"), b"stop").unwrap();
+    wait_for(|| codeagent::status().is_ok_and(|state| !state.running));
+    std::fs::remove_file(isolated.root.path().join("codeagent-test-stop")).unwrap();
+    credentials(&source, &cipher);
+    assert_eq!(codeagent::check_once(), CheckResult::Updated);
+    assert!(registry_value(&isolated.registry) == updated);
     let mut host = Command::new(std::env::current_exe().unwrap())
         .args(["--exact", "codeagent_spawning_host", "--nocapture"])
         .env("JCHTOOLS_CODEAGENT_HOST_TEST", "1")
@@ -358,7 +403,11 @@ fn codeagent_native_registry_and_detached_service() {
     credentials(&source, &protect("synthetic-rotated"));
     wait_for(|| registry_value(&isolated.registry).1 == wide("synthetic-rotated"));
     let safe_status = serde_json::to_string(&codeagent::status().unwrap()).unwrap();
-    assert!(!safe_status.contains(token) && !safe_status.contains("synthetic-rotated"));
+    assert!(
+        !safe_status.contains(token)
+            && !safe_status.contains("synthetic-rotated")
+            && !safe_status.contains(outage_token)
+    );
     std::fs::write(isolated.root.path().join("codeagent-test-stop"), b"stop").unwrap();
     wait_for(|| codeagent::status().is_ok_and(|state| !state.running));
     let logs = isolated.root.path().join("logs");
@@ -367,7 +416,11 @@ fn codeagent_native_registry_and_detached_service() {
             let path = entry.unwrap().path();
             if path.is_file() {
                 let text = std::fs::read_to_string(path).unwrap();
-                assert!(!text.contains(token) && !text.contains("synthetic-rotated"));
+                assert!(
+                    !text.contains(token)
+                        && !text.contains("synthetic-rotated")
+                        && !text.contains(outage_token)
+                );
             }
         }
     }

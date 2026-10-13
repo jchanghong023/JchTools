@@ -30,7 +30,7 @@ from pathlib import Path
 from typing import cast
 from unittest.mock import MagicMock, patch
 
-from scripts import gate_runtime, local_gate_plan, make_tmp, test_gate
+from scripts import gate_runtime, local_gate_plan, make_tmp, test_gate, test_timing, xberg_test_engine
 from scripts.test_gate import stage_remote_workflow
 
 
@@ -653,6 +653,108 @@ class CargoArtifactEncodingTests(unittest.TestCase):
                     )
                     self.assertEqual(len(discovered), 1, "唯一 artifact 因 UTF-8 BOM 被丢失")
                     self.assertEqual(discovered[0].name, "root-test-build-中文测试")
+
+
+class GateCleanupCancellationTests(unittest.TestCase):
+    """覆盖 AGENTS.md 3.4：清理阶段取消也必须输出统一计时证据。"""
+
+    def test_cleanup_interrupt_preserves_failed_timing_summary(self) -> None:
+        run = gate_runtime.GateRun(
+            "fastcheck", 60.0, test_gate.ROOT, test_gate.LOG_DIR,
+            start_command=MagicMock(side_effect=AssertionError("不应启动阶段")),
+            close_command=MagicMock(return_value=True),
+            kill_tree=MagicMock(return_value=True),
+            compiler_ids=MagicMock(return_value=frozenset()),
+        )
+        temporary = MagicMock()
+        temporary.name = "synthetic cleanup directory; never created"
+        temporary.cleanup.side_effect = KeyboardInterrupt
+        run._temporary = temporary
+        output = io.StringIO()
+        with contextlib.redirect_stdout(output):
+            code = run.finish([])
+        self.assertEqual(code, 1)
+        self.assertIn("temporary-cleanup", output.getvalue())
+        self.assertIn("fastcheck FAIL total=", output.getvalue())
+        for field in ("compile_excluded=", "budgeted=", "limit="):
+            self.assertIn(field, output.getvalue())
+
+
+class TimingBudgetAndEncodingTests(unittest.TestCase):
+    """覆盖 AGENTS.md 3.4：计时预算不扩张，中文用例名原样交给 --exact。"""
+
+    def test_remaining_budget_bounds_single_test_timeout(self) -> None:
+        suite = test_timing.Suite("synthetic", Path("never-run.exe"), seconds=6.0, test_names=["first", "second"])
+        with (
+            patch.object(test_timing, "_run_checked", side_effect=subprocess.TimeoutExpired("never-run.exe", 7.0)) as run,
+            patch.object(test_timing.time, "perf_counter", side_effect=[0.0, 7.0]),
+            contextlib.redirect_stdout(io.StringIO()),
+        ):
+            rows = test_timing.time_individual_tests([suite], 7.0)
+        self.assertEqual(run.call_args.kwargs["timeout"], 7.0)
+        self.assertEqual(run.call_count, 1)
+        self.assertEqual(rows[0].note, "单用例超时")
+        self.assertIsNone(rows[1].seconds)
+        self.assertEqual(rows[1].note, "预算截停未测")
+
+    def test_cleanup_only_budget_does_not_start_a_test(self) -> None:
+        suite = test_timing.Suite("synthetic", Path("never-run.exe"), seconds=6.0, test_names=["case"])
+        with (
+            patch.object(test_timing, "_run_checked", side_effect=AssertionError("清理预算不足时不得启动")),
+            contextlib.redirect_stdout(io.StringIO()),
+        ):
+            rows = test_timing.time_individual_tests([suite], test_timing.PROCESS_TREE_CLEANUP_SECONDS)
+        self.assertIsNone(rows[0].seconds)
+        self.assertEqual(rows[0].note, "预算截停未测")
+
+    def test_utf8_test_names_survive_gbk_host(self) -> None:
+        with patch("subprocess._text_encoding", return_value="gbk"):
+            result = test_timing._run_checked(
+                [sys.executable, "-c", "import sys; sys.stdout.buffer.write('中文用例: test\\n'.encode('utf-8'))"],
+                timeout=10.0,
+            )
+        self.assertEqual(result.returncode, 0)
+        self.assertEqual(result.stdout, "中文用例: test\n")
+
+
+class XbergCachedIdentityTests(unittest.TestCase):
+    """覆盖 XB-10：损坏的本机收据不能阻止最新版本重新获取。"""
+
+    def test_invalid_receipt_requests_verified_reinstallation(self) -> None:
+        workspace = test_gate.ROOT / ".tmp" / "test-gate" / "engine-identity-regression"
+        with patch.object(sys, "argv", ["make_tmp.py", "workspace", "--destination", str(workspace)]):
+            self.assertEqual(make_tmp.main(), 0)
+        with tempfile.TemporaryDirectory(dir=workspace) as temporary:
+            root = Path(temporary)
+            engine = root / "engine"
+            engine.mkdir()
+            (engine / "xberg.exe").write_bytes(b"inert engine; never execute")
+            receipt = engine / xberg_test_engine.RECEIPT_NAME
+            manifest = root / "resources"
+            manifest.mkdir()
+            (manifest / "markdown-assets.json").write_text('{"xberg": {}}', encoding="utf-8")
+            release = xberg_test_engine.Release("v-latest", "0" * 64, 1)
+            with (
+                patch.object(xberg_test_engine, "ROOT", root),
+                patch.object(xberg_test_engine, "TEST_ENGINE", engine),
+            ):
+                for content in ("", "{", "not json", "\ufeff{}"):
+                    with self.subTest(content=content):
+                        receipt.write_text(content, encoding="utf-8")
+                        self.assertFalse(xberg_test_engine.current_engine_matches(release))
+
+    def test_redirected_fixed_directory_is_rejected_before_cached_reuse(self) -> None:
+        with (
+            patch.object(xberg_test_engine.shutil, "which", return_value="never-run-gh"),
+            patch.object(xberg_test_engine.subprocess, "run", return_value=subprocess.CompletedProcess([], 0, "{}")),
+            patch.object(xberg_test_engine, "release_from_metadata", return_value=xberg_test_engine.Release("v", "0" * 64, 1)),
+            patch.object(xberg_test_engine, "ensure_test_engine_target", side_effect=OSError("重定向目录")),
+            patch.object(xberg_test_engine, "current_engine_matches", return_value=True) as cached,
+            patch.dict(os.environ, {"JCHTOOLS_TEST_XBERG_DIR": ""}),
+            contextlib.redirect_stdout(io.StringIO()),
+        ):
+            self.assertEqual(xberg_test_engine.main(), 1)
+        cached.assert_not_called()
 
 
 if __name__ == "__main__":

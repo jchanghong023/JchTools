@@ -2715,3 +2715,201 @@ fn recursive_fetch_does_not_update_submodule_tracking_ref() {
         "superproject当前文件应已推送"
     );
 }
+
+// 覆盖 G-06/G-11：合并范围按字面路径核实，不能把前导空格剥除后误认成冲突文件。
+#[test]
+fn conflict_resume_refuses_whitespace_distinct_staged_path() {
+    let fix = fixture();
+    fs::write(fix.repo.join("conflict.txt"), "local version\n").unwrap();
+    let other = fix.repo.parent().unwrap().join("other");
+    git_ok(
+        fix.repo.parent().unwrap(),
+        &["clone", "-q", &fix.remote.display().to_string(), "other"],
+    );
+    fs::write(other.join("conflict.txt"), "remote version\n").unwrap();
+    git_ok(&other, &["add", "conflict.txt"]);
+    git_ok(&other, &["commit", "-q", "-m", "remote conflict"]);
+    git_ok(&other, &["push", "-q"]);
+    assert!(run_tool(&fix.repo).text.contains("冲突"));
+    fs::write(fix.repo.join("conflict.txt"), "resolved\n").unwrap();
+    fs::write(fix.repo.join(" conflict.txt"), "unrelated staged\n").unwrap();
+    git_ok(&fix.repo, &["add", "--", "conflict.txt", " conflict.txt"]);
+    let tree = git_ok(&fix.repo, &["write-tree"]);
+    let head = git_ok(&fix.repo, &["rev-parse", "HEAD"]);
+    let remote = git_ok(&fix.remote, &["rev-parse", "master"]);
+
+    let outcome = run_tool(&fix.repo);
+    assert!(
+        outcome.text.contains("合并范围之外") && outcome.text.contains(" conflict.txt"),
+        "前导空格不同的路径必须拒绝夹带：{}",
+        outcome.text
+    );
+    assert_eq!(git_ok(&fix.repo, &["write-tree"]), tree, "暂存树必须保留");
+    assert_eq!(git_ok(&fix.repo, &["rev-parse", "HEAD"]), head, "不得提交");
+    assert_eq!(git_ok(&fix.remote, &["rev-parse", "master"]), remote, "不得推送");
+    assert!(fix.repo.join(".git/MERGE_HEAD").is_file(), "保留已解决的合并现场");
+}
+
+// 包装器仅让指定阶段首败一次，其余命令透传真实 Git，轨迹可核对阶段记忆。
+fn fail_once_wrapper(dir: &Path, stage: &str) -> PathBuf {
+    let wrapper = git_wrapper(dir);
+    let injected = format!(
+        "if /I \"%SUB%\"==\"{stage}\" if not exist \"%WDIR%failed.flag\" (\r\n\
+           >\"%WDIR%failed.flag\" echo failed\r\n\
+           echo TRANSIENT-OUT-MARK\r\n\
+           echo transient stage failure 1>&2\r\n\
+           exit /b 1\r\n\
+         )\r\n"
+    );
+    fs::write(
+        &wrapper,
+        GIT_WRAPPER_CMD.replace("\"%REALGIT%\" %*\r\n", &format!("{injected}\"%REALGIT%\" %*\r\n")),
+    )
+    .unwrap();
+    wrapper
+}
+
+// 覆盖 G-09/G-10/G-14：fetch 首败只重试 fetch；stdout/stderr 的实际内容不能被摘要丢弃。
+#[test]
+fn fetch_failure_retries_fetch_without_repeating_push() {
+    let fix = fixture();
+    remote_pushes_ahead(&fix.remote, "master", fix.repo.parent().unwrap());
+    fs::write(fix.repo.join("local.txt"), "local\n").unwrap();
+    let dir = tempfile::tempdir().unwrap();
+    let wrapper = fail_once_wrapper(dir.path(), "fetch");
+    let outcome = run_tool_with_control_and_git(&wrapper, &fix.repo, &Arc::new(Control::default()));
+    assert!(outcome.text.contains("全部完成"), "{}", outcome.text);
+    let phases: Vec<String> = trace_lines(dir.path())
+        .into_iter()
+        .filter(|line| line.starts_with("push") || line.starts_with("fetch") || line.starts_with("merge"))
+        .map(|line| line.split_whitespace().next().unwrap().to_owned())
+        .collect();
+    assert_eq!(phases, ["push", "fetch", "fetch", "merge", "push"], "只重试失败阶段");
+    assert!(outcome.logs.iter().any(|line| {
+        line.contains("git fetch 输出")
+            && line.contains("TRANSIENT-OUT-MARK")
+            && line.contains("transient stage failure")
+    }), "fetch 失败必须保留两条真实输出流");
+    assert_eq!(git_ok(&fix.remote, &["show", "master:local.txt"]), "local\n");
+}
+
+// 覆盖 G-09/G-10：merge 首败只重试 merge，不重复已成功的 fetch 或被拒绝的 push。
+#[test]
+fn merge_failure_retries_merge_without_repeating_fetch_or_push() {
+    let fix = fixture();
+    remote_pushes_ahead(&fix.remote, "master", fix.repo.parent().unwrap());
+    fs::write(fix.repo.join("local.txt"), "local\n").unwrap();
+    let dir = tempfile::tempdir().unwrap();
+    let wrapper = fail_once_wrapper(dir.path(), "merge");
+    let outcome = run_tool_with_control_and_git(&wrapper, &fix.repo, &Arc::new(Control::default()));
+    assert!(outcome.text.contains("全部完成"), "{}", outcome.text);
+    let phases: Vec<String> = trace_lines(dir.path())
+        .into_iter()
+        .filter(|line| line.starts_with("push") || line.starts_with("fetch") || line.starts_with("merge"))
+        .map(|line| line.split_whitespace().next().unwrap().to_owned())
+        .collect();
+    assert_eq!(phases, ["push", "fetch", "merge", "merge", "push"], "只重试失败阶段");
+    assert_merge_tip(&fix.remote, "master");
+    assert_eq!(git_ok(&fix.remote, &["show", "master:local.txt"]), "local\n");
+}
+
+// 覆盖 G-15：已解决合并的范围检查结束后收到停止，不能再启动合并提交。
+#[test]
+fn stop_before_resolved_merge_commit_preserves_index_and_head() {
+    let fix = fixture();
+    fs::write(fix.repo.join("conflict.txt"), "local\n").unwrap();
+    let other = fix.repo.parent().unwrap().join("other");
+    git_ok(
+        fix.repo.parent().unwrap(),
+        &["clone", "-q", &fix.remote.display().to_string(), "other"],
+    );
+    fs::write(other.join("conflict.txt"), "remote\n").unwrap();
+    git_ok(&other, &["add", "conflict.txt"]);
+    git_ok(&other, &["commit", "-q", "-m", "remote conflict"]);
+    git_ok(&other, &["push", "-q"]);
+    assert!(run_tool(&fix.repo).text.contains("冲突"));
+    fs::write(fix.repo.join("conflict.txt"), "resolved\n").unwrap();
+    git_ok(&fix.repo, &["add", "conflict.txt"]);
+    let tree = git_ok(&fix.repo, &["write-tree"]);
+    let head = git_ok(&fix.repo, &["rev-parse", "HEAD"]);
+    let remote = git_ok(&fix.remote, &["rev-parse", "master"]);
+    let control = Control::default();
+    let shared = Arc::new(GitShared::new());
+    let outcome = git_tools::run(
+        &git_exe(),
+        &fix.repo,
+        &control,
+        &shared,
+        &|line| {
+            if line.contains("检测到已解决的合并") {
+                control.cancel();
+            }
+        },
+        &|_| {},
+        TEST_UNIT,
+    );
+    assert!(control.is_cancelled(), "必须抵达提交前停止边界");
+    assert!(outcome.contains("已停止"), "{outcome}");
+    assert_eq!(git_ok(&fix.repo, &["write-tree"]), tree, "暂存树保留");
+    assert_eq!(git_ok(&fix.repo, &["rev-parse", "HEAD"]), head, "不得提交");
+    assert_eq!(git_ok(&fix.remote, &["rev-parse", "master"]), remote, "不得推送");
+    assert!(fix.repo.join(".git/MERGE_HEAD").is_file(), "保留合并现场");
+}
+
+// 覆盖 G-15：日志发送与命令启动之间的停止也有效，不能只在上一阶段结束时检查。
+#[test]
+fn stop_at_write_command_log_does_not_start_that_command() {
+    for stage in ["add", "commit", "merge"] {
+        let fix = fixture();
+        fs::write(fix.repo.join("local.txt"), "local\n").unwrap();
+        if stage == "merge" {
+            remote_pushes_ahead(&fix.remote, "master", fix.repo.parent().unwrap());
+        }
+        let control = Control::default();
+        let shared = Arc::new(GitShared::new());
+        let outcome = git_tools::run(
+            &git_exe(),
+            &fix.repo,
+            &control,
+            &shared,
+            &|line| {
+                let stop = match stage {
+                    "add" => line.starts_with("git add --"),
+                    "commit" => line.starts_with("git commit --only -m"),
+                    "merge" => line.starts_with("git -c") && line.contains(" merge FETCH_HEAD"),
+                    _ => unreachable!(),
+                };
+                if stop {
+                    control.cancel();
+                }
+            },
+            &|_| {},
+            TEST_UNIT,
+        );
+        assert!(control.is_cancelled(), "必须抵达 {stage} 命令启动边界");
+        assert!(outcome.contains("已停止"), "{stage}: {outcome}");
+        assert_eq!(fs::read_to_string(fix.repo.join("local.txt")).unwrap(), "local\n");
+        if stage == "merge" {
+            assert_eq!(
+                git_ok(&fix.repo, &["log", "-1", "--format=%s"]).trim(),
+                "update: local.txt",
+                "停止后不能形成合并提交"
+            );
+            assert!(!fix.repo.join("remote-side.txt").exists(), "不能落盘合并结果");
+            assert!(!fix.repo.join(".git/MERGE_HEAD").exists(), "不能启动合并");
+        } else {
+            assert_eq!(git_ok(&fix.repo, &["log", "-1", "--format=%s"]).trim(), "init");
+            if stage == "add" {
+                assert!(
+                    git_ok(&fix.repo, &["status", "--porcelain"]).contains("?? local.txt"),
+                    "add 尚未启动，文件应保持未跟踪"
+                );
+            } else {
+                assert_eq!(git_ok(&fix.repo, &["show", ":local.txt"]), "local\n",
+                    "成功的 add 保留，不回滚");
+            }
+        }
+        assert!(!remote_log(&fix.remote).iter().any(|s| s.starts_with("update: ")),
+            "停止前未成功 push，远端不得收到本地文件");
+    }
+}

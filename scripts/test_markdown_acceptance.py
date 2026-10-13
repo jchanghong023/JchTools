@@ -31,7 +31,7 @@ if TYPE_CHECKING:
 
     from pywinauto.application import WindowSpecification
 
-from scripts import gui_smoke, markdown_acceptance, test_gate, test_timing
+from scripts import gui_smoke, markdown_acceptance, media_e2e_fixture, test_gate, test_timing
 from scripts.gui_smoke import find_button as smoke_find_button
 from scripts.markdown_acceptance import unique_visible_buttons, verify_common_postconditions
 from scripts.test_gate import acceptance_coverage_gaps
@@ -538,6 +538,37 @@ class MediaPostconditionTests(unittest.TestCase):
 
             assert problems == []  # nosec B101: 回归测试断言，不用于产品权限或输入校验。
 
+    def test_percent_encoded_media_reference_resolves_to_original_filename(self) -> None:
+        # 覆盖 T-14：引擎前缀中的 &、百分号和括号经 URL 转义后仍指向原落盘文件。
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            source, output = root / "input", root / "output"
+            source.mkdir()
+            output.mkdir()
+            original = source / "中文&copy;% (图).docx"
+            original.write_bytes(b"source")
+            media = output / "中文&copy;%_(图)_docx_media" / "image_0.png"
+            media.parent.mkdir()
+            media.write_bytes(b"png-bytes")
+            (output / "中文&copy;% (图)_docx.md").write_text(
+                "![](中文%26copy;%25_%28图%29_docx_media/image_0.png)\n", encoding="utf-8"
+            )
+            assert verify_common_postconditions(source, output, {Path(original.name): _digest(original)}) == []
+
+    def test_encoded_absolute_media_reference_is_rejected_before_path_resolution(self) -> None:
+        # 覆盖 T-14/T-21：不能解析本地或 UNC 绝对引用，尤其不能访问远程共享再判越界。
+        collector = getattr(markdown_acceptance, "_" + "collect_media_references")
+        with tempfile.TemporaryDirectory() as temporary:
+            output = Path(temporary)
+            markdown = output / "sample.md"
+            markdown.write_text(
+                "![](%2F%2Fserver/share/image.png)\n![](C%3A%2Foutside/image.png)\n", encoding="utf-8"
+            )
+            with patch.object(Path, "resolve", side_effect=AssertionError("绝对引用不得解析")):
+                problems, referenced = collector(markdown, output)
+            assert len(problems) == 2
+            assert not referenced
+
     def test_duplicate_uia_button_nodes_collapse_to_physical_rows(self) -> None:
         buttons = [
             _FakeButton(_FakeRect(10, 100, 110, 140), "选择目录…"),
@@ -871,6 +902,51 @@ class PerInputRuleTests(unittest.TestCase):
             assert _per_input_problems("A25", ["sample.rst"], [], "")  # nosec B101: 本轮声明支持则缺产物必须失败。
             assert _per_input_problems("A25", ["sample.rst"], ["sample_rst.md"], "") == []  # nosec B101: 有对应产物才通过。
 
+    def test_each_top_level_input_rejects_duplicate_result_in_another_directory(self) -> None:
+        # 覆盖 T-10/A26：不能只比较文件名集合，把一份顶层输入的两份产物判为通过。
+        assessor = getattr(markdown_acceptance, "_" + "assess_conversion")
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            source, output = root / "input", root / "output"
+            source.mkdir()
+            output.mkdir()
+            original = source / "sample.docx"
+            original.write_bytes(b"source")
+            first = output / "sample_docx.md"
+            second = output / "duplicate" / first.name
+            second.parent.mkdir()
+            for result in (first, second):
+                result.write_text("公开合成正文", encoding="utf-8")
+            item = markdown_acceptance.Item("A21", "A", "逐输入唯一产物", "GUI")
+            prepared = markdown_acceptance.PreparedInputs(source, output, [original.name])
+            run = markdown_acceptance.GuiRun([first, second], "成功 1，失败 0", None)
+            for stop_mode in (False, True):
+                with self.subTest(stop_mode=stop_mode):
+                    outcome = assessor(item, prepared, {Path(original.name): _digest(original)}, run, stop_mode=stop_mode)
+                    assert outcome.status == markdown_acceptance.STATUS_FAILED
+                    assert "重复" in outcome.reason
+
+    def test_empty_healthy_output_cannot_pass_non_a26_item(self) -> None:
+        # 覆盖 P-12/T-25：任何健康文档条目和停止后的成品都不能把空文件计为通过。
+        assessor = getattr(markdown_acceptance, "_" + "assess_conversion")
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            source, output = root / "input", root / "output"
+            source.mkdir()
+            output.mkdir()
+            original = source / "sample.docx"
+            original.write_bytes(b"source")
+            result = output / "sample_docx.md"
+            result.write_text(" \n", encoding="utf-8")
+            item = markdown_acceptance.Item("A21", "A", "健康输入正文", "GUI")
+            prepared = markdown_acceptance.PreparedInputs(source, output, [original.name])
+            run = markdown_acceptance.GuiRun([result], "成功 1，失败 0", None)
+            for stop_mode in (False, True):
+                with self.subTest(stop_mode=stop_mode):
+                    outcome = assessor(item, prepared, {Path(original.name): _digest(original)}, run, stop_mode=stop_mode)
+                    assert outcome.status == markdown_acceptance.STATUS_FAILED
+                    assert "正文为空" in outcome.reason
+
     def test_a11_missing_broken_preview_fixture_is_not_run(self) -> None:
         # 缺少注入变体时必须由实际执行前置返回 NOT RUN，不能只锁定仓库当前缺少夹具。
         item = next(entry for entry in markdown_acceptance.ITEMS if entry.item_id == "A11")
@@ -919,6 +995,12 @@ class ContentAssertStrengthTests(unittest.TestCase):
         assert _content_problems("RUN-AND-FIELD 7 -FIELD-END", "", "A08") == []  # nosec B101
         assert _content_problems("RUN-AND-FIELD-FIELD-END", "", "A08")  # nosec B101: 字段值丢失。
 
+    def test_a08_wrong_field_value_cannot_pass_as_preserved(self) -> None:
+        # 覆盖 T-15：夹具的可见字段固定为 7，任意非空字符不证明字段值完整保留。
+        for value in ("8", "X", "?", "77"):
+            with self.subTest(value=value):
+                assert _content_problems(f"RUN-AND-FIELD{value}-FIELD-END", "", "A08")
+
     def test_a09_description_only_allowed_in_alt(self) -> None:
         ok = "![DESCR-NO-OCR-TOKEN](m/image_0.png)\n"
         assert _content_problems(ok, "", "A09") == []  # nosec B101: alt 位置合法。
@@ -944,6 +1026,22 @@ class DocumentSemanticPredicateTests(unittest.TestCase):
     def check(self, item_id: str, source: Path, output: Path, texts: str = "") -> list[str]:
         checker = getattr(markdown_acceptance, "_" + "document_semantic_problems")
         return checker(item_id, source, output, texts)
+
+    def test_image_binding_resolves_percent_encoded_media_directory(self) -> None:
+        # 覆盖 T-14/T-15：URL 转义不能使正确的源图与 OCR 绑定误报不可达。
+        checker = getattr(markdown_acceptance, "_" + "image_binding_problems")
+        token_png = getattr(markdown_acceptance, "_" + "token_png")
+        with tempfile.TemporaryDirectory() as temporary:
+            output = Path(temporary)
+            media = output / "sample&copy;%_media"
+            media.mkdir()
+            image = token_png("SOURCE-TOKEN")
+            (media / "image_0.png").write_bytes(image)
+            markdown = output / "sample.md"
+            markdown.write_text(
+                "![](sample%26copy;%25_media/image_0.png)\nSOURCE-TOKEN\n", encoding="utf-8"
+            )
+            assert checker(markdown, (("SOURCE-TOKEN", image),)) == []
 
     def test_a01_and_a14_detect_swapped_bytes_with_unchanged_text(self) -> None:
         cases = (
@@ -1831,7 +1929,7 @@ class AcceptanceBoundaryTests(unittest.TestCase):
                         "markdown_acceptance.py",
                         "--only",
                         "C01",
-                        "--json-report",
+                        "--json",
                         str(report_path),
                     ],
                 ),
@@ -1849,6 +1947,47 @@ class AcceptanceBoundaryTests(unittest.TestCase):
 
 class SyntheticFixtureTests(unittest.TestCase):
     """S10-13：夹具合成化——无外部语料路径、无来源元数据、生成脚本可校验。."""
+
+    def test_pptx_multi_image_fixture_has_unique_nonvisual_shape_ids(self) -> None:
+        # 覆盖附录 A2/T-15：组形状与图片形状不能复用同一个 cNvPr ID。
+        with tempfile.TemporaryDirectory() as temporary:
+            target = Path(temporary)
+            result = markdown_acceptance.SYNTHESIZERS["pptx_multi_images"](target, markdown_acceptance.FIXTURES_DEFAULT)
+            assert not result.error
+            with zipfile.ZipFile(target / result.files[0]) as archive:
+                slide = ElementTree.fromstring(archive.read("ppt/slides/slide1.xml"))
+            presentation = "{http://schemas.openxmlformats.org/presentationml/2006/main}"
+            ids = [node.attrib["id"] for node in slide.iter(f"{presentation}cNvPr")]
+            assert len(ids) == markdown_acceptance.A02_IMAGE_COUNT + 1
+            assert len(set(ids)) == len(ids)
+
+    def test_pbm_binary_preserves_ascii_pixel_positions(self) -> None:
+        # 覆盖附录 A17：P4 每行从最高位开始，不得把 P1 的像素整体右移。
+        with tempfile.TemporaryDirectory() as temporary:
+            target = Path(temporary)
+            result = markdown_acceptance.SYNTHESIZERS["pnm"](target, markdown_acceptance.FIXTURES_DEFAULT)
+            assert not result.error
+            assert (target / "p4_bin.pbm").read_bytes() == b"P4\n3 3\n\x40\xa0\x40"
+            with (
+                markdown_acceptance.Image.open(target / "p1_ascii.pbm") as ascii_image,
+                markdown_acceptance.Image.open(target / "p4_bin.pbm") as binary_image,
+            ):
+                assert ascii_image.size == binary_image.size
+                assert ascii_image.tobytes() == binary_image.tobytes()
+
+    def test_pptx_field_fixture_uses_drawingml_paragraph_namespace(self) -> None:
+        # 覆盖 T-15/附录 A8：真实文本框必须含 a:p，不能用 p:p 让引擎接受非标准 XML。
+        with tempfile.TemporaryDirectory() as temporary:
+            target = Path(temporary)
+            result = markdown_acceptance.SYNTHESIZERS["pptx_runs_fields"](target, markdown_acceptance.FIXTURES_DEFAULT)
+            assert not result.error
+            with zipfile.ZipFile(target / result.files[0]) as archive:
+                slide = ElementTree.fromstring(archive.read("ppt/slides/slide1.xml"))
+            drawing = "{http://schemas.openxmlformats.org/drawingml/2006/main}"
+            presentation = "{http://schemas.openxmlformats.org/presentationml/2006/main}"
+            paragraphs = slide.findall(f".//{presentation}txBody/{drawing}p")
+            assert len(paragraphs) == 1
+            assert "".join(node.text or "" for node in paragraphs[0].iter(f"{drawing}t")) == "RUN-AND-FIELD7-FIELD-END"
 
     def test_format_sweep_jsonl_is_synthetic(self) -> None:
         path = markdown_acceptance.FIXTURES_DEFAULT / "matrix" / "format_sweep" / "sample.jsonl"
@@ -2188,6 +2327,32 @@ class ProcessTreeOwnershipTests(unittest.TestCase):
                 if unrelated.poll() is None:
                     unrelated.terminate()
                 _ = unrelated.wait(timeout=5)
+
+
+class MediaFixtureOutputIsolationTests(unittest.TestCase):
+    """覆盖 T-26：环境 JSON 不能覆盖准备器的媒体、来源收据或已校验工具。"""
+
+    def test_output_cannot_overwrite_owned_fixture_artifacts(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary).resolve()
+            component = root / "component"
+            component.mkdir()
+            (component / "xberg.exe").write_bytes(b"synthetic engine identity")
+            workspace = root / ".tmp" / "media-e2e-fixture"
+            for relative in ("fixture-receipt.json", "speech.mp4", "spoken.wav", "tools/ffmpeg.exe"):
+                with self.subTest(output=relative):
+                    output = workspace / relative
+                    output.parent.mkdir(parents=True, exist_ok=True)
+                    original = b"previous verified artifact"
+                    output.write_bytes(original)
+                    with (
+                        patch.object(media_e2e_fixture, "ROOT", root),
+                        patch.object(media_e2e_fixture, "WORKSPACE", workspace),
+                        patch.object(media_e2e_fixture, "workspace", side_effect=AssertionError("拒绝前不得准备目录")),
+                    ):
+                        with self.assertRaises(ValueError):
+                            media_e2e_fixture.prepare(component, output)
+                    assert output.read_bytes() == original
 
 
 if __name__ == "__main__":

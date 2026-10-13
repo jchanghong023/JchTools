@@ -10,7 +10,7 @@
 /// `ProxyOverride` 例外表的单条规则。
 #[derive(Clone, PartialEq, Eq, Debug)]
 enum BypassRule {
-    /// `<local>`：不含点的主机名（内网裸名）不走代理。
+    /// `<local>`：不含点的主机名（内网裸名）不走代理，IPv6 字面量不算主机名。
     Local,
     /// 含 `*` 通配的模式，按大小写不敏感的通配匹配。
     Pattern(String),
@@ -119,15 +119,27 @@ impl SystemProxy {
     /// git 网络命令的环境变量注入（P-09）：仅在系统代理开启时非空，键固定为
     /// 小写（libcurl 优先识别小写）。`no_proxy` 仅近似表达可保持匹配范围的规则
     /// （`*.foo.com` → `foo.com`、`*` → `*`）；无法表达的条目丢弃。
+    /// 两协议分别沿用 [`Self::endpoint_for_url`] 的端点优先级，不能因缺少专配
+    /// 条目而让 Git 与应用下载使用不同出口；目标绕过仍由调用方先行判断。
     pub fn git_env(&self) -> Vec<(String, String)> {
         if !self.is_enabled() {
             return Vec::new();
         }
         let mut env = Vec::new();
-        if let Some(http) = &self.http {
+        if let Some(http) = self
+            .http
+            .as_ref()
+            .or(self.socks.as_ref())
+            .or(self.https.as_ref())
+        {
             env.push(("http_proxy".to_string(), http.clone()));
         }
-        if let Some(https) = &self.https {
+        if let Some(https) = self
+            .https
+            .as_ref()
+            .or(self.socks.as_ref())
+            .or(self.http.as_ref())
+        {
             env.push(("https_proxy".to_string(), https.clone()));
         }
         if let Some(socks) = &self.socks {
@@ -272,7 +284,7 @@ fn override_host(entry: &str) -> &str {
 /// `*.corp.example`）；`*` 在其他位置的条目退化为通用通配匹配。
 fn rule_matches(rule: &BypassRule, host: &str) -> bool {
     match rule {
-        BypassRule::Local => !host.contains('.'),
+        BypassRule::Local => !host.contains(['.', ':']),
         BypassRule::Pattern(pattern) => {
             if let Some(suffix) = pattern
                 .strip_prefix("*.")
@@ -288,7 +300,7 @@ fn rule_matches(rule: &BypassRule, host: &str) -> bool {
             // 条目在 parse_override 已规范化；此处再过一遍 [`override_host`]
             // 保证任何来源构造的规则都与 URL 侧裸主机口径一致（含方括号 IPv6）。
             let host_part = override_host(entry);
-            host_part == host || host_part.split(':').next().unwrap_or(host_part) == host
+            host_part == host
         }
     }
 }
@@ -609,6 +621,46 @@ mod tests {
         assert_eq!(no_proxy, "corp.example");
     }
 
+    // 覆盖 P-09：Git 与下载使用相同的按协议回退，不能因只配置一种协议
+    // 而让另一种协议的 Git 请求绕过系统代理。
+    #[test]
+    fn git_env_uses_the_same_protocol_fallback_as_downloads() {
+        for server in [
+            "http=p:1",
+            "https=p:2",
+            "socks=p:3",
+            "http=p:1;socks=p:3",
+            "https=p:2;socks=p:3",
+            "http=p:1;https=p:2",
+            "http=p:1;https=p:2;socks=p:3",
+        ] {
+            let proxy = SystemProxy::from_registry_values(
+                1,
+                Some(server),
+                Some("bypass.example;<local>;192.168.*"),
+            );
+            let env = proxy.git_env();
+            for (key, url) in [
+                ("http_proxy", "http://outside.example/asset"),
+                ("https_proxy", "https://outside.example/asset"),
+            ] {
+                assert_eq!(
+                    env.iter().find(|(name, _)| name == key).map(|(_, value)| value),
+                    proxy.endpoint_for_url(url).as_ref(),
+                    "Git 与下载的代理出口必须相同：{server}，{key}"
+                );
+            }
+            for url in [
+                "https://bypass.example/asset",
+                "http://intranet/asset",
+                "http://192.168.1.2/asset",
+            ] {
+                assert!(proxy.bypassed(url), "Git 必须先按目标判断绕过：{url}");
+                assert_eq!(proxy.endpoint_for_url(url), None);
+            }
+        }
+    }
+
     // 覆盖 P-09：git 直连回退只由连接类失败触发，认证与推送冲突不得触发。
     #[test]
     fn network_signature_matches_connect_failures_only() {
@@ -653,6 +705,47 @@ mod tests {
             Some("http://127.0.0.1:7890".to_string())
         );
         assert!(proxy.bypassed("http://[::1]/wiki"));
+    }
+
+    // 覆盖 P-09：精确 IPv6 或畸形端口条目不能按首个冒号截成另一主机，
+    // 否则未命中 ProxyOverride 的下载与 Git 请求会意外绕过系统代理。
+    #[test]
+    fn exact_bypass_does_not_expand_colon_entries_to_other_hosts() {
+        for (rule, unrelated, matched) in [
+            (
+                "2001:db8::1",
+                "https://2001/repo",
+                Some("https://[2001:db8::1]/repo"),
+            ),
+            ("example.com:bad", "https://example.com/repo", None),
+        ] {
+            let proxy = SystemProxy::from_registry_values(1, Some("p:1"), Some(rule));
+            assert_eq!(
+                proxy.endpoint_for_url(unrelated),
+                Some("http://p:1".to_string()),
+                "精确规则不能扩大到其他主机：{rule}"
+            );
+            assert!(!proxy.bypassed(unrelated));
+            if let Some(url) = matched {
+                assert_eq!(proxy.endpoint_for_url(url), None);
+                assert!(proxy.bypassed(url));
+            }
+        }
+    }
+
+    // 覆盖 P-09：<local> 仅匹配无点主机名，不把所有 IPv6 字面量当作本地主机。
+    #[test]
+    fn local_bypass_does_not_match_ipv6_addresses() {
+        let proxy = SystemProxy::from_registry_values(1, Some("p:1"), Some("<local>"));
+        assert_eq!(proxy.endpoint_for_url("http://intranet/wiki"), None);
+        for url in ["https://[2001:db8::1]/repo", "https://[::1]/repo"] {
+            assert_eq!(
+                proxy.endpoint_for_url(url),
+                Some("http://p:1".to_string()),
+                "<local> 不能替代显式 IP 例外：{url}"
+            );
+            assert!(!proxy.bypassed(url));
+        }
     }
 
     // 覆盖 P-09：no_proxy 仅翻译能保持匹配范围的规则；libcurl 会让普通主机条目

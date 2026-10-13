@@ -1,8 +1,10 @@
 # Xberg 本地联调记录（非需求、非发布结论）
 
+本文保留既有联调的输入、失败及验证记录，不授予当前执行权限，也不代表当前源码或最新发布物的验收结果。当前 Xberg 测试选版遵循 [XB-10](requirements/XBERG-INFERENCE.md)，开发目录 `E:\xberg` 仅作只读接口参照，不得编译、构建或产出测试/发布物；测试引擎目录及三级门预算、真实桌面和模型执行授权以 [AGENTS.md §3.4–3.5](../AGENTS.md#34-三级测试门与执行权限) 为准。下文的旧门耗时、桌面覆盖与本地构建仅是历史记录，不是现行门的配置或授权。
+
 ## 对照与边界
 
-- 发布对照：`v2026.10.4-2214-run57.1`，使用已缓存的官方发布物与其模型/DLL，不重复下载。`E:\xberg` 仅本次经用户授权本地构建；未发布、未触发 CI。
+- 发布对照：`v2026.10.4-2214-run57.1`，当时使用已缓存的官方发布物与其模型/DLL，不重复下载。`E:\xberg` 的本地构建是该次历史联调记录，不能据此再次构建；当时未发布、未触发 CI。
 - 本地标准 feature 集：`formats-no-heic,core-cli,analysis,ocr,paddle-ocr,transcription,api`。不得把本地修补二进制冒充官方发布物。
 - 未修改 Xberg 的金标准、阈值或基线。2026-10-05 用户明确删除独立断网测试；该项已从 JchTools 验收清单删除，不是改判为通过。产品的离线功能与隐私约束不变。
 
@@ -21,7 +23,7 @@
 
 原 `sample.hwp` 虽含 BodyText/Section0，但正文使用带 zlib 头的数据、空段落头和错误的文字记录标签（0x51 而非 PARA_TEXT=0x43），不能作为健康 HWP5。现从零生成无压缩 HWP5，遵循 MS-CFB 长度优先的目录排序和红黑树规则，由独立 olefile / pyhwp 读取完整记录，并由未修改的真实引擎提取 `HWP SYNTH CHECK`。HWP 引擎的 Windows 分隔符假设没有被实测支持，不据此改代码。
 
-## 当前验证证据
+## 历史验证证据
 
 - Rust 公开边界与安全回归：2026-10-05，本地 Windows，公开 PNG/native 1、公开 auto_mode 4、探测边界 3、EXIF 分类 1、编译格式能力 1、图像安全入口审计 1，全部通过。JBIG2 解码与安全回归此前 11 项通过。
 - 本地二进制 SHA-256：`4215e28ab087eab4f578cc13bf1e4aff3a3f20149e4ae8113fbd3848517bbe88`。真实零配置 worker 单进程完成健康 JBIG2 OCR、PNG 逐像素对照、Markdown 图片引用、501 页 auto/normal 隔离、损坏头失败与正常 shutdown；健康 JBIG2 无警告，命令退出码 0，耗时 48.30 秒。
@@ -37,7 +39,7 @@
 - 后续完整门 672.9 秒：43 PASS、1 FAIL、0 NOT RUN；A24 遇到 UIA `COMError(-2147220991)`。原报告没有堆栈，不能确认实际抛出点；单独带堆栈诊断的 A24 正常通过，不把它当作修复证据。发现按钮等待循环的控件查询没有使用已有瞬态错误边界：向真实桌面 A24 首次按钮查询注入同类 COM 错误，修补前退出码 1；将幂等查询纳入原等待期限后，真实转录、停止、产物与失败隔离断言全部通过，退出码 0、21.63 秒。没有增加任务重试，也不重试已发出的启动/停止命令；原始异常是否确属此查询仍为推断。
 - 最终 JchTools Windows `python scripts/test_gate.py fulltest --authorized`（显式本地 Xberg 运行目录、`RUST_TEST_THREADS=2`、外层整门 900 秒硬超时）：退出码 0，总墙钟 654.7 秒，13 个阶段全部 PASS。最终 JSON：Markdown 44 PASS、0 FAIL、0 NOT RUN；覆盖真实 GUI、引擎、截图组件、媒体转录及安装版/便携版公开入口。本次不触发 CI、不发布；通过结论仅限上述本地验证范围。
 
-## 可复现入口
+## 历史问题的复现入口（非执行授权）
 
 ```powershell
 python tests/markdown_fixtures/generate_synthetic.py --check
@@ -46,4 +48,4 @@ xberg.exe extract tests/markdown_fixtures/matrix/jbig2_standalone.jb2 --format j
 xberg.exe formats --format json
 ```
 
-模式问题须以真实 `worker` 的 `extract` 请求省略 mode（auto）或携带 `mode:"normal"` 对同一 501 页夹具对照；检查产物中的 `processing_warnings`，不能以界面任务完成标记冒充披露证据。每轮完整 fulltest 的总墙钟硬上限保持 900 秒，超时终止整个所属进程树并判失败。
+当时的模式问题通过真实 `worker` 的 `extract` 请求省略 mode（auto）或携带 `mode:"normal"`，对同一 501 页夹具作引擎侧对照；检查产物中的 `processing_warnings`，不能以界面任务完成标记冒充披露证据。此处不是当前 JchTools 请求配置示例：当前文档 extract 只传 path、不发送 mode，遵循 XB-05 / T-13。当时完整 fulltest 使用 900 秒总墙钟硬上限；现行三级门只扣除符合观测条件的编译独占时间后计算共享非编译预算，终止与计时证据按 AGENTS.md §3.4，不沿用旧计时方式。

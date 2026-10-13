@@ -514,6 +514,9 @@ class GateRun:
                 self._temporary.cleanup()
             except OSError as error:
                 results.append(Result("temporary-cleanup", STATUS_FAILED, f"运行期临时目录回收失败：{error}"))
+            except KeyboardInterrupt:
+                self._interrupted = True
+                results.append(Result("temporary-cleanup", STATUS_FAILED, "运行期临时目录回收被中断；不报告为通过。"))
             self._temporary = None
         if not self._valid:
             results.extend(self._results[:1])

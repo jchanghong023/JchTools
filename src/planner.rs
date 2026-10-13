@@ -72,7 +72,7 @@ fn remove_candidate(
     feature = "perf-tracing",
     tracing::instrument(target = "perf", name = "plan_cleanup", skip_all)
 )]
-fn cleanup_candidates(job: &mut Job) -> Result<()> {
+pub(crate) fn cleanup_candidates(job: &mut Job) -> Result<()> {
     let mut cursor = 0;
     loop {
         let batch = job.db.files(
@@ -296,10 +296,11 @@ impl Item {
             &digest,
             &self.extension,
             self.index_suffix,
+            no_source,
         )
     }
     /// 当前阶段的候选名（C-18 来源前缀 / C-19 摘要 / C-20 长度受限形式）。
-    fn current_candidate(&self) -> Option<String> {
+    fn current_candidate(&mut self) -> Option<String> {
         if self.digest_step == 0 {
             let derived = self.derived();
             let take = self.k.min(self.sources.len());
@@ -310,11 +311,33 @@ impl Item {
             let candidate = format!("{prefix}_{derived}");
             // C-20：逐层候选一旦超过 40 单元立即停止加来源，转无来源段的摘要形式。
             if candidate.encode_utf16().count() > rules::CONFLICT_YIELD_UNITS {
+                self.digest_step = 1;
+                self.digest_no_source = true;
                 return self.digest_candidate(8, true);
             }
             return Some(candidate);
         }
         let hex_units = usize::try_from((6 + 2 * self.digest_step).min(64)).unwrap_or(64);
+        // C-19 的首次摘要候选超长时同样进入 C-20；后续不能重新加回来源。
+        if !self.digest_no_source {
+            let source_units = self
+                .sources
+                .first()
+                .map_or(0, |source| source.encode_utf16().count() + 1);
+            let index_units = self
+                .index_suffix
+                .map_or(0, |index| index.to_string().len() + 1);
+            if source_units
+                + self.stem.encode_utf16().count()
+                + 1
+                + hex_units
+                + self.extension.encode_utf16().count()
+                + index_units
+                > rules::CONFLICT_YIELD_UNITS
+            {
+                self.digest_no_source = true;
+            }
+        }
         self.digest_candidate(hex_units, self.digest_no_source)
     }
 }
@@ -768,6 +791,8 @@ fn git_collection(job: &mut Job) -> Result<Vec<String>> {
     tracing::instrument(target = "perf", name = "plan_classify", skip_all)
 )]
 fn classify_files(job: &mut Job, moved_roots: &[String]) -> Result<()> {
+    // 保留已有 plan_classify，恢复分类移动计划的稳定性能口径（只增不改名）。
+    crate::perf::perf_span!("plan_moves");
     job.context
         .status("按「大类」确定存活文件的归类目标与最终名称");
     // C-05 一级结构：逐文件确定派生名、最终扩展名与大类（C-01 / C-08 / 附录 A），
@@ -1128,7 +1153,16 @@ pub fn build(job: &mut Job) -> Result<()> {
     job.db
         .conn
         .execute_batch("DELETE FROM actions; DELETE FROM targets; DELETE FROM keepers;")?;
-    cleanup_candidates(job)?; // Cleanup candidates must never become the sole duplicate keeper.
+    cleanup_candidates(job)?; // 永久清理项不能成为唯一去重保留者。
+    build_after_cleanup(job)
+}
+
+/// C-01：分析入口已在哈希前确定清理项；这里只规划存活文件，不重置或重复清理。
+#[cfg_attr(
+    feature = "perf-tracing",
+    tracing::instrument(target = "perf", name = "plan", skip_all)
+)]
+pub(crate) fn build_after_cleanup(job: &mut Job) -> Result<()> {
     deduplicate(job)?;
     // C-14 先于文件归类：项目移动先行执行，腾出的目录名可被分类层级复用；
     // 空目录规划依赖 git_roots.staying 标记，必须在集合规划之后。

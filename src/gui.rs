@@ -2227,10 +2227,38 @@ fn start_extract(ui: &AppWindow, state: &Rc<RefCell<State>>, out: &EventSender) 
         .map(|o| EngineTestOverrides {
             state_dir: o.state_dir.clone(),
         });
+    let generation = state.borrow().extract_generation;
+    let fail_sender = state.borrow().fail_sender.clone();
     spawn_event_worker(
         out,
         "解压线程意外退出；未执行的步骤不会继续",
         move || {
+            // U-10/H-02：先在工作线程记录旧任务，再启动引擎；不能在引擎建库后
+            // 才取快照，否则当前任务会被当成旧任务，运行中失败列表无法关联。
+            let state_root = overrides.as_ref().map_or_else(
+                || crate::config::state_dir().ok(),
+                |overrides| Some(overrides.state_dir.clone()),
+            );
+            if let Some(state_root) = state_root {
+                let tasks_root = state_root.join("tasks");
+                let known = std::fs::read_dir(&tasks_root)
+                    .map(|entries| {
+                        entries
+                            .flatten()
+                            .map(|entry| entry.path())
+                            .collect::<Vec<PathBuf>>()
+                    })
+                    .unwrap_or_default();
+                std::thread::spawn(move || {
+                    watch_extract_task(
+                        &tasks_root,
+                        &known,
+                        generation,
+                        &fail_sender,
+                        EXTRACT_TASK_WATCH_TIMEOUT,
+                    );
+                });
+            }
             let result = match overrides {
                 Some(overrides) => engine::extract_run_at(
                     &directory,
@@ -2244,35 +2272,6 @@ fn start_extract(ui: &AppWindow, state: &Rc<RefCell<State>>, out: &EventSender) 
             result.map(|result| Event::ExtractDone(result.directory, result.summary))
         },
     );
-    // U-10：失败列表的数据源是本次任务的任务库，而任务库目录由引擎在状态目录下创建、
-    // 路径随结果事件返回时任务已结束。启动前快照既有任务目录，watcher 在后台轮询新
-    // 目录并回传路径（只读访问，不进界面线程）；失败列表由此在运行中即可查看。
-    let state_root = state.borrow().engine_overrides.as_ref().map_or_else(
-        || crate::config::state_dir().ok(),
-        |o| Some(o.state_dir.clone()),
-    );
-    if let Some(state_root) = state_root {
-        let tasks_root = state_root.join("tasks");
-        let known = std::fs::read_dir(&tasks_root)
-            .map(|entries| {
-                entries
-                    .flatten()
-                    .map(|entry| entry.path())
-                    .collect::<Vec<PathBuf>>()
-            })
-            .unwrap_or_default();
-        let generation = state.borrow().extract_generation;
-        let fail_sender = state.borrow().fail_sender.clone();
-        std::thread::spawn(move || {
-            watch_extract_task(
-                &tasks_root,
-                &known,
-                generation,
-                &fail_sender,
-                EXTRACT_TASK_WATCH_TIMEOUT,
-            );
-        });
-    }
 }
 /// 「开始解压」确认框文案（X-02，S-02 的破坏性告知）：数量由后台清点（大目录不阻塞界面），
 /// 清点完成前先给占位文案，事件到达后原位更新。文案固定说明去向、完整成功即永久删除原包及
@@ -2326,9 +2325,13 @@ fn parse_size_bytes(text: &str, unit_index: i32) -> Result<u64, String> {
     if !digits(whole) || !digits(frac) {
         return Err("大小只接受非负十进制数字".into());
     }
-    let whole_value: u64 = whole
-        .parse()
-        .map_err(|_| "数值超出允许的范围".to_string())?;
+    let whole_value: u64 = if whole.is_empty() {
+        0
+    } else {
+        whole
+            .parse()
+            .map_err(|_| "数值超出允许的范围".to_string())?
+    };
     let base = whole_value
         .checked_mul(multiplier)
         .ok_or_else(|| "数值超出允许的范围".to_string())?;
@@ -2338,24 +2341,31 @@ fn parse_size_bytes(text: &str, unit_index: i32) -> Result<u64, String> {
         }
         return Ok(base);
     }
-    if frac.len() > 9 {
-        return Err("小数位数过多，换算后不是整数字节".into());
+    // 去掉不影响数值的尾零；KB/MB 的整数字节小数最多分别需要 10/20 位。
+    // 使用 u128 计算中间量，避免合法的 1 字节 MB 小数被 u64 的 10^20 拒绝。
+    let frac = frac.trim_end_matches('0');
+    if frac.len() > if unit_index == 1 { 20 } else { 10 } {
+        return Err("换算后不是整数字节".into());
     }
-    let frac_value: u64 = frac.parse().map_err(|_| "数值超出允许的范围".to_string())?;
+    let frac_value: u128 = if frac.is_empty() {
+        0
+    } else {
+        frac.parse().map_err(|_| "数值超出允许的范围".to_string())?
+    };
     let digits_count = u32::try_from(frac.len()).unwrap_or(u32::MAX);
-    let denom = 10u64
+    let denom = 10u128
         .checked_pow(digits_count)
         .ok_or_else(|| "数值超出允许的范围".to_string())?;
-    let scaled = frac_value
-        .checked_mul(multiplier)
-        .ok_or_else(|| "数值超出允许的范围".to_string())?;
-    if scaled % denom != 0 {
+    let scaled = frac_value * u128::from(multiplier);
+    if !scaled.is_multiple_of(denom) {
         return Err("换算后不是整数字节（如 0.1 KB = 102.4 字节）".into());
     }
+    let fractional_bytes =
+        u64::try_from(scaled / denom).map_err(|_| "数值超出允许的范围".to_string())?;
     // 合法性判定看换算后的总量：整数部分为 0 的小数（如 0.5 MB）在汇总后才见真值，
     // 提前判 base==0 会把合法小数输入误拒（回归见 split_size_accepts_integral_fractions）。
     let total = base
-        .checked_add(scaled / denom)
+        .checked_add(fractional_bytes)
         .ok_or_else(|| "数值超出允许的范围".to_string())?;
     if total == 0 {
         return Err("拆分大小必须大于 0".into());
@@ -3599,6 +3609,28 @@ impl UiPump {
         }
     }
 
+    /// watcher 与任务终态使用同一关联入口；迟到的同任务发现不重置当前页。
+    fn associate_extract_task(&self, ui: &AppWindow, path: PathBuf) -> bool {
+        {
+            let mut state = self.state.borrow_mut();
+            if state.extract_task.as_ref() == Some(&path) && ui.get_fail_ready() {
+                return false;
+            }
+            state.extract_task = Some(path);
+            state.fail_page = 0;
+            state.fail_page_starts = vec![0];
+            state.fail_gen += 1;
+        }
+        ui.set_fail_ready(true);
+        ui.set_fail_rows(Rc::new(VecModel::from(Vec::<FailRow>::new())).into());
+        ui.set_fail_total(0);
+        ui.set_fail_prev_enabled(false);
+        ui.set_fail_next_enabled(false);
+        ui.set_fail_page_label("加载中…".into());
+        request_fail_page(&self.state, 0);
+        true
+    }
+
     /// 排空失败列表专用通道：任务目录发现与分页结果（U-10）。
     /// 迟到的结果按请求代际与当前解压任务整体丢弃，与计划页事件同一口径。
     fn apply_fail_messages(&self, ui: &AppWindow) {
@@ -3616,21 +3648,7 @@ impl UiPump {
                     if self.state.borrow().extract_generation != generation {
                         continue;
                     }
-                    {
-                        let mut s = self.state.borrow_mut();
-                        s.extract_task = Some(path);
-                        s.fail_page = 0;
-                        s.fail_page_starts = vec![0];
-                        s.fail_gen += 1;
-                    }
-                    // 关联到本次任务：先呈现空列表占位，第 0 页数据落地后填充。
-                    ui.set_fail_ready(true);
-                    ui.set_fail_rows(Rc::new(VecModel::from(Vec::<FailRow>::new())).into());
-                    ui.set_fail_total(0);
-                    ui.set_fail_prev_enabled(false);
-                    ui.set_fail_next_enabled(false);
-                    ui.set_fail_page_label("加载中…".into());
-                    request_fail_page(&self.state, 0);
+                    self.associate_extract_task(ui, path);
                 }
                 FailChannelMsg::Page(fail) => {
                     let accepted = {
@@ -4548,7 +4566,7 @@ impl UiPump {
                         }
                     }
                 }
-                Event::ExtractDone(_path, summary) => {
+                Event::ExtractDone(path, summary) => {
                     pending_status = None;
                     terminal = true;
                     // X-02 一段式收尾：只清运行态与展示摘要；不改 ready/has_task（目录整理两段式专用）。
@@ -4587,7 +4605,7 @@ impl UiPump {
                     );
                     // U-10：任务结束后刷新失败列表当前页——收尾日志已全部落库，
                     // 此刻取数才能看到完整的失败明细（任务结束后仍可查看）。
-                    if self.state.borrow().extract_task.is_some() {
+                    if !self.associate_extract_task(ui, path) {
                         let page = self.state.borrow().fail_page;
                         request_fail_page(&self.state, page);
                     }
@@ -5311,11 +5329,17 @@ fn wire_md_git(ui: &AppWindow, state: &Rc<RefCell<State>>, out: &EventSender) {
 /// 转 Markdown 的可选组件初始化与转换回调。组件状态、路径和任务均独立于旧工具。
 fn settings_payload() -> Result<String, String> {
     let config = crate::xberg_settings::settings()?;
+    // XB-18/XB-21：来源、两条保存路径与生效路径必须属于同一个读取快照。
+    let active = match config.source {
+        crate::xberg_settings::Source::Custom => config.custom.as_ref(),
+        crate::xberg_settings::Source::Downloaded => config.downloaded.as_ref(),
+    }
+    .map(|path| crate::platform::display_path_text(&path.display().to_string()));
     Ok(serde_json::json!({
         "custom": config.custom.map(|p| crate::platform::display_path_text(&p.display().to_string())),
         "downloaded": config.downloaded.map(|p| crate::platform::display_path_text(&p.display().to_string())),
         "downloaded_active": config.source == crate::xberg_settings::Source::Downloaded,
-        "active": crate::xberg_settings::load()?.map(|p| crate::platform::display_path_text(&p.display().to_string()))
+        "active": active
     }).to_string())
 }
 fn send_settings_result(out: &EventSender, result: Result<String, String>) {
@@ -7978,6 +8002,113 @@ mod gui_tests {
             parse_size_bytes("0.0", 1).is_err(),
             "0.0 MB 换算后为 0，必须拒绝"
         );
+    }
+
+    // XB-18/XB-21：真实 SQLite 读出的 GUI 载荷必须来自同一个来源快照，
+    // 即使另一连接正在提交来源切换，也不能显示来源 A 却让工具使用目录 B。
+    #[test]
+    fn settings_payload_active_matches_same_source_snapshot() {
+        use crate::xberg_settings::{self, Source};
+        let _lock = crate::asset_util::test_env::env_lock()
+            .lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+        let root = tempfile::tempdir().unwrap();
+        struct Restore(Vec<(&'static str, Option<std::ffi::OsString>)>);
+        impl Drop for Restore {
+            fn drop(&mut self) {
+                for (key, value) in self.0.drain(..) {
+                    match value {
+                        Some(value) => std::env::set_var(key, value),
+                        None => std::env::remove_var(key),
+                    }
+                }
+            }
+        }
+        let keys = ["JCHTOOLS_TEST_STATE_DIR", "JCHTOOLS_MARKDOWN_TEST_ASSET_ROOT"];
+        let _restore = Restore(keys.into_iter().map(|key| (key, std::env::var_os(key))).collect());
+        std::env::set_var("JCHTOOLS_TEST_STATE_DIR", root.path().join("state"));
+        std::env::set_var("JCHTOOLS_MARKDOWN_TEST_ASSET_ROOT", root.path().join("markdown"));
+        let custom = root.path().join("用户目录");
+        let downloaded = root.path().join("下载目录");
+        for path in [&custom, &downloaded] {
+            std::fs::create_dir_all(path).unwrap();
+            std::fs::write(path.join("xberg.exe"), b"public settings fixture").unwrap();
+        }
+        let empty: serde_json::Value = serde_json::from_str(&settings_payload().unwrap()).unwrap();
+        assert!(empty["active"].is_null());
+        xberg_settings::save_source(Source::Custom, &custom).unwrap();
+        xberg_settings::save_source(Source::Downloaded, &downloaded).unwrap();
+        let barrier = Arc::new(std::sync::Barrier::new(2));
+        let writer_barrier = barrier.clone();
+        let writer = std::thread::spawn(move || {
+            writer_barrier.wait();
+            for _ in 0..400 {
+                xberg_settings::save_source(Source::Custom, &custom).unwrap();
+                std::thread::yield_now();
+                xberg_settings::save_source(Source::Downloaded, &downloaded).unwrap();
+                std::thread::yield_now();
+            }
+        });
+        barrier.wait();
+        let mut mismatch = None;
+        let mut read_error = None;
+        for _ in 0..400 {
+            match settings_payload() {
+                Ok(payload) => {
+                    let value: serde_json::Value = serde_json::from_str(&payload).unwrap();
+                    let expected = if value["downloaded_active"] == true {
+                        &value["downloaded"]
+                    } else {
+                        &value["custom"]
+                    };
+                    if &value["active"] != expected && mismatch.is_none() {
+                        mismatch = Some(value);
+                    }
+                }
+                Err(error) => { read_error = Some(error); break; }
+            }
+            std::thread::yield_now();
+        }
+        writer.join().unwrap();
+        assert!(read_error.is_none(), "读取真实配置失败：{read_error:?}");
+        assert!(mismatch.is_none(), "GUI来源、保存目录与生效目录必须来自同一快照：{mismatch:?}");
+    }
+
+    // 覆盖 M-08/M-09/M-10：精确换算为整数字节的小数不受任意小数位数限制。
+    #[test]
+    fn split_size_accepts_exact_byte_fractions() {
+        assert_eq!(parse_size_bytes(".5", 0), Ok(512));
+        assert_eq!(parse_size_bytes("0.0009765625", 0), Ok(1));
+        assert_eq!(parse_size_bytes("0.00000095367431640625", 1), Ok(1));
+        assert_eq!(parse_size_bytes("1.000000000000000000000", 1), Ok(1024 * 1024));
+        assert!(parse_size_bytes("0.00000095367431640624", 1).is_err());
+        assert!(parse_size_bytes("0.000", 0).is_err());
+    }
+
+    // 覆盖 M-08/M-09/M-10/U-12：真实拆分回调接受 1 字节的精确 KB 输入，产物无损。
+    #[test]
+    fn md_split_exact_byte_limit_runs_via_callback() {
+        let dir = temp_test_dir("md-split-exact-byte-limit");
+        let input = dir.join("doc.md");
+        let parts = dir.join("parts");
+        std::fs::write(&input, b"abc").unwrap();
+        std::fs::create_dir_all(&parts).unwrap();
+        let cleanup = dir.clone();
+        with_gui(move |app| {
+            app.ui.invoke_select_tool("md-organizer".into());
+            app.ui.set_md_split_file(input.display().to_string().into());
+            app.ui.set_md_split_dir(parts.display().to_string().into());
+            app.ui.set_md_split_size("0.0009765625".into());
+            app.ui.set_md_split_unit(0);
+            app.ui.invoke_md_split_start();
+            assert!(app.ui.get_busy(), "合法 1 字节限制必须启动后台拆分");
+            assert!(pump_until(app, || !app.ui.get_busy()));
+            assert!(app.ui.get_status().contains("拆分完成"));
+            for (name, bytes) in [("doc_001.md", b"a"), ("doc_002.md", b"b"), ("doc_003.md", b"c")] {
+                assert_eq!(std::fs::read(parts.join(name)).unwrap(), bytes);
+            }
+            assert_eq!(std::fs::read(&input).unwrap(), b"abc", "原文件不得改动");
+        }).unwrap();
+        let _ = std::fs::remove_dir_all(cleanup);
     }
 
     // 覆盖 M-11（同名分片确认覆盖后必须实际写出：确认不得再次弹框或空转）
@@ -11223,6 +11354,33 @@ mod gui_tests {
         })
         .unwrap();
         let _ = std::fs::remove_dir_all(&task_for_cleanup);
+    }
+
+    // 覆盖 U-10/X-06：watcher 未及时发现任务时，解压终态必须按返回的真实任务库加载失败列表。
+    #[test]
+    fn extract_done_associates_failure_list_without_watcher() {
+        let task = make_extract_task_db("extract-done-failure-list");
+        let cleanup = task.clone();
+        with_gui(move |app| {
+            app.ui.set_busy(true);
+            app.state.borrow_mut().extracting = true;
+            app.state.borrow_mut().runtime = RuntimeMode::Extract;
+            app.pump.out.send(Event::ExtractDone(task.clone(), Summary::default())).unwrap();
+            app.pump.drain(&app.ui);
+            assert_eq!(app.state.borrow().extract_task.as_ref(), Some(&task));
+            assert!(app.ui.get_fail_ready());
+            assert!(pump_until(app, || app.ui.get_fail_total() == 3));
+            assert_eq!(app.ui.get_fail_rows().row_count(), 3);
+            let rows = app.ui.get_fail_rows();
+            let generation = app.state.borrow().fail_gen;
+            let sender = app.state.borrow().fail_sender.clone();
+            sender.send(FailChannelMsg::TaskFound(task, app.state.borrow().extract_generation)).unwrap();
+            app.pump.apply_fail_messages(&app.ui);
+            assert_eq!(app.state.borrow().fail_gen, generation, "迟到的同任务发现不得重置已加载列表");
+            assert_eq!(app.ui.get_fail_rows().row_count(), rows.row_count());
+            assert_eq!(app.ui.get_fail_total(), 3);
+        }).unwrap();
+        let _ = std::fs::remove_dir_all(cleanup);
     }
 
     // 覆盖 U-10（附录 E：超过 300 项也不得截断，全部可翻页查询；翻页按钮只在对应页

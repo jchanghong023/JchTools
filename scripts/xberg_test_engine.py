@@ -113,7 +113,11 @@ def current_engine_matches(release: Release) -> bool:
     receipt_path = TEST_ENGINE / RECEIPT_NAME
     if not receipt_path.is_file():
         return False
-    receipt: object = _parse_json(receipt_path.read_text(encoding="utf-8"))
+    try:
+        receipt: object = _parse_json(receipt_path.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        # 本机收据损坏或不可读即无法证明最新版身份；重新走官方校验安装，不复用旧版。
+        return False
     return (
         object_map(receipt)
         and receipt.get("tag") == release.tag
@@ -281,6 +285,7 @@ def main() -> int:
             timeout=60,
         )
         release = release_from_metadata(_parse_json(response.stdout))
+        ensure_test_engine_target()
         if current_engine_matches(release):
             print(f"PASS：已存在最新引擎 {release.tag}，不重复下载；目录 {TEST_ENGINE}")
         else:

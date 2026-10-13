@@ -48,6 +48,8 @@ pub(super) struct CompletionStream {
     started: Instant,
     output_bytes: usize,
     terminal_logged: bool,
+    // 响应体由 Hyper 在 handler 结束后轮询，必须保留原 HTTP 操作关联。
+    span: tracing::Span,
 }
 
 impl CompletionStream {
@@ -64,6 +66,7 @@ impl CompletionStream {
             started: Instant::now(),
             output_bytes: 0,
             terminal_logged: false,
+            span: tracing::Span::current(),
         }
     }
 
@@ -79,6 +82,7 @@ impl Stream for CompletionStream {
 
     fn poll_next(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
         let this = self.get_mut();
+        let _entered = this.span.enter();
         if matches!(this.stage, Stage::Role | Stage::Events)
             && this
                 .connection_closed
@@ -169,6 +173,7 @@ impl Stream for CompletionStream {
 
 impl Drop for CompletionStream {
     fn drop(&mut self) {
+        let _entered = self.span.enter();
         if !self.terminal_logged {
             tracing::warn!(event = "acp_sse_cancelled", component = "acp_http", request_id = %self.request.accepted.request_id.0, stage = "response_body_dropped", elapsed_ms = crate::logging::elapsed_ms(self.started), "ACP SSE 响应体提前释放");
         }

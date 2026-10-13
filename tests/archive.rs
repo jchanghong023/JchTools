@@ -1638,3 +1638,95 @@ fn review_nested_volume_collision_keeps_families_independent() {
     }
     assert!(!f.root.join("a-outer.7z").exists());
 }
+
+// 覆盖 X-04/X-05：冲突目录须避开同包其它成员的原名，不能将两个来源目录合并。
+#[test]
+#[ignore = "Requires explicitly provided real 7-Zip engine"]
+fn directory_collision_preserves_incoming_sibling_directories() {
+    let f = ArchiveFixture::new();
+    fs::create_dir_all(f.input.join("sub/empty")).unwrap();
+    fs::create_dir_all(f.input.join("sub (1)/empty")).unwrap();
+    fs::write(f.input.join("sub/payload.txt"), b"first directory").unwrap();
+    fs::write(f.input.join("sub (1)/payload.txt"), b"second directory").unwrap();
+    fs::write(f.input.join("sub (2)"), b"incoming sibling file").unwrap();
+    f.archive(&f.root.join("pack.zip"), "-tzip");
+    fs::write(f.root.join("sub"), b"existing occupier").unwrap();
+    let result = f.run(config());
+    assert_eq!(result.summary.archives_ok, 1);
+    assert_eq!(result.summary.archives_failed, 0);
+    assert_eq!(result.summary.extracted, 3);
+    assert_eq!(fs::read(f.root.join("sub")).unwrap(), b"existing occupier");
+    assert_eq!(
+        fs::read(f.root.join("sub (3)/payload.txt")).unwrap(),
+        b"first directory"
+    );
+    assert_eq!(
+        fs::read(f.root.join("sub (1)/payload.txt")).unwrap(),
+        b"second directory"
+    );
+    assert_eq!(
+        fs::read(f.root.join("sub (2)")).unwrap(),
+        b"incoming sibling file"
+    );
+    assert!(f.root.join("sub (3)/empty").is_dir());
+    assert!(f.root.join("sub (1)/empty").is_dir());
+    assert!(!f.root.join("sub (1)/payload (1).txt").exists());
+    assert!(!f.root.join("pack.zip").exists());
+}
+
+// 覆盖 X-01/X-09/H-07/附录 B：单点开头的 .zip/.7z/.rar 没有扩展名，即使内容有效也不处理。
+#[test]
+#[ignore = "Requires explicitly provided real 7-Zip engine"]
+fn extensionless_archive_dotfiles_stay_untouched_by_public_extraction() {
+    let f = ArchiveFixture::new();
+    fs::write(f.input.join("payload.txt"), b"ordinary archive member").unwrap();
+    let zip = f.tmp.path().join("seed.zip");
+    let seven_zip = f.tmp.path().join("seed.7z");
+    f.archive(&zip, "-tzip");
+    f.archive(&seven_zip, "-t7z");
+    fs::copy(&zip, f.root.join(".zip")).unwrap();
+    fs::copy(&seven_zip, f.root.join(".7z")).unwrap();
+    // 合法 RAR4 空包：主头与结束头都带低 16 位 CRC-32，不使用模拟引擎。
+    let mut rar = b"Rar!\x1a\x07\x00".to_vec();
+    for header in [
+        &[0x73u8, 0, 0, 0x0d, 0, 0, 0, 0, 0, 0, 0][..],
+        &[0x7bu8, 0, 0, 7, 0][..],
+    ] {
+        rar.extend_from_slice(&crc32(header).to_le_bytes()[..2]);
+        rar.extend_from_slice(header);
+    }
+    fs::write(f.root.join(".rar"), rar).unwrap();
+    let originals: Vec<_> = [".zip", ".7z", ".rar"]
+        .into_iter()
+        .map(|name| {
+            let path = f.root.join(name);
+            let status = Command::new(&f.engine)
+                .args(["t", "-p-", "--"])
+                .arg(&path)
+                .status()
+                .unwrap();
+            assert!(status.success(), "真实引擎必须确认 {name} 是有效归档");
+            (name, fs::read(path).unwrap())
+        })
+        .collect();
+    f.archive(&f.root.join("ordinary.zip"), "-tzip");
+    let result = f.run(config());
+    assert_eq!(result.summary.archives_ok, 1, "只处理普通扩展名归档");
+    assert_eq!(result.summary.archives_failed, 0);
+    assert_eq!(result.summary.deleted, 1);
+    assert_eq!(result.summary.extracted, 1);
+    assert_eq!(result.summary.archives_quarantined, 0);
+    for (name, bytes) in originals {
+        assert_eq!(
+            fs::read(f.root.join(name)).unwrap(),
+            bytes,
+            "{name} 原样保留"
+        );
+    }
+    assert_eq!(
+        fs::read(f.root.join("payload.txt")).unwrap(),
+        b"ordinary archive member"
+    );
+    assert!(!f.root.join("ordinary.zip").exists());
+    assert!(!f.root.join("解压失败").exists());
+}

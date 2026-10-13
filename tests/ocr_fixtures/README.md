@@ -14,6 +14,8 @@ Xberg 链路的验收结论（XB-02），冻结 TextSnap 及旧独立推理 runt
 
 `--out` 与 `derive_dict.py` 的输出路径都必须位于仓库根的 `.tmp/` 之下（AGENTS.md §2），仓库外同名 `.tmp` 会被拒绝。
 
+性能报告中的加载及识别耗时必须为有限非负数，且至少记录一次识别；`NaN`、无穷值、负耗时及空识别耗时列表按无效报告拒绝，不得产出通过结论或含非标准数值的 JSON。该输入回归包含在 `compare.py --self-test` 中。
+
 从原 `PP-OCRv6_small_rec/inference.yml` 派生字典可运行 `python tests/ocr_fixtures/derive_dict.py <inference.yml> .tmp/ocr-assets/dict-check.txt`；脚本核对 18708 字、74947 字节和固定 SHA-256，输出同样锚定仓库根 `.tmp/`。需有 PyYAML。若将来删除冻结 Python 仓库，须另行保存其可运行源码和锁定依赖；这里保存的冻结输出只支持对已取得报告作既有质量基线比较，不能重新测量已删除程序的速度。
 
 ## 当前源码链路与现有验收入口（未运行）
@@ -36,6 +38,13 @@ Xberg 链路的验收结论（XB-02），冻结 TextSnap 及旧独立推理 runt
   源码收尾调用 broker 停止并终结、等待本轮 worker，不是旧说明中的
   `shutdown` 协议。这是会注册全局热键的独立桌面探测，须当次明确授权；
   状态就绪不证明两张夹具的识别质量、模型常驻或完整桌面链路。
+  服务启动前先读取 `--capabilities` 的 `test_hooks: true`；缺字段或生产构建
+  一律拒绝，不保留旧生产管道探测回退。此守卫的安全回归入口为
+  `python -m unittest discover -s tests/ocr_fixtures -p test_worker_root_isolation.py -v`，
+  回归用合成能力响应证明拒绝发生在 `--service` 启动前，不注册热键。
+  隔离服务的自启读写仅访问 `HKCU\Software\JchTools\Tests\SnapOcr\<资产根哈希>`，
+  不读取或修改生产 Run 项；worker 的注册表 sentinel 回归为
+  `cargo test --manifest-path optional/snap-ocr-worker/Cargo.toml --features test-hooks --lib service::tests::isolated_service_autostart_preserves_existing_sentinel -- --exact`。
 - `check_gui_worker_connection.py --pid <主程序 PID>` 是现有真实窗口检查：
   切到截图 OCR 页，不点击连接按钮，等待当前后台连接／模型就绪文案，
   并断言旧按钮和文案不在场。它会设置焦点并点击侧栏，须当次独立桌面

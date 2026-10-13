@@ -656,3 +656,108 @@ fn quarantine_tree_is_left_alone() {
     assert!(f.exists("文档/normal.txt"));
     assert!(!f.root.join("解压失败").join("文档").exists());
 }
+
+// 覆盖 C-17 / C-19 / C-20 / C-21：无来源摘要候选为 39 单元时保留完整主体。
+#[test]
+fn in_place_digest_below_threshold_preserves_full_stem() {
+    let f = Fixture::new();
+    let stem = "abcdefghijklmnopqrstuvwxyz";
+    let first = format!("文档/{stem}.pdf");
+    let second = format!("文档/{stem} - Copy.pdf");
+    f.write(&first, b"first");
+    f.write(&second, b"second");
+    let task = f.plan();
+    Fixture::apply(&task);
+    for (source, contents) in [
+        (&first, b"first".as_slice()),
+        (&second, b"second".as_slice()),
+    ] {
+        let target = format!("文档/{stem}_{}.pdf", digest8(source));
+        assert_eq!(fs::read(f.root.join(target)).unwrap(), contents);
+        assert!(!f.root.join(source).exists());
+    }
+    let again = f.plan();
+    assert_eq!(
+        again.summary.planned_move, 0,
+        "完整主体摘要名再次整理不改变"
+    );
+}
+
+// 覆盖 C-19 / C-20 / C-21：来源加完整主体的摘要名超 40 时，先去掉来源。
+#[test]
+fn same_source_digest_over_threshold_drops_source_prefix() {
+    let f = Fixture::new();
+    let stem = "abcdefghijklmnopqrstuvwxyz";
+    let first = format!("a/{stem}.pdf");
+    let second = format!("a/{stem} - Copy.pdf");
+    f.write(&first, b"first");
+    f.write(&second, b"second");
+    let task = f.plan();
+    Fixture::apply(&task);
+    for (source, contents) in [
+        (&first, b"first".as_slice()),
+        (&second, b"second".as_slice()),
+    ] {
+        let target = format!("文档/abcdefghijklmnopqrstuvwxy_{}.pdf", digest8(source));
+        assert_eq!(fs::read(f.root.join(target)).unwrap(), contents);
+        assert!(!f.root.join(source).exists());
+    }
+    assert!(!f.root.join("a").exists(), "搬空来源目录应清理");
+    let again = f.plan();
+    assert_eq!(again.summary.planned_move, 0, "截短摘要名再次整理不改变");
+}
+
+// 覆盖 C-08 / 附录 A / 附录 B：临时清理不能删除无扩展名点文件。
+#[test]
+fn temp_cleanup_keeps_extensionless_dotfiles_through_execution() {
+    let f = Fixture::new();
+    for (name, bytes) in [
+        (".tmp", b"tmp".as_slice()),
+        (".temp", b"temp".as_slice()),
+        (".bak", b"bak".as_slice()),
+    ] {
+        f.write(name, bytes);
+    }
+    f.write("discard.tmp", b"temporary");
+    let cfg = Config {
+        clean_temp: true,
+        ..Config::default()
+    };
+    let task = engine::prepare_at(&f.root, cfg.clone(), Context::default(), &f.state).unwrap();
+    assert_eq!(
+        task.summary.planned_delete, 1,
+        "只删除真正带 .tmp 扩展名的普通文件"
+    );
+    assert_eq!(task.summary.planned_move, 3, "三个点文件按无扩展名归其他");
+    Fixture::apply(&task);
+    for (name, bytes) in [
+        (".tmp", b"tmp".as_slice()),
+        (".temp", b"temp".as_slice()),
+        (".bak", b"bak".as_slice()),
+    ] {
+        assert_eq!(fs::read(f.root.join("其他").join(name)).unwrap(), bytes);
+    }
+    assert!(!f.root.join("discard.tmp").exists());
+    let again = engine::prepare_at(&f.root, cfg, Context::default(), &f.state).unwrap();
+    assert_eq!(again.summary.planned_delete, 0);
+    assert_eq!(again.summary.planned_move, 0);
+}
+
+// 覆盖 C-18 / C-20：来源候选已经超限时，即使去来源后完整摘要名能放下仍须截到 25。
+#[test]
+fn oversized_source_candidate_keeps_forced_digest_truncation() {
+    let f = Fixture::new();
+    let first = "long_source_first/abcdefghijklmnopqrstuvwxyz.pdf";
+    let second = "long_source_second/abcdefghijklmnopqrstuvwxyz.pdf";
+    f.write(first, b"first");
+    f.write(second, b"second");
+    let task = f.plan();
+    Fixture::apply(&task);
+    for (source, contents) in [(first, b"first".as_slice()), (second, b"second".as_slice())] {
+        let target = format!("文档/abcdefghijklmnopqrstuvwxy_{}.pdf", digest8(source));
+        assert_eq!(fs::read(f.root.join(target)).unwrap(), contents);
+        assert!(!f.root.join(source).exists());
+    }
+    let again = f.plan();
+    assert_eq!(again.summary.planned_move, 0);
+}
