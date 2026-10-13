@@ -2655,6 +2655,27 @@
       "body": "be686e68ff91bdec"
     },
     {
+      "file": "src/jchocr.rs",
+      "name": "base64_stdin_and_json_can_be_combined",
+      "ignored": false,
+      "cfg": null,
+      "body": "65d3a71354447f8a"
+    },
+    {
+      "file": "src/jchocr.rs",
+      "name": "informational_commands_do_not_accept_image_inputs",
+      "ignored": false,
+      "cfg": null,
+      "body": "027006b429280228"
+    },
+    {
+      "file": "src/jchocr.rs",
+      "name": "input_modes_are_mutually_exclusive",
+      "ignored": false,
+      "cfg": null,
+      "body": "3a265fa99c5413dd"
+    },
+    {
       "file": "src/logging.rs",
       "name": "both_log_directories_blocked_do_not_panic",
       "ignored": false,
@@ -6818,6 +6839,34 @@
       "ignored": false,
       "cfg": "all(feature = \"gui\", feature = \"test-hooks\")",
       "body": "ab938a76c10b938f"
+    },
+    {
+      "file": "tests/jchocr.rs",
+      "name": "invalid_arguments_are_rejected_before_network_or_engine_use",
+      "ignored": false,
+      "cfg": "all(windows, feature = \"test-hooks\")",
+      "body": "ca0f360c27f5c75a"
+    },
+    {
+      "file": "tests/jchocr.rs",
+      "name": "malformed_base64_and_empty_inputs_are_input_errors_without_xberg",
+      "ignored": false,
+      "cfg": "all(windows, feature = \"test-hooks\")",
+      "body": "a351a7118ff5b1c7"
+    },
+    {
+      "file": "tests/jchocr.rs",
+      "name": "missing_members_in_a_selected_directory_are_an_asset_error",
+      "ignored": false,
+      "cfg": "all(windows, feature = \"test-hooks\")",
+      "body": "c4ae56704fc22f19"
+    },
+    {
+      "file": "tests/jchocr.rs",
+      "name": "valid_image_without_selected_xberg_is_an_explained_asset_error",
+      "ignored": false,
+      "cfg": "all(windows, feature = \"test-hooks\")",
+      "body": "7be06afdcaa26713"
     },
     {
       "file": "tests/markdown_convert_gate.rs",
