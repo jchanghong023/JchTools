@@ -80,11 +80,11 @@
 
 ## 6.1 jchocr 命令行图片 OCR（2026-10-13）
 
-- **O-33** 随 JchTools 安装包和便携 ZIP 交付独立控制台程序 `jchocr.exe`，供其他程序和 AI Agent 调用，不打开 GUI，不增加 MCP、HTTP 服务或另一套配置。安装包自动将安装目录加入当前用户 PATH，无需管理员权限或用户手工设置环境变量；安装、升级不重复加入，卸载只移除本安装新增且仍属于本安装的条目，不改变其他 PATH 条目或用户预先配置的同一路径。广播环境更新后，新启动并取得更新环境的程序可直接调用 `jchocr`；已运行程序仍可能持有旧环境。便携包提供同一程序，不因解压而修改 PATH。
+- **O-33** 随 JchTools 安装包和便携 ZIP 交付独立控制台程序 `jchocr.exe`，供其他程序和 AI Agent 调用，不打开 GUI，不增加 MCP、HTTP 服务或另一套配置。安装包将命令程序复制到当前用户的 `%LOCALAPPDATA%\Microsoft\WindowsApps` 目录，该目录是 Windows 默认已有的 PATH 目录；不新增、删除或改写用户或系统 PATH，不写入需要管理员权限的 Windows 系统目录。安装完成后，已运行的终端及其他当前用户程序也能直接执行 `jchocr`，无需重启终端或设置环境变量。升级覆盖本工具的命令程序，卸载由安装器移除其安装的命令程序；便携包只随附程序，不自动复制到 PATH 目录。
 - **O-34** 一次调用只识别一张图片：`jchocr <图片绝对路径或HTTP(S) URL>`，或 `jchocr --stdin` 从 stdin 读取原始图片字节，或 `jchocr --base64 <Base64>`；`--base64 -` 从 stdin 读取 Base64。输入方式互斥。本地文件只读；URL 仅下载显式目标及其 HTTP(S) 重定向，按 P-09 使用系统代理；不接受其他网络协议。图片与下载内容仅驻内存，不生成临时图片或内容缓存。
 - **O-35** 自动读取 XB-18 / XB-21 的当前共享 Xberg 目录，经现有唯一代理调用 `ocr_snapshot`，使用 O-07 / O-23～O-28 的截图模型和布局行为，不混用文档模型或自动回退。没有已配置且可用的 Xberg 时，向 stderr 明确提示在 JchTools 设置页下载或配置 Xberg，非零退出，不自动联网安装引擎。无需设置 Xberg、模型或 ONNX Runtime 环境变量；不修改现有配置或中断其他功能任务。
 - **O-36** 默认 stdout 仅返回 UTF-8 OCR 原文，保留内部空格和换行；`--json` 返回 `{"ok":true,"text":"..."}`。无文字为成功且正文为空；失败不输出伪造正文，错误只到 stderr，JSON 模式错误为 `{"ok":false,"error_kind":"...","error":"..."}`。退出码 0 表示成功（含无文字），2 表示参数或输入错误，3 表示 Xberg 未配置或所需资产缺失，1 表示下载、推理或运行错误。日志遵守 P-10，不包含图片、正文、Base64、完整 URL 或用户路径。
-- **O-37** `jchocr --help` 和 `jchocr help` 在无 Xberg 时也正常工作，完整说明输入方式、互斥规则、支持的图片格式、文字与 JSON 输出、错误与退出码、配置前提、PATH 生效边界，以及 PowerShell 和程序直接传 stdin 的可复制示例；`--version` 返回版本。命令无需调用方维护 worker、JSONL、请求 ID 或 Xberg 进程生命周期。
+- **O-37** `jchocr --help` 和 `jchocr help` 在无 Xberg 时也正常工作，完整说明输入方式、互斥规则、支持的图片格式、文字与 JSON 输出、错误与退出码、配置前提、安装后的直接命令调用，以及 PowerShell 和程序直接传 stdin 的可复制示例；`--version` 返回版本。命令无需调用方维护 worker、JSONL、请求 ID 或 Xberg 进程生命周期。
 
 ## 7. 与全局需求的关系
 
