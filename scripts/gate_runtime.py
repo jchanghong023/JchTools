@@ -493,7 +493,8 @@ class GateRun:
 
     @staticmethod
     def _print_result(result: Result) -> None:
-        print(f"{result.status} {result.name}: {result.detail}")
+        elapsed = f"{result.elapsed:.6f}s" if result.log is not None and result.returncode is not None else "unknown"
+        print(f"{result.status} {result.name}: {result.detail} stage_elapsed={elapsed}")
         if result.log is not None:
             print(f"  log={result.log}")
             if result.status != STATUS_OK:

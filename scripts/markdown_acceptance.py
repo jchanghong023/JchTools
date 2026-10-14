@@ -28,6 +28,9 @@
 语义验收按夹具构造、源图绑定和单成员失败阶段分层；媒体验收分别核对统计行与逐段正文，
 各层保留独立真值、原阈值和首个失败原因，不以被测引擎输出替代源图。
 退出码：任一 FAIL→1；任一 NOT RUN（包括未选择的条目）→2；全部 PASS→0；参数错误→3。
+CLI 实际执行另自动写入独立 `.tmp/test-reports/<run-id>/junit.xml` 与 `run.json`；
+仅所选条目进入单例报告，PASS/FAIL 使用实测 run_item 墙钟，NOT RUN 无时长。
+原生 JSON/控制台固定全集分母保持不变；帮助、--list 与 --seed-state 不创建测试报告。
 """
 
 from __future__ import annotations
@@ -74,6 +77,7 @@ from pywinauto.uia_defines import IUIA
 if not __package__:
     sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 from scripts.gui_smoke import completion_confirms_new_run, missing_isolation_env, own_process_tree
+from scripts.test_reports import Case, TimingReport
 
 if TYPE_CHECKING:
     from collections.abc import Buffer, Callable
@@ -3990,6 +3994,146 @@ def _cli_execution_context(args: _Arguments, parser: _ArgumentParser) -> tuple[C
     return ctx, report_path
 
 
+class _MarkdownTiming:
+    """CLI 专用逐项计时及报告；不改变 run_item 的异常转换语义."""
+
+    def __init__(self, selected: list[Item], profile: str, selector: str) -> None:
+        self.selected: list[Item] = selected
+        self.profile: str = profile
+        self.completed: set[str] = set()
+        self.not_run: set[str] = set()
+        self.report: TimingReport | None = None
+        self.report_failed: bool = False
+        try:
+            self.report = TimingReport(
+                "markdown_acceptance",
+                [sys.executable, *sys.argv],
+                scope={
+                    "profile": profile,
+                    "selector": selector,
+                    "selected_items": [{"id": item.item_id, "group": item.group} for item in selected],
+                    "native_report_denominator": len(ITEMS),
+                    "unselected_items_are_not_executed": True,
+                },
+                timing_basis=(
+                    "单调时钟实测 CLI 中每个所选条目的 run_item 调用，包含其前置探测、夹具准备、"
+                    "GUI/模型执行及条目内清理；NOT RUN 无执行时长；共享 broker 收尾与报告写入"
+                    "不计入单例，运行墙钟另记"
+                ),
+                concurrency={"mode": "sequential", "workers": 1},
+            )
+        except Exception as error:  # noqa: BLE001  # 报告故障不改变全体所选条目的原有执行。
+            print(f"测试报告创建失败：{error}", file=sys.stderr)
+            self.report_failed = True
+
+    def record(self, item: Item, duration: float | None, status: str, detail: str) -> None:
+        if self.report is None:
+            return
+        try:
+            self.report.add_case(
+                Case(
+                    name=item.item_id,
+                    classname=f"scripts.markdown_acceptance.{self.profile}.{item.group}",
+                    duration=duration,
+                    status=status,
+                    detail=detail,
+                    file="scripts/markdown_acceptance.py",
+                )
+            )
+        except Exception as error:  # noqa: BLE001  # 原生结论保留，报告失败另行可见。
+            print(f"测试报告写入失败：{error}", file=sys.stderr)
+            self.report_failed = True
+
+    def run_item(self, item: Item, ctx: Context) -> Outcome:
+        started = time.perf_counter()
+        try:
+            outcome = run_item(item, ctx)
+        except BaseException as error:
+            duration = time.perf_counter() - started
+            self.completed.add(item.item_id)
+            self.record(item, duration, "error", f"{type(error).__name__}: {error}")
+            raise
+        duration = time.perf_counter() - started
+        self.completed.add(item.item_id)
+        status = {
+            STATUS_OK: "passed",
+            STATUS_FAILED: "failure",
+            STATUS_NOT_RUN: "skipped",
+            STATUS_OPTIONAL: "skipped",
+        }[outcome.status]
+        if status == "skipped":
+            self.not_run.add(item.item_id)
+        self.record(
+            item,
+            None if status == "skipped" else duration,
+            status,
+            "\n".join([outcome.reason, *outcome.details]),
+        )
+        return outcome
+
+    def finish(self, exit_code: int, completion: str) -> int:
+        for item in self.selected:
+            if item.item_id not in self.completed:
+                self.record(item, None, "skipped", "运行中断，本条目未执行")
+        exit_code = exit_code or int(self.report_failed)
+        if self.not_run and completion == "complete":
+            completion = "partial"
+        if self.report is not None:
+            try:
+                exit_code = self.report.finish(exit_code, completion=completion, coverage=self._coverage())
+            except Exception as error:  # noqa: BLE001  # 不覆盖验收或 broker 清理原有异常。
+                print(f"测试报告收尾失败：{error}", file=sys.stderr)
+                self.report_failed = True
+        return exit_code or int(self.report_failed)
+
+    def _coverage(self) -> dict[str, list[str]]:
+        return {
+            "selected_items": [item.item_id for item in self.selected],
+            "dispatch_completed_items": [item.item_id for item in self.selected if item.item_id in self.completed],
+            "executed_items": [
+                item.item_id
+                for item in self.selected
+                if item.item_id in self.completed and item.item_id not in self.not_run
+            ],
+            "selected_not_run_items": [item.item_id for item in self.selected if item.item_id in self.not_run],
+            "never_started_items": [item.item_id for item in self.selected if item.item_id not in self.completed],
+        }
+
+
+def _close_context_broker(ctx: Context) -> None:
+    """保留原 CLI 对本轮 broker 的精确回收逻辑."""
+    if ctx.broker_close is not None:
+        ctx.broker_close()
+    elif ctx.broker_process is not None and ctx.broker_process.poll() is None:
+        # Job 归属建立失败时尚未发送 formats；只回收自己刚启动的精确进程句柄。
+        ctx.broker_process.kill()
+        _ = ctx.broker_process.wait(timeout=15.0)
+    if ctx.broker_process is not None:
+        _ = ctx.broker_process.poll()
+
+
+def _execute_acceptance(selected: list[Item], ctx: Context, report_path: Path | None, selector: str) -> int:
+    """执行全部所选条目，原生汇总和共享报告保持各自口径."""
+    timing = _MarkdownTiming(selected, ctx.profile, selector)
+    exit_code = 0
+    completion = "complete"
+    try:
+        try:
+            results = [(item, timing.run_item(item, ctx)) for item in selected]
+            exit_code = _print_report(results, report_path, ctx.profile)
+        finally:
+            _close_context_broker(ctx)
+    except BaseException as error:
+        exit_code = 130 if isinstance(error, KeyboardInterrupt) else 1
+        if isinstance(error, SystemExit):
+            exit_code = error.code if isinstance(error.code, int) else 1
+        completion = "interrupted" if isinstance(error, (KeyboardInterrupt, SystemExit)) else "incomplete"
+        raise
+    finally:
+        exit_code = timing.finish(exit_code, completion)
+    return exit_code
+
+
 def main() -> int:
     _reconfigure_stdout()
     description = "转 Markdown 验收承接驱动器（附录 A；缺资产一律 NOT RUN，不虚构 PASS）"
@@ -4034,18 +4178,7 @@ def main() -> int:
         if item.item_id in selected_ids and not (args.profile == "common" and item.item_id in OPTIONAL_COMMON_ITEMS)
     ]
     SCRATCH_ROOT.mkdir(parents=True, exist_ok=True)
-    try:
-        results = [(item, run_item(item, ctx)) for item in selected]
-        return _print_report(results, report_path, args.profile)
-    finally:
-        if ctx.broker_close is not None:
-            ctx.broker_close()
-        elif ctx.broker_process is not None and ctx.broker_process.poll() is None:
-            # Job 归属建立失败时尚未发送 formats；只回收自己刚启动的精确进程句柄。
-            ctx.broker_process.kill()
-            _ = ctx.broker_process.wait(timeout=15.0)
-        if ctx.broker_process is not None:
-            _ = ctx.broker_process.poll()
+    return _execute_acceptance(selected, ctx, report_path, args.only)
 
 
 if __name__ == "__main__":

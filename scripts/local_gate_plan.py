@@ -71,17 +71,26 @@ def gate_plan(level: str, root: Path, log_dir: Path, ps_env: dict[str, str]) -> 
         return plan
     plan += [
         Stage("pyquality-pip-audit", [sys.executable, "-m", "pip_audit", "-r", "scripts/requirements-dev.txt"]),
-        Stage("markdown-acceptance-unit", [sys.executable, "-m", "unittest", "-f", "scripts.test_markdown_acceptance"]),
-        Stage("gui-automation-unit", [sys.executable, "-m", "unittest", "-f", "scripts.test_gui_smoke"]),
-        Stage("test-gate-unit", [sys.executable, "-m", "unittest", "-f", "scripts.test_test_gate"]),
-        Stage("trusted-review-unit", [sys.executable, "-m", "unittest", "-f", "scripts.test_review_trusted"]),
-        Stage("package-windows-unit", [sys.executable, "-m", "unittest", "-f", "scripts.test_package_windows"]),
+        Stage(
+            "markdown-acceptance-unit",
+            [sys.executable, "-m", "scripts.unittest_report", "-f", "scripts.test_markdown_acceptance"],
+        ),
+        Stage("gui-automation-unit", [sys.executable, "-m", "scripts.unittest_report", "-f", "scripts.test_gui_smoke"]),
+        Stage("test-gate-unit", [sys.executable, "-m", "scripts.unittest_report", "-f", "scripts.test_test_gate"]),
+        Stage(
+            "trusted-review-unit",
+            [sys.executable, "-m", "scripts.unittest_report", "-f", "scripts.test_review_trusted"],
+        ),
+        Stage(
+            "package-windows-unit",
+            [sys.executable, "-m", "scripts.unittest_report", "-f", "scripts.test_package_windows"],
+        ),
         Stage(
             "worker-root-isolation-unit",
             [
                 sys.executable,
                 "-m",
-                "unittest",
+                "scripts.unittest_report",
                 "discover",
                 "-f",
                 "-s",

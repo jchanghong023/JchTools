@@ -85,48 +85,37 @@ pub(super) fn cleanup_stray_engines() {
     // 0) 先停测试派生的截图服务本体：XB-22 常驻看护会把被杀的代理与引擎按自己的
     //    周期重新拉起，只杀代理/引擎永远赢不了。仅匹配测试临时根下的 worker。
     let stop_service = test_owned_service_kill_script();
-    let _ = std::process::Command::new("powershell")
-        .args([
-            "-NoProfile",
-            "-ExecutionPolicy",
-            "Bypass",
-            "-Command",
-            &stop_service,
-        ])
-        .output();
-    std::thread::sleep(Duration::from_millis(300));
     // 1) 再杀测试派生的代理。worker 自身位于测试临时根；主程序代理则须
     //    仍拥有一个路径位于测试临时根下的 xberg.exe 子进程，不能只凭
     //    内部命令行参数或与用户 GUI 相同的 JchTools.exe 路径判为测试进程。
     let script = test_owned_broker_kill_script();
-    let _ = std::process::Command::new("powershell")
-        .args([
-            "-NoProfile",
-            "-ExecutionPolicy",
-            "Bypass",
-            "-Command",
-            &script,
-        ])
-        .output();
-    std::thread::sleep(Duration::from_millis(400));
     // 2) 清引擎，两遍（防监督者在窗口期重启）。只结束测试派生的 xberg.exe：
     //    可执行文件位于仓库 `.tmp\` 下，或系统临时目录的 tempfile 目录
     //    （`%TEMP%\.tmp*`——本仓测试经 tempfile::tempdir 安装模拟引擎）。
     //    不按映像名全杀：那会误杀用户自行运行的 Xberg（XB-23 同口径：
     //    不操作用户自行启动的其他 Xberg，含真实引擎测试目录）。
-    let script = test_owned_engine_kill_script();
-    for _ in 0..2 {
-        let _ = std::process::Command::new("powershell")
-            .args([
-                "-NoProfile",
-                "-ExecutionPolicy",
-                "Bypass",
-                "-Command",
-                &script,
-            ])
-            .output();
-        std::thread::sleep(Duration::from_millis(300));
-    }
+    let stop_engine = test_owned_engine_kill_script();
+    // 四次清场共用一个 PowerShell 进程；各阶段独立作用域并尽力执行，
+    // 任一阶段失败也继续后续扫描，每次仍重新查询 CIM 进程列表。
+    let cleanup = format!(
+        "& {{ try {{ {stop_service} }} catch {{ }} }}; \
+         Start-Sleep -Milliseconds 300; \
+         & {{ try {{ {script} }} catch {{ }} }}; \
+         Start-Sleep -Milliseconds 400; \
+         & {{ try {{ {stop_engine} }} catch {{ }} }}; \
+         Start-Sleep -Milliseconds 300; \
+         & {{ try {{ {stop_engine} }} catch {{ }} }}; \
+         Start-Sleep -Milliseconds 300"
+    );
+    let _ = std::process::Command::new("powershell")
+        .args([
+            "-NoProfile",
+            "-ExecutionPolicy",
+            "Bypass",
+            "-Command",
+            &cleanup,
+        ])
+        .output();
 }
 
 /// 构造匹配测试隔离临时根下可执行文件的 PowerShell 条件（大小写不敏感）。

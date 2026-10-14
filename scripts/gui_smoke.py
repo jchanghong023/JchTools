@@ -34,6 +34,9 @@
     非自隔离阶段独立调用时须已布置隔离环境变量；推荐经 scripts/acceptance.ps1
     编排执行。--allow-isolated-run 仅跳过 CLI 前置检查，不能绕过公共启动入口的隔离。
 
+CLI 实际执行自动写入独立 `.tmp/test-reports/<run-id>/junit.xml` 与 `run.json`；
+逐 S 阶段实测，数据集阶段计入夹具复制与清理，运行墙钟包含共享收尾。
+`--list-stages` / 帮助及直接调用阶段函数不创建报告；失败仍按原顺序立即停止。
 依赖：pip install pywinauto（需要可交互桌面会话）。
 """
 
@@ -68,6 +71,10 @@ import win32process
 from pywinauto import Application, controls, findbestmatch, findwindows, timings
 from pywinauto.application import ProcessNotFoundError, WindowSpecification
 from pywinauto.uia_defines import IUIA, NoPatternInterfaceError
+
+if not __package__:
+    sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+from scripts.test_reports import Case, TimingReport
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Mapping
@@ -960,7 +967,7 @@ def goto_converter(window: WindowSpecification) -> None:
 
 
 def converter_directory_rows(window: WindowSpecification) -> list[BaseWrapper]:
-    """转 Markdown 页自上而下两行「选择目录…」按钮：输入 / 输出（XB-20）。"""
+    """转 Markdown 页自上而下两行「选择目录…」按钮：输入 / 输出（XB-20）."""
     buttons = [b for b in window.descendants(control_type="Button") if (b.window_text() or "") == "选择目录…"]
     unique: list[BaseWrapper] = []
     for button in buttons:
@@ -2039,7 +2046,13 @@ def require_orchestrated_isolation(stages: list[str], env: Mapping[str, str], *,
     raise RuntimeError(msg)
 
 
-def run_dataset_stages(exe: str, data: Path, stages: list[str]) -> None:
+def run_dataset_stages(
+    exe: str,
+    data: Path,
+    stages: list[str],
+    *,
+    run_case: Callable[[str, Callable[[], None]], None] | None = None,
+) -> None:
     """S4/S2/S3 数据集阶段：每阶段前从旁路副本恢复，保证“干净语料上的完整链路”.
 
     H-06/附录 E：所选根的任一祖先直接含 .git 时两工具拒绝整次处理。仓库根本身
@@ -2055,9 +2068,20 @@ def run_dataset_stages(exe: str, data: Path, stages: list[str]) -> None:
         for stage, runner in (("S4", s4_full_extract), ("S2", s2_analyze_only), ("S3", s3_full_organize)):
             if stage not in stages:
                 continue
-            _ = shutil.copytree(data, fresh)
-            runner(str(exe), str(fresh))
-            shutil.rmtree(fresh, ignore_errors=True)
+            if run_case is None:
+                _ = shutil.copytree(data, fresh)
+                runner(str(exe), str(fresh))
+                shutil.rmtree(fresh, ignore_errors=True)
+            else:
+                # 仅 CLI 报告路径计入复制与清理；直接调用仍无报告副作用。
+                def invoke(runner: Callable[[str, str], None] = runner) -> None:
+                    try:
+                        _ = shutil.copytree(data, fresh)
+                        runner(str(exe), str(fresh))
+                    finally:
+                        shutil.rmtree(fresh, ignore_errors=True)
+
+                run_case(stage, invoke)
     finally:
         shutil.rmtree(scratch, ignore_errors=True)
 
@@ -2081,6 +2105,138 @@ def ensure_smoke_target_is_disposable(data: Path) -> None:
     if data.drive and len(data.parts) <= 1:
         msg = f"拒绝在盘符根目录执行整理冒烟：{data}"
         raise RuntimeError(msg)
+
+
+class _GuiTiming:
+    """CLI 专用报告生命周期；阶段函数的直接调用不产生报告."""
+
+    def __init__(self, stages: list[str], stage_functions: dict[str, str]) -> None:
+        self.stages: list[str] = stages
+        self.stage_functions: dict[str, str] = stage_functions
+        self.completed: set[str] = set()
+        self.report: TimingReport | None = None
+        self.report_failed: bool = False
+        try:
+            self.report = TimingReport(
+                "gui_smoke",
+                [sys.executable, *sys.argv],
+                scope={
+                    "selected_stages": stages,
+                    "case_functions": {stage: stage_functions[stage] for stage in stages},
+                },
+                timing_basis=(
+                    "单调时钟实测每个 S 阶段调用；数据集阶段包含夹具复制及成功/失败后的夹具清理；"
+                    "共享临时根创建/删除、CLI 前置检查与报告写入不计入单例，运行墙钟另记"
+                ),
+                concurrency={"mode": "sequential", "workers": 1},
+            )
+        except Exception as error:  # noqa: BLE001  # 报告故障不改变原阶段执行。
+            print(f"测试报告创建失败：{error}", file=sys.stderr)
+            self.report_failed = True
+
+    def record(self, stage: str, duration: float | None, status: str, detail: str = "") -> None:
+        if self.report is None:
+            return
+        try:
+            self.report.add_case(
+                Case(
+                    name=f"{stage}:{self.stage_functions[stage]}",
+                    classname="scripts.gui_smoke",
+                    duration=duration,
+                    status=status,
+                    detail=detail,
+                    file="scripts/gui_smoke.py",
+                )
+            )
+        except Exception as error:  # noqa: BLE001  # 保留原测试结果，报告故障另行可见。
+            print(f"测试报告写入失败：{error}", file=sys.stderr)
+            self.report_failed = True
+
+    def run_case(self, stage: str, invoke: Callable[[], None]) -> None:
+        started = time.perf_counter()
+        try:
+            invoke()
+        except BaseException as error:
+            duration = time.perf_counter() - started
+            self.completed.add(stage)
+            self.record(
+                stage,
+                duration,
+                "failure" if isinstance(error, AssertionError) else "error",
+                f"{type(error).__name__}: {error}",
+            )
+            raise
+        else:
+            duration = time.perf_counter() - started
+            self.completed.add(stage)
+            self.record(stage, duration, "passed")
+
+    def finish(self, exit_code: int, completion: str) -> int:
+        for stage in self.stages:
+            if stage not in self.completed:
+                self.record(stage, None, "skipped", "前一阶段失败或运行中断，本阶段未执行")
+        exit_code = exit_code or int(self.report_failed)
+        if self.report is not None:
+            try:
+                exit_code = self.report.finish(
+                    exit_code,
+                    completion=completion,
+                    coverage={
+                        "selected_stages": self.stages,
+                        "completed_stages": [stage for stage in self.stage_functions if stage in self.completed],
+                        "never_started_stages": [stage for stage in self.stages if stage not in self.completed],
+                    },
+                )
+            except Exception as error:  # noqa: BLE001  # 不覆盖正在传播的阶段异常。
+                print(f"测试报告收尾失败：{error}", file=sys.stderr)
+                self.report_failed = True
+        return exit_code or int(self.report_failed)
+
+
+def _run_cli_stages(exe: Path, data: Path, stages: list[str]) -> int:
+    """按原调度顺序执行，报告只包裹既有阶段边界."""
+    stage_runners = {
+        "S5": s5_markdown_basic_chain,
+        "S6": s6_auto_saves_feature_selection,
+        "S7": s7_restart_restores_saved_selection,
+        "S8": s8_empty_selection_disables_download_and_recovers,
+        "S9": s9_unconfigured_state_shows_reason_and_no_autostart,
+        "S10": s10_output_layout_and_flat_duplicate_policy,
+        "S11": s11_existing_results_are_skipped_untouched,
+        "S12": s12_output_subtree_is_excluded_from_scan,
+        "S13": s13_partial_failure_isolated_with_counts,
+        "S14": s14_close_during_conversion_confirms_and_stops,
+        "S15": s15_markdown_merge_and_split,
+        "S16": s16_git_commit_and_push,
+        "S17": s17_check_configured_components_offline,
+        "S18": s18_layout_at_two_window_sizes,
+    }
+    stage_functions = {
+        "S1": s1_launch_and_exit.__name__,
+        "S4": s4_full_extract.__name__,
+        "S2": s2_analyze_only.__name__,
+        "S3": s3_full_organize.__name__,
+        **{stage: runner.__name__ for stage, runner in stage_runners.items()},
+    }
+    timing = _GuiTiming(stages, stage_functions)
+    exit_code = 0
+    completion = "complete"
+    try:
+        if "S1" in stages:
+            timing.run_case("S1", lambda: s1_launch_and_exit(str(exe)))
+        run_dataset_stages(str(exe), data, stages, run_case=timing.run_case)
+        for stage, runner in stage_runners.items():
+            if stage in stages:
+                timing.run_case(stage, lambda runner=runner: runner(str(exe)))
+    except BaseException as error:
+        exit_code = 130 if isinstance(error, KeyboardInterrupt) else 1
+        if isinstance(error, SystemExit):
+            exit_code = error.code if isinstance(error.code, int) else 1
+        completion = "interrupted" if isinstance(error, (KeyboardInterrupt, SystemExit)) else "incomplete"
+        raise
+    finally:
+        exit_code = timing.finish(exit_code, completion)
+    return exit_code
 
 
 def main() -> int:
@@ -2114,29 +2270,7 @@ def main() -> int:
         raise RuntimeError(msg)
     ensure_smoke_target_is_disposable(data)
 
-    if "S1" in stages:
-        s1_launch_and_exit(str(exe))
-    run_dataset_stages(str(exe), data, stages)
-    stage_runners = {
-        "S5": s5_markdown_basic_chain,
-        "S6": s6_auto_saves_feature_selection,
-        "S7": s7_restart_restores_saved_selection,
-        "S8": s8_empty_selection_disables_download_and_recovers,
-        "S9": s9_unconfigured_state_shows_reason_and_no_autostart,
-        "S10": s10_output_layout_and_flat_duplicate_policy,
-        "S11": s11_existing_results_are_skipped_untouched,
-        "S12": s12_output_subtree_is_excluded_from_scan,
-        "S13": s13_partial_failure_isolated_with_counts,
-        "S14": s14_close_during_conversion_confirms_and_stops,
-        "S15": s15_markdown_merge_and_split,
-        "S16": s16_git_commit_and_push,
-        "S17": s17_check_configured_components_offline,
-        "S18": s18_layout_at_two_window_sizes,
-    }
-    for stage, runner in stage_runners.items():
-        if stage in stages:
-            runner(str(exe))
-    return 0
+    return _run_cli_stages(exe, data, stages)
 
 
 if __name__ == "__main__":

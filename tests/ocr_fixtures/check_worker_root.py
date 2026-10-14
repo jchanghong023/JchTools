@@ -24,6 +24,7 @@ ROOT = Path(__file__).resolve().parents[2]
 # 独立脚本的 sys.path 起点是 tests/ocr_fixtures；复用同仓 GUI 验收的进程所有权设施。
 sys.path.insert(0, str(ROOT))
 from scripts.gui_smoke import own_process_tree  # noqa: E402
+from scripts.test_reports import run_atomic  # noqa: E402
 
 
 def process_id_to_session_id() -> Callable[[int, object], int]:
@@ -235,8 +236,15 @@ def main() -> int:
     if not (engine_root / "xberg.exe").is_file():
         message = f"隔离 Xberg 测试目录缺少 xberg.exe：{engine_root}"
         raise FileNotFoundError(message)
-    run_worker_root(source, worker_version, engine_root, without_font_cache=bool(args.without_font_cache))
-    return 0
+    def check() -> int:
+        run_worker_root(source, worker_version, engine_root, without_font_cache=bool(args.without_font_cache))
+        return 0
+
+    return run_atomic(
+        "ocr.worker-install-root",
+        check,
+        scope={"worker_version": worker_version, "without_font_cache": bool(args.without_font_cache)},
+    )
 
 
 if __name__ == "__main__":

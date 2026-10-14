@@ -28,6 +28,7 @@ import json
 import math
 import statistics
 import tempfile
+import sys
 import unicodedata
 from difflib import SequenceMatcher
 from pathlib import Path
@@ -35,6 +36,9 @@ from typing import Any
 from unittest.mock import patch
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
+
+sys.path.insert(0, str(REPO_ROOT))
+from scripts.test_reports import run_atomic  # noqa: E402
 
 
 def distance(left: str, right: str) -> int:
@@ -355,9 +359,15 @@ def main() -> int:
     parser.add_argument("--self-test", action="store_true", help="运行内嵌自测后退出，不读写报告")
     args = parser.parse_args()
     if args.self_test:
-        self_test()
-        print("PASS compare.py 自测通过")
-        return 0
+        def check() -> int:
+            self_test()
+            print("PASS compare.py 自测通过")
+            return 0
+
+        return run_atomic(
+            "ocr.compare-self-test", check, scope={"file": "tests/ocr_fixtures/compare.py", "mode": "self-test"},
+            error_exit_code=3,
+        )
     missing = [
         flag
         for flag, value in (
@@ -377,6 +387,15 @@ def main() -> int:
     assert args.python_reports is not None
     assert args.rust_reports is not None
 
+    return run_atomic(
+        "ocr.compare-reports",
+        lambda: compare_reports(args),
+        scope={"file": "tests/ocr_fixtures/compare.py", "mode": "historical-report-comparison"},
+        error_exit_code=3,
+    )
+
+
+def compare_reports(args: argparse.Namespace) -> int:
     output = ensure_repo_tmp_output(args.out)
     expected = args.expected.read_text(encoding="utf-8").rstrip("\n").replace("\r\n", "\n")
     manifest = json.loads(args.manifest.read_text(encoding="utf-8"))

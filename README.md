@@ -247,6 +247,37 @@ OMP `server_agent` 开发边界：来源过滤及聊天到 `X-JchTools-Session-I
 
 本地验收保留调用方显式设置的 `JCHTOOLS_TEST_XBERG_DIR`，未设置时才使用本机固定测试引擎目录；真实引擎验收须采用当时最新发布版。无效的显式目录由验收报错，不静默换测其他二进制；运行目录须同时包含所选 `xberg.exe`、模型及 DLL。媒体夹具合成另需 PATH 中的 `ffmpeg.exe`；独立桌面验收缺少安装版/便携版产物或独立 Windows 用户会话仍如实报告覆盖缺口，不能以目录改名或复制开发 EXE 代替；不要求独立断网测试。门外真实桌面项目继续按 `NOT_RUN_SEPARATE_USER_INSTRUCTION_REQUIRED` 报告，既不冒报 PASS，也不据此判三级门 FAIL。
 
+### 测试计时报告
+
+完整门内的六个 Python unittest 阶段沿用原发现范围、参数和 `-f`，通过 `scripts.unittest_report` 扩展标准库结果回调；不替换测试框架。局部命令只替换入口模块，其余选择器保持原样：
+
+```powershell
+python -m scripts.unittest_report -f scripts.test_gui_smoke
+python -m scripts.unittest_report discover -f -s tests/ocr_fixtures -p test_worker_root_isolation.py
+```
+
+每次调用自动生成独占的 `.tmp/test-reports/<UTC时间-UUID>/junit.xml` 与 `run.json`。元数据记录实际命令、选择范围、并发、平台、Python/运行器版本、源码 revision 与 dirty 内容身份、观察到的墙钟、退出码及覆盖状态；不可用值明确为 `null`。自维护脚本无独立版本号时以源码身份定位，不编造运行器版本。XML/JSON 按现有 `.tmp/` 忽略规则保留，不进入源码或发布包，不新增 CI 上传或自动历史清理。
+
+测试门每项汇总另打印 `stage_elapsed=<秒>s`，测量既有阶段从启动至所属进程树收尾的墙钟；未取得真实启动/退出证据时打印 `unknown`。这是阶段耗时，不是逐例时间，也不把整条 Cargo 阶段计为纯编译；阶段并行时不得累加为总墙钟。
+
+无头日志面板用例保留两档尺寸、五个工具、空闲/运行状态的完整矩阵及真实键盘/鼠标事件；每次仍推进模拟时钟和动画，只在 Slint 标记画面需重绘时渲染到复用的像素缓冲，不强制重画未变化的画面。测试引擎清场在同一个 PowerShell 进程中依次执行原服务、代理及两遍引擎扫描，保留逐阶段的最新进程查询、所有权过滤、等待间隔和尽力继续语义；会话锁及用户进程保护不变。
+
+| 既有生产者 / 公开入口 | 报告粒度与边界 |
+| --- | --- |
+| 门内 unittest：`test_markdown_acceptance`、`test_gui_smoke`、`test_test_gate`、`test_review_trusted`、`test_package_windows`、`test_worker_root_isolation` | 每个逻辑测试一项；`startTest`–`stopTest` 实测包含 setup、call、teardown 与单例清理。子测试结果归入父用例，不增加用例数；类/模块夹具的门外错误在元数据中标为未知时长。 |
+| 独立 `scripts.test_fetch_7zip` 等 unittest 选择器 | 可经同一入口报告；不擅自加入完整门原选择范围。原始 `python -m unittest` 本身不提供 XML。 |
+| `scripts/gui_smoke.py` | 正常 CLI 自动报告所选 S 阶段；数据集阶段含复制/清理，未启动阶段为无时长 skipped。执行顺序及首错停止不变，仍需当次独立桌面授权。 |
+| `scripts/markdown_acceptance.py` | 正常 CLI 自动报告所选条目 ID、profile 和组；原 JSON/控制台全集分母不变。NOT RUN 无时长，未选择及 OPTIONAL 不冒充执行；仍按原规则完成所选条目与 broker 清理。 |
+| `check_worker_root.py`、`check_gui_worker_connection.py` | 各自单项场景为明确的 command-level 用例，包含其夹具和清理；真实服务/桌面权限不变，不能拿命令耗时冒充内部断言计时。 |
+| `tests/ocr_fixtures/compare.py` | `--self-test` 与历史报告比较分别是单项 command-level 报告；后者只比较既有 OCR 数据，不证明当前模型执行。 |
+| 根、14 个生产 crate、两个 optional 包的 Rust UT / integration / native / 无头 GUI，以及另行授权的真实 GUI / 引擎 / 模型用例 | 保留原 cargo/libtest 入口。稳定版 libtest 的逐用例 JSON、JUnit 和计时仍需不稳定开关；现有 `--logfile` 只有结果，没有时长，当前不支持逐例计时 XML。 |
+| 根默认成员及两个 optional 包的 `cargo test --doc` | 保留独立路径，同属上述稳定版报告缺口；nextest 不覆盖 doctest。 |
+| `scripts/test_timing.py` | 原两轮套件/慢例 JSON 分析入口不变；整套耗时不能当逐例时长，重复单跑结果也不替代正常测试路径的完整 XML。 |
+
+已安装的 nextest 不能无损替换现有门：其逐测试独立进程改变进程内夹具复用，`--nocapture` 强制串行，而当前门为四 binary 并发、每 binary 两线程。不会为报告切换 profile、工具链、构建旗标或缓存路径。参照 [nextest 执行规则及 doctest 边界](https://nexte.st/docs/running/) 与 [libtest 输出选项](https://doc.rust-lang.org/rustc/tests/index.html#output-options)。
+
+逐例秒数之和不是运行墙钟或 CPU 时间；共享夹具、构建、调度和并行重叠分别按运行器口径记录。已有结果逐项检查点落盘，失败、中断或门外终止留下 partial 元数据，不重用旧 XML。报告故障可见且不能使测试失败变成功；help/list/状态播种不是测试运行。静态检查、编译和 CI 打包没有测试用例，不计入计时排名。局部报告不代表全仓库报告，完整门和真实桌面/模型执行仍须分别取得当次授权。
+
 ## 工程入口
 
 根 `src/main.rs` 只装配 GUI 和既有后台入口，不提供旧根库 façade；`crates/gui` 承接 GUI 业务装配，`crates/ui` 仅编译根 `ui/app.slint`。`crates/file-core` 承接配置、模型、磁盘索引/审计、共享任务/扫描、文件与引擎基础；`crates/recursive-extract` 和 `crates/directory-organizer` 分别承接递归解压与目录整理。MD、Git、Markdown、assets、Xberg、ACP、CodeAgent 与 foundation 均在各自 `crates/` 中；`crates/jchocr` 有自己的 lib/bin/test，可用 `cargo run -p jchocr -- --help`，无需构建 GUI。截图 worker 入口仍为 `optional/snap-ocr-worker/Cargo.toml`，复用真实 foundation/Xberg crate。根 `resources/`、`ui/`、`tests/`、`docs/` 仍是唯一资源/测试位置（CLI 测试归 `crates/jchocr/tests/`）；`scripts/` 是检查/打包入口；`.github/workflows/check.yml` 是 Windows CI。

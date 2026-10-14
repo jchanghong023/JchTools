@@ -11,10 +11,15 @@
 from __future__ import annotations
 
 import argparse
+import sys
 import time
+from pathlib import Path
 from typing import cast
 
 from pywinauto import Application
+
+sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
+from scripts.test_reports import run_atomic  # noqa: E402
 
 CONNECTED_STATUS = "后台已连接 · 托盘和热键独立运行"
 MODEL_READY = "模型：就绪"
@@ -28,7 +33,16 @@ def main() -> int:
     _ = parser.add_argument("--pid", type=int, required=True)
     _ = parser.add_argument("--timeout", type=int, default=30, help="等待自动连接与模型就绪的秒数")
     args = parser.parse_args()
-    window = Application(backend="uia").connect(process=cast("int", args.pid)).window(title="JchTools")
+    pid, timeout = cast("int", args.pid), cast("int", args.timeout)
+    return run_atomic(
+        "ocr.gui-worker-connection",
+        lambda: check_connection(pid, timeout),
+        scope={"file": "tests/ocr_fixtures/check_gui_worker_connection.py", "pid": pid, "timeout": timeout},
+    )
+
+
+def check_connection(pid: int, timeout: int) -> int:
+    window = Application(backend="uia").connect(process=pid).window(title="JchTools")
 
     def texts() -> list[str]:
         return [str(item.window_text() or "") for item in window.descendants(control_type="Text")]
@@ -53,7 +67,7 @@ def main() -> int:
     _ = window.set_focus()
     nav.click_input()
 
-    deadline = time.monotonic() + cast("int", args.timeout)
+    deadline = time.monotonic() + timeout
     labels: list[str] = []
     while time.monotonic() < deadline:
         labels = texts()

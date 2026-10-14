@@ -82,12 +82,12 @@ impl View {
         // 推进真实动画/changed 回调，但不依赖 wall-clock 或任何 OS 事件循环。
         self.state.time_ms.set(self.state.time_ms.get() + 150);
         slint::platform::update_timers_and_animations();
-        self.ui.window().request_redraw();
+        // 首帧与可视变化由 Slint 标脏；非可视事件不强制重绘，保留 ReusedBuffer 的真实像素。
         let stride = self.pixels.width() as usize;
         let pixels = &mut self.pixels;
-        assert!(self.window.draw_if_needed(|renderer| {
+        self.window.draw_if_needed(|renderer| {
             renderer.render(pixels.make_mut_slice(), stride);
-        }));
+        });
     }
 
     fn set(&self, name: &str, value: impl Into<Value>) {
@@ -199,23 +199,23 @@ impl View {
         self.click_at(center);
     }
 
+    fn dispatch_key_event(&self, event: WindowEvent) {
+        self.ui.window().dispatch_event(event);
+    }
+
     fn key(&mut self, key: impl Into<SharedString>) {
         let text = key.into();
-        self.ui
-            .window()
-            .dispatch_event(WindowEvent::KeyPressed { text: text.clone() });
-        self.ui
-            .window()
-            .dispatch_event(WindowEvent::KeyReleased { text });
+        self.dispatch_key_event(WindowEvent::KeyPressed { text: text.clone() });
+        self.dispatch_key_event(WindowEvent::KeyReleased { text });
         self.render();
     }
 
     fn shortcut(&mut self, modifier: Key, key: impl Into<SharedString>) {
-        self.ui.window().dispatch_event(WindowEvent::KeyPressed {
+        self.dispatch_key_event(WindowEvent::KeyPressed {
             text: modifier.into(),
         });
         self.key(key);
-        self.ui.window().dispatch_event(WindowEvent::KeyReleased {
+        self.dispatch_key_event(WindowEvent::KeyReleased {
             text: modifier.into(),
         });
         self.render();
@@ -424,7 +424,10 @@ fn exercise(view: &mut View, screen: i32, panel: i32, name: &str, busy: bool) {
         view.pixels.height()
     ));
     view.click("还原");
-    assert!(view.has_button("停止并关闭"), "背景还原点击不能关闭安全确认");
+    assert!(
+        view.has_button("停止并关闭"),
+        "背景还原点击不能关闭安全确认"
+    );
     assert!(view.has_button("还原"), "背景还原点击不能穿透安全确认");
     view.editor(&updated);
     view.key(Key::Escape);
