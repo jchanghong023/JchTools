@@ -1,4 +1,5 @@
 """R21 可信基回归：仅合成目录和真实解析行为，不启动桌面、引擎或 Cargo。"""
+
 from __future__ import annotations
 
 import contextlib
@@ -62,7 +63,9 @@ class DestinationBoundaryTests(TrustedWorkspaceTests):
         junction = temp / "linked-data"
         result = subprocess.run(
             ["cmd", "/d", "/c", "mklink", "/J", str(junction), str(external)],
-            capture_output=True, check=False, timeout=20,
+            capture_output=True,
+            check=False,
+            timeout=20,
         )
         self.assertEqual(result.returncode, 0, result.stderr.decode(errors="replace"))
         self.addCleanup(lambda: junction.rmdir() if junction.exists() else None)
@@ -78,7 +81,9 @@ class DestinationBoundaryTests(TrustedWorkspaceTests):
             patch.object(make_tmp, "__file__", str(scripts / "make_tmp.py")),
             patch.object(sys, "argv", ["make_tmp.py", "testdata", "--destination", str(destination), "--force"]),
             patch.object(make_tmp, "seven_zip", return_value=Path("not-executed.exe")),
-            patch.object(make_tmp, "_clear_existing_target", side_effect=AssertionError("合法目的地到达清空边界")) as clear,
+            patch.object(
+                make_tmp, "_clear_existing_target", side_effect=AssertionError("合法目的地到达清空边界")
+            ) as clear,
         ):
             with self.assertRaisesRegex(AssertionError, "合法目的地"):
                 make_tmp.main()
@@ -86,6 +91,48 @@ class DestinationBoundaryTests(TrustedWorkspaceTests):
 
 
 class AttributeBaselineTests(TrustedWorkspaceTests):
+    # static_check 自 10071d43 起按自身 ROOT 硬性要求登记清单全部在场；合成目录
+    # 必须满足同一合同（含各 build producer），检查本身不为此放宽。
+    _PRODUCTION_CRATES = (
+        "foundation",
+        "file-core",
+        "recursive-extract",
+        "directory-organizer",
+        "md-tools",
+        "git-tools",
+        "xberg",
+        "assets",
+        "markdown",
+        "acp-api",
+        "codeagent",
+        "jchocr",
+        "ui",
+        "gui",
+    )
+    _OPTIONAL_CRATES = ("snap-ocr-core", "snap-ocr-worker")
+    _BUILD_PRODUCERS = (
+        "",  # 根 build.rs
+        "crates/file-core",
+        "crates/assets",
+        "crates/ui",
+        "optional/snap-ocr-worker",
+    )
+
+    def _materialize_manifest_contract(self) -> None:
+        (self.directory / "Cargo.toml").write_bytes(b"")
+        (self.directory / "src").mkdir(exist_ok=True)
+        for parent, names in (
+            (self.directory / "crates", self._PRODUCTION_CRATES),
+            (self.directory / "optional", self._OPTIONAL_CRATES),
+        ):
+            for crate in names:
+                package = parent / crate
+                (package / "src").mkdir(parents=True, exist_ok=True)
+                (package / "Cargo.toml").write_bytes(b"")
+                (package / "src" / "lib.rs").write_bytes(b"")
+        for producer in self._BUILD_PRODUCERS:
+            (self.directory / producer / "build.rs").write_bytes(b"")
+
     def collect(self, source: str) -> dict[str, object]:
         scripts = self.directory / "scripts"
         scripts.mkdir(exist_ok=True)
@@ -93,9 +140,12 @@ class AttributeBaselineTests(TrustedWorkspaceTests):
         tests = self.directory / "tests"
         tests.mkdir(exist_ok=True)
         (tests / "sample.rs").write_text(source, encoding="utf-8")
+        self._materialize_manifest_contract()
         result = subprocess.run(
             [sys.executable, str(scripts / "static_check.py"), "--update-test-baseline"],
-            capture_output=True, check=False, timeout=30,
+            capture_output=True,
+            check=False,
+            timeout=30,
         )
         self.assertEqual(result.returncode, 0, result.stderr.decode(errors="replace"))
         rows = json.loads((scripts / "test-baseline.json").read_text(encoding="utf-8"))["tests"]
@@ -139,8 +189,6 @@ class RequirementInventoryTests(TrustedWorkspaceTests):
         self.assertTrue(all(item["status"] == "UNVERIFIED" for item in report["items"]))
 
 
-
-
 class DesktopAuthorizationTests(unittest.TestCase):
     def test_desktop_driver_entry_requires_explicit_authorization(self) -> None:
         # 只运行真实入口root赋值之前的if决策；不执行目录/工具发现、Cargo或桌面动作。
@@ -168,16 +216,27 @@ try {
 """
         powershell = Path(os.environ["SYSTEMROOT"]) / "System32/WindowsPowerShell/v1.0/powershell.exe"
         for smoke, markdown, desktop in (
-            (True, False, False), (False, True, False), (True, True, False),
-            (True, True, True), (False, False, False),
+            (True, False, False),
+            (False, True, False),
+            (True, True, False),
+            (True, True, True),
+            (False, False, False),
         ):
             with self.subTest(smoke=smoke, markdown=markdown, desktop=desktop):
-                payload = {"path": str(ROOT / "scripts" / "acceptance.ps1"),
-                           "smoke": smoke, "markdown": markdown, "desktop": desktop}
+                payload = {
+                    "path": str(ROOT / "scripts" / "acceptance.ps1"),
+                    "smoke": smoke,
+                    "markdown": markdown,
+                    "desktop": desktop,
+                }
                 result = subprocess.run(
                     [str(powershell), "-NoProfile", "-Command", harness],
-                    input=json.dumps(payload), text=True, encoding="utf-8",
-                    capture_output=True, check=False, timeout=30,
+                    input=json.dumps(payload),
+                    text=True,
+                    encoding="utf-8",
+                    capture_output=True,
+                    check=False,
+                    timeout=30,
                 )
                 self.assertEqual(result.returncode, 0, result.stderr)
                 if (smoke or markdown) and not desktop:
