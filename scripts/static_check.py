@@ -9,6 +9,7 @@ except --update-test-baseline which rewrites scripts/test-baseline.json.
 from __future__ import annotations
 
 import contextlib
+import functools
 import hashlib
 import io
 import json
@@ -686,6 +687,7 @@ def _test_body_hash(text: str, signature_end: int) -> str:
     return hashlib.sha256(blob.encode("utf-8")).hexdigest()[:16]
 
 
+@functools.cache
 def collect_tests() -> list[dict[str, object]]:
     # 提取本项目所有 package 的手写 Rust #[test] / #[tokio::test]。基线键包含生效门禁（cfg）：
     #   1) 文件级 #![cfg(...)]（仅扫文件头部内层属性区）；
@@ -693,6 +695,8 @@ def collect_tests() -> list[dict[str, object]]:
     #   3) 紧贴 #[test] 的属性块（前后均可，方括号配对，支持 not(windows) 等嵌套括号）。
     # 已知残留盲区：定义在其它文件里的门禁（如 lib.rs 对模块声明的 cfg）
     # 不在本文件扫描范围内——本检查是执法下界，不是完整 cfg 求值器。
+    # 单次进程内 test_baseline 与 scope_and_delivery 复用同一次全量扫描：
+    # 源文件在一次运行中只读，结果纯函数于文件内容；调用方均只读，缓存不改变判据。
     rows: list[dict[str, object]] = []
     # 与词法/SQL/实现检查共用范围，包含搬迁的 crate 内联测试与 jchocr 集成测试，
     # 也包含 optional 的 src/tests/examples/benches；实际执行仍受默认成员/显式入口控制。
