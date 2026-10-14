@@ -1543,6 +1543,13 @@
     },
     {
       "file": "crates/foundation/src/xberg_settings.rs",
+      "name": "download_selection_persists_without_changing_active_source",
+      "ignored": false,
+      "cfg": null,
+      "body": "a1140b04d5d0f1de"
+    },
+    {
+      "file": "crates/foundation/src/xberg_settings.rs",
       "name": "explicit_test_directory_policy_preserves_isolation",
       "ignored": false,
       "cfg": null,
@@ -1637,7 +1644,7 @@
       "name": "close_after_waits_for_concurrent_task_and_converter_initialization",
       "ignored": false,
       "cfg": null,
-      "body": "b7067000e6280f74"
+      "body": "b47d6a8bc959b42b"
     },
     {
       "file": "crates/gui/src/gui.rs",
@@ -1673,13 +1680,6 @@
       "ignored": false,
       "cfg": null,
       "body": "947f70270d4f9b6e"
-    },
-    {
-      "file": "crates/gui/src/gui.rs",
-      "name": "convert_runtime_edit_and_use_directory_revalidation_flow",
-      "ignored": false,
-      "cfg": null,
-      "body": "caf77bd20ea501d4"
     },
     {
       "file": "crates/gui/src/gui.rs",
@@ -1791,7 +1791,7 @@
       "name": "directory_dialog_uses_own_field_start",
       "ignored": false,
       "cfg": null,
-      "body": "1415d3305208aafb"
+      "body": "b36709e67db0cc21"
     },
     {
       "file": "crates/gui/src/gui.rs",
@@ -1928,6 +1928,13 @@
     },
     {
       "file": "crates/gui/src/gui.rs",
+      "name": "installed_components_check_preserves_legacy_source_and_restores_notice_offline",
+      "ignored": false,
+      "cfg": null,
+      "body": "5f7f6d9ec10691e8"
+    },
+    {
+      "file": "crates/gui/src/gui.rs",
       "name": "invalid_large_threshold_is_ignored_only_until_rule_reenabled",
       "ignored": false,
       "cfg": null,
@@ -1952,7 +1959,7 @@
       "name": "markdown_converter_navigation_is_isolated_before_initialization",
       "ignored": false,
       "cfg": null,
-      "body": "e9477ed7675b5d22"
+      "body": "f532abc718792aa8"
     },
     {
       "file": "crates/gui/src/gui.rs",
@@ -2176,7 +2183,21 @@
       "name": "settings_actions_are_gated_while_busy_and_reject_unknown_action",
       "ignored": false,
       "cfg": null,
-      "body": "73e7a1372a518f78"
+      "body": "5628759fff185ed1"
+    },
+    {
+      "file": "crates/gui/src/gui.rs",
+      "name": "settings_failed_autosave_restores_saved_choice_before_next_download",
+      "ignored": false,
+      "cfg": null,
+      "body": "92eb05205df98dbf"
+    },
+    {
+      "file": "crates/gui/src/gui.rs",
+      "name": "settings_load_failure_keeps_download_blocked_and_offline_check_reloads_selection",
+      "ignored": false,
+      "cfg": null,
+      "body": "0e7a66d83f719883"
     },
     {
       "file": "crates/gui/src/gui.rs",
@@ -2190,14 +2211,28 @@
       "name": "settings_result_while_task_running_keeps_close_after",
       "ignored": false,
       "cfg": null,
-      "body": "53790436f60fd833"
+      "body": "79a2c281bc4e4a53"
     },
     {
       "file": "crates/gui/src/gui.rs",
-      "name": "shared_settings_rejects_invalid_assets_and_keeps_saved_source",
+      "name": "settings_selection_callbacks_persist_reload_and_reject_stale_snapshots",
       "ignored": false,
       "cfg": null,
-      "body": "7f1655d68de08f89"
+      "body": "54bf38c0b174399a"
+    },
+    {
+      "file": "crates/gui/src/gui.rs",
+      "name": "settings_startup_pending_download_cannot_consume_default_choice",
+      "ignored": false,
+      "cfg": null,
+      "body": "e854d030eed5c438"
+    },
+    {
+      "file": "crates/gui/src/gui.rs",
+      "name": "settings_startup_pending_selection_cannot_replace_saved_choice",
+      "ignored": false,
+      "cfg": null,
+      "body": "839471a1b1d60be2"
     },
     {
       "file": "crates/gui/src/gui.rs",
@@ -2264,6 +2299,20 @@
     },
     {
       "file": "crates/gui/src/gui.rs",
+      "name": "snapshot_download_callback_is_single_flight_and_cancel_preserves_active_source",
+      "ignored": false,
+      "cfg": null,
+      "body": "82e34b5ec504b642"
+    },
+    {
+      "file": "crates/gui/src/gui.rs",
+      "name": "snapshot_download_completion_refreshes_only_installed_feature_status",
+      "ignored": false,
+      "cfg": null,
+      "body": "d3df33f235970298"
+    },
+    {
+      "file": "crates/gui/src/gui.rs",
       "name": "split_size_accepts_exact_byte_fractions",
       "ignored": false,
       "cfg": null,
@@ -2288,7 +2337,7 @@
       "name": "startup_settings_results_do_not_replace_newer_selection",
       "ignored": false,
       "cfg": null,
-      "body": "504d6482981dccd7"
+      "body": "fb13027815ecd159"
     },
     {
       "file": "crates/gui/src/gui.rs",
@@ -2603,14 +2652,14 @@
       "name": "download_cancel_before_commit_keeps_config_untouched",
       "ignored": false,
       "cfg": null,
-      "body": "e95e29a5d7c7df1d"
+      "body": "a3e333bba75bee7c"
     },
     {
       "file": "crates/markdown/src/markdown_assets.rs",
       "name": "download_runtime_write_notice_closes_readiness_loop",
       "ignored": false,
       "cfg": null,
-      "body": "0e1c8e05016dce22"
+      "body": "10de8774dcb13268"
     },
     {
       "file": "crates/markdown/src/markdown_assets.rs",
@@ -2666,14 +2715,14 @@
       "name": "initialize_cleans_stale_runtime_selection_residue_at_entry",
       "ignored": false,
       "cfg": null,
-      "body": "47051fcc66aa6031"
+      "body": "8bc690389902de65"
     },
     {
       "file": "crates/markdown/src/markdown_assets.rs",
       "name": "initialize_cleans_stale_staging_residue_at_entry",
       "ignored": false,
       "cfg": null,
-      "body": "c7ad609514a668d7"
+      "body": "0550ac8010e032c2"
     },
     {
       "file": "crates/markdown/src/markdown_assets.rs",
@@ -2681,41 +2730,6 @@
       "ignored": false,
       "cfg": "windows",
       "body": "d47729a8d2fcd08b"
-    },
-    {
-      "file": "crates/markdown/src/markdown_assets.rs",
-      "name": "installed_runtime_is_verified_before_selection",
-      "ignored": false,
-      "cfg": null,
-      "body": "a0acdcdb070a4f2d"
-    },
-    {
-      "file": "crates/markdown/src/markdown_assets.rs",
-      "name": "latest_metadata_rejects_changed_source_and_duplicate_archives",
-      "ignored": false,
-      "cfg": null,
-      "body": "57a31c996d0e7efd"
-    },
-    {
-      "file": "crates/markdown/src/markdown_assets.rs",
-      "name": "latest_metadata_replaces_pinned_engine_but_preserves_model_identity",
-      "ignored": false,
-      "cfg": null,
-      "body": "17ead6b834a01b9e"
-    },
-    {
-      "file": "crates/markdown/src/markdown_assets.rs",
-      "name": "latest_metadata_without_digest_fails_without_mutating_pinned_pack",
-      "ignored": false,
-      "cfg": null,
-      "body": "8856c2143a42951e"
-    },
-    {
-      "file": "crates/markdown/src/markdown_assets.rs",
-      "name": "latest_runtime_is_reused_without_repeating_archive_download",
-      "ignored": false,
-      "cfg": null,
-      "body": "3bcd4aa3a0e70525"
     },
     {
       "file": "crates/markdown/src/markdown_assets.rs",
@@ -2800,6 +2814,69 @@
       "ignored": false,
       "cfg": null,
       "body": "8c91d6bc7e9caac6"
+    },
+    {
+      "file": "crates/markdown/src/markdown_assets.rs",
+      "name": "split_damaged_installed_component_is_replaced_without_changing_original",
+      "ignored": false,
+      "cfg": null,
+      "body": "122444ebf848d132"
+    },
+    {
+      "file": "crates/markdown/src/markdown_assets.rs",
+      "name": "split_integrity_failures_and_cancel_preserve_active_config_and_assets",
+      "ignored": false,
+      "cfg": null,
+      "body": "f36fd489741fd840"
+    },
+    {
+      "file": "crates/markdown/src/markdown_assets.rs",
+      "name": "split_member_integrity_overlap_and_zip_safety_failures_preserve_active_install",
+      "ignored": false,
+      "cfg": null,
+      "body": "edb18efbde3196a5"
+    },
+    {
+      "file": "crates/markdown/src/markdown_assets.rs",
+      "name": "split_metadata_rejects_legacy_only_release_and_untrusted_assets",
+      "ignored": false,
+      "cfg": null,
+      "body": "9ac4d628dd7bfb25"
+    },
+    {
+      "file": "crates/markdown/src/markdown_assets.rs",
+      "name": "split_notice_failure_preserves_active_assets_and_config",
+      "ignored": false,
+      "cfg": null,
+      "body": "21f7b83c3e2161bf"
+    },
+    {
+      "file": "crates/markdown/src/markdown_assets.rs",
+      "name": "split_snapshot_only_and_same_tag_addition_reuse_verified_components",
+      "ignored": false,
+      "cfg": null,
+      "body": "43367ad4bde96fb8"
+    },
+    {
+      "file": "crates/markdown/src/markdown_assets.rs",
+      "name": "split_snapshot_selection_does_not_inherit_legacy_full_bundle_features",
+      "ignored": false,
+      "cfg": null,
+      "body": "8749bd36df295371"
+    },
+    {
+      "file": "crates/markdown/src/markdown_assets.rs",
+      "name": "split_sqlite_commit_failure_rolls_back_new_install_only",
+      "ignored": false,
+      "cfg": null,
+      "body": "589e819ef1684680"
+    },
+    {
+      "file": "crates/markdown/src/markdown_assets.rs",
+      "name": "split_upgrade_installs_selected_features_without_cross_tag_reuse",
+      "ignored": false,
+      "cfg": null,
+      "body": "b65e5e43f41357c8"
     },
     {
       "file": "crates/markdown/src/markdown_assets.rs",
@@ -3450,7 +3527,7 @@
       "name": "broken_engine_delivers_terminal_with_thread_request_context",
       "ignored": false,
       "cfg": null,
-      "body": "7a306b1876d0f1c6"
+      "body": "23c0bcf6236bb2a3"
     },
     {
       "file": "crates/xberg/src/xberg_runtime_windows.rs",
@@ -3464,7 +3541,7 @@
       "name": "consumed_response_logs_safe_results_and_decode_failure_stage",
       "ignored": false,
       "cfg": null,
-      "body": "3a5d3ce47070abf3"
+      "body": "632492f1eb630417"
     },
     {
       "file": "crates/xberg/src/xberg_runtime_windows.rs",
@@ -3520,7 +3597,7 @@
       "name": "root_preflight_reuses_caller_diagnostic_id_without_logging_request_body",
       "ignored": false,
       "cfg": null,
-      "body": "8d87c2beb6ec6a03"
+      "body": "8a52a31e9df3e4ff"
     },
     {
       "file": "crates/xberg/src/xberg_runtime_windows.rs",
@@ -5242,7 +5319,7 @@
       "name": "both_sources_survive_process_restart_and_failed_save",
       "ignored": false,
       "cfg": null,
-      "body": "f1783fbf4d06835d"
+      "body": "232a02ed36ba83dc"
     },
     {
       "file": "tests/background_settings.rs",
@@ -6831,7 +6908,7 @@
       "name": "settings_markdown_and_snap_pages_gate_and_status_end_to_end",
       "ignored": false,
       "cfg": "feature = \"gui\"",
-      "body": "c14534dc810048f9"
+      "body": "1d1544f8eaa86baa"
     },
     {
       "file": "tests/gui_flow.rs",

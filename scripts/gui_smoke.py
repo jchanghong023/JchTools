@@ -9,14 +9,11 @@
      冲突自动改名、嵌套内容落盘，失败包保留在「解压失败」（H-07/X-05/X-06）。
   S5 转 Markdown 基本链路：启动 → 切到「转 Markdown」→ 选输入/输出 → 开始 → 停止 → 关闭
      （T 分区附录 A GUI E2E 最小段；需 Xberg 已配置且组件就绪，默认序列不含 S5，须显式 --stages 请求）。
-  S6 Xberg 目录选择与保存：设置页填入有效目录 → 「使用此目录」校验并持久保存
-     （XB-20；需 JCHTOOLS_SMOKE_XBERG_DIR 指向包含 xberg.exe 的有效目录，应用配置经
-     JCHTOOLS_TEST_STATE_DIR 隔离到临时目录，不写真实用户配置）。
-  S7 重启恢复：S6 保存后完全退出，再启动时设置页自动恢复来源与目录（XB-18/XB-21）。
-  S8 无效目录提示与重新选择：不存在的路径与缺 xberg.exe 的目录都被明确拒绝，
-     且界面不锁死、可再次输入重试（T-05/T-06）。
-  S9 组件缺失状态与初始化入口：未配置时转换页明确提示未就绪、开始按钮禁用、
-     初始化入口与「前往设置」可见且不自动下载（XB-19/O-06；无需任何资产）。
+  S6 Xberg 功能选择自动保存：实际勾选三项功能，核对界面选择摘要与隔离 SQLite。
+  S7 重启恢复：完全退出后恢复相同功能选择，保留旧配置迁移的运行目录。
+  S8 空选择禁用下载：取消全部功能后不能下载，重新选择后恢复可用，活动配置不变。
+  S9 组件缺失状态与设置入口：未配置时各功能如实显示未下载、转换开始按钮禁用，
+     可前往设置选择功能但不自动下载（无需任何资产）。
   S10 输出层级与同名策略：保留层级两份同名输入各自成文；平铺只处理排序第一份、
      其余按重复跳过计数（T-11；需真实组件，Xberg 目录可真实，状态目录仍须隔离）。
      所有非自隔离阶段受统一隔离守卫：独立调用需验收编排布置的隔离环境变量在场
@@ -29,7 +26,7 @@
      确认后取消当前文件、清理未完成产物、进程退出码 0（U-09/T-23；需真实媒体样本）。
   S15 MD 合并/拆分真实 GUI：验证标题下移、原文件不变与 UTF-8 分片无损还原。
   S16 Git 真实 GUI：使用一次性仓库和本地 bare 远端，验证逐文件提交及推送结果。
-  S17 在已保存有效 Xberg 的隔离配置下，从转换页初始化本地 notice 并核对就绪状态。
+  S17 预置真实最新 Xberg 后，经设置页离线检查补写 notice，核对实际转换就绪状态。
   S18 在两档窗口尺寸下逐页检查主要操作控件边界与重叠，自动判定布局结果。
 
 用法：
@@ -115,19 +112,21 @@ DEFAULT_STAGES = "S1,S2,S3,S4,S15,S16,S18"
 CONVERT_BUSY_TIMEOUT = 60  # 点击「开始转换」后等待「停止任务」出现的上限（秒）
 _S5_LAST_ATTEMPT = 2  # S5 重按「开始转换」的末次序号（共 3 次，0 起）
 CONVERT_STOP_TIMEOUT = 15  # T-23：停止不得等待当前媒体自然结束。
-# 转 Markdown 页「选择目录…」应有行数（输入 / 输出；Xberg 目录在设置页，XB-20）。
+# 转 Markdown 页「选择目录…」应有行数（输入 / 输出；组件下载统一在设置页）。
 CONVERT_DIR_ROWS = 2
 EXTRACT_ACK = "我已确认：成功原包及分卷永久删除（不可恢复）"
 ORGANIZE_ACK = "我已确认目录、规则及可能的永久删除行为（不可恢复）"
 # 设置/转换页状态文案锚点（与 ui/app.slint 的文案保持同步，改动必须两侧同改）。
-SETTINGS_SAVED_TEXT = "配置已持久保存"
-CONVERT_NEED_RUNTIME_TEXT = "请先保存共享 Xberg 运行目录"
+SETTINGS_DOWNLOAD_BUTTON = "下载 / 补齐所选功能"
+SETTINGS_CHECK_BUTTON = "检查已安装组件"
+SETTINGS_FEATURE_LABELS = ("文档转换与图片 OCR", "截图 OCR", "音视频转写")
+CONVERT_NEED_RUNTIME_TEXT = "请前往设置下载所需 Xberg 组件"
 CONVERT_DONE_MARKER = "总耗时"
 STOP_AND_CLOSE_TITLE = "停止任务并关闭"
 STOP_AND_CLOSE_BUTTON = "停止并关闭"
 # 统一隔离守卫：所有非自隔离阶段的 run_stage 不自建隔离环境（不同于 S6-S9 的
 # isolated_state_env），独立调用会直接读写真实用户状态目录（config.sqlite3）并
-# 可能连接/唤起常驻服务（保存目录会触发 ensure_snap_supervisor）。因此要求经验收
+# 可能连接/唤起常驻服务（已有配置可能触发 ensure_snap_supervisor）。因此要求经验收
 # 编排布置的隔离环境（下述两个变量由 acceptance.ps1 的 gui-smoke / markdown 分支
 # 统一布置）才可启动；--allow-isolated-run 不绕过公共启动入口。Xberg 目录可指向真实
 # 引擎目录——状态隔离必须，组件目录可真实。
@@ -961,7 +960,7 @@ def goto_converter(window: WindowSpecification) -> None:
 
 
 def converter_directory_rows(window: WindowSpecification) -> list[BaseWrapper]:
-    """转 Markdown 页自上而下两行「选择目录…」按钮：输入 / 输出（Xberg 目录在设置页，XB-20）."""
+    """转 Markdown 页自上而下两行「选择目录…」按钮：输入 / 输出（XB-20）。"""
     buttons = [b for b in window.descendants(control_type="Button") if (b.window_text() or "") == "选择目录…"]
     unique: list[BaseWrapper] = []
     for button in buttons:
@@ -1138,41 +1137,77 @@ def click_and_wait_text(
 
 
 def goto_settings(window: WindowSpecification) -> None:
-    """切到设置页：等待设置专属「下载 Xberg」控件，避免命中转换页状态文案."""
+    """切到设置页：等待设置专属的组件下载控件，避免命中转换页状态文案."""
     for _attempt in range(5):
         click(window, find_button(window, "设置"))
         try:
-            _ = find_button(window, "下载 Xberg").wait("visible", timeout=ATTEMPT_TIMEOUT)
+            _ = find_button(window, SETTINGS_DOWNLOAD_BUTTON).wait("visible", timeout=ATTEMPT_TIMEOUT)
         except (RuntimeError, timings.TimeoutError):
             continue
         else:
             return
-    message = "点击「设置」后始终未出现设置页专属「下载 Xberg」控件"
+    message = "点击「设置」后始终未出现设置页专属的组件下载控件"
     raise RuntimeError(message)
 
 
-def _settings_custom_dir_edit(window: WindowSpecification) -> BaseWrapper:
-    """返回「使用此目录」按钮上方最近的 Xberg 目录输入框."""
-    button = find_button(window, "使用此目录")
-    button_rect = button.rectangle()
-    candidates = [
-        edit for edit in window.descendants(control_type="Edit") if edit.rectangle().bottom <= button_rect.top
-    ]
-    if not candidates:
-        msg = "设置页未找到 Xberg 目录输入框"
-        raise RuntimeError(msg)
-    return min(candidates, key=lambda e: button_rect.top - e.rectangle().bottom)
+def read_xberg_settings(state: Path) -> dict[str, str]:
+    """只读观察被测应用实际写入的隔离 SQLite，不向数据库伪造 GUI 保存结果."""
+    database = state / "config.sqlite3"
+    with contextlib.closing(sqlite3.connect(database.as_uri() + "?mode=ro", uri=True)) as connection:
+        rows = cast(
+            "list[tuple[str, str]]",
+            connection.execute("SELECT key,value FROM app_settings WHERE key LIKE 'xberg_%'").fetchall(),
+        )
+    return dict(rows)
 
 
-def set_settings_custom_dir(window: WindowSpecification, path: str) -> None:
-    """填设置页的 Xberg 目录输入框."""
-    _settings_custom_dir_edit(window).set_edit_text(path)
+def active_xberg_settings(state: Path) -> dict[str, str]:
+    """选择项以外的来源/目录配置必须在勾选、空选择与重启之间保持不变."""
+    return {key: value for key, value in read_xberg_settings(state).items() if key != "xberg_download_selection"}
 
 
-def settings_custom_dir_value(window: WindowSpecification) -> str:
-    """读取设置页当前 Xberg 目录输入框的值."""
-    edit = cast("controls.uia_controls.EditWrapper", _settings_custom_dir_edit(window))
-    return edit.get_value() or ""
+def wait_saved_selection(window: WindowSpecification, state: Path, selection: str) -> None:
+    """同时核对实际 SQLite 保存和界面摘要，不依赖 Slint Check 未暴露的 TogglePattern."""
+    selected = "、".join(label for label, flag in zip(SETTINGS_FEATURE_LABELS, selection, strict=True) if flag == "1")
+    summary = f"所选功能：{selected or '无'}"
+    deadline = time.monotonic() + TIMEOUT
+    actual: str | None = None
+    while time.monotonic() < deadline:
+        actual = read_xberg_settings(state).get("xberg_download_selection")
+        visible = any(text.window_text() == summary for text in window.descendants(control_type="Text"))
+        if actual == selection and visible:
+            return
+        time.sleep(0.1)
+    message = f"功能选择未由 GUI 自动保存或未上屏：期望 {selection} / {summary}，SQLite 实际 {actual!r}"
+    raise RuntimeError(message)
+
+
+def select_settings_features(window: WindowSpecification, state: Path, selection: str) -> None:
+    """逐个点击真实 Check，等待每一步自动保存后再操作下一项."""
+    current = read_xberg_settings(state).get("xberg_download_selection", "010")
+    require(
+        len(current) == len(SETTINGS_FEATURE_LABELS) and set(current) <= {"0", "1"},
+        f"已保存的下载选择无效：{current!r}",
+    )
+    for index, label in enumerate(SETTINGS_FEATURE_LABELS):
+        if current[index] == selection[index]:
+            continue
+        check = find_check(window, label)
+        _ = check.wait("visible enabled", timeout=TIMEOUT)
+        click(window, check)
+        current = current[:index] + selection[index] + current[index + 1 :]
+        wait_saved_selection(window, state, current)
+    wait_saved_selection(window, state, selection)
+
+
+def seed_legacy_runtime(state: Path) -> str:
+    """保留旧文本迁移夹具：只播种旧路径，下载选择必须由真实 GUI 写入."""
+    directory = os.environ.get("JCHTOOLS_SMOKE_XBERG_DIR") or os.environ.get("JCHTOOLS_TEST_XBERG_DIR")
+    runtime = str(Path(plain_windows_path(directory) if directory else state / "legacy-runtime").resolve())
+    root = state / "markdown-assets"
+    root.mkdir(parents=True, exist_ok=True)
+    _ = (root / "xberg-runtime-path.txt").write_text(runtime, encoding="utf-8")
+    return runtime
 
 
 def wait_text_containing(
@@ -1252,27 +1287,17 @@ def find_check(window: WindowSpecification, title: str) -> WindowSpecification:
 
 
 def isolated_state_env(scratch_state: Path) -> dict[str, str]:
-    """S6-S9 的子进程环境：应用配置与截图资产根全部隔离到临时目录.
+    """S6-S9 的子进程环境：应用配置、Markdown 与截图资产根全部隔离.
 
-    JCHTOOLS_TEST_STATE_DIR（src/xberg_settings.rs，test-hooks 构建识别）隔离
-    config.sqlite3，避免冒烟改写真实用户配置（XB-18）；JCHTOOLS_SNAP_OCR_TEST_ASSET_ROOT
-    （src/snap_ocr_assets.rs）同时隔离截图服务管道名与 worker 安装位置——S6/S7
-    保存有效目录会触发 ensure_snap_supervisor，不隔离会 ping 真实用户会话的
-    后台服务、改写其 launcher.json 甚至启动真实 worker（XB-22/XB-25）。
+    旧路径迁移可能连接截图后台，因此同时隔离服务身份与组件根；
+    不继承验收编排的 Markdown 资产根，避免干净状态用例误读其他阶段的 notice。
     """
     env = dict(os.environ)
     env["JCHTOOLS_TEST_STATE_DIR"] = str(scratch_state)
     env["JCHTOOLS_SNAP_OCR_TEST_ASSET_ROOT"] = str(scratch_state / "snap-assets")
+    env["JCHTOOLS_MARKDOWN_TEST_ASSET_ROOT"] = str(scratch_state / "markdown-assets")
+    env["JCHTOOLS_TEST_ASSET_ROOT"] = str(scratch_state / "markdown-assets")
     return env
-
-
-def smoke_xberg_dir() -> str:
-    """S6/S7 需要的有效 Xberg 目录（含 xberg.exe；由验收环境提供）."""
-    directory = plain_windows_path(os.environ.get("JCHTOOLS_SMOKE_XBERG_DIR", ""))
-    if not directory or not Path(directory).joinpath("xberg.exe").is_file():
-        message = "S6/S7 需要包含 xberg.exe 的有效 Xberg 目录：设置 JCHTOOLS_SMOKE_XBERG_DIR 指向该目录"
-        raise RuntimeError(message)
-    return str(Path(directory).resolve())
 
 
 def plain_windows_path(text: str) -> str:
@@ -1288,99 +1313,84 @@ def plain_windows_path(text: str) -> str:
     return text
 
 
-def s6_save_xberg_directory(exe: str) -> None:
-    """S6 设置页选择并保存 Xberg 目录：校验通过、状态显示已持久保存."""
-    state = Path(tempfile.mkdtemp(prefix="jchtools-gui-smoke-s6-"))
-    try:
-        directory = smoke_xberg_dir()
+def wait_legacy_runtime(state: Path, directory: str) -> None:
+    """等待应用迁移旧文本目录并核对实际活动路径，失效旧路径也不得静默替换."""
+    deadline = time.monotonic() + TIMEOUT
+    while time.monotonic() < deadline:
+        actual = read_xberg_settings(state).get("xberg_directory")
+        if actual and Path(plain_windows_path(actual)).resolve() == Path(directory).resolve():
+            return
+        time.sleep(0.1)
+    message = f"旧配置未迁移或活动 Xberg 目录被改变：{directory}"
+    raise RuntimeError(message)
+
+
+def s6_auto_saves_feature_selection(exe: str) -> None:
+    """S6 实际操作三项功能 Check，同时核对 UI 摘要和自动保存的 SQLite 值."""
+    with tempfile.TemporaryDirectory(prefix="jchtools-gui-smoke-s6-") as temporary:
+        state = Path(temporary)
 
         def body(window: WindowSpecification) -> None:
             goto_settings(window)
-            set_settings_custom_dir(window, directory)
-            click(window, find_button(window, "使用此目录"))
-            _ = wait_text_containing(window, SETTINGS_SAVED_TEXT)
+            for selection in ("111", "101", "010"):
+                select_settings_features(window, state, selection)
+            require(not active_xberg_settings(state), "选择下载功能不得创建活动 Xberg 目录配置")
 
         run_stage("S6", exe, body, env=isolated_state_env(state))
-    finally:
-        shutil.rmtree(state, ignore_errors=True)
-    print("S6 PASS：Xberg 目录经「使用此目录」校验并持久保存（应用配置已隔离）")
+        require(read_xberg_settings(state).get("xberg_download_selection") == "010", "GUI 退出后选择必须仍在 SQLite")
+    print("S6 PASS：真实勾选三项功能后自动保存，界面摘要与 SQLite 一致")
 
 
-def s7_restart_restores_saved_directory(exe: str) -> None:
-    """S7 重启恢复：保存后完全退出，再启动时设置页自动恢复来源与目录（XB-18/XB-21）."""
-    state = Path(tempfile.mkdtemp(prefix="jchtools-gui-smoke-s7-"))
-    try:
-        directory = smoke_xberg_dir()
+def s7_restart_restores_saved_selection(exe: str) -> None:
+    """S7 完全退出后恢复选择，且旧文本迁移目录与来源记录原样保留."""
+    with tempfile.TemporaryDirectory(prefix="jchtools-gui-smoke-s7-") as temporary:
+        state = Path(temporary)
+        directory = seed_legacy_runtime(state)
         env = isolated_state_env(state)
 
         def save(window: WindowSpecification) -> None:
             goto_settings(window)
-            set_settings_custom_dir(window, directory)
-            click(window, find_button(window, "使用此目录"))
-            _ = wait_text_containing(window, SETTINGS_SAVED_TEXT)
+            wait_legacy_runtime(state, directory)
+            select_settings_features(window, state, "101")
 
         def restored(window: WindowSpecification) -> None:
             goto_settings(window)
-            _ = wait_text_containing(window, SETTINGS_SAVED_TEXT)
-            _ = wait_text_containing(window, "当前来源：用户提供的目录")
-            # 快照上屏与 UIA 取值之间有竞态（fulltest 重负载下曾读到陈旧值）：
-            # 在有界窗口内轮询字段直到与期望一致，超时仍不一致才判失败；
-            # 断言本身不变（仍要求解析后相等），失败信息带实际值便于取证。
-            expected_directory = str(Path(directory).resolve())
-            deadline = time.monotonic() + 20.0
-            actual_directory = plain_windows_path(settings_custom_dir_value(window))
-            while (
-                Path(actual_directory).resolve() != Path(expected_directory).resolve() and time.monotonic() < deadline
-            ):
-                time.sleep(0.5)
-                actual_directory = plain_windows_path(settings_custom_dir_value(window))
-            require(
-                Path(actual_directory).resolve() == Path(expected_directory).resolve(),
-                f"S7 重启后未恢复已保存的 Xberg 目录（实际：{actual_directory!r}，期望：{expected_directory}）",
-            )
+            wait_saved_selection(window, state, "101")
+            wait_legacy_runtime(state, directory)
+            require(active_xberg_settings(state) == saved_runtime, "重启不得改变已迁移的活动目录与来源")
 
         run_stage("S7-first", exe, save, env=env)
+        saved_runtime = active_xberg_settings(state)
         run_stage("S7", exe, restored, env=env)
-    finally:
-        shutil.rmtree(state, ignore_errors=True)
-    print("S7 PASS：重启后自动恢复保存的 Xberg 目录与来源，无需重新输入")
+        require(active_xberg_settings(state) == saved_runtime, "退出后活动目录与来源必须保持不变")
+        legacy = state / "markdown-assets" / "xberg-runtime-path.txt"
+        require(legacy.read_text(encoding="utf-8") == directory, "旧路径原件必须保留")
+    print("S7 PASS：重启恢复功能选择，旧配置迁移的运行目录与来源保持不变")
 
 
-def s8_invalid_directory_is_rejected_and_retryable(exe: str) -> None:
-    """S8 无效目录提示与重新选择：不存在的路径与缺 xberg.exe 的目录都被明确拒绝."""
-    state = Path(tempfile.mkdtemp(prefix="jchtools-gui-smoke-s8-"))
-    empty = state / "empty-dir"
-    empty.mkdir()
-    env = isolated_state_env(state)
-    try:
+def s8_empty_selection_disables_download_and_recovers(exe: str) -> None:
+    """S8 空选择不能下载，重新选择可恢复操作；全过程不得改变活动运行目录."""
+    with tempfile.TemporaryDirectory(prefix="jchtools-gui-smoke-s8-") as temporary:
+        state = Path(temporary)
+        directory = seed_legacy_runtime(state)
 
         def body(window: WindowSpecification) -> None:
             goto_settings(window)
-            # 保存校验只要求 xberg.exe 在场（XB-19/XB-26：场景资产按各功能就绪
-            # 检查分别校验，不在保存时强制）；无效目录被明确拒绝并说明目录要求。
-            # 两次无效目录的报错文案相同：中间插入一次成功保存作为切换点——成功
-            # 文案既证明报错后界面未锁死（可再次输入并触发校验），也让第二次报错
-            # 的出现无歧义（上一次可见文案是成功文案）。
-            # 1) 不存在的路径：明确报错并说明要求（不是无声失败）。
-            set_settings_custom_dir(window, str(state / "does-not-exist"))
-            click(window, find_button(window, "使用此目录"))
-            rejected = wait_text_containing(window, "xberg.exe")
-            require("有效绝对目录" in rejected, f"错误应说明有效目录要求：{rejected}")
-            # 2) 报错后重试有效目录：校验通过、状态切换为已持久保存。
-            set_settings_custom_dir(window, smoke_xberg_dir())
-            click(window, find_button(window, "使用此目录"))
-            _ = wait_text_containing(window, SETTINGS_SAVED_TEXT)
-            # 3) 已有有效配置后再次输入无效目录（缺 xberg.exe 的空目录）：同样被
-            #    拒绝，报错重新出现且说明要求。
-            set_settings_custom_dir(window, str(empty))
-            click(window, find_button(window, "使用此目录"))
-            second = wait_text_containing(window, "xberg.exe", exclude=SETTINGS_SAVED_TEXT)
-            require("有效绝对目录" in second, f"错误应说明有效目录要求：{second}")
+            wait_legacy_runtime(state, directory)
+            original = active_xberg_settings(state)
+            for empty, selected in (("000", "100"), ("000", "010")):
+                select_settings_features(window, state, empty)
+                download = find_button(window, SETTINGS_DOWNLOAD_BUTTON)
+                _ = download.wait("visible", timeout=TIMEOUT)
+                require(not download.is_enabled(), "未选任何功能时下载按钮必须禁用")
+                require(active_xberg_settings(state) == original, "空选择不得改变活动运行目录与来源")
+                select_settings_features(window, state, selected)
+                _ = download.wait("visible enabled", timeout=TIMEOUT)
+                require(active_xberg_settings(state) == original, "恢复有效选择不得改变活动运行目录与来源")
 
-        run_stage("S8", exe, body, env=env)
-    finally:
-        shutil.rmtree(state, ignore_errors=True)
-    print("S8 PASS：无效目录明确拒绝且可重新选择（提示指认缺失项，不锁死界面）")
+        run_stage("S8", exe, body, env=isolated_state_env(state))
+        wait_legacy_runtime(state, directory)
+    print("S8 PASS：空选择禁用下载，重新勾选恢复可用，活动 Xberg 配置未改变")
 
 
 def s9_unconfigured_state_shows_reason_and_no_autostart(exe: str) -> None:
@@ -1395,20 +1405,22 @@ def s9_unconfigured_state_shows_reason_and_no_autostart(exe: str) -> None:
             start = find_button(window, "开始转换")
             _ = start.wait("visible", timeout=TIMEOUT)
             require(not start.is_enabled(), "未配置 Xberg 时「开始转换」必须禁用")
-            # 转换页初始化入口已移除（S3-01：初始化集中到设置页，保存/下载自动
-            # 完成）；未就绪时的正确指引是「前往设置」。
+            # 未就绪时只引导到设置；不点击下载，观察每项功能的独立状态。
             _ = find_button(window, "前往设置").wait("visible", timeout=TIMEOUT)
             goto_settings(window)
-            # 「尚未下载 Xberg」绑定 settings-downloaded-dir 的静态空值，不依赖
-            # 异步 SETTINGS_READY 事件的时序（事件文案在连跑时序下可能尚未到位）。
-            _ = wait_text_containing(window, "尚未下载 Xberg")
-            _ = find_button(window, "下载 Xberg").wait("visible enabled", timeout=TIMEOUT)
-            # O-06：不做任何下载动作——缺失状态如实可见即可，冒烟不得触发真实联网。
+            for label in SETTINGS_FEATURE_LABELS:
+                _ = find_check(window, label).wait("visible enabled", timeout=TIMEOUT)
+                _ = wait_text_containing(window, f"{label}：未下载")
+            _ = find_button(window, SETTINGS_DOWNLOAD_BUTTON).wait("visible enabled", timeout=TIMEOUT)
+            _ = find_button(window, SETTINGS_CHECK_BUTTON).wait("visible enabled", timeout=TIMEOUT)
+            require(not find_button(window, "取消下载").exists(), "未操作时不得自动启动组件下载")
+            require(not active_xberg_settings(state), "未配置状态不得自动创建活动 Xberg 配置")
+            require(not snapshot_output_bytes(state / "markdown-assets"), "未操作时不得下载或初始化 Markdown 组件")
 
         run_stage("S9", exe, body, env=env)
     finally:
         shutil.rmtree(state, ignore_errors=True)
-    print("S9 PASS：未配置状态如实显示原因与初始化入口，开始按钮禁用（不自动下载）")
+    print("S9 PASS：各功能未下载状态与设置入口可见，转换禁用，未自动下载组件")
 
 
 def check_flat_output(window: WindowSpecification) -> None:
@@ -1887,35 +1899,52 @@ def s16_git_commit_and_push(exe: str) -> None:
     print("S16 PASS：GUI 逐文件提交并推送成功，本地工作树与远端内容正确")
 
 
-def s17_initialize_configured_components(exe: str) -> None:
-    """覆盖 T-05/T-06：经设置页真实保存入口初始化组件，不伪造就绪标记."""
-    engine_dir = os.environ.get("JCHTOOLS_TEST_XBERG_DIR", "").strip()
+def s17_check_configured_components_offline(exe: str) -> None:
+    """覆盖 T-05/T-06：预置真实引擎经离线检查补写 notice，并建立真实转换就绪状态."""
+    engine_dir = plain_windows_path(os.environ.get("JCHTOOLS_TEST_XBERG_DIR", "").strip())
     require(
         bool(engine_dir) and Path(engine_dir, "xberg.exe").is_file(),
-        "S17 需要 JCHTOOLS_TEST_XBERG_DIR 指向含 xberg.exe 的真实测试引擎目录",
+        "S17 需要 JCHTOOLS_TEST_XBERG_DIR 指向含 xberg.exe 的真实最新测试引擎目录",
     )
+    state = Path(os.environ.get("JCHTOOLS_TEST_STATE_DIR", ""))
+    asset_root = Path(os.environ.get("JCHTOOLS_MARKDOWN_TEST_ASSET_ROOT", ""))
+    require(state.is_absolute() and asset_root.is_absolute(), "S17 需要绝对隔离状态目录与 Markdown 资产根")
+    notice = asset_root / "licenses" / "THIRD_PARTY_NOTICES.md"
+    require(not notice.exists(), "S17 需要新隔离资产根，以观察离线检查实际创建 notice")
+    original = active_xberg_settings(state)
+    before = snapshot_output_bytes(asset_root)
+    with tempfile.TemporaryDirectory(prefix="jchtools-gui-smoke-s17-") as temporary:
+        scratch = Path(temporary)
+        source, output = scratch / "input", scratch / "output"
+        source.mkdir()
+        output.mkdir()
+        _ = (source / "ready.txt").write_text("真实引擎离线检查夹具\n", encoding="utf-8")
 
-    def body(window: WindowSpecification) -> None:
-        # 隔离 SQLite 已由 --seed-state 播种目录来源，但许可证 notice 尚未落盘；
-        # 转换页初始化入口移除后（S3-01），初始化随「使用此目录」真实保存自动
-        # 完成（保存成功即写 notice，S5-03 同源闭环）。保存为异步动作，就绪探
-        # 测可能在保存完成前发生，用重试收敛。
-        for _attempt in range(3):
-            goto_converter(window)
-            try:
-                _ = wait_text_containing(window, "已安装组件就绪，可离线使用", timeout=ATTEMPT_TIMEOUT)
-                break
-            except RuntimeError:
-                pass
+        def body(window: WindowSpecification) -> None:
+            wait_legacy_runtime(state, engine_dir)
             goto_settings(window)
-            set_settings_custom_dir(window, engine_dir)
-            click(window, find_button(window, "使用此目录"))
-        else:
-            msg = "S17：经设置页保存真实引擎目录后组件仍未就绪"
-            raise RuntimeError(msg)
+            check = find_button(window, SETTINGS_CHECK_BUTTON)
+            _ = check.wait("visible enabled", timeout=TIMEOUT)
+            click(window, check)
+            deadline = time.monotonic() + COMPLETION_TIMEOUT
+            while not notice.is_file() and time.monotonic() < deadline:
+                time.sleep(0.1)
+            require(notice.is_file(), "离线检查必须由生产路径创建许可证 notice")
+            require("Xberg" in notice.read_text(encoding="utf-8"), "许可证 notice 必须包含真实引擎的许可说明")
+            _ = check.wait("visible enabled", timeout=TIMEOUT)
+            _ = click_and_wait_text(window, "转 Markdown", "已安装组件就绪，可离线使用")
+            set_converter_dirs(window, str(source), str(output))
+            _ = wait_button(window, "开始转换", COMPLETION_TIMEOUT, enabled=True)
+            require(active_xberg_settings(state) == original, "离线检查不得切换活动 Xberg 配置")
+            after = snapshot_output_bytes(asset_root)
+            require(
+                set(after) == set(before) | {str(notice.relative_to(asset_root))}
+                and all(after[name] == digest for name, digest in before.items()),
+                "离线检查只能补写 notice，不得下载组件或改动已有资产",
+            )
 
-    run_stage("S17", exe, body)
-    print("S17 PASS：真实 GUI 经设置页保存并自动初始化成功，已配置的 Xberg 可离线使用")
+        run_stage("S17", exe, body)
+    print("S17 PASS：真实引擎离线检查创建 notice，转换就绪且开始操作可用，未下载组件")
 
 
 LAYOUT_PAGES = (
@@ -1925,7 +1954,7 @@ LAYOUT_PAGES = (
     ("转 Markdown", ("开始转换",)),
     ("Git 工具", ("开始",)),
     ("截图 OCR", ()),
-    ("设置", ("下载 Xberg", "使用此目录")),
+    ("设置", (SETTINGS_DOWNLOAD_BUTTON, SETTINGS_CHECK_BUTTON)),
     ("关于", ()),
 )
 
@@ -2090,9 +2119,9 @@ def main() -> int:
     run_dataset_stages(str(exe), data, stages)
     stage_runners = {
         "S5": s5_markdown_basic_chain,
-        "S6": s6_save_xberg_directory,
-        "S7": s7_restart_restores_saved_directory,
-        "S8": s8_invalid_directory_is_rejected_and_retryable,
+        "S6": s6_auto_saves_feature_selection,
+        "S7": s7_restart_restores_saved_selection,
+        "S8": s8_empty_selection_disables_download_and_recovers,
         "S9": s9_unconfigured_state_shows_reason_and_no_autostart,
         "S10": s10_output_layout_and_flat_duplicate_policy,
         "S11": s11_existing_results_are_skipped_untouched,
@@ -2101,7 +2130,7 @@ def main() -> int:
         "S14": s14_close_during_conversion_confirms_and_stops,
         "S15": s15_markdown_merge_and_split,
         "S16": s16_git_commit_and_push,
-        "S17": s17_initialize_configured_components,
+        "S17": s17_check_configured_components_offline,
         "S18": s18_layout_at_two_window_sizes,
     }
     for stage, runner in stage_runners.items():

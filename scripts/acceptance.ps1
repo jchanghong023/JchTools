@@ -299,16 +299,13 @@ if ($WithGuiSmoke) {
     # 就绪时按前置逐组追加并向 gui_smoke 传 --stages；任一前置缺失只记 NOT RUN
     # 说明（不 fail），不得把缺资产伪报为已覆盖。
     $smokeStages = @('S1','S2','S3','S4','S15','S16','S18')
-    # 前置（设置页组 S6-S9）：S6/S7 需要包含 xberg.exe 的有效目录（优先
-    # JCHTOOLS_SMOKE_XBERG_DIR，回落 JCHTOOLS_TEST_XBERG_DIR）；S8/S9 本身无需
-    # 资产，但随设置页组整组扩展，保证无资产环境的默认序列不变。
+    # XB-20/XB-27：设置页组验证功能选择、持久恢复、空选择门禁与缺失提示，
+    # 不再通过目录输入初始化，不需真实模型，也不发起下载。
+    $smokeStages += @('S6','S7','S8','S9')
     $smokeXberg = $env:JCHTOOLS_SMOKE_XBERG_DIR
     if (-not $smokeXberg) {$smokeXberg = $env:JCHTOOLS_TEST_XBERG_DIR}
     if ($smokeXberg -and (Test-Path -LiteralPath (Join-Path $smokeXberg 'xberg.exe') -PathType Leaf)) {
-        $smokeStages += @('S6','S7','S8','S9')
         $guiEnvironment['JCHTOOLS_SMOKE_XBERG_DIR'] = [IO.Path]::GetFullPath($smokeXberg)
-    } else {
-        $script:Results.Add('NOT RUN  gui-smoke S6-S9 设置页阶段（缺包含 xberg.exe 的有效目录：JCHTOOLS_SMOKE_XBERG_DIR / JCHTOOLS_TEST_XBERG_DIR；S8/S9 随设置页组整组扩展）')
     }
     # 前置（转换组 S5/S10-S14，S17 经下方先行调用覆盖）：需 JCHTOOLS_TEST_XBERG_DIR
     # 指向有效引擎；隔离状态先经 --seed-state 播种，再以 S17 先行真实初始化组件
