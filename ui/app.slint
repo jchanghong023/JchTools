@@ -876,13 +876,17 @@ export component AppWindow inherits Window {
     // 转 Markdown 回调（T 分区）：组件状态、目录选择与任务控制。
     callback convert-choose-input();
     callback convert-choose-output();
-    callback convert-choose-runtime();
-    callback convert-runtime-edited();
-    callback convert-use-runtime();
     callback settings-action(string);
-    in-out property <string> settings-custom-dir;
-    in-out property <string> settings-downloaded-dir;
-    in-out property <int> settings-source: 0;
+    callback settings-selection(bool, bool, bool);
+    in-out property <bool> settings-loaded: false;
+    in-out property <bool> settings-load-failed: false;
+    in-out property <bool> settings-document: false;
+    in-out property <bool> settings-snapshot: true;
+    in-out property <bool> settings-media: false;
+    in-out property <string> settings-document-status: "未下载";
+    in-out property <string> settings-snapshot-status: "未下载";
+    in-out property <string> settings-media-status: "未下载";
+    out property <bool> settings-download-enabled: root.settings-loaded && (root.settings-document || root.settings-snapshot || root.settings-media) && !root.busy && !root.convert-initializing && !root.convert-preparing && !root.convert-runtime-saving && !root.snap-initializing && root.confirm-kind == 0;
     in-out property <string> settings-status: "正在读取配置…";
 
     // S3-01：转换页的初始化回调与按钮入口已一并移除
@@ -1593,24 +1597,25 @@ export component AppWindow inherits Window {
                     VerticalLayout { width: settings-scroll.visible-width; spacing: 12px;
                         Surface { VerticalLayout { padding: 18px; spacing: 12px;
                             Label { text: "共享 Xberg"; font-size: 16px; font-weight: 600; }
-                            Muted { text: "文档、截图与媒体共用一个引擎。两种来源分别保存，重启自动恢复。"; }
-                            Label { text: root.settings-source == 1 ? "当前来源：下载的 Xberg" : "当前来源：用户提供的目录"; }
-                            Field { text <=> root.settings-custom-dir; placeholder-text: "包含 xberg.exe 的已有目录";
-                                enabled: !root.busy && !root.convert-initializing && !root.convert-preparing && !root.convert-runtime-saving && root.confirm-kind == 0; }
+                            Muted { text: "按需独立下载功能组件，共享引擎自动管理；取消勾选不会卸载已安装组件。"; }
+                            Check { text: "文档转换与图片 OCR"; checked: root.settings-document;
+                                enabled: root.settings-loaded && !root.busy && !root.convert-initializing && !root.convert-preparing && !root.convert-runtime-saving && !root.snap-initializing && root.confirm-kind == 0;
+                                toggled => { root.settings-selection(self.checked, root.settings-snapshot, root.settings-media); } }
+                            Muted { text: "文档转换与图片 OCR：" + root.settings-document-status; }
+                            Check { text: "截图 OCR"; checked: root.settings-snapshot;
+                                enabled: root.settings-loaded && !root.busy && !root.convert-initializing && !root.convert-preparing && !root.convert-runtime-saving && !root.snap-initializing && root.confirm-kind == 0;
+                                toggled => { root.settings-selection(root.settings-document, self.checked, root.settings-media); } }
+                            Muted { text: "截图 OCR：" + root.settings-snapshot-status; }
+                            Check { text: "音视频转写"; checked: root.settings-media;
+                                enabled: root.settings-loaded && !root.busy && !root.convert-initializing && !root.convert-preparing && !root.convert-runtime-saving && !root.snap-initializing && root.confirm-kind == 0;
+                                toggled => { root.settings-selection(root.settings-document, root.settings-snapshot, self.checked); } }
+                            Muted { text: "音视频转写：" + root.settings-media-status; }
+                            Muted { text: "所选功能：" + ((!root.settings-document && !root.settings-snapshot && !root.settings-media) ? "无" : (root.settings-document ? "文档转换与图片 OCR" : "") + (root.settings-snapshot ? (root.settings-document ? "、" : "") + "截图 OCR" : "") + (root.settings-media ? ((root.settings-document || root.settings-snapshot) ? "、" : "") + "音视频转写" : "")); }
                             HorizontalLayout { spacing: 8px;
-                                AppButton { text: "选择目录…"; enabled: !root.busy && !root.convert-initializing && !root.convert-preparing && !root.convert-runtime-saving && root.confirm-kind == 0;
-                                    clicked => { root.settings-action("choose"); } }
-                                AppButton { text: "使用此目录"; primary: true; enabled: !root.busy && !root.convert-initializing && !root.convert-preparing && !root.convert-runtime-saving && root.settings-custom-dir != "" && root.confirm-kind == 0;
-                                    clicked => { root.settings-action("custom"); } }
-                                Rectangle { horizontal-stretch: 1; }
-                            }
-                            Rectangle { height: 1px; background: Design.line-soft; }
-                            Muted { text: root.settings-downloaded-dir == "" ? "尚未下载 Xberg" : "下载目录：" + root.settings-downloaded-dir; }
-                            HorizontalLayout { spacing: 8px;
-                                AppButton { text: "下载 Xberg"; enabled: !root.busy && !root.convert-initializing && !root.convert-preparing && !root.convert-runtime-saving && root.confirm-kind == 0;
+                                AppButton { text: "下载 / 补齐所选功能"; primary: true; enabled: root.settings-download-enabled && root.confirm-kind == 0;
                                     clicked => { root.settings-action("download"); } }
-                                AppButton { text: "使用已下载版本"; enabled: !root.busy && !root.convert-initializing && !root.convert-preparing && !root.convert-runtime-saving && root.settings-downloaded-dir != "" && root.confirm-kind == 0;
-                                    clicked => { root.settings-action("downloaded"); } }
+                                AppButton { text: "检查已安装组件"; enabled: (root.settings-loaded || root.settings-load-failed) && !root.busy && !root.convert-initializing && !root.convert-preparing && !root.convert-runtime-saving && !root.snap-initializing && root.confirm-kind == 0;
+                                    clicked => { root.settings-action("check"); } }
                                 if root.convert-initializing: AppButton { text: "取消下载"; enabled: root.confirm-kind == 0; clicked => { root.convert-stop(); } }
                                 Rectangle { horizontal-stretch: 1; }
                             }

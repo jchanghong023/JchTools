@@ -15,8 +15,8 @@
 #![allow(clippy::unwrap_used, clippy::expect_used)]
 
 mod common;
-use jchtools_xberg::xberg_runtime;
 use jchtools_foundation::xberg_settings::{self, Source};
+use jchtools_xberg::xberg_runtime;
 use serde_json::json;
 use std::{
     path::Path,
@@ -83,7 +83,12 @@ fn both_sources_survive_process_restart_and_failed_save() {
                     downloaded.canonicalize().unwrap()
                 );
                 let cancelled = AtomicBool::new(true);
-                assert!(jchtools_markdown::markdown_assets::download_runtime(&cancelled, |_| {}).is_err());
+                assert!(jchtools_markdown::markdown_assets::download_runtime(
+                    xberg_settings::DownloadSelection::default(),
+                    &cancelled,
+                    |_| {},
+                )
+                .is_err());
                 assert_eq!(
                     xberg_settings::required().unwrap(),
                     custom.canonicalize().unwrap()
@@ -172,13 +177,11 @@ fn ensure_engine_exit(pid: u64) {
             output.status
         );
         // 精确匹配 CSV 的 PID 字段，不能让内存占用或其他列中的数字命中。
-        let alive = String::from_utf8_lossy(&output.stdout)
-            .lines()
-            .any(|line| {
-                line.split(',')
-                    .nth(1)
-                    .is_some_and(|value| value.trim_matches('"') == pid)
-            });
+        let alive = String::from_utf8_lossy(&output.stdout).lines().any(|line| {
+            line.split(',')
+                .nth(1)
+                .is_some_and(|value| value.trim_matches('"') == pid)
+        });
         if !alive {
             return;
         }

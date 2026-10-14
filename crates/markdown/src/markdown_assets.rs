@@ -1,8 +1,7 @@
-//! 转 Markdown 的本地资产校验。Xberg 目录由应用级 SQLite 统一提供。
-//! 文档与媒体分别校验自己的模型和运行库；设置页主动解析最新版并固定本次发布物，
-//! 校验完整后保存为共享下载来源；下载安装、保存共享目录与切换到已下载
-//! 来源都会经 [`ensure_document_notice`] 原子补写许可证 notice
-//!（完成即满足文档场景 readiness，不再要求补一次初始化）。
+//! 转 Markdown 的本地资产校验。三个独立功能包共用一个 SQLite 运行目录。
+//! 下载按最新正式发布的组件清单核验来源、归档和成员；添加功能复用同版本
+//! 已验证组件，升级同时迁移已安装功能。旧用户目录保持只读兼容。
+//! 下载成功及离线组件检查经 [`ensure_document_notice`] 原子补写许可证 notice。
 //! P-10：主动查询最新发布与下载校验落位分别创建关联 operation span；日志
 //! 保留元数据验证、缓存复用、暂存、校验、原子落位、回滚及来源保存的阶段与结果，
 //! 不记录发布 JSON、运行目录内容、完整路径或任意外部异常正文。
@@ -13,8 +12,9 @@ use jchtools_assets::asset_util::{
     state_dir_asset_root, valid_component_tag, validate_relative_path, verify_file_with_cancel,
     AssetDownloader, InferenceManifest,
 };
+use jchtools_foundation::xberg_settings::DownloadSelection;
 use serde::{Deserialize, Serialize};
-use sha2::{Digest, Sha256};
+use std::collections::{BTreeMap, BTreeSet};
 use std::fmt::Write as FmtWrite;
 use std::fs::{self, File, OpenOptions};
 use std::io::Write as IoWrite;
@@ -30,7 +30,10 @@ const XBERG_DOWNLOAD_STAGING_MARKER: &str = ".jchtools-xberg-download-staging-v1
 const XBERG_RELEASE_RECEIPT: &str = ".jchtools-xberg-release.json";
 const XBERG_LATEST_RELEASE_URL: &str =
     "https://api.github.com/repos/jchanghong023/xberg/releases/latest";
-const XBERG_ARCHIVE_NAME: &str = "xberg-cli-x86_64-pc-windows-msvc.zip";
+const XBERG_TARGET: &str = "x86_64-pc-windows-msvc";
+const XBERG_COMPONENT_MANIFEST: &str = "xberg-components-x86_64-pc-windows-msvc.json";
+const XBERG_ARCHIVE_PREFIX: &str = "xberg-cli-x86_64-pc-windows-msvc";
+const COMPONENT_IDS: [&str; 3] = ["document", "snapshot", "media"];
 
 #[derive(Debug, Deserialize)]
 struct AssetManifest {
@@ -52,7 +55,7 @@ struct XbergManifest {
     licenses: Vec<LicenseEntry>,
 }
 
-#[derive(Debug, Deserialize, Serialize)]
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
 struct AssetFile {
     path: String,
     size_bytes: u64,
@@ -71,9 +74,9 @@ pub fn load_saved_runtime_dir() -> Result<Option<PathBuf>, String> {
     jchtools_foundation::xberg_settings::load()
 }
 
-/// 校验用户选择的 Xberg 运行目录：只做 document 场景成员存在性检查
-/// （T-06 2026-10-02 随 XB-09 修订：不比对大小与 SHA-256，用户可自行替换
-/// 或更新引擎版本），缺失时汇总指认缺失项。
+/// 校验已下载的 Xberg 运行目录：只做 document 场景成员存在性检查
+/// （T-06 / XB-09：不比对大小与 SHA-256，用户可自行替换或更新引擎版本），
+/// 缺失时汇总指认缺失项。
 pub fn validate_runtime_dir(path: &Path) -> Result<(), String> {
     let manifest = load_manifest()?;
     if !path.is_dir() {
@@ -139,9 +142,10 @@ pub fn ensure_document_notice() -> Result<(), String> {
     }
     result
 }
-/// 返回已保存的 Xberg 运行目录；未选择时返回明确错误。
+/// 返回已保存的 Xberg 运行目录；未下载组件时提示在设置页选择功能。
 pub fn runtime_dir() -> Result<PathBuf, String> {
-    load_saved_runtime_dir()?.ok_or_else(|| "尚未选择 Xberg 运行目录".to_string())
+    load_saved_runtime_dir()?
+        .ok_or_else(|| "尚未下载 Xberg 功能组件，请在设置页选择并下载".to_string())
 }
 
 /// Xberg 推理组件安装根：`<资产根>/xberg-inference/`（每个发布版本一个 tag
@@ -349,7 +353,7 @@ fn initialize_staged(
     let mut stage = "runtime_directory";
     let result = (|| {
         ensure_not_cancelled(cancel)?;
-        // 运行目录校验失败时如实报告：初始化不替用户修复用户指定的 Xberg 目录。
+        // 已下载组件缺失时如实报告；转 Markdown 初始化不自动补装功能组件。
         let runtime = runtime_dir()?;
         stage = "runtime_validate";
         validate_runtime_dir(&runtime)?;
@@ -363,8 +367,7 @@ fn initialize_staged(
         ensure_not_cancelled(cancel)?;
         stage = "notice_install";
         atomic_replace_dir(&notice_stage, &root.join("licenses"))?;
-        // XB-10：用户提供 Xberg 运行目录，初始化不再下载任何引擎或组件包
-        //（下载器仅媒体运行库的 download_runtime 路径仍在使用）。
+        // XB-10：Xberg 功能组件由设置页独立下载，本阶段只检查已有目录并生成 notice。
         progress("转 Markdown 组件初始化完成".to_string());
         Ok(())
     })();
@@ -418,496 +421,590 @@ impl AssetDownloader for NetworkDownloader {
     }
 }
 
-/// XB-20/XB-21：主动下载固定发布物；旧目录和配置在失败/取消时保持不变。
-pub fn download_runtime(
-    cancel: &AtomicBool,
-    mut progress: impl FnMut(String),
-) -> Result<PathBuf, String> {
-    let span = jchtools_foundation::logging::operation_span("markdown_assets", "download_runtime");
-    let _entered = span.enter();
-    let started = std::time::Instant::now();
-    tracing::info!(
-        event = "runtime_download_started",
-        "Xberg 最新运行时下载开始"
-    );
-    let mut stage = "cancel_check";
-    let result = (|| {
-        ensure_not_cancelled(cancel)?;
-        progress("正在查询 Xberg 最新发布版本…".into());
-        stage = "release_metadata";
-        let release = jchtools_assets::snap_ocr_assets::fetch_release_json(
-            XBERG_LATEST_RELEASE_URL,
-            cancel,
-            &mut progress,
-        )?;
-        stage = "manifest";
-        let mut manifest = load_manifest()?;
-        stage = "release_validate";
-        apply_latest_release(&mut manifest.xberg, &release)?;
-        progress(format!("最新发布版本：{}", manifest.xberg.tag));
-        stage = "download_install";
-        download_runtime_with(&manifest, cancel, &mut progress, &mut NetworkDownloader)
-    })();
-    let elapsed_ms = jchtools_foundation::logging::elapsed_ms(started);
-    match &result {
-        Ok(_) => tracing::info!(
-            event = "runtime_download_completed",
-            elapsed_ms,
-            result = "validated_saved",
-            "Xberg 最新运行时下载完成"
-        ),
-        Err(_) if cancel.load(std::sync::atomic::Ordering::Acquire) => tracing::info!(
-            event = "runtime_download_cancelled",
-            stage,
-            elapsed_ms,
-            "Xberg 最新运行时下载已取消"
-        ),
-        Err(_) => tracing::error!(
-            event = "runtime_download_failed",
-            stage,
-            elapsed_ms,
-            "Xberg 最新运行时下载失败"
-        ),
-    }
-    result
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
+struct ReleaseAsset {
+    archive: String,
+    url: String,
+    size_bytes: u64,
+    sha256: String,
 }
 
-/// XB-10：只接受固定官方源的 Windows 发布包与上游 SHA-256，不回退钉死版本。
-fn apply_latest_release(
-    pack: &mut XbergManifest,
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
+struct FeatureComponent {
+    id: String,
+    archive: String,
+    requires: Vec<String>,
+    size_bytes: u64,
+    sha256: String,
+    members: Vec<AssetFile>,
+}
+
+#[derive(Debug, Deserialize)]
+struct ComponentManifest {
+    schema_version: u32,
+    target: String,
+    components: Vec<FeatureComponent>,
+}
+
+#[derive(Debug, Deserialize, Serialize)]
+struct ComponentReceipt {
+    owner: String,
+    tag: String,
+    source: String,
+    manifest: ReleaseAsset,
+    components: Vec<FeatureComponent>,
+}
+
+fn valid_digest(value: &str) -> bool {
+    value.len() == 64 && value.bytes().all(|byte| byte.is_ascii_hexdigit())
+}
+
+fn release_asset(
     release: &serde_json::Value,
-) -> Result<(), String> {
+    tag: &str,
+    name: &str,
+) -> Result<ReleaseAsset, String> {
+    let assets = release["assets"]
+        .as_array()
+        .ok_or("最新 Xberg 发布缺少资产列表")?;
+    let matches: Vec<_> = assets
+        .iter()
+        .filter(|asset| asset["name"] == name)
+        .collect();
+    if matches.len() != 1 {
+        return Err(format!(
+            "最新 Xberg 发布缺少或重复独立组件资产：{name}；不会回退完整包"
+        ));
+    }
+    let asset = matches[0];
+    let url = format!("https://github.com/jchanghong023/xberg/releases/download/{tag}/{name}");
+    if asset["browser_download_url"].as_str() != Some(url.as_str()) {
+        return Err("最新 Xberg 组件来源与固定官方源不一致".into());
+    }
+    let size_bytes = asset["size"]
+        .as_u64()
+        .filter(|size| *size > 0)
+        .ok_or("最新 Xberg 组件大小无效")?;
+    let sha256 = asset["digest"]
+        .as_str()
+        .and_then(|digest| digest.strip_prefix("sha256:"))
+        .filter(|digest| valid_digest(digest))
+        .ok_or("最新 Xberg 组件缺少上游 SHA-256，未开始下载")?
+        .to_ascii_lowercase();
+    Ok(ReleaseAsset {
+        archive: name.into(),
+        url,
+        size_bytes,
+        sha256,
+    })
+}
+
+fn release_components(
+    release: &serde_json::Value,
+) -> Result<(String, ReleaseAsset, BTreeMap<String, ReleaseAsset>), String> {
     let tag = release["tag_name"]
         .as_str()
         .filter(|tag| valid_component_tag(tag))
-        .ok_or_else(|| "最新 Xberg 发布缺少合法版本标识".to_string())?;
-    if release["draft"] == true || release["prerelease"] == true {
-        return Err("最新发布接口返回草稿或预发布版本，未开始下载".into());
+        .ok_or("最新 Xberg 发布缺少合法版本标识")?;
+    if release["draft"] != false || release["prerelease"] != false {
+        return Err("最新发布接口未返回正式发布版本，未开始下载".into());
     }
-    let matches: Vec<_> = release["assets"]
-        .as_array()
-        .ok_or_else(|| "最新 Xberg 发布缺少资产列表".to_string())?
-        .iter()
-        .filter(|asset| asset["name"] == XBERG_ARCHIVE_NAME)
-        .collect();
-    if matches.len() != 1 {
-        return Err("最新 Xberg 发布必须恰好包含一个 Windows x64 CLI 包".into());
+    let manifest = release_asset(release, tag, XBERG_COMPONENT_MANIFEST)?;
+    let mut components = BTreeMap::new();
+    for id in COMPONENT_IDS {
+        let name = format!("xberg-{id}-{XBERG_TARGET}.zip");
+        components.insert(id.into(), release_asset(release, tag, &name)?);
     }
-    let asset = matches[0];
-    let url = format!(
-        "https://github.com/jchanghong023/xberg/releases/download/{tag}/{XBERG_ARCHIVE_NAME}"
-    );
-    if asset["browser_download_url"].as_str() != Some(url.as_str()) {
-        return Err("最新 Xberg 发布包来源与固定官方源不一致".into());
+    Ok((tag.into(), manifest, components))
+}
+
+fn member_owner(path: &str) -> &'static str {
+    if path.starts_with("models/snapshot-ocr/") {
+        "snapshot"
+    } else if path.starts_with("models/models--") {
+        "document"
+    } else if path.starts_with("models/sense_voice")
+        || path.starts_with("models/vad/")
+        || path.starts_with("ffmpeg/")
+        || path.starts_with("sherpa-onnx/")
+        || path.starts_with("samples/")
+    {
+        "media"
+    } else {
+        "common"
     }
-    let size = asset["size"]
-        .as_u64()
-        .filter(|size| *size > 0)
-        .ok_or_else(|| "最新 Xberg 发布包大小无效".to_string())?;
-    let digest = asset["digest"]
-        .as_str()
-        .and_then(|digest| digest.strip_prefix("sha256:"))
-        .filter(|digest| digest.len() == 64 && digest.bytes().all(|byte| byte.is_ascii_hexdigit()))
-        .ok_or_else(|| "最新 Xberg 发布包缺少上游 SHA-256，未开始下载".to_string())?;
-    pack.tag = tag.into();
-    pack.archive_url = url;
-    pack.archive_size_bytes = size;
-    pack.archive_sha256 = digest.to_ascii_lowercase();
-    // 归档按最新上游摘要校验；可变引擎/DLL/许可不使用旧发布成员摘要。
-    // 既定模型身份仍保留，其他场景成员仍必须存在，不静默缩小功能。
-    for member in &mut pack.members {
-        if !member.path.starts_with("models/") {
-            member.size_bytes = 0;
-            member.sha256.clear();
+}
+
+fn validate_component_manifest(
+    manifest: &ComponentManifest,
+    assets: &BTreeMap<String, ReleaseAsset>,
+    pinned: &XbergManifest,
+) -> Result<(), String> {
+    if manifest.schema_version != 1
+        || manifest.target != XBERG_TARGET
+        || manifest.components.len() != 3
+    {
+        return Err("Xberg 独立组件清单版本、平台或组件数量无效".into());
+    }
+    let mut ids = BTreeSet::new();
+    let mut paths: BTreeMap<String, &AssetFile> = BTreeMap::new();
+    for component in &manifest.components {
+        let asset = assets.get(&component.id).ok_or("Xberg 清单包含未知组件")?;
+        let dependencies: Vec<String> = Vec::new();
+        if !ids.insert(component.id.as_str())
+            || component.requires != dependencies
+            || component.archive != asset.archive
+            || component.size_bytes != asset.size_bytes
+            || component.sha256 != asset.sha256
+            || component.members.is_empty()
+        {
+            return Err("Xberg 清单组件与正式发布资产不一致".into());
+        }
+        let mut component_paths = BTreeSet::new();
+        for member in &component.members {
+            validate_relative_path(&member.path)?;
+            let normalized = member.path.to_ascii_lowercase();
+            let owner = member_owner(&member.path);
+            if member.path.contains('\\')
+                || member.path == XBERG_RELEASE_RECEIPT
+                || !valid_digest(&member.sha256)
+                || !component_paths.insert(normalized.clone())
+                || (owner != "common" && owner != component.id)
+                || paths
+                    .get(&normalized)
+                    .is_some_and(|previous| *previous != member)
+            {
+                return Err(format!(
+                    "Xberg 清单成员路径、摘要或组件归属无效：{}",
+                    member.path
+                ));
+            }
+            paths.insert(normalized, member);
+        }
+        for expected in &pinned.members {
+            let owner = member_owner(&expected.path);
+            if owner != "common" && owner != component.id {
+                continue;
+            }
+            let actual = component
+                .members
+                .iter()
+                .find(|member| member.path == expected.path)
+                .ok_or_else(|| {
+                    format!("Xberg {} 清单缺少所需成员：{}", component.id, expected.path)
+                })?;
+            if expected.path.starts_with("models/")
+                && (actual.size_bytes != expected.size_bytes || actual.sha256 != expected.sha256)
+            {
+                return Err(format!(
+                    "Xberg 发布模型身份与固定资产不一致：{}",
+                    expected.path
+                ));
+            }
         }
     }
     Ok(())
 }
 
-fn runtime_recipe(pack: &XbergManifest) -> Result<String, String> {
-    let bytes = serde_json::to_vec(&pack.members).map_err(|error| error.to_string())?;
-    Ok(format!("{:x}", Sha256::digest(bytes)))
+/// 按功能获取同一正式发布的独立组件；不下载完整离线包、不修改旧运行目录。
+/// 新安装与复用均返回规范化绝对目录，与保存的活动运行目录使用同一表示。
+pub fn download_runtime(
+    selection: DownloadSelection,
+    cancel: &AtomicBool,
+    mut progress: impl FnMut(String),
+) -> Result<PathBuf, String> {
+    let span = jchtools_foundation::logging::operation_span("markdown_assets", "download_runtime");
+    let _entered = span.enter();
+    ensure_selection(selection)?;
+    ensure_not_cancelled(cancel)?;
+    progress("正在查询 Xberg 最新发布版本…".into());
+    let release = jchtools_assets::snap_ocr_assets::fetch_release_json(
+        XBERG_LATEST_RELEASE_URL,
+        cancel,
+        &mut progress,
+    )?;
+    download_runtime_from_release(
+        selection,
+        &release,
+        cancel,
+        progress,
+        &mut NetworkDownloader,
+    )
 }
 
-fn reusable_runtime(
-    base: &Path,
-    pack: &XbergManifest,
-    cancel: &AtomicBool,
-) -> Result<Option<PathBuf>, String> {
-    let recipe = runtime_recipe(pack)?;
-    let entries = match fs::read_dir(base) {
-        Ok(entries) => entries,
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
-        Err(error) => return Err(format!("无法检查已下载版本：{error}")),
-    };
-    let mut candidates = Vec::new();
-    for entry in entries {
-        let entry = entry.map_err(|error| error.to_string())?;
-        let name = entry.file_name();
-        let Some(suffix) = name
-            .to_str()
-            .and_then(|name| name.strip_prefix(&format!("{}-", pack.tag)))
-        else {
-            continue;
-        };
-        if Uuid::parse_str(suffix).is_err() {
-            continue;
-        }
-        let path = entry.path();
-        let receipt = path.join(XBERG_RELEASE_RECEIPT);
-        let bytes = match fs::read(&receipt) {
-            Ok(bytes) => bytes,
-            Err(error) => {
-                tracing::warn!(event = "runtime_reuse_rejected", stage = "receipt_read", error_kind = ?error.kind(), error_code = error.raw_os_error(), "已下载版本记录不可读，继续寻找可复用版本");
-                continue;
-            }
-        };
-        let value = match serde_json::from_slice::<serde_json::Value>(&bytes) {
-            Ok(value) => value,
-            Err(error) => {
-                tracing::warn!(event = "runtime_reuse_rejected", stage = "receipt_parse", error_category = ?error.classify(), "已下载版本记录无效，继续寻找可复用版本");
-                continue;
-            }
-        };
-        if value["owner"] == "JchTools-xberg-download-v1"
-            && value["tag"] == pack.tag
-            && value["archive_sha256"] == pack.archive_sha256
-            && value["archive_size_bytes"] == pack.archive_size_bytes
-            && value["members_recipe"] == recipe
-            && pack
-                .members
-                .iter()
-                .all(|member| path.join(&member.path).is_file())
-        {
-            // 仅用户主动获取最新版时核验自有缓存身份；正常运行和用户自供
-            // 目录仍按 XB-09 做存在性检查，不在启动/转换/截图中计算摘要。
-            let Some(expected) = value["engine_sha256"].as_str() else {
-                tracing::warn!(
-                    event = "runtime_reuse_rejected",
-                    stage = "engine_digest_missing",
-                    "已下载版本缺少引擎摘要，继续寻找可复用版本"
-                );
-                continue;
-            };
-            ensure_not_cancelled(cancel)?;
-            let Ok(actual) = jchtools_assets::asset_util::sha256_file_inner(
-                &path.join("xberg.exe"),
-                Some(cancel),
-            ) else {
-                ensure_not_cancelled(cancel)?;
-                tracing::warn!(
-                    event = "runtime_reuse_rejected",
-                    stage = "engine_digest_read",
-                    "已下载引擎摘要不可读，继续寻找可复用版本"
-                );
-                continue;
-            };
-            if actual == expected {
-                candidates.push(path);
-            } else {
-                tracing::warn!(
-                    event = "runtime_reuse_rejected",
-                    stage = "engine_digest_mismatch",
-                    "已下载引擎摘要不匹配，不复用此版本"
-                );
-            }
-        }
+fn ensure_selection(selection: DownloadSelection) -> Result<(), String> {
+    if !selection.document && !selection.snapshot && !selection.media {
+        return Err("请至少选择一种 Xberg 功能后下载".into());
     }
-    candidates.sort();
-    Ok(candidates.into_iter().next())
+    Ok(())
 }
 
-fn download_runtime_with(
-    manifest: &AssetManifest,
+/// 生产安装接缝：调用方可提供正式发布元数据与流式资产供给器。
+/// 来源、清单、归档、成员、模型身份以及最终配置提交全部走生产校验。
+/// 成功返回规范化绝对目录；新安装和已校验组件复用遵循相同路径表示。
+pub fn download_runtime_from_release(
+    selection: DownloadSelection,
+    release: &serde_json::Value,
     cancel: &AtomicBool,
-    progress: &mut impl FnMut(String),
+    progress: impl FnMut(String),
     downloader: &mut dyn AssetDownloader,
+) -> Result<PathBuf, String> {
+    let pinned = load_manifest()?;
+    download_runtime_with_pinned(
+        selection,
+        release,
+        cancel,
+        progress,
+        downloader,
+        &pinned.xberg,
+    )
+}
+
+fn download_runtime_with_pinned(
+    selection: DownloadSelection,
+    release: &serde_json::Value,
+    cancel: &AtomicBool,
+    mut progress: impl FnMut(String),
+    downloader: &mut dyn AssetDownloader,
+    pinned: &XbergManifest,
 ) -> Result<PathBuf, String> {
     let span = jchtools_foundation::logging::operation_span("markdown_assets", "install_runtime");
     let _entered = span.enter();
-    tracing::info!(
-        event = "runtime_install_started",
-        size_bytes = manifest.xberg.archive_size_bytes,
-        member_count = manifest.xberg.members.len(),
-        "Xberg 运行时校验安装任务开始"
-    );
-    let started = std::time::Instant::now();
-    let mut stage = "cancel_check";
-    let result = download_runtime_task(manifest, cancel, progress, downloader, &mut stage);
-    let elapsed_ms = jchtools_foundation::logging::elapsed_ms(started);
-    match &result {
-        Ok(_) => tracing::info!(
-            event = "runtime_install_completed",
-            elapsed_ms,
-            result = "verified_installed_saved",
-            "Xberg 运行时校验安装任务完成"
-        ),
-        Err(reason) if reason.contains("取消") => {
-            tracing::info!(
-                event = "runtime_install_cancelled",
-                stage,
-                elapsed_ms,
-                "Xberg 运行时校验安装任务已取消"
-            );
-        }
-        Err(_) => tracing::error!(
-            event = "runtime_install_failed",
-            stage,
-            elapsed_ms,
-            "Xberg 运行时校验安装任务失败"
-        ),
-    }
-    result
-}
-
-fn download_runtime_task(
-    manifest: &AssetManifest,
-    cancel: &AtomicBool,
-    progress: &mut impl FnMut(String),
-    downloader: &mut dyn AssetDownloader,
-    stage: &mut &'static str,
-) -> Result<PathBuf, String> {
+    ensure_selection(selection)?;
     ensure_not_cancelled(cancel)?;
-    *stage = "state_directory";
+    let (tag, manifest_asset, assets) = release_components(release)?;
     let base = jchtools_foundation::xberg_settings::state_dir()?.join("xberg-downloads");
-    *stage = "create_download_root";
-    fs::create_dir_all(&base).map_err(|e| e.to_string())?;
-    cleanup_owned_download_staging(&base, progress);
-    *stage = "reuse_validate";
-    if let Some(installed) = reusable_runtime(&base, &manifest.xberg, cancel)? {
-        tracing::debug!(
-            event = "runtime_install_reused",
-            result = "verified_existing",
-            "复用已校验 Xberg 运行时"
-        );
-        ensure_not_cancelled(cancel)?;
-        *stage = "reuse_notice";
-        ensure_document_notice()?;
-        ensure_not_cancelled(cancel)?;
-        *stage = "reuse_save_source";
-        jchtools_foundation::xberg_settings::save_source(
-            jchtools_foundation::xberg_settings::Source::Downloaded,
-            &installed,
-        )?;
-        progress(format!(
-            "已存在 {}，复用已校验安装，不重复下载",
-            manifest.xberg.tag
-        ));
-        return Ok(installed);
-    }
+    fs::create_dir_all(&base).map_err(|error| error.to_string())?;
+    // 在 staging 和配置提交前统一路径表示，避免提交成功后再增加可能失败的操作。
+    let base =
+        fs::canonicalize(&base).map_err(|error| format!("解析 Xberg 下载目录失败：{error}"))?;
+    cleanup_owned_download_staging(&base, &mut progress);
     let staging = base.join(format!(".staging-{}", Uuid::new_v4()));
-    *stage = "create_staging";
-    fs::create_dir(&staging).map_err(|error| {
-        tracing::error!(event = "runtime_staging_create_failed", stage = "create_staging", error_kind = ?error.kind(), error_code = error.raw_os_error(), "创建 Xberg 下载临时目录失败");
-        error.to_string()
-    })?;
-    *stage = "staging_lock";
-    let mut staging_lock = match open_download_staging_lock(&staging) {
+    fs::create_dir(&staging).map_err(|error| error.to_string())?;
+    let staging_lock = (|| {
+        let mut file = open_download_staging_lock(&staging)?;
+        file.write_all(b"JchTools Xberg download staging\n")
+            .map_err(|error| error.to_string())?;
+        file.sync_all().map_err(|error| error.to_string())?;
+        Ok::<_, String>(file)
+    })();
+    let staging_lock = match staging_lock {
         Ok(file) => file,
         Err(error) => {
             rollback_runtime_directory(&staging, "staging_lock");
             return Err(error);
         }
     };
-    *stage = "staging_marker_write";
-    if let Err(error) = staging_lock.write_all(b"JchTools Xberg download staging\n") {
-        tracing::error!(event = "runtime_staging_marker_failed", stage = "staging_marker_write", error_kind = ?error.kind(), error_code = error.raw_os_error(), "写入 Xberg 下载临时目录所有权标记失败");
-        drop(staging_lock);
-        rollback_runtime_directory(&staging, "staging_marker_write");
-        return Err(format!("创建下载临时目录所有权标记失败：{error}"));
-    }
-    *stage = "staging_marker_sync";
-    if let Err(error) = staging_lock.sync_all() {
-        tracing::error!(event = "runtime_staging_marker_failed", stage = "staging_marker_sync", error_kind = ?error.kind(), error_code = error.raw_os_error(), "同步 Xberg 下载临时目录所有权标记失败");
-        drop(staging_lock);
-        rollback_runtime_directory(&staging, "staging_marker_sync");
-        return Err(format!("同步下载临时目录所有权标记失败：{error}"));
-    }
     let result = (|| {
-        let archive = staging.join("runtime.zip");
-        let pack = &manifest.xberg;
-        *stage = "download_archive";
+        progress(format!("最新发布版本：{tag}，正在获取独立组件清单…"));
+        let path = staging.join("components.json");
         downloader.download(
-            &pack.archive_url,
+            &manifest_asset.url,
+            &path,
+            manifest_asset.size_bytes,
+            &manifest_asset.sha256,
+            cancel,
+            &mut progress,
+        )?;
+        verify_file_with_cancel(
+            &path,
+            manifest_asset.size_bytes,
+            &manifest_asset.sha256,
+            cancel,
+        )?;
+        let bytes = fs::read(path).map_err(|error| error.to_string())?;
+        let manifest: ComponentManifest = serde_json::from_slice(&bytes)
+            .map_err(|error| format!("Xberg 独立组件清单无效：{error}"))?;
+        validate_component_manifest(&manifest, &assets, pinned)?;
+        install_components(
+            selection,
+            &tag,
+            &manifest_asset,
+            &manifest,
+            &base,
+            &staging,
+            cancel,
+            &mut progress,
+            downloader,
+        )
+    })();
+    drop(staging_lock);
+    if let Err(error) = fs::remove_dir_all(&staging) {
+        tracing::warn!(event = "runtime_staging_cleanup_failed", error_kind = ?error.kind(), "下载暂存目录清理失败");
+    }
+    if result.is_ok() {
+        tracing::info!(
+            event = "runtime_install_completed",
+            result = "verified_installed_saved",
+            "Xberg 独立组件安装完成"
+        );
+    } else {
+        tracing::warn!(
+            event = "runtime_install_failed",
+            cancelled = cancel.load(std::sync::atomic::Ordering::Acquire),
+            "Xberg 独立组件安装未提交"
+        );
+    }
+    result
+}
+
+fn owned_receipt(base: &Path) -> Result<Option<(PathBuf, ComponentReceipt)>, String> {
+    let Some(path) = jchtools_foundation::xberg_settings::settings()?.downloaded else {
+        return Ok(None);
+    };
+    let Ok(canonical_base) = fs::canonicalize(base) else {
+        return Ok(None);
+    };
+    let Ok(path) = fs::canonicalize(path) else {
+        return Ok(None);
+    };
+    // 只复用本流程创建的目录；旧文本/用户目录不会被复制、删除或改写。
+    if path.parent() != Some(canonical_base.as_path()) {
+        return Ok(None);
+    }
+    let receipt = fs::read(path.join(XBERG_RELEASE_RECEIPT))
+        .ok()
+        .and_then(|bytes| serde_json::from_slice::<ComponentReceipt>(&bytes).ok());
+    let Some(receipt) = receipt else {
+        return Ok(None);
+    };
+    let suffix = path
+        .file_name()
+        .and_then(|name| name.to_str())
+        .and_then(|name| name.strip_prefix(&format!("{}-", receipt.tag)));
+    if receipt.owner != "JchTools-xberg-components-v1"
+        || receipt.source != XBERG_LATEST_RELEASE_URL
+        || !valid_component_tag(&receipt.tag)
+        || suffix.is_none_or(|suffix| Uuid::parse_str(suffix).is_err())
+        || receipt.manifest.archive != XBERG_COMPONENT_MANIFEST
+        || receipt.manifest.url
+            != format!(
+                "https://github.com/jchanghong023/xberg/releases/download/{}/{}",
+                receipt.tag, XBERG_COMPONENT_MANIFEST
+            )
+    {
+        return Ok(None);
+    }
+    let mut ids = BTreeSet::new();
+    for component in &receipt.components {
+        if !COMPONENT_IDS.contains(&component.id.as_str())
+            || !ids.insert(component.id.as_str())
+            || component.archive != format!("xberg-{}-{XBERG_TARGET}.zip", component.id)
+        {
+            return Ok(None);
+        }
+    }
+    if ids.is_empty() {
+        return Ok(None);
+    }
+    Ok(Some((path, receipt)))
+}
+
+fn verify_component(
+    root: &Path,
+    component: &FeatureComponent,
+    cancel: &AtomicBool,
+) -> Result<(), String> {
+    for member in &component.members {
+        ensure_not_cancelled(cancel)?;
+        let path = root.join(&member.path);
+        if fs::symlink_metadata(&path)
+            .map_err(|error| error.to_string())?
+            .file_type()
+            .is_symlink()
+        {
+            return Err("已安装组件包含符号链接，不能复用".into());
+        }
+        verify_file_with_cancel(&path, member.size_bytes, &member.sha256, cancel)?;
+    }
+    Ok(())
+}
+
+fn collect_files(root: &Path, paths: &mut BTreeSet<String>, relative: &Path) -> Result<(), String> {
+    for entry in fs::read_dir(root.join(relative)).map_err(|error| error.to_string())? {
+        let entry = entry.map_err(|error| error.to_string())?;
+        let path = relative.join(entry.file_name());
+        let kind = entry.file_type().map_err(|error| error.to_string())?;
+        if kind.is_dir() {
+            collect_files(root, paths, &path)?;
+        } else if kind.is_file() {
+            let name = path
+                .to_str()
+                .ok_or("组件路径无法编码为 Unicode")?
+                .replace('\\', "/");
+            paths.insert(name);
+        } else {
+            return Err("组件归档包含非普通文件".into());
+        }
+    }
+    Ok(())
+}
+
+#[allow(clippy::too_many_arguments)]
+fn install_components(
+    selection: DownloadSelection,
+    tag: &str,
+    manifest_asset: &ReleaseAsset,
+    manifest: &ComponentManifest,
+    base: &Path,
+    staging: &Path,
+    cancel: &AtomicBool,
+    progress: &mut impl FnMut(String),
+    downloader: &mut dyn AssetDownloader,
+) -> Result<PathBuf, String> {
+    let previous = owned_receipt(base)?;
+    let mut wanted = BTreeSet::new();
+    for (id, selected) in [
+        ("document", selection.document),
+        ("snapshot", selection.snapshot),
+        ("media", selection.media),
+    ] {
+        if selected {
+            wanted.insert(id);
+        }
+    }
+    if let Some((_, receipt)) = &previous {
+        if receipt.tag == tag {
+            for component in &receipt.components {
+                wanted.insert(component.id.as_str());
+            }
+        }
+    }
+    let components: Vec<_> = manifest
+        .components
+        .iter()
+        .filter(|component| wanted.contains(component.id.as_str()))
+        .cloned()
+        .collect();
+    let mut reusable = BTreeSet::new();
+    if let Some((path, receipt)) = &previous {
+        if receipt.tag == tag {
+            for component in &components {
+                if receipt.components.contains(component) {
+                    match verify_component(path, component, cancel) {
+                        Ok(()) => {
+                            reusable.insert(component.id.as_str());
+                        }
+                        Err(_) => {
+                            ensure_not_cancelled(cancel)?;
+                        }
+                    }
+                }
+            }
+            if reusable.len() == components.len() {
+                ensure_not_cancelled(cancel)?;
+                ensure_document_notice()?;
+                ensure_not_cancelled(cancel)?;
+                jchtools_foundation::xberg_settings::save_source(
+                    jchtools_foundation::xberg_settings::Source::Downloaded,
+                    path,
+                )?;
+                progress(format!("已存在 {tag}，复用已校验组件，不重复下载"));
+                return Ok(path.clone());
+            }
+        }
+    }
+    let runtime = staging.join("runtime");
+    fs::create_dir(&runtime).map_err(|error| error.to_string())?;
+    for component in &components {
+        ensure_not_cancelled(cancel)?;
+        if reusable.contains(component.id.as_str()) {
+            let source = &previous.as_ref().ok_or("缺少可复用组件目录")?.0;
+            for member in &component.members {
+                ensure_not_cancelled(cancel)?;
+                let destination = runtime.join(&member.path);
+                if destination.exists() {
+                    verify_file_with_cancel(
+                        &destination,
+                        member.size_bytes,
+                        &member.sha256,
+                        cancel,
+                    )?;
+                } else {
+                    fs::create_dir_all(destination.parent().ok_or("组件路径缺少父目录")?)
+                        .map_err(|error| error.to_string())?;
+                    fs::copy(source.join(&member.path), &destination)
+                        .map_err(|error| error.to_string())?;
+                }
+            }
+            verify_component(&runtime, component, cancel)?;
+            continue;
+        }
+        progress(format!("正在下载 Xberg {} 组件…", component.id));
+        let archive = staging.join(&component.archive);
+        let url = format!(
+            "https://github.com/jchanghong023/xberg/releases/download/{tag}/{}",
+            component.archive
+        );
+        downloader.download(
+            &url,
             &archive,
-            pack.archive_size_bytes,
-            &pack.archive_sha256,
+            component.size_bytes,
+            &component.sha256,
             cancel,
             progress,
         )?;
-        ensure_not_cancelled(cancel)?;
-        *stage = "archive_verify";
-        let verify_started = std::time::Instant::now();
-        tracing::debug!(
-            event = "runtime_archive_verify_started",
-            size_bytes = pack.archive_size_bytes,
-            "Xberg 下载归档独立复核开始"
-        );
-        verify_file_with_cancel(
-            &archive,
-            pack.archive_size_bytes,
-            &pack.archive_sha256,
-            cancel,
-        )?;
-        tracing::debug!(
-            event = "runtime_archive_verified",
-            size_bytes = pack.archive_size_bytes,
-            elapsed_ms = jchtools_foundation::logging::elapsed_ms(verify_started),
-            "Xberg 下载归档校验通过"
-        );
-        *stage = "extract_directory";
-        let extracted = staging.join("unpacked");
-        fs::create_dir(&extracted).map_err(|e| e.to_string())?;
-        *stage = "extract_archive";
-        let extract_started = std::time::Instant::now();
-        tracing::debug!(
-            event = "runtime_extract_started",
-            "Xberg 运行时归档解包开始"
-        );
+        verify_file_with_cancel(&archive, component.size_bytes, &component.sha256, cancel)?;
+        let extracted = staging.join(format!("unpacked-{}", component.id));
+        fs::create_dir(&extracted).map_err(|error| error.to_string())?;
         jchtools_assets::asset_util::extract_zip_safely(&archive, &extracted, cancel)?;
-        tracing::debug!(
-            event = "runtime_extract_completed",
-            elapsed_ms = jchtools_foundation::logging::elapsed_ms(extract_started),
-            "Xberg 运行时归档解包完成"
-        );
-        let component = extracted.join("xberg-cli-x86_64-pc-windows-msvc");
-        *stage = "member_verify";
-        for (member_index, member) in pack.members.iter().enumerate() {
-            ensure_not_cancelled(cancel)?;
-            let member_started = std::time::Instant::now();
-            tracing::debug!(
-                event = "runtime_member_verify_started",
-                member_index,
-                verification = if member.sha256.is_empty() {
-                    "presence"
-                } else {
-                    "sha256"
-                },
-                "Xberg 发布成员校验开始"
-            );
-            let path = component.join(&member.path);
-            if member.sha256.is_empty() {
-                if !path.is_file() {
-                    tracing::error!(
-                        event = "runtime_member_verify_failed",
-                        stage = "member_missing",
-                        member_index,
-                        "最新 Xberg 发布缺少所需成员"
-                    );
-                    return Err(format!("最新 Xberg 发布缺少所需成员：{}", member.path));
-                }
-            } else {
-                verify_file_with_cancel(&path, member.size_bytes, &member.sha256, cancel)?;
-            }
-            tracing::debug!(
-                event = "runtime_member_verify_completed",
-                member_index,
-                elapsed_ms = jchtools_foundation::logging::elapsed_ms(member_started),
-                "Xberg 发布成员校验通过"
-            );
-        }
-        tracing::debug!(
-            event = "runtime_members_verified",
-            member_count = pack.members.len(),
-            "Xberg 发布成员校验通过"
-        );
-        *stage = "engine_digest";
-        let engine_sha256 = if let Some(member) = pack
+        let mut actual = BTreeSet::new();
+        collect_files(&extracted, &mut actual, Path::new(""))?;
+        let expected: BTreeSet<_> = component
             .members
             .iter()
-            .find(|member| member.path == "xberg.exe" && !member.sha256.is_empty())
-        {
-            // 此成员已在上面的循环验证，不重复读取相同文件。
-            member.sha256.clone()
-        } else {
-            jchtools_assets::asset_util::sha256_file_inner(
-                &component.join("xberg.exe"),
-                Some(cancel),
-            )
-            .map_err(|error| error.to_string())?
-        };
-        *stage = "release_receipt";
-        let receipt = serde_json::json!({
-            "owner":"JchTools-xberg-download-v1",
-            "tag":pack.tag,
-            "archive_url":pack.archive_url,
-            "archive_sha256":pack.archive_sha256,
-            "archive_size_bytes":pack.archive_size_bytes,
-            "members_recipe":runtime_recipe(pack)?,
-            "engine_sha256":engine_sha256,
-        });
-        let mut receipt_file = OpenOptions::new()
-            .write(true)
-            .create_new(true)
-            .open(component.join(XBERG_RELEASE_RECEIPT))
-            .map_err(|error| format!("写入已校验发布记录失败：{error}"))?;
-        receipt_file
-            .write_all(&serde_json::to_vec(&receipt).map_err(|error| error.to_string())?)
-            .map_err(|error| error.to_string())?;
-        receipt_file.sync_all().map_err(|error| error.to_string())?;
-        drop(receipt_file);
-        // 上述清单含全部场景，逐成员核对，不按当前工具过滤模型。
-        ensure_not_cancelled(cancel)?;
-        let installed = base.join(format!("{}-{}", pack.tag, Uuid::new_v4()));
-        // 提交段（rename → notice → save_source）取消检查点：紧贴 rename 再查
-        // 一次，把「检查通过后用户才取消」的窗口收窄到提交动作本身；取消被
-        // 观测到时不进入提交（T-05：可重试，staging 随后整体清理）。
-        ensure_not_cancelled(cancel)?;
-        *stage = "install_rename";
-        let install_started = std::time::Instant::now();
-        tracing::debug!(
-            event = "runtime_directory_install_started",
-            "Xberg 已校验目录原子落位开始"
-        );
-        fs::rename(&component, &installed).map_err(|error| {
-            tracing::error!(event = "runtime_directory_install_failed", stage = "install_rename", error_kind = ?error.kind(), error_code = error.raw_os_error(), elapsed_ms = jchtools_foundation::logging::elapsed_ms(install_started), "Xberg 已校验目录原子落位失败");
-            format!("安装 Xberg 失败：{error}")
-        })?;
-        tracing::debug!(
-            event = "runtime_directory_installed",
-            elapsed_ms = jchtools_foundation::logging::elapsed_ms(install_started),
-            result = "renamed",
-            "Xberg 已校验目录原子落位完成"
-        );
-        *stage = "notice_install";
-        // 下载安装成功即确保许可证 notice（T-06，S3-01 集成后与保存共用
-        // [`ensure_document_notice`] 原子闭环）：失败按未完成安装处理——
-        // 撤销目录且不写 SQLite（与 save_source 失败同一回滚口径）。
-        if let Err(error) = ensure_document_notice() {
-            rollback_runtime_directory(&installed, "notice_install");
-            return Err(error);
+            .map(|member| format!("{XBERG_ARCHIVE_PREFIX}/{}", member.path))
+            .collect();
+        if actual != expected {
+            return Err(format!("Xberg {} 归档成员与清单不一致", component.id));
         }
-        // save_source 前最后一次取消检查（XB-20：下载取消不覆盖有效配置）——
-        // 取消在 SQLite 写入前被观测到时不切换来源；已 rename 落位的目录按
-        // T-05「保留已校验资产」保留，不做删除回滚（残留目录不阻塞任何功能，
-        // 下次下载安装到新目录）。
-        ensure_not_cancelled(cancel)?;
-        *stage = "save_source";
-        if let Err(error) = jchtools_foundation::xberg_settings::save_source(
-            jchtools_foundation::xberg_settings::Source::Downloaded,
-            &installed,
-        ) {
-            // 仅撤销本次创建且尚未成为有效配置的目录。
-            rollback_runtime_directory(&installed, "save_source");
-            return Err(error);
-        }
-        Ok(installed)
-    })();
-    // 校验与安装已经结束；先释放禁止删除共享的 Windows marker 句柄。
-    drop(staging_lock);
-    let cleanup = fs::remove_dir_all(&staging);
-    match cleanup {
-        Ok(()) => tracing::debug!(
-            event = "runtime_staging_cleanup_completed",
-            result = "removed",
-            "Xberg 下载临时目录清理完成"
-        ),
-        Err(error) => {
-            tracing::warn!(event = "runtime_staging_cleanup_failed", stage = "staging_remove", error_kind = ?error.kind(), error_code = error.raw_os_error(), "Xberg 下载临时目录清理失败");
-            progress(format!("下载临时目录清理失败：{error}"));
+        let unpacked = extracted.join(XBERG_ARCHIVE_PREFIX);
+        verify_component(&unpacked, component, cancel)?;
+        for member in &component.members {
+            ensure_not_cancelled(cancel)?;
+            let destination = runtime.join(&member.path);
+            if destination.exists() {
+                verify_file_with_cancel(&destination, member.size_bytes, &member.sha256, cancel)?;
+            } else {
+                fs::create_dir_all(destination.parent().ok_or("组件路径缺少父目录")?)
+                    .map_err(|error| error.to_string())?;
+                fs::rename(unpacked.join(&member.path), destination)
+                    .map_err(|error| error.to_string())?;
+            }
         }
     }
-    result
+    let receipt = ComponentReceipt {
+        owner: "JchTools-xberg-components-v1".into(),
+        tag: tag.into(),
+        source: XBERG_LATEST_RELEASE_URL.into(),
+        manifest: manifest_asset.clone(),
+        components,
+    };
+    let mut file = OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(runtime.join(XBERG_RELEASE_RECEIPT))
+        .map_err(|error| error.to_string())?;
+    file.write_all(&serde_json::to_vec(&receipt).map_err(|error| error.to_string())?)
+        .map_err(|error| error.to_string())?;
+    file.sync_all().map_err(|error| error.to_string())?;
+    drop(file);
+    ensure_not_cancelled(cancel)?;
+    let installed = base.join(format!("{tag}-{}", Uuid::new_v4()));
+    fs::rename(&runtime, &installed).map_err(|error| format!("安装 Xberg 失败：{error}"))?;
+    let commit = (|| {
+        ensure_document_notice()?;
+        ensure_not_cancelled(cancel)?;
+        jchtools_foundation::xberg_settings::save_source(
+            jchtools_foundation::xberg_settings::Source::Downloaded,
+            &installed,
+        )
+    })();
+    if let Err(error) = commit {
+        rollback_runtime_directory(&installed, "notice_or_save_source");
+        return Err(error);
+    }
+    Ok(installed)
 }
 
 fn rollback_runtime_directory(directory: &Path, stage: &'static str) {
@@ -1060,7 +1157,7 @@ fn asset_root() -> PathBuf {
 
 fn write_notice(path: &Path, manifest: &AssetManifest) -> Result<(), String> {
     let mut text = String::from("# JchTools 转 Markdown 可选组件许可证\n\n");
-    text.push_str("Xberg 运行目录由用户指定；主程序安装包不包含这些资产。媒体转录的模型与推理运行库由 Xberg 推理组件提供，许可随组件树自带。\n\n");
+    text.push_str("Xberg 运行目录由共享配置提供；主程序安装包不包含这些资产。独立功能组件由设置页按需下载，模型与推理运行库的许可随组件树自带。\n\n");
     for license in &manifest.xberg.licenses {
         let _ = writeln!(
             &mut text,
@@ -1271,279 +1368,386 @@ mod tests {
         component
     }
 
-    // 覆盖 XB-20/XB-21：合成发布包经过真实下载安装核心；成员错误及取消保留原配置。
-    fn release_metadata(tag: &str) -> serde_json::Value {
-        serde_json::json!({
-            "tag_name":tag,
-            "draft":false,
-            "prerelease":false,
-            "assets":[{
-                "name":super::XBERG_ARCHIVE_NAME,
-                "browser_download_url":format!(
-                    "https://github.com/jchanghong023/xberg/releases/download/{tag}/{}",
-                    super::XBERG_ARCHIVE_NAME
-                ),
-                "size":12345,
-                "digest":format!("sha256:{}", "a".repeat(64))
-            }]
-        })
+    struct ComponentFixture {
+        tag: String,
+        manifest: serde_json::Value,
+        release: serde_json::Value,
+        data: std::collections::BTreeMap<String, Vec<u8>>,
+        pinned: super::XbergManifest,
+        requests: Vec<String>,
+        cancel_on: Option<String>,
     }
 
-    // 覆盖 XB-10/O-07：采用实际最新发布元数据，不能仍钉死内置 tag 或引擎摘要。
-    #[test]
-    fn latest_metadata_replaces_pinned_engine_but_preserves_model_identity() {
-        let mut pack = super::load_manifest().unwrap().xberg;
-        let model = pack
-            .members
-            .iter()
-            .find(|member| member.path.starts_with("models/"))
-            .unwrap();
-        let model_path = model.path.clone();
-        let model_hash = model.sha256.clone();
-        super::apply_latest_release(&mut pack, &release_metadata("v2099.1.1")).unwrap();
-        assert_eq!(pack.tag, "v2099.1.1");
-        assert_eq!(pack.archive_size_bytes, 12345);
-        assert_eq!(pack.archive_sha256, "a".repeat(64));
-        assert!(pack
-            .members
-            .iter()
-            .find(|member| member.path == "xberg.exe")
-            .unwrap()
-            .sha256
-            .is_empty());
-        assert_eq!(
-            pack.members
-                .iter()
-                .find(|member| member.path == model_path)
-                .unwrap()
-                .sha256,
-            model_hash
-        );
-    }
-
-    // 覆盖 XB-10：没有上游摘要不得下载，也不得静默改用旧版本。
-    #[test]
-    fn latest_metadata_without_digest_fails_without_mutating_pinned_pack() {
-        let mut pack = super::load_manifest().unwrap().xberg;
-        let old_tag = pack.tag.clone();
-        let mut release = release_metadata("v2099.1.1");
-        release["assets"][0]["digest"] = serde_json::Value::Null;
-        assert!(super::apply_latest_release(&mut pack, &release)
-            .unwrap_err()
-            .contains("SHA-256"));
-        assert_eq!(pack.tag, old_tag);
-    }
-
-    // 覆盖 P-03/XB-10：元数据不能扩大固定来源，歧义包也不得猜测。
-    #[test]
-    fn latest_metadata_rejects_changed_source_and_duplicate_archives() {
-        let mut pack = super::load_manifest().unwrap().xberg;
-        let mut release = release_metadata("v2099.1.1");
-        release["assets"][0]["browser_download_url"] =
-            serde_json::json!("https://example.invalid/engine.zip");
-        assert!(super::apply_latest_release(&mut pack, &release).is_err());
-        let mut release = release_metadata("v2099.1.1");
-        let duplicate = release["assets"][0].clone();
-        release["assets"].as_array_mut().unwrap().push(duplicate);
-        assert!(super::apply_latest_release(&mut pack, &release).is_err());
-    }
-
-    // 覆盖 XB-10：同一已校验最新版再次选择下载，应复用而非再次下载与安装。
-    #[test]
-    fn latest_runtime_is_reused_without_repeating_archive_download() {
-        use super::{AssetFile, AssetManifest, XbergManifest};
-        use sha2::{Digest, Sha256};
-        use std::io::{Cursor, Write};
-        let _guard = redirect_component_env();
-        let payload = b"synthetic engine";
-        let mut zip = zip::ZipWriter::new(Cursor::new(Vec::new()));
-        zip.start_file(
-            "xberg-cli-x86_64-pc-windows-msvc/xberg.exe",
-            zip::write::SimpleFileOptions::default(),
-        )
-        .unwrap();
-        zip.write_all(payload).unwrap();
-        let archive = zip.finish().unwrap().into_inner();
-        struct Download {
-            archive: Vec<u8>,
-            calls: usize,
-        }
-        impl AssetDownloader for Download {
-            fn download(
-                &mut self,
-                _: &str,
-                destination: &Path,
-                _: u64,
-                _: &str,
-                _: &AtomicBool,
-                _: &mut dyn FnMut(String),
-            ) -> Result<(), String> {
-                self.calls += 1;
-                fs::write(destination, &self.archive).map_err(|error| error.to_string())
+    impl ComponentFixture {
+        fn new(tag: &str) -> Self {
+            use std::io::{Cursor, Write};
+            let mut components = Vec::new();
+            let mut data = std::collections::BTreeMap::new();
+            let mut pinned = Vec::new();
+            for (id, model) in [
+                ("document", "models/models--fixture/model.onnx"),
+                ("snapshot", "models/snapshot-ocr/model.onnx"),
+                ("media", "models/vad/model.onnx"),
+            ] {
+                let mut zip = zip::ZipWriter::new(Cursor::new(Vec::new()));
+                let mut members = Vec::new();
+                for (path, bytes) in [
+                    ("xberg.exe", b"shared engine".as_slice()),
+                    (model, id.as_bytes()),
+                    ("LICENSE", b"shared license".as_slice()),
+                ] {
+                    zip.start_file(
+                        format!("{}/{path}", super::XBERG_ARCHIVE_PREFIX),
+                        zip::write::SimpleFileOptions::default(),
+                    ).unwrap();
+                    zip.write_all(bytes).unwrap();
+                    let member = super::AssetFile {
+                        path: path.into(),
+                        size_bytes: bytes.len() as u64,
+                        sha256: format!("{:x}", Sha256::digest(bytes)),
+                    };
+                    if path == model || (id == "document") {
+                        pinned.push(member.clone());
+                    }
+                    members.push(member);
+                }
+                let archive = format!("xberg-{id}-{}.zip", super::XBERG_TARGET);
+                let bytes = zip.finish().unwrap().into_inner();
+                components.push(serde_json::json!({
+                    "id":id, "archive":archive, "requires":[],
+                    "size_bytes":bytes.len(), "sha256":format!("{:x}", Sha256::digest(&bytes)),
+                    "members":members
+                }));
+                data.insert(archive, bytes);
             }
+            let mut fixture = Self {
+                tag: tag.into(),
+                manifest: serde_json::json!({
+                    "schema_version":1, "target":super::XBERG_TARGET, "components":components
+                }),
+                release: serde_json::Value::Null,
+                data,
+                pinned: super::XbergManifest {
+                    tag: "old-pin".into(),
+                    archive_url: String::new(),
+                    archive_size_bytes: 0,
+                    archive_sha256: String::new(),
+                    members: pinned,
+                    licenses: Vec::new(),
+                },
+                requests: Vec::new(),
+                cancel_on: None,
+            };
+            fixture.refresh_release();
+            fixture
         }
-        let manifest = AssetManifest {
-            schema_version: 1,
-            xberg_inference: None,
-            xberg: XbergManifest {
-                tag: "latest-reuse-test".into(),
-                archive_url: "https://example.invalid/latest.zip".into(),
-                archive_size_bytes: u64::try_from(archive.len()).unwrap(),
-                archive_sha256: format!("{:x}", Sha256::digest(&archive)),
-                members: vec![AssetFile {
-                    path: "xberg.exe".into(),
-                    size_bytes: u64::try_from(payload.len()).unwrap(),
-                    sha256: format!("{:x}", Sha256::digest(payload)),
-                }],
-                licenses: Vec::new(),
-            },
-        };
-        let mut downloader = Download { archive, calls: 0 };
-        let cancel = AtomicBool::new(false);
-        let first =
-            super::download_runtime_with(&manifest, &cancel, &mut |_| {}, &mut downloader).unwrap();
-        let second =
-            super::download_runtime_with(&manifest, &cancel, &mut |_| {}, &mut downloader).unwrap();
-        assert_eq!(first, second, "已安装的最新版必须复用同一目录");
-        assert_eq!(downloader.calls, 1, "已有最新版不得重复下载");
-        // XB-10：主动再次获取最新版时，旧标记不能证明已被手工替换的引擎仍是该发布。
-        // 正常运行及用户自供目录仍按 XB-09 只检查存在性，不受此下载身份检查影响。
-        fs::write(first.join("xberg.exe"), b"manually replaced older engine").unwrap();
-        let repaired =
-            super::download_runtime_with(&manifest, &cancel, &mut |_| {}, &mut downloader).unwrap();
-        assert_ne!(repaired, first, "被替换的缓存不能冒充可复用的最新版");
-        assert_eq!(fs::read(repaired.join("xberg.exe")).unwrap(), payload);
-        assert_eq!(downloader.calls, 2, "缓存身份失效时必须重新获取该次最新版");
-        assert_eq!(
-            fs::read(first.join("xberg.exe")).unwrap(),
-            b"manually replaced older engine",
-            "重新获取不得覆盖旧缓存中用户改写的文件"
-        );
-    }
 
-    #[test]
-    fn installed_runtime_is_verified_before_selection() {
-        use super::{AssetFile, AssetManifest, XbergManifest};
-        use std::io::{Cursor, Write};
-        let guard = redirect_component_env();
-        let custom = guard.root.path().join("custom");
-        fs::create_dir(&custom).unwrap();
-        fs::write(custom.join("xberg.exe"), b"existing").unwrap();
-        jchtools_foundation::xberg_settings::save(&custom).unwrap();
-        let user_staging = jchtools_foundation::xberg_settings::state_dir()
-            .unwrap()
-            .join("xberg-downloads")
-            .join(".staging-user");
-        fs::create_dir_all(&user_staging).unwrap();
-        fs::write(user_staging.join("user.txt"), b"keep").unwrap();
-        let mut archive = zip::ZipWriter::new(Cursor::new(Vec::new()));
-        let mut members = Vec::new();
-        for (name, bytes) in [
-            ("xberg.exe", b"engine".as_slice()),
-            ("models/snapshot-ocr/det.onnx", b"model".as_slice()),
-        ] {
-            archive
-                .start_file(
-                    format!("xberg-cli-x86_64-pc-windows-msvc/{name}"),
-                    zip::write::SimpleFileOptions::default(),
+        fn refresh_release(&mut self) {
+            self.data.insert(
+                super::XBERG_COMPONENT_MANIFEST.into(),
+                serde_json::to_vec(&self.manifest).unwrap(),
+            );
+            let assets: Vec<_> = self.data.iter().map(|(name, bytes)| serde_json::json!({
+                "name":name,
+                "size":bytes.len(),
+                "digest":format!("sha256:{:x}", Sha256::digest(bytes)),
+                "browser_download_url":format!(
+                    "https://github.com/jchanghong023/xberg/releases/download/{}/{name}", self.tag
                 )
-                .unwrap();
-            archive.write_all(bytes).unwrap();
-            members.push(AssetFile {
-                path: name.into(),
-                size_bytes: bytes.len() as u64,
-                sha256: format!("{:x}", Sha256::digest(bytes)),
+            })).collect();
+            self.release = serde_json::json!({
+                "tag_name":self.tag, "draft":false, "prerelease":false, "assets":assets
             });
         }
-        let bytes = archive.finish().unwrap().into_inner();
-        struct Download(Vec<u8>);
-        impl AssetDownloader for Download {
-            fn download(
-                &mut self,
-                _: &str,
-                destination: &Path,
-                _: u64,
-                _: &str,
-                _: &AtomicBool,
-                _: &mut dyn FnMut(String),
-            ) -> Result<(), String> {
-                fs::write(destination, &self.0).map_err(|e| e.to_string())
+
+        fn install(&mut self, selection: super::DownloadSelection) -> Result<PathBuf, String> {
+            let release = self.release.clone();
+            let pinned = super::XbergManifest {
+                tag: self.pinned.tag.clone(),
+                archive_url: String::new(),
+                archive_size_bytes: 0,
+                archive_sha256: String::new(),
+                members: self.pinned.members.clone(),
+                licenses: Vec::new(),
+            };
+            super::download_runtime_with_pinned(
+                selection, &release, &AtomicBool::new(false), |_| {}, self, &pinned,
+            )
+        }
+
+        fn use_known_runtime_paths(&mut self) {
+            use std::io::{Cursor, Write};
+            let real = super::load_manifest().unwrap();
+            self.pinned.members = real.xberg.members.iter().map(|member| super::AssetFile {
+                path: member.path.clone(),
+                size_bytes: 1,
+                sha256: format!("{:x}", Sha256::digest(b"x")),
+            }).collect();
+            let mut components = Vec::new();
+            for id in super::COMPONENT_IDS {
+                let mut zip = zip::ZipWriter::new(Cursor::new(Vec::new()));
+                let members: Vec<_> = self.pinned.members.iter()
+                    .filter(|member| {
+                        let owner = super::member_owner(&member.path);
+                        owner == "common" || owner == id
+                    }).cloned().collect();
+                for member in &members {
+                    zip.start_file(
+                        format!("{}/{}", super::XBERG_ARCHIVE_PREFIX, member.path),
+                        zip::write::SimpleFileOptions::default(),
+                    ).unwrap();
+                    zip.write_all(b"x").unwrap();
+                }
+                let bytes = zip.finish().unwrap().into_inner();
+                let name = format!("xberg-{id}-{}.zip", super::XBERG_TARGET);
+                components.push(serde_json::json!({
+                    "id":id, "requires":[], "archive":name,
+                    "size_bytes":bytes.len(), "sha256":format!("{:x}", Sha256::digest(&bytes)),
+                    "members":members
+                }));
+                self.data.insert(name, bytes);
+            }
+            self.manifest["components"] = serde_json::json!(components);
+            self.refresh_release();
+        }
+    }
+
+    impl AssetDownloader for ComponentFixture {
+        fn download(
+            &mut self,
+            url: &str,
+            destination: &Path,
+            _: u64,
+            _: &str,
+            cancel: &AtomicBool,
+            _: &mut dyn FnMut(String),
+        ) -> Result<(), String> {
+            let name = url.rsplit('/').next().ok_or("缺少文件名")?;
+            self.requests.push(name.into());
+            let bytes = self.data.get(name).ok_or("未提供组件资产")?;
+            fs::write(destination, bytes).map_err(|error| error.to_string())?;
+            if self.cancel_on.as_deref() == Some(name) {
+                cancel.store(true, std::sync::atomic::Ordering::Release);
+            }
+            Ok(())
+        }
+    }
+
+    #[test]
+    fn split_snapshot_only_and_same_tag_addition_reuse_verified_components() {
+        let _guard = redirect_component_env();
+        let mut fixture = ComponentFixture::new("v2099.1");
+        let snapshot = super::DownloadSelection::default();
+        let first = fixture.install(snapshot).unwrap();
+        assert_eq!(first, fs::canonicalize(&first).unwrap());
+        assert_eq!(fixture.requests, [
+            super::XBERG_COMPONENT_MANIFEST,
+            "xberg-snapshot-x86_64-pc-windows-msvc.zip",
+        ]);
+        assert!(!first.join("models/models--fixture/model.onnx").exists());
+        assert!(!first.join("models/vad/model.onnx").exists());
+        fixture.requests.clear();
+        let second = fixture.install(super::DownloadSelection {
+            document: true, snapshot: false, media: false,
+        }).unwrap();
+        assert_ne!(first, second);
+        assert_eq!(second, fs::canonicalize(&second).unwrap());
+        assert_eq!(fixture.requests, [
+            super::XBERG_COMPONENT_MANIFEST,
+            "xberg-document-x86_64-pc-windows-msvc.zip",
+        ]);
+        assert!(second.join("models/snapshot-ocr/model.onnx").is_file());
+        assert!(second.join("models/models--fixture/model.onnx").is_file());
+        assert!(first.join("models/snapshot-ocr/model.onnx").is_file());
+        fixture.requests.clear();
+        let reused = fixture.install(snapshot).unwrap();
+        assert_eq!(reused, second);
+        assert_eq!(
+            fs::canonicalize(&reused).unwrap(),
+            fs::canonicalize(&second).unwrap()
+        );
+        assert_eq!(fixture.requests, [super::XBERG_COMPONENT_MANIFEST]);
+        let receipt: super::ComponentReceipt = serde_json::from_slice(
+            &fs::read(second.join(super::XBERG_RELEASE_RECEIPT)).unwrap(),
+        ).unwrap();
+        assert_eq!(receipt.tag, "v2099.1");
+        assert_eq!(receipt.source, super::XBERG_LATEST_RELEASE_URL);
+        assert_eq!(receipt.components.len(), 2);
+    }
+
+    #[test]
+    fn split_upgrade_installs_selected_features_without_cross_tag_reuse() {
+        let _guard = redirect_component_env();
+        let first = ComponentFixture::new("v2099.1").install(super::DownloadSelection {
+            document: true, snapshot: true, media: false,
+        }).unwrap();
+        let mut latest = ComponentFixture::new("v2099.2");
+        let upgraded = latest.install(super::DownloadSelection {
+            document: false, snapshot: false, media: true,
+        }).unwrap();
+        assert_ne!(first, upgraded);
+        assert_eq!(latest.requests, [
+            super::XBERG_COMPONENT_MANIFEST,
+            "xberg-media-x86_64-pc-windows-msvc.zip",
+        ]);
+        assert!(!upgraded.join("models/snapshot-ocr/model.onnx").exists());
+        assert!(!upgraded.join("models/models--fixture/model.onnx").exists());
+        assert_eq!(fs::read(first.join("xberg.exe")).unwrap(), b"shared engine");
+    }
+
+    #[test]
+    fn split_snapshot_selection_does_not_inherit_legacy_full_bundle_features() {
+        let _guard = redirect_component_env();
+        let base = jchtools_foundation::xberg_settings::state_dir().unwrap().join("xberg-downloads");
+        let legacy = base.join(format!("v2098-{}", uuid::Uuid::new_v4()));
+        fs::create_dir_all(&legacy).unwrap();
+        for member in &super::load_manifest().unwrap().xberg.members {
+            let path = legacy.join(&member.path);
+            fs::create_dir_all(path.parent().unwrap()).unwrap();
+            fs::write(path, b"legacy").unwrap();
+        }
+        fs::write(
+            legacy.join(super::XBERG_RELEASE_RECEIPT),
+            serde_json::to_vec(&serde_json::json!({
+                "owner":"JchTools-xberg-download-v1", "tag":"v2098",
+                "archive_url":"https://github.com/jchanghong023/xberg/releases/download/v2098/xberg-cli-x86_64-pc-windows-msvc.zip"
+            })).unwrap(),
+        ).unwrap();
+        jchtools_foundation::xberg_settings::save_source(
+            jchtools_foundation::xberg_settings::Source::Downloaded, &legacy,
+        ).unwrap();
+        let mut fixture = ComponentFixture::new("v2099.1");
+        let installed = fixture.install(super::DownloadSelection::default()).unwrap();
+        assert_eq!(fixture.requests, [
+            super::XBERG_COMPONENT_MANIFEST,
+            "xberg-snapshot-x86_64-pc-windows-msvc.zip",
+        ]);
+        assert!(!installed.join("models/models--fixture/model.onnx").exists());
+        assert!(!installed.join("models/vad/model.onnx").exists());
+        assert_eq!(fs::read(legacy.join("xberg.exe")).unwrap(), b"legacy");
+        assert!(legacy.join("models/vad/silero_vad.onnx").is_file());
+    }
+
+    #[test]
+    fn split_damaged_installed_component_is_replaced_without_changing_original() {
+        let _guard = redirect_component_env();
+        let mut fixture = ComponentFixture::new("v2099.1");
+        let first = fixture.install(super::DownloadSelection::default()).unwrap();
+        fs::write(first.join("models/snapshot-ocr/model.onnx"), b"changed").unwrap();
+        fixture.requests.clear();
+        let replacement = fixture.install(super::DownloadSelection::default()).unwrap();
+        assert_ne!(first, replacement);
+        assert_eq!(fixture.requests.len(), 2);
+        assert_eq!(fs::read(first.join("models/snapshot-ocr/model.onnx")).unwrap(), b"changed");
+        assert_eq!(fs::read(replacement.join("models/snapshot-ocr/model.onnx")).unwrap(), b"snapshot");
+    }
+
+    #[test]
+    fn split_integrity_failures_and_cancel_preserve_active_config_and_assets() {
+        let guard = redirect_component_env();
+        let active = guard.root.path().join("user-runtime");
+        fs::create_dir(&active).unwrap();
+        fs::write(active.join("xberg.exe"), b"original engine").unwrap();
+        jchtools_foundation::xberg_settings::save(&active).unwrap();
+        let original = jchtools_foundation::xberg_settings::required().unwrap();
+        let selection = super::DownloadSelection { document: true, snapshot: true, media: true };
+        for id in super::COMPONENT_IDS {
+            let name = format!("xberg-{id}-{}.zip", super::XBERG_TARGET);
+            for failure in ["digest", "size", "cancel"] {
+                let mut fixture = ComponentFixture::new("v2099.1");
+                match failure {
+                    "digest" => {
+                        let bytes = fixture.data.get_mut(&name).unwrap();
+                        bytes[0] ^= 1;
+                    }
+                    "size" => { fixture.data.get_mut(&name).unwrap().pop(); }
+                    "cancel" => { fixture.cancel_on = Some(name.clone()); }
+                    _ => unreachable!(),
+                }
+                assert!(fixture.install(selection).is_err(), "{id}/{failure}");
+                assert_eq!(jchtools_foundation::xberg_settings::required().unwrap(), original);
+                assert_eq!(fs::read(active.join("xberg.exe")).unwrap(), b"original engine");
             }
         }
-        let mut manifest = AssetManifest {
-            schema_version: 1,
-            xberg_inference: None,
-            xberg: XbergManifest {
-                tag: "test".into(),
-                archive_url: "https://example.invalid/synthetic.zip".into(),
-                archive_size_bytes: bytes.len() as u64,
-                archive_sha256: format!("{:x}", Sha256::digest(&bytes)),
-                members,
-                licenses: Vec::new(),
-            },
-        };
-        let mut downloader = Download(bytes);
-        let cancel = AtomicBool::new(false);
-        let installed =
-            super::download_runtime_with(&manifest, &cancel, &mut |_| {}, &mut downloader).unwrap();
-        // 覆盖 T-06/XB-10：已校验下载须持久记录精确来源，而非仅凭 tag 推断。
-        let receipt: serde_json::Value = serde_json::from_slice(
-            &fs::read(installed.join(super::XBERG_RELEASE_RECEIPT)).unwrap(),
-        )
-        .unwrap();
-        assert_eq!(
-            receipt["archive_url"].as_str(),
-            Some(manifest.xberg.archive_url.as_str()),
-            "发布记录必须保留本次实际采用的下载来源"
+        let mut fixture = ComponentFixture::new("v2099.1");
+        fixture.data.get_mut(super::XBERG_COMPONENT_MANIFEST).unwrap()[0] ^= 1;
+        assert!(fixture.install(selection).is_err());
+        assert_eq!(jchtools_foundation::xberg_settings::required().unwrap(), original);
+        let mut fixture = ComponentFixture::new("v2099.1");
+        fixture.manifest["components"][1]["members"][1]["sha256"] = serde_json::json!("0".repeat(64));
+        fixture.refresh_release();
+        assert!(fixture.install(selection).unwrap_err().contains("模型身份"));
+        assert_eq!(jchtools_foundation::xberg_settings::required().unwrap(), original);
+    }
+
+    #[test]
+    fn split_metadata_rejects_legacy_only_release_and_untrusted_assets() {
+        let _guard = redirect_component_env();
+        let mut empty = ComponentFixture::new("v2099.1");
+        assert!(empty.install(super::DownloadSelection {
+            document: false, snapshot: false, media: false,
+        }).unwrap_err().contains("至少选择"));
+        assert!(empty.requests.is_empty());
+        let mut fixture = ComponentFixture::new("v2099.1");
+        fixture.release["assets"].as_array_mut().unwrap().retain(
+            |asset| asset["name"] == super::XBERG_COMPONENT_MANIFEST,
         );
-        assert_eq!(
-            fs::read(installed.join("models/snapshot-ocr/det.onnx")).unwrap(),
-            b"model"
-        );
-        assert_eq!(
-            jchtools_foundation::xberg_settings::required().unwrap(),
-            installed.canonicalize().unwrap()
-        );
-        assert_eq!(
-            jchtools_foundation::xberg_settings::settings().unwrap().custom.unwrap(),
-            custom.canonicalize().unwrap()
-        );
-        manifest.xberg.members[1].sha256 = "0".repeat(64);
-        assert!(
-            super::download_runtime_with(&manifest, &cancel, &mut |_| {}, &mut downloader).is_err()
-        );
-        assert_eq!(
-            jchtools_foundation::xberg_settings::required().unwrap(),
-            installed.canonicalize().unwrap()
-        );
-        assert!(super::download_runtime_with(
-            &manifest,
-            &AtomicBool::new(true),
-            &mut |_| {},
-            &mut downloader
-        )
-        .is_err());
-        assert_eq!(fs::read(custom.join("xberg.exe")).unwrap(), b"existing");
-        assert!(
-            user_staging.exists(),
-            "无 ownership marker 的用户 staging 必须保留"
-        );
-        let remaining_staging: Vec<String> = fs::read_dir(installed.parent().unwrap())
-            .unwrap()
-            .flatten()
-            .filter_map(|entry| {
-                entry
-                    .file_name()
-                    .to_str()
-                    .map(str::to_string)
-                    .filter(|name| name.starts_with(".staging-"))
-            })
-            .collect();
-        assert_eq!(
-            remaining_staging,
-            vec![".staging-user".to_string()],
-            "本轮带 ownership marker 的 staging 必须清除，用户目录必须保留"
-        );
+        assert!(fixture.install(super::DownloadSelection::default()).unwrap_err().contains("不会回退"));
+        assert!(fixture.requests.is_empty());
+        for field in ["digest", "browser_download_url"] {
+            let mut fixture = ComponentFixture::new("v2099.1");
+            fixture.release["assets"][0][field] = serde_json::json!("https://example.invalid/wrong");
+            assert!(fixture.install(super::DownloadSelection::default()).is_err());
+            assert!(fixture.requests.is_empty());
+        }
+        let mut fixture = ComponentFixture::new("v2099.1");
+        let duplicate = fixture.release["assets"][0].clone();
+        fixture.release["assets"].as_array_mut().unwrap().push(duplicate);
+        assert!(fixture.install(super::DownloadSelection::default()).is_err());
+        assert!(fixture.requests.is_empty());
+    }
+
+    #[test]
+    fn split_member_integrity_overlap_and_zip_safety_failures_preserve_active_install() {
+        use std::io::{Cursor, Write};
+        let _guard = redirect_component_env();
+        let mut first = ComponentFixture::new("v2099.1");
+        let active = first.install(super::DownloadSelection::default()).unwrap();
+        let original = jchtools_foundation::xberg_settings::required().unwrap();
+        for failure in ["member_digest", "member_missing", "member_extra", "unsafe_path", "overlap"] {
+            let mut fixture = ComponentFixture::new("v2099.2");
+            let name = "xberg-snapshot-x86_64-pc-windows-msvc.zip";
+            if failure == "overlap" {
+                fixture.manifest["components"][1]["members"][0]["sha256"] = serde_json::json!("0".repeat(64));
+            } else {
+                let mut zip = zip::ZipWriter::new(Cursor::new(Vec::new()));
+                let mut files = vec![
+                    ("xberg.exe".to_string(), b"shared engine".as_slice()),
+                    ("LICENSE".to_string(), b"shared license".as_slice()),
+                ];
+                if failure != "member_missing" {
+                    files.push(("models/snapshot-ocr/model.onnx".into(),
+                        if failure == "member_digest" { b"wrong".as_slice() } else { b"snapshot".as_slice() }));
+                }
+                if failure == "member_extra" { files.push(("extra.bin".into(), b"extra")); }
+                if failure == "unsafe_path" { files.push(("../escape.bin".into(), b"escape")); }
+                for (path, bytes) in files {
+                    zip.start_file(
+                        format!("{}/{path}", super::XBERG_ARCHIVE_PREFIX),
+                        zip::write::SimpleFileOptions::default(),
+                    ).unwrap();
+                    zip.write_all(bytes).unwrap();
+                }
+                let bytes = zip.finish().unwrap().into_inner();
+                fixture.manifest["components"][1]["size_bytes"] = serde_json::json!(bytes.len());
+                fixture.manifest["components"][1]["sha256"] = serde_json::json!(format!("{:x}", Sha256::digest(&bytes)));
+                fixture.data.insert(name.into(), bytes);
+            }
+            fixture.refresh_release();
+            assert!(fixture.install(super::DownloadSelection::default()).is_err(), "{failure}");
+            assert_eq!(jchtools_foundation::xberg_settings::required().unwrap(), original);
+            assert_eq!(fs::read(active.join("xberg.exe")).unwrap(), b"shared engine");
+        }
     }
 
     // 覆盖 T-05/T-06（XB-01/XB-12）：媒体组件按在位校验，齐全时返回组件目录。
@@ -1601,165 +1805,83 @@ mod tests {
     }
 
 
-    // 覆盖 T-05/XB-20：取消在任何提交动作（rename/notice/save_source）之前的
-    // 检查点被观测到时，任务必须以取消错误结束——SQLite 不写 downloaded、
-    // 不留已安装目录、staging 清理（取消不覆盖有效配置）。
     #[test]
     fn download_cancel_before_commit_keeps_config_untouched() {
-        use super::{AssetFile, AssetManifest, XbergManifest};
-        use std::sync::atomic::Ordering;
         let _guard = redirect_component_env();
-        let mut writer = zip::ZipWriter::new(std::io::Cursor::new(Vec::new()));
-        writer
-            .start_file(
-                "xberg-cli-x86_64-pc-windows-msvc/xberg.exe",
-                zip::write::SimpleFileOptions::default(),
-            )
-            .unwrap();
-        use std::io::Write as _;
-        writer.write_all(b"engine").unwrap();
-        let bytes = writer.finish().unwrap().into_inner();
-        // 下载完成后置取消：任务必须在进入提交段前停止。
-        struct CancelAtEnd(Vec<u8>);
-        impl AssetDownloader for CancelAtEnd {
-            fn download(
-                &mut self,
-                _: &str,
-                destination: &Path,
-                _: u64,
-                _: &str,
-                cancel: &AtomicBool,
-                _: &mut dyn FnMut(String),
-            ) -> Result<(), String> {
-                fs::write(destination, &self.0).map_err(|e| e.to_string())?;
-                cancel.store(true, Ordering::Release);
-                Ok(())
-            }
-        }
-        let manifest = AssetManifest {
-            schema_version: 1,
-            xberg_inference: None,
-            xberg: XbergManifest {
-                tag: "vcancel-test".into(),
-                archive_url: "https://example.invalid/synthetic.zip".into(),
-                archive_size_bytes: bytes.len() as u64,
-                archive_sha256: sha256_bytes(&bytes),
-                members: vec![AssetFile {
-                    path: "xberg.exe".into(),
-                    size_bytes: 6,
-                    sha256: sha256_bytes(b"engine"),
-                }],
-                licenses: Vec::new(),
-            },
-        };
-        let cancel = AtomicBool::new(false);
-        let error =
-            super::download_runtime_with(&manifest, &cancel, &mut |_| {}, &mut CancelAtEnd(bytes))
-                .expect_err("下载尾置取消必须在提交前停止");
-        assert!(error.contains("取消"), "错误必须是取消语义：{error}");
-        assert!(
-            jchtools_foundation::xberg_settings::settings()
-                .unwrap()
-                .downloaded
-                .is_none(),
-            "取消后不得写 downloaded 来源"
-        );
-        let base = jchtools_foundation::xberg_settings::state_dir()
-            .unwrap()
-            .join("xberg-downloads");
-        let leftovers: Vec<String> = fs::read_dir(&base)
-            .map(|entries| {
-                entries
-                    .flatten()
-                    .filter_map(|entry| entry.file_name().to_str().map(str::to_string))
-                    .collect()
-            })
-            .unwrap_or_default();
-        assert!(
-            leftovers.is_empty(),
-            "取消后不得残留 staging 或已安装目录：{leftovers:?}"
-        );
+        let mut fixture = ComponentFixture::new("v2099.1");
+        fixture.cancel_on = Some("xberg-snapshot-x86_64-pc-windows-msvc.zip".into());
+        assert!(fixture.install(super::DownloadSelection::default()).unwrap_err().contains("取消"));
+        assert!(jchtools_foundation::xberg_settings::settings().unwrap().downloaded.is_none());
+        let base = jchtools_foundation::xberg_settings::state_dir().unwrap().join("xberg-downloads");
+        assert_eq!(fs::read_dir(base).unwrap().count(), 0);
     }
 
-    // 覆盖 T-05/T-06（回归：设置页下载安装成功后必须直接满足文档场景
-    // readiness——修复前 notice 唯一写点在 initialize_staged，下载完成后
-    // readiness 仍因「许可证 notice 不存在」阻断转换，用户还得再点一次初始化）。
     #[test]
     fn download_runtime_write_notice_closes_readiness_loop() {
-        use super::{AssetFile, AssetManifest, XbergManifest};
-        use std::io::Write as _;
         let guard = redirect_component_env();
-        // 合成发布包：覆盖真实清单 xberg 段全部成员（字节为桩，清单值按桩字节
-        // 计算），使安装后 validate_runtime_dir 的 document 场景存在性检查通过；
-        // 断言核心是 readiness 的 notice 检查不再失败。
-        let real = load_manifest().expect("内置清单必须可解析");
-        let mut archive = zip::ZipWriter::new(std::io::Cursor::new(Vec::new()));
-        let mut members = Vec::new();
-        for member in &real.xberg.members {
-            let bytes = format!("stub-{}", member.path).into_bytes();
-            archive
-                .start_file(
-                    format!("xberg-cli-x86_64-pc-windows-msvc/{}", member.path),
-                    zip::write::SimpleFileOptions::default(),
-                )
-                .unwrap();
-            archive.write_all(&bytes).unwrap();
-            members.push(AssetFile {
-                path: member.path.clone(),
-                size_bytes: bytes.len() as u64,
-                sha256: sha256_bytes(&bytes),
-            });
-        }
-        let bytes = archive.finish().unwrap().into_inner();
-        struct Download(Vec<u8>);
-        impl AssetDownloader for Download {
-            fn download(
-                &mut self,
-                _: &str,
-                destination: &Path,
-                _: u64,
-                _: &str,
-                _: &AtomicBool,
-                _: &mut dyn FnMut(String),
-            ) -> Result<(), String> {
-                fs::write(destination, &self.0).map_err(|e| e.to_string())
+        let mut fixture = ComponentFixture::new("v2099.1");
+        // 字节为合成资产，公开 readiness 仍按真实路径检查存在性，不能据此声称模型推理通过。
+        fixture.use_known_runtime_paths();
+        let installed = fixture.install(super::DownloadSelection {
+            document: true, snapshot: true, media: true,
+        }).unwrap();
+        assert!(super::validate_media().is_ok());
+        assert!(super::readiness().is_ok());
+        assert!(guard.root.path().join("licenses/THIRD_PARTY_NOTICES.md").is_file());
+        assert!(installed.is_dir());
+    }
+
+    #[test]
+    fn split_sqlite_commit_failure_rolls_back_new_install_only() {
+        let guard = redirect_component_env();
+        let active = guard.root.path().join("user-runtime");
+        fs::create_dir(&active).unwrap();
+        fs::write(active.join("xberg.exe"), b"original").unwrap();
+        jchtools_foundation::xberg_settings::save(&active).unwrap();
+        let original = jchtools_foundation::xberg_settings::required().unwrap();
+        let db = jchtools_foundation::xberg_settings::open(
+            &jchtools_foundation::xberg_settings::state_dir().unwrap(),
+        ).unwrap();
+        db.execute_batch(
+            "CREATE TRIGGER reject_download_source BEFORE INSERT ON app_settings
+             WHEN NEW.key='xberg_source' AND NEW.value='downloaded'
+             BEGIN SELECT RAISE(ABORT,'injected commit failure'); END;",
+        ).unwrap();
+        let mut fixture = ComponentFixture::new("v2099.1");
+        assert!(fixture.install(super::DownloadSelection::default()).is_err());
+        assert_eq!(jchtools_foundation::xberg_settings::required().unwrap(), original);
+        assert_eq!(fs::read(active.join("xberg.exe")).unwrap(), b"original");
+        let base = jchtools_foundation::xberg_settings::state_dir().unwrap().join("xberg-downloads");
+        assert_eq!(fs::read_dir(base).unwrap().count(), 0);
+    }
+
+    #[test]
+    fn split_notice_failure_preserves_active_assets_and_config() {
+        let guard = redirect_component_env();
+        let state = jchtools_foundation::xberg_settings::state_dir().unwrap();
+        let active = guard.root.path().join("user-runtime");
+        fs::create_dir(&active).unwrap();
+        fs::write(active.join("xberg.exe"), b"original").unwrap();
+        jchtools_foundation::xberg_settings::save(&active).unwrap();
+        let original = jchtools_foundation::xberg_settings::required().unwrap();
+        let blocker = guard.root.path().join("notice-root-file");
+        fs::write(&blocker, b"keep").unwrap();
+        struct RestoreRoots<'a>(&'a Path);
+        impl Drop for RestoreRoots<'_> {
+            fn drop(&mut self) {
+                std::env::remove_var("JCHTOOLS_TEST_STATE_DIR");
+                std::env::set_var("JCHTOOLS_MARKDOWN_TEST_ASSET_ROOT", self.0);
             }
         }
-        let manifest = AssetManifest {
-            schema_version: 1,
-            xberg_inference: None,
-            xberg: XbergManifest {
-                tag: "vdownload-notice-test".into(),
-                archive_url: "https://example.invalid/synthetic.zip".into(),
-                archive_size_bytes: bytes.len() as u64,
-                archive_sha256: sha256_bytes(&bytes),
-                members,
-                licenses: Vec::new(),
-            },
-        };
-        let cancel = AtomicBool::new(false);
-        let installed =
-            super::download_runtime_with(&manifest, &cancel, &mut |_| {}, &mut Download(bytes))
-                .expect("合成下载安装应成功");
-        // 媒体场景不受影响：无推理段时在位校验照常。
-        assert!(super::validate_media().is_ok());
-        // 断言链：notice 存在且文档场景 readiness 通过（修复前在此失败）。
-        let notice = guard
-            .root
-            .path()
-            .join("licenses")
-            .join("THIRD_PARTY_NOTICES.md");
-        assert!(
-            notice.is_file(),
-            "下载安装成功后必须写入 notice：{}",
-            notice.display()
-        );
-        assert!(
-            super::readiness().is_ok(),
-            "下载完成即应满足文档场景 readiness：{:?}",
-            super::readiness()
-        );
-        assert!(installed.is_dir());
+        let _restore = RestoreRoots(guard.root.path());
+        std::env::set_var("JCHTOOLS_TEST_STATE_DIR", &state);
+        std::env::set_var("JCHTOOLS_MARKDOWN_TEST_ASSET_ROOT", &blocker);
+        let mut fixture = ComponentFixture::new("v2099.1");
+        assert!(fixture.install(super::DownloadSelection::default()).is_err());
+        assert_eq!(jchtools_foundation::xberg_settings::required().unwrap(), original);
+        assert_eq!(fs::read(active.join("xberg.exe")).unwrap(), b"original");
+        assert_eq!(fs::read(blocker).unwrap(), b"keep");
+        assert_eq!(fs::read_dir(state.join("xberg-downloads")).unwrap().count(), 0);
     }
 
     // 覆盖 XB-19：保存共享目录时不强制其他场景的模型就绪；每个功能仅在自身
@@ -2140,7 +2262,7 @@ mod tests {
         .expect("预置残留文件");
 
         let cancel = AtomicBool::new(false);
-        // 后续阶段会因未选择 Xberg 运行目录而失败，属预期；本用例只断言入口清理。
+        // 后续阶段会因尚未下载 Xberg 功能组件而失败；本用例只断言入口清理。
         let _ = super::initialize(&cancel, |_message: String| {});
 
         assert!(
@@ -2243,7 +2365,7 @@ mod tests {
         fs::create_dir_all(&keep_backup).expect("预置旧备份残留");
 
         let cancel = AtomicBool::new(false);
-        // 后续阶段会因未选择 Xberg 运行目录而失败，属预期；本用例只断言入口清理。
+        // 后续阶段会因尚未下载 Xberg 功能组件而失败；本用例只断言入口清理。
         let _ = super::initialize(&cancel, |_message: String| {});
 
         assert!(
@@ -2298,9 +2420,8 @@ mod tests {
         );
     }
 
-    // 覆盖 T-06（2026-10-02 随 XB-09 修订）：用户指定的 Xberg 运行目录只做
-    // document 场景成员存在性检查——文件被替换为不同字节（用户自行更新引擎
-    // 版本）必须放行；成员缺失时明确指出缺失项，不执行不完整环境。
+    // 覆盖 T-06（XB-09）：已下载的 Xberg 运行目录只做 document 场景成员
+    // 存在性检查；文件被用户替换为不同字节仍须放行，缺失时明确指认成员。
     #[test]
     fn validate_runtime_dir_presence_only_accepts_replaced_engine() {
         let temp = tempfile::tempdir().expect("创建测试目录");

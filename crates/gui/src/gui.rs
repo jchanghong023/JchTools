@@ -13,6 +13,7 @@ use jchtools_file_core::{
     db::Database,
     model::{bytes, ActionKind, Summary},
 };
+use jchtools_foundation::xberg_settings::{self, DownloadSelection};
 use jchtools_git_tools::git_tools::{self, GitShared, BACKOFF_UNIT};
 use jchtools_markdown::{
     markdown::{self, FormatGroup},
@@ -803,6 +804,10 @@ struct State {
     convert_readiness_missed: bool,
     /// 设置操作代际：启动时的旧配置读取不得覆盖之后保存的配置或错误。
     settings_generation: u64,
+    /// 最近一次从持久配置确认的选择；保存失败时只回滚选择，不改活动引擎。
+    settings_saved_selection: Option<DownloadSelection>,
+    #[cfg(test)]
+    settings_download: Option<Arc<SettingsDownload>>,
     /// 转 Markdown 启动前场景预检代际。
     convert_preflight_generation: u64,
     /// 截图 OCR（O 分区）：可选组件初始化的取消信号（O-06 取消/重试语义）。
@@ -3984,17 +3989,25 @@ impl UiPump {
         let Ok(value) = serde_json::from_str::<serde_json::Value>(payload) else {
             return;
         };
-        ui.set_settings_custom_dir(value["custom"].as_str().unwrap_or_default().into());
-        ui.set_settings_downloaded_dir(value["downloaded"].as_str().unwrap_or_default().into());
-        ui.set_settings_source(i32::from(value["downloaded_active"] == true));
+        if apply_saved_settings_selection(ui, &self.state, &value) {
+            ui.set_settings_loaded(true);
+            ui.set_settings_load_failed(false);
+        }
+        ui.set_settings_document_status(
+            value["document_status"].as_str().unwrap_or("未下载").into(),
+        );
+        ui.set_settings_snapshot_status(
+            value["snapshot_status"].as_str().unwrap_or("未下载").into(),
+        );
+        ui.set_settings_media_status(value["media_status"].as_str().unwrap_or("未下载").into());
         let active = value["active"].as_str().unwrap_or_default();
         ui.set_convert_runtime_dir(active.into());
         ui.set_convert_runtime_confirmed(!active.is_empty());
         ui.set_settings_status(
             if active.is_empty() {
-                "请选择已有目录或主动下载 Xberg"
+                "请选择所需功能并下载 Xberg 组件"
             } else {
-                "配置已持久保存；后台自动连接，重启无需重新配置"
+                "功能选择已保存；组件状态见上方"
             }
             .into(),
         );
@@ -4037,8 +4050,16 @@ impl UiPump {
         for event in self.receiver.try_iter().take(256) {
             match event {
                 Event::Status(text) => {
-                    if let Some(message) = text.strip_prefix("SETTINGS_PROGRESS|") {
-                        ui.set_settings_status(message.into());
+                    if let Some(rest) = text.strip_prefix("SETTINGS_PROGRESS|") {
+                        let Some((generation, message)) = rest.split_once('|') else {
+                            continue;
+                        };
+                        if generation.parse::<u64>().ok()
+                            == Some(self.state.borrow().settings_generation)
+                            && ui.get_convert_initializing()
+                        {
+                            ui.set_settings_status(message.into());
+                        }
                         continue;
                     }
 
@@ -4371,62 +4392,43 @@ impl UiPump {
                         self.apply_settings_snapshot(ui, payload, false);
                         continue;
                     }
-                    if let Some(payload) = text.strip_prefix("SETTINGS_READY|") {
+                    if let Some(rest) = text.strip_prefix("SETTINGS_READY|") {
+                        let Some((generation, payload)) = rest.split_once('|') else {
+                            continue;
+                        };
+                        if generation.parse::<u64>().ok()
+                            != Some(self.state.borrow().settings_generation)
+                        {
+                            continue;
+                        }
                         self.apply_settings_snapshot(ui, payload, true);
                         continue;
                     }
-
-                    if let Some(rest) = text.strip_prefix("CONVERTER_RUNTIME_SAVED|") {
-                        let mut fields = rest.splitn(2, '|');
-                        let generation = fields.next().and_then(|value| value.parse::<u64>().ok());
-                        let path = fields.next().unwrap_or_default();
-                        let accepted = generation.is_some_and(|generation| {
-                            let s = self.state.borrow();
-                            s.convert_readiness_generation == generation
-                                && ui.get_convert_runtime_saving()
-                        });
-                        if accepted {
-                            ui.set_convert_runtime_saving(false);
-                            ui.set_convert_runtime_confirmed(true);
-                            ui.set_convert_runtime_dir(path.into());
-                            ui.set_convert_status("正在检查已安装组件…".into());
-                            start_markdown_readiness(ui, &self.state, &self.out);
-                            start_snap_readiness(ui, &self.state, &self.out);
-                            ui.set_notice_text("共享 Xberg 目录已保存，重启后自动恢复".into());
-                            if self.close_after_if_idle(ui) {
-                                let _ = slint::quit_event_loop();
-                            }
+                    if let Some(rest) = text.strip_prefix("SETTINGS_FEATURES|") {
+                        let Some((generation, payload)) = rest.split_once('|') else {
+                            continue;
+                        };
+                        if generation.parse::<u64>().ok()
+                            != Some(self.state.borrow().settings_generation)
+                        {
+                            continue;
                         }
-                    } else if text == "CONVERTER_INIT_OK" {
-                        self.state.borrow_mut().convert_init_cancel = None;
-                        ui.set_convert_initializing(false);
-                        ui.set_convert_ready(false);
-                        ui.set_convert_status("初始化完成，正在重新检查可选组件…".into());
-                        if ui.get_screen() == 5 {
-                            ui.set_notice_text(
-                                "转 Markdown 组件初始化完成，正在校验运行目录".into(),
+                        if let Ok(value) = serde_json::from_str::<serde_json::Value>(payload) {
+                            apply_saved_settings_selection(ui, &self.state, &value);
+                            ui.set_settings_document_status(
+                                value["document_status"].as_str().unwrap_or("未下载").into(),
+                            );
+                            ui.set_settings_snapshot_status(
+                                value["snapshot_status"].as_str().unwrap_or("未下载").into(),
+                            );
+                            ui.set_settings_media_status(
+                                value["media_status"].as_str().unwrap_or("未下载").into(),
                             );
                         }
-                        let closing = self.state.borrow().close_after;
-                        if self.close_after_if_idle(ui) {
-                            let _ = slint::quit_event_loop();
-                        } else if !closing {
-                            start_markdown_readiness(ui, &self.state, &self.out);
-                        }
-                    } else if let Some(error) = text.strip_prefix("CONVERTER_INIT_CANCELLED|") {
-                        self.state.borrow_mut().convert_init_cancel = None;
-                        ui.set_convert_initializing(false);
-                        ui.set_convert_ready(false);
-                        ui.set_convert_status("初始化已取消，可稍后重试".into());
-                        if ui.get_screen() == 5 {
-                            ui.set_notice_text(format!("转 Markdown 初始化已取消：{error}").into());
-                        }
-                        if self.close_after_if_idle(ui) {
-                            let _ = slint::quit_event_loop();
-                        }
-                    } else {
-                        ui.set_notice_text(text.into());
+                        continue;
                     }
+
+                    ui.set_notice_text(text.into());
                 }
                 // Error 更新错误文案。
                 // 计划筛选曾乐观置「加载中…」：失败必须恢复分页控件，避免永久中间态。
@@ -4439,15 +4441,36 @@ impl UiPump {
                             == Some(self.state.borrow().settings_generation)
                         {
                             ui.set_settings_status(error.into());
+                            if !ui.get_settings_loaded() {
+                                ui.set_settings_load_failed(true);
+                            }
                         }
                         continue;
                     }
 
-                    if let Some(error) = text.strip_prefix("SETTINGS_ERROR|") {
+                    if let Some(rest) = text.strip_prefix("SETTINGS_ERROR|") {
+                        let Some((generation, error)) = rest.split_once('|') else {
+                            continue;
+                        };
+                        if generation.parse::<u64>().ok()
+                            != Some(self.state.borrow().settings_generation)
+                        {
+                            continue;
+                        }
                         ui.set_settings_status(error.into());
+                        if let Some(selection) = self.state.borrow().settings_saved_selection {
+                            ui.set_settings_document(selection.document);
+                            ui.set_settings_snapshot(selection.snapshot);
+                            ui.set_settings_media(selection.media);
+                        }
+                        if !ui.get_settings_loaded() {
+                            ui.set_settings_load_failed(true);
+                        }
                         ui.set_convert_initializing(false);
                         ui.set_convert_runtime_saving(false);
                         self.state.borrow_mut().convert_init_cancel = None;
+                        start_markdown_readiness(ui, &self.state, &self.out);
+                        start_snap_readiness(ui, &self.state, &self.out);
                         // U-09/S1-01：任务运行中不得消费 close_after 提前退出，关闭由
                         // 任务终态统一完成（镜像 on_close_requested 的守卫口径）。
                         if self.close_after_if_idle(ui) {
@@ -4456,61 +4479,7 @@ impl UiPump {
                         continue;
                     }
 
-                    if let Some(rest) = text.strip_prefix("CONVERTER_RUNTIME_ERR|") {
-                        let mut fields = rest.splitn(3, '|');
-                        let generation = fields.next().and_then(|value| value.parse::<u64>().ok());
-                        let error = fields.next().unwrap_or_default();
-                        let accepted = generation.is_some_and(|generation| {
-                            let s = self.state.borrow();
-                            s.convert_readiness_generation == generation
-                                && ui.get_convert_runtime_saving()
-                        });
-                        if accepted {
-                            ui.set_convert_runtime_saving(false);
-                            ui.set_convert_runtime_confirmed(false);
-                            ui.set_convert_ready(false);
-                            ui.set_convert_detail_text(error.into());
-                            ui.set_convert_detail_open(false);
-                            ui.set_convert_status("Xberg 运行目录不可用，请修正后重试".into());
-                            if matches!(ui.get_screen(), 5 | 6) {
-                                let mut s = self.state.borrow_mut();
-                                push_event_log(
-                                    &mut s.convert_logs,
-                                    format!("Xberg 运行目录校验失败：{error}"),
-                                );
-                                ui.set_convert_log_text(log_panel_text(&s.convert_logs).into());
-                                // 直接上屏后文本已是最新，清掉脏标记避免尾部重复重建。
-                                self.convert_log_dirty.set(false);
-                                let first_item = error.split('；').next().unwrap_or(error);
-                                let brief: String = first_item.chars().take(90).collect();
-                                let message = if first_item.len() < error.len()
-                                    || first_item.chars().count() > 90
-                                {
-                                    format!("{brief}… 详情见转换日志")
-                                } else {
-                                    brief
-                                };
-                                ui.set_error_text(message.into());
-                            }
-                            if self.close_after_if_idle(ui) {
-                                let _ = slint::quit_event_loop();
-                            }
-                        }
-                    } else if let Some(error) = text.strip_prefix("CONVERTER_INIT_ERR|") {
-                        self.state.borrow_mut().convert_init_cancel = None;
-                        ui.set_convert_initializing(false);
-                        ui.set_convert_ready(false);
-                        ui.set_convert_status("可选组件未就绪，请重试初始化".into());
-                        if ui.get_screen() == 5 {
-                            ui.set_convert_detail_text(error.into());
-                            ui.set_convert_detail_open(false);
-                        }
-                        if self.close_after_if_idle(ui) {
-                            let _ = slint::quit_event_loop();
-                        }
-                    } else {
-                        ui.set_error_text(text.into());
-                    }
+                    ui.set_error_text(text.into());
                     if ui.get_has_task() && !ui.get_busy() {
                         let s = self.state.borrow();
                         let page = s.page;
@@ -5129,6 +5098,9 @@ fn initial_state() -> Result<State> {
         convert_readiness_missed: false,
         convert_preflight_generation: 0,
         settings_generation: 0,
+        settings_saved_selection: None,
+        #[cfg(test)]
+        settings_download: None,
         engine_overrides: None,
         plan_load: Arc::new(PlanLoadSync::default()),
         readiness_status_pending: Cell::new(false),
@@ -5338,21 +5310,133 @@ fn settings_payload() -> Result<String, String> {
         jchtools_foundation::xberg_settings::Source::Downloaded => config.downloaded.as_ref(),
     }
     .map(|path| jchtools_file_core::platform::display_path_text(&path.display().to_string()));
+    let selection = xberg_settings::download_selection()?;
+    let feature_status = |scenario: &str| {
+        let Some(path) = active.as_ref() else {
+            return "未下载";
+        };
+        if jchtools_xberg::xberg_runtime::validate_assets(Path::new(path), scenario).is_ok() {
+            "已安装"
+        } else {
+            "组件缺失"
+        }
+    };
     Ok(serde_json::json!({
         "custom": config.custom.map(|p| jchtools_file_core::platform::display_path_text(&p.display().to_string())),
         "downloaded": config.downloaded.map(|p| jchtools_file_core::platform::display_path_text(&p.display().to_string())),
         "downloaded_active": config.source == jchtools_foundation::xberg_settings::Source::Downloaded,
-        "active": active
+        "active": active,
+        "selection": { "document": selection.document, "snapshot": selection.snapshot, "media": selection.media },
+        "document_status": feature_status("document"),
+        "snapshot_status": feature_status("snapshot"),
+        "media_status": feature_status("media")
     }).to_string())
 }
-fn send_settings_result(out: &EventSender, result: Result<String, String>) {
+#[cfg(test)]
+type SettingsDownload = dyn Fn(DownloadSelection, &std::sync::atomic::AtomicBool) -> Result<PathBuf, String>
+    + Send
+    + Sync;
+
+fn send_settings_result(out: &EventSender, generation: u64, result: Result<String, String>) {
     let event = match result {
-        Ok(payload) => Event::Notice(format!("SETTINGS_READY|{payload}")),
-        Err(error) => Event::Error(format!("SETTINGS_ERROR|{error}")),
+        Ok(payload) => Event::Notice(format!("SETTINGS_READY|{generation}|{payload}")),
+        Err(error) => {
+            // 刷新持久选择和缺损组件状态，但不替换活动来源或失败文案。
+            if let Ok(payload) = settings_payload() {
+                let _ = out.send(Event::Notice(format!(
+                    "SETTINGS_FEATURES|{generation}|{payload}"
+                )));
+            }
+            Event::Error(format!("SETTINGS_ERROR|{generation}|{error}"))
+        }
     };
     let _ = out.send(event);
 }
+
+fn settings_blocked(ui: &AppWindow, state: &Rc<RefCell<State>>, allow_load_retry: bool) -> bool {
+    !(ui.get_settings_loaded() || allow_load_retry && ui.get_settings_load_failed())
+        || ui.get_busy()
+        || ui.get_convert_initializing()
+        || ui.get_convert_preparing()
+        || ui.get_convert_runtime_saving()
+        || ui.get_snap_initializing()
+        || ui.get_confirm_kind() != 0
+        || state.borrow().close_after
+}
+
+fn settings_selection(ui: &AppWindow) -> DownloadSelection {
+    DownloadSelection {
+        document: ui.get_settings_document(),
+        snapshot: ui.get_settings_snapshot(),
+        media: ui.get_settings_media(),
+    }
+}
+
+fn apply_saved_settings_selection(
+    ui: &AppWindow,
+    state: &Rc<RefCell<State>>,
+    payload: &serde_json::Value,
+) -> bool {
+    let selection = &payload["selection"];
+    let (Some(document), Some(snapshot), Some(media)) = (
+        selection["document"].as_bool(),
+        selection["snapshot"].as_bool(),
+        selection["media"].as_bool(),
+    ) else {
+        return false;
+    };
+    ui.set_settings_document(document);
+    ui.set_settings_snapshot(snapshot);
+    ui.set_settings_media(media);
+    state.borrow_mut().settings_saved_selection = Some(DownloadSelection {
+        document,
+        snapshot,
+        media,
+    });
+    true
+}
+
+fn begin_settings(state: &Rc<RefCell<State>>) -> u64 {
+    let mut s = state.borrow_mut();
+    s.settings_generation = s.settings_generation.wrapping_add(1);
+    s.convert_readiness_generation = s.convert_readiness_generation.wrapping_add(1);
+    s.settings_generation
+}
+
 fn wire_settings(ui: &AppWindow, state: &Rc<RefCell<State>>, out: &EventSender) {
+    {
+        let weak = ui.as_weak();
+        let state = state.clone();
+        let out = out.clone();
+        ui.on_settings_selection(move |document, snapshot, media| {
+            let Some(ui) = weak.upgrade() else {
+                return;
+            };
+            if settings_blocked(&ui, &state, false) {
+                return;
+            }
+            let selection = DownloadSelection {
+                document,
+                snapshot,
+                media,
+            };
+            if selection == settings_selection(&ui) {
+                return;
+            }
+            let generation = begin_settings(&state);
+            ui.set_settings_document(document);
+            ui.set_settings_snapshot(snapshot);
+            ui.set_settings_media(media);
+            ui.set_convert_runtime_saving(true);
+            ui.set_settings_status("正在保存功能选择…".into());
+            let out = out.clone();
+            std::thread::spawn(move || {
+                let result = xberg_settings::save_download_selection(selection)
+                    .and_then(|()| settings_payload());
+                send_settings_result(&out, generation, result);
+            });
+        });
+    }
     let weak = ui.as_weak();
     let state = state.clone();
     let out = out.clone();
@@ -5360,69 +5444,58 @@ fn wire_settings(ui: &AppWindow, state: &Rc<RefCell<State>>, out: &EventSender) 
         let Some(ui) = weak.upgrade() else {
             return;
         };
-        if ui.get_busy()
-            || ui.get_convert_initializing()
-            || ui.get_convert_preparing()
-            || ui.get_convert_runtime_saving()
-        {
+        if settings_blocked(&ui, &state, action == "check") {
             return;
         }
-        if action == "choose" {
-            pick_directory(
-                &ui,
-                "选择 Xberg 运行目录",
-                ui.get_settings_custom_dir().as_str(),
-                |ui, path| {
-                    ui.set_settings_custom_dir(path.display().to_string().into());
-                },
-            );
+        if action != "download" && action != "check" {
+            ui.set_settings_status("未知设置操作".into());
             return;
         }
-        {
-            let mut s = state.borrow_mut();
-            s.settings_generation = s.settings_generation.wrapping_add(1);
-            // 保存期间到达的旧场景检查不再属于当前设置。
-            s.convert_readiness_generation = s.convert_readiness_generation.wrapping_add(1);
+        let selection = settings_selection(&ui);
+        if action == "download" && !selection.document && !selection.snapshot && !selection.media {
+            ui.set_settings_status("请至少选择一个功能".into());
+            return;
         }
+        let generation = begin_settings(&state);
+        let reload_settings = !ui.get_settings_loaded();
         let action = action.to_string();
-        let custom = PathBuf::from(ui.get_settings_custom_dir().as_str());
         let cancel =
             (action == "download").then(|| Arc::new(std::sync::atomic::AtomicBool::new(false)));
         ui.set_convert_initializing(action == "download");
-        ui.set_convert_runtime_saving(action != "download");
+        ui.set_convert_runtime_saving(action == "check");
         ui.set_settings_status("正在处理，请稍候…".into());
         state.borrow_mut().convert_init_cancel.clone_from(&cancel);
+        #[cfg(test)]
+        let download = state.borrow().settings_download.clone();
         let out = out.clone();
         std::thread::spawn(move || {
             let result = (|| {
-                match action.as_str() {
-                    "custom" => markdown_assets::save_runtime_dir(&custom)?,
-                    "downloaded" => {
-                        let saved = jchtools_foundation::xberg_settings::settings()?
-                            .downloaded
-                            .ok_or("尚未下载 Xberg")?;
-                        jchtools_xberg::xberg_runtime::validate_assets(&saved, "engine")?;
-                        jchtools_foundation::xberg_settings::select(
-                            jchtools_foundation::xberg_settings::Source::Downloaded,
-                        )?;
-                        // S3-01：转换页初始化入口移除后，历史「已下载但未写
-                        // notice」的用户没有其它修复入口，切换来源时补齐
-                        // notice（已存在则幂等），避免 readiness 卡死无解。
-                        markdown_assets::ensure_document_notice()?;
+                if action == "check" {
+                    if reload_settings {
+                        // 读取失败后的离线恢复不依赖引擎存在，也不下载或改写来源。
+                        return settings_payload();
                     }
-                    "download" => {
-                        let cancel = cancel
-                            .as_ref()
-                            .ok_or_else(|| "下载取消信号不可用".to_string())?;
-                        markdown_assets::download_runtime(cancel, |message| {
-                            let _ = out.send(Event::Status(format!("SETTINGS_PROGRESS|{message}")));
-                        })?;
+                    let saved = xberg_settings::required()?;
+                    jchtools_xberg::xberg_runtime::validate_assets(&saved, "engine")?;
+                    markdown_assets::ensure_document_notice()?;
+                } else {
+                    let cancel = cancel
+                        .as_ref()
+                        .ok_or_else(|| "下载取消信号不可用".to_string())?;
+                    #[cfg(test)]
+                    if let Some(download) = download {
+                        download(selection, cancel)?;
+                        return settings_payload();
                     }
-                    _ => return Err("未知设置操作".into()),
+                    markdown_assets::download_runtime(selection, cancel, |message| {
+                        let _ = out.send(Event::Status(format!(
+                            "SETTINGS_PROGRESS|{generation}|{message}"
+                        )));
+                    })?;
                 }
                 settings_payload()
             })();
-            send_settings_result(&out, result);
+            send_settings_result(&out, generation, result);
         });
     });
 }
@@ -5439,81 +5512,6 @@ fn wire_markdown_converter(ui: &AppWindow, state: &Rc<RefCell<State>>, out: &Eve
                         .into(),
                 );
             }
-        });
-    }
-    {
-        let weak = ui.as_weak();
-        let state = state.clone();
-        ui.on_convert_choose_runtime(move || {
-            if let Some(ui) = weak.upgrade() {
-                pick_directory(
-                    &ui,
-                    "选择 Xberg 运行目录",
-                    ui.get_convert_runtime_dir().as_str(),
-                    |ui, path| {
-                        let mut s = state.borrow_mut();
-                        s.convert_readiness_generation =
-                            s.convert_readiness_generation.wrapping_add(1);
-                        ui.set_convert_runtime_confirmed(false);
-                        ui.set_convert_ready(false);
-                        ui.set_convert_status("目录已更换，请点击「使用此目录」进行校验".into());
-                        ui.set_convert_runtime_dir(path.display().to_string().into());
-                    },
-                );
-            }
-        });
-    }
-    {
-        let weak = ui.as_weak();
-        let state = state.clone();
-        ui.on_convert_runtime_edited(move || {
-            if let Some(ui) = weak.upgrade() {
-                let mut s = state.borrow_mut();
-                s.convert_readiness_generation = s.convert_readiness_generation.wrapping_add(1);
-                ui.set_convert_runtime_confirmed(false);
-                ui.set_convert_ready(false);
-                ui.set_convert_status("目录已修改，请点击「使用此目录」重新校验".into());
-            }
-        });
-    }
-    {
-        let weak = ui.as_weak();
-        let state = state.clone();
-        let out = out.clone();
-        ui.on_convert_use_runtime(move || {
-            let Some(ui) = weak.upgrade() else {
-                return;
-            };
-            let path = PathBuf::from(ui.get_convert_runtime_dir().as_str());
-            if path.as_os_str().is_empty() {
-                ui.set_convert_runtime_confirmed(false);
-                ui.set_convert_ready(false);
-                ui.set_convert_status("请先选择 Xberg 运行目录".into());
-                return;
-            }
-            let generation = {
-                let mut s = state.borrow_mut();
-                s.convert_readiness_generation = s.convert_readiness_generation.wrapping_add(1);
-                s.convert_readiness_generation
-            };
-            ui.set_convert_ready(false);
-            ui.set_convert_runtime_confirmed(false);
-            ui.set_convert_runtime_saving(true);
-            ui.set_convert_status("正在校验并保存 Xberg 运行目录…".into());
-            let out = out.clone();
-            std::thread::spawn(move || {
-                let result = markdown_assets::save_runtime_dir(&path);
-                let event = match result {
-                    Ok(()) => Event::Notice(format!(
-                        "CONVERTER_RUNTIME_SAVED|{generation}|{}",
-                        path.display()
-                    )),
-                    Err(error) => {
-                        Event::Error(format!("CONVERTER_RUNTIME_ERR|{generation}|{error}"))
-                    }
-                };
-                let _ = out.send(event);
-            });
         });
     }
     {
@@ -5642,12 +5640,12 @@ fn start_markdown_readiness(ui: &AppWindow, state: &Rc<RefCell<State>>, out: &Ev
     if ui.get_convert_runtime_dir().trim().is_empty() {
         ui.set_convert_runtime_confirmed(false);
         ui.set_convert_ready(false);
-        ui.set_convert_status("请先保存共享 Xberg 运行目录".into());
+        ui.set_convert_status("请前往设置下载所需 Xberg 组件".into());
         return;
     }
     if !ui.get_convert_runtime_confirmed() {
         ui.set_convert_ready(false);
-        ui.set_convert_status("请点击「保存目录」保存共享 Xberg 运行目录".into());
+        ui.set_convert_status("请前往设置检查已安装组件".into());
         return;
     }
     let groups = selected_conversion_groups(ui);
@@ -8306,21 +8304,6 @@ mod gui_tests {
             app.pump.run(ui);
             assert_eq!(ui.get_convert_status().as_str(), "已停止");
 
-            // 覆盖 T-05/T-06：无效运行目录的长清单须保留在日志，错误横幅不能撑坏页面。
-            let generation = app.state.borrow().convert_readiness_generation;
-            ui.set_convert_runtime_saving(true);
-            let long_error = format!("xberg.exe 缺失；{}", "models/缺失项；".repeat(80));
-            app.pump
-                .out
-                .send(Event::Error(format!(
-                    "CONVERTER_RUNTIME_ERR|{generation}|{long_error}"
-                )))
-                .unwrap();
-            app.pump.run(ui);
-            assert!(ui.get_error_text().chars().count() <= 220);
-            assert!(ui.get_error_text().contains("xberg.exe"));
-            assert!(!ui.get_error_text().contains("models/"));
-            assert!(ui.get_convert_log_text().contains(&long_error));
 
             ui.invoke_select_tool("directory-organizer".into());
             assert_eq!(ui.get_screen(), 0, "切回目录整理必须进入旧页面");
@@ -8471,7 +8454,7 @@ mod gui_tests {
             app.pump
                 .out
                 .send(Event::Notice(
-                    "SETTINGS_READY|{\"custom\":null,\"downloaded\":null,\"downloaded_active\":false,\"active\":\"\"}"
+                    "SETTINGS_READY|0|{\"custom\":null,\"downloaded\":null,\"downloaded_active\":false,\"active\":\"\"}"
                         .into(),
                 ))
                 .unwrap();
@@ -8482,7 +8465,7 @@ mod gui_tests {
             );
             app.pump
                 .out
-                .send(Event::Error("SETTINGS_ERROR|校验失败".into()))
+                .send(Event::Error("SETTINGS_ERROR|0|校验失败".into()))
                 .unwrap();
             app.pump.run(ui);
             assert!(
@@ -8517,7 +8500,7 @@ mod gui_tests {
             ui.set_busy(true);
             app.pump
                 .out
-                .send(Event::Notice("CONVERTER_INIT_OK".into()))
+                .send(Event::Notice("SETTINGS_READY|0|{\"active\":\"\"}".into()))
                 .unwrap();
             app.pump.run(ui);
             assert!(!ui.get_convert_initializing());
@@ -8681,14 +8664,16 @@ mod gui_tests {
         with_gui(|app| {
             let ui = &app.ui;
             app.state.borrow_mut().settings_generation = 1;
-            ui.set_settings_custom_dir("D:\\new-xberg".into());
+            ui.set_settings_document(true);
+            ui.set_settings_snapshot(false);
+            ui.set_settings_media(true);
             ui.set_settings_status("新配置已保存".into());
             app.pump.out.send(Event::Notice(
-                "SETTINGS_LOADED|0|{\"custom\":\"D:\\\\old-xberg\",\"active\":\"\"}".into()
+                "SETTINGS_LOADED|0|{\"selection\":{\"document\":false,\"snapshot\":true,\"media\":false},\"active\":\"\"}".into()
             )).unwrap();
             app.pump.out.send(Event::Error("SETTINGS_LOAD_ERR|0|旧读取失败".into())).unwrap();
             app.pump.run(ui);
-            assert_eq!(ui.get_settings_custom_dir().as_str(), "D:\\new-xberg");
+            assert_eq!(settings_selection(ui), DownloadSelection { document: true, snapshot: false, media: true });
             assert_eq!(ui.get_settings_status().as_str(), "新配置已保存");
         }).unwrap();
     }
@@ -9205,6 +9190,15 @@ mod gui_tests {
             self.ui.set_convert_preparing(false);
             self.ui.set_convert_runtime_saving(false);
             self.ui.set_convert_runtime_dir("".into());
+            self.ui.set_settings_loaded(false);
+            self.ui.set_settings_load_failed(false);
+            self.ui.set_settings_document(false);
+            self.ui.set_settings_snapshot(true);
+            self.ui.set_settings_media(false);
+            self.ui.set_settings_document_status("未下载".into());
+            self.ui.set_settings_snapshot_status("未下载".into());
+            self.ui.set_settings_media_status("未下载".into());
+            self.ui.set_settings_status("正在读取配置…".into());
             self.ui.set_convert_status("尚未检查可选组件".into());
             self.ui.set_convert_detail_text("".into());
             self.ui.set_convert_detail_open(false);
@@ -9385,60 +9379,79 @@ mod gui_tests {
         })
     }
 
-    // 覆盖 XB-20/XB-21/XB-24：设置页真实保存回调、持久结果和页面隔离。
-    #[test]
-    fn shared_settings_rejects_invalid_assets_and_keeps_saved_source() {
-        with_gui(|app| {
-            let _lock = jchtools_foundation::test_support::env_lock()
-                .lock()
-                .unwrap_or_else(std::sync::PoisonError::into_inner);
-            let root = tempfile::tempdir().unwrap();
-            struct Restore(Option<std::ffi::OsString>);
-            impl Drop for Restore {
-                fn drop(&mut self) {
-                    if let Some(value) = &self.0 {
-                        std::env::set_var("JCHTOOLS_TEST_STATE_DIR", value);
-                    } else {
-                        std::env::remove_var("JCHTOOLS_TEST_STATE_DIR");
+    fn with_settings_fixture(action: impl FnOnce(&Path)) {
+        let _lock = jchtools_foundation::test_support::env_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let root = tempfile::tempdir().unwrap();
+        struct Restore(Vec<(&'static str, Option<std::ffi::OsString>)>);
+        impl Drop for Restore {
+            fn drop(&mut self) {
+                for (key, value) in &self.0 {
+                    match value {
+                        Some(value) => std::env::set_var(key, value),
+                        None => std::env::remove_var(key),
                     }
                 }
             }
-            let _restore = Restore(std::env::var_os("JCHTOOLS_TEST_STATE_DIR"));
-            std::env::set_var("JCHTOOLS_TEST_STATE_DIR", root.path());
-            std::fs::write(root.path().join("xberg.exe"), b"settings fixture").unwrap();
+        }
+        let keys = ["JCHTOOLS_TEST_STATE_DIR", "JCHTOOLS_MARKDOWN_TEST_ASSET_ROOT"];
+        let _restore = Restore(keys.into_iter().map(|key| (key, std::env::var_os(key))).collect());
+        std::env::set_var(keys[0], root.path().join("state"));
+        std::env::set_var(keys[1], root.path().join("markdown"));
+        action(root.path());
+    }
+
+    fn deliver_settings_loaded(app: &GuiTestApp) {
+        let generation = app.state.borrow().settings_generation;
+        app.pump.out.send(Event::Notice(format!(
+            "SETTINGS_LOADED|{generation}|{}",
+            settings_payload().unwrap()
+        ))).unwrap();
+        app.pump.run(&app.ui);
+    }
+
+    // Real offline callback repairs only the notice and never enters the downloader or changes legacy source.
+    #[test]
+    fn installed_components_check_preserves_legacy_source_and_restores_notice_offline() {
+        with_gui(|app| with_settings_fixture(|root| {
+            let engine = root.join("legacy");
+            let manifest: serde_json::Value = serde_json::from_str(include_str!("../../../resources/markdown-assets.json")).unwrap();
+            for member in manifest["xberg"]["members"].as_array().unwrap() {
+                let path = member["path"].as_str().unwrap();
+                if jchtools_xberg::xberg_runtime::asset_for_scenario(path, "engine") {
+                    let target = engine.join(path);
+                    std::fs::create_dir_all(target.parent().unwrap()).unwrap();
+                    std::fs::write(target, b"presence-only fixture").unwrap();
+                }
+            }
+            xberg_settings::save(&engine).unwrap();
+            let saved = xberg_settings::settings().unwrap();
+            app.state.borrow_mut().settings_download = Some(Arc::new(|_, _| panic!("offline check downloaded assets")));
+            let notice = root.join("markdown/licenses/THIRD_PARTY_NOTICES.md");
+            assert!(!notice.exists());
             let ui = &app.ui;
-            ui.set_convert_runtime_saving(false);
-            ui.set_convert_initializing(false);
+            deliver_settings_loaded(app);
             ui.invoke_navigation(7);
             assert_eq!(ui.get_screen(), 7);
             assert!(ui.get_active_tool_id().is_empty());
-            jchtools_foundation::xberg_settings::save(root.path()).unwrap();
-            app.pump
-                .out
-                .send(Event::Notice(format!(
-                    "SETTINGS_READY|{}",
-                    settings_payload().unwrap()
-                )))
-                .unwrap();
-            app.pump.run(ui);
-            ui.set_settings_custom_dir(root.path().display().to_string().into());
-            ui.invoke_settings_action("custom".into());
+            ui.invoke_settings_action("check".into());
+            assert!(ui.get_convert_runtime_saving());
             assert!(pump_until(app, || !ui.get_convert_runtime_saving()));
+            assert!(notice.is_file());
             assert!(ui.get_convert_runtime_confirmed());
-            // XB-19/XB-26：保存只要求 xberg.exe 在场（含根可执行），场景资产按
-            // 各功能就绪检查分别校验；成功必须给出持久保存确认（XB-18）。
-            assert!(ui.get_settings_status().contains("配置已持久保存"));
-            assert_eq!(
-                jchtools_foundation::xberg_settings::required().unwrap(),
-                root.path().canonicalize().unwrap()
-            );
-            let saved = ui.get_convert_runtime_dir();
-            ui.set_settings_custom_dir(root.path().join("missing").display().to_string().into());
-            ui.invoke_settings_action("custom".into());
+            assert_eq!(ui.get_settings_document_status().as_str(), "组件缺失");
+            assert_eq!(ui.get_settings_snapshot_status().as_str(), "组件缺失");
+            assert_eq!(ui.get_settings_media_status().as_str(), "组件缺失");
+            let current = xberg_settings::settings().unwrap();
+            assert_eq!((current.source, &current.custom, &current.downloaded), (saved.source, &saved.custom, &saved.downloaded));
+            std::fs::remove_file(engine.join("xberg.exe")).unwrap();
+            let active = ui.get_convert_runtime_dir();
+            ui.invoke_settings_action("check".into());
             assert!(pump_until(app, || !ui.get_convert_runtime_saving()));
-            assert_eq!(ui.get_convert_runtime_dir(), saved);
-            // 保存校验不再强制无关场景资产：缺目录由 xberg.exe 在场校验直接拒绝，
-            // 状态行必须说明具体拒绝原因（XB-20），已保存来源保持不变。
+            assert_eq!(ui.get_convert_runtime_dir(), active);
+            let current = xberg_settings::settings().unwrap();
+            assert_eq!((current.source, &current.custom, &current.downloaded), (saved.source, &saved.custom, &saved.downloaded));
             assert!(ui.get_settings_status().contains("xberg.exe"));
             ui.invoke_select_tool("snap-ocr".into());
             assert_eq!(ui.get_screen(), 6);
@@ -9460,7 +9473,7 @@ mod gui_tests {
                 ui.get_snap_error()
             );
             assert!(ui.get_snap_service_status().contains("已从托盘退出"));
-        })
+        }))
         .unwrap();
     }
 
@@ -9975,8 +9988,6 @@ mod gui_tests {
             "md-output",
             "md-split",
             "git",
-            "runtime",
-            "custom",
             "convert-input",
             "convert-output",
         ];
@@ -9990,8 +10001,6 @@ mod gui_tests {
             ui.set_md_output_dir(root.join("md-output").display().to_string().into());
             ui.set_md_split_dir(root.join("md-split").display().to_string().into());
             ui.set_git_repo(root.join("git").display().to_string().into());
-            ui.set_convert_runtime_dir(root.join("runtime").display().to_string().into());
-            ui.set_settings_custom_dir(root.join("custom").display().to_string().into());
             ui.set_convert_input_dir(root.join("convert-input").display().to_string().into());
             ui.set_convert_output_dir(root.join("convert-output").display().to_string().into());
             for entered in [
@@ -9999,8 +10008,6 @@ mod gui_tests {
                 ui.get_md_output_dir(),
                 ui.get_md_split_dir(),
                 ui.get_git_repo(),
-                ui.get_convert_runtime_dir(),
-                ui.get_settings_custom_dir(),
                 ui.get_convert_input_dir(),
                 ui.get_convert_output_dir(),
             ] {
@@ -12484,56 +12491,285 @@ mod gui_tests {
         .unwrap();
     }
 
-    // 覆盖 T-06 / XB-19（共享 Xberg 目录：编辑即失效就绪与已确认；空目录直接拒绝；
-    // 无效目录后台校验失败回传后不得标记已确认）
     #[test]
-    fn convert_runtime_edit_and_use_directory_revalidation_flow() {
-        with_gui(|app| {
+    fn settings_startup_pending_selection_cannot_replace_saved_choice() {
+        with_gui(|app| with_settings_fixture(|_| {
+            let saved = DownloadSelection { document: false, snapshot: false, media: true };
+            xberg_settings::save_download_selection(saved).unwrap();
+            let generation = app.state.borrow().settings_generation;
+            let payload = settings_payload().unwrap();
             let ui = &app.ui;
-            ui.set_convert_ready(true);
+            let initial = settings_selection(ui);
+            ui.invoke_settings_selection(true, true, false);
+            let changed_before_load = settings_selection(ui) != initial;
+            assert!(pump_until(app, || !ui.get_convert_runtime_saving()));
+            app.pump.out.send(Event::Notice(format!(
+                "SETTINGS_LOADED|{generation}|{payload}"
+            ))).unwrap();
+            app.pump.run(ui);
+            let persisted = xberg_settings::download_selection().unwrap();
+            assert!(!changed_before_load, "保存选择送达前不得编辑启动默认值");
+            assert_eq!(app.state.borrow().settings_generation, generation, "提前编辑不得使启动快照失效");
+            assert_eq!(persisted, saved, "提前编辑不得覆盖真实 SQLite 选择");
+            assert_eq!(settings_selection(ui), saved);
+        })).unwrap();
+    }
+
+    #[test]
+    fn settings_startup_pending_download_cannot_consume_default_choice() {
+        with_gui(|app| with_settings_fixture(|root| {
+            let saved = DownloadSelection { document: false, snapshot: false, media: true };
+            xberg_settings::save_download_selection(saved).unwrap();
+            let generation = app.state.borrow().settings_generation;
+            let payload = settings_payload().unwrap();
+            let (sent, received) = mpsc::channel();
+            let target = root.join("unused-download");
+            app.state.borrow_mut().settings_download = Some(Arc::new(move |selection, _| {
+                sent.send(selection).unwrap();
+                Ok(target.clone())
+            }));
+            let ui = &app.ui;
+            let enabled_before_load = ui.get_settings_download_enabled();
+            ui.invoke_settings_action("download".into());
+            let started_before_load = ui.get_convert_initializing();
+            assert!(pump_until(app, || !ui.get_convert_initializing()));
+            let downloaded = received.try_recv().ok();
+            app.pump.out.send(Event::Notice(format!(
+                "SETTINGS_LOADED|{generation}|{payload}"
+            ))).unwrap();
+            app.pump.run(ui);
+            assert!(!enabled_before_load, "应用已保存设置前下载控件必须禁用");
+            assert!(!started_before_load, "真实下载回调必须拒绝设置加载前的请求");
+            assert_eq!(downloaded, None, "启动默认值 010 不得传入下载器");
+            assert_eq!(app.state.borrow().settings_generation, generation);
+            assert_eq!(settings_selection(ui), saved);
+            assert_eq!(xberg_settings::download_selection().unwrap(), saved);
+        })).unwrap();
+    }
+
+    #[test]
+    fn settings_load_failure_keeps_download_blocked_and_offline_check_reloads_selection() {
+        with_gui(|app| with_settings_fixture(|root| {
+            let saved = DownloadSelection { document: false, snapshot: false, media: true };
+            xberg_settings::save_download_selection(saved).unwrap();
+            let db = xberg_settings::open(&xberg_settings::state_dir().unwrap()).unwrap();
+            db.execute("UPDATE app_settings SET value='invalid' WHERE key='xberg_download_selection'", []).unwrap();
+            let error = settings_payload().unwrap_err();
+            let generation = app.state.borrow().settings_generation;
+            app.pump.out.send(Event::Error(format!(
+                "SETTINGS_LOAD_ERR|{generation}|{error}"
+            ))).unwrap();
+            app.pump.run(&app.ui);
+            let ui = &app.ui;
+            let error_visible = ui.get_settings_status().contains(&error);
+            let enabled_after_failure = ui.get_settings_download_enabled();
+            let (sent, received) = mpsc::channel();
+            let target = root.join("unused-download");
+            app.state.borrow_mut().settings_download = Some(Arc::new(move |selection, _| {
+                sent.send(selection).unwrap();
+                Ok(target.clone())
+            }));
+            ui.invoke_settings_action("download".into());
+            let started_after_failure = ui.get_convert_initializing();
+            assert!(pump_until(app, || !ui.get_convert_initializing()));
+            let downloaded = received.try_recv().ok();
+            // 仅修复不可读选择，特意不安装引擎：
+            // 恢复必须离线读取设置，不依赖或下载引擎。
+            xberg_settings::save_download_selection(saved).unwrap();
+            ui.invoke_settings_action("check".into());
+            assert!(pump_until(app, || !ui.get_convert_runtime_saving()));
+            assert!(error_visible, "启动加载失败必须保持可见");
+            assert!(!enabled_after_failure, "加载失败不得允许下载启动默认选择");
+            assert!(!started_after_failure);
+            assert_eq!(downloaded, None);
+            assert_eq!(settings_selection(ui), saved, "即使未安装引擎，离线检查也必须恢复已保存选择");
+            assert!(ui.get_settings_download_enabled());
+            assert!(received.try_recv().is_err(), "离线恢复不得调用下载器");
+            assert!(xberg_settings::settings().unwrap().custom.is_none());
+            assert!(xberg_settings::settings().unwrap().downloaded.is_none());
+        })).unwrap();
+    }
+
+    #[test]
+    fn settings_failed_autosave_restores_saved_choice_before_next_download() {
+        with_gui(|app| with_settings_fixture(|root| {
+            let legacy = root.join("legacy");
+            std::fs::create_dir_all(&legacy).unwrap();
+            std::fs::write(legacy.join("xberg.exe"), b"legacy").unwrap();
+            xberg_settings::save(&legacy).unwrap();
+            let saved_selection = DownloadSelection { document: false, snapshot: false, media: true };
+            xberg_settings::save_download_selection(saved_selection).unwrap();
+            deliver_settings_loaded(app);
+            let ui = &app.ui;
+            let active = ui.get_convert_runtime_dir();
+            let saved_source = xberg_settings::settings().unwrap();
+            let db = xberg_settings::open(&xberg_settings::state_dir().unwrap()).unwrap();
+            db.execute_batch(
+                "CREATE TRIGGER refuse_selection_write BEFORE INSERT ON app_settings
+                 WHEN NEW.key='xberg_download_selection'
+                 BEGIN SELECT RAISE(ABORT, 'fixture selection write refused'); END;"
+            ).unwrap();
+            let (sent, received) = mpsc::channel();
+            let target = legacy.clone();
+            app.state.borrow_mut().settings_download = Some(Arc::new(move |selection, _| {
+                sent.send(selection).unwrap();
+                Ok(target.clone())
+            }));
+            ui.invoke_settings_selection(true, true, false);
+            assert!(ui.get_convert_runtime_saving());
+            assert!(pump_until(app, || !ui.get_convert_runtime_saving()));
+            let selection_after_failure = settings_selection(ui);
+            let failure_status = ui.get_settings_status();
+            let active_after_failure = ui.get_convert_runtime_dir();
+            let confirmed_after_failure = ui.get_convert_runtime_confirmed();
+            assert_eq!(xberg_settings::download_selection().unwrap(), saved_selection, "SQLite 触发器必须拒绝真实自动保存");
+            ui.invoke_settings_action("download".into());
+            assert!(ui.get_convert_initializing(), "下载应重新可用并使用已保存选择");
+            assert!(pump_until(app, || !ui.get_convert_initializing()));
+            let downloaded = received.try_recv().unwrap();
+            let current_source = xberg_settings::settings().unwrap();
+            assert!(failure_status.contains("fixture selection write refused"), "组件状态刷新后必须保留保存错误：{failure_status}");
+            assert_eq!(selection_after_failure, saved_selection, "自动保存失败必须回滚未保存的界面选择");
+            assert_eq!(downloaded, saved_selection, "下一次下载不得使用被 SQLite 拒绝的选择");
+            assert_eq!(settings_selection(ui), selection_after_failure, "下载成功不得再次反转选择");
+            assert_eq!(active_after_failure, active, "自动保存失败必须保留活动引擎");
+            assert!(confirmed_after_failure);
+            assert_eq!(ui.get_convert_runtime_dir(), active);
+            assert_eq!((current_source.source, current_source.custom, current_source.downloaded),
+                (saved_source.source, saved_source.custom, saved_source.downloaded));
+        })).unwrap();
+    }
+
+    #[test]
+    fn settings_selection_callbacks_persist_reload_and_reject_stale_snapshots() {
+        with_gui(|app| with_settings_fixture(|_| {
+            let ui = &app.ui;
+            deliver_settings_loaded(app);
+            assert_eq!(settings_selection(ui), DownloadSelection::default());
+            for selection in [
+                DownloadSelection { document: true, snapshot: false, media: false },
+                DownloadSelection { document: false, snapshot: false, media: true },
+                DownloadSelection { document: true, snapshot: true, media: true },
+                DownloadSelection { document: false, snapshot: false, media: false },
+            ] {
+                ui.invoke_settings_selection(selection.document, selection.snapshot, selection.media);
+                assert!(ui.get_convert_runtime_saving());
+                assert!(!ui.get_settings_download_enabled());
+                let generation = app.state.borrow().settings_generation;
+                ui.invoke_settings_selection(!selection.document, !selection.snapshot, !selection.media);
+                ui.invoke_settings_action("download".into());
+                assert_eq!(settings_selection(ui), selection);
+                assert_eq!(app.state.borrow().settings_generation, generation);
+                app.pump.out.send(Event::Notice(format!(
+                    "SETTINGS_LOADED|{}|{{\"selection\":{{\"document\":false,\"snapshot\":true,\"media\":false}},\"active\":\"stale\"}}",
+                    generation - 1
+                ))).unwrap();
+                app.pump.run(ui);
+                assert_eq!(settings_selection(ui), selection);
+                assert!(pump_until(app, || !ui.get_convert_runtime_saving()));
+                assert_eq!(xberg_settings::download_selection().unwrap(), selection);
+                let restarted_ui = AppWindow::new().unwrap();
+                app.pump.apply_settings_snapshot(&restarted_ui, &settings_payload().unwrap(), false);
+                assert_eq!(settings_selection(&restarted_ui), selection);
+                assert!(restarted_ui.get_convert_runtime_dir().is_empty());
+            }
+            assert!(!ui.get_settings_download_enabled());
+            let generation = app.state.borrow().settings_generation;
+            ui.invoke_settings_action("download".into());
+            assert!(!ui.get_convert_initializing());
+            assert_eq!(app.state.borrow().settings_generation, generation);
+            assert!(app.state.borrow().convert_init_cancel.is_none());
+        })).unwrap();
+    }
+
+    #[test]
+    fn snapshot_download_callback_is_single_flight_and_cancel_preserves_active_source() {
+        with_gui(|app| with_settings_fixture(|root| {
+            let legacy = root.join("legacy");
+            std::fs::create_dir_all(&legacy).unwrap();
+            std::fs::write(legacy.join("xberg.exe"), b"legacy").unwrap();
+            xberg_settings::save(&legacy).unwrap();
+            let saved = xberg_settings::settings().unwrap();
+            let calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+            let observed = calls.clone();
+            let (sent, received) = mpsc::channel();
+            app.state.borrow_mut().settings_download = Some(Arc::new(move |selection, cancel| {
+                observed.fetch_add(1, Ordering::SeqCst);
+                sent.send(selection).unwrap();
+                let deadline = Instant::now() + Duration::from_secs(5);
+                while !cancel.load(Ordering::Acquire) && Instant::now() < deadline {
+                    std::thread::sleep(Duration::from_millis(5));
+                }
+                assert!(cancel.load(Ordering::Acquire), "download was not cancelled");
+                Err("下载已取消".into())
+            }));
+            let ui = &app.ui;
+            deliver_settings_loaded(app);
+            ui.set_convert_runtime_dir(legacy.display().to_string().into());
             ui.set_convert_runtime_confirmed(true);
-            ui.invoke_convert_runtime_edited();
-            assert!(!ui.get_convert_ready(), "目录编辑后必须失效就绪");
-            assert!(!ui.get_convert_runtime_confirmed());
-            assert!(ui.get_convert_status().contains("重新校验"));
+            let active = ui.get_convert_runtime_dir();
+            ui.invoke_settings_action("download".into());
+            assert!(ui.get_convert_initializing());
+            assert!(!ui.get_settings_download_enabled());
+            let generation = app.state.borrow().settings_generation;
+            ui.invoke_settings_action("download".into());
+            ui.invoke_settings_action("check".into());
+            ui.invoke_settings_selection(true, true, true);
+            assert_eq!(app.state.borrow().settings_generation, generation);
+            assert_eq!(settings_selection(ui), DownloadSelection::default());
+            assert_eq!(received.recv_timeout(Duration::from_secs(2)).unwrap(), DownloadSelection::default());
+            app.pump.out.send(Event::Notice("SETTINGS_READY|0|{\"active\":\"stale\"}".into())).unwrap();
+            app.pump.out.send(Event::Error("SETTINGS_ERROR|0|stale".into())).unwrap();
+            app.pump.run(ui);
+            assert!(ui.get_convert_initializing());
+            ui.invoke_convert_stop();
+            assert!(pump_until(app, || !ui.get_convert_initializing()));
+            assert_eq!(calls.load(Ordering::SeqCst), 1);
+            assert!(received.try_recv().is_err());
+            assert!(app.state.borrow().convert_init_cancel.is_none());
+            let current = xberg_settings::settings().unwrap();
+            assert_eq!((current.source, &current.custom, &current.downloaded), (saved.source, &saved.custom, &saved.downloaded));
+            assert_eq!(ui.get_convert_runtime_dir(), active);
+            assert!(ui.get_convert_runtime_confirmed());
+            assert_eq!(xberg_settings::download_selection().unwrap(), DownloadSelection::default());
+        })).unwrap();
+    }
 
-            // 空目录：使用前校验直接拒绝并给出指引
-            ui.set_convert_runtime_dir("".into());
-            ui.invoke_convert_use_runtime();
-            assert!(!ui.get_convert_runtime_saving());
-            assert!(ui.get_convert_status().contains("请先选择 Xberg 运行目录"));
-
-            // 无效目录：隔离设置状态目录后走真实保存线程，失败事件回传不标记已确认
-            let _lock = jchtools_foundation::test_support::env_lock()
-                .lock()
-                .unwrap_or_else(std::sync::PoisonError::into_inner);
-            let root = tempfile::tempdir().unwrap();
-            struct Restore(Option<std::ffi::OsString>);
-            impl Drop for Restore {
-                fn drop(&mut self) {
-                    match &self.0 {
-                        Some(value) => std::env::set_var("JCHTOOLS_TEST_STATE_DIR", value.clone()),
-                        None => std::env::remove_var("JCHTOOLS_TEST_STATE_DIR"),
+    // Downloads are substituted at the network/install boundary; callbacks, source commit and status refresh are real.
+    #[test]
+    fn snapshot_download_completion_refreshes_only_installed_feature_status() {
+        with_gui(|app| with_settings_fixture(|root| {
+            let installed = root.join("downloaded");
+            let expected = installed.clone();
+            app.state.borrow_mut().settings_download = Some(Arc::new(move |selection, cancel| {
+                assert_eq!(selection, DownloadSelection::default());
+                assert!(!cancel.load(Ordering::Acquire));
+                let manifest: serde_json::Value = serde_json::from_str(include_str!("../../../resources/markdown-assets.json")).unwrap();
+                for member in manifest["xberg"]["members"].as_array().unwrap() {
+                    let path = member["path"].as_str().unwrap();
+                    if jchtools_xberg::xberg_runtime::asset_for_scenario(path, "snapshot") {
+                        let target = installed.join(path);
+                        std::fs::create_dir_all(target.parent().unwrap()).unwrap();
+                        std::fs::write(target, b"presence-only fixture").unwrap();
                     }
                 }
-            }
-            let _restore = Restore(std::env::var_os("JCHTOOLS_TEST_STATE_DIR"));
-            std::env::set_var("JCHTOOLS_TEST_STATE_DIR", root.path());
-            ui.set_convert_runtime_dir(root.path().display().to_string().into());
-            ui.invoke_convert_use_runtime();
-            assert!(ui.get_convert_runtime_saving(), "点击使用后进入保存校验中");
-            assert!(
-                pump_until(app, || !ui.get_convert_runtime_saving()),
-                "无效目录校验必须以失败收尾"
-            );
-            assert!(
-                !ui.get_convert_runtime_confirmed(),
-                "校验失败不得标记已确认"
-            );
-            assert!(!ui.get_convert_ready());
-            assert!(ui.get_convert_status().contains("Xberg 运行目录不可用"));
-        })
-        .unwrap();
+                xberg_settings::save_source(xberg_settings::Source::Downloaded, &installed)?;
+                Ok(installed.clone())
+            }));
+            let ui = &app.ui;
+            deliver_settings_loaded(app);
+            ui.invoke_settings_action("download".into());
+            assert!(ui.get_convert_initializing());
+            assert!(pump_until(app, || !ui.get_convert_initializing()));
+            assert!(ui.get_convert_runtime_confirmed());
+            assert_eq!(xberg_settings::required().unwrap(), expected.canonicalize().unwrap());
+            assert_eq!(xberg_settings::settings().unwrap().source, xberg_settings::Source::Downloaded);
+            assert_eq!(ui.get_settings_snapshot_status().as_str(), "已安装");
+            assert_ne!(ui.get_settings_document_status().as_str(), "已安装");
+            assert_ne!(ui.get_settings_media_status().as_str(), "已安装");
+            assert_eq!(settings_selection(ui), DownloadSelection::default());
+            assert!(ui.get_settings_download_enabled());
+        })).unwrap();
     }
 
     // 覆盖 XB-20（设置页操作门禁：任务、启动前检查等在途时不接受新操作；
@@ -12544,7 +12780,7 @@ mod gui_tests {
             let ui = &app.ui;
             assert_eq!(ui.get_settings_status().as_str(), "正在读取配置…");
             ui.set_busy(true);
-            ui.invoke_settings_action("custom".into());
+            ui.invoke_settings_action("download".into());
             assert!(
                 !ui.get_convert_runtime_saving() && !ui.get_convert_initializing(),
                 "任务运行中设置操作必须被门禁"
@@ -12552,10 +12788,31 @@ mod gui_tests {
             assert_eq!(ui.get_settings_status().as_str(), "正在读取配置…");
             ui.set_busy(false);
             ui.set_convert_preparing(true);
-            ui.invoke_settings_action("custom".into());
+            ui.invoke_settings_action("check".into());
             assert!(!ui.get_convert_runtime_saving(), "预检在途同样门禁");
             assert_eq!(ui.get_settings_status().as_str(), "正在读取配置…");
             ui.set_convert_preparing(false);
+            for blocked in 0..4 {
+                ui.set_snap_initializing(blocked == 0);
+                ui.set_confirm_kind(if blocked == 1 { 1 } else { 0 });
+                ui.set_convert_runtime_saving(blocked == 2);
+                app.state.borrow_mut().close_after = blocked == 3;
+                let selection = settings_selection(ui);
+                let generation = app.state.borrow().settings_generation;
+                ui.invoke_settings_selection(true, false, true);
+                ui.invoke_settings_action("download".into());
+                assert_eq!(settings_selection(ui), selection);
+                assert_eq!(app.state.borrow().settings_generation, generation);
+                assert!(!ui.get_convert_initializing());
+            }
+            ui.set_snap_initializing(false);
+            ui.set_confirm_kind(0);
+            ui.set_convert_runtime_saving(false);
+            app.state.borrow_mut().close_after = false;
+            app.pump.out.send(Event::Notice(
+                "SETTINGS_LOADED|0|{\"selection\":{\"document\":false,\"snapshot\":true,\"media\":false}}".into()
+            )).unwrap();
+            app.pump.run(ui);
             ui.invoke_settings_action("bogus".into());
             assert!(
                 pump_until(app, || ui.get_settings_status().contains("未知设置操作")),

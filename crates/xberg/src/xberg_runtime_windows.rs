@@ -2724,7 +2724,18 @@ mod tests {
         }
     }
 
-    fn capture_logs() -> (tracing::Dispatch, mpsc::Receiver<Vec<u8>>) {
+    // tracing 的 callsite 缓存跨线程共享；并发注册不同级别的 subscriber 会丢失 DEBUG 事件。
+    static LOG_CAPTURE_LOCK: Mutex<()> = Mutex::new(());
+
+    fn capture_logs() -> (
+        std::sync::MutexGuard<'static, ()>,
+        tracing::Dispatch,
+        mpsc::Receiver<Vec<u8>>,
+    ) {
+        // 前一个日志断言若 panic，不让互斥锁中毒掩盖后续断言的具体失败。
+        let guard = LOG_CAPTURE_LOCK
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         let (send, bytes) = mpsc::channel();
         let writer = LogCapture(send);
         let subscriber = tracing_subscriber::fmt()
@@ -2732,12 +2743,12 @@ mod tests {
             .with_max_level(tracing::Level::DEBUG)
             .with_writer(move || writer.clone())
             .finish();
-        (tracing::Dispatch::new(subscriber), bytes)
+        (guard, tracing::Dispatch::new(subscriber), bytes)
     }
 
     #[test]
     fn consumed_response_logs_safe_results_and_decode_failure_stage() {
-        let (dispatch, bytes) = capture_logs();
+        let (_capture_guard, dispatch, bytes) = capture_logs();
         let markdown = "private-success-markdown-sentinel";
         tracing::dispatcher::with_default(&dispatch, || {
             let span =
@@ -2782,7 +2793,7 @@ mod tests {
 
     #[test]
     fn broken_engine_delivers_terminal_with_thread_request_context() -> Result<(), String> {
-        let (dispatch, bytes) = capture_logs();
+        let (_capture_guard, dispatch, bytes) = capture_logs();
         let (send, receive) = mpsc::channel();
         let pending: Pending = Arc::new(Mutex::new(HashMap::new()));
         tracing::dispatcher::with_default(&dispatch, || {
@@ -2835,7 +2846,7 @@ mod tests {
 
     #[test]
     fn root_preflight_reuses_caller_diagnostic_id_without_logging_request_body() {
-        let (dispatch, bytes) = capture_logs();
+        let (_capture_guard, dispatch, bytes) = capture_logs();
         tracing::dispatcher::with_default(&dispatch, || {
             let error = super::super::request(
                 Path::new("C:\\this-path-is-not-read"),

@@ -132,16 +132,10 @@ STATUS_OPTIONAL = "OPTIONAL"
 COMMON_FORMATS = frozenset(("doc", "docx", "xls", "xlsx", "ppt", "pptx", "pdf", "mp4"))
 OPTIONAL_COMMON_ITEMS = frozenset(("A16", "A17", "A18", "A19", "A20"))
 
-# 与 src/markdown_assets.rs 的常量同口径：资产根目录、固定版本与成员相对路径。
+# 与 crates/markdown/src/markdown_assets.rs 同口径：资产根目录与成员相对路径。
 DATA_DIRECTORY = "markdown-assets"
-# 产品钉死 tag（resources/markdown-assets.json 的 xberg.tag，只读引用勿随本文件改）。
-# 本机测试引擎不使用该 tag：测试一律用 LOCAL_TEST_XBERG_DIR 的最新版（S10-01 两个口径）。
-XBERG_TAG = "v2026.10.6-0420-run58.1"
-XBERG_ARCHIVE_URL = (
-    f"https://github.com/jchanghong023/xberg/releases/download/{XBERG_TAG}/xberg-cli-x86_64-pc-windows-msvc.zip"
-)
 # 本机测试引擎固定目录（AGENTS.md §3，与 scripts/test_gate.py 的同名常量同口径）：
-# 测试只用该目录下的最新版引擎，最新版已存在时不重复下载；勿用产品钉死 tag 覆盖它。
+# 测试只用该目录下的最新版真实引擎；通过隔离旧配置夹具接入，不提供产品手工路径入口。
 LOCAL_TEST_XBERG_DIR = Path(r"C:\Users\jiang\Documents\xberg-test\xberg-cli-x86_64-pc-windows-msvc")
 # 与 src/markdown_assets.rs 同口径：媒体转录在位校验的必需成员
 # （存在性；SHA-256 校验由初始化/清单承接；组件目录与运行目录同口径）。
@@ -163,7 +157,7 @@ INFERENCE_REQUIRED = (
 # T-28 / 附录 A 的旧项目与旧缓存前置：旧目录仍在即未满足「删除旧项目后独立运行」。
 OLD_PROJECT_DIR = Path(r"D:\code1111111111\all2markdown")
 
-# 转 Markdown 页自上而下的「选择目录…」行数：输入 / 输出（Xberg 目录在设置页，XB-20）。
+# 转 Markdown 页自上而下的「选择目录…」行数：输入 / 输出（XB-20）。
 CONVERT_ROW_COUNT = 2
 
 # A18 的合成夹具全集；支持/未支持分区只能由本轮共享引擎的实际 formats 决定。
@@ -279,18 +273,16 @@ class AssetProbe:
         return self.inference_dir is not None and not any("推理组件" in text or "媒体" in text for text in self.missing)
 
     def acquire_hint(self) -> str:
-        # 两个口径分开表述（S10-01）：测试引擎优先用本机固定目录的最新版；产品钉死
-        # tag 只描述产品下载链路的来源，不作为测试引擎的获取建议。
-        hint = "Xberg 运行目录两种口径——测试（优先）：将 JCHTOOLS_TEST_XBERG_DIR 指向本机固定测试引擎目录 "
-        hint += f"{LOCAL_TEST_XBERG_DIR}（AGENTS.md §3，只放最新版，已存在不重复下载；验收经 --seed-state "
-        hint += "写入隔离 SQLite）；产品钉死 tag："
-        hint += f"{_manifest_xberg_tag()}（来源 resources/markdown-assets.json，产品下载链路使用，勿在本脚本内改动）。"
-        hint += "配置入口：GUI「设置」页「共享 Xberg」区填入/选择目录并点「使用此目录」保存"
-        hint += "（XB-20；保存或下载成功后自动完成组件初始化与许可证 notice 落盘，"
-        hint += "「转 Markdown」页不再需要单独的初始化步骤）。"
-        hint += "推理组件：媒体转录所需的 xberg.exe、SenseVoice/VAD 模型与 FFmpeg/sherpa-onnx "
-        hint += "运行库来自同一 Xberg 目录（成员与摘要见 resources/markdown-assets.json），"
-        hint += "保存目录后按所选场景自动校验。"
+        hint = "真实引擎验收：将 JCHTOOLS_TEST_XBERG_DIR 指向本机最新版测试引擎目录 "
+        hint += f"{LOCAL_TEST_XBERG_DIR}（已存在且身份有效时不重复下载）。"
+        hint += "验收经 --seed-state / --seed-xberg 写入隔离 SQLite 旧配置夹具，"
+        hint += "再由 GUI「设置」页「检查已安装组件」离线校验并补写许可证 notice；"
+        hint += "这仅用于兼容旧配置的真实引擎验收，不是产品手工配置目录入口。"
+        hint += "产品在「设置」页勾选「文档转换与图片 OCR」「截图 OCR」「音视频转写」，"
+        hint += "点击「下载 / 补齐所选功能」获取最新发布版的三个独立功能包；"
+        hint += "共享运行时由应用管理，不要求用户填写路径，也不自动下载。"
+        hint += "媒体验收需同源 xberg.exe、SenseVoice/VAD 模型与 FFmpeg/sherpa-onnx 运行库；"
+        hint += "已配置引擎的就绪状态按实际场景成员与能力检查。"
         return hint
 
 
@@ -301,17 +293,6 @@ def _asset_root() -> Path | None:
         if override and Path(override).is_absolute():
             return Path(override)
     return None
-
-
-def _manifest_xberg_tag() -> str:
-    """只读读取产品钉死 tag（resources/markdown-assets.json）；不可读时回退内置常量。."""
-    try:
-        parsed = _parse_json(ASSET_MANIFEST.read_text(encoding="utf-8"))
-    except (OSError, ValueError):
-        return XBERG_TAG
-    section = parsed.get("xberg") if _is_str_obj_map(parsed) else None
-    tag = _str_field(section, "tag") if _is_str_obj_map(section) else None
-    return tag or XBERG_TAG
 
 
 def _manifest_model_paths() -> list[str]:
@@ -1476,7 +1457,7 @@ ITEMS: tuple[Item, ...] = (
         AVAILABLE,
         needs_assets="xberg+media",
     ),
-    # —— B 组：GUI 入口 E2E（引用 scripts/gui_smoke.py 阶段；S5 为本次补丁，其余为建议扩展） ——
+    # —— B 组：GUI 入口 E2E（引用 scripts/gui_smoke.py 的真实阶段） ——
     Item(
         "B01",
         "B",
@@ -1489,36 +1470,34 @@ ITEMS: tuple[Item, ...] = (
     Item(
         "B02",
         "B",
-        "Xberg 目录选择与保存（使用此目录校验）",
+        "三项功能勾选自动保存：界面摘要与隔离 SQLite 一致",
         "gui_smoke 阶段引用",
         stage="S6",
-        fixture_note="需 gui_smoke 扩展 S6（建议）",
-        needs_assets="xberg",
+        fixture_note="S6 实际点击三项 Check 并核对每步自动保存，无需真实引擎",
     ),
     Item(
         "B03",
         "B",
-        "重启恢复：保存的 Xberg 目录下次启动自动恢复",
+        "重启恢复功能选择，并保留旧配置迁移的活动运行目录",
         "gui_smoke 阶段引用",
         stage="S7",
-        fixture_note="需 gui_smoke 扩展 S7（建议）",
-        needs_assets="xberg",
+        fixture_note="S7 完全退出再启动，保留旧路径迁移夹具，无需真实引擎",
     ),
     Item(
         "B04",
         "B",
-        "无效目录提示与重新选择",
+        "空选择禁用下载，重新勾选恢复可用，活动运行配置不变",
         "gui_smoke 阶段引用",
         stage="S8",
-        fixture_note="需 gui_smoke 扩展 S8（建议）",
+        fixture_note="S8 操作真实 Check，核对禁用/恢复与活动配置不变",
     ),
     Item(
         "B05",
         "B",
-        "组件就绪/缺失状态与初始化、取消、重试",
+        "未配置时各功能独立显示未下载、转换禁用且不自动下载",
         "gui_smoke 阶段引用",
         stage="S9",
-        fixture_note="需 gui_smoke 扩展 S9（建议）",
+        fixture_note="S9 使用全新隔离状态和资产根，不触发下载",
     ),
     Item(
         "B06",
@@ -3525,10 +3504,9 @@ def _run_gui_ref(item: Item, ctx: Context) -> Outcome:
     if pending:
         return Outcome(STATUS_NOT_RUN, pending)
     env_extra: dict[str, str] = {}
-    if item.stage in ("S6", "S7", "S8") and ctx.assets.runtime_dir is not None:
-        # S6-S8 各自使用隔离 SQLite；目录环境变量必须来自同一份已探测配置，
-        # 不能让固定提示路径与 GUI 实际保存的目录分叉。S8 的重试步同样要保存
-        # 有效目录（两次无效目录报错文案相同，靠成功保存做切换点）。
+    if item.stage in ("S7", "S8") and ctx.assets.runtime_dir is not None:
+        # 选择项用例不要求引擎；若已有真实测试配置，仅把同源目录作为旧配置迁移
+        # 夹具，并核对勾选、空选择和重启都不会改变该路径，不经手工目录控件保存。
         env_extra["JCHTOOLS_SMOKE_XBERG_DIR"] = str(ctx.assets.runtime_dir)
     if item.stage in ("S5", "S14") and not os.environ.get("JCHTOOLS_S5_MEDIA"):
         # S5/S14 需要真实媒体样本观察运行态；默认使用已有夹具中的真实视频。
@@ -3939,7 +3917,7 @@ class _Arguments(argparse.Namespace):
 
 
 def _seed_isolated_state(state_root: Path, xberg_root: Path) -> None:
-    """为开发验收 GUI 写入与驱动同源的隔离 Xberg 配置."""
+    """播种旧来源配置供真实最新版引擎验收；不恢复已移除的产品手工目录入口."""
     if not state_root.is_absolute() or not xberg_root.is_absolute():
         message = "隔离状态目录与 Xberg 目录必须是绝对路径"
         raise ValueError(message)
@@ -3955,7 +3933,7 @@ def _seed_isolated_state(state_root: Path, xberg_root: Path) -> None:
     if not _is_under_tmp(database):
         message = f"隔离设置库目标必须位于仓库 .tmp/ 下，拒绝写入：{database}"
         raise ValueError(message)
-    schema = ROOT / "src" / "app_settings.sql"
+    schema = ROOT / "crates" / "foundation" / "src" / "app_settings.sql"
     state_root.mkdir(parents=True, exist_ok=True)
     with contextlib.closing(sqlite3.connect(database)) as connection:
         _ = connection.executescript(schema.read_text(encoding="utf-8"))

@@ -196,6 +196,82 @@ fn load_from_db(root: &Path, db: &Connection) -> Result<Option<PathBuf>, String>
     })
 }
 
+/// 功能下载选择独立于当前运行目录；取消下载不会改变活动来源。
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct DownloadSelection {
+    pub document: bool,
+    pub snapshot: bool,
+    pub media: bool,
+}
+
+impl Default for DownloadSelection {
+    fn default() -> Self {
+        Self {
+            document: false,
+            snapshot: true,
+            media: false,
+        }
+    }
+}
+
+pub fn download_selection() -> Result<DownloadSelection, String> {
+    observe("read_download_selection", || {
+        let db = open(&state_dir()?)?;
+        download_selection_from_db(&db)
+    })
+}
+
+fn download_selection_from_db(db: &Connection) -> Result<DownloadSelection, String> {
+    let value: Option<String> = db
+        .query_row(
+            "SELECT value FROM app_settings WHERE key='xberg_download_selection'",
+            [],
+            |row| row.get(0),
+        )
+        .optional()
+        .map_err(|error| format!("读取 Xberg 下载选择失败：{error}"))?;
+    match value.as_deref() {
+        None => Ok(DownloadSelection::default()),
+        Some(value)
+            if value.len() == 3 && value.bytes().all(|byte| matches!(byte, b'0' | b'1')) =>
+        {
+            let bytes = value.as_bytes();
+            Ok(DownloadSelection {
+                document: bytes[0] == b'1',
+                snapshot: bytes[1] == b'1',
+                media: bytes[2] == b'1',
+            })
+        }
+        Some(_) => Err("保存的 Xberg 下载选择无效，请重新选择".into()),
+    }
+}
+
+pub fn save_download_selection(selection: DownloadSelection) -> Result<(), String> {
+    observe("save_download_selection", || {
+        let db = open(&state_dir()?)?;
+        save_download_selection_to_db(&db, selection)
+    })
+}
+
+fn save_download_selection_to_db(
+    db: &Connection,
+    selection: DownloadSelection,
+) -> Result<(), String> {
+    let value = format!(
+        "{}{}{}",
+        u8::from(selection.document),
+        u8::from(selection.snapshot),
+        u8::from(selection.media)
+    );
+    db.execute(
+        "INSERT INTO app_settings(key,value) VALUES('xberg_download_selection',?1)
+         ON CONFLICT(key) DO UPDATE SET value=excluded.value",
+        [value],
+    )
+    .map_err(|error| format!("保存 Xberg 下载选择失败：{error}"))?;
+    Ok(())
+}
+
 /// XB-20/XB-21：两种来源各自保存，所有功能只读取一个当前来源。
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Source {
@@ -378,7 +454,7 @@ pub fn save(path: &Path) -> Result<(), String> {
 }
 
 pub fn required() -> Result<PathBuf, String> {
-    load()?.ok_or_else(|| "尚未配置 Xberg：请在设置页下载 Xberg 或保存已有目录".into())
+    load()?.ok_or_else(|| "尚未配置 Xberg：请在设置页勾选所需功能并下载组件".into())
 }
 
 #[rustfmt::skip]
@@ -398,6 +474,45 @@ mod tests {
     use super::test_directory_override;
     use std::ffi::OsString;
     use std::path::PathBuf;
+
+    #[test]
+    fn download_selection_persists_without_changing_active_source() {
+        let root = tempfile::tempdir().unwrap();
+        let db = super::open(root.path()).unwrap();
+        assert_eq!(
+            super::download_selection_from_db(&db).unwrap(),
+            super::DownloadSelection::default()
+        );
+        db.execute(
+            "INSERT INTO app_settings(key,value) VALUES('xberg_source','custom')",
+            [],
+        )
+        .unwrap();
+        for mask in 0..8 {
+            let selection = super::DownloadSelection {
+                document: mask & 1 != 0,
+                snapshot: mask & 2 != 0,
+                media: mask & 4 != 0,
+            };
+            super::save_download_selection_to_db(&db, selection).unwrap();
+            let reopened = super::open(root.path()).unwrap();
+            assert_eq!(super::download_selection_from_db(&reopened).unwrap(), selection);
+            let source: String = reopened
+                .query_row(
+                    "SELECT value FROM app_settings WHERE key='xberg_source'",
+                    [],
+                    |row| row.get(0),
+                )
+                .unwrap();
+            assert_eq!(source, "custom");
+        }
+        db.execute(
+            "UPDATE app_settings SET value='invalid' WHERE key='xberg_download_selection'",
+            [],
+        )
+        .unwrap();
+        assert!(super::download_selection_from_db(&db).is_err());
+    }
 
     // 覆盖 XB-18/XB-21：生产策略不读取任何测试环境变量，不能重定向配置。
     #[test]

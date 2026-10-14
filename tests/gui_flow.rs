@@ -123,14 +123,18 @@ fn run_isolated_test(name: &str) -> bool {
             jchtools_foundation::xberg_settings::state_dir().unwrap(),
             root.join("state")
         );
-        assert_eq!(jchtools_assets::snap_ocr_assets::asset_root(), root.join("snap"));
-        assert!(
-            jchtools_assets::snap_ocr_assets::pipe_name().starts_with(r"\\.\pipe\jchtools-snap-ocr-test-")
+        assert_eq!(
+            jchtools_assets::snap_ocr_assets::asset_root(),
+            root.join("snap")
         );
+        assert!(jchtools_assets::snap_ocr_assets::pipe_name()
+            .starts_with(r"\\.\pipe\jchtools-snap-ocr-test-"));
         assert!(jchtools_acp_api::acp_api::settings::load_config()
             .unwrap()
             .is_none());
-        assert!(jchtools_foundation::xberg_settings::load().unwrap().is_none());
+        assert!(jchtools_foundation::xberg_settings::load()
+            .unwrap()
+            .is_none());
         return false;
     }
     let root = tempfile::tempdir().unwrap();
@@ -208,7 +212,11 @@ struct OrganizerRun {
 }
 
 // 覆盖 C-11：真实回调必须即时更新勾选状态，而不是等待任务库回传或重新加载。
-fn toggle_first_file_action(ui: &jchtools_ui::AppWindow, selected: bool, failures: &Failures) -> bool {
+fn toggle_first_file_action(
+    ui: &jchtools_ui::AppWindow,
+    selected: bool,
+    failures: &Failures,
+) -> bool {
     let plans = ui.get_plans();
     let Some((index, row)) = plans
         .iter()
@@ -732,13 +740,9 @@ fn stop_and_close_skips_override_confirm_and_quits() {
     );
 }
 
-// 覆盖 XB-19 / XB-20 / T-06（S3-05）：设置、转 Markdown、截图 OCR 三页的最小端到端。
-// 真实事件循环内导航三页：未配置共享 Xberg 时转换页不得标记就绪且呈现未就绪指引
-//（T-06：未配置禁止开始转换；XB-19），设置页呈现「请选择已有目录或主动下载
-// Xberg」的初始指引（XB-20，快照经启动线程 SETTINGS_LOADED 回传），截图页对隔离
-// 资产根呈现「组件未就绪」状态且不阻塞页面（XB-19/O-03）。两页的「前往设置」
-// 按钮与页面导航共用 navigation(7) 回调，此处按同一回调验证导航可达；按钮元素
-// 本体的可见性属 Slint 内部元素，无头断言只覆盖到该回调层。
+// 设置、转 Markdown、截图 OCR 三页真实事件循环：缺少组件不得就绪，
+// 独立功能选择经后台回调落库，全不选也可持久保存且不能下载。
+// 使用与页面控件相同的回调检查导航和状态，不绑定偶然的提示文案。
 #[test]
 fn settings_markdown_and_snap_pages_gate_and_status_end_to_end() {
     if run_isolated_test("settings_markdown_and_snap_pages_gate_and_status_end_to_end") {
@@ -798,62 +802,84 @@ fn settings_markdown_and_snap_pages_gate_and_status_end_to_end() {
                         }
                         let Some(ui) = ui.upgrade() else { return };
                         match steps.get() {
-                            0 => {
-                                // XB-19/T-06：转 Markdown 页未配置时不得就绪，
-                                // 就绪指引指明先保存共享目录。
+                            0 if ui.get_settings_loaded() => {
                                 ui.invoke_select_tool("markdown-converter".into());
-                                if ui.get_screen() != 5 {
-                                    record_failure(&failures, "必须进入转 Markdown 页".into());
-                                }
-                                if ui.get_convert_ready() {
+                                if ui.get_screen() != 5 || ui.get_convert_ready() {
                                     record_failure(
                                         &failures,
-                                        "T-06：未配置组件不得标记就绪".into(),
+                                        "未配置组件时转换页必须保持不可启动".into(),
                                     );
                                 }
-                                if !ui.get_convert_status().contains("请先保存共享 Xberg") {
-                                    record_failure(
-                                        &failures,
-                                        format!(
-                                            "XB-19：未就绪指引缺失：{}",
-                                            ui.get_convert_status()
-                                        ),
-                                    );
+                                if ui.get_convert_runtime_confirmed()
+                                    || !ui.get_convert_runtime_dir().is_empty()
+                                {
+                                    record_failure(&failures, "空配置不得恢复虚构运行目录".into());
                                 }
-                                // 「前往设置」入口与页面按钮共用 navigation(7)。
+                                if ui.get_settings_document()
+                                    || !ui.get_settings_snapshot()
+                                    || ui.get_settings_media()
+                                {
+                                    record_failure(&failures, "下载选择默认必须为截图 OCR".into());
+                                }
                                 ui.invoke_navigation(7);
+                                ui.invoke_settings_selection(true, false, true);
+                                if !ui.get_convert_runtime_saving()
+                                    || ui.get_settings_download_enabled()
+                                {
+                                    record_failure(&failures, "选择保存期间不得启动下载".into());
+                                }
                                 steps.set(1);
                             }
-                            1 => {
-                                // XB-20：设置页呈现未配置初始指引
-                                //（快照经启动线程 SETTINGS_LOADED 回传上屏）。
-                                if ui.get_screen() == 7
-                                    && ui
-                                        .get_settings_status()
-                                        .contains("请选择已有目录或主动下载")
+                            1 if !ui.get_convert_runtime_saving() => {
+                                let expected =
+                                    jchtools_foundation::xberg_settings::DownloadSelection {
+                                        document: true,
+                                        snapshot: false,
+                                        media: true,
+                                    };
+                                if jchtools_foundation::xberg_settings::download_selection()
+                                    .unwrap()
+                                    != expected
+                                    || !ui.get_settings_document()
+                                    || ui.get_settings_snapshot()
+                                    || !ui.get_settings_media()
                                 {
-                                    ui.invoke_select_tool("snap-ocr".into());
-                                    steps.set(2);
+                                    record_failure(
+                                        &failures,
+                                        "独立功能选择必须通过后台回调持久保存".into(),
+                                    );
                                 }
+                                ui.invoke_settings_selection(false, false, false);
+                                steps.set(2);
                             }
-                            2 => {
-                                // XB-19/O-03：截图页对隔离资产根呈现「组件未就绪」
-                                // 状态，页面导航不被阻塞。
-                                let status = ui.get_snap_asset_status().to_string();
-                                if ui.get_screen() == 6 && status.contains("未就绪") {
-                                    if ui.get_snap_ready() {
-                                        record_failure(
-                                            &failures,
-                                            "隔离资产根下截图组件不得就绪".into(),
-                                        );
-                                    }
-                                    // 截图页「前往设置」入口同样走 navigation(7)。
-                                    ui.invoke_navigation(7);
-                                    steps.set(3);
+                            2 if !ui.get_convert_runtime_saving() => {
+                                if ui.get_settings_download_enabled() {
+                                    record_failure(&failures, "清空功能选择后下载必须禁用".into());
                                 }
+                                ui.invoke_settings_action("download".into());
+                                if ui.get_convert_initializing() {
+                                    record_failure(&failures, "空选择不得发起下载".into());
+                                }
+                                let selection =
+                                    jchtools_foundation::xberg_settings::download_selection()
+                                        .unwrap();
+                                if selection.document || selection.snapshot || selection.media {
+                                    record_failure(&failures, "全不选状态也必须持久保存".into());
+                                }
+                                ui.invoke_select_tool("snap-ocr".into());
+                                steps.set(3);
                             }
-                            3 if ui.get_screen() == 7 => {
+                            3 => {
+                                if ui.get_screen() != 6 || ui.get_snap_ready() {
+                                    record_failure(
+                                        &failures,
+                                        "缺少组件时截图页不得标记就绪".into(),
+                                    );
+                                }
+                                ui.invoke_navigation(7);
                                 steps.set(4);
+                            }
+                            4 if ui.get_screen() == 7 => {
                                 let _ = slint::quit_event_loop();
                             }
                             _ => {}

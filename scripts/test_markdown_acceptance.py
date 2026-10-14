@@ -738,29 +738,6 @@ class MediaPostconditionTests(unittest.TestCase):
         assert "Set-Item -Path Env:JCHTOOLS_SNAP_OCR_TEST_ASSET_ROOT -Value $mdSnapAssetRoot" in acceptance  # nosec B101: 回归测试断言，不用于产品权限或输入校验。
 
 
-class AcquireHintTests(unittest.TestCase):
-    """S10-01：资产获取提示必须区分测试引擎与产品钉死 tag，并指向设置页。."""
-
-    def test_hint_guides_settings_page_and_test_engine_paths(self) -> None:
-        probe = markdown_acceptance.AssetProbe(None, None, None, None, ["未提供隔离验收资产根"])
-        hint = probe.acquire_hint()
-        # 测试引擎口径优先：固定测试目录 + 环境变量入口。
-        assert "JCHTOOLS_TEST_XBERG_DIR" in hint  # nosec B101: 回归测试断言，不用于产品权限或输入校验。
-        assert str(markdown_acceptance.LOCAL_TEST_XBERG_DIR) in hint  # nosec B101: 回归测试断言。
-        # 配置入口在设置页（XB-20），不得再引导到「转 Markdown」页选择运行目录。
-        assert "「设置」页" in hint  # nosec B101: 回归测试断言。
-        assert "「转 Markdown」页选择并点" not in hint  # nosec B101: 回归测试断言。
-        # 产品钉死 tag 只读自清单，两个口径不得混写。
-        manifest = cast(
-            "dict[str, object]",
-            json.loads(markdown_acceptance.ASSET_MANIFEST.read_text(encoding="utf-8")),
-        )
-        section = cast("dict[str, object]", manifest["xberg"])
-        pinned = section["tag"]
-        assert isinstance(pinned, str)  # nosec B101: 回归测试断言。
-        assert pinned in hint  # nosec B101: 回归测试断言。
-        assert "resources/markdown-assets.json" in hint  # nosec B101: 回归测试断言。
-
 
 class FormatSweepCoverageTests(unittest.TestCase):
     """覆盖 T-08 / 附录 A25：未实际纳入矩阵输入的格式必须进入 sweep。."""
