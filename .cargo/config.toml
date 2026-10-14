@@ -1,7 +1,9 @@
 [build]
-# 全目标并行编译在 32 逻辑核宿主触发 Windows 提交内存耗尽（os error 1455）。
-# 限制 Cargo 并发，不改特性、目标、profile、链接器或受检覆盖。
-jobs = 2
+# 全目标并行编译在 32 逻辑核宿主曾于默认 jobs=32 触发 Windows 提交内存耗尽（os error 1455）。
+# 2026-10-14 实测（提交上限 94.9GB）：jobs=16 触发全量脏重建（含 --all-targets release、
+# 打包 triple release、clippy），峰值提交见提交信息；如后续机器内存变小，用环境变量
+# CARGO_BUILD_JOBS 覆盖即可，无需改本文件。CI 4 核 runner 由 workflow 显式设 4。
+jobs = 16
 
 [target.x86_64-pc-windows-msvc]
 # Keep the portable Windows application independent of a separately installed MSVC runtime.

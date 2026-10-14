@@ -35,6 +35,8 @@ jobs:
         shell: pwsh
         env:
           GITHUB_TOKEN: ${{ github.token }}
+          # 4 核 runner 吃满并发；仓库 .cargo/config.toml 的 jobs 面向本地多核宿主。
+          CARGO_BUILD_JOBS: 4
         run: ./scripts/package-windows.ps1 -SkipTests
       - name: Create GitHub Release with both artifacts
         shell: pwsh

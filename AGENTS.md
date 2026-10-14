@@ -69,7 +69,7 @@ powershell -NoProfile -File .\scripts\package-windows.ps1   # 生成完整安装
 
 > 隔离测试显式启用 `test-hooks`；该特性不在默认特性中，生产与打包构建不启用。它允许测试目录和测试代理覆盖；`debug-assertions` 本身不再授予这些覆盖。测试门同时保持生产构建维度。临时验证工作目录可用 `python scripts/make_tmp.py workspace --destination .tmp/validation` 创建。
 
-生产功能按 `crates/` 下 14 个真实 package 隔离，根 package 只保留主 EXE 与合成 ACP fixture，没有旧库 façade。默认构建/测试覆盖根与这些生产成员；可选截图包仍使用 3.3 的额外显式入口。Cargo 缓存复用以真实 fresh/dirty 输出为证据，保持现有 profile、target、features、RUSTFLAGS 与 `.cargo/config.toml` 的 jobs=2，不用清缓存或改变构建维度伪造提速。Windows 打包的主构建显式选择 `-p jchtools -p jchocr --bins`；引擎生成由 file-core、截图内嵌清单由 assets、Slint 生成由 ui 各自的 build script 负责，根 `build.rs` 仅承接 Windows 资源与 manifest。`package-windows.ps1` 在 `.tmp/package-windows-<独占标识>/timings.json` 记录各实际阶段和 total 的墙钟时间与状态，失败也保留已发生记录，输出打印该路径；这些记录不是纯编译时间、不替代 `GateTimingFile` 预算控制，也不进入发布包。
+生产功能按 `crates/` 下 14 个真实 package 隔离，根 package 只保留主 EXE 与合成 ACP fixture，没有旧库 façade。默认构建/测试覆盖根与这些生产成员；可选截图包仍使用 3.3 的额外显式入口。Cargo 缓存复用以真实 fresh/dirty 输出为证据，保持现有 profile、target、features、RUSTFLAGS，不用清缓存或改变构建维度伪造提速。`.cargo/config.toml` 的 `jobs` 面向本地多核宿主设定（2026-10-14 由 2 调至 16：默认 32 曾触发 Windows 提交内存耗尽 os error 1455，16 经全量脏重建实测在 94.9GB 提交上限内安全）；CI 4 核 runner 由两个 workflow 显式 `CARGO_BUILD_JOBS=4` 覆盖，其他机器可用同名环境变量覆盖；并行度变化不改特性、目标、profile、链接器或受检覆盖。Windows 打包的主构建显式选择 `-p jchtools -p jchocr --bins`；引擎生成由 file-core、截图内嵌清单由 assets、Slint 生成由 ui 各自的 build script 负责，根 `build.rs` 仅承接 Windows 资源与 manifest。`package-windows.ps1` 在 `.tmp/package-windows-<独占标识>/timings.json` 记录各实际阶段和 total 的墙钟时间与状态，失败也保留已发生记录，输出打印该路径；这些记录不是纯编译时间、不替代 `GateTimingFile` 预算控制，也不进入发布包。
 
 ## 3.1 7-Zip 引擎
 
