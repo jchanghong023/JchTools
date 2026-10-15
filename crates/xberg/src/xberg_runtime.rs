@@ -62,6 +62,19 @@ pub fn force_background_exit() -> Result<Value, String> {
     }
 }
 
+/// 在唯一代理的空闲边界激活随包目录；失败不提交来源，不中断在途推理。
+pub fn activate_bundled_runtime(root: &Path) -> Result<(), String> {
+    #[cfg(windows)]
+    {
+        platform::activate_bundled_runtime(root)
+    }
+    #[cfg(not(windows))]
+    {
+        let _ = root;
+        Err("共享 Xberg 目录迁移仅支持 Windows".into())
+    }
+}
+
 pub fn serve() -> Result<(), String> {
     #[cfg(windows)]
     {
@@ -231,6 +244,7 @@ pub(super) fn diagnostic_command(command: Option<&str>) -> &'static str {
         Some("broker-state") => "broker_state",
         Some("broker-stop") => "broker_stop",
         Some("broker-force-stop") => "broker_force_stop",
+        Some("broker-activate-bundled") => "broker_activate_bundled",
         _ => "unknown",
     }
 }
@@ -290,14 +304,13 @@ pub fn checked(response: Value) -> Result<Value, String> {
     ))
 }
 
-/// 启动基线只声明与引擎默认不同的文档场景差异（Markdown 输出、中文 OCR、
-/// 图片字节通道），并按模型在位声明媒体转录可用性；截图模型目录交还引擎
-/// exe 旁回退，其余等价键一律不下发（2026-10-04 零配置改造）。
-pub fn startup_config(root: &Path) -> Result<Value, String> {
+/// 启动基线声明文档场景差异和已编译的转录能力。音频 DLL/模型只在转录请求时
+/// 惰性加载；缺失不阻止基础 worker 启动，同目录补齐后无需重启或卸载其他模型。
+pub fn startup_config(_root: &Path) -> Result<Value, String> {
     let mut config: Value =
         serde_json::from_str(include_str!("../../../resources/markdown-xberg.json"))
             .map_err(|e| e.to_string())?;
-    config["transcription"] = json!({"enabled": root.join("models/sense_voice_zh_en_ja_ko_yue_2024_07_17/model.int8.onnx").is_file()});
+    config["transcription"] = json!({"enabled": true});
     Ok(config)
 }
 
@@ -315,7 +328,6 @@ pub fn asset_for_scenario(path: &str, scenario: &str) -> bool {
     }
     if path.starts_with("models/sense_voice_")
         || path.starts_with("models/vad/")
-        || path.starts_with("sherpa-onnx/")
         || path.starts_with("ffmpeg/")
     {
         return scenario == "media";
@@ -392,19 +404,6 @@ mod tests {
         std::fs::write(root.path().join(license), b"synthetic license")
             .expect("补齐许可存在性夹具");
         validate_assets(root.path(), "snapshot").expect("补齐共同许可后截图资产就绪");
-    }
-
-    // 覆盖 T-13（2026-10-04 零配置改造）：启动基线只携带与引擎默认不同的
-    // 关键差异——Markdown 输出、中文 OCR、图片字节通道；等价键交还引擎默认，
-    // 截图模型目录交还 exe 旁回退。
-    #[test]
-    fn document_startup_baseline_pins_only_engine_differences() {
-        let root = tempfile::tempdir().expect("创建隔离运行目录");
-        let config = startup_config(root.path()).expect("生成共享配置");
-        assert_eq!(config["output_format"], "markdown");
-        assert_eq!(config["ocr"]["language"][0], "ch");
-        assert_eq!(config["images"]["include_data_base64"], true);
-        assert!(config.get("snapshot_ocr").is_none());
     }
 
     /// 覆盖 XB-06/XB-09：命令名称存在不代表对应场景的推理后端已编译。

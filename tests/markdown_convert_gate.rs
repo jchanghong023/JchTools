@@ -167,7 +167,9 @@ fn batch_uses_selected_engine_formats() {
         serde_json::from_str(include_str!("../resources/markdown-assets.json")).unwrap();
     for member in manifest["xberg"]["members"].as_array().unwrap() {
         let relative = member["path"].as_str().unwrap();
-        if relative != "xberg.exe" {
+        if relative != "xberg.exe"
+            && jchtools_xberg::xberg_runtime::asset_for_scenario(relative, "document")
+        {
             let target = root.join(relative);
             std::fs::create_dir_all(target.parent().unwrap()).unwrap();
             std::fs::write(target, b"synthetic asset").unwrap();
@@ -223,6 +225,56 @@ fn batch_uses_selected_engine_formats() {
     assert_eq!(
         std::fs::read(input.join("b.rtf")).unwrap(),
         b"synthetic unsupported input"
+    );
+    // 默认混选媒体不应全局阻断文档；实际媒体文件单独报告缺少可选资产。
+    assert!(!root.join("ffmpeg").exists());
+    assert!(!root.join("models/vad").exists());
+    let mixed_input = root.join("mixed-input");
+    let mixed_output = root.join("mixed-output");
+    std::fs::create_dir(&mixed_input).unwrap();
+    std::fs::create_dir(&mixed_output).unwrap();
+    std::fs::write(mixed_input.join("first.txt"), b"document source").unwrap();
+    std::fs::write(
+        mixed_input.join("optional.mp4"),
+        b"uninstalled audio source",
+    )
+    .unwrap();
+    std::fs::write(mixed_input.join("last.txt"), b"another document source").unwrap();
+    let mixed = Options {
+        input_dir: mixed_input.clone(),
+        output_dir: mixed_output.clone(),
+        groups: vec![FormatGroup::Other, FormatGroup::Media],
+        ..options.clone()
+    };
+    let mut failures = Vec::new();
+    let summary = jchtools_markdown::markdown::run(&mixed, &AtomicBool::new(false), |event| {
+        if let jchtools_markdown::markdown::Event::FileFinished {
+            success: false,
+            message,
+            ..
+        } = event
+        {
+            failures.push(message);
+        }
+    })
+    .unwrap();
+    assert_eq!(summary.success, 2);
+    assert_eq!(summary.failed, 1);
+    assert_eq!(failures.len(), 1);
+    assert!(failures[0].contains("可选音频资产"), "{failures:?}");
+    assert!(failures[0].contains("不会自动联网"), "{failures:?}");
+    assert_eq!(
+        std::fs::read(mixed_output.join("first_txt.md")).unwrap(),
+        b"document"
+    );
+    assert_eq!(
+        std::fs::read(mixed_output.join("last_txt.md")).unwrap(),
+        b"document"
+    );
+    assert!(!mixed_output.join("optional_mp4.md").exists());
+    assert_eq!(
+        std::fs::read(mixed_input.join("optional.mp4")).unwrap(),
+        b"uninstalled audio source"
     );
 }
 
@@ -571,13 +623,23 @@ fn review_remediation_run_non_unicode_batch(
             Event::Started { total } => assert_eq!(total, 3),
             Event::FileStarted { relative, .. } => started.push(relative),
             Event::FileFinished {
-                relative, success, partial, message,
+                relative,
+                success,
+                partial,
+                message,
             } => finished.push((relative, success, partial, message)),
             Event::FileCancelled { relative } => panic!("未请求取消：{relative:?}"),
             Event::Log(_) => {}
         })
         .expect("非法编码必须返回逐文件 Err，而非 panic 或中止批次");
-    assert_eq!(summary, Summary { success: 2, failed: 1, ..Summary::default() });
+    assert_eq!(
+        summary,
+        Summary {
+            success: 2,
+            failed: 1,
+            ..Summary::default()
+        }
+    );
     assert_eq!(started, vec![first.clone(), invalid.clone(), last.clone()]);
     assert_eq!(finished.len(), 3);
     for (result, relative, success) in [
@@ -609,7 +671,10 @@ fn review_remediation_run_non_unicode_batch(
         .unwrap()
         .map(|entry| entry.unwrap().file_name())
         .collect();
-    assert_eq!(entries, expected_entries, "非法项无成品、媒体目录或临时文件");
+    assert_eq!(
+        entries, expected_entries,
+        "非法项无成品、媒体目录或临时文件"
+    );
     for stem in ["a", "c"] {
         assert_eq!(
             std::fs::read(output.join(format!("{stem}_{extension}.md"))).unwrap(),
@@ -637,24 +702,36 @@ fn review_remediation_run_non_unicode_batch(
         ..options
     };
     let mut control_finished = Vec::new();
-    let control_summary = jchtools_markdown::markdown::run(
-        &control_options,
-        &AtomicBool::new(false),
-        |event| {
-            if let Event::FileFinished { relative, success, partial, .. } = event {
+    let control_summary =
+        jchtools_markdown::markdown::run(&control_options, &AtomicBool::new(false), |event| {
+            if let Event::FileFinished {
+                relative,
+                success,
+                partial,
+                ..
+            } = event
+            {
                 control_finished.push((relative, success, partial));
             }
-        },
-    )
-    .unwrap();
-    assert_eq!(control_summary, Summary { success: 1, ..Summary::default() });
+        })
+        .unwrap();
+    assert_eq!(
+        control_summary,
+        Summary {
+            success: 1,
+            ..Summary::default()
+        }
+    );
     assert_eq!(control_finished, vec![(replacement.clone(), true, false)]);
     assert_eq!(
         std::fs::read(control_output.join(format!("b_\u{fffd}_{extension}.md"))).unwrap(),
         expected_markdown
     );
     assert_eq!(std::fs::read_dir(&control_output).unwrap().count(), 1);
-    assert_eq!(std::fs::read(control_input.join(replacement)).unwrap(), control_bytes);
+    assert_eq!(
+        std::fs::read(control_input.join(replacement)).unwrap(),
+        control_bytes
+    );
     for (relative, bytes) in sources {
         assert_eq!(std::fs::read(input.join(relative)).unwrap(), bytes);
     }
@@ -703,7 +780,11 @@ fn review_remediation_batch_multiple_images_preserve_literals_and_exact_media() 
             {"image_index": 0, "format": "png", "data": [37]}
         ]),
         expected,
-        &[("image_0.png", &[37]), ("image_1.png", b"hello"), ("image_2.png", &[0, 255])],
+        &[
+            ("image_0.png", &[37]),
+            ("image_1.png", b"hello"),
+            ("image_2.png", &[0, 255]),
+        ],
     );
 }
 

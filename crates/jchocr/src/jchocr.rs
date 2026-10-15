@@ -171,24 +171,21 @@ fn local_bytes(input: Input) -> Result<Vec<u8>, Failure> {
 }
 
 fn selected_xberg() -> Result<PathBuf, Failure> {
-    let settings = jchtools_foundation::xberg_settings::settings().map_err(|error| {
-        Failure::new(
-            1,
-            "runtime",
-            format!("读取 JchTools Xberg 设置失败：{error}"),
-        )
-    })?;
-    let root = match settings.source {
-        jchtools_foundation::xberg_settings::Source::Custom => settings.custom,
-        jchtools_foundation::xberg_settings::Source::Downloaded => settings.downloaded,
-    }
-    .ok_or_else(|| {
-        Failure::new(
-            3,
-            "xberg",
-            "尚未配置 Xberg。请在 JchTools 设置页下载或配置 Xberg。",
-        )
-    })?;
+    let root = jchtools_foundation::xberg_settings::effective_directory()
+        .map_err(|error| {
+            Failure::new(
+                1,
+                "runtime",
+                format!("读取 JchTools Xberg 设置失败：{error}"),
+            )
+        })?
+        .ok_or_else(|| {
+            Failure::new(
+                3,
+                "xberg",
+                "未找到有效的 Xberg。请在 JchTools 设置页检查状态，并从安装包修复随包资产。",
+            )
+        })?;
     if !root.is_absolute() {
         return Err(Failure::new(
             3,
@@ -200,7 +197,7 @@ fn selected_xberg() -> Result<PathBuf, Failure> {
         Failure::new(
             3,
             "xberg",
-            format!("{error}。请在 JchTools 设置页下载或配置完整的 Xberg 截图资产。"),
+            format!("{error}。请在 JchTools 设置页检查状态，并从安装包修复 Xberg 截图资产。"),
         )
     })?;
     Ok(root)
@@ -358,7 +355,7 @@ fn recognize(input: Input) -> Result<String, Failure> {
                     3,
                     "xberg",
                     format!(
-                        "{}。请在 JchTools 设置页下载或配置完整的 Xberg 截图资产。",
+                        "{}。请在 JchTools 设置页检查状态，并从安装包修复 Xberg 截图资产。",
                         response["error"].as_str().unwrap_or("Xberg 截图资产不可用")
                     ),
                 ));

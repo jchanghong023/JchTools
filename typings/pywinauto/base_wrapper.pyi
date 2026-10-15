@@ -11,6 +11,9 @@ class InvalidElement(RuntimeError): ...
 class BaseWrapper:
     handle: int
 
+    # 控件所属进程（真实定义在 BaseWrapper，读取 element_info.process_id）。
+    def process_id(self) -> int: ...
+
     # 真实鼠标点击（移动光标并按下/抬起鼠标键）。
     def click_input(self) -> None: ...
 

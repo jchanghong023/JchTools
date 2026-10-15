@@ -20,7 +20,7 @@ from dataclasses import dataclass
 from functools import partial
 from pathlib import Path
 from typing import TYPE_CHECKING, cast
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 
 if TYPE_CHECKING:
     from collections.abc import Callable
@@ -370,6 +370,140 @@ class IsolationGuardTests(unittest.TestCase):
                 gui_smoke.run_stage("S1", "unused.exe", lambda _window: None, env=supplied)
             spawn.assert_not_called()
 
+    def test_self_isolated_settings_do_not_inherit_host_runtime_or_audio_barrier(self) -> None:
+        with tempfile.TemporaryDirectory(prefix="gui-settings-isolation-") as temporary:
+            state = Path(temporary).resolve()
+            inherited = {
+                "JCHTOOLS_TEST_XBERG_DIR": str(state / "host-engine"),
+                "JCHTOOLS_SMOKE_XBERG_DIR": str(state / "host-smoke-engine"),
+                "JCHTOOLS_TEST_BUNDLED_XBERG_DIR": str(state / "host-installation"),
+                "JCHTOOLS_TEST_AUDIO_DOWNLOAD_BARRIER": str(state / "unrelated-barrier"),
+                "JCHTOOLS_MARKDOWN_TEST_ASSET_ROOT": str(state / "host-assets"),
+            }
+            with patch.dict(os.environ, inherited):
+                env = gui_smoke.isolated_state_env(state)
+                explicit = gui_smoke.isolated_state_env(state, state / "fixture-bundle")
+            self.assertEqual(env["JCHTOOLS_TEST_BUNDLED_XBERG_DIR"], str(state / "absent-bundle"))
+            self.assertEqual(explicit["JCHTOOLS_TEST_BUNDLED_XBERG_DIR"], str(state / "fixture-bundle"))
+            self.assertEqual(env["JCHTOOLS_TEST_STATE_DIR"], str(state))
+            self.assertEqual(env["JCHTOOLS_MARKDOWN_TEST_ASSET_ROOT"], str(state / "markdown-assets"))
+            self.assertEqual(env["JCHTOOLS_SNAP_OCR_TEST_ASSET_ROOT"], str(state / "snap-assets"))
+            for key in ("JCHTOOLS_TEST_XBERG_DIR", "JCHTOOLS_SMOKE_XBERG_DIR", "JCHTOOLS_TEST_AUDIO_DOWNLOAD_BARRIER"):
+                self.assertNotIn(key, env)
+
+
+class BundledRuntimePredicateTests(unittest.TestCase):
+    """只验证落盘结果/拒绝条件；合成文件不代表真实引擎或 GUI 端到端通过."""
+
+    @staticmethod
+    def write_package(root: Path) -> dict[str, object]:
+        files = {"xberg.exe": b"synthetic engine", "sherpa-onnx/runtime.dll": b"synthetic shared runtime"}
+        members: list[dict[str, object]] = []
+        for relative, content in files.items():
+            path = root / relative
+            path.parent.mkdir(parents=True, exist_ok=True)
+            _ = path.write_bytes(content)
+            members.append({"path": relative, "size_bytes": len(content), "sha256": gui_smoke.file_digest(path)})
+        tag = "v2099.1.1"
+        archive = "xberg-audio-assets-x86_64-pc-windows-msvc.zip"
+        receipt: dict[str, object] = {
+            "owner": "JchTools-bundled-xberg-v1",
+            "source": "https://api.github.com/repos/jchanghong023/xberg/releases/latest",
+            "tag": tag,
+            "components": [{"id": "document", "members": members}, {"id": "snapshot", "members": members}],
+            "audio_assets": {
+                "id": "audio-assets",
+                "archive": archive,
+                "url": f"https://github.com/jchanghong023/xberg/releases/download/{tag}/{archive}",
+            },
+        }
+        BundledRuntimePredicateTests.write_receipt(root, receipt)
+        return receipt
+
+    @staticmethod
+    def write_receipt(root: Path, receipt: dict[str, object]) -> None:
+        _ = (root / "jchtools-xberg-release.json").write_text(json.dumps(receipt), encoding="utf-8")
+
+    def test_package_predicate_checks_actual_member_bytes_and_exact_tree(self) -> None:
+        with tempfile.TemporaryDirectory(prefix="gui-base-predicate-") as temporary:
+            root = Path(temporary)
+            _ = self.write_package(root)
+            before = gui_smoke.verify_bundled_package(root)
+            self.assertEqual(before, gui_smoke.snapshot_output_bytes(root))
+            engine = root / "xberg.exe"
+            original = engine.read_bytes()
+            _ = engine.write_bytes(b"x" * len(original))
+            with self.assertRaises(RuntimeError):  # noqa: PT027 - 标准库 unittest。
+                _ = gui_smoke.verify_bundled_package(root)
+            _ = engine.write_bytes(original)
+            engine.unlink()
+            with self.assertRaises(RuntimeError):  # noqa: PT027 - 标准库 unittest。
+                _ = gui_smoke.verify_bundled_package(root)
+            _ = engine.write_bytes(original)
+            extra = root / "not-in-receipt.dll"
+            _ = extra.write_bytes(b"unexpected")
+            with self.assertRaises(RuntimeError):  # noqa: PT027 - 标准库 unittest。
+                _ = gui_smoke.verify_bundled_package(root)
+
+    def test_default_package_rejects_audio_even_as_empty_directories(self) -> None:
+        for relative in ("ffmpeg", "models/vad", "models/sense_voice_small"):
+            with self.subTest(relative=relative), tempfile.TemporaryDirectory(prefix="gui-base-audio-") as temporary:
+                root = Path(temporary)
+                _ = self.write_package(root)
+                (root / relative).mkdir(parents=True)
+                with self.assertRaises(RuntimeError):  # noqa: PT027 - 标准库 unittest。
+                    _ = gui_smoke.verify_bundled_package(root)
+
+    def test_component_identity_and_audio_release_must_match_the_base(self) -> None:
+        for change in ("media-component", "wrong-audio-release", "unsafe-member", "conflicting-shared-member"):
+            with self.subTest(change=change), tempfile.TemporaryDirectory(prefix="gui-base-record-") as temporary:
+                root = Path(temporary)
+                receipt = self.write_package(root)
+                components = cast("list[dict[str, object]]", receipt["components"])
+                audio = cast("dict[str, object]", receipt["audio_assets"])
+                members = cast("list[dict[str, object]]", components[0]["members"])
+                if change == "media-component":
+                    components[1]["id"] = "media"
+                elif change == "wrong-audio-release":
+                    audio["url"] = str(audio["url"]).replace("v2099.1.1", "v2099.1.2")
+                elif change == "unsafe-member":
+                    members[0]["path"] = "../outside.exe"
+                else:
+                    components[1]["members"] = [dict(members[0], sha256="0" * 64)]
+                self.write_receipt(root, receipt)
+                with self.assertRaises(RuntimeError):  # noqa: PT027 - 标准库 unittest。
+                    _ = gui_smoke.verify_bundled_package(root)
+
+    def test_active_source_requires_both_saved_directory_records(self) -> None:
+        with tempfile.TemporaryDirectory(prefix="gui-active-source-") as temporary:
+            root = Path(temporary)
+            runtime = root / "xberg"
+            current = {
+                "xberg_source": "bundled",
+                "xberg_directory": str(runtime),
+                "xberg_bundled_directory": str(runtime),
+                "xberg_custom_directory": str(root / "legacy"),
+            }
+            database = root / "config.sqlite3"
+            with contextlib.closing(sqlite3.connect(database)) as connection:
+                _ = connection.execute("CREATE TABLE app_settings(key TEXT PRIMARY KEY, value TEXT)")
+                _ = connection.executemany("INSERT INTO app_settings VALUES(?,?)", current.items())
+                connection.commit()
+            self.assertEqual(gui_smoke.active_xberg_settings(root), current)
+            gui_smoke.verify_bundled_settings(gui_smoke.active_xberg_settings(root), runtime)
+            for key, value in (("xberg_source", "custom"), ("xberg_directory", str(root)), ("xberg_bundled_directory", "")):
+                with self.subTest(key=key), self.assertRaises(RuntimeError):  # noqa: PT027 - 标准库 unittest。
+                    gui_smoke.verify_bundled_settings(dict(current, **{key: value}), runtime)
+            self.assertEqual(gui_smoke.active_xberg_settings(root), current, "只读判据不得改写 SQLite")
+
+    def test_download_start_needs_a_real_barrier_marker(self) -> None:
+        with tempfile.TemporaryDirectory(prefix="gui-audio-barrier-") as temporary:
+            marker = Path(temporary) / "barrier"
+            with patch.object(gui_smoke, "TIMEOUT", 0), self.assertRaises(RuntimeError):  # noqa: PT027 - 标准库 unittest。
+                gui_smoke.wait_download_barrier(marker)
+            marker.touch()
+            gui_smoke.wait_download_barrier(marker)
+
 
 class StageSelectionTests(unittest.TestCase):
     def test_empty_stage_selection_is_rejected(self) -> None:
@@ -636,6 +770,76 @@ class _ReviewControl:
         raise AssertionError(message)
 
 
+class WindowLocalClickTests(unittest.TestCase):
+    """局部点击必须命中所属 HWND 的真实控件坐标，拒绝错误归属及不可用控件."""
+
+    @staticmethod
+    def control() -> Mock:
+        control = Mock()
+        control.handle = 0
+        control.process_id.return_value = 501
+        control.invoke.side_effect = gui_smoke.NoPatternInterfaceError
+        control.rectangle.return_value = _ReviewRectangle(260, 180, 340, 220)
+        control.is_visible.return_value = True
+        control.is_enabled.return_value = True
+        return control
+
+    @staticmethod
+    def dispatch(control: Mock) -> list[tuple[int, int, int, int]]:
+        window = Mock(handle=100)
+        events: list[tuple[int, int, int, int]] = []
+
+        def post_message(handle: int, message: int, keys: int, point: int) -> None:
+            events.append((handle, message, keys, point))
+
+        with (
+            patch("scripts.gui_smoke.time.sleep"),
+            patch("scripts.gui_smoke.win32gui.ShowWindow"),
+            patch("scripts.gui_smoke.win32process.GetWindowThreadProcessId", return_value=(1, 501)),
+            patch("scripts.gui_smoke.win32gui.IsChild", return_value=False),
+            patch("scripts.gui_smoke.win32gui.IsWindowVisible", return_value=True),
+            patch("scripts.gui_smoke.win32gui.IsWindowEnabled", return_value=True),
+            patch("scripts.gui_smoke.win32gui.GetClientRect", return_value=(0, 0, 640, 480)),
+            patch(
+                "scripts.gui_smoke.win32gui.ScreenToClient",
+                side_effect=lambda _handle, point: (point[0] - 200, point[1] - 100),
+            ),
+            patch("scripts.gui_smoke.win32gui.PostMessage", side_effect=post_message),
+        ):
+            gui_smoke.click(cast("WindowSpecification", window), cast("WindowSpecification", control))
+        return events
+
+    def test_unavailable_invoke_targets_control_center_without_foreground_input(self) -> None:
+        events = self.dispatch(self.control())
+        point = gui_smoke.win32api.MAKELONG(100, 100)
+        self.assertEqual(
+            events,
+            [
+                (100, gui_smoke.win32con.WM_MOUSEMOVE, 0, point),
+                (100, gui_smoke.win32con.WM_LBUTTONDOWN, gui_smoke.win32con.MK_LBUTTON, point),
+                (100, gui_smoke.win32con.WM_LBUTTONUP, 0, point),
+            ],
+        )
+
+    def test_invalid_owner_visibility_enablement_and_bounds_reject_local_click(self) -> None:
+        for invalid in ("process", "foreign-hwnd", "hidden", "disabled", "outside", "empty"):
+            control = self.control()
+            if invalid == "process":
+                control.process_id.return_value = 999
+            elif invalid == "foreign-hwnd":
+                control.handle = 200
+            elif invalid == "hidden":
+                control.is_visible.return_value = False
+            elif invalid == "disabled":
+                control.is_enabled.return_value = False
+            elif invalid == "outside":
+                control.rectangle.return_value = _ReviewRectangle(190, 180, 340, 220)
+            else:
+                control.rectangle.return_value = _ReviewRectangle(260, 180, 260, 220)
+            with self.subTest(invalid=invalid), self.assertRaises(RuntimeError):
+                _ = self.dispatch(control)
+
+
 class _ReviewStageDriver:
     """仅替换进程/桌面边界，pre、真实阶段主体及 after 仍执行。."""
 
@@ -671,7 +875,7 @@ class _ReviewLayoutWindow:
         "转 Markdown": ("开始转换",),
         "Git 工具": ("开始",),
         "截图 OCR": (),
-        "设置": ("下载 / 补齐所选功能", "检查已安装组件"),
+        "设置": ("下载 / 补齐音频转写资产", "检查已安装组件"),
         "关于": (),
         "模型服务": ("保存配置", "退出模型服务"),
         # 错误提示当前可见；正常无提示时不应无条件等待“关闭提示”。

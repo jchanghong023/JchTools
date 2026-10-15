@@ -880,16 +880,16 @@ export component AppWindow inherits Window {
     callback convert-choose-input();
     callback convert-choose-output();
     callback settings-action(string);
-    callback settings-selection(bool, bool, bool);
     in-out property <bool> settings-loaded: false;
     in-out property <bool> settings-load-failed: false;
-    in-out property <bool> settings-document: false;
-    in-out property <bool> settings-snapshot: true;
-    in-out property <bool> settings-media: false;
-    in-out property <string> settings-document-status: "未下载";
-    in-out property <string> settings-snapshot-status: "未下载";
-    in-out property <string> settings-media-status: "未下载";
-    out property <bool> settings-download-enabled: root.settings-loaded && (root.settings-document || root.settings-snapshot || root.settings-media) && !root.busy && !root.convert-initializing && !root.convert-preparing && !root.convert-runtime-saving && !root.snap-initializing && root.confirm-kind == 0;
+    in-out property <string> settings-document-status: "正在检查…";
+    in-out property <string> settings-snapshot-status: "正在检查…";
+    in-out property <string> settings-ffmpeg-status: "正在检查…";
+    in-out property <string> settings-audio-model-status: "正在检查…";
+    in-out property <string> settings-media-status: "正在检查…";
+    in-out property <string> settings-release: "";
+    in-out property <bool> settings-audio-failed: false;
+    out property <bool> settings-download-enabled: root.settings-loaded && root.convert-runtime-confirmed && !root.busy && !root.convert-initializing && !root.convert-preparing && !root.convert-runtime-saving && !root.snap-initializing && root.confirm-kind == 0;
     in-out property <string> settings-status: "正在读取配置…";
 
     // S3-01：转换页的初始化回调与按钮入口已一并移除
@@ -1605,22 +1605,19 @@ export component AppWindow inherits Window {
                     VerticalLayout { width: settings-scroll.visible-width; spacing: 12px;
                         Surface { VerticalLayout { padding: 18px; spacing: 12px;
                             Label { text: "共享 Xberg"; font-size: 16px; font-weight: 600; }
-                            Muted { text: "按需独立下载功能组件，共享引擎自动管理；取消勾选不会卸载已安装组件。"; }
-                            Check { text: "文档转换与图片 OCR"; checked: root.settings-document;
-                                enabled: root.settings-loaded && !root.busy && !root.convert-initializing && !root.convert-preparing && !root.convert-runtime-saving && !root.snap-initializing && root.confirm-kind == 0;
-                                toggled => { root.settings-selection(self.checked, root.settings-snapshot, root.settings-media); } }
+                            Muted { text: "文档与截图 OCR 已随安装包提供，共用同一运行目录；无需另行下载或选择功能。"; }
+                            Muted { text: "当前共享目录：" + (root.convert-runtime-dir == "" ? "未找到，请修复安装包或重新解包" : root.convert-runtime-dir); }
+                            Muted { text: root.settings-release; }
                             Muted { text: "文档转换与图片 OCR：" + root.settings-document-status; }
-                            Check { text: "截图 OCR"; checked: root.settings-snapshot;
-                                enabled: root.settings-loaded && !root.busy && !root.convert-initializing && !root.convert-preparing && !root.convert-runtime-saving && !root.snap-initializing && root.confirm-kind == 0;
-                                toggled => { root.settings-selection(root.settings-document, self.checked, root.settings-media); } }
                             Muted { text: "截图 OCR：" + root.settings-snapshot-status; }
-                            Check { text: "音视频转写"; checked: root.settings-media;
-                                enabled: root.settings-loaded && !root.busy && !root.convert-initializing && !root.convert-preparing && !root.convert-runtime-saving && !root.snap-initializing && root.confirm-kind == 0;
-                                toggled => { root.settings-selection(root.settings-document, root.settings-snapshot, self.checked); } }
+                            Muted { text: "基础资产缺失或加载不兼容时，请使用安装包修复 / 重装，或重新解包便携 ZIP；不会联网补下载文档或截图组件。"; }
+                            Label { text: "音频转写可选资产"; font-size: 15px; font-weight: 600; }
+                            Muted { text: "FFmpeg 及配套运行库：" + root.settings-ffmpeg-status; }
+                            Muted { text: "SenseVoice / VAD 音频模型：" + root.settings-audio-model-status; }
                             Muted { text: "音视频转写：" + root.settings-media-status; }
-                            Muted { text: "所选功能：" + ((!root.settings-document && !root.settings-snapshot && !root.settings-media) ? "无" : (root.settings-document ? "文档转换与图片 OCR" : "") + (root.settings-snapshot ? (root.settings-document ? "、" : "") + "截图 OCR" : "") + (root.settings-media ? ((root.settings-document || root.settings-snapshot) ? "、" : "") + "音视频转写" : "")); }
+                            Muted { text: "仅点击下方按钮才下载当前随包引擎匹配的音频资产。未下载不影响文档、图片或截图 OCR；下载失败或取消后可重试，不删除已有效资产。"; }
                             HorizontalLayout { spacing: 8px;
-                                AppButton { text: "下载 / 补齐所选功能"; primary: true; enabled: root.settings-download-enabled && root.confirm-kind == 0;
+                                AppButton { text: root.settings-audio-failed ? "重试音频资产下载" : "下载 / 补齐音频转写资产"; primary: true; enabled: root.settings-download-enabled && root.confirm-kind == 0;
                                     clicked => { root.settings-action("download"); } }
                                 AppButton { text: "检查已安装组件"; enabled: (root.settings-loaded || root.settings-load-failed) && !root.busy && !root.convert-initializing && !root.convert-preparing && !root.convert-runtime-saving && !root.snap-initializing && root.confirm-kind == 0;
                                     clicked => { root.settings-action("check"); } }

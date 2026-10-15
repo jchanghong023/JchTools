@@ -11,7 +11,9 @@ import subprocess
 import sys
 import tempfile
 import unittest
+import uuid
 from pathlib import Path
+import zipfile
 
 if not __package__:
     sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
@@ -58,6 +60,17 @@ $package = Get-Content -LiteralPath $env:R24_PACKAGE -Raw -Encoding UTF8 | Conve
 $sourcePackage = Get-Content -LiteralPath $env:R24_SOURCE_PACKAGE -Raw -Encoding UTF8 | ConvertFrom-Json
 $count = Copy-PackageLicenseMaterials -Package $package -SourcePackage $sourcePackage -Destination $env:R24_DESTINATION
 [Console]::WriteLine($count)
+"""
+)
+
+INSTALLER_COMPILER_DRIVER = (
+    FUNCTION_LOADER
+    + r"""
+[Console]::WriteLine("实际安装包编译器：$env:R24_ISCC")
+$banner = & $env:R24_ISCC '/?' | Out-String
+[Console]::WriteLine($banner)
+if ($banner -notmatch '\bInno Setup 6 Command-Line Compiler\b') {throw '深路径回归必须使用真实 Inno Setup 6；参见上述原生编译器路径与横幅'}
+Invoke-InstallerCompiler -CompilerPath $env:R24_ISCC -SourceDirectory $env:R24_SOURCE_DIRECTORY -OutputDirectory $env:R24_DESTINATION -Version '0.0.0' -RepositoryRoot $env:R24_REPOSITORY -InstallerScript $env:R24_INSTALLER_SCRIPT
 """
 )
 
@@ -412,6 +425,208 @@ class PackageWindowsArtifactTests(unittest.TestCase):
             timeout=30,
             check=False,
         )
+
+    def installer_compiler(self) -> Path:
+        candidates = [
+            shutil.which("ISCC.exe"),
+            str(Path(os.environ.get("LOCALAPPDATA", "")) / "Programs" / "Inno Setup 6" / "ISCC.exe"),
+            str(Path(os.environ.get("ProgramFiles(x86)", "")) / "Inno Setup 6" / "ISCC.exe"),
+            str(Path(os.environ.get("ProgramFiles", "")) / "Inno Setup 6" / "ISCC.exe"),
+        ]
+        for candidate in candidates:
+            if candidate and Path(candidate).is_file():
+                return Path(candidate)
+        self.fail("深路径回归需要真实 Inno Setup 6；不得跳过或伪造编译器")
+
+    @staticmethod
+    def extended_path(path: Path) -> Path:
+        """Create/read/delete the fixture without depending on Windows long-path policy."""
+        absolute = str(path.absolute())
+        if absolute.startswith("\\\\"):
+            return Path("\\\\?\\UNC\\" + absolute[2:])
+        return Path("\\\\?\\" + absolute)
+
+    def installer_source_snapshot(self, source: Path) -> dict:
+        extended = self.extended_path(source)
+        snapshot = {}
+        for directory, directories, files in os.walk(extended):
+            for name in directories + files:
+                member = Path(directory) / name
+                metadata = member.stat()
+                snapshot[str(member.relative_to(extended))] = (
+                    member.is_dir(),
+                    metadata.st_ino,
+                    metadata.st_size,
+                    metadata.st_mtime_ns,
+                    None if member.is_dir() else hashlib.sha256(member.read_bytes()).hexdigest(),
+                )
+        return snapshot
+
+    def run_installer_compiler(
+        self, source: Path, destination: Path, installer_script: Path
+    ) -> subprocess.CompletedProcess[str]:
+        driver = self.root / "installer-compiler.ps1"
+        driver.write_text(INSTALLER_COMPILER_DRIVER, encoding="utf-8-sig")
+        environment = self.powershell_environment()
+        environment.update(
+            R24_SCRIPT=str(SCRIPT),
+            R24_FUNCTIONS="Invoke-InstallerCompiler",
+            R24_REPOSITORY=str(ROOT),
+            R24_ISCC=str(self.installer_compiler()),
+            R24_SOURCE_DIRECTORY=str(source),
+            R24_DESTINATION=str(destination),
+            R24_INSTALLER_SCRIPT=str(installer_script),
+        )
+        return subprocess.run(
+            [self.powershell, "-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-File", str(driver)],
+            cwd=ROOT,
+            env=environment,
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            timeout=90,
+            check=False,
+        )
+
+    def test_inno6_compiles_deep_hf_source_without_mutation_or_alias_leak(self) -> None:
+        # Synthetic storage-only payload: neither executable nor model is run or claimed to support OCR.
+        import winreg
+
+        model_relative = Path(
+            "xberg/models/models--xberg-io--paddleocr-onnx-models/snapshots/"
+            "bc5ec866cf0e798e667808dfa51b0ba8ad0dafc8/v2/classifiers/PP-LCNet_x1_0_textline_ori.onnx"
+        )
+        # Same failure geometry as the real release: the file crosses MAX_PATH, its parent does not.
+        source_parent = ROOT / ".tmp"
+        source_name_length = 262 - len(str(source_parent)) - len(str(model_relative)) - 2
+        unique_name = "p-" + uuid.uuid4().hex
+        self.assertGreaterEqual(source_name_length, len(unique_name))
+        source = source_parent / unique_name.ljust(source_name_length, "s")
+        self.assertEqual(len(str(source / model_relative)), 262)
+        self.assertLess(len(str((source / model_relative).parent)), 260)
+        extended = self.extended_path(source)
+        extended.mkdir(parents=True)
+        self.addCleanup(shutil.rmtree, extended)
+        members = {
+            Path("JchTools.exe"): b"MZ synthetic non-executed GUI fixture",
+            Path("jchocr.exe"): b"MZ synthetic non-executed CLI fixture",
+            Path("xberg/xberg.exe"): b"MZ synthetic non-executed Xberg fixture",
+            Path("xberg/jchtools-xberg-release.json"): b'{"fixture":"synthetic non-OCR storage-only payload"}',
+            model_relative: b"synthetic model bytes; no inference claim",
+        }
+        for relative, payload in members.items():
+            member = extended / relative
+            member.parent.mkdir(parents=True, exist_ok=True)
+            member.write_bytes(payload)
+        before = self.installer_source_snapshot(source)
+        aliases_before = set((ROOT / ".tmp").glob("i-*"))
+        destination = self.root / "installer-output"
+        destination.mkdir()
+        # Include the real installer with its supported isolation defines. Silent installation
+        # suppresses [Run]; no fake payload is executed, no uninstall entry or real shortcut is made.
+        isolation = ROOT / ".tmp" / ("s-" + uuid.uuid4().hex[:12])
+        isolation.mkdir()
+        self.addCleanup(shutil.rmtree, self.extended_path(isolation))
+        self.assertLess(len(str(isolation / "installed" / model_relative)), 260)
+        app_id = uuid.uuid4().hex
+        registry_key = rf"Software\JchTools-Review-{app_id}"
+        with self.assertRaises(FileNotFoundError):
+            winreg.OpenKey(winreg.HKEY_CURRENT_USER, registry_key)
+
+        def remove_isolated_registry_key() -> None:
+            try:
+                winreg.DeleteKey(winreg.HKEY_CURRENT_USER, registry_key)
+            except FileNotFoundError:
+                pass
+
+        self.addCleanup(remove_isolated_registry_key)
+        installer_script = self.root / "isolated-installer.iss"
+        installer_script.write_text(
+            f'#define ReviewRemediationRoot "{isolation}"\n'
+            f'#define ReviewRemediationAppId "{app_id}"\n'
+            f'#include "{ROOT / "installer" / "JchTools.iss"}"\n'
+            "[Setup]\n"
+            f"SourceDir={ROOT / 'installer'}\n"
+            "Uninstallable=no\n",
+            encoding="utf-8-sig",
+        )
+        result = self.run_installer_compiler(source, destination, installer_script)
+        diagnostics = f"stdout:\n{result.stdout}\nstderr:\n{result.stderr}"
+        self.assertEqual(self.installer_source_snapshot(source), before, diagnostics)
+        self.assertEqual(set((ROOT / ".tmp").glob("i-*")), aliases_before, diagnostics)
+        self.assertEqual(result.returncode, 0, diagnostics)
+        setup = destination / "JchTools-Setup-x64.exe"
+        self.assertTrue(setup.is_file(), diagnostics)
+        self.assertGreater(setup.stat().st_size, 0, diagnostics)
+        install_log = self.root / "isolated-install.log"
+        installed = subprocess.run(
+            [
+                str(setup),
+                "/VERYSILENT",
+                "/SUPPRESSMSGBOXES",
+                "/NORESTART",
+                "/SP-",
+                "/NOICONS",
+                "/TASKS=!desktopicon,!quicklaunchicon",
+                f"/LOG={install_log}",
+            ],
+            cwd=self.root,
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            timeout=90,
+            check=False,
+        )
+        install_diagnostics = (
+            diagnostics + f"\ninstaller exit={installed.returncode}\nstdout:\n{installed.stdout}"
+            f"\nstderr:\n{installed.stderr}\nlog:\n"
+            + (install_log.read_text(encoding="utf-8-sig", errors="replace") if install_log.exists() else "(missing)")
+        )
+        self.assertEqual(installed.returncode, 0, install_diagnostics)
+        for relative, payload in members.items():
+            installed_path = (
+                isolation / "WindowsApps" / relative.name
+                if relative == Path("jchocr.exe")
+                else isolation / "installed" / relative
+            )
+            extended_installed = self.extended_path(installed_path)
+            self.assertTrue(extended_installed.is_file(), f"{relative}\n{install_diagnostics}")
+            self.assertEqual(extended_installed.read_bytes(), payload, f"{relative}\n{install_diagnostics}")
+        self.assertEqual(self.installer_source_snapshot(source), before, install_diagnostics)
+        self.assertEqual(set((ROOT / ".tmp").glob("i-*")), aliases_before, install_diagnostics)
+
+    def test_inno6_native_compile_error_removes_alias_without_mutating_source(self) -> None:
+        source = self.root / "native-error-source"
+        source.mkdir()
+        for relative, payload in {
+            "JchTools.exe": b"MZ synthetic non-executed GUI",
+            "jchocr.exe": b"MZ synthetic non-executed CLI",
+            "xberg/xberg.exe": b"MZ synthetic non-executed Xberg",
+            "xberg/jchtools-xberg-release.json": b'{"fixture":"synthetic non-OCR"}',
+            "xberg/models/retained.onnx": b"retained model bytes; no inference claim",
+        }.items():
+            member = source / relative
+            member.parent.mkdir(parents=True, exist_ok=True)
+            member.write_bytes(payload)
+        installer_script = self.root / "native-error.iss"
+        installer_script.write_text(
+            f'#include "{ROOT / "installer" / "JchTools.iss"}"\n#error "JCHTOOLS_EXPECTED_NATIVE_COMPILER_ERROR"\n',
+            encoding="utf-8-sig",
+        )
+        destination = self.root / "native-error-output"
+        destination.mkdir()
+        before = self.installer_source_snapshot(source)
+        aliases_before = set((ROOT / ".tmp").glob("i-*"))
+        result = self.run_installer_compiler(source, destination, installer_script)
+        diagnostics = f"stdout:\n{result.stdout}\nstderr:\n{result.stderr}"
+        self.assertNotEqual(result.returncode, 0, diagnostics)
+        self.assertIn("JCHTOOLS_EXPECTED_NATIVE_COMPILER_ERROR", result.stdout + result.stderr, diagnostics)
+        self.assertIn("Inno Setup compiler failed: 2", result.stdout + result.stderr, diagnostics)
+        self.assertEqual(self.installer_source_snapshot(source), before, diagnostics)
+        self.assertEqual(set((ROOT / ".tmp").glob("i-*")), aliases_before, diagnostics)
+        self.assertFalse((destination / "JchTools-Setup-x64.exe").exists(), diagnostics)
 
     def write_status(self, status: str, *, foreign: bool = False) -> None:
         directory = self.out_dir if not foreign else self.out_dir.parent.parent / "unrelated" / "out"
@@ -1001,6 +1216,284 @@ class PackageWindowsArtifactTests(unittest.TestCase):
         self.write_status("ok")
         self.records.append(dict(self.records[1]))
         self.assertNotEqual(self.run_selection().returncode, 0)
+
+    def xberg_fixture(self) -> dict:
+        """Synthetic bytes exercise production archive/policy decisions, not OCR inference."""
+        common = {
+            name: name.encode()
+            for name in (
+                "xberg.exe",
+                "LICENSE",
+                "THIRD_PARTY_LICENSES.md",
+                "onnxruntime.dll",
+                "onnxruntime_providers_shared.dll",
+                "MSVCP140.dll",
+                "MSVCP140_1.dll",
+                "VCRUNTIME140.dll",
+                "VCRUNTIME140_1.dll",
+                "models/paddleocr-onnx-models-LICENSE.txt",
+                "sherpa-onnx/LICENSE",
+                "sherpa-onnx/sherpa-onnx-c-api.dll",
+                "sherpa-onnx/sherpa-onnx-cxx-api.dll",
+            )
+        }
+        for name in ("onnxruntime.dll", "onnxruntime_providers_shared.dll"):
+            common[f"sherpa-onnx/{name}"] = common[name]
+        prefix = "models/models--xberg-io--paddleocr-onnx-models/snapshots/fixed/"
+        document = {
+            prefix + name: name.encode()
+            for name in (
+                "v6/det/tiny/model.onnx",
+                "v6/rec/tiny/model.onnx",
+                "v6/rec/tiny/dict.txt",
+                "v2/classifiers/PP-LCNet_x1_0_textline_ori.onnx",
+            )
+        }
+        snapshot = {
+            f"models/snapshot-ocr/{name}": ("small-" + name).encode()
+            for name in ("det.onnx", "rec.onnx", "dict/dict.txt")
+        }
+        identity_root = self.root / "identity"
+        (identity_root / "resources").mkdir(parents=True)
+        (identity_root / "resources" / "markdown-assets.json").write_text(
+            json.dumps({"xberg": {"members": [self.xberg_member(p, b) for p, b in (document | snapshot).items()]}}),
+            encoding="utf-8",
+        )
+        components = []
+        for name, files in (("document", common | document), ("snapshot", common | snapshot)):
+            archive = self.root / f"xberg-{name}-x86_64-pc-windows-msvc.zip"
+            with zipfile.ZipFile(archive, "w") as output:
+                for path, payload in files.items():
+                    output.writestr(f"xberg-cli-x86_64-pc-windows-msvc/{path}", payload)
+            components.append(
+                {
+                    "id": name,
+                    "archive": archive.name,
+                    "requires": [],
+                    "size_bytes": archive.stat().st_size,
+                    "sha256": hashlib.sha256(archive.read_bytes()).hexdigest(),
+                    "members": [self.xberg_member(p, b) for p, b in files.items()],
+                }
+            )
+        release_url = "https://github.com/jchanghong023/xberg/releases/download/v-test/"
+        audio = {
+            "id": "audio-assets",
+            "archive": "xberg-audio-assets-x86_64-pc-windows-msvc.zip",
+            "requires": [],
+            "size_bytes": 123,
+            "sha256": "a" * 64,
+            "members": [self.xberg_member("ffmpeg/LICENSE.txt", b"license")],
+        }
+        receipt = {
+            "owner": "JchTools-bundled-xberg-v1",
+            "tag": "v-test",
+            "source": "https://api.github.com/repos/jchanghong023/xberg/releases/latest",
+            "manifest": {
+                "archive": "xberg-components-x86_64-pc-windows-msvc.json",
+                "url": release_url + "xberg-components-x86_64-pc-windows-msvc.json",
+                "size_bytes": 123,
+                "sha256": "b" * 64,
+            },
+            "components": components,
+            "audio_assets": audio | {"url": release_url + audio["archive"]},
+        }
+        return {"receipt": receipt, "root": identity_root}
+
+    @staticmethod
+    def xberg_member(path: str, payload: bytes) -> dict:
+        return {"path": path, "size_bytes": len(payload), "sha256": hashlib.sha256(payload).hexdigest()}
+
+    def run_xberg_policy(self, fixture: dict, action: str = "expand") -> subprocess.CompletedProcess:
+        record = self.root / "xberg-receipt.json"
+        record.write_text(json.dumps(fixture["receipt"]), encoding="utf-8")
+        driver = self.root / "xberg-policy.ps1"
+        driver.write_text(
+            FUNCTION_LOADER
+            + r"""
+Add-Type -AssemblyName System.IO.Compression.FileSystem
+$receipt = Get-Content -LiteralPath $env:R24_RECORDS -Raw -Encoding UTF8 | ConvertFrom-Json
+$stage = Join-Path $env:R24_DESTINATION 'staged'
+switch ($env:R24_ACTION) {
+    'api' {
+        $release = $receipt
+        Get-XbergReleaseAsset $release 'xberg-document-x86_64-pc-windows-msvc.zip' | Out-Null
+    }
+    'cache' {Get-XbergCachedAsset $receipt $env:R24_DESTINATION -OfflineMode | Out-Null}
+    'validate' {Assert-XbergPackage $stage $env:R24_ROOT}
+    'install' {Install-XbergBaseFiles $stage (Join-Path $env:R24_DESTINATION 'installed') $env:R24_ROOT}
+    default {
+        $union = Assert-XbergBaseMembers @($receipt.components) $env:R24_ROOT
+        New-Item -ItemType Directory -Path $stage -Force | Out-Null
+        foreach ($component in $receipt.components) {
+            Expand-XbergComponent (Join-Path $env:R24_DESTINATION $component.archive) $component $stage
+        }
+        Copy-Item -LiteralPath $env:R24_RECORDS -Destination (Join-Path $stage 'jchtools-xberg-release.json') -Force
+        Assert-XbergPackage $stage $env:R24_ROOT
+    }
+}
+""",
+            encoding="utf-8-sig",
+        )
+        environment = self.powershell_environment()
+        environment.update(
+            R24_SCRIPT=str(ROOT / "scripts" / "prepare-xberg-runtime.ps1"),
+            R24_FUNCTIONS="Assert-XbergRelativePath,Assert-XbergFile,Get-XbergReleaseAsset,Get-XbergCachedAsset,"
+            "Get-XbergMemberMap,Test-XbergAudioPath,Assert-XbergBaseMembers,Expand-XbergComponent,"
+            "Assert-XbergPackage,Install-XbergBaseFiles",
+            R24_RECORDS=str(record),
+            R24_DESTINATION=str(self.root),
+            R24_ROOT=str(fixture["root"]),
+            R24_ACTION=action,
+        )
+        return subprocess.run(
+            [self.powershell, "-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-File", str(driver)],
+            cwd=ROOT,
+            env=environment,
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            check=False,
+        )
+
+    def rewrite_xberg_zip(self, fixture: dict, members: list[tuple[str, bytes | zipfile.ZipInfo]]) -> None:
+        component = fixture["receipt"]["components"][0]
+        archive = self.root / component["archive"]
+        with zipfile.ZipFile(archive, "w") as output:
+            for path, payload in members:
+                if isinstance(payload, zipfile.ZipInfo):
+                    output.writestr(payload, b"link-target")
+                else:
+                    output.writestr(path, payload)
+        component["size_bytes"] = archive.stat().st_size
+        component["sha256"] = hashlib.sha256(archive.read_bytes()).hexdigest()
+
+    def test_xberg_complete_base_receipt_and_same_root_refresh_preserve_audio_and_config(self) -> None:
+        fixture = self.xberg_fixture()
+        result = self.run_xberg_policy(fixture)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        staged = self.root / "staged"
+        self.assertEqual(json.loads((staged / "jchtools-xberg-release.json").read_text()), fixture["receipt"])
+        self.assertFalse((staged / "ffmpeg").exists())
+        installed = self.root / "installed"
+        (installed / "ffmpeg").mkdir(parents=True)
+        (installed / "ffmpeg" / "avcodec-63.dll").write_bytes(b"downloaded-audio")
+        (installed / "config.json").write_bytes(b"user-config")
+        (installed / "xberg.exe").write_bytes(b"old-engine")
+        result = self.run_xberg_policy(fixture, "install")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual((installed / "ffmpeg" / "avcodec-63.dll").read_bytes(), b"downloaded-audio")
+        self.assertEqual((installed / "config.json").read_bytes(), b"user-config")
+        self.assertEqual((installed / "xberg.exe").read_bytes(), (staged / "xberg.exe").read_bytes())
+
+    def test_xberg_missing_common_model_identity_and_shared_conflict_fail_closed(self) -> None:
+        original = self.xberg_fixture()
+        for mutation in ("missing-common", "wrong-model", "shared-conflict", "audio-in-base", "audio-overwrites-base"):
+            with self.subTest(mutation=mutation):
+                fixture = {"receipt": json.loads(json.dumps(original["receipt"])), "root": original["root"]}
+                if mutation == "missing-common":
+                    fixture["receipt"]["components"][0]["members"] = [
+                        m for m in fixture["receipt"]["components"][0]["members"] if m["path"] != "sherpa-onnx/LICENSE"
+                    ]
+                elif mutation == "wrong-model":
+                    next(m for m in fixture["receipt"]["components"][0]["members"] if "/tiny/" in m["path"])[
+                        "sha256"
+                    ] = "f" * 64
+                elif mutation == "shared-conflict":
+                    next(m for m in fixture["receipt"]["components"][1]["members"] if m["path"] == "xberg.exe")[
+                        "sha256"
+                    ] = "f" * 64
+                elif mutation == "audio-in-base":
+                    fixture["receipt"]["components"][0]["members"].append(
+                        self.xberg_member("ffmpeg/avcodec-63.dll", b"x")
+                    )
+                else:
+                    fixture["receipt"]["audio_assets"]["members"].append(self.xberg_member("xberg.exe", b"x"))
+                self.assertNotEqual(self.run_xberg_policy(fixture).returncode, 0)
+
+    def test_xberg_archive_digest_mismatch_is_rejected(self) -> None:
+        fixture = self.xberg_fixture()
+        fixture["receipt"]["components"][0]["sha256"] = "f" * 64
+        self.assertNotEqual(self.run_xberg_policy(fixture).returncode, 0)
+
+    def test_xberg_zip_missing_unlisted_duplicate_unsafe_symlink_and_corrupt_members_rejected(self) -> None:
+        fixture = self.xberg_fixture()
+        archive = self.root / fixture["receipt"]["components"][0]["archive"]
+        with zipfile.ZipFile(archive) as source:
+            members = [(entry.filename, source.read(entry)) for entry in source.infolist()]
+        for mutation in ("missing", "unlisted", "duplicate", "traversal", "ads", "symlink", "corrupt"):
+            with self.subTest(mutation=mutation):
+                changed = list(members)
+                if mutation == "missing":
+                    changed.pop()
+                elif mutation == "unlisted":
+                    changed.append(("xberg-cli-x86_64-pc-windows-msvc/extra.dll", b"x"))
+                elif mutation == "duplicate":
+                    prefix, path = changed[0][0].split("/", 1)
+                    changed.append((prefix + "/" + path.upper(), changed[0][1]))
+                elif mutation in ("traversal", "ads"):
+                    path = "../outside" if mutation == "traversal" else "xberg.exe:stream"
+                    changed.append(("xberg-cli-x86_64-pc-windows-msvc/" + path, b"x"))
+                elif mutation == "symlink":
+                    info = zipfile.ZipInfo(changed[0][0])
+                    info.create_system = 3
+                    info.external_attr = 0o120777 << 16
+                    changed[0] = (info.filename, info)
+                else:
+                    changed[0] = (changed[0][0], b"z" * len(changed[0][1]))
+                self.rewrite_xberg_zip(fixture, changed)
+                self.assertNotEqual(self.run_xberg_policy(fixture).returncode, 0)
+
+    def test_xberg_final_tree_detects_audio_leak_and_missing_base(self) -> None:
+        fixture = self.xberg_fixture()
+        result = self.run_xberg_policy(fixture)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        (self.root / "staged" / "ffmpeg").mkdir()
+        self.assertNotEqual(self.run_xberg_policy(fixture, "validate").returncode, 0)
+        (self.root / "staged" / "ffmpeg").rmdir()
+        (self.root / "staged" / "xberg.exe").unlink()
+        self.assertNotEqual(self.run_xberg_policy(fixture, "validate").returncode, 0)
+
+    def test_xberg_fixed_api_provenance_and_digest_are_required(self) -> None:
+        name = "xberg-document-x86_64-pc-windows-msvc.zip"
+        release = {
+            "tag_name": "v-test",
+            "draft": False,
+            "prerelease": False,
+            "html_url": "https://github.com/jchanghong023/xberg/releases/tag/v-test",
+            "assets": [
+                {
+                    "name": name,
+                    "state": "uploaded",
+                    "size": 123,
+                    "digest": "sha256:" + "a" * 64,
+                    "browser_download_url": "https://github.com/jchanghong023/xberg/releases/download/v-test/" + name,
+                }
+            ],
+        }
+        fixture = {"receipt": release, "root": self.root}
+        result = self.run_xberg_policy(fixture, "api")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        for key, value in (("digest", None), ("browser_download_url", "https://example.invalid/base.zip"), ("size", 0)):
+            changed = json.loads(json.dumps(release))
+            changed["assets"][0][key] = value
+            self.assertNotEqual(self.run_xberg_policy({"receipt": changed, "root": self.root}, "api").returncode, 0)
+
+    def test_xberg_offline_cache_is_rehashed_not_trusted_by_filename(self) -> None:
+        payload = b"cached-archive"
+        record = self.xberg_member("unused", payload) | {
+            "archive": "document.zip",
+            "url": "https://example.invalid/never",
+        }
+        cache = self.root / f"{record['sha256']}-{record['archive']}"
+        cache.write_bytes(payload)
+        fixture = {"receipt": record, "root": self.root}
+        result = self.run_xberg_policy(fixture, "cache")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        cache.write_bytes(b"corrupt")
+        self.assertNotEqual(self.run_xberg_policy(fixture, "cache").returncode, 0)
+        cache.unlink()
+        self.assertNotEqual(self.run_xberg_policy(fixture, "cache").returncode, 0)
 
     def test_resolved_patched_packages_use_local_path_sources(self) -> None:
         # 真实 Cargo resolver 查询：仅读取元数据，不编译、不执行任何 crate。

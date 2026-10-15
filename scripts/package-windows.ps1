@@ -30,7 +30,7 @@ function Initialize-PackageTiming([string]$RepositoryRoot) {
     $workspace = Join-Path $RepositoryRoot ('.tmp\package-windows-' + [guid]::NewGuid().ToString('N'))
     & python (Join-Path $RepositoryRoot 'scripts\make_tmp.py') workspace --destination $workspace
     if ($LASTEXITCODE -ne 0) {throw "Unable to create package timing workspace: $LASTEXITCODE"}
-    $steps = @('setup','assets','font-and-engine-validation','lockfile','tests','worker-build','manifest','main-build','staging','licenses','package-validation','installer','zip')
+    $steps = @('setup','assets','font-and-engine-validation','lockfile','tests','worker-build','manifest','main-build','staging','xberg-base','licenses','package-validation','installer','zip')
     $script:packageTiming = @{
         path = (Join-Path $workspace 'timings.jsonl')
         writer = $null
@@ -100,6 +100,35 @@ function Complete-PackageTiming([string]$Failure) {
         Write-Host ("Package total: {0} ({1:F3}s); record: {2}" -f $script:packageTiming.total.status, $script:packageTiming.total.elapsed_seconds, $script:packageTiming.path)
     } finally {
         if ($script:packageTiming.writer) {$script:packageTiming.writer.Dispose()}
+    }
+}
+function Invoke-InstallerCompiler(
+    [string]$CompilerPath,
+    [string]$SourceDirectory,
+    [string]$OutputDirectory,
+    [string]$Version,
+    [string]$RepositoryRoot,
+    [string]$InstallerScript = (Join-Path $RepositoryRoot 'installer\JchTools.iss')
+) {
+    if (-not (Test-Path -LiteralPath $CompilerPath -PathType Leaf)) {throw "安装包编译器不存在：$CompilerPath"}
+    if (-not (Test-Path -LiteralPath $InstallerScript -PathType Leaf)) {throw "安装脚本不存在：$InstallerScript"}
+    if (-not (Test-Path -LiteralPath $SourceDirectory -PathType Container)) {throw "已校验的安装源目录不存在：$SourceDirectory"}
+    if (-not (Test-Path -LiteralPath $OutputDirectory -PathType Container)) {throw "安装包输出目录不存在：$OutputDirectory"}
+    if (-not (Test-Path -LiteralPath $RepositoryRoot -PathType Container)) {throw "仓库目录不存在：$RepositoryRoot"}
+    $source = [IO.Path]::GetFullPath($SourceDirectory)
+    $temporaryRoot = Join-Path ([IO.Path]::GetFullPath($RepositoryRoot)) '.tmp'
+    New-Item -ItemType Directory -Path $temporaryRoot -Force | Out-Null
+    # Inno 6 不接受 \\?\ 前缀；短 junction 只缩短编译器输入路径，不复制或改写已校验资产。
+    $alias = Join-Path $temporaryRoot ('i-' + [guid]::NewGuid().ToString('N').Substring(0, 12))
+    $junction = $null
+    try {
+        # 不用 -Force：绝不接管已有目录或其他调用创建的链接。
+        $junction = New-Item -ItemType Junction -Path $alias -Value $source -ErrorAction Stop
+        & $CompilerPath "/DSourceDir=$alias" "/DOutputDir=$OutputDirectory" "/DVersion=$Version" $InstallerScript
+        if ($LASTEXITCODE -ne 0) { throw "Inno Setup compiler failed: $LASTEXITCODE" }
+    } finally {
+        # 仅删除本次拥有的目录链接；非递归 Delete 绝不进入源树。
+        if ($null -ne $junction) {[IO.Directory]::Delete($alias, $false)}
     }
 }
 Initialize-PackageTiming -RepositoryRoot $root
@@ -402,6 +431,9 @@ Copy-Item -LiteralPath $sourceArchive -Destination $engineDir
 Copy-Item -LiteralPath 'README.md','LICENSE','THIRD_PARTY_NOTICES.md','Cargo.lock' -Destination $folder
 Copy-Item -LiteralPath 'docs' -Destination $folder -Recurse
 Copy-Item -LiteralPath 'scripts\launch-software.cmd' -Destination $folder
+Start-PackageStep 'xberg-base'
+# 同一已验证基础树用于 Inno Setup 与 ZIP；仅构建辅助脚本联网，build.rs 不获取资产。
+& (Join-Path $PSScriptRoot 'prepare-xberg-runtime.ps1') -Destination (Join-Path $folder 'xberg') -Offline:$Offline
 Start-PackageStep 'licenses'
 # Collect license texts from the exact resolved dependency graph, not a guessed static list.
 # cargo 的 stdout 是 UTF-8；中文 Windows 默认用 ANSI 代码页解码会破坏
@@ -450,14 +482,18 @@ foreach ($name in @('7z.exe','7z.dll')) {
     if (Test-Path -LiteralPath (Join-Path $folder "resources\7zip\$name")) {throw "Engine executable leaked into the package: $name"}
 }
 if (-not (Test-Path -LiteralPath (Join-Path $folder 'resources\7zip\manifest.json'))) {throw 'Engine manifest is missing from the package.'}
-# XB-25: ship the background service; inference assets remain optional.
+# XB-27：后台服务/字体仍由本次构建提供，文档与截图推理资产统一随基础树交付。
 Copy-Item -LiteralPath $workerExe -Destination (Join-Path $folder 'snap-ocr-worker.exe')
 if ((Get-FileHash -LiteralPath (Join-Path $folder 'snap-ocr-worker.exe') -Algorithm SHA256).Hash -ne (Get-FileHash -LiteralPath $workerExe -Algorithm SHA256).Hash) {throw 'Bundled background service hash mismatch.'}
-# XB-11/T-05：文档 OCR 清单还包含 model.onnx、方向分类器及 dict.txt；
-# 不能只检查截图/媒体模型的少数固定文件名，否则这些真实成员会漏检。
-foreach ($name in @('onnxruntime.dll','*.onnx','dict.txt','NotoSansMonoCJKsc-Regular.otf','xberg.exe','tokens.txt','sherpa-onnx-c-api.dll','sherpa-onnx-cxx-api.dll','onnxruntime_providers_shared.dll','avcodec-63.dll','avformat-63.dll','avutil-61.dll','swresample-7.dll')) {
-    if (@(Get-ChildItem -LiteralPath $folder -Recurse -File -Filter $name).Count -ne 0) {
-        throw "Optional OCR payload leaked into the main installer/ZIP staging directory: $name"
+# 正向核对基础成员、模型身份、来源记录与实际字节；同时拒绝 FFmpeg/语音模型和未登记成员。
+& (Join-Path $PSScriptRoot 'prepare-xberg-runtime.ps1') -Destination (Join-Path $folder 'xberg') -ValidateOnly
+# 音频专属负载也不得散落到 Xberg 目录以外；7-Zip 内嵌与许可证校验保留。
+foreach ($item in (Get-ChildItem -LiteralPath $folder -Recurse -Force)) {
+    $relative = $item.FullName.Substring($folder.Length + 1).Replace('\','/')
+    if ($relative -match '(?i)(^|/)(ffmpeg|sense_voice_[^/]+|vad)(/|$)' -or
+        $item.Name -match '(?i)^(avcodec|avformat|avutil|swresample|swscale|avfilter|avdevice)(-[0-9]+)?\.dll$' -or
+        $item.Name -match '(?i)^((silero[^/]*|sensevoice[^/]*|whisper[^/]*)\.(onnx|bin|gguf)|model\.int8\.onnx|tokens\.txt|silence-1s\.wav)$') {
+        throw "默认安装包/ZIP 不得携带音频专属资产：$relative"
     }
 }
 # ===== 安装包（P-05/E-04）：Inno Setup 双形态交付的第二产物 =====
@@ -481,8 +517,7 @@ if (-not $isccPath) {
 $info = @{created=(Get-Date).ToUniversalTime().ToString('o');rustc=(& rustc --version | Out-String).Trim();tests= $(if($SkipTests){'NOT RUN'}else{'non-desktop cargo tests and real-engine archive tests passed on this build machine'});desktop_tests='NOT RUN (requires separate explicit desktop acceptance authorization)';installer=$(if($isccPath){'NOT VERIFIED (this record was captured before the installer compiler completed)'}else{$setupSummary});windows_ui_manual='NOT VERIFIED BY THIS SCRIPT';multi_tb_benchmark='NOT VERIFIED BY THIS SCRIPT';source_validation='Use local Windows test evidence for functional acceptance; CI only compiles and packages.'}
 [IO.File]::WriteAllText((Join-Path $folder 'BUILD-INFO.json'),($info | ConvertTo-Json -Depth 5),$utf8)
 if ($isccPath) {
-    & $isccPath "/DSourceDir=$folder" "/DOutputDir=$DestinationRoot" "/DVersion=$version" (Join-Path $root 'installer\JchTools.iss')
-    if ($LASTEXITCODE -ne 0) { throw "Inno Setup compiler failed: $LASTEXITCODE" }
+    Invoke-InstallerCompiler -CompilerPath $isccPath -SourceDirectory $folder -OutputDirectory $DestinationRoot -Version $version -RepositoryRoot $root
     $setup = Join-Path $DestinationRoot 'JchTools-Setup-x64.exe'
     $setupLocation = if ($PSBoundParameters.ContainsKey('DestinationRoot')) {$setup} else {'dist\JchTools-Setup-x64.exe'}
     if (-not (Test-Path -LiteralPath $setup)) { throw "Installer was not produced at $setupLocation" }

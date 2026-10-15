@@ -13,7 +13,7 @@ use jchtools_file_core::{
     db::Database,
     model::{bytes, ActionKind, Summary},
 };
-use jchtools_foundation::xberg_settings::{self, DownloadSelection};
+use jchtools_foundation::xberg_settings;
 use jchtools_git_tools::git_tools::{self, GitShared, BACKOFF_UNIT};
 use jchtools_markdown::{
     markdown::{self, FormatGroup},
@@ -827,8 +827,6 @@ struct State {
     convert_readiness_missed: bool,
     /// 设置操作代际：启动时的旧配置读取不得覆盖之后保存的配置或错误。
     settings_generation: u64,
-    /// 最近一次从持久配置确认的选择；保存失败时只回滚选择，不改活动引擎。
-    settings_saved_selection: Option<DownloadSelection>,
     #[cfg(test)]
     settings_download: Option<Arc<SettingsDownload>>,
     #[cfg(test)]
@@ -4037,7 +4035,7 @@ impl UiPump {
                     if ready {
                         "已安装组件就绪，可离线使用"
                     } else {
-                        "可选组件未就绪，请主动初始化"
+                        "组件未就绪，请前往设置检查基础资产或下载音频资产"
                     }
                     .into(),
                 );
@@ -4141,10 +4139,8 @@ impl UiPump {
         let Ok(value) = serde_json::from_str::<serde_json::Value>(payload) else {
             return;
         };
-        if apply_saved_settings_selection(ui, &self.state, &value) {
-            ui.set_settings_loaded(true);
-            ui.set_settings_load_failed(false);
-        }
+        ui.set_settings_loaded(true);
+        ui.set_settings_load_failed(false);
         ui.set_settings_document_status(
             value["document_status"].as_str().unwrap_or("未下载").into(),
         );
@@ -4152,17 +4148,30 @@ impl UiPump {
             value["snapshot_status"].as_str().unwrap_or("未下载").into(),
         );
         ui.set_settings_media_status(value["media_status"].as_str().unwrap_or("未下载").into());
+        ui.set_settings_ffmpeg_status(value["ffmpeg_status"].as_str().unwrap_or("未下载").into());
+        ui.set_settings_audio_model_status(
+            value["audio_model_status"]
+                .as_str()
+                .unwrap_or("未下载")
+                .into(),
+        );
+        ui.set_settings_release(value["release"].as_str().unwrap_or_default().into());
         let active = value["active"].as_str().unwrap_or_default();
         ui.set_convert_runtime_dir(active.into());
         ui.set_convert_runtime_confirmed(!active.is_empty());
         ui.set_settings_status(
-            if active.is_empty() {
-                "请选择所需功能并下载 Xberg 组件"
-            } else {
-                "功能选择已保存；组件状态见上方"
-            }
-            .into(),
+            value["status"]
+                .as_str()
+                .unwrap_or(if active.is_empty() {
+                    "未找到共享运行目录，请使用安装包修复 / 重装，或重新解包便携 ZIP"
+                } else {
+                    "离线检查完成；音频可选资产未下载不影响文档与截图 OCR"
+                })
+                .into(),
         );
+        if terminal {
+            ui.set_settings_audio_failed(false);
+        }
         if terminal {
             ui.set_convert_runtime_saving(false);
             ui.set_convert_initializing(false);
@@ -4208,7 +4217,7 @@ impl UiPump {
                         };
                         if generation.parse::<u64>().ok()
                             == Some(self.state.borrow().settings_generation)
-                            && ui.get_convert_initializing()
+                            && (ui.get_convert_initializing() || !ui.get_settings_loaded())
                         {
                             ui.set_settings_status(message.into());
                         }
@@ -4566,7 +4575,6 @@ impl UiPump {
                             continue;
                         }
                         if let Ok(value) = serde_json::from_str::<serde_json::Value>(payload) {
-                            apply_saved_settings_selection(ui, &self.state, &value);
                             ui.set_settings_document_status(
                                 value["document_status"].as_str().unwrap_or("未下载").into(),
                             );
@@ -4575,6 +4583,15 @@ impl UiPump {
                             );
                             ui.set_settings_media_status(
                                 value["media_status"].as_str().unwrap_or("未下载").into(),
+                            );
+                            ui.set_settings_ffmpeg_status(
+                                value["ffmpeg_status"].as_str().unwrap_or("未下载").into(),
+                            );
+                            ui.set_settings_audio_model_status(
+                                value["audio_model_status"]
+                                    .as_str()
+                                    .unwrap_or("未下载")
+                                    .into(),
                             );
                         }
                         continue;
@@ -4610,10 +4627,8 @@ impl UiPump {
                             continue;
                         }
                         ui.set_settings_status(error.into());
-                        if let Some(selection) = self.state.borrow().settings_saved_selection {
-                            ui.set_settings_document(selection.document);
-                            ui.set_settings_snapshot(selection.snapshot);
-                            ui.set_settings_media(selection.media);
+                        if ui.get_convert_initializing() {
+                            ui.set_settings_audio_failed(true);
                         }
                         if !ui.get_settings_loaded() {
                             ui.set_settings_load_failed(true);
@@ -5268,7 +5283,6 @@ fn initial_state() -> Result<State> {
         convert_readiness_missed: false,
         convert_preflight_generation: 0,
         settings_generation: 0,
-        settings_saved_selection: None,
         #[cfg(test)]
         settings_download: None,
         #[cfg(test)]
@@ -5477,47 +5491,90 @@ fn wire_md_git(ui: &AppWindow, state: &Rc<RefCell<State>>, out: &EventSender) {
     }
 }
 
-/// 转 Markdown 的可选组件初始化与转换回调。组件状态、路径和任务均独立于旧工具。
+/// 所有状态来自唯一生效目录；只检查成员存在，不加载模型或联网。
 fn settings_payload() -> Result<String, String> {
-    let config = jchtools_foundation::xberg_settings::settings()?;
-    // XB-18/XB-21：来源、两条保存路径与生效路径必须属于同一个读取快照。
-    let active = match config.source {
-        jchtools_foundation::xberg_settings::Source::Custom => config.custom.as_ref(),
-        jchtools_foundation::xberg_settings::Source::Downloaded => config.downloaded.as_ref(),
-    }
-    .map(|path| jchtools_file_core::platform::display_path_text(&path.display().to_string()));
-    let selection = xberg_settings::download_selection()?;
+    let active = xberg_settings::effective_directory()?;
     let feature_status = |scenario: &str| {
-        let Some(path) = active.as_ref() else {
+        active.as_ref().map_or("未找到运行目录", |path| {
+            if jchtools_xberg::xberg_runtime::validate_assets(path, scenario).is_ok() {
+                "已安装"
+            } else {
+                "组件缺失"
+            }
+        })
+    };
+    let manifest: serde_json::Value =
+        serde_json::from_str(include_str!("../../../resources/markdown-assets.json"))
+            .map_err(|error| format!("无法读取运行资产清单：{error}"))?;
+    let audio_status = |ffmpeg: bool| {
+        let Some(root) = active.as_ref() else {
             return "未下载";
         };
-        if jchtools_xberg::xberg_runtime::validate_assets(Path::new(path), scenario).is_ok() {
-            "已安装"
+        let members = manifest["xberg"]["members"].as_array();
+        let (required, present) = members
+            .into_iter()
+            .flatten()
+            .filter_map(|member| member["path"].as_str())
+            .filter(|path| {
+                if ffmpeg {
+                    path.starts_with("ffmpeg/")
+                } else {
+                    path.starts_with("models/sense_voice_") || path.starts_with("models/vad/")
+                }
+            })
+            .fold((0usize, 0usize), |(required, present), path| {
+                (
+                    required + 1,
+                    present + usize::from(root.join(path).is_file()),
+                )
+            });
+        if required == 0 {
+            "资产清单缺失"
+        } else if present == required {
+            "已就绪"
+        } else if present != 0 {
+            "资产不完整，请补齐"
         } else {
-            "组件缺失"
+            "未下载"
         }
     };
+    let release = active.as_ref().map(|root| {
+        let receipt = std::fs::read(root.join("jchtools-xberg-release.json"))
+            .ok()
+            .and_then(|bytes| serde_json::from_slice::<serde_json::Value>(&bytes).ok());
+        receipt
+            .as_ref()
+            .filter(|value| value["owner"] == "JchTools-bundled-xberg-v1")
+            .and_then(|value| value["tag"].as_str())
+            .map_or_else(
+                || "当前目录未提供有效的随包发布记录；音频下载需要匹配的发布记录".to_string(),
+                |tag| format!("随包版本：{tag}；来源：jchanghong023/xberg 正式发布"),
+            )
+    });
     Ok(serde_json::json!({
-        "custom": config.custom.map(|p| jchtools_file_core::platform::display_path_text(&p.display().to_string())),
-        "downloaded": config.downloaded.map(|p| jchtools_file_core::platform::display_path_text(&p.display().to_string())),
-        "downloaded_active": config.source == jchtools_foundation::xberg_settings::Source::Downloaded,
-        "active": active,
-        "selection": { "document": selection.document, "snapshot": selection.snapshot, "media": selection.media },
+        "active": active.as_ref().map(|path| jchtools_file_core::platform::display_path_text(&path.display().to_string())),
+        "release": release,
         "document_status": feature_status("document"),
         "snapshot_status": feature_status("snapshot"),
-        "media_status": feature_status("media")
+        "ffmpeg_status": audio_status(true),
+        "audio_model_status": audio_status(false),
+        "media_status": if active.as_ref().is_some_and(|path|
+            jchtools_xberg::xberg_runtime::validate_assets(path, "media").is_ok()) {
+            "已就绪"
+        } else {
+            "未就绪，请主动下载音频资产"
+        }
     }).to_string())
 }
 #[cfg(test)]
-type SettingsDownload = dyn Fn(DownloadSelection, &std::sync::atomic::AtomicBool) -> Result<PathBuf, String>
-    + Send
-    + Sync;
+type SettingsDownload =
+    dyn Fn(&std::sync::atomic::AtomicBool) -> Result<PathBuf, String> + Send + Sync;
 
 fn send_settings_result(out: &EventSender, generation: u64, result: Result<String, String>) {
     let event = match result {
         Ok(payload) => Event::Notice(format!("SETTINGS_READY|{generation}|{payload}")),
         Err(error) => {
-            // 刷新持久选择和缺损组件状态，但不替换活动来源或失败文案。
+            // 刷新缺损组件状态，但不替换活动来源或失败文案。
             if let Ok(payload) = settings_payload() {
                 let _ = out.send(Event::Notice(format!(
                     "SETTINGS_FEATURES|{generation}|{payload}"
@@ -5540,38 +5597,6 @@ fn settings_blocked(ui: &AppWindow, state: &Rc<RefCell<State>>, allow_load_retry
         || state.borrow().close_after
 }
 
-fn settings_selection(ui: &AppWindow) -> DownloadSelection {
-    DownloadSelection {
-        document: ui.get_settings_document(),
-        snapshot: ui.get_settings_snapshot(),
-        media: ui.get_settings_media(),
-    }
-}
-
-fn apply_saved_settings_selection(
-    ui: &AppWindow,
-    state: &Rc<RefCell<State>>,
-    payload: &serde_json::Value,
-) -> bool {
-    let selection = &payload["selection"];
-    let (Some(document), Some(snapshot), Some(media)) = (
-        selection["document"].as_bool(),
-        selection["snapshot"].as_bool(),
-        selection["media"].as_bool(),
-    ) else {
-        return false;
-    };
-    ui.set_settings_document(document);
-    ui.set_settings_snapshot(snapshot);
-    ui.set_settings_media(media);
-    state.borrow_mut().settings_saved_selection = Some(DownloadSelection {
-        document,
-        snapshot,
-        media,
-    });
-    true
-}
-
 fn begin_settings(state: &Rc<RefCell<State>>) -> u64 {
     let mut s = state.borrow_mut();
     s.settings_generation = s.settings_generation.wrapping_add(1);
@@ -5580,39 +5605,6 @@ fn begin_settings(state: &Rc<RefCell<State>>) -> u64 {
 }
 
 fn wire_settings(ui: &AppWindow, state: &Rc<RefCell<State>>, out: &EventSender) {
-    {
-        let weak = ui.as_weak();
-        let state = state.clone();
-        let out = out.clone();
-        ui.on_settings_selection(move |document, snapshot, media| {
-            let Some(ui) = weak.upgrade() else {
-                return;
-            };
-            if settings_blocked(&ui, &state, false) {
-                return;
-            }
-            let selection = DownloadSelection {
-                document,
-                snapshot,
-                media,
-            };
-            if selection == settings_selection(&ui) {
-                return;
-            }
-            let generation = begin_settings(&state);
-            ui.set_settings_document(document);
-            ui.set_settings_snapshot(snapshot);
-            ui.set_settings_media(media);
-            ui.set_convert_runtime_saving(true);
-            ui.set_settings_status("正在保存功能选择…".into());
-            let out = out.clone();
-            std::thread::spawn(move || {
-                let result = xberg_settings::save_download_selection(selection)
-                    .and_then(|()| settings_payload());
-                send_settings_result(&out, generation, result);
-            });
-        });
-    }
     let weak = ui.as_weak();
     let state = state.clone();
     let out = out.clone();
@@ -5627,9 +5619,8 @@ fn wire_settings(ui: &AppWindow, state: &Rc<RefCell<State>>, out: &EventSender) 
             ui.set_settings_status("未知设置操作".into());
             return;
         }
-        let selection = settings_selection(&ui);
-        if action == "download" && !selection.document && !selection.snapshot && !selection.media {
-            ui.set_settings_status("请至少选择一个功能".into());
+        if action == "download" && !ui.get_convert_runtime_confirmed() {
+            ui.set_settings_status("未找到共享运行目录，请先修复安装包或重新解包".into());
             return;
         }
         let generation = begin_settings(&state);
@@ -5640,6 +5631,9 @@ fn wire_settings(ui: &AppWindow, state: &Rc<RefCell<State>>, out: &EventSender) 
         ui.set_convert_initializing(action == "download");
         ui.set_convert_runtime_saving(action == "check");
         ui.set_settings_status("正在处理，请稍候…".into());
+        if action == "download" {
+            ui.set_settings_audio_failed(false);
+        }
         state.borrow_mut().convert_init_cancel.clone_from(&cancel);
         #[cfg(test)]
         let download = state.borrow().settings_download.clone();
@@ -5660,10 +5654,10 @@ fn wire_settings(ui: &AppWindow, state: &Rc<RefCell<State>>, out: &EventSender) 
                         .ok_or_else(|| "下载取消信号不可用".to_string())?;
                     #[cfg(test)]
                     if let Some(download) = download {
-                        download(selection, cancel)?;
+                        download(cancel)?;
                         return settings_payload();
                     }
-                    markdown_assets::download_runtime(selection, cancel, |message| {
+                    markdown_assets::download_audio_runtime(cancel, |message| {
                         let _ = out.send(Event::Status(format!(
                             "SETTINGS_PROGRESS|{generation}|{message}"
                         )));
@@ -5816,7 +5810,7 @@ fn start_markdown_readiness(ui: &AppWindow, state: &Rc<RefCell<State>>, out: &Ev
     if ui.get_convert_runtime_dir().trim().is_empty() {
         ui.set_convert_runtime_confirmed(false);
         ui.set_convert_ready(false);
-        ui.set_convert_status("请前往设置下载所需 Xberg 组件".into());
+        ui.set_convert_status("请前往设置检查随包基础资产；音频转写资产需主动下载".into());
         return;
     }
     if !ui.get_convert_runtime_confirmed() {
@@ -6816,9 +6810,29 @@ fn run_gui(
     std::thread::spawn(move || {
         // S1-01：启动快照用独立前缀，界面侧不把它当设置操作终态（不清标志、
         // 不消费 close_after），避免迟到快照在任务运行中提前退出或抹掉初始化状态。
-        let event = match jchtools_xberg::xberg_runtime::resume_background()
-            .and_then(|()| settings_payload())
-        {
+        let mut migration_status = None;
+        let migration = jchtools_xberg::xberg_runtime::resume_background().and_then(|()| {
+            markdown_assets::migrate_bundled_runtime(
+                &std::sync::atomic::AtomicBool::new(false),
+                |message| {
+                    let _ = startup.send(Event::Status(format!(
+                        "SETTINGS_PROGRESS|{settings_generation}|{message}"
+                    )));
+                    migration_status = Some(message);
+                },
+            )
+        });
+        let result = settings_payload().and_then(|payload| {
+            let status = migration.err().or(migration_status);
+            if let Some(error) = status {
+                let mut value: serde_json::Value = serde_json::from_str(&payload)
+                    .map_err(|error| format!("无法读取设置状态：{error}"))?;
+                value["status"] = serde_json::Value::String(error);
+                return Ok(value.to_string());
+            }
+            Ok(payload)
+        });
+        let event = match result {
             Ok(payload) => {
                 Event::Notice(format!("SETTINGS_LOADED|{settings_generation}|{payload}"))
             }
@@ -7337,7 +7351,7 @@ mod gui_tests {
             app.state.borrow_mut().review_remediation.readiness =
                 Some(Arc::new(|| panic!("PRIVATE_PANIC_PAYLOAD_readiness")));
             app.ui.invoke_convert_selection_changed();
-            assert!(pump_until(app, || app.ui.get_convert_status() == "可选组件未就绪，请主动初始化"),
+            assert!(pump_until(app, || !app.ui.get_convert_detail_text().is_empty()),
                 "readiness panic 必须交付当前代际的未就绪结果");
             assert!(!app.ui.get_convert_ready());
             assert_eq!(app.ui.get_convert_detail_text().as_str(),
@@ -8533,10 +8547,9 @@ mod gui_tests {
         );
     }
 
-    // XB-18/XB-21：真实 SQLite 读出的 GUI 载荷必须来自同一个来源快照，
-    // 即使另一连接正在提交来源切换，也不能显示来源 A 却让工具使用目录 B。
+    // 并发保存旧来源时，GUI 仍只呈现一个完整的生效根，不按功能拼接路径。
     #[test]
-    fn settings_payload_active_matches_same_source_snapshot() {
+    fn settings_payload_keeps_one_effective_directory_during_source_changes() {
         use jchtools_foundation::xberg_settings::{self, Source};
         let _lock = jchtools_foundation::test_support::env_lock()
             .lock().unwrap_or_else(std::sync::PoisonError::into_inner);
@@ -8584,12 +8597,10 @@ mod gui_tests {
             match settings_payload() {
                 Ok(payload) => {
                     let value: serde_json::Value = serde_json::from_str(&payload).unwrap();
-                    let expected = if value["downloaded_active"] == true {
-                        &value["downloaded"]
-                    } else {
-                        &value["custom"]
-                    };
-                    if &value["active"] != expected && mismatch.is_none() {
+                    let active = value["active"].as_str().unwrap_or_default();
+                    let expected_custom = jchtools_file_core::platform::display_path_text(&root.path().join("用户目录").display().to_string());
+                    let expected_downloaded = jchtools_file_core::platform::display_path_text(&root.path().join("下载目录").display().to_string());
+                    if active != expected_custom && active != expected_downloaded && mismatch.is_none() {
                         mismatch = Some(value);
                     }
                 }
@@ -8599,7 +8610,7 @@ mod gui_tests {
         }
         writer.join().unwrap();
         assert!(read_error.is_none(), "读取真实配置失败：{read_error:?}");
-        assert!(mismatch.is_none(), "GUI来源、保存目录与生效目录必须来自同一快照：{mismatch:?}");
+        assert!(mismatch.is_none(), "GUI必须呈现一个已保存的完整生效目录：{mismatch:?}");
     }
 
     // 覆盖 M-08/M-09/M-10：精确换算为整数字节的小数不受任意小数位数限制。
@@ -8898,7 +8909,8 @@ mod gui_tests {
                 )))
                 .unwrap();
             app.pump.run(ui);
-            assert_eq!(ui.get_convert_status().as_str(), "可选组件未就绪，请主动初始化");
+            assert!(!ui.get_convert_ready());
+            assert!(!ui.get_convert_status().contains(detail), "完整缺失清单只显示在折叠详情中");
             assert!(ui.get_notice_text().is_empty());
             assert!(
                 ui.get_error_text().is_empty(),
@@ -8972,7 +8984,7 @@ mod gui_tests {
             app.pump
                 .out
                 .send(Event::Notice(
-                    "SETTINGS_READY|0|{\"custom\":null,\"downloaded\":null,\"downloaded_active\":false,\"active\":\"\"}"
+                    "SETTINGS_READY|0|{\"active\":\"\"}"
                         .into(),
                 ))
                 .unwrap();
@@ -9120,7 +9132,7 @@ mod gui_tests {
             app.pump
                 .out
                 .send(Event::Notice(
-                    "SETTINGS_LOADED|0|{\"custom\":null,\"downloaded\":null,\"downloaded_active\":false,\"active\":\"\"}"
+                    "SETTINGS_LOADED|0|{\"active\":\"\"}"
                         .into(),
                 ))
                 .unwrap();
@@ -9178,20 +9190,22 @@ mod gui_tests {
 
     // 覆盖 XB-18/XB-21：保存完成后迟到的启动读取不得恢复旧目录或旧错误。
     #[test]
-    fn startup_settings_results_do_not_replace_newer_selection() {
+    fn startup_settings_results_do_not_replace_newer_audio_state() {
         with_gui(|app| {
             let ui = &app.ui;
             app.state.borrow_mut().settings_generation = 1;
-            ui.set_settings_document(true);
-            ui.set_settings_snapshot(false);
-            ui.set_settings_media(true);
+            ui.set_convert_runtime_dir("当前生效目录".into());
+            ui.set_settings_ffmpeg_status("已就绪".into());
+            ui.set_settings_audio_model_status("未下载".into());
             ui.set_settings_status("新配置已保存".into());
             app.pump.out.send(Event::Notice(
-                "SETTINGS_LOADED|0|{\"selection\":{\"document\":false,\"snapshot\":true,\"media\":false},\"active\":\"\"}".into()
+                "SETTINGS_LOADED|0|{\"active\":\"stale\",\"ffmpeg_status\":\"未下载\"}".into()
             )).unwrap();
             app.pump.out.send(Event::Error("SETTINGS_LOAD_ERR|0|旧读取失败".into())).unwrap();
             app.pump.run(ui);
-            assert_eq!(settings_selection(ui), DownloadSelection { document: true, snapshot: false, media: true });
+            assert_eq!(ui.get_convert_runtime_dir().as_str(), "当前生效目录");
+            assert_eq!(ui.get_settings_ffmpeg_status().as_str(), "已就绪");
+            assert_eq!(ui.get_settings_audio_model_status().as_str(), "未下载");
             assert_eq!(ui.get_settings_status().as_str(), "新配置已保存");
         }).unwrap();
     }
@@ -9710,12 +9724,13 @@ mod gui_tests {
             self.ui.set_convert_runtime_dir("".into());
             self.ui.set_settings_loaded(false);
             self.ui.set_settings_load_failed(false);
-            self.ui.set_settings_document(false);
-            self.ui.set_settings_snapshot(true);
-            self.ui.set_settings_media(false);
             self.ui.set_settings_document_status("未下载".into());
             self.ui.set_settings_snapshot_status("未下载".into());
             self.ui.set_settings_media_status("未下载".into());
+            self.ui.set_settings_ffmpeg_status("未下载".into());
+            self.ui.set_settings_audio_model_status("未下载".into());
+            self.ui.set_settings_release("".into());
+            self.ui.set_settings_audio_failed(false);
             self.ui.set_settings_status("正在读取配置…".into());
             self.ui.set_convert_status("尚未检查可选组件".into());
             self.ui.set_convert_detail_text("".into());
@@ -9945,7 +9960,7 @@ mod gui_tests {
             }
             xberg_settings::save(&engine).unwrap();
             let saved = xberg_settings::settings().unwrap();
-            app.state.borrow_mut().settings_download = Some(Arc::new(|_, _| panic!("offline check downloaded assets")));
+            app.state.borrow_mut().settings_download = Some(Arc::new(|_| panic!("offline check downloaded assets")));
             let notice = root.join("markdown/licenses/THIRD_PARTY_NOTICES.md");
             assert!(!notice.exists());
             let ui = &app.ui;
@@ -9960,7 +9975,7 @@ mod gui_tests {
             assert!(ui.get_convert_runtime_confirmed());
             assert_eq!(ui.get_settings_document_status().as_str(), "组件缺失");
             assert_eq!(ui.get_settings_snapshot_status().as_str(), "组件缺失");
-            assert_eq!(ui.get_settings_media_status().as_str(), "组件缺失");
+            assert_ne!(ui.get_settings_media_status().as_str(), "已就绪");
             let current = xberg_settings::settings().unwrap();
             assert_eq!((current.source, &current.custom, &current.downloaded), (saved.source, &saved.custom, &saved.downloaded));
             std::fs::remove_file(engine.join("xberg.exe")).unwrap();
@@ -9970,7 +9985,6 @@ mod gui_tests {
             assert_eq!(ui.get_convert_runtime_dir(), active);
             let current = xberg_settings::settings().unwrap();
             assert_eq!((current.source, &current.custom, &current.downloaded), (saved.source, &saved.custom, &saved.downloaded));
-            assert!(ui.get_settings_status().contains("xberg.exe"));
             ui.invoke_select_tool("snap-ocr".into());
             assert_eq!(ui.get_screen(), 6);
             assert_eq!(ui.get_active_tool_id(), "snap-ocr");
@@ -13037,69 +13051,39 @@ mod gui_tests {
         .unwrap();
     }
 
-    #[test]
-    fn settings_startup_pending_selection_cannot_replace_saved_choice() {
-        with_gui(|app| with_settings_fixture(|_| {
-            let saved = DownloadSelection { document: false, snapshot: false, media: true };
-            xberg_settings::save_download_selection(saved).unwrap();
-            let generation = app.state.borrow().settings_generation;
-            let payload = settings_payload().unwrap();
-            let ui = &app.ui;
-            let initial = settings_selection(ui);
-            ui.invoke_settings_selection(true, true, false);
-            let changed_before_load = settings_selection(ui) != initial;
-            assert!(pump_until(app, || !ui.get_convert_runtime_saving()));
-            app.pump.out.send(Event::Notice(format!(
-                "SETTINGS_LOADED|{generation}|{payload}"
-            ))).unwrap();
-            app.pump.run(ui);
-            let persisted = xberg_settings::download_selection().unwrap();
-            assert!(!changed_before_load, "保存选择送达前不得编辑启动默认值");
-            assert_eq!(app.state.borrow().settings_generation, generation, "提前编辑不得使启动快照失效");
-            assert_eq!(persisted, saved, "提前编辑不得覆盖真实 SQLite 选择");
-            assert_eq!(settings_selection(ui), saved);
-        })).unwrap();
-    }
 
     #[test]
-    fn settings_startup_pending_download_cannot_consume_default_choice() {
+    fn settings_startup_pending_audio_download_waits_for_loaded_directory() {
         with_gui(|app| with_settings_fixture(|root| {
-            let saved = DownloadSelection { document: false, snapshot: false, media: true };
-            xberg_settings::save_download_selection(saved).unwrap();
             let generation = app.state.borrow().settings_generation;
             let payload = settings_payload().unwrap();
             let (sent, received) = mpsc::channel();
             let target = root.join("unused-download");
-            app.state.borrow_mut().settings_download = Some(Arc::new(move |selection, _| {
-                sent.send(selection).unwrap();
+            app.state.borrow_mut().settings_download = Some(Arc::new(move |_| {
+                sent.send(()).unwrap();
                 Ok(target.clone())
             }));
             let ui = &app.ui;
-            let enabled_before_load = ui.get_settings_download_enabled();
+            assert!(!ui.get_settings_download_enabled());
             ui.invoke_settings_action("download".into());
-            let started_before_load = ui.get_convert_initializing();
-            assert!(pump_until(app, || !ui.get_convert_initializing()));
-            let downloaded = received.try_recv().ok();
+            assert!(!ui.get_convert_initializing());
+            assert!(received.try_recv().is_err());
+            assert_eq!(app.state.borrow().settings_generation, generation);
             app.pump.out.send(Event::Notice(format!(
                 "SETTINGS_LOADED|{generation}|{payload}"
             ))).unwrap();
             app.pump.run(ui);
-            assert!(!enabled_before_load, "应用已保存设置前下载控件必须禁用");
-            assert!(!started_before_load, "真实下载回调必须拒绝设置加载前的请求");
-            assert_eq!(downloaded, None, "启动默认值 010 不得传入下载器");
-            assert_eq!(app.state.borrow().settings_generation, generation);
-            assert_eq!(settings_selection(ui), saved);
-            assert_eq!(xberg_settings::download_selection().unwrap(), saved);
+            assert!(ui.get_settings_loaded());
+            assert!(!ui.get_settings_download_enabled(), "缺少有效目录不能下载音频资产");
         })).unwrap();
     }
 
     #[test]
-    fn settings_load_failure_keeps_download_blocked_and_offline_check_reloads_selection() {
+    fn settings_load_failure_keeps_audio_download_blocked_and_offline_check_recovers() {
         with_gui(|app| with_settings_fixture(|root| {
-            let saved = DownloadSelection { document: false, snapshot: false, media: true };
-            xberg_settings::save_download_selection(saved).unwrap();
-            let db = xberg_settings::open(&xberg_settings::state_dir().unwrap()).unwrap();
-            db.execute("UPDATE app_settings SET value='invalid' WHERE key='xberg_download_selection'", []).unwrap();
+            let state_root = xberg_settings::state_dir().unwrap();
+            std::fs::create_dir_all(&state_root).unwrap();
+            std::fs::write(state_root.join("config.sqlite3"), b"unreadable database").unwrap();
             let error = settings_payload().unwrap_err();
             let generation = app.state.borrow().settings_generation;
             app.pump.out.send(Event::Error(format!(
@@ -13107,129 +13091,31 @@ mod gui_tests {
             ))).unwrap();
             app.pump.run(&app.ui);
             let ui = &app.ui;
-            let error_visible = ui.get_settings_status().contains(&error);
-            let enabled_after_failure = ui.get_settings_download_enabled();
+            assert!(ui.get_settings_status().contains(&error));
+            assert!(!ui.get_settings_download_enabled());
             let (sent, received) = mpsc::channel();
             let target = root.join("unused-download");
-            app.state.borrow_mut().settings_download = Some(Arc::new(move |selection, _| {
-                sent.send(selection).unwrap();
+            app.state.borrow_mut().settings_download = Some(Arc::new(move |_| {
+                sent.send(()).unwrap();
                 Ok(target.clone())
             }));
-            ui.invoke_settings_action("download".into());
-            let started_after_failure = ui.get_convert_initializing();
-            assert!(pump_until(app, || !ui.get_convert_initializing()));
-            let downloaded = received.try_recv().ok();
-            // 仅修复不可读选择，特意不安装引擎：
-            // 恢复必须离线读取设置，不依赖或下载引擎。
-            xberg_settings::save_download_selection(saved).unwrap();
-            ui.invoke_settings_action("check".into());
-            assert!(pump_until(app, || !ui.get_convert_runtime_saving()));
-            assert!(error_visible, "启动加载失败必须保持可见");
-            assert!(!enabled_after_failure, "加载失败不得允许下载启动默认选择");
-            assert!(!started_after_failure);
-            assert_eq!(downloaded, None);
-            assert_eq!(settings_selection(ui), saved, "即使未安装引擎，离线检查也必须恢复已保存选择");
-            assert!(ui.get_settings_download_enabled());
-            assert!(received.try_recv().is_err(), "离线恢复不得调用下载器");
-            assert!(xberg_settings::settings().unwrap().custom.is_none());
-            assert!(xberg_settings::settings().unwrap().downloaded.is_none());
-        })).unwrap();
-    }
-
-    #[test]
-    fn settings_failed_autosave_restores_saved_choice_before_next_download() {
-        with_gui(|app| with_settings_fixture(|root| {
-            let legacy = root.join("legacy");
-            std::fs::create_dir_all(&legacy).unwrap();
-            std::fs::write(legacy.join("xberg.exe"), b"legacy").unwrap();
-            xberg_settings::save(&legacy).unwrap();
-            let saved_selection = DownloadSelection { document: false, snapshot: false, media: true };
-            xberg_settings::save_download_selection(saved_selection).unwrap();
-            deliver_settings_loaded(app);
-            let ui = &app.ui;
-            let active = ui.get_convert_runtime_dir();
-            let saved_source = xberg_settings::settings().unwrap();
-            let db = xberg_settings::open(&xberg_settings::state_dir().unwrap()).unwrap();
-            db.execute_batch(
-                "CREATE TRIGGER refuse_selection_write BEFORE INSERT ON app_settings
-                 WHEN NEW.key='xberg_download_selection'
-                 BEGIN SELECT RAISE(ABORT, 'fixture selection write refused'); END;"
-            ).unwrap();
-            let (sent, received) = mpsc::channel();
-            let target = legacy.clone();
-            app.state.borrow_mut().settings_download = Some(Arc::new(move |selection, _| {
-                sent.send(selection).unwrap();
-                Ok(target.clone())
-            }));
-            ui.invoke_settings_selection(true, true, false);
-            assert!(ui.get_convert_runtime_saving());
-            assert!(pump_until(app, || !ui.get_convert_runtime_saving()));
-            let selection_after_failure = settings_selection(ui);
-            let failure_status = ui.get_settings_status();
-            let active_after_failure = ui.get_convert_runtime_dir();
-            let confirmed_after_failure = ui.get_convert_runtime_confirmed();
-            assert_eq!(xberg_settings::download_selection().unwrap(), saved_selection, "SQLite 触发器必须拒绝真实自动保存");
-            ui.invoke_settings_action("download".into());
-            assert!(ui.get_convert_initializing(), "下载应重新可用并使用已保存选择");
-            assert!(pump_until(app, || !ui.get_convert_initializing()));
-            let downloaded = received.try_recv().unwrap();
-            let current_source = xberg_settings::settings().unwrap();
-            assert!(failure_status.contains("fixture selection write refused"), "组件状态刷新后必须保留保存错误：{failure_status}");
-            assert_eq!(selection_after_failure, saved_selection, "自动保存失败必须回滚未保存的界面选择");
-            assert_eq!(downloaded, saved_selection, "下一次下载不得使用被 SQLite 拒绝的选择");
-            assert_eq!(settings_selection(ui), selection_after_failure, "下载成功不得再次反转选择");
-            assert_eq!(active_after_failure, active, "自动保存失败必须保留活动引擎");
-            assert!(confirmed_after_failure);
-            assert_eq!(ui.get_convert_runtime_dir(), active);
-            assert_eq!((current_source.source, current_source.custom, current_source.downloaded),
-                (saved_source.source, saved_source.custom, saved_source.downloaded));
-        })).unwrap();
-    }
-
-    #[test]
-    fn settings_selection_callbacks_persist_reload_and_reject_stale_snapshots() {
-        with_gui(|app| with_settings_fixture(|_| {
-            let ui = &app.ui;
-            deliver_settings_loaded(app);
-            assert_eq!(settings_selection(ui), DownloadSelection::default());
-            for selection in [
-                DownloadSelection { document: true, snapshot: false, media: false },
-                DownloadSelection { document: false, snapshot: false, media: true },
-                DownloadSelection { document: true, snapshot: true, media: true },
-                DownloadSelection { document: false, snapshot: false, media: false },
-            ] {
-                ui.invoke_settings_selection(selection.document, selection.snapshot, selection.media);
-                assert!(ui.get_convert_runtime_saving());
-                assert!(!ui.get_settings_download_enabled());
-                let generation = app.state.borrow().settings_generation;
-                ui.invoke_settings_selection(!selection.document, !selection.snapshot, !selection.media);
-                ui.invoke_settings_action("download".into());
-                assert_eq!(settings_selection(ui), selection);
-                assert_eq!(app.state.borrow().settings_generation, generation);
-                app.pump.out.send(Event::Notice(format!(
-                    "SETTINGS_LOADED|{}|{{\"selection\":{{\"document\":false,\"snapshot\":true,\"media\":false}},\"active\":\"stale\"}}",
-                    generation - 1
-                ))).unwrap();
-                app.pump.run(ui);
-                assert_eq!(settings_selection(ui), selection);
-                assert!(pump_until(app, || !ui.get_convert_runtime_saving()));
-                assert_eq!(xberg_settings::download_selection().unwrap(), selection);
-                let restarted_ui = AppWindow::new().unwrap();
-                app.pump.apply_settings_snapshot(&restarted_ui, &settings_payload().unwrap(), false);
-                assert_eq!(settings_selection(&restarted_ui), selection);
-                assert!(restarted_ui.get_convert_runtime_dir().is_empty());
-            }
-            assert!(!ui.get_settings_download_enabled());
-            let generation = app.state.borrow().settings_generation;
             ui.invoke_settings_action("download".into());
             assert!(!ui.get_convert_initializing());
-            assert_eq!(app.state.borrow().settings_generation, generation);
-            assert!(app.state.borrow().convert_init_cancel.is_none());
+            assert!(received.try_recv().is_err());
+            std::fs::remove_file(state_root.join("config.sqlite3")).unwrap();
+            ui.invoke_settings_action("check".into());
+            assert!(pump_until(app, || !ui.get_convert_runtime_saving()));
+            assert!(ui.get_settings_loaded(), "即使未找到引擎，离线恢复也必须结束读取失败状态");
+            assert!(!ui.get_settings_load_failed());
+            assert!(!ui.get_settings_download_enabled());
+            assert!(received.try_recv().is_err(), "离线恢复不得调用下载器");
+            assert!(xberg_settings::effective_directory().unwrap().is_none());
         })).unwrap();
     }
 
+
     #[test]
-    fn snapshot_download_callback_is_single_flight_and_cancel_preserves_active_source() {
+    fn audio_download_callback_is_single_flight_and_cancel_preserves_active_source() {
         with_gui(|app| with_settings_fixture(|root| {
             let legacy = root.join("legacy");
             std::fs::create_dir_all(&legacy).unwrap();
@@ -13239,9 +13125,9 @@ mod gui_tests {
             let calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
             let observed = calls.clone();
             let (sent, received) = mpsc::channel();
-            app.state.borrow_mut().settings_download = Some(Arc::new(move |selection, cancel| {
+            app.state.borrow_mut().settings_download = Some(Arc::new(move |cancel| {
                 observed.fetch_add(1, Ordering::SeqCst);
-                sent.send(selection).unwrap();
+                sent.send(()).unwrap();
                 let deadline = Instant::now() + Duration::from_secs(5);
                 while !cancel.load(Ordering::Acquire) && Instant::now() < deadline {
                     std::thread::sleep(Duration::from_millis(5));
@@ -13260,10 +13146,8 @@ mod gui_tests {
             let generation = app.state.borrow().settings_generation;
             ui.invoke_settings_action("download".into());
             ui.invoke_settings_action("check".into());
-            ui.invoke_settings_selection(true, true, true);
             assert_eq!(app.state.borrow().settings_generation, generation);
-            assert_eq!(settings_selection(ui), DownloadSelection::default());
-            assert_eq!(received.recv_timeout(Duration::from_secs(2)).unwrap(), DownloadSelection::default());
+            received.recv_timeout(Duration::from_secs(2)).unwrap();
             app.pump.out.send(Event::Notice("SETTINGS_READY|0|{\"active\":\"stale\"}".into())).unwrap();
             app.pump.out.send(Event::Error("SETTINGS_ERROR|0|stale".into())).unwrap();
             app.pump.run(ui);
@@ -13277,44 +13161,76 @@ mod gui_tests {
             assert_eq!((current.source, &current.custom, &current.downloaded), (saved.source, &saved.custom, &saved.downloaded));
             assert_eq!(ui.get_convert_runtime_dir(), active);
             assert!(ui.get_convert_runtime_confirmed());
-            assert_eq!(xberg_settings::download_selection().unwrap(), DownloadSelection::default());
+            assert!(ui.get_settings_audio_failed(), "取消收尾后保留重试入口");
         })).unwrap();
     }
 
-    // Downloads are substituted at the network/install boundary; callbacks, source commit and status refresh are real.
+    // 仅替换下载边界；同根资产状态、真实回调及取消后重试均走生产装配。
     #[test]
-    fn snapshot_download_completion_refreshes_only_installed_feature_status() {
+    fn audio_download_completion_refreshes_same_root_without_changing_bundled_status() {
         with_gui(|app| with_settings_fixture(|root| {
-            let installed = root.join("downloaded");
-            let expected = installed.clone();
-            app.state.borrow_mut().settings_download = Some(Arc::new(move |selection, cancel| {
-                assert_eq!(selection, DownloadSelection::default());
+            let installed = root.join("bundled");
+            let manifest: serde_json::Value = serde_json::from_str(include_str!("../../../resources/markdown-assets.json")).unwrap();
+            for member in manifest["xberg"]["members"].as_array().unwrap() {
+                let path = member["path"].as_str().unwrap();
+                if jchtools_xberg::xberg_runtime::asset_for_scenario(path, "document")
+                    || jchtools_xberg::xberg_runtime::asset_for_scenario(path, "snapshot") {
+                    let target = installed.join(path);
+                    std::fs::create_dir_all(target.parent().unwrap()).unwrap();
+                    std::fs::write(target, b"presence-only fixture").unwrap();
+                }
+            }
+            xberg_settings::save_bundled_directory(&installed).unwrap();
+            let expected = xberg_settings::effective_directory().unwrap().unwrap();
+            let target_root = installed.clone();
+            app.state.borrow_mut().settings_download = Some(Arc::new(move |cancel| {
                 assert!(!cancel.load(Ordering::Acquire));
                 let manifest: serde_json::Value = serde_json::from_str(include_str!("../../../resources/markdown-assets.json")).unwrap();
                 for member in manifest["xberg"]["members"].as_array().unwrap() {
                     let path = member["path"].as_str().unwrap();
-                    if jchtools_xberg::xberg_runtime::asset_for_scenario(path, "snapshot") {
-                        let target = installed.join(path);
+                    if jchtools_xberg::xberg_runtime::asset_for_scenario(path, "media") {
+                        let target = target_root.join(path);
                         std::fs::create_dir_all(target.parent().unwrap()).unwrap();
-                        std::fs::write(target, b"presence-only fixture").unwrap();
+                        if !target.is_file() {
+                            std::fs::write(target, b"presence-only fixture").unwrap();
+                        }
                     }
                 }
-                xberg_settings::save_source(xberg_settings::Source::Downloaded, &installed)?;
-                Ok(installed.clone())
+                Ok(target_root.clone())
             }));
             let ui = &app.ui;
             deliver_settings_loaded(app);
+            assert_eq!(ui.get_settings_document_status().as_str(), "已安装");
+            assert_eq!(ui.get_settings_snapshot_status().as_str(), "已安装");
+            assert_eq!(ui.get_settings_ffmpeg_status().as_str(), "未下载");
+            assert_eq!(ui.get_settings_audio_model_status().as_str(), "未下载");
+            // 单独装有 FFmpeg 时模型仍未就绪，不能将两者混为同一个开关。
+            for member in manifest["xberg"]["members"].as_array().unwrap() {
+                let path = member["path"].as_str().unwrap();
+                if path.starts_with("ffmpeg/") {
+                    let target = installed.join(path);
+                    std::fs::create_dir_all(target.parent().unwrap()).unwrap();
+                    std::fs::write(target, b"presence-only FFmpeg fixture").unwrap();
+                }
+            }
+            app.pump.apply_settings_snapshot(ui, &settings_payload().unwrap(), false);
+            assert_eq!(ui.get_settings_ffmpeg_status().as_str(), "已就绪");
+            assert_eq!(ui.get_settings_audio_model_status().as_str(), "未下载");
+            assert_ne!(ui.get_settings_media_status().as_str(), "已就绪");
+            let active = ui.get_convert_runtime_dir();
+            ui.set_settings_audio_failed(true);
             ui.invoke_settings_action("download".into());
             assert!(ui.get_convert_initializing());
             assert!(pump_until(app, || !ui.get_convert_initializing()));
             assert!(ui.get_convert_runtime_confirmed());
-            assert_eq!(xberg_settings::required().unwrap(), expected.canonicalize().unwrap());
-            assert_eq!(xberg_settings::settings().unwrap().source, xberg_settings::Source::Downloaded);
+            assert_eq!(ui.get_convert_runtime_dir(), active);
+            assert_eq!(xberg_settings::effective_directory().unwrap().unwrap(), expected);
+            assert_eq!(ui.get_settings_document_status().as_str(), "已安装");
             assert_eq!(ui.get_settings_snapshot_status().as_str(), "已安装");
-            assert_ne!(ui.get_settings_document_status().as_str(), "已安装");
-            assert_ne!(ui.get_settings_media_status().as_str(), "已安装");
-            assert_eq!(settings_selection(ui), DownloadSelection::default());
-            assert!(ui.get_settings_download_enabled());
+            assert_eq!(ui.get_settings_ffmpeg_status().as_str(), "已就绪");
+            assert_eq!(ui.get_settings_audio_model_status().as_str(), "已就绪");
+            assert_eq!(ui.get_settings_media_status().as_str(), "已就绪");
+            assert!(!ui.get_settings_audio_failed());
         })).unwrap();
     }
 
@@ -13324,30 +13240,29 @@ mod gui_tests {
     fn settings_actions_are_gated_while_busy_and_reject_unknown_action() {
         with_gui(|app| {
             let ui = &app.ui;
-            assert_eq!(ui.get_settings_status().as_str(), "正在读取配置…");
+            ui.set_settings_loaded(true);
+            ui.set_convert_runtime_confirmed(true);
+            ui.set_convert_runtime_dir("fixture-runtime".into());
+            let generation = app.state.borrow().settings_generation;
             ui.set_busy(true);
             ui.invoke_settings_action("download".into());
             assert!(
                 !ui.get_convert_runtime_saving() && !ui.get_convert_initializing(),
                 "任务运行中设置操作必须被门禁"
             );
-            assert_eq!(ui.get_settings_status().as_str(), "正在读取配置…");
             ui.set_busy(false);
             ui.set_convert_preparing(true);
             ui.invoke_settings_action("check".into());
             assert!(!ui.get_convert_runtime_saving(), "预检在途同样门禁");
-            assert_eq!(ui.get_settings_status().as_str(), "正在读取配置…");
+            assert_eq!(app.state.borrow().settings_generation, generation);
             ui.set_convert_preparing(false);
             for blocked in 0..4 {
                 ui.set_snap_initializing(blocked == 0);
                 ui.set_confirm_kind(if blocked == 1 { 1 } else { 0 });
                 ui.set_convert_runtime_saving(blocked == 2);
                 app.state.borrow_mut().close_after = blocked == 3;
-                let selection = settings_selection(ui);
                 let generation = app.state.borrow().settings_generation;
-                ui.invoke_settings_selection(true, false, true);
                 ui.invoke_settings_action("download".into());
-                assert_eq!(settings_selection(ui), selection);
                 assert_eq!(app.state.borrow().settings_generation, generation);
                 assert!(!ui.get_convert_initializing());
             }
@@ -13356,7 +13271,7 @@ mod gui_tests {
             ui.set_convert_runtime_saving(false);
             app.state.borrow_mut().close_after = false;
             app.pump.out.send(Event::Notice(
-                "SETTINGS_LOADED|0|{\"selection\":{\"document\":false,\"snapshot\":true,\"media\":false}}".into()
+                "SETTINGS_LOADED|0|{\"active\":null}".into()
             )).unwrap();
             app.pump.run(ui);
             ui.invoke_settings_action("bogus".into());

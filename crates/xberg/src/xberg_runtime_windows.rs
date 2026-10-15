@@ -126,6 +126,24 @@ pub(super) fn background_control(stop: bool) -> Result<Value, String> {
 pub(super) fn force_background_exit() -> Result<Value, String> {
     background_command("broker-force-stop")
 }
+pub(super) fn activate_bundled_runtime(root: &Path) -> Result<(), String> {
+    let root =
+        std::fs::canonicalize(root).map_err(|error| format!("随包 Xberg 目录不可读：{error}"))?;
+    let timeout = Duration::from_secs(60);
+    let pipe = connect(true, Instant::now() + timeout, false)?;
+    let operation_id = logging::new_operation_id();
+    let response = exchange(
+        pipe,
+        &json!({
+            "runtime_dir": root,
+            "request": {"id": operation_id, "command": "broker-activate-bundled"},
+            "diagnostic": {"operation_id": operation_id, "caller_pid": std::process::id()}
+        }),
+        timeout,
+    )?;
+    super::checked(response).map(|_| ())
+}
+
 fn background_command(command: &str) -> Result<Value, String> {
     let operation_id = logging::new_operation_id();
     let span =
@@ -1886,6 +1904,99 @@ fn write_pipe_response(
     Ok(())
 }
 
+/// 调用方持有唯一引擎槽锁；成功回收之前绝不清空槽或启动替代进程。
+fn stop_owned_engine(slot: &mut Option<Engine>, reason: &'static str) -> Result<(), String> {
+    if let Some(current) = slot.as_mut() {
+        if let Some(status) = current
+            .child
+            .try_wait()
+            .map_err(|error| format!("查询旧引擎退出失败：{error}"))?
+        {
+            log_engine_exit(current, status, reason);
+        } else {
+            kill_engine(current, reason).map_err(|error| format!("停止旧共享引擎失败：{error}"))?;
+            wait_engine(current, reason)
+                .map_err(|error| format!("等待旧共享引擎退出失败：{error}"))?;
+        }
+        fail_pending(&current.pending, &current.broken);
+    }
+    slot.take();
+    Ok(())
+}
+
+/// 在 submit/取消/生命周期共用的槽锁内完成迁移，关闭检查与提交之间的竞态窗口。
+fn activate_runtime(slot: &mut Option<Engine>, root: &Path) -> Result<Value, String> {
+    if let Some(current) = slot.as_ref() {
+        if current
+            .pending
+            .lock()
+            .map_err(|_| "共享请求表异常")?
+            .values()
+            .any(|request| request.lane.is_some())
+        {
+            return Err(
+                "文档、媒体或截图任务尚未结束，暂不迁移共享目录；原配置和任务保持不变".into(),
+            );
+        }
+    }
+    for scenario in ["engine", "document", "snapshot"] {
+        super::validate_assets(root, scenario)?;
+    }
+    let previous = slot.as_ref().map(|engine| engine.root.clone());
+    // 同根只提交来源；音频资产按请求惰性加载，不能为了补齐音频重启常驻模型。
+    if let Some(current) = slot.as_mut().filter(|engine| engine.root == root) {
+        if !current.broken.load(Ordering::Acquire)
+            && current
+                .child
+                .try_wait()
+                .map_err(|error| format!("查询共享引擎失败：{error}"))?
+                .is_none()
+        {
+            xberg_settings::save_bundled_directory(root)?;
+            return Ok(json!({"ok":true,"jchtools_xberg_pid":current.child.id()}));
+        }
+    }
+    let preserve_media = previous
+        .as_ref()
+        .is_some_and(|old| super::validate_assets(old, "media").is_ok());
+    stop_owned_engine(slot, "bundled_activation")?;
+    let result: Result<Value, String> = (|| {
+        *slot = Some(Engine::spawn(root)?);
+        let current = slot.as_ref().ok_or("随包共享引擎初始化失败")?;
+        let capabilities = current
+            .submit(json!({
+                "id": logging::new_operation_id(),
+                "command":"capabilities",
+                "timeout_ms": u64::try_from(QUERY_TIMEOUT.as_millis()).unwrap_or(u64::MAX)
+            }))?
+            .recv_timeout(QUERY_TIMEOUT)
+            .map_err(|error| format!("随包 Xberg 能力握手失败：{error}"))?;
+        let capabilities = super::checked(capabilities)?;
+        for command in ["extract", "ocr_snapshot"] {
+            super::validate_capabilities(&capabilities, command)?;
+        }
+        if preserve_media {
+            super::validate_assets(root, "media")?;
+            super::validate_capabilities(&capabilities, "transcribe")?;
+        }
+        xberg_settings::save_bundled_directory(root)?;
+        Ok(json!({"ok":true,"jchtools_xberg_pid":current.child.id()}))
+    })();
+    if let Err(error) = result {
+        // 新来源尚未提交；失败目标必须先退出，才允许恢复旧根的惰性能力。
+        stop_owned_engine(slot, "bundled_activation_rollback")
+            .map_err(|rollback| format!("{error}；回收迁移目标失败：{rollback}；原配置未更改"))?;
+        if let Some(previous) = previous {
+            *slot =
+                Some(Engine::spawn(&previous).map_err(|restore| {
+                    format!("{error}；原配置保留，但旧引擎恢复失败：{restore}")
+                })?);
+        }
+        return Err(format!("共享目录迁移失败，原配置保留：{error}"));
+    }
+    result
+}
+
 fn handle(
     pipe: File,
     engine: &Mutex<Option<Engine>>,
@@ -2002,6 +2113,15 @@ fn handle(
             stage = "stopping_gate";
             if stopping.load(Ordering::Acquire) && request["command"] != "cancel" {
                 return Err("后台正在退出，不接受新请求".into());
+            }
+            if request["command"] == "broker-activate-bundled" {
+                stage = "bundled_activation";
+                let root = std::fs::canonicalize(&root)
+                    .map_err(|error| format!("随包 Xberg 目录不可读：{error}"))?;
+                return activate_runtime(&mut slot, &root).map(|mut response| {
+                    response["id"] = request["id"].clone();
+                    response
+                });
             }
             stage = "engine_exit_probe";
             if let Some(current) = slot.as_mut() {

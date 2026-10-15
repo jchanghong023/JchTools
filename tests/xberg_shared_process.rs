@@ -1673,3 +1673,173 @@ fn review_remediation_post_stop_unread_broker_state_does_not_delay_retirement() 
     assert!(!broker_alive, "停止后未读状态响应仍拖住代理退出");
     assert!(!engine_alive, "原终态交付后引擎未在 5 秒内回收");
 }
+
+fn place_base_assets(root: &Path) {
+    let manifest: serde_json::Value =
+        serde_json::from_str(include_str!("../resources/markdown-assets.json")).unwrap();
+    for member in manifest["xberg"]["members"].as_array().unwrap() {
+        let path = member["path"].as_str().unwrap();
+        if path == "xberg.exe"
+            || path.starts_with("ffmpeg/")
+            || path.starts_with("models/sense_voice_")
+            || path.starts_with("models/vad/")
+        {
+            continue;
+        }
+        let target = root.join(path);
+        std::fs::create_dir_all(target.parent().unwrap()).unwrap();
+        std::fs::write(target, b"synthetic base asset").unwrap();
+    }
+}
+
+fn shared_state(root: &Path) -> serde_json::Value {
+    let state = xberg_runtime::request(
+        root,
+        json!({"command":"snapshot_state"}),
+        Duration::from_secs(15),
+        &AtomicBool::new(false),
+    )
+    .unwrap();
+    assert_eq!(state["ok"], true, "{state}");
+    state
+}
+
+/// XB-14/XB-21：真实代理把 idle 检查、唯一引擎替换与来源提交串为一个边界。
+/// 合成引擎只证明生命周期/事务，不代表目标模型真实推理已经验收。
+#[test]
+fn bundled_activation_refuses_active_work_and_preserves_source_on_failure() {
+    use jchtools_foundation::xberg_settings;
+    common::ensure_child_reaper();
+    let _session = common::session_lock();
+    common::cleanup_stray_engines();
+    let temporary = tempfile::tempdir().unwrap();
+    let old = temporary.path().join("old");
+    let bundled = temporary.path().join("bundled");
+    std::fs::create_dir_all(&old).unwrap();
+    std::fs::create_dir_all(&bundled).unwrap();
+    prepare(&old);
+    place_base_assets(&old);
+    place_base_assets(&bundled);
+    common::mock_engine_copy("tests/fixtures/shared_xberg.rs", &bundled.join("xberg.exe"));
+    let state = shared_state(&old);
+    let mut shared = SharedProcess {
+        broker_pid: state["jchtools_broker_pid"].as_u64().unwrap(),
+        engine_pid: state["jchtools_xberg_pid"].as_u64(),
+    };
+    let previous_source = xberg_settings::settings().unwrap().source;
+    std::fs::write(old.join("long.txt"), "document").unwrap();
+    let document_root = old.clone();
+    let document = std::thread::spawn(move || {
+        xberg_runtime::request(
+            &document_root,
+            json!({"command":"extract","path":document_root.join("long.txt")}),
+            Duration::from_secs(30),
+            &AtomicBool::new(false),
+        )
+        .unwrap()
+    });
+    let until = Instant::now() + Duration::from_secs(15);
+    while !old.join("document-started").exists() {
+        assert!(Instant::now() < until, "长文档必须先进入推理");
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    let rejected = xberg_runtime::activate_bundled_runtime(&bundled);
+    let still_active = !document.is_finished();
+    let unchanged = xberg_settings::required().unwrap() == old.canonicalize().unwrap();
+    let during = xberg_runtime::request(
+        &old,
+        json!({"command":"ocr_snapshot","image_base64":"fixture"}),
+        Duration::from_secs(5),
+        &AtomicBool::new(false),
+    )
+    .unwrap();
+    std::fs::write(old.join("release-document"), "1").unwrap();
+    let terminal = document.join().unwrap();
+    assert!(rejected.is_err(), "在途推理必须拒绝迁移");
+    assert!(still_active && unchanged, "迁移拒绝不得中断任务或提前切源");
+    assert_eq!(during["jchtools_xberg_pid"], state["jchtools_xberg_pid"]);
+    assert_eq!(
+        during["text"], "截图结果",
+        "没有音频资产仍能在文档执行期间截图"
+    );
+    assert_eq!(terminal["ok"], true);
+    assert_eq!(terminal["jchtools_xberg_pid"], state["jchtools_xberg_pid"]);
+    assert!(
+        !bundled.join("starts.txt").exists(),
+        "活跃时不得启动目标引擎"
+    );
+
+    let database = xberg_settings::open(&xberg_settings::state_dir().unwrap()).unwrap();
+    database
+        .execute_batch(
+            "CREATE TRIGGER reject_runtime_source BEFORE INSERT ON app_settings
+         WHEN NEW.key='xberg_source'
+         BEGIN SELECT RAISE(ABORT, 'synthetic save failure'); END;",
+        )
+        .unwrap();
+    let failed = xberg_runtime::activate_bundled_runtime(&bundled);
+    let restored = shared_state(&old);
+    shared.engine_pid = restored["jchtools_xberg_pid"].as_u64();
+    assert!(failed.is_err(), "真实 SQLite 保存失败不得冒称迁移成功");
+    assert_eq!(
+        xberg_settings::required().unwrap(),
+        old.canonicalize().unwrap()
+    );
+    assert_eq!(xberg_settings::settings().unwrap().source, previous_source);
+    assert_eq!(
+        restored["jchtools_broker_pid"],
+        state["jchtools_broker_pid"]
+    );
+    assert!(!process_alive(
+        state["jchtools_xberg_pid"].as_u64().unwrap()
+    ));
+    for pid in std::fs::read_to_string(bundled.join("starts.txt"))
+        .unwrap()
+        .lines()
+    {
+        assert!(
+            !process_alive(pid.parse().unwrap()),
+            "失败目标必须退出后才恢复原引擎"
+        );
+    }
+    database
+        .execute_batch("DROP TRIGGER reject_runtime_source")
+        .unwrap();
+    std::fs::write(bundled.join("xberg.exe"), b"not an executable").unwrap();
+    assert!(xberg_runtime::activate_bundled_runtime(&bundled).is_err());
+    let recovered = shared_state(&old);
+    shared.engine_pid = recovered["jchtools_xberg_pid"].as_u64();
+    assert_eq!(
+        xberg_settings::required().unwrap(),
+        old.canonicalize().unwrap()
+    );
+    assert_eq!(xberg_settings::settings().unwrap().source, previous_source);
+
+    common::mock_engine_copy("tests/fixtures/shared_xberg.rs", &bundled.join("xberg.exe"));
+    xberg_runtime::activate_bundled_runtime(&bundled).unwrap();
+    let activated = shared_state(&bundled);
+    shared.engine_pid = activated["jchtools_xberg_pid"].as_u64();
+    assert_eq!(
+        xberg_settings::required().unwrap(),
+        bundled.canonicalize().unwrap()
+    );
+    assert_eq!(
+        activated["jchtools_broker_pid"],
+        state["jchtools_broker_pid"]
+    );
+    assert!(!process_alive(
+        recovered["jchtools_xberg_pid"].as_u64().unwrap()
+    ));
+    let stale = xberg_runtime::request(
+        &old,
+        json!({"command":"keepalive"}),
+        Duration::from_secs(5),
+        &AtomicBool::new(false),
+    )
+    .unwrap();
+    assert_eq!(stale["ok"], false, "切源后旧客户端不能把引擎切回旧根");
+    assert_eq!(
+        shared_state(&bundled)["jchtools_xberg_pid"],
+        activated["jchtools_xberg_pid"]
+    );
+}

@@ -51,6 +51,7 @@ impl Harness {
             .args(args)
             .current_dir(self.root.path())
             .env("JCHTOOLS_TEST_STATE_DIR", self.root.path().join("state"))
+            .env_remove("JCHTOOLS_TEST_BUNDLED_XBERG_DIR")
             .env("JCH_LOG_LEVEL", "INFO")
             .env(
                 "JCHTOOLS_MARKDOWN_TEST_ASSET_ROOT",
@@ -94,9 +95,15 @@ fn png() -> Vec<u8> {
 
 fn failure(output: &Output, code: i32) -> &str {
     assert_eq!(output.status.code(), Some(code), "{output:?}");
-    assert!(output.stdout.is_empty(), "failures must not fabricate OCR text");
+    assert!(
+        output.stdout.is_empty(),
+        "failures must not fabricate OCR text"
+    );
     let stderr = std::str::from_utf8(&output.stderr).unwrap();
-    assert!(!stderr.trim().is_empty(), "failure must explain itself on stderr");
+    assert!(
+        !stderr.trim().is_empty(),
+        "failure must explain itself on stderr"
+    );
     stderr
 }
 
@@ -122,6 +129,45 @@ fn valid_image_without_selected_xberg_is_an_explained_asset_error() {
     assert!(!error.error.trim().is_empty());
 }
 
+// XB-18 / O-33：未打开 GUI、无 SQLite 时，CLI 使用共享发现入口并保存同一随包来源。
+// 此用例只验证发现及缺资产错误，不把占位 exe 当作真实 OCR 推理成功。
+#[test]
+fn bundled_runtime_is_discovered_without_gui_configuration() {
+    let harness = Harness::new();
+    let bundled = harness.root.path().join("xberg");
+    std::fs::create_dir(&bundled).unwrap();
+    std::fs::write(bundled.join("xberg.exe"), b"discovery fixture").unwrap();
+    let state = harness.root.path().join("state");
+    assert!(!state.join("config.sqlite3").exists());
+    let mut child = harness
+        .command(&["--stdin", "--json"], true)
+        .env("JCHTOOLS_TEST_BUNDLED_XBERG_DIR", &bundled)
+        .spawn()
+        .unwrap();
+    child.stdin.take().unwrap().write_all(&png()).unwrap();
+    let output = child.wait_with_output().unwrap();
+    let error: JsonError = serde_json::from_str(failure(&output, 3)).unwrap();
+    assert!(!error.ok);
+    assert_eq!(error.error_kind, "xberg");
+    let db = jchtools_foundation::xberg_settings::open(&state).unwrap();
+    let (source, effective): (String, String) = db
+        .query_row(
+            "SELECT
+            (SELECT value FROM app_settings WHERE key='xberg_source'),
+            (SELECT value FROM app_settings WHERE key='xberg_directory')",
+            [],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .unwrap();
+    assert_eq!(source, "bundled");
+    assert_eq!(PathBuf::from(effective), bundled.canonicalize().unwrap());
+    assert!(!harness
+        .root
+        .path()
+        .join("legacy-assets/xberg-runtime-path.txt")
+        .exists());
+}
+
 #[test]
 fn help_is_concise_and_available_without_xberg() {
     let harness = Harness::new();
@@ -141,8 +187,16 @@ fn help_is_concise_and_available_without_xberg() {
         ] {
             assert!(help.contains(required), "{argument}: missing {required}");
         }
-        for unrelated in ["配置前提：", "程序调用示例", "PowerShell 示例", "WindowsApps"] {
-            assert!(!help.contains(unrelated), "{argument}: contains {unrelated}");
+        for unrelated in [
+            "配置前提：",
+            "程序调用示例",
+            "PowerShell 示例",
+            "WindowsApps",
+        ] {
+            assert!(
+                !help.contains(unrelated),
+                "{argument}: contains {unrelated}"
+            );
         }
     }
 }
@@ -183,7 +237,10 @@ fn invalid_arguments_are_rejected_before_network_or_engine_use() {
     listener.set_nonblocking(true).unwrap();
     let url = format!("http://{}/image.png", listener.local_addr().unwrap());
     failure(&harness.run(&[&url, "--stdin"], None), 2);
-    assert_eq!(listener.accept().unwrap_err().kind(), std::io::ErrorKind::WouldBlock);
+    assert_eq!(
+        listener.accept().unwrap_err().kind(),
+        std::io::ErrorKind::WouldBlock
+    );
 }
 
 #[test]
@@ -216,8 +273,14 @@ fn ocr_call_logs_correlated_start_and_result_without_input_content() {
         .map(|entry| std::fs::read_to_string(entry.unwrap().path()).unwrap())
         .collect::<Vec<_>>()
         .join("\n");
-    let started = logs.lines().find(|line| line.contains("event=ocr_cli_started")).unwrap();
-    let completed = logs.lines().find(|line| line.contains("event=ocr_cli_completed")).unwrap();
+    let started = logs
+        .lines()
+        .find(|line| line.contains("event=ocr_cli_started"))
+        .unwrap();
+    let completed = logs
+        .lines()
+        .find(|line| line.contains("event=ocr_cli_completed"))
+        .unwrap();
     let operation_id = |line: &str| {
         line.split_ascii_whitespace()
             .find_map(|field| field.strip_prefix("operation_id="))
@@ -388,8 +451,12 @@ fn review_image_server(
         // Windows 的 accepted socket 可能继承 listener 的非阻塞状态；
         // 大流写入必须阻塞等待客户端消费，不能把 WouldBlock 误当容量拒绝。
         stream.set_nonblocking(false).unwrap();
-        stream.set_read_timeout(Some(std::time::Duration::from_secs(5))).unwrap();
-        stream.set_write_timeout(Some(std::time::Duration::from_secs(5))).unwrap();
+        stream
+            .set_read_timeout(Some(std::time::Duration::from_secs(5)))
+            .unwrap();
+        stream
+            .set_write_timeout(Some(std::time::Duration::from_secs(5)))
+            .unwrap();
         let mut request = Vec::new();
         let mut byte = [0];
         while !request.ends_with(b"\r\n\r\n") {
@@ -397,7 +464,10 @@ fn review_image_server(
                 return;
             }
             request.push(byte[0]);
-            assert!(request.len() <= 16 * 1024, "unexpected oversized HTTP request");
+            assert!(
+                request.len() <= 16 * 1024,
+                "unexpected oversized HTTP request"
+            );
         }
         let header = match framing {
             ReviewFraming::ContentLength => format!(
@@ -418,12 +488,14 @@ fn review_image_server(
             // 不能等待读取超时后恰巧也得到 network。旧无界 reader 在此不能通过。
             match stream.read(&mut byte) {
                 Ok(0) => {}
-                Err(error) if matches!(
-                    error.kind(),
-                    std::io::ErrorKind::ConnectionReset
-                        | std::io::ErrorKind::ConnectionAborted
-                ) => {}
-                result => panic!("declared oversized image was not rejected before its body: {result:?}"),
+                Err(error)
+                    if matches!(
+                        error.kind(),
+                        std::io::ErrorKind::ConnectionReset | std::io::ErrorKind::ConnectionAborted
+                    ) => {}
+                result => {
+                    panic!("declared oversized image was not rejected before its body: {result:?}")
+                }
             }
             return;
         }
@@ -442,8 +514,7 @@ fn review_image_server(
                 // 流式超限时可在预算+1处关闭。
                 return;
             }
-            if matches!(framing, ReviewFraming::Chunked)
-                && !review_send(stream.write_all(b"\r\n"))
+            if matches!(framing, ReviewFraming::Chunked) && !review_send(stream.write_all(b"\r\n"))
             {
                 return;
             }
@@ -500,7 +571,9 @@ fn review_run_bounded(harness: &Harness, args: &[&str]) -> Output {
 fn review_reject_oversized_url(framing: ReviewFraming) {
     // 同一测试进程串行大响应；避免三个旧行为子进程同时分配数百 MiB。
     static SERIAL: std::sync::Mutex<()> = std::sync::Mutex::new(());
-    let _serial = SERIAL.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+    let _serial = SERIAL
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
     let harness = Harness::new();
     review_selected_runtime(&harness);
     let (url, server) = review_image_server(framing, REVIEW_IMAGE_BUDGET + 1);
@@ -568,7 +641,12 @@ fn main() {
         .stdin(Stdio::piped())
         .spawn()
         .unwrap();
-    compiler.stdin.take().unwrap().write_all(ENGINE.as_bytes()).unwrap();
+    compiler
+        .stdin
+        .take()
+        .unwrap()
+        .write_all(ENGINE.as_bytes())
+        .unwrap();
     assert!(compiler.wait().unwrap().success());
 
     struct Broker(std::process::Child);
@@ -604,7 +682,10 @@ fn main() {
         if ready {
             break;
         }
-        assert!(std::time::Instant::now() < deadline, "isolated broker did not start");
+        assert!(
+            std::time::Instant::now() < deadline,
+            "isolated broker did not start"
+        );
         std::thread::sleep(std::time::Duration::from_millis(20));
     }
     for framing in [

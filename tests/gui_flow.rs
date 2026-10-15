@@ -814,56 +814,41 @@ fn settings_markdown_and_snap_pages_gate_and_status_end_to_end() {
                                 {
                                     record_failure(&failures, "空配置不得恢复虚构运行目录".into());
                                 }
-                                if ui.get_settings_document()
-                                    || !ui.get_settings_snapshot()
-                                    || ui.get_settings_media()
-                                {
-                                    record_failure(&failures, "下载选择默认必须为截图 OCR".into());
+                                if ui.get_settings_download_enabled() {
+                                    record_failure(
+                                        &failures,
+                                        "没有有效运行目录时不能下载音频资产".into(),
+                                    );
                                 }
                                 ui.invoke_navigation(7);
-                                ui.invoke_settings_selection(true, false, true);
-                                if !ui.get_convert_runtime_saving()
-                                    || ui.get_settings_download_enabled()
-                                {
-                                    record_failure(&failures, "选择保存期间不得启动下载".into());
+                                ui.invoke_settings_action("check".into());
+                                if !ui.get_convert_runtime_saving() {
+                                    record_failure(
+                                        &failures,
+                                        "离线检查必须异步启动，不阻塞界面".into(),
+                                    );
                                 }
                                 steps.set(1);
                             }
                             1 if !ui.get_convert_runtime_saving() => {
-                                let expected =
-                                    jchtools_foundation::xberg_settings::DownloadSelection {
-                                        document: true,
-                                        snapshot: false,
-                                        media: true,
-                                    };
-                                if jchtools_foundation::xberg_settings::download_selection()
-                                    .unwrap()
-                                    != expected
-                                    || !ui.get_settings_document()
-                                    || ui.get_settings_snapshot()
-                                    || !ui.get_settings_media()
-                                {
+                                if !ui.get_settings_loaded() || ui.get_convert_runtime_confirmed() {
                                     record_failure(
                                         &failures,
-                                        "独立功能选择必须通过后台回调持久保存".into(),
+                                        "离线检查不得虚构缺失的随包目录".into(),
                                     );
                                 }
-                                ui.invoke_settings_selection(false, false, false);
-                                steps.set(2);
-                            }
-                            2 if !ui.get_convert_runtime_saving() => {
                                 if ui.get_settings_download_enabled() {
-                                    record_failure(&failures, "清空功能选择后下载必须禁用".into());
+                                    record_failure(
+                                        &failures,
+                                        "缺少基础目录时不得提供音频下载".into(),
+                                    );
                                 }
                                 ui.invoke_settings_action("download".into());
                                 if ui.get_convert_initializing() {
-                                    record_failure(&failures, "空选择不得发起下载".into());
-                                }
-                                let selection =
-                                    jchtools_foundation::xberg_settings::download_selection()
-                                        .unwrap();
-                                if selection.document || selection.snapshot || selection.media {
-                                    record_failure(&failures, "全不选状态也必须持久保存".into());
+                                    record_failure(
+                                        &failures,
+                                        "缺少共享目录时不得发起音频下载".into(),
+                                    );
                                 }
                                 ui.invoke_select_tool("snap-ocr".into());
                                 steps.set(3);

@@ -16,11 +16,19 @@
 #if !FileExists(SourceDir + "\jchocr.exe")
 #error "SourceDir 必须包含本次 Cargo 构建的 jchocr.exe"
 #endif
+#if !FileExists(SourceDir + "\xberg\xberg.exe") || !FileExists(SourceDir + "\xberg\jchtools-xberg-release.json")
+#error "SourceDir 必须包含已校验的 Xberg 基础运行资产与来源记录"
+#endif
 ; P3-29：真实安装/卸载回归专用预处理隔离；普通构建完全保留生产目标。
 #ifdef ReviewRemediationRoot
 #ifndef ReviewRemediationAppId
 #error "隔离安装回归必须同时提供随机 ReviewRemediationAppId"
 #endif
+#endif
+#ifdef ReviewRemediationRoot
+#define InstallLocationKey "Software\JchTools-Review-" + ReviewRemediationAppId
+#else
+#define InstallLocationKey "Software\JchTools"
 #endif
 
 [Setup]
@@ -67,7 +75,7 @@ Name: "quicklaunchicon"; Description: "添加到快速启动栏"; GroupDescripti
 ; 升级控制器仅从本次 setup 解压到临时目录，不安装第二份 EXE。
 ; 独特名称防止 ExtractTemporaryFile 匹配到普通安装载荷中的 JchTools.exe。
 Source: "{#SourceDir}\JchTools.exe"; DestDir: "{tmp}"; DestName: "JchTools-maintenance.exe"; Flags: dontcopy
-; 整个便携目录原样安装：EXE（内嵌 7-Zip 引擎）、resources 许可证材料、第三方清单等。
+; 仅复制本次交付的基础成员；不清空 xberg，不覆盖用户配置或已下载音频资产。
 Source: "{#SourceDir}\*"; DestDir: "{app}"; Excludes: "jchocr.exe"; Flags: ignoreversion recursesubdirs createallsubdirs
 ; O-33：复制到 Windows 已有的用户 PATH 目录，不修改环境变量，无需重启终端。
 #ifdef ReviewRemediationRoot
@@ -75,6 +83,11 @@ Source: "{#SourceDir}\jchocr.exe"; DestDir: "{#ReviewRemediationRoot}\WindowsApp
 #else
 Source: "{#SourceDir}\jchocr.exe"; DestDir: "{localappdata}\Microsoft\WindowsApps"; Flags: ignoreversion
 #endif
+
+[Registry]
+; WindowsApps 中的独立 jchocr 通过此用户级位置发现同一基础树；不修改 PATH。
+; 不使用 uninsdeletevalue：旧安装卸载器不能删掉后来另一安装登记的新位置。
+Root: HKCU; Subkey: "{#InstallLocationKey}"; ValueType: string; ValueName: "InstallDir"; ValueData: "{app}"
 
 [Icons]
 Name: "{group}\JchTools"; Filename: "{app}\JchTools.exe"
@@ -127,7 +140,20 @@ begin
 end;
 
 procedure CurUninstallStepChanged(CurUninstallStep: TUninstallStep);
+var
+  RegisteredDirectory: String;
 begin
+  if CurUninstallStep = usPostUninstall then
+  begin
+    if RegQueryStringValue(HKCU, '{#InstallLocationKey}', 'InstallDir', RegisteredDirectory) and
+      (CompareText(RemoveBackslashUnlessRoot(RegisteredDirectory),
+        RemoveBackslashUnlessRoot(ExpandConstant('{app}'))) = 0) then
+    begin
+      RegDeleteValue(HKCU, '{#InstallLocationKey}', 'InstallDir');
+      RegDeleteKeyIfEmpty(HKCU, '{#InstallLocationKey}');
+    end;
+    Exit;
+  end;
   // 确认卸载后、实际删除前才停止后台；取消确认不影响凭据维护。
   if CurUninstallStep <> usUninstall then
     Exit;

@@ -699,6 +699,15 @@ impl ReviewRemediationInstaller {
         .unwrap();
         // 不调用 OCR；这个惰性载荷只证明 WindowsApps 写入确实隔离在临时根。
         std::fs::write(root.join("package/jchocr.exe"), b"synthetic isolated OCR payload").unwrap();
+        // CA-08 只验安装维护链路：补齐安装器要求的合成基础布局，不作为 OCR 验收证据。
+        let runtime = root.join("package/xberg");
+        std::fs::create_dir(&runtime).unwrap();
+        std::fs::write(runtime.join("xberg.exe"), b"synthetic isolated Xberg payload").unwrap();
+        std::fs::write(
+            runtime.join("jchtools-xberg-release.json"),
+            br#"{"fixture":"codeagent installer lifecycle; not OCR evidence"}"#,
+        )
+        .unwrap();
         fixture.build();
         fixture
     }

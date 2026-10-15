@@ -123,26 +123,25 @@ pub fn readiness() -> Result<(), String> {
     markdown_assets::readiness()
 }
 
-/// 任务启动前的场景化预检（XB-19：单独使用一种功能不强制初始化另一种）。
-/// 所选分组决定需要检查的场景：Media 组走媒体链路（SenseVoice/VAD/sherpa/FFmpeg
-/// 成员存在性），其余分组（PDF/Office/图片/其他）走文档场景；混选时两个场景
-/// 都必须就绪，缺失原因汇总指认。修复前 run() 无条件用文档条件预检——纯媒体
-/// 目录缺文档模型会被提前拒绝，缺媒体资产则要等任务开始后才逐文件报错。
+/// 默认格式筛选包含 Media；缺少可选音频不能阻断文档/图片批次。
+/// 媒体资产在逐文件转录边界检查并明确报错，不触发联网。
 pub fn readiness_for_groups(groups: &[FormatGroup]) -> Result<(), String> {
     platform_preflight()?;
     let needs_document = groups
         .iter()
         .any(|group| !matches!(group, FormatGroup::Media));
-    let needs_media = groups.contains(&FormatGroup::Media);
+    let media_only = !needs_document && groups.contains(&FormatGroup::Media);
     let mut problems = Vec::new();
     if needs_document {
         if let Err(error) = markdown_assets::readiness() {
             problems.push(format!("文档转换组件未就绪：{error}"));
         }
     }
-    if needs_media {
-        if let Err(error) = markdown_assets::validate_media() {
-            problems.push(format!("媒体转录组件未就绪：{error}"));
+    if media_only {
+        if let Err(error) = markdown_assets::runtime_dir()
+            .and_then(|root| jchtools_xberg::xberg_runtime::validate_assets(&root, "engine"))
+        {
+            problems.push(format!("共享 Xberg 引擎未就绪：{error}"));
         }
     }
     if problems.is_empty() {
@@ -1401,10 +1400,10 @@ fn convert_media(
             .to_str()
             .ok_or_else(|| "输入路径编码无效：Xberg 请求要求有效 UTF-8 路径".to_string())?;
         stage = "media_assets";
-        let component = markdown_assets::media_component_dir().map_err(|error| {
-            format!("共享 Xberg 的媒体组件未就绪，请检查已保存目录的模型和运行库：{error}")
-        })?;
         markdown_assets::validate_media()?;
+        let component = markdown_assets::media_component_dir().map_err(|error| {
+            format!("缺少可选音频资产，请在设置页主动下载；不会自动联网：{error}")
+        })?;
         stage = "transcribe_request_boundary";
         let response = jchtools_xberg::xberg_runtime::request(
             &component,

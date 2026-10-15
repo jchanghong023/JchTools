@@ -32,7 +32,9 @@ jobs:
           $tag = (Get-Date).ToUniversalTime().ToString('yyyyMMdd-HHmm')
           Add-Content -Path $env:GITHUB_OUTPUT -Value "tag=$tag"
           Add-Content -Path $env:GITHUB_OUTPUT -Value "name=JchTools $tag"
-      - name: Build installer and portable ZIP
+      # 构建入口实时解析 Xberg 正式 latest，只获取 document/snapshot/manifest 并校验来源与字节。
+      # 基础树共用于安装包和 ZIP；CI 不运行本地验收、不下载可选音频附加包。
+      - name: Build installer and portable ZIP with verified Xberg base
         shell: pwsh
         env:
           GITHUB_TOKEN: ${{ github.token }}

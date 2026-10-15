@@ -1,6 +1,6 @@
 # JchTools
 
-仅支持 Windows 的 Rust + Slint 本地工具箱。当前通过工具注册表接入「递归解压」「目录整理」「MD 整理」「转 Markdown」「Git 工具」「截图 OCR」「模型服务」「CodeAgent」八个工具。文件转换与已初始化的截图 OCR 完全离线；模型服务仅监听本机，用户配置的外部 ACP Agent 自行承接模型调用；[CodeAgent](docs/requirements/CODEAGENT.md) 仅维护当前用户本地 Token，不联网。联网边界见需求合同 P-03、T-21、AH 分区与 [截图 OCR 需求](docs/requirements/SNAP2TEXT.md)。
+仅支持 Windows 的 Rust + Slint 本地工具箱。当前通过工具注册表接入「递归解压」「目录整理」「MD 整理」「转 Markdown」「Git 工具」「截图 OCR」「模型服务」「CodeAgent」八个工具。截图与文档/图片转换的基础资产随包提供，处理完全离线；媒体转录先主动下载音频可选资产。模型服务仅监听本机，用户配置的外部 ACP Agent 自行承接模型调用；[CodeAgent](docs/requirements/CODEAGENT.md) 仅维护当前用户本地 Token，不联网。联网边界见需求合同 P-03、T-21、AH 分区与 [截图 OCR 需求](docs/requirements/SNAP2TEXT.md)。
 
 > **验证以对应提交的结果为准**：本地 `fulltest` 覆盖静态与 Python 质量检查、Rust 格式与 Clippy、编译、所有适用的 Windows 本地单元/集成/doc/e2e 测试、真实 7-Zip 用例及本地发布打包；真实桌面 driver 保留独立并如实标注未运行，不以门通过代替其验收。功能验收以 Windows 本地结果为准；CI 仅编译、打包和发布，不重复运行完整测试。安装包、便携 ZIP 与发布记录见 [Releases](https://github.com/jchanghong023/JchTools/releases)。没有引擎时构建不内嵌，运行期解压会给出明确错误；运行 `scripts/fetch-7zip.ps1` 获取官方引擎后，构建会自动把它压缩内嵌进 EXE。发布包由 `scripts/package-windows.ps1` 生成，只附带许可证与上游源码，不含引擎可执行文件。
 
@@ -35,9 +35,13 @@ powershell -NoProfile -File .\scripts\package-windows.ps1
 
 脚本从官方 `ip7z/7zip` 的固定 `26.03` 发布获取完整 x64 MSI 和对应源码，要求 GitHub 发布元数据提供 SHA-256 摘要；缺少摘要、校验失败或资产缺失时停止，不换非官方镜像。MSI 只在构建机生成 administrative image，提取完整 `7z.exe + 7z.dll`，不把安装步骤交给最终用户。
 
+构建装配通过 `scripts/prepare-xberg-runtime.ps1` 解析 Xberg 最新正式发布，仅获取并校验 document、snapshot 两个功能包及清单，合并为交付目录的 `xberg/`，写入锁定版本和摘要的 `jchtools-xberg-release.json`。构建缓存复用须重新校验；离线构建要求已有锁定收据及完整资产，不把离线复用冒称已核验最新发布。构建过程不下载音频附加包，运行和截图不查询最新版本。
+
+Inno Setup 编译通过 `.tmp/` 下独占的短路径 junction 读取已校验交付树，避免 Hugging Face 模型路径超过 MAX_PATH；编译成功或失败都只移除链接，不改写源资产或其目录布局。
+
 随后在缺少时生成 Cargo.lock，执行 `cargo check`、workspace 测试和真实引擎解压测试；先以 `cargo build --locked --release --target x86_64-pc-windows-msvc --manifest-path optional/snap-ocr-worker/Cargo.toml --bin snap-ocr-worker` 构建**独立的截图 OCR 后台 worker**，把原始 EXE 放到 `dist/optional-components-v0.1.2/snap-ocr-worker.exe`，按实际字节数及 SHA-256 回填清单。在 Cargo 返回的 worker EXE 所在 release 目录中，以最终清单完整 SHA-256 命名 `snap-ocr-assets-<SHA256>.json`；相同字节不重写，变更输出目录不改变这个构建输入。脚本只在主包构建期间通过 `JCHTOOLS_SNAP_OCR_MANIFEST` 让 `crates/assets/build.rs` 内嵌这份稳定清单，结束或异常时恢复调用者环境，不改仓库内的占位清单；optional 暂存目录和发布目录 `resources/snap-ocr-assets.json` 交付相同字节。
 
-主程序与独立 CLI 使用 `cargo build --locked --release --target x86_64-pc-windows-msvc -p jchtools -p jchocr --bins`；保留已有构建缓存、profile、flags、features 与目标配置，不执行 `cargo clean`。随后校验引擎及清单，复制许可证和 7-Zip 源码（发布包不含 7z.exe/dll），生成 `dist/JchTools-Windows-x64-时间戳.zip`；构建机装有 Inno Setup 6 时还会生成 `dist/JchTools-Setup-x64.exe`（当前用户安装、免 UAC、桌面及开始菜单入口、控制面板卸载；缺 ISCC 时安装包阶段如实标为 NOT_RUN，仍生成 ZIP）。**ZIP 和安装包均包含 `jchocr.exe`、`snap-ocr-worker.exe` 与资产清单；截图字体和许可证直接内置于 worker，无需额外初始化；Xberg、ONNX 模型和推理 DLL 仍使用独立 Xberg 组件目录。后台 worker 缺失时应重新解包或安装同一发布包，不能把未交付的独立下载地址当作恢复依据。** `BUILD-INFO.json` 只记录实际执行范围，不声称手工 UI、多 TB 性能或当前源码实测提速已通过。
+主程序与独立 CLI 使用 `cargo build --locked --release --target x86_64-pc-windows-msvc -p jchtools -p jchocr --bins`；保留已有构建缓存、profile、flags、features 与目标配置，不执行 `cargo clean`。随后校验引擎及清单，复制许可证和 7-Zip 源码（发布包不含 7z.exe/dll），生成 `dist/JchTools-Windows-x64-时间戳.zip`；构建机装有 Inno Setup 6 时还会生成 `dist/JchTools-Setup-x64.exe`（当前用户安装、免 UAC、桌面及开始菜单入口、控制面板卸载；缺 ISCC 时安装包阶段如实标为 NOT_RUN，仍生成 ZIP）。**ZIP 和安装包均包含 `jchocr.exe`、`snap-ocr-worker.exe`、资产清单及完整 `xberg/` 基础运行目录，两套 OCR 模型、字典、共享 DLL 与许可随包提供，截图字体内置于 worker；默认不携带 FFmpeg、SenseVoice 或 VAD 音频资产。随包文件缺失时应重新解包或安装同一发布包，不用初始化下载代替修复。** `BUILD-INFO.json` 只记录实际执行范围，不声称手工 UI、多 TB 性能或当前源码实测提速已通过。
 
 打包只使用本次 Cargo JSON `compiler-artifact` 中按 manifest 与 bin 唯一匹配的实际可执行文件：GUI 属于根 `Cargo.toml`，CLI 属于 `crates/jchocr/Cargo.toml`。内嵌引擎状态绑定 `crates/file-core/Cargo.toml` 的真实 `jchtools_file_core` 库 artifact 的 `package_id`，从对应 `build-script-executed` 的 `OUT_DIR` 读取；不把 GUI 的 OUT_DIR 当引擎来源，不按时间戳挑缓存，缺失、歧义或未完整内嵌时拒绝打包。第三方许可收集仅按 `metadata.workspace_members` 的 package ID 排除本工程自有 crate，非 workspace 的 vendor path 补丁仍收集；根 `LICENSE` 继续交付。按 [vendor/SOURCES.json](vendor/SOURCES.json) 的 `license_and_notice_materials` 保留相对路径（含嵌套目录）和实际字节，登记材料缺失时停止。本地源修补及理由以该清单的 `project_source_modifications` 为准；上游摘要标识原发布归档，不代表修补后的本地树与上游逐字节相同。
 
@@ -51,7 +55,7 @@ powershell -NoProfile -File .\scripts\package-windows.ps1
 
 正式发布走 GitHub Actions 的 **Release** 工作流（`.github/workflows/release.yml`）：**仅手动触发**（Actions 页 Run workflow），在 `windows-2022` 上执行同一套 `package-windows.ps1`，以 UTC 时间到分钟的 tag（`yyyyMMdd-HHmm`）创建 Release，并把便携 ZIP、安装包 `JchTools-Setup-x64.exe` 与 SHA256SUMS 校验和挂到该 Release。最终用户直接从仓库 **Releases** 页下载即可。
 
-后台及截图服务程序随主安装包和便携 ZIP 交付，由打包时的清单校验。Xberg 在「设置」页按需下载，只有三个独立功能包：**文档转换与图片 OCR、截图 OCR、音视频转写**。勾选所需功能后点击「下载 / 补齐所选功能」，运行目录及共享依赖由应用自动管理，无需也不提供手工填写 Xberg 路径；取消勾选不卸载已安装功能。「检查已安装组件」仅离线检查，不会下载。结果窗字体和许可证直接内置于随包截图服务程序，新安装无需额外初始化字体。内嵌 7-Zip、截图后台和字体均随安装包和便携包提供；Git 不随包分发，仅调用 Windows 系统已安装且可经 PATH 解析的 Git for Windows，沿用其现有配置、身份、认证、代理、hooks、签名、合并策略及继承环境。没有可用 Git 时仅 Git 工具提示，不影响其他功能。普通启动、打开功能页或模型加载不会自动下载；缺少或损坏的组件明确显示未就绪。发布物与真实模型的验收以对应提交的验证结果为准。
+截图后台、字体、共享 Xberg、两套独立 OCR 模型及文档/截图运行依赖随主安装包和便携 ZIP 交付，安装或解包后自动定位，无需先打开设置或下载基础组件。只有 FFmpeg、SenseVoice INT8、Silero VAD 等音频转写可选资产由用户在「设置」页主动下载，严格匹配包内收据的精确版本，不替换已有引擎、模型或共享 DLL；支持进度、取消、失败后重试。「检查已安装组件」只离线检查，基础文件缺失时指引修复安装或重新解包。不再提供三个功能勾选或手填 Xberg 路径。Git 不随包分发，仅调用 Windows 系统已安装且可经 PATH 解析的 Git for Windows，沿用其现有配置、身份、认证、代理、hooks、签名、合并策略及继承环境。没有可用 Git 时仅 Git 工具提示，不影响其他功能。普通启动、打开功能页、截图或转换不会自动下载或更新；发布物与真实模型的验收以对应提交的验证结果为准。
 
 组件下载及其 GitHub 发布查询从第一次 HTTPS 请求起直接忽略服务端证书的信任链、域名和有效期校验，进度会明确提示；不再先执行严格证书校验或额外重复一轮请求。仍优先使用 Windows 系统手动代理（支持内网服务器域名或 IP），代理传输失败后直连重试一次。TLS 加密、握手签名及文件大小/摘要校验保留，但不再保障服务器身份；不修改 Windows 全局证书、Git 或 jchocr 的网络策略。详细边界见 [P-09](docs/requirements/CONTRACT.md)；跳过证书不能解决 HTTP 403 访问限制或 407 代理认证失败。
 升级时保留已有 Xberg 配置和旧路径原件，不删除或搬动用户原有引擎目录；兼容迁移不恢复手工路径设置入口。
@@ -63,13 +67,13 @@ powershell -NoProfile -File .\scripts\package-windows.ps1
 - **递归解压**：选目录 → 调整扫描范围与防护上限 → 点「开始解压」→ 一次确认 → 连续执行到结束。每个包就地解压，只有整包解码、校验及全部成员落盘成功后才永久删除原包及实际分卷；不去重、不删除已有文件或普通解压结果。目标重名时只给新文件的基础名加唯一编号，保留普通及复合扩展名。未能完全解开的包整组移入根目录的「解压失败」并记录原因；空间不足或取消则停止并保留当前源包，不作为坏包隔离。同一次任务不重复处理已经处理的包，新任务允许重新处理仍在范围内的包；固定整树跳过「解压失败」目录。
 - **目录整理**：选目录 → 调整规则 → 点「开始分析」（**只读**，不改任何文件）→ 查看真实文件产生的分页计划 → 确认后执行去重、归类与清理。文件动作可逐项勾选/取消，状态立即更新；空目录清理是无独立开关的固定收尾步骤，任务取消后停止后续删除，清理失败不报告整理完成。
 - **MD 整理**：只读处理 Markdown。「合并 MD」按文件创建时间从早到晚（平局按相对路径自然排序）合并目录中的 .md，每个文件以「# 文件名.md」为一级标题、内部标题整体下移一级（六级封顶），fenced code block 内容原样保留；「拆分 MD」按 KB/MB 硬限制在 UTF-8 安全边界分片，分片按编号顺序拼接与原文件完全一致。原文件一律不改动；输出冲突先确认、不静默覆盖。
-- **转 Markdown**：先在独立「设置」页勾选并下载「文档转换与图片 OCR」，转录媒体时再选择「音视频转写」，然后在工具页选择输入、输出目录和转换类型。各功能共用应用管理的 Xberg 运行时；文档及图片支持格式以该运行时的 `formats` 能力为准，PDF、DOCX、PPTX、XLSX 是必需类型，媒体仍固定 MP4/M4A。转换完全离线，缺少相应资产或必需能力时明确提示。下载与就绪检查的详细约定见 [共享 Xberg 需求](docs/requirements/XBERG-INFERENCE.md)。
+- **转 Markdown**：直接在工具页选择输入、输出目录和转换类型；文档/图片转换使用随包基础运行时，不需要先下载。媒体转录先在独立「设置」页主动下载音频可选资产。各功能共用应用管理的 Xberg 运行时；文档及图片支持格式以该运行时的 `formats` 能力为准，PDF、DOCX、PPTX、XLSX 是必需类型，媒体仍固定 MP4/M4A。转换完全离线，缺少相应资产或必需能力时明确提示。下载与就绪检查的详细约定见 [共享 Xberg 需求](docs/requirements/XBERG-INFERENCE.md)。
 - **Git 工具**：逐文件提交并推送——一个文件单独 add → 单独 commit（只含当前文件，保护既有 staged 内容）→ 单独 push，push 成功后才处理下一个；提交信息固定「update: 相对路径」。push 被远端新提交拒绝时自动 fetch + merge（不 rebase），冲突即停并保留现场；可重试失败按 5→10→20→40→80→80… 秒无限退避，可随时停止；以 git 状态为唯一进度来源，重启不重复提交。
-- **截图 OCR**：页面仅设置快捷键并显示后台状态；通过快捷键或托盘截图。打开 GUI 后，已配置的 Xberg 与后台服务异步启动；GUI 关闭后服务、模型和托盘继续常驻，重新打开连接同一服务。需要完全退出时使用系统托盘「退出后台服务」，正在处理的任务先确认并安全停止。组件初始化和故障恢复统一位于「设置」页；开机启动默认关闭。
+- **截图 OCR**：页面仅设置快捷键并显示后台状态；通过快捷键或托盘截图。打开 GUI 后，自动定位随包 Xberg 并异步启动后台服务，无需下载截图模型；GUI 关闭后服务、模型和托盘继续常驻，重新打开连接同一服务。需要完全退出时使用系统托盘「退出后台服务」，正在处理的任务先确认并安全停止。就绪检查和故障恢复统一位于「设置」页；开机启动默认关闭。
 - **模型服务**：保存 ACP Agent 启动程序、参数和端口 → 异步启动或连接独立后台 → HTTP 调用 Models / Chat Completions；关闭工具箱不停止服务，配置应用与主动退出使用页面上的独立入口，具体协议及限制见下方「ACP 模型服务」。
 - **CodeAgent**：打开页面启动或连接独立后台，默认每 60 秒读取当前用户 `.cac` 凭据并用 CurrentUser DPAPI 解密，仅在 Token 变化时更新当前用户注册表。页面可保存正整数秒检查间隔，显示后台状态、最近检查时间与去敏结果，不显示 Token；读取或解密失败保留已有 Token。关闭 GUI 后后台继续运行，不属于截图/Xberg 托盘或模型服务页的退出范围，具体行为见 [CodeAgent 需求](docs/requirements/CODEAGENT.md)。
 
-导航只显示已注册工具（递归解压、目录整理、MD 整理、转 Markdown、Git 工具、截图 OCR、模型服务、CodeAgent）以及独立设置、关于；工具描述集中注册。「关于」包含 Slint 的 AboutSlint 署名组件。旧工具不提供独立任务记录页或设置页：规则仍只在主界面「处理规则」里会话内调整，不落盘、不导入导出；Xberg 功能勾选会自动保存，重启恢复，已安装组件由应用管理；截图快捷键与开机启动设置、CodeAgent 检查间隔也持久保存。
+导航只显示已注册工具（递归解压、目录整理、MD 整理、转 Markdown、Git 工具、截图 OCR、模型服务、CodeAgent）以及独立设置、关于；工具描述集中注册。「关于」包含 Slint 的 AboutSlint 署名组件。旧工具不提供独立任务记录页或设置页：规则仍只在主界面「处理规则」里会话内调整，不落盘、不导入导出；有效共享运行目录由应用自动发现和持久保存，旧源安全迁移按共享推理需求执行；截图快捷键与开机启动设置、CodeAgent 检查间隔也持久保存。
 
 转 Markdown 的单文件超时只接受正整数秒数；非法值在字段旁提示并禁用开始，不自动钳制。用户取消与处理超时分别呈现，停止只取消本次请求，不终止共享 Xberg 或影响另一场景。Xberg 下载的本地发布记录保留实际归档来源、版本、大小与摘要；下载取消在最终落位前检查，不覆盖已有有效资产。
 
@@ -85,7 +89,7 @@ powershell -NoProfile -File .\scripts\package-windows.ps1
 
 安装包和便携 ZIP 均提供 `jchocr.exe`，供程序或 AI Agent 直接调用，不打开 GUI、不增加 MCP。
 命令经共享代理调用与截图相同的 `ocr_snapshot` 接口，复用截图模型和布局。
-先在 JchTools「设置」页勾选「截图 OCR」并下载所选功能；无需手工设置 Xberg 路径、模型或 ONNX Runtime 环境变量。
+安装或解包后自动发现随包截图运行时，无需先打开 GUI、下载模型或设置 Xberg/ONNX Runtime 环境变量；安装到 WindowsApps 的命令通过安装位置登记定位同一运行目录。
 安装包免 UAC，将 `jchocr.exe` 复制到当前用户已有 PATH 的 `%LOCALAPPDATA%\Microsoft\WindowsApps` 目录，不修改用户或系统 PATH；安装完成即可直接运行 `jchocr`，无需重启终端。
 便携 ZIP 只随附程序，不自动复制到 PATH 目录。
 输入方式、输出格式和错误约定以 `jchocr --help`（或 `jchocr help`）为准；帮助不依赖 Xberg。

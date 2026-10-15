@@ -356,9 +356,9 @@ def prepare(component: Path, output: Path) -> None:
     environment = {**os.environ, "TEMP": str(WORKSPACE), "TMP": str(WORKSPACE), "PYTHONDONTWRITEBYTECODE": "1"}
     workspace(WORKSPACE, environment)
     workspace(output.parent, environment)
-    executable = shutil.which("powershell.exe")
+    executable = shutil.which("pwsh.exe") or shutil.which("powershell.exe")
     if executable is None:
-        message = "文件输出式 SAPI 语音合成需要 Windows PowerShell"
+        message = "文件输出式 SAPI 语音合成需要 Windows 上的 PowerShell"
         raise FileNotFoundError(message)
     ffmpeg, ffprobe = portable_tools(environment)
     voice = voice_identity(executable, environment)

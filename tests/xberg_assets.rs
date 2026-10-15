@@ -12,10 +12,10 @@
 )]
 
 //! 覆盖 XB-19：场景化固定清单校验（场景规则、清单同步、替换兼容与缺失路径）
-//! 与 XB-16：共享引擎启动配置按场景声明模型目录、媒体可用性按文件在位判定。
+//! 与 XB-16/XB-27：音频资产可选，基础运行库不因音频可选而移出主包。
 //! 纯库口径，不启动代理或引擎进程。
 #![allow(clippy::unwrap_used)]
-use jchtools_xberg::xberg_runtime::{asset_for_scenario, startup_config, validate_assets};
+use jchtools_xberg::xberg_runtime::{asset_for_scenario, validate_assets};
 use serde_json::Value;
 
 /// 与 `validate_assets` 内置的同一份固定清单（resources/markdown-assets.json）。
@@ -70,7 +70,7 @@ fn scenario_rules_assign_every_fixed_manifest_member() {
             false,
         ),
         ("models/vad/silero.onnx", false, true, false),
-        ("sherpa-onnx/lib.dll", false, true, false),
+        ("sherpa-onnx/lib.dll", true, true, true),
         ("ffmpeg/avcodec-63.dll", false, true, false),
         ("models/doc-tiny/model.onnx", false, false, true),
         ("MSVCP140.dll", true, true, true),
@@ -150,28 +150,47 @@ fn validate_assets_presence_only_accepts_replaced_engine_files() {
     );
 }
 
-// 覆盖 XB-16：启动配置声明文档基线与媒体转录可用性；截图模型目录交还引擎
-// exe 旁回退（同一共享运行目录布局），媒体可用性由 SenseVoice 模型在位决定。
+/// XB-19/XB-27：只有音频 DLL/模型缺失时，基础场景仍可用；原目录内补齐
+/// 音频成员后同一目录变为媒体就绪，不依赖重新生成启动配置。
 #[test]
-fn startup_config_declares_scenario_models_and_media_availability() {
-    let temp = tempfile::tempdir().unwrap();
-    let root = temp.path();
-    let config = startup_config(root).unwrap();
-    assert!(
-        config.get("ocr").is_some(),
-        "文档场景配置须来自内置基线（markdown-xberg.json）"
-    );
-    assert!(
-        config.get("snapshot_ocr").is_none(),
-        "截图模型目录交还引擎 exe 旁回退（同一共享运行目录布局）"
-    );
-    assert_eq!(config["transcription"]["enabled"], false);
-
-    let model = root.join("models/sense_voice_zh_en_ja_ko_yue_2024_07_17/model.int8.onnx");
-    std::fs::create_dir_all(model.parent().unwrap()).unwrap();
-    std::fs::write(&model, b"model placeholder").unwrap();
-    let config = startup_config(root).unwrap();
-    assert_eq!(config["transcription"]["enabled"], true);
+fn same_root_optional_media_does_not_block_base_readiness() {
+    let temporary = tempfile::tempdir().unwrap();
+    let root = temporary.path();
+    let members = manifest_members();
+    let audio = |path: &str| {
+        path.starts_with("ffmpeg/")
+            || path.starts_with("models/sense_voice_")
+            || path.starts_with("models/vad/")
+    };
+    for (member, _) in members.iter().filter(|(path, _)| !audio(path)) {
+        let target = root.join(member);
+        std::fs::create_dir_all(target.parent().unwrap()).unwrap();
+        std::fs::write(target, b"synthetic base asset").unwrap();
+    }
+    for scenario in ["engine", "snapshot", "document"] {
+        validate_assets(root, scenario).unwrap();
+    }
+    assert!(validate_assets(root, "media").is_err());
+    for (member, _) in members.iter().filter(|(path, _)| audio(path)) {
+        let target = root.join(member);
+        std::fs::create_dir_all(target.parent().unwrap()).unwrap();
+        std::fs::write(target, b"synthetic optional audio asset").unwrap();
+    }
+    validate_assets(root, "media").unwrap();
+    let sherpa = members
+        .iter()
+        .find(|(path, _)| path.starts_with("sherpa-onnx/"))
+        .expect("主包须包含 sherpa 运行库")
+        .0
+        .clone();
+    std::fs::remove_file(root.join(&sherpa)).unwrap();
+    for scenario in ["engine", "snapshot", "document", "media"] {
+        let error = validate_assets(root, scenario).unwrap_err();
+        assert!(
+            error.contains(&sherpa),
+            "{scenario} 缺少基础运行库必须报错：{error}"
+        );
+    }
 }
 
 // 真实 Xberg 组件目录的端到端存在性验证（默认 #[ignore] 的真实引擎用例）：

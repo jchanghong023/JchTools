@@ -10,8 +10,8 @@ MD 整理只读处理 Markdown：合并按创建时间排序、标题下移一�
 拆分按 KB/MB 硬限制在 UTF-8 安全边界分片、按序拼接无损还原。
 Git 工具逐文件提交并推送（add → commit → push 成功后才下一个）；
 冲突即停保留现场，失败按 5→10→20→40→80→80… 秒无限退避，可随时停止。
-转 Markdown 与截图 OCR 在统一「设置」页共用一个 Xberg 运行目录，可主动下载最新发布版或提供已有目录；
-模型及推理运行库使用独立 Xberg 组件目录；截图后台 worker 随主包提供，字体及许可证直接内置于 worker，无需额外初始化。组件就绪后离线处理，关闭 GUI 不退出截图/Xberg 后台，托盘「退出后台服务」只安全退出截图服务与共享 Xberg，不退出模型服务或 CodeAgent。
+转 Markdown 与截图 OCR 共用随包 xberg/ 运行目录；引擎、两套 OCR 模型、字典、DLL、字体及许可随安装包和便携 ZIP 提供，安装或解包即可离线使用，无需先下载或手填目录。
+只有 FFmpeg、SenseVoice INT8、Silero VAD 等音频转写可选资产需在统一「设置」页主动下载，版本严格匹配包内引擎，不替换基础文件；普通启动、截图和转换不自动下载。关闭 GUI 不退出截图/Xberg 后台，托盘「退出后台服务」只安全退出截图服务与共享 Xberg，不退出模型服务或 CodeAgent。
 模型服务将用户配置的 ACP Agent 接到本机 OpenAI 风格文本接口；模型联网由 Agent 承接，关闭 GUI 不退出模型服务，须在模型服务页确认退出。
 CodeAgent 页面启动或连接独立本地后台，默认每 60 秒用 CurrentUser DPAPI 解密当前用户 .cac 凭据，仅在变化时更新当前用户注册表 Token；检查间隔持久保存，失败保留已有值，界面与日志不显示 Token，关闭 GUI 后继续检查，不联网。
 目录整理的范围内空目录收尾不可关闭；递归解压与目录整理对含 .git 文件或目录（不区分大小写）的目录整树保护，不进入树内处理，目录整理仅按 C-14 整体归类范围内的子级 Git 项目；
@@ -27,7 +27,7 @@ fulltest / slowtest 覆盖适用的 Windows 本地质量门、真实引擎与发
 官方引擎后，crates/file-core/build.rs 会把引擎压缩内嵌进库并链接到主 EXE；没有内嵌引擎的构建在解压时会给出明确错误，
 需要按下面方式生成内嵌引擎的构建或发布包。
 
-生成可交付的 Windows 包（需要联网，会下载并校验官方完整 7-Zip）：
+生成可交付的 Windows 包（需要联网，校验官方固定 7-Zip 及 Xberg 最新正式发布的文档/截图基础包，不下载音频附加包）：
   powershell -NoProfile -File .\scripts\package-windows.ps1
 
 该脚本编译、运行测试并生成 Windows ZIP；构建机装有 Inno Setup 6 时还会生成安装包
@@ -53,7 +53,7 @@ jchocr 的 lib/bin/test 位于 crates/jchocr，独立开发入口为 cargo run -
 
 jchocr.exe 随安装包和便携 ZIP 提供，供程序或 AI Agent 直接调用，不打开 GUI、不增加 MCP。
 通过共享代理调用与截图相同的 ocr_snapshot 接口，复用截图模型和布局。
-先在 JchTools「设置」页下载或配置并选中共享 Xberg，无需手工设置模型或 ONNX Runtime 环境变量。
+安装或解包后自动定位随包截图运行时，无需先打开 GUI、下载模型或手工设置模型、Xberg 或 ONNX Runtime 环境变量。
 安装包免 UAC，将 jchocr.exe 复制到当前用户已有 PATH 的 WindowsApps 目录，不修改用户或系统 PATH。
 安装完成即可直接运行 jchocr，无需重启终端；便携 ZIP 只随附程序，不自动复制到 PATH 目录。
 输入方式、输出格式和错误约定以 `jchocr --help`（或 `jchocr help`）为准；帮助无需 Xberg。

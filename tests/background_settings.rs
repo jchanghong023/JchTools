@@ -83,8 +83,7 @@ fn both_sources_survive_process_restart_and_failed_save() {
                     downloaded.canonicalize().unwrap()
                 );
                 let cancelled = AtomicBool::new(true);
-                assert!(jchtools_markdown::markdown_assets::download_runtime(
-                    xberg_settings::DownloadSelection::default(),
+                assert!(jchtools_markdown::markdown_assets::download_audio_runtime(
                     &cancelled,
                     |_| {},
                 )
@@ -330,7 +329,10 @@ fn background_stop_does_not_wait_for_preexisting_incomplete_request() {
             .as_nanos();
         let root = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
             .join(".tmp")
-            .join(format!("background-incomplete-{}-{unique}", std::process::id()));
+            .join(format!(
+                "background-incomplete-{}-{unique}",
+                std::process::id()
+            ));
         assert!(Command::new("python")
             .args(["scripts/make_tmp.py", "workspace", "--destination"])
             .arg(&root)
@@ -352,26 +354,38 @@ fn background_stop_does_not_wait_for_preexisting_incomplete_request() {
             self.0.wait().expect("等待本测试 broker 回收");
         }
     }
-    let mut broker = Broker(Command::new(env!("CARGO_BIN_EXE_JchTools"))
-        .arg("--xberg-broker")
-        .spawn()
-        .unwrap());
+    let mut broker = Broker(
+        Command::new(env!("CARGO_BIN_EXE_JchTools"))
+            .arg("--xberg-broker")
+            .spawn()
+            .unwrap(),
+    );
     let mut session = 0;
     #[link(name = "kernel32")]
     extern "system" {
         fn ProcessIdToSessionId(pid: u32, session: *mut u32) -> i32;
     }
     // SAFETY: 当前进程 ID 和有效可写的 session 输出指针。
-    assert_ne!(unsafe { ProcessIdToSessionId(std::process::id(), &raw mut session) }, 0);
+    assert_ne!(
+        unsafe { ProcessIdToSessionId(std::process::id(), &raw mut session) },
+        0
+    );
     let root = xberg_settings::state_dir().unwrap();
     let digest = Sha256::digest(format!("{}:{session}", root.display()).as_bytes());
     let name = format!(r"\\.\pipe\jchtools-xberg-{digest:x}");
     let deadline = Instant::now() + Duration::from_secs(10);
     let mut incomplete = loop {
-        match std::fs::OpenOptions::new().read(true).write(true).open(&name) {
+        match std::fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .open(&name)
+        {
             Ok(pipe) => break pipe,
             Err(error) => {
-                assert!(broker.0.try_wait().unwrap().is_none(), "broker 启动时意外退出");
+                assert!(
+                    broker.0.try_wait().unwrap().is_none(),
+                    "broker 启动时意外退出"
+                );
                 assert!(Instant::now() < deadline, "隔离 broker 未监听：{error}");
                 std::thread::sleep(Duration::from_millis(10));
             }
@@ -392,7 +406,10 @@ fn background_stop_does_not_wait_for_preexisting_incomplete_request() {
     assert_eq!(stopped["ok"], true);
     assert_eq!(stopped["stopping"], true);
     assert_eq!(stopped["active"], 0, "不完整 JSON 尚未形成业务任务");
-    assert!(xberg_runtime::background_allowed().is_err(), "停止回执已建立防拉起标记");
+    assert!(
+        xberg_runtime::background_allowed().is_err(),
+        "停止回执已建立防拉起标记"
+    );
     let deadline = Instant::now() + Duration::from_secs(5);
     let exited = loop {
         if broker.0.try_wait().unwrap().is_some() {
@@ -405,5 +422,8 @@ fn background_stop_does_not_wait_for_preexisting_incomplete_request() {
     };
     // 保持不完整连接直到观测结束；不能先断开它再冒称 broker 自行停止。
     drop(incomplete);
-    assert!(exited, "broker-stop 已回执且 active=0，但停止前不完整请求仍拖住 JchTools 代理退出");
+    assert!(
+        exited,
+        "broker-stop 已回执且 active=0，但停止前不完整请求仍拖住 JchTools 代理退出"
+    );
 }

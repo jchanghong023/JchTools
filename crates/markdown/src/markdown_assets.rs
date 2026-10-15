@@ -1,10 +1,6 @@
-//! 转 Markdown 的本地资产校验。三个独立功能包共用一个 SQLite 运行目录。
-//! 下载按最新正式发布的组件清单核验来源、归档和成员；添加功能复用同版本
-//! 已验证组件，升级同时迁移已安装功能。旧用户目录保持只读兼容。
-//! 下载成功及离线组件检查经 [`ensure_document_notice`] 原子补写许可证 notice。
-//! P-10：主动查询最新发布与下载校验落位分别创建关联 operation span；日志
-//! 保留元数据验证、缓存复用、暂存、校验、原子落位、回滚及来源保存的阶段与结果，
-//! 不记录发布 JSON、运行目录内容、完整路径或任意外部异常正文。
+//! 内置文档/截图运行目录与显式可选音频安装。
+//! 音频只使用当前运行目录随包收据锁定的发布资产；离线迁移按目标收据逐成员
+//! 校验，保留旧来源和已有有效文件，最后经共享 broker 安全提交统一来源。
 
 use jchtools_assets::asset_util::{
     atomic_replace_dir, cleanup_stale_staging_dirs, ensure_not_cancelled, finalize_staging,
@@ -12,12 +8,10 @@ use jchtools_assets::asset_util::{
     state_dir_asset_root, valid_component_tag, validate_relative_path, verify_file_with_cancel,
     AssetDownloader, InferenceManifest,
 };
-use jchtools_foundation::xberg_settings::DownloadSelection;
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt::Write as FmtWrite;
-use std::fs::{self, File, OpenOptions};
-use std::io::Write as IoWrite;
+use std::fs::{self, File};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::AtomicBool;
 use uuid::Uuid;
@@ -26,14 +20,14 @@ const MANIFEST: &str = include_str!("../../../resources/markdown-assets.json");
 const DATA_DIRECTORY: &str = "markdown-assets";
 pub(crate) const XBERG_TAG: &str = "v2026.10.6-0420-run58.1";
 const RUNTIME_SELECTION_FILE: &str = "xberg-runtime-path.txt";
-const XBERG_DOWNLOAD_STAGING_MARKER: &str = ".jchtools-xberg-download-staging-v1";
-const XBERG_RELEASE_RECEIPT: &str = ".jchtools-xberg-release.json";
+const XBERG_RELEASE_RECEIPT: &str = "jchtools-xberg-release.json";
 const XBERG_LATEST_RELEASE_URL: &str =
     "https://api.github.com/repos/jchanghong023/xberg/releases/latest";
 const XBERG_TARGET: &str = "x86_64-pc-windows-msvc";
 const XBERG_COMPONENT_MANIFEST: &str = "xberg-components-x86_64-pc-windows-msvc.json";
 const XBERG_ARCHIVE_PREFIX: &str = "xberg-cli-x86_64-pc-windows-msvc";
-const COMPONENT_IDS: [&str; 3] = ["document", "snapshot", "media"];
+const AUDIO_ARCHIVE: &str = "xberg-audio-assets-x86_64-pc-windows-msvc.zip";
+static OPTIONAL_INSTALL: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
 #[derive(Debug, Deserialize)]
 struct AssetManifest {
@@ -71,7 +65,7 @@ struct LicenseEntry {
 
 /// 读取应用级 SQLite 保存的共享 Xberg 运行目录。
 pub fn load_saved_runtime_dir() -> Result<Option<PathBuf>, String> {
-    jchtools_foundation::xberg_settings::load()
+    jchtools_foundation::xberg_settings::effective_directory()
 }
 
 /// 校验已下载的 Xberg 运行目录：只做 document 场景成员存在性检查
@@ -122,30 +116,42 @@ pub fn save_runtime_dir(path: &Path) -> Result<(), String> {
 
 /// 确保文档场景就绪链的许可证 notice 已落盘（T-06）。
 ///
-/// 已存在时幂等返回；缺失时经 staging 目录原子就位（与私有 `initialize_staged`
-/// 同口径），半途失败不留半成品、不破坏既有文件——非原子直写曾在复审中
-/// 被指出可能在磁盘满/杀软锁时截断旧 notice，把原本有效的安装打成
-/// 「notice 不存在」。设置页保存与下载共用此闭环。
+/// 已存在时幂等返回；缺失时先完整写入自有 staging，再以 create-new 语义原子发布文件。
+/// 并发修复只复用已完整发布的成品，不交换整个 licenses 目录，不截断或覆盖既有文件。
+/// 设置页保存、启动就绪检查与下载共用此闭环。
 pub fn ensure_document_notice() -> Result<(), String> {
     let manifest = load_manifest()?;
     let root = asset_root();
-    let target = root.join("licenses").join("THIRD_PARTY_NOTICES.md");
+    let licenses = root.join("licenses");
+    let target = licenses.join("THIRD_PARTY_NOTICES.md");
     if target.is_file() {
         return Ok(());
     }
+    fs::create_dir_all(&licenses).map_err(|error| format!("创建许可证目录失败：{error}"))?;
     let staging = root.join(format!(".notice-staging-{}", Uuid::new_v4().simple()));
     fs::create_dir_all(&staging).map_err(|error| format!("创建许可证临时目录失败：{error}"))?;
-    let result = write_notice(&staging.join("THIRD_PARTY_NOTICES.md"), &manifest)
-        .and_then(|()| atomic_replace_dir(&staging, &root.join("licenses")));
-    if result.is_err() {
-        let _ = fs::remove_dir_all(&staging);
+    let prepared = staging.join("THIRD_PARTY_NOTICES.md");
+    let result =
+        write_notice(&prepared, &manifest).and_then(|()| match fs::hard_link(&prepared, &target) {
+            Ok(()) => Ok(()),
+            Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists && target.is_file() => {
+                Ok(())
+            }
+            Err(error) => Err(format!("原子就位许可证 notice 失败：{error}")),
+        });
+    if let Err(error) = fs::remove_dir_all(&staging) {
+        tracing::warn!(
+            event = "notice_staging_cleanup_failed",
+            error_type = ?error.kind(),
+            "许可证暂存目录清理失败"
+        );
     }
     result
 }
-/// 返回已保存的 Xberg 运行目录；未下载组件时提示在设置页选择功能。
+/// 返回应用唯一生效运行目录（含未打开 GUI 的随包默认目录）。
 pub fn runtime_dir() -> Result<PathBuf, String> {
     load_saved_runtime_dir()?
-        .ok_or_else(|| "尚未下载 Xberg 功能组件，请在设置页选择并下载".to_string())
+        .ok_or_else(|| "未找到 Xberg 运行目录，请检查安装包或设置页的共享目录".to_string())
 }
 
 /// Xberg 推理组件安装根：`<资产根>/xberg-inference/`（每个发布版本一个 tag
@@ -194,7 +200,9 @@ pub fn media_component_dir() -> Result<PathBuf, String> {
 
 /// 使用媒体能力前校验它独有的固定资产；文档初始化不要求媒体模型。
 pub fn validate_media() -> Result<(), String> {
-    readiness_inference_pack(&load_manifest()?, &asset_root())
+    readiness_inference_pack(&load_manifest()?, &asset_root()).map_err(|error| {
+        format!("缺少可选音频资产（FFmpeg 与音频模型），请在设置页主动下载；不会自动联网：{error}")
+    })
 }
 
 /// 检查文档场景及许可证；读取应用配置时可首次迁移旧文本，不联网。
@@ -203,10 +211,7 @@ pub fn readiness() -> Result<(), String> {
     load_manifest()?;
     let runtime = runtime_dir()?;
     validate_runtime_dir(&runtime)?;
-    let notice = asset_root().join("licenses").join("THIRD_PARTY_NOTICES.md");
-    if !notice.is_file() {
-        return Err(format!("许可证 notice 不存在：{}", notice.display()));
-    }
+    ensure_document_notice()?;
     Ok(())
 }
 
@@ -439,11 +444,11 @@ struct FeatureComponent {
     members: Vec<AssetFile>,
 }
 
-#[derive(Debug, Deserialize)]
-struct ComponentManifest {
-    schema_version: u32,
-    target: String,
-    components: Vec<FeatureComponent>,
+#[derive(Debug, Deserialize, Serialize)]
+struct AudioAsset {
+    #[serde(flatten)]
+    component: FeatureComponent,
+    url: String,
 }
 
 #[derive(Debug, Deserialize, Serialize)]
@@ -453,351 +458,152 @@ struct ComponentReceipt {
     source: String,
     manifest: ReleaseAsset,
     components: Vec<FeatureComponent>,
+    audio_assets: AudioAsset,
 }
 
 fn valid_digest(value: &str) -> bool {
     value.len() == 64 && value.bytes().all(|byte| byte.is_ascii_hexdigit())
 }
 
-fn release_asset(
-    release: &serde_json::Value,
-    tag: &str,
-    name: &str,
-) -> Result<ReleaseAsset, String> {
-    let assets = release["assets"]
-        .as_array()
-        .ok_or("最新 Xberg 发布缺少资产列表")?;
-    let matches: Vec<_> = assets
-        .iter()
-        .filter(|asset| asset["name"] == name)
-        .collect();
-    if matches.len() != 1 {
-        return Err(format!(
-            "最新 Xberg 发布缺少或重复独立组件资产：{name}；不会回退完整包"
-        ));
-    }
-    let asset = matches[0];
-    let url = format!("https://github.com/jchanghong023/xberg/releases/download/{tag}/{name}");
-    if asset["browser_download_url"].as_str() != Some(url.as_str()) {
-        return Err("最新 Xberg 组件来源与固定官方源不一致".into());
-    }
-    let size_bytes = asset["size"]
-        .as_u64()
-        .filter(|size| *size > 0)
-        .ok_or("最新 Xberg 组件大小无效")?;
-    let sha256 = asset["digest"]
-        .as_str()
-        .and_then(|digest| digest.strip_prefix("sha256:"))
-        .filter(|digest| valid_digest(digest))
-        .ok_or("最新 Xberg 组件缺少上游 SHA-256，未开始下载")?
-        .to_ascii_lowercase();
-    Ok(ReleaseAsset {
-        archive: name.into(),
-        url,
-        size_bytes,
-        sha256,
-    })
-}
-
-fn release_components(
-    release: &serde_json::Value,
-) -> Result<(String, ReleaseAsset, BTreeMap<String, ReleaseAsset>), String> {
-    let tag = release["tag_name"]
-        .as_str()
-        .filter(|tag| valid_component_tag(tag))
-        .ok_or("最新 Xberg 发布缺少合法版本标识")?;
-    if release["draft"] != false || release["prerelease"] != false {
-        return Err("最新发布接口未返回正式发布版本，未开始下载".into());
-    }
-    let manifest = release_asset(release, tag, XBERG_COMPONENT_MANIFEST)?;
-    let mut components = BTreeMap::new();
-    for id in COMPONENT_IDS {
-        let name = format!("xberg-{id}-{XBERG_TARGET}.zip");
-        components.insert(id.into(), release_asset(release, tag, &name)?);
-    }
-    Ok((tag.into(), manifest, components))
-}
-
-fn member_owner(path: &str) -> &'static str {
-    if path.starts_with("models/snapshot-ocr/") {
-        "snapshot"
-    } else if path.starts_with("models/models--") {
-        "document"
-    } else if path.starts_with("models/sense_voice")
+fn optional_audio_path(path: &str) -> bool {
+    path.starts_with("ffmpeg/")
         || path.starts_with("models/vad/")
-        || path.starts_with("ffmpeg/")
-        || path.starts_with("sherpa-onnx/")
+        || path.strip_prefix("models/").is_some_and(|tail| {
+            tail.split_once('/')
+                .is_some_and(|(directory, _)| directory.starts_with("sense_voice_"))
+        })
         || path.starts_with("samples/")
-    {
-        "media"
-    } else {
-        "common"
-    }
 }
 
-fn validate_component_manifest(
-    manifest: &ComponentManifest,
-    assets: &BTreeMap<String, ReleaseAsset>,
-    pinned: &XbergManifest,
-) -> Result<(), String> {
-    if manifest.schema_version != 1
-        || manifest.target != XBERG_TARGET
-        || manifest.components.len() != 3
+fn validate_member(member: &AssetFile) -> Result<(), String> {
+    validate_relative_path(&member.path)?;
+    // Windows 路径别名、ADS、大小写冲突不能借用音频清单覆盖基础成员。
+    if member.path.contains('\\')
+        || !valid_digest(&member.sha256)
+        || member.path.split('/').any(|part| {
+            let stem = part.split('.').next().unwrap_or("").to_ascii_uppercase();
+            part.ends_with(['.', ' '])
+                || part.chars().any(|c| c < ' ' || "<>\"|?*".contains(c))
+                || matches!(stem.as_str(), "CON" | "PRN" | "AUX" | "NUL")
+                || (stem.len() == 4
+                    && (stem.starts_with("COM") || stem.starts_with("LPT"))
+                    && matches!(stem.as_bytes()[3], b'1'..=b'9'))
+        })
     {
-        return Err("Xberg 独立组件清单版本、平台或组件数量无效".into());
-    }
-    let mut ids = BTreeSet::new();
-    let mut paths: BTreeMap<String, &AssetFile> = BTreeMap::new();
-    for component in &manifest.components {
-        let asset = assets.get(&component.id).ok_or("Xberg 清单包含未知组件")?;
-        let dependencies: Vec<String> = Vec::new();
-        if !ids.insert(component.id.as_str())
-            || component.requires != dependencies
-            || component.archive != asset.archive
-            || component.size_bytes != asset.size_bytes
-            || component.sha256 != asset.sha256
-            || component.members.is_empty()
-        {
-            return Err("Xberg 清单组件与正式发布资产不一致".into());
-        }
-        let mut component_paths = BTreeSet::new();
-        for member in &component.members {
-            validate_relative_path(&member.path)?;
-            let normalized = member.path.to_ascii_lowercase();
-            let owner = member_owner(&member.path);
-            if member.path.contains('\\')
-                || member.path == XBERG_RELEASE_RECEIPT
-                || !valid_digest(&member.sha256)
-                || !component_paths.insert(normalized.clone())
-                || (owner != "common" && owner != component.id)
-                || paths
-                    .get(&normalized)
-                    .is_some_and(|previous| *previous != member)
-            {
-                return Err(format!(
-                    "Xberg 清单成员路径、摘要或组件归属无效：{}",
-                    member.path
-                ));
-            }
-            paths.insert(normalized, member);
-        }
-        for expected in &pinned.members {
-            let owner = member_owner(&expected.path);
-            if owner != "common" && owner != component.id {
-                continue;
-            }
-            let actual = component
-                .members
-                .iter()
-                .find(|member| member.path == expected.path)
-                .ok_or_else(|| {
-                    format!("Xberg {} 清单缺少所需成员：{}", component.id, expected.path)
-                })?;
-            if expected.path.starts_with("models/")
-                && (actual.size_bytes != expected.size_bytes || actual.sha256 != expected.sha256)
-            {
-                return Err(format!(
-                    "Xberg 发布模型身份与固定资产不一致：{}",
-                    expected.path
-                ));
-            }
-        }
+        return Err(format!("Xberg 收据成员路径或摘要无效：{}", member.path));
     }
     Ok(())
 }
 
-/// 按功能获取同一正式发布的独立组件；不下载完整离线包、不修改旧运行目录。
-/// 新安装与复用均返回规范化绝对目录，与保存的活动运行目录使用同一表示。
-pub fn download_runtime(
-    selection: DownloadSelection,
-    cancel: &AtomicBool,
-    mut progress: impl FnMut(String),
-) -> Result<PathBuf, String> {
-    let span = jchtools_foundation::logging::operation_span("markdown_assets", "download_runtime");
-    let _entered = span.enter();
-    ensure_selection(selection)?;
-    ensure_not_cancelled(cancel)?;
-    progress("正在查询 Xberg 最新发布版本…".into());
-    let release = jchtools_assets::snap_ocr_assets::fetch_release_json(
-        XBERG_LATEST_RELEASE_URL,
-        cancel,
-        &mut progress,
-    )?;
-    download_runtime_from_release(
-        selection,
-        &release,
-        cancel,
-        progress,
-        &mut NetworkDownloader,
-    )
-}
-
-fn ensure_selection(selection: DownloadSelection) -> Result<(), String> {
-    if !selection.document && !selection.snapshot && !selection.media {
-        return Err("请至少选择一种 Xberg 功能后下载".into());
-    }
-    Ok(())
-}
-
-/// 生产安装接缝：调用方可提供正式发布元数据与流式资产供给器。
-/// 来源、清单、归档、成员、模型身份以及最终配置提交全部走生产校验。
-/// 成功返回规范化绝对目录；新安装和已校验组件复用遵循相同路径表示。
-pub fn download_runtime_from_release(
-    selection: DownloadSelection,
-    release: &serde_json::Value,
-    cancel: &AtomicBool,
-    progress: impl FnMut(String),
-    downloader: &mut dyn AssetDownloader,
-) -> Result<PathBuf, String> {
-    let pinned = load_manifest()?;
-    download_runtime_with_pinned(
-        selection,
-        release,
-        cancel,
-        progress,
-        downloader,
-        &pinned.xberg,
-    )
-}
-
-fn download_runtime_with_pinned(
-    selection: DownloadSelection,
-    release: &serde_json::Value,
-    cancel: &AtomicBool,
-    mut progress: impl FnMut(String),
-    downloader: &mut dyn AssetDownloader,
-    pinned: &XbergManifest,
-) -> Result<PathBuf, String> {
-    let span = jchtools_foundation::logging::operation_span("markdown_assets", "install_runtime");
-    let _entered = span.enter();
-    ensure_selection(selection)?;
-    ensure_not_cancelled(cancel)?;
-    let (tag, manifest_asset, assets) = release_components(release)?;
-    let base = jchtools_foundation::xberg_settings::state_dir()?.join("xberg-downloads");
-    fs::create_dir_all(&base).map_err(|error| error.to_string())?;
-    // 在 staging 和配置提交前统一路径表示，避免提交成功后再增加可能失败的操作。
-    let base =
-        fs::canonicalize(&base).map_err(|error| format!("解析 Xberg 下载目录失败：{error}"))?;
-    cleanup_owned_download_staging(&base, &mut progress);
-    let staging = base.join(format!(".staging-{}", Uuid::new_v4()));
-    fs::create_dir(&staging).map_err(|error| error.to_string())?;
-    let staging_lock = (|| {
-        let mut file = open_download_staging_lock(&staging)?;
-        file.write_all(b"JchTools Xberg download staging\n")
-            .map_err(|error| error.to_string())?;
-        file.sync_all().map_err(|error| error.to_string())?;
-        Ok::<_, String>(file)
-    })();
-    let staging_lock = match staging_lock {
-        Ok(file) => file,
-        Err(error) => {
-            rollback_runtime_directory(&staging, "staging_lock");
-            return Err(error);
-        }
-    };
-    let result = (|| {
-        progress(format!("最新发布版本：{tag}，正在获取独立组件清单…"));
-        let path = staging.join("components.json");
-        downloader.download(
-            &manifest_asset.url,
-            &path,
-            manifest_asset.size_bytes,
-            &manifest_asset.sha256,
-            cancel,
-            &mut progress,
-        )?;
-        verify_file_with_cancel(
-            &path,
-            manifest_asset.size_bytes,
-            &manifest_asset.sha256,
-            cancel,
-        )?;
-        let bytes = fs::read(path).map_err(|error| error.to_string())?;
-        let manifest: ComponentManifest = serde_json::from_slice(&bytes)
-            .map_err(|error| format!("Xberg 独立组件清单无效：{error}"))?;
-        validate_component_manifest(&manifest, &assets, pinned)?;
-        install_components(
-            selection,
-            &tag,
-            &manifest_asset,
-            &manifest,
-            &base,
-            &staging,
-            cancel,
-            &mut progress,
-            downloader,
+fn load_receipt(root: &Path) -> Result<ComponentReceipt, String> {
+    let bytes = fs::read(root.join(XBERG_RELEASE_RECEIPT))
+        .map_err(|error| format!("无法读取随包 Xberg 发布收据，请修复安装包：{error}"))?;
+    let receipt: ComponentReceipt = serde_json::from_slice(&bytes)
+        .map_err(|error| format!("随包 Xberg 发布收据无效：{error}"))?;
+    let release_url = |archive: &str| {
+        format!(
+            "https://github.com/jchanghong023/xberg/releases/download/{}/{archive}",
+            receipt.tag
         )
-    })();
-    drop(staging_lock);
-    if let Err(error) = fs::remove_dir_all(&staging) {
-        tracing::warn!(event = "runtime_staging_cleanup_failed", error_kind = ?error.kind(), "下载暂存目录清理失败");
-    }
-    if result.is_ok() {
-        tracing::info!(
-            event = "runtime_install_completed",
-            result = "verified_installed_saved",
-            "Xberg 独立组件安装完成"
-        );
-    } else {
-        tracing::warn!(
-            event = "runtime_install_failed",
-            cancelled = cancel.load(std::sync::atomic::Ordering::Acquire),
-            "Xberg 独立组件安装未提交"
-        );
-    }
-    result
-}
-
-fn owned_receipt(base: &Path) -> Result<Option<(PathBuf, ComponentReceipt)>, String> {
-    let Some(path) = jchtools_foundation::xberg_settings::settings()?.downloaded else {
-        return Ok(None);
     };
-    let Ok(canonical_base) = fs::canonicalize(base) else {
-        return Ok(None);
-    };
-    let Ok(path) = fs::canonicalize(path) else {
-        return Ok(None);
-    };
-    // 只复用本流程创建的目录；旧文本/用户目录不会被复制、删除或改写。
-    if path.parent() != Some(canonical_base.as_path()) {
-        return Ok(None);
-    }
-    let receipt = fs::read(path.join(XBERG_RELEASE_RECEIPT))
-        .ok()
-        .and_then(|bytes| serde_json::from_slice::<ComponentReceipt>(&bytes).ok());
-    let Some(receipt) = receipt else {
-        return Ok(None);
-    };
-    let suffix = path
-        .file_name()
-        .and_then(|name| name.to_str())
-        .and_then(|name| name.strip_prefix(&format!("{}-", receipt.tag)));
-    if receipt.owner != "JchTools-xberg-components-v1"
+    if receipt.owner != "JchTools-bundled-xberg-v1"
         || receipt.source != XBERG_LATEST_RELEASE_URL
         || !valid_component_tag(&receipt.tag)
-        || suffix.is_none_or(|suffix| Uuid::parse_str(suffix).is_err())
         || receipt.manifest.archive != XBERG_COMPONENT_MANIFEST
-        || receipt.manifest.url
-            != format!(
-                "https://github.com/jchanghong023/xberg/releases/download/{}/{}",
-                receipt.tag, XBERG_COMPONENT_MANIFEST
-            )
+        || receipt.manifest.url != release_url(XBERG_COMPONENT_MANIFEST)
+        || receipt.manifest.size_bytes == 0
+        || !valid_digest(&receipt.manifest.sha256)
+        || receipt.components.len() != 2
     {
-        return Ok(None);
+        return Err("随包 Xberg 发布收据来源、版本或基础组件无效".into());
     }
     let mut ids = BTreeSet::new();
+    let mut base_paths: BTreeMap<String, &AssetFile> = BTreeMap::new();
     for component in &receipt.components {
-        if !COMPONENT_IDS.contains(&component.id.as_str())
+        if !matches!(component.id.as_str(), "document" | "snapshot")
             || !ids.insert(component.id.as_str())
+            || !component.requires.is_empty()
             || component.archive != format!("xberg-{}-{XBERG_TARGET}.zip", component.id)
+            || component.size_bytes == 0
+            || !valid_digest(&component.sha256)
+            || component.members.is_empty()
         {
-            return Ok(None);
+            return Err("随包 Xberg 基础组件记录无效".into());
+        }
+        let mut own_paths = BTreeSet::new();
+        for member in &component.members {
+            validate_member(member)?;
+            let key = member.path.to_ascii_lowercase();
+            if optional_audio_path(&key)
+                || key == XBERG_RELEASE_RECEIPT
+                || !own_paths.insert(key.clone())
+                || base_paths
+                    .get(&key)
+                    .is_some_and(|previous| *previous != member)
+            {
+                return Err("随包 Xberg 基础成员冲突或混入可选音频资产".into());
+            }
+            base_paths.insert(key, member);
         }
     }
-    if ids.is_empty() {
-        return Ok(None);
+    let audio = &receipt.audio_assets.component;
+    if audio.id != "audio-assets"
+        || audio.archive != AUDIO_ARCHIVE
+        || receipt.audio_assets.url != release_url(AUDIO_ARCHIVE)
+        || !audio.requires.is_empty()
+        || audio.size_bytes == 0
+        || !valid_digest(&audio.sha256)
+        || audio.members.is_empty()
+    {
+        return Err("随包 Xberg 音频收据与锁定发布资产不一致".into());
     }
-    Ok(Some((path, receipt)))
+    let mut audio_paths = BTreeSet::new();
+    for member in &audio.members {
+        validate_member(member)?;
+        let key = member.path.to_ascii_lowercase();
+        if !optional_audio_path(&member.path)
+            || base_paths.contains_key(&key)
+            || !audio_paths.insert(key)
+        {
+            return Err("音频收据包含基础文件、未知目录或重复成员，拒绝安装".into());
+        }
+    }
+    Ok(receipt)
+}
+
+fn safe_member_path(root: &Path, relative: &str) -> Result<PathBuf, String> {
+    validate_relative_path(relative)?;
+    let mut current = root.to_path_buf();
+    for segment in std::iter::once(None).chain(relative.split('/').map(Some)) {
+        if let Some(segment) = segment {
+            current.push(segment);
+        }
+        match fs::symlink_metadata(&current) {
+            Ok(metadata) => {
+                let mut linked = metadata.file_type().is_symlink();
+                #[cfg(windows)]
+                {
+                    use std::os::windows::fs::MetadataExt;
+                    linked |= metadata.file_attributes() & 0x400 != 0;
+                }
+                if linked {
+                    return Err("音频资产路径包含符号链接或重解析点，拒绝安装".into());
+                }
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) => return Err(format!("检查音频资产路径失败：{error}")),
+        }
+    }
+    Ok(current)
+}
+
+fn verify_member(root: &Path, member: &AssetFile, cancel: &AtomicBool) -> Result<(), String> {
+    verify_file_with_cancel(
+        &safe_member_path(root, &member.path)?,
+        member.size_bytes,
+        &member.sha256,
+        cancel,
+    )
 }
 
 fn verify_component(
@@ -807,32 +613,28 @@ fn verify_component(
 ) -> Result<(), String> {
     for member in &component.members {
         ensure_not_cancelled(cancel)?;
-        let path = root.join(&member.path);
-        if fs::symlink_metadata(&path)
-            .map_err(|error| error.to_string())?
-            .file_type()
-            .is_symlink()
-        {
-            return Err("已安装组件包含符号链接，不能复用".into());
-        }
-        verify_file_with_cancel(&path, member.size_bytes, &member.sha256, cancel)?;
+        verify_member(root, member, cancel)?;
     }
     Ok(())
 }
 
 fn collect_files(root: &Path, paths: &mut BTreeSet<String>, relative: &Path) -> Result<(), String> {
-    for entry in fs::read_dir(root.join(relative)).map_err(|error| error.to_string())? {
-        let entry = entry.map_err(|error| error.to_string())?;
+    for entry in
+        fs::read_dir(root.join(relative)).map_err(|error| format!("读取解包目录失败：{error}"))?
+    {
+        let entry = entry.map_err(|error| format!("读取解包成员失败：{error}"))?;
         let path = relative.join(entry.file_name());
-        let kind = entry.file_type().map_err(|error| error.to_string())?;
+        let kind = entry
+            .file_type()
+            .map_err(|error| format!("读取解包成员类型失败：{error}"))?;
         if kind.is_dir() {
             collect_files(root, paths, &path)?;
         } else if kind.is_file() {
-            let name = path
-                .to_str()
-                .ok_or("组件路径无法编码为 Unicode")?
-                .replace('\\', "/");
-            paths.insert(name);
+            paths.insert(
+                path.to_str()
+                    .ok_or("组件路径无法编码为 Unicode")?
+                    .replace('\\', "/"),
+            );
         } else {
             return Err("组件归档包含非普通文件".into());
         }
@@ -840,244 +642,337 @@ fn collect_files(root: &Path, paths: &mut BTreeSet<String>, relative: &Path) -> 
     Ok(())
 }
 
-#[allow(clippy::too_many_arguments)]
-fn install_components(
-    selection: DownloadSelection,
-    tag: &str,
-    manifest_asset: &ReleaseAsset,
-    manifest: &ComponentManifest,
-    base: &Path,
-    staging: &Path,
+/// 只在用户主动操作时下载当前生效引擎锁定的音频附加包，不查询最新发布。
+pub fn download_audio_runtime(
     cancel: &AtomicBool,
-    progress: &mut impl FnMut(String),
+    progress: impl FnMut(String),
+) -> Result<PathBuf, String> {
+    download_audio_runtime_with(cancel, progress, &mut NetworkDownloader)
+}
+
+/// 注入真实资产供给器；来源、归档、成员与落位仍经过完整生产校验。
+#[cfg(any(test, feature = "test-hooks"))]
+pub fn download_audio_runtime_with_downloader(
+    cancel: &AtomicBool,
+    progress: impl FnMut(String),
     downloader: &mut dyn AssetDownloader,
 ) -> Result<PathBuf, String> {
-    let previous = owned_receipt(base)?;
-    let mut wanted = BTreeSet::new();
-    for (id, selected) in [
-        ("document", selection.document),
-        ("snapshot", selection.snapshot),
-        ("media", selection.media),
-    ] {
-        if selected {
-            wanted.insert(id);
-        }
-    }
-    if let Some((_, receipt)) = &previous {
-        if receipt.tag == tag {
-            for component in &receipt.components {
-                wanted.insert(component.id.as_str());
-            }
-        }
-    }
-    let components: Vec<_> = manifest
-        .components
-        .iter()
-        .filter(|component| wanted.contains(component.id.as_str()))
-        .cloned()
-        .collect();
-    let mut reusable = BTreeSet::new();
-    if let Some((path, receipt)) = &previous {
-        if receipt.tag == tag {
-            for component in &components {
-                if receipt.components.contains(component) {
-                    match verify_component(path, component, cancel) {
-                        Ok(()) => {
-                            reusable.insert(component.id.as_str());
-                        }
-                        Err(_) => {
-                            ensure_not_cancelled(cancel)?;
-                        }
-                    }
-                }
-            }
-            if reusable.len() == components.len() {
-                ensure_not_cancelled(cancel)?;
-                ensure_document_notice()?;
-                ensure_not_cancelled(cancel)?;
-                jchtools_foundation::xberg_settings::save_source(
-                    jchtools_foundation::xberg_settings::Source::Downloaded,
-                    path,
-                )?;
-                progress(format!("已存在 {tag}，复用已校验组件，不重复下载"));
-                return Ok(path.clone());
-            }
-        }
-    }
-    let runtime = staging.join("runtime");
-    fs::create_dir(&runtime).map_err(|error| error.to_string())?;
-    for component in &components {
+    download_audio_runtime_with(cancel, progress, downloader)
+}
+
+fn download_audio_runtime_with(
+    cancel: &AtomicBool,
+    mut progress: impl FnMut(String),
+    downloader: &mut dyn AssetDownloader,
+) -> Result<PathBuf, String> {
+    let _guard = OPTIONAL_INSTALL.lock().map_err(|_| "音频安装锁不可用")?;
+    ensure_not_cancelled(cancel)?;
+    let root = runtime_dir()?;
+    let receipt = load_receipt(&root)?;
+    #[cfg(any(test, feature = "test-hooks"))]
+    audio_download_test_barrier(cancel, &mut progress)?;
+    let audio = &receipt.audio_assets.component;
+    if verify_component(&root, audio, cancel).is_ok() {
         ensure_not_cancelled(cancel)?;
-        if reusable.contains(component.id.as_str()) {
-            let source = &previous.as_ref().ok_or("缺少可复用组件目录")?.0;
-            for member in &component.members {
-                ensure_not_cancelled(cancel)?;
-                let destination = runtime.join(&member.path);
-                if destination.exists() {
-                    verify_file_with_cancel(
-                        &destination,
-                        member.size_bytes,
-                        &member.sha256,
-                        cancel,
-                    )?;
-                } else {
-                    fs::create_dir_all(destination.parent().ok_or("组件路径缺少父目录")?)
-                        .map_err(|error| error.to_string())?;
-                    fs::copy(source.join(&member.path), &destination)
-                        .map_err(|error| error.to_string())?;
-                }
-            }
-            verify_component(&runtime, component, cancel)?;
-            continue;
-        }
-        progress(format!("正在下载 Xberg {} 组件…", component.id));
-        let archive = staging.join(&component.archive);
-        let url = format!(
-            "https://github.com/jchanghong023/xberg/releases/download/{tag}/{}",
-            component.archive
-        );
+        progress(format!("已复用 {} 的完整音频资产，无需下载", receipt.tag));
+        return Ok(root);
+    }
+    ensure_not_cancelled(cancel)?;
+    with_audio_staging(&root, &mut progress, |staging, progress| {
+        progress(format!("正在下载 {} 的可选音频资产…", receipt.tag));
+        let archive = staging.join(AUDIO_ARCHIVE);
         downloader.download(
-            &url,
+            &receipt.audio_assets.url,
             &archive,
-            component.size_bytes,
-            &component.sha256,
+            audio.size_bytes,
+            &audio.sha256,
             cancel,
             progress,
         )?;
-        verify_file_with_cancel(&archive, component.size_bytes, &component.sha256, cancel)?;
-        let extracted = staging.join(format!("unpacked-{}", component.id));
-        fs::create_dir(&extracted).map_err(|error| error.to_string())?;
+        verify_file_with_cancel(&archive, audio.size_bytes, &audio.sha256, cancel)?;
+        let extracted = staging.join("extracted");
+        fs::create_dir(&extracted).map_err(|error| format!("创建音频解包目录失败：{error}"))?;
         jchtools_assets::asset_util::extract_zip_safely(&archive, &extracted, cancel)?;
         let mut actual = BTreeSet::new();
         collect_files(&extracted, &mut actual, Path::new(""))?;
-        let expected: BTreeSet<_> = component
+        let expected = audio
             .members
             .iter()
             .map(|member| format!("{XBERG_ARCHIVE_PREFIX}/{}", member.path))
-            .collect();
+            .collect::<BTreeSet<_>>();
         if actual != expected {
-            return Err(format!("Xberg {} 归档成员与清单不一致", component.id));
+            return Err("音频归档成员与锁定收据不一致，拒绝安装".into());
         }
-        let unpacked = extracted.join(XBERG_ARCHIVE_PREFIX);
-        verify_component(&unpacked, component, cancel)?;
-        for member in &component.members {
-            ensure_not_cancelled(cancel)?;
-            let destination = runtime.join(&member.path);
-            if destination.exists() {
-                verify_file_with_cancel(&destination, member.size_bytes, &member.sha256, cancel)?;
-            } else {
-                fs::create_dir_all(destination.parent().ok_or("组件路径缺少父目录")?)
-                    .map_err(|error| error.to_string())?;
-                fs::rename(unpacked.join(&member.path), destination)
-                    .map_err(|error| error.to_string())?;
-            }
-        }
-    }
-    let receipt = ComponentReceipt {
-        owner: "JchTools-xberg-components-v1".into(),
-        tag: tag.into(),
-        source: XBERG_LATEST_RELEASE_URL.into(),
-        manifest: manifest_asset.clone(),
-        components,
+        let source = extracted.join(XBERG_ARCHIVE_PREFIX);
+        verify_component(&source, audio, cancel)?;
+        install_audio_members(&root, &source, &audio.members, staging, cancel, || {
+            // 同根补入资产不切换来源、不重启正在执行的唯一 worker。
+            ensure_not_cancelled(cancel)
+        })?;
+        progress("可选音频资产已安装，现有文档与截图任务不受影响".into());
+        Ok(root.clone())
+    })
+}
+
+/// 真实 GUI 取消路径的离线屏障：仅隔离测试构建可启用，不供应伪造资产或成功结果。
+#[cfg(any(test, feature = "test-hooks"))]
+fn audio_download_test_barrier(
+    cancel: &AtomicBool,
+    progress: &mut impl FnMut(String),
+) -> Result<(), String> {
+    let Some(marker) = std::env::var_os("JCHTOOLS_TEST_AUDIO_DOWNLOAD_BARRIER") else {
+        return Ok(());
     };
-    let mut file = OpenOptions::new()
+    let state = std::env::var_os("JCHTOOLS_TEST_STATE_DIR")
+        .map(PathBuf::from)
+        .filter(|path| path.is_absolute())
+        .ok_or("音频下载测试屏障必须使用隔离状态目录")?;
+    let marker = PathBuf::from(marker);
+    let parent = marker.parent().ok_or("音频下载测试屏障缺少父目录")?;
+    let state =
+        fs::canonicalize(state).map_err(|error| format!("解析测试状态目录失败：{error}"))?;
+    let parent =
+        fs::canonicalize(parent).map_err(|error| format!("解析测试屏障目录失败：{error}"))?;
+    if !marker.is_absolute() || !parent.starts_with(&state) {
+        return Err("音频下载测试屏障必须位于隔离状态目录内".into());
+    }
+    fs::OpenOptions::new()
         .write(true)
         .create_new(true)
-        .open(runtime.join(XBERG_RELEASE_RECEIPT))
-        .map_err(|error| error.to_string())?;
-    file.write_all(&serde_json::to_vec(&receipt).map_err(|error| error.to_string())?)
-        .map_err(|error| error.to_string())?;
-    file.sync_all().map_err(|error| error.to_string())?;
-    drop(file);
-    ensure_not_cancelled(cancel)?;
-    let installed = base.join(format!("{tag}-{}", Uuid::new_v4()));
-    fs::rename(&runtime, &installed).map_err(|error| format!("安装 Xberg 失败：{error}"))?;
-    let commit = (|| {
-        ensure_document_notice()?;
+        .open(&marker)
+        .map_err(|error| format!("创建音频下载测试屏障失败：{error}"))?;
+    progress("测试音频下载已进入可取消等待，未发出网络请求".into());
+    loop {
         ensure_not_cancelled(cancel)?;
-        jchtools_foundation::xberg_settings::save_source(
-            jchtools_foundation::xberg_settings::Source::Downloaded,
-            &installed,
-        )
+        std::thread::sleep(std::time::Duration::from_millis(20));
+    }
+}
+
+fn with_audio_staging<T>(
+    root: &Path,
+    progress: &mut impl FnMut(String),
+    operation: impl FnOnce(&Path, &mut dyn FnMut(String)) -> Result<T, String>,
+) -> Result<T, String> {
+    let staging = root.join(format!(".audio-staging-{}", Uuid::new_v4()));
+    fs::create_dir(&staging).map_err(|error| format!("创建音频暂存目录失败：{error}"))?;
+    let result = operation(&staging, progress);
+    // 回滚失败的备份必须保留供恢复，绝不以清理吞掉原文件。
+    if !staging.join("recovery-required").exists() {
+        if let Err(error) = fs::remove_dir_all(&staging) {
+            tracing::warn!(event = "audio_staging_cleanup_failed", error_kind = ?error.kind(), "音频暂存目录清理失败");
+            progress(format!("警告：音频暂存目录清理失败：{error}"));
+        }
+    }
+    result
+}
+
+/// 成员事务只写附加包路径；有效现有成员原位复用，失败恢复原有无效成员。
+fn install_audio_members(
+    root: &Path,
+    source: &Path,
+    members: &[AssetFile],
+    staging: &Path,
+    cancel: &AtomicBool,
+    commit: impl FnOnce() -> Result<(), String>,
+) -> Result<(), String> {
+    let mut installed = Vec::new();
+    let mut backups = Vec::new();
+    let mut directories = Vec::new();
+    let result = (|| {
+        for (index, member) in members.iter().enumerate() {
+            ensure_not_cancelled(cancel)?;
+            if !optional_audio_path(&member.path) {
+                return Err("拒绝通过音频安装覆盖基础文件".into());
+            }
+            if verify_member(root, member, cancel).is_ok() {
+                continue;
+            }
+            ensure_not_cancelled(cancel)?;
+            verify_member(source, member, cancel)?;
+            let target = safe_member_path(root, &member.path)?;
+            let parent = target.parent().ok_or("音频成员缺少父目录")?;
+            let mut missing = Vec::new();
+            let mut cursor = parent;
+            while !cursor.exists() {
+                missing.push(cursor.to_path_buf());
+                cursor = cursor.parent().ok_or("音频目录缺少父目录")?;
+            }
+            for directory in missing.into_iter().rev() {
+                fs::create_dir(&directory)
+                    .map_err(|error| format!("创建音频成员目录失败：{error}"))?;
+                directories.push(directory);
+            }
+            let prepared = staging.join(format!("member-{index}"));
+            fs::copy(safe_member_path(source, &member.path)?, &prepared)
+                .map_err(|error| format!("暂存音频成员失败：{error}"))?;
+            // Windows FlushFileBuffers 需要写权限；仅打开本次自有暂存文件。
+            File::options()
+                .write(true)
+                .open(&prepared)
+                .and_then(|file| file.sync_all())
+                .map_err(|error| format!("同步音频暂存成员失败：{error}"))?;
+            verify_file_with_cancel(&prepared, member.size_bytes, &member.sha256, cancel)?;
+            ensure_not_cancelled(cancel)?;
+            safe_member_path(root, &member.path)?;
+            if target.exists() {
+                if !target.is_file() {
+                    return Err("音频目标被非普通文件占用".into());
+                }
+                let backup = staging.join(format!("backup-{index}"));
+                fs::rename(&target, &backup)
+                    .map_err(|error| format!("备份已有音频成员失败：{error}"))?;
+                backups.push((target.clone(), backup));
+            }
+            // 同一文件系统内以 create-new 语义发布，绝不覆盖并发出现的文件。
+            fs::hard_link(&prepared, &target)
+                .map_err(|error| format!("安装音频成员失败：{error}"))?;
+            installed.push(target);
+        }
+        ensure_not_cancelled(cancel)?;
+        commit()
     })();
-    if let Err(error) = commit {
-        rollback_runtime_directory(&installed, "notice_or_save_source");
+    if let Err(error) = result {
+        let mut recovery = Vec::new();
+        for path in installed.iter().rev() {
+            if let Err(error) = fs::remove_file(path) {
+                recovery.push(format!("删除本轮音频成员失败：{error}"));
+            }
+        }
+        for (target, backup) in backups.iter().rev() {
+            if let Err(error) = fs::hard_link(backup, target) {
+                recovery.push(format!("恢复原音频成员失败：{error}"));
+            }
+        }
+        for directory in directories.iter().rev() {
+            let _ = fs::remove_dir(directory);
+        }
+        if !recovery.is_empty() {
+            let _ = fs::write(staging.join("recovery-required"), b"keep backups");
+            return Err(format!(
+                "{error}；{}；原文件备份保留于 {}",
+                recovery.join("；"),
+                staging.display()
+            ));
+        }
         return Err(error);
     }
-    Ok(installed)
+    Ok(())
 }
 
-fn rollback_runtime_directory(directory: &Path, stage: &'static str) {
-    let started = std::time::Instant::now();
-    tracing::warn!(
-        event = "runtime_install_rollback_started",
-        stage,
-        action = "remove_new_directory",
-        "Xberg 安装阶段失败，开始撤销本次目录"
-    );
-    match fs::remove_dir_all(directory) {
-        Ok(()) => tracing::info!(
-            event = "runtime_install_rollback_completed",
-            stage,
-            elapsed_ms = jchtools_foundation::logging::elapsed_ms(started),
-            result = "removed",
-            "Xberg 本次目录已撤销"
-        ),
+/// 离线迁移兼容音频成员后，交由 broker 在空闲边界提交唯一随包运行目录。
+/// 迁移失败保留并返回旧生效目录，不把已就绪媒体静默变为不可用。
+pub fn migrate_bundled_runtime(
+    cancel: &AtomicBool,
+    progress: impl FnMut(String),
+) -> Result<PathBuf, String> {
+    migrate_bundled_runtime_with_activation(cancel, progress, |root| {
+        jchtools_xberg::xberg_runtime::activate_bundled_runtime(root)
+    })
+}
+
+fn migrate_bundled_runtime_with_activation(
+    cancel: &AtomicBool,
+    mut progress: impl FnMut(String),
+    mut activate: impl FnMut(&Path) -> Result<(), String>,
+) -> Result<PathBuf, String> {
+    let _guard = OPTIONAL_INSTALL.lock().map_err(|_| "音频迁移锁不可用")?;
+    let previous = jchtools_foundation::xberg_settings::effective_directory()?;
+    let mut uncertain_commit = false;
+    let attempt = (|| {
+        ensure_not_cancelled(cancel)?;
+        let bundled = jchtools_foundation::xberg_settings::bundled_directory()?
+            .ok_or("未找到随包 Xberg 目录，请修复安装包")?;
+        let bundled =
+            fs::canonicalize(&bundled).map_err(|error| format!("解析随包运行目录失败：{error}"))?;
+        let receipt = load_receipt(&bundled)?;
+        jchtools_xberg::xberg_runtime::validate_assets(&bundled, "document")?;
+        jchtools_xberg::xberg_runtime::validate_assets(&bundled, "snapshot")?;
+        if previous.as_ref() == Some(&bundled) {
+            ensure_not_cancelled(cancel)?;
+            activate(&bundled)?;
+            return Ok(bundled);
+        }
+        with_audio_staging(&bundled, &mut progress, |staging, progress| {
+            let mut compatible = Vec::new();
+            let old_media_ready = previous.as_ref().is_some_and(|old| {
+                jchtools_xberg::xberg_runtime::validate_assets(old, "media").is_ok()
+            });
+            for member in &receipt.audio_assets.component.members {
+                ensure_not_cancelled(cancel)?;
+                if verify_member(&bundled, member, cancel).is_ok() {
+                    continue;
+                }
+                ensure_not_cancelled(cancel)?;
+                if let Some(old) = &previous {
+                    if verify_member(old, member, cancel).is_ok() {
+                        compatible.push(member.clone());
+                        continue;
+                    }
+                }
+                ensure_not_cancelled(cancel)?;
+                if old_media_ready {
+                    return Err(format!(
+                        "旧目录音频已就绪，但成员与目标发布不兼容：{}；保留旧来源",
+                        member.path
+                    ));
+                }
+            }
+            let source = previous.as_deref().unwrap_or(&bundled);
+            progress(format!(
+                "离线迁移 {} 项目标发布兼容的音频成员",
+                compatible.len()
+            ));
+            let mut uncertain = None;
+            install_audio_members(&bundled, source, &compatible, staging, cancel, || {
+                ensure_not_cancelled(cancel)?;
+                if old_media_ready {
+                    jchtools_xberg::xberg_runtime::validate_assets(&bundled, "media")?;
+                }
+                match activate(&bundled) {
+                    Ok(()) => Ok(()),
+                    Err(error) => {
+                        match jchtools_foundation::xberg_settings::effective_directory() {
+                            Ok(Some(active)) if active == bundled => {
+                                tracing::warn!(
+                                    event = "bundled_runtime_commit_reply_lost",
+                                    "来源已提交但代理确认失败，保留目标音频资产"
+                                );
+                                Ok(())
+                            }
+                            Ok(_) => Err(error),
+                            Err(read_error) => {
+                                // IPC 确认丢失且配置暂不可读时不能删除可能已生效的媒体文件。
+                                uncertain_commit = true;
+                                uncertain = Some(format!("来源提交状态暂不可确认，已保留目标音频资产：{error}；{read_error}"));
+                                Ok(())
+                            }
+                        }
+                    }
+                }
+            })?;
+            if let Some(error) = uncertain {
+                return Err(error);
+            }
+            Ok(bundled.clone())
+        })
+    })();
+    match attempt {
+        Ok(root) => Ok(root),
         Err(error) => {
-            tracing::warn!(event = "runtime_install_rollback_failed", stage, error_kind = ?error.kind(), error_code = error.raw_os_error(), error = %jchtools_foundation::logging::safe_error(&error.to_string()), elapsed_ms = jchtools_foundation::logging::elapsed_ms(started), "Xberg 本次目录撤销失败，保留既有错误处理策略");
-        }
-    }
-}
-
-fn open_download_staging_lock(staging: &Path) -> Result<File, String> {
-    let marker = staging.join(XBERG_DOWNLOAD_STAGING_MARKER);
-    #[cfg(windows)]
-    {
-        use std::os::windows::fs::OpenOptionsExt;
-        OpenOptions::new()
-            .write(true)
-            .create_new(true)
-            .share_mode(0b011)
-            .open(&marker)
-            .map_err(|error| format!("创建下载临时目录所有权标记失败：{error}"))
-    }
-    #[cfg(not(windows))]
-    {
-        OpenOptions::new()
-            .write(true)
-            .create_new(true)
-            .open(&marker)
-            .map_err(|error| format!("创建下载临时目录所有权标记失败：{error}"))
-    }
-}
-
-/// 只清理本流程创建并带有精确所有权标记的下载 staging 目录。
-///
-/// `xberg-downloads` 可能由用户自行创建或包含用户文件；没有标记的目录一律
-/// 保留。有效下载版本目录不是 `.staging-*`，因此不会被触碰。
-fn cleanup_owned_download_staging(root: &Path, progress: &mut impl FnMut(String)) {
-    let Ok(entries) = fs::read_dir(root) else {
-        return;
-    };
-    for entry in entries.flatten() {
-        let path = entry.path();
-        let is_staging = path
-            .file_name()
-            .and_then(|name| name.to_str())
-            .is_some_and(|name| name.starts_with(".staging-"));
-        let Ok(metadata) = fs::symlink_metadata(&path) else {
-            continue;
-        };
-        if !is_staging || !metadata.file_type().is_dir() || metadata.file_type().is_symlink() {
-            continue;
-        }
-        let marker = path.join(XBERG_DOWNLOAD_STAGING_MARKER);
-        let owned = fs::read_to_string(&marker)
-            .is_ok_and(|value| value == "JchTools Xberg download staging\n");
-        if owned {
-            if let Err(error) = fs::remove_dir_all(&path) {
-                tracing::warn!(event = "runtime_stale_staging_cleanup_failed", stage = "staging_remove", error_kind = ?error.kind(), error_code = error.raw_os_error(), "清理旧 Xberg 下载临时目录失败");
-                progress(format!("警告：清理旧 Xberg 下载临时目录失败：{error}"));
+            tracing::warn!(
+                event = "bundled_runtime_migration_deferred",
+                cancelled = cancel.load(std::sync::atomic::Ordering::Acquire),
+                "随包运行目录迁移未获确认，保留既有文件与来源记录"
+            );
+            if uncertain_commit {
+                progress(error.clone());
+                return Err(error);
+            }
+            if let Some(previous) = previous {
+                progress(format!("随包迁移未提交，继续使用原运行目录：{error}"));
+                Ok(previous)
+            } else {
+                Err(error)
             }
         }
     }
@@ -1157,7 +1052,7 @@ fn asset_root() -> PathBuf {
 
 fn write_notice(path: &Path, manifest: &AssetManifest) -> Result<(), String> {
     let mut text = String::from("# JchTools 转 Markdown 可选组件许可证\n\n");
-    text.push_str("Xberg 运行目录由共享配置提供；主程序安装包不包含这些资产。独立功能组件由设置页按需下载，模型与推理运行库的许可随组件树自带。\n\n");
+    text.push_str("文档与截图基础运行资产随应用提供；FFmpeg 和音频模型仅在设置页主动下载。各模型与推理运行库的许可随运行目录自带。\n\n");
     for license in &manifest.xberg.licenses {
         let _ = writeln!(
             &mut text,
@@ -1203,33 +1098,6 @@ mod tests {
         );
     }
 
-    #[test]
-    fn cleanup_owned_download_staging_preserves_unowned_and_valid_versions() {
-        let root = tempfile::tempdir().expect("创建测试目录");
-        let owned = root.path().join(".staging-owned");
-        fs::create_dir_all(&owned).expect("创建自有 staging");
-        fs::write(
-            owned.join(super::XBERG_DOWNLOAD_STAGING_MARKER),
-            b"JchTools Xberg download staging\n",
-        )
-        .expect("写入自有 staging 标记");
-        fs::write(owned.join("runtime.zip"), b"partial").expect("写入残留下载");
-
-        let unowned = root.path().join(".staging-user");
-        fs::create_dir_all(&unowned).expect("创建用户 staging");
-        fs::write(unowned.join("user.txt"), b"keep").expect("写入用户文件");
-
-        let version = root.path().join("v2026.10.6-0420-run58.1-uuid");
-        fs::create_dir_all(&version).expect("创建有效版本目录");
-        fs::write(version.join("xberg.exe"), b"valid").expect("写入有效版本");
-
-        let mut progress = |_message: String| {};
-        super::cleanup_owned_download_staging(root.path(), &mut progress);
-
-        assert!(!owned.exists(), "带所有权标记的残留 staging 必须回收");
-        assert!(unowned.exists(), "无所有权标记的目录不得删除");
-        assert!(version.exists(), "有效下载版本目录不得删除");
-    }
 
     // 覆盖 XB-19/T-05（回归：任务预检按所选分组分场景——纯媒体目录缺文档模型
     // 不再被文档条件提前拒绝；缺文档模型的文档任务启动前明确报错而不是静默放行
@@ -1315,20 +1183,36 @@ mod tests {
     struct ComponentGuard {
         root: tempfile::TempDir,
         _lock: MutexGuard<'static, ()>,
+        previous_env: Vec<(&'static str, Option<std::ffi::OsString>)>,
     }
 
     fn redirect_component_env() -> ComponentGuard {
         let lock = env_lock()
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
-        let root = tempfile::tempdir().expect("创建资产根目录");
+        let temporary_root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../.tmp");
+        fs::create_dir_all(&temporary_root).expect("创建仓库临时目录");
+        let root = tempfile::tempdir_in(temporary_root).expect("创建资产根目录");
+        let previous_env = [
+            "JCHTOOLS_MARKDOWN_TEST_ASSET_ROOT", "JCHTOOLS_TEST_STATE_DIR",
+            "JCHTOOLS_TEST_BUNDLED_XBERG_DIR", "JCHTOOLS_TEST_AUDIO_DOWNLOAD_BARRIER",
+        ].into_iter().map(|name| (name, std::env::var_os(name))).collect();
         std::env::set_var("JCHTOOLS_MARKDOWN_TEST_ASSET_ROOT", root.path());
-        ComponentGuard { root, _lock: lock }
+        std::env::set_var("JCHTOOLS_TEST_STATE_DIR", root.path().join("app-settings"));
+        std::env::remove_var("JCHTOOLS_TEST_BUNDLED_XBERG_DIR");
+        std::env::remove_var("JCHTOOLS_TEST_AUDIO_DOWNLOAD_BARRIER");
+        ComponentGuard { root, _lock: lock, previous_env }
     }
 
     impl Drop for ComponentGuard {
         fn drop(&mut self) {
-            std::env::remove_var("JCHTOOLS_MARKDOWN_TEST_ASSET_ROOT");
+            for (name, value) in &self.previous_env {
+                if let Some(value) = value {
+                    std::env::set_var(name, value);
+                } else {
+                    std::env::remove_var(name);
+                }
+            }
         }
     }
 
@@ -1368,165 +1252,135 @@ mod tests {
         component
     }
 
-    struct ComponentFixture {
-        tag: String,
-        manifest: serde_json::Value,
-        release: serde_json::Value,
-        data: std::collections::BTreeMap<String, Vec<u8>>,
-        pinned: super::XbergManifest,
+    struct AudioFixture {
+        receipt: super::ComponentReceipt,
+        archive: Vec<u8>,
+        files: Vec<(String, Vec<u8>)>,
         requests: Vec<String>,
-        cancel_on: Option<String>,
+        cancel_download: bool,
     }
 
-    impl ComponentFixture {
-        fn new(tag: &str) -> Self {
-            use std::io::{Cursor, Write};
-            let mut components = Vec::new();
-            let mut data = std::collections::BTreeMap::new();
-            let mut pinned = Vec::new();
-            for (id, model) in [
-                ("document", "models/models--fixture/model.onnx"),
-                ("snapshot", "models/snapshot-ocr/model.onnx"),
-                ("media", "models/vad/model.onnx"),
-            ] {
-                let mut zip = zip::ZipWriter::new(Cursor::new(Vec::new()));
-                let mut members = Vec::new();
-                for (path, bytes) in [
-                    ("xberg.exe", b"shared engine".as_slice()),
-                    (model, id.as_bytes()),
-                    ("LICENSE", b"shared license".as_slice()),
-                ] {
-                    zip.start_file(
-                        format!("{}/{path}", super::XBERG_ARCHIVE_PREFIX),
-                        zip::write::SimpleFileOptions::default(),
-                    ).unwrap();
-                    zip.write_all(bytes).unwrap();
-                    let member = super::AssetFile {
-                        path: path.into(),
-                        size_bytes: bytes.len() as u64,
-                        sha256: format!("{:x}", Sha256::digest(bytes)),
-                    };
-                    if path == model || (id == "document") {
-                        pinned.push(member.clone());
-                    }
-                    members.push(member);
-                }
-                let archive = format!("xberg-{id}-{}.zip", super::XBERG_TARGET);
-                let bytes = zip.finish().unwrap().into_inner();
-                components.push(serde_json::json!({
-                    "id":id, "archive":archive, "requires":[],
-                    "size_bytes":bytes.len(), "sha256":format!("{:x}", Sha256::digest(&bytes)),
-                    "members":members
-                }));
-                data.insert(archive, bytes);
-            }
-            let mut fixture = Self {
-                tag: tag.into(),
-                manifest: serde_json::json!({
-                    "schema_version":1, "target":super::XBERG_TARGET, "components":components
-                }),
-                release: serde_json::Value::Null,
-                data,
-                pinned: super::XbergManifest {
-                    tag: "old-pin".into(),
-                    archive_url: String::new(),
-                    archive_size_bytes: 0,
-                    archive_sha256: String::new(),
-                    members: pinned,
-                    licenses: Vec::new(),
-                },
-                requests: Vec::new(),
-                cancel_on: None,
+    impl AudioFixture {
+        fn new() -> Self {
+            let files: Vec<(String, Vec<u8>)> = [
+                ("ffmpeg/avcodec-63.dll", b"codec".as_slice()),
+                ("ffmpeg/LICENSE.txt", b"audio license".as_slice()),
+                ("ffmpeg/avformat-63.dll", b"format".as_slice()),
+                ("ffmpeg/avutil-61.dll", b"utility".as_slice()),
+                ("ffmpeg/swresample-7.dll", b"resample".as_slice()),
+                ("models/vad/silero_vad.onnx", b"vad".as_slice()),
+                ("models/sense_voice_zh_en_ja_ko_yue_2024_07_17/model.int8.onnx", b"voice".as_slice()),
+                ("models/sense_voice_zh_en_ja_ko_yue_2024_07_17/tokens.txt", b"tokens".as_slice()),
+            ].into_iter().map(|(path, bytes)| (path.into(), bytes.to_vec())).collect::<Vec<_>>();
+            let member = |path: &str, bytes: &[u8]| super::AssetFile {
+                path: path.into(), size_bytes: bytes.len() as u64, sha256: sha256_bytes(bytes),
             };
-            fixture.refresh_release();
+            let components = ["document", "snapshot"].into_iter().map(|id| {
+                super::FeatureComponent {
+                    id: id.into(), archive: format!("xberg-{id}-{}.zip", super::XBERG_TARGET),
+                    requires: Vec::new(), size_bytes: 1, sha256: sha256_bytes(b"base zip"),
+                    members: vec![member("xberg.exe", b"base engine"), member("LICENSE", b"base license")],
+                }
+            }).collect();
+            let mut fixture = Self {
+                receipt: super::ComponentReceipt {
+                    owner: "JchTools-bundled-xberg-v1".into(), tag: "v2099.1".into(),
+                    source: super::XBERG_LATEST_RELEASE_URL.into(),
+                    manifest: super::ReleaseAsset {
+                        archive: super::XBERG_COMPONENT_MANIFEST.into(),
+                        url: format!("https://github.com/jchanghong023/xberg/releases/download/v2099.1/{}", super::XBERG_COMPONENT_MANIFEST),
+                        size_bytes: 1, sha256: sha256_bytes(b"manifest"),
+                    },
+                    components,
+                    audio_assets: super::AudioAsset {
+                        component: super::FeatureComponent {
+                            id: "audio-assets".into(), archive: super::AUDIO_ARCHIVE.into(),
+                            requires: Vec::new(), size_bytes: 1, sha256: String::new(),
+                            members: files.iter().map(|(path, bytes)| member(path, bytes)).collect(),
+                        },
+                        url: format!("https://github.com/jchanghong023/xberg/releases/download/v2099.1/{}", super::AUDIO_ARCHIVE),
+                    },
+                },
+                archive: Vec::new(), files, requests: Vec::new(), cancel_download: false,
+            };
+            fixture.rebuild_archive();
             fixture
         }
 
-        fn refresh_release(&mut self) {
-            self.data.insert(
-                super::XBERG_COMPONENT_MANIFEST.into(),
-                serde_json::to_vec(&self.manifest).unwrap(),
-            );
-            let assets: Vec<_> = self.data.iter().map(|(name, bytes)| serde_json::json!({
-                "name":name,
-                "size":bytes.len(),
-                "digest":format!("sha256:{:x}", Sha256::digest(bytes)),
-                "browser_download_url":format!(
-                    "https://github.com/jchanghong023/xberg/releases/download/{}/{name}", self.tag
-                )
-            })).collect();
-            self.release = serde_json::json!({
-                "tag_name":self.tag, "draft":false, "prerelease":false, "assets":assets
-            });
-        }
-
-        fn install(&mut self, selection: super::DownloadSelection) -> Result<PathBuf, String> {
-            let release = self.release.clone();
-            let pinned = super::XbergManifest {
-                tag: self.pinned.tag.clone(),
-                archive_url: String::new(),
-                archive_size_bytes: 0,
-                archive_sha256: String::new(),
-                members: self.pinned.members.clone(),
-                licenses: Vec::new(),
-            };
-            super::download_runtime_with_pinned(
-                selection, &release, &AtomicBool::new(false), |_| {}, self, &pinned,
-            )
-        }
-
-        fn use_known_runtime_paths(&mut self) {
+        fn rebuild_archive(&mut self) {
             use std::io::{Cursor, Write};
-            let real = super::load_manifest().unwrap();
-            self.pinned.members = real.xberg.members.iter().map(|member| super::AssetFile {
-                path: member.path.clone(),
-                size_bytes: 1,
-                sha256: format!("{:x}", Sha256::digest(b"x")),
-            }).collect();
-            let mut components = Vec::new();
-            for id in super::COMPONENT_IDS {
-                let mut zip = zip::ZipWriter::new(Cursor::new(Vec::new()));
-                let members: Vec<_> = self.pinned.members.iter()
-                    .filter(|member| {
-                        let owner = super::member_owner(&member.path);
-                        owner == "common" || owner == id
-                    }).cloned().collect();
-                for member in &members {
-                    zip.start_file(
-                        format!("{}/{}", super::XBERG_ARCHIVE_PREFIX, member.path),
-                        zip::write::SimpleFileOptions::default(),
-                    ).unwrap();
-                    zip.write_all(b"x").unwrap();
-                }
-                let bytes = zip.finish().unwrap().into_inner();
-                let name = format!("xberg-{id}-{}.zip", super::XBERG_TARGET);
-                components.push(serde_json::json!({
-                    "id":id, "requires":[], "archive":name,
-                    "size_bytes":bytes.len(), "sha256":format!("{:x}", Sha256::digest(&bytes)),
-                    "members":members
-                }));
-                self.data.insert(name, bytes);
+            let mut zip = zip::ZipWriter::new(Cursor::new(Vec::new()));
+            for (path, bytes) in &self.files {
+                zip.start_file(
+                    format!("{}/{path}", super::XBERG_ARCHIVE_PREFIX),
+                    zip::write::SimpleFileOptions::default(),
+                ).unwrap();
+                zip.write_all(bytes).unwrap();
             }
-            self.manifest["components"] = serde_json::json!(components);
-            self.refresh_release();
+            self.archive = zip.finish().unwrap().into_inner();
+            self.receipt.audio_assets.component.size_bytes = self.archive.len() as u64;
+            self.receipt.audio_assets.component.sha256 = sha256_bytes(&self.archive);
+        }
+
+        fn prepare(&self, root: &Path) {
+            fs::create_dir_all(root).unwrap();
+            for component in &self.receipt.components {
+                for member in &component.members {
+                    let path = root.join(&member.path);
+                    fs::create_dir_all(path.parent().unwrap()).unwrap();
+                    fs::write(path, if member.path == "xberg.exe" { b"base engine".as_slice() } else { b"base license".as_slice() }).unwrap();
+                }
+            }
+            self.write_receipt(root);
+        }
+
+        fn write_receipt(&self, root: &Path) {
+            fs::write(root.join(super::XBERG_RELEASE_RECEIPT), serde_json::to_vec(&self.receipt).unwrap()).unwrap();
+        }
+
+        fn install(&mut self) -> Result<PathBuf, String> {
+            super::download_audio_runtime_with_downloader(&AtomicBool::new(false), |_| {}, self)
+        }
+
+        fn write_audio(&self, root: &Path) {
+            for (relative, bytes) in &self.files {
+                let path = root.join(relative);
+                fs::create_dir_all(path.parent().unwrap()).unwrap();
+                fs::write(path, bytes).unwrap();
+            }
+        }
+
+        fn prepare_migration_base(&self, root: &Path) {
+            self.prepare(root);
+            for member in load_manifest().unwrap().xberg.members {
+                if super::optional_audio_path(&member.path) {
+                    continue;
+                }
+                let path = root.join(&member.path);
+                fs::create_dir_all(path.parent().unwrap()).unwrap();
+                if !path.exists() {
+                    fs::write(path, b"base").unwrap();
+                }
+            }
+            for relative in [
+                "models/snapshot-ocr/det.onnx", "models/snapshot-ocr/rec.onnx",
+                "models/snapshot-ocr/dict/dict.txt",
+            ] {
+                let path = root.join(relative);
+                fs::create_dir_all(path.parent().unwrap()).unwrap();
+                fs::write(path, b"snapshot").unwrap();
+            }
         }
     }
 
-    impl AssetDownloader for ComponentFixture {
+    impl AssetDownloader for AudioFixture {
         fn download(
-            &mut self,
-            url: &str,
-            destination: &Path,
-            _: u64,
-            _: &str,
-            cancel: &AtomicBool,
-            _: &mut dyn FnMut(String),
+            &mut self, url: &str, destination: &Path, _: u64, _: &str,
+            cancel: &AtomicBool, _: &mut dyn FnMut(String),
         ) -> Result<(), String> {
-            let name = url.rsplit('/').next().ok_or("缺少文件名")?;
-            self.requests.push(name.into());
-            let bytes = self.data.get(name).ok_or("未提供组件资产")?;
-            fs::write(destination, bytes).map_err(|error| error.to_string())?;
-            if self.cancel_on.as_deref() == Some(name) {
+            self.requests.push(url.into());
+            fs::write(destination, &self.archive).map_err(|error| format!("夹具写入失败：{error}"))?;
+            if self.cancel_download {
                 cancel.store(true, std::sync::atomic::Ordering::Release);
             }
             Ok(())
@@ -1534,219 +1388,226 @@ mod tests {
     }
 
     #[test]
-    fn split_snapshot_only_and_same_tag_addition_reuse_verified_components() {
-        let _guard = redirect_component_env();
-        let mut fixture = ComponentFixture::new("v2099.1");
-        let snapshot = super::DownloadSelection::default();
-        let first = fixture.install(snapshot).unwrap();
-        assert_eq!(first, fs::canonicalize(&first).unwrap());
-        assert_eq!(fixture.requests, [
-            super::XBERG_COMPONENT_MANIFEST,
-            "xberg-snapshot-x86_64-pc-windows-msvc.zip",
-        ]);
-        assert!(!first.join("models/models--fixture/model.onnx").exists());
-        assert!(!first.join("models/vad/model.onnx").exists());
-        fixture.requests.clear();
-        let second = fixture.install(super::DownloadSelection {
-            document: true, snapshot: false, media: false,
-        }).unwrap();
-        assert_ne!(first, second);
-        assert_eq!(second, fs::canonicalize(&second).unwrap());
-        assert_eq!(fixture.requests, [
-            super::XBERG_COMPONENT_MANIFEST,
-            "xberg-document-x86_64-pc-windows-msvc.zip",
-        ]);
-        assert!(second.join("models/snapshot-ocr/model.onnx").is_file());
-        assert!(second.join("models/models--fixture/model.onnx").is_file());
-        assert!(first.join("models/snapshot-ocr/model.onnx").is_file());
-        fixture.requests.clear();
-        let reused = fixture.install(snapshot).unwrap();
-        assert_eq!(reused, second);
-        assert_eq!(
-            fs::canonicalize(&reused).unwrap(),
-            fs::canonicalize(&second).unwrap()
-        );
-        assert_eq!(fixture.requests, [super::XBERG_COMPONENT_MANIFEST]);
-        let receipt: super::ComponentReceipt = serde_json::from_slice(
-            &fs::read(second.join(super::XBERG_RELEASE_RECEIPT)).unwrap(),
-        ).unwrap();
-        assert_eq!(receipt.tag, "v2099.1");
-        assert_eq!(receipt.source, super::XBERG_LATEST_RELEASE_URL);
-        assert_eq!(receipt.components.len(), 2);
-    }
-
-    #[test]
-    fn split_upgrade_installs_selected_features_without_cross_tag_reuse() {
-        let _guard = redirect_component_env();
-        let first = ComponentFixture::new("v2099.1").install(super::DownloadSelection {
-            document: true, snapshot: true, media: false,
-        }).unwrap();
-        let mut latest = ComponentFixture::new("v2099.2");
-        let upgraded = latest.install(super::DownloadSelection {
-            document: false, snapshot: false, media: true,
-        }).unwrap();
-        assert_ne!(first, upgraded);
-        assert_eq!(latest.requests, [
-            super::XBERG_COMPONENT_MANIFEST,
-            "xberg-media-x86_64-pc-windows-msvc.zip",
-        ]);
-        assert!(!upgraded.join("models/snapshot-ocr/model.onnx").exists());
-        assert!(!upgraded.join("models/models--fixture/model.onnx").exists());
-        assert_eq!(fs::read(first.join("xberg.exe")).unwrap(), b"shared engine");
-    }
-
-    #[test]
-    fn split_snapshot_selection_does_not_inherit_legacy_full_bundle_features() {
-        let _guard = redirect_component_env();
-        let base = jchtools_foundation::xberg_settings::state_dir().unwrap().join("xberg-downloads");
-        let legacy = base.join(format!("v2098-{}", uuid::Uuid::new_v4()));
-        fs::create_dir_all(&legacy).unwrap();
-        for member in &super::load_manifest().unwrap().xberg.members {
-            let path = legacy.join(&member.path);
-            fs::create_dir_all(path.parent().unwrap()).unwrap();
-            fs::write(path, b"legacy").unwrap();
-        }
-        fs::write(
-            legacy.join(super::XBERG_RELEASE_RECEIPT),
-            serde_json::to_vec(&serde_json::json!({
-                "owner":"JchTools-xberg-download-v1", "tag":"v2098",
-                "archive_url":"https://github.com/jchanghong023/xberg/releases/download/v2098/xberg-cli-x86_64-pc-windows-msvc.zip"
-            })).unwrap(),
-        ).unwrap();
-        jchtools_foundation::xberg_settings::save_source(
-            jchtools_foundation::xberg_settings::Source::Downloaded, &legacy,
-        ).unwrap();
-        let mut fixture = ComponentFixture::new("v2099.1");
-        let installed = fixture.install(super::DownloadSelection::default()).unwrap();
-        assert_eq!(fixture.requests, [
-            super::XBERG_COMPONENT_MANIFEST,
-            "xberg-snapshot-x86_64-pc-windows-msvc.zip",
-        ]);
-        assert!(!installed.join("models/models--fixture/model.onnx").exists());
-        assert!(!installed.join("models/vad/model.onnx").exists());
-        assert_eq!(fs::read(legacy.join("xberg.exe")).unwrap(), b"legacy");
-        assert!(legacy.join("models/vad/silero_vad.onnx").is_file());
-    }
-
-    #[test]
-    fn split_damaged_installed_component_is_replaced_without_changing_original() {
-        let _guard = redirect_component_env();
-        let mut fixture = ComponentFixture::new("v2099.1");
-        let first = fixture.install(super::DownloadSelection::default()).unwrap();
-        fs::write(first.join("models/snapshot-ocr/model.onnx"), b"changed").unwrap();
-        fixture.requests.clear();
-        let replacement = fixture.install(super::DownloadSelection::default()).unwrap();
-        assert_ne!(first, replacement);
-        assert_eq!(fixture.requests.len(), 2);
-        assert_eq!(fs::read(first.join("models/snapshot-ocr/model.onnx")).unwrap(), b"changed");
-        assert_eq!(fs::read(replacement.join("models/snapshot-ocr/model.onnx")).unwrap(), b"snapshot");
-    }
-
-    #[test]
-    fn split_integrity_failures_and_cancel_preserve_active_config_and_assets() {
+    fn audio_download_uses_only_receipt_pin_and_reuses_complete_install() {
         let guard = redirect_component_env();
-        let active = guard.root.path().join("user-runtime");
-        fs::create_dir(&active).unwrap();
-        fs::write(active.join("xberg.exe"), b"original engine").unwrap();
-        jchtools_foundation::xberg_settings::save(&active).unwrap();
+        let root = guard.root.path().join("bundle");
+        let mut fixture = AudioFixture::new();
+        fixture.prepare(&root);
+        jchtools_foundation::xberg_settings::save(&root).unwrap();
         let original = jchtools_foundation::xberg_settings::required().unwrap();
-        let selection = super::DownloadSelection { document: true, snapshot: true, media: true };
-        for id in super::COMPONENT_IDS {
-            let name = format!("xberg-{id}-{}.zip", super::XBERG_TARGET);
-            for failure in ["digest", "size", "cancel"] {
-                let mut fixture = ComponentFixture::new("v2099.1");
-                match failure {
-                    "digest" => {
-                        let bytes = fixture.data.get_mut(&name).unwrap();
-                        bytes[0] ^= 1;
-                    }
-                    "size" => { fixture.data.get_mut(&name).unwrap().pop(); }
-                    "cancel" => { fixture.cancel_on = Some(name.clone()); }
-                    _ => unreachable!(),
-                }
-                assert!(fixture.install(selection).is_err(), "{id}/{failure}");
-                assert_eq!(jchtools_foundation::xberg_settings::required().unwrap(), original);
-                assert_eq!(fs::read(active.join("xberg.exe")).unwrap(), b"original engine");
-            }
-        }
-        let mut fixture = ComponentFixture::new("v2099.1");
-        fixture.data.get_mut(super::XBERG_COMPONENT_MANIFEST).unwrap()[0] ^= 1;
-        assert!(fixture.install(selection).is_err());
+        assert_eq!(fixture.install().unwrap(), original);
+        assert_eq!(fixture.requests, [fixture.receipt.audio_assets.url.clone()]);
+        assert_eq!(fs::read(root.join("xberg.exe")).unwrap(), b"base engine");
+        fixture.install().unwrap();
+        assert_eq!(fixture.requests.len(), 1, "完整音频资产不得重复联网");
         assert_eq!(jchtools_foundation::xberg_settings::required().unwrap(), original);
-        let mut fixture = ComponentFixture::new("v2099.1");
-        fixture.manifest["components"][1]["members"][1]["sha256"] = serde_json::json!("0".repeat(64));
-        fixture.refresh_release();
-        assert!(fixture.install(selection).unwrap_err().contains("模型身份"));
-        assert_eq!(jchtools_foundation::xberg_settings::required().unwrap(), original);
+        super::verify_component(&root, &fixture.receipt.audio_assets.component, &AtomicBool::new(false)).unwrap();
     }
 
     #[test]
-    fn split_metadata_rejects_legacy_only_release_and_untrusted_assets() {
-        let _guard = redirect_component_env();
-        let mut empty = ComponentFixture::new("v2099.1");
-        assert!(empty.install(super::DownloadSelection {
-            document: false, snapshot: false, media: false,
-        }).unwrap_err().contains("至少选择"));
-        assert!(empty.requests.is_empty());
-        let mut fixture = ComponentFixture::new("v2099.1");
-        fixture.release["assets"].as_array_mut().unwrap().retain(
-            |asset| asset["name"] == super::XBERG_COMPONENT_MANIFEST,
-        );
-        assert!(fixture.install(super::DownloadSelection::default()).unwrap_err().contains("不会回退"));
-        assert!(fixture.requests.is_empty());
-        for field in ["digest", "browser_download_url"] {
-            let mut fixture = ComponentFixture::new("v2099.1");
-            fixture.release["assets"][0][field] = serde_json::json!("https://example.invalid/wrong");
-            assert!(fixture.install(super::DownloadSelection::default()).is_err());
-            assert!(fixture.requests.is_empty());
-        }
-        let mut fixture = ComponentFixture::new("v2099.1");
-        let duplicate = fixture.release["assets"][0].clone();
-        fixture.release["assets"].as_array_mut().unwrap().push(duplicate);
-        assert!(fixture.install(super::DownloadSelection::default()).is_err());
-        assert!(fixture.requests.is_empty());
-    }
-
-    #[test]
-    fn split_member_integrity_overlap_and_zip_safety_failures_preserve_active_install() {
-        use std::io::{Cursor, Write};
-        let _guard = redirect_component_env();
-        let mut first = ComponentFixture::new("v2099.1");
-        let active = first.install(super::DownloadSelection::default()).unwrap();
-        let original = jchtools_foundation::xberg_settings::required().unwrap();
-        for failure in ["member_digest", "member_missing", "member_extra", "unsafe_path", "overlap"] {
-            let mut fixture = ComponentFixture::new("v2099.2");
-            let name = "xberg-snapshot-x86_64-pc-windows-msvc.zip";
-            if failure == "overlap" {
-                fixture.manifest["components"][1]["members"][0]["sha256"] = serde_json::json!("0".repeat(64));
-            } else {
-                let mut zip = zip::ZipWriter::new(Cursor::new(Vec::new()));
-                let mut files = vec![
-                    ("xberg.exe".to_string(), b"shared engine".as_slice()),
-                    ("LICENSE".to_string(), b"shared license".as_slice()),
-                ];
-                if failure != "member_missing" {
-                    files.push(("models/snapshot-ocr/model.onnx".into(),
-                        if failure == "member_digest" { b"wrong".as_slice() } else { b"snapshot".as_slice() }));
-                }
-                if failure == "member_extra" { files.push(("extra.bin".into(), b"extra")); }
-                if failure == "unsafe_path" { files.push(("../escape.bin".into(), b"escape")); }
-                for (path, bytes) in files {
-                    zip.start_file(
-                        format!("{}/{path}", super::XBERG_ARCHIVE_PREFIX),
-                        zip::write::SimpleFileOptions::default(),
-                    ).unwrap();
-                    zip.write_all(bytes).unwrap();
-                }
-                let bytes = zip.finish().unwrap().into_inner();
-                fixture.manifest["components"][1]["size_bytes"] = serde_json::json!(bytes.len());
-                fixture.manifest["components"][1]["sha256"] = serde_json::json!(format!("{:x}", Sha256::digest(&bytes)));
-                fixture.data.insert(name.into(), bytes);
+    fn audio_integrity_cancel_and_hostile_archives_preserve_existing_files() {
+        let guard = redirect_component_env();
+        for failure in ["digest", "size", "cancel", "traversal", "base_overwrite", "extra", "member_digest", "missing"] {
+            let root = guard.root.path().join(failure);
+            let mut fixture = AudioFixture::new();
+            fixture.prepare(&root);
+            fs::create_dir_all(root.join("ffmpeg")).unwrap();
+            fs::write(root.join("ffmpeg/LICENSE.txt"), b"audio license").unwrap();
+            fs::write(root.join("ffmpeg/avcodec-63.dll"), b"old incomplete codec").unwrap();
+            jchtools_foundation::xberg_settings::save(&root).unwrap();
+            let original = jchtools_foundation::xberg_settings::required().unwrap();
+            match failure {
+                "digest" => fixture.archive[0] ^= 1,
+                "size" => { fixture.archive.pop(); }
+                "cancel" => fixture.cancel_download = true,
+                "traversal" => fixture.files.push(("../escape".into(), b"bad".to_vec())),
+                "base_overwrite" => fixture.files.push(("xberg.exe".into(), b"bad".to_vec())),
+                "extra" => fixture.files.push(("ffmpeg/unlisted.dll".into(), b"bad".to_vec())),
+                "member_digest" => fixture.files[0].1 = b"bad".to_vec(),
+                "missing" => { fixture.files.pop(); }
+                _ => unreachable!(),
             }
-            fixture.refresh_release();
-            assert!(fixture.install(super::DownloadSelection::default()).is_err(), "{failure}");
+            if !matches!(failure, "digest" | "size" | "cancel") {
+                fixture.rebuild_archive();
+                fixture.write_receipt(&root);
+            }
+            assert!(fixture.install().is_err(), "{failure}");
+            assert_eq!(fs::read(root.join("xberg.exe")).unwrap(), b"base engine", "{failure}");
+            assert_eq!(fs::read(root.join("ffmpeg/LICENSE.txt")).unwrap(), b"audio license", "{failure}");
+            assert_eq!(fs::read(root.join("ffmpeg/avcodec-63.dll")).unwrap(), b"old incomplete codec", "{failure}");
             assert_eq!(jchtools_foundation::xberg_settings::required().unwrap(), original);
-            assert_eq!(fs::read(active.join("xberg.exe")).unwrap(), b"shared engine");
+        }
+    }
+
+    #[test]
+    fn audio_receipt_rejects_unpinned_urls_and_base_member_aliases_before_network() {
+        let guard = redirect_component_env();
+        for path in ["../xberg.exe", "xberg.exe", "sherpa-onnx/onnxruntime.dll", "ffmpeg/../xberg.exe", "ffmpeg/CON.dll", "ffmpeg/file.dll.", "ffmpeg/file:ads"] {
+            let root = guard.root.path().join(uuid::Uuid::new_v4().to_string());
+            let mut fixture = AudioFixture::new();
+            fixture.prepare(&root);
+            fixture.receipt.audio_assets.component.members[0].path = path.into();
+            fixture.write_receipt(&root);
+            jchtools_foundation::xberg_settings::save(&root).unwrap();
+            assert!(fixture.install().is_err(), "{path}");
+            assert!(fixture.requests.is_empty());
+            assert_eq!(fs::read(root.join("xberg.exe")).unwrap(), b"base engine");
+        }
+        let root = guard.root.path().join("wrong-release");
+        let mut fixture = AudioFixture::new();
+        fixture.prepare(&root);
+        fixture.receipt.audio_assets.url = fixture.receipt.audio_assets.url.replace("v2099.1", "latest");
+        fixture.write_receipt(&root);
+        jchtools_foundation::xberg_settings::save(&root).unwrap();
+        assert!(fixture.install().is_err());
+        assert!(fixture.requests.is_empty());
+    }
+
+    #[test]
+    fn audio_member_commit_failure_restores_invalid_and_keeps_valid_members() {
+        let guard = redirect_component_env();
+        let root = guard.root.path().join("target");
+        let source = guard.root.path().join("source");
+        let staging = guard.root.path().join("staging");
+        let fixture = AudioFixture::new();
+        fixture.prepare(&root);
+        fixture.write_audio(&source);
+        fs::create_dir(&staging).unwrap();
+        fs::create_dir_all(root.join("ffmpeg")).unwrap();
+        fs::write(root.join("ffmpeg/avcodec-63.dll"), b"old bytes").unwrap();
+        fs::write(root.join("ffmpeg/LICENSE.txt"), b"audio license").unwrap();
+        let error = super::install_audio_members(
+            &root, &source, &fixture.receipt.audio_assets.component.members, &staging,
+            &AtomicBool::new(false), || Err("配置提交失败".into()),
+        ).unwrap_err();
+        assert_eq!(error, "配置提交失败");
+        assert_eq!(fs::read(root.join("ffmpeg/avcodec-63.dll")).unwrap(), b"old bytes");
+        assert_eq!(fs::read(root.join("ffmpeg/LICENSE.txt")).unwrap(), b"audio license");
+        assert!(!root.join("models/vad/silero_vad.onnx").exists());
+        assert_eq!(fs::read(source.join("ffmpeg/avcodec-63.dll")).unwrap(), b"codec");
+    }
+
+    #[test]
+    fn bundled_migration_copies_only_compatible_members_and_preserves_source() {
+        let guard = redirect_component_env();
+        let fixture = AudioFixture::new();
+        let old = guard.root.path().join("old");
+        let bundle = guard.root.path().join("bundle");
+        fixture.prepare_migration_base(&old);
+        fixture.write_audio(&old);
+        jchtools_xberg::xberg_runtime::validate_assets(&old, "media").unwrap();
+        fixture.prepare_migration_base(&bundle);
+        fs::write(old.join("unrelated-private.bin"), b"never copy").unwrap();
+        jchtools_foundation::xberg_settings::save(&old).unwrap();
+        std::env::set_var("JCHTOOLS_TEST_BUNDLED_XBERG_DIR", &bundle);
+        let result = super::migrate_bundled_runtime_with_activation(
+            &AtomicBool::new(false), |_| {}, |root| {
+                jchtools_foundation::xberg_settings::save_bundled_directory(root)
+            },
+        ).unwrap();
+        assert_eq!(result, fs::canonicalize(&bundle).unwrap());
+        assert_eq!(jchtools_foundation::xberg_settings::required().unwrap(), result);
+        super::verify_component(&bundle, &fixture.receipt.audio_assets.component, &AtomicBool::new(false)).unwrap();
+        super::verify_component(&old, &fixture.receipt.audio_assets.component, &AtomicBool::new(false)).unwrap();
+        assert!(!bundle.join("unrelated-private.bin").exists());
+        assert_eq!(fs::read(bundle.join("xberg.exe")).unwrap(), b"base engine");
+    }
+
+    #[test]
+    fn bundled_migration_commit_or_cancel_failure_keeps_old_configuration_and_audio() {
+        let guard = redirect_component_env();
+        let fixture = AudioFixture::new();
+        let old = guard.root.path().join("old");
+        let bundle = guard.root.path().join("bundle");
+        fixture.prepare_migration_base(&old);
+        fixture.write_audio(&old);
+        jchtools_xberg::xberg_runtime::validate_assets(&old, "media").unwrap();
+        fixture.prepare_migration_base(&bundle);
+        jchtools_foundation::xberg_settings::save(&old).unwrap();
+        let original = jchtools_foundation::xberg_settings::required().unwrap();
+        std::env::set_var("JCHTOOLS_TEST_BUNDLED_XBERG_DIR", &bundle);
+        let db = jchtools_foundation::xberg_settings::open(
+            &jchtools_foundation::xberg_settings::state_dir().unwrap(),
+        ).unwrap();
+        db.execute_batch(
+            "CREATE TRIGGER reject_bundle BEFORE INSERT ON app_settings
+             WHEN NEW.key='xberg_source' AND NEW.value='bundled'
+             BEGIN SELECT RAISE(ABORT,'injected failure'); END;",
+        ).unwrap();
+        let mut diagnostics = Vec::new();
+        let result = super::migrate_bundled_runtime_with_activation(
+            &AtomicBool::new(false), |message| diagnostics.push(message),
+            |root| jchtools_foundation::xberg_settings::save_bundled_directory(root),
+        ).unwrap();
+        assert_eq!(result, original);
+        assert_eq!(jchtools_foundation::xberg_settings::required().unwrap(), original);
+        assert!(diagnostics.iter().any(|message| message.contains("继续使用原运行目录")));
+        assert!(!bundle.join("ffmpeg/avcodec-63.dll").exists());
+        super::verify_component(&old, &fixture.receipt.audio_assets.component, &AtomicBool::new(false)).unwrap();
+        let result = super::migrate_bundled_runtime_with_activation(
+            &AtomicBool::new(true), |_| {}, |_| panic!("取消不能切源"),
+        ).unwrap();
+        assert_eq!(result, original);
+    }
+
+    #[test]
+    fn bundled_migration_retains_ready_old_media_until_target_is_compatible() {
+        let guard = redirect_component_env();
+        let fixture = AudioFixture::new();
+        let old = guard.root.path().join("old");
+        let bundle = guard.root.path().join("bundle");
+        fixture.prepare_migration_base(&old);
+        fixture.write_audio(&old);
+        fixture.prepare_migration_base(&bundle);
+        fs::write(old.join("ffmpeg/avcodec-63.dll"), b"incompatible but present").unwrap();
+        jchtools_xberg::xberg_runtime::validate_assets(&old, "media").unwrap();
+        jchtools_foundation::xberg_settings::save(&old).unwrap();
+        let original = jchtools_foundation::xberg_settings::required().unwrap();
+        std::env::set_var("JCHTOOLS_TEST_BUNDLED_XBERG_DIR", &bundle);
+        let mut called = false;
+        let result = super::migrate_bundled_runtime_with_activation(
+            &AtomicBool::new(false), |_| {}, |_| { called = true; Ok(()) },
+        ).unwrap();
+        assert!(!called, "已就绪旧媒体不兼容时不能切源");
+        assert_eq!(result, original);
+        assert_eq!(jchtools_foundation::xberg_settings::required().unwrap(), original);
+        assert!(!bundle.join("ffmpeg").exists());
+        assert_eq!(fs::read(old.join("ffmpeg/avcodec-63.dll")).unwrap(), b"incompatible but present");
+        fixture.write_audio(&bundle);
+        let result = super::migrate_bundled_runtime_with_activation(
+            &AtomicBool::new(false), |_| {}, |root| {
+                jchtools_foundation::xberg_settings::save_bundled_directory(root)
+            },
+        ).unwrap();
+        assert_eq!(result, fs::canonicalize(&bundle).unwrap());
+        jchtools_xberg::xberg_runtime::validate_assets(&result, "media").unwrap();
+        assert_eq!(fs::read(old.join("ffmpeg/avcodec-63.dll")).unwrap(), b"incompatible but present");
+    }
+
+    #[test]
+    fn bundled_default_closes_notice_readiness_without_manual_initialization() {
+        let guard = redirect_component_env();
+        let fixture = AudioFixture::new();
+        let bundle = guard.root.path().join("bundle");
+        fixture.prepare_migration_base(&bundle);
+        std::env::set_var("JCHTOOLS_TEST_BUNDLED_XBERG_DIR", &bundle);
+        assert!(!guard.root.path().join("licenses/THIRD_PARTY_NOTICES.md").exists());
+        let root = super::migrate_bundled_runtime_with_activation(
+            &AtomicBool::new(false), |_| {}, |root| {
+                jchtools_foundation::xberg_settings::save_bundled_directory(root)
+            },
+        ).unwrap();
+        assert_eq!(root, fs::canonicalize(&bundle).unwrap());
+        assert_eq!(jchtools_foundation::xberg_settings::settings().unwrap().source,
+            jchtools_foundation::xberg_settings::Source::Bundled);
+        super::readiness().unwrap();
+        assert!(guard.root.path().join("licenses/THIRD_PARTY_NOTICES.md").is_file());
+        assert!(super::validate_media().unwrap_err().contains("可选音频资产"));
+        if crate::markdown::platform_preflight().is_ok() {
+            crate::markdown::readiness_for_groups(&[
+                crate::markdown::FormatGroup::Pdf, crate::markdown::FormatGroup::Images,
+                crate::markdown::FormatGroup::Media,
+            ]).unwrap();
         }
     }
 
@@ -1762,15 +1623,6 @@ mod tests {
             super::xberg_inference_root(),
             "安装根必须固定在 <资产根>/xberg-inference"
         );
-    }
-
-    // 覆盖 T-05：组件未安装时如实报告未配置，不冒称就绪。
-    #[test]
-    fn media_component_missing_reports_not_configured() {
-        let _guard = redirect_component_env();
-        let error = media_component_dir().expect_err("缺失组件必须报未配置");
-        assert!(error.contains("未配置"), "错误应说明组件未配置：{error}");
-        assert!(error.contains("设置页"), "错误应指引共享配置入口：{error}");
     }
 
     // 覆盖 T-06：组件不完整时明确指出缺失项，不执行不完整环境。
@@ -1805,84 +1657,6 @@ mod tests {
     }
 
 
-    #[test]
-    fn download_cancel_before_commit_keeps_config_untouched() {
-        let _guard = redirect_component_env();
-        let mut fixture = ComponentFixture::new("v2099.1");
-        fixture.cancel_on = Some("xberg-snapshot-x86_64-pc-windows-msvc.zip".into());
-        assert!(fixture.install(super::DownloadSelection::default()).unwrap_err().contains("取消"));
-        assert!(jchtools_foundation::xberg_settings::settings().unwrap().downloaded.is_none());
-        let base = jchtools_foundation::xberg_settings::state_dir().unwrap().join("xberg-downloads");
-        assert_eq!(fs::read_dir(base).unwrap().count(), 0);
-    }
-
-    #[test]
-    fn download_runtime_write_notice_closes_readiness_loop() {
-        let guard = redirect_component_env();
-        let mut fixture = ComponentFixture::new("v2099.1");
-        // 字节为合成资产，公开 readiness 仍按真实路径检查存在性，不能据此声称模型推理通过。
-        fixture.use_known_runtime_paths();
-        let installed = fixture.install(super::DownloadSelection {
-            document: true, snapshot: true, media: true,
-        }).unwrap();
-        assert!(super::validate_media().is_ok());
-        assert!(super::readiness().is_ok());
-        assert!(guard.root.path().join("licenses/THIRD_PARTY_NOTICES.md").is_file());
-        assert!(installed.is_dir());
-    }
-
-    #[test]
-    fn split_sqlite_commit_failure_rolls_back_new_install_only() {
-        let guard = redirect_component_env();
-        let active = guard.root.path().join("user-runtime");
-        fs::create_dir(&active).unwrap();
-        fs::write(active.join("xberg.exe"), b"original").unwrap();
-        jchtools_foundation::xberg_settings::save(&active).unwrap();
-        let original = jchtools_foundation::xberg_settings::required().unwrap();
-        let db = jchtools_foundation::xberg_settings::open(
-            &jchtools_foundation::xberg_settings::state_dir().unwrap(),
-        ).unwrap();
-        db.execute_batch(
-            "CREATE TRIGGER reject_download_source BEFORE INSERT ON app_settings
-             WHEN NEW.key='xberg_source' AND NEW.value='downloaded'
-             BEGIN SELECT RAISE(ABORT,'injected commit failure'); END;",
-        ).unwrap();
-        let mut fixture = ComponentFixture::new("v2099.1");
-        assert!(fixture.install(super::DownloadSelection::default()).is_err());
-        assert_eq!(jchtools_foundation::xberg_settings::required().unwrap(), original);
-        assert_eq!(fs::read(active.join("xberg.exe")).unwrap(), b"original");
-        let base = jchtools_foundation::xberg_settings::state_dir().unwrap().join("xberg-downloads");
-        assert_eq!(fs::read_dir(base).unwrap().count(), 0);
-    }
-
-    #[test]
-    fn split_notice_failure_preserves_active_assets_and_config() {
-        let guard = redirect_component_env();
-        let state = jchtools_foundation::xberg_settings::state_dir().unwrap();
-        let active = guard.root.path().join("user-runtime");
-        fs::create_dir(&active).unwrap();
-        fs::write(active.join("xberg.exe"), b"original").unwrap();
-        jchtools_foundation::xberg_settings::save(&active).unwrap();
-        let original = jchtools_foundation::xberg_settings::required().unwrap();
-        let blocker = guard.root.path().join("notice-root-file");
-        fs::write(&blocker, b"keep").unwrap();
-        struct RestoreRoots<'a>(&'a Path);
-        impl Drop for RestoreRoots<'_> {
-            fn drop(&mut self) {
-                std::env::remove_var("JCHTOOLS_TEST_STATE_DIR");
-                std::env::set_var("JCHTOOLS_MARKDOWN_TEST_ASSET_ROOT", self.0);
-            }
-        }
-        let _restore = RestoreRoots(guard.root.path());
-        std::env::set_var("JCHTOOLS_TEST_STATE_DIR", &state);
-        std::env::set_var("JCHTOOLS_MARKDOWN_TEST_ASSET_ROOT", &blocker);
-        let mut fixture = ComponentFixture::new("v2099.1");
-        assert!(fixture.install(super::DownloadSelection::default()).is_err());
-        assert_eq!(jchtools_foundation::xberg_settings::required().unwrap(), original);
-        assert_eq!(fs::read(active.join("xberg.exe")).unwrap(), b"original");
-        assert_eq!(fs::read(blocker).unwrap(), b"keep");
-        assert_eq!(fs::read_dir(state.join("xberg-downloads")).unwrap().count(), 0);
-    }
 
     // 覆盖 XB-19：保存共享目录时不强制其他场景的模型就绪；每个功能仅在自身
     // 启动前按场景检查。即使目录缺少截图和媒体模型，文档所需成员齐全也可保存。
@@ -1973,6 +1747,26 @@ mod tests {
             !text.contains("SenseVoice INT8"),
             "媒体模型许可条目已退役，不得出现：{text}"
         );
+    }
+
+    // 覆盖 T-06/XB-20：GUI 与后台同时修复缺失 notice，不得互相替换目录或留下截断成品。
+    #[test]
+    fn concurrent_notice_repairs_publish_one_complete_notice() {
+        let guard = redirect_component_env();
+        let expected = guard.root.path().join("expected-notice.md");
+        write_notice(&expected, &load_manifest().unwrap()).unwrap();
+        let target = guard.root.path().join("licenses/THIRD_PARTY_NOTICES.md");
+        let start = std::sync::Arc::new(std::sync::Barrier::new(32));
+        let workers: Vec<_> = (0..32).map(|_| {
+            let start = start.clone();
+            std::thread::spawn(move || {
+                start.wait();
+                super::ensure_document_notice()
+            })
+        }).collect();
+        let results: Vec<_> = workers.into_iter().map(|worker| worker.join().unwrap()).collect();
+        assert!(results.iter().all(Result::is_ok), "并发许可证修复失败：{results:?}");
+        assert_eq!(fs::read(&target).unwrap(), fs::read(&expected).unwrap());
     }
 
     // ── Xberg 推理组件包：下载安装、复用、失败保护与版本一致性（XB-09/XB-10）──

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import contextlib
 import hashlib
 import io
 import json
@@ -43,6 +44,56 @@ ARGUMENT_ERROR_EXIT_CODE = 3
 COMMAND_TIMEOUT_SECONDS = 8.0
 COMMAND_FAILURE_EXIT_CODE = 7
 UNVERIFIED_EXIT_CODE = 2
+
+
+def _bundled_package_fixture(root: Path) -> Path:
+    """小字节真实目录/收据夹具；仅测承接判定，不冒充真实模型或转换 E2E。"""
+    runtime = root / "xberg"
+    runtime.mkdir(parents=True)
+    _ = (root / "JchTools.exe").write_bytes(b"synthetic GUI; never executed")
+    names = set(markdown_acceptance.BASE_REQUIRED) | {
+        "LICENSE", "THIRD_PARTY_LICENSES.md", "models/paddleocr-onnx-models-LICENSE.txt",
+        *(f"models/models--fixture/snapshots/fixed{suffix}" for suffix in markdown_acceptance.DOCUMENT_MODEL_SUFFIXES),
+    }
+    records: list[dict[str, object]] = []
+    for name in sorted(names):
+        identity_name = name.removeprefix("sherpa-onnx/") if "onnxruntime" in name else name
+        content = f"synthetic fixture: {identity_name}".encode()
+        path = runtime / name
+        path.parent.mkdir(parents=True, exist_ok=True)
+        _ = path.write_bytes(content)
+        records.append({"path": name, "size_bytes": len(content), "sha256": hashlib.sha256(content).hexdigest()})
+    manifest = root.parent / f"{root.name}-model-identities.json"
+    _ = manifest.write_text(json.dumps({"xberg": {"members": records}}), encoding="utf-8")
+
+    def component(component_id: str, members: list[dict[str, object]]) -> dict[str, object]:
+        return {
+            "id": component_id, "archive": f"xberg-{component_id}-x86_64-pc-windows-msvc.zip",
+            "requires": [], "size_bytes": 1, "sha256": "a" * 64, "members": members,
+        }
+
+    document = [record for record in records if not str(record["path"]).startswith("models/snapshot-ocr/")]
+    snapshot = [record for record in records if not str(record["path"]).startswith("models/models--")]
+    audio_members = []
+    for name in (*markdown_acceptance.MEDIA_REQUIRED, "ffmpeg/LICENSE.txt"):
+        content = f"synthetic audio fixture: {name}".encode()
+        audio_members.append({"path": name, "size_bytes": len(content), "sha256": hashlib.sha256(content).hexdigest()})
+    audio = component("audio-assets", audio_members)
+    tag = "v-fixture"
+    prefix = f"{markdown_acceptance.RELEASE_DOWNLOAD}{tag}/"
+    audio["url"] = prefix + str(audio["archive"])
+    receipt = {
+        "owner": "JchTools-bundled-xberg-v1", "tag": tag, "source": markdown_acceptance.RELEASE_SOURCE,
+        "manifest": {
+            "archive": markdown_acceptance.COMPONENT_MANIFEST_NAME,
+            "url": prefix + markdown_acceptance.COMPONENT_MANIFEST_NAME,
+            "size_bytes": 1, "sha256": "b" * 64,
+        },
+        "components": [component("document", document), component("snapshot", snapshot)],
+        "audio_assets": audio,
+    }
+    _ = (runtime / markdown_acceptance.RECEIPT_NAME).write_text(json.dumps(receipt), encoding="utf-8")
+    return manifest
 
 
 def report_acceptance(results: list[tuple[markdown_acceptance.Item, markdown_acceptance.Outcome]]) -> int:
@@ -2215,8 +2266,9 @@ class AcceptanceBoundaryTests(unittest.TestCase):
             root = Path(temporary) / "package"
             _ = root.mkdir()
             _ = (root / "JchTools.exe").write_bytes(b"synthetic executable fixture")
-            manifest = Path(temporary) / "markdown-assets.json"
-            _ = manifest.write_text("{", encoding="utf-8")
+            runtime = root / "xberg"
+            runtime.mkdir()
+            _ = (runtime / markdown_acceptance.RECEIPT_NAME).write_text("{", encoding="utf-8")
             item = next(entry for entry in markdown_acceptance.ITEMS if entry.item_id == "C01")
             context = markdown_acceptance.Context(
                 None,
@@ -2225,10 +2277,9 @@ class AcceptanceBoundaryTests(unittest.TestCase):
                 root,
                 markdown_acceptance.AssetProbe(None, None, None, None, []),
             )
-            with patch.object(markdown_acceptance, "ASSET_MANIFEST", manifest):
-                outcome = markdown_acceptance.run_item(item, context)
+            outcome = markdown_acceptance.run_item(item, context)
         assert outcome.status == "FAIL"  # nosec B101: 清单不可验证时不得报告交付扫描通过。
-        assert "无法读取或解析" in outcome.reason  # nosec B101: 必须保留清单错误原因。
+        assert outcome.reason  # nosec B101: 必须保留清单/收据解析错误原因。
 
     def test_external_report_path_is_rejected_before_write(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
@@ -2334,17 +2385,245 @@ class SyntheticFixtureTests(unittest.TestCase):
         assert done.returncode == 0, done.stderr  # nosec B101: 在场夹具必须满足结构断言。
 
 
-class ManifestDrivenScanTests(unittest.TestCase):
-    """S10-14：禁止资产扫描按清单成员驱动，文档类成员不得误报。."""
+class BundledDistributionTests(unittest.TestCase):
+    """基础资产正向完整性与音频负向策略；夹具不执行 GUI/模型。"""
 
-    def test_manifest_member_names_are_forbidden(self) -> None:
+    @staticmethod
+    def _context(root: Path) -> markdown_acceptance.Context:
+        return markdown_acceptance.Context(
+            None, root, root, root, markdown_acceptance.AssetProbe(None, None, None, None, [])
+        )
+
+    def test_default_base_passes_both_package_scans_without_audio(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary) / "package"
+            manifest = _bundled_package_fixture(root)
+            with patch.object(markdown_acceptance, "ASSET_MANIFEST", manifest):
+                for item_id in ("C01", "C02"):
+                    item = next(item for item in markdown_acceptance.ITEMS if item.item_id == item_id)
+                    outcome = markdown_acceptance.run_item(item, self._context(root))
+                    self.assertEqual(outcome.status, markdown_acceptance.STATUS_OK, outcome.reason)
+            self.assertFalse((root / "xberg/ffmpeg").exists())
+
+    def test_missing_delivery_environment_is_not_run_not_pass(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            absent = Path(temporary) / "not-unpacked"
+            for item_id in ("C01", "C02"):
+                item = next(item for item in markdown_acceptance.ITEMS if item.item_id == item_id)
+                outcome = markdown_acceptance.run_item(item, self._context(absent))
+                self.assertEqual(outcome.status, markdown_acceptance.STATUS_NOT_RUN)
+                self.assertTrue(outcome.reason)
+
+    def test_missing_model_identity_manifest_cannot_pass_delivery(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary) / "package"
+            manifest = _bundled_package_fixture(root)
+            manifest.unlink()
+            item = next(item for item in markdown_acceptance.ITEMS if item.item_id == "C01")
+            with patch.object(markdown_acceptance, "ASSET_MANIFEST", manifest):
+                outcome = markdown_acceptance.run_item(item, self._context(root))
+            self.assertEqual(outcome.status, markdown_acceptance.STATUS_FAILED)
+            self.assertTrue(outcome.reason)
+
+    def test_missing_or_tampered_base_is_not_a_passing_package(self) -> None:
+        for relative in ("xberg.exe", "models/snapshot-ocr/det.onnx", "sherpa-onnx/sherpa-onnx-c-api.dll"):
+            for mutation in ("missing", "tampered"):
+                with self.subTest(relative=relative, mutation=mutation), tempfile.TemporaryDirectory() as temporary:
+                    root = Path(temporary) / "package"
+                    manifest = _bundled_package_fixture(root)
+                    path = root / "xberg" / relative
+                    if mutation == "missing":
+                        path.unlink()
+                    else:
+                        _ = path.write_bytes(b"tampered")
+                    with patch.object(markdown_acceptance, "ASSET_MANIFEST", manifest):
+                        problems = markdown_acceptance.scan_distribution(root)
+                    self.assertTrue(any(relative in problem for problem in problems), problems)
+
+    def test_default_distribution_rejects_audio_and_python_anywhere(self) -> None:
+        leaks = (
+            "xberg/ffmpeg/LICENSE.txt", "xberg/models/vad/silero_vad.onnx",
+            "xberg/models/sense_voice_zh_en_ja_ko_yue_2024_07_17/model.int8.onnx",
+            "misplaced/avcodec-63.dll", "misplaced/silero_vad.onnx",
+            "samples/silence.wav", "python313.dll", "xberg-audio-assets-x86_64-pc-windows-msvc.zip",
+        )
+        for relative in leaks:
+            with self.subTest(relative=relative), tempfile.TemporaryDirectory() as temporary:
+                root = Path(temporary) / "package"
+                manifest = _bundled_package_fixture(root)
+                path = root / relative
+                path.parent.mkdir(parents=True, exist_ok=True)
+                _ = path.write_bytes(b"leaked optional/runtime bytes")
+                with patch.object(markdown_acceptance, "ASSET_MANIFEST", manifest):
+                    problems = markdown_acceptance.scan_distribution(root)
+                self.assertTrue(any(relative in problem for problem in problems), problems)
+
+    def test_receipt_rejects_unsafe_duplicate_and_conflicting_members(self) -> None:
+        for relative in ("../escape.dll", "C:/escape.dll", "models\\\\escape.onnx", "/escape.dll", "xberg.exe"):
+            with self.subTest(relative=relative), tempfile.TemporaryDirectory() as temporary:
+                root = Path(temporary) / "package"
+                manifest = _bundled_package_fixture(root)
+                receipt_path = root / "xberg" / markdown_acceptance.RECEIPT_NAME
+                receipt = json.loads(receipt_path.read_text(encoding="utf-8"))
+                receipt["components"][0]["members"].append({
+                    "path": relative, "size_bytes": 1, "sha256": "f" * 64,
+                })
+                _ = receipt_path.write_text(json.dumps(receipt), encoding="utf-8")
+                with patch.object(markdown_acceptance, "ASSET_MANIFEST", manifest), self.assertRaises(ValueError):
+                    markdown_acceptance.scan_distribution(root)
+
+    def test_receipt_rejects_wrong_release_and_shared_member_conflict(self) -> None:
+        for mutation in ("audio-url", "shared-digest", "missing-model-record"):
+            with self.subTest(mutation=mutation), tempfile.TemporaryDirectory() as temporary:
+                root = Path(temporary) / "package"
+                manifest = _bundled_package_fixture(root)
+                receipt_path = root / "xberg" / markdown_acceptance.RECEIPT_NAME
+                receipt = json.loads(receipt_path.read_text(encoding="utf-8"))
+                if mutation == "audio-url":
+                    receipt["audio_assets"]["url"] = "https://github.com/untrusted/audio.zip"
+                elif mutation == "shared-digest":
+                    record = next(entry for entry in receipt["components"][1]["members"] if entry["path"] == "xberg.exe")
+                    record["sha256"] = "f" * 64
+                else:
+                    receipt["components"][1]["members"] = [
+                        entry for entry in receipt["components"][1]["members"]
+                        if entry["path"] != "models/snapshot-ocr/rec.onnx"
+                    ]
+                _ = receipt_path.write_text(json.dumps(receipt), encoding="utf-8")
+                with patch.object(markdown_acceptance, "ASSET_MANIFEST", manifest), self.assertRaises(ValueError):
+                    markdown_acceptance.scan_distribution(root)
+
+    def test_invalid_distribution_failure_and_report_details_are_preserved(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary) / "package"
+            manifest = _bundled_package_fixture(root)
+            _ = (root / "xberg/xberg.exe").write_bytes(b"broken engine")
+            item = next(item for item in markdown_acceptance.ITEMS if item.item_id == "C02")
+            with patch.object(markdown_acceptance, "ASSET_MANIFEST", manifest):
+                outcome = markdown_acceptance.run_item(item, self._context(root))
+            self.assertEqual(outcome.status, markdown_acceptance.STATUS_FAILED)
+            self.assertIn("xberg.exe", outcome.reason)
+            self.assertTrue(outcome.details)
+            with patch("sys.stdout", new=io.StringIO()):
+                self.assertEqual(report_acceptance([(item, outcome)]), 1)
+
+
+class BundledProbeTests(unittest.TestCase):
+    """有效源选择与按场景前置；基础包无音频只能阻塞媒体，不冒充转录成功。"""
+
+    @staticmethod
+    def _probe(root: Path, manifest: Path) -> markdown_acceptance.AssetProbe:
+        with (
+            patch.object(markdown_acceptance, "ASSET_MANIFEST", manifest),
+            patch.dict(os.environ, {
+                "JCHTOOLS_TEST_ASSET_ROOT": str(root / "assets"),
+                "JCHTOOLS_TEST_STATE_DIR": str(root / "state"),
+                "JCHTOOLS_TEST_BUNDLED_XBERG_DIR": str(root / "package/xberg"),
+            }, clear=True),
+        ):
+            return markdown_acceptance.probe_assets()
+
+    def test_base_qualifies_documents_but_missing_audio_is_not_run(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
-            _ = (root / "MSVCP140.dll").write_bytes(b"x")  # 清单成员、静态模式抓不到。
-            _ = (root / "LICENSE").write_text("product license", encoding="utf-8")
-            hits = markdown_acceptance.scan_forbidden_assets(root)
-        assert any("MSVCP140.dll" in hit for hit in hits)  # nosec B101: 清单驱动命中。
-        assert not any("LICENSE" in hit for hit in hits)  # nosec B101: 文档/许可成员不误报。
+            manifest = _bundled_package_fixture(root / "package")
+            assets = self._probe(root, manifest)
+            self.assertTrue(assets.xberg_ready(), assets.missing)
+            self.assertFalse(assets.media_ready())
+            context = markdown_acceptance.Context(None, None, None, root, assets)
+            prerequisite = getattr(markdown_acceptance, "_" + "asset_precondition")
+            document = markdown_acceptance.Item("probe-doc", "C", "document", "GUI", needs_assets="xberg")
+            media = markdown_acceptance.Item("probe-media", "C", "media", "GUI", needs_assets="xberg+media")
+            self.assertIsNone(prerequisite(context, document))
+            self.assertIn("媒体", prerequisite(context, media))
+            self.assertEqual(markdown_acceptance.run_item(
+                next(item for item in markdown_acceptance.ITEMS if item.item_id == "A24"), context
+            ).status, markdown_acceptance.STATUS_NOT_RUN)
+
+    def test_installed_audio_requires_each_actual_member_and_digest(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            manifest = _bundled_package_fixture(root / "package")
+            runtime = root / "package/xberg"
+            for name in (*markdown_acceptance.MEDIA_REQUIRED, "ffmpeg/LICENSE.txt"):
+                path = runtime / name
+                path.parent.mkdir(parents=True, exist_ok=True)
+                _ = path.write_bytes(f"synthetic audio fixture: {name}".encode())
+            assets = self._probe(root, manifest)
+            self.assertTrue(assets.media_ready(), assets.missing)
+            _ = (runtime / markdown_acceptance.MEDIA_REQUIRED[0]).write_bytes(b"tampered")
+            assets = self._probe(root, manifest)
+            self.assertTrue(assets.xberg_ready(), assets.missing)
+            self.assertFalse(assets.media_ready())
+
+    def test_missing_or_tampered_base_never_qualifies_documents(self) -> None:
+        for mutation in ("missing", "tampered"):
+            with self.subTest(mutation=mutation), tempfile.TemporaryDirectory() as temporary:
+                root = Path(temporary)
+                manifest = _bundled_package_fixture(root / "package")
+                model = root / "package/xberg/models/snapshot-ocr/rec.onnx"
+                if mutation == "missing":
+                    model.unlink()
+                else:
+                    _ = model.write_bytes(b"tampered")
+                assets = self._probe(root, manifest)
+                self.assertFalse(assets.xberg_ready())
+                self.assertTrue(assets.base_missing)
+
+    def test_effective_source_and_sqlite_failures_are_not_hidden_by_bundle(self) -> None:
+        for source in ("custom", "downloaded", "bundled", "unknown", "corrupt-db"):
+            with self.subTest(source=source), tempfile.TemporaryDirectory() as temporary:
+                root = Path(temporary)
+                manifest = _bundled_package_fixture(root / "package")
+                state = root / "state"
+                state.mkdir()
+                selected = root / "selected"
+                selected.mkdir()
+                _ = (selected / "xberg.exe").write_bytes(b"legacy never executed")
+                database = state / "config.sqlite3"
+                if source == "corrupt-db":
+                    _ = database.write_bytes(b"not sqlite")
+                else:
+                    with contextlib.closing(sqlite3.connect(database)) as conn, conn:
+                        _ = conn.execute("CREATE TABLE app_settings (key TEXT PRIMARY KEY, value TEXT NOT NULL)")
+                        _ = conn.executemany("INSERT INTO app_settings VALUES (?,?)", [
+                            ("xberg_source", source), (f"xberg_{source}_directory", str(selected)),
+                            ("xberg_directory", str(root / "stale")),
+                        ])
+                assets = self._probe(root, manifest)
+                if source in ("unknown", "corrupt-db"):
+                    self.assertIsNone(assets.runtime_dir)
+                    self.assertTrue(any("SQLite" in problem for problem in assets.missing))
+                else:
+                    self.assertEqual(assets.runtime_dir, selected)
+
+    def test_invalid_or_missing_legacy_root_can_use_bundle_but_relative_bundle_cannot(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            manifest = _bundled_package_fixture(root / "package")
+            assets = root / "assets"
+            assets.mkdir()
+            _ = (assets / "xberg-runtime-path.txt").write_text(str(root / "absent-legacy"), encoding="utf-8")
+            self.assertEqual(self._probe(root, manifest).runtime_dir, root / "package/xberg")
+            with (
+                patch.dict(os.environ, {
+                    "JCHTOOLS_TEST_ASSET_ROOT": str(assets), "JCHTOOLS_TEST_STATE_DIR": str(root / "state"),
+                    "JCHTOOLS_TEST_BUNDLED_XBERG_DIR": "relative-bundle",
+                }, clear=True),
+                patch.object(markdown_acceptance, "ASSET_MANIFEST", manifest),
+            ):
+                probe = markdown_acceptance.probe_assets()
+            self.assertIsNone(probe.runtime_dir)
+            self.assertTrue(probe.missing)
+
+    def test_legacy_pointer_read_failure_is_not_hidden_by_valid_bundle(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            manifest = _bundled_package_fixture(root / "package")
+            (root / "assets/xberg-runtime-path.txt").mkdir(parents=True)
+            probe = self._probe(root, manifest)
+            self.assertIsNone(probe.runtime_dir)
+            self.assertTrue(any("读取旧 Xberg" in problem for problem in probe.missing))
 
 
 class TestGateEnvironmentTests(unittest.TestCase):

@@ -66,7 +66,6 @@ import win32event
 import win32file
 import win32gui
 import win32pipe
-import win32process
 import win32ts
 import winerror
 from defusedxml import ElementTree
@@ -81,6 +80,7 @@ if not __package__:
 from scripts.gui_smoke import (
     ISOLATION_GUARDED_STAGES,
     assert_clean_exit,
+    click,
     completion_confirms_new_run,
     missing_isolation_env,
     own_process_tree,
@@ -150,22 +150,43 @@ DATA_DIRECTORY = "markdown-assets"
 # 本机测试引擎固定目录（AGENTS.md §3，与 scripts/test_gate.py 的同名常量同口径）：
 # 测试只用该目录下的最新版真实引擎；通过隔离旧配置夹具接入，不提供产品手工路径入口。
 LOCAL_TEST_XBERG_DIR = Path(r"C:\Users\jiang\Documents\xberg-test\xberg-cli-x86_64-pc-windows-msvc")
-# 与 src/markdown_assets.rs 同口径：媒体转录在位校验的必需成员
-# （存在性；SHA-256 校验由初始化/清单承接；组件目录与运行目录同口径）。
-INFERENCE_REQUIRED = (
-    "xberg.exe",
+# 可选媒体只在媒体条目前置检查；文档/截图不能被未下载音频阻塞。
+MEDIA_REQUIRED = (
     "models/sense_voice_zh_en_ja_ko_yue_2024_07_17/model.int8.onnx",
     "models/sense_voice_zh_en_ja_ko_yue_2024_07_17/tokens.txt",
     "models/vad/silero_vad.onnx",
-    "sherpa-onnx/sherpa-onnx-c-api.dll",
-    "sherpa-onnx/sherpa-onnx-cxx-api.dll",
-    "sherpa-onnx/onnxruntime.dll",
-    "sherpa-onnx/onnxruntime_providers_shared.dll",
     "ffmpeg/avutil-61.dll",
     "ffmpeg/swresample-7.dll",
     "ffmpeg/avcodec-63.dll",
     "ffmpeg/avformat-63.dll",
 )
+BASE_REQUIRED = (
+    "xberg.exe",
+    "onnxruntime.dll",
+    "onnxruntime_providers_shared.dll",
+    "MSVCP140.dll",
+    "VCRUNTIME140.dll",
+    "VCRUNTIME140_1.dll",
+    "models/snapshot-ocr/det.onnx",
+    "models/snapshot-ocr/rec.onnx",
+    "models/snapshot-ocr/dict/dict.txt",
+    "sherpa-onnx/sherpa-onnx-c-api.dll",
+    "sherpa-onnx/sherpa-onnx-cxx-api.dll",
+    "sherpa-onnx/onnxruntime.dll",
+    "sherpa-onnx/onnxruntime_providers_shared.dll",
+    "sherpa-onnx/LICENSE",
+)
+DOCUMENT_MODEL_SUFFIXES = (
+    "/v6/det/tiny/model.onnx",
+    "/v6/rec/tiny/model.onnx",
+    "/v6/rec/tiny/dict.txt",
+    "/v2/classifiers/PP-LCNet_x1_0_textline_ori.onnx",
+)
+RECEIPT_NAME = "jchtools-xberg-release.json"
+RELEASE_SOURCE = "https://api.github.com/repos/jchanghong023/xberg/releases/latest"
+RELEASE_DOWNLOAD = "https://github.com/jchanghong023/xberg/releases/download/"
+COMPONENT_MANIFEST_NAME = "xberg-components-x86_64-pc-windows-msvc.json"
+BASE_COMPONENT_IDS = frozenset(("document", "snapshot"))
 
 # T-28 / 附录 A 的旧项目与旧缓存前置：旧目录仍在即未满足「删除旧项目后独立运行」。
 OLD_PROJECT_DIR = Path(r"D:\code1111111111\all2markdown")
@@ -197,19 +218,6 @@ def _old_cache_candidates() -> list[Path]:
     candidates.append(Path.home() / ".cache" / "all2markdown")
     return candidates
 
-
-# 附录 A 双形态检查：主包不得携带的转换专用资产（文件名/后缀，全部小写比较）。
-# 固定清单只作兜底；可执行/模型类成员名按 resources/markdown-assets.json 清单驱动
-# （见 _manifest_forbidden_names），清单新增成员自动纳入扫描。EXE 内嵌内容的
-# 检测做不到，维持文件粒度现状（不过度设计）。
-FORBIDDEN_SUFFIXES = (".onnx",)
-FORBIDDEN_NAMES = ("xberg.exe", "markdown-media-worker.exe")
-FORBIDDEN_DLL_PREFIXES = ("python", "onnxruntime", "sherpa", "avcodec", "avformat", "swresample", "ffmpeg")
-# 清单驱动扫描的成员筛选口径：可执行/原生库/模型成员按扩展名纳入，模型词表
-# 文件按显式名单纳入（tokens.txt/dict.txt 属于模型资产）；许可/说明等文档类
-# 成员不纳入——盲目按成员名匹配会把交付物自身的 LICENSE 误报为违禁资产。
-_MANIFEST_MEMBER_SUFFIXES = (".exe", ".dll", ".onnx", ".cmd")
-_MANIFEST_MEMBER_ASSET_NAMES = frozenset({"tokens.txt", "dict.txt"})
 
 GUI_WINDOW_TIMEOUT = 60
 READINESS_TIMEOUT = 180
@@ -279,24 +287,23 @@ class AssetProbe:
     inference_dir: Path | None
     missing: list[str]
 
+    base_missing: list[str] = dataclasses.field(default_factory=list)
+    media_missing: list[str] = dataclasses.field(default_factory=list)
+
     def xberg_ready(self) -> bool:
-        return self.xberg_exe is not None
+        return self.xberg_exe is not None and not self.base_missing
 
     def media_ready(self) -> bool:
-        return self.inference_dir is not None and not any("推理组件" in text or "媒体" in text for text in self.missing)
+        return self.xberg_ready() and self.inference_dir is not None and not self.media_missing
 
     def acquire_hint(self) -> str:
-        hint = "真实引擎验收：将 JCHTOOLS_TEST_XBERG_DIR 指向本机最新版测试引擎目录 "
-        hint += f"{LOCAL_TEST_XBERG_DIR}（已存在且身份有效时不重复下载）。"
-        hint += "验收经 --seed-state / --seed-xberg 写入隔离 SQLite 旧配置夹具，"
-        hint += "再由 GUI「设置」页「检查已安装组件」离线校验并补写许可证 notice；"
-        hint += "这仅用于兼容旧配置的真实引擎验收，不是产品手工配置目录入口。"
-        hint += "产品在「设置」页勾选「文档转换与图片 OCR」「截图 OCR」「音视频转写」，"
-        hint += "点击「下载 / 补齐所选功能」获取最新发布版的三个独立功能包；"
-        hint += "共享运行时由应用管理，不要求用户填写路径，也不自动下载。"
-        hint += "媒体验收需同源 xberg.exe、SenseVoice/VAD 模型与 FFmpeg/sherpa-onnx 运行库；"
-        hint += "已配置引擎的就绪状态按实际场景成员与能力检查。"
-        return hint
+        return (
+            "默认安装版/便携版的 xberg/ 已内置文档与截图资产，无需初始化或下载。"
+            "可用 --seed-state / --seed-xberg 在隔离 SQLite 中承接有效旧运行目录；"
+            "设置页「检查已安装组件」仅离线检查。音视频需用户主动点击"
+            "「下载 / 补齐音频转写资产」，按内置收据固定发布安装 FFmpeg、SenseVoice/VAD；"
+            "转换过程不联网补齐。媒体验收必须有实际资产和真实转录结果。"
+        )
 
 
 def _asset_root() -> Path | None:
@@ -306,20 +313,6 @@ def _asset_root() -> Path | None:
         if override and Path(override).is_absolute():
             return Path(override)
     return None
-
-
-def _manifest_model_paths() -> list[str]:
-    """读取资产清单中推理组件包成员的安装相对路径；解析失败返回空表（调用方按未知处理）."""
-    try:
-        raw = ASSET_MANIFEST.read_text(encoding="utf-8")
-    except OSError:
-        return []
-    parsed = _parse_json(raw)
-    inference = parsed.get("xberg_inference") if _is_str_obj_map(parsed) else None
-    members = inference.get("members") if _is_str_obj_map(inference) else None
-    if not _is_str_obj_list(members):
-        return []
-    return [relative for entry in members if (relative := _str_field(entry, "install_path")) is not None]
 
 
 def _settings_state_dir() -> Path | None:
@@ -345,88 +338,106 @@ def _plain_windows_path(text: str) -> str:
 
 
 def _probe_legacy_runtime_dir(root: Path, missing: list[str]) -> Path | None:
-    """旧文本指针（SQLite 无值时的迁移源，与 xberg_settings::load 同口径）."""
+    """只读旧文本指针；缺席允许内置发现，读取错误不能伪装为未配置."""
     selection = root / "xberg-runtime-path.txt"
-    runtime_dir: Path | None = None
-    if not selection.is_file():
-        missing.append(f"未配置 Xberg 运行目录（SQLite 无记录且未找到 {selection}）")
+    if not selection.exists():
         return None
-    with contextlib.suppress(OSError, ValueError):
-        runtime_dir = Path(_plain_windows_path(selection.read_text(encoding="utf-8").strip()))
-    if runtime_dir is not None and not (runtime_dir / "xberg.exe").is_file():
-        missing.append(f"Xberg 运行目录缺 xberg.exe：{runtime_dir / 'xberg.exe'}")
-    return runtime_dir
+    try:
+        text = selection.read_text(encoding="utf-8").strip()
+        return Path(_plain_windows_path(text)) if text else None
+    except (OSError, ValueError) as error:
+        missing.append(f"读取旧 Xberg 目录失败：{error}")
+        return None
 
 
 def _fetch_xberg_directory(database: Path) -> tuple[object, ...] | None:
-    """只读读取应用级 SQLite 保存的共享 Xberg 目录；无记录返回 None."""
+    """同一只读 SQLite 快照选择活动来源，不吞掉未知来源或配置读取错误."""
     with contextlib.closing(sqlite3.connect(database.as_uri() + "?mode=ro", uri=True)) as conn:
-        cursor = conn.execute("SELECT value FROM app_settings WHERE key='xberg_directory'")
-        return cast("tuple[object, ...] | None", cursor.fetchone())
+        settings = cast("dict[str, str]", dict(conn.execute("SELECT key,value FROM app_settings")))
+    source = settings.get("xberg_source", "custom")
+    keys = {
+        "custom": "xberg_custom_directory",
+        "downloaded": "xberg_downloaded_directory",
+        "bundled": "xberg_bundled_directory",
+    }
+    if source not in keys:
+        message = f"未知 Xberg 来源：{source}"
+        raise ValueError(message)
+    stored = settings.get(keys[source])
+    if stored is None and source == "custom":
+        stored = settings.get("xberg_directory")
+    return (stored,) if stored is not None else None
 
 
 def _probe_runtime_dir(root: Path, missing: list[str]) -> Path | None:
-    """只读核对运行目录指针与 xberg.exe；缺失项写入 missing.
-
-    XB-18 后应用把共享目录保存在应用级 SQLite（config.sqlite3 的
-    app_settings.xberg_directory）；旧文本指针仅作为 SQLite 无值时的迁移源。
-    """
-    runtime_dir: Path | None = None
+    """复用产品有效源优先级；只发现显式隔离 bundle，不读取真实安装/注册表."""
     state = _settings_state_dir()
     database = state / "config.sqlite3" if state is not None else None
-    if database is None or not database.is_file():
-        runtime_dir = _probe_legacy_runtime_dir(root, missing)
+    try:
+        row = _fetch_xberg_directory(database) if database is not None and database.is_file() else None
+    except (sqlite3.Error, OSError, ValueError) as error:
+        missing.append(f"读取应用配置 SQLite 失败：{error}")
+        return None
+    stored = row[0] if row else None
+    runtime_dir = (
+        Path(_plain_windows_path(stored.strip()))
+        if isinstance(stored, str) and stored.strip()
+        else _probe_legacy_runtime_dir(root, missing)
+    )
+    if missing:
+        return None
+    if runtime_dir is not None and runtime_dir.is_absolute() and (runtime_dir / "xberg.exe").is_file():
+        return runtime_dir
+    bundled = os.environ.get("JCHTOOLS_TEST_BUNDLED_XBERG_DIR")
+    if bundled:
+        candidate = Path(_plain_windows_path(bundled))
+        if candidate.is_absolute() and (candidate / "xberg.exe").is_file():
+            return candidate
+        missing.append(f"内置 Xberg 目录无效或缺 xberg.exe：{candidate}")
+    elif runtime_dir is not None:
+        missing.append(f"Xberg 运行目录无效或缺 xberg.exe：{runtime_dir}")
     else:
-        try:
-            row = _fetch_xberg_directory(database)
-        except sqlite3.Error as error:
-            missing.append(f"读取应用配置 SQLite 失败：{error}")
-        else:
-            stored = row[0] if row else None
-            if isinstance(stored, str) and stored.strip():
-                runtime_dir = Path(_plain_windows_path(stored.strip()))
-            else:
-                runtime_dir = _probe_legacy_runtime_dir(root, missing)
-    if runtime_dir is not None and not (runtime_dir / "xberg.exe").is_file():
-        missing.append(f"Xberg 运行目录缺 xberg.exe：{runtime_dir / 'xberg.exe'}")
-        runtime_dir = None
-    return runtime_dir
-
-
-def _check_inference_members(inference_dir: Path, missing: list[str]) -> None:
-    """在位校验：固定必需成员 + 清单声明的组件包成员；缺失项写入 missing."""
-    holes = [name for name in INFERENCE_REQUIRED if not (inference_dir / name).is_file()]
-    if holes:
-        shown = "、".join(holes[:3])
-        missing.append(f"推理组件不完整（缺 {len(holes)} 个，如 {shown}；组件目录 {inference_dir}）")
-        return
-    manifest_members = _manifest_model_paths()
-    if not manifest_members:
-        missing.append("推理组件：无法解析 resources/markdown-assets.json 的组件包成员，安装面未知")
-        return
-    member_holes = [name for name in manifest_members if not (inference_dir / name).is_file()]
-    if member_holes:
-        shown = "、".join(member_holes[:3])
-        missing.append(f"推理组件清单成员缺失（{len(member_holes)} 个，如 {shown}；组件目录 {inference_dir}）")
+        missing.append("未配置有效 Xberg 且未提供隔离内置目录（JCHTOOLS_TEST_BUNDLED_XBERG_DIR）")
+    return None
 
 
 def probe_assets() -> AssetProbe:
-    """只读核对：已保存的 Xberg 指针、xberg.exe 与推理组件是否在场."""
+    """只读按实际有效目录分别检查基础与可选音频；不下载、不改配置."""
     missing: list[str] = []
     root = _asset_root()
     if root is None:
         return AssetProbe(None, None, None, None, ["未提供隔离验收资产根（JCHTOOLS_TEST_ASSET_ROOT）"])
     runtime_dir = _probe_runtime_dir(root, missing)
-    xberg_exe = (runtime_dir / "xberg.exe") if runtime_dir is not None else None
-    if xberg_exe is not None and not xberg_exe.is_file():
-        xberg_exe = None
-    # 推理组件目录与运行目录同口径（resolve_xberg_component 即
-    # xberg_settings::required()，2026-10-04 起无环境变量覆盖）：未配置时的
-    # 缺失原因已由 _probe_runtime_dir 报告，这里只做组件成员检查。
-    inference_dir = runtime_dir
-    if inference_dir is not None:
-        _check_inference_members(inference_dir, missing)
-    return AssetProbe(root, runtime_dir, xberg_exe, inference_dir, missing)
+    if runtime_dir is None:
+        return AssetProbe(root, None, None, None, missing)
+    base_missing: list[str] = []
+    media_missing: list[str] = []
+    receipt = runtime_dir / RECEIPT_NAME
+    if receipt.exists():
+        try:
+            base, audio = _release_members(runtime_dir)
+            base_missing.extend(_member_problems(runtime_dir, base))
+            media_missing.extend(_member_problems(runtime_dir, audio))
+        except (OSError, ValueError) as error:
+            base_missing.append(f"内置收据无法验证：{error}")
+    else:
+        # 旧外部源仍可用；用已有固定成员清单检查基础，不强迫迁移来源制造收据。
+        try:
+            base = _legacy_base_members()
+            base_missing.extend(
+                _member_problems(
+                    runtime_dir, {name: identity for name, identity in base.items() if name.startswith("models/")}
+                )
+            )
+            base_missing.extend(f"基础资产缺失：{name}" for name in BASE_REQUIRED if not (runtime_dir / name).is_file())
+        except (OSError, ValueError) as error:
+            base_missing.append(f"基础资产清单无法验证：{error}")
+        holes = [name for name in MEDIA_REQUIRED if not (runtime_dir / name).is_file()]
+        if holes:
+            media_missing.append(f"可选媒体资产缺失：{', '.join(holes)}")
+    missing.extend(base_missing)
+    missing.extend(media_missing)
+    return AssetProbe(root, runtime_dir, runtime_dir / "xberg.exe", runtime_dir, missing, base_missing, media_missing)
 
 
 def _file_digest(path: Path) -> str:
@@ -1483,31 +1494,31 @@ ITEMS: tuple[Item, ...] = (
     Item(
         "B02",
         "B",
-        "三项功能勾选自动保存：界面摘要与隔离 SQLite 一致",
+        "内置文档/截图可用，固定发布来源与隔离 SQLite 活动目录一致",
         "gui_smoke 阶段引用",
         stage="S6",
-        fixture_note="S6 实际点击三项 Check 并核对每步自动保存，无需真实引擎",
+        fixture_note="S6 读取真实内置基础收据/文件并核对界面就绪与 bundled 活动来源，不下载音频",
     ),
     Item(
         "B03",
         "B",
-        "重启恢复功能选择，并保留旧配置迁移的活动运行目录",
+        "重启恢复同一有效运行目录，并保留旧外部配置记录",
         "gui_smoke 阶段引用",
         stage="S7",
-        fixture_note="S7 完全退出再启动，保留旧路径迁移夹具，无需真实引擎",
+        fixture_note="S7 完全退出再启动，核对同一有效根与旧路径记录，无需音频",
     ),
     Item(
         "B04",
         "B",
-        "空选择禁用下载，重新勾选恢复可用，活动运行配置不变",
+        "显式音频下载可取消/重试，不隐式请求或改写基础资产和活动目录",
         "gui_smoke 阶段引用",
         stage="S8",
-        fixture_note="S8 操作真实 Check，核对禁用/恢复与活动配置不变",
+        fixture_note="S8 使用真实设置动作及受控无网络下载屏障，核对取消/重试和基础资产不变",
     ),
     Item(
         "B05",
         "B",
-        "未配置时各功能独立显示未下载、转换禁用且不自动下载",
+        "内置目录缺失时转换和音频动作禁用，显示离线修复指引且不自动下载",
         "gui_smoke 阶段引用",
         stage="S9",
         fixture_note="S9 使用全新隔离状态和资产根，不触发下载",
@@ -1558,8 +1569,8 @@ ITEMS: tuple[Item, ...] = (
         needs_assets="xberg",
     ),
     # —— C 组：双形态与前置环境（附录 A 末段） ——
-    Item("C01", "C", "安装版主包不含模型或转换专用依赖（目录树扫描）", "安装目录文件扫描"),
-    Item("C02", "C", "便携版主包不含模型或转换专用依赖（目录树扫描）", "便携目录文件扫描"),
+    Item("C01", "C", "安装版内置基础收据/模型/DLL 完整且无可选音频/Python", "安装目录文件与 SHA-256 扫描"),
+    Item("C02", "C", "便携版内置基础收据/模型/DLL 完整且无可选音频/Python", "便携目录文件与 SHA-256 扫描"),
     Item("C03", "C", "未配置时 JchTools 及旧工具正常可用且不自动下载 Xberg", "gui_smoke S1 引用 + 干净资产根快照对比"),
     Item(
         "C05",
@@ -1591,7 +1602,7 @@ ITEMS: tuple[Item, ...] = (
     Item(
         "C08",
         "C",
-        "安装版实际完成转换（配置外部 Xberg 并初始化后）",
+        "安装版首次启动实际完成转换（内置基础资产，无需音频或预先打开设置）",
         "GUI 转换链路（安装版 EXE）",
         ("test_hello_world.png",),
         AVAILABLE,
@@ -1600,7 +1611,7 @@ ITEMS: tuple[Item, ...] = (
     Item(
         "C09",
         "C",
-        "便携版实际完成转换（配置外部 Xberg 并初始化后）",
+        "便携版首次启动实际完成转换（内置基础资产，无需音频或预先打开设置）",
         "GUI 转换链路（便携版 EXE）",
         ("test_hello_world.png",),
         AVAILABLE,
@@ -1651,10 +1662,10 @@ def _asset_precondition(ctx: Context, item: Item) -> str | None:
         return None
     assets = ctx.assets
     if not assets.xberg_ready():
-        reason = "；".join(assets.missing) if assets.missing else "Xberg 未配置"
+        reason = "；".join(assets.base_missing or assets.missing) or "Xberg 未配置"
         return f"资产未就绪：{reason}。获取方式：{assets.acquire_hint()}"
     if item.needs_assets == "xberg+media" and not assets.media_ready():
-        holes = "；".join(assets.missing) or "媒体组件缺失"
+        holes = "；".join(assets.media_missing or assets.missing) or "媒体组件缺失"
         return f"媒体资产未就绪：{holes}。获取方式：{assets.acquire_hint()}"
     return None
 
@@ -1722,18 +1733,8 @@ def _click_button(window: WindowSpecification, title: str) -> None:
     if button is None:
         message = f"按钮「{title}」未找到唯一可见可用控件"
         raise RuntimeError(message)
-    # 优先 UIA Invoke 模式：不移动真实鼠标、不依赖窗口前台（合成鼠标点击在
-    # 窗口失去前台时会落到别的窗口，实测导致「开始转换」未生效而超时）。
-    with contextlib.suppress(*TRANSIENT_ERRORS):
-        invoke = getattr(button, "invoke", None)
-        if callable(invoke):
-            _ = invoke()
-            time.sleep(0.3)
-            return
-    with contextlib.suppress(*TRANSIENT_ERRORS):
-        _ = window.set_focus()
-    button.click_input()
-    time.sleep(0.3)
+    # 共用 UIA Invoke / 窗口局部消息边界，不移动硬件鼠标或抢占前台。
+    click(window, button)
 
 
 def _button_state(window: WindowSpecification, title: str) -> tuple[bool, bool]:
@@ -1819,22 +1820,15 @@ def _window_texts(window: WindowSpecification) -> str:
 
 
 def _request_close(window: WindowSpecification) -> None:
-    """先发 WM_CLOSE；鼠标兜底前验证前台窗口 PID 属于目标 GUI。."""
+    """先发 WM_CLOSE，未退出时共用不占用硬件输入的按钮激活边界."""
     handle = window.handle
-    target_pid = win32process.GetWindowThreadProcessId(handle)[1]
     win32gui.PostMessage(handle, win32con.WM_CLOSE, 0, 0)
     time.sleep(0.3)
     with contextlib.suppress(*TRANSIENT_ERRORS):
         if not window.exists():
             return
-    foreground = win32gui.GetForegroundWindow()
-    foreground_pid = win32process.GetWindowThreadProcessId(foreground)[1]
-    if foreground_pid != target_pid:
-        message = "关闭兜底拒绝操作：前台窗口 PID 不属于被测 GUI"
-        raise RuntimeError(message)
     for button in unique_visible_buttons(window, "关闭"):
-        button.click_input()
-        time.sleep(0.3)
+        click(window, button)
         return
 
 
@@ -2636,58 +2630,259 @@ def _delegate_stage(stage: str, exe: Path, env_extra: dict[str, str] | None = No
 # ---------------------------------------------------------------- C 组检查件。
 
 
-def _manifest_forbidden_names() -> frozenset[str]:
-    """从资产清单只读收集禁止随主包携带的成员文件名；无法解析时拒绝给出假 PASS."""
-    try:
-        parsed = _parse_json(ASSET_MANIFEST.read_text(encoding="utf-8"))
-    except (OSError, ValueError) as error:
-        message = f"转换资产清单无法读取或解析：{error}"
-        raise ValueError(message) from error
-    if not _is_str_obj_map(parsed):
-        message = "转换资产清单不是 JSON 对象"
+def _member_records(entries: object, label: str) -> dict[str, tuple[int, str]]:
+    """收据成员必须可安全落盘；Windows 大小写重名与逃逸均不能通过."""
+    if not _is_str_obj_list(entries) or not entries:
+        message = f"{label} 缺少非空 members"
         raise ValueError(message)
-    names: set[str] = set(_MANIFEST_MEMBER_ASSET_NAMES)
-    for section_key in ("xberg", "xberg_inference"):
-        section = parsed.get(section_key)
-        members = section.get("members") if _is_str_obj_map(section) else None
-        if not _is_str_obj_list(members) or not members:
-            message = f"转换资产清单缺少非空 {section_key}.members 数组"
+    members: dict[str, tuple[int, str]] = {}
+    seen: set[str] = set()
+    for entry in entries:
+        if not _is_str_obj_map(entry):
+            message = f"{label} 成员不是对象"
             raise ValueError(message)
-        for entry in members:
-            relative = _str_field(entry, "install_path") or _str_field(entry, "path")
-            if not relative:
-                message = f"转换资产清单 {section_key}.members 存在缺少路径的成员"
-                raise ValueError(message)
-            base = relative.replace("/", "\\").rsplit("\\", 1)[-1].lower()
-            if not base:
-                message = f"转换资产清单 {section_key}.members 存在无文件名的成员路径：{relative}"
-                raise ValueError(message)
-            if base.endswith(_MANIFEST_MEMBER_SUFFIXES):
-                names.add(base)
-    return frozenset(names)
+        relative = _str_field(entry, "path")
+        if (
+            not relative
+            or "\\" in relative
+            or ":" in relative
+            or relative.startswith("/")
+            or re.search(r'[\x00-\x1f<>"|?*]', relative)
+            or any(
+                part in ("", ".", "..")
+                or part.endswith((".", " "))
+                or part.split(".", 1)[0].upper()
+                in {
+                    "CON",
+                    "PRN",
+                    "AUX",
+                    "NUL",
+                    *(f"COM{i}" for i in range(1, 10)),
+                    *(f"LPT{i}" for i in range(1, 10)),
+                }
+                for part in relative.split("/")
+            )
+        ):
+            message = f"{label} 成员路径不安全：{relative}"
+            raise ValueError(message)
+        if relative.casefold() in seen:
+            message = f"{label} 成员路径重复：{relative}"
+            raise ValueError(message)
+        seen.add(relative.casefold())
+        size, digest = entry.get("size_bytes"), entry.get("sha256")
+        if (
+            type(size) is not int
+            or size <= 0
+            or not isinstance(digest, str)
+            or not re.fullmatch("[0-9a-f]{64}", digest)
+        ):
+            message = f"{label} 成员大小/摘要无效：{relative}"
+            raise ValueError(message)
+        members[relative] = (size, digest)
+    return members
 
 
-def scan_forbidden_assets(root: Path) -> list[str]:
-    """扫描交付目录树，报告任何模型/转换专用依赖（文件粒度，只读）.
+def _legacy_base_members() -> dict[str, tuple[int, str]]:
+    """沿用资产清单的真实模型身份；不再把这些必需模型当作违禁品."""
+    parsed = _parse_json(ASSET_MANIFEST.read_text(encoding="utf-8"))
+    section = parsed.get("xberg") if _is_str_obj_map(parsed) else None
+    records = _member_records(section.get("members") if _is_str_obj_map(section) else None, "基础资产清单")
+    base = {name: record for name, record in records.items() if not _is_audio_path(name)}
+    required = set(BASE_REQUIRED) | {"LICENSE", "THIRD_PARTY_LICENSES.md", "models/paddleocr-onnx-models-LICENSE.txt"}
+    missing = required - base.keys()
+    missing.update(suffix for suffix in DOCUMENT_MODEL_SUFFIXES if not any(name.endswith(suffix) for name in base))
+    if missing:
+        message = f"基础成员清单不完整：{sorted(missing)}"
+        raise ValueError(message)
+    return base
 
-    模式清单驱动：resources/markdown-assets.json 新增的可执行/库/模型成员自动
-    纳入；固定文件名/后缀/DLL 前缀兜底保持。EXE 内嵌内容检测做不到，维持现状。
-    """
-    forbidden_names = set(FORBIDDEN_NAMES) | _manifest_forbidden_names()
-    hits: list[str] = []
+
+def _is_audio_path(relative: str) -> bool:
+    parts = relative.lower().replace("\\", "/").split("/")
+    return (
+        "ffmpeg" in parts
+        or "vad" in parts
+        or "samples" in parts
+        or any(part.startswith(("sense_voice", "sensevoice")) for part in parts)
+        or Path(parts[-1]).stem.startswith(("avcodec", "avformat", "avutil", "swresample", "ffmpeg", "silero_vad"))
+    )
+
+
+def _load_release_receipt(runtime: Path) -> tuple[dict[str, object], str]:
+    receipt_path = runtime / RECEIPT_NAME
+    if not receipt_path.resolve().is_relative_to(runtime.resolve()):
+        message = "内置收据路径逃逸"
+        raise ValueError(message)
+    receipt = _parse_json(receipt_path.read_text(encoding="utf-8"))
+    if not _is_str_obj_map(receipt) or receipt.get("owner") != "JchTools-bundled-xberg-v1":
+        message = "内置收据 owner 无效"
+        raise ValueError(message)
+    tag = _str_field(receipt, "tag")
+    if not tag or not re.fullmatch(r"[A-Za-z0-9._-]+", tag) or receipt.get("source") != RELEASE_SOURCE:
+        message = "内置收据来源/tag 无效"
+        raise ValueError(message)
+    return receipt, f"{RELEASE_DOWNLOAD}{tag}/"
+
+
+def _validate_release_manifest(manifest: object, prefix: str) -> None:
+    if (
+        not _is_str_obj_map(manifest)
+        or manifest.get("archive") != COMPONENT_MANIFEST_NAME
+        or manifest.get("url") != prefix + COMPONENT_MANIFEST_NAME
+        or type(manifest.get("size_bytes")) is not int
+        or cast("int", manifest["size_bytes"]) <= 0
+        or not re.fullmatch("[0-9a-f]{64}", _str_field(manifest, "sha256") or "")
+    ):
+        message = "内置收据 manifest 来源/大小/摘要无效"
+        raise ValueError(message)
+
+
+def _release_component_records(receipt: dict[str, object]) -> list[object]:
+    components = receipt.get("components")
+    if not _is_str_obj_list(components) or len(components) != len(BASE_COMPONENT_IDS):
+        message = "内置收据 components 必须恰为 document+snapshot"
+        raise ValueError(message)
+    if {_str_field(record, "id") for record in components} != set(BASE_COMPONENT_IDS) or _str_field(
+        receipt.get("audio_assets"), "id"
+    ) != "audio-assets":
+        message = "内置收据基础/音频组件位置无效"
+        raise ValueError(message)
+    return [*components, receipt.get("audio_assets")]
+
+
+def _validate_base_component_members(component_id: str, members: dict[str, tuple[int, str]]) -> None:
+    common = {name for name in BASE_REQUIRED if not name.startswith("models/")} | {
+        "LICENSE",
+        "THIRD_PARTY_LICENSES.md",
+        "models/paddleocr-onnx-models-LICENSE.txt",
+    }
+    if common - members.keys():
+        message = f"独立基础组件缺少共享成员：{component_id}"
+        raise ValueError(message)
+    owned_prefix = "models/models--" if component_id == "document" else "models/snapshot-ocr/"
+    other_prefix = "models/snapshot-ocr/" if component_id == "document" else "models/models--"
+    owned = [name for name in members if name.startswith(owned_prefix)]
+    if not owned or any(name.startswith(other_prefix) for name in members):
+        message = f"基础组件模型归属无效：{component_id}"
+        raise ValueError(message)
+
+
+def _release_component_members(record: object, prefix: str, ids: set[str]) -> tuple[str, dict[str, tuple[int, str]]]:
+    if not _is_str_obj_map(record):
+        message = "内置收据组件记录无效"
+        raise ValueError(message)
+    component_id = _str_field(record, "id") or ""
+    if component_id not in ("document", "snapshot", "audio-assets") or component_id in ids:
+        message = f"内置收据组件 id 无效/重复：{component_id}"
+        raise ValueError(message)
+    ids.add(component_id)
+    archive = (
+        "xberg-audio-assets-x86_64-pc-windows-msvc.zip"
+        if component_id == "audio-assets"
+        else f"xberg-{component_id}-x86_64-pc-windows-msvc.zip"
+    )
+    if (
+        record.get("archive") != archive
+        or record.get("requires") != []
+        or type(record.get("size_bytes")) is not int
+        or cast("int", record["size_bytes"]) <= 0
+        or not re.fullmatch("[0-9a-f]{64}", _str_field(record, "sha256") or "")
+        or (component_id == "audio-assets" and record.get("url") != prefix + archive)
+    ):
+        message = f"内置收据组件 archive/来源/大小/摘要无效：{component_id}"
+        raise ValueError(message)
+    members = _member_records(record.get("members"), component_id)
+    if component_id != "audio-assets":
+        _validate_base_component_members(component_id, members)
+    return component_id, members
+
+
+def _merge_component_members(
+    target: dict[str, tuple[int, str]], members: dict[str, tuple[int, str]], component_id: str
+) -> None:
+    for name, identity in members.items():
+        if _is_audio_path(name) != (component_id == "audio-assets"):
+            message = f"基础/音频组件成员越界：{name}"
+            raise ValueError(message)
+        existing = next((old for old in target if old.casefold() == name.casefold()), None)
+        if existing is not None and (existing != name or target[existing] != identity):
+            message = f"共享成员身份冲突：{name}"
+            raise ValueError(message)
+        target[name] = identity
+
+
+def _validate_release_member_sets(base: dict[str, tuple[int, str]], audio: dict[str, tuple[int, str]]) -> None:
+    expected = _legacy_base_members()
+    required = (
+        set(BASE_REQUIRED)
+        | {"LICENSE", "THIRD_PARTY_LICENSES.md"}
+        | {name for name in expected if name.startswith("models/")}
+    )
+    if required - base.keys() or (set(MEDIA_REQUIRED) | {"ffmpeg/LICENSE.txt"}) - audio.keys():
+        message = "内置收据缺少基础模型/DLL 或音频必需成员"
+        raise ValueError(message)
+    for name in required:
+        if name.startswith("models/") and base[name] != expected[name]:
+            message = f"内置模型身份不匹配：{name}"
+            raise ValueError(message)
+    for name in ("onnxruntime.dll", "onnxruntime_providers_shared.dll"):
+        if base[name] != base[f"sherpa-onnx/{name}"]:
+            message = f"共享 ORT 身份不匹配：{name}"
+            raise ValueError(message)
+
+
+def _release_members(runtime: Path) -> tuple[dict[str, tuple[int, str]], dict[str, tuple[int, str]]]:
+    receipt, prefix = _load_release_receipt(runtime)
+    _validate_release_manifest(receipt.get("manifest"), prefix)
+    records = _release_component_records(receipt)
+    ids: set[str] = set()
+    base: dict[str, tuple[int, str]] = {}
+    audio: dict[str, tuple[int, str]] = {}
+    for record in records:
+        component_id, members = _release_component_members(record, prefix, ids)
+        target = audio if component_id == "audio-assets" else base
+        _merge_component_members(target, members, component_id)
+    if ids != {"document", "snapshot", "audio-assets"}:
+        message = "内置收据组件集合不完整"
+        raise ValueError(message)
+    _validate_release_member_sets(base, audio)
+    return base, audio
+
+
+def _member_problems(runtime: Path, members: dict[str, tuple[int, str]]) -> list[str]:
+    problems: list[str] = []
+    for name, (size, digest) in members.items():
+        path = runtime / name
+        try:
+            if not path.resolve().is_relative_to(runtime.resolve()):
+                problems.append(f"成员路径逃逸：{name}")
+            elif not path.is_file():
+                problems.append(f"缺少成员：{name}")
+            elif path.stat().st_size != size or _file_digest(path) != digest:
+                problems.append(f"成员大小/摘要不匹配：{name}")
+        except (OSError, ValueError, RuntimeError) as error:
+            problems.append(f"成员读取失败：{name}：{error}")
+    return problems
+
+
+def scan_distribution(root: Path) -> list[str]:
+    """正向核对内置基础收据/全部成员，反向拒绝默认包的音频与 Python."""
+    runtime = root / "xberg"
+    if not runtime.resolve().is_relative_to(root.resolve()):
+        message = "内置运行目录路径逃逸"
+        raise ValueError(message)
+    base, _audio = _release_members(runtime)
+    problems = _member_problems(runtime, base)
     for path in root.rglob("*"):
-        if not path.is_file():
-            continue
+        relative = path.relative_to(root).as_posix()
         name = path.name.lower()
-        stem = name.rsplit(".", 1)[0]
-        forbidden = (
-            name in forbidden_names
-            or path.suffix.lower() in FORBIDDEN_SUFFIXES
-            or (name.endswith(".dll") and stem.startswith(FORBIDDEN_DLL_PREFIXES))
-        )
-        if forbidden:
-            hits.append(str(path.relative_to(root)))
-    return hits
+        if (
+            _is_audio_path(relative)
+            or name.startswith(("python", "xberg-audio-assets"))
+            or name == "markdown-media-worker.exe"
+        ):
+            problems.append(f"默认包泄漏可选音频或 Python/旧运行时：{relative}")
+    return problems
 
 
 def _tasklist() -> Path | None:
@@ -2723,9 +2918,6 @@ def scan_python_modules(image_names: tuple[str, ...]) -> tuple[list[str], str | 
 
 
 def manifest_has_python_entries() -> bool:
-    for name in _manifest_model_paths():
-        if "python" in name.lower():
-            return True
     if ASSET_MANIFEST.is_file():
         return "python" in ASSET_MANIFEST.read_text(encoding="utf-8", errors="replace").lower()
     return True  # 清单缺失本身即无法证明未携带 Python，按可疑处理。
@@ -3607,8 +3799,7 @@ def _run_gui_ref(item: Item, ctx: Context) -> Outcome:
         return Outcome(STATUS_NOT_RUN, pending)
     env_extra: dict[str, str] = {}
     if item.stage in ("S7", "S8") and ctx.assets.runtime_dir is not None:
-        # 选择项用例不要求引擎；若已有真实测试配置，仅把同源目录作为旧配置迁移
-        # 夹具，并核对勾选、空选择和重启都不会改变该路径，不经手工目录控件保存。
+        # 重启/显式音频动作必须保留同一有效根；旧外部目录仅作为迁移夹具。
         env_extra["JCHTOOLS_SMOKE_XBERG_DIR"] = str(ctx.assets.runtime_dir)
     if item.stage in ("S5", "S14") and not os.environ.get("JCHTOOLS_S5_MEDIA"):
         # S5/S14 需要真实媒体样本观察运行态；默认使用已有夹具中的真实视频。
@@ -3627,11 +3818,16 @@ def _run_c01_installed_scan(item: Item, ctx: Context) -> Outcome:
         return Outcome(STATUS_NOT_RUN, f"安装目录不存在：{root}")
     if not (root / "JchTools.exe").is_file():
         return Outcome(STATUS_FAILED, f"安装目录缺少 JchTools.exe：{root}")
-    hits = scan_forbidden_assets(root)
-    if hits:
-        message = f"安装版携带转换专用资产 {len(hits)} 项：{hits[:8]}"
-        return Outcome(STATUS_FAILED, message, [f"{item.item_id} 扫描根：{root}"])
-    return Outcome(STATUS_OK, details=[f"{item.item_id} 扫描 {root}：无模型/转换专用依赖"])
+    problems = scan_distribution(root)
+    if problems:
+        return Outcome(STATUS_FAILED, f"安装版基础完整性/默认资产策略失败：{problems[:8]}", problems)
+    return Outcome(
+        STATUS_OK,
+        details=[
+            f"{item.item_id} 扫描 {root}：内置收据及全部基础成员大小/SHA-256 已核对，无音频/Python 资产",
+            "收据记录固定发布清单来源；本检查离线，不声称重新下载核验远端发布清单",
+        ],
+    )
 
 
 def _run_c02_portable_scan(item: Item, ctx: Context) -> Outcome:
@@ -3642,11 +3838,16 @@ def _run_c02_portable_scan(item: Item, ctx: Context) -> Outcome:
         return Outcome(STATUS_NOT_RUN, f"便携目录不存在：{root}")
     if not (root / "JchTools.exe").is_file():
         return Outcome(STATUS_FAILED, f"便携目录缺少 JchTools.exe：{root}")
-    hits = scan_forbidden_assets(root)
-    if hits:
-        message = f"便携版携带转换专用资产 {len(hits)} 项：{hits[:8]}"
-        return Outcome(STATUS_FAILED, message, [f"{item.item_id} 扫描根：{root}"])
-    return Outcome(STATUS_OK, details=[f"{item.item_id} 扫描 {root}：无模型/转换专用依赖"])
+    problems = scan_distribution(root)
+    if problems:
+        return Outcome(STATUS_FAILED, f"便携版基础完整性/默认资产策略失败：{problems[:8]}", problems)
+    return Outcome(
+        STATUS_OK,
+        details=[
+            f"{item.item_id} 扫描 {root}：内置收据及全部基础成员大小/SHA-256 已核对，无音频/Python 资产",
+            "收据记录固定发布清单来源；本检查离线，不声称重新下载核验远端发布清单",
+        ],
+    )
 
 
 def _c03_delegate_stages(item_id: str, target: Path, env: dict[str, str]) -> Outcome | None:
@@ -3715,6 +3916,7 @@ def _run_c03_unconfigured(item: Item, ctx: Context) -> Outcome:
         "JCHTOOLS_TEST_ASSET_ROOT": str(scratch_assets),
         "JCHTOOLS_TEST_STATE_DIR": str(scratch_state),
         "JCHTOOLS_SNAP_OCR_TEST_ASSET_ROOT": str(scratch_assets),
+        "JCHTOOLS_TEST_BUNDLED_XBERG_DIR": str(scratch_assets / "absent-bundle"),
     }
     delegated = _c03_delegate_stages(item.item_id, target, env)
     if delegated is not None:
@@ -3855,11 +4057,12 @@ def _run_c08_c09(item: Item, _ctx: Context, root: Path | None, label: str) -> Ou
     exe = root / "JchTools.exe"
     if not exe.is_file():
         return Outcome(STATUS_NOT_RUN, f"{label}目录缺少 JchTools.exe：{exe}")
-    # 当前驱动只支持 test-hooks 隔离。正式包必须在独立 Windows 用户会话中经
-    # 真实设置页配置；仅给 release 传测试环境变量会读写生产 KnownFolder。
-    # 尚无可核对的独立会话承接入口，不能启动正式包或用 debug EXE 冒充两种交付。
+    # 正式包须在独立 Windows 会话的干净配置中直接发现内置基础资产；
+    # release 忽略测试环境变量，当前承接不能安全启动它或用 debug 冒充。
     reason = f"{label} release 忽略测试状态/资产根环境变量；当前驱动缺少可核对的独立 Windows "
-    reason += "会话与真实配置，禁止启动正式 EXE 或读写生产配置。须在独立 Windows 会话中经真实设置页配置后验证。"
+    reason += (
+        "会话，禁止启动正式 EXE 或读写生产配置。须在独立 Windows 会话的干净配置中验证内置首次转换，无需设置初始化。"
+    )
     return Outcome(STATUS_NOT_RUN, reason, [f"{item.item_id} 未启动被测正式 EXE：{exe}"])
 
 

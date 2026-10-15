@@ -1362,14 +1362,17 @@ mod tests {
         std::env::set_var("JCH_LOG_LEVEL", "info");
         let previous = std::panic::take_hook();
         let guard = init(temp.path()).unwrap();
-        let selected = crate::xberg_settings::download_selection().unwrap();
-        crate::xberg_settings::save_download_selection(selected).unwrap();
+        let runtime = temp.path().join("runtime");
+        std::fs::create_dir(&runtime).unwrap();
+        std::fs::write(runtime.join("xberg.exe"), b"settings logging fixture").unwrap();
+        crate::xberg_settings::settings().unwrap();
+        crate::xberg_settings::save_bundled_directory(&runtime).unwrap();
         drop(guard);
         std::panic::set_hook(previous);
         std::env::remove_var("JCHTOOLS_TEST_STATE_DIR");
         std::env::remove_var("JCH_LOG_LEVEL");
         let captured = contents(&temp.path().join(LOG_DIR));
-        for operation in ["read_download_selection", "save_download_selection"] {
+        for operation in ["read_sources", "save_source"] {
             let events: Vec<_> = captured.lines()
                 .filter(|line| line.contains(&format!("operation=\"{operation}\"")))
                 .collect();
