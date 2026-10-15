@@ -3912,7 +3912,7 @@
       "name": "background_stop_waits_for_client_to_consume_confirmation",
       "ignored": false,
       "cfg": null,
-      "body": "f5529a53083e747c"
+      "body": "856ca2fc98066407"
     },
     {
       "file": "crates/xberg/src/xberg_runtime_windows.rs",
@@ -4816,6 +4816,13 @@
       "ignored": false,
       "cfg": null,
       "body": "899ec920b1ee602f"
+    },
+    {
+      "file": "optional/snap-ocr-worker/src/service/tray.rs",
+      "name": "taskbar_recreation_retries_after_native_registration_failure",
+      "ignored": false,
+      "cfg": null,
+      "body": "e84219b636e4c87e"
     },
     {
       "file": "optional/snap-ocr-worker/src/shared_xberg.rs",
@@ -5817,6 +5824,13 @@
       "ignored": true,
       "cfg": null,
       "body": "26673b92c65cafc5"
+    },
+    {
+      "file": "tests/background_settings.rs",
+      "name": "background_stop_does_not_wait_for_preexisting_incomplete_request",
+      "ignored": false,
+      "cfg": null,
+      "body": "7c00fd6df7450a25"
     },
     {
       "file": "tests/background_settings.rs",
@@ -7742,6 +7756,13 @@
       "ignored": false,
       "cfg": "all(feature = \"gui\", feature = \"test-hooks\")",
       "body": "5cd2c1477fe95678"
+    },
+    {
+      "file": "tests/gui_log_panel.rs",
+      "name": "input_field_icons_are_vertically_centered",
+      "ignored": false,
+      "cfg": "all(feature = \"gui\", feature = \"test-hooks\")",
+      "body": "00254a4faa9c0e40"
     },
     {
       "file": "tests/gui_log_panel.rs",
