@@ -760,3 +760,42 @@ fn review_remediation_hotkey_save_ignores_autostart_draft_and_preserves_it() {
         panic!("返回设置页后必须能看到仍然勾选的自启草稿");
     });
 }
+
+/// 覆盖 U-02/U-05：搜索框与目录输入框共用 Field，图标在实际渲染布局中上下居中。
+#[test]
+fn input_field_icons_are_vertically_centered() {
+    with_review_remediation_view(|view| {
+        view.set("screen", 0);
+        view.set("tool-count", 8);
+        for (width, height) in [(960, 620), (1120, 720)] {
+            view.window.set_size(PhysicalSize::new(width, height));
+            view.pixels = SharedPixelBuffer::new(width, height);
+            view.render();
+            view.screenshot(&format!("input-icons-{width}x{height}"));
+            let fields = ElementQuery::from_root(&view.ui)
+                .match_type_name("Field")
+                .find_all();
+            for field_height in [32.0, 36.0] {
+                let (field, icon) = fields.iter().find_map(|field| {
+                    if (field.size().height - field_height).abs() > 0.1 {
+                        return None;
+                    }
+                    field.query_descendants().match_type_name("Ico").find_first()
+                        .map(|icon| (field, icon))
+                }).expect("搜索框与目录输入框都应显示前置图标");
+                let center = field.absolute_position().y + field.size().height / 2.0;
+                let icon_center = icon.absolute_position().y + icon.size().height / 2.0;
+                assert!(
+                    (icon_center - center).abs() <= 0.5,
+                    "{width}×{height}，{field_height}px 输入框：图标中心 {icon_center}，输入框中心 {center}"
+                );
+                let input = field.query_descendants()
+                    .match_type_name("TextInput").find_first().unwrap();
+                assert!(
+                    (input.size().height - field.size().height).abs() <= 1.0,
+                    "图标居中不得压缩文字输入区域的高度"
+                );
+            }
+        }
+    });
+}
