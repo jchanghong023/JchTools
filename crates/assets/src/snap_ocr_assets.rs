@@ -1216,35 +1216,21 @@ fn download_stream(
         .map_err(|(message, _)| message)
 }
 
-/// P-09：仅在正常代理/直连请求链出现证书错误并失败后，对当前目标降级一次。
-#[derive(Default)]
-struct DownloadTls {
-    bypass_certificates: bool,
-    certificate_failure: bool,
-}
-
-impl DownloadTls {
-    fn retry_without_certificate_verification(&mut self, progress: &mut dyn FnMut(String)) -> bool {
-        if self.bypass_certificates || !self.certificate_failure {
-            return false;
-        }
-        self.bypass_certificates = true;
-        self.certificate_failure = false;
-        tracing::warn!(
-            event = "asset_tls_verification_bypassed",
-            certificate_verification = false,
-            "正常代理与直连尝试未成功，跳过 TLS 证书校验重试，连接身份不再验证"
-        );
-        progress("证书校验失败，跳过 TLS 证书校验重试（连接身份不再验证）".into());
-        true
-    }
+/// P-09：组件下载首轮即跳过证书身份校验；在取消检查前给出明确提示。
+fn announce_certificate_bypass(progress: &mut dyn FnMut(String)) {
+    tracing::warn!(
+        event = "asset_tls_verification_bypassed",
+        certificate_verification = false,
+        "组件下载已跳过服务端证书校验，连接身份不再验证"
+    );
+    progress("已跳过 TLS 证书校验（连接身份不再验证）".into());
 }
 
 /// 只跳过证书身份/信任校验；TLS 加密与服务端握手签名仍由 rustls 验证。
 #[derive(Debug)]
-struct DownloadCertificateFallback(WebPkiSupportedAlgorithms);
+struct DownloadCertificateBypass(WebPkiSupportedAlgorithms);
 
-impl ServerCertVerifier for DownloadCertificateFallback {
+impl ServerCertVerifier for DownloadCertificateBypass {
     fn verify_server_cert(
         &self,
         _end_entity: &CertificateDer<'_>,
@@ -1313,7 +1299,7 @@ fn download_attempt(
     let mut redirects_followed = 0_u32;
     let mut retry_direct = false;
     let mut proxy_failure = None;
-    let mut tls = DownloadTls::default();
+    announce_certificate_bypass(progress);
     loop {
         if cancel.load(std::sync::atomic::Ordering::Acquire) {
             tracing::info!(
@@ -1340,50 +1326,38 @@ fn download_attempt(
                 "资产请求开始直连回退"
             );
         }
-        let response = match download_request(
-            &current_url,
-            endpoint.as_deref(),
-            progress,
-            &request_id,
-            &mut tls,
-        ) {
-            Ok(response) => response,
-            Err((proxy_message, true)) if endpoint.is_some() => {
-                tracing::warn!(
-                    event = "asset_direct_fallback_retrying",
-                    stage = "request",
-                    elapsed_ms = jchtools_foundation::logging::elapsed_ms(hop_started),
-                    url = %jchtools_foundation::logging::safe_url(&current_url),
-                    "系统代理连接失败，按 P-09 自动回退直连重试"
-                );
-                progress("系统代理连接失败，自动回退直连重试".to_string());
-                proxy_failure = Some(proxy_message);
-                retry_direct = true;
-                continue;
-            }
-            Err((direct_message, _)) => {
-                if !cancel.load(std::sync::atomic::Ordering::Acquire)
-                    && tls.retry_without_certificate_verification(progress)
-                {
-                    retry_direct = false;
-                    proxy_failure = None;
-                    continue;
-                }
-                if retry_direct {
-                    tracing::error!(
-                        event = "asset_direct_fallback_failed",
+        let response =
+            match download_request(&current_url, endpoint.as_deref(), progress, &request_id) {
+                Ok(response) => response,
+                Err((proxy_message, true)) if endpoint.is_some() => {
+                    tracing::warn!(
+                        event = "asset_direct_fallback_retrying",
                         stage = "request",
                         elapsed_ms = jchtools_foundation::logging::elapsed_ms(hop_started),
-                        "资产直连回退请求失败"
+                        url = %jchtools_foundation::logging::safe_url(&current_url),
+                        "系统代理连接失败，按 P-09 自动回退直连重试"
                     );
+                    progress("系统代理连接失败，自动回退直连重试".to_string());
+                    proxy_failure = Some(proxy_message);
+                    retry_direct = true;
+                    continue;
                 }
-                return Err(download_attempt_error(
-                    &current_url,
-                    &mut proxy_failure,
-                    direct_message,
-                ));
-            }
-        };
+                Err((direct_message, _)) => {
+                    if retry_direct {
+                        tracing::error!(
+                            event = "asset_direct_fallback_failed",
+                            stage = "request",
+                            elapsed_ms = jchtools_foundation::logging::elapsed_ms(hop_started),
+                            "资产直连回退请求失败"
+                        );
+                    }
+                    return Err(download_attempt_error(
+                        &current_url,
+                        &mut proxy_failure,
+                        direct_message,
+                    ));
+                }
+            };
 
         let status = response.status();
         // ureq checks the redirect limit before looking up Location, including
@@ -1452,7 +1426,6 @@ fn download_attempt(
             redirects_followed += 1;
             retry_direct = false;
             proxy_failure = None;
-            tls = DownloadTls::default();
             continue;
         }
         if !(200..300).contains(&status) {
@@ -1659,9 +1632,9 @@ fn fetch_release_json_with_proxy(
     let _entered = span.enter();
     let started = std::time::Instant::now();
     tracing::info!(event = "release_metadata_started", url = %jchtools_foundation::logging::safe_url(url), max_bytes = MAX_METADATA_BYTES, "发布元数据查询开始");
+    announce_certificate_bypass(progress);
     let endpoint = proxy.endpoint_for_url(url);
     let mut direct = false;
-    let mut tls = DownloadTls::default();
     let mut attempt_number = 0;
     loop {
         attempt_number += 1;
@@ -1690,7 +1663,6 @@ fn fetch_release_json_with_proxy(
                 if direct { None } else { endpoint.as_deref() },
                 progress,
                 &request_id,
-                &mut tls,
             )?;
             if (300..400).contains(&response.status()) {
                 tracing::warn!(
@@ -1763,13 +1735,6 @@ fn fetch_release_json_with_proxy(
                 direct = true;
             }
             Err((message, _)) => {
-                if stage == "request"
-                    && !cancel.load(std::sync::atomic::Ordering::Acquire)
-                    && tls.retry_without_certificate_verification(progress)
-                {
-                    direct = false;
-                    continue;
-                }
                 if cancel.load(std::sync::atomic::Ordering::Acquire) {
                     tracing::info!(
                         event = "release_metadata_cancelled",
@@ -1800,7 +1765,6 @@ fn download_request(
     proxy: Option<&str>,
     progress: &mut dyn FnMut(String),
     request_id: &str,
-    tls: &mut DownloadTls,
 ) -> Result<ureq::Response, (String, bool)> {
     let span = tracing::info_span!("asset_http_request", request_id);
     let _entered = span.enter();
@@ -1812,23 +1776,21 @@ fn download_request(
         .timeout_connect(Duration::from_secs(30))
         .timeout_read(Duration::from_secs(60))
         .user_agent("JchTools-snap-ocr-assets/1");
-    if tls.bypass_certificates {
-        // 仅降级请求使用独立配置，绝不改动 ureq 的正常证书校验缓存。
-        static FALLBACK_TLS: std::sync::LazyLock<std::sync::Arc<rustls::ClientConfig>> =
-            std::sync::LazyLock::new(|| {
-                let algorithms =
-                    rustls::crypto::ring::default_provider().signature_verification_algorithms;
-                std::sync::Arc::new(
-                    rustls::ClientConfig::builder()
-                        .dangerous()
-                        .with_custom_certificate_verifier(std::sync::Arc::new(
-                            DownloadCertificateFallback(algorithms),
-                        ))
-                        .with_no_client_auth(),
-                )
-            });
-        builder = builder.tls_config(std::sync::Arc::clone(&FALLBACK_TLS));
-    }
+    // 独立配置仅用于组件下载；不改 ureq 默认值、其他工具或 Windows 全局证书设置。
+    static DOWNLOAD_TLS: std::sync::LazyLock<std::sync::Arc<rustls::ClientConfig>> =
+        std::sync::LazyLock::new(|| {
+            let algorithms =
+                rustls::crypto::ring::default_provider().signature_verification_algorithms;
+            std::sync::Arc::new(
+                rustls::ClientConfig::builder()
+                    .dangerous()
+                    .with_custom_certificate_verifier(std::sync::Arc::new(
+                        DownloadCertificateBypass(algorithms),
+                    ))
+                    .with_no_client_auth(),
+            )
+        });
+    builder = builder.tls_config(std::sync::Arc::clone(&DOWNLOAD_TLS));
     if let Some(proxy_url) = proxy {
         match ureq::Proxy::new(proxy_url) {
             Ok(parsed) => builder = builder.proxy(parsed),
@@ -1847,14 +1809,12 @@ fn download_request(
         }
     }
     let agent = builder.build();
-    tracing::info!(event = "asset_http_request_started", method = "GET", url = %jchtools_foundation::logging::safe_url(url), route, certificate_verification = !tls.bypass_certificates, connect_timeout_ms = 30_000, read_timeout_ms = 60_000, automatic_redirects = 0, "资产 GET 请求开始");
+    tracing::info!(event = "asset_http_request_started", method = "GET", url = %jchtools_foundation::logging::safe_url(url), route, certificate_verification = false, connect_timeout_ms = 30_000, read_timeout_ms = 60_000, automatic_redirects = 0, "资产 GET 请求开始");
     let result = agent.get(url).call();
     let certificate_failure = matches!(
         &result,
         Err(ureq::Error::Transport(error)) if is_certificate_failure(error)
     );
-    tls.certificate_failure = matches!(&result, Err(ureq::Error::Transport(_)))
-        && (tls.certificate_failure || certificate_failure);
     let elapsed_ms = jchtools_foundation::logging::elapsed_ms(started);
     match &result {
         Ok(response) => tracing::info!(
@@ -2216,58 +2176,50 @@ mod tests {
         (address, server)
     }
 
-    // 覆盖 P-09/XB-10：先严格校验代理与直连，均失败后才跳过证书校验重试代理。
-    // 元数据与资产正文共用该顺序；观察真实 TLS 握手、JSON 结果及下载字节。
+    // 覆盖 P-09/XB-10：未知颁发者的 HTTPS 代理须首轮成功，不先等待不可用的直连。
+    // 代理正文截断仍只回退直连一次；观察实际 TLS 握手、JSON 及下载字节。
     #[test]
-    fn certificate_fallback_runs_after_secure_proxy_and_direct_failures() {
+    fn certificate_bypass_uses_first_proxy_request_and_preserves_transport_fallback() {
         const BODY: &str = r#"{"tag_name":"isolated-tls-release"}"#;
         for (metadata, truncated_proxy_body) in [(true, false), (false, false), (true, true), (false, true)] {
             let complete = format!("HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{BODY}", BODY.len());
             let proxy_response = format!("HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{BODY}", BODY.len() + usize::from(truncated_proxy_body));
-            let (proxy_address, proxy_server) = diagnostic_tls_server(true, 2, proxy_response);
-            let (direct_address, direct_server) = diagnostic_tls_server(false, 1 + usize::from(truncated_proxy_body), complete);
+            let (proxy_address, proxy_server) = diagnostic_tls_server(true, 1, proxy_response);
+            let (direct_address, direct_server) = diagnostic_tls_server(false, usize::from(truncated_proxy_body), complete);
             let proxy = jchtools_foundation::system_proxy::SystemProxy::from_registry_values(
                 1, Some(&proxy_address.to_string()), None,
             );
             let url = format!("https://{direct_address}/release");
             let workspace = DiagnosticWorkspace::new();
             let partial = workspace.path().join("asset.part");
-            let mut messages = Vec::new();
-            let (_, logs) = capture_diagnostics(|| {
-                if metadata {
-                    let value = super::fetch_release_json_with_proxy(
-                        &url, &AtomicBool::new(false), &mut |text| messages.push(text), &proxy,
-                    ).expect("证书失败后必须降级查询成功");
-                    assert_eq!(value["tag_name"], "isolated-tls-release");
-                } else {
-                    super::download_attempt(
-                        &url, &partial, BODY.len() as u64, &AtomicBool::new(false),
-                        &mut |text| messages.push(text), &proxy,
-                    ).expect("证书失败后必须降级下载成功");
-                    assert_eq!(fs::read(&partial).unwrap(), BODY.as_bytes());
-                }
-            });
-            assert_eq!(proxy_server.join().unwrap(), [false, true], "代理先拒绝证书再降级成功");
-            let expected_direct = if truncated_proxy_body { vec![false, true] } else { vec![false] };
-            assert_eq!(direct_server.join().unwrap(), expected_direct, "降级前须先严格校验直连");
-            assert_eq!(logs.matches("asset_http_request_started").count(), 3 + usize::from(truncated_proxy_body), "{logs}");
-            assert_eq!(logs.matches("asset_tls_verification_bypassed").count(), 1, "{logs}");
-            let direct = messages.iter().position(|text| text.contains("直连")).unwrap();
-            let bypass = messages.iter().position(|text| text.contains("跳过 TLS 证书校验")).unwrap();
-            assert!(direct < bypass, "{messages:?}");
+            if metadata {
+                let value = super::fetch_release_json_with_proxy(
+                    &url, &AtomicBool::new(false), &mut |_| {}, &proxy,
+                ).expect("代理 HTTPS 必须首轮跳过证书校验并查询成功");
+                assert_eq!(value["tag_name"], "isolated-tls-release");
+            } else {
+                super::download_attempt(
+                    &url, &partial, BODY.len() as u64, &AtomicBool::new(false),
+                    &mut |_| {}, &proxy,
+                ).expect("代理 HTTPS 必须首轮跳过证书校验并下载成功");
+                assert_eq!(fs::read(&partial).unwrap(), BODY.as_bytes());
+            }
+            assert_eq!(proxy_server.join().unwrap(), [true], "代理只应执行一次成功的 TLS 握手");
+            let expected_direct = if truncated_proxy_body { vec![true] } else { vec![] };
+            assert_eq!(direct_server.join().unwrap(), expected_direct, "仅真实传输失败才回退直连");
         }
     }
 
-    // 覆盖 P-09：无代理时仅严格/降级两次；降级提示期间取消不得再发请求或写产物。
+    // 覆盖 P-09：无代理时未知颁发者也只请求一次；初始进度回调取消不得发请求或写产物。
     #[test]
-    fn certificate_fallback_direct_only_respects_cancellation() {
+    fn certificate_bypass_direct_only_respects_cancellation() {
         const BODY: &str = r#"{"tag_name":"direct-tls-release"}"#;
         for (metadata, cancelled) in [(true, false), (false, false), (true, true), (false, true)] {
             let response = format!("HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{BODY}", BODY.len());
-            let (address, server) = diagnostic_tls_server(false, if cancelled { 1 } else { 2 }, response);
+            let (address, server) = diagnostic_tls_server(false, usize::from(!cancelled), response);
             let cancel = AtomicBool::new(false);
-            let mut progress = |text: String| {
-                if cancelled && text.contains("跳过 TLS 证书校验") {
+            let mut progress = |_: String| {
+                if cancelled {
                     cancel.store(true, std::sync::atomic::Ordering::Release);
                 }
             };
@@ -2286,37 +2238,34 @@ mod tests {
             if cancelled {
                 assert!(result.unwrap_err().contains("取消"));
                 assert!(!partial.exists(), "取消后不得产生下载文件");
-                assert_eq!(server.join().unwrap(), [false]);
+                assert_eq!(server.join().unwrap(), Vec::<bool>::new());
             } else {
-                result.expect("无代理时须在证书错误后降级成功");
-                assert_eq!(server.join().unwrap(), [false, true]);
+                result.expect("无代理时必须首轮跳过证书校验并成功");
+                assert_eq!(server.join().unwrap(), [true]);
             }
         }
     }
 
-    // 覆盖 P-09：前一跳降级成功不得把证书校验关闭状态带给重定向目标。
+    // 覆盖 P-09：每个 HTTPS 重定向目标均首轮跳过证书校验，不产生额外证书重试。
     #[test]
-    fn certificate_fallback_restarts_secure_validation_after_redirect() {
+    fn certificate_bypass_applies_to_each_redirect_target() {
         const BODY: &str = "redirected asset";
-        let (target, target_server) = diagnostic_tls_server(false, 2, format!(
+        let (target, target_server) = diagnostic_tls_server(false, 1, format!(
             "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{BODY}", BODY.len(),
         ));
-        let (source, source_server) = diagnostic_tls_server(false, 2, format!(
+        let (source, source_server) = diagnostic_tls_server(false, 1, format!(
             "HTTP/1.1 302 Found\r\nLocation: https://{target}/release\r\nContent-Length: 0\r\nConnection: close\r\n\r\n",
         ));
         let workspace = DiagnosticWorkspace::new();
         let partial = workspace.path().join("redirected.part");
-        let (_, logs) = capture_diagnostics(|| {
-            super::download_attempt(
-                &format!("https://{source}/release"), &partial, BODY.len() as u64,
-                &AtomicBool::new(false), &mut |_| {},
-                &jchtools_foundation::system_proxy::SystemProxy::default(),
-            ).expect("两跳分别完成证书错误回退");
-        });
+        super::download_attempt(
+            &format!("https://{source}/release"), &partial, BODY.len() as u64,
+            &AtomicBool::new(false), &mut |_| {},
+            &jchtools_foundation::system_proxy::SystemProxy::default(),
+        ).expect("两跳 HTTPS 均须首轮跳过证书校验并成功");
         assert_eq!(fs::read(&partial).unwrap(), BODY.as_bytes());
-        assert_eq!(source_server.join().unwrap(), [false, true]);
-        assert_eq!(target_server.join().unwrap(), [false, true]);
-        assert_eq!(logs.matches("asset_tls_verification_bypassed").count(), 2, "{logs}");
+        assert_eq!(source_server.join().unwrap(), [true]);
+        assert_eq!(target_server.join().unwrap(), [true]);
     }
 
     #[test]
@@ -2479,7 +2428,6 @@ mod tests {
                 Some(&format!("http://{proxy_address}")),
                 &mut |_| {},
                 "proxy-auth-regression",
-                &mut super::DownloadTls::default(),
             )
         });
         proxy_server.join().expect("代理认证拒绝供给线程结束");
@@ -2530,7 +2478,6 @@ mod tests {
             None,
             &mut |_| {},
             "direct-http-status-regression",
-            &mut super::DownloadTls::default(),
         )
         .expect_err("非代理 407 必须仍报 HTTP 错误");
         server.join().expect("非代理 HTTP 错误供给线程结束");
