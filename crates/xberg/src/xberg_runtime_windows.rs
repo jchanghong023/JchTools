@@ -1,7 +1,7 @@
 //! Windows 命名管道代理。锁与管道名不包含运行目录，保存不同目录也不会另起引擎。
 //! 停止后新连接不加入终态交付屏障，但仍解析请求，让已登记任务的取消可达；
 //! 业务入口继续由 stopping gate 拒绝，未交付 JSON 的新连接不能拖住后台退出。
-use super::{diagnostic_id, startup_config};
+use super::{diagnostic_id, startup_config, MAX_MESSAGE_BYTES};
 use fs2::FileExt;
 use jchtools_foundation::{logging, xberg_settings};
 use serde_json::{json, Value};
@@ -30,11 +30,6 @@ extern "system" {
 use windows_sys::Win32::System::IO::CancelSynchronousIo;
 
 const QUERY_TIMEOUT: Duration = Duration::from_secs(15);
-// 单行消息上限按方向共用：请求侧远小于该值；响应侧承载完整 extract 结果，
-// 含正文之外未被产物消费的图片/页/表数据（实测 50 MB 源文档可达 204 MB）。
-// 512 MB 覆盖现有批次峰值约 2.5 倍；超限属于引擎通信故障，由 broken 重建兜底，
-// 可定位请求时只失败该请求，无法定位时才重建；不得静默截断或冒充成功。
-const MAX_MESSAGE: u64 = 512 * 1024 * 1024;
 const MAX_RESPONSE_ID_BYTES: usize = 4096;
 struct PendingRequest {
     sender: mpsc::Sender<Value>,
@@ -207,9 +202,29 @@ fn should_mark_background_stopped(command: &str, response: &Value) -> bool {
 fn mark_background_stopped() -> Result<(), String> {
     let marker = stopped_marker()?;
     if let Some(parent) = marker.parent() {
-        std::fs::create_dir_all(parent).map_err(|e| e.to_string())?;
+        std::fs::create_dir_all(parent).map_err(|error| {
+            tracing::warn!(
+                event = "xberg_stopped_marker_failed",
+                stage = "stopped_marker",
+                operation = "create_directory",
+                error_type = ?error.kind(),
+                error_code = ?error.raw_os_error(),
+                "无法准备共享后台停止标记目录"
+            );
+            error.to_string()
+        })?;
     }
-    std::fs::write(marker, b"stopped").map_err(|e| e.to_string())
+    std::fs::write(marker, b"stopped").map_err(|error| {
+        tracing::warn!(
+            event = "xberg_stopped_marker_failed",
+            stage = "stopped_marker",
+            operation = "write",
+            error_type = ?error.kind(),
+            error_code = ?error.raw_os_error(),
+            "无法写入共享后台停止标记"
+        );
+        error.to_string()
+    })
 }
 
 /// 看门狗反复取消当前线程同步 I/O，覆盖期限到达恰在两次 I/O 之间的竞态。
@@ -508,7 +523,7 @@ fn read_bounded_line(reader: &mut impl BufRead, limit: u64) -> Result<BoundedLin
 }
 
 fn read_json(reader: &mut impl BufRead) -> Result<Value, String> {
-    let line = read_bounded_line(reader, MAX_MESSAGE).inspect_err(|_| {
+    let line = read_bounded_line(reader, MAX_MESSAGE_BYTES).inspect_err(|_| {
         tracing::warn!(
             event = "xberg_message_read_failed",
             stage = "read",
@@ -543,7 +558,7 @@ enum EngineResponse {
 }
 
 fn read_engine_response(reader: &mut impl BufRead) -> Result<EngineResponse, String> {
-    match read_bounded_line(reader, MAX_MESSAGE)? {
+    match read_bounded_line(reader, MAX_MESSAGE_BYTES)? {
         BoundedLine::Complete(bytes) => serde_json::from_slice(&bytes)
             .map(EngineResponse::Json)
             .map_err(|_| "共享 Xberg 返回了无效 JSON".into()),
@@ -559,7 +574,7 @@ fn write_json(writer: &mut impl Write, value: &Value) -> Result<(), String> {
         );
         e.to_string()
     })?;
-    if bytes.len() as u64 > MAX_MESSAGE {
+    if bytes.len() as u64 > MAX_MESSAGE_BYTES {
         tracing::warn!(
             event = "xberg_message_write_failed",
             stage = "message_limit",
@@ -987,7 +1002,6 @@ fn request_via_broker(
         Some("extract" | "transcribe" | "ocr_snapshot")
     );
     let envelope = json!({"runtime_dir":root, "request":value, "acknowledge_submission":acknowledge_submission, "diagnostic":{"parent_operation_id":parent_operation_id,"caller_pid":std::process::id()}});
-    let cloned = envelope.clone();
     let (send, receive) = mpsc::channel();
     let span = tracing::Span::current();
     // 状态只由本次原连接持有，线程结束便释放；不保留请求墓碑。
@@ -998,7 +1012,7 @@ fn request_via_broker(
         if send
             .send(exchange_with_submission(
                 pipe,
-                &cloned,
+                &envelope,
                 exchange_timeout,
                 acknowledge_submission.then_some(reader_submitted.as_ref()),
             ))
@@ -1921,7 +1935,7 @@ fn handle(pipe: File, engine: &Mutex<Option<Engine>>, stopping: &AtomicBool) -> 
             request["command"].as_str(),
             Some("broker-state" | "broker-stop" | "broker-force-stop")
         ) {
-            // 先持有状态锁，再发布停止；看门狗必须等客户端取走确认后才能退出。
+            // 状态快照与停止变更在锁内完成；交付由 Flush 和 ActiveHandler 保证。
             let mut slot = engine.lock().map_err(|_| "后台状态异常")?;
             if request["command"] == "broker-stop" {
                 stopping.store(true, Ordering::Release);
@@ -1939,12 +1953,9 @@ fn handle(pipe: File, engine: &Mutex<Option<Engine>>, stopping: &AtomicBool) -> 
                         command,
                         "共享代理拒绝强制停止：仍有其他场景任务"
                     );
-                    return write_pipe_response(
-                        reader.get_mut(),
-                        &json!({"id":request["id"],"ok":false,"error":"文档、媒体或截图任务尚未结束，不能强制退出","jchtools_broker_protocol":BROKER_PROTOCOL}),
-                        caller_pid,
-                        started,
-                    );
+                    let response = json!({"id":request["id"],"ok":false,"error":"文档、媒体或截图任务尚未结束，不能强制退出","jchtools_broker_protocol":BROKER_PROTOCOL});
+                    drop(slot);
+                    return write_pipe_response(reader.get_mut(), &response, caller_pid, started);
                 }
                 stopping.store(true, Ordering::Release);
                 if let Some(mut current) = slot.take() {
@@ -1963,6 +1974,7 @@ fn handle(pipe: File, engine: &Mutex<Option<Engine>>, stopping: &AtomicBool) -> 
                 })
                 .unwrap_or(0);
             let response = json!({"id":request["id"],"ok":true,"running":true,"active":active,"stopping":stopping.load(Ordering::Acquire),"jchtools_broker_protocol":BROKER_PROTOCOL});
+            drop(slot); // 控制客户端未读响应不能阻塞其他请求或停止回收。
             log_response("broker", command, &response, started, None);
             stage = "response_write";
             return write_pipe_response(reader.get_mut(), &response, caller_pid, started);
@@ -2460,7 +2472,7 @@ mod tests {
             }
             BoundedLine::Complete(_) => panic!("超限行不应保留完整正文"),
         }
-        let second = read_bounded_line(&mut input, MAX_MESSAGE).expect("下一行应保持同步");
+        let second = read_bounded_line(&mut input, MAX_MESSAGE_BYTES).expect("下一行应保持同步");
         match second {
             BoundedLine::Complete(bytes) => {
                 let response: Value = serde_json::from_slice(&bytes).expect("JSON 应完整");

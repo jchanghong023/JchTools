@@ -6,6 +6,10 @@ use std::path::Path;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
+/// 单条 IPC 消息的请求/响应共用上限；调用方须为 JSON envelope 预留空间。
+/// 512 MiB 覆盖包含正文、图片、页和表数据的现有响应峰值，超限不得截断。
+pub const MAX_MESSAGE_BYTES: u64 = 512 * 1024 * 1024;
+
 static NEXT: AtomicU64 = AtomicU64::new(1);
 
 #[cfg(windows)]

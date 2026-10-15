@@ -96,8 +96,9 @@ pub(crate) enum Command {
     CaptureFailed(String),
     ModelLoaded(Result<(), LoadFailure>),
     OcrFinished(Result<Option<String>, OcrError>, (i32, i32, i32, i32)),
-    WorkerStopped,
-    WorkerStopFailed(String),
+    WorkerStopped(tracing::Span),
+    WorkerStopFailed(tracing::Span),
+    TrayStopped,
     HotkeyUnavailable(String),
     OpenMain,
     OpenSettings,
@@ -140,11 +141,10 @@ enum Work {
 
 const WORKER_STOP_ATTEMPTS: usize = 3;
 
-fn stop_background_with_retry<F>(mut control: F) -> Result<(), String>
+fn stop_background_with_retry<F>(mut control: F) -> Result<(), ()>
 where
     F: FnMut() -> Result<Value, String>,
 {
-    let mut last_error = None;
     let started = Instant::now();
     for attempt in 0..WORKER_STOP_ATTEMPTS {
         tracing::info!(
@@ -162,8 +162,7 @@ where
                 );
                 return Ok(());
             }
-            Ok(_) => last_error = Some("共享后台仍在运行".to_string()),
-            Err(error) => last_error = Some(error),
+            Ok(_) | Err(_) => {}
         }
         tracing::warn!(
             event = "ocr_stop_attempt_failed",
@@ -182,7 +181,7 @@ where
         elapsed_ms = crate::logging::elapsed_ms(started),
         "共享后台停止重试耗尽"
     );
-    Err(last_error.unwrap_or_else(|| "共享后台停止未完成".to_string()))
+    Err(())
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -716,10 +715,12 @@ fn worker(
             // 通道断开是正常服务收尾，末端统一记录。
             Err(mpsc::RecvTimeoutError::Timeout) => {
                 let alive = (|| {
-                    let component = crate::xberg_settings::required()?;
+                    let component =
+                        crate::xberg_settings::required().map_err(LoadFailure::NotConfigured)?;
                     if verified_root.as_ref() != Some(&component) {
-                        crate::xberg_runtime::validate_assets(&component, "engine")
-                            .map_err(|error| redact_user_path(&error, &component))?;
+                        crate::xberg_runtime::validate_assets(&component, "engine").map_err(
+                            |error| LoadFailure::Failed(redact_user_path(&error, &component)),
+                        )?;
                         verified_root = Some(component.clone());
                     }
                     crate::xberg_runtime::request(
@@ -729,6 +730,7 @@ fn worker(
                         &AtomicBool::new(false),
                     )
                     .and_then(crate::xberg_runtime::checked)
+                    .map_err(LoadFailure::Failed)
                 })();
                 match alive {
                     Ok(value) => {
@@ -752,15 +754,18 @@ fn worker(
                         );
                         Work::Load(tracing::Span::current())
                     }
-                    Err(error) => {
+                    Err(failure) => {
                         tracing::warn!(
                             event = "ocr_keepalive_failed",
-                            error_type = "runtime_unavailable",
+                            error_type = match &failure {
+                                LoadFailure::NotConfigured(_) => "not_configured",
+                                LoadFailure::Failed(_) => "runtime_unavailable",
+                            },
                             "共享引擎保活失败，模型降级"
                         );
                         client.take();
                         engine_pid = None;
-                        let _ = events.send(Command::ModelLoaded(Err(LoadFailure::Failed(error))));
+                        let _ = events.send(Command::ModelLoaded(Err(failure)));
                         continue;
                     }
                 }
@@ -878,11 +883,11 @@ fn worker(
                 match stop_background_with_retry(|| crate::xberg_runtime::background_control(true))
                 {
                     Ok(()) => {
-                        let _ = events.send(Command::WorkerStopped);
+                        let _ = events.send(Command::WorkerStopped(span.clone()));
                         break;
                     }
-                    Err(error) => {
-                        let _ = events.send(Command::WorkerStopFailed(error));
+                    Err(()) => {
+                        let _ = events.send(Command::WorkerStopFailed(span.clone()));
                     }
                 }
             }
@@ -1206,6 +1211,16 @@ fn autostart_value() -> Result<AutostartValue, String> {
     })
 }
 
+/// 截图任务的活动阶段；等待模型与已交付推理均属于 Processing。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ActivityPhase {
+    Idle,
+    /// Trigger 已派发，等待框选的终态回执。
+    Selecting,
+    /// 已收到截图，等待模型或推理完成；托盘退出不能终结此阶段。
+    Processing,
+}
+
 struct Service {
     root: PathBuf,
     commands: mpsc::Sender<Command>,
@@ -1218,7 +1233,7 @@ struct Service {
     model: ModelState,
     model_error: Option<String>,
     pending_image: Option<(BgrImage, (i32, i32, i32, i32))>,
-    busy: bool,
+    phase: ActivityPhase,
     diagnostic_task: Option<(tracing::Span, Instant)>,
     result: Option<ResultWindowHandle>,
     old_result_visible: bool,
@@ -1274,7 +1289,7 @@ impl Service {
         // S8-05：损坏的 Run 值不得计入已启用（保持 bool 口径兼容主界面），
         // 并以独立字段呈现损坏状态。
         let autostart = autostart_value().unwrap_or(AutostartValue::Absent);
-        json!({"ok":true,"exiting":self.exit_pending.is_some(),"shared_xberg_protocol":2,"background_service_protocol":1,"model":self.model.as_str(),"task":if self.busy {"recognizing"} else {"idle"},
+        json!({"ok":true,"exiting":self.exit_pending.is_some(),"shared_xberg_protocol":2,"background_service_protocol":1,"model":self.model.as_str(),"task":if self.phase == ActivityPhase::Idle {"idle"} else {"recognizing"},
             "hotkey":self.settings.hotkey,"autostart":matches!(autostart, AutostartValue::Current | AutostartValue::Stale),
             "autostart_corrupt":autostart == AutostartValue::Corrupt,
             "error":self.model_error.as_ref().or(self.settings.warning.as_ref())})
@@ -1392,7 +1407,7 @@ impl Service {
         });
     }
     fn cancel_recognition(&mut self) {
-        if !self.busy {
+        if self.phase == ActivityPhase::Idle {
             return;
         }
         let span = self.task_span();
@@ -1417,7 +1432,7 @@ impl Service {
         );
         if self.pending_image.take().is_some() {
             self.finish_task("cancelled", "waiting_model");
-            self.busy = false;
+            self.phase = ActivityPhase::Idle;
             self.hide_progress();
             self.restore_old();
             self.tray.notice("已取消识别");
@@ -1615,7 +1630,7 @@ impl Service {
                 window.set_autostart_draft(enabled);
             }
             window.set_autostart_enabled(enabled);
-            window.set_recognizing(self.busy);
+            window.set_recognizing(self.phase != ActivityPhase::Idle);
             window.set_model_loading(self.model == ModelState::Loading);
             window.set_needs_initialization(matches!(
                 self.model,
@@ -1750,7 +1765,7 @@ impl Service {
         });
     }
     fn save_settings(&mut self, hotkey: &str, enabled: bool) -> Result<(), String> {
-        if self.busy || self.exit_pending.is_some() {
+        if self.phase != ActivityPhase::Idle || self.exit_pending.is_some() {
             return Err("请等待当前截图任务结束后保存设置".into());
         }
         if self.pending_hotkey.is_some() {
@@ -1984,7 +1999,7 @@ impl Service {
             self.tray.notice("截图服务正在退出");
             return;
         }
-        if self.busy {
+        if self.phase != ActivityPhase::Idle {
             self.tray.notice("正在识别");
             return;
         }
@@ -1999,9 +2014,13 @@ impl Service {
         );
         self.cancel_generation.fetch_add(1, Ordering::AcqRel);
         self.cancel.store(false, Ordering::Release);
-        self.busy = true;
+        self.phase = ActivityPhase::Selecting;
         self.hide_old();
-        self.tray.trigger(span.clone());
+        if self.tray.trigger(span.clone()).is_err() {
+            self.handle(Command::CaptureFailed(
+                "托盘服务不可用，截图请求未交付".into(),
+            ));
+        }
         self.refresh_settings();
     }
     fn request_exit(&mut self) {
@@ -2021,12 +2040,12 @@ impl Service {
         self.cancel_recognition();
         tracing::info!(
             event = "ocr_service_stopping",
-            busy = self.busy,
+            busy = self.phase != ActivityPhase::Idle,
             model_state = self.model.as_str(),
             "截图后台开始安全停止"
         );
         self.exit_pending = Some(Instant::now());
-        if self.busy || self.model == ModelState::Loading {
+        if self.phase != ActivityPhase::Idle || self.model == ModelState::Loading {
             self.tray
                 .notice("正在等待当前任务安全结束；退出完成前后台仍保持响应");
             self.open_settings();
@@ -2133,7 +2152,7 @@ impl Service {
                     event = "ocr_control_handler_completed",
                     command = command_kind,
                     model_state = self.model.as_str(),
-                    busy = self.busy,
+                    busy = self.phase != ActivityPhase::Idle,
                     elapsed_ms = crate::logging::elapsed_ms(started),
                     "截图服务控制命令完成"
                 );
@@ -2160,10 +2179,15 @@ impl Service {
             }
             Command::CaptureRequested => self.request_capture(),
             Command::Image(image, work) => {
+                // 托盘销毁后可能仍有框选的迟到回执，不能重新启动已终结的任务。
+                if self.phase == ActivityPhase::Idle {
+                    return;
+                }
+                self.phase = ActivityPhase::Processing;
                 let span = self.task_span();
                 let _entered = span.enter();
                 if self.exit_pending.is_some() || self.cancel.load(Ordering::Acquire) {
-                    self.busy = false;
+                    self.phase = ActivityPhase::Idle;
                     self.pending_image = None;
                     self.hide_progress();
                     self.restore_old();
@@ -2173,7 +2197,7 @@ impl Service {
                         ModelState::Loading => {
                             if let Err(reason) = self.show_progress("等待模型就绪…") {
                                 self.finish_task("failed", "progress_window");
-                                self.busy = false;
+                                self.phase = ActivityPhase::Idle;
                                 self.restore_old();
                                 self.tray.notice(reason);
                             } else {
@@ -2184,7 +2208,7 @@ impl Service {
                             self.cancel.store(false, Ordering::Release);
                             if let Err(reason) = self.show_progress("正在识别…") {
                                 self.finish_task("failed", "progress_window");
-                                self.busy = false;
+                                self.phase = ActivityPhase::Idle;
                                 self.restore_old();
                                 self.tray.notice(reason);
                             } else if self
@@ -2193,7 +2217,7 @@ impl Service {
                                 .is_err()
                             {
                                 self.finish_task("failed", "worker_dispatch");
-                                self.busy = false;
+                                self.phase = ActivityPhase::Idle;
                                 self.hide_progress();
                                 self.restore_old();
                                 self.tray.notice("推理进程已退出");
@@ -2201,7 +2225,7 @@ impl Service {
                         }
                         ModelState::Uninitialized | ModelState::Error => {
                             self.finish_task("failed", "model_not_ready");
-                            self.busy = false;
+                            self.phase = ActivityPhase::Idle;
                             self.restore_old();
                             self.tray.notice("模型未就绪，请初始化或在设置中重试加载");
                         }
@@ -2210,13 +2234,13 @@ impl Service {
             }
             Command::CancelledSelection => {
                 self.finish_task("cancelled", "selection");
-                self.busy = false;
+                self.phase = ActivityPhase::Idle;
                 self.hide_progress();
                 self.restore_old();
             }
             Command::CaptureFailed(reason) => {
                 self.finish_task("failed", "capture");
-                self.busy = false;
+                self.phase = ActivityPhase::Idle;
                 self.hide_progress();
                 self.restore_old();
                 self.tray.notice(reason);
@@ -2243,7 +2267,7 @@ impl Service {
                             if let Some((image, work)) = self.pending_image.take() {
                                 if self.cancel.load(Ordering::Acquire) {
                                     self.finish_task("cancelled", "waiting_model");
-                                    self.busy = false;
+                                    self.phase = ActivityPhase::Idle;
                                     self.hide_progress();
                                     self.restore_old();
                                 } else {
@@ -2256,7 +2280,7 @@ impl Service {
                                         .is_err()
                                     {
                                         self.finish_task("failed", "worker_dispatch");
-                                        self.busy = false;
+                                        self.phase = ActivityPhase::Idle;
                                         self.hide_progress();
                                         self.restore_old();
                                         self.tray.notice("推理进程已退出");
@@ -2286,7 +2310,7 @@ impl Service {
                 );
                 if self.model != ModelState::Ready && self.pending_image.take().is_some() {
                     self.finish_task("failed", "model_load");
-                    self.busy = false;
+                    self.phase = ActivityPhase::Idle;
                     self.hide_progress();
                     self.restore_old();
                     self.tray.notice(format!(
@@ -2304,7 +2328,7 @@ impl Service {
                     Err(OcrError::Cancelled) => "cancelled",
                     Err(_) => "failed",
                 };
-                self.busy = false;
+                self.phase = ActivityPhase::Idle;
                 self.hide_progress();
                 if self.exit_pending.is_some() {
                     self.finish_task(terminal_result, "service_stopping");
@@ -2394,6 +2418,12 @@ impl Service {
                         self.model = ModelState::Error;
                         self.model_error = Some(reason);
                     }
+                }
+            }
+            Command::TrayStopped => {
+                self.settings.warning = Some("托盘服务已退出，截图暂不可用".into());
+                if self.phase == ActivityPhase::Selecting {
+                    self.handle(Command::CaptureFailed("托盘服务已退出，截图未完成".into()));
                 }
             }
             Command::HotkeyUnavailable(reason) => {
@@ -2549,12 +2579,14 @@ impl Service {
                     self.begin_exit();
                 }
             }
-            Command::WorkerStopped => {
+            Command::WorkerStopped(span) => {
+                let _entered = span.enter();
                 tracing::debug!(event = "ocr_stop_received", "已收到截图推理线程停止回执");
                 self.complete_exit();
                 return;
             }
-            Command::WorkerStopFailed(error) => {
+            Command::WorkerStopFailed(span) => {
+                let _entered = span.enter();
                 tracing::warn!(
                     event = "ocr_stop_retry_scheduled",
                     error_type = "stop_failed",
@@ -2565,10 +2597,12 @@ impl Service {
                 self.stop_retry_at = Some(Instant::now() + Duration::from_secs(1));
                 self.tray
                     .notice("后台停止暂未完成，将继续重试；仍可使用强制退出");
-                let _ = error;
             }
         }
-        if self.exit_pending.is_some() && !self.busy && self.model != ModelState::Loading {
+        if self.exit_pending.is_some()
+            && self.phase == ActivityPhase::Idle
+            && self.model != ModelState::Loading
+        {
             self.stop_worker();
         }
         self.refresh_settings();
@@ -2888,7 +2922,7 @@ fn run_service_inner(autostart: bool) -> Result<(), String> {
         model: ModelState::Loading,
         model_error: None,
         pending_image: None,
-        busy: false,
+        phase: ActivityPhase::Idle,
         diagnostic_task: None,
         result: None,
         old_result_visible: false,
@@ -2943,7 +2977,7 @@ fn run_service_inner(autostart: bool) -> Result<(), String> {
                 {
                     let mut current = service.borrow_mut();
                     if current.exit_pending.is_some()
-                        && !current.busy
+                        && current.phase == ActivityPhase::Idle
                         && current.model != ModelState::Loading
                     {
                         current.stop_worker();
@@ -2968,6 +3002,10 @@ fn run_service_inner(autostart: bool) -> Result<(), String> {
         .map_err(|_| service_failure("截图服务窗口事件循环失败".to_string(), "event_loop"))
 }
 
+#[cfg(all(test, feature = "test-hooks"))]
+#[path = "../../../tests/common/engine_session.rs"]
+mod engine_session;
+
 #[rustfmt::skip]
 #[warn(
     warnings,
@@ -2982,7 +3020,7 @@ fn run_service_inner(autostart: bool) -> Result<(), String> {
 )]
 #[cfg(test)]
 mod tests {
-    use super::{tray, Command, ModelState, OcrError, PendingHotkey, Service, Settings, Work};
+    use super::{tray, ActivityPhase, Command, ModelState, OcrError, PendingHotkey, Service, Settings, Work};
     use slint::ComponentHandle;
     use std::fs;
     use std::path::Path;
@@ -3011,7 +3049,7 @@ mod tests {
             model: ModelState::Ready,
             model_error: None,
             pending_image: None,
-            busy: true,
+            phase: ActivityPhase::Processing,
             diagnostic_task: None,
             result: None,
             old_result_visible: false,
@@ -3028,6 +3066,484 @@ mod tests {
         (service, work_rx)
     }
 
+    fn review_remediation_testing_backend(threading: bool) -> Result<(), Box<dyn std::error::Error>> {
+        slint::platform::set_platform(Box::new(
+            i_slint_backend_testing::TestingBackend::new(
+                i_slint_backend_testing::TestingBackendOptions {
+                    threading,
+                    renderer_name: Some("software".into()),
+                    ..Default::default()
+                },
+            ),
+        ))?;
+        Ok(())
+    }
+
+    // 隔离测试子进程先等 stdin 放行，父进程完成 Job 绑定后才允许创建 broker。
+    // 回收屏障等待整个自有进程树归零，不能把 broker-stop 的 ACK 当作引擎已退出。
+    #[cfg(feature = "test-hooks")]
+    fn review_remediation_engine_child(
+        command: &mut std::process::Command,
+    ) -> Result<std::process::ExitStatus, Box<dyn std::error::Error>> {
+        use std::io::Write as _;
+        use std::os::windows::io::{AsRawHandle as _, FromRawHandle as _, OwnedHandle};
+        use windows_sys::Win32::System::JobObjects::{
+            AssignProcessToJobObject, CreateJobObjectW, JobObjectBasicAccountingInformation,
+            JobObjectExtendedLimitInformation, QueryInformationJobObject, SetInformationJobObject,
+            TerminateJobObject, JOBOBJECT_BASIC_ACCOUNTING_INFORMATION,
+            JOBOBJECT_EXTENDED_LIMIT_INFORMATION, JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE,
+        };
+
+        struct ScopedChild {
+            child: Option<std::process::Child>,
+            job: OwnedHandle,
+            assigned: bool,
+        }
+        impl ScopedChild {
+            fn finish(&mut self) -> std::io::Result<()> {
+                if self.assigned {
+                    // SAFETY: 仅终结本测试创建并在放行前绑定的子进程及其后代。
+                    if unsafe { TerminateJobObject(self.job.as_raw_handle().cast(), 1) } == 0 {
+                        return Err(std::io::Error::last_os_error());
+                    }
+                    loop {
+                        // Job 完成端口通知不保证送达；只以内核账户中的进程数为屏障。
+                        // SAFETY: Win32 POD 允许清零；输出结构和可选长度指针有效。
+                        let mut accounting: JOBOBJECT_BASIC_ACCOUNTING_INFORMATION =
+                            unsafe { std::mem::zeroed() };
+                        // SAFETY: Job 由本守卫独占，输出缓冲区大小与结构一致。
+                        if unsafe {
+                            QueryInformationJobObject(self.job.as_raw_handle().cast(),
+                                JobObjectBasicAccountingInformation, (&raw mut accounting).cast(),
+                                std::mem::size_of_val(&accounting) as u32, std::ptr::null_mut())
+                        } == 0 {
+                            return Err(std::io::Error::last_os_error());
+                        }
+                        if accounting.ActiveProcesses == 0 {
+                            self.assigned = false;
+                            break;
+                        }
+                        // 没有新的业务重试或任意时限；仅让出调度等待已终结进程退场。
+                        std::thread::yield_now();
+                    }
+                }
+                if let Some(child) = self.child.as_mut() {
+                    if child.try_wait()?.is_none() {
+                        // 仅覆盖 Job 绑定失败、尚在等 stdin 放行的自有子进程。
+                        child.kill()?;
+                    }
+                    child.wait()?;
+                }
+                drop(self.child.take());
+                Ok(())
+            }
+        }
+        impl Drop for ScopedChild {
+            fn drop(&mut self) {
+                if let Err(error) = self.finish() {
+                    // 不吞掉回收失败；无路径、环境或协议正文。
+                    eprintln!("隔离引擎进程树回收失败：kind={:?} code={:?}",
+                        error.kind(), error.raw_os_error());
+                }
+            }
+        }
+        // SAFETY: 创建无继承的匿名 Job；返回有效句柄后立即交给 OwnedHandle。
+        let job = unsafe { CreateJobObjectW(std::ptr::null(), std::ptr::null()) };
+        if job.is_null() { return Err(std::io::Error::last_os_error().into()); }
+        // SAFETY: job 来自上面的成功创建，所有权仅转移一次。
+        let job = unsafe { OwnedHandle::from_raw_handle(job.cast()) };
+        let mut scoped = ScopedChild {
+            child: None, job,
+            assigned: false,
+        };
+        // SAFETY: Win32 POD 配置允许全零初始化。
+        let mut limits: JOBOBJECT_EXTENDED_LIMIT_INFORMATION = unsafe { std::mem::zeroed() };
+        limits.BasicLimitInformation.LimitFlags = JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE;
+        // SAFETY: Job 及同步读取的配置结构均由本函数持有。
+        if unsafe {
+            SetInformationJobObject(scoped.job.as_raw_handle().cast(), JobObjectExtendedLimitInformation,
+                (&raw const limits).cast(), std::mem::size_of_val(&limits) as u32)
+        } == 0 {
+            return Err(std::io::Error::last_os_error().into());
+        }
+        scoped.child = Some(command.stdin(std::process::Stdio::piped()).spawn()?);
+        let child = scoped.child.as_mut().ok_or("隔离子进程未创建")?;
+        // SAFETY: 子进程等待 stdin，不会在绑定之前派生任何 broker/引擎。
+        if unsafe {
+            AssignProcessToJobObject(scoped.job.as_raw_handle().cast(), child.as_raw_handle().cast())
+        } == 0 {
+            return Err(std::io::Error::last_os_error().into());
+        }
+        scoped.assigned = true;
+        child.stdin.take().ok_or("隔离子进程缺少放行管道")?.write_all(b"1")?;
+        let status = child.wait()?;
+        scoped.finish()?;
+        Ok(status)
+    }
+
+    // P2-06 / O-13 / XB-22：真实 recv_timeout 空闲分支，不手工映射 LoadFailure。
+    // 引擎复用现有协议夹具；模型质量不在这项生命周期回归的范围内。
+    #[test]
+    #[cfg(feature = "test-hooks")]
+    fn review_remediation_idle_unconfigured_recovers_after_settings_save(
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        const CHILD: &str = "JCHTOOLS_REVIEW_OCR_IDLE_CHILD";
+        if std::env::var_os(CHILD).is_none() {
+            // 仅父进程取仓库级锁；status 等待子进程停止测试引擎并退出后才释放，
+            // 子分支不重入同一文件锁，避免父子互等。
+            let repository_root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+            let _session = super::engine_session::session_lock(&repository_root);
+            let temp = tempfile::tempdir()?;
+            let status = review_remediation_engine_child(
+                std::process::Command::new(std::env::current_exe()?)
+                    .args(["--exact", "service::tests::review_remediation_idle_unconfigured_recovers_after_settings_save", "--nocapture"])
+                    .env(CHILD, "1")
+                    .env("JCHTOOLS_TEST_STATE_DIR", temp.path().join("state"))
+                    .env("JCHTOOLS_SNAP_OCR_TEST_ASSET_ROOT", temp.path().join("ocr"))
+                    .env_remove("JCHTOOLS_MARKDOWN_TEST_ASSET_ROOT"),
+            )?;
+            assert!(status.success(), "隔离 worker 空闲保活回归失败");
+            return Ok(());
+        }
+        // 父进程绑定自有 Job 后才放行；EOF/错误均不得启动推理子进程。
+        use std::io::Read as _;
+        use std::os::windows::process::CommandExt as _;
+        let mut gate = [0];
+        std::io::stdin().read_exact(&mut gate)?;
+        assert_eq!(gate, *b"1", "隔离进程未收到父进程放行");
+        // 全局事件代理只在这个独立子进程注册；其余用例保留线程局部无队列后端。
+        review_remediation_testing_backend(true)?;
+        let executable = std::env::current_exe()?;
+        let broker = executable.parent().and_then(Path::parent)
+            .ok_or("测试可执行文件缺少 target 目录")?.join("snap-ocr-worker.exe");
+        assert!(broker.is_file(), "先构建带 test-hooks 的 snap-ocr-worker.exe：{}", broker.display());
+        // 库测试不会重建这个独立 EXE；is_file 不代表它支持隔离状态目录。
+        // 先做无副作用握手，避免旧普通构建读取真实用户配置。
+        let capabilities = std::process::Command::new(&broker)
+            .arg("--capabilities").creation_flags(0x0800_0000).output()?;
+        assert!(capabilities.status.success(), "测试 broker 能力入口执行失败");
+        let capabilities: serde_json::Value = serde_json::from_slice(&capabilities.stdout)?;
+        assert_eq!(capabilities["test_hooks"], true, "测试 broker 必须以 test-hooks 构建");
+        std::env::set_var("JCHTOOLS_TEST_BROKER_EXE", &broker);
+        // 资产根由父进程的 TempDir 持有：必须等自有 Job 的 broker/engine 全部
+        // 退出后才删除，子进程不能在 stop ACK 后提前销毁运行目录。
+        let state = crate::xberg_settings::state_dir().map_err(std::io::Error::other)?;
+        let temp = state.parent().ok_or("隔离状态目录缺少父目录")?.join("idle-worker");
+        fs::create_dir(&temp)?;
+        let engine = temp.join("engine");
+        fs::create_dir(&engine)?;
+        let source = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../tests/fixtures/shared_xberg.rs");
+        let compiled = std::process::Command::new("rustc")
+            // 成员夹具包含合成 DLL；动态 CRT 会先加载同目录假 VCRUNTIME140.dll 而崩溃，
+            // 尚未处理能力请求就 EOF。与现有共享引擎夹具一致，静态链接测试 CRT。
+            .arg("--edition=2021").args(["-C", "target-feature=+crt-static"])
+            .arg(&source).arg("-o").arg(engine.join("xberg.exe"))
+            .output()?;
+        assert!(compiled.status.success(), "既有协议引擎夹具编译失败：{}", String::from_utf8_lossy(&compiled.stderr));
+        let manifest: serde_json::Value = serde_json::from_str(
+            include_str!("../../../resources/markdown-assets.json"),
+        )?;
+        for member in manifest["xberg"]["members"].as_array().ok_or("资产清单缺少成员")? {
+            let relative = member["path"].as_str().ok_or("资产清单路径无效")?;
+            if relative != "xberg.exe" {
+                let target = engine.join(relative);
+                fs::create_dir_all(target.parent().ok_or("资产父目录缺失")?)?;
+                fs::write(target, b"synthetic asset")?;
+            }
+        }
+        assert!(crate::xberg_settings::load().map_err(std::io::Error::other)?.is_none());
+        let (events, event_rx) = mpsc::channel();
+        let (service, work_rx) = ready_busy_service(&temp);
+        struct IdleWorker {
+            service: Service,
+            thread: Option<std::thread::JoinHandle<()>>,
+        }
+        impl IdleWorker {
+            fn finish(&mut self) -> Result<(), Box<dyn std::error::Error>> {
+                if self.thread.is_none() { return Ok(()); }
+                let (closed_work, _) = mpsc::channel();
+                drop(std::mem::replace(&mut self.service.work, closed_work));
+                if let Some(thread) = self.thread.take() {
+                    thread.join().map_err(|_| "空闲推理线程异常")?;
+                }
+                Ok(())
+            }
+        }
+        impl Drop for IdleWorker {
+            fn drop(&mut self) {
+                let _ = self.finish();
+            }
+        }
+        let mut worker = IdleWorker { service, thread: None };
+        let service = &mut worker.service;
+        service.phase = ActivityPhase::Idle;
+        service.model = ModelState::Uninitialized;
+        let root = temp.clone();
+        let cancel = service.cancel.clone();
+        worker.thread = Some(std::thread::spawn(move || super::worker(&root, &work_rx, &events, &cancel)));
+        let service = &mut worker.service;
+        let mut idle_states = Vec::new();
+        for _ in 0..2 {
+            service.handle(event_rx.recv_timeout(Duration::from_secs(10))?);
+            idle_states.push(service.pipe(&serde_json::json!({"command":"get-state"})));
+        }
+        crate::xberg_settings::save(&engine).map_err(std::io::Error::other)?;
+        // 没有 RetryModel / Work::Load：只由下一轮空闲保活发现新配置。
+        let recovered = event_rx.recv_timeout(Duration::from_secs(30));
+        if let Ok(command) = recovered {
+            service.handle(command);
+            // 字体注册使用真实 Slint spawn_local；在创建后端的测试 UI 线程
+            // 消费已排队任务。Quit 排在其后，成功和模型失败均不会停在事件循环。
+            slint::quit_event_loop()?;
+            slint::run_event_loop_until_quit()?;
+        }
+        let ready = service.pipe(&serde_json::json!({"command":"get-state"}));
+        worker.finish()?;
+        let stopped = crate::xberg_runtime::background_control(true);
+        for state in idle_states {
+            assert_eq!(state["model"], "uninitialized", "两轮空闲保活都必须保留初始化入口：{state}");
+            assert_eq!(state["task"], "idle");
+            assert!(state["error"].as_str().is_some_and(|message| message.contains("设置")), "缺配置必须保留设置指引：{state}");
+        }
+        assert_eq!(ready["model"], "ready", "保存有效配置后须自动恢复，无需重试：{ready}");
+        assert!(ready["error"].is_null());
+        stopped.map_err(std::io::Error::other)?;
+        Ok(())
+    }
+
+    // P3-31 / O-16 / O-20：在真实 message-only 托盘销毁前后各请求一次截图。
+    #[test]
+    #[cfg(feature = "test-hooks")]
+    fn review_remediation_dead_tray_capture_restores_result_and_allows_exit(
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        review_remediation_dead_tray_case(true,
+            "service::tests::review_remediation_dead_tray_capture_restores_result_and_allows_exit")
+    }
+
+    // P3-31：真实消息队列满时投递失败，以及销毁后新请求，均独立于排队丢失场景。
+    #[test]
+    #[cfg(feature = "test-hooks")]
+    fn review_remediation_failed_trigger_post_restores_result_and_allows_exit(
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        review_remediation_dead_tray_case(false,
+            "service::tests::review_remediation_failed_trigger_post_restores_result_and_allows_exit")
+    }
+
+    #[cfg(feature = "test-hooks")]
+    fn review_remediation_dead_tray_case(
+        queued_before_death: bool,
+        test_name: &str,
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        const CHILD: &str = "JCHTOOLS_REVIEW_OCR_DEAD_TRAY_CHILD";
+        if std::env::var_os(CHILD).is_none() {
+            let temp = tempfile::tempdir()?;
+            let status = std::process::Command::new(std::env::current_exe()?)
+                .args(["--exact", test_name, "--nocapture"])
+                .env(CHILD, "1")
+                .env("JCHTOOLS_TEST_STATE_DIR", temp.path().join("state"))
+                .env("JCHTOOLS_SNAP_OCR_TEST_ASSET_ROOT", temp.path().join("ocr"))
+                .env_remove("JCHTOOLS_MARKDOWN_TEST_ASSET_ROOT")
+                .status()?;
+            assert!(status.success(), "隔离托盘故障回归失败");
+            return Ok(());
+        }
+        review_remediation_testing_backend(false)?;
+        {
+            let temp = tempfile::tempdir()?;
+            let (events, event_rx) = mpsc::channel();
+            let mut native = tray::ReviewTray::start(events.clone()).map_err(std::io::Error::other)?;
+            let (mut service, work_rx) = ready_busy_service(temp.path());
+            service.commands = events;
+            service.tray = native.handle.clone();
+            service.phase = ActivityPhase::Idle;
+            let result = crate::result_window::ResultWindowHandle::show_for_monitor(
+                "P3-31 旧结果", (0, 0, 800, 600), |_| Ok(()),
+            )?;
+            let old = result.as_weak();
+            service.result = Some(result);
+            if queued_before_death {
+                service.pipe(&serde_json::json!({"command":"capture"}));
+            }
+            if !queued_before_death {
+                native.fill_message_queue().map_err(std::io::Error::other)?;
+                service.pipe(&serde_json::json!({"command":"capture"}));
+                assert_eq!(service.status()["task"], "idle", "实际 PostMessageW 失败必须立即结束任务");
+                assert!(service.diagnostic_task.is_none());
+                assert!(service.result.as_ref().is_some_and(crate::result_window::ResultWindowHandle::is_visible));
+            }
+            native.terminate().map_err(std::io::Error::other)?;
+            while let Ok(command) = event_rx.try_recv() {
+                service.handle(command);
+            }
+            if !queued_before_death {
+                // 句柄已由所属原生线程销毁；确认终止后不得再向可能复用的 HWND 投递。
+                service.pipe(&serde_json::json!({"command":"capture"}));
+            }
+            let deadline = Instant::now() + Duration::from_millis(500);
+            while Instant::now() < deadline {
+                match event_rx.recv_timeout(Duration::from_millis(20)) {
+                    Ok(command) => service.handle(command),
+                    Err(mpsc::RecvTimeoutError::Timeout) => {}
+                    Err(mpsc::RecvTimeoutError::Disconnected) => break,
+                }
+            }
+            let state = service.pipe(&serde_json::json!({"command":"get-state"}));
+            assert_eq!(state["task"], "idle", "托盘死亡不得永久占用任务（queued={queued_before_death}）：{state}");
+            assert!(service.diagnostic_task.is_none(), "未交付截图必须产生失败终态");
+            let window = old.upgrade().ok_or("旧结果不可丢失")?;
+            assert!(window.window().is_visible(), "失败必须恢复原先可见结果");
+            let root = temp.path().to_path_buf();
+            let events = service.commands.clone();
+            let cancel = service.cancel.clone();
+            let worker = std::thread::spawn(move || super::worker(&root, &work_rx, &events, &cancel));
+            // 不调用会弹出原生确认框的 shutdown；消费真实的“确认退出”回执。
+            service.handle(Command::ExitDecision(true));
+            service.exit_pending = Some(Instant::now() - Duration::from_secs(3));
+            service.handle(Command::Pipe(serde_json::json!({"command":"get-state"}), mpsc::sync_channel(1).0, tracing::Span::none()));
+            let stopped = event_rx.recv_timeout(Duration::from_secs(5));
+            let (closed_work, _) = mpsc::channel();
+            drop(std::mem::replace(&mut service.work, closed_work));
+            worker.join().map_err(|_| "安全退出推理线程异常")?;
+            let stopped = stopped?;
+            assert!(matches!(&stopped, Command::WorkerStopped(_)), "实际后台停止必须完成，而非仅派发退出指令");
+            service.handle(stopped);
+            assert_eq!(crate::xberg_runtime::background_control(false).map_err(std::io::Error::other)?["running"], false);
+            assert!(service.result.is_none(), "停止回执必须完成服务收尾");
+        }
+        Ok(())
+    }
+
+    // P3-31：托盘死亡仅结束未交付截图，不能误清已交给推理线程的任务。
+    #[test]
+    fn review_remediation_dead_tray_does_not_clear_inference(
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        review_remediation_testing_backend(false)?;
+        let temp = tempfile::tempdir()?;
+        let (events, event_rx) = mpsc::channel();
+        let mut native = tray::ReviewTray::start(events).map_err(std::io::Error::other)?;
+        let (mut service, work_rx) = ready_busy_service(temp.path());
+        service.tray = native.handle.clone();
+        let image = crate::capture_win::BgrImage::from_vec(8, 8, vec![0; 8 * 8 * 3])
+            .map_err(std::io::Error::other)?;
+        service.handle(Command::Image(image, (0, 0, 8, 8)));
+        assert!(matches!(work_rx.recv_timeout(Duration::from_millis(500)), Ok(Work::Recognize(..))));
+        native.terminate().map_err(std::io::Error::other)?;
+        while let Ok(command) = event_rx.try_recv() {
+            service.handle(command);
+        }
+        assert_eq!(service.pipe(&serde_json::json!({"command":"get-state"}))["task"], "recognizing", "托盘故障不能伪造推理终态");
+        service.handle(Command::OcrFinished(Ok(None), (0, 0, 8, 8)));
+        assert_eq!(service.status()["task"], "idle");
+        Ok(())
+    }
+
+    // P3-31 / O-19：已进入框选的正常用户等待不能被托盘故障修复加上期限。
+    #[test]
+    fn review_remediation_live_selection_has_no_capture_deadline(
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        review_remediation_testing_backend(false)?;
+        let temp = tempfile::tempdir()?;
+        let (events, event_rx) = mpsc::channel();
+        let mut native = tray::ReviewTray::selecting(events).map_err(std::io::Error::other)?;
+        let (mut service, _work_rx) = ready_busy_service(temp.path());
+        service.tray = native.handle.clone();
+        service.phase = ActivityPhase::Idle;
+        service.result = Some(crate::result_window::ResultWindowHandle::show_for_monitor(
+            "框选前的旧结果", (0, 0, 800, 600), |_| Ok(()),
+        )?);
+        service.pipe(&serde_json::json!({"command":"capture"}));
+        native.wait_selection().map_err(std::io::Error::other)?;
+        let wait_until = Instant::now() + Duration::from_secs(4);
+        while Instant::now() < wait_until {
+            match event_rx.recv_timeout(Duration::from_millis(200)) {
+                Ok(command) => service.handle(command),
+                Err(mpsc::RecvTimeoutError::Timeout) => {}
+                Err(error) => return Err(error.into()),
+            }
+            assert_eq!(service.pipe(&serde_json::json!({"command":"get-state"}))["task"], "recognizing", "用户仍在选择，不能超时伪造截图失败");
+            assert!(service.old_result_visible, "正常框选中旧结果应隐藏暂存");
+        }
+        native.finish_selection();
+        service.handle(event_rx.recv_timeout(Duration::from_secs(2))?);
+        assert_eq!(service.status()["task"], "idle");
+        assert!(service.result.as_ref().is_some_and(crate::result_window::ResultWindowHandle::is_visible));
+        native.terminate().map_err(std::io::Error::other)?;
+        Ok(())
+    }
+
+    // P3-32 / P-10：真实独占锁制造停止标记写失败，检查落盘原因及跨线程关联。
+    #[test]
+    #[cfg(feature = "test-hooks")]
+    fn review_remediation_stop_failure_retains_safe_diagnostic_correlation(
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        use std::os::windows::fs::OpenOptionsExt as _;
+        const CHILD: &str = "JCHTOOLS_REVIEW_OCR_STOP_CHILD";
+        if std::env::var_os(CHILD).is_none() {
+            let temp = tempfile::tempdir()?;
+            let status = std::process::Command::new(std::env::current_exe()?)
+                .args(["--exact", "service::tests::review_remediation_stop_failure_retains_safe_diagnostic_correlation", "--nocapture"])
+                .env(CHILD, "1")
+                .env("JCHTOOLS_TEST_STATE_DIR", temp.path().join("private-state-canary")
+                    .join("private-user-path-canary").join("OCR-body-canary"))
+                .env("JCHTOOLS_SNAP_OCR_TEST_ASSET_ROOT", temp.path().join("ocr"))
+                .env_remove("JCHTOOLS_MARKDOWN_TEST_ASSET_ROOT")
+                .status()?;
+            assert!(status.success(), "隔离停止诊断回归失败");
+            return Ok(());
+        }
+        let state = crate::xberg_settings::state_dir().map_err(std::io::Error::other)?;
+        crate::xberg_runtime::background_control(true).map_err(std::io::Error::other)?;
+        let marker = fs::read_dir(&state)?.filter_map(Result::ok)
+            .find(|entry| entry.file_name().to_string_lossy().starts_with("background-stopped-"))
+            .ok_or("实际停止入口没有创建停止标记")?.path();
+        let locked = fs::OpenOptions::new().read(true).write(true).share_mode(0).open(&marker)?;
+        let expected = fs::write(&marker, b"locked").err().ok_or("独占锁必须阻止写入")?;
+        let temp = tempfile::tempdir()?;
+        let guard = crate::logging::init(temp.path()).ok_or("诊断日志初始化失败")?;
+        let (events, event_rx) = mpsc::channel();
+        let (mut service, work_rx) = ready_busy_service(temp.path());
+        service.phase = ActivityPhase::Idle;
+        service.exit_pending = Some(Instant::now() - Duration::from_secs(3));
+        service.exit_stop_sent = true;
+        let root = temp.path().to_path_buf();
+        let cancel = service.cancel.clone();
+        let worker = std::thread::spawn(move || super::worker(&root, &work_rx, &events, &cancel));
+        service.work.send(Work::Stop).map_err(|_| "停止指令通道已断开")?;
+        let failure = event_rx.recv_timeout(Duration::from_secs(5))?;
+        assert!(matches!(&failure, Command::WorkerStopFailed(_)), "锁定停止标记必须通过真实停止回执报告失败");
+        service.handle(failure);
+        assert!(service.stop_retry_at.is_some(), "停止失败须继续保留安全重试");
+        let (closed_work, _) = mpsc::channel();
+        drop(std::mem::replace(&mut service.work, closed_work));
+        worker.join().map_err(|_| "停止测试推理线程异常")?;
+        drop(locked);
+        drop(guard);
+        let mut logs = String::new();
+        for entry in fs::read_dir(temp.path().join(crate::logging::LOG_DIR))? {
+            logs.push_str(&fs::read_to_string(entry?.path())?);
+        }
+        let exhausted = logs.lines().find(|line| line.contains("event=ocr_stop_exhausted"))
+            .ok_or("缺少实际停止重试耗尽诊断")?;
+        let correlation = exhausted.split_whitespace().find(|field| field.starts_with("operation_id="))
+            .ok_or("停止原操作缺少安全关联 ID")?;
+        let scheduled = logs.lines().find(|line| line.contains("event=ocr_stop_retry_scheduled"))
+            .ok_or("缺少消费端重试诊断")?;
+        assert!(scheduled.contains(correlation), "消费端必须保留停止原操作的安全关联，而非丢弃原因：{scheduled}");
+        // DiagnosticFields 对字符串/Debug 字段统一 JSON 引号编码；数字 Option
+        // 以 Debug 字符串记录。按真实编码匹配动态 OS 原因，而非裸 key=value 假设。
+        let kind = format!("error_type={}", serde_json::to_string(&format!("{:?}", expected.kind()))?);
+        let code = expected.raw_os_error().ok_or("Windows 文件锁错误缺少 OS code")?;
+        let code = format!("error_code={}", serde_json::to_string(&format!("Some({code})"))?);
+        assert!(logs.lines().any(|line| line.contains("event=xberg_stopped_marker_failed")
+            && line.contains("stage=\"stopped_marker\"") && line.contains("operation=\"write\"")
+            && line.contains(&kind) && line.contains(&code) && line.contains(correlation)),
+            "停止错误原产地必须保留安全 kind/code 及操作关联，不是仅记录固定分类");
+        for private in ["private-state-canary", "private-user-path-canary", "OCR-body-canary"] {
+            assert!(!logs.contains(private), "停止诊断不得泄漏路径或正文：{private}");
+        }
+        Ok(())
+    }
+
     // 覆盖 O-20/O-22/O-29：关闭结果释放组件引用，隐藏暂存则保留以便失败恢复。
     #[test]
     fn closed_result_is_released_but_hidden_old_result_is_retained(
@@ -3042,7 +3558,7 @@ mod tests {
         ))?;
         let temp = tempfile::tempdir()?;
         let (mut service, _work_rx) = ready_busy_service(temp.path());
-        service.busy = false;
+        service.phase = ActivityPhase::Idle;
         let result = crate::result_window::ResultWindowHandle::show_for_monitor(
             "旧结果", (10, 20, 1920, 1080), |_| Ok(()),
         )?;
@@ -3114,7 +3630,7 @@ mod tests {
         super::set_autostart(true).map_err(std::io::Error::other)?;
         assert!(super::autostart_enabled());
         let (mut service, _work_rx) = ready_busy_service(temp.path());
-        service.busy = false;
+        service.phase = ActivityPhase::Idle;
         service.save_settings("Ctrl+Alt+O", false).map_err(std::io::Error::other)?;
         assert!(!super::autostart_enabled(), "服务保存应关闭本轮测试自启");
         assert_eq!(
@@ -3271,7 +3787,7 @@ mod tests {
             Err(OcrError::Cancelled),
             (0, 0, 20, 20),
         ));
-        assert!(!service.busy, "取消后当前任务应立即结束");
+        assert_eq!(service.phase, ActivityPhase::Idle, "取消后当前任务应立即结束");
         assert_eq!(
             service.model,
             ModelState::Loading,
@@ -3310,7 +3826,7 @@ mod tests {
             model: ModelState::Ready,
             model_error: None,
             pending_image: None,
-            busy: true,
+            phase: ActivityPhase::Processing,
             diagnostic_task: None,
             result: None,
             old_result_visible: false,
@@ -3330,7 +3846,7 @@ mod tests {
         ));
         assert_eq!(service.model, ModelState::Ready);
         assert!(service.model_error.is_none());
-        assert!(!service.busy);
+        assert_eq!(service.phase, ActivityPhase::Idle);
         assert_eq!(service.status()["model"], "ready");
         Ok(())
     }
@@ -3346,7 +3862,7 @@ mod tests {
         ));
         assert_eq!(service.model, ModelState::Error);
         assert!(service.model_error.is_some());
-        assert!(!service.busy);
+        assert_eq!(service.phase, ActivityPhase::Idle);
         service.handle(Command::RetryModel);
         assert_eq!(service.model, ModelState::Loading);
         Ok(())
@@ -3377,7 +3893,7 @@ mod tests {
         let image = crate::capture_win::BgrImage::from_vec(8, 8, vec![0; 8 * 8 * 3])
             .map_err(std::io::Error::other)?;
         service.handle(Command::Image(image, (0, 0, 8, 8)));
-        assert!(!service.busy);
+        assert_eq!(service.phase, ActivityPhase::Idle);
         assert!(matches!(work_rx.try_recv(), Err(mpsc::TryRecvError::Empty)));
         Ok(())
     }
@@ -3465,7 +3981,7 @@ mod tests {
             model: ModelState::Loading,
             model_error: None,
             pending_image: None,
-            busy: false,
+            phase: ActivityPhase::Idle,
             diagnostic_task: None,
             result: None,
             old_result_visible: false,
@@ -3523,7 +4039,7 @@ mod tests {
             .model_error
             .as_deref()
             .is_some_and(|reason| reason.contains("推理子进程已退出")));
-        assert!(!service.busy);
+        assert_eq!(service.phase, ActivityPhase::Idle);
         assert_eq!(service.status()["model"], "error");
         // Error 状态下重试入口恢复可用（O-13）：retry 把状态置回加载中。
         service.handle(Command::RetryModel);
@@ -3577,7 +4093,7 @@ mod tests {
             )),
             (0, 0, 20, 20),
         ));
-        assert!(!service.busy, "超时后当前任务应立即结束");
+        assert_eq!(service.phase, ActivityPhase::Idle, "超时后当前任务应立即结束");
         assert_eq!(
             service.model,
             ModelState::Error,
@@ -3619,15 +4135,18 @@ mod tests {
         Ok(())
     }
 
-    // 覆盖 S8-01：托盘线程在 2 秒时限内未回执（测试句柄永不泵消息，等价于
-    // 托盘线程阻塞 >2s）时，保存不得立即报「快捷键更新超时」失败终态——
+    // 覆盖 S8-01：真实 message-only 托盘线程冻结 >2s 时，
+    // 保存不得立即报「快捷键更新超时」失败终态——
     // 排队操作在托盘线程恢复后仍会执行，立即报失败会造成「保存失败、实际
     // 热键已变、重启回旧值」。
     #[test]
     fn timeout_hotkey_save_is_not_reported_failure() -> Result<(), Box<dyn std::error::Error>> {
         let temp = tempfile::tempdir()?;
         let (mut service, _work_rx) = ready_busy_service(temp.path());
-        service.busy = false;
+        service.phase = ActivityPhase::Idle;
+        let (events, _event_rx) = mpsc::channel();
+        let native = tray::ReviewTray::start(events).map_err(std::io::Error::other)?;
+        service.tray = native.handle.clone();
         let outcome = service.save_settings("Ctrl+Shift+PageDown", false);
         assert!(outcome.is_ok(), "超时未回执不得立即报失败终态：{outcome:?}");
         assert!(
@@ -3660,7 +4179,7 @@ mod tests {
     fn delayed_hotkey_failure_reports_and_keeps_old() -> Result<(), Box<dyn std::error::Error>> {
         let temp = tempfile::tempdir()?;
         let (mut service, _work_rx) = ready_busy_service(temp.path());
-        service.busy = false;
+        service.phase = ActivityPhase::Idle;
         service.pending_hotkey = Some(PendingHotkey::Saving {
             hotkey: "Ctrl+Shift+PageDown".into(),
             old_hotkey: "Ctrl+Alt+O".into(),
@@ -3694,7 +4213,7 @@ mod tests {
     fn hotkey_receipt_final_timeout_self_heals_to_old() -> Result<(), Box<dyn std::error::Error>> {
         let temp = tempfile::tempdir()?;
         let (mut service, _work_rx) = ready_busy_service(temp.path());
-        service.busy = false;
+        service.phase = ActivityPhase::Idle;
         service.pending_hotkey = Some(PendingHotkey::Saving {
             hotkey: "Ctrl+Shift+PageDown".into(),
             old_hotkey: "Ctrl+Alt+O".into(),
@@ -3730,7 +4249,7 @@ mod tests {
     ) -> Result<(), Box<dyn std::error::Error>> {
         let temp = tempfile::tempdir()?;
         let (mut service, _work_rx) = ready_busy_service(temp.path());
-        service.busy = false;
+        service.phase = ActivityPhase::Idle;
         service.pending_hotkey = Some(PendingHotkey::Restoring {
             new_hotkey: "Ctrl+Shift+PageDown".into(),
         });

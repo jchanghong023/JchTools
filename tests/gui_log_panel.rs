@@ -13,6 +13,7 @@
 
 //! 日志展开的窗口内交互边界：真实 Slint 控件、指针、键盘和软件渲染，绝不创建 OS 窗口。
 //! 覆盖 U-10/U-09/U-12：阅读面积、滚动复制、只读、安全确认优先及任务控制隔离。
+//! P3-24/P3-25：静态 Git 计数无鼠标/Tab 焦点伪交互，截图快捷键保存不受另一页自启草稿影响。
 // 仅 GUI + test-hooks 装配使用此集成测试；无 GUI 构建不包含被测窗口。
 //! 可选截图：JCH_LOG_PANEL_SCREENSHOTS=.tmp/log-panel；默认不写文件。
 #![cfg(all(feature = "gui", feature = "test-hooks"))]
@@ -26,7 +27,7 @@ use slint::platform::{
 use slint::{
     ComponentHandle, LogicalPosition, PhysicalSize, Rgb8Pixel, SharedPixelBuffer, SharedString,
 };
-use slint_interpreter::{Compiler, ComponentInstance, Value};
+use slint_interpreter::{Compiler, ComponentDefinition, ComponentInstance, Value};
 use std::cell::{Cell, RefCell};
 use std::fmt::Write as _;
 use std::path::PathBuf;
@@ -261,6 +262,25 @@ impl View {
         );
     }
 
+    fn pixels_in(&self, element: &ElementHandle) -> Vec<u8> {
+        // MinimalSoftwareWindow 的默认缩放为 1；仅比较控件真实占据的渲染区域。
+        let position = element.absolute_position();
+        let size = element.size();
+        let left = position.x.floor().max(0.0) as u32;
+        let top = position.y.floor().max(0.0) as u32;
+        let right = ((position.x + size.width).ceil() as u32).min(self.pixels.width());
+        let bottom = ((position.y + size.height).ceil() as u32).min(self.pixels.height());
+        assert!(left < right && top < bottom, "控件必须在实际渲染区域内");
+        let stride = self.pixels.width() as usize * 3;
+        let mut region = Vec::new();
+        for row in top..bottom {
+            let start = row as usize * stride + left as usize * 3;
+            let end = row as usize * stride + right as usize * 3;
+            region.extend_from_slice(&self.pixels.as_bytes()[start..end]);
+        }
+        region
+    }
+
     fn screenshot(&self, name: &str) {
         let Some(directory) = std::env::var_os("JCH_LOG_PANEL_SCREENSHOTS") else {
             return;
@@ -466,11 +486,13 @@ fn exercise(view: &mut View, screen: i32, panel: i32, name: &str, busy: bool) {
     );
 }
 
-#[test]
-fn all_tool_logs_support_headless_expansion_and_modal_boundaries() {
-    // 单测试串行矩阵：Slint 平台仅绑定此测试线程，既不依赖 winit 也不更改全局鼠标/焦点。
+fn headless_definition() -> (Rc<HeadlessState>, ComponentDefinition) {
     let state = Rc::new(HeadlessState::default());
     slint::platform::set_platform(Box::new(HeadlessPlatform(state.clone()))).unwrap();
+    // 编译器读取调试开关时串行访问环境；各窗口/平台仍只属于各自测试线程。
+    let setup = jchtools_foundation::test_support::env_lock()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
     let previous_debug = std::env::var_os("SLINT_EMIT_DEBUG_INFO");
     std::env::set_var("SLINT_EMIT_DEBUG_INFO", "1");
     let mut compiler = Compiler::default();
@@ -479,6 +501,7 @@ fn all_tool_logs_support_headless_expansion_and_modal_boundaries() {
     } else {
         std::env::remove_var("SLINT_EMIT_DEBUG_INFO");
     }
+    drop(setup);
     compiler.set_style("fluent".into());
     let result = spin_on::spin_on(
         compiler.build_from_path(PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("ui/app.slint")),
@@ -489,6 +512,13 @@ fn all_tool_logs_support_headless_expansion_and_modal_boundaries() {
             result.diagnostics().collect::<Vec<_>>()
         )
     });
+    (state, definition)
+}
+
+#[test]
+fn all_tool_logs_support_headless_expansion_and_modal_boundaries() {
+    // 单测试串行矩阵：Slint 平台仅绑定此测试线程，既不依赖 winit 也不更改全局鼠标/焦点。
+    let (state, definition) = headless_definition();
     for (width, height) in [(960, 620), (1120, 720)] {
         for (screen, panel, name) in [
             (0, 2, "organizer"),
@@ -531,4 +561,202 @@ fn all_tool_logs_support_headless_expansion_and_modal_boundaries() {
             }
         }
     }
+}
+
+fn with_review_remediation_view(exercise: impl FnOnce(&mut View) + Send + 'static) {
+    // 每个用例使用独立线程，避免重复设置 Slint 的线程局部平台。
+    std::thread::spawn(move || {
+        let (state, definition) = headless_definition();
+        let ui = definition.create().unwrap();
+        ui.show().unwrap();
+        let window = state.window.borrow().as_ref().unwrap().clone();
+        window.set_size(PhysicalSize::new(1120, 720));
+        let mut view = View {
+            ui,
+            state,
+            window,
+            pixels: SharedPixelBuffer::new(1120, 720),
+            task_actions: Rc::new(Cell::new(0)),
+            confirmations: Rc::new(Cell::new(0)),
+        };
+        exercise(&mut view);
+        view.ui.hide().unwrap();
+    })
+    .join()
+    .unwrap();
+}
+
+#[test]
+fn review_remediation_git_count_is_visible_without_filter_or_pointer_feedback() {
+    with_review_remediation_view(|view| {
+        // P3-24：Git 是移动计划的静态附加计数，不新增 kind=3 筛选。
+        // 实际 Move 查询/整树移动复用既有 GUI 回调及 contract_engine 回归。
+        let filter_requests = Rc::new(Cell::new(0));
+        let requests = filter_requests.clone();
+        view.ui
+            .set_callback("filter-plan", move |_| {
+                requests.set(requests.get() + 1);
+                Value::Void
+            })
+            .unwrap();
+        view.set("screen", 0);
+        view.set("panel", 1);
+        view.set("has-task", true);
+        view.set("plan-move-count", 2);
+        view.set("plan-git-count", 1);
+        view.render();
+        let count = view.button("Git 项目 1");
+        let position = count.absolute_position();
+        let size = count.size();
+        let center = LogicalPosition::new(
+            position.x + size.width / 2.0,
+            position.y + size.height / 2.0,
+        );
+        assert!(center.x > 0.0 && center.x < 1120.0);
+        assert!(center.y > 46.0 && center.y < 720.0);
+        view.ui.window().dispatch_event(WindowEvent::PointerMoved {
+            position: LogicalPosition::new(1100.0, 700.0),
+        });
+        view.render();
+        view.render();
+        let idle = view.pixels_in(&count);
+        view.screenshot("review-remediation-git-count-idle");
+
+        view.ui
+            .window()
+            .dispatch_event(WindowEvent::PointerMoved { position: center });
+        view.render();
+        view.render();
+        let hovered = view.pixels_in(&count);
+        view.screenshot("review-remediation-git-count-hovered");
+        assert!(idle == hovered, "P3-24：静态 Git 计数不能呈现悬停反馈");
+        view.ui.window().dispatch_event(WindowEvent::PointerPressed {
+            position: center,
+            button: PointerEventButton::Left,
+        });
+        view.render();
+        view.render();
+        let pressed = view.pixels_in(&count);
+        view.screenshot("review-remediation-git-count-pressed");
+        assert!(idle == pressed, "P3-24：静态 Git 计数不能呈现按压/焦点反馈");
+        view.ui.window().dispatch_event(WindowEvent::PointerReleased {
+            position: center,
+            button: PointerEventButton::Left,
+        });
+        view.render();
+        view.render();
+
+        view.screenshot("review-remediation-git-count-released");
+        assert!(
+            idle == view.pixels_in(&count),
+            "P3-24：静态 Git 计数释放后不能残留焦点反馈"
+        );
+        count.invoke_accessible_default_action();
+        view.render();
+        assert_eq!(count.accessible_enabled(), Some(false));
+        assert_eq!(view.ui.get_property("plan-filter").unwrap(), Value::Number(0.0));
+        view.button("Git 项目 1");
+        view.button("移动 2");
+        assert_eq!(filter_requests.get(), 0, "静态计数不能请求任何计划筛选");
+
+        // 共享 Pill 的正常可点行为不变；从移动项 Tab 离开也不能让静态计数获得焦点。
+        view.click("移动 2");
+        assert_eq!(view.ui.get_property("plan-filter").unwrap(), Value::Number(2.0));
+        assert_eq!(filter_requests.get(), 1);
+        view.key(Key::Tab);
+        view.render();
+        assert!(
+            idle == view.pixels_in(&count),
+            "P3-24：Tab 导航必须跳过禁用的静态 Git 计数"
+        );
+        view.screenshot("review-remediation-git-count-tab-skipped");
+        view.click("全部");
+        assert_eq!(view.ui.get_property("plan-filter").unwrap(), Value::Number(0.0));
+        assert_eq!(filter_requests.get(), 2);
+    });
+}
+
+#[test]
+fn review_remediation_hotkey_save_ignores_autostart_draft_and_preserves_it() {
+    with_review_remediation_view(|view| {
+        // P3-25/O-15/XB-24：属性注入是服务/UiPump 边界，启用与点击由真实控件消费。
+        // 只观察是否产生保存请求；不复制 Rust 控制器的保存或跨页草稿隔离实现。
+        let save_requested = Rc::new(Cell::new(false));
+        let requested = save_requested.clone();
+        view.ui
+            .set_callback("snap-save-settings", move |_| {
+                requested.set(true);
+                Value::Void
+            })
+            .unwrap();
+        view.set("screen", 6);
+        view.set("snap-connected", true);
+        view.set("snap-hotkey", Value::String("Ctrl+Alt+O".into()));
+        view.set("snap-hotkey-draft", Value::String("Ctrl+Alt+O".into()));
+        view.set("snap-autostart", false);
+        view.set("snap-autostart-draft", false);
+        view.render();
+        assert_eq!(view.button("保存快捷键").accessible_enabled(), Some(false));
+        view.click("保存快捷键");
+        assert!(!save_requested.get(), "没有快捷键改动时不得请求保存");
+
+        // 设置页留下未保存自启草稿，再进入截图页；生效热键没有改变。
+        view.set("screen", 7);
+        view.set("snap-autostart-draft", true);
+        view.render();
+        view.set("screen", 6);
+        view.render();
+        view.screenshot("review-remediation-hotkey-autostart-only");
+        view.click("保存快捷键");
+        assert!(
+            !save_requested.get(),
+            "P3-25：仅有另一页自启草稿时，截图页真实点击不得产生保存请求"
+        );
+        assert_eq!(
+            view.button("保存快捷键").accessible_enabled(),
+            Some(false),
+            "仅自启草稿改变不能启用保存快捷键"
+        );
+
+        view.set("snap-hotkey-draft", Value::String("Ctrl+Alt+P".into()));
+        view.render();
+        view.screenshot("review-remediation-hotkey-edited");
+        assert_eq!(view.button("保存快捷键").accessible_enabled(), Some(true));
+        view.click("保存快捷键");
+        assert!(save_requested.replace(false), "真实点击必须产生快捷键保存请求");
+
+        // 服务确认热键生效；不把未保存的另一页草稿冒充已保存值。
+        view.set("snap-hotkey", Value::String("Ctrl+Alt+P".into()));
+        view.render();
+        view.screenshot("review-remediation-hotkey-saved");
+        view.click("保存快捷键");
+        assert!(!save_requested.get(), "热键生效后不能重复提交无变化的设置");
+        assert_eq!(view.button("保存快捷键").accessible_enabled(), Some(false));
+        assert_eq!(view.ui.get_property("snap-autostart").unwrap(), Value::Bool(false));
+        assert_eq!(view.ui.get_property("snap-autostart-draft").unwrap(), Value::Bool(true));
+
+        // 返回设置页，保留的自启草稿必须仍以勾选状态呈现给用户。
+        view.set("screen", 7);
+        view.render();
+        for _ in 0..8 {
+            if let Some(checkbox) =
+                ElementHandle::find_by_accessible_label(&view.ui, "登录时自动启动后台服务")
+                    .find(|element| {
+                        let position = element.absolute_position();
+                        position.y > 46.0 && position.y + element.size().height < 720.0
+                    })
+            {
+                assert_eq!(checkbox.accessible_checked(), Some(true));
+                view.screenshot("review-remediation-hotkey-autostart-draft-preserved");
+                return;
+            }
+            view.ui.window().dispatch_event(WindowEvent::PointerScrolled {
+                position: LogicalPosition::new(1000.0, 550.0),
+                delta_x: 0.0,
+                delta_y: -250.0,
+            });
+            view.render();
+        }
+        panic!("返回设置页后必须能看到仍然勾选的自启草稿");
+    });
 }

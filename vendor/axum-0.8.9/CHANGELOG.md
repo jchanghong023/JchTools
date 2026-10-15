@@ -6,6 +6,12 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 
+# Local changes
+
+- **fixed:** Install a Tokio timer for HTTP/1 connections served by `axum::serve`
+  so Hyper's existing 30-second request-header timeout closes incomplete requests.
+  Request handling and graceful shutdown retain their existing, unbounded durations.
+
 # 0.8.9
 
 - **added:** `WebSocketUpgrade::{requested_protocols, set_selected_protocol}` for more

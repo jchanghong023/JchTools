@@ -234,17 +234,19 @@ component Pill inherits Rectangle {
     accessible-role: button;
     accessible-label: root.text;
     accessible-enabled: root.enabled;
-    accessible-action-default => { root.clicked(); }
+    accessible-action-default => { if (root.enabled) { root.clicked(); } }
     fs := FocusScope {
         width: 100%; height: 100%;
+        // TouchArea 的禁用不影响 FocusScope；静态计数也必须退出鼠标/Tab 焦点导航。
+        enabled: root.enabled;
         key-pressed(event) => {
             if (!root.enabled) { return reject; }
             if (event.text == " " || event.text == "\n") { root.clicked(); return accept; }
             return reject;
         }
     }
-    border-width: fs.has-focus ? 1.5px : (root.active ? 1px : 0px);
-    border-color: fs.has-focus ? Design.accent-ink : Design.line-strong;
+    border-width: root.enabled && fs.has-focus ? 1.5px : (root.active ? 1px : 0px);
+    border-color: root.enabled && fs.has-focus ? Design.accent-ink : Design.line-strong;
     background: !root.enabled ? transparent : root.active ? Design.pill-active
         : (touch.pressed ? Design.press : touch.has-hover ? Design.hover : transparent);
     drop-shadow-color: root.active ? Design.shadow : transparent;
@@ -1132,7 +1134,7 @@ export component AppWindow inherits Window {
                                     clicked => { root.plan-filter = 1; root.filter-plan("delete"); } }
                                 Pill { text: "移动 " + root.plan-move-count; active: root.plan-filter == 2; width: 88px; height: 26px; enabled: !root.busy && root.plan-move-count > 0 && root.confirm-kind == 0;
                                     clicked => { root.plan-filter = 2; root.filter-plan("move"); } }
-                                Pill { text: "Git 项目 " + root.plan-git-count; active: false; width: 96px; height: 26px; enabled: root.plan-git-count > 0 && root.confirm-kind == 0; }
+                                Pill { text: "Git 项目 " + root.plan-git-count; active: false; width: 96px; height: 26px; enabled: false; }
                                 Pill { text: "空目录 " + root.plan-empty-count; active: root.plan-filter == 4; width: 96px; height: 26px; enabled: !root.busy && root.plan-empty-count > 0 && root.confirm-kind == 0;
                                     clicked => { root.plan-filter = 4; root.filter-plan("empty_directory"); } }
                                 Rectangle { horizontal-stretch: 1; background: transparent; }
@@ -1832,7 +1834,7 @@ export component AppWindow inherits Window {
                                 AppButton { text: root.snap-recording ? "取消录制" : "录制热键"; icon: root.snap-recording ? -1 : 8;
                                     enabled: root.snap-connected && root.confirm-kind == 0 && !root.snap-request-pending;
                                     clicked => { root.snap-recording = !root.snap-recording; if (root.snap-recording) { recording.focus(); } } }
-                                AppButton { text: "保存快捷键"; enabled: root.snap-connected && !root.snap-recording && (root.snap-hotkey-draft != root.snap-hotkey || root.snap-autostart-draft != root.snap-autostart) && root.confirm-kind == 0 && !root.snap-request-pending;
+                                AppButton { text: "保存快捷键"; enabled: root.snap-connected && !root.snap-recording && root.snap-hotkey-draft != root.snap-hotkey && root.confirm-kind == 0 && !root.snap-request-pending;
                                     clicked => { root.snap-save-settings(); } }
                             }
                     } }

@@ -570,6 +570,84 @@ impl GitBoundaries {
         Ok(blocked)
     }
 }
+/// 单包共享的目标父链：先只校验，成员获准后才创建。
+/// false 表示已校验但尚不存在，true 表示已确认的普通目录（含本包新建目录）。
+/// P-08 不复核外部变化；首次接触及创建后的链接/junction 检查仍保留。
+#[derive(Default)]
+struct DestinationParents {
+    known: HashMap<PathBuf, bool>,
+}
+
+impl DestinationParents {
+    fn validate(&mut self, root: &Path, directory: &Path) -> Result<()> {
+        if directory == root || self.known.contains_key(directory) {
+            return Ok(());
+        }
+        let relative = directory.strip_prefix(root).context("目标目录超出所选根")?;
+        ensure!(
+            relative
+                .components()
+                .all(|part| matches!(part, std::path::Component::Normal(_))),
+            "非法路径组件"
+        );
+        let mut chain = Vec::new();
+        for current in directory.ancestors() {
+            if current == root || self.known.contains_key(current) {
+                break;
+            }
+            chain.push(current);
+        }
+        for current in chain.into_iter().rev() {
+            let exists = match fs::symlink_metadata(current) {
+                Ok(meta) => {
+                    ensure!(
+                        !fsutil::is_link(&meta),
+                        "拒绝符号链接 / junction / reparse point：{}",
+                        current.display()
+                    );
+                    ensure!(meta.is_dir(), "目标父链不是普通目录：{}", current.display());
+                    true
+                }
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => false,
+                Err(error) => {
+                    return Err(error).with_context(|| format!("无法检查 {}", current.display()))
+                }
+            };
+            self.known.insert(current.to_path_buf(), exists);
+        }
+        Ok(())
+    }
+
+    fn ensure(&mut self, root: &Path, directory: &Path) -> Result<()> {
+        self.validate(root, directory)?;
+        let mut chain = Vec::new();
+        for current in directory.ancestors() {
+            if current == root || self.known.get(current) == Some(&true) {
+                break;
+            }
+            chain.push(current);
+        }
+        for current in chain.into_iter().rev() {
+            match fs::create_dir(current) {
+                Ok(()) => {}
+                Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {}
+                Err(error) => {
+                    return Err(error)
+                        .with_context(|| format!("无法创建目录 {}", current.display()))
+                }
+            }
+            let meta = fs::symlink_metadata(current)?;
+            ensure!(
+                !fsutil::is_link(&meta),
+                "拒绝符号链接 / junction / reparse point：{}",
+                current.display()
+            );
+            ensure!(meta.is_dir(), "目标父链不是普通目录：{}", current.display());
+            *self.known.get_mut(current).context("目标目录尚未校验")? = true;
+        }
+        Ok(())
+    }
+}
 
 /// 分卷组实际体积合计（X-08 的展开比例分母）：主体与每个随组分卷各按实际文件大小
 /// 相加。单卷大小会随分卷数缩小分母，把健康的分卷组误判为「展开比例超限」。
@@ -1147,6 +1225,7 @@ impl SevenZip {
             let mut complete = true;
             let exclusions = rules::build_exclusions(&job.config.exclusions)?;
             let mut git = GitBoundaries::default();
+            let mut parents = DestinationParents::default();
             let base = archive.parent().context("压缩包缺少父目录")?;
             // X-04：目录落盘名规划。压缩包目录的默认落盘名被普通文件、链接或 junction
             // 占用时，为新目录选最小未占用序号（`目录 (1)`、`目录 (2)`），该目录及全部
@@ -1200,12 +1279,9 @@ impl SevenZip {
                     destination = fsutil::unique_target(&job.root, &destination)?;
                 }
                 let destination_rel = fsutil::relative_string(&job.root, &destination)?;
-                // 父链仍做整链校验；最终名可能是既有链接 / junction / OneDrive 在线占位，
-                // 那是成员级场景（merge_extracted 改用唯一名落盘），整链校验会让含这类
-                // 成员的整包解压失败。
-                if let Some(split) = destination_rel.rfind('/') {
-                    fsutil::safe_join(&job.root, &destination_rel[..split])?;
-                }
+                // 最终名的冲突由 merge_extracted 改名；父链先校验但不创建，
+                // 同包后续成员复用已经检查过的祖先。
+                parents.validate(&job.root, destination.parent().context("目标缺少父目录")?)?;
                 if inside_git_subtree(&git_subtrees, original) {
                     // H-06：该成员所属目录直接含 .git——整树排除（含 .git 的兄弟条目与
                     // 全部后代），不解出；原包按未完全解开处理（X-06），内容仍在原包里。
@@ -1253,7 +1329,7 @@ impl SevenZip {
                     continue;
                 }
                 let (final_path, renamed) =
-                    match merge_extracted(&job.root, entry.path(), &destination)? {
+                    match merge_extracted(&job.root, entry.path(), &destination, &mut parents)? {
                         MergeOutcome::Placed(path) => (path, false),
                         MergeOutcome::Renamed(path) => (path, true),
                     };
@@ -1361,16 +1437,7 @@ impl SevenZip {
                         mapped_entry_rel(&dir_renames, &rel).unwrap_or_else(|| rel.clone());
                     let dest = base.join(fsutil::safe_relative(&dest_rel)?);
                     let root_rel = fsutil::relative_string(&job.root, &dest)?;
-                    // 父链仍整链校验；最终名可能是链接/junction（如 OneDrive 占位目录）：
-                    // 已存在的目录直接合入；链接到目录不会创建也不会被写入（空目录无成员；
-                    // 含成员时成员路径的父链校验仍会拒绝），不再让整包解压失败。
-                    let dir_parent_rel = match root_rel.rfind('/') {
-                        Some(i) => &root_rel[..i],
-                        None => "",
-                    };
-                    if !dir_parent_rel.is_empty() {
-                        fsutil::safe_join(&job.root, dir_parent_rel)?;
-                    }
+                    parents.validate(&job.root, dest.parent().context("目标缺少父目录")?)?;
                     // 与文件合入/扫描同一过滤口径：X/** 不匹配 bare X，需补 X/ 变体；
                     // 祖先目录命中排除同样跳过（扫描对 X 整树剪枝，子目录不得落盘）。
                     if member_excluded(&exclusions, &root_rel)
@@ -1406,7 +1473,7 @@ impl SevenZip {
                         continue;
                     }
                     if !dest.try_exists()? {
-                        if let Err(error) = fs::create_dir_all(&dest) {
+                        if let Err(error) = parents.ensure(&job.root, &dest) {
                             // 最终名被悬空链接等占用（try_exists 跟随链接判为不存在，但名字已被占）：
                             // 与文件成员的应急改名同口径降级为跳过，不让整包解压失败。
                             if fs::symlink_metadata(&dest).is_ok() {
@@ -1440,6 +1507,8 @@ impl SevenZip {
                         )?;
                         continue;
                     }
+                    // 文件与空目录共用同一缓存；既有目录也要首次检查链接身份。
+                    parents.validate(&job.root, &dest)?;
                     // 容器名也是合法普通成员名：一旦作为正式目录合入，即使为空也不能清理。
                     // 暂存容器直属所选根，名称仅含 ASCII；比较沿用 Windows 的大小写语义。
                     if stage.remove_container
@@ -2494,15 +2563,14 @@ enum MergeOutcome {
 /// 把暂存成员合入正式位置（X-08：整包解码校验完成后才合入）。
 /// 既有目标一律不动：目标存在就改用唯一名（保留扩展名，含复合扩展名），
 /// 内容相同也照常落盘；不比较内容、不淘汰、不询问、不删除。
-fn merge_extracted(root: &Path, source: &Path, target: &Path) -> Result<MergeOutcome> {
-    // 只校验/创建父目录链（ensure_dir 创建目录链本身，ensure_parent 只会创建到祖父目录，
-    // 带子目录的成员会因此以「系统找不到指定的路径」整包失败）；
-    // 最终名被符号链接 / junction / OneDrive 在线占位占用是成员级场景
-    //（下方改用唯一名落盘），对最终名也做整链校验会让含这类成员的整包失败。
-    let parent = target.parent().context("目标缺少父目录")?;
-    if parent != root {
-        fsutil::ensure_dir(root, parent)?;
-    }
+fn merge_extracted(
+    root: &Path,
+    source: &Path,
+    target: &Path,
+    parents: &mut DestinationParents,
+) -> Result<MergeOutcome> {
+    // 过滤获准后才创建父链，最终名仍按成员级冲突改名，绝不覆盖。
+    parents.ensure(root, target.parent().context("目标缺少父目录")?)?;
     if !target.try_exists()? {
         match fsutil::rename_noreplace(source, target) {
             Ok(()) => return Ok(MergeOutcome::Placed(target.to_path_buf())),
@@ -2946,7 +3014,8 @@ mod tests {
         fs::write(&source, b"member payload").unwrap();
         let target = root.join("archives/sub/dir1/file1.txt");
 
-        let outcome = merge_extracted(&root, &source, &target).unwrap();
+        let mut parents = DestinationParents::default();
+        let outcome = merge_extracted(&root, &source, &target, &mut parents).unwrap();
         assert!(
             matches!(outcome, MergeOutcome::Placed(_)),
             "目标空闲时成员应落到目标路径"
@@ -2992,9 +3061,11 @@ mod tests {
             &mut GitBoundaries::default(),
         )
         .unwrap();
+        let mut parents = DestinationParents::default();
         for entry in staged_files(&content, &names.renamed, &job.context.control) {
             let (entry, relative) = entry.unwrap();
-            merge_extracted(&root, entry.path(), targets.get(&relative).unwrap()).unwrap();
+            merge_extracted(&root, entry.path(), targets.get(&relative).unwrap(), &mut parents)
+                .unwrap();
         }
         assert_eq!(fs::read(root.join("bundle.zip.001")).unwrap(), b"old");
         assert!(!root.join("bundle.zip.002").exists());
@@ -3022,7 +3093,8 @@ mod tests {
         let stage = tempfile::tempdir().unwrap();
         let source = stage.path().join("a.txt");
         fs::write(&source, b"same bytes").unwrap();
-        let outcome = merge_extracted(&root, &source, &target).unwrap();
+        let mut parents = DestinationParents::default();
+        let outcome = merge_extracted(&root, &source, &target, &mut parents).unwrap();
         assert!(
             matches!(outcome, MergeOutcome::Renamed(_)),
             "目标已存在时必须改名落盘而不是按内容跳过"
@@ -3054,7 +3126,8 @@ mod tests {
         let stage = tempfile::tempdir().unwrap();
         let source = stage.path().join("资料.tar.gz");
         fs::write(&source, b"brand new package content").unwrap();
-        let outcome = merge_extracted(&root, &source, &target).unwrap();
+        let mut parents = DestinationParents::default();
+        let outcome = merge_extracted(&root, &source, &target, &mut parents).unwrap();
         assert!(
             matches!(outcome, MergeOutcome::Renamed(_)),
             "目标已存在时必须改名落盘（H-07）"
@@ -3342,11 +3415,12 @@ mod tests {
         )
         .unwrap();
         assert_eq!(targets.len(), members.len());
+        let mut parents = DestinationParents::default();
         for name in members {
             let suffix = name.strip_prefix("pack").unwrap();
             let target = targets.get(name).unwrap();
             assert_eq!(*target, root.join(format!("pack (1){suffix}")));
-            merge_extracted(&root, &content.join(name), target).unwrap();
+            merge_extracted(&root, &content.join(name), target, &mut parents).unwrap();
             assert_eq!(fs::read(target).unwrap(), name.as_bytes());
         }
         assert_eq!(fs::read(root.join("pack.tar.gz.1000")).unwrap(), b"old tail");

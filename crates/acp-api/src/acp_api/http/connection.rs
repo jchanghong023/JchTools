@@ -115,6 +115,20 @@ impl AsyncRead for ObservedIo {
                         self.closed.cancel();
                     }
                     buf.advance(size);
+                    // P2-03：仅隔离消费者测试同步真实首读，不观察或保存请求字节。
+                    #[cfg(feature = "test-hooks")]
+                    if size > 0 {
+                        if let Some(root) = std::env::var_os("JCHTOOLS_TEST_ACP_HTTP_READ_DIR") {
+                            if let Ok(peer) = socket.peer_addr() {
+                                let marker = std::path::PathBuf::from(root)
+                                    .join(format!("http-read-{}", peer.port()));
+                                let _marker = std::fs::OpenOptions::new()
+                                    .write(true)
+                                    .create_new(true)
+                                    .open(marker);
+                            }
+                        }
+                    }
                     return Poll::Ready(Ok(()));
                 }
                 Err(error) if error.kind() == io::ErrorKind::WouldBlock => {}

@@ -1383,7 +1383,7 @@ fn write_new_markdown_cancelable(
     result
 }
 
-/// 转换一个媒体文件：验证媒体资产后，经会话共享进程请求 transcribe。
+/// 转换一个媒体文件：无损验证请求路径编码，验证媒体资产后请求 transcribe。
 fn convert_media(
     path: &Path,
     deadline: &markdown_document::Deadline,
@@ -1396,6 +1396,11 @@ fn convert_media(
     tracing::debug!(event = "media_conversion_started", "媒体转换开始");
     let result = (|| {
         jchtools_assets::asset_util::ensure_not_cancelled(cancel)?;
+        stage = "path_encoding";
+        let request_path = path
+            .to_str()
+            .ok_or_else(|| "输入路径编码无效：Xberg 请求要求有效 UTF-8 路径".to_string())?;
+        stage = "media_assets";
         let component = markdown_assets::media_component_dir().map_err(|error| {
             format!("共享 Xberg 的媒体组件未就绪，请检查已保存目录的模型和运行库：{error}")
         })?;
@@ -1403,7 +1408,7 @@ fn convert_media(
         stage = "transcribe_request_boundary";
         let response = jchtools_xberg::xberg_runtime::request(
             &component,
-            serde_json::json!({"command":"transcribe","path":path}),
+            serde_json::json!({"command":"transcribe","path":request_path}),
             deadline.remaining(),
             cancel,
         )?;

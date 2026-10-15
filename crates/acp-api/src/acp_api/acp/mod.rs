@@ -1,6 +1,7 @@
 //! AH-02 / AH-04 / AH-12 / AH-13：单连接、请求级路由、4+16 调度与安全收尾。
 //! 模型 catalog 与未消费的探测会话共享状态；首轮接管 spare 时冻结，避免会话配置污染新会话能力。
 //! 模型配置按会话协商；后台排空/停止阶段保持到外层释放 Agent 与 HTTP 资源。
+//! foreground 已完成的本地收尾保留 Io 归属，不由 SDK 的连接退出结果覆盖或重复执行。
 mod callbacks;
 mod terminals;
 
@@ -999,6 +1000,8 @@ async fn run_backend(
         commands,
         #[cfg(test)]
         None,
+        #[cfg(test)]
+        None,
     )
     .await;
 }
@@ -1009,6 +1012,7 @@ async fn run_backend_inner(
     status: watch::Sender<ServiceStatus>,
     mut commands: mpsc::UnboundedReceiver<BackendCommand>,
     #[cfg(test)] mut observer: Option<RetirementObserver>,
+    #[cfg(test)] setup: Option<fn(&Callbacks)>,
 ) {
     let mut actor = Actor {
         status,
@@ -1039,16 +1043,25 @@ async fn run_backend_inner(
             Err(failure) => failure,
             Ok(connection) => {
                 let callbacks = Callbacks::new();
+                #[cfg(test)]
+                if let Some(setup) = setup {
+                    setup(&callbacks);
+                }
                 let mut exit = connection.exit;
                 let mut initialized = false;
                 let mut startup_failure = None;
+                let mut foreground_shutdown: Option<Result<(), ServiceError>> = None;
                 let connected = callbacks::connect(connection.transport, callbacks.clone(), async |cx: ConnectionTo<Agent>| {
                     let startup = tokio::time::timeout(std::time::Duration::from_secs(30), initialize(&cx, workspace.clone(), &callbacks));
                     tokio::pin!(startup);
                     let probe = loop {
                         reap_retired(&mut retired, &mut retired_failure);
                         if actor.stopping {
-                            return callbacks.shutdown().await;
+                            let result = callbacks.shutdown().await;
+                            foreground_shutdown = Some(result.as_ref().copied().map_err(|_| {
+                                error(ServiceErrorKind::Io, "ACP 自有回调或终端资源收尾失败")
+                            }));
+                            return result;
                         }
                         if actor.sealed && actor.requests.is_empty() {
                             for reply in actor.acknowledgements.drain(..) { let _ = reply.send(Ok(())); }
@@ -1098,7 +1111,11 @@ async fn run_backend_inner(
                         if actor.sealed && actor.requests.is_empty() {
                             if actor.stopping {
                                 // SDK 连接仍处理已知 handle 的管理回调，直到自有终端安全回收。
-                                return callbacks.shutdown().await;
+                                let result = callbacks.shutdown().await;
+                                foreground_shutdown = Some(result.as_ref().copied().map_err(|_| {
+                                    error(ServiceErrorKind::Io, "ACP 自有回调或终端资源收尾失败")
+                                }));
+                                return result;
                             }
                             // 应用新配置先 drain；只 ACK 空闲，不关闭连接，随后 Stop 再退役。
                             for reply in actor.acknowledgements.drain(..) { let _ = reply.send(Ok(())); }
@@ -1123,18 +1140,23 @@ async fn run_backend_inner(
                         }
                     }
                 }).await;
-                let mut finish = connected.map_err(|_| {
-                    if initialized {
-                        disconnected()
-                    } else {
-                        startup_failure.unwrap_or_else(|| {
-                            error(
-                                ServiceErrorKind::InvalidConfig,
-                                "Agent 初始化期间连接断裂或退出",
-                            )
-                        })
-                    }
-                });
+                let shutdown_completed = foreground_shutdown.is_some();
+                let mut finish = match foreground_shutdown {
+                    Some(Err(failure)) => Err(failure),
+                    // 本地收尾成功不掩盖 SDK/Agent 的真实连接失败。
+                    Some(Ok(())) | None => connected.map_err(|_| {
+                        if initialized {
+                            disconnected()
+                        } else {
+                            startup_failure.unwrap_or_else(|| {
+                                error(
+                                    ServiceErrorKind::InvalidConfig,
+                                    "Agent 初始化期间连接断裂或退出",
+                                )
+                            })
+                        }
+                    }),
+                };
                 // 通信断裂先交付失败；旧终端自然收尾异步托管，不阻塞模型查询或恢复。
                 if let Err(failure) = &finish {
                     {
@@ -1151,7 +1173,7 @@ async fn run_backend_inner(
                     }
                     actor.fail_all(failure);
                 }
-                if finish.is_err() && !actor.stopping {
+                if finish.is_err() && !actor.stopping && !shutdown_completed {
                     let cleanup = callbacks.clone();
                     retired.push(tokio::spawn(
                         async move { cleanup.shutdown().await }
@@ -1163,7 +1185,8 @@ async fn run_backend_inner(
                         observer(&retired, Some(&callbacks));
                     }
                 } else {
-                    if callbacks.shutdown().await.is_err() && finish.is_ok() {
+                    if !shutdown_completed && callbacks.shutdown().await.is_err() && finish.is_ok()
+                    {
                         finish = Err(error(
                             ServiceErrorKind::Io,
                             "ACP 自有回调或终端资源收尾失败",
@@ -1861,6 +1884,7 @@ mod tests {
             status,
             commands,
             Some(observer),
+            None,
         ));
         tokio::time::timeout(Duration::from_secs(10), async {
             // 首个 Submit 不负责启动握手：等待真实 initialize + 模型探测完成后的 Ready。
@@ -1965,5 +1989,124 @@ mod tests {
             assert_eq!(reclaimed.retained, 0,
                 "正常服务/恢复期间应回收 completed={} 个真实 cleanup", reclaimed.completed);
         }).await.expect("10s 仅为回归 watchdog，不修改产品退出等待");
+    }
+
+    // P3-19/AH-13/AH-A09：真实 SDK foreground 的本地收尾错误不能冒充 Agent 断连。
+    #[cfg(windows)]
+    #[tokio::test]
+    async fn review_remediation_local_shutdown_failure_reaches_backend_consumer_as_io() {
+        use crate::acp_api::{
+            agent_process_channel, AgentConnection, AgentExit, AgentProcessCommand,
+        };
+        use std::{process::Stdio, time::Duration};
+        use tokio_util::compat::{TokioAsyncReadCompatExt, TokioAsyncWriteCompatExt};
+
+        struct ReleaseOnDrop(PathBuf);
+        impl Drop for ReleaseOnDrop {
+            fn drop(&mut self) {
+                let _ = std::fs::write(&self.0, b"release");
+            }
+        }
+        fn alive(pid: u32) -> bool {
+            use windows_sys::Win32::{
+                Foundation::{CloseHandle, ERROR_INVALID_PARAMETER, WAIT_FAILED, WAIT_TIMEOUT},
+                System::Threading::{OpenProcess, WaitForSingleObject, PROCESS_SYNCHRONIZE},
+            };
+            // SAFETY: 只查询测试自有终端进程，并在查询后关闭唯一拥有的句柄。
+            let handle = unsafe { OpenProcess(PROCESS_SYNCHRONIZE, 0, pid) };
+            if handle.is_null() {
+                assert_eq!(
+                    std::io::Error::last_os_error().raw_os_error(),
+                    Some(ERROR_INVALID_PARAMETER as i32)
+                );
+                return false;
+            }
+            // SAFETY: 有效同步句柄，零超时只查询是否退出。
+            let waited = unsafe { WaitForSingleObject(handle, 0) };
+            // SAFETY: 本函数独占本次取得的句柄。
+            unsafe { CloseHandle(handle) };
+            assert_ne!(waited, WAIT_FAILED);
+            waited == WAIT_TIMEOUT
+        }
+        let executable = std::env::current_exe().unwrap();
+        let fixture = executable.parent().unwrap().parent().unwrap()
+            .join("jchtools-acp-fixture.exe");
+        assert!(fixture.is_file(), "先构建真实 SDK fixture：{}", fixture.display());
+        let root = tempfile::tempdir().unwrap();
+        let release = ReleaseOnDrop(root.path().join("terminal-release-local-shutdown"));
+        let (processes, mut connections) = agent_process_channel();
+        let fixture_root = root.path().to_path_buf();
+        let provider = tokio::spawn(async move {
+            let AgentProcessCommand::Connect { reply } = connections.recv().await.unwrap();
+            let mut child = tokio::process::Command::new(fixture)
+                .args(["--agent", fixture_root.to_str().unwrap(), "normal"])
+                .current_dir(&fixture_root)
+                .stdin(Stdio::piped())
+                .stdout(Stdio::piped())
+                .stderr(Stdio::null())
+                .kill_on_drop(true)
+                .spawn().unwrap();
+            let pid = child.id().unwrap();
+            let transport = agent_client_protocol::ByteStreams::new(
+                child.stdin.take().unwrap().compat_write(),
+                child.stdout.take().unwrap().compat(),
+            );
+            let (exit, exited) = watch::channel(None);
+            let (finished, done) = oneshot::channel();
+            reply.send(Ok(AgentConnection {
+                transport, pid, exit: exited, finished,
+            })).unwrap();
+            // 不注入 EOF/exit：SDK 客户端真实退役后 Agent 自然退出并被 wait 回收。
+            let result = child.wait().await.unwrap();
+            let _ = exit.send(Some(AgentExit { code: result.code(), error: None }));
+            done.await.unwrap()
+        });
+        let (status, _) = watch::channel(ServiceStatus::default());
+        let (backend, commands) = backend_channel(status.subscribe());
+        let mut phases = backend.subscribe_status();
+        let running = tokio::spawn(run_backend_inner(
+            processes, root.path().to_path_buf(), status, commands, None,
+            Some(|callbacks| callbacks.terminals.review_remediation_fail_shutdown()),
+        ));
+        tokio::time::timeout(Duration::from_secs(15), async {
+            while phases.borrow_and_update().phase != ServicePhase::Ready {
+                phases.changed().await.unwrap();
+            }
+            let plan = serde_json::json!({
+                "tag": "local-shutdown", "action": "terminal-held",
+                "barrier": false, "chunks": [],
+            });
+            let mut request = backend.submit(PromptInput {
+                cwd: root.path().to_path_buf(), model: "fixture-model-a".into(), session: None,
+                messages: vec![ChatMessage {
+                    role: MessageRole::User, text: format!("AH_FIXTURE {plan}"),
+                }],
+            }).await.unwrap();
+            loop {
+                match request.events.recv().await.unwrap() {
+                    RequestEvent::Completed { .. } => {
+                        request.cancellation.disarm();
+                        break;
+                    }
+                    RequestEvent::TextDelta(_) => {}
+                    event => panic!("正常 SDK 终端轮次未完成：{event:?}"),
+                }
+            }
+            let pid = loop {
+                if let Ok(value) = std::fs::read_to_string(root.path().join("terminal-local-shutdown.pid")) {
+                    break value.parse::<u32>().unwrap();
+                }
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            };
+            assert!(alive(pid), "注入之前真实终端必须仍在等待自然退出");
+            std::fs::write(&release.0, b"release").unwrap();
+            let stopped = backend.stop().await;
+            running.await.unwrap();
+            let finished = provider.await.unwrap();
+            assert!(!alive(pid), "本地失败仍需完成真实终端收尾");
+            // 两个真实消费者都在后台、Agent、终端完成退役后观察原始错误归属。
+            assert_eq!(stopped.unwrap_err().kind, ServiceErrorKind::Io);
+            assert_eq!(finished.unwrap_err().kind, ServiceErrorKind::Io);
+        }).await.expect("15s 仅为测试 watchdog，不改变产品收尾等待");
     }
 }

@@ -398,7 +398,8 @@ fn walk_dir<'a>(
         }
     }
 }
-/// 深度先序回放：按父目录分组后的子项以枚举序递归发射，与旧 walkdir 的产出顺序一致。
+/// 深度先序回放：显式 DFS 栈保留同目录枚举序，目录退出时再归组尾卷。
+/// 回放栈随目录深度增长在堆上，不让合法深链耗尽调用线程栈。
 fn scan_emit(
     job: &mut Job,
     by_parent: &HashMap<String, Vec<ScanChild>>,
@@ -407,26 +408,58 @@ fn scan_emit(
     depth: i64,
     count: &mut u64,
 ) -> Result<()> {
-    let Some(children) = by_parent.get(parent) else {
+    struct Frame<'a> {
+        parent: &'a str,
+        children: &'a [ScanChild],
+        next: usize,
+        depth: i64,
+        archive_entries: Option<HashSet<String>>,
+    }
+    let Some((parent, children)) = by_parent.get_key_value(parent) else {
         return Ok(());
     };
-    // 同目录的歧义入口只选一个代表；不同目录递归调用各自维护卷族集合。
-    let mut archive_entries = enqueue.then(HashSet::new);
-    for child in children {
+    let mut stack = vec![Frame {
+        parent,
+        children,
+        next: 0,
+        depth,
+        archive_entries: enqueue.then(HashSet::new),
+    }];
+    while let Some(frame) = stack.last_mut() {
+        let Some(child) = frame.children.get(frame.next) else {
+            // 与递归返回时一致：整棵子树回放结束后，才处理本目录的残缺卷族。
+            if enqueue {
+                enqueue_old_style_tail_groups(job, frame.parent, frame.children)?;
+                enqueue_missing_entry_groups(job, frame.parent, frame.children)?;
+            }
+            stack.pop();
+            continue;
+        };
+        frame.next += 1;
         *count += 1;
         if (*count).is_multiple_of(2048) {
             job.db.conn.execute_batch("COMMIT; BEGIN IMMEDIATE;")?;
         }
         job.context.control.checkpoint()?;
-        let rel = if parent.is_empty() {
+        let rel = if frame.parent.is_empty() {
             child.name.clone()
         } else {
-            format!("{parent}/{}", child.name)
+            format!("{}/{}", frame.parent, child.name)
         };
         match &child.kind {
             ScanKind::Dir { lower } => {
-                job.db.insert_dir(&rel, lower, depth)?;
-                scan_emit(job, by_parent, enqueue, &rel, depth + 1, count)?;
+                job.db.insert_dir(&rel, lower, frame.depth)?;
+                if let Some((parent, children)) = by_parent.get_key_value(&rel) {
+                    let depth = frame.depth + 1;
+                    stack.push(Frame {
+                        parent,
+                        children,
+                        next: 0,
+                        depth,
+                        // 同目录的歧义入口只选一个代表；每层独立维护卷族集合。
+                        archive_entries: enqueue.then(HashSet::new),
+                    });
+                }
             }
             ScanKind::File { normal, snapshot } => {
                 job.db.insert_file(&rel, &child.name, normal, snapshot)?;
@@ -434,7 +467,7 @@ fn scan_emit(
                 job.summary.scanned_bytes = job.summary.scanned_bytes.saturating_add(snapshot.size);
                 // S-01：根层固定容器被普通文件占用时原位保留；在哈希、清理与
                 // 去重前退出活动集合，不能通过其他规则间接删除或挪走占用项。
-                if !enqueue && parent.is_empty() && is_fixed_container_name(&child.name) {
+                if !enqueue && frame.parent.is_empty() && is_fixed_container_name(&child.name) {
                     job.db.deactivate_file_rel(&rel)?;
                     job.log(
                         "扫描",
@@ -445,7 +478,7 @@ fn scan_emit(
                         snapshot.size,
                     )?;
                 }
-                if let Some(entry_groups) = archive_entries.as_mut() {
+                if let Some(entry_groups) = frame.archive_entries.as_mut() {
                     if rules::archive_entry_key(&child.name)
                         .is_some_and(|key| entry_groups.insert(key))
                     {
@@ -458,10 +491,6 @@ fn scan_emit(
                 }
             }
         }
-    }
-    if enqueue {
-        enqueue_old_style_tail_groups(job, parent, children)?;
-        enqueue_missing_entry_groups(job, parent, children)?;
     }
     Ok(())
 }

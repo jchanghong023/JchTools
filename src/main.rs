@@ -11,7 +11,12 @@ fn main() {
             jchtools_foundation::logging::hold_for_process(guard);
         }
         let _flush_on_unwind = jchtools_foundation::logging::FlushOnDrop;
-        let served = jchtools_codeagent::codeagent::serve();
+        let served =
+            if std::env::args_os().nth(2).as_deref() == Some(std::ffi::OsStr::new("--stop")) {
+                jchtools_codeagent::codeagent::stop()
+            } else {
+                jchtools_codeagent::codeagent::serve()
+            };
         if served.is_err() {
             tracing::error!(
                 event = "application_failed",

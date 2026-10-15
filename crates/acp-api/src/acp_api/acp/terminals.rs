@@ -1,4 +1,5 @@
 //! AH-13：终端属于 session/handle；仅显式 kill/release 终止，Stop 等自然回收。
+//! 省略输出限额时保留末尾 1 MiB；显式限额（含零）保持调用方语义。
 use agent_client_protocol::schema::v1::{
     CreateTerminalRequest, CreateTerminalResponse, KillTerminalRequest, KillTerminalResponse,
     ReleaseTerminalRequest, ReleaseTerminalResponse, SessionId, TerminalExitStatus, TerminalId,
@@ -28,6 +29,8 @@ pub(super) struct Terminals {
 struct Table {
     sealed: bool,
     entries: HashMap<TerminalId, Entry>,
+    #[cfg(test)]
+    fail_shutdown: bool,
 }
 #[derive(Clone)]
 struct Entry {
@@ -54,6 +57,14 @@ impl Terminals {
         Self {
             inner: Arc::new(Mutex::new(Table::default())),
         }
+    }
+    // P3-19/AH-13：仅测试在真实资源 drain 后注入本地失败，不修改 ACP transport。
+    #[cfg(test)]
+    pub(super) fn review_remediation_fail_shutdown(&self) {
+        self.inner
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .fail_shutdown = true;
     }
     pub(super) fn create(
         &self,
@@ -445,6 +456,17 @@ impl Terminals {
                     Err(_) => {}
                 }
             }
+            #[cfg(test)]
+            if std::mem::take(
+                &mut self
+                    .inner
+                    .lock()
+                    .unwrap_or_else(PoisonError::into_inner)
+                    .fail_shutdown,
+            ) && result.is_ok()
+            {
+                return Err(io_error("P3-19 本地终端收尾故障"));
+            }
             result
         })
         .await
@@ -452,16 +474,14 @@ impl Terminals {
 }
 fn append_output(snapshot: &mut Snapshot, text: &str, limit: Option<u64>) {
     snapshot.output.push_str(text);
-    if let Some(limit) = limit {
-        let limit = usize::try_from(limit).unwrap_or(usize::MAX);
-        if snapshot.output.len() > limit {
-            let mut start = snapshot.output.len() - limit;
-            while !snapshot.output.is_char_boundary(start) {
-                start += 1;
-            }
-            snapshot.output.drain(..start);
-            snapshot.truncated = true;
+    let limit = usize::try_from(limit.unwrap_or(1024 * 1024)).unwrap_or(usize::MAX);
+    if snapshot.output.len() > limit {
+        let mut start = snapshot.output.len() - limit;
+        while !snapshot.output.is_char_boundary(start) {
+            start += 1;
         }
+        snapshot.output.drain(..start);
+        snapshot.truncated = true;
     }
 }
 async fn read_pipe(mut pipe: impl AsyncRead + Unpin, sender: mpsc::Sender<Result<String, ()>>) {

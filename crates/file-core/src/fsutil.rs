@@ -1036,7 +1036,7 @@ impl RootGuard {
                 .truncate(false)
                 .open(state.join("organizer.lock"))?;
             fs2::FileExt::try_lock_exclusive(&file)
-                .context("另一个目录整理任务正在运行，请先结束它")?;
+                .context("另一个递归解压或目录整理任务正在运行，请先结束它")?;
             Ok(Self(file))
         })();
         log_filesystem_result("lock", started, &result);

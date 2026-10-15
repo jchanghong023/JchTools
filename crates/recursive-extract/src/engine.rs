@@ -199,6 +199,11 @@ fn count_archives_with(root: &Path, config: &Config, protected: Option<&Path>) -
         .max_depth(if config.recursive { usize::MAX } else { 1 })
         .into_iter()
         .filter_entry(|entry| {
+            // 正式扫描先检查子项原名；不可表示的文件逐项跳过，目录整树剪枝。
+            // 必须先于 relative_string，不能把孤立代理等名称变成整批 filter_error。
+            let Some(name) = entry.file_name().to_str() else {
+                return false;
+            };
             let meta = match fs::symlink_metadata(entry.path()) {
                 Ok(meta) => meta,
                 Err(error) => {
@@ -220,14 +225,13 @@ fn count_archives_with(root: &Path, config: &Config, protected: Option<&Path>) -
                     return false;
                 }
             };
-            let name = entry.file_name();
-            let name = name.to_string_lossy();
+            // name 来自无损转换，不用 replacement character 猜测排除或卷集归组。
             // 选定根目录自身不参与隐藏/系统/名称等判定——扫描同口径：筛选只作用于
             // 根目录的子项，隐藏的选定根目录不会把整棵树剪掉（否则确认框报 0，
             // 正式扫描却能找到包）。
             // 范围剪枝先于 Git 边界判定（与扫描同口径：walk_dir 只下钻未剪枝目录），
             // 被范围规则剪掉的目录不做边界判定，用户排除的不可读目录不得让清点失败。
-            let in_scope = rel.is_empty() || !scope_filter.prunes(&rel, &name, &meta);
+            let in_scope = rel.is_empty() || !scope_filter.prunes(&rel, name, &meta);
             if !in_scope {
                 return false;
             }
@@ -264,10 +268,7 @@ fn count_archives_with(root: &Path, config: &Config, protected: Option<&Path>) -
             continue;
         }
         let Some(name) = entry.file_name().to_str() else {
-            bail!(
-                "无法完成确认框清点：文件名不能无损表示为 UTF-8：{}",
-                entry.path().display()
-            );
+            continue;
         };
         let parent = entry
             .path()

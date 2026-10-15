@@ -98,6 +98,10 @@ pub fn convert_cancelable(
     );
     let result = (|| {
         jchtools_assets::asset_util::ensure_not_cancelled(cancel)?;
+        stage = "path_encoding";
+        let request_path = path
+            .to_str()
+            .ok_or_else(|| "输入路径编码无效：Xberg 请求要求有效 UTF-8 路径".to_string())?;
         stage = "input_file";
         if !path.is_file() {
             return Err(format!("输入文件不存在或不可读：{}", path.display()));
@@ -114,7 +118,7 @@ pub fn convert_cancelable(
         stage = "extract_request_boundary";
         let response = jchtools_xberg::xberg_runtime::request(
             runtime_dir,
-            serde_json::json!({"command": "extract", "path": path}),
+            serde_json::json!({"command": "extract", "path": request_path}),
             deadline.remaining(),
             cancel,
         )
@@ -191,9 +195,8 @@ fn parse_document_response(response: &Value, media_dir: &str) -> Result<Document
         );
         return Err("Xberg 输出协议异常：document.content 必须是字符串".to_string());
     };
-    let mut markdown = content.to_owned();
     let mut warnings = Vec::new();
-    let media = collect_media(document, &mut markdown, media_dir, &mut warnings);
+    let (markdown, media) = collect_media(document, content, media_dir, &mut warnings);
     relay_warnings(response, &mut warnings);
     Ok(DocumentOutput {
         markdown,
@@ -210,12 +213,12 @@ fn parse_document_response(response: &Value, media_dir: &str) -> Result<Document
 /// （与引擎引用↔字节对应口径一致）。字节缺失或解码失败时保留占位引用并告警。
 fn collect_media(
     document: &Value,
-    content: &mut String,
+    content: &str,
     media_dir: &str,
     warnings: &mut Vec<String>,
-) -> Vec<MediaFile> {
+) -> (String, Vec<MediaFile>) {
     let Some(images) = document.get("images") else {
-        return Vec::new();
+        return (content.to_owned(), Vec::new());
     };
     let Some(images) = images.as_array() else {
         tracing::warn!(
@@ -225,9 +228,10 @@ fn collect_media(
             "图片资源类型无效，保留占位引用"
         );
         warnings.push("图片资源字段类型无效，已保留占位引用".to_string());
-        return Vec::new();
+        return (content.to_owned(), Vec::new());
     };
-    let mut files = Vec::new();
+    // 元数据只建一次索引；正文扫描与图片数量无关，不为未引用项复制正文或解码。
+    let mut entries = Vec::with_capacity(images.len());
     for image in images {
         let Some(index) = image.get("image_index").and_then(Value::as_u64) else {
             tracing::warn!(
@@ -262,18 +266,39 @@ fn collect_media(
             warnings.push(format!("图片 image_{index} 的格式无效，已保留占位引用"));
             continue;
         }
-        let source = format!("image_{index}.{format}");
-        let target_ref = format!("{}/{}", encode_markdown_dir(media_dir), source);
-        let relative = format!("{media_dir}/{source}");
-        // 先试改写：围栏/行内代码内的字面量不算正文引用（不落盘、不改写）。
-        let (rewritten, referenced) = rewrite_image_links(content, &source, &target_ref);
-        if !referenced {
+        entries.push((format!("image_{index}.{format}"), image, index));
+    }
+    // 无有效图片时不解析正文；元数据校验产生的警告仍由调用方转达。
+    if entries.is_empty() {
+        return (content.to_owned(), Vec::new());
+    }
+    let mut image_index = std::collections::HashMap::with_capacity(entries.len());
+    for (position, (source, _, _)) in entries.iter().enumerate() {
+        // 重复元数据沿用首个分组；按原顺序尝试字节，首个成功项只落盘一次。
+        image_index.entry(source.as_str()).or_insert(position);
+    }
+    let mut referenced = vec![false; entries.len()];
+    let mut destinations = Vec::new();
+    scan_image_links(content, &mut |range| {
+        if let Some(&position) = image_index.get(&content[range.clone()]) {
+            referenced[position] = true;
+            destinations.push((range, position));
+        }
+    });
+    let mut materialized = vec![false; entries.len()];
+    let mut files = Vec::new();
+    for (source, image, index) in &entries {
+        let position = image_index[source.as_str()];
+        if !referenced[position] || materialized[position] {
             continue;
         }
         match image_bytes(image) {
             Some(bytes) if !bytes.is_empty() => {
-                *content = rewritten;
-                files.push(MediaFile { relative, bytes });
+                materialized[position] = true;
+                files.push(MediaFile {
+                    relative: format!("{media_dir}/{source}"),
+                    bytes,
+                });
             }
             _ => {
                 tracing::warn!(
@@ -287,7 +312,30 @@ fn collect_media(
             }
         }
     }
-    files
+    if files.is_empty() {
+        return (content.to_owned(), files);
+    }
+    // 只拼接一次正文；插入目录前缀，其余字节（含尖括号、alt/title、CRLF）原样复制。
+    let directory = encode_markdown_dir(media_dir);
+    let extra = destinations
+        .iter()
+        .filter(|(_, position)| materialized[*position])
+        .count()
+        * (directory.len() + 1);
+    let mut markdown = String::with_capacity(content.len() + extra);
+    let mut copied = 0;
+    for (range, position) in destinations {
+        if !materialized[position] {
+            continue;
+        }
+        markdown.push_str(&content[copied..range.start]);
+        markdown.push_str(&directory);
+        markdown.push('/');
+        markdown.push_str(&content[range.clone()]);
+        copied = range.end;
+    }
+    markdown.push_str(&content[copied..]);
+    (markdown, files)
 }
 
 /// 图片字节：优先 `data_base64`（启动配置 `images.include_data_base64=true`
@@ -345,51 +393,31 @@ fn value_type_name(value: &Value) -> &'static str {
     }
 }
 
-/// 围栏和行内代码感知的图片链接目标改写（T-14/FORK.md 调用方目录前缀步骤）。
-/// 把正文中 destination 等于 `from` 的图片链接改指 `to`，不碰普通文字、
-/// alt text、行内代码、普通链接的目标/title 或已改写媒体目录中的同名片段。
-fn rewrite_image_links(text: &str, from: &str, to: &str) -> (String, bool) {
-    let mut result = String::with_capacity(text.len());
+/// 沿既有围栏/行内代码/链接语义扫描真实图片目标；只记录区间，不重写正文。
+/// alt text、普通链接的目标/title 及已带媒体目录的目标仍按原解析规则处理。
+fn scan_image_links(text: &str, visit: &mut impl FnMut(std::ops::Range<usize>)) {
     let mut fence: Option<(char, usize)> = None;
     let mut inline_code: Option<usize> = None;
-    let mut changed = false;
     let mut offset = 0;
     for line in text.split_inclusive('\n') {
         let remaining = &text[offset..];
+        let line_start = offset;
         offset += line.len();
-        let (body, newline) = match line.strip_suffix('\n') {
-            Some(body) => (body, "\n"),
-            None => (line, ""),
-        };
-        let (body, carriage) = match body.strip_suffix('\r') {
-            Some(body) => (body, "\r"),
-            None => (body, ""),
-        };
+        let body = line.strip_suffix('\n').unwrap_or(line);
+        let body = body.strip_suffix('\r').unwrap_or(body);
         if let Some((open_char, open_len)) = fence {
             if closes_fence(body, open_char, open_len) {
                 fence = None;
             }
-            result.push_str(body);
-            result.push_str(carriage);
-            result.push_str(newline);
             continue;
         }
         if let Some((ch, run, _indent)) = opening_fence(body) {
             inline_code = None;
             fence = Some((ch, run));
-            result.push_str(body);
-            result.push_str(carriage);
-            result.push_str(newline);
             continue;
         }
-        let (rewritten, line_changed) =
-            rewrite_image_links_in_line(body, remaining, from, to, &mut inline_code);
-        changed |= line_changed;
-        result.push_str(&rewritten);
-        result.push_str(carriage);
-        result.push_str(newline);
+        scan_image_links_in_line(body, remaining, line_start, &mut inline_code, visit);
     }
-    (result, changed)
 }
 /// Encode the media directory for a CommonMark link target using Xberg's caller contract.
 fn encode_markdown_dir(name: &str) -> String {
@@ -419,17 +447,15 @@ fn encode_markdown_dir(name: &str) -> String {
     encoded
 }
 
-fn rewrite_image_links_in_line(
+fn scan_image_links_in_line(
     line: &str,
     remaining: &str,
-    from: &str,
-    to: &str,
+    offset: usize,
     inline_code: &mut Option<usize>,
-) -> (String, bool) {
-    let mut out = String::with_capacity(line.len());
+    visit: &mut impl FnMut(std::ops::Range<usize>),
+) {
     let mut i = 0;
     let bytes = line.as_bytes();
-    let mut changed = false;
     while i < bytes.len() {
         // CommonMark 正文中的反斜杠转义只作用于 ASCII 标点；代码跨度内
         // 则是普通字符。成对消费也保留 \\ 后的真实图片/反引号语义。
@@ -437,7 +463,6 @@ fn rewrite_image_links_in_line(
             && bytes[i] == b'\\'
             && bytes.get(i + 1).is_some_and(u8::is_ascii_punctuation)
         {
-            out.push_str(&line[i..i + 2]);
             i += 2;
             continue;
         }
@@ -453,24 +478,20 @@ fn rewrite_image_links_in_line(
                     *inline_code = Some(run);
                 }
             }
-            out.push_str(&line[i..i + run]);
             i += run;
             continue;
         }
         if inline_code.is_none() && line[i..].starts_with("![") {
             let Some(close_alt) = image_label_end(line, i + 2) else {
-                out.push('!');
                 i += 1;
                 continue;
             };
             if bytes.get(close_alt + 1) != Some(&b'(') {
-                out.push('!');
                 i += 1;
                 continue;
             }
             let destination_start = close_alt + 2;
             let Some(close_link) = image_link_end(line, destination_start) else {
-                out.push('!');
                 i += 1;
                 continue;
             };
@@ -486,18 +507,9 @@ fn rewrite_image_links_in_line(
                 Some(token) => (token, true),
                 None => (token, false),
             };
-            if token == from {
-                let token_start = destination_start + leading + usize::from(bracketed);
-                out.push_str(&line[i..token_start]);
-                out.push_str(to);
-                out.push_str(&line[token_start + token.len()..close_link]);
-                out.push(')');
-                i = close_link + 1;
-                changed = true;
-                continue;
-            }
-            // alt/title 的字面文本不参与引用改写或行内代码状态。
-            out.push_str(&line[i..=close_link]);
+            let token_start = offset + destination_start + leading + usize::from(bracketed);
+            visit(token_start..token_start + token.len());
+            // alt/title 的字面文本不参与引用扫描或行内代码状态。
             i = close_link + 1;
             continue;
         }
@@ -507,26 +519,20 @@ fn rewrite_image_links_in_line(
                     if let Some(close_link) = ordinary_link_end(line, close_label + 2) {
                         // label 使用正文共享的代码状态；跨行代码优先于目标/title。
                         let label = &line[i + 1..close_label];
-                        out.push('[');
                         if label.contains("![") || label.contains('`') {
-                            let (rewritten, label_changed) = rewrite_image_links_in_line(
+                            scan_image_links_in_line(
                                 label,
                                 &remaining[i + 1..],
-                                from,
-                                to,
+                                offset + i + 1,
                                 inline_code,
+                                visit,
                             );
-                            out.push_str(&rewritten);
-                            changed |= label_changed;
-                        } else {
-                            out.push_str(label);
                         }
                         if inline_code.is_some() {
                             i = close_label;
                             continue;
                         }
                         // 只有合法普通链接的目标及 title 才不属于正文。
-                        out.push_str(&line[close_label..=close_link]);
                         i = close_link + 1;
                         continue;
                     }
@@ -536,10 +542,8 @@ fn rewrite_image_links_in_line(
         let Some(ch) = line[i..].chars().next() else {
             break;
         };
-        out.push(ch);
         i += ch.len_utf8();
     }
-    (out, changed)
 }
 
 /// 平衡括号只确定候选边界；普通链接还须包含合法目标和可选 title，
@@ -1212,5 +1216,88 @@ mod tests {
             MediaFile { relative: "m/image_2.png".to_string(), bytes: vec![0, 255, 37] },
         ]);
         assert!(output.warnings.is_empty());
+    }
+
+    // P3-13 / T-14/T-16/T-17：多图批次仅改写真实且有字节的目标；
+    // 元数据顺序与引用顺序不同、缺字节/坏字节不能影响其他图片或字面量。
+    #[test]
+    fn review_remediation_multiple_images_preserve_literals_placeholders_and_warnings() {
+        let content = concat!(
+            "# 多图\r\n",
+            "![二](<image_2.png> \"说明 ) ![title](image_5.png)\")\r\n",
+            "```中文\r\n![围栏](image_5.png)\r\n```\r\n",
+            "`跨行\n![代码](image_5.png)`\n",
+            "![说明 `![alt](image_5.png)`](image_0.png)\n",
+            "[![一](image_1.png)](external.md '![title](image_5.png)')\n",
+            "\\![转义](image_5.png)\n",
+            "![缺失](image_3.png) ![损坏](image_4.png)\n",
+            "![再二](image_2.png) ![再零](image_0.png)"
+        );
+        let envelope = response(&json!({
+            "content": content,
+            "images": [
+                {"image_index": 3, "format": "png"},
+                {"image_index": 2, "format": "png", "data": [0, 255]},
+                {"image_index": 5, "format": "png", "data_base64": "not-base64"},
+                {"image_index": 4, "format": "png", "data": [256]},
+                {"image_index": 1, "format": "png", "data_base64": "aGVsbG8="},
+                {"image_index": 0, "format": "png", "data": [37]}
+            ]
+        }));
+        let output = parse_document_response(&envelope, "中文_(1)&").unwrap();
+        assert_eq!(output.markdown, concat!(
+            "# 多图\r\n",
+            "![二](<中文_%281%29%26/image_2.png> \"说明 ) ![title](image_5.png)\")\r\n",
+            "```中文\r\n![围栏](image_5.png)\r\n```\r\n",
+            "`跨行\n![代码](image_5.png)`\n",
+            "![说明 `![alt](image_5.png)`](中文_%281%29%26/image_0.png)\n",
+            "[![一](中文_%281%29%26/image_1.png)](external.md '![title](image_5.png)')\n",
+            "\\![转义](image_5.png)\n",
+            "![缺失](image_3.png) ![损坏](image_4.png)\n",
+            "![再二](中文_%281%29%26/image_2.png) ![再零](中文_%281%29%26/image_0.png)"
+        ));
+        assert_eq!(output.media, vec![
+            MediaFile { relative: "中文_(1)&/image_2.png".to_string(), bytes: vec![0, 255] },
+            MediaFile { relative: "中文_(1)&/image_1.png".to_string(), bytes: b"hello".to_vec() },
+            MediaFile { relative: "中文_(1)&/image_0.png".to_string(), bytes: vec![37] },
+        ]);
+        assert_eq!(output.warnings, vec![
+            "图片 image_3.png 缺少有效数据，已保留占位引用",
+            "图片 image_4.png 缺少有效数据，已保留占位引用",
+        ], "未引用的损坏 image_5 不解码、不落盘、也不额外告警");
+    }
+
+    // P3-13 / T-14/T-17：稀疏正文引用与大量未引用元数据一起消费解析器。
+    // 只断言正文/媒体语义，不用固定秒数或实现扫描/复制次数冒充性能证明。
+    #[test]
+    fn review_remediation_many_images_keep_sparse_references_exact() {
+        for image_count in [16_u64, 64, 256] {
+            let mut content = "正文无需规范化，空格  与 Unicode 保持原样。\r\n".repeat(512);
+            let mut expected = content.clone();
+            let mut expected_media = Vec::new();
+            let mut images = Vec::new();
+            for index in 0..image_count {
+                images.push(json!({
+                    "image_index": index, "format": "png", "data": [index % 256, 255]
+                }));
+                if index % 7 == 0 {
+                    content.push_str(&format!("![图{index}](image_{index}.png)\n"));
+                    expected.push_str(&format!("![图{index}](m/image_{index}.png)\n"));
+                    expected_media.push(MediaFile {
+                        relative: format!("m/image_{index}.png"),
+                        bytes: vec![u8::try_from(index % 256).unwrap(), 255],
+                    });
+                } else {
+                    let literal = format!("`![代码{index}](image_{index}.png)`\n");
+                    content.push_str(&literal);
+                    expected.push_str(&literal);
+                }
+            }
+            let envelope = response(&json!({"content": content, "images": images}));
+            let output = parse_document_response(&envelope, "m").unwrap();
+            assert_eq!(output.markdown, expected);
+            assert_eq!(output.media, expected_media);
+            assert!(output.warnings.is_empty());
+        }
     }
 }

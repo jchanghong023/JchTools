@@ -40,16 +40,7 @@ pub fn detect_extension(path: &Path, control: &Control) -> Result<Option<&'stati
             .ok()
             .and_then(|archive| zip_extension(archive, length))
     } else if prefix.starts_with(b"%PDF-") {
-        lopdf::Document::load_from_with_options(
-            reader,
-            lopdf::LoadOptions {
-                strict: true,
-                ..lopdf::LoadOptions::default()
-            },
-        )
-        .ok()
-        .filter(|document| document.catalog().is_ok())
-        .map(|_| "pdf")
+        pdf_extension(reader, length)
     } else if prefix.starts_with(b"7z\xbc\xaf\x27\x1c") {
         archive_oracle(path, control, "-t7z", "7z")?.then_some("7z")
     } else if prefix.starts_with(b"Rar!\x1a\x07\0") {
@@ -73,8 +64,40 @@ pub fn detect_extension(path: &Path, control: &Control) -> Result<Option<&'stati
     Ok(detected)
 }
 
-// XML 类型元数据只作判型，不为此展开无关数据；过大的元数据无法安全确认时保留后缀。
+// 判型内部预算：ZIP 的 XML 元数据或完整 PDF 输入最多 16MiB；不是产品文件大小限制。
 const MAX_TYPE_METADATA: u64 = 16 * 1024 * 1024;
+
+fn pdf_extension(reader: impl Read, length: u64) -> Option<&'static str> {
+    if length > MAX_TYPE_METADATA {
+        return None;
+    }
+    let limit = usize::try_from(MAX_TYPE_METADATA).ok()?;
+    let mut bytes = Vec::new();
+    bytes
+        .try_reserve_exact(usize::try_from(length).ok()?)
+        .ok()?;
+    // 元数据检查后文件仍可能增长；多读一个探测字节，不能把有界前缀当成完整 PDF。
+    reader
+        .take(MAX_TYPE_METADATA + 1)
+        .read_to_end(&mut bytes)
+        .ok()?;
+    if bytes.len() > limit {
+        return None;
+    }
+    lopdf::Document::load_mem_with_options(
+        &bytes,
+        lopdf::LoadOptions {
+            strict: true,
+            // 限制加载期单个 ObjStm/XRef 解压流，不代表所有 PDF 对象的累计内存上界。
+            max_decompressed_size: Some(limit),
+            ..lopdf::LoadOptions::default()
+        },
+    )
+    .ok()
+    .filter(|document| document.catalog().is_ok())
+    .map(|_| "pdf")
+}
+
 fn zip_text<R: Read + Seek>(archive: &mut zip::ZipArchive<R>, name: &str) -> Option<String> {
     let index = archive.index_for_name(name)?;
     zip_text_by_index(archive, index)
@@ -904,6 +927,23 @@ const fn flac_crc_table() -> [u16; 256] {
 
 #[cfg(test)]
 mod tests {
+    // 输入元数据只作提前退出优化；读取端也必须有界并拒绝超预算前缀。
+    #[test]
+    fn pdf_probe_bounds_reads_even_when_length_metadata_is_stale() {
+        use std::io::Read as _;
+
+        let mut oversized = std::io::repeat(b' ').take(super::MAX_TYPE_METADATA + 2);
+        assert_eq!(super::pdf_extension(&mut oversized, 0), None);
+        assert_eq!(oversized.limit(), 1, "最多读取预算加一个超限探测字节");
+
+        let mut untouched = b"%PDF-".as_slice();
+        assert_eq!(
+            super::pdf_extension(&mut untouched, super::MAX_TYPE_METADATA + 1),
+            None
+        );
+        assert_eq!(untouched, b"%PDF-", "已知超预算时不得加载正文");
+    }
+
     // 覆盖 C-08 / 附录 B：OPC 根级关联按包内 URI 点段解析，不能越过包根。
     #[test]
     fn ooxml_main_relationship_resolves_internal_package_paths() {

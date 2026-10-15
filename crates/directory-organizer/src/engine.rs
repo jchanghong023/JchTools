@@ -176,7 +176,7 @@ fn hash_candidates(job: &mut Job) -> Result<()> {
         job.db.conn.execute_batch("DROP TABLE IF EXISTS hash_candidates; CREATE TEMP TABLE hash_candidates(id INTEGER PRIMARY KEY);")?;
         // C-12：候选范围只依据扫描期已获得的信息（大小与启用的名称关系），完整哈希在一次
         // 遍历内完成，不设预哈希/完整哈希两阶段。同尺寸是安全下界；仅在不同名去重开启时
-        // 扩到全部同尺寸项。副本名关系按 normal 分组，需保留同名节点作连通组桥接项。
+        // 扩到全部同尺寸项。副本名桶须含不同名称，合格桶仍保留全部同名桥接节点。
         if job.config.dedup_other_names {
             // 整条 SQL 保持单个字符串字面量（不含花括号）：static_check 的 sql_syntax
             // 逐字面量抽取校验，跨字面量拼接会让尾段单独受检而误报。
@@ -184,7 +184,7 @@ fn hash_candidates(job: &mut Job) -> Result<()> {
             job.db.conn.execute(SQL, [])?;
         } else {
             const SAME_NAME: &str = "INSERT OR IGNORE INTO hash_candidates SELECT id FROM files WHERE active=1 AND (size,name) IN (SELECT size,name FROM files WHERE active=1 GROUP BY size,name HAVING COUNT(*)>1)";
-            const COPY_NAME: &str = "INSERT OR IGNORE INTO hash_candidates SELECT id FROM files WHERE active=1 AND (size,normal) IN (SELECT size,normal FROM files WHERE active=1 GROUP BY size,normal HAVING COUNT(*)>1)";
+            const COPY_NAME: &str = "INSERT OR IGNORE INTO hash_candidates SELECT id FROM files WHERE active=1 AND (size,normal) IN (SELECT size,normal FROM files WHERE active=1 GROUP BY size,normal HAVING COUNT(DISTINCT name)>1)";
             if job.config.dedup_same_name {
                 job.db.conn.execute(SAME_NAME, [])?;
             }

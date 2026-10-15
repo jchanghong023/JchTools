@@ -733,6 +733,106 @@ fn git_project_sources_skip_collection_and_category_levels() {
     );
 }
 
+// P3-06 / X-02 / S-04：不可无损表示的根目录子项只逐项跳过；
+// 确认清点不得阻断正常卷集，正式执行须保留原始 UTF-16 名称/内容并说明跳过原因。
+#[cfg(windows)]
+#[test]
+fn review_remediation_count_and_extract_skip_unpaired_surrogate_entries() {
+    use std::ffi::OsString;
+    use std::os::windows::ffi::{OsStrExt, OsStringExt};
+
+    let f = Fixture::new();
+    let file_units: Vec<u16> = "skip-file-"
+        .encode_utf16()
+        .chain([0xd800])
+        .chain(".txt".encode_utf16())
+        .collect();
+    let dir_units: Vec<u16> = "skip-dir-"
+        .encode_utf16()
+        .chain([0xdc00])
+        .collect();
+    let skipped_file = f.root.join(OsString::from_wide(&file_units));
+    let skipped_dir = f.root.join(OsString::from_wide(&dir_units));
+    assert!(skipped_file.to_str().is_none(), "前置：文件名含孤立高代理");
+    assert!(skipped_dir.to_str().is_none(), "前置：目录名含孤立低代理");
+    fs::write(&skipped_file, b"unrepresentable file payload").unwrap();
+    fs::create_dir(&skipped_dir).unwrap();
+    // 目录必须整树剪枝，其内可归组的缺首卷包也不能计入或被隔离。
+    fs::write(skipped_dir.join("hidden.part02.rar"), b"untouched inner part2").unwrap();
+    fs::write(skipped_dir.join("hidden.part03.rar"), b"untouched inner part3").unwrap();
+    f.write("normal.part02.rar", b"normal part2");
+    f.write("normal.part03.rar", b"normal part3");
+
+    let count = jchtools_recursive_extract::engine::count_archives(&f.root, &base())
+        .expect("P3-06：不可无损表示的无关项不得使确认清点整批失败");
+    assert_eq!(count, 1, "只计正常名称的缺首卷组，不下钻不可表示目录");
+    let task = jchtools_recursive_extract::engine::extract_run_at(
+        &f.root,
+        base(),
+        Context::default(),
+        &f.state,
+        None,
+    )
+    .unwrap();
+    assert_eq!(task.summary.archives_ok, 0);
+    assert_eq!(task.summary.archives_failed, 1, "正常缺首卷组仍实际处理");
+    for (name, bytes) in [
+        ("normal.part02.rar", b"normal part2".as_slice()),
+        ("normal.part03.rar", b"normal part3".as_slice()),
+    ] {
+        assert_eq!(
+            fs::read(f.root.join("解压失败").join(name)).unwrap(),
+            bytes,
+            "正常卷集应整组原样隔离"
+        );
+        assert!(!f.root.join(name).exists(), "正常卷集原位不得残留");
+    }
+    assert_eq!(
+        fs::read(&skipped_file).unwrap(),
+        b"unrepresentable file payload",
+        "跳过文件原字节不变"
+    );
+    for (name, bytes) in [
+        ("hidden.part02.rar", b"untouched inner part2".as_slice()),
+        ("hidden.part03.rar", b"untouched inner part3".as_slice()),
+    ] {
+        assert_eq!(
+            fs::read(skipped_dir.join(name)).unwrap(),
+            bytes,
+            "跳过目录内的包不得移动或改写"
+        );
+    }
+    let remaining_names: Vec<Vec<u16>> = fs::read_dir(&f.root)
+        .unwrap()
+        .map(|entry| entry.unwrap().file_name().encode_wide().collect())
+        .collect();
+    assert!(remaining_names.contains(&file_units), "文件名原 UTF-16 单元不变");
+    assert!(remaining_names.contains(&dir_units), "目录名原 UTF-16 单元不变");
+    assert_eq!(fs::read_dir(&skipped_dir).unwrap().count(), 2);
+
+    let db = Database::open_existing(&task.directory).unwrap();
+    // 任务入口规范化根目录；ScanSink.notes 按实际枚举路径落库，
+    // Windows 上 source 因而可能带 \\?\ 前缀，不能拿原始 fixture 根路径做字符串匹配。
+    let scanned_root = fs::canonicalize(&f.root).unwrap();
+    for path in [&skipped_file, &skipped_dir] {
+        let source = scanned_root.join(path.file_name().unwrap());
+        let reason: String = db
+            .conn
+            .query_row(
+                "SELECT reason FROM events WHERE phase='扫描' AND result='跳过' AND source=?1",
+                [source.display().to_string()],
+                |row| row.get(0),
+            )
+            .expect("每个不可表示项都必须有消费可见的扫描跳过记录");
+        assert!(
+            reason.contains("不能无损表示"),
+            "逐项说明不能处理的真实原因：{reason}"
+        );
+    }
+    let log = events(&task.directory);
+    assert!(log.contains("缺首卷"), "正常包失败原因仍明确：{log}");
+}
+
 // 覆盖 X-10/X-02（回归：只有 a.part02/a.part03 缺 part1 与 b.7z.002/b.7z.003
 // 缺 .001 的目录按「残缺但可归组的卷集」各计一包；修复前两者都被静默漏掉，
 // 确认框报 0 个包）

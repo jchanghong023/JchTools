@@ -253,6 +253,61 @@ fn terminal_callbacks_capture_wait_and_release_the_same_child() {
     assert_eq!(initialization["capabilities"]["terminal"], true);
 }
 
+// P3-20/AH-13/AH-A11：产物来自真实 terminal/create → 子进程 → SDK output/wait/release。
+fn review_remediation_terminal_limit_snapshot(action: &str) -> (Value, String) {
+    let server = server();
+    let plan = Plan::new(action);
+    let expected = format!("{}尾部:{}:完成🙂\n", "A中🙂β\n".repeat(150_000), plan.tag);
+    assert!(expected.len() > 1024 * 1024);
+    let response = server.post(&plan);
+    assert_eq!(response.status, 200);
+    let value = response.json();
+    let terminal: Value = serde_json::from_str(completion(&value)).unwrap();
+    assert_eq!(terminal["wait"]["exitCode"], 7);
+    assert_eq!(terminal["first"], terminal["second"], "累计输出不得被查询消费");
+    assert_eq!(terminal["released_error"], true, "release 后 handle 必须失效");
+    let pid = std::fs::read_to_string(server.workspace.join(format!("terminal-{}.pid", plan.tag)))
+        .unwrap().parse::<u32>().unwrap();
+    assert!(!process_alive(pid), "预算策略不得破坏 wait/release 的实际进程回收");
+    (terminal, expected)
+}
+
+/// P3-20/AH-13：省略 limit 使用本客户端的末尾 1MiB 默认，不是 ACP 协议默认。
+#[test]
+fn review_remediation_terminal_omitted_limit_retains_utf8_tail_within_one_mib() {
+    let (terminal, expected) = review_remediation_terminal_limit_snapshot("terminal-limit-default");
+    let output = terminal["first"]["output"].as_str().unwrap();
+    assert!(output.len() <= 1024 * 1024, "省略 limit 的输出无界：{} bytes", output.len());
+    assert!(output.len() >= 1024 * 1024 - 3, "默认预算应保留可容纳的完整 UTF-8 尾部");
+    assert_eq!(terminal["first"]["truncated"], true);
+    assert!(expected.ends_with(output), "输出必须是原始混合 UTF-8 的连续末尾");
+    assert!(output.ends_with("完成🙂\n"));
+    assert!(output.contains('中') && output.contains('β') && output.contains('🙂'));
+}
+
+/// P3-20/AH-13：显式小限额仍按字节保留尾部，显式大限额不得被默认值覆盖。
+#[test]
+fn review_remediation_terminal_explicit_limits_preserve_caller_budgets() {
+    let (small, expected) = review_remediation_terminal_limit_snapshot("terminal-limit-small");
+    let output = small["first"]["output"].as_str().unwrap();
+    assert!(output.len() <= 137 && output.len() >= 134);
+    assert!(expected.ends_with(output));
+    assert!(output.ends_with("完成🙂\n"));
+    assert_eq!(small["first"]["truncated"], true);
+
+    let (large, expected) = review_remediation_terminal_limit_snapshot("terminal-limit-large");
+    assert_eq!(large["first"]["output"].as_str().unwrap(), expected);
+    assert_eq!(large["first"]["truncated"], false);
+}
+
+/// P3-20/AH-13：显式零仍丢弃全部输出并报告截断，终端等待与释放正常完成。
+#[test]
+fn review_remediation_terminal_zero_limit_discards_output_without_breaking_lifecycle() {
+    let (terminal, _) = review_remediation_terminal_limit_snapshot("terminal-limit-zero");
+    assert_eq!(terminal["first"]["output"], "");
+    assert_eq!(terminal["first"]["truncated"], true);
+}
+
 /// 覆盖 AH-13/AH-A11：kill只结束目标终端，后续模型请求仍使用唯一Agent。
 #[test]
 fn terminal_kill_reaps_child_without_terminating_agent() {

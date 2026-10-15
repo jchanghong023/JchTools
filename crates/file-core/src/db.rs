@@ -11,8 +11,9 @@ use std::path::{Path, PathBuf};
 pub const SCHEMA: &str = include_str!("schema.sql");
 /// 当前任务库 schema 版本；不兼容的既有库一律拒绝，按 R-04 重新分析，不做迁移。
 /// 5 起归类改为「大类」一级结构；6 起文件名称与目标占用键采用 Windows 序数
-/// 忽略大小写语义，不能复用旧 Unicode 小写键生成的计划。
-pub const SCHEMA_VERSION: i64 = 6;
+/// 忽略大小写语义，不能复用旧 Unicode 小写键生成的计划；7 移除不参与冲突决策的
+/// 目标预留与保留者表，旧任务按统一版本边界重新分析。
+pub const SCHEMA_VERSION: i64 = 7;
 pub struct Database {
     pub conn: Connection,
     pub directory: PathBuf,
@@ -314,13 +315,6 @@ impl Database {
         anyhow::ensure!(changed == 1, "行动不存在或状态未改变");
         Ok(())
     }
-    pub fn reserve_target(&self, target: &str, file_id: i64) -> Result<bool> {
-        let key = crate::fsutil::fold_rel(target);
-        let mut stmt = self
-            .conn
-            .prepare_cached("INSERT OR IGNORE INTO targets(path,file_id) VALUES(?1,?2)")?;
-        Ok(stmt.execute(params![key, file_id])? == 1)
-    }
 }
 pub const FILE_COLUMNS: &str =
     "id,rel,name,normal,size,mtime,created,name16,rel16,identity,links,hash,cleanable";
@@ -446,13 +440,6 @@ mod tests {
             db.file(3)?.name,
             db.file(4)?.name,
             "İ 与 i 加组合点不是序数同名"
-        );
-        assert!(db.reserve_target("文档/Σ.txt", 1)?);
-        assert!(!db.reserve_target("文档/ς.txt", 2)?, "序数同名目标必须冲突");
-        assert!(db.reserve_target("文档/İ.txt", 3)?);
-        assert!(
-            db.reserve_target("文档/i\u{0307}.txt", 4)?,
-            "不同序数目标不可错误冲突"
         );
         Ok(())
     }

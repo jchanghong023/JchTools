@@ -160,6 +160,13 @@ fn message_loop_requires_cleanup(code: i32) -> bool {
 fn cleanup_tray_state(hwnd: Handle, failure: Option<&str>) {
     STATE.with(|slot| {
         if let Some(state) = slot.borrow_mut().take() {
+            // 与投递共用同一把锁：死亡之后不能再留下无人消费的控制请求。
+            let _ = state
+                .queue
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .take();
+            let _ = state.commands.send(Command::TrayStopped);
             if state.active != 0 {
                 // SAFETY: state.active 是本线程成功注册的热键 ID；0 表示未注册。
                 unsafe { UnregisterHotKey(hwnd, state.active) };
@@ -243,13 +250,27 @@ enum Control {
 }
 struct TrayState {
     commands: mpsc::Sender<Command>,
-    queue: Arc<Mutex<VecDeque<Control>>>,
+    queue: Arc<Mutex<Option<VecDeque<Control>>>>,
     active: i32,
     hotkey: String,
 }
 thread_local! { static STATE:RefCell<Option<TrayState>>=const { RefCell::new(None) }; }
 
+// P3-31：仅在该测试托盘线程冻结选区交互；不捕获屏幕、不创建遮罩。
+#[cfg(test)]
+thread_local! {
+    static REVIEW_SELECTION: RefCell<Option<(mpsc::SyncSender<()>, mpsc::Receiver<()>)>> =
+        const { RefCell::new(None) };
+}
+
 fn capture_selected(state: &mpsc::Sender<Command>) {
+    #[cfg(test)]
+    if let Some((entered, release)) = REVIEW_SELECTION.with(|slot| slot.borrow_mut().take()) {
+        let _ = entered.send(());
+        let _ = release.recv();
+        let _ = state.send(Command::CancelledSelection);
+        return;
+    }
     let started = std::time::Instant::now();
     tracing::info!(event = "ocr_capture_started", "开始截图与选区");
     // 完整截图发生在遮罩出现前；旧结果由 Slint 线程先隐藏，服务不主动写图片。
@@ -379,7 +400,8 @@ unsafe extern "system" fn wnd_proc(hwnd: Handle, msg: u32, w: usize, l: isize) -
                     let control = queue
                         .lock()
                         .unwrap_or_else(std::sync::PoisonError::into_inner)
-                        .pop_front();
+                        .as_mut()
+                        .and_then(VecDeque::pop_front);
                     let Some(control) = control else {
                         break;
                     };
@@ -487,7 +509,7 @@ unsafe extern "system" fn wnd_proc(hwnd: Handle, msg: u32, w: usize, l: isize) -
 #[derive(Clone)]
 pub(crate) struct TrayHandle {
     hwnd: usize,
-    queue: Arc<Mutex<VecDeque<Control>>>,
+    queue: Arc<Mutex<Option<VecDeque<Control>>>>,
 }
 
 /// 托盘热键替换回执（S8-01）：2 秒内回执的同步结果，或超时后的迟到回执
@@ -502,30 +524,38 @@ pub(crate) enum HotkeyReceipt {
 }
 
 impl TrayHandle {
-    fn send(&self, command: Control) {
-        self.queue
+    fn send(&self, command: Control) -> Result<(), ()> {
+        let mut slot = self
+            .queue
             .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .push_back(command);
-        // SAFETY: 仅按值传递句柄与常量；窗口已销毁时 PostMessageW 仅返回 0，不产生未定义行为。
-        unsafe {
-            PostMessageW(self.hwnd as Handle, WM_APP_CONTROL, 0, 0);
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let queue = slot.as_mut().ok_or(())?;
+        queue.push_back(command);
+        // SAFETY: 仅按值传递本托盘句柄与常量；与死亡清理互斥，避免向复用的句柄投递。
+        if unsafe { PostMessageW(self.hwnd as Handle, WM_APP_CONTROL, 0, 0) } == 0 {
+            // 持锁期间窗口线程不能取走请求，撤回本次投递而不是留下迟到副作用。
+            let _ = queue.pop_back();
+            return Err(());
         }
+        Ok(())
     }
-    pub(crate) fn trigger(&self, span: tracing::Span) {
-        self.send(Control::Trigger(span));
+    /// 成功仅表示已投递；终止由 TrayStopped 通知，不为合法框选设置时限。
+    pub(crate) fn trigger(&self, span: tracing::Span) -> Result<(), ()> {
+        self.send(Control::Trigger(span))
     }
     /// 请求当前冻结框选结束；服务取消/退出路径可在不阻塞托盘线程的情况下调用。
     pub(crate) fn cancel_selection() -> bool {
         crate::capture_win::cancel_selection()
     }
     pub(crate) fn notice(&self, text: impl Into<String>) {
-        self.send(Control::Notice(text.into()));
+        let _ = self.send(Control::Notice(text.into()));
     }
     /// 请求替换热键：等待 2 秒；超时不报失败，改为交出迟到回执通道（S8-01）。
     pub(crate) fn replace(&self, name: String) -> HotkeyReceipt {
         let (tx, rx) = mpsc::sync_channel(1);
-        self.send(Control::Replace(name, tx));
+        if self.send(Control::Replace(name, tx)).is_err() {
+            return HotkeyReceipt::Done(Err("托盘服务已退出或无法投递热键更新".into()));
+        }
         match rx.recv_timeout(std::time::Duration::from_secs(2)) {
             Ok(result) => HotkeyReceipt::Done(result),
             Err(_) => HotkeyReceipt::Late(rx),
@@ -535,13 +565,14 @@ impl TrayHandle {
     /// 期望的热键；托盘侧对「已是当前热键」的替换直接回成功，幂等）。
     pub(crate) fn replace_detached(&self, name: String) {
         let (tx, _rx) = mpsc::sync_channel(1);
-        self.send(Control::Replace(name, tx));
+        let _ = self.send(Control::Replace(name, tx));
     }
     pub(crate) fn stop(&self) {
         let _ = Self::cancel_selection();
         let (tx, rx) = mpsc::sync_channel(1);
-        self.send(Control::Stop(tx));
-        let _ = rx.recv_timeout(std::time::Duration::from_secs(2));
+        if self.send(Control::Stop(tx)).is_ok() {
+            let _ = rx.recv_timeout(std::time::Duration::from_secs(2));
+        }
     }
 }
 
@@ -562,8 +593,173 @@ impl TrayHandle {
     pub(super) fn for_test() -> Self {
         Self {
             hwnd: 0,
-            queue: Arc::new(Mutex::new(VecDeque::new())),
+            queue: Arc::new(Mutex::new(Some(VecDeque::new()))),
         }
+    }
+}
+
+// P3-31：只创建 message-only 窗口；不注册全局热键、不接触通知区、不抢焦点。
+// 门控发生在真实消息循环前，可重现已经排队但尚未交付的 Trigger。
+#[cfg(test)]
+pub(super) struct ReviewTray {
+    pub(super) handle: TrayHandle,
+    release: Option<mpsc::SyncSender<()>>,
+    thread: Option<std::thread::JoinHandle<()>>,
+    selecting: bool,
+    selection_release: Option<mpsc::SyncSender<()>>,
+    selection_entered: mpsc::Receiver<()>,
+}
+
+#[cfg(test)]
+impl ReviewTray {
+    pub(super) fn start(commands: mpsc::Sender<Command>) -> Result<Self, String> {
+        Self::start_inner(commands, false)
+    }
+
+    pub(super) fn selecting(commands: mpsc::Sender<Command>) -> Result<Self, String> {
+        Self::start_inner(commands, true)
+    }
+
+    fn start_inner(commands: mpsc::Sender<Command>, selecting: bool) -> Result<Self, String> {
+        let (ready_tx, ready_rx) = mpsc::sync_channel(1);
+        let (release, gate) = mpsc::sync_channel(1);
+        let (selection_started, selection_entered) = mpsc::sync_channel(1);
+        let (selection_release, selection_wait) = mpsc::sync_channel(1);
+        let thread = std::thread::spawn(move || {
+            let class_name = wide("JchToolsReviewRemediationTray");
+            // SAFETY: null 只查询当前模块。
+            let instance = unsafe { GetModuleHandleW(null()) };
+            let class = WndClass {
+                style: 0,
+                proc: Some(wnd_proc),
+                cls_extra: 0,
+                wnd_extra: 0,
+                instance,
+                icon: null_mut(),
+                cursor: null_mut(),
+                background: null_mut(),
+                menu: null(),
+                class: class_name.as_ptr(),
+            };
+            // SAFETY: 类名和结构在调用期间有效；已注册时复用同一窗口过程。
+            unsafe { RegisterClassW(&raw const class) };
+            // SAFETY: HWND_MESSAGE(-3) 创建不可见且没有用户桌面交互的消息窗口。
+            let hwnd = unsafe {
+                CreateWindowExW(
+                    0,
+                    class_name.as_ptr(),
+                    class_name.as_ptr(),
+                    0,
+                    0,
+                    0,
+                    0,
+                    0,
+                    -3isize as Handle,
+                    null_mut(),
+                    instance,
+                    null_mut(),
+                )
+            };
+            if hwnd.is_null() {
+                let _ = ready_tx.send(Err("隔离消息窗口创建失败".to_owned()));
+                return;
+            }
+            let queue = Arc::new(Mutex::new(Some(VecDeque::new())));
+            STATE.with(|slot| {
+                *slot.borrow_mut() = Some(TrayState {
+                    commands,
+                    queue: queue.clone(),
+                    active: 0,
+                    hotkey: String::new(),
+                });
+            });
+            if selecting {
+                REVIEW_SELECTION.with(|slot| {
+                    *slot.borrow_mut() = Some((selection_started, selection_wait));
+                });
+            }
+            let _ = ready_tx.send(Ok(TrayHandle {
+                hwnd: hwnd as usize,
+                queue,
+            }));
+            if selecting {
+                loop {
+                    // SAFETY: Msg 是纯数据输出缓冲，GetMessageW 在本线程填充。
+                    let mut msg = unsafe { std::mem::zeroed::<Msg>() };
+                    // SAFETY: 只接收本线程消息，缓冲有效。
+                    if unsafe { GetMessageW(&raw mut msg, null_mut(), 0, 0) } <= 0 {
+                        break;
+                    }
+                    // SAFETY: 消息来自本线程 GetMessageW，目标为本线程窗口。
+                    unsafe { DispatchMessageW(&raw const msg) };
+                }
+            } else {
+                let _ = gate.recv();
+                // 与 GetMessageW 返回 -1 的生产路径相同；不消费排队中的 Trigger。
+                cleanup_tray_state(hwnd, Some("托盘消息循环失败；快捷键与托盘已清理"));
+                // SAFETY: 本线程独占创建的 message-only 窗口，仅销毁一次。
+                unsafe { DestroyWindow(hwnd) };
+            }
+        });
+        let handle = ready_rx
+            .recv_timeout(std::time::Duration::from_secs(5))
+            .map_err(|error| error.to_string())??;
+        Ok(Self {
+            handle,
+            release: Some(release),
+            thread: Some(thread),
+            selecting,
+            selection_release: Some(selection_release),
+            selection_entered,
+        })
+    }
+
+    /// 只填满隔离线程的原生消息队列，令下一次真实 PostMessageW 返回失败。
+    pub(super) fn fill_message_queue(&self) -> Result<(), String> {
+        if self.selecting {
+            return Err("只能填充冻结的隔离消息窗口".into());
+        }
+        for _ in 0..=262_144 {
+            // SAFETY: 仅投递无副作用的 WM_NULL 到本测试独占的 message-only 窗口。
+            if unsafe { PostMessageW(self.handle.hwnd as Handle, 0, 0, 0) } == 0 {
+                return Ok(());
+            }
+        }
+        Err("隔离原生消息队列未达到投递上限".into())
+    }
+
+    pub(super) fn wait_selection(&self) -> Result<(), String> {
+        self.selection_entered
+            .recv_timeout(std::time::Duration::from_secs(5))
+            .map_err(|error| error.to_string())
+    }
+
+    pub(super) fn finish_selection(&mut self) {
+        if let Some(release) = self.selection_release.take() {
+            let _ = release.send(());
+        }
+    }
+
+    pub(super) fn terminate(&mut self) -> Result<(), String> {
+        self.finish_selection();
+        if self.selecting && self.thread.is_some() {
+            // SAFETY: 只向本测试创建的 message-only 窗口请求关闭。
+            unsafe { PostMessageW(self.handle.hwnd as Handle, WM_CLOSE, 0, 0) };
+        }
+        if let Some(release) = self.release.take() {
+            let _ = release.send(());
+        }
+        if let Some(thread) = self.thread.take() {
+            thread.join().map_err(|_| "隔离托盘线程异常".to_owned())?;
+        }
+        Ok(())
+    }
+}
+
+#[cfg(test)]
+impl Drop for ReviewTray {
+    fn drop(&mut self) {
+        let _ = self.terminate();
     }
 }
 
@@ -663,7 +859,7 @@ pub(crate) fn start(
                 "快捷键被占用，请在截图 OCR 页设置其他组合；后台服务仍在运行".into(),
             ));
         }
-        let queue = Arc::new(Mutex::new(VecDeque::new()));
+        let queue = Arc::new(Mutex::new(Some(VecDeque::new())));
         STATE.with(|slot| {
             *slot.borrow_mut() = Some(TrayState {
                 commands: sender,

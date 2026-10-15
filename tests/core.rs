@@ -501,6 +501,68 @@ fn hash_candidates_respect_enabled_name_relationships() {
     );
 }
 
+// P3-07 / H-01, C-02, C-12：纯同名桶没有副本名边，prepare 不应读取内容；
+// 每次使用独立状态，避免哈希缓存使无用读取回归被掩盖。
+fn assert_copy_name_only_bucket_skips_hash(left_name: &str, right_name: &str) {
+    let f = Fixture::new();
+    f.write(&format!("a/{left_name}"), b"same", 10);
+    f.write(&format!("b/{right_name}"), b"same", 20);
+    let cfg = Config {
+        dedup_same_name: false,
+        dedup_copy_names: true,
+        dedup_other_names: false,
+        ..base()
+    };
+    let context = Context::default();
+    let control = context.control.clone();
+    let task = engine::prepare_at(&f.root, cfg, context, &f.state).unwrap();
+    let read_bytes = control.read_bytes.load(Ordering::Relaxed);
+    assert_eq!(task.summary.errors, 0);
+    assert_eq!(task.summary.planned_delete, 0, "纯同名桶没有启用的去重关系");
+    let applied = Fixture::apply(&task);
+    assert_eq!(applied.summary.errors, 0);
+    let contents: Vec<Vec<u8>> = fs::read_dir(f.root.join("文档"))
+        .unwrap()
+        .map(|entry| {
+            let entry = entry.unwrap();
+            assert!(entry.file_type().unwrap().is_file());
+            fs::read(entry.path()).unwrap()
+        })
+        .collect();
+    assert_eq!(
+        contents,
+        vec![b"same".to_vec(), b"same".to_vec()],
+        "归类及名称冲突消解后必须仍有两份完整内容"
+    );
+    assert_eq!(read_bytes, 0, "纯同名桶不可能建立副本名边，不得整文件哈希");
+}
+
+// P3-07：不同目录中完全同名的文件不属于副本名候选。
+#[test]
+fn review_remediation_copy_name_only_skips_pure_same_name_bucket() {
+    assert_copy_name_only_bucket_skips_hash("report.txt", "report.txt");
+}
+
+// P3-07：两份名称包含相同副本标记，仍是纯同名桶。
+#[test]
+fn review_remediation_copy_name_only_skips_identical_copy_marker_names() {
+    assert_copy_name_only_bucket_skips_hash("report (1).txt", "report (1).txt");
+}
+
+// P3-07 / 附录 B：Windows 序数等价的 ASCII 大小写名称也是纯同名桶。
+#[cfg(windows)]
+#[test]
+fn review_remediation_copy_name_only_skips_windows_ascii_equivalent_names() {
+    assert_copy_name_only_bucket_skips_hash("Report.txt", "REPORT.TXT");
+}
+
+// P3-07 / 附录 B：Windows 序数键将希腊 sigma 的两种形式视为同名。
+#[cfg(windows)]
+#[test]
+fn review_remediation_copy_name_only_skips_windows_sigma_equivalent_names() {
+    assert_copy_name_only_bucket_skips_hash("Σ.txt", "ς.txt");
+}
+
 // 覆盖 C-02, C-12（仅副本名关系仍须保留同名节点作为连通组桥接项）
 #[test]
 fn copy_name_only_hashing_keeps_same_name_bridge_candidates() {
@@ -1401,7 +1463,7 @@ fn apply_with_invalid_record_but_tasks_layout_still_runs() {
     );
 }
 
-// ===== H-11 并发与多进程访问：状态目录锁 / set_selected 竞态 / reserve_target =====
+// ===== H-11 并发与多进程访问：状态目录锁 / set_selected 竞态 =====
 #[test]
 fn prepare_and_apply_share_exclusive_state_lock() {
     // prepare 与 apply 共用同一 RootGuard：任一持有锁时，另一路必须失败（锁测试增强）。
@@ -1503,35 +1565,6 @@ fn set_selected_rejected_after_apply_finished() {
     assert_eq!(db.get::<String>("status").unwrap(), "finished");
     let id = db.actions_page(0, 10).unwrap().remove(0).id;
     assert!(db.set_selected(id, true).is_err());
-}
-// 覆盖 S-01
-#[test]
-fn reserve_target_is_case_insensitive_unique() {
-    let f = Fixture::new();
-    let db = Database::create(&f.state.join("reserve-db")).unwrap();
-    assert!(
-        db.reserve_target("Reports/Final.PDF", 1).unwrap(),
-        "首次预留必须成功"
-    );
-    // 大小写折叠仅 Windows：大小写敏感文件系统上仅大小写不同的路径是不同目标。
-    if cfg!(windows) {
-        assert!(
-            !db.reserve_target("reports/final.pdf", 2).unwrap(),
-            "大小写不同的同一路径必须视为冲突"
-        );
-        assert!(!db.reserve_target("REPORTS/final.PDF", 3).unwrap());
-    } else {
-        assert!(
-            db.reserve_target("reports/final.pdf", 2).unwrap(),
-            "大小写敏感文件系统上不同大小写路径应可并存"
-        );
-        assert!(db.reserve_target("REPORTS/final.PDF", 3).unwrap());
-    }
-    assert!(
-        db.reserve_target("reports/other.pdf", 4).unwrap(),
-        "不同路径可以预留"
-    );
-    assert!(db.reserve_target("other.pdf", 5).unwrap());
 }
 
 // ===== L5 actions_page_filtered 直接测 =====

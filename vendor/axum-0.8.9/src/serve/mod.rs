@@ -389,6 +389,8 @@ async fn handle_connection<L, M, S>(
     tokio::spawn(async move {
         #[allow(unused_mut)]
         let mut builder = Builder::new(TokioExecutor::new());
+        #[cfg(feature = "http1")]
+        builder.http1().timer(hyper_util::rt::TokioTimer::new());
         // CONNECT protocol needed for HTTP/2 websockets
         #[cfg(feature = "http2")]
         builder.http2().enable_connect_protocol();

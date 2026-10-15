@@ -1,11 +1,15 @@
 //! O-33～O-37：通过应用共享截图运行时识别单张图片的控制台客户端。
 use base64::Engine as _;
+use jchtools_xberg::xberg_runtime::MAX_MESSAGE_BYTES;
 use serde_json::json;
 use std::ffi::OsString;
 use std::io::{Read, Write};
 use std::path::PathBuf;
 use std::sync::atomic::AtomicBool;
 use std::time::Duration;
+
+// 为共享协议 envelope 的有界元数据预留 256 KiB，其余预算覆盖 Base64 的 4:3 扩张。
+const MAX_DOWNLOADED_IMAGE_BYTES: u64 = ((MAX_MESSAGE_BYTES - 256 * 1024) / 4) * 3;
 
 const HELP: &str = r#"jchocr - 图片 OCR
 
@@ -217,6 +221,17 @@ fn http_request(url: &str, proxy: Option<&str>) -> Result<ureq::Response, ureq::
     }
 }
 
+fn image_download_over_budget(stage: &'static str) -> Failure {
+    tracing::warn!(
+        component = "jchocr",
+        event = "image_download_rejected",
+        stage,
+        reason = "message_budget_exceeded",
+        "图片下载超过共享协议容量预算"
+    );
+    Failure::new(1, "network", "图片下载超过共享协议容量预算")
+}
+
 fn fetch_image(mut url: String) -> Result<Vec<u8>, Failure> {
     let proxy = jchtools_foundation::system_proxy::read();
     for hop in 0..3 {
@@ -285,11 +300,22 @@ fn fetch_image(mut url: String) -> Result<Vec<u8>, Failure> {
                 format!("图片下载失败：HTTP {}", response.status()),
             ));
         }
+        if response
+            .header("content-length")
+            .and_then(|value| value.trim().parse::<u64>().ok())
+            .is_some_and(|length| length > MAX_DOWNLOADED_IMAGE_BYTES)
+        {
+            return Err(image_download_over_budget("content_length"));
+        }
         let mut bytes = Vec::new();
         response
             .into_reader()
+            .take(MAX_DOWNLOADED_IMAGE_BYTES + 1)
             .read_to_end(&mut bytes)
             .map_err(|_| Failure::new(1, "network", "无法读取下载的图片"))?;
+        if bytes.len() as u64 > MAX_DOWNLOADED_IMAGE_BYTES {
+            return Err(image_download_over_budget("body"));
+        }
         tracing::info!(
             component = "jchocr",
             event = "image_download_completed",

@@ -912,6 +912,11 @@ impl Reader<'_> {
                                 }
                             }
                         }
+                        // A decompression budget failure is not a recoverable
+                        // encrypted-object parsing error.
+                        Err(e @ Error::Decompress(crate::DecompressError::MemoryLimitExceeded { .. })) => {
+                            return Err(e);
+                        }
                         Err(_e) => {}
                     }
                 }

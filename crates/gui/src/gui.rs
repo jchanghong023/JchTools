@@ -530,12 +530,8 @@ fn request_codeagent(state: &Rc<RefCell<State>>, command: CodeAgentCommand) -> b
                 }
                 None => Ok(()),
             };
-            let status = action.and_then(|()| {
-                Ok((
-                    jchtools_codeagent::codeagent::status()?,
-                    jchtools_codeagent::codeagent::load_interval()?,
-                ))
-            });
+            let status =
+                action.and_then(|()| jchtools_codeagent::codeagent::status_with_saved_interval());
             if sender.send(CodeAgentMessage { saved, status }).is_err() {
                 return;
             }
@@ -743,6 +739,33 @@ impl ConvertCounts {
     }
 }
 
+#[cfg(test)]
+#[derive(Default)]
+struct ReviewRemediationHooks {
+    git: Option<Arc<dyn Fn() + Send + Sync>>,
+    readiness: Option<Arc<dyn Fn() -> Result<(), String> + Send + Sync>>,
+    preflight: Option<Arc<dyn Fn() -> Result<(), String> + Send + Sync>>,
+    conversion: Option<Arc<dyn Fn() + Send + Sync>>,
+}
+
+struct IdleDirectoryRequest {
+    generation: u64,
+    directory: String,
+    tool: Tool,
+}
+
+struct IdleDirectoryMessage {
+    request: IdleDirectoryRequest,
+    exists: bool,
+}
+
+/// 每个窗口最多一个目录 probe worker；编辑只覆盖尚未开始的最新请求。
+#[derive(Default)]
+struct IdleDirectoryQueue {
+    pending: Option<IdleDirectoryRequest>,
+    running: bool,
+}
+
 struct State {
     config: Config,
     specs: Vec<RuleSpec>,
@@ -808,6 +831,8 @@ struct State {
     settings_saved_selection: Option<DownloadSelection>,
     #[cfg(test)]
     settings_download: Option<Arc<SettingsDownload>>,
+    #[cfg(test)]
+    review_remediation: ReviewRemediationHooks,
     /// 转 Markdown 启动前场景预检代际。
     convert_preflight_generation: u64,
     /// 截图 OCR（O 分区）：可选组件初始化的取消信号（O-06 取消/重试语义）。
@@ -840,6 +865,10 @@ struct State {
     plan_load: Arc<PlanLoadSync>,
     /// 目录/工具变化的反馈意图保留到最新有效快照落地，不随被顶替的请求丢失。
     readiness_status_pending: Cell<bool>,
+    idle_directory_generation: Cell<u64>,
+    idle_directory_queue: Arc<std::sync::Mutex<IdleDirectoryQueue>>,
+    idle_directory_sender: mpsc::Sender<IdleDirectoryMessage>,
+    idle_directory_receiver: RefCell<mpsc::Receiver<IdleDirectoryMessage>>,
     /// U-10 失败列表：当前解压任务的任务库目录。引擎在状态目录下创建任务库，启动时
     /// 界面只知状态目录，由 watcher（`watch_extract_task`）发现新目录后回传。
     extract_task: Option<PathBuf>,
@@ -1466,7 +1495,107 @@ fn refresh(ui: &AppWindow, state: &State) {
         _ => 0,
     });
 }
-fn invalidate(ui: &AppWindow, tool: Tool) {
+fn idle_directory_is_dir(path: &Path) -> bool {
+    #[cfg(test)]
+    {
+        let probe = gui_tests::review_remediation_directory_probes()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .get(path)
+            .cloned();
+        if let Some(probe) = probe {
+            return probe();
+        }
+    }
+    path.is_dir()
+}
+
+fn invalidate_idle_directory(state: &State) -> u64 {
+    let generation = state.idle_directory_generation.get().wrapping_add(1);
+    state.idle_directory_generation.set(generation);
+    state
+        .idle_directory_queue
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .pending = None;
+    generation
+}
+
+fn start_idle_directory_probe(ui: &AppWindow, state: &State, generation: u64) {
+    ui.set_status("正在检查目录…".into());
+    let queue = Arc::clone(&state.idle_directory_queue);
+    {
+        let mut queued = queue
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        queued.pending = Some(IdleDirectoryRequest {
+            generation,
+            directory: ui.get_directory().to_string(),
+            tool: state.tool,
+        });
+        if queued.running {
+            return;
+        }
+        queued.running = true;
+    }
+    let sender = state.idle_directory_sender.clone();
+    std::thread::spawn(move || loop {
+        let request = {
+            let mut queued = queue
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            if let Some(request) = queued.pending.take() {
+                request
+            } else {
+                queued.running = false;
+                return;
+            }
+        };
+        let exists = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            idle_directory_is_dir(Path::new(&request.directory))
+        }))
+        .unwrap_or(false);
+        if sender
+            .send(IdleDirectoryMessage { request, exists })
+            .is_err()
+        {
+            return;
+        }
+        wake_event_loop();
+    });
+}
+
+fn apply_idle_directory_messages(ui: &AppWindow, state: &State) {
+    for message in state.idle_directory_receiver.borrow_mut().try_iter() {
+        let request = message.request;
+        if ui.get_busy()
+            || ui.get_status() != "正在检查目录…"
+            || request.generation != state.idle_directory_generation.get()
+            || request.directory != ui.get_directory().as_str()
+            || request.tool != state.tool
+            || (state.tool == Tool::Organizer && ui.get_has_task())
+        {
+            continue;
+        }
+        ui.set_status(
+            if message.exists {
+                match request.tool {
+                    Tool::Extract => "目录已就绪；点「开始解压」后会先弹一次确认",
+                    Tool::Organizer => "目录已就绪；「分析」只读不改文件，随时可以开始",
+                    Tool::Md | Tool::Git => "目录已就绪",
+                    _ => continue,
+                }
+            } else {
+                "目录不存在或无法访问，请检查路径"
+            }
+            .into(),
+        );
+    }
+}
+
+fn invalidate(ui: &AppWindow, state: &State) {
+    let generation = invalidate_idle_directory(state);
+    let tool = state.tool;
     // 运行中不得改写状态文案（C-11 如实展示）：规则/目录/工具变化在任务收尾后由
     // Done/Failed/Cancelled 事件按最终状态重算；运行期改写会把「执行中」谎报成
     // 「已结束/已就绪」。ready 在任务启动时已置 false，无需在此重复。
@@ -1479,11 +1608,7 @@ fn invalidate(ui: &AppWindow, tool: Tool) {
             ui.set_status("请选择需要解压的目录".into());
             return;
         }
-        if !PathBuf::from(ui.get_directory().as_str()).is_dir() {
-            ui.set_status("目录不存在或无法访问，请检查路径".into());
-            return;
-        }
-        ui.set_status("目录已就绪；点「开始解压」后会先弹一次确认".into());
+        start_idle_directory_probe(ui, state, generation);
         return;
     }
     // U-11/C-11：MD 整理与 Git 工具没有「分析→计划→执行」流程，状态栏必须用本工具
@@ -1493,11 +1618,7 @@ fn invalidate(ui: &AppWindow, tool: Tool) {
             ui.set_status("请选择需要处理的目录".into());
             return;
         }
-        if !PathBuf::from(ui.get_directory().as_str()).is_dir() {
-            ui.set_status("目录不存在或无法访问，请检查路径".into());
-            return;
-        }
-        ui.set_status("目录已就绪".into());
+        start_idle_directory_probe(ui, state, generation);
         return;
     }
     if tool == Tool::MarkdownConverter {
@@ -1525,12 +1646,7 @@ fn invalidate(ui: &AppWindow, tool: Tool) {
         ui.set_status("请选择需要整理的目录".into());
         return;
     }
-    // 手输路径打错时立刻反馈，不要一路绿灯到确认框才由引擎报“无法访问目标目录”。
-    if !PathBuf::from(ui.get_directory().as_str()).is_dir() {
-        ui.set_status("目录不存在或无法访问，请检查路径".into());
-        return;
-    }
-    ui.set_status("目录已就绪；「分析」只读不改文件，随时可以开始".into());
+    start_idle_directory_probe(ui, state, generation);
 }
 /// 目录输入变化与切换工具共用的就绪同步：已有任务时按「任务 + 配置 + 目录」在后台重算
 /// （开任务库与 canonicalize 都在 worker 线程，见 `load_plan_state`），而不是一律 invalidate
@@ -1540,11 +1656,13 @@ fn sync_ready_after_directory(ui: &AppWindow, state: &State, out: &EventSender) 
     // 同 invalidate 的 busy 门禁：运行中的状态栏归任务事件管，目录输入与工具切换
     // 不得触发就绪重算把执行中任务改写为「已结束/可执行」。
     if ui.get_busy() {
+        invalidate_idle_directory(state);
         return;
     }
     if ui.get_has_task() && state.tool == Tool::Organizer {
         if let Some(task) = state.task.clone() {
             ui.set_ready(false);
+            invalidate_idle_directory(state);
             state.readiness_status_pending.set(true);
             load_plan_state(
                 out,
@@ -1556,7 +1674,7 @@ fn sync_ready_after_directory(ui: &AppWindow, state: &State, out: &EventSender) 
             return;
         }
     }
-    invalidate(ui, state.tool);
+    invalidate(ui, state);
 }
 fn apply_theme(ui: &AppWindow, state: &State) {
     ui.set_theme(match state.config.theme.as_str() {
@@ -1666,7 +1784,7 @@ fn changed(
             // theme 是纯外观设置，不影响计划内容：不使已生成的计划失效。
             if key != "theme" {
                 refresh_scope_notice(ui, &state.config);
-                invalidate(ui, tool);
+                invalidate(ui, &state);
             }
             if rebuild {
                 refresh(ui, &state);
@@ -1969,14 +2087,14 @@ fn invalid_number_error(state: &State, tool: Tool) -> Option<String> {
     })
 }
 fn retain_invalid_number(ui: &AppWindow, state: &Rc<RefCell<State>>, key: &str, value: &str) {
-    let (tool, error) = {
+    let error = {
         let mut s = state.borrow_mut();
         s.invalid_rule_inputs
             .insert(key.to_string(), value.to_string());
-        (s.tool, invalid_number_error(&s, s.tool))
+        invalid_number_error(&s, s.tool)
     };
     patch_rule_row(ui, key, |row| row.value = value.into());
-    invalidate(ui, tool);
+    invalidate(ui, &state.borrow());
     ui.set_error_text(error.unwrap_or_default().into());
 }
 /// 计划页事件是否可应用：代际须仍是 latest，且 filter 与当前视图一致。
@@ -2824,47 +2942,66 @@ fn start_git(ui: &AppWindow, state: &Rc<RefCell<State>>, out: &EventSender) {
     ui.set_status("正在验证仓库（分支、upstream 与仓库状态）…".into());
     let worker_out = out.clone();
     let parent = tracing::Span::current();
+    #[cfg(test)]
+    let execution_hook = state.borrow().review_remediation.git.clone();
     std::thread::spawn(move || {
         let _parent = parent.enter();
         let span = jchtools_foundation::logging::operation_span("gui_worker", "git_task");
         let _entered = span.enter();
-        let git = match git_tools::find_git() {
-            Ok(git) => git,
-            Err(error) => {
-                tracing::error!(
-                    event = "git_task_start_failed",
-                    stage = "find_git",
-                    error_type = "git_unavailable",
-                    "Git 程序不可用"
-                );
-                let text = format!("{error:#}");
-                if let Ok(mut state) = shared.state.lock() {
-                    state.clear();
-                    state.push_str("失败");
-                }
-                if let Ok(mut stage) = shared.stage.lock() {
-                    stage.clear();
-                    stage.push_str("失败");
-                }
-                let _ = worker_out.send(Event::GitDone(format!("无法启动 Git 任务：{text}")));
-                return;
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            #[cfg(test)]
+            if let Some(hook) = execution_hook {
+                hook();
             }
-        };
-        let log_out = worker_out.clone();
-        let status_out = worker_out.clone();
-        let final_text = git_tools::run(
-            &git,
-            &repo,
-            &control,
-            &shared,
-            &|text: &str| {
-                let _ = log_out.send(Event::Log(text.to_string()));
-            },
-            &|text: &str| {
-                let _ = status_out.send(Event::Status(text.to_string()));
-            },
-            BACKOFF_UNIT,
-        );
+            let git = match git_tools::find_git() {
+                Ok(git) => git,
+                Err(error) => {
+                    tracing::error!(
+                        event = "git_task_start_failed",
+                        stage = "find_git",
+                        error_type = "git_unavailable",
+                        "Git 程序不可用"
+                    );
+                    if let Ok(mut state) = shared.state.lock() {
+                        state.clear();
+                        state.push_str("失败");
+                    }
+                    if let Ok(mut stage) = shared.stage.lock() {
+                        stage.clear();
+                        stage.push_str("失败");
+                    }
+                    return format!("无法启动 Git 任务：{error:#}");
+                }
+            };
+            let log_out = worker_out.clone();
+            let status_out = worker_out.clone();
+            git_tools::run(
+                &git,
+                &repo,
+                &control,
+                &shared,
+                &|text: &str| {
+                    let _ = log_out.send(Event::Log(text.to_string()));
+                },
+                &|text: &str| {
+                    let _ = status_out.send(Event::Status(text.to_string()));
+                },
+                BACKOFF_UNIT,
+            )
+        }));
+        let final_text = result.unwrap_or_else(|_| {
+            // panic payload 可能含凭据；只交付固定文案与本任务的专属终态。
+            for field in [&shared.state, &shared.stage] {
+                let mut value = field
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner);
+                value.clear();
+                value.push_str("失败");
+                drop(value);
+                field.clear_poison();
+            }
+            "Git 后台任务意外退出；请检查仓库后重试".to_string()
+        });
         let _ = worker_out.send(Event::GitDone(final_text));
     });
 }
@@ -3018,9 +3155,8 @@ fn wire_sync(ui: &AppWindow, state: &Rc<RefCell<State>>, out: &EventSender) {
     {
         let weak = ui.as_weak();
         let state = state.clone();
-        // 目录输入变化：无任务时重算很轻（仅本地存在性检查），保持同步反馈；有任务时
-        // 就绪重算要开任务库 + canonicalize，交给后台 worker（见 load_plan_state）。
-        // 去抖 300ms 只用于「按键停顿后才重算」，不再是为了躲开界面线程上的阻塞 I/O。
+        // 无任务目录检查由单 worker 合并执行，不在界面线程触碰文件系统；
+        // 只有已有整理计划仍沿原来的 300ms 去抖 + 任务库快照路径重算。
         let debounce = std::rc::Rc::new(slint::Timer::default());
         ui.on_root_edited({
             let weak = weak.clone();
@@ -3032,7 +3168,8 @@ fn wire_sync(ui: &AppWindow, state: &Rc<RefCell<State>>, out: &EventSender) {
                     // 编辑目录立即失效执行按钮（旧同步行为的安全属性）：去抖窗口内不得凭
                     // 陈旧 ready 打开确认框；随后去抖重算，目录与计划仍一致时重新点亮。
                     ui.set_ready(false);
-                    if !ui.get_has_task() {
+                    invalidate_idle_directory(&state.borrow());
+                    if !ui.get_has_task() || state.borrow().tool != Tool::Organizer {
                         sync_ready_after_directory(&ui, &state.borrow(), &out);
                         return;
                     }
@@ -3533,6 +3670,7 @@ impl UiPump {
         self.apply_snap_messages(ui);
         apply_acp_messages(ui, &self.state);
         apply_codeagent_messages(ui, &self.state);
+        apply_idle_directory_messages(ui, &self.state.borrow());
         self.refresh_fail_list(ui);
         self.refresh_runtime(ui);
     }
@@ -5092,6 +5230,7 @@ fn initial_state() -> Result<State> {
     let (fail_sender, fail_receiver) = mpsc::channel();
     let (snap_sender, snap_receiver) = mpsc::channel();
     let (acp_sender, acp_receiver) = mpsc::channel();
+    let (idle_directory_sender, idle_directory_receiver) = mpsc::channel();
     Ok(State {
         config: Config::default(),
         specs,
@@ -5132,9 +5271,15 @@ fn initial_state() -> Result<State> {
         settings_saved_selection: None,
         #[cfg(test)]
         settings_download: None,
+        #[cfg(test)]
+        review_remediation: ReviewRemediationHooks::default(),
         engine_overrides: None,
         plan_load: Arc::new(PlanLoadSync::default()),
         readiness_status_pending: Cell::new(false),
+        idle_directory_generation: Cell::new(0),
+        idle_directory_queue: Arc::new(std::sync::Mutex::new(IdleDirectoryQueue::default())),
+        idle_directory_sender,
+        idle_directory_receiver: RefCell::new(idle_directory_receiver),
         extract_task: None,
         fail_page: 0,
         fail_page_starts: vec![0],
@@ -5688,9 +5833,18 @@ fn start_markdown_readiness(ui: &AppWindow, state: &Rc<RefCell<State>>, out: &Ev
     ui.set_convert_ready(false);
     ui.set_convert_status("正在检查已安装组件…".into());
     let out = out.clone();
+    #[cfg(test)]
+    let readiness_hook = state.borrow().review_remediation.readiness.clone();
     std::thread::spawn(move || {
         // T-05/T-06：按当前勾选的场景检查必需组件，缺失时开始按钮保持关闭。
-        let result = markdown::readiness_for_groups(&groups);
+        let check = || markdown::readiness_for_groups(&groups);
+        #[cfg(test)]
+        let check = || match readiness_hook {
+            Some(hook) => hook(),
+            None => check(),
+        };
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(check))
+            .unwrap_or_else(|_| Err("转 Markdown 组件检查意外退出，请重试".to_string()));
         let (ok, message) = match result {
             Ok(()) => (true, "已安装组件就绪，可离线使用".to_string()),
             Err(error) => (false, error),
@@ -5774,8 +5928,10 @@ fn start_markdown_conversion(ui: &AppWindow, state: &Rc<RefCell<State>>, out: &E
     ui.set_convert_preparing(true);
     ui.set_convert_status("正在检查所选组件和输入输出目录…".into());
     let out = out.clone();
+    #[cfg(test)]
+    let preflight_hook = state.borrow().review_remediation.preflight.clone();
     std::thread::spawn(move || {
-        let result = (|| {
+        let check = || {
             if cancel.load(Ordering::Acquire) {
                 return Err("用户取消检查".to_string());
             }
@@ -5797,7 +5953,14 @@ fn start_markdown_conversion(ui: &AppWindow, state: &Rc<RefCell<State>>, out: &E
                 return Err("用户取消检查".to_string());
             }
             Ok(())
-        })();
+        };
+        #[cfg(test)]
+        let check = || match preflight_hook {
+            Some(hook) => hook(),
+            None => check(),
+        };
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(check))
+            .unwrap_or_else(|_| Err("转 Markdown 开始前检查意外退出，请重试".to_string()));
         let ok = result.is_ok();
         let message = result.err().unwrap_or_default();
         let _ = out.send(Event::Status(format!(
@@ -5841,41 +6004,50 @@ fn launch_markdown_conversion(
     ui.set_convert_status("正在转换…".into());
     let out = out.clone();
     let parent = tracing::Span::current();
+    #[cfg(test)]
+    let conversion_hook = state.borrow().review_remediation.conversion.clone();
     std::thread::spawn(move || {
         let _parent = parent.enter();
-        let result = markdown::run(&options, &cancel, |event| {
-            let text = match event {
-                markdown::Event::Started { total } => format!("CONVERTER_STARTED|{total}"),
-                markdown::Event::FileStarted {
-                    relative,
-                    index,
-                    total,
-                } => format!(
-                    "CONVERTER_FILE_STARTED|{index}|{total}|{}",
-                    relative.display()
-                ),
-                markdown::Event::FileFinished {
-                    relative,
-                    partial,
-                    success,
-                    message,
-                } => format!(
-                    "CONVERTER_FILE_FINISHED|{}|{}|{}|{}",
-                    i32::from(partial),
-                    i32::from(success),
-                    relative.display(),
-                    message.replace('|', "／")
-                ),
-                markdown::Event::Log(text) => {
-                    let _ = out.send(Event::Status(format!("CONVERTER_LOG|{text}")));
-                    return;
-                }
-                markdown::Event::FileCancelled { relative } => {
-                    format!("CONVERTER_FILE_CANCELLED|{}", relative.display())
-                }
-            };
-            let _ = out.send(Event::Status(text));
-        });
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            #[cfg(test)]
+            if let Some(hook) = conversion_hook {
+                hook();
+            }
+            markdown::run(&options, &cancel, |event| {
+                let text = match event {
+                    markdown::Event::Started { total } => format!("CONVERTER_STARTED|{total}"),
+                    markdown::Event::FileStarted {
+                        relative,
+                        index,
+                        total,
+                    } => format!(
+                        "CONVERTER_FILE_STARTED|{index}|{total}|{}",
+                        relative.display()
+                    ),
+                    markdown::Event::FileFinished {
+                        relative,
+                        partial,
+                        success,
+                        message,
+                    } => format!(
+                        "CONVERTER_FILE_FINISHED|{}|{}|{}|{}",
+                        i32::from(partial),
+                        i32::from(success),
+                        relative.display(),
+                        message.replace('|', "／")
+                    ),
+                    markdown::Event::Log(text) => {
+                        let _ = out.send(Event::Status(format!("CONVERTER_LOG|{text}")));
+                        return;
+                    }
+                    markdown::Event::FileCancelled { relative } => {
+                        format!("CONVERTER_FILE_CANCELLED|{}", relative.display())
+                    }
+                };
+                let _ = out.send(Event::Status(text));
+            })
+        }))
+        .unwrap_or_else(|_| Err("转 Markdown 后台任务意外退出；已完成的输出保留".to_string()));
         let text = match result {
             Ok(summary) => format!(
                 "CONVERTER_DONE|{}|{}|{}|{}|{}|{}",
@@ -7030,6 +7202,321 @@ mod gui_tests {
     //! 每个用例开始前重置为初始状态，互不干扰且与显示器/事件循环解耦。
     use super::*;
     use std::sync::{mpsc, Mutex, OnceLock};
+
+    type ReviewDirectoryProbe = dyn Fn() -> bool + Send + Sync;
+    pub(super) fn review_remediation_directory_probes(
+    ) -> &'static Mutex<HashMap<PathBuf, Arc<ReviewDirectoryProbe>>> {
+        static PROBES: std::sync::LazyLock<Mutex<HashMap<PathBuf, Arc<ReviewDirectoryProbe>>>> =
+            std::sync::LazyLock::new(|| Mutex::new(HashMap::new()));
+        &PROBES
+    }
+
+    #[derive(Default)]
+    struct ReviewProbeGate {
+        entered: std::sync::atomic::AtomicBool,
+        released: Mutex<bool>,
+        changed: std::sync::Condvar,
+    }
+    impl ReviewProbeGate {
+        fn probe(&self, result: bool) -> bool {
+            self.entered.store(true, Ordering::Release);
+            let mut released = self.released.lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            while !*released {
+                released = self.changed.wait(released)
+                    .unwrap_or_else(std::sync::PoisonError::into_inner);
+            }
+            result
+        }
+        fn release(&self) {
+            *self.released.lock().unwrap_or_else(std::sync::PoisonError::into_inner) = true;
+            self.changed.notify_all();
+        }
+    }
+    struct ReviewProbeRelease(Arc<ReviewProbeGate>);
+    impl Drop for ReviewProbeRelease {
+        fn drop(&mut self) {
+            self.0.release();
+        }
+    }
+    struct ReviewProbeRegistration {
+        paths: Vec<PathBuf>,
+        gates: Vec<Arc<ReviewProbeGate>>,
+    }
+    impl ReviewProbeRegistration {
+        fn new() -> Self {
+            Self { paths: Vec::new(), gates: Vec::new() }
+        }
+        fn insert(&mut self, path: PathBuf, gate: Arc<ReviewProbeGate>, result: bool) {
+            self.paths.push(path.clone());
+            self.gates.push(gate.clone());
+            review_remediation_directory_probes().lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .insert(path, Arc::new(move || gate.probe(result)));
+        }
+    }
+    impl Drop for ReviewProbeRegistration {
+        fn drop(&mut self) {
+            for gate in &self.gates {
+                gate.release();
+            }
+            let mut probes = review_remediation_directory_probes().lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            for path in &self.paths {
+                probes.remove(path);
+            }
+        }
+    }
+
+    fn review_remediation_edit_without_waiting(ui: &AppWindow, gate: Arc<ReviewProbeGate>) {
+        let (returned, callback_returned) = mpsc::channel();
+        let (decision, result) = mpsc::channel();
+        let watchdog = std::thread::spawn(move || {
+            let responsive = callback_returned.recv_timeout(Duration::from_secs(2)).is_ok();
+            if !responsive {
+                gate.release();
+            }
+            let _ = decision.send(responsive);
+        });
+        ui.invoke_root_edited();
+        let _ = returned.send(());
+        let responsive = result.recv().unwrap();
+        watchdog.join().unwrap();
+        assert!(responsive, "root_edited 必须在目录 probe 未放行时返回");
+    }
+
+    fn review_remediation_configure_conversion(app: &GuiTestApp, root: &Path) {
+        let input = root.join("input");
+        let output = root.join("output");
+        std::fs::create_dir_all(&input).unwrap();
+        std::fs::create_dir_all(&output).unwrap();
+        app.ui.invoke_select_tool("markdown-converter".into());
+        app.ui.set_convert_runtime_dir(root.display().to_string().into());
+        app.ui.set_convert_runtime_confirmed(true);
+        app.ui.set_convert_input_dir(input.display().to_string().into());
+        app.ui.set_convert_output_dir(output.display().to_string().into());
+    }
+
+    // P2-04/H-02/U-09：真实 Git worker unwind 后必须交付一次 GitDone，而非手工补事件。
+    #[test]
+    fn review_remediation_git_unwind_finishes_and_can_restart() {
+        with_gui(|app| {
+            let root = tempfile::tempdir().unwrap();
+            app.ui.invoke_select_tool("git-tools".into());
+            app.ui.set_git_repo(root.path().display().to_string().into());
+            app.state.borrow_mut().review_remediation.git =
+                Some(Arc::new(|| panic!("PRIVATE_PANIC_PAYLOAD_git_token")));
+            for _ in 0..2 {
+                app.ui.invoke_git_start();
+                assert!(app.ui.get_busy(), "新任务必须真实启动，不能残留上次 busy 门禁");
+                assert!(pump_until(app, || !app.ui.get_busy()),
+                    "Git 执行边界 unwind 必须经 GitDone 清除 busy");
+                assert_eq!(app.ui.get_git_state().as_str(), "失败");
+                assert_eq!(app.ui.get_git_stage().as_str(), "失败");
+                assert!(!app.ui.get_paused());
+                assert!(app.state.borrow().control.is_none());
+                assert!(app.state.borrow().git_shared.is_none());
+                assert!(app.state.borrow().runtime == RuntimeMode::Organizer);
+                let message = "Git 后台任务意外退出；请检查仓库后重试";
+                assert_eq!(app.ui.get_status().as_str(), message);
+                app.pump.run(&app.ui);
+                assert_eq!(app.state.borrow().logs.iter()
+                    .filter(|line| line.contains(message)).count(), 1,
+                    "用户日志应恰好呈现一次 GitDone 终态");
+                assert!(!app.ui.get_log_text().contains("PRIVATE_PANIC_PAYLOAD"));
+            }
+        }).unwrap();
+    }
+
+    // P1/T-05/H-02：就绪 panic 仍用当前代际 READINESS=false，不能悬停在检查中。
+    #[test]
+    fn review_remediation_converter_readiness_unwind_delivers_readiness_result() {
+        with_gui(|app| {
+            let root = tempfile::tempdir().unwrap();
+            review_remediation_configure_conversion(app, root.path());
+            app.state.borrow_mut().review_remediation.readiness =
+                Some(Arc::new(|| panic!("PRIVATE_PANIC_PAYLOAD_readiness")));
+            app.ui.invoke_convert_selection_changed();
+            assert!(pump_until(app, || app.ui.get_convert_status() == "可选组件未就绪，请主动初始化"),
+                "readiness panic 必须交付当前代际的未就绪结果");
+            assert!(!app.ui.get_convert_ready());
+            assert_eq!(app.ui.get_convert_detail_text().as_str(),
+                "转 Markdown 组件检查意外退出，请重试");
+            assert!(!app.ui.get_error_text().contains("PRIVATE_PANIC_PAYLOAD"));
+            assert!(!app.ui.get_convert_detail_text().contains("PRIVATE_PANIC_PAYLOAD"));
+            app.state.borrow_mut().review_remediation.readiness = Some(Arc::new(|| Ok(())));
+            app.ui.invoke_convert_selection_changed();
+            assert!(pump_until(app, || app.ui.get_convert_ready()), "检查异常后可以重试");
+            assert!(!app.ui.get_busy());
+            assert!(!app.ui.get_convert_preparing());
+            assert!(app.state.borrow().convert_init_cancel.is_none());
+        }).unwrap();
+    }
+
+    // P1/T-22～T-25：预检 panic 必须消费 PREFLIGHT=false 并释放专属挂起参数/取消句柄。
+    #[test]
+    fn review_remediation_converter_preflight_unwind_releases_pending_state() {
+        with_gui(|app| {
+            let root = tempfile::tempdir().unwrap();
+            review_remediation_configure_conversion(app, root.path());
+            app.ui.set_convert_ready(true);
+            app.state.borrow_mut().review_remediation.preflight =
+                Some(Arc::new(|| panic!("PRIVATE_PANIC_PAYLOAD_preflight")));
+            for _ in 0..2 {
+                app.ui.invoke_convert_start();
+                assert!(app.ui.get_convert_preparing(), "预检异常后必须可再次开始");
+                assert!(pump_until(app, || !app.ui.get_convert_preparing()),
+                    "preflight panic 必须交付原协议终态，不能只发通用 Failed");
+                let state = app.state.borrow();
+                assert!(!state.convert_preparing);
+                assert!(state.convert_pending_options.is_none());
+                assert!(state.convert_cancel.is_none());
+                assert!(state.runtime == RuntimeMode::Organizer);
+                assert!(!app.ui.get_busy());
+                assert_eq!(app.ui.get_convert_status().as_str(), "开始前检查失败，请修正后重试");
+                assert_eq!(app.ui.get_error_text().as_str(),
+                    "转 Markdown 开始前检查意外退出，请重试");
+                assert!(!app.ui.get_error_text().contains("PRIVATE_PANIC_PAYLOAD"));
+            }
+        }).unwrap();
+    }
+
+    // P1/T-22～T-25：批次 panic 必须经 CONVERTER_FAIL 收尾，不删除此前成品。
+    #[test]
+    fn review_remediation_converter_run_unwind_finishes_and_preserves_outputs() {
+        with_gui(|app| {
+            let root = tempfile::tempdir().unwrap();
+            review_remediation_configure_conversion(app, root.path());
+            let completed = root.path().join("output/completed.md");
+            std::fs::write(&completed, "already completed").unwrap();
+            app.ui.set_convert_ready(true);
+            {
+                let mut state = app.state.borrow_mut();
+                state.review_remediation.preflight = Some(Arc::new(|| Ok(())));
+            }
+            for _ in 0..2 {
+                let gate = Arc::new(ReviewProbeGate::default());
+                let _release = ReviewProbeRelease(gate.clone());
+                let worker_gate = gate.clone();
+                app.state.borrow_mut().review_remediation.conversion = Some(Arc::new(move || {
+                    worker_gate.probe(true);
+                    panic!("PRIVATE_PANIC_PAYLOAD_run");
+                }));
+                app.ui.invoke_convert_start();
+                assert!(pump_until(app, || app.ui.get_busy()), "真实预检成功后应进入转换");
+                gate.release();
+                assert!(pump_until(app, || !app.ui.get_busy()),
+                    "转换 worker panic 必须交付 CONVERTER_FAIL 并清 busy");
+                assert!(!app.ui.get_convert_preparing());
+                assert!(!app.ui.get_paused());
+                let state = app.state.borrow();
+                assert!(state.convert_cancel.is_none());
+                assert!(state.convert_pending_options.is_none());
+                assert!(state.convert_current.is_empty());
+                assert!(state.runtime == RuntimeMode::Organizer);
+                assert_eq!(app.ui.get_convert_status().as_str(), "转换失败，请查看日志");
+                assert!(app.ui.get_convert_metrics().contains("转换失败"));
+                assert_eq!(app.ui.get_error_text().as_str(),
+                    "转 Markdown 后台任务意外退出；已完成的输出保留");
+                assert!(!app.ui.get_convert_log_text().contains("PRIVATE_PANIC_PAYLOAD"));
+                assert_eq!(std::fs::read_to_string(&completed).unwrap(), "already completed");
+            }
+        }).unwrap();
+    }
+
+    // P3-23/H-02/R-04：真实目录回调不可等待 probe；代际/路径/工具过期结果不得落地。
+    #[test]
+    fn review_remediation_idle_probe_keeps_edits_and_navigation_responsive() {
+        with_gui(|app| {
+            let root = tempfile::tempdir().unwrap();
+            for tool in ["directory-organizer", "recursive-extract", "md-organizer", "git-tools"] {
+                app.ui.set_directory("".into());
+                app.ui.invoke_select_tool(tool.into());
+                let old = root.path().join(format!("{tool}-old"));
+                let latest = root.path().join(format!("{tool}-latest"));
+                let old_gate = Arc::new(ReviewProbeGate::default());
+                let latest_gate = Arc::new(ReviewProbeGate::default());
+                let mut probes = ReviewProbeRegistration::new();
+                probes.insert(old.clone(), old_gate.clone(), false);
+                probes.insert(latest.clone(), latest_gate.clone(), true);
+                app.ui.set_ready(true);
+                app.ui.set_directory(old.display().to_string().into());
+                review_remediation_edit_without_waiting(&app.ui, old_gate.clone());
+                assert!(!app.ui.get_ready(), "编辑必须同步撤销旧执行权");
+                assert!(pump_until(app, || old_gate.entered.load(Ordering::Acquire)));
+                app.ui.set_directory(latest.display().to_string().into());
+                app.ui.invoke_root_edited();
+                assert_eq!(app.ui.get_directory().as_str(), latest.display().to_string());
+                assert!(!app.ui.get_ready());
+                old_gate.release();
+                assert!(pump_until(app, || latest_gate.entered.load(Ordering::Acquire)));
+                app.pump.run(&app.ui);
+                assert!(!app.ui.get_status().contains("目录不存在"),
+                    "旧路径的失败结果不能覆盖仍在检查的新路径");
+                app.ui.invoke_select_tool("recursive-extract".into());
+                assert_eq!(app.ui.get_active_tool_id().as_str(), "recursive-extract",
+                    "probe 未放行时仍必须可以导航");
+                latest_gate.release();
+                assert!(pump_until(app, || app.ui.get_status().contains("开始解压")),
+                    "当前工具的结果必须胜出，不能被旧工具的中性状态覆盖");
+                assert_eq!(app.ui.get_directory().as_str(), latest.display().to_string());
+                drop(probes);
+            }
+        }).unwrap();
+    }
+
+    // P3-23：相同路径/工具再次编辑亦是新代际，旧失败不得穿过路径相等检查。
+    #[test]
+    fn review_remediation_idle_probe_rejects_old_generation_for_same_path() {
+        with_gui(|app| {
+            let root = tempfile::tempdir().unwrap();
+            let path = root.path().join("same-path");
+            let old_gate = Arc::new(ReviewProbeGate::default());
+            let latest_gate = Arc::new(ReviewProbeGate::default());
+            let mut probes = ReviewProbeRegistration::new();
+            probes.paths.push(path.clone());
+            probes.gates.extend([old_gate.clone(), latest_gate.clone()]);
+            let scripted = Mutex::new(VecDeque::from([
+                (old_gate.clone(), false),
+                (latest_gate.clone(), true),
+            ]));
+            review_remediation_directory_probes().lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .insert(path.clone(), Arc::new(move || {
+                    let (gate, result) = scripted.lock()
+                        .unwrap_or_else(std::sync::PoisonError::into_inner)
+                        .pop_front().expect("目录检查脚本只供本用例的两次编辑");
+                    gate.probe(result)
+                }));
+            app.ui.invoke_select_tool("directory-organizer".into());
+            app.ui.set_directory(path.display().to_string().into());
+            review_remediation_edit_without_waiting(&app.ui, old_gate.clone());
+            assert!(pump_until(app, || old_gate.entered.load(Ordering::Acquire)));
+            app.ui.invoke_root_edited();
+            assert!(!app.ui.get_ready());
+            old_gate.release();
+            assert!(pump_until(app, || latest_gate.entered.load(Ordering::Acquire)));
+            app.pump.run(&app.ui);
+            assert!(!app.ui.get_status().contains("目录不存在"),
+                "即使路径和工具相等，旧代际结果也不能覆盖新检查");
+            latest_gate.release();
+            assert!(pump_until(app, || app.ui.get_status() == "目录已就绪；「分析」只读不改文件，随时可以开始"));
+        }).unwrap();
+    }
+
+    // 覆盖 R-04/H-02、P3-23：编辑后立即撤销就绪；异步检查仍须报告不存在目录。
+    #[test]
+    fn review_remediation_idle_missing_directory_still_reports_failure() {
+        with_gui(|app| {
+            let root = tempfile::tempdir().unwrap();
+            app.ui.invoke_select_tool("directory-organizer".into());
+            app.ui.set_ready(true);
+            app.ui.set_directory(root.path().join("not-created").display().to_string().into());
+            app.ui.invoke_root_edited();
+            assert!(!app.ui.get_ready());
+            assert!(pump_until(app, || app.ui.get_status() == "目录不存在或无法访问，请检查路径"));
+        }).unwrap();
+    }
 
     // 覆盖 AH-08/AH-09/AH-12：GUI 消费真实类型快照，不将 saved 冒充 running。
     #[test]
@@ -10332,22 +10819,6 @@ mod gui_tests {
         })
         .unwrap();
     }
-    // 覆盖 R-04（目录改动后立即反馈，不得凭陈旧目录继续）
-    #[test]
-    fn root_edited_reports_missing_directory() {
-        with_gui(|app| {
-            let ui = &app.ui;
-            ui.set_directory("D:/surely-missing-dir-42/data".into());
-            ui.invoke_root_edited();
-            assert!(
-                ui.get_status().contains("目录不存在"),
-                "输入不存在的目录必须立即提示：status={} directory={}",
-                ui.get_status(),
-                ui.get_directory()
-            );
-        })
-        .unwrap();
-    }
     // 覆盖 P-02
     #[test]
     fn search_tools_filters_registry() {
@@ -10875,48 +11346,6 @@ mod gui_tests {
         }
     }
 
-    // 覆盖 U-11, C-11（切到 MD 整理/Git 工具时状态栏必须显示本工具中性文案，
-    // 不得出现「分析/整理/规则」等目录整理专属流程词）
-    #[test]
-    fn switching_to_md_or_git_shows_neutral_status() {
-        with_gui(|app| {
-            let ui = &app.ui;
-            let assert_neutral = |ui: &AppWindow, page: &str| {
-                let status = ui.get_status().to_string();
-                for forbidden in ["分析", "整理", "规则"] {
-                    assert!(
-                        !status.contains(forbidden),
-                        "{page} 页状态栏不得出现目录整理流程词（{forbidden}）：{status}"
-                    );
-                }
-            };
-            ui.invoke_select_tool("md-organizer".into());
-            assert_neutral(ui, "MD 整理");
-            ui.invoke_select_tool("git-tools".into());
-            assert_neutral(ui, "Git 工具");
-            // 目录输入有效时是「就绪」类提示，同样不得串用目录整理流程词
-            let ready_dir = temp_test_dir("neutral-status-dir");
-            ui.set_directory(ready_dir.display().to_string().into());
-            ui.invoke_select_tool("md-organizer".into());
-            assert_neutral(ui, "MD 整理");
-            assert!(
-                ui.get_status().contains("就绪"),
-                "目录有效时应显示就绪类提示：{}",
-                ui.get_status()
-            );
-            // 目录无效时的反馈同样保持中性
-            ui.set_directory("D:/surely-missing-dir-42/data".into());
-            ui.invoke_root_edited();
-            assert_neutral(ui, "MD 整理");
-            assert!(
-                ui.get_status().contains("目录不存在"),
-                "无效目录必须立即提示：{}",
-                ui.get_status()
-            );
-            let _ = std::fs::remove_dir_all(&ready_dir);
-        })
-        .unwrap();
-    }
 
     /// 构造 MD 输入/输出目录：`file_count` 个带内容的 .md 文件。
     fn make_md_fixture(tag: &str, file_count: usize) -> (PathBuf, PathBuf, PathBuf) {

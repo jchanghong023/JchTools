@@ -307,7 +307,13 @@ fn reap(child: &mut Child) {
 /// 带宿主侧总超时地运行命令并捕获全部输出。
 /// 超时后回收进程；Windows 下所有后代也归入本次拥有的 kill-on-close Job。
 pub fn run_with_timeout(command: &mut Command, timeout: Duration) -> Result<CapturedOutput> {
-    run_with_timeout_ext(command, None, timeout, None, MAX_CAPTURE_BYTES, false)
+    run_with_timeout_ext(command, None, Some(timeout), None, MAX_CAPTURE_BYTES, false)
+}
+
+/// 有界捕获 stdout/stderr，但不设命令 deadline，也不在等待期间响应取消。
+/// Git 等需要保留正在执行的写操作的调用方应在命令自然结束后自行检查停止标志。
+pub fn run_to_completion(command: &mut Command) -> Result<CapturedOutput> {
+    run_with_timeout_ext(command, None, None, None, MAX_CAPTURE_BYTES, false)
 }
 
 /// 同 [`run_with_timeout`]，另支持外部取消标志；预取消不启动命令，
@@ -320,7 +326,7 @@ pub fn run_with_timeout_cancel(
     run_with_timeout_ext(
         command,
         None,
-        timeout,
+        Some(timeout),
         Some(&CancelSource::Atomic(cancel)),
         MAX_CAPTURE_BYTES,
         false,
@@ -351,7 +357,7 @@ pub fn run_with_timeout_control_limit(
     run_with_timeout_ext(
         command,
         None,
-        timeout,
+        Some(timeout),
         Some(&CancelSource::Control(control)),
         capture_limit,
         true,
@@ -455,7 +461,7 @@ impl ProcessTreeJob {
 fn run_with_timeout_ext(
     command: &mut Command,
     stdin_data: Option<&[u8]>,
-    timeout: Duration,
+    timeout: Option<Duration>,
     cancel: Option<&CancelSource<'_>>,
     capture_limit: usize,
     reject_truncation: bool,
@@ -471,7 +477,7 @@ fn run_with_timeout_ext(
     let started = Instant::now();
     tracing::debug!(
         event = "spawn_started",
-        timeout_ms = u64::try_from(timeout.as_millis()).unwrap_or(u64::MAX),
+        timeout_ms = timeout.map(|limit| u64::try_from(limit.as_millis()).unwrap_or(u64::MAX)),
         capture_limit,
         stdin_present = stdin_data.is_some(),
         "开始启动捕获子进程"
@@ -517,7 +523,7 @@ fn run_with_timeout_ext(
 fn run_with_timeout_inner(
     command: &mut Command,
     stdin_data: Option<&[u8]>,
-    timeout: Duration,
+    timeout: Option<Duration>,
     cancel: Option<&CancelSource<'_>>,
     capture_limit: usize,
     reject_truncation: bool,
@@ -706,7 +712,14 @@ fn run_with_timeout_inner(
             None => read_all_capped(stderr_pipe, capture_limit),
         }
     });
-    match wait_child_with_deadline(&mut child, timeout, cancel, exceeded.as_deref()) {
+    let status = match timeout {
+        Some(timeout) => wait_child_with_deadline(&mut child, timeout, cancel, exceeded.as_deref()),
+        None => child.wait().map_err(|error| {
+            tracing::error!(event = "subprocess_wait_failed", peer_pid = child.id(), stage = "wait", error_type = ?error.kind(), error_code = error.raw_os_error(), "等待子进程自然结束失败");
+            anyhow::anyhow!("等待子进程自然结束失败：{error}")
+        }),
+    };
+    match status {
         Ok(status) => {
             tracing::debug!(
                 event = "subprocess_exited",
@@ -1287,7 +1300,7 @@ mod tests {
                     ])
                     .env("DIAGNOSTIC_TEST_SECRET", "private-environment-secret");
                 let out =
-                    run_with_timeout_ext(&mut command, None, Duration::from_secs(5), None, 8, false)
+                    run_with_timeout_ext(&mut command, None, Some(Duration::from_secs(5)), None, 8, false)
                         .unwrap();
                 assert_eq!(out.status.code(), Some(exit_code));
                 assert_eq!(out.stdout, b"private-");

@@ -377,6 +377,8 @@ socket2 = { version = "=0.6.5", path = "vendor/socket2-0.6.5" }
 imagesize = { version = "=0.14.0", path = "vendor/imagesize-0.14.0" }
 rustybuzz = { version = "=0.20.1", path = "vendor/rustybuzz-0.20.1" }
 unicode-bidi-mirroring = { version = "=0.4.0", path = "vendor/unicode-bidi-mirroring-0.4.0" }
+axum = { version = "=0.8.9", path = "vendor/axum-0.8.9" }
+lopdf = { version = "=0.45.0", path = "vendor/lopdf-0.45.0" }
 
 [profile.release]
 lto = "thin"

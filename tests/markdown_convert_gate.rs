@@ -32,25 +32,39 @@ fn test_dir() -> tempfile::TempDir {
     tempfile::tempdir_in(root).unwrap()
 }
 
-struct EnvironmentGuard {
+// 环境恢复必须仍持有仓库级会话锁；notice 根和状态根都显式隔离，
+// 不能让继承的资产覆盖目录把不同测试进程导向同一个 licenses 目录。
+struct EnvironmentGuard<'session> {
+    _session: &'session common::SessionLock,
     state_dir: Option<std::ffi::OsString>,
     broker_exe: Option<std::ffi::OsString>,
+    asset_root: Option<std::ffi::OsString>,
 }
 
-impl EnvironmentGuard {
-    fn capture() -> Self {
-        Self {
+impl<'session> EnvironmentGuard<'session> {
+    fn capture(session: &'session common::SessionLock, root: &std::path::Path) -> Self {
+        let guard = Self {
+            _session: session,
             state_dir: std::env::var_os("JCHTOOLS_TEST_STATE_DIR"),
             broker_exe: std::env::var_os("JCHTOOLS_TEST_BROKER_EXE"),
-        }
+            asset_root: std::env::var_os("JCHTOOLS_MARKDOWN_TEST_ASSET_ROOT"),
+        };
+        std::env::set_var("JCHTOOLS_TEST_STATE_DIR", root.join("state"));
+        std::env::set_var("JCHTOOLS_TEST_BROKER_EXE", env!("CARGO_BIN_EXE_JchTools"));
+        std::env::set_var(
+            "JCHTOOLS_MARKDOWN_TEST_ASSET_ROOT",
+            root.join("markdown-assets"),
+        );
+        guard
     }
 }
 
-impl Drop for EnvironmentGuard {
+impl Drop for EnvironmentGuard<'_> {
     fn drop(&mut self) {
         for (name, value) in [
             ("JCHTOOLS_TEST_STATE_DIR", &self.state_dir),
             ("JCHTOOLS_TEST_BROKER_EXE", &self.broker_exe),
+            ("JCHTOOLS_MARKDOWN_TEST_ASSET_ROOT", &self.asset_root),
         ] {
             if let Some(value) = value {
                 std::env::set_var(name, value);
@@ -142,15 +156,13 @@ fn scan_honors_cancellation_before_traversal() {
 #[test]
 fn batch_uses_selected_engine_formats() {
     common::ensure_child_reaper();
-    let _session = common::session_lock();
+    let session = common::session_lock();
     common::cleanup_stray_engines();
     let temp = test_dir();
     let root = temp.path();
     common::mock_engine_copy("tests/fixtures/shared_xberg.rs", &root.join("xberg.exe"));
     // 在持有会话锁期间恢复进程级测试配置，包括断言 panic 的路径。
-    let _environment = EnvironmentGuard::capture();
-    std::env::set_var("JCHTOOLS_TEST_STATE_DIR", root.join("state"));
-    std::env::set_var("JCHTOOLS_TEST_BROKER_EXE", env!("CARGO_BIN_EXE_JchTools"));
+    let _environment = EnvironmentGuard::capture(&session, root);
     let manifest: serde_json::Value =
         serde_json::from_str(include_str!("../resources/markdown-assets.json")).unwrap();
     for member in manifest["xberg"]["members"].as_array().unwrap() {
@@ -219,7 +231,7 @@ fn batch_uses_selected_engine_formats() {
 #[test]
 fn batch_preserves_image_titles_and_commits_angle_bracket_media() {
     common::ensure_child_reaper();
-    let _session = common::session_lock();
+    let session = common::session_lock();
     common::cleanup_stray_engines();
     let temp = test_dir();
     let root = temp.path();
@@ -249,9 +261,7 @@ fn batch_preserves_image_titles_and_commits_angle_bracket_media() {
     )
     .unwrap();
     common::mock_engine_copy(engine_source.to_str().unwrap(), &root.join("xberg.exe"));
-    let _environment = EnvironmentGuard::capture();
-    std::env::set_var("JCHTOOLS_TEST_STATE_DIR", root.join("state"));
-    std::env::set_var("JCHTOOLS_TEST_BROKER_EXE", env!("CARGO_BIN_EXE_JchTools"));
+    let _environment = EnvironmentGuard::capture(&session, root);
     let manifest: serde_json::Value =
         serde_json::from_str(include_str!("../resources/markdown-assets.json")).unwrap();
     for member in manifest["xberg"]["members"].as_array().unwrap() {
@@ -321,7 +331,7 @@ fn review_fix_run_link_batch(
     expected_media: &[(&str, &[u8])],
 ) {
     common::ensure_child_reaper();
-    let _session = common::session_lock();
+    let session = common::session_lock();
     common::cleanup_stray_engines();
     let temp = test_dir();
     let root = temp.path();
@@ -350,9 +360,7 @@ fn review_fix_run_link_batch(
     )
     .unwrap();
     common::mock_engine_copy(engine_source.to_str().unwrap(), &root.join("xberg.exe"));
-    let _environment = EnvironmentGuard::capture();
-    std::env::set_var("JCHTOOLS_TEST_STATE_DIR", root.join("state"));
-    std::env::set_var("JCHTOOLS_TEST_BROKER_EXE", env!("CARGO_BIN_EXE_JchTools"));
+    let _environment = EnvironmentGuard::capture(&session, root);
     let manifest: serde_json::Value =
         serde_json::from_str(include_str!("../resources/markdown-assets.json")).unwrap();
     for member in manifest["xberg"]["members"].as_array().unwrap() {
@@ -480,5 +488,245 @@ fn review_fix_batch_materializes_invalid_link_image_and_preserves_valid_titles()
         ]),
         expected,
         &[("image_0.png", b"hello"), ("image_2.png", &[0, 255, 37])],
+    );
+}
+
+// P1 / T-09/T-24/XB-05：通过真实 run、共享代理和合成引擎消费孤立代理项路径。
+// 正常—非法—正常必须逐项完成；U+FFFD 是另一合法文件名，不是非法路径的替身。
+#[cfg(windows)]
+fn review_remediation_run_non_unicode_batch(
+    extension: &str,
+    group: FormatGroup,
+    expected_markdown: &[u8],
+) {
+    use jchtools_markdown::markdown::{Event, Summary};
+    use std::os::windows::ffi::{OsStrExt, OsStringExt};
+
+    common::ensure_child_reaper();
+    let session = common::session_lock();
+    common::cleanup_stray_engines();
+    let temp = test_dir();
+    let root = temp.path();
+    common::mock_engine_copy("tests/fixtures/shared_xberg.rs", &root.join("xberg.exe"));
+    let _environment = EnvironmentGuard::capture(&session, root);
+    let manifest: serde_json::Value =
+        serde_json::from_str(include_str!("../resources/markdown-assets.json")).unwrap();
+    for member in manifest["xberg"]["members"].as_array().unwrap() {
+        let relative = member["path"].as_str().unwrap();
+        if relative != "xberg.exe" {
+            let target = root.join(relative);
+            std::fs::create_dir_all(target.parent().unwrap()).unwrap();
+            std::fs::write(target, b"synthetic asset").unwrap();
+        }
+    }
+    jchtools_markdown::markdown_assets::save_runtime_dir(root).unwrap();
+    let state = jchtools_xberg::xberg_runtime::request(
+        root,
+        serde_json::json!({"command":"snapshot_state"}),
+        std::time::Duration::from_secs(15),
+        &AtomicBool::new(false),
+    )
+    .and_then(jchtools_xberg::xberg_runtime::checked)
+    .unwrap();
+    struct BrokerGuard(u64);
+    impl Drop for BrokerGuard {
+        fn drop(&mut self) {
+            let _ = std::process::Command::new("taskkill")
+                .args(["/PID", &self.0.to_string(), "/T", "/F"])
+                .output();
+        }
+    }
+    let _broker = BrokerGuard(state["jchtools_broker_pid"].as_u64().unwrap());
+
+    let input = root.join("input");
+    let output = root.join("output");
+    std::fs::create_dir(&input).unwrap();
+    std::fs::create_dir(&output).unwrap();
+    let mut invalid_units: Vec<u16> = "b_".encode_utf16().collect();
+    invalid_units.push(0xd800);
+    invalid_units.extend(format!(".{extension}").encode_utf16());
+    let invalid = std::path::PathBuf::from(std::ffi::OsString::from_wide(&invalid_units));
+    let first = std::path::PathBuf::from(format!("a.{extension}"));
+    let last = std::path::PathBuf::from(format!("c.{extension}"));
+    let sources = [
+        (&first, b"first source".as_slice()),
+        (&invalid, b"isolated surrogate source".as_slice()),
+        (&last, b"last source".as_slice()),
+    ];
+    for (relative, bytes) in sources {
+        std::fs::write(input.join(relative), bytes).unwrap();
+    }
+    assert!(invalid.to_str().is_none(), "必须真实触发非 UTF-8 路径边界");
+    let options = Options {
+        input_dir: input.clone(),
+        output_dir: output.clone(),
+        flat: false,
+        groups: vec![group],
+        timeout_secs: 15,
+    };
+    let mut started = Vec::new();
+    let mut finished = Vec::new();
+    let summary =
+        jchtools_markdown::markdown::run(&options, &AtomicBool::new(false), |event| match event {
+            Event::Started { total } => assert_eq!(total, 3),
+            Event::FileStarted { relative, .. } => started.push(relative),
+            Event::FileFinished {
+                relative, success, partial, message,
+            } => finished.push((relative, success, partial, message)),
+            Event::FileCancelled { relative } => panic!("未请求取消：{relative:?}"),
+            Event::Log(_) => {}
+        })
+        .expect("非法编码必须返回逐文件 Err，而非 panic 或中止批次");
+    assert_eq!(summary, Summary { success: 2, failed: 1, ..Summary::default() });
+    assert_eq!(started, vec![first.clone(), invalid.clone(), last.clone()]);
+    assert_eq!(finished.len(), 3);
+    for (result, relative, success) in [
+        (&finished[0], &first, true),
+        (&finished[1], &invalid, false),
+        (&finished[2], &last, true),
+    ] {
+        assert_eq!(&result.0, relative);
+        assert_eq!(result.1, success);
+        assert!(!result.2, "编码失败不是部分成功");
+    }
+    assert_eq!(
+        finished[1].0.as_os_str().encode_wide().collect::<Vec<_>>(),
+        invalid_units,
+        "失败事件必须保留原始 UTF-16 路径，不能替换为 U+FFFD"
+    );
+    let error = &finished[1].3;
+    assert!(
+        error.to_ascii_lowercase().contains("utf-8")
+            || error.contains("编码")
+            || error.to_ascii_lowercase().contains("unicode"),
+        "必须披露路径编码拒绝原因：{error}"
+    );
+    let expected_entries: std::collections::BTreeSet<_> = ["a", "c"]
+        .into_iter()
+        .map(|stem| std::ffi::OsString::from(format!("{stem}_{extension}.md")))
+        .collect();
+    let entries: std::collections::BTreeSet<_> = std::fs::read_dir(&output)
+        .unwrap()
+        .map(|entry| entry.unwrap().file_name())
+        .collect();
+    assert_eq!(entries, expected_entries, "非法项无成品、媒体目录或临时文件");
+    for stem in ["a", "c"] {
+        assert_eq!(
+            std::fs::read(output.join(format!("{stem}_{extension}.md"))).unwrap(),
+            expected_markdown,
+            "非法项之后的正常文件也必须完成真实提交"
+        );
+    }
+    for (relative, bytes) in sources {
+        assert_eq!(std::fs::read(input.join(relative)).unwrap(), bytes);
+    }
+
+    // 独立对照批次：合法 U+FFFD 路径必须成功，不能一概拒绝替换字符。
+    let control_input = root.join("control-input");
+    let control_output = root.join("control-output");
+    std::fs::create_dir(&control_input).unwrap();
+    std::fs::create_dir(&control_output).unwrap();
+    let replacement = std::path::PathBuf::from(format!("b_\u{fffd}.{extension}"));
+    assert_ne!(replacement, invalid);
+    assert!(replacement.to_str().is_some());
+    let control_bytes = b"literal replacement character source";
+    std::fs::write(control_input.join(&replacement), control_bytes).unwrap();
+    let control_options = Options {
+        input_dir: control_input.clone(),
+        output_dir: control_output.clone(),
+        ..options
+    };
+    let mut control_finished = Vec::new();
+    let control_summary = jchtools_markdown::markdown::run(
+        &control_options,
+        &AtomicBool::new(false),
+        |event| {
+            if let Event::FileFinished { relative, success, partial, .. } = event {
+                control_finished.push((relative, success, partial));
+            }
+        },
+    )
+    .unwrap();
+    assert_eq!(control_summary, Summary { success: 1, ..Summary::default() });
+    assert_eq!(control_finished, vec![(replacement.clone(), true, false)]);
+    assert_eq!(
+        std::fs::read(control_output.join(format!("b_\u{fffd}_{extension}.md"))).unwrap(),
+        expected_markdown
+    );
+    assert_eq!(std::fs::read_dir(&control_output).unwrap().count(), 1);
+    assert_eq!(std::fs::read(control_input.join(replacement)).unwrap(), control_bytes);
+    for (relative, bytes) in sources {
+        assert_eq!(std::fs::read(input.join(relative)).unwrap(), bytes);
+    }
+}
+
+// P1 / T-24：extract 请求边界的 Path 序列化不得越过逐文件错误隔离。
+#[cfg(windows)]
+#[test]
+fn review_remediation_document_non_unicode_path_isolated_and_replacement_is_valid() {
+    review_remediation_run_non_unicode_batch("txt", FormatGroup::Other, b"document");
+}
+
+// P1 / T-24：transcribe 请求边界同样拒绝孤立代理项，后续媒体仍正常提交。
+#[cfg(windows)]
+#[test]
+fn review_remediation_media_non_unicode_path_isolated_and_replacement_is_valid() {
+    review_remediation_run_non_unicode_batch("mp4", FormatGroup::Media, b"media");
+}
+
+// P3-13 / T-14/T-17/T-25：多图元数据逆序，引用顺序、重复引用、title、
+// 跨行代码和围栏共同消费真实批处理落盘；未引用资源不得产生文件。
+#[test]
+fn review_remediation_batch_multiple_images_preserve_literals_and_exact_media() {
+    let content = concat!(
+        "![二](<image_2.png> \"![title](image_3.png)\")\r\n",
+        "~~~text\r\n![围栏](image_3.png)\r\n~~~\r\n",
+        "`跨行\n![代码](image_3.png)`\n",
+        "![说明 `![alt](image_3.png)`](image_0.png)\n",
+        "[![一](image_1.png)](external.md '![title](image_3.png)')\n",
+        "![重复](image_2.png)"
+    );
+    let expected = concat!(
+        "![二](<a_txt_media/image_2.png> \"![title](image_3.png)\")\r\n",
+        "~~~text\r\n![围栏](image_3.png)\r\n~~~\r\n",
+        "`跨行\n![代码](image_3.png)`\n",
+        "![说明 `![alt](image_3.png)`](a_txt_media/image_0.png)\n",
+        "[![一](a_txt_media/image_1.png)](external.md '![title](image_3.png)')\n",
+        "![重复](a_txt_media/image_2.png)"
+    );
+    review_fix_run_link_batch(
+        content,
+        serde_json::json!([
+            {"image_index": 3, "format": "png", "data": [99]},
+            {"image_index": 2, "format": "png", "data": [0, 255]},
+            {"image_index": 1, "format": "png", "data_base64": "aGVsbG8="},
+            {"image_index": 0, "format": "png", "data": [37]}
+        ]),
+        expected,
+        &[("image_0.png", &[37]), ("image_1.png", b"hello"), ("image_2.png", &[0, 255])],
+    );
+}
+
+// P3-13 / T-14/T-16：重复元数据不能重复落盘或覆盖首个成功字节；
+// 未引用的坏数据不解码、不告警，合法 title/代码中的同名目标仍是字面量。
+#[test]
+fn review_remediation_batch_duplicate_metadata_and_unreferenced_bad_data() {
+    let content = concat!(
+        "![图](image_1.png) ![重复](<image_1.png> \"![title](image_0.png)\")\r\n",
+        "`![代码](image_0.png)`"
+    );
+    let expected = concat!(
+        "![图](a_txt_media/image_1.png) ![重复](<a_txt_media/image_1.png> \"![title](image_0.png)\")\r\n",
+        "`![代码](image_0.png)`"
+    );
+    review_fix_run_link_batch(
+        content,
+        serde_json::json!([
+            {"image_index": 1, "format": "png", "data": [0, 255]},
+            {"image_index": 0, "format": "png", "data_base64": "not-base64"},
+            {"image_index": 1, "format": "png", "data": [37]}
+        ]),
+        expected,
+        &[("image_1.png", &[0, 255])],
     );
 }

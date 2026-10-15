@@ -408,6 +408,92 @@ fn members_in_subdirectories_merge_into_created_parents() {
         "X-05：全部成员成功落盘后必须永久删除原压缩包"
     );
 }
+
+// P3-05 / X-04 / S-01：同包兄弟共享深父链，仍保留冲突文件和空目录。
+#[test]
+#[ignore = "Requires explicitly provided real 7-Zip engine"]
+fn shared_destination_parents_preserve_conflicts_and_empty_directories() {
+    let f = ArchiveFixture::new();
+    let relative = Path::new("shared/level1/level2/level3");
+    fs::create_dir_all(f.input.join(relative).join("empty/leaf")).unwrap();
+    fs::create_dir_all(f.root.join("shared/level1")).unwrap();
+    for index in 0..64 {
+        fs::write(
+            f.input.join(relative).join(format!("member-{index:02}.txt")),
+            format!("member payload {index}"),
+        )
+        .unwrap();
+    }
+    fs::create_dir_all(f.root.join(relative)).unwrap();
+    fs::write(
+        f.root.join(relative).join("member-00.txt"),
+        b"existing user content",
+    )
+    .unwrap();
+    f.archive(&f.root.join("shared.7z"), "-t7z");
+
+    let result = f.run(config());
+    assert_eq!(result.summary.archives_ok, 1);
+    assert_eq!(result.summary.archives_failed, 0);
+    assert_eq!(result.summary.extracted, 64);
+    assert_eq!(result.summary.deleted, 1);
+    assert_eq!(
+        fs::read(f.root.join(relative).join("member-00.txt")).unwrap(),
+        b"existing user content",
+        "共享缓存不得把已存在的最终名视为可覆盖"
+    );
+    for index in 0..64 {
+        let name = if index == 0 {
+            "member-00 (1).txt".to_owned()
+        } else {
+            format!("member-{index:02}.txt")
+        };
+        assert_eq!(
+            fs::read(f.root.join(relative).join(name)).unwrap(),
+            format!("member payload {index}").as_bytes(),
+            "每个兄弟成员均完整落盘"
+        );
+    }
+    assert!(f.root.join(relative).join("empty/leaf").is_dir());
+    assert!(!f.root.join("shared.7z").exists());
+}
+
+// P3-05：只校验被排除成员的父链，不提前创建目录；获准的兄弟成员照常落盘。
+#[test]
+#[ignore = "Requires explicitly provided real 7-Zip engine"]
+fn excluded_members_do_not_create_validated_parent_chains() {
+    let f = ArchiveFixture::new();
+    fs::create_dir_all(f.input.join("blocked/deep/empty")).unwrap();
+    for index in 0..16 {
+        fs::write(
+            f.input.join(format!("blocked/deep/member-{index}.txt")),
+            format!("excluded payload {index}"),
+        )
+        .unwrap();
+    }
+    fs::write(f.input.join("allowed.txt"), b"allowed member").unwrap();
+    let archive = f.root.join("filtered.7z");
+    f.archive(&archive, "-t7z");
+    let original = fs::read(&archive).unwrap();
+    let cfg = Config {
+        exclusions: "blocked/**".into(),
+        ..config()
+    };
+
+    let result = f.run(cfg);
+    assert_eq!(result.summary.archives_ok, 0, "部分排除不能算完整解开");
+    assert_eq!(result.summary.archives_failed, 1);
+    assert_eq!(result.summary.archives_quarantined, 1);
+    assert_eq!(result.summary.extracted, 1);
+    assert_eq!(result.summary.deleted, 0, "原包仍含未解出的成员");
+    assert_eq!(fs::read(f.root.join("allowed.txt")).unwrap(), b"allowed member");
+    assert!(!f.root.join("blocked").exists(), "过滤前不得创建任何父链或空目录");
+    assert_eq!(
+        fs::read(f.root.join("解压失败/filtered.7z")).unwrap(),
+        original,
+        "部分排除的源包逐字节保留"
+    );
+}
 // 覆盖 C-02, C-01：先解压（工具一）再分析（工具二，只读），两工具分工后仍能衔接出删除计划。
 // C-02（2026-09-21 第四批）：不同名去重默认关闭，本用例显式开启后再验证衔接。
 #[test]

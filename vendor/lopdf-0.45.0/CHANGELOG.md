@@ -1,3 +1,8 @@
+## Local JchTools patch
+
+* Apply `LoadOptions.max_decompressed_size` to cross-reference and object-stream decoding.
+* Propagate encrypted object-stream `MemoryLimitExceeded` errors without changing recovery for other encrypted-object errors.
+
 <a name="v0.44.0"></a>
 ## [v0.44.0](https://github.com/J-F-Liu/lopdf/compare/v0.43.0...v0.44.0) (2026-07-10)
 

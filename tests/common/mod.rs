@@ -6,56 +6,20 @@
 //! 独占文件句柄保证。句柄关闭时由系统删除锁文件，存活持有者不会因测试耗时被抢占。
 
 use std::collections::HashMap;
-use std::fs::{File, OpenOptions};
-use std::os::windows::fs::OpenOptionsExt;
 use std::path::{Path, PathBuf};
 use std::sync::{Mutex, OnceLock};
-use std::time::{Duration, Instant};
+
+mod engine_session;
+pub(super) use engine_session::SessionLock;
 
 /// 仓库根（编译期定位 rustc 夹具源与 .tmp）。
 const ROOT: &str = env!("CARGO_MANIFEST_DIR");
 
-/// 会话锁守卫：持有不共享且关闭即删除的文件句柄；异常进程退出也由系统释放。
-pub(super) struct SessionLock {
-    _file: File,
-}
-
-/// 取会话锁：最多等 180 秒，但绝不按锁文件时龄抢占仍存活的持有者。
+/// 取根 package 的会话锁；子 package 通过 `#[path]` 复用 engine_session 并显式传仓库根。
 ///
-/// # Panics
-/// 创建锁目录或打开锁文件失败，或等满 180 秒仍拿不到锁时 panic。
+/// 最多等 180 秒，不按时龄抢占存活持有者；目录、打开或等待失败的 panic 规则不变。
 pub(super) fn session_lock() -> SessionLock {
-    let path = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join(".tmp/engine-session.lock");
-    std::fs::create_dir_all(path.parent().unwrap())
-        .unwrap_or_else(|error| panic!("创建引擎会话锁目录失败：{error}"));
-    let deadline = Instant::now() + Duration::from_secs(180);
-    // Win32 FILE_FLAG_DELETE_ON_CLOSE：保留句柄期间拒绝共享打开/删除；最后一个
-    // 句柄关闭时删除。create(true) 也可安全接管旧版遗留、已无人持有的文件，
-    // 不需先检查时龄再删除（该检查会误抢耗时测试，旧守卫还会删掉新持有者的锁）。
-    const DELETE_ON_CLOSE: u32 = 0x0400_0000;
-    const GENERIC_WRITE: u32 = 0x4000_0000;
-    const DELETE_ACCESS: u32 = 0x0001_0000;
-    loop {
-        match OpenOptions::new()
-            .write(true)
-            .create(true)
-            .truncate(false)
-            .access_mode(GENERIC_WRITE | DELETE_ACCESS)
-            .share_mode(0)
-            .custom_flags(DELETE_ON_CLOSE)
-            .open(&path)
-        {
-            Ok(file) => return SessionLock { _file: file },
-            // 共享冲突表示已有持有者；关闭删除的短暂窗口可能返回访问被拒绝。
-            Err(error) if matches!(error.raw_os_error(), Some(5 | 32 | 33)) => {}
-            Err(error) => panic!("打开引擎会话锁失败（{}）：{error}", path.display()),
-        }
-        assert!(
-            Instant::now() < deadline,
-            "引擎会话锁等待超时：仍有测试持有锁或锁目录不可写；不得删除活跃锁"
-        );
-        std::thread::sleep(Duration::from_millis(300));
-    }
+    engine_session::session_lock(Path::new(ROOT))
 }
 
 /// 清场前的廉价探测（2026-10-03 计时优化：全量 PowerShell 扫杀每轮约 2s，而

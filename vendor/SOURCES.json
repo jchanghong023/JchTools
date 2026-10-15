@@ -12,6 +12,24 @@
   "source_copy_policy": "The source and original_upstream_source strings, published crate archive URLs, archive_sha256 values and vcs records identify the original upstream releases. They remain unchanged for local repairs. Each effective_source identifies either the current registry identity (resolved through the vendored-sources replacement) or the root [patch.crates-io] local path identity. Local path entries intentionally have no registry source or checksum in Cargo.lock; the upstream archive digest is not a checksum of the repaired local tree. Local repairs are recorded in project_source_modifications: each global record identifies package, version and a files array identical to the package-level array; each file path is relative to the package directory and reason covers source, regression, documentation or inventory changes. The .cargo-checksum.json package field retains the original upstream archive digest, while file digests describe the current retained tree; local path dependencies are not immutable registry packages. Omitted upstream license texts remain separate under _upstream-licenses, with exact origin and digest. Effective identities are manifest/lock facts, not proof of production recompilation or runtime acceptance.",
   "project_source_modifications": [
     {
+      "package": "axum",
+      "version": "0.8.9",
+      "files": [
+        {
+          "path": "src/serve/mod.rs",
+          "reason": "P2-03：在 HTTP/1 的既有 Hyper builder 装配 TokioTimer，启用现有 30 秒 header 读取超时以关闭半头 socket，不对业务请求或优雅排空时长额外限时。"
+        },
+        {
+          "path": "CHANGELOG.md",
+          "reason": "记录 HTTP/1 header 读取计时器接入及现有 30 秒超时恢复。"
+        },
+        {
+          "path": ".cargo-checksum.json",
+          "reason": "更新 src/serve/mod.rs 与 CHANGELOG.md 的本地文件 SHA-256 摘要，保留上游发布归档 package 摘要。"
+        }
+      ]
+    },
+    {
       "package": "blocking",
       "version": "1.7.0",
       "files": [
@@ -158,6 +176,24 @@
         {
           "path": ".cargo-checksum.json",
           "reason": "更新本地源码、回归测试及修复说明的文件清单和 SHA-256 摘要，保留上游发布归档 package 摘要。"
+        }
+      ]
+    },
+    {
+      "package": "lopdf",
+      "version": "0.45.0",
+      "files": [
+        {
+          "path": "src/reader.rs",
+          "reason": "加密 ObjStm 加载精确匹配并原样传播 Decompress(MemoryLimitExceeded)，其余加密对象错误维持既有恢复语义；复用上游已有 src/object_stream.rs 的有界 ObjectStream 解码、src/parser_aux.rs 的有界 XRef stream 解码、src/parser/mod.rs 的预算传递及 src/xref.rs 的有界解码导出，这四个实现文件与 0.45.0 上游归档相同，不属于本地修改。"
+        },
+        {
+          "path": "CHANGELOG.md",
+          "reason": "记录加载期单个 XRef/ObjStm 解压预算及加密对象流预算错误传播；有界解码实现为 0.45.0 已有上游代码，本地修复补齐加密错误传播。"
+        },
+        {
+          "path": ".cargo-checksum.json",
+          "reason": "按最终保留源刷新 src/reader.rs 与 CHANGELOG.md 的实际 SHA-256；ObjectStream、XRef 解码及接线源与原归档相同，保留其现有文件摘要及上游归档 package 摘要。"
         }
       ]
     },
@@ -2381,8 +2417,8 @@
       "source": "registry+https://github.com/rust-lang/crates.io-index",
       "original_upstream_source": "registry+https://github.com/rust-lang/crates.io-index",
       "effective_source": {
-        "type": "registry",
-        "source": "registry+https://github.com/rust-lang/crates.io-index"
+        "type": "path",
+        "path": "vendor/axum-0.8.9"
       },
       "archive_url": "https://static.crates.io/crates/axum/axum-0.8.9.crate",
       "archive_sha256": "31b698c5f9a010f6573133b09e0de5408834d0c82f8d7475a89fc1867a71cd90",
@@ -2402,7 +2438,20 @@
         "path_in_vcs": "axum"
       },
       "file_inventory": ".cargo-checksum.json",
-      "project_source_modifications": [],
+      "project_source_modifications": [
+        {
+          "path": "src/serve/mod.rs",
+          "reason": "P2-03：在 HTTP/1 的既有 Hyper builder 装配 TokioTimer，启用现有 30 秒 header 读取超时以关闭半头 socket，不对业务请求或优雅排空时长额外限时。"
+        },
+        {
+          "path": "CHANGELOG.md",
+          "reason": "记录 HTTP/1 header 读取计时器接入及现有 30 秒超时恢复。"
+        },
+        {
+          "path": ".cargo-checksum.json",
+          "reason": "更新 src/serve/mod.rs 与 CHANGELOG.md 的本地文件 SHA-256 摘要，保留上游发布归档 package 摘要。"
+        }
+      ],
       "supplemental_materials": []
     },
     {
@@ -11493,8 +11542,8 @@
       "source": "registry+https://github.com/rust-lang/crates.io-index",
       "original_upstream_source": "registry+https://github.com/rust-lang/crates.io-index",
       "effective_source": {
-        "type": "registry",
-        "source": "registry+https://github.com/rust-lang/crates.io-index"
+        "type": "path",
+        "path": "vendor/lopdf-0.45.0"
       },
       "archive_url": "https://static.crates.io/crates/lopdf/lopdf-0.45.0.crate",
       "archive_sha256": "bfffda0fe1ab0157e1a13c14bebd3f28671f2fccb7922f0722ec53926e6922d3",
@@ -11518,7 +11567,20 @@
         "path_in_vcs": ""
       },
       "file_inventory": ".cargo-checksum.json",
-      "project_source_modifications": [],
+      "project_source_modifications": [
+        {
+          "path": "src/reader.rs",
+          "reason": "加密 ObjStm 加载精确匹配并原样传播 Decompress(MemoryLimitExceeded)，其余加密对象错误维持既有恢复语义；复用上游已有 src/object_stream.rs 的有界 ObjectStream 解码、src/parser_aux.rs 的有界 XRef stream 解码、src/parser/mod.rs 的预算传递及 src/xref.rs 的有界解码导出，这四个实现文件与 0.45.0 上游归档相同，不属于本地修改。"
+        },
+        {
+          "path": "CHANGELOG.md",
+          "reason": "记录加载期单个 XRef/ObjStm 解压预算及加密对象流预算错误传播；有界解码实现为 0.45.0 已有上游代码，本地修复补齐加密错误传播。"
+        },
+        {
+          "path": ".cargo-checksum.json",
+          "reason": "按最终保留源刷新 src/reader.rs 与 CHANGELOG.md 的实际 SHA-256；ObjectStream、XRef 解码及接线源与原归档相同，保留其现有文件摘要及上游归档 package 摘要。"
+        }
+      ],
       "supplemental_materials": []
     },
     {

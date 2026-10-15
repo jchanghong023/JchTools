@@ -251,6 +251,57 @@ async fn callbacks(
                 .await?;
             Ok(serde_json::to_string(&response).unwrap())
         }
+        // P3-20/AH-13：None 确实省略线协议字段，所有输出均由真实终端写入管道。
+        "terminal-limit-default"
+        | "terminal-limit-small"
+        | "terminal-limit-large"
+        | "terminal-limit-zero" => {
+            let create = CreateTerminalRequest::new(
+                id.clone(),
+                std::env::current_exe().unwrap().to_string_lossy().into_owned(),
+            )
+            .args(vec![
+                "--terminal".into(), cwd.to_string_lossy().into_owned(),
+                plan.tag.clone(), plan.action.clone(),
+            ]);
+            let create = match plan.action.as_str() {
+                "terminal-limit-small" => create.output_byte_limit(137),
+                "terminal-limit-large" => create.output_byte_limit(2 * 1024 * 1024),
+                "terminal-limit-zero" => create.output_byte_limit(0),
+                _ => create,
+            };
+            let terminal = cx.send_request(create).block_task().await?.terminal_id;
+            let exited = cx.send_request(WaitForTerminalExitRequest::new(
+                id.clone(), terminal.clone(),
+            )).block_task().await?;
+            let tail = format!("尾部:{}:完成🙂\n", plan.tag);
+            let first = tokio::time::timeout(Duration::from_secs(10), async {
+                loop {
+                    let output = cx.send_request(TerminalOutputRequest::new(
+                        id.clone(), terminal.clone(),
+                    )).block_task().await?;
+                    // wait 不保证已读尽管道；末尾标记证明单一 stdout 已完整消费。
+                    // 零预算不可能保留标记，观察真实 truncated 后由 release 等待完整 drain。
+                    if output.output.ends_with(&tail)
+                        || (plan.action == "terminal-limit-zero" && output.truncated)
+                    {
+                        return Ok::<_, Error>(output);
+                    }
+                    tokio::task::yield_now().await;
+                }
+            }).await.map_err(|_| Error::new(-32043, "限额终端输出等待超时"))??;
+            let second = cx.send_request(TerminalOutputRequest::new(
+                id.clone(), terminal.clone(),
+            )).block_task().await?;
+            cx.send_request(ReleaseTerminalRequest::new(id.clone(), terminal.clone()))
+                .block_task().await?;
+            let released = cx.send_request(TerminalOutputRequest::new(id.clone(), terminal))
+                .block_task().await;
+            Ok(json!({
+                "wait": exited, "first": first, "second": second,
+                "released_error": released.is_err(),
+            }).to_string())
+        }
         "terminal"
         | "terminal-kill"
         | "terminal-held"
@@ -993,6 +1044,13 @@ fn main() {
         let pending_pid = root.join(format!("terminal-{tag}.pid.tmp"));
         std::fs::write(&pending_pid, std::process::id().to_string()).unwrap();
         std::fs::rename(&pending_pid, &pid_path).unwrap();
+        if args[3].starts_with("terminal-limit-") {
+            let mut stdout = std::io::stdout().lock();
+            stdout.write_all("A中🙂β\n".repeat(150_000).as_bytes()).unwrap();
+            stdout.write_all(format!("尾部:{tag}:完成🙂\n").as_bytes()).unwrap();
+            stdout.flush().unwrap();
+            std::process::exit(7);
+        }
         if args[3] == "terminal-pwd" || args[3] == "terminal-pwd-explicit" {
             let current_dir = std::env::current_dir()
                 .unwrap()

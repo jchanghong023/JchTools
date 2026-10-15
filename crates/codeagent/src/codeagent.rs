@@ -1,4 +1,4 @@
-//! CA-02～CA-07：独立本地凭据维护；SQLite 仅保存间隔和去敏状态。
+//! CA-02～CA-08：独立本地凭据维护；SQLite 仅保存间隔和去敏状态。
 use std::fs::{File, OpenOptions};
 use std::io::Read;
 use std::path::PathBuf;
@@ -123,6 +123,10 @@ pub fn save_interval(value: &str) -> Result<()> {
 }
 
 fn lock_file() -> Result<File> {
+    named_lock_file("codeagent-service.lock")
+}
+
+fn named_lock_file(name: &str) -> Result<File> {
     let root = jchtools_foundation::xberg_settings::state_dir()?;
     std::fs::create_dir_all(&root).map_err(|_| "创建 CodeAgent 状态目录失败")?;
     OpenOptions::new()
@@ -130,7 +134,7 @@ fn lock_file() -> Result<File> {
         .truncate(false)
         .read(true)
         .write(true)
-        .open(root.join("codeagent-service.lock"))
+        .open(root.join(name))
         .map_err(|_| "打开 CodeAgent 单实例锁失败".into())
 }
 
@@ -149,8 +153,108 @@ fn is_running() -> Result<bool> {
     }
 }
 
+fn control_lock_file() -> Result<File> {
+    named_lock_file("codeagent-service-control.lock")
+}
+
+// CA-08：启动清理旧请求与维护请求串行，避免请求在启动握手中丢失。
+fn control_lock() -> Result<File> {
+    let lock = control_lock_file()?;
+    let deadline = Instant::now() + Duration::from_secs(15);
+    loop {
+        match lock.try_lock_exclusive() {
+            Ok(()) => return Ok(lock),
+            Err(error) if is_lock_contended(&error) && Instant::now() < deadline => {
+                std::thread::sleep(Duration::from_millis(50));
+            }
+            Err(_) => return Err("取得 CodeAgent 维护锁失败".into()),
+        }
+    }
+}
+
+fn remove_stop_request() -> Result<()> {
+    let path = jchtools_foundation::xberg_settings::state_dir()?.join("codeagent-service.stop");
+    match std::fs::remove_file(path) {
+        Ok(()) => Ok(()),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(_) => Err("清理 CodeAgent 维护请求失败".into()),
+    }
+}
+
+/// CA-08：只请求本应用后台自然退出，不依赖 SQLite，不终止任何进程。
+/// 返回成功前等待持锁进程退出及单实例锁释放，安装器随后才可替换/删除镜像。
+pub fn stop() -> Result<()> {
+    use std::os::windows::io::{AsRawHandle, FromRawHandle, OwnedHandle};
+    use windows_sys::Win32::{
+        Foundation::{ERROR_INVALID_PARAMETER, WAIT_OBJECT_0},
+        System::Threading::{OpenProcess, WaitForSingleObject, PROCESS_SYNCHRONIZE},
+    };
+
+    #[cfg(feature = "test-hooks")]
+    test_isolation()?;
+    let _control = control_lock()?;
+    if !is_running()? {
+        return remove_stop_request();
+    }
+    let root = jchtools_foundation::xberg_settings::state_dir()?;
+    let pid = std::fs::read_to_string(root.join("codeagent-service.pid"))
+        .ok()
+        .and_then(|value| value.parse::<u32>().ok())
+        .filter(|pid| *pid != 0)
+        .ok_or("读取 CodeAgent 后台进程身份失败")?;
+    // SAFETY: PID 由持锁的本应用实例发布；只申请同步权限，不修改或终止进程。
+    let raw = unsafe { OpenProcess(PROCESS_SYNCHRONIZE, 0, pid) };
+    let process = if raw.is_null() {
+        if std::io::Error::last_os_error().raw_os_error()
+            != Some(ERROR_INVALID_PARAMETER.cast_signed())
+        {
+            return Err("打开 CodeAgent 后台退出等待句柄失败".into());
+        }
+        None // 在读取 PID 后已经自然退出。
+    } else {
+        // SAFETY: 本函数拥有 OpenProcess 返回的唯一有效句柄。
+        Some(unsafe { OwnedHandle::from_raw_handle(raw.cast()) })
+    };
+    std::fs::write(root.join("codeagent-service.stop"), b"stop")
+        .map_err(|_| "发送 CodeAgent 维护请求失败")?;
+    if let Some(process) = process {
+        // SAFETY: OwnedHandle 保证句柄在整个有界等待期间有效。
+        if unsafe { WaitForSingleObject(process.as_raw_handle().cast(), 15_000) } != WAIT_OBJECT_0 {
+            return Err("等待 CodeAgent 后台自然退出失败".into());
+        }
+    }
+    let deadline = Instant::now() + Duration::from_secs(2);
+    while is_running()? {
+        if Instant::now() >= deadline {
+            return Err("CodeAgent 后台单实例锁尚未释放".into());
+        }
+        std::thread::sleep(Duration::from_millis(25));
+    }
+    remove_stop_request()
+}
+
 pub fn status() -> Result<Status> {
-    let value: Option<String> = db()?
+    let connection = db()?;
+    let mut state = read_status(&connection)?;
+    if state.interval_seconds == 0 {
+        state.interval_seconds = read_interval(&connection)?;
+    }
+    Ok(state)
+}
+
+/// 同一连接读取后台有效状态和已保存间隔；有效间隔非零时不覆盖它。
+pub fn status_with_saved_interval() -> Result<(Status, u64)> {
+    let connection = db()?;
+    let mut state = read_status(&connection)?;
+    let saved = read_interval(&connection)?;
+    if state.interval_seconds == 0 {
+        state.interval_seconds = saved;
+    }
+    Ok((state, saved))
+}
+
+fn read_status(connection: &rusqlite::Connection) -> Result<Status> {
+    let value: Option<String> = connection
         .query_row(
             "SELECT value FROM app_settings WHERE key='codeagent_status'",
             [],
@@ -167,9 +271,6 @@ pub fn status() -> Result<Status> {
     state.running = is_running()?;
     if !state.running {
         state.pid = None;
-    }
-    if state.interval_seconds == 0 {
-        state.interval_seconds = load_interval()?;
     }
     Ok(state)
 }
@@ -462,10 +563,23 @@ pub fn check_once() -> CheckResult {
     result
 }
 
-/// CA-04 / CA-05：后台拥有锁到退出，GUI 生命周期与本循环无关。
+/// CA-04 / CA-05：后台拥有锁到退出，GUI 生命周期与本循环无关；维护期间不等待重启。
 pub fn serve() -> Result<()> {
     #[cfg(feature = "test-hooks")]
     test_isolation()?;
+    let control = control_lock_file()?;
+    match control.try_lock_exclusive() {
+        Ok(()) => {}
+        Err(error) if is_lock_contended(&error) => {
+            tracing::info!(
+                component = "codeagent",
+                event = "codeagent_service_maintenance_active",
+                "CodeAgent 正在维护，后台不启动"
+            );
+            return Ok(());
+        }
+        Err(_) => return Err("取得 CodeAgent 维护锁失败".into()),
+    }
     let lock = lock_file()?;
     match lock.try_lock_exclusive() {
         Ok(()) => {}
@@ -479,6 +593,20 @@ pub fn serve() -> Result<()> {
         }
         Err(_) => return Err("取得 CodeAgent 后台单实例锁失败".into()),
     }
+    remove_stop_request()?;
+    let root = jchtools_foundation::xberg_settings::state_dir()?;
+    let stop_request = root.join("codeagent-service.stop");
+    std::fs::write(
+        root.join("codeagent-service.pid"),
+        std::process::id().to_string(),
+    )
+    .map_err(|_| "发布 CodeAgent 后台进程身份失败")?;
+    // 锁保持到服务进程真正结束（包括 main 的日志刷盘），不在 serve 返回时提前释放。
+    static PROCESS_LOCK: std::sync::OnceLock<File> = std::sync::OnceLock::new();
+    PROCESS_LOCK
+        .set(lock)
+        .map_err(|_| "CodeAgent 后台进程锁已登记")?;
+    drop(control);
     let mut state = Status {
         running: true,
         pid: Some(std::process::id()),
@@ -508,19 +636,16 @@ pub fn serve() -> Result<()> {
     );
     let mut last_check = None;
     loop {
-        #[cfg(feature = "test-hooks")]
-        if test_isolation()?.is_some()
-            && jchtools_foundation::xberg_settings::state_dir()?
-                .join("codeagent-test-stop")
-                .exists()
-        {
+        let stop_requested = stop_request.exists();
+        if stop_requested {
             state.running = false;
             state.pid = None;
-            publish(&state)?;
+            // 维护退出绝不等待 SQLite 可写；锁与进程退出才是停止事实。
+            let _ = publish(&state);
             tracing::info!(
                 component = "codeagent",
                 event = "codeagent_service_stopped",
-                "隔离 CodeAgent 后台已停止"
+                "CodeAgent 后台已按维护请求停止"
             );
             return Ok(());
         }

@@ -471,8 +471,8 @@ fn initialize_task(cancel: &AtomicBool, progress: &mut dyn FnMut(String)) -> Res
 
 /// 兜底清理资产根下历史残留的 `.staging-*` 目录（B-2，`.staging-*` 清扫与
 /// markdown 侧共用 [`crate::asset_util::cleanup_stale_staging_dirs`]），
-/// 并清扫 write_expected_tag 在 `xberg-inference/` 下残留的 `.expected-tag-*`
-/// 临时文件；单项失败跳过继续。
+/// 并兼容清扫旧版 tag 标记写入流程在 `xberg-inference/` 下残留的
+/// `.expected-tag-*` 临时文件；当前版本不再写入该标记，单项失败跳过继续。
 ///
 /// 不扫 `.old-*` 备份：那是原子替换路径的暂存（asset_util），其中
 /// xberg-inference/<tag> 目标的残留按设计由 prune_old_inference_tags 收集
@@ -480,14 +480,13 @@ fn initialize_task(cancel: &AtomicBool, progress: &mut dyn FnMut(String)) -> Res
 /// XB-10），入口一概删除会把替换失败后仍可恢复的备份提前清掉。
 fn cleanup_stale_staging(root: &Path) {
     cleanup_stale_staging_dirs(root);
-    // write_expected_tag 的临时标记（xberg-inference/.expected-tag-<uuid>）在
-    // 写入或原子就位失败/进程崩溃时残留（XB-09），与 .staging-* 同属入口兜底
-    // 清扫。
+    // 仅清扫旧版写入流程在失败或进程崩溃后留下的临时标记；当前版本没有
+    // expected-tag writer，也不依据该标记拒绝共享组件版本。
     cleanup_expected_tag_residue(&root.join("xberg-inference"));
 }
 
-/// 清扫 `xberg-inference/` 下顶层的 `.expected-tag-*` 残留临时文件（文件非
-/// 目录，按类型删除）；目录不存在（组件从未安装）时无需清理，单项失败跳过。
+/// 兼容清扫旧版在 `xberg-inference/` 顶层遗留的 `.expected-tag-*` 临时文件
+/// （非目录，按类型删除）；目录不存在时无需清理，单项失败跳过。
 fn cleanup_expected_tag_residue(base: &Path) {
     let entries = match fs::read_dir(base) {
         Ok(entries) => entries,
@@ -576,14 +575,8 @@ fn initialize_staged(
         }
         ensure_not_cancelled(cancel)?;
         stage = "worker_readiness";
-        let bundled_present = bundled_worker().is_some();
-        let bundled_ready = bundled_present && worker_install_path().is_ok();
-        let cached_ready = !bundled_present && worker_ready(worker, root).is_ok();
-        if bundled_ready || cached_ready {
-            progress("复用已校验的工作进程".to_string());
-        } else {
-            return Err(worker_repair_message(worker));
-        }
+        worker_readiness(worker, root)?;
+        progress("复用已校验的工作进程".to_string());
         let notice_stage = staging.join("licenses");
         stage = "notice_create";
         fs::create_dir_all(&notice_stage)
@@ -841,8 +834,8 @@ fn inference_manifest_from_pack(pack: &SnapInferencePack) -> Result<InferenceMan
     })
 }
 
-/// 写入推理组件的清单 tag 标记（`xberg-inference/expected-tag.txt`），供截图
-/// 服务进程做与主程序同口径的版本校验（XB-09）。
+/// 解析内置截图 OCR 资产清单，并校验 schema、条目与安装路径约束。
+/// 此处不写入 tag 标记，也不按清单 tag 拒绝用户选择的共享推理组件版本。
 fn load_manifest() -> Result<SnapAssetManifest, String> {
     let manifest: SnapAssetManifest = serde_json::from_str(MANIFEST)
         .map_err(|error| format!("截图 OCR 资产清单无效：{error}"))?;
@@ -2639,6 +2632,127 @@ mod tests {
         fs::write(&worker_path, b"healthy-worker").expect("写入完好的 worker");
         super::worker_readiness(&worker, guard.root.path())
             .expect("完好的 bundled worker 必须通过就绪检查");
+    }
+
+    // P3-18 / O-06 / O-09：用已回填 worker 清单和有效 Xberg 成员实际初始化，
+    // 锁定最终返回给设置页的失败原因，而非仅检查 readiness 助手的返回值。
+    fn review_remediation_initialize_worker_failure(
+        cached_bytes: Option<&[u8]>,
+        bundled_bytes: Option<&[u8]>,
+    ) -> (String, String) {
+        let guard = redirect_component_env();
+        std::env::remove_var("JCHTOOLS_TEST_BUNDLED_WORKER");
+        let root = guard.root.path();
+        let mut manifest = super::load_manifest().expect("解析内置清单");
+        let worker = &mut manifest.workers[0];
+        worker.status = "ok".into();
+        worker.size_bytes = b"healthy-worker".len() as u64;
+        worker.sha256 = sha256_bytes(b"healthy-worker");
+        let cached_path = root.join(&worker.install_path);
+        fs::create_dir_all(cached_path.parent().expect("worker 有父目录"))
+            .expect("创建缓存 worker 目录");
+        let missing_reason = fs::metadata(&cached_path)
+            .expect_err("新建隔离目录中 worker 尚不存在")
+            .to_string();
+        if let Some(bytes) = cached_bytes {
+            fs::write(&cached_path, bytes).expect("预置缓存 worker");
+        }
+        if let Some(bytes) = bundled_bytes {
+            // 随包损坏用例始终带一份有效缓存，防止修复错误地回退到缓存副本。
+            super::worker_ready(worker, root).expect("随包损坏场景的缓存 worker 必须完好");
+            let bundled_path = root.join("bundle").join("snap-ocr-worker.exe");
+            fs::create_dir_all(bundled_path.parent().expect("随包 worker 有父目录"))
+                .expect("创建随包目录");
+            fs::write(&bundled_path, bytes).expect("预置随包 worker");
+            std::env::set_var("JCHTOOLS_TEST_BUNDLED_WORKER", &bundled_path);
+        }
+
+        let component = root.join("component");
+        let inference = super::inference_manifest_from_pack(
+            manifest.xberg_inference.as_ref().expect("推理组件清单"),
+        )
+        .expect("转换组件清单");
+        for member in &inference.members {
+            if jchtools_xberg::xberg_runtime::asset_for_scenario(&member.install_path, "snapshot") {
+                let target = component.join(&member.install_path);
+                fs::create_dir_all(target.parent().expect("组件成员有父目录"))
+                    .expect("创建组件目录");
+                fs::write(target, b"local-component").expect("预置有效的本地组件成员");
+            }
+        }
+        jchtools_foundation::xberg_settings::save(&component).expect("保存组件目录");
+        super::readiness_inference_pack(&manifest, root).expect("Xberg 前置条件必须就绪");
+        let staging = root.join(".staging-review-remediation-worker");
+        fs::create_dir_all(&staging).expect("创建初始化暂存目录");
+        let error = super::initialize_staged(
+            &manifest,
+            &AtomicBool::new(false),
+            &mut |_| {},
+            &staging,
+            root,
+            &mut super::NetworkDownloader,
+        )
+        .expect_err("缺失或损坏 worker 的实际初始化必须失败，不得回退其他副本");
+        assert!(
+            error.contains("重新安装当前 JchTools 包"),
+            "初始化失败必须保留重装指引：{error}"
+        );
+        (error, missing_reason)
+    }
+
+    // P3-18：缺失错误必须保留文件系统的具体原因，不能只剩通用修复文案。
+    #[test]
+    fn review_remediation_initialize_reports_missing_worker_reason() {
+        let (error, missing_reason) = review_remediation_initialize_worker_failure(None, None);
+        assert!(
+            error.contains(&missing_reason),
+            "初始化必须保留缺失 worker 的具体原因：{error}"
+        );
+    }
+
+    // P3-18：大小错误与缺失、摘要错误必须可区分。
+    #[test]
+    fn review_remediation_initialize_reports_worker_size_mismatch() {
+        let (error, _) = review_remediation_initialize_worker_failure(Some(b"short"), None);
+        assert!(
+            error.contains("大小 5，预期 14"),
+            "初始化必须说明 worker 的实际大小与预期大小：{error}"
+        );
+    }
+
+    // P3-18：等长损坏必须落到摘要原因，而不是大小错误或通用文案。
+    #[test]
+    fn review_remediation_initialize_reports_worker_digest_mismatch() {
+        let (error, _) =
+            review_remediation_initialize_worker_failure(Some(b"healthy-workXr"), None);
+        assert!(
+            error.contains("SHA256") && error.contains("预期"),
+            "初始化必须说明 worker 摘要不匹配：{error}"
+        );
+    }
+
+    // P3-18 / O-09：随包 worker 大小错误不得被有效缓存掩盖。
+    #[test]
+    fn review_remediation_initialize_reports_bundled_worker_size_without_fallback() {
+        let (error, _) =
+            review_remediation_initialize_worker_failure(Some(b"healthy-worker"), Some(b"short"));
+        assert!(
+            error.contains("大小 5，预期 14"),
+            "随包 worker 损坏必须保留大小原因，不能回退缓存：{error}"
+        );
+    }
+
+    // P3-18 / O-09：随包 worker 等长损坏也不得回退有效缓存。
+    #[test]
+    fn review_remediation_initialize_reports_bundled_worker_digest_without_fallback() {
+        let (error, _) = review_remediation_initialize_worker_failure(
+            Some(b"healthy-worker"),
+            Some(b"healthy-workXr"),
+        );
+        assert!(
+            error.contains("SHA256") && error.contains("预期"),
+            "随包 worker 损坏必须保留摘要原因，不能回退缓存：{error}"
+        );
     }
 
     // 覆盖 O-09/O-30（S7-05）：readiness 对资产的具体失败原因（缺失、大小不符、

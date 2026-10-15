@@ -773,7 +773,6 @@ fn git_collection(job: &mut Job) -> Result<Vec<String>> {
             state: "pending".into(),
         };
         job.db.add_action(&planned)?;
-        job.db.reserve_target(&target, 0)?;
         job.summary.planned_move += 1;
         job.summary.planned_git += 1;
         moved.push(item.rel.clone());
@@ -960,7 +959,6 @@ fn classify_files(job: &mut Job, moved_roots: &[String]) -> Result<()> {
         );
         planned.target = Some(target.clone());
         job.db.add_action(&planned)?;
-        job.db.reserve_target(&target, item.id)?;
         job.summary.planned_move += 1;
     }
     Ok(())
@@ -1161,9 +1159,7 @@ fn empty_directories(job: &mut Job, moved_roots: &[String]) -> Result<()> {
     tracing::instrument(target = "perf", name = "plan", skip_all)
 )]
 pub fn build(job: &mut Job) -> Result<()> {
-    job.db
-        .conn
-        .execute_batch("DELETE FROM actions; DELETE FROM targets; DELETE FROM keepers;")?;
+    job.db.conn.execute_batch("DELETE FROM actions;")?;
     cleanup_candidates(job)?; // 永久清理项不能成为唯一去重保留者。
     build_after_cleanup(job)
 }
