@@ -9,6 +9,9 @@ use std::sync::{mpsc, Arc, LazyLock, Mutex};
 
 use super::{protocol::wide, Command};
 use crate::capture_win;
+use windows_sys::Win32::UI::WindowsAndMessaging::{
+    CreateIconFromResourceEx, DestroyIcon, GetSystemMetrics, SM_CXSMICON, SM_CYSMICON,
+};
 
 type Handle = *mut c_void;
 #[repr(C)]
@@ -90,7 +93,6 @@ extern "system" {
     fn KillTimer(hwnd: Handle, id: usize) -> i32;
     fn RegisterHotKey(hwnd: Handle, id: i32, modifiers: u32, key: u32) -> i32;
     fn UnregisterHotKey(hwnd: Handle, id: i32) -> i32;
-    fn LoadIconW(instance: Handle, name: *const u16) -> Handle;
     fn CreatePopupMenu() -> Handle;
     fn AppendMenuW(menu: Handle, flags: u32, id: usize, text: *const u16) -> i32;
     fn TrackPopupMenu(
@@ -138,6 +140,57 @@ fn fill<const N: usize>(buffer: &mut [u16; N], value: &str) {
         *dst = src;
     }
 }
+// CreateIconFromResourceEx 要求资源起点按 DWORD 对齐；图像直接编入 worker，不依赖外部文件。
+#[repr(align(4))]
+struct IconPng([u8; include_bytes!("../../../../resources/app-icon.png").len()]);
+static ICON_PNG: IconPng = IconPng(*include_bytes!("../../../../resources/app-icon.png"));
+
+struct TrayIcon(Handle);
+impl Drop for TrayIcon {
+    fn drop(&mut self) {
+        // SAFETY: 此句柄仅由 CreateIconFromResourceEx 创建，归当前托盘线程独占。
+        if unsafe { DestroyIcon(self.0) } == 0 {
+            tracing::warn!(event = "ocr_tray_icon_release_failed", error = %std::io::Error::last_os_error(), "释放托盘品牌图标失败");
+        }
+    }
+}
+
+fn load_notification_icon() -> Option<TrayIcon> {
+    let size = u32::try_from(ICON_PNG.0.len()).ok()?;
+    // SAFETY: 只读取 Windows 通知区使用的小图标尺寸，不修改 DPI 或系统设置。
+    let width = unsafe { GetSystemMetrics(SM_CXSMICON) };
+    // SAFETY: 同上，仅查询系统度量。
+    let height = unsafe { GetSystemMetrics(SM_CYSMICON) };
+    // SAFETY: 对齐的内置 PNG 在进程存续期间有效，API 仅读取资源字节；
+    // 0x30000 为 Win32 图标资源格式，flags=0 使返回句柄由本线程负责释放。
+    let icon = unsafe {
+        CreateIconFromResourceEx(
+            ICON_PNG.0.as_ptr().cast_mut(),
+            size,
+            1,
+            0x0003_0000,
+            width,
+            height,
+            0,
+        )
+    };
+    if icon.is_null() {
+        tracing::error!(event = "ocr_tray_icon_load_failed", error = %std::io::Error::last_os_error(), "内置 JchTools 托盘图标加载失败");
+        None
+    } else {
+        Some(TrayIcon(icon))
+    }
+}
+
+thread_local! {
+    static NOTIFICATION_ICON: Option<TrayIcon> = load_notification_icon();
+}
+
+fn notification_icon() -> Handle {
+    // 图标按托盘线程缓存一次，复用注册、通知和 Explorer 重建；线程结束时释放句柄。
+    NOTIFICATION_ICON.with(|icon| icon.as_ref().map_or(null_mut(), |icon| icon.0))
+}
+
 fn notify(hwnd: Handle, message: Option<&str>, hotkey: &str, action: u32) -> bool {
     // SAFETY: NotifyIconData 是 repr(C) 纯数据结构，全零是有效初始值（句柄为 null、数值为 0）。
     let mut data: NotifyIconData = unsafe { std::mem::zeroed() };
@@ -149,9 +202,10 @@ fn notify(hwnd: Handle, message: Option<&str>, hotkey: &str, action: u32) -> boo
     data.id = 1;
     data.flags = 0x1 | 0x2 | 0x4;
     data.callback = WM_APP_TRAY;
-    // SAFETY: 实例句柄为 null、名称为系统预定义常量 IDI_APPLICATION(32512)，
-    // 按 MAKEINTRESOURCE 语义传整数标识，LoadIconW 不解引用该指针。
-    data.icon = unsafe { LoadIconW(null_mut(), 32512usize as *const u16) };
+    data.icon = notification_icon();
+    if data.icon.is_null() && action != 2 {
+        return false;
+    }
     fill(&mut data.tip, &format!("JchTools 后台服务 ({hotkey})"));
     if let Some(message) = message {
         data.flags |= 0x10;
@@ -1035,6 +1089,65 @@ mod tests {
         assert!(message_loop_requires_cleanup(-1));
         assert!(message_loop_requires_cleanup(0));
         assert!(!message_loop_requires_cleanup(1));
+    }
+
+    // 覆盖 O-12：检查实际 HICON 的像素，避免托盘退回通用程序图标或丢失透明圆角。
+    #[test]
+    fn notification_icon_renders_application_brand() {
+        use windows_sys::Win32::Graphics::Gdi::{
+            DeleteObject, GetDC, GetDIBits, GetObjectW, ReleaseDC,
+            BITMAP, BITMAPINFO, BITMAPINFOHEADER, BI_RGB, DIB_RGB_COLORS,
+        };
+        use windows_sys::Win32::UI::WindowsAndMessaging::{GetIconInfo, ICONINFO};
+        struct IconBitmaps(ICONINFO);
+        impl Drop for IconBitmaps {
+            fn drop(&mut self) {
+                // SAFETY: GetIconInfo 创建的两个位图归本测试独占，非空时各释放一次。
+                if !self.0.hbmColor.is_null() { unsafe { DeleteObject(self.0.hbmColor) }; }
+                // SAFETY: 同上，掩码位图由 GetIconInfo 分配。
+                if !self.0.hbmMask.is_null() { unsafe { DeleteObject(self.0.hbmMask) }; }
+            }
+        }
+        // SAFETY: ICONINFO 是纯 Win32 输出结构，全零有效。
+        let mut info = IconBitmaps(unsafe { std::mem::zeroed() });
+        // SAFETY: 图标句柄来自生产加载路径，输出结构有效；不注册通知区、热键或窗口。
+        assert_ne!(unsafe { GetIconInfo(super::notification_icon(), &raw mut info.0) }, 0);
+        // SAFETY: BITMAP 是纯输出结构，全零有效。
+        let mut bitmap: BITMAP = unsafe { std::mem::zeroed() };
+        // SAFETY: 只读取 GetIconInfo 复制出的彩色位图，缓冲大小与结构一致。
+        assert_ne!(unsafe { GetObjectW(info.0.hbmColor, i32::try_from(std::mem::size_of::<BITMAP>()).unwrap(), (&raw mut bitmap).cast()) }, 0);
+        let width = usize::try_from(bitmap.bmWidth).unwrap();
+        let height = usize::try_from(bitmap.bmHeight).unwrap();
+        // SAFETY: BITMAPINFO 为纯数据结构，下方完整填写所需头部。
+        let mut dib: BITMAPINFO = unsafe { std::mem::zeroed() };
+        dib.bmiHeader.biSize = u32::try_from(std::mem::size_of::<BITMAPINFOHEADER>()).unwrap();
+        dib.bmiHeader.biWidth = bitmap.bmWidth;
+        dib.bmiHeader.biHeight = -bitmap.bmHeight;
+        dib.bmiHeader.biPlanes = 1;
+        dib.bmiHeader.biBitCount = 32;
+        dib.bmiHeader.biCompression = BI_RGB;
+        let mut pixels = vec![0_u8; width * height * 4];
+        // SAFETY: 仅取得读取位图所需的屏幕 DC，不捕获屏幕或改变焦点。
+        let dc = unsafe { GetDC(std::ptr::null_mut()) };
+        assert!(!dc.is_null());
+        // SAFETY: 位图未选入 DC；输出缓冲按完整 32bpp、top-down 图像大小分配。
+        let rows = unsafe { GetDIBits(dc, info.0.hbmColor, 0, u32::try_from(height).unwrap(), pixels.as_mut_ptr().cast(), &raw mut dib, DIB_RGB_COLORS) };
+        // SAFETY: 归还本测试 GetDC 获得的同一 DC。
+        unsafe { ReleaseDC(std::ptr::null_mut(), dc) };
+        assert_eq!(usize::try_from(rows).unwrap(), height);
+        let pixel = |x: usize, y: usize| {
+            let index = ((y * height / 16) * width + x * width / 16) * 4;
+            &pixels[index..index + 4]
+        };
+        let blue = pixel(4, 4); // 品牌圆角矩形内部的靛蓝色。
+        assert!(blue[0] > 180 && blue[1] < 180 && blue[2] < 120 && blue[3] > 200,
+            "必须显示 JchTools 品牌蓝底，而非 Windows 通用图标：{blue:?}");
+        for point in [(10, 5), (6, 10)] { // 白色 J 的竖笔与横笔。
+            let white = pixel(point.0, point.1);
+            assert!(white[..3].iter().all(|channel| *channel > 220) && white[3] > 200,
+                "品牌白色 J 必须完整可见：{point:?}={white:?}");
+        }
+        assert_eq!(pixel(0, 0)[3], 0, "圆角外部必须透明，不能显示实心方块");
     }
 
     // 覆盖 XB-23/O-11/O-12：Explorer 恢复期间首次 NIM_ADD 失败不能永久丢失托盘。
