@@ -4819,6 +4819,13 @@
     },
     {
       "file": "optional/snap-ocr-worker/src/service/tray.rs",
+      "name": "notification_icon_renders_application_brand",
+      "ignored": false,
+      "cfg": null,
+      "body": "e232dfd040ff2866"
+    },
+    {
+      "file": "optional/snap-ocr-worker/src/service/tray.rs",
       "name": "taskbar_recreation_retries_after_native_registration_failure",
       "ignored": false,
       "cfg": null,
