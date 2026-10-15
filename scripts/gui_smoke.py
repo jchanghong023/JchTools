@@ -1,0 +1,2276 @@
+#!/usr/bin/env python3
+"""JchTools GUI OS 级冒烟测试（pywinauto / UIA）.
+
+关键路径冒烟（2026-09-18 两工具拆分后；S6-S14 为转 Markdown GUI E2E 扩展）：
+  S1 启动并正常退出；
+  S2 目录整理：选择目录 → 开始分析（只读，无确认框）→ 计划生成（不执行）；
+  S3 目录整理全链路：开始分析 → 确认执行 → 整理完成；
+  S4 递归解压全链路：开始解压 → 一段确认 → 解压结束；完整成功的原包/分卷删除，既有内容保留，
+     冲突自动改名、嵌套内容落盘，失败包保留在「解压失败」（H-07/X-05/X-06）。
+  S5 转 Markdown 基本链路：启动 → 切到「转 Markdown」→ 选输入/输出 → 开始 → 停止 → 关闭
+     （T 分区附录 A GUI E2E 最小段；需 Xberg 已配置且组件就绪，默认序列不含 S5，须显式 --stages 请求）。
+  S6 Xberg 功能选择自动保存：实际勾选三项功能，核对界面选择摘要与隔离 SQLite。
+  S7 重启恢复：完全退出后恢复相同功能选择，保留旧配置迁移的运行目录。
+  S8 空选择禁用下载：取消全部功能后不能下载，重新选择后恢复可用，活动配置不变。
+  S9 组件缺失状态与设置入口：未配置时各功能如实显示未下载、转换开始按钮禁用，
+     可前往设置选择功能但不自动下载（无需任何资产）。
+  S10 输出层级与同名策略：保留层级两份同名输入各自成文；平铺只处理排序第一份、
+     其余按重复跳过计数（T-11；需真实组件，Xberg 目录可真实，状态目录仍须隔离）。
+     所有非自隔离阶段受统一隔离守卫：独立调用需验收编排布置的隔离环境变量在场
+     （JCHTOOLS_TEST_STATE_DIR 与 JCHTOOLS_SNAP_OCR_TEST_ASSET_ROOT），缺则拒绝
+     启动并提示经 acceptance.ps1 入口执行；公共启动入口始终要求状态与资产根隔离。
+  S11 已有结果跳过：重复运行不覆盖既有产物，跳过数量如实显示（T-12）。
+  S12 输出子树排除：输出目录位于输入内时整棵输出子树不作为新输入（T-09）。
+  S13 部分失败与完成统计：单文件失败不终止批次，成功/失败可区分（T-16/T-24）。
+  S14 运行中关闭确认与安全停止：转换运行中点标题栏「关闭」弹出「停止任务并关闭」，
+     确认后取消当前文件、清理未完成产物、进程退出码 0（U-09/T-23；需真实媒体样本）。
+  S15 MD 合并/拆分真实 GUI：验证标题下移、原文件不变与 UTF-8 分片无损还原。
+  S16 Git 真实 GUI：使用一次性仓库和本地 bare 远端，验证逐文件提交及推送结果。
+  S17 预置真实最新 Xberg 后，经设置页离线检查补写 notice，核对实际转换就绪状态。
+  S18 在两档窗口尺寸下逐页检查主要操作控件边界与重叠，自动判定布局结果。
+
+用法：
+    python scripts/gui_smoke.py --exe target/debug/JchTools.exe --data <已生成的测试数据目录>
+    非自隔离阶段独立调用时须已布置隔离环境变量；推荐经 scripts/acceptance.ps1
+    编排执行。--allow-isolated-run 仅跳过 CLI 前置检查，不能绕过公共启动入口的隔离。
+
+CLI 实际执行自动写入独立 `.tmp/test-reports/<run-id>/junit.xml` 与 `run.json`；
+逐 S 阶段实测，数据集阶段计入夹具复制与清理，运行墙钟包含共享收尾。
+`--list-stages` / 帮助及直接调用阶段函数不创建报告；失败仍按原顺序立即停止。
+依赖：pip install pywinauto（需要可交互桌面会话）。
+"""
+
+from __future__ import annotations
+
+import argparse
+import contextlib
+import hashlib
+import json
+import os
+import re
+import shutil
+import sqlite3
+import struct
+import subprocess
+import sys
+import tempfile
+import time
+import zipfile
+import zlib
+from collections import Counter
+from pathlib import Path
+from typing import TYPE_CHECKING, cast
+
+import comtypes
+import pywintypes
+import win32api
+import win32con
+import win32gui
+import win32job
+import win32process
+from pywinauto import Application, controls, findbestmatch, findwindows, timings
+from pywinauto.application import ProcessNotFoundError, WindowSpecification
+from pywinauto.uia_defines import IUIA, NoPatternInterfaceError
+
+if not __package__:
+    sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+from scripts.test_reports import Case, TimingReport
+
+if TYPE_CHECKING:
+    from collections.abc import Callable, Mapping
+
+    from pywinauto.base_wrapper import BaseWrapper
+
+TIMEOUT = 60
+# 分析/执行完成等待用更长上限：真实数据、冷启动与杀软扫描都会让真实耗时远离秒级。
+# 只放宽「等结果」的上限，元素出现仍按 TIMEOUT 快速失败，避免掩盖界面迟迟不响应的问题。
+COMPLETION_TIMEOUT = 240
+# 目录输入框与「选择目录…」按钮视为同一行的纵坐标容差（像素）。
+EDIT_ROW_TOLERANCE_PX = 20
+PHYSICAL_OVERLAP_THRESHOLD = 0.8
+CONFIRM_CLOSED_OBSERVATIONS = 2
+MD_SPLIT_LIMIT_BYTES = 1024
+STOP_MEDIA_FILE_COUNT = 16
+DEFAULT_EXE = "target/debug/JchTools.exe"
+DEFAULT_DATA = ".tmp/gui-smoke/data"
+# 冒烟阶段清单：S1-S4 无需转 Markdown 资产；S5 需要（默认序列不含 S5，须显式 --stages 请求）；
+# S6-S9 只需隔离的应用配置目录（JCHTOOLS_TEST_STATE_DIR）；S10-S14 复用验收环境的真实组件。
+SUPPORTED_STAGES = (
+    "S1",
+    "S2",
+    "S3",
+    "S4",
+    "S5",
+    "S6",
+    "S7",
+    "S8",
+    "S9",
+    "S10",
+    "S11",
+    "S12",
+    "S13",
+    "S14",
+    "S15",
+    "S16",
+    "S17",
+    "S18",
+)
+DEFAULT_STAGES = "S1,S2,S3,S4,S15,S16,S18"
+CONVERT_BUSY_TIMEOUT = 60  # 点击「开始转换」后等待「停止任务」出现的上限（秒）
+_S5_LAST_ATTEMPT = 2  # S5 重按「开始转换」的末次序号（共 3 次，0 起）
+CONVERT_STOP_TIMEOUT = 15  # T-23：停止不得等待当前媒体自然结束。
+# 转 Markdown 页「选择目录…」应有行数（输入 / 输出；组件下载统一在设置页）。
+CONVERT_DIR_ROWS = 2
+EXTRACT_ACK = "我已确认：成功原包及分卷永久删除（不可恢复）"
+ORGANIZE_ACK = "我已确认目录、规则及可能的永久删除行为（不可恢复）"
+# 设置/转换页状态文案锚点（与 ui/app.slint 的文案保持同步，改动必须两侧同改）。
+SETTINGS_DOWNLOAD_BUTTON = "下载 / 补齐所选功能"
+SETTINGS_CHECK_BUTTON = "检查已安装组件"
+SETTINGS_FEATURE_LABELS = ("文档转换与图片 OCR", "截图 OCR", "音视频转写")
+CONVERT_NEED_RUNTIME_TEXT = "请前往设置下载所需 Xberg 组件"
+CONVERT_DONE_MARKER = "总耗时"
+STOP_AND_CLOSE_TITLE = "停止任务并关闭"
+STOP_AND_CLOSE_BUTTON = "停止并关闭"
+# 统一隔离守卫：所有非自隔离阶段的 run_stage 不自建隔离环境（不同于 S6-S9 的
+# isolated_state_env），独立调用会直接读写真实用户状态目录（config.sqlite3）并
+# 可能连接/唤起常驻服务（已有配置可能触发 ensure_snap_supervisor）。因此要求经验收
+# 编排布置的隔离环境（下述两个变量由 acceptance.ps1 的 gui-smoke / markdown 分支
+# 统一布置）才可启动；--allow-isolated-run 不绕过公共启动入口。Xberg 目录可指向真实
+# 引擎目录——状态隔离必须，组件目录可真实。
+ISOLATION_GUARDED_STAGES = tuple(stage for stage in SUPPORTED_STAGES if stage not in ("S6", "S7", "S8", "S9"))
+ISOLATION_REQUIRED_ENV_KEYS = ("JCHTOOLS_TEST_STATE_DIR", "JCHTOOLS_SNAP_OCR_TEST_ASSET_ROOT")
+
+# pywinauto/pywin32 窗口操作在窗口建立/销毁竞态下抛出的瞬态错误族；
+# 此元组是唯一放行集合，出现新瞬态类型须显式补充并说明：
+# - pywintypes.error / pywintypes.com_error：pywin32 的 Win32 调用与 COM 调用基础错误；
+# - comtypes.COMError：UIA 后端经 comtypes 访问 COM 元素，窗口消失时立即抛出；
+# - ProcessNotFoundError：Application().connect() 在进程不存在/已退出时抛出；
+# - timings.TimeoutError：window.wait() 等待条件超时抛出（继承 RuntimeError，与上无交集）；
+# - findwindows.ElementNotFoundError / findbestmatch.MatchError /
+#   controls.InvalidWindowHandle / controls.InvalidElement：pywinauto 解析控件规格失败
+#   的四种错误（WindowSpecification.__getattribute__ 解析包装器时抛出，
+#   与 window.exists()/wait() 内部捕获的是同一组）。
+TRANSIENT_GUI_ERRORS: tuple[type[Exception], ...] = (
+    pywintypes.error,
+    pywintypes.com_error,
+    comtypes.COMError,
+    ProcessNotFoundError,
+    timings.TimeoutError,
+    findwindows.ElementNotFoundError,
+    findbestmatch.MatchError,
+    controls.InvalidWindowHandle,
+    controls.InvalidElement,
+)
+
+# 任务库（task.sqlite3）读取容忍集，与 GUI 瞬态错误分开维护：
+# 任务库可能正被运行中的任务写入或损坏，读不出的任务一律跳过（原为 except Exception，
+# 收窄为该处实际会发生的类型）：sqlite3.Error 覆盖库打不开/被锁/损坏；
+# ValueError 覆盖元数据 JSON 解析失败（json.JSONDecodeError 及其子类）。
+TASK_RECORD_ERRORS: tuple[type[Exception], ...] = (sqlite3.Error, ValueError)
+
+
+class _CliArgs(argparse.Namespace):
+    """命令行参数容器：以固定字段取代 Namespace 的动态属性（运行期行为与默认 Namespace 一致）."""
+
+    exe: str
+    data: str
+    stages: str
+    list_stages: bool
+    allow_isolated_run: bool
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.exe = DEFAULT_EXE
+        self.data = DEFAULT_DATA
+        self.stages = DEFAULT_STAGES
+        self.list_stages = False
+        self.allow_isolated_run = False
+
+
+class _OwnedProcessTree:
+    """Windows Job Object 持有所属进程树；父 GUI 退出后仍能安全回收后台."""
+
+    def __init__(self, proc: subprocess.Popen[bytes]) -> None:
+        # types-pywin32 的 Job API 返回值/参数漏标；按实际 Win32 签名收口，不修改第三方桩。
+        create_job = cast("Callable[[object, str], int]", win32job.CreateJobObject)
+        query_information = cast("Callable[[int, int], dict[str, object]]", vars(win32job)["QueryInformationJobObject"])
+        set_information = cast(
+            "Callable[[int, int, dict[str, object]], None]", vars(win32job)["SetInformationJobObject"]
+        )
+        job = create_job(None, "")
+        assigned = False
+        try:
+            information = query_information(job, win32job.JobObjectExtendedLimitInformation)
+            limits = cast("dict[str, int]", information["BasicLimitInformation"])
+            limits["LimitFlags"] |= win32job.JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE
+            set_information(job, win32job.JobObjectExtendedLimitInformation, information)
+            process = win32api.OpenProcess(win32con.PROCESS_SET_QUOTA | win32con.PROCESS_TERMINATE, 0, proc.pid)
+            try:
+                win32job.AssignProcessToJobObject(job, process)
+            finally:
+                win32api.CloseHandle(process)
+            assigned = True
+        finally:
+            if not assigned:
+                win32api.CloseHandle(job)
+        self._job: int | None = job
+
+    def terminate(self, proc: subprocess.Popen[bytes]) -> None:
+        """只终止本轮 Job Object 中的 GUI 与后台，不按名称或已退出父 PID 操作."""
+        self._kill_tree()
+        with contextlib.suppress(OSError, ProcessLookupError):
+            if proc.poll() is None:
+                proc.kill()
+
+    def close(self) -> None:
+        """正常或异常退出后回收所属后台并释放 Job 句柄；重复关闭无副作用."""
+        job = self._job
+        if job is None:
+            return
+        try:
+            self._kill_tree()
+        finally:
+            self._job = None
+            win32api.CloseHandle(job)
+
+    def _kill_tree(self) -> None:
+        if self._job is not None:
+            terminate_job = cast("Callable[[int, int], None]", vars(win32job)["TerminateJobObject"])
+            terminate_job(self._job, 0)
+            query = cast("Callable[[int, int], dict[str, int]]", vars(win32job)["QueryInformationJobObject"])
+            deadline = time.monotonic() + 15.0
+            while query(self._job, win32job.JobObjectBasicAccountingInformation)["ActiveProcesses"]:
+                if time.monotonic() >= deadline:
+                    message = "本轮测试 Job Object 的子进程未在清理期限内退出"
+                    raise RuntimeError(message)
+                time.sleep(0.05)
+
+
+def own_process_tree(proc: subprocess.Popen[bytes]) -> _OwnedProcessTree:
+    """为各真实 GUI 验收驱动提供同一套进程所有权与收尾策略."""
+    return _OwnedProcessTree(proc)
+
+
+def wait_window(pid: int, timeout: int = TIMEOUT) -> tuple[Application, WindowSpecification]:
+    deadline = time.time() + timeout
+    last: Exception | None = None
+    while time.time() < deadline:
+        try:
+            app = Application(backend="uia").connect(process=pid, timeout=1)
+            window = app.window(title="JchTools")
+            if window.exists():
+                return app, window
+        except TRANSIENT_GUI_ERRORS as exc:
+            last = exc
+        time.sleep(0.5)
+    msg = f"等待 JchTools 窗口超时：{last}"
+    raise RuntimeError(msg)
+
+
+def _same_physical_control(left: BaseWrapper, right: BaseWrapper) -> bool:
+    left_rect = left.rectangle()
+    right_rect = right.rectangle()
+    width = max(0, min(left_rect.right, right_rect.right) - max(left_rect.left, right_rect.left))
+    height = max(0, min(left_rect.bottom, right_rect.bottom) - max(left_rect.top, right_rect.top))
+    overlap = width * height
+    left_area = max(1, (left_rect.right - left_rect.left) * (left_rect.bottom - left_rect.top))
+    right_area = max(1, (right_rect.right - right_rect.left) * (right_rect.bottom - right_rect.top))
+    return overlap / min(left_area, right_area) >= PHYSICAL_OVERLAP_THRESHOLD
+
+
+def find_button(window: WindowSpecification, title: str) -> WindowSpecification:
+    """返回同一物理按钮组中唯一的可见控件，去除 Slint 外/内层重复节点.
+
+    未找到当前可见节点时仍返回可轮询的 WindowSpecification。旧调用约定会
+    对结果调用 ``exists()`` 判断按钮是否尚未出现；此处直接抛错会把正常的
+    「运行态按钮尚未出现」误报成阶段失败。真正需要按钮的 ``wait``/``click``
+    仍会在超时后失败。
+    """
+    matching = [button for button in window.descendants(control_type="Button") if (button.window_text() or "") == title]
+    buttons: list[BaseWrapper] = []
+    for button in matching:
+        if (button.window_text() or "") != title:
+            continue
+        if any(_same_physical_control(button, existing) for existing in buttons):
+            continue
+        buttons.append(button)
+    visible = [button for button in buttons if button.is_visible()]
+    candidates = visible or buttons
+    if not candidates:
+        return window.child_window(title=title, control_type="Button")
+    candidates.sort(key=lambda button: (button.rectangle().top, button.rectangle().left))
+    chosen_index = next(index for index, button in enumerate(matching) if button is candidates[0])
+    return window.child_window(title=title, control_type="Button", found_index=chosen_index)
+
+
+def activate(window: WindowSpecification | BaseWrapper) -> None:
+    """把应用窗口提到前台，并抬到 z 序最上层.
+
+    click_input 是真实鼠标点击：窗口被资源管理器等程序遮挡时，点击会落到遮挡窗口上。
+    SetWindowPos(HWND_TOP) 只改 z 序、不抢焦点，在后台进程里也能生效，比 set_focus 可靠。
+    """
+    with contextlib.suppress(*TRANSIENT_GUI_ERRORS):
+        _ = win32gui.ShowWindow(window.handle, win32con.SW_RESTORE)
+        win32gui.SetWindowPos(
+            window.handle,
+            win32con.HWND_TOP,
+            0,
+            0,
+            0,
+            0,
+            win32con.SWP_NOMOVE | win32con.SWP_NOSIZE | win32con.SWP_SHOWWINDOW,
+        )
+    with contextlib.suppress(*TRANSIENT_GUI_ERRORS):
+        _ = window.set_focus()
+    time.sleep(0.3)
+
+
+def click(window: WindowSpecification, control: WindowSpecification | BaseWrapper) -> None:
+    activate(window)
+    try:
+        invoke = getattr(control, "invoke", None)
+    except TRANSIENT_GUI_ERRORS:
+        invoke = None
+    if callable(invoke):
+        try:
+            _ = invoke()
+        except (NoPatternInterfaceError, *TRANSIENT_GUI_ERRORS):
+            pass
+        else:
+            time.sleep(0.3)
+            return
+    target_pid = win32process.GetWindowThreadProcessId(window.handle)[1]
+    foreground_pid = win32process.GetWindowThreadProcessId(win32gui.GetForegroundWindow())[1]
+    if foreground_pid != target_pid:
+        message = "鼠标兜底拒绝操作：前台窗口 PID 不属于被测 GUI"
+        raise RuntimeError(message)
+    control.click_input()
+    time.sleep(0.3)
+
+
+def confirm_dialog(window: WindowSpecification, timeout: int = TIMEOUT, *, extraction: bool = False) -> None:
+    """勾选「我已确认…」并点「确认」，以**对话框消失**作为成功判据.
+
+    点击可能落在对话框滑入动画的空档或未生效，所以按当前状态重试：
+    未勾选就点复选框，已勾选就点确认，直到对话框关闭；
+    只检查「点击没报错」会把没生效的点击当成成功，后续等待必然超时。
+    """
+    checkbox = window.child_window(title=EXTRACT_ACK if extraction else ORGANIZE_ACK, control_type="CheckBox")
+    ok = find_button(window, "确认")
+    deadline = time.time() + timeout
+    attempts = 0
+    while time.time() < deadline:
+        _ = checkbox.wait("visible", timeout=10)
+        time.sleep(0.3)  # 让对话框完成滑入，避免点到动画中途的位置
+        attempts += 1
+        click(window, ok if ok.is_enabled() else checkbox)
+        closed_observations = 0
+        for _ in range(20):
+            time.sleep(0.3)
+            try:
+                # Slint 删除/重建 UIA 节点时旧 CheckBox 可能暂时不可读；
+                # 用新枚举且非空的页面树连续两次确认模态标题消失。
+                texts = [text.window_text() or "" for text in window.descendants(control_type="Text")]
+                if texts and "确认文件处理范围" not in texts:
+                    closed_observations += 1
+                else:
+                    closed_observations = 0
+                if closed_observations >= CONFIRM_CLOSED_OBSERVATIONS:
+                    return
+            except TRANSIENT_GUI_ERRORS:
+                closed_observations = 0
+        print(f"  确认框仍未关闭，重试第 {attempts} 次")
+    msg = "确认对话框没有关闭：勾选或确认点击未生效"
+    raise RuntimeError(msg)
+
+
+def state_dir() -> Path:
+    r"""任务库与 GUI 使用同一隔离状态根，缺覆盖时为 %LOCALAPPDATA%\JchTools\data."""
+    isolated = os.environ.get("JCHTOOLS_TEST_STATE_DIR")
+    if isolated is not None:
+        path = Path(isolated)
+        if not path.is_absolute():
+            msg = "JCHTOOLS_TEST_STATE_DIR 必须为绝对路径，拒绝回退到真实任务目录"
+            raise RuntimeError(msg)
+        return path
+    local = os.environ.get("LOCALAPPDATA")
+    if not local:
+        msg = "缺少 LOCALAPPDATA，无法定位任务目录"
+        raise RuntimeError(msg)
+    return Path(local) / "JchTools" / "data"
+
+
+def _task_records(data: str) -> list[tuple[str, object]]:
+    """按目录名列出 data 的任务；转义 SQLite URI 路径，读取失败也关闭观察连接。."""
+    tasks = state_dir() / "tasks"
+    want = os.path.normcase(str(Path(data).resolve()))
+    records: list[tuple[str, object]] = []
+    for task in tasks.glob("*"):
+        db = task / "task.sqlite3"
+        if not db.is_file():
+            continue
+        with contextlib.suppress(*TASK_RECORD_ERRORS):
+            with contextlib.closing(sqlite3.connect(db.as_uri() + "?mode=ro", uri=True)) as conn:
+                rows: dict[str, object] = dict(conn.execute("SELECT key,value FROM metadata").fetchall())
+            root_raw = rows.get("root", '""')
+            status_raw = rows.get("status", '""')
+            # json.loads 只接受 str/bytes/bytearray；其余类型原本也是 TypeError 后跳过，等价。
+            # 解析出的 root 非字符串时原本 removeprefix 抛 AttributeError 后跳过，等价。
+            if isinstance(root_raw, (str, bytes, bytearray)) and isinstance(status_raw, (str, bytes, bytearray)):
+                # cast(object) 是诚实放宽：json.loads 的 Any 在此进入类型化世界，JSON 值本就属于 object；
+                # basedpyright all 模式对「Any 赋给 object」也报 reportAny，cast 是唯一无 suppression 出口。
+                root = cast("object", json.loads(root_raw))
+                if isinstance(root, str):
+                    if os.path.normcase(root.removeprefix("\\\\?\\")) != want:
+                        continue
+                    records.append((task.name, json.loads(status_raw)))
+    # 任务目录名唯一，按首元素排序与按整个元组排序结果一致。
+    records.sort(key=lambda record: record[0])
+    return records
+
+
+def newest_task(data: str) -> str:
+    records = _task_records(data)
+    return records[-1][0] if records else ""
+
+
+def wait_task_status(data: str, expected: str, after: str = "", timeout: int = COMPLETION_TIMEOUT) -> None:
+    """等待这次点击新建的任务跑到 expected 状态.
+
+    界面文本经 UIA 桥接并不总是可见（动态状态行时有时无），
+    而任务库状态是「GUI 流程真的跑完」的可靠判据，因此用它做断言；
+    点击前的任务名通过 after 排除，避免读到上一轮分析留下的 ready 任务。
+    """
+    deadline = time.time() + timeout
+    while time.time() < deadline:
+        for name, status in _task_records(data):
+            if name <= after:
+                continue
+            if status == expected:
+                return
+            if status in ("failed", "cancelled"):
+                msg = f"任务 {name} 状态为 {status}"
+                raise RuntimeError(msg)
+        time.sleep(0.5)
+    msg = f"等待任务状态 {expected} 超时（目录 {data}）"
+    raise RuntimeError(msg)
+
+
+def set_directory(window: WindowSpecification, path: str) -> None:
+    # 目录输入框是与「选择目录…」按钮同排的 Edit 控件。
+    button = find_button(window, "选择目录…")
+    button_rect = button.rectangle()
+    candidates = [
+        edit
+        for edit in window.descendants(control_type="Edit")
+        if abs(edit.rectangle().top - button_rect.top) < EDIT_ROW_TOLERANCE_PX
+        and edit.rectangle().right <= button_rect.left
+    ]
+    if not candidates:
+        msg = "未找到目录输入框"
+        raise RuntimeError(msg)
+    # 侧栏搜索框在小窗口下可能与目录输入框同高；取紧挨「选择目录…」左侧的 Edit。
+    edit = min(candidates, key=lambda e: button_rect.left - e.rectangle().right)
+    _ = edit.set_edit_text(path)
+
+
+def setup_directory(window: WindowSpecification, path: str, timeout: int = TIMEOUT) -> None:
+    """设置目录并确认界面已接受它.
+
+    界面未接受时「开始解压与分析」保持禁用，直接点击只会空转、随后以超时收场；
+    判据用状态栏文案而不是按钮状态，避免把「扫描中」误判成未就绪。
+    """
+    for attempt in range(1, 4):
+        set_directory(window, path)
+        deadline = time.time() + timeout
+        while time.time() < deadline:
+            for text in window.descendants(control_type="Text"):
+                if "目录已就绪" in (text.window_text() or ""):
+                    return
+            time.sleep(0.5)
+        print(f"  目录未被界面接受，重试第 {attempt} 次")
+    msg = "目录未被界面接受：状态栏始终没有出现「目录已就绪」"
+    raise RuntimeError(msg)
+
+
+def open_confirm(window: WindowSpecification, button_title: str, timeout: int = TIMEOUT) -> None:
+    """点击会弹出确认框的按钮，并确认确认框已经出现.
+
+    上一个对话框的关闭动画期间点击会被吞掉，按钮显示 enabled 但不生效；
+    因此以「确认框出现」为判据重试按钮点击。
+    """
+    title = EXTRACT_ACK if button_title == "开始解压" else ORGANIZE_ACK
+    checkbox = window.child_window(title=title, control_type="CheckBox")
+    deadline = time.time() + timeout
+    while time.time() < deadline:
+        button = find_button(window, button_title)
+        _ = button.wait("visible enabled", timeout=timeout)
+        click(window, button)
+        try:
+            _ = checkbox.wait("visible", timeout=5)
+        except TRANSIENT_GUI_ERRORS:
+            print(f"  「{button_title}」后确认框未出现，重试")
+        else:
+            return
+
+
+def close_app(window: WindowSpecification) -> None:
+    """先发 WM_CLOSE；鼠标兜底前验证前台窗口 PID 属于被测 GUI."""
+    handle = window.handle
+    target_pid = win32process.GetWindowThreadProcessId(handle)[1]
+    win32gui.PostMessage(handle, win32con.WM_CLOSE, 0, 0)
+    time.sleep(0.3)
+    with contextlib.suppress(*TRANSIENT_GUI_ERRORS, RuntimeError):
+        if not window.exists():
+            return
+    foreground = win32gui.GetForegroundWindow()
+    foreground_pid = win32process.GetWindowThreadProcessId(foreground)[1]
+    if foreground_pid != target_pid:
+        message = "关闭兜底拒绝操作：前台窗口 PID 不属于被测 GUI"
+        raise RuntimeError(message)
+    for button in [b for b in window.descendants(control_type="Button") if (b.window_text() or "") == "关闭"]:
+        button.click_input()
+        time.sleep(0.3)
+        return
+
+
+def _escalate_close(window: WindowSpecification) -> None:
+    """关闭兜底：向窗口发标准 WM_CLOSE，走同一条 on_close_requested 路径，不依赖坐标命中."""
+    with contextlib.suppress(*TRANSIENT_GUI_ERRORS):
+        win32gui.PostMessage(window.handle, win32con.WM_CLOSE, 0, 0)
+
+
+def _wait_exit_or_kill(
+    proc: subprocess.Popen[bytes],
+    timeout: int = 15,
+    window: WindowSpecification | None = None,
+    owner: _OwnedProcessTree | None = None,
+) -> tuple[bool, int | None]:
+    """等待进程退出，超时则强制结束（避免异常路径泄漏进程），并返回是否被强杀与退出码.
+
+    合成鼠标点击可能落空（窗口未在前台时点到了别的窗口，实测 S2 稳定复现且随后手动
+    点击同一按钮立即退出）：首次尝试仍只点标题栏按钮，之后的重试才补发 WM_CLOSE，
+    把「点击落空」与「关闭路径真的挂死」区分开——后者会耗尽全部重试并最终被强杀、
+    由断言判失败。
+    """
+    deadline = time.time() + timeout
+    attempts = 0
+    while time.time() < deadline:
+        try:
+            _ = proc.wait(timeout=min(3.0, max(0.1, deadline - time.time())))
+        except subprocess.TimeoutExpired:
+            attempts += 1
+            if window is not None:
+                with contextlib.suppress(*TRANSIENT_GUI_ERRORS, RuntimeError):
+                    if attempts <= 1:
+                        close_app(window)
+                    else:
+                        _escalate_close(window)
+        else:
+            return False, proc.returncode
+    if owner is not None:
+        owner.terminate(proc)
+    else:
+        with contextlib.suppress(OSError, ProcessLookupError):
+            proc.kill()
+    with contextlib.suppress(subprocess.TimeoutExpired, OSError):
+        _ = proc.wait(timeout=10)
+    return True, proc.returncode
+
+
+def assert_clean_exit(tag: str, *, killed: bool, code: int | None) -> None:
+    """S1-S4 的退出断言：被强杀或非 0 退出码都算失败（AGENTS §3.4 不得把未验证当作通过）."""
+    if killed:
+        msg = f"{tag}：多次点击关闭后进程仍未退出，已被强杀（关闭路径可能挂死或窗口无法退出）"
+        raise RuntimeError(msg)
+    if code != 0:
+        msg = f"{tag}：进程退出码 {code}（预期 0）"
+        raise RuntimeError(msg)
+
+
+def run_stage(  # noqa: PLR0913 - 脚手架的收尾钩子与子进程环境天然成组
+    tag: str,
+    exe: str,
+    body: Callable[[WindowSpecification], None],
+    *,
+    pre: Callable[[], None] | None = None,
+    after: Callable[[], None] | None = None,
+    env: dict[str, str] | None = None,
+) -> None:
+    """S1-S14 共用的启动/拆除脚手架：Popen →（pre）→ wait_window → body → 统一收尾.
+
+    拆除顺序（含异常路径）为：窗口非 None 才 close_app；随后等待/结束本次 Job
+    Object 的 GUI 及其子服务；最后无论前面哪一步失败都执行 after。pre 也在统一
+    try/finally 内，因此媒体缺失等前置失败不会泄漏已启动的 GUI。Job Object 只绑定
+    本函数刚启动的 PID，不能触碰其他用户实例。env 非 None 时传给子进程（S6-S9 用
+    JCHTOOLS_TEST_STATE_DIR 隔离应用配置，不写真实用户配置）。
+    Popen 前始终检查两个隔离变量，直接调用及 CLI 前置检查逃生口均不能绕过。
+    收尾断言与最终 PASS 行统一在此打印。
+    """
+    effective_env = dict(os.environ if env is None else env)
+    missing = missing_isolation_env(effective_env)
+    if missing:
+        message = f"GUI 启动前必须隔离状态目录与资产根，缺少：{','.join(missing)}；请经 scripts/acceptance.ps1 执行"
+        raise RuntimeError(message)
+    proc = subprocess.Popen([exe], env=effective_env)
+    owner: _OwnedProcessTree | None = None
+    window: WindowSpecification | None = None
+    try:
+        owner = _OwnedProcessTree(proc)
+        if pre is not None:
+            pre()
+        _, window = wait_window(proc.pid)
+        if effective_env.get("JCHTOOLS_TEST_STATE_DIR"):
+            isolated_db = Path(effective_env["JCHTOOLS_TEST_STATE_DIR"]) / "config.sqlite3"
+            deadline = time.time() + TIMEOUT
+            while not isolated_db.is_file() and time.time() < deadline:
+                time.sleep(0.1)
+            if not isolated_db.is_file():
+                message = "GUI 未建立隔离配置；请先 cargo build --features test-hooks，禁止写入真实用户配置"
+                raise RuntimeError(message)
+        body(window)
+    finally:
+        if window is not None:
+            with contextlib.suppress(*TRANSIENT_GUI_ERRORS, RuntimeError):
+                close_app(window)
+        try:
+            killed, code = _wait_exit_or_kill(proc, window=window, owner=owner)
+        finally:
+            try:
+                if owner is not None:
+                    owner.close()
+            finally:
+                if after is not None:
+                    after()
+    assert_clean_exit(tag, killed=killed, code=code)
+    print(f"{tag} PASS：进程已退出")
+
+
+def s1_launch_and_exit(exe: str) -> None:
+    run_stage("S1", exe, lambda _window: print("S1 PASS：窗口启动并可见"))
+
+
+def goto_organizer(window: WindowSpecification) -> None:
+    """启动落在注册表第一个工具（递归解压）；目录整理用例先切过去."""
+    click(window, find_button(window, "目录整理"))
+
+
+def analyze_until_ready(window: WindowSpecification, data: str) -> str:
+    """S2/S3 共用前缀：切到目录整理、设置数据集并分析到 ready，返回任务基线."""
+    goto_organizer(window)
+    setup_directory(window, data)
+    baseline = newest_task(data)
+    # C-01：分析只读，不再弹破坏性确认框——点击后直接进入分析。
+    click(window, find_button(window, "开始分析"))
+    wait_task_status(data, "ready", baseline)
+    return baseline
+
+
+def s2_analyze_only(exe: str, data: str) -> None:
+    def body(window: WindowSpecification) -> None:
+        root = Path(data)
+        before_paths = frozenset(path.relative_to(root) for path in root.rglob("*"))
+        before_files = {
+            path.relative_to(root): (file_digest(path), path.stat().st_mtime_ns)
+            for path in root.rglob("*")
+            if path.is_file()
+        }
+        _ = analyze_until_ready(window, data)
+        _ = find_button(window, "确认并执行整理").wait("visible enabled", timeout=TIMEOUT)
+        after_paths = frozenset(path.relative_to(root) for path in root.rglob("*"))
+        after_files = {
+            path.relative_to(root): (file_digest(path), path.stat().st_mtime_ns)
+            for path in root.rglob("*")
+            if path.is_file()
+        }
+        require(
+            before_paths == after_paths and before_files == after_files,
+            "分析阶段不得改动测试数据（路径、内容或修改时间发生变化）",
+        )
+        print("S2 PASS：分析完成（计划已生成，执行按钮可用；分析阶段未改动文件）")
+
+    run_stage("S2", exe, body)
+
+
+def s3_full_organize(exe: str, data: str) -> None:
+    root = Path(data)
+    expected = prepare_organize_witnesses(root)
+    git_before = tree_snapshot(root / "__gui_witness" / "project")
+
+    def body(window: WindowSpecification) -> None:
+        baseline = analyze_until_ready(window, data)
+        open_confirm(window, "确认并执行整理")
+        confirm_dialog(window)
+        wait_task_status(data, "finished", baseline)
+        verify_organize_witnesses(root, expected, git_before)
+        for parent, dirs, files in os.walk(data):
+            if ".git" in dirs or ".git" in files:
+                dirs.clear()
+                continue
+            if Path(parent) != Path(data) and not dirs and not files:
+                msg = f"整理成功后仍残留空目录：{parent}"
+                raise RuntimeError(msg)
+        before_repeat = tree_snapshot(root)
+        # 相同目录已保留在页面，重复 set_edit_text 不触发目录变化，状态仍显示上次结束；
+        # 从真实「开始分析」入口重新建计划，避免把“目录已就绪”当成唯一空闲状态。
+        baseline = newest_task(data)
+        _ = wait_button(window, "开始分析", TIMEOUT, enabled=True)
+        click(window, find_button(window, "开始分析"))
+        wait_task_status(data, "ready", baseline)
+        open_confirm(window, "确认并执行整理")
+        confirm_dialog(window)
+        wait_task_status(data, "finished", baseline)
+        require(tree_snapshot(root) == before_repeat, "相同默认规则再次整理改变了路径、内容或修改时间")
+        print("S3 PASS：默认分类、两类去重保留最新、不同名保留、内容冲突保留、Git整树归类及再次整理幂等")
+
+    run_stage("S3", exe, body)
+
+
+def tree_snapshot(root: Path) -> tuple[frozenset[str], dict[str, tuple[str, int]]]:
+    """测试侧记录全部路径及字节/mtime，包含 Git 内部空目录，供整体平移与幂等判定。."""
+    paths = frozenset(path.relative_to(root).as_posix() for path in root.rglob("*"))
+    files = {
+        path.relative_to(root).as_posix(): (file_digest(path), path.stat().st_mtime_ns)
+        for path in root.rglob("*")
+        if path.is_file()
+    }
+    return paths, files
+
+
+def prepare_organize_witnesses(root: Path) -> dict[str, tuple[str, int]]:
+    """覆盖 C-02/C-03/C-04/C-05/C-08/C-14：给工厂语料的一次性副本补充结果明确的见证。."""
+    source = root / "__gui_witness"
+    require(not source.exists(), "测试语料已占用 GUI 见证目录")
+    old_stamp, new_stamp = 1_700_000_000_000_000_000, 1_760_000_000_000_000_000
+    # 期望由合同直接给定，不从计划库或产品归类函数反推结果。
+    entries = (
+        ("old/same.txt", "文档/same.txt", b"GUI same-name witness", old_stamp, False),
+        ("new/same.txt", "文档/same.txt", b"GUI same-name witness", new_stamp, True),
+        ("old/copy.txt", "文档/copy_2.txt", b"GUI copy-name witness", old_stamp, False),
+        ("new/copy (2).txt", "文档/copy_2.txt", b"GUI copy-name witness", new_stamp, True),
+        ("left/different-a.txt", "文档/different-a.txt", b"GUI different-name witness", old_stamp, True),
+        ("right/different-b.txt", "文档/different-b.txt", b"GUI different-name witness", new_stamp, True),
+        ("left/conflict.txt", "文档/left_conflict.txt", b"GUI conflict first", old_stamp, True),
+        ("right/conflict.txt", "文档/right_conflict.txt", b"GUI conflict other", new_stamp, True),
+        ("nested/witness.png", "图片/witness.png", b"GUI category image", old_stamp, True),
+        ("nested/witness.mp4", "视频/witness.mp4", b"GUI category video", old_stamp, True),
+        ("nested/witness.mp3", "音频/witness.mp3", b"GUI category audio", old_stamp, True),
+        ("nested/witness.zip", "压缩包/witness.zip", b"GUI category archive", old_stamp, True),
+        ("nested/witness.exe", "程序/witness.exe", b"GUI category program", old_stamp, True),
+        ("nested/witness.unknown", "其他/witness.unknown", b"GUI category fallback", old_stamp, True),
+    )
+    expected: dict[str, tuple[str, int]] = {}
+    for name, target, content, stamp, survives in entries:
+        path = source / name
+        path.parent.mkdir(parents=True, exist_ok=True)
+        _ = path.write_bytes(content)
+        os.utime(path, ns=(stamp, stamp))
+        if survives:
+            expected[target] = (file_digest(path), stamp)
+    project = source / "project"
+    for name, content in (
+        (".git/marker", b"synthetic Git boundary"),
+        ("Thumbs.db", b"Git internal junk must survive"),
+        ("copy.txt", b"Git duplicate must survive"),
+        ("copy (1).txt", b"Git duplicate must survive"),
+    ):
+        path = project / name
+        path.parent.mkdir(parents=True, exist_ok=True)
+        _ = path.write_bytes(content)
+    (project / "empty").mkdir()
+    return expected
+
+
+def verify_organize_witnesses(
+    root: Path,
+    expected: dict[str, tuple[str, int]],
+    git_before: tuple[frozenset[str], dict[str, tuple[str, int]]],
+) -> None:
+    """任务完成之外核对真实产物，拒绝未移动、错误去重、改写及 Git 内部清理。."""
+    for name, (digest, stamp) in expected.items():
+        path = root / name
+        require(path.is_file(), f"默认整理缺少合同期望产物：{name}")
+        require(file_digest(path) == digest, f"整理改变了文件内容：{name}")
+        require(path.stat().st_mtime_ns == stamp, f"去重保留者不是最新文件或归类改变了 mtime：{name}")
+    expected_counts = Counter(digest for digest, _stamp in expected.values())
+    actual_counts: Counter[str] = Counter()
+    for path in root.rglob("*"):
+        if path.is_file():
+            digest = file_digest(path)
+            if digest in expected_counts:
+                actual_counts[digest] += 1
+    require(actual_counts == expected_counts, "默认去重的副本数量或不同名保留数量不符合合同")
+    require(not (root / "__gui_witness").exists(), "已搬空的 GUI 见证来源目录没有清理")
+    require(tree_snapshot(root / "Git项目集合" / "project") == git_before, "Git 项目未整体归类或内部被改动")
+
+
+# 自动解压白名单（与 src/rules.rs::archive_name 同口径）：只有这些后缀会被解压。
+# 其它格式（.cab/.iso/.wim/.lzh/.cpio/.docx/.msi 等）即使 7-Zip 能打开也不碰，
+# 因此在核对里必须按「既有文件」处理——字节不变、不得消失、不得进隔离目录。
+ARCHIVE_SUFFIXES = (
+    ".zip",
+    ".7z",
+    ".rar",
+    ".tar",
+    ".gz",
+    ".bz2",
+    ".xz",
+    ".zst",
+    ".lzma",
+    ".z",
+    ".tgz",
+    ".tbz2",
+    ".txz",
+    ".tzst",
+)
+
+
+def file_digest(path: Path) -> str:
+    with path.open("rb") as stream:
+        return hashlib.file_digest(stream, "sha256").hexdigest()
+
+
+def verify_original_disposition(root: Path, originals: dict[Path, str], quarantined: Counter[str]) -> None:
+    """逐个原包核对：成功组的原包与分卷必须已删除且不得出现在「解压失败」，失败组必须完整隔离，既有文件必须原样保留."""
+    successful_sections = {
+        "07-压缩包-各格式",
+        "08-压缩包-冲突",
+        "09-压缩包-嵌套",
+        "10-压缩包-超深",
+        "13-压缩包-分卷",
+        "14-大文件",
+    }
+    for relative, digest in originals.items():
+        current = root / relative
+        # X-09/X-10：数字尾卷必须属于白名单主包，编号为三位或自然扩展，
+        # data.001、非白名单容器及多余前导零均是普通文件，不得要求删除或隔离。
+        numeric_volume = (
+            re.fullmatch(r"\.(?:[0-9]{3}|[1-9][0-9]{3,})", relative.suffix) is not None
+            and relative.with_suffix("").suffix.lower() in ARCHIVE_SUFFIXES
+        )
+        is_archive = relative.suffix.lower() in ARCHIVE_SUFFIXES or numeric_volume
+        if is_archive and relative.parts[0] in successful_sections:
+            if current.exists():
+                msg = f"完整成功后仍保留原包或分卷：{relative}"
+                raise RuntimeError(msg)
+            continue
+        if current.is_file():
+            if is_archive:
+                msg = f"失败原包未隔离：{relative}"
+                raise RuntimeError(msg)
+            if file_digest(current) != digest:
+                msg = f"解压修改了既有文件：{relative}"
+                raise RuntimeError(msg)
+            continue
+        if not is_archive or quarantined[digest] == 0:
+            msg = f"解压丢失失败原包、分卷或既有文件：{relative}"
+            raise RuntimeError(msg)
+        quarantined[digest] -= 1
+    # X-05 与 X-06 是互斥的两种结果：「原包不在原位」不等于「按 X-05 永久删除」——
+    # 被防护上限误伤而按 X-06 移入「解压失败」的原包，原位同样不存在。全部预期
+    # 隔离项按 digest 配平后，「解压失败」不得再有剩余项：成功组的包若被误伤隔离，
+    # 其 digest 不会出现在任何配平里，在此被拦下（否则 S4 对该类回归假绿，
+    # 例如 max_ratio 上限被调小后 14-大文件 的全零包被整包推进「解压失败」）。
+    leftovers = {digest: count for digest, count in quarantined.items() if count > 0}
+    if leftovers:
+        msg = f"「解压失败」存在无法对应到任何失败原包/分卷的多余隔离项（成功包可能被误伤隔离）：{leftovers}"
+        raise RuntimeError(msg)
+
+
+# 与 make_tmp.py 的 07 分区一致：同内容的单文件压缩流个数（gz / bz2 / xz / lzma）。
+STREAM_PAYLOAD_CASES = ("single.txt.gz", "single.txt.bz2", "single.txt.xz", "single.txt.lzma")
+
+
+def verify_extracted_outputs(root: Path) -> None:
+    """核对解压产物内容、分卷体积、复合压缩的中间层与嵌套原包清理."""
+    expected = {
+        "08-压缩包-冲突/说明 (1).txt": b"archive version B, different content and length\n",
+        "08-压缩包-冲突/等长 (1).txt": b"fedcba9876543210",
+        "09-压缩包-嵌套/level5.txt": b"innermost payload\n",
+    }
+    for relative, content in expected.items():
+        if (root / relative).read_bytes() != content:
+            msg = f"解压输出内容不符合测试语料：{relative}"
+            raise RuntimeError(msg)
+    # X-01：复合扩展名整体识别，中间 tar 层不得留在正式位置（`.tar.lzma` 这类
+    # 引擎不自动拆 tar 的组合，靠把中间 tar 当嵌套包继续解开并清理）。
+    leftovers = [str(path.relative_to(root)) for path in (root / "07-压缩包-各格式").rglob("*.tar")]
+    if leftovers:
+        msg = f"中间 tar 层不得留在正式位置：{leftovers}"
+        raise RuntimeError(msg)
+    # 同内容的单文件压缩流（gz/bz2/xz/lzma）都应解出；同名冲突自动改名，内容不变。
+    payload = b"single member payload\n" * 8
+    expected_copies = len(STREAM_PAYLOAD_CASES)
+    copies = sum(
+        1 for path in (root / "07-压缩包-各格式").rglob("*") if path.is_file() and path.read_bytes() == payload
+    )
+    if copies != expected_copies:
+        msg = f"单文件压缩流应各解出一份内容（含 .lzma），实得 {copies} 份"
+        raise RuntimeError(msg)
+    if (root / "13-压缩包-分卷/big.bin").stat().st_size != 2 * 1024 * 1024 + 12345:
+        msg = "分卷原包删除前必须完整解出 big.bin"
+        raise RuntimeError(msg)
+    for path in (root / "09-压缩包-嵌套").rglob("*"):
+        if path.is_file() and path.suffix.lower() in ARCHIVE_SUFFIXES:
+            msg = f"嵌套成功原包未清理：{path.relative_to(root)}"
+            raise RuntimeError(msg)
+
+
+def verify_extraction_results(root: Path, originals: dict[Path, str]) -> None:
+    """核对成功源包删除、失败包完整隔离、既有文件不变与真实解压结果."""
+    quarantined = Counter(file_digest(path) for path in (root / "解压失败").rglob("*") if path.is_file())
+    # X-06：10-压缩包-超深 的第 17 层是按深度上限预期隔离的失败项。
+    # 先严格核对这个有意保留的嵌套包，再从隔离计数中扣除一份；后续
+    # verify_original_disposition 的 leftovers 检查仍会拒绝所有其他多余项。
+    deep_failed = root / "解压失败" / "d17.zip"
+    if not deep_failed.is_file():
+        msg = "超深压缩包应按 X-06 隔离 d17.zip"
+        raise RuntimeError(msg)
+    try:
+        with zipfile.ZipFile(deep_failed) as archive:
+            members = archive.namelist()
+    except (OSError, zipfile.BadZipFile) as exc:
+        msg = "X-06 隔离的 d17.zip 不是有效压缩包"
+        raise RuntimeError(msg) from exc
+    if members != ["d18.zip"]:
+        msg = f"X-06 隔离的 d17.zip 内容不符合预期：{members}"
+        raise RuntimeError(msg)
+    quarantined[file_digest(deep_failed)] -= 1
+    verify_original_disposition(root, originals, quarantined)
+    verify_extracted_outputs(root)
+
+
+def s4_full_extract(exe: str, data: str) -> None:
+    """递归解压全链路：成功原包删除、既有文件不变，冲突另存、嵌套内容完整落盘."""
+    root = Path(data)
+    originals: dict[Path, str] = {}
+
+    def snapshot_originals() -> None:
+        originals.update({path.relative_to(root): file_digest(path) for path in root.rglob("*") if path.is_file()})
+
+    def body(window: WindowSpecification) -> None:
+        # 启动页即递归解压，无需切换。
+        setup_directory(window, data)
+        baseline = newest_task(data)
+        open_confirm(window, "开始解压")
+        confirm_dialog(window, extraction=True)
+        wait_task_status(data, "finished", baseline)
+        verify_extraction_results(root, originals)
+        print("S4 PASS：成功原包及分卷删除（隔离目录无多余项）；既有内容保留，冲突自动改名，嵌套内容正确落盘")
+
+    run_stage("S4", exe, body, pre=snapshot_originals)
+
+
+def goto_converter(window: WindowSpecification) -> None:
+    click(window, find_button(window, "转 Markdown"))
+
+
+def converter_directory_rows(window: WindowSpecification) -> list[BaseWrapper]:
+    """转 Markdown 页自上而下两行「选择目录…」按钮：输入 / 输出（XB-20）."""
+    buttons = [b for b in window.descendants(control_type="Button") if (b.window_text() or "") == "选择目录…"]
+    unique: list[BaseWrapper] = []
+    for button in buttons:
+        if not button.is_visible() or any(_same_physical_control(button, existing) for existing in unique):
+            continue
+        unique.append(button)
+    unique.sort(key=lambda b: (b.rectangle().top, b.rectangle().left))
+    buttons = unique
+    if len(buttons) < CONVERT_DIR_ROWS:
+        msg = f"转 Markdown 页「选择目录…」按钮不足两行（实得 {len(buttons)}）"
+        raise RuntimeError(msg)
+    return buttons
+
+
+def set_converter_dirs(window: WindowSpecification, input_dir: str, output_dir: str) -> None:
+    rows = converter_directory_rows(window)
+    for button, value in ((rows[0], input_dir), (rows[1], output_dir)):
+        top = button.rectangle().top
+        candidates = [
+            edit
+            for edit in window.descendants(control_type="Edit")
+            if abs(edit.rectangle().top - top) < EDIT_ROW_TOLERANCE_PX
+        ]
+        if not candidates:
+            msg = "未找到与「选择目录…」同排的目录输入框"
+            raise RuntimeError(msg)
+        _ = min(candidates, key=lambda e: e.rectangle().left).set_edit_text(value)
+
+
+def unique_visible_buttons(window: WindowSpecification, title: str) -> list[BaseWrapper]:
+    """按矩形去除 Slint 外层/内层重复 UIA Button 节点."""
+    candidates: list[BaseWrapper] = []
+    for button in window.descendants(control_type="Button"):
+        if (button.window_text() or "") != title or not button.is_visible():
+            continue
+        if any(_same_physical_control(button, existing) for existing in candidates):
+            continue
+        candidates.append(button)
+    candidates.sort(key=lambda button: (button.rectangle().top, button.rectangle().left))
+    return candidates
+
+
+def wait_button(window: WindowSpecification, title: str, timeout: float, *, enabled: bool = False) -> BaseWrapper:
+    """动态等待唯一可见按钮，避免页面切换时缓存空 WindowSpecification."""
+    deadline = time.time() + timeout
+    while time.time() < deadline:
+        try:
+            buttons = unique_visible_buttons(window, title)
+            if buttons and (not enabled or any(button.is_enabled() for button in buttons)):
+                return next(button for button in buttons if not enabled or button.is_enabled())
+        except TRANSIENT_GUI_ERRORS:
+            pass
+        time.sleep(0.2)
+    message = f"等待可见{('可用' if enabled else '')}按钮超时：{title}"
+    raise RuntimeError(message)
+
+
+def s5_markdown_basic_chain(exe: str) -> None:
+    """S5 转 Markdown 基本链路：启动→选输入→开始→停止→关闭.
+
+    未配置/未就绪时「开始转换」保持禁用，wait 超时即失败——不得把「未配置也通过」
+    报成基本链路通过。覆盖 T-23/P-12：观察当前媒体运行态，取消后已有成品逐字节
+    不变、当前及后续产物不存在，临时文件和图片也不得留下。
+    """
+    scratch_box: list[Path] = []
+
+    def prepare_scratch() -> None:
+        scratch = Path(tempfile.mkdtemp(prefix="jchtools-gui-smoke-s5-"))
+        scratch_box.append(scratch)
+        (scratch / "input").mkdir()
+        (scratch / "output").mkdir()
+        # 空输入的转换瞬时完成，「停止任务」运行态不可观察，开始→停止链路断言失效；
+        # 用媒体样本（转录需数秒）保证运行态可观察。样本由环境变量显式提供（真实
+        # 组件门控用例同口径），缺样本时明确失败而不是把「没开始」当通过。
+        media = os.environ.get("JCHTOOLS_S5_MEDIA", "")
+        if not media or not Path(media).is_file():
+            message = "S5 需要媒体样本以观察运行态：设置 JCHTOOLS_S5_MEDIA 指向一个真实媒体文件"
+            raise RuntimeError(message)
+        _ = (scratch / "input" / "00_complete.txt").write_text("completed before cancellation\n", encoding="utf-8")
+        for index in range(1, STOP_MEDIA_FILE_COUNT + 1):
+            _ = shutil.copyfile(media, scratch / "input" / f"{index:02}_{Path(media).name}")
+
+    def body(window: WindowSpecification) -> None:
+        scratch = scratch_box[0]
+        goto_converter(window)
+        set_converter_dirs(window, str(scratch / "input"), str(scratch / "output"))
+        _ = wait_button(window, "开始转换", COMPLETION_TIMEOUT, enabled=True)
+        # 合成点击偶发落空（点击后仍停在「尚未开始」）：按当前状态重试，与
+        # confirm_dialog 同一立场——只检查「点击没报错」会把没生效的点击当成
+        # 成功。每次重按后观察一段运行态窗口，重按最多 3 次。
+        busy_timeout = CONVERT_BUSY_TIMEOUT // 3
+        for attempt in range(3):
+            click(window, find_button(window, "开始转换"))
+            try:
+                _ = wait_button(window, "停止任务", busy_timeout, enabled=True)
+                break
+            except (timings.TimeoutError, RuntimeError):
+                if attempt == _S5_LAST_ATTEMPT:
+                    raise
+        current = f"01_{Path(os.environ['JCHTOOLS_S5_MEDIA']).name}"
+        current_md = f"{Path(current).stem}_{Path(current).suffix.lstrip('.')}.md"
+        _ = wait_text_containing(window, f"正在处理 {current}")
+        before = snapshot_output_bytes(scratch / "output")
+        require("00_complete_txt.md" in before, "停止测试必须先观察一份已完成产物")
+        require(len(before) == 1, "当前媒体尚未完成时才可发出停止请求")
+        click(window, find_button(window, "停止任务"))
+        _ = wait_button(window, "开始转换", CONVERT_STOP_TIMEOUT, enabled=True)
+        _ = wait_text_containing(window, "已停止")
+        # 停止落地前的时延内当前文件可能已自然完成（其成品按 T-23 保留），取消条目
+        # 因此可能落在下一文件上；断言「存在媒体文件的确认取消条目」这一合同不变量。
+        _ = wait_log_matching(window, r"已取消：\d{2}_\S+；未完成结果不提交")
+        verify_cancelled_outputs(scratch / "output", before, current_md)
+        print("S5 PASS：当前转换及时取消；已完成产物保留，后续/临时产物均未提交")
+
+    def cleanup() -> None:
+        if scratch_box:
+            shutil.rmtree(scratch_box.pop(), ignore_errors=True)
+
+    run_stage("S5", exe, body, pre=prepare_scratch, after=cleanup)
+
+
+# ---------------------------------------------------------------- S6-S14：转 Markdown / 设置页阶段。
+
+ATTEMPT_TIMEOUT = 8  # 单次「点击→等文本」的观察窗（秒）；落空即重试
+
+
+def require(condition: object, message: str) -> None:
+    """S6-S14 的断言 helper：bandit B101 禁用 assert，统一 raise 口径."""
+    if not condition:
+        raise RuntimeError(message)
+
+
+def snapshot_output_bytes(root: Path) -> dict[str, str]:
+    """P-12：结果内容快照包含图片与临时文件，不能只数 Markdown。."""
+    return {str(path.relative_to(root)): file_digest(path) for path in root.rglob("*") if path.is_file()}
+
+
+def verify_cancelled_outputs(root: Path, completed: dict[str, str], in_flight_md: str) -> None:
+    """覆盖 T-23/T-25：停止后保留已完成成品；当前文件至多保留停止落地前完成的那份.
+
+    停止请求从发出到被引擎确认存在 UIA/调度时延：当前文件若在停止落地前已自然
+    完成，其成品按 T-23「已完成产物保留」合法提交。因此允许集合为「已完成成品
+    加至多一份当前文件成品」；后续文件、临时产物与未完成媒体目录仍然一律拒绝。
+    """
+    final = snapshot_output_bytes(root)
+    extras = set(final) - set(completed)
+    require(not extras or extras == {in_flight_md}, f"停止后出现当前文件之外的产物或临时文件：{sorted(extras)}")
+    lost = [name for name in completed if name not in final]
+    require(not lost, f"停止后已完成成品丢失：{sorted(lost)}")
+    changed = [name for name in completed if name in final and final[name] != completed[name]]
+    require(not changed, f"停止后成品被修改：{changed}")
+    require(not any(path.is_dir() for path in root.rglob("*")), "取消后不得留下未完成媒体目录")
+
+
+def click_and_wait_text(
+    window: WindowSpecification,
+    button_title: str,
+    needle: str,
+    attempts: int = 5,
+) -> str:
+    """点击按钮并以 needle 文本出现为准——合成点击可能落空，未出现即重试.
+
+    与 confirm_dialog/open_confirm 同一立场：只检查「点击没报错」会把没生效
+    的点击当成功，后续等待必然超时。
+    """
+    for _attempt in range(attempts):
+        click(window, find_button(window, button_title))
+        try:
+            return wait_text_containing(window, needle, timeout=ATTEMPT_TIMEOUT)
+        except RuntimeError:
+            continue
+    msg = f"点击「{button_title}」后始终未出现「{needle}」（点击可能一直落空）"
+    raise RuntimeError(msg)
+
+
+def goto_settings(window: WindowSpecification) -> None:
+    """切到设置页：等待设置专属的组件下载控件，避免命中转换页状态文案."""
+    for _attempt in range(5):
+        click(window, find_button(window, "设置"))
+        try:
+            _ = find_button(window, SETTINGS_DOWNLOAD_BUTTON).wait("visible", timeout=ATTEMPT_TIMEOUT)
+        except (RuntimeError, timings.TimeoutError):
+            continue
+        else:
+            return
+    message = "点击「设置」后始终未出现设置页专属的组件下载控件"
+    raise RuntimeError(message)
+
+
+def read_xberg_settings(state: Path) -> dict[str, str]:
+    """只读观察被测应用实际写入的隔离 SQLite，不向数据库伪造 GUI 保存结果."""
+    database = state / "config.sqlite3"
+    with contextlib.closing(sqlite3.connect(database.as_uri() + "?mode=ro", uri=True)) as connection:
+        rows = cast(
+            "list[tuple[str, str]]",
+            connection.execute("SELECT key,value FROM app_settings WHERE key LIKE 'xberg_%'").fetchall(),
+        )
+    return dict(rows)
+
+
+def active_xberg_settings(state: Path) -> dict[str, str]:
+    """选择项以外的来源/目录配置必须在勾选、空选择与重启之间保持不变."""
+    return {key: value for key, value in read_xberg_settings(state).items() if key != "xberg_download_selection"}
+
+
+def wait_saved_selection(window: WindowSpecification, state: Path, selection: str) -> None:
+    """同时核对实际 SQLite 保存和界面摘要，不依赖 Slint Check 未暴露的 TogglePattern."""
+    selected = "、".join(label for label, flag in zip(SETTINGS_FEATURE_LABELS, selection, strict=True) if flag == "1")
+    summary = f"所选功能：{selected or '无'}"
+    deadline = time.monotonic() + TIMEOUT
+    actual: str | None = None
+    while time.monotonic() < deadline:
+        actual = read_xberg_settings(state).get("xberg_download_selection")
+        visible = any(text.window_text() == summary for text in window.descendants(control_type="Text"))
+        if actual == selection and visible:
+            return
+        time.sleep(0.1)
+    message = f"功能选择未由 GUI 自动保存或未上屏：期望 {selection} / {summary}，SQLite 实际 {actual!r}"
+    raise RuntimeError(message)
+
+
+def select_settings_features(window: WindowSpecification, state: Path, selection: str) -> None:
+    """逐个点击真实 Check，等待每一步自动保存后再操作下一项."""
+    current = read_xberg_settings(state).get("xberg_download_selection", "010")
+    require(
+        len(current) == len(SETTINGS_FEATURE_LABELS) and set(current) <= {"0", "1"},
+        f"已保存的下载选择无效：{current!r}",
+    )
+    for index, label in enumerate(SETTINGS_FEATURE_LABELS):
+        if current[index] == selection[index]:
+            continue
+        check = find_check(window, label)
+        _ = check.wait("visible enabled", timeout=TIMEOUT)
+        click(window, check)
+        current = current[:index] + selection[index] + current[index + 1 :]
+        wait_saved_selection(window, state, current)
+    wait_saved_selection(window, state, selection)
+
+
+def seed_legacy_runtime(state: Path) -> str:
+    """保留旧文本迁移夹具：只播种旧路径，下载选择必须由真实 GUI 写入."""
+    directory = os.environ.get("JCHTOOLS_SMOKE_XBERG_DIR") or os.environ.get("JCHTOOLS_TEST_XBERG_DIR")
+    runtime = str(Path(plain_windows_path(directory) if directory else state / "legacy-runtime").resolve())
+    root = state / "markdown-assets"
+    root.mkdir(parents=True, exist_ok=True)
+    _ = (root / "xberg-runtime-path.txt").write_text(runtime, encoding="utf-8")
+    return runtime
+
+
+def wait_text_containing(
+    window: WindowSpecification,
+    needle: str,
+    timeout: int = COMPLETION_TIMEOUT,
+    exclude: str = "",
+) -> str:
+    """等待任一 Text 控件包含 needle 并返回其全文（设置/转换页状态断言的共用判据）.
+
+    exclude 非空时跳过与它完全相同的旧文案——重试类断言用它确保等到的是
+    新一次操作的结果，而不是仍留在界面上的上一次输出。
+    """
+    deadline = time.time() + timeout
+    last_seen = ""
+    while time.time() < deadline:
+        try:
+            for text in window.descendants(control_type="Text"):
+                value = text.window_text() or ""
+                if needle in value and value != exclude:
+                    return value
+                if value:
+                    last_seen = value
+        except TRANSIENT_GUI_ERRORS:
+            pass
+        time.sleep(0.5)
+    msg = f"等待界面文本「{needle}」超时（最后可见文本：{last_seen[:200]}）"
+    raise RuntimeError(msg)
+
+
+def wait_log_containing(window: WindowSpecification, needle: str) -> str:
+    """T-23：Slint 只读日志暴露为 Edit/Value，不能以 Text/Name 读取。."""
+    deadline = time.monotonic() + CONVERT_STOP_TIMEOUT
+    while time.monotonic() < deadline:
+        try:
+            for control in window.descendants(control_type="Edit"):
+                editor = cast("controls.uia_controls.EditWrapper", control)
+                available = IUIA().UIA_dll.UIA_IsValuePatternAvailablePropertyId
+                if not editor.element_info.element.GetCurrentPropertyValue(available):
+                    continue
+                value = editor.get_value() or ""
+                if needle in value:
+                    return value
+        except TRANSIENT_GUI_ERRORS:
+            pass
+        time.sleep(0.1)
+    message = f"等待真实 GUI 只读日志超时：{needle}"
+    raise RuntimeError(message)
+
+
+def wait_log_matching(window: WindowSpecification, pattern: str) -> str:
+    """同 wait_log_containing，但按正则匹配——取消条目落在哪个媒体文件上取决于时延."""
+    deadline = time.monotonic() + CONVERT_STOP_TIMEOUT
+    while time.monotonic() < deadline:
+        try:
+            for control in window.descendants(control_type="Edit"):
+                editor = cast("controls.uia_controls.EditWrapper", control)
+                available = IUIA().UIA_dll.UIA_IsValuePatternAvailablePropertyId
+                if not editor.element_info.element.GetCurrentPropertyValue(available):
+                    continue
+                value = editor.get_value() or ""
+                if re.search(pattern, value):
+                    return value
+        except TRANSIENT_GUI_ERRORS:
+            pass
+        time.sleep(0.1)
+    message = f"等待真实 GUI 只读日志超时（正则）：{pattern}"
+    raise RuntimeError(message)
+
+
+def find_check(window: WindowSpecification, title: str) -> WindowSpecification:
+    """按标题返回 CheckBox 控件规格（与 find_button 同构，类型注解一致）.
+
+    可见性由调用处的 wait 保证。
+    """
+    return window.child_window(title=title, control_type="CheckBox")
+
+
+def isolated_state_env(scratch_state: Path) -> dict[str, str]:
+    """S6-S9 的子进程环境：应用配置、Markdown 与截图资产根全部隔离.
+
+    旧路径迁移可能连接截图后台，因此同时隔离服务身份与组件根；
+    不继承验收编排的 Markdown 资产根，避免干净状态用例误读其他阶段的 notice。
+    """
+    env = dict(os.environ)
+    env["JCHTOOLS_TEST_STATE_DIR"] = str(scratch_state)
+    env["JCHTOOLS_SNAP_OCR_TEST_ASSET_ROOT"] = str(scratch_state / "snap-assets")
+    env["JCHTOOLS_MARKDOWN_TEST_ASSET_ROOT"] = str(scratch_state / "markdown-assets")
+    env["JCHTOOLS_TEST_ASSET_ROOT"] = str(scratch_state / "markdown-assets")
+    return env
+
+
+def plain_windows_path(text: str) -> str:
+    """剥除 Windows verbatim 前缀（与 src/platform.rs display_path_text 同口径）.
+
+    应用保存目录经 fs::canonicalize 落盘为带 verbatim 前缀的路径，界面显示则剥前缀；
+    断言两侧必须先归一，否则同一目录会因表示形式不同而误判。
+    """
+    if text.startswith("\\\\?\\UNC\\"):
+        return "\\\\" + text[len("\\\\?\\UNC\\") :]
+    if text.startswith("\\\\?\\"):
+        return text[len("\\\\?\\") :]
+    return text
+
+
+def wait_legacy_runtime(state: Path, directory: str) -> None:
+    """等待应用迁移旧文本目录并核对实际活动路径，失效旧路径也不得静默替换."""
+    deadline = time.monotonic() + TIMEOUT
+    while time.monotonic() < deadline:
+        actual = read_xberg_settings(state).get("xberg_directory")
+        if actual and Path(plain_windows_path(actual)).resolve() == Path(directory).resolve():
+            return
+        time.sleep(0.1)
+    message = f"旧配置未迁移或活动 Xberg 目录被改变：{directory}"
+    raise RuntimeError(message)
+
+
+def s6_auto_saves_feature_selection(exe: str) -> None:
+    """S6 实际操作三项功能 Check，同时核对 UI 摘要和自动保存的 SQLite 值."""
+    with tempfile.TemporaryDirectory(prefix="jchtools-gui-smoke-s6-") as temporary:
+        state = Path(temporary)
+
+        def body(window: WindowSpecification) -> None:
+            goto_settings(window)
+            for selection in ("111", "101", "010"):
+                select_settings_features(window, state, selection)
+            require(not active_xberg_settings(state), "选择下载功能不得创建活动 Xberg 目录配置")
+
+        run_stage("S6", exe, body, env=isolated_state_env(state))
+        require(read_xberg_settings(state).get("xberg_download_selection") == "010", "GUI 退出后选择必须仍在 SQLite")
+    print("S6 PASS：真实勾选三项功能后自动保存，界面摘要与 SQLite 一致")
+
+
+def s7_restart_restores_saved_selection(exe: str) -> None:
+    """S7 完全退出后恢复选择，且旧文本迁移目录与来源记录原样保留."""
+    with tempfile.TemporaryDirectory(prefix="jchtools-gui-smoke-s7-") as temporary:
+        state = Path(temporary)
+        directory = seed_legacy_runtime(state)
+        env = isolated_state_env(state)
+
+        def save(window: WindowSpecification) -> None:
+            goto_settings(window)
+            wait_legacy_runtime(state, directory)
+            select_settings_features(window, state, "101")
+
+        def restored(window: WindowSpecification) -> None:
+            goto_settings(window)
+            wait_saved_selection(window, state, "101")
+            wait_legacy_runtime(state, directory)
+            require(active_xberg_settings(state) == saved_runtime, "重启不得改变已迁移的活动目录与来源")
+
+        run_stage("S7-first", exe, save, env=env)
+        saved_runtime = active_xberg_settings(state)
+        run_stage("S7", exe, restored, env=env)
+        require(active_xberg_settings(state) == saved_runtime, "退出后活动目录与来源必须保持不变")
+        legacy = state / "markdown-assets" / "xberg-runtime-path.txt"
+        require(legacy.read_text(encoding="utf-8") == directory, "旧路径原件必须保留")
+    print("S7 PASS：重启恢复功能选择，旧配置迁移的运行目录与来源保持不变")
+
+
+def s8_empty_selection_disables_download_and_recovers(exe: str) -> None:
+    """S8 空选择不能下载，重新选择可恢复操作；全过程不得改变活动运行目录."""
+    with tempfile.TemporaryDirectory(prefix="jchtools-gui-smoke-s8-") as temporary:
+        state = Path(temporary)
+        directory = seed_legacy_runtime(state)
+
+        def body(window: WindowSpecification) -> None:
+            goto_settings(window)
+            wait_legacy_runtime(state, directory)
+            original = active_xberg_settings(state)
+            for empty, selected in (("000", "100"), ("000", "010")):
+                select_settings_features(window, state, empty)
+                download = find_button(window, SETTINGS_DOWNLOAD_BUTTON)
+                _ = download.wait("visible", timeout=TIMEOUT)
+                require(not download.is_enabled(), "未选任何功能时下载按钮必须禁用")
+                require(active_xberg_settings(state) == original, "空选择不得改变活动运行目录与来源")
+                select_settings_features(window, state, selected)
+                _ = download.wait("visible enabled", timeout=TIMEOUT)
+                require(active_xberg_settings(state) == original, "恢复有效选择不得改变活动运行目录与来源")
+
+        run_stage("S8", exe, body, env=isolated_state_env(state))
+        wait_legacy_runtime(state, directory)
+    print("S8 PASS：空选择禁用下载，重新勾选恢复可用，活动 Xberg 配置未改变")
+
+
+def s9_unconfigured_state_shows_reason_and_no_autostart(exe: str) -> None:
+    """S9 组件缺失状态与设置页指引：未配置时如实显示未就绪，不自动下载."""
+    state = Path(tempfile.mkdtemp(prefix="jchtools-gui-smoke-s9-"))
+    env = isolated_state_env(state)
+    try:
+
+        def body(window: WindowSpecification) -> None:
+            # 切页点击可能落空：以目标状态文本出现为准重试（与 goto_settings 同口径）。
+            _ = click_and_wait_text(window, "转 Markdown", CONVERT_NEED_RUNTIME_TEXT)
+            start = find_button(window, "开始转换")
+            _ = start.wait("visible", timeout=TIMEOUT)
+            require(not start.is_enabled(), "未配置 Xberg 时「开始转换」必须禁用")
+            # 未就绪时只引导到设置；不点击下载，观察每项功能的独立状态。
+            _ = find_button(window, "前往设置").wait("visible", timeout=TIMEOUT)
+            goto_settings(window)
+            for label in SETTINGS_FEATURE_LABELS:
+                _ = find_check(window, label).wait("visible enabled", timeout=TIMEOUT)
+                _ = wait_text_containing(window, f"{label}：未下载")
+            _ = find_button(window, SETTINGS_DOWNLOAD_BUTTON).wait("visible enabled", timeout=TIMEOUT)
+            _ = find_button(window, SETTINGS_CHECK_BUTTON).wait("visible enabled", timeout=TIMEOUT)
+            require(not find_button(window, "取消下载").exists(), "未操作时不得自动启动组件下载")
+            require(not active_xberg_settings(state), "未配置状态不得自动创建活动 Xberg 配置")
+            require(not snapshot_output_bytes(state / "markdown-assets"), "未操作时不得下载或初始化 Markdown 组件")
+
+        run_stage("S9", exe, body, env=env)
+    finally:
+        shutil.rmtree(state, ignore_errors=True)
+    print("S9 PASS：各功能未下载状态与设置入口可见，转换禁用，未自动下载组件")
+
+
+def check_flat_output(window: WindowSpecification) -> None:
+    """勾选「平铺输出」.
+
+    Slint 的 Check 不暴露 UIA TogglePattern，无法直读勾选状态；用随 convert-flat
+    切换的提示文案（app.slint 输出目录卡片）作为状态锚：点击后等「平铺时同名结果
+    只处理排序第一份」出现，未出现按点击落空重试（奇数次点击收敛到勾选态）。
+    """
+    _ = find_check(window, "平铺输出").wait("visible", timeout=TIMEOUT)
+    for _attempt in range(3):
+        click(window, find_check(window, "平铺输出"))
+        try:
+            _ = wait_text_containing(window, "平铺时同名结果只处理排序第一份", timeout=8)
+        except RuntimeError:
+            continue
+        return
+    msg = "「平铺输出」未能勾选（状态提示始终未切换为平铺文案）"
+    raise RuntimeError(msg)
+
+
+def produced_snapshot(directory: Path) -> frozenset[tuple[str, int, int]]:
+    """输出目录产物快照（相对路径、mtime_ns、大小）；目录不可读时返回空快照.
+
+    转换页没有可观察的任务计数或时间戳文本（收尾统计行的总耗时只保留 0.1s 精度，
+    两轮可以逐字相同），用「点击开始前后的产物快照变化」作任务代次锚（S11-06）。
+
+    全有或全无语义（复审修正）：枚举或 stat 中途失败（Windows 写锁/杀软扫描
+    句柄）返回空快照而不是部分集合——部分快照相对完整 before 必然「已变化」，
+    会把陈旧完成行误判为新完成；空快照在 completion_confirms_new_run 侧被
+    视为「无锚」（与 None 同路），宁可退回文本判据也不假锚。
+    """
+    snapshot: list[tuple[str, int, int]] = []
+    try:
+        for path in directory.rglob("*"):
+            if path.is_file():
+                info = path.stat()
+                snapshot.append((str(path.relative_to(directory)), info.st_mtime_ns, info.st_size))
+    except OSError:
+        return frozenset()
+    return frozenset(snapshot)
+
+
+def completion_confirms_new_run(
+    value: str,
+    previous_done: str,
+    produced_before: frozenset[tuple[str, int, int]] | None,
+    produced_now: frozenset[tuple[str, int, int]] | None,
+) -> bool:
+    """S11-06 新一轮批次完成判据（纯函数；单测见 scripts/test_gui_smoke.py）.
+
+    含完成标记且统计行文本不同于上一轮 → 新完成；文本与上一轮逐字相同时，若
+    调用方提供了前后两份非空输出快照且快照已变化，也判为新一轮完成。
+    任一侧空快照均按「无锚」处理（与 None 同路）：它可能表示尚无产物或目录
+    不可读（部分快照已被 produced_snapshot 归零），不得当「已变化」。
+    纯跳过批次若统计行也逐字相同则不存在任何可观察锚点（现有各阶段的成功/跳过
+    计数必然变化，不命中该死角）。
+    """
+    if CONVERT_DONE_MARKER not in value:
+        return False
+    if value != previous_done:
+        return True
+    if not produced_before or not produced_now:
+        return False
+    return produced_now != produced_before
+
+
+def _confirm_new_completion(
+    value: str,
+    previous_done: str,
+    produced_dir: Path | None,
+    before: frozenset[tuple[str, int, int]] | None,
+) -> bool:
+    """以 completion_confirms_new_run 判定 value；快照只在完成标记在场后才取（S11-06）."""
+    if CONVERT_DONE_MARKER not in value:
+        return False
+    now = produced_snapshot(produced_dir) if produced_dir is not None else None
+    return completion_confirms_new_run(value, previous_done, before, now)
+
+
+def _wait_completion_with_anchor(
+    window: WindowSpecification,
+    previous_done: str,
+    produced_dir: Path | None,
+    before: frozenset[tuple[str, int, int]] | None,
+) -> str:
+    """已确认进入运行态后等待本次收尾统计行（S11-06：快照锚兜底）.
+
+    不能用 exclude=previous_done 的纯文本等待——统计行与上一轮逐字相同时会把
+    新完成误判为旧文案残留而超时假失败，由产物快照锚兜底识别。
+    """
+    deadline = time.time() + COMPLETION_TIMEOUT
+    last_seen = ""
+    while time.time() < deadline:
+        try:
+            for text in window.descendants(control_type="Text"):
+                value = text.window_text() or ""
+                if _confirm_new_completion(value, previous_done, produced_dir, before):
+                    return value
+                if value:
+                    last_seen = value
+        except TRANSIENT_GUI_ERRORS:
+            pass
+        time.sleep(0.5)
+    msg = f"等待新一轮转换收尾统计超时（上一轮统计：{previous_done[:120]}；最后可见文本：{last_seen[:200]}）"
+    raise RuntimeError(msg)
+
+
+def start_conversion_and_wait_done(
+    window: WindowSpecification,
+    previous_done: str = "",
+    produced_dir: Path | None = None,
+) -> str:
+    """点击「开始转换」（带重试）并等待批次完成，返回新的完成统计行文本.
+
+    小批次可能在 UIA 轮询间隔内整批完成，「停止任务」一闪而过——启动成功的
+    判据是「停止任务」出现**或**出现与上一轮不同的完成统计行（总耗时数值必变），
+    两者任一即停止重试点击；只有两者都不出现（点击落空或按钮不可用）才重按。
+    produced_dir 非空时在统计行与上一轮逐字相同的情况下，以「输出目录产物快照
+    相对点击前的变化」作任务代次锚识别新完成（S11-06），避免误按开始导致假失败。
+    """
+    before = produced_snapshot(produced_dir) if produced_dir is not None else None
+    finished = ""
+    for attempt in range(3):
+        click(window, find_button(window, "开始转换"))
+        deadline = time.time() + CONVERT_BUSY_TIMEOUT
+        while time.time() < deadline:
+            try:
+                if find_button(window, "停止任务").exists(timeout=0.1):
+                    return _wait_completion_with_anchor(window, previous_done, produced_dir, before)
+                for text in window.descendants(control_type="Text"):
+                    value = text.window_text() or ""
+                    if _confirm_new_completion(value, previous_done, produced_dir, before):
+                        finished = value
+                        break
+            except TRANSIENT_GUI_ERRORS:
+                pass
+            if finished:
+                break
+            time.sleep(0.5)
+        if finished:
+            return finished
+        if attempt == _S5_LAST_ATTEMPT:
+            _ = find_button(window, "停止任务").wait("visible enabled", timeout=TIMEOUT)
+            msg = "转换既未进入运行态也未完成（开始按钮可能未生效）"
+            raise RuntimeError(msg)
+    msg = "转换既未进入运行态也未完成（开始按钮可能未生效）"
+    raise RuntimeError(msg)
+
+
+def s10_output_layout_and_flat_duplicate_policy(exe: str) -> None:
+    """S10 输出层级（保留/平铺）与同名策略：层次两份、平铺一份+重复跳过计数."""
+    scratch = Path(tempfile.mkdtemp(prefix="jchtools-gui-smoke-s10-"))
+    source = scratch / "input"
+    layered = scratch / "out-layered"
+    flat = scratch / "out-flat"
+    for part in ("a", "b"):
+        (source / part).mkdir(parents=True)
+        _ = (source / part / "同名.txt").write_text(f"stable first input {part}\n", encoding="utf-8")
+    layered.mkdir()
+    flat.mkdir()
+    try:
+
+        def body(window: WindowSpecification) -> None:
+            goto_converter(window)
+            # 层次模式：两份同名输入各自成文（T-11 默认保留层级）。
+            set_converter_dirs(window, str(source), str(layered))
+            metrics = start_conversion_and_wait_done(window, produced_dir=layered)
+            require((layered / "a" / "同名_txt.md").is_file(), "层次输出应保留相对层级 a/")
+            require((layered / "b" / "同名_txt.md").is_file(), "层次输出应保留相对层级 b/")
+            require("重复结果跳过 0" in metrics, f"层次模式不应有同名跳过：{metrics}")
+            # 平铺模式：同名只处理排序第一份，其余按重复跳过计数。
+            set_converter_dirs(window, str(source), str(flat))
+            check_flat_output(window)
+            metrics = start_conversion_and_wait_done(window, previous_done=metrics, produced_dir=flat)
+            produced = sorted(p.name for p in flat.glob("*.md"))
+            require(produced == ["同名_txt.md"], f"平铺只应有一份结果：{produced}")
+            result = (flat / "同名_txt.md").read_text(encoding="utf-8")
+            require(
+                "stable first input a" in result and "stable first input b" not in result,
+                "平铺须选排序第一份的实际内容",
+            )
+            require("重复结果跳过 1" in metrics, f"平铺同名跳过必须如实计数：{metrics}")
+
+        run_stage("S10", exe, body)
+    finally:
+        shutil.rmtree(scratch, ignore_errors=True)
+    print("S10 PASS：层级保留两份同名输入；平铺只处理一份并如实计数重复跳过")
+
+
+S11_SOURCE_FILES = ("one.txt", "two.txt")
+
+
+def s11_existing_results_are_skipped_untouched(exe: str) -> None:
+    """S11 已有结果跳过：重复运行不覆盖既有产物，跳过数量如实显示（T-12）."""
+    scratch = Path(tempfile.mkdtemp(prefix="jchtools-gui-smoke-s11-"))
+    source = scratch / "input"
+    output = scratch / "out"
+    source.mkdir()
+    output.mkdir()
+    for name in S11_SOURCE_FILES:
+        _ = (source / name).write_text(f"content of {name}\n", encoding="utf-8")
+    try:
+
+        def body(window: WindowSpecification) -> None:
+            goto_converter(window)
+            set_converter_dirs(window, str(source), str(output))
+            first = start_conversion_and_wait_done(window, produced_dir=output)
+            require(
+                "已有结果跳过 0" in first or "跳过" not in first,
+                f"首轮应全部转换：{first}",
+            )
+            existing = {path.name: (file_digest(path), path.stat().st_mtime_ns) for path in output.glob("*.md")}
+            require(
+                len(existing) == len(S11_SOURCE_FILES),
+                f"前置：两份产物（实得 {list(existing)}）",
+            )
+            second = start_conversion_and_wait_done(window, previous_done=first, produced_dir=output)
+            require(
+                f"已有结果跳过 {len(S11_SOURCE_FILES)}" in second,
+                f"重复运行必须如实显示跳过数量：{second}",
+            )
+            final = {path.name: (file_digest(path), path.stat().st_mtime_ns) for path in output.glob("*.md")}
+            require(
+                final == existing,
+                "已有结果的文件集合、内容与修改时间必须保持不变（T-12）",
+            )
+
+        run_stage("S11", exe, body)
+    finally:
+        shutil.rmtree(scratch, ignore_errors=True)
+    print("S11 PASS：已有结果跳过不覆盖，内容与修改时间不变，跳过数量如实显示")
+
+
+def _tiny_png(width: int = 16, height: int = 16) -> bytes:
+    """构造最小合法灰度 PNG（无文字，转换成功即可，OCR 内容不作断言）."""
+    raw = b"".join(b"\x00" + b"\xff" * width for _ in range(height))
+
+    def chunk(kind: bytes, data: bytes) -> bytes:
+        return struct.pack(">I", len(data)) + kind + data + struct.pack(">I", zlib.crc32(kind + data) & 0xFFFFFFFF)
+
+    return (
+        b"\x89PNG\r\n\x1a\n"
+        + chunk(b"IHDR", struct.pack(">IIBBBBB", width, height, 8, 0, 0, 0, 0))
+        + chunk(b"IDAT", zlib.compress(raw))
+        + chunk(b"IEND", b"")
+    )
+
+
+def s12_output_subtree_is_excluded_from_scan(exe: str) -> None:
+    """S12 输出子树排除：输出目录位于输入内时整棵输出子树不作为新输入（T-09）."""
+    scratch = Path(tempfile.mkdtemp(prefix="jchtools-gui-smoke-s12-"))
+    source = scratch / "input"
+    output = source / "results"
+    (source / "prep").mkdir(parents=True)
+    _ = (source / "prep" / "page.png").write_bytes(_tiny_png())
+    output.mkdir()
+    _ = (output / "inner.png").write_bytes(_tiny_png())
+    try:
+
+        def body(window: WindowSpecification) -> None:
+            goto_converter(window)
+            set_converter_dirs(window, str(source), str(output))
+            metrics = start_conversion_and_wait_done(window, produced_dir=output)
+            require(
+                (output / "prep" / "page_png.md").is_file(),
+                f"输出子树外的输入应正常转换：{metrics}",
+            )
+            require(
+                not (output / "inner_png.md").exists(),
+                "输出子树内的文件不得作为新输入",
+            )
+            require(
+                not (output / "results" / "inner_png.md").exists(),
+                "不得重复嵌套输出子树",
+            )
+            require((output / "inner.png").is_file(), "输出子树内的源文件保持原样")
+
+        run_stage("S12", exe, body)
+    finally:
+        shutil.rmtree(scratch, ignore_errors=True)
+    print("S12 PASS：输出子树整树排除，不因生成了 Markdown 而重复转换")
+
+
+def s13_partial_failure_isolated_with_counts(exe: str) -> None:
+    """S13 部分失败与完成统计：单文件失败不终止批次，成功/失败可区分（T-16/T-24）."""
+    scratch = Path(tempfile.mkdtemp(prefix="jchtools-gui-smoke-s13-"))
+    source = scratch / "input"
+    output = scratch / "out"
+    source.mkdir()
+    output.mkdir()
+    _ = (source / "good.txt").write_text("convertible text\n", encoding="utf-8")
+    _ = (source / "broken.png").write_bytes(b"\x89PNG\r\n\x1a\ntruncated")
+    try:
+
+        def body(window: WindowSpecification) -> None:
+            goto_converter(window)
+            set_converter_dirs(window, str(source), str(output))
+            metrics = start_conversion_and_wait_done(window, produced_dir=output)
+            require("成功 1" in metrics, f"可转换文件必须成功（统计行：{metrics}）")
+            require("失败 1" in metrics, f"损坏文件必须计入失败（统计行：{metrics}）")
+            require((output / "good_txt.md").is_file(), "成功产物必须在场")
+            require(
+                not (output / "broken_png.md").exists(),
+                "失败文件不得留下半成品（T-25）",
+            )
+
+        run_stage("S13", exe, body)
+    finally:
+        shutil.rmtree(scratch, ignore_errors=True)
+    print("S13 PASS：部分失败不终止批次，成功/失败计数与产物边界一致")
+
+
+def close_title_bar(window: WindowSpecification) -> None:
+    """直接向目标 GUI 窗口发送 WM_CLOSE，并等待停止确认弹窗出现."""
+    handle = window.handle
+    win32gui.PostMessage(handle, win32con.WM_CLOSE, 0, 0)
+    _ = wait_text_containing(window, STOP_AND_CLOSE_TITLE, timeout=TIMEOUT)
+
+
+def wait_window_closed_after_cancel(window: WindowSpecification) -> None:
+    """T-23/U-09：任务关闭必须在取消预算内自然生效。."""
+    deadline = time.monotonic() + CONVERT_STOP_TIMEOUT
+    while window.exists() and time.monotonic() < deadline:
+        time.sleep(0.1)
+    require(not window.exists(), "确认关闭后不得等待当前媒体自然完成")
+
+
+def s14_close_during_conversion_confirms_and_stops(exe: str) -> None:
+    """S14 运行中关闭确认与安全停止：U-09 确认框 → T-23 安全停止 → 退出码 0."""
+    scratch_box: list[Path] = []
+
+    def prepare_scratch() -> None:
+        scratch = Path(tempfile.mkdtemp(prefix="jchtools-gui-smoke-s14-"))
+        scratch_box.append(scratch)
+        (scratch / "input").mkdir()
+        (scratch / "output").mkdir()
+        media = os.environ.get("JCHTOOLS_S5_MEDIA", "")
+        if not media or not Path(media).is_file():
+            message = "S14 需要媒体样本以保持转换运行态：设置 JCHTOOLS_S5_MEDIA 指向一个真实媒体文件"
+            raise RuntimeError(message)
+        _ = (scratch / "input" / "00_complete.txt").write_text("completed before closing\n", encoding="utf-8")
+        for index in range(1, STOP_MEDIA_FILE_COUNT + 1):
+            _ = shutil.copyfile(media, scratch / "input" / f"{index:02}_{Path(media).name}")
+
+    def body(window: WindowSpecification) -> None:
+        scratch = scratch_box[0]
+        goto_converter(window)
+        set_converter_dirs(window, str(scratch / "input"), str(scratch / "output"))
+        for attempt in range(3):
+            click(window, find_button(window, "开始转换"))
+            try:
+                _ = find_button(window, "停止任务").wait("visible enabled", timeout=CONVERT_BUSY_TIMEOUT // 3)
+                break
+            except timings.TimeoutError:
+                if attempt == _S5_LAST_ATTEMPT:
+                    raise
+        current = f"01_{Path(os.environ['JCHTOOLS_S5_MEDIA']).name}"
+        current_md = f"{Path(current).stem}_{Path(current).suffix.lstrip('.')}.md"
+        _ = wait_text_containing(window, f"正在处理 {current}")
+        before = snapshot_output_bytes(scratch / "output")
+        require("00_complete_txt.md" in before and len(before) == 1, "关闭前须确认首份已完成且当前媒体尚未完成")
+        close_title_bar(window)
+        click(window, find_button(window, STOP_AND_CLOSE_BUTTON))
+        wait_window_closed_after_cancel(window)
+        verify_cancelled_outputs(scratch / "output", before, current_md)
+
+    def cleanup() -> None:
+        if scratch_box:
+            shutil.rmtree(scratch_box.pop(), ignore_errors=True)
+
+    run_stage("S14", exe, body, pre=prepare_scratch, after=cleanup)
+    print("S14 PASS：运行中关闭确认后当前转换及时取消，成品保留，无后续/临时产物，正常退出")
+
+
+def set_edit_before_button(window: WindowSpecification, button: BaseWrapper, value: str) -> None:
+    """填写选择按钮左侧最近的同排输入框，避免误选文件名或侧栏搜索框."""
+    rect = button.rectangle()
+    candidates = [
+        edit
+        for edit in window.descendants(control_type="Edit")
+        if abs(edit.rectangle().top - rect.top) < EDIT_ROW_TOLERANCE_PX and edit.rectangle().right <= rect.left
+    ]
+    require(candidates, "未找到选择按钮左侧输入框")
+    _ = min(candidates, key=lambda edit: rect.left - edit.rectangle().right).set_edit_text(value)
+
+
+def s15_markdown_merge_and_split(exe: str) -> None:
+    """覆盖 M-01/M-04/M-08/M-10：真实页面到可核对的合并与拆分产物."""
+    with tempfile.TemporaryDirectory(prefix="jchtools-gui-md-") as temporary:
+        scratch = Path(temporary)
+        source, merged, split = (scratch / name for name in ("input", "merged", "split"))
+        for directory in (source, merged, split):
+            directory.mkdir()
+        originals = {"a.md": b"# Alpha\nfirst\n", "b.md": "# 中文\n第二份\n".encode()}
+        for name, content in originals.items():
+            _ = (source / name).write_bytes(content)
+        split_source = scratch / "document.md"
+        original = ("中文与 UTF-8 分片测试\n" * 150).encode()
+        _ = split_source.write_bytes(original)
+
+        def body(window: WindowSpecification) -> None:
+            click(window, find_button(window, "MD 整理"))
+            rows = unique_visible_buttons(window, "选择目录…")
+            require(len(rows) == CONVERT_DIR_ROWS, "合并页应有输入与输出目录两行")
+            for button, directory in zip(rows, (source, merged), strict=True):
+                set_edit_before_button(window, button, str(directory))
+            click(window, find_button(window, "开始合并"))
+            _ = wait_text_containing(window, "合并完成")
+            result = (merged / "merged.md").read_text(encoding="utf-8")
+            require("# a.md" in result and "## Alpha" in result, "合并必须保留文件标题并下移正文标题")
+            require("# b.md" in result and "## 中文" in result, "中文 Markdown 必须正常合并")
+            for name, content in originals.items():
+                require((source / name).read_bytes() == content, "合并不得改写输入")
+            click(window, window.child_window(title="拆分 MD", control_type="TabItem"))
+            files = unique_visible_buttons(window, "选择文件…")
+            directories = unique_visible_buttons(window, "选择目录…")
+            require(len(files) == 1 and len(directories) == 1, "拆分页应有文件与输出目录入口")
+            set_edit_before_button(window, files[0], str(split_source))
+            set_edit_before_button(window, directories[0], str(split))
+            click(window, find_button(window, "开始拆分"))
+            _ = wait_text_containing(window, "拆分完成")
+            pieces = sorted(split.glob("document_*.md"))
+            require(len(pieces) > 1, "1 KB 上限应产生多个分片")
+            require(b"".join(path.read_bytes() for path in pieces) == original, "分片拼接必须逐字节还原")
+            require(all(path.stat().st_size <= MD_SPLIT_LIMIT_BYTES for path in pieces), "分片不得超过 1 KB")
+            require(split_source.read_bytes() == original, "拆分不得改写原文件")
+
+        run_stage("S15", exe, body)
+    print("S15 PASS：MD 合并与拆分产物正确，原文件不变，UTF-8 分片可无损拼接")
+
+
+def s16_git_commit_and_push(exe: str) -> None:
+    """覆盖 G-01/G-04/G-05/G-13：真实 GUI 到本地 bare 远端的逐文件提交推送."""
+    git = shutil.which("git")
+    require(git is not None, "Git GUI 验证需要可用 git")
+    if git is None:
+        return
+    with tempfile.TemporaryDirectory(prefix="jchtools-gui-git-") as temporary:
+        scratch = Path(temporary)
+        repo, remote = scratch / "repo", scratch / "remote.git"
+        repo.mkdir()
+
+        def git_output(directory: Path, *args: str) -> str:
+            result = subprocess.run([git, *args], cwd=directory, capture_output=True, text=True, check=True)
+            return result.stdout.strip()
+
+        _ = git_output(scratch, "init", "--bare", str(remote))
+        _ = git_output(repo, "init", "--initial-branch=main")
+        _ = git_output(repo, "config", "user.name", "Synthetic GUI test")
+        _ = git_output(repo, "config", "user.email", "gui-test@local")
+        _ = (repo / "one.txt").write_text("initial\n", encoding="utf-8")
+        _ = git_output(repo, "add", "one.txt")
+        _ = git_output(repo, "commit", "-m", "initial synthetic fixture")
+        _ = git_output(repo, "remote", "add", "origin", str(remote))
+        _ = git_output(repo, "push", "--set-upstream", "origin", "main")
+        _ = (repo / "one.txt").write_text("changed\n", encoding="utf-8")
+        _ = (repo / "two.txt").write_text("second\n", encoding="utf-8")
+
+        def body(window: WindowSpecification) -> None:
+            click(window, find_button(window, "Git 工具"))
+            set_directory(window, str(repo))
+            click(window, find_button(window, "开始"))
+            _ = wait_text_containing(window, "全部完成：2 / 2")
+            require(git_output(repo, "status", "--porcelain") == "", "GUI 操作后工作树必须干净")
+            require(
+                git_output(repo, "rev-parse", "HEAD") == git_output(remote, "rev-parse", "main"), "远端必须收到全部提交"
+            )
+            for commit in ("HEAD", "HEAD~1"):
+                files = git_output(repo, "diff-tree", "--no-commit-id", "--name-only", "-r", commit).splitlines()
+                require(len(files) == 1, "每个 GUI 提交只能包含一个文件")
+            require(git_output(remote, "show", "main:one.txt") == "changed", "远端修改内容必须正确")
+            require(git_output(remote, "show", "main:two.txt") == "second", "远端新增内容必须正确")
+
+        run_stage("S16", exe, body)
+    print("S16 PASS：GUI 逐文件提交并推送成功，本地工作树与远端内容正确")
+
+
+def s17_check_configured_components_offline(exe: str) -> None:
+    """覆盖 T-05/T-06：预置真实引擎经离线检查补写 notice，并建立真实转换就绪状态."""
+    engine_dir = plain_windows_path(os.environ.get("JCHTOOLS_TEST_XBERG_DIR", "").strip())
+    require(
+        bool(engine_dir) and Path(engine_dir, "xberg.exe").is_file(),
+        "S17 需要 JCHTOOLS_TEST_XBERG_DIR 指向含 xberg.exe 的真实最新测试引擎目录",
+    )
+    state = Path(os.environ.get("JCHTOOLS_TEST_STATE_DIR", ""))
+    asset_root = Path(os.environ.get("JCHTOOLS_MARKDOWN_TEST_ASSET_ROOT", ""))
+    require(state.is_absolute() and asset_root.is_absolute(), "S17 需要绝对隔离状态目录与 Markdown 资产根")
+    notice = asset_root / "licenses" / "THIRD_PARTY_NOTICES.md"
+    require(not notice.exists(), "S17 需要新隔离资产根，以观察离线检查实际创建 notice")
+    original = active_xberg_settings(state)
+    before = snapshot_output_bytes(asset_root)
+    with tempfile.TemporaryDirectory(prefix="jchtools-gui-smoke-s17-") as temporary:
+        scratch = Path(temporary)
+        source, output = scratch / "input", scratch / "output"
+        source.mkdir()
+        output.mkdir()
+        _ = (source / "ready.txt").write_text("真实引擎离线检查夹具\n", encoding="utf-8")
+
+        def body(window: WindowSpecification) -> None:
+            wait_legacy_runtime(state, engine_dir)
+            goto_settings(window)
+            check = find_button(window, SETTINGS_CHECK_BUTTON)
+            _ = check.wait("visible enabled", timeout=TIMEOUT)
+            click(window, check)
+            deadline = time.monotonic() + COMPLETION_TIMEOUT
+            while not notice.is_file() and time.monotonic() < deadline:
+                time.sleep(0.1)
+            require(notice.is_file(), "离线检查必须由生产路径创建许可证 notice")
+            require("Xberg" in notice.read_text(encoding="utf-8"), "许可证 notice 必须包含真实引擎的许可说明")
+            _ = check.wait("visible enabled", timeout=TIMEOUT)
+            _ = click_and_wait_text(window, "转 Markdown", "已安装组件就绪，可离线使用")
+            set_converter_dirs(window, str(source), str(output))
+            _ = wait_button(window, "开始转换", COMPLETION_TIMEOUT, enabled=True)
+            require(active_xberg_settings(state) == original, "离线检查不得切换活动 Xberg 配置")
+            after = snapshot_output_bytes(asset_root)
+            require(
+                set(after) == set(before) | {str(notice.relative_to(asset_root))}
+                and all(after[name] == digest for name, digest in before.items()),
+                "离线检查只能补写 notice，不得下载组件或改动已有资产",
+            )
+
+        run_stage("S17", exe, body)
+    print("S17 PASS：真实引擎离线检查创建 notice，转换就绪且开始操作可用，未下载组件")
+
+
+LAYOUT_PAGES = (
+    ("递归解压", ("开始解压",)),
+    ("目录整理", ("开始分析",)),
+    ("MD 整理", ("开始合并",)),
+    ("转 Markdown", ("开始转换",)),
+    ("Git 工具", ("开始",)),
+    ("截图 OCR", ()),
+    ("设置", (SETTINGS_DOWNLOAD_BUTTON, SETTINGS_CHECK_BUTTON)),
+    ("关于", ()),
+)
+
+
+def verify_control_rectangles(bounds: tuple[int, int, int, int], rectangles: list[tuple[int, int, int, int]]) -> None:
+    """覆盖 U-05/P-13：主要按钮应有正面积，处于窗口内且彼此不遮盖。."""
+    left, top, right, bottom = bounds
+    for index, (x1, y1, x2, y2) in enumerate(rectangles):
+        require(left <= x1 < x2 <= right and top <= y1 < y2 <= bottom, "主要操作控件被裁切或移出窗口")
+        for a1, b1, a2, b2 in rectangles[:index]:
+            require(min(x2, a2) <= max(x1, a1) or min(y2, b2) <= max(y1, b1), "主要操作控件互相重叠")
+
+
+def s18_layout_at_two_window_sizes(exe: str) -> None:
+    """真实 GUI 入口，自动检查两档尺寸与全部页面的主要控件；不冒充全面像素审美验收。."""
+
+    def body(window: WindowSpecification) -> None:
+        original = window.rectangle()
+        sizes = (
+            (original.right - original.left, original.bottom - original.top),
+            (original.right - original.left + 200, original.bottom - original.top + 150),
+        )
+        for width, height in sizes:
+            win32gui.SetWindowPos(window.handle, 0, 0, 0, width, height, win32con.SWP_NOMOVE | win32con.SWP_NOZORDER)
+            time.sleep(0.5)
+            for page, titles in LAYOUT_PAGES:
+                click(window, find_button(window, page))
+                if page == "截图 OCR":
+                    _ = wait_text_containing(window, "截图快捷键")
+                elif page == "关于":
+                    _ = wait_text_containing(window, "关于 JchTools")
+                buttons = [wait_button(window, title, TIMEOUT) for title in titles]
+                bounds = window.rectangle()
+                rectangles = [button.rectangle() for button in buttons]
+                verify_control_rectangles(
+                    (bounds.left, bounds.top, bounds.right, bounds.bottom),
+                    [(rect.left, rect.top, rect.right, rect.bottom) for rect in rectangles],
+                )
+
+    run_stage("S18", exe, body)
+    print("S18 PASS：两档窗口尺寸逐页到达，所列主要按钮未裁切、未重叠（未覆盖全部视觉细节）")
+
+
+def parse_stages(stages_arg: str) -> list[str]:
+    """解析并校验 --stages：逗号分隔、大小写不敏感、未知阶段立即失败."""
+    stages = [token.strip().upper() for token in stages_arg.split(",") if token.strip()]
+    if not stages:
+        message = "阶段清单不能为空，未执行任何阶段不能报告成功"
+        raise RuntimeError(message)
+    unknown = [stage for stage in stages if stage not in SUPPORTED_STAGES]
+    if unknown:
+        msg = f"未知阶段：{unknown}（可选：{list(SUPPORTED_STAGES)}）"
+        raise RuntimeError(msg)
+    return stages
+
+
+def missing_isolation_env(env: Mapping[str, str]) -> list[str]:
+    """返回隔离守卫要求但当前环境缺失的变量键（纯函数；单测见 scripts/test_gui_smoke.py）."""
+    return [key for key in ISOLATION_REQUIRED_ENV_KEYS if not env.get(key)]
+
+
+def require_orchestrated_isolation(stages: list[str], env: Mapping[str, str], *, allow_isolated_run: bool) -> None:
+    """S11-07 统一隔离守卫：受守卫阶段未经编排隔离不得独立运行.
+
+    受守卫的非自隔离阶段不自建隔离环境，独立调用会读写真实
+    用户状态目录并可能连接常驻服务；在启动任何 GUI 之前整批拒绝，避免半程执行。
+    经 acceptance.ps1 编排（或已手工布置同等隔离变量）时两个变量在场，不受影响；
+    组件目录（Xberg 运行目录）允许为真实引擎目录，不做隔离检查。
+    """
+    guarded = [stage for stage in stages if stage in ISOLATION_GUARDED_STAGES]
+    if not guarded or allow_isolated_run:
+        return
+    missing = missing_isolation_env(env)
+    if not missing:
+        return
+    msg = (
+        f"阶段 {','.join(guarded)} 独立运行会读写真实应用状态目录并可能连接常驻服务，"
+        f"当前缺少隔离环境变量：{','.join(missing)}。"
+        "请经 scripts/acceptance.ps1 执行（-WithGuiSmoke / -WithMarkdownAcceptance 会布置隔离"
+        "状态目录与资产根）；--allow-isolated-run 仅跳过本项前置检查，公共启动入口仍要求隔离。"
+    )
+    raise RuntimeError(msg)
+
+
+def run_dataset_stages(
+    exe: str,
+    data: Path,
+    stages: list[str],
+    *,
+    run_case: Callable[[str, Callable[[], None]], None] | None = None,
+) -> None:
+    """S4/S2/S3 数据集阶段：每阶段前从旁路副本恢复，保证“干净语料上的完整链路”.
+
+    H-06/附录 E：所选根的任一祖先直接含 .git 时两工具拒绝整次处理。仓库根本身
+    带 .git，冒烟副本若继续放在仓库 .tmp/ 下会整次被拒（S4 确认框不再出现）。
+    改放系统临时目录（AGENTS §2 允许的 tempfile 例外；语料源目录不受影响）。
+    """
+    scratch = Path(tempfile.mkdtemp(prefix="jchtools-gui-smoke-"))
+    try:
+        # 顺序 S4→S2→S3 固定（元组序即原顺序）；S3 为末段，随后的清理由
+        # finally 的 scratch 删除兜底（循环末尾多出的一次 fresh 删除无输出、
+        # 无异常，可观察行为不变）。
+        fresh = scratch / "data"
+        for stage, runner in (("S4", s4_full_extract), ("S2", s2_analyze_only), ("S3", s3_full_organize)):
+            if stage not in stages:
+                continue
+            if run_case is None:
+                _ = shutil.copytree(data, fresh)
+                runner(str(exe), str(fresh))
+                shutil.rmtree(fresh, ignore_errors=True)
+            else:
+                # 仅 CLI 报告路径计入复制与清理；直接调用仍无报告副作用。
+                def invoke(runner: Callable[[str, str], None] = runner) -> None:
+                    try:
+                        _ = shutil.copytree(data, fresh)
+                        runner(str(exe), str(fresh))
+                    finally:
+                        shutil.rmtree(fresh, ignore_errors=True)
+
+                run_case(stage, invoke)
+    finally:
+        shutil.rmtree(scratch, ignore_errors=True)
+
+
+def ensure_smoke_target_is_disposable(data: Path) -> None:
+    """整理/解压阶段会真实改动数据：只允许对一次性测试副本操作.
+
+    仓库内仅放行 .tmp/（默认 .tmp/gui-smoke/data 就在这里）；用户主目录与
+    盘符根一律拒绝。
+    """
+    repo = Path(__file__).resolve().parent.parent
+    home = Path.home().resolve()
+    under_repo_tmp = repo / ".tmp" in (data, *data.parents)
+    if (data == repo or repo in data.parents) and not under_repo_tmp:
+        msg = "拒绝在仓库目录内执行 GUI 整理冒烟（请使用 .tmp/gui-smoke/data 或其它副本）"
+        raise RuntimeError(msg)
+    if not under_repo_tmp and (data == home or home in data.parents):
+        msg = "拒绝在用户主目录内执行 GUI 整理冒烟（请使用一次性测试副本）"
+        raise RuntimeError(msg)
+    # 盘符根：parts 只有 ('D:\\',) 一层；'D:\\foo' 是 2 层，不得误杀。
+    if data.drive and len(data.parts) <= 1:
+        msg = f"拒绝在盘符根目录执行整理冒烟：{data}"
+        raise RuntimeError(msg)
+
+
+class _GuiTiming:
+    """CLI 专用报告生命周期；阶段函数的直接调用不产生报告."""
+
+    def __init__(self, stages: list[str], stage_functions: dict[str, str]) -> None:
+        self.stages: list[str] = stages
+        self.stage_functions: dict[str, str] = stage_functions
+        self.completed: set[str] = set()
+        self.report: TimingReport | None = None
+        self.report_failed: bool = False
+        try:
+            self.report = TimingReport(
+                "gui_smoke",
+                [sys.executable, *sys.argv],
+                scope={
+                    "selected_stages": stages,
+                    "case_functions": {stage: stage_functions[stage] for stage in stages},
+                },
+                timing_basis=(
+                    "单调时钟实测每个 S 阶段调用；数据集阶段包含夹具复制及成功/失败后的夹具清理；"
+                    "共享临时根创建/删除、CLI 前置检查与报告写入不计入单例，运行墙钟另记"
+                ),
+                concurrency={"mode": "sequential", "workers": 1},
+            )
+        except Exception as error:  # noqa: BLE001  # 报告故障不改变原阶段执行。
+            print(f"测试报告创建失败：{error}", file=sys.stderr)
+            self.report_failed = True
+
+    def record(self, stage: str, duration: float | None, status: str, detail: str = "") -> None:
+        if self.report is None:
+            return
+        try:
+            self.report.add_case(
+                Case(
+                    name=f"{stage}:{self.stage_functions[stage]}",
+                    classname="scripts.gui_smoke",
+                    duration=duration,
+                    status=status,
+                    detail=detail,
+                    file="scripts/gui_smoke.py",
+                )
+            )
+        except Exception as error:  # noqa: BLE001  # 保留原测试结果，报告故障另行可见。
+            print(f"测试报告写入失败：{error}", file=sys.stderr)
+            self.report_failed = True
+
+    def run_case(self, stage: str, invoke: Callable[[], None]) -> None:
+        started = time.perf_counter()
+        try:
+            invoke()
+        except BaseException as error:
+            duration = time.perf_counter() - started
+            self.completed.add(stage)
+            self.record(
+                stage,
+                duration,
+                "failure" if isinstance(error, AssertionError) else "error",
+                f"{type(error).__name__}: {error}",
+            )
+            raise
+        else:
+            duration = time.perf_counter() - started
+            self.completed.add(stage)
+            self.record(stage, duration, "passed")
+
+    def finish(self, exit_code: int, completion: str) -> int:
+        for stage in self.stages:
+            if stage not in self.completed:
+                self.record(stage, None, "skipped", "前一阶段失败或运行中断，本阶段未执行")
+        exit_code = exit_code or int(self.report_failed)
+        if self.report is not None:
+            try:
+                exit_code = self.report.finish(
+                    exit_code,
+                    completion=completion,
+                    coverage={
+                        "selected_stages": self.stages,
+                        "completed_stages": [stage for stage in self.stage_functions if stage in self.completed],
+                        "never_started_stages": [stage for stage in self.stages if stage not in self.completed],
+                    },
+                )
+            except Exception as error:  # noqa: BLE001  # 不覆盖正在传播的阶段异常。
+                print(f"测试报告收尾失败：{error}", file=sys.stderr)
+                self.report_failed = True
+        return exit_code or int(self.report_failed)
+
+
+def _run_cli_stages(exe: Path, data: Path, stages: list[str]) -> int:
+    """按原调度顺序执行，报告只包裹既有阶段边界."""
+    stage_runners = {
+        "S5": s5_markdown_basic_chain,
+        "S6": s6_auto_saves_feature_selection,
+        "S7": s7_restart_restores_saved_selection,
+        "S8": s8_empty_selection_disables_download_and_recovers,
+        "S9": s9_unconfigured_state_shows_reason_and_no_autostart,
+        "S10": s10_output_layout_and_flat_duplicate_policy,
+        "S11": s11_existing_results_are_skipped_untouched,
+        "S12": s12_output_subtree_is_excluded_from_scan,
+        "S13": s13_partial_failure_isolated_with_counts,
+        "S14": s14_close_during_conversion_confirms_and_stops,
+        "S15": s15_markdown_merge_and_split,
+        "S16": s16_git_commit_and_push,
+        "S17": s17_check_configured_components_offline,
+        "S18": s18_layout_at_two_window_sizes,
+    }
+    stage_functions = {
+        "S1": s1_launch_and_exit.__name__,
+        "S4": s4_full_extract.__name__,
+        "S2": s2_analyze_only.__name__,
+        "S3": s3_full_organize.__name__,
+        **{stage: runner.__name__ for stage, runner in stage_runners.items()},
+    }
+    timing = _GuiTiming(stages, stage_functions)
+    exit_code = 0
+    completion = "complete"
+    try:
+        if "S1" in stages:
+            timing.run_case("S1", lambda: s1_launch_and_exit(str(exe)))
+        run_dataset_stages(str(exe), data, stages, run_case=timing.run_case)
+        for stage, runner in stage_runners.items():
+            if stage in stages:
+                timing.run_case(stage, lambda runner=runner: runner(str(exe)))
+    except BaseException as error:
+        exit_code = 130 if isinstance(error, KeyboardInterrupt) else 1
+        if isinstance(error, SystemExit):
+            exit_code = error.code if isinstance(error.code, int) else 1
+        completion = "interrupted" if isinstance(error, (KeyboardInterrupt, SystemExit)) else "incomplete"
+        raise
+    finally:
+        exit_code = timing.finish(exit_code, completion)
+    return exit_code
+
+
+def main() -> int:
+    parser = argparse.ArgumentParser(description="JchTools GUI 冒烟测试")
+    _ = parser.add_argument("--exe", default=DEFAULT_EXE)
+    _ = parser.add_argument("--data", default=DEFAULT_DATA)
+    _ = parser.add_argument(
+        "--stages", default=DEFAULT_STAGES, help=f"逗号分隔阶段清单（可选：{','.join(SUPPORTED_STAGES)}）"
+    )
+    _ = parser.add_argument("--list-stages", action="store_true", help="逐行打印支持的阶段号后退出")
+    _ = parser.add_argument(
+        "--allow-isolated-run",
+        action="store_true",
+        help="跳过 CLI 编排前置检查；公共启动入口仍必须具有隔离状态目录与资产根（推荐 acceptance.ps1）",
+    )
+    args = parser.parse_args(namespace=_CliArgs())
+    if args.list_stages:
+        for stage in SUPPORTED_STAGES:
+            print(stage)
+        return 0
+    stages = parse_stages(args.stages)
+    # S11-07：受守卫阶段在启动任何 GUI 之前统一校验隔离环境，缺则拒绝并指引入口。
+    require_orchestrated_isolation(stages, os.environ, allow_isolated_run=args.allow_isolated_run)
+    exe = Path(args.exe).resolve()
+    data = Path(args.data).resolve()
+    if not exe.is_file():
+        msg = f"找不到 {exe}"
+        raise RuntimeError(msg)
+    if not data.is_dir():
+        msg = f"找不到测试数据目录 {data}"
+        raise RuntimeError(msg)
+    ensure_smoke_target_is_disposable(data)
+
+    return _run_cli_stages(exe, data, stages)
+
+
+if __name__ == "__main__":
+    sys.exit(main())

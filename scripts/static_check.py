@@ -1,0 +1,1086 @@
+#!/usr/bin/env python3
+"""Lightweight source-structure checks, NOT rustc, cargo check, or application tests.
+
+Uses Python stdlib; Pygments, if present, adds Rust lexical delimiter checking.
+All writes are confined to .tmp/static-check.json under this source tree,
+except --update-test-baseline which rewrites scripts/test-baseline.json.
+"""
+
+from __future__ import annotations
+
+import contextlib
+import functools
+import hashlib
+import io
+import json
+import re
+import shutil
+import sqlite3
+import subprocess
+import sys
+import tomllib
+from pathlib import Path
+from typing import TYPE_CHECKING
+
+import defusedxml.ElementTree
+
+if TYPE_CHECKING:
+    from collections.abc import Callable
+    from typing import TypeIs
+
+try:
+    import pygments.lexers
+    from pygments import lex
+    from pygments.lexer import Lexer
+    from pygments.token import Comment, Literal
+except ImportError:
+    lex = None
+    Lexer = None
+    Comment = None
+    Literal = None
+    pygments = None
+
+ROOT = Path(__file__).resolve().parent.parent
+UPDATE_BASELINE = "--update-test-baseline" in sys.argv[1:]
+# 检查明细含中文；Windows CI 默认 cp1252，会把 print/写文件变成 UnicodeEncodeError。
+# 明确按 UTF-8 输出（stdout 不可重配时退化为替换字符，不让编码问题变成检查失败）。
+with contextlib.suppress(AttributeError):
+    stream = sys.stdout
+    if isinstance(stream, io.TextIOWrapper):
+        stream.reconfigure(encoding="utf-8", errors="replace")
+
+# json.loads / tomllib.loads / getattr 的返回含 Any；经固定签名别名收口为 object，
+# 随后用 TypeIs 守卫逐层校验成精确类型。
+_parse_json: Callable[[str], object] = json.loads
+_parse_toml: Callable[[str], object] = tomllib.loads
+_module_attr: Callable[[object, str], object] = getattr
+# rules.json 单条 choice 规则至少要有的选项数；bash「命令不存在」的退出码；
+# 非 ASCII 判定阈值（0x00-0x7F 在 UTF-8 与任何 ANSI 单字节代码页下解码一致）。
+_MIN_CHOICE_COUNT = 2
+_BASH_COMMAND_NOT_FOUND = 127
+_ASCII_LIMIT = 0x80
+
+
+def _is_str(value: object) -> TypeIs[str]:
+    return isinstance(value, str)
+
+
+def _is_str_obj_map(value: object) -> TypeIs[dict[str, object]]:
+    return isinstance(value, dict)
+
+
+def _is_obj_list(value: object) -> TypeIs[list[object]]:
+    return isinstance(value, list)
+
+
+def read_text(path: Path) -> str:
+    return path.read_text(encoding="utf-8")
+
+
+checks: list[dict[str, object]] = []
+
+
+# 检查在本机不可执行（依赖缺失等）；与 PASS/FAIL 区分，避免“没跑”被记成“通过”。
+class SkippedError(Exception):
+    pass
+
+
+def check(name: str, fn: Callable[[], object]) -> None:
+    try:
+        details = fn()
+        checks.append({"name": name, "status": "PASS", "details": details})
+    except SkippedError as exc:
+        checks.append({"name": name, "status": "SKIP", "details": str(exc)})
+    # BLE001：这里必须捕获任意 Exception——check() 的职责就是把单个检查的任何异常记为
+    # FAIL 而不是让整个脚本崩溃；可出现的异常类型无法穷举，重抛又会改变退出行为。
+    # （异常转为 FAIL 条目而非静默吞掉，属检查器逐项汇总场景。）
+    except Exception as exc:  # noqa: BLE001
+        checks.append({"name": name, "status": "FAIL", "details": str(exc)})
+
+
+_PRODUCTION_CRATES = (
+    "foundation",
+    "file-core",
+    "recursive-extract",
+    "directory-organizer",
+    "md-tools",
+    "git-tools",
+    "xberg",
+    "assets",
+    "markdown",
+    "acp-api",
+    "codeagent",
+    "jchocr",
+    "ui",
+    "gui",
+)
+_OPTIONAL_CRATES = ("snap-ocr-core", "snap-ocr-worker")
+
+
+def project_manifests() -> list[Path]:
+    """仅扫描本项目，不扫描 vendor 或 Cargo 输出；已登记 package 缺失即失败."""
+    required = {
+        ROOT / "Cargo.toml",
+        *(ROOT / "crates" / name / "Cargo.toml" for name in _PRODUCTION_CRATES),
+        *(ROOT / "optional" / name / "Cargo.toml" for name in _OPTIONAL_CRATES),
+    }
+    missing = sorted(path.relative_to(ROOT).as_posix() for path in required if not path.is_file())
+    if missing:
+        detail = f"本项目 Cargo 清单缺失：{missing}"
+        raise AssertionError(detail)
+    required_sources = {
+        *(ROOT / "crates" / name / "src/lib.rs" for name in _PRODUCTION_CRATES),
+        *(ROOT / "optional" / name / "src/lib.rs" for name in _OPTIONAL_CRATES),
+        ROOT / "build.rs",
+        ROOT / "crates/file-core/build.rs",
+        ROOT / "crates/assets/build.rs",
+        ROOT / "crates/ui/build.rs",
+        ROOT / "optional/snap-ocr-worker/build.rs",
+    }
+    missing_sources = sorted(path.relative_to(ROOT).as_posix() for path in required_sources if not path.is_file())
+    if missing_sources:
+        detail = f"本项目库入口或真实 build producer 缺失：{missing_sources}"
+        raise AssertionError(detail)
+    return sorted(required | set(ROOT.glob("crates/*/Cargo.toml")) | set(ROOT.glob("optional/*/Cargo.toml")))
+
+
+def rust_sources() -> list[Path]:
+    """统一手写 Rust 范围：各 package 的 build/src/tests/examples/benches 及根夹具."""
+    paths: set[Path] = set()
+    for manifest in project_manifests():
+        package_root = manifest.parent
+        if not (package_root / "src").is_dir():
+            detail = f"本项目源码目录缺失：{package_root.relative_to(ROOT) / 'src'}"
+            raise AssertionError(detail)
+        build_script = package_root / "build.rs"
+        if build_script.is_file():
+            paths.add(build_script)
+        for directory in ("src", "tests", "examples", "benches"):
+            paths.update((package_root / directory).glob("**/*.rs"))
+    return sorted(paths)
+
+
+def _manifest_source(manifest: Path, kind: str, target: object) -> None:
+    if not _is_str_obj_map(target):
+        detail = f"{manifest.relative_to(ROOT)} 的 {kind} 项必须是表"
+        raise AssertionError(detail)
+    target_path = target.get("path")
+    if target_path is None and kind == "lib":
+        target_path = "src/lib.rs"
+    if not _is_str(target_path) or not (manifest.parent / target_path).is_file():
+        detail = f"{manifest.relative_to(ROOT)} 的 {kind} 源码路径无效：{target_path}"
+        raise AssertionError(detail)
+
+
+def _manifest_targets(manifest: Path, cargo: dict[str, object]) -> None:
+    for kind in ("lib", "bin", "test", "example", "bench"):
+        value = cargo.get(kind)
+        if value is None:
+            continue
+        targets: list[object] = [value] if kind == "lib" else value if _is_obj_list(value) else []
+        if not targets:
+            detail = f"{manifest.relative_to(ROOT)} 的 {kind} 必须是非空目标表/数组"
+            raise AssertionError(detail)
+        for target in targets:
+            _manifest_source(manifest, kind, target)
+    package = cargo.get("package")
+    if not _is_str_obj_map(package):
+        detail = f"{manifest.relative_to(ROOT)} 的 package 必须是表"
+        raise AssertionError(detail)
+    build = package.get("build")
+    if build is not None and build is not False:
+        build_path = "build.rs" if build is True else build
+        if not _is_str(build_path) or not (manifest.parent / build_path).is_file():
+            detail = f"{manifest.relative_to(ROOT)} 的 build 源码路径无效：{build_path}"
+            raise AssertionError(detail)
+
+
+def manifests() -> str:
+    paths = project_manifests()
+    for path in paths:
+        cargo_value: object = _parse_toml(read_text(path))
+        if not _is_str_obj_map(cargo_value):
+            detail = f"{path.relative_to(ROOT)} 顶层必须是表"
+            raise AssertionError(detail)
+        if path == ROOT / "Cargo.toml":
+            if not _is_obj_list(cargo_value.get("bin")):
+                detail = "Cargo.toml 的 bin 必须是数组"
+                raise AssertionError(detail)
+            workspace = cargo_value.get("workspace")
+            if not _is_str_obj_map(workspace):
+                detail = "Cargo.toml 的 workspace 必须是表"
+                raise AssertionError(detail)
+            default_members = workspace.get("default-members")
+            expected = {".", *(f"crates/{name}" for name in _PRODUCTION_CRATES)}
+            if not _is_obj_list(default_members) or set(default_members) != expected:
+                detail = f"default-members 必须完整覆盖根与生产 crates，不包含 optional：{default_members}"
+                raise AssertionError(detail)
+        _manifest_targets(path, cargo_value)
+    _ = defusedxml.ElementTree.parse(ROOT / "resources/windows.manifest")
+    summary = f"{len(paths)} project Cargo TOML files, declared target/build paths,"
+    return f"{summary} default members and Windows XML parsed."
+
+
+def _rules_rows() -> list[dict[str, object]]:
+    rules_value: object = _parse_json(read_text(ROOT / "resources/rules.json"))
+    if not _is_obj_list(rules_value):
+        detail = "resources/rules.json 顶层必须是数组"
+        raise AssertionError(detail)
+    rows: list[dict[str, object]] = []
+    for item in rules_value:
+        if not _is_str_obj_map(item):
+            detail = "resources/rules.json 的规则项必须是对象"
+            raise AssertionError(detail)
+        rows.append(item)
+    return rows
+
+
+def _choice_values(choices: list[object]) -> list[str]:
+    if len(choices) < _MIN_CHOICE_COUNT:
+        raise AssertionError
+    values: list[str] = []
+    for choice in choices:
+        if not _is_obj_list(choice):
+            detail = "resources/rules.json 的 choice 项必须是列表"
+            raise AssertionError(detail)
+        first = choice[0]
+        if not _is_str(first):
+            detail = "resources/rules.json 的 choice 首项必须是字符串"
+            raise AssertionError(detail)
+        values.append(first)
+    if len(values) != len(set(values)):
+        raise AssertionError
+    return values
+
+
+def _expected_enum_values(ty: str, config: str) -> set[str]:
+    enum_match = re.search("pub enum " + ty + r"\s*\{(.*?)\}", config, re.DOTALL)
+    if enum_match is None:
+        detail = f"找不到配置枚举 {ty}"
+        raise AssertionError(detail)
+    return {re.sub(r"(?<!^)(?=[A-Z])", "_", v.strip()).lower() for v in enum_match.group(1).split(",") if v.strip()}
+
+
+def _check_rule_choices(row: dict[str, object], ty: str, config: str) -> None:
+    choices = row["choices"]
+    if not _is_obj_list(choices):
+        detail = "resources/rules.json 的 choices 必须是数组"
+        raise AssertionError(detail)
+    values = _choice_values(choices)
+    if ty != "String":
+        expected = _expected_enum_values(ty, config)
+        if set(values) != expected:
+            raise AssertionError((row["key"], values, expected))
+
+
+def _check_rule_row(row: dict[str, object], fields: dict[str, str], config: str) -> None:
+    if not (row["title"] and row["hint"]):
+        raise AssertionError
+    key_value = row["key"]
+    if not _is_str(key_value):
+        detail = "resources/rules.json 的 key 必须是字符串"
+        raise AssertionError(detail)
+    ty = fields[key_value]
+    if ty == "bool" and row["kind"] != "bool":
+        raise AssertionError
+    if ty in ("usize", "u64", "u32") and row["kind"] != "number":
+        raise AssertionError
+    if row["kind"] == "choice":
+        _check_rule_choices(row, ty, config)
+
+
+def config_schema() -> str:
+    config = read_text(ROOT / "crates/file-core/src/config.rs")
+    match = re.search(r"pub struct Config\s*\{(.*?)\n\}", config, re.DOTALL)
+    if match is None:
+        detail = "crates/file-core/src/config.rs 中找不到 pub struct Config 定义"
+        raise AssertionError(detail)
+    fields = dict(re.findall(r"pub\s+(\w+)\s*:\s*([\w:]+)", match.group(1)))
+    rows = _rules_rows()
+    keys = [row["key"] for row in rows]
+    if len(keys) != len(set(keys)):
+        raise AssertionError
+    # 有意不进规则表的配置字段：theme 已挪到「关于」页；detect_type 是合并行的
+    # 影子键（「修正扩展名」一行驱动两个细粒度字段），引擎 / 旧任务库仍读原值。
+    # 去重三类（同名/副本名/不同名同内容）按 R-04 是独立规则行，不在此列。
+    hidden = {"theme", "detect_type"}
+    if set(fields) != set(keys) | hidden:
+        raise AssertionError((set(fields) - set(keys) - hidden, set(keys) - set(fields)))
+    for row in rows:
+        _check_rule_row(row, fields, config)
+    return f"{len(rows)} UI settings match serialized Config fields ({len(hidden)} engine-only) and enum values."
+
+
+def ui_callbacks() -> str:
+    ui = read_text(ROOT / "ui/app.slint")
+    # GUI 组装层在真实 gui crate；bin main.rs 只是薄壳入口。
+    rs = chr(10).join(read_text(path) for path in [ROOT / "src/main.rs", *sorted(ROOT.glob("crates/gui/src/**/*.rs"))])
+    # 只有导出组件（窗口）上的回调是应用级 API；组件内部的回调在 .slint 内部接线。
+    text = ui[ui.index("export component AppWindow inherits Window") :]
+    depth = 0
+    end = len(text)
+    for index, char in enumerate(text):
+        if char == "{":
+            depth += 1
+        elif char == "}":
+            depth -= 1
+            if depth == 0:
+                end = index
+                break
+    callback_names: list[str] = re.findall(r"callback\s+([\w-]+)\(", text[:end])
+    declared = {name.replace("-", "_") for name in callback_names}
+    handler_names: list[str] = re.findall(r"ui\.on_(\w+)\(", rs)
+    wired = set(handler_names)
+    if declared != wired:
+        raise AssertionError({"missing_handlers": sorted(declared - wired), "extra_handlers": sorted(wired - declared)})
+    return f"{len(declared)} declared window callbacks have Rust handlers."
+
+
+# rust_lexical 使用 pygments；RustLexer 无类型标注，经 getattr 别名取回并运行期校验。
+def rust_lexical() -> str:
+    lex_fn = lex
+    lexer_base = Lexer
+    comment_token = Comment
+    literal_token = Literal
+    package = pygments
+    if lex_fn is None or lexer_base is None or comment_token is None or literal_token is None or package is None:
+        message = "Pygments unavailable; Rust lexical delimiter check was not run."
+        raise SkippedError(message) from None
+    lexer_factory: object = _module_attr(package.lexers, "RustLexer")
+    if not callable(lexer_factory):
+        detail = "pygments 的 RustLexer 不可调用"
+        raise TypeError(detail)
+    count = 0
+    for path in rust_sources():
+        stack: list[str] = []
+        lexer: object = lexer_factory()
+        if not isinstance(lexer, lexer_base):
+            detail = "pygments 的 RustLexer 实例类型异常"
+            raise TypeError(detail)
+        for token, text in lex_fn(read_text(path), lexer):
+            if token in comment_token or token in literal_token.String:
+                continue
+            _check_delimiters(path, text, stack)
+        if stack:
+            raise AssertionError((str(path.relative_to(ROOT)), stack))
+        count += 1
+    return (
+        f"{count} Rust files have balanced lexical delimiters; "
+        "this does NOT validate Rust types, APIs, macros or borrow checking."
+    )
+
+
+def _check_delimiters(path: Path, text: str, stack: list[str]) -> None:
+    for ch in text:
+        if ch in "([{":
+            stack.append(ch)
+        elif ch in ")]}" and not (stack and "([{".index(stack.pop()) == ")]}".index(ch)):
+            raise AssertionError(str(path.relative_to(ROOT)))
+
+
+def sql_syntax() -> str:
+    conn = sqlite3.connect(":memory:")
+    _ = conn.executescript(read_text(ROOT / "crates/file-core/src/schema.sql"))
+    # XB-18：直接读取产品使用的应用配置 schema，避免检查器另造一份表定义。
+    _ = conn.executescript(read_text(ROOT / "crates/foundation/src/app_settings.sql"))
+    _ = conn.executescript("""CREATE TEMP TABLE duplicate_order(seq INTEGER,id INTEGER);
+        CREATE TEMP TABLE empty_order(seq INTEGER,rel TEXT);
+        CREATE TEMP TABLE empty_will(rel TEXT PRIMARY KEY);
+        CREATE TEMP TABLE stay_parents(parent TEXT);
+        CREATE TEMP TABLE dir_children(parent TEXT,rel TEXT);
+        CREATE TEMP TABLE hash_candidates(id INTEGER PRIMARY KEY);
+        CREATE TEMP TABLE scan_taint(rel TEXT PRIMARY KEY);
+        CREATE TEMP TABLE git_roots(rel TEXT PRIMARY KEY);
+        CREATE TEMP TABLE tainted_will(rel TEXT PRIMARY KEY);
+        CREATE TABLE hash_cache(identity TEXT NOT NULL, size INTEGER NOT NULL, mtime INTEGER NOT NULL,
+            hash TEXT NOT NULL, updated INTEGER NOT NULL, PRIMARY KEY(identity,size,mtime));""")
+    file_columns = "id,rel,name,normal,size,mtime,identity,links,hash,cleanable"
+    statements: set[str] = set()
+    # SQL 判据保持原生产实现范围；独立 crate 的真实实现取代原 src/，
+    # 不把 optional 热键字面量 "INSERT"/"DELETE" 或测试输入误当成产品 SQL。
+    for path in sorted([*ROOT.glob("src/**/*.rs"), *ROOT.glob("crates/*/src/**/*.rs")]):
+        for match in re.finditer(r'"((?:[^"\\]|\\.)*)"', read_text(path)):
+            raw = match.group(1)
+            if not re.match(r"^(SELECT|UPDATE|INSERT|DELETE)\b", raw):
+                continue
+            raw = raw.replace("{FILE_COLUMNS}", file_columns)
+            raw = raw.replace("{key_expr}", "name")
+            raw = raw.replace("{filter}", "active=1 AND name=?1 AND size=?2")
+            if "{" in raw or "}" in raw or ";" in raw:
+                continue
+            raw = raw.replace('\\"', '"')
+            question_params: list[str] = re.findall(r"\?(\d+)", raw)
+            params = max([int(x) for x in question_params] + [0])
+            _ = conn.execute("EXPLAIN " + raw, [None] * params)
+            statements.add(raw)
+    return (
+        f"SQLite schema and {len(statements)} concrete DML statements prepare successfully "
+        "against empty schema; no organizer application executed."
+    )
+
+
+def shell_syntax() -> str:
+    # 平台范围按合同 P-07 仅 Windows：scripts/ 下可能没有 .sh；有则逐个 bash -n 校验。
+    scripts = sorted((ROOT / "scripts").glob("*.sh"))
+    if not scripts:
+        return "no shell scripts under scripts/; nothing to check"
+    bash = shutil.which("bash")
+    if not bash:
+        message = "bash not found; bash -n and PowerShell syntax checks run in the Windows CI job."
+        raise SkippedError(message)
+    for script in scripts:
+        done = subprocess.run([bash, "-n", str(script)], capture_output=True, text=True, check=False)
+        if done.returncode != 0 and (
+            "not found" in (done.stderr or "").lower() or done.returncode == _BASH_COMMAND_NOT_FOUND
+        ):
+            message = "bash launcher is unavailable on this host; bash -n runs in the Windows CI job."
+            raise SkippedError(message)
+        if done.returncode != 0:
+            message = f"{script}: {done.stderr}"
+            raise AssertionError(message)
+    names = ", ".join(path.name for path in scripts)
+    return (
+        f"bash -n passed for {len(scripts)} shell script(s) ({names}); "
+        "PowerShell syntax check is defined in Windows CI."
+    )
+
+
+def ps1_utf8_bom() -> str:
+    # 反证（2026-09-19，run 35430517207 与 zh-CN 本机）：Windows PowerShell 5.1 对无 BOM 的
+    # .ps1 按 ANSI 代码页解码，在 cp936/cp932 等多字节代码页下中文注释会吞掉后续换行
+    # （fetch-7zip.ps1 实测 83 行→81 行），把下一行代码并进注释而静默失效——该文件的
+    # `$previousEap = $ErrorActionPreference` 即如此丢失，finally 引用未赋值变量报错；
+    # CI 的 en-US/cp1252 是单字节代码页，不吞换行，故 CI 绿色掩盖了此缺陷。
+    # 带 BOM 后 PowerShell 5.1 一律按 UTF-8 解码，与文件实际编码一致；
+    # 纯 ASCII 文件不在此列：其字节在 ANSI 与 UTF-8 下解码结果相同，本就不受该缺陷影响。
+    scripts = sorted((ROOT / "scripts").glob("*.ps1"))
+    missing: list[str] = []
+    for path in scripts:
+        raw = path.read_bytes()
+        if raw.startswith(b"\xef\xbb\xbf") or all(byte < _ASCII_LIMIT for byte in raw):
+            continue
+        missing.append(path.name)
+    if missing:
+        detail = f"scripts/*.ps1 含非 ASCII 内容时必须带 UTF-8 BOM（否则多字节 ANSI 代码页下会被误解码）：{missing}"
+        raise AssertionError(detail)
+    return f"{len(scripts)} 个 .ps1 均带 UTF-8 BOM 或为纯 ASCII；PowerShell 5.1 解码不受 ANSI 代码页影响。"
+
+
+# text[i] 指向 '#'：解析 #[...] 与 #![...] 属性（括号配对，允许嵌套括号）。
+# 返回 (属性体如 'cfg(not(windows))' 或 'ignore = "..."', 结束下标+1)；不是属性则 None。
+def _attr_body(text: str, i: int) -> tuple[str, int] | None:
+    if i + 1 >= len(text) or text[i] != "#":
+        return None
+    j = i + 1
+    if text[j] == "!":
+        j += 1
+    if j >= len(text) or text[j] != "[":
+        return None
+    depth = 0
+    for k in range(j, len(text)):
+        if text[k] == "[":
+            depth += 1
+        elif text[k] == "]":
+            depth -= 1
+            if depth == 0:
+                return text[j + 1 : k], k + 1
+    return None
+
+
+# 'cfg(...)' -> '...'；其余属性返回 None。'test' 门禁对 cargo test 恒真，返回 '' 表示忽略。
+def _cfg_payload(inner: str) -> str | None:
+    # 完整匹配属性名与括号，避免把 cfg_attr 或其他 cfg 前缀属性当作门禁。
+    match = re.fullmatch(r"cfg\s*\((.*)\)", inner.strip(), re.DOTALL)
+    if match is None:
+        return None
+    payload = match.group(1).strip()
+    return "" if payload == "test" else payload
+
+
+def _file_level_cfgs(head: str) -> list[str]:
+    cfgs: list[str] = []
+    for match in re.finditer(r"#!\[", _mask_rust_trivia(head)):
+        got = _attr_body(head, match.start())
+        if got:
+            payload = _cfg_payload(got[0])
+            if payload and payload not in cfgs:
+                cfgs.append(payload)
+    return cfgs
+
+
+def _mod_gates(text: str) -> list[tuple[int, int, str]]:
+    spans: list[tuple[int, int, str]] = []
+    structural = _mask_rust_trivia(text)
+    attrs = _attr_spans(text)
+    for match in re.finditer(r"(?:pub(?:\([^)]*\))?\s+)?mod\s+\w+\s*\{", structural):
+        end = _brace_end(structural, match.end() - 1)
+        for _, _, inner in _walk_attrs(text, attrs, match.start(), -1):
+            payload = _cfg_payload(inner)
+            if payload:
+                spans.append((match.end(), end, payload))
+    return spans
+
+
+def _attr_spans(text: str) -> list[tuple[int, int, str]]:
+    spans: list[tuple[int, int, str]] = []
+    for match in re.finditer(r"#\[", _mask_rust_trivia(text)):
+        got = _attr_body(text, match.start())
+        if got:
+            spans.append((match.start(), got[1], got[0]))
+    return spans
+
+
+def _adjacent(attr: tuple[int, int, str], cursor: int, text: str, step: int) -> bool:
+    if step < 0:
+        return attr[1] <= cursor and text[attr[1] : cursor].strip() == ""
+    if step > 0:
+        return attr[0] >= cursor and text[cursor : attr[0]].strip() == ""
+    return False
+
+
+# 收集紧贴的属性行（在 #[test] 之前 step=-1，之后 step=+1）。
+def _walk_attrs(text: str, attrs: list[tuple[int, int, str]], pos: int, step: int) -> list[tuple[int, int, str]]:
+    out: list[tuple[int, int, str]] = []
+    cursor = pos
+    while True:
+        candidate = None
+        for attr in attrs:
+            if _adjacent(attr, cursor, text, step):
+                candidate = attr
+        if candidate is None:
+            break
+        out.append(candidate)
+        cursor = candidate[0] if step < 0 else candidate[1]
+    return out
+
+
+def _brace_end(text: str, open_idx: int) -> int:
+    depth = 0
+    for i in range(open_idx, len(text)):
+        if text[i] == "{":
+            depth += 1
+        elif text[i] == "}":
+            depth -= 1
+            if depth == 0:
+                return i
+    return len(text) - 1
+
+
+def _test_gates(
+    text: str,
+    attrs: list[tuple[int, int, str]],
+    match: re.Match[str],
+    file_cfgs: list[str],
+    mod_spans: list[tuple[int, int, str]],
+) -> tuple[list[str], bool]:
+    start = match.start()
+    cfgs = list(file_cfgs)
+    ignored = False
+    neighbours = _walk_attrs(text, attrs, start, -1) + list(reversed(_walk_attrs(text, attrs, match.end(), 1)))
+    for _, _, inner in neighbours:
+        payload = _cfg_payload(inner)
+        if payload is not None and payload and payload not in cfgs:
+            cfgs.append(payload)
+        if inner.strip().startswith("ignore"):
+            ignored = True
+    for span_start, span_end, payload in mod_spans:
+        if span_start < start < span_end and payload not in cfgs:
+            cfgs.append(payload)
+    return cfgs, ignored
+
+
+def _collect_file_tests(path: Path) -> list[dict[str, object]]:
+    text = read_text(path)
+    structural = _mask_rust_comments(text)
+    discovery = _mask_rust_trivia(text)
+    rel = path.relative_to(ROOT).as_posix()
+    # 文件头内层属性：#![cfg(...)]（遇到第一个顶层项即停，避免误读宏内的 #![ ]）
+    head = structural[
+        : len(
+            re.split(
+                r"\n(?=(?:pub\s+)?(?:use|mod|fn|struct|enum|impl|trait|const|static|type|macro_rules)\b)",
+                discovery,
+            )[0]
+        )
+    ]
+    file_cfgs = _file_level_cfgs(head)
+    # 模块级门禁：#[cfg(...)] mod X { ... }
+    mod_spans = _mod_gates(structural)
+    # 全部属性跨度（供逐测试回溯/前瞻；#![ ] 内层属性只出现在文件头，不会被测试链到）
+    attrs = _attr_spans(structural)
+    rows: list[dict[str, object]] = []
+    for match in re.finditer(r"#\[(?:tokio::)?test(?:\([^]]*\))?\]", discovery):
+        cfgs, ignored = _test_gates(structural, attrs, match, file_cfgs, mod_spans)
+        name_match = re.match(r"[^{};]*?fn\s+(\w+)\s*\(", discovery[match.end() :])
+        if not name_match:
+            continue
+        rows.append(
+            {
+                "file": rel,
+                "name": name_match.group(1),
+                "ignored": ignored,
+                "cfg": " && ".join(cfgs) if cfgs else None,
+                # 测试体内容哈希：防「保留名字、清空/放宽断言」式削弱（基线 val 的一部分）。
+                "body": _test_body_hash(text, match.end() + name_match.end()),
+            }
+        )
+    return rows
+
+
+# Rust 源里的注释与字符串/字符字面量（花括号配对前先抹除干扰；保持等长以便位置对齐）。
+# 近似实现：不处理嵌套块注释；原始字符串按开头 # 数量匹配结束分隔符。
+_RUST_TRIVIA_ALTS = (
+    r"//[^\n]*",
+    r"/\*.*?\*/",
+    r'b?r(?P<raw_hashes>#{0,})".*?"(?P=raw_hashes)',
+    r'b?"(?:\\.|[^"\\\n])*"',
+    r"b?'(?:\\.|[^'\\\n])'",
+)
+_RUST_TRIVIA = re.compile("|".join(_RUST_TRIVIA_ALTS), re.DOTALL)
+
+
+def _mask_rust_comments(text: str) -> str:
+    """等长抹除 Rust 注释（含嵌套块），保留字面量及换行，供属性与门禁定位."""
+    parts: list[str] = []
+    cursor = search_at = 0
+    while match := _RUST_TRIVIA.search(text, search_at):
+        start, end = match.span()
+        if not match.group().startswith(("//", "/*")):
+            search_at = end
+            continue
+        if text.startswith("/*", start):
+            depth, end = 1, start + 2
+            while depth:
+                opening, closing = text.find("/*", end), text.find("*/", end)
+                if closing == -1:
+                    end = len(text)
+                    break
+                if opening != -1 and opening < closing:
+                    depth += 1
+                    end = opening + 2
+                else:
+                    depth -= 1
+                    end = closing + 2
+        parts.append(text[cursor:start])
+        parts.append(re.sub(r"[^\n]", " ", text[start:end]))
+        cursor = search_at = end
+    parts.append(text[cursor:])
+    return "".join(parts)
+
+
+def _mask_rust_trivia(text: str) -> str:
+    """先处理嵌套注释，再等长遮蔽字面量；保留换行以定位真实 Rust 结构."""
+    return _RUST_TRIVIA.sub(
+        lambda match: re.sub(r"[^\n]", " ", match.group()),
+        _mask_rust_comments(text),
+    )
+
+
+def _test_body_hash(text: str, signature_end: int) -> str:
+    """取普通或 Tokio 异步测试函数体内容并哈希（sha256 前 16 位十六进制）.
+
+    签名（参数/返回值/where 子句）内不含花括号，函数体从其后第一个 "{" 起；
+    在剔除注释与字面量后的等长文本上做朴素配对找闭合 "}"，对原文切片哈希。
+    找不到闭合时退化为「到文件尾」的哈希——仍然确定，只会更敏感。
+    """
+    scrubbed = _mask_rust_trivia(text)
+    open_at = scrubbed.find("{", signature_end)
+    if open_at == -1:
+        blob = text[signature_end:]
+    else:
+        depth, end = 0, -1
+        for i in range(open_at, len(scrubbed)):
+            if scrubbed[i] == "{":
+                depth += 1
+            elif scrubbed[i] == "}":
+                depth -= 1
+                if depth == 0:
+                    end = i
+                    break
+        blob = text[signature_end:] if end == -1 else text[open_at : end + 1]
+    return hashlib.sha256(blob.encode("utf-8")).hexdigest()[:16]
+
+
+@functools.cache
+def collect_tests() -> list[dict[str, object]]:
+    # 提取本项目所有 package 的手写 Rust #[test] / #[tokio::test]。基线键包含生效门禁（cfg）：
+    #   1) 文件级 #![cfg(...)]（仅扫文件头部内层属性区）；
+    #   2) 包裹测试的 #[cfg(...)] mod 块（花括号配对取范围；cfg(test) 恒真不计）；
+    #   3) 紧贴 #[test] 的属性块（前后均可，方括号配对，支持 not(windows) 等嵌套括号）。
+    # 已知残留盲区：定义在其它文件里的门禁（如 lib.rs 对模块声明的 cfg）
+    # 不在本文件扫描范围内——本检查是执法下界，不是完整 cfg 求值器。
+    # 单次进程内 test_baseline 与 scope_and_delivery 复用同一次全量扫描：
+    # 源文件在一次运行中只读，结果纯函数于文件内容；调用方均只读，缓存不改变判据。
+    rows: list[dict[str, object]] = []
+    # 与词法/SQL/实现检查共用范围，包含搬迁的 crate 内联测试与 jchocr 集成测试，
+    # 也包含 optional 的 src/tests/examples/benches；实际执行仍受默认成员/显式入口控制。
+    for path in rust_sources():
+        rows.extend(_collect_file_tests(path))
+    keys = [(row["file"], row["name"], row["cfg"]) for row in rows]
+    if len(keys) != len(set(keys)):
+        detail = f"测试键重复（同名且同门禁）：{sorted(k for k in keys if keys.count(k) > 1)}"
+        raise AssertionError(detail)
+    return rows
+
+
+def write_baseline(rows: list[dict[str, object]]) -> None:
+    note = (
+        "由 static_check.py --update-test-baseline 生成。删除/改名/新增 ignore 或平台门禁、"
+        "以及任何测试体修改（含放宽或清空断言）都必须重新生成本文件，并在提交信息说明理由；"
+        "body 哈希用于防止「保留测试名、掏空测试体」式削弱。"
+    )
+    payload = {"note": note, "tests": sorted(rows, key=lambda row: (row["file"], row["name"]))}
+    _ = (ROOT / "scripts" / "test-baseline.json").write_text(
+        json.dumps(payload, ensure_ascii=False, indent=2) + "\n",
+        newline="\n",
+        encoding="utf-8",
+    )
+
+
+def _baseline_rows(path: Path) -> list[dict[str, object]]:
+    loaded: object = _parse_json(read_text(path))
+    if not _is_str_obj_map(loaded):
+        detail = "scripts/test-baseline.json 顶层必须是对象"
+        raise AssertionError(detail)
+    tests = loaded["tests"]
+    if not _is_obj_list(tests):
+        detail = "scripts/test-baseline.json 的 tests 必须是数组"
+        raise AssertionError(detail)
+    rows: list[dict[str, object]] = []
+    for item in tests:
+        if not _is_str_obj_map(item):
+            detail = "scripts/test-baseline.json 的测试项必须是对象"
+            raise AssertionError(detail)
+        rows.append(item)
+    return rows
+
+
+def test_baseline() -> str:
+    path = ROOT / "scripts" / "test-baseline.json"
+    if not path.is_file():
+        message = (
+            "scripts/test-baseline.json 缺失；" + "先运行 python scripts/static_check.py --update-test-baseline 生成"
+        )
+        raise AssertionError(message)
+
+    def key(row: dict[str, object]) -> tuple[object, object, object]:
+        return (row["file"], row["name"], row.get("cfg") or None)
+
+    def val(row: dict[str, object]) -> tuple[bool, str]:
+        return (bool(row.get("ignored")), str(row.get("body") or ""))
+
+    baseline_rows = _baseline_rows(path)
+    seen_keys: set[tuple[object, object, object]] = set()
+    duplicate_keys: set[tuple[object, object, object]] = set()
+    for row in baseline_rows:
+        row_key = key(row)
+        if row_key in seen_keys:
+            duplicate_keys.add(row_key)
+        else:
+            seen_keys.add(row_key)
+    if duplicate_keys:
+        raise AssertionError({"scripts/test-baseline.json 含重复测试键 (file, name, cfg)": sorted(duplicate_keys)})
+    base = {key(row): val(row) for row in baseline_rows}
+    now = {key(row): val(row) for row in collect_tests()}
+    added = sorted(set(now) - set(base))
+    removed = sorted(set(base) - set(now))
+    changed = sorted(k for k in set(base) & set(now) if base[k] != now[k])
+    if added or removed or changed:
+        raise AssertionError(
+            {
+                "新增测试(更新基线并在提交信息说明覆盖点)": added,
+                "删除或改名(提交信息必须说明理由)": removed,
+                "ignore状态翻转(提交信息必须说明理由)": [
+                    f"{k}: ignored {base[k][0]} -> {now[k][0]}" for k in changed if base[k][0] != now[k][0]
+                ],
+                "测试体变化(审查确认非削弱后更新基线并说明理由)": [
+                    f"{k}: body {base[k][1]} -> {now[k][1]}" for k in changed if base[k][1] != now[k][1]
+                ],
+                "更新命令": "python scripts/static_check.py --update-test-baseline",
+            }
+        )
+    return f"{len(now)} 个测试与 scripts/test-baseline.json 完全一致（含 ignore、平台门禁与测试体哈希）。"
+
+
+def slint_blocks(ui: str) -> list[tuple[int, int, str]]:
+    # 列表元素为 (open_pos, close_pos, 块头标识符)：块头是紧贴 { 前的最后一个标识符（如 Rectangle）。
+    pairs: list[tuple[int, int, str]] = []
+    stack: list[tuple[int, str]] = []
+    for i, ch in enumerate(ui):
+        if ch == "{":
+            head = re.search(r"([A-Za-z_][\w-]*)\s*$", ui[max(0, i - 80) : i])
+            stack.append((i, head.group(1) if head else ""))
+        elif ch == "}":
+            open_pos, head = stack.pop()
+            pairs.append((open_pos, i, head))
+    return pairs
+
+
+def enclosing(pairs: list[tuple[int, int, str]], pos: int) -> tuple[int, int, str] | None:
+    best: tuple[int, int, str] | None = None
+    for open_pos, close_pos, head in pairs:
+        if open_pos < pos < close_pos and (best is None or close_pos - open_pos < best[1] - best[0]):
+            best = (open_pos, close_pos, head)
+    return best
+
+
+LAYOUTS = {"HorizontalLayout", "VerticalLayout", "GridLayout"}
+
+
+def slint_layout_width() -> str:
+    # AGENTS.md 第 4 节：布局容器直接子项不得用 root/parent.width 绑定自身宽度（绑定环）。
+    # 匹配位置在元素 E 自身块内，E 的父块（再上溯一层）是布局时才违规；绝对定位下的填充用法不受影响。
+    ui = read_text(ROOT / "ui" / "app.slint")
+    pairs = slint_blocks(ui)
+    bad: list[tuple[int, str]] = []
+    for match in re.finditer(r"(?:preferred-|min-|max-)?width\s*:\s*(root|parent)\.width\b", ui):
+        inner = enclosing(pairs, match.start())
+        outer = enclosing(pairs, inner[0]) if inner else None
+        if outer and outer[2] in LAYOUTS:
+            bad.append((ui.count("\n", 0, match.start()) + 1, match.group(0).strip()))
+    if bad:
+        detail = f"布局直接子项的宽度绑定了 root/parent.width（第 行, 表达式）：{bad}"
+        raise AssertionError(detail)
+    return "布局容器内没有用 root/parent.width 绑定子项自身宽度。"
+
+
+def slint_colors() -> str:
+    # AGENTS.md 第 4 节：十六进制颜色只允许出现在 Design 全局内（浅深主题由 Design.dark 切换）。
+    ui = read_text(ROOT / "ui" / "app.slint")
+    pairs = slint_blocks(ui)
+    match = re.search(r"global\s+Design\s*\{", ui)
+    if match is None:
+        detail = "找不到 Design 全局定义"
+        raise AssertionError(detail)
+    design = [pair for pair in pairs if pair[0] == match.end() - 1]
+    if not design:
+        detail = "Design 块花括号配对异常"
+        raise AssertionError(detail)
+    open_pos, close_pos, _ = design[0]
+    bad = [
+        (ui.count("\n", 0, hex_match.start()) + 1, hex_match.group(0))
+        for hex_match in re.finditer(r"#[0-9a-fA-F]{3,8}\b", ui)
+        if not (open_pos < hex_match.start() < close_pos)
+    ]
+    if bad:
+        detail = f"Design 全局之外出现硬编码十六进制颜色（行, 颜色）：{bad}"
+        raise AssertionError(detail)
+    return "十六进制颜色只出现在 Design 全局内。"
+
+
+def product_naming() -> str:
+    # AGENTS.md 第 1/5 节的产品名同步下界：标题与状态目录必须是 JchTools，且无旧名残留。
+    ui = read_text(ROOT / "ui" / "app.slint")
+    config = read_text(ROOT / "crates/file-core/src/config.rs")
+    if not re.search(r'title:\s*"JchTools"', ui):
+        detail = "窗口标题必须是产品名 JchTools"
+        raise AssertionError(detail)
+    # 状态定位可由 config 委托给应用共享设置；检查实际定位方，不能要求
+    # 调用方为满足字符串检查重复维护产品目录名。
+    shared_settings = read_text(ROOT / "crates/foundation/src/xberg_settings.rs")
+    locator = shared_settings if "jchtools_foundation::xberg_settings::state_dir()" in config else config
+    if not re.search(r'ProjectDirs::from\(\s*""\s*,\s*""\s*,\s*"JchTools"\s*\)', locator):
+        detail = '实际状态定位方的用户数据目录名必须是 "JchTools"'
+        raise AssertionError(detail)
+    for rel in [
+        "ui/app.slint",
+        "crates/file-core/src/config.rs",
+        "crates/foundation/src/xberg_settings.rs",
+        "crates/gui/src/registry.rs",
+        *(path.relative_to(ROOT).as_posix() for path in project_manifests()),
+    ]:
+        if "MyTools" in read_text(ROOT / rel):
+            detail = f"{rel} 残留旧产品名 MyTools"
+            raise AssertionError(detail)
+    return "窗口标题、状态目录与 Cargo 清单中的产品名一致（JchTools），无旧名残留。"
+
+
+def slint_modal_gating() -> str:
+    # AGENTS.md 第 4 节与仓库既有先例（app.slint 内「键盘可穿透确认框」修复注释）：
+    # 确认模态（confirm-kind != 0）的 scrim 只挡鼠标，Tab 焦点仍可到达被遮挡控件；
+    # AppWindow 内（确认层之前）所有可交互控件的 enabled 绑定都必须门禁 confirm-kind。
+    ui = read_text(ROOT / "ui" / "app.slint")
+    start = ui.index("export component AppWindow inherits Window")
+    overlay = ui.index("if root.confirm-kind != 0:", start)
+    background = ui[start:overlay]
+    bad: list[tuple[int, str]] = []
+    # enabled 绑定到分号才结束；换行不能截断后续的确认门禁。
+    for enabled_match in re.finditer(r"(?<![\w-])enabled\s*:([^;]*);", background):
+        expr = enabled_match.group(1)
+        if "confirm-kind" not in expr:
+            line_number = ui.count("\n", 0, start + enabled_match.start()) + 1
+            bad.append((line_number, "enabled: " + " ".join(expr.split())))
+    if bad:
+        detail = f"AppWindow 内存在未按 confirm-kind 门禁的 enabled 绑定（行, 表达式）：{bad}"
+        raise AssertionError(detail)
+    return "AppWindow 内（确认层之前）所有可交互控件的 enabled 绑定都门禁 confirm-kind。"
+
+
+def build_rc_prefers_windows_kits() -> str:
+    # 防 PATH 劫持口径：build.rs 解析 rc.exe 必须优先 Windows SDK 目录；PATH 只能
+    # 作为回退（且回退时构建日志应有告警）。
+    text = read_text(ROOT / "build.rs")
+    kits = text.find("Windows Kits")
+    from_path = text.find('var_os("PATH")')
+    if not (from_path == -1 or (kits != -1 and kits < from_path)):
+        detail = "build.rs 中 rc.exe 的 Windows SDK 查找必须先于 PATH 查找（或不搜 PATH）"
+        raise AssertionError(detail)
+    return "rc.exe 优先从 Windows SDK 解析，PATH 仅作回退。"
+
+
+def acceptance_respects_cargo_target_dir() -> str:
+    # acceptance.ps1 的 gui-smoke exe 路径必须与 package-windows.ps1 同口径尊重
+    # CARGO_TARGET_DIR：否则自定义 target 目录的机器会误报验证失败，或冒烟陈旧 exe。
+    text = read_text(ROOT / "scripts" / "acceptance.ps1")
+    if "CARGO_TARGET_DIR" not in text:
+        detail = "acceptance.ps1 的 gui-smoke 必须尊重 CARGO_TARGET_DIR（与 package-windows.ps1 同口径）"
+        raise AssertionError(detail)
+    return "acceptance.ps1 的 gui-smoke 尊重 CARGO_TARGET_DIR。"
+
+
+def scope_and_delivery() -> str:
+    required = [
+        "README.md",
+        "先读我.txt",
+        "LICENSE",
+        "THIRD_PARTY_NOTICES.md",
+        "docs/CONTRACT.md",
+        "scripts/package-windows.ps1",
+        "scripts/fetch-7zip.ps1",
+        "scripts/test-baseline.json",
+        "tests/core.rs",
+        "tests/archive.rs",
+        ".github/workflows/check.yml",
+    ]
+    if not all((ROOT / p).is_file() for p in required):
+        raise AssertionError
+    for path in sorted(
+        [*ROOT.glob("src/**/*.rs"), *ROOT.glob("crates/*/src/**/*.rs"), *ROOT.glob("optional/*/src/**/*.rs")]
+    ):
+        text = read_text(path)
+        if "todo!(" in text or "unimplemented!(" in text:
+            raise AssertionError(str(path))
+    tests = len(collect_tests())
+    return (
+        f"{tests} Rust test functions supplied, NOT executed; no todo!/unimplemented! in Rust implementation; "
+        "no prebuilt executable asserted."
+    )
+
+
+_REQUIREMENT_DOCS = [
+    "docs/requirements/README.md",
+    "docs/requirements/CONTRACT.md",
+    "docs/requirements/RECURSIVE-EXTRACT.md",
+    "docs/requirements/DIRECTORY-ORGANIZER.md",
+    "docs/requirements/MD-TOOLS.md",
+    "docs/requirements/GIT-TOOLS.md",
+    "docs/requirements/ALL2MARKDOWN.md",
+    "docs/requirements/SNAP2TEXT.md",
+    "docs/requirements/XBERG-INFERENCE.md",
+    "docs/requirements/ACP-MODEL-SERVICE.md",
+    "docs/requirements/CODEAGENT.md",
+]
+
+
+_MIN_REQUIREMENT_DOC_LINES = 10
+
+
+def requirements_registry() -> str:
+    """固定需求目录的权威清单执法：文档在场、非空壳且无未登记项.
+
+    登记的需求文档及索引必须在场且非空壳，目录内不得出现未登记的额外 .md
+    （新增需求文档须先更新 AGENTS.md 权威分工与本清单）。
+    """
+    for path in _REQUIREMENT_DOCS:
+        if not (ROOT / path).is_file():
+            detail = f"权威需求文档缺失：{path}"
+            raise AssertionError(detail)
+        lines = [line for line in read_text(ROOT / path).splitlines() if line.strip()]
+        if len(lines) < _MIN_REQUIREMENT_DOC_LINES:
+            detail = f"需求文档内容异常单薄（有效行 <{_MIN_REQUIREMENT_DOC_LINES}）：{path}"
+            raise AssertionError(detail)
+    expected = {str(Path(p).name) for p in _REQUIREMENT_DOCS}
+    names = {str(path.name) for path in (ROOT / "docs" / "requirements").glob("*.md")}
+    extra = sorted(names - expected)
+    if extra:
+        detail = f"docs/requirements/ 存在未登记的需求文档（先更新 AGENTS.md 权威分工与本检查清单）：{extra}"
+        raise AssertionError(detail)
+    return f"固定需求目录 {len(expected)} 份权威文档及索引在场，无未登记文档：{sorted(expected)}"
+
+
+def snap_pipe_command_sync() -> str:
+    """截图服务命名管道协议双端同步执法：gui 发出的命令服务端必须可处理.
+
+    crates/gui/src/gui.rs 构造的每个 "command" 字面量都必须在 worker 服务分发表
+    （optional/snap-ocr-worker/src/service.rs）中有对应处理；两端无共享类型，
+    本检查防协议各自演进造成静默失配。
+    """
+    gui = read_text(ROOT / "crates/gui/src/gui.rs")
+    service = read_text(ROOT / "optional" / "snap-ocr-worker" / "src" / "service.rs")
+    sent: list[str] = sorted(set(re.findall(r'"command"\s*:\s*"([a-z-]+)"', gui)))
+    if not sent:
+        detail = "crates/gui/src/gui.rs 中未发现任何管道命令字面量（检查本身失效）"
+        raise AssertionError(detail)
+    unhandled = [cmd for cmd in sent if f'"{cmd}"' not in service]
+    if unhandled:
+        detail = f"管道命令在服务端无处理：{unhandled}（gui.rs 与 service.rs 双端必须同步演进）"
+        raise AssertionError(detail)
+    return f"gui.rs 发出的 {len(sent)} 个管道命令在服务端均有处理：{sent}"
+
+
+if UPDATE_BASELINE:
+    rows = collect_tests()
+    write_baseline(rows)
+    print(f"baseline updated: {len(rows)} tests -> scripts/test-baseline.json")
+    sys.exit(0)
+
+# 检查注册表：条目名即函数名（fn.__name__），新增检查只需把函数加进列表，
+# 避免名称字符串与函数名两处同步漂移。
+for fn in [
+    manifests,
+    config_schema,
+    ui_callbacks,
+    rust_lexical,
+    sql_syntax,
+    shell_syntax,
+    ps1_utf8_bom,
+    test_baseline,
+    requirements_registry,
+    snap_pipe_command_sync,
+    slint_layout_width,
+    slint_colors,
+    product_naming,
+    slint_modal_gating,
+    build_rc_prefers_windows_kits,
+    acceptance_respects_cargo_target_dir,
+    scope_and_delivery,
+]:
+    check(fn.__name__, fn)
+    # 仅调度失败即停；检查定义、判据与独立报告保持不变（2026-10-11 用户批准）。
+    if checks[-1]["status"] == "FAIL":
+        break
+
+report = {
+    "kind": "lightweight static source checks only",
+    "platform": sys.platform,
+    "python": sys.version.split()[0],
+    "rustc": shutil.which("rustc"),
+    "cargo": shutil.which("cargo"),
+    "powershell": shutil.which("pwsh"),
+    "cargo_check": "NOT RUN",
+    "cargo_test": "NOT RUN",
+    "windows_runtime": "NOT RUN",
+    "real_7zip_tests": "NOT RUN",
+    "multi_tb_benchmark": "NOT RUN",
+    "checks": checks,
+}
+report_dir = ROOT / ".tmp"
+report_dir.mkdir(parents=True, exist_ok=True)
+_ = (report_dir / "static-check.json").write_text(
+    json.dumps(report, ensure_ascii=False, indent=2) + "\n",
+    newline="\n",
+    encoding="utf-8",
+)
+for row in checks:
+    print(row["status"], row["name"], row["details"])
+sys.exit(any(entry["status"] == "FAIL" for entry in checks))
