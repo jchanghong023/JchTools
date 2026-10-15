@@ -907,7 +907,8 @@ def slint_modal_gating() -> str:
     # enabled 绑定到分号才结束；换行不能截断后续的确认门禁。
     for enabled_match in re.finditer(r"(?<![\w-])enabled\s*:([^;]*);", background):
         expr = enabled_match.group(1)
-        if "confirm-kind" not in expr:
+        # 常量 false 不可能交互；含其他运算的表达式仍须显式确认门禁。
+        if expr.strip() != "false" and "confirm-kind" not in expr:
             line_number = ui.count("\n", 0, start + enabled_match.start()) + 1
             bad.append((line_number, "enabled: " + " ".join(expr.split())))
     if bad:

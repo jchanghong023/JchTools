@@ -603,7 +603,8 @@ class GateFailFastTests(unittest.TestCase):
         self.assertEqual([row["name"] for row in report["checks"]], ["manifests"])
         self.assertIn("FAIL manifests", result.stdout)
 
-    def test_nested_test_failure_does_not_wait_for_runner_or_budget(self) -> None:
+    def test_review_remediation_native_failure_records_stop_runner_and_pending_stages(self) -> None:
+        # P3-41：Rust 1.98.1 原生结果文件含普通失败、带消息失败及跨行消息。
         artifact = self.workspace / "artifact.json"
         artifact.write_text(json.dumps({
             "reason": "compiler-artifact",
@@ -611,35 +612,156 @@ class GateFailFastTests(unittest.TestCase):
             "target": {"name": "synthetic", "kind": ["test"]},
             "executable": sys.executable,
         }), encoding="utf-8")
+        variants = (
+            ("ordinary", "failed first_failure\n", "test first_failure ... FAILED"),
+            (
+                "message",
+                "failed: test did not panic as expected first_failure\n",
+                "test did not panic as expected",
+            ),
+            (
+                "multiline",
+                "failed: panic did not contain expected string\n"
+                f'      panic message: "{"x" * 16_384}"\n'
+                ' expected substring: "expected" first_failure\n',
+                "panic did not contain expected string",
+            ),
+            (
+                "long-message",
+                f"failed: native failure {'x' * 16_384}\n",
+                "native failure",
+            ),
+        )
         for level in ("fulltest", "slowtest"):
-            with self.subTest(level=level):
-                nested = local_gate_plan._test_binary_stages(
-                    gate_runtime.Result("root-test-build", "PASS", "synthetic artifact", log=artifact)
-                )[0]
-                nested.argv = [
-                    sys.executable, "-c",
-                    "import pathlib,sys,threading; print('test first_failure ... FAILED',flush=True); "
-                    "pathlib.Path(sys.argv[-1]).write_text('failed first_failure\\n'); threading.Event().wait()",
-                ]
-                output = io.StringIO()
-                with contextlib.redirect_stdout(output):
-                    code = test_gate.execute_gate(level, 1.0, stages_override=[nested])
-                self.assertEqual(code, 1)
-                self.assertIn(f"{level} FAIL total=", output.getvalue())
-                self.assertNotIn("TIMEOUT", output.getvalue())
-                self.assertIn("test first_failure ... FAILED", output.getvalue())
+            for variant, record, summary in variants:
+                with (
+                    self.subTest(level=level, variant=variant),
+                    tempfile.TemporaryDirectory(dir=self.workspace) as temporary,
+                ):
+                    root = Path(temporary)
+                    ready, later = root / "peer-ready", root / "pending-ran"
+                    peer_code = (
+                        "import pathlib,sys,threading; "
+                        "pathlib.Path(sys.argv[1]).touch(); threading.Event().wait()"
+                    )
+                    runner_code = (
+                        "import pathlib,sys,threading,time; ready=pathlib.Path(sys.argv[1]); "
+                        "\nwhile not ready.exists(): time.sleep(0.01)"
+                        "\npathlib.Path(sys.argv[-1]).write_text(sys.argv[2],encoding='utf-8'); "
+                        "print('runner stays alive after native result',flush=True); threading.Event().wait()"
+                    )
+                    nested = local_gate_plan._test_binary_stages(
+                        gate_runtime.Result("root-test-build", "PASS", "synthetic artifact", log=artifact)
+                    )[0]
+                    nested.argv = [sys.executable, "-c", runner_code, str(ready), record]
+                    nested.exclusive_resource = "native-failure-chain"
+                    stages = [
+                        gate_runtime.Stage("active-peer", [sys.executable, "-c", peer_code, str(ready)]),
+                        nested,
+                        gate_runtime.Stage(
+                            "must-not-run",
+                            [sys.executable, "-c",
+                             "import pathlib,sys; pathlib.Path(sys.argv[1]).touch()", str(later)],
+                            exclusive_resource="native-failure-chain",
+                        ),
+                    ]
+                    processes: list[subprocess.Popen[bytes]] = []
+                    start = test_gate._start_owned_command
 
-    def test_expected_failure_text_does_not_stop_successful_runner(self) -> None:
+                    def record_start(argv, **kwargs):
+                        proc = start(argv, **kwargs)
+                        processes.append(proc)
+                        return proc
+
+                    output = io.StringIO()
+                    with (
+                        patch.object(test_gate, "LOG_DIR", root / "logs"),
+                        patch.object(test_gate, "_start_owned_command", record_start),
+                        contextlib.redirect_stdout(output),
+                    ):
+                        code = test_gate.execute_gate(level, 3.0, stages_override=stages)
+                    self.assertEqual(code, 1)
+                    self.assertFalse(later.exists(), "原生失败后仍启动了待执行阶段")
+                    self.assertTrue(ready.exists(), "并行所属进程未进入运行状态")
+                    peer = next(proc for proc in processes if peer_code in proc.args)
+                    runner = next(proc for proc in processes if runner_code in proc.args)
+                    for proc in (peer, runner):
+                        self.assertIsNotNone(proc.poll(), "原生失败后仍遗留所属进程")
+                        self.assertNotEqual(proc.returncode, 0, "保活进程应由门终止")
+                    text = output.getvalue()
+                    self.assertIn(f"{level} FAIL total=", text)
+                    self.assertNotIn("TIMEOUT", text)
+                    self.assertIn(summary, text, "门报告必须保留真实原生失败摘要")
+                    self.assertLess(len(text), 8_192, "跨行消息不得无限膨胀门摘要")
+                    if variant != "ordinary":
+                        self.assertNotIn(
+                            f"test {record.removeprefix('failed: ').strip()} ... FAILED",
+                            text,
+                            "冒号后的失败消息不是测试名",
+                        )
+                        self.assertNotIn(f"test {summary} ... FAILED", text)
+
+    def test_review_remediation_stdout_failure_text_does_not_stop_successful_runner(self) -> None:
+        # P3-41：stdout 的普通/冒号/跨行假失败不属于原生结果协议。
+        later = self.workspace / "successful-runner-later"
         stage = gate_runtime.Stage(
             "expected-panic-fixture",
             [sys.executable, "-c",
              "import pathlib,sys; print('test expected_panic ... FAILED'); "
+             "print('failed first_failure'); print('failed: test did not panic as expected first_failure'); "
+             "print('failed: panic did not contain expected string\\n"
+             '      panic message: "actual"\\n expected substring: "expected" first_failure\'); '
              "pathlib.Path(sys.argv[-1]).write_text('ok expected_panic\\n')"],
+            exclusive_resource="native-success-chain",
             watch_test_failures=True,
         )
+        pending = gate_runtime.Stage(
+            "successful-runner-next",
+            [sys.executable, "-c", "import pathlib,sys; pathlib.Path(sys.argv[1]).touch()", str(later)],
+            exclusive_resource="native-success-chain",
+        )
         with contextlib.redirect_stdout(io.StringIO()):
-            code = test_gate.execute_gate("fulltest", 60.0, stages_override=[stage])
+            code = test_gate.execute_gate("fulltest", 60.0, stages_override=[stage, pending])
         self.assertEqual(code, 0, "测试自行输出的失败文字被误当成 harness 失败")
+        self.assertTrue(later.exists(), "成功的原生结果不应阻止后续阶段")
+
+    def test_native_failure_partial_record_waits_for_newline_or_runner_exit(self) -> None:
+        for prefix in ("failed ", "failed: "):
+            for exited in (False, True):
+                with self.subTest(prefix=prefix, exited=exited):
+                    log = self.workspace / "partial-native.log"
+                    native = log.with_suffix(".test-results")
+                    native.write_bytes(f"{prefix}first_failure".encode())
+                    proc = MagicMock(spec=subprocess.Popen)
+                    proc.poll.return_value = None
+                    run = gate_runtime.GateRun(
+                        "fulltest", 60.0, self.workspace, self.workspace,
+                        start_command=MagicMock(side_effect=AssertionError("不应启动阶段")),
+                        close_command=MagicMock(return_value=True),
+                        kill_tree=MagicMock(return_value=True),
+                        compiler_ids=MagicMock(return_value=frozenset()),
+                    )
+                    with io.BytesIO() as sink, contextlib.redirect_stdout(io.StringIO()):
+                        running = gate_runtime._Running(
+                            gate_runtime.Stage("partial-native", [], watch_test_failures=True),
+                            proc, sink, log, 0.0,
+                        )
+                        run._observe_test_failure(running)
+                        self.assertIsNone(running.test_failure, "活跃 runner 的半行不得提前判为失败")
+                        self.assertEqual(running.output_offset, 0, "半行必须保留到下次完整读取")
+                        self.assertFalse(run._interrupted)
+                        if exited:
+                            proc.poll.return_value = 1
+                        else:
+                            with native.open("ab") as output:
+                                _ = output.write(b"\n")
+                        run._observe_test_failure(running)
+                    self.assertEqual(
+                        running.test_failure,
+                        "test first_failure ... FAILED" if prefix == "failed " else "failed: first_failure",
+                    )
+                    self.assertTrue(run._interrupted)
+                    self.assertEqual(running.output_offset, native.stat().st_size)
 
 
 class FastcheckWallClockGuardTests(unittest.TestCase):

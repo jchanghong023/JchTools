@@ -78,11 +78,17 @@ from pywinauto.uia_defines import IUIA
 
 if not __package__:
     sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
-from scripts.gui_smoke import completion_confirms_new_run, missing_isolation_env, own_process_tree
+from scripts.gui_smoke import (
+    ISOLATION_GUARDED_STAGES,
+    assert_clean_exit,
+    completion_confirms_new_run,
+    missing_isolation_env,
+    own_process_tree,
+)
 from scripts.test_reports import Case, TimingReport
 
 if TYPE_CHECKING:
-    from collections.abc import Buffer, Callable
+    from collections.abc import Buffer, Callable, Mapping
     from typing import NoReturn, TypeIs
 
     from _win32typing import (  # pyright: ignore[reportMissingModuleSource]  # 官方 pywin32 类型桩专用模块。
@@ -113,15 +119,16 @@ def _is_under_tmp(path: Path) -> bool:
     return resolved.is_relative_to(TMP_ROOT)
 
 
-def _isolated_environment_error() -> str | None:
+def _isolated_environment_error(env: Mapping[str, str] | None = None) -> str | None:
     """拒绝将生产状态库或资产目录通过验收环境变量伪装成隔离根."""
+    effective_env = os.environ if env is None else env
     for name in (
         "JCHTOOLS_TEST_ASSET_ROOT",
         "JCHTOOLS_MARKDOWN_TEST_ASSET_ROOT",
         "JCHTOOLS_TEST_STATE_DIR",
         "JCHTOOLS_SNAP_OCR_TEST_ASSET_ROOT",
     ):
-        value = os.environ.get(name)
+        value = effective_env.get(name)
         if not value:
             continue
         path = Path(value)
@@ -1831,26 +1838,37 @@ def _request_close(window: WindowSpecification) -> None:
         return
 
 
-def _terminate(proc: subprocess.Popen[bytes]) -> None:
-    with contextlib.suppress(Exception):
-        _ = proc.wait(timeout=10)
-    proc.kill()
-    _ = proc.wait(timeout=10)
+def _terminate(proc: subprocess.Popen[bytes]) -> tuple[bool, int | None]:
+    """先等待实际自然退出；仅超时且仍存活时强杀，并保留退出证据。."""
+    try:
+        return False, proc.wait(timeout=10)
+    except subprocess.TimeoutExpired:
+        if proc.poll() is not None:
+            return False, proc.returncode
+        proc.kill()
+        return True, proc.wait(timeout=10)
 
 
 def _close_conversion_gui(
     proc: subprocess.Popen[bytes], window: WindowSpecification | None, close_tree: Callable[[], None] | None
 ) -> None:
-    """关闭真实窗口并始终回收本轮后台，包括 UIA 关闭失败的路径."""
+    """仅在自然 exit 0 且 Job 回收成功后容忍关闭阶段的瞬态 UIA 竞态。."""
+    close_error: Exception | None = None
     try:
-        if window is not None:
-            _request_close(window)
+        if proc.poll() is None and window is not None:
+            try:
+                _request_close(window)
+            except TRANSIENT_ERRORS as error:
+                close_error = error
     finally:
         try:
-            _terminate(proc)
+            killed, code = _terminate(proc)
         finally:
             if close_tree is not None:
                 close_tree()
+    if close_error is not None and (killed or code != 0):
+        raise close_error
+    assert_clean_exit("转 Markdown GUI", killed=killed, code=code)
 
 
 _MAX_START_RECLICKS = 3
@@ -1944,12 +1962,21 @@ def _wait_process_isolation(
     return False
 
 
+def _isolation_precondition(env: Mapping[str, str]) -> Outcome | None:
+    """只把缺必需隔离键归为未执行；非法路径仍按失败呈现。."""
+    invalid = _isolated_environment_error(env)
+    if invalid is not None:
+        return Outcome(STATUS_FAILED, invalid)
+    missing = missing_isolation_env(env)
+    if missing:
+        return Outcome(STATUS_NOT_RUN, f"GUI 验收缺少隔离环境变量：{missing}，拒绝启动")
+    return None
+
+
 def _conversion_preflight_error() -> str | None:
     """启动 GUI 前同时检查必需隔离键与隔离根，保持原拒绝诊断。."""
-    missing = missing_isolation_env(os.environ)
-    if missing:
-        return f"GUI 验收缺少隔离环境变量：{missing}，拒绝启动"
-    return _isolated_environment_error()
+    pending = _isolation_precondition(os.environ)
+    return None if pending is None else pending.reason
 
 
 def _configure_conversion_paths(window: WindowSpecification, input_dir: Path, output_dir: Path) -> str | None:
@@ -2570,6 +2597,11 @@ def _gui_smoke_stages() -> tuple[tuple[str, ...], str | None]:
 
 
 def _delegate_stage(stage: str, exe: Path, env_extra: dict[str, str] | None = None) -> Outcome:
+    effective_env = os.environ | (env_extra or {})
+    if stage in ISOLATION_GUARDED_STAGES:
+        pending = _isolation_precondition(effective_env)
+        if pending is not None:
+            return pending
     # gui_smoke 的 main() 无条件校验数据目录存在；本入口只委托 S1/S5 这类不读
     # 数据集的阶段，提供一次性空目录即可通过校验（S2-S4 数据阶段不经此处）。
     scratch_data = SCRATCH_ROOT / "gui-smoke-data"
@@ -2593,7 +2625,7 @@ def _delegate_stage(stage: str, exe: Path, env_extra: dict[str, str] | None = No
         encoding="utf-8",
         errors="replace",
         check=False,
-        env=os.environ | (env_extra or {}),
+        env=effective_env,
     )
     tail = "\n".join(((done.stdout or "") + (done.stderr or "")).splitlines()[-8:])
     if done.returncode == 0:
@@ -2754,9 +2786,15 @@ def _run_conversion_item(  # noqa: PLR0913  # 前置与采集参数各自独立�
     target, blocked = _resolve_gui(ctx, exe)
     if blocked is not None or target is None:
         return Outcome(STATUS_NOT_RUN, blocked or "被测 GUI 缺失")
-    for pending in (_asset_precondition(ctx, item), _fixture_precondition(item, ctx.fixtures_dir)):
-        if pending:
-            return Outcome(STATUS_NOT_RUN, pending)
+    pending = None
+    for reason in (_asset_precondition(ctx, item), _fixture_precondition(item, ctx.fixtures_dir)):
+        if reason:
+            pending = Outcome(STATUS_NOT_RUN, reason)
+            break
+    if pending is None:
+        pending = _isolation_precondition(os.environ)
+    if pending is not None:
+        return pending
     prepared = _prepare_scratch(item, ctx, tag_suffix)
     if prepared.error is not None:
         return Outcome(STATUS_NOT_RUN, f"夹具合成失败：{prepared.error}")
@@ -2847,8 +2885,8 @@ _CONTENT_ASSERTS: dict[str, ContentSpec] = {
     # A03 同一 media 被两个 shape 引用：T-14 要求保留每处位置，正文恰出现两次。
     "A03": ContentSpec(require_counts=(("SHARED-MEDIA", 2),)),
     # SVG 栅格化后可按 PNG 落盘；源扩展名字面量不是 T-14 的产物要求。
-    # 邻位 PNG 仍须 OCR；两张独立的可解码媒体由 verify_svg_raster_media 核对。
-    "A07": ContentSpec(require=("PNG-NEIGH",)),
+    # 两个来源的 OCR 正文都须保留；独立可解码媒体由 verify_svg_raster_media 核对。
+    "A07": ContentSpec(require=("SVG-LOCAL", "PNG-NEIGH")),
     # A08 字段值（幻灯片编号一位字符）必须存活在两段 run 之间，不能只查首尾。
     "A08": ContentSpec(
         require=("RUN-AND", "FIELD-END"),
@@ -3779,6 +3817,9 @@ def _run_c05_no_python(item: Item, ctx: Context) -> Outcome:
     target, blocked = _resolve_gui(ctx)
     if blocked is not None or target is None:
         return Outcome(STATUS_NOT_RUN, blocked or "被测 GUI 缺失")
+    pending = _isolation_precondition(os.environ)
+    if pending is not None:
+        return pending
     if manifest_has_python_entries():
         return Outcome(STATUS_FAILED, "可选资产清单包含 python 字样条目（隐藏携带 Python）")
     prepared = _prepare_scratch(item, ctx, "python-scan")

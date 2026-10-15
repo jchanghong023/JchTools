@@ -25,6 +25,7 @@ STATUS_UNVERIFIED = "UNVERIFIED"
 _CEILINGS = {"fastcheck": 60.0, "fulltest": 900.0, "slowtest": 1500.0}
 _POLL_SECONDS = 0.02
 _TAIL_LINES = 8
+_TEST_FAILURE_SUMMARY_LIMIT = 1024
 _PARALLEL_COMMANDS = 4
 _parse_json: Callable[[str], object] = json.loads
 
@@ -368,7 +369,7 @@ class GateRun:
         if not running.stage.watch_test_failures:
             return
         # stable libtest 的 fail-fast 开关仍需 nightly；只观察原生结果文件，不解析测试输出。
-        # failed <name> 与 nocapture、测试线程数、panic/预期失败夹具文案无关。
+        # failed <name> 是测试名，failed: <message> 是失败消息；摘要只保留有界单行。
         result_file = running.log.with_suffix(".test-results")
         if not result_file.exists():
             return
@@ -378,9 +379,13 @@ class GateRun:
                 if not line.endswith(b"\n") and running.process.poll() is None:
                     break
                 running.output_offset = source.tell()
-                if line.startswith(b"failed "):
-                    name = line.removeprefix(b"failed ").decode("utf-8", errors="replace").strip()
-                    running.test_failure = f"test {name} ... FAILED"
+                if line.startswith((b"failed ", b"failed:")):
+                    summary = " ".join(line.decode("utf-8", errors="replace").split())
+                    if line.startswith(b"failed "):
+                        summary = f"test {summary.removeprefix('failed ')} ... FAILED"
+                    if len(summary) > _TEST_FAILURE_SUMMARY_LIMIT:
+                        summary = summary[: _TEST_FAILURE_SUMMARY_LIMIT - 3] + "..."
+                    running.test_failure = summary
                     self._halt_on_error(Result(running.stage.name, STATUS_FAILED, running.test_failure, running.log))
                     break
                 self._charge()

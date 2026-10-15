@@ -27,7 +27,9 @@
   S15 MD 合并/拆分真实 GUI：验证标题下移、原文件不变与 UTF-8 分片无损还原。
   S16 Git 真实 GUI：使用一次性仓库和本地 bare 远端，验证逐文件提交及推送结果。
   S17 预置真实最新 Xberg 后，经设置页离线检查补写 notice，核对实际转换就绪状态。
-  S18 在两档窗口尺寸下逐页检查主要操作控件边界与重叠，自动判定布局结果。
+  S18 在两档窗口尺寸下逐页检查主要操作控件及退出模型服务确认层的边界与重叠；
+     独占隔离状态、资产、CodeAgent 凭据与注册表，真实空配置服务仅用于打开确认层，
+     随后返回检查，不确认退出；阶段收尾只回收本轮拥有的后台进程。
 
 用法：
     python scripts/gui_smoke.py --exe target/debug/JchTools.exe --data <已生成的测试数据目录>
@@ -355,31 +357,36 @@ def confirm_dialog(window: WindowSpecification, timeout: int = TIMEOUT, *, extra
     未勾选就点复选框，已勾选就点确认，直到对话框关闭；
     只检查「点击没报错」会把没生效的点击当成成功，后续等待必然超时。
     """
-    checkbox = window.child_window(title=EXTRACT_ACK if extraction else ORGANIZE_ACK, control_type="CheckBox")
-    ok = find_button(window, "确认")
     deadline = time.time() + timeout
+    next_attempt = 0.0
     attempts = 0
+    closed_observations = 0
     while time.time() < deadline:
-        _ = checkbox.wait("visible", timeout=10)
-        time.sleep(0.3)  # 让对话框完成滑入，避免点到动画中途的位置
-        attempts += 1
-        click(window, ok if ok.is_enabled() else checkbox)
-        closed_observations = 0
-        for _ in range(20):
-            time.sleep(0.3)
-            try:
-                # Slint 删除/重建 UIA 节点时旧 CheckBox 可能暂时不可读；
-                # 用新枚举且非空的页面树连续两次确认模态标题消失。
-                texts = [text.window_text() or "" for text in window.descendants(control_type="Text")]
-                if texts and "确认文件处理范围" not in texts:
-                    closed_observations += 1
-                else:
-                    closed_observations = 0
+        try:
+            # 重试前也必须新枚举：上次观察尾部关闭后，不再等待已删除的复选框。
+            texts = [text.window_text() or "" for text in window.descendants(control_type="Text")]
+            if texts and "确认文件处理范围" not in texts:
+                closed_observations += 1
                 if closed_observations >= CONFIRM_CLOSED_OBSERVATIONS:
                     return
-            except TRANSIENT_GUI_ERRORS:
+            else:
                 closed_observations = 0
-        print(f"  确认框仍未关闭，重试第 {attempts} 次")
+                if texts and time.time() >= next_attempt:
+                    checkbox = window.child_window(
+                        title=EXTRACT_ACK if extraction else ORGANIZE_ACK, control_type="CheckBox"
+                    )
+                    _ = checkbox.wait("visible", timeout=min(10.0, max(0.1, deadline - time.time())))
+                    time.sleep(0.3)  # 让对话框完成滑入，避免点到动画中途的位置
+                    ok = find_button(window, "确认")
+                    click(window, ok if ok.is_enabled() else checkbox)
+                    attempts += 1
+                    if attempts > 1:
+                        print(f"  确认框仍未关闭，重试第 {attempts - 1} 次")
+                    next_attempt = time.time() + 6.0
+        except TRANSIENT_GUI_ERRORS:
+            # 空树、重建和控件等待超时都不是关闭证据；耗尽总期限仍须失败。
+            closed_observations = 0
+        time.sleep(0.3)
     msg = "确认对话框没有关闭：勾选或确认点击未生效"
     raise RuntimeError(msg)
 
@@ -434,9 +441,7 @@ def task_ids(data: str) -> frozenset[str]:
     return frozenset(name for name, _status in _task_records(data))
 
 
-def wait_task_status(
-    data: str, expected: str, before: frozenset[str], timeout: int = COMPLETION_TIMEOUT
-) -> None:
+def wait_task_status(data: str, expected: str, before: frozenset[str], timeout: int = COMPLETION_TIMEOUT) -> None:
     """等待这次点击新建的任务跑到 expected 状态.
 
     界面文本经 UIA 桥接并不总是可见（动态状态行时有时无），
@@ -1079,7 +1084,7 @@ def s5_markdown_basic_chain(exe: str) -> None:
         _ = wait_text_containing(window, "已停止")
         # 停止落地前的时延内当前文件可能已自然完成（其成品按 T-23 保留），取消条目
         # 因此可能落在下一文件上；断言「存在媒体文件的确认取消条目」这一合同不变量。
-        _ = wait_log_matching(window, r"已取消：\d{2}_\S+；未完成结果不提交")
+        _ = wait_log_matching(window, r"已取消：\d{2}_[^\r\n]+；未完成结果不提交")
         verify_cancelled_outputs(scratch / "output", before, current_md)
         print("S5 PASS：当前转换及时取消；已完成产物保留，后续/临时产物均未提交")
 
@@ -1964,6 +1969,8 @@ LAYOUT_PAGES = (
     ("截图 OCR", ()),
     ("设置", (SETTINGS_DOWNLOAD_BUTTON, SETTINGS_CHECK_BUTTON)),
     ("关于", ()),
+    ("模型服务", ("保存配置", "退出模型服务")),
+    ("CodeAgent", ("保存间隔",)),
 )
 
 
@@ -1976,34 +1983,82 @@ def verify_control_rectangles(bounds: tuple[int, int, int, int], rectangles: lis
             require(min(x2, a2) <= max(x1, a1) or min(y2, b2) <= max(y1, b1), "主要操作控件互相重叠")
 
 
+def verify_layout_buttons(window: WindowSpecification, buttons: list[BaseWrapper]) -> None:
+    """把真实 UIA 按钮矩形交给同一布局判据，页面和模态不另设放宽规则。."""
+    bounds = window.rectangle()
+    rectangles = [button.rectangle() for button in buttons]
+    verify_control_rectangles(
+        (bounds.left, bounds.top, bounds.right, bounds.bottom),
+        [(rect.left, rect.top, rect.right, rect.bottom) for rect in rectangles],
+    )
+
+
+def _verify_layout_at_two_sizes(window: WindowSpecification) -> None:
+    original = window.rectangle()
+    sizes = (
+        (original.right - original.left, original.bottom - original.top),
+        (original.right - original.left + 200, original.bottom - original.top + 150),
+    )
+    optional_buttons = {"模型服务": ("应用并重启",), "CodeAgent": ("关闭提示",)}
+    for width, height in sizes:
+        win32gui.SetWindowPos(window.handle, 0, 0, 0, width, height, win32con.SWP_NOMOVE | win32con.SWP_NOZORDER)
+        time.sleep(0.5)
+        for page, titles in LAYOUT_PAGES:
+            click(window, find_button(window, page))
+            if page == "截图 OCR":
+                _ = wait_text_containing(window, "截图快捷键")
+            elif page == "关于":
+                _ = wait_text_containing(window, "关于 JchTools")
+            buttons = [wait_button(window, title, TIMEOUT) for title in titles]
+            for title in optional_buttons.get(page, ()):
+                buttons.extend(unique_visible_buttons(window, title))
+            verify_layout_buttons(window, buttons)
+            if page == "模型服务":
+                click(window, wait_button(window, "退出模型服务", TIMEOUT, enabled=True))
+                back = wait_button(window, "返回检查", TIMEOUT, enabled=True)
+                confirm = wait_button(window, "确认退出模型服务", TIMEOUT, enabled=True)
+                try:
+                    verify_layout_buttons(window, [back, confirm])
+                finally:
+                    click(window, back)
+                _ = wait_button(window, "保存配置", TIMEOUT, enabled=True)
+                _ = wait_button(window, "退出模型服务", TIMEOUT, enabled=True)
+
+
 def s18_layout_at_two_window_sizes(exe: str) -> None:
-    """真实 GUI 入口，自动检查两档尺寸与全部页面的主要控件；不冒充全面像素审美验收。."""
+    """覆盖 U-05/P-13/CA-01：隔离后台下检查两档页面及 kind 5，返回检查而不退出服务。."""
+    service: subprocess.Popen[bytes] | None = None
+    service_owner: _OwnedProcessTree | None = None
+
+    def cleanup_service() -> None:
+        if service is None:
+            return
+        try:
+            if service_owner is not None:
+                service_owner.close()
+            elif service.poll() is None:
+                service.kill()
+        finally:
+            _ = service.wait(timeout=15)
 
     def body(window: WindowSpecification) -> None:
-        original = window.rectangle()
-        sizes = (
-            (original.right - original.left, original.bottom - original.top),
-            (original.right - original.left + 200, original.bottom - original.top + 150),
-        )
-        for width, height in sizes:
-            win32gui.SetWindowPos(window.handle, 0, 0, 0, width, height, win32con.SWP_NOMOVE | win32con.SWP_NOZORDER)
-            time.sleep(0.5)
-            for page, titles in LAYOUT_PAGES:
-                click(window, find_button(window, page))
-                if page == "截图 OCR":
-                    _ = wait_text_containing(window, "截图快捷键")
-                elif page == "关于":
-                    _ = wait_text_containing(window, "关于 JchTools")
-                buttons = [wait_button(window, title, TIMEOUT) for title in titles]
-                bounds = window.rectangle()
-                rectangles = [button.rectangle() for button in buttons]
-                verify_control_rectangles(
-                    (bounds.left, bounds.top, bounds.right, bounds.bottom),
-                    [(rect.left, rect.top, rect.right, rect.bottom) for rect in rectangles],
-                )
+        nonlocal service, service_owner
+        # run_stage 先确认 GUI 已建立隔离 SQLite，才允许启动真实独占服务。
+        # 空配置服务无需 Agent 或模型即可提供真实控制状态和退出确认入口。
+        service = subprocess.Popen([exe, "--acp-http-service"], env=env)
+        service_owner = own_process_tree(service)
+        _verify_layout_at_two_sizes(window)
+        require(service.poll() is None, "S18 返回检查后真实隔离模型服务必须保持存活")
 
-    run_stage("S18", exe, body)
-    print("S18 PASS：两档窗口尺寸逐页到达，所列主要按钮未裁切、未重叠（未覆盖全部视觉细节）")
+    with tempfile.TemporaryDirectory(prefix="jchtools-gui-smoke-s18-") as temporary:
+        scratch = Path(temporary).resolve()
+        env = isolated_state_env(scratch)
+        # 不继承真实或其他阶段的凭据/注册表；缺失凭据只能产生安全的读取失败。
+        env["JCHTOOLS_TEST_CODEAGENT_CREDENTIALS"] = str(scratch / "absent-credentials.json")
+        env["JCHTOOLS_TEST_CODEAGENT_REGISTRY"] = rf"Software\JchTools\Tests\CodeAgent\{scratch.name}"
+        env["JCHTOOLS_TEST_ACP_SERVICE_EXE"] = str(Path(exe).resolve())
+        run_stage("S18", exe, body, env=env, after=cleanup_service)
+    print("S18 PASS：两档尺寸覆盖全部页面及退出确认，按钮无裁切/重叠，返回检查未停止服务（非全面视觉验收）")
 
 
 def parse_stages(stages_arg: str) -> list[str]:

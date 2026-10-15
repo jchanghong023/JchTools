@@ -1,6 +1,6 @@
-"""gui_smoke 纯函数回归单测（S11-06 完成判据与产物快照锚、S11-07 隔离守卫）.
+"""gui_smoke 判据及内存 UIA 阶段回归单测.
 
-只测纯函数与文件系统快照 helper，不启动 GUI、不写仓库目录（tempfile 例外）；
+不启动真实 GUI、不操作硬件鼠标、不写仓库目录（tempfile 例外）；
 受 Bandit B101 管控的 assert 逐条附 nosec 说明。
 """
 
@@ -16,6 +16,8 @@ import tempfile
 import unittest
 import zipfile
 from collections import Counter
+from dataclasses import dataclass
+from functools import partial
 from pathlib import Path
 from typing import TYPE_CHECKING, cast
 from unittest.mock import patch
@@ -573,3 +575,427 @@ class OriginalDispositionTests(unittest.TestCase):
                         original.unlink()
                         with self.assertRaises(RuntimeError):
                             gui_smoke.verify_original_disposition(root, originals, Counter())
+
+
+class _ReviewClock:
+    def __init__(self) -> None:
+        self.now = 0.0
+
+    def read(self) -> float:
+        return self.now
+
+    def sleep(self, seconds: float) -> None:
+        self.now += seconds
+
+
+@dataclass(frozen=True)
+class _ReviewRectangle:
+    left: int
+    top: int
+    right: int
+    bottom: int
+
+
+class _ReviewControl:
+    def __init__(
+        self,
+        title: str,
+        rectangle: _ReviewRectangle = _ReviewRectangle(250, 80, 390, 112),
+        *,
+        action: Callable[[], None] | None = None,
+        before_wait: Callable[[], None] | None = None,
+    ) -> None:
+        self.title = title
+        self.bounds = rectangle
+        self.action = action
+        self.before_wait = before_wait
+
+    def window_text(self) -> str:
+        return self.title
+
+    def rectangle(self) -> _ReviewRectangle:
+        return self.bounds
+
+    def is_visible(self) -> bool:
+        return True
+
+    def is_enabled(self) -> bool:
+        return True
+
+    def wait(self, _state: str, **_options: object) -> _ReviewControl:
+        if self.before_wait is not None:
+            self.before_wait()
+        return self
+
+    def invoke(self) -> None:
+        if self.action is not None:
+            self.action()
+
+    def click_input(self) -> None:
+        message = "内存 UIA 回归禁止鼠标兜底"
+        raise AssertionError(message)
+
+
+class _ReviewStageDriver:
+    """仅替换进程/桌面边界，pre、真实阶段主体及 after 仍执行。."""
+
+    def __init__(self, window: object) -> None:
+        self.window = window
+
+    def __call__(
+        self,
+        _tag: str,
+        _exe: str,
+        body: Callable[[WindowSpecification], None],
+        *,
+        pre: Callable[[], None] | None = None,
+        after: Callable[[], None] | None = None,
+        **_options: object,
+    ) -> None:
+        try:
+            if pre is not None:
+                pre()
+            body(cast("WindowSpecification", self.window))
+        finally:
+            if after is not None:
+                after()
+
+
+class _ReviewLayoutWindow:
+    handle = 0
+    # 独立 UIA 场景，不从被测 LAYOUT_PAGES 生成，否则漏页会同步消失。
+    pages: dict[str, tuple[str, ...]] = {
+        "递归解压": ("开始解压",),
+        "目录整理": ("开始分析",),
+        "MD 整理": ("开始合并",),
+        "转 Markdown": ("开始转换",),
+        "Git 工具": ("开始",),
+        "截图 OCR": (),
+        "设置": ("下载 / 补齐所选功能", "检查已安装组件"),
+        "关于": (),
+        "模型服务": ("保存配置", "退出模型服务"),
+        # 错误提示当前可见；正常无提示时不应无条件等待“关闭提示”。
+        "CodeAgent": ("保存间隔", "关闭提示"),
+    }
+
+    def __init__(self, damaged_page: str = "", damage: str = "", *, show_hint: bool = True) -> None:
+        self.page = "递归解压"
+        self.bounds = _ReviewRectangle(0, 0, 960, 620)
+        self.damaged_page = damaged_page
+        self.damage = damage
+        self.show_hint = show_hint
+        self.modal_open = False
+        self.service_running = True
+
+    def rectangle(self) -> _ReviewRectangle:
+        return self.bounds
+
+    def resize(
+        self, _handle: int, _after: int, _x: int, _y: int, width: int, height: int, _flags: int
+    ) -> None:
+        self.bounds = _ReviewRectangle(0, 0, width, height)
+
+    def select_page(self, page: str) -> None:
+        self.page = page
+
+    def open_modal(self) -> None:
+        self.modal_open = True
+
+    def return_to_page(self) -> None:
+        self.modal_open = False
+
+    def stop_service(self) -> None:
+        self.service_running = False
+
+    def descendants(self, *, control_type: str) -> list[_ReviewControl]:
+        if control_type == "Text":
+            if self.modal_open:
+                return [_ReviewControl("退出模型服务")]
+            return [_ReviewControl("截图快捷键"), _ReviewControl("关于 JchTools")]
+        if control_type != "Button":
+            return []
+        if self.modal_open:
+            titles = ("返回检查", "确认退出模型服务")
+            actions: tuple[Callable[[], None] | None, ...] = (self.return_to_page, self.stop_service)
+            page = "confirm5"
+            buttons: list[_ReviewControl] = []
+        else:
+            titles = self.pages[self.page]
+            if self.page == "CodeAgent" and not self.show_hint:
+                titles = ("保存间隔",)
+            actions = tuple(self.open_modal if title == "退出模型服务" else None for title in titles)
+            page = self.page
+            buttons = [
+                _ReviewControl(name, action=partial(self.select_page, name))
+                for name in self.pages
+            ]
+        for index, (title, action) in enumerate(zip(titles, actions, strict=True)):
+            left = 250 + index * 180
+            bounds = _ReviewRectangle(left, 200, left + 160, 240)
+            if page == self.damaged_page:
+                if self.damage == "clipped" and index == 0:
+                    bounds = _ReviewRectangle(250, 200, self.bounds.right + 1, 240)
+                elif self.damage == "overlap" and index == 1:
+                    bounds = _ReviewRectangle(370, 200, 530, 240)
+            buttons.append(_ReviewControl(title, bounds, action=action))
+        return buttons
+
+    def child_window(self, *, title: str, control_type: str, found_index: int = 0) -> _ReviewControl:
+        matching = [control for control in self.descendants(control_type=control_type) if control.title == title]
+        if len(matching) <= found_index:
+            message = f"内存 UIA 中不存在可见控件：{title}"
+            raise gui_smoke.timings.TimeoutError(message)
+        return matching[found_index]
+
+
+class _ReviewLayoutService:
+    """仅替换真实服务的进程/Job 边界，不改页面或模态行为。."""
+
+    def __init__(self) -> None:
+        self.reaped = False
+
+    def poll(self) -> int | None:
+        return 0 if self.reaped else None
+
+    def close(self) -> None:
+        self.reaped = True
+
+    def wait(self, *, timeout: int) -> int:
+        del timeout
+        if not self.reaped:
+            raise AssertionError("隔离服务必须先由所属 Job 收尾")
+        return 0
+
+
+class ReviewRemediationLayoutTests(unittest.TestCase):
+    def run_layout(self, window: _ReviewLayoutWindow) -> None:
+        clock = _ReviewClock()
+        service = _ReviewLayoutService()
+
+        def spawn(argv: list[str], *, env: dict[str, str]) -> _ReviewLayoutService:
+            self.assertIs(env, stage.call_args.kwargs["env"], "GUI 与服务必须使用同一完整隔离环境")
+            self.assertEqual(argv, ["unused.exe", "--acp-http-service"], "不允许启动真实 GUI 或 Agent")
+            state = Path(env["JCHTOOLS_TEST_STATE_DIR"])
+            self.assertTrue(state.is_absolute())
+            self.assertNotEqual(str(state), ISOLATED_ENV["JCHTOOLS_TEST_STATE_DIR"])
+            for key in (
+                "JCHTOOLS_SNAP_OCR_TEST_ASSET_ROOT",
+                "JCHTOOLS_MARKDOWN_TEST_ASSET_ROOT",
+                "JCHTOOLS_TEST_ASSET_ROOT",
+                "JCHTOOLS_TEST_CODEAGENT_CREDENTIALS",
+            ):
+                self.assertTrue(Path(env[key]).is_relative_to(state), key)
+            self.assertFalse(Path(env["JCHTOOLS_TEST_CODEAGENT_CREDENTIALS"]).exists(), "不得读取真实 Token")
+            self.assertEqual(
+                env["JCHTOOLS_TEST_CODEAGENT_REGISTRY"],
+                rf"Software\JchTools\Tests\CodeAgent\{state.name}",
+            )
+            self.assertEqual(env["JCHTOOLS_TEST_ACP_SERVICE_EXE"], str(Path("unused.exe").resolve()))
+            return service
+        with (
+            patch.object(gui_smoke, "run_stage", side_effect=_ReviewStageDriver(window)) as stage,
+            patch.object(gui_smoke, "activate"),
+            patch("scripts.gui_smoke.win32gui.SetWindowPos", side_effect=window.resize),
+            patch("scripts.gui_smoke.time.time", side_effect=clock.read),
+            patch("scripts.gui_smoke.time.sleep", side_effect=clock.sleep),
+            patch.dict(
+                os.environ,
+                {
+                    **ISOLATED_ENV,
+                    "JCHTOOLS_TEST_CODEAGENT_CREDENTIALS": r"C:\real-profile\.cac\.credentials.json",
+                    "JCHTOOLS_TEST_CODEAGENT_REGISTRY": "Environment",
+                    "JCHTOOLS_TEST_ACP_SERVICE_EXE": r"C:\real-production\JchTools.exe",
+                },
+            ),
+            patch("scripts.gui_smoke.subprocess.Popen", side_effect=spawn) as popen,
+            patch.object(gui_smoke, "own_process_tree", return_value=service) as own_tree,
+        ):
+            try:
+                gui_smoke.s18_layout_at_two_window_sizes("unused.exe")
+            finally:
+                self.assertTrue(service.reaped, "成功与几何失败都必须回收本轮独占服务")
+                popen.assert_called_once()
+                own_tree.assert_called_once_with(service)
+                self.assertTrue(window.service_running, "布局验收不得确认退出模型服务")
+                self.assertFalse(window.modal_open, "布局验收必须通过返回检查关闭 kind 5")
+
+    def test_review_remediation_s18_rejects_clipping_on_new_pages_and_exit_modal(self) -> None:
+        # P2-07 / U-05 / P-13：真正执行 S18，遗漏页面/模态将无法拒绝这些几何反例。
+        for page in ("模型服务", "CodeAgent", "confirm5"):
+            with self.subTest(page=page), self.assertRaisesRegex(RuntimeError, "裁切|移出窗口"):
+                self.run_layout(_ReviewLayoutWindow(page, "clipped"))
+
+    def test_review_remediation_s18_rejects_overlap_on_new_pages_and_exit_modal(self) -> None:
+        # P2-07：CodeAgent 的关闭提示已可见；不要求无提示状态出现此按钮。
+        for page in ("模型服务", "CodeAgent", "confirm5"):
+            with self.subTest(page=page), self.assertRaisesRegex(RuntimeError, "重叠"):
+                self.run_layout(_ReviewLayoutWindow(page, "overlap"))
+
+    def test_review_remediation_s18_accepts_normal_geometry_without_stopping_service(self) -> None:
+        for show_hint in (False, True):
+            with self.subTest(show_hint=show_hint):
+                self.run_layout(_ReviewLayoutWindow(show_hint=show_hint))
+
+
+class _ReviewValueElement:
+    def GetCurrentPropertyValue(self, _identifier: int) -> bool:  # noqa: N802 - UIA 协议方法名。
+        return True
+
+
+class _ReviewElementInfo:
+    def __init__(self) -> None:
+        self.element = _ReviewValueElement()
+
+
+class _ReviewLogEdit(_ReviewControl):
+    def __init__(self, value: str) -> None:
+        super().__init__("")
+        self.value = value
+        self.element_info = _ReviewElementInfo()
+
+    def get_value(self) -> str:
+        return self.value
+
+
+class _ReviewUiaDll:
+    UIA_IsValuePatternAvailablePropertyId = 1
+
+
+class _ReviewUia:
+    UIA_dll = _ReviewUiaDll()
+
+
+class _ReviewConversionWindow:
+    def __init__(self, media_name: str, cancellation_log: str) -> None:
+        self.media_name = media_name
+        self.cancellation_log = cancellation_log
+        self.output: Path | None = None
+        self.running = False
+        self.stopped = False
+
+    def set_directories(self, _window: WindowSpecification, _input: str, output: str) -> None:
+        self.output = Path(output)
+
+    def start(self) -> None:
+        if self.output is None:
+            message = "尚未选择输出目录"
+            raise AssertionError(message)
+        _ = (self.output / "00_complete_txt.md").write_bytes(b"completed before cancellation\n")
+        self.running = True
+
+    def stop(self) -> None:
+        self.running = False
+        self.stopped = True
+
+    def descendants(self, *, control_type: str) -> list[_ReviewControl]:
+        if control_type == "Button":
+            if self.running:
+                return [_ReviewControl("停止任务", action=self.stop)]
+            return [_ReviewControl("开始转换", action=self.start)]
+        if control_type == "Text":
+            return [_ReviewControl("已停止" if self.stopped else f"正在处理 01_{self.media_name}")]
+        if control_type == "Edit":
+            return [_ReviewLogEdit(self.cancellation_log if self.stopped else "")]
+        return []
+
+    def child_window(self, *, title: str, control_type: str, found_index: int = 0) -> _ReviewControl:
+        return [control for control in self.descendants(control_type=control_type) if control.title == title][found_index]
+
+
+class ReviewRemediationCancellationLogTests(unittest.TestCase):
+    def run_s5(self, log: str) -> None:
+        # P3-35 / T-23 / P-12：执行真实 S5 主体、产物判据及 wait_log_matching；
+        # 只替换桌面/进程边界，不在测试中复制正则。
+        media_name = "中文 示例 clip.mp4"
+        clock = _ReviewClock()
+        window = _ReviewConversionWindow(media_name, log)
+        with tempfile.TemporaryDirectory(prefix="jchtools-review-s5-") as temporary:
+            media = Path(temporary) / media_name
+            _ = media.write_bytes(b"synthetic media; no decoder is launched")
+            with (
+                patch.dict(os.environ, {"JCHTOOLS_S5_MEDIA": str(media)}),
+                patch.object(gui_smoke, "run_stage", side_effect=_ReviewStageDriver(window)),
+                patch.object(gui_smoke, "goto_converter"),
+                patch.object(gui_smoke, "set_converter_dirs", side_effect=window.set_directories),
+                patch.object(gui_smoke, "activate"),
+                patch.object(gui_smoke, "IUIA", side_effect=_ReviewUia),
+                patch("scripts.gui_smoke.time.time", side_effect=clock.read),
+                patch("scripts.gui_smoke.time.monotonic", side_effect=clock.read),
+                patch("scripts.gui_smoke.time.sleep", side_effect=clock.sleep),
+                patch("scripts.gui_smoke.subprocess.Popen", side_effect=AssertionError("禁止启动真实 GUI")),
+            ):
+                gui_smoke.s5_markdown_basic_chain("unused.exe")
+
+    def test_review_remediation_s5_accepts_cancelled_media_with_chinese_and_spaces(self) -> None:
+        self.run_s5("已取消：01_中文 示例 clip.mp4；未完成结果不提交\n已停止")
+
+    def test_review_remediation_s5_rejects_stopped_without_a_cancellation_entry(self) -> None:
+        with self.assertRaisesRegex(RuntimeError, "只读日志超时"):
+            self.run_s5("已停止\n没有文件被确认取消")
+
+    def test_review_remediation_s5_rejects_cancellation_suffix_on_another_line(self) -> None:
+        with self.assertRaisesRegex(RuntimeError, "只读日志超时"):
+            self.run_s5("已取消：01_中文 示例 clip.mp4\n其他事件；未完成结果不提交")
+
+
+class _ReviewConfirmWindow:
+    def __init__(self, observations: tuple[str, ...]) -> None:
+        self.observations = iter(observations)
+        self.last = "open"
+        self.closed = False
+
+    def wait_checkbox(self) -> None:
+        if self.closed:
+            message = "确认层已删除，旧复选框不可见"
+            raise gui_smoke.timings.TimeoutError(message)
+
+    def descendants(self, *, control_type: str) -> list[_ReviewControl]:
+        if control_type == "Button":
+            return [_ReviewControl("确认")]
+        if control_type != "Text":
+            return []
+        self.last = next(self.observations, self.last)
+        self.closed = self.last == "closed"
+        if self.last == "error":
+            message = "UIA 树正重建"
+            raise gui_smoke.timings.TimeoutError(message)
+        if self.last == "empty":
+            return []
+        return [_ReviewControl("后台任务页面" if self.closed else "确认文件处理范围")]
+
+    def child_window(self, *, title: str, control_type: str, found_index: int = 0) -> _ReviewControl:
+        if control_type == "CheckBox":
+            return _ReviewControl(title, before_wait=self.wait_checkbox)
+        return self.descendants(control_type=control_type)[found_index]
+
+
+class ReviewRemediationConfirmationTests(unittest.TestCase):
+    def confirm(self, window: _ReviewConfirmWindow, *, extraction: bool = False) -> None:
+        clock = _ReviewClock()
+        with (
+            patch.object(gui_smoke, "activate"),
+            patch("scripts.gui_smoke.time.time", side_effect=clock.read),
+            patch("scripts.gui_smoke.time.sleep", side_effect=clock.sleep),
+            patch("scripts.gui_smoke.subprocess.Popen", side_effect=AssertionError("禁止启动真实 GUI")),
+        ):
+            gui_smoke.confirm_dialog(cast("WindowSpecification", window), timeout=15, extraction=extraction)
+
+    def test_review_remediation_confirm_closure_observations_cross_batch_boundary(self) -> None:
+        # P3-38 / P-13：第 19 次仍 open，20、21 次 closed；第 20 次后旧 checkbox 消失。
+        for extraction in (False, True):
+            window = _ReviewConfirmWindow(("open",) * 19 + ("closed", "closed"))
+            with self.subTest(extraction=extraction):
+                self.confirm(window, extraction=extraction)
+                self.assertTrue(window.closed)
+
+    def test_review_remediation_confirm_unreadable_or_open_tree_cannot_report_success(self) -> None:
+        # P3-38：空树、瞬态异常、始终打开均不能作为正常关闭的有效观察。
+        for observation in ("empty", "error", "open"):
+            with self.subTest(observation=observation), self.assertRaises(RuntimeError):
+                self.confirm(_ReviewConfirmWindow((observation,)))
+
+    def test_review_remediation_confirm_invalid_reading_breaks_consecutive_closure(self) -> None:
+        # P3-38：单次有效关闭观察不得穿过空树、异常或重新出现的标题累积成成功。
+        for observation in ("empty", "error", "open"):
+            with self.subTest(observation=observation), self.assertRaises(RuntimeError):
+                self.confirm(_ReviewConfirmWindow(("closed", observation) * 40))

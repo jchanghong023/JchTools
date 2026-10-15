@@ -9,6 +9,7 @@ import io
 import json
 import os
 from pathlib import Path
+import re
 import shutil
 import subprocess
 import sys
@@ -30,6 +31,41 @@ class TrustedWorkspaceTests(unittest.TestCase):
         temporary = tempfile.TemporaryDirectory(dir=workspace)
         self.addCleanup(temporary.cleanup)
         self.directory = Path(temporary.name)
+
+
+class ModalGatingBehaviorTests(unittest.TestCase):
+    def test_permanently_disabled_controls_are_safe_without_weakening_live_controls(self) -> None:
+        # 只加载真实检查函数，避免脚本模块末尾的全仓检查和 sys.exit 导入副作用。
+        checker_path = ROOT / "scripts" / "static_check.py"
+        tree = ast.parse(checker_path.read_text(encoding="utf-8"))
+        function = next(
+            node for node in tree.body
+            if isinstance(node, ast.FunctionDef) and node.name == "slint_modal_gating"
+        )
+        namespace = {"ROOT": ROOT, "re": re, "read_text": lambda path: source}
+        exec(compile(ast.Module(body=[function], type_ignores=[]), str(checker_path), "exec"), namespace)
+        expressions = {
+            "false": True,
+            "true": False,
+            "root.busy": False,
+            "false || root.busy": False,
+            "!root.busy && root.confirm-kind == 0": True,
+        }
+        observed = {}
+        for expression in expressions:
+            source = (
+                "export component AppWindow inherits Window {\n"
+                f"    Button {{ enabled: {expression}; }}\n"
+                "    if root.confirm-kind != 0: Rectangle {}\n"
+                "}\n"
+            )
+            try:
+                namespace["slint_modal_gating"]()
+            except AssertionError:
+                observed[expression] = False
+            else:
+                observed[expression] = True
+        self.assertEqual(observed, expressions)
 
 
 class DestinationBoundaryTests(TrustedWorkspaceTests):
