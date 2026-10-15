@@ -304,6 +304,27 @@
     },
     {
       "file": "crates/assets/src/snap_ocr_assets.rs",
+      "name": "certificate_fallback_direct_only_respects_cancellation",
+      "ignored": false,
+      "cfg": null,
+      "body": "7a82521125ee963d"
+    },
+    {
+      "file": "crates/assets/src/snap_ocr_assets.rs",
+      "name": "certificate_fallback_restarts_secure_validation_after_redirect",
+      "ignored": false,
+      "cfg": null,
+      "body": "656c6b0bfd4f2b07"
+    },
+    {
+      "file": "crates/assets/src/snap_ocr_assets.rs",
+      "name": "certificate_fallback_runs_after_secure_proxy_and_direct_failures",
+      "ignored": false,
+      "cfg": null,
+      "body": "2ce915104925735c"
+    },
+    {
+      "file": "crates/assets/src/snap_ocr_assets.rs",
       "name": "checked_download_total_rejects_payload_over_manifest_size",
       "ignored": false,
       "cfg": null,
@@ -356,7 +377,7 @@
       "name": "http_proxy_authentication_failure_falls_back_to_direct_metadata",
       "ignored": false,
       "cfg": null,
-      "body": "2511710bb480734c"
+      "body": "27711ea91c840d11"
     },
     {
       "file": "crates/assets/src/snap_ocr_assets.rs",
@@ -447,7 +468,7 @@
       "name": "proxy_authentication_failure_allows_direct_fallback",
       "ignored": false,
       "cfg": null,
-      "body": "27b9579d3f64ba06"
+      "body": "a4e1291ea73e4513"
     },
     {
       "file": "crates/assets/src/snap_ocr_assets.rs",
