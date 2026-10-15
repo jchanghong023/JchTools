@@ -1616,7 +1616,7 @@
       "name": "settings_operations_are_observable_at_default_info_level",
       "ignored": false,
       "cfg": null,
-      "body": "bba966139d4bb142"
+      "body": "8419ab351473ce23"
     },
     {
       "file": "crates/foundation/src/logging.rs",
@@ -1697,17 +1697,17 @@
     },
     {
       "file": "crates/foundation/src/xberg_settings.rs",
+      "name": "bundled_discovery_policy_isolates_real_installations",
+      "ignored": false,
+      "cfg": null,
+      "body": "0f252893ce104206"
+    },
+    {
+      "file": "crates/foundation/src/xberg_settings.rs",
       "name": "caller_selected_busy_timeout_preserves_default_and_allows_fail_fast",
       "ignored": false,
       "cfg": null,
       "body": "a1b7b011eabbef54"
-    },
-    {
-      "file": "crates/foundation/src/xberg_settings.rs",
-      "name": "download_selection_persists_without_changing_active_source",
-      "ignored": false,
-      "cfg": null,
-      "body": "a1140b04d5d0f1de"
     },
     {
       "file": "crates/foundation/src/xberg_settings.rs",
@@ -1722,6 +1722,13 @@
       "ignored": false,
       "cfg": null,
       "body": "b11cad6f8bdd3826"
+    },
+    {
+      "file": "crates/foundation/src/xberg_settings.rs",
+      "name": "sibling_bundle_precedes_installed_registry_directory",
+      "ignored": false,
+      "cfg": null,
+      "body": "7930aba0ca5e607a"
     },
     {
       "file": "crates/foundation/src/xberg_settings.rs",
@@ -1792,6 +1799,20 @@
       "ignored": false,
       "cfg": null,
       "body": "02c477b27971ed33"
+    },
+    {
+      "file": "crates/gui/src/gui.rs",
+      "name": "audio_download_callback_is_single_flight_and_cancel_preserves_active_source",
+      "ignored": false,
+      "cfg": null,
+      "body": "12b013bbed35d58f"
+    },
+    {
+      "file": "crates/gui/src/gui.rs",
+      "name": "audio_download_completion_refreshes_same_root_without_changing_bundled_status",
+      "ignored": false,
+      "cfg": null,
+      "body": "5da14a80ff6a952d"
     },
     {
       "file": "crates/gui/src/gui.rs",
@@ -1938,7 +1959,7 @@
       "name": "converter_readiness_long_detail_stays_in_log",
       "ignored": false,
       "cfg": null,
-      "body": "b24a046679c6c8cd"
+      "body": "e39e402769b166b7"
     },
     {
       "file": "crates/gui/src/gui.rs",
@@ -2113,7 +2134,7 @@
       "name": "installed_components_check_preserves_legacy_source_and_restores_notice_offline",
       "ignored": false,
       "cfg": null,
-      "body": "5f7f6d9ec10691e8"
+      "body": "d121fd3685c50861"
     },
     {
       "file": "crates/gui/src/gui.rs",
@@ -2337,7 +2358,7 @@
       "name": "review_remediation_converter_readiness_unwind_delivers_readiness_result",
       "ignored": false,
       "cfg": null,
-      "body": "2e9d6985b64dba2c"
+      "body": "036a731c0d7056c8"
     },
     {
       "file": "crates/gui/src/gui.rs",
@@ -2414,56 +2435,35 @@
       "name": "settings_actions_are_gated_while_busy_and_reject_unknown_action",
       "ignored": false,
       "cfg": null,
-      "body": "5628759fff185ed1"
+      "body": "8d7f53027a0cb091"
     },
     {
       "file": "crates/gui/src/gui.rs",
-      "name": "settings_failed_autosave_restores_saved_choice_before_next_download",
+      "name": "settings_load_failure_keeps_audio_download_blocked_and_offline_check_recovers",
       "ignored": false,
       "cfg": null,
-      "body": "92eb05205df98dbf"
+      "body": "7f4eb7e8aa16be87"
     },
     {
       "file": "crates/gui/src/gui.rs",
-      "name": "settings_load_failure_keeps_download_blocked_and_offline_check_reloads_selection",
+      "name": "settings_payload_keeps_one_effective_directory_during_source_changes",
       "ignored": false,
       "cfg": null,
-      "body": "0e7a66d83f719883"
-    },
-    {
-      "file": "crates/gui/src/gui.rs",
-      "name": "settings_payload_active_matches_same_source_snapshot",
-      "ignored": false,
-      "cfg": null,
-      "body": "3ae582fce3234097"
+      "body": "4d2af5fdee83794c"
     },
     {
       "file": "crates/gui/src/gui.rs",
       "name": "settings_result_while_task_running_keeps_close_after",
       "ignored": false,
       "cfg": null,
-      "body": "79a2c281bc4e4a53"
+      "body": "a06f0be2699490e0"
     },
     {
       "file": "crates/gui/src/gui.rs",
-      "name": "settings_selection_callbacks_persist_reload_and_reject_stale_snapshots",
+      "name": "settings_startup_pending_audio_download_waits_for_loaded_directory",
       "ignored": false,
       "cfg": null,
-      "body": "54bf38c0b174399a"
-    },
-    {
-      "file": "crates/gui/src/gui.rs",
-      "name": "settings_startup_pending_download_cannot_consume_default_choice",
-      "ignored": false,
-      "cfg": null,
-      "body": "e854d030eed5c438"
-    },
-    {
-      "file": "crates/gui/src/gui.rs",
-      "name": "settings_startup_pending_selection_cannot_replace_saved_choice",
-      "ignored": false,
-      "cfg": null,
-      "body": "839471a1b1d60be2"
+      "body": "5596a829e4694de0"
     },
     {
       "file": "crates/gui/src/gui.rs",
@@ -2530,20 +2530,6 @@
     },
     {
       "file": "crates/gui/src/gui.rs",
-      "name": "snapshot_download_callback_is_single_flight_and_cancel_preserves_active_source",
-      "ignored": false,
-      "cfg": null,
-      "body": "82e34b5ec504b642"
-    },
-    {
-      "file": "crates/gui/src/gui.rs",
-      "name": "snapshot_download_completion_refreshes_only_installed_feature_status",
-      "ignored": false,
-      "cfg": null,
-      "body": "d3df33f235970298"
-    },
-    {
-      "file": "crates/gui/src/gui.rs",
       "name": "split_size_accepts_exact_byte_fractions",
       "ignored": false,
       "cfg": null,
@@ -2565,17 +2551,17 @@
     },
     {
       "file": "crates/gui/src/gui.rs",
-      "name": "startup_settings_results_do_not_replace_newer_selection",
+      "name": "startup_settings_results_do_not_replace_newer_audio_state",
       "ignored": false,
       "cfg": null,
-      "body": "fb13027815ecd159"
+      "body": "e16aea4ee245f617"
     },
     {
       "file": "crates/gui/src/gui.rs",
       "name": "startup_settings_snapshot_keeps_running_initialization_state",
       "ignored": false,
       "cfg": null,
-      "body": "2f426978d4bbf284"
+      "body": "8bed1b5d071b1b18"
     },
     {
       "file": "crates/gui/src/gui.rs",
@@ -2649,6 +2635,13 @@
     },
     {
       "file": "crates/jchocr/tests/jchocr.rs",
+      "name": "bundled_runtime_is_discovered_without_gui_configuration",
+      "ignored": false,
+      "cfg": "all(windows, feature = \"test-hooks\")",
+      "body": "68106ad8403d6be7"
+    },
+    {
+      "file": "crates/jchocr/tests/jchocr.rs",
       "name": "engine_asset_failure_is_an_explained_xberg_error",
       "ignored": false,
       "cfg": "all(windows, feature = \"test-hooks\")",
@@ -2659,14 +2652,14 @@
       "name": "help_is_concise_and_available_without_xberg",
       "ignored": false,
       "cfg": "all(windows, feature = \"test-hooks\")",
-      "body": "2edbbbe80413eb63"
+      "body": "198bf1a653afc914"
     },
     {
       "file": "crates/jchocr/tests/jchocr.rs",
       "name": "invalid_arguments_are_rejected_before_network_or_engine_use",
       "ignored": false,
       "cfg": "all(windows, feature = \"test-hooks\")",
-      "body": "ca0f360c27f5c75a"
+      "body": "efbb2b9133bc10be"
     },
     {
       "file": "crates/jchocr/tests/jchocr.rs",
@@ -2687,14 +2680,14 @@
       "name": "ocr_call_logs_correlated_start_and_result_without_input_content",
       "ignored": false,
       "cfg": "all(windows, feature = \"test-hooks\")",
-      "body": "9853d780e6651c0e"
+      "body": "f2530165718e4d1a"
     },
     {
       "file": "crates/jchocr/tests/jchocr.rs",
       "name": "review_remediation_small_url_preserves_successful_ocr_text",
       "ignored": false,
       "cfg": "all(windows, feature = \"test-hooks\")",
-      "body": "20dd6f03c3e5f0b3"
+      "body": "2d31786086b5bb3f"
     },
     {
       "file": "crates/jchocr/tests/jchocr.rs",
@@ -2908,24 +2901,66 @@
     },
     {
       "file": "crates/markdown/src/markdown_assets.rs",
-      "name": "cleanup_owned_download_staging_preserves_unowned_and_valid_versions",
+      "name": "audio_download_uses_only_receipt_pin_and_reuses_complete_install",
       "ignored": false,
       "cfg": null,
-      "body": "289c6ab764c79bd8"
+      "body": "3b32bfdebc7e8339"
     },
     {
       "file": "crates/markdown/src/markdown_assets.rs",
-      "name": "download_cancel_before_commit_keeps_config_untouched",
+      "name": "audio_integrity_cancel_and_hostile_archives_preserve_existing_files",
       "ignored": false,
       "cfg": null,
-      "body": "a3e333bba75bee7c"
+      "body": "13442d76ac42721d"
     },
     {
       "file": "crates/markdown/src/markdown_assets.rs",
-      "name": "download_runtime_write_notice_closes_readiness_loop",
+      "name": "audio_member_commit_failure_restores_invalid_and_keeps_valid_members",
       "ignored": false,
       "cfg": null,
-      "body": "10de8774dcb13268"
+      "body": "48628999e75d90bd"
+    },
+    {
+      "file": "crates/markdown/src/markdown_assets.rs",
+      "name": "audio_receipt_rejects_unpinned_urls_and_base_member_aliases_before_network",
+      "ignored": false,
+      "cfg": null,
+      "body": "b0635f860f55437c"
+    },
+    {
+      "file": "crates/markdown/src/markdown_assets.rs",
+      "name": "bundled_default_closes_notice_readiness_without_manual_initialization",
+      "ignored": false,
+      "cfg": null,
+      "body": "2cf0b0314eccc94f"
+    },
+    {
+      "file": "crates/markdown/src/markdown_assets.rs",
+      "name": "bundled_migration_commit_or_cancel_failure_keeps_old_configuration_and_audio",
+      "ignored": false,
+      "cfg": null,
+      "body": "f5f2baa187c7773a"
+    },
+    {
+      "file": "crates/markdown/src/markdown_assets.rs",
+      "name": "bundled_migration_copies_only_compatible_members_and_preserves_source",
+      "ignored": false,
+      "cfg": null,
+      "body": "94860c9ed7c5864c"
+    },
+    {
+      "file": "crates/markdown/src/markdown_assets.rs",
+      "name": "bundled_migration_retains_ready_old_media_until_target_is_compatible",
+      "ignored": false,
+      "cfg": null,
+      "body": "ad6ff4c8ab2bcaf3"
+    },
+    {
+      "file": "crates/markdown/src/markdown_assets.rs",
+      "name": "concurrent_notice_repairs_publish_one_complete_notice",
+      "ignored": false,
+      "cfg": null,
+      "body": "229ec7b7a9b73abb"
     },
     {
       "file": "crates/markdown/src/markdown_assets.rs",
@@ -3020,13 +3055,6 @@
     },
     {
       "file": "crates/markdown/src/markdown_assets.rs",
-      "name": "media_component_missing_reports_not_configured",
-      "ignored": false,
-      "cfg": null,
-      "body": "b107661a5c3f3936"
-    },
-    {
-      "file": "crates/markdown/src/markdown_assets.rs",
       "name": "media_component_ready_returns_component_dir",
       "ignored": false,
       "cfg": null,
@@ -3080,69 +3108,6 @@
       "ignored": false,
       "cfg": null,
       "body": "8c91d6bc7e9caac6"
-    },
-    {
-      "file": "crates/markdown/src/markdown_assets.rs",
-      "name": "split_damaged_installed_component_is_replaced_without_changing_original",
-      "ignored": false,
-      "cfg": null,
-      "body": "122444ebf848d132"
-    },
-    {
-      "file": "crates/markdown/src/markdown_assets.rs",
-      "name": "split_integrity_failures_and_cancel_preserve_active_config_and_assets",
-      "ignored": false,
-      "cfg": null,
-      "body": "f36fd489741fd840"
-    },
-    {
-      "file": "crates/markdown/src/markdown_assets.rs",
-      "name": "split_member_integrity_overlap_and_zip_safety_failures_preserve_active_install",
-      "ignored": false,
-      "cfg": null,
-      "body": "edb18efbde3196a5"
-    },
-    {
-      "file": "crates/markdown/src/markdown_assets.rs",
-      "name": "split_metadata_rejects_legacy_only_release_and_untrusted_assets",
-      "ignored": false,
-      "cfg": null,
-      "body": "9ac4d628dd7bfb25"
-    },
-    {
-      "file": "crates/markdown/src/markdown_assets.rs",
-      "name": "split_notice_failure_preserves_active_assets_and_config",
-      "ignored": false,
-      "cfg": null,
-      "body": "21f7b83c3e2161bf"
-    },
-    {
-      "file": "crates/markdown/src/markdown_assets.rs",
-      "name": "split_snapshot_only_and_same_tag_addition_reuse_verified_components",
-      "ignored": false,
-      "cfg": null,
-      "body": "43367ad4bde96fb8"
-    },
-    {
-      "file": "crates/markdown/src/markdown_assets.rs",
-      "name": "split_snapshot_selection_does_not_inherit_legacy_full_bundle_features",
-      "ignored": false,
-      "cfg": null,
-      "body": "8749bd36df295371"
-    },
-    {
-      "file": "crates/markdown/src/markdown_assets.rs",
-      "name": "split_sqlite_commit_failure_rolls_back_new_install_only",
-      "ignored": false,
-      "cfg": null,
-      "body": "589e819ef1684680"
-    },
-    {
-      "file": "crates/markdown/src/markdown_assets.rs",
-      "name": "split_upgrade_installs_selected_features_without_cross_tag_reuse",
-      "ignored": false,
-      "cfg": null,
-      "body": "b65e5e43f41357c8"
     },
     {
       "file": "crates/markdown/src/markdown_assets.rs",
@@ -3857,13 +3822,6 @@
       "ignored": false,
       "cfg": null,
       "body": "51ab9b9e5864b726"
-    },
-    {
-      "file": "crates/xberg/src/xberg_runtime.rs",
-      "name": "document_startup_baseline_pins_only_engine_differences",
-      "ignored": false,
-      "cfg": "any(test, feature = \"test-hooks\")",
-      "body": "e58cfc2d398b4eea"
     },
     {
       "file": "crates/xberg/src/xberg_runtime.rs",
@@ -5837,14 +5795,14 @@
       "name": "background_stop_does_not_wait_for_preexisting_incomplete_request",
       "ignored": false,
       "cfg": null,
-      "body": "7c00fd6df7450a25"
+      "body": "710c99d7237f06ca"
     },
     {
       "file": "tests/background_settings.rs",
       "name": "both_sources_survive_process_restart_and_failed_save",
       "ignored": false,
       "cfg": null,
-      "body": "232a02ed36ba83dc"
+      "body": "cad9712df49052ae"
     },
     {
       "file": "tests/background_settings.rs",
@@ -7741,7 +7699,7 @@
       "name": "settings_markdown_and_snap_pages_gate_and_status_end_to_end",
       "ignored": false,
       "cfg": "feature = \"gui\"",
-      "body": "1d1544f8eaa86baa"
+      "body": "242e389c771ab925"
     },
     {
       "file": "tests/gui_flow.rs",
@@ -7797,7 +7755,7 @@
       "name": "batch_uses_selected_engine_formats",
       "ignored": false,
       "cfg": null,
-      "body": "a28a438363893dea"
+      "body": "dad45cbc1f2aefa4"
     },
     {
       "file": "tests/markdown_convert_gate.rs",
@@ -7846,7 +7804,7 @@
       "name": "review_remediation_batch_multiple_images_preserve_literals_and_exact_media",
       "ignored": false,
       "cfg": null,
-      "body": "a21fc1a74effaa7f"
+      "body": "43fbbb925e75261d"
     },
     {
       "file": "tests/markdown_convert_gate.rs",
@@ -8515,17 +8473,17 @@
     },
     {
       "file": "tests/xberg_assets.rs",
-      "name": "scenario_rules_assign_every_fixed_manifest_member",
+      "name": "same_root_optional_media_does_not_block_base_readiness",
       "ignored": false,
       "cfg": null,
-      "body": "3ff6d7dcadec2f59"
+      "body": "7c02029a90e43562"
     },
     {
       "file": "tests/xberg_assets.rs",
-      "name": "startup_config_declares_scenario_models_and_media_availability",
+      "name": "scenario_rules_assign_every_fixed_manifest_member",
       "ignored": false,
       "cfg": null,
-      "body": "d2dc2144f5880f0c"
+      "body": "e9b436ab92b46af3"
     },
     {
       "file": "tests/xberg_assets.rs",
@@ -8543,6 +8501,13 @@
     },
     {
       "file": "tests/xberg_settings.rs",
+      "name": "bundled_discovery_and_activation_preserve_existing_configuration",
+      "ignored": false,
+      "cfg": null,
+      "body": "da83f56469ac9e79"
+    },
+    {
+      "file": "tests/xberg_settings.rs",
       "name": "downloaded_save_preserves_unloaded_legacy_text",
       "ignored": false,
       "cfg": null,
@@ -8553,7 +8518,7 @@
       "name": "persisted_directory_survives_process_restart",
       "ignored": false,
       "cfg": null,
-      "body": "29ca29d1fc347426"
+      "body": "fbe862924a702e47"
     },
     {
       "file": "tests/xberg_settings.rs",
@@ -8564,10 +8529,10 @@
     },
     {
       "file": "tests/xberg_settings.rs",
-      "name": "scenario_assets_and_configuration_are_independent",
+      "name": "scenario_assets_are_independent",
       "ignored": false,
       "cfg": null,
-      "body": "aa4cac3f20502ced"
+      "body": "d885e4c7f2cdaa14"
     },
     {
       "file": "tests/xberg_shared_process.rs",
@@ -8617,6 +8582,13 @@
       "ignored": false,
       "cfg": null,
       "body": "d204b2b607cf0cc3"
+    },
+    {
+      "file": "tests/xberg_shared_process.rs",
+      "name": "bundled_activation_refuses_active_work_and_preserves_source_on_failure",
+      "ignored": false,
+      "cfg": null,
+      "body": "360d1cec568e5132"
     },
     {
       "file": "tests/xberg_shared_process.rs",

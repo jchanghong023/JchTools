@@ -9,11 +9,11 @@
      冲突自动改名、嵌套内容落盘，失败包保留在「解压失败」（H-07/X-05/X-06）。
   S5 转 Markdown 基本链路：启动 → 切到「转 Markdown」→ 选输入/输出 → 开始 → 停止 → 关闭
      （T 分区附录 A GUI E2E 最小段；需 Xberg 已配置且组件就绪，默认序列不含 S5，须显式 --stages 请求）。
-  S6 Xberg 功能选择自动保存：实际勾选三项功能，核对界面选择摘要与隔离 SQLite。
-  S7 重启恢复：完全退出后恢复相同功能选择，保留旧配置迁移的运行目录。
-  S8 空选择禁用下载：取消全部功能后不能下载，重新选择后恢复可用，活动配置不变。
-  S9 组件缺失状态与设置入口：未配置时各功能如实显示未下载、转换开始按钮禁用，
-     可前往设置选择功能但不自动下载（无需任何资产）。
+  S6 随包基础就绪：文档/截图已安装、音频未下载，核对发布收据、实际文件与 SQLite 活动来源。
+  S7 重启恢复：完全退出后仍使用同一随包目录，旧路径原件与来源记录保留。
+  S8 音频显式下载边界：受控 test-hooks 下载屏障下验证无隐式请求、主动下载、取消与重试，
+     不连接真实网络，不改变基础文件或活动目录。
+  S9 基础包缺失：转换禁用、音频下载禁用，离线检查给出修复安装/重新解压指引，不自动下载。
   S10 输出层级与同名策略：保留层级两份同名输入各自成文；平铺只处理排序第一份、
      其余按重复跳过计数（T-11；需真实组件，Xberg 目录可真实，状态目录仍须隔离）。
      所有非自隔离阶段受统一隔离守卫：独立调用需验收编排布置的隔离环境变量在场
@@ -76,6 +76,7 @@ from pywinauto.uia_defines import IUIA, NoPatternInterfaceError
 
 if not __package__:
     sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+from scripts.make_tmp import guard_destination
 from scripts.test_reports import Case, TimingReport
 
 if TYPE_CHECKING:
@@ -96,7 +97,7 @@ STOP_MEDIA_FILE_COUNT = 16
 DEFAULT_EXE = "target/debug/JchTools.exe"
 DEFAULT_DATA = ".tmp/gui-smoke/data"
 # 冒烟阶段清单：S1-S4 无需转 Markdown 资产；S5 需要（默认序列不含 S5，须显式 --stages 请求）；
-# S6-S9 只需隔离的应用配置目录（JCHTOOLS_TEST_STATE_DIR）；S10-S14 复用验收环境的真实组件。
+# S6-S8 需要真实预置的无音频基础包；S9 自建缺失包环境；S10-S14 复用验收环境的真实组件。
 SUPPORTED_STAGES = (
     "S1",
     "S2",
@@ -126,10 +127,11 @@ CONVERT_DIR_ROWS = 2
 EXTRACT_ACK = "我已确认：成功原包及分卷永久删除（不可恢复）"
 ORGANIZE_ACK = "我已确认目录、规则及可能的永久删除行为（不可恢复）"
 # 设置/转换页状态文案锚点（与 ui/app.slint 的文案保持同步，改动必须两侧同改）。
-SETTINGS_DOWNLOAD_BUTTON = "下载 / 补齐所选功能"
+SETTINGS_DOWNLOAD_BUTTON = "下载 / 补齐音频转写资产"
+SETTINGS_RETRY_BUTTON = "重试音频资产下载"
 SETTINGS_CHECK_BUTTON = "检查已安装组件"
-SETTINGS_FEATURE_LABELS = ("文档转换与图片 OCR", "截图 OCR", "音视频转写")
-CONVERT_NEED_RUNTIME_TEXT = "请前往设置下载所需 Xberg 组件"
+SETTINGS_BASE_LABELS = ("文档转换与图片 OCR", "截图 OCR")
+CONVERT_NEED_RUNTIME_TEXT = "请前往设置检查随包基础资产；音频转写资产需主动下载"
 CONVERT_DONE_MARKER = "总耗时"
 STOP_AND_CLOSE_TITLE = "停止任务并关闭"
 STOP_AND_CLOSE_BUTTON = "停止并关闭"
@@ -306,25 +308,42 @@ def find_button(window: WindowSpecification, title: str) -> WindowSpecification:
 
 
 def activate(window: WindowSpecification | BaseWrapper) -> None:
-    """把应用窗口提到前台，并抬到 z 序最上层.
-
-    click_input 是真实鼠标点击：窗口被资源管理器等程序遮挡时，点击会落到遮挡窗口上。
-    SetWindowPos(HWND_TOP) 只改 z 序、不抢焦点，在后台进程里也能生效，比 set_focus 可靠。
-    """
+    """显示被测窗口但不抢焦点、前台或用户输入；局部窗口消息不依赖遮挡状态."""
     with contextlib.suppress(*TRANSIENT_GUI_ERRORS):
-        _ = win32gui.ShowWindow(window.handle, win32con.SW_RESTORE)
-        win32gui.SetWindowPos(
-            window.handle,
-            win32con.HWND_TOP,
-            0,
-            0,
-            0,
-            0,
-            win32con.SWP_NOMOVE | win32con.SWP_NOSIZE | win32con.SWP_SHOWWINDOW,
-        )
-    with contextlib.suppress(*TRANSIENT_GUI_ERRORS):
-        _ = window.set_focus()
+        _ = win32gui.ShowWindow(window.handle, win32con.SW_SHOWNOACTIVATE)
     time.sleep(0.3)
+
+
+def _post_control_click(window: WindowSpecification, control: WindowSpecification | BaseWrapper) -> None:
+    """只向所属 HWND 投递控件中心的客户区鼠标消息，不移动系统光标."""
+    window_handle = window.handle
+    target_pid = win32process.GetWindowThreadProcessId(window_handle)[1]
+    handle = control.handle or window_handle
+    require(
+        cast("BaseWrapper", control).process_id() == target_pid
+        and win32process.GetWindowThreadProcessId(handle)[1] == target_pid
+        and (handle == window_handle or win32gui.IsChild(window_handle, handle)),
+        "局部点击拒绝操作：控件 HWND/PID 不属于被测窗口",
+    )
+    require(
+        control.is_visible()
+        and control.is_enabled()
+        and win32gui.IsWindowVisible(handle)
+        and win32gui.IsWindowEnabled(handle),
+        "局部点击拒绝操作：控件或目标窗口不可见/未启用",
+    )
+    rectangle = control.rectangle()
+    left, top = cast("tuple[int, int]", win32gui.ScreenToClient(handle, (rectangle.left, rectangle.top)))
+    right, bottom = cast("tuple[int, int]", win32gui.ScreenToClient(handle, (rectangle.right, rectangle.bottom)))
+    client_left, client_top, client_right, client_bottom = win32gui.GetClientRect(handle)
+    require(
+        client_left <= left < right <= client_right and client_top <= top < bottom <= client_bottom,
+        "局部点击拒绝操作：控件矩形为空或超出目标客户区",
+    )
+    point = (((top + bottom) // 2) << 16) | ((left + right) // 2)
+    win32gui.PostMessage(handle, win32con.WM_MOUSEMOVE, 0, point)
+    win32gui.PostMessage(handle, win32con.WM_LBUTTONDOWN, win32con.MK_LBUTTON, point)
+    win32gui.PostMessage(handle, win32con.WM_LBUTTONUP, 0, point)
 
 
 def click(window: WindowSpecification, control: WindowSpecification | BaseWrapper) -> None:
@@ -341,12 +360,7 @@ def click(window: WindowSpecification, control: WindowSpecification | BaseWrappe
         else:
             time.sleep(0.3)
             return
-    target_pid = win32process.GetWindowThreadProcessId(window.handle)[1]
-    foreground_pid = win32process.GetWindowThreadProcessId(win32gui.GetForegroundWindow())[1]
-    if foreground_pid != target_pid:
-        message = "鼠标兜底拒绝操作：前台窗口 PID 不属于被测 GUI"
-        raise RuntimeError(message)
-    control.click_input()
+    _post_control_click(window, control)
     time.sleep(0.3)
 
 
@@ -522,22 +536,15 @@ def open_confirm(window: WindowSpecification, button_title: str, timeout: int = 
 
 
 def close_app(window: WindowSpecification) -> None:
-    """先发 WM_CLOSE；鼠标兜底前验证前台窗口 PID 属于被测 GUI."""
+    """先发 WM_CLOSE；窗口仍在时仅通过 UIA/所属 HWND 局部消息尝试关闭按钮."""
     handle = window.handle
-    target_pid = win32process.GetWindowThreadProcessId(handle)[1]
     win32gui.PostMessage(handle, win32con.WM_CLOSE, 0, 0)
     time.sleep(0.3)
     with contextlib.suppress(*TRANSIENT_GUI_ERRORS, RuntimeError):
         if not window.exists():
             return
-    foreground = win32gui.GetForegroundWindow()
-    foreground_pid = win32process.GetWindowThreadProcessId(foreground)[1]
-    if foreground_pid != target_pid:
-        message = "关闭兜底拒绝操作：前台窗口 PID 不属于被测 GUI"
-        raise RuntimeError(message)
     for button in [b for b in window.descendants(control_type="Button") if (b.window_text() or "") == "关闭"]:
-        button.click_input()
-        time.sleep(0.3)
+        click(window, button)
         return
 
 
@@ -555,10 +562,9 @@ def _wait_exit_or_kill(
 ) -> tuple[bool, int | None]:
     """等待进程退出，超时则强制结束（避免异常路径泄漏进程），并返回是否被强杀与退出码.
 
-    合成鼠标点击可能落空（窗口未在前台时点到了别的窗口，实测 S2 稳定复现且随后手动
-    点击同一按钮立即退出）：首次尝试仍只点标题栏按钮，之后的重试才补发 WM_CLOSE，
-    把「点击落空」与「关闭路径真的挂死」区分开——后者会耗尽全部重试并最终被强杀、
-    由断言判失败。
+    首次关闭及重试均不依赖系统鼠标或前台窗口；重试补发 WM_CLOSE，
+    把「关闭请求未落地」与「关闭路径真的挂死」区分开——后者会耗尽全部重试并
+    最终被强杀、由断言判失败。
     """
     deadline = time.time() + timeout
     attempts = 0
@@ -1150,16 +1156,16 @@ def click_and_wait_text(
 
 
 def goto_settings(window: WindowSpecification) -> None:
-    """切到设置页：等待设置专属的组件下载控件，避免命中转换页状态文案."""
+    """切到设置页：等待设置专属离线检查控件，兼容下载失败后的重试按钮."""
     for _attempt in range(5):
         click(window, find_button(window, "设置"))
         try:
-            _ = find_button(window, SETTINGS_DOWNLOAD_BUTTON).wait("visible", timeout=ATTEMPT_TIMEOUT)
+            _ = find_button(window, SETTINGS_CHECK_BUTTON).wait("visible", timeout=ATTEMPT_TIMEOUT)
         except (RuntimeError, timings.TimeoutError):
             continue
         else:
             return
-    message = "点击「设置」后始终未出现设置页专属的组件下载控件"
+    message = "点击「设置」后始终未出现设置页专属的离线检查控件"
     raise RuntimeError(message)
 
 
@@ -1175,52 +1181,43 @@ def read_xberg_settings(state: Path) -> dict[str, str]:
 
 
 def active_xberg_settings(state: Path) -> dict[str, str]:
-    """选择项以外的来源/目录配置必须在勾选、空选择与重启之间保持不变."""
-    return {key: value for key, value in read_xberg_settings(state).items() if key != "xberg_download_selection"}
+    """只读活动来源与所有目录记录；离线检查/取消/重启不得悄悄改动它们."""
+    return read_xberg_settings(state)
 
 
-def wait_saved_selection(window: WindowSpecification, state: Path, selection: str) -> None:
-    """同时核对实际 SQLite 保存和界面摘要，不依赖 Slint Check 未暴露的 TogglePattern."""
-    selected = "、".join(label for label, flag in zip(SETTINGS_FEATURE_LABELS, selection, strict=True) if flag == "1")
-    summary = f"所选功能：{selected or '无'}"
+def same_runtime_path(actual: str | None, expected: Path) -> bool:
+    """SQLite 的 verbatim 路径与普通 Win32 路径表示同一个实际目录."""
+    return actual is not None and Path(plain_windows_path(actual)).resolve() == expected.resolve()
+
+
+def verify_bundled_settings(settings: dict[str, str], runtime: Path) -> None:
+    """实际活动目录、来源和 bundled 来源记录必须一致，而不是仅显示一个路径."""
+    require(settings.get("xberg_source") == "bundled", f"活动来源不是 bundled：{settings}")
+    for key in ("xberg_directory", "xberg_bundled_directory"):
+        require(same_runtime_path(settings.get(key), runtime), f"{key} 未指向随包目录：{settings.get(key)!r}")
+
+
+def wait_bundled_settings(state: Path, runtime: Path) -> dict[str, str]:
     deadline = time.monotonic() + TIMEOUT
-    actual: str | None = None
+    actual: dict[str, str] = {}
     while time.monotonic() < deadline:
-        actual = read_xberg_settings(state).get("xberg_download_selection")
-        visible = any(text.window_text() == summary for text in window.descendants(control_type="Text"))
-        if actual == selection and visible:
-            return
+        actual = active_xberg_settings(state)
+        if actual.get("xberg_source") == "bundled" and all(
+            same_runtime_path(actual.get(key), runtime) for key in ("xberg_directory", "xberg_bundled_directory")
+        ):
+            return actual
         time.sleep(0.1)
-    message = f"功能选择未由 GUI 自动保存或未上屏：期望 {selection} / {summary}，SQLite 实际 {actual!r}"
-    raise RuntimeError(message)
+    verify_bundled_settings(actual, runtime)
+    return actual
 
 
-def select_settings_features(window: WindowSpecification, state: Path, selection: str) -> None:
-    """逐个点击真实 Check，等待每一步自动保存后再操作下一项."""
-    current = read_xberg_settings(state).get("xberg_download_selection", "010")
-    require(
-        len(current) == len(SETTINGS_FEATURE_LABELS) and set(current) <= {"0", "1"},
-        f"已保存的下载选择无效：{current!r}",
-    )
-    for index, label in enumerate(SETTINGS_FEATURE_LABELS):
-        if current[index] == selection[index]:
-            continue
-        check = find_check(window, label)
-        _ = check.wait("visible enabled", timeout=TIMEOUT)
-        click(window, check)
-        current = current[:index] + selection[index] + current[index + 1 :]
-        wait_saved_selection(window, state, current)
-    wait_saved_selection(window, state, selection)
-
-
-def seed_legacy_runtime(state: Path) -> str:
-    """保留旧文本迁移夹具：只播种旧路径，下载选择必须由真实 GUI 写入."""
-    directory = os.environ.get("JCHTOOLS_SMOKE_XBERG_DIR") or os.environ.get("JCHTOOLS_TEST_XBERG_DIR")
-    runtime = str(Path(plain_windows_path(directory) if directory else state / "legacy-runtime").resolve())
+def seed_legacy_runtime(state: Path, runtime: Path) -> str:
+    """只播种旧文本路径；SQLite 的迁移/来源记录必须由应用真实生成."""
+    directory = str(runtime.resolve())
     root = state / "markdown-assets"
     root.mkdir(parents=True, exist_ok=True)
-    _ = (root / "xberg-runtime-path.txt").write_text(runtime, encoding="utf-8")
-    return runtime
+    _ = (root / "xberg-runtime-path.txt").write_text(directory, encoding="utf-8")
+    return directory
 
 
 def wait_text_containing(
@@ -1299,18 +1296,107 @@ def find_check(window: WindowSpecification, title: str) -> WindowSpecification:
     return window.child_window(title=title, control_type="CheckBox")
 
 
-def isolated_state_env(scratch_state: Path) -> dict[str, str]:
-    """S6-S9 的子进程环境：应用配置、Markdown 与截图资产根全部隔离.
-
-    旧路径迁移可能连接截图后台，因此同时隔离服务身份与组件根；
-    不继承验收编排的 Markdown 资产根，避免干净状态用例误读其他阶段的 notice。
-    """
+def isolated_state_env(scratch_state: Path, bundled: Path | None = None) -> dict[str, str]:
+    """隔离配置、组件、bundle 发现及旧引擎覆盖，不读取宿主安装目录/注册表."""
     env = dict(os.environ)
+    for key in ("JCHTOOLS_TEST_XBERG_DIR", "JCHTOOLS_SMOKE_XBERG_DIR", "JCHTOOLS_TEST_AUDIO_DOWNLOAD_BARRIER"):
+        _ = env.pop(key, None)
     env["JCHTOOLS_TEST_STATE_DIR"] = str(scratch_state)
     env["JCHTOOLS_SNAP_OCR_TEST_ASSET_ROOT"] = str(scratch_state / "snap-assets")
     env["JCHTOOLS_MARKDOWN_TEST_ASSET_ROOT"] = str(scratch_state / "markdown-assets")
     env["JCHTOOLS_TEST_ASSET_ROOT"] = str(scratch_state / "markdown-assets")
+    env["JCHTOOLS_TEST_BUNDLED_XBERG_DIR"] = str(bundled if bundled is not None else scratch_state / "absent-bundle")
     return env
+
+
+def settings_stage_workspace() -> Path:
+    """新设置阶段只在 make_tmp 管理的仓库 .tmp 中建立一次性数据."""
+    root = Path(__file__).resolve().parent.parent / ".tmp" / "gui-settings"
+    guard_destination(root)
+    root.mkdir(parents=True, exist_ok=True)
+    return root
+
+
+def optional_audio_member(relative: str) -> bool:
+    path = relative.replace("\\", "/").lower()
+    return path.startswith(("ffmpeg/", "models/vad/", "models/sense_voice_"))
+
+
+def verify_bundled_package(root: Path) -> dict[str, str]:
+    """核对真实基础包的收据及每个落盘成员；拒绝缺失/篡改与默认音频载荷."""
+    receipt_path = root / "jchtools-xberg-release.json"
+    receipt = cast("dict[str, object]", json.loads(receipt_path.read_text(encoding="utf-8")))
+    require(receipt.get("owner") == "JchTools-bundled-xberg-v1", "基础包缺少真实发布收据")
+    require(
+        receipt.get("source") == "https://api.github.com/repos/jchanghong023/xberg/releases/latest",
+        "基础包收据来源错误",
+    )
+    tag = receipt.get("tag")
+    require(isinstance(tag, str) and bool(tag), "基础包未锁定发布版本")
+    components = cast("list[dict[str, object]]", receipt.get("components"))
+    component_ids = {"document", "snapshot"}
+    require(
+        isinstance(receipt.get("components"), list) and len(components) == len(component_ids),
+        "基础包应只有 document/snapshot 两组件",
+    )
+    require({component.get("id") for component in components} == component_ids, "基础包组件错误")
+    expected: dict[str, tuple[int, str]] = {}
+    for component in components:
+        members = cast("list[dict[str, object]]", component.get("members"))
+        require(isinstance(component.get("members"), list) and bool(members), "基础包成员清单为空")
+        for member in members:
+            relative = cast("str", member.get("path"))
+            require(
+                isinstance(member.get("path"), str)
+                and "\\" not in relative
+                and ":" not in relative
+                and not relative.startswith("/")
+                and all(part not in ("", ".", "..") for part in relative.split("/")),
+                f"基础成员路径不安全：{relative!r}",
+            )
+            require(not optional_audio_member(relative), f"基础收据混入音频成员：{relative}")
+            identity = (cast("int", member.get("size_bytes")), cast("str", member.get("sha256")))
+            require(relative not in expected or expected[relative] == identity, f"共享成员身份冲突：{relative}")
+            expected[relative] = identity
+    require("xberg.exe" in expected, "基础包缺少实际引擎")
+    require(any(path.startswith("sherpa-onnx/") for path in expected), "基础包缺少 sherpa 公共运行库")
+    audio = cast("dict[str, object]", receipt.get("audio_assets"))
+    require(
+        isinstance(receipt.get("audio_assets"), dict) and audio.get("id") == "audio-assets", "基础包未记录可选音频资产"
+    )
+    archive = "xberg-audio-assets-x86_64-pc-windows-msvc.zip"
+    require(
+        audio.get("archive") == archive
+        and audio.get("url") == f"https://github.com/jchanghong023/xberg/releases/download/{tag}/{archive}",
+        "音频资产必须绑定基础包的精确发布",
+    )
+    for relative, (size, digest) in expected.items():
+        member = root / relative
+        require(member.is_file() and not member.is_symlink(), f"基础成员缺失或被重定向：{relative}")
+        require(member.stat().st_size == size and file_digest(member) == digest, f"基础成员不符合收据：{relative}")
+    snapshot = snapshot_output_bytes(root)
+    expected_names = {str(Path(relative)) for relative in expected} | {receipt_path.name}
+    require(
+        set(snapshot) == expected_names,
+        f"基础包文件集合不符合收据：{sorted(set(snapshot) ^ expected_names)}",
+    )
+    require(
+        not any(optional_audio_member(path.relative_to(root).as_posix() + "/") for path in root.rglob("*")),
+        "默认基础包不得包含 FFmpeg / SenseVoice / VAD 目录或文件",
+    )
+    return snapshot
+
+
+def provision_bundled_runtime(exe: str, state: Path) -> tuple[Path, dict[str, str]]:
+    """仅复制明确预置/打包的真实基础包；从不下载，也不写源包或用户安装目录."""
+    configured = os.environ.get("JCHTOOLS_TEST_BUNDLED_XBERG_DIR")
+    source = Path(plain_windows_path(configured)) if configured else Path(exe).resolve().parent / "xberg"
+    require(source.is_absolute() and source.is_dir(), "S6-S8 需要预置真实随包基础目录 JCHTOOLS_TEST_BUNDLED_XBERG_DIR")
+    before = verify_bundled_package(source)
+    runtime = state / "xberg"
+    _ = shutil.copytree(source, runtime)
+    require(snapshot_output_bytes(runtime) == before, "隔离基础包复制不完整")
+    return runtime, before
 
 
 def plain_windows_path(text: str) -> str:
@@ -1327,7 +1413,7 @@ def plain_windows_path(text: str) -> str:
 
 
 def wait_legacy_runtime(state: Path, directory: str) -> None:
-    """等待应用迁移旧文本目录并核对实际活动路径，失效旧路径也不得静默替换."""
+    """等待旧文本迁移的有效活动路径；供外部预置引擎阶段使用."""
     deadline = time.monotonic() + TIMEOUT
     while time.monotonic() < deadline:
         actual = read_xberg_settings(state).get("xberg_directory")
@@ -1338,102 +1424,154 @@ def wait_legacy_runtime(state: Path, directory: str) -> None:
     raise RuntimeError(message)
 
 
-def s6_auto_saves_feature_selection(exe: str) -> None:
-    """S6 实际操作三项功能 Check，同时核对 UI 摘要和自动保存的 SQLite 值."""
-    with tempfile.TemporaryDirectory(prefix="jchtools-gui-smoke-s6-") as temporary:
+def wait_base_ready(window: WindowSpecification, state: Path, runtime: Path) -> dict[str, str]:
+    """观察真实 GUI 的基础/音频独立状态，并确认同一个实际活动来源."""
+    goto_settings(window)
+    settings = wait_bundled_settings(state, runtime)
+    for label in SETTINGS_BASE_LABELS:
+        _ = wait_text_containing(window, f"{label}：已安装")
+    for label in ("FFmpeg 及配套运行库", "SenseVoice / VAD 音频模型"):
+        _ = wait_text_containing(window, f"{label}：未下载")
+    _ = wait_text_containing(window, "音视频转写：未就绪，请主动下载音频资产")
+    _ = wait_text_containing(window, f"当前共享目录：{runtime}")
+    _ = find_button(window, SETTINGS_DOWNLOAD_BUTTON).wait("visible enabled", timeout=TIMEOUT)
+    require(not find_button(window, "取消下载").exists(), "未主动操作时不得自动下载音频")
+    return settings
+
+
+def s6_bundled_readiness_and_active_source(exe: str) -> None:
+    """S6 真实随包文档/截图就绪、可选音频缺失，并持久化唯一活动来源."""
+    with tempfile.TemporaryDirectory(prefix="s6-", dir=settings_stage_workspace()) as temporary:
         state = Path(temporary)
+        runtime, before = provision_bundled_runtime(exe, state)
 
         def body(window: WindowSpecification) -> None:
-            goto_settings(window)
-            for selection in ("111", "101", "010"):
-                select_settings_features(window, state, selection)
-            require(not active_xberg_settings(state), "选择下载功能不得创建活动 Xberg 目录配置")
+            _ = wait_base_ready(window, state, runtime)
+            require(snapshot_output_bytes(runtime) == before, "启动就绪检查不得修改随包基础资产")
 
-        run_stage("S6", exe, body, env=isolated_state_env(state))
-        require(read_xberg_settings(state).get("xberg_download_selection") == "010", "GUI 退出后选择必须仍在 SQLite")
-    print("S6 PASS：真实勾选三项功能后自动保存，界面摘要与 SQLite 一致")
+        run_stage("S6", exe, body, env=isolated_state_env(state, runtime))
+        verify_bundled_settings(active_xberg_settings(state), runtime)
+        require(verify_bundled_package(runtime) == before, "退出后基础包必须保持不变")
+    print("S6 PASS：真实随包基础资产就绪、无默认音频，GUI 与 SQLite 活动来源一致且持久保存")
 
 
-def s7_restart_restores_saved_selection(exe: str) -> None:
-    """S7 完全退出后恢复选择，且旧文本迁移目录与来源记录原样保留."""
-    with tempfile.TemporaryDirectory(prefix="jchtools-gui-smoke-s7-") as temporary:
+def s7_restart_restores_active_runtime(exe: str) -> None:
+    """S7 从有效旧文本路径迁移后重启，保留旧目录/原件并恢复相同活动来源."""
+    with tempfile.TemporaryDirectory(prefix="s7-", dir=settings_stage_workspace()) as temporary:
         state = Path(temporary)
-        directory = seed_legacy_runtime(state)
-        env = isolated_state_env(state)
+        runtime, before = provision_bundled_runtime(exe, state)
+        legacy_runtime = state / "legacy-runtime"
+        _ = shutil.copytree(runtime, legacy_runtime)
+        directory = seed_legacy_runtime(state, legacy_runtime)
+        env = isolated_state_env(state, runtime)
 
-        def save(window: WindowSpecification) -> None:
-            goto_settings(window)
-            wait_legacy_runtime(state, directory)
-            select_settings_features(window, state, "101")
+        def activated(window: WindowSpecification) -> None:
+            current = wait_base_ready(window, state, runtime)
+            require(
+                same_runtime_path(current.get("xberg_custom_directory"), legacy_runtime),
+                "随包迁移必须保留旧有效目录的来源记录",
+            )
 
         def restored(window: WindowSpecification) -> None:
-            goto_settings(window)
-            wait_saved_selection(window, state, "101")
-            wait_legacy_runtime(state, directory)
-            require(active_xberg_settings(state) == saved_runtime, "重启不得改变已迁移的活动目录与来源")
+            _ = wait_base_ready(window, state, runtime)
+            require(active_xberg_settings(state) == saved_runtime, "重启不得改变活动来源或历史目录记录")
 
-        run_stage("S7-first", exe, save, env=env)
+        run_stage("S7-first", exe, activated, env=env)
         saved_runtime = active_xberg_settings(state)
         run_stage("S7", exe, restored, env=env)
         require(active_xberg_settings(state) == saved_runtime, "退出后活动目录与来源必须保持不变")
         legacy = state / "markdown-assets" / "xberg-runtime-path.txt"
         require(legacy.read_text(encoding="utf-8") == directory, "旧路径原件必须保留")
-    print("S7 PASS：重启恢复功能选择，旧配置迁移的运行目录与来源保持不变")
+        require(snapshot_output_bytes(legacy_runtime) == before, "迁移不得改写旧运行目录")
+        require(verify_bundled_package(runtime) == before, "无兼容音频时迁移不得改动基础包")
+    print("S7 PASS：重启恢复同一随包活动目录，旧来源、旧目录字节与路径原件保留")
 
 
-def s8_empty_selection_disables_download_and_recovers(exe: str) -> None:
-    """S8 空选择不能下载，重新选择可恢复操作；全过程不得改变活动运行目录."""
-    with tempfile.TemporaryDirectory(prefix="jchtools-gui-smoke-s8-") as temporary:
+def wait_download_barrier(marker: Path) -> None:
+    """只有真实 audio API 到达 test-hooks 预网络屏障后才能确认启动下载."""
+    deadline = time.monotonic() + TIMEOUT
+    while not marker.is_file() and time.monotonic() < deadline:
+        time.sleep(0.1)
+    require(marker.is_file(), "音频下载未进入受控预网络屏障；不能把点击成功当作下载已启动")
+
+
+def s8_explicit_audio_download_cancel_and_retry(exe: str) -> None:
+    """S8 真实音频动作与取消；test-hooks 在网络前拦住，绝不下载真实发布资产."""
+    with tempfile.TemporaryDirectory(prefix="s8-", dir=settings_stage_workspace()) as temporary:
         state = Path(temporary)
-        directory = seed_legacy_runtime(state)
+        runtime, before = provision_bundled_runtime(exe, state)
+        marker = state / "audio-download-barrier"
+        env = isolated_state_env(state, runtime)
+        env["JCHTOOLS_TEST_AUDIO_DOWNLOAD_BARRIER"] = str(marker)
 
         def body(window: WindowSpecification) -> None:
-            goto_settings(window)
-            wait_legacy_runtime(state, directory)
-            original = active_xberg_settings(state)
-            for empty, selected in (("000", "100"), ("000", "010")):
-                select_settings_features(window, state, empty)
-                download = find_button(window, SETTINGS_DOWNLOAD_BUTTON)
-                _ = download.wait("visible", timeout=TIMEOUT)
-                require(not download.is_enabled(), "未选任何功能时下载按钮必须禁用")
-                require(active_xberg_settings(state) == original, "空选择不得改变活动运行目录与来源")
-                select_settings_features(window, state, selected)
-                _ = download.wait("visible enabled", timeout=TIMEOUT)
-                require(active_xberg_settings(state) == original, "恢复有效选择不得改变活动运行目录与来源")
+            original = wait_base_ready(window, state, runtime)
+            require(not marker.exists(), "启动/进入设置不得隐式调用音频下载")
+            notice = state / "markdown-assets" / "licenses" / "THIRD_PARTY_NOTICES.md"
+            notice.unlink(missing_ok=True)
+            click(window, find_button(window, SETTINGS_CHECK_BUTTON))
+            deadline = time.monotonic() + COMPLETION_TIMEOUT
+            while not notice.is_file() and time.monotonic() < deadline:
+                time.sleep(0.1)
+            require(notice.is_file(), "真实离线检查必须生成许可证 notice，不能把未生效的点击当作检查完成")
+            _ = find_button(window, SETTINGS_CHECK_BUTTON).wait("visible enabled", timeout=COMPLETION_TIMEOUT)
+            require(not marker.exists(), "离线检查不得调用音频下载")
+            require(active_xberg_settings(state) == original, "离线检查不得切换活动目录")
+            for caption in (SETTINGS_DOWNLOAD_BUTTON, SETTINGS_RETRY_BUTTON):
+                button = find_button(window, caption)
+                _ = button.wait("visible enabled", timeout=TIMEOUT)
+                click(window, button)
+                wait_download_barrier(marker)
+                cancel = find_button(window, "取消下载")
+                _ = cancel.wait("visible enabled", timeout=TIMEOUT)
+                click(window, cancel)
+                _ = find_button(window, SETTINGS_RETRY_BUTTON).wait("visible enabled", timeout=CONVERT_STOP_TIMEOUT)
+                _ = wait_text_containing(window, "已取消", timeout=CONVERT_STOP_TIMEOUT)
+                require(active_xberg_settings(state) == original, "取消音频下载不得改动活动配置")
+                require(snapshot_output_bytes(runtime) == before, "取消音频下载不得改动基础包或留下暂存文件")
+                marker.unlink()
+            require(not find_button(window, "取消下载").exists(), "取消完成后不得仍处于下载状态")
 
-        run_stage("S8", exe, body, env=isolated_state_env(state))
-        wait_legacy_runtime(state, directory)
-    print("S8 PASS：空选择禁用下载，重新勾选恢复可用，活动 Xberg 配置未改变")
+        run_stage("S8", exe, body, env=env)
+        require(not marker.exists(), "退出不得隐式重启音频下载")
+        require(verify_bundled_package(runtime) == before, "受控取消后基础包必须完整且没有音频")
+    print("S8 PASS：仅显式动作进入预网络屏障；取消与重试真实生效，配置/基础文件不变（未连接真实网络）")
 
 
-def s9_unconfigured_state_shows_reason_and_no_autostart(exe: str) -> None:
-    """S9 组件缺失状态与设置页指引：未配置时如实显示未就绪，不自动下载."""
-    state = Path(tempfile.mkdtemp(prefix="jchtools-gui-smoke-s9-"))
-    env = isolated_state_env(state)
-    try:
+def s9_missing_base_requires_install_repair(exe: str) -> None:
+    """S9 故意缺失 bundle；转换/音频禁用，离线检查给出安装修复而非基础下载."""
+    with tempfile.TemporaryDirectory(prefix="s9-", dir=settings_stage_workspace()) as temporary:
+        state = Path(temporary)
+        env = isolated_state_env(state)
+        marker = state / "audio-download-barrier"
+        env["JCHTOOLS_TEST_AUDIO_DOWNLOAD_BARRIER"] = str(marker)
 
         def body(window: WindowSpecification) -> None:
-            # 切页点击可能落空：以目标状态文本出现为准重试（与 goto_settings 同口径）。
             _ = click_and_wait_text(window, "转 Markdown", CONVERT_NEED_RUNTIME_TEXT)
             start = find_button(window, "开始转换")
             _ = start.wait("visible", timeout=TIMEOUT)
-            require(not start.is_enabled(), "未配置 Xberg 时「开始转换」必须禁用")
-            # 未就绪时只引导到设置；不点击下载，观察每项功能的独立状态。
+            require(not start.is_enabled(), "缺失基础包时「开始转换」必须禁用")
             _ = find_button(window, "前往设置").wait("visible", timeout=TIMEOUT)
             goto_settings(window)
-            for label in SETTINGS_FEATURE_LABELS:
-                _ = find_check(window, label).wait("visible enabled", timeout=TIMEOUT)
-                _ = wait_text_containing(window, f"{label}：未下载")
-            _ = find_button(window, SETTINGS_DOWNLOAD_BUTTON).wait("visible enabled", timeout=TIMEOUT)
+            for label in SETTINGS_BASE_LABELS:
+                _ = wait_text_containing(window, f"{label}：未找到运行目录")
+            _ = wait_text_containing(window, "当前共享目录：未找到，请修复安装包或重新解包")
+            _ = wait_text_containing(window, "重新解包便携 ZIP")
+            download = find_button(window, SETTINGS_DOWNLOAD_BUTTON)
+            _ = download.wait("visible", timeout=TIMEOUT)
+            require(not download.is_enabled(), "缺失基础包时不得启用可选音频下载")
+            click(window, find_button(window, SETTINGS_CHECK_BUTTON))
+            _ = wait_text_containing(window, "未找到有效的 Xberg 运行目录：")
             _ = find_button(window, SETTINGS_CHECK_BUTTON).wait("visible enabled", timeout=TIMEOUT)
-            require(not find_button(window, "取消下载").exists(), "未操作时不得自动启动组件下载")
-            require(not active_xberg_settings(state), "未配置状态不得自动创建活动 Xberg 配置")
-            require(not snapshot_output_bytes(state / "markdown-assets"), "未操作时不得下载或初始化 Markdown 组件")
+            require(not download.is_enabled(), "离线检查失败不得解除音频下载门控")
+            require(not find_button(window, "取消下载").exists(), "缺失基础包不得自动启动下载")
+            require(not active_xberg_settings(state), "缺失包不得伪造活动 Xberg 来源")
+            require(not marker.exists(), "缺失包/离线检查不得调用音频下载")
+            require(not snapshot_output_bytes(state / "markdown-assets"), "缺失基础包不得下载或初始化 Markdown 资产")
+            require(not Path(env["JCHTOOLS_TEST_BUNDLED_XBERG_DIR"]).exists(), "检查不得悄悄创建/下载基础包")
 
         run_stage("S9", exe, body, env=env)
-    finally:
-        shutil.rmtree(state, ignore_errors=True)
-    print("S9 PASS：各功能未下载状态与设置入口可见，转换禁用，未自动下载组件")
+    print("S9 PASS：缺失基础包时转换与音频禁用，离线检查如实失败并提供安装修复/解包指引，无自动下载")
 
 
 def check_flat_output(window: WindowSpecification) -> None:
@@ -2001,7 +2139,9 @@ def _verify_layout_at_two_sizes(window: WindowSpecification) -> None:
     )
     optional_buttons = {"模型服务": ("应用并重启",), "CodeAgent": ("关闭提示",)}
     for width, height in sizes:
-        win32gui.SetWindowPos(window.handle, 0, 0, 0, width, height, win32con.SWP_NOMOVE | win32con.SWP_NOZORDER)
+        win32gui.SetWindowPos(
+            window.handle, 0, 0, 0, width, height, win32con.SWP_NOMOVE | win32con.SWP_NOZORDER | win32con.SWP_NOACTIVATE
+        )
         time.sleep(0.5)
         for page, titles in LAYOUT_PAGES:
             click(window, find_button(window, page))
@@ -2253,10 +2393,10 @@ def _run_cli_stages(exe: Path, data: Path, stages: list[str]) -> int:
     """按原调度顺序执行，报告只包裹既有阶段边界."""
     stage_runners = {
         "S5": s5_markdown_basic_chain,
-        "S6": s6_auto_saves_feature_selection,
-        "S7": s7_restart_restores_saved_selection,
-        "S8": s8_empty_selection_disables_download_and_recovers,
-        "S9": s9_unconfigured_state_shows_reason_and_no_autostart,
+        "S6": s6_bundled_readiness_and_active_source,
+        "S7": s7_restart_restores_active_runtime,
+        "S8": s8_explicit_audio_download_cancel_and_retry,
+        "S9": s9_missing_base_requires_install_repair,
         "S10": s10_output_layout_and_flat_duplicate_policy,
         "S11": s11_existing_results_are_skipped_untouched,
         "S12": s12_output_subtree_is_excluded_from_scan,
