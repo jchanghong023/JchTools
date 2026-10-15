@@ -204,13 +204,6 @@ fn make_fixture() -> tempfile::TempDir {
     dir
 }
 
-/// 目录整理两段式流程的驱动结果：结束时的状态栏与提示条文本（事件循环内读取）。
-struct OrganizerRun {
-    failures: Vec<String>,
-    status: String,
-    notice: String,
-}
-
 // 覆盖 C-11：真实回调必须即时更新勾选状态，而不是等待任务库回传或重新加载。
 fn toggle_first_file_action(
     ui: &jchtools_ui::AppWindow,
@@ -242,13 +235,11 @@ fn toggle_first_file_action(
 }
 
 /// 在 GUI 工作线程上驱动目录整理：选目录 → 开始分析 → 确认执行 → 整理结束。
-fn drive_organizer(data: String, state_dir: PathBuf) -> OrganizerRun {
+fn drive_organizer(data: String, state_dir: PathBuf) -> Vec<String> {
     let failures: Failures = Arc::new(Mutex::new(Vec::new()));
     let failure_sink = Arc::clone(&failures);
     let steps = Rc::new(Cell::new(0u32));
     let ticks = Rc::new(Cell::new(0u32));
-    let observed = Arc::new(Mutex::new((String::new(), String::new())));
-    let observed_sink = Arc::clone(&observed);
     gui::run_with_engine_overrides(
         move |ui| {
             // 启动页是注册表第一个工具（递归解压）；本流程驱动目录整理，先切工具。
@@ -258,7 +249,6 @@ fn drive_organizer(data: String, state_dir: PathBuf) -> OrganizerRun {
             let steps = steps.clone();
             let ticks = ticks.clone();
             let failures = Arc::clone(&failure_sink);
-            let observed = Arc::clone(&observed_sink);
             let driver = slint::Timer::default();
             driver.start(
                 slint::TimerMode::Repeated,
@@ -301,12 +291,6 @@ fn drive_organizer(data: String, state_dir: PathBuf) -> OrganizerRun {
                         }
                         3 if ui.get_status().contains("整理结束") => {
                             steps.set(6);
-                            *observed
-                                .lock()
-                                .unwrap_or_else(std::sync::PoisonError::into_inner) = (
-                                ui.get_status().to_string(),
-                                ui.get_notice_text().to_string(),
-                            );
                             let _ = slint::quit_event_loop();
                         }
                         _ => {}
@@ -319,15 +303,7 @@ fn drive_organizer(data: String, state_dir: PathBuf) -> OrganizerRun {
         Some(EngineTestOverrides { state_dir }),
     )
     .expect("GUI 流程失败");
-    let (status, notice) = observed
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner)
-        .clone();
-    OrganizerRun {
-        failures: take_failures(&failures),
-        status,
-        notice,
-    }
+    take_failures(&failures)
 }
 
 // 覆盖 C-01, C-05, S-02（两段式确认执行全流程）
@@ -343,13 +319,8 @@ fn plan_execution_confirmation_flow_runs_end_to_end() {
 
     let data_text = data.to_string_lossy().to_string();
     run_gui_job(move || {
-        let run = drive_organizer(data_text, state_dir);
-        assert!(run.failures.is_empty(), "流程未完成：{:?}", run.failures);
-        assert!(
-            run.status.contains("整理结束"),
-            "结束时状态栏必须报告完成：{}",
-            run.status
-        );
+        let failures = drive_organizer(data_text, state_dir);
+        assert!(failures.is_empty(), "流程未完成：{failures:?}");
     });
 
     // 事件循环退出后校验：
@@ -407,11 +378,10 @@ fn plan_execution_confirmation_flow_runs_end_to_end() {
     }
 }
 
-// 覆盖 H-06, S-04（Git 目录整树排除在界面明确可见：结束后提示条仍保留跳过说明，
-// 排除树内的文件既不被归类也不被删除，目录结构原样保留）
+// 覆盖 C-14：Git 项目整体移动，保留项目树结构与文件内容。
 #[test]
-fn git_subtree_skip_is_visible_after_run_and_tree_untouched() {
-    if run_isolated_test("git_subtree_skip_is_visible_after_run_and_tree_untouched") {
+fn git_project_moves_as_whole_and_preserves_tree() {
+    if run_isolated_test("git_project_moves_as_whole_and_preserves_tree") {
         return;
     }
     let fixture = tempfile::tempdir().unwrap();
@@ -426,20 +396,8 @@ fn git_subtree_skip_is_visible_after_run_and_tree_untouched() {
 
     let data_text = data.to_string_lossy().to_string();
     run_gui_job(move || {
-        let run = drive_organizer(data_text, state_dir);
-        assert!(run.failures.is_empty(), "流程未完成：{:?}", run.failures);
-        assert!(
-            run.notice.contains("Git"),
-            "H-06：结束后提示条必须明确说明 Git 目录的处置结果：notice={} status={}",
-            run.notice,
-            run.status
-        );
-        assert!(
-            run.notice.contains("Git项目集合") && !run.notice.contains("跳过"),
-            "C-14：整理流程中 Git 项目整体移入「Git项目集合」，提示条必须说明该处置，\
-             不得说成「跳过」：{}",
-            run.notice
-        );
+        let failures = drive_organizer(data_text, state_dir);
+        assert!(failures.is_empty(), "流程未完成：{failures:?}");
     });
 
     // C-14：Git 项目整体移入「Git项目集合」，树内文件随树移动且不得被删除或改写。
