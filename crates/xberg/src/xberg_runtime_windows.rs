@@ -42,7 +42,7 @@ type Pending = Arc<Mutex<HashMap<String, PendingRequest>>>;
 const BROKER_PROTOCOL: u64 = 3;
 
 /// 引擎终态从 pending 移除后，客户端管道仍可能等待取走响应。
-/// 停止看门狗必须等连接处理结束，不能仅凭引擎场景已空就退出代理。
+/// 停止看门狗必须等已解析登记的请求处理结束，不能仅凭引擎场景已空就退出代理。
 struct ActiveHandler(Arc<AtomicUsize>);
 impl ActiveHandler {
     fn new(active: &Arc<AtomicUsize>) -> Self {
@@ -1886,12 +1886,27 @@ fn write_pipe_response(
     Ok(())
 }
 
-fn handle(pipe: File, engine: &Mutex<Option<Engine>>, stopping: &AtomicBool) -> Result<(), String> {
+fn handle(
+    pipe: File,
+    engine: &Mutex<Option<Engine>>,
+    stopping: &AtomicBool,
+    active_handlers: &Arc<AtomicUsize>,
+) -> Result<(), String> {
     let started = Instant::now();
     let mut reader = BufReader::new(pipe);
     let envelope = {
         let _guard = IoDeadline::new(QUERY_TIMEOUT)?;
         read_json(&mut reader)?
+    };
+    // 完整 JSON 及读取期限看门狗结束后才登记，未提交请求的连接不能拖住退出。
+    // 与停止变更、停止看门狗共用状态锁，确保退出检查不会越过已登记响应的交付。
+    let _handler = {
+        let _slot = engine.lock().map_err(|_| "后台状态异常")?;
+        if stopping.load(Ordering::Acquire) {
+            None
+        } else {
+            Some(ActiveHandler::new(active_handlers))
+        }
     };
     let request = envelope["request"].clone();
     let fallback_id;
@@ -2352,23 +2367,14 @@ pub(super) fn serve() -> Result<(), String> {
                 );
                 continue;
             }
-            let handler = ActiveHandler::new(&active_handlers);
-            // XB-08/XB-23：取消走独立连接，停止后仍须允许已有任务安全结束。
-            // 新连接不加入终态刷出屏障；不完整 JSON 不能延长后台寿命。
-            // 先登记再检查，保留停止前已获准连接的响应交付权限。
-            let handler = if stopping.load(Ordering::Acquire) {
-                drop(handler);
-                None
-            } else {
-                Some(handler)
-            };
             let engine = Arc::clone(&engine);
             let stopping = stopping.clone();
+            // XB-08/XB-23：停止后仍解析新连接，让已登记任务的取消可达。
+            let active_handlers = Arc::clone(&active_handlers);
             let span = tracing::Span::current();
             std::thread::spawn(move || {
-                let _handler = handler;
                 let _entered = span.enter();
-                if handle(pipe, &engine, &stopping).is_err() {
+                if handle(pipe, &engine, &stopping, &active_handlers).is_err() {
                     tracing::warn!(
                         event = "xberg_broker_connection_failed",
                         stage = "receive_or_handle",
@@ -2718,7 +2724,8 @@ mod tests {
         let server = std::thread::spawn(move || {
             let engine = Mutex::new(None);
             let stopping = AtomicBool::new(false);
-            let result = handle(pipe, &engine, &stopping);
+            let active_handlers = Arc::new(AtomicUsize::new(0));
+            let result = handle(pipe, &engine, &stopping, &active_handlers);
             let _ = handled_send.send(result);
         });
         let written = written_receive.recv_timeout(QUERY_TIMEOUT);

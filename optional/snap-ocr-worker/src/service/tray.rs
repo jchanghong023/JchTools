@@ -81,6 +81,13 @@ extern "system" {
     fn TranslateMessage(msg: *const Msg) -> i32;
     fn DispatchMessageW(msg: *const Msg) -> isize;
     fn PostMessageW(hwnd: Handle, msg: u32, w: usize, l: isize) -> i32;
+    fn SetTimer(
+        hwnd: Handle,
+        id: usize,
+        interval: u32,
+        callback: Option<unsafe extern "system" fn(Handle, u32, usize, u32)>,
+    ) -> usize;
+    fn KillTimer(hwnd: Handle, id: usize) -> i32;
     fn RegisterHotKey(hwnd: Handle, id: i32, modifiers: u32, key: u32) -> i32;
     fn UnregisterHotKey(hwnd: Handle, id: i32) -> i32;
     fn LoadIconW(instance: Handle, name: *const u16) -> Handle;
@@ -114,6 +121,10 @@ const WM_COMMAND: u32 = 0x111;
 const WM_APP_TRAY: u32 = 0x8000 + 17;
 const WM_APP_CONTROL: u32 = 0x8000 + 19;
 const WM_CLOSE: u32 = 0x10;
+const WM_TIMER: u32 = 0x113;
+const ID_ICON_RETRY: usize = 0x5455;
+const ICON_RETRY_INTERVAL_MS: u32 = 250;
+const ICON_RETRY_LIMIT: u8 = 5;
 const ID_ACTIVE: i32 = 0x5453;
 const ID_STANDBY: i32 = 0x5454;
 static TASKBAR_CREATED: LazyLock<u32> = LazyLock::new(|| {
@@ -153,13 +164,32 @@ fn notify(hwnd: Handle, message: Option<&str>, hotkey: &str, action: u32) -> boo
     unsafe { Shell_NotifyIconW(action, &raw mut data) != 0 }
 }
 
+fn register_tray_icon(hwnd: Handle, hotkey: &str) -> bool {
+    if notify(hwnd, None, hotkey, 0) {
+        return true;
+    }
+    tracing::warn!(
+        event = "ocr_tray_icon_registration_failed",
+        error_type = "shell_notify_icon",
+        "Shell_NotifyIconW(NIM_ADD) 返回失败，通知区图标尚未注册"
+    );
+    false
+}
+
+fn stop_icon_retry(hwnd: Handle, state: &mut TrayState) {
+    // SAFETY: 只取消本线程窗口的自有定时器；尚未设置或已经取消时无副作用。
+    unsafe { KillTimer(hwnd, ID_ICON_RETRY) };
+    state.icon_retries_left = 0;
+}
+
 fn message_loop_requires_cleanup(code: i32) -> bool {
     code <= 0
 }
 
 fn cleanup_tray_state(hwnd: Handle, failure: Option<&str>) {
     STATE.with(|slot| {
-        if let Some(state) = slot.borrow_mut().take() {
+        if let Some(mut state) = slot.borrow_mut().take() {
+            stop_icon_retry(hwnd, &mut state);
             // 与投递共用同一把锁：死亡之后不能再留下无人消费的控制请求。
             let _ = state
                 .queue
@@ -253,6 +283,7 @@ struct TrayState {
     queue: Arc<Mutex<Option<VecDeque<Control>>>>,
     active: i32,
     hotkey: String,
+    icon_retries_left: u8,
 }
 thread_local! { static STATE:RefCell<Option<TrayState>>=const { RefCell::new(None) }; }
 
@@ -322,13 +353,46 @@ fn capture_selected(state: &mpsc::Sender<Command>) {
 unsafe extern "system" fn wnd_proc(hwnd: Handle, msg: u32, w: usize, l: isize) -> isize {
     if msg == *TASKBAR_CREATED && msg != 0 {
         STATE.with(|slot| {
-            if let Some(state) = slot.borrow().as_ref() {
-                let _ = notify(hwnd, None, &state.hotkey, 0);
+            if let Some(state) = slot.borrow_mut().as_mut() {
+                stop_icon_retry(hwnd, state);
+                if !register_tray_icon(hwnd, &state.hotkey) {
+                    // SAFETY: hwnd 属于本线程，固定 ID 仅用于图标恢复；由窗口消息泵分发。
+                    if unsafe { SetTimer(hwnd, ID_ICON_RETRY, ICON_RETRY_INTERVAL_MS, None) } != 0 {
+                        state.icon_retries_left = ICON_RETRY_LIMIT;
+                    } else {
+                        tracing::error!(
+                            event = "ocr_tray_icon_retry_failed",
+                            error = %std::io::Error::last_os_error(),
+                            "托盘图标恢复定时器创建失败"
+                        );
+                    }
+                }
             }
         });
         return 0;
     }
     match msg {
+        WM_TIMER if w == ID_ICON_RETRY => {
+            STATE.with(|slot| {
+                if let Some(state) = slot.borrow_mut().as_mut() {
+                    if state.icon_retries_left == 0 {
+                        return;
+                    }
+                    state.icon_retries_left -= 1;
+                    if register_tray_icon(hwnd, &state.hotkey) {
+                        stop_icon_retry(hwnd, state);
+                    } else if state.icon_retries_left == 0 {
+                        stop_icon_retry(hwnd, state);
+                        tracing::error!(
+                            event = "ocr_tray_icon_retry_exhausted",
+                            retries = ICON_RETRY_LIMIT,
+                            "托盘图标注册重试已耗尽，通知区图标仍不可用"
+                        );
+                    }
+                }
+            });
+            return 0;
+        }
         WM_HOTKEY => {
             let commands = STATE.with(|slot| {
                 slot.borrow()
@@ -671,6 +735,7 @@ impl ReviewTray {
                     queue: queue.clone(),
                     active: 0,
                     hotkey: String::new(),
+                    icon_retries_left: 0,
                 });
             });
             if selecting {
@@ -866,15 +931,27 @@ pub(crate) fn start(
                 queue: queue.clone(),
                 active: if hotkey_registered { ID_ACTIVE } else { 0 },
                 hotkey: hotkey.clone(),
+                icon_retries_left: 0,
             });
         });
-        if !notify(hwnd, None, &hotkey, 0) {
+        let mut icon_registered = register_tray_icon(hwnd, &hotkey);
+        for _ in 0..ICON_RETRY_LIMIT {
+            let interval = std::time::Duration::from_millis(u64::from(ICON_RETRY_INTERVAL_MS));
+            if icon_registered || started.elapsed() + interval >= std::time::Duration::from_secs(5)
+            {
+                break;
+            }
+            // 仅初始化阶段等待；最多五次，且不越过调用方原有的五秒初始化预算。
+            std::thread::sleep(interval);
+            icon_registered = register_tray_icon(hwnd, &hotkey);
+        }
+        if !icon_registered {
             tracing::error!(
                 event = "ocr_tray_failed",
                 stage = "notify_icon",
                 error_type = "win32",
                 elapsed_ms = crate::logging::elapsed_ms(started),
-                "托盘图标创建失败"
+                "托盘图标创建失败，有限注册重试已结束"
             );
             let _ = ready_tx.send(Err("通知区图标创建失败；截图服务未启动".into()));
             // SAFETY: 仅按值传递本线程刚创建的窗口句柄，销毁失败仅返回非零。
@@ -958,5 +1035,106 @@ mod tests {
         assert!(message_loop_requires_cleanup(-1));
         assert!(message_loop_requires_cleanup(0));
         assert!(!message_loop_requires_cleanup(1));
+    }
+
+    // 覆盖 XB-23/O-11/O-12：Explorer 恢复期间首次 NIM_ADD 失败不能永久丢失托盘。
+    // 只验证真实 Shell API 失败后安排原生重试；不代表真实 Explorer 已绘制图标。
+    #[test]
+    fn taskbar_recreation_retries_after_native_registration_failure() {
+        use super::{notify, wide, Handle, TrayState, STATE, TASKBAR_CREATED};
+        use std::ptr::{null, null_mut};
+        use std::sync::{mpsc, Arc, Mutex};
+        use std::time::{Duration, Instant};
+        use windows_sys::Win32::System::Threading::GetCurrentThreadId;
+        use windows_sys::Win32::UI::WindowsAndMessaging::{
+            DispatchMessageW, PeekMessageW, SendMessageW, SetWindowLongPtrW,
+            GWLP_WNDPROC, MSG, PM_REMOVE, WM_TIMER,
+        };
+
+        std::thread::spawn(|| {
+            #[link(name = "user32")]
+            extern "system" {
+                fn CreateDesktopW(
+                    name: *const u16, device: *const u16, mode: *const std::ffi::c_void,
+                    flags: u32, access: u32, security: *const std::ffi::c_void,
+                ) -> Handle;
+                fn GetThreadDesktop(thread: u32) -> Handle;
+                fn SetThreadDesktop(desktop: Handle) -> i32;
+                fn CloseDesktop(desktop: Handle) -> i32;
+            }
+            struct IsolatedDesktop {
+                previous: Handle,
+                desktop: Handle,
+                window: Handle,
+            }
+            impl Drop for IsolatedDesktop {
+                fn drop(&mut self) {
+                    if !self.window.is_null() {
+                        // SAFETY: 仅销毁本线程的隐藏窗口；托盘清理仍在隔离 desktop 内。
+                        unsafe { super::DestroyWindow(self.window) };
+                    }
+                    let _ = STATE.with(|slot| slot.borrow_mut().take());
+                    // SAFETY: 本线程窗口已销毁，恢复系统持有的原 desktop。
+                    assert_ne!(unsafe { SetThreadDesktop(self.previous) }, 0);
+                    // SAFETY: 关闭本测试创建且不再绑定线程的 desktop，不切换显示桌面。
+                    assert_ne!(unsafe { CloseDesktop(self.desktop) }, 0);
+                }
+            }
+            // SAFETY: 无参数线程查询，不改变用户环境。
+            let thread = unsafe { GetCurrentThreadId() };
+            // SAFETY: 查询当前线程已绑定的 desktop，句柄仍由系统持有。
+            let previous = unsafe { GetThreadDesktop(thread) };
+            let name = wide(&format!("JchToolsTrayRecovery-{}-{thread}", std::process::id()));
+            // SAFETY: 创建未显示的测试 desktop；字符串存活，安全属性使用默认值。
+            let desktop = unsafe { CreateDesktopW(name.as_ptr(), null(), null(), 0, 0x01ff, null()) };
+            assert!(!desktop.is_null(), "必须成功创建隔离 desktop，不能降级到用户桌面");
+            let mut isolated = IsolatedDesktop { previous, desktop, window: null_mut() };
+            // SAFETY: 新线程尚无窗口或 hook，只绑定本线程，不调用 SwitchDesktop。
+            assert_ne!(unsafe { SetThreadDesktop(desktop) }, 0);
+            let class = wide("STATIC");
+            // SAFETY: 系统 STATIC 类和 HWND_MESSAGE(-3) 仅创建本线程的隐藏消息窗口。
+            isolated.window = unsafe {
+                super::CreateWindowExW(
+                    0, class.as_ptr(), class.as_ptr(), 0, 0, 0, 0, 0,
+                    -3isize as Handle, null_mut(), null_mut(), null_mut(),
+                )
+            };
+            assert!(!isolated.window.is_null(), "必须创建隔离消息窗口");
+            // SAFETY: 本线程拥有窗口，回调使用正确 Win32 ABI，存活至窗口销毁。
+            assert_ne!(unsafe {
+                SetWindowLongPtrW(isolated.window, GWLP_WNDPROC, super::wnd_proc as *const () as isize)
+            }, 0);
+            let (commands, _received) = mpsc::channel();
+            STATE.with(|slot| {
+                *slot.borrow_mut() = Some(TrayState {
+                    commands,
+                    queue: Arc::new(Mutex::new(Some(std::collections::VecDeque::new()))),
+                    active: 0, // 不注册或注销任何用户全局热键。
+                    hotkey: "Ctrl+Alt+O".into(),
+                    icon_retries_left: 0,
+                });
+            });
+            assert!(!notify(isolated.window, None, "Ctrl+Alt+O", 0),
+                "隔离 desktop 无 Explorer，真实 NIM_ADD 必须失败");
+            let taskbar_created = *TASKBAR_CREATED;
+            assert_ne!(taskbar_created, 0, "TaskbarCreated 消息必须成功注册");
+            // SAFETY: 同步投递至本线程独占消息窗口，执行真实生产窗口过程。
+            unsafe { SendMessageW(isolated.window, taskbar_created, 0, 0) };
+            let deadline = Instant::now() + Duration::from_secs(2);
+            let mut retried = false;
+            while Instant::now() < deadline {
+                // SAFETY: MSG 是纯输出缓冲，全零有效；仅读取测试窗口的 WM_TIMER。
+                let mut message: MSG = unsafe { std::mem::zeroed() };
+                // SAFETY: 输出缓冲有效，过滤本线程独占窗口，不消费用户消息。
+                if unsafe { PeekMessageW(&raw mut message, isolated.window, WM_TIMER, WM_TIMER, PM_REMOVE) } != 0 {
+                    // SAFETY: 消息来自该窗口原生队列，执行原生定时器恢复路径。
+                    unsafe { DispatchMessageW(&raw const message) };
+                    retried = true;
+                    break;
+                }
+                std::thread::sleep(Duration::from_millis(10));
+            }
+            assert!(retried, "TaskbarCreated 的真实 NIM_ADD 失败后必须安排原生定时重试，不能静默永久失图");
+        }).join().expect("隔离托盘恢复回归失败");
     }
 }
