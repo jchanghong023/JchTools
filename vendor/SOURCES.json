@@ -30,6 +30,24 @@
       ]
     },
     {
+      "package": "dpi",
+      "version": "0.1.2",
+      "files": [
+        {
+          "path": "CHANGELOG.md",
+          "reason": "记录 PhysicalUnit 常量类型及数值修复。"
+        },
+        {
+          "path": "src/lib.rs",
+          "reason": "将 PhysicalUnit 的 ZERO/MAX/MIN 常量改为正确的 PhysicalUnit 类型及构造器，保留 PhysicalSize 常量；新增类型、数值和缩放内联回归。"
+        },
+        {
+          "path": ".cargo-checksum.json",
+          "reason": "更新本地源码、回归测试及修复说明的文件清单和 SHA-256 摘要，保留上游发布归档 package 摘要。"
+        }
+      ]
+    },
+    {
       "package": "error-code",
       "version": "3.4.0",
       "files": [
@@ -38,8 +56,20 @@
           "reason": "Windows FormatMessageW 缓冲不足失败直接返回原有 <Truncated>，禁止按无效输出长度转换；仅格式化调用使用单个私有回调，后续执行真实 WideCharToMultiByte；新增足够容量的全初始化 UTF-16 哨兵正文防泄露、真实成功文本及真实转换缓冲不足回归。私有入口返回字符串的显式生命周期只绑定输出 MessageBuf，不绑定临时 UTF-16 缓冲。"
         },
         {
+          "path": "README.md",
+          "reason": "记录 Windows 原始 IO 错误码使用系统类别的修复。"
+        },
+        {
+          "path": "src/lib.rs",
+          "reason": "std::io::Error 的原始 Windows 错误码使用系统类别而非 errno 类别，保留原始 Win32/Winsock 数值和公开 API。"
+        },
+        {
+          "path": "tests/error_code.rs",
+          "reason": "新增 Win32 ERROR_ACCESS_DENIED 及 Winsock WSAEWOULDBLOCK 原始错误码类别回归。"
+        },
+        {
           "path": ".cargo-checksum.json",
-          "reason": "更新本地 src/system.rs 文件摘要，保留上游发布归档 package 摘要。"
+          "reason": "更新本地源码、回归测试及修复说明的文件清单和 SHA-256 摘要，保留上游发布归档 package 摘要。"
         }
       ]
     },
@@ -49,11 +79,19 @@
       "files": [
         {
           "path": "src/decoder.rs",
-          "reason": "Group4 Vertical 转折越出图像宽度时返回 DecodeError::Invalid，而非把畸形数据视为成功的 Incomplete；新增四项边界行为回归。"
+          "reason": "Group4 Vertical 转折越出图像宽度时返回 DecodeError::Invalid，而非把畸形数据视为成功的 Incomplete；新增四项边界行为回归。 Group3/Group4 Horizontal 模式的两段游程超出行宽时返回 Invalid，不再接受越界成功。"
+        },
+        {
+          "path": "README.md",
+          "reason": "记录 Horizontal 游程行宽拒绝、Vertical 差值及位置算术溢出修复。"
+        },
+        {
+          "path": "src/encoder.rs",
+          "reason": "Vertical 差值使用 i32，避免合法大宽度坐标差截断；以减法判断位置边界，避免坐标和溢出。"
         },
         {
           "path": ".cargo-checksum.json",
-          "reason": "更新本地修复后 src/decoder.rs 的文件摘要，保留上游发布归档 package 摘要。"
+          "reason": "更新本地源码、回归测试及修复说明的文件清单和 SHA-256 摘要，保留上游发布归档 package 摘要。"
         }
       ]
     },
@@ -81,11 +119,45 @@
       "files": [
         {
           "path": "src/decoder.rs",
-          "reason": "修正 VP8L 宽高字段掩码与加一的运算顺序，正确解码最大 16384 像素维度；新增四种宽高轴组合的编码/解码像素往返回归。"
+          "reason": "修正 VP8L 宽高字段掩码与加一的运算顺序，正确解码最大 16384 像素维度；新增四种宽高轴组合的编码/解码像素往返回归。 ANMF 的 ALPH+VP8 帧在填充前核对 VP8 宽高与帧头一致，尺寸不符返回错误而非越界写入。"
+        },
+        {
+          "path": "README.md",
+          "reason": "记录 ANMF 帧头与 ALPH+VP8 图像尺寸一致性校验修复。"
         },
         {
           "path": ".cargo-checksum.json",
-          "reason": "更新本地修复后 src/decoder.rs 的文件摘要，保留上游发布归档 package 摘要。"
+          "reason": "更新本地源码、回归测试及修复说明的文件清单和 SHA-256 摘要，保留上游发布归档 package 摘要。"
+        }
+      ]
+    },
+    {
+      "package": "imagesize",
+      "version": "0.14.0",
+      "files": [
+        {
+          "path": "Cargo.toml",
+          "reason": "登记新增 ordering 集成测试 target。"
+        },
+        {
+          "path": "Cargo.toml.orig",
+          "reason": "同步登记新增 ordering 集成测试 target。"
+        },
+        {
+          "path": "README.md",
+          "reason": "记录等面积 ImageSize 排序与 Eq 一致性修复及 BTreeSet 回归。"
+        },
+        {
+          "path": "src/lib.rs",
+          "reason": "ImageSize 排序在面积相等时继续比较宽高，维持面积优先并满足 Ord/Eq 一致性。"
+        },
+        {
+          "path": "tests/ordering.rs",
+          "reason": "新增真实 BTreeSet 逐项插入、等面积不同尺寸及公开 PNG blob_size 的三项回归。"
+        },
+        {
+          "path": ".cargo-checksum.json",
+          "reason": "更新本地源码、回归测试及修复说明的文件清单和 SHA-256 摘要，保留上游发布归档 package 摘要。"
         }
       ]
     },
@@ -98,8 +170,20 @@
           "reason": "Windows ANSI 支持仅为成功创建的自有控制台句柄建立 Drop 所有权 guard，在成功及 Get/SetConsoleMode 失败路径均关闭句柄并保持错误码/public API；新增真实 NUL 句柄失败路径及真实 GetHandleInformation 关闭结果回归，不创建或修改控制台窗口。"
         },
         {
+          "path": "CHANGELOG.md",
+          "reason": "记录 reset_before_style 强制重置并恢复完整样式的修复。"
+        },
+        {
+          "path": "src/difference.rs",
+          "reason": "reset_before_style 优先于无变化及增量样式优化，强制重置并重新输出完整目标样式。"
+        },
+        {
+          "path": "tests/style.rs",
+          "reason": "新增相同样式、增量样式和完整前景背景恢复的公开 ANSI 输出回归。"
+        },
+        {
           "path": ".cargo-checksum.json",
-          "reason": "更新本地 src/windows.rs 文件摘要，保留上游发布归档 package 摘要。"
+          "reason": "更新本地源码、回归测试及修复说明的文件清单和 SHA-256 摘要，保留上游发布归档 package 摘要。"
         }
       ]
     },
@@ -112,8 +196,42 @@
           "reason": "f_pow 的零指数及单位底数恒等式先于 NaN 传播，保持近似算法及其他 NaN 行为不变；新增标准 powf 比较与 NaN、无穷、有限值控制回归。"
         },
         {
+          "path": "README.md",
+          "reason": "记录 f_powf 带符号零及负底数奇数负指数符号修复。"
+        },
+        {
+          "path": "src/powf.rs",
+          "reason": "f_powf 正确保留带符号零及负底数奇数负指数的结果符号，新增特殊值内联回归。"
+        },
+        {
           "path": ".cargo-checksum.json",
-          "reason": "更新本地 src/pow.rs 文件摘要，保留上游发布归档 package 摘要。"
+          "reason": "更新本地源码、回归测试及修复说明的文件清单和 SHA-256 摘要，保留上游发布归档 package 摘要。"
+        }
+      ]
+    },
+    {
+      "package": "rfd",
+      "version": "0.15.4",
+      "files": [
+        {
+          "path": "CHANGELOG.md",
+          "reason": "记录 Windows 扩展 UNC/驱动器原生 UTF-16 默认目录转换修复。"
+        },
+        {
+          "path": "src/backend/win_cid/file_dialog.rs",
+          "reason": "Windows 文件对话框默认目录使用统一的原生宽字符路径转换，保持扩展 UNC 为绝对 UNC 路径。"
+        },
+        {
+          "path": "src/backend/win_cid/file_dialog/dialog_ffi.rs",
+          "reason": "复用原生 UTF-16 路径转换以传入 NUL 结尾的 SHCreateItemFromParsingName 参数，避免中间字符串分配。"
+        },
+        {
+          "path": "src/backend/win_cid/file_dialog/path.rs",
+          "reason": "新增 Windows 宽字符路径辅助实现，正确移除扩展驱动器前缀及将扩展 UNC 前缀转换为双反斜杠；内联覆盖驱动器、UNC 及非 ASCII 路径。"
+        },
+        {
+          "path": ".cargo-checksum.json",
+          "reason": "更新本地源码、回归测试及修复说明的文件清单和 SHA-256 摘要，保留上游发布归档 package 摘要。"
         }
       ]
     },
@@ -123,15 +241,71 @@
       "files": [
         {
           "path": "src/moparser.rs",
-          "reason": "MO 消息表定位及 msgid/msgstr 的定位、read_exact 错误传播为现有 IOError，拒绝零填充的截断成功；新增真实 44 字节公开 mofile 负例与完整 NUL 结尾正例。"
+          "reason": "MO 消息表定位及 msgid/msgstr 的定位、read_exact 错误传播为现有 IOError，拒绝零填充的截断成功；新增真实 44 字节公开 mofile 负例与完整 NUL 结尾正例。 MO 上下文按 msgctxt\\x04msgid 顺序拆分并保留既有截断错误传播。"
         },
         {
           "path": "src/poparser.rs",
-          "reason": "PO 行读取失败不再伪装为 EOF，保留错误并在解析成功前返回现有 SyntaxError；文件打开失败不再 unwrap panic；新增无效 UTF-8、IOError、文件打开失败及公开 pofile 正反例。"
+          "reason": "PO 行读取失败不再伪装为 EOF，保留错误并在解析成功前返回现有 SyntaxError；文件打开失败不再 unwrap panic；新增无效 UTF-8、IOError、文件打开失败及公开 pofile 正反例。 增加 PO 引号及状态转换校验，畸形输入返回解析错误而非越界或无效成功。"
+        },
+        {
+          "path": "Cargo.toml",
+          "reason": "登记新增 parser_invariants 集成测试 target。"
+        },
+        {
+          "path": "README.md",
+          "reason": "记录 MO 上下文顺序、借用字节、IOError 传播及畸形 PO 引号/状态修复。"
+        },
+        {
+          "path": "src/file/mod.rs",
+          "reason": "FileOptions 支持借用字节输入而无需误当路径读取。"
+        },
+        {
+          "path": "src/file/mofile.rs",
+          "reason": "MO 文件读写失败返回现有 IOError，不再 unwrap panic。"
+        },
+        {
+          "path": "tests/parser_invariants.rs",
+          "reason": "新增 MO 上下文、借用字节、IOError 和畸形 PO 引号/状态的公开解析回归。"
         },
         {
           "path": ".cargo-checksum.json",
-          "reason": "更新 src/moparser.rs 与 src/poparser.rs 的本地文件摘要，保留上游发布归档 package 摘要。"
+          "reason": "更新本地源码、回归测试及修复说明的文件清单和 SHA-256 摘要，保留上游发布归档 package 摘要。"
+        }
+      ]
+    },
+    {
+      "package": "rustybuzz",
+      "version": "0.20.1",
+      "files": [
+        {
+          "path": "CHANGELOG.md",
+          "reason": "记录 SAFE_TO_INSERT_TATWEEL 位值修复，避免公开 glyph flags 泄漏内部 mask。"
+        },
+        {
+          "path": "src/lib.rs",
+          "reason": "将 DEFINED_GLYPH_FLAGS 的 SAFE_TO_INSERT_TATWEEL 位改为 0x80，避免内部 glyph mask 0x40 被公开 flags 泄漏；新增真实 glyph mask 和公开 Buffer 回归。"
+        },
+        {
+          "path": ".cargo-checksum.json",
+          "reason": "更新本地源码、回归测试及修复说明的文件清单和 SHA-256 摘要，保留上游发布归档 package 摘要。"
+        }
+      ]
+    },
+    {
+      "package": "socket2",
+      "version": "0.6.5",
+      "files": [
+        {
+          "path": "README.md",
+          "reason": "记录 Windows 正超时向上取整毫秒及既有零值/饱和语义。"
+        },
+        {
+          "path": "src/sys/windows.rs",
+          "reason": "Windows 非零 socket 超时向上取整为毫秒，保留 None、零和最大值饱和语义；新增纳秒边界及大时长内联回归。"
+        },
+        {
+          "path": ".cargo-checksum.json",
+          "reason": "更新本地源码、回归测试及修复说明的文件清单和 SHA-256 摘要，保留上游发布归档 package 摘要。"
         }
       ]
     },
@@ -158,6 +332,76 @@
       ]
     },
     {
+      "package": "tiny-skia",
+      "version": "0.11.4",
+      "files": [
+        {
+          "path": "CHANGELOG.md",
+          "reason": "记录自有及借用 Pixmap 的横纵像素边界修复。"
+        },
+        {
+          "path": "src/pixmap.rs",
+          "reason": "自有与借用 Pixmap 的像素访问在 x>=width 或 y>=height 时返回 None，避免跨行别名及越界访问。"
+        },
+        {
+          "path": "tests/pixel_bounds.rs",
+          "reason": "新增自有与借用 Pixmap 的横纵边界和合法像素四项公开回归。"
+        },
+        {
+          "path": ".cargo-checksum.json",
+          "reason": "更新本地源码、回归测试及修复说明的文件清单和 SHA-256 摘要，保留上游发布归档 package 摘要。"
+        }
+      ]
+    },
+    {
+      "package": "tiny-skia",
+      "version": "0.12.0",
+      "files": [
+        {
+          "path": "CHANGELOG.md",
+          "reason": "记录自有及借用 Pixmap 的横纵像素边界修复。"
+        },
+        {
+          "path": "Cargo.toml",
+          "reason": "登记新增 pixel_bounds 集成测试 target。"
+        },
+        {
+          "path": "src/pixmap.rs",
+          "reason": "自有与借用 Pixmap 的像素访问在 x>=width 或 y>=height 时返回 None，避免跨行别名及越界访问。"
+        },
+        {
+          "path": "tests/pixel_bounds.rs",
+          "reason": "新增自有与借用 Pixmap 的横纵边界和合法像素四项公开回归。"
+        },
+        {
+          "path": ".cargo-checksum.json",
+          "reason": "更新本地源码、回归测试及修复说明的文件清单和 SHA-256 摘要，保留上游发布归档 package 摘要。"
+        }
+      ]
+    },
+    {
+      "package": "tokio",
+      "version": "1.52.3",
+      "files": [
+        {
+          "path": "CHANGELOG.md",
+          "reason": "记录 Windows 命名管道客户端模式设置失败时的句柄回收及原错误码保留。"
+        },
+        {
+          "path": "src/net/windows/named_pipe.rs",
+          "reason": "CreateFileW 成功后若 SetNamedPipeHandleState 失败，先捕获 last_os_error 再关闭自有句柄，防止每次失败泄漏句柄且保持原错误码。"
+        },
+        {
+          "path": "tests/net_named_pipe.rs",
+          "reason": "新增隔离子进程的 32 次失败句柄计数回归，并保留有效 byte/message 命名管道成功控制。"
+        },
+        {
+          "path": ".cargo-checksum.json",
+          "reason": "更新本地源码、回归测试及修复说明的文件清单和 SHA-256 摘要，保留上游发布归档 package 摘要。"
+        }
+      ]
+    },
+    {
       "package": "ttf-parser",
       "version": "0.25.1",
       "files": [
@@ -175,11 +419,41 @@
         },
         {
           "path": "CHANGELOG.md",
-          "reason": "记录本地数组长度溢出和 TTC 集合计数结构验证修复。"
+          "reason": "记录本地数组长度溢出和 TTC 集合计数结构验证修复。 记录 cmap format 2/4 的 u16 wrapping delta 与高位 glyph 映射修复。"
+        },
+        {
+          "path": "src/tables/cmap/format2.rs",
+          "reason": "cmap format 2 的 glyph ID 和 delta 使用 u16 wrapping 运算，按模 65536 映射高位 glyph。"
+        },
+        {
+          "path": "src/tables/cmap/format4.rs",
+          "reason": "cmap format 4 的 glyph ID 和 delta 使用 u16 wrapping 运算，保留零 glyph 语义并避免高位 glyph 错误拒绝。"
+        },
+        {
+          "path": "tests/tables/cmap.rs",
+          "reason": "新增 cmap format 2/4 高位 glyph、正负 delta 及零 glyph 映射边界回归。"
         },
         {
           "path": ".cargo-checksum.json",
-          "reason": "更新本地修复后源码、回归测试及 CHANGELOG.md 的四项文件摘要，保留上游发布归档 package 摘要。"
+          "reason": "更新本地源码、回归测试及修复说明的文件清单和 SHA-256 摘要，保留上游发布归档 package 摘要。"
+        }
+      ]
+    },
+    {
+      "package": "unicode-bidi-mirroring",
+      "version": "0.4.0",
+      "files": [
+        {
+          "path": "README.md",
+          "reason": "记录未排序镜像表第二列反向查找修复及全部静态映射对回归。"
+        },
+        {
+          "path": "src/lib.rs",
+          "reason": "反向镜像查找不再对未排序的第二列做二分查找，改用有界无分配扫描；新增 U+29F5 反向映射、全部 214 对和未映射控制回归。"
+        },
+        {
+          "path": ".cargo-checksum.json",
+          "reason": "更新本地源码、回归测试及修复说明的文件清单和 SHA-256 摘要，保留上游发布归档 package 摘要。"
         }
       ]
     },
@@ -193,11 +467,27 @@
         },
         {
           "path": "src/stream.rs",
-          "reason": "SOCKS 连接完成信号采用 wait_timeout_while 谓词等待，避免通知先于等待或虚假唤醒造成错误超时；新增内联等待入口和两项行为回归。"
+          "reason": "SOCKS 连接完成信号采用 wait_timeout_while 谓词等待，避免通知先于等待或虚假唤醒造成错误超时；新增内联等待入口和两项行为回归。 SOCKS IPv6 目标使用 ATYP=4 编码，并将 CONNECT 写入和刷新委托给保留 IO 错误的私有辅助模块。"
+        },
+        {
+          "path": "CHANGELOG.md",
+          "reason": "记录畸形响应头拒绝、截断 chunked payload 错误、IPv6 SOCKS 编码及 CONNECT IO 错误传播修复。"
+        },
+        {
+          "path": "src/chunked/decoder.rs",
+          "reason": "chunked payload 未完整读取即 EOF 时返回 UnexpectedEof，不再误报成功结束。"
+        },
+        {
+          "path": "src/header.rs",
+          "reason": "缺失冒号的响应头返回无效头错误，避免切片 panic。"
+        },
+        {
+          "path": "src/stream/proxy_connect.rs",
+          "reason": "新增生产 CONNECT 写入/刷新辅助模块，传播真实 IO 错误而非 unwrap panic；内联覆盖 write、flush 失败及成功输出。"
         },
         {
           "path": ".cargo-checksum.json",
-          "reason": "更新本地修复后 src/proxy.rs 和 src/stream.rs 的文件摘要，保留上游发布归档 package 摘要。"
+          "reason": "更新本地源码、回归测试及修复说明的文件清单和 SHA-256 摘要，保留上游发布归档 package 摘要。"
         }
       ]
     },
@@ -207,11 +497,11 @@
       "files": [
         {
           "path": "README.md",
-          "reason": "记录本地 const u8/bool 构造验证及零尺寸类型空字节解析链修复和回归入口。"
+          "reason": "记录本地 const u8/bool 构造验证及零尺寸类型空字节解析链修复和回归入口。 记录零尺寸 ULE const/切片构造的仅空输入约束及无取模/除零修复。"
         },
         {
           "path": "src/ule/plain.rs",
-          "reason": "const u8 构造器接受任意字节，bool 逐字节仅接受 0/1，单位类型仅接受空输入；挂接 const 单元回归。"
+          "reason": "const u8 构造器接受任意字节，bool 逐字节仅接受 0/1，单位类型仅接受空输入；挂接 const 单元回归。 零尺寸 ULE 的 const 构造只接受空输入，明确拒绝非空输入而不执行取模或除零。"
         },
         {
           "path": "src/ule/mod.rs",
@@ -231,11 +521,15 @@
         },
         {
           "path": "tests/const_constructors_smoke.rs",
-          "reason": "新增动态公开 API 回归，覆盖构造器输入验证和 ULE/ZeroSlice/ZeroVec 零尺寸解析链。"
+          "reason": "新增动态公开 API 回归，覆盖构造器输入验证和 ULE/ZeroSlice/ZeroVec 零尺寸解析链。 补充零尺寸 ULE 空输入成功、非空输入拒绝及公开构造链回归。"
+        },
+        {
+          "path": "src/ule/slices.rs",
+          "reason": "零尺寸 ULE 切片转换维持仅空输入约束，避免长度计算的取模或除零。"
         },
         {
           "path": ".cargo-checksum.json",
-          "reason": "更新本地修复后文档、源码和新增回归文件的七项文件摘要，保留上游发布归档 package 摘要。"
+          "reason": "更新本地源码、回归测试及修复说明的文件清单和 SHA-256 摘要，保留上游发布归档 package 摘要。"
         }
       ]
     }
@@ -5264,8 +5558,8 @@
       "source": "registry+https://github.com/rust-lang/crates.io-index",
       "original_upstream_source": "registry+https://github.com/rust-lang/crates.io-index",
       "effective_source": {
-        "type": "registry",
-        "source": "registry+https://github.com/rust-lang/crates.io-index"
+        "type": "path",
+        "path": "vendor/dpi-0.1.2"
       },
       "archive_url": "https://static.crates.io/crates/dpi/dpi-0.1.2.crate",
       "archive_sha256": "d8b14ccef22fc6f5a8f4d7d768562a182c04ce9a3b3157b91390b52ddfdf1a76",
@@ -5286,7 +5580,20 @@
         "path_in_vcs": "dpi"
       },
       "file_inventory": ".cargo-checksum.json",
-      "project_source_modifications": [],
+      "project_source_modifications": [
+        {
+          "path": "CHANGELOG.md",
+          "reason": "记录 PhysicalUnit 常量类型及数值修复。"
+        },
+        {
+          "path": "src/lib.rs",
+          "reason": "将 PhysicalUnit 的 ZERO/MAX/MIN 常量改为正确的 PhysicalUnit 类型及构造器，保留 PhysicalSize 常量；新增类型、数值和缩放内联回归。"
+        },
+        {
+          "path": ".cargo-checksum.json",
+          "reason": "更新本地源码、回归测试及修复说明的文件清单和 SHA-256 摘要，保留上游发布归档 package 摘要。"
+        }
+      ],
       "supplemental_materials": []
     },
     {
@@ -5845,8 +6152,20 @@
           "reason": "Windows FormatMessageW 缓冲不足失败直接返回原有 <Truncated>，禁止按无效输出长度转换；仅格式化调用使用单个私有回调，后续执行真实 WideCharToMultiByte；新增足够容量的全初始化 UTF-16 哨兵正文防泄露、真实成功文本及真实转换缓冲不足回归。私有入口返回字符串的显式生命周期只绑定输出 MessageBuf，不绑定临时 UTF-16 缓冲。"
         },
         {
+          "path": "README.md",
+          "reason": "记录 Windows 原始 IO 错误码使用系统类别的修复。"
+        },
+        {
+          "path": "src/lib.rs",
+          "reason": "std::io::Error 的原始 Windows 错误码使用系统类别而非 errno 类别，保留原始 Win32/Winsock 数值和公开 API。"
+        },
+        {
+          "path": "tests/error_code.rs",
+          "reason": "新增 Win32 ERROR_ACCESS_DENIED 及 Winsock WSAEWOULDBLOCK 原始错误码类别回归。"
+        },
+        {
           "path": ".cargo-checksum.json",
-          "reason": "更新本地 src/system.rs 文件摘要，保留上游发布归档 package 摘要。"
+          "reason": "更新本地源码、回归测试及修复说明的文件清单和 SHA-256 摘要，保留上游发布归档 package 摘要。"
         }
       ],
       "supplemental_materials": []
@@ -6110,11 +6429,19 @@
       "project_source_modifications": [
         {
           "path": "src/decoder.rs",
-          "reason": "Group4 Vertical 转折越出图像宽度时返回 DecodeError::Invalid，而非把畸形数据视为成功的 Incomplete；新增四项边界行为回归。"
+          "reason": "Group4 Vertical 转折越出图像宽度时返回 DecodeError::Invalid，而非把畸形数据视为成功的 Incomplete；新增四项边界行为回归。 Group3/Group4 Horizontal 模式的两段游程超出行宽时返回 Invalid，不再接受越界成功。"
+        },
+        {
+          "path": "README.md",
+          "reason": "记录 Horizontal 游程行宽拒绝、Vertical 差值及位置算术溢出修复。"
+        },
+        {
+          "path": "src/encoder.rs",
+          "reason": "Vertical 差值使用 i32，避免合法大宽度坐标差截断；以减法判断位置边界，避免坐标和溢出。"
         },
         {
           "path": ".cargo-checksum.json",
-          "reason": "更新本地修复后 src/decoder.rs 的文件摘要，保留上游发布归档 package 摘要。"
+          "reason": "更新本地源码、回归测试及修复说明的文件清单和 SHA-256 摘要，保留上游发布归档 package 摘要。"
         }
       ],
       "supplemental_materials": []
@@ -9517,11 +9844,15 @@
       "project_source_modifications": [
         {
           "path": "src/decoder.rs",
-          "reason": "修正 VP8L 宽高字段掩码与加一的运算顺序，正确解码最大 16384 像素维度；新增四种宽高轴组合的编码/解码像素往返回归。"
+          "reason": "修正 VP8L 宽高字段掩码与加一的运算顺序，正确解码最大 16384 像素维度；新增四种宽高轴组合的编码/解码像素往返回归。 ANMF 的 ALPH+VP8 帧在填充前核对 VP8 宽高与帧头一致，尺寸不符返回错误而非越界写入。"
+        },
+        {
+          "path": "README.md",
+          "reason": "记录 ANMF 帧头与 ALPH+VP8 图像尺寸一致性校验修复。"
         },
         {
           "path": ".cargo-checksum.json",
-          "reason": "更新本地修复后 src/decoder.rs 的文件摘要，保留上游发布归档 package 摘要。"
+          "reason": "更新本地源码、回归测试及修复说明的文件清单和 SHA-256 摘要，保留上游发布归档 package 摘要。"
         }
       ],
       "supplemental_materials": []
@@ -9532,8 +9863,8 @@
       "source": "registry+https://github.com/rust-lang/crates.io-index",
       "original_upstream_source": "registry+https://github.com/rust-lang/crates.io-index",
       "effective_source": {
-        "type": "registry",
-        "source": "registry+https://github.com/rust-lang/crates.io-index"
+        "type": "path",
+        "path": "vendor/imagesize-0.14.0"
       },
       "archive_url": "https://static.crates.io/crates/imagesize/imagesize-0.14.0.crate",
       "archive_sha256": "09e54e57b4c48b40f7aec75635392b12b3421fa26fe8b4332e63138ed278459c",
@@ -9555,7 +9886,32 @@
         "path_in_vcs": ""
       },
       "file_inventory": ".cargo-checksum.json",
-      "project_source_modifications": [],
+      "project_source_modifications": [
+        {
+          "path": "Cargo.toml",
+          "reason": "登记新增 ordering 集成测试 target。"
+        },
+        {
+          "path": "Cargo.toml.orig",
+          "reason": "同步登记新增 ordering 集成测试 target。"
+        },
+        {
+          "path": "README.md",
+          "reason": "记录等面积 ImageSize 排序与 Eq 一致性修复及 BTreeSet 回归。"
+        },
+        {
+          "path": "src/lib.rs",
+          "reason": "ImageSize 排序在面积相等时继续比较宽高，维持面积优先并满足 Ord/Eq 一致性。"
+        },
+        {
+          "path": "tests/ordering.rs",
+          "reason": "新增真实 BTreeSet 逐项插入、等面积不同尺寸及公开 PNG blob_size 的三项回归。"
+        },
+        {
+          "path": ".cargo-checksum.json",
+          "reason": "更新本地源码、回归测试及修复说明的文件清单和 SHA-256 摘要，保留上游发布归档 package 摘要。"
+        }
+      ],
       "supplemental_materials": []
     },
     {
@@ -12152,8 +12508,20 @@
           "reason": "Windows ANSI 支持仅为成功创建的自有控制台句柄建立 Drop 所有权 guard，在成功及 Get/SetConsoleMode 失败路径均关闭句柄并保持错误码/public API；新增真实 NUL 句柄失败路径及真实 GetHandleInformation 关闭结果回归，不创建或修改控制台窗口。"
         },
         {
+          "path": "CHANGELOG.md",
+          "reason": "记录 reset_before_style 强制重置并恢复完整样式的修复。"
+        },
+        {
+          "path": "src/difference.rs",
+          "reason": "reset_before_style 优先于无变化及增量样式优化，强制重置并重新输出完整目标样式。"
+        },
+        {
+          "path": "tests/style.rs",
+          "reason": "新增相同样式、增量样式和完整前景背景恢复的公开 ANSI 输出回归。"
+        },
+        {
           "path": ".cargo-checksum.json",
-          "reason": "更新本地 src/windows.rs 文件摘要，保留上游发布归档 package 摘要。"
+          "reason": "更新本地源码、回归测试及修复说明的文件清单和 SHA-256 摘要，保留上游发布归档 package 摘要。"
         }
       ],
       "supplemental_materials": []
@@ -14901,8 +15269,16 @@
           "reason": "f_pow 的零指数及单位底数恒等式先于 NaN 传播，保持近似算法及其他 NaN 行为不变；新增标准 powf 比较与 NaN、无穷、有限值控制回归。"
         },
         {
+          "path": "README.md",
+          "reason": "记录 f_powf 带符号零及负底数奇数负指数符号修复。"
+        },
+        {
+          "path": "src/powf.rs",
+          "reason": "f_powf 正确保留带符号零及负底数奇数负指数的结果符号，新增特殊值内联回归。"
+        },
+        {
           "path": ".cargo-checksum.json",
-          "reason": "更新本地 src/pow.rs 文件摘要，保留上游发布归档 package 摘要。"
+          "reason": "更新本地源码、回归测试及修复说明的文件清单和 SHA-256 摘要，保留上游发布归档 package 摘要。"
         }
       ],
       "supplemental_materials": []
@@ -16024,8 +16400,8 @@
       "source": "registry+https://github.com/rust-lang/crates.io-index",
       "original_upstream_source": "registry+https://github.com/rust-lang/crates.io-index",
       "effective_source": {
-        "type": "registry",
-        "source": "registry+https://github.com/rust-lang/crates.io-index"
+        "type": "path",
+        "path": "vendor/rfd-0.15.4"
       },
       "archive_url": "https://static.crates.io/crates/rfd/rfd-0.15.4.crate",
       "archive_sha256": "ef2bee61e6cffa4635c72d7d81a84294e28f0930db0ddcb0f66d10244674ebed",
@@ -16047,7 +16423,28 @@
         "path_in_vcs": ""
       },
       "file_inventory": ".cargo-checksum.json",
-      "project_source_modifications": [],
+      "project_source_modifications": [
+        {
+          "path": "CHANGELOG.md",
+          "reason": "记录 Windows 扩展 UNC/驱动器原生 UTF-16 默认目录转换修复。"
+        },
+        {
+          "path": "src/backend/win_cid/file_dialog.rs",
+          "reason": "Windows 文件对话框默认目录使用统一的原生宽字符路径转换，保持扩展 UNC 为绝对 UNC 路径。"
+        },
+        {
+          "path": "src/backend/win_cid/file_dialog/dialog_ffi.rs",
+          "reason": "复用原生 UTF-16 路径转换以传入 NUL 结尾的 SHCreateItemFromParsingName 参数，避免中间字符串分配。"
+        },
+        {
+          "path": "src/backend/win_cid/file_dialog/path.rs",
+          "reason": "新增 Windows 宽字符路径辅助实现，正确移除扩展驱动器前缀及将扩展 UNC 前缀转换为双反斜杠；内联覆盖驱动器、UNC 及非 ASCII 路径。"
+        },
+        {
+          "path": ".cargo-checksum.json",
+          "reason": "更新本地源码、回归测试及修复说明的文件清单和 SHA-256 摘要，保留上游发布归档 package 摘要。"
+        }
+      ],
       "supplemental_materials": []
     },
     {
@@ -16213,15 +16610,35 @@
       "project_source_modifications": [
         {
           "path": "src/moparser.rs",
-          "reason": "MO 消息表定位及 msgid/msgstr 的定位、read_exact 错误传播为现有 IOError，拒绝零填充的截断成功；新增真实 44 字节公开 mofile 负例与完整 NUL 结尾正例。"
+          "reason": "MO 消息表定位及 msgid/msgstr 的定位、read_exact 错误传播为现有 IOError，拒绝零填充的截断成功；新增真实 44 字节公开 mofile 负例与完整 NUL 结尾正例。 MO 上下文按 msgctxt\\x04msgid 顺序拆分并保留既有截断错误传播。"
         },
         {
           "path": "src/poparser.rs",
-          "reason": "PO 行读取失败不再伪装为 EOF，保留错误并在解析成功前返回现有 SyntaxError；文件打开失败不再 unwrap panic；新增无效 UTF-8、IOError、文件打开失败及公开 pofile 正反例。"
+          "reason": "PO 行读取失败不再伪装为 EOF，保留错误并在解析成功前返回现有 SyntaxError；文件打开失败不再 unwrap panic；新增无效 UTF-8、IOError、文件打开失败及公开 pofile 正反例。 增加 PO 引号及状态转换校验，畸形输入返回解析错误而非越界或无效成功。"
+        },
+        {
+          "path": "Cargo.toml",
+          "reason": "登记新增 parser_invariants 集成测试 target。"
+        },
+        {
+          "path": "README.md",
+          "reason": "记录 MO 上下文顺序、借用字节、IOError 传播及畸形 PO 引号/状态修复。"
+        },
+        {
+          "path": "src/file/mod.rs",
+          "reason": "FileOptions 支持借用字节输入而无需误当路径读取。"
+        },
+        {
+          "path": "src/file/mofile.rs",
+          "reason": "MO 文件读写失败返回现有 IOError，不再 unwrap panic。"
+        },
+        {
+          "path": "tests/parser_invariants.rs",
+          "reason": "新增 MO 上下文、借用字节、IOError 和畸形 PO 引号/状态的公开解析回归。"
         },
         {
           "path": ".cargo-checksum.json",
-          "reason": "更新 src/moparser.rs 与 src/poparser.rs 的本地文件摘要，保留上游发布归档 package 摘要。"
+          "reason": "更新本地源码、回归测试及修复说明的文件清单和 SHA-256 摘要，保留上游发布归档 package 摘要。"
         }
       ],
       "supplemental_materials": [
@@ -16593,8 +17010,8 @@
       "source": "registry+https://github.com/rust-lang/crates.io-index",
       "original_upstream_source": "registry+https://github.com/rust-lang/crates.io-index",
       "effective_source": {
-        "type": "registry",
-        "source": "registry+https://github.com/rust-lang/crates.io-index"
+        "type": "path",
+        "path": "vendor/rustybuzz-0.20.1"
       },
       "archive_url": "https://static.crates.io/crates/rustybuzz/rustybuzz-0.20.1.crate",
       "archive_sha256": "fd3c7c96f8a08ee34eff8857b11b49b07d71d1c3f4e88f8a88d4c9e9f90b1702",
@@ -16620,7 +17037,20 @@
         "path_in_vcs": ""
       },
       "file_inventory": ".cargo-checksum.json",
-      "project_source_modifications": [],
+      "project_source_modifications": [
+        {
+          "path": "CHANGELOG.md",
+          "reason": "记录 SAFE_TO_INSERT_TATWEEL 位值修复，避免公开 glyph flags 泄漏内部 mask。"
+        },
+        {
+          "path": "src/lib.rs",
+          "reason": "将 DEFINED_GLYPH_FLAGS 的 SAFE_TO_INSERT_TATWEEL 位改为 0x80，避免内部 glyph mask 0x40 被公开 flags 泄漏；新增真实 glyph mask 和公开 Buffer 回归。"
+        },
+        {
+          "path": ".cargo-checksum.json",
+          "reason": "更新本地源码、回归测试及修复说明的文件清单和 SHA-256 摘要，保留上游发布归档 package 摘要。"
+        }
+      ],
       "supplemental_materials": []
     },
     {
@@ -18218,8 +18648,8 @@
       "source": "registry+https://github.com/rust-lang/crates.io-index",
       "original_upstream_source": "registry+https://github.com/rust-lang/crates.io-index",
       "effective_source": {
-        "type": "registry",
-        "source": "registry+https://github.com/rust-lang/crates.io-index"
+        "type": "path",
+        "path": "vendor/socket2-0.6.5"
       },
       "archive_url": "https://static.crates.io/crates/socket2/socket2-0.6.5.crate",
       "archive_sha256": "c3d1e2c7f27f8d4cb10542a02c49005dbd6e93095799d6f3be745fae9f8fedd4",
@@ -18243,7 +18673,20 @@
         "path_in_vcs": ""
       },
       "file_inventory": ".cargo-checksum.json",
-      "project_source_modifications": [],
+      "project_source_modifications": [
+        {
+          "path": "README.md",
+          "reason": "记录 Windows 正超时向上取整毫秒及既有零值/饱和语义。"
+        },
+        {
+          "path": "src/sys/windows.rs",
+          "reason": "Windows 非零 socket 超时向上取整为毫秒，保留 None、零和最大值饱和语义；新增纳秒边界及大时长内联回归。"
+        },
+        {
+          "path": ".cargo-checksum.json",
+          "reason": "更新本地源码、回归测试及修复说明的文件清单和 SHA-256 摘要，保留上游发布归档 package 摘要。"
+        }
+      ],
       "supplemental_materials": []
     },
     {
@@ -19350,8 +19793,8 @@
       "source": "registry+https://github.com/rust-lang/crates.io-index",
       "original_upstream_source": "registry+https://github.com/rust-lang/crates.io-index",
       "effective_source": {
-        "type": "registry",
-        "source": "registry+https://github.com/rust-lang/crates.io-index"
+        "type": "path",
+        "path": "vendor/tiny-skia-0.11.4"
       },
       "archive_url": "https://static.crates.io/crates/tiny-skia/tiny-skia-0.11.4.crate",
       "archive_sha256": "83d13394d44dae3207b52a326c0c85a8bf87f1541f23b0d143811088497b09ab",
@@ -19373,7 +19816,24 @@
         "path_in_vcs": ""
       },
       "file_inventory": ".cargo-checksum.json",
-      "project_source_modifications": [],
+      "project_source_modifications": [
+        {
+          "path": "CHANGELOG.md",
+          "reason": "记录自有及借用 Pixmap 的横纵像素边界修复。"
+        },
+        {
+          "path": "src/pixmap.rs",
+          "reason": "自有与借用 Pixmap 的像素访问在 x>=width 或 y>=height 时返回 None，避免跨行别名及越界访问。"
+        },
+        {
+          "path": "tests/pixel_bounds.rs",
+          "reason": "新增自有与借用 Pixmap 的横纵边界和合法像素四项公开回归。"
+        },
+        {
+          "path": ".cargo-checksum.json",
+          "reason": "更新本地源码、回归测试及修复说明的文件清单和 SHA-256 摘要，保留上游发布归档 package 摘要。"
+        }
+      ],
       "supplemental_materials": []
     },
     {
@@ -19382,8 +19842,8 @@
       "source": "registry+https://github.com/rust-lang/crates.io-index",
       "original_upstream_source": "registry+https://github.com/rust-lang/crates.io-index",
       "effective_source": {
-        "type": "registry",
-        "source": "registry+https://github.com/rust-lang/crates.io-index"
+        "type": "path",
+        "path": "vendor/tiny-skia-0.12.0"
       },
       "archive_url": "https://static.crates.io/crates/tiny-skia/tiny-skia-0.12.0.crate",
       "archive_sha256": "47ffee5eaaf5527f630fb0e356b90ebdec84d5d18d937c5e440350f88c5a91ea",
@@ -19405,7 +19865,28 @@
         "path_in_vcs": ""
       },
       "file_inventory": ".cargo-checksum.json",
-      "project_source_modifications": [],
+      "project_source_modifications": [
+        {
+          "path": "CHANGELOG.md",
+          "reason": "记录自有及借用 Pixmap 的横纵像素边界修复。"
+        },
+        {
+          "path": "Cargo.toml",
+          "reason": "登记新增 pixel_bounds 集成测试 target。"
+        },
+        {
+          "path": "src/pixmap.rs",
+          "reason": "自有与借用 Pixmap 的像素访问在 x>=width 或 y>=height 时返回 None，避免跨行别名及越界访问。"
+        },
+        {
+          "path": "tests/pixel_bounds.rs",
+          "reason": "新增自有与借用 Pixmap 的横纵边界和合法像素四项公开回归。"
+        },
+        {
+          "path": ".cargo-checksum.json",
+          "reason": "更新本地源码、回归测试及修复说明的文件清单和 SHA-256 摘要，保留上游发布归档 package 摘要。"
+        }
+      ],
       "supplemental_materials": []
     },
     {
@@ -19612,8 +20093,8 @@
       "source": "registry+https://github.com/rust-lang/crates.io-index",
       "original_upstream_source": "registry+https://github.com/rust-lang/crates.io-index",
       "effective_source": {
-        "type": "registry",
-        "source": "registry+https://github.com/rust-lang/crates.io-index"
+        "type": "path",
+        "path": "vendor/tokio-1.52.3"
       },
       "archive_url": "https://static.crates.io/crates/tokio/tokio-1.52.3.crate",
       "archive_sha256": "8fc7f01b389ac15039e4dc9531aa973a135d7a4135281b12d7c1bc79fd57fffe",
@@ -19635,7 +20116,24 @@
         "path_in_vcs": "tokio"
       },
       "file_inventory": ".cargo-checksum.json",
-      "project_source_modifications": [],
+      "project_source_modifications": [
+        {
+          "path": "CHANGELOG.md",
+          "reason": "记录 Windows 命名管道客户端模式设置失败时的句柄回收及原错误码保留。"
+        },
+        {
+          "path": "src/net/windows/named_pipe.rs",
+          "reason": "CreateFileW 成功后若 SetNamedPipeHandleState 失败，先捕获 last_os_error 再关闭自有句柄，防止每次失败泄漏句柄且保持原错误码。"
+        },
+        {
+          "path": "tests/net_named_pipe.rs",
+          "reason": "新增隔离子进程的 32 次失败句柄计数回归，并保留有效 byte/message 命名管道成功控制。"
+        },
+        {
+          "path": ".cargo-checksum.json",
+          "reason": "更新本地源码、回归测试及修复说明的文件清单和 SHA-256 摘要，保留上游发布归档 package 摘要。"
+        }
+      ],
       "supplemental_materials": []
     },
     {
@@ -20200,11 +20698,23 @@
         },
         {
           "path": "CHANGELOG.md",
-          "reason": "记录本地数组长度溢出和 TTC 集合计数结构验证修复。"
+          "reason": "记录本地数组长度溢出和 TTC 集合计数结构验证修复。 记录 cmap format 2/4 的 u16 wrapping delta 与高位 glyph 映射修复。"
+        },
+        {
+          "path": "src/tables/cmap/format2.rs",
+          "reason": "cmap format 2 的 glyph ID 和 delta 使用 u16 wrapping 运算，按模 65536 映射高位 glyph。"
+        },
+        {
+          "path": "src/tables/cmap/format4.rs",
+          "reason": "cmap format 4 的 glyph ID 和 delta 使用 u16 wrapping 运算，保留零 glyph 语义并避免高位 glyph 错误拒绝。"
+        },
+        {
+          "path": "tests/tables/cmap.rs",
+          "reason": "新增 cmap format 2/4 高位 glyph、正负 delta 及零 glyph 映射边界回归。"
         },
         {
           "path": ".cargo-checksum.json",
-          "reason": "更新本地修复后源码、回归测试及 CHANGELOG.md 的四项文件摘要，保留上游发布归档 package 摘要。"
+          "reason": "更新本地源码、回归测试及修复说明的文件清单和 SHA-256 摘要，保留上游发布归档 package 摘要。"
         }
       ],
       "supplemental_materials": []
@@ -20445,8 +20955,8 @@
       "source": "registry+https://github.com/rust-lang/crates.io-index",
       "original_upstream_source": "registry+https://github.com/rust-lang/crates.io-index",
       "effective_source": {
-        "type": "registry",
-        "source": "registry+https://github.com/rust-lang/crates.io-index"
+        "type": "path",
+        "path": "vendor/unicode-bidi-mirroring-0.4.0"
       },
       "archive_url": "https://static.crates.io/crates/unicode-bidi-mirroring/unicode-bidi-mirroring-0.4.0.crate",
       "archive_sha256": "5dfa6e8c60bb66d49db113e0125ee8711b7647b5579dc7f5f19c42357ed039fe",
@@ -20469,7 +20979,20 @@
         "path_in_vcs": ""
       },
       "file_inventory": ".cargo-checksum.json",
-      "project_source_modifications": [],
+      "project_source_modifications": [
+        {
+          "path": "README.md",
+          "reason": "记录未排序镜像表第二列反向查找修复及全部静态映射对回归。"
+        },
+        {
+          "path": "src/lib.rs",
+          "reason": "反向镜像查找不再对未排序的第二列做二分查找，改用有界无分配扫描；新增 U+29F5 反向映射、全部 214 对和未映射控制回归。"
+        },
+        {
+          "path": ".cargo-checksum.json",
+          "reason": "更新本地源码、回归测试及修复说明的文件清单和 SHA-256 摘要，保留上游发布归档 package 摘要。"
+        }
+      ],
       "supplemental_materials": []
     },
     {
@@ -20911,11 +21434,27 @@
         },
         {
           "path": "src/stream.rs",
-          "reason": "SOCKS 连接完成信号采用 wait_timeout_while 谓词等待，避免通知先于等待或虚假唤醒造成错误超时；新增内联等待入口和两项行为回归。"
+          "reason": "SOCKS 连接完成信号采用 wait_timeout_while 谓词等待，避免通知先于等待或虚假唤醒造成错误超时；新增内联等待入口和两项行为回归。 SOCKS IPv6 目标使用 ATYP=4 编码，并将 CONNECT 写入和刷新委托给保留 IO 错误的私有辅助模块。"
+        },
+        {
+          "path": "CHANGELOG.md",
+          "reason": "记录畸形响应头拒绝、截断 chunked payload 错误、IPv6 SOCKS 编码及 CONNECT IO 错误传播修复。"
+        },
+        {
+          "path": "src/chunked/decoder.rs",
+          "reason": "chunked payload 未完整读取即 EOF 时返回 UnexpectedEof，不再误报成功结束。"
+        },
+        {
+          "path": "src/header.rs",
+          "reason": "缺失冒号的响应头返回无效头错误，避免切片 panic。"
+        },
+        {
+          "path": "src/stream/proxy_connect.rs",
+          "reason": "新增生产 CONNECT 写入/刷新辅助模块，传播真实 IO 错误而非 unwrap panic；内联覆盖 write、flush 失败及成功输出。"
         },
         {
           "path": ".cargo-checksum.json",
-          "reason": "更新本地修复后 src/proxy.rs 和 src/stream.rs 的文件摘要，保留上游发布归档 package 摘要。"
+          "reason": "更新本地源码、回归测试及修复说明的文件清单和 SHA-256 摘要，保留上游发布归档 package 摘要。"
         }
       ],
       "supplemental_materials": []
@@ -24501,11 +25040,11 @@
       "project_source_modifications": [
         {
           "path": "README.md",
-          "reason": "记录本地 const u8/bool 构造验证及零尺寸类型空字节解析链修复和回归入口。"
+          "reason": "记录本地 const u8/bool 构造验证及零尺寸类型空字节解析链修复和回归入口。 记录零尺寸 ULE const/切片构造的仅空输入约束及无取模/除零修复。"
         },
         {
           "path": "src/ule/plain.rs",
-          "reason": "const u8 构造器接受任意字节，bool 逐字节仅接受 0/1，单位类型仅接受空输入；挂接 const 单元回归。"
+          "reason": "const u8 构造器接受任意字节，bool 逐字节仅接受 0/1，单位类型仅接受空输入；挂接 const 单元回归。 零尺寸 ULE 的 const 构造只接受空输入，明确拒绝非空输入而不执行取模或除零。"
         },
         {
           "path": "src/ule/mod.rs",
@@ -24525,11 +25064,15 @@
         },
         {
           "path": "tests/const_constructors_smoke.rs",
-          "reason": "新增动态公开 API 回归，覆盖构造器输入验证和 ULE/ZeroSlice/ZeroVec 零尺寸解析链。"
+          "reason": "新增动态公开 API 回归，覆盖构造器输入验证和 ULE/ZeroSlice/ZeroVec 零尺寸解析链。 补充零尺寸 ULE 空输入成功、非空输入拒绝及公开构造链回归。"
+        },
+        {
+          "path": "src/ule/slices.rs",
+          "reason": "零尺寸 ULE 切片转换维持仅空输入约束，避免长度计算的取模或除零。"
         },
         {
           "path": ".cargo-checksum.json",
-          "reason": "更新本地修复后文档、源码和新增回归文件的七项文件摘要，保留上游发布归档 package 摘要。"
+          "reason": "更新本地源码、回归测试及修复说明的文件清单和 SHA-256 摘要，保留上游发布归档 package 摘要。"
         }
       ],
       "supplemental_materials": []
@@ -25205,5 +25748,5 @@
       "sha256": "e870d7fd7819a9f0453c62798cb52ae95d148a8c91dc2de1d983f997143c72de"
     }
   ],
-  "verification": "Windows cargo metadata --locked --offline --format-version 1 completed with exit 0: 754 resolved packages, three workspace members, 12 locally patched path identities and 739 registry identities. This is source-resolution evidence, not proof of production recompilation or runtime behavior. The earlier review-phase combined provenance/file-inventory audit exceeded its 60-second limit with no completed result. Under the user's later fulltest/commit/push authorization, the coordinator completed a current full static audit: 751 source identities and 754 lock/metadata identities matched, all 12 reachable path overrides and 39 global/package modification records matched, 36626 current inventory file SHA-256 values, 742 VCS records, 1250 retained notice paths and 45 external supplement hashes were verified. Existing inventory-backed license reuse, including the winapi license references, was included in the reference closure. Original archive/package digests were preserved. This static result does not certify every feature, runtime behavior or legal status. No build, test, real-model call or acceptance gate was run by the metadata repair owner; complete package regressions, actual consumers and distribution validation remain governed by the coordinator's current fulltest evidence without weakening provenance or clearing active build caches."
+  "verification": "本轮仅完成静态来源一致性复核：751 个保留上游 package 身份与当前 Cargo.lock 的 768 个 package 记录核对；21 个本地修复 path 身份与根 [patch.crates-io]、Cargo.lock 无 registry source/checksum 的身份一致，其余 730 个保留 package 继续使用 vendored-sources。全局和 package 级的 21 组、99 项本地修改记录一致，覆盖既有修复及本轮 18 个 package 的 78 个实际新增/修改源码、回归、说明和 inventory 文件；本轮改动文件的本地 SHA-256 及所有 package 的上游归档摘要保持一致。原始 source、original_upstream_source、archive_url、archive_sha256 和 vcs 身份均保留不变；构建 target 产物不属于来源修改。PackagingRecheck2 已报告 Windows cargo metadata --locked --offline --format-version 1 在九个新增 path 覆盖接入后退出 0，仅说明依赖解析，不代表生产重编译或功能验收。本元数据同步未执行构建、测试、真实模型、桌面或验收门；包级回归、真实消费者与交付验收仍以各修复任务的已运行证据及后续验收为准，不以静态来源一致性代替运行验证。"
 }

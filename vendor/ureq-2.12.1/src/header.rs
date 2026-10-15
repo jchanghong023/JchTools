@@ -51,6 +51,9 @@ impl HeaderLine {
             }
             index += 1;
         }
+        if index == 0 || index == self.as_bytes().len() {
+            return Err(ErrorKind::BadHeader.msg("Header field requires a name and ':'"));
+        }
 
         Ok(Header { line: self, index })
     }
@@ -252,6 +255,24 @@ impl FromStr for Header {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // 覆盖 P-09：非法代理/服务器响应头不能破坏 Header 的分隔符不变量。
+    #[test]
+    fn missing_colon_is_rejected() {
+        for input in ["Content-Length", "Transfer-Encoding", "", ": value"] {
+            let line: HeaderLine = input.to_string().into();
+            assert!(
+                matches!(line.into_header(), Err(error) if error.kind() == ErrorKind::BadHeader),
+                "应拒绝没有字段名或冒号的响应头：{input:?}"
+            );
+        }
+        let response: crate::Response =
+            "HTTP/1.1 200 OK\r\nContent-Length\r\nContent-Length: 2\r\n\r\nok"
+                .parse()
+                .unwrap();
+        assert_eq!(response.header("Content-Length"), Some("2"));
+        assert_eq!(response.into_string().unwrap(), "ok");
+    }
 
     #[test]
     fn test_valid_name() {

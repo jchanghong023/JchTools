@@ -112,9 +112,7 @@ impl<'a> Subtable2<'a> {
             return None;
         }
 
-        u16::try_from((i32::from(glyph) + i32::from(sub_header.id_delta)) % 65536)
-            .ok()
-            .map(GlyphId)
+        Some(GlyphId(glyph.wrapping_add(sub_header.id_delta as u16)))
     }
 
     /// Calls `f` for each codepoint defined in this table.

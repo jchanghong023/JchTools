@@ -19,6 +19,13 @@ See the [API documentation] for more.
 
 [API documentation]: https://docs.rs/socket2
 
+# Local repair
+
+The retained Windows implementation rounds positive fractional-millisecond socket
+timeouts up instead of truncating them to zero (an indefinite timeout), preserving
+the existing `None`, zero-duration, and `INFINITE` saturation behavior. Windows
+regressions cover the conversion boundaries and real socket read/write options.
+
 # Branches
 
 Currently Socket2 supports the following versions:

@@ -30,6 +30,10 @@ repository = "https://github.com/mondeja/rspolib"
 name = "rspolib"
 path = "src/lib.rs"
 
+[[test]]
+name = "parser_invariants"
+path = "tests/parser_invariants.rs"
+
 [[bench]]
 name = "formatting"
 path = "benches/formatting.rs"

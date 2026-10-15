@@ -377,8 +377,9 @@ pub fn get_mirrored(c: char) -> Option<char> {
         return Some(PAIRS[idx].1);
     }
 
-    if let Ok(idx) = PAIRS.binary_search_by(|v| v.1.cmp(&c)) {
-        return Some(PAIRS[idx].0);
+    // PAIRS is sorted only by its first column, not its mirrored values.
+    if let Some(&(original, _)) = PAIRS.iter().find(|pair| pair.1 == c) {
+        return Some(original);
     }
 
     None
@@ -388,7 +389,34 @@ pub fn get_mirrored(c: char) -> Option<char> {
 ///
 /// Based on <https://www.unicode.org/Public/UNIDATA/BidiMirroring.txt>.
 pub fn is_mirroring(c: char) -> bool {
-    PAIRS.binary_search_by(|v| v.0.cmp(&c)).is_ok() ||
-    PAIRS.binary_search_by(|v| v.1.cmp(&c)).is_ok() ||
-    OTHER.binary_search_by(|v| v.cmp(&c)).is_ok()
+    PAIRS.binary_search_by(|v| v.0.cmp(&c)).is_ok()
+        || PAIRS.iter().any(|pair| pair.1 == c)
+        || OTHER.binary_search_by(|v| v.cmp(&c)).is_ok()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{get_mirrored, is_mirroring, OTHER, PAIRS};
+
+    #[test]
+    fn every_pair_is_mirrored_in_both_directions() {
+        for &(left, right) in PAIRS {
+            assert_eq!(get_mirrored(left), Some(right), "U+{:04X}", left as u32);
+            assert_eq!(get_mirrored(right), Some(left), "U+{:04X}", right as u32);
+            assert!(is_mirroring(left), "U+{:04X}", left as u32);
+            assert!(is_mirroring(right), "U+{:04X}", right as u32);
+        }
+    }
+
+    #[test]
+    fn unpaired_mirroring_and_ordinary_characters_stay_distinct() {
+        for &character in OTHER {
+            assert!(is_mirroring(character));
+            assert_eq!(get_mirrored(character), None);
+        }
+        for character in ['A', '\u{0}', '\u{10FFFF}'] {
+            assert!(!is_mirroring(character));
+            assert_eq!(get_mirrored(character), None);
+        }
+    }
 }

@@ -9,6 +9,7 @@ and this project adheres to [Semantic Versioning](http://semver.org/).
 ### Fixed (JchTools local patch)
 - 畸形 TTC 声明超出字体地址范围的 offset 数组时返回解析错误，避免断言导致消费者退出；公开接口与零分配读取不变。
 - `fonts_in_collection` 在返回数量前检查完整 offset 数组，畸形 TTC 返回 `None`，避免 fontdb/femtovg 消费者按未校验数量分配或循环；不改变合法集合计数或验证各字体内容。
+- `cmap` format 2 与 format 4 的 glyphIndexArray 路径以无符号 16 位回绕实现 `idDelta` 的模 65536 加法，保留负增量回绕结果和 32768 以上的合法 glyph ID；零数组值仍表示缺字。
 
 ## [0.25.1] - 2024-11-29
 ### Changed

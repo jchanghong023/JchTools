@@ -386,6 +386,10 @@ impl From<std::io::Error> for ErrorCode {
     #[inline]
     fn from(err: std::io::Error) -> Self {
         match err.raw_os_error() {
+            // Windows 的原生 I/O 错误码属于 Win32/Winsock，而非 CRT errno。
+            #[cfg(windows)]
+            Some(err) => Self::new_system(err),
+            #[cfg(not(windows))]
             Some(err) => Self::new_posix(err),
             None => Self::new_posix(-1),
         }

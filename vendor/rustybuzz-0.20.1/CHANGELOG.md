@@ -6,6 +6,9 @@ and this project adheres to [Semantic Versioning](http://semver.org/).
 
 ## [Unreleased]
 
+### Fixed (JchTools local repair)
+- Keep optional tatweel-insertion and unsafe-concatenation glyph flags independent by assigning `PRODUCE_SAFE_TO_INSERT_TATWEEL` its HarfBuzz-compatible `0x80` bit.
+
 ## [0.20.1] - 2024-10-12
 ### Changed
 - Update canonical repository location

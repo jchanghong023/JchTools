@@ -1,5 +1,9 @@
 # Changelog
 
+## 本地修复
+
+- 组合字符串、字节字符串与样式 infix 保留 `reset_before_style` 的显式重置，并在重置后写出完整目标样式，避免相同/增量样式优化吞掉重置。
+
 ## v0.47.0 (2023-03-13)
 
 ### Breaking changes

@@ -89,6 +89,10 @@ webp = []
 name = "imagesize"
 path = "src/lib.rs"
 
+[[test]]
+name = "ordering"
+path = "tests/ordering.rs"
+
 [[bench]]
 name = "parse_benchmark"
 path = "benches/parse_benchmark.rs"

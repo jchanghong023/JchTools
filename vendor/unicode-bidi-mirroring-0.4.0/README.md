@@ -17,6 +17,13 @@ assert_eq!(is_mirroring('\u{29C4}'), true);
 assert_eq!(is_mirroring('\u{22FF}'), true);
 ```
 
+### JchTools local repair
+
+Reverse lookups now search the existing static pair table without assuming that
+its second column is sorted. Both lookup functions recognize every pair in both
+directions; forward lookups retain binary search and reverse lookups use a bounded
+linear scan, without runtime allocation or table construction.
+
 ### License
 
 Licensed under either of

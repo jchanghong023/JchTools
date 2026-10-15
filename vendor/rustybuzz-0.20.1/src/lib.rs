@@ -40,7 +40,7 @@ bitflags::bitflags! {
         /// Indicates that the `UNSAFE_TO_CONCAT` glyph-flag should be produced by the shaper. By default it will not be produced since it incurs a cost.
         const PRODUCE_UNSAFE_TO_CONCAT      = 0x00000040;
         /// Indicates that the `SAFE_TO_INSERT_TATWEEL` glyph-flag should be produced by the shaper. By default it will not be produced.
-        const PRODUCE_SAFE_TO_INSERT_TATWEEL      = 0x00000040;
+        const PRODUCE_SAFE_TO_INSERT_TATWEEL      = 0x00000080;
         /// All currently defined flags
         const DEFINED = 0x000000FF;
     }
@@ -81,5 +81,51 @@ bitflags::bitflags! {
         const NO_ADVANCES       = 0b00100000;
         /// All currently defined flags.
         const DEFINED = 0b00111111;
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{BufferFlags, UnicodeBuffer};
+
+    #[test]
+    fn optional_glyph_flags_are_independent() {
+        assert_eq!(BufferFlags::PRODUCE_UNSAFE_TO_CONCAT.bits(), 0x40);
+        assert_eq!(BufferFlags::PRODUCE_SAFE_TO_INSERT_TATWEEL.bits(), 0x80);
+
+        for (enabled, disabled) in [
+            (
+                BufferFlags::PRODUCE_UNSAFE_TO_CONCAT,
+                BufferFlags::PRODUCE_SAFE_TO_INSERT_TATWEEL,
+            ),
+            (
+                BufferFlags::PRODUCE_SAFE_TO_INSERT_TATWEEL,
+                BufferFlags::PRODUCE_UNSAFE_TO_CONCAT,
+            ),
+        ] {
+            let mut buffer = UnicodeBuffer::new();
+            buffer.set_flags(enabled);
+            assert!(buffer.flags().contains(enabled));
+            assert!(!buffer.flags().intersects(disabled));
+        }
+    }
+
+    #[test]
+    fn optional_flags_control_only_their_glyph_operations() {
+        use super::hb::buffer::glyph_flag::{SAFE_TO_INSERT_TATWEEL, UNSAFE_TO_CONCAT};
+
+        let mut concat = UnicodeBuffer::new();
+        concat.push_str("ab");
+        concat.set_flags(BufferFlags::PRODUCE_UNSAFE_TO_CONCAT);
+        concat.0.safe_to_insert_tatweel(None, None);
+        assert_eq!(concat.0.info[1].mask & SAFE_TO_INSERT_TATWEEL, 0);
+
+        let mut tatweel = UnicodeBuffer::new();
+        tatweel.push_str("ab");
+        tatweel.set_flags(BufferFlags::PRODUCE_SAFE_TO_INSERT_TATWEEL);
+        tatweel.0.unsafe_to_concat(None, None);
+        assert_eq!(tatweel.0.info[1].mask & UNSAFE_TO_CONCAT, 0);
+        tatweel.0.safe_to_insert_tatweel(None, None);
+        assert_ne!(tatweel.0.info[1].mask & SAFE_TO_INSERT_TATWEEL, 0);
     }
 }

@@ -24,6 +24,10 @@ impl<const N: usize> RawBytesULE<N> {
 
     #[inline]
     pub fn from_bytes_unchecked_mut(bytes: &mut [u8]) -> &mut [Self] {
+        if N == 0 {
+            assert!(bytes.is_empty(), "零尺寸 ULE 的字节输入必须为空");
+            return &mut [];
+        }
         let data = bytes.as_mut_ptr();
         let len = bytes.len() / N;
         // Safe because Self is transparent over [u8; N]
@@ -43,6 +47,13 @@ impl<const N: usize> RawBytesULE<N> {
 unsafe impl<const N: usize> ULE for RawBytesULE<N> {
     #[inline]
     fn validate_bytes(bytes: &[u8]) -> Result<(), UleError> {
+        if N == 0 {
+            return if bytes.is_empty() {
+                Ok(())
+            } else {
+                Err(UleError::length::<Self>(bytes.len()))
+            };
+        }
         if bytes.len() % N == 0 {
             // Safe because Self is transparent over [u8; N]
             Ok(())

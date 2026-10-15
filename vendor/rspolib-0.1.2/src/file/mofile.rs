@@ -68,7 +68,7 @@ pub fn mofile<Opt>(options: Opt) -> Result<MOFile, IOError>
 where
     Opt: Into<FileOptions>,
 {
-    let mut parser = MOFileParser::new(options.into());
+    let mut parser = MOFileParser::new(options.into())?;
     parser.parse()?;
     Ok(parser.file)
 }

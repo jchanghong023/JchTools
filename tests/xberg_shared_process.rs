@@ -1370,3 +1370,75 @@ fn review_fix_post_stop_incomplete_connections_do_not_delay_retirement() {
         "全部原任务结束后，共享引擎未在界限内回收：pid={engine_pid}"
     );
 }
+
+/// 覆盖 XB-08/XB-17/XB-23：后台停止后仍须接受已登记任务的取消连接，
+/// 安全结束原任务并交付终态；停止后的不完整新连接仍不得阻止代理回收。
+#[test]
+fn background_stop_preserves_inflight_request_cancellation() {
+    common::ensure_child_reaper();
+    let _session = common::session_lock();
+    common::cleanup_stray_engines();
+    let temp = tempfile::tempdir().unwrap();
+    let root = temp.path();
+    prepare(root);
+    std::fs::write(root.join("long.txt"), b"synthetic document").unwrap();
+    let state = xberg_runtime::request(
+        root,
+        json!({"command":"snapshot_state"}),
+        Duration::from_secs(15),
+        &AtomicBool::new(false),
+    )
+    .unwrap();
+    assert_eq!(state["ok"], true, "合成引擎启动失败：{state}");
+    let broker_pid = state["jchtools_broker_pid"].as_u64().unwrap();
+    let engine_pid = state["jchtools_xberg_pid"].as_u64().unwrap();
+    let _shared = SharedProcess {
+        broker_pid,
+        engine_pid: Some(engine_pid),
+    };
+    let cancel = Arc::new(AtomicBool::new(false));
+    let token = Arc::clone(&cancel);
+    let directory = root.to_path_buf();
+    let (send, receive) = std::sync::mpsc::channel();
+    let document = std::thread::spawn(move || {
+        let result = xberg_runtime::request(
+            &directory,
+            json!({"command":"extract","path":directory.join("long.txt")}),
+            Duration::from_secs(15),
+            &token,
+        );
+        let _ = send.send(result);
+    });
+    let deadline = Instant::now() + Duration::from_secs(5);
+    while !root.join("document-started").exists() {
+        assert!(Instant::now() < deadline, "原请求未开始执行");
+        std::thread::sleep(Duration::from_millis(5));
+    }
+    let stopped = xberg_runtime::background_control(true).unwrap();
+    assert_eq!(stopped["ok"], true);
+    assert_eq!(stopped["stopping"], true);
+    assert_eq!(stopped["active"], 1, "停止时必须仍有原请求");
+    cancel.store(true, Ordering::Release);
+    let terminal = receive
+        .recv_timeout(Duration::from_secs(3))
+        .expect("后台停止后原请求的取消必须尽快结束");
+    document.join().unwrap();
+    let terminal = terminal.expect("后台停止不得拒绝原请求的取消连接");
+    assert_eq!(terminal["ok"], false);
+    assert_eq!(terminal["error_kind"], "cancelled", "{terminal}");
+    assert_eq!(terminal["jchtools_xberg_pid"], engine_pid);
+    assert_eq!(
+        std::fs::read_to_string(root.join("starts.txt"))
+            .unwrap()
+            .lines()
+            .count(),
+        1,
+        "停止与取消不得创建第二个引擎"
+    );
+    let deadline = Instant::now() + Duration::from_secs(5);
+    while (process_alive(broker_pid) || process_alive(engine_pid)) && Instant::now() < deadline {
+        std::thread::sleep(Duration::from_millis(50));
+    }
+    assert!(!process_alive(broker_pid), "原请求安全结束后代理须退出");
+    assert!(!process_alive(engine_pid), "原请求安全结束后引擎须回收");
+}

@@ -22,3 +22,7 @@ use std::fs::File;
 File::open("non_existing");
 println!("{}", ErrorCode::last_system());
 ```
+
+## 本地修复
+
+- Windows 下启用 `std` 后，`std::io::Error` 的原生 Win32/Winsock 错误码转换为系统错误类别，保留系统消息与 WouldBlock 判断；无原生错误码时仍使用既有的 POSIX `-1` 回退，其他平台行为不变。

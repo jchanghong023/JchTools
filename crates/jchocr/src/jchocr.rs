@@ -327,6 +327,16 @@ fn recognize(input: Input) -> Result<String, Failure> {
         .map_err(|error| Failure::new(1, "runtime", error))?;
     if response["ok"] != true {
         let (code, kind) = match response["error_kind"].as_str() {
+            Some("asset_invalid") => {
+                return Err(Failure::new(
+                    3,
+                    "xberg",
+                    format!(
+                        "{}。请在 JchTools 设置页下载或配置完整的 Xberg 截图资产。",
+                        response["error"].as_str().unwrap_or("Xberg 截图资产不可用")
+                    ),
+                ));
+            }
             Some("input_invalid" | "invalid_request") => (2, "input"),
             _ => (1, "inference"),
         };

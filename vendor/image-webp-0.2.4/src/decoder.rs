@@ -836,6 +836,10 @@ impl<R: BufRead + Seek> WebPDecoder<R> {
                 }
 
                 let frame = Vp8Decoder::decode_frame((&mut self.r).take(next_chunk_size))?;
+                if u32::from(frame.width) != frame_width || u32::from(frame.height) != frame_height
+                {
+                    return Err(DecodingError::InconsistentImageSizes);
+                }
 
                 let mut rgba_frame = vec![0; frame_width as usize * frame_height as usize * 4];
                 frame.fill_rgba(&mut rgba_frame, self.webp_decode_options.lossy_upsampling);
@@ -963,6 +967,55 @@ pub(crate) fn read_chunk_header<R: BufRead>(
 mod tests {
     use super::*;
     const RGB_BPP: usize = 3;
+
+    #[test]
+    fn animated_alpha_frame_dimensions_match() {
+        fn chunk(out: &mut Vec<u8>, fourcc: &[u8; 4], data: &[u8]) {
+            out.extend_from_slice(fourcc);
+            out.extend_from_slice(&(data.len() as u32).to_le_bytes());
+            out.extend_from_slice(data);
+            if data.len() & 1 != 0 {
+                out.push(0);
+            }
+        }
+        // 复用下方 2x2 红色 VP8 夹具；ANMF/ALPH 的尺寸必须与其一致。
+        let vp8 = [
+            0xd0, 0x01, 0x00, 0x9d, 0x01, 0x2a, 0x02, 0x00, 0x02, 0x00, 0x02, 0x00, 0x34, 0x25,
+            0xa0, 0x02, 0x74, 0xba, 0x01, 0xf8, 0x00, 0x03, 0xb0, 0x00, 0xfe, 0xf0, 0xc4, 0x0b,
+            0xff, 0x20, 0xb9, 0x61, 0x75, 0xc8, 0xd7, 0xff, 0x20, 0x3f, 0xe4, 0x07, 0xfc, 0x80,
+            0xff, 0xf8, 0xf2, 0x00, 0x00, 0x00,
+        ];
+        for (width, height) in [(1u8, 1u8), (2, 2), (3, 3), (1, 2), (2, 1)] {
+            let mut body = b"WEBP".to_vec();
+            let mut vp8x = [0; 10];
+            vp8x[0] = 0x12; // Alpha + animation.
+            vp8x[4] = width - 1;
+            vp8x[7] = height - 1;
+            chunk(&mut body, b"VP8X", &vp8x);
+            chunk(&mut body, b"ANIM", &[0; 6]);
+            let mut frame = vec![0; 16];
+            frame[6] = width - 1;
+            frame[9] = height - 1;
+            let mut alpha = vec![255; 1 + width as usize * height as usize];
+            alpha[0] = 0; // Uncompressed, unfiltered alpha.
+            chunk(&mut frame, b"ALPH", &alpha);
+            chunk(&mut frame, b"VP8 ", &vp8);
+            chunk(&mut body, b"ANMF", &frame);
+            let mut encoded = b"RIFF".to_vec();
+            encoded.extend_from_slice(&(body.len() as u32).to_le_bytes());
+            encoded.extend_from_slice(&body);
+            let mut decoder = WebPDecoder::new(Cursor::new(encoded)).unwrap();
+            let mut pixels = vec![0; decoder.output_buffer_size().unwrap()];
+            let result = decoder.read_frame(&mut pixels);
+            if width == 2 && height == 2 {
+                assert_eq!(result.unwrap(), 0);
+                assert!(pixels.chunks_exact(4).all(|p| p == &pixels[..4]));
+                assert!(pixels.chunks_exact(4).all(|p| p[3] == 255));
+            } else {
+                assert!(matches!(result, Err(DecodingError::InconsistentImageSizes)));
+            }
+        }
+    }
 
     #[test]
     fn lossless_maximum_dimensions_roundtrip() {

@@ -1,6 +1,7 @@
 # Change Log
 
 ## Unreleased
+- JchTools local fix: preserve the UNC root when converting extended Windows starting-directory paths for the native dialog; keep drive and ordinary UNC paths unchanged.
 - Fix regressions on Wayland due to `ashpd` upgrade (#255).
 
 ## 0.15.3

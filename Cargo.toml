@@ -249,6 +249,15 @@ exclude = [
     "vendor/pxfm-0.1.30",
     "vendor/error-code-3.4.0",
     "vendor/nu-ansi-term-0.50.3",
+    "vendor/tiny-skia-0.11.4",
+    "vendor/tiny-skia-0.12.0",
+    "vendor/dpi-0.1.2",
+    "vendor/rfd-0.15.4",
+    "vendor/tokio-1.52.3",
+    "vendor/socket2-0.6.5",
+    "vendor/imagesize-0.14.0",
+    "vendor/rustybuzz-0.20.1",
+    "vendor/unicode-bidi-mirroring-0.4.0",
 ]
 default-members = [
     ".",
@@ -359,6 +368,15 @@ rspolib = { version = "=0.1.2", path = "vendor/rspolib-0.1.2" }
 pxfm = { version = "=0.1.30", path = "vendor/pxfm-0.1.30" }
 error-code = { version = "=3.4.0", path = "vendor/error-code-3.4.0" }
 nu-ansi-term = { version = "=0.50.3", path = "vendor/nu-ansi-term-0.50.3" }
+tiny-skia-0-11 = { package = "tiny-skia", version = "=0.11.4", path = "vendor/tiny-skia-0.11.4" }
+tiny-skia-0-12 = { package = "tiny-skia", version = "=0.12.0", path = "vendor/tiny-skia-0.12.0" }
+dpi = { version = "=0.1.2", path = "vendor/dpi-0.1.2" }
+rfd = { version = "=0.15.4", path = "vendor/rfd-0.15.4" }
+tokio = { version = "=1.52.3", path = "vendor/tokio-1.52.3" }
+socket2 = { version = "=0.6.5", path = "vendor/socket2-0.6.5" }
+imagesize = { version = "=0.14.0", path = "vendor/imagesize-0.14.0" }
+rustybuzz = { version = "=0.20.1", path = "vendor/rustybuzz-0.20.1" }
+unicode-bidi-mirroring = { version = "=0.4.0", path = "vendor/unicode-bidi-mirroring-0.4.0" }
 
 [profile.release]
 lto = "thin"

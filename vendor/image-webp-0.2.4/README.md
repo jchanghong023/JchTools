@@ -8,6 +8,8 @@ This crate is an independent implementation of the WebP image format, written so
 that the `image` crate can have a pure-Rust WebP backend for both encoding and
 decoding.
 
+本地修复：VP8L 最大宽高字段按掩码后加一解码；动画的 ALPH + VP8 帧在填充像素缓冲前核对 VP8 与 ANMF 的宽高，不一致时返回 `InconsistentImageSizes`，避免越界或错误成功。回归位于 `src/decoder.rs` 的 `lossless_maximum_dimensions_roundtrip` 与 `animated_alpha_frame_dimensions_match`。
+
 ## Current Status
 
 * **Decoder:** Supports all WebP format features including both lossless and

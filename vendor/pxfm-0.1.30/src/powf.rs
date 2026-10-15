@@ -545,13 +545,13 @@ fn powf_gen<B: PowfBackend>(x: f32, y: f32, backend: B) -> f32 {
             return 1.;
         }
 
-        let x_is_neg = x.to_bits() > 0x8000_0000;
+        let x_is_neg = x.is_sign_negative();
 
         if x == 0.0 {
             let out_is_neg = x_is_neg && backend.odd_integerf(f32::from_bits(y_u));
             if y_u > 0x8000_0000u32 {
                 // pow(0, negative number) = inf
-                return if x_is_neg {
+                return if out_is_neg {
                     f32::NEG_INFINITY
                 } else {
                     f32::INFINITY
@@ -843,6 +843,27 @@ pub fn dirty_powf(d: f32, n: f32) -> f32 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn f_powf_signed_zero_controls() {
+        for x in [0.0f32, -0.0] {
+            for y in [
+                -3.0f32, -2.0, -1.5, -1.0, -0.5, -0.0, 0.0, 0.5, 1.0, 1.5, 2.0, 3.0,
+                f32::NEG_INFINITY, f32::INFINITY,
+            ] {
+                assert_eq!(
+                    f_powf(x, y).to_bits(),
+                    x.powf(y).to_bits(),
+                    "零底数的符号必须遵循指数奇偶性：x={x:?}, y={y}"
+                );
+                assert_eq!(
+                    powf_gen(x, y, GenPowfBackend {}).to_bits(),
+                    x.powf(y).to_bits(),
+                    "通用后端必须保留相同的零底数符号：x={x:?}, y={y}"
+                );
+            }
+        }
+    }
 
     #[test]
     fn powf_test() {

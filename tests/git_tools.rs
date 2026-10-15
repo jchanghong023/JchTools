@@ -2968,3 +2968,45 @@ fn add_and_commit_failures_preserve_both_output_streams() {
         assert_eq!(git_ok(&fix.remote, &["show", "master:local.txt"]), "local\n");
     }
 }
+
+// 覆盖 G-02/G-06：从仓库子目录续接合并且 diff.relative=true 时，
+// 范围检查仍须检查根目录全部 staged 路径，不能把子目录之外的文件夹带进合并提交。
+#[test]
+fn conflict_resume_from_subdirectory_preserves_outside_staged_files() {
+    let fix = fixture();
+    fs::write(fix.repo.join("conflict.txt"), "local version\n").unwrap();
+    let base = fix.repo.parent().unwrap();
+    let other = base.join("other");
+    git_ok(base, &["clone", "-q", &fix.remote.display().to_string(), "other"]);
+    fs::write(other.join("conflict.txt"), "remote version\n").unwrap();
+    git_ok(&other, &["add", "conflict.txt"]);
+    git_ok(&other, &["commit", "-q", "-m", "remote conflict"]);
+    git_ok(&other, &["push", "-q"]);
+    let first = run_tool(&fix.repo);
+    assert!(first.text.contains("冲突"), "先制造冲突：{}", first.text);
+
+    fs::write(fix.repo.join("conflict.txt"), "resolved version\n").unwrap();
+    fs::write(fix.repo.join("unrelated.txt"), "protected staged content\n").unwrap();
+    git_ok(&fix.repo, &["add", "conflict.txt", "unrelated.txt"]);
+    git_ok(&fix.repo, &["config", "diff.relative", "true"]);
+    let subdir = fix.repo.join("selected-subdirectory");
+    fs::create_dir(&subdir).unwrap();
+    let protected_tree = git_ok(&fix.repo, &["write-tree"]);
+    let protected_head = git_ok(&fix.repo, &["rev-parse", "HEAD"]);
+    let protected_remote = git_ok(&fix.remote, &["rev-parse", "master"]);
+
+    let outcome = run_tool(&subdir);
+    assert!(
+        outcome.text.contains("unrelated.txt") && outcome.text.contains("G-06"),
+        "必须识别子目录之外的无关暂存文件并拒绝合并提交：{}",
+        outcome.text
+    );
+    assert!(fix.repo.join(".git/MERGE_HEAD").is_file(), "必须保留合并现场");
+    assert_eq!(git_ok(&fix.repo, &["write-tree"]), protected_tree);
+    assert_eq!(git_ok(&fix.repo, &["rev-parse", "HEAD"]), protected_head);
+    assert_eq!(git_ok(&fix.remote, &["rev-parse", "master"]), protected_remote);
+    assert_eq!(
+        fs::read_to_string(fix.repo.join("unrelated.txt")).unwrap(),
+        "protected staged content\n"
+    );
+}

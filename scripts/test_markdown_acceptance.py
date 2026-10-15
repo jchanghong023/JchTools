@@ -1480,7 +1480,7 @@ class ClosedFormatConnectionTests(unittest.TestCase):
         def exchange(pipe: object, _runtime: Path, request_id: str, _deadline: float) -> object:
             if pipe is old_pipe:
                 raise pywintypes.error(232, "WriteFile", "管道正在被关闭")
-            return {"id": request_id, "ok": True, "jchtools_broker_protocol": 2, "formats": expected}
+            return {"id": request_id, "ok": True, "jchtools_broker_protocol": 3, "formats": expected}
 
         with (
             patch.dict(
@@ -1514,13 +1514,76 @@ class ClosedFormatConnectionTests(unittest.TestCase):
 class SharedFormatProtocolTests(unittest.TestCase):
     """失效/异版本 broker 响应必须使真实 A18 消费者 NOT RUN，不能使用旧固定清单。."""
 
+    def test_current_broker_protocol_accepts_formats(self) -> None:
+        """覆盖 T-08/XB-05：当前协议 3 的真实终态结构不能被旧版本判据拒绝。"""
+        root = markdown_acceptance.ROOT / ".tmp" / "acceptance-protocol-regression"
+        context = markdown_acceptance.Context(
+            None, None, None, markdown_acceptance.FIXTURES_DEFAULT,
+            markdown_acceptance.AssetProbe(root, root, root / "xberg.exe", root, []),
+        )
+        expected = [{"extension": "pdf", "mime_type": "application/pdf"}]
+
+        def reply(_pipe: object, _runtime: Path, request_id: str, _deadline: float) -> object:
+            return {"id": request_id, "ok": True, "jchtools_broker_protocol": 3, "formats": expected}
+
+        with (
+            patch.object(markdown_acceptance, "_formats_request_inputs", return_value=(str(root), root)),
+            patch.object(markdown_acceptance, "_open_formats_pipe"),
+            patch.object(markdown_acceptance, "_exchange_formats", side_effect=reply),
+        ):
+            rows, error = context.cached_formats()
+        self.assertIsNone(error)
+        self.assertEqual(rows, expected)
+
+    def test_protocol3_bytes_use_real_formats_parser(self) -> None:
+        """覆盖 XB-05：从管道字节经真实 JSON 解码和身份判据接受协议 3。"""
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            context = markdown_acceptance.Context(
+                None, None, None, markdown_acceptance.FIXTURES_DEFAULT,
+                markdown_acceptance.AssetProbe(root, root, root / "xberg.exe", root, []),
+            )
+            expected = [{"extension": "pdf", "mime_type": "application/pdf"}]
+            response = (json.dumps({
+                "id": "acceptance-formats-protocol3", "ok": True,
+                "jchtools_broker_protocol": 3, "formats": expected,
+            }) + "\n").encode("utf-8")
+            sizes: list[int] = []
+            sent: list[bytes] = []
+
+            def write_pipe(_handle: object, payload: bytes, _overlap: object) -> tuple[int, None]:
+                sent.append(payload)
+                sizes.append(len(payload))
+                return 0, None
+
+            def read_pipe(_handle: object, _buffer: object, _overlap: object) -> tuple[int, None]:
+                sizes.append(len(response))
+                return 0, None
+
+            with (
+                patch.object(markdown_acceptance, "_formats_request_inputs", return_value=(str(root), root)),
+                patch.object(markdown_acceptance, "_open_formats_pipe"),
+                patch.object(markdown_acceptance.uuid, "uuid4", return_value=MagicMock(hex="protocol3")),
+                patch("win32event.CreateEvent", return_value=321),
+                patch("win32event.ResetEvent"),
+                patch("win32api.CloseHandle"),
+                patch("win32file.WriteFile", side_effect=write_pipe),
+                patch("win32file.AllocateReadBuffer", return_value=response),
+                patch("win32file.ReadFile", side_effect=read_pipe),
+                patch("win32file.GetOverlappedResult", side_effect=lambda *_args: sizes.pop(0)),
+            ):
+                rows, error = context.cached_formats()
+            self.assertIsNone(error)
+            self.assertEqual(rows, expected)
+            self.assertEqual(json.loads(sent[0])["request"]["command"], "formats")
+
     @staticmethod
     def _protocol_outcome(fields: dict[str, object]) -> markdown_acceptance.Outcome:
         def reply(_pipe: object, _runtime: Path, request_id: str, _deadline: float) -> object:
             response: dict[str, object] = {
                 "id": request_id,
                 "ok": True,
-                "jchtools_broker_protocol": 2,
+                "jchtools_broker_protocol": 3,
                 "formats": [
                     {"extension": extension, "mime_type": "application/test"}
                     for extension in ("pdf", "docx", "pptx", "xlsx", "jp2", "j2k", "j2c")
@@ -1568,6 +1631,10 @@ class SharedFormatProtocolTests(unittest.TestCase):
     def test_incompatible_broker_protocol_cannot_pass_a18(self) -> None:
         outcome = self._protocol_outcome({"jchtools_broker_protocol": 1})
         assert outcome.status == "NOT RUN"  # nosec B101: 不兼容协议不可当作当前会话。
+
+    def test_previous_broker_protocol_cannot_pass_a18(self) -> None:
+        outcome = self._protocol_outcome({"jchtools_broker_protocol": 2})
+        self.assertEqual(outcome.status, "NOT RUN")
 
     def test_worker_failure_cannot_fall_back_to_manifest(self) -> None:
         outcome = self._protocol_outcome({"ok": False, "error_kind": "backend_error", "error": "formats unavailable"})

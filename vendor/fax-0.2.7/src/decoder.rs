@@ -298,6 +298,9 @@ impl<E, R: Iterator<Item = Result<u8, E>>> Group4Decoder<R> {
                     let a1a2 = colored(!color, &mut self.reader).ok_or(DecodeError::Invalid)?;
                     let a1 = a0.checked_add(a0a1).ok_or(DecodeError::Invalid)?;
                     let a2 = a1.checked_add(a1a2).ok_or(DecodeError::Invalid)?;
+                    if a2 > self.width {
+                        return Err(DecodeError::Invalid);
+                    }
                     //debug!("a0a1={}, a1a2={}, a1={}, a2={}", a0a1, a1a2, a1, a2);
 
                     // Same canonical form rule: never store a transition
@@ -357,6 +360,43 @@ impl<'a> Line<'a> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn g4_horizontal_width_boundary() {
+        use crate::BitWriter;
+        // C-08：游程必须恰好落在行内，不能截断后冒充有效 TIFF。
+        for (white_run, black_run) in [(0, 2), (2, 0), (0, 1), (1, 0)] {
+            let mut writer = crate::VecWriter::new();
+            writer
+                .write(mode::encode(Mode::Horizontal).unwrap())
+                .unwrap();
+            writer.write(white::encode(white_run).unwrap()).unwrap();
+            writer.write(black::encode(black_run).unwrap()).unwrap();
+            writer.write(EDFB_HALF).unwrap();
+            writer.write(EDFB_HALF).unwrap();
+            let data = writer.finish();
+            let valid = white_run + black_run == 1;
+            let mut rows = Vec::new();
+            let result = decode_g4(data.iter().copied(), 1, Some(1), |line| {
+                rows.push(pels(line, 1).collect::<Vec<_>>());
+            });
+            assert_eq!(result.is_some(), valid, "runs={white_run},{black_run}");
+            assert_eq!(rows.len(), usize::from(valid));
+            if valid {
+                assert_eq!(
+                    rows[0],
+                    [if white_run == 0 {
+                        Color::Black
+                    } else {
+                        Color::White
+                    }]
+                );
+            }
+            let image = crate::tiff::wrap(&data, 1, 1);
+            let mut decoder = tiff::decoder::Decoder::new(std::io::Cursor::new(image)).unwrap();
+            assert_eq!(decoder.read_image().is_ok(), valid);
+        }
+    }
 
     // C-08 / 附录 B：损坏的 TIFF 不能通过完整图像解码获得改后缀授权。
     #[test]

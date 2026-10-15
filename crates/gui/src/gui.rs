@@ -4809,8 +4809,25 @@ impl UiPump {
                         s.runtime = RuntimeMode::Organizer;
                         push_event_log(&mut s.logs, text.clone());
                         self.log_dirty.set(true);
-                        // 收尾时把共享进度的最终状态定格上屏（G-13）。
+                        // G-13：收尾定格全部字段；终态可能先于首次周期刷新到达。
                         if let Some(shared) = &s.git_shared {
+                            if let Ok(branch) = shared.branch.lock() {
+                                ui.set_git_branch(branch.as_str().into());
+                            }
+                            if let Ok(upstream) = shared.upstream.lock() {
+                                ui.set_git_upstream(upstream.as_str().into());
+                            }
+                            if let Ok(current) = shared.current.lock() {
+                                ui.set_git_current(current.as_str().into());
+                            }
+                            ui.set_git_retry(
+                                i32::try_from(shared.retry.load(Ordering::Relaxed))
+                                    .unwrap_or(i32::MAX),
+                            );
+                            ui.set_git_retry_wait(
+                                i32::try_from(shared.retry_wait.load(Ordering::Relaxed))
+                                    .unwrap_or(i32::MAX),
+                            );
                             if let Ok(state_text) = shared.state.lock() {
                                 ui.set_git_state(state_text.as_str().into());
                             }
@@ -11169,7 +11186,31 @@ mod gui_tests {
             app.ui.invoke_select_tool("git-tools".into());
             app.ui.set_git_repo(repo_text.into());
             app.ui.invoke_git_start();
-            assert!(pump_until(app, || !app.ui.get_busy()), "Git 任务应正常收尾");
+            // G-13：让真实 worker 先完成，再交付同一批真实事件，确定性覆盖
+            // GitDone 先于 refresh_runtime 的时序（不创建或激活 OS 窗口）。
+            let deadline = Instant::now() + Duration::from_secs(30);
+            let mut pending = Vec::new();
+            loop {
+                let event = app.pump.receiver
+                    .recv_timeout(deadline.saturating_duration_since(Instant::now()))
+                    .expect("真实 Git 任务必须回传终态");
+                let terminal = matches!(&event, Event::GitDone(_));
+                pending.push(event);
+                if terminal {
+                    break;
+                }
+            }
+            assert!(pending.len() <= 256, "单文件夹具应在一次事件泵内收尾");
+            for event in pending {
+                app.pump.out.send(event).unwrap();
+            }
+            app.pump.run(&app.ui);
+            assert!(!app.ui.get_busy(), "Git 任务应正常收尾");
+            assert_eq!(app.ui.get_git_branch().as_str(), "master");
+            assert_eq!(app.ui.get_git_upstream().as_str(), "origin/master");
+            assert_eq!(app.ui.get_git_current().as_str(), "feature.md");
+            assert_eq!(app.ui.get_git_retry(), 0);
+            assert_eq!(app.ui.get_git_retry_wait(), 0);
             assert_eq!(
                 app.ui.get_git_state().as_str(),
                 "完成",

@@ -18,6 +18,13 @@ unsafe impl<T: ULE, const N: usize> ULE for [T; N] {
             // ZSTs shouldn't be ULE
             return Err(UleError::length::<Self>(bytes.len()));
         }
+        if size_of::<Self>() == 0 {
+            return if bytes.is_empty() {
+                T::validate_bytes(bytes)
+            } else {
+                Err(UleError::length::<Self>(bytes.len()))
+            };
+        }
         if bytes.len() % size_of::<Self>() != 0 {
             return Err(UleError::length::<Self>(bytes.len()));
         }

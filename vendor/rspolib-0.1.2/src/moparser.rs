@@ -52,7 +52,7 @@ fn maybe_extract_msgctxt_from_msgid(
     let msgid_tokens = msgid.split('\x04').collect::<Vec<&str>>();
 
     if msgid_tokens.len() == 2 {
-        (msgid_tokens[0].into(), Some(msgid_tokens[1].to_string()))
+        (msgid_tokens[1].into(), Some(msgid_tokens[0].to_string()))
     } else {
         (msgid.into(), None)
     }
@@ -69,26 +69,27 @@ pub(crate) struct MOFileParser<'a> {
 }
 
 impl MOFileParser<'_> {
-    pub fn new<'a>(file_options: FileOptions) -> MOFileParser<'a> {
-        let mut file = MOFile::new(file_options);
-        let fhandle: Box<dyn SeekRead> = match Path::new(
-            &file.options.path_or_content,
-        )
-        .is_file()
-        {
-            true => Box::new(
-                File::open(&file.options.path_or_content).unwrap(),
+    pub fn new<'a>(file_options: FileOptions) -> Result<MOFileParser<'a>, IOError> {
+        let file = MOFile::new(file_options);
+        let fhandle: Box<dyn SeekRead> = match (
+            &file.options.byte_content,
+            Path::new(&file.options.path_or_content).is_file(),
+        ) {
+            (Some(bytes), false) => Box::new(Cursor::new(bytes.clone())),
+            _ => Box::new(
+                File::open(&file.options.path_or_content).map_err(|_| {
+                    IOError::CorruptedMOData {
+                        context: "打开 MO 文件".to_string(),
+                    }
+                })?,
             ),
-            false => Box::new(Cursor::new(
-                file.options.byte_content.as_mut().unwrap().clone(),
-            )),
         };
 
-        MOFileParser {
+        Ok(MOFileParser {
             fhandle,
             freader: &u32::from_le_bytes,
             file,
-        }
+        })
     }
 
     pub fn parse(&mut self) -> Result<(), IOError> {
@@ -444,7 +445,7 @@ mod tests {
     #[test]
     fn parse_from_file() -> Result<(), IOError> {
         let mo_path = "tests-data/all.mo";
-        let mut parser = MOFileParser::new(mo_path.into());
+        let mut parser = MOFileParser::new(mo_path.into())?;
         parser.parse()?;
 
         all_features_test(&parser);
@@ -454,7 +455,7 @@ mod tests {
     #[test]
     fn parse_from_bytes() -> Result<(), IOError> {
         let bytes = std::fs::read("tests-data/all.mo").ok().unwrap();
-        let mut parser = MOFileParser::new(bytes.into());
+        let mut parser = MOFileParser::new(bytes.into())?;
         parser.parse()?;
 
         all_features_test(&parser);
@@ -467,7 +468,7 @@ mod tests {
         let data = vec![magic_number];
         let content = create_binary_content(&data, true);
 
-        let mut parser = MOFileParser::new(content.into());
+        let mut parser = MOFileParser::new(content.into()).unwrap();
         let result = parser.parse();
 
         assert_eq!(
@@ -485,7 +486,7 @@ mod tests {
         let data = vec![MAGIC, version];
         let content = create_binary_content(&data, true);
 
-        let mut parser = MOFileParser::new(content.into());
+        let mut parser = MOFileParser::new(content.into()).unwrap();
         let result = parser.parse();
 
         assert_eq!(
@@ -507,7 +508,7 @@ mod tests {
         let content =
             create_binary_content(&data, magic_number == MAGIC);
 
-        let mut parser = MOFileParser::new(content.into());
+        let mut parser = MOFileParser::new(content.into()).unwrap();
         let result = parser.parse();
         assert_eq!(
             result,
@@ -538,7 +539,7 @@ mod tests {
                 additional_bytes,
             );
 
-            let mut parser = MOFileParser::new(content.into());
+            let mut parser = MOFileParser::new(content.into()).unwrap();
             let result = parser.parse();
 
             assert_eq!(

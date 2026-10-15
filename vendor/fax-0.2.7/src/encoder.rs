@@ -99,7 +99,7 @@ impl<W: BitWriter> Encoder<W> {
                         continue;
                     }
                     (b1, _) if absdiff(a1, b1) <= 3 => {
-                        let delta = a1 as i16 - b1 as i16;
+                        let delta = i32::from(a1) - i32::from(b1);
                         debug!("  Vertical({})", delta);
                         let bits = mode::encode(Mode::Vertical(delta as i8)).unwrap();
                         writer.write(bits)?;
@@ -119,7 +119,11 @@ impl<W: BitWriter> Encoder<W> {
                         debug!("  Horizontal({}, {}) color={color:?}", a0a1, a1a2);
                         let bits = mode::encode(Mode::Horizontal).unwrap();
                         writer.write(bits)?;
-                        let c = if a0 + a1 == 0 { Color::White } else { color };
+                        let c = if a0 == 0 && a1 == 0 {
+                            Color::White
+                        } else {
+                            color
+                        };
                         encode_color(writer, c, a0a1)?;
                         encode_color(writer, !c, a1a2)?;
                         a0 = a2;
@@ -137,5 +141,28 @@ impl<W: BitWriter> Encoder<W> {
         self.writer.write(EDFB_HALF)?;
         self.writer.write(EDFB_HALF)?;
         Ok(self.writer)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn g4_large_width_roundtrip() {
+        for (width, transitions) in [(32770, vec![32767]), (65535, vec![40000, 40001, 50000])] {
+            let pixels = crate::decoder::pels(&transitions, width).collect::<Vec<_>>();
+            let mut encoder = Encoder::new(crate::VecWriter::new());
+            encoder.encode_line(pixels.iter().copied(), width).unwrap();
+            let data = encoder.finish().unwrap().finish();
+            let mut rows = Vec::new();
+            assert_eq!(
+                crate::decoder::decode_g4(data.into_iter(), width, Some(1), |line| {
+                    rows.push(crate::decoder::pels(line, width).collect::<Vec<_>>());
+                }),
+                Some(())
+            );
+            assert_eq!(rows, [pixels]);
+        }
     }
 }

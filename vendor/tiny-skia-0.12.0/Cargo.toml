@@ -90,6 +90,10 @@ path = "examples/stroke.rs"
 name = "integration"
 path = "tests/integration/main.rs"
 
+[[test]]
+name = "pixel_bounds"
+path = "tests/pixel_bounds.rs"
+
 [dependencies.arrayref]
 version = "0.3.9"
 

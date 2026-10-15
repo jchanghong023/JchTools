@@ -39,6 +39,11 @@ impl Difference {
         // having the Plain/Foreground enum variants, so I'm just leaving
         // it commented out for now, and defaulting to Reset.
 
+        // 显式重置不能被相同样式或增量差分省略；重置后必须重发完整样式。
+        if next.prefix_with_reset {
+            return ExtraStyles(*next);
+        }
+
         if first == next {
             return Empty;
         }
@@ -159,6 +164,9 @@ mod test {
     test!(nothing2:   Green.bold();   Green.bold()    => Empty);
 
     test!(color_change: Red.normal(); Blue.normal() => ExtraStyles(Blue.normal()));
+
+    test!(explicit_reset_same_style: Red.reset_before_style(); Red.reset_before_style() => ExtraStyles(Red.reset_before_style()));
+    test!(explicit_reset_keeps_color: Red.normal(); Red.reset_before_style() => ExtraStyles(Red.reset_before_style()));
 
     test!(addition_of_blink:          style(); style().blink()          => ExtraStyles(style().blink()));
     test!(addition_of_dimmed:         style(); style().dimmed()         => ExtraStyles(style().dimmed()));

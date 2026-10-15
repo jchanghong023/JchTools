@@ -1586,6 +1586,7 @@ fn finish_without_changes(git: &Path, info: &RepoInfo, ctx: &Ctx<'_>) -> String 
 
 /// 主入口：逐文件提交并推送（G-03~G-16）。返回收尾文案（状态与统计），
 /// 详细过程经 `log`/`status` 回调实时上报（G-14）。
+/// `repo` 可位于仓库子目录；验证后统一从仓库根执行，合并暂存区保护覆盖整个仓库。
 /// `unit` 为退避基准（生产用 [`BACKOFF_UNIT`]，测试注入小值）。
 pub fn run(
     git: &Path,
@@ -1674,6 +1675,9 @@ fn run_task(
             return format!("无法开始：{text}");
         }
     };
+    // G-06：后续命令统一从仓库根执行，避免 diff.relative 将合并范围检查
+    // 限制在用户选定的子目录，却由 commit --no-edit 提交整个暂存区。
+    let repo = info.root.as_path();
     GitShared::set_text(&shared.repo, &info.root.display().to_string());
     GitShared::set_text(&shared.branch, &info.branch);
     GitShared::set_text(&shared.upstream, &info.upstream);

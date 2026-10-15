@@ -225,7 +225,14 @@ impl POFileParser {
     ) -> Result<(), SyntaxError> {
         let next_transition = (*symbol, self.current_state);
         let (action, next_state) =
-            *TRANSITIONS.get(&next_transition).unwrap();
+            *TRANSITIONS.get(&next_transition).ok_or_else(|| SyntaxError::Generic {
+                maybe_filename: MaybeFilename::new(
+                    &self.file.options.path_or_content,
+                    self.content_is_path,
+                ),
+                line: self.current_line,
+                index: 0,
+            })?;
 
         (transition_fn_factory(action)?)(self)?;
         if action != St::MC {
@@ -449,6 +456,17 @@ impl POFileParser {
                 }
             };
 
+            let value = self.current_token
+                .split_once(']')
+                .map_or("", |(_, value)| value.trim());
+            maybe_raise_unescaped_double_quote_found_error(
+                value,
+                self.current_line,
+                self.content_is_path,
+                &self.file.options.path_or_content,
+                0,
+            )?;
+
             self.process(&St::MX)?;
         } else if tokens[0] == "#," {
             if nb_tokens < 2 {
@@ -548,6 +566,13 @@ impl POFileParser {
                 [tokens[1].len() + tokens[0].len() + 1..]
                 .trim_start()
                 .to_string();
+            maybe_raise_unescaped_double_quote_found_error(
+                &self.current_token,
+                self.current_line,
+                self.content_is_path,
+                &self.file.options.path_or_content,
+                tokens[0].len() + tokens[1].len() + 3,
+            )?;
             self.process(PREV_KEYWORDS.get(&tokens[1]).unwrap())?;
         } else {
             return Err(SyntaxError::Generic {
@@ -858,6 +883,17 @@ fn maybe_raise_unescaped_double_quote_found_error(
     path_or_content: &str,
     index_offset: usize,
 ) -> Result<(), SyntaxError> {
+    if text.len() < 2 || !text.starts_with('"') {
+        return Err(SyntaxError::Custom {
+            maybe_filename: MaybeFilename::new(
+                path_or_content,
+                path_or_content_is_path,
+            ),
+            line: linenum,
+            index: 0,
+            message: format!("invalid quoted string '{text}'"),
+        });
+    }
     // Check if last character is not a double quote
     // to prevent slicing out of bounds
     let text_chars = text.chars();

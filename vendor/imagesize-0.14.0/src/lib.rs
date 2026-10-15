@@ -175,6 +175,7 @@ impl ImageType {
 }
 
 /// Holds the size information of an image.
+/// 按面积排序；面积相同时依次按宽度、高度区分，保持排序与相等判断一致。
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub struct ImageSize {
     /// Width of an image in pixels.
@@ -185,7 +186,10 @@ pub struct ImageSize {
 
 impl Ord for ImageSize {
     fn cmp(&self, other: &Self) -> std::cmp::Ordering {
-        (self.width * self.height).cmp(&(other.width * other.height))
+        (self.width * self.height)
+            .cmp(&(other.width * other.height))
+            .then_with(|| self.width.cmp(&other.width))
+            .then_with(|| self.height.cmp(&other.height))
     }
 }
 

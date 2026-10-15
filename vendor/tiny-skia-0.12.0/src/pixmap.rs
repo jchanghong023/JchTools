@@ -242,6 +242,9 @@ impl Pixmap {
     ///
     /// Returns `None` when position is out of bounds.
     pub fn pixel(&self, x: u32, y: u32) -> Option<PremultipliedColorU8> {
+        if x >= self.width() || y >= self.height() {
+            return None;
+        }
         let idx = self.width().checked_mul(y)?.checked_add(x)?;
         self.pixels().get(idx as usize).cloned()
     }
@@ -368,6 +371,9 @@ impl<'a> PixmapRef<'a> {
     ///
     /// Returns `None` when position is out of bounds.
     pub fn pixel(&self, x: u32, y: u32) -> Option<PremultipliedColorU8> {
+        if x >= self.width() || y >= self.height() {
+            return None;
+        }
         let idx = self.width().checked_mul(y)?.checked_add(x)?;
         self.pixels().get(idx as usize).cloned()
     }

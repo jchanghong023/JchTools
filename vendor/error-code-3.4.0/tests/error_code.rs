@@ -69,3 +69,23 @@ fn check_error_code_range() {
         }
     }
 }
+
+// Windows 的 std::io::Error 保存 Win32/Winsock 错误码，不是 CRT errno。
+#[cfg(all(feature = "std", windows))]
+#[test]
+fn io_os_error_preserves_windows_system_category() {
+    for code in [5, 10035] {
+        let error = ErrorCode::from(std::io::Error::from_raw_os_error(code));
+        assert_eq!(error, ErrorCode::new_system(code));
+        assert_eq!(error.raw_code(), code);
+        assert_eq!(error.to_string(), ErrorCode::new_system(code).to_string());
+    }
+    assert!(ErrorCode::from(std::io::Error::from_raw_os_error(10035)).is_would_block());
+}
+
+#[cfg(feature = "std")]
+#[test]
+fn io_error_without_os_code_keeps_existing_fallback() {
+    let error = ErrorCode::from(std::io::Error::from(std::io::ErrorKind::Other));
+    assert_eq!(error, ErrorCode::new_posix(-1));
+}

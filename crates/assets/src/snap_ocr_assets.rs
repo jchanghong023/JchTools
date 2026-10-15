@@ -1796,7 +1796,12 @@ fn download_request(
             );
             (format!("下载请求失败：{error}"), retryable)
         }
-        status @ ureq::Error::Status(..) => (format!("下载请求失败：{status}"), false),
+        status @ ureq::Error::Status(..) => {
+            // P-09：HTTP 代理认证失败以状态码而非 CONNECT 传输错误返回。
+            // 只让实际代理的 407 进入已有直连回退，普通 HTTP 错误保持不变。
+            let retryable = proxy.is_some() && matches!(&status, ureq::Error::Status(407, _));
+            (format!("下载请求失败：{status}"), retryable)
+        }
     })
 }
 
@@ -2169,6 +2174,54 @@ mod tests {
         let (_, retryable) = result.expect_err("代理 CONNECT 认证拒绝必须报错");
         assert!(retryable, "代理认证失败必须允许一次直连回退");
         assert!(logs.contains("proxy_connect") && logs.contains("retryable=true"), "{logs}");
+    }
+
+    // 覆盖 P-09：普通 HTTP 代理的 407 同样是代理认证失败，须仅直连回退一次。
+    // HTTPS CONNECT 的同类错误由上一个用例覆盖；非代理的 HTTP 错误不得回退。
+    #[test]
+    fn http_proxy_authentication_failure_falls_back_to_direct_metadata() {
+        let (proxy_address, proxy_server) = diagnostic_http_server(
+            b"HTTP/1.1 407 Proxy Authentication Required\r\nContent-Length: 0\r\nConnection: close\r\n\r\n".to_vec(),
+        );
+        let body = r#"{"tag_name":"direct-release"}"#;
+        let (direct_address, direct_server) = diagnostic_http_server(
+            format!(
+                "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                body.len()
+            )
+            .into_bytes(),
+        );
+        let proxy = jchtools_foundation::system_proxy::SystemProxy::from_registry_values(
+            1,
+            Some(&proxy_address.to_string()),
+            None,
+        );
+        let (result, logs) = capture_diagnostics(|| {
+            super::fetch_release_json_with_proxy(
+                &format!("http://{direct_address}/release"),
+                &AtomicBool::new(false),
+                &mut |_| {},
+                &proxy,
+            )
+        });
+        proxy_server.join().expect("HTTP 代理认证拒绝供给线程结束");
+        assert_eq!(result.expect("HTTP 代理 407 后必须直连成功")["tag_name"], "direct-release");
+        direct_server.join().expect("直连元数据供给线程结束");
+        assert_eq!(logs.matches("asset_http_request_started").count(), 2, "{logs}");
+        assert_eq!(logs.matches("release_metadata_direct_retrying").count(), 1, "{logs}");
+
+        let (address, server) = diagnostic_http_server(
+            b"HTTP/1.1 407 Proxy Authentication Required\r\nContent-Length: 0\r\nConnection: close\r\n\r\n".to_vec(),
+        );
+        let (_, retryable) = super::download_request(
+            &format!("http://{address}/release"),
+            None,
+            &mut |_| {},
+            "direct-http-status-regression",
+        )
+        .expect_err("非代理 407 必须仍报 HTTP 错误");
+        server.join().expect("非代理 HTTP 错误供给线程结束");
+        assert!(!retryable, "非代理 HTTP 状态不得触发直连回退");
     }
 
     #[test]

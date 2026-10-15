@@ -88,3 +88,44 @@ fn checked_parse_preserves_boolean_and_multibyte_validation() {
         2
     );
 }
+
+#[test]
+fn zero_sized_raw_bytes_follow_ule_contract() {
+    use zerovec::ule::RawBytesULE;
+
+    assert!(RawBytesULE::<0>::validate_bytes(&[]).is_ok());
+    assert!(RawBytesULE::<0>::parse_bytes_to_slice(&[])
+        .expect("零尺寸 ULE 空字节必须有效")
+        .is_empty());
+    assert!(RawBytesULE::<0>::validate_bytes(&[0]).is_err());
+    assert!(RawBytesULE::<0>::parse_bytes_to_slice(&[0]).is_err());
+}
+
+#[test]
+fn zero_sized_raw_bytes_mutable_conversion_accepts_empty() {
+    use zerovec::ule::RawBytesULE;
+    assert!(RawBytesULE::<0>::from_bytes_unchecked_mut(&mut []).is_empty());
+}
+
+#[test]
+fn unit_arrays_follow_zero_sized_ule_contract() {
+    assert!(<[(); 1] as ULE>::validate_bytes(&[]).is_ok());
+    assert!(<[(); 1] as ULE>::parse_bytes_to_slice(&[])
+        .expect("单位类型数组的空字节必须有效")
+        .is_empty());
+    assert!(<[(); 1] as ULE>::validate_bytes(&[0]).is_err());
+    assert!(ZeroSlice::<[(); 1]>::parse_bytes(&[])
+        .expect("零尺寸数组的空字节必须有效")
+        .is_empty());
+}
+
+#[test]
+fn raw_bytes_mutable_conversion_preserves_nonzero_stride() {
+    use zerovec::ule::RawBytesULE;
+    // 非零步长的转换与验证保持不变。
+    let mut bytes = [1, 2, 3, 4];
+    let values = RawBytesULE::<2>::from_bytes_unchecked_mut(&mut bytes);
+    assert_eq!(values.len(), 2);
+    values[1] = RawBytesULE([5, 6]);
+    assert_eq!(bytes, [1, 2, 5, 6]);
+}

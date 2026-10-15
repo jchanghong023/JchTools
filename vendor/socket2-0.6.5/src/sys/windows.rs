@@ -804,7 +804,9 @@ fn into_ms(duration: Option<Duration>) -> u32 {
     // * Greater than u32::MAX milliseconds (50 days) is rounded up to
     //   INFINITE (never time out).
     duration.map_or(0, |duration| {
-        min(duration.as_millis(), INFINITE as u128) as u32
+        let millis = duration.as_millis();
+        let extra = u128::from(duration.subsec_nanos() % 1_000_000 != 0);
+        min(millis + extra, INFINITE as u128) as u32
     })
 }
 
@@ -1176,4 +1178,51 @@ fn in6_addr_convertion() {
     ];
     assert_eq!(unsafe { raw.u.Word }, want);
     assert_eq!(from_in6_addr(raw), ip);
+}
+
+#[test]
+fn timeout_milliseconds_round_up_and_saturate() {
+    assert_eq!(into_ms(None), 0);
+    assert_eq!(into_ms(Some(Duration::ZERO)), 0);
+    assert_eq!(into_ms(Some(Duration::from_nanos(1))), 1);
+    assert_eq!(into_ms(Some(Duration::from_millis(1))), 1);
+    assert_eq!(into_ms(Some(Duration::from_nanos(1_000_001))), 2);
+    assert_eq!(
+        into_ms(Some(Duration::from_millis(u32::MAX as u64))),
+        INFINITE
+    );
+    assert_eq!(
+        into_ms(Some(
+            Duration::from_millis(u32::MAX as u64) + Duration::from_nanos(1)
+        )),
+        INFINITE
+    );
+    assert_eq!(into_ms(Some(Duration::MAX)), INFINITE);
+}
+
+#[test]
+fn socket_timeouts_preserve_finite_submillisecond_values() -> io::Result<()> {
+    let socket = crate::Socket::new(crate::Domain::IPV4, crate::Type::STREAM, None)?;
+    for (requested, expected) in [
+        (None, None),
+        (Some(Duration::ZERO), None),
+        (
+            Some(Duration::from_nanos(1)),
+            Some(Duration::from_millis(1)),
+        ),
+        (
+            Some(Duration::from_millis(1)),
+            Some(Duration::from_millis(1)),
+        ),
+        (
+            Some(Duration::from_nanos(1_000_001)),
+            Some(Duration::from_millis(2)),
+        ),
+    ] {
+        socket.set_read_timeout(requested)?;
+        assert_eq!(socket.read_timeout()?, expected, "read: {requested:?}");
+        socket.set_write_timeout(requested)?;
+        assert_eq!(socket.write_timeout()?, expected, "write: {requested:?}");
+    }
+    Ok(())
 }

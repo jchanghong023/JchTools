@@ -1,6 +1,7 @@
 mod com;
 pub mod dialog_ffi;
 mod dialog_future;
+mod path;
 
 use dialog_ffi::{IDialog, Result};
 use dialog_future::{multiple_return_future, single_return_future};

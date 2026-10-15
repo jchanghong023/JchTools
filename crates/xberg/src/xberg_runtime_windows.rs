@@ -1,4 +1,6 @@
 //! Windows 命名管道代理。锁与管道名不包含运行目录，保存不同目录也不会另起引擎。
+//! 停止后新连接不加入终态交付屏障，但仍解析请求，让已登记任务的取消可达；
+//! 业务入口继续由 stopping gate 拒绝，未交付 JSON 的新连接不能拖住后台退出。
 use super::{diagnostic_id, startup_config};
 use fs2::FileExt;
 use jchtools_foundation::{logging, xberg_settings};
@@ -2339,17 +2341,15 @@ pub(super) fn serve() -> Result<(), String> {
                 continue;
             }
             let handler = ActiveHandler::new(&active_handlers);
-            // XB-23：停止后拒绝新连接；不能让未交付 JSON 的客户端加入终态刷出屏障。
-            // 先登记再检查停止状态，保留停止前已获准连接的响应交付权限。
-            if stopping.load(Ordering::Acquire) {
+            // XB-08/XB-23：取消走独立连接，停止后仍须允许已有任务安全结束。
+            // 新连接不加入终态刷出屏障；不完整 JSON 不能延长后台寿命。
+            // 先登记再检查，保留停止前已获准连接的响应交付权限。
+            let handler = if stopping.load(Ordering::Acquire) {
                 drop(handler);
-                tracing::debug!(
-                    event = "xberg_broker_connection_rejected",
-                    reason = "stopping",
-                    "共享代理停止后不再接收新连接"
-                );
-                continue;
-            }
+                None
+            } else {
+                Some(handler)
+            };
             let engine = Arc::clone(&engine);
             let stopping = stopping.clone();
             let span = tracing::Span::current();

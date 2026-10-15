@@ -94,11 +94,51 @@ mod format2 {
         assert_eq!(subtable.glyph_index(41), Some(GlyphId(1000)));
         assert_eq!(subtable.glyph_index(42), None);
     }
+
+    #[test]
+    fn glyph_delta_wraps_modulo_65536() {
+        for (glyph, delta, expected) in [
+            (1, -3, Some(GlyphId(65534))),
+            (65534, 3, Some(GlyphId(1))),
+            (20, -3, Some(GlyphId(17))),
+            (0, -3, None),
+        ] {
+            let mut data = convert(&[UInt16(2), UInt16(528), UInt16(0)]);
+            data.extend(std::iter::repeat(0).take(256 * U16_SIZE));
+            data.extend(convert(&[
+                UInt16(65), UInt16(1), Int16(delta), UInt16(2), UInt16(glyph),
+            ]));
+            let subtable = cmap::Subtable2::parse(&data).unwrap();
+            assert_eq!(subtable.glyph_index(65), expected);
+        }
+    }
 }
 
 mod format4 {
     use ttf_parser::{cmap, GlyphId};
     use crate::{convert, Unit::*};
+
+    #[test]
+    fn glyph_array_delta_preserves_unsigned_range() {
+        for (glyph, delta, expected) in [
+            (40000, 0, Some(GlyphId(40000))),
+            (1, -3, Some(GlyphId(65534))),
+            (65534, 3, Some(GlyphId(1))),
+            (20, -3, Some(GlyphId(17))),
+            (0, 3, None),
+        ] {
+            let data = convert(&[
+                UInt16(4), UInt16(34), UInt16(0),
+                UInt16(4), UInt16(2), UInt16(0), UInt16(2),
+                UInt16(65), UInt16(65535), UInt16(0),
+                UInt16(65), UInt16(65535),
+                Int16(delta), Int16(1),
+                UInt16(4), UInt16(0), UInt16(glyph),
+            ]);
+            let subtable = cmap::Subtable4::parse(&data).unwrap();
+            assert_eq!(subtable.glyph_index(65), expected);
+        }
+    }
 
     #[test]
     fn single_glyph() {

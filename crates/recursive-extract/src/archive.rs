@@ -1185,9 +1185,9 @@ impl SevenZip {
                 if let Some(target) = volume_renames.get(&relative) {
                     destination.clone_from(target);
                 }
-                // 压缩包里含有与压缩包同名的成员（gzip 头会记录原始文件名，base.tgz 里就可能是 base.tgz）：
-                // 绝不能覆盖仍在使用的源包。流式包的解压结果其实就是去掉一层压缩后的内容，
-                // 用真实名字（base.tar）落盘并按正常冲突策略处理；其他格式改名放置。
+                // 与源包同名的成员（含 gzip 头记录的原名）也只按 H-07 改主体，保留完整后缀：
+                // 绝不覆盖仍在使用的源包，也不通过剥掉压缩扩展名改变后续嵌套处理。
+                // 无成员名的流已在清单/解码阶段使用去掉一层压缩后缀的默认名。
                 // 路径相等判断仅在 Windows 上忽略大小写（NTFS 不区分）；其他平台区分大小写。
                 // 与 Windows 文件系统相同的序数键比较，Unicode lowercase 会错误展开主体。
                 let collides_with_source = if cfg!(windows) {
@@ -1197,10 +1197,7 @@ impl SevenZip {
                     destination == archive
                 };
                 if collides_with_source {
-                    match stream_stem(&archive).map(|stem| base.join(stem)) {
-                        Some(candidate) => destination = candidate,
-                        None => destination = fsutil::unique_target(&job.root, &destination)?,
-                    }
+                    destination = fsutil::unique_target(&job.root, &destination)?;
                 }
                 let destination_rel = fsutil::relative_string(&job.root, &destination)?;
                 // 父链仍做整链校验；最终名可能是既有链接 / junction / OneDrive 在线占位，
@@ -3700,6 +3697,29 @@ mod tests {
         assert!(engine.extract_one(&mut job, "pack.gz", 0).is_err());
         assert!(root.join("pack.gz").is_file(), "超比例不删源");
         assert!(!root.join("payload.txt").exists(), "检查完成前不得合入成员");
+    }
+
+    // 覆盖 X-01/X-04/H-07：流中记录的成员名与源包同名时仍保留扩展名，只改冲突主体。
+    #[test]
+    fn stream_member_matching_source_preserves_recorded_extension() {
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path().join("data");
+        fs::create_dir(&root).unwrap();
+        fs::write(root.join("pack.gz"), b"source archive").unwrap();
+        let engine = review_script_engine(
+            temp.path(),
+            "echo Path = pack.gz\r\necho Packed Size = 1\r\necho.",
+            "echo payload> \"%output%\\pack.gz\"",
+        );
+        let mut job = review_job(&root, &temp.path().join("state"), 0);
+        assert!(engine.extract_one(&mut job, "pack.gz", 0).unwrap());
+        assert_eq!(
+            fs::read(root.join("pack (1).gz")).unwrap(),
+            b"payload\r\n",
+            "成员记录的 .gz 扩展名不得因碰到源包而被剥掉"
+        );
+        assert!(!root.join("pack").exists());
+        assert!(!root.join("pack.gz").exists(), "仅完整成功的源包应被删除");
     }
 
     // 覆盖 X-08：整包实际逻辑量不符必须先拒绝，不能合入安全子集。

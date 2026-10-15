@@ -8,6 +8,7 @@
 1. 套件级：逐个测试二进制整跑，得到每个套件的墙钟时间（含套件内并行）；
 2. 用例级：只对超过阈值的慢套件，逐用例 --exact 单跑计时（含单跑固定开销：
    进程启动、夹具与清场），按预算截停，未测用例如实标注；命令启动与清理共用绝对截止。
+   套件枚举失败立即终止；套件或单用例失败、超时仍保存已采集报告并返回非零。
 
 用法（仓库根目录）：
   python scripts/test_timing.py                     # 构建后全流程
@@ -203,12 +204,14 @@ def list_suites(target_dir: Path | None) -> list[Suite]:
         print(f"未解析到任何套件头；原始输出前 40 行已落盘 {OUT_DIR / 'list-raw.log'}")
     for suite in suites:
         listing = _run_checked([str(suite.exe), "--list", "--format", "terse"], timeout=120.0)
-        if listing.returncode == 0:
-            suite.test_names = [
-                line.strip().removesuffix(": test")
-                for line in listing.stdout.splitlines()
-                if line.strip().endswith(": test")
-            ]
+        if listing.returncode != 0:
+            print(f"套件 {suite.desc} 用例枚举失败（退出码 {listing.returncode}）")
+            sys.exit(1)
+        suite.test_names = [
+            line.strip().removesuffix(": test")
+            for line in listing.stdout.splitlines()
+            if line.strip().endswith(": test")
+        ]
     suites = [suite for suite in suites if suite.test_names]
     total = sum(len(suite.test_names) for suite in suites)
     print(f"共 {len(suites)} 个套件、{total} 个用例。")
@@ -359,7 +362,7 @@ def main(argv: list[str] | None = None) -> int:
     if not args.suite_only:
         rows = time_individual_tests(suites, budget)
     write_report(suites, rows, budget)
-    return 0
+    return int(any(suite.failed for suite in suites) or any(row.note in {"失败", "单用例超时"} for row in rows))
 
 
 if __name__ == "__main__":

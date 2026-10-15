@@ -5,6 +5,9 @@ The format is based on [Keep a Changelog](http://keepachangelog.com/)
 and this project adheres to [Semantic Versioning](http://semver.org/).
 
 ## [Unreleased]
+### Fixed
+- 本地修复：`Pixmap::pixel` 与 `PixmapRef::pixel` 按二维坐标检查边界，越界的横坐标不再读取下一行像素。
+
 
 ## [0.11.4] - 2024-02-04
 ### Fixed

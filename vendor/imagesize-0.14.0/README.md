@@ -59,6 +59,12 @@ match imagesize::blob_size(&data) {
 }
 ```
 
+## JchTools 本地修复
+
+`ImageSize` 保留面积优先的排序规则，面积相同时依次比较宽度和高度，
+使排序与宽高相等判断一致，避免向 `BTreeSet` 逐项插入同面积的不同尺寸时丢失元素。
+`tests/ordering.rs` 覆盖公开尺寸值、PNG 尺寸探测到集合插入的链路，以及原有面积主排序规则。
+
 [crates.io link]: https://crates.io/crates/imagesize
 [crates.io version]: https://img.shields.io/crates/v/imagesize.svg?style=flat-square
 [docs]: https://docs.rs/imagesize

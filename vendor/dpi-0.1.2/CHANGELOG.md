@@ -11,6 +11,8 @@ Unreleased` header.
 
 ## Unreleased
 
+- 本地修复：`PhysicalUnit::MAX`、`MIN`、`ZERO` 返回 `PhysicalUnit<f64>`，不再错误地返回 `LogicalUnit<f64>`。
+
 ## 0.1.2
 
 - Added `Insets`, `LogicalInsets` and `PhysicalInsets` types.

@@ -89,8 +89,15 @@ fn same_file_path(a: &Path, b: &Path) -> bool {
         for component in joined.components() {
             match component {
                 Component::Prefix(item) => {
-                    prefix =
-                        jchtools_file_core::fsutil::fold_rel(&item.as_os_str().to_string_lossy());
+                    let text = item.as_os_str().to_string_lossy();
+                    // 普通盘符/UNC 与 canonicalize 返回的扩展拼写须排除同一输出。
+                    let text = match item.kind() {
+                        std::path::Prefix::VerbatimDisk(_) | std::path::Prefix::VerbatimUNC(..) => {
+                            jchtools_file_core::platform::display_path_text(&text)
+                        }
+                        _ => text.into_owned(),
+                    };
+                    prefix = jchtools_file_core::fsutil::fold_rel(&text);
                 }
                 Component::RootDir | Component::CurDir => {}
                 Component::ParentDir => {
@@ -120,6 +127,11 @@ fn ensure_root_is_real_directory(root: &Path, control: &Control) -> Result<()> {
     for component in root.components() {
         control.checkpoint()?;
         current.push(component.as_os_str());
+        // 扩展盘符前缀 `\\?\C:` 尚不是可查询路径，补上 RootDir 后再检查卷根；
+        // 驱动器相对路径没有 RootDir，仍保留原有前缀检查。
+        if root.has_root() && matches!(component, std::path::Component::Prefix(_)) {
+            continue;
+        }
         match std::fs::symlink_metadata(&current) {
             Ok(meta) => {
                 if jchtools_file_core::fsutil::is_link(&meta) {
@@ -1435,6 +1447,45 @@ mod tests {
             vec!["a.md"],
             "分隔符变体拼写的输出必须被排除：{rels:?}"
         );
+    }
+
+    // 覆盖 M-07：扩展路径与普通路径指向同一输出，双向拼写均须排除输出并允许确认覆盖。
+    #[test]
+    fn merge_excludes_output_across_verbatim_path_spellings() {
+        let dir = tempfile::tempdir().unwrap();
+        let canonical = dir.path().canonicalize().unwrap();
+        let ordinary = PathBuf::from(jchtools_file_core::platform::display_path_text(
+            &canonical.to_string_lossy(),
+        ));
+        assert_ne!(canonical, ordinary, "Windows canonicalize 应产生扩展路径");
+        let original = "# 原始正文\n";
+        write(&ordinary.join("a.md"), original);
+        for (root, output_dir) in [(&ordinary, &canonical), (&canonical, &ordinary)] {
+            let output = output_dir.join("merged.md");
+            fs::write(&output, "旧输出不得参与合并\n").unwrap();
+            let entries = scan_markdown(root, true, Some(&output), &Control::default()).unwrap();
+            assert_eq!(
+                entries.iter().map(|entry| entry.rel.as_str()).collect::<Vec<_>>(),
+                ["a.md"],
+                "普通/扩展路径拼写不得把输出本身当作输入"
+            );
+            merge_markdown_with_events(&entries, &output, true, &Control::default(), &|_| Ok(()))
+                .unwrap();
+            assert_eq!(fs::read_to_string(&output).unwrap(), "# a.md\n\n## 原始正文\n");
+            assert_eq!(fs::read_to_string(ordinary.join("a.md")).unwrap(), original);
+            assert_eq!(fs::read_dir(&ordinary).unwrap().count(), 2, "不得残留临时文件");
+        }
+    }
+
+    // 覆盖 M-07：UNC 只比较路径文本，不访问网络共享；不同共享及不同文件不得误排除。
+    #[test]
+    fn output_path_identity_matches_verbatim_unc_without_network_access() {
+        let ordinary = Path::new(r"\\server\share\docs\merged.md");
+        let verbatim = Path::new(r"\\?\UNC\SERVER\SHARE\docs\merged.md");
+        assert!(same_file_path(ordinary, verbatim));
+        assert!(same_file_path(verbatim, ordinary));
+        assert!(!same_file_path(ordinary, Path::new(r"\\?\UNC\server\other\docs\merged.md")));
+        assert!(!same_file_path(ordinary, Path::new(r"\\?\UNC\server\share\docs\source.md")));
     }
 
     // 覆盖 M-07（输出与输入是同一实体的硬链接：扫描期拒绝任务，绝不进入覆盖确认，

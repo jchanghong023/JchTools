@@ -1,5 +1,10 @@
 # Unreleased
 
+  * 本地修补：忽略缺少字段名或冒号的坏响应头，避免访问字段值时越界 panic。
+  * 本地修补：SOCKS5 的 IPv6 URL 目标按 IP 地址编码，不发送带方括号的域名。
+  * 本地修补：HTTP CONNECT 写入错误返回原有 Io Transport，允许应用执行既有直连回退。
+  * 本地修补：chunked 正文未读满即断链时返回 UnexpectedEof，不把截断下载当成功。
+
 # 2.12.1
 
   * Do not use multi-version deps (>=x.x.x) (#907)

@@ -17,6 +17,7 @@ use crate::proxy::Proxy;
 use crate::unit::Unit;
 use crate::Response;
 use crate::{error::Error, proxy::Proto};
+mod proxy_connect;
 
 /// Trait for things implementing [std::io::Read] + [std::io::Write]. Used in [TlsConnector].
 pub trait ReadWrite: Read + Write + Send + Sync + fmt::Debug + 'static {
@@ -444,13 +445,10 @@ pub(crate) fn connect_host(
 
     if proto == Some(Proto::HTTP) && unit.url.scheme() == "https" {
         if let Some(ref proxy) = proxy {
-            write!(
-                stream,
-                "{}",
-                proxy.connect(hostname, port, &unit.agent.config.user_agent)
-            )
-            .unwrap();
-            stream.flush()?;
+            proxy_connect::write_proxy_connect(
+                &mut stream,
+                &proxy.connect(hostname, port, &unit.agent.config.user_agent),
+            )?;
 
             let s = stream.try_clone()?;
             let pool_key = PoolKey::from_parts(unit.url.scheme(), hostname, port);
@@ -522,9 +520,14 @@ fn connect_socks(
     use socks::TargetAddr::Domain;
     use std::net::{Ipv4Addr, Ipv6Addr};
     use std::str::FromStr;
+    // URL 的 IPv6 host 带方括号；只在判断地址类型时剥除，resolver 仍需括号。
+    let ip_host = host
+        .strip_prefix('[')
+        .and_then(|host| host.strip_suffix(']'))
+        .unwrap_or(host);
 
     let host_addr = if Ipv4Addr::from_str(host).is_ok()
-        || Ipv6Addr::from_str(host).is_ok()
+        || Ipv6Addr::from_str(ip_host).is_ok()
         || proto == Proto::SOCKS4
     {
         match socks_local_nslookup(unit, host, port) {
@@ -674,6 +677,55 @@ mod tests {
         io::Read,
         sync::{Arc, Mutex},
     };
+
+    // 覆盖 P-09：IPv6 目标必须使用 SOCKS5 的 IPv6 地址类型，不能作为带括号的域名。
+    #[cfg(feature = "socks-proxy")]
+    #[test]
+    fn socks5_ipv6_target_uses_ip_address() {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let proxy_addr = listener.local_addr().unwrap();
+        let server = std::thread::spawn(move || {
+            let (mut socket, _) = listener.accept().unwrap();
+            socket
+                .set_read_timeout(Some(Duration::from_secs(2)))
+                .unwrap();
+            socket
+                .set_write_timeout(Some(Duration::from_secs(2)))
+                .unwrap();
+            let mut greeting = [0; 3];
+            socket.read_exact(&mut greeting).unwrap();
+            assert_eq!(greeting, [5, 1, 0]);
+            socket.write_all(&[5, 0]).unwrap();
+            let mut command = [0; 4];
+            socket.read_exact(&mut command).unwrap();
+            assert_eq!(command, [5, 1, 0, 4]);
+            let mut target = [0; 18];
+            socket.read_exact(&mut target).unwrap();
+            assert_eq!(&target[..16], &std::net::Ipv6Addr::LOCALHOST.octets());
+            assert_eq!(&target[16..], &8080u16.to_be_bytes());
+            socket.write_all(&[5, 0, 0, 1, 127, 0, 0, 1, 0, 0]).unwrap();
+            let mut request = Vec::new();
+            let mut byte = [0];
+            while !request.ends_with(b"\r\n\r\n") {
+                assert!(request.len() < 4096);
+                socket.read_exact(&mut byte).unwrap();
+                request.push(byte[0]);
+            }
+            assert!(request.starts_with(b"GET /image HTTP/1.1\r\n"));
+            socket
+                .write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\nok")
+                .unwrap();
+        });
+        let result = crate::AgentBuilder::new()
+            .proxy(Proxy::new(format!("socks5://{proxy_addr}")).unwrap())
+            .timeout_connect(Duration::from_secs(2))
+            .timeout_read(Duration::from_secs(2))
+            .build()
+            .get("http://[::1]:8080/image")
+            .call();
+        server.join().unwrap();
+        assert_eq!(result.unwrap().into_string().unwrap(), "ok");
+    }
 
     // 覆盖 P-09：握手已完成时通知可能先于等待，不能继续消耗连接超时。
     #[cfg(feature = "socks-proxy")]

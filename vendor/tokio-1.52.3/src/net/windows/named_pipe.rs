@@ -2575,7 +2575,12 @@ impl ClientOptions {
             };
 
             if result == 0 {
-                return Err(io::Error::last_os_error());
+                let error = io::Error::last_os_error();
+                // 模式设置失败时尚未移交句柄所有权；先保存错误，再关闭自有句柄。
+                unsafe {
+                    windows_sys::CloseHandle(h);
+                }
+                return Err(error);
             }
         }
 

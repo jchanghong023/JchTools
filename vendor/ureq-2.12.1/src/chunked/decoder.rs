@@ -169,6 +169,9 @@ where
         // second possibility: we continue reading from a chunk
         if buf.len() < remaining_chunks_size {
             let read = self.source.read(buf)?;
+            if read == 0 && !buf.is_empty() {
+                return Err(IoError::new(ErrorKind::UnexpectedEof, DecoderError));
+            }
             self.remaining_chunks_size = Some(remaining_chunks_size - read);
             return Ok(read);
         }
@@ -179,6 +182,9 @@ where
 
         let buf = &mut buf[..remaining_chunks_size];
         let read = self.source.read(buf)?;
+        if read == 0 {
+            return Err(IoError::new(ErrorKind::UnexpectedEof, DecoderError));
+        }
 
         self.remaining_chunks_size = if read == remaining_chunks_size {
             self.read_carriage_return()?;
@@ -212,6 +218,45 @@ mod test {
     use super::Decoder;
     use std::io;
     use std::io::Read;
+
+    // 覆盖 P-09：下载途中关闭连接必须报告不完整，而不能把截断正文当成功。
+    #[test]
+    fn truncated_chunk_is_not_eof() {
+        for input in [&b"5\r\nabc"[..], &b"1\r\n"[..]] {
+            let mut decoder = Decoder::new(input);
+            let mut body = Vec::new();
+            assert_eq!(
+                decoder.read_to_end(&mut body).unwrap_err().kind(),
+                io::ErrorKind::UnexpectedEof
+            );
+        }
+    }
+
+    #[test]
+    fn truncated_chunk_small_reads_are_not_eof() {
+        let mut decoder = Decoder::new(&b"5\r\nabc"[..]);
+        let mut byte = [0];
+        for expected in b"abc" {
+            assert_eq!(decoder.read(&mut byte).unwrap(), 1);
+            assert_eq!(byte[0], *expected);
+        }
+        assert_eq!(
+            decoder.read(&mut byte).unwrap_err().kind(),
+            io::ErrorKind::UnexpectedEof
+        );
+    }
+
+    #[test]
+    fn truncated_chunk_response_is_not_eof() {
+        let response: crate::Response =
+            "HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n5\r\nabc"
+                .parse()
+                .unwrap();
+        assert_eq!(
+            response.into_string().unwrap_err().kind(),
+            io::ErrorKind::UnexpectedEof
+        );
+    }
 
     /// This unit test is taken from from Hyper
     /// https://github.com/hyperium/hyper

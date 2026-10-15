@@ -894,6 +894,48 @@ class TimingBudgetAndEncodingTests(unittest.TestCase):
         self.assertEqual(result.stdout, "中文用例: test\n")
 
 
+class TimingResultIntegrityTests(unittest.TestCase):
+    """覆盖 P-12/P-13：枚举失败不缩小范围，计时发现的失败须返回非零。"""
+
+    def test_failed_binary_listing_is_not_silently_omitted(self) -> None:
+        cargo_listing = subprocess.CompletedProcess(
+            [], 0, "", "Running first (target/first.exe)\nRunning second (target/second.exe)\n"
+        )
+        with (
+            patch.object(test_timing, "_run_checked", side_effect=[
+                cargo_listing,
+                subprocess.CompletedProcess([], 7, "", "listing failed"),
+                subprocess.CompletedProcess([], 0, "case: test\n", ""),
+            ]),
+            contextlib.redirect_stdout(io.StringIO()),
+        ):
+            with self.assertRaises(SystemExit) as stopped:
+                test_timing.list_suites(None)
+        self.assertEqual(stopped.exception.code, 1)
+
+    def test_main_propagates_suite_and_individual_failures(self) -> None:
+        for suite_failed, note, expected_code in (
+            (False, "", 0),
+            (True, "", 1),
+            (False, "失败", 1),
+            (False, "单用例超时", 1),
+            (False, "预算截停未测", 0),
+        ):
+            with self.subTest(suite_failed=suite_failed, note=note):
+                suite = test_timing.Suite("synthetic", Path("never-run.exe"), failed=suite_failed)
+                rows = [test_timing.PerTestRow("synthetic", "case", None if note == "预算截停未测" else 0.1, note)]
+                with (
+                    patch.object(test_timing, "_reconfigure_stdout"),
+                    patch.object(test_timing, "list_suites", return_value=[suite]),
+                    patch.object(test_timing, "time_suites"),
+                    patch.object(test_timing, "time_individual_tests", return_value=rows),
+                    patch.object(test_timing, "write_report") as report,
+                ):
+                    code = test_timing.main(["--skip-build"])
+                self.assertEqual(code, expected_code)
+                report.assert_called_once_with([suite], rows, 600.0)
+
+
 class XbergCachedIdentityTests(unittest.TestCase):
     """覆盖 XB-10：损坏的本机收据不能阻止最新版本重新获取。"""
 

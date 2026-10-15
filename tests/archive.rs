@@ -935,6 +935,37 @@ fn zstd_stream_archive_extracts_with_content() {
     assert_eq!(fs::read(f.root.join("payload.txt")).unwrap(), payload);
 }
 
+// 覆盖 X-01/X-04/X-05/X-08/H-07：gzip 原名碰到源包时保留 .gz，后续仍按嵌套包处理。
+#[test]
+#[ignore = "Requires explicitly provided real 7-Zip engine"]
+fn gzip_member_matching_source_keeps_extension_and_nested_processing() {
+    let f = ArchiveFixture::new();
+    let payload = b"recorded member payload\n";
+    // RFC 1952 FNAME + RFC 1951 单个未压缩块，独立保留原始成员名，不依赖压缩器改名。
+    let mut gzip = vec![0x1f, 0x8b, 8, 8, 0, 0, 0, 0, 0, 3];
+    gzip.extend_from_slice(b"same.gz\0");
+    gzip.push(1);
+    let size = u16::try_from(payload.len()).unwrap();
+    gzip.extend_from_slice(&size.to_le_bytes());
+    gzip.extend_from_slice(&(!size).to_le_bytes());
+    gzip.extend_from_slice(payload);
+    gzip.extend_from_slice(&crc32(payload).to_le_bytes());
+    gzip.extend_from_slice(&u32::try_from(payload.len()).unwrap().to_le_bytes());
+    fs::write(f.root.join("same.gz"), gzip).unwrap();
+    let result = f.run(Config { max_depth: 1, ..config() });
+    assert_eq!(result.summary.archives_ok, 1, "外层完整落盘后独立成功");
+    assert_eq!(result.summary.archives_failed, 1, "保留 .gz 的成员仍须进入嵌套处理并按深度上限隔离");
+    assert_eq!(result.summary.deleted, 1, "只删除完整成功的外层源包");
+    assert_eq!(result.summary.archives_quarantined, 1);
+    assert!(!f.root.join("same.gz").exists());
+    assert!(!f.root.join("same").exists(), "不得剥掉记录的扩展名来绕过递归");
+    assert_eq!(
+        fs::read(f.root.join("解压失败/same (1).gz")).unwrap(),
+        payload,
+        "碰到尚未删除的源包时，只改成员主体；后续隔离仍保留原始解码字节"
+    );
+}
+
 // 平台门禁原因：触发条件本身是 Windows 路径长度语义（>260 字符 + LongPathsEnabled 默认 0 时
 // 裸 Win32 调用失败），且植入隐藏属性需要 SetFileAttributesW，均无法在非 Windows 复现。
 // 覆盖 S-04(扫描隐藏), X-08

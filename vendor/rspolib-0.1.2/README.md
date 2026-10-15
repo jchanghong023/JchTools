@@ -26,6 +26,14 @@ po.save("./file.po");
 
 See the documentation at [docs.rs/rspolib](https://docs.rs/rspolib)
 
+## JchTools 本地修正
+
+- MO 上下文按 `msgctxt + EOT + msgid` 解码，保持普通/复数消息的标识、上下文查找及序列化往返。
+- 从借用的 `FileOptions` 创建文件时保留二进制内容；MO 路径打开失败返回现有 `IOError`，不再因缺少字节内容而 panic。
+- PO 普通、续行、previous 和复数字段在切片前验证引号；非法状态转换返回现有 `SyntaxError`，不对畸形输入 unwrap。
+- 公开入口回归位于 `tests/parser_invariants.rs`，已登记为独立 Cargo 测试目标，覆盖上述负例和有效 Unicode、大小端 MO 往返。
+
+
 ## Python bindings
 
 [![Python versions](https://img.shields.io/pypi/pyversions/rspolib?logo=python&logoColor=white)](https://pypi.org/project/rspolib/#files)

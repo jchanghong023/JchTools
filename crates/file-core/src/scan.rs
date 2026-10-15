@@ -516,7 +516,7 @@ fn enqueue_old_style_tail_groups(
     let siblings: HashSet<String> = children
         .iter()
         .filter(|child| matches!(child.kind, ScanKind::File { .. }))
-        .map(|child| child.name.to_ascii_lowercase())
+        .map(|child| fsutil::fold_rel(&child.name))
         .collect();
     let mut seen: HashSet<(String, &'static str)> = HashSet::new();
     for child in children {
@@ -527,8 +527,11 @@ fn enqueue_old_style_tail_groups(
         let Some(tail) = rules::old_style_tail(&lower) else {
             continue;
         };
-        if siblings.contains(format!("{}.{}", tail.stem, tail.main_ext).as_str())
-            || !seen.insert((tail.stem.to_string(), tail.main_ext))
+        // 与确认清点及实际卷集识别一致：语法只折叠 ASCII，主干按 Windows 序数比较。
+        if siblings.contains(&fsutil::fold_rel(&format!(
+            "{}.{}",
+            tail.stem, tail.main_ext
+        ))) || !seen.insert((fsutil::fold_rel(tail.stem), tail.main_ext))
         {
             continue;
         }
@@ -894,5 +897,46 @@ mod boundary_tests {
         let error = ensure_git_boundary_checked(Some("access denied")).unwrap_err();
         assert!(error.to_string().contains("H-06"));
         assert!(ensure_git_boundary_checked(None).is_ok());
+    }
+
+    // 覆盖 X-02 / X-10 / 附录 B：扫描入队与确认清点使用同一序数忽略大小写主干。
+    // Windows 专属原因：Unicode 名称等价按产品平台的 Windows 序数语义判定。
+    #[cfg(windows)]
+    #[test]
+    fn old_style_volume_queue_uses_ordinal_stems() {
+        for names in [
+            ["Ä.zip", "ä.z01"],
+            ["ä.z01", "Ä.z02"],
+            ["Ä.rar", "ä.r00"],
+            ["ä.r00", "Ä.r01"],
+        ] {
+            let temp = tempfile::tempdir().unwrap();
+            let root = temp.path().join("data");
+            let state = temp.path().join("state");
+            fs::create_dir(&root).unwrap();
+            for name in names {
+                fs::write(root.join(name), b"original volume").unwrap();
+            }
+            let db = crate::db::Database::create(&state.join("tasks/probe")).unwrap();
+            let mut job = Job {
+                root: root.clone(),
+                config: crate::config::Config::default(),
+                context: crate::control::Context::default(),
+                db,
+                summary: crate::model::Summary::default(),
+            };
+            scan(&mut job, true, &state, None).unwrap();
+            let queued: i64 = job
+                .db
+                .conn
+                .query_row("SELECT COUNT(*) FROM archives", [], |row| row.get(0))
+                .unwrap();
+            assert_eq!(queued, 1, "同一老式分卷族只能入队一次：{names:?}");
+            assert_eq!(job.summary.scanned, 2);
+            assert_eq!(job.summary.errors, 0);
+            for name in names {
+                assert_eq!(fs::read(root.join(name)).unwrap(), b"original volume");
+            }
+        }
     }
 }

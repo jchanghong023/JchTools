@@ -227,10 +227,7 @@ impl IDialog {
             return Ok(());
         };
 
-        // Strip Win32 namespace prefix from the path
-        let path = path.strip_prefix(r"\\?\").unwrap_or(path);
-
-        let wide_path = str_to_vec_u16(path);
+        let wide_path = super::path::path_for_shell(path);
 
         unsafe {
             let mut item = std::mem::MaybeUninit::uninit();

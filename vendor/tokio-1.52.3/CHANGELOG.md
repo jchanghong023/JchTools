@@ -1,3 +1,9 @@
+# Local repair
+
+* net: close the newly opened Windows named pipe client handle when setting
+  message read mode fails, preserving the original OS error; add an isolated
+  public API regression for failed opens and successful byte/message controls.
+
 # 1.52.3 (May 8th, 2026)
 
 ### Fixed

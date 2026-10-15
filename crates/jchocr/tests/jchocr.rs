@@ -221,3 +221,100 @@ fn ocr_call_logs_correlated_start_and_result_without_input_content() {
         assert!(!line.contains(harness.root.path().to_str().unwrap()));
     }
 }
+
+// 覆盖 O-35/O-36：成员存在性检查通过后，引擎确认资产不可用仍须返回资产退出码。
+// 使用真实 CLI、共享代理和 Windows 管道，但合成引擎不代表真实模型验证。
+#[test]
+fn engine_asset_failure_is_an_explained_xberg_error() {
+    let harness = Harness::new();
+    let runtime = harness.root.path().join("xberg");
+    std::fs::create_dir(&runtime).unwrap();
+    let manifest: serde_json::Value =
+        serde_json::from_str(include_str!("../../../resources/markdown-assets.json")).unwrap();
+    for member in manifest["xberg"]["members"].as_array().unwrap() {
+        let relative = member["path"].as_str().unwrap();
+        if relative != "xberg.exe"
+            && jchtools_xberg::xberg_runtime::asset_for_scenario(relative, "snapshot")
+        {
+            let target = runtime.join(relative);
+            std::fs::create_dir_all(target.parent().unwrap()).unwrap();
+            std::fs::write(target, b"synthetic asset").unwrap();
+        }
+    }
+    let mut compiler = Command::new("rustc")
+        // 与仓库共享引擎夹具一致，避免占位 VCRUNTIME DLL 被加载器当成依赖。
+        .args(["-C", "target-feature=+crt-static"])
+        .args([
+            "--edition=2021",
+            "--crate-name",
+            "jchocr_asset_failure",
+            "-",
+        ])
+        .arg("-o")
+        .arg(runtime.join("xberg.exe"))
+        .stdin(Stdio::piped())
+        .spawn()
+        .unwrap();
+    compiler
+        .stdin
+        .take()
+        .unwrap()
+        .write_all(include_bytes!("fixtures/asset_failure.rs"))
+        .unwrap();
+    assert!(compiler.wait().unwrap().success());
+    let legacy = harness.root.path().join("legacy-assets");
+    std::fs::create_dir(&legacy).unwrap();
+    std::fs::write(
+        legacy.join("xberg-runtime-path.txt"),
+        runtime.to_str().unwrap(),
+    )
+    .unwrap();
+
+    // 直接持有本测试代理，保证失败断言或 panic 后也只回收本测试的进程树。
+    struct Broker(std::process::Child);
+    impl Drop for Broker {
+        fn drop(&mut self) {
+            let _ = Command::new("taskkill")
+                .args(["/PID", &self.0.id().to_string(), "/T", "/F"])
+                .stdout(Stdio::null())
+                .stderr(Stdio::null())
+                .status();
+            let _ = self.0.wait();
+        }
+    }
+    let _broker = Broker(
+        Command::new(env!("CARGO_BIN_EXE_jchocr"))
+            .arg("--xberg-broker")
+            .env("JCHTOOLS_TEST_STATE_DIR", harness.root.path().join("state"))
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn()
+            .unwrap(),
+    );
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+    loop {
+        let ready = std::fs::read_dir(harness.root.path().join("state/logs"))
+            .ok()
+            .into_iter()
+            .flatten()
+            .filter_map(Result::ok)
+            .filter_map(|entry| std::fs::read_to_string(entry.path()).ok())
+            .any(|log| log.contains("event=xberg_broker_listening"));
+        if ready {
+            break;
+        }
+        assert!(
+            std::time::Instant::now() < deadline,
+            "isolated broker did not start"
+        );
+        std::thread::sleep(std::time::Duration::from_millis(20));
+    }
+    let output = harness.run(&["--stdin", "--json"], Some(&png()));
+    let error: JsonError = serde_json::from_str(failure(&output, 3)).unwrap();
+    assert!(!error.ok);
+    assert_eq!(error.error_kind, "xberg");
+    assert!(error.error.contains("设置"));
+    assert!(error.error.contains("Xberg"));
+    assert!(error.error.contains("snapshot model asset missing"));
+}

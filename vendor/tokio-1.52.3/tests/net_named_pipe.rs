@@ -397,3 +397,96 @@ async fn test_named_pipe_access() -> io::Result<()> {
     }
     Ok(())
 }
+
+// 覆盖 Windows 公开客户端开管道失败后的句柄所有权；独立进程避免并行测试干扰计数。
+#[test]
+fn test_named_pipe_failed_message_open_closes_handle() -> io::Result<()> {
+    const CHILD: &str = "TOKIO_NAMED_PIPE_OPEN_ERROR_CHILD";
+    if std::env::var_os(CHILD).is_none() {
+        let output = std::process::Command::new(std::env::current_exe()?)
+            .args([
+                "--exact",
+                "test_named_pipe_failed_message_open_closes_handle",
+                "--nocapture",
+            ])
+            .env(CHILD, "1")
+            .output()?;
+        assert!(
+            output.status.success(),
+            "isolated handle regression failed:\n{}\n{}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+        eprint!("{}", String::from_utf8_lossy(&output.stderr));
+        return Ok(());
+    }
+
+    use std::os::windows::io::{FromRawHandle, OwnedHandle};
+    use std::ptr::null_mut;
+    use windows_sys::Win32::Foundation::{ERROR_INVALID_PARAMETER, INVALID_HANDLE_VALUE};
+    use windows_sys::Win32::Storage::FileSystem::PIPE_ACCESS_DUPLEX;
+    use windows_sys::Win32::System::Pipes::{
+        CreateNamedPipeW, PIPE_READMODE_MESSAGE, PIPE_TYPE_BYTE, PIPE_TYPE_MESSAGE,
+    };
+    use windows_sys::Win32::System::Threading::{GetCurrentProcess, GetProcessHandleCount};
+
+    fn handle_count() -> io::Result<u32> {
+        let mut count = 0;
+        if unsafe { GetProcessHandleCount(GetCurrentProcess(), &mut count) } == 0 {
+            return Err(io::Error::last_os_error());
+        }
+        Ok(count)
+    }
+
+    fn server(mode: PipeMode, index: usize) -> io::Result<(OwnedHandle, String)> {
+        let name = format!(r"\\.\pipe\tokio-open-error-{}-{index}", std::process::id());
+        let wide: Vec<_> = name.encode_utf16().chain(Some(0)).collect();
+        let pipe_mode = if matches!(mode, PipeMode::Message) {
+            PIPE_TYPE_MESSAGE | PIPE_READMODE_MESSAGE
+        } else {
+            PIPE_TYPE_BYTE
+        };
+        // 原生服务端没有异步注册/待完成操作，关闭时不会引入延迟回收的句柄。
+        let handle = unsafe {
+            CreateNamedPipeW(
+                wide.as_ptr(),
+                PIPE_ACCESS_DUPLEX,
+                pipe_mode,
+                1,
+                1024,
+                1024,
+                0,
+                null_mut(),
+            )
+        };
+        if handle == INVALID_HANDLE_VALUE {
+            return Err(io::Error::last_os_error());
+        }
+        Ok((unsafe { OwnedHandle::from_raw_handle(handle) }, name))
+    }
+
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_io()
+        .build()?;
+    let _entered = runtime.enter();
+
+    // 初始化 IOCP，并用两种合法模式验证成功路径后再开始计数。
+    for (index, mode) in [PipeMode::Byte, PipeMode::Message].into_iter().enumerate() {
+        let (_server, name) = server(mode, index)?;
+        drop(ClientOptions::new().pipe_mode(mode).open(name)?);
+    }
+
+    let before = handle_count()?;
+    for index in 2..34 {
+        let (_server, name) = server(PipeMode::Byte, index)?;
+        let error = ClientOptions::new()
+            .pipe_mode(PipeMode::Message)
+            .open(name)
+            .unwrap_err();
+        assert_eq!(error.raw_os_error(), Some(ERROR_INVALID_PARAMETER as i32));
+    }
+    let after = handle_count()?;
+    eprintln!("failed message opens: 32; handles before={before}, after={after}");
+    assert_eq!(after, before, "failed client opens leaked Windows handles");
+    Ok(())
+}

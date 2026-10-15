@@ -245,11 +245,11 @@ pub struct PhysicalUnit<P>(pub P);
 
 impl<P> PhysicalUnit<P> {
     /// Represents a maximum physical unit that is equal to [`f64::MAX`].
-    pub const MAX: LogicalUnit<f64> = LogicalUnit::new(f64::MAX);
-    /// Represents a minimum physical unit of [`f64::MAX`].
-    pub const MIN: LogicalUnit<f64> = LogicalUnit::new(f64::MIN);
+    pub const MAX: PhysicalUnit<f64> = PhysicalUnit::new(f64::MAX);
+    /// Represents a minimum physical unit of [`f64::MIN`].
+    pub const MIN: PhysicalUnit<f64> = PhysicalUnit::new(f64::MIN);
     /// Represents a physical unit of `0_f64`.
-    pub const ZERO: LogicalUnit<f64> = LogicalUnit::new(0.0);
+    pub const ZERO: PhysicalUnit<f64> = PhysicalUnit::new(0.0);
 
     #[inline]
     pub const fn new(v: P) -> Self {
@@ -929,6 +929,17 @@ mod tests {
     use std::collections::HashSet;
 
     use super::*;
+
+    #[test]
+    fn physical_unit_constants_have_physical_types_and_values() {
+        const MAX: PhysicalUnit<f64> = PhysicalUnit::<f64>::MAX;
+        const MIN: PhysicalUnit<f64> = PhysicalUnit::<f64>::MIN;
+        const ZERO: PhysicalUnit<f64> = PhysicalUnit::<f64>::ZERO;
+        assert_eq!(MAX.0, f64::MAX);
+        assert_eq!(MIN.0, f64::MIN);
+        assert_eq!(ZERO.0, 0.0);
+        assert_eq!(ZERO.to_logical::<f64>(2.0), LogicalUnit::new(0.0));
+    }
 
     macro_rules! test_pixel_int_impl {
         ($($name:ident => $ty:ty),*) => {$(

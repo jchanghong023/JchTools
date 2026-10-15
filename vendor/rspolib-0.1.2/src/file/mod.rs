@@ -111,7 +111,7 @@ impl From<&FileOptions> for FileOptions {
         Self {
             path_or_content: options.path_or_content.clone(),
             wrapwidth: options.wrapwidth,
-            ..Default::default()
+            byte_content: options.byte_content.clone(),
         }
     }
 }
