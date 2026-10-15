@@ -7682,17 +7682,17 @@
     },
     {
       "file": "tests/gui_flow.rs",
-      "name": "git_subtree_skip_is_visible_after_run_and_tree_untouched",
+      "name": "git_project_moves_as_whole_and_preserves_tree",
       "ignored": false,
       "cfg": "feature = \"gui\"",
-      "body": "78d1f4fdc6072561"
+      "body": "54b2801019394f99"
     },
     {
       "file": "tests/gui_flow.rs",
       "name": "plan_execution_confirmation_flow_runs_end_to_end",
       "ignored": false,
       "cfg": "feature = \"gui\"",
-      "body": "2578f0ec315a8de5"
+      "body": "a13b785b00a922b6"
     },
     {
       "file": "tests/gui_flow.rs",
